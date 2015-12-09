@@ -1,0 +1,331 @@
+defmodule SIP do
+	defmodule SIP.Packet
+		@moduledoc """
+		SIP parser. The parse() function analyze a binary and create a Packet structure that will be used
+		by other SIP modules. The serialize function turn a packet structure into a binary ready to be send
+		by a SIP transport
+		"""
+		
+		defstruct { method: nil, ruri: nil, headers: nil, is_request: true, response_code: nil, reason: nil, body: nil, transport: :sip_udp }
+		
+		@doc """
+		Parse a SIP message as received by the transport.
+		"""
+		def parse( data, transport ) when is_binary(blob) do
+			[ fline, rest ] = String.split( data, << 13, 10 >>, parts: 2)
+			p1 = parseFirstLine( String.split( fline ) )
+			{ body, hlist } = Dict.pop( parseHeaders( rest ), :body )
+			%Packet{ p1 | headers: hlist, body: body, transport: transport }
+		end
+
+		@doc """
+		Serialize a SIP packet into a binary ready to be sent
+		""""
+		
+		def serialize( packet, multiline_header ) do
+			
+			header_order = [ :Via, :Record-Route, :Route, :From, :To ]
+			
+			if packet.is_request do
+				fl = Atom.to_string(packet.method) <> " " <> packet.ruri <> " SIP/2.0"
+			else
+				fl = "SIP/2.0 " <> Integer.to_string(packet.response_code) <> " " <> packet.reason 
+			end
+			
+			data = fl <> << 13,10 >> <> serializeHeaders( packet.headers, header_order )
+			if packet.body != nil do
+				sizestr = Integer.to_string(byte_size(packet.body))
+				data <> "Content-Size: " <> sizestr <> << 13,10 >> <> body
+			else
+				data
+			end
+		end
+
+		#---------------- private functions (implementation) ---------------------
+
+		defp parseMethod( method ) do
+			case method do
+				"INVITE" -> :INVITE
+				"UPDATE" -> :UPDATE
+				"OPTIONS" -> :OPTIONS
+				"MESSAGE" -> :MESSAGE
+				"INFO" -> :INFO
+				"SUBSCRIBE" -> :SUBSCRIBE
+				"NOTIFY" -> :NOTIFY
+				"PUBLISH" -> :PUBLISH
+				_ -> raise "Unrecognized SIP method"
+			end
+		end
+		
+		defp parseFirstLine( [ method, ruri, "SIP/2.0" ] ) do			
+			%Packet{ method: parseMethod(method), ruri: ruri, is_request: true }
+		end
+   
+		defp parseFirstLine( [ "SIP/2.0", codestr, reason ] ) do
+		    code = String.to_integer(codestr)
+			if code < 100 or code > 699 do
+				raise "Invalid SIP response code"
+			else
+				%Packet{ is_request: false, response_code }
+			end
+		end
+				
+		defp headerKey( headerName ) do
+		
+			case headerName do
+				"From" 	-> :From
+				"f" 	-> :From
+				"Via" 	-> :Via
+				"To"	-> :To
+				"t"		-> :To
+				"Route" -> :Route
+				"Record-Route" 	-> :RecordRoute
+				"CSeq"			-> :CSeq
+				"c"			-> :CSeq
+				"Contact"		-> :Contact
+				"Call-ID"		-> :CallID
+				"Allow"			-> :Allow
+				_		-> headerName
+			end
+		end
+		
+		defp parseHeaders( [] ) do
+			HashDict.new
+		end
+		
+		def parseHeaders( headers ) when is_binary(header) do
+			header_plus_rest = String.split( headers, << 13, 10 >>, parts: 2)
+			header = String.split( hd header_plus_rest, ":", parts: 2)
+			parseHeaders( header, tl header_plus_rest )
+		end
+
+		@doc """
+		This function matches when SIP header parsing reaches the end of
+		headers and reaches the body
+		"""		
+		defp parseHeaders( [ "" ], [ body ] ) do
+			hlist = HashDict.new
+			Dict.put(hlist, :body, body)
+		end
+		
+		defp parseHeaders( [ headerName, value ], [rest] ) do
+			key = headerKey( headerName )
+			parsed_val = String.split( headers, ",", trim; true )
+			hlist = parseHeaders( rest )
+			if Dict.has_key?(hlist, key) do
+				val2 = Dict.get(hlist, headerName)
+				Dict.put(hlist, key, [ parsed_val | val2 ] )
+			else
+				Dict.put(hlist, key, parsed_val )
+			end
+		end
+
+		
+		defp serializeValue( val ) do
+			val
+		end
+		
+		defp serializeHeader( { key, val } ) do
+			if is_atom(key) do
+				data = Atom.to_string(key) <> ": "
+			else
+				data = key <> ": "
+			end
+			
+			if is_list(val) do
+				#Repeat the same header for each value
+				#multiheaders = Enum.map( val, fn(x) -> data <> serializeValue(x) end )
+				multiheaders = for x <- val do: data <> serializeValue(x)
+				Enum.join(multiheaders, <<13,10>>)
+			else
+				data <> serializeValue(val)
+			end			
+		end
+		
+		defp serializeHeaders( [] ) do
+		end
+		
+		defp serializeHeaders( headers ) when is_list(headers) do
+			h2 = Enum.map(headers, fn({k,v}) -> serializeHeader({k,v}) end)
+			data = Enum.join( h2, << 13,10 >> )
+		end
+
+		# When no ordered headers remain, serialize remaining headers
+		defp serializeHeaders( headers, [] ) do
+			# Do not include Content-Size. Header will be added at the end
+			# of serialization		
+			serializeHeaders( Dict.to_list(Dict.delete(headers, "Content-Size")) )
+		end
+		
+		# Recursive serialization of ordered headers
+		
+		defp serializeHeaders( headers, order ) when is_list(order) do
+			k = hd order
+			if Dict.has_key?(headers, k) do
+				{ v, headers } = Dict.pop(headers, k)
+				serializeHeader( { k, v } ) <> << 13,10 >> <> serializeHeaders(headers, tl order)
+			else
+				serializeHeaders(headers, tl order)
+			end
+		end 
+	end
+	
+	#---------------- SIP URI PARSER / SERIALIZER ---------------------
+	defmodule SipUri do
+	@moduledoc """
+	SIP URI parser
+	"""
+	
+	defstruct { scheme: :sip, displayname: nil, username: nil, domain: nil, port: 5060, transport: :sip_udp, params: nil }
+	
+	defp parseParameters( paramsstr ) do
+		paramList = String.split(paramsstr,";")
+		paramMap = HashDict.new
+		for p <- paramList do
+			case String.split(p,"=") do
+				[ pkey, pvalue ] -> Dict.put(paramMap, pkey, pvalue)
+				[ pkey ] 		 -> Dict.put(paramMap, pkey, nil)
+			end
+		end
+	end
+	
+	defp parseHostPort ( hostport )
+		case String.split(domport, ":") do
+			[ host, port ] -> [ host, String.to_integer(port) ]
+			[ host ] -> [ host, 5060 ]
+		end
+	end
+	
+	defp parseUserHostPort( userhoststr ) do
+		case String.split(userhoststr, "@") do
+			[ user, hostport ] -> [ user | parseHostPort(userhoststr) ]
+			[ user, hostport ] -> [ nil  | parseHostPort(userhoststr) ]
+		end
+	end
+	
+	defp parseScheme( schemestr )
+		case scheme do
+			"sip" -> :sip
+			"sips" -> :sips
+			"tel" -> :tel
+			_ -> raise "Invalid scheme for SIP URI"
+		end
+	end
+	
+	defp getTransportFromParams( nil )
+		:udp
+	end
+	
+	defp getTransportFromParams( paramMap )
+		case Dict.fetch(paramMap, "transport") do
+			"WS" -> :ws
+			"ws" -> :ws
+			"WSS" -> :wss
+			"wss" -> :wss
+			case "UDP" :udp
+			case "udp" -> :udp
+			case "TCP" -> :tcp
+			case "tcp" -> :tcp
+			:error -> t = :udp
+			_ -> raise "Unsupported transport for SIP uri"
+		end
+	end
+	
+	defp newSipUri( [ displayname, scheme, userhost ] ) do
+		[ user, host, port ] = parseUserHostPort(userhoststr)
+		s = parseScheme( scheme )
+		%SipUri{ scheme: s, dispayname: displayname, username: user, domain: host, transport: :udp, params: HashDict.new }
+	end
+		
+	defp newSipUri( [ displayname, scheme, userhost, params] ) do
+		[ user, host, port ] = parseUserHostPort(userhoststr)
+		paramMap = parseParameters(params)
+		s = parseScheme( scheme )
+		t = getTransportFromParams( paramMap )
+		%SipUri{ scheme: s, dispayname: displayname, username: user, domain: host, transport: t, params: paramMap }
+	end
+	
+	defp parse2( uristr, regex_lst  ) do
+		if empty?(regex_lst) do
+			raise "Invalid SIP URI"
+		else
+			{ uriform, has_dn } = hd regex_lst
+			{ rez, reg } = Regex.compile(uriform)
+			if rez != :ok do
+				raise "Internal error in URI parser (invalid regex)"
+			end 
+
+			capt = Regex.run( uristr )
+			if is_list(capt) do
+				if has_dn do
+					newSipUri( tl capt )
+				else
+					newSipUri( [ nil | tl capt] )
+				end
+			else
+				parse2( uristr, tl regex_lst )
+			end
+		end
+	end
+	
+	def parse( uristr ) do	
+		rgx_list = [ 
+			{ "\"([[:alnum:]+%]+)\"[ ]+<(sip|sips):([[:alnum:]\.:@]+)>;(*)", true },
+			{ "\"([[:alnum:]+%]+)\"[ ]+<(sip|sips):([[:alnum:]\.:@]+)>"	 , true },
+			{ "(sip|sips):([[:alnum:]\.:@]+);(*)", false },
+			{ "(sip|sips):([[:alnum:]\.:@]+)", false }
+		]
+		
+		parse2(uristr, rgx_list)	
+	end
+	
+	#---------------- SIP TRANSACTION LAYER ---------------------
+	defmodule Transaction do
+		@moduledoc """
+		SIP transaction layer. Each transaction is a process (and a state machine). It communcate
+		with two other processes: a transport process that is in charge of sending or receiveing
+		packets and a session level process that receives SIP messages once processed by the transaction
+		layer. It handles the retransmission in case on unreliable transport
+		"""
+		
+		@doc """
+		Starts an outgoing transaction
+		method 
+		
+		session_id is either nil -> call ID and from_tag will be generated
+							 call_id :: binary -> from_tag will be generated
+							 { from_tag, call_id } 
+							 { from_tag, call_id, to_tag }
+		
+		"""
+		def start_outgoing_t( method, cseq, session_id, transport_pid, session_pid ) do
+			%Packet
+		end
+		
+		def start_incoming_t( packet ) do
+		end
+		
+		def message_match?( packet, transaction_id ) do
+		end
+		
+		def message_match?( packet, cseqs  ) do
+		end
+		
+		@doc """
+		Call this function for to process any message related to this transaction
+		"""
+		
+		def process_message_t( pid, packet ) do
+		end
+		
+		def reply_t( transaction_pid, error_code, reason ) do
+		end
+		
+		def cancel_t( transaction_pid ) do
+		end
+	end
+end	
+			
+		
+			
+	
