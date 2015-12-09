@@ -39,10 +39,12 @@ defmodule SIP.Transaction do
 				nil -> { fromtag, callid } = { genTag( [from.user, from.domain, :rand.uniform() ] ), genTag( :rand.uniform() ) }
 			end
 			
+			via = %SIP.URI{}
+			
 			hlist = [ 
 				{ "From", SIP.URI.setParam(from, "tag", fromtag) },
-				{ "To", SIP.URI.setParam(from, "tag", totag) },
-				{ "CSeq", Integer.to_string(cseq) <> " " <> Atom.to_string(method) }
+				{ "To", if totag != nil, do: SIP.URI.setParam(to, "tag", totag), else: to },
+				{ "CSeq", "#{cseq} #{method}" }
 			}
 			
 			p = SIP.Packet.setHeaderValues(p, hlist)

@@ -10,11 +10,15 @@ defmodule SIP.Packet do
 	
 	It holds the request URI (ruri), method and response code.
 	It holds the message body if any
-	It holds a dictionary of
+	It holds a dictionary of headers
+	It also holds tranport parameter such as source IP (src_ip)/ port (src_port), transport protocol (transport)
+	Finally: branch is a field used by the transaction layer to store the transaction ID for outgoing SIP requests
+	and the transport layer is responsible of creating the proper via header
 	"""
+	
 	defstruct method: nil, ruri: nil, headers: nil, is_request: true, response_code: nil, reason: nil, 
 					  body: nil, transport: :sip_udp, dst: nil, dstlist: [], src_ip: nil, src_port: 0,
-					  trans_id: nil
+					  branch: nil
 	
 	@doc """
 	Parse a SIP message as received by the transport layer.
