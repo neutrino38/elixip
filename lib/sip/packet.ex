@@ -17,8 +17,8 @@ defmodule SIP.Packet do
 	"""
 	
 	defstruct method: nil, ruri: nil, headers: nil, is_request: true, response_code: nil, reason: nil, 
-					  body: nil, transport: :sip_udp, dst: nil, dstlist: [], src_ip: nil, src_port: 0,
-					  branch: nil
+					  body: nil, transport: :sip_udp, dst: nil, dstlist: [], dst_port: 5060, src_ip: nil, src_port: 0,
+					  branch: nil, packet_bytes: nil
 	
 	@doc """
 	Parse a SIP message as received by the transport layer.
@@ -27,6 +27,7 @@ defmodule SIP.Packet do
 		[ fline, rest ] = String.split( data, << 13, 10 >>, parts: 2)
 		p1 = parseFirstLine( String.split( fline ) )
 		{ body, hlist } = Dict.pop( parseHeaders( rest ), :body )
+		
 		%SIP.Packet{ p1 | headers: hlist, body: body, transport: transport }
 	end
 
@@ -37,7 +38,7 @@ defmodule SIP.Packet do
 		header_order = [ :Via, "Record-Route", :Route, :From, :To ]
 		
 		if packet.is_request do
-			fl = Atom.to_string(packet.method) <> " " <> packet.ruri <> " SIP/2.0"
+			fl = Atom.to_string(packet.method) <> " " <> packet.ruri.serialize() <> " SIP/2.0"
 		else
 			fl = "SIP/2.0 " <> Integer.to_string(packet.response_code) <> " " <> packet.reason 
 		end
@@ -50,7 +51,29 @@ defmodule SIP.Packet do
 			data
 		end
 	end
-
+	
+	@doc """
+	Serialize a SIP packet into a binary and store serialized
+	packet data inside packet structure
+	"""
+	def serialize2( packet ) do
+		%SIP.Packet{ packet | packet_bytes: packet.serialize() }
+	end
+	
+	@doc """
+	Create a reply statelessly
+	"""
+	def reply(packet, code, reason, ua) when is_integer(code) do
+		# Todo if reason is nil, use default reason
+		if code >= 100 && code < 700 do
+			p = %SIP.Packet{ packet | is_request: false, response_code: code, reason: reason, packet_bytes: nil }
+			p = setHeaderValue(p, "User-Agent", ua)
+			
+		else
+			raise "Invalid reply code"
+		end
+	end
+	
 	def getHeaderValue(packet, hKey) do
 		if packet.headers != nil do
 			vallist = Dict.get(packet.headers, headerKey(hKey) )
@@ -62,29 +85,43 @@ defmodule SIP.Packet do
 			nil
 		end
 	end
-	def setHeaderValue(packet, headerKey, value) do
 	
+	def popHeaderValue(packet, hKey)
+		value = getHeaderValue(packet, hKey)
+		cond do
+			value == nil 	-> packet
+			is_list(value)	-> setHeaderValue(packet, hKey, tl value)
+			true ->			-> setHeaderValue(packet, hKey, no)
+		end
+	end
+	
+	
+	defp getHeaderDict(packet)
 		if packet.headers == nil do
 			hl = HashDict.new
 		else
 			hl = packet.headers
 		end
+	end
+	
+	@doc """
+	Set the value of a packet header or erases an header entirely (if value is nil)
+	"""
+	def setHeaderValue(packet, hKey, value) do
+		hl = packet.getHeaderDict()
 
-		if is_list(value) do
-			hl = Dict.put(hl, headerKey(hKey), value )
-		else
-			hl = Dict.put(hl, headerKey(hKey), [ value ] )
+		cond do
+			value == nil 	-> hl = Dict.remove(hl, headerKey(hKey))
+			value == []		-> hl = Dict.remove(hl, headerKey(hKey))
+			is_list(value) 	-> hl = Dict.put(hl, headerKey(hKey), value )
+			true 			-> hl = Dict.put(hl, headerKey(hKey), [ value ] )
 		end
 		
 		%SIP.Packet{ packet | headers: hl }
 	end
 	
-	def addHeaderValue(packet, headerKey, value) do
-		if packet.headers == nil do
-			hl = HashDict.new
-		else
-			hl = packet.headers
-		end
+	def addHeaderValue(packet, headerKey, value, option) do
+		hl = packet.getHeaderDict()		
 		
 		vallist = Dict.get(packet.headers, headerKey(hKey) )
 		
@@ -95,15 +132,26 @@ defmodule SIP.Packet do
 		if vallist == nil do
 			vallist = value
 		else
-			vallist = [ vallist | value ]
+			case option do
+				:append -> vallist = [ vallist | value ]
+				:prepend -> vallist = [ value | vallist ]
+			end
 		end
 		
-		hl = Dict.put(hl, headerKey(hKey), value )
-		
-		%SIP.Packet{ packet | headers: hl }
+		%SIP.Packet{ packet | headers: Dict.put(hl, headerKey(hKey), value ) }
 	end
-			
 	
+	@spec getDialogId( t ) :: {String.t, String.t, String.t}
+	def getDialogId(packet) do
+		from = packet.getHeaderValue(:From)
+		to = packet.getHeaderValue(:To)
+		callid = packet.getHeaderValue("Call-ID")
+		
+		if from == nil or to == nil do
+			raise "Missing From or To header. Invalid SIP packet"
+		end
+		
+		{ from.getParam("tag"), callid, from.getParam("to") }
 	end
 	#---------------- private functions (implementation) ---------------------
 
@@ -122,7 +170,7 @@ defmodule SIP.Packet do
 	end
 	
 	defp parseFirstLine( [ method, ruri, "SIP/2.0" ] ) do			
-		%SIP.Packet{ method: parseMethod(method), ruri: ruri, is_request: true }
+		%SIP.Packet{ method: parseMethod(method), ruri: SIP.URI.parse(ruri), is_request: true }
 	end
 
 	defp parseFirstLine( [ "SIP/2.0", codestr, reason ] ) do
@@ -169,17 +217,29 @@ defmodule SIP.Packet do
 	
 	defp parseHeaders( [ headerName, value ], [rest] ) do
 		key = headerKey( headerName )
-		parsed_val = String.split( value, ",", trim: true )
 		hlist = parseHeaders( rest )
-		if Dict.has_key?(hlist, key) do
-			val2 = Dict.get(hlist, headerName)
-			Dict.put(hlist, key, [ parsed_val | val2 ] )
+		
+		if key in [:From, :To, :Contact ] do
+			if val2 == nil do
+				hlist = Dict.put(hlist, key, [ SIP.URI.parse(value) ])
+			else
+				raise "Several #{Key} headers. Invalid SIP packet"
+			end
 		else
-			Dict.put(hlist, key, parsed_val )
+			val2 = Dict.get(hlist, headerName, [])
+			parsed_val = String.split( value, ",", trim: true )
+			Dict.put(hlist, key, [ parsed_val | val2 ] )
+		end		
+	end
+
+	defp serializeValue( val ) when is_map(val) do
+		if val.__struct__ == "SIP.URI"
+			val.serialize()
+		else
+			val
 		end
 	end
 
-	
 	defp serializeValue( val ) do
 		val
 	end

@@ -43,12 +43,12 @@ defmodule SIP.Transaction do
 			
 			hlist = [ 
 				{ "From", SIP.URI.setParam(from, "tag", fromtag) },
-				{ "To", if totag != nil, do: SIP.URI.setParam(to, "tag", totag), else: to },
+				{ "To", (if totag != nil, do: SIP.URI.setParam(to, "tag", totag), else: to) },
 				{ "CSeq", "#{cseq} #{method}" }
-			}
+			]
 			
 			p = SIP.Packet.setHeaderValues(p, hlist)
-			
+			p = %SIP.Packet{p | branch: genTag( :rand.uniform() ) }
 			# Other headers (contact, via, route, will be added by transport layer)
 			
 			Process.send( transport_pid, :sip_out, p, session_pid )

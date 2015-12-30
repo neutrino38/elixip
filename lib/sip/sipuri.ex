@@ -120,7 +120,7 @@ defmodule SIP.URI do
 		%SIP.URI{uri | params: Dict.put(uri.params, key, true) }
 	end
 	
-	defp serialize2( scheme, user, host, port )
+	defp serialize2( scheme, user, host, port ) do
 		if user != nil do
 			data = Atom.to_string(scheme) <> ":" <> user <> "@" <> host
 		else
@@ -134,11 +134,18 @@ defmodule SIP.URI do
 		end
 	end
 	
-	def serialize( uri )
+	def serialize( uri ) do
 		if uri.displayname != nil do
-			"\"" <> URI.encode_www_form(uri.displayname) <> "\" <" <> serialize2(uri.scheme, uri.user, uri.host, uri.port) <> ">;" <> serializeParams(uri.params)
+			"\"" <> URI.encode_www_form(uri.displayname) <> "\" <" <> 
+				serialize2(uri.scheme, uri.user, uri.host, uri.port) <> ">;" <> 
+				serializeParams(uri.params)
 		else
-			<> serialize2(uri.scheme, uri.user, uri.host, uri.port) <> ";" <> serializeParams(uri.params)
+			serialize2(uri.scheme, uri.user, uri.host, uri.port) <> ";" <> serializeParams(uri.params)
 		end
+	end
+	
+	@spec getParam(t,String.t) :: String.t | nil
+	def getParam( uri, key  ) do 
+		Dict.get(uri.params, key)
 	end
 end
