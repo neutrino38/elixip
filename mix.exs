@@ -27,6 +27,7 @@ defmodule SocketServer.Mixfile do
   #
   # Type "mix help deps" for more examples and options
   defp deps do
-    [ {:socket, path: "../elixir-socket" } ]
+    [ {:socket, github: "neutrino38/elixir-socket" },
+	  {:cowboy, "~> 1.0.4"} ]
   end
 end

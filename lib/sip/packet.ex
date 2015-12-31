@@ -15,7 +15,6 @@ defmodule SIP.Packet do
 	Finally: branch is a field used by the transaction layer to store the transaction ID for outgoing SIP requests
 	and the transport layer is responsible of creating the proper via header
 	"""
-	
 	defstruct method: nil, ruri: nil, headers: nil, is_request: true, response_code: nil, reason: nil, 
 					  body: nil, transport: :sip_udp, dst: nil, dstlist: [], dst_port: 5060, src_ip: nil, src_port: 0,
 					  branch: nil, packet_bytes: nil
@@ -233,7 +232,7 @@ defmodule SIP.Packet do
 	end
 
 	defp serializeValue( val ) when is_map(val) do
-		if val.__struct__ == "SIP.URI"
+		if val.__struct__ == "SIP.URI" do
 			val.serialize()
 		else
 			val
