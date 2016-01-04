@@ -9,7 +9,12 @@ defmodule SIP.Transaction do
 		
 
 		@t1_value 		500
-				
+		
+		defp init_t_data( transport_pid, session_pid )
+			%{ cancel: nil, timer_A_ref: nil, timer_A_value: @t1_value, timer_B_ref: nil, timer_D_ref: nil,
+			   transport_pid: transport_pid, session_pid: session_pid, local_ack: true }
+		end
+		
 		@doc """
 		Starts an outgoing transaction
 		method 
@@ -52,8 +57,8 @@ defmodule SIP.Transaction do
 			p = %SIP.Packet{p | branch: genTag( :rand.uniform() ) }
 			# Other headers (contact, via, route, will be added by transport layer)
 			
-			Process.send( transport_pid, :sip_out, p, session_pid )
-			p
+			# Start the transaction 
+			t_id = Process.spawn(fn -> client_transaction_state_init(p, init_t_data(transport_pid, session_pid) )  end)
 		end
 		
 		def start_incoming_t( packet ) do
@@ -108,16 +113,30 @@ defmodule SIP.Transaction do
 		end
 
 		# Send an ACK message given a transaction
-		defp sendCANCEL(initial_req, transport_pid) do
-			if initial_req.method == :INVITE do
+		defp sendCANCEL(initial_req, t_data) do
+			if t_data[:cancel] != nil do
+				cancel = t_data[:cancel]
+				t_data = %{ t_data | cancel: cancel }
+			else
 				cancel = %SIP.Packet{initial_req | method: :CANCEL }
-				Process.send(transport_pid, { :sip_out, cancel } )
-				cancel
 			end
+			Process.send(t_data[:transport_pid], { :sip_out, cancel } )
+			t_data
 		end
 
 		
 		# --------------- Client Transaction state machine --------------------------------------
+		defp client_transition_init( initial_req, packet, t_data ) do
+			# Send the message out
+			Process.send( t_data[:transport_pid], :sip_out, initial_req, self() )
+			
+			#Start timer B
+			t_data = %{ t_data | timer_B_ref: Erlang.start_timer(@timer_B_value) }
+			
+			# Start waiting for response messages
+			client_transaction_state_0XX( initial_req, t_data )
+		end
+		
 		defp client_transition_to_2XX_to_6xx( initial_req, packet, t_data ) do
 			Erlang.cancel_timer(timer_B_ref)
 			timer_D_ref = Erlang.start_timer( @timer_D_value, self(), :timer_D )
@@ -178,17 +197,18 @@ defmodule SIP.Transaction do
 					
 						# Handle 1xx responses. Notify session only for 180 and 183
 						# Todo - handle PRACK sending here.
-						packet.response_code == 180 or packet.response_code == 183 ->
+						packet.response_code == 180 or packet.response_code == 183 and
+						packet.getHeaderValue(:CSeq) == initial_req.getHeaderValue(:CSeq) ->
 							sendPRACK(initial_req, transport_pid),
 							if session_pid != nil do: Process.send(session_pid, { :transaction_progress, packet } ),
 							client_transaction_state_1XX( initial_req, t_data )
 						
-						packet.response_code in 100..199 ->
+						packet.response_code in 100..199 and packet.getHeaderValue(:CSeq) == initial_req.getHeaderValue(:CSeq) ->
 							sendPRACK(initial_req, t_data[:transport_pid]),
 							client_transaction_state_1XX( initial_req, t_data )
 						
 						# Handle other responses
-						packet.response_code in 200..699 ->
+						packet.response_code in 200..699 packet.getHeaderValue(:CSeq) == initial_req.getHeaderValue(:CSeq) ->
 							client_transition_to_2XX_to_6xx( initial_req, packet, t_data )
 							
 						# Ignore the rest
@@ -208,6 +228,14 @@ defmodule SIP.Transaction do
 				{ :timeout, timer, :timer_B } ->
 					if session_pid != nil do: Process.send(session_pid, { :transaction_close, :expired } ),
 					raise "SIP transaction expired.  Terminating SIP transaction"
+				
+				
+				# Someone wants to cancel the transaction. Stop timer B and fire timer D
+				{ :cancel, caller } ->
+					timer_D_ref = Erlang.start_timer( @timer_D_value, self(), :timer_D ),
+					t_data = %{ t_data | timer_A_value: @t1_value, timer_A_ref: nil, timer_D_ref: Erlang.start_timer( @timer_D_value, self(), :timer_D ) },
+					client_transaction_state_cancelling_in_0XX( initial_req, t_data, true )						
+							
 			end
 		end
 		
@@ -220,14 +248,14 @@ defmodule SIP.Transaction do
 						packet.is_request -> client_transaction_state_1XX( initial_req, t_data )
 					
 						# Handle 1xx responses. RESET timer B
-						packet.response_code in 100..199 ->
+						packet.response_code in 100..199 packet.getHeaderValue(:CSeq) == initial_req.getHeaderValue(:CSeq) ->
 							sendPRACK(initial_req, t_data),
 							Erlang.cancel_timer(t_data[:timer_B_ref]),
 							t_data = %{ t_data | timer_B_ref: Erlang.start_timer(@timer_B_value) },
 							client_transaction_state_1XX( initial_req, t_data )
 							
 						# Handle other responses
-						packet.response_code in 200..699 ->
+						packet.response_code in 200..699 packet.getHeaderValue(:CSeq) == initial_req.getHeaderValue(:CSeq) ->
 							client_transition_to_2XX_to_6xx( initial_req, packet, t_data )
 						
 						# Ignore the rest
@@ -237,6 +265,13 @@ defmodule SIP.Transaction do
 				# timer B expired
 				{ :timeout, timer, :timer_B } -> cond do -> 
 					if session_pid != nil do: Process.send(session_pid, { :transaction_close, :timer_B_timeout, 408 } ),
+					raise "SIP session expired"
+					
+				# Someone wants to cancel the transaction. Stop timer B and fire timer D
+				{ :cancel, caller } ->
+					timer_D_ref = Erlang.start_timer( @timer_D_value, self(), :timer_D ),
+					t_data = %{ t_data | timer_A_value: @t1_value, timer_A_ref: nil, timer_D_ref: Erlang.start_timer( @timer_D_value, self(), :timer_D ) },
+					client_transaction_state_cancelling_in_0XX( initial_req, t_data, true )
 			end
 		end
 	end
@@ -246,6 +281,7 @@ defmodule SIP.Transaction do
 		session_pid = t_data[:session_pid]
 
 		# Handle ACK business (test on method is done inside sendACK )
+		# to do: change the code to wait for application to send ACK (RFC 3261 compliance)
 		if sendack do
 			t_data = sendACK(initial_req, t_data)
 		end
@@ -264,7 +300,9 @@ defmodule SIP.Transaction do
 				# timer D expired - close session
 				{ :timeout, timer, :timer_D }
 					if session_pid != nil do: Process.send(session_pid, { :transaction_close, :completed } )
-					
+				
+				{ :cancel, caller } -> if is_pid(caller) do: Process.send(caller, { :cancel_failed, self(), :bad_state }),
+									   client_transaction_state_2XX( initial_req, t_data, false )
 			end
 		end
 	end
@@ -277,7 +315,7 @@ defmodule SIP.Transaction do
 		if sendack do
 			t_data = sendACK(initial_req, t_data)
 		end
-		
+				
 		receive do
 				{ :sip_in, packet }   ->
 					cond do
@@ -292,7 +330,9 @@ defmodule SIP.Transaction do
 				# timer D expired - close session
 				{ :timeout, timer, :timer_D }
 					if session_pid != nil do: Process.send(t_data[:session_pid], { :transaction_close, :completed } )
-					
+				
+				{ :cancel, caller } -> if is_pid(caller) do: Process.send(caller, { :cancel_failed, self() :bad_state }),
+									   # client_transaction_state_3XX( initial_req, t_data, false )
 			end
 		end
 	end
@@ -307,7 +347,7 @@ defmodule SIP.Transaction do
 		end
 		
 		receive do
-				{ :sip_in, packet }   ->
+				{ :sip_in, packet } ->
 					cond do
 						# Handle 4xx 5xx 6xx retransmissions, resend ACK
 						packet.isRetransmission(final_reply) ->
@@ -320,12 +360,104 @@ defmodule SIP.Transaction do
 				# timer D expired - close session
 				{ :timeout, timer, :timer_D }
 					if session_pid != nil do: Process.send(session_pid, { :transaction_close, :completed } )
-					
+				
+				{ :cancel, caller } -> if is_pid(caller) do: Process.send(caller, { :cancel_failed, self(), :bad_state }),
+									   client_transaction_state_456XX( initial_req, t_data, false )
 			end
 		end
 	end
 	
-	defp client_transaction_state_cancelling( initial_req, t_data, sendack ) do
+	defp client_transaction_cancelling_process_response(initial_req, resp, t_data, state_func) do
+		cond do
+			resp.is_request -> client_transaction_state_cancelling_in_0XX( initial_req, t_data, false )
+			
+			# 1xx answer received for intial requrest, retry cancelling
+			resp.response_code in 100..199 ->
+				state_func.( resp, t_data, true )
+			
+			resp.response_code == 487 ->
+				if timerA != nil do: Erlang.cancel_timer(timerA),
+				if t_data[:session_pid] != nil do: Process.send(t_data[:session_pid], { :cancel_ok, self() } ),
+				client_transition_to_2XX_to_6xx( initial_req, initial_req, t_data )
+			
+			packet.response_code in 200..299 ->
+				if timerA != nil do: Erlang.cancel_timer(timerA),
+				if t_data[:session_pid] != nil do: Process.send(t_data[:session_pid], { :cancel_failed, self(), :too_late } ),
+				client_transition_to_2XX_to_6xx( initial_req, packet, t_data )
+			
+			# Todo - should print a warning here
+			packet.response_code in 300..699 ->
+				if timerA != nil do: Erlang.cancel_timer(timerA),
+				if t_data[:session_pid] != nil do: Process.send(t_data[:session_pid], { :cancel_ok, self()} ),
+				client_transition_to_2XX_to_6xx( initial_req, packet, t_data )
+				
+			true -> state_func.( resp, t_data, false )
+		end	
+	
+	defp client_transaction_state_cancelling_in_0XX( initial_req, t_data, sendcancel ) do
+		if sendcancel do
+			t_data = sendCANCEL(initial_req, t_data)
+			timerA = t_data[:timer_A_ref]
+			if initial_req.transport == udp do
+				timerA = Erlang.start_timer( timer_A_value, self(), t_data[:timer_A_value] )
+				t_data  = %{ t_data | timer_A_ref: timerA }
+			end
+		end
+		
+		
+		cancel = t_data[:cancel]
+
+		receive do
+			{ :sip_in, packet } ->
+				cond do
+					# This is an answer for cancel - wait for final answer of the request
+					cancel.getHeaderValue(:CSeq) == packet.getHeaderValue(:CSeq) ->
+						if timerA != nil do: Erlang.cancel_timer(timerA),
+						client_transaction_state_cancel_received( initial_req, t_data )
+					
+					initial_req.getHeaderValue(:CSeq) == packet.getHeaderValue(:CSeq) ->
+						client_transaction_state_cancelling_in_0XX( initial_req, packet, client_transaction_state_cancelling_in_0XX )
+
+					true -> client_transaction_state_cancelling_in_0XX( initial_req, t_data, false )
+				end
+			
+							# T1 Retransmission
+			{ :timeout, timer, :timer_A } ->
+				if initial_req.transport == udp do
+						# This packet uses UDP transport, resend it
+						Process.send( transport_pid, { :sip_out, initial_req} )
+				end,
+				t_data = %{ t_data | timer_A_value: t_data[:timer_A_value]*2 }
+				client_transaction_state_cancelling_in_0XX( initial_req, t_data )
+
+			# timer D expired - close session
+			{ :timeout, timer, :timer_D } ->
+				if session_pid != nil do: Process.send(t_data[:session_pid], { :transaction_close, :cancelled } )
+		end
+	end
+	
+	defp client_transaction_state_cancel_received( initial_req, t_data, sendcancel ) do
+		
+		cancel = t_data[:cancel]
+
+		receive do
+			{ :sip_in, packet } ->
+				cond do
+					# This is an answer for cancel - wait for final answer of the request
+					cancel.getHeaderValue(:CSeq) == packet.getHeaderValue(:CSeq) ->
+						client_transaction_state_cancel_received( initial_req, t_data )
+					
+					initial_req.getHeaderValue(:CSeq) == packet.getHeaderValue(:CSeq) ->
+						client_transaction_state_cancelling_in_0XX( initial_req, packet, client_transaction_state_cancel_received )
+
+					true -> client_transaction_state_cancelling_in_0XX( initial_req, t_data, false )
+				end
+			
+			# timer D expired - close session
+			{ :timeout, timer, :timer_D } ->
+				if session_pid != nil do: Process.send(t_data[:session_pid], { :transaction_close, :cancelled } )
+		end	
+	end
 end	
 			
 		
