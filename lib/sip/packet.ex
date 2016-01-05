@@ -106,19 +106,31 @@ defmodule SIP.Packet do
 	@doc """
 	Set the value of a packet header or erases an header entirely (if value is nil)
 	"""
-	def setHeaderValue(packet, hKey, value) do
+	def setHeaderValue(packet, hKey, nil) do
 		hl = packet.getHeaderDict()
-
-		cond do
-			value == nil 	-> hl = Dict.remove(hl, headerKey(hKey))
-			value == []		-> hl = Dict.remove(hl, headerKey(hKey))
-			is_list(value) 	-> hl = Dict.put(hl, headerKey(hKey), value )
-			true 			-> hl = Dict.put(hl, headerKey(hKey), [ value ] )
-		end
-		
-		%SIP.Packet{ packet | headers: hl }
+		%SIP.Packet{ packet | headers: Dict.remove(hl, headerKey(hKey)) }
 	end
 	
+	def setHeaderValue(packet, hKey, []) do
+		hl = packet.getHeaderDict()
+		%SIP.Packet{ packet | headers: Dict.remove(hl, headerKey(hKey)) }
+	end
+
+	def setHeaderValue(packet, hKey, value) when is_list(value) do
+		hl = packet.getHeaderDict()
+		%SIP.Packet{ packet | headers: Dict.put(hl, headerKey(hKey), value ) }
+	end
+	
+	def setHeaderValue(packet, hKey, value) when is_binary(value) or is_integer(value) do 
+		hl = packet.getHeaderDict()
+		%SIP.Packet{ packet | headers: Dict.put(hl, headerKey(hKey), [ value ]) }
+	end
+	
+	def setHeaderValue(packet, hKey, value) when is_map(value) do 
+		hl = packet.getHeaderDict()
+		%SIP.Packet{ packet | headers: Dict.put(hl, headerKey(hKey), [ value ]) }
+	end
+		
 	def addHeaderValue(packet, headerKey, value, option) do
 		hl = packet.getHeaderDict()		
 		
@@ -140,6 +152,36 @@ defmodule SIP.Packet do
 		%SIP.Packet{ packet | headers: Dict.put(hl, headerKey(hKey), value ) }
 	end
 	
+	@spec generateTag( t, String.t | Atom.t ) :: t
+	def generateTag( packet, header )
+		case header do
+			:From -> from = packet.getHeaderValue(header),
+					if from != nil do
+						from.setParam( "tag", genTag() )
+						packet = packet.setHeaderValue(header, from)
+					end 
+					
+			:To -> 
+				to = packet.getHeaderValue(header),
+				if to != nil do
+					to.setParam( "tag", genTag() )
+					packet = packet.setHeaderValue(header, to)
+				end 
+			
+			"Call-ID" -> 
+				cid = packet.getHeaderValue(header),
+				if cid == nil do
+					packet = packet.setHeaderValue(header, genHash() )
+				end
+				
+			:Via ->
+				if packet.branch == nil do
+					packet = %SIP.Packet{ packet | branch: genTag() }
+				end
+		end
+		packet
+	end
+	
 	@spec getDialogId( t ) :: {String.t, String.t, String.t}
 	def getDialogId(packet) do
 		from = packet.getHeaderValue(:From)
@@ -152,6 +194,9 @@ defmodule SIP.Packet do
 		
 		{ from.getParam("tag"), callid, from.getParam("to") }
 	end
+	
+	
+	
 	#---------------- private functions (implementation) ---------------------
 
 	defp parseMethod( method ) do
@@ -231,6 +276,18 @@ defmodule SIP.Packet do
 		end		
 	end
 
+	defp genHash( src ) do
+		:crypto.hash(:md5, src) |> Base.encode64 |> String.strip ?=
+	end
+	
+	defp genTag() do
+		Integer.to_string(abs(:erlang.unique_integer))
+	end
+
+	defp genHash() do
+		genHash( genTag() )
+	end
+	
 	defp serializeValue( val ) when is_map(val) do
 		if val.__struct__ == "SIP.URI" do
 			val.serialize()
@@ -239,11 +296,25 @@ defmodule SIP.Packet do
 		end
 	end
 
+	defp serializeValue( val ) when is_list(val) do
+	
+	end
+	
 	defp serializeValue( val ) do
 		val
 	end
 	
 	defp serializeHeader( { key, val }, valsep ) do
+		cond do
+		
+			# Those are URIs
+			key in [ :From, :To, :Contact ] -> 
+				Atom.to_string(key) <> ": " <> val.serialize()
+				
+			# key is an atom
+			is_atom(key) -> Atom.to_string(key) <> ": " <> serializeValue(x)
+			
+			
 		if is_atom(key) do
 			keystr = Atom.to_string(key) <> ": "
 		else

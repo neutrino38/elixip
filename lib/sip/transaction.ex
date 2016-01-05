@@ -45,8 +45,12 @@ defmodule SIP.Transaction do
 				
 			
 			case session_id do
-				{ fromtag, callid, totag } -> { fromtag, callid, totag }
-				nil -> { fromtag, callid } = { genTag( [from.user, from.domain, :rand.uniform() ] ), genTag( :rand.uniform() ) }
+				{ fromtag, callid, totag } -> 
+					p = p.setHeaderValue( :From, from.setParam("tag", fromtag ) ),
+					p = p.setHeaderValue( :To, to.setParam("tag", totag ) ),
+					p = p.setHeaderValue( "Call-ID", callid )
+					
+				nil -> { fromtag, callid } = { genTag(), genTag( :rand.uniform() ) }
 			end
 			
 			hlist = [ 
@@ -55,7 +59,7 @@ defmodule SIP.Transaction do
 				{ "CSeq", "#{cseq} #{method}" }
 			]
 			
-			p = SIP.Packet.setHeaderValues(p, hlist)
+			p = p.setHeaderValue(:CSeq, "#{cseq} #{method}")
 			p = %SIP.Packet{p | branch: genTag( :rand.uniform() ) }
 			# Other headers (contact, via, route, will be added by transmission layer)
 			
@@ -84,11 +88,7 @@ defmodule SIP.Transaction do
 		def cancel_t( transaction_pid ) do
 			Process.send( transaction_pid, :cancel )
 		end
-		
-		defp genTag( src ) do
-			:crypto.hash(:md5, src) |> Base.encode64 |> String.strip ?=
-		end
-		
+				
 		# Send a prack message given a transaction - if PRACK is required
 		defp sendPRACK(initial_req, transport_pid)
 		end
@@ -129,8 +129,12 @@ defmodule SIP.Transaction do
 		
 		# --------------- Client Transaction state machine --------------------------------------
 		defp client_transition_init( initial_req, packet, t_data ) do
+		
+			# Ask transmission layer to create a transaction entry
+			Process.send( t_data[:transport_pid], { :transaction_add, self() } )
+		
 			# Send the message out
-			Process.send( t_data[:transport_pid], :sip_out, initial_req, self() )
+			Process.send( t_data[:transport_pid], { :sip_out, initial_req, self() } )
 			
 			#Start timer B
 			t_data = %{ t_data | timer_B_ref: Erlang.start_timer(@timer_B_value) }
@@ -469,6 +473,9 @@ defmodule SIP.Transaction do
 	
 	# --------------- Server Transaction state machine --------------------------------------
 	defp server_transition_init( initial_req, t_data ) do
+
+			# Ask transmission layer to create a transaction entry
+			Process.send( t_data[:transport_pid], { :transaction_add, initial_req.getTransactionId(), self() } )
 	
 			resp = initial_req.reply(100, "Trying", t_data[:ua])
 				# Send the message out
@@ -562,7 +569,7 @@ defmodule SIP.Transaction do
 		end
 		
 		if packet != nil do
-			# Store final RESP
+			# Store final response
 			t_data = %{ t_data | final_resp: packet }
 		else
 			packet = t_data[:final_resp]
@@ -581,7 +588,7 @@ defmodule SIP.Transaction do
 					# Discard packet which CSeq does not match the initial request
 					packet.getHeaderValue(:CSeq) != initial_req.getHeaderValue(:CSeq) ->
 						resp = packet.reply(400, "Bad request", t_data[:ua]),
-						Process.send( t_data[:transport_pid], :sip_out ),
+						Process.send( t_data[:transport_pid], { :sip_out, resp } ),
 						server_transaction_state_final_reply( initial_req, t_data, nil, false )
 					
 					# Restransmission - resend reply
@@ -590,9 +597,17 @@ defmodule SIP.Transaction do
 					
 					# Too late for cancelling !
 					packet.method == :CANCEL ->
+						resp = packet.reply(200, "OK", t_data[:ua]),
+						Process.send( t_data[:transport_pid], { :sip_out, resp } ),
+						server_transaction_state_final_reply( initial_req, t_data, nil, false )
 					
 					# Check if method is INVITE and UPDATE then notify the application
 					packet.method == :ACK ->
+						if packet.initial_req in [ :INVITE, :UPDATE ] do
+							if t_data[:session_pid] != nil do
+								Process.send( t_data[:session_pid], { :transaction_close, :confirmed } )
+							end
+						end
 				end
 			
 			# End of transaction
@@ -607,6 +622,3 @@ defmodule SIP.Transaction do
 
 end	
 			
-		
-			
-	

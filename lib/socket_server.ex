@@ -39,8 +39,15 @@ defmodule SipServer do
 		setHeaderValue(packet, "Contact", contactUri)
 	end
 	
+	defp getTransactionKey(packet)
+		if packet.is_request do
+			# UAS transaction: user
+			#
+			# UAS-call-id-totag-branchid
+	end
+	
 	# Main loop of UDP SIP listener
-	defp udpLoop( parameters, routing_rules, blacklist, call_list ) do
+	defp udpLoop( parameters, routing_rules, blacklist, transaction_list ) do
 		IO.puts "Entering server loop in process #{self()}"
 
 		receive do
@@ -54,7 +61,7 @@ defmodule SipServer do
 			# Raw data received on from UDP socket
 			{:udp, socket, addr, portNo, data} -> 
 				IO.puts "SIP packet from " <> Socket.Address.to_string(addr),
-				processPacket(parameters, socket, routing_rules, blacklist, call_list, addr, portNo, data)
+				processPacket(parameters, socket, routing_rules, blacklist, transaction_list, addr, portNo, data)
 			
 			# packet to be send
 			{:sip_out, packet, session_pid} -> sendPacket(parameters, packet, session_pid)
@@ -62,22 +69,29 @@ defmodule SipServer do
 			{:sip_out, packet } -> sendPacket(parameters, packet)
 			
 			# Register a SIP application in this listener and specify the routing criterias
-			{:register_app, app_type, src_net, dst_net, domain_rule, user_rule, app_pid }
-				-> routing_rules = [ routing_rules | { app_type, src_net, dst_net, domain_rule, user_rule, app_pid }]
+			{:register_app, app_type, src_net, dst_net, domain_rule, user_rule, app_pid } ->
+				routing_rules = [ routing_rules | { app_type, src_net, dst_net, domain_rule, user_rule, app_pid }]
 				
 			{:unregister_app, app_pid } -> 
 				routing_rules = Enum.filter(routing_rules, 
 											fn(rule) -> elem(rule,6) == app_pid end )
+			
+			# Remove transaction for SIP transmission layer
+			{ :transaction_remove, trans_id } -> 
+				
+			# Add transaction
+			{ :transaction_add,  packet, trans_pid } -> 
+				transaction_list = Dict.put(transaction_list, )
 		end
 		
-		udpLoop( parameters, routing_rules, blacklist, call_list )
+		udpLoop( parameters, routing_rules, blacklist, transaction_list )
 	end
 
 	# Parse the SIP packet (data) and dispatch it to the proper process
 	#
 	# If the dialog
 	
-	defp processPacket(parameters, socket, routing_rules, blacklist, call_list, src_addr, src_port, tranport, data) do
+	defp processPacket(parameters, socket, routing_rules, blacklist, transaction_list, src_addr, src_port, tranport, data) do
 	
 		psip = SIP.Packet.parse(data)
 		
@@ -88,15 +102,17 @@ defmodule SipServer do
 			_ -> raise "Failed to get local address"
 		end
 		
-		sess_pid = Dict.get( call_list, psip.getDialogId() )
+		trans_id = Dict.get( transaction_list, psip.getTransactionId() )
 		
 		cond do
 			# Blacklisted ? If yes reject
 			check_blacklist(blacklist, src_ip) -> rep = packet.reply(403, "Blacklisted", @sip_default_ua), 
 			
-			# If packet is in active session, forward it to active session
-			sess_pid != nil ->  if Process.send( sess_pid, { :sip_in, psip } ) != :ok do
-									Process.send( self(), { :session_remove, sess_pid } )
+			# If packet is in active session, forward it to active transaction
+			trans_id != nil ->  if Process.alive?(trans_id) do
+									Process.send( trans_id, { :sip_in, psip } ) != :ok do
+								else
+									Process.send( self(), { :transaction_remove, trans_id } )
 								end
 		
 			# If the packet matches a routing rule, send it to the proper application
