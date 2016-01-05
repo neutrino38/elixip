@@ -55,7 +55,7 @@ defmodule SIP.Transaction do
 			
 			p = SIP.Packet.setHeaderValues(p, hlist)
 			p = %SIP.Packet{p | branch: genTag( :rand.uniform() ) }
-			# Other headers (contact, via, route, will be added by transport layer)
+			# Other headers (contact, via, route, will be added by transmission layer)
 			
 			# Start the transaction 
 			t_id = Process.spawn(fn -> client_transaction_state_init(p, init_t_data(transport_pid, session_pid) )  end)
@@ -410,6 +410,9 @@ defmodule SIP.Transaction do
 		receive do
 			{ :sip_in, packet } ->
 				cond do
+					# This is an UAC, ignore incoming requests
+					packet.is_request -> client_transaction_state_cancelling_in_0XX( initial_req, t_data, false )
+					
 					# This is an answer for cancel - wait for final answer of the request
 					cancel.getHeaderValue(:CSeq) == packet.getHeaderValue(:CSeq) ->
 						if timerA != nil do: Erlang.cancel_timer(timerA),
@@ -443,6 +446,9 @@ defmodule SIP.Transaction do
 		receive do
 			{ :sip_in, packet } ->
 				cond do
+					# This is an UAC, ignore incoming requests
+					packet.is_request -> client_transaction_state_cancelling_in_0XX( initial_req, t_data, false )
+					
 					# This is an answer for cancel - wait for final answer of the request
 					cancel.getHeaderValue(:CSeq) == packet.getHeaderValue(:CSeq) ->
 						client_transaction_state_cancel_received( initial_req, t_data )
@@ -457,6 +463,114 @@ defmodule SIP.Transaction do
 			{ :timeout, timer, :timer_D } ->
 				if session_pid != nil do: Process.send(t_data[:session_pid], { :transaction_close, :cancelled } )
 		end	
+	end
+	
+	# --------------- Server Transaction state machine --------------------------------------
+	defp server_transition_init( initial_req, t_data ) do
+	
+			resp = initial_req.reply(100, "Trying", t_data[:ua])
+				# Send the message out
+			Process.send( t_data[:transport_pid], :sip_out, resp, self() )
+			
+			#Start timer B
+			t_data = %{ t_data | timer_B_ref: Erlang.start_timer(@timer_B_value, :timer_B) }
+			
+			# Start waiting for response messages
+			server_transaction_state_1XX( initial_req, t_data )
+	end
+	
+	defp server_transaction_state_1XX( initial_req, t_data ) do
+	
+		receive do
+			{ :sip_in, packet } ->
+				cond do
+					# Discard responses (we are an UAS)
+					packet.is_request == false -> server_transaction_state_1XX( initial_req, t_data )
+					
+					# Discard packet which CSeq does not match the initial request
+					packet.getHeaderValue(:CSeq) != initial_req.getHeaderValue(:CSeq) ->
+						resp = packet.reply(400, "Bad request", t_data[:ua]),
+						Process.send( t_data[:transport_pid], :sip_out )
+						server_transaction_state_1XX( initial_req, t_data )
+					
+					# Restransmission - resend 100 trying
+					packet.method == initial_req.method -> 
+						resp = initial_req.reply(100, "Trying", t_data[:ua]),
+						Process.send( t_data[:transport_pid], :sip_out ),
+						server_transaction_state_1XX( initial_req, t_data )
+					
+					# Prack a 1xx response: do nothing (we should cancel a timer)
+					packet.method == :PRACK ->
+						server_transaction_state_1XX( initial_req, t_data )
+					
+					# ugh. Invalid case. Ignore 
+					packet.method == :ACK ->
+						server_transaction_state_1XX( initial_req, t_data )
+						
+					# UPDATE - not supported
+					packet.method == :UPDATE ->
+						if initial_req.method == :INVITE do
+							resp = packet.reply(501, "Not supported", t_data[:ua]),
+							Process.send( t_data[:transport_pid], { :sip_out, resp } )
+							server_transaction_state_1XX( initial_req, packet, t_data )
+						else
+							resp = packet.reply(405, "Mrthod not allowed", t_data[:ua]),
+							Process.send( t_data[:transport_pid], { :sip_out, resp } ),
+							server_transaction_state_1XX( initial_req, packet, t_data )
+						end
+					
+					# CANCEL a transaction
+					packet.method == :CANCEL ->
+						t_data = %{ t_data | cancel: packet },
+						server_transaction_state_cancelling( initial_req, packet, t_data )
+			
+				end
+			
+			{ :sip_reply, reply } -> 
+				cond do
+				
+					reply.response_code in [ 180, 183 ] ->
+						Process.send( t_data[:transport_pid], { :sip_out, reply } ),
+						server_transaction_state_1XX( initial_req, t_data )
+						
+					reply.response_code in 200..299 ->
+						Process.send( t_data[:transport_pid], { :sip_out, reply } ),
+						t_data = %{ t_data | final_resp: reply },
+						server_transaction_state_2XX( initial_req, packet, t_data )
+						
+					reply.response_code in 300..399 ->
+						t_data = %{ t_data | final_resp: reply },
+						Process.send( t_data[:transport_pid], { :sip_out, reply } ),
+						server_transaction_state_3XX( initial_req, packet, t_data )
+
+					reply.response_code in 400..699 ->
+						t_data = %{ t_data | final_resp: reply },
+						Process.send( t_data[:transport_pid], { :sip_out, reply } ),
+						server_transaction_state_456XX( initial_req, packet, t_data )
+					
+				end
+				
+			{ :timeout, :timer_B } ->
+				resp = packet.reply(408, "Request timeout", t_data[:ua]),
+				t_data = %{ t_data | final_resp: resp, timer_B_ref: nil },
+				Process.send( t_data[:transport_pid], { :sip_out, reply } ),
+				server_transaction_state_456XX( initial_req, packet, t_data )
+		end
+		
+	end
+	
+	defp server_transaction_state_2XX( initial_req, packet, t_data ) do
+		if t_data[:timer_B_ref] != nil do
+			Erlang.cancel_timer(t_data[:timer_B_ref)
+		end
+			t_data = %{ t_data | final_resp: resp, timer_B_ref: nil },
+			
+	end
+	
+	defp server_transition_3XX( initial_req, packet, t_data ) do
+	end
+	
+	defp server_transition_456XX( initial_req, packet, t_data ) do
 	end
 end	
 			
