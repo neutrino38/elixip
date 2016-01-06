@@ -47,7 +47,7 @@ defmodule SipServer do
 	end
 	
 	# Main loop of UDP SIP listener
-	defp udpLoop( parameters, routing_rules, blacklist, transaction_list ) do
+	defp udpLoop( parameters, routing_rules, blacklist, transaction_list, dialog_list ) do
 		IO.puts "Entering server loop in process #{self()}"
 
 		receive do
@@ -61,7 +61,7 @@ defmodule SipServer do
 			# Raw data received on from UDP socket
 			{:udp, socket, addr, portNo, data} -> 
 				IO.puts "SIP packet from " <> Socket.Address.to_string(addr),
-				processPacket(parameters, socket, routing_rules, blacklist, transaction_list, addr, portNo, data)
+				processPacket(parameters, socket, routing_rules, blacklist, transaction_list, , dialog_list, addr, portNo, data)
 			
 			# packet to be send
 			{:sip_out, packet, session_pid} -> sendPacket(parameters, packet, session_pid)
@@ -77,11 +77,18 @@ defmodule SipServer do
 											fn(rule) -> elem(rule,6) == app_pid end )
 			
 			# Remove transaction for SIP transmission layer
-			{ :transaction_remove, trans_id } -> 
+			{ :transaction_remove, key, trans_id } -> 
+				transaction_list = Dict.delete(transaction_list, key)
 				
 			# Add transaction
-			{ :transaction_add,  packet, trans_pid } -> 
-				transaction_list = Dict.put(transaction_list, )
+			{ :transaction_add,  key, trans_pid } -> 
+				transaction_list = Dict.put(transaction_list, key, trans_pid)
+				
+			{ :dialog_add, key, dialog_id } ->
+				dialog_list = Dict.put(dialog_list, key, dialog_pid)
+				
+			{ :dialog_remove, key } ->
+				dialog_list = Dict.put(dialog_list, key, dialog_pid)
 		end
 		
 		udpLoop( parameters, routing_rules, blacklist, transaction_list )
@@ -91,7 +98,7 @@ defmodule SipServer do
 	#
 	# If the dialog
 	
-	defp processPacket(parameters, socket, routing_rules, blacklist, transaction_list, src_addr, src_port, tranport, data) do
+	defp processPacket(parameters, socket, routing_rules, blacklist, transaction_list, dialog_list, src_addr, src_port, tranport, data) do
 	
 		psip = SIP.Packet.parse(data)
 		
@@ -102,31 +109,53 @@ defmodule SipServer do
 			_ -> raise "Failed to get local address"
 		end
 		
-		trans_id = Dict.get( transaction_list, psip.getTransactionId() )
+		trans_id = nil
+		rule = nil
+		dialog_id = Dict.get(dialog_list, p.getDialogId())
 		
+		if p.is_request do
+			t_key = SIP.Transaction.compute_transaction_key(p, "uas")
+		else
+			t_key = SIP.Transaction.compute_transaction_key(p, "uac")
+		end
+		
+		# Ckeck if packet is attached to an existing transaction
+		trans_id = Dict.get( transaction_list, t_key )
+		if trans_id != nil and ! Process.alive?(trans_id) do
+			if p.is_request do
+				Process.send( self(), { :uas_transaction_remove, t_key } )
+			else
+				Process.send( self(), { :uac_transaction_remove, t_key } )
+			end
+			trans_id = nil
+		end
+		
+		# Check if pacjet can be dispatched by an application rule
+		if trans_id == nil and dialog_id == nil do
+			rule = RoutingRules.matchRule( routing_rules, packet)
+			if rule != nil and ! Process.alive?(rule) do
+				rule = nil
+			end
+		end
+			
+			
 		cond do
 			# Blacklisted ? If yes reject
-			check_blacklist(blacklist, src_ip) -> rep = packet.reply(403, "Blacklisted", @sip_default_ua), 
+			check_blacklist(blacklist, src_ip) ->
+				rep = packet.reply(403, "Blacklisted", @sip_default_ua),
+				Process.send( self(), { :sip_out, p } )
 			
-			# If packet is in active session, forward it to active transaction
-			trans_id != nil ->  if Process.alive?(trans_id) do
-									Process.send( trans_id, { :sip_in, psip } ) != :ok do
-								else
-									Process.send( self(), { :transaction_remove, trans_id } )
-								end
-		
-			# If the packet matches a routing rule, send it to the proper application
-			matches = RoutingRules.matchRule( routing_rules, packet) -> 
-				if Process.send( matches, { :sip_in, psip } ) == :ok do
-					nil
-				else
-					Process.send( self(), {:unregister_app, app_pid })
-				end
-					
-					
+			# If packet is in active transaction, send it
+			trans_id != nil ->  Process.send( trans_id, { :sip_in, psip } )
 			
+			# If packet is in an active dialog
+			dialog_id != nil ->  Process.send( dialog_id, { :sip_in, psip } )
+
 			# If packet is an ACK and does not match any rule or session, ignore it
 			packet.method == :ACK -> nil
+	
+			# If the packet matches a routing rule, send it to the proper application
+			rule != nil -> Process.send( rule, { :sip_in, psip } )
 			
 			# If the packet does not match any routing rule, reply statelessly
 			if packet.is_request ->
