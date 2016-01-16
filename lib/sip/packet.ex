@@ -94,6 +94,15 @@ defmodule SIP.Packet do
 		end
 	end
 	
+	def getCSeqNum(packet)
+		val = getHeaderValue(packet, :CSeq)
+		if val != nil do
+			[ cseq, method ] =String.split(val, " ")
+			String.to_integer(cseq)
+		else
+			nil
+		end
+	end
 	
 	defp getHeaderDict(packet)
 		if packet.headers == nil do
@@ -102,6 +111,8 @@ defmodule SIP.Packet do
 			hl = packet.headers
 		end
 	end
+	
+	
 	
 	@doc """
 	Set the value of a packet header or erases an header entirely (if value is nil)

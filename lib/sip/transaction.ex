@@ -80,14 +80,15 @@ defmodule SIP.Transaction do
 		@doc """
 		Given a packet, start an incoming (UAS) transaction.
 		"""
-		def start_incoming_t( packet, session_id, transport_pid, session_pid ) do
+		def start_incoming_t( packet, session_id, transport_pid, session_pid, ua ) do
 			if packet.is_request do
 			
 				if packet.method in [ :ACK, :PRACK, :CANCEL ] do
 					raise "Cannot start a transaction #{packet.method}"
 				end
 			
-				t_id = Process.spawn(fn -> server_transaction_state_init(p, init_t_data(transport_pid, session_pid) )  end)
+				t_data = %{ init_t_data(transport_pid, session_pid) | :ua => ua }
+				t_id = Process.spawn(fn -> server_transaction_state_init(p, t_data )  end)
 			else
 				raise "Cannot start a transaction with a RESPONSE"
 			end
@@ -107,6 +108,15 @@ defmodule SIP.Transaction do
 				raise "Invalid error code specified"
 			end
 		end
+
+		def reply_t( transaction_pid, error_code, reason ) when is_integer(error_code) do
+			if error_code in 100..699 do
+				Process.send( transaction_pid, { :sip_reply, error_code, reason, nil } )
+			else
+				raise "Invalid error code specified"
+			end
+		end
+
 		
 		@doc """
 		Cancel an existing UAC transaction
@@ -536,7 +546,7 @@ defmodule SIP.Transaction do
 	
 	# --------------- Server Transaction state machine --------------------------------------
 	
-	defp server_transition_init( initial_req, t_data ) do
+	defp server_transition_state_init( initial_req, t_data ) do
 
 			# Ask transmission layer to create a transaction entry
 			Process.send( t_data[:transport_pid], { :uas_transaction_add, compute_transaction_key(packet, "uas"),  self() } )
