@@ -70,8 +70,7 @@ defmodule SIP.Dialog do
 				raise "SIP packet is not associated with this dialog"
 			end
 		end
-		
-		
+				
 		# Here we check if we can accept the new incoming transaction.
 		# We accept 
 		cond do
@@ -83,7 +82,7 @@ defmodule SIP.Dialog do
 				SIP.Transaction.reply_t(t_id, 500, "Invalid CSeq"),
 				raise "CSeq is already expired"
 
-			
+
 		
 			true -> %{ d_data | :trans_in => [ d_data[:trans_in] | t_id ], 
 					   :cseq_in => newcseq )
@@ -127,8 +126,14 @@ defmodule SIP.Dialog do
 
 			{ :auth, req_id } ->
 				internal_challenge_d(req_id, code, reason),
-				next_state = :early_state
+				next_state = :auth_state
 
+		end
+		
+		if next_state != :init_state do
+			invite_dialog_state( next_state, d_data, :init_state )
+		else
+			invite_dialog_init( d_data, transport_pid )
 		end
 	end
 	

@@ -181,22 +181,28 @@ defmodule SIP.Transaction do
 		end
 
 		# Create a reply from the initial request and send it
-		defp uas_reply( initial_req, t_data, error_code, reason ) do
-			uas_reply( initial_req, t_data, error_code, reason, nil )
+		defp uas_reply( req, is_ini_req, t_data, error_code, reason ) do
+			uas_reply( req, t_data, error_code, reason, store_reply, nil )
 		end
 		
 		# Create a reply from the initial request and send it
-		defp uas_reply( initial_req, t_data, error_code, reason, body ) do
-			p = initial_req.reply(error_code, reason, t_data[:ua])
+		defp uas_reply( req, is_ini_req, t_data, error_code, reason, body ) do
+			p = req.reply(error_code, reason, t_data[:ua])
 			if is_tupple(body) do
 				{ content_type, content_payload } = body
 				p = p.setHeaderValue("Content-Type", content_type)
-				p %SIP.Packet{ p | body: content_payload }
+				p = %SIP.Packet{ p | body: content_payload }
 			end
 			Process.send( t_data[:transport_pid], { :sip_out, p } )
 			t_data = timer_stop(:timer_B, t_data)
-			if error_code in 200..699 do
+			if error_code in 200..699 and is_ini_req do
 				%{ t_data | final_resp: p }
+			end
+		end
+		
+		defp uas_resend_reply( t_data ) do
+			if t_data[:final_reply] != nil do
+				Process.send( t_data[:transport_pid], { :sip_out, t_data[:final_reply] } )
 			end
 		end
 		
@@ -255,26 +261,26 @@ defmodule SIP.Transaction do
 			cond do
 				# Handle 2xx responses
 				packet.response_code in 200..299 ->
-					if session_pid != nil do: Process.send(session_pid, { :transaction_success, packet } ),
+					if session_pid != nil do: Process.send(session_pid, { :transaction_success, self(), packet } ),
 					client_transaction_state_2XX( initial_req, packet, t_data, true )
 				
 				# Handle 3xx responses
 				packet.response_code in 300..399 ->
-					if session_pid != nil do: Process.send(session_pid, { :transaction_redirect, packet } ),
+					if session_pid != nil do: Process.send(session_pid, { :transaction_redirect, self(), packet } ),
 					client_transaction_state_3XX( initial_req, packet, t_data, true )
 					
 				# Handle auth required
 				packet.response_code in [401, 407] ->
-					if session_pid != nil do: Process.send(session_pid, { :transaction_auth_required, packet } ),
+					if session_pid != nil do: Process.send(session_pid, { :transaction_auth_required, self(), packet } ),
 					client_transaction_state_456XX( initial_req, packet, t_data, true )
 					
 				# Handle 4xx to 6xx errors
 				packet.response_code in 400..699 ->				,
-					if session_pid != nil do: Process.send(session_pid, { :transaction_error, packet } ),
+					if session_pid != nil do: Process.send(session_pid, { :transaction_error, self(), packet } ),
 					client_transaction_state_456XX( initial_req, packet, t_data, true )
 				
 				true ->
-					if session_pid != nil do: Process.send(session_pid, { :transaction_close, :invalid_response } ),
+					if session_pid != nil do: Process.send(session_pid, { :transaction_close, self(), :invalid_response } ),
 					raise "Invalid SIP response. Terimnating transaction",
 			end
 		end
@@ -310,7 +316,7 @@ defmodule SIP.Transaction do
 						packet.response_code in [180, 183] ->
 							t_data = stop_timer(:timer_A, t_data),
 							sendPRACK(initial_req, transport_pid),
-							if session_pid != nil do: Process.send(session_pid, { :transaction_progress, packet } ),
+							if session_pid != nil do: Process.send(session_pid, { :transaction_progress, self(), packet } ),
 							client_transaction_state_1XX( initial_req, t_data )
 						
 						packet.response_code in 100..199  ->
@@ -407,7 +413,7 @@ defmodule SIP.Transaction do
 					
 				# timer D expired - close session
 				{ :timeout, timer, :timer_D }
-					if session_pid != nil do: Process.send(session_pid, { :transaction_close, :completed } )
+					if session_pid != nil do: Process.send(session_pid, { :transaction_close, self(), :completed } )
 				
 				{ :cancel, caller } -> if is_pid(caller) do: Process.send(caller, { :cancel_failed, self(), :bad_state }),
 									   client_transaction_state_2XX( initial_req, t_data, false )
@@ -487,7 +493,7 @@ defmodule SIP.Transaction do
 
 	defp client_cancelling_process_resp(initial_req, resp, t_data, state_func) when resp.response_code == 487 do
 		t_data = stop(:timer_A, t_data )
-		if t_data[:session_pid] != nil do: Process.send(t_data[:session_pid], { :cancel_ok, self() } )
+		if t_data[:session_pid] != nil do: Process.send(t_data[:session_pid], { :cancel_ok, self(), :ok } )
 		client_transition_to_2XX_to_6xx( initial_req, initial_req, t_data )
 	end
 	
@@ -551,9 +557,10 @@ defmodule SIP.Transaction do
 			# Ask transmission layer to create a transaction entry
 			Process.send( t_data[:transport_pid], { :uas_transaction_add, compute_transaction_key(packet, "uas"),  self() } )
 	
-			resp = initial_req.reply(100, "Trying", t_data[:ua])
-				# Send the message out
-			Process.send( t_data[:transport_pid], :sip_out, resp, self() )
+			# Send 100 Trying if needed
+			if initial_req.method == :INVITE or initial_req.transport == :sip_udp do
+				uas_reply( initial_req, true, t_data, 100, "Trying" )
+			end
 			
 			#Start timer B
 			t_data = start_timer(:timer_B, t_data)
@@ -571,15 +578,13 @@ defmodule SIP.Transaction do
 					packet.is_request == false -> server_transaction_state_1XX( initial_req, t_data )
 					
 					# Discard packet which CSeq does not match the initial request
-					packet.getHeaderValue(:CSeq) != initial_req.getHeaderValue(:CSeq) ->
-						resp = packet.reply(400, "Bad request", t_data[:ua]),
-						Process.send( t_data[:transport_pid], :sip_out ),
+					packet.getCSeqNum() != initial_req.getCSeqNum() ->
+						uas_reply( packet, false, t_data, 400, "Bad request" ),
 						server_transaction_state_1XX( initial_req, t_data )
 					
 					# Restransmission - resend 100 trying
-					packet.method == initial_req.method -> 
-						resp = initial_req.reply(100, "Trying", t_data[:ua]),
-						Process.send( t_data[:transport_pid], :sip_out ),
+					packet.method == initial_req.method ->
+						uas_reply( packet, true, t_data, 100, "Trying" ),
 						server_transaction_state_1XX( initial_req, t_data )
 					
 					# Prack a 1xx response: do nothing (we should cancel a timer)
@@ -593,42 +598,73 @@ defmodule SIP.Transaction do
 					# UPDATE - not supported
 					packet.method == :UPDATE ->
 						if initial_req.method == :INVITE do
-							resp = packet.reply(501, "Not supported", t_data[:ua]),
-							Process.send( t_data[:transport_pid], { :sip_out, resp } )
+							uas_reply( packet, false, t_data, 501, "Not supported" ),
 							server_transaction_state_1XX( initial_req, packet, t_data )
 						else
-							resp = packet.reply(405, "Method not allowed", t_data[:ua]),
-							Process.send( t_data[:transport_pid], { :sip_out, resp } ),
+							uas_reply( packet, false, t_data, 405, "Method not allowed" ),
 							server_transaction_state_1XX( initial_req, packet, t_data )
 						end
 					
 					# CANCEL a transaction
 					packet.method == :CANCEL ->
 						t_data = %{ t_data | cancel: packet },
+						if t_data[:session_pid] != nil do: Process.send(t_data[:session_pid], { :cancel, self(), :ok } )
 						server_transaction_state_cancelling( initial_req, t_data )
-			
 				end
 			
 			{ :sip_reply, error_code, reason, body } ->
-				t_data = uas_reply( initial_req, t_data, error_code, reason, body ),
+				t_data = uas_reply( initial_req, true, t_data, error_code, reason, body ),
 				cond do
 					reply.response_code in 100..199 -> server_transaction_state_1XX( initial_req, t_data )
 						
 					reply.response_code in 200..699 -> 
 						t_data = start_timer(:timer_D, t_data),
-						server_transaction_state_final_reply( initial_req, t_data )					
+						server_transaction_state_final_reply( initial_req, t_data )
 				end
 				
 			{ :timeout, :timer_B } ->
 				t_data = %{ t_data | final_resp: resp, timer_B_ref: nil },
-				t_data = uas_reply( initial_req, t_data, 408, reason, "Request timeout" )
-				server_transaction_state_456XX( initial_req, packet, t_data )
+				t_data = uas_reply( initial_req, true, t_data, 408, reason, "Request timeout" )
+				server_transaction_state_final_reply( initial_req, t_data, false )
 		end
 		
 	end
 	
-	defp server_transaction_state_final_reply( initial_req, packet, t_data ) do
+	defp server_transaction_state_cancelling( initial_req, t_data ) do
+		receive do
+			{ :sip_in, packet } ->
+				cond do
+					# Discard responses (we are an UAS)
+					packet.is_request == false -> server_transaction_state_cancelling( initial_req, t_data )
+					
+					# Discard packet which CSeq does not match the initial request
+					packet.getCSeqNum() != initial_req.getCSeqNum() ->
+						uas_reply( packet, false, t_data, 400, "Bad request" ),
+						server_transaction_state_cancelling( initial_req, t_data )
 
+					# Restransmission - resend 100
+					packet.method == initial_req.method -> 
+						uas_reply( packet, true, t_data, 100, "Trying" ),
+						server_transaction_state_cancelling( initial_req, t_data )
+						
+					# Cancel restransmission
+					packet.method == :CANCEL ->
+						uas_reply( packet, false, t_data, 100, "Cancelling" ),
+						server_transaction_state_cancelling( initial_req, t_data )
+					
+					# All other case - 
+					true ->
+						uas_reply( packet, false, t_data, 400, "Bad state" ),
+						server_transaction_state_cancelling( initial_req, t_data )
+				end
+	end
+	
+	defp server_transaction_state_final_reply( initial_req, t_data, resend_repl ) do
+	
+		if resend_repl do
+			uas_resend_reply( t_data )
+		end
+		
 		receive do
 			{ :sip_in, packet } ->
 				cond do
@@ -636,19 +672,17 @@ defmodule SIP.Transaction do
 					packet.is_request == false -> server_transaction_state_final_reply( initial_req, t_data, nil, false )
 					
 					# Discard packet which CSeq does not match the initial request
-					packet.getHeaderValue(:CSeq) != initial_req.getHeaderValue(:CSeq) ->
-						resp = packet.reply(400, "Bad request", t_data[:ua]),
-						Process.send( t_data[:transport_pid], { :sip_out, resp } ),
+					packet.getCSeqNum() != initial_req.getCSeqNum() ->
+						uas_reply( packet, false, t_data, 400, "Bad request" ),
 						server_transaction_state_final_reply( initial_req, t_data, nil, false )
 					
 					# Restransmission - resend reply
 					packet.method == initial_req.method -> 
 						server_transaction_state_final_reply( initial_req, t_data, nil, true )
 					
-					# Too late for cancelling !
+					# Too late for cancelling - but we reply OK 
 					packet.method == :CANCEL ->
-						resp = packet.reply(200, "OK", t_data[:ua]),
-						Process.send( t_data[:transport_pid], { :sip_out, resp } ),
+						uas_reply( packet, false, t_data, 200, "OK" ),
 						server_transaction_state_final_reply( initial_req, t_data, nil, false )
 					
 					# Check if method is INVITE and UPDATE then notify the application
@@ -671,7 +705,7 @@ defmodule SIP.Transaction do
 	
 	defp server_transaction_end( initial_req, t_data )
 		Process.send(t_data[:transport_pid], { :uas_transaction_remove, compute_transaction_key(initial_req, "uac"), self() } )
-		if t_data[:session_pid] != nil do: Process.send(t_data[:session_pid], { :transaction_close, self(), reason } )
+		if t_data[:session_pid] != nil do: Process.send(t_data[:session_pid], { :transaction_close, self(), :ok } )
 	end
 end	
 			
