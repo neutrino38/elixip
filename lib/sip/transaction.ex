@@ -213,26 +213,28 @@ defmodule SIP.Transaction do
 		
 		defp stop_timer( :timer_A, t_data ) do
 			if t_data[:timer_A_ref] != nil do
-				:erlang.stop_timer(t_data[:timer_A_ref])
+				:erlang.cancel_timer(t_data[:timer_A_ref])
 				t_data  = %{ t_data | timer_A_ref: nil, timer_A_value: @t1_value }
+			end
+			t_data
+		end
+		
+		defp stop_timer( :timer_B, t_data ) do
+			if t_data[:timer_B_ref] != nil do
+				:erlang.cancel_timer(t_data[:timer_B_ref])
+				t_data  = %{ t_data | timer_B_ref: nil }
 			end
 			t_data
 		end
 		
 		defp start_timer( :timer_B, t_data ) do
 			# Timer B can be restarted
-			if t_data[:timer_B_ref] != nil do
-				:erlang.cancel_timer(t_data[:timer_B_ref])
-			end
+			t_data = stop_timer( :timer_B, t_data )
 			t_data = %{ t_data | timer_B_ref: :erlang.start_timer( t_data[:timer_B_value], self(), timer ) }
 		end
 
 		defp start_timer( :timer_F, t_data ) do
-			if (t_data[:timer_B_ref] != nil do
-				:erlang.cancel_timer(t_data[:timer_B_ref])
-				t_data = %{ t_data | timer_B_ref: nil }
-			end
-			
+			t_data = stop_timer( :timer_B, t_data )
 			t_data = %{ t_data | timer_D_ref: :erlang.start_timer( @timer_D_value, self(), timer ) }
 		end
 		
@@ -608,6 +610,7 @@ defmodule SIP.Transaction do
 					# CANCEL a transaction
 					packet.method == :CANCEL ->
 						t_data = %{ t_data | cancel: packet },
+						t_data = start_timer(:timer_D, t_data),
 						if t_data[:session_pid] != nil do: Process.send(t_data[:session_pid], { :cancel, self(), :ok } )
 						server_transaction_state_cancelling( initial_req, t_data )
 				end
@@ -657,6 +660,13 @@ defmodule SIP.Transaction do
 						uas_reply( packet, false, t_data, 400, "Bad state" ),
 						server_transaction_state_cancelling( initial_req, t_data )
 				end
+				
+			# Not cancelled on time
+			{ :timeout, :timer_D } ->
+				uas_reply( initial_req, true, t_data, 487, "Request terminated" ),
+				uas_reply( t_data[:cancel], false, t_data, 200, "OK" ),
+				t_data = start_timer(:timer_D, t_data),
+				server_transaction_state_final_reply( initial_req, t_data, false )
 	end
 	
 	defp server_transaction_state_final_reply( initial_req, t_data, resend_repl ) do
