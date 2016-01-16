@@ -101,22 +101,17 @@ defmodule SIP.Transaction do
 		reason: 	reason string to send
 		body: 		must be a tupple { content_type, content_payload }
 		"""
-		def reply_t( transaction_pid, error_code, reason, body ) when is_integer(error_code) and is_tuple(body) do
-			if error_code in 100..699 do
-				Process.send( transaction_pid, { :sip_reply, error_code, reason, body } )
-			else
-				raise "Invalid error code specified"
-			end
+		def reply_t( transaction_pid, error_code, reason, headers, body ) when error_code in 200..299 and is_tuple(body) do
+			Process.send( transaction_pid, { :sip_reply, error_code, reason, headers, body } )
 		end
 
-		def reply_t( transaction_pid, error_code, reason ) when is_integer(error_code) do
-			if error_code in 100..699 do
-				Process.send( transaction_pid, { :sip_reply, error_code, reason, nil } )
-			else
-				raise "Invalid error code specified"
-			end
+		def reply_t( transaction_pid, error_code, reason, headers ) when error_code in 100..699 do
+			Process.send( transaction_pid, { :sip_reply, error_code, reason, headers, nil } )
 		end
 
+		def reply_t( transaction_pid, error_code, reason, headers ) when not error_code in 100..699 do
+			raise "Invalid SIP response code specified"
+		end
 		
 		@doc """
 		Cancel an existing UAC transaction
@@ -615,15 +610,16 @@ defmodule SIP.Transaction do
 						server_transaction_state_cancelling( initial_req, t_data )
 				end
 			
-			{ :sip_reply, error_code, reason, body } ->
+			# Provisional responses
+			{ :sip_reply, error_code, reason, body } when error_code in 100..199 ->
 				t_data = uas_reply( initial_req, true, t_data, error_code, reason, body ),
-				cond do
-					reply.response_code in 100..199 -> server_transaction_state_1XX( initial_req, t_data )
-						
-					reply.response_code in 200..699 -> 
-						t_data = start_timer(:timer_D, t_data),
-						server_transaction_state_final_reply( initial_req, t_data )
-				end
+				server_transaction_state_1XX( initial_req, t_data )
+			
+			# Final responses and redirect
+			{ :sip_reply, error_code, reason, body } when error_code in 200..699 ->
+				t_data = uas_reply( initial_req, true, t_data, error_code, reason, body ),
+				t_data = start_timer(:timer_D, t_data),
+				server_transaction_state_final_reply( initial_req, t_data )
 				
 			{ :timeout, :timer_B } ->
 				t_data = %{ t_data | final_resp: resp, timer_B_ref: nil },
@@ -660,6 +656,17 @@ defmodule SIP.Transaction do
 						uas_reply( packet, false, t_data, 400, "Bad state" ),
 						server_transaction_state_cancelling( initial_req, t_data )
 				end
+
+			
+			{ :sip_reply, error_code, reason, body } when error_code in 100..199 ->
+				t_data = uas_reply( initial_req, true, t_data, error_code, reason, body ),
+				server_transaction_state_1XX( initial_req, t_data )
+			
+			# Only cancelled is processd
+			:cancel ->
+				t_data = uas_reply( initial_req, true, t_data, 487, "Request Terminated", nil ),
+				t_data = start_timer(:timer_D, t_data),
+				server_transaction_state_final_reply( initial_req, t_data )
 				
 			# Not cancelled on time
 			{ :timeout, :timer_D } ->

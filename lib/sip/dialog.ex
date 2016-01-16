@@ -25,11 +25,55 @@ defmodule SIP.Dialog do
 	"""
 
 	@doc """
-	Create a dialog from an incoming SIP packet
+	Create a dialog from an incoming SIP request. Use this method when an application
+	receives an incoming SIP packet from network and manage this request within a dialog
+	
+	Returns the process ID of the dialog
 	"""
-	def create_d( packet, app_pid, options )
+	def create_incoming_d( packet, app_pid, transport_pid, options )
 		d_data = init_d_data( app_id, packet, option )
 		Process.spawn( fn -> invite_dialog_init( d_data ) end )
+	end
+	
+	@doc """
+	Create a dialog from an outging (UAC) SIP transaction. Use this to create
+	
+	- an outgoing call
+	"""
+	def create_outgoing_call( ruri, from, to, body, app_pid, options ) do
+	end
+	
+	def create_outgoing_registration( ruri, from, to, app_pid, options ) do
+	end
+
+	def create_outgoing_presence( method, ruri, from, to, app_pid, options ) do
+	end
+	
+	def send_ood_message( method, ruri, from, to, app_pid, options ) do
+	end
+	
+	@doc """
+	Reply to an incoming request. Use this function to reply to any incoming request 
+	
+	dialog_id: 	pid of dialog process
+	req_id:    	pid of request transaction
+	error_code: SIP error code of the responses
+	reason:		SIP reason. nil to use default reason
+	headers:	SIP headers to inject. Make sure that you know what you are doing here ...
+	
+	"""
+	def reply_d( dialog_id, req_id, error_code, reason, headers ) when error_code in 100..699 do
+	end
+	
+	def reply_d( dialog_id, req_id, 200, reason, headers, body ) when error_code in 100..699 do
+	end
+
+	@doc """
+	Challenge the request
+	Send 401 Proxy Authentication required
+	Send 407 Authentication required
+	"""
+	def challenge_d( dialog_id, req_id, code, headers ) when code == 401 or when code == 407 do
 	end
 	
 	@doc """
@@ -37,14 +81,31 @@ defmodule SIP.Dialog do
 	will be automatically forwarded back. Useful to build a B2BUA or
 	an SBC
 	"""
-	def forward_request_d( dialog_id, req, other_dialog )
+	def fwd_request( dialog_id, req, other_dialog ) do
 	end
 	
-	def forward_response_d( dialog_id, resp, req_cseq )
+	def fwd_response( dialog_id, req_id, resp, req_cseq )
 	end
 	
+	@doc """
+	Use this function to send in-dialog UPDATE, INFO, MESSAGE
+	"""
+	def send_request(dialog_id, method, body ) do
+	end
 	
-	def terminate_dialog( dialog_id )
+	@doc """
+	Use this function to send in-dialog NOTIFY, PUBLISH, NOTIFY
+	"""
+	def send_presence_message(dialog_id, method, body ) do
+	end
+	
+	@doc """
+	Stop running dialog.
+	- INVITE dialog -> send BYE
+	- UAC REGISTER dialog send REGISTER with Expiration; 0
+	- UAC PUBLISH dialog send unPUBLISH
+	"""
+	def terminate_d( dialog_id )
 	end
 	
 	# ------------- Utility functions -------------------------------
@@ -81,8 +142,6 @@ defmodule SIP.Dialog do
 			newcseq <= d_data[:cseq_in] ->
 				SIP.Transaction.reply_t(t_id, 500, "Invalid CSeq"),
 				raise "CSeq is already expired"
-
-
 		
 			true -> %{ d_data | :trans_in => [ d_data[:trans_in] | t_id ], 
 					   :cseq_in => newcseq )
@@ -128,6 +187,13 @@ defmodule SIP.Dialog do
 				internal_challenge_d(req_id, code, reason),
 				next_state = :auth_state
 
+			{ :reply, req_id, code, reason } when code in 200..699 ->
+				SIP.Transaction.reply_t(req_id, code, reason),
+				next_state = :terminating_state
+				
+			{ :reply, req_id, code, reason, body } when code in 200..299 ->
+				SIP.Transaction.reply_t(req_id, code, reason, body),
+				next_state = :terminating_state
 		end
 		
 		if next_state != :init_state do
