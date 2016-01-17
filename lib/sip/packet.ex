@@ -64,6 +64,21 @@ defmodule SIP.Packet do
 	"""
 	def reply(packet, code, reason, ua) when is_integer(code) do
 		# Todo if reason is nil, use default reason
+		if reason == nil do
+			case code do
+				100 -> reason = "Trying"
+				180 -> reason = "Ringing"
+				181 -> reason = "Call is Being Forwarded"
+				182 -> reason = "Queued"
+				183 -> reason = "Session in Progress"
+				
+				200 -> "OK"
+				202 -> reason = "Accepted"
+				
+				300 -> "Multiple choices"
+				
+			end
+		end
 		if code >= 100 && code < 700 do
 			p = %SIP.Packet{ packet | is_request: false, response_code: code, reason: reason, packet_bytes: nil }
 			p = setHeaderValue(p, "User-Agent", ua)

@@ -121,7 +121,7 @@ defmodule SIP.Dialog do
 		   :peer_ip => initial_req.src_ip, :peer_port => initial_req.src_port }
 	end
 	
-	defp add_incoming_trans( d_data, t_id, packet ) do
+	defp add_trans( :uas, d_data, t_id, packet ) do
 	
 		newcseq = packet.getCSeqNum()
 		if d_data[:dialog_id] = nil do
@@ -148,11 +148,22 @@ defmodule SIP.Dialog do
 		end
 	end
 	
-	defp del_incoming_trans( d_data, t_id )
+	defp add_trans( :uac, d_data,  ) do
+	end
+	
+	defp del_trans( :uas, d_data, t_id )
+		d_data
+	end
+
+	defp del_trans( :uac, d_data, t_id )
 		d_data
 	end
 	
-	internal_challenge_d(req_id, code, reason)
+	defp internal_challenge_d(req_id, code) where code in [ 401, 407 ] do
+		m = SIP.Transaction.reply_get_data_t(t_id, :method)
+		SIP.Transaction.reply_t(t_id, code, nil)
+
+	end
 	
 	defp internal_reply_d(d_data, t_id, code, reason) do
 		if req_id in d_data[:trans_in] do: SIP.Transaction.reply_t(t_id, code, reason)
@@ -165,7 +176,7 @@ defmodule SIP.Dialog do
 		if d_data.packet != nil do
 			# Icomong packet used to create dialog -> create UAS transaction
 			t_pid = SIP.Transaction.start_incoming_t( d_data[:initial_req], sess_id, transport_pid, self() )
-			d_data = add_incoming_trans( d_data, t_pid )
+			d_data = add_trans( :uas, d_data, t_pid )
 		else
 			
 		end
@@ -187,7 +198,7 @@ defmodule SIP.Dialog do
 
 			# App requires authentication
 			{ :auth, req_id, } ->
-				internal_challenge_d(req_id, code, reason),
+				internal_challenge_d(req_id),
 				next_state = :auth_uas_state
 
 			{ :reply, req_id, code, reason } when code in 200..699 ->
@@ -205,6 +216,7 @@ defmodule SIP.Dialog do
 				next_state = :cancelling_state
 				
 			{ :transaction_close, self(), :confirmed } ->
+			
 		end
 		
 		if next_state != :init_state do
