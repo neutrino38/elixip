@@ -258,26 +258,26 @@ defmodule SIP.Transaction do
 			cond do
 				# Handle 2xx responses
 				packet.response_code in 200..299 ->
-					if session_pid != nil do: Process.send(session_pid, { :transaction_success, self(), packet } ),
+					if session_pid != nil do: Process.send(session_pid, { :uac_transaction_success, self(), packet } ),
 					client_transaction_state_2XX( initial_req, packet, t_data, true )
 				
 				# Handle 3xx responses
 				packet.response_code in 300..399 ->
-					if session_pid != nil do: Process.send(session_pid, { :transaction_redirect, self(), packet } ),
+					if session_pid != nil do: Process.send(session_pid, { :uac_transaction_redirect, self(), packet } ),
 					client_transaction_state_3XX( initial_req, packet, t_data, true )
 					
 				# Handle auth required
 				packet.response_code in [401, 407] ->
-					if session_pid != nil do: Process.send(session_pid, { :transaction_auth_required, self(), packet } ),
+					if session_pid != nil do: Process.send(session_pid, { :uac_transaction_auth_required, self(), packet } ),
 					client_transaction_state_456XX( initial_req, packet, t_data, true )
 					
 				# Handle 4xx to 6xx errors
 				packet.response_code in 400..699 ->				,
-					if session_pid != nil do: Process.send(session_pid, { :transaction_error, self(), packet } ),
+					if session_pid != nil do: Process.send(session_pid, { :uac_transaction_error, self(), packet } ),
 					client_transaction_state_456XX( initial_req, packet, t_data, true )
 				
 				true ->
-					if session_pid != nil do: Process.send(session_pid, { :transaction_close, self(), :invalid_response } ),
+					if session_pid != nil do: Process.send(session_pid, { :uac_transaction_close, self(), :invalid_response } ),
 					raise "Invalid SIP response. Terimnating transaction",
 			end
 		end
@@ -313,7 +313,7 @@ defmodule SIP.Transaction do
 						packet.response_code in [180, 183] ->
 							t_data = stop_timer(:timer_A, t_data),
 							sendPRACK(initial_req, transport_pid),
-							if session_pid != nil do: Process.send(session_pid, { :transaction_progress, self(), packet } ),
+							if session_pid != nil do: Process.send(session_pid, { :uac_transaction_progress, self(), packet } ),
 							client_transaction_state_1XX( initial_req, t_data )
 						
 						packet.response_code in 100..199  ->
@@ -410,7 +410,7 @@ defmodule SIP.Transaction do
 					
 				# timer D expired - close session
 				{ :timeout, timer, :timer_D }
-					if session_pid != nil do: Process.send(session_pid, { :transaction_close, self(), :completed } )
+					if session_pid != nil do: Process.send(session_pid, { :uac_transaction_close, self(), :completed } )
 				
 				{ :cancel, caller } -> if is_pid(caller) do: Process.send(caller, { :cancel_failed, self(), :bad_state }),
 									   client_transaction_state_2XX( initial_req, t_data, false )
@@ -543,7 +543,7 @@ defmodule SIP.Transaction do
 	end
 	
 	defp client_transaction_end(initial_req, t_data, reason, runtime_error) do
-		if t_data[:session_pid] != nil do: Process.send(t_data[:session_pid], { :transaction_close, self(), reason } )
+		if t_data[:session_pid] != nil do: Process.send(t_data[:session_pid], { :uac_transaction_close, self(), reason } )
 		Process.send(t_data[:transport_pid], { :uac_transaction_remove, compute_transaction_key(initial_req, "uac"), self() }
 	end
 	
@@ -606,7 +606,7 @@ defmodule SIP.Transaction do
 					packet.method == :CANCEL ->
 						t_data = %{ t_data | cancel: packet },
 						t_data = start_timer(:timer_D, t_data),
-						if t_data[:session_pid] != nil do: Process.send(t_data[:session_pid], { :cancel, self(), :ok } )
+						if t_data[:session_pid] != nil do: Process.send(t_data[:session_pid], { :uas_transaction_cancel, self(), :ok } )
 						server_transaction_state_cancelling( initial_req, t_data )
 				end
 			
@@ -706,7 +706,7 @@ defmodule SIP.Transaction do
 					packet.method == :ACK ->
 						if packet.initial_req in [ :INVITE, :UPDATE ] do
 							if t_data[:session_pid] != nil do
-								Process.send( t_data[:session_pid], { :transaction_close, :confirmed } )
+								Process.send( t_data[:session_pid], { :uas_transaction_close, self(), :confirmed } )
 							end
 							server_transaction_end( initial_req, t_data )
 						end
@@ -722,7 +722,7 @@ defmodule SIP.Transaction do
 	
 	defp server_transaction_end( initial_req, t_data )
 		Process.send(t_data[:transport_pid], { :uas_transaction_remove, compute_transaction_key(initial_req, "uac"), self() } )
-		if t_data[:session_pid] != nil do: Process.send(t_data[:session_pid], { :transaction_close, self(), :ok } )
+		if t_data[:session_pid] != nil do: Process.send(t_data[:session_pid], { :uas_transaction_close, self(), :ok } )
 	end
 end	
 			

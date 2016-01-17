@@ -152,12 +152,14 @@ defmodule SIP.Dialog do
 		d_data
 	end
 	
+	internal_challenge_d(req_id, code, reason)
+	
 	defp internal_reply_d(d_data, t_id, code, reason) do
 		if req_id in d_data[:trans_in] do: SIP.Transaction.reply_t(t_id, code, reason)
 	end
 	# ---------------- INVITE DIALOG FSM ---------------------------
 
-	defp invite_dialog_init( d_data, transport_pid )
+	defp invite_dialog_init_uas( d_data, transport_pid )
 		next_state = :init_state
 	
 		if d_data.packet != nil do
@@ -183,27 +185,36 @@ defmodule SIP.Dialog do
 				internal_reply_d(req_id, code, reason),
 				next_state = :early_state
 
-			{ :auth, req_id } ->
+			# App requires authentication
+			{ :auth, req_id, } ->
 				internal_challenge_d(req_id, code, reason),
-				next_state = :auth_state
+				next_state = :auth_uas_state
 
 			{ :reply, req_id, code, reason } when code in 200..699 ->
 				SIP.Transaction.reply_t(req_id, code, reason),
 				next_state = :terminating_state
-				
+			
+			# App send a reply code
 			{ :reply, req_id, code, reason, body } when code in 200..299 ->
 				SIP.Transaction.reply_t(req_id, code, reason, body),
 				next_state = :terminating_state
+			
+			# Intial transaction is cancelled
+			{ :transaction_cancel, t_id, reason } -> 
+				Process.send( data_d[:app_id], { :dialog_cancel, t_id } ),
+				next_state = :cancelling_state
+				
+			{ :transaction_close, self(), :confirmed } ->
 		end
 		
 		if next_state != :init_state do
 			invite_dialog_state( next_state, d_data, :init_state )
 		else
-			invite_dialog_init( d_data, transport_pid )
+			invite_dialog_init_uas( d_data, transport_pid )
 		end
 	end
 	
-	defp invite_dialog_state( :auth_state, d_data, prev_st )
+	defp invite_dialog_state( :auth_uas_state, d_data, prev_st )
 	end
 	
 	defp invite_dialog_state( :cancelling_state, d_data, prev_st )
