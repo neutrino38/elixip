@@ -72,11 +72,11 @@ defmodule SIP.Packet do
 				182 -> reason = "Queued"
 				183 -> reason = "Session in Progress"
 				
-				200 -> "OK"
+				200 -> reason = "OK"
 				202 -> reason = "Accepted"
 				
-				300 -> "Multiple choices"
-				
+				300 -> reason = "Multiple choices"
+				301 -> reason = "Moved permanently"
 			end
 		end
 		if code >= 100 && code < 700 do
