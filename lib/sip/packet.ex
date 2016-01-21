@@ -22,6 +22,7 @@ defmodule SIP.Packet do
 	@doc """
 	Parse a SIP message as received by the transport layer.
 	"""
+	@spec parse( String.t, pid ) :: t
 	def parse( data, transport ) when is_binary(data) do
 		[ fline, rest ] = String.split( data, << 13, 10 >>, parts: 2)
 		p1 = parseFirstLine( String.split( fline ) )
@@ -77,6 +78,11 @@ defmodule SIP.Packet do
 				
 				300 -> reason = "Multiple choices"
 				301 -> reason = "Moved permanently"
+				302 -> reason = "Moved temporarily"
+				305 -> reason = "Use Proxy"
+				
+				400 -> reason = "Bad Request"
+				401 -> reason = "Unauthorized"
 			end
 		end
 		if code >= 100 && code < 700 do
@@ -87,7 +93,18 @@ defmodule SIP.Packet do
 			raise "Invalid reply code"
 		end
 	end
+
+	@doc """
+	Create a 401 or 407 replay with challenge info
+	"""		
+	def challenge(packet, code, realm, algorithm)
 	
+	end
+	
+	@doc """
+	Get one value from the header. And remove it from the packet header
+	Returns the modified SIP packet
+	"""		
 	def getHeaderValue(packet, hKey) do
 		if packet.headers != nil do
 			vallist = Dict.get(packet.headers, headerKey(hKey) )
@@ -100,6 +117,11 @@ defmodule SIP.Packet do
 		end
 	end
 	
+	
+	@doc """
+	Get one value from the header. And remove it from the packet header
+	nil, if the packet does not contain the header. Returns the modified SIP packet
+	"""	
 	def popHeaderValue(packet, hKey)
 		value = getHeaderValue(packet, hKey)
 		cond do
@@ -109,6 +131,9 @@ defmodule SIP.Packet do
 		end
 	end
 	
+	@doc """
+	Get the numerical sequence number of the SIP packet
+	"""	
 	def getCSeqNum(packet)
 		val = getHeaderValue(packet, :CSeq)
 		if val != nil do
@@ -119,6 +144,9 @@ defmodule SIP.Packet do
 		end
 	end
 	
+	@doc """
+	Get all the packet's parsed header dictionary
+	"""	
 	defp getHeaderDict(packet)
 		if packet.headers == nil do
 			hl = HashDict.new
@@ -126,7 +154,6 @@ defmodule SIP.Packet do
 			hl = packet.headers
 		end
 	end
-	
 	
 	
 	@doc """
@@ -178,6 +205,12 @@ defmodule SIP.Packet do
 		%SIP.Packet{ packet | headers: Dict.put(hl, headerKey(hKey), value ) }
 	end
 	
+	@doc """
+	Utility function to add a from-tag, a to-tag or generate a Call-ID
+	Do not overwrite existing tag or call-iD.
+	
+	Returns the modified SIP packet
+	"""
 	@spec generateTag( t, String.t | Atom.t ) :: t
 	def generateTag( packet, header )
 		case header do
@@ -222,7 +255,25 @@ defmodule SIP.Packet do
 	end
 	
 	
+	@doc """
+	Obtain a map of SIP 401 or 407 challenge
+	"""
+	def getChallengeInfo(packet) do
+		case packet.response_code do
+			401 ->
+			
+			407 ->
 	
+			_ -> raise "Only 401 and 407 responses contains authentication challenge info"
+		end
+	end
+	
+	def checkCredentials(packet, challenge, credentials) do
+	end
+	
+	def getAuthUserAndDomain(packet) do
+	end
+		
 	#---------------- private functions (implementation) ---------------------
 
 	defp parseMethod( method ) do

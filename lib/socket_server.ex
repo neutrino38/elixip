@@ -149,13 +149,13 @@ defmodule SipServer do
 			trans_id != nil ->  Process.send( trans_id, { :sip_in, psip } )
 			
 			# If packet is in an active dialog
-			dialog_id != nil ->  Process.send( dialog_id, { :sip_in, psip } )
+			dialog_id != nil ->  Process.send( dialog_id, { :sip_in, psip, self() } )
 
 			# If packet is an ACK and does not match any rule or session, ignore it
 			packet.method == :ACK -> nil
 	
 			# If the packet matches a routing rule, send it to the proper application
-			rule != nil -> Process.send( rule, { :sip_in, psip } )
+			rule != nil -> Process.send( rule, { :sip_in, psip, self() } )
 			
 			# If the packet does not match any routing rule, reply statelessly
 			if packet.is_request ->

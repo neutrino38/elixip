@@ -143,7 +143,12 @@ defmodule SIP.Dialog do
 				SIP.Transaction.reply_t(t_id, 500, "Invalid CSeq"),
 				raise "CSeq is already expired"
 		
-			true -> %{ d_data | :trans_in => [ d_data[:trans_in] | t_id ], 
+			# If too many requests are being processed
+			length(d_data.trans_in) > 3 ->
+				SIP.Transaction.reply_t(t_id, 491, nil),
+				d_data
+		
+			true -> %{ d_data | :trans_in => [ d_data.trans_in | t_id ], 
 					   :cseq_in => newcseq )
 		end
 	end
@@ -162,7 +167,6 @@ defmodule SIP.Dialog do
 	defp internal_challenge_d(req_id, code) where code in [ 401, 407 ] do
 		m = SIP.Transaction.reply_get_data_t(t_id, :method)
 		SIP.Transaction.reply_t(t_id, code, nil)
-
 	end
 	
 	defp internal_reply_d(d_data, t_id, code, reason) do
@@ -188,17 +192,22 @@ defmodule SIP.Dialog do
 		Process.send( d_data[:app_id], { :dialog_add, d_data[:dialog_id], self() } )
 		
 		receive do
-			{ :trying,   req_id, code, reason } when code in 100..199 -> 
+			{ :trying, req_id, code, reason } when code in 100..199 -> 
 				internal_reply_d(req_id, code, reason),
 				next_state = :init_state
 	
 			{ :ringing, req_id } ->
-				internal_reply_d(req_id, code, reason),
+				internal_reply_d(req_id, 180, "Ringing"),
 				next_state = :early_state
 
+			{ :progress, req_id, body } ->
+				internal_reply_d(req_id, 180, "Session Progress", body),
+				next_state = :early_state
+
+				
 			# App requires authentication
 			{ :auth, req_id, } ->
-				internal_challenge_d(req_id),
+				data_d = internal_challenge_d(data_d, req_id),
 				next_state = :auth_uas_state
 
 			{ :reply, req_id, code, reason } when code in 200..699 ->
@@ -213,10 +222,13 @@ defmodule SIP.Dialog do
 			# Intial transaction is cancelled
 			{ :transaction_cancel, t_id, reason } -> 
 				Process.send( data_d[:app_id], { :dialog_cancel, t_id } ),
+				data_d = del_trans( :uas, d_data, t_id ),
 				next_state = :cancelling_state
 				
-			{ :transaction_close, self(), :confirmed } ->
-			
+			{ :transaction_close, t_id, reason } ->
+				Process.send( data_d[:app_id], { :dialog_rejected, t_id } ),
+				data_d = del_trans( :uas, d_data, t_id ),
+				next_state = :terminated_state
 		end
 		
 		if next_state != :init_state do
@@ -227,6 +239,10 @@ defmodule SIP.Dialog do
 	end
 	
 	defp invite_dialog_state( :auth_uas_state, d_data, prev_st )
+	
+		receive do
+			{ :sip_in, p, tr_id } -> 
+		end
 	end
 	
 	defp invite_dialog_state( :cancelling_state, d_data, prev_st )
