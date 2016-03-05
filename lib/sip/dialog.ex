@@ -32,7 +32,11 @@ defmodule SIP.Dialog do
 	"""
 	def create_incoming_d( packet, app_pid, transport_pid, options )
 		d_data = init_d_data( app_id, packet, option )
-		Process.spawn( fn -> invite_dialog_init( d_data ) end )
+		if packet.method == :INVITE do	
+			Process.spawn( fn -> invite_dialog_init( :uas, d_data, transport_pid ) end )
+		else
+			Process.spawn( fn -> other_dialog_init( :uas, d_data, transport_pid ) end )
+		end
 	end
 	
 	@doc """
@@ -41,12 +45,26 @@ defmodule SIP.Dialog do
 	- an outgoing call
 	"""
 	def create_outgoing_call( ruri, from, to, body, app_pid, options ) do
+		d_data = init_d_data( app_id, option )
+		Process.spawn( fn -> invite_dialog_init( :uac, d_data, ruri, from, to, body ) end )
 	end
 	
+	@doc """
+	Register as an UAC
+	"""
 	def create_outgoing_registration( ruri, from, to, app_pid, options ) do
+		d_data = init_d_data( app_id, packet, option )
+		Process.spawn( fn -> other_dialog_init( :uac, :REGISTER, d_data ) end )
 	end
 
-	def create_outgoing_presence( method, ruri, from, to, app_pid, options ) do
+	@doc """
+	Register as an UAC
+	"""
+	def create_outgoing_presence( method, ruri, from, to, app_pid, options )
+		if method in [ :PUBLISH, :SUBSCRIBE ] do
+			Process.spawn( fn -> other_dialog_init( :uac, :REGISTER, d_data ) end )
+		else
+			raise "Cannot "
 	end
 	
 	def send_ood_message( method, ruri, from, to, app_pid, options ) do
@@ -121,7 +139,7 @@ defmodule SIP.Dialog do
 		   :peer_ip => initial_req.src_ip, :peer_port => initial_req.src_port }
 	end
 	
-	defp add_trans( :uas, d_data, t_id, packet ) do
+	defp add_trans( :uac, d_data, t_id, packet ) do
 	
 		newcseq = packet.getCSeqNum()
 		if d_data[:dialog_id] = nil do
@@ -153,15 +171,25 @@ defmodule SIP.Dialog do
 		end
 	end
 	
-	defp add_trans( :uac, d_data,  ) do
+	defp add_trans( :uac, d_data, t_id, packet ) do
+		newcseq = packet.getCSeqNum()
+		if d_data[:dialog_id] = nil do
+			d_data = %{ d_data | :dialog_id => packet.getDialogId() }
+		else
+			if packet.getDialogId() != d_data[:dialog_id] do
+				raise "SIP packet is not associated with this dialog"
+			end
+		end
+		
 	end
 	
 	defp del_trans( :uas, d_data, t_id )
-		d_data
+		trans_in = List.remove()
+		d_data = 
 	end
 
 	defp del_trans( :uac, d_data, t_id )
-		d_data
+		
 	end
 	
 	defp internal_challenge_d(req_id, code) where code in [ 401, 407 ] do
@@ -172,17 +200,17 @@ defmodule SIP.Dialog do
 	defp internal_reply_d(d_data, t_id, code, reason) do
 		if req_id in d_data[:trans_in] do: SIP.Transaction.reply_t(t_id, code, reason)
 	end
-	# ---------------- INVITE DIALOG FSM ---------------------------
 
-	defp invite_dialog_init_uas( d_data, transport_pid )
+	# ---------------- INVITE DIALOG FSM ---------------------------
+	defp invite_dialog_init( :uas, d_data, transport_pid )
 		next_state = :init_state
 	
 		if d_data.packet != nil do
 			# Icomong packet used to create dialog -> create UAS transaction
-			t_pid = SIP.Transaction.start_incoming_t( d_data[:initial_req], sess_id, transport_pid, self() )
+			t_pid = SIP.Transaction.start_incoming_t( d_data[:initial_req], transport_pid, self() )
 			d_data = add_trans( :uas, d_data, t_pid )
 		else
-			
+			raise "Cannot start a dialog without packet"
 		end
 		
 		# Register the dialog in the transport layer and in the app
@@ -220,6 +248,44 @@ defmodule SIP.Dialog do
 				next_state = :terminating_state
 			
 			# Intial transaction is cancelled
+			{ :uas_transaction_cancel, t_id, reason } -> 
+				Process.send( data_d[:app_id], { :dialog_cancel, t_id } ),
+				data_d = del_trans( :uas, d_data, t_id ),
+				next_state = :cancelling_state
+				
+			{ :uas_transaction_close, t_id, reason } ->
+				Process.send( data_d[:app_id], { :dialog_rejected, t_id } ),
+				data_d = del_trans( :uas, d_data, t_id ),
+				next_state = :terminated_state
+		end
+		
+		if next_state != :init_state do
+			invite_dialog_state( next_state, d_data, :init_state )
+		else
+			invite_dialog_init( :uas, d_data, transport_pid )
+		end
+	end
+
+	defp invite_dialog_init( :uac, d_data, ruri, from, to, body )
+		next_state = :init_state
+		transport_pid = select_transport( d_data, ruri )
+		{ t_pid, p } = SIP.Transaction.start_outgoing_t( :INVITE, 1, ruri, from, to, nil, d_data.ua, body, transport_pid, self() )
+			
+		# Register the dialog in the transport layer and in the app
+		Process.send( transport_pid, { :dialog_add, d_data[:dialog_id], self() } )
+		
+		# Notify the application about dialog creation
+		Process.send( d_data.app_id, { :dialog_add, d_data[:dialog_id], self() } )
+		
+		receive do
+			{ :uac_transaction_progress, t_id, packet } ->
+				if  case packet.response_code do
+					183 -> Process.send( d_data.app_id, { :dialog_early, d_data.dialog_id, self(), packet } )
+					180 -> Process.send( d_data.app_id, { :dialog_early, d_data.dialog_id, self(), packet } )
+				end,
+				next_state = :early_state
+				
+			# Intial transaction is cancelled
 			{ :transaction_cancel, t_id, reason } -> 
 				Process.send( data_d[:app_id], { :dialog_cancel, t_id } ),
 				data_d = del_trans( :uas, d_data, t_id ),
@@ -241,7 +307,7 @@ defmodule SIP.Dialog do
 	defp invite_dialog_state( :auth_uas_state, d_data, prev_st )
 	
 		receive do
-			{ :sip_in, p, tr_id } -> 
+			{ :sip_in, p, tr_id } when p.method == ->  
 		end
 	end
 	
@@ -261,7 +327,9 @@ defmodule SIP.Dialog do
 	defp invite_dialog_state( :terminated_state, d_data, prev_st )
 	end
 	
-	defp other_dialog_init( d_data )
+	# ---------------- NON INVITE DIALOG FSM ---------------------------
+	defp other_dialog_init( :uac, d_data )
+		
 	end
 	
 	defp other_dialog_state( :early_state, d_data, prev_st )
