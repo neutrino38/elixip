@@ -23,7 +23,8 @@ defmodule SIP.Dialog do
 		
 		- MESSAGE and INFO create dialog that only last during the transaction
 	"""
-
+	
+	
 	@doc """
 	Create a dialog from an incoming SIP request. Use this method when an application
 	receives an incoming SIP packet from network and manage this request within a dialog
@@ -45,8 +46,12 @@ defmodule SIP.Dialog do
 	- an outgoing call
 	"""
 	def create_outgoing_call( ruri, from, to, body, app_pid, options ) do
-		d_data = init_d_data( app_id, option )
-		Process.spawn( fn -> invite_dialog_init( :uac, d_data, ruri, from, to, body ) end )
+		# to do extract UA from options
+		ua = option
+		packet = SIP.Packet.create( :INVITE, 1, ruri, from, to, nil, ua, body )
+		init_d_data( app_id, packet, option )
+		
+		Process.spawn( fn -> invite_dialog_init( :uac, d_data, nil ) end )
 	end
 	
 	@doc """
@@ -183,12 +188,15 @@ defmodule SIP.Dialog do
 		
 	end
 	
+	# Remove a transation from dialog transaction list
 	defp del_trans( :uas, d_data, t_id )
-		trans_in = List.remove()
-		d_data = 
+		trans_in = List.remove(d_data.trans_in, t_id)
+		d_data = %{ d_data | :trans_in => trans_in }
 	end
 
 	defp del_trans( :uac, d_data, t_id )
+		trans_out = List.remove(d_data.trans_out, t_id)
+		d_data = %{ d_data | :trans_out => trans_out }
 		
 	end
 	
@@ -266,10 +274,14 @@ defmodule SIP.Dialog do
 		end
 	end
 
-	defp invite_dialog_init( :uac, d_data, ruri, from, to, body )
+	defp invite_dialog_init( :uac, d_data, transport_pid )
+		
 		next_state = :init_state
-		transport_pid = select_transport( d_data, ruri )
-		{ t_pid, p } = SIP.Transaction.start_outgoing_t( :INVITE, 1, ruri, from, to, nil, d_data.ua, body, transport_pid, self() )
+		if transport_pid == nil do
+			transport_pid = select_transport( d_data, ruri )
+		end
+		
+		{ t_pid, p } = SIP.Transaction.start_outgoing_t( d_data.packet, transport_pid, self() )
 			
 		# Register the dialog in the transport layer and in the app
 		Process.send( transport_pid, { :dialog_add, d_data[:dialog_id], self() } )
@@ -284,15 +296,34 @@ defmodule SIP.Dialog do
 					180 -> Process.send( d_data.app_id, { :dialog_early, d_data.dialog_id, self(), packet } )
 				end,
 				next_state = :early_state
-				
-			# Intial transaction is cancelled
-			{ :transaction_cancel, t_id, reason } -> 
-				Process.send( data_d[:app_id], { :dialog_cancel, t_id } ),
+
+			{ :uac_transaction_success, t_id, packet } -> 
+				Process.send( d_data.app_id, { :dialog_accepted, d_data.dialog_id, self(), packet } ),
+				next_state = :accepted_state
+			
+			{ :uac_transaction_redirect, t_id, initial_req, resp } ->
 				data_d = del_trans( :uas, d_data, t_id ),
-				next_state = :cancelling_state
-				
-			{ :transaction_close, t_id, reason } ->
-				Process.send( data_d[:app_id], { :dialog_rejected, t_id } ),
+				if d_data.redirect_count < @max_redirect do
+					d_data = %{ d_data | redirect_count: d_data.redirect_count + 1 }
+					if d_data.transfer_auto_accept do
+						d_data = execute_3xx_redirect( d_data, initial_req )
+						Process.send( d_data.app_id, { :dialog_redirected, d_data.dialog_id, self() } )
+						next_state = :init_state 
+					else
+						Process.send( d_data.app_id, { :dialog_redirect_pending, d_data.dialog_id, self() } )
+						next_state = :wait_app_accept_redirect
+					end
+				else
+					# Too many redirections
+					Process.send( data_d[:app_id], { :dialog_rejected, t_id, :too_many_redirections } )
+					next_state = :terminated_state
+				end
+			
+			{ :uac_transaction_auth_required, self(), packet }
+			
+			# Initial dialog failed. Transport error ?
+			{ :uac_transaction_close, t_id, reason } ->
+				Process.send( data_d[:app_id], { :dialog_rejected, t_id, reason } ),
 				data_d = del_trans( :uas, d_data, t_id ),
 				next_state = :terminated_state
 		end
@@ -300,7 +331,7 @@ defmodule SIP.Dialog do
 		if next_state != :init_state do
 			invite_dialog_state( next_state, d_data, :init_state )
 		else
-			invite_dialog_init_uas( d_data, transport_pid )
+			invite_dialog_init( :uac, d_data, transport_pid )
 		end
 	end
 	
