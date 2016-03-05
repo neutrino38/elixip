@@ -125,8 +125,8 @@ defmodule SIP.Packet do
 		- tuple { mime-type, body }
 		- a list of such tuples
 	"""
-	@spec reply( atom, int, String.t, String.t, nil | tuple, String.t, tuple | list | nil) :: t
-	create(method, cseq, ruri, from, to, session_id, ua, body ) when is_atom(method) and is_integer(cseq) do
+	@spec create( atom, int, String.t, String.t, nil | tuple, String.t, tuple | list | nil) :: t
+	def create(method, cseq, ruri, from, to, session_id, ua, body ) when is_atom(method) and is_integer(cseq) do
 		p = %SIP.Packet{ method: method, ruri: ruri, is_request: true }
 		
 		cond do
