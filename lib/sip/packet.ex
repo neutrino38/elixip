@@ -113,6 +113,18 @@ defmodule SIP.Packet do
 		end
 	end
 	
+	
+	defp checkMethod( method ) do
+		if method in [ :INVITE, :UPDATE, :ACK:, :PRACK, :MESSAGE, :INFO,
+					   :SUBSCRIBE, :PUBLISH, :NOTIFY, :MESSAGE,
+					   :OPTIONS, :REGISTER ] do
+			method
+		else
+			raise "Invalid SIP method specified"
+		end
+	end
+	
+	
 	@doc """
 	Create a SIP packet from a set of parameters.
 	
@@ -126,8 +138,8 @@ defmodule SIP.Packet do
 		- a list of such tuples
 	"""
 	@spec create( atom, int, String.t, String.t, nil | tuple, String.t, tuple | list | nil) :: t
-	def create(method, cseq, ruri, from, to, session_id, ua, body ) when is_atom(method) and is_integer(cseq) do
-		p = %SIP.Packet{ method: method, ruri: ruri, is_request: true }
+	def create(method, cseq, ruri, from, to, session_id, ua, body ) when is_atom(method) and is_integer(cseq) do	
+		p = %SIP.Packet{ method: checkMethod(method), ruri: ruri, is_request: true }
 		
 		cond do
 			is_binary(from) -> from = SIP.URI.parse(from)
