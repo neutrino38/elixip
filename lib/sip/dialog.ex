@@ -302,7 +302,7 @@ defmodule SIP.Dialog do
 				next_state = :accepted_state
 			
 			{ :uac_transaction_redirect, t_id, initial_req, resp } ->
-				data_d = del_trans( :uas, d_data, t_id ),
+				data_d = del_trans( :uac, d_data, t_id ),
 				if d_data.redirect_count < @max_redirect do
 					d_data = %{ d_data | redirect_count: d_data.redirect_count + 1 }
 					if d_data.transfer_auto_accept do
@@ -319,8 +319,15 @@ defmodule SIP.Dialog do
 					next_state = :terminated_state
 				end
 			
-			{ :uac_transaction_auth_required, self(), packet }
-			
+			{ :uac_transaction_auth_required, self(), initial_req, resp } ->
+				data_d = del_trans( :uac, d_data, t_id ),
+				if d_data.auth_user != nil do
+					d_data = answer_challenge( d_data, initial_req, resp.getChallengeInfo() )
+					next_state = :uac_auth_state
+				else
+					# No credential for this dialog. End here !
+					next_state = :terminated_state
+				end
 			# Initial dialog failed. Transport error ?
 			{ :uac_transaction_close, t_id, reason } ->
 				Process.send( data_d[:app_id], { :dialog_rejected, t_id, reason } ),
