@@ -5,6 +5,9 @@ defmodule SIP.Packet do
 	by a SIP transport
 	"""
 	
+	@max_body_len 			10000
+	@max_nb_body_parts 		5
+	
 	@doc """
 	SIP message structure that is filled when parsing a SIP message
 	
@@ -34,6 +37,7 @@ defmodule SIP.Packet do
 	@doc """
 	Serialize a SIP packet into a binary ready to be sent
 	"""
+	@spec parse( t ) :: String.t
 	def serialize( packet ) do
 		header_order = [ :Via, "Record-Route", :Route, :From, :To ]
 		
@@ -56,6 +60,7 @@ defmodule SIP.Packet do
 	Serialize a SIP packet into a binary and store serialized
 	packet data inside packet structure
 	"""
+	@spec serialize2( t ) :: t
 	def serialize2( packet ) do
 		%SIP.Packet{ packet | packet_bytes: packet.serialize() }
 	end
@@ -63,8 +68,9 @@ defmodule SIP.Packet do
 	@doc """
 	Create a reply statelessly
 	"""
+	@spec reply( t, int, String.t, String.t ) :: t
 	def reply(packet, code, reason, ua) when is_integer(code) do
-		# Todo if reason is nil, use default reason
+				
 		if reason == nil do
 			case code do
 				100 -> reason = "Trying"
@@ -86,7 +92,7 @@ defmodule SIP.Packet do
 			end
 		end
 		if code >= 100 && code < 700 do
-			p = %SIP.Packet{ packet | is_request: false, response_code: code, reason: reason, packet_bytes: nil }
+			p = %SIP.Packet{ packet | is_request: false, response_code: code, reason: reason, packet_bytes: nil, body: nil }
 			p = setHeaderValue(p, "User-Agent", ua)
 			
 		else
@@ -95,15 +101,70 @@ defmodule SIP.Packet do
 	end
 
 	@doc """
-	Create a 401 or 407 replay with challenge info
-	"""		
-	def challenge(packet, code, realm, algorithm)
-	
+	Create a 401 or 407 reply with challenge info
+	"""
+	@spec reply( t, int, String.t, String.t, String.t ) :: t
+	def challenge(packet, code, realm, algorithm, ua) when is_integer(code)
+		if code == 401 or code == 407 do
+			p = packet.reply(code, nil, ua)
+			# todo create a nonce and set header
+		else
+			raise "response code must be 401 or 407 to create a challenge"
+		end
 	end
 	
 	@doc """
-	Get one value from the header. And remove it from the packet header
-	Returns the modified SIP packet
+	Create a SIP packet from a set of parameters.
+	
+	session_id can be:
+		- nil, then a from tag and call-ID are generated.
+		- tuple { fromtag, callid, totag }
+		
+	body can be:
+		- nil (packet has no attached body)
+		- tuple { mime-type, body }
+		- a list of such tuples
+	"""
+	@spec reply( atom, int, String.t, String.t, nil | tuple, String.t, tuple | list | nil) :: t
+	create(method, cseq, ruri, from, to, session_id, ua, body ) when is_atom(method) and is_integer(cseq) do
+		p = %SIP.Packet{ method: method, ruri: ruri, is_request: true }
+		
+		cond do
+			is_binary(from) -> from = SIP.URI.parse(from)
+			from.__struct__ == "SIP.URI" -> from
+			true -> raise "Invalid from"
+		end
+		
+		cond do
+			is_binary(to) -> to = SIP.URI.parse(to)
+			to.__struct__ == "SIP.URI" -> to
+			to == nil -> to = ruri
+			true -> raise "Invalid to"
+		end
+			
+		case session_id do
+			{ fromtag, callid, totag } -> 
+				p = p.setHeaderValue( :From, 	from.setParam("tag", fromtag )),
+				p = p.setHeaderValue( :To, 		to.setParam("tag", totag )),
+				p = p.setHeaderValue( "Call-ID", callid )
+								
+			
+			# No session ID specifed ? Create one !
+			nil ->
+				p = p.setHeaderValue(:From, from) |> 
+					SIP.Packet.setHeaderValue(:To, to) |> 
+					SIP.Packet.generateTag(:From) |> 
+					SIP.Packet.generateTag("Call-ID")
+					
+			_ -> raise "Invalid session ID"
+		end
+		
+		# Add CSeq and generage branch tag.
+		p = p |> setHeaderValue(:CSeq, "#{cseq} #{method}") |> generateTag(:Via) |> setBody(body)
+	end
+	
+	@doc """
+	Get one header value
 	"""		
 	def getHeaderValue(packet, hKey) do
 		if packet.headers != nil do
@@ -205,38 +266,67 @@ defmodule SIP.Packet do
 		%SIP.Packet{ packet | headers: Dict.put(hl, headerKey(hKey), value ) }
 	end
 	
+	defp checkMimeType( mimetype ) when is_binary (mimetype) do
+		if mimetype in [ "application/sdp", "text/plain", "text/xml" ] do
+			mimetype
+		else
+			raise "Invalid mimetype #{mimetype}"
+		end	
+	end
+	
+	defp checkBodyPart( { mimetype, payload } )
+		if byte_size( payload ) <= @max_body_len do
+			{ checkMimeType(mimetype), payload }
+		else
+			raise "#{mimetype} body part is too big"
+		end
+	end
+	
+	@doc """
+	Set or replace the packet body
+	"""
+	def setBody(packet, nil) do
+		packet
+	end
+	
+	def setBody(packet, { mimetype, payload } ) do
+		%SIP.Packet{ packet | body: { checkBodyPart( { mimetype, payload } ) }
+	end
+	
+	def setBody(packet, body) when is_list(body) do
+		if size(body) <= @max_nb_body_parts do
+			body2 = for bpart <- body, do: checkBodyPart(bpart)
+			%SIP.Packet{ packet | body: body2 }
+		else
+			raise "Number of body parts exceeds the limit"
+		end
+	end
+	
 	@doc """
 	Utility function to add a from-tag, a to-tag or generate a Call-ID
-	Do not overwrite existing tag or call-iD.
-	
-	Returns the modified SIP packet
+	Do not overwrite existing tag or call-iD. Returns the modified SIP packet
 	"""
 	@spec generateTag( t, String.t | Atom.t ) :: t
-	def generateTag( packet, header )
-		case header do
-			:From -> from = packet.getHeaderValue(header),
-					if from != nil do
-						from.setParam( "tag", genTag() )
-						packet = packet.setHeaderValue(header, from)
-					end 
-					
-			:To -> 
-				to = packet.getHeaderValue(header),
-				if to != nil do
-					to.setParam( "tag", genTag() )
-					packet = packet.setHeaderValue(header, to)
-				end 
-			
-			"Call-ID" -> 
-				cid = packet.getHeaderValue(header),
-				if cid == nil do
-					packet = packet.setHeaderValue(header, genHash() )
-				end
-				
-			:Via ->
-				if packet.branch == nil do
-					packet = %SIP.Packet{ packet | branch: genTag() }
-				end
+	def generateTag( packet, header ) when header in [ :From, :To ] do
+		headerv = packet.getHeaderValue(header)
+		if headerv != nil do
+			headerv.setParam( "tag", genTag() )
+			packet = packet.setHeaderValue(header, headerv)
+		end
+		packet
+	end
+		
+	def generateTag( packet, "Call-ID" ) do
+		cid = packet.getHeaderValue(header)
+		if cid == nil do
+			packet = packet.setHeaderValue(header, genHash() )
+		end
+		packet
+	end
+	
+	def generateTag( packet, "Call-ID" ) do
+		if packet.branch == nil do
+			packet = %SIP.Packet{ packet | branch: genTag() }
 		end
 		packet
 	end
@@ -268,9 +358,17 @@ defmodule SIP.Packet do
 		end
 	end
 	
+	@doc """
+	Check if this packet answers correctly a challenge and comply
+	with rhe credentials
+	"""
 	def checkCredentials(packet, challenge, credentials) do
 	end
-	
+
+	@doc """
+	Check if this packet answers correctly a challenge and comply
+	with rhe credentials
+	"""	
 	def getAuthUserAndDomain(packet) do
 	end
 		
