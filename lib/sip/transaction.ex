@@ -35,52 +35,30 @@ defmodule SIP.Transaction do
 							 { from_tag, call_id, to_tag }
 		
 		"""
-		def start_outgoing_t( method, cseq, ruri, from, to, session_id, transport_pid, session_pid ) when is_atom(method) and is_integer(cseq) do
-			p = %SIP.Packet{ method: method, ruri: ruri, is_request: true }
+		def start_outgoing_t( packet, transport_pid, session_pid )
+							  when is_atom(method) and is_integer(cseq) do
 			
-			cond do
-				is_binary(from) -> from = SIP.URI.parse(from)
-				from.__struct__ == "SIP.URI" -> from
-				true -> raise "Invalid from"
+			if 	packet.is_request do
+				# Start the transaction. FSM will start sending the message to transmission layer
+				t_id = Process.spawn(fn -> client_transition_init(packet, init_t_data(transport_pid, session_pid) )  end)
+				{ t_id, p }
+			else
+				raise "Packet must me a request to open a transaction"
 			end
-			
-			cond do
-				is_binary(to) -> to = SIP.URI.parse(to)
-				to.__struct__ == "SIP.URI" -> to
-				to == nil -> to = ruri
-				true -> raise "Invalid to"
-			end
-				
-			
-			case session_id do
-				{ fromtag, callid, totag } -> 
-					p = p.setHeaderValue( :From, 	from.setParam("tag", fromtag )),
-					p = p.setHeaderValue( :To, 		to.setParam("tag", totag )),
-					p = p.setHeaderValue( "Call-ID", callid )
-									
-				
-				# No session ID specifed ? Create one !
-				nil ->
-					p = p.setHeaderValue(:From, from) |> 
-						SIP.Packet.setHeaderValue(:To, to) |> 
-						SIP.Packet.generateTag(:From) |> 
-						SIP.Packet.generateTag("Call-ID")
-			end
-			
-			
-			# Add CSeq and generage branch tag.
-			p = p |> SIP.Packet.setHeaderValue(:CSeq, "#{cseq} #{method}") |> SIP.Packet.generateTag(:Via)
-			
-			# Other headers (contact, via, route, will be added by transmission layer)
-			
-			# Start the transaction. FSM will start sending the message to transmission layer
-			t_id = Process.spawn(fn -> client_transaction_state_init(p, init_t_data(transport_pid, session_pid) )  end)
+		end
+	
+		def start_outgoing_t( method, cseq, ruri, from, to, session_id, ua, 
+						      body, transport_pid, session_pid )
+							  when is_atom(method) and is_integer(cseq) do
+							  
+			p = SIP.Packet.create(method, cseq, ruri, from, to, session_id, ua, body)
+			start_outgoing_t( packet, transport_pid, session_pid )
 		end
 		
 		@doc """
 		Given a packet, start an incoming (UAS) transaction.
 		"""
-		def start_incoming_t( packet, session_id, transport_pid, session_pid, ua ) do
+		def start_incoming_t( packet, transport_pid, session_pid, ua ) do
 			if packet.is_request do
 			
 				if packet.method in [ :ACK, :PRACK, :CANCEL ] do
