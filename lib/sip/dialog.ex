@@ -110,7 +110,7 @@ defmodule SIP.Dialog do
 			error_code = :refused -> evt = :reply, error_code = 403
 			error_code = :accepted -> evt = :reply, error_code = 200
 			
-			true -> raise "unsupported answer"
+			true -> raise "unsupported answer #{error_code}"
 		end
 		
 		Process.send( d_id, { evt, t_id, code, reason, headers, body } )
@@ -120,17 +120,25 @@ defmodule SIP.Dialog do
 		reply_d( d_id, t_id, error_code, reason, nil, nil )
 	end	
 	
-	def reply_d( d_id, t_id, error_code, reason, headers ) when error_code in 100..699 do
-		reply_d( d_id, t_id, error_code, reason, headers, nil )
+	def reply_d( d_id, t_id, error_code, reason, body ) when error_code in 100..699 do
+		reply_d( d_id, t_id, error_code, reason, nil, body )
+	end
+
+	def reply_d( d_id, t_id, answer, body ) when is_atom(answer) do
+		reply_d( d_id, t_id, answer, reason, nil, body )
 	end
 	
+	def reply_d( d_id, t_id, answer ) when is_atom(answer) or error_code in 100..699 do
+		reply_d( d_id, t_id, answer, reason, nil, nil )
+	end
 
-	def reply_d( d_id, t_id, answer ) when is_atom(answer) do
-		case answer do
-			:trying -> error_code = 100
-			:ringing -> error_code = 101
-			:busy -> error_code = 486
-			:refused -> error_code = 403
+	def reply_d( d_id, t_id, answer, body ) when is_atom(answer) do
+		reply_d( d_id, nil, answer, reason, nil, body )
+	end
+	
+	def reply_d( d_id, answer ) when is_atom(answer) or error_code in 100..699 do
+		reply_d( d_id, nil, answer, reason, nil, nil )
+	end
 	
 	
 	@doc """
