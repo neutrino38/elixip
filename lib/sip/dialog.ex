@@ -78,19 +78,61 @@ defmodule SIP.Dialog do
 	@doc """
 	Reply to an incoming request. Use this function to reply to any incoming request 
 	
-	dialog_id: 	pid of dialog process
-	req_id:    	pid of request transaction
+	d_id: 	pid of dialog process
+	t_id:    	pid of request transaction
 	error_code: SIP error code of the responses
 	reason:		SIP reason. nil to use default reason
 	headers:	SIP headers to inject. Make sure that you know what you are doing here ...
 	
 	"""
-	def reply_d( dialog_id, req_id, error_code, reason, headers ) when error_code in 100..699 do
-	end
-	
-	def reply_d( dialog_id, req_id, 200, reason, headers, body ) when error_code in 100..699 do
+	def reply_d( d_id, t_id, error_code, reason, headers, body ) when error_code in 100..699 or is_atom(error_code) do
+		cond do
+			error_code == 180 -> evt = :ringing
+			error_code == 183 ->
+				evt = :progress,
+				if body == nil do
+					raise "Progress event needs an SDP body"
+				end
+				
+			error_code in 100..102 -> evt = :trying, body = nil
+			error_code in [200, 202] evt = :accepted
+			error_code in 300..699 evt = :reply
+			
+			error_code = :ringing -> error_code = 180, evt = :ringing
+			error_code = :trying -> error_code = 100, evt = :trying
+			error_code = :progress -> 
+				error_code = 183, evt = :progress,
+				if body == nil do
+					raise "Progress event needs an SDP body"
+				end
+				
+			error_code = :busy -> evt = :reply, error_code = 486
+			error_code = :refused -> evt = :reply, error_code = 403
+			error_code = :accepted -> evt = :reply, error_code = 200
+			
+			true -> raise "unsupported answer"
+		end
+		
+		Process.send( d_id, { evt, t_id, code, reason, headers, body } )
 	end
 
+	def reply_d( d_id, t_id, error_code, reason ) when error_code in 100..699 do
+		reply_d( d_id, t_id, error_code, reason, nil, nil )
+	end	
+	
+	def reply_d( d_id, t_id, error_code, reason, headers ) when error_code in 100..699 do
+		reply_d( d_id, t_id, error_code, reason, headers, nil )
+	end
+	
+
+	def reply_d( d_id, t_id, answer ) when is_atom(answer) do
+		case answer do
+			:trying -> error_code = 100
+			:ringing -> error_code = 101
+			:busy -> error_code = 486
+			:refused -> error_code = 403
+	
+	
 	@doc """
 	Challenge the request
 	Send 401 Proxy Authentication required
@@ -100,27 +142,31 @@ defmodule SIP.Dialog do
 	end
 	
 	@doc """
-	Forward a request coming from another dialog. All the responses
-	will be automatically forwarded back. Useful to build a B2BUA or
-	an SBC
-	"""
-	def fwd_request( dialog_id, req, other_dialog ) do
-	end
-	
-	def fwd_response( dialog_id, req_id, resp, req_cseq )
-	end
-	
-	@doc """
 	Use this function to send in-dialog UPDATE, INFO, MESSAGE
+	Note that from, to, contact, CSeq and other dialog related headers
+	will be overwritten with dialog values.
 	"""
-	def send_request(dialog_id, method, body ) do
+	def send_request_d(d_id, method, headers, body ) do
+		Process.send( d_id, { :in_dialog_req_out, method, headers, body } )
 	end
-	
+
 	@doc """
-	Use this function to send in-dialog NOTIFY, PUBLISH, NOTIFY
+	Forward a request to another dialog. Obtain the transaction
+	ID for this request
 	"""
-	def send_presence_message(dialog_id, method, body ) do
+	def fwd_request_d( d_id, req ) when req.is_request do
+		send_request_d(d_id, req.method, req.headers, req.body)
 	end
+
+	@doc """
+	Forward a response to a dalog. Caller must know the UAS transaction ID
+	that is
+	ID for this request
+	"""	
+	def fwd_response_d( d_id, t_id, resp )
+		reply_d(d_id, t_id, resp.error_code, resp.reason, resp.body)
+	end
+		
 	
 	@doc """
 	Stop running dialog.
@@ -128,7 +174,8 @@ defmodule SIP.Dialog do
 	- UAC REGISTER dialog send REGISTER with Expiration; 0
 	- UAC PUBLISH dialog send unPUBLISH
 	"""
-	def terminate_d( dialog_id )
+	def terminate_d( d_id )
+		Process.send( d_id, :terminate )
 	end
 	
 	# ------------- Utility functions -------------------------------
@@ -209,6 +256,8 @@ defmodule SIP.Dialog do
 		if req_id in d_data[:trans_in] do: SIP.Transaction.reply_t(t_id, code, reason)
 	end
 
+	defp create_indialog_req(d_data, method, headers, body)
+	
 	# ---------------- INVITE DIALOG FSM ---------------------------
 	defp invite_dialog_init( :uas, d_data, transport_pid )
 		next_state = :init_state
@@ -237,7 +286,7 @@ defmodule SIP.Dialog do
 				next_state = :early_state
 
 			{ :progress, req_id, body } ->
-				internal_reply_d(req_id, 180, "Session Progress", body),
+				internal_reply_d(req_id, 183, "Session Progress", body),
 				next_state = :early_state
 
 				
@@ -246,14 +295,14 @@ defmodule SIP.Dialog do
 				data_d = internal_challenge_d(data_d, req_id),
 				next_state = :auth_uas_state
 
-			{ :reply, req_id, code, reason } when code in 200..699 ->
+			{ :reply, req_id, code, reason } when code in 300..699 ->
 				SIP.Transaction.reply_t(req_id, code, reason),
 				next_state = :terminating_state
 			
 			# App send a reply code
 			{ :reply, req_id, code, reason, body } when code in 200..299 ->
 				SIP.Transaction.reply_t(req_id, code, reason, body),
-				next_state = :terminating_state
+				next_state = :accepted_state
 			
 			# Intial transaction is cancelled
 			{ :uas_transaction_cancel, t_id, reason } -> 
@@ -325,9 +374,12 @@ defmodule SIP.Dialog do
 					d_data = answer_challenge( d_data, initial_req, resp.getChallengeInfo() )
 					next_state = :uac_auth_state
 				else
-					# No credential for this dialog. End here !
-					next_state = :terminated_state
+					# No credential for this dialog. 
+					# We do nothing. If the APP may handle the challenge itself
+					# todo - add a timer
+					next_state = :init_state
 				end
+				
 			# Initial dialog failed. Transport error ?
 			{ :uac_transaction_close, t_id, reason } ->
 				Process.send( data_d[:app_id], { :dialog_rejected, t_id, reason } ),
