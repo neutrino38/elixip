@@ -241,12 +241,12 @@ defmodule SIP.Transaction do
 				
 				# Handle 3xx responses
 				packet.response_code in 300..399 ->
-					if session_pid != nil do: Process.send(session_pid, { :uac_transaction_redirect, self(), packet } ),
+					if session_pid != nil do: Process.send(session_pid, { :uac_transaction_redirect, self(), initial_req, resp } ),
 					client_transaction_state_3XX( initial_req, packet, t_data, true )
 					
 				# Handle auth required
 				packet.response_code in [401, 407] ->
-					if session_pid != nil do: Process.send(session_pid, { :uac_transaction_auth_required, self(), packet } ),
+					if session_pid != nil do: Process.send(session_pid, { :uac_transaction_auth_required, self(), initial_req, resp } ),
 					client_transaction_state_456XX( initial_req, packet, t_data, true )
 					
 				# Handle 4xx to 6xx errors

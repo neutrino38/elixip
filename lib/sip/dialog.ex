@@ -24,6 +24,8 @@ defmodule SIP.Dialog do
 		- MESSAGE and INFO create dialog that only last during the transaction
 	"""
 	
+	@dialog_min_reg_interval	60
+	@dialog_refresh_interval	300
 	
 	@doc """
 	Create a dialog from an incoming SIP request. Use this method when an application
@@ -67,7 +69,7 @@ defmodule SIP.Dialog do
 	"""
 	def create_outgoing_presence( method, ruri, from, to, app_pid, options )
 		if method in [ :PUBLISH, :SUBSCRIBE ] do
-			Process.spawn( fn -> other_dialog_init( :uac, :REGISTER, d_data ) end )
+			Process.spawn( fn -> other_dialog_init( :uac, method, d_data ) end )
 		else
 			raise "Cannot "
 	end
