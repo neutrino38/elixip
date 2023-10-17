@@ -1,0 +1,14 @@
+SIP/2.0 180 Ringing
+Via: SIP/2.0/UDP 87.98.205.4;branch=z9hG4bK18d9.829852dcccb559fa7184dc4ab9a406e8.0;i=4612;received=87.98.205.4
+Via: SIP/2.0/TCP 192.168.24.71:61884;received=185.215.65.24;branch=z9hG4bK-8069017;rport=19679
+Record-Route: <sip:87.98.205.4;r2=on;lr=on;did=f78.2332>
+Record-Route: <sip:87.98.205.4;transport=tcp;r2=on;lr=on;did=f78.2332>
+From: "Site%20Arras%20POLE%20EMPLOI"<sip:+33970260233@visioassistance.net>;tag=8075639
+To: <sip:90901@visioassistance.net>;tag=as424e7930
+Call-ID: 32645600-4c01-bc8f-670c-deac31158db8
+CSeq: 9678 INVITE
+User-Agent: Passerelle RNIS Paris
+Allow: INVITE, ACK, CANCEL, OPTIONS, BYE, REFER, SUBSCRIBE, NOTIFY, INFO, UPDATE
+Supported: replaces
+Contact: <sip:90901@212.83.152.250:5090>
+Content-Length: 0

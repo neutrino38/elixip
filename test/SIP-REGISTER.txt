@@ -1,0 +1,18 @@
+REGISTER sip:example.com SIP/2.0
+Via: SIP/2.0/TLS 19x.1xx.0.1xx:3246
+From: <sip:lynctest8@example.com>;tag=2257063211;epid=22570632
+To: <sip:lynctest8@example.com>
+Call-ID: A2B000F95CB8XZRikcdYitb4QBvEr4P2
+CSeq: 3 REGISTER
+Contact: <sip:19x.1xx.0.1xx:3246;transport=tls;ms-opaque=28c9d310c1>;methods="INVITE, MESSAGE, INFO, OPTIONS, BYE, CANCEL, NOTIFY, ACK, REFER, BENOTIFY";proxy=replace;+sip.instance="<urn:uuid:6b6590c5-2a3f-5dee-ad87-5ab6694cf66d>"
+Max-Forwards: 70
+User-Agent: UCCAPI/4.0.7577.0 OC/4.0.7577.0 (Microsoft Lync 2010)
+Supported: gruu-10, adhoclist, msrtc-event-categories
+Supported: ms-forking
+Supported: ms-cluster-failover
+Supported: ms-userservices-state-notification
+Ms-keep-alive: UAC;hop-hop=yes
+Event: registration
+Ms-subnet: 19x.1xx.0.0
+Proxy-Authorization: NTLM qop="auth", realm="SIP Communications Service", opaque="8CEED616", targetname="lyncfe.example.com", version=4, gssapi-data="TlRMTVNTUAADAAAAGAAYAKgAAADGAMYAwAAAABAAEABYAAAALAAsAGgAAAAUABQAlAAAABAAEACGAQAAVYKQYgYBsR0AAAAPAAAAAAAAAAAAAAAAAAAAAG4AZQB5AGUAYgBhAGwAbABsAHkAbgBjAHQAZQBzAHQAOABAAG4AZQB5AGUAYgBhAGwAbAAuAGMAbwBtAEUAWQBFAEIAQQBMAEwALQBQAEMA9jYBMVaneo2SEFBrg1/YnLPWl4gGzCyjeTg+SJIb99jnRvh/xOM1KQEBAAAAAAAAAD9j2kfbzAGz1peIBswsowAAAAACABAATgBFAFkARQBCAEEATABMAAEADABMAFkATgBDAEYARQAEABgAbgBlAHkAZQBiAGEAbABsAC4AYwBvAG0AAwAmAGwAeQBuAGMAZgBlAC4AbgBlAHkAZQBiAGEAbABsAC4AYwBvAG0ABQAYAG4AZQB5AGUAYgBhAGwAbAAuAGMAbwBtAAcACABjQk/rRdvMAQAAAAAAAAAAGL4kYo+YoVBEmij7AkIylQ==" , crand="becdaa89", cnum ="1", response="0100000024A95BA08AA3947964000000"
+Content-Length: 0

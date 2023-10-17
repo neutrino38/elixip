@@ -1,0 +1,11 @@
+REGISTER sip:212.83.152.250 SIP/2.0
+Via: SIP/2.0/UDP 103.145.13.101:5191;branch=z9hG4bK335871ccf827f48961ba1414;rport
+From: "5430" <sip:5430@212.83.152.250>;tag=228081ccf8708
+To: "5430" <sip:5430@212.83.152.250>
+Call-ID: 1ccf827f-b25aff8973f69ef-9a4bb76@212.83.152.250
+CSeq: 22645 REGISTER
+Contact: <sip:5430@103.145.13.101:5191>
+User-Agent: voip
+Expires: 1800
+Max-Forwards: 70
+Content-Length: 0

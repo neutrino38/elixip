@@ -1,0 +1,73 @@
+INVITE sips:bob@biloxi.example.com SIP/2.0
+Via: SIPS/2.0/TLS pc33.atlanta.example.com;branch=z9hG4bK74bf9
+Max-Forwards: 70
+To: Bob <sips:bob@biloxi.example.com>
+From: Alice <sips:alice@atlanta.example.com>;tag=9fxced76sl
+Call-ID: 3848276298220188511@atlanta.example.com
+Geolocation: <cid:target123@atlanta.example.com>
+Geolocation-Routing: no
+Accept: application/sdp, application/pidf+xml
+CSeq: 31862 INVITE
+Contact: <sips:alice@atlanta.example.com>
+Content-Type: multipart/mixed; boundary=boundary1
+Content-Length: 1587
+
+--boundary1
+
+Content-Type: application/sdp
+
+v=0
+o=alice 2890844526 2890842807 IN IP4 atlanta.example.com
+s=-
+c=IN IP4 192.0.2.1
+t=0 0
+m=audio 20000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+m=video 20002 RTP/AVP 31
+a=rtpmap:31 H261/90000
+v=0
+o=alice 2890844526 2890842807 IN IP4 atlanta.example.com
+s=-
+c=IN IP4 192.0.2.1
+t=0 0
+m=audio 20000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+m=video 20002 RTP/AVP 31
+a=rtpmap:31 H261/90000
+
+--boundary1
+
+Content-Type: application/pidf+xml
+Content-ID: <target123@atlanta.example.com>
+
+<?xml version="1.0" encoding="UTF-8"?>
+   <presence
+	  xmlns="urn:ietf:params:xml:ns:pidf"
+	  xmlns:gp="urn:ietf:params:xml:ns:pidf:geopriv10"
+	  xmlns:gbp="urn:ietf:params:xml:ns:pidf:geopriv10:basicPolicy"
+	  xmlns:cl="urn:ietf:params:xml:ns:pidf:geopriv10:civicAddr"
+	  xmlns:gml="http://www.opengis.net/gml"
+	  xmlns:dm="urn:ietf:params:xml:ns:pidf:data-model"
+	  entity="pres:alice@atlanta.example.com">
+	<dm:device id="target123-1">
+	  <gp:geopriv>
+		<gp:location-info>
+		  <gml:location>
+			<gml:Point srsName="urn:ogc:def:crs:EPSG::4326">
+			  <gml:pos>32.86726 -97.16054</gml:pos>
+			</gml:Point>
+		 </gml:location>
+		</gp:location-info>
+		<gp:usage-rules>
+		  <gbp:retransmission-allowed>false
+		  </gbp:retransmission-allowed>
+		  <gbp:retention-expiry>2010-11-14T20:00:00Z
+		  </gbp:retention-expiry>
+		</gp:usage-rules>
+		<gp:method>802.11</gp:method>
+	  </gp:geopriv>
+	  <dm:deviceID>mac:1234567890ab</dm:deviceID>
+	  <dm:timestamp>2010-11-04T20:57:29Z</dm:timestamp>
+	</dm:device>
+  </presence>
+--boundary1--

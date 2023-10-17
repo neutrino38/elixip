@@ -1,0 +1,12 @@
+BYE sip:90901@212.83.152.250:5090 SIP/2.0
+Via: SIP/2.0/UDP 87.98.205.4;branch=z9hG4bK08d9.78a0fdaa8ce5d9f8f4e9b4a835589196.0;i=4612
+Via: SIP/2.0/TCP 192.168.24.71:61884;received=185.215.65.24;branch=z9hG4bK-8142722;rport=19679
+From: "Site Arras POLE EMPLOI"<sip:33970260233@visioassistance.net>;tag=8075639
+To: <sip:90901@visioassistance.net>;tag=as424e7930
+Call-ID: 32645600-4c01-bc8f-670c-deac31158db8
+CSeq: 9679 BYE
+Content-Length: 0
+Max-Forwards: 16
+Proxy-Authorization: Digest username="33970260233",realm="visioassistance.net",nonce="YboVImG6E/ZJLQLgVnHNOj90ZCW0dNWR",uri="sip:90901@212.83.152.250:5090",response="3ae53ff1691497f11229aa240505ea2d",algorithm=MD5
+User-Agent: LiveVideoPlugin 4.2.8/Win8+
+P-Preferred-Identity: <sip:nouser@visioassistance.net>

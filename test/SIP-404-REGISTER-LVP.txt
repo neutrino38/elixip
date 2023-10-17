@@ -1,0 +1,10 @@
+SIP/2.0 404 Not found
+Via: SIP/2.0/UDP 103.145.13.101:5191;branch=z9hG4bK335871ccf827f48961ba1414;received=103.145.13.101;rport=5191
+From: "5430" <sip:5430@212.83.152.250>;tag=228081ccf8708
+To: "5430" <sip:5430@212.83.152.250>;tag=as274dbbda
+Call-ID: 1ccf827f-b25aff8973f69ef-9a4bb76@212.83.152.250
+CSeq: 22645 REGISTER
+User-Agent: Passerelle RNIS Paris
+Allow: INVITE, ACK, CANCEL, OPTIONS, BYE, REFER, SUBSCRIBE, NOTIFY, INFO, UPDATE
+Supported: replaces
+Content-Length: 0
