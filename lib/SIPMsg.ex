@@ -109,7 +109,7 @@ defmodule SIPMsgParser do
 	end
 
 	defp parse_header_content( :contact, value ) do
-		case SIPUriParser.parse_sip_uri(value) do
+		case SIPUri.parse(value) do
 			{ :ok, value } -> { :ok, value }
 			{ errcode, _value } -> { errcode, "Invalid contact URI" }
 		end
@@ -203,7 +203,7 @@ defmodule SIPMsgParser do
 	defp create_sip_req( req, ruri ) do
 		req2 = method_to_atom(req)
 		if !is_nil(req2) do
-			case SIPUriParser.parse_sip_uri(ruri) do
+			case SIPUri.parse(ruri) do
 				{ :ok, parsed_uri } ->
 					{ :ok, %{ method: req2, ruri: parsed_uri,
 					  from: nil, to: nil, via: [], callid: nil, cseq: nil } }
@@ -284,7 +284,7 @@ defmodule SIPMsgParser do
 				# Get topmost via and branch parameter
 				[ _transport, topmost_via ] = String.split(Enum.at(msg.via, 0), " ", parts: 2)
 
-				case SIPUriParser.get_uri_param("sip:" <> topmost_via, "branch") do
+				case SIPUri.get_uri_param("sip:" <> topmost_via, "branch") do
 					{ :ok, branch } -> { :ok, Map.put(msg, :transid, branch) }
 					{ :no_such_param, nil } -> { :ok, Map.put(msg, :transid, nil) }
 					{ _code, _parsed_via } -> { :invalid_tompost_via, msg }
@@ -300,8 +300,8 @@ defmodule SIPMsgParser do
 	# Compute dialog ID using from tag, to tag and callid
 	# Then add it to parsed message
 	defp compute_dialog_id(msg, from, callid, to) do
-			{ _code_from, from_tag } = SIPUriParser.get_uri_param(from, "tag")
-			{ _code_to, to_tag } = SIPUriParser.get_uri_param(to, "tag")
+			{ _code_from, from_tag } = SIPUri.get_uri_param(from, "tag")
+			{ _code_to, to_tag } = SIPUri.get_uri_param(to, "tag")
 			case { from_tag, callid, to_tag } do
 				{ nil, _cid, _totag } -> { :invalid_dialog_id_no_from_tag, "no from tag" }
 				{ _from_tag, nil, _totag } -> { :invalid_dialog_id_no_callid, "no callid" }
