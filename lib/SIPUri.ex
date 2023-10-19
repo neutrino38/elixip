@@ -209,6 +209,6 @@ defmodule SIPUri do
 		else
 			core_uri_str <> ";" <> serialize_params(uri.params)
 		end
-		{ :ok, uri_str }
+		{ :ok, String.trim_trailing(uri_str, ";") }
 	end
 end

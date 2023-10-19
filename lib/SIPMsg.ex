@@ -1,5 +1,5 @@
-defmodule SIPMsgParser do
-	@moduledoc "SIP protocol parser"
+defmodule SIPMsg do
+	@moduledoc "SIP protocol parser and serializer"
 
 	# Concat multi value headers in a single list
 	defp concat_multi_header_values(val1, val2) when is_list(val1) and is_list(val2) do
@@ -76,6 +76,7 @@ defmodule SIPMsgParser do
 			"PUBLISH" -> :PUBLISH
 			"SUBSCRIBE" -> :SUBSCRIBE
 			"NOTIFY" -> :NOTIFY
+			"BYE" -> :BYE
 			_ -> nil
 		end
 	end
@@ -118,10 +119,10 @@ defmodule SIPMsgParser do
 	defp parse_header_content( :proxyauthorization, value ) do
 		authparams = Map.new(
 			Enum.map(
-				String.split(value, ", "),
+				String.split(value, ","),
 				fn val ->
 					[ k, v] = String.split(val, "=", parts: 2)
-					{ k, v }
+					{ String.trim(k), String.trim(v) }
 				end)
 		)
 		{ :ok, authparams }
@@ -270,7 +271,7 @@ defmodule SIPMsgParser do
 	end
 
 	# Parse the transaction ID from topmost via
-	defp parse_transaction_id({ :ok, msg }) do
+	def parse_transaction_id({ :ok, msg }) do
 		cond do
 			Map.has_key?(msg, :via) == false ->
 				# No via header
@@ -293,7 +294,7 @@ defmodule SIPMsgParser do
 	end
 
 	# We don't parse anything if the messge is not correct
-	defp parse_transaction_id({ code, msg }) do
+	def parse_transaction_id({ code, msg }) do
 		{ code, msg }
 	end
 
@@ -380,7 +381,8 @@ defmodule SIPMsgParser do
 					bodies = List.delete_at(bodies, -1)
 
 					# Parse all sub bodies and return them as a list of maps
-					Enum.map(bodies, fn v -> parse_sub_body(v) end)
+					Enum.map(bodies,
+						fn v -> Map.put(parse_sub_body(v), :boundary, boundary) end)
 				end
 			_ ->
 				# Single body
@@ -418,11 +420,11 @@ defmodule SIPMsgParser do
 				{ :bad_body_size, parsed_msg, nil }
 
 			clen <= sz ->
-				# Todo support multipart/mixed as defined by RFC 2046
+				# Multipart/mixed as defined by RFC 2046
 				mod_msg = Map.put(parsed_msg, :body,
 								  	parse_multi_part_body(
-										parsed_msg.contenttype,
-										Kernel.binary_part(body, 0, clen-2)))
+											parsed_msg.contenttype,
+											Kernel.binary_part(body, 0, clen-2)))
 
 				rest = if clen < sz do Kernel.binary_part(body, clen-2, sz - clen) else "" end
 				{ :ok, mod_msg, rest }
@@ -475,5 +477,164 @@ defmodule SIPMsgParser do
 		else
 			{ code, parsed_msg }
 		end
+	end
+
+	# ---------------------- serialize -----------------------------------------
+
+	defp serialize_first_line(req, uri) when is_atom(req) do
+		{ :ok, uri_str } = SIPUri.serialize(uri)
+		Atom.to_string(req) <> " " <> uri_str <> " SIP/2.0\r\n"
+	end
+
+	defp serialize_first_line(response, reason) when is_integer(response) do
+		"SIP/2.0 " <> Integer.to_string(response) <> " " <> reason <> "\r\n"
+	end
+
+
+
+	@common_headers_atoms %{ via: "Via", from: "From", to: "To", callid: "Call-ID",
+		route: "Route", recordroute: "Record-Route", useragent: "UserAgent",
+		contact: "Contact", cseq: "CSeq", contenttype: "Content-Type",
+		contentlength: "Content-Length", proxyauthorization: "Proxy-Authorization",
+		supported: "Supported" }
+
+	defp header_name_to_string(name) when is_atom(name) do
+		@common_headers_atoms[name]
+	end
+
+	defp header_name_to_string(name) when is_bitstring(name) do
+		name
+	end
+
+	# Serialize an empty header
+	defp serialize_one_header( _name, nil ) when do
+		""
+	end
+
+	# Serialize a contact header header
+	defp serialize_one_header( :contact, contact ) do
+		case SIPUri.serialize(contact) do
+			{ :ok, contact_str} -> header_name_to_string(:contact) <> ": " <> contact_str <> "\r\n"
+			_ -> raise "Invalid contact in SIP message"
+		end
+	end
+
+	# Serialize single value common headers (which name are represented by an atom)
+	defp serialize_one_header( name, val ) when name in [ :from, :to, :callid, :useragent, :contenttype	] and is_bitstring(val) do
+		header_name_to_string(name) <> ": " <> val <> "\r\n"
+	end
+
+	# Serialize a CSeq header
+	defp serialize_one_header( :cseq, [ seqno, method ] ) do
+		header_name_to_string(:cseq) <> ": " <> Integer.to_string(seqno) <> " " <> Atom.to_string(method) <> "\r\n"
+	end
+
+	# Serialize a Proxy-Authorization header
+	defp serialize_one_header( :proxyauthorization, authinfo ) do
+		header_name_to_string(:proxyauthorization) <> ": " <>
+			String.trim_trailing(Enum.reduce(authinfo, "", fn {k, v}, acc ->
+				acc <> k <> "=" <> v <> ", "
+			end), ", ") <> "\r\n"
+	end
+
+	# Serialize a header that can have multiple string values represented as a list
+	defp serialize_one_header( name, value ) when is_list(value) do
+		Enum.reduce(value, "", fn v, acc ->
+			acc <> header_name_to_string(name) <> ": " <> v <> "\r\n"
+		end)
+	end
+
+	# Serialize a single value header with a string value
+	defp serialize_one_header( name, value ) when is_bitstring(value) do
+		header_name_to_string(name) <> ": " <> value <> "\r\n"
+	end
+
+	# Serialize a single value header with an integer value
+	defp serialize_one_header( name, value ) when is_integer(value) do
+		header_name_to_string(name) <> ": " <> Integer.to_string(value) <> "\r\n"
+	end
+
+	defp serialize_headers(sipmsg, ordered_header_list, mandatory) do
+		Enum.reduce( ordered_header_list, "", fn h, acc ->
+			if Map.has_key?(sipmsg, h) do
+				acc <> serialize_one_header(h, sipmsg[h])
+			else
+				if mandatory and h not in [:via] do
+					name = header_name_to_string(h)
+					raise "Missing mandatory header #{name} in SIP message"
+				else
+					acc
+				end
+			end
+		end)
+	end
+
+	defp serialize_headers(sipmsg) do
+		header_order1 = [ :via, :from, :to, :callid, :cseq ]
+		header_order2 = [ :useragent, :contenttype, :contentlength ]
+		toskip = [ :transid, :body, :dialog_id, :boundary, :method, :response, :reason, :ruri ]
+
+		remaining_headers = Enum.reduce(sipmsg, [], fn {k, _v}, acc ->
+			if k not in header_order1 and k not in toskip and k not in header_order2 do
+				List.insert_at(acc, -1, k)
+			else
+				acc
+			end
+		end)
+		# First we serialize all headers mentionned in "order1" in order
+		# They are mandatory so we fail if they are not in the SIP msg
+		serialize_headers(sipmsg, header_order1, true) <>
+			serialize_headers(sipmsg, remaining_headers, false) <>
+				serialize_headers(sipmsg, header_order2, false)
+	end
+
+	defp serialize_body([]) do
+		"\r\n"
+	end
+
+	defp serialize_body([ body ]) do
+		"\r\n" <> body.data
+	end
+
+	# Serialize a sub body of a multipart/mixed body
+	defp serialize_body(body) when is_map(body) do
+		h = "\r\n" <> body.boundary <> "\r\n" <> serialize_headers(body)
+		h <> "\r\n" <> body.data
+	end
+
+	# Serialize a list of bodies into multipart/mixed body
+	defp serialize_body( bodies ) when is_list(bodies) do
+		bds = Enum.reduce(bodies, "", fn bd, acc -> acc <> serialize_body(bd) end)
+		bds <> "\r\n" <> Enum.at(bodies, 0).boundary <> "--\r\n"
+	end
+
+
+
+	@doc """
+	Serialize a SIP request into a string to be sent on the network
+	"""
+	def serialize(sipmsg) when is_map(sipmsg) and is_atom(sipmsg.method) do
+		msgstr = serialize_first_line(sipmsg.method, sipmsg.ruri)
+		headers = serialize_headers(sipmsg)
+		body = if Map.has_key?(sipmsg, :body) do
+			serialize_body(sipmsg.body)
+		else
+			""
+		end
+		msgstr <> headers <> body
+	end
+
+	@doc """
+	Serialize a SIP response into a string to be sent on the network
+	"""
+	def serialize(sipmsg) when is_map(sipmsg) and is_boolean(sipmsg.method) do
+		msgstr = serialize_first_line(sipmsg.code, sipmsg.reason)
+		headers = serialize_headers(sipmsg)
+		body = if Map.has_key?(sipmsg, :body) do
+			serialize_body(sipmsg.body)
+		else
+			""
+		end
+		msgstr <> headers <> body
 	end
 end
