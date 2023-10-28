@@ -77,6 +77,7 @@ defmodule SIPMsg do
 			"SUBSCRIBE" -> :SUBSCRIBE
 			"NOTIFY" -> :NOTIFY
 			"BYE" -> :BYE
+			"CANCEL" -> :CANCEL
 			_ -> nil
 		end
 	end
@@ -110,7 +111,7 @@ defmodule SIPMsg do
 	end
 
 	defp parse_header_content( :contact, value ) do
-		case SIPUri.parse(value) do
+		case SIP.Uri.parse(value) do
 			{ :ok, value } -> { :ok, value }
 			{ errcode, _value } -> { errcode, "Invalid contact URI" }
 		end
@@ -204,7 +205,7 @@ defmodule SIPMsg do
 	defp create_sip_req( req, ruri ) do
 		req2 = method_to_atom(req)
 		if !is_nil(req2) do
-			case SIPUri.parse(ruri) do
+			case SIP.Uri.parse(ruri) do
 				{ :ok, parsed_uri } ->
 					{ :ok, %{ method: req2, ruri: parsed_uri,
 					  from: nil, to: nil, via: [], callid: nil, cseq: nil } }
@@ -285,7 +286,7 @@ defmodule SIPMsg do
 				# Get topmost via and branch parameter
 				[ _transport, topmost_via ] = String.split(Enum.at(msg.via, 0), " ", parts: 2)
 
-				case SIPUri.get_uri_param("sip:" <> topmost_via, "branch") do
+				case SIP.Uri.get_uri_param("sip:" <> topmost_via, "branch") do
 					{ :ok, branch } -> { :ok, Map.put(msg, :transid, branch) }
 					{ :no_such_param, nil } -> { :ok, Map.put(msg, :transid, nil) }
 					{ _code, _parsed_via } -> { :invalid_tompost_via, msg }
@@ -301,8 +302,8 @@ defmodule SIPMsg do
 	# Compute dialog ID using from tag, to tag and callid
 	# Then add it to parsed message
 	defp compute_dialog_id(msg, from, callid, to) do
-			{ _code_from, from_tag } = SIPUri.get_uri_param(from, "tag")
-			{ _code_to, to_tag } = SIPUri.get_uri_param(to, "tag")
+			{ _code_from, from_tag } = SIP.Uri.get_uri_param(from, "tag")
+			{ _code_to, to_tag } = SIP.Uri.get_uri_param(to, "tag")
 			case { from_tag, callid, to_tag } do
 				{ nil, _cid, _totag } -> { :invalid_dialog_id_no_from_tag, "no from tag" }
 				{ _from_tag, nil, _totag } -> { :invalid_dialog_id_no_callid, "no callid" }
@@ -480,9 +481,8 @@ defmodule SIPMsg do
 	end
 
 	# ---------------------- serialize -----------------------------------------
-
 	defp serialize_first_line(req, uri) when is_atom(req) do
-		{ :ok, uri_str } = SIPUri.serialize(uri)
+		{ :ok, uri_str } = SIP.Uri.serialize(uri)
 		Atom.to_string(req) <> " " <> uri_str <> " SIP/2.0\r\n"
 	end
 
@@ -507,15 +507,15 @@ defmodule SIPMsg do
 	end
 
 	# Serialize an empty header
-	defp serialize_one_header( _name, nil ) when do
+	defp serialize_one_header( _name, nil ) do
 		""
 	end
 
 	# Serialize a contact header header
 	defp serialize_one_header( :contact, contact ) do
-		case SIPUri.serialize(contact) do
+		case SIP.Uri.serialize(contact) do
 			{ :ok, contact_str} -> header_name_to_string(:contact) <> ": " <> contact_str <> "\r\n"
-			_ -> raise "Invalid contact in SIP message"
+			# _ -> raise "Invalid contact in SIP message"
 		end
 	end
 
@@ -624,9 +624,6 @@ defmodule SIPMsg do
 		msgstr <> headers <> body
 	end
 
-	@doc """
-	Serialize a SIP response into a string to be sent on the network
-	"""
 	def serialize(sipmsg) when is_map(sipmsg) and is_boolean(sipmsg.method) do
 		msgstr = serialize_first_line(sipmsg.code, sipmsg.reason)
 		headers = serialize_headers(sipmsg)

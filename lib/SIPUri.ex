@@ -1,4 +1,4 @@
-defmodule SIPUri do
+defmodule SIP.Uri do
 	defp parse_uri_parameters(param_list) do
 		params = Enum.map( param_list, fn pv ->
 				case String.split(pv, "=") do
@@ -82,7 +82,7 @@ defmodule SIPUri do
 			[ "<", part2 ] ->
 				# Form <sip:user@domain>;param=value
 				[ core_uri_str, params_str ] =  String.split( part2, ">", parts: 2 )
-				case SIPUri.parse( proto <> core_uri_str ) do
+				case SIP.Uri.parse( proto <> core_uri_str ) do
 					{ :ok, core_uri } ->
 						# Parse params
 						param_list = case String.split( String.trim_leading(params_str,";"), ";" ) do
@@ -129,7 +129,7 @@ defmodule SIPUri do
 				end
 
 				#Recurse to parse the URI part
-				case SIPUri.parse( "<" <> proto <> part2 ) do
+				case SIP.Uri.parse( "<" <> proto <> part2 ) do
 					{ :ok, core_uri } ->
 						 { :ok, Map.put(core_uri, :displayname, display_name) }
 
@@ -149,7 +149,7 @@ defmodule SIPUri do
 	end
 
 	def get_uri_param(sip_uri, param) when is_binary(sip_uri) do
-		case SIPUri.parse(sip_uri) do
+		case SIP.Uri.parse(sip_uri) do
 			{ :ok, parsed_uri } -> get_uri_param(parsed_uri, param)
 			{ code, _dump } -> { code, nil }
 		end

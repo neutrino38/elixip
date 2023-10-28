@@ -1,16 +1,16 @@
-defmodule SIPParserTest do
+defmodule SIP.Test.Parser do
   use ExUnit.Case
-  doctest SIPUri
+  doctest SIP.Uri
 
   test "Parse an URI that has only a domain" do
-		{ code, parsed_uri } = SIPUri.parse("sip:domain.fr")
+		{ code, parsed_uri } = SIP.Uri.parse("sip:domain.fr")
 		assert code == :ok
 		assert parsed_uri.domain == "domain.fr"
   end
 
   test "Parse a simple URI" do
 
-		{ code, parsed_uri } = SIPUri.parse("sip:simple@domain.fr")
+		{ code, parsed_uri } = SIP.Uri.parse("sip:simple@domain.fr")
 		assert code == :ok
 		assert parsed_uri.userpart == "simple"
 		assert parsed_uri.domain == "domain.fr"
@@ -19,12 +19,12 @@ defmodule SIPParserTest do
   end
 
   test "Parse a faulty SIP URI" do
-		{ code, _parsed_uri } = SIPUri.parse("sipp:simple@domain.fr")
+		{ code, _parsed_uri } = SIP.Uri.parse("sipp:simple@domain.fr")
 		assert code == :invalid_sip_uri_general
 	end
 
   test "Parse an URI with transport parameter" do
-		{ code, parsed_uri } = SIPUri.parse("sip:simple@domain.fr:5060;transport=TCP")
+		{ code, parsed_uri } = SIP.Uri.parse("sip:simple@domain.fr:5060;transport=TCP")
 			assert code == :ok
 			assert parsed_uri.userpart == "simple"
 			assert parsed_uri.domain == "domain.fr"
@@ -33,7 +33,7 @@ defmodule SIPParserTest do
 	end
 
   test "Parse an URI with <> and transport parameter" do
-			{ code, parsed_uri } = SIPUri.parse("<sip:simple@domain.fr:5030>;transport=TCP;rport")
+			{ code, parsed_uri } = SIP.Uri.parse("<sip:simple@domain.fr:5030>;transport=TCP;rport")
 			assert code == :ok
 			assert parsed_uri.userpart == "simple"
 			assert parsed_uri.domain == "domain.fr"
@@ -42,7 +42,7 @@ defmodule SIPParserTest do
 	end
 
   test "Parse an URI with a display name and several parameters" do
-			{ code, parsed_uri } = SIPUri.parse("\"omé tür\" <sip:simple@domain.fr:50>;transport=TCP;rport")
+			{ code, parsed_uri } = SIP.Uri.parse("\"omé tür\" <sip:simple@domain.fr:50>;transport=TCP;rport")
 			assert code == :ok
 			assert parsed_uri.userpart == "simple"
 			assert parsed_uri.domain == "domain.fr"
@@ -52,7 +52,7 @@ defmodule SIPParserTest do
 	end
 
 	test "Parse an URI with a display name without spece" do
-		{ code, parsed_uri } = SIPUri.parse("\"Site%20Arras%20POLE%20EMPLOI\"<sip:+33970260233@visioassistance.net>;tag=8075639")
+		{ code, parsed_uri } = SIP.Uri.parse("\"Site%20Arras%20POLE%20EMPLOI\"<sip:+33970260233@visioassistance.net>;tag=8075639")
 		assert code == :ok
 		assert parsed_uri.params == %{ "tag" => "8075639" }
 	end
@@ -67,7 +67,7 @@ defmodule SIPParserTest do
 			displayname: "omé tür"
 		}
 
-		{ code, uristr } = SIPUri.serialize(uri)
+		{ code, uristr } = SIP.Uri.serialize(uri)
 		assert code == :ok
 		assert uristr == "\"om%C3%A9+t%C3%BCr\" <sip:simple@domain.fr:50>;rport;transport=TCP"
 	end
