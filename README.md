@@ -20,37 +20,5 @@ SIP application.
 
 ### Future version
 
-The main idea is to run the SIP stack into separates erlang nodes. The SIP applications
-would run in separates nodes (one node per set of domain that can run multiple application).
-Application would embbed a simple SIP API that would enable the applications to be fully
-isolated from the code SIP and possibly distributed accross several servers.
+I changed my mind and I now want to build and advanced SIP and RTP test tool using the Elixir scripting capablity.
 
-### Redundent version
-
-The ability to run several instances of network listeners and as well as several instances
-of the same pplication on several nodes. One more step would to integrate cloud APIs to enable
-dynamic instance creation. This would make possible to create or delete instance to cope with
-increasing traffic.
-
-### Mutliple protocols (H.323)
-
-Same approach would be used to create other listener to support other signalling protocols
-and allow the design of multi protocol applications such as gateways.
-
-A further development of this project would allow
-
-## Installation
-
-If [available in Hex](https://hex.pm/docs/publish), the package can be installed as:
-
-  1. Add socket_server to your list of dependencies in `mix.exs`:
-
-        def deps do
-          [{:socket_server, "~> 0.0.1"}]
-        end
-
-  2. Ensure socket_server is started before your application:
-
-        def application do
-          [applications: [:socket_server]]
-        end
