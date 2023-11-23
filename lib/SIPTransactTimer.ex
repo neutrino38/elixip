@@ -9,6 +9,7 @@ defmodule SIP.Trans.Timer do
     state
   end
 
+  @spec schedule_timer_T2(map(), non_neg_integer()) :: map()
   def schedule_timer_T2(state, ms \\ @timer_T2_val) do
     schedule_generic_timer(state, :timerT2, :t2, ms)
   end
@@ -72,9 +73,13 @@ defmodule SIP.Trans.Timer do
   end
 
   def handle_timer( :timerT2, state) when state.state == :proceeding do
-    send(state.sipmsg.app, {:timeout, :timer_T2})
-    Logger.error([ transid: state.sipmsg.transid, message: "timer_T2: no final response receveived on time."])
-    { :stop, state, "SIP transaction timeout (timer T2)" }
+    send(state.app, {:timeout, :timer_T2})
+    if state.sipmsg.method == :INVITE do
+      Logger.info([ transid: state.sipmsg.transid, message: "INVITE not answered on time."])
+    else
+      Logger.error([ transid: state.sipmsg.transid, message: "timer_T2: no final response received on time."])
+    end
+    { :stop, state, "timer_T2: no final response receveived on time." }
   end
 
   def handle_timer( :timerK, state) when state.state in [ :confirmed, :terminated ] do

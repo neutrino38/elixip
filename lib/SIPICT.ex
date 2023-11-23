@@ -5,14 +5,14 @@ defmodule SIP.ICT do
   require SIPMsgOps
   require Logger
 
-  defp safe_serialize(initial_state, sipmsg) do
+  defp safe_serialize(sipmsg, state) do
     try do
       msgstr = SIPMsg.serialize(sipmsg)
-      { :ok, Map.put(initial_state, :msgstr, msgstr) }
+      { :ok, Map.put(state, :msgstr, msgstr) }
     rescue
       e in RuntimeError ->
         Logger.debug([ transid: sipmsg.transid, message: e.message])
-        { :invalid_sip_msg, initial_state }
+        { :invalid_sip_msg, state }
     end
   end
 
@@ -25,7 +25,7 @@ defmodule SIP.ICT do
     initial_state = %{ msg: sipmsg, tmod: t_mod, tpid: t_pid, app: app_pid, t2: ring_timeout,
                        t_isreliable: apply(t_mod, :is_reliable, []),  state: :sending }
 
-    case safe_serialize(initial_state, sipmsg) do
+    case safe_serialize(sipmsg, initial_state) do
       {:ok, initial_state} ->
         case GenServer.call(t_pid, :sendmsg, initial_state.msgstr ) do
           :ok ->
@@ -35,13 +35,13 @@ defmodule SIP.ICT do
             { :ok, initial_state }
 
           code ->
-            Logger.error([ transid: sipmsg.transid, message: "ICT: Fail to send message: #{code}"])
-            { :stop, initial_state }
+            Logger.error([ transid: sipmsg.transid, message: "ICT: Fail to send SIP request  #{code}"])
+            { :stop, "Fail to send SIP erequest" }
         end
 
-      { code, initial_state} ->
+      { code, _initial_state} ->
         Logger.error([ transid: sipmsg.transid, message: "ICT: Fail to serialize SIP message #{code}"])
-        { :stop, initial_state }
+        { :stop, "Fail to serialize message" }
     end
 
   end
@@ -103,19 +103,21 @@ defmodule SIP.ICT do
   # Handle privisional (1xx) responses
   defp handle_sip_response(state, sipmsg) when SIPMsgOps.is_1xx_resp(sipmsg) do
     Logger.debug([ transid: sipmsg.transid, message: "Received prov resp #{sipmsg.response_code}"])
-    cond do
-      state.state == :sending ->
+    case state.state do
+      :sending ->
+        # Todo: support 100rel and send PRACK
+
         # Send provisional response to app layer
-        # Todo: support reliabilty and PRACK
-        send(sipmsg.app, { :response, sipmsg })
+        send(state.app, { :response, sipmsg })
         Logger.debug([ transid: sipmsg.transid, message: "state: sending -> proceeding"])
-        %{ sipmsg | state: :proceeding }
+        state = schedule_timer_T2(state, state.t2)
+        %{ state | state: :proceeding }
 
-      state.state == :proceeding ->
+      :proceeding ->
         send(sipmsg.app, { :response, sipmsg })
-        state
+        schedule_timer_T2(state, state.t2)
 
-      true ->
+      _ ->
         Logger.debug([ transid: sipmsg.transid, message: "state: #{state.state}. Ignoring resp."])
         state
     end
@@ -208,6 +210,21 @@ defmodule SIP.ICT do
   @impl true
   # Handle T1 time retransmission
   def handle_info({ :timerT1, ms }, state) do
-    handle_timer({ :timerT1, ms }, state)
+    case handle_timer({ :timerT1, ms }, state) do
+      { :noreply, newstate } -> { :noreply, newstate }
+      { :stop, _reason, state} ->
+        GenServer.stop(self())
+        { :noreply, state }
+    end
+  end
+
+  # Handle other timers
+  def handle_info({ :timeout, _tref, timer } , state) when timer in [ :timerT2, :timerK] do
+    case handle_timer(timer, state) do
+      { :noreply, newstate } -> { :noreply, newstate }
+      { :stop, _reason, state} ->
+        GenServer.stop(self())
+        { :noreply, state }
+    end
   end
 end

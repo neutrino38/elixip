@@ -1,38 +1,14 @@
-defmodule SIP.Test.Transport.UDPMockup do
-  @moduledoc """
-  Mockup for transport module
-  """
-  use GenServer
-  require Logger
-
-   # Callbacks
-
-  @impl true
-  def init(nil) do
-    initial_state = %{ t_isreliable: false }
-    { :ok, initial_state }
-  end
-
-  @impl true
-  def handle_call({ :sendmsg, msgstr }, _from, state) do
-    Logger.debug("Transport mockeup: Message sent ---->\r\n" <> msgstr <> "\r\n-----------------")
-    { :reply, :ok, state}
-  end
-
-  def handle_call( :stop , _from, state) do
-    { :stop, "Normal stop", state}
-  end
-end
 
 IO.puts("Répertoire de travail : #{File.cwd!()}")
 
 defmodule SIP.Test.Transact do
   use ExUnit.Case
+  require SIP.Transac
   doctest SIP.Transac
 
   test "Arm a T1 timer and check that it fires" do
     # Start fake transport layer
-    { :ok, t_pid } = GenServer.start_link(SIP.Test.Transport.UDPMockup, nil)
+    { :ok, t_pid } = GenServer.start(SIP.Test.Transport.UDPMockup, nil)
     { code, msg } = File.read("test/SIP-INVITE-BASIC-AUDIO.txt")
     assert code == :ok
     state = %{ state: :sending, t_isreliable: false, msgstr: msg,
@@ -61,28 +37,152 @@ defmodule SIP.Test.Transact do
         # Timer has fired - handle it and check that it refires
         assert ms == 1000
         { :noreply, _st } =  SIP.Trans.Timer.handle_timer({:timerT1, ms}, state)
+
+      _ ->
+        IO.puts("incorrect message received")
+        assert false
+    after
+      1_500 ->
+        IO.puts("No message received")
+        assert false
+    end
+
+    receive do
         _ ->
-          IO.puts("incorrect message received")
-          assert false
-      after
-        1_500 ->
-          IO.puts("No message received")
-          assert false
-      end
+        IO.puts("incorrect message received")
+        assert false
 
-      receive do
-          _ ->
-            IO.puts("incorrect message received")
-            assert false
-      after
-          2_500 ->
-            GenServer.call(state.tpid, :stop)
+    after
+      2_500 ->
+        GenServer.stop(state.tpid)
+        assert true
+    end
+  end
+
+  test "Arm a T2 timer and check that it fires" do
+    { code, msg } = File.read("test/SIP-INVITE-BASIC-AUDIO.txt")
+    assert code == :ok
+
+		{ code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
+			IO.puts("\n" <> errmsg)
+			IO.puts("Offending line #{lineno}: #{line}")
+			IO.puts("Error code #{code}")
+			end)
+    assert code == :ok
+
+    state = %{ state: :proceeding, t_isreliable: false, msgstr: msg,
+               sipmsg: parsed_msg, tmod: SIP.Test.Transport.UDPMockup, app: self() }
+    state = SIP.Trans.Timer.schedule_timer_T2(state, 200)
+    receive do
+      { :timeout, _tref, timer } ->
+        # Timer has fired - handle it and check that it requires transaction termination
+        case SIP.Trans.Timer.handle_timer(timer, state) do
+          { :stop, newstate, _reason } ->
             assert true
-      end
+            newstate
 
-      receive do
-        {:stop, _reference, :process, pid_to_monitor, reason} ->
-          IO.puts("Le processus s'est terminé avec la raison : #{inspect(reason)}")
-      end
+          _ ->
+            # Should reply with 'stop'
+            IO.puts("Unexpected answer from hande_timer()")
+            assert false
+        end
+
+      msg ->
+        IO.puts("Unexpected message received.")
+        IO.inspect(msg)
+        assert false
+
+    after
+      1_000 ->
+        IO.puts("Timer T2 has not fired")
+        assert false
+    end
+  end
+
+
+  test "Check that get_localip() works" do
+    assert is_bitstring( SIP.NetUtils.get_local_ipv4() )
+  end
+
+  defp create_sdp_body( ) do
+sdp = """
+v=0
+o=Elixip2 1 678901 IN IP4 <%= ipaddr %>
+s=-
+c=IN IP4 <%= ipaddr %>
+t=0 0
+a=tcap:1 RTP/AVPF
+m=audio 7344 RTP/AVP 9 8 111 0 101
+a=ptime:20
+a=silenceSupp:off - - - -
+a=rtpmap:9 G722/8000/1
+a=rtpmap:8 PCMA/8000/1
+a=rtpmap:111 opus/48000/2
+a=fmtp:111 maxplaybackrate=48000; sprop-maxcapturerate=16000; stereo=0; sprop-stereo=0; useinbandfec=0; usedtx=0
+a=rtpmap:0 PCMU/8000/1
+a=rtpmap:101 telephone-event/8000/1
+a=fmtp:101 0-16
+a=pcfg:1 t=1
+a=rtcp-fb:* nack
+a=sendrecv
+a=rtcp-mux
+a=ssrc:3202199976 cname:LVP_8088975@djanah.com
+a=ssrc:3202199976 mslabel:6994f7d1-6ce9-4fbd-acfd-84e5131ca2e2
+a=ssrc:3202199976 label:LiveVideoPlugin@audio
+m=video 7346 RTP/AVP 96
+b=AS:520
+b=TIAS:520000
+a=rtpmap:96 H264/90000
+a=fmtp:96 profile-level-id=420016; packetization-mode=1;max-br=520
+a=pcfg:1 t=1
+a=rtcp-fb:* ccm fir
+a=rtcp-fb:* ccm tmmbr
+a=rtcp-fb:* nack
+a=rtcp-fb:* nack pli
+a=rtcp-fb:* goog-remb
+a=sendrecv
+a=rtcp-mux
+a=ssrc:3202204423 cname:LVP_8088976@djanah.com
+a=ssrc:3202204423 mslabel:6994f7d1-6ce9-4fbd-acfd-84e5131ca2e2
+a=ssrc:3202204423 label:LiveVideoPlugin@video
+m=text 7348 RTP/AVP 98 99
+a=rtpmap:98 t140/1000
+a=fmtp:98 cps=30
+a=rtpmap:99 red/1000
+a=fmtp:99 98/98/98
+a=pcfg:1 t=1
+a=sendrecv
+a=rtcp-mux
+"""
+  end
+
+  defp create_invite_msg() do
+    invite_msg_str =
+"""
+INVITE sip:90901@visio5.visioassistance.net:5090 SIP/2.0
+P-Asserted-Identity: sip:+33970260233@visioassistance.net
+From: "Site%20Arras%20POLE%20EMPLOI"<sip:+33970260233@visioassistance.net>;tag=8075639
+To: <sip:90901@visioassistance.net>
+Contact: <sip:33970260233@<%= ipaddr %>:5070>
+Call-ID: 32645600-4c01-bc8f-670c-deac31158db8
+CSeq: 9678 INVITE
+Content-Type: application/sdp
+Content-Length: 1260
+Max-Forwards: 16
+User-Agent: Elixip 0.2.0
+
+"""
+    new_invite = Regex.replace(~r/\n(?<!\r\n)/, invite_msg_str <> create_sdp_body(), "\r\n")
+    EEx.eval_string( new_invite, ipaddr: SIP.NetUtils.get_local_ipv4() )
+  end
+
+  test "Cree une transaction SIP client INVITE" do
+    new_invite = create_invite_msg()
+
+    { :ok, invitemsg } = SIPMsg.parse(new_invite, fn code, errmsg, lineno, line ->
+			IO.puts("\n" <> errmsg)
+			IO.puts("Offending line #{lineno}: #{line}")
+			IO.puts("Error code #{code}")
+			end)
   end
 end
