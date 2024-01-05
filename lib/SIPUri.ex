@@ -107,12 +107,13 @@ defmodule SIP.Uri do
 					# test "Display Name" <....
 					String.contains?(part1, "\" <") ->
 						[ d_name, _truc ] = String.split( part1, "\" <")
-						URI.decode_www_form(String.slice(d_name, 1..-1))
+						URI.decode_www_form(String.slice(d_name, 1..-1//1))
 
 					# test "Display Name"<....
 					String.contains?(part1, "\"<") ->
 						[ d_name, _truc ] = String.split( part1, "\"<")
-						URI.decode_www_form(String.slice(d_name, 1..-1))
+						# URI.decode_www_form(String.slice(d_name, 1..-1))
+						URI.decode_www_form(String.slice(d_name, 1..-1//1))
 
 						# test DisplayName <....
 					String.contains?(part1, " <") ->

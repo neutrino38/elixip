@@ -19,7 +19,7 @@ defmodule SIPMsgOps do
       raise "Invalid port #{local_port} for via header"
     end
 
-    if String.capitalize(transport) not in ["UDP", "TCP", "TLS", "WS", "WSS"] do
+    if String.upcase(transport, :ascii) not in ["UDP", "TCP", "TLS", "WS", "WSS"] do
       raise "Invalid transport #{transport} for via header"
     end
 

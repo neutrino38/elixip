@@ -208,4 +208,14 @@ defmodule SIP.NetUtils do
   def get_local_ipv4() do
     hd(SIP.NetUtils.get_local_ips( [ :ipv4 ])) |> :inet.ntoa( ) |> List.to_string()
   end
+
+  def ip2string(ipaddr) do
+    ret = :inet.ntoa(ipaddr)
+    if is_list(ret) do
+      to_string(ret)
+    else
+      # Error case (:einval)
+      ret
+    end
+  end
 end

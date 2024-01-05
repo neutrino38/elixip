@@ -33,14 +33,14 @@ defmodule SIP.Test.NetUtils do
   end
 
   test "Compute an IP V6 network" do
-    { :ok, ipv6 } = :inet.parse_address(~c"2a01:cb15:810f:7900:4d3c:2081:792b:863a")
+    { :ok, _ipv6 } = :inet.parse_address(~c"2a01:cb15:810f:7900:4d3c:2081:792b:863a")
     netw = SIP.NetUtils.cidr_network( {10753, 51989, 33039, 30976, 19772, 8321, 31019, 34362}, 64)
     assert netw == {10753, 51989, 33039, 30976, 0, 0, 0, 0}
     assert :inet.ntoa(netw) == ~c"2a01:cb15:810f:7900::"
   end
 
   test "Compute an IP V6 netmask" do
-    { :ok, ipv6 } = :inet.parse_address(~c"2a01:cb15:810f:7900:4d3c:2081:792b:863a")
+    { :ok, _ipv6 } = :inet.parse_address(~c"2a01:cb15:810f:7900:4d3c:2081:792b:863a")
     netm = SIP.NetUtils.cidr_netmask( {10753, 51989, 33039, 30976, 19772, 8321, 31019, 34362}, 64)
     assert :inet.ntoa(netm) == ~c"ffff:ffff:ffff:ffff::"
   end

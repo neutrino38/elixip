@@ -9,7 +9,7 @@ defmodule SIP.Transac do
     #Create the registry
     case Registry.start_link(keys: :unique, name: Registry.SIPTransaction) do
       { :ok, pid } ->
-        Logger.info("SIP transaction layer started with PID #{pid}")
+        Logger.info("SIP transaction layer started with PID #{inspect(pid)}")
         :ok
 
       { code, _pid } ->
@@ -22,6 +22,7 @@ defmodule SIP.Transac do
   Start an INVITE client transaction (ICT)
   - first arg is the SIP message to send
   - second arg is a function that will loopkup a transport process
+  - it returns a pid that represent the transaction. The process is a GenServer
   """
   def start_uac_transaction(sipmsg, transport_selector_fn, ring_timeout) when is_map(sipmsg) and sipmsg.method == :INVITE do
     # Generate the branch ID
@@ -30,15 +31,24 @@ defmodule SIP.Transac do
 
     # Use callback passed to select transport
     case transport_selector_fn.(sipmsg.ruri) do
-      { :ok, local_ip, local_port, transport_str, t_mod, t_pid } ->
-        sipmsg = SIPMsgOps.add_via(sipmsg, { local_ip, local_port, transport_str }, branch_id)
+      { :ok, t_mod, t_pid } ->
+        # Get the transport name frm the module
+        transport_str = apply(t_mod, :transport_str, [])
+
+        # Get the local and IP port from the transport process
+        { :ok, local_ip, local_port  } = GenServer.call(t_pid, :getlocalipandport)
+        local_ip_str = SIP.NetUtils.ip2string(local_ip)
+
+        #Add the topmost via header
+        sipmsg = SIPMsgOps.add_via(sipmsg, { local_ip_str, local_port, transport_str }, branch_id)
 
         # Start a new GenServer for each transaction and register it in Registry.SIPTransaction
+        # The process created IS the transaction
         name = {:via, Registry, {Registry.SIPTransaction, branch_id, :cast }}
         transact_params = { t_mod, t_pid, sipmsg, self(), ring_timeout }
         case GenServer.start_link(SIP.ICT, transact_params, name: name ) do
           { :ok, trans_pid } ->
-            Logger.debug([ transid: branch_id, message: "Created invite client transaction with PID #{trans_pid}." ])
+            Logger.debug([ transid: branch_id, message: "Created invite client transaction with PID #{inspect(trans_pid)}." ])
             { :ok, trans_pid }
 
           { code, err } ->
@@ -46,9 +56,9 @@ defmodule SIP.Transac do
             { code, err }
         end
 
-      code ->
-        ruri_str = SIP.Uri.serialize(sipmsg.ruri)
-        Logger.error("Failed to select transport for request URI #{ruri_str}. Error = #{code}")
+      _ ->
+        { _err, ruri_str } = SIP.Uri.serialize(sipmsg.ruri)
+        Logger.error("Failed to select transport for request URI #{ruri_str}.")
         { :no_transport_available, nil }
     end
   end

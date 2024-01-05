@@ -7,11 +7,11 @@ defmodule SIP.MsgTemplate do
   end
 
   @doc "Generate a SIP message string from a template"
-  def apply(msgemplate, bindings \\ []) do
+  def apply_template(msg_template, bindings \\ []) do
     bindings = add_default_bindings( bindings)
 
     # Split headers an bodies. Compute content length
-    [ headers, body, clen ] = case String.split(msgemplate, "\n\n", parts: 2) do
+    [ headers, body, clen ] = case String.split(msg_template, "\n\n", parts: 2) do
       [ headers, body ] ->
         body = EEx.eval_string( body, bindings )
         body = Regex.replace(~r/\n(?<!\r\n)/, body, "\r\n")
@@ -21,7 +21,7 @@ defmodule SIP.MsgTemplate do
     end
 
     # Apply header template
-    headers = EEx.eval_string( headers, bindings ++ [ :content_length, clen ] )
+    headers = EEx.eval_string( headers, bindings ++ [ content_length: clen ] )
     headers = Regex.replace(~r/\n(?<!\r\n)/, headers, "\r\n")
     if is_nil(body) do
       headers
@@ -30,6 +30,7 @@ defmodule SIP.MsgTemplate do
     end
   end
 
+  @doc "Generate a SIP message structure from a template"
   def apply_and_build(msgemplate, fn_parse_cb, bindings \\ []) do
     apply(msgemplate, bindings) |> SIPMsg.parse(fn_parse_cb)
   end

@@ -7,14 +7,20 @@ defmodule SIP.Test.Transport.UDPMockup do
   require SIP.Transac
   import SIPMsgOps
 
-   # Callbacks
+  @destproxy "1.2.3.4"
+  @destport 5080
 
-  @remote_ip "200.1.2.3"
-  @remote_port 5080
+  @transport_str "udp"
+  def transport_str, do: @transport_str
+
+  def is_reliable, do: false
+
+   # Callbacks
 
   @impl true
   def init(nil) do
-    initial_state = %{ t_isreliable: false }
+    ips = SIP.NetUtils.get_local_ips( [ :ipv4 ] )
+    initial_state = %{ t_isreliable: false, localip: hd(ips), localport: 5060 }
     { :ok, initial_state }
   end
 
@@ -22,6 +28,11 @@ defmodule SIP.Test.Transport.UDPMockup do
   def handle_call({ :sendmsg, msgstr }, _from, state) do
     Logger.debug("Transport mockeup: Message sent ---->\r\n" <> msgstr <> "\r\n-----------------")
     { :reply, :ok, state}
+  end
+
+  # Obtain localip and port values
+  def handle_call(:getlocalipandport, _from, state) do
+    { :reply, { :ok, state.localip, state.localport }, state}
   end
 
   @impl true

@@ -27,7 +27,7 @@ defmodule SIP.ICT do
 
     case safe_serialize(sipmsg, initial_state) do
       {:ok, initial_state} ->
-        case GenServer.call(t_pid, :sendmsg, initial_state.msgstr ) do
+        case GenServer.call(t_pid, { :sendmsg, initial_state.msgstr }  ) do
           :ok ->
             if not initial_state.t_isreliable do
               schedule_timer_T1(initial_state)

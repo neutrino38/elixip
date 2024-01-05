@@ -107,9 +107,9 @@ defmodule SIP.Test.Transact do
   defp create_sdp_body( ) do
 sdp = """
 v=0
-o=Elixip2 1 678901 IN IP4 <%= ipaddr %>
+o=Elixip2 1 678901 IN IP4 <%= local_ip %>
 s=-
-c=IN IP4 <%= ipaddr %>
+c=IN IP4 <%= local_ip %>
 t=0 0
 a=tcap:1 RTP/AVPF
 m=audio 7344 RTP/AVP 9 8 111 0 101
@@ -154,35 +154,48 @@ a=pcfg:1 t=1
 a=sendrecv
 a=rtcp-mux
 """
+    sdp
   end
 
-  defp create_invite_msg() do
+  defp create_invite_msg(bindings) do
     invite_msg_str =
 """
 INVITE sip:90901@visio5.visioassistance.net:5090 SIP/2.0
 P-Asserted-Identity: sip:+33970260233@visioassistance.net
 From: "Site%20Arras%20POLE%20EMPLOI"<sip:+33970260233@visioassistance.net>;tag=8075639
 To: <sip:90901@visioassistance.net>
-Contact: <sip:33970260233@<%= ipaddr %>:5070>
+Contact: <sip:33970260233@<%= local_ip %>:<%= local_port %>>
 Call-ID: 32645600-4c01-bc8f-670c-deac31158db8
 CSeq: 9678 INVITE
 Content-Type: application/sdp
-Content-Length: 1260
+Content-Length: <%= content_length %>
 Max-Forwards: 16
 User-Agent: Elixip 0.2.0
 
 """
-    new_invite = Regex.replace(~r/\n(?<!\r\n)/, invite_msg_str <> create_sdp_body(), "\r\n")
-    EEx.eval_string( new_invite, ipaddr: SIP.NetUtils.get_local_ipv4() )
+    SIP.MsgTemplate.apply_template(invite_msg_str <> create_sdp_body(), bindings)
   end
 
-  test "Cree une transaction SIP client INVITE" do
-    new_invite = create_invite_msg()
+  test "Cree une transaction SIP client INVITE - sans utiliser le selecteur de transport" do
+    SIP.Transac.start()
+    { :ok, transport_pid } = GenServer.start_link(SIP.Test.Transport.UDPMockup, nil, name: UDPMockup )
+    { :ok, local_ip, local_port  } = GenServer.call(transport_pid, :getlocalipandport)
+
+    bindings = [ local_ip: :inet.ntoa(local_ip), local_port: local_port ]
+
+    new_invite = create_invite_msg(bindings)
 
     { :ok, invitemsg } = SIPMsg.parse(new_invite, fn code, errmsg, lineno, line ->
 			IO.puts("\n" <> errmsg)
 			IO.puts("Offending line #{lineno}: #{line}")
 			IO.puts("Error code #{code}")
 			end)
+
+    dummy_transport_selector = fn _ruri ->
+
+      { :ok, SIP.Test.Transport.UDPMockup, transport_pid}
+    end
+
+    { :ok, _uac_t } = SIP.Transac.start_uac_transaction(invitemsg, dummy_transport_selector, 90)
   end
 end
