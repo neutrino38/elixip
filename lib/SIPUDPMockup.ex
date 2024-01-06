@@ -5,17 +5,27 @@ defmodule SIP.Test.Transport.UDPMockup do
   use GenServer
   require Logger
   require SIP.Transac
+  require SIPMsg
   import SIPMsgOps
 
   @destproxy "1.2.3.4"
   @destport 5080
+  @ringing_time 2000
 
   @transport_str "udp"
   def transport_str, do: @transport_str
 
   def is_reliable, do: false
 
-   # Callbacks
+  # Simulated call scenarii
+
+  def simulate_successful_answer(t_pid) do
+    GenServer.cast(t_pid, {:simulate, 100, 200})
+  end
+
+
+  # Callbacks
+
 
   @impl true
   def init(nil) do
@@ -27,7 +37,14 @@ defmodule SIP.Test.Transport.UDPMockup do
   @impl true
   def handle_call({ :sendmsg, msgstr }, _from, state) do
     Logger.debug("Transport mockeup: Message sent ---->\r\n" <> msgstr <> "\r\n-----------------")
-    { :reply, :ok, state}
+    case SIPMsg.parse(msgstr, fn code, errmsg, lineno, line ->
+			IO.puts("\n" <> errmsg)
+			IO.puts("Offending line #{lineno}: #{line}")
+			IO.puts("Error code #{code}")
+			end) do
+        { :ok, sipreq } -> { :reply, :ok, Map.put(state, :req, sipreq) }
+        _ ->  { :reply, :invalidreq, state }
+      end
   end
 
   # Obtain localip and port values
@@ -35,23 +52,32 @@ defmodule SIP.Test.Transport.UDPMockup do
     { :reply, { :ok, state.localip, state.localport }, state}
   end
 
+  # Simulate Answers
   @impl true
-  @spec handle_cast({:simulate, 100, map(), non_neg_integer()}, map()) :: { :noreply, map() }
-  def handle_cast( { :simulate, 100, sipreq, after_ms }, state) do
-    siprsp = reply_to_request(sipreq, 100, "Trying")
-    Process.send_after(self(), { :simu, siprsp }, after_ms)
+  @spec handle_cast({:simulate, 100, non_neg_integer()}, map()) :: { :noreply, map() }
+  def handle_cast( { :simulate, 100, after_ms }, state) do
+    siprsp = reply_to_request(state.req, 100, "Trying")
+    Process.send_after(self(), { :recv, siprsp }, after_ms)
     { :noreply,  state}
   end
 
-  def handle_cast( { :simulate, 180, sipreq, after_ms }, state) do
-    siprsp = reply_to_request(sipreq, 180, "Ringing")
-    Process.send_after(self(), { :simu, siprsp }, after_ms)
+  @spec handle_cast({:simulate, 180, non_neg_integer()}, map()) :: { :noreply, map() }
+  def handle_cast( { :simulate, 180, after_ms }, state) do
+    siprsp = reply_to_request(state.req, 180, "Ringing")
+    Process.send_after(self(), { :recv, siprsp }, after_ms)
     { :noreply,  state}
   end
 
   @impl true
-  def handle_info({ :simu, siprsp}, state) do
+  def handle_info({ :recv, siprsp}, state) do
     SIP.Transac.process_sip_message(SIPMsg.serialize(siprsp))
+    case siprsp.response_code do
+      100 ->
+          # We received the 100 Trying -- simulate a 180 ringing after some time
+          GenServer.cast(self(), { :simulate, { 180, @ringing_time } })
+
+      _ -> nil
+    end
     state
   end
 end

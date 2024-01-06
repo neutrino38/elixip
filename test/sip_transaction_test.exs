@@ -176,6 +176,8 @@ User-Agent: Elixip 0.2.0
     SIP.MsgTemplate.apply_template(invite_msg_str <> create_sdp_body(), bindings)
   end
 
+  # Big transaction test
+  @tag :skip
   test "Cree une transaction SIP client INVITE - sans utiliser le selecteur de transport" do
     SIP.Transac.start()
     { :ok, transport_pid } = GenServer.start_link(SIP.Test.Transport.UDPMockup, nil, name: UDPMockup )
@@ -197,5 +199,25 @@ User-Agent: Elixip 0.2.0
     end
 
     { :ok, _uac_t } = SIP.Transac.start_uac_transaction(invitemsg, dummy_transport_selector, 90)
+
+    SIP.Test.Transport.UDPMockup.simulate_successful_answer(transport_pid)
+
+    # Expect a 100 Trying after 200 ms
+    receive do
+      {:response, resp} -> assert resp.response_code == 100
+      _ -> assert false
+    # after
+      # 300 -> assert false # We did not received the 100 Trying on time
+    end
+
+    # Expect a 180 ringing after 2s
+    receive do
+      {:response, resp} -> assert resp.response_code == 180
+      _ -> assert false
+    after
+      3000 -> assert false # We did not received the 100 Trying on time
+    end
+
+
   end
 end

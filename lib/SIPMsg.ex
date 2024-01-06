@@ -572,7 +572,7 @@ defmodule SIPMsg do
 	defp serialize_headers(sipmsg) do
 		header_order1 = [ :via, :from, :to, :callid, :cseq ]
 		header_order2 = [ :useragent, :contenttype, :contentlength ]
-		toskip = [ :transid, :body, :dialog_id, :boundary, :method, :response, :reason, :ruri ]
+		toskip = [ :transid, :body, :dialog_id, :boundary, :method, :response, :reason, :ruri, :response_code ]
 
 		remaining_headers = Enum.reduce(sipmsg, [], fn {k, _v}, acc ->
 			if k not in header_order1 and k not in toskip and k not in header_order2 do

@@ -83,10 +83,12 @@ defmodule SIPMsgOps do
     sipmsg
   end
 
+  @reply_filter [ :via, :to, :from, :route, "Max-Forward", :cseq, :callid, :contentlength, :ruri ]
+
   @doc "Build a SIP reply given a SIP request"
   def reply_to_request(req, resp_code, reason) when is_atom(req.method) and resp_code in 100..199 do
     resp_filter = fn { k, _v } ->
-      k in [ :via, :to, :from, :route, "Max-Forward", :cseq, :callid, :contentlength ]
+      k in @reply_filter
     end
 
     fieldlist = [
@@ -96,12 +98,12 @@ defmodule SIPMsgOps do
       {:response_code, resp_code},
       {:body, []}]
 
-    req |> update_sip_msg(fieldlist) |> Map.filter(resp_filter)
+    req |> Map.filter(resp_filter) |> update_sip_msg(fieldlist)
   end
 
   def reply_to_request(req, resp_code, reason) when is_atom(req.method) and resp_code in 400..699 do
     resp_filter = fn { k, _v } ->
-      k in [ :via, :to, :from, :route, "Max-Forward", :cseq, :callid, :contentlength ]
+      k in @reply_filter
     end
 
     fieldlist = [
@@ -111,7 +113,7 @@ defmodule SIPMsgOps do
       {:response_code, resp_code},
       {:body, []}]
 
-    req |> update_sip_msg(fieldlist) |> Map.filter(resp_filter)
+      req |> Map.filter(resp_filter) |> update_sip_msg(fieldlist)
   end
 
   @doc "Crée un message ACK à partir d'une requête existante"
