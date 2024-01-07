@@ -1,9 +1,15 @@
 import Config
+config :logger,
+  backends: [:console, {LoggerFileBackend, :file_log}]
+
+
 config :logger, :console,
   format: "[$level] $message\n",
   metadata: [:pid, :module, :function, :file, :line],
   level: :info
 
-config :logger, :file,
+
+config :logger, :file_log,
   path: "elixip.log",
+  format: "$time [$level] $message \n",
   level: :debug  # Niveau de journalisation souhaité (par exemple, :info, :warn, :error, :debug, etc.)
