@@ -17,7 +17,7 @@ defmodule SIP.Test.SIPMsgOps do
 
     siprsp = SIPMsgOps.reply_to_request(parsed_msg, 100, "Trying")
     assert siprsp.method == false
-    assert siprsp.response_code == 100
+    assert siprsp.response == 100
 
     _siprsp_str = SIPMsg.serialize(siprsp)
 

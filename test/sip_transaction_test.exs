@@ -97,6 +97,21 @@ defmodule SIP.Test.Transact do
         IO.puts("Timer T2 has not fired")
         assert false
     end
+
+    # Process the timer message sent to the app layer
+    receive do
+      { :timeout, :timer_T2 } ->
+        assert true
+
+      _ ->
+        assert false
+
+      after
+        1_000 ->
+          IO.puts("Did not received timemout layer message")
+          assert false
+      end
+
   end
 
 
@@ -177,7 +192,6 @@ User-Agent: Elixip 0.2.0
   end
 
   # Big transaction test
-  @tag :skip
   test "Cree une transaction SIP client INVITE - sans utiliser le selecteur de transport" do
     SIP.Transac.start()
     { :ok, transport_pid } = GenServer.start_link(SIP.Test.Transport.UDPMockup, nil, name: UDPMockup )
@@ -204,7 +218,10 @@ User-Agent: Elixip 0.2.0
 
     # Expect a 100 Trying after 200 ms
     receive do
-      {:response, resp} -> assert resp.response_code == 100
+      {:response, resp} ->
+        assert resp.response == 100
+        IO.puts("Received 100")
+
       _ -> assert false
     # after
       # 300 -> assert false # We did not received the 100 Trying on time
@@ -212,10 +229,17 @@ User-Agent: Elixip 0.2.0
 
     # Expect a 180 ringing after 2s
     receive do
-      {:response, resp} -> assert resp.response_code == 180
-      _ -> assert false
+      {:response, resp} -> assert resp.response == 180
+
+      {:timeout, :timer_T2} ->
+        IO.puts("T2 timer expired before 180 Ringing")
+        assert false
+
+      bla ->
+        IO.puts("Received #{bla}")
+        assert false
     after
-      3000 -> assert false # We did not received the 100 Trying on time
+      3_000 -> assert false # We did not received the 180 Ringing on time
     end
 
 

@@ -199,6 +199,9 @@ defmodule SIP.Test.Parser do
 			assert parsed_msg.method == false
 			assert parsed_msg.response == 180
 			assert parsed_msg.transid == "z9hG4bK18d9.829852dcccb559fa7184dc4ab9a406e8.0"
+
+			# Reserialize it
+			_str = SIPMsg.serialize(parsed_msg)
 		end
 
 		test "Parse an 200 response sent by the LiveVideoPlugin" do
