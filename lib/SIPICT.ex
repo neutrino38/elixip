@@ -30,7 +30,7 @@ defmodule SIP.ICT do
         case GenServer.call(t_pid, { :sendmsg, initial_state.msgstr }  ) do
           :ok ->
             if not initial_state.t_isreliable do
-              schedule_timer_T1(initial_state)
+              schedule_timer_A(initial_state)
             end
             { :ok, initial_state }
 
@@ -110,12 +110,12 @@ defmodule SIP.ICT do
         # Send provisional response to app layer
         send(state.app, { :response, sipmsg })
         Logger.debug([ transid: sipmsg.transid, message: "state: sending -> proceeding"])
-        state = schedule_timer_T2(state, state.t2)
+        state = schedule_timer_B(state, state.t2 * 1000)
         %{ state | state: :proceeding }
 
       :proceeding ->
-        send(sipmsg.app, { :response, sipmsg })
-        schedule_timer_T2(state, state.t2)
+        send(state.app, { :response, sipmsg })
+        state
 
       _ ->
         Logger.debug([ transid: sipmsg.transid, message: "state: #{state.state}. Ignoring resp."])
@@ -209,8 +209,8 @@ defmodule SIP.ICT do
 
   @impl true
   # Handle T1 time retransmission
-  def handle_info({ :timerT1, ms }, state) do
-    case handle_timer({ :timerT1, ms }, state) do
+  def handle_info({ :timerA, ms }, state) do
+    case handle_timer({ :timerA, ms }, state) do
       { :noreply, newstate } -> { :noreply, newstate }
       { :stop, _reason, state} ->
         GenServer.stop(self())

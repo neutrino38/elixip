@@ -6,19 +6,19 @@ defmodule SIP.Test.Transact do
   require SIP.Transac
   doctest SIP.Transac
 
-  test "Arm a T1 timer and check that it fires" do
+  test "Arm a timer A and check that it fires" do
     # Start fake transport layer
     { :ok, t_pid } = GenServer.start(SIP.Test.Transport.UDPMockup, nil)
     { code, msg } = File.read("test/SIP-INVITE-BASIC-AUDIO.txt")
     assert code == :ok
     state = %{ state: :sending, t_isreliable: false, msgstr: msg,
                tmod: SIP.Test.Transport.UDPMockup, tpid: t_pid }
-    state = SIP.Trans.Timer.schedule_timer_T1(state)
+    state = SIP.Trans.Timer.schedule_timer_A(state)
     state = receive do
-      { :timerT1, ms } ->
+      { :timerA, ms } ->
         # Timer has fired - handle it and check that it refires
         assert ms == 500
-        { :noreply, st } =  SIP.Trans.Timer.handle_timer({:timerT1, ms}, state)
+        { :noreply, st } =  SIP.Trans.Timer.handle_timer({:timerA, ms}, state)
         # Emulate a provisional response
         %{ st | state: :proceeding }
       _ ->
@@ -33,10 +33,10 @@ defmodule SIP.Test.Transact do
     assert state.state == :proceeding
 
     receive do
-      { :timerT1, ms } ->
+      { :timerA, ms } ->
         # Timer has fired - handle it and check that it refires
         assert ms == 1000
-        { :noreply, _st } =  SIP.Trans.Timer.handle_timer({:timerT1, ms}, state)
+        { :noreply, _st } =  SIP.Trans.Timer.handle_timer({:timerA, ms}, state)
 
       _ ->
         IO.puts("incorrect message received")
@@ -59,7 +59,7 @@ defmodule SIP.Test.Transact do
     end
   end
 
-  test "Arm a T2 timer and check that it fires" do
+  test "Arm a timer B and check that it fires" do
     { code, msg } = File.read("test/SIP-INVITE-BASIC-AUDIO.txt")
     assert code == :ok
 
@@ -72,7 +72,7 @@ defmodule SIP.Test.Transact do
 
     state = %{ state: :proceeding, t_isreliable: false, msgstr: msg,
                sipmsg: parsed_msg, tmod: SIP.Test.Transport.UDPMockup, app: self() }
-    state = SIP.Trans.Timer.schedule_timer_T2(state, 200)
+    state = SIP.Trans.Timer.schedule_timer_B(state, 200)
     receive do
       { :timeout, _tref, timer } ->
         # Timer has fired - handle it and check that it requires transaction termination
@@ -94,13 +94,13 @@ defmodule SIP.Test.Transact do
 
     after
       1_000 ->
-        IO.puts("Timer T2 has not fired")
+        IO.puts("Timer B has not fired")
         assert false
     end
 
     # Process the timer message sent to the app layer
     receive do
-      { :timeout, :timer_T2 } ->
+      { :timeout, :timerB } ->
         assert true
 
       _ ->

@@ -1,17 +1,17 @@
 defmodule SIP.Trans.Timer do
   require Logger
-  @timer_T1_val 32000
+  @timer_T1_val 500
   @timer_T2_val 4000
 
   # Arm T1 timer
-  def schedule_timer_T1(state, ms \\ 500) do
-    Process.send_after(self(), { :timerT1, ms }, ms )
+  def schedule_timer_A(state, ms \\ @timer_T1_val) do
+    Process.send_after(self(), { :timerA, ms }, ms )
     state
   end
 
-  @spec schedule_timer_T2(map(), non_neg_integer()) :: map()
-  def schedule_timer_T2(state, ms \\ @timer_T2_val) do
-    schedule_generic_timer(state, :timerT2, :t2_ref, ms)
+  @spec schedule_timer_B(map(), non_neg_integer()) :: map()
+  def schedule_timer_B(state, ms \\ 64 * @timer_T1_val) do
+    schedule_generic_timer(state, :timerB, :tB_ref, ms)
   end
 
   @doc """
@@ -39,7 +39,8 @@ defmodule SIP.Trans.Timer do
 
       # Schedule timer
       millis when millis > 0 ->
-        tref = :erlang.start_timer(millis, self(), timer_id)
+        IO.puts("Scheduling timer #{timer_id} after #{ms} ms")
+        tref = :erlang.start_timer(ms, self(), timer_id)
         Map.put(state, timer_field, tref)
     end
   end
@@ -50,7 +51,7 @@ defmodule SIP.Trans.Timer do
   end
 
   @doc "Handle timer messages"
-  def handle_timer({ :timerT1, ms }, state) when ms < @timer_T1_val and state.state == :sending do
+  def handle_timer({ :timerA, ms }, state) when ms < @timer_T2_val and state.state == :sending do
     if not state.t_isreliable do
       # If transport is not reliable, retransmit
       code = GenServer.call(state.tpid, { :sendmsg, state.msgstr } )
@@ -58,28 +59,28 @@ defmodule SIP.Trans.Timer do
         Logger.error([ transid: state.sipmsg.transid, message: "timer_T1: Fail to retransmit message: #{code}"])
       end
     end
-    schedule_timer_T1(state, ms*2)
+    schedule_timer_A(state, ms*2)
     { :noreply, state }
   end
 
-  def handle_timer({ :timerT1, ms }, state) when ms >= @timer_T1_val and state.state == :sending do
-    Logger.error([ transid: state.sipmsg.transid, message: "timer_T1: transaction timed out (retrans)."])
-    send(state.sipmsg.app, {:timeout, :timer_T1})
-    { :stop, state, "timer_T1: transaction timed out (retrans)." }
+  def handle_timer({ :timerA, ms }, state) when ms >= @timer_T2_val and state.state == :sending do
+    Logger.error([ transid: state.sipmsg.transid, message: "timer_A: max restransmition delay expired."])
+    send(state.sipmsg.app, {:timeout, :timerA})
+    { :stop, state, "timer_A: max restransmition delay expired." }
   end
 
-  def handle_timer({ :timerT1, _ms }, state) when state.state != :sending do
+  def handle_timer({ :timerA, _ms }, state) when state.state != :sending do
     { :noreply, state }
   end
 
-  def handle_timer( :timerT2, state) when state.state == :proceeding do
-    send(state.app, {:timeout, :timer_T2})
+  def handle_timer( :timerB, state) when state.state == :proceeding do
+    send(state.app, {:timeout, :timerB})
     if state.sipmsg.method == :INVITE do
       Logger.info([ transid: state.sipmsg.transid, message: "INVITE not answered on time."])
     else
-      Logger.error([ transid: state.sipmsg.transid, message: "timer_T2: no final response received on time."])
+      Logger.error([ transid: state.sipmsg.transid, message: "timer_B: should not be used in NICT."])
     end
-    { :stop, state, "timer_T2: no final response receveived on time." }
+    { :stop, state, "timer_B: no final response receveived on time." }
   end
 
   def handle_timer( :timerK, state) when state.state in [ :confirmed, :terminated ] do
