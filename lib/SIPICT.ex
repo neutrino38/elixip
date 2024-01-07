@@ -50,18 +50,18 @@ defmodule SIP.ICT do
   # CANCEL  current transaction from dialog layer
   def handle_call(:cancel, _from, state) do
     if state.state in [ :sending, :proceeding ] do
-      cancel = state.sipmsg |> SIPMsgOps.cancel_request() |> SIPMsg.serialize()
-      Logger.info([ transid: state.sipmsg.transid, message: "ICT: sending CANCEL"])
+      cancel = state.msg |> SIPMsgOps.cancel_request() |> SIPMsg.serialize()
+      Logger.info([ transid: state.msg.transid, message: "ICT: sending CANCEL"])
       case GenServer.call(state.tpid, { :sendmsg, cancel }  ) do
         :ok ->
           { :reply, :ok, %{ state | state: :cancelling }}
 
         code ->
-          Logger.error([ transid: state.sipmsg.transid, message: "ICT: Fail to send CANCEL message #{code}"])
+          Logger.error([ transid: state.msg.transid, message: "ICT: Fail to send CANCEL message #{code}"])
           { :reply, :transport_error, state}
       end
     else
-      Logger.debug([ transid: state.sipmsg.transid, message: "Cannot CANCEL transaction in #{state.state} state"])
+      Logger.debug([ transid: state.msg.transid, message: "Cannot CANCEL transaction in #{state.state} state"])
       { :reply, :bad_state, state}
     end
   end
@@ -78,22 +78,22 @@ defmodule SIP.ICT do
         {:ok, rcontact} -> rcontact
         :error -> nil
       end
-      ack_sent = state.sipmsg |> SIPMsgOps.ack_request(remote_contact, routeset) |> SIPMsg.serialize()
-      Logger.info([ transid: state.sipmsg.transid, message: "Sending ACK"])
+      ack_sent = state.msg |> SIPMsgOps.ack_request(remote_contact, routeset) |> SIPMsg.serialize()
+      Logger.info([ transid: state.msg.transid, message: "Sending ACK"])
       case GenServer.call(state.tpid, {:sendmsg, ack_sent} ) do
         :ok ->
           if state.t_isreliable do
-            Logger.debug([ transid: state.sipmsg.transid, message: "ACK sent: #{state.state} -> terminated"])
+            Logger.debug([ transid: state.msg.transid, message: "ACK sent: #{state.state} -> terminated"])
             schedule_timer_K(state, 0)
             { :reply, :ok, %{ state | ack: ack_sent, state: :terminated }}
           else
             # RFC 3261 clause 17.1.2.2 arm timer K for unreliable transport
-            Logger.debug([ transid: state.sipmsg.transid, message: "ACK sent. Arming timer_K"])
+            Logger.debug([ transid: state.msg.transid, message: "ACK sent. Arming timer_K"])
             state = %{ schedule_timer_K(state, 5000) | ack: ack_sent }
             { :reply, :ok, state }
           end
         code ->
-          Logger.error([ transid: state.sipmsg.transid, message: "ICT: Fail to send ACK message #{code}"])
+          Logger.error([ transid: state.msg.transid, message: "ICT: Fail to send ACK message #{code}"])
           # Arm a timer to destroy the transaction
           { :reply, :transport_error, state}
       end
@@ -102,7 +102,7 @@ defmodule SIP.ICT do
 
   # Handle privisional (1xx) responses
   defp handle_sip_response(state, sipmsg) when SIPMsgOps.is_1xx_resp(sipmsg) do
-    Logger.debug([ transid: sipmsg.transid, message: "Received prov resp #{sipmsg.response_code}"])
+    Logger.debug([ transid: sipmsg.transid, message: "Received prov resp #{sipmsg.response}"])
     case state.state do
       :sending ->
         # Todo: support 100rel and send PRACK
@@ -125,7 +125,7 @@ defmodule SIP.ICT do
 
   # Handle OK responses (2xx)
   defp handle_sip_response(state, sip_resp) when SIPMsgOps.is_2xx_resp(sip_resp) do
-    Logger.debug([ transid: sip_resp.transid, message: "Received #{sip_resp.response_code} final resp"])
+    Logger.debug([ transid: sip_resp.transid, message: "Received #{sip_resp.response} final resp"])
     cond do
       state.state in [ :sending, :proceeding ] ->
         send(state.app, { :response, sip_resp })
@@ -154,7 +154,7 @@ defmodule SIP.ICT do
 
   # Handle 4xx, 5xx, 6xx responses
   defp handle_sip_response(state, sipmsg) when SIPMsgOps.is_failure_resp(sipmsg) do
-    Logger.debug([ transid: sipmsg.transid, message: "Received #{sipmsg.response_code} failure resp"])
+    Logger.debug([ transid: sipmsg.transid, message: "Received #{sipmsg.response} failure resp"])
     cond do
       state.state in [ :sending, :proceeding ] ->
         # Send the message to the application layer
@@ -175,10 +175,10 @@ defmodule SIP.ICT do
   end
 
   defp handle_cancel_response(state, siprsp) do
-    if siprsp.response_code == 200 do
+    if siprsp.response == 200 do
       state
     else
-      send(state.app, { :cancel_rejected, siprsp.response_code})
+      send(state.app, { :cancel_rejected, siprsp.response})
       state
     end
   end
@@ -186,23 +186,23 @@ defmodule SIP.ICT do
    # Process SIP response from transport layer
   def handle_cast({ :onsipmsg, siprsp }, state) do
     cond do
-      is_atom(siprsp.method) ->
-        Logger.warning([ transid: state.sipmsg.transid, message: "Received an #{siprsp.method} SIP request. But this is a client transaction'"])
+      siprsp.method != false ->
+        Logger.warning([ transid: state.msg.transid, message: "Received an #{siprsp.method} SIP request. But this is a client transaction'"])
         {:noreply, state}
 
       # The response matches the INVITE req
-      state.sipmsg.cseq == siprsp.cseq ->
+      state.msg.cseq == siprsp.cseq ->
         new_state = handle_sip_response(state, siprsp)
         {:noreply, new_state}
 
 
       # The response matches the CANCEL req
-      siprsp.cseq == { hd(state.sipmsg.cseq), :CANCEL } ->
+      siprsp.cseq == { hd(state.msg.cseq), :CANCEL } ->
         new_state = handle_cancel_response(state, siprsp)
         {:noreply, new_state}
 
       true ->
-        Logger.warning([ transid: state.sipmsg.transid, message: "Response CSeq #{siprsp.cseq} does not match transaction requests'"])
+        Logger.warning([ transid: state.msg.transid, message: "Response CSeq #{siprsp.cseq} does not match transaction requests'"])
         {:noreply, state}
     end
   end

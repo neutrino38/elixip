@@ -8,9 +8,9 @@ defmodule SIP.Test.Transport.UDPMockup do
   require SIPMsg
   import SIPMsgOps
 
-  @destproxy "1.2.3.4"
-  @destport 5080
-  @ringing_time 2000
+  # @destproxy "1.2.3.4"
+  # @destport 5080
+#  @ringing_time 2000
 
   @transport_str "udp"
   def transport_str, do: @transport_str
@@ -64,20 +64,26 @@ defmodule SIP.Test.Transport.UDPMockup do
   @spec handle_cast({:simulate, 180, non_neg_integer()}, map()) :: { :noreply, map() }
   def handle_cast( { :simulate, 180, after_ms }, state) do
     siprsp = reply_to_request(state.req, 180, "Ringing")
+    Logger.debug([transid: state.req.transid, module: SIP.Test.Transport.UDPMockup,
+                 message: "Simulating a 180 Ringing after #{after_ms} ms."])
+
     Process.send_after(self(), { :recv, siprsp }, after_ms)
     { :noreply,  state}
   end
 
   @impl true
   def handle_info({ :recv, siprsp}, state) do
+    Logger.debug([transid: state.req.transid, module: SIP.Test.Transport.UDPMockup,
+    message: "Received SIP resp #{siprsp.response}."])
+
     SIP.Transac.process_sip_message(SIPMsg.serialize(siprsp))
-    case siprsp.response_code do
+    case siprsp.response do
       100 ->
           # We received the 100 Trying -- simulate a 180 ringing after some time
-          GenServer.cast(self(), { :simulate, { 180, @ringing_time } })
+          GenServer.cast(self(), { :simulate, 180, 200 })
 
       _ -> nil
     end
-    state
+    { :noreply,  state }
   end
 end

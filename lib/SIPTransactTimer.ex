@@ -11,7 +11,7 @@ defmodule SIP.Trans.Timer do
 
   @spec schedule_timer_T2(map(), non_neg_integer()) :: map()
   def schedule_timer_T2(state, ms \\ @timer_T2_val) do
-    schedule_generic_timer(state, :timerT2, :t2, ms)
+    schedule_generic_timer(state, :timerT2, :t2_ref, ms)
   end
 
   @doc """

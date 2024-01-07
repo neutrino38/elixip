@@ -83,7 +83,7 @@ defmodule SIPMsgOps do
     sipmsg
   end
 
-  @reply_filter [ :via, :to, :from, :route, "Max-Forward", :cseq, :callid, :contentlength, :ruri ]
+  @reply_filter [ :via, :to, :from, :route, "Max-Forward", :cseq, :callid, :contentlength ]
 
   @doc "Build a SIP reply given a SIP request"
   def reply_to_request(req, resp_code, reason) when is_atom(req.method) and resp_code in 100..199 do
@@ -95,7 +95,7 @@ defmodule SIPMsgOps do
       {:method, false},
       {:contentlength, 0},
       {:reason, reason},
-      {:response_code, resp_code},
+      {:response, resp_code},
       {:body, []}]
 
     req |> Map.filter(resp_filter) |> update_sip_msg(fieldlist)
@@ -110,7 +110,7 @@ defmodule SIPMsgOps do
       {:method, false},
       {:contentlength, 0},
       {:reason, reason},
-      {:response_code, resp_code},
+      {:response, resp_code},
       {:body, []}]
 
       req |> Map.filter(resp_filter) |> update_sip_msg(fieldlist)
@@ -136,25 +136,25 @@ defmodule SIPMsgOps do
 
   defmacro is_1xx_resp(msg) do
     quote do
-      unquote(msg).method == false and unquote(msg).response_code in 100..199
+      unquote(msg).method == false and unquote(msg).response in 100..199
     end
   end
 
   defmacro is_2xx_resp(msg) do
     quote do
-      unquote(msg).method == false and unquote(msg).response_code in 200..299
+      unquote(msg).method == false and unquote(msg).response in 200..299
     end
   end
 
   defmacro is_3xx_resp(msg) do
     quote do
-      unquote(msg).method == false and unquote(msg).response_code in 300..399
+      unquote(msg).method == false and unquote(msg).response in 300..399
     end
   end
 
   defmacro is_failure_resp(msg) do
     quote do
-      unquote(msg).method == false and unquote(msg).response_code in 400..699
+      unquote(msg).method == false and unquote(msg).response in 400..699
     end
   end
 

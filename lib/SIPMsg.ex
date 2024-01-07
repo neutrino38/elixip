@@ -613,6 +613,17 @@ defmodule SIPMsg do
 	@doc """
 	Serialize a SIP request into a string to be sent on the network
 	"""
+	def serialize(sipmsg) when is_map(sipmsg) and sipmsg.method == false do
+		msgstr = serialize_first_line(sipmsg.response, sipmsg.reason)
+		headers = serialize_headers(sipmsg)
+		body = if Map.has_key?(sipmsg, :body) do
+			serialize_body(sipmsg.body)
+		else
+			""
+		end
+		msgstr <> headers <> body
+	end
+
 	def serialize(sipmsg) when is_map(sipmsg) and is_atom(sipmsg.method) do
 		msgstr = serialize_first_line(sipmsg.method, sipmsg.ruri)
 		headers = serialize_headers(sipmsg)
@@ -624,14 +635,5 @@ defmodule SIPMsg do
 		msgstr <> headers <> body
 	end
 
-	def serialize(sipmsg) when is_map(sipmsg) and is_boolean(sipmsg.method) do
-		msgstr = serialize_first_line(sipmsg.code, sipmsg.reason)
-		headers = serialize_headers(sipmsg)
-		body = if Map.has_key?(sipmsg, :body) do
-			serialize_body(sipmsg.body)
-		else
-			""
-		end
-		msgstr <> headers <> body
-	end
+
 end
