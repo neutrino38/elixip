@@ -126,6 +126,17 @@ defmodule SIPMsgOps do
         fieldlist
     end
 
+    # Specific case for 200 OK and 183 Session Progress for invite
+    if req.method == :INVITE and resp_code in [183, 200] do
+      has_non_empty_body = fn { field, value } ->
+        field == :body and is_list(value) and value != []
+      end
+
+      if !Enum.find(fieldlist, has_non_empty_body) do
+        raise "183 or 200 OK need to be provided with an SDP body"
+      end
+    end
+
     req |> Map.filter(resp_filter) |> update_sip_msg(fieldlist)
   end
 
