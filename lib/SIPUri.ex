@@ -48,6 +48,7 @@ defmodule SIP.Uri do
 	@doc """
 	Parse a single SIP URI and store its parts in a map
 	"""
+	@spec parse( bitstring() ) :: { atom(), map() }
 	def parse(uri_string) do
 		proto = if String.contains?(uri_string, "sips:") do
 				"sips:"
@@ -141,6 +142,7 @@ defmodule SIP.Uri do
 		end
 	end
 
+	@doc "Obtain a parameter from an URI"
 	def get_uri_param(sip_uri, param) when is_map(sip_uri) do
 		cond do
 			!Map.has_key?(sip_uri, :params) -> { :uri_without_params, nil }
@@ -154,6 +156,12 @@ defmodule SIP.Uri do
 			{ :ok, parsed_uri } -> get_uri_param(parsed_uri, param)
 			{ code, _dump } -> { code, nil }
 		end
+	end
+
+	@doc "Set an URI parameter"
+	def set_uri_param(sip_uri, param, value) when is_map(sip_uri) do
+		new_params = Map.put(sip_uri.params, param, value)
+		Map.put(sip_uri, :params, new_params)
 	end
 
 	defp serialize_core_uri( "sips:", nil, host, 5061 ) do

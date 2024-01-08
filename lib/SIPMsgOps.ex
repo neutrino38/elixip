@@ -92,7 +92,7 @@ defmodule SIPMsgOps do
   @reply_filter [ :via, :to, :from, :route, "Max-Forward", :cseq, :callid, :contentlength ]
 
   @doc "Build a SIP reply given a SIP request"
-  def reply_to_request(req, resp_code, reason) when is_atom(req.method) and resp_code in 100..199 do
+  def reply_to_request(req, resp_code, reason, upd_fields \\ [], totag \\ nil) when is_atom(req.method) and resp_code in 100..699 do
     resp_filter = fn { k, _v } ->
       k in @reply_filter
     end
@@ -103,24 +103,32 @@ defmodule SIPMsgOps do
       {:reason, reason},
       {:response, resp_code},
       {:body, []}]
+
+    # Merge upd_fields and fieldlist. The content of upd_fields take priority
+    fieldlist = upd_fields ++ (fieldlist -- upd_fields) |> Enum.uniq()
+
+    # If totag is missing add it
+    { :ok, to_uri } = SIP.Uri.parse(req.to)
+    fieldlist = case SIP.Uri.get_uri_param(to_uri, "tag") do
+      { :no_such_param, nil } ->
+        if totag != nil do
+          to_uri_modified = SIP.Uri.set_uri_param(to_uri, "tag", totag)
+          fieldlist ++ [ { :to, to_uri_modified }]
+        else
+          if resp_code > 100 do
+            raise "Missing totag for SIP response #{resp_code} > 100"
+          else
+            fieldlist
+          end
+        end
+
+      { :ok, _old_totag } ->
+        fieldlist
+    end
 
     req |> Map.filter(resp_filter) |> update_sip_msg(fieldlist)
   end
 
-  def reply_to_request(req, resp_code, reason) when is_atom(req.method) and resp_code in 400..699 do
-    resp_filter = fn { k, _v } ->
-      k in @reply_filter
-    end
-
-    fieldlist = [
-      {:method, false},
-      {:contentlength, 0},
-      {:reason, reason},
-      {:response, resp_code},
-      {:body, []}]
-
-      req |> Map.filter(resp_filter) |> update_sip_msg(fieldlist)
-  end
 
   @doc "Crée un message ACK à partir d'une requête existante"
   def ack_request(sipmsg, remote_contact, routeset \\ :ignore , body \\ []) when is_map(sipmsg) and sipmsg.method in [:INVITE, :UPDATE] do

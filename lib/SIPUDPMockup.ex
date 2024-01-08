@@ -63,7 +63,7 @@ defmodule SIP.Test.Transport.UDPMockup do
 
   @spec handle_cast({:simulate, 180, non_neg_integer()}, map()) :: { :noreply, map() }
   def handle_cast( { :simulate, 180, after_ms }, state) do
-    siprsp = reply_to_request(state.req, 180, "Ringing")
+    siprsp = reply_to_request(state.req, 180, "Ringing", [], "as424e7930")
     Logger.debug([transid: state.req.transid, module: SIP.Test.Transport.UDPMockup,
                  message: "Simulating a 180 Ringing after #{after_ms} ms."])
 

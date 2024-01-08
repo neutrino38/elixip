@@ -511,6 +511,14 @@ defmodule SIPMsg do
 		""
 	end
 
+		# Serialize a contact header header
+		defp serialize_one_header( :to, to_uri ) when is_map(to_uri) do
+			case SIP.Uri.serialize(to_uri) do
+				{ :ok, to_str} -> header_name_to_string(:to) <> ": " <> to_str <> "\r\n"
+				# _ -> raise "Invalid to in SIP message"
+			end
+		end
+
 	# Serialize a contact header header
 	defp serialize_one_header( :contact, contact ) do
 		case SIP.Uri.serialize(contact) do
