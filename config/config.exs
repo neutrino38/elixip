@@ -6,7 +6,7 @@ config :logger,
 config :logger, :console,
   format: "[$level] $message\n",
   metadata: [:pid, :module, :function, :file, :line],
-  level: :info
+  level: :warning
 
 
 config :logger, :file_log,

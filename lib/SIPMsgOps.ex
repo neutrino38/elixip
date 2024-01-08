@@ -48,6 +48,12 @@ defmodule SIPMsgOps do
     "z9hG4bK" <> branch_value
   end
 
+  @doc "Génère une valeur aléatoire pour le paramètre fromtag ou totag"
+  def generate_from_or_to_tag() do
+    random_branch = :crypto.strong_rand_bytes(10) |> Base.encode16
+    String.replace(random_branch, ~r/[^a-f0-9]/, "")
+  end
+
   @doc "Met a jour ou ajout des champs dans un message SIP"
   def update_sip_msg(sipmsg, fields) when is_list(fields) do
     Enum.reduce(fields, sipmsg, fn {header, value}, acc ->

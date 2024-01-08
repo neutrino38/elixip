@@ -6,7 +6,7 @@ defmodule SIP.Test.Transact do
   require SIP.Transac
   doctest SIP.Transac
 
-  test "Arm a timer A and check that it fires" do
+  test "Arms timer A and check that it fires" do
     # Start fake transport layer
     { :ok, t_pid } = GenServer.start(SIP.Test.Transport.UDPMockup, nil)
     { code, msg } = File.read("test/SIP-INVITE-BASIC-AUDIO.txt")
@@ -59,7 +59,7 @@ defmodule SIP.Test.Transact do
     end
   end
 
-  test "Arm a timer B and check that it fires" do
+  test "Arms timer B and check that it fires" do
     { code, msg } = File.read("test/SIP-INVITE-BASIC-AUDIO.txt")
     assert code == :ok
 
@@ -220,7 +220,7 @@ User-Agent: Elixip 0.2.0
     receive do
       {:response, resp} ->
         assert resp.response == 100
-        IO.puts("Received 100")
+        #IO.puts("TEST: Received 100")
 
       _ -> assert false
     # after
@@ -229,14 +229,16 @@ User-Agent: Elixip 0.2.0
 
     # Expect a 180 ringing after 2s
     receive do
-      {:response, resp} -> assert resp.response == 180
+      {:response, resp} ->
+        assert resp.response == 180
+        #IO.puts("TEST: Received 180 Ringing on time")
 
-      {:timeout, :timer_T2} ->
-        IO.puts("T2 timer expired before 180 Ringing")
+      {:timeout, :timerB} ->
+        IO.puts("timerB expired before 180 Ringing")
         assert false
 
       bla ->
-        IO.puts("Received #{bla}")
+        IO.puts("TEST: Received #{bla}")
         assert false
     after
       3_000 -> assert false # We did not received the 180 Ringing on time

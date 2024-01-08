@@ -39,7 +39,7 @@ defmodule SIP.Trans.Timer do
 
       # Schedule timer
       millis when millis > 0 ->
-        IO.puts("Scheduling timer #{timer_id} after #{ms} ms")
+        # IO.puts("Scheduling timer #{timer_id} after #{ms} ms")
         tref = :erlang.start_timer(ms, self(), timer_id)
         Map.put(state, timer_field, tref)
     end
