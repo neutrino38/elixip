@@ -78,6 +78,19 @@ defmodule SIPMsgOps do
     sipmsg |> Map.put(:contact, contact_uri)
   end
 
+  # Specific case for body
+  def update_sip_msg(sipmsg, { :body, [] } ) do
+    sipmsg |> Map.put(:body, []) |> Map.put(:contentlength, 0)
+  end
+
+  def update_sip_msg(sipmsg, { :body, [ %{ contenttype: ctype, data: body_data } ] } ) do
+    sipmsg |> Map.put(:body, [%{ contenttype: ctype, data: body_data }]) |> Map.put(:contenttype, ctype) |> Map.put(:contentlength, Kernel.byte_size(body_data))
+  end
+
+  def update_sip_msg(_sipmsg, { :body, body_list }) when is_list(body_list) do
+    raise "Multipart bodies are not yet supported"
+  end
+
 
   def update_sip_msg(sipmsg, { header, value }) do
     sipmsg |> Map.put(header, value)
@@ -112,13 +125,13 @@ defmodule SIPMsgOps do
 
     fieldlist = %{
       method: false,
-      contentlength: 0,
       reason: reason,
       response: resp_code,
       body: []}
 
-    # Merge upd_fields and fieldlist. The content of upd_fields take priority
-    upd_map = Map.merge(fieldlist, Map.new(upd_fields))
+    # Merge upd_fields and fieldlist. The content of upd_fields take priority. Remove fields that are compted
+    # automatically
+    upd_map = Map.merge(fieldlist, Map.new(upd_fields)) |> Map.delete(:contentlength)
 
     # If totag is missing add it
     { :ok, to_uri } = SIP.Uri.parse(req.to)

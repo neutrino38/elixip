@@ -65,15 +65,23 @@ defmodule SIP.Test.SIPMsgOps do
     end
   end
 
+  test "Add a single body to a SIP message" do
+    body = %{ contenttype: "application/sdp", data: "blabla" }
+    sipmsg = SIPMsgOps.update_sip_msg(%{}, { :body, [ body ]})
+    assert sipmsg.contenttype == "application/sdp"
+    assert sipmsg.contentlength > 0
+
+  end
 
   test "Create an INVITE 200 OK with all what's needed", context do
-    body = %{ contentype: "application/sdp", data: "blabla"}
+    body = %{ contenttype: "application/sdp", data: "blabla" }
     upd_fields = [ body: [ body ], contact: "<sip:90901@212.83.152.250:5090>" ]
     siprsp = SIPMsgOps.reply_to_request(context.sipreq, 200, "OK", upd_fields, "zz77998")
     assert siprsp.method == false
     assert siprsp.response == 200
 
     _siprsp_str = SIPMsg.serialize(siprsp)
+    #IO.puts(siprsp_str)
 
   end
 
