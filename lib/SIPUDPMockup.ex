@@ -42,7 +42,12 @@ defmodule SIP.Test.Transport.UDPMockup do
 			IO.puts("Offending line #{lineno}: #{line}")
 			IO.puts("Error code #{code}")
 			end) do
-        { :ok, sipreq } -> { :reply, :ok, Map.put(state, :req, sipreq) }
+        { :ok, sipreq } ->
+          if sipreq.method == :INVITE do
+            { :reply, :ok, Map.put(state, :req, sipreq) }
+          else
+            { :reply, :ok, state }
+          end
         _ ->  { :reply, :invalidreq, state }
       end
   end
@@ -71,6 +76,16 @@ defmodule SIP.Test.Transport.UDPMockup do
     { :noreply,  state}
   end
 
+  def handle_cast( { :simulate, 200, after_ms }, state) do
+    sdp_body = %{ contenttype: "application/sdp", data: "blablabla\r\n" }
+    siprsp = reply_to_request(state.req, 200, "OK", [body: [ sdp_body ], contact: "<sip:90901@212.83.152.250:5090>" ], "as424e7930")
+    Logger.debug([transid: state.req.transid, module: SIP.Test.Transport.UDPMockup,
+                 message: "Simulating a 200 Ringing after #{after_ms} ms."])
+
+    Process.send_after(self(), { :recv, siprsp }, after_ms)
+    { :noreply,  state}
+  end
+
   @impl true
   def handle_info({ :recv, siprsp}, state) do
     Logger.debug([transid: state.req.transid, module: SIP.Test.Transport.UDPMockup,
@@ -81,6 +96,10 @@ defmodule SIP.Test.Transport.UDPMockup do
       100 ->
           # We received the 100 Trying -- simulate a 180 ringing after some time
           GenServer.cast(self(), { :simulate, 180, 200 })
+
+      180 ->
+          # We received the 180 Ringing -- simulate a 200 OK after some time
+          GenServer.cast(self(), { :simulate, 200, 4000 })
 
       _ -> nil
     end

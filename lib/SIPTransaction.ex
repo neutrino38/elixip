@@ -139,6 +139,7 @@ defmodule SIP.Transac do
     end
   end
 
+  @spec process_sip_message(binary()) :: { :ok, map() } | { atom(), binary() }
   @doc "Process an incoming SIP message from the transport layer and dispatch it to the proper transaction"
   def process_sip_message(sipmsgstr) do
 
@@ -166,5 +167,9 @@ defmodule SIP.Transac do
       { code, _err } ->
         code
     end
+  end
+
+  def ack_uac_transaction(uac_t) do
+    GenServer.call(uac_t, :ack)
   end
 end

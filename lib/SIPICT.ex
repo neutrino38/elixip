@@ -82,16 +82,16 @@ defmodule SIP.ICT do
       Logger.info([ transid: state.msg.transid, message: "Sending ACK"])
       case GenServer.call(state.tpid, {:sendmsg, ack_sent} ) do
         :ok ->
-          if state.t_isreliable do
+          new_state = if state.t_isreliable do
             Logger.debug([ transid: state.msg.transid, message: "ACK sent: #{state.state} -> terminated"])
-            schedule_timer_K(state, 0)
-            { :reply, :ok, %{ state | ack: ack_sent, state: :terminated }}
+            schedule_timer_K(state, 0) |> Map.put(:ack, ack_sent) |> Map.put(:state, :terminated)
           else
             # RFC 3261 clause 17.1.2.2 arm timer K for unreliable transport
             Logger.debug([ transid: state.msg.transid, message: "ACK sent. Arming timer_K"])
-            state = %{ schedule_timer_K(state, 5000) | ack: ack_sent }
-            { :reply, :ok, state }
+            schedule_timer_K(state, 5000) |> Map.put(:ack, ack_sent)
           end
+          { :reply, :ok, new_state }
+
         code ->
           Logger.error([ transid: state.msg.transid, message: "ICT: Fail to send ACK message #{code}"])
           # Arm a timer to destroy the transaction
@@ -110,8 +110,13 @@ defmodule SIP.ICT do
         # Send provisional response to app layer
         send(state.app, { :response, sipmsg })
         Logger.debug([ transid: sipmsg.transid, message: "state: sending -> proceeding"])
-        state = schedule_timer_B(state, state.t2 * 1000)
-        %{ state | state: :proceeding }
+        upd_msg = if sipmsg.response > 100 do
+          #Store the to header to obtain the 'to' tag
+          Map.put(state.msg, :to, sipmsg.to)
+        else
+          state.msg
+        end
+        %{ state | state: :proceeding, msg: upd_msg } |> schedule_timer_B(state.t2 * 1000)
 
       :proceeding ->
         send(state.app, { :response, sipmsg })
@@ -134,7 +139,10 @@ defmodule SIP.ICT do
           { :ok, routeset } -> routeset
           :error -> nil
         end
-        %{ state | state: :confirmed, remotecontact: sip_resp.contact, route: routeset }
+        # Update status, the to header of the request with the to of the response to get the to tag
+        state = %{ state | msg: Map.put(state.msg, :to, sip_resp.to), state: :confirmed }
+
+        Map.put(state, :remotecontact, sip_resp.contact) |> Map.put(:route, routeset)
 
       # Corner case when 200 OK retransmission is still not acked by app layer.
       state.state == :confirmed ->

@@ -187,11 +187,10 @@ defmodule SIPMsgOps do
       {:method, :ACK},
       {:ruri, remote_contact},
       {:route, routeset},
-      {:contentlength, 0},
       {:body, body}]
 
     # Update message
-    sipmsg |> update_sip_msg(fieldlist) |> Map.filter(ack_filter)
+    sipmsg |> Map.filter(ack_filter) |> update_sip_msg(fieldlist)
   end
 
   defmacro is_1xx_resp(msg) do

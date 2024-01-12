@@ -192,7 +192,7 @@ User-Agent: Elixip 0.2.0
   end
 
   # Big transaction test
-  test "Cree une transaction SIP client INVITE - sans utiliser le selecteur de transport" do
+  test "Cree une transaction SIP client INVITE - sans utiliser le selecteur de transport standard" do
     SIP.Transac.start()
     { :ok, transport_pid } = GenServer.start_link(SIP.Test.Transport.UDPMockup, nil, name: UDPMockup )
     { :ok, local_ip, local_port  } = GenServer.call(transport_pid, :getlocalipandport)
@@ -212,7 +212,7 @@ User-Agent: Elixip 0.2.0
       { :ok, SIP.Test.Transport.UDPMockup, transport_pid}
     end
 
-    { :ok, _uac_t } = SIP.Transac.start_uac_transaction(invitemsg, dummy_transport_selector, 90)
+    { :ok, uac_t } = SIP.Transac.start_uac_transaction(invitemsg, dummy_transport_selector, 90)
 
     SIP.Test.Transport.UDPMockup.simulate_successful_answer(transport_pid)
 
@@ -227,7 +227,7 @@ User-Agent: Elixip 0.2.0
       # 300 -> assert false # We did not received the 100 Trying on time
     end
 
-    # Expect a 180 ringing after 2s
+    # Expect a 180 ringing after 200 mss
     receive do
       {:response, resp} ->
         assert resp.response == 180
@@ -241,9 +241,27 @@ User-Agent: Elixip 0.2.0
         IO.puts("TEST: Received #{bla}")
         assert false
     after
-      3_000 -> assert false # We did not received the 180 Ringing on time
+      500 -> assert false # We did not received the 180 Ringing on time
     end
 
+
+    receive do
+      {:response, resp} ->
+        assert resp.response == 200
+        #IO.puts("TEST: Received 200 Ringing on time")
+        SIP.Transac.ack_uac_transaction(uac_t)
+
+
+      {:timeout, :timerB} ->
+        IO.puts("timerB expired before 200 OK")
+        assert false
+
+      bla ->
+        IO.puts("TEST: Received #{bla}")
+        assert false
+    after
+      5_000 -> assert false # We did not received the 200 OK on time
+    end
 
   end
 end
