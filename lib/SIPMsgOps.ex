@@ -61,10 +61,23 @@ defmodule SIPMsgOps do
     end)
   end
 
+  def update_sip_msg(sipmsg, fields) when is_map(fields) do
+    Enum.reduce(fields, sipmsg, fn {header, value}, acc ->
+      update_sip_msg(acc, { header, value})
+    end)
+  end
+
   # Ignore update
   def update_sip_msg(sipmsg, { _header, :ignore }) do
     sipmsg
   end
+
+  # Specific case for contact
+  def update_sip_msg(sipmsg, { :contact, value }) when is_bitstring(value) do
+    { :ok, contact_uri } = SIP.Uri.parse(value)
+    sipmsg |> Map.put(:contact, contact_uri)
+  end
+
 
   def update_sip_msg(sipmsg, { header, value }) do
     sipmsg |> Map.put(header, value)
@@ -97,23 +110,25 @@ defmodule SIPMsgOps do
       k in @reply_filter
     end
 
-    fieldlist = [
-      {:method, false},
-      {:contentlength, 0},
-      {:reason, reason},
-      {:response, resp_code},
-      {:body, []}]
+    fieldlist = %{
+      method: false,
+      contentlength: 0,
+      reason: reason,
+      response: resp_code,
+      body: []}
 
     # Merge upd_fields and fieldlist. The content of upd_fields take priority
-    fieldlist = upd_fields ++ (fieldlist -- upd_fields) |> Enum.uniq()
+    upd_map = Map.merge(fieldlist, Map.new(upd_fields))
 
     # If totag is missing add it
     { :ok, to_uri } = SIP.Uri.parse(req.to)
-    fieldlist = case SIP.Uri.get_uri_param(to_uri, "tag") do
+    upd_map = case SIP.Uri.get_uri_param(to_uri, "tag") do
+
+      #If "to" header has no tag and tag is specified
       { :no_such_param, nil } ->
         if totag != nil do
           to_uri_modified = SIP.Uri.set_uri_param(to_uri, "tag", totag)
-          fieldlist ++ [ { :to, to_uri_modified }]
+          Map.put(upd_map, :to, to_uri_modified)
         else
           if resp_code > 100 do
             raise "Missing totag for SIP response #{resp_code} > 100"
@@ -123,21 +138,28 @@ defmodule SIPMsgOps do
         end
 
       { :ok, _old_totag } ->
-        fieldlist
+        upd_map
     end
+
+    rsp = req |> Map.filter(resp_filter) |> update_sip_msg(upd_map)
 
     # Specific case for 200 OK and 183 Session Progress for invite
     if req.method == :INVITE and resp_code in [183, 200] do
-      has_non_empty_body = fn { field, value } ->
-        field == :body and is_list(value) and value != []
-      end
-
-      if !Enum.find(fieldlist, has_non_empty_body) do
-        raise "183 or 200 OK need to be provided with an SDP body"
+      case Map.fetch(rsp, :body) do
+        {:ok, [] } -> raise "183 or 200 OK response cannot have an empty body"
+        {:ok, _ } -> nil
+        :error -> raise "183 or 200 OK need to be provided with an SDP body"
       end
     end
 
-    req |> Map.filter(resp_filter) |> update_sip_msg(fieldlist)
+    if resp_code in 300..303 or resp_code in 200..202 do
+      case Map.fetch(rsp, :contact) do
+        {:ok, _ } -> nil
+        :error -> raise "#{resp_code} response needs to be provided with a contact field"
+      end
+    end
+
+    rsp
   end
 
 
