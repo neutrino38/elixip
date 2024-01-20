@@ -3,6 +3,7 @@ defmodule SIP.Transport.Selector do
 
   require SIP.Uri
   require SIP.Test.Transport.UDPMockup
+  require Registry
 
   @transport_map %{
     "UDP" => SIP.Transport.UDP,
@@ -12,6 +13,27 @@ defmodule SIP.Transport.Selector do
     "WSS" => SIP.Transport.WSS,
     "SCTP" => nil
   }
+
+  def start() do
+    { :ok, _ } = Registry.start_link(keys: :unique, name: SIP.Transport.Registry)
+  end
+
+  def find_or_launch_transport(t_mod, transport_name, port \\ nil)  do
+    instance_name = if is_integer(port) do
+      transport_name <> "_" <> Integer.to_string(port) <> "_" <> Integer.to_string(port)
+    else
+      transport_name
+    end
+
+    case Registry.lookup(SIP.Transport.Registry, instance_name) do
+      { nil, _ } ->
+        name = { :via, Registry, {SIP.Transport.Registry, instance_name}}
+        GenServer.start_link(t_mod, { port } , name: name)
+
+      { t_pid, _ } -> { :ok, t_pid }
+    end
+
+  end
 
   @spec select_transport(binary(), boolean()) :: { atom(), module(), pid() } | atom()
   @doc "Select a transport module an option given a request URI"
