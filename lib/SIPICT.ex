@@ -2,7 +2,7 @@ defmodule SIP.ICT do
   @moduledoc "SIP INVITE client transaction"
   use GenServer
   import SIP.Trans.Timer
-  require SIPMsgOps
+  require SIP.Msg.Ops
   require Logger
 
   defp safe_serialize(sipmsg, state) do
@@ -29,6 +29,8 @@ defmodule SIP.ICT do
       {:ok, initial_state} ->
         case GenServer.call(t_pid, { :sendmsg, initial_state.msgstr }  ) do
           :ok ->
+            { :ok, ruri } = SIP.Uri.serialize(sipmsg.ruri)
+            Logger.info([ transid: sipmsg.transid, message: "ICT: sent INVITE to #{ruri}"])
             if not initial_state.t_isreliable do
               schedule_timer_A(initial_state)
             end
@@ -36,7 +38,7 @@ defmodule SIP.ICT do
 
           code ->
             Logger.error([ transid: sipmsg.transid, message: "ICT: Fail to send SIP request  #{code}"])
-            { :stop, "Fail to send SIP erequest" }
+            { :stop, "Fail to send SIP request" }
         end
 
       { code, _initial_state} ->
@@ -50,7 +52,7 @@ defmodule SIP.ICT do
   # CANCEL  current transaction from dialog layer
   def handle_call(:cancel, _from, state) do
     if state.state in [ :sending, :proceeding ] do
-      cancel = state.msg |> SIPMsgOps.cancel_request() |> SIPMsg.serialize()
+      cancel = state.msg |> SIP.Msg.Ops.cancel_request() |> SIPMsg.serialize()
       Logger.info([ transid: state.msg.transid, message: "ICT: sending CANCEL"])
       case GenServer.call(state.tpid, { :sendmsg, cancel }  ) do
         :ok ->
@@ -66,7 +68,11 @@ defmodule SIP.ICT do
     end
   end
 
-  # ACK the transaction (only needed in case of 200 OK received)
+  def handle_call(:gettransport, _from, state ) do
+    { :reply, { state.t_mod, state.t_pid }, state }
+  end
+
+  @doc "ACK the transaction (only needed in case of 200 OK received)"
   def handle_call(:ack, _from, state) do
     if state.state == :confirmed do
       routeset = case Map.fetch(state, :route) do
@@ -78,7 +84,7 @@ defmodule SIP.ICT do
         {:ok, rcontact} -> rcontact
         :error -> nil
       end
-      ack_sent = state.msg |> SIPMsgOps.ack_request(remote_contact, routeset) |> SIPMsg.serialize()
+      ack_sent = state.msg |> SIP.Msg.Ops.ack_request(remote_contact, routeset) |> SIPMsg.serialize()
       Logger.info([ transid: state.msg.transid, message: "Sending ACK"])
       case GenServer.call(state.tpid, {:sendmsg, ack_sent} ) do
         :ok ->
@@ -101,7 +107,7 @@ defmodule SIP.ICT do
   end
 
   # Handle privisional (1xx) responses
-  defp handle_sip_response(state, sipmsg) when SIPMsgOps.is_1xx_resp(sipmsg) do
+  defp handle_sip_response(state, sipmsg) when SIP.Msg.Ops.is_1xx_resp(sipmsg) do
     Logger.debug([ transid: sipmsg.transid, message: "Received prov resp #{sipmsg.response}"])
     case state.state do
       :sending ->
@@ -129,7 +135,7 @@ defmodule SIP.ICT do
   end
 
   # Handle OK responses (2xx)
-  defp handle_sip_response(state, sip_resp) when SIPMsgOps.is_2xx_resp(sip_resp) do
+  defp handle_sip_response(state, sip_resp) when SIP.Msg.Ops.is_2xx_resp(sip_resp) do
     Logger.debug([ transid: sip_resp.transid, message: "Received #{sip_resp.response} final resp"])
     cond do
       state.state in [ :sending, :proceeding ] ->
@@ -139,9 +145,10 @@ defmodule SIP.ICT do
           { :ok, routeset } -> routeset
           :error -> nil
         end
+
+        Logger.info([ transid: sip_resp.transid, message: "ICT: answered with #{sip_resp.response}"])
         # Update status, the to header of the request with the to of the response to get the to tag
         state = %{ state | msg: Map.put(state.msg, :to, sip_resp.to), state: :confirmed }
-
         Map.put(state, :remotecontact, sip_resp.contact) |> Map.put(:route, routeset)
 
       # Corner case when 200 OK retransmission is still not acked by app layer.
@@ -161,7 +168,7 @@ defmodule SIP.ICT do
   end
 
   # Handle 4xx, 5xx, 6xx responses
-  defp handle_sip_response(state, sipmsg) when SIPMsgOps.is_failure_resp(sipmsg) do
+  defp handle_sip_response(state, sipmsg) when SIP.Msg.Ops.is_failure_resp(sipmsg) do
     Logger.debug([ transid: sipmsg.transid, message: "Received #{sipmsg.response} failure resp"])
     cond do
       state.state in [ :sending, :proceeding ] ->
@@ -232,6 +239,7 @@ defmodule SIP.ICT do
       { :noreply, newstate } -> { :noreply, newstate }
       { :stop, _reason, state} ->
         GenServer.stop(self())
+        # Notify the tranport that this transaction is terminated
         { :noreply, state }
     end
   end

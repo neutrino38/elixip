@@ -1,5 +1,5 @@
-defmodule SIPMsgOps do
-	@moduledoc "Operation on SIM message"
+defmodule SIP.Msg.Ops do
+	@moduledoc "Operations on SIP messages"
 
   defp build_via_addr( local_ip , 5060, "UDP" ) do
     "SIP/2.0/UDP " <> local_ip
@@ -38,6 +38,85 @@ defmodule SIPMsgOps do
     Map.put(sipmsg, :via, [ via | sipmsg.via ])
   end
 
+  @doc "Return a SIP reason given a SIP code"
+  def sip_reason(sip_code) when sip_code in 100..607 do
+    case sip_code do
+      100 -> "Trying"
+      180 -> "Ringing"
+      181 -> "Call is being forwarded"
+      182 -> "Call queued"
+      183 -> "Session progress"
+      199 -> "Early Dialog terminated"
+      200 -> "OK"
+      202 -> "Accepted"
+      204 -> "No Notification"
+      300 -> "Multiple choices"
+      301 -> "Moved permanently"
+      302 -> "Moved temporarily"
+      305 -> "Use proxy"
+      380 -> "Alternative service"
+      400 -> "Bad request"
+      401 -> "Unauthorized"
+      402 -> "Payment required"
+      403 -> "Forbidden"
+      404 -> "Not found"
+      405 -> "Method not allowed"
+      406 -> "Not acceptable"
+      407 -> "Proxy authentication required"
+      408 -> "Request timeout"
+      410 -> "Gone"
+      413 -> "Request entity too large"
+      414 -> "Request URI too long"
+      415 -> "Unsupported media type"
+      416 -> "Unsupported URI scheme"
+      417 -> "Unknown resource priority"
+      418 -> "I'm a teapot"
+      420 -> "Bad extension"
+      421 -> "Extension required"
+      422 -> "Session interval too small"
+      423 -> "Interval too brief"
+      424 -> "Bad location information"
+      428 -> "Use identity header"
+      429 -> "Provide referrer identity"
+      430 -> "Flow failed"
+      433 -> "Anonymity disallowed"
+      436 -> "Bad identity-Info"
+      437 -> "Unsupported certificate"
+      438 -> "Invalid identity header"
+      439 -> "First hop Lacks Outbound Support"
+      440 -> "Max-Breadth Exceeded"
+      469 -> "Bad Info Package"
+      470 -> "Consent needed"
+      478 -> "Unresolvable destination"
+      480 -> "Temporarily unavailable"
+      481 -> "Call leg/transaction does not exist"
+      482 -> "Loop detected"
+      483 -> "Too many hops"
+      484 -> "Address incomplete"
+      485 -> "Ambiguous"
+      486 -> "Busy here"
+      487 -> "Request terminated"
+      488 -> "Not acceptable here"
+      491 -> "Request pending"
+      493 -> "Undecipherable"
+      494 -> "Security agreement required"
+      500 -> "Server internal error"
+      501 -> "Not implemented"
+      502 -> "Bad gateway"
+      503 -> "Service unavailable"
+      504 -> "Server timeout"
+      505 -> "Version not supported"
+      513 -> "Message too large"
+      580 -> "Precondition Failure"
+      600 -> "Busy everywhere"
+      603 -> "Decline"
+      604 -> "Does not exist anywhere"
+      606 -> "Not Acceptable"
+      _ -> "Unknown SIP Code"
+    end
+  end
+
+
   @doc "Génère une valeur aléatoire pour le paramètre branch"
   def generate_branch_value() do
     # Génère une chaîne aléatoire de 20 caractères en ajoutant le numéro aléatoire
@@ -47,6 +126,7 @@ defmodule SIPMsgOps do
     # Assurez-vous que la chaîne commence par "z9hG4bK" comme requis par RFC 3261
     "z9hG4bK" <> branch_value
   end
+
 
   @doc "Génère une valeur aléatoire pour le paramètre fromtag ou totag"
   def generate_from_or_to_tag() do
@@ -121,6 +201,12 @@ defmodule SIPMsgOps do
   def reply_to_request(req, resp_code, reason, upd_fields \\ [], totag \\ nil) when is_atom(req.method) and resp_code in 100..699 do
     resp_filter = fn { k, _v } ->
       k in @reply_filter
+    end
+
+    reason = if is_nil(reason) do
+      sip_reason(resp_code)
+    else
+      reason
     end
 
     fieldlist = %{
