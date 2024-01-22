@@ -6,7 +6,7 @@ defmodule SIP.Test.Transport.UDPMockup do
   require Logger
   require SIP.Transac
   require SIPMsg
-  import SIPMsgOps
+  import SIP.Msg.Ops
 
   # @destproxy "1.2.3.4"
   # @destport 5080
@@ -15,14 +15,22 @@ defmodule SIP.Test.Transport.UDPMockup do
   @transport_str "udp"
   def transport_str, do: @transport_str
 
+  @spec is_reliable() :: boolean()
   def is_reliable, do: false
+
+  def select_instance(_ruri) do
+
+  end
 
   # Simulated call scenarii
 
   def simulate_successful_answer(t_pid) do
-    GenServer.cast(t_pid, {:simulate, 100, 200})
+    GenServer.cast(t_pid, {:simulate, :successfulcall})
   end
 
+  def simulate_busy_answer(t_pid) do
+    GenServer.cast(t_pid, {:simulate, :busy})
+  end
 
   # Callbacks
 
@@ -57,13 +65,23 @@ defmodule SIP.Test.Transport.UDPMockup do
     { :reply, { :ok, state.localip, state.localport }, state}
   end
 
-  # Simulate Answers
+  # Simulate call scenario
   @impl true
   @spec handle_cast({:simulate, 100, non_neg_integer()}, map()) :: { :noreply, map() }
   def handle_cast( { :simulate, 100, after_ms }, state) do
     siprsp = reply_to_request(state.req, 100, "Trying")
     Process.send_after(self(), { :recv, siprsp }, after_ms)
-    { :noreply,  state}
+    { :noreply,  state }
+  end
+
+  def handle_cast({ :simulate, scenario }, state) do
+
+    new_state = Map.put(state, :scenario, scenario)
+    case scenario do
+      :successfulcall -> handle_cast({:simulate, 100, 200}, new_state)
+      :busy -> handle_cast({:simulate, 100, 200}, new_state)
+      :notregistered -> handle_cast({:simulate, 100, 200}, new_state)
+    end
   end
 
   @spec handle_cast({:simulate, 180, non_neg_integer()}, map()) :: { :noreply, map() }
@@ -86,6 +104,16 @@ defmodule SIP.Test.Transport.UDPMockup do
     { :noreply,  state}
   end
 
+  def handle_cast( {:simulate, resp, after_ms }, state) when resp in 400..487 do
+    siprsp = reply_to_request(state.req, 200, nil, [], "as424e7930")
+
+    Logger.debug([transid: state.req.transid, module: SIP.Test.Transport.UDPMockup,
+                 message: "Simulating a #{resp} Answer #{after_ms} ms."])
+
+    Process.send_after(self(), { :recv, siprsp }, after_ms)
+    { :noreply,  state}
+  end
+
   @impl true
   def handle_info({ :recv, siprsp}, state) do
     Logger.debug([transid: state.req.transid, module: SIP.Test.Transport.UDPMockup,
@@ -94,13 +122,34 @@ defmodule SIP.Test.Transport.UDPMockup do
     SIP.Transac.process_sip_message(SIPMsg.serialize(siprsp))
     case siprsp.response do
       100 ->
-          # We received the 100 Trying -- simulate a 180 ringing after some time
-          GenServer.cast(self(), { :simulate, 180, 200 })
+          case state.scenario do
+            :successfulcall ->
+              # We received the 100 Trying -- simulate a 180 ringing after some time
+              GenServer.cast(self(), { :simulate, 180, 200 })
+
+            :notregistered ->
+              # answer with 480 Temporary Unavailable
+              GenServer.cast(self(), { :simulate, 480, 200 })
+
+            :busy
+              # We received the 100 Trying -- simulate a 180 ringing after some time
+              # then simulate 486 Busy sent by the user
+              GenServer.cast(self(), { :simulate, 180, 200 })
+
+            _ ->
+              GenServer.cast(self(), { :simulate, 404, 200 })
+          end
 
       180 ->
-          # We received the 180 Ringing -- simulate a 200 OK after some time
-          GenServer.cast(self(), { :simulate, 200, 4000 })
+        case state.scenario do
+          :successfulcall ->
+            # We received the 180 Ringing -- simulate a 200 OK after some time
+            GenServer.cast(self(), { :simulate, 200, 4000 })
 
+          :busy ->
+            GenServer.cast(self(), { :simulate, 486, 2000 })
+
+          end
       _ -> nil
     end
     { :noreply,  state }

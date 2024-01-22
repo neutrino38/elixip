@@ -6,6 +6,10 @@ defmodule SIP.Test.Transact do
   require SIP.Transac
   doctest SIP.Transac
 
+  setup_all do
+    SIP.Transac.start()
+  end
+
   test "Arms timer A and check that it fires" do
     # Start fake transport layer
     { :ok, t_pid } = GenServer.start(SIP.Test.Transport.UDPMockup, nil)
@@ -175,7 +179,7 @@ a=rtcp-mux
   defp create_invite_msg(bindings) do
     invite_msg_str =
 """
-INVITE sip:90901@visio5.visioassistance.net:5090 SIP/2.0
+INVITE sip:90901@visio5.visioassistance.net:5090;unittest=1 SIP/2.0
 P-Asserted-Identity: sip:+33970260233@visioassistance.net
 From: "Site%20Arras%20POLE%20EMPLOI"<sip:+33970260233@visioassistance.net>;tag=8075639
 To: <sip:90901@visioassistance.net>
@@ -191,10 +195,11 @@ User-Agent: Elixip 0.2.0
     SIP.MsgTemplate.apply_template(invite_msg_str <> create_sdp_body(), bindings)
   end
 
+
   # Big transaction test
-  test "Cree une transaction SIP client INVITE - sans utiliser le selecteur de transport standard" do
-    SIP.Transac.start()
-    { :ok, transport_pid } = GenServer.start_link(SIP.Test.Transport.UDPMockup, nil, name: UDPMockup )
+  test "Cree une transaction SIP client INVITE - appel reussi" do
+
+
     { :ok, local_ip, local_port  } = GenServer.call(transport_pid, :getlocalipandport)
 
     bindings = [ local_ip: :inet.ntoa(local_ip), local_port: local_port ]
@@ -207,13 +212,10 @@ User-Agent: Elixip 0.2.0
 			IO.puts("Error code #{code}")
 			end)
 
-    dummy_transport_selector = fn _ruri ->
 
-      { :ok, SIP.Test.Transport.UDPMockup, transport_pid}
-    end
+    { :ok, uac_t } = SIP.Transac.start_uac_transaction(invitemsg, 90)
 
-    { :ok, uac_t } = SIP.Transac.start_uac_transaction(invitemsg, dummy_transport_selector, 90)
-
+    { t_mod, t_pid } =
     SIP.Test.Transport.UDPMockup.simulate_successful_answer(transport_pid)
 
     # Expect a 100 Trying after 200 ms

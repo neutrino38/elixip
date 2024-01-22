@@ -3,6 +3,7 @@ defmodule SIP.Transac do
 
   require SIP.ICT
   require Logger
+  require SIP.Transport.Selector
 
   @doc "Start the transaction layer"
   def start() do
@@ -21,16 +22,16 @@ defmodule SIP.Transac do
   @doc """
   Start an INVITE client transaction (ICT)
   - first arg is the SIP message to send
-  - second arg is a function that will loopkup a transport process
+  - second arg is the number of seconds the callshould be tried
   - it returns a pid that represent the transaction. The process is a GenServer
   """
-  def start_uac_transaction(sipmsg, transport_selector_fn, ring_timeout) when is_map(sipmsg) and sipmsg.method == :INVITE do
+  def start_uac_transaction(sipmsg, ring_timeout) when is_map(sipmsg) and sipmsg.method == :INVITE do
     # Generate the branch ID
-    branch_id = SIPMsgOps.generate_branch_value()
+    branch_id = SIP.Msg.Ops.generate_branch_value()
     #Todo : check that branch ID is not already registered on the transaction registry
 
     # Use callback passed to select transport
-    case transport_selector_fn.(sipmsg.ruri) do
+    case SIP.Transport.Selector.select_transport(sipmsg.ruri) do
       { :ok, t_mod, t_pid } ->
         # Get the transport name frm the module
         transport_str = apply(t_mod, :transport_str, [])
@@ -40,7 +41,7 @@ defmodule SIP.Transac do
         local_ip_str = SIP.NetUtils.ip2string(local_ip)
 
         #Add the topmost via header
-        sipmsg = SIPMsgOps.add_via(sipmsg, { local_ip_str, local_port, transport_str }, branch_id)
+        sipmsg = SIP.Msg.Ops.add_via(sipmsg, { local_ip_str, local_port, transport_str }, branch_id)
 
         # Start a new GenServer for each transaction and register it in Registry.SIPTransaction
         # The process created IS the transaction
@@ -70,13 +71,13 @@ defmodule SIP.Transac do
 
   def start_uac_transaction(sipmsg, transport_selector_fn) when is_map(sipmsg) and sipmsg.method != :INVITE do
     # Generate the branch ID
-    branch_id = SIPMsgOps.generate_branch_value()
+    branch_id = SIP.Msg.Ops.generate_branch_value()
     #Todo : check that branch ID is not already registered on the transaction registry
 
     # Use callback passed to select transport
     case transport_selector_fn.(sipmsg.ruri) do
       { :ok, local_ip, local_port, transport_str, t_mod, t_pid } ->
-        sipmsg = SIPMsgOps.add_via(sipmsg, { local_ip, local_port, transport_str }, branch_id)
+        sipmsg = SIP.Msg.Ops.add_via(sipmsg, { local_ip, local_port, transport_str }, branch_id)
 
         # Start a new GenServer for each transaction and register it in Registry.SIPTransaction
         name = { :via, Registry, {Registry.SIPTransaction, branch_id, :cast }}
@@ -99,10 +100,10 @@ defmodule SIP.Transac do
 
   def start_uas_transaction(sipmsg, { local_ip, local_port, transport_str, t_mod, t_pid } , { remote_ip, remote_port }) when is_map(sipmsg) and sipmsg.method == :INVITE do
     # Generate the branch ID
-    branch_id = SIPMsgOps.generate_branch_value()
+    branch_id = SIP.Msg.Ops.generate_branch_value()
     #Todo : check that branch ID is not already registered on the transaction registry
 
-    sipmsg = SIPMsgOps.add_via(sipmsg, { local_ip, local_port, transport_str }, branch_id)
+    sipmsg = SIP.Msg.Ops.add_via(sipmsg, { local_ip, local_port, transport_str }, branch_id)
 
     # Start a new GenServer for each transaction and register it in Registry.SIPTransaction
     transact_params = { t_mod, t_pid, remote_ip, remote_port, sipmsg, self() }
@@ -120,10 +121,10 @@ defmodule SIP.Transac do
 
   def start_uas_transaction(sipmsg, { local_ip, local_port, transport_str, t_mod, t_pid } , { remote_ip, remote_port }) when is_map(sipmsg) and sipmsg.method != :INVITE do
     # Generate the branch ID
-    branch_id = SIPMsgOps.generate_branch_value()
+    branch_id = SIP.Msg.Ops.generate_branch_value()
     #Todo : check that branch ID is not already registered on the transaction registry
 
-    sipmsg = SIPMsgOps.add_via(sipmsg, { local_ip, local_port, transport_str }, branch_id)
+    sipmsg = SIP.Msg.Ops.add_via(sipmsg, { local_ip, local_port, transport_str }, branch_id)
 
     # Start a new GenServer for each transaction and register it in Registry.SIPTransaction
     transact_params = { t_mod, t_pid, remote_ip, remote_port, sipmsg, self() }
