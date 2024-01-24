@@ -36,7 +36,7 @@ defmodule SIP.Test.Transport.UDPMockup do
 
 
   @impl true
-  def init(nil) do
+  def init({ _dest_ip, _dest_port}) do
     ips = SIP.NetUtils.get_local_ips( [ :ipv4 ] )
     initial_state = %{ t_isreliable: false, localip: hd(ips), localport: 5060 }
     { :ok, initial_state }

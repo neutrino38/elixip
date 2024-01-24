@@ -69,7 +69,7 @@ defmodule SIP.ICT do
   end
 
   def handle_call(:gettransport, _from, state ) do
-    { :reply, { state.t_mod, state.t_pid }, state }
+    { :reply, { state.tmod, state.tpid }, state }
   end
 
   @doc "ACK the transaction (only needed in case of 200 OK received)"

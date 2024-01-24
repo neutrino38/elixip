@@ -1,7 +1,6 @@
 defmodule SIP.Transac do
   @moduledoc "SIP Transaction Layer"
 
-  alias Hex.Application
   require SIP.ICT
   require Logger
   require SIP.Transport.Selector
@@ -40,7 +39,7 @@ defmodule SIP.Transac do
     # Start a new GenServer for each transaction and register it in Registry.SIPTransaction
     # The process created IS the transaction
     name = {:via, Registry, {Registry.SIPTransaction, branch_id, :cast }}
-    transact_params = { transact_module, transport_pid, sipmsg, self(), timeout }
+    transact_params = { transport_module, transport_pid, sipmsg, self(), timeout }
     case GenServer.start_link(SIP.ICT, transact_params, name: name ) do
       { :ok, trans_pid } ->
         Logger.debug([ transid: branch_id, message: "Created #{transact_module} with PID #{inspect(trans_pid)}." ])
@@ -55,44 +54,52 @@ defmodule SIP.Transac do
 
   @spec start_uac_transaction_with_template(binary(), list(), function(), map()) ::
           {:error, any()}
-          | {:invalidtemplate, atom()}
-          | {:no_transport_available, nil}
+          | :invalidtemplate
+          | :no_transport_available
           | {:ok, pid()}
   @doc "Start a client transaction from a template"
   def start_uac_transaction_with_template(siptemplate, bindings, parse_error_cb, options) when is_map(options) do
-    { dest_uri, _use_srv } = if Map.has_key?(options, :desturi) do
-      { options.desturi , options.usesrv }
-    else
-      { Application.fetch_env!(:elixip2, :proxyuri), Application.fetch_env!(:elixip2, :proxyusesrv ) }
-    end
+    try do
+      { dest_uri, _use_srv } = if Map.has_key?(options, :desturi) do
+        { options.desturi , options.usesrv }
+      else
+        { Application.fetch_env!(:elixip2, :proxyuri), Application.fetch_env!(:elixip2, :proxyusesrv ) }
+      end
 
-    case SIP.Transport.Selector.select_transport(dest_uri) do
-      { :ok, t_mod, t_pid } ->
-        { :ok, local_ip, local_port  } = GenServer.call(t_pid, :getlocalipandport)
-        bindings = bindings ++ [ local_ip: :inet.ntoa(local_ip), local_port: local_port ]
+      case SIP.Transport.Selector.select_transport(dest_uri) do
+        { :ok, t_mod, t_pid } ->
+          { :ok, local_ip, local_port } = GenServer.call(t_pid, :getlocalipandport)
+          bindings = bindings ++ [ local_ip: :inet.ntoa(local_ip), local_port: local_port ]
 
-        # Apply the bindings to the template to create the SIP message
-        msgstr = SIP.MsgTemplate.apply_template(siptemplate, bindings)
+          # Apply the bindings to the template to create the SIP message
+          msgstr = SIP.MsgTemplate.apply_template(siptemplate, bindings)
 
-        # parse the SIP message
-        case SIPMsg.parse(msgstr, parse_error_cb) do
+          # parse the SIP message
+          case SIPMsg.parse(msgstr, parse_error_cb) do
 
-          # This is an invite message
-          { :ok, sipmsg } when is_map(sipmsg) and sipmsg.method == :INVITE ->
-            transaction_start_common(t_mod, t_pid, SIP.ICT, sipmsg, options.ringtimeout)
+            # This is an invite message
+            { :ok, sipmsg } when is_map(sipmsg) and sipmsg.method == :INVITE ->
+              transaction_start_common(t_mod, t_pid, SIP.ICT, sipmsg, options.ringtimeout)
 
-          { :ok, sipmsg } when is_map(sipmsg) and sipmsg.method == false ->
-            raise "Cannot start an UAC transaction with SIP response"
+            { :ok, sipmsg } when is_map(sipmsg) and sipmsg.method == false ->
+              raise "Cannot start an UAC transaction with SIP response"
 
-          { :ok, sipmsg } when is_map(sipmsg) ->
-            # TODO
-            raise "Non INVITE transaction are not yet supported"
+            { :ok, sipmsg } when is_map(sipmsg) ->
+              # TODO
+              raise "Non INVITE transaction are not yet supported"
 
-          { errcode, _ } ->
-            { :invalidtemplate, errcode }
-        end
+            { errcode, _ } ->
+              { :invalidtemplate, errcode }
+          end
 
-        _ -> { :no_transport_available, nil }
+          _ -> :no_transport_available
+      end
+    rescue
+      ArgumentError ->
+        Logger.error("Transaction cannot be started with template without a specified destination or a proxy setting")
+        Logger.info("Specify %{ desturi: <dest SIP uri> usesrv: false | true } in the option arguments or ")
+        Logger.info("Specify a SIP proxy in config.exs. Add a section:\nconfig :elixp2   proxyuri: <SIP proxy URI>\n   usesrv: false | true")
+        :missingproxyconf
     end
   end
 

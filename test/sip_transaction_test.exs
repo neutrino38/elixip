@@ -15,7 +15,7 @@ defmodule SIP.Test.Transact do
 
   test "Arms timer A and check that it fires" do
     # Start fake transport layer
-    { :ok, t_pid } = GenServer.start(SIP.Test.Transport.UDPMockup, nil)
+    { :ok, t_pid } = GenServer.start_link(SIP.Test.Transport.UDPMockup, { "1.2.3.4", 5080 })
     { code, msg } = File.read("test/SIP-INVITE-BASIC-AUDIO.txt")
     assert code == :ok
     state = %{ state: :sending, t_isreliable: false, msgstr: msg,
@@ -118,7 +118,6 @@ defmodule SIP.Test.Transact do
           IO.puts("Did not received timemout layer message")
           assert false
       end
-
   end
 
 
@@ -211,7 +210,12 @@ User-Agent: Elixip 0.2.0
     assert invitemsg.method == :INVITE
   end
 
+  test "Selectionne le transport mockup" do
+    { :ok, t_mod, _t_pid } = SIP.Transport.Selector.select_transport("sip:90901@visio5.visioassistance.net:5090;unittest=1")
+    assert t_mod == SIP.Test.Transport.UDPMockup
+  end
   # Big transaction test
+  @tag :toto
   test "Cree une transaction SIP client INVITE - appel reussi" do
     { :ok, uac_t } = SIP.Transac.start_uac_transaction_with_template(
                               create_invite_template(), [],
@@ -220,7 +224,7 @@ User-Agent: Elixip 0.2.0
                                 IO.puts("Offending line #{lineno}: #{line}")
                                 IO.puts("Error code #{code}")
                                 end,
-                                %{} # %{ desturi: "sip:1.2.3.4:5060", usesrv: false }
+                                %{ desturi: "sip:1.2.3.4:5060;unittest=1", usesrv: false, ringtimeout: 90 }
       )
 
     { _t_mod, t_pid } = GenServer.call(uac_t, :gettransport)

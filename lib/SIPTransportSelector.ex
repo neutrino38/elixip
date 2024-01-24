@@ -38,6 +38,7 @@ defmodule SIP.Transport.Selector do
     case Registry.lookup(Registry.SIPTransport, instance_name) do
       [] ->
         # No such instance. Start a new transport
+        Logger.debug("Starting transport instance #{t_mod} <-> #{destip}:#{port}")
         name = { :via, Registry, {Registry.SIPTransport, instance_name}}
         GenServer.start(t_mod, { destip, port } , name: name)
 
@@ -73,7 +74,7 @@ defmodule SIP.Transport.Selector do
 
     # Obtain the transport part from the Request URI
     transport_str = case SIP.Uri.get_uri_param(ruri, "transport") do
-      { :nosuchparam, nil } -> "UDP"
+      { :no_such_param, nil } -> "UDP"
       { :ok, value } -> String.upcase(value)
     end
 
@@ -85,7 +86,7 @@ defmodule SIP.Transport.Selector do
       if usemockup do
          # Obtain the transport pid
         { :ok, t_pid } = find_or_launch_transport(SIP.Test.Transport.UDPMockup, "UDPMockup", ruri.domain, ruri.port)
-        { :ok, t_mod, t_pid }
+        { :ok, SIP.Test.Transport.UDPMockup, t_pid }
       else
         # Get the destination IP address
         { :ok, dest_ip } = resolve_dest_domain(ruri.domain, false)
