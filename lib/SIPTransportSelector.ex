@@ -2,8 +2,8 @@ defmodule SIP.Transport.Selector do
 	@moduledoc "Selection of transport given a SIP URI"
 
   require SIP.Uri
-  require SIP.Test.Transport.UDPMockup
   require Registry
+  require Logger
 
   @transport_map %{
     "UDP" => SIP.Transport.UDP,
@@ -15,7 +15,15 @@ defmodule SIP.Transport.Selector do
   }
 
   def start() do
-    { :ok, _ } = Registry.start_link(keys: :unique, name: SIP.Transport.Registry)
+    case Registry.start_link(keys: :unique, name: Registry.SIPTransport) do
+      { :ok, pid } ->
+        Logger.info("SIP transport layer started with PID #{inspect(pid)}")
+        :ok
+
+      { code, _pid } ->
+        Logger.error ("SIP transport layer failed to start with error #{code}")
+        code
+    end
   end
 
   defp find_or_launch_transport(t_mod, transport_name, destip, port)  do
@@ -26,12 +34,14 @@ defmodule SIP.Transport.Selector do
       transport_name
     end
 
-    case Registry.lookup(SIP.Transport.Registry, instance_name) do
+    # Lookup a process matching the existing instance name
+    case Registry.lookup(Registry.SIPTransport, instance_name) do
       [] ->
         # No such instance. Start a new transport
-        name = { :via, Registry, {SIP.Transport.Registry, instance_name}}
+        name = { :via, Registry, {Registry.SIPTransport, instance_name}}
         GenServer.start(t_mod, { destip, port } , name: name)
 
+        # Found one. Start return the pid
       [{ t_pid, _ }] -> { :ok, t_pid }
     end
   end

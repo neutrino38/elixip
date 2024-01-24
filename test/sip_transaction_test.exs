@@ -7,7 +7,10 @@ defmodule SIP.Test.Transact do
   doctest SIP.Transac
 
   setup_all do
-    SIP.Transac.start()
+    # Initialize transaction and transport layers
+    :ok = SIP.Transac.start()
+    :ok = SIP.Transport.Selector.start()
+    :ok
   end
 
   test "Arms timer A and check that it fires" do
@@ -176,7 +179,7 @@ a=rtcp-mux
     sdp
   end
 
-  defp create_invite_msg(bindings) do
+  defp create_invite_template() do
     invite_msg_str =
 """
 INVITE sip:90901@visio5.visioassistance.net:5090;unittest=1 SIP/2.0
@@ -192,31 +195,36 @@ Max-Forwards: 16
 User-Agent: Elixip 0.2.0
 
 """
-    SIP.MsgTemplate.apply_template(invite_msg_str <> create_sdp_body(), bindings)
+    invite_msg_str <> create_sdp_body()
   end
 
+  test "Cree un message INVITE à partir d'un modèle" do
+    bindings = [ local_ip: "172.21.100.2", local_port: 5060 ]
+    msgstr = SIP.MsgTemplate.apply_template(create_invite_template(), bindings)
 
-  # Big transaction test
-  test "Cree une transaction SIP client INVITE - appel reussi" do
-
-
-    { :ok, local_ip, local_port  } = GenServer.call(transport_pid, :getlocalipandport)
-
-    bindings = [ local_ip: :inet.ntoa(local_ip), local_port: local_port ]
-
-    new_invite = create_invite_msg(bindings)
-
-    { :ok, invitemsg } = SIPMsg.parse(new_invite, fn code, errmsg, lineno, line ->
+    { :ok, invitemsg } = SIPMsg.parse(msgstr, fn code, errmsg, lineno, line ->
 			IO.puts("\n" <> errmsg)
 			IO.puts("Offending line #{lineno}: #{line}")
 			IO.puts("Error code #{code}")
 			end)
 
+    assert invitemsg.method == :INVITE
+  end
 
-    { :ok, uac_t } = SIP.Transac.start_uac_transaction(invitemsg, 90)
+  # Big transaction test
+  test "Cree une transaction SIP client INVITE - appel reussi" do
+    { :ok, uac_t } = SIP.Transac.start_uac_transaction_with_template(
+                              create_invite_template(), [],
+                              fn code, errmsg, lineno, line ->
+                                IO.puts("\n" <> errmsg)
+                                IO.puts("Offending line #{lineno}: #{line}")
+                                IO.puts("Error code #{code}")
+                                end,
+                                %{} # %{ desturi: "sip:1.2.3.4:5060", usesrv: false }
+      )
 
-    { t_mod, t_pid } =
-    SIP.Test.Transport.UDPMockup.simulate_successful_answer(transport_pid)
+    { _t_mod, t_pid } = GenServer.call(uac_t, :gettransport)
+    SIP.Test.Transport.UDPMockup.simulate_successful_answer(t_pid)
 
     # Expect a 100 Trying after 200 ms
     receive do

@@ -1,9 +1,11 @@
 defmodule SIP.Transac do
   @moduledoc "SIP Transaction Layer"
 
+  alias Hex.Application
   require SIP.ICT
   require Logger
   require SIP.Transport.Selector
+  require Application
 
   @doc "Start the transaction layer"
   def start() do
@@ -19,6 +21,81 @@ defmodule SIP.Transac do
     end
   end
 
+  # Common part of transaction start
+  defp transaction_start_common(transport_module, transport_pid, transact_module, sipmsg, timeout) do
+     # Generate the branch ID
+     branch_id = SIP.Msg.Ops.generate_branch_value()
+     #Todo : check that branch ID is not already registered on the transaction registry
+
+    # Get the transport name frm the module
+    transport_str = apply(transport_module, :transport_str, [])
+
+    # Get the local and IP port from the transport process
+    { :ok, local_ip, local_port  } = GenServer.call(transport_pid, :getlocalipandport)
+    local_ip_str = SIP.NetUtils.ip2string(local_ip)
+
+    #Add the topmost via header
+    sipmsg = SIP.Msg.Ops.add_via(sipmsg, { local_ip_str, local_port, transport_str }, branch_id)
+
+    # Start a new GenServer for each transaction and register it in Registry.SIPTransaction
+    # The process created IS the transaction
+    name = {:via, Registry, {Registry.SIPTransaction, branch_id, :cast }}
+    transact_params = { transact_module, transport_pid, sipmsg, self(), timeout }
+    case GenServer.start_link(SIP.ICT, transact_params, name: name ) do
+      { :ok, trans_pid } ->
+        Logger.debug([ transid: branch_id, message: "Created #{transact_module} with PID #{inspect(trans_pid)}." ])
+        { :ok, trans_pid }
+
+      { code, err } ->
+        Logger.error("Failed to create #{transact_module} transaction. Error: #{code}.")
+        { code, err }
+    end
+  end
+
+
+  @spec start_uac_transaction_with_template(binary(), list(), function(), map()) ::
+          {:error, any()}
+          | {:invalidtemplate, atom()}
+          | {:no_transport_available, nil}
+          | {:ok, pid()}
+  @doc "Start a client transaction from a template"
+  def start_uac_transaction_with_template(siptemplate, bindings, parse_error_cb, options) when is_map(options) do
+    { dest_uri, _use_srv } = if Map.has_key?(options, :desturi) do
+      { options.desturi , options.usesrv }
+    else
+      { Application.fetch_env!(:elixip2, :proxyuri), Application.fetch_env!(:elixip2, :proxyusesrv ) }
+    end
+
+    case SIP.Transport.Selector.select_transport(dest_uri) do
+      { :ok, t_mod, t_pid } ->
+        { :ok, local_ip, local_port  } = GenServer.call(t_pid, :getlocalipandport)
+        bindings = bindings ++ [ local_ip: :inet.ntoa(local_ip), local_port: local_port ]
+
+        # Apply the bindings to the template to create the SIP message
+        msgstr = SIP.MsgTemplate.apply_template(siptemplate, bindings)
+
+        # parse the SIP message
+        case SIPMsg.parse(msgstr, parse_error_cb) do
+
+          # This is an invite message
+          { :ok, sipmsg } when is_map(sipmsg) and sipmsg.method == :INVITE ->
+            transaction_start_common(t_mod, t_pid, SIP.ICT, sipmsg, options.ringtimeout)
+
+          { :ok, sipmsg } when is_map(sipmsg) and sipmsg.method == false ->
+            raise "Cannot start an UAC transaction with SIP response"
+
+          { :ok, sipmsg } when is_map(sipmsg) ->
+            # TODO
+            raise "Non INVITE transaction are not yet supported"
+
+          { errcode, _ } ->
+            { :invalidtemplate, errcode }
+        end
+
+        _ -> { :no_transport_available, nil }
+    end
+  end
+
   @doc """
   Start an INVITE client transaction (ICT)
   - first arg is the SIP message to send
@@ -26,36 +103,11 @@ defmodule SIP.Transac do
   - it returns a pid that represent the transaction. The process is a GenServer
   """
   def start_uac_transaction(sipmsg, ring_timeout) when is_map(sipmsg) and sipmsg.method == :INVITE do
-    # Generate the branch ID
-    branch_id = SIP.Msg.Ops.generate_branch_value()
-    #Todo : check that branch ID is not already registered on the transaction registry
 
-    # Use callback passed to select transport
+    # Get an associated transport instance.
     case SIP.Transport.Selector.select_transport(sipmsg.ruri) do
       { :ok, t_mod, t_pid } ->
-        # Get the transport name frm the module
-        transport_str = apply(t_mod, :transport_str, [])
-
-        # Get the local and IP port from the transport process
-        { :ok, local_ip, local_port  } = GenServer.call(t_pid, :getlocalipandport)
-        local_ip_str = SIP.NetUtils.ip2string(local_ip)
-
-        #Add the topmost via header
-        sipmsg = SIP.Msg.Ops.add_via(sipmsg, { local_ip_str, local_port, transport_str }, branch_id)
-
-        # Start a new GenServer for each transaction and register it in Registry.SIPTransaction
-        # The process created IS the transaction
-        name = {:via, Registry, {Registry.SIPTransaction, branch_id, :cast }}
-        transact_params = { t_mod, t_pid, sipmsg, self(), ring_timeout }
-        case GenServer.start_link(SIP.ICT, transact_params, name: name ) do
-          { :ok, trans_pid } ->
-            Logger.debug([ transid: branch_id, message: "Created invite client transaction with PID #{inspect(trans_pid)}." ])
-            { :ok, trans_pid }
-
-          { code, err } ->
-            Logger.error("Failed to create invite client transaction. Error: #{code}.")
-            { code, err }
-        end
+        transaction_start_common(t_mod, t_pid, SIP.ICT, sipmsg, ring_timeout)
 
       _ ->
         { _err, ruri_str } = SIP.Uri.serialize(sipmsg.ruri)
