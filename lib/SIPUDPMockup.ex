@@ -43,8 +43,15 @@ defmodule SIP.Test.Transport.UDPMockup do
   end
 
   @impl true
-  def handle_call({ :sendmsg, msgstr }, _from, state) do
-    Logger.debug("Transport mockeup: Message sent ---->\r\n" <> msgstr <> "\r\n-----------------")
+  def handle_call({ :sendmsg, msgstr, destip, dest_port }, _from, state) do
+    destipstr = case SIP.NetUtils.ip2string(destip) do
+      { :error, :einval } ->
+        Logger.error([module: SIP.Test.Transport.UDPMockup, message: "sendmsg: invalid destination address."])
+        IO.inspect(destip)
+        raise "UDPMockup: invalid IP address"
+        ipstr when is_binary(ipstr)-> ipstr
+    end
+    Logger.debug("UDPMockup: Message sent to #{destipstr}:#{dest_port} ---->\r\n" <> msgstr <> "\r\n-----------------")
     case SIPMsg.parse(msgstr, fn code, errmsg, lineno, line ->
 			IO.puts("\n" <> errmsg)
 			IO.puts("Offending line #{lineno}: #{line}")

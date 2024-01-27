@@ -21,7 +21,7 @@ defmodule SIP.Transac do
   end
 
   # Common part of transaction start
-  defp transaction_start_common(transport_module, transport_pid, transact_module, sipmsg, timeout) do
+  defp transaction_start_common(transport_module, transport_pid, destip, dest_port, transact_module, sipmsg, timeout) do
      # Generate the branch ID
      branch_id = SIP.Msg.Ops.generate_branch_value()
      #Todo : check that branch ID is not already registered on the transaction registry
@@ -39,7 +39,7 @@ defmodule SIP.Transac do
     # Start a new GenServer for each transaction and register it in Registry.SIPTransaction
     # The process created IS the transaction
     name = {:via, Registry, {Registry.SIPTransaction, branch_id, :cast }}
-    transact_params = { transport_module, transport_pid, sipmsg, self(), timeout }
+    transact_params = { transport_module, transport_pid, destip, dest_port, sipmsg, self(), timeout }
     case GenServer.start_link(SIP.ICT, transact_params, name: name ) do
       { :ok, trans_pid } ->
         Logger.debug([ transid: branch_id, message: "Created #{transact_module} with PID #{inspect(trans_pid)}." ])
@@ -67,7 +67,7 @@ defmodule SIP.Transac do
       end
 
       case SIP.Transport.Selector.select_transport(dest_uri) do
-        { :ok, t_mod, t_pid } ->
+        { :ok, t_mod, t_pid, destip, destport } ->
           { :ok, local_ip, local_port } = GenServer.call(t_pid, :getlocalipandport)
           bindings = bindings ++ [ local_ip: :inet.ntoa(local_ip), local_port: local_port ]
 
@@ -79,7 +79,7 @@ defmodule SIP.Transac do
 
             # This is an invite message
             { :ok, sipmsg } when is_map(sipmsg) and sipmsg.method == :INVITE ->
-              transaction_start_common(t_mod, t_pid, SIP.ICT, sipmsg, options.ringtimeout)
+              transaction_start_common(t_mod, t_pid, destip, destport, SIP.ICT, sipmsg, options.ringtimeout)
 
             { :ok, sipmsg } when is_map(sipmsg) and sipmsg.method == false ->
               raise "Cannot start an UAC transaction with SIP response"
@@ -113,8 +113,8 @@ defmodule SIP.Transac do
 
     # Get an associated transport instance.
     case SIP.Transport.Selector.select_transport(sipmsg.ruri) do
-      { :ok, t_mod, t_pid } ->
-        transaction_start_common(t_mod, t_pid, SIP.ICT, sipmsg, ring_timeout)
+      { :ok, t_mod, t_pid, destip, dport } ->
+        transaction_start_common(t_mod, t_pid, destip, dport, SIP.ICT, sipmsg, ring_timeout)
 
       _ ->
         { _err, ruri_str } = SIP.Uri.serialize(sipmsg.ruri)

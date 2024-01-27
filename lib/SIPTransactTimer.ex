@@ -54,7 +54,7 @@ defmodule SIP.Trans.Timer do
   def handle_timer({ :timerA, ms }, state) when ms < @timer_T2_val and state.state == :sending do
     if not state.t_isreliable do
       # If transport is not reliable, retransmit
-      code = GenServer.call(state.tpid, { :sendmsg, state.msgstr } )
+      code = GenServer.call(state.tpid, { :sendmsg, state.msgstr, state.destip, state.destport } )
       if code != :ok do
         Logger.error([ transid: state.sipmsg.transid, message: "timer_T1: Fail to retransmit message: #{code}"])
       end
