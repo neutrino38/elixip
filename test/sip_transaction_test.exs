@@ -15,11 +15,11 @@ defmodule SIP.Test.Transact do
 
   test "Arms timer A and check that it fires" do
     # Start fake transport layer
-    { :ok, t_pid } = GenServer.start_link(SIP.Test.Transport.UDPMockup, { "1.2.3.4", 5080 })
+    { :ok, t_pid } = GenServer.start_link(SIP.Test.Transport.UDPMockup, { {1,2,3,4}, 5080 })
     { code, msg } = File.read("test/SIP-INVITE-BASIC-AUDIO.txt")
     assert code == :ok
     state = %{ state: :sending, t_isreliable: false, msgstr: msg,
-               tmod: SIP.Test.Transport.UDPMockup, tpid: t_pid }
+               tmod: SIP.Test.Transport.UDPMockup, tpid: t_pid, destip: {1,2,3,4}, destport: 5080 }
     state = SIP.Trans.Timer.schedule_timer_A(state)
     state = receive do
       { :timerA, ms } ->
@@ -211,8 +211,9 @@ User-Agent: Elixip 0.2.0
   end
 
   test "Selectionne le transport mockup" do
-    { :ok, t_mod, _t_pid } = SIP.Transport.Selector.select_transport("sip:90901@visio5.visioassistance.net:5090;unittest=1")
+    { :ok, t_mod, _t_pid, destip, 5080 } = SIP.Transport.Selector.select_transport("sip:90901@visio5.visioassistance.net:5090;unittest=1")
     assert t_mod == SIP.Test.Transport.UDPMockup
+    assert destip == {1,2,3,4}
   end
   # Big transaction test
   @tag :toto
