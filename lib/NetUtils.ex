@@ -209,7 +209,12 @@ defmodule SIP.NetUtils do
     hd(SIP.NetUtils.get_local_ips( [ :ipv4 ])) |> :inet.ntoa( ) |> List.to_string()
   end
 
-  def ip2string(ipaddr) do
+  @doc "Convert an IP address into a string. Wrapper for the erlang inet module ntoa() function"
+  @spec ip2string(
+          {byte(), byte(), byte(), byte()}
+          | {char(), char(), char(), char(), char(), char(), char(), char()}
+        ) :: binary() | {:error, :einval}
+  def ip2string(ipaddr) when is_tuple(ipaddr) do
     ret = :inet.ntoa(ipaddr)
     if is_list(ret) do
       to_string(ret)
@@ -217,5 +222,10 @@ defmodule SIP.NetUtils do
       # Error case (:einval)
       ret
     end
+  end
+
+  @doc "parse an IP address expressed as a string."
+  def parse_address(ipaddr_str) when is_binary(ipaddr_str) do
+    :inet.parse_address(String.to_charlist(ipaddr_str))
   end
 end
