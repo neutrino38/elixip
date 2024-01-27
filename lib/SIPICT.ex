@@ -16,18 +16,22 @@ defmodule SIP.ICT do
     end
   end
 
+  defp transport_send_msg(state, sipmsgstr) do
+    GenServer.call(state.tpid,{ :sendmsg, sipmsgstr, state.destip, state.destport } )
+  end
 
 
   # Callbacks
 
   @impl true
-  def init({ t_mod, t_pid, sipmsg, app_pid, ring_timeout }) do
+  def init({ t_mod, t_pid, dest_ip, dest_port, sipmsg, app_pid, ring_timeout }) do
     initial_state = %{ msg: sipmsg, tmod: t_mod, tpid: t_pid, app: app_pid, t2: ring_timeout,
-                       t_isreliable: apply(t_mod, :is_reliable, []),  state: :sending }
+                       t_isreliable: apply(t_mod, :is_reliable, []), destip: dest_ip,
+                       destport: dest_port, state: :sending }
 
     case safe_serialize(sipmsg, initial_state) do
       {:ok, initial_state} ->
-        case GenServer.call(t_pid, { :sendmsg, initial_state.msgstr }  ) do
+        case transport_send_msg(initial_state, initial_state.msgstr ) do
           :ok ->
             { :ok, ruri } = SIP.Uri.serialize(sipmsg.ruri)
             Logger.info([ transid: sipmsg.transid, message: "ICT: sent INVITE to #{ruri}"])
@@ -54,7 +58,7 @@ defmodule SIP.ICT do
     if state.state in [ :sending, :proceeding ] do
       cancel = state.msg |> SIP.Msg.Ops.cancel_request() |> SIPMsg.serialize()
       Logger.info([ transid: state.msg.transid, message: "ICT: sending CANCEL"])
-      case GenServer.call(state.tpid, { :sendmsg, cancel }  ) do
+      case transport_send_msg(state, cancel) do
         :ok ->
           { :reply, :ok, %{ state | state: :cancelling }}
 
@@ -86,7 +90,7 @@ defmodule SIP.ICT do
       end
       ack_sent = state.msg |> SIP.Msg.Ops.ack_request(remote_contact, routeset) |> SIPMsg.serialize()
       Logger.info([ transid: state.msg.transid, message: "Sending ACK"])
-      case GenServer.call(state.tpid, {:sendmsg, ack_sent} ) do
+      case transport_send_msg(state, ack_sent) do
         :ok ->
           new_state = if state.t_isreliable do
             Logger.debug([ transid: state.msg.transid, message: "ACK sent: #{state.state} -> terminated"])
@@ -158,7 +162,7 @@ defmodule SIP.ICT do
 
       # Handle 200 OK retransmission on unrelable transport (UDP)
       state.state == :terminated and is_bitstring(state.ack) ->
-        GenServer.call(state.tpid, :sendmsg, state.ack )
+        transport_send_msg(state, state.ack)
         state
 
       true ->
@@ -180,7 +184,7 @@ defmodule SIP.ICT do
 
         state.state == :confirmed  and is_bitstring(state.ack) ->
           #Resend the same ack message
-          GenServer.call(state.tpid, :sendmsg, state.ack )
+          transport_send_msg(state, state.ack )
           state
 
         true ->
