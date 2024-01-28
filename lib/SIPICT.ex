@@ -177,7 +177,7 @@ defmodule SIP.ICT do
     cond do
       state.state in [ :sending, :proceeding ] ->
         # Send the message to the application layer
-        send(sipmsg.app, { :response, sipmsg })
+        send(state.app, { :response, sipmsg })
         # Send ACK automatically
         { :reply, _reply, new_state } = handle_call(:ack, self(), state)
         new_state
