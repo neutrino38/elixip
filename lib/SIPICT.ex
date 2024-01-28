@@ -25,7 +25,7 @@ defmodule SIP.ICT do
 
   @impl true
   def init({ t_mod, t_pid, dest_ip, dest_port, sipmsg, app_pid, ring_timeout }) do
-    initial_state = %{ msg: sipmsg, tmod: t_mod, tpid: t_pid, app: app_pid, t2: ring_timeout,
+    initial_state = %SIP.Transac{ msg: sipmsg, tmod: t_mod, tpid: t_pid, app: app_pid, timeout: ring_timeout,
                        t_isreliable: apply(t_mod, :is_reliable, []), destip: dest_ip,
                        destport: dest_port, state: :sending }
 
@@ -126,7 +126,7 @@ defmodule SIP.ICT do
         else
           state.msg
         end
-        %{ state | state: :proceeding, msg: upd_msg } |> schedule_timer_B(state.t2 * 1000)
+        %{ state | state: :proceeding, msg: upd_msg } |> schedule_timer_B(state.timeout * 1000)
 
       :proceeding ->
         send(state.app, { :response, sipmsg })

@@ -1,10 +1,24 @@
 defmodule SIP.Transac do
   @moduledoc "SIP Transaction Layer"
 
-  require SIP.ICT
   require Logger
   require SIP.Transport.Selector
   require Application
+
+  # Struct defining a transaction
+  defstruct [
+    msg: nil, # SIP message that created this transaction
+    tmod: nil, # Transport module used by this transaction
+    tpid: nil, # PID of the transport instance
+    app: nil, # PID of the application / dialog layer using the transaction
+    t_isreliable: false, #If the associated transport is reliable
+    timeout: 30, # transaction overall timeout in sec
+    destip: {127,0,0,1},
+    destport: 5060,
+    state: :inital,
+    tB_ref: nil,
+    timerk: nil
+  ]
 
   @doc "Start the transaction layer"
   def start() do
