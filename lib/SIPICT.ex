@@ -34,7 +34,8 @@ defmodule SIP.ICT do
         case transport_send_msg(initial_state, initial_state.msgstr ) do
           :ok ->
             { :ok, ruri } = SIP.Uri.serialize(sipmsg.ruri)
-            Logger.info([ transid: sipmsg.transid, message: "ICT: sent INVITE to #{ruri}"])
+            Logger.info([ transid: sipmsg.transid, module: __MODULE__,
+                        message: "Sent INVITE to #{ruri}"])
             if not initial_state.t_isreliable do
               schedule_timer_A(initial_state)
             end
@@ -46,7 +47,8 @@ defmodule SIP.ICT do
         end
 
       { code, _initial_state} ->
-        Logger.error([ transid: sipmsg.transid, message: "ICT: Fail to serialize SIP message #{code}"])
+        Logger.error([ transid: sipmsg.transid, module: __MODULE__,
+                      message: "Fail to serialize SIP message #{code}"])
         { :stop, "Fail to serialize message" }
     end
 
@@ -57,7 +59,8 @@ defmodule SIP.ICT do
   def handle_call(:cancel, _from, state) do
     if state.state in [ :sending, :proceeding ] do
       cancel = state.msg |> SIP.Msg.Ops.cancel_request() |> SIPMsg.serialize()
-      Logger.info([ transid: state.msg.transid, message: "ICT: sending CANCEL"])
+      Logger.info([ transid: state.msg.transid,  module: __MODULE__,
+                  message: "Cancelling transaction"])
       case transport_send_msg(state, cancel) do
         :ok ->
           { :reply, :ok, %{ state | state: :cancelling }}
@@ -89,7 +92,8 @@ defmodule SIP.ICT do
         :error -> nil
       end
       ack_sent = state.msg |> SIP.Msg.Ops.ack_request(remote_contact, routeset) |> SIPMsg.serialize()
-      Logger.info([ transid: state.msg.transid, message: "Sending ACK"])
+      Logger.debug([ transid: state.msg.transid,  module: __MODULE__,
+                  message: "Sending ACK"])
       case transport_send_msg(state, ack_sent) do
         :ok ->
           new_state = if state.t_isreliable do
@@ -112,14 +116,16 @@ defmodule SIP.ICT do
 
   # Handle privisional (1xx) responses
   defp handle_sip_response(state, sipmsg) when SIP.Msg.Ops.is_1xx_resp(sipmsg) do
-    Logger.debug([ transid: sipmsg.transid, message: "Received prov resp #{sipmsg.response}"])
+    Logger.debug([ transid: sipmsg.transid, module: __MODULE__,
+                 message: "Received prov resp #{sipmsg.response}"])
     case state.state do
       :sending ->
         # Todo: support 100rel and send PRACK
 
         # Send provisional response to app layer
         send(state.app, { :response, sipmsg })
-        Logger.debug([ transid: sipmsg.transid, message: "state: sending -> proceeding"])
+        Logger.debug([ transid: sipmsg.transid,  module: __MODULE__,
+                     message: "state: sending -> proceeding"])
         upd_msg = if sipmsg.response > 100 do
           #Store the to header to obtain the 'to' tag
           Map.put(state.msg, :to, sipmsg.to)
@@ -133,24 +139,28 @@ defmodule SIP.ICT do
         state
 
       _ ->
-        Logger.debug([ transid: sipmsg.transid, message: "state: #{state.state}. Ignoring resp."])
+        Logger.debug([ transid: sipmsg.transid,  module: __MODULE__,
+                     message: "state: #{state.state}. Ignoring resp."])
         state
     end
   end
 
   # Handle OK responses (2xx)
   defp handle_sip_response(state, sip_resp) when SIP.Msg.Ops.is_2xx_resp(sip_resp) do
-    Logger.debug([ transid: sip_resp.transid, message: "Received #{sip_resp.response} final resp"])
+    Logger.debug([ transid: sip_resp.transid,  module: __MODULE__,
+                 message: "Received #{sip_resp.response} final resp"])
     cond do
       state.state in [ :sending, :proceeding ] ->
         send(state.app, { :response, sip_resp })
-        Logger.debug([ transid: sip_resp.transid, message: "state: #{state.state} -> confirmed"])
+        Logger.debug([ transid: sip_resp.transid,
+                     module: __MODULE__,message: "state: #{state.state} -> confirmed"])
         routeset = case Map.fetch(sip_resp, :route) do
           { :ok, routeset } -> routeset
           :error -> nil
         end
 
-        Logger.info([ transid: sip_resp.transid, message: "ICT: answered with #{sip_resp.response}"])
+        Logger.info([ transid: sip_resp.transid,  module: __MODULE__,
+                    message: "answered with #{sip_resp.response}"])
         # Update status, the to header of the request with the to of the response to get the to tag
         state = %{ state | msg: Map.put(state.msg, :to, sip_resp.to), state: :confirmed }
         Map.put(state, :remotecontact, sip_resp.contact) |> Map.put(:route, routeset)
@@ -166,20 +176,22 @@ defmodule SIP.ICT do
         state
 
       true ->
-        Logger.debug([ transid: sip_resp.transid, message: "state: #{state.state}. Ignoring resp."])
+        Logger.debug([ transid: sip_resp.transid, module: __MODULE__,
+                     message: "state: #{state.state}. Ignoring resp."])
         state
     end
   end
 
   # Handle 4xx, 5xx, 6xx responses
   defp handle_sip_response(state, sipmsg) when SIP.Msg.Ops.is_failure_resp(sipmsg) do
-    Logger.debug([ transid: sipmsg.transid, message: "Received #{sipmsg.response} failure resp in state #{state.state}"])
     cond do
       state.state in [ :sending, :proceeding ] ->
         # Send the message to the application layer
         send(state.app, { :response, sipmsg })
         # Send ACK automatically on failure
-        Logger.debug([ transid: sipmsg.transid, message: "state: #{state.state} -> rejected"])
+        Logger.debug([ transid: sipmsg.transid, module: __MODULE__,
+                      message: "Received #{sipmsg.response}. State: #{state.state} -> rejected"])
+        Logger.info([ transid: sipmsg.transid, message: "Call rejected with response #{sipmsg.response}"])
         { :reply, _reply, new_state } = handle_call(:ack, self(), %SIP.Transac{state | state: :rejected })
         new_state
 

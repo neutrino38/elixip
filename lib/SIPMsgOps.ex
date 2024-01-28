@@ -35,7 +35,8 @@ defmodule SIP.Msg.Ops do
       #To do add, list of tuples and maps
     end
 
-    Map.put(sipmsg, :via, [ via | sipmsg.via ])
+    # Add the new via header as the head of the list and change the transaction id
+    Map.put(sipmsg, :via, [ via | sipmsg.via ]) |> Map.put(:transid, branch_id)
   end
 
   @doc "Return a SIP reason given a SIP code"
