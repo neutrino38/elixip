@@ -230,7 +230,7 @@ defmodule SIPMsg do
 		first_line = List.first(lines)
 		line_number = 1
 		if is_bitstring(first_line) do
-			case String.split(first_line, " ") do
+			case String.split(first_line, " ", parts: 3) do
 
 				# This is a SIP response
 				[ "SIP/2.0", response_code, reason ] ->
