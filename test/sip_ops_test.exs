@@ -97,4 +97,12 @@ defmodule SIP.Test.SIP.Msg.Ops do
       end)
     assert code == :ok
   end
+
+  test "Create an ACK message from the request and serialize it", context do
+    ackmsg = SIP.Msg.Ops.ack_request(context.sipreq, nil)
+    assert ackmsg.method == :ACK
+    assert is_map(ackmsg.ruri)
+    assert ackmsg.ruri != nil
+    _sipack_str = SIPMsg.serialize(ackmsg)
+  end
 end

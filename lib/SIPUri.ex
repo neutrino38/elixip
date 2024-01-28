@@ -1,4 +1,15 @@
 defmodule SIP.Uri do
+
+	defstruct [
+		displayname: nil,
+		userpart: nil,
+		domain: nil,
+		port: nil,
+		scheme: nil,
+		proto: "UDP",
+		params: %{}
+	]
+
 	defp parse_uri_parameters(param_list) do
 		params = Enum.map( param_list, fn pv ->
 				case String.split(pv, "=") do
@@ -20,7 +31,7 @@ defmodule SIP.Uri do
 			[ user, domainport ] ->
 				if String.match?(user,~r/^[a-zA-Z0-9\+][a-zA-Z0-9\-\._]+$/) do
 					tmpuri = parse_core_uri( scheme, domainport )
-					if is_map(tmpuri) do Map.merge( %{ userpart: user }, tmpuri) else tmpuri end
+					if is_map(tmpuri) do Map.put(tmpuri, :userpart, user) else tmpuri end
 				else
 					nil
 				end
@@ -30,14 +41,14 @@ defmodule SIP.Uri do
 					[ domain, port ] ->
 						if String.match?(port,~r/^[0-9]+$/) do
 							tmpuri = parse_core_uri( scheme, domain )
-							if is_map(tmpuri) do Map.merge( %{ port: String.to_integer(port) }, tmpuri ) else tmpuri end
+							if is_map(tmpuri) do Map.put( tmpuri, :port, String.to_integer(port) ) else tmpuri end
 						else
 							:invalid_sip_uri_port
 						end
 
 					[ domain ] ->
 						if String.match?(domain,~r/^[a-zA-Z0-9\-\.]+$/) do
-							%{ domain: domain }
+							%SIP.Uri{ domain: domain }
 						else
 							:invalid_sip_domain
 						end
@@ -69,7 +80,7 @@ defmodule SIP.Uri do
 					core_uri ->
 						# Parse parameters
 						params = parse_uri_parameters( Enum.drop( parts, 1 ) )
-						core_uri = if Map.has_key?(core_uri, :port) do
+						core_uri = if core_uri.port != nil do
 							core_uri
 						else
 							# Add default port
@@ -77,7 +88,8 @@ defmodule SIP.Uri do
 								:port,
 								if proto == "sips:" do 5061 else 5060 end)
 						end
-						{ :ok, Map.merge(core_uri, %{ scheme: proto, params: params }) }
+						core_uri = Map.put(core_uri, :scheme, proto) |> Map.put(:params, params)
+						{ :ok, core_uri }
 				end
 
 			[ "<", part2 ] ->
@@ -172,6 +184,10 @@ defmodule SIP.Uri do
 		"sips:" <> user <> "@" <> host
 	end
 
+	defp serialize_core_uri( "sips:", user, host, nil ) do
+		"sips:" <> user <> "@" <> host
+	end
+
 	defp serialize_core_uri( "sips:", user, host, port ) do
 		"sips:" <> user <> "@" <> host <> ":" <> Integer.to_string(port)
 	end
@@ -181,6 +197,10 @@ defmodule SIP.Uri do
 	end
 
 	defp serialize_core_uri( "sip:", user, host, 5060 ) do
+		"sip:" <> user <> "@" <> host
+	end
+
+	defp serialize_core_uri( "sip:", user, host, nil ) do
 		"sip:" <> user <> "@" <> host
 	end
 
@@ -213,7 +233,7 @@ defmodule SIP.Uri do
 				uri.port )
 
 		#URI.encode_www_form()
-		uri_str = if Map.has_key?(uri, :displayname) do
+		uri_str = if uri.displayname != nil do
 			"\"" <> URI.encode_www_form(uri.displayname) <> "\" <" <> core_uri_str <> ">;" <> serialize_params(uri.params)
 		else
 			core_uri_str <> ";" <> serialize_params(uri.params)

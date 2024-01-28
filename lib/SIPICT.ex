@@ -78,7 +78,7 @@ defmodule SIP.ICT do
 
   @doc "ACK the transaction (only needed in case of 200 OK received)"
   def handle_call(:ack, _from, state) do
-    if state.state == :confirmed do
+    if state.state in [:confirmed, :rejected] do
       routeset = case Map.fetch(state, :route) do
         {:ok, routeset} -> routeset
         :error -> nil
@@ -173,23 +173,24 @@ defmodule SIP.ICT do
 
   # Handle 4xx, 5xx, 6xx responses
   defp handle_sip_response(state, sipmsg) when SIP.Msg.Ops.is_failure_resp(sipmsg) do
-    Logger.debug([ transid: sipmsg.transid, message: "Received #{sipmsg.response} failure resp"])
+    Logger.debug([ transid: sipmsg.transid, message: "Received #{sipmsg.response} failure resp in state #{state.state}"])
     cond do
       state.state in [ :sending, :proceeding ] ->
         # Send the message to the application layer
         send(state.app, { :response, sipmsg })
-        # Send ACK automatically
-        { :reply, _reply, new_state } = handle_call(:ack, self(), state)
+        # Send ACK automatically on failure
+        Logger.debug([ transid: sipmsg.transid, message: "state: #{state.state} -> rejected"])
+        { :reply, _reply, new_state } = handle_call(:ack, self(), %SIP.Transac{state | state: :rejected })
         new_state
 
-        state.state == :confirmed  and is_bitstring(state.ack) ->
-          #Resend the same ack message
-          transport_send_msg(state, state.ack )
-          state
+      state.state == :rejected  and is_bitstring(state.ack) ->
+        #Resend the same ack message
+        transport_send_msg(state, state.ack )
+        state
 
-        true ->
-          Logger.debug([ transid: sipmsg.transid, message: "state: #{state.state}. Ignoring resp."])
-          state
+      true ->
+        Logger.debug([ transid: sipmsg.transid, message: "state: #{state.state}. Ignoring resp."])
+        state
       end
   end
 

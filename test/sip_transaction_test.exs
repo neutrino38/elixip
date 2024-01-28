@@ -327,7 +327,7 @@ User-Agent: Elixip 0.2.0
     receive do
       {:response, resp} ->
         assert resp.response == 486
-        #IO.puts("TEST: Received 180 Ringing on time")
+        Process.sleep(500)
 
       {:timeout, :timerB} ->
         IO.puts("timerB expired before 486 Ringing")

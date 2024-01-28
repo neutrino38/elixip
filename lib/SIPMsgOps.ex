@@ -268,6 +268,12 @@ defmodule SIP.Msg.Ops do
       k in [ :via, :to, :from, :route, "Max-Forward", :cseq, :callid, :contentlength ]
     end
 
+    remote_contact = if remote_contact == nil do
+      sipmsg.ruri
+    else
+      remote_contact
+    end
+
     # update fields
     fieldlist = [
       {:method, :ACK},
