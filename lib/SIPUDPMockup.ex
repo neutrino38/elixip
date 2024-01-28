@@ -81,7 +81,7 @@ defmodule SIP.Test.Transport.UDPMockup do
     { :noreply,  state }
   end
 
-  def handle_cast({ :simulate, scenario }, state) do
+  def handle_cast({ :simulate, scenario }, state) when is_atom(scenario) do
 
     new_state = Map.put(state, :scenario, scenario)
     case scenario do
@@ -112,7 +112,7 @@ defmodule SIP.Test.Transport.UDPMockup do
   end
 
   def handle_cast( {:simulate, resp, after_ms }, state) when resp in 400..487 do
-    siprsp = reply_to_request(state.req, 200, nil, [], "as424e7930")
+    siprsp = reply_to_request(state.req, resp, nil, [], "as424e7930")
 
     Logger.debug([transid: state.req.transid, module: SIP.Test.Transport.UDPMockup,
                  message: "Simulating a #{resp} Answer #{after_ms} ms."])
@@ -124,7 +124,7 @@ defmodule SIP.Test.Transport.UDPMockup do
   @impl true
   def handle_info({ :recv, siprsp}, state) do
     Logger.debug([transid: state.req.transid, module: SIP.Test.Transport.UDPMockup,
-    message: "Received SIP resp #{siprsp.response}."])
+    message: "Received SIP resp #{siprsp.response} scenario #{state.scenario}"])
 
     SIP.Transac.process_sip_message(SIPMsg.serialize(siprsp))
     case siprsp.response do
@@ -138,12 +138,13 @@ defmodule SIP.Test.Transport.UDPMockup do
               # answer with 480 Temporary Unavailable
               GenServer.cast(self(), { :simulate, 480, 200 })
 
-            :busy
+            :busy ->
               # We received the 100 Trying -- simulate a 180 ringing after some time
               # then simulate 486 Busy sent by the user
               GenServer.cast(self(), { :simulate, 180, 200 })
 
             _ ->
+              Logger.warning( [ module: SIP.Test.Transport.UDPMockup, message: "Unidentified SIP scenario #{state.scenario}"])
               GenServer.cast(self(), { :simulate, 404, 200 })
           end
 
