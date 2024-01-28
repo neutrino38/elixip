@@ -248,4 +248,6 @@ defmodule SIP.Test.Parser do
 			assert parsed_msg2.method == :BYE
 			assert parsed_msg2.dialog_id == {"8075639", "32645600-4c01-bc8f-670c-deac31158db8", "as424e7930"}
 		end
+
+
 end

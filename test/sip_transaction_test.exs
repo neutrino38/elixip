@@ -279,4 +279,65 @@ User-Agent: Elixip 0.2.0
     end
 
   end
+
+  @tag :toto
+  test "Cree une transaction SIP client INVITE - appel occcupé" do
+    { :ok, uac_t } = SIP.Transac.start_uac_transaction_with_template(
+                              create_invite_template(), [],
+                              fn code, errmsg, lineno, line ->
+                                IO.puts("\n" <> errmsg)
+                                IO.puts("Offending line #{lineno}: #{line}")
+                                IO.puts("Error code #{code}")
+                                end,
+                                %{ desturi: "sip:1.2.3.4:5060;unittest=1", usesrv: false, ringtimeout: 90 }
+      )
+
+    { _t_mod, t_pid } = GenServer.call(uac_t, :gettransport)
+    SIP.Test.Transport.UDPMockup.simulate_busy_answer(t_pid)
+
+    # Expect a 100 Trying after 200 ms
+    receive do
+      {:response, resp} ->
+        assert resp.response == 100
+        #IO.puts("TEST: Received 100")
+
+      _ -> assert false
+    # after
+      # 300 -> assert false # We did not received the 100 Trying on time
+    end
+
+   # Expect a 180 ringing after 200 mss
+   receive do
+    {:response, resp} ->
+      assert resp.response == 180
+      #IO.puts("TEST: Received 180 Ringing on time")
+
+    {:timeout, :timerB} ->
+      IO.puts("timerB expired before 180 Ringing")
+      assert false
+
+    bla ->
+      IO.puts("TEST: Received #{bla}")
+      assert false
+    after
+      500 -> assert false # We did not received the 180 Ringing on time
+    end
+
+    # Expect a 486 Busy after 200 mss
+    receive do
+      {:response, resp} ->
+        assert resp.response == 486
+        #IO.puts("TEST: Received 180 Ringing on time")
+
+      {:timeout, :timerB} ->
+        IO.puts("timerB expired before 486 Ringing")
+        assert false
+
+      bla ->
+        IO.puts("TEST: Received #{bla}")
+        assert false
+    after
+      3000 -> assert false # We did not received the 180 Ringing on time
+    end
+  end
 end
