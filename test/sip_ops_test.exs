@@ -85,4 +85,16 @@ defmodule SIP.Test.SIP.Msg.Ops do
 
   end
 
+  test "Create a 486 Busy, serialize it then reparse it", context do
+    siprsp = SIP.Msg.Ops.reply_to_request(context.sipreq, 486, nil, [], "tt88767")
+    assert siprsp.method == false
+    assert siprsp.response == 486
+    siprsp_str = SIPMsg.serialize(siprsp)
+    { code, _parsed_msg } = SIPMsg.parse(siprsp_str, fn code, errmsg, lineno, line ->
+      IO.puts("\n" <> errmsg)
+      IO.puts("Offending line #{lineno}: #{line}")
+      IO.puts("Error code #{code}")
+      end)
+    assert code == :ok
+  end
 end
