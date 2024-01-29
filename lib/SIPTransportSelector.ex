@@ -54,17 +54,17 @@ defmodule SIP.Transport.Selector do
     { :ok, uri_domain }
   end
 
-  @spec select_transport(binary()) :: { :ok, module(), pid(), list(), integer() } | atom()
+  @spec select_transport(binary(), boolean()) :: { :ok, module(), pid(), list(), integer() } | atom()
   @doc "Select a transport module an option given a request URI"
-  def select_transport(ruri) when is_binary(ruri) do
+  def select_transport(ruri, trysrv) when is_binary(ruri) do
     case SIP.Uri.parse(ruri) do
-      { :ok, parsed_uri } -> select_transport(parsed_uri)
+      { :ok, parsed_uri } -> select_transport(parsed_uri, trysrv)
       { errcode, %{} } -> errcode
     end
   end
 
-  @spec select_transport(map()) :: { :ok, module(), pid(), list(), integer() } | atom()
-  def select_transport(ruri) when is_map(ruri) do
+  @spec select_transport(map(), boolean()) :: { :ok, module(), pid(), list(), integer() } | atom()
+  def select_transport(ruri, trysrv) when is_map(ruri) do
 
     #Check if this is a unit test. If this is the case use a mockup for transport
     usemockup = case SIP.Uri.get_uri_param(ruri, "unittest") do
@@ -91,7 +91,7 @@ defmodule SIP.Transport.Selector do
         { :ok, SIP.Test.Transport.UDPMockup, t_pid, destaddr, 5080 }
       else
         # Get the destination IP address
-        { :ok, dest_ip } = resolve_dest_domain(ruri.domain, false)
+        { :ok, dest_ip } = resolve_dest_domain(ruri.domain, trysrv)
         # Obtain the transport pid
         { :ok, t_pid } = find_or_launch_transport(t_mod, transport_str, dest_ip, ruri.port)
         { :ok, t_mod, t_pid, dest_ip, ruri.port }

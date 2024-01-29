@@ -17,7 +17,8 @@ defmodule SIP.Transac do
     destport: 5060,
     state: :inital,
     tB_ref: nil,
-    timerk: nil
+    timerk: nil,
+    debuglog: true # If we should output debug logs for this transaction
   ]
 
   @doc "Start the transaction layer"
@@ -36,9 +37,9 @@ defmodule SIP.Transac do
 
   # Common part of transaction start
   defp transaction_start_common(transport_module, transport_pid, destip, dest_port, transact_module, sipmsg, timeout) do
-     # Generate the branch ID
-     branch_id = SIP.Msg.Ops.generate_branch_value()
-     #Todo : check that branch ID is not already registered on the transaction registry
+    # Generate the branch ID
+    branch_id = SIP.Msg.Ops.generate_branch_value()
+    #Todo : check that branch ID is not already registered on the transaction registry
 
     # Get the transport name frm the module
     transport_str = apply(transport_module, :transport_str, [])
@@ -74,13 +75,13 @@ defmodule SIP.Transac do
   @doc "Start a client transaction from a template"
   def start_uac_transaction_with_template(siptemplate, bindings, parse_error_cb, options) when is_map(options) do
     try do
-      { dest_uri, _use_srv } = if Map.has_key?(options, :desturi) do
+      { dest_uri, use_srv } = if Map.has_key?(options, :desturi) do
         { options.desturi , options.usesrv }
       else
         { Application.fetch_env!(:elixip2, :proxyuri), Application.fetch_env!(:elixip2, :proxyusesrv ) }
       end
 
-      case SIP.Transport.Selector.select_transport(dest_uri) do
+      case SIP.Transport.Selector.select_transport(dest_uri, use_srv) do
         { :ok, t_mod, t_pid, destip, destport } ->
           { :ok, local_ip, local_port } = GenServer.call(t_pid, :getlocalipandport)
           bindings = bindings ++ [ local_ip: :inet.ntoa(local_ip), local_port: local_port ]
@@ -124,15 +125,20 @@ defmodule SIP.Transac do
   - it returns a pid that represent the transaction. The process is a GenServer
   """
   def start_uac_transaction(sipmsg, ring_timeout) when is_map(sipmsg) and sipmsg.method == :INVITE do
+    { desturi, usesrv } = try do
+      { Application.fetch_env!(:elixip2, :proxyuri), Application.fetch_env!(:elixip2, :proxyusesrv ) }
+    rescue
+      ArgumentError ->
+        { sipmsg.ruri, true }
+    end
 
     # Get an associated transport instance.
-    case SIP.Transport.Selector.select_transport(sipmsg.ruri) do
+    case SIP.Transport.Selector.select_transport(desturi, usesrv) do
       { :ok, t_mod, t_pid, destip, dport } ->
         transaction_start_common(t_mod, t_pid, destip, dport, SIP.ICT, sipmsg, ring_timeout)
 
       _ ->
-        { _err, ruri_str } = SIP.Uri.serialize(sipmsg.ruri)
-        Logger.error("Failed to select transport for request URI #{ruri_str}.")
+        Logger.error("Failed to select transport for request URI #{sipmsg.ruri}.")
         { :no_transport_available, nil }
     end
   end
@@ -142,31 +148,23 @@ defmodule SIP.Transac do
     { :req_cannot_create_trans, nil }
   end
 
-  def start_uac_transaction(sipmsg, transport_selector_fn) when is_map(sipmsg) and sipmsg.method != :INVITE do
-    # Generate the branch ID
-    branch_id = SIP.Msg.Ops.generate_branch_value()
-    #Todo : check that branch ID is not already registered on the transaction registry
+  def start_uac_transaction(sipmsg, timeout) when is_map(sipmsg) and is_integer(timeout) and sipmsg.method != :INVITE do
 
-    # Use callback passed to select transport
-    case transport_selector_fn.(sipmsg.ruri) do
-      { :ok, local_ip, local_port, transport_str, t_mod, t_pid } ->
-        sipmsg = SIP.Msg.Ops.add_via(sipmsg, { local_ip, local_port, transport_str }, branch_id)
+    # Get the destination (check if a proxy has been configured)
+    { desturi, usesrv } = try do
+      { Application.fetch_env!(:elixip2, :proxyuri), Application.fetch_env!(:elixip2, :proxyusesrv ) }
+    rescue
+      ArgumentError ->
+        { sipmsg.ruri, true }
+    end
 
-        # Start a new GenServer for each transaction and register it in Registry.SIPTransaction
-        name = { :via, Registry, {Registry.SIPTransaction, branch_id, :cast }}
-        case GenServer.start_link(SIP.NICT, { sipmsg, t_mod, t_pid }, name: name) do
-          { :ok, trans_pid } ->
-            Logger.debug([ transid: branch_id, message: "Created non-invite client transaction with PID #{trans_pid}." ])
-            { :ok, trans_pid }
+    # Get an associated transport instance.
+    case SIP.Transport.Selector.select_transport(desturi, usesrv) do
+      { :ok, t_mod, t_pid, destip, dport } ->
+        transaction_start_common(t_mod, t_pid, destip, dport, SIP.NICT, sipmsg, timeout)
 
-          { code, err } ->
-            Logger.error("Failed to create non-invite client transaction. Error: #{code}.")
-            { code, err }
-        end
-
-      code ->
-        ruri_str = SIP.Uri.serialize(sipmsg.ruri)
-        Logger.error("Failed to select transport for request URI #{ruri_str}. Error = #{code}")
+      _ ->
+        Logger.error("Failed to select transport for request URI #{sipmsg.ruri}.")
         { :no_transport_available, nil }
     end
   end
