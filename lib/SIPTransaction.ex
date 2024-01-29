@@ -243,7 +243,41 @@ defmodule SIP.Transac do
     end
   end
 
+  @doc "Send an ACK message when a 2xx answer has been received for in an UAC transaction"
+  @spec ack_uac_transaction(pid()) :: any()
   def ack_uac_transaction(uac_t) do
     GenServer.call(uac_t, :ack)
+  end
+
+  defmodule Common do
+    @moduledoc """
+    Module that gather all common an utility functions to implement SIP
+    transactions
+    """
+
+    @doc "Send a SIP message to the transport layer"
+    def sendout_msg(state, sipmsgstr) when is_map(state) and is_binary(sipmsgstr) do
+      rez = GenServer.call(state.tpid,{ :sendmsg, sipmsgstr, state.destip, state.destport } )
+      { rez, state }
+    end
+
+    def sendout_msg(state, sipmsg) when is_map(state) and is_map(sipmsg) do
+      try do
+        msgstr = SIPMsg.serialize(sipmsg)
+        state = case sipmsg.method do
+          :ACK -> Map.put(state, :ack, msgstr)
+          :CANCEL -> state
+          false -> state
+          _ -> Map.put(state, :msgstr, msgstr)
+
+        end
+        sendout_msg(state, msgstr)
+        { :ok, Map.put(state, :msgstr, msgstr) }
+      rescue
+        e in RuntimeError ->
+          Logger.debug([ transid: sipmsg.transid, module: __MODULE__, message: e.message])
+          { :invalid_sip_msg, state }
+      end
+    end
   end
 end

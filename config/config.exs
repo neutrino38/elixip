@@ -12,4 +12,4 @@ config :logger, :console,
 config :logger, :file_log,
   path: "elixip.log",
   format: "$time [$level] $message \n",
-  level: :info  # Niveau de journalisation souhaité (par exemple, :info, :warn, :error, :debug, etc.)
+  level: :debug  # Niveau de journalisation souhaité (par exemple, :info, :warn, :error, :debug, etc.)

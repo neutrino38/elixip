@@ -240,4 +240,12 @@ defmodule SIP.Uri do
 		end
 		{ :ok, String.trim_trailing(uri_str, ";") }
 	end
+
+	defimpl String.Chars do
+		def to_string(uri) do
+			case SIP.Uri.serialize(uri) do
+				{ :ok, uri_str } -> uri_str
+			end
+		end
+	end
 end

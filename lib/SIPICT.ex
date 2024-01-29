@@ -5,22 +5,6 @@ defmodule SIP.ICT do
   require SIP.Msg.Ops
   require Logger
 
-  defp safe_serialize(sipmsg, state) do
-    try do
-      msgstr = SIPMsg.serialize(sipmsg)
-      { :ok, Map.put(state, :msgstr, msgstr) }
-    rescue
-      e in RuntimeError ->
-        Logger.debug([ transid: sipmsg.transid, message: e.message])
-        { :invalid_sip_msg, state }
-    end
-  end
-
-  defp transport_send_msg(state, sipmsgstr) do
-    GenServer.call(state.tpid,{ :sendmsg, sipmsgstr, state.destip, state.destport } )
-  end
-
-
   # Callbacks
 
   @impl true
@@ -29,48 +13,57 @@ defmodule SIP.ICT do
                        t_isreliable: apply(t_mod, :is_reliable, []), destip: dest_ip,
                        destport: dest_port, state: :sending }
 
-    case safe_serialize(sipmsg, initial_state) do
-      {:ok, initial_state} ->
-        case transport_send_msg(initial_state, initial_state.msgstr ) do
-          :ok ->
-            { :ok, ruri } = SIP.Uri.serialize(sipmsg.ruri)
-            Logger.info([ transid: sipmsg.transid, module: __MODULE__,
-                        message: "Sent INVITE to #{ruri}"])
-            if not initial_state.t_isreliable do
-              schedule_timer_A(initial_state)
-            end
-            { :ok, initial_state }
-
-          code ->
-            Logger.error([ transid: sipmsg.transid, message: "ICT: Fail to send SIP request  #{code}"])
-            { :stop, "Fail to send SIP request" }
+    case SIP.Transac.Common.sendout_msg(initial_state, sipmsg) do
+      {:ok, state} ->
+        Logger.info([ transid: sipmsg.transid, module: __MODULE__,
+                    message: "Sent INVITE to #{sipmsg.ruri}"])
+        if not state.t_isreliable do
+          schedule_timer_A(state)
         end
+        { :ok, state }
 
-      { code, _initial_state} ->
+      { :invalid_sip_msg, _state } ->
         Logger.error([ transid: sipmsg.transid, module: __MODULE__,
-                      message: "Fail to serialize SIP message #{code}"])
+                        message: "Fail to serialize SIP message."])
         { :stop, "Fail to serialize message" }
-    end
 
+      { code, _state } ->
+          Logger.error([ transid: sipmsg.transid, module: __MODULE__,
+          message: "Transport error. Fail to send SIP request  #{code}"])
+          { :stop, "Fail to send SIP request" }
+    end
   end
 
   @impl true
   # CANCEL  current transaction from dialog layer
   def handle_call(:cancel, _from, state) do
     if state.state in [ :sending, :proceeding ] do
-      cancel = state.msg |> SIP.Msg.Ops.cancel_request() |> SIPMsg.serialize()
       Logger.info([ transid: state.msg.transid,  module: __MODULE__,
                   message: "Cancelling transaction"])
-      case transport_send_msg(state, cancel) do
-        :ok ->
+
+      # Build the CANCEL request from the initial request
+      cancel = SIP.Msg.Ops.cancel_request(state.msg)
+
+      # Send it aout
+      case SIP.Transac.Common.sendout_msg(state, cancel) do
+        { :ok, state } ->
+          Logger.debug([ transid: state.msg.transid, message: "CANCEL sent: #{state.state} -> cancelling"])
           { :reply, :ok, %{ state | state: :cancelling }}
 
-        code ->
-          Logger.error([ transid: state.msg.transid, message: "ICT: Fail to send CANCEL message #{code}"])
+        { :invalid_sip_msg, state } ->
+          Logger.error([ transid: state.msg.transid, module: __MODULE__,
+                       message: "Fail to build CANCEL message."])
+          { :reply, :invalid_sip_msg, state}
+
+
+        { code, state } ->
+          Logger.error([ transid: state.msg.transid, module: __MODULE__,
+                       message: "Fail to send CANCEL message #{code}"])
           { :reply, :transport_error, state}
       end
     else
-      Logger.debug([ transid: state.msg.transid, message: "Cannot CANCEL transaction in #{state.state} state"])
+      Logger.warning([ transid: state.msg.transid, module: __MODULE__,
+                     message: "Cannot CANCEL transaction in #{state.state} state"])
       { :reply, :bad_state, state}
     end
   end
@@ -94,20 +87,26 @@ defmodule SIP.ICT do
       ack_sent = state.msg |> SIP.Msg.Ops.ack_request(remote_contact, routeset) |> SIPMsg.serialize()
       Logger.debug([ transid: state.msg.transid,  module: __MODULE__,
                   message: "Sending ACK"])
-      case transport_send_msg(state, ack_sent) do
-        :ok ->
+      case SIP.Transac.Common.sendout_msg(state, ack_sent) do
+        { :ok, state } ->
           new_state = if state.t_isreliable do
             Logger.debug([ transid: state.msg.transid, message: "ACK sent: #{state.state} -> terminated"])
-            schedule_timer_K(state, 0) |> Map.put(:ack, ack_sent) |> Map.put(:state, :terminated)
+            schedule_timer_K(state, 0) |> Map.put(:state, :terminated)
           else
             # RFC 3261 clause 17.1.2.2 arm timer K for unreliable transport
             Logger.debug([ transid: state.msg.transid, message: "ACK sent. Arming timer_K"])
-            schedule_timer_K(state, 5000) |> Map.put(:ack, ack_sent)
+            schedule_timer_K(state, 5000)
           end
           { :reply, :ok, new_state }
 
-        code ->
-          Logger.error([ transid: state.msg.transid, message: "ICT: Fail to send ACK message #{code}"])
+        { :invalid_sip_msg, state } ->
+          Logger.error([ transid: state.msg.transid, module: __MODULE__,
+                         message: "Fail to build ACK message."])
+          { :reply, :invalid_sip_msg, state }
+
+        { code, state } ->
+          Logger.error([ transid: state.msg.transid, module: __MODULE__,
+                       message: "Fail to send ACK message #{code}"])
           # Arm a timer to destroy the transaction
           { :reply, :transport_error, state}
       end
@@ -172,7 +171,7 @@ defmodule SIP.ICT do
 
       # Handle 200 OK retransmission on unrelable transport (UDP)
       state.state == :terminated and is_bitstring(state.ack) ->
-        transport_send_msg(state, state.ack)
+        SIP.Transac.Common.sendout_msg(state, state.ack)
         state
 
       true ->
@@ -197,7 +196,7 @@ defmodule SIP.ICT do
 
       state.state == :rejected  and is_bitstring(state.ack) ->
         #Resend the same ack message
-        transport_send_msg(state, state.ack )
+        SIP.Transac.Common.sendout_msg(state, state.ack )
         state
 
       true ->
