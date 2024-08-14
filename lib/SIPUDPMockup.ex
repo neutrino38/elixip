@@ -28,8 +28,53 @@ defmodule SIP.Test.Transport.UDPMockup do
     GenServer.cast(t_pid, {:simulate, :successfulcall})
   end
 
+  def simulate_successful_answer(t_pid) do
+    GenServer.cast(t_pid, {:simulate, :noanswer})
+  end
+
+  @spec simulate_busy_answer(atom() | pid() | {atom(), any()} | {:via, atom(), any()}) :: :ok
   def simulate_busy_answer(t_pid) do
     GenServer.cast(t_pid, {:simulate, :busy})
+  end
+
+
+  defp handle_req(state, :INVITE, sipreq) do
+    Map.put(state, :req, sipreq)
+  end
+
+  defp handle_req(state, :ACK, _sipreq) do
+    if Map.has_key?(state, :req) and state.req.method == INVITE do
+      Map.delete(state, :req)
+    else
+      state
+    end
+  end
+
+  defp handle_req(state, :CANCEL, sipreq) do
+    if Map.has_key?(state, :req) do
+      if sipreq.transid == state.req.transid do
+        # Simulate cancellig
+        siprsp = reply_to_request(sipreq, 200, "OK")
+        Process.send_after(self(), { :recv, siprsp }, 100)
+        siprsp2 = reply_to_request(sipreq, 487, nil)
+        Process.send_after(self(), { :recv, siprsp2 }, 200)
+      end
+
+      state
+    else
+      siprsp = reply_to_request(sipreq, 481, "No such transaction")
+      Process.send_after(self(), { :recv, siprsp }, 100)
+      state
+    end
+
+  end
+
+  defp handle_req(state, _method, _sipreq) do
+    state
+  end
+
+  defp handle_resp(state, _code, _sipresp) do
+    state
   end
 
   # Callbacks
@@ -57,11 +102,14 @@ defmodule SIP.Test.Transport.UDPMockup do
 			IO.puts("Offending line #{lineno}: #{line}")
 			IO.puts("Error code #{code}")
 			end) do
-        { :ok, sipreq } ->
-          if sipreq.method == :INVITE do
-            { :reply, :ok, Map.put(state, :req, sipreq) }
-          else
-            { :reply, :ok, state }
+        { :ok, sipmsg } ->
+          case sipmsg.method do
+            false ->
+              { :reply, :ok, handle_resp(state, sipmsg.response, sipmsg) }
+
+            method ->
+              { :reply, :ok, handle_req(state, method, sipmsg) }
+
           end
         _ ->  { :reply, :invalidreq, state }
       end
@@ -143,10 +191,16 @@ defmodule SIP.Test.Transport.UDPMockup do
               # then simulate 486 Busy sent by the user
               GenServer.cast(self(), { :simulate, 180, 200 })
 
+            :noanswer ->
+                # We received the 100 Trying -- simulate a 180 ringing after some time
+                # then simulate 486 Busy sent by the user
+                GenServer.cast(self(), { :simulate, 180, 200 })
+
             _ ->
               Logger.warning( [ module: SIP.Test.Transport.UDPMockup, message: "Unidentified SIP scenario #{state.scenario}"])
               GenServer.cast(self(), { :simulate, 404, 200 })
           end
+          { :noreply,  state }
 
       180 ->
         case state.scenario do
@@ -154,12 +208,22 @@ defmodule SIP.Test.Transport.UDPMockup do
             # We received the 180 Ringing -- simulate a 200 OK after some time
             GenServer.cast(self(), { :simulate, 200, 4000 })
 
+          :noanswer ->
+            GenServer.cast(self(), { :simulate, 408, 2000 })
+
           :busy ->
             GenServer.cast(self(), { :simulate, 486, 2000 })
 
-          end
-      _ -> nil
+        end
+        { :noreply,  state }
+
+      486 -> { :noreply,  state }
+
+      487 -> { :noreply,  state }
+
+      _ -> { :noreply,  state }
+
     end
-    { :noreply,  state }
+
   end
 end
