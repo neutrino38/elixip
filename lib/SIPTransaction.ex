@@ -211,7 +211,7 @@ defmodule SIP.Transac do
     end
   end
 
-  @spec process_sip_message(binary()) :: { :ok, map() } | { atom(), binary() }
+  @spec process_sip_message(binary()) :: :ok | { :no_matching_transaction, map() } | atom()
   @doc "Process an incoming SIP message from the transport layer and dispatch it to the proper transaction"
   def process_sip_message(sipmsgstr) do
 
@@ -226,7 +226,7 @@ defmodule SIP.Transac do
         case Registry.lookup(Registry.SIPTransaction, parsed_msg.transid) do
           # No such transction
           [] ->
-            :no_matching_transaction
+            { :no_matching_transaction, parsed_msg }
 
           # Found a matching transaction. Dispatch the SIP msg to it
           # We do not use dispatch because we have already looked up the transaction list
@@ -235,7 +235,9 @@ defmodule SIP.Transac do
             for {pid, _cast_in} <- transaction_list, do: GenServer.cast(pid, {:onsipmsg, parsed_msg})
             :ok
 
-          end
+        end
+
+
       { code, _err } ->
         code
     end
