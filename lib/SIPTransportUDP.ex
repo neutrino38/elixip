@@ -30,8 +30,15 @@ defmodule SIP.Transport.UDP do
         raise "UDP: invalid IP address"
         ipstr when is_binary(ipstr)-> ipstr
     end
+
     Logger.debug("UDP: Message sent to #{destipstr}:#{dest_port} ---->\r\n" <> msgstr <> "\r\n-----------------")
-    :gen_udp.send(state.socket, msgstr, destip, dest_port)
+    case :gen_udp.send(state.socket, msgstr, destip, dest_port) do
+      :ok -> { :reply, :ok, state }
+      { :error, reason } ->
+        Logger.debug("UDP: failed to send message. Error: #{reason}");
+        { :reply, :ok, state }
+    end
+    { :reply, :ok, state }
   end
 
 # Receving an UDP datagram
