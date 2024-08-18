@@ -43,14 +43,19 @@ defmodule SIP.Transport.UDP do
 
 # Receving an UDP datagram
   @impl true
-  def handle_info({:udp, _socket, ip, port, message}, state) do
+  def handle_info({:udp, socket, ip, port, message}, state) do
     case SIP.Transac.process_sip_message(message) do
       :ok -> { :noreply, state }
 
       { :no_matching_transaction, parsed_msg } ->
         if is_atom(parsed_msg.method) do
+          # Obtain local IP used to receive the message
+          { localip, localport } = case :inet.sockname(socket) do
+            { :ok, {lip, lport}} -> {lip, lport}
+            {:error, _reason} -> {state.localip, state.localport}
+          end
           # We need to start a new transaction
-          SIP.Transac.start_uas_transaction(parsed_msg, { state.localip, state.localport, "UDP", SIP.Transport.UDP, self() } , { ip, port })
+          SIP.Transac.start_uas_transaction(parsed_msg, { localip, localport, "UDP", SIP.Transport.UDP, self() } , { ip, port })
         else
           Logger.error("Received a SIP #{parsed_msg.response} response from #{ip}:#{port} not linked to any transaction. Droping it")
           { :noreply, state }
