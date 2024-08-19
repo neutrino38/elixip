@@ -155,6 +155,11 @@ defmodule SIP.Msg.Ops do
     sipmsg
   end
 
+  # Remove update
+  def update_sip_msg(sipmsg, { header, nil }) do
+    Map.delete(sipmsg, header)
+  end
+
   # Specific case for contact
   def update_sip_msg(sipmsg, { :contact, value }) when is_bitstring(value) do
     { :ok, contact_uri } = SIP.Uri.parse(value)
@@ -307,7 +312,8 @@ defmodule SIP.Msg.Ops do
         new_cseq = hd(req.cseq) + 1
 
         # Build new request (delete auth header, add autorization header and overwrite CSeq)
-        Map.delete(req, autheader) |> Map.put(header2, autorisation_params) |> Map.put(:cseq, [ new_cseq, req.method ])
+        upd_map = %{ header2 => autorisation_params, autheader => nil, cseq: [ new_cseq, req.method ]}
+        update_sip_msg(req, upd_map)
 
       { :ko, mparam } ->
         raise "Invalid autentication params. Missing #{mparam} parameter"
