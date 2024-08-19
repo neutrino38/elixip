@@ -85,7 +85,8 @@ defmodule SIP.Test.Parser do
 		assert parsed_msg.method == :REGISTER
 		assert parsed_msg.ruri.domain == "example.com"
 		assert parsed_msg.contact.port == 3246
-		assert parsed_msg.proxyauthorization["realm"] == "\"SIP Communications Service\""
+		assert parsed_msg.proxyauthorization["realm"] == "SIP Communications Service"
+		assert parsed_msg.proxyauthorization["targetname"] == "lyncfe.example.com"
 		assert parsed_msg.from == "<sip:lynctest8@example.com>;tag=2257063211;epid=22570632"
 		assert parsed_msg.callid == "A2B000F95CB8XZRikcdYitb4QBvEr4P2"
   end

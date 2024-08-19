@@ -94,6 +94,24 @@ defmodule SIPMsg do
 		end
 	end
 
+	defp required_auth_params("NTLM", header) do
+		case header do
+			:wwwauthenticate -> [ "opaque", "realm", "targetname", "gssapi-data"]
+			:proxyauthenticate -> [ "opaque", "realm", "targetname", "gssapi-data"]
+		  :authorization -> [ "opaque", "realm", "targetname", "response", "gssapi-data"]
+			:proxyauthorization -> [ "opaque", "realm", "targetname", "response", "gssapi-data"]
+		end
+	end
+
+	defp required_auth_params("Digest", header) do
+		case header do
+			:wwwauthenticate -> [ "nonce", "realm" ]
+			:proxyauthenticate -> [ "nonce", "realm" ]
+		  :authorization -> [ "nonce", "realm", "username", "response", "uri"]
+			:proxyauthorization -> [ "nonce", "realm", "username", "response", "uri"]
+		end
+	end
+
 	# Check that a param map contains at list all the required parameters.
 	# returns :ok and the initial map if all are here
 	#         :ko and the first missing param if one is missing
@@ -128,24 +146,15 @@ defmodule SIPMsg do
 
  	#Parse auth param content
 	defp parse_auth_param_list(paramstring, reqparams) do
-		if String.starts_with?(paramstring, "Digest") do
-			authparams = parse_param_list(String.slice(paramstring, 6..-1//1))
+		authparams = parse_param_list(paramstring)
 
-			# Add algorithm default value (MD5)
-			authparams = if Map.has_key?(authparams, "algorithm") do
-				Map.put(authparams, "algorithm", "MD5")
-			end
-
-			# Check that all required params are here
-			case check_required_params(authparams, reqparams) do
-				:ok -> { :ok, authparams }
-				{ :ko, mparam } -> { :invalid_auth, "Missing param #{mparam}" }
-			end
-
-		else
-			{ :invalid_auth, "Missing Digest keyword" }
+		# Check that all required params are here
+		case check_required_params(authparams, reqparams) do
+			:ok -> { :ok, authparams }
+			{ :ko, mparam } -> { :invalid_auth, "Missing param #{mparam}" }
 		end
 	end
+
 
 	#Parse header content
 	defp parse_header_content( :cseq, value ) do
@@ -181,45 +190,22 @@ defmodule SIPMsg do
 		end
 	end
 
+	# Parse Auth header
+	defp parse_header_content( header, value ) when header in [ :proxyauthorization, :authorization, :proxyauthenticate, :wwwauthenticate] do
+			[ authproc, rest ] = String.split(value, " ", parts: 2)
 
-		# Parse Proxy-Authenticate header
-		defp parse_header_content( :procyauthenticate, value ) do
-			case parse_auth_param_list( value, [ "nonce", "realm" ] ) do
-				{ :ok, authparams} -> { :ok, authparams}
-				{ :invalid_auth,  errmsg } -> { :invalid_auth_header, errmsg <> " in header Proxy-Authenticate"}
+			required_params = required_auth_params(authproc, header )
+			case parse_auth_param_list( rest, required_params ) do
+				{ :ok, authparams} -> { :ok, Map.put(authparams, :authproc, authproc) }
+				{ :invalid_auth,  errmsg } ->
+					header_name = header_name_to_string(header)
+					{ :invalid_auth_header, errmsg <> " in header " <> header_name}
 			end
-		end
-
-
-	# Parse Proxy-Authorization header
-	defp parse_header_content( :proxyauthorization, value ) do
-
-		case parse_auth_param_list( value, [ "nonce", "realm", "username", "response", "uri" ] ) do
-			{ :ok, authparams} -> { :ok, authparams}
-			{ :invalid_auth,  errmsg } -> { :invalid_auth_header, errmsg <> " in header Proxy-Authorization"}
-		end
-	end
-
-	# Parse WWW-Authenticate header
-	defp parse_header_content( :wwwauthenticate, value ) do
-		case parse_auth_param_list( value, [ "nonce", "realm" ] ) do
-			{ :ok, authparams} -> { :ok, authparams}
-			{ :invalid_auth,  errmsg } -> { :invalid_auth_header, errmsg <> " in header WWW-Authenticate"}
-		end
-	end
-
-	# Parse Authorization header
-	defp parse_header_content( :authorization, value ) do
-		case parse_auth_param_list( value, [ "nonce", "realm", "username", "response", "uri" ] ) do
-			{ :ok, authparams} -> { :ok, authparams}
-			{ :invalid_auth,  errmsg } -> { :invalid_auth_header, errmsg <> " in header Authorization"}
-		end
 	end
 
 	defp parse_header_content( "Max-Forwards", value ) do
 		{ :ok, String.to_integer(value) }
 	end
-
 
 	defp parse_header_content( _key, value ) do
 		{ :ok, value }
@@ -618,11 +604,14 @@ defmodule SIPMsg do
 	end
 
 	# Serialize a Proxy-Authorization header
-	defp serialize_one_header( :proxyauthorization, authinfo ) do
-		header_name_to_string(:proxyauthorization) <> ": Digest " <>
+	defp serialize_one_header( name, authinfo ) when name in [ :proxyauthorization, :authorization, :proxyauthenticate, :wwwauthenticate]  do
+		header_name_to_string(:proxyauthorization) <> ": " <> authinfo.authproc <> " " <>
 			String.trim_trailing(Enum.reduce(authinfo, "", fn {k, v}, acc ->
-				val = if k in ["algorithm"], do: v, else:	"\"" <> v <> "\""
-				acc <> k <> "=" <> val <> ", "
+				case k do
+					:authproc -> acc
+					"algorithm" -> acc <> k <> "=" <> v <> ", "
+					_ -> acc <> k <> "=" <> "\"" <> v <> "\", "
+				end
 			end), ", ") <> "\r\n"
 	end
 
