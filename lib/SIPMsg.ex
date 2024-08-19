@@ -54,13 +54,25 @@ defmodule SIPMsg do
 			"Content-Length" -> :contentlength
 			"Content-Type" -> :contenttype
 			"CSeq" -> :cseq
+			"Authorization" -> :authorization
 			"Proxy-Authorization" -> :proxyauthorization
+			"Proxy-Authenticate" -> :proxyauthenticate
+			"WWW-Authenticate" -> :wwwauthenticate
 			"Expire" -> :expire
 			"Contact" -> :contact
 			"Supported" -> :supported
 			_ -> name
 		end
 	end
+
+	@common_headers_atoms %{ via: "Via", from: "From", to: "To", callid: "Call-ID",
+		route: "Route", recordroute: "Record-Route", useragent: "UserAgent",
+		contact: "Contact", cseq: "CSeq", contenttype: "Content-Type",
+		contentlength: "Content-Length", proxyauthorization: "Proxy-Authorization",
+		proxyauthentication: "Proxy-Authenticate", wwwauthenticate: "WWW-Authenticate",
+		authorization: "Authorization",
+		supported: "Supported" }
+
 
 	# Convert SIP method name to atom or nil if not recognized
 	defp method_to_atom(reqname) do
@@ -82,6 +94,58 @@ defmodule SIPMsg do
 		end
 	end
 
+	# Check that a param map contains at list all the required parameters.
+	# returns :ok and the initial map if all are here
+	#         :ko and the first missing param if one is missing
+	def check_required_params(_param_map, []) do
+		:ok
+	end
+
+	def check_required_params(param_map, req_param_list) do
+		hd = hd(req_param_list)
+		Enum.reduce(req_param_list,
+		fn k, acc ->
+			if acc == hd || acc == :ok do
+				if !Map.has_key?(param_map, k), do: {:ko, k }, else: :ok
+			else
+				# There was an error already just propagate it
+				acc
+			end
+		end)
+	end
+
+	# Parse param list header content
+	defp parse_param_list(paramstring) do
+		Map.new(
+				Enum.map(
+					String.split(paramstring, ","),
+						fn val ->
+							[ k, v] = String.split(val, "=", parts: 2)
+							{ String.trim(k), String.trim(v) }
+						end)
+				)
+	end
+
+ 	#Parse auth param content
+	defp parse_auth_param_list(paramstring, reqparams) do
+		if String.starts_with?(paramstring, "Digest") do
+			authparams = parse_param_list(String.slice(paramstring, 6..-1//1))
+
+			# Add algorithm default value (MD5)
+			authparams = if Map.has_key?(authparams, "algorithm") do
+				Map.put(authparams, "algorithm", "MD5")
+			end
+
+			# Check that all required params are here
+			case check_required_params(authparams, reqparams) do
+				:ok -> { :ok, authparams }
+				{ :ko, mparam } -> { :invalid_auth, "Missing param #{mparam}" }
+			end
+
+		else
+			{ :invalid_auth, "Missing Digest keyword" }
+		end
+	end
 
 	#Parse header content
 	defp parse_header_content( :cseq, value ) do
@@ -117,16 +181,39 @@ defmodule SIPMsg do
 		end
 	end
 
+
+		# Parse Proxy-Authenticate header
+		defp parse_header_content( :procyauthenticate, value ) do
+			case parse_auth_param_list( value, [ "nonce", "realm" ] ) do
+				{ :ok, authparams} -> { :ok, authparams}
+				{ :invalid_auth,  errmsg } -> { :invalid_auth_header, errmsg <> " in header Proxy-Authenticate"}
+			end
+		end
+
+
+	# Parse Proxy-Authorization header
 	defp parse_header_content( :proxyauthorization, value ) do
-		authparams = Map.new(
-			Enum.map(
-				String.split(value, ","),
-				fn val ->
-					[ k, v] = String.split(val, "=", parts: 2)
-					{ String.trim(k), String.trim(v) }
-				end)
-		)
-		{ :ok, authparams }
+
+		case parse_auth_param_list( value, [ "nonce", "realm", "username", "response", "uri" ] ) do
+			{ :ok, authparams} -> { :ok, authparams}
+			{ :invalid_auth,  errmsg } -> { :invalid_auth_header, errmsg <> " in header Proxy-Authorization"}
+		end
+	end
+
+	# Parse WWW-Authenticate header
+	defp parse_header_content( :wwwauthenticate, value ) do
+		case parse_auth_param_list( value, [ "nonce", "realm" ] ) do
+			{ :ok, authparams} -> { :ok, authparams}
+			{ :invalid_auth,  errmsg } -> { :invalid_auth_header, errmsg <> " in header WWW-Authenticate"}
+		end
+	end
+
+	# Parse Authorization header
+	defp parse_header_content( :authorization, value ) do
+		case parse_auth_param_list( value, [ "nonce", "realm", "username", "response", "uri" ] ) do
+			{ :ok, authparams} -> { :ok, authparams}
+			{ :invalid_auth,  errmsg } -> { :invalid_auth_header, errmsg <> " in header Authorization"}
+		end
 	end
 
 	defp parse_header_content( "Max-Forwards", value ) do
@@ -491,13 +578,6 @@ defmodule SIPMsg do
 	end
 
 
-
-	@common_headers_atoms %{ via: "Via", from: "From", to: "To", callid: "Call-ID",
-		route: "Route", recordroute: "Record-Route", useragent: "UserAgent",
-		contact: "Contact", cseq: "CSeq", contenttype: "Content-Type",
-		contentlength: "Content-Length", proxyauthorization: "Proxy-Authorization",
-		supported: "Supported" }
-
 	defp header_name_to_string(name) when is_atom(name) do
 		@common_headers_atoms[name]
 	end
@@ -539,7 +619,7 @@ defmodule SIPMsg do
 
 	# Serialize a Proxy-Authorization header
 	defp serialize_one_header( :proxyauthorization, authinfo ) do
-		header_name_to_string(:proxyauthorization) <> ": " <>
+		header_name_to_string(:proxyauthorization) <> ": Digest " <>
 			String.trim_trailing(Enum.reduce(authinfo, "", fn {k, v}, acc ->
 				acc <> k <> "=" <> v <> ", "
 			end), ", ") <> "\r\n"

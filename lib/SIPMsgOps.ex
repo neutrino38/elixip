@@ -1,6 +1,8 @@
 defmodule SIP.Msg.Ops do
 	@moduledoc "Operations on SIP messages"
 
+  require SIP.Auth
+
   defp build_via_addr( local_ip , 5060, "UDP" ) do
     "SIP/2.0/UDP " <> local_ip
   end
@@ -284,6 +286,32 @@ defmodule SIP.Msg.Ops do
 
     # Update message
     sipmsg |> Map.filter(ack_filter) |> update_sip_msg(fieldlist)
+  end
+
+  @doc "Crée une requête autentifiée à partir d'une requête non authentifiée et d'en entête auth"
+  def add_autorization_to_req(req, authparams, autheader, username, passwd_or_hash, pwdformat) when is_atom(req.method) do
+
+    header2 = case autheader do
+      :wwwauthentication -> :autorisation
+      :proxyauthentication -> :proxyautorisation
+      _ ->  raise "Invalid authentication header #{autheader}"
+    end
+
+    case SIPMsg.check_required_params(authparams, [ "nonce", "realm"]) do
+      :ok ->
+        algo = Map.get(authparams, "algorithm", "MD5")
+        autorisation_params = SIP.Auth.build_auth_response(algo, username, authparams["nonce"], authparams["realm"],
+                                                  passwd_or_hash, pwdformat, req.method, to_string(req.ruri))
+
+        # Increment CSeq to start a new transaction
+        new_cseq = hd(req.cseq) + 1
+
+        # Build new request (delete auth header, add autorization header and overwrite CSeq)
+        Map.delete(req, autheader) |> Map.put(header2, autorisation_params) |> Map.put(:cseq, [ new_cseq, req.method ])
+
+      { :ko, mparam } ->
+        raise "Invalid autentication params. Missing #{mparam} parameter"
+    end
   end
 
   defmacro is_1xx_resp(msg) do
