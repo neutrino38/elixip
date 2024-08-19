@@ -98,6 +98,37 @@ defmodule SIP.Test.SIP.Msg.Ops do
     assert code == :ok
   end
 
+  test "Create a 401 WWW-Authentication, serialize it then reparse it", context do
+    siprsp = SIP.Msg.Ops.challenge_request(context.sipreq, 401, "Digest", "elioz.net", [], "tt88767")
+    assert siprsp.method == false
+    assert siprsp.response == 401
+    assert siprsp.wwwauthenticate["realm"] == "elioz.net"
+    assert Map.has_key?(siprsp.wwwauthenticate, "nonce")
+    siprsp_str = SIPMsg.serialize(siprsp)
+    { code, _parsed_msg } = SIPMsg.parse(siprsp_str, fn code, errmsg, lineno, line ->
+      IO.puts("\n" <> errmsg)
+      IO.puts("Offending line #{lineno}: #{line}")
+      IO.puts("Error code #{code}")
+      end)
+    assert code == :ok
+  end
+
+  test "Create a 407 Proxy-Authentication, serialize it then reparse it", context do
+    siprsp = SIP.Msg.Ops.challenge_request(context.sipreq, 407, "Digest", "elioz.net", [], "tt88767")
+    assert siprsp.method == false
+    assert siprsp.response == 407
+    assert siprsp.proxyauthenticate["realm"] == "elioz.net"
+    assert Map.has_key?(siprsp.proxyauthenticate, "nonce")
+    siprsp_str = SIPMsg.serialize(siprsp)
+    { code, _parsed_msg } = SIPMsg.parse(siprsp_str, fn code, errmsg, lineno, line ->
+      IO.puts("\n" <> errmsg)
+      IO.puts("Offending line #{lineno}: #{line}")
+      IO.puts("Error code #{code}")
+      end)
+    assert code == :ok
+  end
+
+
   test "Create an ACK message from the request and serialize it", context do
     ackmsg = SIP.Msg.Ops.ack_request(context.sipreq, nil)
     assert ackmsg.method == :ACK

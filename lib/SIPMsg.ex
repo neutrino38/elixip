@@ -69,7 +69,7 @@ defmodule SIPMsg do
 		route: "Route", recordroute: "Record-Route", useragent: "UserAgent",
 		contact: "Contact", cseq: "CSeq", contenttype: "Content-Type",
 		contentlength: "Content-Length", proxyauthorization: "Proxy-Authorization",
-		proxyauthentication: "Proxy-Authenticate", wwwauthenticate: "WWW-Authenticate",
+		proxyauthenticate: "Proxy-Authenticate", wwwauthenticate: "WWW-Authenticate",
 		authorization: "Authorization",
 		supported: "Supported" }
 
@@ -605,7 +605,7 @@ defmodule SIPMsg do
 
 	# Serialize a Proxy-Authorization header
 	defp serialize_one_header( name, authinfo ) when name in [ :proxyauthorization, :authorization, :proxyauthenticate, :wwwauthenticate]  do
-		header_name_to_string(:proxyauthorization) <> ": " <> authinfo.authproc <> " " <>
+		header_name_to_string(name) <> ": " <> authinfo.authproc <> " " <>
 			String.trim_trailing(Enum.reduce(authinfo, "", fn {k, v}, acc ->
 				case k do
 					:authproc -> acc

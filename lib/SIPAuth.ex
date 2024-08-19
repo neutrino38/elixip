@@ -35,4 +35,11 @@ defmodule SIP.Auth do
     %{ "username" => username, "realm" => realm, "nonce" => nonce,"algorithm" => algorithm,
        "response" => response }
   end
+
+  @nonce_size 16  # 16 bytes = 128 bits
+
+  @doc "Generate a nonce for Digest auth procedure"
+  def generate_nonce do
+    :crypto.strong_rand_bytes(@nonce_size) |> Base.encode64()
+  end
 end
