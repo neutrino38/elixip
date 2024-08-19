@@ -183,6 +183,8 @@ defmodule SIP.Test.Parser do
 			assert parsed_msg.contenttype == "application/sdp"
 			assert parsed_msg.transid == "z9hG4bK18d9.829852dcccb559fa7184dc4ab9a406e8.0"
 			assert parsed_msg.dialog_id == {"8075639", "32645600-4c01-bc8f-670c-deac31158db8", nil}
+			assert Map.get(parsed_msg.proxyauthorization, "nonce") == "YboVImG6E/ZJLQLgVnHNOj90ZCW0dNWR"
+			assert Map.get(parsed_msg.proxyauthorization, "uri") == "sip:90901@visioassistance.net"
 		end
 
 		test "Parse an 180 response sent by the LiveVideoPlugin" do

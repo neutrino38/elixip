@@ -121,7 +121,7 @@ defmodule SIPMsg do
 					String.split(paramstring, ","),
 						fn val ->
 							[ k, v] = String.split(val, "=", parts: 2)
-							{ String.trim(k), String.trim(v) }
+							{ String.trim(k), String.trim(v, "\"") |> String.trim() }
 						end)
 				)
 	end
@@ -621,7 +621,8 @@ defmodule SIPMsg do
 	defp serialize_one_header( :proxyauthorization, authinfo ) do
 		header_name_to_string(:proxyauthorization) <> ": Digest " <>
 			String.trim_trailing(Enum.reduce(authinfo, "", fn {k, v}, acc ->
-				acc <> k <> "=" <> v <> ", "
+				val = if k in ["algorithm"], do: v, else:	"\"" <> v <> "\""
+				acc <> k <> "=" <> val <> ", "
 			end), ", ") <> "\r\n"
 	end
 

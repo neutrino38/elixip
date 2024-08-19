@@ -213,7 +213,7 @@ defmodule SIP.Transac do
 
   @spec process_sip_message(binary()) :: :ok | { :no_matching_transaction, map() } | atom()
   @doc "Process an incoming SIP message from the transport layer and dispatch it to the proper transaction"
-  def process_sip_message(sipmsgstr) do
+  def process_sip_message(sipmsgstr, remoteip \\ nil, remoteport \\ nil) do
 
     trace_parse_err_fn =  fn code, errmsg, lineno, line ->
       Logger.error("Failed to parse SIP message: #{code}")
@@ -232,7 +232,7 @@ defmodule SIP.Transac do
           # We do not use dispatch because we have already looked up the transaction list
           # Note that lookup() should always return a single transaction here
           transaction_list ->
-            for {pid, _cast_in} <- transaction_list, do: GenServer.cast(pid, {:onsipmsg, parsed_msg})
+            for {pid, _cast_in} <- transaction_list, do: GenServer.cast(pid, {:onsipmsg, parsed_msg, remoteip, remoteport})
             :ok
 
         end
