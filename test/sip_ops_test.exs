@@ -99,7 +99,7 @@ defmodule SIP.Test.SIP.Msg.Ops do
   end
 
   test "Create a 401 WWW-Authentication, serialize it then reparse it", context do
-    siprsp = SIP.Msg.Ops.challenge_request(context.sipreq, 401, "Digest", "elioz.net", [], "tt88767")
+    siprsp = SIP.Msg.Ops.challenge_request(context.sipreq, 401, "Digest", "elioz.net", "MD5", [], "tt88767")
     assert siprsp.method == false
     assert siprsp.response == 401
     assert siprsp.wwwauthenticate["realm"] == "elioz.net"
@@ -114,7 +114,7 @@ defmodule SIP.Test.SIP.Msg.Ops do
   end
 
   test "Create a 407 Proxy-Authentication, serialize it then reparse it", context do
-    siprsp = SIP.Msg.Ops.challenge_request(context.sipreq, 407, "Digest", "elioz.net", [], "tt88767")
+    siprsp = SIP.Msg.Ops.challenge_request(context.sipreq, 407, "Digest", "elioz.net", "SHA256", [], "tt88767")
     assert siprsp.method == false
     assert siprsp.response == 407
     assert siprsp.proxyauthenticate["realm"] == "elioz.net"

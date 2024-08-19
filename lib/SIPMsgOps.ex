@@ -276,11 +276,13 @@ defmodule SIP.Msg.Ops do
           binary()
         ) :: map()
   @doc "Create a 401 or a 407 response and compute the challenge"
-  def challenge_request(req, resp_code, authproc, realm, upd_fields \\ [], totag \\ nil)
+  def challenge_request(req, resp_code, authproc, realm, algorithm \\ nil, upd_fields \\ [], totag \\ nil)
 
-  def challenge_request(req, resp_code, "Digest", realm, upd_fields, totag) when is_atom(req.method) and resp_code in [401, 407] do
+  def challenge_request(req, resp_code, "Digest", realm, algorithm, upd_fields, totag) when is_atom(req.method) and resp_code in [401, 407] do
     rsp = reply_to_request(req, resp_code, sip_reason(resp_code), upd_fields, totag)
     authparams = %{ "realm" => realm, "nonce" => SIP.Auth.generate_nonce(), authproc: "Digest" }
+    authparams = if algorithm in [ "MD5", "SHA1", "SHA256" ], do: Map.put(authparams, "algorithm", algorithm), else: algorithm
+
     header = case resp_code do
       401 -> :wwwauthenticate
       407 -> :proxyauthenticate
@@ -288,7 +290,7 @@ defmodule SIP.Msg.Ops do
     Map.put(rsp, header, authparams)
   end
 
-  def challenge_request(req, resp_code, "NTLM", realm, upd_fields, totag) when is_atom(req.method) and resp_code in [401, 407] do
+  def challenge_request(req, resp_code, "NTLM", realm, nil, upd_fields, totag) when is_atom(req.method) and resp_code in [401, 407] do
     rsp = reply_to_request(req, resp_code, sip_reason(resp_code), upd_fields, totag)
     authparams = %{ "realm" => realm, authproc: "NTLM" }
     header = case resp_code do
