@@ -94,7 +94,7 @@ defmodule SIP.Test.Transport.UDPMockup do
         Logger.error([module: SIP.Test.Transport.UDPMockup, message: "sendmsg: invalid destination address."])
         IO.inspect(destip)
         raise "UDPMockup: invalid IP address"
-        ipstr when is_binary(ipstr)-> ipstr
+      ipstr when is_binary(ipstr)-> ipstr
     end
     Logger.debug("UDPMockup: Message sent to #{destipstr}:#{dest_port} ---->\r\n" <> msgstr <> "\r\n-----------------")
     case SIPMsg.parse(msgstr, fn code, errmsg, lineno, line ->
