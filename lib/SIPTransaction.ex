@@ -2,6 +2,7 @@ defmodule SIP.Transac do
   @moduledoc "SIP Transaction Layer"
 
   require Logger
+  require Registry
   require SIP.Transport.Selector
   require Application
 

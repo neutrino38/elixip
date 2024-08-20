@@ -23,7 +23,7 @@ defmodule SIPParser.MixProject do
     [
       {:logger_file_backend, "~> 0.0.12"},
       {:jason, "~> 1.4"},
-      {:socket, "~> 0.3.1"}
+      {:socket2, "~> 2.1.1"}
     ]
   end
 end

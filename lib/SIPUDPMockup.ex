@@ -28,7 +28,7 @@ defmodule SIP.Test.Transport.UDPMockup do
     GenServer.cast(t_pid, {:simulate, :successfulcall})
   end
 
-  def simulate_successful_answer(t_pid) do
+  def simulate_noanswer_answer(t_pid) do
     GenServer.cast(t_pid, {:simulate, :noanswer})
   end
 

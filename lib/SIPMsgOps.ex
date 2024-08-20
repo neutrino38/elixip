@@ -351,6 +351,9 @@ defmodule SIP.Msg.Ops do
     end
   end
 
+  @doc "Check auth response"
+
+
   defmacro is_1xx_resp(msg) do
     quote do
       unquote(msg).method == false and unquote(msg).response in 100..199
