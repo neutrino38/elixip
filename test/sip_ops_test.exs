@@ -113,19 +113,19 @@ defmodule SIP.Test.SIP.Msg.Ops do
     assert code == :ok
   end
 
-  test "Create a 407 Proxy-Authentication, serialize it then reparse it", context do
+  test "Create a 407 Proxy-Authentication, and a subsequent authenticated request", context do
     siprsp = SIP.Msg.Ops.challenge_request(context.sipreq, 407, "Digest", "elioz.net", "SHA256", [], "tt88767")
     assert siprsp.method == false
     assert siprsp.response == 407
     assert siprsp.proxyauthenticate["realm"] == "elioz.net"
     assert Map.has_key?(siprsp.proxyauthenticate, "nonce")
-    siprsp_str = SIPMsg.serialize(siprsp)
-    { code, _parsed_msg } = SIPMsg.parse(siprsp_str, fn code, errmsg, lineno, line ->
-      IO.puts("\n" <> errmsg)
-      IO.puts("Offending line #{lineno}: #{line}")
-      IO.puts("Error code #{code}")
-      end)
-    assert code == :ok
+
+    auth_req = SIP.Msg.Ops.add_autorization_to_req(
+      context.sipreq, siprsp.proxyauthenticate, :proxyauthenticate,
+      "manu", "buu", :plain)
+
+    assert Map.has_key?(auth_req.proxyauthorization, "response")
+    assert SIP.Msg.Ops.check_authrequest(auth_req, "buu", nil) == :ok
   end
 
   test "Check auth header on a register message", _context do

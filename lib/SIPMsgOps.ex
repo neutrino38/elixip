@@ -328,8 +328,8 @@ defmodule SIP.Msg.Ops do
   def add_autorization_to_req(req, authparams, autheader, username, passwd_or_hash, pwdformat) when is_atom(req.method) do
 
     header2 = case autheader do
-      :wwwauthentication -> :autorisation
-      :proxyauthentication -> :proxyautorisation
+      :wwwauthenticate -> :authorization
+      :proxyauthenticate -> :proxyauthorization
       _ ->  raise "Invalid authentication header #{autheader}"
     end
 
