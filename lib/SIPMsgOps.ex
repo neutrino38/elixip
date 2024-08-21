@@ -325,7 +325,7 @@ defmodule SIP.Msg.Ops do
   end
 
   @doc "Crée une requête autentifiée à partir d'une requête non authentifiée et d'en entête auth"
-  def add_autorization_to_req(req, authparams, autheader, username, passwd_or_hash, pwdformat) when is_atom(req.method) do
+  def add_authorization_to_req(req, authparams, autheader, username, passwd_or_hash, pwdformat) when is_atom(req.method) do
 
     header2 = case autheader do
       :wwwauthenticate -> :authorization

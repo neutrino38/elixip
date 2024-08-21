@@ -120,7 +120,7 @@ defmodule SIP.Test.SIP.Msg.Ops do
     assert siprsp.proxyauthenticate["realm"] == "elioz.net"
     assert Map.has_key?(siprsp.proxyauthenticate, "nonce")
 
-    auth_req = SIP.Msg.Ops.add_autorization_to_req(
+    auth_req = SIP.Msg.Ops.add_authorization_to_req(
       context.sipreq, siprsp.proxyauthenticate, :proxyauthenticate,
       "manu", "buu", :plain)
 
