@@ -1,0 +1,13 @@
+REGISTER sip:visioassistance.net SIP/2.0
+Via: SIP/2.0/TCP 10.162.193.59:53936;branch=z9hG4bK-27653602;rport
+From: <sip:33970260257@visioassistance.net>;tag=27648420 
+To: <sip:33970260257@visioassistance.net>
+Contact: <sip:33970260257@10.162.193.59:53936;transport=tcp>;expires=600
+Call-ID: 44612373-ddd8-8c9e-acb9-121b265ffb82
+CSeq: 32394 REGISTER
+Content-Length: 0
+Max-Forwards: 70
+Authorization: Digest username="33970260257",realm="visioassistance.net",nonce="Y9FQeWPRT03KfHfWIHKGohwgjQGhDW9x",uri="sip:visioassistance.net",response="1caeecf4473acbd8f5f2355ad6a1b573",algorithm=MD5
+User-Agent: LiveVideoPlugin 4.4.2/Win8+
+P-Preferred-Identity: <sip:nouser@visioassistance.net>
+Supported: path

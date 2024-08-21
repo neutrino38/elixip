@@ -1,7 +1,9 @@
 defmodule SIP.Auth do
 	@moduledoc "Utility to handle SIP authentication procedures"
 
-  defp compute_auth_response_from_pwd(algorithm, username, nonce, realm, passwd, method, uri) do
+  @spec compute_auth_response_from_pwd(String.t(), String.t(), String.t(), String.t(), String.t(), atom(), String.t() | SIP.Uristruct) :: String.t()
+  def compute_auth_response_from_pwd(algorithm, username, nonce, realm, passwd, method, uri) do
+    uri = to_string(uri)
     algoid = case algorithm do
       "MD5" -> :md5
       "SHA1" -> :sha1
@@ -13,7 +15,7 @@ defmodule SIP.Auth do
     :crypto.hash(algoid, "#{ha1}:#{nonce}:#{ha2}") |> Base.encode16(case: :lower)
   end
 
-  defp compute_auth_response_from_ha1(algorithm, nonce, ha1, method, uri) do
+  def compute_auth_response_from_ha1(algorithm, nonce, ha1, method, uri) do
     algoid = case algorithm do
       "MD5" -> :md5
       "SHA1" -> :sha1
@@ -24,7 +26,7 @@ defmodule SIP.Auth do
     :crypto.hash(algoid, "#{ha1}:#{nonce}:#{ha2}") |> Base.encode16(case: :lower)
   end
 
-  @doc "Build authentication parameters based on nonce and realm"
+  @doc "Build challenge on nonce and realm"
   def build_auth_response( algorithm, username, nonce, realm, passwd_or_hash, pwdformat, method, uri) do
     response = case pwdformat do
       :plain -> compute_auth_response_from_pwd(algorithm, username, nonce, realm, passwd_or_hash, Atom.to_string(method), uri)

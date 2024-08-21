@@ -128,6 +128,42 @@ defmodule SIP.Test.SIP.Msg.Ops do
     assert code == :ok
   end
 
+  test "Check auth header on a register message", _context do
+    { code, msg } = File.read("test/SIP-REGISTER-AUTH.txt")
+    assert code == :ok # Test if file containing the SIP message is loaded
+
+    { code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
+    IO.puts("\n" <> errmsg)
+    IO.puts("Offending line #{lineno}: #{line}")
+    IO.puts("Error code #{code}")
+    end)
+
+    assert code == :ok
+    assert parsed_msg.method == :REGISTER
+    assert SIP.Msg.Ops.check_authrequest(parsed_msg, "PoleEmploi@2022", nil) == :ok
+    assert SIP.Msg.Ops.check_authrequest(parsed_msg, "pole", nil) == :invalid_password
+    assert SIP.Msg.Ops.check_authrequest(parsed_msg, "PoleEmploi@2022", "1234") == :nonce_mismatch
+
+  end
+
+  test "Check auth header on an INVITE message", _context do
+    { code, msg } = File.read("test/SIP-INVITE-AUTH.txt")
+    assert code == :ok # Test if file containing the SIP message is loaded
+
+    { code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
+    IO.puts("\n" <> errmsg)
+    IO.puts("Offending line #{lineno}: #{line}")
+    IO.puts("Error code #{code}")
+    end)
+
+    assert code == :ok
+    assert parsed_msg.method == :INVITE
+    assert SIP.Msg.Ops.check_authrequest(parsed_msg, "PoleEmploi@2022", "Y9FQjWPRT2GbehYzuvveSodTCIUpmxLc") == :ok
+    assert SIP.Msg.Ops.check_authrequest(parsed_msg, "pole", nil) == :invalid_password
+    assert SIP.Msg.Ops.check_authrequest(parsed_msg, "PoleEmploi@2022", "1234") == :nonce_mismatch
+
+  end
+
 
   test "Create an ACK message from the request and serialize it", context do
     ackmsg = SIP.Msg.Ops.ack_request(context.sipreq, nil)

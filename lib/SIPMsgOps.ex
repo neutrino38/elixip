@@ -351,8 +351,32 @@ defmodule SIP.Msg.Ops do
     end
   end
 
-  @doc "Check auth response"
+  defp check_nonce({ header, authparams}, nonce) do
+    if !is_nil(nonce) and authparams["nonce"] != nonce do
+      { :nonce_mismatch, authparams }
+    else
+      # Skip nonce check
+      { header, authparams }
+    end
+  end
 
+  defp get_auth_params_and_check_nonce(req, nonce) do
+    cond do
+      Map.has_key?(req, :authorization)
+        -> { :authorization, Map.get(req, :authorization) } |> check_nonce(nonce)
+      Map.has_key?(req, :proxyauthorization)
+        -> { :proxyauthorization, Map.get(req, :proxyauthorization) } |> check_nonce(nonce)
+      true -> { :no_auth_header, nil }
+    end
+  end
+
+
+
+  defmacro is_req(msg) do
+    quote do
+      is_map(unquote(msg)) and is_atom(unquote(msg).method)
+    end
+  end
 
   defmacro is_1xx_resp(msg) do
     quote do
@@ -375,6 +399,32 @@ defmodule SIP.Msg.Ops do
   defmacro is_failure_resp(msg) do
     quote do
       unquote(msg).method == false and unquote(msg).response in 400..699
+    end
+  end
+
+  @doc """
+  Check authenticated request- check that auth header is valid
+  req: request with auth header
+  nonce: nonce that was sent in the challenge response
+  """
+  def check_authrequest(req, password, nonce \\ nil) when is_req(req) do
+
+    case get_auth_params_and_check_nonce(req, nonce) do
+      { header, authparams } when header in [ :authorization, :proxyauthorization ] ->
+        response = SIP.Auth.compute_auth_response_from_pwd(
+          authparams["algorithm"], authparams["username"],
+          authparams["nonce"], authparams["realm"], password,
+          req.method, req.ruri )
+
+        if response == authparams["response"] do
+          :ok
+        else
+          :invalid_password
+        end
+
+      { header, nil } -> header
+
+      { :nonce_mismatch, _authparams } -> :nonce_mismatch
     end
   end
 
