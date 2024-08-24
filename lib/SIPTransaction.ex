@@ -22,6 +22,7 @@ defmodule SIP.Transac do
     debuglog: true # If we should output debug logs for this transaction
   ]
 
+  @spec start() :: :error | :ok
   @doc "Start the transaction layer"
   def start() do
     #Create the registry
@@ -56,7 +57,7 @@ defmodule SIP.Transac do
     # The process created IS the transaction
     name = {:via, Registry, {Registry.SIPTransaction, branch_id, :cast }}
     transact_params = { transport_module, transport_pid, destip, dest_port, sipmsg, self(), timeout }
-    case GenServer.start_link(SIP.ICT, transact_params, name: name ) do
+    case GenServer.start_link(transact_module, transact_params, name: name ) do
       { :ok, trans_pid } ->
         Logger.debug([ transid: branch_id, message: "Created #{transact_module} with PID #{inspect(trans_pid)}." ])
         { :ok, trans_pid }

@@ -28,6 +28,44 @@ defmodule SIP.Msg.Ops do
     "SIP/2.0/" <> String.capitalize(transport) <> " " <> local_ip <> ":" <> Integer.to_string(local_port)
   end
 
+  defmacro is_req(msg) do
+    quote do
+      is_map(unquote(msg)) and is_atom(unquote(msg).method)
+    end
+  end
+
+  defmacro is_this_req(msg, method) do
+    quote do
+      is_map(unquote(msg)) and unquote(msg).method == unquote(method)
+    end
+  end
+
+
+  defmacro is_1xx_resp(msg) do
+    quote do
+      unquote(msg).method == false and unquote(msg).response in 100..199
+    end
+  end
+
+  defmacro is_2xx_resp(msg) do
+    quote do
+      unquote(msg).method == false and unquote(msg).response in 200..299
+    end
+  end
+
+  defmacro is_3xx_resp(msg) do
+    quote do
+      unquote(msg).method == false and unquote(msg).response in 300..399
+    end
+  end
+
+  defmacro is_failure_resp(msg) do
+    quote do
+      unquote(msg).method == false and unquote(msg).response in 400..699
+    end
+  end
+
+
   @doc "Add a tomost via"
   def add_via(sipmsg, { local_ip, local_port, transport }, branch_id, additional_params \\ nil) when is_bitstring(branch_id) do
     via = build_via_addr(local_ip, local_port, transport)
@@ -371,36 +409,6 @@ defmodule SIP.Msg.Ops do
   end
 
 
-
-  defmacro is_req(msg) do
-    quote do
-      is_map(unquote(msg)) and is_atom(unquote(msg).method)
-    end
-  end
-
-  defmacro is_1xx_resp(msg) do
-    quote do
-      unquote(msg).method == false and unquote(msg).response in 100..199
-    end
-  end
-
-  defmacro is_2xx_resp(msg) do
-    quote do
-      unquote(msg).method == false and unquote(msg).response in 200..299
-    end
-  end
-
-  defmacro is_3xx_resp(msg) do
-    quote do
-      unquote(msg).method == false and unquote(msg).response in 300..399
-    end
-  end
-
-  defmacro is_failure_resp(msg) do
-    quote do
-      unquote(msg).method == false and unquote(msg).response in 400..699
-    end
-  end
 
   @doc """
   Check authenticated request- check that auth header is valid
