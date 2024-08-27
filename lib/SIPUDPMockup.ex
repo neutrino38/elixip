@@ -2,6 +2,7 @@ defmodule SIP.Test.Transport.UDPMockup do
   @moduledoc """
   Mockup for transport module
   """
+  alias SIP.NetUtils
   use GenServer
   require Logger
   require SIP.Transac
@@ -32,7 +33,7 @@ defmodule SIP.Test.Transport.UDPMockup do
     GenServer.cast(t_pid, {:simulate, :noanswer})
   end
 
-  @spec simulate_busy_answer(atom() | pid() | {atom(), any()} | {:via, atom(), any()}) :: :ok
+  @spec simulate_busy_answer(pid()) :: :ok
   def simulate_busy_answer(t_pid) do
     GenServer.cast(t_pid, {:simulate, :busy})
   end
@@ -170,60 +171,86 @@ defmodule SIP.Test.Transport.UDPMockup do
   end
 
   @impl true
-  def handle_info({ :recv, siprsp}, state) do
+
+  # Handle 100 Trying
+  def handle_info({ :recv, siprsp}, state) when siprsp.response == 100 do
     Logger.debug([transid: state.req.transid, module: SIP.Test.Transport.UDPMockup,
     message: "Received SIP resp #{siprsp.response} scenario #{state.scenario}"])
-
     SIP.Transac.process_sip_message(SIPMsg.serialize(siprsp))
-    case siprsp.response do
-      100 ->
-          case state.scenario do
-            :successfulcall ->
-              # We received the 100 Trying -- simulate a 180 ringing after some time
-              GenServer.cast(self(), { :simulate, 180, 200 })
+    case state.scenario do
+      :successfulcall ->
+        # We received the 100 Trying -- simulate a 180 ringing after some time
+        GenServer.cast(self(), { :simulate, 180, 200 })
 
-            :notregistered ->
-              # answer with 480 Temporary Unavailable
-              GenServer.cast(self(), { :simulate, 480, 200 })
+      :notregistered ->
+        # answer with 480 Temporary Unavailable
+        GenServer.cast(self(), { :simulate, 480, 200 })
 
-            :busy ->
-              # We received the 100 Trying -- simulate a 180 ringing after some time
-              # then simulate 486 Busy sent by the user
-              GenServer.cast(self(), { :simulate, 180, 200 })
+      :busy ->
+        # We received the 100 Trying -- simulate a 180 ringing after some time
+        # then simulate 486 Busy sent by the user
+        GenServer.cast(self(), { :simulate, 180, 200 })
 
-            :noanswer ->
-                # We received the 100 Trying -- simulate a 180 ringing after some time
-                # then simulate 486 Busy sent by the user
-                GenServer.cast(self(), { :simulate, 180, 200 })
+      :noanswer ->
+          # We received the 100 Trying -- simulate a 180 ringing after some time
+          # then simulate 486 Busy sent by the user
+          GenServer.cast(self(), { :simulate, 180, 200 })
 
-            _ ->
-              Logger.warning( [ module: SIP.Test.Transport.UDPMockup, message: "Unidentified SIP scenario #{state.scenario}"])
-              GenServer.cast(self(), { :simulate, 404, 200 })
-          end
-          { :noreply,  state }
+      _ ->
+        Logger.warning( [ module: SIP.Test.Transport.UDPMockup, message: "Unidentified SIP scenario #{state.scenario}"])
+        GenServer.cast(self(), { :simulate, 404, 200 })
+    end
+    { :noreply,  state }
+  end
 
-      180 ->
-        case state.scenario do
-          :successfulcall ->
-            # We received the 180 Ringing -- simulate a 200 OK after some time
-            GenServer.cast(self(), { :simulate, 200, 4000 })
+   # Handle 180 Ringing
+  def handle_info({ :recv, siprsp}, state) when siprsp.response == 180 do
+    Logger.debug([transid: state.req.transid, module: SIP.Test.Transport.UDPMockup,
+    message: "Received SIP resp #{siprsp.response} scenario #{state.scenario}"])
+    SIP.Transac.process_sip_message(SIPMsg.serialize(siprsp))
+    case state.scenario do
+      :successfulcall ->
+        # We received the 180 Ringing -- simulate a 200 OK after some time
+        GenServer.cast(self(), { :simulate, 200, 4000 })
 
-          :noanswer ->
-            GenServer.cast(self(), { :simulate, 408, 2000 })
+      :noanswer ->
+        GenServer.cast(self(), { :simulate, 408, 2000 })
 
-          :busy ->
-            GenServer.cast(self(), { :simulate, 486, 2000 })
-
-        end
-        { :noreply,  state }
-
-      486 -> { :noreply,  state }
-
-      487 -> { :noreply,  state }
-
-      _ -> { :noreply,  state }
+      :busy ->
+        GenServer.cast(self(), { :simulate, 486, 2000 })
 
     end
-
+    { :noreply,  state }
   end
+
+  # Include case with 486, 487
+  def handle_info({ :recv, siprsp}, state) when is_integer(siprsp.response) do
+    Logger.debug([transid: state.req.transid, module: SIP.Test.Transport.UDPMockup,
+    message: "Received SIP resp #{siprsp.response} scenario #{state.scenario}"])
+    SIP.Transac.process_sip_message(SIPMsg.serialize(siprsp))
+
+    { :noreply,  state }
+  end
+
+  def handle_info({ :recv, sipreq}, state) when sipreq.method == :REGISTER do
+    Logger.debug([transid: state.req.transid, module: SIP.Test.Transport.UDPMockup,
+    message: "Received SIP REGISTER in scenario #{state.scenario}"])
+
+    # Simulate remote IP
+    { :ok, ip } = NetUtils.parse_address("82.184.8.2")
+    port = 53936
+    case SIP.Transac.process_sip_message(SIPMsg.serialize(sipreq)) do
+      :ok -> { :noreply, state }
+
+      { :no_matching_transaction, parsed_msg } ->
+        # We need to start a new transaction
+        SIP.Transac.start_uas_transaction(parsed_msg, { state.localip, state.localport, "UDP", SIP.Test.Transport.UDPMockup, self() } , { ip, port })
+
+      _ ->
+        Logger.error("Received an invalid SIP message from #{ip}:#{port}")
+        { :noreply, state }
+    end
+    { :noreply,  state }
+  end
+
 end
