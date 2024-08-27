@@ -691,6 +691,7 @@ defmodule SIPMsg do
 	@doc """
 	Serialize a SIP request into a string to be sent on the network
 	"""
+	@spec serialize(map()) :: binary()
 	def serialize(sipmsg) when is_map(sipmsg) and sipmsg.method == false do
 		msgstr = serialize_first_line(sipmsg.response, sipmsg.reason)
 		headers = serialize_headers(sipmsg)
@@ -702,6 +703,7 @@ defmodule SIPMsg do
 		msgstr <> headers <> body
 	end
 
+	@spec serialize(map()) :: binary()
 	def serialize(sipmsg) when is_map(sipmsg) and is_atom(sipmsg.method) do
 		msgstr = serialize_first_line(sipmsg.method, sipmsg.ruri)
 		headers = serialize_headers(sipmsg)
