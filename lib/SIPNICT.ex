@@ -72,6 +72,11 @@ defmodule SIP.NICT do
     { :reply, { state.tmod, state.tpid }, state }
   end
 
+  def handle_call(:ack, _from, state) do
+    Logger.warning([ transid: state.msg.transid, module: __MODULE__,
+                     message: "Sending ACK is not supported for a non invite client transaction"])
+    { :reply, :unsupported, state }
+  end
 
   # Handle privisional (1xx) responses
   defp handle_sip_response(state, sipmsg) when SIP.Msg.Ops.is_1xx_resp(sipmsg) do
