@@ -84,7 +84,7 @@ defmodule SIP.Test.Transport.UDPMockup do
   @impl true
   def init({ _dest_ip, _dest_port}) do
     ips = SIP.NetUtils.get_local_ips( [ :ipv4 ] )
-    initial_state = %{ t_isreliable: false, localip: hd(ips), localport: 5060 }
+    initial_state = %{ t_isreliable: false, localip: hd(ips), localport: 5060, upperlayer: nil }
     { :ok, initial_state }
   end
 
@@ -119,6 +119,19 @@ defmodule SIP.Test.Transport.UDPMockup do
   # Obtain localip and port values
   def handle_call(:getlocalipandport, _from, state) do
     { :reply, { :ok, state.localip, state.localport }, state}
+  end
+
+  # Set the upper layer handler for transactions to process
+  def handle_call( {:setupperlayer, ul_pid }, _from, state) when is_pid(ul_pid) do
+    { :reply, :ok, Map.put(state, :upperlayer, ul_pid) }
+  end
+
+  def handle_call( {:setupperlayer, ul_func }, _from, state) when is_function(ul_func, 2) do
+    { :reply, :ok, Map.put(state, :upperlayer, ul_func) }
+  end
+
+  def handle_call( {:setupperlayer, nil }, _from, state) do
+    { :reply, :ok, Map.put(state, :upperlayer, nil) }
   end
 
   # Simulate call scenario
@@ -244,7 +257,10 @@ defmodule SIP.Test.Transport.UDPMockup do
 
       { :no_matching_transaction, parsed_msg } ->
         # We need to start a new transaction
-        SIP.Transac.start_uas_transaction(parsed_msg, { state.localip, state.localport, "UDP", SIP.Test.Transport.UDPMockup, self() } , { ip, port })
+        SIP.Transac.start_uas_transaction(
+          parsed_msg,
+          { state.localip, state.localport, "UDP", SIP.Test.Transport.UDPMockup, self(), state.upperlayer },
+          { ip, port })
 
       _ ->
         Logger.error("Received an invalid SIP message from #{ip}:#{port}")

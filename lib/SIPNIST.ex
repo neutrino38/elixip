@@ -8,14 +8,14 @@ defmodule SIP.NIST do
   # Callbacks
 
   @impl true
-  def init({ t_mod, t_pid, remote_ip, remote_port, sipmsg }) do
+  def init({ t_mod, t_pid, remote_ip, remote_port, sipmsg, upperlayer }) do
     initial_state = %SIP.Transac{ msg: sipmsg, tmod: t_mod, tpid: t_pid, app: nil, timeout: 0,
                       t_isreliable: apply(t_mod, :is_reliable, []), destip: remote_ip,
-                      destport: remote_port, state: :trying }
+                      destport: remote_port, state: :trying, upperlayer: upperlayer }
 
-    state = if not initial_state.t_isreliable, do: schedule_timer_A(initial_state), else: initial_state
+    # state = if not initial_state.t_isreliable, do: schedule_timer_A(initial_state), else: initial_state
 
-    { :ok, state }
+    { :ok, initial_state }
   end
 
   defp fsm_reply(state, resp_code, rsp) when state.state in [ :trying, :proceeding ] do
@@ -34,8 +34,6 @@ defmodule SIP.NIST do
             new_state = schedule_timer_K(new_state, 5000) |> Map.put(:state, :complete)
             { :ok, new_state }
         end
-
-
 
       { :invalid_sip_msg, _state } ->
         Logger.error([ transid: rsp.transid, module: __MODULE__,
