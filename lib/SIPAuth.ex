@@ -26,6 +26,7 @@ defmodule SIP.Auth do
     :crypto.hash(algoid, "#{ha1}:#{nonce}:#{ha2}") |> Base.encode16(case: :lower)
   end
 
+  @spec build_auth_response( String.t(), String.t(), String.t(), String.t(), String.t(), atom(), atom(), String.t()) :: map()
   @doc "Build challenge on nonce and realm"
   def build_auth_response( algorithm, username, nonce, realm, passwd_or_hash, pwdformat, method, uri) do
     response = case pwdformat do

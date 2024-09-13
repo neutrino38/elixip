@@ -15,7 +15,8 @@ defmodule SIP.Transport.UDP do
   def init({ _dest_ip, _dest_port}) do
     ips = SIP.NetUtils.get_local_ips( [ :ipv4 ] )
 
-    initial_state = %{ t_isreliable: false, localip: hd(ips), localips: ips, localport: @default_local_port }
+    initial_state = %{ t_isreliable: false, localip: hd(ips), localips: ips,
+                      localport: @default_local_port, upperlayer: nil }
     {:ok, socket} = Socket.UDP.open(@default_local_port, [binary: true, active: true])
     :ok = Socket.UDP.process(socket, self())
     initial_state = Map.put(initial_state, :socket, socket)
@@ -42,6 +43,19 @@ defmodule SIP.Transport.UDP do
     end
   end
 
+  # Set the upper layer handler for transactions to process
+  def handle_call( {:setupperlayer, ul_pid }, _from, state) when is_pid(ul_pid) do
+    { :reply, :ok, Map.put(state, :upperlayer, ul_pid) }
+  end
+
+  def handle_call( {:setupperlayer, ul_func }, _from, state) when is_function(ul_func, 2) do
+    { :reply, :ok, Map.put(state, :upperlayer, ul_func) }
+  end
+
+  def handle_call( {:setupperlayer, nil }, _from, state) do
+    { :reply, :ok, Map.put(state, :upperlayer, nil) }
+  end
+
 # Receving an UDP datagram
   @impl true
   def handle_info({:udp, socket, ip, port, message}, state) do
@@ -56,7 +70,7 @@ defmodule SIP.Transport.UDP do
             {:error, _reason} -> {state.localip, state.localport}
           end
           # We need to start a new transaction
-          SIP.Transac.start_uas_transaction(parsed_msg, { localip, localport, "UDP", SIP.Transport.UDP, self() } , { ip, port })
+          SIP.Transac.start_uas_transaction(parsed_msg, { localip, localport, "UDP", SIP.Transport.UDP, self(), state.upperlayer } , { ip, port })
         else
           Logger.error("Received a SIP #{parsed_msg.response} response from #{ip}:#{port} not linked to any transaction. Droping it")
           { :noreply, state }

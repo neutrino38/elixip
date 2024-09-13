@@ -19,7 +19,8 @@ defmodule SIP.Transac do
     state: :inital,
     tB_ref: nil,
     timerk: nil,
-    debuglog: true # If we should output debug logs for this transaction
+    debuglog: true, # If we should output debug logs for this transaction
+    upperlayer: nil
   ]
 
   @spec start() :: :error | :ok
@@ -192,7 +193,10 @@ defmodule SIP.Transac do
     end
   end
 
-  def start_uas_transaction(sipmsg, { local_ip, local_port, transport_str, t_mod, t_pid } , { remote_ip, remote_port }) when is_map(sipmsg) and sipmsg.method != :INVITE do
+  def start_uas_transaction(sipmsg,
+    { local_ip, local_port, transport_str, t_mod, t_pid, upperlayer },
+    { remote_ip, remote_port }) when is_map(sipmsg) and sipmsg.method != :INVITE do
+
     # Generate the branch ID
     branch_id = SIP.Msg.Ops.generate_branch_value()
     #Todo : check that branch ID is not already registered on the transaction registry
@@ -200,7 +204,7 @@ defmodule SIP.Transac do
     sipmsg = SIP.Msg.Ops.add_via(sipmsg, { local_ip, local_port, transport_str }, branch_id)
 
     # Start a new GenServer for each transaction and register it in Registry.SIPTransaction
-    transact_params = { t_mod, t_pid, remote_ip, remote_port, sipmsg, self() }
+    transact_params = { t_mod, t_pid, remote_ip, remote_port, sipmsg, upperlayer }
     name = {:via, Registry, {Registry.SIPTransaction, branch_id, :cast }}
     case GenServer.start_link(SIP.NIST, transact_params, name: name) do
       { :ok, trans_pid } ->
@@ -251,6 +255,11 @@ defmodule SIP.Transac do
     GenServer.call(uac_t, :ack)
   end
 
+  @doc "Send a response to an UAS transation"
+  def reply(uas_t, resp_code, reason, upd_fields \\ [], totag \\ nil) when is_integer(resp_code) do
+    GenServer.call(uas_t, { resp_code, reason, upd_fields, totag } )
+  end
+
   defmodule Common do
     @moduledoc """
     Module that gather all common an utility functions to implement SIP
@@ -263,18 +272,19 @@ defmodule SIP.Transac do
       { rez, state }
     end
 
-    def sendout_msg(state, sipmsg) when is_map(state) and is_map(sipmsg) do
+    def sendout_msg(state, sipmsg) when is_map(state) and is_atom(sipmsg.method) do
       try do
         msgstr = SIPMsg.serialize(sipmsg)
         state = case sipmsg.method do
           :ACK -> Map.put(state, :ack, msgstr)
           :CANCEL -> state
-          false -> state
+          false -> Map.put(state, :rspstr, msgstr)
           _ -> Map.put(state, :msgstr, msgstr)
 
         end
+
         sendout_msg(state, msgstr)
-        { :ok, Map.put(state, :msgstr, msgstr) }
+
       rescue
         e in RuntimeError ->
           Logger.debug([ transid: sipmsg.transid, module: __MODULE__, message: e.message])
@@ -282,4 +292,26 @@ defmodule SIP.Transac do
       end
     end
   end
+
+  def sendout_msg(state, sipmsg) when is_map(state) and is_atom(sipmsg.method) do
+    try do
+      msgstr = SIPMsg.serialize(sipmsg)
+
+      state = case sipmsg.method do
+        :ACK -> Map.put(state, :ack, msgstr)
+        :CANCEL -> state
+        false -> Map.put(state, :rspstr, msgstr)
+        _ -> Map.put(state, :msgstr, msgstr)
+
+      end
+
+      sendout_msg(state, msgstr)
+
+    rescue
+      e in RuntimeError ->
+        Logger.debug([ transid: sipmsg.transid, module: __MODULE__, message: e.message])
+        { :invalid_sip_msg, state }
+    end
+  end
+
 end

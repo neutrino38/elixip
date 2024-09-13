@@ -10,6 +10,7 @@ defmodule SIP.Dialog do
     supported: [],
     routeset: [],
     direction: :outbound, # outbound means that dialog was created by an outbound request.
+    curtrans: nil,  # Current transaction
     transactions: [],
     app: nil, # PID of the application
     state: :inital,
@@ -36,9 +37,8 @@ defmodule SIP.Dialog do
   # Obtain the triplet that uniquely identify a dialog
   defp get_dialog_id(req) do
     { _code, fromtag } = SIP.Uri.get_uri_param(req.from, "tag")
-    callid = SIP.Uri.callid
     { _code, totag } = SIP.Uri.get_uri_param(req.to, "tag")
-    { fromtag, callid, totag }
+    { fromtag, req.callid, totag }
   end
 
   defp get_or_create_dialog_id( req ) do
@@ -83,7 +83,28 @@ defmodule SIP.Dialog do
     end
   end
 
-  def start_dialog_with_template(req, timeout, direction \\ :outbound, debug \\ false) do
+  def start_dialog_with_template(_req, _timeout, _direction \\ :outbound, _debug \\ false) do
     raise "To be implemented later"
+    :ok
+  end
+
+
+  def process_incoming_request(req, transact_pid) when is_map(req) and is_atom(req.method) do
+    { req2, dialog_id } = get_or_create_dialog_id(req)
+    case Registry.lookup(Registry.Dialog, dialog_id) do
+      # No such transction
+      [] ->
+        SIP.Transac.reply(transact_pid, 481, " Call/Transaction Does Not Exist")
+        { :no_matching_transaction, req2 }
+
+      # Found a matching transaction. Dispatch the SIP msg to it
+      # We do not use dispatch because we have already looked up the transaction list
+      # Note that lookup() should always return a single transaction here
+      dialog_list when is_list(dialog_list) ->
+        pid = hd(dialog_list)
+        GenServer.cast(pid, {:onsipmsg, req2, transact_pid})
+        { pid, req2 }
+    end
+
   end
 end
