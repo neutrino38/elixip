@@ -146,7 +146,7 @@ defmodule SIP.Transac do
     end
   end
 
-  def start_uac_transaction(sipmsg, _transport_selector_fn) when is_map(sipmsg) and sipmsg.method == :ACK  do
+  def start_uac_transaction(sipmsg, _timeout) when is_map(sipmsg) and sipmsg.method == :ACK  do
     Logger.error("SIP request " <> Atom.to_string(sipmsg.method) <> "cannot create transactions")
     { :req_cannot_create_trans, nil }
   end
@@ -313,5 +313,4 @@ defmodule SIP.Transac do
         { :invalid_sip_msg, state }
     end
   end
-
 end

@@ -28,7 +28,7 @@ defmodule SIP.Transport.UDP do
   def handle_call({ :sendmsg, msgstr, destip, dest_port }, _from, state) do
     destipstr = case SIP.NetUtils.ip2string(destip) do
       { :error, :einval } ->
-        Logger.error([module: SIP.Test.Transport.UDPMockup, message: "sendmsg: invalid destination address."])
+        Logger.error([module: SIP.Test.Transport.UDP, message: "sendmsg: invalid destination address."])
         IO.inspect(destip)
         raise "UDP: invalid IP address"
       ipstr when is_binary(ipstr)-> ipstr
@@ -41,6 +41,10 @@ defmodule SIP.Transport.UDP do
         Logger.debug("UDP: failed to send message. Error: #{reason}");
         { :reply, :ok, state }
     end
+  end
+
+  def handle_call(:getlocalipandport, _from, state) do
+    { :reply, { :ok, state.localip, state.localport }, state}
   end
 
   # Set the upper layer handler for transactions to process

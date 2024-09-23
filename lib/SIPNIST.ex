@@ -15,6 +15,11 @@ defmodule SIP.NIST do
 
     # state = if not initial_state.t_isreliable, do: schedule_timer_A(initial_state), else: initial_state
 
+    cond do
+      is_function(upperlayer) -> upperlayer.(sipmsg, self())
+      is_pid(upperlayer) -> Genserver.cast( upperlayer, { :sipmsg, sipmsg, self() })
+      true -> SIP.Dialog.process_incoming_request(sipmsg, self(), false)
+    end
     { :ok, initial_state }
   end
 
