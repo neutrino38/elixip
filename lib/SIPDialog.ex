@@ -57,6 +57,7 @@ defmodule SIP.Dialog do
       state = %SIP.Dialog{ msg: req, direction: direction, app: nil, expirationtimer: timeout, debuglog: debug,
                    transactions: [ pid ] }
 
+
       { :ok, state }
     else
       state = %SIP.Dialog{ msg: req, direction: direction, app: pid, expirationtimer: timeout, debuglog: debug,
@@ -92,6 +93,7 @@ defmodule SIP.Dialog do
   end
 
   # Create call ID and add it to the request
+  @spec get_or_create_dialog_id( map() ) :: map()
   defp get_or_create_dialog_id( req, { fromtag, nil, totag }) do
     callid = SIP.Msg.Ops.generate_from_or_to_tag()
     req = Map.put(req, :callid, callid)
@@ -110,6 +112,7 @@ defmodule SIP.Dialog do
     {req,  { fromtag, callid , totag } }
   end
 
+  @spec start_dialog(map(), integer(), { :inbound | :outbound }, boolean() ) :: {:error, any()} | {:ok, pid()}
   @doc "Start a dialog"
   def start_dialog(req, timeout, direction \\ :outbound, debug \\ false) when is_atom(req.method) do
     # Obtain create the dialog id { fromtag, callid, totag } that identify the SIP dialog according to RFC 3261
@@ -121,6 +124,12 @@ defmodule SIP.Dialog do
     case GenServer.start_link(SIP.Dialog, dialog_params, name: name ) do
       { :ok, dlg_pid } ->
         Logger.debug([ dialogid: "#{inspect(dialog_id)}" , message: "Created dialog with PID #{inspect(dlg_pid)}." ])
+
+        # Bind the outbound dialog to the caller process which is
+        # assumed to be the application
+        if direction == :outbound do
+          GenServer.call(dlg_pid, { :setapppid, self() })
+        end
         { :ok, dlg_pid }
 
       { code, err } ->
@@ -130,11 +139,11 @@ defmodule SIP.Dialog do
   end
 
   def start_dialog_with_template(_req, _timeout, _direction \\ :outbound, _debug \\ false) do
-    raise "To be implemented later"
     :ok
   end
 
 
+  @spec process_incoming_request(map(), pid(), boolean()) :: {:error, any()} | {:ok, pid()} | :nomatchingdialog
   def process_incoming_request(req, transact_pid, debug) when is_map(req) and is_atom(req.method) do
     { req2, dialog_id } = get_or_create_dialog_id(req)
     case Registry.lookup(Registry.Dialog, dialog_id) do
@@ -153,11 +162,11 @@ defmodule SIP.Dialog do
 
           :ACK ->
             # to add error log - ACK should be in dialog
-            :no_matching_dialog
+            :nomatchingdialog
 
           :PRACK ->
             # to add error log - ACK should be in dialog
-            :no_matching_dialog
+            :nomatchingdialog
 
           m when m in [ :PUBLISH, :REGISTER, :SUBSCRIBE ] ->
             #Todo compulte timeout from refresh contact period
