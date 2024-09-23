@@ -9,10 +9,15 @@ defmodule SIP.NICT do
 
   @impl true
   def init({ t_mod, t_pid, dest_ip, dest_port, sipmsg, app_pid, ring_timeout }) do
+    # Add contact header
+    sipmsg = SIP.Transport.add_contact_header(t_pid, sipmsg)
+
+    # Create GenServer state
     initial_state = %SIP.Transac{ msg: sipmsg, tmod: t_mod, tpid: t_pid, app: app_pid, timeout: ring_timeout,
                        t_isreliable: apply(t_mod, :is_reliable, []), destip: dest_ip,
                        destport: dest_port, state: :sending }
 
+    # Sendout the message using the transport
     case SIP.Transac.Common.sendout_msg(initial_state, sipmsg) do
       {:ok, state} ->
         Logger.info([ transid: sipmsg.transid, module: __MODULE__,
