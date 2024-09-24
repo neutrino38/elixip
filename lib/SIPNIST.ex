@@ -5,6 +5,51 @@ defmodule SIP.NIST do
   require SIP.Msg.Ops
   require Logger
 
+  # reply to request internally
+  defp internal_reply(state, sipmsg, resp_code, reason, totag) do
+    resp = SIP.Msg.Ops.reply_to_request(sipmsg, resp_code, reason, nil, totag)
+    case fsm_reply(state, resp.code, resp) do
+      { :ok, new_state }  -> { :ok, schedule_timer_K(new_state, 5000) }
+      { code, state }  -> { code, schedule_timer_K(state, 5000) }
+    end
+  end
+
+  # Call upper layer request handling function and
+  defp process_incoming_request(state, ul_fun) when is_function(ul_fun) do
+    case ul_fun.(state.sipmsg, self(), state.debug) do
+      # upper layer has started processing the request. Save the PID
+      { :ok, ul_pid } -> { :ok, Map.put(state, :app, ul_pid) }
+
+      # upper layer could not process the request and indicated a response code
+      # close the transaction with this response code
+      { :error, { code, reason, totag }} ->
+        { _errcode, state } = internal_reply(state, state.sipmsg, code, reason, totag)
+        { :upperlayerfailure, state }
+
+
+      # General error
+      _ ->
+        { _errcode, state } =  internal_reply(state, state.sipmsg, 403, "Denied", nil)
+        { :upperlayerfailure, state }
+    end
+  end
+
+  # When upperlayer is a callback that returns the upperlayer PID
+  defp process_incoming_request(state) when is_function(state.upperlayer) do
+    process_incoming_request(state, state.upperlayer)
+  end
+
+  # when upperlayer is a PID -> send the message
+  defp process_incoming_request(state) when is_pid(state.upperlayer) do
+    send(state.upperlayer, { state.sipmsg.method, state.sipmsg } )
+    { :ok, Map.put(state, :app, state.upperlayer) }
+  end
+
+  # when upperlayer is not specified -> send to the dialog layer
+  defp process_incoming_request(state) when is_nil(state.upperlayer) do
+    process_incoming_request(state, &SIP.Dialog.process_incoming_request/3)
+  end
+
   # Callbacks
 
   @impl true
@@ -15,14 +60,22 @@ defmodule SIP.NIST do
 
     # state = if not initial_state.t_isreliable, do: schedule_timer_A(initial_state), else: initial_state
 
-    cond do
-      is_function(upperlayer) -> upperlayer.(sipmsg, self())
-      is_pid(upperlayer) -> Genserver.cast( upperlayer, { :sipmsg, sipmsg, self() })
-      true -> SIP.Dialog.process_incoming_request(sipmsg, self(), false)
-    end
+    # Asynchornously process the request
+    GenServer.cast(self(), :sipreq)
     { :ok, initial_state }
   end
 
+  @impl true
+  # This is invoked at transaction creation to forward the request to upperlayer
+  # asynchronously
+  def handle_cast(:sipreq, state) do
+    case process_incoming_request(state) do
+      { :ok, state } -> { :noreply, state }
+      { :upperlayerfailure, state } -> { :noreply, state }
+    end
+  end
+
+  # Transaction state machin function
   defp fsm_reply(state, resp_code, rsp) when state.state in [ :trying, :proceeding ] do
 
     case SIP.Transac.Common.sendout_msg(state, rsp) do
