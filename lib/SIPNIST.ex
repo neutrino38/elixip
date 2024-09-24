@@ -18,12 +18,12 @@ defmodule SIP.NIST do
   # Call upper layer request handling function and
   defp process_incoming_request(state, ul_fun) when is_function(ul_fun) do
     case ul_fun.(state.sipmsg, self(), state.debug) do
-      # upper layer has started processing the request. Save the PID
-      { :ok, ul_pid, totag } -> { :ok, Map.put(state, :app, ul_pid) |> Map.put(:totag, totag) }
+      # upper layer has started processing the request. Save the PID and the totag
+      { :ok, ul_pid, { _ftag, _cid, totag } } -> { :ok, Map.put(state, :app, ul_pid) |> Map.put(:totag, totag) }
 
       # upper layer could not process the request and indicated a response code
       # close the transaction with this response code
-      { :error, { code, reason, totag }} ->
+      { :error, { code, reason, { _ftag, _cid, totag } }} ->
         { _errcode, state } = internal_reply(state, state.sipmsg, code, reason, [], totag)
         { :upperlayerfailure, state }
 
@@ -99,12 +99,13 @@ defmodule SIP.NIST do
     end
   end
 
-  #Called
+  #Implementation of reply transaction interface
   @impl true
   def handle_call({ resp_code, reason, upd_fields, totag }, state) when is_integer(resp_code) do
-    { code, new_state } = internal_reply(state, state.sipmsg, code, reason, upd_fields, totag);
+    { code, new_state } = internal_reply(state, state.sipmsg, resp_code, reason, upd_fields, totag);
     { :reply, code, new_state }
   end
+
   # Transaction state machine function
   defp fsm_reply(state, resp_code, rsp) when state.state in [ :trying, :proceeding ] do
 
