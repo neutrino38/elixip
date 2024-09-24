@@ -16,11 +16,19 @@ defmodule SIP.Trans.Timer do
 
   @doc """
   Schedule a generic cancellable timer
+
+  state: transactipn internal state
+  timer_id: atom to be sent as in timer
+  timer_field: atom to designate the field used in the transaction state map
+               to store the timer reference
+
+  ms: number of milliseconds for the timer
+
   if ms is nil, cancel timer
   if ms is 0, fire timer immediatly
   if ms > 0, schedule timer
   """
-  @spec schedule_generic_timer(state :: map() , timer_id :: atom() , timer_field :: atom(), ms :: integer() ) :: map()
+  @spec schedule_generic_timer(state :: map() , timer_id :: atom() , timer_field :: atom(), ms :: integer() | nil ) :: map()
   def schedule_generic_timer(state, timer_id, timer_field, ms) when is_atom(timer_id) do
     # If needed cancel previous timer
     state = case Map.fetch(state, timer_field) do
@@ -48,6 +56,11 @@ defmodule SIP.Trans.Timer do
   @doc "Schedule/reschedule the K timer and save its reference (pid) in the transaction state"
   def schedule_timer_K(state, ms) do
     schedule_generic_timer(state, :timerK, :timerk, ms)
+  end
+
+  @doc "Schedule/reschedule the F timer and save its reference (pid) in the transaction state"
+  def schedule_timer_F(state) do
+    schedule_generic_timer(state, :timerF, :timerf, @timer_T1_val * 64)
   end
 
   @doc "Handle timer messages"

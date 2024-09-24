@@ -19,6 +19,7 @@ defmodule SIP.Transac do
     state: :inital,
     tB_ref: nil,
     timerk: nil,
+    timerf: nil,
     debuglog: true, # If we should output debug logs for this transaction
     upperlayer: nil
   ]
