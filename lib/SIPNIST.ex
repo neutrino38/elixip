@@ -6,10 +6,11 @@ defmodule SIP.NIST do
   require Logger
 
   # reply to request internally
-  defp internal_reply(state, sipmsg, resp_code, reason, totag) do
-    resp = SIP.Msg.Ops.reply_to_request(sipmsg, resp_code, reason, nil, totag)
-    case fsm_reply(state, resp.code, resp) do
-      { :ok, new_state }  -> { :ok, schedule_timer_K(new_state, 5000) }
+  defp internal_reply(state, sipmsg, resp_code, reason, upd_fields, totag) do
+    resp = SIP.Msg.Ops.reply_to_request(sipmsg, resp_code, reason, upd_fields, totag)
+    case fsm_reply(state, resp_code, resp) do
+      { :ok, new_state } when resp_code in 200..599 -> { :ok, schedule_timer_K(new_state, 5000) }
+      { :ok, new_state } when resp_code in 100..199 -> { :ok, new_state }
       { code, state }  -> { code, schedule_timer_K(state, 5000) }
     end
   end
@@ -18,18 +19,18 @@ defmodule SIP.NIST do
   defp process_incoming_request(state, ul_fun) when is_function(ul_fun) do
     case ul_fun.(state.sipmsg, self(), state.debug) do
       # upper layer has started processing the request. Save the PID
-      { :ok, ul_pid } -> { :ok, Map.put(state, :app, ul_pid) }
+      { :ok, ul_pid, totag } -> { :ok, Map.put(state, :app, ul_pid) |> Map.put(:totag, totag) }
 
       # upper layer could not process the request and indicated a response code
       # close the transaction with this response code
       { :error, { code, reason, totag }} ->
-        { _errcode, state } = internal_reply(state, state.sipmsg, code, reason, totag)
+        { _errcode, state } = internal_reply(state, state.sipmsg, code, reason, [], totag)
         { :upperlayerfailure, state }
 
 
       # General error
       _ ->
-        { _errcode, state } =  internal_reply(state, state.sipmsg, 403, "Denied", nil)
+        { _errcode, state } =  internal_reply(state, state.sipmsg, 403, "Denied", [], nil)
         { :upperlayerfailure, state }
     end
   end
@@ -66,16 +67,45 @@ defmodule SIP.NIST do
   end
 
   @impl true
-  # This is invoked at transaction creation to forward the request to upperlayer
+  # This is invoked at NIST transaction creation to forward the request to upperlayer
   # asynchronously
   def handle_cast(:sipreq, state) do
     case process_incoming_request(state) do
-      { :ok, state } -> { :noreply, state }
+      # Schedule timer F (max NIST transaction)
+      { :ok, state } -> { :noreply, SIP.Trans.Timer.schedule_timer_F(state) }
+
+      # In case of failure, timerK is scheduled by internal_reply()
       { :upperlayerfailure, state } -> { :noreply, state }
     end
   end
 
-  # Transaction state machin function
+  @impl true
+  # Timer K - kill the transaction
+  def handle_info({ :timeout, _tref, :timerK } , state)  do
+    case handle_timer(:timerK, state) do
+      { :noreply, newstate } -> { :noreply, newstate }
+      { :stop, _reason, state} ->
+        GenServer.stop(self())
+        # Notify the tranport that this transaction is terminated
+        { :noreply, state }
+    end
+  end
+
+  # Timer F - timeout
+  def handle_info({ :timeout, _tref, :timerF } , state)  do
+    case internal_reply(state, state.sipmsg, 408, "Timeout", [], state.totag) do
+      { :ok, new_state } -> { :noreply, new_state }
+      { _err, new_state } -> { :noreply, new_state }
+    end
+  end
+
+  #Called
+  @impl true
+  def handle_call({ resp_code, reason, upd_fields, totag }, state) when is_integer(resp_code) do
+    { code, new_state } = internal_reply(state, state.sipmsg, code, reason, upd_fields, totag);
+    { :reply, code, new_state }
+  end
+  # Transaction state machine function
   defp fsm_reply(state, resp_code, rsp) when state.state in [ :trying, :proceeding ] do
 
     case SIP.Transac.Common.sendout_msg(state, rsp) do
@@ -88,8 +118,13 @@ defmodule SIP.NIST do
           rc when rc in 100..199 ->
             { :ok, Map.put(new_state, :state, :proceeding) }
 
-            rc when rc in 200..699 ->
-            new_state = schedule_timer_K(new_state, 5000) |> Map.put(:state, :complete)
+          rc when rc in 200..699 ->
+            # Final answer
+            # Cancel timer F, arm timer K
+            # set transaction state to terminated
+            new_state = schedule_timer_K(new_state, 5000)
+                        |> schedule_generic_timer(:timerF, :timerf, nil)
+                        |> Map.put(:state, :terminated)
             { :ok, new_state }
         end
 
@@ -106,7 +141,7 @@ defmodule SIP.NIST do
 
   end
 
-  defp fsm_reply(state, _resp_code, rsp) when state.state == :complete do
+  defp fsm_reply(state, _resp_code, rsp) when state.state == :terminated do
     Logger.info([ transid: rsp.transid, module: __MODULE__,
                   message: "Final response to #{state.msg.method} already sent"])
     { :ignore, state }
