@@ -99,12 +99,6 @@ defmodule SIP.NIST do
     end
   end
 
-  #Implementation of reply transaction interface
-  @impl true
-  def handle_call({ resp_code, reason, upd_fields, totag }, state) when is_integer(resp_code) do
-    { code, new_state } = internal_reply(state, state.sipmsg, resp_code, reason, upd_fields, totag);
-    { :reply, code, new_state }
-  end
 
   # Transaction state machine function
   defp fsm_reply(state, resp_code, rsp) when state.state in [ :trying, :proceeding ] do
@@ -148,29 +142,17 @@ defmodule SIP.NIST do
     { :ignore, state }
   end
 
-
+  #Implementation of reply transaction interface
   @impl true
-  def handle_call( { resp_code, reason, upd_fields, totag }, _from, state ) when is_integer(resp_code) do
-    try do
-      rsp = SIP.Msg.Ops.reply_to_request(state.msg, resp_code, reason, upd_fields, totag)
-      { code, newstate } = fsm_reply(state, resp_code, rsp)
-      { :reply, code, newstate }
-
-    rescue
-      e in RuntimerError ->
-        Logger.error([ transid: state.msg.transid, module: __MODULE__,
-                        message: "Failed to build #{resp_code} response"])
-        Logger.error([ transid: state.msg.transid, module: __MODULE__,
-                        message: e.message])
-        { :reply, :missingparams, state }
-    end
-
+  def handle_call({ resp_code, reason, upd_fields, totag }, _from, state) when is_integer(resp_code) do
+    { code, new_state } = internal_reply(state, state.sipmsg, resp_code, reason, upd_fields, totag);
+    { :reply, code, new_state }
   end
 
- @impl true
- def handle_call(:ack, _from, state) do
-  Logger.warning([ transid: state.msg.transid, module: __MODULE__,
-                   message: "Sending ACK is not supported for a server transaction"])
-  { :reply, :unsupported, state }
- end
+  @impl true
+  def handle_call(:ack, _from, state) do
+    Logger.warning([ transid: state.msg.transid, module: __MODULE__,
+                    message: "Sending ACK is not supported for a server transaction"])
+    { :reply, :unsupported, state }
+  end
 end

@@ -179,7 +179,8 @@ defmodule SIP.Dialog do
         case req.method do
           :INVITE ->
             # todo, add a timeout global parameter
-            start_dialog(req2, 1800, :inbound, debug)
+            { code, data} = start_dialog(req2, 1800, :inbound, debug)
+            { code, data}
 
           :OPTIONS ->
             start_dialog(req2, 60, :inbound, false)

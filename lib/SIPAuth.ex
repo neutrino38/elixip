@@ -26,11 +26,11 @@ defmodule SIP.Auth do
     :crypto.hash(algoid, "#{ha1}:#{nonce}:#{ha2}") |> Base.encode16(case: :lower)
   end
 
-  @spec build_auth_response( String.t(), String.t(), String.t(), String.t(), String.t(), atom(), atom(), String.t()) :: map()
+  @spec build_auth_response( String.t(), String.t(), String.t(), String.t(), String.t(), atom(), atom(), String.t() | SIP.Uristruct) :: map()
   @doc "Build challenge on nonce and realm"
   def build_auth_response( algorithm, username, nonce, realm, passwd_or_hash, pwdformat, method, uri) do
     response = case pwdformat do
-      :plain -> compute_auth_response_from_pwd(algorithm, username, nonce, realm, passwd_or_hash, Atom.to_string(method), uri)
+      :plain -> compute_auth_response_from_pwd(algorithm, username, nonce, realm, passwd_or_hash, method, uri)
       :ha1 -> compute_auth_response_from_ha1(algorithm,  nonce, passwd_or_hash, Atom.to_string(method), uri)
       _ -> raise "Unsupported password format #{pwdformat}"
     end
