@@ -17,7 +17,10 @@ defmodule SIP.Dialog do
     state: :inital,
     debuglog: true, # If we should output debug logs for this dialog
     expirationtimer: nil,
-    cseq: 1
+    cseq: 1,
+    fromtag: nil,
+    callid: nil,
+    totag: nil
   ]
 
 
@@ -52,16 +55,26 @@ defmodule SIP.Dialog do
 
 
   @impl true
-  def init({ req, direction, pid, timeout, debug }) do
+  def init({ req, direction, pid, timeout, debug, dialog_id }) do
+    { fromtag, callid, totag } = dialog_id
+    # Generate totag if needed
+    totag = if is_nil(totag), do: SIP.Msg.Ops.generate_from_or_to_tag(), else: totag
+
     if direction == :inbound do
       state = %SIP.Dialog{ msg: req, direction: direction, app: nil, expirationtimer: timeout, debuglog: debug,
-                   transactions: [ pid ] }
+                   transactions: [ pid ], fromtag: fromtag, callid: callid, totag: totag }
 
+      # Dispatch the initial request to the upper layer
+      case SIP.Session.ConfigRegistry.dispach(self(), req ) do
+        { :accept, app_id } -> { :ok, Map.put(state, :app, app_id ) }
 
-      { :ok, state }
+        # Session has not been created. Abort dialog
+        { :reject, code, reason } -> { :stop, { code, reason }}
+      end
+
     else
       state = %SIP.Dialog{ msg: req, direction: direction, app: pid, expirationtimer: timeout, debuglog: debug,
-                   transactions: [] }
+                   transactions: [], fromtag: fromtag, callid: callid, totag: totag }
 
       #In case of an outbound dialog, start a, UAC transaction
       case SIP.Transac.start_uac_transaction( req, timeout ) do
@@ -79,6 +92,19 @@ defmodule SIP.Dialog do
     else
       { :reply, :alreadybound, state }
     end
+  end
+
+  # Obtain the call ID of a given dialog
+  def handle_call(:getdialogid, _from, state) do
+    { :reply, { state.fromtag, state.callid, state.totag } }
+  end
+
+  # Invoked when dialog process receives sip message
+  # sent by calling process_incoming_request(). Typically
+  # from NIST or IST transaction processes
+  @impl true
+  def handle_cast({:sipmsg, req, transact_pid} ) do
+
   end
   # ---------------------- API ----------------------
   # Obtain the triplet that uniquely identify a dialog
@@ -119,22 +145,23 @@ defmodule SIP.Dialog do
     # Using the recusion and pattern matching
     { req2, dialog_id } = get_or_create_dialog_id(req)
     name = {:via, Registry, {Registry.SIPDialog, dialog_id, :cast }}
-    dialog_params = { req2, direction, self(), timeout, debug }
+    dialog_params = { req2, direction, self(), timeout, debug, dialog_id }
 
     case GenServer.start_link(SIP.Dialog, dialog_params, name: name ) do
       { :ok, dlg_pid } ->
         Logger.debug([ dialogid: "#{inspect(dialog_id)}" , message: "Created dialog with PID #{inspect(dlg_pid)}." ])
-
         # Bind the outbound dialog to the caller process which is
         # assumed to be the application
         if direction == :outbound do
           GenServer.call(dlg_pid, { :setapppid, self() })
         end
-        { :ok, dlg_pid }
 
-      { code, err } ->
-        Logger.error("Failed to create dialog transaction. Error: #{code}.")
-        { code, err }
+        dialog_id = GenServer.call(dlg_pid, :getdialogid)
+        { :ok, dlg_pid, dialog_id }
+
+      { :error, err } ->
+        Logger.error("Failed to create dialog Error: #{err}.")
+        { :error, err }
     end
   end
 
@@ -191,7 +218,7 @@ defmodule SIP.Dialog do
       # Note that lookup() should always return a single transaction here
       dialog_list when is_list(dialog_list) ->
         pid = hd(dialog_list)
-        GenServer.cast(pid, {:onsipmsg, req2, transact_pid})
+        GenServer.cast(pid, {:sipmsg, req2, transact_pid})
         { pid, req2 }
     end
   end
