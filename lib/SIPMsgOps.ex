@@ -244,9 +244,11 @@ defmodule SIP.Msg.Ops do
   @reply_filter [ :via, :to, :from, :route, "Max-Forward", :cseq, :callid, :contentlength ]
 
   @spec reply_to_request(
-          %{:method => any(), :to => binary(), optional(any()) => any()},
-          1..1_114_111,
-          any()
+          %{:method => atom(), :to => binary(), optional(any()) => any()},
+          integer(),
+          binary() | nil,
+          list(),
+          binary() | nil
         ) :: any()
   @doc "Build a SIP reply given a SIP request"
   def reply_to_request(req, resp_code, reason, upd_fields \\ [], totag \\ nil) when is_atom(req.method) and resp_code in 100..699 do
