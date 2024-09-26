@@ -341,4 +341,57 @@ User-Agent: Elixip 0.2.0
       3000 -> assert false # We did not received the 180 Ringing on time
     end
   end
+
+  test "Outbound register" do
+    { code, msg } = File.read("test/SIP-INVITE-LVP.txt")
+    assert code == :ok
+
+    { code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
+			IO.puts("\n" <> errmsg)
+			IO.puts("Offending line #{lineno}: #{line}")
+			IO.puts("Error code #{code}")
+			end)
+    assert code == :ok
+
+    # Add unittest param to RURI to trigger UDP mockeup transport
+    upd_uri = SIP.Uri.set_uri_param(parsed_msg.ruri, "unittest", "1")
+    parsed_msg = SIP.Msg.Ops.update_sip_msg( parsed_msg, { :ruri, upd_uri })
+
+    # Send REGISTER
+    { :ok, uac_t } = SIP.Transac.start_uac_transaction(parsed_msg, 30)
+
+    { _t_mod, t_pid } = GenServer.call(uac_t, :gettransport)
+    SIP.Test.Transport.UDPMockup.simulate_challenge(t_pid)
+
+    receive do
+      {:response, resp} ->
+        assert resp.response == 401
+        auth_req = SIP.Msg.Ops.add_authorization_to_req(
+          parsed_msg, resp.wwwauthenticate, :wwwauthenticate,
+          "manu", "buu", :plain)
+
+        # send authenticated register
+        { :ok, _uac_t } = SIP.Transac.start_uac_transaction(auth_req, 30)
+
+        # Simulate successful registration
+        SIP.Test.Transport.UDPMockup.simulate_successful_answer(t_pid)
+
+
+      bla ->
+        IO.puts("TEST: Received #{bla}")
+        assert false
+      after
+        500 -> assert false # We did not received the 401 Athentication required on time
+    end
+
+    receive do
+      {:response, resp} -> assert resp.response == 200
+
+      bla ->
+        IO.puts("TEST: Received #{bla}")
+        assert false
+      after
+        500 -> assert false # We did not received the 200 OK on time
+    end
+  end
 end

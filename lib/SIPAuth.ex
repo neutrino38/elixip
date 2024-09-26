@@ -36,13 +36,20 @@ defmodule SIP.Auth do
     end
 
     %{ "username" => username, "realm" => realm, "nonce" => nonce,"algorithm" => algorithm,
-       "response" => response }
+       "response" => response, :authproc => "Digest", "uri" => uri }
   end
 
   @nonce_size 16  # 16 bytes = 128 bits
 
   @doc "Generate a nonce for Digest auth procedure"
   def generate_nonce do
-    :crypto.strong_rand_bytes(@nonce_size) |> Base.encode64()
+    now = DateTime.utc_now(:second)
+    generate_nonce(now)
+  end
+
+  def generate_nonce(date) do
+    :crypto.hash(:sha256, "ElixSIP-#{date.day}:#{date.hour}:#{date.minute}")
+      |> binary_part(0, @nonce_size)
+      |> Base.encode16(case: :lower)
   end
 end

@@ -38,6 +38,9 @@ defmodule SIP.Test.Transport.UDPMockup do
     GenServer.cast(t_pid, {:simulate, :busy})
   end
 
+  def simulate_challenge(t_pid) do
+    GenServer.cast(t_pid, {:simulate, :challenge})
+  end
 
   defp handle_req(state, :INVITE, sipreq) do
     Map.put(state, :req, sipreq)
@@ -150,6 +153,7 @@ defmodule SIP.Test.Transport.UDPMockup do
       :successfulcall -> handle_cast({:simulate, 100, 200}, new_state)
       :busy -> handle_cast({:simulate, 100, 200}, new_state)
       :notregistered -> handle_cast({:simulate, 100, 200}, new_state)
+      :challenge -> handle_cast({:simulate, 401, 200}, new_state)
     end
   end
 
@@ -168,6 +172,15 @@ defmodule SIP.Test.Transport.UDPMockup do
     siprsp = reply_to_request(state.req, 200, "OK", [body: [ sdp_body ], contact: "<sip:90901@212.83.152.250:5090>" ], "as424e7930")
     Logger.debug([transid: state.req.transid, module: SIP.Test.Transport.UDPMockup,
                  message: "Simulating a 200 Ringing after #{after_ms} ms."])
+
+    Process.send_after(self(), { :recv, siprsp }, after_ms)
+    { :noreply,  state}
+  end
+
+  def handle_cast( { :simulate, resp , after_ms }, state) when resp in [ 401, 407 ] do
+    siprsp = SIP.Msg.Ops.challenge_request(state.req, resp, "Digest", "elioz.net", "SHA256", [], "as424e7930" )
+    Logger.debug([transid: state.req.transid, module: SIP.Test.Transport.UDPMockup,
+                 message: "Simulating a #{resp} Digest challenge after #{after_ms} ms."])
 
     Process.send_after(self(), { :recv, siprsp }, after_ms)
     { :noreply,  state}
