@@ -10,7 +10,7 @@ defmodule SIP.NICT do
   @impl true
   def init({ t_mod, t_pid, dest_ip, dest_port, sipmsg, app_pid, ring_timeout }) do
     # Add contact header
-    sipmsg = SIP.Transport.add_contact_header(t_pid, sipmsg)
+    sipmsg = SIP.Transport.add_contact_header(t_mod, t_pid, sipmsg)
 
     # Create GenServer state
     initial_state = %SIP.Transac{ msg: sipmsg, tmod: t_mod, tpid: t_pid, app: app_pid, timeout: ring_timeout,

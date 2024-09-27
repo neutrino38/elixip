@@ -343,7 +343,7 @@ User-Agent: Elixip 0.2.0
   end
 
   test "Outbound register" do
-    { code, msg } = File.read("test/SIP-INVITE-LVP.txt")
+    { code, msg } = File.read("test/SIP-REGISTER-LVP.txt")
     assert code == :ok
 
     { code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
@@ -374,7 +374,7 @@ User-Agent: Elixip 0.2.0
         { :ok, _uac_t } = SIP.Transac.start_uac_transaction(auth_req, 30)
 
         # Simulate successful registration
-        SIP.Test.Transport.UDPMockup.simulate_successful_answer(t_pid)
+        SIP.Test.Transport.UDPMockup.simulate_successful_register(t_pid)
 
 
       bla ->

@@ -23,19 +23,6 @@ defmodule SIP.Dialog do
     totag: nil
   ]
 
-
-  defmodule Listener do
-    use Agent
-
-    defstruct [
-      app: nil,
-      callhandlingmodule: nil,
-      onnewregistration: nil,
-    ]
-    def start() do
-
-    end
-  end
   @spec start() :: :error | :ok
   @doc "Start the dialog layer"
   def start() do
@@ -51,6 +38,9 @@ defmodule SIP.Dialog do
     end
   end
 
+  defp on_new_transaction(state, req, transact_id) do
+    { :ok, Map.put(state, :transactions, List.insert_at(state.transactions, -1, transact_id)) }
+  end
   # -------- GenServer callbacks --------------------
 
 
@@ -103,8 +93,21 @@ defmodule SIP.Dialog do
   # sent by calling process_incoming_request(). Typically
   # from NIST or IST transaction processes
   @impl true
-  def handle_cast({:sipmsg, req, transact_pid} ) do
+  def handle_cast({:sipmsg, req, transact_pid}, state ) do
+    if is_atom(req.method) do
+      state = case on_new_transaction(state, req, transact_pid) do
+        { :ok, state } ->
+          send(state.app, { req.method, req, transact_pid })
+          state
 
+        _ ->
+          SIP.Transac.reply(transact_pid, 503, "Service Denied", nil, state.totag)
+      end
+      { :noreply, state }
+    else
+      send(state.app, { req.resp_code, req, transact_pid })
+      { :noreply, state }
+    end
   end
   # ---------------------- API ----------------------
   # Obtain the triplet that uniquely identify a dialog

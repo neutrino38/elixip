@@ -294,6 +294,7 @@ defmodule SIP.Transac do
     end
   end
 
+  @spec sendout_msg(map(), map()) :: {:invalid_sip_msg, map()}
   def sendout_msg(state, sipmsg) when is_map(state) and is_atom(sipmsg.method) do
     try do
       msgstr = SIPMsg.serialize(sipmsg)
