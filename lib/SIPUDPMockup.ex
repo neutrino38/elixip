@@ -1,6 +1,6 @@
 defmodule SIP.Test.Transport.UDPMockup do
   @moduledoc """
-  Mockup for transport module
+  Mockup for transport module for unit testing
   """
   alias SIP.NetUtils
   use GenServer
@@ -42,7 +42,15 @@ defmodule SIP.Test.Transport.UDPMockup do
     GenServer.cast(t_pid, {:simulate, :challenge})
   end
 
+
+  def simulate_successful_register(t_pid) do
+    GenServer.cast(t_pid, {:simulate, :successfulregister})
+  end
   defp handle_req(state, :INVITE, sipreq) do
+    Map.put(state, :req, sipreq)
+  end
+
+  defp handle_req(state, :REGISTER, sipreq) do
     Map.put(state, :req, sipreq)
   end
 
@@ -151,6 +159,7 @@ defmodule SIP.Test.Transport.UDPMockup do
     new_state = Map.put(state, :scenario, scenario)
     case scenario do
       :successfulcall -> handle_cast({:simulate, 100, 200}, new_state)
+      :successfulregister -> handle_cast({:simulate, 200, 200}, new_state)
       :busy -> handle_cast({:simulate, 100, 200}, new_state)
       :notregistered -> handle_cast({:simulate, 100, 200}, new_state)
       :challenge -> handle_cast({:simulate, 401, 200}, new_state)
@@ -167,16 +176,24 @@ defmodule SIP.Test.Transport.UDPMockup do
     { :noreply,  state}
   end
 
+  @spec handle_cast({:simulate, 200, non_neg_integer()}, map()) :: { :noreply, map() }
   def handle_cast( { :simulate, 200, after_ms }, state) do
-    sdp_body = %{ contenttype: "application/sdp", data: "blablabla\r\n" }
-    siprsp = reply_to_request(state.req, 200, "OK", [body: [ sdp_body ], contact: "<sip:90901@212.83.152.250:5090>" ], "as424e7930")
+    siprsp = if state.req.method == :INVITE do
+      #invite case
+      sdp_body = %{ contenttype: "application/sdp", data: "blablabla\r\n" }
+      reply_to_request(state.req, 200, "OK", [body: [ sdp_body ], contact: "<sip:90901@212.83.152.250:5090>" ], "as424e7930")
+    else
+      # register case
+      reply_to_request(state.req, 200, "OK", [ contact: state.req.contact ], "as424e7930")
+    end
     Logger.debug([transid: state.req.transid, module: SIP.Test.Transport.UDPMockup,
-                 message: "Simulating a 200 Ringing after #{after_ms} ms."])
+                 message: "Simulating a 200 OK after #{after_ms} ms."])
 
     Process.send_after(self(), { :recv, siprsp }, after_ms)
     { :noreply,  state}
   end
 
+  @spec handle_cast({:simulate, 401 | 407, non_neg_integer()}, map()) :: { :noreply, map() }
   def handle_cast( { :simulate, resp , after_ms }, state) when resp in [ 401, 407 ] do
     siprsp = SIP.Msg.Ops.challenge_request(state.req, resp, "Digest", "elioz.net", "SHA256", [], "as424e7930" )
     Logger.debug([transid: state.req.transid, module: SIP.Test.Transport.UDPMockup,
