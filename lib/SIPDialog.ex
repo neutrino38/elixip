@@ -56,7 +56,10 @@ defmodule SIP.Dialog do
 
       # Dispatch the initial request to the upper layer
       case SIP.Session.ConfigRegistry.dispach(self(), req ) do
-        { :accept, app_id } -> { :ok, Map.put(state, :app, app_id ) }
+        { :accept, app_id } ->
+          # Send the messante a
+          send( app_id, { req.method, req })
+          { :ok, Map.put(state, :app, app_id ) }
 
         # Session has not been created. Abort dialog
         { :reject, code, reason } -> { :stop, { code, reason }}
@@ -89,15 +92,21 @@ defmodule SIP.Dialog do
     { :reply, { state.fromtag, state.callid, state.totag } }
   end
 
-  # Invoked when dialog process receives sip message
+  # Reply to an in_dialog request
+  def handle_call({:replyreq, req, resp_code, reason, upd_field}, _from, state) do
+    SIP.Transac.reply_req(req, resp_code, reason, upd_field, state.totag, state.transactions)
+  end
+
+  # Invoked when dialog process receives sip request
   # sent by calling process_incoming_request(). Typically
-  # from NIST or IST transaction processes
+  # from NIST or IST transaction processes. Also get
+  #
   @impl true
   def handle_cast({:sipmsg, req, transact_pid}, state ) do
     if is_atom(req.method) do
       state = case on_new_transaction(state, req, transact_pid) do
         { :ok, state } ->
-          send(state.app, { req.method, req, transact_pid })
+          send(state.app, { req.method, req })
           state
 
         _ ->
@@ -105,11 +114,11 @@ defmodule SIP.Dialog do
       end
       { :noreply, state }
     else
-      send(state.app, { req.resp_code, req, transact_pid })
+      send(state.app, { req.resp_code, req })
       { :noreply, state }
     end
   end
-  # ---------------------- API ----------------------
+ # ---------------------- API ----------------------
   # Obtain the triplet that uniquely identify a dialog
   defp get_dialog_id(req) do
     { _code, fromtag } = SIP.Uri.get_uri_param(req.from, "tag")
@@ -174,7 +183,7 @@ defmodule SIP.Dialog do
 
 
   @spec process_incoming_request(map(), pid(), boolean()) :: {:error, any()} | {:ok, pid()} | :nomatchingdialog
-  def process_incoming_request(req, transact_pid, debug) when is_map(req) and is_atom(req.method) do
+  def process_incoming_request(req, transact_id, debug) when is_map(req) and is_atom(req.method) do
     { req2, dialog_id } = get_or_create_dialog_id(req)
     case Registry.lookup(Registry.Dialog, dialog_id) do
       # No such dialog - create it if the request
@@ -205,25 +214,33 @@ defmodule SIP.Dialog do
             start_dialog(req2, to, :inbound, debug)
 
           :UPDATE ->
-            SIP.Transac.reply(transact_pid, 481, " Call/Transaction Does Not Exist")
+            SIP.Transac.reply(transact_id, 481, " Call/Transaction Does Not Exist")
             :no_matching_dialog
 
           :BYE ->
-            SIP.Transac.reply(transact_pid, 481, " Call/Transaction Does Not Exist")
+            SIP.Transac.reply(transact_id, 481, " Call/Transaction Does Not Exist")
             :no_matching_dialog
 
           _ ->
-            SIP.Transac.reply(transact_pid, 500, " Unsupported request")
+            SIP.Transac.reply(transact_id, 500, " Unsupported request")
             :no_matching_dialog
         end
 
-      # Found a matching transaction. Dispatch the SIP msg to it
+      # Found a matching dialog.Forward the SIP msg to it
       # We do not use dispatch because we have already looked up the transaction list
       # Note that lookup() should always return a single transaction here
-      dialog_list when is_list(dialog_list) ->
-        pid = hd(dialog_list)
-        GenServer.cast(pid, {:sipmsg, req2, transact_pid})
-        { pid, req2 }
+
+      [ { dialog_pid, _dialog_id } ] ->
+        GenServer.cast(dialog_pid, {:sipmsg, req2, transact_id})
+        { dialog_pid, req2 }
+
+      _ ->
+        raise "Inconsitent dialog list: serveral dialogs associated with #{ IO.inspect(dialog_id)}"
     end
+  end
+
+  @doc "Reply to an in dialog request"
+  def reply(dialog_id, req, resp_code, reason, upd_fields) do
+    GenServer.call(dialog_id, { :replyreq, req, resp_code, reason, upd_fields})
   end
 end

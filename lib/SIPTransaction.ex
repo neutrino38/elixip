@@ -28,7 +28,7 @@ defmodule SIP.Transac do
   @doc "Start the transaction layer"
   def start() do
     #Create the registry
-    case Registry.start_link(keys: :unique, name: Registry.SIPTransaction) do
+    case Registry.start_link(keys: :unique, name: Registry.SIP.Transac) do
       { :ok, pid } ->
         Logger.info("SIP transaction layer started with PID #{inspect(pid)}")
         :ok
@@ -57,7 +57,7 @@ defmodule SIP.Transac do
 
     # Start a new GenServer for each transaction and register it in Registry.SIPTransaction
     # The process created IS the transaction
-    name = {:via, Registry, {Registry.SIPTransaction, branch_id, :cast }}
+    name = {:via, Registry, {Registry.SIP.Transac, branch_id, :cast }}
     transact_params = { transport_module, transport_pid, destip, dest_port, sipmsg, self(), timeout }
     case GenServer.start_link(transact_module, transact_params, name: name ) do
       { :ok, trans_pid } ->
@@ -182,7 +182,7 @@ defmodule SIP.Transac do
 
     # Start a new GenServer for each transaction and register it in Registry.SIPTransaction
     transact_params = { t_mod, t_pid, remote_ip, remote_port, sipmsg, self() }
-    name = {:via, Registry, {Registry.SIPTransaction, branch_id, :cast }}
+    name = {:via, Registry, {Registry.SIP.Transac, branch_id, :cast }}
     case GenServer.start_link(SIP.IST, transact_params, name: name) do
       { :ok, trans_pid } ->
         Logger.debug([ transid: branch_id, message: "Created non-invite client transaction with PID #{trans_pid}." ])
@@ -206,7 +206,7 @@ defmodule SIP.Transac do
 
     # Start a new GenServer for each transaction and register it in Registry.SIPTransaction
     transact_params = { t_mod, t_pid, remote_ip, remote_port, sipmsg, upperlayer }
-    name = {:via, Registry, {Registry.SIPTransaction, branch_id, :cast }}
+    name = {:via, Registry, {Registry.SIP.Transac, branch_id, :cast }}
     case GenServer.start_link(SIP.NIST, transact_params, name: name) do
       { :ok, trans_pid } ->
         Logger.debug([ transid: branch_id, message: "Created non-invite client transaction with PID #{trans_pid}." ])
@@ -230,7 +230,7 @@ defmodule SIP.Transac do
 
     case SIPMsg.parse(sipmsgstr, trace_parse_err_fn) do
       { :ok, parsed_msg } ->
-        case Registry.lookup(Registry.SIPTransaction, parsed_msg.transid) do
+        case Registry.lookup(Registry.SIP.Transac, parsed_msg.transid) do
           # No such transction
           [] ->
             { :no_matching_transaction, parsed_msg }
@@ -257,9 +257,23 @@ defmodule SIP.Transac do
   end
 
   @doc "Send a response to an UAS transation"
-  def reply(uas_t, resp_code, reason, upd_fields \\ [], totag \\ nil) when is_integer(resp_code) do
+  def reply(uas_t, resp_code, reason, upd_fields \\ [], totag \\ nil) when is_pid(uas_t) and is_integer(resp_code) do
     GenServer.call(uas_t, { resp_code, reason, upd_fields, totag } )
   end
+
+  @doc "Transactionful reply to a request"
+  def reply_req(req , resp_code, reason, upd_fields, totag, tr_list_filter) when is_map(req) and is_integer(resp_code) do
+    Registry.dispatch(Registry.SIP.Transac, req.transid, fn entries ->
+      for {uas_t, _} <- entries do
+        if uas_t in tr_list_filter or tr_list_filter == nil do
+          reply(uas_t, resp_code, reason, upd_fields, totag)
+        else
+          :invalid_transaction
+        end
+      end
+    end)
+  end
+
 
   defmodule Common do
     @moduledoc """
