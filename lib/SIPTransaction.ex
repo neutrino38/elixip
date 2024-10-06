@@ -282,12 +282,13 @@ defmodule SIP.Transac do
     """
 
     @doc "Send a SIP message to the transport layer"
+    @spec sendout_msg(map(), binary()) :: {:invalid_sip_msg, map()}
     def sendout_msg(state, sipmsgstr) when is_map(state) and is_binary(sipmsgstr) do
       rez = GenServer.call(state.tpid,{ :sendmsg, sipmsgstr, state.destip, state.destport } )
       { rez, state }
     end
 
-    def sendout_msg(state, sipmsg) when is_map(state) and is_atom(sipmsg.method) do
+    def sendout_msg(state, sipmsg) when is_map(state) and is_map(sipmsg) do
       try do
         msgstr = SIPMsg.serialize(sipmsg)
         state = case sipmsg.method do
@@ -295,7 +296,6 @@ defmodule SIP.Transac do
           :CANCEL -> state
           false -> Map.put(state, :rspstr, msgstr)
           _ -> Map.put(state, :msgstr, msgstr)
-
         end
 
         sendout_msg(state, msgstr)
@@ -308,25 +308,4 @@ defmodule SIP.Transac do
     end
   end
 
-  @spec sendout_msg(map(), map()) :: {:invalid_sip_msg, map()}
-  def sendout_msg(state, sipmsg) when is_map(state) and is_atom(sipmsg.method) do
-    try do
-      msgstr = SIPMsg.serialize(sipmsg)
-
-      state = case sipmsg.method do
-        :ACK -> Map.put(state, :ack, msgstr)
-        :CANCEL -> state
-        false -> Map.put(state, :rspstr, msgstr)
-        _ -> Map.put(state, :msgstr, msgstr)
-
-      end
-
-      sendout_msg(state, msgstr)
-
-    rescue
-      e in RuntimeError ->
-        Logger.debug([ transid: sipmsg.transid, module: __MODULE__, message: e.message])
-        { :invalid_sip_msg, state }
-    end
-  end
 end
