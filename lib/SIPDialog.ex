@@ -8,7 +8,7 @@ defmodule SIP.Dialog do
 
   defstruct [
     msg: nil, # SIP message that created this dialog
-    supported: [],
+    allows: [],
     routeset: [],
     direction: :outbound, # outbound means that dialog was created by an outbound request.
     curtrans: nil,  # Current transaction
@@ -18,6 +18,7 @@ defmodule SIP.Dialog do
     debuglog: true, # If we should output debug logs for this dialog
     expirationtimer: nil,
     cseq: 1,
+    cseqin: 1,
     fromtag: nil,
     callid: nil,
     totag: nil
@@ -38,45 +39,99 @@ defmodule SIP.Dialog do
     end
   end
 
-  defp on_new_transaction(state, req, transact_id) do
-    { :ok, Map.put(state, :transactions, List.insert_at(state.transactions, -1, transact_id)) }
+  defp on_new_transaction(state, _req, transact_id) do
+    if Enum.count(state.transactions) < 4 do
+      { :ok, Map.put(state, :transactions, List.insert_at(state.transactions, -1, transact_id)) }
+    else
+      Logger.error("Too many transactions open for this dialog #{inspect(self())}")
+      SIP.Transac.reply(transact_id, 503, "Service Denied", nil, state.totag)
+      { :toomanytransactions, state }
+    end
+  end
+
+
+  defp allows(:REGISTER) do
+    [ :REGISTER ]
+  end
+
+  defp allows(:INVITE) do
+    [ :BYE, :UPDATE, :ACK, :MESSAGE, :INFO, :INVITE, :REFER ]
+  end
+
+  defp allows(:OPTIONS) do
+    [ :OPTIONS ]
+  end
+
+  defp allows(prezreq) when prezreq in [ :PUBLISH, :SUBSCRIBE, :NOTIFY, :MESSAGE ] do
+    [ :PUBLISH, :SUBSCRIBE, :NOTIFY, :MESSAGE ]
+  end
+
+  defp set_fromtag(req, fromtag ) when is_atom(req.method) do
+    Map.put(req, :from, SIP.Uri.set_uri_param(req.from, "tag", fromtag))
+  end
+
+  defp set_totag(req, totag ) when is_atom(req.method) do
+    Map.put(req, :to, SIP.Uri.set_uri_param(req.to, "tag", totag))
+  end
+
+  # Apply fromtag, totag, callid and CSeq
+  # Todo : fix route, request URI ...
+  defp fix_outbound_request(state, req) when is_atom(req.method) do
+    newreq = Map.put(req, :cseq, [ state.cseq, req.method ])
+             |> Map.put( :callid, state.callid )
+             |> set_fromtag(state.fromtag)
+             |> set_totag(state.totag)
+
+    # Increment cseq for outbound and store modified request
+    msg =  if state.msg == nil, do: newreq, else: state.msg
+    newstate = %SIP.Dialog{ state | cseq: state.cseq + 1, msg: msg }
+    { newstate, newreq }
   end
   # -------- GenServer callbacks --------------------
 
 
   @impl true
-  def init({ req, direction, pid, timeout, debug, dialog_id }) do
+  @spec init({map(), :inbound, pid(), integer(), boolean(), pid()} ) :: { :ok, map() } | { :stop, any() } | atom() | { any,  any }
+  def init({ req, :inbound, pid, timeout, debug, dialog_id }) when is_atom(req.method) do
     { fromtag, callid, totag } = dialog_id
     # Generate totag if needed
     totag = if is_nil(totag), do: SIP.Msg.Ops.generate_from_or_to_tag(), else: totag
 
-    if direction == :inbound do
-      state = %SIP.Dialog{ msg: req, direction: direction, app: nil, expirationtimer: timeout, debuglog: debug,
-                   transactions: [ pid ], fromtag: fromtag, callid: callid, totag: totag }
+    state = %SIP.Dialog{ msg: req, direction: :inbound, app: nil, expirationtimer: timeout, debuglog: debug,
+                  transactions: [ pid ], fromtag: fromtag, callid: callid, totag: totag,
+                  allows: allows(req.method) }
 
-      # Dispatch the initial request to the upper layer
-      case SIP.Session.ConfigRegistry.dispach(self(), req ) do
-        { :accept, app_id } ->
-          # Send the messante a
-          send( app_id, { req.method, req })
-          { :ok, Map.put(state, :app, app_id ) }
+    # Dispatch the initial request to the upper layer
+    case SIP.Session.ConfigRegistry.dispach(self(), req ) do
+      { :accept, app_id } ->
+        # Send the message to
+        send( app_id, { req.method, req })
+        { :ok, Map.put(state, :app, app_id ) }
 
-        # Session has not been created. Abort dialog
-        { :reject, code, reason } -> { :stop, { code, reason }}
-      end
-
-    else
-      state = %SIP.Dialog{ msg: req, direction: direction, app: pid, expirationtimer: timeout, debuglog: debug,
-                   transactions: [], fromtag: fromtag, callid: callid, totag: totag }
-
-      #In case of an outbound dialog, start a, UAC transaction
-      case SIP.Transac.start_uac_transaction( req, timeout ) do
-        { :ok, transaction_pid } -> { :ok, %SIP.Dialog{ state | transactions: [ transaction_pid ] } }
-        { code, _extra } -> { :stop, code }
-      end
+      # Session has not been created. Abort dialog
+      { :reject, code, reason } -> { :stop, { code, reason }}
     end
   end
 
+  # Dialog started by an outbound request
+  @spec init({map(), :outbound, pid(), integer(), boolean(), pid()} ) :: { :ok, map() } | { :stop, any() } | atom()
+  def init({ req, :outbound, pid, timeout, debug, dialog_id }) when is_atom(req.method) do
+    { fromtag, callid, totag } = dialog_id
+    # Generate totag if needed
+    totag = if is_nil(totag), do: SIP.Msg.Ops.generate_from_or_to_tag(), else: totag
+
+    state = %SIP.Dialog{ msg: req, direction: :outbound, app: pid, expirationtimer: timeout, debuglog: debug,
+    transactions: [], fromtag: fromtag, callid: callid, totag: totag,
+    allows: allows(req.method) }
+
+    { state, req } = fix_outbound_request(state, req)
+
+    #In case of an outbound dialog, start a, UAC transaction
+    case SIP.Transac.start_uac_transaction( req, timeout ) do
+      { :ok, transaction_pid } -> { :ok, %SIP.Dialog{ state | transactions: [ transaction_pid ] } }
+      { code, _extra } -> { :stop, code }
+    end
+  end
 
   @impl true
   def handle_call({ :setapppid, app_pid }, _from, state) do
@@ -93,32 +148,87 @@ defmodule SIP.Dialog do
   end
 
   # Reply to an in_dialog request
+  def handle_call({:replyreq, req, resp_code, reason, realm}, _from, state) when resp_code in [ 401, 407 ] do
+    auth = %{ realm: realm, algorithm: "SHA256", authproc: "Digest "}
+    SIP.Transac.reply_req(req, resp_code, reason, auth, state.totag, state.transactions)
+  end
+
   def handle_call({:replyreq, req, resp_code, reason, upd_field}, _from, state) do
     SIP.Transac.reply_req(req, resp_code, reason, upd_field, state.totag, state.transactions)
   end
 
+  @doc "Handle call to send out a new in-dialog request"
+  def handle_call({ :newreq, req}, _from, state ) do
+    if req.method in state.allows do
+      if Enum.count(state.transactions) < 4 do
+        { state, req } = fix_outbound_request(state, req)
+
+        # Create an UAC transaction to send the request out
+        case SIP.Transac.start_uac_transaction( req, 15 ) do
+          { :ok, transaction_pid } ->
+            # Add the transaction in the transaction list
+            { :reply, :ok, %SIP.Dialog{ state |
+                               transactions: List.insert_at(state.transactions, -1, transaction_pid) }}
+
+          # Failed to send the message or create the transaction
+          { code, _extra } ->
+            { :reply, code, state }
+        end
+
+      else
+        # Cannot open too many transaction for dialog
+        { :reply, :toomanytransactons, state}
+      end
+    else
+      # Not allowed
+      { :reply, :methodnotallowed, state}
+    end
+  end
   # Invoked when dialog process receives sip request
   # sent by calling process_incoming_request(). Typically
   # from NIST or IST transaction processes. Also get
   #
   @impl true
-  def handle_cast({:sipmsg, req, transact_pid}, state ) do
-    if is_atom(req.method) do
-      state = case on_new_transaction(state, req, transact_pid) do
-        { :ok, state } ->
-          send(state.app, { req.method, req })
+  def handle_cast({:sipmsg, msg, transact_pid}, state ) when is_atom(msg.method) do
+    state = case on_new_transaction(state, msg, transact_pid) do
+      { :ok, state } ->
+        if msg.method in state.allows do
+          [ seqno, _cmethod ] = msg.cseq
+          if seqno > state.cseqin do
+            # Forward request to app layer
+            send(state.app, { msg.method, msg })
+            %SIP.Dialog{ state | cseqin: seqno }
+          else
+            SIP.Transac.reply(transact_pid, 500, "Out of order", nil, state.totag)
+            state
+          end
+        else
+          SIP.Transac.reply(transact_pid, 405, "Method not allowed", nil, state.totag)
           state
+        end
 
-        _ ->
-          SIP.Transac.reply(transact_pid, 503, "Service Denied", nil, state.totag)
-      end
-      { :noreply, state }
-    else
-      send(state.app, { req.resp_code, req })
-      { :noreply, state }
+
+      _ -> state
     end
+
+    { :noreply, state }
   end
- # ---------------------- API ----------------------
+
+  # For SIP response
+  def handle_cast({:sipmsg, msg, transact_pid}, state ) when msg.method == false do
+    if transact_pid in state.transactions do
+      send(state.app, { msg.resp_code, msg })
+    else
+      Logger.warning([
+        dialogid: "#{inspect(self())}",
+        message: "SIP response #{msg.resp_code} from a transaction #{inspect(transact_pid)} " <>
+                 "that is not attached to the dialog." ])
+    end
+    { :noreply, state }
+  end
+
+  # -- send a new request out --
+  # ---------------------- API ----------------------
   # Obtain the triplet that uniquely identify a dialog
   defp get_dialog_id(req) do
     { _code, fromtag } = SIP.Uri.get_uri_param(req.from, "tag")
@@ -131,7 +241,7 @@ defmodule SIP.Dialog do
   end
 
   # Create call ID and add it to the request
-  @spec get_or_create_dialog_id( map() ) :: map()
+  @spec get_or_create_dialog_id( map(), { binary(), nil, binary() } ) :: tuple()
   defp get_or_create_dialog_id( req, { fromtag, nil, totag }) do
     callid = SIP.Msg.Ops.generate_from_or_to_tag()
     req = Map.put(req, :callid, callid)
@@ -146,13 +256,14 @@ defmodule SIP.Dialog do
   end
 
   # At least from tag and callid are present, return them and end the recursion
+  @spec get_or_create_dialog_id( map(), { binary(), binary(), binary() } ) :: tuple()
   defp get_or_create_dialog_id( req, { fromtag, callid , totag } )  when is_binary(fromtag) and is_binary(callid) do
-    {req,  { fromtag, callid , totag } }
+    {req, { fromtag, callid , totag } }
   end
 
-  @spec start_dialog(map(), integer(), { :inbound | :outbound }, boolean() ) :: {:error, any()} | {:ok, pid()}
   @doc "Start a dialog"
-  def start_dialog(req, timeout, direction \\ :outbound, debug \\ false) when is_atom(req.method) do
+  @spec start_dialog(map(), integer(), { :inbound | :outbound }, boolean() ) :: {:error, any()} | {:ok, pid()}
+  def start_dialog(req, timeout, direction, debug) when is_integer(timeout) and is_atom(req.method) do
     # Obtain create the dialog id { fromtag, callid, totag } that identify the SIP dialog according to RFC 3261
     # Using the recusion and pattern matching
     { req2, dialog_id } = get_or_create_dialog_id(req)
@@ -161,13 +272,7 @@ defmodule SIP.Dialog do
 
     case GenServer.start_link(SIP.Dialog, dialog_params, name: name ) do
       { :ok, dlg_pid } ->
-        Logger.debug([ dialogid: "#{inspect(dialog_id)}" , message: "Created dialog with PID #{inspect(dlg_pid)}." ])
-        # Bind the outbound dialog to the caller process which is
-        # assumed to be the application
-        if direction == :outbound do
-          GenServer.call(dlg_pid, { :setapppid, self() })
-        end
-
+        Logger.debug([ dialogid: "#{inspect(dialog_id)}" , message: "Created dialog." ])
         dialog_id = GenServer.call(dlg_pid, :getdialogid)
         { :ok, dlg_pid, dialog_id }
 
@@ -177,12 +282,13 @@ defmodule SIP.Dialog do
     end
   end
 
+  @spec start_dialog_with_template(any(), any()) :: :ok
   def start_dialog_with_template(_req, _timeout, _direction \\ :outbound, _debug \\ false) do
     :ok
   end
 
 
-  @spec process_incoming_request(map(), pid(), boolean()) :: {:error, any()} | {:ok, pid()} | :nomatchingdialog
+  @spec process_incoming_request(map(), pid(), boolean()) :: {:error, any()} | {:ok, pid()} | atom() | { any, any }
   def process_incoming_request(req, transact_id, debug) when is_map(req) and is_atom(req.method) do
     { req2, dialog_id } = get_or_create_dialog_id(req)
     case Registry.lookup(Registry.Dialog, dialog_id) do
@@ -191,8 +297,7 @@ defmodule SIP.Dialog do
         case req.method do
           :INVITE ->
             # todo, add a timeout global parameter
-            { code, data} = start_dialog(req2, 1800, :inbound, debug)
-            { code, data}
+            start_dialog(req2, 1800, :inbound, debug)
 
           :OPTIONS ->
             start_dialog(req2, 60, :inbound, false)
@@ -207,6 +312,12 @@ defmodule SIP.Dialog do
           :PRACK ->
             # to add error log - ACK should be in dialog
             :nomatchingdialog
+
+          :REFER ->
+            SIP.Transac.reply(transact_id, 481, " Call/Transaction Does Not Exist")
+            :no_matching_dialog
+
+          :CANCEL -> :nomatchingdialog
 
           m when m in [ :PUBLISH, :REGISTER, :SUBSCRIBE ] ->
             #Todo compulte timeout from refresh contact period
@@ -240,7 +351,16 @@ defmodule SIP.Dialog do
   end
 
   @doc "Reply to an in dialog request"
-  def reply(dialog_id, req, resp_code, reason, upd_fields) do
+  def reply(dialog_id, req, resp_code, reason, upd_fields) when is_pid(dialog_id) and is_atom(req.method) do
     GenServer.call(dialog_id, { :replyreq, req, resp_code, reason, upd_fields})
+  end
+
+
+  def new_request(dialog_id, req) when is_pid(dialog_id) and is_atom(req.method) do
+    GenServer.call(dialog_id, { :newreq, req })
+  end
+
+  def challenge(dialog_id, req, resp_code, realm) when resp_code in [ 401, 407 ] do
+    reply(dialog_id, req, resp_code, nil, realm)
   end
 end

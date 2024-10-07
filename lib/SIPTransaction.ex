@@ -282,12 +282,13 @@ defmodule SIP.Transac do
     """
 
     @doc "Send a SIP message to the transport layer"
-    @spec sendout_msg(map(), binary()) :: {:invalid_sip_msg, map()}
+    @spec sendout_msg(map(), binary()) :: {:ok | :invalid_sip_msg | :transporterror, map()}
     def sendout_msg(state, sipmsgstr) when is_map(state) and is_binary(sipmsgstr) do
       rez = GenServer.call(state.tpid,{ :sendmsg, sipmsgstr, state.destip, state.destport } )
       { rez, state }
     end
 
+    @spec sendout_msg(map(), map()) :: {:ok | :invalid_sip_msg | :transporterror, map()}
     def sendout_msg(state, sipmsg) when is_map(state) and is_map(sipmsg) do
       try do
         msgstr = SIPMsg.serialize(sipmsg)

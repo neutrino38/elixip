@@ -7,7 +7,12 @@ defmodule SIP.NIST do
 
   # reply to request internally
   defp internal_reply(state, sipmsg, resp_code, reason, upd_fields, totag) do
-    resp = SIP.Msg.Ops.reply_to_request(sipmsg, resp_code, reason, upd_fields, totag)
+    resp = case resp_code do
+      rc when rc in [ 401, 407 ] ->
+        SIP.Msg.Ops.challenge_request(sipmsg, resp_code, upd_fields.authproc, upd_fields.realm, upd_fields.algorithm, [], totag)
+
+      _ -> SIP.Msg.Ops.reply_to_request(sipmsg, resp_code, reason, upd_fields, totag)
+    end
     case fsm_reply(state, resp_code, resp) do
       { :ok, new_state } when resp_code in 200..599 -> { :ok, schedule_timer_K(new_state, 5000) }
       { :ok, new_state } when resp_code in 100..199 -> { :ok, new_state }
