@@ -39,7 +39,7 @@ defmodule SIP.Transport.UDP do
       :ok -> { :reply, :ok, state }
       { :error, reason } ->
         Logger.debug("UDP: failed to send message. Error: #{reason}");
-        { :reply, :ok, state }
+        { :reply, :transporterror, state }
     end
   end
 
