@@ -123,7 +123,7 @@ defmodule SIP.Test.Transport.UDPMockup do
               { :reply, :ok, handle_req(state, method, sipmsg) }
 
           end
-        _ ->  { :reply, :invalidreq, state }
+        _ ->  { :reply, :transporterror, state }
       end
   end
 
