@@ -89,9 +89,13 @@ defmodule SIP.Dialog do
   end
   # -------- GenServer callbacks --------------------
 
-
   @impl true
-  @spec init({map(), :inbound, pid(), integer(), boolean(), pid()} ) :: { :ok, map() } | { :stop, any() } | atom() | { any,  any }
+  @spec init(
+         { map(), :inbound | :outbound, pid(), integer(), boolean(), {any(), any(), any()}}
+      ) ::
+
+      { :ok, map() } | {:stop, atom() | {any(), any()}}
+
   def init({ req, :inbound, pid, timeout, debug, dialog_id }) when is_atom(req.method) do
     { fromtag, callid, totag } = dialog_id
     # Generate totag if needed
@@ -102,10 +106,10 @@ defmodule SIP.Dialog do
                   allows: allows(req.method) }
 
     # Dispatch the initial request to the upper layer
-    case SIP.Session.ConfigRegistry.dispach(self(), req ) do
+    case SIP.Session.ConfigRegistry.dispatch(self(), req ) do
       { :accept, app_id } ->
-        # Send the message to
-        send( app_id, { req.method, req })
+        # Send the message to the newly created app layer
+        send( app_id, { req.method, req, pid, self() })
         { :ok, Map.put(state, :app, app_id ) }
 
       # Session has not been created. Abort dialog
@@ -114,7 +118,6 @@ defmodule SIP.Dialog do
   end
 
   # Dialog started by an outbound request
-  @spec init({map(), :outbound, pid(), integer(), boolean(), pid()} ) :: { :ok, map() } | { :stop, any() } | atom()
   def init({ req, :outbound, pid, timeout, debug, dialog_id }) when is_atom(req.method) do
     { fromtag, callid, totag } = dialog_id
     # Generate totag if needed
@@ -196,7 +199,7 @@ defmodule SIP.Dialog do
           [ seqno, _cmethod ] = msg.cseq
           if seqno > state.cseqin do
             # Forward request to app layer
-            send(state.app, { msg.method, msg })
+            send(state.app, { msg.method, msg, transact_pid, self() })
             %SIP.Dialog{ state | cseqin: seqno }
           else
             SIP.Transac.reply(transact_pid, 500, "Out of order", nil, state.totag)
@@ -217,7 +220,7 @@ defmodule SIP.Dialog do
   # For SIP response
   def handle_cast({:sipmsg, msg, transact_pid}, state ) when msg.method == false do
     if transact_pid in state.transactions do
-      send(state.app, { msg.resp_code, msg })
+      send(state.app, { msg.resp_code, msg, transact_pid, self() })
     else
       Logger.warning([
         dialogid: "#{inspect(self())}",
@@ -262,9 +265,10 @@ defmodule SIP.Dialog do
   end
 
   @doc "Start a dialog"
-  @spec start_dialog(map(), integer(), { :inbound | :outbound }, boolean() ) :: {:error, any()} | {:ok, pid()}
+  @spec start_dialog(map(), integer(), :inbound | :outbound, boolean() ) :: {:error, any()} | {:ok, pid() }
   def start_dialog(req, timeout, direction, debug) when is_integer(timeout) and is_atom(req.method) do
-    # Obtain create the dialog id { fromtag, callid, totag } that identify the SIP dialog according to RFC 3261
+
+    # Obtain or create the dialog id { fromtag, callid, totag } that identify the SIP dialog according to RFC 3261
     # Using the recusion and pattern matching
     { req2, dialog_id } = get_or_create_dialog_id(req)
     name = {:via, Registry, {Registry.SIPDialog, dialog_id, :cast }}
@@ -273,8 +277,8 @@ defmodule SIP.Dialog do
     case GenServer.start_link(SIP.Dialog, dialog_params, name: name ) do
       { :ok, dlg_pid } ->
         Logger.debug([ dialogid: "#{inspect(dialog_id)}" , message: "Created dialog." ])
-        dialog_id = GenServer.call(dlg_pid, :getdialogid)
-        { :ok, dlg_pid, dialog_id }
+        # dialog_id = GenServer.call(dlg_pid, :getdialogid)
+        { :ok, dlg_pid }
 
       { :error, err } ->
         Logger.error("Failed to create dialog Error: #{err}.")

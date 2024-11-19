@@ -1,26 +1,29 @@
 defmodule SIP.Session do
-  @doc """
+  @moduledoc """
   This module defines an Agent and several behaviors.
   The behaviors are to be implemented by SIP apps in order to process requests and create processes if need.
-  These behavors requires specialized callbacks that will be invoked when a dialog is created by a server transaction:
+  These behavors requires specialized callback that will be invoked when a dialog is created by a server transaction:
   eg. incoming calls, incoming registration (when implemebenting a registrar) or incoming presence / messaging
 
   Each of these callback function shall return a pid of an "application process" that will be bound to the dialog.
   This process will receive the various SIP requests and responses from the dialog layer. All the dirty details such
   as SIP retransmission, and refresh, etc will be handled by the dialog layer
 
-  It is assumed by the dialog layer that the app process is a GenServer responding to the following:
+  It is assumed by the dialog layer that the app process is processing requests as follow:
 
-  handle_call( { <method>, <req message>, <transaction_pid> }, <dialog_pid> ) to handle incoming SIP requests
-  and it should
+  receive do
+   { <method>, <req message>, <transaction_pid>, <dialog_pid> } ->
 
   e.g.
 
-  handle_call( { :BYE, <req message>, <transaction_pid> }, <dialog_pid> ) to handle incoming SIP requests
+  receive do
+    { :BYE, <req message>, <transaction_pid>, <dialog_pid> } ->
 
   For SIP responses
 
-  handle_cast( { <resp code>, <res message>, <transaction_pid> }, <dialog_pid> ) to handle SIP responses
+  receive do
+    { <resp code>, <resp message>, <transaction_pid>, <dialog_pid> } ->
+
   """
   defmodule ConfigRegistry do
     defstruct [
@@ -46,6 +49,7 @@ defmodule SIP.Session do
       Agent.start( fn -> %ConfigRegistry{} end, name: __MODULE__ )
     end
 
+    @spec set_call_processing_module(module()) :: :ok
     @doc """
     Specify which call processing module will be used by the Dialog Layer
     module: the Elixir module implementing the call behavior
@@ -56,7 +60,7 @@ defmodule SIP.Session do
       end)
     end
 
-    @spec set_registration_processing_module(any()) :: :ok
+    @spec set_registration_processing_module(module()) :: :ok
     @doc """
     Specify which registration processing will be used by the Dialog Layer
     module: the Elixir module implementing the call behavior
@@ -122,10 +126,13 @@ defmodule SIP.Session do
     end
 
     defp internal_dispatch( proc_atom, fun_atom, args, errormsg ) when is_atom(fun_atom) and is_list(args) do
+      # Get the module that is configured to process the request
       call_mod = ConfigRegistry.get(proc_atom)
       if call_mod == nil do
+        # If no module is found, reject the request
         { :reject, 500,  errormsg }
       else
+        # If a module is configured, call the callback in this module
         apply(call_mod, fun_atom, args)
       end
     end
@@ -134,19 +141,19 @@ defmodule SIP.Session do
      Call this to dispatch the on_new_end callback of the call processing
     module
     """
-    def dispach( dialog_id, req ) when is_map(req) and req.method == :INVITE do
+    def dispatch( dialog_id, req ) when is_map(req) and req.method == :INVITE do
       internal_dispatch(
         :callprocessing, :on_new_call,
         [ dialog_id, req ], "No call server defined")
     end
 
-    def dispach( dialog_id, req ) when is_map(req) and req.method == :REGISTER do
+    def dispatch( dialog_id, req ) when is_map(req) and req.method == :REGISTER do
       internal_dispatch(
         :registration, :on_new_registration,
         [ dialog_id, req ], "No registration server defined")
     end
 
-    def dispach( :on_call_end, dialog_id, app_id ) when is_pid(app_id) do
+    def dispatch( :on_call_end, dialog_id, app_id ) when is_pid(app_id) do
       internal_dispatch(
         :callprocessing, :on_call_end,
         [ dialog_id, app_id], "No call server defined")
@@ -165,11 +172,15 @@ defmodule SIP.Session do
   end
 
   defmodule Registrar do
+    defmacro __using__(_opts) do
+    end
+
+    # Calllback defined for a registrar server. They are called
     @callback on_new_registration(dialog_id :: pid, registerreq :: map) :: { :accept, pid } | { :reject, integer, binary }
     @callback on_registration_expired(dialog_id :: pid, app_pid :: pid) :: nil
 
     @spec client_register(integer(), boolean()) :: { :ok, pid } | { :failure, binary }
-    def client_register(expire \\ 600, debug \\ false) do
+    def client_register(expire, debug) do
       register = %{
         method: :REGISTER,
         from: SIP.Session.ConfigRegistry.from(),
