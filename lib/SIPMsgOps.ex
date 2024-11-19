@@ -4,14 +4,17 @@ defmodule SIP.Msg.Ops do
   require SIP.Auth
 
   defp build_via_addr( local_ip , 5060, "UDP" ) do
+    local_ip = if is_tuple(local_ip), do: SIP.NetUtils.ip2string(local_ip), else: local_ip
     "SIP/2.0/UDP " <> local_ip
   end
 
   defp build_via_addr( local_ip , 5060, "TCP" ) do
+    local_ip = if is_tuple(local_ip), do: SIP.NetUtils.ip2string(local_ip), else: local_ip
     "SIP/2.0/TCP " <> local_ip
   end
 
   defp build_via_addr( local_ip , 5061, "TLS" ) do
+    local_ip = if is_tuple(local_ip), do: SIP.NetUtils.ip2string(local_ip), else: local_ip
     "SIP/2.0/TLS " <> local_ip
   end
 
@@ -25,6 +28,7 @@ defmodule SIP.Msg.Ops do
       raise "Invalid transport #{transport} for via header"
     end
 
+    local_ip = if is_tuple(local_ip), do: SIP.NetUtils.ip2string(local_ip), else: local_ip
     "SIP/2.0/" <> String.capitalize(transport) <> " " <> local_ip <> ":" <> Integer.to_string(local_port)
   end
 

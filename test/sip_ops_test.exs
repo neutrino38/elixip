@@ -18,6 +18,11 @@ defmodule SIP.Test.SIP.Msg.Ops do
     { :ok, [ sipreq: parsed_msg ]}
   end
 
+  test "Add a via header", context do
+    _newsipmsg = SIP.Msg.Ops.add_via(context.sipreq, { {192, 168, 1, 17}, 5062, "TLS"}, "7729919")
+    assert true
+  end
+
   test "Create a 100 trying resp", context do
 
     siprsp = SIP.Msg.Ops.reply_to_request(context.sipreq, 100, "Trying")
