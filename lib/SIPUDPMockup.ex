@@ -276,8 +276,9 @@ defmodule SIP.Test.Transport.UDPMockup do
   end
 
   def handle_info({ :recv, sipreq}, state) when sipreq.method == :REGISTER do
+    state = Map.put(state, :req, sipreq) |> Map.put(:scenario, :inboundregister)
     Logger.debug([transid: state.req.transid, module: SIP.Test.Transport.UDPMockup,
-    message: "Received SIP REGISTER in scenario #{state.scenario}"])
+                message: "Received SIP REGISTER in scenario #{state.scenario}"])
 
     # Simulate remote IP
     { :ok, ip } = NetUtils.parse_address("82.184.8.2")

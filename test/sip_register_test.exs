@@ -5,6 +5,7 @@ defmodule SIP.Test.Register do
 
   defmodule TestRegistrar do
     use SIP.Session.Registrar
+    require Logger
     @behaviour SIP.Session.Registrar
 
 
@@ -12,7 +13,9 @@ defmodule SIP.Test.Register do
       receive do
         { :REGISTER, reg, _trans_pid, dialog_pid } ->
           # If a register message is received, replay 200 OK
-          SIP.Dialog.reply(dialog_pid, reg, 200, "OK", nil)
+          Logger.info("REGISTRAR: replying to REGISTER")
+          SIP.Dialog.reply(dialog_pid, reg, 200, "OK", [])
+          Logger.info("REGISTRAR: processed an inbound REGISTER")
           # then increase the register counter
           registrar_process_loop(%{state | registered: state.registered + 1 })
 
@@ -24,10 +27,14 @@ defmodule SIP.Test.Register do
 
     @impl true
     def on_new_registration(dialog_id, _register) do
+      Logger.info("on_new_registration called in test")
       case Process.whereis(:test_registrar) do
         nil ->
           state = %{ registered: 0, dialogid: dialog_id }
           new_reg_pid = spawn_link(fn -> registrar_process_loop(state) end)
+          Logger.info("Created dummy registrar process #{inspect(new_reg_pid)}")
+          # Register the process
+          Process.register(new_reg_pid, :test_registrar)
           { :accept, new_reg_pid }
 
         registrar_pid when is_pid(registrar_pid) ->
@@ -54,7 +61,7 @@ defmodule SIP.Test.Register do
   defp assert_appears(procname, timeout) when timeout > 0 do
     case Process.whereis(procname) do
       nil ->
-        # Sleep + recution
+        # Sleep + recurtion
         Process.sleep(10)
         assert_appears(procname, timeout - 10)
 
@@ -91,10 +98,10 @@ defmodule SIP.Test.Register do
     { :ok, _t_mod, t_pid, _dest_ip, _port } = SIP.Transport.Selector.select_transport(upd_uri, false)
 
     # Simulate a received REGISTER by UDP mockeup transport
-    send(t_pid, parsed_msg)
+    send(t_pid, { :recv, parsed_msg})
 
     # Attendre l'apparition du processus test_registrar
-    registrar_pid = assert_appears(:test_registrar, 1000)
+    registrar_pid = assert_appears(:test_registrar, 2000)
 
     send(registrar_pid, { :stop, self() })
 

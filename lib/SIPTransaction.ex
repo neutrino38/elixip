@@ -209,7 +209,7 @@ defmodule SIP.Transac do
     name = {:via, Registry, {Registry.SIP.Transac, branch_id, :cast }}
     case GenServer.start_link(SIP.NIST, transact_params, name: name) do
       { :ok, trans_pid } ->
-        Logger.debug([ transid: branch_id, message: "Created non-invite client transaction with PID #{trans_pid}." ])
+        Logger.debug([ transid: branch_id, message: "Created non-invite client transaction with PID #{inspect(trans_pid)}." ])
         { :ok, trans_pid }
 
         { code, err } ->
@@ -263,15 +263,13 @@ defmodule SIP.Transac do
 
   @doc "Transactionful reply to a request"
   def reply_req(req , resp_code, reason, upd_fields, totag, tr_list_filter) when is_map(req) and is_integer(resp_code) do
-    Registry.dispatch(Registry.SIP.Transac, req.transid, fn entries ->
-      for {uas_t, _} <- entries do
-        if uas_t in tr_list_filter or tr_list_filter == nil do
-          reply(uas_t, resp_code, reason, upd_fields, totag)
-        else
-          :invalid_transaction
-        end
-      end
-    end)
+    [ {uas_t, _value} ] = Registry.lookup(Registry.SIP.Transac, req.transid)
+    if uas_t in tr_list_filter or tr_list_filter == nil do
+      retcode = reply(uas_t, resp_code, reason, upd_fields, totag)
+      { retcode, uas_t }
+    else
+      :invalid_transaction
+    end
   end
 
 

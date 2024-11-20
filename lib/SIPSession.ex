@@ -25,6 +25,8 @@ defmodule SIP.Session do
     { <resp code>, <resp message>, <transaction_pid>, <dialog_pid> } ->
 
   """
+  require Logger
+
   defmodule ConfigRegistry do
     defstruct [
       callprocessing: nil,
@@ -130,9 +132,11 @@ defmodule SIP.Session do
       call_mod = ConfigRegistry.get(proc_atom)
       if call_mod == nil do
         # If no module is found, reject the request
+        Logger.error("No processing module configured for #{proc_atom}.")
         { :reject, 500,  errormsg }
       else
         # If a module is configured, call the callback in this module
+        Logger.debug("Dispatched #{proc_atom} to  #{inspect(call_mod)}.#{fun_atom}().")
         apply(call_mod, fun_atom, args)
       end
     end

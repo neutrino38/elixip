@@ -108,12 +108,20 @@ defmodule SIP.Dialog do
     # Dispatch the initial request to the upper layer
     case SIP.Session.ConfigRegistry.dispatch(self(), req ) do
       { :accept, app_id } ->
+        Logger.debug([
+          dialogpid: "#{inspect(self())}", module: __MODULE__,
+          message: "Bound dialog to app process #{inspect(app_id)}" ])
+
         # Send the message to the newly created app layer
         send( app_id, { req.method, req, pid, self() })
         { :ok, Map.put(state, :app, app_id ) }
 
       # Session has not been created. Abort dialog
-      { :reject, code, reason } -> { :stop, { code, reason }}
+      { :reject, code, reason } ->
+        Logger.error([
+          dialogpid: "#{inspect(self())}", module: __MODULE__,
+          message: "Failed to create the app process. Err: #{code}. Aborting dialog creation." ])
+        { :stop, { code, reason }}
     end
   end
 
@@ -136,6 +144,10 @@ defmodule SIP.Dialog do
     end
   end
 
+  defp close_transaction(state, uas_t) do
+    %SIP.Dialog{ state | transactions: List.delete(state.transactions, uas_t)}
+  end
+
   @impl true
   def handle_call({ :setapppid, app_pid }, _from, state) do
     if state.direction == :inbound and state.app == nil do
@@ -147,17 +159,21 @@ defmodule SIP.Dialog do
 
   # Obtain the call ID of a given dialog
   def handle_call(:getdialogid, _from, state) do
-    { :reply, { state.fromtag, state.callid, state.totag } }
+    { :reply, { state.fromtag, state.callid, state.totag }, state }
   end
 
   # Reply to an in_dialog request
   def handle_call({:replyreq, req, resp_code, reason, realm}, _from, state) when resp_code in [ 401, 407 ] do
     auth = %{ realm: realm, algorithm: "SHA256", authproc: "Digest "}
-    SIP.Transac.reply_req(req, resp_code, reason, auth, state.totag, state.transactions)
+    { ret, uas_t } = SIP.Transac.reply_req(req, resp_code, reason, auth, state.totag, state.transactions)
+    state = close_transaction(state, uas_t)
+    { :reply, ret, state }
   end
 
   def handle_call({:replyreq, req, resp_code, reason, upd_field}, _from, state) do
-    SIP.Transac.reply_req(req, resp_code, reason, upd_field, state.totag, state.transactions)
+    { ret, uas_t } = SIP.Transac.reply_req(req, resp_code, reason, upd_field, state.totag, state.transactions)
+    state = if resp_code in [200..699], do: close_transaction(state, uas_t), else: state
+    { :reply, ret, state }
   end
 
   @doc "Handle call to send out a new in-dialog request"
@@ -223,7 +239,7 @@ defmodule SIP.Dialog do
       send(state.app, { msg.resp_code, msg, transact_pid, self() })
     else
       Logger.warning([
-        dialogid: "#{inspect(self())}",
+        dialogpid: "#{inspect(self())}",  module: __MODULE__,
         message: "SIP response #{msg.resp_code} from a transaction #{inspect(transact_pid)} " <>
                  "that is not attached to the dialog." ])
     end
@@ -264,6 +280,14 @@ defmodule SIP.Dialog do
     {req, { fromtag, callid , totag } }
   end
 
+  def dlgid2string({ ftag, cid, nil}) do
+    ftag <> "-" <> cid
+  end
+
+  def dlgid2string({ ftag, cid, totag}) do
+    ftag <> "-" <> cid <> "-" <> totag
+  end
+
   @doc "Start a dialog"
   @spec start_dialog(map(), integer(), :inbound | :outbound, boolean() ) :: {:error, any()} | {:ok, pid() }
   def start_dialog(req, timeout, direction, debug) when is_integer(timeout) and is_atom(req.method) do
@@ -274,15 +298,22 @@ defmodule SIP.Dialog do
     name = {:via, Registry, {Registry.SIPDialog, dialog_id, :cast }}
     dialog_params = { req2, direction, self(), timeout, debug, dialog_id }
 
-    case GenServer.start_link(SIP.Dialog, dialog_params, name: name ) do
+    case GenServer.start(SIP.Dialog, dialog_params, name: name ) do
       { :ok, dlg_pid } ->
-        Logger.debug([ dialogid: "#{inspect(dialog_id)}" , message: "Created dialog." ])
+        # Cause deadlock -- why ?
+        # The GenServer.call() times out and caused the caller process to terminate.
+        # As if the GenServer was not ready to process request at ths point
         # dialog_id = GenServer.call(dlg_pid, :getdialogid)
-        { :ok, dlg_pid }
+        Logger.info([ dialogpid: "#{inspect(dlg_pid)}", module: __MODULE__, message: "Created dialog." ])
+        { :ok, dlg_pid, dialog_id }
 
       { :error, err } ->
-        Logger.error("Failed to create dialog Error: #{err}.")
+        Logger.error([ module: __MODULE__, message: "Failed to create dialog Error: #{err}."])
         { :error, err }
+
+      _ ->
+        Logger.error([ module: __MODULE__, message: "Failed to create dialog."])
+        :error
     end
   end
 
@@ -295,7 +326,7 @@ defmodule SIP.Dialog do
   @spec process_incoming_request(map(), pid(), boolean()) :: {:error, any()} | {:ok, pid()} | atom() | { any, any }
   def process_incoming_request(req, transact_id, debug) when is_map(req) and is_atom(req.method) do
     { req2, dialog_id } = get_or_create_dialog_id(req)
-    case Registry.lookup(Registry.Dialog, dialog_id) do
+    case Registry.lookup(Registry.SIPDialog, dialog_id) do
       # No such dialog - create it if the request
       [] ->
         case req.method do

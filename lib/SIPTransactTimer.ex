@@ -29,11 +29,13 @@ defmodule SIP.Trans.Timer do
   if ms > 0, schedule timer
   """
   @spec schedule_generic_timer(state :: map() , timer_id :: atom() , timer_field :: atom(), ms :: integer() | nil ) :: map()
-  def schedule_generic_timer(state, timer_id, timer_field, ms) when is_atom(timer_id) do
+    def schedule_generic_timer(state, timer_id, timer_field, ms) when is_atom(timer_id) do
     # If needed cancel previous timer
     state = case Map.fetch(state, timer_field) do
       { :ok, nil } -> state
-      { :ok, timer_ref } -> :erlang.cancel_timer(timer_ref)
+      { :ok, timer_ref } ->
+        :erlang.cancel_timer(timer_ref)
+        Map.put(state, timer_field, nil)
       :error -> Map.put(state, timer_field, nil)
     end
 

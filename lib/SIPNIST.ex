@@ -5,14 +5,45 @@ defmodule SIP.NIST do
   require SIP.Msg.Ops
   require Logger
 
-  # reply to request internally
-  defp internal_reply(state, sipmsg, resp_code, reason, upd_fields, totag) do
-    resp = case resp_code do
-      rc when rc in [ 401, 407 ] ->
-        SIP.Msg.Ops.challenge_request(sipmsg, resp_code, upd_fields.authproc, upd_fields.realm, upd_fields.algorithm, [], totag)
+  defp fix_contact(state, upd_fields) do
+    # Get contact from transport
+    contact = SIP.Transport.build_contact_uri(state.tmod, state.tpid)
+    # Add it to update fields of the response
+    # Todo: merge contact by taking contact parameters from the upd fields
+    [ { :contact, contact } | upd_fields ]
+ end
 
-      _ -> SIP.Msg.Ops.reply_to_request(sipmsg, resp_code, reason, upd_fields, totag)
+  # reply to request internally - specific case when we need to challenge. upd_fields contains the auth parameters
+  defp internal_reply(state, sipmsg, resp_code, _reason, upd_fields, totag) when is_map(upd_fields) and resp_code in [ 401, 407 ] do
+    # Build the challenge response
+    resp = SIP.Msg.Ops.challenge_request(sipmsg, resp_code, upd_fields.authproc, upd_fields.realm, upd_fields.algorithm, [], totag)
+
+    # Send it to the transaction state machine
+    case fsm_reply(state, resp_code, resp) do
+      { :ok, new_state } when resp_code in 200..599 -> { :ok, schedule_timer_K(new_state, 5000) }
+      { :ok, new_state } when resp_code in 100..199 -> { :ok, new_state }
+      { code, state }  -> { code, schedule_timer_K(state, 5000) }
     end
+  end
+
+  # Other regular cases
+  defp internal_reply(state, sipmsg, resp_code, reason, upd_fields, totag) when is_list(upd_fields) do
+    # Fix contact if needed
+    upd_fields = case resp_code do
+      rc when rc in 200..299 ->
+        fix_contact(state, upd_fields)
+
+      # Todo, handle redirect here.
+      rc when rc in 300..399 -> upd_fields
+
+      # Other cases
+      _ -> upd_fields
+    end
+
+    # Build the SIP reponse
+    resp = SIP.Msg.Ops.reply_to_request(sipmsg, resp_code, reason, upd_fields, totag)
+
+    # Send it to the transaction state machine
     case fsm_reply(state, resp_code, resp) do
       { :ok, new_state } when resp_code in 200..599 -> { :ok, schedule_timer_K(new_state, 5000) }
       { :ok, new_state } when resp_code in 100..199 -> { :ok, new_state }
@@ -22,20 +53,23 @@ defmodule SIP.NIST do
 
   # Call upper layer request handling function and
   defp process_incoming_request(state, ul_fun) when is_function(ul_fun) do
-    case ul_fun.(state.sipmsg, self(), state.debug) do
+    # TODO add debug support
+    case ul_fun.(state.msg, self(), false) do
       # upper layer has started processing the request. Save the PID and the totag
       { :ok, ul_pid, { _ftag, _cid, totag } } -> { :ok, Map.put(state, :app, ul_pid) |> Map.put(:totag, totag) }
 
       # upper layer could not process the request and indicated a response code
       # close the transaction with this response code
       { :error, { code, reason, { _ftag, _cid, totag } }} ->
-        { _errcode, state } = internal_reply(state, state.sipmsg, code, reason, [], totag)
+        { _errcode, state } = internal_reply(state, state.msg, code, reason, [], totag)
         { :upperlayerfailure, state }
 
 
       # General error
-      _ ->
-        { _errcode, state } =  internal_reply(state, state.sipmsg, 403, "Denied", [], nil)
+      anything ->
+        Logger.error([ transid: state.msg.transid, module: __MODULE__,
+                     message: "Dialog layer failed to process SIP request. Err #{inspect(anything)}"])
+        { _errcode, state } =  internal_reply(state, state.msg, 403, "Denied", [], SIP.Msg.Ops.generate_from_or_to_tag())
         { :upperlayerfailure, state }
     end
   end
@@ -150,7 +184,7 @@ defmodule SIP.NIST do
   #Implementation of reply transaction interface
   @impl true
   def handle_call({ resp_code, reason, upd_fields, totag }, _from, state) when is_integer(resp_code) do
-    { code, new_state } = internal_reply(state, state.sipmsg, resp_code, reason, upd_fields, totag);
+    { code, new_state } = internal_reply(state, state.msg, resp_code, reason, upd_fields, totag);
     { :reply, code, new_state }
   end
 

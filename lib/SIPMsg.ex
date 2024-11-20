@@ -345,7 +345,7 @@ defmodule SIPMsg do
 	end
 
 	# Parse the transaction ID from topmost via
-	def parse_transaction_id({ :ok, msg }) do
+	def parse_transaction_id({ :ok, msg }, parse_error_callback) do
 		cond do
 			Map.has_key?(msg, :via) == false ->
 				# No via header
@@ -355,14 +355,26 @@ defmodule SIPMsg do
 				# Empty Via header
 				{ :ok, Map.put(msg, :transid, nil) }
 
-			Kernel.length(msg.via) >= 1 ->
+			length(msg.via) >= 1 ->
 				# Get topmost via and branch parameter
 				[ _transport, topmost_via ] = String.split(Enum.at(msg.via, 0), " ", parts: 2)
 
 				case SIP.Uri.get_uri_param("sip:" <> topmost_via, "branch") do
-					{ :ok, branch } -> { :ok, Map.put(msg, :transid, branch) }
-					{ :no_such_param, nil } -> { :ok, Map.put(msg, :transid, nil) }
-					{ _code, _parsed_via } -> { :invalid_tompost_via, msg }
+					{ :ok, branch } ->
+						if String.starts_with?(branch, "z9hG4bK") do
+              Map.put(msg, :transid, branch)
+            else
+							parse_error_callback.( :invalid_tompost_via, "Branch ID does not start with z9hG4bK",1, topmost_via)
+              { :invalid_tompost_via, msg }
+            end
+						{ :ok, Map.put(msg, :transid, branch) }
+					{ :no_such_param, nil } ->
+						parse_error_callback.( :invalid_tompost_via, "top most via does not have any vranch parameter", 1, topmost_via)
+						{  :ok, Map.put(msg, :transid, nil) }
+
+					{ _code, _parsed_via } ->
+						parse_error_callback.( :invalid_tompost_via, "Failed to parse topmost via to obtain branch ID", 1, topmost_via)
+						{ :invalid_tompost_via, msg }
 				end
 		end
 	end
@@ -530,11 +542,14 @@ defmodule SIPMsg do
 		{ code, _lines, parsed_msg } = start_header_parsing(headers, parse_error_callback)
 
 		if code == :ok do
-			{ code, parsed_msg_or_error	}
-				= do_final_checks(
-					compute_dialog_id(
-						parse_transaction_id(
-							{ code, parsed_msg } )))
+			{ code, parsed_msg_or_error	} = parse_transaction_id( { code, parsed_msg }, parse_error_callback )
+			   |> compute_dialog_id()
+				 |> do_final_checks()
+
+		#		= do_final_checks(
+		#			compute_dialog_id(
+		#				parse_transaction_id(
+		#					{ code, parsed_msg } )))
 
 			if code == :ok do
 				# Now parse message body and insert it into the map under de body key

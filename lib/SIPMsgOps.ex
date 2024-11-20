@@ -245,6 +245,32 @@ defmodule SIP.Msg.Ops do
     sipmsg
   end
 
+  def add_transaction_id(msg) do
+		cond do
+			Map.has_key?(msg, :via) == false ->
+				# No via header
+				{ :ok, Map.put(msg, :transid, nil) }
+
+			is_nil(msg.via) or msg.via == [] ->
+				# Empty Via header
+				{ :ok, Map.put(msg, :transid, nil) }
+
+			length(msg.via) >= 1 ->
+				# Get topmost via and branch parameter
+				[ _transport, topmost_via ] = String.split(Enum.at(msg.via, 0), " ", parts: 2)
+
+				case SIP.Uri.get_uri_param("sip:" <> topmost_via, "branch") do
+					{ :ok, branch } ->
+            if String.starts_with?(branch, "z9hG4bK") do
+              Map.put(msg, :transid, branch)
+            else
+              raise("Invalid SIP message. branch ID does not start with z9hG4bK")
+            end
+					{ :no_such_param, nil } -> raise("Invalid SIP message. No branch parameter in the topmost Via")
+					{ _code, _parsed_via } -> raise("Invalid SIP message. Failed to parse Via header")
+				end
+		end
+	end
   @reply_filter [ :via, :to, :from, :route, "Max-Forward", :cseq, :callid, :contentlength ]
 
   @spec reply_to_request(
@@ -297,7 +323,7 @@ defmodule SIP.Msg.Ops do
         upd_map
     end
 
-    rsp = req |> Map.filter(resp_filter) |> update_sip_msg(upd_map)
+    rsp = req |> Map.filter(resp_filter) |> update_sip_msg(upd_map) |> add_transaction_id()
 
     # Specific case for 200 OK and 183 Session Progress for invite
     if req.method == :INVITE and resp_code in [183, 200] do
