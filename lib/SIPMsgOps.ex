@@ -32,42 +32,20 @@ defmodule SIP.Msg.Ops do
     "SIP/2.0/" <> String.capitalize(transport) <> " " <> local_ip <> ":" <> Integer.to_string(local_port)
   end
 
-  defmacro is_req(msg) do
-    quote do
-      is_map(unquote(msg)) and is_atom(unquote(msg).method)
-    end
-  end
+  defguard is_req(msg) when is_map(msg) and is_atom(msg.method)
 
-  defmacro is_this_req(msg, method) do
-    quote do
-      is_map(unquote(msg)) and unquote(msg).method == unquote(method)
-    end
-  end
+  defguard is_this_req(msg, method) when is_req(msg) and msg.method == method
 
+  defguard is_resp(msg) when msg.method == false
 
-  defmacro is_1xx_resp(msg) do
-    quote do
-      unquote(msg).method == false and unquote(msg).response in 100..199
-    end
-  end
+  defguard is_1xx_resp(msg) when is_resp(msg) and msg.response in 100..199
 
-  defmacro is_2xx_resp(msg) do
-    quote do
-      unquote(msg).method == false and unquote(msg).response in 200..299
-    end
-  end
+  defguard is_2xx_resp(msg) when is_resp(msg) and msg.response in 200..299
 
-  defmacro is_3xx_resp(msg) do
-    quote do
-      unquote(msg).method == false and unquote(msg).response in 300..399
-    end
-  end
+  defguard is_3xx_resp(msg) when is_resp(msg) and msg.response in 300..399
 
-  defmacro is_failure_resp(msg) do
-    quote do
-      unquote(msg).method == false and unquote(msg).response in 400..699
-    end
-  end
+  defguard is_failure_resp(msg) when is_resp(msg) and msg.response in 400..699
+
 
 
   @doc "Add a tomost via"

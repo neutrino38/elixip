@@ -3,6 +3,7 @@ defmodule SIP.Dialog do
   require Logger
   require Registry
   require SIP.Uri
+  import SIP.Msg.Ops
   use GenServer
 
 
@@ -66,17 +67,17 @@ defmodule SIP.Dialog do
     [ :PUBLISH, :SUBSCRIBE, :NOTIFY, :MESSAGE ]
   end
 
-  defp set_fromtag(req, fromtag ) when is_atom(req.method) do
+  defp set_fromtag(req, fromtag ) when is_req(req) do
     Map.put(req, :from, SIP.Uri.set_uri_param(req.from, "tag", fromtag))
   end
 
-  defp set_totag(req, totag ) when is_atom(req.method) do
+  defp set_totag(req, totag ) when is_req(req) do
     Map.put(req, :to, SIP.Uri.set_uri_param(req.to, "tag", totag))
   end
 
   # Apply fromtag, totag, callid and CSeq
   # Todo : fix route, request URI ...
-  defp fix_outbound_request(state, req) when is_atom(req.method) do
+  defp fix_outbound_request(state, req) when is_req(req) do
     newreq = Map.put(req, :cseq, [ state.cseq, req.method ])
              |> Map.put( :callid, state.callid )
              |> set_fromtag(state.fromtag)
@@ -96,10 +97,10 @@ defmodule SIP.Dialog do
 
       { :ok, map() } | {:stop, atom() | {any(), any()}}
 
-  def init({ req, :inbound, pid, timeout, debug, dialog_id }) when is_atom(req.method) do
+  def init({ req, :inbound, pid, timeout, debug, dialog_id }) when is_req(req) do
     { fromtag, callid, totag } = dialog_id
     # Generate totag if needed
-    totag = if is_nil(totag), do: SIP.Msg.Ops.generate_from_or_to_tag(), else: totag
+    totag = if is_nil(totag), do: generate_from_or_to_tag(), else: totag
 
     state = %SIP.Dialog{ msg: req, direction: :inbound, app: nil, expirationtimer: timeout, debuglog: debug,
                   transactions: [ pid ], fromtag: fromtag, callid: callid, totag: totag,
@@ -126,10 +127,10 @@ defmodule SIP.Dialog do
   end
 
   # Dialog started by an outbound request
-  def init({ req, :outbound, pid, timeout, debug, dialog_id }) when is_atom(req.method) do
+  def init({ req, :outbound, pid, timeout, debug, dialog_id }) when is_req(req) do
     { fromtag, callid, totag } = dialog_id
     # Generate totag if needed
-    totag = if is_nil(totag), do: SIP.Msg.Ops.generate_from_or_to_tag(), else: totag
+    totag = if is_nil(totag), do: generate_from_or_to_tag(), else: totag
 
     state = %SIP.Dialog{ msg: req, direction: :outbound, app: pid, expirationtimer: timeout, debuglog: debug,
     transactions: [], fromtag: fromtag, callid: callid, totag: totag,
@@ -177,7 +178,7 @@ defmodule SIP.Dialog do
   end
 
   @doc "Handle call to send out a new in-dialog request"
-  def handle_call({ :newreq, req}, _from, state ) do
+  def handle_call({ :newreq, req}, _from, state ) when is_req(req) do
     if req.method in state.allows do
       if Enum.count(state.transactions) < 4 do
         { state, req } = fix_outbound_request(state, req)
@@ -208,7 +209,7 @@ defmodule SIP.Dialog do
   # from NIST or IST transaction processes. Also get
   #
   @impl true
-  def handle_cast({:sipmsg, msg, transact_pid}, state ) when is_atom(msg.method) do
+  def handle_cast({:sipmsg, msg, transact_pid}, state ) when is_req(msg) do
     state = case on_new_transaction(state, msg, transact_pid) do
       { :ok, state } ->
         if msg.method in state.allows do
@@ -234,7 +235,7 @@ defmodule SIP.Dialog do
   end
 
   # For SIP response
-  def handle_cast({:sipmsg, msg, transact_pid}, state ) when msg.method == false do
+  def handle_cast({:sipmsg, msg, transact_pid}, state ) when is_resp(msg) do
     if transact_pid in state.transactions do
       send(state.app, { msg.resp_code, msg, transact_pid, self() })
     else
@@ -262,14 +263,14 @@ defmodule SIP.Dialog do
   # Create call ID and add it to the request
   @spec get_or_create_dialog_id( map(), { binary(), nil, binary() } ) :: tuple()
   defp get_or_create_dialog_id( req, { fromtag, nil, totag }) do
-    callid = SIP.Msg.Ops.generate_from_or_to_tag()
+    callid = generate_from_or_to_tag()
     req = Map.put(req, :callid, callid)
     get_or_create_dialog_id( req, { fromtag, callid, totag } )
   end
 
   # Create from TAG and add it the from URI
   defp get_or_create_dialog_id( req, { nil, callid , totag }) do
-    fromtag = SIP.Msg.Ops.generate_from_or_to_tag()
+    fromtag = generate_from_or_to_tag()
     req = Map.put(req, :from, SIP.Uri.set_uri_param(req.from, "tag", fromtag))
     get_or_create_dialog_id( req, { fromtag, callid, totag } )
   end
@@ -289,7 +290,7 @@ defmodule SIP.Dialog do
   end
 
   @doc "Start a dialog"
-  @spec start_dialog(map(), integer(), :inbound | :outbound, boolean() ) :: {:error, any()} | {:ok, pid() }
+  @spec start_dialog(map(), integer(), :inbound | :outbound, boolean() ) :: {:error, any()} | {:ok, pid(), tuple() }
   def start_dialog(req, timeout, direction, debug) when is_integer(timeout) and is_atom(req.method) do
 
     # Obtain or create the dialog id { fromtag, callid, totag } that identify the SIP dialog according to RFC 3261
@@ -324,7 +325,7 @@ defmodule SIP.Dialog do
 
 
   @spec process_incoming_request(map(), pid(), boolean()) :: {:error, any()} | {:ok, pid()} | atom() | { any, any }
-  def process_incoming_request(req, transact_id, debug) when is_map(req) and is_atom(req.method) do
+  def process_incoming_request(req, transact_id, debug) when is_req(req) do
     { req2, dialog_id } = get_or_create_dialog_id(req)
     case Registry.lookup(Registry.SIPDialog, dialog_id) do
       # No such dialog - create it if the request
@@ -386,16 +387,16 @@ defmodule SIP.Dialog do
   end
 
   @doc "Reply to an in dialog request"
-  def reply(dialog_id, req, resp_code, reason, upd_fields) when is_pid(dialog_id) and is_atom(req.method) do
+  def reply(dialog_id, req, resp_code, reason, upd_fields) when is_pid(dialog_id) and is_req(req) do
     GenServer.call(dialog_id, { :replyreq, req, resp_code, reason, upd_fields})
   end
 
 
-  def new_request(dialog_id, req) when is_pid(dialog_id) and is_atom(req.method) do
-    GenServer.call(dialog_id, { :newreq, req })
+  def new_request(dialog_pid, req) when is_pid(dialog_pid) and is_req(req) do
+    GenServer.call(dialog_pid, { :newreq, req })
   end
 
-  def challenge(dialog_id, req, resp_code, realm) when resp_code in [ 401, 407 ] do
-    reply(dialog_id, req, resp_code, nil, realm)
+  def challenge(dialog_pid, req, resp_code, realm) when resp_code in [ 401, 407 ] and is_req(req) do
+    reply(dialog_pid, req, resp_code, nil, realm)
   end
 end

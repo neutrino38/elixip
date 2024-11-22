@@ -2,6 +2,7 @@ defmodule SIP.Test.Register do
   use ExUnit.Case
   require SIP.Dialog
   doctest SIP.Dialog
+  use SIP.Session.RegisterUAC
 
   defmodule TestRegistrar do
     use SIP.Session.Registrar
@@ -115,6 +116,36 @@ defmodule SIP.Test.Register do
       _ -> assert(false, "Some strange stuff was received")
 
       # Add Timeout
+    end
+  end
+
+  test "Context" do
+    sip_ctx = %SIP.Context{}
+    ctx_set :displayname, "Emmanuel BUU"
+    ctx_set :domain, "visioassistance.net"
+    ctx_set :username, "33924765453"
+
+    assert  ctx_get(:username) == "33924765453"
+    from = ctx_from()
+    assert from.displayname == "Emmanuel BUU"
+  end
+
+  test "Client Register" do
+    sip_ctx = %SIP.Context{
+      username: "33970262547",
+      authusername: "33970262547",
+      displayname: "Test User",
+      domain: "visioassistance.net"
+    }
+
+    ctx_set :passwd, "crtv2user1"
+
+    send_REGISTER 600
+
+    receive do
+      { resp_code, rsp, trans_pid, dialog_pid } ->
+        assert resp_code == 401
+
     end
   end
 end

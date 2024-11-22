@@ -1,27 +1,30 @@
 defmodule SIP.Auth do
 	@moduledoc "Utility to handle SIP authentication procedures"
 
-  @spec compute_auth_response_from_pwd(String.t(), String.t(), String.t(), String.t(), String.t(), atom(), String.t() | SIP.Uristruct) :: String.t()
-  def compute_auth_response_from_pwd(algorithm, username, nonce, realm, passwd, method, uri) do
-    uri = to_string(uri)
-    algoid = case algorithm do
+  defp algo2atom(algorithm) do
+    case algorithm do
       "MD5" -> :md5
       "SHA1" -> :sha1
       "SHA256" -> :sha256
       _ -> raise "Unsupported hash algorithm #{algorithm}"
     end
-    ha1 = :crypto.hash(algoid, "#{username}:#{realm}:#{passwd}") |> Base.encode16(case: :lower)
-    ha2 = :crypto.hash(algoid, "#{method}:#{uri}") |> Base.encode16(case: :lower)
-    :crypto.hash(algoid, "#{ha1}:#{nonce}:#{ha2}") |> Base.encode16(case: :lower)
+  end
+
+  def compute_ha1(algorithm, username, realm, passwd) do
+    algoid = if is_binary(algorithm), do: algo2atom(algorithm), else: algorithm
+    :crypto.hash(algoid, "#{username}:#{realm}:#{passwd}") |> Base.encode16(case: :lower)
+  end
+
+  @spec compute_auth_response_from_pwd(String.t(), String.t(), String.t(), String.t(), String.t(), atom(), String.t() | SIP.Uristruct) :: String.t()
+  def compute_auth_response_from_pwd(algorithm, username, nonce, realm, passwd, method, uri) do
+    algoid = algo2atom(algorithm)
+    ha1 = compute_ha1(algoid, username, realm, passwd)
+    compute_auth_response_from_ha1(algoid, nonce, ha1, method, uri )
   end
 
   def compute_auth_response_from_ha1(algorithm, nonce, ha1, method, uri) do
-    algoid = case algorithm do
-      "MD5" -> :md5
-      "SHA1" -> :sha1
-      "SHA256" -> :sha256
-      _ -> raise "Unsupported hash algorithm #{algorithm}"
-    end
+    algoid = if is_binary(algorithm), do: algo2atom(algorithm), else: algorithm
+    uri = to_string(uri)
     ha2 = :crypto.hash(algoid, "#{method}:#{uri}") |> Base.encode16(case: :lower)
     :crypto.hash(algoid, "#{ha1}:#{nonce}:#{ha2}") |> Base.encode16(case: :lower)
   end

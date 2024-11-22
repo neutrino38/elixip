@@ -33,17 +33,7 @@ defmodule SIP.Session do
       mainapppid: nil,
       registration: nil,
       presence: nil,
-
-      username: nil,
-      authusername: nil,
-      displayname: nil,
-      domain: nil,
-      ha1: nil,
-      ha1b: nil,
-
     ]
-
-    @props [ :username, :displayname, :authusername, :domain, :ha1, :ha1b ]
 
     use Agent
 
@@ -73,63 +63,9 @@ defmodule SIP.Session do
       end)
     end
 
-    @spec set(atom(), binary()) :: :nosuchproperty | :ok
-    @doc """
-    Set a property of the registy
-    """
-
-    def set(property, value) when is_atom(property) do
-      if property in @props do
-        Agent.update(
-          __MODULE__,
-          fn reg -> Map.put(reg, property, value) end)
-      else
-        :nosuchproperty
-      end
-    end
-
-    @spec get(atom()) :: any()
-    @doc """
-    Get a property from the registy
-    """
-
-    def get(property) when is_atom(property) do
-      Agent.get(__MODULE__, fn reg -> Map.get(reg, property) end)
-    end
-
-    def from() do
-      from_uri = %SIP.Uri{
-        displayname: get(:displayname),
-        userpart: get(:username),
-        domain: get(:domain),
-        params: %{ "tag" => SIP.Msg.Ops.generate_from_or_to_tag() }
-      }
-
-      if from_uri.userpart == nil or from_uri.domain == nil do
-        raise "username or domain has not been set"
-      else
-        from_uri
-      end
-    end
-
-
-    def to( userpart ) do
-      userpart = if userpart != nil, do: userpart, else: get(:username)
-      to_uri = %SIP.Uri{
-        userpart: userpart,
-        domain: get(:domain)
-      }
-
-      if to_uri.userpart == nil or to_uri.domain == nil do
-        raise "username or domain has not been set"
-      else
-        to_uri
-      end
-    end
-
     defp internal_dispatch( proc_atom, fun_atom, args, errormsg ) when is_atom(fun_atom) and is_list(args) do
       # Get the module that is configured to process the request
-      call_mod = ConfigRegistry.get(proc_atom)
+      call_mod = Agent.get(__MODULE__, fn reg -> Map.get(reg, proc_atom) end)
       if call_mod == nil do
         # If no module is found, reject the request
         Logger.error("No processing module configured for #{proc_atom}.")
@@ -175,6 +111,7 @@ defmodule SIP.Session do
     @callback on_call_end(dialog_id :: pid, app_pid :: pid) :: nil
   end
 
+
   defmodule Registrar do
     defmacro __using__(_opts) do
     end
@@ -183,19 +120,75 @@ defmodule SIP.Session do
     @callback on_new_registration(dialog_id :: pid, registerreq :: map) :: { :accept, pid } | { :reject, integer, binary }
     @callback on_registration_expired(dialog_id :: pid, app_pid :: pid) :: nil
 
-    @spec client_register(integer(), boolean()) :: { :ok, pid } | { :failure, binary }
-    def client_register(expire, debug) do
+  end
+
+  defmodule RegisterUAC do
+    defmacro __using__(_opts) do
+      quote do
+        use SIP.Context
+
+        defmacro send_REGISTER(expire) do
+          quote do
+            var!(sip_ctx) = SIP.Session.RegisterUAC.client_register(var!(sip_ctx), unquote(expire))
+          end
+        end
+
+        defmacro send_auth_REGISTER(resp_401, expire) do
+          quote do
+            var!(sip_ctx) = SIP.Session.RegisterUAC.auth_register(var!(sip_ctx), unquote(expire))
+          end
+        end
+      end
+    end
+
+    @doc"""
+      Send an outbound REGISTER and create the dialog if needed
+      Update the session sip_ctx accordingly
+      """
+    @spec client_register(%SIP.Context{}, integer()) :: %SIP.Context{}
+    def client_register(sip_ctx, expire) when is_integer(expire) do
       register = %{
         method: :REGISTER,
-        from: SIP.Session.ConfigRegistry.from(),
-        to: SIP.Session.ConfigRegistry.to(nil),
-        expire: expire,
+        from: SIP.Context.from(sip_ctx),
+        to: SIP.Context.to(sip_ctx, nil),
+        expire: expire, # TODO contact
         callid: nil
       }
 
-      case SIP.Dialog.start_dialog(register, expire, :outbound, debug) do
-        { :ok, dialog_id } -> { :ok, dialog_id }
-        { code, err } -> { code, err }
+      if not is_pid(sip_ctx.dialogpid) do
+        case SIP.Dialog.start_dialog(register, expire, :outbound, sip_ctx.debug) do
+          { :ok, dialog_pid, _dialog_id } ->
+            # Dialog created, update context and clear last error
+            SIP.Context.set(sip_ctx, :dialogpid, dialog_pid) |> SIP.Context.set(:lasterr, :ok)
+
+          { :error, err} ->
+            SIP.Context.set(sip_ctx, :lasterr, err)
+        end
+      else
+        # Send an in dialog REGISTER
+        rc = SIP.Dialog.new_request(sip_ctx.dialogpid, register)
+        SIP.Context.set(sip_ctx, :lasterr, rc)
+      end
+    end
+
+    @spec auth_register(%SIP.Context{},map(), integer()) :: %SIP.Context{}
+    def auth_register(sip_ctx, rsp, expire) when rsp.resp_code == 401 do
+      register = %{
+        method: :REGISTER,
+        from: SIP.Context.from(sip_ctx),
+        to: SIP.Context.to(sip_ctx, nil),
+        expire: expire, # TODO contact
+        callid: nil
+      }
+
+      authparams = Map.get(rsp, :wwwauthenticate)
+      if not is_nil(authparams) do
+        register = SIP.Msg.Ops.add_authorization_to_req(
+          register, authparams, :wwwauthenticate,
+          sip_ctx.authusername, sip_ctx.ha1, :ha1)
+        rez = SIP.Dialog.new_request(sip_ctx.dialogpid, register)
+        IO.puts(inspect(rez))
+        sip_ctx
       end
     end
   end

@@ -2,7 +2,7 @@ defmodule SIP.NIST do
   @moduledoc "SIP non-INVITE client transaction"
   use GenServer
   import SIP.Trans.Timer
-  require SIP.Msg.Ops
+  import SIP.Msg.Ops
   require Logger
 
   defp fix_contact(state, upd_fields) do
@@ -16,12 +16,13 @@ defmodule SIP.NIST do
   # reply to request internally - specific case when we need to challenge. upd_fields contains the auth parameters
   defp internal_reply(state, sipmsg, resp_code, _reason, upd_fields, totag) when is_map(upd_fields) and resp_code in [ 401, 407 ] do
     # Build the challenge response
-    resp = SIP.Msg.Ops.challenge_request(sipmsg, resp_code, upd_fields.authproc, upd_fields.realm, upd_fields.algorithm, [], totag)
+    resp = challenge_request(sipmsg, resp_code,
+      upd_fields.authproc, upd_fields.realm, upd_fields.algorithm,
+      [], totag)
 
     # Send it to the transaction state machine
     case fsm_reply(state, resp_code, resp) do
       { :ok, new_state } when resp_code in 200..599 -> { :ok, schedule_timer_K(new_state, 5000) }
-      { :ok, new_state } when resp_code in 100..199 -> { :ok, new_state }
       { code, state }  -> { code, schedule_timer_K(state, 5000) }
     end
   end
@@ -41,7 +42,7 @@ defmodule SIP.NIST do
     end
 
     # Build the SIP reponse
-    resp = SIP.Msg.Ops.reply_to_request(sipmsg, resp_code, reason, upd_fields, totag)
+    resp = reply_to_request(sipmsg, resp_code, reason, upd_fields, totag)
 
     # Send it to the transaction state machine
     case fsm_reply(state, resp_code, resp) do
@@ -69,7 +70,7 @@ defmodule SIP.NIST do
       anything ->
         Logger.error([ transid: state.msg.transid, module: __MODULE__,
                      message: "Dialog layer failed to process SIP request. Err #{inspect(anything)}"])
-        { _errcode, state } =  internal_reply(state, state.msg, 403, "Denied", [], SIP.Msg.Ops.generate_from_or_to_tag())
+        { _errcode, state } =  internal_reply(state, state.msg, 403, "Denied", [], generate_from_or_to_tag())
         { :upperlayerfailure, state }
     end
   end
