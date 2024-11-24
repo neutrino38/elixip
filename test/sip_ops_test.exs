@@ -195,4 +195,20 @@ defmodule SIP.Test.SIP.Msg.Ops do
     assert ackmsg.ruri != nil
     _sipack_str = SIPMsg.serialize(ackmsg)
   end
+
+  test "Add new via on a blank message" do
+    register = %{
+      method: :REGISTER,
+      ruri: %SIP.Uri{ domain: "visio.net"},
+      from: %SIP.Uri{ domain: "visio.net", userpart: "me"},
+      to: %SIP.Uri{ domain: "visio.net"},
+      expire: 600,
+      callid: nil
+    }
+
+    register = SIP.Msg.Ops.add_via(register, { { 1,2,3,4}, 5060, "TCP" }, "zztop")
+    assert register.via == [ "SIP/2.0/TCP 1.2.3.4;branch=zztop" ]
+    register = SIP.Msg.Ops.add_via(register, { { 1,2,3,10}, 5070, "TLS" }, "zztop2")
+    assert register.via == [ "SIP/2.0/TLS 1.2.3.10:5070;branch=zztop2", "SIP/2.0/TCP 1.2.3.4;branch=zztop" ]
+  end
 end

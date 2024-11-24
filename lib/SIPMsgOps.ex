@@ -29,7 +29,7 @@ defmodule SIP.Msg.Ops do
     end
 
     local_ip = if is_tuple(local_ip), do: SIP.NetUtils.ip2string(local_ip), else: local_ip
-    "SIP/2.0/" <> String.capitalize(transport) <> " " <> local_ip <> ":" <> Integer.to_string(local_port)
+    "SIP/2.0/" <> String.upcase(transport) <> " " <> local_ip <> ":" <> Integer.to_string(local_port)
   end
 
   defguard is_req(msg) when is_map(msg) and is_atom(msg.method)
@@ -57,8 +57,13 @@ defmodule SIP.Msg.Ops do
       #To do add, list of tuples and maps
     end
 
+    newvia = case Map.get(sipmsg, :via) do
+      nil -> [ via ]
+      oldvia when is_list(oldvia) -> [ via | oldvia ]
+      _ -> raise "Invalid via header"
+    end
     # Add the new via header as the head of the list and change the transaction id
-    Map.put(sipmsg, :via, [ via | sipmsg.via ]) |> Map.put(:transid, branch_id)
+    Map.put(sipmsg, :via, newvia) |> Map.put(:transid, branch_id)
   end
 
   @doc "Return a SIP reason given a SIP code"
