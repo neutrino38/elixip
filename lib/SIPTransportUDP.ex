@@ -17,10 +17,15 @@ defmodule SIP.Transport.UDP do
 
     initial_state = %{ t_isreliable: false, localip: hd(ips), localips: ips,
                       localport: @default_local_port, upperlayer: nil }
-    {:ok, socket} = Socket.UDP.open(@default_local_port, [binary: true, active: true])
-    :ok = Socket.UDP.process(socket, self())
-    initial_state = Map.put(initial_state, :socket, socket)
-    { :ok, initial_state }
+    case  Socket.UDP.open(@default_local_port, [mode: :active]) do
+      {:ok, socket} ->
+        :ok = Socket.UDP.process(socket, self())
+        { :ok, Map.put(initial_state, :socket, socket) }
+
+      { :error, err } ->
+        Logger.error("Failed to create UDP socket on port #{@default_local_port}.")
+        { :stop, err }
+    end
   end
 
   @impl true
