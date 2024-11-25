@@ -1,4 +1,5 @@
 defmodule SIP.Transport.UDP do
+  alias SIP.NetUtils
   use GenServer
   require Logger
   require Socket.UDP
@@ -86,7 +87,7 @@ defmodule SIP.Transport.UDP do
         end
 
       _ ->
-        Logger.error("Received an invalid SIP message from #{ip}:#{port}")
+        Logger.error("Received an invalid SIP message from #{NetUtils.ip2string(ip)}:#{port}")
         { :noreply, state }
     end
   end

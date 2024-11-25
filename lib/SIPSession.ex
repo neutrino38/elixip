@@ -148,7 +148,7 @@ defmodule SIP.Session do
     @spec client_register(%SIP.Context{}, integer()) :: %SIP.Context{}
     def client_register(sip_ctx, expire) when is_integer(expire) do
       register = %{
-        "Expire" => 600,
+        "Expire" => expire,
         method: :REGISTER,
         ruri: SIP.Context.to(sip_ctx, nil),
         from: SIP.Context.from(sip_ctx),
@@ -173,13 +173,17 @@ defmodule SIP.Session do
     end
 
     @spec auth_register(%SIP.Context{},map(), integer()) :: %SIP.Context{}
-    def auth_register(sip_ctx, rsp, expire) when rsp.resp_code == 401 do
+    def auth_register(sip_ctx, rsp, expire) when is_map(rsp) and is_integer(rsp.response) do
+      if rsp.response != 401 do
+        raise "You must provide a 401 response with auth param to auth the REGISTER"
+      end
+
       register = %{
+        "Expire" => expire,
         method: :REGISTER,
         ruri: SIP.Context.to(sip_ctx, nil),
         from: SIP.Context.from(sip_ctx),
         to: SIP.Context.to(sip_ctx, nil),
-        expire: expire, # TODO contact
         callid: nil
       }
 

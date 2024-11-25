@@ -127,7 +127,9 @@ Use the API provided by SIP.Dialog module
     try do
       #In case of an outbound dialog, start a, UAC transaction
       case SIP.Transac.start_uac_transaction( req, timeout ) do
-        { :ok, transaction_pid } -> { :ok, %SIP.DialogImpl{ state | transactions: [ transaction_pid ] } }
+        { :ok, transaction_pid } ->
+          { :ok, %SIP.DialogImpl{ state | transactions: [ transaction_pid ] } }
+
         { code, _extra } ->
           Logger.error([ module: __MODULE__, dialogpid: self(),
                       message: "Failed to create client transaction."])
@@ -232,8 +234,7 @@ Use the API provided by SIP.Dialog module
 
   # For SIP responses
   @impl true
-  def handle_info({ :response, msg }, state ) when is_resp(msg) do
-    transact_pid = msg.transid
+  def handle_info({ :response, msg, transact_pid }, state ) when is_resp(msg) do
     if transact_pid in state.transactions do
       send(state.app, { msg.response, msg, transact_pid, self() })
     else

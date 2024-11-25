@@ -398,7 +398,7 @@ defmodule SIP.Msg.Ops do
                                                   passwd_or_hash, pwdformat, req.method, to_string(req.ruri))
 
         # Increment CSeq to start a new transaction
-        new_cseq = hd(req.cseq) + 1
+        new_cseq = if Map.get(req, :cseq) != nil, do: hd(req.cseq) + 1, else: 1
 
         # Build new request (delete auth header, add autorization header and overwrite CSeq)
         upd_map = %{ header2 => autorisation_params, autheader => nil, cseq: [ new_cseq, req.method ]}
