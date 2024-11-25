@@ -128,6 +128,8 @@ defmodule SIP.Test.Register do
     assert  ctx_get(:username) == "33924765453"
     from = ctx_from()
     assert from.displayname == "Emmanuel BUU"
+    SIP.Context.set(sip_ctx, :dialogpid, self())
+
   end
 
   test "Client Register" do
@@ -138,14 +140,19 @@ defmodule SIP.Test.Register do
       domain: "visioassistance.net"
     }
 
+    proxyuri = %SIP.Uri{ domain: "sip.visioassistance.net", scheme: "sip:", port: 5060 }
+    Application.put_env(:elixip2, :proxyuri, proxyuri)
     ctx_set :passwd, "crtv2user1"
 
     send_REGISTER 600
+    assert ctx_get(:lasterr) == :ok
 
-    receive do
-      { resp_code, rsp, trans_pid, dialog_pid } ->
+
+    ^sip_ctx = receive do
+      { resp_code, rsp, _trans_pid, _dialog_pid } ->
         assert resp_code == 401
-
+        send_auth_REGISTER(rsp, 600)
+        sip_ctx
     end
   end
 end

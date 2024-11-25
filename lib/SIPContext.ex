@@ -101,6 +101,15 @@ defmodule SIP.Context do
     Map.put(context, prop, value)
   end
 
+  # Set the dialog PID
+  def set(context, :dialogpid, value) do
+    if is_pid(value) do
+      Map.put(context, :dialogpid, value)
+    else
+      raise "dialog PID must me a process ID"
+    end
+  end
+
   # Set the password
   def set(ctx, :passwd, value) when ctx.authusername != nil and ctx.algorithm != nil and ctx.domain != nil do
     Map.put( ctx, :ha1,

@@ -5,6 +5,7 @@ defmodule SIP.Transac do
   require Registry
   require SIP.Transport.Selector
   require Application
+  import SIP.Msg.Ops
 
   # Struct defining a transaction
   defstruct [
@@ -111,7 +112,7 @@ defmodule SIP.Transac do
               { :invalidtemplate, errcode }
           end
 
-          _ -> :no_transport_available
+        _err -> :no_transport_available
       end
     rescue
       ArgumentError ->
@@ -128,7 +129,7 @@ defmodule SIP.Transac do
   - second arg is the number of seconds the callshould be tried
   - it returns a pid that represent the transaction. The process is a GenServer
   """
-  def start_uac_transaction(sipmsg, ring_timeout) when is_map(sipmsg) and sipmsg.method == :INVITE do
+  def start_uac_transaction(sipmsg, ring_timeout) when is_this_req(sipmsg, :INVITE) do
     { desturi, usesrv } = try do
       { Application.fetch_env!(:elixip2, :proxyuri), Application.fetch_env!(:elixip2, :proxyusesrv ) }
     rescue
@@ -136,19 +137,20 @@ defmodule SIP.Transac do
         { sipmsg.ruri, true }
     end
 
+
     # Get an associated transport instance.
     case SIP.Transport.Selector.select_transport(desturi, usesrv) do
       { :ok, t_mod, t_pid, destip, dport } ->
         transaction_start_common(t_mod, t_pid, destip, dport, SIP.ICT, sipmsg, ring_timeout)
 
       _ ->
-        Logger.error("Failed to select transport for request URI #{sipmsg.ruri}.")
+        Logger.error(module: __MODULE__, message: "Failed to select transport for request URI #{sipmsg.ruri}.")
         { :no_transport_available, nil }
     end
   end
 
   def start_uac_transaction(sipmsg, _timeout) when is_map(sipmsg) and sipmsg.method == :ACK  do
-    Logger.error("SIP request " <> Atom.to_string(sipmsg.method) <> "cannot create transactions")
+    Logger.error(module: __MODULE__, message: "SIP request " <> Atom.to_string(sipmsg.method) <> "cannot create transactions")
     { :req_cannot_create_trans, nil }
   end
 
@@ -168,7 +170,8 @@ defmodule SIP.Transac do
         transaction_start_common(t_mod, t_pid, destip, dport, SIP.NICT, sipmsg, timeout)
 
       _ ->
-        Logger.error("Failed to select transport for request URI #{sipmsg.ruri}.")
+        Logger.error(module: __MODULE__,
+          message: "Failed to create transaction. Cannot select transport for request URI #{sipmsg.ruri}.")
         { :no_transport_available, nil }
     end
   end
@@ -300,8 +303,9 @@ defmodule SIP.Transac do
         sendout_msg(state, msgstr)
 
       rescue
-        e in RuntimeError ->
-          Logger.debug([ transid: sipmsg.transid, module: __MODULE__, message: e.message])
+        e ->
+          Logger.error(Exception.format(:error, e, __STACKTRACE__))
+          Logger.error("")
           { :invalid_sip_msg, state }
       end
     end

@@ -1,5 +1,6 @@
 defmodule SIP.Transport.Selector do
 	@moduledoc "Selection of transport given a SIP URI"
+alias SIP.NetUtils
 
   require SIP.Uri
   require Registry
@@ -40,18 +41,12 @@ defmodule SIP.Transport.Selector do
         # No such instance. Start a new transport
         name = { :via, Registry, {Registry.SIPTransport, instance_name}}
         { :ok, t_pid} = GenServer.start(t_mod, { destip, port } , name: name)
-        Logger.debug("Started transport instance #{t_mod} PID #{inspect(t_pid)} -> #{destip}:#{port}")
+        Logger.debug("Started transport instance #{t_mod} PID #{inspect(t_pid)} -> #{NetUtils.ip2string(destip)}:#{port}")
         { :ok, t_pid}
 
         # Found one. Start return the pid
       [{ t_pid, _ }] -> { :ok, t_pid }
     end
-  end
-
-  # Resolve and select one of the IP
-  defp resolve_dest_domain(uri_domain, _trysrv) do
-    # To implement
-    { :ok, uri_domain }
   end
 
   @spec select_transport(binary(), boolean()) :: { :ok, module(), pid(), list(), integer() } | atom()
@@ -74,30 +69,34 @@ defmodule SIP.Transport.Selector do
     end
 
     # Obtain the transport part from the Request URI
-    transport_str = case SIP.Uri.get_uri_param(ruri, "transport") do
-      { :no_such_param, nil } -> "UDP"
-      { :ok, value } -> String.upcase(value)
-    end
+    transport_str = SIP.Uri.get_transport(ruri)
 
     t_mod = Map.get(@transport_map, transport_str)
 
     if t_mod != nil do
-      # We have a transport module
-      # Test if we use the mockup transport (for unit testing)
-      if usemockup do
-         # Obtain the transport pid
-        { :ok, t_pid } = find_or_launch_transport(SIP.Test.Transport.UDPMockup, "UDPMockup", ruri.domain, ruri.port)
-        { :ok , destaddr } = SIP.NetUtils.parse_address("1.2.3.4")
-        { :ok, SIP.Test.Transport.UDPMockup, t_pid, destaddr, 5080 }
-      else
-        # Get the destination IP address
-        { :ok, dest_ip } = resolve_dest_domain(ruri.domain, trysrv)
-        # Obtain the transport pid
-        { :ok, t_pid } = find_or_launch_transport(t_mod, transport_str, dest_ip, ruri.port)
-        { :ok, t_mod, t_pid, dest_ip, ruri.port }
-
+      try do
+        # We have a transport module
+        # Test if we use the mockup transport (for unit testing)
+        if usemockup do
+          # Obtain the transport pid
+          { :ok, t_pid } = find_or_launch_transport(SIP.Test.Transport.UDPMockup, "UDPMockup", ruri.domain, ruri.port)
+          { :ok , destaddr } = SIP.NetUtils.parse_address("1.2.3.4")
+          { :ok, SIP.Test.Transport.UDPMockup, t_pid, destaddr, 5080 }
+        else
+          # Get the destination IP address
+          { dest_ip, dest_port } = SIP.Resolver.resolve(ruri, trysrv)
+          # Obtain the transport pid
+          { :ok, t_pid } = find_or_launch_transport(t_mod, transport_str, dest_ip, dest_port)
+          { :ok, t_mod, t_pid, dest_ip, dest_port }
+        end
+      rescue
+        e ->
+          Logger.error(module: __MODULE__, message: "Got an exception during #{transport_str} transport selection")
+          Logger.error(Exception.format(:error, e, __STACKTRACE__))
+          :invalidtransport
       end
     else
+      Logger.error(module: __MODULE__, message: "Transport #{transport_str} is not supported.")
       :invalidtransport
     end
   end

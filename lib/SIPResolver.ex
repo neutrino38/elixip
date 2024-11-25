@@ -17,7 +17,7 @@ defmodule SIP.Resolver do
 
     random_number = :rand.uniform(total_weight)
 
-    Enum.reduce_while(records, 0, fn {_priority, weight, port, target} = record, acc ->
+    Enum.reduce_while(records, 0, fn {_priority, weight, _port, _target} = record, acc ->
       cumulative_weight = acc + weight
 
       if random_number <= cumulative_weight do

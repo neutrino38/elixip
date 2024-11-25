@@ -135,7 +135,7 @@ defmodule SIP.Session do
 
         defmacro send_auth_REGISTER(resp_401, expire) do
           quote do
-            var!(sip_ctx) = SIP.Session.RegisterUAC.auth_register(var!(sip_ctx), unquote(expire))
+            var!(sip_ctx) = SIP.Session.RegisterUAC.auth_register(var!(sip_ctx), unquote(resp_401), unquote(expire))
           end
         end
       end
@@ -148,10 +148,11 @@ defmodule SIP.Session do
     @spec client_register(%SIP.Context{}, integer()) :: %SIP.Context{}
     def client_register(sip_ctx, expire) when is_integer(expire) do
       register = %{
+        "Expire" => 600,
         method: :REGISTER,
+        ruri: SIP.Context.to(sip_ctx, nil),
         from: SIP.Context.from(sip_ctx),
         to: SIP.Context.to(sip_ctx, nil),
-        expire: expire, # TODO contact
         callid: nil
       }
 
@@ -175,6 +176,7 @@ defmodule SIP.Session do
     def auth_register(sip_ctx, rsp, expire) when rsp.resp_code == 401 do
       register = %{
         method: :REGISTER,
+        ruri: SIP.Context.to(sip_ctx, nil),
         from: SIP.Context.from(sip_ctx),
         to: SIP.Context.to(sip_ctx, nil),
         expire: expire, # TODO contact
