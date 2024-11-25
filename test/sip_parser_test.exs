@@ -57,6 +57,12 @@ defmodule SIP.Test.Parser do
 		assert parsed_uri.params == %{ "tag" => "8075639" }
 	end
 
+	test "Parse a register contact URI from the proxy"  do
+		{ code, parsed_uri } = SIP.Uri.parse("<sip:172.21.93.138>;expires=3600;received=\"sip:37.71.250.86:53266\"")
+		assert code == :ok
+		assert Map.get(parsed_uri.params, "expires") == "3600"
+	end
+
 	test "Serialize a SIP URI" do
 		uri = %{
 			port: 50,
