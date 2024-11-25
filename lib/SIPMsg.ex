@@ -580,7 +580,11 @@ defmodule SIPMsg do
 
 
 	defp header_name_to_string(name) when is_atom(name) do
-		@common_headers_atoms[name]
+		str_name = @common_headers_atoms[name]
+		if is_nil(str_name) do
+			raise "This header #{name} is not a common header"
+		end
+		str_name
 	end
 
 	defp header_name_to_string(name) when is_bitstring(name) do
@@ -606,6 +610,10 @@ defmodule SIPMsg do
 			{ :ok, contact_str} -> header_name_to_string(:contact) <> ": " <> contact_str <> "\r\n"
 			# _ -> raise "Invalid contact in SIP message"
 		end
+	end
+
+	defp serialize_one_header( name, val = %SIP.Uri{}) when name in  [ :from, :to ] do
+		header_name_to_string(name) <> ": " <> to_string(val) <> "\r\n"
 	end
 
 	# Serialize single value common headers (which name are represented by an atom)
