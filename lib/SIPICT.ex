@@ -122,7 +122,10 @@ defmodule SIP.ICT do
         # Todo: support 100rel and send PRACK
 
         # Send provisional response to app layer
-        send(state.app, { :response, sipmsg })
+        if sipmsg.response != 100 do
+          # We do not forward 100 Trying to the dialog layer
+          send(state.app, { :response, sipmsg, self() })
+        end
         Logger.debug([ transid: sipmsg.transid,  module: __MODULE__,
                      message: "state: sending -> proceeding"])
         upd_msg = if sipmsg.response > 100 do
@@ -134,7 +137,10 @@ defmodule SIP.ICT do
         %{ state | state: :proceeding, msg: upd_msg } |> schedule_timer_B(state.timeout * 1000)
 
       :proceeding ->
-        send(state.app, { :response, sipmsg })
+        if sipmsg.response != 100 do
+          # We do not forward 100 Trying to the dialog layer
+          send(state.app, { :response, sipmsg, self() })
+        end
         state
 
       _ ->
@@ -150,7 +156,7 @@ defmodule SIP.ICT do
                  message: "Received #{sip_resp.response} final resp"])
     cond do
       state.state in [ :sending, :proceeding ] ->
-        send(state.app, { :response, sip_resp })
+        send(state.app, { :response, sip_resp, self() })
         Logger.debug([ transid: sip_resp.transid,
                      module: __MODULE__,message: "state: #{state.state} -> confirmed"])
         routeset = case Map.fetch(sip_resp, :route) do
@@ -166,7 +172,7 @@ defmodule SIP.ICT do
 
       # Corner case when 200 OK retransmission is still not acked by app layer.
       state.state == :confirmed ->
-        send(state.app, { :response, sip_resp })
+        send(state.app, { :response, sip_resp, self() })
         state
 
       # Handle 200 OK retransmission on unrelable transport (UDP)
@@ -186,7 +192,7 @@ defmodule SIP.ICT do
     cond do
       state.state in [ :sending, :proceeding ] ->
         # Send the message to the application layer
-        send(state.app, { :response, sipmsg })
+        send(state.app, { :response, sipmsg, self() })
         # Send ACK automatically on failure
         Logger.debug([ transid: sipmsg.transid, module: __MODULE__,
                       message: "Received #{sipmsg.response}. State: #{state.state} -> rejected"])
@@ -209,7 +215,7 @@ defmodule SIP.ICT do
     if siprsp.response == 200 do
       state
     else
-      send(state.app, { :cancel_rejected, siprsp.response})
+      send(state.app, { :cancel_rejected, siprsp.response, self() })
       state
     end
   end

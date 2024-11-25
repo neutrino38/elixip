@@ -232,51 +232,38 @@ User-Agent: Elixip 0.2.0
     { _t_mod, t_pid } = GenServer.call(uac_t, :gettransport)
     SIP.Test.Transport.UDPMockup.simulate_successful_answer(t_pid)
 
-    # Expect a 100 Trying after 200 ms
-    receive do
-      {:response, resp} ->
-        assert resp.response == 100
-        #IO.puts("TEST: Received 100")
-
-      _ -> assert false
-    # after
-      # 300 -> assert false # We did not received the 100 Trying on time
-    end
-
     # Expect a 180 ringing after 200 mss
     receive do
-      {:response, resp} ->
+      {:response, resp, _transact_pid} ->
         assert resp.response == 180
         #IO.puts("TEST: Received 180 Ringing on time")
 
       {:timeout, :timerB} ->
-        IO.puts("timerB expired before 180 Ringing")
-        assert false
+        assert(false,"timerB expired before 180 Ringing")
 
-      bla ->
-        IO.puts("TEST: Received #{bla}")
+      _bla ->
+        IO.puts("TEST: Received unexpected bla")
         assert false
     after
-      500 -> assert false # We did not received the 180 Ringing on time
+      500 -> assert(false,"We did not received the 180 Ringing on time")
     end
 
 
     receive do
-      {:response, resp} ->
+      {:response, resp, _transact_pid} ->
         assert resp.response == 200
         #IO.puts("TEST: Received 200 Ringing on time")
         SIP.Transac.ack_uac_transaction(uac_t)
 
 
       {:timeout, :timerB} ->
-        IO.puts("timerB expired before 200 OK")
-        assert false
+        assert(false, "timerB expired before 200 OK")
 
       bla ->
-        IO.puts("TEST: Received #{bla}")
-        assert false
+        assert(false, "Received unexpected bla")
+
     after
-      5_000 -> assert false # We did not received the 200 OK on time
+      5_000 -> assert(false, "We did not receive the 200 OK on time")
     end
 
   end
@@ -296,20 +283,9 @@ User-Agent: Elixip 0.2.0
     { _t_mod, t_pid } = GenServer.call(uac_t, :gettransport)
     SIP.Test.Transport.UDPMockup.simulate_busy_answer(t_pid)
 
-    # Expect a 100 Trying after 200 ms
-    receive do
-      {:response, resp} ->
-        assert resp.response == 100
-        #IO.puts("TEST: Received 100")
-
-      _ -> assert false
-    # after
-      # 300 -> assert false # We did not received the 100 Trying on time
-    end
-
    # Expect a 180 ringing after 200 mss
    receive do
-    {:response, resp} ->
+    {:response, resp, _transact_pid} ->
       assert resp.response == 180
       #IO.puts("TEST: Received 180 Ringing on time")
 
@@ -326,7 +302,7 @@ User-Agent: Elixip 0.2.0
 
     # Expect a 486 Busy after 200 mss
     receive do
-      {:response, resp} ->
+      {:response, resp, _transact_pid} ->
         assert resp.response == 486
         Process.sleep(500)
 
@@ -364,7 +340,7 @@ User-Agent: Elixip 0.2.0
     SIP.Test.Transport.UDPMockup.simulate_challenge(t_pid)
 
     receive do
-      {:response, resp} ->
+      {:response, resp, _transact_pid} ->
         assert resp.response == 401
         auth_req = SIP.Msg.Ops.add_authorization_to_req(
           parsed_msg, resp.wwwauthenticate, :wwwauthenticate,
@@ -385,7 +361,7 @@ User-Agent: Elixip 0.2.0
     end
 
     receive do
-      {:response, resp} -> assert resp.response == 200
+      {:response, resp, _transact_pid} -> assert resp.response == 200
 
       bla ->
         IO.puts("TEST: Received #{bla}")

@@ -91,8 +91,12 @@ defmodule SIP.NICT do
       :sending ->
         # Todo: support 100rel and send PRACK
 
-        # Send provisional response to app layer
-        send(state.app, { :response, sipmsg })
+        # Send provisional response to dialog layer
+
+        if sipmsg.response != 100 do
+          # We do not forward 100 Trying to the dialog layer
+          send(state.app, { :response, sipmsg, self() })
+        end
         Logger.debug([ transid: sipmsg.transid,  module: __MODULE__,
                      message: "state: sending -> proceeding"])
         upd_msg = if sipmsg.response > 100 do
@@ -104,7 +108,10 @@ defmodule SIP.NICT do
         %{ state | state: :proceeding, msg: upd_msg } |> schedule_timer_B(state.timeout * 1000)
 
       :proceeding ->
-        send(state.app, { :response, sipmsg })
+        if sipmsg.response != 100 do
+          # We do not forward 100 Trying to the dialog layer
+          send(state.app, { :response, sipmsg, self() })
+        end
         state
 
       _ ->
@@ -120,7 +127,7 @@ defmodule SIP.NICT do
                  message: "Received #{sip_resp.response} final resp"])
     cond do
       state.state in [ :sending, :proceeding ] ->
-        send(state.app, { :response, sip_resp })
+        send(state.app, { :response, sip_resp, self() })
         Logger.debug([ transid: sip_resp.transid,
                      module: __MODULE__,message: "state: #{state.state} -> confirmed"])
         routeset = case Map.fetch(sip_resp, :route) do
@@ -134,17 +141,11 @@ defmodule SIP.NICT do
         state = %{ state | msg: Map.put(state.msg, :to, sip_resp.to), state: :confirmed }
         Map.put(state, :remotecontact, sip_resp.contact) |> Map.put(:route, routeset)
 
-      # Corner case when 200 OK retransmission is still not acked by app layer.
       state.state == :confirmed ->
-        send(state.app, { :response, sip_resp })
         state
 
-      # Handle 200 OK retransmission on unrelable transport (UDP)
-      state.state == :terminated and is_bitstring(state.ack) ->
-        SIP.Transac.Common.sendout_msg(state, state.ack)
-        state
-
-      true ->
+      # Handle 200 OK retransmission on unrelable transport (UDP) - ignore
+      state.state in [ :confirmed, :terminated ] ->
         Logger.debug([ transid: sip_resp.transid, module: __MODULE__,
                      message: "state: #{state.state}. Ignoring resp."])
         state
@@ -156,14 +157,13 @@ defmodule SIP.NICT do
     cond do
       state.state in [ :sending, :proceeding ] ->
         # Send the message to the transaction layer
-        send(state.app, { :response, sipmsg })
+        send(state.app, { :response, sipmsg, self() })
         Logger.debug([ transid: sipmsg.transid, module: __MODULE__,
                       message: "Received #{sipmsg.response}. State: #{state.state} -> rejected"])
-        if sipmsg.response in [ 401, 407 ] do
-          Logger.info([ transid: sipmsg.transid, message: "#{state.msg.method} rejected with response #{sipmsg.response}"])
-        else
-          Logger.info([ transid: sipmsg.transid, message: "#{state.msg.method} challenged with response #{sipmsg.response}"])
-        end
+
+        verb = if sipmsg.response in [ 401, 407 ], do: "challenged", else: "rejected"
+        Logger.info([ transid: sipmsg.transid, module: __MODULE__,
+                     message: "#{state.msg.method} #{verb} with response #{sipmsg.response}"])
         %SIP.Transac{state | state: :rejected }
 
       state.state == :rejected ->
