@@ -81,6 +81,11 @@ defmodule SIP.Dialog do
         Logger.info([ dialogpid: "#{inspect(dlg_pid)}", module: __MODULE__, message: "Created dialog." ])
         { :ok, dlg_pid, dialog_id }
 
+      { :error, err } when is_exception(err) ->
+        Logger.error([ module: __MODULE__, message: "Failed to create dialog: exception raised" ])
+        Logger.error(Exception.format(:error, err))
+        :error
+
       { :error, err } ->
         Logger.error([ module: __MODULE__, message: "Failed to create dialog: #{inspect(err)}."])
         { :error, err }
