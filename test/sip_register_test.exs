@@ -154,5 +154,17 @@ defmodule SIP.Test.Register do
         send_auth_REGISTER(rsp, 600)
         sip_ctx
     end
+
+    ^sip_ctx = receive do
+      { resp_code, _rsp, _trans_pid, _dialog_pid } ->
+        assert resp_code == 200
+        sip_ctx
+
+      _ -> assert(false, "Received unexpected msg")
+
+    after
+      1_000 -> assert(false, "Did not receive 200 OK on time")
+    end
+
   end
 end
