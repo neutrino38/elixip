@@ -5,7 +5,7 @@ defmodule SIP.Uri do
 		userpart: nil,
 		domain: nil,
 		port: nil,
-		scheme: nil,
+		scheme: "sip:",
 		proto: "UDP",
 		params: %{}
 	]
@@ -171,9 +171,18 @@ defmodule SIP.Uri do
 	end
 
 	@doc "Set an URI parameter"
-	def set_uri_param(sip_uri, param, value) when is_map(sip_uri) do
+	def set_uri_param(sip_uri = %SIP.Uri{}, param, value) do
 		new_params = Map.put(sip_uri.params, param, value)
 		Map.put(sip_uri, :params, new_params)
+	end
+
+	@doc "Obtain the transport string in capitals from the URI"
+	def get_transport(uri = %SIP.Uri{}) do
+		case get_uri_param(uri, "transport") do
+			{ :no_such_param, nil } ->
+				if uri.scheme == "sips:", do: "TLS", else: "UDP"
+				{ :ok, value } -> String.upcase(value)
+		end
 	end
 
 	defp serialize_core_uri( "sips:", nil, host, 5061 ) do
@@ -234,7 +243,7 @@ defmodule SIP.Uri do
 	end
 
 	#Serialize a map into a SIP URI
-	def serialize( uri ) when is_map(uri) do
+	def serialize( uri = %SIP.Uri{} ) do
 		core_uri_str = serialize_core_uri(
 				uri.scheme,
 				if Map.has_key?(uri, :userpart) do uri.userpart else nil end,
