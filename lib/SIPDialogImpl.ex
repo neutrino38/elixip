@@ -230,14 +230,16 @@ Use the API provided by SIP.Dialog module
     { :noreply, state }
   end
 
-  # For SIP response
-  def handle_cast({:sipmsg, msg, transact_pid}, state ) when is_resp(msg) do
+  # For SIP responses
+  @impl true
+  def handle_info({ :response, msg }, state ) when is_resp(msg) do
+    transact_pid = msg.transid
     if transact_pid in state.transactions do
-      send(state.app, { msg.resp_code, msg, transact_pid, self() })
+      send(state.app, { msg.response, msg, transact_pid, self() })
     else
       Logger.warning([
         dialogpid: "#{inspect(self())}",  module: __MODULE__,
-        message: "SIP response #{msg.resp_code} from a transaction #{inspect(transact_pid)} " <>
+        message: "SIP response #{msg.response} from a transaction #{inspect(transact_pid)} " <>
                  "that is not attached to the dialog." ])
     end
     { :noreply, state }

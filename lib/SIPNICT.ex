@@ -155,15 +155,18 @@ defmodule SIP.NICT do
   defp handle_sip_response(state, sipmsg) when SIP.Msg.Ops.is_failure_resp(sipmsg) do
     cond do
       state.state in [ :sending, :proceeding ] ->
-        # Send the message to the application layer
+        # Send the message to the transaction layer
         send(state.app, { :response, sipmsg })
-        # Send ACK automatically on failure
         Logger.debug([ transid: sipmsg.transid, module: __MODULE__,
                       message: "Received #{sipmsg.response}. State: #{state.state} -> rejected"])
-        Logger.info([ transid: sipmsg.transid, message: "#{state.msg.method} rejected with response #{sipmsg.response}"])
+        if sipmsg.response in [ 401, 407 ] do
+          Logger.info([ transid: sipmsg.transid, message: "#{state.msg.method} rejected with response #{sipmsg.response}"])
+        else
+          Logger.info([ transid: sipmsg.transid, message: "#{state.msg.method} challenged with response #{sipmsg.response}"])
+        end
         %SIP.Transac{state | state: :rejected }
 
-      state.state == :rejected  and is_bitstring(state.ack) ->
+      state.state == :rejected ->
         state
 
       true ->
