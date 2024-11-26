@@ -141,21 +141,28 @@ defmodule SIP.Session do
       end
     end
 
+    defp register_msg(sip_ctx = %SIP.Context{}, expire) do
+      contact_uri = %SIP.Uri{ domain: "0.0.0.0", params: %{
+        "expires" => to_string(expire) }
+      }
+
+      %{
+        method: :REGISTER,
+        ruri: SIP.Context.to(sip_ctx, nil),
+        from: SIP.Context.from(sip_ctx),
+        to: SIP.Context.to(sip_ctx, nil),
+        contact: contact_uri,
+        callid: nil
+      }
+    end
+
     @doc"""
       Send an outbound REGISTER and create the dialog if needed
       Update the session sip_ctx accordingly
       """
     @spec client_register(%SIP.Context{}, integer()) :: %SIP.Context{}
-    def client_register(sip_ctx, expire) when is_integer(expire) do
-      register = %{
-        "Expire" => expire,
-        method: :REGISTER,
-        ruri: SIP.Context.to(sip_ctx, nil),
-        from: SIP.Context.from(sip_ctx),
-        to: SIP.Context.to(sip_ctx, nil),
-        callid: nil
-      }
-
+    def client_register(sip_ctx = %SIP.Context{}, expire) when is_integer(expire) do
+      register = register_msg(sip_ctx, expire)
       if not is_pid(sip_ctx.dialogpid) do
         case SIP.Dialog.start_dialog(register, expire, :outbound, sip_ctx.debug) do
           { :ok, dialog_pid, _dialog_id } ->
@@ -178,14 +185,7 @@ defmodule SIP.Session do
         raise "You must provide a 401 response with auth param to auth the REGISTER"
       end
 
-      register = %{
-        "Expire" => expire,
-        method: :REGISTER,
-        ruri: SIP.Context.to(sip_ctx, nil),
-        from: SIP.Context.from(sip_ctx),
-        to: SIP.Context.to(sip_ctx, nil),
-        callid: nil
-      }
+      register = register_msg(sip_ctx, expire)
 
       authparams = Map.get(rsp, :wwwauthenticate)
       if not is_nil(authparams) do
@@ -193,7 +193,7 @@ defmodule SIP.Session do
           register, authparams, :wwwauthenticate,
           sip_ctx.authusername, sip_ctx.ha1, :ha1)
         rez = SIP.Dialog.new_request(sip_ctx.dialogpid, register)
-        IO.puts(inspect(rez))
+        SIP.Context.set(sip_ctx, :lasterr, rez)
         sip_ctx
       end
     end
