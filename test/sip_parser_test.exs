@@ -64,7 +64,7 @@ defmodule SIP.Test.Parser do
 	end
 
 	test "Serialize a SIP URI" do
-		uri = %{
+		uri = %SIP.Uri{
 			port: 50,
 			scheme: "sip:",
 			domain: "domain.fr",
