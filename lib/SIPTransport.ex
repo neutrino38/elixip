@@ -23,8 +23,18 @@ defmodule SIP.Transport do
     }
   end
 
-  # Add contact header to a SIP message given the transport
+  # Add /fix contact header to a SIP message given the transport
   def add_contact_header(tmod, tid, msg) when is_pid(tid) and is_map(msg) do
-   Map.put(msg, :contact, build_contact_uri(tmod, tid))
+    new_contact = build_contact_uri(tmod, tid)
+    old_contact = Map.get(msg, :contact)
+
+    new_contact = if not is_nil(old_contact) do
+      # Transfert contact parameters if specified by the caller
+      %SIP.Uri{ new_contact | params: old_contact.params }
+    else
+      new_contact
+    end
+
+    Map.put(msg, :contact, new_contact)
   end
 end
