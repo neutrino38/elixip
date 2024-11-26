@@ -132,7 +132,7 @@ defmodule SIP.Test.Register do
 
   end
 
-  test "Client Register" do
+  test "Client Register using UDP" do
     sip_ctx = %SIP.Context{
       username: "33970262547",
       authusername: "33970262547",
@@ -149,16 +149,19 @@ defmodule SIP.Test.Register do
 
 
     ^sip_ctx = receive do
-      { resp_code, rsp, _trans_pid, _dialog_pid } ->
-        assert resp_code == 401
+      { 401, rsp, _trans_pid, _dialog_pid } ->
         send_auth_REGISTER(rsp, 600)
         sip_ctx
     end
 
     ^sip_ctx = receive do
-      { resp_code, _rsp, _trans_pid, _dialog_pid } ->
-        assert resp_code == 200
+      { 200, rsp, _trans_pid, _dialog_pid } ->
+        IO.puts(inspect(rsp.contact.params))
+        assert SIP.Uri.get_uri_param(rsp.contact, "expires") == {:ok, "600"}
         sip_ctx
+
+      { resp_code, _rsp, _trans_pid, _dialog_pid } when is_integer(resp_code) ->
+        assert(false, "Received unexpected SIP response #{resp_code}")
 
       _ -> assert(false, "Received unexpected msg")
 
