@@ -67,7 +67,7 @@ defmodule SIP.Uri do
 				"sip:"
 		end
 
-		case String.split(uri_string, proto) do
+		case String.split(uri_string, proto, parts: 2) do
 			[ "", part2 ] ->
 				# Form sip:user@domain;param=value
 				parts = String.split( part2, ";" )
