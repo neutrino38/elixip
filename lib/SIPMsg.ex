@@ -66,7 +66,7 @@ defmodule SIPMsg do
 	end
 
 	@common_headers_atoms %{ via: "Via", from: "From", to: "To", callid: "Call-ID",
-		route: "Route", recordroute: "Record-Route", useragent: "UserAgent",
+		route: "Route", recordroute: "Record-Route", useragent: "User-Agent",
 		contact: "Contact", cseq: "CSeq", contenttype: "Content-Type",
 		contentlength: "Content-Length", proxyauthorization: "Proxy-Authorization",
 		proxyauthenticate: "Proxy-Authenticate", wwwauthenticate: "WWW-Authenticate",
@@ -725,15 +725,15 @@ defmodule SIPMsg do
 		msgstr <> headers <> body
 	end
 
+	@doc "Serialize a SIP message as a string to be sent over the network"
 	def serialize(sipmsg) when is_map(sipmsg) and is_atom(sipmsg.method) do
 		msgstr = serialize_first_line(sipmsg.method, sipmsg.ruri)
-		headers = serialize_headers(sipmsg)
-		body = if Map.has_key?(sipmsg, :body) do
-			serialize_body(sipmsg.body)
+
+		if Map.has_key?(sipmsg, :body) do
+			msgstr <> serialize_headers(sipmsg) <> serialize_body(sipmsg.body)
 		else
-			""
+			msgstr <> serialize_headers(sipmsg) <> "\r\n"
 		end
-		msgstr <> headers <> body
 	end
 
 
