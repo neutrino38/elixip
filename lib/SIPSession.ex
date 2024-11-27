@@ -27,6 +27,27 @@ defmodule SIP.Session do
   """
   require Logger
 
+    @doc"""
+    Send an outbound SIP request and create the dialog if needed
+    Update the session sip_ctx accordingly
+    """
+  def send_sip_request(sip_ctx = %SIP.Context{}, req, timeout) do
+    if not is_pid(sip_ctx.dialogpid) do
+      case SIP.Dialog.start_dialog(req, timeout, :outbound, sip_ctx.debug) do
+        { :ok, dialog_pid, _dialog_id } ->
+          # Dialog created, update context and clear last error
+          SIP.Context.set(sip_ctx, :dialogpid, dialog_pid) |> SIP.Context.set(:lasterr, :ok)
+
+        { :error, err} ->
+          SIP.Context.set(sip_ctx, :lasterr, err)
+      end
+    else
+      # Send an in dialog request
+      rc = SIP.Dialog.new_request(sip_ctx.dialogpid, req)
+      SIP.Context.set(sip_ctx, :lasterr, rc)
+    end
+  end
+
   defmodule ConfigRegistry do
     defstruct [
       callprocessing: nil,
@@ -138,12 +159,20 @@ defmodule SIP.Session do
             var!(sip_ctx) = SIP.Session.RegisterUAC.auth_register(var!(sip_ctx), unquote(resp_401), unquote(expire))
           end
         end
+
+        defmacro send_OPTIONS() do
+          quote do
+            var!(sip_ctx) = SIP.Session.RegisterUAC.send_options(var!(sip_ctx))
+          end
+        end
       end
     end
 
     defp register_msg(sip_ctx = %SIP.Context{}, expire) do
-      contact_uri = %SIP.Uri{ domain: "0.0.0.0", params: %{
-        "expires" => to_string(expire) }
+      contact_uri = %SIP.Uri{
+        userpart: SIP.Context.get(sip_ctx, :username),
+        domain: "0.0.0.0",
+        params: %{ "expires" => to_string(expire) }
       }
 
       %{
@@ -153,9 +182,27 @@ defmodule SIP.Session do
         to: SIP.Context.from(sip_ctx),
         contact: contact_uri,
         useragent: "Elixipp/0.1",
-        callid: nil
+        callid: nil,
+        contentlength: 0
       }
     end
+
+    defp options_msg(sip_ctx = %SIP.Context{}) do
+      %{
+        "Accept" => "*/*",
+        "Accept-Encoding" => "UTF-8",
+        "Accept-Language" => "en",
+        "Supported" => "OPTIONS, REGISTER",
+        method: :OPTIONS,
+        ruri: %SIP.Uri{ domain: SIP.Context.get(sip_ctx, :domain) },
+        from: SIP.Context.from(sip_ctx),
+        to: SIP.Context.from(sip_ctx),
+        useragent: "Elixipp/0.1",
+        callid: nil,
+        contentlength: 0
+      }
+    end
+
 
     @doc"""
       Send an outbound REGISTER and create the dialog if needed
@@ -164,24 +211,11 @@ defmodule SIP.Session do
     @spec client_register(%SIP.Context{}, integer()) :: %SIP.Context{}
     def client_register(sip_ctx = %SIP.Context{}, expire) when is_integer(expire) do
       register = register_msg(sip_ctx, expire)
-      if not is_pid(sip_ctx.dialogpid) do
-        case SIP.Dialog.start_dialog(register, expire, :outbound, sip_ctx.debug) do
-          { :ok, dialog_pid, _dialog_id } ->
-            # Dialog created, update context and clear last error
-            SIP.Context.set(sip_ctx, :dialogpid, dialog_pid) |> SIP.Context.set(:lasterr, :ok)
-
-          { :error, err} ->
-            SIP.Context.set(sip_ctx, :lasterr, err)
-        end
-      else
-        # Send an in dialog REGISTER
-        rc = SIP.Dialog.new_request(sip_ctx.dialogpid, register)
-        SIP.Context.set(sip_ctx, :lasterr, rc)
-      end
+      SIP.Session.send_sip_request(sip_ctx, register, expire)
     end
 
     @spec auth_register(%SIP.Context{},map(), integer()) :: %SIP.Context{}
-    def auth_register(sip_ctx, rsp, expire) when is_map(rsp) and is_integer(rsp.response) do
+    def auth_register(sip_ctx = %SIP.Context{}, rsp, expire) when is_map(rsp) and is_integer(rsp.response) do
       if rsp.response != 401 do
         raise "You must provide a 401 response with auth param to auth the REGISTER"
       end
@@ -197,6 +231,11 @@ defmodule SIP.Session do
         SIP.Context.set(sip_ctx, :lasterr, rez)
         sip_ctx
       end
+    end
+
+    def send_options(sip_ctx = %SIP.Context{}) do
+      options = options_msg(sip_ctx)
+      SIP.Session.send_sip_request(sip_ctx, options, 20)
     end
   end
 
