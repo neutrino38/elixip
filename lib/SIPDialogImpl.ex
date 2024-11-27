@@ -141,7 +141,8 @@ Use the API provided by SIP.Dialog module
       err ->
         Logger.error([ module: __MODULE__, dialogpid: self(),
                       message: "Failed to create client transaction. Exception occurred."])
-        reraise err, __STACKTRACE__
+        Logger.error(Exception.format(:error, err, __STACKTRACE__))
+        { :stop, :transactionfailure }
     end
   end
 
