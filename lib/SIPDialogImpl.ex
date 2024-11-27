@@ -185,7 +185,7 @@ Use the API provided by SIP.Dialog module
 
         # Copy transport parameters from the request that opened the dialog into the RURI to reuse them
         o_ruri = state.msg.ruri
-        ruri = %SIP.Uri{ req | destip: o_ruri.destip, destport: o_ruri.destport,
+        ruri = %SIP.Uri{ req.ruri | destip: o_ruri.destip, destport: o_ruri.destport,
                          tp_module: o_ruri.tp_module, tp_pid: o_ruri.tp_pid }
         req = %{ req | ruri: ruri }
         # Create an UAC transaction to send the request out

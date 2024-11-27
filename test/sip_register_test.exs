@@ -133,6 +133,9 @@ defmodule SIP.Test.Register do
   end
 
   test "Client Register using UDP" do
+    # Adapt to actual client DNS config
+    Application.put_env(:elixip2, :nameserver, { 172,21,100,8 })
+
     sip_ctx = %SIP.Context{
       username: "33970262547",
       authusername: "33970262547",
