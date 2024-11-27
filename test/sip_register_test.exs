@@ -55,6 +55,8 @@ defmodule SIP.Test.Register do
     :ok = SIP.Transport.Selector.start()
     :ok = SIP.Dialog.start()
     { :ok, _config_pid } = SIP.Session.ConfigRegistry.start()
+    # Adapt to actual client DNS config
+    Application.put_env(:elixip2, :nameserver, { 172,21,100,8 })
     :ok
   end
 
@@ -133,8 +135,6 @@ defmodule SIP.Test.Register do
   end
 
   test "Client Register using UDP" do
-    # Adapt to actual client DNS config
-    Application.put_env(:elixip2, :nameserver, { 172,21,100,8 })
 
     sip_ctx = %SIP.Context{
       username: "33970262547",
@@ -172,5 +172,32 @@ defmodule SIP.Test.Register do
       1_000 -> assert(false, "Did not receive 200 OK on time")
     end
 
+  end
+
+  test "Client OPTIONS UDP" do
+    # Adapt to actual client DNS config
+    Application.put_env(:elixip2, :nameserver, { 172,21,100,8 })
+
+    sip_ctx = %SIP.Context{
+      username: "33970262547",
+      authusername: "33970262547",
+      displayname: "Test User",
+      domain: "visioassistance.net"
+    }
+
+    proxyuri = %SIP.Uri{ domain: "sip.visioassistance.net", scheme: "sip:", port: 5060 }
+    Application.put_env(:elixip2, :proxyuri, proxyuri)
+    ctx_set :passwd, "crtv2user1"
+
+    send_OPTIONS()
+    assert ctx_get(:lasterr) == :ok
+
+    ^sip_ctx = receive do
+      { response, _rsp, _trans_pid, _dialog_pid } ->
+        IO.puts(response)
+        sip_ctx
+    after
+      1_000 -> assert(false, "Did not receive 200 OK on time")
+   end
   end
 end
