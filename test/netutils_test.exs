@@ -73,6 +73,7 @@ defmodule SIP.Test.NetUtils do
 
   test "resolution SRV" do
     # Adapt to actual DNS config
+    Application.put_env(:elixip2, :nameserver, { 172,21,100,8 })
     possible_answers = [ {{212, 129, 18, 151}, 5060}, { {91, 134, 191, 39}, 5060 } ]
     assert SIP.Resolver.resolve(%SIP.Uri{ domain: "visioassistance.net", port: 5077 }, true) in possible_answers
   end

@@ -33,8 +33,11 @@ defmodule SIP.Resolver do
     name = "_sip._" <> transport_str <> "." <> uri.domain
 
     # We need to specify a DNS server otherwise it does not work
-    nameserver = Application.fetch_env(:elixip2, :nameserver)
-    nameserver = if is_tuple(nameserver), do: nameserver, else: {8,8,8,8}
+    nameserver = case Application.fetch_env(:elixip2, :nameserver) do
+      { :ok, { x, y, z, t }} -> { x, y, z, t }
+      :error -> {8,8,8,8}
+    end
+
     case :inet_res.lookup(String.to_charlist(name), :in, :srv,  [alt_nameservers: [ { nameserver, 53} ]]) do
       [] ->
         Logger.debug(module: __MODULE__, message: "SRV resolution for #{name} returns no records")
