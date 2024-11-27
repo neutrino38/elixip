@@ -61,8 +61,8 @@ alias SIP.NetUtils
     end
   end
 
-  @spec select_transport(map(), boolean()) :: { :ok, module(), pid(), list(), integer() } | atom()
-  def select_transport(ruri, trysrv) when is_map(ruri) do
+  @spec select_transport(%SIP.Uri{}, boolean()) :: { :ok, module(), pid(), list(), integer() } | atom()
+  def select_transport(ruri = %SIP.Uri{}, trysrv) do
 
     #Check if this is a unit test. If this is the case use a mockup for transport
     usemockup = case SIP.Uri.get_uri_param(ruri, "unittest") do

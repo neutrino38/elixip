@@ -23,7 +23,9 @@ Use the API provided by SIP.Dialog module
     cseqin: 1,
     fromtag: nil,
     callid: nil,
-    totag: nil
+    totag: nil,
+    destip: nil,
+    destport: 0
   ]
 
 
@@ -127,8 +129,8 @@ Use the API provided by SIP.Dialog module
     try do
       #In case of an outbound dialog, start a, UAC transaction
       case SIP.Transac.start_uac_transaction( req, timeout ) do
-        { :ok, transaction_pid } ->
-          { :ok, %SIP.DialogImpl{ state | transactions: [ transaction_pid ] } }
+        { :ok, transaction_pid, modmsg } ->
+          { :ok, %SIP.DialogImpl{ state | transactions: [ transaction_pid ], msg: modmsg } }
 
         { code, _extra } ->
           Logger.error([ module: __MODULE__, dialogpid: self(),
@@ -181,16 +183,22 @@ Use the API provided by SIP.Dialog module
       if Enum.count(state.transactions) < 4 do
         { state, req } = fix_outbound_request(state, req)
 
+        # Copy transport parameters from the request that opened the dialog into the RURI to reuse them
+        o_ruri = state.msg.ruri
+        ruri = %SIP.Uri{ req | destip: o_ruri.destip, destport: o_ruri.destport,
+                         tp_module: o_ruri.tp_module, tp_pid: o_ruri.tp_pid }
+        req = %{ req | ruri: ruri }
         # Create an UAC transaction to send the request out
         case SIP.Transac.start_uac_transaction( req, 15 ) do
-          { :ok, transaction_pid } ->
+          # Failed to send the message or create the transaction
+          { code, nil } ->
+            { :reply, code, state }
+
+          { :ok, transaction_pid, _modmsg } ->
             # Add the transaction in the transaction list
             { :reply, :ok, %SIP.DialogImpl{ state |
                                transactions: List.insert_at(state.transactions, -1, transaction_pid) }}
 
-          # Failed to send the message or create the transaction
-          { code, _extra } ->
-            { :reply, code, state }
         end
 
       else

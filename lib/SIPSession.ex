@@ -150,8 +150,9 @@ defmodule SIP.Session do
         method: :REGISTER,
         ruri: SIP.Context.to(sip_ctx, nil),
         from: SIP.Context.from(sip_ctx),
-        to: SIP.Context.to(sip_ctx, nil),
+        to: SIP.Context.from(sip_ctx),
         contact: contact_uri,
+        useragent: "Elixipp/0.1",
         callid: nil
       }
     end

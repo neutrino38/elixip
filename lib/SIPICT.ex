@@ -8,10 +8,13 @@ defmodule SIP.ICT do
   # Callbacks
 
   @impl true
-  def init({ t_mod, t_pid, dest_ip, dest_port, sipmsg, app_pid, ring_timeout }) do
+  def init({ sipmsg, app_pid, ring_timeout }) do
+    t_mod = sipmsg.ruri.tp_module
+    t_pid = sipmsg.ruri.tp_pid
+
     initial_state = %SIP.Transac{ msg: sipmsg, tmod: t_mod, tpid: t_pid, app: app_pid, timeout: ring_timeout,
-                       t_isreliable: apply(t_mod, :is_reliable, []), destip: dest_ip,
-                       destport: dest_port, state: :sending }
+                       t_isreliable: apply(t_mod, :is_reliable, []), destip: sipmsg.ruri.destip,
+                       destport: sipmsg.ruri.destport, state: :sending }
 
     case SIP.Transac.Common.sendout_msg(initial_state, sipmsg) do
       {:ok, state} ->

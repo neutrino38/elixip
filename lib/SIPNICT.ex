@@ -8,20 +8,23 @@ defmodule SIP.NICT do
   # Callbacks
 
   @impl true
-  def init({ t_mod, t_pid, dest_ip, dest_port, sipmsg, app_pid, ring_timeout }) do
+  def init({ sipmsg, app_pid, ring_timeout }) do
+    t_mod = sipmsg.ruri.tp_module
+    t_pid = sipmsg.ruri.tp_pid
+
     # Add contact header
     sipmsg = SIP.Transport.add_contact_header(t_mod, t_pid, sipmsg)
 
     # Create GenServer state
     initial_state = %SIP.Transac{ msg: sipmsg, tmod: t_mod, tpid: t_pid, app: app_pid, timeout: ring_timeout,
-                       t_isreliable: apply(t_mod, :is_reliable, []), destip: dest_ip,
-                       destport: dest_port, state: :sending }
+                       t_isreliable: apply(t_mod, :is_reliable, []), destip: sipmsg.ruri.destip,
+                       destport: sipmsg.ruri.destport, state: :sending }
 
     # Sendout the message using the transport
     case SIP.Transac.Common.sendout_msg(initial_state, sipmsg) do
       {:ok, state} ->
         Logger.info([ transid: sipmsg.transid, module: __MODULE__,
-                    message: "Sent #{sipmsg.method} to #{sipmsg.ruri}"])
+                    message: "Sent #{sipmsg.method} #{sipmsg.ruri}"])
         if not state.t_isreliable do
           schedule_timer_A(state)
         end
@@ -136,7 +139,7 @@ defmodule SIP.NICT do
         end
 
         Logger.info([ transid: sip_resp.transid,  module: __MODULE__,
-                    message: "answered with #{sip_resp.response}"])
+                    message: "#{state.msg.method} answered with #{sip_resp.response}"])
         # Update status, the to header of the request with the to of the response to get the to tag
         state = %{ state | msg: Map.put(state.msg, :to, sip_resp.to), state: :confirmed }
         Map.put(state, :remotecontact, sip_resp.contact) |> Map.put(:route, routeset)

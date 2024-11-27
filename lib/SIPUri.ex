@@ -7,6 +7,10 @@ defmodule SIP.Uri do
 		port: nil,
 		scheme: "sip:",
 		proto: "UDP",
+		destip: nil, # IP to be used
+		destport: 0, # port to be used
+		tp_module: nil, # transport module
+		tp_pid: nil, # transport PID
 		params: %{}
 	]
 
@@ -257,6 +261,10 @@ defmodule SIP.Uri do
 			core_uri_str <> ";" <> serialize_params(uri.params)
 		end
 		{ :ok, String.trim_trailing(uri_str, ";") }
+	end
+
+	def has_tp_info(uri = %SIP.Uri{}) do
+		is_tuple(uri.destip) and uri.destport > 0 and is_pid(uri.tp_pid) and not is_nil(uri.tp_module)
 	end
 
 	defimpl String.Chars do

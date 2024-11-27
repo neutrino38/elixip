@@ -219,7 +219,7 @@ User-Agent: Elixip 0.2.0
   # Big transaction test
   @tag :toto
   test "Transaction SIP client INVITE - appel reussi" do
-    { :ok, uac_t } = SIP.Transac.start_uac_transaction_with_template(
+    { :ok, uac_t, _modmsg } = SIP.Transac.start_uac_transaction_with_template(
                               create_invite_template(), [],
                               fn code, errmsg, lineno, line ->
                                 IO.puts("\n" <> errmsg)
@@ -270,7 +270,7 @@ User-Agent: Elixip 0.2.0
 
   @tag :toto
   test "Transaction SIP client INVITE - appel occcupé" do
-    { :ok, uac_t } = SIP.Transac.start_uac_transaction_with_template(
+    { :ok, uac_t, _modmsg } = SIP.Transac.start_uac_transaction_with_template(
                               create_invite_template(), [],
                               fn code, errmsg, lineno, line ->
                                 IO.puts("\n" <> errmsg)
@@ -334,7 +334,7 @@ User-Agent: Elixip 0.2.0
     parsed_msg = SIP.Msg.Ops.update_sip_msg( parsed_msg, { :ruri, upd_uri })
 
     # Send REGISTER
-    { :ok, uac_t } = SIP.Transac.start_uac_transaction(parsed_msg, 30)
+    { :ok, uac_t, _modmsg } = SIP.Transac.start_uac_transaction(parsed_msg, 30)
 
     { _t_mod, t_pid } = GenServer.call(uac_t, :gettransport)
     SIP.Test.Transport.UDPMockup.simulate_challenge(t_pid)
@@ -347,7 +347,7 @@ User-Agent: Elixip 0.2.0
           "manu", "buu", :plain)
 
         # send authenticated register
-        { :ok, _uac_t } = SIP.Transac.start_uac_transaction(auth_req, 30)
+        { :ok, _uac_t, _modmsg } = SIP.Transac.start_uac_transaction(auth_req, 30)
 
         # Simulate successful registration
         SIP.Test.Transport.UDPMockup.simulate_successful_register(t_pid)

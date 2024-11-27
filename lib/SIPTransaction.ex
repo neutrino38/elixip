@@ -1,5 +1,6 @@
 defmodule SIP.Transac do
   @moduledoc "SIP Transaction Layer"
+alias SIP.NetUtils
 
   require Logger
   require Registry
@@ -41,16 +42,19 @@ defmodule SIP.Transac do
   end
 
   # Common part of transaction start
-  defp transaction_start_common(transport_module, transport_pid, destip, dest_port, transact_module, sipmsg, timeout) do
+  defp transaction_start_common(tc_mod, sipmsg, timeout) do
     # Generate the branch ID
     branch_id = SIP.Msg.Ops.generate_branch_value()
     #Todo : check that branch ID is not already registered on the transaction registry
 
+
     # Get the transport name frm the module
-    transport_str = apply(transport_module, :transport_str, [])
+    tp_module = sipmsg.ruri.tp_module
+    tp_pid = sipmsg.ruri.tp_pid
+    transport_str = apply(tp_module, :transport_str, [])
 
     # Get the local and IP port from the transport process
-    { :ok, local_ip, local_port  } = GenServer.call(transport_pid, :getlocalipandport)
+    { :ok, local_ip, local_port  } = GenServer.call(tp_pid, :getlocalipandport)
     local_ip_str = SIP.NetUtils.ip2string(local_ip)
 
     #Add the topmost via header
@@ -59,60 +63,104 @@ defmodule SIP.Transac do
     # Start a new GenServer for each transaction and register it in Registry.SIPTransaction
     # The process created IS the transaction
     name = {:via, Registry, {Registry.SIP.Transac, branch_id, :cast }}
-    transact_params = { transport_module, transport_pid, destip, dest_port, sipmsg, self(), timeout }
-    case GenServer.start_link(transact_module, transact_params, name: name ) do
+    transact_params = { sipmsg, self(), timeout }
+    case GenServer.start_link(tc_mod, transact_params, name: name ) do
       { :ok, trans_pid } ->
-        Logger.debug([ transid: branch_id, message: "Created #{transact_module} with PID #{inspect(trans_pid)}." ])
-        { :ok, trans_pid }
+        Logger.debug([ transid: branch_id, message: "Created #{tc_mod} with PID #{inspect(trans_pid)}." ])
+        { :ok, trans_pid, sipmsg }
 
       { code, err } ->
-        Logger.error("Failed to create #{transact_module} transaction. Error: #{code}.")
+        Logger.error("Failed to create #{tc_mod} transaction. Error: #{code}.")
         { code, err }
     end
   end
 
+  defp resolve_uri(uri) when is_binary(uri) do
+    case SIP.Uri.parse(uri) do
+      { :ok, parsed_uri } -> resolve_uri(parsed_uri)
+      _ -> :invalid_uri
+    end
 
-  @spec start_uac_transaction_with_template(binary(), list(), function(), map()) ::
-          {:error, any()}
-          | :invalidtemplate
-          | :no_transport_available
-          | {:ok, pid()}
+  end
+
+  defp resolve_uri(uri = %SIP.Uri{}) do
+    # Get the destination to resolve (check if a proxy has been configured)
+    { desturi, usesrv } = try do
+      { Application.fetch_env!(:elixip2, :proxyuri), Application.fetch_env!(:elixip2, :proxyusesrv ) }
+    rescue
+      ArgumentError ->
+        { uri, true }
+    end
+
+    case SIP.Transport.Selector.select_transport(desturi, usesrv) do
+      { :ok, tp_mod, tp_pid, destip, dport } ->
+        %SIP.Uri{ uri | destip: destip, destport: dport, tp_module: tp_mod, tp_pid: tp_pid }
+
+      err ->
+        Logger.error(module: __MODULE__,
+          message: "Failed to create transaction: #{err}. Cannot select transport for URI #{uri}.")
+        :no_transport_available
+    end
+  end
+
+  defp add_transport_info(sipmsg) when is_req(sipmsg) do
+    case resolve_uri(sipmsg.ruri) do
+      # URI resolved -> update ruri in SIP request with transport available
+      ruri when is_map(ruri) -> Map.put(sipmsg, :ruri, ruri)
+
+      # URI resolution failure
+      err ->
+        Logger.error(module: __MODULE__,
+          message: "Failed to create transaction: #{err}. Cannot select transport for request URI #{sipmsg.ruri}.")
+        :no_transport_available
+    end
+  end
+
+  @spec start_uac_transaction_with_template(binary(), list(), (... -> any), map()) :: {:error, any()} | :invalidtemplate | :no_transport_available | {:ok, pid()}
   @doc "Start a client transaction from a template"
   def start_uac_transaction_with_template(siptemplate, bindings, parse_error_cb, options) when is_map(options) do
     try do
-      { dest_uri, use_srv } = if Map.has_key?(options, :desturi) do
-        { options.desturi , options.usesrv }
-      else
-        { Application.fetch_env!(:elixip2, :proxyuri), Application.fetch_env!(:elixip2, :proxyusesrv ) }
+      { headers, _body } = case String.split(siptemplate, "\r\n\r\n", parts: 2) do
+        [ hs, bd ] ->
+          { String.split(hs, "\r\n"), bd }
+
+        [ _hs ] ->
+          { String.split(siptemplate, "\r\n"), nil }
       end
+      sipfirstline = SIP.MsgTemplate.apply_template(hd(headers), bindings)
+      case String.split(sipfirstline, " ", parts: 3) do
 
-      case SIP.Transport.Selector.select_transport(dest_uri, use_srv) do
-        { :ok, t_mod, t_pid, destip, destport } ->
-          { :ok, local_ip, local_port } = GenServer.call(t_pid, :getlocalipandport)
-          bindings = bindings ++ [ local_ip: :inet.ntoa(local_ip), local_port: local_port ]
+				# This is a SIP response
+				[ "SIP/2.0", _response_code, _reason ] ->
+					raise "Cannot start an UAC transaction with SIP response"
 
-          # Apply the bindings to the template to create the SIP message
-          msgstr = SIP.MsgTemplate.apply_template(siptemplate, bindings)
+				# This is a SIP request
+				[ _req, sip_uri, "SIP/2.0" ] ->
+            # Resolve URI and get local transport parameters
+            case resolve_uri(sip_uri) do
+              ruri when is_map(ruri) ->
+                { :ok, local_ip, local_port } = GenServer.call(ruri.tp_pid, :getlocalipandport)
 
-          # parse the SIP message
-          case SIPMsg.parse(msgstr, parse_error_cb) do
+                # Add local transport params to bindings
+                bindings = bindings ++ [ local_ip: NetUtils.ip2string(local_ip), local_port: local_port ]
 
-            # This is an invite message
-            { :ok, sipmsg } when is_map(sipmsg) and sipmsg.method == :INVITE ->
-              transaction_start_common(t_mod, t_pid, destip, destport, SIP.ICT, sipmsg, options.ringtimeout)
+                # Apply the bindings to the template to create the SIP message
+                msgstr = SIP.MsgTemplate.apply_template(siptemplate, bindings)
 
-            { :ok, sipmsg } when is_map(sipmsg) and sipmsg.method == false ->
-              raise "Cannot start an UAC transaction with SIP response"
+                # Create SIP message
+                case SIPMsg.parse(msgstr, parse_error_cb) do
+                  # Start transaction
+                  { :ok, sipmsg } when is_req(sipmsg) -> start_uac_transaction(sipmsg, 600)
 
-            { :ok, sipmsg } when is_map(sipmsg) ->
-              # TODO
-              raise "Non INVITE transaction are not yet supported"
+                  { :ok, sipmsg } when is_resp(sipmsg) -> raise "Cannot start an UAC transaction with SIP response"
 
-            { errcode, _ } ->
-              { :invalidtemplate, errcode }
-          end
+                end
 
-        _err -> :no_transport_available
+              _err ->
+                # Add log
+                raise "Invalid SIP template first line"
+            end
+
       end
     rescue
       ArgumentError ->
@@ -120,59 +168,41 @@ defmodule SIP.Transac do
         Logger.info("Specify %{ desturi: <dest SIP uri> usesrv: false | true } in the option arguments or ")
         Logger.info("Specify a SIP proxy in config.exs. Add a section:\nconfig :elixp2   proxyuri: <SIP proxy URI>\n   usesrv: false | true")
         :missingproxyconf
+
+      e -> reraise e, __STACKTRACE__
     end
   end
 
+
   @doc """
-  Start an INVITE client transaction (ICT)
+  Start an  client transaction (ICT)
   - first arg is the SIP message to send
   - second arg is the number of seconds the callshould be tried
   - it returns a pid that represent the transaction. The process is a GenServer
   """
-  def start_uac_transaction(sipmsg, ring_timeout) when is_this_req(sipmsg, :INVITE) do
-    { desturi, usesrv } = try do
-      { Application.fetch_env!(:elixip2, :proxyuri), Application.fetch_env!(:elixip2, :proxyusesrv ) }
-    rescue
-      ArgumentError ->
-        { sipmsg.ruri, true }
-    end
-
-
-    # Get an associated transport instance.
-    case SIP.Transport.Selector.select_transport(desturi, usesrv) do
-      { :ok, t_mod, t_pid, destip, dport } ->
-        transaction_start_common(t_mod, t_pid, destip, dport, SIP.ICT, sipmsg, ring_timeout)
-
-      _ ->
-        Logger.error(module: __MODULE__, message: "Failed to select transport for request URI #{sipmsg.ruri}.")
-        { :no_transport_available, nil }
-    end
-  end
-
-  def start_uac_transaction(sipmsg, _timeout) when is_map(sipmsg) and sipmsg.method == :ACK  do
+  def start_uac_transaction(sipmsg, _timeout) when is_this_req(sipmsg, :ACK)  do
     Logger.error(module: __MODULE__, message: "SIP request " <> Atom.to_string(sipmsg.method) <> "cannot create transactions")
     { :req_cannot_create_trans, nil }
   end
 
-  def start_uac_transaction(sipmsg, timeout) when is_map(sipmsg) and is_integer(timeout) and sipmsg.method != :INVITE do
+  def start_uac_transaction(sipmsg, _timeout) when is_resp(sipmsg)  do
+    Logger.error(module: __MODULE__, message: "SIP request " <> Atom.to_string(sipmsg.method) <> "cannot create transactions")
+    { :req_cannot_create_trans, nil }
+  end
 
-    # Get the destination (check if a proxy has been configured)
-    { desturi, usesrv } = try do
-      { Application.fetch_env!(:elixip2, :proxyuri), Application.fetch_env!(:elixip2, :proxyusesrv ) }
-    rescue
-      ArgumentError ->
-        { sipmsg.ruri, true }
-    end
+  def start_uac_transaction(sipmsg, timeout) when is_req(sipmsg) and is_integer(timeout) do
+    # Select the correct transaction module
+    tc_mod = if sipmsg.method == :INVITE, do: SIP.ICT, else: SIP.NICT
 
-    # Get an associated transport instance.
-    case SIP.Transport.Selector.select_transport(desturi, usesrv) do
-      { :ok, t_mod, t_pid, destip, dport } ->
-        transaction_start_common(t_mod, t_pid, destip, dport, SIP.NICT, sipmsg, timeout)
-
-      _ ->
-        Logger.error(module: __MODULE__,
-          message: "Failed to create transaction. Cannot select transport for request URI #{sipmsg.ruri}.")
-        { :no_transport_available, nil }
+    # If SIP message contains the resolved destination, just do it
+    if SIP.Uri.has_tp_info(sipmsg.ruri) do
+      transaction_start_common(tc_mod, sipmsg, timeout)
+    else
+      # Resolve R-URI
+      case add_transport_info(sipmsg) do
+        newmsg when is_req(newmsg) -> transaction_start_common(tc_mod, newmsg, timeout)
+        err -> err
+      end
     end
   end
 
