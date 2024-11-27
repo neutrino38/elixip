@@ -217,6 +217,10 @@ defmodule SIP.Uri do
 		"sip:" <> user <> "@" <> host
 	end
 
+	defp serialize_core_uri( "sip:", nil, host, nil ) do
+		"sip:" <> host
+	end
+
 	defp serialize_core_uri( "sip:", user, host, nil ) do
 		"sip:" <> user <> "@" <> host
 	end

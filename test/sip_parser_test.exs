@@ -1,5 +1,5 @@
-defmodule SIP.Test.Parser do
-  use ExUnit.Case
+defmodule SIP.Test.Uri do
+	use ExUnit.Case
   doctest SIP.Uri
 
   test "Parse an URI that has only a domain" do
@@ -77,6 +77,17 @@ defmodule SIP.Test.Parser do
 		assert code == :ok
 		assert uristr == "\"om%C3%A9+t%C3%BCr\" <sip:simple@domain.fr:50>;rport;transport=TCP"
 	end
+
+	test "Serialize a SIP URI with a domain only with to_string " do
+		uri = %SIP.Uri{ domain: "domaine.fr" }
+		assert to_string(uri) == "sip:domaine.fr"
+	end
+end
+
+defmodule SIP.Test.Parser do
+  use ExUnit.Case
+  doctest SIPMsg
+
   test "Load and parse a REGISTER message" do
     { code, msg } = File.read("test/SIP-REGISTER.txt")
 		assert code == :ok
