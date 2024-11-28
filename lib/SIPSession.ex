@@ -176,6 +176,7 @@ defmodule SIP.Session do
       }
 
       %{
+        "Max-Forwards" => "70",
         method: :REGISTER,
         ruri: SIP.Context.to(sip_ctx, nil),
         from: SIP.Context.from(sip_ctx),
@@ -193,10 +194,13 @@ defmodule SIP.Session do
         "Accept-Encoding" => "UTF-8",
         "Accept-Language" => "en",
         "Supported" => "OPTIONS, REGISTER",
+        "Max-Forwards" => "70",
         method: :OPTIONS,
         ruri: %SIP.Uri{ domain: SIP.Context.get(sip_ctx, :domain) },
         from: SIP.Context.from(sip_ctx),
         to: SIP.Context.from(sip_ctx),
+        contact: %SIP.Uri{ userpart: SIP.Context.get(sip_ctx, :username),
+          domain: "0.0.0.0", params: %{ "expires" => "15" } },
         useragent: "Elixipp/0.1",
         callid: nil,
         contentlength: 0
