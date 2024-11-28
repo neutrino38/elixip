@@ -57,6 +57,10 @@ defmodule SIP.Test.Register do
     { :ok, _config_pid } = SIP.Session.ConfigRegistry.start()
     # Adapt to actual client DNS config
     Application.put_env(:elixip2, :nameserver, { 172,21,100,8 })
+
+    # Force SIP proxy / registrar
+    Application.put_env(:elixip2, :proxyuri, %SIP.Uri{ domain: "testsip.djanah.com", scheme: "sip:", port: 5060 })
+    Application.put_env(:elixip2, :proxyusesrv, false)
     :ok
   end
 
@@ -143,8 +147,6 @@ defmodule SIP.Test.Register do
       domain: "visioassistance.net"
     }
 
-    proxyuri = %SIP.Uri{ domain: "sip.visioassistance.net", scheme: "sip:", port: 5060 }
-    Application.put_env(:elixip2, :proxyuri, proxyuri)
     ctx_set :passwd, "crtv2user1"
 
     send_REGISTER 600
@@ -159,7 +161,7 @@ defmodule SIP.Test.Register do
 
     ^sip_ctx = receive do
       { 200, rsp, _trans_pid, _dialog_pid } ->
-        IO.puts(inspect(rsp.contact.params))
+        # IO.puts(inspect(rsp.contact.params))
         assert SIP.Uri.get_uri_param(rsp.contact, "expires") == {:ok, "600"}
         sip_ctx
 
@@ -185,8 +187,6 @@ defmodule SIP.Test.Register do
       domain: "visioassistance.net"
     }
 
-    proxyuri = %SIP.Uri{ domain: "sip.visioassistance.net", scheme: "sip:", port: 5060 }
-    Application.put_env(:elixip2, :proxyuri, proxyuri)
     ctx_set :passwd, "crtv2user1"
 
     send_OPTIONS()
