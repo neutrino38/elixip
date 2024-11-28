@@ -38,13 +38,13 @@ alias SIP.NetUtils
     destip = if is_tuple(destip), do: NetUtils.ip2string(destip), else: destip
 
     # Lookup a process matching the existing instance name
-    Logger.debug("Looking for transport instance #{instance_name}")
+    Logger.debug([ module: __MODULE__,  message: "Looking for transport instance #{instance_name} for dest #{destip}:#{port}"])
     case Registry.lookup(Registry.SIPTransport, instance_name) do
       [] ->
         # No such instance. Start a new transport
         name = { :via, Registry, {Registry.SIPTransport, instance_name}}
         { :ok, t_pid} = GenServer.start(t_mod, { destip, port } , name: name)
-        Logger.debug("Started transport instance #{t_mod} PID #{inspect(t_pid)} -> #{destip}:#{port}")
+        Logger.debug("Started transport #{inspect(t_mod)} process with PID #{inspect(t_pid)}")
         { :ok, t_pid}
 
         # Found one. Start return the pid

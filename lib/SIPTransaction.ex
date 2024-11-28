@@ -89,6 +89,8 @@ alias SIP.NetUtils
       { Application.fetch_env!(:elixip2, :proxyuri), Application.fetch_env!(:elixip2, :proxyusesrv ) }
     rescue
       ArgumentError ->
+        Logger.debug(module: __MODULE__,
+          message: "No SIP proxy configured. Using R-URI domain #{uri.domain} and SRV")
         { uri, true }
     end
 

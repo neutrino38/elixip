@@ -30,7 +30,7 @@ defmodule SIP.Transport do
 
     new_contact = if not is_nil(old_contact) do
       # Transfert contact parameters if specified by the caller
-      %SIP.Uri{ new_contact | params: old_contact.params }
+      %SIP.Uri{ new_contact | params: old_contact.params, userpart: old_contact.userpart }
     else
       new_contact
     end
