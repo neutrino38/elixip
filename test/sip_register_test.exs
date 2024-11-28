@@ -55,7 +55,9 @@ defmodule SIP.Test.Register do
     :ok = SIP.Transport.Selector.start()
     :ok = SIP.Dialog.start()
     { :ok, _config_pid } = SIP.Session.ConfigRegistry.start()
-    # Adapt to actual client DNS config
+
+
+    # Force DNS server. Adapt to actual client DNS config
     Application.put_env(:elixip2, :nameserver, { 172,21,100,8 })
 
     # Force SIP proxy / registrar
@@ -177,8 +179,6 @@ defmodule SIP.Test.Register do
   end
 
   test "Client OPTIONS UDP" do
-    # Adapt to actual client DNS config
-    Application.put_env(:elixip2, :nameserver, { 172,21,100,8 })
 
     sip_ctx = %SIP.Context{
       username: "33970262547",
@@ -193,11 +193,23 @@ defmodule SIP.Test.Register do
     assert ctx_get(:lasterr) == :ok
 
     ^sip_ctx = receive do
-      { response, _rsp, _trans_pid, _dialog_pid } ->
-        IO.puts(response)
+      { _response, _rsp, _trans_pid, _dialog_pid } ->
         sip_ctx
     after
       1_000 -> assert(false, "Did not receive 200 OK on time")
-   end
+    end
+    Process.sleep(1000)
+
+    # Send a second option
+    send_OPTIONS()
+    assert ctx_get(:lasterr) == :ok
+
+    ^sip_ctx = receive do
+      { _response, _rsp, _trans_pid, _dialog_pid } ->
+        sip_ctx
+    after
+      1_000 -> assert(false, "Did not receive 200 OK on time")
+    end
+
   end
 end

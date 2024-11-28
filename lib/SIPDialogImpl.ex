@@ -66,11 +66,12 @@ Use the API provided by SIP.Dialog module
 
   # Apply fromtag, totag, callid and CSeq
   # Todo : fix route, request URI ...
-  defp fix_outbound_request(state, req) when is_req(req) do
+  defp fix_outbound_request(state, req, is_initial \\ false) when is_req(req) do
     newreq = Map.put(req, :cseq, [ state.cseq, req.method ])
              |> Map.put( :callid, state.callid )
              |> set_fromtag(state.fromtag)
-             |> set_totag(state.totag)
+
+    newreq = if not is_initial and not (req.method in [ :OPTIONS ]), do: set_totag(newreq, state.totag), else: newreq
 
     # Increment cseq for outbound and store modified request
     msg =  if state.msg == nil, do: newreq, else: state.msg
@@ -118,14 +119,13 @@ Use the API provided by SIP.Dialog module
   # Dialog started by an outbound request
   def init({ req, :outbound, pid, timeout, debug, dialog_id }) when is_req(req) do
     { fromtag, callid, totag } = dialog_id
-    # Generate totag if needed
-    totag = if is_nil(totag), do: generate_from_or_to_tag(), else: totag
+
 
     state = %SIP.DialogImpl{ msg: req, direction: :outbound, app: pid, expirationtimer: timeout, debuglog: debug,
-    transactions: [], fromtag: fromtag, callid: callid, totag: totag,
+    transactions: [], fromtag: fromtag, callid: callid, totag: nil,
     allows: allows(req.method) }
 
-    { state, req } = fix_outbound_request(state, req)
+    { state, req } = fix_outbound_request(state, req, true)
     try do
       #In case of an outbound dialog, start a, UAC transaction
       case SIP.Transac.start_uac_transaction( req, timeout ) do
@@ -243,14 +243,25 @@ Use the API provided by SIP.Dialog module
 
   # For SIP responses
   @impl true
-  def handle_info({ :response, msg, transact_pid }, state ) when is_resp(msg) do
-    if transact_pid in state.transactions do
-      send(state.app, { msg.response, msg, transact_pid, self() })
+  def handle_info({ :response, rsp, transact_pid }, state ) when is_resp(rsp) do
+    state = if transact_pid in state.transactions do
+      { _rc, totag } = SIP.Uri.get_uri_param(rsp.to, "tag")
+
+      state = if is_nil(state.totag) and not is_nil(totag) do
+        # Case when the dialog has been created by an outbound request
+        # Get the to tag from the first answer
+        %SIP.DialogImpl{ state | totag: totag }
+      else
+        state
+      end
+      send(state.app, { rsp.response, rsp, transact_pid, self() })
+      state
     else
       Logger.warning([
         dialogpid: "#{inspect(self())}",  module: __MODULE__,
-        message: "SIP response #{msg.response} from a transaction #{inspect(transact_pid)} " <>
+        message: "SIP response #{rsp.response} from a transaction #{inspect(transact_pid)} " <>
                  "that is not attached to the dialog." ])
+      state
     end
     { :noreply, state }
   end

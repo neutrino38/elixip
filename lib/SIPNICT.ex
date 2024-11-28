@@ -141,8 +141,12 @@ defmodule SIP.NICT do
         Logger.info([ transid: sip_resp.transid,  module: __MODULE__,
                     message: "#{state.msg.method} answered with #{sip_resp.response}"])
         # Update status, the to header of the request with the to of the response to get the to tag
-        state = %{ state | msg: Map.put(state.msg, :to, sip_resp.to), state: :confirmed }
-        Map.put(state, :remotecontact, sip_resp.contact) |> Map.put(:route, routeset)
+        state = %{ state | msg: Map.put(state.msg, :to, sip_resp.to), state: :confirmed } |> Map.put(:route, routeset)
+        if Map.has_key?(sip_resp, :contact) do
+          Map.put(state, :remotecontact, sip_resp.contact)
+        else
+          state
+        end
 
       state.state == :confirmed ->
         state
