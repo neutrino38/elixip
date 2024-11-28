@@ -260,7 +260,7 @@ User-Agent: Elixip 0.2.0
         assert(false, "timerB expired before 200 OK")
 
       bla ->
-        assert(false, "Received unexpected bla")
+        assert(false, "Received unexpected #{inspect(bla)}")
 
     after
       5_000 -> assert(false, "We did not receive the 200 OK on time")
