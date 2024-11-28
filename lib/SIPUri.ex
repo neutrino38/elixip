@@ -189,6 +189,10 @@ defmodule SIP.Uri do
 		end
 	end
 
+	defp serialize_core_uri( scheme, user, host, port ) when is_tuple(host) do
+		serialize_core_uri(scheme, user, SIP.NetUtils.ip2string(host), port)
+	end
+
 	defp serialize_core_uri( "sips:", nil, host, 5061 ) do
 		"sips:" <> host
 	end
@@ -205,30 +209,23 @@ defmodule SIP.Uri do
 		"sips:" <> user <> "@" <> host <> ":" <> Integer.to_string(port)
 	end
 
-	defp serialize_core_uri( "sip:", nil, host, 5060 ) when is_tuple(host) do
-		"sip:" <> SIP.NetUtils.ip2string(host)
-	end
-
 	defp serialize_core_uri( "sip:", nil, host, 5060 ) when is_binary(host) do
 		"sip:" <> host
 	end
 
-	defp serialize_core_uri( "sip:", user, host, 5060 ) do
+
+	defp serialize_core_uri( "sip:", user, host, 5060 ) when is_binary(host) do
 		"sip:" <> user <> "@" <> host
 	end
 
-	defp serialize_core_uri( "sip:", nil, host, nil ) do
+	defp serialize_core_uri( "sip:", nil, host, nil ) when is_binary(host) do
 		"sip:" <> host
 	end
+
 
 	defp serialize_core_uri( "sip:", user, host, nil ) do
 		"sip:" <> user <> "@" <> host
 	end
-
-	defp serialize_core_uri( "sip:", user, host, port ) when is_tuple(host) do
-		"sip:" <> user <> "@" <> SIP.NetUtils.ip2string(host) <> ":" <> Integer.to_string(port)
-	end
-
 
 	defp serialize_core_uri( "sip:", user, host, port ) when is_binary(host) do
 		"sip:" <> user <> "@" <> host <> ":" <> Integer.to_string(port)

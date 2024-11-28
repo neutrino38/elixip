@@ -82,6 +82,19 @@ defmodule SIP.Test.Uri do
 		uri = %SIP.Uri{ domain: "domaine.fr" }
 		assert to_string(uri) == "sip:domaine.fr"
 	end
+
+	test "Serialize a SIP URI with a domain as IP addresses " do
+		uri = %SIP.Uri{ domain: { 1, 2, 3, 4} }
+		assert to_string(uri) == "sip:1.2.3.4"
+		uri = %SIP.Uri{ userpart: "toto", domain: { 1, 2, 3, 4} }
+		assert to_string(uri) == "sip:toto@1.2.3.4"
+		uri = %SIP.Uri{ userpart: "toto", domain: { 1, 2, 3, 4}, port: 5070 }
+		assert to_string(uri) == "sip:toto@1.2.3.4:5070"
+		uri = %SIP.Uri{ userpart: "toto", domain: { 1, 2, 3, 4}, port: 5070, params: %{ "transport" => "WSS"}}
+		assert to_string(uri) == "sip:toto@1.2.3.4:5070;transport=WSS"
+		uri = %SIP.Uri{ userpart: "toto", domain: { 1, 2, 3, 4}, port: 5070, scheme: "sips:" }
+		assert to_string(uri) == "sips:toto@1.2.3.4:5070"
+	end
 end
 
 defmodule SIP.Test.Parser do
