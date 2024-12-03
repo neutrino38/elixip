@@ -48,7 +48,16 @@ alias SIP.NetUtils
         { :ok, t_pid}
 
         # Found one. Start return the pid
-      [{ t_pid, _ }] -> { :ok, t_pid }
+      [{ t_pid, _ }] ->
+        if Process.alive?(t_pid) do
+          { :ok, t_pid }
+        else
+          Logger.warning("Found transport process with PID #{inspect(t_pid)} but it is dead.")
+          name = { :via, Registry, {Registry.SIPTransport, instance_name}}
+          { :ok, t_pid} = GenServer.start(t_mod, { destip, port } , name: name)
+          Logger.debug("Started transport #{inspect(t_mod)} process with PID #{inspect(t_pid)}")
+          { :ok, t_pid }
+        end
     end
   end
 

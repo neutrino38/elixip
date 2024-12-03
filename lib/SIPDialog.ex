@@ -174,7 +174,16 @@ defmodule SIP.Dialog do
     GenServer.call(dialog_pid, { :newreq, req })
   end
 
+  @spec challenge(pid(), map(), 401 | 407, any()) :: any()
   def challenge(dialog_pid, req, resp_code, realm) when resp_code in [ 401, 407 ] and is_req(req) do
     reply(dialog_pid, req, resp_code, nil, realm)
+  end
+
+  def broadcast(msg_to_send) do
+    # récupérer l'ensemble des PID
+    pids = Registry.select(Registry.SIPDialog, [{{:_, :"$1", :_}, [], [:"$1"]}])
+    for pid <- pids do
+      send(pid, msg_to_send)
+    end
   end
 end

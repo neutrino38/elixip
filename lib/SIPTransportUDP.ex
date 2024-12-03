@@ -95,7 +95,7 @@ defmodule SIP.Transport.UDP do
   @impl true
   def terminate(_reason, state) do
     if not is_nil(state.socket) do
-      :gen_udp.close(state.socket)
+      Socket.close(state.socket)
     end
   end
 end
