@@ -18,8 +18,11 @@ defmodule SIP.Transport.TCP do
     sock = Socket.TCP.connect!(state.destip, state.destport, [ timeout: 10000, mode: :active ])
     # Optain local IP and port
     {local_ip, local_port} = Socket.local!(sock)
+
+    #Bind the socket to the GenServer process
     Socket.process!(sock, self())
 
+    # Return the local IP and port inside the state map.
     Map.put(state, :localip, local_ip) |> Map.put(:localport, local_port)
   end
 
