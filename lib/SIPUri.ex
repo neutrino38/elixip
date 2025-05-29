@@ -109,7 +109,15 @@ defmodule SIP.Uri do
 							plist -> plist
 						end
 						params = parse_uri_parameters( param_list )
-						{ :ok, Map.put(core_uri, :params, params) }
+
+						#Add params to URI and fix proto field
+						uri = %SIP.Uri{ core_uri | params: params, proto: get_transport(core_uri) }
+						if uri.scheme == "sips" and uri.proto != "TLS" do
+							raise "Invalid URI. sips is specified and transport is not TLS"
+						else
+							{ :ok, uri }
+						end
+
 
 					{ code, core_uri } -> { code, core_uri }
 				end
@@ -184,7 +192,7 @@ defmodule SIP.Uri do
 	def get_transport(uri = %SIP.Uri{}) do
 		case get_uri_param(uri, "transport") do
 			{ :no_such_param, nil } ->
-				if uri.scheme == "sips:", do: "TLS", else: "UDP"
+				if uri.scheme == "sips:", do: "TLS", else: uri.proto
 				{ :ok, value } -> String.upcase(value)
 		end
 	end
@@ -255,11 +263,18 @@ defmodule SIP.Uri do
 				uri.domain,
 				uri.port )
 
-		#URI.encode_www_form()
-		uri_str = if uri.displayname != nil do
-			"\"" <> URI.encode_www_form(uri.displayname) <> "\" <" <> core_uri_str <> ">;" <> serialize_params(uri.params)
+		# add transport in params if needed
+		params = if Map.has_key?(uri.params, "transport") or uri.proto == "UDP" do
+			uri.params
 		else
-			core_uri_str <> ";" <> serialize_params(uri.params)
+			Map.put(uri.params, "transport", uri.proto)
+		end
+		#URI.encode_www_form()
+
+		uri_str = if uri.displayname != nil do
+			"\"" <> URI.encode_www_form(uri.displayname) <> "\" <" <> core_uri_str <> ">;" <> serialize_params(params)
+		else
+			core_uri_str <> ";" <> serialize_params(params)
 		end
 		{ :ok, String.trim_trailing(uri_str, ";") }
 	end
