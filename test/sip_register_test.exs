@@ -4,6 +4,14 @@ defmodule SIP.Test.Register do
   doctest SIP.Dialog
   use SIP.Session.RegisterUAC
 
+  # Account to use for tests
+  @username "33970262547"
+  @authusername "33970262547"
+  @displayname "Test User"
+  @domain "visioassistance.net"
+  @proxy "testsip.djanah.com"
+  @passwd "crtv2user1"
+
   defmodule TestRegistrar do
     use SIP.Session.Registrar
     require Logger
@@ -61,7 +69,7 @@ defmodule SIP.Test.Register do
     Application.put_env(:elixip2, :nameserver, { 172,21,100,8 })
 
     # Force SIP proxy / registrar
-    Application.put_env(:elixip2, :proxyuri, %SIP.Uri{ domain: "testsip.djanah.com", scheme: "sip:", port: 5060 })
+    Application.put_env(:elixip2, :proxyuri, %SIP.Uri{ domain: @proxy, scheme: "sip:", port: 5060 })
     Application.put_env(:elixip2, :proxyusesrv, false)
     :ok
   end
@@ -143,13 +151,13 @@ defmodule SIP.Test.Register do
   test "Client Register using UDP" do
 
     sip_ctx = %SIP.Context{
-      username: "33970262547",
-      authusername: "33970262547",
-      displayname: "Test User",
-      domain: "visioassistance.net"
+      username: @username,
+      authusername: @authusername,
+      displayname: @displayname,
+      domain: @domain
     }
 
-    ctx_set :passwd, "crtv2user1"
+    ctx_set :passwd, @passwd
 
     send_REGISTER 600
     assert ctx_get(:lasterr) == :ok
@@ -181,13 +189,14 @@ defmodule SIP.Test.Register do
   test "Client OPTIONS UDP" do
 
     sip_ctx = %SIP.Context{
-      username: "33970262547",
-      authusername: "33970262547",
-      displayname: "Test User",
-      domain: "visioassistance.net"
+      username: @username,
+      authusername: @authusername,
+      displayname: @displayname,
+      domain: @domain
     }
 
-    ctx_set :passwd, "crtv2user1"
+
+    ctx_set :passwd, @passwd
 
     send_OPTIONS()
     assert ctx_get(:lasterr) == :ok
@@ -212,4 +221,45 @@ defmodule SIP.Test.Register do
     end
 
   end
+
+    test "Client Register using TCP" do
+
+    sip_ctx = %SIP.Context{
+      username: @username,
+      authusername: @authusername,
+      displayname: @displayname,
+      domain: @domain
+    }
+
+    ctx_set :passwd, @passwd
+
+    Application.put_env(:elixip2, :proxyuri, %SIP.Uri{ domain: @proxy, proto: "TCP", scheme: "sip:", port: 5060 })
+
+    send_REGISTER 600
+    assert ctx_get(:lasterr) == :ok
+
+
+    ^sip_ctx = receive do
+      { 401, rsp, _trans_pid, _dialog_pid } ->
+        send_auth_REGISTER(rsp, 600)
+        sip_ctx
+    end
+
+    ^sip_ctx = receive do
+      { 200, rsp, _trans_pid, _dialog_pid } ->
+        # IO.puts(inspect(rsp.contact.params))
+        assert SIP.Uri.get_uri_param(rsp.contact, "expires") == {:ok, "600"}
+        sip_ctx
+
+      { resp_code, _rsp, _trans_pid, _dialog_pid } when is_integer(resp_code) ->
+        assert(false, "Received unexpected SIP response #{resp_code}")
+
+      _ -> assert(false, "Received unexpected msg")
+
+    after
+      1_000 -> assert(false, "Did not receive 200 OK on time")
+    end
+
+  end
+
 end
