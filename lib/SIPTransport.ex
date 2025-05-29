@@ -22,6 +22,7 @@ defmodule SIP.Transport do
     end
 
     # Parse the first line and if this is Content-Legnth return the value
+    # Use recursion to parse all the lines
     defp parse_and_get_clen(lines) do
       [ first_line | rest ] = lines
       [ header, val ] = String.split(first_line, ": ", parts: 2)
