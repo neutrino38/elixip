@@ -17,10 +17,10 @@ defmodule SIP.Transport.TCP do
   defp connect(state) do
     sock = Socket.TCP.connect!(state.destip, state.destport, [ timeout: 10000, mode: :active ])
     # Optain local IP and port
-    {:ok, {local_ip, local_port}} = Socket.local!(sock)
+    {local_ip, local_port} = Socket.local!(sock)
     Socket.process!(sock, self())
 
-    %{ state | socket: sock, localip: local_ip, localport: local_port }
+    Map.put(state, :localip, local_ip) |> Map.put(:localport, local_port)
   end
 
   @impl true
