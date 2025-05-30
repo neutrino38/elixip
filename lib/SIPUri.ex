@@ -9,6 +9,7 @@ defmodule SIP.Uri do
 		proto: "UDP",
 		destip: nil, # IP to be used
 		destport: 0, # port to be used
+		destproto: nil,
 		tp_module: nil, # transport module
 		tp_pid: nil, # transport PID
 		params: %{}
@@ -168,18 +169,17 @@ defmodule SIP.Uri do
 
 	@doc "Obtain a parameter from an URI"
 	@spec get_uri_param(%SIP.Uri{} | binary(), binary()) :: { :ok, binary() } | { :no_such_param, nil } | { atom(), nil }
-	def get_uri_param(sip_uri, param) when is_map(sip_uri) do
-		cond do
-			!Map.has_key?(sip_uri, :params) -> { :uri_without_params, nil }
-			Map.has_key?(sip_uri.params, param) -> { :ok, sip_uri.params[param] }
-			true -> { :no_such_param, nil }
-		end
-	end
-
 	def get_uri_param(sip_uri, param) when is_binary(sip_uri) do
 		case SIP.Uri.parse(sip_uri) do
 			{ :ok, parsed_uri } -> get_uri_param(parsed_uri, param)
 			{ code, _dump } -> { code, nil }
+		end
+	end
+
+	def get_uri_param(sip_uri = %SIP.Uri{}, param) do
+		case Map.get(sip_uri.params, param) do
+			nil -> { :no_such_param, nil }
+			val -> { :ok, val }
 		end
 	end
 
@@ -230,11 +230,14 @@ defmodule SIP.Uri do
 	defp serialize_core_uri( "sip:", nil, host, nil ) when is_binary(host) do
 		"sip:" <> host
 	end
-
+	defp serialize_core_uri( "sip:", nil, host, port ) when is_binary(host) do
+		"sip:" <> host <> ":" <> Integer.to_string(port)
+	end
 
 	defp serialize_core_uri( "sip:", user, host, nil ) do
 		"sip:" <> user <> "@" <> host
 	end
+
 
 	defp serialize_core_uri( "sip:", user, host, port ) when is_binary(host) do
 		"sip:" <> user <> "@" <> host <> ":" <> Integer.to_string(port)
@@ -260,7 +263,7 @@ defmodule SIP.Uri do
 	def serialize( uri = %SIP.Uri{} ) do
 		core_uri_str = serialize_core_uri(
 				uri.scheme,
-				if Map.has_key?(uri, :userpart) do uri.userpart else nil end,
+				Map.get(uri, :userpart),
 				uri.domain,
 				uri.port )
 

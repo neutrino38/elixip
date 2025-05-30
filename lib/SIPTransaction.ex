@@ -75,28 +75,8 @@ alias SIP.NetUtils
     end
   end
 
-  defp resolve_uri(uri) when is_binary(uri) do
-    case SIP.Uri.parse(uri) do
-      { :ok, parsed_uri } -> resolve_uri(parsed_uri)
-      _ -> :invalid_uri
-    end
-
-  end
-
-  defp resolve_uri(uri = %SIP.Uri{}) do
-    case SIP.Transport.Selector.select_transport(uri, true) do
-      { :ok, tp_mod, tp_pid, destip, dport } ->
-        %SIP.Uri{ uri | destip: destip, destport: dport, tp_module: tp_mod, tp_pid: tp_pid }
-
-      err ->
-        #Logger.debug(module: __MODULE__,
-        #  message: "Failed to create transaction: error=#{err}.")
-        :no_transport_available
-    end
-  end
-
   defp add_transport_info(sipmsg) when is_req(sipmsg) do
-    case resolve_uri(sipmsg.ruri) do
+    case SIP.Transport.Selector.select_transport(sipmsg.ruri) do
       # URI resolved -> update ruri in SIP request with transport available
       ruri when is_map(ruri) -> Map.put(sipmsg, :ruri, ruri)
 
@@ -134,7 +114,7 @@ alias SIP.NetUtils
 				# This is a SIP request
 				[ _req, sip_uri, "SIP/2.0" ] ->
             # Resolve URI and get local transport parameters
-            case resolve_uri(sip_uri) do
+            case  SIP.Transport.Selector.select_transport(sip_uri) do
               ruri when is_map(ruri) ->
                 { :ok, local_ip, local_port } = GenServer.call(ruri.tp_pid, :getlocalipandport)
 

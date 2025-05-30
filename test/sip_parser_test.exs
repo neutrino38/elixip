@@ -81,6 +81,8 @@ defmodule SIP.Test.Uri do
 	test "Serialize a SIP URI with a domain only with to_string " do
 		uri = %SIP.Uri{ domain: "domaine.fr" }
 		assert to_string(uri) == "sip:domaine.fr"
+		uri = %SIP.Uri{ userpart: nil, domain: "djanah.com", port: 5061, scheme: "sip:", proto: "TLS" }
+		assert to_string(uri) == "sip:djanah.com:5061;transport=TLS"
 	end
 
 	test "Serialize a SIP URI with a domain as IP addresses " do
@@ -94,6 +96,7 @@ defmodule SIP.Test.Uri do
 		assert to_string(uri) == "sip:toto@1.2.3.4:5070;transport=WSS"
 		uri = %SIP.Uri{ userpart: "toto", domain: { 1, 2, 3, 4}, port: 5070, scheme: "sips:" }
 		assert to_string(uri) == "sips:toto@1.2.3.4:5070"
+
 	end
 end
 

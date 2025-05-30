@@ -211,9 +211,10 @@ User-Agent: Elixip 0.2.0
   end
 
   test "Selectionne le transport mockup" do
-    { :ok, t_mod, _t_pid, destip, 5080 } = SIP.Transport.Selector.select_transport("sip:90901@visio5.visioassistance.net:5090;unittest=1", false)
-    assert t_mod == SIP.Test.Transport.UDPMockup
-    assert destip == {1,2,3,4}
+    newuri = SIP.Transport.Selector.select_transport("sip:90901@visio5.visioassistance.net:5090;unittest=1")
+    assert newuri.tp_module == SIP.Test.Transport.UDPMockup
+    assert newuri.destip == {1,2,3,4}
+    assert newuri.destport == 5080
   end
 
   # Big transaction test

@@ -62,6 +62,12 @@ alias SIP.NetUtils
     end
   end
 
+
+
+  def resolve(uri = %SIP.Uri{}, _usesrv) when uri.destip != nil and uri.destport != 0 do
+    { uri.destip, uri.destport }
+  end
+
   def resolve(uri = %SIP.Uri{}, true) do
     case resolve_srv_multiple(uri, 0) do
       # SRV resolution successful but host returned in SRV record could not be resolved
@@ -84,7 +90,7 @@ alias SIP.NetUtils
     end
   end
 
-  def resolve_v6(uri = %SIP.Uri{}) do
+  defp resolve_v6(uri = %SIP.Uri{}) do
     case :inet.getaddr(String.to_charlist(uri.domain), :inet6) do
       { :ok, ip } -> { ip, uri.port }
       { :error, :nxdomain } -> :nxdomain
@@ -92,6 +98,27 @@ alias SIP.NetUtils
     end
   end
 
+  def resolve_and_add_dest(uri = %SIP.Uri{}) do
+    { desturi, usesrv } = try do
+      { Application.fetch_env!(:elixip2, :proxyuri), Application.fetch_env!(:elixip2, :proxyusesrv ) }
+    rescue
+      ArgumentError ->
+        # No SIP proxy configured. Using R-URI domain
+        Logger.debug(module: __MODULE__, message: "no SIP proxy configured");
+        { uri, false }
+    end
+    Logger.debug(module: __MODULE__, message: "resolving #{desturi} with trysrv=#{usesrv}");
+    case resolve(desturi, usesrv) do
+      { :error, err } ->
+        Logger.debug(module: __MODULE__, message: "resolution error #{err}")
+        :error
+
+      :nxdomain ->
+        Logger.debug(module: __MODULE__, message: "resolution failed")
+        :nxdomain
+      { ip, port } -> %SIP.Uri{ uri | destip: ip, destport: port, destproto: SIP.Uri.get_transport(desturi) }
+    end
+  end
 
   def get_dns_default_dns_server() do
     dns_str = case System.get_env("OS") do
