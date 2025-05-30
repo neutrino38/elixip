@@ -1,8 +1,8 @@
 defmodule SIP.Transport.UDP do
-  alias SIP.NetUtils
   use GenServer
   require Logger
   require Socket.UDP
+  require SIP.Transport.ImplHelpers
 
   @transport_str "udp"
   @default_local_port 5060
@@ -82,27 +82,7 @@ defmodule SIP.Transport.UDP do
 # Receving an UDP datagram
   @impl true
   def handle_info({:udp, socket, ip, port, message}, state) do
-    case SIP.Transac.process_sip_message(message) do
-      :ok -> { :noreply, state }
-
-      { :no_matching_transaction, parsed_msg } ->
-        if is_atom(parsed_msg.method) do
-          # Obtain local IP used to receive the message
-          { localip, localport } = case :inet.sockname(socket) do
-            { :ok, {lip, lport}} -> {lip, lport}
-            {:error, _reason} -> {state.localip, state.localport}
-          end
-          # We need to start a new transaction
-          SIP.Transac.start_uas_transaction(parsed_msg, { localip, localport, "UDP", SIP.Transport.UDP, self(), state.upperlayer } , { ip, port })
-        else
-          Logger.error("Received a SIP #{parsed_msg.response} response from #{ip}:#{port} not linked to any transaction. Droping it")
-          { :noreply, state }
-        end
-
-      _ ->
-        Logger.error("Received an invalid SIP message from #{NetUtils.ip2string(ip)}:#{port}")
-        { :noreply, state }
-    end
+    SIP.Transport.ImplHelpers.process_incoming_message(state, message, @transport_str, __MODULE__, socket, ip, port)
   end
 
   @impl true

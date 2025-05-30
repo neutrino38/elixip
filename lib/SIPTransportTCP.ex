@@ -5,7 +5,8 @@ defmodule SIP.Transport.TCP do
   alias SIP.NetUtils
   use GenServer
   require Logger
-  require Socket.UDP
+  require Socket.TCP
+  require SIP.Transport.ImplHelpers
 
   @transport_str "tcp"
   # @default_local_port 5060
@@ -14,18 +15,6 @@ defmodule SIP.Transport.TCP do
   @spec is_reliable() :: boolean()
   def is_reliable, do: true
 
-  defp connect(state) do
-    sock = Socket.TCP.connect!(state.destip, state.destport, [ timeout: 10000, mode: :active ])
-    # Optain local IP and port
-    {local_ip, local_port} = Socket.local!(sock)
-
-    #Bind the socket to the GenServer process
-    Socket.process!(sock, self())
-
-    # Return the local IP and port inside the state map.
-    Map.put(state, :localip, local_ip) |> Map.put(:localport, local_port) |> Map.put(:socket, sock)
-  end
-
   @impl true
   def init({ dest_ip, dest_port}) do
     initial_state = %{ t_isreliable: true,
@@ -33,8 +22,7 @@ defmodule SIP.Transport.TCP do
       buffer: %SIP.Transport.Depack{}  }
 
     try do
-      state = connect(initial_state)
-
+      state = SIP.Transport.ImplHelpers.connect(initial_state, :tcp)
       { :ok, state }
     rescue
       err in Socket.Error ->
@@ -77,34 +65,15 @@ defmodule SIP.Transport.TCP do
   end
 
 
-  def process_incoming_message(state, message, tp_name, tp_mod) do
-    case SIP.Transac.process_sip_message(message) do
-      :ok -> { :noreply, state }
-
-      { :no_matching_transaction, parsed_msg } ->
-        if is_atom(parsed_msg.method) do
-          # We need to start a new transaction
-          SIP.Transac.start_uas_transaction(parsed_msg,
-              { state.localip, state.localport, tp_name, tp_mod, self(), state.upperlayer } , { state.destip, state.destport })
-        else
-          Logger.error("Received a SIP #{parsed_msg.response} response from #{state.destip}:#{state.destport} not linked to any transaction. Droping it")
-          { :noreply, state }
-        end
-
-      _ ->
-        Logger.error("Received an invalid SIP message from #{NetUtils.ip2string(state.destip)}:#{state.destport}")
-        { :noreply, state }
-    end
-  end
 
   # Handle data reception
   @impl true
-  def handle_info({:tcp, _socket, data}, state ) do
+  def handle_info({:tcp, socket, data}, state ) do
     buf = SIP.Transport.Depack.on_data_received(state.buffer, data,
       fn what, msg ->
         case what do
           :ping -> nil
-          :msg -> process_incoming_message(state, msg, "TCP", __MODULE__)
+          :msg -> SIP.Transport.ImplHelpers.process_incoming_message(state, msg, "TCP", __MODULE__, socket, state.destip, state.destport)
         end
       end)
     { :noreply, %{ state | buffer: buf } }
