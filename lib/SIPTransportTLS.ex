@@ -59,8 +59,8 @@ defmodule SIP.Transport.TLS do
 
   @spec handle_call(  {:sendmsg, binary(), :inet.ip_address(), :inet.port_number }, any(), map() ) ::  { :reply, :ok, map() }
   def handle_call({ :sendmsg, msgstr, _destip, _dest_port }, _from, state) do
-
-    Logger.debug("TLS: Message sent to #{state.destip}:#{state.destport} ---->\r\n" <> msgstr <> "\r\n-----------------")
+    destipstr = SIP.NetUtils.ip2string(state.destip)
+    Logger.debug("TLS: Message sent to #{destipstr}:#{state.destport} ---->\r\n" <> msgstr <> "\r\n-----------------")
     case Socket.Stream.send(state.socket, msgstr) do
       :ok -> { :reply, :ok, state }
       { :error, reason } ->
