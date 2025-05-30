@@ -193,7 +193,7 @@ defmodule SIP.NetUtils do
     iflist = Enum.filter( iflist, fn { _ifname, ifinfolist } ->
       case List.keyfind(ifinfolist, :flags, 0) do
         { :flags, flaglist } ->
-          :up in flaglist and :running in flaglist and :broadcast not in flaglist
+          :up in flaglist and :running in flaglist not in flaglist
 
         nil ->
           false
@@ -224,6 +224,11 @@ defmodule SIP.NetUtils do
     end
   end
 
+  @spec parse_address(binary()) ::
+          {:error, :einval}
+          | {:ok,
+             {byte(), byte(), byte(), byte()}
+             | {char(), char(), char(), char(), char(), char(), char(), char()}}
   @doc "parse an IP address expressed as a string."
   def parse_address(ipaddr_str) when is_binary(ipaddr_str) do
     :inet.parse_address(String.to_charlist(ipaddr_str))
