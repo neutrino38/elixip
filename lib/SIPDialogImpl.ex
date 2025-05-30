@@ -118,7 +118,7 @@ Use the API provided by SIP.Dialog module
 
   # Dialog started by an outbound request
   def init({ req, :outbound, pid, timeout, debug, dialog_id }) when is_req(req) do
-    { fromtag, callid, totag } = dialog_id
+    { fromtag, callid, _totag } = dialog_id
 
 
     state = %SIP.DialogImpl{ msg: req, direction: :outbound, app: pid, expirationtimer: timeout, debuglog: debug,
@@ -134,8 +134,14 @@ Use the API provided by SIP.Dialog module
 
         { code, _extra } ->
           Logger.error([ module: __MODULE__, dialogpid: self(),
-                      message: "Failed to create client transaction."])
+                      message: "Failed to create client transaction, err: #{code}."])
           { :stop, code }
+
+        :no_transport_available ->
+          Logger.debug([ module: __MODULE__, dialogpid: self(),
+                      message: "Failed to create client transaction because we could not find / start a suitable transport."])
+          { :stop, :no_transport_available }
+
       end
     rescue
       err ->
