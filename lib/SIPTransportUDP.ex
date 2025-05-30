@@ -15,18 +15,24 @@ defmodule SIP.Transport.UDP do
   @impl true
   def init({ _dest_ip, _dest_port}) do
     try do
+      # TODO support for IPV6
       ips = SIP.NetUtils.get_local_ips( [ :ipv4 ] )
-
-      initial_state = %{ t_isreliable: false, localip: hd(ips), localips: ips,
+      if ips == [] do
+        Logger.error([module: SIP.Test.Transport.UDP,
+                      message: "Could not find any valid IP V4 address. Check your network connection"])
+        { :stop, :networkdown }
+      else
+        initial_state = %{ t_isreliable: false, localip: hd(ips), localips: ips,
                         localport: @default_local_port, upperlayer: nil }
-      case  Socket.UDP.open(@default_local_port, [mode: :active]) do
-        {:ok, socket} ->
-          :ok = Socket.UDP.process(socket, self())
-          { :ok, Map.put(initial_state, :socket, socket) }
+        case  Socket.UDP.open(@default_local_port, [mode: :active]) do
+          {:ok, socket} ->
+            :ok = Socket.UDP.process(socket, self())
+            { :ok, Map.put(initial_state, :socket, socket) }
 
-        { :error, err } ->
-          Logger.error("Failed to create UDP socket on port #{@default_local_port}.")
-          { :stop, err }
+          { :error, err } ->
+            Logger.error("Failed to create UDP socket on port #{@default_local_port}.")
+            { :stop, err }
+        end
       end
     rescue
       err in RuntimeError ->

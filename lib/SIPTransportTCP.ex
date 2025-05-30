@@ -23,7 +23,7 @@ defmodule SIP.Transport.TCP do
     Socket.process!(sock, self())
 
     # Return the local IP and port inside the state map.
-    Map.put(state, :localip, local_ip) |> Map.put(:localport, local_port)
+    Map.put(state, :localip, local_ip) |> Map.put(:localport, local_port) |> Map.put(:socket, sock)
   end
 
   @impl true
@@ -40,7 +40,7 @@ defmodule SIP.Transport.TCP do
       err in Socket.Error ->
         Logger.error([ module: __MODULE__, dest: "#{NetUtils.ip2string(dest_ip)}:#{dest_port}}",
                        message: "Failed to connect socket: #{err.message} "])
-        { :stop, err.message }
+        { :stop, :cnxerror }
     end
   end
 
@@ -58,6 +58,11 @@ defmodule SIP.Transport.TCP do
   def handle_call( {:setupperlayer, nil }, _from, state) do
     { :reply, :ok, Map.put(state, :upperlayer, nil) }
   end
+
+  def handle_call(:getlocalipandport, _from, state) do
+    { :reply, { :ok, state.localip, state.localport }, state}
+  end
+
 
   @spec handle_call(  {:sendmsg, binary(), :inet.ip_address(), :inet.port_number }, any(), map() ) ::  { :reply, :ok, map() }
   def handle_call({ :sendmsg, msgstr, _destip, _dest_port }, _from, state) do
@@ -95,7 +100,7 @@ defmodule SIP.Transport.TCP do
   # Handle data reception
   @impl true
   def handle_info({:tcp, _socket, data}, state ) do
-    buf = SIP.Transport.Depack.on_data_received(state.buf, data,
+    buf = SIP.Transport.Depack.on_data_received(state.buffer, data,
       fn what, msg ->
         case what do
           :ping -> nil
