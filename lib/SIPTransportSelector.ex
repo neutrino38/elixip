@@ -27,7 +27,11 @@ alias SIP.NetUtils
     end
   end
 
-  defp find_or_launch_transport(t_mod, transport_name, destip, port)  do
+  defp find_or_launch_transport(t_mod, transport_name, destip, port) when is_tuple(destip) do
+    find_or_launch_transport(t_mod, transport_name, NetUtils.ip2string(destip), port)
+  end
+
+  defp find_or_launch_transport(t_mod, transport_name, destip, port) when is_binary(destip) do
     reliable = apply(t_mod, :is_reliable, [])
     instance_name = if reliable do
       transport_name <> "_" <> destip <> ":" <> Integer.to_string(port)
@@ -43,9 +47,23 @@ alias SIP.NetUtils
       [] ->
         # No such instance. Start a new transport
         name = { :via, Registry, {Registry.SIPTransport, instance_name}}
-        { :ok, t_pid} = GenServer.start(t_mod, { destip, port } , name: name)
-        Logger.debug("Started transport #{inspect(t_mod)} process with PID #{inspect(t_pid)}")
-        { :ok, t_pid}
+        case GenServer.start(t_mod, { destip, port } , name: name) do
+          { :ok, t_pid } ->
+            Logger.debug("Started transport #{inspect(t_mod)} process with PID #{inspect(t_pid)}")
+            { :ok, t_pid }
+
+          { :error, :networkdown } ->
+            Logger.error([ module: __MODULE__, message: "Failed to start transport #{transport_name}. No network connection" ])
+            { :error, :failedtostart }
+
+          { :error, { errtype, stacktrace }} ->
+            Logger.error([ module: __MODULE__, message: "Failed to start transport #{transport_name}. Reported error #{errtype}" ])
+            Logger.error(Exception.format(:error, { errtype, stacktrace }, stacktrace))
+            { :error, :failedtostart }
+
+        end
+
+
 
         # Found one. Start return the pid
       [{ t_pid, _ }] ->
@@ -88,18 +106,28 @@ alias SIP.NetUtils
     if t_mod != nil do
       try do
         # We have a transport module
-        # Test if we use the mockup transport (for unit testing)
-        if usemockup do
-          # Obtain the transport pid
-          { :ok, t_pid } = find_or_launch_transport(SIP.Test.Transport.UDPMockup, "UDPMockup", ruri.domain, ruri.port)
+
+        { t_mod, transport_str, dest_ip, dest_port } = if usemockup do
+          # Here we use the mockup transport (for unit testing)
           { :ok , destaddr } = SIP.NetUtils.parse_address("1.2.3.4")
-          { :ok, SIP.Test.Transport.UDPMockup, t_pid, destaddr, 5080 }
+
+          # Perform a fake resolution
+          { SIP.Test.Transport.UDPMockup, "UDPMockup", destaddr, 5080 }
         else
-          # Get the destination IP address
+          # Get the destination IP address (URI resolution)
+          # Note that Resolver will use the SIP proxy setting
           { dest_ip, dest_port } = SIP.Resolver.resolve(ruri, trysrv)
-          # Obtain the transport pid
-          { :ok, t_pid } = find_or_launch_transport(t_mod, transport_str, dest_ip, dest_port)
-          { :ok, t_mod, t_pid, dest_ip, dest_port }
+          { t_mod, transport_str, dest_ip, dest_port }
+        end
+
+        # Now obtain the transport pid and launch it if needed
+        case find_or_launch_transport(t_mod, transport_str, dest_ip, dest_port) do
+          { :ok, t_pid } ->
+            { :ok, t_mod, t_pid, dest_ip, dest_port }
+
+          { :error, err } ->
+            Logger.error(module: __MODULE__, message: "failed to find and start #{t_mod} transport : #{err}")
+            :invalidtransport
         end
       rescue
         e ->
