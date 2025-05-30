@@ -1,7 +1,7 @@
 %{
-  "certifi": {:hex, :certifi, "2.13.0", "e52be248590050b2dd33b0bb274b56678f9068e67805dca8aa8b1ccdb016bbf6", [:rebar3], [], "hexpm", "8f3d9533a0f06070afdfd5d596b32e21c6580667a492891851b0e2737bc507a1"},
+  "certifi": {:hex, :certifi, "2.15.0", "0e6e882fcdaaa0a5a9f2b3db55b1394dba07e8d6d9bcad08318fb604c6839712", [:rebar3], [], "hexpm", "b147ed22ce71d72eafdad94f055165c1c182f61a2ff49df28bcc71d1d5b94a60"},
   "jason": {:hex, :jason, "1.4.4", "b9226785a9aa77b6857ca22832cffa5d5011a667207eb2a0ad56adb5db443b8a", [:mix], [{:decimal, "~> 1.0 or ~> 2.0", [hex: :decimal, repo: "hexpm", optional: true]}], "hexpm", "c5eb0cab91f094599f94d55bc63409236a8ec69a21a67814529e8d5f6cc90b3b"},
   "logger_file_backend": {:hex, :logger_file_backend, "0.0.14", "774bb661f1c3fed51b624d2859180c01e386eb1273dc22de4f4a155ef749a602", [:mix], [], "hexpm", "071354a18196468f3904ef09413af20971d55164267427f6257b52cfba03f9e6"},
   "socket": {:hex, :socket, "0.3.13", "98a2ab20ce17f95fb512c5cadddba32b57273e0d2dba2d2e5f976c5969d0c632", [:mix], [], "hexpm", "f82ea9833ef49dde272e6568ab8aac657a636acb4cf44a7de8a935acb8957c2e"},
-  "socket2": {:hex, :socket2, "2.1.1", "850a8e90963358e1e9ba53efe4e91272f2b39489e3f2a82d291010b20539e8c3", [:mix], [{:certifi, "~> 2.12", [hex: :certifi, repo: "hexpm", optional: false]}], "hexpm", "37face03ee9c98e100084fa202a5291c2200a9b4e661dad7b163c9efdb0a2865"},
+  "socket2": {:hex, :socket2, "2.1.2", "a5fd170965ba66350857aaea68cd31984b9959633947a2245ccda8f8e93f8276", [:mix], [{:certifi, "~> 2.12", [hex: :certifi, repo: "hexpm", optional: false]}], "hexpm", "32e5260e5c6cbc1349c3bbe7282ba3a5c03e0eb7b9fa5fafabcb44caa5a49694"},
 }
