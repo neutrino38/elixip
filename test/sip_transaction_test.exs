@@ -78,7 +78,7 @@ defmodule SIP.Test.Transact do
     assert code == :ok
 
     state = %{ state: :proceeding, t_isreliable: false, msgstr: msg,
-               sipmsg: parsed_msg, tmod: SIP.Test.Transport.UDPMockup, app: self() }
+               msg: parsed_msg, tmod: SIP.Test.Transport.UDPMockup, app: self() }
     state = SIP.Trans.Timer.schedule_timer_B(state, 200)
     receive do
       { :timeout, _tref, timer } ->

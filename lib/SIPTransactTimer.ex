@@ -79,7 +79,7 @@ defmodule SIP.Trans.Timer do
   end
 
   def handle_timer({ :timerA, ms }, state) when ms >= @timer_T2_val and state.state == :sending do
-    Logger.error([ transid: state.sipmsg.transid, message: "timer_A: max restransmition delay expired."])
+    Logger.error([ transid: state.msg.transid, message: "timer_A: max restransmition delay expired."])
     send(state.sipmsg.app, {:timeout, :timerA})
     { :stop, state, "timer_A: max restransmition delay expired." }
   end
@@ -90,10 +90,10 @@ defmodule SIP.Trans.Timer do
 
   def handle_timer( :timerB, state) when state.state == :proceeding do
     send(state.app, {:timeout, :timerB})
-    if state.sipmsg.method == :INVITE do
-      Logger.info([ transid: state.sipmsg.transid, message: "INVITE not answered on time."])
+    if state.msg.method == :INVITE do
+      Logger.info([ transid: state.msg.transid, message: "INVITE not answered on time."])
     else
-      Logger.error([ transid: state.sipmsg.transid, message: "timer_B: should not be used in NICT."])
+      Logger.error([ transid: state.msg.transid, message: "timer_B: should not be used in NICT."])
     end
     { :stop, state, "timer_B: no final response receveived on time." }
   end
