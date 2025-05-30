@@ -12,6 +12,10 @@ defmodule SIP.Test.Register do
   @proxy "testsip.djanah.com"
   @passwd "crtv2user1"
 
+  # DNS setting
+  @nameserver { 172,21,100,8 }
+
+
   defmodule TestRegistrar do
     use SIP.Session.Registrar
     require Logger
@@ -66,7 +70,7 @@ defmodule SIP.Test.Register do
 
 
     # Force DNS server. Adapt to actual client DNS config
-    Application.put_env(:elixip2, :nameserver, { 172,21,100,8 })
+    Application.put_env(:elixip2, :nameserver, @nameserver)
 
     # Force SIP proxy / registrar
     Application.put_env(:elixip2, :proxyuri, %SIP.Uri{ domain: @proxy, scheme: "sip:", port: 5060 })
