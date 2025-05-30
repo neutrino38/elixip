@@ -7,10 +7,10 @@ defmodule SIP.Test.Register do
   # Account to use for tests
   @username "33970262547"
   @authusername "33970262547"
-  @displayname "Test User"
+  @displayname "CRT V2 User"
   @domain "visioassistance.net"
   @proxy "testsip.djanah.com"
-  @passwd "crtv2user1"
+  @passwd "xxxxxxxx"
 
   # DNS setting
   @nameserver { 172,21,100,8 }
@@ -266,7 +266,7 @@ defmodule SIP.Test.Register do
 
   end
 
-    test "Client Register using TLS" do
+    test "Client Register and OPTIONS using TLS" do
 
     sip_ctx = %SIP.Context{
       username: @username,
@@ -304,6 +304,18 @@ defmodule SIP.Test.Register do
       1_000 -> assert(false, "Did not receive 200 OK on time")
     end
 
+    Process.sleep(1000)
+
+    # Send an option
+    send_OPTIONS()
+    assert ctx_get(:lasterr) == :ok
+
+    ^sip_ctx = receive do
+      { _response, _rsp, _trans_pid, _dialog_pid } ->
+        sip_ctx
+    after
+      1_000 -> assert(false, "Did not receive 200 OK on time")
+    end
   end
 
 end
