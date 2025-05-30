@@ -95,8 +95,13 @@ defmodule SIP.Test.Transport.UDPMockup do
   @impl true
   def init({ _dest_ip, _dest_port}) do
     ips = SIP.NetUtils.get_local_ips( [ :ipv4 ] )
-    initial_state = %{ t_isreliable: false, localip: hd(ips), localport: 5060, upperlayer: nil }
-    { :ok, initial_state }
+    if ips == [] do
+      Logger.error([module: SIP.Test.Transport.UDPMockup, message: "Could not find any valid IP V4 address. Check your network connection"])
+      { :stop, :networkdown }
+    else
+      initial_state = %{ t_isreliable: false, localip: hd(ips), localport: 5060, upperlayer: nil }
+      { :ok, initial_state }
+    end
   end
 
   @impl true

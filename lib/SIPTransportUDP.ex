@@ -14,18 +14,25 @@ defmodule SIP.Transport.UDP do
 
   @impl true
   def init({ _dest_ip, _dest_port}) do
-    ips = SIP.NetUtils.get_local_ips( [ :ipv4 ] )
+    try do
+      ips = SIP.NetUtils.get_local_ips( [ :ipv4 ] )
 
-    initial_state = %{ t_isreliable: false, localip: hd(ips), localips: ips,
-                      localport: @default_local_port, upperlayer: nil }
-    case  Socket.UDP.open(@default_local_port, [mode: :active]) do
-      {:ok, socket} ->
-        :ok = Socket.UDP.process(socket, self())
-        { :ok, Map.put(initial_state, :socket, socket) }
+      initial_state = %{ t_isreliable: false, localip: hd(ips), localips: ips,
+                        localport: @default_local_port, upperlayer: nil }
+      case  Socket.UDP.open(@default_local_port, [mode: :active]) do
+        {:ok, socket} ->
+          :ok = Socket.UDP.process(socket, self())
+          { :ok, Map.put(initial_state, :socket, socket) }
 
-      { :error, err } ->
-        Logger.error("Failed to create UDP socket on port #{@default_local_port}.")
-        { :stop, err }
+        { :error, err } ->
+          Logger.error("Failed to create UDP socket on port #{@default_local_port}.")
+          { :stop, err }
+      end
+    rescue
+      err in RuntimeError ->
+        Logger.error("Failed to start UDP transport.")
+        Logger.error(Exception.format(:error, err, __STACKTRACE__))
+        { :stop, :failedtostart }
     end
   end
 
