@@ -4,7 +4,7 @@ defmodule SIPParser.MixProject do
   def project do
     [
       app: :elixip2,
-      version: "0.1.0",
+      version: "0.2.0",
       elixir: "~> 1.15",
       start_permanent: Mix.env() == :prod,
       deps: deps()
@@ -23,7 +23,7 @@ defmodule SIPParser.MixProject do
     [
       {:logger_file_backend, "~> 0.0.12"},
       {:jason, "~> 1.4"},
-      {:socket2, "== 2.1.1"}
+      {:socket2, "== 2.1.2"}
     ]
   end
 end
