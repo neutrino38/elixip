@@ -1,5 +1,6 @@
 defmodule SIP.Resolver do
   @moduledoc "DNS resolver for the SIP stack"
+alias SIP.NetUtils
 
   require SIP.Uri
   require Logger
@@ -28,6 +29,7 @@ defmodule SIP.Resolver do
     end)
   end
 
+  @doc "Perform an SIP srv resolution"
   def resolve_srv_multiple(uri = %SIP.Uri{}, prio_idx = 0) do
     transport_str = SIP.Uri.get_transport(uri) |> String.downcase()
     name = "_sip._" <> transport_str <> "." <> uri.domain
@@ -60,9 +62,17 @@ defmodule SIP.Resolver do
     end
   end
 
-
   def resolve(uri = %SIP.Uri{}, true) do
-    resolve_srv_multiple(uri, 0)
+    case resolve_srv_multiple(uri, 0) do
+      # SRV resolution successful but host returned in SRV record could not be resolved
+      {:error, err } -> {:error, err }
+
+      # SRV resolution successful and subsequent A resolution too
+      { ip, port } -> { ip, port }
+
+      # No SRV record. Try direct A / AAAA resolution
+      :nosuchname -> resolve( uri, false )
+    end
   end
 
   def resolve(uri = %SIP.Uri{}, false) do
@@ -82,4 +92,30 @@ defmodule SIP.Resolver do
     end
   end
 
+
+  def get_dns_default_dns_server() do
+    dns_str = case System.get_env("OS") do
+      "Windows_NT" ->
+        getipcmd = ~c"powershell -Command \"Get-NetAdapter | Where-Object Status -eq 'Up' | ForEach-Object { Get-DnsClientServerAddress -InterfaceAlias $_.Name } | Select-Object -ExpandProperty ServerAddresses | Sort-Object -Unique
+\""
+        :os.cmd(getipcmd) |> List.to_string() |> String.split("\r\n") |> hd()
+
+      # Assume linux
+      _ ->
+        case File.read("/etc/resolv.conf") do
+          { :ok, content } ->
+            String.split(content, "\n") |>
+            Enum.find(&String.starts_with?(&1, "nameserver")) |>
+            String.trim() |> String.split(" ") |>
+            List.last()
+
+          { :error, _code } -> nil
+        end
+    end
+
+    Logger.debug(module: __MODULE__, message: "DNS server that will be used: #{dns_str}");
+    { :ok, dns_addr } = NetUtils.parse_address(dns_str)
+    Application.put_env(:elixip2, :nameserver, dns_addr)
+    dns_str
+  end
 end

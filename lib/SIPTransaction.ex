@@ -84,17 +84,7 @@ alias SIP.NetUtils
   end
 
   defp resolve_uri(uri = %SIP.Uri{}) do
-    # Get the destination to resolve (check if a proxy has been configured)
-    { desturi, usesrv } = try do
-      { Application.fetch_env!(:elixip2, :proxyuri), Application.fetch_env!(:elixip2, :proxyusesrv ) }
-    rescue
-      ArgumentError ->
-        Logger.debug(module: __MODULE__,
-          message: "No SIP proxy configured. Using R-URI domain #{uri.domain} and SRV")
-        { uri, true }
-    end
-
-    case SIP.Transport.Selector.select_transport(desturi, usesrv) do
+    case SIP.Transport.Selector.select_transport(uri, true) do
       { :ok, tp_mod, tp_pid, destip, dport } ->
         %SIP.Uri{ uri | destip: destip, destport: dport, tp_module: tp_mod, tp_pid: tp_pid }
 

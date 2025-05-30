@@ -16,6 +16,8 @@ alias SIP.NetUtils
   }
 
   def start() do
+    # Make sure we know which DNS server to use
+    SIP.Resolver.get_dns_default_dns_server()
     case Registry.start_link(keys: :unique, name: Registry.SIPTransport) do
       { :ok, pid } ->
         Logger.info("SIP transport layer started with PID #{inspect(pid)}")
@@ -26,6 +28,7 @@ alias SIP.NetUtils
         code
     end
   end
+
 
   defp find_or_launch_transport(t_mod, transport_name, destip, port) when is_tuple(destip) do
     find_or_launch_transport(t_mod, transport_name, NetUtils.ip2string(destip), port)
@@ -102,15 +105,22 @@ alias SIP.NetUtils
       _ -> false
     end
 
+    # Check if we need to use the SIP proxy
+    { ruri, trysrv } = try do
+      { Application.fetch_env!(:elixip2, :proxyuri), Application.fetch_env!(:elixip2, :proxyusesrv ) }
+    rescue
+      ArgumentError ->
+        # No SIP proxy configured. Using R-URI domain
+        Logger.debug(module: __MODULE__, message: "no SIP proxy configured");
+        { ruri, trysrv }
+    end
     # Obtain the transport part from the Request URI
     transport_str = SIP.Uri.get_transport(ruri)
-
     t_mod = Map.get(@transport_map, transport_str)
 
     if t_mod != nil do
       try do
         # We have a transport module
-
         { t_mod, transport_str, dest_ip, dest_port } = if usemockup do
           # Here we use the mockup transport (for unit testing)
           { :ok , destaddr } = SIP.NetUtils.parse_address("1.2.3.4")
@@ -118,10 +128,13 @@ alias SIP.NetUtils
           # Perform a fake resolution
           { SIP.Test.Transport.UDPMockup, "UDPMockup", destaddr, 5080 }
         else
+
           # Get the destination IP address (URI resolution)
-          # Note that Resolver will use the SIP proxy setting
-          { dest_ip, dest_port } = SIP.Resolver.resolve(ruri, trysrv)
-          { t_mod, transport_str, dest_ip, dest_port }
+          Logger.debug(module: __MODULE__, message: "resolving #{ruri} with trysrv=#{trysrv}");
+          case SIP.Resolver.resolve(ruri, trysrv) do
+            :nxdomain -> { t_mod, transport_str, :nxdomain, 0 }
+            { dest_ip, dest_port } -> { t_mod, transport_str, dest_ip, dest_port }
+          end
         end
 
         # Now obtain the transport pid and launch it if needed
