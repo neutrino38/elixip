@@ -78,4 +78,42 @@ defmodule SIP.Test.NetUtils do
     assert SIP.Resolver.resolve(%SIP.Uri{ domain: "visioassistance.net", port: 5077 }, true) in possible_answers
   end
 
+  test "SSL connection with Erlang" do
+    # Pour generer les fichiers
+    # openssl genpkey -algorithm RSA -out key.pem -pkeyopt rsa_keygen_bits:4096
+    # openssl req -new -x509 -key key.pem -out cert.pem -days 1000 -sha384
+
+    ssl_options = [
+      certfile: "certs/certificate.pem",
+      keyfile: "certs/private_key.pem",
+      verify: :verify_none, # Désactive la vérification du certificat pour simplifier l'exemple
+      versions: [:"tlsv1.2"], # Spécifie la version de TLS à utiliser
+      #ciphers: :ssl.cipher_suites(:all, :"tlsv1.2")
+      ciphers: [~c"AES256-GCM-SHA384"]
+    ]
+
+    # Établir une connexion SSL
+
+    :ssl.start()
+    case :ssl.connect({147, 135, 153, 48}, 5061, ssl_options) do
+      {:ok, socket} ->
+        assert true
+        :ssl.close(socket)
+
+      {:error, reason} ->
+        IO.puts("Err : #{inspect(reason)}")
+        assert false
+    end
+  end
+
+  test "SSL connection with socket2" do
+    ssl_options = [
+      cert: [path: "certs/certificate.pem"],
+      key: [ path: "certs/private_key.pem" ],
+      verify: false, # Désactive la vérification du certificat pour simplifier l'exemple
+      versions: [:"tlsv1.2"], # Spécifie la version de TLS à utiliser
+      ciphers: [~c"AES256-GCM-SHA384"]
+    ]
+    _sock = Socket.SSL.connect!({147, 135, 153, 48}, 5061, ssl_options)
+  end
 end

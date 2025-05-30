@@ -73,7 +73,7 @@ defmodule SIP.Transport.TLS do
 
   # Handle data reception
   @impl true
-  def handle_info({:tcp, socket, data}, state ) do
+  def handle_info({:ssl, socket, data}, state ) do
     buf = SIP.Transport.Depack.on_data_received(state.buffer, data,
       fn what, msg ->
         case what do
