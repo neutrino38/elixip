@@ -53,7 +53,11 @@ alias SIP.NetUtils
             { :ok, t_pid }
 
           { :error, :networkdown } ->
-            Logger.error([ module: __MODULE__, message: "Failed to start transport #{transport_name}. No network connection" ])
+            Logger.error([ module: __MODULE__, message: "Failed to start transport #{transport_name}: No network connection" ])
+            { :error, :failedtostart }
+
+          { :error, :cnxerror } ->
+            Logger.error([ module: __MODULE__, message: "Failed to start transport #{transport_name}: failed to connect to UAS" ])
             { :error, :failedtostart }
 
           { :error, { errtype, stacktrace }} ->
@@ -126,7 +130,7 @@ alias SIP.NetUtils
             { :ok, t_mod, t_pid, dest_ip, dest_port }
 
           { :error, err } ->
-            Logger.error(module: __MODULE__, message: "failed to find and start #{t_mod} transport : #{err}")
+            Logger.debug(module: __MODULE__, message: "failed to find and start #{t_mod} transport : #{err}")
             :invalidtransport
         end
       rescue

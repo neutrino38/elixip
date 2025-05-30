@@ -121,7 +121,8 @@ defmodule SIP.Transport do
       sock = case transport do
         :tcp -> Socket.TCP.connect!(state.destip, state.destport, [ timeout: 10000, mode: :active ])
         :tls -> Socket.SSL.connect!(state.destip, state.destport, [ timeout: 10000, mode: :active ])
-        :wss -> Socket.Web.connect!(state.destip, state.destport, [ timeout: 10000, mode: :active ])
+        :wss -> Socket.Web.connect!(state.destip, state.destport, [ timeout: 10000, mode: :active, secure: true ])
+        :ws  -> Socket.Web.connect!(state.destip, state.destport, [ timeout: 10000, mode: :active ])
         _ -> raise "Unsupported transport #{transport}"
       end
       # Optain local IP and port

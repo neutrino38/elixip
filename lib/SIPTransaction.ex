@@ -99,8 +99,8 @@ alias SIP.NetUtils
         %SIP.Uri{ uri | destip: destip, destport: dport, tp_module: tp_mod, tp_pid: tp_pid }
 
       err ->
-        Logger.error(module: __MODULE__,
-          message: "Failed to create transaction: #{err}. Cannot select transport for URI #{uri}.")
+        #Logger.debug(module: __MODULE__,
+        #  message: "Failed to create transaction: error=#{err}.")
         :no_transport_available
     end
   end

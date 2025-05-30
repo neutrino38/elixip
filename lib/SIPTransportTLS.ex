@@ -1,14 +1,14 @@
-defmodule SIP.Transport.TCP do
+defmodule SIP.Transport.TLS do
   @moduledoc """
-  TCP transport layer for SIP. Client version only for the moment
+  TLS transport layer for SIP. Client version only for the moment
   """
   alias SIP.NetUtils
   use GenServer
   require Logger
-  require Socket.TCP
+  require Socket.SSL
   require SIP.Transport.ImplHelpers
 
-  @transport_str "tcp"
+  @transport_str "tls"
   # @default_local_port 5060
   def transport_str, do: @transport_str
 
@@ -22,7 +22,7 @@ defmodule SIP.Transport.TCP do
       buffer: %SIP.Transport.Depack{}  }
 
     try do
-      state = SIP.Transport.ImplHelpers.connect(initial_state, :tcp)
+      state = SIP.Transport.ImplHelpers.connect(initial_state, :tls)
       { :ok, state }
     rescue
       err in Socket.Error ->
@@ -60,11 +60,11 @@ defmodule SIP.Transport.TCP do
   @spec handle_call(  {:sendmsg, binary(), :inet.ip_address(), :inet.port_number }, any(), map() ) ::  { :reply, :ok, map() }
   def handle_call({ :sendmsg, msgstr, _destip, _dest_port }, _from, state) do
 
-    Logger.debug("TCP: Message sent to #{state.destip}:#{state.destport} ---->\r\n" <> msgstr <> "\r\n-----------------")
+    Logger.debug("TLS: Message sent to #{state.destip}:#{state.destport} ---->\r\n" <> msgstr <> "\r\n-----------------")
     case Socket.Stream.send(state.socket, msgstr) do
       :ok -> { :reply, :ok, state }
       { :error, reason } ->
-        Logger.debug([ module: __MODULE__, message: "failed to send message. Error: #{reason}"]);
+        Logger.debug("TLS: failed to send message. Error: #{reason}");
         { :reply, :transporterror, state }
     end
   end
@@ -78,7 +78,7 @@ defmodule SIP.Transport.TCP do
       fn what, msg ->
         case what do
           :ping -> nil
-          :msg -> SIP.Transport.ImplHelpers.process_incoming_message(state, msg, "TCP", __MODULE__, socket, state.destip, state.destport)
+          :msg -> SIP.Transport.ImplHelpers.process_incoming_message(state, msg, "TLS", __MODULE__, socket, state.destip, state.destport)
         end
       end)
     { :noreply, %{ state | buffer: buf } }

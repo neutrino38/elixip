@@ -167,6 +167,7 @@ defmodule SIP.Uri do
 	end
 
 	@doc "Obtain a parameter from an URI"
+	@spec get_uri_param(%SIP.Uri{} | binary(), binary()) :: { :ok, binary() } | { :no_such_param, nil } | { atom(), nil }
 	def get_uri_param(sip_uri, param) when is_map(sip_uri) do
 		cond do
 			!Map.has_key?(sip_uri, :params) -> { :uri_without_params, nil }
