@@ -187,11 +187,11 @@ defmodule SIP.Transport do
   def build_contact_uri(tmod, tid) do
     { :ok, localip, localport } = get_local_ip_port(tid)
     transport_str = apply(tmod, :transport_str, [])
-    scheme = if transport_str == "tls" || transport_str == "TLS", do: "sips:", else: "sip:"
     %SIP.Uri{
      domain: localip,
      port: localport,
-     scheme: scheme
+     scheme: "sip:",
+     proto: String.upcase(transport_str)
     }
   end
 
@@ -202,7 +202,9 @@ defmodule SIP.Transport do
 
     new_contact = if not is_nil(old_contact) do
       # Transfert contact parameters if specified by the caller
-      %SIP.Uri{ new_contact | params: old_contact.params, userpart: old_contact.userpart }
+      # Override transport params
+      old_params = Map.put(old_contact.params, "transport", new_contact.proto)
+      %SIP.Uri{ new_contact | params: old_params, userpart: old_contact.userpart, displayname: old_contact.displayname }
     else
       new_contact
     end
