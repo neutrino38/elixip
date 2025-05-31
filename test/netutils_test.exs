@@ -109,6 +109,7 @@ defmodule SIP.Test.NetUtils do
     end
   end
 
+  @tag :live
   test "SSL connection with socket2" do
     ssl_options = [
       cert: [path: "certs/certificate.pem"],
@@ -118,5 +119,19 @@ defmodule SIP.Test.NetUtils do
       ciphers: [~c"AES256-GCM-SHA384"]
     ]
     _sock = Socket.SSL.connect!({147, 135, 153, 48}, 5061, ssl_options)
+  end
+
+  @tag :live
+  test "WSS connection with socket2" do
+    wss_options = [
+      cert: [path: "certs/certificate.pem"],
+      key: [ path: "certs/private_key.pem" ],
+      verify: false, # Désactive la vérification du certificat
+      versions: [:"tlsv1.2"], # Spécifie la version de TLS à utiliser
+      ciphers: [~c"AES256-GCM-SHA384"],
+      protocol: ["sip"],
+      secure: true
+    ]
+    _sock = Socket.Web.connect!("testsip.djanah.com", 443, wss_options)
   end
 end
