@@ -28,6 +28,14 @@ defmodule SIP.Transport.WSS do
         dest_ip = if is_tuple(dest_ip) do NetUtils.ip2string(dest_ip) else dest_ip end
         Logger.info([ module: __MODULE__, dest: "#{dest_ip}:#{dest_port}",
                        message: "Failed to connect socket: #{err.message} "])
+        Logger.debug( Exception.format_stacktrace(__STACKTRACE__))
+        { :stop, :cnxerror }
+
+      err in Protocol.UndefinedError ->
+        Logger.info([ module: __MODULE__, dest: "#{dest_ip}:#{dest_port}",
+                      message: "Runtime error in connect() "])
+        Logger.debug(inspect(err))
+        Logger.debug( Exception.format_stacktrace(__STACKTRACE__))
         { :stop, :cnxerror }
     end
   end
@@ -69,12 +77,12 @@ defmodule SIP.Transport.WSS do
 
   # Handle data reception
   @impl true
-  def handle_info({:wss, socket, data}, state ) do
+  def handle_info({:web, socket, data}, state ) do
     SIP.Transport.ImplHelpers.process_incoming_message(state, data, "WSS", __MODULE__, socket, state.destip, state.destport)
     { :noreply, state }
   end
 
-  def handle_info( {:tcp_closed, _socket}, state ) do
+  def handle_info( {:web_closed, _socket}, state ) do
     Logger.debug([ module: __MODULE__, message: "Cnx disconnected. stopping transport instance" ])
 
     # Notify all dialogs to give them a chance to restart the TCP connection

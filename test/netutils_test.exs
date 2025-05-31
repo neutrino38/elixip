@@ -132,6 +132,19 @@ defmodule SIP.Test.NetUtils do
       protocol: ["sip"],
       secure: true
     ]
-    _sock = Socket.Web.connect!("testsip.djanah.com", 443, wss_options)
+    sock = Socket.Web.connect!("testsip.djanah.com", 443, wss_options)
+    Socket.Web.close(sock)
+    wss_options = [
+      cert: [path: "certs/certificate.pem"],
+      key: [ path: "certs/private_key.pem" ],
+      verify: false, # Désactive la vérification du certificat
+      versions: [:"tlsv1.2"], # Spécifie la version de TLS à utiliser
+      ciphers: [~c"AES256-GCM-SHA384"],
+      protocol: ["sip"],
+      mode: :active,
+      secure: true
+    ]
+    sock = Socket.Web.connect!("testsip.djanah.com", 443, wss_options)
+    Socket.Web.close(sock)
   end
 end

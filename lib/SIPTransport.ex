@@ -129,21 +129,27 @@ defmodule SIP.Transport do
       ]
 
       sock = case transport do
-        :tcp -> Socket.TCP.connect!(state.destip, state.destport, [ timeout: timeout, mode: :active ])
-        :tls -> Socket.SSL.connect!(state.destip, state.destport, ssl_options)
+        :tcp ->
+          s = Socket.TCP.connect!(state.destip, state.destport, [ timeout: timeout, mode: :active ])
+          Socket.process!(s, self())
+          s
+
+        :tls ->
+          s = Socket.SSL.connect!(state.destip, state.destport, ssl_options)
+          Socket.process!(s, self())
+          s
+
         :wss ->
-          wss_options = List.insert_at(ssl_options, 0, { :secure, true })
+          wss_options = List.insert_at(ssl_options, 0, { :secure, true }) |> List.insert_at(0, { :protocol, ["sip"] })
           Socket.Web.connect!(state.destip, state.destport, wss_options)
 
-        :ws  -> Socket.Web.connect!(state.destip, state.destport, [ timeout: timeout, mode: :active ])
+        :ws  -> Socket.Web.connect!(state.destip, state.destport, [ timeout: timeout, mode: :active, protocol: ["sip"] ])
 
         _ -> raise "Unsupported transport #{transport}"
       end
+
       # Optain local IP and port
       {local_ip, local_port} = Socket.local!(sock)
-
-      #Bind the socket to the GenServer process
-      Socket.process!(sock, self())
 
       # Return the local IP and port inside the state map.
       Map.put(state, :localip, local_ip) |> Map.put(:localport, local_port) |> Map.put(:socket, sock)
