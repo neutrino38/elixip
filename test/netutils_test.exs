@@ -72,6 +72,7 @@ defmodule SIP.Test.NetUtils do
 
   end
 
+  @tag :live
   test "resolution SRV" do
     # Adapt to actual DNS config
     SIP.Resolver.get_dns_default_dns_server()
@@ -79,6 +80,7 @@ defmodule SIP.Test.NetUtils do
     assert SIP.Resolver.resolve(%SIP.Uri{ domain: "visioassistance.net", port: 5077 }, true) in possible_answers
   end
 
+  @tag :live
   test "SSL connection with Erlang" do
     # Pour generer les fichiers
     # openssl genpkey -algorithm RSA -out key.pem -pkeyopt rsa_keygen_bits:4096
