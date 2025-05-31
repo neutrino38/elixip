@@ -10,11 +10,7 @@ defmodule SIP.Test.Register do
   @displayname "CRT V2 User"
   @domain "visioassistance.net"
   @proxy "testsip.djanah.com"
-  @passwd "xxxxxxxx"
-
-  # DNS setting
-  @nameserver { 172,21,100,8 }
-
+  @passwd "crtv2user1"
 
   defmodule TestRegistrar do
     use SIP.Session.Registrar
@@ -68,10 +64,6 @@ defmodule SIP.Test.Register do
     :ok = SIP.Dialog.start()
     { :ok, _config_pid } = SIP.Session.ConfigRegistry.start()
 
-
-    # Force DNS server. Adapt to actual client DNS config
-    Application.put_env(:elixip2, :nameserver, @nameserver)
-
     # Force SIP proxy / registrar
     Application.put_env(:elixip2, :proxyuri, %SIP.Uri{ domain: @proxy, scheme: "sip:", port: 5060 })
     Application.put_env(:elixip2, :proxyusesrv, false)
@@ -116,10 +108,10 @@ defmodule SIP.Test.Register do
     upd_uri = SIP.Uri.set_uri_param(parsed_msg.ruri, "unittest", "1")
     parsed_msg = SIP.Msg.Ops.update_sip_msg( parsed_msg, { :ruri, upd_uri })
 
-    { :ok, _t_mod, t_pid, _dest_ip, _port } = SIP.Transport.Selector.select_transport(upd_uri, false)
+    upd_uri = SIP.Transport.Selector.select_transport(upd_uri)
 
     # Simulate a received REGISTER by UDP mockeup transport
-    send(t_pid, { :recv, parsed_msg})
+    send(upd_uri.tp_pid, { :recv, parsed_msg})
 
     # Attendre l'apparition du processus test_registrar
     registrar_pid = assert_appears(:test_registrar, 2000)
