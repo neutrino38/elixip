@@ -45,35 +45,7 @@ defmodule SIP.NICT do
   @impl true
   # CANCEL  current transaction from dialog layer
   def handle_call(:cancel, _from, state) do
-    if state.state in [ :sending, :proceeding ] do
-      Logger.info([ transid: state.msg.transid,  module: __MODULE__,
-                  message: "Cancelling transaction"])
-
-      # Build the CANCEL request from the initial request
-      cancel = SIP.Msg.Ops.cancel_request(state.msg)
-
-      # Send it aout
-      case SIP.Transac.Common.sendout_msg(state, cancel) do
-        { :ok, state } ->
-          Logger.debug([ transid: state.msg.transid, message: "CANCEL sent: #{state.state} -> cancelling"])
-          { :reply, :ok, %{ state | state: :cancelling }}
-
-        { :invalid_sip_msg, state } ->
-          Logger.error([ transid: state.msg.transid, module: __MODULE__,
-                       message: "Fail to build CANCEL message."])
-          { :reply, :invalid_sip_msg, state}
-
-
-        { code, state } ->
-          Logger.error([ transid: state.msg.transid, module: __MODULE__,
-                       message: "Fail to send CANCEL message #{code}"])
-          { :reply, :transport_error, state}
-      end
-    else
-      Logger.warning([ transid: state.msg.transid, module: __MODULE__,
-                     message: "Cannot CANCEL transaction in #{state.state} state"])
-      { :reply, :bad_state, state}
-    end
+    SIP.Transac.Common.cancel(state)
   end
 
   def handle_call(:gettransport, _from, state ) do
@@ -86,111 +58,6 @@ defmodule SIP.NICT do
     { :reply, :unsupported, state }
   end
 
-  # Handle privisional (1xx) responses
-  defp handle_sip_response(state, sipmsg) when SIP.Msg.Ops.is_1xx_resp(sipmsg) do
-    Logger.debug([ transid: sipmsg.transid, module: __MODULE__,
-                 message: "Received prov resp #{sipmsg.response}"])
-    case state.state do
-      :sending ->
-        # Todo: support 100rel and send PRACK
-
-        # Send provisional response to dialog layer
-
-        if sipmsg.response != 100 do
-          # We do not forward 100 Trying to the dialog layer
-          send(state.app, { :response, sipmsg, self() })
-        end
-        Logger.debug([ transid: sipmsg.transid,  module: __MODULE__,
-                     message: "state: sending -> proceeding"])
-        upd_msg = if sipmsg.response > 100 do
-          #Store the to header to obtain the 'to' tag
-          Map.put(state.msg, :to, sipmsg.to)
-        else
-          state.msg
-        end
-        %{ state | state: :proceeding, msg: upd_msg } |> schedule_timer_B(state.timeout * 1000)
-
-      :proceeding ->
-        if sipmsg.response != 100 do
-          # We do not forward 100 Trying to the dialog layer
-          send(state.app, { :response, sipmsg, self() })
-        end
-        state
-
-      _ ->
-        Logger.debug([ transid: sipmsg.transid,  module: __MODULE__,
-                     message: "state: #{state.state}. Ignoring resp."])
-        state
-    end
-  end
-
-  # Handle OK responses (2xx)
-  defp handle_sip_response(state, sip_resp) when SIP.Msg.Ops.is_2xx_resp(sip_resp) do
-    Logger.debug([ transid: sip_resp.transid,  module: __MODULE__,
-                 message: "Received #{sip_resp.response} final resp"])
-    cond do
-      state.state in [ :sending, :proceeding ] ->
-        send(state.app, { :response, sip_resp, self() })
-        Logger.debug([ transid: sip_resp.transid,
-                     module: __MODULE__,message: "state: #{state.state} -> confirmed"])
-        routeset = case Map.fetch(sip_resp, :route) do
-          { :ok, routeset } -> routeset
-          :error -> nil
-        end
-
-        Logger.info([ transid: sip_resp.transid,  module: __MODULE__,
-                    message: "#{state.msg.method} answered with #{sip_resp.response}"])
-        # Update status, the to header of the request with the to of the response to get the to tag
-        state = %{ state | msg: Map.put(state.msg, :to, sip_resp.to), state: :confirmed } |> Map.put(:route, routeset)
-        if Map.has_key?(sip_resp, :contact) do
-          Map.put(state, :remotecontact, sip_resp.contact)
-        else
-          state
-        end
-
-      state.state == :confirmed ->
-        state
-
-      # Handle 200 OK retransmission on unrelable transport (UDP) - ignore
-      state.state in [ :confirmed, :terminated ] ->
-        Logger.debug([ transid: sip_resp.transid, module: __MODULE__,
-                     message: "state: #{state.state}. Ignoring resp."])
-        state
-    end
-  end
-
-  # Handle 4xx, 5xx, 6xx responses
-  defp handle_sip_response(state, sipmsg) when SIP.Msg.Ops.is_failure_resp(sipmsg) do
-    cond do
-      state.state in [ :sending, :proceeding ] ->
-        # Send the message to the transaction layer
-        send(state.app, { :response, sipmsg, self() })
-        Logger.debug([ transid: sipmsg.transid, module: __MODULE__,
-                      message: "Received #{sipmsg.response}. State: #{state.state} -> rejected"])
-
-        verb = if sipmsg.response in [ 401, 407 ], do: "challenged", else: "rejected"
-        Logger.info([ transid: sipmsg.transid, module: __MODULE__,
-                     message: "#{state.msg.method} #{verb} with response #{sipmsg.response}"])
-        %SIP.Transac{state | state: :rejected }
-
-      state.state == :rejected ->
-        state
-
-      true ->
-        Logger.debug([ transid: sipmsg.transid, module: __MODULE__,
-                     message: "state: #{state.state}. Ignoring resp."])
-        state
-      end
-  end
-
-  defp handle_cancel_response(state, siprsp) do
-    if siprsp.response == 200 do
-      state
-    else
-      send(state.app, { :cancel_rejected, siprsp.response})
-      state
-    end
-  end
   @impl true
    # Process SIP response from transport layer
   def handle_cast({ :onsipmsg, siprsp, _remoteip, _remoteport }, state) do
@@ -201,13 +68,13 @@ defmodule SIP.NICT do
 
       # The response matches the INVITE req
       state.msg.cseq == siprsp.cseq ->
-        new_state = handle_sip_response(state, siprsp)
+        new_state = SIP.Transac.Common.handle_UAS_sip_response(state, siprsp)
         {:noreply, new_state}
 
 
       # The response matches the CANCEL req
       siprsp.cseq == { hd(state.msg.cseq), :CANCEL } ->
-        new_state = handle_cancel_response(state, siprsp)
+        new_state = SIP.Transac.Common.handle_cancel_response(state, siprsp)
         {:noreply, new_state}
 
       true ->

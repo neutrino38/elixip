@@ -281,41 +281,4 @@ alias SIP.NetUtils
       :invalid_transaction
     end
   end
-
-
-  defmodule Common do
-    @moduledoc """
-    Module that gather all common an utility functions to implement SIP
-    transactions
-    """
-
-    @doc "Send a SIP message to the transport layer"
-    @spec sendout_msg(map(), binary()) :: {:ok | :invalid_sip_msg | :transporterror, map()}
-    def sendout_msg(state, sipmsgstr) when is_map(state) and is_binary(sipmsgstr) do
-      rez = GenServer.call(state.tpid,{ :sendmsg, sipmsgstr, state.destip, state.destport } )
-      { rez, state }
-    end
-
-    @spec sendout_msg(map(), map()) :: {:ok | :invalid_sip_msg | :transporterror, map()}
-    def sendout_msg(state, sipmsg) when is_map(state) and is_map(sipmsg) do
-      try do
-        msgstr = SIPMsg.serialize(sipmsg)
-        state = case sipmsg.method do
-          :ACK -> Map.put(state, :ack, msgstr)
-          :CANCEL -> state
-          false -> Map.put(state, :rspstr, msgstr)
-          _ -> Map.put(state, :msgstr, msgstr)
-        end
-
-        sendout_msg(state, msgstr)
-
-      rescue
-        e ->
-          Logger.error(Exception.format(:error, e, __STACKTRACE__))
-          Logger.error("")
-          { :invalid_sip_msg, state }
-      end
-    end
-  end
-
 end
