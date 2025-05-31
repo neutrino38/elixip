@@ -63,6 +63,14 @@ defmodule SIP.Test.Uri do
 		assert Map.get(parsed_uri.params, "expires") == "3600"
 	end
 
+	test "Parse an URI with sips scheme and check port 5061" do
+		{ code, parsed_uri } = SIP.Uri.parse("sips:9999@visioassistance.net")
+		assert code == :ok
+		assert parsed_uri.scheme == "sips:"
+		assert parsed_uri.port == 5061
+		assert parsed_uri.proto == "TLS"
+	end
+
 	test "Serialize a SIP URI" do
 		uri = %SIP.Uri{
 			port: 50,
@@ -83,6 +91,15 @@ defmodule SIP.Test.Uri do
 		assert to_string(uri) == "sip:domaine.fr"
 		uri = %SIP.Uri{ userpart: nil, domain: "djanah.com", port: 5061, scheme: "sip:", proto: "TLS" }
 		assert to_string(uri) == "sip:djanah.com:5061;transport=TLS"
+	end
+
+	test "Serialize a SIPS URI" do
+		uri = %SIP.Uri{ domain: "domaine.fr", scheme: "sips:" }
+		assert to_string(uri) == "sips:domaine.fr"
+		uri = %SIP.Uri{ domain: "domaine.fr", scheme: "sips:", port: 5061 }
+		assert to_string(uri) == "sips:domaine.fr"
+		uri = %SIP.Uri{ domain: "domaine.fr", scheme: "sips:", port: 5061, proto: "TLS" }
+		assert to_string(uri) == "sips:domaine.fr"
 	end
 
 	test "Serialize a SIP URI with a domain as IP addresses " do

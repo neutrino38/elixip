@@ -85,16 +85,17 @@ defmodule SIP.Uri do
 					core_uri ->
 						# Parse parameters
 						params = parse_uri_parameters( Enum.drop( parts, 1 ) )
-						core_uri = if core_uri.port != nil do
-							core_uri
+						finalport = if core_uri.port != nil do
+							core_uri.port
 						else
-							# Add default port
-							Map.put(core_uri,
-								:port,
-								if proto == "sips:" do 5061 else 5060 end)
+							if proto == "sips:" do 5061 else 5060 end
 						end
-						core_uri = Map.put(core_uri, :scheme, proto) |> Map.put(:params, params)
-						{ :ok, core_uri }
+
+						finaluri = %SIP.Uri{ core_uri | scheme: proto, params: params, port: finalport }
+
+						# Fix protocol
+						finaluri = if proto == "sips:" do %SIP.Uri{ finaluri | proto: "TLS" } else finaluri	end
+						{ :ok, finaluri }
 				end
 
 			[ "<", part2 ] ->
@@ -206,6 +207,11 @@ defmodule SIP.Uri do
 		"sips:" <> host
 	end
 
+	defp serialize_core_uri( "sips:", nil, host, nil ) do
+		"sips:" <> host
+	end
+
+
 	defp serialize_core_uri( "sips:", user, host, 5061 ) do
 		"sips:" <> user <> "@" <> host
 	end
@@ -268,7 +274,7 @@ defmodule SIP.Uri do
 				uri.port )
 
 		# add transport in params if needed
-		params = if Map.has_key?(uri.params, "transport") or uri.proto == "UDP" do
+		params = if Map.has_key?(uri.params, "transport") or uri.proto == "UDP" or (uri.scheme == "sips:" and uri.proto == "TLS") do
 			uri.params
 		else
 			Map.put(uri.params, "transport", uri.proto)
