@@ -31,7 +31,7 @@ alias SIP.NetUtils
 
   defp find_or_launch_transport(uri = %SIP.Uri{}) do
     reliable = apply(uri.tp_module, :is_reliable, [])
-    destip = NetUtils.ip2string(uri.destip)
+    destip = if is_tuple(uri.destip) do NetUtils.ip2string(uri.destip) else uri.destip end
     instance_name = if reliable do
       uri.destproto <> "_" <> destip <> ":" <> Integer.to_string(uri.destport)
     else

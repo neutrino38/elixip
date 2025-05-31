@@ -1,14 +1,14 @@
-defmodule SIP.Transport.TLS do
+defmodule SIP.Transport.WSS do
   @moduledoc """
   TLS transport layer for SIP. Client version only for the moment
   """
   alias SIP.NetUtils
   use GenServer
   require Logger
-  require Socket.SSL
+  require Socket.Web
   require SIP.Transport.ImplHelpers
 
-  @transport_str "tls"
+  @transport_str "wss"
   # @default_local_port 5060
   def transport_str, do: @transport_str
 
@@ -18,19 +18,14 @@ defmodule SIP.Transport.TLS do
   @impl true
   def init({ dest_ip, dest_port}) do
     initial_state = %{ t_isreliable: true,
-      upperlayer: nil, destip: dest_ip, destport: dest_port,
-      buffer: %SIP.Transport.Depack{}  }
+      upperlayer: nil, destip: dest_ip, destport: dest_port }
 
     try do
-      state = SIP.Transport.ImplHelpers.connect(initial_state, :tls)
+      state = SIP.Transport.ImplHelpers.connect(initial_state, :wss)
       { :ok, state }
     rescue
       err in Socket.Error ->
-        dest_ip = if is_tuple(dest_ip) do
-          NetUtils.ip2string(dest_ip)
-        else
-          dest_ip
-        end
+        dest_ip = if is_tuple(dest_ip) do NetUtils.ip2string(dest_ip) else dest_ip end
         Logger.info([ module: __MODULE__, dest: "#{dest_ip}:#{dest_port}",
                        message: "Failed to connect socket: #{err.message} "])
         { :stop, :cnxerror }
@@ -59,13 +54,14 @@ defmodule SIP.Transport.TLS do
 
   @spec handle_call(  {:sendmsg, binary(), :inet.ip_address(), :inet.port_number }, any(), map() ) ::  { :reply, :ok, map() }
   def handle_call({ :sendmsg, msgstr, _destip, _dest_port }, _from, state) do
-    destipstr = SIP.NetUtils.ip2string(state.destip)
-    Logger.debug("TLS: Message sent to #{destipstr}:#{state.destport} ---->\r\n" <> msgstr <> "\r\n-----------------")
-    case Socket.Stream.send(state.socket, msgstr) do
-      :ok -> { :reply, :ok, state }
-      { :error, reason } ->
-        Logger.debug("TLS: failed to send message. Error: #{reason}");
-        { :reply, :transporterror, state }
+    try do
+      Socket.Web.send!(state.socket, {:text, msgstr})
+      Logger.debug("WSS: Message sent to #{state.destip}:#{state.destport} ---->\r\n" <> msgstr <> "\r\n-----------------")
+      { :reply, :ok, state }
+      rescue
+        err in Socket.Error ->
+          Logger.debug("WSS: failed to send message. Error #{err.message}");
+          { :reply, :transporterror, state }
     end
   end
 
@@ -73,22 +69,16 @@ defmodule SIP.Transport.TLS do
 
   # Handle data reception
   @impl true
-  def handle_info({:ssl, socket, data}, state ) do
-    buf = SIP.Transport.Depack.on_data_received(state.buffer, data,
-      fn what, msg ->
-        case what do
-          :ping -> nil
-          :msg -> SIP.Transport.ImplHelpers.process_incoming_message(state, msg, "TLS", __MODULE__, socket, state.destip, state.destport)
-        end
-      end)
-    { :noreply, %{ state | buffer: buf } }
+  def handle_info({:wss, socket, data}, state ) do
+    SIP.Transport.ImplHelpers.process_incoming_message(state, data, "WSS", __MODULE__, socket, state.destip, state.destport)
+    { :noreply, state }
   end
 
   def handle_info( {:tcp_closed, _socket}, state ) do
     Logger.debug([ module: __MODULE__, message: "Cnx disconnected. stopping transport instance" ])
 
     # Notify all dialogs to give them a chance to restart the TCP connection
-    SIP.Dialog.broadcast({ :tls_client_closed, state.destip, state.destport })
+    SIP.Dialog.broadcast({ :wss_client_closed, state.destip, state.destport })
     { :stop, state }
   end
 

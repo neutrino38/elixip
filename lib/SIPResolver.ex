@@ -107,16 +107,24 @@ alias SIP.NetUtils
         Logger.debug(module: __MODULE__, message: "no SIP proxy configured");
         { uri, false }
     end
-    Logger.debug(module: __MODULE__, message: "resolving #{desturi} with trysrv=#{usesrv}");
-    case resolve(desturi, usesrv) do
-      { :error, err } ->
-        Logger.debug(module: __MODULE__, message: "resolution error #{err}")
-        :error
+    transport = SIP.Uri.get_transport(desturi)
+    if transport in [ "WS", "WSS"] do
+      # We NEED to pass the name when using WSS or WS protocol
+      Logger.debug(module: __MODULE__, message: " #{desturi} uses Websocket transport. Resolution will be done by socket layer");
+      %SIP.Uri{ uri | destip: desturi.domain, destport: desturi.port, destproto: transport }
+    else
+      # For UDP, TCP, TLS use regular DNS resolution
+      Logger.debug(module: __MODULE__, message: "resolving #{desturi} with trysrv=#{usesrv}");
+      case resolve(desturi, usesrv) do
+        { :error, err } ->
+          Logger.debug(module: __MODULE__, message: "resolution error #{err}")
+          :error
 
-      :nxdomain ->
-        Logger.debug(module: __MODULE__, message: "resolution failed")
-        :nxdomain
-      { ip, port } -> %SIP.Uri{ uri | destip: ip, destport: port, destproto: SIP.Uri.get_transport(desturi) }
+        :nxdomain ->
+          Logger.debug(module: __MODULE__, message: "resolution failed")
+          :nxdomain
+        { ip, port } -> %SIP.Uri{ uri | destip: ip, destport: port, destproto: transport }
+      end
     end
   end
 
