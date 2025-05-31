@@ -41,7 +41,7 @@ Use the API provided by SIP.Dialog module
 
 
   defp allows(:REGISTER) do
-    [ :REGISTER ]
+    [ :REGISTER, :OPTIONS ]
   end
 
   defp allows(:INVITE) do
@@ -214,6 +214,8 @@ Use the API provided by SIP.Dialog module
       end
     else
       # Not allowed
+      Logger.debug([ module: __MODULE__, dialogpid: self(),
+                     message: "Method #{req.method} not allowed in this dialog"])
       { :reply, :methodnotallowed, state}
     end
   end
