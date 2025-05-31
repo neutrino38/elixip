@@ -217,6 +217,32 @@ User-Agent: Elixip 0.2.0
     assert newuri.destport == 5080
   end
 
+  @tag :live
+  test "Selectionne le transport TCP et ajoute un contact" do
+    # Le SIP proxy doit etre joignable pour que cela fonctionne
+    newuri = SIP.Transport.Selector.select_transport("sip:90901@testsip.djanah.com:5060;transport=TCP")
+    assert newuri != :invalidtransport
+    assert is_map(newuri)
+    assert newuri.tp_module == SIP.Transport.TCP
+    assert newuri.destport == 5060
+    msg = %{ contact: newuri }
+    msg = SIP.Transport.add_contact_header(newuri.tp_module, newuri.tp_pid, msg)
+    assert msg.contact.proto == "TCP"
+  end
+
+   @tag :live
+  test "Selectionne le transport TLS et ajoute un contact" do
+    # Le SIP proxy doit etre joignable pour que cela fonctionne
+    newuri = SIP.Transport.Selector.select_transport("sip:90901@testsip.djanah.com:5061;transport=TLS")
+    assert newuri != :invalidtransport
+    assert is_map(newuri)
+    assert newuri.tp_module == SIP.Transport.TLS
+    assert newuri.destport == 5061
+    msg = %{ contact: newuri }
+    msg = SIP.Transport.add_contact_header(newuri.tp_module, newuri.tp_pid, msg)
+    assert msg.contact.proto == "TLS"
+  end
+
   # Big transaction test
   @tag :toto
   test "Transaction SIP client INVITE - appel reussi" do
