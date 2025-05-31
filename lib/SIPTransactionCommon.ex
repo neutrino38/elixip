@@ -113,16 +113,26 @@ defmodule SIP.Transac.Common do
         send(state.app, { :response, sip_resp, self() })
         Logger.debug([ transid: sip_resp.transid,
                      module: __MODULE__,message: "state: #{state.state} -> confirmed"])
-        routeset = case Map.fetch(sip_resp, :route) do
-          { :ok, routeset } -> routeset
-          :error -> nil
-        end
-
         Logger.info([ transid: sip_resp.transid,  module: __MODULE__,
                     message: "answered with #{sip_resp.response}"])
         # Update status, the to header of the request with the to of the response to get the to tag
         state = %{ state | msg: Map.put(state.msg, :to, sip_resp.to), state: :confirmed }
-        Map.put(state, :remotecontact, sip_resp.contact) |> Map.put(:route, routeset)
+
+        # Process specific fields
+        case state.msg.method do
+          :INVITE ->
+            # INVITE Process Record-Route record and use the route set
+            routeset = Map.get(sip_resp, :recordroute)
+            Map.put(state, :remotecontact, sip_resp.contact) |> Map.put(:route, routeset)
+
+          :REGISTER ->
+            path = Map.get(sip_resp, "Path")
+            Map.put(state, :path, path)
+
+          # To do SUBSCRIBE and PUBLISH
+
+          _ -> state
+        end
 
       # Corner case when 200 OK retransmission is still not acked by app layer.
       state.state == :confirmed ->
