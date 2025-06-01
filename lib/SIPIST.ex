@@ -1,5 +1,5 @@
-defmodule SIP.NIST do
-  @moduledoc "SIP non-INVITE server transaction"
+defmodule SIP.IST do
+  @moduledoc "SIP INVITE server transaction"
   use GenServer
   import SIP.Trans.Timer
   import SIP.Transac.Common
@@ -62,8 +62,13 @@ defmodule SIP.NIST do
 
   @impl true
   def handle_call(:ack, _from, state) do
-    Logger.warning([ transid: state.msg.transid, module: __MODULE__,
-                    message: "Sending ACK is not supported for a server transaction"])
-    { :reply, :unsupported, state }
+    if state.state in [:confirmed, :rejected] do
+      send_ack(state)
+    else
+      Logger.debug([ transid: state.msg.transid,  module: __MODULE__,
+                     message: "Cannot ACK an ICT in state #{state.state}"])
+      { :reply, :badstate, state }
+    end
+
   end
 end
