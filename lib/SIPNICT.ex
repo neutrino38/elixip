@@ -2,6 +2,7 @@ defmodule SIP.NICT do
   @moduledoc "SIP non-INVITE client transaction"
   use GenServer
   import SIP.Trans.Timer
+  import SIP.Transac.Common
   require SIP.Msg.Ops
   require Logger
 
@@ -21,7 +22,7 @@ defmodule SIP.NICT do
                        destport: sipmsg.ruri.destport, state: :sending }
 
     # Sendout the message using the transport
-    case SIP.Transac.Common.sendout_msg(initial_state, sipmsg) do
+    case sendout_msg(initial_state, sipmsg) do
       {:ok, state} ->
         Logger.info([ transid: sipmsg.transid, module: __MODULE__,
                     message: "Sent #{sipmsg.method} #{sipmsg.ruri}"])
@@ -45,7 +46,7 @@ defmodule SIP.NICT do
   @impl true
   # CANCEL  current transaction from dialog layer
   def handle_call(:cancel, _from, state) do
-    SIP.Transac.Common.cancel(state)
+    cancel(state)
   end
 
   def handle_call(:gettransport, _from, state ) do
@@ -68,13 +69,13 @@ defmodule SIP.NICT do
 
       # The response matches the INVITE req
       state.msg.cseq == siprsp.cseq ->
-        new_state = SIP.Transac.Common.handle_UAS_sip_response(state, siprsp)
+        new_state = handle_UAS_sip_response(state, siprsp)
         {:noreply, new_state}
 
 
       # The response matches the CANCEL req
       siprsp.cseq == { hd(state.msg.cseq), :CANCEL } ->
-        new_state = SIP.Transac.Common.handle_cancel_response(state, siprsp)
+        new_state = handle_cancel_response(state, siprsp)
         {:noreply, new_state}
 
       true ->
