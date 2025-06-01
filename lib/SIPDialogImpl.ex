@@ -28,6 +28,10 @@ Use the API provided by SIP.Dialog module
     destport: 0
   ]
 
+  defp on_new_transaction(state, req, _transact_id) when is_map(req) and req.method == :ACK do
+    # Specific case for ACK. Do not create a new transaction for these request
+    state
+  end
 
   defp on_new_transaction(state, _req, transact_id) do
     if Enum.count(state.transactions) < 4 do
@@ -210,6 +214,8 @@ Use the API provided by SIP.Dialog module
 
       else
         # Cannot open too many transaction for dialog
+        Logger.warning([ module: __MODULE__, dialogpid: self(),
+                       message: "Too many open transaction for this dialog. Dropping request #{req.method}"])
         { :reply, :toomanytransactons, state}
       end
     else
@@ -263,7 +269,13 @@ Use the API provided by SIP.Dialog module
         state
       end
       send(state.app, { rsp.response, rsp, transact_pid, self() })
-      state
+      if rsp.response >= 200 do
+        # Remove transaction from active transaction list
+        close_transaction(state, transact_pid)
+      else
+        # Provisionnal response. Keep the transaction
+        state
+      end
     else
       Logger.warning([
         dialogpid: "#{inspect(self())}",  module: __MODULE__,

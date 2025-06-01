@@ -162,15 +162,25 @@ defmodule SIP.Transac.Common do
       state.state in [ :sending, :proceeding ] ->
         # Send the message to the application layer
         send(state.app, { :response, sipmsg, self() })
-        # Send ACK automatically on failure
+
         Logger.debug([ transid: sipmsg.transid, module: __MODULE__,
                       message: "Received #{sipmsg.response}. State: #{state.state} -> rejected"])
-        Logger.info([ transid: sipmsg.transid, message: "Call rejected with response #{sipmsg.response}"])
 
         if state.msg.method == :INVITE do
+          if sipmsg.response in [ 401, 407 ] do
+            Logger.info([ transid: sipmsg.transid, message: "INVITE challenged. Code #{sipmsg.response}"])
+          else
+            Logger.info([ transid: sipmsg.transid, message: "INVITE rejected Code #{sipmsg.response}"])
+          end
+          # Send ACK automatically on failure in case of Invite Client Transaction (ICT)
           { :reply, _reply, new_state } = send_ack(%SIP.Transac{state | state: :rejected })
           new_state
         else
+          if sipmsg.response in [ 401, 407 ] do
+            Logger.info([ transid: sipmsg.transid, message: "#{state.msg.method} challenged. Code #{sipmsg.response}"])
+          else
+            Logger.info([ transid: sipmsg.transid, message: "#{state.msg.method} rejected Code #{sipmsg.response}"])
+          end
           %SIP.Transac{state | state: :rejected }
         end
 
