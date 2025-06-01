@@ -5,7 +5,7 @@ defmodule SIP.Transac.Common do
   """
   import SIP.Trans.Timer
   require Logger
-  require SIP.Msg.Ops
+  import SIP.Msg.Ops
 
   @doc "Send a SIP message to the transport layer"
   @spec sendout_msg(map(), binary()) :: {:ok | :invalid_sip_msg | :transporterror, map()}
@@ -104,7 +104,7 @@ defmodule SIP.Transac.Common do
     end
   end
 
-  # Handle OK responses (2xx)
+  # Handle OK responses (2xx) from UAS
   def handle_UAS_sip_response(state, sip_resp) when SIP.Msg.Ops.is_2xx_resp(sip_resp) do
     Logger.debug([ transid: sip_resp.transid,  module: __MODULE__,
                  message: "Received #{sip_resp.response} final resp"])
@@ -225,8 +225,6 @@ defmodule SIP.Transac.Common do
     end
   end
 
-
-
   def handle_cancel_response(state, siprsp) do
     if siprsp.response == 200 do
       state
@@ -235,4 +233,134 @@ defmodule SIP.Transac.Common do
       state
     end
   end
+
+  # Internal Server Transaction Finite State Machine
+  defp fsm_reply(state, resp_code, rsp) when state.state in [ :trying, :proceeding ] do
+
+    case SIP.Transac.Common.sendout_msg(state, rsp) do
+      {:ok, new_state} ->
+        Logger.info([ transid: rsp.transid, module: __MODULE__,
+                    message: "Sent response #{resp_code} to #{state.msg.method}"])
+
+        case resp_code do
+          # Transition to proceeding
+          rc when rc in 100..199 ->
+            { :ok, Map.put(new_state, :state, :proceeding) }
+
+          rc when rc in 200..699 ->
+            # Final answer
+            # Cancel timer F, arm timer K
+            # set transaction state to terminated
+            new_state = schedule_timer_K(new_state, 5000)
+                        |> schedule_generic_timer(:timerF, :timerf, nil)
+                        |> Map.put(:state, :terminated)
+            { :ok, new_state }
+        end
+
+      { :invalid_sip_msg, _state } ->
+        Logger.error([ transid: rsp.transid, module: __MODULE__,
+                        message: "Fail to serialize SIP message."])
+        { :invalid_sip_msg, state }
+
+      { code, _state } ->
+          Logger.error([ transid: rsp.transid, module: __MODULE__,
+          message: "Transport error. Fail to send SIP response #{resp_code}. Err #{code}"])
+          { code, state }
+    end
+
+  end
+
+  defp fsm_reply(state, _resp_code, rsp) when state.state == :terminated do
+    Logger.info([ transid: rsp.transid, module: __MODULE__,
+                  message: "Final response to #{state.msg.method} already sent"])
+    { :ignore, state }
+  end
+
+  # reply to request from UAC - specific case when we need to challenge. upd_fields contains the auth parameters
+  def reply_to_UAC(state, sipmsg, resp_code, _reason, upd_fields, totag) when is_map(upd_fields) and resp_code in [ 401, 407 ] do
+    # Build the challenge response
+    resp = challenge_request(sipmsg, resp_code,
+      upd_fields.authproc, upd_fields.realm, upd_fields.algorithm,
+      [], totag)
+
+    # Send it to the transaction state machine
+    case fsm_reply(state, resp_code, resp) do
+      { :ok, new_state } when resp_code in 200..599 -> { :ok, schedule_timer_K(new_state, 5000) }
+      { code, state }  -> { code, schedule_timer_K(state, 5000) }
+    end
+  end
+
+  # Other regular cases
+  def reply_to_UAC(state, sipmsg, resp_code, reason, upd_fields, totag) when is_list(upd_fields) do
+    # Fix contact if needed
+    upd_fields = case resp_code do
+      rc when rc in 200..299 ->
+        #fix_contact(state, upd_fields)
+        upd_fields
+
+      # Todo, handle redirect here.
+      rc when rc in 300..399 -> upd_fields
+
+      # Other cases
+      _ -> upd_fields
+    end
+
+    # Build the SIP reponse
+    resp = reply_to_request(sipmsg, resp_code, reason, upd_fields, totag)
+
+    resp = if sipmsg.method == :INVITE and resp_code in 200..299 do
+      # Correct contact field for INVITE transaction
+      SIP.Transport.add_contact_header(state.tmod, state.tpid, resp)
+    else
+      resp
+    end
+
+    # Send it to the transaction state machine
+    case fsm_reply(state, resp_code, resp) do
+      { :ok, new_state } when resp_code in 200..599 -> { :ok, schedule_timer_K(new_state, 5000) }
+      { :ok, new_state } when resp_code in 100..199 -> { :ok, new_state }
+      { code, state }  -> { code, schedule_timer_K(state, 5000) }
+    end
+  end
+
+  # Call upper layer request handling function and
+  def process_UAS_request(state, ul_fun) when is_function(ul_fun) do
+    # TODO add debug support
+    case ul_fun.(state.msg, self(), false) do
+      # upper layer has started processing the request. Save the PID and the totag
+      { :ok, ul_pid, { _ftag, _cid, totag } } -> { :ok, Map.put(state, :app, ul_pid) |> Map.put(:totag, totag) }
+
+      # upper layer could not process the request and indicated a response code
+      # close the transaction with this response code
+      { :error, { code, reason, { _ftag, _cid, totag } }} ->
+        { _errcode, state } = reply_to_UAC(state, state.msg, code, reason, [], totag)
+        { :upperlayerfailure, state }
+
+
+      # General error
+      anything ->
+        Logger.error([ transid: state.msg.transid, module: __MODULE__,
+                     message: "Dialog layer failed to process SIP request. Err #{inspect(anything)}"])
+        { _errcode, state } =  reply_to_UAC(state, state.msg, 403, "Denied", [], generate_from_or_to_tag())
+        { :upperlayerfailure, state }
+    end
+  end
+
+  # When upperlayer is a callback that returns the upperlayer PID
+  def process_UAS_request(state) when is_function(state.upperlayer) do
+    process_UAS_request(state, state.upperlayer)
+  end
+
+  # when upperlayer is a PID -> send the message
+  def process_UAS_request(state) when is_pid(state.upperlayer) do
+    send(state.upperlayer, { state.sipmsg.method, state.sipmsg } )
+    { :ok, Map.put(state, :app, state.upperlayer) }
+  end
+
+  # when upperlayer is not specified -> send to the dialog layer
+  def process_UAS_request(state) when is_nil(state.upperlayer) do
+    process_UAS_request(state, &SIP.Dialog.process_incoming_request/3)
+  end
+
+
 end

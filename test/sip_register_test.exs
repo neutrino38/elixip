@@ -23,7 +23,22 @@ defmodule SIP.Test.Register do
         { :REGISTER, reg, _trans_pid, dialog_pid } ->
           # If a register message is received, replay 200 OK
           Logger.info("REGISTRAR: replying to REGISTER")
-          SIP.Dialog.reply(dialog_pid, reg, 200, "OK", [])
+          aor = reg.contact
+          expires = case SIP.Uri.get_uri_param(aor, "expires") do
+            { :ok, value } ->
+              value = String.to_integer(value)
+              if value > 300 or value < 60 do
+                300
+              else
+                value
+              end
+              Integer.to_string(value)
+
+            _ -> "300"
+          end
+
+          aor = SIP.Uri.set_uri_param(aor, "expires", expires)
+          SIP.Dialog.reply(dialog_pid, reg, 200, "OK", [ contact: aor ])
           Logger.info("REGISTRAR: processed an inbound REGISTER")
           # then increase the register counter
           registrar_process_loop(%{state | registered: state.registered + 1 })
@@ -144,6 +159,7 @@ defmodule SIP.Test.Register do
 
   end
 
+  @tag :live
   test "Client Register using UDP" do
 
     sip_ctx = %SIP.Context{
@@ -182,6 +198,7 @@ defmodule SIP.Test.Register do
 
   end
 
+  @tag :live
   test "Client OPTIONS UDP" do
 
     sip_ctx = %SIP.Context{
@@ -218,6 +235,7 @@ defmodule SIP.Test.Register do
 
   end
 
+  @tag :live
   test "Client Register using TCP" do
 
     sip_ctx = %SIP.Context{
@@ -258,7 +276,8 @@ defmodule SIP.Test.Register do
 
   end
 
-    test "Client Register and OPTIONS using TLS" do
+  @tag :live
+  test "Client Register / OPTIONS / unREGISTER using TLS" do
 
     sip_ctx = %SIP.Context{
       username: @username,
@@ -293,7 +312,7 @@ defmodule SIP.Test.Register do
       _ -> assert(false, "Received unexpected msg")
 
     after
-      1_000 -> assert(false, "Did not receive 200 OK on time")
+      1_000 -> assert(false, "auth REGISTER reply was was not recieved")
     end
 
     Process.sleep(1000)
@@ -306,8 +325,78 @@ defmodule SIP.Test.Register do
       { _response, _rsp, _trans_pid, _dialog_pid } ->
         sip_ctx
     after
+      1_000 -> assert(false, "Did not OPTIONS reply")
+    end
+
+    Process.sleep(1000)
+
+    send_REGISTER 0
+    assert ctx_get(:lasterr) == :ok
+
+
+    ^sip_ctx = receive do
+      { 401, rsp, _trans_pid, _dialog_pid } ->
+        send_auth_REGISTER(rsp, 0)
+        IO.puts("We received 401.")
+        sip_ctx
+    end
+
+    ^sip_ctx = receive do
+      { 200, rsp, _trans_pid, _dialog_pid } ->
+        assert SIP.Uri.get_uri_param(rsp.contact, "expires") == {:ok, "600"}
+        # IO.puts(inspect(rsp.contact.params))
+        sip_ctx
+
+      { resp_code, _rsp, _trans_pid, _dialog_pid } when is_integer(resp_code) ->
+        assert(false, "Received unexpected SIP response #{resp_code}")
+
+      _ -> assert(false, "Received unexpected msg")
+
+    after
+      2_000 -> assert(false, "un REGISTER reply not received")
+    end
+
+  end
+
+  @tag :live
+  test "Client Register using WSS" do
+
+    sip_ctx = %SIP.Context{
+      username: @username,
+      authusername: @authusername,
+      displayname: @displayname,
+      domain: @domain
+    }
+
+    ctx_set :passwd, @passwd
+
+    Application.put_env(:elixip2, :proxyuri, %SIP.Uri{ domain: @proxy, proto: "WSS", scheme: "sip:", port: 443 })
+
+    send_REGISTER 600
+    assert ctx_get(:lasterr) == :ok
+
+
+    ^sip_ctx = receive do
+      { 401, rsp, _trans_pid, _dialog_pid } ->
+        send_auth_REGISTER(rsp, 600)
+        sip_ctx
+    end
+
+    ^sip_ctx = receive do
+      { 200, rsp, _trans_pid, _dialog_pid } ->
+        # IO.puts(inspect(rsp.contact.params))
+        assert SIP.Uri.get_uri_param(rsp.contact, "expires") == {:ok, "600"}
+        sip_ctx
+
+      { resp_code, _rsp, _trans_pid, _dialog_pid } when is_integer(resp_code) ->
+        assert(false, "Received unexpected SIP response #{resp_code}")
+
+      _ -> assert(false, "Received unexpected msg")
+
+    after
       1_000 -> assert(false, "Did not receive 200 OK on time")
     end
+
   end
 
 end
