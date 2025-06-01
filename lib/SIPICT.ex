@@ -2,6 +2,7 @@ defmodule SIP.ICT do
   @moduledoc "SIP INVITE client transaction"
   use GenServer
   import SIP.Trans.Timer
+  import SIP.Transac.Common
   require SIP.Msg.Ops
   require Logger
 
@@ -16,7 +17,7 @@ defmodule SIP.ICT do
                        t_isreliable: apply(t_mod, :is_reliable, []), destip: sipmsg.ruri.destip,
                        destport: sipmsg.ruri.destport, state: :sending }
 
-    case SIP.Transac.Common.sendout_msg(initial_state, sipmsg) do
+    case sendout_msg(initial_state, sipmsg) do
       {:ok, state} ->
         Logger.info([ transid: sipmsg.transid, module: __MODULE__,
                     message: "Sent INVITE to #{sipmsg.ruri}"])
@@ -40,7 +41,7 @@ defmodule SIP.ICT do
   @impl true
   # CANCEL  current transaction from dialog layer
   def handle_call(:cancel, _from, state) do
-    SIP.Transac.Common.cancel(state)
+    cancel(state)
   end
 
   def handle_call(:gettransport, _from, state ) do
@@ -49,7 +50,7 @@ defmodule SIP.ICT do
 
   @doc "ACK the transaction (only needed in case of 200 OK received)"
   def handle_call(:ack, _from, state) do
-    SIP.Transac.Common.send_ack(state)
+    send_ack(state)
   end
 
   @impl true
@@ -62,13 +63,13 @@ defmodule SIP.ICT do
 
       # The response matches the INVITE req
       state.msg.cseq == siprsp.cseq ->
-        new_state = SIP.Transac.Common.handle_UAS_sip_response(state, siprsp)
+        new_state =handle_UAS_sip_response(state, siprsp)
         {:noreply, new_state}
 
 
       # The response matches the CANCEL req
       siprsp.cseq == { hd(state.msg.cseq), :CANCEL } ->
-        new_state = SIP.Transac.Common.handle_cancel_response(state, siprsp)
+        new_state = handle_cancel_response(state, siprsp)
         {:noreply, new_state}
 
       true ->
