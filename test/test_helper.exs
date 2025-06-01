@@ -3,26 +3,29 @@ defmodule TestRegistrar do
   require Logger
   @behaviour SIP.Session.Registrar
 
+  defp build_aor(reg) do
+    aor = reg.contact
+    expires = case SIP.Uri.get_uri_param(aor, "expires") do
+      { :ok, value } ->
+        value = String.to_integer(value)
+        if value > 300 or value < 60 do
+          300
+        else
+          value
+        end
+        Integer.to_string(value)
+
+      _ -> "300"
+    end
+    SIP.Uri.set_uri_param(aor, "expires", expires)
+  end
+
   defp registrar_process_loop(state) do
     receive do
       { :REGISTER, reg, _trans_pid, dialog_pid } ->
         # If a register message is received, replay 200 OK
         Logger.info("REGISTRAR: replying to REGISTER")
-        aor = reg.contact
-        expires = case SIP.Uri.get_uri_param(aor, "expires") do
-          { :ok, value } ->
-            value = String.to_integer(value)
-            if value > 300 or value < 60 do
-              300
-            else
-              value
-            end
-            Integer.to_string(value)
-
-          _ -> "300"
-        end
-
-        aor = SIP.Uri.set_uri_param(aor, "expires", expires)
+        aor = build_aor(reg)
         SIP.Dialog.reply(dialog_pid, reg, 200, "OK", [ contact: aor ])
         Logger.info("REGISTRAR: processed an inbound REGISTER")
         # then increase the register counter
