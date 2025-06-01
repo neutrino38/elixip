@@ -183,7 +183,8 @@ alias SIP.NetUtils
     end
   end
 
-  def start_uas_transaction(sipmsg, { local_ip, local_port, transport_str, t_mod, t_pid } , { remote_ip, remote_port }) when is_map(sipmsg) and sipmsg.method == :INVITE do
+  def start_uas_transaction(sipmsg, { local_ip, local_port, transport_str, upperlayer })
+      when is_map(sipmsg) do
     # Generate the branch ID
     branch_id = SIP.Msg.Ops.generate_branch_value()
     #Todo : check that branch ID is not already registered on the transaction registry
@@ -191,39 +192,21 @@ alias SIP.NetUtils
     sipmsg = SIP.Msg.Ops.add_via(sipmsg, { local_ip, local_port, transport_str }, branch_id)
 
     # Start a new GenServer for each transaction and register it in Registry.SIPTransaction
-    transact_params = { t_mod, t_pid, remote_ip, remote_port, sipmsg, self() }
-    name = {:via, Registry, {Registry.SIP.Transac, branch_id, :cast }}
-    case GenServer.start_link(SIP.IST, transact_params, name: name) do
-      { :ok, trans_pid } ->
-        Logger.debug([ transid: branch_id, message: "Created non-invite client transaction with PID #{trans_pid}." ])
-        { :ok, trans_pid }
-
-        { code, err } ->
-          Logger.error("Failed to create non-invite client transaction. Error: #{code}.")
-          { code, err }
+    ruri = sipmsg.ruri
+    transact_params = { ruri.tp_module, ruri.tp_pid, ruri.destip, ruri.destport, sipmsg, upperlayer }
+    name = {:via, Registry, { Registry.SIP.Transac, branch_id, :cast }}
+    transaction_module = if sipmsg.method == :INVITE do
+      SIP.IST
+    else
+      SIP.NIST
     end
-  end
-
-  def start_uas_transaction(sipmsg,
-    { local_ip, local_port, transport_str, t_mod, t_pid, upperlayer },
-    { remote_ip, remote_port }) when is_map(sipmsg) and sipmsg.method != :INVITE do
-
-    # Generate the branch ID
-    branch_id = SIP.Msg.Ops.generate_branch_value()
-    #Todo : check that branch ID is not already registered on the transaction registry
-
-    sipmsg = SIP.Msg.Ops.add_via(sipmsg, { local_ip, local_port, transport_str }, branch_id)
-
-    # Start a new GenServer for each transaction and register it in Registry.SIPTransaction
-    transact_params = { t_mod, t_pid, remote_ip, remote_port, sipmsg, upperlayer }
-    name = {:via, Registry, {Registry.SIP.Transac, branch_id, :cast }}
-    case GenServer.start_link(SIP.NIST, transact_params, name: name) do
+    case GenServer.start_link(transaction_module, transact_params, name: name) do
       { :ok, trans_pid } ->
-        Logger.debug([ transid: branch_id, message: "Created non-invite client transaction with PID #{inspect(trans_pid)}." ])
+        Logger.debug([ transid: branch_id, message: "Created an #{transaction_module} with PID #{inspect(trans_pid)}." ])
         { :ok, trans_pid }
 
         { code, err } ->
-          Logger.error("Failed to create non-invite client transaction. Error: #{code}.")
+          Logger.error("Failed to create an #{transaction_module}. Error: #{code}.")
           { code, err }
     end
   end

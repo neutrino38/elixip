@@ -163,10 +163,12 @@ defmodule SIP.Transport do
           if is_atom(parsed_msg.method) do
             # We need to start a new transaction
             { local_ip, local_port } = Socket.local!(socket)
-            SIP.Transac.start_uas_transaction(parsed_msg,
-                { local_ip, local_port, tp_name, tp_mod, self(), state.upperlayer } , { destip, destport })
+            ruri_with_tp_info = %SIP.Uri{ parsed_msg.ruri | destip: destip, destport: destport,
+                                          tp_module: tp_mod, tp_pid: self() }
+            msg = Map.put(parsed_msg, :ruri, ruri_with_tp_info )
+            SIP.Transac.start_uas_transaction(msg, { local_ip, local_port, tp_name, state.upperlayer })
           else
-            Logger.error("Received a SIP #{parsed_msg.response} response from #{state.destip}:#{state.destport} not linked to any transaction. Dropping it")
+            Logger.warning("Received a SIP #{parsed_msg.response} response from #{state.destip}:#{state.destport} not linked to any transaction. Dropping it")
             { :noreply, state }
           end
 

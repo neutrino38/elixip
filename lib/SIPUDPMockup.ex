@@ -293,13 +293,14 @@ defmodule SIP.Test.Transport.UDPMockup do
 
       { :no_matching_transaction, parsed_msg } ->
         # We need to start a new transaction
+        ruri = %SIP.Uri{ parsed_msg.ruri | destip: ip, destport: port,
+                         tp_module: __MODULE__, tp_pid: self() }
         SIP.Transac.start_uas_transaction(
-          parsed_msg,
-          { state.localip, state.localport, "UDP", SIP.Test.Transport.UDPMockup, self(), state.upperlayer },
-          { ip, port })
+          Map.put(parsed_msg, :ruri, ruri),
+          { state.localip, state.localport, "UDP", state.upperlayer })
 
       _ ->
-        Logger.error("Received an invalid SIP message from #{ip}:#{port}")
+        Logger.error("Received an invalid SIP message from #{NetUtils.ip2string(ip)}:#{port}")
         { :noreply, state }
     end
     { :noreply,  state }
