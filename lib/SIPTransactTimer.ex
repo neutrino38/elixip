@@ -71,7 +71,7 @@ defmodule SIP.Trans.Timer do
       # If transport is not reliable, retransmit
       code = GenServer.call(state.tpid, { :sendmsg, state.msgstr, state.destip, state.destport } )
       if code != :ok do
-        Logger.error([ transid: state.sipmsg.transid, message: "timer_T1: Fail to retransmit message: #{code}"])
+        Logger.error([ transid: state.msg.transid, message: "timer_T1: Fail to retransmit message: #{code}"])
       end
     end
     schedule_timer_A(state, ms*2)
@@ -80,7 +80,7 @@ defmodule SIP.Trans.Timer do
 
   def handle_timer({ :timerA, ms }, state) when ms >= @timer_T2_val and state.state == :sending do
     Logger.error([ transid: state.msg.transid, message: "timer_A: max restransmition delay expired."])
-    send(state.sipmsg.app, {:timeout, :timerA})
+    send(state.msg.app, {:timeout, :timerA})
     { :stop, state, "timer_A: max restransmition delay expired." }
   end
 
@@ -100,8 +100,8 @@ defmodule SIP.Trans.Timer do
 
   def handle_timer( :timerK, state) when state.state in [ :confirmed, :terminated ] do
     # Timer K expired: destroy transaction
-    Logger.debug([ transid: state.sipmsg.transid, message: "timer_K: SIP transaction terminated."])
-    { :stop, state, "SIP transactipn timeout (timer K)" }
+    Logger.debug([ transid: state.msg.transid, message: "timer_K: SIP transaction terminated."])
+    { :stop, :normal, state }
   end
 
   def handle_timer( :timer_K, state) do

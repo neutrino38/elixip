@@ -81,6 +81,16 @@ defmodule SIP.Test.Transport.UDPMockup do
 
   end
 
+  defp handle_req(state, :BYE, sipreq) do
+    if state.scenario in [ :inboundinvite ] do
+      # Handle the BYE request and answers
+      resp = SIP.Msg.Ops.reply_to_request(sipreq, 200, "OK")
+      Process.send_after(self(), { :recv, resp }, 100)
+      Logger.debug("UDPMockup: replied to BYE")
+    end
+    state
+  end
+
   defp handle_req(state, _method, _sipreq) do
     state
   end
@@ -115,9 +125,9 @@ defmodule SIP.Test.Transport.UDPMockup do
     end
     Logger.debug("UDPMockup: Message sent to #{destipstr}:#{dest_port} ---->\r\n" <> msgstr <> "\r\n-----------------")
     case SIPMsg.parse(msgstr, fn code, errmsg, lineno, line ->
-			IO.puts("\n" <> errmsg)
-			IO.puts("Offending line #{lineno}: #{line}")
-			IO.puts("Error code #{code}")
+			Logger.error("UDPMockup: failed to parse sent msg:" <> errmsg)
+			Logger.debug("UDPMockup: Offending line #{lineno}: #{line}")
+			Logger.debug("UDPMockup: Error code #{code}")
 			end) do
         { :ok, sipmsg } ->
           case sipmsg.method do
@@ -128,7 +138,10 @@ defmodule SIP.Test.Transport.UDPMockup do
               { :reply, :ok, handle_req(state, method, sipmsg) }
 
           end
-        _ ->  { :reply, :transporterror, state }
+
+        err ->
+          Logger.error("UDPMockup: failed to parse sent msg: #{inspect(err)}")
+          { :reply, :transporterror, state }
       end
   end
 
@@ -218,6 +231,14 @@ defmodule SIP.Test.Transport.UDPMockup do
     { :noreply,  state}
   end
 
+
+  defp set_inbound_scenario(state, sipreq) when sipreq.method == :REGISTER do
+    Map.put(state, :req, sipreq) |> Map.put(:scenario, :inboundregister)
+  end
+
+  defp set_inbound_scenario(state, sipreq) when sipreq.method == :INVITE do
+    Map.put(state, :req, sipreq) |> Map.put(:scenario, :inboundinvite)
+  end
   @impl true
 
   # Handle 100 Trying
@@ -280,10 +301,10 @@ defmodule SIP.Test.Transport.UDPMockup do
     { :noreply,  state }
   end
 
-  def handle_info({ :recv, sipreq}, state) when sipreq.method == :REGISTER do
-    state = Map.put(state, :req, sipreq) |> Map.put(:scenario, :inboundregister)
+  def handle_info({ :recv, sipreq}, state) when is_atom(sipreq.method) do
+    state = set_inbound_scenario(state, sipreq)
     Logger.debug([transid: state.req.transid, module: SIP.Test.Transport.UDPMockup,
-                message: "Received SIP REGISTER in scenario #{state.scenario}"])
+                 message: "Received SIP #{sipreq.method} in scenario #{state.scenario}"])
 
     # Simulate remote IP
     { :ok, ip } = NetUtils.parse_address("82.184.8.2")

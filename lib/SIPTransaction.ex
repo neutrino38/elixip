@@ -200,7 +200,7 @@ alias SIP.NetUtils
     else
       SIP.NIST
     end
-    case GenServer.start_link(transaction_module, transact_params, name: name) do
+    case GenServer.start(transaction_module, transact_params, name: name) do
       { :ok, trans_pid } ->
         Logger.debug([ transid: branch_id, message: "Created an #{transaction_module} with PID #{inspect(trans_pid)}." ])
         { :ok, trans_pid }

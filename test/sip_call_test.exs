@@ -4,12 +4,6 @@ defmodule TestCall do
   @behaviour SIP.Session.Call
 
   defp send_bye(state) do
-    contact_uri = %SIP.Uri{
-      userpart: "bob",
-      domain: "0.0.0.0"
-    }
-
-
     bye = %{
       "Max-Forwards" => "70",
       method: :BYE,
@@ -74,8 +68,9 @@ a=sendrecv
 a=rtcp-mux
 """
     contact_uri = %SIP.Uri{ userpart: "bob", domain: "0.0.0.0" }
+     Logger.info("CALLSERVER: answering call")
     SIP.Dialog.reply(state.dlg_id, state.req, 200, "OK",
-                    [ body: sdp, contact: contact_uri ])
+                    [ body: sdp, contact: contact_uri, contenttype: "application/sdp" ])
   end
 
   # Call simulator: answered call scenario
@@ -87,51 +82,51 @@ a=rtcp-mux
         Logger.info("CALLSERVER: processing call")
         SIP.Dialog.reply(dialog_pid, req, 100, "Trying", [])
         :erlang.start_timer(100, self(), :ringing)
-        call_handling_process_loop(%{state | dlg_id: dialog_pid, state: :proceeding, req: req })
+        answered_call_handling_process_loop(%{state | dlg_id: dialog_pid, state: :proceeding, req: req })
 
-      :ringing ->
+      { :timeout, _timerRef, :ringing } ->
         SIP.Dialog.reply(state.dlg_id, state.req, 180, "Ringing", [])
         :erlang.start_timer(1000, self(), :answer)
-        call_handling_process_loop(%{state | state: :ringing})
+        answered_call_handling_process_loop(%{state | state: :ringing})
 
-      :answer ->
+      { :timeout, _timerRef, :answer } ->
         answer_call(state)
         :erlang.start_timer(10000, self(), :hangup)
-        call_handling_process_loop(%{state | state: :confirmed})
+        answered_call_handling_process_loop(%{state | state: :confirmed})
 
-      :hangup ->
+      { :timeout, _timerRef, :hangup } ->
         if state.state == :confirmed do
           Logger.info("Hanging up answered call")
           send_bye(state)
           :erlang.start_timer(1000, self(), :stop)
-          call_handling_process_loop(%{state | state: :hangingup})
+          answered_call_handling_process_loop(%{state | state: :hangingup})
         else
           if state.state != :idle do
             Logger.info("Hanging up proceeding/ringing call")
             SIP.Dialog.reply(state.dlg_id, state.req, 486, "Busy", [])
           else
             Logger.info("Ignoring hangup in idle call")
-            call_handling_process_loop(state)
+            answered_call_handling_process_loop(state)
           end
         end
 
       # 200 OK answer from BYE
-      { 200, rsp, _trans_pid, _dialog_pid } ->
+      { 200, _rsp, _trans_pid, _dialog_pid } ->
         if state.state == :hangingup do
           Logger.info("Hangup complete")
         else
           Logger.warning("Ignoring unexpected 200 OK")
-          call_handling_process_loop(state)
+          answered_call_handling_process_loop(state)
         end
 
       # Received BYE
-      { BYE, req, _trans_pid, _dialog_pid } ->
+      { BYE, _req, _trans_pid, _dialog_pid } ->
         if state.state == :confirmed do
-          SIP.Dialog.reply(dialog_pid, req, 200, "OK", [])
+          SIP.Dialog.reply(state.dlg_id, state.req, 200, "OK", [])
           Logger.info("Terminating call because received bye")
         else
           Logger.warning("Ignoring unexpected BYE")
-          call_handling_process_loop(state)
+          answered_call_handling_process_loop(state)
         end
 
       :stop ->
@@ -156,9 +151,57 @@ end
 
 
 defmodule SIP.Test.Call do
+  alias SIP.Test
   use ExUnit.Case
   require SIP.Dialog
-  doctest SIP.Dialog
+  doctest SIP.Session.Call
 
+    # Account to use for tests
+  @proxy "testsip.djanah.com"
+
+  setup_all do
+    # Initialize transaction and transport layers
+    :ok = SIP.Transac.start()
+    :ok = SIP.Transport.Selector.start()
+    :ok = SIP.Dialog.start()
+    { :ok, _config_pid } = SIP.Session.ConfigRegistry.start()
+
+    # Force SIP proxy / registrar
+    Application.put_env(:elixip2, :proxyuri, %SIP.Uri{ domain: @proxy, scheme: "sip:", port: 5060 })
+    Application.put_env(:elixip2, :proxyusesrv, false)
+    :ok
+  end
+
+test "Simulating an answered call" do
+    # Define module as registrar module
+    :ok = SIP.Session.ConfigRegistry.set_call_processing_module(TestCall)
+
+    # Load a REGISTER message from a file
+    { code, msg } = File.read("test/SIP-INVITE-LVP.txt")
+    assert code == :ok
+
+    # Parse it
+    { code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
+			IO.puts("\n" <> errmsg)
+			IO.puts("Offending line #{lineno}: #{line}")
+			IO.puts("Error code #{code}")
+			end)
+    assert code == :ok
+
+    # Add unittest param to RURI to trigger UDP mockeup transport selection
+    upd_uri = SIP.Uri.set_uri_param(parsed_msg.ruri, "unittest", "1")
+    upd_uri = SIP.Uri.set_uri_param(upd_uri, "scenario", "answered_call")
+    parsed_msg = SIP.Msg.Ops.update_sip_msg( parsed_msg, { :ruri, upd_uri })
+
+    upd_uri = SIP.Transport.Selector.select_transport(upd_uri)
+
+    # Simulate a received INVITE by UDP mockeup transport
+    send(upd_uri.tp_pid, { :recv, parsed_msg})
+
+    receive do
+      truc -> IO.puts(inspect(truc))
+      # Add Timeout
+    end
+  end
 
 end
