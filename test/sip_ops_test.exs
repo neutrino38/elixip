@@ -85,17 +85,44 @@ defmodule SIP.Test.SIP.Msg.Ops do
     assert siprsp.method == false
     assert siprsp.response == 200
     assert(Map.has_key?(siprsp, :transid), "Missing transaction ID field in SIP response")
-    _siprsp_str = SIPMsg.serialize(siprsp)
+    assert(siprsp.contentlength == 6, "Inconsistent content length")
+    siprsp_str = SIPMsg.serialize(siprsp)
     #IO.puts(siprsp_str)
+    { code, parsed_msg } = SIPMsg.parse(siprsp_str, fn code, errmsg, lineno, line ->
+    IO.puts("\n" <> errmsg)
+    IO.puts("Offending line #{lineno}: #{line}")
+    IO.puts("Error code #{code}")
+    end)
 
+    assert code == :ok
+    assert parsed_msg.response == 200
+  end
+
+  test "Create an INVITE 200 OK - alternate", context do
+    upd_fields = [ body: "blabla", contact: "<sip:90901@212.83.152.250:5090>", contenttype: "application/sdp" ]
+    siprsp = SIP.Msg.Ops.reply_to_request(context.sipreq, 200, "OK", upd_fields, "zz77998")
+    assert siprsp.method == false
+    assert siprsp.response == 200
+    assert(Map.has_key?(siprsp, :transid), "Missing transaction ID field in SIP response")
+    assert siprsp.contentlength == 6
+    siprsp_str = SIPMsg.serialize(siprsp)
+    IO.puts(siprsp_str)
+    { code, parsed_msg } = SIPMsg.parse(siprsp_str, fn code, errmsg, lineno, line ->
+    IO.puts("\n" <> errmsg)
+    IO.puts("Offending line #{lineno}: #{line}")
+    IO.puts("Error code #{code}")
+    end)
+
+    assert code == :ok
+    assert parsed_msg.response == 200
   end
 
   test "Create an INVITE 200 OK and get the contact from the transport", context do
     :ok = SIP.Transport.Selector.start()
-    { :ok, t_mod, t_pid, destip, 5080 } = SIP.Transport.Selector.select_transport("sip:90901@visio5.visioassistance.net:5090;unittest=1", false)
-    assert t_mod == SIP.Test.Transport.UDPMockup
-    assert destip == {1,2,3,4}
-    contact = SIP.Transport.build_contact_uri(t_mod,t_pid )
+    uri = SIP.Transport.Selector.select_transport("sip:90901@visio5.visioassistance.net:5090;unittest=1")
+    assert uri.tp_module == SIP.Test.Transport.UDPMockup
+    assert uri.destip == {1,2,3,4}
+    contact = SIP.Transport.build_contact_uri(uri.tp_module,assert uri.tp_pid )
     body = %{ contenttype: "application/sdp", data: "blabla" }
     upd_fields = [ body: [ body ] ]
     upd_fields = [ { :contact, contact } | upd_fields ]
