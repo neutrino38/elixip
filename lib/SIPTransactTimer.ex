@@ -101,6 +101,7 @@ defmodule SIP.Trans.Timer do
   def handle_timer( :timerK, state) when state.state in [ :confirmed, :terminated ] do
     # Timer K expired: destroy transaction
     Logger.debug([ transid: state.msg.transid, message: "timer_K: SIP transaction terminated."])
+    # Notify the ??
     { :stop, :normal, state }
   end
 

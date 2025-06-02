@@ -67,9 +67,14 @@ defmodule SIP.NICT do
         Logger.warning([ transid: state.msg.transid, message: "Received an #{siprsp.method} SIP request. But this is a client transaction'"])
         {:noreply, state}
 
-      # The response matches the INVITE req
+      # The response matches the inital req
       state.msg.cseq == siprsp.cseq ->
         new_state = handle_UAS_sip_response(state, siprsp)
+        new_state = if siprsp.response >= 200 do
+          schedule_timer_K(new_state, 5000)
+        else
+          new_state
+        end
         {:noreply, new_state}
 
 
@@ -98,12 +103,6 @@ defmodule SIP.NICT do
 
   # Handle other timers
   def handle_info({ :timeout, _tref, timer } , state) when timer in [ :timerT2, :timerK] do
-    case handle_timer(timer, state) do
-      { :noreply, newstate } -> { :noreply, newstate }
-      { :stop, _reason, state} ->
-        GenServer.stop(self())
-        # Notify the tranport that this transaction is terminated
-        { :noreply, state }
-    end
+    handle_timer(timer, state)
   end
 end
