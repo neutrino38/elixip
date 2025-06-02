@@ -36,13 +36,7 @@ defmodule SIP.IST do
   @impl true
   # Timer K - kill the transaction
   def handle_info({ :timeout, _tref, :timerK } , state)  do
-    case handle_timer(:timerK, state) do
-      { :noreply, newstate } -> { :noreply, newstate }
-      { :stop, _reason, state} ->
-        GenServer.stop(self())
-        # Notify the tranport that this transaction is terminated
-        { :noreply, state }
-    end
+    handle_timer(:timerK, state)
   end
 
   # Timer F - timeout

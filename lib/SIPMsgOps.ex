@@ -321,13 +321,16 @@ defmodule SIP.Msg.Ops do
       end
     end
 
-    if resp_code in 300..303 or resp_code in 200..202 do
-      case Map.fetch(rsp, :contact) do
-        {:ok, _ } -> nil
-        :error -> raise "#{resp_code} response needs to be provided with a contact field"
+    contact = Map.get(rsp, :contact)
+    if contact == nil do
+      if resp_code in 300..303 and contact == nil do
+        raise "#{resp_code} response needs to be provided with a contact field"
+      end
+
+      if resp_code in 200..202 and req.method in [ :INVITE, :UPDATE, :REGISTER ] do
+        raise "#{resp_code} response to #{req.method} needs to be provided with a contact field"
       end
     end
-
     rsp
   end
 

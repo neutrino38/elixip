@@ -458,7 +458,7 @@ defmodule SIPMsg do
 				# Spilt into the parts according to the boundaries
 				bodies = String.split(body, "--" <> boundary )
 				if Kernel.length(bodies) < 3 do # prologue, bodies, last boundary
-					raise "Invalid MIME multipart SIP message body. Missing bpundaries."
+					raise "Invalid MIME multipart SIP message body. Missing boundaries."
 				else
 					# Remove everything before the first boundary
 				 	bodies = List.delete_at(bodies, 0)
@@ -691,6 +691,10 @@ defmodule SIPMsg do
 
 	defp serialize_body([]) do
 		"\r\n"
+	end
+
+	defp serialize_body(body) when is_binary(body) do
+		"\r\n" <> body
 	end
 
 	defp serialize_body([ body ]) do

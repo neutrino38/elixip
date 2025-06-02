@@ -60,12 +60,15 @@ Use the API provided by SIP.Dialog module
     [ :PUBLISH, :SUBSCRIBE, :NOTIFY, :MESSAGE ]
   end
 
-  defp set_fromtag(req, fromtag ) when is_req(req) do
-    Map.put(req, :from, SIP.Uri.set_uri_param(req.from, "tag", fromtag))
-  end
-
-  defp set_totag(req, totag ) when is_req(req) do
-    Map.put(req, :to, SIP.Uri.set_uri_param(req.to, "tag", totag))
+  defp set_tag(req, h, tag ) when is_req(req) and h in [ :from, :to] do
+    uri = Map.get(req, h)
+    uri = if is_binary(uri) do
+      { :ok, puri } = SIP.Uri.parse(uri)
+      puri
+    else
+      uri
+    end
+    Map.put(req, h, SIP.Uri.set_uri_param(uri, "tag", tag))
   end
 
   # Apply fromtag, totag, callid and CSeq
@@ -73,9 +76,13 @@ Use the API provided by SIP.Dialog module
   defp fix_outbound_request(state, req, is_initial \\ false) when is_req(req) do
     newreq = Map.put(req, :cseq, [ state.cseq, req.method ])
              |> Map.put( :callid, state.callid )
-             |> set_fromtag(state.fromtag)
+             |> set_tag(:from, state.fromtag)
 
-    newreq = if not is_initial and not (req.method in [ :OPTIONS ]), do: set_totag(newreq, state.totag), else: newreq
+    newreq = if not is_initial and not (req.method in [ :OPTIONS ]) do
+      set_tag(newreq, :to, state.totag)
+    else
+      newreq
+    end
 
     # Increment cseq for outbound and store modified request
     msg =  if state.msg == nil, do: newreq, else: state.msg

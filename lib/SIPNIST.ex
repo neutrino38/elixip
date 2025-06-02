@@ -38,10 +38,9 @@ defmodule SIP.NIST do
   def handle_info({ :timeout, _tref, :timerK } , state)  do
     case handle_timer(:timerK, state) do
       { :noreply, newstate } -> { :noreply, newstate }
-      { :stop, _reason, state} ->
-        GenServer.stop(self())
-        # Notify the tranport that this transaction is terminated
-        { :noreply, state }
+      { :stop, state, _reason } ->
+        Logger.debug([ transid: state.msg.transid,  module: __MODULE__, message: "Transaction terminated"])
+        { :stop, :normal, state }
     end
   end
 
