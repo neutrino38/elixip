@@ -185,16 +185,27 @@ alias SIP.NetUtils
 
   def start_uas_transaction(sipmsg, { local_ip, local_port, transport_str, upperlayer })
       when is_map(sipmsg) do
-    # Generate the branch ID
+
+    # Get top most via branch ID
+    [_, ori_branchid ]= hd(sipmsg.via) |> String.split("branch=")
+    ori_branchid =  String.split(ori_branchid, ";") |> hd()
+
+    # Generate a new branch ID
     branch_id = SIP.Msg.Ops.generate_branch_value()
     #Todo : check that branch ID is not already registered on the transaction registry
 
     sipmsg = SIP.Msg.Ops.add_via(sipmsg, { local_ip, local_port, transport_str }, branch_id)
 
+    # Reset the transaction ID field to associate this transaction with the original branch ID
+    sipmsg = Map.put(sipmsg, :transid, ori_branchid)
+
     # Start a new GenServer for each transaction and register it in Registry.SIPTransaction
     ruri = sipmsg.ruri
     transact_params = { ruri.tp_module, ruri.tp_pid, ruri.destip, ruri.destport, sipmsg, upperlayer }
-    name = {:via, Registry, { Registry.SIP.Transac, branch_id, :cast }}
+
+    # Note that the UAS transaction is associated with the ORIGINAL top most via to handle
+    # SIP retransmissions, CANCEL, UPDATE, ACK
+    name = {:via, Registry, { Registry.SIP.Transac, ori_branchid, :cast }}
     transaction_module = if sipmsg.method == :INVITE do
       SIP.IST
     else
@@ -202,7 +213,7 @@ alias SIP.NetUtils
     end
     case GenServer.start(transaction_module, transact_params, name: name) do
       { :ok, trans_pid } ->
-        Logger.debug([ transid: branch_id, message: "Created an #{transaction_module} with PID #{inspect(trans_pid)}." ])
+        Logger.debug([ transid: ori_branchid, message: "Created an #{transaction_module} with PID #{inspect(trans_pid)}." ])
         { :ok, trans_pid }
 
         { code, err } ->
@@ -256,12 +267,19 @@ alias SIP.NetUtils
 
   @doc "Transactionful reply to a request"
   def reply_req(req , resp_code, reason, upd_fields, totag, tr_list_filter) when is_map(req) and is_integer(resp_code) do
-    [ {uas_t, _value} ] = Registry.lookup(Registry.SIP.Transac, req.transid)
-    if uas_t in tr_list_filter or tr_list_filter == nil do
-      retcode = reply(uas_t, resp_code, reason, upd_fields, totag)
-      { retcode, uas_t }
-    else
-      :invalid_transaction
+    case Registry.lookup(Registry.SIP.Transac, req.transid) do
+      [ {uas_t, _value} ] ->
+        if uas_t in tr_list_filter or tr_list_filter == nil do
+          retcode = reply(uas_t, resp_code, reason, upd_fields, totag)
+          { retcode, uas_t }
+        else
+          :invalid_transaction
+        end
+
+      [] ->
+        Logger.error(module: __MODULE__,
+                     message: "Cannot reply to #{req.method}. Req transid #{req.transid} is not associated with a real transaction" )
+        :invalid_transaction
     end
   end
 end

@@ -310,7 +310,12 @@ defmodule SIP.Msg.Ops do
         upd_map
     end
 
-    rsp = req |> Map.filter(resp_filter) |> update_sip_msg(upd_map) |> add_transaction_id()
+    rsp = req |> Map.filter(resp_filter) |> update_sip_msg(upd_map)
+    rsp = if Map.has_key?(req, :transid) do
+      Map.put(rsp, :transid, req.transid )
+    else
+      add_transaction_id(rsp)
+    end
 
     # Specific case for 200 OK and 183 Session Progress for invite
     if req.method == :INVITE and resp_code in [183, 200] do
@@ -369,7 +374,7 @@ defmodule SIP.Msg.Ops do
   @doc "Crée un message ACK à partir d'une requête existante"
   def ack_request(sipmsg, remote_contact, routeset \\ :ignore , body \\ []) when is_map(sipmsg) and sipmsg.method in [:INVITE, :UPDATE] do
     ack_filter = fn { k, _v } ->
-      k in [ :via, :to, :from, :route, "Max-Forward", :cseq, :callid, :contentlength ]
+      k in [ :to, :from, :route, "Max-Forward", :callid, :contentlength ]
     end
 
     remote_contact = if remote_contact == nil do
@@ -378,12 +383,22 @@ defmodule SIP.Msg.Ops do
       remote_contact
     end
 
-    # update fields
+    [ seqno, _method ] = sipmsg.cseq
+    # build ACK according to RFC 3261 section 17.1.1.3
+    # - contact is copied from the final response (provided as argument)
+    # - routeset is copied too (same)
+    # - cseq copy the seq number and change the method to ACK
+    # - via contains only the top most via header of the original request
+    # - note the to field is copied from the message passed as argument
+    #   so the to needs to be modified to contain the to of the final response
+
     fieldlist = [
       {:method, :ACK},
       {:ruri, remote_contact},
       {:route, routeset},
-      {:body, body}]
+      {:body, body},
+      {:cseq, [ seqno, :ACK ]},
+      {:via, hd(sipmsg.via)}]
 
     # Update message
     sipmsg |> Map.filter(ack_filter) |> update_sip_msg(fieldlist)

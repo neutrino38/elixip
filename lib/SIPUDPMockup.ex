@@ -253,6 +253,10 @@ defmodule SIP.Test.Transport.UDPMockup do
     Map.put(state, :req, sipreq) |> Map.put(:scenario, :inboundregister)
   end
 
+  defp set_inbound_scenario(state, sipreq) when sipreq.method == :ACK do
+    state
+  end
+
   defp set_inbound_scenario(state, sipreq) when sipreq.method == :INVITE do
     Map.put(state, :req, sipreq) |> Map.put(:scenario, :inboundinvite)
   end
@@ -320,7 +324,7 @@ defmodule SIP.Test.Transport.UDPMockup do
 
   def handle_info({ :recv, sipreq}, state) when is_atom(sipreq.method) do
     state = set_inbound_scenario(state, sipreq)
-    Logger.debug([transid: state.req.transid, module: SIP.Test.Transport.UDPMockup,
+    Logger.debug([transid: sipreq.transid, module: SIP.Test.Transport.UDPMockup,
                  message: "Received SIP #{sipreq.method} in scenario #{state.scenario}"])
 
     # Simulate remote IP

@@ -116,6 +116,7 @@ defmodule SIP.Transac.Common do
         Logger.info([ transid: sip_resp.transid,  module: __MODULE__,
                     message: "answered with #{sip_resp.response}"])
         # Update status, the to header of the request with the to of the response to get the to tag
+        # and buidl the ACK in case of ICT transaction according to section 17.1.1.3 of RFC 3261
         state = %{ state | msg: Map.put(state.msg, :to, sip_resp.to), state: :confirmed }
 
         # Process specific fields
@@ -156,7 +157,7 @@ defmodule SIP.Transac.Common do
     end
   end
 
-  # Handle 4xx, 5xx, 6xx responses
+  # UAC: Handle 4xx, 5xx, 6xx responses
   def handle_UAS_sip_response(state, sipmsg) when SIP.Msg.Ops.is_failure_resp(sipmsg) do
     cond do
       state.state in [ :sending, :proceeding ] ->
@@ -173,7 +174,11 @@ defmodule SIP.Transac.Common do
             Logger.info([ transid: sipmsg.transid, message: "INVITE rejected Code #{sipmsg.response}"])
           end
           # Send ACK automatically on failure in case of Invite Client Transaction (ICT)
-          { :reply, _reply, new_state } = send_ack(%SIP.Transac{state | state: :rejected })
+          # Update the to field of the original request to comply with section 17.1.1.3
+          # of RFC 3261
+
+          { :reply, _reply, new_state } = send_ack(
+            %SIP.Transac{state | state: :rejected, msg: Map.put(state.msg, :to, sipmsg.to) })
           new_state
         else
           if sipmsg.response in [ 401, 407 ] do
@@ -259,11 +264,22 @@ defmodule SIP.Transac.Common do
 
           rc when rc in 200..699 ->
             # Final answer
-            # Cancel timer F, arm timer K
+            # Cancel timer F, arm timer K (NIST) or time A (IST)
             # set transaction state to terminated
-            new_state = schedule_timer_K(new_state, 5000)
+            new_state = if state.msg == :INVITE do
+              st = schedule_generic_timer(new_state, :timerF, :timerf, nil)
+                        |> Map.put(:state, :confirmed)
+              if state.t_isreliable do
+                st
+              else
+                # Arm T2 to retransmit last final response
+                schedule_timer_A(st) |> Map.put(:state, rspstr: SIPMsg.serialize(rsp) )
+              end
+            else
+              schedule_timer_K(new_state, 5000)
                         |> schedule_generic_timer(:timerF, :timerf, nil)
                         |> Map.put(:state, :terminated)
+            end
             { :ok, new_state }
         end
 
@@ -295,8 +311,8 @@ defmodule SIP.Transac.Common do
 
     # Send it to the transaction state machine
     case fsm_reply(state, resp_code, resp) do
-      { :ok, new_state } when resp_code in 200..599 -> { :ok, schedule_timer_K(new_state, 5000) }
-      { code, state }  -> { code, schedule_timer_K(state, 5000) }
+      { :ok, new_state } when resp_code in 200..599 -> { :ok, new_state }
+      { code, state }  -> { code, state }
     end
   end
 
@@ -326,10 +342,11 @@ defmodule SIP.Transac.Common do
     end
 
     # Send it to the transaction state machine
+
     case fsm_reply(state, resp_code, resp) do
-      { :ok, new_state } when resp_code in 200..599 -> { :ok, schedule_timer_K(new_state, 5000) }
+      { :ok, new_state } when resp_code in 200..599 -> { :ok, new_state }
       { :ok, new_state } when resp_code in 100..199 -> { :ok, new_state }
-      { code, state }  -> { code, schedule_timer_K(state, 5000) }
+      { code, state }  -> { code, state }
     end
   end
 
@@ -371,6 +388,4 @@ defmodule SIP.Transac.Common do
   def process_UAS_request(state) when is_nil(state.upperlayer) do
     process_UAS_request(state, &SIP.Dialog.process_incoming_request/3)
   end
-
-
 end

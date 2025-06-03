@@ -201,6 +201,14 @@ test "Simulating an answered call" do
     send(upd_uri.tp_pid, { :recv, parsed_msg})
 
     assert_receive(200, 2000, "Failed to receive 200 OK on time")
+    Process.sleep(600)
+
+    #Simulate ACK sending
+    ack = SIP.Msg.Ops.ack_request(parsed_msg, %SIP.Uri{ domain: "2.2.2.2", port: 5090 })
+          |> Map.put( :transid, "z9hG4bK18d9.829852dcccb559fa7184dc4ab9a406e8.0")
+    send(upd_uri.tp_pid, { :recv, ack })
+
+    #Wait for ACK
     assert_receive(:BYE, 6000, "Failed to receive BYE")
 
     # Wait for BYE transaction to die out
