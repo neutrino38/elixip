@@ -83,10 +83,15 @@ defmodule SIP.Test.Transport.UDPMockup do
 
   defp handle_req(state, :BYE, sipreq) do
     if state.scenario in [ :inboundinvite ] do
-      # Handle the BYE request and answers
+      # Handle the BYE request and answers it
       resp = SIP.Msg.Ops.reply_to_request(sipreq, 200, "OK")
       Process.send_after(self(), { :recv, resp }, 100)
       Logger.debug("UDPMockup: replied to BYE")
+
+      # Forward event to the test process
+      if state.testapppid != nil do
+        send(state.testapppid, :BYE)
+      end
     end
     state
   end
@@ -95,7 +100,15 @@ defmodule SIP.Test.Transport.UDPMockup do
     state
   end
 
-  defp handle_resp(state, _code, _sipresp) do
+  defp handle_resp(state, code, _sipresp) do
+    if state.scenario == :inboundinvite and state.testapppid != nil do
+      # Forward event to the test process
+      case code do
+        200 -> send(state.testapppid, code)
+        486 -> send(state.testapppid, code)
+        _ -> nil
+      end
+    end
     state
   end
 
@@ -109,7 +122,7 @@ defmodule SIP.Test.Transport.UDPMockup do
       Logger.error([module: SIP.Test.Transport.UDPMockup, message: "Could not find any valid IP V4 address. Check your network connection"])
       { :stop, :networkdown }
     else
-      initial_state = %{ t_isreliable: false, localip: hd(ips), localport: 5060, upperlayer: nil }
+      initial_state = %{ t_isreliable: false, localip: hd(ips), localport: 5060, upperlayer: nil, testapppid: nil }
       { :ok, initial_state }
     end
   end
@@ -161,6 +174,10 @@ defmodule SIP.Test.Transport.UDPMockup do
 
   def handle_call( {:setupperlayer, nil }, _from, state) do
     { :reply, :ok, Map.put(state, :upperlayer, nil) }
+  end
+
+  def handle_call( :settestapp, { pid, _ref }, state) do
+    { :reply, :ok, Map.put(state, :testapppid, pid) }
   end
 
   # Simulate call scenario

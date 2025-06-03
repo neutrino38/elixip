@@ -91,7 +91,7 @@ a=rtcp-mux
 
       { :timeout, _timerRef, :answer } ->
         answer_call(state)
-        :erlang.start_timer(10000, self(), :hangup)
+        :erlang.start_timer(5000, self(), :hangup)
         answered_call_handling_process_loop(%{state | state: :confirmed})
 
       { :timeout, _timerRef, :hangup } ->
@@ -151,7 +151,6 @@ end
 
 
 defmodule SIP.Test.Call do
-  alias SIP.Test
   use ExUnit.Case
   require SIP.Dialog
   doctest SIP.Session.Call
@@ -195,13 +194,17 @@ test "Simulating an answered call" do
 
     upd_uri = SIP.Transport.Selector.select_transport(upd_uri)
 
+    # Indicate our test PID to receive events
+    GenServer.call(upd_uri.tp_pid, :settestapp)
+
     # Simulate a received INVITE by UDP mockeup transport
     send(upd_uri.tp_pid, { :recv, parsed_msg})
 
-    receive do
-      truc -> IO.puts(inspect(truc))
-      # Add Timeout
-    end
+    assert_receive(200, 2000, "Failed to receive 200 OK on time")
+    assert_receive(:BYE, 6000, "Failed to receive BYE")
+
+    # Wait for BYE transaction to die out
+    Process.sleep(6000)
   end
 
 end
