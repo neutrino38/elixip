@@ -83,9 +83,7 @@ defmodule SIP.ICT do
   def handle_info({ :timerA, ms }, state) do
     case handle_timer({ :timerA, ms }, state) do
       { :noreply, newstate } -> { :noreply, newstate }
-      { :stop, _reason, state} ->
-        GenServer.stop(self())
-        { :noreply, state }
+      { :stop, _reason, state} -> { :stop, :normal, state }
     end
   end
 
