@@ -47,6 +47,11 @@ defmodule SIP.IST do
     end
   end
 
+  # Handle SIP retransmission
+  def handle_info({ :timerA, ms }, state) do
+    handle_UAS_timerA({ :timerA, ms }, state)
+  end
+
   #Implementation of reply transaction interface
   @impl true
   def handle_call({ resp_code, reason, upd_fields, totag }, _from, state) when is_integer(resp_code) do

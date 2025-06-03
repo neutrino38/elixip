@@ -108,4 +108,21 @@ defmodule SIP.Trans.Timer do
   def handle_timer( :timer_K, state) do
     { :noreply, state }
   end
+
+  def handle_UAS_timerA({ :timerA, ms }, state) when ms < @timer_T2_val and state.state == :confirmed do
+    # If transport is not reliable, retransmit
+    code = GenServer.call(state.tpid, { :sendmsg, state.rspstr, state.destip, state.destport } )
+    if code != :ok do
+      Logger.error([ transid: state.msg.transid, message: "timer_T1: Fail to retransmit message: #{code}"])
+    end
+    schedule_timer_A(state, ms*2)
+    { :noreply, state }
+  end
+
+  def handle_UAS_timerA({ :timerA, ms }, state) when ms >= @timer_T2_val and state.state == :confirmed do
+    Logger.error([ transid: state.msg.transid, message: "timer_A: max restransmition delay expired."])
+    send(state.msg.app, {:timeout, :timerA})
+    { :stop, state, "timer_A: max restransmition delay expired." }
+  end
+
 end
