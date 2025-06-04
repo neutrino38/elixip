@@ -38,7 +38,7 @@ defmodule SIP.NIST do
   def handle_info({ :timeout, _tref, :timerK } , state)  do
     case handle_timer(:timerK, state) do
       { :noreply, newstate } -> { :noreply, newstate }
-      { :stop, state, _reason } ->
+      { :stop, _reason, state } ->
         Logger.debug([ transid: state.msg.transid,  module: __MODULE__, message: "Transaction terminated"])
         { :stop, :normal, state }
     end

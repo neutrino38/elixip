@@ -201,7 +201,7 @@ test "Simulating an answered call" do
     send(upd_uri.tp_pid, { :recv, parsed_msg})
 
     assert_receive(200, 2000, "Failed to receive 200 OK on time")
-    Process.sleep(600)
+    Process.sleep(1000)
 
     #Simulate ACK sending
     ack = SIP.Msg.Ops.ack_request(parsed_msg, %SIP.Uri{ domain: "2.2.2.2", port: 5090 })

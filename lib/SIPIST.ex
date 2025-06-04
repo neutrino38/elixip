@@ -25,7 +25,7 @@ defmodule SIP.IST do
   def handle_cast( {:onsipmsg, req, _remoteip, _remoteport }, state) when is_map(req) and req.method == :ACK do
     # TODO, check the IP/port against the  IP/port of the original request
     if state.state == :confirmed do
-      Logger.warning([ transid: state.msg.transid,  module: __MODULE__,
+      Logger.debug([ transid: state.msg.transid,  module: __MODULE__,
                       message: "ACK received. confirmed -> terminated"])
       { :noreply, schedule_timer_K(state, 5000) |> Map.put(:state, :terminated) }
     else
@@ -76,6 +76,9 @@ defmodule SIP.IST do
 
   # Handle SIP retransmission
   def handle_info({ :timerA, ms }, state) do
+    # Resending last final response in case of an unreliable transport
+    Logger.debug([ transid: state.msg.transid,  module: __MODULE__,
+                    message: "Resening the final response because ACK was not received"])
     handle_UAS_timerA({ :timerA, ms }, state)
   end
 

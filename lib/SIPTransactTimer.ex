@@ -122,7 +122,14 @@ defmodule SIP.Trans.Timer do
   def handle_UAS_timerA({ :timerA, ms }, state) when ms >= @timer_T2_val and state.state == :confirmed do
     Logger.error([ transid: state.msg.transid, message: "timer_A: max restransmition delay expired."])
     send(state.msg.app, {:timeout, :timerA})
-    { :stop, state, "timer_A: max restransmition delay expired." }
+    { :stop, :normal, state }
   end
+
+
+  # Ignoring timer A in terminated state
+  def handle_UAS_timerA({ :timerA, _ms }, state) when state.state == :terminated do
+    { :noreply, state }
+  end
+
 
 end

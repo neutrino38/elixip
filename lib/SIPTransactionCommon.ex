@@ -266,14 +266,17 @@ defmodule SIP.Transac.Common do
             # Final answer
             # Cancel timer F, arm timer K (NIST) or time A (IST)
             # set transaction state to terminated
-            new_state = if state.msg == :INVITE do
+            new_state = if state.msg.method == :INVITE do
               st = schedule_generic_timer(new_state, :timerF, :timerf, nil)
                         |> Map.put(:state, :confirmed)
               if state.t_isreliable do
                 st
               else
                 # Arm T2 to retransmit last final response
-                schedule_timer_A(st) |> Map.put(:state, rspstr: SIPMsg.serialize(rsp) )
+                Logger.debug([ transid: rsp.transid, module: __MODULE__,
+                     message: "final response sent. Arming timer A for IST transaction"])
+
+                schedule_timer_A(st) |> Map.put(:rspstr, SIPMsg.serialize(rsp) )
               end
             else
               schedule_timer_K(new_state, 5000)
