@@ -9,6 +9,8 @@ defmodule SIP.Transport do
     """
     require SIPMsg
 
+    @maxmsgsize 8000
+
     defstruct [
       buffer: "",
       body: "",
@@ -79,6 +81,9 @@ defmodule SIP.Transport do
 
     def on_data_received(buf = %Depack{}, data, cb_fun) when is_binary(data) and is_function(cb_fun) and buf.state == :reading_headers do
       buf = %Depack{ buf | buffer: buf.buffer <> data } # Accumulate
+      if Kernel.byte_size(buf.buffer) > @maxmsgsize do
+        raise "SIP message exceeeds maximum size"
+      end
       # IO.puts("reading_headers !")
       if String.contains?(buf.buffer,"\r\n\r\n") do
         [ headers, rest ] = String.split(buf.buffer, "\r\n\r\n", parts: 2)
@@ -155,6 +160,11 @@ defmodule SIP.Transport do
       Map.put(state, :localip, local_ip) |> Map.put(:localport, local_port) |> Map.put(:socket, sock)
     end
 
+    @doc """
+    Process an incoming message inside a transport. Message must be complete.
+    Parse it, try to find an associated transaction and if not, create an UAS
+    transaction
+    """
     def process_incoming_message(state, message, tp_name, tp_mod, socket, destip, destport) do
       case SIP.Transac.process_sip_message(message) do
         :ok -> { :noreply, state }
@@ -162,11 +172,15 @@ defmodule SIP.Transport do
         { :no_matching_transaction, parsed_msg } ->
           if is_atom(parsed_msg.method) do
             # We need to start a new transaction
-            { local_ip, local_port } = Socket.local!(socket)
+            { local_ip, local_port } = case socket do
+              { ip, port } -> { ip, port }
+              _ -> Socket.local(socket)
+            end
             ruri_with_tp_info = %SIP.Uri{ parsed_msg.ruri | destip: destip, destport: destport,
                                           tp_module: tp_mod, tp_pid: self() }
             msg = Map.put(parsed_msg, :ruri, ruri_with_tp_info )
-            SIP.Transac.start_uas_transaction(msg, { local_ip, local_port, tp_name, state.upperlayer })
+            {:ok, _tpid} = SIP.Transac.start_uas_transaction(msg, { local_ip, local_port, tp_name, state.upperlayer })
+            { :noreply, state }
           else
             Logger.warning("Received a SIP #{parsed_msg.response} response from #{state.destip}:#{state.destport} not linked to any transaction. Dropping it")
             { :noreply, state }

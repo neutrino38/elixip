@@ -255,7 +255,7 @@ defmodule SIP.Transac.Common do
     case SIP.Transac.Common.sendout_msg(state, rsp) do
       {:ok, new_state} ->
         Logger.info([ transid: rsp.transid, module: __MODULE__,
-                    message: "Sent response #{resp_code} to #{state.msg.method}"])
+                     message: "Sent response #{resp_code} to #{state.msg.method}"])
 
         case resp_code do
           # Transition to proceeding

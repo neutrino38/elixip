@@ -21,6 +21,33 @@ defmodule SIP.IST do
   end
 
   @impl true
+  # Handle ACK sent by UAC
+  def handle_cast( {:onsipmsg, req, _remoteip, _remoteport }, state) when is_map(req) and req.method == :ACK do
+    # TODO, check the IP/port against the  IP/port of the original request
+    if state.state == :confirmed do
+      Logger.warning([ transid: state.msg.transid,  module: __MODULE__,
+                      message: "ACK received. confirmed -> terminated"])
+      { :noreply, schedule_timer_K(state, 5000) |> Map.put(:state, :terminated) }
+    else
+      { :noreply, state }
+    end
+  end
+
+  # Handle CANCEL
+  def handle_cast({:onsipmsg, req, _remoteip, _remoteport }, state) when is_map(req) and req.method == :CANCEL do
+    if state.state in [ :trying, :proceeding ] do
+      cancel_resp = SIP.Msg.Ops.reply_to_request(req, 200, "OK")
+      sendout_msg(state, cancel_resp)
+
+    else
+      Logger.debug([ transid: state.msg.transid,  module: __MODULE__,
+                      message: "CANCEL rejected in state #{state.state}"])
+      # RFC 3261: 9.2 Processing CANCEL Requests
+      cancel_resp = SIP.Msg.Ops.reply_to_request(req, 481, "Call/Transaction Does Not Exist")
+      sendout_msg(state, cancel_resp)
+      state
+    end
+  end
   # This is invoked at NIST transaction creation to forward the request to upperlayer
   # asynchronously
   def handle_cast(:sipreq, state) do
@@ -61,13 +88,8 @@ defmodule SIP.IST do
 
   @impl true
   def handle_call(:ack, _from, state) do
-    if state.state in [:confirmed, :rejected] do
-      send_ack(state)
-    else
-      Logger.debug([ transid: state.msg.transid,  module: __MODULE__,
-                     message: "Cannot ACK an ICT in state #{state.state}"])
-      { :reply, :badstate, state }
-    end
-
+    Logger.warning([ transid: state.msg.transid,  module: __MODULE__,
+                    message: "Cannot ACK an Invite Server Transaction"])
+      { :reply, :notsupported, state }
   end
 end

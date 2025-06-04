@@ -131,11 +131,12 @@ defmodule SIP.Test.Transport.UDPMockup do
   def handle_call({ :sendmsg, msgstr, destip, dest_port }, _from, state) do
     destipstr = case SIP.NetUtils.ip2string(destip) do
       { :error, :einval } ->
-        Logger.error([module: SIP.Test.Transport.UDPMockup, message: "sendmsg: invalid destination address."])
-        IO.inspect(destip)
+        Logger.error([module: SIP.Test.Transport.UDPMockup, message: "sendmsg: invalid destination address #{inspect(destip)}."])
+
         raise "UDPMockup: invalid IP address"
       ipstr when is_binary(ipstr)-> ipstr
     end
+
     Logger.debug("UDPMockup: Message sent to #{destipstr}:#{dest_port} ---->\r\n" <> msgstr <> "\r\n-----------------")
     case SIPMsg.parse(msgstr, fn code, errmsg, lineno, line ->
 			Logger.error("UDPMockup: failed to parse sent msg:" <> errmsg)
@@ -330,22 +331,8 @@ defmodule SIP.Test.Transport.UDPMockup do
     # Simulate remote IP
     { :ok, ip } = NetUtils.parse_address("82.184.8.2")
     port = 53936
-    case SIP.Transac.process_sip_message(SIPMsg.serialize(sipreq)) do
-      :ok -> { :noreply, state }
-
-      { :no_matching_transaction, parsed_msg } ->
-        # We need to start a new transaction
-        ruri = %SIP.Uri{ parsed_msg.ruri | destip: ip, destport: port,
-                         tp_module: __MODULE__, tp_pid: self() }
-        SIP.Transac.start_uas_transaction(
-          Map.put(parsed_msg, :ruri, ruri),
-          { state.localip, state.localport, "UDP", state.upperlayer })
-
-      _ ->
-        Logger.error("Received an invalid SIP message from #{NetUtils.ip2string(ip)}:#{port}")
-        { :noreply, state }
-    end
-    { :noreply,  state }
+    SIP.Transport.ImplHelpers.process_incoming_message(
+      state, SIPMsg.serialize(sipreq), "UDP", __MODULE__, { { 1,2,3,4 }, 5080}, ip, port)
   end
 
 end

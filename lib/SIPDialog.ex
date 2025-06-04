@@ -131,7 +131,9 @@ defmodule SIP.Dialog do
             SIP.Transac.reply(transact_id, 481, " Call/Transaction Does Not Exist")
             :no_matching_dialog
 
-          :CANCEL -> :nomatchingdialog
+          :CANCEL ->
+            SIP.Transac.reply(transact_id, 481, " Call/Transaction Does Not Exist")
+            :nomatchingdialog
 
           m when m in [ :PUBLISH, :REGISTER, :SUBSCRIBE ] ->
             #Todo compulte timeout from refresh contact period
