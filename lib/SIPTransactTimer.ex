@@ -113,7 +113,10 @@ defmodule SIP.Trans.Timer do
     # If transport is not reliable, retransmit
     code = GenServer.call(state.tpid, { :sendmsg, state.rspstr, state.destip, state.destport } )
     if code != :ok do
-      Logger.error([ transid: state.msg.transid, message: "timer_T1: Fail to retransmit message: #{code}"])
+      Logger.warning([ transid: state.msg.transid, message: "timer_T1: Fail to retransmit message: #{code}"])
+    else
+      Logger.debug([ transid: state.msg.transid,  module: __MODULE__,
+                     message: "Resending the final response because ACK was not received"])
     end
     schedule_timer_A(state, ms*2)
     { :noreply, state }

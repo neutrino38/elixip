@@ -45,9 +45,22 @@ defmodule SIP.IST do
       # RFC 3261: 9.2 Processing CANCEL Requests
       cancel_resp = SIP.Msg.Ops.reply_to_request(req, 481, "Call/Transaction Does Not Exist")
       sendout_msg(state, cancel_resp)
-      state
+      { :noreply, state }
     end
   end
+
+  def handle_cast({:onsipmsg, req, _remoteip, _remoteport }, state) when is_map(req) when is_atom(req.method) do
+    Logger.warning([ transid: state.msg.transid,  module: __MODULE__,
+                    message: "Ignoring unsupported SIP request #{req.method}"])
+    { :noreply, state }
+  end
+
+  def handle_cast({:onsipmsg, rsp, _remoteip, _remoteport }, state) when is_map(rsp) when rsp.method == false do
+    Logger.warning([ transid: state.msg.transid,  module: __MODULE__,
+                    message: "Ignoring unsupported SIP response #{rsp.response}"])
+    { :noreply, state }
+  end
+
   # This is invoked at NIST transaction creation to forward the request to upperlayer
   # asynchronously
   def handle_cast(:sipreq, state) do
@@ -77,8 +90,6 @@ defmodule SIP.IST do
   # Handle SIP retransmission
   def handle_info({ :timerA, ms }, state) do
     # Resending last final response in case of an unreliable transport
-    Logger.debug([ transid: state.msg.transid,  module: __MODULE__,
-                    message: "Resening the final response because ACK was not received"])
     handle_UAS_timerA({ :timerA, ms }, state)
   end
 

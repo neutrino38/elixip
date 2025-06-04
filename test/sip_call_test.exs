@@ -168,14 +168,16 @@ defmodule SIP.Test.Call do
     # Force SIP proxy / registrar
     Application.put_env(:elixip2, :proxyuri, %SIP.Uri{ domain: @proxy, scheme: "sip:", port: 5060 })
     Application.put_env(:elixip2, :proxyusesrv, false)
+
+    # Register the Call processing module
+    :ok = SIP.Session.ConfigRegistry.set_call_processing_module(TestCall)
+
     :ok
   end
 
-test "Simulating an answered call" do
-    # Define module as registrar module
-    :ok = SIP.Session.ConfigRegistry.set_call_processing_module(TestCall)
+test "Simulating an answered call and let the call end" do
 
-    # Load a REGISTER message from a file
+    # Load a INVITE message from a file
     { code, msg } = File.read("test/SIP-INVITE-LVP.txt")
     assert code == :ok
 
@@ -208,9 +210,66 @@ test "Simulating an answered call" do
           |> Map.put( :transid, "z9hG4bK18d9.829852dcccb559fa7184dc4ab9a406e8.0")
     send(upd_uri.tp_pid, { :recv, ack })
 
-    #Wait for ACK
+    #Wait for BYE
     assert_receive(:BYE, 6000, "Failed to receive BYE")
 
+    # Wait for BYE transaction to die out
+    Process.sleep(6000)
+  end
+
+  test "Simulating an answered call then hangup the call" do
+    # Load a INVITE message from a file
+    { code, msg } = File.read("test/SIP-INVITE-LVP.txt")
+    assert code == :ok
+
+    # Parse it
+    { code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
+			IO.puts("\n" <> errmsg)
+			IO.puts("Offending line #{lineno}: #{line}")
+			IO.puts("Error code #{code}")
+			end)
+    assert code == :ok
+
+    # Add unittest param to RURI to trigger UDP mockeup transport selection
+    upd_uri = SIP.Uri.set_uri_param(parsed_msg.ruri, "unittest", "1")
+    upd_uri = SIP.Uri.set_uri_param(upd_uri, "scenario", "answered_call")
+    parsed_msg = SIP.Msg.Ops.update_sip_msg( parsed_msg, { :ruri, upd_uri })
+
+    upd_uri = SIP.Transport.Selector.select_transport(upd_uri)
+
+    # Indicate our test PID to receive events
+    GenServer.call(upd_uri.tp_pid, :settestapp)
+
+    # Simulate a received INVITE by UDP mockeup transport
+    send(upd_uri.tp_pid, { :recv, parsed_msg})
+
+    assert_receive(200, 2000, "Failed to receive 200 OK on time")
+    Process.sleep(100)
+
+    #Simulate ACK sending
+    ack = SIP.Msg.Ops.ack_request(parsed_msg, %SIP.Uri{ domain: "2.2.2.2", port: 5090 })
+          |> Map.put( :transid, "z9hG4bK18d9.829852dcccb559fa7184dc4ab9a406e8.0")
+    send(upd_uri.tp_pid, { :recv, ack })
+
+    Process.sleep(500)
+    bye = %{
+      "Max-Forwards" => "70",
+      method: :BYE,
+      ruri: %SIP.Uri{ upd_uri | destip: {1,2,3,4}, destport: 5080 },
+      from: parsed_msg.from,
+      to: parsed_msg.to,
+      useragent: "Elixipp/0.1",
+      callid: parsed_msg.callid,
+      transid: "z9hG4bK18d9a7184d.0",
+      cseq: [
+        hd(parsed_msg.cseq) + 1,
+        :BYE
+      ],
+      via: ["SIP/2.0/UDP 87.98.205.4;branch=z9hG4bK18d9a7184d.0;i=4612"],
+      contentlength: 0
+    }
+
+    send(upd_uri.tp_pid, { :recv, bye })
     # Wait for BYE transaction to die out
     Process.sleep(6000)
   end

@@ -254,13 +254,15 @@ defmodule SIP.Test.Transport.UDPMockup do
     Map.put(state, :req, sipreq) |> Map.put(:scenario, :inboundregister)
   end
 
-  defp set_inbound_scenario(state, sipreq) when sipreq.method == :ACK do
-    state
-  end
-
   defp set_inbound_scenario(state, sipreq) when sipreq.method == :INVITE do
     Map.put(state, :req, sipreq) |> Map.put(:scenario, :inboundinvite)
   end
+
+  defp set_inbound_scenario(state, sipreq) when is_atom(sipreq.method) do
+    state
+  end
+
+
   @impl true
 
   # Handle 100 Trying
