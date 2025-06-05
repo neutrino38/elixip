@@ -201,7 +201,7 @@ defmodule SIP.Msg.Ops do
   end
 
   def update_sip_msg(sipmsg, { :body, body_data } ) when is_binary(body_data) do
-    sipmsg |> Map.put(:body,  body_data) |>  Map.put(:contentlength, Kernel.byte_size(body_data))
+    sipmsg |> Map.put(:body,  body_data) |>  Map.put(:contentlength, Kernel.byte_size(body_data)) |> Map.put(:contenttype, "application/sdp")
   end
 
   def update_sip_msg(_sipmsg, { :body, body_list }) when is_list(body_list) do

@@ -243,6 +243,41 @@ defmodule SIP.Session do
     end
   end
 
+  defmodule CallUAC do
+    defp invite_msg(sip_ctx = %SIP.Context{}, body) do
+      contact_uri = %SIP.Uri{
+        userpart: SIP.Context.get(sip_ctx, :username),
+        domain: "0.0.0.0",
+        params: %{}
+      }
+
+      req = %{
+        "Max-Forwards" => "70",
+        "Supported:" => "replaces",
+        method: :INVITE,
+        ruri: SIP.Context.to(sip_ctx, nil),
+        from: SIP.Context.from(sip_ctx),
+        to: SIP.Context.to(sip_ctx,nil),
+        contact: contact_uri,
+        useragent: "Elixipp/0.1",
+        callid: nil,
+        contentlength: 0
+      }
+      SIP.Msg.Ops.update_sip_msg(req, { :body, body })
+    end
+
+    @spec client_invite(%SIP.Context{}, binary() | list(), integer()) :: %SIP.Context{}
+    def client_invite(sip_ctx = %SIP.Context{}, sdp_offer, timeout) when is_integer(timeout) do
+      invite = invite_msg(sip_ctx, sdp_offer)
+      SIP.Session.send_sip_request(sip_ctx, invite, timeout)
+    end
+
+    defmacro send_INVITE(sdp_offer, timeout) do
+      quote do
+        var!(sip_ctx) = SIP.Session.CallUAC.client_invite(var!(sip_ctx), unquote(sdp_offer), unquote(timeout))
+      end
+    end
+  end
   defmodule Presence do
     @callback on_new_publish(dialog_id :: pid, pub_req :: map) :: { :accept, pid } | { :reject, integer }
     @callback on_new_subscribe(dialog_id :: pid, sub_req :: map) :: { :accept, pid } | { :reject, integer }
