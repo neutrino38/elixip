@@ -327,7 +327,7 @@ defmodule SIP.Test.Transport.UDPMockup do
 
   def handle_info({ :recv, sipreq}, state) when is_atom(sipreq.method) do
     state = set_inbound_scenario(state, sipreq)
-    Logger.debug([transid: sipreq.transid, module: SIP.Test.Transport.UDPMockup,
+    Logger.info([transid: sipreq.transid, module: SIP.Test.Transport.UDPMockup,
                  message: "Received SIP #{sipreq.method} in scenario #{state.scenario}"])
 
     # Simulate remote IP

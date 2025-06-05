@@ -281,6 +281,15 @@ defmodule SIP.Test.Call do
     ack
   end
 
+
+  defp simulate_remote_cancel(invite, branch_id) do
+    ack = SIP.Msg.Ops.cancel_request(invite)
+          |> Map.put( :transid, branch_id)
+    send(invite.ruri.tp_pid, { :recv, ack })
+    ack
+  end
+
+
   defp simulate_remote_bye(parsed_msg) do
     branch_id = SIP.Msg.Ops.generate_branch_value()
     bye = %{
@@ -347,7 +356,9 @@ defmodule SIP.Test.Call do
   test "Simulating an abandonned call" do
     { parsed_msg, branch_id } = simulate_remote_invite("timeout_call")
     assert_receive(180, 2000, "Failed to receive 180 Ringing on time")
-    assert_receive(408, 6000, "Failed to receive 408 Timeout ")
+    Process.sleep(100)
+    simulate_remote_cancel(parsed_msg, branch_id)
+    assert_receive(487, 1000, "Failed to receive 487 Request interrupted ")
     Process.sleep(100)
 
     #Simulate ACK sending

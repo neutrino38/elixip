@@ -35,18 +35,26 @@ defmodule SIP.IST do
 
   # Handle CANCEL
   def handle_cast({:onsipmsg, req, _remoteip, _remoteport }, state) when is_map(req) and req.method == :CANCEL do
-    if state.state in [ :trying, :proceeding ] do
-      cancel_resp = SIP.Msg.Ops.reply_to_request(req, 200, "OK")
+    state = if state.state in [ :trying, :proceeding ] do
+      Logger.info([ transid: state.msg.transid,  module: __MODULE__,
+                    message: "Received CANCEL - cancelling this transaction"])
+      # Reply to CANCEL request
+      cancel_resp = SIP.Msg.Ops.reply_to_request(req, 200, "OK", [], state.totag)
       sendout_msg(state, cancel_resp)
-
+      Logger.info([ transid: state.msg.transid,  module: __MODULE__,
+                    message: "Replied 200 OK to CANCEL"])
+      # Terminate transaction
+      { _code, new_state } = reply_to_UAC(state, state.msg, 487, "Request interrupted", [], state.totag);
+      new_state
     else
       Logger.debug([ transid: state.msg.transid,  module: __MODULE__,
                       message: "CANCEL rejected in state #{state.state}"])
       # RFC 3261: 9.2 Processing CANCEL Requests
-      cancel_resp = SIP.Msg.Ops.reply_to_request(req, 481, "Call/Transaction Does Not Exist")
+      cancel_resp = SIP.Msg.Ops.reply_to_request(req, 481, "Call/Transaction Does Not Exist", [], state.totag)
       sendout_msg(state, cancel_resp)
-      { :noreply, state }
+      state
     end
+    { :noreply, state }
   end
 
   def handle_cast({:onsipmsg, req, _remoteip, _remoteport }, state) when is_map(req) when is_atom(req.method) do

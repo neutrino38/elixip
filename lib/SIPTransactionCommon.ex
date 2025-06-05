@@ -257,10 +257,17 @@ defmodule SIP.Transac.Common do
         Logger.info([ transid: rsp.transid, module: __MODULE__,
                      message: "Sent response #{resp_code} to #{state.msg.method}"])
 
+        totag = case SIP.Uri.get_uri_param(rsp.to, "tag") do
+          { :no_such_param, nil } -> nil
+          { :ok, value } -> value
+        end
         case resp_code do
           # Transition to proceeding
-          rc when rc in 100..199 ->
+          100 ->
             { :ok, Map.put(new_state, :state, :proceeding) }
+
+          rc when rc in 101..199 ->
+            { :ok, Map.put(new_state, :state, :proceeding) |> Map.put(:totag, totag) }
 
           rc when rc in 200..699 ->
             # Final answer
@@ -269,6 +276,7 @@ defmodule SIP.Transac.Common do
             new_state = if state.msg.method == :INVITE do
               st = schedule_generic_timer(new_state, :timerF, :timerf, nil)
                         |> Map.put(:state, :confirmed)
+                        |> Map.put(:totag, totag)
               if state.t_isreliable do
                 st
               else

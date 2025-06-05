@@ -216,12 +216,13 @@ defmodule SIP.Msg.Ops do
   @doc "Crée un message CANCEL à partir d'une requête existante"
   def cancel_request(sipmsg) when is_map(sipmsg) and is_atom(sipmsg.method) do
     cancel_filter = fn { k, _v } ->
-      k in [ :via, :to, :from, :route, "Max-Forward", :cseq, :callid, :contentlength ]
+      k in [ :via, :to, :from, :route, "Max-Forward", :callid, :contentlength, :cseq, :method, :ruri ]
     end
-
+    [ seqno, _method ] = sipmsg.cseq
     fieldlist = [
       {:method, :CANCEL},
       {:contentlength, 0},
+      {:cseq, [ seqno, :CANCEL]},
       {:body, []}]
 
     sipmsg |> update_sip_msg(fieldlist) |> Map.filter(cancel_filter)
