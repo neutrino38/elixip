@@ -157,9 +157,9 @@ defmodule SIP.Dialog do
       # We do not use dispatch because we have already looked up the transaction list
       # Note that lookup() should always return a single transaction here
 
-      [ { dialog_pid, _dialog_id } ] ->
+      [ { dialog_pid, _value } ] ->
         GenServer.cast(dialog_pid, {:sipmsg, req2, transact_id})
-        { dialog_pid, req2 }
+        { :ok, dialog_pid, dialog_id }
 
       _ ->
         raise "Inconsitent dialog list: serveral dialogs associated with #{ IO.inspect(dialog_id)}"
@@ -186,6 +186,12 @@ defmodule SIP.Dialog do
     pids = Registry.select(Registry.SIPDialog, [{{:_, :"$1", :_}, [], [:"$1"]}])
     for pid <- pids do
       send(pid, msg_to_send)
+    end
+  end
+
+  def dump() do
+    for { k, p, _} <- Registry.select(Registry.SIPDialog, [{{:"$1", :"$2", :"$3"}, [], [{{:"$1", :"$2", :"$3"}}]}]) do
+      Logger.debug("callid: #{inspect(k)} -> #{inspect(p)}")
     end
   end
 end

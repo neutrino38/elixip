@@ -1,5 +1,5 @@
 defmodule TestCall do
-  use SIP.Session.Registrar
+  # use SIP.Session.Call
   require Logger
   @behaviour SIP.Session.Call
 
@@ -120,9 +120,9 @@ a=rtcp-mux
         end
 
       # Received BYE
-      { BYE, _req, _trans_pid, _dialog_pid } ->
+      { :BYE, bye, _trans_pid, dialog_pid } ->
         if state.state == :confirmed do
-          SIP.Dialog.reply(state.dlg_id, state.req, 200, "OK", [])
+          SIP.Dialog.reply(dialog_pid, bye, 200, "OK", [])
           Logger.info("Terminating call because received bye")
         else
           Logger.warning("Ignoring unexpected BYE")
@@ -135,12 +135,82 @@ a=rtcp-mux
     end
   end
 
+
+    # Call simulator: answered call scenario
+  defp timeout_call_handling_process_loop(state) do
+
+    state = receive do
+      { :INVITE, req, _trans_pid, dialog_pid } ->
+
+        Logger.info("CALLSERVER: processing call - will not answer")
+        SIP.Dialog.reply(dialog_pid, req, 100, "Trying", [])
+        :erlang.start_timer(100, self(), :ringing)
+        %{state | dlg_id: dialog_pid, state: :proceeding, req: req }
+
+      { :timeout, _timerRef, :ringing } ->
+        SIP.Dialog.reply(state.dlg_id, state.req, 180, "Ringing", [])
+        :erlang.start_timer(10000, self(), :noanswer)
+        %{state | state: :ringing}
+
+      { :timeout, _timerRef, :noanswer } ->
+        SIP.Dialog.reply(state.dlg_id, state.req, 408, "Timeout", [])
+        :erlang.start_timer(500, self(), :waitabit)
+        %{state | state: :waitabit}
+
+      { :timeout, _timerRef, :waitabit } ->
+        %{state | state: :end}
+
+      # Received CANCEL
+      { :CANCEL, cancel, _trans_pid, dialog_pid } ->
+        if state.state == :ringing do
+          SIP.Dialog.reply(dialog_pid, cancel, cancel, "OK", [])
+          :erlang.start_timer(100, self(), :cancelling)
+          %{state | state: :cancelling}
+        else
+          Logger.warning("Ignoring unexpected CANCEL")
+          state
+        end
+
+      { :timeout, _timerRef, :cancelling } ->
+        SIP.Dialog.reply(state.dlg_id, state.req, 487, "Request Terminated", [])
+        %{state | state: :end}
+
+      :stop ->
+        # Kill process
+        %{state | state: :end}
+    end
+    case state.state do
+      # End process
+      :end -> nil
+
+      # Continue pro essing
+      _ -> timeout_call_handling_process_loop(state)
+    end
+  end
+
+
   @impl true
   def on_new_call(dialog_id, req) do
     Logger.info("on_new_call called in test")
     state = %{ state: :idle, dlg_id: dialog_id, req: req }
-    pid = spawn_link(fn -> answered_call_handling_process_loop(state) end)
-    { :accept, pid }
+    case SIP.Uri.get_uri_param(req.ruri, "scenario") do
+      { :ok, "answered_call" } ->
+        pid = spawn_link(fn -> answered_call_handling_process_loop(state) end)
+        { :accept, pid }
+
+      { :ok, "timeout_call" } ->
+        pid = spawn_link(fn -> timeout_call_handling_process_loop(state) end)
+        { :accept, pid }
+
+        { :ok, truc } ->
+          Logger.info("on_new_call: unsupported scenario #{truc}")
+          { :reject, :noscenario, "unsupported scenario #{truc}" }
+
+        { :nosuchparam, nil } ->
+          Logger.info("on_new_call: no scenario specified in RURI")
+          { :reject, :noscenario, "no scenario specified in RURI" }
+
+    end
   end
 
   @impl true

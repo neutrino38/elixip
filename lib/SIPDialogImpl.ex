@@ -28,17 +28,15 @@ Use the API provided by SIP.Dialog module
     destport: 0
   ]
 
-  defp on_new_transaction(state, req, _transact_id) when is_map(req) and req.method == :ACK do
+  defp on_new_transaction(state, req, _transact_id) when is_map(req) and req.method in [ :ACK, :CANCEL ] do
     # Specific case for ACK. Do not create a new transaction for these request
-    state
+    { :nonewtrans, state }
   end
 
   defp on_new_transaction(state, _req, transact_id) do
     if Enum.count(state.transactions) < 4 do
       { :ok, Map.put(state, :transactions, List.insert_at(state.transactions, -1, transact_id)) }
     else
-      Logger.error("Too many transactions open for this dialog #{inspect(self())}")
-      SIP.Transac.reply(transact_id, 503, "Service Denied", nil, state.totag)
       { :toomanytransactions, state }
     end
   end
@@ -123,7 +121,7 @@ Use the API provided by SIP.Dialog module
         Logger.error([
           dialogpid: "#{inspect(self())}", module: __MODULE__,
           message: "Failed to create the app process. Err: #{code}. Aborting dialog creation." ])
-        { :stop, { code, reason }}
+        { :stop, :abnormal, reason }
     end
   end
 
@@ -221,13 +219,13 @@ Use the API provided by SIP.Dialog module
 
       else
         # Cannot open too many transaction for dialog
-        Logger.warning([ module: __MODULE__, dialogpid: self(),
+        Logger.warning([ dialogpid: self(), module: __MODULE__,
                        message: "Too many open transaction for this dialog. Dropping request #{req.method}"])
         { :reply, :toomanytransactons, state}
       end
     else
       # Not allowed
-      Logger.debug([ module: __MODULE__, dialogpid: self(),
+      Logger.debug([ dialogpid: self(), module: __MODULE__,
                      message: "Method #{req.method} not allowed in this dialog"])
       { :reply, :methodnotallowed, state}
     end
@@ -238,6 +236,8 @@ Use the API provided by SIP.Dialog module
   #
   @impl true
   def handle_cast({:sipmsg, msg, transact_pid}, state ) when is_req(msg) do
+    Logger.debug([ dialogpid: self(), module: __MODULE__,
+                   message: "Handing in-dialog SIP req #{msg.method}"])
     state = case on_new_transaction(state, msg, transact_pid) do
       { :ok, state } ->
         if msg.method in state.allows do
@@ -245,18 +245,31 @@ Use the API provided by SIP.Dialog module
           if seqno > state.cseqin do
             # Forward request to app layer
             send(state.app, { msg.method, msg, transact_pid, self() })
+            Logger.debug([ dialogpid: self(), module: __MODULE__,
+                   message: "Forwarded request to app process #{inspect(state.app)}"])
             %SIP.DialogImpl{ state | cseqin: seqno }
           else
-            SIP.Transac.reply(transact_pid, 500, "Out of order", nil, state.totag)
+            SIP.Transac.reply(transact_pid, 500, "Out of order", [], state.totag)
             state
           end
         else
-          SIP.Transac.reply(transact_pid, 405, "Method not allowed", nil, state.totag)
+          SIP.Transac.reply(transact_pid, 405, "Method not allowed", [], state.totag)
           state
         end
 
+      { :toomanytransactions, state } ->
+        Logger.error([ module: __MODULE__, dialogpid: self(), message: "Too many transactions open."])
+        SIP.Transac.reply(transact_pid, 503, "Service Denied", nil, state.totag)
+        state
 
-      _ -> state
+      # ACK, CANCEL do not create new transactions
+      { :nonewtrans, state } ->
+        state
+
+      #anything ->
+      #  Logger.error(module: __MODULE__, dialogpid: self(), message: "Unexpected error while handing req: #{anything}")
+      #  raise "Unexpected behavior"
+      #  state
     end
 
     { :noreply, state }
