@@ -104,8 +104,8 @@ defmodule SIP.Test.Transport.UDPMockup do
     if state.scenario == :inboundinvite and state.testapppid != nil do
       # Forward event to the test process
       case code do
-        200 -> send(state.testapppid, code)
-        486 -> send(state.testapppid, code)
+        180 -> send(state.testapppid, code)
+        c when c in 200..699  -> send(state.testapppid, c)
         _ -> nil
       end
     end

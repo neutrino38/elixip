@@ -24,6 +24,8 @@ defmodule SIP.NIST do
   # This is invoked at NIST transaction creation to forward the request to upperlayer
   # asynchronously
   def handle_cast(:sipreq, state) do
+    Logger.info([ transid: state.msg.transid,  module: __MODULE__,
+                message: "SIP Request #{state.msg.method} received"])
     case process_UAS_request(state) do
       # Schedule timer F (max NIST transaction)
       { :ok, state } -> { :noreply, SIP.Trans.Timer.schedule_timer_F(state) }

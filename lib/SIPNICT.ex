@@ -25,7 +25,7 @@ defmodule SIP.NICT do
     case sendout_msg(initial_state, sipmsg) do
       {:ok, state} ->
         Logger.info([ transid: sipmsg.transid, module: __MODULE__,
-                    message: "Sent #{sipmsg.method} #{sipmsg.ruri}"])
+                      message: "Sent #{sipmsg.method} #{sipmsg.ruri}"])
         if not state.t_isreliable do
           schedule_timer_A(state)
         end

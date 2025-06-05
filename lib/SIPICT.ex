@@ -20,7 +20,7 @@ defmodule SIP.ICT do
     case sendout_msg(initial_state, sipmsg) do
       {:ok, state} ->
         Logger.info([ transid: sipmsg.transid, module: __MODULE__,
-                    message: "Sent INVITE to #{sipmsg.ruri}"])
+                     message: "Sent INVITE to #{sipmsg.ruri}"])
         if not state.t_isreliable do
           schedule_timer_A(state)
         end

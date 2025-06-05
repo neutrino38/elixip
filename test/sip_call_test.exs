@@ -149,7 +149,7 @@ a=rtcp-mux
 
       { :timeout, _timerRef, :ringing } ->
         SIP.Dialog.reply(state.dlg_id, state.req, 180, "Ringing", [])
-        :erlang.start_timer(10000, self(), :noanswer)
+        :erlang.start_timer(5000, self(), :noanswer)
         %{state | state: :ringing}
 
       { :timeout, _timerRef, :noanswer } ->
@@ -245,8 +245,7 @@ defmodule SIP.Test.Call do
     :ok
   end
 
-test "Simulating an answered call and let the call end" do
-
+  defp simulate_remote_invite(scenario) do
     # Load a INVITE message from a file
     { code, msg } = File.read("test/SIP-INVITE-LVP.txt")
     assert code == :ok
@@ -261,24 +260,57 @@ test "Simulating an answered call and let the call end" do
 
     # Add unittest param to RURI to trigger UDP mockeup transport selection
     upd_uri = SIP.Uri.set_uri_param(parsed_msg.ruri, "unittest", "1")
-    upd_uri = SIP.Uri.set_uri_param(upd_uri, "scenario", "answered_call")
-    parsed_msg = SIP.Msg.Ops.update_sip_msg( parsed_msg, { :ruri, upd_uri })
-
+    upd_uri = SIP.Uri.set_uri_param(upd_uri, "scenario", scenario)
+    branch_id = SIP.Msg.Ops.generate_branch_value()
+    parsed_msg = SIP.Msg.Ops.add_via(parsed_msg, { {2,2,2,2}, 5090, "UDP" }, branch_id)
     upd_uri = SIP.Transport.Selector.select_transport(upd_uri)
+    parsed_msg = SIP.Msg.Ops.update_sip_msg( parsed_msg, { :ruri, upd_uri })
 
     # Indicate our test PID to receive events
     GenServer.call(upd_uri.tp_pid, :settestapp)
 
     # Simulate a received INVITE by UDP mockeup transport
     send(upd_uri.tp_pid, { :recv, parsed_msg})
+    { parsed_msg, branch_id }
+  end
 
+  defp simulate_remote_ack(invite, branch_id) do
+    ack = SIP.Msg.Ops.ack_request(invite, %SIP.Uri{ domain: "2.2.2.2", port: 5090 })
+          |> Map.put( :transid, branch_id)
+    send(invite.ruri.tp_pid, { :recv, ack })
+    ack
+  end
+
+  defp simulate_remote_bye(parsed_msg) do
+    branch_id = SIP.Msg.Ops.generate_branch_value()
+    bye = %{
+      "Max-Forwards" => "70",
+      method: :BYE,
+      ruri: %SIP.Uri{ parsed_msg.ruri | destip: {1,2,3,4}, destport: 5080 },
+      from: parsed_msg.from,
+      to: parsed_msg.to,
+      useragent: "Elixipp/0.1",
+      callid: parsed_msg.callid,
+      transid: branch_id,
+      cseq: [
+        hd(parsed_msg.cseq) + 1,
+        :BYE
+      ],
+      via: ["SIP/2.0/UDP 87.98.205.4;branch=#{branch_id};i=4612"],
+      contentlength: 0
+    }
+
+    send(parsed_msg.ruri.tp_pid, { :recv, bye })
+  end
+
+  test "Simulating an answered call and let the call end" do
+    { parsed_msg, branch_id } = simulate_remote_invite("answered_call")
+    assert_receive(180, 2000, "Failed to receive 180 Ringing on time")
     assert_receive(200, 2000, "Failed to receive 200 OK on time")
     Process.sleep(1000)
 
     #Simulate ACK sending
-    ack = SIP.Msg.Ops.ack_request(parsed_msg, %SIP.Uri{ domain: "2.2.2.2", port: 5090 })
-          |> Map.put( :transid, "z9hG4bK18d9.829852dcccb559fa7184dc4ab9a406e8.0")
-    send(upd_uri.tp_pid, { :recv, ack })
+    _ack = simulate_remote_ack(parsed_msg, branch_id)
 
     #Wait for BYE
     assert_receive(:BYE, 6000, "Failed to receive BYE")
@@ -288,60 +320,39 @@ test "Simulating an answered call and let the call end" do
   end
 
   test "Simulating an answered call then hangup the call" do
-    # Load a INVITE message from a file
-    { code, msg } = File.read("test/SIP-INVITE-LVP.txt")
-    assert code == :ok
-
-    # Parse it
-    { code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
-			IO.puts("\n" <> errmsg)
-			IO.puts("Offending line #{lineno}: #{line}")
-			IO.puts("Error code #{code}")
-			end)
-    assert code == :ok
-
-    # Add unittest param to RURI to trigger UDP mockeup transport selection
-    upd_uri = SIP.Uri.set_uri_param(parsed_msg.ruri, "unittest", "1")
-    upd_uri = SIP.Uri.set_uri_param(upd_uri, "scenario", "answered_call")
-    parsed_msg = SIP.Msg.Ops.update_sip_msg( parsed_msg, { :ruri, upd_uri })
-
-    upd_uri = SIP.Transport.Selector.select_transport(upd_uri)
-
-    # Indicate our test PID to receive events
-    GenServer.call(upd_uri.tp_pid, :settestapp)
-
-    # Simulate a received INVITE by UDP mockeup transport
-    send(upd_uri.tp_pid, { :recv, parsed_msg})
-
+    { parsed_msg, branch_id } = simulate_remote_invite("answered_call")
+    assert_receive(180, 2000, "Failed to receive 180 Ringing on time")
     assert_receive(200, 2000, "Failed to receive 200 OK on time")
     Process.sleep(100)
 
     #Simulate ACK sending
-    ack = SIP.Msg.Ops.ack_request(parsed_msg, %SIP.Uri{ domain: "2.2.2.2", port: 5090 })
-          |> Map.put( :transid, "z9hG4bK18d9.829852dcccb559fa7184dc4ab9a406e8.0")
-    send(upd_uri.tp_pid, { :recv, ack })
-
+    _ack = simulate_remote_ack(parsed_msg, branch_id)
     Process.sleep(500)
-    bye = %{
-      "Max-Forwards" => "70",
-      method: :BYE,
-      ruri: %SIP.Uri{ upd_uri | destip: {1,2,3,4}, destport: 5080 },
-      from: parsed_msg.from,
-      to: parsed_msg.to,
-      useragent: "Elixipp/0.1",
-      callid: parsed_msg.callid,
-      transid: "z9hG4bK18d9a7184d.0",
-      cseq: [
-        hd(parsed_msg.cseq) + 1,
-        :BYE
-      ],
-      via: ["SIP/2.0/UDP 87.98.205.4;branch=z9hG4bK18d9a7184d.0;i=4612"],
-      contentlength: 0
-    }
-
-    send(upd_uri.tp_pid, { :recv, bye })
+    simulate_remote_bye(parsed_msg)
     # Wait for BYE transaction to die out
     Process.sleep(6000)
+  end
+
+  test "Simulating an call without answser" do
+    { parsed_msg, branch_id } = simulate_remote_invite("timeout_call")
+    assert_receive(180, 2000, "Failed to receive 180 Ringing on time")
+    assert_receive(408, 6000, "Failed to receive 408 Timeout ")
+    Process.sleep(100)
+
+    #Simulate ACK sending
+    _ack = simulate_remote_ack(parsed_msg, branch_id)
+    Process.sleep(1000)
+  end
+
+  test "Simulating an abandonned call" do
+    { parsed_msg, branch_id } = simulate_remote_invite("timeout_call")
+    assert_receive(180, 2000, "Failed to receive 180 Ringing on time")
+    assert_receive(408, 6000, "Failed to receive 408 Timeout ")
+    Process.sleep(100)
+
+    #Simulate ACK sending
+    _ack = simulate_remote_ack(parsed_msg, branch_id)
+    Process.sleep(1000)
   end
 
 end
