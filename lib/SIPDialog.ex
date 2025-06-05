@@ -78,7 +78,7 @@ defmodule SIP.Dialog do
         # The GenServer.call() times out and caused the caller process to terminate.
         # As if the GenServer was not ready to process request at ths point
         # dialog_id = GenServer.call(dlg_pid, :getdialogid)
-        Logger.info([ dialogpid: "#{inspect(dlg_pid)}", module: __MODULE__, message: "Created dialog." ])
+        Logger.info([ dialogpid: "#{inspect(dlg_pid)}", module: __MODULE__, message: "Created dialog #{inspect(dialog_id)}." ])
         { :ok, dlg_pid, dialog_id }
 
       { :error, err } when is_exception(err) ->

@@ -183,13 +183,18 @@ Use the API provided by SIP.Dialog module
   def handle_call({:replyreq, req, resp_code, reason, realm}, _from, state) when resp_code in [ 401, 407 ] do
     auth = %{ realm: realm, algorithm: "SHA256", authproc: "Digest "}
     { ret, uas_t } = SIP.Transac.reply_req(req, resp_code, reason, auth, state.totag, state.transactions)
-    state = close_transaction(state, uas_t)
-    { :reply, ret, state }
+
+    { :reply, ret, add_totag(state, nil) |> close_transaction(uas_t) }
   end
 
   def handle_call({:replyreq, req, resp_code, reason, upd_field}, _from, state) do
     { ret, uas_t } = SIP.Transac.reply_req(req, resp_code, reason, upd_field, state.totag, state.transactions)
-    state = if resp_code in [200..699], do: close_transaction(state, uas_t), else: state
+    state = case resp_code do
+      100 -> state
+      rc when rc in 101..199 -> add_totag(state, nil)
+      rc when rc in 200..699 -> add_totag(state, nil) |> close_transaction(uas_t)
+      _ -> raise "Unsupported response code #{resp_code}"
+    end
     { :reply, ret, state }
   end
 
@@ -275,19 +280,29 @@ Use the API provided by SIP.Dialog module
     { :noreply, state }
   end
 
-  # For SIP responses
+  defp add_totag(state, totag) do
+    if is_nil(state.totag) and not is_nil(totag) do
+      totag = if state.direction == :inbound do
+        SIP.Msg.Ops.generate_from_or_to_tag()
+      else
+        if totag == nil, do: raise "Response does not contain totag"
+        totag
+      end
+      # Case when the dialog has been created by an outbound request
+      # Get the to tag from the first answer
+      Registry.register(Registry.SIPDialog, { state.fromtag, state.callid, totag }, :completedialog)
+      %SIP.DialogImpl{ state | totag: totag }
+    else
+      state
+    end
+  end
+
   @impl true
   def handle_info({ :response, rsp, transact_pid }, state ) when is_resp(rsp) do
     state = if transact_pid in state.transactions do
       { _rc, totag } = SIP.Uri.get_uri_param(rsp.to, "tag")
 
-      state = if is_nil(state.totag) and not is_nil(totag) do
-        # Case when the dialog has been created by an outbound request
-        # Get the to tag from the first answer
-        %SIP.DialogImpl{ state | totag: totag }
-      else
-        state
-      end
+      state = add_totag(state, totag)
       send(state.app, { rsp.response, rsp, transact_pid, self() })
       if rsp.response >= 200 do
         # Remove transaction from active transaction list
