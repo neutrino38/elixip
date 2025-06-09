@@ -15,10 +15,13 @@ Use the API provided by SIP.Dialog module
     direction: :outbound, # outbound means that dialog was created by an outbound request.
     curtrans: nil,  # Current transaction
     transactions: [],
+    closing_transaction: nil, # PID of the transaction that should terminate the dialog
     app: nil, # PID of the application
     state: :inital,
     debuglog: true, # If we should output debug logs for this dialog
     expirationtimer: nil,
+    keepalivetimer: nil,
+    missedkeepalive: 0,
     cseq: 1,
     cseqin: 1,
     fromtag: nil,
@@ -87,6 +90,148 @@ Use the API provided by SIP.Dialog module
     newstate = %SIP.DialogImpl{ state | cseq: state.cseq + 1, msg: msg }
     { newstate, newreq }
   end
+
+  def send_in_dialog_request(state = %SIP.DialogImpl{}, req) do
+    if req.method in state.allows do
+      if Enum.count(state.transactions) < 4 do
+        { state, req } = fix_outbound_request(state, req)
+
+        # Copy transport parameters from the request that opened the dialog into the RURI to reuse them
+        o_ruri = state.msg.ruri
+        ruri = %SIP.Uri{ req.ruri | destip: o_ruri.destip, destport: o_ruri.destport,
+                         tp_module: o_ruri.tp_module, tp_pid: o_ruri.tp_pid }
+        req = %{ req | ruri: ruri }
+        # Create an UAC transaction to send the request out
+        case SIP.Transac.start_uac_transaction( req, 15 ) do
+          # Failed to send the message or create the transaction
+          { code, nil } ->
+            { code, state }
+
+          { :ok, transaction_pid, _modmsg } ->
+            # Add the transaction in the transaction list
+            newstate = %SIP.DialogImpl{ state | transactions: List.insert_at(state.transactions, -1, transaction_pid) }
+
+            # Handle expiration timer
+            newstate = arm_expiration_timer(newstate, req)
+            { :ok, newstate}
+
+        end
+
+      else
+        # Cannot open too many transaction for dialog
+        Logger.warning([ dialogpid: self(), module: __MODULE__,
+                       message: "Too many open transaction for this dialog. Dropping request #{req.method}"])
+        { :toomanytransactons, state}
+      end
+    else
+      # Not allowed
+      Logger.debug([ dialogpid: self(), module: __MODULE__,
+                     message: "Method #{req.method} not allowed in this dialog"])
+      { :methodnotallowed, state}
+    end
+  end
+
+  # --------------------------- OPTIONS keepalive -------------------------
+  @doc "arm the registration keepalive timer"
+  def arm_options_keepalive_timer(state =%SIP.DialogImpl{}) do
+    if state.keepalivetimer == nil and state.direction == :outbound do
+      %SIP.DialogImpl{ state | keepalivetimer: :erlang.start_timer(15000, :optionskeepalive, self()) }
+    else
+      state
+    end
+  end
+
+  def cancel_options_keepalive_timer(state =%SIP.DialogImpl{}) do
+    if state.keepalivetimer != nil do
+      :erlang.cancel_timer(state.keepalivetimer)
+      %SIP.DialogImpl{ state | keepalivetimer: nil }
+    end
+  end
+
+  def send_options_keepalive(state) do
+    msg = %{
+        "Accept" => "*/*",
+        "Accept-Encoding" => "UTF-8",
+        "Accept-Language" => "en",
+        "Supported" => "OPTIONS, REGISTER",
+        "Max-Forwards" => "70",
+        method: :OPTIONS,
+        ruri: state.msg.ruri,
+        from: state.msg.from,
+        to: state.msg.to,
+        contact: state.msg.contact,
+        useragent: Application.get_env(:elixip2, :useragent, "Elixipp/0.1"),
+        callid: nil,
+        contentlength: 0
+      }
+
+    case state.state do
+      :confirmed ->
+        # Send OPTIONS message
+        { _rc, state } = send_in_dialog_request(state, msg)
+
+        # Refresh timer
+        arm_options_keepalive_timer(state)
+
+      :terminated ->
+        # Dialog is dead. Kill timer
+        cancel_options_keepalive_timer(state)
+
+      _ -> state
+    end
+  end
+
+  # --------------------------- General expiration timer -------------------------
+  def arm_expiration_timer(state =%SIP.DialogImpl{}, req) when req.method == :INVITE do
+    expire = case Map.get(req, "Session-Expire", 1800) do
+      1800 -> 1800
+      exp -> String.to_integer(exp)
+    end
+
+    state = cancel_expiration_timer(state)
+    %SIP.DialogImpl{ state | expirationtimer: :erlang.start_timer(expire*1000, :inviterefresh, self()) }
+  end
+
+  @doc """
+  For dialogs created by REGISTER message, we have two cases: client REGISTER or server REGISTER
+
+  - for client REGISTER, we arm a timer that is equal to half of the expiration time and send a refresh
+    register automatically. We also send an OPTIONS message every 15 seconds to keep the NAT or the
+    connectionfull co
+  """
+  def arm_expiration_timer(state =%SIP.DialogImpl{}, req) when req.method == :REGISTER do
+    { expire, timeratom} = case SIP.Uri.get_uri_param(req.contact, "expires") do
+      { :no_such_param, nil } -> { 1, :unregister }
+      { :no_such_param, "0" } -> { 1, :unregister }
+      { :ok, value } ->
+        exp = String.to_integer(value)
+        if state.direction == :inbound do
+          { :registerexpire, exp }
+        else
+          { :registerrefresh, exp/2 }
+        end
+    end
+
+    state = cancel_expiration_timer(state)
+
+    %SIP.DialogImpl{ state | expirationtimer: :erlang.start_timer(expire*1000, timeratom, self()) }
+  end
+
+  # Default, do nothing
+  def arm_expiration_timer(state =%SIP.DialogImpl{}, _req) do
+    state
+  end
+
+  @doc "Cancels the dialog expiration timer"
+  def cancel_expiration_timer(state =%SIP.DialogImpl{}) do
+    if state.expirationtimer != nil do
+      :erlang.cancel_timer(state.expirationtimer)
+      %SIP.DialogImpl{ state | expirationtimer: nil }
+    else
+      state
+    end
+  end
+
   # -------- GenServer callbacks --------------------
 
   @impl true
@@ -139,12 +284,14 @@ Use the API provided by SIP.Dialog module
       #In case of an outbound dialog, start a, UAC transaction
       case SIP.Transac.start_uac_transaction( req, timeout ) do
         { :ok, transaction_pid, modmsg } ->
-          { :ok, %SIP.DialogImpl{ state | transactions: [ transaction_pid ], msg: modmsg } }
+          send(state.apppid, { :onnewdialog, :ok, transaction_pid })
+          newstate = %SIP.DialogImpl{ state | transactions: [ transaction_pid ], msg: modmsg } |> arm_expiration_timer(modmsg)
+          { :ok, newstate }
 
         { code, _extra } ->
           Logger.error([ module: __MODULE__, dialogpid: self(),
                       message: "Failed to create client transaction, err: #{code}."])
-          { :stop, code }
+          { :stop, :abnormal, code }
 
         :no_transport_available ->
           Logger.debug([ module: __MODULE__, dialogpid: self(),
@@ -200,41 +347,71 @@ Use the API provided by SIP.Dialog module
 
   @doc "Handle call to send out a new in-dialog request"
   def handle_call({ :newreq, req}, _from, state ) when is_req(req) do
-    if req.method in state.allows do
-      if Enum.count(state.transactions) < 4 do
-        { state, req } = fix_outbound_request(state, req)
+    { rc, state } = send_in_dialog_request(state, req)
+    { :reply, rc, state }
+  end
 
-        # Copy transport parameters from the request that opened the dialog into the RURI to reuse them
-        o_ruri = state.msg.ruri
-        ruri = %SIP.Uri{ req.ruri | destip: o_ruri.destip, destport: o_ruri.destport,
-                         tp_module: o_ruri.tp_module, tp_pid: o_ruri.tp_pid }
-        req = %{ req | ruri: ruri }
-        # Create an UAC transaction to send the request out
-        case SIP.Transac.start_uac_transaction( req, 15 ) do
-          # Failed to send the message or create the transaction
-          { code, nil } ->
-            { :reply, code, state }
-
-          { :ok, transaction_pid, _modmsg } ->
-            # Add the transaction in the transaction list
-            { :reply, :ok, %SIP.DialogImpl{ state |
-                               transactions: List.insert_at(state.transactions, -1, transaction_pid) }}
-
-        end
-
-      else
-        # Cannot open too many transaction for dialog
-        Logger.warning([ dialogpid: self(), module: __MODULE__,
-                       message: "Too many open transaction for this dialog. Dropping request #{req.method}"])
-        { :reply, :toomanytransactons, state}
-      end
+  def handle_call({:cancel, transact_pid}, state ) do
+    if transact_pid in state.transactions do
+      reply = SIP.Transac.cancel_uac_transaction(transact_pid)
+      { :reply, reply, state }
     else
-      # Not allowed
-      Logger.debug([ dialogpid: self(), module: __MODULE__,
-                     message: "Method #{req.method} not allowed in this dialog"])
-      { :reply, :methodnotallowed, state}
+      { :reply, :nosuchtransaction, state }
     end
   end
+
+    def handle_call({:ack, transact_pid}, state ) do
+    if transact_pid in state.transactions do
+      reply = SIP.Transac.ack_uac_transaction(transact_pid)
+      { :reply, reply, state }
+    else
+      { :reply, :nosuchtransaction, state }
+    end
+  end
+
+  defp check_closing_transaction({ :ok, state}, msg, transact_pid) when msg.method in [ :BYE ] do
+    { :ok, %SIP.DialogImpl{ state | closing_transaction: transact_pid } }
+  end
+
+  defp check_closing_transaction({ :ok, state}, _msg, _transact_pid) do
+    { :ok, state }
+  end
+
+  defp check_closing_transaction({ err, state }, _msg, _transact_pid) do
+    { err, state }
+  end
+
+
+  defp check_allows({ :ok, state}, msg) do
+    if msg.method in state.allows do
+      { :ok, state }
+    else
+      { :notallowed, state }
+    end
+  end
+
+  defp check_allows({ err, state }, _msg) do
+    { err, state }
+  end
+
+  defp check_seqno_and_notify({ :ok, state}, msg, transact_pid ) do
+    [ seqno, _cmethod ] = msg.cseq
+    if seqno > state.cseqin do
+      # Forward request to app layer
+      send(state.app, { msg.method, msg, transact_pid, self() })
+      Logger.debug([ dialogpid: self(), module: __MODULE__,
+              message: "Forwarded request to app process #{inspect(state.app)}"])
+
+      { :ok, %SIP.DialogImpl{ state | cseqin: seqno } }
+    else
+      { :out_of_order, state }
+    end
+  end
+
+  defp check_seqno_and_notify({ err, state }, _msg, _transact_pid) do
+    { err, state }
+  end
+
   # Invoked when dialog process receives sip request
   # sent by calling process_incoming_request(). Typically
   # from NIST or IST transaction processes. Also get
@@ -243,38 +420,32 @@ Use the API provided by SIP.Dialog module
   def handle_cast({:sipmsg, msg, transact_pid}, state ) when is_req(msg) do
     Logger.debug([ dialogpid: self(), module: __MODULE__,
                    message: "Handing in-dialog SIP req #{msg.method}"])
-    state = case on_new_transaction(state, msg, transact_pid) do
-      { :ok, state } ->
-        if msg.method in state.allows do
-          [ seqno, _cmethod ] = msg.cseq
-          if seqno > state.cseqin do
-            # Forward request to app layer
-            send(state.app, { msg.method, msg, transact_pid, self() })
-            Logger.debug([ dialogpid: self(), module: __MODULE__,
-                   message: "Forwarded request to app process #{inspect(state.app)}"])
-            %SIP.DialogImpl{ state | cseqin: seqno }
-          else
-            SIP.Transac.reply(transact_pid, 500, "Out of order", [], state.totag)
-            state
-          end
-        else
-          SIP.Transac.reply(transact_pid, 405, "Method not allowed", [], state.totag)
-          state
-        end
 
-      { :toomanytransactions, state } ->
+    { rc, state } = on_new_transaction(state, msg, transact_pid)
+                    |> check_allows(msg)
+                    |> check_seqno_and_notify(msg, transact_pid)
+                    |> check_closing_transaction(msg, transact_pid)
+
+    state = case rc do
+      :ok -> arm_expiration_timer(state, msg)
+      :notallowed ->
+        SIP.Transac.reply(transact_pid, 405, "Method not allowed", [], state.totag)
+        state
+
+      :out_of_order ->
+        SIP.Transac.reply(transact_pid, 500, "Out of order", [], state.totag)
+        state
+
+      :toomanytransactions ->
         Logger.error([ module: __MODULE__, dialogpid: self(), message: "Too many transactions open."])
         SIP.Transac.reply(transact_pid, 503, "Service Denied", nil, state.totag)
         state
 
-      # ACK, CANCEL do not create new transactions
-      { :nonewtrans, state } ->
+      :nonewtrans ->
+        # ACK, CANCEL do not create new transactions
+        # - rc returned by on_new_transaction
         state
 
-      #anything ->
-      #  Logger.error(module: __MODULE__, dialogpid: self(), message: "Unexpected error while handing req: #{anything}")
-      #  raise "Unexpected behavior"
-      #  state
     end
 
     { :noreply, state }
@@ -298,6 +469,7 @@ Use the API provided by SIP.Dialog module
   end
 
   @impl true
+  @doc "Invoked when a dialog receives a SIP response from an UAC transaction"
   def handle_info({ :response, rsp, transact_pid }, state ) when is_resp(rsp) do
     state = if transact_pid in state.transactions do
       { _rc, totag } = SIP.Uri.get_uri_param(rsp.to, "tag")
@@ -306,6 +478,18 @@ Use the API provided by SIP.Dialog module
       send(state.app, { rsp.response, rsp, transact_pid, self() })
       if rsp.response >= 200 do
         # Remove transaction from active transaction list
+        state = if state.state == :initial and rsp.response in 200..202  do
+          case rsp.response do
+            rc when rc in 200..202 -> %{state | state: :established }
+            rc when rc in 300..399 ->
+              %{state | state: :redirected }
+              Logger.debug(dialogpid: "#{inspect(self())}", module: __MODULE__,
+                           message: "Redirected to #{rsp.contact}")
+            rc when rc in 400..699 -> %{state | state: :terminated }
+          end
+        else
+          state
+        end
         close_transaction(state, transact_pid)
       else
         # Provisionnal response. Keep the transaction
@@ -318,7 +502,60 @@ Use the API provided by SIP.Dialog module
                  "that is not attached to the dialog." ])
       state
     end
+    if state.state in [:initial, :confirmed] do
+      { :noreply, state }
+    else
+      Logger.warning([
+        dialogpid: "#{inspect(self())}",  module: __MODULE__,
+        message: "Terminating Dialog" ])
+      { :stop, :normal, state }
+    end
+  end
+
+  # ----------------------- handling expiration timer ------------------------------
+
+  #
+  def handle_info({ :timeout, _timerRef, :unregister }, state= %SIP.DialogImpl{}) do
+    Logger.info([
+        dialogpid: "#{inspect(self())}",  module: __MODULE__,
+        message: "Terminating REGISTER Dialog" ])
+    { :stop, :normal, state }
+  end
+
+  def handle_info({ :timeout, _timerRef, :registerexpire }, state= %SIP.DialogImpl{}) do
+    Logger.info([
+        dialogpid: "#{inspect(self())}",  module: __MODULE__,
+        message: "Terminating REGISTER Dialog because no refresh REGISTER recevied" ])
+    { :stop, :normal, state }
+  end
+
+  def handle_info({ :timeout, _timerRef, :registerrefresh }, state= %SIP.DialogImpl{}) do
+    Logger.debug([
+        dialogpid: "#{inspect(self())}",  module: __MODULE__,
+        message: "Sending REFRESH register" ])
     { :noreply, state }
+  end
+
+  # ----------------------- transaction timers ------------------------------
+  def handle_info({ :transaction_timeout, _timer, transact_pid, req, module }, state= %SIP.DialogImpl{}) when is_pid(transact_pid) do
+    # Transaction expired -> remove it
+    state = close_transaction(state, transact_pid)
+    end_dialog = case req.method do
+      :BYE -> module == SIP.ICT # true if this is a client transaction
+      :REGISTER ->
+        case SIP.Uri.get_uri_param(req.contact, "expires") do
+          { :ok, "0" } -> module == SIP.ICT # true if this is a client transaction
+          _ -> false
+        end
+
+      _ -> false
+    end
+
+    if end_dialog do
+      { :stop, :normal, :state }
+    else
+      { :noreply, state }
+    end
   end
 
 end
