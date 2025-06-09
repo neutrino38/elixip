@@ -97,17 +97,16 @@ defmodule SIP.NICT do
   end
 
   @impl true
-  # Handle T1 time retransmission
+  # Handle request retransmission
+  # We should use timerE here. We use timerA instead
   def handle_info({ :timerA, ms }, state) do
-    case handle_timer({ :timerA, ms }, state) do
-      { :noreply, newstate } -> { :noreply, newstate }
-      { :stop, _reason, state} ->
-        { :stop, :normal, state }
-    end
+    handle_timer({ :timerA, ms }, state)
   end
 
   # Handle other timers
+  # - timer F - request timeout. UAS did not respond on time
+  # - timer K - normal transaction end
   def handle_info({ :timeout, _tref, timer } , state) do
-    handle_timer(timer, state)
+    handle_timer(timer, state, __MODULE__)
   end
 end

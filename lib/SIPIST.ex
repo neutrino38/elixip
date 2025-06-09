@@ -55,7 +55,7 @@ defmodule SIP.IST do
       sendout_msg(state, cancel_resp)
       Logger.info([ transid: state.msg.transid,  module: __MODULE__,
                     message: "Replied 200 OK to CANCEL"])
-      # Terminate transaction
+      # Terminate transaction - timers are handled inside reply_to_UAC
       { _code, new_state } = reply_to_UAC(state, state.msg, 487, "Request interrupted", [], state.totag);
       new_state
     else
@@ -88,7 +88,7 @@ defmodule SIP.IST do
                     message: "SIP Request #{state.msg.method} received"])
     case process_UAS_request(state) do
       # Schedule timer F (max NIST transaction)
-      { :ok, state } -> { :noreply, SIP.Trans.Timer.schedule_timer_F(state) }
+      { :ok, state } -> { :noreply, schedule_timer_F(state) }
 
       # In case of failure, timerK is scheduled by internal_reply()
       { :upperlayerfailure, state } -> { :noreply, state }
@@ -96,11 +96,6 @@ defmodule SIP.IST do
   end
 
   @impl true
-  # Timer K - kill the transaction
-  def handle_info({ :timeout, _tref, :timerK } , state)  do
-    handle_timer(:timerK, state)
-  end
-
   # Timer F - timeout
   def handle_info({ :timeout, _tref, :timerF } , state)  do
     case reply_to_UAC(state, state.sipmsg, 408, "Timeout", [], state.totag) do
@@ -109,7 +104,14 @@ defmodule SIP.IST do
     end
   end
 
-  # Handle SIP retransmission
+  # other timers
+  # - Timer K - kill the transaction
+  def handle_info({ :timeout, _tref, timer } , state)  do
+    handle_timer(timer, state, __MODULE__)
+  end
+
+  # Handle SIP response retransmission for unreliable transport
+  # - should be timerG here but we are using timerA
   def handle_info({ :timerA, ms }, state) do
     # Resending last final response in case of an unreliable transport
     handle_UAS_timerA({ :timerA, ms }, state)

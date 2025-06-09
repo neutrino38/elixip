@@ -4,12 +4,13 @@ defmodule SIP.Trans.Timer do
   @timer_T2_val 4000
   @timer_T4_val 5000
 
-  defp notify_dialog_layer(state, timer) do
+  defp notify_dialog_layer(state, timer, transact_module) do
     if !is_nil(state.app) do
-      send(state.app, {:transaction_timeout, timer, self(), state.msg })
+      send(state.app, {:transaction_timeout, timer, self(), state.msg, transact_module })
     end
   end
   # Arm T1 timer
+  @spec schedule_timer_A(any(), non_neg_integer()) :: any()
   def schedule_timer_A(state, ms \\ @timer_T1_val) do
     Process.send_after(self(), { :timerA, ms }, ms )
     state
@@ -127,8 +128,20 @@ defmodule SIP.Trans.Timer do
   end
 
 
-  def handle_timer( timer, state) when timer in [ :timerB, :timerD, :timerF, :timerH ] do
-    notify_dialog_layer(state, timer)
+  def handle_timer( :timerK, state, module) when state.state in [ :confirmed, :terminated ] do
+    # Timer K expired: destroy transaction
+    Logger.debug([ transid: state.msg.transid, module: module,
+                   message: "timer_K: SIP transaction terminated."])
+    # Notify the ??
+    { :stop, :normal, state }
+  end
+
+  def handle_timer( :timer_K, state, _module) do
+    { :noreply, state }
+  end
+
+  def handle_timer( timer, state, module) when timer in [ :timerB, :timerD, :timerF, :timerH ] do
+    notify_dialog_layer(state, timer, module)
     reason = case timer do
       :timerB ->
         Logger.info([ transid: state.msg.transid, message: "client INVITE not answered on time."])
@@ -139,7 +152,8 @@ defmodule SIP.Trans.Timer do
         :normal
 
       :timerF ->
-        Logger.info([ transid: state.msg.transid, message: "client #{state.msg.method} not answered on time."])
+        Logger.info([ transid: state.msg.transid, module: module,
+                    message: "#{state.msg.method} request not answered on time."])
         :transaction_timeout
 
       :timerH ->
@@ -150,16 +164,7 @@ defmodule SIP.Trans.Timer do
     { :stop, reason, state }
   end
 
-  def handle_timer( :timerK, state) when state.state in [ :confirmed, :terminated ] do
-    # Timer K expired: destroy transaction
-    Logger.debug([ transid: state.msg.transid, message: "timer_K: SIP transaction terminated."])
-    # Notify the ??
-    { :stop, :normal, state }
-  end
 
-  def handle_timer( :timer_K, state) do
-    { :noreply, state }
-  end
 
   def handle_UAS_timerA({ :timerA, ms }, state) when ms < @timer_T2_val and state.state == :confirmed do
     # If transport is not reliable, retransmit

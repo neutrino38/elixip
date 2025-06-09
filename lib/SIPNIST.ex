@@ -38,12 +38,7 @@ defmodule SIP.NIST do
   @impl true
   # Timer K - kill the transaction
   def handle_info({ :timeout, _tref, :timerK } , state)  do
-    case handle_timer(:timerK, state) do
-      { :noreply, newstate } -> { :noreply, newstate }
-      { :stop, _reason, state } ->
-        Logger.debug([ transid: state.msg.transid,  module: __MODULE__, message: "Transaction terminated"])
-        { :stop, :normal, state }
-    end
+    handle_timer(:timerK, state, __MODULE__)
   end
 
   # Timer F - timeout

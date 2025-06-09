@@ -83,19 +83,14 @@ defmodule SIP.ICT do
   @impl true
   # Handle T1 time retransmission
   def handle_info({ :timerA, ms }, state) do
-    case handle_timer({ :timerA, ms }, state) do
-      { :noreply, newstate } -> { :noreply, newstate }
-      { :stop, _reason, state} -> { :stop, :normal, state }
-    end
+    handle_timer({ :timerA, ms }, state)
   end
 
   # Handle other timers
-  def handle_info({ :timeout, _tref, timer } , state) when timer in [ :timerB, :timerK] do
-    case handle_timer(timer, state) do
-      { :noreply, newstate } -> { :noreply, newstate }
-      { :stop, _reason, state} ->
-        # TODO : Notify the tranport that this transaction is terminated
-        { :stop, :normal, state }
-    end
+  # - timer B - this is the ring time
+  # - timer H - if ACK is not sent on time
+  # - timer K - normal end of transaction
+  def handle_info({ :timeout, _tref, timer } , state) do
+    handle_timer(timer, state, __MODULE__)
   end
 end
