@@ -27,7 +27,19 @@ defmodule SIP.IST do
     if state.state == :confirmed do
       Logger.debug([ transid: state.msg.transid,  module: __MODULE__,
                       message: "ACK received. confirmed -> terminated"])
-      { :noreply, schedule_timer_K(state, 5000) |> Map.put(:state, :terminated) }
+
+      # todo: should we notify the upper layer ?
+      # probably yes because the ACK may carry and SDP body ...
+
+      newstate = Map.put(state, :state, :terminated) |> cancel_timer_H()
+      if state.is_reliable do
+        # All is done. Kill the transaction
+        { :stop, :normal, newstate }
+      else
+        # Unreliable transport ? Arm timer K to handle retransmissions
+        # According to RFC 3261, it should be timer J here. But whatever ...
+        { :noreply, schedule_timer_K(newstate, :default) }
+      end
     else
       { :noreply, state }
     end

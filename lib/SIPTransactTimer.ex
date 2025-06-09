@@ -2,6 +2,7 @@ defmodule SIP.Trans.Timer do
   require Logger
   @timer_T1_val 500
   @timer_T2_val 4000
+  @timer_T4_val 5000
 
   # Arm T1 timer
   def schedule_timer_A(state, ms \\ @timer_T1_val) do
@@ -16,6 +17,14 @@ defmodule SIP.Trans.Timer do
 
   def cancel_timer_B(state) do
     schedule_generic_timer(state, :timerB, :tB_ref, nil)
+  end
+
+  def schedule_timer_D(state, ms \\ 32) do
+    schedule_generic_timer(state, :timerD, :tD_ref, ms)
+  end
+
+  def cancel_timer_D(state) do
+    schedule_generic_timer(state, :timerD, :tD_ref, nil)
   end
 
   @doc """
@@ -68,7 +77,24 @@ defmodule SIP.Trans.Timer do
     schedule_generic_timer(state, :timerF, :timerf, nil)
   end
 
+  @doc """
+  Schedule/reschedule the H timer and save its reference (pid) in the transaction state
+  Wait time for ACK receipt
+  """
+  def schedule_timer_H(state) do
+    schedule_generic_timer(state, :timerH, :timerh, @timer_T1_val * 64)
+  end
+
+  def cancel_timer_H(state) do
+    schedule_generic_timer(state, :timerH, :timerh, nil)
+  end
+
+
   @doc "Schedule/reschedule the K timer and save its reference (pid) in the transaction state"
+   def schedule_timer_K(state, :default) do
+    schedule_generic_timer(state, :timerK, :timerk, @timer_T4_val)
+  end
+
   def schedule_timer_K(state, ms) do
     schedule_generic_timer(state, :timerK, :timerk, ms)
   end
@@ -88,12 +114,7 @@ defmodule SIP.Trans.Timer do
 
   def handle_timer({ :timerA, ms }, state) when ms >= @timer_T2_val and state.state == :sending do
     Logger.error([ transid: state.msg.transid, message: "timer_A: max restransmition delay expired."])
-
-    # Notify upper layer
-    if !is_nil(state.app) do
-      send(state.app, {:timeout, :timerA, self(), state.msg.method })
-    end
-    { :stop, state, "timer_A: max restransmition delay expired." }
+    { :noreply, state }
   end
 
   def handle_timer({ :timerA, _ms }, state) when state.state != :sending do
@@ -145,7 +166,7 @@ defmodule SIP.Trans.Timer do
 
   def handle_UAS_timerA({ :timerA, ms }, state) when ms >= @timer_T2_val and state.state == :confirmed do
     Logger.error([ transid: state.msg.transid, message: "timer_A: max restransmition delay expired."])
-    send(state.msg.app, {:timeout, :timerA})
+    send(state.msg.app, {:timeout, :timerA, self(), state.msg.method})
     { :stop, :normal, state }
   end
 

@@ -21,10 +21,12 @@ defmodule SIP.ICT do
       {:ok, state} ->
         Logger.info([ transid: sipmsg.transid, module: __MODULE__,
                      message: "Sent INVITE to #{sipmsg.ruri}"])
-        if not state.t_isreliable do
-          schedule_timer_A(state)
+        state = if not state.t_isreliable do
+          schedule_timer_A(state) |> schedule_timer_B(ring_timeout)
+        else
+          schedule_timer_B(state, ring_timeout)
         end
-        { :ok, state }
+        { :ok,  state }
 
       { :invalid_sip_msg, _state } ->
         Logger.error([ transid: sipmsg.transid, module: __MODULE__,
@@ -88,13 +90,12 @@ defmodule SIP.ICT do
   end
 
   # Handle other timers
-  def handle_info({ :timeout, _tref, timer } , state) when timer in [ :timerT2, :timerK] do
+  def handle_info({ :timeout, _tref, timer } , state) when timer in [ :timerB, :timerK] do
     case handle_timer(timer, state) do
       { :noreply, newstate } -> { :noreply, newstate }
       { :stop, _reason, state} ->
-        GenServer.stop(self())
-        # Notify the tranport that this transaction is terminated
-        { :noreply, state }
+        # TODO : Notify the tranport that this transaction is terminated
+        { :stop, :normal, state }
     end
   end
 end

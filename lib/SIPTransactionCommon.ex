@@ -88,7 +88,11 @@ defmodule SIP.Transac.Common do
         else
           state.msg
         end
-        %{ state | state: :proceeding, msg: upd_msg } |> schedule_timer_B(state.timeout * 1000)
+        if state.msg == :INVITE do
+          %{ state | state: :proceeding, msg: upd_msg } |> schedule_timer_B(state.timeout * 1000)
+        else
+          %{ state | state: :proceeding, msg: upd_msg }
+        end
 
       :proceeding ->
         if sipmsg.response != 100 do
@@ -104,7 +108,7 @@ defmodule SIP.Transac.Common do
     end
   end
 
-  # Handle OK responses (2xx) from UAS
+  @doc "Handle OK responses (2xx) from UAS. To be used in ICT and NICT"
   def handle_UAS_sip_response(state, sip_resp) when SIP.Msg.Ops.is_2xx_resp(sip_resp) do
     Logger.debug([ transid: sip_resp.transid,  module: __MODULE__,
                  message: "Received #{sip_resp.response} final resp"])
@@ -119,12 +123,19 @@ defmodule SIP.Transac.Common do
         # and buidl the ACK in case of ICT transaction according to section 17.1.1.3 of RFC 3261
         state = %{ state | msg: Map.put(state.msg, :to, sip_resp.to), state: :confirmed }
 
-        # Process specific fields
+        # Process specific fields and timers
         case state.msg.method do
           :INVITE ->
             # INVITE Process Record-Route record and use the route set
             routeset = Map.get(sip_resp, :recordroute)
-            Map.put(state, :remotecontact, sip_resp.contact) |> Map.put(:route, routeset)
+
+            # Deviation from RFC 3261 - 17.1.1.2
+            # Arm timer D in any case (transport unreliable or not).
+            # That will limit the time
+            # when the application layer can ACK the transaction.
+            Map.put(state, :remotecontact, sip_resp.contact)
+              |> Map.put(:route, routeset)
+              |> cancel_timer_B() |> schedule_timer_D()
 
           :REGISTER ->
             path = Map.get(sip_resp, "Path")
@@ -137,6 +148,7 @@ defmodule SIP.Transac.Common do
 
       # Corner case when 200 OK retransmission is still not acked by app layer.
       state.state == :confirmed ->
+        # TODO: Why should we resend the 200 OK to the app layer?
         if state.msg.method == :INVITE do
           send(state.app, { :response, sip_resp, self() })
         end
@@ -218,11 +230,13 @@ defmodule SIP.Transac.Common do
         { :ok, state } ->
           new_state = if state.t_isreliable do
             Logger.debug([ transid: state.msg.transid, message: "ACK sent: #{state.state} -> terminated"])
-            schedule_timer_K(state, 0) |> Map.put(:state, :terminated)
+            schedule_timer_K(state, 0) |> Map.put(:state, :terminated) |> cancel_timer_D()
           else
             # RFC 3261 clause 17.1.2.2 arm timer K for unreliable transport
+            # We are not using timer D but timer K instead to handle responses retransmissions
+            # After ACK is sent.
             Logger.debug([ transid: state.msg.transid, message: "ACK sent. Arming timer_K"])
-            schedule_timer_K(state, 5000)
+            schedule_timer_K(state, :default) |> cancel_timer_D()
           end
           { :reply, :ok, new_state }
 
@@ -267,6 +281,9 @@ defmodule SIP.Transac.Common do
             { :ok, Map.put(new_state, :state, :proceeding) }
 
           rc when rc in 101..199 ->
+            if totag == nil do
+              raise "Invalid #{rc} response. Missing totag"
+            end
             { :ok, Map.put(new_state, :state, :proceeding) |> Map.put(:totag, totag) }
 
           rc when rc in 200..699 ->
@@ -274,21 +291,22 @@ defmodule SIP.Transac.Common do
             # Cancel timer F, arm timer K (NIST) or time A (IST)
             # set transaction state to terminated
             new_state = if state.msg.method == :INVITE do
-              st = schedule_generic_timer(new_state, :timerF, :timerf, nil)
-                        |> Map.put(:state, :confirmed)
-                        |> Map.put(:totag, totag)
+              st = schedule_timer_F(state)
+                    |> Map.put(:state, :confirmed)
+                    |> Map.put(:totag, totag)
               if state.t_isreliable do
-                st
+                schedule_timer_H(st)
               else
-                # Arm T2 to retransmit last final response
+                # Arm timer A to retransmit last final response
+                # TODO: check if this is timer A to be used here ...
                 Logger.debug([ transid: rsp.transid, module: __MODULE__,
                      message: "final response sent. Arming timer A for IST transaction"])
 
-                schedule_timer_A(st) |> Map.put(:rspstr, SIPMsg.serialize(rsp) )
+                schedule_timer_A(st) |> Map.put(:rspstr, SIPMsg.serialize(rsp) ) |> schedule_timer_H()
               end
             else
-              schedule_timer_K(new_state, 5000)
-                        |> schedule_generic_timer(:timerF, :timerf, nil)
+              schedule_timer_K(new_state, :default)
+                        |> cancel_timer_F()
                         |> Map.put(:state, :terminated)
             end
             { :ok, new_state }

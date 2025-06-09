@@ -32,7 +32,8 @@ defmodule SIP.NICT do
           state
         end
 
-        # Arm timer F
+        # Arm timer F - RFC 3261 - Section 17.1.2.2
+        # Maximum time to answer a request
         state = schedule_timer_F(state)
         { :ok, state }
 
