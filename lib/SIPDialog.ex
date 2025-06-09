@@ -1,5 +1,6 @@
 defmodule SIP.Dialog do
 @moduledoc "SIP module layer API"
+alias SIP.Transac
   require Logger
   require Registry
   require SIP.Uri
@@ -179,6 +180,27 @@ defmodule SIP.Dialog do
   @spec challenge(pid(), map(), 401 | 407, any()) :: any()
   def challenge(dialog_pid, req, resp_code, realm) when resp_code in [ 401, 407 ] and is_req(req) do
     reply(dialog_pid, req, resp_code, nil, realm)
+  end
+
+  @doc "Cancel a request"
+  @spec cancel(pid(), pid()) :: any()
+  def cancel(dialog_pid, transac_pid) when is_pid(dialog_pid) do
+    GenServer.call(dialog_pid, { :cancel, transac_pid})
+  end
+
+  @doc """
+  ACK an INVITE SIP request.
+  """
+  @spec ack(pid() | map(), pid()) :: any()
+  def ack(dialog_pid, req) when is_req(req) when req.method in [ :INVITE ] do
+    case Transac.get_transaction_pid(req) do
+      :invalid_transaction -> :invalid_transaction
+      ctrans_pid when is_pid(ctrans_pid) -> ack(dialog_pid, ctrans_pid)
+    end
+  end
+
+  def ack(dialog_pid, transac_pid) when is_pid(dialog_pid) do
+    GenServer.call(dialog_pid, { :ack, transac_pid})
   end
 
   def broadcast(msg_to_send) do

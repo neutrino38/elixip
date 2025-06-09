@@ -254,32 +254,47 @@ alias SIP.NetUtils
     end
   end
 
-  @doc "Send an ACK message when a 2xx answer has been received for in an UAC transaction"
-  @spec ack_uac_transaction(pid()) :: any()
-  def ack_uac_transaction(uac_t) do
-    GenServer.call(uac_t, :ack)
-  end
-
   @doc "Send a response to an UAS transation"
   def reply(uas_t, resp_code, reason, upd_fields \\ [], totag \\ nil) when is_pid(uas_t) and is_integer(resp_code) do
     GenServer.call(uas_t, { resp_code, reason, upd_fields, totag } )
   end
 
+  @doc "Get the transaction PID associated with a SIP request"
+  def get_transaction_pid(req) when is_req(req) do
+    case Registry.lookup(Registry.SIP.Transac, req.transid) do
+      [ {trans_pid, _value} ] -> trans_pid
+      [] -> :invalid_transaction
+    end
+  end
+
   @doc "Transactionful reply to a request"
   def reply_req(req , resp_code, reason, upd_fields, totag, tr_list_filter) when is_map(req) and is_integer(resp_code) do
-    case Registry.lookup(Registry.SIP.Transac, req.transid) do
-      [ {uas_t, _value} ] ->
+    case get_transaction_pid(req) do
+      :invalid_transaction ->
+        Logger.error(module: __MODULE__,
+                     message: "Cannot reply to #{req.method}. Req transid #{req.transid} is not associated with a real transaction" )
+        :invalid_transaction
+
+      uas_t ->
         if uas_t in tr_list_filter or tr_list_filter == nil do
           retcode = reply(uas_t, resp_code, reason, upd_fields, totag)
           { retcode, uas_t }
         else
           :invalid_transaction
         end
-
-      [] ->
-        Logger.error(module: __MODULE__,
-                     message: "Cannot reply to #{req.method}. Req transid #{req.transid} is not associated with a real transaction" )
-        :invalid_transaction
     end
   end
+
+  @doc "Send an ACK message when a 2xx answer has been received for in an UAC transaction"
+  @spec ack_uac_transaction(pid()) :: any()
+  def ack_uac_transaction(uac_t) do
+    GenServer.call(uac_t, :ack)
+  end
+
+  @doc "Cancel an UAC transaction"
+  @spec cancel_uac_transaction(pid()) :: any()
+  def cancel_uac_transaction(uac_t) do
+    GenServer.call(uac_t, :cancel)
+  end
+
 end
