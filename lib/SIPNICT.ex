@@ -76,7 +76,7 @@ defmodule SIP.NICT do
       state.msg.cseq == siprsp.cseq ->
         new_state = handle_UAS_sip_response(state, siprsp)
         new_state = if siprsp.response >= 200 do
-          schedule_timer_K(new_state, 5000)
+          schedule_timer_K(new_state, 5000) |> cancel_timer_F()
         else
           new_state
         end
@@ -106,10 +106,7 @@ defmodule SIP.NICT do
   end
 
   # Handle other timers
-  def handle_info({ :timeout, _tref, timer } , state) when timer in [ :timerF, :timerK] do
-    state = handle_timer(timer, state)
-    if timer == :timerF do
-      send(state.app, { :timeout, :timerF })
-    end
+  def handle_info({ :timeout, _tref, timer } , state) do
+    handle_timer(timer, state)
   end
 end
