@@ -182,7 +182,7 @@ defmodule SIP.Session do
         from: SIP.Context.from(sip_ctx),
         to: SIP.Context.to(sip_ctx,nil),
         contact: contact_uri,
-        useragent: "Elixipp/0.1",
+        useragent: Application.get_env(:elixip2, :useragent, "Elixipp/0.1"),
         callid: nil,
         contentlength: 0
       }
@@ -201,7 +201,7 @@ defmodule SIP.Session do
         to: SIP.Context.to(sip_ctx,nil),
         contact: %SIP.Uri{ userpart: SIP.Context.get(sip_ctx, :username),
           domain: "0.0.0.0", params: %{ "expires" => "15" } },
-        useragent: "Elixipp/0.1",
+        useragent: Application.get_env(:elixip2, :useragent, "Elixipp/0.1"),
         callid: nil,
         contentlength: 0
       }
@@ -259,7 +259,7 @@ defmodule SIP.Session do
         from: SIP.Context.from(sip_ctx),
         to: SIP.Context.to(sip_ctx,nil),
         contact: contact_uri,
-        useragent: "Elixipp/0.1",
+        useragent: Application.get_env(:elixip2, :useragent, "Elixipp/0.1"),
         callid: nil,
         contentlength: 0
       }
@@ -277,7 +277,53 @@ defmodule SIP.Session do
         var!(sip_ctx) = SIP.Session.CallUAC.client_invite(var!(sip_ctx), unquote(sdp_offer), unquote(timeout))
       end
     end
+
+    defp bye_message(sip_ctx) do
+      %{
+        "Max-Forwards" => "70",
+        method: :BYE,
+        ruri: SIP.Context.to(sip_ctx, nil),
+        from: SIP.Context.from(sip_ctx),
+        to: SIP.Context.to(sip_ctx,nil),
+        useragent: Application.get_env(:elixip2, :useragent, "Elixipp/0.1"),
+        callid: nil,
+        contentlength: 0
+      }
+    end
+
+    def ack(sip_ctx = %SIP.Context{}, transaction_id) do
+      SIP.Dialog.ack(sip_ctx.dialogpid, transaction_id)
+    end
+
+    @spec client_bye(%SIP.Context{}) :: %SIP.Context{}
+    def client_bye(sip_ctx = %SIP.Context{})  do
+      bye = bye_message(sip_ctx)
+      SIP.Session.send_sip_request(sip_ctx, bye, 0)
+    end
+
+    defmacro send_BYE() do
+      quote do
+        var!(sip_ctx) = SIP.Session.CallUAC.client_bye(var!(sip_ctx))
+      end
+    end
   end
+
+  defmodule Common do
+    require SIP.Dialog
+
+    @doc "CANCEL an existing outbound request"
+    def cancel(sip_ctx = %SIP.Context{}, transaction_id) when is_pid(transaction_id) do
+      rc = SIP.Dialog.cancel(sip_ctx.dialogpid, transaction_id)
+      SIP.Context.set(sip_ctx, :lasterr, rc)
+    end
+
+    defmacro send_CANCEL(transaction_id) do
+        quote do
+          var!(sip_ctx) = SIP.Session.Common.cancel(var!(sip_ctx), unquote(transaction_id))
+        end
+    end
+  end
+
   defmodule Presence do
     @callback on_new_publish(dialog_id :: pid, pub_req :: map) :: { :accept, pid } | { :reject, integer }
     @callback on_new_subscribe(dialog_id :: pid, sub_req :: map) :: { :accept, pid } | { :reject, integer }
