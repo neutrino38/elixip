@@ -26,9 +26,14 @@ defmodule SIP.NICT do
       {:ok, state} ->
         Logger.info([ transid: sipmsg.transid, module: __MODULE__,
                       message: "Sent #{sipmsg.method} #{sipmsg.ruri}"])
-        if not state.t_isreliable do
+        state = if not state.t_isreliable do
           schedule_timer_A(state)
+        else
+          state
         end
+
+        # Arm timer F
+        state = schedule_timer_F(state)
         { :ok, state }
 
       { :invalid_sip_msg, _state } ->
@@ -96,13 +101,15 @@ defmodule SIP.NICT do
     case handle_timer({ :timerA, ms }, state) do
       { :noreply, newstate } -> { :noreply, newstate }
       { :stop, _reason, state} ->
-        GenServer.stop(self())
-        { :noreply, state }
+        { :stop, :normal, state }
     end
   end
 
   # Handle other timers
-  def handle_info({ :timeout, _tref, timer } , state) when timer in [ :timerT2, :timerK] do
-    handle_timer(timer, state)
+  def handle_info({ :timeout, _tref, timer } , state) when timer in [ :timerF, :timerK] do
+    state = handle_timer(timer, state)
+    if timer == :timerF do
+      send(state.app, { :timeout, :timerF })
+    end
   end
 end

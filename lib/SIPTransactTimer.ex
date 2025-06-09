@@ -14,6 +14,10 @@ defmodule SIP.Trans.Timer do
     schedule_generic_timer(state, :timerB, :tB_ref, ms)
   end
 
+  def cancel_timer_B(state) do
+    schedule_generic_timer(state, :timerB, :tB_ref, nil)
+  end
+
   @doc """
   Schedule a generic cancellable timer
 
@@ -55,14 +59,18 @@ defmodule SIP.Trans.Timer do
     end
   end
 
-  @doc "Schedule/reschedule the K timer and save its reference (pid) in the transaction state"
-  def schedule_timer_K(state, ms) do
-    schedule_generic_timer(state, :timerK, :timerk, ms)
-  end
-
   @doc "Schedule/reschedule the F timer and save its reference (pid) in the transaction state"
   def schedule_timer_F(state) do
     schedule_generic_timer(state, :timerF, :timerf, @timer_T1_val * 64)
+  end
+
+  def cancel_timer_F(state) do
+    schedule_generic_timer(state, :timerF, :timerf, nil)
+  end
+
+  @doc "Schedule/reschedule the K timer and save its reference (pid) in the transaction state"
+  def schedule_timer_K(state, ms) do
+    schedule_generic_timer(state, :timerK, :timerk, ms)
   end
 
   @doc "Handle timer messages"
@@ -80,7 +88,11 @@ defmodule SIP.Trans.Timer do
 
   def handle_timer({ :timerA, ms }, state) when ms >= @timer_T2_val and state.state == :sending do
     Logger.error([ transid: state.msg.transid, message: "timer_A: max restransmition delay expired."])
-    send(state.msg.app, {:timeout, :timerA})
+
+    # Notify upper layer
+    if !is_nil(state.app) do
+      send(state.app, {:timeout, :timerA, self(), state.msg.method })
+    end
     { :stop, state, "timer_A: max restransmition delay expired." }
   end
 
@@ -89,13 +101,22 @@ defmodule SIP.Trans.Timer do
   end
 
   def handle_timer( :timerB, state) when state.state == :proceeding do
-    send(state.app, {:timeout, :timerB})
+    if !is_nil(state.app) do
+      send(state.app, {:timeout, :timerB, self(), state.msg.method})
+    end
     if state.msg.method == :INVITE do
       Logger.info([ transid: state.msg.transid, message: "INVITE not answered on time."])
     else
       Logger.error([ transid: state.msg.transid, message: "timer_B: should not be used in NICT."])
     end
     { :stop, state, "timer_B: no final response receveived on time." }
+  end
+
+  def handle_timer( :timer_F, state) do
+    if !is_nil(state.app) do
+      send(state.app, {:timeout, :timerF, self(), state.msg.method })
+    end
+    { :stop, state, "timer_F: no final response receveived on time." }
   end
 
   def handle_timer( :timerK, state) when state.state in [ :confirmed, :terminated ] do
