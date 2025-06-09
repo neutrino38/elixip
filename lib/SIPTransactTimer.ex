@@ -4,6 +4,11 @@ defmodule SIP.Trans.Timer do
   @timer_T2_val 4000
   @timer_T4_val 5000
 
+  defp notify_dialog_layer(state, timer) do
+    if !is_nil(state.app) do
+      send(state.app, {:transaction_timeout, timer, self(), state.msg })
+    end
+  end
   # Arm T1 timer
   def schedule_timer_A(state, ms \\ @timer_T1_val) do
     Process.send_after(self(), { :timerA, ms }, ms )
@@ -105,7 +110,7 @@ defmodule SIP.Trans.Timer do
       # If transport is not reliable, retransmit
       code = GenServer.call(state.tpid, { :sendmsg, state.msgstr, state.destip, state.destport } )
       if code != :ok do
-        Logger.error([ transid: state.msg.transid, message: "timer_T1: Fail to retransmit message: #{code}"])
+        Logger.error([ transid: state.msg.transid, message: "timer_A: Fail to retransmit message: #{code}"])
       end
     end
     schedule_timer_A(state, ms*2)
@@ -121,23 +126,28 @@ defmodule SIP.Trans.Timer do
     { :noreply, state }
   end
 
-  def handle_timer( :timerB, state) when state.state == :proceeding do
-    if !is_nil(state.app) do
-      send(state.app, {:timeout, :timerB, self(), state.msg.method})
-    end
-    if state.msg.method == :INVITE do
-      Logger.info([ transid: state.msg.transid, message: "INVITE not answered on time."])
-    else
-      Logger.error([ transid: state.msg.transid, message: "timer_B: should not be used in NICT."])
-    end
-    { :stop, state, "timer_B: no final response receveived on time." }
-  end
 
-  def handle_timer( :timer_F, state) do
-    if !is_nil(state.app) do
-      send(state.app, {:timeout, :timerF, self(), state.msg.method })
+  def handle_timer( timer, state) when timer in [ :timerB, :timerD, :timerF, :timerH ] do
+    notify_dialog_layer(state, timer)
+    reason = case timer do
+      :timerB ->
+        Logger.info([ transid: state.msg.transid, message: "client INVITE not answered on time."])
+        :transaction_timeout
+
+      :timerD ->
+        # ICT retransmission grace period
+        :normal
+
+      :timerF ->
+        Logger.info([ transid: state.msg.transid, message: "client #{state.msg.method} not answered on time."])
+        :transaction_timeout
+
+      :timerH ->
+        Logger.info([ transid: state.msg.transid, message: "ACK not received on time."])
+        :transaction_timeout
+
     end
-    { :stop, state, "timer_F: no final response receveived on time." }
+    { :stop, reason, state }
   end
 
   def handle_timer( :timerK, state) when state.state in [ :confirmed, :terminated ] do
@@ -166,8 +176,7 @@ defmodule SIP.Trans.Timer do
 
   def handle_UAS_timerA({ :timerA, ms }, state) when ms >= @timer_T2_val and state.state == :confirmed do
     Logger.error([ transid: state.msg.transid, message: "timer_A: max restransmition delay expired."])
-    send(state.msg.app, {:timeout, :timerA, self(), state.msg.method})
-    { :stop, :normal, state }
+    { :noreply, state }
   end
 
 

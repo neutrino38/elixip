@@ -284,6 +284,8 @@ defmodule SIP.Transac.Common do
             if totag == nil do
               raise "Invalid #{rc} response. Missing totag"
             end
+            # TODO: totag is not protected here. It can be changed. Make sure that
+            #       the intial value is not changed.
             { :ok, Map.put(new_state, :state, :proceeding) |> Map.put(:totag, totag) }
 
           rc when rc in 200..699 ->
@@ -297,8 +299,10 @@ defmodule SIP.Transac.Common do
               if state.t_isreliable do
                 schedule_timer_H(st)
               else
-                # Arm timer A to retransmit last final response
-                # TODO: check if this is timer A to be used here ...
+                # Arm timer A to retransmit last final response if ACK is not
+                # received on time for unreliable transports.
+                # TODO: That should be timer G here. Timer G should behave like time A
+                # but is specific to this case. We will change that later
                 Logger.debug([ transid: rsp.transid, module: __MODULE__,
                      message: "final response sent. Arming timer A for IST transaction"])
 
