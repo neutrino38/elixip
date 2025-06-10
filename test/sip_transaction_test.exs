@@ -83,8 +83,8 @@ defmodule SIP.Test.Transact do
     receive do
       { :timeout, _tref, timer } ->
         # Timer has fired - handle it and check that it requires transaction termination
-        case SIP.Trans.Timer.handle_timer(timer, state) do
-          { :stop, newstate, _reason } ->
+        case SIP.Trans.Timer.handle_timer(timer, state, SIP.ICT) do
+          { :stop, :transaction_timeout, newstate } ->
             assert true
             newstate
 
@@ -106,18 +106,7 @@ defmodule SIP.Test.Transact do
     end
 
     # Process the timer message sent to the app layer
-    receive do
-      { :timeout, :timerB } ->
-        assert true
-
-      _ ->
-        assert false
-
-      after
-        1_000 ->
-          IO.puts("Did not received timemout layer message")
-          assert false
-      end
+    assert_receive( {:transaction_timeout, :timerB, _transpid, _msg, SIP.ICT }, 1000, "Did not received timemout layer message")
   end
 
 
@@ -265,12 +254,12 @@ User-Agent: Elixip 0.2.0
         assert resp.response == 180
         #IO.puts("TEST: Received 180 Ringing on time")
 
-      {:timeout, :timerB} ->
+      { :transaction_timeout, :timerB, _transpid, _msg, SIP.ICT } ->
         assert(false,"timerB expired before 180 Ringing")
 
       _bla ->
-        IO.puts("TEST: Received unexpected bla")
-        assert false
+        assert(false, "Received unexpected bla")
+
     after
       500 -> assert(false,"We did not received the 180 Ringing on time")
     end
@@ -283,7 +272,7 @@ User-Agent: Elixip 0.2.0
         SIP.Transac.ack_uac_transaction(uac_t)
 
 
-      {:timeout, :timerB} ->
+      { :transaction_timeout, :timerB, _transpid, _msg, SIP.ICT } ->
         assert(false, "timerB expired before 200 OK")
 
       bla ->
@@ -316,7 +305,7 @@ User-Agent: Elixip 0.2.0
       assert resp.response == 180
       #IO.puts("TEST: Received 180 Ringing on time")
 
-    {:timeout, :timerB} ->
+    { :transaction_timeout, :timerB, _transpid, _msg, SIP.ICT } ->
       IO.puts("timerB expired before 180 Ringing")
       assert false
 
@@ -333,7 +322,7 @@ User-Agent: Elixip 0.2.0
         assert resp.response == 486
         Process.sleep(500)
 
-      {:timeout, :timerB} ->
+      { :transaction_timeout, :timerB, _transpid, _msg, SIP.ICT } ->
         IO.puts("timerB expired before 486 Ringing")
         assert false
 

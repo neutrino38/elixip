@@ -121,6 +121,7 @@ defmodule SIP.Test.Register do
         sip_ctx
     end
 
+    assert_receive( {:onnewdialog, :ok, _trans_pid}, 500, "onnewdialog not received")
     ^sip_ctx = receive do
       { 200, rsp, _trans_pid, _dialog_pid } ->
         # IO.puts(inspect(rsp.contact.params))
@@ -130,7 +131,7 @@ defmodule SIP.Test.Register do
       { resp_code, _rsp, _trans_pid, _dialog_pid } when is_integer(resp_code) ->
         assert(false, "Received unexpected SIP response #{resp_code}")
 
-      _ -> assert(false, "Received unexpected msg")
+      msg -> assert(false, "Received unexpected msg #{inspect(msg)}")
 
     after
       1_000 -> assert(false, "Did not receive 200 OK on time")
@@ -199,6 +200,8 @@ defmodule SIP.Test.Register do
         sip_ctx
     end
 
+    assert_receive( {:onnewdialog, :ok, _trans_pid}, 500, "onnewdialog not received")
+
     ^sip_ctx = receive do
       { 200, rsp, _trans_pid, _dialog_pid } ->
         # IO.puts(inspect(rsp.contact.params))
@@ -239,6 +242,8 @@ defmodule SIP.Test.Register do
         send_auth_REGISTER(rsp, 600)
         sip_ctx
     end
+
+    assert_receive( {:onnewdialog, :ok, _trans_pid}, 500, "onnewdialog not received")
 
     ^sip_ctx = receive do
       { 200, rsp, _trans_pid, _dialog_pid } ->
@@ -326,6 +331,8 @@ defmodule SIP.Test.Register do
         send_auth_REGISTER(rsp, 600)
         sip_ctx
     end
+
+    assert_receive( {:onnewdialog, :ok, _trans_pid}, 500, "onnewdialog not received")
 
     ^sip_ctx = receive do
       { 200, rsp, _trans_pid, _dialog_pid } ->

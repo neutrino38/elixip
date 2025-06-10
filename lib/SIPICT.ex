@@ -22,9 +22,9 @@ defmodule SIP.ICT do
         Logger.info([ transid: sipmsg.transid, module: __MODULE__,
                      message: "Sent INVITE to #{sipmsg.ruri}"])
         state = if not state.t_isreliable do
-          schedule_timer_A(state) |> schedule_timer_B(ring_timeout)
+          schedule_timer_A(state) |> schedule_timer_B(ring_timeout * 1000)
         else
-          schedule_timer_B(state, ring_timeout)
+          schedule_timer_B(state, ring_timeout * 1000)
         end
         { :ok,  state }
 

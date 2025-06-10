@@ -17,9 +17,10 @@ Use the API provided by SIP.Dialog module
     transactions: [],
     closing_transaction: nil, # PID of the transaction that should terminate the dialog
     app: nil, # PID of the application
-    state: :inital,
+    state: :initial,
     debuglog: true, # If we should output debug logs for this dialog
     expirationtimer: nil,
+    dialogtimeout: 0,
     keepalivetimer: nil,
     missedkeepalive: 0,
     cseq: 1,
@@ -112,8 +113,8 @@ Use the API provided by SIP.Dialog module
             newstate = %SIP.DialogImpl{ state | transactions: List.insert_at(state.transactions, -1, transaction_pid) }
 
             # Handle expiration timer and closing transaction
-            newstate = arm_expiration_timer(newstate, req) |> check_closing_transaction(req, transaction_pid)
-            { :ok, newstate}
+            arm_expiration_timer(newstate, req) |> check_closing_transaction(req, transaction_pid)
+            #{ :ok, newstate}
 
         end
 
@@ -166,7 +167,7 @@ Use the API provided by SIP.Dialog module
       }
 
     case state.state do
-      :confirmed ->
+      :established ->
         # Send OPTIONS message
         { _rc, state } = send_in_dialog_request(state, msg)
 
@@ -206,9 +207,9 @@ Use the API provided by SIP.Dialog module
       { :ok, value } ->
         exp = String.to_integer(value)
         if state.direction == :inbound do
-          { :registerexpire, exp }
+          { exp, :registerexpire }
         else
-          { :registerrefresh, exp/2 }
+          { trunc(exp/2), :registerrefresh }
         end
     end
 
@@ -246,7 +247,7 @@ Use the API provided by SIP.Dialog module
     # Generate totag if needed
     totag = if is_nil(totag), do: generate_from_or_to_tag(), else: totag
 
-    state = %SIP.DialogImpl{ msg: req, direction: :inbound, app: nil, expirationtimer: timeout, debuglog: debug,
+    state = %SIP.DialogImpl{ msg: req, direction: :inbound, app: nil, dialogtimeout: timeout, debuglog: debug,
                   transactions: [ pid ], fromtag: fromtag, callid: callid, totag: totag,
                   allows: allows(req.method) }
 
@@ -275,7 +276,7 @@ Use the API provided by SIP.Dialog module
     { fromtag, callid, _totag } = dialog_id
 
 
-    state = %SIP.DialogImpl{ msg: req, direction: :outbound, app: pid, expirationtimer: timeout, debuglog: debug,
+    state = %SIP.DialogImpl{ msg: req, direction: :outbound, app: pid, dialogtimeout: timeout, debuglog: debug,
     transactions: [], fromtag: fromtag, callid: callid, totag: nil,
     allows: allows(req.method) }
 
@@ -284,11 +285,11 @@ Use the API provided by SIP.Dialog module
       #In case of an outbound dialog, start a, UAC transaction
       case SIP.Transac.start_uac_transaction( req, timeout ) do
         { :ok, transaction_pid, modmsg } ->
-          send(state.apppid, { :onnewdialog, :ok, transaction_pid })
-          newstate = %SIP.DialogImpl{ state | transactions: [ transaction_pid ], msg: modmsg }
+          send(state.app, { :onnewdialog, :ok, transaction_pid })
+          %SIP.DialogImpl{ state | transactions: [ transaction_pid ], msg: modmsg }
             |> arm_expiration_timer(modmsg)
+            #This returns { :ok, newstate } as expected by init()
             |> check_closing_transaction(modmsg, transaction_pid)
-          { :ok, newstate }
 
         { code, _extra } ->
           Logger.error([ module: __MODULE__, dialogpid: self(),
@@ -459,7 +460,9 @@ Use the API provided by SIP.Dialog module
     end
   end
 
-  defp handle_UAS_response(state, rsp, _transact_pid) when state.state == :initial and rsp.response in 200..202 do
+  defp handle_UAS_response(state, rsp, _transact_pid) when state.state in [ :initial, :uac_challenged ] and rsp.response in 200..202 do
+    Logger.debug(dialogpid: "#{inspect(self())}", module: __MODULE__,
+                 message: "Outbound dialog established")
     %{state | state: :established }
   end
 
@@ -469,12 +472,31 @@ Use the API provided by SIP.Dialog module
     %{state | state: :redirected }
   end
 
-  defp handle_UAS_response(state, rsp, _transact_pid) when state.state == :initial and rsp.response in 400..699 do
+  defp handle_UAS_response(state, rsp, _transact_pid) when state.state == :initial and rsp.response in [ 401, 407 ] do
+    Logger.info(dialogpid: "#{inspect(self())}", module: __MODULE__,
+                 message: "challenged initial request with #{rsp.response}")
+    %{state | state: :uac_challenged }
+  end
+
+  defp handle_UAS_response(state, rsp, _transact_pid) when state.state in [ :initial, :uac_challenged ] and rsp.response in 400..699 do
+    Logger.info(dialogpid: "#{inspect(self())}", module: __MODULE__,
+                message: "initial request reject with code #{rsp.response}")
     %{state | state: :terminated }
   end
 
-  defp handle_UAS_response(state = %SIP.DialogImpl{}, rsp, transact_pid) when state.state == :established do
+  defp handle_UAS_response(state = %SIP.DialogImpl{}, rsp, transact_pid) when state.state == :established and rsp.response in 300..399 do
     if transact_pid == state.closing_transaction do
+      # Closing transaction was redirected. Need to resend a new req.
+      Logger.debug(dialogpid: "#{inspect(self())}", module: __MODULE__,
+                           message: "Closing request redirected to #{rsp.contact}")
+      %{state | state: :redirected, closing_transaction: nil }
+    else
+      %{state | state: :redirected }
+    end
+  end
+
+  defp handle_UAS_response(state = %SIP.DialogImpl{}, rsp, transact_pid) when state.state == :established do
+    if transact_pid == state.closing_transaction and rsp.response not in [ 401, 407 ] do
       # The closing transaction has been completed. Kill the dialog
       Logger.debug(dialogpid: "#{inspect(self())}", module: __MODULE__,
                    message: "Final dialog transaction completed by final anwswer #{rsp.response}")
@@ -510,12 +532,12 @@ Use the API provided by SIP.Dialog module
                  "that is not attached to the dialog." ])
       state
     end
-    if state.state in [:initial, :confirmed, :redirected ] do
+    if state.state in [:initial, :established, :redirected, :uac_challenged, :uas_challenged ] do
       { :noreply, state }
     else
       Logger.info([
         dialogpid: "#{inspect(self())}",  module: __MODULE__,
-        message: "Terminating Dialog" ])
+        message: "Terminating Dialog. Final state: #{state.state}" ])
       { :stop, :normal, state }
     end
   end
