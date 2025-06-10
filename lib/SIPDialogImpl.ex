@@ -369,20 +369,15 @@ Use the API provided by SIP.Dialog module
     end
   end
 
-  defp check_closing_transaction({ :ok, state}, msg, transact_pid) when msg.method in [ :BYE ] do
+  defp check_closing_transaction(state, msg, transact_pid) when msg.method in [ :BYE ] do
     { :ok, %SIP.DialogImpl{ state | closing_transaction: transact_pid } }
   end
 
-  defp check_closing_transaction({ :ok, state}, _msg, _transact_pid) do
+  defp check_closing_transaction(state, _msg, _transact_pid) do
     { :ok, state }
   end
 
-  defp check_closing_transaction({ err, state }, _msg, _transact_pid) do
-    { err, state }
-  end
-
-
-  defp check_allows({ :ok, state}, msg) do
+  defp check_allows(state, msg) do
     if msg.method in state.allows do
       { :ok, state }
     else
@@ -390,26 +385,21 @@ Use the API provided by SIP.Dialog module
     end
   end
 
-  defp check_allows({ err, state }, _msg) do
-    { err, state }
-  end
-
-  defp check_seqno_and_notify({ :ok, state}, msg, transact_pid ) do
+  defp check_seqno(state, msg ) do
     [ seqno, _cmethod ] = msg.cseq
     if seqno > state.cseqin do
-      # Forward request to app layer
-      send(state.app, { msg.method, msg, transact_pid, self() })
-      Logger.debug([ dialogpid: self(), module: __MODULE__,
-              message: "Forwarded request to app process #{inspect(state.app)}"])
-
       { :ok, %SIP.DialogImpl{ state | cseqin: seqno } }
     else
       { :out_of_order, state }
     end
   end
 
-  defp check_seqno_and_notify({ err, state }, _msg, _transact_pid) do
-    { err, state }
+  defp send_to_app(state, msg, transact_pid ) do
+      # Forward request to app layer
+      send(state.app, { msg.method, msg, transact_pid, self() })
+      Logger.debug([ dialogpid: self(), module: __MODULE__,
+              message: "Forwarded request to app process #{inspect(state.app)}"])
+      { :ok, state }
   end
 
   # Invoked when dialog process receives sip request
@@ -421,34 +411,33 @@ Use the API provided by SIP.Dialog module
     Logger.debug([ dialogpid: self(), module: __MODULE__,
                    message: "Handing in-dialog SIP req #{msg.method}"])
 
-    { rc, state } = on_new_transaction(state, msg, transact_pid)
-                    |> check_allows(msg)
-                    |> check_seqno_and_notify(msg, transact_pid)
-                    |> check_closing_transaction(msg, transact_pid)
+    with  { :ok, state } <- on_new_transaction(state, msg, transact_pid),
+      { :ok, state } <- check_allows(state, msg),
+      { :ok, state } <- check_seqno(state, msg),
+      { :ok, state } <- send_to_app(state, msg, transact_pid),
+      { :ok, state } <- check_closing_transaction(state, msg, transact_pid) do
 
-    state = case rc do
-      :ok -> arm_expiration_timer(state, msg)
-      :notallowed ->
+      { :noreply, arm_expiration_timer(state, msg) }
+
+    else
+      { :notallowed, state } ->
         SIP.Transac.reply(transact_pid, 405, "Method not allowed", [], state.totag)
-        state
+        { :noreply, state }
 
-      :out_of_order ->
+      { :out_of_order, state } ->
         SIP.Transac.reply(transact_pid, 500, "Out of order", [], state.totag)
-        state
+        { :noreply, state }
 
-      :toomanytransactions ->
+      { :toomanytransactions, state } ->
         Logger.error([ module: __MODULE__, dialogpid: self(), message: "Too many transactions open."])
         SIP.Transac.reply(transact_pid, 503, "Service Denied", nil, state.totag)
-        state
+        { :noreply, state }
 
-      :nonewtrans ->
+      { :nonewtrans, state } ->
         # ACK, CANCEL do not create new transactions
         # - rc returned by on_new_transaction
-        state
-
+        { :noreply, state }
     end
-
-    { :noreply, state }
   end
 
   defp add_totag(state, totag) do
