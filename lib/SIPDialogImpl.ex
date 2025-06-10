@@ -111,8 +111,8 @@ Use the API provided by SIP.Dialog module
             # Add the transaction in the transaction list
             newstate = %SIP.DialogImpl{ state | transactions: List.insert_at(state.transactions, -1, transaction_pid) }
 
-            # Handle expiration timer
-            newstate = arm_expiration_timer(newstate, req)
+            # Handle expiration timer and closing transaction
+            newstate = arm_expiration_timer(newstate, req) |> check_closing_transaction(req, transaction_pid)
             { :ok, newstate}
 
         end
@@ -285,7 +285,9 @@ Use the API provided by SIP.Dialog module
       case SIP.Transac.start_uac_transaction( req, timeout ) do
         { :ok, transaction_pid, modmsg } ->
           send(state.apppid, { :onnewdialog, :ok, transaction_pid })
-          newstate = %SIP.DialogImpl{ state | transactions: [ transaction_pid ], msg: modmsg } |> arm_expiration_timer(modmsg)
+          newstate = %SIP.DialogImpl{ state | transactions: [ transaction_pid ], msg: modmsg }
+            |> arm_expiration_timer(modmsg)
+            |> check_closing_transaction(modmsg, transaction_pid)
           { :ok, newstate }
 
         { code, _extra } ->
@@ -394,7 +396,7 @@ Use the API provided by SIP.Dialog module
     end
   end
 
-  defp send_to_app(state, msg, transact_pid ) do
+  defp send_req_to_app(state, msg, transact_pid ) do
       # Forward request to app layer
       send(state.app, { msg.method, msg, transact_pid, self() })
       Logger.debug([ dialogpid: self(), module: __MODULE__,
@@ -405,7 +407,7 @@ Use the API provided by SIP.Dialog module
   # Invoked when dialog process receives sip request
   # sent by calling process_incoming_request(). Typically
   # from NIST or IST transaction processes. Also get
-  #
+
   @impl true
   def handle_cast({:sipmsg, msg, transact_pid}, state ) when is_req(msg) do
     Logger.debug([ dialogpid: self(), module: __MODULE__,
@@ -414,7 +416,7 @@ Use the API provided by SIP.Dialog module
     with  { :ok, state } <- on_new_transaction(state, msg, transact_pid),
       { :ok, state } <- check_allows(state, msg),
       { :ok, state } <- check_seqno(state, msg),
-      { :ok, state } <- send_to_app(state, msg, transact_pid),
+      { :ok, state } <- send_req_to_app(state, msg, transact_pid),
       { :ok, state } <- check_closing_transaction(state, msg, transact_pid) do
 
       { :noreply, arm_expiration_timer(state, msg) }
@@ -457,31 +459,48 @@ Use the API provided by SIP.Dialog module
     end
   end
 
+  defp handle_UAS_response(state, rsp, _transact_pid) when state.state == :initial and rsp.response in 200..202 do
+    %{state | state: :established }
+  end
+
+  defp handle_UAS_response(state, rsp, _transact_pid) when state.state == :initial and rsp.response in 300..399 do
+    Logger.debug(dialogpid: "#{inspect(self())}", module: __MODULE__,
+                           message: "Redirected to #{rsp.contact}")
+    %{state | state: :redirected }
+  end
+
+  defp handle_UAS_response(state, rsp, _transact_pid) when state.state == :initial and rsp.response in 400..699 do
+    %{state | state: :terminated }
+  end
+
+  defp handle_UAS_response(state = %SIP.DialogImpl{}, rsp, transact_pid) when state.state == :established do
+    if transact_pid == state.closing_transaction do
+      # The closing transaction has been completed. Kill the dialog
+      Logger.debug(dialogpid: "#{inspect(self())}", module: __MODULE__,
+                   message: "Final dialog transaction completed by final anwswer #{rsp.response}")
+      %{state | state: :terminated }
+    else
+      state
+    end
+  end
+
+  defp handle_UAS_response(state, _rsp, _transact_pid) do
+    state
+  end
+
   @impl true
   @doc "Invoked when a dialog receives a SIP response from an UAC transaction"
   def handle_info({ :response, rsp, transact_pid }, state ) when is_resp(rsp) do
     state = if transact_pid in state.transactions do
       { _rc, totag } = SIP.Uri.get_uri_param(rsp.to, "tag")
 
-      state = add_totag(state, totag)
       send(state.app, { rsp.response, rsp, transact_pid, self() })
+      state = add_totag(state, totag)
+
       if rsp.response >= 200 do
-        # Remove transaction from active transaction list
-        state = if state.state == :initial and rsp.response in 200..202  do
-          case rsp.response do
-            rc when rc in 200..202 -> %{state | state: :established }
-            rc when rc in 300..399 ->
-              %{state | state: :redirected }
-              Logger.debug(dialogpid: "#{inspect(self())}", module: __MODULE__,
-                           message: "Redirected to #{rsp.contact}")
-            rc when rc in 400..699 -> %{state | state: :terminated }
-          end
-        else
-          state
-        end
-        close_transaction(state, transact_pid)
+        handle_UAS_response(state, rsp, transact_pid) |> close_transaction(transact_pid)
       else
-        # Provisionnal response. Keep the transaction
+        # Provisional responses.
         state
       end
     else
@@ -491,10 +510,10 @@ Use the API provided by SIP.Dialog module
                  "that is not attached to the dialog." ])
       state
     end
-    if state.state in [:initial, :confirmed] do
+    if state.state in [:initial, :confirmed, :redirected ] do
       { :noreply, state }
     else
-      Logger.warning([
+      Logger.info([
         dialogpid: "#{inspect(self())}",  module: __MODULE__,
         message: "Terminating Dialog" ])
       { :stop, :normal, state }
@@ -522,6 +541,8 @@ Use the API provided by SIP.Dialog module
     Logger.debug([
         dialogpid: "#{inspect(self())}",  module: __MODULE__,
         message: "Sending REFRESH register" ])
+
+    # TODO send refresher
     { :noreply, state }
   end
 
