@@ -265,26 +265,41 @@ defmodule SIP.Uri do
 		String.trim_trailing(pstr, ";")
 	end
 
+	# Do not add transport=TLS for sips URI
+	defp fix_transport_param(params, "sips:", "TLS") do
+		params
+	end
+
+	# Do not add transport=UDP
+	defp fix_transport_param(params, _scheme, "UDP") do
+		params
+	end
+
+	defp fix_transport_param(params, _scheme, proto) do
+		if Map.has_key?(params, "transport") do
+			params
+		else
+			Map.put(params, "transport", proto)
+		end
+	end
+
 	#Serialize a map into a SIP URI
 	def serialize( uri = %SIP.Uri{} ) do
+		# Serialize core part or the SIP URI
 		core_uri_str = serialize_core_uri(
 				uri.scheme,
-				Map.get(uri, :userpart),
+				uri.userpart,
 				uri.domain,
 				uri.port )
 
-		# add transport in params if needed
-		params = if Map.has_key?(uri.params, "transport") or uri.proto == "UDP" or (uri.scheme == "sips:" and uri.proto == "TLS") do
-			uri.params
-		else
-			Map.put(uri.params, "transport", uri.proto)
-		end
-		#URI.encode_www_form()
+		# add transport in params if needed and serialize params as string
+		params_str = fix_transport_param(uri.params, uri.scheme, uri.proto) |> serialize_params()
 
+		# Add Display Name
 		uri_str = if uri.displayname != nil do
-			"\"" <> URI.encode_www_form(uri.displayname) <> "\" <" <> core_uri_str <> ">;" <> serialize_params(params)
+			"\"" <> URI.encode_www_form(uri.displayname) <> "\" <" <> core_uri_str <> ">;" <> params_str
 		else
-			core_uri_str <> ";" <> serialize_params(params)
+			core_uri_str <> ";" <> params_str
 		end
 		{ :ok, String.trim_trailing(uri_str, ";") }
 	end
