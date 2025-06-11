@@ -158,10 +158,9 @@ defmodule SIP.Trans.Timer do
   end
 
   def handle_timer( timer, state, module) when timer in [ :timerB, :timerD, :timerF, :timerH ] do
-    notify_dialog_layer(state, timer, module)
     reason = case timer do
       :timerB ->
-        Logger.info([ transid: state.msg.transid, message: "client INVITE not answered on time."])
+        Logger.info([ transid: state.msg.transid, message: "client INVITE not answered on time. Timer B expired."])
         :normal
 
       :timerD ->
@@ -170,14 +169,14 @@ defmodule SIP.Trans.Timer do
 
       :timerF ->
         Logger.info([ transid: state.msg.transid, module: module,
-                    message: "#{state.msg.method} request not answered on time."])
+                      message: "#{state.msg.method} request not answered on time. Timer F expired."])
         :normal
 
       :timerH ->
-        Logger.info([ transid: state.msg.transid, message: "ACK not received on time."])
+        Logger.info([ transid: state.msg.transid, message: "ACK not received on time. Timer H expired."])
         :normal
-
     end
+    notify_dialog_layer(state, timer, module)
     { :stop, reason, state }
   end
 

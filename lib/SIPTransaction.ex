@@ -89,10 +89,7 @@ alias SIP.NetUtils
   end
 
   @spec start_uac_transaction_with_template(binary(), list(), (... -> any), map()) ::
-    {:error, any()}  |
-    :invalidtemplate |
-    :no_transport_available |
-    :missiingproxyconf |
+    {:error, any()}  | :invalidtemplate |  :no_transport_available | :missingproxyconf |
     {:ok, pid()}
   @doc "Start a client transaction from a template"
   def start_uac_transaction_with_template(siptemplate, bindings, parse_error_cb, options) when is_map(options) do
@@ -127,7 +124,7 @@ alias SIP.NetUtils
                 # Create SIP message
                 case SIPMsg.parse(msgstr, parse_error_cb) do
                   # Start transaction
-                  { :ok, sipmsg } when is_req(sipmsg) -> start_uac_transaction(sipmsg, 600)
+                  { :ok, sipmsg } when is_req(sipmsg) -> start_uac_transaction(sipmsg, Map.get(options, :timeout, 60))
 
                   { :ok, sipmsg } when is_resp(sipmsg) -> raise "Cannot start an UAC transaction with SIP response"
 

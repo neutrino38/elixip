@@ -32,7 +32,7 @@ defmodule SIP.IST do
       # probably yes because the ACK may carry and SDP body ...
 
       newstate = Map.put(state, :state, :terminated) |> cancel_timer_H()
-      if state.is_reliable do
+      if state.t_isreliable do
         # All is done. Kill the transaction
         { :stop, :normal, newstate }
       else

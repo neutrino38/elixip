@@ -327,11 +327,33 @@ User-Agent: Elixip 0.2.0
         assert false
 
       bla ->
-        IO.puts("TEST: Received #{bla}")
+        IO.puts("TEST: Received #{inspect(bla)}")
         assert false
     after
       3000 -> assert false # We did not received the 180 Ringing on time
     end
+  end
+
+  test "Transaction SIP client INVITE - proxy ne répond pas" do
+    { :ok, uac_t, _modmsg } = SIP.Transac.start_uac_transaction_with_template(
+                              create_invite_template(), [],
+                              fn code, errmsg, lineno, line ->
+                                IO.puts("\n" <> errmsg)
+                                IO.puts("Offending line #{lineno}: #{line}")
+                                IO.puts("Error code #{code}")
+                                end,
+                                %{ desturi: "sip:1.2.3.4:5060;unittest=1", usesrv: false, timeout: 1 }
+      )
+
+    { _t_mod, _t_pid } = GenServer.call(uac_t, :gettransport)
+
+    #receive do
+    #  bla -> assert false, "Received #{inspect(bla)}"
+    #after
+    #  3000 -> assert false, "did not receive anything after 3s"
+    #end
+    # Expect that timer B fires
+    assert_receive({:transaction_timeout, :timerB, _tpid, _req, SIP.ICT }, 2000, "Timer B should have fired")
   end
 
   test "Outbound register" do
@@ -406,9 +428,9 @@ User-Agent: Elixip 0.2.0
     parsed_msg = SIP.Msg.Ops.update_sip_msg( parsed_msg, { :ruri, upd_uri })
 
     # Send REGISTER
-    { :ok, uac_t, _modmsg } = SIP.Transac.start_uac_transaction(parsed_msg, 30)
+    { :ok, _uac_t, _modmsg } = SIP.Transac.start_uac_transaction(parsed_msg, 30)
 
     # Expect timer F timeout
-    assert_receive({:transaction_timeout, :timerF, _tpid, _req, SIP.ICT }, 1000, "Timer F should have fired")
+    assert_receive({:transaction_timeout, :timerF, _tpid, _req, SIP.NICT }, 1000, "Timer F should have fired")
   end
 end
