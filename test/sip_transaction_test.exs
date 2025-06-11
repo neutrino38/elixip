@@ -386,4 +386,29 @@ User-Agent: Elixip 0.2.0
         500 -> assert false # We did not received the 200 OK on time
     end
   end
+
+  test "Outbound register - proxy not responding" do
+    # Motify timer T1
+    # Timer F will be 64 * 10 = 640 ms
+    Application.put_env(:elixip2, :sip_timer_T1, 10)
+    { code, msg } = File.read("test/SIP-REGISTER-LVP.txt")
+    assert code == :ok
+
+    { code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
+			IO.puts("\n" <> errmsg)
+			IO.puts("Offending line #{lineno}: #{line}")
+			IO.puts("Error code #{code}")
+			end)
+    assert code == :ok
+
+    # Add unittest param to RURI to trigger UDP mockeup transport
+    upd_uri = SIP.Uri.set_uri_param(parsed_msg.ruri, "unittest", "1")
+    parsed_msg = SIP.Msg.Ops.update_sip_msg( parsed_msg, { :ruri, upd_uri })
+
+    # Send REGISTER
+    { :ok, uac_t, _modmsg } = SIP.Transac.start_uac_transaction(parsed_msg, 30)
+
+    # Expect timer F timeout
+    assert_receive({:transaction_timeout, :timerF, _tpid, _req, SIP.ICT }, 1000, "Timer F should have fired")
+  end
 end

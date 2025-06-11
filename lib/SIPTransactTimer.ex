@@ -16,11 +16,20 @@ defmodule SIP.Trans.Timer do
     state
   end
 
-  @spec schedule_timer_B(map(), non_neg_integer()) :: map()
-  def schedule_timer_B(state, ms \\ 64 * @timer_T1_val) do
+  @doc """
+  Schedule timer B
+  - timer B defines the overall INVITE client transaction timeout
+  """
+  @spec schedule_timer_B(map(), non_neg_integer() | atom()) :: map()
+  def schedule_timer_B(state, ms \\ :default) do
+    ms = if ms == :default do
+      t1 = Application.get_env(:elixip2, :sip_timer_T1, @timer_T1_val)
+      64 *t1
+    else
+      ms
+    end
     schedule_generic_timer(state, :timerB, :tB_ref, ms)
   end
-
   def cancel_timer_B(state) do
     schedule_generic_timer(state, :timerB, :tB_ref, nil)
   end
@@ -32,6 +41,44 @@ defmodule SIP.Trans.Timer do
   def cancel_timer_D(state) do
     schedule_generic_timer(state, :timerD, :tD_ref, nil)
   end
+
+  @doc """
+  Schedule/reschedule the F timer and save its reference (pid) in the transaction state
+  - timer F is the maixmum non INVITE transaction timeout. If it fires, the client should
+  stop expecting a final answer.
+  """
+  def schedule_timer_F(state) do
+    t1 = Application.get_env(:elixip2, :sip_timer_T1, @timer_T1_val)
+    schedule_generic_timer(state, :timerF, :timerf, t1 * 64)
+  end
+
+  def cancel_timer_F(state) do
+    schedule_generic_timer(state, :timerF, :timerf, nil)
+  end
+
+  @doc """
+  Schedule/reschedule the H timer and save its reference (pid) in the transaction state
+  Wait time for ACK receipt
+  """
+  def schedule_timer_H(state) do
+    t1 = Application.get_env(:elixip2, :sip_timer_T1, @timer_T1_val)
+    schedule_generic_timer(state, :timerH, :timerh, t1 * 64)
+  end
+
+  def cancel_timer_H(state) do
+    schedule_generic_timer(state, :timerH, :timerh, nil)
+  end
+
+
+  @doc "Schedule/reschedule the K timer and save its reference (pid) in the transaction state"
+   def schedule_timer_K(state, :default) do
+    schedule_generic_timer(state, :timerK, :timerk, @timer_T4_val)
+  end
+
+  def schedule_timer_K(state, ms) do
+    schedule_generic_timer(state, :timerK, :timerk, ms)
+  end
+
 
   @doc """
   Schedule a generic cancellable timer
@@ -74,36 +121,6 @@ defmodule SIP.Trans.Timer do
     end
   end
 
-  @doc "Schedule/reschedule the F timer and save its reference (pid) in the transaction state"
-  def schedule_timer_F(state) do
-    schedule_generic_timer(state, :timerF, :timerf, @timer_T1_val * 64)
-  end
-
-  def cancel_timer_F(state) do
-    schedule_generic_timer(state, :timerF, :timerf, nil)
-  end
-
-  @doc """
-  Schedule/reschedule the H timer and save its reference (pid) in the transaction state
-  Wait time for ACK receipt
-  """
-  def schedule_timer_H(state) do
-    schedule_generic_timer(state, :timerH, :timerh, @timer_T1_val * 64)
-  end
-
-  def cancel_timer_H(state) do
-    schedule_generic_timer(state, :timerH, :timerh, nil)
-  end
-
-
-  @doc "Schedule/reschedule the K timer and save its reference (pid) in the transaction state"
-   def schedule_timer_K(state, :default) do
-    schedule_generic_timer(state, :timerK, :timerk, @timer_T4_val)
-  end
-
-  def schedule_timer_K(state, ms) do
-    schedule_generic_timer(state, :timerK, :timerk, ms)
-  end
 
   @doc "Handle timer messages"
   def handle_timer({ :timerA, ms }, state) when ms < @timer_T2_val and state.state == :sending do
@@ -145,7 +162,7 @@ defmodule SIP.Trans.Timer do
     reason = case timer do
       :timerB ->
         Logger.info([ transid: state.msg.transid, message: "client INVITE not answered on time."])
-        :transaction_timeout
+        :normal
 
       :timerD ->
         # ICT retransmission grace period
@@ -154,11 +171,11 @@ defmodule SIP.Trans.Timer do
       :timerF ->
         Logger.info([ transid: state.msg.transid, module: module,
                     message: "#{state.msg.method} request not answered on time."])
-        :transaction_timeout
+        :normal
 
       :timerH ->
         Logger.info([ transid: state.msg.transid, message: "ACK not received on time."])
-        :transaction_timeout
+        :normal
 
     end
     { :stop, reason, state }
