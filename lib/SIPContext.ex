@@ -17,6 +17,7 @@ defmodule SIP.Context do
     debug: false,
     dialogpid: nil,
     lasterr: :ok,
+    mediapid: nil,
     appdata: %{}
   ]
 
@@ -107,6 +108,15 @@ defmodule SIP.Context do
       Map.put(context, :dialogpid, value)
     else
       raise "dialog PID must me a process ID"
+    end
+  end
+
+  # Set the media PID
+  def set(context, :mediapid, value) do
+    if is_pid(value) do
+      Map.put(context, :mediapid, value)
+    else
+      raise "media PID must me a process ID"
     end
   end
 

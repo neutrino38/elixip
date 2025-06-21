@@ -18,7 +18,7 @@ defmodule MediaServer do
       - `:video_codecs` - Video codec to use (e.g., "VP8", "H264")
       - `:audio_codecs` - Audio codec to use (e.g., "OPUS", "PCMU")
       - `:medias` - Tuple of media to handle (e.g., { :audio, :video, :text })
-      - `:webrtc_support` - :no | :yes | :if_offered
+      - `:webrtc_support` - :no | :yes | :if_offered | :no_avp
       - `:event_sink` - Process id of the event sink that will receive events from the media server
     - returns `{:ok, pid()}` on success or `{:error, term()}` on failure
     """

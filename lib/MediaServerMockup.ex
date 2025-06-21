@@ -75,6 +75,13 @@ defmodule MediaServer.Mockup do
   end
 
   @impl MediaServer.Behavior
+  @spec connectStream(
+          atom() | pid() | {atom(), any()} | {:via, atom(), any()},
+          any(),
+          any(),
+          any(),
+          any()
+        ) :: any()
   def connectStream(pid, direction, option, media_resource_type, media_ressource_id) do
     GenServer.call(pid, {:connect_stream, direction, option, media_resource_type, media_ressource_id})
   end
@@ -150,8 +157,8 @@ defmodule MediaServer.Mockup do
 
   defp build_sdp_media(media, port, bw, codecs, webrtc_support) do
     protocol = case webrtc_support do
-      yes when yes in [:if_offered, :full] -> "RTP/SAVPF"
-      :no_avpf -> "RTP/AVPF"
+      yes when yes in [:if_offered, :yes] -> "RTP/SAVPF"
+      :no -> "RTP/AVPF"
       _ -> "RTP/AVP"
     end
 

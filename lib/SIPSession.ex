@@ -244,20 +244,21 @@ defmodule SIP.Session do
   end
 
   defmodule CallUAC do
-    defp invite_msg(sip_ctx = %SIP.Context{}, body) do
+    defp invite_msg(sip_ctx = %SIP.Context{}, ruri, body) do
       contact_uri = %SIP.Uri{
         userpart: SIP.Context.get(sip_ctx, :username),
         domain: "0.0.0.0",
         params: %{}
       }
 
+      ruri = if is_binary(ruri), do: SIP.Uri.parse(ruri), else: ruri
       req = %{
         "Max-Forwards" => "70",
         "Supported:" => "replaces",
         method: :INVITE,
-        ruri: SIP.Context.to(sip_ctx, nil),
+        ruri: ruri,
         from: SIP.Context.from(sip_ctx),
-        to: SIP.Context.to(sip_ctx,nil),
+        to: ruri,
         contact: contact_uri,
         useragent: Application.get_env(:elixip2, :useragent, "Elixipp/0.1"),
         callid: nil,
@@ -266,15 +267,15 @@ defmodule SIP.Session do
       SIP.Msg.Ops.update_sip_msg(req, { :body, body })
     end
 
-    @spec client_invite(%SIP.Context{}, binary() | list(), integer()) :: %SIP.Context{}
-    def client_invite(sip_ctx = %SIP.Context{}, sdp_offer, timeout) when is_integer(timeout) do
-      invite = invite_msg(sip_ctx, sdp_offer)
+    @spec client_invite(%SIP.Context{}, binary(), binary() | list(), integer()) :: %SIP.Context{}
+    def client_invite(sip_ctx = %SIP.Context{}, ruri, sdp_offer, timeout) when is_integer(timeout) do
+      invite = invite_msg(sip_ctx, ruri, sdp_offer)
       SIP.Session.send_sip_request(sip_ctx, invite, timeout)
     end
 
-    defmacro send_INVITE(sdp_offer, timeout) do
+    defmacro send_INVITE(ruri, sdp_offer, timeout) do
       quote do
-        var!(sip_ctx) = SIP.Session.CallUAC.client_invite(var!(sip_ctx), unquote(sdp_offer), unquote(timeout))
+        var!(sip_ctx) = SIP.Session.CallUAC.client_invite(var!(sip_ctx), unquote(ruri), unquote(sdp_offer), unquote(timeout))
       end
     end
 
