@@ -2,6 +2,7 @@ defmodule MediaServer.Mockup do
   use GenServer
   require Logger
   require Socket.UDP
+  require ExSDP
 
 
   defmodule Echo do
@@ -103,6 +104,93 @@ defmodule MediaServer.Mockup do
     GenServer.call(pid, :close)
   end
 
+  defp add_codec(m, pt) when pt in [0..127] do
+    codecs = List.insert_at(m.fmt, pt, -1)
+    Map.put(m, :fmt, codecs)
+  end
+
+  defp add_codec(m, :audio, "PCMU") do
+    ExSDP.add_attribute(m, %ExSDP.Attribute.RTPMapping{ payload_type: 0, encoding: "PCMU", clock_rate: 8000 })
+    |> add_codec(0)
+  end
+
+  defp add_codec(m, :audio, "OPUS") do
+    ExSDP.add_attribute(m, %ExSDP.Attribute.RTPMapping{ payload_type: 99, encoding: "OPUS", clock_rate: 16000 })
+    |> ExSDP.add_attribute(%ExSDP.Attribute.FMTP{ pt: 99, useinbandfec: "1",  minptime: "10" })
+    |> add_codec(99)
+  end
+
+  defp add_codec(m, :video, "H264") do
+    ExSDP.add_attribute(m, %ExSDP.Attribute.RTPMapping{ payload_type: 99, encoding: "H264", clock_rate: 90000 })
+    |> ExSDP.add_attribute(%ExSDP.Attribute.FMTP{ pt: 99, profile_level_id: "42e01f", packetization_mode: "1" })
+    |> add_codec(99)
+  end
+
+  defp add_codec(m, :video, "VP8") do
+    ExSDP.add_attribute(m, %ExSDP.Attribute.RTPMapping{ payload_type: 100, encoding: "VP8", clock_rate: 90000 })
+    |> ExSDP.add_attribute(%ExSDP.Attribute.FMTP{ pt: 100, max_fr: "30" })
+    |> add_codec(100)
+  end
+
+  defp add_codec(m, :text, "T140") do
+    ExSDP.add_attribute(m, %ExSDP.Attribute.RTPMapping{ payload_type: 101, encoding: "T140", clock_rate: 1000 })
+    |> add_codec(101)
+  end
+
+  defp add_codec(m, :text, "RED") do
+    ExSDP.add_attribute(m, %ExSDP.Attribute.RTPMapping{ payload_type: 102, encoding: "RED", clock_rate: 1000 })
+    |> ExSDP.add_attribute(%ExSDP.Attribute.FMTP{ pt: 102, redundant_payloads: "101/101/101" })
+    |> add_codec(102)
+  end
+
+  defp add_codec(m, media, _codec) when media in [ :audio, :video, :text ] do
+    m
+  end
+
+
+  defp build_sdp_media(media, port, bw, codecs, webrtc_support) do
+    m = ExSDP.Media.new(media: media, port: port)
+    m = if bw > 0 do
+      Map.put(m, :bandwidth, [ %ExSDP.Bandwidth{ type: :AS, bandwidth: bw } ])
+    else
+      m
+    end
+
+    m = if webrtc_support in [ :if_offered, :full ] do
+      Map.put(m, :protocol, "RTP/SAVPF")
+    else
+      Map.put(m, :protocol, "RTP/AVPF")
+    end
+
+    m = for c <- codecs do
+      add_codec(m, media, c)
+    end
+
+    m
+  end
+
+  defp create_local_sdp(state) when is_nil(state.local_sdp) do
+    { ip, port } = Socket.local(state.rtp_socket)
+    sdp = ExSDP.new(
+      version: 0,
+      username: "Elixip2",
+      session_id: :erlang.unique_integer([:positive, :monotonic]),
+      session_version: 1,
+      address: { :IP4, ip })
+
+    sdp = ExSDP.add_connection(sdp, { :IP4, ip })
+    sdp = for media <- state.medias do
+      { bw, codecs } = case media do
+        :video -> { state.video_bandwidth, state.video_codecs }
+        :audio -> { state.audio_bandwidth, state.audio_codecs }
+        :text -> { 0, [ "T140", "RED" ] }
+        _ -> raise "unsupported media #{media}"
+      end
+
+    end
+
+  end
+
   ## Server Callbacks
   @impl true
   def init({ event_sink, options }) do
@@ -125,13 +213,15 @@ defmodule MediaServer.Mockup do
         inbound: %{ audio: nil, video: nil, text: nil },
         outbound: %{ audio: nil, video: nil, text: nil }
       },
-      rtp_socket: nil
+      rtp_socket: nil,
+      local_sdp: nil
     }
 
     case Socket.UDP.open([mode: :active]) do
       {:ok, socket} ->
         :ok = Socket.UDP.process(socket, self())
-        { :ok, Map.put(state, :rtp_socket, socket) }
+        state = Map.put(state, :rtp_socket, socket) |> create_local_sdp()
+        { :ok, state }
 
       { :error, err } ->
         Logger.error("Failed to allocate RTP port.")
