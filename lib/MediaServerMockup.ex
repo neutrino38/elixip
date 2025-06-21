@@ -104,7 +104,7 @@ defmodule MediaServer.Mockup do
     GenServer.call(pid, :close)
   end
 
-  defp add_codec(m, pt) when pt in [0..127] do
+  defp add_codec(m, pt) when pt in 0..127 do
     codecs = List.insert_at(m.fmt, pt, -1)
     Map.put(m, :fmt, codecs)
   end
@@ -149,37 +149,44 @@ defmodule MediaServer.Mockup do
 
 
   defp build_sdp_media(media, port, bw, codecs, webrtc_support) do
-    m = ExSDP.Media.new(media: media, port: port)
+    protocol = case webrtc_support do
+      yes when yes in [:if_offered, :full] -> "RTP/SAVPF"
+      :no_avpf -> "RTP/AVPF"
+      _ -> "RTP/AVP"
+    end
+
+    # Create the media structure
+    m = %ExSDP.Media{ type: media, port: port, protocol: protocol, fmt: [] }
     m = if bw > 0 do
       Map.put(m, :bandwidth, [ %ExSDP.Bandwidth{ type: :AS, bandwidth: bw } ])
     else
       m
     end
 
-    m = if webrtc_support in [ :if_offered, :full ] do
-      Map.put(m, :protocol, "RTP/SAVPF")
-    else
-      Map.put(m, :protocol, "RTP/AVPF")
-    end
-
-    m = for c <- codecs do
-      add_codec(m, media, c)
-    end
-
-    m
+    Enum.reduce(codecs, m, fn c, m -> add_codec(m, media, c) end)
   end
 
   defp create_local_sdp(state) when is_nil(state.local_sdp) do
-    { ip, port } = Socket.local(state.rtp_socket)
+    { :ok, { ip, port }} = Socket.local(state.rtp_socket)
+    cnx = case ip do
+      { _a,_b,_c,_d } -> %ExSDP.ConnectionData{ ttl: nil, address_count: 1,
+        network_type: "IN", address: { :IP4, ip }}
+      { _a, _b, _c, _d, _e, _f, _g, _h } -> %ExSDP.ConnectionData{ ttl: nil, address_count: 1,
+        network_type: "IN", address: { :IP6, ip }}
+    end
+
     sdp = ExSDP.new(
       version: 0,
       username: "Elixip2",
       session_id: :erlang.unique_integer([:positive, :monotonic]),
       session_version: 1,
-      address: { :IP4, ip })
+      address: { :IP4, ip },
+      connection_data: cnx)
 
-    sdp = ExSDP.add_connection(sdp, { :IP4, ip })
-    sdp = for media <- state.medias do
+    # Build media
+    Enum.reduce(state.medias, sdp, fn media, sdp ->
+
+      # Obtain media codecs and media bandwidth
       { bw, codecs } = case media do
         :video -> { state.video_bandwidth, state.video_codecs }
         :audio -> { state.audio_bandwidth, state.audio_codecs }
@@ -187,7 +194,9 @@ defmodule MediaServer.Mockup do
         _ -> raise "unsupported media #{media}"
       end
 
-    end
+      build_sdp_media(media, port, bw, codecs, state.webrtc_support)
+      |> ExSDP.add_media(sdp)
+    end)
 
   end
 
@@ -251,6 +260,26 @@ defmodule MediaServer.Mockup do
       connect_single_stream_to_rtc_connection(acc_state, direction, media_resource_type, media_ressource_id, media)
     end)
     {:reply, {:ok, state}, state}
+  end
+
+  def handle_call(:close, _from, state) do
+    { :stop, :normal, :ok, state }
+  end
+
+  def handle_call(:get_local_offer, _from, state) do
+    case state.local_sdp do
+      nil ->
+        sdp = create_local_sdp(state)
+        state = Map.put(state, :local_sdp, sdp)
+        {:reply, {:ok, sdp}, state}
+      sdp -> {:reply, {:ok, sdp}, state}
+    end
+  end
+
+  def handle_call({:set_remote_offer, sdpstr}, _from, state) do
+    sdp = ExSDP.parse(sdpstr)
+    state = Map.put(state, :remote_sdp, sdp)
+    { :reply, :ok, state }
   end
 
   defp get_resource_pid(state, resource_type, ressource_id) do
