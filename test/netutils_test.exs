@@ -57,10 +57,43 @@ defmodule SIP.Test.NetUtils do
 
 
   test "get local IPV4 from Wifi" do
-    getipcmd = ~c"powershell -Command \"(Get-NetIPAddress -AddressFamily IPV4 -InterfaceAlias Wi-Fi).IPAddress\""
-    one_ip = :os.cmd(getipcmd) |> List.to_string() |> String.split("\r\n") |> hd()
-    { :ok, one_ip } = String.to_charlist(one_ip) |> :inet.parse_address()
-    ips = SIP.NetUtils.get_local_ips( [ :ipv4 ] )
+    one_ip =
+      case :os.type() do
+        {:win32, _} ->
+          ~c"powershell -Command \"(Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias Wi-Fi).IPAddress\""
+          |> :os.cmd()
+          |> List.to_string()
+          |> String.split(["\r\n", "\n"], trim: true)
+          |> hd()
+
+        {:unix, _} ->
+          # Linux: récupère l'IPv4 de l'interface Wi-Fi (wlan0 par défaut)
+          wifi_if =
+          "/sys/class/net"
+          |> File.ls!()
+          |> Enum.find(fn ifname ->
+            File.exists?("/sys/class/net/#{ifname}/wireless")
+          end)
+
+          unless wifi_if do
+            flunk("No Wi-Fi interface detected")
+          end
+
+          cmd = ~c"sh -c \"ip -4 addr show #{wifi_if} | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){3}'\""
+
+          cmd
+          |> :os.cmd()
+          |> List.to_string()
+          |> String.split(["\r\n", "\n"], trim: true)
+          |> hd()
+      end
+
+    {:ok, one_ip} =
+      one_ip
+      |> String.to_charlist()
+      |> :inet.parse_address()
+
+    ips = SIP.NetUtils.get_local_ips([:ipv4])
     assert one_ip in ips
   end
 
@@ -94,11 +127,13 @@ defmodule SIP.Test.NetUtils do
       #ciphers: :ssl.cipher_suites(:all, :"tlsv1.2")
       ciphers: [~c"AES256-GCM-SHA384"]
     ]
+    #Resoudre le proxy de preprod
+    { ip, _port } =SIP.Resolver.resolve(%SIP.Uri{ domain: "sip-preprod.djanah.com", port: 5061 }, false)
 
     # Établir une connexion SSL
 
     :ssl.start()
-    case :ssl.connect({147, 135, 153, 48}, 5061, ssl_options) do
+    case :ssl.connect(ip, 5061, ssl_options) do
       {:ok, socket} ->
         assert true
         :ssl.close(socket)
@@ -118,7 +153,11 @@ defmodule SIP.Test.NetUtils do
       versions: [:"tlsv1.2"], # Spécifie la version de TLS à utiliser
       ciphers: [~c"AES256-GCM-SHA384"]
     ]
-    _sock = Socket.SSL.connect!({147, 135, 153, 48}, 5061, ssl_options)
+
+    #Resoudre le proxy de preprod
+    { ip, _port } = SIP.Resolver.resolve(%SIP.Uri{ domain: "sip-preprod.djanah.com", port: 5061 }, false)
+
+    _sock = Socket.SSL.connect!(ip, 5061, ssl_options)
   end
 
   @tag :live
@@ -132,19 +171,7 @@ defmodule SIP.Test.NetUtils do
       protocol: ["sip"],
       secure: true
     ]
-    sock = Socket.Web.connect!("testsip.djanah.com", 443, wss_options)
-    Socket.Web.close(sock)
-    wss_options = [
-      cert: [path: "certs/certificate.pem"],
-      key: [ path: "certs/private_key.pem" ],
-      verify: false, # Désactive la vérification du certificat
-      versions: [:"tlsv1.2"], # Spécifie la version de TLS à utiliser
-      ciphers: [~c"AES256-GCM-SHA384"],
-      protocol: ["sip"],
-      mode: :active,
-      secure: true
-    ]
-    sock = Socket.Web.connect!("testsip.djanah.com", 443, wss_options)
+    sock = Socket.Web.connect!("sip-preprod.djanah.com", 443,wss_options)
     Socket.Web.close(sock)
   end
 end
