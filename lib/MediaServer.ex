@@ -1,102 +1,145 @@
 defmodule MediaServer do
-  defmodule Behavior do
+  @moduledoc """
+  Types and behaviour for the media server interface.
 
+  Implementations drive a medooze Node.js media server over an IPC channel.
+  Use `MediaServer.Mockup` in tests.
+  """
+
+  @type server_addr :: {String.t(), pos_integer()}
+  @type sdp :: String.t()
+  @type media_kind :: :audio | :video | :audio_video
+
+  @type conn_opts :: [
+    ice_servers: [String.t()],
+    video_codec: String.t(),
+    audio_codec: String.t(),
+    media: media_kind(),
+    video_bandwidth: pos_integer(),
+    audio_bandwidth: pos_integer(),
+    webrtc_support: :yes | :no | :if_offered | :no_avp
+  ]
+
+  @type player_opts :: [
+    loop: boolean(),
+    start_time: non_neg_integer()
+  ]
+
+  @type recorder_opts :: [
+    wait_for_keyframe: boolean(),
+    stop_on_silence: boolean(),
+    silence_timeout_ms: pos_integer(),
+    stop_on_dtmf: boolean()
+  ]
+
+  defmodule Behaviour do
     @moduledoc """
-    Defines the behavior for MediaServer modules.
-    This module specifies the callbacks that a MediaServer implementation must provide.
-    The MediaServer is responsible for managing RTC connections, media players, media recorders, and media echoes.
+    Callbacks that a media server adapter must implement.
+
+    ## Event model
+
+    Asynchronous events are delivered to the `event_sink` pid supplied at
+    resource creation time, using the message format:
+
+        {:ms_event, ref :: pid(), event}
+
+    ### Events per resource type
+
+        # PeerConnection
+        {:ms_event, conn, :ice_connected}
+        {:ms_event, conn, :ice_failed}
+        {:ms_event, conn, {:ice_candidate, candidate :: String.t()}}
+        {:ms_event, conn, :closed}
+
+        # Player
+        {:ms_event, player, :player_started}
+        {:ms_event, player, :player_ended}
+        {:ms_event, player, {:player_error, reason :: term()}}
+
+        # Recorder
+        {:ms_event, recorder, :recorder_started}
+        {:ms_event, recorder, {:recorder_stopped, :duration | :dtmf | :silence | :caller}}
+        {:ms_event, recorder, {:recorder_error, reason :: term()}}
+
+        # Server
+        {:ms_event, server, :server_disconnected}
+
+    ## Teardown order
+
+        stop_player / stop_recorder / stop_echo
+            -> close_peer_connection
+                -> disconnect
     """
+
+    # ── Server lifecycle ────────────────────────────────────────────────────
+
+    @callback connect(MediaServer.server_addr()) ::
+                {:ok, server :: pid()} | {:error, term()}
+
+    @doc "Closes all open resources then disconnects from the media server process."
+    @callback disconnect(server :: pid(), opts :: [force: boolean()]) :: :ok
+
+    # ── Peer connection ─────────────────────────────────────────────────────
+
+    @callback create_peer_connection(
+                server :: pid(),
+                event_sink :: pid(),
+                MediaServer.conn_opts()
+              ) :: {:ok, conn :: pid()} | {:error, term()}
+
+    @doc "Generate a local SDP offer. Call before set_remote_answer/2."
+    @callback get_local_offer(conn :: pid()) ::
+                {:ok, MediaServer.sdp()} | {:error, term()}
+
+    @doc "Provide the remote SDP answer after SIP negotiation. Starts ICE checks."
+    @callback set_remote_answer(conn :: pid(), MediaServer.sdp()) ::
+                :ok | {:error, term()}
+
+    @doc "Accept an incoming SDP offer and return the local SDP answer."
+    @callback set_remote_offer(conn :: pid(), MediaServer.sdp()) ::
+                {:ok, answer :: MediaServer.sdp()} | {:error, term()}
+
+    @doc "Feed a trickle ICE candidate received from the remote peer."
+    @callback add_remote_candidate(conn :: pid(), candidate :: String.t()) ::
+                :ok | {:error, term()}
+
+    @callback close_peer_connection(conn :: pid()) :: :ok
+
+    # ── Player ──────────────────────────────────────────────────────────────
+
+    @doc "Attach an MP4 player to `conn`. Media is streamed to the remote peer."
+    @callback create_player(
+                conn :: pid(),
+                file_path :: String.t(),
+                MediaServer.player_opts()
+              ) :: {:ok, player :: pid()} | {:error, term()}
+
+    @callback start_player(player :: pid()) :: :ok | {:error, term()}
+    @callback pause_player(player :: pid()) :: :ok | {:error, term()}
+    @callback stop_player(player :: pid()) :: :ok
+
+    # ── Recorder ────────────────────────────────────────────────────────────
+
     @doc """
-    Create an RTC connection
-
-    - hostname and port to connect to the media server
-    - event_sink is the process id of the event sink that will receive events from the media server
-    - `options` is a list of options to configure the connection, such as:
-      - `:ice_servers` - List of ICE servers to use for the connection
-      - `:video_bandwidth` - Maximum video bandwidth in kbps
-      - `:audio_bandwidth` - Maximum audio bandwidth in kbps
-      - `:video_codecs` - Video codec to use (e.g., "VP8", "H264")
-      - `:audio_codecs` - Audio codec to use (e.g., "OPUS", "PCMU")
-      - `:medias` - Tuple of media to handle (e.g., { :audio, :video, :text })
-      - `:webrtc_support` - :no | :yes | :if_offered | :no_avp
-      - `:event_sink` - Process id of the event sink that will receive events from the media server
-    - returns `{:ok, pid()}` on success or `{:error, term()}` on failure
+    Attach a recorder to `conn`. Media from the remote peer is written to
+    `file_path`. Use `duration_ms = 0` for unlimited duration.
     """
-    @callback createRTCConnection(String.t(), pid(), list()) :: {:ok, pid()} | {:error, term()}
+    @callback create_recorder(
+                conn :: pid(),
+                file_path :: String.t(),
+                duration_ms :: non_neg_integer(),
+                MediaServer.recorder_opts()
+              ) :: {:ok, recorder :: pid()} | {:error, term()}
 
+    @callback start_recorder(recorder :: pid()) :: :ok | {:error, term()}
+    @callback stop_recorder(recorder :: pid()) :: :ok
 
-    @doc """
-    Create a media player
+    # ── Echo ────────────────────────────────────────────────────────────────
 
-    - `url` is the URL of the media to play
-    - `loop` is a boolean indicating whether the media should loop
-    - returns `{:ok, term()}` on success or `{:error, term()}` on failure
-    """
-    @callback createMediaPlayer( pid(), String.t(), boolean()) :: { :ok, term() } | { :error, term() }
+    @doc "Loopback incoming media from `conn` back to the remote peer."
+    @callback create_echo(conn :: pid()) ::
+                {:ok, echo :: pid()} | {:error, term()}
 
-    @doc """
-    Create a media recorder
-
-    - `url` is the URL of the media to play. Only file:// URLs are supported
-    - `duration` is the duration in seconds to record
-    - `options` is a list of options for the recorder, e
-      - :stop_on_dtmf stop recording if a DTMF is received,
-      - :wait_for_first_frame wait for the first frame before starting the recording
-      - :stop_on_silence stop recording if no audio is received for a certain time
-      - :silence_timeout the time in seconds to wait for silence before stopping the recording
-      - :stop_on_text_input: stop recording if a specific text input is received
-    - returns `{:ok, term()}` on success or `{:error, term()}` on failure
-    """
-    @callback createMediaRecorder( pid(), String.t(), integer(), list()) :: { :ok, term() } | { :error, term() }
-
-    @callback createMediaEcho( pid()) :: { :ok, term() } | { :error, term() }
-
-    @doc """
-    Connect an media ressource to an exiting RTC connection
-    - `pid` is the process id of the RTC connection
-    - `direction` is either `:inbound` or `:outbound`
-    - `options` is a list of additional parameters:
-      - `:media_type` - Tuple of media to handle (e.g., { :audio, :video, :text })
-      - `:transcoding` - true | false, whether to transcode the media
-    - ressource is a term that can be used to identify the media resource (e.g., a MediaPlayer or MediaRecorder or a MediaEcho)
-    - returns `{:ok, term()}` on success or `{:error, term()}` on failure
-    """
-    @callback connectStream(pid(), :inbound | :outbound, list(), atom(), term()) :: {:ok, term()} | {:error, term()}
-
-    @doc """
-    Disconnect a media resource from an existing RTC connection
-    - `pid` is the process id of the RTC connection
-    - `direction` is either `:inbound` or `:outbound`
-    - `options` is a list of additional parameters:
-      - `:media_type` - Tuple of media to handle (e.g., { :audio, :video, :text })
-
-    returns `{:ok, term()}` on success or `{:error, term()}` on failure
-    """
-    @callback disconnectStream(pid(), :inbound | :outbound, list()) :: {:ok, term()} | {:error, term()}
-
-    @doc """
-    Set the event sink for the media server
-    - `pid` is the process id of the media server
-    - `event_sink` is the process id of the event sink that will receive events from the media server
-    - returns `:ok` on success or `{:error, term()}` on failure
-    """
-    @callback setEventSink(pid(), pid()) :: :ok | {:error, term()}
-
-    @doc """
-    Get the local offer for an RTC connection
-    - `pid` is the process id of the RTC connection
-    - returns `{:ok, String.t()}` with the SDP offer on success or `{:error, term()}` on failure
-    """
-    @callback getLocalOffer(pid) :: {:ok, String.t()} | {:error, term()}
-
-    @doc """
-    Set the remote offer for an RTC connection
-    - `pid` is the process id of the RTC connection
-    - `offer` is the SDP offer to set
-    - returns `:ok` on success or `{:error, term()}` on failure
-    """
-    @callback setRemoteOffer(pid, String.t()) :: :ok | {:error, term()}
-
-    @callback close(pid) :: :ok | {:error, term()}
+    @callback stop_echo(echo :: pid()) :: :ok
   end
 end
