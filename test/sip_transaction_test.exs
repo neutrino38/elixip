@@ -84,7 +84,7 @@ defmodule SIP.Test.Transact do
       { :timeout, _tref, timer } ->
         # Timer has fired - handle it and check that it requires transaction termination
         case SIP.Trans.Timer.handle_timer(timer, state, SIP.ICT) do
-          { :stop, :transaction_timeout, newstate } ->
+          { :stop, :normal, newstate } ->
             assert true
             newstate
 
@@ -209,7 +209,7 @@ User-Agent: Elixip 0.2.0
   @tag :live
   test "Selectionne le transport TCP et ajoute un contact" do
     # Le SIP proxy doit etre joignable pour que cela fonctionne
-    newuri = SIP.Transport.Selector.select_transport("sip:90901@testsip.djanah.com:5060;transport=TCP")
+    newuri = SIP.Transport.Selector.select_transport("sip:90901@sip-preprod.djanah.com:5060;transport=TCP")
     assert newuri != :invalidtransport
     assert is_map(newuri)
     assert newuri.tp_module == SIP.Transport.TCP
@@ -222,7 +222,7 @@ User-Agent: Elixip 0.2.0
    @tag :live
   test "Selectionne le transport TLS et ajoute un contact" do
     # Le SIP proxy doit etre joignable pour que cela fonctionne
-    newuri = SIP.Transport.Selector.select_transport("sip:90901@testsip.djanah.com:5061;transport=TLS")
+    newuri = SIP.Transport.Selector.select_transport("sip:90901@sip-preprod.djanah.com:5061;transport=TLS")
     assert newuri != :invalidtransport
     assert is_map(newuri)
     assert newuri.tp_module == SIP.Transport.TLS
