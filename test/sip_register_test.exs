@@ -9,7 +9,7 @@ defmodule SIP.Test.Register do
   @authusername "33970262547"
   @displayname "CRT V2 User"
   @domain "visioassistance.net"
-  @proxy "testsip.djanah.com"
+  @proxy "sip-preprod.djanah.com"
   @passwd "crtv2user1"
 
   setup_all do
@@ -18,10 +18,14 @@ defmodule SIP.Test.Register do
     :ok = SIP.Transport.Selector.start()
     :ok = SIP.Dialog.start()
     { :ok, _config_pid } = SIP.Session.ConfigRegistry.start()
-
-    # Force SIP proxy / registrar
-    Application.put_env(:elixip2, :proxyuri, %SIP.Uri{ domain: @proxy, scheme: "sip:", port: 5060 })
     Application.put_env(:elixip2, :proxyusesrv, false)
+    :ok
+  end
+
+  # Reset proxyuri to default (UDP) before each test to prevent contamination
+  # between tests that override the transport protocol.
+  setup do
+    Application.put_env(:elixip2, :proxyuri, %SIP.Uri{ domain: @proxy, scheme: "sip:", port: 5060 })
     :ok
   end
 
