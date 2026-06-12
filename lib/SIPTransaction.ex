@@ -94,14 +94,11 @@ alias SIP.NetUtils
   @doc "Start a client transaction from a template"
   def start_uac_transaction_with_template(siptemplate, bindings, parse_error_cb, options) when is_map(options) do
     try do
-      { headers, _body } = case String.split(siptemplate, "\r\n\r\n", parts: 2) do
-        [ hs, bd ] ->
-          { String.split(hs, "\r\n"), bd }
-
-        [ _hs ] ->
-          { String.split(siptemplate, "\r\n"), nil }
-      end
-      sipfirstline = SIP.MsgTemplate.apply_template(hd(headers), bindings)
+      # Extract the first non-empty line, handling both \r\n and \n line endings
+      sipfirstline_raw = siptemplate
+        |> String.split(~r/\r?\n/)
+        |> Enum.find("", fn line -> String.trim(line) != "" end)
+      sipfirstline = SIP.MsgTemplate.apply_template(sipfirstline_raw, bindings)
       case String.split(sipfirstline, " ", parts: 3) do
 
 				# This is a SIP response
