@@ -128,14 +128,17 @@ defmodule SIP.Transport do
         key: [ path: "certs/private_key.pem" ],
         verify: false, # Désactive la vérification du certificat pour simplifier l'exemple
         versions: [:"tlsv1.2"], # Spécifie la version de TLS à utiliser
-        ciphers: [~c"AES256-GCM-SHA384"],
+        # ECDHE variant is required for PFS; RSA-only ciphers are rejected by modern servers
+        ciphers: [~c"ECDHE-RSA-AES256-GCM-SHA384"],
         timeout: timeout,
         mode: :active
       ]
 
       sock = case transport do
         :tcp ->
-          s = Socket.TCP.connect!(state.destip, state.destport, [ timeout: timeout, mode: :active ])
+          # socket2 expects a string hostname/IP, not an Erlang tuple
+          destip_str = SIP.NetUtils.ip2string(state.destip)
+          s = Socket.TCP.connect!(destip_str, state.destport, [ timeout: timeout, mode: :active ])
           Socket.process!(s, self())
           s
 
