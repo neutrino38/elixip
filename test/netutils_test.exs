@@ -120,12 +120,11 @@ defmodule SIP.Test.NetUtils do
     # openssl req -new -x509 -key key.pem -out cert.pem -days 1000 -sha384
 
     ssl_options = [
-      certfile: "certs/certificate.pem",
-      keyfile: "certs/private_key.pem",
-      verify: :verify_none, # Désactive la vérification du certificat pour simplifier l'exemple
-      versions: [:"tlsv1.2"], # Spécifie la version de TLS à utiliser
-      #ciphers: :ssl.cipher_suites(:all, :"tlsv1.2")
-      ciphers: [~c"AES256-GCM-SHA384"]
+      verify: :verify_none,
+      versions: [:"tlsv1.2"],
+      # AES256-GCM-SHA384 (Kx=RSA, no PFS) is rejected by the server;
+      # ECDHE variant uses ephemeral key exchange and is accepted.
+      ciphers: [~c"ECDHE-RSA-AES256-GCM-SHA384"]
     ]
     #Resoudre le proxy de preprod
     { ip, _port } =SIP.Resolver.resolve(%SIP.Uri{ domain: "sip-preprod.djanah.com", port: 5061 }, false)
@@ -151,7 +150,7 @@ defmodule SIP.Test.NetUtils do
       key: [ path: "certs/private_key.pem" ],
       verify: false, # Désactive la vérification du certificat pour simplifier l'exemple
       versions: [:"tlsv1.2"], # Spécifie la version de TLS à utiliser
-      ciphers: [~c"AES256-GCM-SHA384"]
+      ciphers: [~c"ECDHE-RSA-AES256-GCM-SHA384"]
     ]
 
     #Resoudre le proxy de preprod
@@ -167,7 +166,7 @@ defmodule SIP.Test.NetUtils do
       key: [ path: "certs/private_key.pem" ],
       verify: false, # Désactive la vérification du certificat
       versions: [:"tlsv1.2"], # Spécifie la version de TLS à utiliser
-      ciphers: [~c"AES256-GCM-SHA384"],
+      ciphers: [~c"ECDHE-RSA-AES256-GCM-SHA384"],
       protocol: ["sip"],
       secure: true
     ]
