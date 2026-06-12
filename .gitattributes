@@ -1,2 +1,2 @@
-# Force CRLF line endings for SIP test messages (RFC 3261 mandates CRLF)
-test/SIP-*.txt text eol=crlf
+# Force CRLF line endings for all protocol test data files (RFC 3261 mandates CRLF)
+test/*.txt text eol=crlf
