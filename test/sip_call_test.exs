@@ -258,6 +258,11 @@ defmodule SIP.Test.Call do
 			end)
     assert code == :ok
 
+    # Randomize Call-ID so each test gets a distinct dialog key in Registry.SIPDialog.
+    # Without this, all tests share the same {from_tag, call_id, nil} key and
+    # GenServer.start fails with {:already_started, pid} for tests 2-4.
+    parsed_msg = Map.put(parsed_msg, :callid, SIP.Msg.Ops.generate_branch_value())
+
     # Add unittest param to RURI to trigger UDP mockeup transport selection
     upd_uri = SIP.Uri.set_uri_param(parsed_msg.ruri, "unittest", "1")
     upd_uri = SIP.Uri.set_uri_param(upd_uri, "scenario", scenario)
