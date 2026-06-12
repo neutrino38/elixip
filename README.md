@@ -13,12 +13,14 @@ This is not intended to be a finished product . It is rather a self training pro
 
 ## Design and future roadmap
 
-### Beta version
-
-A regular Elixir project with a callback based API that can be embedded to produce ability
-SIP application.
-
-### Future version
+### Goal
 
 I changed my mind and I now want to build and advanced SIP and RTP test tool using the Elixir scripting capablity.
+
+What I want is to use the Domain Specific Language capability of elixir to create
+an easy and powerful scripting tools to test WebRTC call scenario. The signaling
+would be SIP over WSS or SIP over UDP or TCP and the media would be using
+mendooze media server 
+
+https://github.com/1760002018/medooze-media-server/tree/main/media-server
 
