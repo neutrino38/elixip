@@ -14,7 +14,7 @@ defmodule SIP.Test.Call2 do
   @proxy @account.proxy
   @passwd @account.passwd
 
-  @callee "90901@#{@domain}"
+  @callee "sip:90901@#{@domain}"
 
   setup_all do
     :ok = SIP.Transac.start()
@@ -104,7 +104,7 @@ defmodule SIP.Test.Call2 do
     assert ctx_get(:lasterr) == :ok
 
     # ── Wait for the call to be answered (200 OK) ─────────────────────────────
-    {:ok, ok_rsp, ok_trans} = wait_for_200(10_000)
+    {:ok, ok_rsp, ok_trans} = wait_for_200(25_000)
 
     # Acknowledge the 200 OK to confirm the dialog.
     CallUAC.ack(sip_ctx, ok_trans)

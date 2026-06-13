@@ -281,7 +281,16 @@ defmodule SIP.Session do
         params: %{}
       }
 
-      ruri = if is_binary(ruri), do: SIP.Uri.parse(ruri), else: ruri
+      ruri =
+        if is_binary(ruri) do
+          case SIP.Uri.parse(ruri) do
+            { :ok, parsed } -> parsed
+            err -> raise "Invalid request URI #{inspect(ruri)}: #{inspect(err)}"
+          end
+        else
+          ruri
+        end
+
       req = %{
         "Max-Forwards" => "70",
         "Supported:" => "replaces",
