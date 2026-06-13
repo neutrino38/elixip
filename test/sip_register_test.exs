@@ -5,12 +5,12 @@ defmodule SIP.Test.Register do
   use SIP.Session.RegisterUAC
 
   # Account to use for tests
-  @username "33970262547"
-  @authusername "33970262547"
-  @displayname "CRT V2 User"
+  @username "33970262546"
+  @authusername "33970262546"
+  @displayname "Test User"
   @domain "visioassistance.net"
-  @proxy "sip-preprod.djanah.com"
-  @passwd "crtv2user1"
+  @proxy "sip.djanah.com"
+  @passwd "TestKam1"
 
   setup_all do
     # Initialize transaction and transport layers
