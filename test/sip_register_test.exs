@@ -5,12 +5,14 @@ defmodule SIP.Test.Register do
   use SIP.Session.RegisterUAC
 
   # Account to use for tests
-  @username "33970262546"
-  @authusername "33970262546"
-  @displayname "Test User"
-  @domain "visioassistance.net"
-  @proxy "sip.djanah.com"
-  @passwd "TestKam1"
+  # Account to use for tests (centralized in config/test.exs)
+  @account Application.compile_env(:elixip2, :test_account)
+  @username @account.username
+  @authusername @account.authusername
+  @displayname @account.displayname
+  @domain @account.domain
+  @proxy @account.proxy
+  @passwd @account.passwd
 
   setup_all do
     # Initialize transaction and transport layers

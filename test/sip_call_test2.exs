@@ -5,13 +5,14 @@ defmodule SIP.Test.Call2 do
 
   alias SIP.Session.CallUAC
 
-  # Account to use for tests
-  @username "33970262547"
-  @authusername "33970262547"
-  @displayname "CRT V2 User"
-  @domain "visioassistance.net"
-  @proxy "testsip.djanah.com"
-  @passwd "crtv2user1"
+  # Account to use for tests (centralized in config/test.exs)
+  @account Application.compile_env(:elixip2, :test_account)
+  @username @account.username
+  @authusername @account.authusername
+  @displayname @account.displayname
+  @domain @account.domain
+  @proxy @account.proxy
+  @passwd @account.passwd
 
   setup_all do
     :ok = SIP.Transac.start()

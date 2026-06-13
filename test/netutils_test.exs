@@ -2,7 +2,8 @@ defmodule SIP.Test.NetUtils do
   use ExUnit.Case
   doctest SIP.NetUtils
 
-   @proxy "sip.djanah.com"
+   # Proxy to use for tests (centralized in config/test.exs)
+   @proxy Application.compile_env(:elixip2, :test_account).proxy
 
   # Commonly accepted modern cipher suites (Mozilla "intermediate" profile),
   # all providing PFS via ephemeral ECDHE key exchange. Mirrors the list used

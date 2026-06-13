@@ -225,8 +225,8 @@ defmodule SIP.Test.Call do
   require SIP.Dialog
   doctest SIP.Session.Call
 
-    # Account to use for tests
-  @proxy "testsip.djanah.com"
+    # Account to use for tests (centralized in config/test.exs)
+  @proxy Application.compile_env(:elixip2, :test_account).proxy
 
   setup_all do
     # Initialize transaction and transport layers

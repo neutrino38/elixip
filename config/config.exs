@@ -29,3 +29,8 @@ config :elixip2,
     ~c"ECDHE-ECDSA-AES128-GCM-SHA256",
     ~c"ECDHE-RSA-AES128-GCM-SHA256"
   ]
+
+# Environment-specific configuration (e.g. config/test.exs)
+if File.exists?(Path.join(__DIR__, "#{config_env()}.exs")) do
+  import_config "#{config_env()}.exs"
+end
