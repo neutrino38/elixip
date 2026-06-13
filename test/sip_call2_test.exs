@@ -27,6 +27,7 @@ defmodule SIP.Test.Call2 do
     :ok
   end
 
+
   # Wait for the final 200 OK, ignoring provisional (1xx) responses.
   defp wait_for_200(timeout) do
     receive do
