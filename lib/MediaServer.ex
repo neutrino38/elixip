@@ -10,6 +10,35 @@ defmodule MediaServer do
   @type sdp :: String.t()
   @type media_kind :: :audio | :video | :audio_video
 
+  @typedoc """
+  Asynchronous events delivered to the `event_sink` pid as `{:ms_event, ref, event}`.
+
+  `:ice_connected` notifies the application that ICE/DTLS connectivity has been
+  established on a peer connection — i.e. media can now flow. It is emitted once
+  the remote SDP (answer or offer) has been negotiated and connectivity checks
+  succeed.
+  """
+  @type event ::
+          # PeerConnection
+          :ice_connected
+          | :ice_failed
+          | {:ice_candidate, candidate :: String.t()}
+          | :closed
+          # Player
+          | :player_started
+          | :player_ended
+          | {:player_error, reason :: term()}
+          # Recorder
+          | :recorder_started
+          | {:recorder_stopped, :duration | :dtmf | :silence | :caller}
+          | {:recorder_error, reason :: term()}
+          # Echo
+          | :echo_started
+          # Server
+          | :server_disconnected
+
+  @type ms_event :: {:ms_event, ref :: pid(), event()}
+
   @type conn_opts :: [
     ice_servers: [String.t()],
     video_codec: String.t(),
@@ -61,8 +90,16 @@ defmodule MediaServer do
         {:ms_event, recorder, {:recorder_stopped, :duration | :dtmf | :silence | :caller}}
         {:ms_event, recorder, {:recorder_error, reason :: term()}}
 
+        # Echo
+        {:ms_event, echo, :echo_started}
+
         # Server
         {:ms_event, server, :server_disconnected}
+
+    `:ice_connected` is the notification that ICE/DTLS connectivity has been
+    established on a peer connection (media can now flow). Applications wait for
+    it after providing the remote SDP via `set_remote_answer/2` or
+    `set_remote_offer/2`.
 
     ## Teardown order
 
@@ -136,7 +173,10 @@ defmodule MediaServer do
 
     # ── Echo ────────────────────────────────────────────────────────────────
 
-    @doc "Loopback incoming media from `conn` back to the remote peer."
+    @doc """
+    Start a media loopback (echo) on `conn`: every media packet received from
+    the remote peer is sent straight back to it. Emits `:echo_started`.
+    """
     @callback create_echo(conn :: pid()) ::
                 {:ok, echo :: pid()} | {:error, term()}
 

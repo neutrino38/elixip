@@ -244,6 +244,36 @@ defmodule SIP.Session do
   end
 
   defmodule CallUAC do
+    defmacro __using__(_opts) do
+      quote do
+        use SIP.Context
+
+        defmacro send_INVITE(ruri, sdp_offer, timeout) do
+          quote do
+            var!(sip_ctx) = SIP.Session.CallUAC.client_invite(var!(sip_ctx), unquote(ruri), unquote(sdp_offer), unquote(timeout))
+          end
+        end
+
+        defmacro send_auth_INVITE(resp, ruri, sdp_offer, timeout) do
+          quote do
+            var!(sip_ctx) = SIP.Session.CallUAC.auth_invite(var!(sip_ctx), unquote(resp), unquote(ruri), unquote(sdp_offer), unquote(timeout))
+          end
+        end
+
+        defmacro send_BYE() do
+          quote do
+            var!(sip_ctx) = SIP.Session.CallUAC.client_bye(var!(sip_ctx))
+          end
+        end
+
+        defmacro send_ACK(transaction_id) do
+          quote do
+            SIP.Session.CallUAC.ack(var!(sip_ctx), unquote(transaction_id))
+          end
+        end
+      end
+    end
+
     defp invite_msg(sip_ctx = %SIP.Context{}, ruri, body) do
       contact_uri = %SIP.Uri{
         userpart: SIP.Context.get(sip_ctx, :username),
@@ -273,10 +303,32 @@ defmodule SIP.Session do
       SIP.Session.send_sip_request(sip_ctx, invite, timeout)
     end
 
-    defmacro send_INVITE(ruri, sdp_offer, timeout) do
-      quote do
-        var!(sip_ctx) = SIP.Session.CallUAC.client_invite(var!(sip_ctx), unquote(ruri), unquote(sdp_offer), unquote(timeout))
+    @doc """
+    Re-send an INVITE authenticated against a 401/407 challenge response `resp`.
+    Mirrors `SIP.Session.RegisterUAC.auth_register/3` for the INVITE method.
+    """
+    @spec auth_invite(%SIP.Context{}, map(), binary(), binary() | list(), integer()) :: %SIP.Context{}
+    def auth_invite(sip_ctx = %SIP.Context{}, resp, ruri, sdp_offer, _timeout)
+        when is_map(resp) and is_integer(resp.response) do
+      {autheader, authparams} =
+        case resp.response do
+          407 -> {:proxyauthenticate, Map.get(resp, :proxyauthenticate)}
+          401 -> {:wwwauthenticate, Map.get(resp, :wwwauthenticate)}
+          _ -> raise "You must provide a 401 or 407 response with auth params to auth the INVITE"
+        end
+
+      if is_nil(authparams) do
+        raise "Missing #{autheader} header in #{resp.response} response"
       end
+
+      invite =
+        invite_msg(sip_ctx, ruri, sdp_offer)
+        |> SIP.Msg.Ops.add_authorization_to_req(
+          authparams, autheader, sip_ctx.authusername, sip_ctx.ha1, :ha1
+        )
+
+      rez = SIP.Dialog.new_request(sip_ctx.dialogpid, invite)
+      SIP.Context.set(sip_ctx, :lasterr, rez)
     end
 
     defp bye_message(sip_ctx) do
@@ -300,12 +352,6 @@ defmodule SIP.Session do
     def client_bye(sip_ctx = %SIP.Context{})  do
       bye = bye_message(sip_ctx)
       SIP.Session.send_sip_request(sip_ctx, bye, 0)
-    end
-
-    defmacro send_BYE() do
-      quote do
-        var!(sip_ctx) = SIP.Session.CallUAC.client_bye(var!(sip_ctx))
-      end
     end
   end
 

@@ -84,7 +84,8 @@ defmodule MediaServer.Mockup do
   @impl MediaServer.Behaviour
   def create_echo(conn) do
     event_sink = GenServer.call(conn, :get_event_sink)
-    GenServer.start(__MODULE__.Echo, event_sink)
+    :ok = GenServer.call(conn, {:set_echo, true})
+    GenServer.start(__MODULE__.Echo, {conn, event_sink})
   end
 
   @impl MediaServer.Behaviour
@@ -116,6 +117,10 @@ defmodule MediaServer.Mockup.Conn do
   use GenServer
   require Logger
 
+  # Default simulated delay (ms) between remote SDP negotiation and the
+  # :ice_connected event, mimicking ICE/DTLS connectivity checks.
+  @default_ice_delay_ms 150
+
   defstruct [
     :event_sink,
     :rtp_socket,
@@ -129,7 +134,9 @@ defmodule MediaServer.Mockup.Conn do
     audio_bandwidth: 0,
     video_codecs: ["H264", "VP8"],
     audio_codecs: ["OPUS", "PCMU"],
-    webrtc_support: :if_offered
+    webrtc_support: :if_offered,
+    ice_delay_ms: @default_ice_delay_ms,
+    echo: false
   ]
 
   @impl true
@@ -149,7 +156,8 @@ defmodule MediaServer.Mockup.Conn do
       audio_bandwidth: Keyword.get(opts, :audio_bandwidth, 0),
       video_codecs: List.wrap(Keyword.get(opts, :video_codec, ["H264", "VP8"])),
       audio_codecs: List.wrap(Keyword.get(opts, :audio_codec, ["OPUS", "PCMU"])),
-      webrtc_support: Keyword.get(opts, :webrtc_support, :if_offered)
+      webrtc_support: Keyword.get(opts, :webrtc_support, :if_offered),
+      ice_delay_ms: Keyword.get(opts, :ice_delay_ms, @default_ice_delay_ms)
     }
 
     case Socket.UDP.open(mode: :active) do
@@ -178,7 +186,7 @@ defmodule MediaServer.Mockup.Conn do
   def handle_call({:set_remote_answer, sdp_str}, _from, state) do
     case ExSDP.parse(sdp_str) do
       {:ok, sdp} ->
-        send(self(), :notify_ice_connected)
+        schedule_ice_connected(state)
         {:reply, :ok, %{state | remote_sdp: sdp}}
 
       {:error, reason} ->
@@ -191,7 +199,7 @@ defmodule MediaServer.Mockup.Conn do
     case ExSDP.parse(sdp_str) do
       {:ok, remote_sdp} ->
         local_sdp = state.local_sdp || build_local_sdp(state)
-        send(self(), :notify_ice_connected)
+        schedule_ice_connected(state)
         {:reply, {:ok, to_string(local_sdp)}, %{state | remote_sdp: remote_sdp, local_sdp: local_sdp}}
 
       {:error, reason} ->
@@ -204,6 +212,12 @@ defmodule MediaServer.Mockup.Conn do
     {:reply, :ok, state}
   end
 
+  # Toggle media loopback (echo). When enabled, incoming RTP is sent back to
+  # the remote peer, mimicking the real media server echo primitive.
+  def handle_call({:set_echo, enabled}, _from, state) when is_boolean(enabled) do
+    {:reply, :ok, %{state | echo: enabled}}
+  end
+
   @impl true
   def handle_info(:notify_ice_connected, state) do
     send(state.event_sink, {:ms_event, self(), :ice_connected})
@@ -211,8 +225,22 @@ defmodule MediaServer.Mockup.Conn do
   end
 
   @impl true
-  def handle_info({:udp, _socket, ip, port, _packet}, state) do
+  def handle_info({:udp, _socket, ip, port, packet}, state) do
+    # Echo: loop every received media packet back to its sender.
+    if state.echo and state.rtp_socket do
+      Socket.Datagram.send(state.rtp_socket, packet, {ip, port})
+    end
+
     {:noreply, %{state | remote_ip: ip, remote_port: port}}
+  end
+
+  # Simulate ICE/DTLS connectivity checks taking a short, non-zero time.
+  defp schedule_ice_connected(state) do
+    if state.ice_delay_ms > 0 do
+      Process.send_after(self(), :notify_ice_connected, state.ice_delay_ms)
+    else
+      send(self(), :notify_ice_connected)
+    end
   end
 
   @impl true
@@ -227,30 +255,26 @@ defmodule MediaServer.Mockup.Conn do
   defp build_local_sdp(state) do
     {:ok, {ip, port}} = Socket.local(state.rtp_socket)
 
-    cnx =
-      case ip do
-        {_, _, _, _} ->
-          %ExSDP.ConnectionData{
-            ttl: nil, address_count: 1,
-            network_type: "IN", address: {:IP4, ip}
-          }
+    # ExSDP.Address auto-detects IP4/IP6 from the bare tuple; unicast addresses
+    # carry neither ttl nor address_count.
+    cnx = %ExSDP.ConnectionData{
+      ttl: nil,
+      address_count: nil,
+      network_type: "IN",
+      address: ip
+    }
 
-        {_, _, _, _, _, _, _, _} ->
-          %ExSDP.ConnectionData{
-            ttl: nil, address_count: 1,
-            network_type: "IN", address: {:IP6, ip}
-          }
-      end
-
+    # ExSDP.new/1 only forwards opts to the Origin; the session connection line
+    # (c=) must be set explicitly on the struct.
     sdp =
       ExSDP.new(
         version: 0,
         username: "Elixip2",
         session_id: :erlang.unique_integer([:positive, :monotonic]),
         session_version: 1,
-        address: {:IP4, ip},
-        connection_data: cnx
+        address: ip
       )
+      |> Map.put(:connection_data, cnx)
 
     Enum.reduce(state.medias, sdp, fn media, acc ->
       {bw, codecs} =
@@ -260,8 +284,8 @@ defmodule MediaServer.Mockup.Conn do
           :text -> {0, ["T140", "RED"]}
         end
 
-      build_sdp_media(media, port, bw, codecs, state.webrtc_support)
-      |> ExSDP.add_media(acc)
+      media_desc = build_sdp_media(media, port, bw, codecs, state.webrtc_support)
+      ExSDP.add_media(acc, media_desc)
     end)
   end
 
@@ -307,7 +331,7 @@ defmodule MediaServer.Mockup.Conn do
       payload_type: 99, encoding: "H264", clock_rate: 90000
     })
     |> ExSDP.add_attribute(%ExSDP.Attribute.FMTP{
-      pt: 99, profile_level_id: "42e01f", packetization_mode: "1"
+      pt: 99, profile_level_id: 0x42E01F, packetization_mode: 1
     })
     |> append_pt(99)
   end
@@ -423,10 +447,21 @@ end
 defmodule MediaServer.Mockup.Echo do
   use GenServer
 
-  defstruct [:event_sink]
+  defstruct [:conn, :event_sink]
 
   @impl true
-  def init(event_sink) do
-    {:ok, %__MODULE__{event_sink: event_sink}}
+  def init({conn, event_sink}) do
+    send(event_sink, {:ms_event, self(), :echo_started})
+    {:ok, %__MODULE__{conn: conn, event_sink: event_sink}}
+  end
+
+  @impl true
+  def terminate(_reason, state) do
+    # Disable loopback on the peer connection if it is still alive.
+    if state.conn && Process.alive?(state.conn) do
+      GenServer.call(state.conn, {:set_echo, false})
+    end
+
+    :ok
   end
 end
