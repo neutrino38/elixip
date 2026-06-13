@@ -122,14 +122,27 @@ defmodule SIP.Transport do
     require Logger
     require SIP.NetUtils
 
+    # Commonly accepted modern cipher suites (Mozilla "intermediate" profile).
+    # All provide PFS through ephemeral ECDHE key exchange; RSA-only ciphers are
+    # rejected by modern servers. ECDSA and RSA variants are both listed so the
+    # suite negotiates regardless of the server certificate type.
+    @tls_ciphers [
+      ~c"ECDHE-ECDSA-AES256-GCM-SHA384",
+      ~c"ECDHE-RSA-AES256-GCM-SHA384",
+      ~c"ECDHE-ECDSA-CHACHA20-POLY1305",
+      ~c"ECDHE-RSA-CHACHA20-POLY1305",
+      ~c"ECDHE-ECDSA-AES128-GCM-SHA256",
+      ~c"ECDHE-RSA-AES128-GCM-SHA256"
+    ]
+
     def connect(state, transport, timeout \\ 10000) do
       ssl_options = [
         cert: [path: "certs/certificate.pem"],
         key: [ path: "certs/private_key.pem" ],
         verify: false, # Désactive la vérification du certificat pour simplifier l'exemple
         versions: [:"tlsv1.2"], # Spécifie la version de TLS à utiliser
-        # ECDHE variant is required for PFS; RSA-only ciphers are rejected by modern servers
-        ciphers: [~c"ECDHE-RSA-AES256-GCM-SHA384"],
+        # Cipher suites are configurable via :elixip2/:tls_ciphers; @tls_ciphers is the default.
+        ciphers: Application.get_env(:elixip2, :tls_ciphers, @tls_ciphers),
         timeout: timeout,
         mode: :active
       ]

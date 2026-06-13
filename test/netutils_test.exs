@@ -2,6 +2,21 @@ defmodule SIP.Test.NetUtils do
   use ExUnit.Case
   doctest SIP.NetUtils
 
+   @proxy "sip.djanah.com"
+
+  # Commonly accepted modern cipher suites (Mozilla "intermediate" profile),
+  # all providing PFS via ephemeral ECDHE key exchange. Mirrors the list used
+  # by SIP.Transport.ImplHelpers.
+  @tls_ciphers [
+    ~c"ECDHE-ECDSA-AES256-GCM-SHA384",
+    ~c"ECDHE-RSA-AES256-GCM-SHA384",
+    ~c"ECDHE-ECDSA-CHACHA20-POLY1305",
+    ~c"ECDHE-RSA-CHACHA20-POLY1305",
+    ~c"ECDHE-ECDSA-AES128-GCM-SHA256",
+    ~c"ECDHE-RSA-AES128-GCM-SHA256"
+  ]
+
+
   test "Create a netmask for network such as 10.0.0.0/8" do
     netmask = SIP.NetUtils.cidr_netmask( {10,0,0,0}, 8)
     assert netmask == {255, 0, 0, 0}
@@ -122,12 +137,12 @@ defmodule SIP.Test.NetUtils do
     ssl_options = [
       verify: :verify_none,
       versions: [:"tlsv1.2"],
-      # AES256-GCM-SHA384 (Kx=RSA, no PFS) is rejected by the server;
-      # ECDHE variant uses ephemeral key exchange and is accepted.
-      ciphers: [~c"ECDHE-RSA-AES256-GCM-SHA384"]
+      # Commonly accepted ECDHE cipher suites (PFS via ephemeral key exchange).
+      # RSA-only suites such as AES256-GCM-SHA384 are rejected by the server.
+      ciphers: Application.get_env(:elixip2, :tls_ciphers, @tls_ciphers)
     ]
     #Resoudre le proxy de preprod
-    { ip, _port } =SIP.Resolver.resolve(%SIP.Uri{ domain: "sip-preprod.djanah.com", port: 5061 }, false)
+    { ip, _port } =SIP.Resolver.resolve(%SIP.Uri{ domain: @proxy, port: 5061 }, false)
 
     # Établir une connexion SSL
 
@@ -150,11 +165,11 @@ defmodule SIP.Test.NetUtils do
       key: [ path: "certs/private_key.pem" ],
       verify: false, # Désactive la vérification du certificat pour simplifier l'exemple
       versions: [:"tlsv1.2"], # Spécifie la version de TLS à utiliser
-      ciphers: [~c"ECDHE-RSA-AES256-GCM-SHA384"]
+      ciphers: Application.get_env(:elixip2, :tls_ciphers, @tls_ciphers)
     ]
 
     #Resoudre le proxy de preprod
-    { ip, _port } = SIP.Resolver.resolve(%SIP.Uri{ domain: "sip-preprod.djanah.com", port: 5061 }, false)
+    { ip, _port } = SIP.Resolver.resolve(%SIP.Uri{ domain: @proxy, port: 5061 }, false)
 
     _sock = Socket.SSL.connect!(ip, 5061, ssl_options)
   end
@@ -166,11 +181,11 @@ defmodule SIP.Test.NetUtils do
       key: [ path: "certs/private_key.pem" ],
       verify: false, # Désactive la vérification du certificat
       versions: [:"tlsv1.2"], # Spécifie la version de TLS à utiliser
-      ciphers: [~c"ECDHE-RSA-AES256-GCM-SHA384"],
+      ciphers: Application.get_env(:elixip2, :tls_ciphers, @tls_ciphers),
       protocol: ["sip"],
       secure: true
     ]
-    sock = Socket.Web.connect!("sip-preprod.djanah.com", 443,wss_options)
+    sock = Socket.Web.connect!(@proxy, 443,wss_options)
     Socket.Web.close(sock)
   end
 end
