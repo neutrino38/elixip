@@ -161,7 +161,10 @@ defmodule SIP.Transport do
           s
 
         :wss ->
-          wss_options = List.insert_at(ssl_options, 0, { :secure, true }) |> List.insert_at(0, { :protocol, ["sip"] })
+          # With the socket2 fork, mode: :active makes Socket.Web spawn a reader
+          # that delivers incoming frames as {:web, socket, data} to this process
+          # (see handle_info/2). ssl_options already carries mode: :active.
+          wss_options = Keyword.merge(ssl_options, protocol: ["sip"], secure: true)
           Socket.Web.connect!(state.destip, state.destport, wss_options)
 
         :ws  -> Socket.Web.connect!(state.destip, state.destport, [ timeout: timeout, mode: :active, protocol: ["sip"] ])
@@ -169,12 +172,28 @@ defmodule SIP.Transport do
         _ -> raise "Unsupported transport #{transport}"
       end
 
-      # Optain local IP and port
-      {local_ip, local_port} = Socket.local!(sock)
+      # Obtain local IP and port. Socket.local! has no implementation for
+      # %Socket.Web{} (WS/WSS), so reach into the underlying socket directly.
+      {local_ip, local_port} = local_address(sock)
 
       # Return the local IP and port inside the state map.
       Map.put(state, :localip, local_ip) |> Map.put(:localport, local_port) |> Map.put(:socket, sock)
     end
+
+    # Local address of a WS/WSS socket: Socket.Web wraps the transport socket,
+    # which is an :ssl socket when secure (WSS) and a :gen_tcp port otherwise (WS).
+    defp local_address(%Socket.Web{socket: ssl}) when is_tuple(ssl) and elem(ssl, 0) == :sslsocket do
+      {:ok, addr} = :ssl.sockname(ssl)
+      addr
+    end
+
+    defp local_address(%Socket.Web{socket: tcp}) do
+      port = if is_tuple(tcp), do: elem(tcp, 1), else: tcp
+      {:ok, addr} = :inet.sockname(port)
+      addr
+    end
+
+    defp local_address(sock), do: Socket.local!(sock)
 
     @doc """
     Process an incoming message inside a transport. Message must be complete.
