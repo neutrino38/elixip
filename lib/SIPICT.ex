@@ -13,6 +13,10 @@ defmodule SIP.ICT do
     t_mod = sipmsg.ruri.tp_module
     t_pid = sipmsg.ruri.tp_pid
 
+    # Fix the Contact header with the transport's local IP/port so the remote
+    # peer and proxy can route in-dialog requests back to us (RFC 3261 §8.1.1.8).
+    sipmsg = SIP.Transport.add_contact_header(t_mod, t_pid, sipmsg)
+
     initial_state = %SIP.Transac{ msg: sipmsg, tmod: t_mod, tpid: t_pid, app: app_pid, timeout: ring_timeout,
                        t_isreliable: apply(t_mod, :is_reliable, []), destip: sipmsg.ruri.destip,
                        destport: sipmsg.ruri.destport, state: :sending }

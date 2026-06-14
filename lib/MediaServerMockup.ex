@@ -252,8 +252,21 @@ defmodule MediaServer.Mockup.Conn do
 
   # ── SDP helpers ───────────────────────────────────────────────────────────
 
+  # Pick the first routable local IPv4, falling back to loopback when the host
+  # has no non-loopback interface (e.g. isolated CI environments).
+  defp local_media_ip do
+    case SIP.NetUtils.get_local_ips([:ipv4]) do
+      [ip | _] -> ip
+      _ -> {127, 0, 0, 1}
+    end
+  end
+
   defp build_local_sdp(state) do
-    {:ok, {ip, port}} = Socket.local(state.rtp_socket)
+    # The RTP socket is bound to the wildcard address (0.0.0.0), so its local
+    # address is not routable. Advertise the real local IPv4 in the SDP so the
+    # remote peer can reach our media, while keeping the socket's ephemeral port.
+    {:ok, {_bound_ip, port}} = Socket.local(state.rtp_socket)
+    ip = local_media_ip()
 
     # ExSDP.Address auto-detects IP4/IP6 from the bare tuple; unicast addresses
     # carry neither ttl nor address_count.
