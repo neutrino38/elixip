@@ -64,6 +64,18 @@ defmodule SIP.Test.Call2 do
     end
   end
 
+  # Wait for an in-dialog MESSAGE forwarded by the dialog layer and answer it
+  # with a 200 OK. Returns the received request message.
+  defp answer_message(timeout) do
+    receive do
+      {:MESSAGE, req, _trans_pid, dialog_pid} ->
+        :ok = SIP.Dialog.reply(dialog_pid, req, 200, "OK", [])
+        {:ok, req}
+    after
+      timeout -> {:error, :timeout}
+    end
+  end
+
   @tag :live
   @tag timeout: 60_000
   test "echo call" do
@@ -117,6 +129,11 @@ defmodule SIP.Test.Call2 do
 
     # ── Wait until ICE connectivity is established ────────────────────────────
     assert_receive {:ms_event, ^conn, :ice_connected}, 5_000
+
+    # ── Acknowledge the in-dialog MESSAGE sent by the echo service ────────────
+    # The media server greets us with a SIP MESSAGE ("Welcome to the echo
+    # test"); answer it with a 200 OK within the dialog.
+    assert {:ok, _message} = answer_message(5_000)
 
     # ── Run an echo (media loopback) for 20 seconds ───────────────────────────
     {:ok, echo} = MediaServer.Mockup.create_echo(conn)
