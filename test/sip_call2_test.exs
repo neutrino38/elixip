@@ -126,19 +126,17 @@ defmodule SIP.Test.Call2 do
     answer = extract_sdp(ok_rsp)
     assert is_binary(answer)
     :ok = MediaServer.Mockup.set_remote_answer(conn, answer)
-
     # ── Wait until ICE connectivity is established ────────────────────────────
     assert_receive {:ms_event, ^conn, :ice_connected}, 5_000
 
-    # ── Acknowledge the in-dialog MESSAGE sent by the echo service ────────────
-    # The media server greets us with a SIP MESSAGE ("Welcome to the echo
-    # test"); answer it with a 200 OK within the dialog.
-    assert {:ok, _message} = answer_message(5_000)
-
-    # ── Run an echo (media loopback) for 20 seconds ───────────────────────────
+        # ── Run an echo (media loopback) for 20 seconds ───────────────────────────
     {:ok, echo} = MediaServer.Mockup.create_echo(conn)
     assert is_pid(echo)
     assert_receive {:ms_event, ^echo, :echo_started}, 1_000
+
+    # ── Acknowledge the in-dialog MESSAGE sent by the echo service ────────────
+    answer_message(5_000)
+
 
     Process.sleep(20_000)
 
