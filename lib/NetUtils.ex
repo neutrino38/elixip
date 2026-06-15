@@ -162,7 +162,7 @@ defmodule SIP.NetUtils do
         end
 
       { :addr, { a, b, c, d, e, f, g, h } } ->
-        if :ipv6 in filters and :loopback in filters do
+        if :ipv6 in filters do
           [ { a, b, c, d, e, f, g, h } | iplist ]
         else
           iplist

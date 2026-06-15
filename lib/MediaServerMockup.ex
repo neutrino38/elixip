@@ -116,6 +116,7 @@ end
 defmodule MediaServer.Mockup.Conn do
   use GenServer
   require Logger
+  import Bitwise, only: [band: 2]
 
   # Default simulated delay (ms) between remote SDP negotiation and the
   # :ice_connected event, mimicking ICE/DTLS connectivity checks.
@@ -252,14 +253,30 @@ defmodule MediaServer.Mockup.Conn do
 
   # ── SDP helpers ───────────────────────────────────────────────────────────
 
-  # Pick the first routable local IPv4, falling back to loopback when the host
-  # has no non-loopback interface (e.g. isolated CI environments).
+  # Pick the first routable local address: prefer IPv4, fall back to IPv6 when
+  # the host has no IPv4 interface, and finally loopback when neither exists
+  # (e.g. isolated CI environments).
   defp local_media_ip do
     case SIP.NetUtils.get_local_ips([:ipv4]) do
-      [ip | _] -> ip
-      _ -> {127, 0, 0, 1}
+      [ip | _] ->
+        ip
+
+      _ ->
+        # Skip link-local IPv6 (fe80::/10): it is not routable without a zone
+        # id and useless to advertise in SDP. Prefer a global address.
+        ipv6 = SIP.NetUtils.get_local_ips([:ipv6])
+
+        case Enum.find(ipv6, &(not link_local_ipv6?(&1))) || List.first(ipv6) do
+          nil -> {127, 0, 0, 1}
+          ip -> ip
+        end
     end
   end
+
+  # fe80::/10 — the top 10 bits are 1111 1110 10, i.e. first group masked with
+  # 0xffc0 equals 0xfe80.
+  defp link_local_ipv6?({g1, _, _, _, _, _, _, _}), do: band(g1, 0xFFC0) == 0xFE80
+  defp link_local_ipv6?(_), do: false
 
   defp build_local_sdp(state) do
     # The RTP socket is bound to the wildcard address (0.0.0.0), so its local
