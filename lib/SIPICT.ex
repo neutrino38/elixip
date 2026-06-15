@@ -15,7 +15,15 @@ defmodule SIP.ICT do
 
     # Fix the Contact header with the transport's local IP/port so the remote
     # peer and proxy can route in-dialog requests back to us (RFC 3261 §8.1.1.8).
-    sipmsg = SIP.Transport.add_contact_header(t_mod, t_pid, sipmsg)
+    # Only do so when the Contact still carries the placeholder address
+    # (0.0.0.0); a Contact already pointing somewhere is left untouched so that
+    # SIP.ICT can also be used to forward messages verbatim.
+    sipmsg =
+      if contact_needs_fixup?(sipmsg) do
+        SIP.Transport.add_contact_header(t_mod, t_pid, sipmsg)
+      else
+        sipmsg
+      end
 
     initial_state = %SIP.Transac{ msg: sipmsg, tmod: t_mod, tpid: t_pid, app: app_pid, timeout: ring_timeout,
                        t_isreliable: apply(t_mod, :is_reliable, []), destip: sipmsg.ruri.destip,
@@ -41,6 +49,18 @@ defmodule SIP.ICT do
           Logger.error([ transid: sipmsg.transid, module: __MODULE__,
           message: "Transport error. Fail to send SIP request  #{code}"])
           { :stop, "Fail to send SIP request" }
+    end
+  end
+
+  # True when the Contact is missing (nil) or carries the placeholder address
+  # (0.0.0.0) that the session layer inserts and expects the transport to
+  # overwrite with the real local IP/port. Any other Contact (e.g. when
+  # forwarding) is preserved.
+  defp contact_needs_fixup?(sipmsg) do
+    case Map.get(sipmsg, :contact) do
+      nil -> true
+      %SIP.Uri{domain: "0.0.0.0"} -> true
+      _ -> false
     end
   end
 
