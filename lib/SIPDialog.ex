@@ -106,7 +106,16 @@ alias SIP.Transac
   @spec process_incoming_request(map(), pid(), boolean()) :: {:error, any()} | {:ok, pid()} | atom() | { any, any }
   def process_incoming_request(req, transact_id, debug) when is_req(req) do
     { req2, dialog_id } = get_or_create_dialog_id(req)
-    case Registry.lookup(Registry.SIPDialog, dialog_id) do
+
+    # A request received in-dialog carries the tags in the opposite order to how
+    # a dialog we initiated (UAC) is registered: its To-tag is our local tag and
+    # its From-tag is the remote tag. Look the dialog up with both orderings
+    # before concluding that there is no matching dialog (RFC 3261 §12.2.2).
+    matches =
+      Registry.lookup(Registry.SIPDialog, dialog_id) ++
+        Registry.lookup(Registry.SIPDialog, swap_dialog_id(dialog_id))
+
+    case matches do
       # No such dialog - create it if the request
       [] ->
         case req.method do
@@ -158,14 +167,15 @@ alias SIP.Transac
       # We do not use dispatch because we have already looked up the transaction list
       # Note that lookup() should always return a single transaction here
 
-      [ { dialog_pid, _value } ] ->
+      [ { dialog_pid, _value } | _ ] ->
         GenServer.cast(dialog_pid, {:sipmsg, req2, transact_id})
         { :ok, dialog_pid, dialog_id }
-
-      _ ->
-        raise "Inconsitent dialog list: serveral dialogs associated with #{ IO.inspect(dialog_id)}"
     end
   end
+
+  # Swap the from/to tags of a dialog id. Used to match an in-dialog request
+  # received on a dialog we initiated, where the tag roles are reversed.
+  defp swap_dialog_id({ fromtag, callid, totag }), do: { totag, callid, fromtag }
 
   @doc "Reply to an in dialog request"
   def reply(dialog_id, req, resp_code, reason, upd_fields) when is_pid(dialog_id) and is_req(req) do

@@ -11,7 +11,8 @@ Use the API provided by SIP.Dialog module
   defstruct [
     msg: nil, # SIP message that created this dialog
     allows: [],
-    routeset: [],
+    routeset: [], # Route set (Record-Route of the dialog-establishing response)
+    remotetarget: nil, # Remote target URI (Contact of the dialog-establishing response)
     direction: :outbound, # outbound means that dialog was created by an outbound request.
     curtrans: nil,  # Current transaction
     transactions: [],
@@ -80,8 +81,18 @@ Use the API provided by SIP.Dialog module
              |> Map.put( :callid, state.callid )
              |> set_tag(:from, state.fromtag)
 
+    # In-dialog requests (everything but the very first one and OPTIONS
+    # keepalives) must be addressed to the remote party: the To URI of the
+    # original request plus the remote tag, sent to the remote target through
+    # the dialog route set (RFC 3261 §12.2.1.1). Before a dialog-establishing
+    # response arrives, the remote tag/target/route set are still unknown, so a
+    # request sent then (e.g. an INVITE resubmitted after a 401/407 challenge)
+    # goes out unchanged.
     newreq = if not is_initial and not (req.method in [ :OPTIONS ]) do
-      set_tag(newreq, :to, state.totag)
+      newreq
+      |> route_to_remote_target(state)
+      |> add_route_set(state)
+      |> set_remote_totag(state)
     else
       newreq
     end
@@ -91,6 +102,26 @@ Use the API provided by SIP.Dialog module
     newstate = %SIP.DialogImpl{ state | cseq: state.cseq + 1, msg: msg }
     { newstate, newreq }
   end
+
+  # Address the request to the remote party: To URI from the original request
+  # and request URI set to the remote target learned from the establishing
+  # response. Falls back to the request's own values when nothing is known yet.
+  defp route_to_remote_target(req, state) do
+    to_uri = if state.msg, do: state.msg.to, else: req.to
+    ruri = state.remotetarget || req.ruri
+    %{ req | to: to_uri, ruri: ruri }
+  end
+
+  # Add the dialog route set (single Record-Route is stored verbatim).
+  defp add_route_set(req, %SIP.DialogImpl{routeset: rs}) when is_binary(rs) and rs != "" do
+    Map.put(req, :route, rs)
+  end
+  defp add_route_set(req, _state), do: req
+
+  defp set_remote_totag(req, %SIP.DialogImpl{totag: totag}) when is_binary(totag) do
+    set_tag(req, :to, totag)
+  end
+  defp set_remote_totag(req, _state), do: req
 
   def send_in_dialog_request(state = %SIP.DialogImpl{}, req) do
     if req.method in state.allows do
@@ -354,7 +385,7 @@ Use the API provided by SIP.Dialog module
     { :reply, rc, state }
   end
 
-  def handle_call({:cancel, transact_pid}, state ) do
+  def handle_call({:cancel, transact_pid}, _from, state ) do
     if transact_pid in state.transactions do
       reply = SIP.Transac.cancel_uac_transaction(transact_pid)
       { :reply, reply, state }
@@ -363,10 +394,12 @@ Use the API provided by SIP.Dialog module
     end
   end
 
-    def handle_call({:ack, transact_pid}, state ) do
+  def handle_call({:ack, transact_pid}, _from, state ) do
     if transact_pid in state.transactions do
       reply = SIP.Transac.ack_uac_transaction(transact_pid)
-      { :reply, reply, state }
+      # The INVITE client transaction is done once it has been ACKed; drop it
+      # from the dialog so later in-dialog requests (BYE, re-INVITE…) start fresh.
+      { :reply, reply, close_transaction(state, transact_pid) }
     else
       { :reply, :nosuchtransaction, state }
     end
@@ -463,7 +496,13 @@ Use the API provided by SIP.Dialog module
   defp handle_UAS_response(state, rsp, _transact_pid) when state.state in [ :initial, :uac_challenged ] and rsp.response in 200..202 do
     Logger.debug(dialogpid: "#{inspect(self())}", module: __MODULE__,
                  message: "Outbound dialog established")
-    %{state | state: :established }
+    # Learn the remote target (Contact) and route set (Record-Route) so that
+    # subsequent in-dialog requests (BYE, re-INVITE…) can be routed correctly.
+    %{state |
+      state: :established,
+      remotetarget: rsp.contact,
+      routeset: Map.get(rsp, :recordroute)
+    }
   end
 
   defp handle_UAS_response(state, rsp, _transact_pid) when state.state == :initial and rsp.response in 300..399 do
@@ -517,10 +556,31 @@ Use the API provided by SIP.Dialog module
       { _rc, totag } = SIP.Uri.get_uri_param(rsp.to, "tag")
 
       send(state.app, { rsp.response, rsp, transact_pid, self() })
-      state = add_totag(state, totag)
+
+      # Only dialog-establishing responses set the dialog's remote tag:
+      # provisional (1xx with a to-tag) for early dialogs and 2xx for confirmed
+      # ones. Non-2xx final responses — notably 401/407 auth challenges — do not
+      # create a dialog (RFC 3261 §12.1), so their To-tag must be ignored.
+      # Otherwise the re-sent authenticated request would carry a bogus to-tag
+      # and be rejected by the proxy as an orphan in-dialog request.
+      state =
+        if rsp.response < 300 do
+          add_totag(state, totag)
+        else
+          state
+        end
 
       if rsp.response >= 200 do
-        handle_UAS_response(state, rsp, transact_pid) |> close_transaction(transact_pid)
+        new_state = handle_UAS_response(state, rsp, transact_pid)
+
+        # Keep an INVITE client transaction alive after a 2xx so the application
+        # can still ACK it (RFC 3261 §13.2.2.4); it is removed once the ACK is
+        # sent. Every other final response terminates the transaction now.
+        if rsp.response < 300 and match?([_, :INVITE], rsp.cseq) do
+          new_state
+        else
+          close_transaction(new_state, transact_pid)
+        end
       else
         # Provisional responses.
         state
