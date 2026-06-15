@@ -206,10 +206,16 @@ defmodule SIP.Transport do
 
         { :no_matching_transaction, parsed_msg } ->
           if is_atom(parsed_msg.method) do
-            # We need to start a new transaction
+            # We need to start a new transaction. Use the transport's own local
+            # IP/port (resolved at setup) rather than the socket's bound address,
+            # which is the 0.0.0.0 wildcard for UDP. Socket.local/1 also returns
+            # {:ok, {ip, port}}, so it cannot be destructured into {ip, port}.
             { local_ip, local_port } = case socket do
               { ip, port } -> { ip, port }
-              _ -> Socket.local(socket)
+              _ -> case Socket.local(socket) do
+                      { :ok, {{0,0,0,0}, _port} } -> { state.localip, state.localport }
+                      { :ok, {ip, port}} -> { ip, port }
+                   end
             end
             ruri_with_tp_info = %SIP.Uri{ parsed_msg.ruri | destip: destip, destport: destport,
                                           tp_module: tp_mod, tp_pid: self() }
