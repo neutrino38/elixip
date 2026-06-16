@@ -108,7 +108,8 @@ defmodule SIP.Test.Call2 do
     assert_receive {:ms_event, ^conn, :ice_connected}, 5_000
 
         # ── Run an echo (media loopback) for 20 seconds ───────────────────────────
-    {:ok, echo} = MediaServer.Mockup.create_echo(conn)
+    media_start_echo()
+    echo = SIP.Context.appdata_get(sip_ctx, :mediaactionid)
     assert is_pid(echo)
     assert_receive {:ms_event, ^echo, :echo_started}, 1_000
 
@@ -118,7 +119,7 @@ defmodule SIP.Test.Call2 do
 
     Process.sleep(20_000)
 
-    :ok = MediaServer.Mockup.stop_echo(echo)
+    media_stop()
 
     # ── Hang up: send BYE and wait for its 200 OK ─────────────────────────────
     send_BYE()
