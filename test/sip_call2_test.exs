@@ -2,6 +2,7 @@ defmodule SIP.Test.Call2 do
   use ExUnit.Case
   require SIP.Dialog
   use SIP.Session.CallUAC
+  use SIP.Session.Media
 
   alias SIP.Session.CallUAC
 
@@ -44,26 +45,6 @@ defmodule SIP.Test.Call2 do
     end
   end
 
-  # Extract the SDP answer payload from a response message.
-  defp extract_sdp(rsp) do
-    case Map.get(rsp, :body) do
-      body when is_binary(body) ->
-        body
-
-      [%{data: data} | _] ->
-        data
-
-      list when is_list(list) ->
-        case Enum.find(list, fn part -> to_string(part[:contenttype]) =~ "sdp" end) do
-          %{data: data} -> data
-          _ -> nil
-        end
-
-      _ ->
-        nil
-    end
-  end
-
   # Wait for an in-dialog MESSAGE forwarded by the dialog layer and answer it
   # with a 200 OK. Returns the received request message.
   defp answer_message(timeout) do
@@ -89,23 +70,16 @@ defmodule SIP.Test.Call2 do
     ctx_set(:passwd, @passwd)
 
     # ── Set up the media server (mockup) and build a local SDP offer ──────────
-    {:ok, server} = MediaServer.Mockup.connect({"localhost", 8080})
-    assert is_pid(server)
-
-    {:ok, conn} = MediaServer.Mockup.create_peer_connection(server, self(), webrtc_support: :no)
-    assert is_pid(conn)
-
-    {:ok, offer} = MediaServer.Mockup.get_local_offer(conn)
-    assert is_binary(offer)
+    media_connect(MediaServer.Mockup, "sip:localhost:8080")
 
     # ── Place the call: INVITE, then re-INVITE with proxy authentication ──────
-    send_INVITE(@callee, offer, 90)
+    send_INVITE(@callee, :mediaserver, [timeout: 90, webrtc: :no])
     assert ctx_get(:lasterr) == :ok
 
     sip_ctx =
       receive do
         {407, rsp, _trans_pid, _dialog_pid} ->
-          send_auth_INVITE(rsp, @callee, offer, 90)
+          send_auth_INVITE(rsp, @callee, :mediaserver, [timeout: 90])
           sip_ctx
 
         {code, _rsp, _trans_pid, _dialog_pid} when is_integer(code) ->
@@ -116,16 +90,20 @@ defmodule SIP.Test.Call2 do
 
     assert ctx_get(:lasterr) == :ok
 
+    # The media server handle and the peer connection were set up by the
+    # INVITE flow (media_connect + get_sdp_offer). Retrieve them from the context.
+    server = ctx_get(:mediaserverpid)
+    conn = ctx_get(:mediapeerconnectionid)
+    assert is_pid(server)
+    assert is_pid(conn)
+
     # ── Wait for the call to be answered (200 OK) ─────────────────────────────
     {:ok, ok_rsp, ok_trans} = wait_for_200(25_000)
+    process_invite_reply(ok_rsp)
 
     # Acknowledge the 200 OK to confirm the dialog.
     CallUAC.ack(sip_ctx, ok_trans)
 
-    # Feed the remote SDP answer to the media server; this starts ICE checks.
-    answer = extract_sdp(ok_rsp)
-    assert is_binary(answer)
-    :ok = MediaServer.Mockup.set_remote_answer(conn, answer)
     # ── Wait until ICE connectivity is established ────────────────────────────
     assert_receive {:ms_event, ^conn, :ice_connected}, 5_000
 
