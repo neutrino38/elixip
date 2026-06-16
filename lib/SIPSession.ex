@@ -27,24 +27,52 @@ defmodule SIP.Session do
   """
   require Logger
 
+  # Methods sent as standalone (out-of-dialog) transactions: keep-alive (OPTIONS),
+  # registration (REGISTER) and presence (PUBLISH/SUBSCRIBE/MESSAGE). For these it
+  # is safe to (re)start a fresh dialog when the previous one has terminated.
+  # INVITE call dialogs (whose lifetime ends on BYE) are deliberately excluded:
+  # in-dialog requests (BYE, ACK, re-INVITE, …) on a dead call dialog must NOT
+  # silently recreate it — they return a clean error instead.
+  @standalone_methods [:OPTIONS, :REGISTER, :PUBLISH, :SUBSCRIBE, :MESSAGE, :NOTIFY, :INFO]
+
     @doc"""
     Send an outbound SIP request and create the dialog if needed
     Update the session sip_ctx accordingly
     """
   def send_sip_request(sip_ctx = %SIP.Context{}, req, timeout) do
-    if not is_pid(sip_ctx.dialogpid) do
-      case SIP.Dialog.start_dialog(req, timeout, :outbound, sip_ctx.debug) do
-        { :ok, dialog_pid, _dialog_id } ->
-          # Dialog created, update context and clear last error
-          SIP.Context.set(sip_ctx, :dialogpid, dialog_pid) |> SIP.Context.set(:lasterr, :ok)
+    dialog_alive = is_pid(sip_ctx.dialogpid) and Process.alive?(sip_ctx.dialogpid)
 
-        { :error, err} ->
-          SIP.Context.set(sip_ctx, :lasterr, err)
-      end
-    else
-      # Send an in dialog request
-      rc = SIP.Dialog.new_request(sip_ctx.dialogpid, req)
-      SIP.Context.set(sip_ctx, :lasterr, rc)
+    cond do
+      dialog_alive ->
+        # Send an in dialog request. Guard against the dialog terminating between
+        # the liveness check above and the call (returns a clean error, no crash).
+        rc =
+          try do
+            SIP.Dialog.new_request(sip_ctx.dialogpid, req)
+          catch
+            :exit, _reason -> { :error, :dialogterminated }
+          end
+        SIP.Context.set(sip_ctx, :lasterr, rc)
+
+      is_nil(sip_ctx.dialogpid) or req.method in @standalone_methods ->
+        # No dialog yet (first request, e.g. the initial INVITE), or a standalone
+        # method whose previous dialog has terminated (e.g. OPTIONS keep-alive):
+        # start a fresh dialog / transaction.
+        case SIP.Dialog.start_dialog(req, timeout, :outbound, sip_ctx.debug) do
+          { :ok, dialog_pid, _dialog_id } ->
+            # Dialog created, update context and clear last error
+            SIP.Context.set(sip_ctx, :dialogpid, dialog_pid) |> SIP.Context.set(:lasterr, :ok)
+
+          { :error, err} ->
+            SIP.Context.set(sip_ctx, :lasterr, err)
+        end
+
+      true ->
+        # The dialog (e.g. an INVITE call dialog ended by BYE) has terminated and
+        # this is an in-dialog request: do not implicitly recreate it.
+        Logger.warning([module: __MODULE__,
+          message: "Dialog #{inspect(sip_ctx.dialogpid)} terminated; dropping in-dialog #{req.method} request"])
+        SIP.Context.set(sip_ctx, :lasterr, { :error, :dialogterminated })
     end
   end
 
