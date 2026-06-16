@@ -10,6 +10,13 @@ defmodule SIP.Test.Transact do
     # Initialize transaction and transport layers
     :ok = SIP.Transac.start()
     :ok = SIP.Transport.Selector.start()
+
+    # These tests resolve the request URI directly and assume no SIP proxy is
+    # configured (resolve_and_add_dest derives the transport from :proxyuri when
+    # set). Other test modules leave :proxyuri/:proxyusesrv in the global app env,
+    # so reset them here to keep this module self-contained regardless of run order.
+    Application.delete_env(:elixip2, :proxyuri)
+    Application.delete_env(:elixip2, :proxyusesrv)
     :ok
   end
 
