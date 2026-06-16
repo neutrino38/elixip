@@ -397,7 +397,7 @@ end
 defmodule MediaServer.Mockup.Player do
   use GenServer
 
-  defstruct [:event_sink, :file_path, loop: false, status: :idle]
+  defstruct [:event_sink, :file_path, loop: false, status: :idle, duration_ms: 15_000]
 
   @impl true
   def init({event_sink, file_path, opts}) do
@@ -405,14 +405,17 @@ defmodule MediaServer.Mockup.Player do
      %__MODULE__{
        event_sink: event_sink,
        file_path: file_path,
-       loop: Keyword.get(opts, :loop, false)
+       loop: Keyword.get(opts, :loop, false),
+       # Simulated playback duration before :player_ended is emitted (default 15 s,
+       # overridable via the create_player opts for faster unit tests).
+       duration_ms: Keyword.get(opts, :duration_ms, 15_000)
      }}
   end
 
   @impl true
   def handle_call(:start, _from, state) do
     send(state.event_sink, {:ms_event, self(), :player_started})
-    unless state.loop, do: Process.send_after(self(), :end_of_file, 100)
+    unless state.loop, do: Process.send_after(self(), :end_of_file, state.duration_ms)
     {:reply, :ok, %{state | status: :playing}}
   end
 

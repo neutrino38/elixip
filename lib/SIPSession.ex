@@ -293,6 +293,12 @@ defmodule SIP.Session do
           end
         end
 
+        defmacro media_play(file_path, opts \\ []) do
+          quote do
+            var!(sip_ctx) = SIP.Session.Media.start_player(var!(sip_ctx), unquote(file_path), unquote(opts))
+          end
+        end
+
         defmacro media_stop() do
           quote do
             var!(sip_ctx) = SIP.Session.Media.stop_media(var!(sip_ctx))
@@ -390,6 +396,37 @@ defmodule SIP.Session do
       end
     end
 
+    @doc """
+    Create a media player from `file_path` on the session peer connection and
+    start it, mirroring `start_echo/1`. The player handle becomes the current
+    media action (`:mediaactionid` / `:mediaaction = :player`) and is released by
+    `stop_media/1` and `media_cleanup_ressources/1`. `opts` is forwarded to the
+    media server `create_player/3` callback (e.g. `loop: true`).
+    """
+    @spec start_player(%SIP.Context{}, binary(), keyword()) :: %SIP.Context{}
+    def start_player(sip_ctx = %SIP.Context{}, file_path, opts \\ [])
+        when is_binary(file_path) and is_list(opts) do
+      if not is_pid(sip_ctx.mediaserverpid) do
+        raise "No media server connected to the session context"
+      end
+
+      cnx = SIP.Context.appdata_get(sip_ctx, :mediapeerconnectionid)
+      if is_nil(cnx) do
+        raise "No media peer connection found in the session context"
+      end
+
+      if not is_nil(SIP.Context.appdata_get(sip_ctx, :mediaactionid)) do
+        Logger.warning([dialogpid: self(), module: __MODULE__,
+                     message: "Media action already started, ignoring start_player request"])
+        sip_ctx
+      else
+        {:ok, player_pid} = apply(sip_ctx.mediaservermodule, :create_player, [cnx, file_path, opts])
+        :ok = apply(sip_ctx.mediaservermodule, :start_player, [player_pid])
+        SIP.Context.appdata_set(sip_ctx, :mediaactionid, player_pid)
+        |> SIP.Context.appdata_set(:mediaaction, :player)
+      end
+    end
+
     def stop_media(sip_ctx = %SIP.Context{}) do
       if not is_pid(sip_ctx.mediaserverpid) do
         raise "No media server connected to the session context"
@@ -399,6 +436,7 @@ defmodule SIP.Session do
       if not is_nil(action_pid) do
         case SIP.Context.appdata_get(sip_ctx, :mediaaction) do
           :echo -> apply(sip_ctx.mediaservermodule, :stop_echo, [action_pid])
+          :player -> apply(sip_ctx.mediaservermodule, :stop_player, [action_pid])
           _ -> Logger.warning([dialogpid: self(), module: __MODULE__,
                      message: "Unknown media action #{inspect(SIP.Context.appdata_get(sip_ctx, :mediaaction))}, ignoring stop_media request"])
         end
@@ -435,6 +473,7 @@ defmodule SIP.Session do
       else
         case SIP.Context.appdata_get(sip_ctx, :mediaaction) do
           :echo -> safe_ms_call(sip_ctx.mediaservermodule, :stop_echo, [action_pid])
+          :player -> safe_ms_call(sip_ctx.mediaservermodule, :stop_player, [action_pid])
           other ->
             Logger.warning([dialogpid: self(), module: __MODULE__,
               message: "Cannot release unknown media action #{inspect(other)}"])

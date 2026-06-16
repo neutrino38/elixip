@@ -57,6 +57,24 @@ defmodule SIP.Test.Call2 do
     end
   end
 
+  # Wait for the player end-of-file event, answering any in-dialog MESSAGE that
+  # arrives meanwhile (and ignoring other traffic) so the dialog stays healthy.
+  defp wait_for_player_ended(player, timeout) do
+    receive do
+      {:ms_event, ^player, :player_ended} ->
+        :ok
+
+      {:MESSAGE, req, _trans_pid, dialog_pid} ->
+        SIP.Dialog.reply(dialog_pid, req, 200, "OK", [])
+        wait_for_player_ended(player, timeout)
+
+      _other ->
+        wait_for_player_ended(player, timeout)
+    after
+      timeout -> {:error, :timeout}
+    end
+  end
+
   @tag :live
   @tag timeout: 60_000
   test "echo call" do
@@ -134,6 +152,75 @@ defmodule SIP.Test.Call2 do
     media_cleanup_ressources()
 
     # Everything has been torn down and cleared from the context.
+    refute Process.alive?(conn)
+    refute Process.alive?(server)
+    assert ctx_get(:mediaserverpid) == nil
+    assert SIP.Context.appdata_get(sip_ctx, :mediapeerconnectionid) == nil
+  end
+
+  @tag :live
+  @tag timeout: 60_000
+  test "play" do
+    sip_ctx = %SIP.Context{
+      username: @username,
+      authusername: @authusername,
+      displayname: @displayname,
+      domain: @domain
+    }
+
+    ctx_set(:passwd, @passwd)
+
+    # ── Set up the media server (mockup) and build a local SDP offer ──────────
+    media_connect(MediaServer.Mockup, "sip:localhost:8080")
+
+    # ── Place the call: INVITE, then re-INVITE with proxy authentication ──────
+    send_INVITE(@callee, :mediaserver, [timeout: 90, webrtc: :no])
+    assert ctx_get(:lasterr) == :ok
+
+    sip_ctx =
+      receive do
+        {407, rsp, _trans_pid, _dialog_pid} ->
+          send_auth_INVITE(rsp, @callee, :mediaserver, [timeout: 90])
+          sip_ctx
+
+        {code, _rsp, _trans_pid, _dialog_pid} when is_integer(code) ->
+          flunk("Expected a 407 challenge, got #{code}")
+      after
+        5_000 -> flunk("No 407 challenge received")
+      end
+
+    assert ctx_get(:lasterr) == :ok
+
+    server = ctx_get(:mediaserverpid)
+    conn = ctx_get(:mediapeerconnectionid)
+    assert is_pid(server)
+    assert is_pid(conn)
+
+    # ── Wait for the call to be answered (200 OK) ─────────────────────────────
+    {:ok, ok_rsp, ok_trans} = wait_for_200(25_000)
+    process_invite_reply(ok_rsp)
+    CallUAC.ack(sip_ctx, ok_trans)
+
+    # ── Wait until ICE connectivity is established ────────────────────────────
+    assert_receive {:ms_event, ^conn, :ice_connected}, 5_000
+
+    # ── Play a (fictitious) media file; the mockup plays it for 15 s ──────────
+    media_play("toto.mp4")
+    player = SIP.Context.appdata_get(sip_ctx, :mediaactionid)
+    assert is_pid(player)
+    assert_receive {:ms_event, ^player, :player_started}, 1_000
+
+    # ── Hang up at end of file ────────────────────────────────────────────────
+    assert wait_for_player_ended(player, 20_000) == :ok
+
+    send_BYE()
+    assert ctx_get(:lasterr) == :ok
+    assert_receive {200, _bye_rsp, _trans_pid, _dialog_pid}, 5_000
+
+    # ── Media resources are released automatically on call end ────────────────
+    assert_receive {:dialog_terminated, _dialog_pid, _reason}, 5_000
+    media_cleanup_ressources()
+
     refute Process.alive?(conn)
     refute Process.alive?(server)
     assert ctx_get(:mediaserverpid) == nil
