@@ -17,7 +17,8 @@ defmodule SIP.Context do
     debug: false,
     dialogpid: nil,
     lasterr: :ok,
-    mediapid: nil,
+    mediaservermodule: nil,
+    mediaserverpid: nil,
     appdata: %{}
   ]
 
@@ -74,8 +75,23 @@ defmodule SIP.Context do
     Map.get(context, prop)
   end
 
+  # Media server handles are stored as top-level struct fields, not in appdata.
+  def get(context, prop) when prop in [:mediaservermodule, :mediaserverpid] do
+    Map.get(context, prop)
+  end
+
   def get(context, prop) when is_atom(prop) do
     Map.get(context.appdata, prop)
+  end
+
+  @doc "Read an application-defined value stored in the context appdata map."
+  def appdata_get(context = %SIP.Context{}, prop) do
+    Map.get(context.appdata, prop)
+  end
+
+  @doc "Store an application-defined value in the context appdata map."
+  def appdata_set(context = %SIP.Context{}, prop, value) do
+    Map.put(context, :appdata, Map.put(context.appdata, prop, value))
   end
 
   @spec set(map(), list()) :: list()
@@ -112,11 +128,19 @@ defmodule SIP.Context do
   end
 
   # Set the media PID
-  def set(context, :mediapid, value) do
+  def set(context, :mediaserverpid, value) do
     if is_pid(value) do
-      Map.put(context, :mediapid, value)
+      Map.put(context, :mediaserverpid, value)
     else
-      raise "media PID must me a process ID"
+      raise "mediaserver PID must me a process ID"
+    end
+  end
+
+  def set(context, :mediaservermodule, value) do
+    if is_atom(value) and Code.ensure_loaded?(value) do
+      Map.put(context, :mediaservermodule, value)
+    else
+      raise "mediaserver module must be a module"
     end
   end
 
