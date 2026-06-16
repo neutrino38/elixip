@@ -342,6 +342,20 @@ Use the API provided by SIP.Dialog module
     end
   end
 
+  @impl true
+  @doc """
+  Invoked when the dialog GenServer stops (end of call: BYE in either direction,
+  timeout, or failure). Notifies the bound application process so it can release
+  resources tied to the call lifetime (e.g. media). The dialog pid passed in the
+  message is `self()` here, i.e. the same pid the app knows as its dialog.
+  """
+  def terminate(reason, state) do
+    if is_pid(state.app) do
+      send(state.app, { :dialog_terminated, self(), reason })
+    end
+    :ok
+  end
+
   defp close_transaction(state, uas_t) do
     %SIP.DialogImpl{ state | transactions: List.delete(state.transactions, uas_t)}
   end

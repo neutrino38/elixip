@@ -126,8 +126,17 @@ defmodule SIP.Test.Call2 do
     assert ctx_get(:lasterr) == :ok
     assert_receive {200, _bye_rsp, _trans_pid, _dialog_pid}, 5_000
 
-    # ── Tear down the media server resources ──────────────────────────────────
-    :ok = MediaServer.Mockup.close_peer_connection(conn)
-    :ok = MediaServer.Mockup.disconnect(server, [])
+    # ── Media resources are released automatically on call end ────────────────
+    # The dialog layer notifies us when it terminates (after the BYE); we then
+    # release every media resource through a single context-driven entry point,
+    # instead of calling close_peer_connection/disconnect explicitly.
+    assert_receive {:dialog_terminated, _dialog_pid, _reason}, 5_000
+    media_cleanup_ressources()
+
+    # Everything has been torn down and cleared from the context.
+    refute Process.alive?(conn)
+    refute Process.alive?(server)
+    assert ctx_get(:mediaserverpid) == nil
+    assert SIP.Context.appdata_get(sip_ctx, :mediapeerconnectionid) == nil
   end
 end

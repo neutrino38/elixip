@@ -298,6 +298,12 @@ defmodule SIP.Session do
             var!(sip_ctx) = SIP.Session.Media.stop_media(var!(sip_ctx))
           end
         end
+
+        defmacro media_cleanup_ressources() do
+          quote do
+            var!(sip_ctx) = SIP.Session.Media.media_cleanup_ressources(var!(sip_ctx))
+          end
+        end
       end
     end
 
@@ -401,6 +407,76 @@ defmodule SIP.Session do
         Logger.warning([dialogpid: self(), module: __MODULE__,
                      message: "No media action started, ignoring stop_media request"])
         sip_ctx
+      end
+    end
+
+    @doc """
+    Release every media resource held by the context, in the proper teardown
+    order: stop the in-progress action (echo/player/recorder) → close the peer
+    connection → disconnect the media server. Clears the corresponding handles
+    from the context and returns it.
+
+    Idempotent and defensive: missing or already-released handles are skipped,
+    so it is safe to call on a call-end notification (`{:dialog_terminated, …}`)
+    even if `media_stop/1` was already invoked.
+    """
+    @spec media_cleanup_ressources(%SIP.Context{}) :: %SIP.Context{}
+    def media_cleanup_ressources(sip_ctx = %SIP.Context{}) do
+      sip_ctx
+      |> cleanup_action()
+      |> cleanup_peer_connection()
+      |> cleanup_media_server()
+    end
+
+    defp cleanup_action(sip_ctx) do
+      action_pid = SIP.Context.appdata_get(sip_ctx, :mediaactionid)
+      if is_nil(action_pid) do
+        sip_ctx
+      else
+        case SIP.Context.appdata_get(sip_ctx, :mediaaction) do
+          :echo -> safe_ms_call(sip_ctx.mediaservermodule, :stop_echo, [action_pid])
+          other ->
+            Logger.warning([dialogpid: self(), module: __MODULE__,
+              message: "Cannot release unknown media action #{inspect(other)}"])
+        end
+        SIP.Context.appdata_set(sip_ctx, :mediaactionid, nil)
+        |> SIP.Context.appdata_set(:mediaaction, nil)
+      end
+    end
+
+    defp cleanup_peer_connection(sip_ctx) do
+      cnx = SIP.Context.appdata_get(sip_ctx, :mediapeerconnectionid)
+      if is_nil(cnx) do
+        sip_ctx
+      else
+        safe_ms_call(sip_ctx.mediaservermodule, :close_peer_connection, [cnx])
+        SIP.Context.appdata_set(sip_ctx, :mediapeerconnectionid, nil)
+      end
+    end
+
+    defp cleanup_media_server(sip_ctx) do
+      if is_nil(sip_ctx.mediaserverpid) do
+        sip_ctx
+      else
+        safe_ms_call(sip_ctx.mediaservermodule, :disconnect, [sip_ctx.mediaserverpid, []])
+        SIP.Context.set(sip_ctx, :mediaserverpid, nil)
+      end
+    end
+
+    # Call a media server callback defensively: skip dead pid handles and never
+    # let a teardown error crash the caller (cleanup runs on the call-end path).
+    defp safe_ms_call(module, fun, args = [handle | _]) do
+      if is_pid(handle) and not Process.alive?(handle) do
+        :ok
+      else
+        try do
+          apply(module, fun, args)
+        catch
+          kind, reason ->
+            Logger.warning([module: __MODULE__,
+              message: "media #{fun} during cleanup raised #{kind}: #{inspect(reason)}"])
+            :error
+        end
       end
     end
   end

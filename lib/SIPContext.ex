@@ -127,7 +127,11 @@ defmodule SIP.Context do
     end
   end
 
-  # Set the media PID
+  # Set the media PID (nil clears it, e.g. after releasing media resources)
+  def set(context, :mediaserverpid, nil) do
+    Map.put(context, :mediaserverpid, nil)
+  end
+
   def set(context, :mediaserverpid, value) do
     if is_pid(value) do
       Map.put(context, :mediaserverpid, value)
