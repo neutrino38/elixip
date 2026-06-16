@@ -59,7 +59,12 @@ defmodule SIP.Session do
     use Agent
 
     def start() do
-      Agent.start( fn -> %ConfigRegistry{} end, name: __MODULE__ )
+      case Agent.start( fn -> %ConfigRegistry{} end, name: __MODULE__ ) do
+        { :ok, pid } -> { :ok, pid }
+        # Registry already running (e.g. started by a previous test module): reuse it
+        { :error, { :already_started, pid } } -> { :ok, pid }
+        err -> err
+      end
     end
 
     @spec set_call_processing_module(module()) :: :ok
@@ -243,20 +248,161 @@ defmodule SIP.Session do
     end
   end
 
+  defmodule Media do
+    # NOTE: this mixin must be combined with a session module (e.g. SIP.Session.CallUAC)
+    # that brings in `use SIP.Context` — the media macros rely on `var!(sip_ctx)`.
+    defmacro __using__(_opts) do
+      quote do
+        defmacro media_connect(module, url) do
+          quote do
+            var!(sip_ctx) = SIP.Session.Media.use_mediaserver(var!(sip_ctx), unquote(module), unquote(url))
+          end
+        end
+
+        defmacro media_start_echo() do
+          quote do
+            var!(sip_ctx) = SIP.Session.Media.start_echo(var!(sip_ctx))
+          end
+        end
+
+        defmacro media_stop() do
+          quote do
+            var!(sip_ctx) = SIP.Session.Media.stop_media(var!(sip_ctx))
+          end
+        end
+      end
+    end
+
+    def use_mediaserver(sip_ctx = %SIP.Context{}, module, url) when is_atom(module) and is_binary(url) do
+      if not Code.ensure_loaded?(module) do
+        raise "Media server module must be an Elixir module"
+      end
+      sip_ctx = SIP.Context.set(sip_ctx, :mediaservermodule, module)
+      rez = apply(module, :connect, [url])
+
+      sip_ctx = case rez do
+        { :ok, pid } -> SIP.Context.set(sip_ctx, :mediaserverpid, pid)
+        _ -> raise "Failed to connect to media server #{url}"
+      end
+      sip_ctx
+    end
+
+    @doc """
+    Build a local SDP offer from the connected media server.
+
+    Creates the peer connection on first call and stores its handle in the
+    context appdata (`:mediapeerconnectionid`), so subsequent calls reuse it.
+    Returns `{updated_ctx, sdp_offer}`.
+    """
+    @spec get_sdp_offer(%SIP.Context{}, atom()) :: {%SIP.Context{}, binary()}
+    def get_sdp_offer(sip_ctx = %SIP.Context{}, webrtc_support) when is_atom(webrtc_support) do
+      if not is_pid(sip_ctx.mediaserverpid) do
+        raise "No media server connected to the session context"
+      end
+
+      {sip_ctx, cnx} =
+        case SIP.Context.appdata_get(sip_ctx, :mediapeerconnectionid) do
+          nil ->
+            # Create a new peer connection and store it in the session context
+            {:ok, cnx} = apply(sip_ctx.mediaservermodule, :create_peer_connection,
+                               [sip_ctx.mediaserverpid, self(), [webrtc_support: webrtc_support]])
+            {SIP.Context.appdata_set(sip_ctx, :mediapeerconnectionid, cnx), cnx}
+
+          cnx ->
+            # Reuse the existing peer connection
+            {sip_ctx, cnx}
+        end
+
+      {:ok, offer} = apply(sip_ctx.mediaservermodule, :get_local_offer, [cnx])
+      {sip_ctx, offer}
+    end
+
+    @doc """
+    Feed a remote SDP answer to the media server peer connection.
+    Stores the result (`:ok` / `{:error, _}`) in `:lasterr` and returns the context.
+    """
+    @spec process_sdp_answer(%SIP.Context{}, binary()) :: %SIP.Context{}
+    def process_sdp_answer(sip_ctx = %SIP.Context{}, answer) when is_binary(answer) do
+      if not is_pid(sip_ctx.mediaserverpid) do
+        raise "No media server connected to the session context"
+      end
+
+      cnx = SIP.Context.appdata_get(sip_ctx, :mediapeerconnectionid)
+      if is_nil(cnx) do
+        raise "No media peer connection found in the session context"
+      end
+      rez = apply(sip_ctx.mediaservermodule, :set_remote_answer, [cnx, answer])
+      SIP.Context.set(sip_ctx, :lasterr, rez)
+    end
+
+    def start_echo(sip_ctx = %SIP.Context{}) do
+      if not is_pid(sip_ctx.mediaserverpid) do
+        raise "No media server connected to the session context"
+      end
+
+      cnx = SIP.Context.appdata_get(sip_ctx, :mediapeerconnectionid)
+      if is_nil(cnx) do
+        raise "No media peer connection found in the session context"
+      end
+
+      if not is_nil(SIP.Context.appdata_get(sip_ctx, :mediaactionid)) do
+        Logger.warning([dialogpid: self(), module: __MODULE__,
+                     message: "Media action already started, ignoring start_echo request"])
+        sip_ctx
+      else
+        {:ok, echo_pid} = apply(sip_ctx.mediaservermodule, :create_echo, [cnx])
+        SIP.Context.appdata_set(sip_ctx, :mediaactionid, echo_pid)
+        |> SIP.Context.appdata_set(:mediaaction, :echo)
+      end
+    end
+
+    def stop_media(sip_ctx = %SIP.Context{}) do
+      if not is_pid(sip_ctx.mediaserverpid) do
+        raise "No media server connected to the session context"
+      end
+
+      action_pid = SIP.Context.appdata_get(sip_ctx, :mediaactionid)
+      if not is_nil(action_pid) do
+        case SIP.Context.appdata_get(sip_ctx, :mediaaction) do
+          :echo -> apply(sip_ctx.mediaservermodule, :stop_echo, [action_pid])
+          _ -> Logger.warning([dialogpid: self(), module: __MODULE__,
+                     message: "Unknown media action #{inspect(SIP.Context.appdata_get(sip_ctx, :mediaaction))}, ignoring stop_media request"])
+        end
+        SIP.Context.appdata_set(sip_ctx, :mediaactionid, nil) |> SIP.Context.appdata_set(:mediaaction, nil)
+      else
+        Logger.warning([dialogpid: self(), module: __MODULE__,
+                     message: "No media action started, ignoring stop_media request"])
+        sip_ctx
+      end
+    end
+  end
+
+
   defmodule CallUAC do
+    require SIP.Session.Media
+
     defmacro __using__(_opts) do
       quote do
         use SIP.Context
 
-        defmacro send_INVITE(ruri, sdp_offer, timeout) do
+        defmacro send_INVITE(ruri, sdp_offer, options) do
           quote do
-            var!(sip_ctx) = SIP.Session.CallUAC.client_invite(var!(sip_ctx), unquote(ruri), unquote(sdp_offer), unquote(timeout))
+            var!(sip_ctx) = SIP.Session.CallUAC.client_invite(var!(sip_ctx), unquote(ruri), unquote(sdp_offer), unquote(options))
           end
         end
 
-        defmacro send_auth_INVITE(resp, ruri, sdp_offer, timeout) do
+        defmacro send_auth_INVITE(resp, ruri, sdp_offer, options) do
           quote do
-            var!(sip_ctx) = SIP.Session.CallUAC.auth_invite(var!(sip_ctx), unquote(resp), unquote(ruri), unquote(sdp_offer), unquote(timeout))
+            var!(sip_ctx) = SIP.Session.CallUAC.auth_invite(var!(sip_ctx), unquote(resp), unquote(ruri), unquote(sdp_offer), unquote(options))
+          end
+        end
+
+        defmacro process_invite_reply(resp) do
+          quote do
+            var!(sip_ctx) = case unquote(resp).response do
+              200 -> SIP.Session.CallUAC.process_200_ok(var!(sip_ctx), unquote(resp))
+              _ -> var!(sip_ctx)
+            end
           end
         end
 
@@ -306,7 +452,18 @@ defmodule SIP.Session do
       SIP.Msg.Ops.update_sip_msg(req, { :body, body })
     end
 
-    @spec client_invite(%SIP.Context{}, binary(), binary() | list(), integer()) :: %SIP.Context{}
+    @spec client_invite(%SIP.Context{}, binary(), binary() | list() | atom(), integer() | list()) :: %SIP.Context{}
+    def client_invite(sip_ctx = %SIP.Context{}, ruri, :mediaserver, options) when is_list(options) do
+      if is_pid(sip_ctx.mediaserverpid) do
+        timeout = Keyword.get(options, :timeout, 20)
+        webrtc_support = Keyword.get(options, :webrtc, :no)
+        {sip_ctx, sdp_offer} = SIP.Session.Media.get_sdp_offer(sip_ctx, webrtc_support)
+        client_invite(sip_ctx, ruri, sdp_offer, timeout)
+      else
+        raise "No media server connected to the session context"
+      end
+    end
+
     def client_invite(sip_ctx = %SIP.Context{}, ruri, sdp_offer, timeout) when is_integer(timeout) do
       invite = invite_msg(sip_ctx, ruri, sdp_offer)
       SIP.Session.send_sip_request(sip_ctx, invite, timeout)
@@ -316,7 +473,18 @@ defmodule SIP.Session do
     Re-send an INVITE authenticated against a 401/407 challenge response `resp`.
     Mirrors `SIP.Session.RegisterUAC.auth_register/3` for the INVITE method.
     """
-    @spec auth_invite(%SIP.Context{}, map(), binary(), binary() | list(), integer()) :: %SIP.Context{}
+    @spec auth_invite(%SIP.Context{}, map(), binary(), binary() | list() | atom(), integer() | list()) :: %SIP.Context{}
+    def auth_invite(sip_ctx = %SIP.Context{}, resp, ruri, :mediaserver, options) when is_list(options) do
+      if is_pid(sip_ctx.mediaserverpid) do
+        timeout = Keyword.get(options, :timeout, 20)
+        webrtc_support = Keyword.get(options, :webrtc, :no)
+        {sip_ctx, sdp_offer} = SIP.Session.Media.get_sdp_offer(sip_ctx, webrtc_support)
+        auth_invite(sip_ctx, resp, ruri, sdp_offer, timeout)
+      else
+        raise "No media server connected to the session context"
+      end
+    end
+
     def auth_invite(sip_ctx = %SIP.Context{}, resp, ruri, sdp_offer, _timeout)
         when is_map(resp) and is_integer(resp.response) do
       {autheader, authparams} =
@@ -351,6 +519,38 @@ defmodule SIP.Session do
         callid: nil,
         contentlength: 0
       }
+    end
+
+
+
+    def process_200_ok(sip_ctx = %SIP.Context{}, resp) when resp.response == 200 do
+      dlg_id = sip_ctx.dialogpid
+      case Map.get(resp, :body) do
+        sdp_answer when is_binary(sdp_answer) ->
+          SIP.Session.Media.process_sdp_answer(sip_ctx, sdp_answer)
+
+        [%{data: sdp_answer} | _] ->
+          SIP.Session.Media.process_sdp_answer(sip_ctx, sdp_answer)
+
+        list when is_list(list) ->
+          case Enum.find(list, fn part -> to_string(part[:contenttype]) =~ "sdp" end) do
+            %{data: sdp_answer} ->
+              Logger.debug([dialogpid: dlg_id, module: __MODULE__,
+                       message: "Processing SDP answer from 200 OK response in multipart body"])
+              SIP.Session.Media.process_sdp_answer(sip_ctx, sdp_answer)
+
+            _ ->
+              Logger.warning([dialogpid: dlg_id, module: __MODULE__,
+                       message: "No SDP answer found in 200 OK response, ignoring"])
+              sip_ctx
+          end
+
+        _ ->
+          Logger.warning([dialogpid: dlg_id, module: __MODULE__,
+            message: "No SDP answer found in 200 OK response, ignoring"])
+
+          sip_ctx
+      end
     end
 
     def ack(sip_ctx = %SIP.Context{}, transaction_id) do

@@ -35,6 +35,10 @@ alias SIP.NetUtils
         Logger.info("SIP transaction layer started with PID #{inspect(pid)}")
         :ok
 
+      { :error, { :already_started, _pid } } ->
+        # Layer already running (e.g. started by a previous test module): treat as success
+        :ok
+
       { code, _pid } ->
         Logger.error ("SIP transaction layer failed to start with error #{code}")
         code
