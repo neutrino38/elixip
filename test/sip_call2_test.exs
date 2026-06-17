@@ -151,7 +151,7 @@ defmodule SIP.Test.Call2 do
 
     Process.sleep(20_000)
 
-    media_stop()
+
 
     # ── Hang up: send BYE and wait for its 200 OK ─────────────────────────────
     send_BYE()
