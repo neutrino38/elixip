@@ -179,3 +179,75 @@ Log the state before the transtion to final state as an INFO log.
 
 Store the failure reason, log it as well as the state before the transtion to final state as
 an error log. 
+
+
+## Writing and running a SIP scenario
+
+A scenario is a plain Elixir module that `use SIP.Scenario` (see the example
+above), saved as a `.exs` file. The `use SIP.Scenario` block generates a `run/0`
+entry point that starts the SIP stack (transactions, transport selector, dialog
+layer, config registry), builds the initial `%SIP.Context{}` from the `config`
+block and enters `initial_state`. `run/0` returns `:ok` on
+`terminal_success_state` and `{:error, reason}` on `terminal_failure_state`.
+
+There are two ways to run a scenario.
+
+### Prerequisites
+
+- **Erlang/OTP** must be installed on the machine (the BEAM runtime).
+- **Elixir** is required for the `mix` mode; it is *not* required at run time for
+  the standalone `elixipp` mode (the escript only needs the Erlang runtime).
+
+### Mode 1 — with mix (development)
+
+Use this while writing and debugging scenarios.
+
+```bash
+# fetch dependencies and compile once
+mix deps.get
+mix compile
+
+# run a scenario file
+mix scenario scenarios/my_call_scenario.exs
+```
+
+`mix scenario` compiles the project, loads the given `.exs`, locates the scenario
+module, calls its `run/0`, logs the outcome and exits with status `0` on success
+or `1` on failure (so it can be used in CI).
+
+Without the custom task, the plain equivalent is:
+
+```bash
+mix run -e "MyCallScenario.run()" scenarios/my_call_scenario.exs
+```
+
+### Mode 2 — standalone executable (elixipp)
+
+Use this to ship a self-contained tool that runs scenarios without a mix/Elixir
+install. The project builds an [escript](https://hexdocs.pm/mix/Mix.Tasks.Escript.Build.html)
+named `elixipp` (configured via `escript: [main_module: Elixipp.CLI, name: "elixipp"]`
+in `mix.exs`).
+
+```bash
+# build the self-contained executable once
+mix escript.build          # produces ./elixipp
+```
+
+Then run scenarios directly:
+
+```bash
+./elixipp scenarios/my_call_scenario.exs   # by file path
+./elixipp MyCallScenario                   # by module name (if bundled in the escript)
+```
+
+Install it on your `PATH` to call it from anywhere:
+
+```bash
+mix escript.install        # or simply: cp elixipp ~/.local/bin/
+elixipp my_call_scenario.exs
+```
+
+The escript bundles the compiled BEAM modules of Elixip and its dependencies into
+a single file, but it still relies on an Erlang/OTP runtime (`erl` / `escript`)
+being available on the host. Like `mix scenario`, it exits with `0` on success
+and `1` on failure.
