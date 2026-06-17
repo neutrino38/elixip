@@ -26,68 +26,69 @@ https://github.com/1760002018/medooze-media-server/tree/main/media-server
 
 ## Domain Specific langage for SIP scenario
 
-This library defines a new [Domain Specific Langage|https://elixir.hexdocs.pm/1.20.1/domain-specific-languages.html] specialized for call and SIP related finite state machine. It is not unlike ExUnit. Call or SIP scenario would be defined as .exs files
+This library defines a new [Domain Specific Language](https://elixir.hexdocs.pm/1.20.1/domain-specific-languages.html) specialized for call and SIP related finite state machine. It is not unlike ExUnit. Call or SIP scenario would be defined as .exs files
 that would resemble this
 
 ```Elixir
 defmodule MyCallScenario do
 
-  use SIP.Session.CallUAC
-  use SIP.Session.Media
+  # use SIP.Scenario pulls in the state-machine DSL together with
+  # use SIP.Session.CallUAC and use SIP.Session.Media.
+  use SIP.Scenario
 
   @mediaservermod MediaServer.Mockup
-  @username "toto"
-  @authusername "toto"
-  @displayname "La tete a toto"
   @domain "mydomain.com"
-  @proxy "sip.mydomain.com"
-  @passwd "xxxx"
-
   @callee "sip:90901@#{@domain}"
+
+  # SIP identity for the scenario. The framework reads this block to build the
+  # initial %SIP.Context{} (computing :ha1 from :passwd) before initial_state.
+  config username:     "toto",
+         authusername: "toto",
+         displayname:  "La tete a toto",
+         domain:       @domain,
+         proxy:        "sip.mydomain.com",
+         passwd:       "xxxx"
 
   state initial_state do
     media_connect(@mediaservermod, "sip:localhost:8080")
-
     goto next
   end
 
   state calling do
-    send_INVITE(@callee, :mediaserver, [timeout: 90, webrtc: :no])
+    send_INVITE(@callee, :mediaserver, timeout: 90, webrtc: :no)
     goto call_progress
   end
 
-  state call_progress
+  state call_progress do
     receive do
-        {100, rsp, _trans_pid, _dialog_pid} -> call_progress
+      {100, _rsp, _trans_pid, _dialog_pid} -> goto loop
 
-        {407, rsp, _trans_pid, _dialog_pid} -> 
-           send_auth_INVITE(rsp, @callee, :mediaserver, [timeout: 90])
-           goto call_progress
+      {407, rsp, _trans_pid, _dialog_pid} ->
+        send_auth_INVITE(rsp, @callee, :mediaserver, timeout: 90)
+        goto loop
 
-        {180, rsp, _trans_pid, _dialog_pid} -> call_progress
-        {183, rsp_183, _trans_pid, _dialog_pid} -> 
-            process_invite_reply(rsp_183)
-            goto call_progress
+      {180, _rsp, _trans_pid, _dialog_pid} -> goto loop
 
-        {200, rsp_200, _trans_pid, _dialog_pid} ->
-            process_invite_reply(rsp_200)
-            goto call_answered
-        
-        {code, rsp, _trans_pid, _dialog_pid } when code in [400..699] ->
-            scenario_failure "Call failure with code #{code}"
-        
-    after 30_000
-        timeout -> scenario_failure "Call not answered after 30s"
+      {183, rsp_183, trans_pid, _dialog_pid} ->
+        process_invite_reply(rsp_183, trans_pid)
+        goto loop
+
+      {200, rsp_200, trans_pid, _dialog_pid} ->
+        process_invite_reply(rsp_200, trans_pid)
+        goto call_answered
+
+      {code, _rsp, _trans_pid, _dialog_pid} when code in 400..699 ->
+        scenario_failure("Call failure with code #{code}")
+    after
+      30_000 -> scenario_failure("Call not answered after 30s")
     end
   end
 
-
   state call_answered do
     receive do
-      {:ms_event, _conn, :ice_connected } -> start_play
-
-    after 5_000
-        timeout -> scenario_failure("No media received after 5s")
+      {:ms_event, _conn, :ice_connected} -> goto start_play
+    after
+      5_000 -> scenario_failure("No media received after 5s")
     end
   end
 
@@ -98,17 +99,17 @@ defmodule MyCallScenario do
 
   state call_established do
     receive do
-        {:ms_event, _player, :player_started} -> goto loop
+      {:ms_event, _player, :player_started} -> goto loop
 
-        {:ms_event, _player, :player_ended} -> hangup_call
+      {:ms_event, _player, :player_ended} -> goto hangup_call
 
-        {:MESSAGE, req, _trans_pid, dialog_pid} ->
-            SIP.Dialog.reply(dialog_pid, req, 200, "OK", [])
-            goto loop
+      {:MESSAGE, req, _trans_pid, dialog_pid} ->
+        SIP.Dialog.reply(dialog_pid, req, 200, "OK", [])
+        goto loop
 
-        {:BYE, req, _trans_pid, dialog_pid} ->
-            SIP.Dialog.reply(dialog_pid, req, 200, "OK", [])
-            scenario_success()
+      {:BYE, req, _trans_pid, dialog_pid} ->
+        SIP.Dialog.reply(dialog_pid, req, 200, "OK", [])
+        scenario_success()
     end
   end
 
@@ -116,15 +117,21 @@ defmodule MyCallScenario do
     send_BYE()
 
     receive do
-        {200, _bye_rsp, _trans_pid, _dialog_pid} -> scenario_success()
-
-    after 4_000
-        timeout -> scenario_failure("Not 200 OK received for BYE")     
+      {200, _bye_rsp, _trans_pid, _dialog_pid} -> scenario_success()
+    after
+      4_000 -> scenario_failure("Not 200 OK received for BYE")
     end
+  end
 end
 ```
 
 This framework would define the following functions or macro:
+
+### config
+
+Declares the SIP identity used by the scenario (username, authusername, displayname,
+domain, proxy, passwd, ...). The framework reads this block to build the initial
+%SIP.Context{} — computing :ha1 from :passwd — before entering initial_state.
 
 ### state
 
@@ -132,11 +139,11 @@ The state instruction defines a function which takes a %SIP.Context as sole argu
 
 ### goto
 
-This macro takes one argument, a state (a function). It would 
+This macro takes one argument, a state name. The scenario runner will 
 - check the state ctx_get(:lasterr) to be :ok. If not, abort the scenario using scenario_failure()
-- store the name of the function as atom into the sip_ctx using a new member: currentstate
+- store the name of the target state as atom into the sip_ctx using a new member: currentstate
 - if logger is set to debug, the transition is logged as "RCV event: (old state) -> (new state)"
-- call the function passed as argument and pass the modified sip_ctx
+- transition to the target state, calling it with the modified sip_ctx (handled by the runner, not a direct recursive call). goto must be the last expression of a state body or of a receive clause.
 
 
 ### goto next
