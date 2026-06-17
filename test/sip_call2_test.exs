@@ -4,7 +4,6 @@ defmodule SIP.Test.Call2 do
   use SIP.Session.CallUAC
   use SIP.Session.Media
 
-  alias SIP.Session.CallUAC
 
   # Account to use for tests (centralized in config/test.exs)
   @account Application.compile_env(:elixip2, :test_account)
@@ -135,10 +134,7 @@ defmodule SIP.Test.Call2 do
 
     # ── Wait for the call to be answered (200 OK) ─────────────────────────────
     {:ok, ok_rsp, ok_trans} = wait_for_200(25_000)
-    process_invite_reply(ok_rsp)
-
-    # Acknowledge the 200 OK to confirm the dialog.
-    CallUAC.ack(sip_ctx, ok_trans)
+    process_invite_reply(ok_rsp, ok_trans)
 
     # ── Wait until ICE connectivity is established ────────────────────────────
     assert_receive {:ms_event, ^conn, :ice_connected}, 5_000
@@ -216,8 +212,7 @@ defmodule SIP.Test.Call2 do
 
     # ── Wait for the call to be answered (200 OK) ─────────────────────────────
     {:ok, ok_rsp, ok_trans} = wait_for_200(25_000)
-    process_invite_reply(ok_rsp)
-    CallUAC.ack(sip_ctx, ok_trans)
+    process_invite_reply(ok_rsp, ok_trans)
 
     # ── Wait until ICE connectivity is established ────────────────────────────
     assert_receive {:ms_event, ^conn, :ice_connected}, 5_000
@@ -285,8 +280,7 @@ defmodule SIP.Test.Call2 do
 
     # ── Wait for the call to be answered (200 OK) ─────────────────────────────
     {:ok, ok_rsp, ok_trans} = wait_for_200(25_000)
-    process_invite_reply(ok_rsp)
-    CallUAC.ack(sip_ctx, ok_trans)
+    process_invite_reply(ok_rsp, ok_trans)
 
     # ── Wait until ICE connectivity is established ────────────────────────────
     assert_receive {:ms_event, ^conn, :ice_connected}, 5_000
