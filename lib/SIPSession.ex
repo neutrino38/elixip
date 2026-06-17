@@ -581,10 +581,17 @@ defmodule SIP.Session do
           end
         end
 
-        defmacro process_invite_reply(resp) do
+        defmacro process_invite_reply(resp, transaction_id) do
           quote do
             var!(sip_ctx) = case unquote(resp).response do
-              200 -> SIP.Session.CallUAC.process_200_ok(var!(sip_ctx), unquote(resp))
+              200 ->
+                SIP.Session.CallUAC.process_sdp_resp(var!(sip_ctx), unquote(resp))
+                SIP.Session.CallUAC.ack(var!(sip_ctx), unquote(transaction_id))
+                var!(sip_ctx)
+
+              183 -> SIP.Session.CallUAC.process_sdp_resp(var!(sip_ctx), unquote(resp))
+
+              # Ignore other responses for now.
               _ -> var!(sip_ctx)
             end
           end
@@ -707,7 +714,7 @@ defmodule SIP.Session do
 
 
 
-    def process_200_ok(sip_ctx = %SIP.Context{}, resp) when resp.response == 200 do
+    def process_sdp_resp(sip_ctx = %SIP.Context{}, resp) when resp.response in [200, 183] do
       dlg_id = sip_ctx.dialogpid
       case Map.get(resp, :body) do
         sdp_answer when is_binary(sdp_answer) ->
