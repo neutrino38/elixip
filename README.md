@@ -48,17 +48,17 @@ defmodule MyCallScenario do
          domain:       @domain,
          proxy:        "sip.mydomain.com",
          passwd:       "xxxx"
-
+# -------------------------------------------------------------------------------
   state initial_state do
     media_connect(@mediaservermod, "sip:localhost:8080")
     goto next
   end
-
+# -------------------------------------------------------------------------------
   state calling do
     send_INVITE(@callee, :mediaserver, timeout: 90, webrtc: :no)
     goto call_progress
   end
-
+# -------------------------------------------------------------------------------
   state call_progress do
     receive do
       {100, _rsp, _trans_pid, _dialog_pid} -> goto loop
@@ -83,7 +83,7 @@ defmodule MyCallScenario do
       30_000 -> scenario_failure("Call not answered after 30s")
     end
   end
-
+# -------------------------------------------------------------------------------
   state call_answered do
     receive do
       {:ms_event, _conn, :ice_connected} -> goto start_play
@@ -91,12 +91,12 @@ defmodule MyCallScenario do
       5_000 -> scenario_failure("No media received after 5s")
     end
   end
-
+# -------------------------------------------------------------------------------
   state start_play do
     media_play("toto.mp4")
     goto next
   end
-
+# -------------------------------------------------------------------------------
   state call_established do
     receive do
       {:ms_event, _player, :player_started} -> goto loop
@@ -112,7 +112,7 @@ defmodule MyCallScenario do
         scenario_success()
     end
   end
-
+# -------------------------------------------------------------------------------
   state hangup_call do
     send_BYE()
 
