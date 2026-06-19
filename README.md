@@ -435,3 +435,48 @@ a single file, but it still relies on an Erlang/OTP runtime (`erl` / `escript`)
 being available on the host. Like `mix scenario`, it exits with `0` on success
 and `1` on failure.
 
+## Troubleshooting
+
+elixipp produces an elixip.log file. Log level can be changed in `config/config.exs`
+
+If the scenario set the debug flag, in the initial_state:
+
+```Elixir
+# Storing some info into the context
+ctx_set(:debug, true)
+```
+
+A file specific to each scenario execution (instance) will be generated. 
+It will be named `<scenario_name>_<pid>.log` It will contain
+the SIP configuration applied (except the password that will be masked). Then it will details every transition and action performed by the FSM. The format is a diagram
+sequence text file compatible with Plant UML:
+
+```plantuml
+@startuml
+participant "bob Display Name"
+
+#Initial state
+note over elixip: initial_state
+
+# Sending a SIP request
+elixip --> bob: INVITE sip_uri
+# Receiving a response
+elixip <-- bob: 2OO OK
+
+# transition
+note over elixip: calling -> answered 
+
+# receiving a message
+elixip <-- bob: MESSAGE
+
+# Sending a reply
+elixip --> bob: 2OO OK
+
+# Transition
+@enduml
+```
+
+
+
+
+Exchanges between

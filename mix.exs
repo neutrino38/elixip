@@ -7,8 +7,14 @@ defmodule SIPParser.MixProject do
       version: "0.2.0",
       elixir: "~> 1.15",
       start_permanent: Mix.env() == :prod,
+      escript: escript(),
       deps: deps()
     ]
+  end
+
+  # Standalone executable: `mix escript.build` produces ./elixipp
+  defp escript do
+    [main_module: Elixipp.CLI, name: "elixipp"]
   end
 
   # Run "mix help compile.app" to learn about applications.

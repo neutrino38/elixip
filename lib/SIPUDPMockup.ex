@@ -82,7 +82,7 @@ defmodule SIP.Test.Transport.UDPMockup do
   end
 
   defp handle_req(state, :BYE, sipreq) do
-    if state.scenario in [ :inboundinvite ] do
+    if state.scenario in [ :inboundinvite, :successfulcall ] do
       # Handle the BYE request and answers it
       resp = SIP.Msg.Ops.reply_to_request(sipreq, 200, "OK")
       Process.send_after(self(), { :recv, resp }, 100)
@@ -216,7 +216,16 @@ defmodule SIP.Test.Transport.UDPMockup do
   def handle_cast( { :simulate, 200, after_ms }, state) do
     siprsp = if state.req.method == :INVITE do
       #invite case
-      sdp_body = %{ contenttype: "application/sdp", data: "blablabla\r\n" }
+      # Minimal but valid SDP answer so the media layer (ExSDP.parse) accepts it.
+      sdp_answer =
+        "v=0\r\n" <>
+        "o=- 1 1 IN IP4 212.83.152.250\r\n" <>
+        "s=-\r\n" <>
+        "c=IN IP4 212.83.152.250\r\n" <>
+        "t=0 0\r\n" <>
+        "m=audio 7344 RTP/AVP 0\r\n" <>
+        "a=rtpmap:0 PCMU/8000\r\n"
+      sdp_body = %{ contenttype: "application/sdp", data: sdp_answer }
       reply_to_request(state.req, 200, "OK", [body: [ sdp_body ], contact: "<sip:90901@212.83.152.250:5090>" ], "as424e7930")
     else
       # register case

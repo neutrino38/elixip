@@ -630,7 +630,7 @@ defmodule SIP.Session do
 
       req = %{
         "Max-Forwards" => "70",
-        "Supported:" => "replaces",
+        "Supported" => "replaces",
         method: :INVITE,
         ruri: ruri,
         from: SIP.Context.from(sip_ctx),

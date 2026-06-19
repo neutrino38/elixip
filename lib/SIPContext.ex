@@ -48,7 +48,7 @@ defmodule SIP.Context do
 
       defmacro appdata_get(prop) do
         quote do
-          Map.get(var!(sip_ctx.appdata), unquote(prop))
+          Map.get(var!(sip_ctx).appdata, unquote(prop))
         end
       end
 
