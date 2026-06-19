@@ -13,7 +13,11 @@ defmodule Mix.Tasks.Scenario do
 
   @impl true
   def run(args) do
-    Mix.Task.run("compile")
+    # Start the application (and its deps), not just compile: this applies the
+    # project config — in particular the Logger backends (console + file) — so
+    # scenario logs land in the configured log file instead of the console with
+    # default settings.
+    Mix.Task.run("app.start")
 
     path =
       case args do

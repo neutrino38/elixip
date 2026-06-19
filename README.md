@@ -395,7 +395,7 @@ mix scenario scenarios/my_call_scenario.exs
 ```
 
 `mix scenario` compiles the project, loads the given `.exs`, locates the scenario
-module, calls its `run/0`, logs the outcome and exits with status `0` on success
+module, calls its `run/1`, logs the outcome and exits with status `0` on success
 or `1` on failure (so it can be used in CI).
 
 Without the custom task, the plain equivalent is:
@@ -435,9 +435,45 @@ a single file, but it still relies on an Erlang/OTP runtime (`erl` / `escript`)
 being available on the host. Like `mix scenario`, it exits with `0` on success
 and `1` on failure.
 
+## Logging
+
+Logs are written through Elixir's `Logger`. There are two distinct logging
+policies depending on how a scenario is run.
+
+### `mix scenario` and `mix test`
+
+These use the project configuration in `config/config.exs`: warnings and above
+go to the console, everything from `:debug` up is written to `elixip.log`. Change
+the level or the file there. `mix scenario` starts the application before running
+the scenario, so this configuration is fully applied.
+
+### Standalone `elixipp`
+
+A self-contained escript does not reliably apply `config/config.exs` (and never
+runs `config/runtime.exs`), so `elixipp` sets up **its own logging at startup**,
+overriding whatever was baked into the binary. It is driven by environment
+variables:
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `ELIXIPP_LOG_FILE`  | log file path | `elixipp.log` |
+| `ELIXIPP_LOG_LEVEL` | file log level: `debug` \| `info` \| `warning` \| `error` | `debug` |
+
+The console is kept quiet (warnings and above) since `elixipp` prints its own
+success/failure line.
+
+```bash
+# default: writes elixipp.log at :debug level
+elixipp scenarios/my_call_scenario.exs
+
+# override the file and level for a single run (e.g. in CI)
+ELIXIPP_LOG_FILE=ci_run.log ELIXIPP_LOG_LEVEL=info elixipp scenarios/my_call_scenario.exs
+```
+
 ## Troubleshooting
 
-elixipp produces an elixip.log file. Log level can be changed in `config/config.exs`
+elixipp produces a log file (`elixipp.log` by default — see [Logging](#logging)
+for how to configure it).
 
 If the scenario set the debug flag, in the initial_state:
 
