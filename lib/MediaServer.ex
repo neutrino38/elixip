@@ -58,6 +58,7 @@ defmodule MediaServer do
     wait_for_keyframe: boolean(),
     stop_on_silence: boolean(),
     silence_timeout_ms: pos_integer(),
+    max_record_duration_sec: pos_integer(),
     stop_on_dtmf: boolean()
   ]
 
