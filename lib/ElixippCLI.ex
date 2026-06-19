@@ -21,8 +21,8 @@ defmodule Elixipp.CLI do
 
   ## Logging
 
-    * `ELIXIPP_LOG_FILE`  — log file path (default `elixipp.log`)
-    * `ELIXIPP_LOG_LEVEL` — file log level: `debug` | `info` | `warning` | `error`
+    * `--log-file PATH`   — log file path (default `elixipp.log`)
+    * `--log-level LEVEL` — file log level: `debug` | `info` | `warning` | `error`
   """
   require Logger
 
@@ -48,20 +48,28 @@ defmodule Elixipp.CLI do
 
   @spec main([String.t()]) :: no_return()
   def main(argv) do
-    setup_logging()
-
     {opts, rest, _} =
       OptionParser.parse(argv,
-        strict: [monitor: :boolean, limit: :integer, max_run: :integer, rate: :float, help: :boolean],
+        strict: [
+          monitor: :boolean,
+          limit: :integer,
+          max_run: :integer,
+          rate: :float,
+          log_file: :string,
+          log_level: :string,
+          help: :boolean
+        ],
         aliases: [m: :monitor, l: :limit, h: :help]
       )
+
+    setup_logging(opts[:log_file], opts[:log_level])
 
     if opts[:help], do: print_help()
 
     arg =
       case rest do
         [a | _] -> a
-        [] -> abort("usage: elixipp [--monitor] [-l N] [--max-run N] [--rate N] <scenario.exs | ModuleName>", 2)
+        [] -> abort("usage: elixipp [--monitor] [-l N] [--max-run N] [--rate N] [--log-file PATH] [--log-level LEVEL] <scenario.exs | ModuleName>", 2)
       end
 
     module = resolve_module(arg)
@@ -121,8 +129,11 @@ defmodule Elixipp.CLI do
     {:ok, _} = SIP.Scenario.Monitor.start()
     SIP.Scenario.Runner.bootstrap_stack()
 
-    # The live table is shown only with --monitor and an interactive terminal.
-    live? = monitor? and is_pid(Process.whereis(Owl.LiveScreen))
+    # Keyboard control (q / Ctrl+D) needs an interactive terminal; the live table
+    # additionally needs --monitor. On a piped/non-tty stdin we read nothing, so
+    # an immediate EOF can't be mistaken for Ctrl+D.
+    interactive? = match?({:ok, _}, :io.rows())
+    live? = monitor? and interactive?
     raw? = setup_raw_terminal(live?)
 
     if live? do
@@ -150,7 +161,7 @@ defmodule Elixipp.CLI do
       shutdown: :none        # :none | :graceful
     }
 
-    if live?, do: start_input_reader(self())
+    if interactive?, do: start_input_reader(self())
 
     state =
       Enum.reduce(1..limit, state, fn slot_id, acc ->
@@ -546,12 +557,12 @@ defmodule Elixipp.CLI do
 
   # ── Logging setup ─────────────────────────────────────────────────────────────
 
-  defp setup_logging do
+  defp setup_logging(log_file, log_level) do
     _ = Application.ensure_all_started(:logger)
     _ = Application.ensure_all_started(:logger_file_backend)
 
-    log_file = System.get_env("ELIXIPP_LOG_FILE", @default_log_file)
-    file_level = parse_level(System.get_env("ELIXIPP_LOG_LEVEL"))
+    log_file = log_file || @default_log_file
+    file_level = parse_level(log_level)
 
     Logger.configure(level: file_level)
 
@@ -595,7 +606,7 @@ defmodule Elixipp.CLI do
       "warning" -> :warning
       "error" -> :error
       other ->
-        IO.puts(:stderr, "Unknown ELIXIPP_LOG_LEVEL #{inspect(other)}, using #{@default_log_level}")
+        IO.puts(:stderr, "Unknown --log-level #{inspect(other)}, using #{@default_log_level}")
         @default_log_level
     end
   end
@@ -622,12 +633,14 @@ defmodule Elixipp.CLI do
 
     OPTIONS
       -m, --monitor      Affiche un tableau live des appels en cours.
-      -l, --limit N      Lance N appels simultanés (implique --monitor).
+      -l, --limit N      Lance N appels simultanés.
                          Sans --max-run, les slots sont recyclés indéfiniment.
       --max-run N        Arrête après N exécutions au total.
       --rate N           Nombre d'appels créés par seconde (défaut : 10, max : 100).
                          Espace la création de chaque nouvel appel de 1000/N ms.
                          Les valeurs > 100 sont ignorées (retour au défaut).
+      --log-file PATH    Chemin du fichier de log (défaut : elixipp.log).
+      --log-level LEVEL  Niveau : debug | info | warning | error (défaut : debug).
       -h, --help         Affiche cette aide.
 
     Sans --limit ni --max-run, comportement équivalent à --limit 1 --max-run 1
@@ -637,10 +650,6 @@ defmodule Elixipp.CLI do
       q                  Arrêt propre : plus de nouveaux appels, attend les actifs.
       Ctrl+D             Arrêt immédiat (affiche le résumé puis quitte).
       ↑ / ↓              Défile le tableau quand il dépasse la hauteur du terminal.
-
-    JOURNALISATION (variables d'environnement)
-      ELIXIPP_LOG_FILE   Chemin du fichier de log (défaut : elixipp.log).
-      ELIXIPP_LOG_LEVEL  Niveau : debug | info | warning | error (défaut : debug).
 
     Code de sortie : 0 si aucun échec, 1 sinon.
     """)

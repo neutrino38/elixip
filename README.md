@@ -466,6 +466,8 @@ elixipp [OPTIONS] <scenario.exs | ModuleName>
 | `-l N`, `--limit N` | Run `N` calls simultaneously. Without `--max-run`, slots are recycled indefinitely. The live table is shown only with `--monitor`; otherwise the run is silent and prints the final summary. | `1` |
 | `--max-run N` | Stop after `N` executions in total. | unlimited (`1` when neither `--limit` nor `--max-run` is set) |
 | `--rate N` | Number of calls started per second. Each new call creation is spaced by `1000 / N` ms. Values greater than `100` are ignored and fall back to the default. | `10` |
+| `--log-file PATH` | Log file path. | `elixipp.log` |
+| `--log-level LEVEL` | File log level: `debug` \| `info` \| `warning` \| `error`. | `debug` |
 | `-h`, `--help` | Show the help text. | — |
 
 ```bash
@@ -545,13 +547,13 @@ the scenario, so this configuration is fully applied.
 
 A self-contained escript does not reliably apply `config/config.exs` (and never
 runs `config/runtime.exs`), so `elixipp` sets up **its own logging at startup**,
-overriding whatever was baked into the binary. It is driven by environment
-variables:
+overriding whatever was baked into the binary. It is driven by command-line
+options:
 
-| Variable | Meaning | Default |
+| Option | Meaning | Default |
 |---|---|---|
-| `ELIXIPP_LOG_FILE`  | log file path | `elixipp.log` |
-| `ELIXIPP_LOG_LEVEL` | file log level: `debug` \| `info` \| `warning` \| `error` | `debug` |
+| `--log-file PATH`   | log file path | `elixipp.log` |
+| `--log-level LEVEL` | file log level: `debug` \| `info` \| `warning` \| `error` | `debug` |
 
 The console is kept quiet (warnings and above) since `elixipp` prints its own
 success/failure line.
@@ -561,7 +563,7 @@ success/failure line.
 elixipp scenarios/my_call_scenario.exs
 
 # override the file and level for a single run (e.g. in CI)
-ELIXIPP_LOG_FILE=ci_run.log ELIXIPP_LOG_LEVEL=info elixipp scenarios/my_call_scenario.exs
+elixipp --log-file ci_run.log --log-level info scenarios/my_call_scenario.exs
 ```
 
 ## Troubleshooting
