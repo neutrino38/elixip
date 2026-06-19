@@ -136,7 +136,14 @@ defmodule SIP.Scenario do
         # Clear the event type inferred by on_events, so a `goto` in this state
         # that is not inside a on_events clause stays untyped.
         Process.delete(:scenario_event_type)
-        unquote(body)
+        try do
+          unquote(body)
+        rescue
+          e ->
+            Logger.error("Exception in scenario state #{unquote(name)}")
+            Logger.error(Exception.format(:error, e, __STACKTRACE__))
+            scenario_failure("exception!")
+        end
       end
     end
   end
