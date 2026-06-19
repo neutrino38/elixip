@@ -3,33 +3,33 @@
 **Elixip is a personal project to write a multipurpose SIP application layer.**
 
 It provides a [Domain Specific Language](https://elixir.hexdocs.pm/1.20.1/domain-specific-languages.html)
-specialized to describe call scenarios. It is vaguely inspired from the K language developped by the N-SOFT
+specialized to describe call scenarios. It is vaguely inspired by the K language developed by the N-SOFT
 company as part of their Rekoll product. The scenario itself is an .exs file and takes advantage of the
-Elixir syntax to provide a finite state machine (FSM) programming model. This is to me, the most explicit
-way to handle cleanly the asynchronous logic of the programmable telecommunication.
+Elixir syntax to provide a finite state machine (FSM) programming model. This is to me the most explicit
+way to handle cleanly the asynchronous logic of programmable telecommunication.
 
-The scenario engine itself is a framework similar to ExUnit. It sits on top of a  SIP stack fully developed in Elixir.
-Such call / telecom scripts are actually Elixir script so they can take full advantage of the SIP stack and interact
-at dialog / transaction or event message level if needed. Furthermore, external libs and API can be easily called and used
-within such scenario as long as they comply with the asynchronous nature or finite state machines. 
+The scenario engine itself is a framework similar to ExUnit. It sits on top of a SIP stack fully developed in Elixir.
+Such call / telecom scripts are actually Elixir scripts so they can take full advantage of the SIP stack and interact
+at dialog / transaction or event message level if needed. Furthermore, external libs and APIs can be easily called and used
+within such scenarios as long as they comply with the asynchronous nature of finite state machines.
 
-The scframework will also provide a control interface to the
-[Mendooze mediaserver|https://github.com/1760002018/medooze-media-server/tree/main/media-server] 
-in order to handle the media part of telecommunication over IP. A clean abstraction (Behavior) is defined
-and other media servers could easily been interfaced as well if needed. 
+The framework will also provide a control interface to the
+[Medooze media server](https://github.com/1760002018/medooze-media-server/tree/main/media-server)
+in order to handle the media part of telecommunication over IP. A clean abstraction (Behaviour) is defined
+and other media servers could easily be interfaced as well if needed.
 
 ## The roadmap
 
 The project will provide in the long term:
 
 - a testing tool called **elixipp**, similar to sipp, capable of running elixip scenarios to test other SIP servers.
-- a mini scriptable Session Border Controller, called **borderline** using the DSL to fine tune message handling.
+- a mini scriptable Session Border Controller, called **borderline**, using the DSL to fine-tune message handling.
 - a scriptable and extensible SIP proxy inspired by kamailio. Let's call it **kelixip** for now. If someone has a better or funnier name, let me know.
 
-In terms of capabilitites, the emphasis will be on:
-- support for Total Conversation calls with any combination of audio/video/realtime text medias
+In terms of capabilities, the emphasis will be on:
+- support for Total Conversation calls with any combination of audio/video/realtime text media
 - support for SIP over UDP, TCP, TLS and WSS
-- support of WebRTC bitstream and regular RTP bitstream using the Mendooze Media Server
+- support of WebRTC bitstream and regular RTP bitstream using the Medooze Media Server
 - support for clustering and load sharing
 
 ## What is available, what is not.
@@ -37,9 +37,9 @@ In terms of capabilitites, the emphasis will be on:
 - Fully native Elixir SIP stack: implemented
 - Support for SIP over UDP, TCP, TLS and WSS: implemented
 - Media Control interface: implemented
-- Domain Specific Langage definition: in this README
+- Domain Specific Language definition: in this README
 
-- Interface with Mendooze: to be done (priority)
+- Interface with Medooze: to be done (priority)
 - SIP.Scenario Scripting Engine: to be done (priority)
 - Test reporting: to be done
 
@@ -47,15 +47,15 @@ In terms of capabilitites, the emphasis will be on:
 - **borderline**: later
 - **kelixip**: later
 
-## The Domain Specific langage for SIP scenarii
+## The Domain Specific Language for SIP scenarios
 
-This library defines a new [Domain Specific Language](https://elixir.hexdocs.pm/1.20.1/domain-specific-languages.html) 
-specialized for call and SIP related finite state machine. It is not unlike ExUnit. Call or SIP scenarii would be defined as .exs files.
+This library defines a new [Domain Specific Language](https://elixir.hexdocs.pm/1.20.1/domain-specific-languages.html)
+specialized for call and SIP related finite state machines. It is not unlike ExUnit. Call or SIP scenarios would be defined as .exs files.
 
 Here is a "typicall" scenario where:
 
-- and outbound call is placed
-- when call is established, the media server plays a file
+- an outbound call is placed
+- when the call is established, the media server plays a file
 - it hangs up when the file is fully played.
 
 ```Elixir
@@ -138,7 +138,7 @@ defmodule UAC.Invite do
 
       {:BYE, req, _trans_pid, dialog_pid} ->
         SIP.Dialog.reply(dialog_pid, req, 200, "OK", [])
-        scenario_success("BYE"), 
+        scenario_success("BYE")
     end
   end
 # -------------------------------------------------------------------------------
@@ -171,30 +171,31 @@ state state_name do
   receive do
     event1 -> goto next_state, "event 1"
     event2 -> goto another_state, "event 2"
-  endy
+  end
 end
 ```
 
-By convention, **initial_state** is the first state executed when the FSM starts. 
+By convention, **initial_state** is the first state executed when the FSM starts.
 Such a state MUST be declared. Consider it as the main() function in the C language.
 
-The framework defines two terminal states: 
+The framework defines two terminal states:
 - **terminal_success_state** when the scenario is completed as expected.
-- **terminal_error_state** when the scenario encounters any kind of failure.
+- **terminal_failure_state** when the scenario encounters any kind of failure.
 
 Those states are predeclared.
 
-Any Elixir code may be executed when entering the state as long as it is not invoking
-blocking functions or instruction such as Process.sleep() or receive. All processing
-should be kept asynchronous and if possible use Elixir events to return progess or result.
+Any Elixir code may be executed when entering a state, as long as it does not invoke
+blocking functions such as Process.sleep(). Waiting for events must be done through the
+receive primitive (see below), never by busy-waiting or sleeping. All processing should
+be kept asynchronous and, if possible, use Elixir events to report progress or results.
 
-If the code synchronous Elixir code encounters an error (e.g. file does not exists) that
-prevent the scenario to run, it expected that the code calls scenario_failure("reason")
+If the synchronous Elixir code encounters an error (e.g. a file does not exist) that
+prevents the scenario from running, the code is expected to call scenario_failure("reason")
 to abort the scenario explicitly.
 
 The full SIP stack is exposed on purpose in order to enable scenario writers to interact
 at all possible levels. Messages can be created and sent statelessly using SIP.Msg and transport
-modules. SIP transaction can be created. However, one need to understand the possible interaction
+modules. SIP transactions can be created. However, one needs to understand the possible interaction
 of such custom code and the rest of the SIP stack.
 
 For regular cases, it is advised to stick to the macros defined in the SIP.Session.* modules.
@@ -202,11 +203,11 @@ For regular cases, it is advised to stick to the macros defined in the SIP.Sessi
 ### events
 
 Events are native Elixir events collected and received using the Elixir **receive** primitive. Events
-can  be any type but there are two sources of events to consider in SIP scenarii:
+can be any type but there are two sources of events to consider in SIP scenarios:
 
-**SIP dialog events** that are sent by the SIP dialog layer: 
+**SIP dialog events** that are sent by the SIP dialog layer:
 
-Received SIP Requests are formated as an event tuple: 
+Received SIP Requests are formatted as an event tuple:
 
 ```Elixir
 { <request type atom>, <request map>, <transaction_pid>, <dialog_pid> }
@@ -216,11 +217,11 @@ For example:
 
 ```Elixir
   receive do
-    { :BYE, bye_req, _trans_id, _dlg_id_ } -> goto next
+    { :BYE, bye_req, _trans_id, _dlg_id } -> goto next
   end
 ```
 
-Received SIP Responses are formated as an event tuple: 
+Received SIP Responses are formatted as an event tuple:
 
 ```Elixir
 { <response code>, <response map>, <transaction_pid>, <dialog_pid> }
@@ -234,35 +235,35 @@ For example:
   end
 ```
 
-**Media server events** are described in the **Mediaserver** module.
+**Media server events** are described in the **MediaServer** module.
 Those events are formatted as follow:
 
 ```Elixir
-{ :ms_event, <pid of mediaserver>,  <event>}
+{ :ms_event, <pid of mediaserver>, <event>}
 ```
 
 ### transitions: the goto macro, scenario_success(), scenario_failure()
 
-The `goto` macro triggers a state machine transition. This macro takes two argument:
+The `goto` macro triggers a state machine transition. This macro takes two arguments:
 - the next state name
 - a short description of the event triggering the transition (optional).
 
-Using `goto next` triggers a transition to the **next state** declated in the scenario. `goto loop`
-causes the finite state machine to renter the same state.
+Using `goto next` triggers a transition to the **next state** declared in the scenario. `goto loop`
+causes the finite state machine to reenter the same state.
 
 The `goto` macro will:
-- check the state ctx_get(:lasterr) to be `:ok`. If not, abort the scenario using `scenario_failure()`,
-- store the name of the target state as atom in `sip_ctx.currentstate`,
-- if logger is set to debug, the transition is logged as "RCV event: (old state) -> (new state)"
+- check that ctx_get(:lasterr) is `:ok`. If not, abort the scenario using `scenario_failure()`,
+- store the name of the target state as an atom in `sip_ctx.currentstate`,
+- if the logger is set to debug, log the transition as "RCV event: (old state) -> (new state)",
 - transition to the target state, calling it with the modified sip_ctx (handled by the runner, not a direct recursive call). goto must be the last expression of a state body or of a receive clause.
 
 The `scenario_success("reason")` macro must be used to terminate the scenario as successful and transition to the **terminal_success_state**.
-It will log the state before the transtion to final state as an INFO log.
+It will log the state before the transition to the final state as an INFO log.
 
-The `scenario_failure("reason")` macro stores the failure reason, log it as well as the state before the transtion to final state as
+The `scenario_failure("reason")` macro stores the failure reason, logs it as well as the state before the transition to the final state as
 an error log. `scenario_failure()` may be called by the scenario runner in case an error condition is met.
 
-Elixir code may be added before calling goto or other transition macro.
+Elixir code may be added before calling goto or any other transition macro.
 
 ### The scenario context: sip_ctx
 
@@ -270,18 +271,18 @@ All states carry a context that stores SIP configuration information but also al
 that need to be passed around states. The main ones are:
 
 - `sip_ctx.debug` - boolean to activate debug trace for this specific instance of scenario
-- `sip_ctx.dialogid` - PID of the SIP dialog associated with this specific instance of scenario
-- `sip_ctx.lasterr` - atom that describe the last error condition detected by the code executed in the state.
-- `sip_ctx.errorreason` -  a string that describe the detailed reason of errors.
+- `sip_ctx.dialogpid` - PID of the SIP dialog associated with this specific instance of scenario
+- `sip_ctx.lasterr` - atom that describes the last error condition detected by the code executed in the state.
+- `sip_ctx.errorreason` - a string that describes the detailed reason of errors.
 
-Except for `sip_ctx.debug`, all other sip_ctx struct members should NOT be modified manually my the scenario.
+Except for `sip_ctx.debug`, all other sip_ctx struct members should NOT be modified manually by the scenario.
 Their semantic and usage may change as this framework evolves.
-The sip_ctx also provisions an `sip.ctx.appdata` map that can be used as the sole way for scenario
-writer to pass data around states using the `appdata_set()` and `appdata_get()` macros. This should be
+The sip_ctx also provides a `sip_ctx.appdata` map that can be used as the sole way for scenario
+writers to pass data around states using the `appdata_set()` and `appdata_get()` macros. This should be
 the preferred way of passing data around.
 
 ```Elixir
-# Storing some info into the 
+# Storing some info into the context
 appdata_set(:myproperty, "my piece of information")
 
 # retrieving some info from the context
@@ -293,52 +294,78 @@ someinfo = appdata_get(:myproperty)
 
 ## Under the hood of the SIP scenario DSL
 
-Any scenario is a plain Elixir module that `use SIP.Scenario` (see the example
+Any scenario is a plain Elixir module that calls `use SIP.Scenario` (see the example
 above), saved as a `.exs` file. Each **state** of the finite state machine is
-an elixir function.
+an Elixir function.
 
 The context information is stored in a variable always named **sip_ctx** which
 is used by all macros from the SIP.Session.* modules and the MediaServer.*
 modules. The context is updated and passed as argument to all state functions.
 
-The `use SIP.Scenario` block generates a `run/0` entry point that starts the SIP stack 
-(transactions, transport selector, dialog layer, config registry), builds the initial 
+The `use SIP.Scenario` block generates a `run/0` entry point that starts the SIP stack
+(transactions, transport selector, dialog layer, config registry), builds the initial
 `%SIP.Context{}` from the `config` block and enters `initial_state`. `run/0` returns `:ok` on
 `terminal_success_state` and `{:error, reason}` on `terminal_failure_state`.
 
-The `state` macro defines an Elixir function which takes a `%SIP.Context` as sole 
+The `state` macro defines an Elixir function which takes a `%SIP.Context` as sole
 argument.
 
 The `goto` macro
-- check if `sip_ctx.lasterr` is set to `:ok`. If not, it calls `scenario_failure(sip_ctx.lasterr)`
-- Otherwise, store the new state name into `sip_ctx.currentstate`
-- it calls the function passed as first argument, passing the sip_ctx context to the new state.
+- checks if `sip_ctx.lasterr` is set to `:ok`. If not, it calls `scenario_failure(sip_ctx.lasterr)`
+- otherwise, stores the new state name into `sip_ctx.currentstate`
+- calls the function passed as first argument, passing the sip_ctx context to the new state.
 
 If the new state argument is `next`, it determines the name of the next state to consider and
-call `goto <nextstate>, <event>`. If the new state argument is `loop`, it calls 
-`goto sip_ctx.currentstate, <event>`. 
+calls `goto <nextstate>, <event>`. If the new state argument is `loop`, it calls
+`goto sip_ctx.currentstate, <event>`.
 
 When transitioning to any of the terminal states, the scenario runner checks if `sip_ctx.mediaserverpid`
-and `sip_ctx.mediaservermodule` is set. If yes, the scenario runner waits for the `:dialog_terminated`
+and `sip_ctx.mediaservermodule` are set. If yes, the scenario runner waits for the `:dialog_terminated`
 event for maximum 5 seconds then calls media_cleanup_ressources() to deallocate media resources.
 
 Then the scenario runner checks for the existence of a `cleanup` function and calls it with `sip_ctx`
-as arguments.
+as argument.
 
 ## Macro helpers
 
-In order to avoid dealing with low level details, submodules of SIP.Sessions expose helper macros to be used
-in scenario. It should cover most standard cases.
+In order to avoid dealing with low level details, submodules of SIP.Session expose helper macros to be used
+in scenarios. They should cover most standard cases.
+
+All these macros operate on the implicit `sip_ctx` variable: they update it in place and store the
+outcome of the operation in `sip_ctx.lasterr` (`:ok` on success, `{:error, reason}` otherwise).
 
 ### SIP.Session.RegisterUAC
 
-This modules can be used to implement a client registration scenario.
+This module can be used to implement a client registration scenario. It is pulled in by
+`use SIP.Session.RegisterUAC`. It exposes the following helper macros:
 
-
+- `send_REGISTER(expire)` — send an outbound REGISTER, creating the dialog if needed.
+  `expire` is the requested registration lifetime, in seconds.
+- `send_auth_REGISTER(resp_401, expire)` — resend the REGISTER authenticated against the
+  `401 Unauthorized` challenge carried by `resp_401`. The credentials are taken from the
+  scenario `config` (authusername / ha1).
+- `send_OPTIONS()` — send an out-of-dialog OPTIONS request, typically used as a keep-alive / ping.
 
 ### SIP.Session.CallUAC
 
-This modules can be used to implement a client outbound call scenario.
+This module can be used to implement a client outbound call scenario. It is pulled in
+automatically by `use SIP.Scenario`. It exposes the following helper macros:
+
+- `send_INVITE(ruri, sdp_offer, options)` — place an outbound call to `ruri`. `sdp_offer` is
+  either a raw SDP body (binary) or the atom `:mediaserver` to let the connected media server
+  build the offer automatically. `options` is a keyword list:
+    - `timeout:` — INVITE transaction timeout, in seconds (default 20)
+    - `webrtc:` — `:no` for plain RTP, or a WebRTC flavor forwarded to the media server
+- `send_auth_INVITE(resp, ruri, sdp_offer, options)` — resend the INVITE authenticated against a
+  `401`/`407` challenge response `resp`. Same arguments as `send_INVITE`.
+- `process_invite_reply(resp, transaction_id)` — process a `200 OK` or a `183 Session Progress`
+  reply: feed the SDP answer to the media server and, for a `200 OK`, send the ACK automatically.
+- `send_BYE()` — hang up the established call (send an in-dialog BYE).
+- `send_ACK(transaction_id)` — send an ACK manually (normally handled by `process_invite_reply`
+  for the `200 OK`).
+
+The `send_CANCEL(transaction_id)` macro (from `SIP.Session.Common`) can be used to cancel an
+INVITE that has not been answered yet.
 
 
 # elixipp: the testing tool

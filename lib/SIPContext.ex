@@ -82,6 +82,11 @@ defmodule SIP.Context do
     Map.get(context, prop)
   end
 
+  # FSM bookkeeping fields driven by the scenario DSL (goto / scenario_failure).
+  def get(context, prop) when prop in [:currentstate, :errorreason] do
+    Map.get(context, prop)
+  end
+
   def get(context, prop) when is_atom(prop) do
     Map.get(context.appdata, prop)
   end
@@ -162,6 +167,16 @@ defmodule SIP.Context do
 
   def set(ctx, :lasterr, value) do
     Map.put( ctx, :lasterr, value)
+  end
+
+  # Current FSM state name, written by the `goto` macro of the scenario DSL.
+  def set(ctx, :currentstate, value) when is_atom(value) do
+    Map.put( ctx, :currentstate, value)
+  end
+
+  # Human-readable failure reason, written by `scenario_failure/1`.
+  def set(ctx, :errorreason, value) when is_binary(value) do
+    Map.put( ctx, :errorreason, value)
   end
 
   def set(_context, prop, _value) when is_atom(prop) do
