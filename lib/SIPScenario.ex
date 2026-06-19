@@ -201,17 +201,20 @@ defmodule SIP.Scenario do
   end
 
   @doc "Terminate the scenario successfully, transitioning to the success state."
-  defmacro scenario_success(reason \\ "") do
+  defmacro scenario_success(reason \\ "", type \\ nil) do
     quote do
-      {:terminal, :success, unquote(reason), var!(sip_ctx)}
+      event_type = unquote(type) || Process.get(:scenario_event_type)
+      {:terminal, :success, unquote(reason), event_type, var!(sip_ctx)}
     end
   end
 
+  @spec scenario_failure() :: {:__block__, [], [{:=, [...], [...]} | {:{}, [...], [...]}, ...]}
   @doc "Terminate the scenario as a failure, storing `reason` in the context."
-  defmacro scenario_failure(reason \\ "") do
+  defmacro scenario_failure(reason \\ "", type \\ nil) do
     quote do
+      event_type = unquote(type) || Process.get(:scenario_event_type)
       var!(sip_ctx) = SIP.Context.set(var!(sip_ctx), :errorreason, to_string(unquote(reason)))
-      {:terminal, :failure, unquote(reason), var!(sip_ctx)}
+      {:terminal, :failure, unquote(reason), event_type, var!(sip_ctx)}
     end
   end
 

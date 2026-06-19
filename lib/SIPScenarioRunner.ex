@@ -134,12 +134,12 @@ defmodule SIP.Scenario.Runner do
         report(module, target, desc, type)
         loop(module, target, SIP.Context.set(ctx2, :currentstate, target), states)
 
-      {:terminal, :success, reason, ctx2} ->
-        report(module, :succeeded, reason, nil)
+      {:terminal, :success, reason, type, ctx2} ->
+        report(module, :succeeded, reason, type)
         finalize(module, ctx2, :success, reason)
 
-      {:terminal, :failure, reason, ctx2} ->
-        report(module, :failed, reason, nil)
+      {:terminal, :failure, reason, type, ctx2} ->
+        report(module, :failed, reason, type)
         finalize(module, ctx2, :failure, reason)
 
       other ->

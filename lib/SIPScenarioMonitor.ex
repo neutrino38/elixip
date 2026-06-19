@@ -64,7 +64,10 @@ defmodule SIP.Scenario.Monitor do
   @spec note_command(command_type(), String.t() | atom()) :: :ok
   def note_command(type, command) when is_atom(type) do
     if Process.whereis(__MODULE__) do
-      GenServer.cast(__MODULE__, {:command, self(), type, to_string(command)})
+      # Use the stable slot_id set by the CLI duration loop so that successive
+      # runs of the same logical slot recycle the same monitor row.
+      slot_id = Process.get(:scenario_slot_id, self())
+      GenServer.cast(__MODULE__, {:command, slot_id, type, to_string(command)})
     end
 
     :ok
