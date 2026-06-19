@@ -126,13 +126,15 @@ defmodule SIP.Scenario.Runner do
         loop(module, state_name, ctx2, states)
 
       {:goto, target, desc, type, ctx2} when is_atom(target) ->
-        unless target in states do
-          raise "Scenario #{inspect(module)}: goto unknown state #{inspect(target)}"
+        if target in states do
+          log_transition(state_name, target, desc)
+          report(module, target, desc, type)
+          loop(module, target, SIP.Context.set(ctx2, :currentstate, target), states)
+        else
+          raise "Scenario #{inspect(module)} jumped from state #{inspect(state_name)} " <>
+                "to unknown state #{inspect(target)}."
         end
 
-        log_transition(state_name, target, desc)
-        report(module, target, desc, type)
-        loop(module, target, SIP.Context.set(ctx2, :currentstate, target), states)
 
       {:terminal, :success, reason, type, ctx2} ->
         report(module, :succeeded, reason, type)
@@ -143,7 +145,7 @@ defmodule SIP.Scenario.Runner do
         finalize(module, ctx2, :failure, reason)
 
       other ->
-        raise "State #{state_name} of #{inspect(module)} must end with goto / " <>
+        raise "Invalid transition in state #{state_name} does not call goto / " <>
                 "scenario_success / scenario_failure, got: #{inspect(other)}"
     end
   end
