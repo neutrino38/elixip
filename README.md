@@ -302,7 +302,10 @@ appdata_set(:myproperty, "my piece of information")
 someinfo = appdata_get(:myproperty)
 
 ```
+## Exception handling
 
+All uncaught exceptions that are raised in the Elixir code are treated and failure
+and cause the finite state machine to dump the exception in the logs and call scenario_failure()
 
 ## Under the hood of the SIP scenario DSL
 
@@ -382,6 +385,10 @@ INVITE that has not been answered yet.
 
 # elixipp: the testing tool
 
+Elixip testing tool is ment to be a sipp replacement capable of controlling a mediaserver to
+fully simulate SIP calls.
+
+
 ## Writing and running a SIP scenario
 
 
@@ -416,7 +423,7 @@ Without the custom task, the plain equivalent is:
 mix run -e "MyCallScenario.run()" scenarios/my_call_scenario.exs
 ```
 
-### Mode 2 — standalone executable (elixipp)
+### Mode 2 — standalone executable of elixipp
 
 Use this to ship a self-contained tool that runs scenarios without a mix/Elixir
 install. The project builds an [escript](https://hexdocs.pm/mix/Mix.Tasks.Escript.Build.html)
@@ -465,13 +472,10 @@ elixipp --monitor scenarios/my_call_scenario.exs
 ╰────────────────┴────────────────┴──────────────────┴────────────────────────────╯
 ```
 
-The **Commande** column is fed by the instrumented `SIP.Session.*` macros, which
-report their name to the monitor as they run: the SIP send_* macros (`send_INVITE`,
-`send_BYE`, `send_REGISTER`, …) report as type `:sip`, and the media macros
-(`media_connect`, `media_play`, `media_record`, …) as type `:media`. The command
-category (`:sip` / `:media` / `:http` / `:db` / …) is recorded alongside the name
-to drive the future sequence-diagram output. Columns have a fixed width (long
-values are truncated with an ellipsis).
+- The **Commande** column display the last high level macro command used by the scenario.
+- the **Etat** column report the current state
+- the **Evènement
+
 
 Transition **events** can be categorized the same way, via an optional third
 argument to `goto` (`goto target, desc, type`):
@@ -575,7 +579,15 @@ elixip --> bob: 2OO OK
 @enduml
 ```
 
+## Under the hood (elixipp)
 
+Command reporting is fed by the instrumented `SIP.Session.*` macros, which
+report their name to the monitor as they run: the SIP send_* macros (`send_INVITE`,
+`send_BYE`, `send_REGISTER`, …) report as type `:sip`, and the media macros
+(`media_connect`, `media_play`, `media_record`, …) as type `:media`. The command
+category (`:sip` / `:media` / `:http` / `:db` / …) is recorded alongside the name
+to drive the future sequence-diagram output. Columns have a fixed width (long
+values are truncated with an ellipsis).
 
 
 Exchanges between
