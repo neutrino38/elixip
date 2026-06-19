@@ -69,6 +69,27 @@ defmodule SIP.Test.ScenarioEngine do
     end
   end
 
+  # Jumps to a state that does not exist. The runner must stop the scenario as a
+  # failure instead of raising.
+  defmodule UnknownState do
+    use SIP.Scenario
+
+    state initial_state do
+      goto does_not_exist
+    end
+  end
+
+  # A state whose body does not end with goto / scenario_success /
+  # scenario_failure. The runner must stop the scenario as a failure instead of
+  # raising.
+  defmodule MissingGoto do
+    use SIP.Scenario
+
+    state initial_state do
+      :some_unexpected_value
+    end
+  end
+
   # Uses on_events so the event type is inferred from the matched pattern.
   defmodule InferEvents do
     use SIP.Scenario
@@ -112,6 +133,14 @@ defmodule SIP.Test.ScenarioEngine do
   test "calls the optional cleanup/1 callback on termination" do
     assert WithCleanup.run(false) == :ok
     assert_received :cleanup_called
+  end
+
+  test "a goto to an unknown state stops the scenario as a failure" do
+    assert UnknownState.run(false) == {:error, {:unknown_state, :does_not_exist}}
+  end
+
+  test "a state that does not end with a transition stops the scenario as a failure" do
+    assert MissingGoto.run(false) == {:error, {:invalid_transition, :initial_state}}
   end
 
   test "build_context applies config, computes ha1 and keeps unknown keys in appdata" do

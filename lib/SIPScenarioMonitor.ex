@@ -29,7 +29,7 @@ defmodule SIP.Scenario.Monitor do
           event_type: command_type()
         }
 
-  @empty %{scenario: "", command: "", command_type: nil, state: "", event: "", event_type: nil}
+  @empty %{scenario: "", account: "", command: "", command_type: nil, state: "", event: "", event_type: nil}
 
   # ── Public API ──────────────────────────────────────────────────────────────
 
@@ -48,9 +48,9 @@ defmodule SIP.Scenario.Monitor do
   categorizes the triggering event (`:sip`, `:media`, `:timer`, …) — stored for
   the future sequence diagram, mirroring `command_type`.
   """
-  @spec report(pid(), String.t(), atom(), String.t(), command_type()) :: :ok
-  def report(call_id, scenario, state, event, event_type \\ nil) do
-    GenServer.cast(__MODULE__, {:report, call_id, scenario, state, event, event_type})
+  @spec report(pid(), String.t(), String.t(), String.t(), String.t(), command_type()) :: :ok
+  def report(call_id, scenario, username, state, event, event_type \\ nil) do
+    GenServer.cast(__MODULE__, {:report, call_id, scenario, username, state, event, event_type})
   end
 
   @doc """
@@ -79,19 +79,34 @@ defmodule SIP.Scenario.Monitor do
     GenServer.call(__MODULE__, :calls)
   end
 
+  @doc "Remove a slot entry so its row is recycled by the next call on that slot."
+  @spec clear(term()) :: :ok
+  def clear(slot_id) do
+    if Process.whereis(__MODULE__) do
+      GenServer.cast(__MODULE__, {:clear, slot_id})
+    end
+    :ok
+  end
+
   # ── Server ──────────────────────────────────────────────────────────────────
 
   @impl true
   def init(:ok), do: {:ok, %{calls: %{}, seq: 0}}
 
   @impl true
-  def handle_cast({:report, call_id, scenario, state, event, event_type}, st) do
+  def handle_cast({:report, call_id, scenario, username, state, event, event_type}, st) do
     update(st, call_id, %{
       scenario: to_string(scenario),
+      account: to_string(username),
       state: to_string(state),
       event: to_string(event),
       event_type: event_type
     })
+  end
+
+  @impl true
+  def handle_cast({:clear, slot_id}, st) do
+    {:noreply, %{st | calls: Map.delete(st.calls, slot_id)}}
   end
 
   @impl true
@@ -105,7 +120,7 @@ defmodule SIP.Scenario.Monitor do
       st.calls
       |> Map.values()
       |> Enum.sort_by(& &1.idx)
-      |> Enum.map(&Map.take(&1, [:scenario, :command, :command_type, :state, :event, :event_type]))
+      |> Enum.map(&Map.take(&1, [:scenario, :account, :command, :command_type, :state, :event, :event_type]))
 
     {:reply, rows, st}
   end
@@ -115,7 +130,9 @@ defmodule SIP.Scenario.Monitor do
   defp update(st, call_id, fields) do
     {base, seq} =
       case Map.fetch(st.calls, call_id) do
-        :error -> {Map.put(@empty, :idx, st.seq), st.seq + 1}
+        :error ->
+          idx = if is_integer(call_id), do: call_id, else: st.seq
+          {Map.put(@empty, :idx, idx), st.seq + 1}
         {:ok, existing} -> {existing, st.seq}
       end
 

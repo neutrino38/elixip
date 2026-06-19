@@ -78,7 +78,7 @@ defmodule SIP.Scenario.Runner do
       |> build_context()
       |> SIP.Context.set(:currentstate, :initial_state)
 
-    report(module, :initial_state, "start", nil)
+    report(module, "", :initial_state, "start", nil)
     loop(module, :initial_state, ctx, states)
   end
 
@@ -117,36 +117,45 @@ defmodule SIP.Scenario.Runner do
       {:goto, :next, desc, type, ctx2} ->
         next = next_state(state_name, states)
         log_transition(state_name, next, desc)
-        report(module, next, desc, type)
+        report(module, ctx2.username, next, desc, type)
         loop(module, next, SIP.Context.set(ctx2, :currentstate, next), states)
 
       {:goto, :loop, desc, type, ctx2} ->
         log_transition(state_name, state_name, desc)
-        report(module, state_name, desc, type)
+        report(module, ctx2.username, state_name, desc, type)
         loop(module, state_name, ctx2, states)
 
       {:goto, target, desc, type, ctx2} when is_atom(target) ->
         if target in states do
           log_transition(state_name, target, desc)
-          report(module, target, desc, type)
+          report(module, ctx2.username, target, desc, type)
           loop(module, target, SIP.Context.set(ctx2, :currentstate, target), states)
         else
-          raise "Scenario #{inspect(module)} jumped from state #{inspect(state_name)} " <>
-                "to unknown state #{inspect(target)}."
+          reason = "jumped from state #{inspect(state_name)} to unknown state #{inspect(target)}"
+          Logger.error("Scenario #{inspect(module)} #{reason}.")
+          report(module, ctx2.username, :failed, "unknown state #{target}", type)
+          finalize(module, ctx2, :failure, {:unknown_state, target})
         end
 
 
       {:terminal, :success, reason, type, ctx2} ->
-        report(module, :succeeded, reason, type)
+        report(module, ctx2.username, :succeeded, reason, type)
         finalize(module, ctx2, :success, reason)
 
       {:terminal, :failure, reason, type, ctx2} ->
-        report(module, :failed, reason, type)
+        report(module, ctx2.username, :failed, reason, type)
         finalize(module, ctx2, :failure, reason)
 
+      # A state must end with goto / scenario_success / scenario_failure. Anything
+      # else is a malformed transition: stop the scenario cleanly as a failure
+      # rather than crashing the running process with a raw exception.
       other ->
-        raise "Invalid transition in state #{state_name} does not call goto / " <>
-                "scenario_success / scenario_failure, got: #{inspect(other)}"
+        Logger.error(
+          "Invalid transition in state #{state_name}: a state must end with goto / " <>
+            "scenario_success / scenario_failure, got: #{inspect(other)}"
+        )
+        report(module, ctx.username, :failed, "invalid transition", nil)
+        finalize(module, ctx, :failure, {:invalid_transition, state_name})
     end
   end
 
@@ -167,9 +176,10 @@ defmodule SIP.Scenario.Runner do
   # `event_type` categorizes the triggering event (`:sip`, `:media`, …) for the
   # future sequence diagram. No-op (and no dependency on the monitor) when
   # monitoring is off.
-  defp report(module, state, event, event_type) do
+  defp report(module, username, state, event, event_type) do
     if Process.whereis(SIP.Scenario.Monitor) do
-      SIP.Scenario.Monitor.report(self(), scenario_label(module), state, event_label(event), event_type)
+      call_id = Process.get(:scenario_slot_id, self())
+      SIP.Scenario.Monitor.report(call_id, scenario_label(module), username, state, event_label(event), event_type)
     end
 
     :ok

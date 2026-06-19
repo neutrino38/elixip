@@ -454,6 +454,33 @@ a single file, but it still relies on an Erlang/OTP runtime (`erl` / `escript`)
 being available on the host. Like `mix scenario`, it exits with `0` on success
 and `1` on failure.
 
+### Command-line options
+
+```bash
+elixipp [OPTIONS] <scenario.exs | ModuleName>
+```
+
+| Option | Meaning | Default |
+|---|---|---|
+| `-m`, `--monitor` | Display a live table of the calls in progress. | off |
+| `-l N`, `--limit N` | Run `N` calls simultaneously. Without `--max-run`, slots are recycled indefinitely. The live table is shown only with `--monitor`; otherwise the run is silent and prints the final summary. | `1` |
+| `--max-run N` | Stop after `N` executions in total. | unlimited (`1` when neither `--limit` nor `--max-run` is set) |
+| `--rate N` | Number of calls started per second. Each new call creation is spaced by `1000 / N` ms. Values greater than `100` are ignored and fall back to the default. | `10` |
+| `-h`, `--help` | Show the help text. | — |
+
+```bash
+# 5 simultaneous calls, starting at most 20 new calls per second
+elixipp -l 5 --rate 20 scenarios/my_call_scenario.exs
+```
+
+In live mode the following keys are available:
+
+| Key | Action |
+|---|---|
+| `q` | Graceful shutdown: stop starting new calls, wait for the active ones. |
+| `Ctrl+D` | Immediate stop: print the summary and halt right away. |
+| `↑` / `↓` | Scroll the call table when it exceeds the terminal height. |
+
 ### Live monitor (`--monitor`)
 
 The `--monitor` (or `-m`) flag displays a live table of the calls in progress —

@@ -54,6 +54,12 @@ alias SIP.NetUtils
             Logger.debug("Started transport #{inspect(uri.tp_module)} process with PID #{inspect(t_pid)}")
             { :ok, %SIP.Uri{ uri | tp_pid: t_pid } }
 
+          # Race between concurrent scenario instances: another one registered
+          # the same transport instance first. Reuse the already-started pid.
+          { :error, { :already_started, t_pid } } ->
+            Logger.debug("Transport #{inspect(uri.tp_module)} already started with PID #{inspect(t_pid)}, reusing it")
+            { :ok, %SIP.Uri{ uri | tp_pid: t_pid } }
+
           { :error, :networkdown } ->
             Logger.error([ module: __MODULE__, message: "Failed to start transport #{uri.destproto}: No network connection" ])
             { :error, :failedtostart }
@@ -62,9 +68,17 @@ alias SIP.NetUtils
             Logger.error([ module: __MODULE__, message: "Failed to start transport #{uri.destproto}: failed to connect to UAS" ])
             { :error, :failedtostart }
 
-          { :error, { errtype, stacktrace }} ->
-            Logger.error([ module: __MODULE__, message: "Failed to start transport #{uri.destproto}. Reported error #{errtype}" ])
+          # A crash during init returns { reason, stacktrace }. Only format the
+          # stacktrace when it actually is one — other { atom, term } shapes
+          # (e.g. already_started carrying a pid) would otherwise blow up the
+          # formatter with a Protocol.UndefinedError.
+          { :error, { errtype, stacktrace }} when is_list(stacktrace) ->
+            Logger.error([ module: __MODULE__, message: "Failed to start transport #{uri.destproto}. Reported error #{inspect(errtype)}" ])
             Logger.error(Exception.format(:error, { errtype, stacktrace }, stacktrace))
+            { :error, :failedtostart }
+
+          { :error, reason } ->
+            Logger.error([ module: __MODULE__, message: "Failed to start transport #{uri.destproto}. Reported error #{inspect(reason)}" ])
             { :error, :failedtostart }
 
         end

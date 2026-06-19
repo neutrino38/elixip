@@ -128,6 +128,7 @@ defmodule SIP.Scenario do
     fname = :"__state_#{name}"
 
     quote do
+      require Logger
       @scenario_states unquote(name)
       def unquote(fname)(var!(sip_ctx)) do
         # Touch sip_ctx so a state whose body rebinds it before reading does not
@@ -175,7 +176,9 @@ defmodule SIP.Scenario do
         event_type = unquote(type) || Process.get(:scenario_event_type)
         {:goto, unquote(target), unquote(desc), event_type, var!(sip_ctx)}
       else
-        {:terminal, :failure, var!(sip_ctx).lasterr, var!(sip_ctx)}
+        # lasterr aborts the scenario as a failure. Keep the same 5-tuple shape
+        # (with the inferred event type) the runner expects for terminals.
+        {:terminal, :failure, var!(sip_ctx).lasterr, Process.get(:scenario_event_type), var!(sip_ctx)}
       end
     end
   end
