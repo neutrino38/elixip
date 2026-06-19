@@ -69,6 +69,28 @@ defmodule SIP.Test.ScenarioEngine do
     end
   end
 
+  # Uses on_events so the event type is inferred from the matched pattern.
+  defmodule InferEvents do
+    use SIP.Scenario
+
+    config username: "alice", domain: "example.com"
+
+    state initial_state do
+      on_events do
+        {:ms_event, _conn, _evt} -> goto holding, "media event"
+        {code, _r, _t, _d} when is_integer(code) -> goto holding, "sip response"
+      end
+    end
+
+    state holding do
+      # Plain receive: stay until the test releases us, so the monitor can be
+      # inspected before the terminal report overwrites the event type.
+      receive do
+        :stop -> scenario_success("ok")
+      end
+    end
+  end
+
   # ── Tests ───────────────────────────────────────────────────────────────────
 
   test "runs the FSM through next / named / loop transitions to success" do
@@ -118,5 +140,30 @@ defmodule SIP.Test.ScenarioEngine do
     assert SIP.Scenario.start_stack() == :ok
     assert Basic.run(false) == :ok
     assert Basic.run(false) == :ok
+  end
+
+  test "on_events infers the event type and feeds it to the monitor" do
+    {:ok, _} = SIP.Scenario.Monitor.start()
+
+    parent = self()
+    pid = spawn(fn -> send(parent, {:done, InferEvents.run(false)}) end)
+    # An :ms_event must be inferred as :media. Check before sending :stop, since
+    # the terminal report would overwrite the event type.
+    send(pid, {:ms_event, make_ref(), :ice_connected})
+    assert wait_for_event_type(:media, 100) == :media
+
+    send(pid, :stop)
+    assert_receive {:done, :ok}, 2_000
+  end
+
+  defp wait_for_event_type(_type, 0), do: :timeout
+
+  defp wait_for_event_type(type, attempts) do
+    if Enum.any?(SIP.Scenario.Monitor.calls(), &(&1.event_type == type)) do
+      type
+    else
+      Process.sleep(10)
+      wait_for_event_type(type, attempts - 1)
+    end
   end
 end

@@ -31,7 +31,10 @@ defmodule SIPParser.MixProject do
       {:jason, "~> 1.4"},
       # Fork adding active mode for WebSocket (delivers {:web, socket, data} to the owner)
       {:socket2, github: "neutrino38/elixir-socket", branch: "feat/active-ws"},
-      {:ex_sdp, "~> 1.1.1"}
+      {:ex_sdp, "~> 1.1.1"},
+      # Pure-Elixir terminal UI (tables + live screen) for the elixipp --monitor view.
+      # No C NIF (its only dep, ucwidth, is optional), so it bundles cleanly in the escript.
+      {:owl, "~> 0.12"}
     ]
   end
 end

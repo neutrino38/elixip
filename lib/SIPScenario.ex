@@ -70,8 +70,10 @@ defmodule SIP.Scenario do
         only: [
           config: 1,
           state: 2,
+          on_events: 1,
           goto: 1,
           goto: 2,
+          goto: 3,
           scenario_success: 0,
           scenario_success: 1,
           scenario_failure: 0,
@@ -131,6 +133,9 @@ defmodule SIP.Scenario do
         # Touch sip_ctx so a state whose body rebinds it before reading does not
         # trigger an "unused variable" warning.
         _ = var!(sip_ctx)
+        # Clear the event type inferred by on_events, so a `goto` in this state
+        # that is not inside a on_events clause stays untyped.
+        Process.delete(:scenario_event_type)
         unquote(body)
       end
     end
@@ -139,20 +144,60 @@ defmodule SIP.Scenario do
   @doc """
   Transition to another state. `target` may be a state name, `next` (the next
   declared state) or `loop` (re-enter the current state). `desc` is an optional
-  short description of the triggering event, used for logging.
+  short description of the triggering event, used for logging and shown in the
+  monitor. `type` optionally categorizes that event (`:sip`, `:media`, `:timer`,
+  `:http`, `:db`, …) — recorded by the monitor to drive the future sequence
+  diagram, mirroring the command typing of the `SIP.Session.*` macros.
+
+  When `type` is omitted and the `goto` runs inside a `on_events` clause, the
+  type is inferred from the matched event (`:media` for `{:ms_event, …}`, `:sip`
+  for the other SIP tuples). An explicit `type` always wins.
+
+      goto call_answered, "200 OK", :sip
+      goto start_play, "media connected", :media
 
   Aborts the scenario as a failure if `sip_ctx.lasterr` is not `:ok`.
   """
-  defmacro goto(target_ast, desc \\ nil) do
+  defmacro goto(target_ast, desc \\ nil, type \\ nil) do
     target = state_atom(target_ast)
 
     quote do
       if var!(sip_ctx).lasterr == :ok do
-        {:goto, unquote(target), unquote(desc), var!(sip_ctx)}
+        # An explicit type wins; otherwise fall back to the type inferred by the
+        # enclosing on_events clause (nil when not in one).
+        event_type = unquote(type) || Process.get(:scenario_event_type)
+        {:goto, unquote(target), unquote(desc), event_type, var!(sip_ctx)}
       else
         {:terminal, :failure, var!(sip_ctx).lasterr, var!(sip_ctx)}
       end
     end
+  end
+
+  @doc """
+  Like Elixir's `receive`, but each clause records the *type* of the matched
+  event so the trailing `goto` is automatically categorized (no need to pass the
+  type explicitly). The type is inferred from the clause pattern: `{:ms_event,
+  …}` → `:media`, any other SIP tuple (`{100, …}`, `{:BYE, …}`, `{code, …}`) →
+  `:sip`. The optional `after` clause is left untouched.
+
+      on_events do
+        {200, rsp, trans, _dlg} -> process_invite_reply(rsp, trans); goto answered, "200 OK"
+        {:ms_event, _c, :ice_connected} -> goto play, "media connected"
+      after
+        30_000 -> scenario_failure("timeout")
+      end
+  """
+  defmacro on_events(blocks) do
+    do_clauses = Keyword.fetch!(blocks, :do)
+    instrumented = Enum.map(do_clauses, &instrument_receive_clause/1)
+
+    new_blocks =
+      case Keyword.fetch(blocks, :after) do
+        {:ok, after_clauses} -> [do: instrumented, after: after_clauses]
+        :error -> [do: instrumented]
+      end
+
+    {:receive, [], [new_blocks]}
   end
 
   @doc "Terminate the scenario successfully, transitioning to the success state."
@@ -175,4 +220,39 @@ defmodule SIP.Scenario do
   # or a literal atom.
   defp state_atom({name, _meta, context}) when is_atom(name) and is_atom(context), do: name
   defp state_atom(name) when is_atom(name), do: name
+
+  # ── on_events event-type inference (compile time) ─────────────────────────
+
+  # Prepend the inferred event type (stored in the process dict) to a receive
+  # clause body, so the trailing `goto` picks it up.
+  defp instrument_receive_clause({:->, meta, [head, body]}) do
+    type = clause_event_type(head)
+
+    new_body =
+      quote do
+        Process.put(:scenario_event_type, unquote(type))
+        unquote(body)
+      end
+
+    {:->, meta, [head, new_body]}
+  end
+
+  # The clause head is a one-element list holding the pattern, optionally wrapped
+  # in a `when` guard.
+  defp clause_event_type([{:when, _meta, [pattern | _guards]}]), do: pattern_event_type(pattern)
+  defp clause_event_type([pattern]), do: pattern_event_type(pattern)
+  defp clause_event_type(_), do: nil
+
+  # Tuples with 0, 1 or 3+ elements are `{:{}, _, elems}`; 2-tuples are literal.
+  defp pattern_event_type({:{}, _meta, [first | _rest]}), do: first_element_type(first)
+  defp pattern_event_type({first, _second}), do: first_element_type(first)
+  defp pattern_event_type(_), do: nil
+
+  # Media events are `{:ms_event, ...}`; SIP requests/responses are tuples whose
+  # first element is a method atom, a status code integer, or a bound variable.
+  defp first_element_type(:ms_event), do: :media
+  defp first_element_type(first) when is_atom(first), do: :sip
+  defp first_element_type(first) when is_integer(first), do: :sip
+  defp first_element_type({name, _meta, ctx}) when is_atom(name) and is_atom(ctx), do: :sip
+  defp first_element_type(_), do: nil
 end

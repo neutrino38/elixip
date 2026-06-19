@@ -38,10 +38,13 @@ In terms of capabilities, the emphasis will be on:
 - Support for SIP over UDP, TCP, TLS and WSS: implemented
 - Media Control interface: implemented
 - Domain Specific Language definition: in this README
+- SIP.Scenario Scripting Engine: done
+- Interactive command elixpp for testing tools: done
+- Interactive display for elixipp: done
+- multple calls + max duration of test and final reporting: to be done
 
 - Interface with Medooze: to be done (priority)
-- SIP.Scenario Scripting Engine: to be done (priority)
-- Test reporting: to be done
+
 
 - distributed cluster tech: later
 - **borderline**: later
@@ -89,7 +92,7 @@ defmodule UAC.Invite do
   end
 # -------------------------------------------------------------------------------
   state call_progress do
-    receive do
+    on_events do
       {100, _rsp, _trans_pid, _dialog_pid} -> goto loop, "100 Trying"
 
       {407, rsp, _trans_pid, _dialog_pid} ->
@@ -114,7 +117,7 @@ defmodule UAC.Invite do
   end
 # -------------------------------------------------------------------------------
   state call_answered do
-    receive do
+    on_events do
       {:ms_event, _conn, :ice_connected} -> goto start_play, "media connected"
     after
       5_000 -> scenario_failure("No media received after 5s")
@@ -127,7 +130,7 @@ defmodule UAC.Invite do
   end
 # -------------------------------------------------------------------------------
   state call_established do
-    receive do
+    on_events do
       {:ms_event, _player, :player_started} -> goto loop, "toto.mp4: start"
 
       {:ms_event, _player, :player_ended} -> goto hangup_call, "toto.mp4: EOF"
@@ -145,7 +148,7 @@ defmodule UAC.Invite do
   state hangup_call do
     send_BYE()
 
-    receive do
+    on_events do
       {200, _bye_rsp, _trans_pid, _dialog_pid} -> scenario_success("200 OK")
     after
       4_000 -> scenario_failure("No 200 OK received for BYE")
@@ -168,12 +171,19 @@ using the keyword **state** as follows:
 ```Elixir
 state state_name do
   <some elixir code>
-  receive do
+  on_events do
     event1 -> goto next_state, "event 1"
     event2 -> goto another_state, "event 2"
   end
 end
 ```
+
+`on_events` behaves like Elixir's `receive`, but additionally infers the
+*type* of the matched event from the clause pattern (`{:ms_event, …}` → `:media`,
+the other SIP tuples → `:sip`) and attaches it to the following `goto`. This is
+purely for display / the future sequence diagram (see the monitor section); the
+plain `receive` form also works, it just leaves events untyped. An explicit type
+on `goto` (`goto state, "desc", :media`) always wins.
 
 By convention, **initial_state** is the first state executed when the FSM starts.
 Such a state MUST be declared. Consider it as the main() function in the C language.
@@ -185,9 +195,10 @@ The framework defines two terminal states:
 Those states are predeclared.
 
 Any Elixir code may be executed when entering a state, as long as it does not invoke
-blocking functions such as Process.sleep(). Waiting for events must be done through the
-receive primitive (see below), never by busy-waiting or sleeping. All processing should
-be kept asynchronous and, if possible, use Elixir events to report progress or results.
+blocking functions such as Process.sleep(). Waiting for events must be done through
+`on_events` (or the bare `receive`) as shown below, never by busy-waiting or sleeping.
+All processing should be kept asynchronous and, if possible, use Elixir events to
+report progress or results.
 
 If the synchronous Elixir code encounters an error (e.g. a file does not exist) that
 prevents the scenario from running, the code is expected to call scenario_failure("reason")
@@ -202,8 +213,9 @@ For regular cases, it is advised to stick to the macros defined in the SIP.Sessi
 
 ### events
 
-Events are native Elixir events collected and received using the Elixir **receive** primitive. Events
-can be any type but there are two sources of events to consider in SIP scenarios:
+Events are native Elixir messages, collected with `on_events` (a thin wrapper around
+the Elixir **receive** primitive that also infers the event type). Events can be any
+type but there are two sources of events to consider in SIP scenarios:
 
 **SIP dialog events** that are sent by the SIP dialog layer:
 
@@ -216,7 +228,7 @@ Received SIP Requests are formatted as an event tuple:
 For example:
 
 ```Elixir
-  receive do
+  on_events do
     { :BYE, bye_req, _trans_id, _dlg_id } -> goto next
   end
 ```
@@ -230,7 +242,7 @@ Received SIP Responses are formatted as an event tuple:
 For example:
 
 ```Elixir
-  receive do
+  on_events do
     { 200, resp_200, trans_id, _dlg_id } -> goto next
   end
 ```
@@ -255,7 +267,7 @@ The `goto` macro will:
 - check that ctx_get(:lasterr) is `:ok`. If not, abort the scenario using `scenario_failure()`,
 - store the name of the target state as an atom in `sip_ctx.currentstate`,
 - if the logger is set to debug, log the transition as "RCV event: (old state) -> (new state)",
-- transition to the target state, calling it with the modified sip_ctx (handled by the runner, not a direct recursive call). goto must be the last expression of a state body or of a receive clause.
+- transition to the target state, calling it with the modified sip_ctx (handled by the runner, not a direct recursive call). goto must be the last expression of a state body or of an `on_events` / `receive` clause.
 
 The `scenario_success("reason")` macro must be used to terminate the scenario as successful and transition to the **terminal_success_state**.
 It will log the state before the transition to the final state as an INFO log.
@@ -434,6 +446,57 @@ The escript bundles the compiled BEAM modules of Elixip and its dependencies int
 a single file, but it still relies on an Erlang/OTP runtime (`erl` / `escript`)
 being available on the host. Like `mix scenario`, it exits with `0` on success
 and `1` on failure.
+
+### Live monitor (`--monitor`)
+
+The `--monitor` (or `-m`) flag displays a live table of the calls in progress —
+one row per running scenario instance — with the scenario name, the last command
+it issued, its current FSM state and the event that triggered the last transition:
+
+```bash
+elixipp --monitor scenarios/my_call_scenario.exs
+```
+
+```
+╭────────────────┬────────────────┬──────────────────┬────────────────────────────╮
+│Scénario        │Commande        │État              │Événement                   │
+├────────────────┼────────────────┼──────────────────┼────────────────────────────┤
+│UAC.Invite      │send_INVITE     │call_established  │toto.mp4: start             │
+╰────────────────┴────────────────┴──────────────────┴────────────────────────────╯
+```
+
+The **Commande** column is fed by the instrumented `SIP.Session.*` macros, which
+report their name to the monitor as they run: the SIP send_* macros (`send_INVITE`,
+`send_BYE`, `send_REGISTER`, …) report as type `:sip`, and the media macros
+(`media_connect`, `media_play`, `media_record`, …) as type `:media`. The command
+category (`:sip` / `:media` / `:http` / `:db` / …) is recorded alongside the name
+to drive the future sequence-diagram output. Columns have a fixed width (long
+values are truncated with an ellipsis).
+
+Transition **events** can be categorized the same way, via an optional third
+argument to `goto` (`goto target, desc, type`):
+
+```elixir
+goto call_answered, "200 OK", :sip
+goto start_play, "media connected", :media
+```
+
+In practice you rarely write the type by hand: using `on_events` (instead of
+`receive`) infers it from the matched event pattern, so SIP events show green and
+media events orange automatically. The explicit third argument is only needed to
+override the inference or to type a `goto` outside an `on_events`. The event type
+is stored next to the event text (also for the sequence diagram).
+
+On a real terminal the cells are color-coded: the **Commande** and **Événement**
+cells use light green for `:sip`, orange for `:media` and light blue for anything
+else, and the **État** cell turns green on success and red on failure. Colors are
+emitted only on a TTY — the non-interactive snapshot stays plain text.
+
+The view is rendered with [Owl](https://hexdocs.pm/owl) (pure Elixir, bundled in
+the escript). On a real terminal the table refreshes in place; on a non-interactive
+device (a pipe, a CI log) it degrades to a single final snapshot. Today a single
+row is shown; the table is built to hold one row per call once scenarios run in
+parallel.
 
 ## Logging
 

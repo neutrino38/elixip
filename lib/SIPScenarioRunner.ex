@@ -78,6 +78,7 @@ defmodule SIP.Scenario.Runner do
       |> build_context()
       |> SIP.Context.set(:currentstate, :initial_state)
 
+    report(module, :initial_state, "start", nil)
     loop(module, :initial_state, ctx, states)
   end
 
@@ -113,27 +114,32 @@ defmodule SIP.Scenario.Runner do
     fun = :"__state_#{state_name}"
 
     case apply(module, fun, [ctx]) do
-      {:goto, :next, desc, ctx2} ->
+      {:goto, :next, desc, type, ctx2} ->
         next = next_state(state_name, states)
         log_transition(state_name, next, desc)
+        report(module, next, desc, type)
         loop(module, next, SIP.Context.set(ctx2, :currentstate, next), states)
 
-      {:goto, :loop, desc, ctx2} ->
+      {:goto, :loop, desc, type, ctx2} ->
         log_transition(state_name, state_name, desc)
+        report(module, state_name, desc, type)
         loop(module, state_name, ctx2, states)
 
-      {:goto, target, desc, ctx2} when is_atom(target) ->
+      {:goto, target, desc, type, ctx2} when is_atom(target) ->
         unless target in states do
           raise "Scenario #{inspect(module)}: goto unknown state #{inspect(target)}"
         end
 
         log_transition(state_name, target, desc)
+        report(module, target, desc, type)
         loop(module, target, SIP.Context.set(ctx2, :currentstate, target), states)
 
       {:terminal, :success, reason, ctx2} ->
+        report(module, :succeeded, reason, nil)
         finalize(module, ctx2, :success, reason)
 
       {:terminal, :failure, reason, ctx2} ->
+        report(module, :failed, reason, nil)
         finalize(module, ctx2, :failure, reason)
 
       other ->
@@ -153,6 +159,26 @@ defmodule SIP.Scenario.Runner do
   defp log_transition(from, to, desc) do
     suffix = if desc in [nil, ""], do: "", else: ": #{desc}"
     Logger.debug("RCV event: (#{from}) -> (#{to})#{suffix}")
+  end
+
+  # Report the current state of this call to the live monitor, if it is running.
+  # `event_type` categorizes the triggering event (`:sip`, `:media`, …) for the
+  # future sequence diagram. No-op (and no dependency on the monitor) when
+  # monitoring is off.
+  defp report(module, state, event, event_type) do
+    if Process.whereis(SIP.Scenario.Monitor) do
+      SIP.Scenario.Monitor.report(self(), scenario_label(module), state, event_label(event), event_type)
+    end
+
+    :ok
+  end
+
+  defp scenario_label(module), do: module |> Module.split() |> Enum.join(".")
+
+  # The event/reason may be any term (e.g. a `{:error, _}` lasterr tuple used as
+  # a failure reason), so stringify safely rather than assuming String.Chars.
+  defp event_label(event) do
+    if String.Chars.impl_for(event), do: to_string(event), else: inspect(event)
   end
 
   # ── Termination ──────────────────────────────────────────────────────────

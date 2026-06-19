@@ -183,18 +183,21 @@ defmodule SIP.Session do
 
         defmacro send_REGISTER(expire) do
           quote do
+            SIP.Scenario.Monitor.note_command(:sip, "send_REGISTER")
             var!(sip_ctx) = SIP.Session.RegisterUAC.client_register(var!(sip_ctx), unquote(expire))
           end
         end
 
         defmacro send_auth_REGISTER(resp_401, expire) do
           quote do
+            SIP.Scenario.Monitor.note_command(:sip, "send_auth_REGISTER")
             var!(sip_ctx) = SIP.Session.RegisterUAC.auth_register(var!(sip_ctx), unquote(resp_401), unquote(expire))
           end
         end
 
         defmacro send_OPTIONS() do
           quote do
+            SIP.Scenario.Monitor.note_command(:sip, "send_OPTIONS")
             var!(sip_ctx) = SIP.Session.RegisterUAC.send_options(var!(sip_ctx))
           end
         end
@@ -283,36 +286,42 @@ defmodule SIP.Session do
       quote do
         defmacro media_connect(module, url) do
           quote do
+            SIP.Scenario.Monitor.note_command(:media, "media_connect")
             var!(sip_ctx) = SIP.Session.Media.use_mediaserver(var!(sip_ctx), unquote(module), unquote(url))
           end
         end
 
         defmacro media_start_echo() do
           quote do
+            SIP.Scenario.Monitor.note_command(:media, "media_start_echo")
             var!(sip_ctx) = SIP.Session.Media.start_echo(var!(sip_ctx))
           end
         end
 
         defmacro media_play(file_path, opts \\ []) do
           quote do
+            SIP.Scenario.Monitor.note_command(:media, "media_play")
             var!(sip_ctx) = SIP.Session.Media.start_player(var!(sip_ctx), unquote(file_path), unquote(opts))
           end
         end
 
         defmacro media_record(file_path, duration_ms, opts \\ []) do
           quote do
+            SIP.Scenario.Monitor.note_command(:media, "media_record")
             var!(sip_ctx) = SIP.Session.Media.start_recorder(var!(sip_ctx), unquote(file_path), unquote(duration_ms), unquote(opts))
           end
         end
 
         defmacro media_stop() do
           quote do
+            SIP.Scenario.Monitor.note_command(:media, "media_stop")
             var!(sip_ctx) = SIP.Session.Media.stop_media(var!(sip_ctx))
           end
         end
 
         defmacro media_cleanup_ressources() do
           quote do
+            SIP.Scenario.Monitor.note_command(:media, "media_cleanup_ressources")
             var!(sip_ctx) = SIP.Session.Media.media_cleanup_ressources(var!(sip_ctx))
           end
         end
@@ -571,12 +580,14 @@ defmodule SIP.Session do
 
         defmacro send_INVITE(ruri, sdp_offer, options) do
           quote do
+            SIP.Scenario.Monitor.note_command(:sip, "send_INVITE")
             var!(sip_ctx) = SIP.Session.CallUAC.client_invite(var!(sip_ctx), unquote(ruri), unquote(sdp_offer), unquote(options))
           end
         end
 
         defmacro send_auth_INVITE(resp, ruri, sdp_offer, options) do
           quote do
+            SIP.Scenario.Monitor.note_command(:sip, "send_auth_INVITE")
             var!(sip_ctx) = SIP.Session.CallUAC.auth_invite(var!(sip_ctx), unquote(resp), unquote(ruri), unquote(sdp_offer), unquote(options))
           end
         end
@@ -599,12 +610,14 @@ defmodule SIP.Session do
 
         defmacro send_BYE() do
           quote do
+            SIP.Scenario.Monitor.note_command(:sip, "send_BYE")
             var!(sip_ctx) = SIP.Session.CallUAC.client_bye(var!(sip_ctx))
           end
         end
 
         defmacro send_ACK(transaction_id) do
           quote do
+            SIP.Scenario.Monitor.note_command(:sip, "send_ACK")
             SIP.Session.CallUAC.ack(var!(sip_ctx), unquote(transaction_id))
           end
         end
@@ -766,6 +779,7 @@ defmodule SIP.Session do
 
     defmacro send_CANCEL(transaction_id) do
         quote do
+          SIP.Scenario.Monitor.note_command(:sip, "send_CANCEL")
           var!(sip_ctx) = SIP.Session.Common.cancel(var!(sip_ctx), unquote(transaction_id))
         end
     end

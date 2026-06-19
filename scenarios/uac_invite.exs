@@ -4,20 +4,28 @@ defmodule UAC.Invite do
   use SIP.Scenario
 
   @mediaservermod MediaServer.Mockup
-  @domain "mydomain.com"
-  @callee "sip:testcall@#{@domain}"
+
+  @username "33970262546"
+  @authusername "33970262546"
+  @displayname "Test User"
+  @domain "visioassistance.net"
+  @proxy "sip.djanah.com"
+  @passwd "TestKam1"
+  @callee "sip:90901@#{@domain}"
 
   # SIP identity for the scenario. The framework reads this block to build the
   # initial %SIP.Context{} (computing :ha1 from :passwd) before initial_state.
-  config username: "toto",
-         authusername: "toto",
-         displayname: "La tete a toto",
+  config username: @username,
+         authusername: @authusername,
+         displayname: @displayname,
          domain: @domain,
-         proxy: "sip.mydomain.com",
-         passwd: "xxxx"
+         proxy: @proxy,
+         passwd: @passwd
 
   # -------------------------------------------------------------------------------
   state initial_state do
+    Application.put_env(:elixip2, :proxyuri, %SIP.Uri{domain: @proxy, scheme: "sip:", port: 5060})
+    Application.put_env(:elixip2, :proxyusesrv, false)
     media_connect(@mediaservermod, "sip:localhost:8080")
     goto next
   end
@@ -30,7 +38,9 @@ defmodule UAC.Invite do
 
   # -------------------------------------------------------------------------------
   state call_progress do
-    receive do
+    # on_events infers the event type from each clause (here :sip), so the
+    # monitor colors the transitions without an explicit type on goto.
+    on_events do
       {100, _rsp, _trans_pid, _dialog_pid} ->
         goto loop, "100 Trying"
 
@@ -58,7 +68,7 @@ defmodule UAC.Invite do
 
   # -------------------------------------------------------------------------------
   state call_answered do
-    receive do
+    on_events do
       {:ms_event, _conn, :ice_connected} -> goto start_play, "media connected"
     after
       5_000 -> scenario_failure("No media received after 5s")
@@ -73,7 +83,7 @@ defmodule UAC.Invite do
 
   # -------------------------------------------------------------------------------
   state call_established do
-    receive do
+    on_events do
       {:ms_event, _player, :player_started} -> goto loop, "toto.mp4: start"
 
       {:ms_event, _player, :player_ended} -> goto hangup_call, "toto.mp4: EOF"
@@ -92,7 +102,7 @@ defmodule UAC.Invite do
   state hangup_call do
     send_BYE()
 
-    receive do
+    on_events do
       {200, _bye_rsp, _trans_pid, _dialog_pid} -> scenario_success("200 OK")
     after
       4_000 -> scenario_failure("No 200 OK received for BYE")
