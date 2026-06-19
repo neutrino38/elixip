@@ -17,8 +17,10 @@ defmodule SIP.Context do
     debug: false,
     dialogpid: nil,
     lasterr: :ok,
+    errorreason: "",
     mediaservermodule: nil,
     mediaserverpid: nil,
+    currentstate: nil,
     appdata: %{}
   ]
 
