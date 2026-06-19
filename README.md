@@ -434,3 +434,4 @@ The escript bundles the compiled BEAM modules of Elixip and its dependencies int
 a single file, but it still relies on an Erlang/OTP runtime (`erl` / `escript`)
 being available on the host. Like `mix scenario`, it exits with `0` on success
 and `1` on failure.
+
