@@ -14,10 +14,12 @@ defmodule SIP.Test.SequenceDiagram do
 
   @events [
     %{kind: :transition, to: :initial_state, event: "start", type: nil},
+    %{kind: :command, type: :media, name: "media_connect"},
     %{kind: :transition, to: :calling, event: "", type: nil},
     %{kind: :command, type: :sip, name: "send_INVITE"},
     %{kind: :transition, to: :answered, event: "200 OK", type: :sip},
     %{kind: :command, type: :media, name: "media_play"},
+    %{kind: :transition, to: :playing, event: "media connected", type: :media},
     %{kind: :terminal, outcome: :succeeded, reason: "answered", type: :sip}
   ]
 
@@ -41,10 +43,30 @@ defmodule SIP.Test.SequenceDiagram do
     # First transition is the initial-state note; later ones are from -> to.
     assert out =~ "note over elixip : initial_state"
     assert out =~ "note over elixip : calling -> answered"
-    # Media command rendered as a self-note (no SIP peer).
-    assert out =~ "note over elixip : media_play"
     # Terminal outcome.
     assert out =~ "succeeded: answered"
+  end
+
+  test "renders media commands and events against a media-server lane" do
+    out = SequenceDiagram.to_plantuml(@events, @meta)
+
+    # The media lane is declared as a `control`, only because media was touched.
+    assert out =~ ~s(control "media server" as ms)
+    # Media command → outbound colored arrow (the media_ prefix is stripped).
+    assert out =~ "elixip -[#DarkOrange]> ms : connect"
+    assert out =~ "elixip -[#DarkOrange]> ms : play"
+    # Media event → colored arrow from the media server.
+    assert out =~ "ms -[#DarkOrange]> elixip : media connected"
+  end
+
+  test "omits the media lane when no media is involved" do
+    sip_only = [
+      %{kind: :transition, to: :initial_state, event: "start", type: nil},
+      %{kind: :command, type: :sip, name: "send_INVITE"},
+      %{kind: :terminal, outcome: :succeeded, reason: "ok", type: :sip}
+    ]
+
+    refute SequenceDiagram.to_plantuml(sip_only, @meta) =~ "as ms"
   end
 
   test "masks secrets in the configuration header and never leaks them" do
@@ -118,12 +140,13 @@ defmodule SIP.Test.SequenceDiagram do
     config username: "alice", authusername: "alice", domain: "example.com", passwd: "s3cret"
 
     state initial_state do
+      # Call the raw monitor hooks directly so the journal records commands
+      # without needing the SIP stack / media server / network.
+      SIP.Scenario.Monitor.note_command(:media, "media_connect")
       goto next
     end
 
     state calling do
-      # Call the raw monitor hook directly so the journal records a command
-      # without needing the SIP stack / network.
       SIP.Scenario.Monitor.note_command(:sip, "send_INVITE")
       goto wait, "INVITE sent"
     end
@@ -151,6 +174,7 @@ defmodule SIP.Test.SequenceDiagram do
     assert content =~ "@startuml"
     assert content =~ "@enduml"
     assert content =~ "elixip -> peer : INVITE"
+    assert content =~ "elixip -[#DarkOrange]> ms : connect"
     assert content =~ "note over elixip : initial_state -> calling"
     assert content =~ "passwd: ****"
     refute content =~ "s3cret"

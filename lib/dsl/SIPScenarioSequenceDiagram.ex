@@ -15,6 +15,10 @@ defmodule SIP.Scenario.SequenceDiagram do
   # Participant aliases used throughout the diagram.
   @local "elixip"
   @remote "peer"
+  @media "ms"
+
+  # Media commands/events are drawn in a distinct color to stand out from SIP.
+  @media_color "#DarkOrange"
 
   @doc "Render the full PlantUML document as a String."
   @spec to_plantuml([map()], map()) :: String.t()
@@ -22,7 +26,7 @@ defmodule SIP.Scenario.SequenceDiagram do
     [
       header(meta),
       "@startuml",
-      participants(meta),
+      participants(meta, events),
       "",
       body(events),
       "@enduml"
@@ -68,17 +72,29 @@ defmodule SIP.Scenario.SequenceDiagram do
 
   # ── Participants ────────────────────────────────────────────────────────────
 
-  defp participants(meta) do
+  defp participants(meta, events) do
     config = Map.get(meta, :config, [])
 
-    [
+    base = [
       participant(@local, Keyword.get(config, :username)),
       participant(@remote, Keyword.get(config, :domain))
     ]
+
+    # Only declare the media-server lane when the scenario actually touched media,
+    # as a `control` so it is visually distinct from the SIP participants.
+    if media?(events), do: base ++ [~s(control "media server" as #{@media})], else: base
   end
 
   defp participant(alias_name, nil), do: "participant #{alias_name}"
   defp participant(alias_name, label), do: ~s(participant "#{label}" as #{alias_name})
+
+  defp media?(events) do
+    Enum.any?(events, fn
+      %{kind: :command, type: :media} -> true
+      %{kind: :transition, type: :media} -> true
+      _ -> false
+    end)
+  end
 
   # ── Body ──────────────────────────────────────────────────────────────────
 
@@ -97,7 +113,12 @@ defmodule SIP.Scenario.SequenceDiagram do
     {["#{@local} -> #{@remote} : #{method_label(name)}"], current}
   end
 
-  # Media / other commands have no SIP peer: render them as a self-note.
+  # Outbound media command → colored arrow towards the media server.
+  defp render(%{kind: :command, type: :media, name: name}, current) do
+    {["#{@local} -[#{@media_color}]> #{@media} : #{media_label(name)}"], current}
+  end
+
+  # Other command categories have no dedicated lane: render them as a self-note.
   defp render(%{kind: :command, name: name}, current) do
     {["note over #{@local} : #{name}"], current}
   end
@@ -107,13 +128,20 @@ defmodule SIP.Scenario.SequenceDiagram do
     {["note over #{@local} : #{to}"], to}
   end
 
-  # Subsequent transition: optionally an inbound arrow, then the state-change note.
+  # Subsequent transition: optionally an inbound arrow (from the peer for a SIP
+  # event, from the media server for a media event), then the state-change note.
   defp render(%{kind: :transition, to: to, event: event, type: type}, from) do
     inbound =
-      if type == :sip and event not in ["", "start"] do
-        ["#{@local} <-- #{@remote} : #{event}"]
-      else
-        []
+      cond do
+        type == :sip and event not in ["", "start"] ->
+          ["#{@local} <-- #{@remote} : #{event}"]
+
+        # Media events are drawn as a colored arrow from the media server.
+        type == :media and event not in ["", "start"] ->
+          ["#{@media} -[#{@media_color}]> #{@local} : #{event}"]
+
+        true ->
+          []
       end
 
     {inbound ++ ["note over #{@local} : #{from} -> #{to}"], to}
@@ -141,4 +169,7 @@ defmodule SIP.Scenario.SequenceDiagram do
 
     String.upcase(base) <> suffix
   end
+
+  # "media_connect" → "connect", "media_play" → "play", "media_start_echo" → "start_echo".
+  defp media_label(name), do: String.replace_prefix(name, "media_", "")
 end
