@@ -144,8 +144,11 @@ Use the API provided by SIP.Dialog module
             newstate = %SIP.DialogImpl{ state | transactions: List.insert_at(state.transactions, -1, transaction_pid) }
 
             # Handle expiration timer and closing transaction
-            arm_expiration_timer(newstate, req) |> check_closing_transaction(req, transaction_pid)
-            #{ :ok, newstate}
+            { :ok, newstate } =
+              arm_expiration_timer(newstate, req) |> check_closing_transaction(req, transaction_pid)
+
+            # Surface the client transaction pid to the caller (see SIP.Dialog.new_request/2).
+            { { :ok, transaction_pid }, newstate }
 
         end
 

@@ -479,4 +479,11 @@ defmodule SIP.Msg.Ops do
     end
   end
 
+  def is_response_for?(req_type, rsp) when is_req(req_type) and is_resp(rsp) do
+    # A parsed CSeq header is stored as a [seqno, method] list (see SIPMsg).
+    case Map.get(rsp, :cseq) do
+      [ _seqno, method ] -> method == req_type.method
+      _ -> false
+    end
+  end
 end

@@ -187,6 +187,12 @@ alias SIP.Transac
   end
 
 
+  @doc """
+  Send a new in-dialog request out. On success returns `{ :ok, transaction_pid }`
+  where `transaction_pid` is the freshly created UAC transaction (usable to ACK or
+  CANCEL the request). On failure returns the bare error code (e.g.
+  `:methodnotallowed`, `:toomanytransactons`, or a transport error code).
+  """
   def new_request(dialog_pid, req) when is_pid(dialog_pid) and is_req(req) do
     GenServer.call(dialog_pid, { :newreq, req })
   end

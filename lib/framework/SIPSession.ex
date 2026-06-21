@@ -52,7 +52,13 @@ defmodule SIP.Session do
           catch
             :exit, _reason -> { :error, :dialogterminated }
           end
-        SIP.Context.set(sip_ctx, :lasterr, rc)
+
+        # new_request/2 returns {:ok, transaction_pid} on success; the scenario
+        # `goto` contract expects :lasterr == :ok, so collapse the success tuple.
+        case rc do
+          { :ok, _transaction_pid } -> SIP.Context.set(sip_ctx, :lasterr, :ok)
+          _ -> SIP.Context.set(sip_ctx, :lasterr, rc)
+        end
 
       is_nil(sip_ctx.dialogpid) or req.method in @standalone_methods ->
         # No dialog yet (first request, e.g. the initial INVITE), or a standalone
@@ -708,8 +714,12 @@ defmodule SIP.Session do
           authparams, autheader, sip_ctx.authusername, sip_ctx.ha1, :ha1
         )
 
-      rez = SIP.Dialog.new_request(sip_ctx.dialogpid, invite)
-      SIP.Context.set(sip_ctx, :lasterr, rez)
+      # new_request/2 returns {:ok, transaction_pid} on success; keep the :lasterr
+      # contract (:ok on success, error code otherwise).
+      case SIP.Dialog.new_request(sip_ctx.dialogpid, invite) do
+        { :ok, _transaction_pid } -> SIP.Context.set(sip_ctx, :lasterr, :ok)
+        rez -> SIP.Context.set(sip_ctx, :lasterr, rez)
+      end
     end
 
     defp bye_message(sip_ctx) do
