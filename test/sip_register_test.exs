@@ -127,7 +127,9 @@ defmodule SIP.Test.Register do
         sip_ctx
     end
 
-    assert_receive( {:onnewdialog, :ok, _trans_pid}, 500, "onnewdialog not received")
+    # send_sip_request now consumes the dialog layer's {:onnewdialog, :ok, tid}
+    # message and stores the initial transaction in the context.
+    assert is_pid(ctx_get(:last_uac_register_tid))
     ^sip_ctx = receive do
       { 200, rsp, _trans_pid, _dialog_pid } ->
         # IO.puts(inspect(rsp.contact.params))
@@ -206,7 +208,9 @@ defmodule SIP.Test.Register do
         sip_ctx
     end
 
-    assert_receive( {:onnewdialog, :ok, _trans_pid}, 500, "onnewdialog not received")
+    # send_sip_request now consumes the dialog layer's {:onnewdialog, :ok, tid}
+    # message and stores the initial transaction in the context.
+    assert is_pid(ctx_get(:last_uac_register_tid))
 
     ^sip_ctx = receive do
       { 200, rsp, _trans_pid, _dialog_pid } ->
@@ -249,7 +253,9 @@ defmodule SIP.Test.Register do
         sip_ctx
     end
 
-    assert_receive( {:onnewdialog, :ok, _trans_pid}, 500, "onnewdialog not received")
+    # send_sip_request now consumes the dialog layer's {:onnewdialog, :ok, tid}
+    # message and stores the initial transaction in the context.
+    assert is_pid(ctx_get(:last_uac_register_tid))
 
     ^sip_ctx = receive do
       { 200, rsp, _trans_pid, _dialog_pid } ->
@@ -338,7 +344,9 @@ defmodule SIP.Test.Register do
         sip_ctx
     end
 
-    assert_receive( {:onnewdialog, :ok, _trans_pid}, 500, "onnewdialog not received")
+    # send_sip_request now consumes the dialog layer's {:onnewdialog, :ok, tid}
+    # message and stores the initial transaction in the context.
+    assert is_pid(ctx_get(:last_uac_register_tid))
 
     ^sip_ctx = receive do
       { 200, rsp, _trans_pid, _dialog_pid } ->

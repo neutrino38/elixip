@@ -11,21 +11,52 @@ defmodule SIP.Session do
 
   It is assumed by the dialog layer that the app process is processing requests as follow:
 
-  receive do
+  on_event do
    { <method>, <req message>, <transaction_pid>, <dialog_pid> } ->
 
   e.g.
 
-  receive do
+  on_event do
     { :BYE, <req message>, <transaction_pid>, <dialog_pid> } ->
 
   For SIP responses
 
-  receive do
+  on_event do
     { <resp code>, <resp message>, <transaction_pid>, <dialog_pid> } ->
 
   """
   require Logger
+
+  defp register_last_transaction(sip_ctx = %SIP.Context{}, method, transaction_pid)
+       when is_pid(transaction_pid) and is_atom(method) do
+    case method do
+      :INVITE ->
+        SIP.Context.appdata_set(sip_ctx, :last_uac_invite_tid, transaction_pid)
+      :REGISTER ->
+        SIP.Context.appdata_set(sip_ctx, :last_uac_register_tid, transaction_pid)
+      :OPTIONS ->
+        SIP.Context.appdata_set(sip_ctx, :last_uac_options_tid, transaction_pid)
+      _ -> sip_ctx
+    end
+  end
+
+  # After an outbound dialog is created, the dialog layer publishes the initial
+  # UAC transaction pid as `{:onnewdialog, :ok, tid}` to this (the app) process
+  # — see SIP.DialogImpl.init/1. The message is delivered synchronously during
+  # dialog creation, so it is already in the mailbox by the time start_dialog/4
+  # returns; consume it and store the transaction in the context, mirroring the
+  # in-dialog request path. The timeout is only a safety net.
+  defp register_initial_transaction(sip_ctx = %SIP.Context{}, method) when is_atom(method) do
+    receive do
+      { :onnewdialog, :ok, transaction_pid } ->
+        register_last_transaction(sip_ctx, method, transaction_pid)
+    after
+      500 ->
+        Logger.warning([module: __MODULE__,
+          message: "No :onnewdialog received after creating dialog for #{method}; transaction not registered"])
+        sip_ctx
+    end
+  end
 
   # Methods sent as standalone (out-of-dialog) transactions: keep-alive (OPTIONS),
   # registration (REGISTER) and presence (PUBLISH/SUBSCRIBE/MESSAGE). For these it
@@ -39,25 +70,24 @@ defmodule SIP.Session do
     Send an outbound SIP request and create the dialog if needed
     Update the session sip_ctx accordingly
     """
-  def send_sip_request(sip_ctx = %SIP.Context{}, req, timeout) do
+  def send_sip_request(sip_ctx = %SIP.Context{}, req, timeout) when is_atom(req.method) do
     dialog_alive = is_pid(sip_ctx.dialogpid) and Process.alive?(sip_ctx.dialogpid)
 
     cond do
       dialog_alive ->
         # Send an in dialog request. Guard against the dialog terminating between
         # the liveness check above and the call (returns a clean error, no crash).
-        rc =
-          try do
-            SIP.Dialog.new_request(sip_ctx.dialogpid, req)
-          catch
-            :exit, _reason -> { :error, :dialogterminated }
-          end
 
-        # new_request/2 returns {:ok, transaction_pid} on success; the scenario
-        # `goto` contract expects :lasterr == :ok, so collapse the success tuple.
-        case rc do
-          { :ok, _transaction_pid } -> SIP.Context.set(sip_ctx, :lasterr, :ok)
-          _ -> SIP.Context.set(sip_ctx, :lasterr, rc)
+        try do
+          case SIP.Dialog.new_request(sip_ctx.dialogpid, req) do
+            { :ok, transaction_pid } ->
+                register_last_transaction(sip_ctx, req.method, transaction_pid)
+                |> SIP.Context.set(:lasterr, :ok)
+
+              rez -> SIP.Context.set(sip_ctx, :lasterr, rez)
+          end
+        catch
+          :exit, _reason -> SIP.Context.set(sip_ctx, :lasterr, :dialogterminated )
         end
 
       is_nil(sip_ctx.dialogpid) or req.method in @standalone_methods ->
@@ -66,8 +96,12 @@ defmodule SIP.Session do
         # start a fresh dialog / transaction.
         case SIP.Dialog.start_dialog(req, timeout, :outbound, sip_ctx.debug) do
           { :ok, dialog_pid, _dialog_id } ->
-            # Dialog created, update context and clear last error
-            SIP.Context.set(sip_ctx, :dialogpid, dialog_pid) |> SIP.Context.set(:lasterr, :ok)
+            # Dialog created: store its pid, clear the last error, then capture the
+            # initial UAC transaction so the app can later ACK / CANCEL it (same
+            # contract as the in-dialog branch above).
+            SIP.Context.set(sip_ctx, :dialogpid, dialog_pid)
+            |> SIP.Context.set(:lasterr, :ok)
+            |> register_initial_transaction(req.method)
 
           { :error, err} ->
             SIP.Context.set(sip_ctx, :lasterr, err)
@@ -695,7 +729,7 @@ defmodule SIP.Session do
       end
     end
 
-    def auth_invite(sip_ctx = %SIP.Context{}, resp, ruri, sdp_offer, _timeout)
+    def auth_invite(sip_ctx = %SIP.Context{}, resp, ruri, sdp_offer, timeout)
         when is_map(resp) and is_integer(resp.response) do
       {autheader, authparams} =
         case resp.response do
@@ -714,12 +748,7 @@ defmodule SIP.Session do
           authparams, autheader, sip_ctx.authusername, sip_ctx.ha1, :ha1
         )
 
-      # new_request/2 returns {:ok, transaction_pid} on success; keep the :lasterr
-      # contract (:ok on success, error code otherwise).
-      case SIP.Dialog.new_request(sip_ctx.dialogpid, invite) do
-        { :ok, _transaction_pid } -> SIP.Context.set(sip_ctx, :lasterr, :ok)
-        rez -> SIP.Context.set(sip_ctx, :lasterr, rez)
-      end
+      SIP.Session.send_sip_request(sip_ctx, invite, timeout)
     end
 
     defp bye_message(sip_ctx) do
