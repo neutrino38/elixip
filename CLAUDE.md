@@ -33,7 +33,28 @@ mix format
 
 ## Architecture
 
-The project implements a layered SIP protocol stack:
+The project implements a layered SIP protocol stack. In Elixir the directory
+layout under `lib/` is independent of the module names (Mix compiles every
+`*.ex` recursively), so the tree below is purely organizational:
+
+```
+lib/
+├── framework/   # the reusable SIP stack (transport → message → transaction →
+│                #   dialog → session/context → media). See the layers below.
+├── dsl/         # the scenario DSL and its FSM engine (namespace SIP.Scenario)
+│   ├── SIPScenario.ex        # DSL macros: state, goto, config, on_events, …
+│   ├── SIPScenarioRunner.ex  # FSM execution engine
+│   └── SIPScenarioLoader.ex  # loads scenario .exs files / modules
+├── elixipp/     # the standalone test tool (escript `elixipp`)
+│   ├── ElixippCLI.ex         # CLI entry point + live --monitor table rendering
+│   └── SIPScenarioMonitor.ex # in-memory store feeding the --monitor view
+│                             #   (SIP.Scenario.Monitor; a no-op when not started)
+└── mix/tasks/scenario.ex     # `mix scenario` task
+```
+
+The `dsl` layer builds on `framework` (a scenario `use SIP.Scenario` pulls in
+`SIP.Session.CallUAC`, `SIP.Session.Media` and `SIP.Context`). The `elixipp`
+tool drives the DSL engine; the DSL itself runs fine without the tool.
 
 ### Transport Layer (`SIP.Transport.*`)
 - `SIP.Transport.UDP`, `TCP`, `TLS`, `WSS` — protocol-specific transports
