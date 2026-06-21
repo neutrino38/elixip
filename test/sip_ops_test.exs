@@ -223,6 +223,21 @@ defmodule SIP.Test.SIP.Msg.Ops do
     _sipack_str = SIPMsg.serialize(ackmsg)
   end
 
+  test "is_response_for? matches a response to its originating request", context do
+    # A 100 Trying built from the INVITE carries the INVITE CSeq method.
+    invite_rsp = SIP.Msg.Ops.reply_to_request(context.sipreq, 100, "Trying")
+    assert SIP.Msg.Ops.is_response_for?(context.sipreq, invite_rsp) == true
+
+    # Same response, but matched against a request of a different method.
+    bye = %{context.sipreq | method: :BYE}
+    assert SIP.Msg.Ops.is_response_for?(bye, invite_rsp) == false
+  end
+
+  test "is_response_for? returns false when the response has no CSeq", context do
+    rsp = SIP.Msg.Ops.reply_to_request(context.sipreq, 100, "Trying") |> Map.delete(:cseq)
+    assert SIP.Msg.Ops.is_response_for?(context.sipreq, rsp) == false
+  end
+
   test "Add new via on a blank message" do
     register = %{
       method: :REGISTER,

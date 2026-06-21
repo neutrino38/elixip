@@ -14,7 +14,12 @@ defmodule TestCall do
       callid: nil,
       contentlength: 0
     }
-    SIP.Dialog.new_request(state.dlg_id, bye)
+    # new_request/2 returns {:ok, transaction_pid} on success. Asserting the shape
+    # here guards the contract: this runs on the answered-call BYE path which the
+    # "let the call end" test exercises end to end.
+    {:ok, transaction_pid} = SIP.Dialog.new_request(state.dlg_id, bye)
+    true = is_pid(transaction_pid)
+    :ok
   end
 
   defp answer_call(state) do
