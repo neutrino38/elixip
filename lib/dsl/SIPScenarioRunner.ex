@@ -78,8 +78,25 @@ defmodule SIP.Scenario.Runner do
       |> build_context()
       |> SIP.Context.set(:currentstate, :initial_state)
 
+    maybe_start_sequence_journal(module, ctx)
+
     report(module, "", :initial_state, "start", nil)
     loop(module, :initial_state, ctx, states)
+  end
+
+  # Start the per-instance PlantUML sequence journal when --log-sequence is set on
+  # the CLI (Application env) or when the scenario enabled its debug flag. No-op
+  # otherwise — the journal recording helpers are then free.
+  defp maybe_start_sequence_journal(module, ctx) do
+    if Application.get_env(:elixip2, :log_sequence, false) or ctx.debug do
+      SIP.Scenario.SequenceJournal.start(%{
+        scenario: scenario_label(module),
+        pid: inspect(self()),
+        config: module.__scenario_config__()
+      })
+    end
+
+    :ok
   end
 
   # ── Context bootstrap ─────────────────────────────────────────────────────
@@ -182,6 +199,9 @@ defmodule SIP.Scenario.Runner do
       SIP.Scenario.Monitor.report(call_id, scenario_label(module), username, state, event_label(event), event_type)
     end
 
+    # Feed the PlantUML sequence journal (no-op when not enabled in this process).
+    SIP.Scenario.SequenceJournal.record_transition(state, event_label(event), event_type)
+
     :ok
   end
 
@@ -199,6 +219,12 @@ defmodule SIP.Scenario.Runner do
     ctx
     |> release_media()
     |> run_cleanup_callback(module)
+
+    case SIP.Scenario.SequenceJournal.flush() do
+      {:ok, path} -> Logger.info("Sequence diagram written to #{path}")
+      {:error, reason} -> Logger.warning("Could not write sequence diagram: #{inspect(reason)}")
+      :disabled -> :ok
+    end
 
     case outcome do
       :success ->

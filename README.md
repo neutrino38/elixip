@@ -554,6 +554,7 @@ options:
 |---|---|---|
 | `--log-file PATH`   | log file path | `elixipp.log` |
 | `--log-level LEVEL` | file log level: `debug` \| `info` \| `warning` \| `error` | `debug` |
+| `--log-sequence`    | write a PlantUML sequence diagram per instance (single call only) | off |
 
 The console is kept quiet (warnings and above) since `elixipp` prints its own
 success/failure line.
@@ -571,40 +572,47 @@ elixipp --log-file ci_run.log --log-level info scenarios/my_call_scenario.exs
 elixipp produces a log file (`elixipp.log` by default — see [Logging](#logging)
 for how to configure it).
 
-If the scenario set the debug flag, in the initial_state:
+### Sequence diagram (`--log-sequence`)
+
+A PlantUML sequence diagram of a scenario instance can be produced either by
+passing `--log-sequence` to `elixipp`, or by setting the debug flag in the
+scenario `initial_state`:
 
 ```Elixir
 # Storing some info into the context
 ctx_set(:debug, true)
 ```
 
-A file specific to each scenario execution (instance) will be generated. 
-It will be named `<scenario_name>_<pid>.log` It will contain
-the SIP configuration applied (except the password that will be masked). Then it will details every transition and action performed by the FSM. The format is a diagram
-sequence text file compatible with Plant UML:
+Either way, a file specific to each scenario execution (instance) is generated,
+named `<scenario_name>_<pid>.puml` (the pid is sanitized to digits and dots). It
+starts with the SIP configuration applied — passwords masked — as PlantUML
+comments, then renders every command sent, state transition and the terminal
+outcome of the FSM. `--log-sequence` is restricted to a **single simultaneous
+call** (rejected with `--limit > 1`), since one file is written per instance.
+
+The fidelity is reduced (v1): outbound commands become request arrows
+(`send_INVITE` → `INVITE`), state changes become notes, and a transition
+triggered by a SIP event carries its description as an inbound arrow. Example
+output:
 
 ```plantuml
+' Scenario      : UAC.Invite
+' Instance pid  : #PID<0.123.0>
+' Configuration (passwords masked):
+'   username: "bob"
+'   domain: "mydomain.com"
+'   passwd: ****
+'
 @startuml
-participant "bob Display Name"
+participant "bob" as elixip
+participant "mydomain.com" as peer
 
-#Initial state
-note over elixip: initial_state
-
-# Sending a SIP request
-elixip --> bob: INVITE sip_uri
-# Receiving a response
-elixip <-- bob: 2OO OK
-
-# transition
-note over elixip: calling -> answered 
-
-# receiving a message
-elixip <-- bob: MESSAGE
-
-# Sending a reply
-elixip --> bob: 2OO OK
-
-# Transition
+note over elixip : initial_state
+note over elixip : initial_state -> calling
+elixip -> peer : INVITE
+elixip <-- peer : 200 OK
+note over elixip : calling -> answered
+note over elixip #LightGreen : succeeded: answered
 @enduml
 ```
 

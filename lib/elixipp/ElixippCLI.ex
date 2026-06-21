@@ -23,6 +23,8 @@ defmodule Elixipp.CLI do
 
     * `--log-file PATH`   — log file path (default `elixipp.log`)
     * `--log-level LEVEL` — file log level: `debug` | `info` | `warning` | `error`
+    * `--log-sequence`    — write a PlantUML sequence diagram (`<scenario>_<pid>.puml`)
+      per scenario instance. Single-call only (rejected with `--limit > 1`).
   """
   require Logger
 
@@ -57,6 +59,7 @@ defmodule Elixipp.CLI do
           rate: :float,
           log_file: :string,
           log_level: :string,
+          log_sequence: :boolean,
           help: :boolean
         ],
         aliases: [m: :monitor, l: :limit, h: :help]
@@ -87,6 +90,17 @@ defmodule Elixipp.CLI do
     if limit < 1, do: abort("--limit must be >= 1", 2)
     if max_run != nil and max_run < 0, do: abort("--max-run must be >= 0", 2)
 
+    # --log-sequence produces one PlantUML file per scenario instance, so it only
+    # makes sense for a single simultaneous call. Reject it for parallel runs.
+    case validate_log_sequence(opts, limit) do
+      :ok ->
+        if Keyword.get(opts, :log_sequence, false),
+          do: Application.put_env(:elixip2, :log_sequence, true)
+
+      {:error, msg} ->
+        abort(msg, 2)
+    end
+
     rate = resolve_rate(opts[:rate])
     spawn_interval_ms = round(1000 / rate)
 
@@ -115,6 +129,19 @@ defmodule Elixipp.CLI do
 
   # Resolve the call creation rate (calls/s). Values <= 0 or above @max_rate
   # are ignored and fall back to the default rate.
+  @doc false
+  # --log-sequence requires a single simultaneous call (--limit 1): one PlantUML
+  # file is written per instance, which would interleave/clobber across parallel
+  # calls. Returns :ok or {:error, message}.
+  @spec validate_log_sequence(keyword(), integer()) :: :ok | {:error, String.t()}
+  def validate_log_sequence(opts, limit) do
+    if Keyword.get(opts, :log_sequence, false) and limit > 1 do
+      {:error, "--log-sequence n'est utilisable qu'avec un seul appel simultané (--limit 1)"}
+    else
+      :ok
+    end
+  end
+
   defp resolve_rate(nil), do: @default_rate
 
   defp resolve_rate(rate) when rate > 0 and rate <= @max_rate, do: rate
@@ -641,6 +668,10 @@ defmodule Elixipp.CLI do
                          Les valeurs > 100 sont ignorées (retour au défaut).
       --log-file PATH    Chemin du fichier de log (défaut : elixipp.log).
       --log-level LEVEL  Niveau : debug | info | warning | error (défaut : debug).
+      --log-sequence     Écrit un diagramme de séquence PlantUML par instance de
+                         scénario (<scenario>_<pid>.puml). Réservé à un seul appel
+                         simultané (refusé avec --limit > 1). Équivaut à activer le
+                         flag debug du scénario (ctx_set(:debug, true)).
       -h, --help         Affiche cette aide.
 
     Sans --limit ni --max-run, comportement équivalent à --limit 1 --max-run 1

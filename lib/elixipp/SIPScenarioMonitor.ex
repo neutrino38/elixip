@@ -70,6 +70,9 @@ defmodule SIP.Scenario.Monitor do
       GenServer.cast(__MODULE__, {:command, slot_id, type, to_string(command)})
     end
 
+    # Feed the PlantUML sequence journal (no-op when not enabled in this process).
+    SIP.Scenario.SequenceJournal.record_command(type, command)
+
     :ok
   end
 
