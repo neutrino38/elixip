@@ -116,6 +116,30 @@ defmodule SIP.Session do
     end
   end
 
+  @doc """
+  Dispatch a SIP reply to the per-method handler, based on the method carried in
+  the response CSeq (`[seqno, method]`). INVITE, OPTIONS and REGISTER are routed
+  to their respective handlers; replies to any other method are ignored and the
+  context is returned unchanged. Backing function of the `process_sip_reply/2`
+  macro.
+  """
+  @spec dispatch_reply(%SIP.Context{}, map(), pid() | reference()) :: %SIP.Context{}
+  def dispatch_reply(sip_ctx = %SIP.Context{}, resp, transaction_id) when is_map(resp) do
+    case resp.cseq do
+      [_seqno, :INVITE] ->
+        SIP.Session.CallUAC.process_invite_reply(sip_ctx, resp, transaction_id)
+
+      [_seqno, :OPTIONS] ->
+        SIP.Session.RegisterUAC.process_options_reply(sip_ctx, resp, transaction_id)
+
+      [_seqno, :REGISTER] ->
+        SIP.Session.RegisterUAC.process_register_reply(sip_ctx, resp, transaction_id)
+
+      _ ->
+        sip_ctx
+    end
+  end
+
   defmodule ConfigRegistry do
     defstruct [
       callprocessing: nil,
@@ -241,6 +265,30 @@ defmodule SIP.Session do
             var!(sip_ctx) = SIP.Session.RegisterUAC.send_options(var!(sip_ctx), unquote(opts))
           end
         end
+
+        # Process a reply to a REGISTER request: on a 2xx with a granted
+        # expiration > 0, arm the refresh timer (at half the granted expire,
+        # delivering `:register_refresh`) and the OPTIONS keepalive timer
+        # (delivering `:options_keepalive`). On a 2xx with expire == 0
+        # (un-REGISTER) the keepalive timer is cancelled. Other replies are
+        # ignored. Usually reached through `process_sip_reply/2`.
+        defmacro process_register_reply(resp, transaction_id) do
+          quote do
+            var!(sip_ctx) =
+              SIP.Session.RegisterUAC.process_register_reply(
+                var!(sip_ctx), unquote(resp), unquote(transaction_id))
+          end
+        end
+
+        # Process a reply to an OPTIONS keepalive: on a 2xx, re-arm the next
+        # `:options_keepalive` timer.
+        defmacro process_options_reply(resp, transaction_id) do
+          quote do
+            var!(sip_ctx) =
+              SIP.Session.RegisterUAC.process_options_reply(
+                var!(sip_ctx), unquote(resp), unquote(transaction_id))
+          end
+        end
       end
     end
 
@@ -326,6 +374,108 @@ defmodule SIP.Session do
       timeout = Keyword.get(opts, :timeout, 20)
       options = options_msg(sip_ctx)
       SIP.Session.send_sip_request(sip_ctx, options, timeout)
+    end
+
+    # Appdata keys under which the armed timer references are stored, so they can
+    # be re-armed or cancelled later.
+    @refresh_timer_key :register_refresh_timer
+    @keepalive_timer_key :options_keepalive_timer
+
+    @doc """
+    Process a reply to a REGISTER request.
+
+    On a 2xx response, the expiration actually granted by the registrar is read
+    from the returned Contact (the binding matching our username, falling back to
+    the first Contact, then the `Expires` header). When that expiration is > 0 the
+    refresh timer is armed at half of it (delivering `:register_refresh` to the
+    scenario process) and the OPTIONS keepalive timer is armed (delivering
+    `:options_keepalive`). When it is 0 — an un-REGISTER — the keepalive timer is
+    cancelled. Non-2xx replies are ignored.
+    """
+    @spec process_register_reply(%SIP.Context{}, map(), pid() | reference()) :: %SIP.Context{}
+    def process_register_reply(sip_ctx = %SIP.Context{}, resp, _transaction_id)
+        when is_map(resp) and resp.response in 200..299 do
+      case granted_expire(sip_ctx, resp) do
+        expire when is_integer(expire) and expire > 0 ->
+          sip_ctx
+          |> arm_timer(@refresh_timer_key, :register_refresh, max(div(expire, 2), 1))
+          |> arm_timer(@keepalive_timer_key, :options_keepalive, keepalive_period())
+
+        _ ->
+          # expire == 0 (un-REGISTER) or no usable Contact: stop keepalives.
+          cancel_timer(sip_ctx, @keepalive_timer_key)
+      end
+    end
+
+    def process_register_reply(sip_ctx = %SIP.Context{}, _resp, _transaction_id), do: sip_ctx
+
+    @doc """
+    Process a reply to an OPTIONS keepalive: on a 2xx, re-arm the next
+    `:options_keepalive` timer. Other replies are ignored.
+    """
+    @spec process_options_reply(%SIP.Context{}, map(), pid() | reference()) :: %SIP.Context{}
+    def process_options_reply(sip_ctx = %SIP.Context{}, resp, _transaction_id)
+        when is_map(resp) and resp.response in 200..299 do
+      arm_timer(sip_ctx, @keepalive_timer_key, :options_keepalive, keepalive_period())
+    end
+
+    def process_options_reply(sip_ctx = %SIP.Context{}, _resp, _transaction_id), do: sip_ctx
+
+    # OPTIONS keepalive period (seconds), from the runtime config.
+    defp keepalive_period() do
+      Application.get_env(:elixip2, :optionkeepaliveperiod, 15)
+    end
+
+    # Read the expiration granted by the registrar in a REGISTER 2xx response.
+    # Prefer the Contact binding matching our username, fall back to the first
+    # Contact, then to the Expires header, else nil.
+    @spec granted_expire(%SIP.Context{}, map()) :: integer() | nil
+    defp granted_expire(sip_ctx, resp) do
+      contacts = List.wrap(Map.get(resp, :contact))
+      ours = SIP.Context.get(sip_ctx, :username)
+
+      contact =
+        Enum.find(contacts, List.first(contacts), fn
+          %SIP.Uri{userpart: u} -> u == ours
+          _ -> false
+        end)
+
+      with %SIP.Uri{} <- contact,
+           {:ok, value} <- SIP.Uri.get_uri_param(contact, "expires") do
+        String.to_integer(value)
+      else
+        _ -> header_expire(resp)
+      end
+    end
+
+    defp header_expire(resp) do
+      # The parser maps "Expire" to :expire; a standard "Expires" header is kept
+      # verbatim as a string key. Accept both.
+      case Map.get(resp, :expire) || Map.get(resp, "Expires") do
+        v when is_binary(v) -> String.to_integer(v)
+        v when is_integer(v) -> v
+        _ -> nil
+      end
+    end
+
+    # Cancel a previously armed timer (if any) then start a one-shot timer that
+    # delivers `msg` to the scenario process after `delay_s` seconds, storing its
+    # reference under `key` in the context appdata.
+    defp arm_timer(sip_ctx, key, msg, delay_s) do
+      sip_ctx = cancel_timer(sip_ctx, key)
+      ref = Process.send_after(self(), msg, delay_s * 1000)
+      SIP.Context.appdata_set(sip_ctx, key, ref)
+    end
+
+    defp cancel_timer(sip_ctx, key) do
+      case SIP.Context.appdata_get(sip_ctx, key) do
+        ref when is_reference(ref) ->
+          Process.cancel_timer(ref)
+          SIP.Context.appdata_set(sip_ctx, key, nil)
+
+        _ ->
+          sip_ctx
+      end
     end
   end
 
@@ -644,17 +794,19 @@ defmodule SIP.Session do
 
         defmacro process_invite_reply(resp, transaction_id) do
           quote do
-            var!(sip_ctx) = case unquote(resp).response do
-              200 ->
-                SIP.Session.CallUAC.process_sdp_resp(var!(sip_ctx), unquote(resp))
-                SIP.Session.CallUAC.ack(var!(sip_ctx), unquote(transaction_id))
-                var!(sip_ctx)
+            var!(sip_ctx) =
+              SIP.Session.CallUAC.process_invite_reply(
+                var!(sip_ctx), unquote(resp), unquote(transaction_id))
+          end
+        end
 
-              183 -> SIP.Session.CallUAC.process_sdp_resp(var!(sip_ctx), unquote(resp))
-
-              # Ignore other responses for now.
-              _ -> var!(sip_ctx)
-            end
+        # Dispatch any SIP reply to the right per-method handler based on the
+        # method carried in the response CSeq. INVITE/OPTIONS/REGISTER are
+        # handled; other methods are ignored. See `SIP.Session.dispatch_reply/3`.
+        defmacro process_sip_reply(resp, transaction_id) do
+          quote do
+            var!(sip_ctx) =
+              SIP.Session.dispatch_reply(var!(sip_ctx), unquote(resp), unquote(transaction_id))
           end
         end
 
@@ -802,6 +954,27 @@ defmodule SIP.Session do
           Logger.warning([dialogpid: dlg_id, module: __MODULE__,
             message: "No SDP answer found in 200 OK response, ignoring"])
 
+          sip_ctx
+      end
+    end
+
+    @doc """
+    Process a reply to an outbound INVITE: on 200, apply the SDP answer and ACK;
+    on 183, apply the early SDP answer. Other responses are ignored.
+    """
+    @spec process_invite_reply(%SIP.Context{}, map(), pid() | reference()) :: %SIP.Context{}
+    def process_invite_reply(sip_ctx = %SIP.Context{}, resp, transaction_id) when is_map(resp) do
+      case resp.response do
+        200 ->
+          process_sdp_resp(sip_ctx, resp)
+          ack(sip_ctx, transaction_id)
+          sip_ctx
+
+        183 ->
+          process_sdp_resp(sip_ctx, resp)
+
+        # Ignore other responses for now.
+        _ ->
           sip_ctx
       end
     end

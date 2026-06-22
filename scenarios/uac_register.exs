@@ -21,6 +21,11 @@ defmodule UAC.Register do
   state initial_state do
     Application.put_env(:elixip2, :proxyuri, %SIP.Uri{domain: @proxy, scheme: "sip:", port: 5060})
     Application.put_env(:elixip2, :proxyusesrv, false)
+    # Drive the OPTIONS keepalive period (read by process_register_reply) from
+    # the scenario, so the test does not depend on the global default (15 s).
+    Application.put_env(:elixip2, :optionkeepaliveperiod, @options_keepalive)
+    # Count the refreshes so the test tears the registration down after one.
+    appdata_set(:refreshes, 0)
     goto next
   end
 
@@ -40,8 +45,12 @@ defmodule UAC.Register do
       {100, _rsp, _trans_pid, _dialog_pid} ->
         goto loop, "100 Trying"
       {401, rsp, _trans_pid, _dialog_pid} ->
-        goto auth_registering, "401 Unauthorized"
-      {200, _rsp, _trans_pid, _dialog_pid} ->
+        send_auth_REGISTER(rsp, @registration_expire)
+        goto loop, "401 Unauthorized"
+      {200, rsp, trans_pid, _dialog_pid} ->
+        # Arms the refresh timer (:register_refresh at expire/2) and the OPTIONS
+        # keepalive timer (:options_keepalive) from the granted expiration.
+        process_sip_reply(rsp, trans_pid)
         goto registered, "200 OK"
       {errcode, _rsp, _trans_pid, _dialog_pid} when errcode in 400..699 ->
         scenario_failure("REGISTER failed with #{errcode}")
@@ -52,19 +61,15 @@ defmodule UAC.Register do
     end
   end
 
-  state auth_registering do
-    send_auth_REGISTER(@last_rsp, @registration_expire)
-    goto wait_register
-  end
   # ---------------------------------------------------------------------------
+  # Idle state: the refresh and keepalive timers were armed by the last
+  # process_sip_reply, so here we only react to them. No manual Process.send_after.
   state registered do
-    Process.send_after(self(), :send_options, @options_keepalive * 1000)
-    Process.send_after(self(), :send_register, @registration_expire * 500)
     on_events do
-      :send_options -> goto keepalive, "Sending keepalive OPTIONS"
-      :send_register -> goto refresh, "Sending REGISTER refresh"
+      :options_keepalive -> goto keepalive, "Keepalive OPTIONS"
+      :register_refresh -> goto refresh, "REGISTER refresh"
     after (@registration_expire + 5) * 1000 ->
-      scenario_failure("Unexpected timeout in registered state")
+      scenario_failure("No timer fired in registered state")
     end
   end
 
@@ -72,7 +77,10 @@ defmodule UAC.Register do
   state keepalive do
     send_OPTIONS()
     on_events do
-      {200, _rsp, _trans_pid, _dialog_pid} -> goto registered, "OPTIONS OK"
+      {200, rsp, trans_pid, _dialog_pid} ->
+        # Re-arm the next :options_keepalive timer.
+        process_sip_reply(rsp, trans_pid)
+        goto registered, "OPTIONS OK"
       {errcode, _rsp, _trans_pid, _dialog_pid} when errcode in 400..699 ->
         scenario_failure("OPTIONS failed with #{errcode}")
     after 5_000 ->
@@ -82,8 +90,14 @@ defmodule UAC.Register do
 
   # ---------------------------------------------------------------------------
   state refresh do
-    send_REGISTER(@registration_expire)
-    goto wait_refresh
+    # End the test after one refresh: tear the registration down.
+    if appdata_get(:refreshes) >= 1 do
+      goto unregistering, "Max refreshes reached"
+    else
+      appdata_set(:refreshes, appdata_get(:refreshes) + 1)
+      send_REGISTER(@registration_expire)
+      goto wait_refresh
+    end
   end
 
   state wait_refresh do
@@ -93,38 +107,16 @@ defmodule UAC.Register do
       {401, rsp, _trans_pid, _dialog_pid} ->
         send_auth_REGISTER(rsp, @registration_expire)
         goto loop, "401 Unauthorized"
-      {200, _rsp, _trans_pid, _dialog_pid} ->
-        goto refreshed, "200 OK"
+      {200, rsp, trans_pid, _dialog_pid} ->
+        # Re-arm both the refresh and the keepalive timers.
+        process_sip_reply(rsp, trans_pid)
+        goto registered, "REGISTER refreshed"
       {errcode, _rsp, _trans_pid, _dialog_pid} when errcode in 400..699 ->
         scenario_failure("REGISTER refresh failed with #{errcode}")
       {errcode, _rsp, _trans_pid, _dialog_pid} when errcode in 300..399 ->
         scenario_failure("Unexpected REGISTER redirect #{errcode}")
     after 5_000 ->
       scenario_failure("REGISTER refresh timeout")
-    end
-  end
-
-  # ---------------------------------------------------------------------------
-  state refreshed do
-    Process.send_after(self(), :send_options, @options_keepalive * 1000)
-    Process.send_after(self(), :send_register, @registration_expire * 500)
-    on_events do
-      :send_options -> goto keepalive2, "Sending keepalive OPTIONS"
-      :send_register -> goto unregistering, "Sending unREGISTER"
-    after (@registration_expire + 5) * 1000 ->
-      scenario_failure("Unexpected timeout in refreshed state")
-    end
-  end
-
-  # ---------------------------------------------------------------------------
-  state keepalive2 do
-    send_OPTIONS(timeout: @options_keepalive)
-    on_events do
-      {200, _rsp, _trans_pid, _dialog_pid} -> goto refreshed, "OPTIONS OK"
-      {errcode, _rsp, _trans_pid, _dialog_pid} when errcode in 400..699 ->
-        scenario_failure("OPTIONS failed with #{errcode}")
-    after 5_000 ->
-      scenario_failure("OPTIONS timeout")
     end
   end
 
@@ -141,7 +133,9 @@ defmodule UAC.Register do
       {401, rsp, _trans_pid, _dialog_pid} ->
         send_auth_REGISTER(rsp, 0)
         goto loop, "401 Unauthorized"
-      {200, _rsp, _trans_pid, _dialog_pid} ->
+      {200, rsp, trans_pid, _dialog_pid} ->
+        # expire == 0: process_sip_reply cancels the keepalive timer.
+        process_sip_reply(rsp, trans_pid)
         scenario_success("unREGISTER OK")
       {errcode, _rsp, _trans_pid, _dialog_pid} when errcode in 400..699 ->
         scenario_failure("unREGISTER failed with #{errcode}")

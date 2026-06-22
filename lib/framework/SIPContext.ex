@@ -25,7 +25,19 @@ defmodule SIP.Context do
   ]
 
   defmacro __using__(_opts) do
-    quote do
+    # Guard against being injected twice into the same module: a scenario that
+    # `use`s both SIP.Scenario (-> SIP.Session.CallUAC -> SIP.Context) and
+    # SIP.Session.RegisterUAC (-> SIP.Context) would otherwise redefine the
+    # ctx_* macros, raising "previous clause always matches" warnings. The flag
+    # must be set imperatively here (at expansion time): sibling `use` statements
+    # are expanded before a `@attr` set inside the quote is committed, so the
+    # second expansion would not see it.
+    if Module.get_attribute(__CALLER__.module, :sip_context_used) do
+      quote do
+      end
+    else
+      Module.put_attribute(__CALLER__.module, :sip_context_used, true)
+      quote do
       # Déclare la macro ctx_set
       defmacro ctx_set(prop, value) do
         quote do
@@ -70,6 +82,7 @@ defmodule SIP.Context do
         end
       end
 
+      end
     end
   end
 
