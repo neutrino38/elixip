@@ -517,7 +517,7 @@ Use the API provided by SIP.Dialog module
     # subsequent in-dialog requests (BYE, re-INVITE…) can be routed correctly.
     %{state |
       state: :established,
-      remotetarget: rsp.contact,
+      remotetarget: Map.get(rsp, :contact),
       routeset: Map.get(rsp, :recordroute)
     }
   end
@@ -528,7 +528,13 @@ Use the API provided by SIP.Dialog module
     %{state | state: :redirected }
   end
 
-  defp handle_UAS_response(state, rsp, _transact_pid) when state.state == :initial and rsp.response in [ 401, 407 ] do
+  # An auth challenge (401/407) on the initial request — or a *re-challenge*
+  # while we are already authenticating — keeps the dialog open so the app can
+  # (re)send the authenticated request. A second 401/407 is not a rejection:
+  # it happens e.g. when an unauthenticated request is re-sent in parallel, and
+  # must not tear the dialog down (otherwise the in-flight authenticated request
+  # would lose its dialog).
+  defp handle_UAS_response(state, rsp, _transact_pid) when state.state in [ :initial, :uac_challenged ] and rsp.response in [ 401, 407 ] do
     Logger.info(dialogpid: "#{inspect(self())}", module: __MODULE__,
                  message: "challenged initial request with #{rsp.response}")
     %{state | state: :uac_challenged }

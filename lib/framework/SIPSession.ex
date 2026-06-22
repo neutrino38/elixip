@@ -235,10 +235,10 @@ defmodule SIP.Session do
           end
         end
 
-        defmacro send_OPTIONS() do
+        defmacro send_OPTIONS(opts \\ []) do
           quote do
             SIP.Scenario.Monitor.note_command(:sip, "send_OPTIONS")
-            var!(sip_ctx) = SIP.Session.RegisterUAC.send_options(var!(sip_ctx))
+            var!(sip_ctx) = SIP.Session.RegisterUAC.send_options(var!(sip_ctx), unquote(opts))
           end
         end
       end
@@ -288,14 +288,23 @@ defmodule SIP.Session do
       Send an outbound REGISTER and create the dialog if needed
       Update the session sip_ctx accordingly
       """
-    @spec client_register(%SIP.Context{}, integer()) :: %SIP.Context{}
+    @spec client_register(%SIP.Context{}, integer() | keyword()) :: %SIP.Context{}
+    def client_register(sip_ctx = %SIP.Context{}, opts) when is_list(opts) do
+      client_register(sip_ctx, Keyword.get(opts, :timeout, 3600))
+    end
+
     def client_register(sip_ctx = %SIP.Context{}, expire) when is_integer(expire) do
       register = register_msg(sip_ctx, expire)
       SIP.Session.send_sip_request(sip_ctx, register, expire)
     end
 
-    @spec auth_register(%SIP.Context{},map(), integer()) :: %SIP.Context{}
-    def auth_register(sip_ctx = %SIP.Context{}, rsp, expire) when is_map(rsp) and is_integer(rsp.response) do
+    @spec auth_register(%SIP.Context{}, map(), integer() | keyword()) :: %SIP.Context{}
+    def auth_register(sip_ctx = %SIP.Context{}, rsp, opts) when is_map(rsp) and is_list(opts) do
+      auth_register(sip_ctx, rsp, Keyword.get(opts, :timeout, 3600))
+    end
+
+    def auth_register(sip_ctx = %SIP.Context{}, rsp, expire)
+        when is_map(rsp) and is_integer(rsp.response) and is_integer(expire) do
       if rsp.response != 401 do
         raise "You must provide a 401 response with auth param to auth the REGISTER"
       end
@@ -313,9 +322,10 @@ defmodule SIP.Session do
       end
     end
 
-    def send_options(sip_ctx = %SIP.Context{}) do
+    def send_options(sip_ctx = %SIP.Context{}, opts \\ []) when is_list(opts) do
+      timeout = Keyword.get(opts, :timeout, 20)
       options = options_msg(sip_ctx)
-      SIP.Session.send_sip_request(sip_ctx, options, 20)
+      SIP.Session.send_sip_request(sip_ctx, options, timeout)
     end
   end
 
