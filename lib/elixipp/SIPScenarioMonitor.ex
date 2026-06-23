@@ -18,7 +18,7 @@ defmodule SIP.Scenario.Monitor do
   use GenServer
 
   @typedoc "Category of a command, to drive the future sequence diagram."
-  @type command_type :: :sip | :media | :http | :db | nil
+  @type command_type :: :sip | :media | :http | :db | :scenario | :control | nil
 
   @type call_info :: %{
           scenario: String.t(),
@@ -29,7 +29,15 @@ defmodule SIP.Scenario.Monitor do
           event_type: command_type()
         }
 
-  @empty %{scenario: "", account: "", command: "", command_type: nil, state: "", event: "", event_type: nil}
+  @empty %{
+    scenario: "",
+    account: "",
+    command: "",
+    command_type: nil,
+    state: "",
+    event: "",
+    event_type: nil
+  }
 
   # ── Public API ──────────────────────────────────────────────────────────────
 
@@ -88,6 +96,7 @@ defmodule SIP.Scenario.Monitor do
     if Process.whereis(__MODULE__) do
       GenServer.cast(__MODULE__, {:clear, slot_id})
     end
+
     :ok
   end
 
@@ -123,7 +132,9 @@ defmodule SIP.Scenario.Monitor do
       st.calls
       |> Map.values()
       |> Enum.sort_by(& &1.idx)
-      |> Enum.map(&Map.take(&1, [:scenario, :account, :command, :command_type, :state, :event, :event_type]))
+      |> Enum.map(
+        &Map.take(&1, [:scenario, :account, :command, :command_type, :state, :event, :event_type])
+      )
 
     {:reply, rows, st}
   end
@@ -136,7 +147,9 @@ defmodule SIP.Scenario.Monitor do
         :error ->
           idx = if is_integer(call_id), do: call_id, else: st.seq
           {Map.put(@empty, :idx, idx), st.seq + 1}
-        {:ok, existing} -> {existing, st.seq}
+
+        {:ok, existing} ->
+          {existing, st.seq}
       end
 
     entry = Map.merge(base, fields)

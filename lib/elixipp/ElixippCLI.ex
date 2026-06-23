@@ -36,6 +36,10 @@ defmodule Elixipp.CLI do
 
   @max_rate 100
 
+  # Grace period (ms) after a graceful stop before still-running calls that did
+  # not honour the cooperative shutdown request are hard-killed.
+  @shutdown_grace_ms 5_000
+
   # Table columns: {header, monitor_key, fixed_cell_width}
   @columns [
     {"Scénario", :scenario, 16},
@@ -71,8 +75,14 @@ defmodule Elixipp.CLI do
 
     arg =
       case rest do
-        [a | _] -> a
-        [] -> abort("usage: elixipp [--monitor] [-l N] [--max-run N] [--rate N] [--log-file PATH] [--log-level LEVEL] <scenario.exs | ModuleName>", 2)
+        [a | _] ->
+          a
+
+        [] ->
+          abort(
+            "usage: elixipp [--monitor] [-l N] [--max-run N] [--rate N] [--log-file PATH] [--log-level LEVEL] <scenario.exs | ModuleName>",
+            2
+          )
       end
 
     module = resolve_module(arg)
@@ -118,6 +128,10 @@ defmodule Elixipp.CLI do
           IO.puts("Scenario #{inspect(module)} succeeded.")
           System.halt(0)
 
+        {:aborted, reason} ->
+          IO.puts("Scenario #{inspect(module)} aborted: #{inspect(reason)}")
+          System.halt(0)
+
         {:error, reason} ->
           IO.puts(:stderr, "Scenario #{inspect(module)} failed: #{inspect(reason)}")
           System.halt(1)
@@ -147,7 +161,11 @@ defmodule Elixipp.CLI do
   defp resolve_rate(rate) when rate > 0 and rate <= @max_rate, do: rate
 
   defp resolve_rate(rate) do
-    IO.puts(:stderr, "--rate #{rate} ignoré (autorisé : 0 < rate <= #{@max_rate}), utilisation de #{@default_rate}")
+    IO.puts(
+      :stderr,
+      "--rate #{rate} ignoré (autorisé : 0 < rate <= #{@max_rate}), utilisation de #{@default_rate}"
+    )
+
     @default_rate
   end
 
@@ -176,16 +194,20 @@ defmodule Elixipp.CLI do
       max_run: max_run,
       rate: rate,
       spawn_interval_ms: spawn_interval_ms,
-      last_spawn: nil,       # monotonic ms of the last spawn, nil before the first
+      # monotonic ms of the last spawn, nil before the first
+      last_spawn: nil,
       monitor?: monitor?,
       live?: live?,
       raw?: raw?,
-      slots: %{},            # slot_id => mon_ref
+      # slot_id => {pid, mon_ref}
+      slots: %{},
       total_started: 0,
       total_succeeded: 0,
+      total_aborted: 0,
       total_failed: 0,
       scroll_offset: 0,
-      shutdown: :none        # :none | :graceful
+      # :none | :graceful
+      shutdown: :none
     }
 
     if interactive?, do: start_input_reader(self())
@@ -227,16 +249,17 @@ defmodule Elixipp.CLI do
     SIP.Scenario.Monitor.clear(slot_id)
     parent = self()
 
-    {_pid, mon_ref} =
+    {pid, mon_ref} =
       spawn_monitor(fn ->
         Process.put(:scenario_slot_id, slot_id)
         result = SIP.Scenario.Runner.run_instance(state.module)
         send(parent, {:slot_done, slot_id, result})
       end)
 
-    %{state |
-      slots: Map.put(state.slots, slot_id, mon_ref),
-      total_started: state.total_started + 1
+    %{
+      state
+      | slots: Map.put(state.slots, slot_id, {pid, mon_ref}),
+        total_started: state.total_started + 1
     }
   end
 
@@ -288,6 +311,11 @@ defmodule Elixipp.CLI do
         :force_quit ->
           handle_force_quit(state)
 
+        :shutdown_deadline ->
+          # Grace period elapsed after a graceful stop: hard-kill any leftover.
+          Enum.each(state.slots, fn {_sid, {pid, _ref}} -> Process.exit(pid, :kill) end)
+          parallel_loop(state)
+
         :arrow_up ->
           state = %{state | scroll_offset: max(0, state.scroll_offset - 1)}
           push_display(state)
@@ -297,7 +325,6 @@ defmodule Elixipp.CLI do
           state = scroll_down(state)
           push_display(state)
           parallel_loop(state)
-
       after
         200 ->
           push_display(state)
@@ -313,22 +340,28 @@ defmodule Elixipp.CLI do
 
   defp handle_slot_done(state, slot_id, result) do
     state = %{state | slots: Map.delete(state.slots, slot_id)}
+
     state =
       case result do
         :ok -> %{state | total_succeeded: state.total_succeeded + 1}
+        {:aborted, _} -> %{state | total_aborted: state.total_aborted + 1}
         {:error, _} -> %{state | total_failed: state.total_failed + 1}
       end
+
     maybe_spawn_next(state, slot_id)
   end
 
   defp handle_slot_crash(state, mon_ref, reason) do
-    case Enum.find(state.slots, fn {_sid, mref} -> mref == mon_ref end) do
+    case Enum.find(state.slots, fn {_sid, {_pid, mref}} -> mref == mon_ref end) do
       {slot_id, _} ->
         Logger.warning("Slot #{slot_id} crashed: #{inspect(reason)}")
-        state = %{state |
-          slots: Map.delete(state.slots, slot_id),
-          total_failed: state.total_failed + 1
+
+        state = %{
+          state
+          | slots: Map.delete(state.slots, slot_id),
+            total_failed: state.total_failed + 1
         }
+
         maybe_spawn_next(state, slot_id)
 
       nil ->
@@ -342,7 +375,17 @@ defmodule Elixipp.CLI do
   defp handle_graceful_stop(state) do
     case state.shutdown do
       :none ->
-        IO.write("\r\n[q] Arrêt propre — plus de nouveaux appels (Ctrl+D pour forcer).\r\n")
+        IO.write(
+          "\r\n[q] Arrêt propre — plus de nouveaux appels, demande d'arrêt aux actifs (Ctrl+D pour forcer).\r\n"
+        )
+
+        # Ask every active call to wind down cooperatively, and arm a deadline to
+        # hard-kill any that ignores the request (e.g. stuck outside on_events).
+        Enum.each(state.slots, fn {_sid, {pid, _ref}} ->
+          send(pid, {:scenario_ctl, :shutdown, :elixipp_graceful})
+        end)
+
+        Process.send_after(self(), :shutdown_deadline, @shutdown_grace_ms)
         state = %{state | shutdown: :graceful}
         push_display(state)
         if done?(state), do: state, else: parallel_loop(state)
@@ -372,23 +415,29 @@ defmodule Elixipp.CLI do
   defp push_display(%{live?: true} = state) do
     Owl.LiveScreen.update(:display, block_state(state))
   end
+
   defp push_display(_state), do: :ok
 
-  defp initial_block_state, do: {0, 0, 0, 0, 0, :none}
+  defp initial_block_state, do: {0, 0, 0, 0, 0, 0, :none}
 
   defp block_state(state) do
-    {state.scroll_offset, map_size(state.slots),
-     state.total_started, state.total_succeeded, state.total_failed, state.shutdown}
+    {state.scroll_offset, map_size(state.slots), state.total_started, state.total_succeeded,
+     state.total_aborted, state.total_failed, state.shutdown}
   end
 
-  defp render_block({scroll, active, total, succ, fail, shutdown}, limit, max_run) do
-    [render_counters(active, total, succ, fail, limit, max_run, shutdown), "\n",
-     render_table(scroll, true)]
+  defp render_block({scroll, active, total, succ, aborted, fail, shutdown}, limit, max_run) do
+    [
+      render_counters(active, total, succ, aborted, fail, limit, max_run, shutdown),
+      "\n",
+      render_table(scroll, true)
+    ]
   end
 
   defp render_table_plain(_state) do
     case SIP.Scenario.Monitor.calls() do
-      [] -> "(aucun appel)"
+      [] ->
+        "(aucun appel)"
+
       calls ->
         calls
         |> Enum.map(&display_row(&1, false))
@@ -422,7 +471,7 @@ defmodule Elixipp.CLI do
     end
   end
 
-  defp render_counters(active, total, succ, fail, limit, max_run, shutdown) do
+  defp render_counters(active, total, succ, aborted, fail, limit, max_run, shutdown) do
     max_str = if max_run, do: "/#{max_run}", else: ""
 
     shutdown_hint =
@@ -433,10 +482,11 @@ defmodule Elixipp.CLI do
 
     line =
       "  Actifs: #{active}/#{limit}" <>
-      "  |  Succès: #{succ}" <>
-      "  |  Échecs: #{fail}" <>
-      "  |  Total: #{total}#{max_str}" <>
-      shutdown_hint
+        "  |  Succès: #{succ}" <>
+        "  |  Interrompus: #{aborted}" <>
+        "  |  Échecs: #{fail}" <>
+        "  |  Total: #{total}#{max_str}" <>
+        shutdown_hint
 
     Owl.Data.tag(line, :cyan)
   end
@@ -447,6 +497,7 @@ defmodule Elixipp.CLI do
     IO.puts("  Rate     : #{state.rate} appels/s")
     IO.puts("  Total    : #{state.total_started}")
     IO.puts("  Succès   : #{state.total_succeeded}")
+    IO.puts("  Interrompus : #{state.total_aborted}")
     IO.puts("  Échecs   : #{state.total_failed}")
     IO.puts("════════════════════════════")
   end
@@ -491,6 +542,7 @@ defmodule Elixipp.CLI do
           {<<"[">>, <<"B">>} -> send(parent, :arrow_down)
           _ -> :ok
         end
+
         input_loop(parent)
 
       _ ->
@@ -517,6 +569,7 @@ defmodule Elixipp.CLI do
       _ -> false
     end
   end
+
   defp setup_raw_terminal(false), do: false
 
   defp restore_terminal(true),
@@ -627,11 +680,21 @@ defmodule Elixipp.CLI do
 
   defp parse_level(value) do
     case String.downcase(value) do
-      "debug" -> :debug
-      "info" -> :info
-      "warn" -> :warning
-      "warning" -> :warning
-      "error" -> :error
+      "debug" ->
+        :debug
+
+      "info" ->
+        :info
+
+      "warn" ->
+        :warning
+
+      "warning" ->
+        :warning
+
+      "error" ->
+        :error
+
       other ->
         IO.puts(:stderr, "Unknown --log-level #{inspect(other)}, using #{@default_log_level}")
         @default_log_level

@@ -3,26 +3,38 @@ defmodule SIP.Context do
   A SIP session context is a struct that store SIP user agent propertie (username, auth, etc. for a SIP session)
   A SIP context is local to a session process
   """
-  @props [ :username, :displayname, :authusername, :domain, :ha1, :ha1b, :algorithm, :ftag, :debug, :dialogpid, :lasterr ]
-
-  defstruct [
-    username: nil,
-    authusername: nil,
-    displayname: nil,
-    domain: nil,
-    ha1: nil,
-    ha1b: nil,
-    algorithm: "MD5",
-    ftag: nil,
-    debug: false,
-    dialogpid: nil,
-    lasterr: :ok,
-    errorreason: "",
-    mediaservermodule: nil,
-    mediaserverpid: nil,
-    currentstate: nil,
-    appdata: %{}
+  @props [
+    :username,
+    :displayname,
+    :authusername,
+    :domain,
+    :ha1,
+    :ha1b,
+    :algorithm,
+    :ftag,
+    :debug,
+    :dialogpid,
+    :lasterr,
+    :parent_pid
   ]
+
+  defstruct username: nil,
+            authusername: nil,
+            displayname: nil,
+            domain: nil,
+            ha1: nil,
+            ha1b: nil,
+            algorithm: "MD5",
+            ftag: nil,
+            debug: false,
+            dialogpid: nil,
+            parent_pid: nil,
+            lasterr: :ok,
+            errorreason: "",
+            mediaservermodule: nil,
+            mediaserverpid: nil,
+            currentstate: nil,
+            appdata: %{}
 
   defmacro __using__(_opts) do
     # Guard against being injected twice into the same module: a scenario that
@@ -37,51 +49,51 @@ defmodule SIP.Context do
       end
     else
       Module.put_attribute(__CALLER__.module, :sip_context_used, true)
+
       quote do
-      # Déclare la macro ctx_set
-      defmacro ctx_set(prop, value) do
-        quote do
-          var!(sip_ctx) = SIP.Context.set(var!(sip_ctx), unquote(prop), unquote(value))
+        # Déclare la macro ctx_set
+        defmacro ctx_set(prop, value) do
+          quote do
+            var!(sip_ctx) = SIP.Context.set(var!(sip_ctx), unquote(prop), unquote(value))
+          end
         end
-      end
 
-      defmacro ctx_get(prop) do
-        quote do
-          SIP.Context.get(var!(sip_ctx), unquote(prop))
+        defmacro ctx_get(prop) do
+          quote do
+            SIP.Context.get(var!(sip_ctx), unquote(prop))
+          end
         end
-      end
 
-      defmacro appdata_set(prop, value) do
-        quote do
-          appdata = Map.put(var!(sip_ctx).appdata, unquote(prop), unquote(value))
-          var!(sip_ctx) = Map.put(var!(sip_ctx), :appdata, appdata)
+        defmacro appdata_set(prop, value) do
+          quote do
+            appdata = Map.put(var!(sip_ctx).appdata, unquote(prop), unquote(value))
+            var!(sip_ctx) = Map.put(var!(sip_ctx), :appdata, appdata)
+          end
         end
-      end
 
-      defmacro appdata_get(prop) do
-        quote do
-          Map.get(var!(sip_ctx).appdata, unquote(prop))
+        defmacro appdata_get(prop) do
+          quote do
+            Map.get(var!(sip_ctx).appdata, unquote(prop))
+          end
         end
-      end
 
-      defmacro ctx_set_multiple(proplist) do
-        quote do
-          var!(sip_ctx) = SIP.Context.set( var!(sip_ctx), unquote(proplist) )
+        defmacro ctx_set_multiple(proplist) do
+          quote do
+            var!(sip_ctx) = SIP.Context.set(var!(sip_ctx), unquote(proplist))
+          end
         end
-      end
 
-      defmacro ctx_from() do
-        quote do
-          SIP.Context.from(var!(sip_ctx))
+        defmacro ctx_from() do
+          quote do
+            SIP.Context.from(var!(sip_ctx))
+          end
         end
-      end
 
-      defmacro ctx_to(userpart) do
-        quote do
-          SIP.Context.to(var!(sip_ctx), unquote(userpart))
+        defmacro ctx_to(userpart) do
+          quote do
+            SIP.Context.to(var!(sip_ctx), unquote(userpart))
+          end
         end
-      end
-
       end
     end
   end
@@ -120,16 +132,18 @@ defmodule SIP.Context do
   end
 
   def set(context, proplist) when is_list(proplist) do
-    [ { prop, value } | remaining ] = proplist
+    [{prop, value} | remaining] = proplist
     new_ctx = set(context, prop, value)
     set(new_ctx, remaining)
   end
 
   # Set the username and create the fromtag if needed
   def set(context, :username, value) when is_binary(value) do
-    context = if is_nil(context.ftag) do
-      Map.put(context, :ftag, SIP.Msg.Ops.generate_from_or_to_tag())
-    end
+    context =
+      if is_nil(context.ftag) do
+        Map.put(context, :ftag, SIP.Msg.Ops.generate_from_or_to_tag())
+      end
+
     Map.put(context, :username, value)
   end
 
@@ -144,6 +158,20 @@ defmodule SIP.Context do
       Map.put(context, :dialogpid, value)
     else
       raise "dialog PID must me a process ID"
+    end
+  end
+
+  # Set the parent FSM PID (nil means this scenario has no parent and runs
+  # standalone, so notify_parent / scenario_exit become no-ops).
+  def set(context, :parent_pid, nil) do
+    Map.put(context, :parent_pid, nil)
+  end
+
+  def set(context, :parent_pid, value) do
+    if is_pid(value) do
+      Map.put(context, :parent_pid, value)
+    else
+      raise "parent PID must be a process ID"
     end
   end
 
@@ -169,27 +197,28 @@ defmodule SIP.Context do
   end
 
   # Set the password
-  def set(ctx, :passwd, value) when ctx.authusername != nil and ctx.algorithm != nil and ctx.domain != nil do
-    Map.put( ctx, :ha1,
-      SIP.Auth.compute_ha1(ctx.algorithm, ctx.authusername, ctx.domain, value) )
+  def set(ctx, :passwd, value)
+      when ctx.authusername != nil and ctx.algorithm != nil and ctx.domain != nil do
+    Map.put(ctx, :ha1, SIP.Auth.compute_ha1(ctx.algorithm, ctx.authusername, ctx.domain, value))
   end
 
-  def set(ctx, :passwd, _value) when is_nil(ctx.authusername) or is_nil(ctx.algorithm) or is_nil(ctx.domain) do
+  def set(ctx, :passwd, _value)
+      when is_nil(ctx.authusername) or is_nil(ctx.algorithm) or is_nil(ctx.domain) do
     raise "Cannot set password. One of the following has not been set: authusername, domain, algorithm"
   end
 
   def set(ctx, :lasterr, value) do
-    Map.put( ctx, :lasterr, value)
+    Map.put(ctx, :lasterr, value)
   end
 
   # Current FSM state name, written by the `goto` macro of the scenario DSL.
   def set(ctx, :currentstate, value) when is_atom(value) do
-    Map.put( ctx, :currentstate, value)
+    Map.put(ctx, :currentstate, value)
   end
 
   # Human-readable failure reason, written by `scenario_failure/1`.
   def set(ctx, :errorreason, value) when is_binary(value) do
-    Map.put( ctx, :errorreason, value)
+    Map.put(ctx, :errorreason, value)
   end
 
   def set(_context, prop, _value) when is_atom(prop) do
@@ -201,7 +230,7 @@ defmodule SIP.Context do
       displayname: context.displayname,
       userpart: context.username,
       domain: context.domain,
-      params: %{ "tag" => context.ftag }
+      params: %{"tag" => context.ftag}
     }
 
     if from_uri.userpart == nil or from_uri.domain == nil do
@@ -211,10 +240,10 @@ defmodule SIP.Context do
     end
   end
 
-
-  def to( context, userpart ) do
-    if is_nil(context.domain), do: raise "domain has not been set"
+  def to(context, userpart) do
+    if is_nil(context.domain), do: raise("domain has not been set")
     userpart = if userpart != nil, do: userpart, else: context.username
+
     to_uri = %SIP.Uri{
       userpart: userpart,
       domain: context.domain
@@ -226,6 +255,4 @@ defmodule SIP.Context do
       to_uri
     end
   end
-
-
 end

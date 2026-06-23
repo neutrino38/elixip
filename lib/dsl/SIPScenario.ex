@@ -71,13 +71,20 @@ defmodule SIP.Scenario do
           config: 1,
           state: 2,
           on_events: 1,
+          on_shutdown: 1,
+          sub_fsm: 1,
+          sub_fsm: 2,
+          notify: 2,
+          notify_parent: 1,
           goto: 1,
           goto: 2,
           goto: 3,
           scenario_success: 0,
           scenario_success: 1,
           scenario_failure: 0,
-          scenario_failure: 1
+          scenario_failure: 1,
+          scenario_aborted: 0,
+          scenario_aborted: 1
         ]
 
       Module.register_attribute(__MODULE__, :scenario_states, accumulate: true)
@@ -101,7 +108,7 @@ defmodule SIP.Scenario do
       SIP stack first (one-shot mode) or `false` to reuse an already-started
       stack. Returns `:ok` on success or `{:error, reason}` on failure.
       """
-      @spec run(boolean()) :: :ok | {:error, term()}
+      @spec run(boolean()) :: :ok | {:aborted, term()} | {:error, term()}
       def run(start_stack?) when is_boolean(start_stack?) do
         SIP.Scenario.Runner.run(__MODULE__, start_stack?)
       end
@@ -137,6 +144,7 @@ defmodule SIP.Scenario do
         # Clear the event type inferred by on_events, so a `goto` in this state
         # that is not inside a on_events clause stays untyped.
         Process.delete(:scenario_event_type)
+
         try do
           unquote(body)
         rescue
@@ -178,7 +186,8 @@ defmodule SIP.Scenario do
       else
         # lasterr aborts the scenario as a failure. Keep the same 5-tuple shape
         # (with the inferred event type) the runner expects for terminals.
-        {:terminal, :failure, var!(sip_ctx).lasterr, Process.get(:scenario_event_type), var!(sip_ctx)}
+        {:terminal, :failure, var!(sip_ctx).lasterr, Process.get(:scenario_event_type),
+         var!(sip_ctx)}
       end
     end
   end
@@ -199,6 +208,15 @@ defmodule SIP.Scenario do
   """
   defmacro on_events(blocks) do
     do_clauses = Keyword.fetch!(blocks, :do)
+
+    # Make every on_events cooperatively shutdown-aware: prepend a clause matching
+    # the control message, unless the scenario already handles :scenario_ctl
+    # itself. Prepending keeps it ahead of a possible catch-all `_ ->` clause.
+    do_clauses =
+      if Enum.any?(do_clauses, &ctl_clause?/1),
+        do: do_clauses,
+        else: [shutdown_clause() | do_clauses]
+
     instrumented = Enum.map(do_clauses, &instrument_receive_clause/1)
 
     new_blocks =
@@ -208,6 +226,23 @@ defmodule SIP.Scenario do
       end
 
     {:receive, [], [new_blocks]}
+  end
+
+  # Does this receive clause already match a {:scenario_ctl, ...} control message?
+  defp ctl_clause?({:->, _meta, [head, _body]}), do: clause_event_type(head) == :control
+  defp ctl_clause?(_), do: false
+
+  # The auto-injected cooperative-shutdown clause: jump to the reserved
+  # :__shutdown__ state, which the runner resolves to `on_shutdown` (if declared)
+  # or to the default :aborted termination.
+  defp shutdown_clause do
+    [clause] =
+      quote do
+        {:scenario_ctl, :shutdown, _reason} ->
+          {:goto, :__shutdown__, "shutdown", :control, var!(sip_ctx)}
+      end
+
+    clause
   end
 
   @doc "Terminate the scenario successfully, transitioning to the success state."
@@ -225,6 +260,99 @@ defmodule SIP.Scenario do
       event_type = unquote(type) || Process.get(:scenario_event_type)
       var!(sip_ctx) = SIP.Context.set(var!(sip_ctx), :errorreason, to_string(unquote(reason)))
       {:terminal, :failure, unquote(reason), event_type, var!(sip_ctx)}
+    end
+  end
+
+  @doc """
+  Terminate the scenario as *aborted* — a controller-driven wind-down (e.g. a
+  cooperative shutdown), distinct from a failure so it is not counted as one.
+  Typically used as the last statement of an `on_shutdown` block.
+  """
+  defmacro scenario_aborted(reason \\ "", type \\ nil) do
+    quote do
+      event_type = unquote(type) || Process.get(:scenario_event_type)
+      {:terminal, :aborted, unquote(reason), event_type, var!(sip_ctx)}
+    end
+  end
+
+  @doc """
+  Spawn another scenario as a *sub finite-state machine* (a separate process,
+  required because each FSM owns its own SIP/media mailbox). Hands the child our
+  PID and a local name so the two can exchange messages with `notify/2` /
+  `notify_parent/1`.
+
+  `target` is either a compiled scenario module or a path to a `.exs` scenario
+  file. Options:
+
+    * `as:`   — **required** local name (atom) used to address the child and to
+      tag the messages it sends back.
+    * `args:` — optional map merged into the child context appdata.
+
+  The child handle is stored in `sip_ctx.appdata[:__children__]`, so it survives
+  across states; the macro rebinds `sip_ctx` like `ctx_set`.
+
+      state initial_state do
+        sub_fsm UAS.AutoAnswer, as: :callee, args: %{play: "ring.wav"}
+        goto calling
+      end
+  """
+  defmacro sub_fsm(target, opts \\ []) do
+    quote do
+      var!(sip_ctx) =
+        SIP.Scenario.Runner.spawn_child(var!(sip_ctx), unquote(target), unquote(opts), self())
+    end
+  end
+
+  @doc """
+  Send an application message to a named child sub-FSM. The child receives it as
+  `{:scenario_msg, :parent, payload}`. Unknown name → logged and ignored.
+  """
+  defmacro notify(child_name, payload) do
+    quote do
+      SIP.Scenario.Runner.notify_child(var!(sip_ctx), unquote(child_name), unquote(payload))
+    end
+  end
+
+  @doc """
+  Send an application message to the parent FSM. The parent receives it as
+  `{:scenario_msg, <our name>, payload}`. No-op when this scenario has no parent
+  (so the same scenario also runs standalone).
+  """
+  defmacro notify_parent(payload) do
+    quote do
+      SIP.Scenario.Runner.notify_parent(var!(sip_ctx), unquote(payload))
+    end
+  end
+
+  @doc """
+  Declare an optional handler run when a cooperative shutdown is requested
+  (`{:scenario_ctl, :shutdown, _}` received inside an `on_events`). Compiles to
+  the reserved `:__shutdown__` state; its body must end with a transition macro
+  (`scenario_aborted/1` recommended). When omitted, the runner terminates the
+  scenario with the `:aborted` outcome by default.
+
+      on_shutdown do
+        # release app resources, send a BYE, ...
+        scenario_aborted("controller asked to stop")
+      end
+  """
+  defmacro on_shutdown(do: body) do
+    quote do
+      require Logger
+
+      def __state___shutdown__(var!(sip_ctx)) do
+        _ = var!(sip_ctx)
+        Process.delete(:scenario_event_type)
+
+        try do
+          unquote(body)
+        rescue
+          e ->
+            Logger.error("Exception in scenario on_shutdown handler")
+            Logger.error(Exception.format(:error, e, __STACKTRACE__))
+            scenario_failure("exception!")
+        end
+      end
     end
   end
 
@@ -261,9 +389,14 @@ defmodule SIP.Scenario do
   defp pattern_event_type({first, _second}), do: first_element_type(first)
   defp pattern_event_type(_), do: nil
 
-  # Media events are `{:ms_event, ...}`; SIP requests/responses are tuples whose
-  # first element is a method atom, a status code integer, or a bound variable.
+  # Media events are `{:ms_event, ...}`; inter-FSM messages are `{:scenario_msg,
+  # ...}` / `{:scenario_exit, ...}`; control messages are `{:scenario_ctl, ...}`;
+  # SIP requests/responses are tuples whose first element is a method atom, a
+  # status code integer, or a bound variable.
   defp first_element_type(:ms_event), do: :media
+  defp first_element_type(:scenario_msg), do: :scenario
+  defp first_element_type(:scenario_exit), do: :scenario
+  defp first_element_type(:scenario_ctl), do: :control
   defp first_element_type(first) when is_atom(first), do: :sip
   defp first_element_type(first) when is_integer(first), do: :sip
   defp first_element_type({name, _meta, ctx}) when is_atom(name) and is_atom(ctx), do: :sip
