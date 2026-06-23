@@ -3,12 +3,76 @@
 
 defmodule SIP.Session.Registrar do
   defmacro __using__(_opts) do
+    quote do
+      require SIP.Session.ConfigRegistry
+
+      defmacro register_init_uas() do
+        quote do
+          SIP.Session.ConfigRegistry.set_registration_processing_module(__MODULE__)
+        end
+      end
+    end
   end
+
+  @min_expires 60
+  @max_expires 3600
+  @max_contacts 5
 
   # Calllback defined for a registrar server. They are called
   @callback on_new_registration(dialog_id :: pid, registerreq :: map) :: { :accept, pid } | { :reject, integer, binary }
   @callback on_registration_expired(dialog_id :: pid, app_pid :: pid) :: nil
 
+  defp adjust_contact_expires(contact) do
+    case SIP.Uri.get_uri_param(contact, "expires") do
+      {:ok, value} ->
+        case String.to_integer(value) do
+          expires when expires > @max_expires ->
+            SIP.Uri.set_uri_param(contact, "expires", to_string(@max_expires))
+
+          expires when expires < @min_expires ->
+            raise "Contact expire value #{value} is below the minimum allowed #{@min_expires}"
+
+          _ ->
+            contact
+        end
+
+      _ ->
+        contact
+    end
+  end
+
+  defp adjust_all_contacts(contacts) when is_list(contacts) do
+    Enum.map(contacts, &adjust_contact_expires/1)
+  end
+
+  defp adjust_expires_header(req) do
+    expires = Map.get(req, :expires)
+    cond do
+      is_nil(expires) -> req
+      expires > @max_expires -> Map.put(req, :expires,  @max_expires)
+      expires < @min_expires ->
+        raise "Expires value #{expires} is too low."
+      true -> req
+    end
+  end
+
+  @doc """
+    Helper function for registrar implementation
+    Check the Expires header and the Contact header(s) for expiration values.
+    If any of them is below @min_expires, reject with 423 Interval Too Brief.
+    If any of them is above @max_expires, adjust to max expires
+  """
+  def check_register(registerreq) when is_map(registerreq) do
+
+    contacts = List.wrap(Map.get(registerreq, :contact))
+    if length(contacts) > @max_contacts do
+      throw {:reject, 400, "Too many contacts"}
+    end
+    adjusted_contacts = adjust_all_contacts(contacts)
+    Map.put(registerreq, :contact, adjusted_contacts)
+          |> adjust_expires_header()
+
+  end
 end
 
 defmodule SIP.Session.RegisterUAC do
@@ -220,9 +284,8 @@ defmodule SIP.Session.RegisterUAC do
   end
 
   defp header_expire(resp) do
-    # The parser maps "Expire" to :expire; a standard "Expires" header is kept
-    # verbatim as a string key. Accept both.
-    case Map.get(resp, :expire) || Map.get(resp, "Expires") do
+    # The parser maps the "Expires" header to :expires with an integer value.
+    case Map.get(resp, :expires) do
       v when is_binary(v) -> String.to_integer(v)
       v when is_integer(v) -> v
       _ -> nil
