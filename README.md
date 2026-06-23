@@ -305,3 +305,12 @@ values are truncated with an ellipsis).
 
 
 Exchanges between
+
+# License
+
+Elixip is distributed under the **Business Source License 1.1 (BSL 1.1)**, a
+source-available license. See [LICENSE.md](LICENSE.md) for the full terms.
+
+A French translation is available in [LICENSE_fr.md](LICENSE_fr.md) for
+convenience; the English [LICENSE.md](LICENSE.md) is the only legally binding
+version.
