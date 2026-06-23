@@ -8,3 +8,7 @@ elixip.log
 # Standalone executable produced by `mix escript.build`
 /elixipp
 elixipp.log
+
+# Real (non-committed) scenario config holding actual credentials. Use
+# scenario-config.json as a template.
+/ives.json

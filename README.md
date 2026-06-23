@@ -116,7 +116,7 @@ Then run scenarios directly:
 
 ```bash
 ./elixipp scenarios/my_call_scenario.exs   # by file path
-./elixipp MyCallScenario                   # by module name (if bundled in the escript)
+./elixipp UAC.Invite                       # by name, built-in scenario (no file)
 ```
 
 Install it on your `PATH` to call it from anywhere:
@@ -131,6 +131,31 @@ a single file, but it still relies on an Erlang/OTP runtime (`erl` / `escript`)
 being available on the host. Like `mix scenario`, it exits with `0` on success
 and `1` on failure.
 
+### Built-in scenarios
+
+A scenario can be **bundled into the tool** instead of loaded from a `.exs` file:
+its module is compiled into `lib/` (so it ships inside the escript) and is run by
+**module name**, with no file on the host:
+
+```bash
+elixipp UAC.Invite      # outbound INVITE + media (built-in)
+elixipp UAC.Register    # REGISTER + keepalive + refresh (built-in)
+```
+
+The built-ins live in [`lib/scenarios/`](lib/scenarios/). The matching files in
+[`scenarios/`](scenarios/) (`uac_invite.exs`, `uac_register.exs`) are editable,
+file-loadable copies — same logic, but a distinct module name (`UAC.InviteExample`
+/ `UAC.RegisterExample`) so they do not collide with the bundled modules. Use the
+`.exs` files as a starting point to write your own, and combine either form with
+`--config` to inject real accounts:
+
+```bash
+elixipp -c ives.json UAC.Register                 # built-in, JSON-parameterized
+elixipp -c ives.json --max-run 0 UAC.Register      # walk through every account
+```
+
+Both `elixipp` and `mix scenario` accept a built-in name in place of a file path.
+
 ### Command-line options
 
 ```bash
@@ -143,6 +168,7 @@ elixipp [OPTIONS] <scenario.exs | ModuleName>
 | `-l N`, `--limit N` | Run `N` calls simultaneously. Without `--max-run`, slots are recycled indefinitely. The live table is shown only with `--monitor`; otherwise the run is silent and prints the final summary. | `1` |
 | `--max-run N` | Stop after `N` executions in total. | unlimited (`1` when neither `--limit` nor `--max-run` is set) |
 | `--rate N` | Number of calls started per second. Each new call creation is spaced by `1000 / N` ms. Values greater than `100` are ignored and fall back to the default. | `10` |
+| `-c FILE`, `--config FILE` | JSON file parameterizing the scenario (header + N accounts). Overrides the scenario `config` block. See [Paramétrage par fichier JSON](#paramétrage-par-fichier-json-externe). | none |
 | `--log-file PATH` | Log file path. | `elixipp.log` |
 | `--log-level LEVEL` | File log level: `debug` \| `info` \| `warning` \| `error`. | `debug` |
 | `-h`, `--help` | Show the help text. | — |
@@ -207,6 +233,91 @@ the escript). On a real terminal the table refreshes in place; on a non-interact
 device (a pipe, a CI log) it degrades to a single final snapshot. Today a single
 row is shown; the table is built to hold one row per call once scenarios run in
 parallel.
+
+## Paramétrage par fichier JSON externe
+
+A scenario can be parameterized programmatically with its `config` block, **or**
+from an external JSON file passed with `--config` / `-c`. The two are not
+exclusive: the `config` block provides the defaults and the JSON file, when
+given, overrides them. Without `--config`, behavior is unchanged.
+
+The file holds a **header** (global / per-session defaults) and a list of **N
+accounts**:
+
+```json
+{
+  "domain": "example.com",
+  "proxyuri": "sip:sip.example.com:5060",
+  "proxyusesrv": false,
+  "optionkeepaliveperiod": 15,
+  "accounts": [
+    { "username": "1000", "password": "secret1" },
+    { "username": "1001", "password": "secret2", "displayname": "Bob" },
+    { "username": "1002", "password": "secret3", "domain": "other.example.com" }
+  ]
+}
+```
+
+A ready-to-copy template lives in [`scenario-config.json`](scenario-config.json).
+
+**Header keys** (all optional):
+
+| Key | Routed to | Note |
+|---|---|---|
+| `domain` | `%SIP.Context{}` | default domain for accounts that omit it |
+| `proxyuri` | `:elixip2` app env | `"sip:host:port"`, parsed to a `%SIP.Uri{}` |
+| `proxyusesrv` | `:elixip2` app env | boolean |
+| `optionkeepaliveperiod` | `:elixip2` app env | integer (seconds) |
+
+**Account keys**: `username` and `password` are **required**; `domain` (falls
+back to the header), `authusername` (defaults to `username`) and `displayname`
+are optional.
+
+The `proxyuri` / `proxyusesrv` / `optionkeepaliveperiod` keys are *global* — the
+runner routes them to the `:elixip2` application env instead of the per-session
+context. They can equally appear in a scenario `config` block, so scenarios no
+longer call `Application.put_env` in `initial_state`:
+
+```elixir
+config username: "1000", domain: "example.com", passwd: "changeme",
+       proxyuri: "sip:sip.example.com:5060",
+       proxyusesrv: false,
+       optionkeepaliveperiod: 15
+```
+
+### Merge precedence
+
+```
+scenario config block   <   JSON header   <   JSON account
+```
+
+### Selecting accounts
+
+Each scenario instance is built from one account, chosen round-robin on a
+monotonic run counter: `accounts[rem(run_index, N)]`. With the default
+`--limit 1`, one account is used per run, so to walk through every account you
+recycle slots with `--max-run`:
+
+```bash
+# one-shot, first account only
+elixipp -c ives.json scenarios/uac_register.exs
+
+# walk through all accounts sequentially (slots recycled, unlimited runs)
+elixipp -c ives.json --max-run 0 scenarios/uac_register.exs
+
+# N accounts in parallel
+elixipp -c ives.json --limit 3 scenarios/uac_register.exs
+
+# also available from mix (single instance, first account)
+mix scenario --config ives.json scenarios/uac_register.exs
+```
+
+Validation is **strict**: an unknown key (header or account), a missing
+`username`/`password`, an unresolved domain or a type mismatch aborts before the
+run with a clear message.
+
+> **Credentials** — keep real account files out of version control. The repo
+> ignores `ives.json` for that purpose; copy `scenario-config.json` to start.
 
 ## Logging
 

@@ -58,7 +58,7 @@ defmodule SIPMsg do
 			"Proxy-Authorization" -> :proxyauthorization
 			"Proxy-Authenticate" -> :proxyauthenticate
 			"WWW-Authenticate" -> :wwwauthenticate
-			"Expire" -> :expire
+			"Expires" -> :expires
 			"Contact" -> :contact
 			"Supported" -> :supported
 			_ -> name
@@ -71,6 +71,7 @@ defmodule SIPMsg do
 		contentlength: "Content-Length", proxyauthorization: "Proxy-Authorization",
 		proxyauthenticate: "Proxy-Authenticate", wwwauthenticate: "WWW-Authenticate",
 		authorization: "Authorization",
+		expires: "Expires",
 		supported: "Supported" }
 
 
@@ -180,6 +181,10 @@ defmodule SIPMsg do
 	end
 
 	defp parse_header_content( :contentlength, value ) do
+		{ :ok, String.to_integer(value) }
+	end
+
+	defp parse_header_content( :expires, value ) do
 		{ :ok, String.to_integer(value) }
 	end
 

@@ -3,8 +3,16 @@ defmodule Elixipp.CLI do
   Entry point of the standalone `elixipp` executable (built with `mix escript.build`).
 
       elixipp scenarios/my_call.exs
+      elixipp UAC.Invite                       # built-in scenario, no file needed
       elixipp --monitor -l 5 scenarios/my_call.exs
       elixipp --monitor -l 5 --max-run 100 scenarios/my_call.exs
+
+  ## Scenarios
+
+  The argument is either a path to a scenario `.exs` file or the name of a
+  **built-in** scenario module bundled into the escript: `UAC.Invite` and
+  `UAC.Register`. Built-ins need no file on the host, so the standalone tool can
+  run them anywhere.
 
   ## Options
 
@@ -12,6 +20,9 @@ defmodule Elixipp.CLI do
     * `--limit N` / `-l N` — run N calls simultaneously (implies --monitor)
     * `--max-run N`        — stop after N total executions (default: unlimited)
     * `--rate N`           — calls started per second (default: 10, max: 100)
+    * `--config FILE` / `-c` — JSON file parameterizing the scenario (header +
+      N accounts). Overrides the scenario `config` block; accounts are picked
+      round-robin across runs.
 
   ## Keys (interactive/live mode)
 
@@ -61,12 +72,13 @@ defmodule Elixipp.CLI do
           limit: :integer,
           max_run: :integer,
           rate: :float,
+          config: :string,
           log_file: :string,
           log_level: :string,
           log_sequence: :boolean,
           help: :boolean
         ],
-        aliases: [m: :monitor, l: :limit, h: :help]
+        aliases: [m: :monitor, l: :limit, c: :config, h: :help]
       )
 
     setup_logging(opts[:log_file], opts[:log_level])
@@ -86,6 +98,7 @@ defmodule Elixipp.CLI do
       end
 
     module = resolve_module(arg)
+    ext_config = load_config(opts[:config])
     limit = opts[:limit] || 1
 
     # When neither --limit nor --max-run is given, default to a single one-shot
@@ -121,9 +134,14 @@ defmodule Elixipp.CLI do
     parallel? = monitor? or limit > 1 or max_run == nil or max_run > 1
 
     if parallel? do
-      run_parallel(module, limit, max_run, spawn_interval_ms, rate, monitor?)
+      run_parallel(module, limit, max_run, spawn_interval_ms, rate, monitor?, ext_config)
     else
-      case module.run(true) do
+      # Single one-shot run: bootstrap the stack ourselves so we can inject the
+      # external-config overrides for the first account (index 0).
+      SIP.Scenario.Runner.bootstrap_stack()
+      overrides = SIP.Scenario.ExternalConfig.overrides_for(ext_config, 0)
+
+      case SIP.Scenario.Runner.run_instance(module, config_overrides: overrides) do
         :ok ->
           IO.puts("Scenario #{inspect(module)} succeeded.")
           System.halt(0)
@@ -137,6 +155,16 @@ defmodule Elixipp.CLI do
           System.halt(1)
       end
     end
+  end
+
+  # Load and validate the external JSON config, aborting with a clear message on
+  # any error. Returns nil when no --config was given.
+  defp load_config(nil), do: nil
+
+  defp load_config(path) do
+    SIP.Scenario.ExternalConfig.load!(path)
+  rescue
+    e -> abort(Exception.message(e), 2)
   end
 
   # ── Parallel / monitored execution ──────────────────────────────────────────
@@ -169,7 +197,7 @@ defmodule Elixipp.CLI do
     @default_rate
   end
 
-  defp run_parallel(module, limit, max_run, spawn_interval_ms, rate, monitor?) do
+  defp run_parallel(module, limit, max_run, spawn_interval_ms, rate, monitor?, ext_config) do
     {:ok, _} = Application.ensure_all_started(:owl)
     {:ok, _} = SIP.Scenario.Monitor.start()
     SIP.Scenario.Runner.bootstrap_stack()
@@ -190,6 +218,7 @@ defmodule Elixipp.CLI do
 
     state = %{
       module: module,
+      ext_config: ext_config,
       limit: limit,
       max_run: max_run,
       rate: rate,
@@ -249,10 +278,15 @@ defmodule Elixipp.CLI do
     SIP.Scenario.Monitor.clear(slot_id)
     parent = self()
 
+    # Pick the account on the monotonic spawn counter (not slot_id, which is
+    # recycled): accounts cycle round-robin across successive runs. [] when no
+    # --config, so run_instance behaves exactly as before.
+    overrides = SIP.Scenario.ExternalConfig.overrides_for(state.ext_config, state.total_started)
+
     {pid, mon_ref} =
       spawn_monitor(fn ->
         Process.put(:scenario_slot_id, slot_id)
-        result = SIP.Scenario.Runner.run_instance(state.module)
+        result = SIP.Scenario.Runner.run_instance(state.module, config_overrides: overrides)
         send(parent, {:slot_done, slot_id, result})
       end)
 
@@ -714,18 +748,27 @@ defmodule Elixipp.CLI do
       elixipp [OPTIONS] <scenario.exs | NomDeModule>
 
     EXEMPLES
-      elixipp scenarios/uac_invite.exs            # un seul appel
-      elixipp UAC.Invite                          # par nom de module
+      elixipp scenarios/uac_invite.exs            # depuis un fichier
+      elixipp UAC.Invite                          # scénario intégré (sans fichier)
+      elixipp UAC.Register                        # scénario intégré (sans fichier)
       elixipp -m scenarios/uac_invite.exs         # affichage live d'un appel
       elixipp -l 5 scenarios/uac_invite.exs       # 5 appels en continu
       elixipp -l 5 --max-run 100 scenarios/uac_invite.exs   # 5 simultanés, 100 au total
       elixipp -l 5 --rate 20 scenarios/uac_invite.exs       # 5 simultanés, 20 appels/s max
+      elixipp -c ives.json scenarios/uac_register.exs       # paramétré par un fichier JSON
+      elixipp -c accounts.json --max-run 0 scenarios/uac_register.exs  # balaye tous les comptes
 
     OPTIONS
       -m, --monitor      Affiche un tableau live des appels en cours.
       -l, --limit N      Lance N appels simultanés.
                          Sans --max-run, les slots sont recyclés indéfiniment.
       --max-run N        Arrête après N exécutions au total.
+      -c, --config FILE  Fichier JSON paramétrant le scénario : entête (domain,
+                         proxyuri, proxyusesrv, optionkeepaliveperiod) + N comptes
+                         {username, password, domain}. Surcharge le bloc config du
+                         scénario. Les comptes sont tirés en round-robin sur les
+                         exécutions (avec --limit 1, utilisez --max-run pour tous
+                         les parcourir).
       --rate N           Nombre d'appels créés par seconde (défaut : 10, max : 100).
                          Espace la création de chaque nouvel appel de 1000/N ms.
                          Les valeurs > 100 sont ignorées (retour au défaut).
@@ -739,6 +782,11 @@ defmodule Elixipp.CLI do
 
     Sans --limit ni --max-run, comportement équivalent à --limit 1 --max-run 1
     (un seul appel, une seule exécution).
+
+    SCÉNARIOS
+      L'argument est soit un chemin vers un fichier .exs, soit le nom d'un
+      scénario intégré (compilé dans l'exécutable) : UAC.Invite, UAC.Register.
+      Les scénarios intégrés ne nécessitent aucun fichier sur la machine.
 
     TOUCHES (mode live)
       q                  Arrêt propre : plus de nouveaux appels, attend les actifs.

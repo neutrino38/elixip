@@ -30,7 +30,8 @@ Use the API provided by SIP.Dialog module
     callid: nil,
     totag: nil,
     destip: nil,
-    destport: 0
+    destport: 0,
+    nonce_map: %{}  # Map to store nonces and their expiration times
   ]
 
   defp on_new_transaction(state, req, _transact_id) when is_map(req) and req.method in [ :ACK, :CANCEL ] do
@@ -305,6 +306,46 @@ Use the API provided by SIP.Dialog module
     end
   end
 
+  defp check_expired_nonces(state) do
+    now = DateTime.utc_now()
+    new_nonce_map = Enum.reduce(state.nonce_map, %{}, fn {nonce, expiration_time}, acc ->
+      if DateTime.compare(now, expiration_time) == :lt do
+        Map.put(acc, nonce, expiration_time)
+      else
+        Logger.debug([ dialogpid: self(), module: __MODULE__,
+                       message: "Nonce #{nonce} expired and removed from nonce_map"])
+        acc
+      end
+    end)
+    %SIP.DialogImpl{ state | nonce_map: new_nonce_map }
+  end
+
+  defp add_new_nonce(state, nonce) do
+    expiration_time = DateTime.utc_now() |> DateTime.add(30, :second) # Nonce valid for 30 seconds
+    new_nonce_map = Map.put(state.nonce_map, nonce, expiration_time)
+    # Arm a timer to check for expired nonces after 30 seconds
+    Process.send_after(self(), :check_expired_nonces, 30100)
+    %SIP.DialogImpl{ state | nonce_map: new_nonce_map }
+  end
+
+  defp valid_nonce?(state, nonce) do
+    case Map.get(state.nonce_map, nonce) do
+      nil ->
+        Logger.info([ dialogpid: self(), module: __MODULE__,
+                       message: "Nonce #{nonce} is invalid or expired"])
+        false
+
+      expiration_time ->
+        if DateTime.compare(DateTime.utc_now(), expiration_time) == :lt do
+          true
+        else
+          Logger.info([ dialogpid: self(), module: __MODULE__,
+                         message: "Nonce #{nonce} has expired"])
+          false
+        end
+    end
+  end
+
   # Dialog started by an outbound request
   def init({ req, :outbound, pid, timeout, debug, dialog_id }) when is_req(req) do
     { fromtag, callid, _totag } = dialog_id
@@ -381,8 +422,15 @@ Use the API provided by SIP.Dialog module
   def handle_call({:replyreq, req, resp_code, reason, realm}, _from, state) when resp_code in [ 401, 407 ] do
     auth = %{ realm: realm, algorithm: "SHA256", authproc: "Digest "}
     { ret, uas_t } = SIP.Transac.reply_req(req, resp_code, reason, auth, state.totag, state.transactions)
+    case ret do
+      { :ok, nonce } ->
+        # Store the nonce and its expiration time in the nonce_map
+        new_state = add_new_nonce(state, nonce)
+        { :reply, :ok, add_totag(new_state, nil) |> close_transaction(uas_t) }
 
-    { :reply, ret, add_totag(state, nil) |> close_transaction(uas_t) }
+      _ ->
+        { :reply, ret, add_totag(state, nil) |> close_transaction(uas_t) }
+    end
   end
 
   def handle_call({:replyreq, req, resp_code, reason, upd_field}, _from, state) do
@@ -411,6 +459,7 @@ Use the API provided by SIP.Dialog module
     end
   end
 
+  @doc "Handle call to send out an ACK for an INVITE request"
   def handle_call({:ack, transact_pid}, _from, state ) do
     if transact_pid in state.transactions do
       reply = SIP.Transac.ack_uac_transaction(transact_pid)
@@ -421,6 +470,24 @@ Use the API provided by SIP.Dialog module
       { :reply, :nosuchtransaction, state }
     end
   end
+
+  @doc "Handle call to check if a nonce is valid"
+  def handle_call({:checknonce, nonce}, _from, state) do
+    is_valid = valid_nonce?(state, nonce)
+    { :reply, is_valid, state }
+  end
+
+  @doc "Handle option keepalive timers: send an OPTIONS message"
+  def handle_info({ :timeout, _tref, :optionskeepalive }, state) do
+    newstate = send_options_keepalive(state)
+    { :noreply, newstate }
+  end
+
+  @doc "Handle timer for checking expired nonces"
+  def handle_info(:check_expired_nonces, state) do
+    { :noreply, check_expired_nonces(state) }
+  end
+
 
   defp check_closing_transaction(state, msg, transact_pid) when msg.method in [ :BYE ] do
     { :ok, %SIP.DialogImpl{ state | closing_transaction: transact_pid } }

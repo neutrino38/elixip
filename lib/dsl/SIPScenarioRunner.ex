@@ -75,8 +75,13 @@ defmodule SIP.Scenario.Runner do
 
     if slot_id = Keyword.get(opts, :slot_id), do: Process.put(:scenario_slot_id, slot_id)
 
+    # External-config / programmatic overrides (highest precedence) are merged on
+    # top of the scenario `config` block before building the context. Empty by
+    # default, so a run without overrides behaves exactly as before.
+    config = Keyword.merge(module.__scenario_config__(), Keyword.get(opts, :config_overrides, []))
+
     ctx =
-      module.__scenario_config__()
+      config
       |> build_context()
       |> apply_run_opts(opts)
       |> SIP.Context.set(:currentstate, :initial_state)
@@ -190,8 +195,9 @@ defmodule SIP.Scenario.Runner do
   @doc false
   # Build a %SIP.Context{} from the config keyword list. `:passwd` is applied
   # last because computing :ha1 requires :authusername / :domain / :algorithm to
-  # be set first. Keys that are not native context properties (e.g. :proxy) are
-  # kept in the appdata map so scenarios can read them back.
+  # be set first. Global keys (:proxyuri / :proxyusesrv / :optionkeepaliveperiod)
+  # are routed to the :elixip2 application env. Remaining non-native keys (e.g.
+  # :proxy) are kept in the appdata map so scenarios can read them back.
   @spec build_context(keyword()) :: %SIP.Context{}
   def build_context(config) when is_list(config) do
     {passwd, rest} = Keyword.pop(config, :passwd)
@@ -204,6 +210,18 @@ defmodule SIP.Scenario.Runner do
 
   @context_string_props [:username, :authusername, :displayname, :domain, :algorithm]
 
+  # Global keys are not per-session: they are routed to the :elixip2 application
+  # env (read by SIP.Resolver, SIP.Session.Register, …) instead of the context.
+  # This is the single place that applies them, whether they come from the
+  # scenario `config` block or from an external JSON header — so scenarios no
+  # longer need to `Application.put_env` by hand in their initial_state.
+  @global_keys [:proxyuri, :proxyusesrv, :optionkeepaliveperiod]
+
+  defp put_config(ctx, key, value) when key in @global_keys do
+    apply_global_key(key, value)
+    ctx
+  end
+
   defp put_config(ctx, :debug, value) when is_boolean(value), do: Map.put(ctx, :debug, value)
 
   defp put_config(ctx, key, value) when key in @context_string_props and is_binary(value),
@@ -211,6 +229,21 @@ defmodule SIP.Scenario.Runner do
 
   # Unknown / non-native keys (e.g. :proxy) are stored in appdata.
   defp put_config(ctx, key, value), do: SIP.Context.appdata_set(ctx, key, value)
+
+  # Apply a global key to the application env. `:proxyuri` accepts either an
+  # already-parsed %SIP.Uri{} (from the JSON loader) or a string "sip:host:port"
+  # (from a scenario `config` block), parsing the latter so both paths converge.
+  defp apply_global_key(:proxyuri, %SIP.Uri{} = uri),
+    do: Application.put_env(:elixip2, :proxyuri, uri)
+
+  defp apply_global_key(:proxyuri, value) when is_binary(value) do
+    case SIP.Uri.parse(value) do
+      {:ok, uri} -> Application.put_env(:elixip2, :proxyuri, uri)
+      {err, _} -> raise "invalid proxyuri #{inspect(value)}: #{inspect(err)}"
+    end
+  end
+
+  defp apply_global_key(key, value), do: Application.put_env(:elixip2, key, value)
 
   # ── FSM loop ──────────────────────────────────────────────────────────────
 
