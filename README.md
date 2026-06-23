@@ -116,7 +116,7 @@ Then run scenarios directly:
 
 ```bash
 ./elixipp scenarios/my_call_scenario.exs   # by file path
-./elixipp MyCallScenario                   # by module name (if bundled in the escript)
+./elixipp UAC.Invite                       # by name, built-in scenario (no file)
 ```
 
 Install it on your `PATH` to call it from anywhere:
@@ -130,6 +130,31 @@ The escript bundles the compiled BEAM modules of Elixip and its dependencies int
 a single file, but it still relies on an Erlang/OTP runtime (`erl` / `escript`)
 being available on the host. Like `mix scenario`, it exits with `0` on success
 and `1` on failure.
+
+### Built-in scenarios
+
+A scenario can be **bundled into the tool** instead of loaded from a `.exs` file:
+its module is compiled into `lib/` (so it ships inside the escript) and is run by
+**module name**, with no file on the host:
+
+```bash
+elixipp UAC.Invite      # outbound INVITE + media (built-in)
+elixipp UAC.Register    # REGISTER + keepalive + refresh (built-in)
+```
+
+The built-ins live in [`lib/scenarios/`](lib/scenarios/). The matching files in
+[`scenarios/`](scenarios/) (`uac_invite.exs`, `uac_register.exs`) are editable,
+file-loadable copies — same logic, but a distinct module name (`UAC.InviteExample`
+/ `UAC.RegisterExample`) so they do not collide with the bundled modules. Use the
+`.exs` files as a starting point to write your own, and combine either form with
+`--config` to inject real accounts:
+
+```bash
+elixipp -c ives.json UAC.Register                 # built-in, JSON-parameterized
+elixipp -c ives.json --max-run 0 UAC.Register      # walk through every account
+```
+
+Both `elixipp` and `mix scenario` accept a built-in name in place of a file path.
 
 ### Command-line options
 

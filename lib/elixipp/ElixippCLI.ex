@@ -3,8 +3,16 @@ defmodule Elixipp.CLI do
   Entry point of the standalone `elixipp` executable (built with `mix escript.build`).
 
       elixipp scenarios/my_call.exs
+      elixipp UAC.Invite                       # built-in scenario, no file needed
       elixipp --monitor -l 5 scenarios/my_call.exs
       elixipp --monitor -l 5 --max-run 100 scenarios/my_call.exs
+
+  ## Scenarios
+
+  The argument is either a path to a scenario `.exs` file or the name of a
+  **built-in** scenario module bundled into the escript: `UAC.Invite` and
+  `UAC.Register`. Built-ins need no file on the host, so the standalone tool can
+  run them anywhere.
 
   ## Options
 
@@ -740,8 +748,9 @@ defmodule Elixipp.CLI do
       elixipp [OPTIONS] <scenario.exs | NomDeModule>
 
     EXEMPLES
-      elixipp scenarios/uac_invite.exs            # un seul appel
-      elixipp UAC.Invite                          # par nom de module
+      elixipp scenarios/uac_invite.exs            # depuis un fichier
+      elixipp UAC.Invite                          # scénario intégré (sans fichier)
+      elixipp UAC.Register                        # scénario intégré (sans fichier)
       elixipp -m scenarios/uac_invite.exs         # affichage live d'un appel
       elixipp -l 5 scenarios/uac_invite.exs       # 5 appels en continu
       elixipp -l 5 --max-run 100 scenarios/uac_invite.exs   # 5 simultanés, 100 au total
@@ -773,6 +782,11 @@ defmodule Elixipp.CLI do
 
     Sans --limit ni --max-run, comportement équivalent à --limit 1 --max-run 1
     (un seul appel, une seule exécution).
+
+    SCÉNARIOS
+      L'argument est soit un chemin vers un fichier .exs, soit le nom d'un
+      scénario intégré (compilé dans l'exécutable) : UAC.Invite, UAC.Register.
+      Les scénarios intégrés ne nécessitent aucun fichier sur la machine.
 
     TOUCHES (mode live)
       q                  Arrêt propre : plus de nouveaux appels, attend les actifs.

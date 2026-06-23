@@ -1,16 +1,20 @@
-# Editable, file-loadable copy of the built-in UAC.Register scenario
-# (lib/scenarios/uac_register.ex). The module is named UAC.RegisterExample so it
-# does not collide with the bundled UAC.Register. Run it with:
-#     elixipp scenarios/uac_register.exs
-#     mix scenario scenarios/uac_register.exs
-# or run the bundled version by name: `elixipp UAC.Register`.
-defmodule UAC.RegisterExample do
+defmodule UAC.Register do
+  @moduledoc """
+  Built-in REGISTER scenario, compiled into the app and bundled into the
+  `elixipp` escript. Run it by module name, without a `.exs` file:
+
+      elixipp UAC.Register
+      elixipp -c ives.json UAC.Register
+
+  The editable, file-loadable copy lives in `scenarios/uac_register.exs` (module
+  `UAC.RegisterExample`); this is the canonical bundled version.
+  """
   use SIP.Scenario
   use SIP.Session.RegisterUAC
 
   # Standard placeholder identity. Real credentials are injected at run time from
-  # an external JSON file (e.g. `elixipp -c ives.json scenarios/uac_register.exs`)
-  # which overrides this config block. See README "Paramétrage par fichier JSON".
+  # an external JSON file (e.g. `elixipp -c ives.json UAC.Register`) which
+  # overrides this config block. See README "Paramétrage par fichier JSON".
   @username "1000"
   @authusername "1000"
   @displayname "Test User"
