@@ -1,0 +1,11 @@
+{
+  "domain": "example.com",
+  "proxyuri": "sip:sip.example.com:5060",
+  "proxyusesrv": false,
+  "optionkeepaliveperiod": 15,
+  "accounts": [
+    { "username": "1000", "password": "secret1" },
+    { "username": "1001", "password": "secret2", "displayname": "Bob" },
+    { "username": "1002", "password": "secret3", "domain": "other.example.com" }
+  ]
+}

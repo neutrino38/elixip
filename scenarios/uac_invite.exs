@@ -5,35 +5,39 @@ defmodule UAC.Invite do
 
   @mediaservermod MediaServer.Mockup
 
-  @username "33970262546"
-  @authusername "33970262546"
+  # Standard placeholder identity — override at run time with `elixipp -c FILE`.
+  @username "1000"
+  @authusername "1000"
   @displayname "Test User"
-  @domain "visioassistance.net"
-  @proxy "sip.djanah.com"
-  @passwd "TestKam1"
+  @domain "example.com"
+  @proxy "sip.example.com"
+  @passwd "changeme"
   @callee "sip:90901@#{@domain}"
 
   # SIP identity for the scenario. The framework reads this block to build the
   # initial %SIP.Context{} (computing :ha1 from :passwd) before initial_state.
-  config username: @username,
-         authusername: @authusername,
-         displayname: @displayname,
-         domain: @domain,
-         proxy: @proxy,
-         passwd: @passwd
+  # Global keys (proxyuri / proxyusesrv) are routed by the runner to the :elixip2
+  # application env — no Application.put_env needed in initial_state.
+  config(
+    username: @username,
+    authusername: @authusername,
+    displayname: @displayname,
+    domain: @domain,
+    passwd: @passwd,
+    proxyuri: "sip:#{@proxy}:5060",
+    proxyusesrv: false
+  )
 
   # -------------------------------------------------------------------------------
   state initial_state do
-    Application.put_env(:elixip2, :proxyuri, %SIP.Uri{domain: @proxy, scheme: "sip:", port: 5060})
-    Application.put_env(:elixip2, :proxyusesrv, false)
     media_connect(@mediaservermod, "sip:localhost:8080")
-    goto next
+    goto(next)
   end
 
   # -------------------------------------------------------------------------------
   state calling do
     send_INVITE(@callee, :mediaserver, timeout: 90, webrtc: :no)
-    goto call_progress
+    goto(call_progress)
   end
 
   # -------------------------------------------------------------------------------
@@ -42,22 +46,22 @@ defmodule UAC.Invite do
     # monitor colors the transitions without an explicit type on goto.
     on_events do
       {100, _rsp, _trans_pid, _dialog_pid} ->
-        goto loop, "100 Trying"
+        goto(loop, "100 Trying")
 
       {407, rsp, _trans_pid, _dialog_pid} ->
         send_auth_INVITE(rsp, @callee, :mediaserver, timeout: 90)
-        goto loop, "407 Proxy Auth Required"
+        goto(loop, "407 Proxy Auth Required")
 
       {180, _rsp, _trans_pid, _dialog_pid} ->
-        goto loop, "180 Ringing"
+        goto(loop, "180 Ringing")
 
       {183, rsp_183, trans_pid, _dialog_pid} ->
         process_invite_reply(rsp_183, trans_pid)
-        goto loop, "183 Session Progress"
+        goto(loop, "183 Session Progress")
 
       {200, rsp_200, trans_pid, _dialog_pid} ->
         process_invite_reply(rsp_200, trans_pid)
-        goto call_answered, "200 OK"
+        goto(call_answered, "200 OK")
 
       {code, _rsp, _trans_pid, _dialog_pid} when code in 400..699 ->
         scenario_failure("Call failure with code #{code}")
@@ -69,7 +73,7 @@ defmodule UAC.Invite do
   # -------------------------------------------------------------------------------
   state call_answered do
     on_events do
-      {:ms_event, _conn, :ice_connected} -> goto start_play, "media connected"
+      {:ms_event, _conn, :ice_connected} -> goto(start_play, "media connected")
     after
       5_000 -> scenario_failure("No media received after 5s")
     end
@@ -78,19 +82,21 @@ defmodule UAC.Invite do
   # -------------------------------------------------------------------------------
   state start_play do
     media_play("toto.mp4")
-    goto next
+    goto(next)
   end
 
   # -------------------------------------------------------------------------------
   state call_established do
     on_events do
-      {:ms_event, _player, :player_started} -> goto loop, "toto.mp4: start"
+      {:ms_event, _player, :player_started} ->
+        goto(loop, "toto.mp4: start")
 
-      {:ms_event, _player, :player_ended} -> goto hangup_call, "toto.mp4: EOF"
+      {:ms_event, _player, :player_ended} ->
+        goto(hangup_call, "toto.mp4: EOF")
 
       {:MESSAGE, req, _trans_pid, dialog_pid} ->
         SIP.Dialog.reply(dialog_pid, req, 200, "OK", [])
-        goto loop, "MESSAGE"
+        goto(loop, "MESSAGE")
 
       {:BYE, req, _trans_pid, dialog_pid} ->
         SIP.Dialog.reply(dialog_pid, req, 200, "OK", [])
