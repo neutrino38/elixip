@@ -344,7 +344,14 @@ defmodule SIP.Transac.Common do
 
     # Send it to the transaction state machine
     case fsm_reply(state, resp_code, resp) do
-      { :ok, new_state } when resp_code in 200..599 -> { :ok, new_state }
+      { :ok, new_state } ->
+        # If application layer is a PID, send the nonce.
+        nonce = case resp_code do
+          401 -> resp.www_authenticate.nonce
+          407 -> resp.proxy_authenticate.nonce
+        end
+        # Add nonce to reply
+        { { :ok, nonce }, new_state }
       { code, state }  -> { code, state }
     end
   end
