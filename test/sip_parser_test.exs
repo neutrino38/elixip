@@ -154,6 +154,7 @@ defmodule SIP.Test.Parser do
     assert code == :ok
 		assert parsed_msg.method == :REGISTER
 		assert parsed_msg.ruri.domain == "212.83.152.250"
+		assert parsed_msg.expires == 1800
   end
 
   test "Load and parse an invalid unREGISTER message" do
