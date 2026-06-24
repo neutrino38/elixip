@@ -79,7 +79,21 @@ tool drives the DSL engine; the DSL itself runs fine without the tool.
 
 ### Session Layer (`SIP.Session`)
 - Behaviour module — applications implement callbacks for registrars and call processors
+- `SIP.Session.Registrar` — registrar behaviour: `on_new_registration/3` (dialog
+  pid, REGISTER, server-transaction pid) returns `{:accept, app_pid}` / `{:reject, code, reason}`;
+  also exposes `check_register/1` (bounds Contact/Expires)
 - `SIP.Context` — holds per-session state
+- REGISTER reply logic (challenge/accept/reject) is **application-side**: it lives
+  in the scenario itself (see `scenarios/uas_register.exs`), not in the framework
+
+### UAS server scenarios (`SIP.Scenario` + `elixipp`)
+- A scenario can act as a server: `uas :register` sets `__scenario_type__/0` to
+  `:uas_register` (default is `:uac`)
+- `elixipp` detects the type, starts `--listen PROTO:PORT` listeners (UDP only so
+  far) and registers `Elixip.RegistrarUAS` (instance factory + concurrency quota →
+  503) as the processing module
+- `SIP.Scenario.Runner.spawn_uas_instance/2` spawns one monitored instance per
+  inbound dialog (`run_instance/2` opts `:dialog_pid`, `:inbound_request`, `:parent_pid`)
 
 ### Utilities
 - `SIP.NetUtils` — IP address resolution and interface enumeration

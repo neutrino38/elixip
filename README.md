@@ -156,6 +156,81 @@ elixipp -c ives.json --max-run 0 UAC.Register      # walk through every account
 
 Both `elixipp` and `mix scenario` accept a built-in name in place of a file path.
 
+### Server (UAS) scenarios — registrar
+
+So far the scenarios above act as clients (UAC): they originate requests. A
+scenario can instead act as a **server (UAS)** that *answers* inbound requests.
+The first supported kind is a **REGISTER server (registrar)**.
+
+A server scenario declares its kind with `uas :register`. Replying to the
+REGISTER (challenge / accept / reject) is the **application's** responsibility,
+so those helpers are plain functions defined *in the scenario itself* — see
+[`scenarios/uas_register.exs`](scenarios/uas_register.exs):
+
+```elixir
+defmodule UAS.RegisterExample do
+  use SIP.Scenario
+
+  uas :register
+  config domain: "example.com"
+
+  state initial_state, do: goto(next)
+
+  state wait_register do
+    on_events do
+      {:REGISTER, req, _trans, dialog_pid} ->
+        case check_registration_auth(req) do
+          :no_auth_header -> challenge_registration(req, dialog_pid); goto(loop, "401")
+          :ok             -> accept_registration(req, dialog_pid, expires: 300); goto(registered, "200")
+          other           -> reject_registration(req, dialog_pid, 403, "Forbidden"); scenario_failure(other)
+        end
+    after
+      32_000 -> scenario_failure("no REGISTER")
+    end
+  end
+
+  state registered do
+    on_events do
+      {:dialog_terminated, _d, _r} -> scenario_success("ended")
+    after
+      600_000 -> scenario_success("idle")
+    end
+  end
+
+  # Application-side reply helpers (wrap SIP.Dialog.reply/5,
+  # SIP.Session.Registrar.check_register/1, SIP.Msg.Ops.check_authrequest/3).
+  defp challenge_registration(req, dialog_pid, opts \\ []), do: ...
+  defp accept_registration(req, dialog_pid, opts), do: ...
+  defp reject_registration(req, dialog_pid, code, reason), do: ...
+  defp check_registration_auth(req, opts \\ []), do: ...
+end
+```
+
+Run it as a server with one or more `--listen PROTO:PORT` listeners (UDP is wired
+today; TCP/TLS/WSS listeners are planned):
+
+```bash
+elixipp --listen udp:5060 scenarios/uas_register.exs        # registrar on UDP/5060
+elixipp -l 50 --listen udp:5060 scenarios/uas_register.exs  # cap at 50 concurrent registrations
+```
+
+`elixipp` detects the `:uas_register` type, starts the listeners and registers
+`Elixip.RegistrarUAS` as the processing module. One scenario instance is spawned
+per inbound REGISTER dialog and receives `{:REGISTER, req, transaction_id,
+dialog_pid}`. `--limit` caps the number of concurrent instances; REGISTER beyond
+the cap are rejected with `503 Service Unavailable`. Type `q` then Enter to stop
+the server.
+
+The reply helpers used above are defined in the scenario and lean on the
+framework building blocks:
+
+| Helper (in the scenario) | Effect |
+|---|---|
+| `challenge_registration(req, dialog_pid, opts)` | `SIP.Dialog.reply(dialog_pid, req, 401, …, realm)` — the dialog generates and stores the `WWW-Authenticate` nonce |
+| `accept_registration(req, dialog_pid, opts)` | `SIP.Dialog.reply(dialog_pid, req, 200, "OK", …)` after bounding Contact/Expires with `SIP.Session.Registrar.check_register/1` |
+| `reject_registration(req, dialog_pid, code, reason)` | `SIP.Dialog.reply` with an arbitrary error |
+| `check_registration_auth(req, opts)` | `:no_auth_header` / `:ok` / `:invalid_password` via `SIP.Msg.Ops.check_authrequest/3` — pass `opts[:password]` for a real digest check (otherwise any well-formed Authorization is accepted) |
+
 ### Command-line options
 
 ```bash
