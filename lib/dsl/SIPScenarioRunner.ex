@@ -110,6 +110,21 @@ defmodule SIP.Scenario.Runner do
         name -> SIP.Context.appdata_set(ctx, :__self_name__, name)
       end
 
+    # UAS scenarios: the dialog is created by the inbound request, so the
+    # registrar hands us the dialog pid (so reply macros target it) and,
+    # optionally, the request itself (also delivered as a {:REGISTER, …} message).
+    ctx =
+      case Keyword.get(opts, :dialog_pid) do
+        nil -> ctx
+        pid -> SIP.Context.set(ctx, :dialogpid, pid)
+      end
+
+    ctx =
+      case Keyword.get(opts, :inbound_request) do
+        nil -> ctx
+        req -> SIP.Context.appdata_set(ctx, :inbound_request, req)
+      end
+
     case Keyword.get(opts, :appdata) do
       map when is_map(map) ->
         Enum.reduce(map, ctx, fn {k, v}, acc -> SIP.Context.appdata_set(acc, k, v) end)
@@ -147,6 +162,22 @@ defmodule SIP.Scenario.Runner do
 
   defp resolve_target(target) when is_atom(target), do: target
   defp resolve_target(target) when is_binary(target), do: SIP.Scenario.Loader.load_file!(target)
+
+  @doc """
+  Spawn a UAS scenario instance to handle one inbound dialog (e.g. a REGISTER).
+  Used by a registration processing module (`Elixip.RegistrarUAS`) from inside
+  `on_new_registration/3`: it returns `{pid, ref}` where `pid` is the bound app
+  process to return as `{:accept, pid}` and `ref` is a monitor reference the
+  caller can use to free its instance slot when the scenario ends.
+
+  `opts` are forwarded to `run_instance/2`; `:dialog_pid`, `:inbound_request`
+  and `:parent_pid` are the relevant ones for a server scenario.
+  """
+  @spec spawn_uas_instance(module() | Path.t(), keyword()) :: {pid(), reference()}
+  def spawn_uas_instance(target, opts \\ []) do
+    module = resolve_target(target)
+    spawn_monitor(fn -> run_instance(module, opts) end)
+  end
 
   @doc false
   # Send an application message to a named child. Unknown name → log + no-op so a

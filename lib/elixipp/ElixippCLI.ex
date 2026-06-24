@@ -76,6 +76,7 @@ defmodule Elixipp.CLI do
           log_file: :string,
           log_level: :string,
           log_sequence: :boolean,
+          listen: :keep,
           help: :boolean
         ],
         aliases: [m: :monitor, l: :limit, c: :config, h: :help]
@@ -100,6 +101,13 @@ defmodule Elixipp.CLI do
     module = resolve_module(arg)
     ext_config = load_config(opts[:config])
     limit = opts[:limit] || 1
+
+    # A server (UAS) scenario is driven by inbound requests, not by an outbound
+    # spawn loop: switch to server mode and never return.
+    case SIP.Scenario.Loader.scenario_type(module) do
+      :uac -> :ok
+      type -> run_server_mode(module, type, opts, limit)
+    end
 
     # When neither --limit nor --max-run is given, default to a single one-shot
     # run (--limit 1 --max-run 1). As soon as either is set, --max-run stays
@@ -154,6 +162,119 @@ defmodule Elixipp.CLI do
           IO.puts(:stderr, "Scenario #{inspect(module)} failed: #{inspect(reason)}")
           System.halt(1)
       end
+    end
+  end
+
+  # ── Server (UAS) mode ─────────────────────────────────────────────────────
+
+  @default_listen {:udp, :all, 5060}
+
+  # Run elixipp as a SIP server: bring up the stack and the configured listeners,
+  # register the scenario as the registration processing module, then block until
+  # the operator stops the tool. `limit` caps the number of concurrent scenario
+  # instances (REGISTER beyond it are rejected with 503). Never returns.
+  @spec run_server_mode(module(), atom(), keyword(), pos_integer()) :: no_return()
+  defp run_server_mode(module, :uas_register, opts, limit) do
+    listeners = parse_listeners(opts)
+
+    SIP.Scenario.Runner.bootstrap_stack()
+
+    {:ok, _pid} =
+      Elixip.RegistrarUAS.start_link(scenario_module: module, max_instances: limit)
+
+    :ok = SIP.Session.ConfigRegistry.set_registration_processing_module(Elixip.RegistrarUAS)
+
+    started = start_listeners(listeners)
+
+    IO.puts("elixipp — mode serveur UAS Register (#{inspect(module)})")
+    IO.puts("  instances max : #{limit}")
+    IO.puts("  listeners     : #{format_listeners(started)}")
+    IO.puts("  (tapez 'q' puis Entrée pour arrêter)")
+
+    server_loop()
+  end
+
+  defp run_server_mode(_module, type, _opts, _limit) do
+    abort("Type de scénario serveur non supporté : #{inspect(type)}", 2)
+  end
+
+  # Parse repeated --listen options ("proto:port") into {proto, :all, port}
+  # triplets. Falls back to the default UDP:5060 listener when none is given.
+  @spec parse_listeners(keyword()) :: [{atom(), :all | tuple(), pos_integer()}]
+  defp parse_listeners(opts) do
+    case Keyword.get_values(opts, :listen) do
+      [] -> [@default_listen]
+      specs -> Enum.map(specs, &parse_listen_spec/1)
+    end
+  end
+
+  defp parse_listen_spec(spec) do
+    case String.split(spec, ":") do
+      [proto, port] ->
+        {parse_proto(proto), :all, parse_port(port)}
+
+      _ ->
+        abort("--listen invalide : #{inspect(spec)} (attendu proto:port, ex. udp:5060)", 2)
+    end
+  end
+
+  defp parse_proto(proto) do
+    case String.downcase(proto) do
+      p when p in ["udp", "tcp", "tls", "wss"] -> String.to_atom(p)
+      _ -> abort("--listen : protocole inconnu #{inspect(proto)} (udp|tcp|tls|wss)", 2)
+    end
+  end
+
+  defp parse_port(port) do
+    case Integer.parse(port) do
+      {n, ""} when n > 0 and n <= 65535 -> n
+      _ -> abort("--listen : port invalide #{inspect(port)}", 2)
+    end
+  end
+
+  # Start the configured listeners. Only UDP is wired in this MVP (it reuses the
+  # bidirectional SIP.Transport.UDP instance); connected transports (TCP/TLS/WSS)
+  # are not implemented yet and are reported as skipped.
+  defp start_listeners(listeners) do
+    Enum.map(listeners, fn
+      {:udp, addr, port} = l ->
+        case GenServer.start(SIP.Transport.UDP, {addr, port}) do
+          {:ok, _pid} -> {l, :ok}
+          {:error, reason} -> {l, {:error, reason}}
+        end
+
+      {proto, _addr, _port} = l when proto in [:tcp, :tls, :wss] ->
+        {l, :not_implemented}
+    end)
+  end
+
+  defp format_listeners(started) do
+    started
+    |> Enum.map(fn {{proto, addr, port}, status} ->
+      a = if addr == :all, do: "*", else: inspect(addr)
+      "#{proto}:#{a}:#{port} (#{inspect(status)})"
+    end)
+    |> Enum.join(", ")
+  end
+
+  # Block the main process until the operator types 'q' (or stdin reaches EOF on a
+  # non-interactive run, in which case we simply park forever).
+  @spec server_loop() :: no_return()
+  defp server_loop do
+    case IO.gets("") do
+      :eof ->
+        Process.sleep(:infinity)
+
+      {:error, _} ->
+        Process.sleep(:infinity)
+
+      line when is_binary(line) ->
+        if String.trim(line) == "q" do
+          IO.puts("Arrêt du serveur.")
+          System.halt(0)
+        else
+          server_loop()
+        end
     end
   end
 
@@ -757,6 +878,8 @@ defmodule Elixipp.CLI do
       elixipp -l 5 --rate 20 scenarios/uac_invite.exs       # 5 simultanés, 20 appels/s max
       elixipp -c ives.json scenarios/uac_register.exs       # paramétré par un fichier JSON
       elixipp -c accounts.json --max-run 0 scenarios/uac_register.exs  # balaye tous les comptes
+      elixipp --listen udp:5060 scenarios/uas_register.exs  # serveur registrar UAS (UDP)
+      elixipp -l 50 --listen udp:5060 scenarios/uas_register.exs  # serveur, 50 enregistrements max
 
     OPTIONS
       -m, --monitor      Affiche un tableau live des appels en cours.
@@ -772,6 +895,10 @@ defmodule Elixipp.CLI do
       --rate N           Nombre d'appels créés par seconde (défaut : 10, max : 100).
                          Espace la création de chaque nouvel appel de 1000/N ms.
                          Les valeurs > 100 sont ignorées (retour au défaut).
+      --listen PROTO:PORT  (mode serveur) Écoute les requêtes entrantes sur ce
+                         protocole/port. Répétable. Équivaut à PROTO:*:PORT (toutes
+                         les IP locales). Protocoles : udp (tcp|tls|wss à venir).
+                         Défaut si absent : udp:5060.
       --log-file PATH    Chemin du fichier de log (défaut : elixipp.log).
       --log-level LEVEL  Niveau : debug | info | warning | error (défaut : debug).
       --log-sequence     Écrit un diagramme de séquence PlantUML par instance de

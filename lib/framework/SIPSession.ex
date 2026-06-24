@@ -32,11 +32,15 @@ defmodule SIP.Session do
     case method do
       :INVITE ->
         SIP.Context.appdata_set(sip_ctx, :last_uac_invite_tid, transaction_pid)
+
       :REGISTER ->
         SIP.Context.appdata_set(sip_ctx, :last_uac_register_tid, transaction_pid)
+
       :OPTIONS ->
         SIP.Context.appdata_set(sip_ctx, :last_uac_options_tid, transaction_pid)
-      _ -> sip_ctx
+
+      _ ->
+        sip_ctx
     end
   end
 
@@ -48,12 +52,16 @@ defmodule SIP.Session do
   # in-dialog request path. The timeout is only a safety net.
   defp register_initial_transaction(sip_ctx = %SIP.Context{}, method) when is_atom(method) do
     receive do
-      { :onnewdialog, :ok, transaction_pid } ->
+      {:onnewdialog, :ok, transaction_pid} ->
         register_last_transaction(sip_ctx, method, transaction_pid)
     after
       500 ->
-        Logger.warning([module: __MODULE__,
-          message: "No :onnewdialog received after creating dialog for #{method}; transaction not registered"])
+        Logger.warning(
+          module: __MODULE__,
+          message:
+            "No :onnewdialog received after creating dialog for #{method}; transaction not registered"
+        )
+
         sip_ctx
     end
   end
@@ -66,10 +74,10 @@ defmodule SIP.Session do
   # silently recreate it — they return a clean error instead.
   @standalone_methods [:OPTIONS, :REGISTER, :PUBLISH, :SUBSCRIBE, :MESSAGE, :NOTIFY, :INFO]
 
-    @doc"""
-    Send an outbound SIP request and create the dialog if needed
-    Update the session sip_ctx accordingly
-    """
+  @doc """
+  Send an outbound SIP request and create the dialog if needed
+  Update the session sip_ctx accordingly
+  """
   def send_sip_request(sip_ctx = %SIP.Context{}, req, timeout) when is_atom(req.method) do
     dialog_alive = is_pid(sip_ctx.dialogpid) and Process.alive?(sip_ctx.dialogpid)
 
@@ -80,14 +88,15 @@ defmodule SIP.Session do
 
         try do
           case SIP.Dialog.new_request(sip_ctx.dialogpid, req) do
-            { :ok, transaction_pid } ->
-                register_last_transaction(sip_ctx, req.method, transaction_pid)
-                |> SIP.Context.set(:lasterr, :ok)
+            {:ok, transaction_pid} ->
+              register_last_transaction(sip_ctx, req.method, transaction_pid)
+              |> SIP.Context.set(:lasterr, :ok)
 
-              rez -> SIP.Context.set(sip_ctx, :lasterr, rez)
+            rez ->
+              SIP.Context.set(sip_ctx, :lasterr, rez)
           end
         catch
-          :exit, _reason -> SIP.Context.set(sip_ctx, :lasterr, :dialogterminated )
+          :exit, _reason -> SIP.Context.set(sip_ctx, :lasterr, :dialogterminated)
         end
 
       is_nil(sip_ctx.dialogpid) or req.method in @standalone_methods ->
@@ -95,7 +104,7 @@ defmodule SIP.Session do
         # method whose previous dialog has terminated (e.g. OPTIONS keep-alive):
         # start a fresh dialog / transaction.
         case SIP.Dialog.start_dialog(req, timeout, :outbound, sip_ctx.debug) do
-          { :ok, dialog_pid, _dialog_id } ->
+          {:ok, dialog_pid, _dialog_id} ->
             # Dialog created: store its pid, clear the last error, then capture the
             # initial UAC transaction so the app can later ACK / CANCEL it (same
             # contract as the in-dialog branch above).
@@ -103,16 +112,20 @@ defmodule SIP.Session do
             |> SIP.Context.set(:lasterr, :ok)
             |> register_initial_transaction(req.method)
 
-          { :error, err} ->
+          {:error, err} ->
             SIP.Context.set(sip_ctx, :lasterr, err)
         end
 
       true ->
         # The dialog (e.g. an INVITE call dialog ended by BYE) has terminated and
         # this is an in-dialog request: do not implicitly recreate it.
-        Logger.warning([module: __MODULE__,
-          message: "Dialog #{inspect(sip_ctx.dialogpid)} terminated; dropping in-dialog #{req.method} request"])
-        SIP.Context.set(sip_ctx, :lasterr, { :error, :dialogterminated })
+        Logger.warning(
+          module: __MODULE__,
+          message:
+            "Dialog #{inspect(sip_ctx.dialogpid)} terminated; dropping in-dialog #{req.method} request"
+        )
+
+        SIP.Context.set(sip_ctx, :lasterr, {:error, :dialogterminated})
     end
   end
 
@@ -141,20 +154,18 @@ defmodule SIP.Session do
   end
 
   defmodule ConfigRegistry do
-    defstruct [
-      callprocessing: nil,
-      mainapppid: nil,
-      registration: nil,
-      presence: nil,
-    ]
+    defstruct callprocessing: nil,
+              mainapppid: nil,
+              registration: nil,
+              presence: nil
 
     use Agent
 
     def start() do
-      case Agent.start( fn -> %ConfigRegistry{} end, name: __MODULE__ ) do
-        { :ok, pid } -> { :ok, pid }
+      case Agent.start(fn -> %ConfigRegistry{} end, name: __MODULE__) do
+        {:ok, pid} -> {:ok, pid}
         # Registry already running (e.g. started by a previous test module): reuse it
-        { :error, { :already_started, pid } } -> { :ok, pid }
+        {:error, {:already_started, pid}} -> {:ok, pid}
         err -> err
       end
     end
@@ -166,7 +177,7 @@ defmodule SIP.Session do
     """
     def set_call_processing_module(module) do
       Agent.update(__MODULE__, fn reg ->
-        %ConfigRegistry{ reg | callprocessing: module }
+        %ConfigRegistry{reg | callprocessing: module}
       end)
     end
 
@@ -177,17 +188,19 @@ defmodule SIP.Session do
     """
     def set_registration_processing_module(module) do
       Agent.update(__MODULE__, fn reg ->
-        %ConfigRegistry{ reg | registration: module }
+        %ConfigRegistry{reg | registration: module}
       end)
     end
 
-    defp internal_dispatch( proc_atom, fun_atom, args, errormsg ) when is_atom(fun_atom) and is_list(args) do
+    defp internal_dispatch(proc_atom, fun_atom, args, errormsg)
+         when is_atom(fun_atom) and is_list(args) do
       # Get the module that is configured to process the request
       call_mod = Agent.get(__MODULE__, fn reg -> Map.get(reg, proc_atom) end)
+
       if call_mod == nil do
         # If no module is found, reject the request
         Logger.error("No processing module configured for #{proc_atom}.")
-        { :reject, 500,  errormsg }
+        {:reject, 500, errormsg}
       else
         # If a module is configured, call the callback in this module
         Logger.debug("Dispatched #{proc_atom} to  #{inspect(call_mod)}.#{fun_atom}().")
@@ -199,28 +212,44 @@ defmodule SIP.Session do
      Call this to dispatch the on_new_end callback of the call processing
     module
     """
-    def dispatch( dialog_id, req ) when is_map(req) and req.method == :INVITE do
+    # Dispatch an initial inbound request to its processing module. The dialog
+    # layer always provides the transaction pid that created the dialog; it is
+    # forwarded to the registration callback (on_new_registration/3) but ignored
+    # for INVITE (on_new_call/2 keeps its arity).
+    def dispatch(dialog_id, req, _transaction_id) when is_map(req) and req.method == :INVITE do
       internal_dispatch(
-        :callprocessing, :on_new_call,
-        [ dialog_id, req ], "No call server defined")
+        :callprocessing,
+        :on_new_call,
+        [dialog_id, req],
+        "No call server defined"
+      )
     end
 
-    def dispatch( dialog_id, req ) when is_map(req) and req.method == :REGISTER do
+    def dispatch(dialog_id, req, transaction_id) when is_map(req) and req.method == :REGISTER do
       internal_dispatch(
-        :registration, :on_new_registration,
-        [ dialog_id, req ], "No registration server defined")
+        :registration,
+        :on_new_registration,
+        [dialog_id, req, transaction_id],
+        "No registration server defined"
+      )
     end
 
-    def dispatch( :on_call_end, dialog_id, app_id ) when is_pid(app_id) do
+    def dispatch(:on_call_end, dialog_id, app_id) when is_pid(app_id) do
       internal_dispatch(
-        :callprocessing, :on_call_end,
-        [ dialog_id, app_id], "No call server defined")
+        :callprocessing,
+        :on_call_end,
+        [dialog_id, app_id],
+        "No call server defined"
+      )
     end
 
-    def dispach( :on_registration_expired, dialog_id, app_pid ) when is_pid(app_pid) do
+    def dispatch(:on_registration_expired, dialog_id, app_pid) when is_pid(app_pid) do
       internal_dispatch(
-        :registration, :on_new_registration,
-        [ dialog_id, app_pid], "No registration server defined")
+        :registration,
+        :on_registration_expired,
+        [dialog_id, app_pid],
+        "No registration server defined"
+      )
     end
   end
 
@@ -232,7 +261,9 @@ defmodule SIP.Session do
         defmacro media_connect(module, url) do
           quote do
             SIP.Scenario.Monitor.note_command(:media, "media_connect")
-            var!(sip_ctx) = SIP.Session.Media.use_mediaserver(var!(sip_ctx), unquote(module), unquote(url))
+
+            var!(sip_ctx) =
+              SIP.Session.Media.use_mediaserver(var!(sip_ctx), unquote(module), unquote(url))
           end
         end
 
@@ -246,14 +277,23 @@ defmodule SIP.Session do
         defmacro media_play(file_path, opts \\ []) do
           quote do
             SIP.Scenario.Monitor.note_command(:media, "media_play")
-            var!(sip_ctx) = SIP.Session.Media.start_player(var!(sip_ctx), unquote(file_path), unquote(opts))
+
+            var!(sip_ctx) =
+              SIP.Session.Media.start_player(var!(sip_ctx), unquote(file_path), unquote(opts))
           end
         end
 
         defmacro media_record(file_path, duration_ms, opts \\ []) do
           quote do
             SIP.Scenario.Monitor.note_command(:media, "media_record")
-            var!(sip_ctx) = SIP.Session.Media.start_recorder(var!(sip_ctx), unquote(file_path), unquote(duration_ms), unquote(opts))
+
+            var!(sip_ctx) =
+              SIP.Session.Media.start_recorder(
+                var!(sip_ctx),
+                unquote(file_path),
+                unquote(duration_ms),
+                unquote(opts)
+              )
           end
         end
 
@@ -273,17 +313,21 @@ defmodule SIP.Session do
       end
     end
 
-    def use_mediaserver(sip_ctx = %SIP.Context{}, module, url) when is_atom(module) and is_binary(url) do
+    def use_mediaserver(sip_ctx = %SIP.Context{}, module, url)
+        when is_atom(module) and is_binary(url) do
       if not Code.ensure_loaded?(module) do
         raise "Media server module must be an Elixir module"
       end
+
       sip_ctx = SIP.Context.set(sip_ctx, :mediaservermodule, module)
       rez = apply(module, :connect, [url])
 
-      sip_ctx = case rez do
-        { :ok, pid } -> SIP.Context.set(sip_ctx, :mediaserverpid, pid)
-        _ -> raise "Failed to connect to media server #{url}"
-      end
+      sip_ctx =
+        case rez do
+          {:ok, pid} -> SIP.Context.set(sip_ctx, :mediaserverpid, pid)
+          _ -> raise "Failed to connect to media server #{url}"
+        end
+
       sip_ctx
     end
 
@@ -304,8 +348,13 @@ defmodule SIP.Session do
         case SIP.Context.appdata_get(sip_ctx, :mediapeerconnectionid) do
           nil ->
             # Create a new peer connection and store it in the session context
-            {:ok, cnx} = apply(sip_ctx.mediaservermodule, :create_peer_connection,
-                               [sip_ctx.mediaserverpid, self(), [webrtc_support: webrtc_support]])
+            {:ok, cnx} =
+              apply(sip_ctx.mediaservermodule, :create_peer_connection, [
+                sip_ctx.mediaserverpid,
+                self(),
+                [webrtc_support: webrtc_support]
+              ])
+
             {SIP.Context.appdata_set(sip_ctx, :mediapeerconnectionid, cnx), cnx}
 
           cnx ->
@@ -328,9 +377,11 @@ defmodule SIP.Session do
       end
 
       cnx = SIP.Context.appdata_get(sip_ctx, :mediapeerconnectionid)
+
       if is_nil(cnx) do
         raise "No media peer connection found in the session context"
       end
+
       rez = apply(sip_ctx.mediaservermodule, :set_remote_answer, [cnx, answer])
       SIP.Context.set(sip_ctx, :lasterr, rez)
     end
@@ -341,16 +392,22 @@ defmodule SIP.Session do
       end
 
       cnx = SIP.Context.appdata_get(sip_ctx, :mediapeerconnectionid)
+
       if is_nil(cnx) do
         raise "No media peer connection found in the session context"
       end
 
       if not is_nil(SIP.Context.appdata_get(sip_ctx, :mediaactionid)) do
-        Logger.warning([dialogpid: self(), module: __MODULE__,
-                     message: "Media action already started, ignoring start_echo request"])
+        Logger.warning(
+          dialogpid: self(),
+          module: __MODULE__,
+          message: "Media action already started, ignoring start_echo request"
+        )
+
         sip_ctx
       else
         {:ok, echo_pid} = apply(sip_ctx.mediaservermodule, :create_echo, [cnx])
+
         SIP.Context.appdata_set(sip_ctx, :mediaactionid, echo_pid)
         |> SIP.Context.appdata_set(:mediaaction, :echo)
       end
@@ -371,17 +428,25 @@ defmodule SIP.Session do
       end
 
       cnx = SIP.Context.appdata_get(sip_ctx, :mediapeerconnectionid)
+
       if is_nil(cnx) do
         raise "No media peer connection found in the session context"
       end
 
       if not is_nil(SIP.Context.appdata_get(sip_ctx, :mediaactionid)) do
-        Logger.warning([dialogpid: self(), module: __MODULE__,
-                     message: "Media action already started, ignoring start_player request"])
+        Logger.warning(
+          dialogpid: self(),
+          module: __MODULE__,
+          message: "Media action already started, ignoring start_player request"
+        )
+
         sip_ctx
       else
-        {:ok, player_pid} = apply(sip_ctx.mediaservermodule, :create_player, [cnx, file_path, opts])
+        {:ok, player_pid} =
+          apply(sip_ctx.mediaservermodule, :create_player, [cnx, file_path, opts])
+
         :ok = apply(sip_ctx.mediaservermodule, :start_player, [player_pid])
+
         SIP.Context.appdata_set(sip_ctx, :mediaactionid, player_pid)
         |> SIP.Context.appdata_set(:mediaaction, :player)
       end
@@ -398,23 +463,32 @@ defmodule SIP.Session do
     """
     @spec start_recorder(%SIP.Context{}, binary(), non_neg_integer(), keyword()) :: %SIP.Context{}
     def start_recorder(sip_ctx = %SIP.Context{}, file_path, duration_ms, opts \\ [])
-        when is_binary(file_path) and is_integer(duration_ms) and duration_ms >= 0 and is_list(opts) do
+        when is_binary(file_path) and is_integer(duration_ms) and duration_ms >= 0 and
+               is_list(opts) do
       if not is_pid(sip_ctx.mediaserverpid) do
         raise "No media server connected to the session context"
       end
 
       cnx = SIP.Context.appdata_get(sip_ctx, :mediapeerconnectionid)
+
       if is_nil(cnx) do
         raise "No media peer connection found in the session context"
       end
 
       if not is_nil(SIP.Context.appdata_get(sip_ctx, :mediaactionid)) do
-        Logger.warning([dialogpid: self(), module: __MODULE__,
-                     message: "Media action already started, ignoring start_recorder request"])
+        Logger.warning(
+          dialogpid: self(),
+          module: __MODULE__,
+          message: "Media action already started, ignoring start_recorder request"
+        )
+
         sip_ctx
       else
-        {:ok, rec_pid} = apply(sip_ctx.mediaservermodule, :create_recorder, [cnx, file_path, duration_ms, opts])
+        {:ok, rec_pid} =
+          apply(sip_ctx.mediaservermodule, :create_recorder, [cnx, file_path, duration_ms, opts])
+
         :ok = apply(sip_ctx.mediaservermodule, :start_recorder, [rec_pid])
+
         SIP.Context.appdata_set(sip_ctx, :mediaactionid, rec_pid)
         |> SIP.Context.appdata_set(:mediaaction, :recorder)
       end
@@ -426,18 +500,36 @@ defmodule SIP.Session do
       end
 
       action_pid = SIP.Context.appdata_get(sip_ctx, :mediaactionid)
+
       if not is_nil(action_pid) do
         case SIP.Context.appdata_get(sip_ctx, :mediaaction) do
-          :echo -> apply(sip_ctx.mediaservermodule, :stop_echo, [action_pid])
-          :player -> apply(sip_ctx.mediaservermodule, :stop_player, [action_pid])
-          :recorder -> apply(sip_ctx.mediaservermodule, :stop_recorder, [action_pid])
-          _ -> Logger.warning([dialogpid: self(), module: __MODULE__,
-                     message: "Unknown media action #{inspect(SIP.Context.appdata_get(sip_ctx, :mediaaction))}, ignoring stop_media request"])
+          :echo ->
+            apply(sip_ctx.mediaservermodule, :stop_echo, [action_pid])
+
+          :player ->
+            apply(sip_ctx.mediaservermodule, :stop_player, [action_pid])
+
+          :recorder ->
+            apply(sip_ctx.mediaservermodule, :stop_recorder, [action_pid])
+
+          _ ->
+            Logger.warning(
+              dialogpid: self(),
+              module: __MODULE__,
+              message:
+                "Unknown media action #{inspect(SIP.Context.appdata_get(sip_ctx, :mediaaction))}, ignoring stop_media request"
+            )
         end
-        SIP.Context.appdata_set(sip_ctx, :mediaactionid, nil) |> SIP.Context.appdata_set(:mediaaction, nil)
+
+        SIP.Context.appdata_set(sip_ctx, :mediaactionid, nil)
+        |> SIP.Context.appdata_set(:mediaaction, nil)
       else
-        Logger.warning([dialogpid: self(), module: __MODULE__,
-                     message: "No media action started, ignoring stop_media request"])
+        Logger.warning(
+          dialogpid: self(),
+          module: __MODULE__,
+          message: "No media action started, ignoring stop_media request"
+        )
+
         sip_ctx
       end
     end
@@ -462,17 +554,28 @@ defmodule SIP.Session do
 
     defp cleanup_action(sip_ctx) do
       action_pid = SIP.Context.appdata_get(sip_ctx, :mediaactionid)
+
       if is_nil(action_pid) do
         sip_ctx
       else
         case SIP.Context.appdata_get(sip_ctx, :mediaaction) do
-          :echo -> safe_ms_call(sip_ctx.mediaservermodule, :stop_echo, [action_pid])
-          :player -> safe_ms_call(sip_ctx.mediaservermodule, :stop_player, [action_pid])
-          :recorder -> safe_ms_call(sip_ctx.mediaservermodule, :stop_recorder, [action_pid])
+          :echo ->
+            safe_ms_call(sip_ctx.mediaservermodule, :stop_echo, [action_pid])
+
+          :player ->
+            safe_ms_call(sip_ctx.mediaservermodule, :stop_player, [action_pid])
+
+          :recorder ->
+            safe_ms_call(sip_ctx.mediaservermodule, :stop_recorder, [action_pid])
+
           other ->
-            Logger.warning([dialogpid: self(), module: __MODULE__,
-              message: "Cannot release unknown media action #{inspect(other)}"])
+            Logger.warning(
+              dialogpid: self(),
+              module: __MODULE__,
+              message: "Cannot release unknown media action #{inspect(other)}"
+            )
         end
+
         SIP.Context.appdata_set(sip_ctx, :mediaactionid, nil)
         |> SIP.Context.appdata_set(:mediaaction, nil)
       end
@@ -480,6 +583,7 @@ defmodule SIP.Session do
 
     defp cleanup_peer_connection(sip_ctx) do
       cnx = SIP.Context.appdata_get(sip_ctx, :mediapeerconnectionid)
+
       if is_nil(cnx) do
         sip_ctx
       else
@@ -507,14 +611,16 @@ defmodule SIP.Session do
           apply(module, fun, args)
         catch
           kind, reason ->
-            Logger.warning([module: __MODULE__,
-              message: "media #{fun} during cleanup raised #{kind}: #{inspect(reason)}"])
+            Logger.warning(
+              module: __MODULE__,
+              message: "media #{fun} during cleanup raised #{kind}: #{inspect(reason)}"
+            )
+
             :error
         end
       end
     end
   end
-
 
   defmodule Common do
     require SIP.Dialog
@@ -526,11 +632,10 @@ defmodule SIP.Session do
     end
 
     defmacro send_CANCEL(transaction_id) do
-        quote do
-          SIP.Scenario.Monitor.note_command(:sip, "send_CANCEL")
-          var!(sip_ctx) = SIP.Session.Common.cancel(var!(sip_ctx), unquote(transaction_id))
-        end
+      quote do
+        SIP.Scenario.Monitor.note_command(:sip, "send_CANCEL")
+        var!(sip_ctx) = SIP.Session.Common.cancel(var!(sip_ctx), unquote(transaction_id))
+      end
     end
   end
-
 end

@@ -38,7 +38,7 @@ defmodule TestRegistrar do
   end
 
   @impl true
-  def on_new_registration(dialog_id, _register) do
+  def on_new_registration(dialog_id, _register, _transaction_id) do
     Logger.info("on_new_registration called in test")
     case Process.whereis(:test_registrar) do
       nil ->

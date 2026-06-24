@@ -35,6 +35,19 @@ defmodule SIP.Scenario.Loader do
     end
   end
 
+  @doc """
+  Return the scenario kind declared by `module`: `:uac` (default, client
+  scenario), `:uas_register` (REGISTER server), etc. Used by `elixipp` to pick
+  between the outbound client mode and the inbound server mode. Modules compiled
+  before the `uas` annotation existed (no `__scenario_type__/0`) default to `:uac`.
+  """
+  @spec scenario_type(module()) :: atom()
+  def scenario_type(module) do
+    if Code.ensure_loaded?(module) and function_exported?(module, :__scenario_type__, 0),
+      do: module.__scenario_type__(),
+      else: :uac
+  end
+
   defp scenario_module?(module) do
     Code.ensure_loaded?(module) and
       function_exported?(module, :run, 1) and

@@ -69,6 +69,7 @@ defmodule SIP.Scenario do
       import SIP.Scenario,
         only: [
           config: 1,
+          uas: 1,
           state: 2,
           on_events: 1,
           on_shutdown: 1,
@@ -89,6 +90,9 @@ defmodule SIP.Scenario do
 
       Module.register_attribute(__MODULE__, :scenario_states, accumulate: true)
       @scenario_config []
+      # Default scenario kind. A server scenario overrides this with `uas :register`.
+      # Read back through __scenario_type__/0.
+      @scenario_type :uac
       @before_compile SIP.Scenario
     end
   end
@@ -102,6 +106,9 @@ defmodule SIP.Scenario do
 
       @doc false
       def __scenario_config__, do: @scenario_config
+
+      @doc false
+      def __scenario_type__, do: @scenario_type
 
       @doc """
       Run one instance of this scenario. `start_stack?` is `true` to start the
@@ -123,6 +130,21 @@ defmodule SIP.Scenario do
   defmacro config(opts) do
     quote do
       @scenario_config unquote(opts)
+    end
+  end
+
+  @doc """
+  Declare that this scenario is a server (UAS) scenario of a given kind, e.g.
+  `uas :register`. This sets `__scenario_type__/0` to `:uas_<kind>` so the
+  loader and `elixipp` can tell server scenarios apart from the default `:uac`
+  client scenarios. The scenario itself implements the request handling (e.g.
+  replying to a REGISTER), since that is application responsibility.
+  """
+  defmacro uas(kind) when is_atom(kind) do
+    type = :"uas_#{kind}"
+
+    quote do
+      @scenario_type unquote(type)
     end
   end
 

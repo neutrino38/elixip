@@ -18,9 +18,18 @@ defmodule SIP.Session.Registrar do
   @max_expires 3600
   @max_contacts 5
 
-  # Calllback defined for a registrar server. They are called
-  @callback on_new_registration(dialog_id :: pid, registerreq :: map) :: { :accept, pid } | { :reject, integer, binary }
-  @callback on_registration_expired(dialog_id :: pid, app_pid :: pid) :: nil
+  # Callbacks defined for a registrar server.
+  #
+  # `on_new_registration/3` is invoked by the dialog layer when an inbound
+  # REGISTER creates a new dialog. It receives the dialog pid, the parsed
+  # REGISTER request and the pid of the server transaction that created the
+  # dialog (so the application can reply on the right transaction). It returns
+  # `{:accept, app_pid}` to bind the dialog to an application process — the
+  # dialog then forwards `{:REGISTER, req, transaction_id, dialog_id}` to it —
+  # or `{:reject, code, reason}` to refuse the registration.
+  @callback on_new_registration(dialog_id :: pid, registerreq :: map, transaction_id :: pid) ::
+              {:accept, pid} | {:reject, integer, binary}
+  @callback on_registration_expired(dialog_id :: pid, app_pid :: pid) :: any()
 
   defp adjust_contact_expires(contact) do
     case SIP.Uri.get_uri_param(contact, "expires") do
@@ -47,12 +56,19 @@ defmodule SIP.Session.Registrar do
 
   defp adjust_expires_header(req) do
     expires = Map.get(req, :expires)
+
     cond do
-      is_nil(expires) -> req
-      expires > @max_expires -> Map.put(req, :expires,  @max_expires)
+      is_nil(expires) ->
+        req
+
+      expires > @max_expires ->
+        Map.put(req, :expires, @max_expires)
+
       expires < @min_expires ->
         raise "Expires value #{expires} is too low."
-      true -> req
+
+      true ->
+        req
     end
   end
 
@@ -63,15 +79,16 @@ defmodule SIP.Session.Registrar do
     If any of them is above @max_expires, adjust to max expires
   """
   def check_register(registerreq) when is_map(registerreq) do
-
     contacts = List.wrap(Map.get(registerreq, :contact))
-    if length(contacts) > @max_contacts do
-      throw {:reject, 400, "Too many contacts"}
-    end
-    adjusted_contacts = adjust_all_contacts(contacts)
-    Map.put(registerreq, :contact, adjusted_contacts)
-          |> adjust_expires_header()
 
+    if length(contacts) > @max_contacts do
+      throw({:reject, 400, "Too many contacts"})
+    end
+
+    adjusted_contacts = adjust_all_contacts(contacts)
+
+    Map.put(registerreq, :contact, adjusted_contacts)
+    |> adjust_expires_header()
   end
 end
 
@@ -90,7 +107,13 @@ defmodule SIP.Session.RegisterUAC do
       defmacro send_auth_REGISTER(resp_401, expire) do
         quote do
           SIP.Scenario.Monitor.note_command(:sip, "send_auth_REGISTER")
-          var!(sip_ctx) = SIP.Session.RegisterUAC.auth_register(var!(sip_ctx), unquote(resp_401), unquote(expire))
+
+          var!(sip_ctx) =
+            SIP.Session.RegisterUAC.auth_register(
+              var!(sip_ctx),
+              unquote(resp_401),
+              unquote(expire)
+            )
         end
       end
 
@@ -111,7 +134,10 @@ defmodule SIP.Session.RegisterUAC do
         quote do
           var!(sip_ctx) =
             SIP.Session.RegisterUAC.process_register_reply(
-              var!(sip_ctx), unquote(resp), unquote(transaction_id))
+              var!(sip_ctx),
+              unquote(resp),
+              unquote(transaction_id)
+            )
         end
       end
 
@@ -121,7 +147,10 @@ defmodule SIP.Session.RegisterUAC do
         quote do
           var!(sip_ctx) =
             SIP.Session.RegisterUAC.process_options_reply(
-              var!(sip_ctx), unquote(resp), unquote(transaction_id))
+              var!(sip_ctx),
+              unquote(resp),
+              unquote(transaction_id)
+            )
         end
       end
     end
@@ -131,7 +160,7 @@ defmodule SIP.Session.RegisterUAC do
     contact_uri = %SIP.Uri{
       userpart: SIP.Context.get(sip_ctx, :username),
       domain: "0.0.0.0",
-      params: %{ "expires" => to_string(expire) }
+      params: %{"expires" => to_string(expire)}
     }
 
     %{
@@ -139,7 +168,7 @@ defmodule SIP.Session.RegisterUAC do
       method: :REGISTER,
       ruri: SIP.Context.to(sip_ctx, nil),
       from: SIP.Context.from(sip_ctx),
-      to: SIP.Context.to(sip_ctx,nil),
+      to: SIP.Context.to(sip_ctx, nil),
       contact: contact_uri,
       useragent: Application.get_env(:elixip2, :useragent, "Elixipp/0.1"),
       callid: nil,
@@ -155,22 +184,24 @@ defmodule SIP.Session.RegisterUAC do
       "Supported" => "OPTIONS, REGISTER",
       "Max-Forwards" => "70",
       method: :OPTIONS,
-      ruri: %SIP.Uri{ domain: SIP.Context.get(sip_ctx, :domain) },
+      ruri: %SIP.Uri{domain: SIP.Context.get(sip_ctx, :domain)},
       from: SIP.Context.from(sip_ctx),
-      to: SIP.Context.to(sip_ctx,nil),
-      contact: %SIP.Uri{ userpart: SIP.Context.get(sip_ctx, :username),
-        domain: "0.0.0.0", params: %{ "expires" => "15" } },
+      to: SIP.Context.to(sip_ctx, nil),
+      contact: %SIP.Uri{
+        userpart: SIP.Context.get(sip_ctx, :username),
+        domain: "0.0.0.0",
+        params: %{"expires" => "15"}
+      },
       useragent: Application.get_env(:elixip2, :useragent, "Elixipp/0.1"),
       callid: nil,
       contentlength: 0
     }
   end
 
-
-  @doc"""
-    Send an outbound REGISTER and create the dialog if needed
-    Update the session sip_ctx accordingly
-    """
+  @doc """
+  Send an outbound REGISTER and create the dialog if needed
+  Update the session sip_ctx accordingly
+  """
   @spec client_register(%SIP.Context{}, integer() | keyword()) :: %SIP.Context{}
   def client_register(sip_ctx = %SIP.Context{}, opts) when is_list(opts) do
     client_register(sip_ctx, Keyword.get(opts, :timeout, 3600))
@@ -195,10 +226,18 @@ defmodule SIP.Session.RegisterUAC do
     register = register_msg(sip_ctx, expire)
 
     authparams = Map.get(rsp, :wwwauthenticate)
+
     if not is_nil(authparams) do
-      register = SIP.Msg.Ops.add_authorization_to_req(
-        register, authparams, :wwwauthenticate,
-        sip_ctx.authusername, sip_ctx.ha1, :ha1)
+      register =
+        SIP.Msg.Ops.add_authorization_to_req(
+          register,
+          authparams,
+          :wwwauthenticate,
+          sip_ctx.authusername,
+          sip_ctx.ha1,
+          :ha1
+        )
+
       rez = SIP.Dialog.new_request(sip_ctx.dialogpid, register)
       SIP.Context.set(sip_ctx, :lasterr, rez)
       sip_ctx
