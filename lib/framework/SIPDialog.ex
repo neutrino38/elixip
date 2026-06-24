@@ -236,4 +236,8 @@ alias SIP.Transac
       Logger.debug("callid: #{inspect(k)} -> #{inspect(p)}")
     end
   end
+
+  def check_nonce(dialog_pid, nonce) when is_pid(dialog_pid) do
+    GenServer.call(dialog_pid, { :checknonce, nonce})
+  end
 end
