@@ -21,6 +21,7 @@ defmodule Elixip.RegistrarUAS do
 
   defstruct scenario_module: nil,
             max_instances: 1,
+            scenario_overrides: [],
             instances: %{},
             total_started: 0,
             total_rejected_quota: 0
@@ -28,10 +29,13 @@ defmodule Elixip.RegistrarUAS do
   # ── Public API ──────────────────────────────────────────────────────────
 
   @doc """
-  Start the registrar. Required options:
-    * `:scenario_module` — the `:uas_register` scenario module to instantiate;
+  Start the registrar. Options:
+    * `:scenario_module` — the `:uas_register` scenario module to instantiate (required);
     * `:max_instances`   — maximum concurrent instances (REGISTER rejected with
-      503 beyond this).
+      503 beyond this);
+    * `:scenario_overrides` — keyword list merged on top of the scenario `config`
+      block for every spawned instance (e.g. `[password: "secret"]` to set the
+      registrar's shared digest secret without editing the scenario).
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -64,7 +68,8 @@ defmodule Elixip.RegistrarUAS do
   def init(opts) do
     state = %__MODULE__{
       scenario_module: Keyword.fetch!(opts, :scenario_module),
-      max_instances: Keyword.get(opts, :max_instances, 1)
+      max_instances: Keyword.get(opts, :max_instances, 1),
+      scenario_overrides: Keyword.get(opts, :scenario_overrides, [])
     }
 
     {:ok, state}
@@ -84,7 +89,8 @@ defmodule Elixip.RegistrarUAS do
         SIP.Scenario.Runner.spawn_uas_instance(state.scenario_module,
           dialog_pid: dialog_id,
           parent_pid: self(),
-          inbound_request: registerreq
+          inbound_request: registerreq,
+          config_overrides: state.scenario_overrides
         )
 
       instances = Map.put(state.instances, ref, %{pid: pid, dialog_id: dialog_id})
