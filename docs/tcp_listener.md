@@ -389,12 +389,5 @@ Client              TCPListener (accept loop)    SIP.Transport.TCP    RegistrarU
 
 ## Open Questions
 
-1. **TLS listener** — same design, replace `:gen_tcp.listen` / `:gen_tcp.accept` with
-   `:ssl.listen` / `:ssl.accept`. Certificate and key paths would come from application config
-   or CLI `--tls-cert / --tls-key`. Out of scope for the TCP listener.
-
-2. **WSS listener** — WebSocket handshake on top of TLS. Requires a thin HTTP upgrade layer
-   before Depack. Out of scope.
-
-3. **Depack body completion** — must be finished before INVITE/200 OK flows. Not blocking
-   for REGISTER-only UAS (empty body), but should be tackled before widening scenario support.
+TLS and WSS listeners follow the same design (same Depack, same `SIP.Transport.TCP` extension)
+and are deferred to a later iteration. Depack body completion is already implemented.

@@ -421,7 +421,13 @@ defmodule Elixipp.CLI do
           {:error, reason} -> {l, {:error, reason}}
         end
 
-      {proto, _addr, _port} = l when proto in [:tcp, :tls, :wss] ->
+      {:tcp, addr, port} = l ->
+        case SIP.Transport.TCPListener.start({addr, port}) do
+          {:ok, _pid} -> {l, :ok}
+          {:error, reason} -> {l, {:error, reason}}
+        end
+
+      {proto, _addr, _port} = l when proto in [:tls, :wss] ->
         {l, :not_implemented}
     end)
   end
@@ -1079,8 +1085,8 @@ defmodule Elixipp.CLI do
                          Les valeurs > 100 sont ignorées (retour au défaut).
       --listen PROTO:PORT  (mode serveur) Écoute les requêtes entrantes sur ce
       --listen PROTO:ADDR:PORT  protocole/port (ADDR optionnel pour fixer l'IP
-                         locale annoncée). Répétable. Protocoles : udp (tcp|tls|wss
-                         à venir). Défaut si absent : udp:5060.
+                         locale annoncée). Répétable. Protocoles : udp, tcp
+                         (tls|wss à venir). Défaut si absent : udp:5060.
       --local-port PORT  (mode client) Port UDP local à utiliser pour émettre
                          (défaut 5060). Permet de lancer un UAC sur une machine qui
                          héberge déjà un UAS sur 5060 (test deux-process en local).
