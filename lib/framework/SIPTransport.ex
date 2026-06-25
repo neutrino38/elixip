@@ -103,12 +103,22 @@ defmodule SIP.Transport do
           on_data_received(buf, rest, cb_fun)
         else
           buf = %Depack{ buf | state: :reading_body, buffer: headers, clen: clen, body: "" }
-          # Process the body
-          IO.puts(" -> reading_body")
           on_data_received(buf, rest, cb_fun)
         end
       else
         buf
+      end
+    end
+
+    def on_data_received(buf = %Depack{}, data, cb_fun) when is_binary(data) and is_function(cb_fun) and buf.state == :reading_body do
+      accumulated = buf.body <> data
+      if byte_size(accumulated) >= buf.clen do
+        {body, rest} = String.split_at(accumulated, buf.clen)
+        cb_fun.(:msg, buf.buffer <> "\r\n\r\n" <> body)
+        buf = %Depack{ buf | state: :wait_for_msg, buffer: "", body: "", clen: 0 }
+        on_data_received(buf, rest, cb_fun)
+      else
+        %Depack{ buf | body: accumulated }
       end
     end
   end
