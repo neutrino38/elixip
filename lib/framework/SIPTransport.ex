@@ -234,6 +234,13 @@ defmodule SIP.Transport do
                   { :ok, {ip, port} }     -> { ip, port }
                   _                       -> { state.localip, state.localport }
                 end
+              s when is_tuple(s) and elem(s, 0) == :sslsocket ->
+                # Raw :ssl socket (inbound TLS connections via TLSListener).
+                case :ssl.sockname(s) do
+                  {:ok, {{0,0,0,0}, _}} -> {state.localip, state.localport}
+                  {:ok, {ip, port}}     -> {ip, port}
+                  _                     -> {state.localip, state.localport}
+                end
               _ -> case Socket.local(socket) do
                       { :ok, {{0,0,0,0}, _port} } -> { state.localip, state.localport }
                       { :ok, {ip, port}} -> { ip, port }

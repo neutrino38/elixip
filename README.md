@@ -180,7 +180,9 @@ config :elixip2, :tcp_max_connections, 200
 
 Connections exceeding the limit are dropped at the transport level (TCP RST).
 
-TLS and WSS listeners are planned for a later iteration.
+A TLS listener (`SIP.Transport.TLSListener`) is now implemented on the same model as
+TCP. See [docs/TLS_WSS.md](docs/TLS_WSS.md) for certificate setup, runtime
+configuration, and security recommendations. WSS listener is planned for a later iteration.
 
 Scenario can be parametrized using json files as described above.
 
@@ -247,7 +249,7 @@ elixipp [OPTIONS] <scenario.exs | ModuleName>
 | `--max-run N` | Stop after `N` executions in total. | unlimited (`1` when neither `--limit` nor `--max-run` is set) |
 | `--rate N` | Number of calls started per second. Each new call creation is spaced by `1000 / N` ms. Values greater than `100` are ignored and fall back to the default. | `10` |
 | `-c FILE`, `--config FILE` | JSON file parameterizing the scenario (header + N accounts). Overrides the scenario `config` block. See [Paramétrage par fichier JSON](#paramétrage-par-fichier-json-externe). | none |
-| `--listen PROTO:PORT` | (server mode) Listen for inbound requests on this protocol/port. Repeatable. `PROTO:ADDR:PORT` also pins the advertised local IP. Protocols: `udp`, `tcp` (tls/wss planned). | `udp:5060` |
+| `--listen PROTO:PORT` | (server mode) Listen for inbound requests on this protocol/port. Repeatable. `PROTO:ADDR:PORT` also pins the advertised local IP. Protocols: `udp`, `tcp`, `tls` (wss planned). See [docs/TLS_WSS.md](docs/TLS_WSS.md) for TLS certificate setup. | `udp:5060` |
 | `--local-port PORT` | (client mode) Local UDP port used to send (lets a UAC run on a host already serving a UAS on 5060). | `5060` |
 | `--local-addr ADDR` | (client mode) Local IP advertised in Via/Contact. | first local IPv4 |
 | `--log-file PATH` | Log file path. | `elixipp.log` |
