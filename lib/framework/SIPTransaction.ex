@@ -181,20 +181,18 @@ alias SIP.NetUtils
     end
   end
 
-  def start_uas_transaction(sipmsg, { local_ip, local_port, transport_str, upperlayer })
+  def start_uas_transaction(sipmsg, { _local_ip, _local_port, _transport_str, upperlayer })
       when is_map(sipmsg) do
 
-    # Get top most via branch ID
+    # Get top most via branch ID. The UAS transaction is keyed on it (RFC 3261
+    # §17.2.3) so retransmissions / CANCEL / ACK match. A UAS does NOT add a Via:
+    # the request's Via list must be echoed unchanged in the response, otherwise
+    # the response's top Via (hence its transaction id) no longer matches the
+    # client transaction that originated the request.
     [_, ori_branchid ]= hd(sipmsg.via) |> String.split("branch=")
     ori_branchid =  String.split(ori_branchid, ";") |> hd()
 
-    # Generate a new branch ID
-    branch_id = SIP.Msg.Ops.generate_branch_value()
-    #Todo : check that branch ID is not already registered on the transaction registry
-
-    sipmsg = SIP.Msg.Ops.add_via(sipmsg, { local_ip, local_port, transport_str }, branch_id)
-
-    # Reset the transaction ID field to associate this transaction with the original branch ID
+    # Associate this transaction with the original top most via branch ID.
     sipmsg = Map.put(sipmsg, :transid, ori_branchid)
 
     # Start a new GenServer for each transaction and register it in Registry.SIPTransaction
