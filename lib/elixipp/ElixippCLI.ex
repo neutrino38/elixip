@@ -290,10 +290,12 @@ defmodule Elixipp.CLI do
         Owl.LiveScreen.update(:display, {state.scroll_offset, state.shutdown})
         stats = Elixip.RegistrarUAS.stats()
 
+        # Auto-halt when max_run instances have all completed naturally.
+        # RegistrarUAS already refuses new registrations once total_started >= max_run,
+        # so no shutdown_all is needed here — that would abort running instances early.
         state =
           if is_integer(state.max_run) and stats.total_started >= state.max_run and
-               state.shutdown == :none do
-            Elixip.RegistrarUAS.shutdown_all(:max_run)
+               stats.active == 0 and state.shutdown == :none do
             %{state | shutdown: :graceful}
           else
             state
@@ -491,10 +493,10 @@ defmodule Elixipp.CLI do
     Process.sleep(500)
     stats = Elixip.RegistrarUAS.stats()
 
+    # Wait until all started instances have completed naturally.
+    # RegistrarUAS already refuses new registrations once total_started >= max_run.
     if stats.total_started >= max_run and stats.active == 0 do
       IO.puts("\nMax-run #{max_run} atteint — arrêt du serveur.")
-      Elixip.RegistrarUAS.shutdown_all(:max_run)
-      drain_uas_instances()
       print_uas_summary(module)
       System.halt(0)
     else
