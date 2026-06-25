@@ -370,62 +370,6 @@ defmodule SIP.DialogImpl do
     end
   end
 
-  defp check_expired_nonces(state) do
-    now = DateTime.utc_now()
-
-    new_nonce_map =
-      Enum.reduce(state.nonce_map, %{}, fn {nonce, expiration_time}, acc ->
-        if DateTime.compare(now, expiration_time) == :lt do
-          Map.put(acc, nonce, expiration_time)
-        else
-          Logger.debug(
-            dialogpid: self(),
-            module: __MODULE__,
-            message: "Nonce #{nonce} expired and removed from nonce_map"
-          )
-
-          acc
-        end
-      end)
-
-    %SIP.DialogImpl{state | nonce_map: new_nonce_map}
-  end
-
-  defp add_new_nonce(state, nonce) do
-    # Nonce valid for 30 seconds
-    expiration_time = DateTime.utc_now() |> DateTime.add(30, :second)
-    new_nonce_map = Map.put(state.nonce_map, nonce, expiration_time)
-    # Arm a timer to check for expired nonces after 30 seconds
-    Process.send_after(self(), :check_expired_nonces, 30100)
-    %SIP.DialogImpl{state | nonce_map: new_nonce_map}
-  end
-
-  defp valid_nonce?(state, nonce) do
-    case Map.get(state.nonce_map, nonce) do
-      nil ->
-        Logger.info(
-          dialogpid: self(),
-          module: __MODULE__,
-          message: "Nonce #{nonce} is invalid or expired"
-        )
-
-        false
-
-      expiration_time ->
-        if DateTime.compare(DateTime.utc_now(), expiration_time) == :lt do
-          true
-        else
-          Logger.info(
-            dialogpid: self(),
-            module: __MODULE__,
-            message: "Nonce #{nonce} has expired"
-          )
-
-          false
-        end
-    end
-  end
-
   # Dialog started by an outbound request
   def init({req, :outbound, pid, timeout, debug, dialog_id}) when is_req(req) do
     {fromtag, callid, _totag} = dialog_id
@@ -485,6 +429,62 @@ defmodule SIP.DialogImpl do
 
         Logger.error(Exception.format(:error, err, __STACKTRACE__))
         {:stop, :transactionfailure}
+    end
+  end
+
+  defp check_expired_nonces(state) do
+    now = DateTime.utc_now()
+
+    new_nonce_map =
+      Enum.reduce(state.nonce_map, %{}, fn {nonce, expiration_time}, acc ->
+        if DateTime.compare(now, expiration_time) == :lt do
+          Map.put(acc, nonce, expiration_time)
+        else
+          Logger.debug(
+            dialogpid: self(),
+            module: __MODULE__,
+            message: "Nonce #{nonce} expired and removed from nonce_map"
+          )
+
+          acc
+        end
+      end)
+
+    %SIP.DialogImpl{state | nonce_map: new_nonce_map}
+  end
+
+  defp add_new_nonce(state, nonce) do
+    # Nonce valid for 30 seconds
+    expiration_time = DateTime.utc_now() |> DateTime.add(30, :second)
+    new_nonce_map = Map.put(state.nonce_map, nonce, expiration_time)
+    # Arm a timer to check for expired nonces after 30 seconds
+    Process.send_after(self(), :check_expired_nonces, 30100)
+    %SIP.DialogImpl{state | nonce_map: new_nonce_map}
+  end
+
+  defp valid_nonce?(state, nonce) do
+    case Map.get(state.nonce_map, nonce) do
+      nil ->
+        Logger.info(
+          dialogpid: self(),
+          module: __MODULE__,
+          message: "Nonce #{nonce} is invalid or expired"
+        )
+
+        false
+
+      expiration_time ->
+        if DateTime.compare(DateTime.utc_now(), expiration_time) == :lt do
+          true
+        else
+          Logger.info(
+            dialogpid: self(),
+            module: __MODULE__,
+            message: "Nonce #{nonce} has expired"
+          )
+
+          false
+        end
     end
   end
 
@@ -570,7 +570,7 @@ defmodule SIP.DialogImpl do
     end
   end
 
-  @doc "Handle call to send out an ACK for an INVITE request"
+  # Handle call to send out an ACK for an INVITE request
   def handle_call({:ack, transact_pid}, _from, state) do
     if transact_pid in state.transactions do
       reply = SIP.Transac.ack_uac_transaction(transact_pid)
@@ -582,21 +582,10 @@ defmodule SIP.DialogImpl do
     end
   end
 
-  @doc "Handle call to check if a nonce is valid"
+  # Handle call to check if a nonce is valid
   def handle_call({:checknonce, nonce}, _from, state) do
     is_valid = valid_nonce?(state, nonce)
     {:reply, is_valid, state}
-  end
-
-  @doc "Handle option keepalive timers: send an OPTIONS message"
-  def handle_info({:timeout, _tref, :optionskeepalive}, state) do
-    newstate = send_options_keepalive(state)
-    {:noreply, newstate}
-  end
-
-  @doc "Handle timer for checking expired nonces"
-  def handle_info(:check_expired_nonces, state) do
-    {:noreply, check_expired_nonces(state)}
   end
 
   defp check_closing_transaction(state, msg, transact_pid) when msg.method in [:BYE] do
@@ -794,8 +783,19 @@ defmodule SIP.DialogImpl do
     state
   end
 
+  # Handle option keepalive timers: send an OPTIONS message
   @impl true
-  @doc "Invoked when a dialog receives a SIP response from an UAC transaction"
+  def handle_info({:timeout, _tref, :optionskeepalive}, state) do
+    newstate = send_options_keepalive(state)
+    {:noreply, newstate}
+  end
+
+  # Handle timer for checking expired nonces
+  def handle_info(:check_expired_nonces, state) do
+    {:noreply, check_expired_nonces(state)}
+  end
+
+  # Invoked when a dialog receives a SIP response from an UAC transaction
   def handle_info({:response, rsp, transact_pid}, state) when is_resp(rsp) do
     state =
       if transact_pid in state.transactions do
