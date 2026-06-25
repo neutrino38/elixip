@@ -203,16 +203,102 @@ defmodule Elixipp.CLI do
 
     started = start_listeners(listeners)
 
-    IO.puts("elixipp — mode serveur UAS Register (#{inspect(module)})")
-    IO.puts("  instances max : #{limit}")
-    IO.puts("  listeners     : #{format_listeners(started)}")
-    IO.puts("  (tapez 'q' puis Entrée pour arrêter)")
-
-    server_loop()
+    # --monitor wires the same live call table as the UAC parallel mode. Without
+    # it (or on a non-interactive stdin) we fall back to the plain text loop.
+    if opts[:monitor] do
+      run_server_monitored(module, limit, started)
+    else
+      print_server_header(module, limit, started)
+      server_loop()
+    end
   end
 
   defp run_server_mode(_module, type, _opts, _limit) do
     abort("Type de scénario serveur non supporté : #{inspect(type)}", 2)
+  end
+
+  defp print_server_header(module, limit, started) do
+    IO.puts("elixipp — mode serveur UAS Register (#{inspect(module)})")
+    IO.puts("  instances max : #{limit}")
+    IO.puts("  listeners     : #{format_listeners(started)}")
+    IO.puts("  (tapez 'q' puis Entrée pour arrêter)")
+  end
+
+  # Live monitored server loop: bring up Owl + the monitor, render the call table
+  # in a live block and react to the keyboard (q / Ctrl+D / arrows). On a
+  # non-interactive stdin the live table is impossible, so we degrade to the plain
+  # text server loop. Never returns.
+  @spec run_server_monitored(module(), pos_integer(), list()) :: no_return()
+  defp run_server_monitored(module, limit, started) do
+    {:ok, _} = Application.ensure_all_started(:owl)
+    {:ok, _} = SIP.Scenario.Monitor.start()
+
+    if match?({:ok, _}, :io.rows()) do
+      raw? = setup_raw_terminal(true)
+
+      Owl.LiveScreen.add_block(:display,
+        state: {0},
+        render: fn {scroll} -> render_server_block(scroll, module, limit, started) end
+      )
+
+      start_input_reader(self())
+      server_monitor_loop(%{scroll_offset: 0, raw?: raw?})
+    else
+      print_server_header(module, limit, started)
+      server_loop()
+    end
+  end
+
+  @spec server_monitor_loop(map()) :: no_return()
+  defp server_monitor_loop(state) do
+    receive do
+      msg when msg in [:graceful_stop, :force_quit] ->
+        Owl.LiveScreen.update(:display, {state.scroll_offset})
+        Owl.LiveScreen.flush()
+        restore_terminal(state.raw?)
+        IO.puts("\r\nArrêt du serveur.")
+        System.halt(0)
+
+      :arrow_up ->
+        state = %{state | scroll_offset: max(0, state.scroll_offset - 1)}
+        Owl.LiveScreen.update(:display, {state.scroll_offset})
+        server_monitor_loop(state)
+
+      :arrow_down ->
+        total = length(SIP.Scenario.Monitor.calls())
+        max_scroll = max(0, total - visible_rows())
+        state = %{state | scroll_offset: min(max_scroll, state.scroll_offset + 1)}
+        Owl.LiveScreen.update(:display, {state.scroll_offset})
+        server_monitor_loop(state)
+
+      _ ->
+        server_monitor_loop(state)
+    after
+      500 ->
+        # Periodic refresh so new instances appear even without a keystroke.
+        Owl.LiveScreen.update(:display, {state.scroll_offset})
+        server_monitor_loop(state)
+    end
+  end
+
+  defp render_server_block(scroll, module, limit, started) do
+    [
+      render_server_counters(module, limit, started),
+      "\n",
+      render_table(scroll, true)
+    ]
+  end
+
+  defp render_server_counters(module, limit, started) do
+    active = length(SIP.Scenario.Monitor.calls())
+
+    line =
+      "  Serveur UAS #{inspect(module)}" <>
+        "  |  Instances: #{active}/#{limit}" <>
+        "  |  Listeners: #{format_listeners(started)}" <>
+        "  [q: arrêt | Ctrl+D: immédiat | ↑↓: défile]"
+
+    Owl.Data.tag(line, :cyan)
   end
 
   # Parse repeated --listen options ("proto:port") into {proto, :all, port}
