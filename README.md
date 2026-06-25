@@ -181,7 +181,7 @@ config :elixip2, :tcp_max_connections, 200
 Connections exceeding the limit are dropped at the transport level (TCP RST).
 
 A TLS listener (`SIP.Transport.TLSListener`) is now implemented on the same model as
-TCP. See [docs/TLS_WSS.md](docs/TLS_WSS.md) for certificate setup, runtime
+TCP. See [TLS_WSS.md](TLS_WSS.md) for certificate setup, runtime
 configuration, and security recommendations. WSS listener is planned for a later iteration.
 
 Scenario can be parametrized using json files as described above.
@@ -227,7 +227,7 @@ elixipp --local-port 5070 --local-addr 127.0.0.1 -c uac-loopback-tcp.json scenar
 
 **TLS loopback:**
 
-TLS requires a certificate and private key on the UAS side. See [docs/TLS_WSS.md](docs/TLS_WSS.md)
+TLS requires a certificate and private key on the UAS side. See [TLS_WSS.md](TLS_WSS.md)
 for how to generate or obtain them. The certificate paths can be set globally in
 `config/runtime.exs` or passed via environment variables before launching `elixipp`.
 
@@ -255,7 +255,7 @@ elixipp --local-port 5071 --local-addr 127.0.0.1 -c uac-loopback-tls.json scenar
 
 > The UAC uses `SIP.Transport.TLS` which connects outbound; it does not verify the
 > server certificate by default (suitable for self-signed certs in development).
-> See [docs/TLS_WSS.md](docs/TLS_WSS.md) for enabling mutual TLS or strict cert
+> See [TLS_WSS.md](TLS_WSS.md) for enabling mutual TLS or strict cert
 > verification.
 
 `uac-loopback.json` points the client at the UAS:
@@ -282,7 +282,7 @@ elixipp [OPTIONS] <scenario.exs | ModuleName>
 | `--max-run N` | Stop after `N` executions in total. | unlimited (`1` when neither `--limit` nor `--max-run` is set) |
 | `--rate N` | Number of calls started per second. Each new call creation is spaced by `1000 / N` ms. Values greater than `100` are ignored and fall back to the default. | `10` |
 | `-c FILE`, `--config FILE` | JSON file parameterizing the scenario (header + N accounts). Overrides the scenario `config` block. See [Paramétrage par fichier JSON](#paramétrage-par-fichier-json-externe). | none |
-| `--listen PROTO:PORT` | (server mode) Listen for inbound requests on this protocol/port. Repeatable. `PROTO:ADDR:PORT` also pins the advertised local IP. Protocols: `udp`, `tcp`, `tls` (wss planned). See [docs/TLS_WSS.md](docs/TLS_WSS.md) for TLS certificate setup. | `udp:5060` |
+| `--listen PROTO:PORT` | (server mode) Listen for inbound requests on this protocol/port. Repeatable. `PROTO:ADDR:PORT` also pins the advertised local IP. Protocols: `udp`, `tcp`, `tls` (wss planned). See [TLS_WSS.md](TLS_WSS.md) for TLS certificate setup. | `udp:5060` |
 | `--local-port PORT` | (client mode) Local UDP port used to send (lets a UAC run on a host already serving a UAS on 5060). | `5060` |
 | `--local-addr ADDR` | (client mode) Local IP advertised in Via/Contact. | first local IPv4 |
 | `--log-file PATH` | Log file path. | `elixipp.log` |
