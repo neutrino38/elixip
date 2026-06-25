@@ -209,7 +209,7 @@ defmodule Elixipp.CLI do
       run_server_monitored(module, limit, started)
     else
       print_server_header(module, limit, started)
-      server_loop()
+      server_loop(module)
     end
   end
 
@@ -237,66 +237,113 @@ defmodule Elixipp.CLI do
       raw? = setup_raw_terminal(true)
 
       Owl.LiveScreen.add_block(:display,
-        state: {0},
-        render: fn {scroll} -> render_server_block(scroll, module, limit, started) end
+        state: {0, :none},
+        render: fn {scroll, shutdown} -> render_server_block(scroll, shutdown, module, limit, started) end
       )
 
       start_input_reader(self())
-      server_monitor_loop(%{scroll_offset: 0, raw?: raw?})
+      server_monitor_loop(%{scroll_offset: 0, raw?: raw?, shutdown: :none, module: module})
     else
       print_server_header(module, limit, started)
-      server_loop()
+      server_loop(module)
     end
   end
 
   @spec server_monitor_loop(map()) :: no_return()
   defp server_monitor_loop(state) do
     receive do
-      msg when msg in [:graceful_stop, :force_quit] ->
-        Owl.LiveScreen.update(:display, {state.scroll_offset})
-        Owl.LiveScreen.flush()
-        restore_terminal(state.raw?)
-        IO.puts("\r\nArrêt du serveur.")
-        System.halt(0)
+      :graceful_stop when state.shutdown == :none ->
+        Elixip.RegistrarUAS.shutdown_all(:elixipp_graceful)
+        state = %{state | shutdown: :graceful}
+        Owl.LiveScreen.update(:display, {state.scroll_offset, state.shutdown})
+        # If no instance was active, exit right away.
+        if Elixip.RegistrarUAS.stats().active == 0 do
+          server_monitor_halt(state)
+        else
+          server_monitor_loop(state)
+        end
+
+      :graceful_stop ->
+        # Already draining — ignore.
+        server_monitor_loop(state)
+
+      :force_quit ->
+        server_monitor_halt(state)
 
       :arrow_up ->
         state = %{state | scroll_offset: max(0, state.scroll_offset - 1)}
-        Owl.LiveScreen.update(:display, {state.scroll_offset})
+        Owl.LiveScreen.update(:display, {state.scroll_offset, state.shutdown})
         server_monitor_loop(state)
 
       :arrow_down ->
         total = length(SIP.Scenario.Monitor.calls())
         max_scroll = max(0, total - visible_rows())
         state = %{state | scroll_offset: min(max_scroll, state.scroll_offset + 1)}
-        Owl.LiveScreen.update(:display, {state.scroll_offset})
+        Owl.LiveScreen.update(:display, {state.scroll_offset, state.shutdown})
         server_monitor_loop(state)
 
       _ ->
         server_monitor_loop(state)
     after
       500 ->
-        # Periodic refresh so new instances appear even without a keystroke.
-        Owl.LiveScreen.update(:display, {state.scroll_offset})
-        server_monitor_loop(state)
+        Owl.LiveScreen.update(:display, {state.scroll_offset, state.shutdown})
+
+        if state.shutdown == :graceful and Elixip.RegistrarUAS.stats().active == 0 do
+          server_monitor_halt(state)
+        else
+          server_monitor_loop(state)
+        end
     end
   end
 
-  defp render_server_block(scroll, module, limit, started) do
+  defp server_monitor_halt(state) do
+    Owl.LiveScreen.update(:display, {state.scroll_offset, state.shutdown})
+    Owl.LiveScreen.flush()
+    restore_terminal(state.raw?)
+    IO.puts("\r\nServeur arrêté.")
+    print_uas_summary(state.module)
+    System.halt(0)
+  end
+
+  defp print_uas_summary(module) do
+    %{
+      total_started: total,
+      total_succeeded: succ,
+      total_aborted: aborted,
+      total_failed: failed
+    } = Elixip.RegistrarUAS.stats()
+
+    IO.puts("══ Résumé ══════════════════")
+    IO.puts("  Scénario    : #{inspect(module)}")
+    IO.puts("  Total       : #{total}")
+    IO.puts("  Succès      : #{succ}")
+    IO.puts("  Interrompus : #{aborted}")
+    IO.puts("  Échecs      : #{failed}")
+    IO.puts("════════════════════════════")
+  end
+
+  defp render_server_block(scroll, shutdown, module, limit, started) do
     [
-      render_server_counters(module, limit, started),
+      render_server_counters(shutdown, module, limit, started),
       "\n",
       render_table(scroll, true)
     ]
   end
 
-  defp render_server_counters(module, limit, started) do
+  defp render_server_counters(shutdown, module, limit, started) do
     active = length(SIP.Scenario.Monitor.calls())
+
+    hint =
+      case shutdown do
+        :none -> "  [q+Entrée: arrêt propre | Ctrl+D: immédiat | ↑↓: défile]"
+        :graceful -> "  [arrêt en cours… | Ctrl+D: forcer]"
+      end
 
     line =
       "  Serveur UAS #{inspect(module)}" <>
         "  |  Instances: #{active}/#{limit}" <>
         "  |  Listeners: #{format_listeners(started)}" <>
-        "  [q: arrêt | Ctrl+D: immédiat | ↑↓: défile]"
+        hint
 
     Owl.Data.tag(line, :cyan)
   end
@@ -383,8 +430,8 @@ defmodule Elixipp.CLI do
 
   # Block the main process until the operator types 'q' (or stdin reaches EOF on a
   # non-interactive run, in which case we simply park forever).
-  @spec server_loop() :: no_return()
-  defp server_loop do
+  @spec server_loop(module()) :: no_return()
+  defp server_loop(module) do
     case IO.gets("") do
       :eof ->
         Process.sleep(:infinity)
@@ -395,9 +442,10 @@ defmodule Elixipp.CLI do
       line when is_binary(line) ->
         if String.trim(line) == "q" do
           IO.puts("Arrêt du serveur.")
+          print_uas_summary(module)
           System.halt(0)
         else
-          server_loop()
+          server_loop(module)
         end
     end
   end
@@ -791,11 +839,11 @@ defmodule Elixipp.CLI do
   # ── Input reader (q = graceful, Ctrl+D = immediate, arrow keys) ───────────────
 
   defp start_input_reader(parent) do
-    spawn(fn -> input_loop(parent) end)
+    spawn(fn -> input_loop(parent, :standard_io) end)
   end
 
-  defp input_loop(parent) do
-    case read_byte() do
+  defp input_loop(parent, io) do
+    case read_byte(io) do
       :eof ->
         # Ctrl+D (EOF in cooked mode) or a closed stdin → immediate stop. No loop:
         # we force-quit, and looping would spin on a persistently-closed stream.
@@ -812,25 +860,25 @@ defmodule Elixipp.CLI do
       <<c>> when c in [?q, ?Q] ->
         # 'q' → graceful shutdown (no new calls, wait for the active ones).
         send(parent, :graceful_stop)
-        input_loop(parent)
+        input_loop(parent, io)
 
       <<27>> ->
         # ESC prefix: read the rest of the ANSI sequence
-        case {read_byte(), read_byte()} do
+        case {read_byte(io), read_byte(io)} do
           {<<"[">>, <<"A">>} -> send(parent, :arrow_up)
           {<<"[">>, <<"B">>} -> send(parent, :arrow_down)
           _ -> :ok
         end
 
-        input_loop(parent)
+        input_loop(parent, io)
 
       _ ->
-        input_loop(parent)
+        input_loop(parent, io)
     end
   end
 
-  defp read_byte do
-    case :file.read(:standard_io, 1) do
+  defp read_byte(io) do
+    case :file.read(io, 1) do
       {:ok, byte} -> byte
       :eof -> :eof
       {:error, _} -> :eof

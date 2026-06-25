@@ -59,6 +59,8 @@ defmodule UAS.RegisterExample do
             reject_registration(req, dialog_pid, 403, "Forbidden")
             scenario_failure("auth rejected: #{inspect(other)}")
         end
+
+      {:scenario_ctl, :shutdown, _reason } -> scenario_success("Registrar stopped gracefully")
     after
       32_000 ->
         scenario_failure("no REGISTER received")
@@ -96,6 +98,9 @@ defmodule UAS.RegisterExample do
             reject_registration(req, dialog_pid, 403, "Forbidden")
             goto(loop, "refresh auth rejected: #{inspect(other)}")
         end
+
+      {:scenario_ctl, :shutdown, _reason} ->
+        scenario_success("Registrar stopped gracefully")
 
       {:dialog_terminated, _dialog_pid, _reason} ->
         scenario_success("registration ended")

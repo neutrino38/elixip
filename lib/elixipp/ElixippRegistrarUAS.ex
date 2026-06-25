@@ -24,6 +24,9 @@ defmodule Elixip.RegistrarUAS do
             scenario_overrides: [],
             instances: %{},
             total_started: 0,
+            total_succeeded: 0,
+            total_aborted: 0,
+            total_failed: 0,
             total_rejected_quota: 0
 
   # ── Public API ──────────────────────────────────────────────────────────
@@ -49,6 +52,11 @@ defmodule Elixip.RegistrarUAS do
           total_rejected_quota: non_neg_integer()
         }
   def stats, do: GenServer.call(__MODULE__, :stats)
+
+  @doc "Broadcast a cooperative shutdown to all active instances without stopping the registrar."
+  @spec shutdown_all(term()) :: :ok
+  def shutdown_all(reason \\ :elixipp_graceful),
+    do: GenServer.cast(__MODULE__, {:shutdown_all, reason})
 
   # ── SIP.Session.Registrar behaviour ──────────────────────────────────────
 
@@ -109,8 +117,20 @@ defmodule Elixip.RegistrarUAS do
      %{
        active: map_size(state.instances),
        total_started: state.total_started,
+       total_succeeded: state.total_succeeded,
+       total_aborted: state.total_aborted,
+       total_failed: state.total_failed,
        total_rejected_quota: state.total_rejected_quota
      }, state}
+  end
+
+  @impl GenServer
+  def handle_cast({:shutdown_all, reason}, state) do
+    Enum.each(state.instances, fn {_ref, %{pid: pid}} ->
+      send(pid, {:scenario_ctl, :shutdown, reason})
+    end)
+
+    {:noreply, state}
   end
 
   @impl GenServer
@@ -139,6 +159,14 @@ defmodule Elixip.RegistrarUAS do
   # frees the slot, so this is only logged.
   def handle_info({:scenario_exit, _name, outcome, reason}, state) do
     Logger.debug("RegistrarUAS: scenario_exit #{inspect(outcome)} (#{inspect(reason)})")
+
+    state =
+      case outcome do
+        :success -> %{state | total_succeeded: state.total_succeeded + 1}
+        :aborted -> %{state | total_aborted: state.total_aborted + 1}
+        _ -> %{state | total_failed: state.total_failed + 1}
+      end
+
     {:noreply, state}
   end
 
