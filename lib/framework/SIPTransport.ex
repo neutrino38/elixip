@@ -205,7 +205,11 @@ defmodule SIP.Transport do
         :ok -> { :noreply, state }
 
         { :no_matching_transaction, parsed_msg } ->
-          if is_atom(parsed_msg.method) do
+          # A request has a method atom (e.g. :REGISTER); a response carries
+          # `method: false` (and `false` is itself an atom, so guard against it
+          # explicitly — otherwise a response with no matching transaction would
+          # wrongly take the request path and crash on the missing :ruri).
+          if parsed_msg.method != false and is_atom(parsed_msg.method) do
             # We need to start a new transaction. Use the transport's own local
             # IP/port (resolved at setup) rather than the socket's bound address,
             # which is the 0.0.0.0 wildcard for UDP. Socket.local/1 also returns
