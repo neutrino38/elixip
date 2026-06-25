@@ -225,6 +225,39 @@ elixipp --local-port 5070 --local-addr 127.0.0.1 -c uac-loopback-tcp.json scenar
 }
 ```
 
+**TLS loopback:**
+
+TLS requires a certificate and private key on the UAS side. See [docs/TLS_WSS.md](docs/TLS_WSS.md)
+for how to generate or obtain them. The certificate paths can be set globally in
+`config/runtime.exs` or passed via environment variables before launching `elixipp`.
+
+```bash
+# config/runtime.exs (or export before running)
+# config :elixip2, tls_certfile: "certs/certificate.pem", tls_keyfile: "certs/private_key.pem"
+
+# Terminal 1 — the registrar (UAS) on TLS/5061
+elixipp --listen tls:127.0.0.1:5061 scenarios/uas_register.exs
+
+# Terminal 2 — the client (UAC) targeting the UAS over TLS
+elixipp --local-port 5071 --local-addr 127.0.0.1 -c uac-loopback-tls.json scenarios/uac_register.exs
+```
+
+`uac-loopback-tls.json` points the UAC at the TLS listener:
+
+```json
+{
+  "domain": "example.com",
+  "proxyuri": "sip:127.0.0.1:5061;transport=tls",
+  "proxyusesrv": false,
+  "accounts": [ { "username": "alice", "password": "changeme", "domain": "example.com" } ]
+}
+```
+
+> The UAC uses `SIP.Transport.TLS` which connects outbound; it does not verify the
+> server certificate by default (suitable for self-signed certs in development).
+> See [docs/TLS_WSS.md](docs/TLS_WSS.md) for enabling mutual TLS or strict cert
+> verification.
+
 `uac-loopback.json` points the client at the UAS:
 
 ```json
