@@ -83,6 +83,14 @@ defmodule SIP.Transport.TCP do
 
 
 
+  # Activates the socket once the accept Task has transferred ownership.
+  # Only meaningful for inbound connections; outbound sockets are already active.
+  @impl true
+  def handle_cast(:activate_socket, state) do
+    :inet.setopts(state.socket, [{:active, true}])
+    {:noreply, state}
+  end
+
   # Handle data reception
   @impl true
   def handle_info({:tcp, socket, data}, state ) do
@@ -96,12 +104,10 @@ defmodule SIP.Transport.TCP do
     { :noreply, %{ state | buffer: buf } }
   end
 
-  def handle_info( {:tcp_closed, _socket}, state ) do
-    Logger.debug([ module: __MODULE__, message: "Cnx disconnected. stopping transport instance" ])
-
-    # Notify all dialogs to give them a chance to restart the TCP connection
-    SIP.Dialog.broadcast({ :tcp_client_closed, state.destip, state.destport })
-    { :stop, state }
+  def handle_info({:tcp_closed, _socket}, state) do
+    Logger.debug([module: __MODULE__, message: "Cnx disconnected. stopping transport instance"])
+    SIP.Dialog.broadcast({:tcp_client_closed, state.destip, state.destport})
+    {:stop, :normal, state}
   end
 
   @impl true

@@ -158,16 +158,29 @@ Both `elixipp` and `mix scenario` accept a built-in name in place of a file path
 
 ### Running Server (UAS) scenarios — registrar
 
-Run it as a server UAS with one or more `--listen PROTO:PORT` listeners (UDP is wired
-today; TCP/TLS/WSS listeners are planned):
+Run it as a server UAS with one or more `--listen PROTO:PORT` listeners:
 
 ```bash
-elixipp --listen udp:5060 scenarios/uas_register.exs        # registrar on UDP/5060
-elixipp -l 50 --listen udp:5060 scenarios/uas_register.exs  # cap at 50 concurrent registrations
+elixipp --listen udp:5060 scenarios/uas_register.exs         # registrar on UDP/5060
+elixipp --listen tcp:5060 scenarios/uas_register.exs         # registrar on TCP/5060
+elixipp --listen udp:5060 --listen tcp:5060 scenarios/uas_register.exs  # both protocols
+elixipp -l 50 --listen tcp:5060 scenarios/uas_register.exs   # cap at 50 concurrent registrations
 ```
 
 `elixipp` detects the `:uas_register` type, starts the listeners and registers
 itself automatically as a Registrar.
+
+For TCP, the listener accepts inbound connections and spins up one
+`SIP.Transport.TCP` process per connection. The maximum number of simultaneous
+TCP connections defaults to 100 and can be overridden in `config/config.exs`:
+
+```elixir
+config :elixip2, :tcp_max_connections, 200
+```
+
+Connections exceeding the limit are dropped at the transport level (TCP RST).
+
+TLS and WSS listeners are planned for a later iteration.
 
 Scenario can be parametrized using json files as described above.
 
@@ -179,12 +192,35 @@ has a single SIP transaction registry, so a single process can't be both the UAC
 and the UAS for the same transaction). They must bind different local UDP ports —
 hence `--listen … :PORT` on the server and `--local-port` on the client:
 
+**UDP loopback:**
+
 ```bash
 # Terminal 1 — the registrar (UAS), bound to 127.0.0.1:5060
 elixipp --listen udp:127.0.0.1:5060 scenarios/uas_register.exs
 
 # Terminal 2 — the client (UAC), bound to a different local port, proxy → the UAS
 elixipp --local-port 5070 --local-addr 127.0.0.1 -c uac-loopback.json scenarios/uac_register.exs
+```
+
+**TCP loopback:**
+
+```bash
+# Terminal 1 — the registrar (UAS) on TCP/5060
+elixipp --listen tcp:127.0.0.1:5060 scenarios/uas_register.exs
+
+# Terminal 2 — the client (UAC) targeting the UAS over TCP
+elixipp --local-port 5070 --local-addr 127.0.0.1 -c uac-loopback-tcp.json scenarios/uac_register.exs
+```
+
+`uac-loopback-tcp.json` is identical to the UDP version except the proxy URI uses the `sip-tcp` scheme (or the transport parameter, depending on how your scenario resolves it):
+
+```json
+{
+  "domain": "example.com",
+  "proxyuri": "sip:127.0.0.1:5060;transport=tcp",
+  "proxyusesrv": false,
+  "accounts": [ { "username": "alice", "password": "changeme", "domain": "example.com" } ]
+}
 ```
 
 `uac-loopback.json` points the client at the UAS:
@@ -211,7 +247,7 @@ elixipp [OPTIONS] <scenario.exs | ModuleName>
 | `--max-run N` | Stop after `N` executions in total. | unlimited (`1` when neither `--limit` nor `--max-run` is set) |
 | `--rate N` | Number of calls started per second. Each new call creation is spaced by `1000 / N` ms. Values greater than `100` are ignored and fall back to the default. | `10` |
 | `-c FILE`, `--config FILE` | JSON file parameterizing the scenario (header + N accounts). Overrides the scenario `config` block. See [Paramétrage par fichier JSON](#paramétrage-par-fichier-json-externe). | none |
-| `--listen PROTO:PORT` | (server mode) Listen for inbound requests on this protocol/port. Repeatable. `PROTO:ADDR:PORT` also pins the advertised local IP. Protocols: `udp` (tcp/tls/wss planned). | `udp:5060` |
+| `--listen PROTO:PORT` | (server mode) Listen for inbound requests on this protocol/port. Repeatable. `PROTO:ADDR:PORT` also pins the advertised local IP. Protocols: `udp`, `tcp` (tls/wss planned). | `udp:5060` |
 | `--local-port PORT` | (client mode) Local UDP port used to send (lets a UAC run on a host already serving a UAS on 5060). | `5060` |
 | `--local-addr ADDR` | (client mode) Local IP advertised in Via/Contact. | first local IPv4 |
 | `--log-file PATH` | Log file path. | `elixipp.log` |

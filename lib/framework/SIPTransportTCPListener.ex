@@ -4,6 +4,16 @@ defmodule SIP.Transport.TCPListener do
   connections, and spawns one SIP.Transport.TCP instance per accepted connection.
 
   Configurable limit: config :elixip2, :tcp_max_connections, 100
+
+  Ownership transfer sequence
+  ----------------------------
+  The accept Task owns each accepted socket. It calls
+  `GenServer.call(listener, {:spawn_connection, socket})` synchronously to have
+  the Listener create the TCP GenServer and register the connection. The Listener
+  returns the TCP pid; the Task then transfers ownership
+  (`:gen_tcp.controlling_process/2`) and tells the TCP process to activate itself
+  (`:activate_socket` cast). Only the socket owner may transfer ownership, so this
+  sequence must stay in the Task.
   """
   use GenServer
   require Logger
@@ -64,7 +74,6 @@ defmodule SIP.Transport.TCPListener do
 
   @impl true
   def handle_call({:setupperlayer, ul}, _from, state) when is_pid(ul) or is_function(ul, 2) or is_nil(ul) do
-    # Propagate to existing connections
     Enum.each(state.connections, fn {_ref, {_ip, _port, pid}} ->
       GenServer.call(pid, {:setupperlayer, ul})
     end)
@@ -81,31 +90,28 @@ defmodule SIP.Transport.TCPListener do
 
   def handle_call({:sendmsg, msg, dest_ip, dest_port}, _from, state) do
     case find_connection(state.connections, dest_ip, dest_port) do
-      nil ->
-        {:reply, {:error, :no_connection}, state}
+      nil -> {:reply, {:error, :no_connection}, state}
       pid ->
         result = GenServer.call(pid, {:sendmsg, msg, dest_ip, dest_port})
         {:reply, result, state}
     end
   end
 
-  @impl true
-  def handle_info({:new_connection, client_socket}, state) do
+  # Called synchronously by the accept Task, which owns the socket.
+  # Returns {:ok, conn_pid} on success or :rejected when the limit is reached
+  # (the Listener closes the socket in that case).
+  def handle_call({:spawn_connection, client_socket}, _from, state) do
     if map_size(state.connections) >= state.max_connections do
       Logger.warning([module: __MODULE__,
         message: "TCP connection limit (#{state.max_connections}) reached — rejecting inbound connection"])
       :gen_tcp.close(client_socket)
-      {:noreply, state}
+      {:reply, :rejected, state}
     else
       {:ok, {peer_ip, peer_port}} = :inet.peername(client_socket)
 
       case GenServer.start_link(SIP.Transport.TCP,
              {:inbound, client_socket, state.localip, state.localport, peer_ip, peer_port}) do
         {:ok, conn_pid} ->
-          # Transfer socket ownership before activating — order is critical.
-          :gen_tcp.controlling_process(client_socket, conn_pid)
-          :inet.setopts(client_socket, [{:active, true}])
-
           unless is_nil(state.upperlayer) do
             GenServer.call(conn_pid, {:setupperlayer, state.upperlayer})
           end
@@ -114,17 +120,18 @@ defmodule SIP.Transport.TCPListener do
           connections = Map.put(state.connections, ref, {peer_ip, peer_port, conn_pid})
           Logger.debug([module: __MODULE__,
             message: "Accepted TCP connection from #{SIP.NetUtils.ip2string(peer_ip)}:#{peer_port}"])
-          {:noreply, %{state | connections: connections}}
+          {:reply, {:ok, conn_pid}, %{state | connections: connections}}
 
         {:error, reason} ->
           Logger.error([module: __MODULE__,
             message: "Failed to start TCP connection handler: #{inspect(reason)}"])
           :gen_tcp.close(client_socket)
-          {:noreply, state}
+          {:reply, :rejected, state}
       end
     end
   end
 
+  @impl true
   def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
     connections = Map.delete(state.connections, ref)
     {:noreply, %{state | connections: connections}}
@@ -137,10 +144,21 @@ defmodule SIP.Transport.TCPListener do
 
   # ---- Private helpers ------------------------------------------------------
 
+  # The accept loop runs in a Task linked to the Listener. It owns each accepted
+  # socket and is therefore the only process that may call controlling_process.
   defp accept_loop(listen_socket, listener_pid) do
     case :gen_tcp.accept(listen_socket) do
       {:ok, client_socket} ->
-        send(listener_pid, {:new_connection, client_socket})
+        case GenServer.call(listener_pid, {:spawn_connection, client_socket}) do
+          {:ok, conn_pid} ->
+            # Transfer ownership: Task → TCP GenServer (valid because Task owns it).
+            :gen_tcp.controlling_process(client_socket, conn_pid)
+            # Ask the TCP process to activate its socket now that it owns it.
+            GenServer.cast(conn_pid, :activate_socket)
+
+          :rejected ->
+            :ok  # Listener already closed the socket.
+        end
         accept_loop(listen_socket, listener_pid)
 
       {:error, :closed} ->

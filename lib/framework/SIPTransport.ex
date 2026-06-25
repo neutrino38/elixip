@@ -226,6 +226,14 @@ defmodule SIP.Transport do
             # {:ok, {ip, port}}, so it cannot be destructured into {ip, port}.
             { local_ip, local_port } = case socket do
               { ip, port } -> { ip, port }
+              s when is_port(s) ->
+                # Raw :gen_tcp port (inbound TCP connections): Socket.local/1 only
+                # handles Socket structs, so use :inet.sockname directly.
+                case :inet.sockname(s) do
+                  { :ok, {{0,0,0,0}, _} } -> { state.localip, state.localport }
+                  { :ok, {ip, port} }     -> { ip, port }
+                  _                       -> { state.localip, state.localport }
+                end
               _ -> case Socket.local(socket) do
                       { :ok, {{0,0,0,0}, _port} } -> { state.localip, state.localport }
                       { :ok, {ip, port}} -> { ip, port }
