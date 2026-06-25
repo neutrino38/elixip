@@ -77,6 +77,8 @@ defmodule Elixipp.CLI do
           log_level: :string,
           log_sequence: :boolean,
           listen: :keep,
+          local_port: :integer,
+          local_addr: :string,
           help: :boolean
         ],
         aliases: [m: :monitor, l: :limit, c: :config, h: :help]
@@ -101,6 +103,10 @@ defmodule Elixipp.CLI do
     module = resolve_module(arg)
     ext_config = load_config(opts[:config])
     limit = opts[:limit] || 1
+
+    # Optional local UDP bind overrides (so a UAC can run on a host that already
+    # has a UAS bound to 5060 — see the two-process REGISTER recipe in the README).
+    apply_local_udp_opts(opts)
 
     # A server (UAS) scenario is driven by inbound requests, not by an outbound
     # spawn loop: switch to server mode and never return.
@@ -177,6 +183,17 @@ defmodule Elixipp.CLI do
   defp run_server_mode(module, :uas_register, opts, limit) do
     listeners = parse_listeners(opts)
 
+    # Bind the UDP socket to the first UDP listener's address/port (one socket per
+    # host for now — see phase 7). Done before bootstrap so the transport binds it.
+    case Enum.find(listeners, fn {proto, _a, _p} -> proto == :udp end) do
+      {:udp, addr, port} ->
+        Application.put_env(:elixip2, :udp_local_port, port)
+        if addr != :all, do: Application.put_env(:elixip2, :udp_local_addr, addr)
+
+      _ ->
+        :ok
+    end
+
     SIP.Scenario.Runner.bootstrap_stack()
 
     {:ok, _pid} =
@@ -213,8 +230,29 @@ defmodule Elixipp.CLI do
       [proto, port] ->
         {parse_proto(proto), :all, parse_port(port)}
 
+      [proto, addr, port] ->
+        {parse_proto(proto), parse_addr(addr), parse_port(port)}
+
       _ ->
-        abort("--listen invalide : #{inspect(spec)} (attendu proto:port, ex. udp:5060)", 2)
+        abort("--listen invalide : #{inspect(spec)} (attendu proto:port ou proto:addr:port)", 2)
+    end
+  end
+
+  defp parse_addr(addr) do
+    case SIP.NetUtils.parse_address(addr) do
+      {:ok, ip} -> ip
+      _ -> abort("--listen : adresse IP invalide #{inspect(addr)}", 2)
+    end
+  end
+
+  # Apply --local-port / --local-addr to the application env (read by the UDP
+  # transport when it binds its socket).
+  defp apply_local_udp_opts(opts) do
+    if port = opts[:local_port], do: Application.put_env(:elixip2, :udp_local_port, port)
+
+    case opts[:local_addr] do
+      nil -> :ok
+      addr -> Application.put_env(:elixip2, :udp_local_addr, parse_addr(addr))
     end
   end
 
@@ -896,9 +934,13 @@ defmodule Elixipp.CLI do
                          Espace la création de chaque nouvel appel de 1000/N ms.
                          Les valeurs > 100 sont ignorées (retour au défaut).
       --listen PROTO:PORT  (mode serveur) Écoute les requêtes entrantes sur ce
-                         protocole/port. Répétable. Équivaut à PROTO:*:PORT (toutes
-                         les IP locales). Protocoles : udp (tcp|tls|wss à venir).
-                         Défaut si absent : udp:5060.
+      --listen PROTO:ADDR:PORT  protocole/port (ADDR optionnel pour fixer l'IP
+                         locale annoncée). Répétable. Protocoles : udp (tcp|tls|wss
+                         à venir). Défaut si absent : udp:5060.
+      --local-port PORT  (mode client) Port UDP local à utiliser pour émettre
+                         (défaut 5060). Permet de lancer un UAC sur une machine qui
+                         héberge déjà un UAS sur 5060 (test deux-process en local).
+      --local-addr ADDR  (mode client) IP locale annoncée dans Via/Contact.
       --log-file PATH    Chemin du fichier de log (défaut : elixipp.log).
       --log-level LEVEL  Niveau : debug | info | warning | error (défaut : debug).
       --log-sequence     Écrit un diagramme de séquence PlantUML par instance de
