@@ -305,6 +305,13 @@ defmodule Elixipp.CLI do
     System.halt(0)
   end
 
+  defp drain_uas_instances do
+    if Elixip.RegistrarUAS.stats().active > 0 do
+      Process.sleep(200)
+      drain_uas_instances()
+    end
+  end
+
   defp print_uas_summary(module) do
     %{
       total_started: total,
@@ -441,7 +448,10 @@ defmodule Elixipp.CLI do
 
       line when is_binary(line) ->
         if String.trim(line) == "q" do
-          IO.puts("Arrêt du serveur.")
+          IO.puts("Arrêt propre en cours — attente des instances actives…")
+          Elixip.RegistrarUAS.shutdown_all(:elixipp_graceful)
+          drain_uas_instances()
+          IO.puts("Serveur arrêté.")
           print_uas_summary(module)
           System.halt(0)
         else
