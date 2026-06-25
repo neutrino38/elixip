@@ -28,8 +28,8 @@ defmodule SIP.Transport.TCP do
     rescue
       err in Socket.Error ->
         dest_ip_str = if is_tuple(dest_ip), do: NetUtils.ip2string(dest_ip), else: dest_ip
-        Logger.info([module: __MODULE__, dest: "#{dest_ip_str}:#{dest_port}",
-                     message: "Failed to connect socket: #{err.message}"])
+        Logger.debug([module: __MODULE__, dest: "#{dest_ip_str}:#{dest_port}",
+                      message: "Failed to connect socket: #{err.message}"])
         {:stop, :cnxerror}
     end
   end

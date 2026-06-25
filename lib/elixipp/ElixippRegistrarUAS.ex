@@ -21,6 +21,7 @@ defmodule Elixip.RegistrarUAS do
 
   defstruct scenario_module: nil,
             max_instances: 1,
+            max_run: nil,
             scenario_overrides: [],
             instances: %{},
             total_started: 0,
@@ -77,6 +78,7 @@ defmodule Elixip.RegistrarUAS do
     state = %__MODULE__{
       scenario_module: Keyword.fetch!(opts, :scenario_module),
       max_instances: Keyword.get(opts, :max_instances, 1),
+      max_run: Keyword.get(opts, :max_run, nil),
       scenario_overrides: Keyword.get(opts, :scenario_overrides, [])
     }
 
@@ -85,30 +87,38 @@ defmodule Elixip.RegistrarUAS do
 
   @impl GenServer
   def handle_call({:new_registration, dialog_id, registerreq, _transaction_id}, _from, state) do
-    if map_size(state.instances) >= state.max_instances do
-      Logger.warning(
-        "RegistrarUAS: quota reached (#{state.max_instances}), rejecting REGISTER with 503"
-      )
+    max_run_reached = is_integer(state.max_run) and state.total_started >= state.max_run
 
-      {:reply, {:reject, 503, "Service Unavailable"},
-       %{state | total_rejected_quota: state.total_rejected_quota + 1}}
-    else
-      {pid, ref} =
-        SIP.Scenario.Runner.spawn_uas_instance(state.scenario_module,
-          dialog_pid: dialog_id,
-          parent_pid: self(),
-          inbound_request: registerreq,
-          config_overrides: state.scenario_overrides
+    cond do
+      max_run_reached ->
+        Logger.debug("RegistrarUAS: max_run #{state.max_run} reached, rejecting REGISTER with 503")
+        {:reply, {:reject, 503, "Service Unavailable"},
+         %{state | total_rejected_quota: state.total_rejected_quota + 1}}
+
+      map_size(state.instances) >= state.max_instances ->
+        Logger.warning(
+          "RegistrarUAS: quota reached (#{state.max_instances}), rejecting REGISTER with 503"
+        )
+        {:reply, {:reject, 503, "Service Unavailable"},
+         %{state | total_rejected_quota: state.total_rejected_quota + 1}}
+
+      true ->
+        {pid, ref} =
+          SIP.Scenario.Runner.spawn_uas_instance(state.scenario_module,
+            dialog_pid: dialog_id,
+            parent_pid: self(),
+            inbound_request: registerreq,
+            config_overrides: state.scenario_overrides
+          )
+
+        instances = Map.put(state.instances, ref, %{pid: pid, dialog_id: dialog_id})
+
+        Logger.debug(
+          "RegistrarUAS: accepted REGISTER, instance #{inspect(pid)} (#{map_size(instances)} active)"
         )
 
-      instances = Map.put(state.instances, ref, %{pid: pid, dialog_id: dialog_id})
-
-      Logger.debug(
-        "RegistrarUAS: accepted REGISTER, instance #{inspect(pid)} (#{map_size(instances)} active)"
-      )
-
-      {:reply, {:accept, pid},
-       %{state | instances: instances, total_started: state.total_started + 1}}
+        {:reply, {:accept, pid},
+         %{state | instances: instances, total_started: state.total_started + 1}}
     end
   end
 

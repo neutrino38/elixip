@@ -182,6 +182,7 @@ defmodule Elixipp.CLI do
   @spec run_server_mode(module(), atom(), keyword(), pos_integer()) :: no_return()
   defp run_server_mode(module, :uas_register, opts, limit) do
     listeners = parse_listeners(opts)
+    max_run = opts[:max_run]
 
     # Bind the UDP socket to the first UDP listener's address/port (one socket per
     # host for now — see phase 7). Done before bootstrap so the transport binds it.
@@ -197,7 +198,7 @@ defmodule Elixipp.CLI do
     SIP.Scenario.Runner.bootstrap_stack()
 
     {:ok, _pid} =
-      Elixip.RegistrarUAS.start_link(scenario_module: module, max_instances: limit)
+      Elixip.RegistrarUAS.start_link(scenario_module: module, max_instances: limit, max_run: max_run)
 
     :ok = SIP.Session.ConfigRegistry.set_registration_processing_module(Elixip.RegistrarUAS)
 
@@ -206,10 +207,10 @@ defmodule Elixipp.CLI do
     # --monitor wires the same live call table as the UAC parallel mode. Without
     # it (or on a non-interactive stdin) we fall back to the plain text loop.
     if opts[:monitor] do
-      run_server_monitored(module, limit, started)
+      run_server_monitored(module, limit, max_run, started)
     else
       print_server_header(module, limit, started)
-      server_loop(module)
+      server_loop(module, max_run)
     end
   end
 
@@ -228,8 +229,8 @@ defmodule Elixipp.CLI do
   # in a live block and react to the keyboard (q / Ctrl+D / arrows). On a
   # non-interactive stdin the live table is impossible, so we degrade to the plain
   # text server loop. Never returns.
-  @spec run_server_monitored(module(), pos_integer(), list()) :: no_return()
-  defp run_server_monitored(module, limit, started) do
+  @spec run_server_monitored(module(), pos_integer(), non_neg_integer() | nil, list()) :: no_return()
+  defp run_server_monitored(module, limit, max_run, started) do
     {:ok, _} = Application.ensure_all_started(:owl)
     {:ok, _} = SIP.Scenario.Monitor.start()
 
@@ -242,10 +243,10 @@ defmodule Elixipp.CLI do
       )
 
       start_input_reader(self())
-      server_monitor_loop(%{scroll_offset: 0, raw?: raw?, shutdown: :none, module: module})
+      server_monitor_loop(%{scroll_offset: 0, raw?: raw?, shutdown: :none, module: module, max_run: max_run})
     else
       print_server_header(module, limit, started)
-      server_loop(module)
+      server_loop(module, max_run)
     end
   end
 
@@ -287,8 +288,18 @@ defmodule Elixipp.CLI do
     after
       500 ->
         Owl.LiveScreen.update(:display, {state.scroll_offset, state.shutdown})
+        stats = Elixip.RegistrarUAS.stats()
 
-        if state.shutdown == :graceful and Elixip.RegistrarUAS.stats().active == 0 do
+        state =
+          if is_integer(state.max_run) and stats.total_started >= state.max_run and
+               state.shutdown == :none do
+            Elixip.RegistrarUAS.shutdown_all(:max_run)
+            %{state | shutdown: :graceful}
+          else
+            state
+          end
+
+        if state.shutdown == :graceful and stats.active == 0 do
           server_monitor_halt(state)
         else
           server_monitor_loop(state)
@@ -443,8 +454,18 @@ defmodule Elixipp.CLI do
 
   # Block the main process until the operator types 'q' (or stdin reaches EOF on a
   # non-interactive run, in which case we simply park forever).
-  @spec server_loop(module()) :: no_return()
-  defp server_loop(module) do
+  # When max_run is set, a background task polls RegistrarUAS and halts once all
+  # started instances have completed.
+  @spec server_loop(module(), non_neg_integer() | nil) :: no_return()
+  defp server_loop(module, max_run) do
+    if is_integer(max_run) do
+      Task.start(fn -> max_run_watcher(max_run, module) end)
+    end
+
+    server_loop_io(module)
+  end
+
+  defp server_loop_io(module) do
     case IO.gets("") do
       :eof ->
         Process.sleep(:infinity)
@@ -461,8 +482,23 @@ defmodule Elixipp.CLI do
           print_uas_summary(module)
           System.halt(0)
         else
-          server_loop(module)
+          server_loop_io(module)
         end
+    end
+  end
+
+  defp max_run_watcher(max_run, module) do
+    Process.sleep(500)
+    stats = Elixip.RegistrarUAS.stats()
+
+    if stats.total_started >= max_run and stats.active == 0 do
+      IO.puts("\nMax-run #{max_run} atteint — arrêt du serveur.")
+      Elixip.RegistrarUAS.shutdown_all(:max_run)
+      drain_uas_instances()
+      print_uas_summary(module)
+      System.halt(0)
+    else
+      max_run_watcher(max_run, module)
     end
   end
 

@@ -65,7 +65,8 @@ alias SIP.NetUtils
             { :error, :failedtostart }
 
           { :error, :cnxerror } ->
-            Logger.error([ module: __MODULE__, message: "Failed to start transport #{uri.destproto}: failed to connect to UAS" ])
+            dest = "sip:#{SIP.NetUtils.ip2string(uri.destip)}:#{uri.destport};transport=#{String.downcase(uri.destproto)}"
+            Logger.error([ module: __MODULE__, message: "Unable to connect to SIP server #{dest}" ])
             { :error, :failedtostart }
 
           # A crash during init returns { reason, stacktrace }. Only format the
