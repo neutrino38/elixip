@@ -18,7 +18,9 @@ defmodule UAC.InviteExample do
   @domain "example.com"
   @proxy "sip.example.com"
   @passwd "changeme"
-  @callee "sip:90901@#{@domain}"
+  # @callee is NOT a module attribute here because the domain may be overridden at
+  # run time by an external config file (-c FILE). Use sip_ctx.domain at runtime.
+  @callee_num "90901"
 
   # SIP identity for the scenario. The framework reads this block to build the
   # initial %SIP.Context{} (computing :ha1 from :passwd) before initial_state.
@@ -42,7 +44,7 @@ defmodule UAC.InviteExample do
 
   # -------------------------------------------------------------------------------
   state calling do
-    send_INVITE(@callee, :mediaserver, timeout: 90, webrtc: :no)
+    send_INVITE("sip:#{@callee_num}@#{sip_ctx.domain}", :mediaserver, timeout: 90, webrtc: :no)
     goto(call_progress)
   end
 
@@ -55,7 +57,7 @@ defmodule UAC.InviteExample do
         goto(loop, "100 Trying")
 
       {407, rsp, _trans_pid, _dialog_pid} ->
-        send_auth_INVITE(rsp, @callee, :mediaserver, timeout: 90)
+        send_auth_INVITE(rsp, "sip:#{@callee_num}@#{sip_ctx.domain}", :mediaserver, timeout: 90)
         goto(loop, "407 Proxy Auth Required")
 
       {180, _rsp, _trans_pid, _dialog_pid} ->

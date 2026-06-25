@@ -237,7 +237,20 @@ alias SIP.Transac
     end
   end
 
+  @doc "check if a nonce was recorded in the dialog from a previous challenge"
+  @spec check_nonce(pid(), any()) :: boolean()
   def check_nonce(dialog_pid, nonce) when is_pid(dialog_pid) do
     GenServer.call(dialog_pid, { :checknonce, nonce})
   end
+
+  @doc "Start sending OPTIONS keepalive - only available for REGISTER dialog"
+  def start_keepalive(dialog_pid) when is_pid(dialog_pid) do
+    GenServer.call(dialog_pid, :start_keepalive)
+  end
+
+  @doc "Stopn sending keepalive"
+  def stop_keepalive(dialog_pid) when is_pid(dialog_pid) do
+    GenServer.call(dialog_pid, :stop_keepalive)
+  end
+
 end

@@ -95,15 +95,21 @@ defmodule SIP.DialogImpl do
       |> Map.put(:callid, state.callid)
       |> set_tag(:from, state.fromtag)
 
-    # In-dialog requests (everything but the very first one and OPTIONS
-    # keepalives) must be addressed to the remote party: the To URI of the
-    # original request plus the remote tag, sent to the remote target through
-    # the dialog route set (RFC 3261 §12.2.1.1). Before a dialog-establishing
-    # response arrives, the remote tag/target/route set are still unknown, so a
-    # request sent then (e.g. an INVITE resubmitted after a 401/407 challenge)
-    # goes out unchanged.
+    # True in-dialog requests (everything but the very first one) must be
+    # addressed to the remote party: the To URI of the original request plus the
+    # remote tag, sent to the remote target through the dialog route set
+    # (RFC 3261 §12.2.1.1). Before a dialog-establishing response arrives, the
+    # remote tag/target/route set are still unknown, so a request sent then (e.g.
+    # an INVITE resubmitted after a 401/407 challenge) goes out unchanged.
+    #
+    # REGISTER and OPTIONS are NOT dialog-forming (RFC 3261 §10, §11): a REGISTER
+    # refresh / OPTIONS keepalive reuses the registration's Call-ID + From-tag and
+    # bumps the CSeq, but it keeps its own Request-URI (the registrar) and carries
+    # NO To-tag. Re-targeting them would (wrongly) point the refresh at the
+    # returned Contact binding and add a To-tag, which the registrar then sees as a
+    # different dialog.
     newreq =
-      if not is_initial and req.method not in [:OPTIONS] do
+      if not is_initial and req.method not in [:OPTIONS, :REGISTER] do
         newreq
         |> route_to_remote_target(state)
         |> add_route_set(state)
@@ -220,7 +226,7 @@ defmodule SIP.DialogImpl do
     end
   end
 
-  def send_options_keepalive(state) do
+  def send_options_keepalive(state = %SIP.DialogImpl{}) do
     msg = %{
       "Accept" => "*/*",
       "Accept-Encoding" => "UTF-8",
