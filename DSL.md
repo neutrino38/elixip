@@ -230,6 +230,53 @@ a genuine failure, so monitoring/tooling can tell the two apart. `run/1` returns
 
 Elixir code may be added before calling goto or any other transition macro.
 
+### Server (UAS) scenarios — registrar
+
+So far the scenarios above act as clients (UAC): they originate requests. A
+scenario can instead act as a **server (UAS)** that *answers* inbound requests.
+The first supported kind is a **REGISTER server (registrar)**.
+
+A server scenario declares its kind with `uas :register`. The FSM enters the
+initial_state once the server receives the REGISTER request. This request is
+forwarded and need to be processed as a regular SIP request.
+
+
+```elixir
+defmodule UAS.RegisterExample do
+  use SIP.Scenario
+
+  uas :register
+  config domain: "example.com"
+
+  # The REGISTER that started this instance is already in the mailbox; jump
+  # straight to the state that waits for it.
+  state initial_state do
+    goto next
+  end
+
+  state wait_register do
+    on_events do
+      {:REGISTER, req, _trans_pid, dialog_pid} ->
+        # Replying to a REGISTER (challenge / accept / reject) is the application's
+        # job, so these helpers are plain functions defined in the scenario itself.
+        case check_registration_auth(req, dialog_pid, password: appdata_get(:password)) do
+          :no_auth_header -> challenge_registration(req, dialog_pid); goto loop, "401"
+          :ok             -> accept_registration(req, dialog_pid, expires: 300); goto registered, "200 OK"
+          _               -> reject_registration(req, dialog_pid, 403, "Forbidden"); scenario_failure("auth")
+        end
+    after
+      32_000 -> scenario_failure("no REGISTER received")
+    end
+  end
+
+  # state registered: answer OPTIONS keepalives, REGISTER refreshes and un-REGISTER.
+end
+```
+
+See [`scenarios/uas_register.exs`](scenarios/uas_register.exs) for the full scenario,
+including the reply helpers and the `registered` state.
+
+
 ## Sub-scenarios (sub-FSM)
 
 A scenario can launch **another scenario as a sub finite-state machine** and talk to it by message passing.

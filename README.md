@@ -156,57 +156,9 @@ elixipp -c ives.json --max-run 0 UAC.Register      # walk through every account
 
 Both `elixipp` and `mix scenario` accept a built-in name in place of a file path.
 
-### Server (UAS) scenarios — registrar
+### Running Server (UAS) scenarios — registrar
 
-So far the scenarios above act as clients (UAC): they originate requests. A
-scenario can instead act as a **server (UAS)** that *answers* inbound requests.
-The first supported kind is a **REGISTER server (registrar)**.
-
-A server scenario declares its kind with `uas :register`. Replying to the
-REGISTER (challenge / accept / reject) is the **application's** responsibility,
-so those helpers are plain functions defined *in the scenario itself* — see
-[`scenarios/uas_register.exs`](scenarios/uas_register.exs):
-
-```elixir
-defmodule UAS.RegisterExample do
-  use SIP.Scenario
-
-  uas :register
-  config domain: "example.com"
-
-  state initial_state, do: goto(next)
-
-  state wait_register do
-    on_events do
-      {:REGISTER, req, _trans, dialog_pid} ->
-        case check_registration_auth(req) do
-          :no_auth_header -> challenge_registration(req, dialog_pid); goto(loop, "401")
-          :ok             -> accept_registration(req, dialog_pid, expires: 300); goto(registered, "200")
-          other           -> reject_registration(req, dialog_pid, 403, "Forbidden"); scenario_failure(other)
-        end
-    after
-      32_000 -> scenario_failure("no REGISTER")
-    end
-  end
-
-  state registered do
-    on_events do
-      {:dialog_terminated, _d, _r} -> scenario_success("ended")
-    after
-      600_000 -> scenario_success("idle")
-    end
-  end
-
-  # Application-side reply helpers (wrap SIP.Dialog.reply/5,
-  # SIP.Session.Registrar.check_register/1, SIP.Msg.Ops.check_authrequest/3).
-  defp challenge_registration(req, dialog_pid, opts \\ []), do: ...
-  defp accept_registration(req, dialog_pid, opts), do: ...
-  defp reject_registration(req, dialog_pid, code, reason), do: ...
-  defp check_registration_auth(req, opts \\ []), do: ...
-end
-```
-
-Run it as a server with one or more `--listen PROTO:PORT` listeners (UDP is wired
+Run it as a server UAS with one or more `--listen PROTO:PORT` listeners (UDP is wired
 today; TCP/TLS/WSS listeners are planned):
 
 ```bash
@@ -215,21 +167,36 @@ elixipp -l 50 --listen udp:5060 scenarios/uas_register.exs  # cap at 50 concurre
 ```
 
 `elixipp` detects the `:uas_register` type, starts the listeners and registers
-`Elixip.RegistrarUAS` as the processing module. One scenario instance is spawned
-per inbound REGISTER dialog and receives `{:REGISTER, req, transaction_id,
-dialog_pid}`. `--limit` caps the number of concurrent instances; REGISTER beyond
-the cap are rejected with `503 Service Unavailable`. Type `q` then Enter to stop
-the server.
+itself automatically as a Registrar.
 
-The reply helpers used above are defined in the scenario and lean on the
-framework building blocks:
+Scenario can be parametrized using json files as described above.
 
-| Helper (in the scenario) | Effect |
-|---|---|
-| `challenge_registration(req, dialog_pid, opts)` | `SIP.Dialog.reply(dialog_pid, req, 401, …, realm)` — the dialog generates and stores the `WWW-Authenticate` nonce |
-| `accept_registration(req, dialog_pid, opts)` | `SIP.Dialog.reply(dialog_pid, req, 200, "OK", …)` after bounding Contact/Expires with `SIP.Session.Registrar.check_register/1` |
-| `reject_registration(req, dialog_pid, code, reason)` | `SIP.Dialog.reply` with an arbitrary error |
-| `check_registration_auth(req, opts)` | `:no_auth_header` / `:ok` / `:invalid_password` via `SIP.Msg.Ops.check_authrequest/3` — pass `opts[:password]` for a real digest check (otherwise any well-formed Authorization is accepted) |
+### Testing the UAS with the UAC, locally (two terminals)
+
+You can exercise the registrar with the client scenario over a real UDP loopback
+on `127.0.0.1`. A genuine REGISTER exchange needs **two OS processes** (each BEAM
+has a single SIP transaction registry, so a single process can't be both the UAC
+and the UAS for the same transaction). They must bind different local UDP ports —
+hence `--listen … :PORT` on the server and `--local-port` on the client:
+
+```bash
+# Terminal 1 — the registrar (UAS), bound to 127.0.0.1:5060
+elixipp --listen udp:127.0.0.1:5060 scenarios/uas_register.exs
+
+# Terminal 2 — the client (UAC), bound to a different local port, proxy → the UAS
+elixipp --local-port 5070 --local-addr 127.0.0.1 -c uac-loopback.json scenarios/uac_register.exs
+```
+
+`uac-loopback.json` points the client at the UAS:
+
+```json
+{
+  "domain": "example.com",
+  "proxyuri": "sip:127.0.0.1:5060",
+  "proxyusesrv": false,
+  "accounts": [ { "username": "alice", "password": "changeme", "domain": "example.com" } ]
+}
+```
 
 ### Command-line options
 
@@ -244,8 +211,12 @@ elixipp [OPTIONS] <scenario.exs | ModuleName>
 | `--max-run N` | Stop after `N` executions in total. | unlimited (`1` when neither `--limit` nor `--max-run` is set) |
 | `--rate N` | Number of calls started per second. Each new call creation is spaced by `1000 / N` ms. Values greater than `100` are ignored and fall back to the default. | `10` |
 | `-c FILE`, `--config FILE` | JSON file parameterizing the scenario (header + N accounts). Overrides the scenario `config` block. See [Paramétrage par fichier JSON](#paramétrage-par-fichier-json-externe). | none |
+| `--listen PROTO:PORT` | (server mode) Listen for inbound requests on this protocol/port. Repeatable. `PROTO:ADDR:PORT` also pins the advertised local IP. Protocols: `udp` (tcp/tls/wss planned). | `udp:5060` |
+| `--local-port PORT` | (client mode) Local UDP port used to send (lets a UAC run on a host already serving a UAS on 5060). | `5060` |
+| `--local-addr ADDR` | (client mode) Local IP advertised in Via/Contact. | first local IPv4 |
 | `--log-file PATH` | Log file path. | `elixipp.log` |
 | `--log-level LEVEL` | File log level: `debug` \| `info` \| `warning` \| `error`. | `debug` |
+| `--log-sequence` | Write one PlantUML sequence diagram per scenario instance. Single call only (`--limit 1`). | off |
 | `-h`, `--help` | Show the help text. | — |
 
 ```bash
