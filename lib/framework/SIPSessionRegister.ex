@@ -17,6 +17,7 @@ defmodule SIP.Session.Registrar do
   @min_expires 60
   @max_expires 3600
   @max_contacts 5
+  @granted_expires 3600
 
   # Callbacks defined for a registrar server.
   #
@@ -72,14 +73,32 @@ defmodule SIP.Session.Registrar do
     end
   end
 
-  @doc """
-    Helper function for registrar implementation
-    Check the Expires header and the Contact header(s) for expiration values.
-    If any of them is below @min_expires, reject with 423 Interval Too Brief.
-    If any of them is above @max_expires, adjust to max expires
-  """
-  def check_register(registerreq) when is_map(registerreq) do
-    contacts = List.wrap(Map.get(registerreq, :contact))
+  # Extract the registering identity: prefer the auth username (present after a
+  # successful digest challenge), fall back to the Contact URI userpart.
+  defp registered_username(req) do
+    auth = Map.get(req, :authorization) || Map.get(req, :proxyauthorization)
+
+    case auth do
+      %{"username" => u} when is_binary(u) and u != "" -> u
+      _ ->
+        case List.wrap(Map.get(req, :contact)) do
+          [%SIP.Uri{userpart: u} | _] when is_binary(u) -> u
+          _ -> ""
+        end
+    end
+  end
+
+  def set_contacts_expires(nil, _expires), do: nil
+
+  def set_contacts_expires(contacts, expires) when is_list(contacts),
+    do: Enum.map(contacts, &set_contacts_expires(&1, expires))
+
+  def set_contacts_expires(%SIP.Uri{} = contact, expires),
+    do: SIP.Uri.set_uri_param(contact, "expires", to_string(expires))
+
+  defp check_register(registerreq) when is_map(registerreq) do
+    original_contact = Map.get(registerreq, :contact)
+    contacts = List.wrap(original_contact)
 
     if length(contacts) > @max_contacts do
       throw({:reject, 400, "Too many contacts"})
@@ -87,10 +106,63 @@ defmodule SIP.Session.Registrar do
 
     adjusted_contacts = adjust_all_contacts(contacts)
 
-    Map.put(registerreq, :contact, adjusted_contacts)
+    # Preserve original cardinality: a single URI stays a URI, not a list.
+    contact =
+      if is_list(original_contact),
+        do: adjusted_contacts,
+        else: List.first(adjusted_contacts)
+
+    Map.put(registerreq, :contact, contact)
     |> adjust_expires_header()
   end
+
+  def reply_options(req, dialog_pid) when req.method == :OPTIONS do
+    SIP.Scenario.Monitor.note_command(:sip, "reply_OPTIONS")
+    SIP.Dialog.reply(dialog_pid, req, 200, "OK", [])
+  end
+
+  # Challenge with a 401 carrying a freshly generated WWW-Authenticate digest
+  # header. For a 401, SIP.Dialog.reply/5 interprets the 5th argument as the
+  # realm and the dialog layer generates + stores the nonce.
+  def challenge_registration(req, dialog_pid, opts \\ []) when req.method == :REGISTER do
+    realm = Keyword.get(opts, :realm, "example.com")
+    reason = Keyword.get(opts, :reason, "Unauthorized")
+    SIP.Scenario.Monitor.note_command(:sip, "challenge_registration")
+    SIP.Dialog.reply(dialog_pid, req, 401, reason, realm)
+  end
+
+  # Accept with a 200 OK echoing the Contact binding(s) with the granted
+  # expiration. Contact/Expires values are bounded by check_register/1 (min 60,
+  # max 3600, max 5 contacts); a violation becomes the matching reject response.
+  def accept_registration(req, dialog_pid, opts) when req.method == :REGISTER do
+    expires = Keyword.get(opts, :expires, @granted_expires)
+
+    try do
+      req = check_register(req)
+
+      contact =
+        case Keyword.get(opts, :contact) do
+          nil -> set_contacts_expires(Map.get(req, :contact), expires)
+          c -> c
+        end
+
+      SIP.Scenario.Monitor.note_command(:sip, "accept_registration")
+      SIP.Scenario.Monitor.note_account(registered_username(req))
+      SIP.Dialog.reply(dialog_pid, req, 200, "OK", contact: contact)
+    catch
+      {:reject, code, reason} ->
+        reject_registration(req, dialog_pid, code, reason)
+    end
+  end
+
+  def reject_registration(req, dialog_pid, code, reason) when req.method == :REGISTER do
+    SIP.Scenario.Monitor.note_command(:sip, "reject_reg #{code}")
+    SIP.Dialog.reply(dialog_pid, req, code, reason, [])
+  end
+
 end
+
+
 
 defmodule SIP.Session.RegisterUAC do
   defmacro __using__(_opts) do

@@ -14,6 +14,7 @@
 # no macro / `var!` plumbing is needed.
 defmodule UAS.RegisterExample do
   use SIP.Scenario
+  import SIP.Session.Registrar, only: [reply_options: 2, challenge_registration: 2, accept_registration: 3, reject_registration: 4, set_contacts_expires: 2]
 
   # Marks the scenario type as :uas_register so elixipp runs it in server mode.
   uas(:register)
@@ -76,7 +77,7 @@ defmodule UAS.RegisterExample do
   state registered do
     on_events do
       {:OPTIONS, req, _trans_pid, dialog_pid} ->
-        SIP.Dialog.reply(dialog_pid, req, 200, "OK", [])
+        reply_options(req, dialog_pid)
         goto(loop, "OPTIONS keepalive")
 
       {:REGISTER, req, _trans_pid, dialog_pid} ->
@@ -117,41 +118,6 @@ defmodule UAS.RegisterExample do
 
   # ── REGISTER reply helpers (application side) ──────────────────────────────
   # Thin wrappers over the framework's dialog/transaction machinery.
-
-  # Challenge with a 401 carrying a freshly generated WWW-Authenticate digest
-  # header. For a 401, SIP.Dialog.reply/5 interprets the 5th argument as the
-  # realm and the dialog layer generates + stores the nonce.
-  defp challenge_registration(req, dialog_pid, opts \\ []) do
-    realm = Keyword.get(opts, :realm, @domain)
-    reason = Keyword.get(opts, :reason, "Unauthorized")
-    SIP.Dialog.reply(dialog_pid, req, 401, reason, realm)
-  end
-
-  # Accept with a 200 OK echoing the Contact binding(s) with the granted
-  # expiration. Contact/Expires values are bounded by check_register/1 (min 60,
-  # max 3600, max 5 contacts); a violation becomes the matching reject response.
-  defp accept_registration(req, dialog_pid, opts) do
-    expires = Keyword.get(opts, :expires, @granted_expires)
-
-    try do
-      _checked = SIP.Session.Registrar.check_register(req)
-
-      contact =
-        case Keyword.get(opts, :contact) doregistration ended
-          nil -> set_contacts_expires(Map.get(req, :contact), expires)
-          c -> c
-        end
-
-      SIP.Dialog.reply(dialog_pid, req, 200, "OK", contact: contact)
-    catch
-      {:reject, code, reason} ->
-        SIP.Dialog.reply(dialog_pid, req, code, reason, [])
-    end
-  end
-
-  defp reject_registration(req, dialog_pid, code, reason) do
-    SIP.Dialog.reply(dialog_pid, req, code, reason, [])
-  end
 
   # An un-REGISTER is a REGISTER requesting expiration 0 (Expires header or the
   # Contact "expires" parameter).
@@ -221,11 +187,4 @@ defmodule UAS.RegisterExample do
     end
   end
 
-  defp set_contacts_expires(nil, _expires), do: nil
-
-  defp set_contacts_expires(contacts, expires) when is_list(contacts),
-    do: Enum.map(contacts, &set_contacts_expires(&1, expires))
-
-  defp set_contacts_expires(%SIP.Uri{} = contact, expires),
-    do: SIP.Uri.set_uri_param(contact, "expires", to_string(expires))
 end

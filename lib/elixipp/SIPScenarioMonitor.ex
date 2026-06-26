@@ -62,6 +62,21 @@ defmodule SIP.Scenario.Monitor do
   end
 
   @doc """
+  Update the account column of the current scenario row. Called when the
+  registered identity becomes known (e.g. after auth succeeds in a UAS
+  REGISTER scenario). No-op if the monitor is not running.
+  """
+  @spec note_account(String.t()) :: :ok
+  def note_account(username) do
+    if Process.whereis(__MODULE__) do
+      slot_id = Process.get(:scenario_slot_id, self())
+      GenServer.cast(__MODULE__, {:account, slot_id, to_string(username)})
+    end
+
+    :ok
+  end
+
+  @doc """
   Record the last command issued by the current scenario process, with its
   category (`:sip`, `:media`, `:http`, `:db`, …). Called by the instrumented
   `SIP.Session.*` macros. The category is stored to drive the future sequence
@@ -119,6 +134,11 @@ defmodule SIP.Scenario.Monitor do
   @impl true
   def handle_cast({:clear, slot_id}, st) do
     {:noreply, %{st | calls: Map.delete(st.calls, slot_id)}}
+  end
+
+  @impl true
+  def handle_cast({:account, call_id, username}, st) do
+    update(st, call_id, %{account: username})
   end
 
   @impl true
