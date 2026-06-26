@@ -303,5 +303,88 @@ defmodule SIP.Test.Parser do
 			assert parsed_msg2.dialog_id == {"8075639", "32645600-4c01-bc8f-670c-deac31158db8", "as424e7930"}
 		end
 
+	# Helper shared by the Contact tests below.
+	defp parse_register(extra_headers) do
+		msg =
+			"REGISTER sip:example.com SIP/2.0\r\n" <>
+			"Via: SIP/2.0/UDP 192.168.1.1:5060;branch=z9hG4bKtest\r\n" <>
+			"From: <sip:alice@example.com>;tag=1928301774\r\n" <>
+			"To: <sip:alice@example.com>\r\n" <>
+			"Call-ID: test-contact@example.com\r\n" <>
+			"CSeq: 1 REGISTER\r\n" <>
+			extra_headers <>
+			"Max-Forwards: 70\r\n" <>
+			"Expires: 3600\r\n" <>
+			"Content-Length: 0\r\n" <>
+			"\r\n"
+
+		SIPMsg.parse(msg, fn _code, errmsg, lineno, line ->
+			IO.puts("\n" <> errmsg)
+			IO.puts("Offending line #{lineno}: #{line}")
+		end)
+	end
+
+	test "Single Contact is parsed as a SIP.Uri struct, not a list" do
+		{code, parsed} = parse_register("Contact: <sip:alice@192.168.1.1:5060>\r\n")
+		assert code == :ok
+		assert is_struct(parsed.contact, SIP.Uri)
+		assert parsed.contact.userpart == "alice"
+		assert parsed.contact.domain == "192.168.1.1"
+		assert parsed.contact.port == 5060
+	end
+
+	test "Multiple contacts on one Contact line are parsed as a list of SIP.Uri" do
+		{code, parsed} = parse_register(
+			"Contact: <sip:alice@192.168.1.1:5060>, <sip:alice@10.0.0.1:5061>\r\n"
+		)
+		assert code == :ok
+		assert is_list(parsed.contact)
+		assert length(parsed.contact) == 2
+		[c1, c2] = parsed.contact
+		assert is_struct(c1, SIP.Uri)
+		assert c1.domain == "192.168.1.1"
+		assert c1.port == 5060
+		assert c2.domain == "10.0.0.1"
+		assert c2.port == 5061
+	end
+
+	test "Multiple Contact header lines are parsed as a list of SIP.Uri" do
+		{code, parsed} = parse_register(
+			"Contact: <sip:alice@192.168.1.1:5060>\r\n" <>
+			"Contact: <sip:alice@10.0.0.1:5061>\r\n"
+		)
+		assert code == :ok
+		assert is_list(parsed.contact)
+		assert length(parsed.contact) == 2
+		[c1, c2] = parsed.contact
+		assert c1.port == 5060
+		assert c2.port == 5061
+	end
+
+	test "Contact with quoted params containing commas is not split" do
+		{code, parsed} = parse_register(
+			"Contact: <sip:alice@192.168.1.1:5060>;methods=\"INVITE, BYE, OPTIONS\"\r\n"
+		)
+		assert code == :ok
+		assert is_struct(parsed.contact, SIP.Uri)
+		assert parsed.contact.domain == "192.168.1.1"
+	end
+
+	test "Multiple contacts round-trip: serialize then re-parse preserves the list" do
+		{code, parsed} = parse_register(
+			"Contact: <sip:alice@192.168.1.1:5060>, <sip:alice@10.0.0.1:5061>\r\n"
+		)
+		assert code == :ok
+		assert is_list(parsed.contact)
+
+		serialized = SIPMsg.serialize(parsed)
+		{code2, reparsed} = SIPMsg.parse(serialized, fn _c, _m, _l, _li -> nil end)
+		assert code2 == :ok
+		assert is_list(reparsed.contact)
+		assert length(reparsed.contact) == 2
+		[c1, c2] = reparsed.contact
+		assert c1.domain == "192.168.1.1"
+		assert c2.domain == "10.0.0.1"
+	end
 
 end

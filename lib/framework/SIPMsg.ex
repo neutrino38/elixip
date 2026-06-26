@@ -18,6 +18,16 @@ defmodule SIPMsg do
 		[ val1 , val2 ]
  	end
 
+	# Contact header: values are SIP.Uri structs, not strings
+	defp concat_multi_header_values(val1, val2) when is_list(val1) and is_struct(val2),
+		do: val1 ++ [val2]
+
+	defp concat_multi_header_values(val1, val2) when is_struct(val1) and is_list(val2),
+		do: [val1] ++ val2
+
+	defp concat_multi_header_values(val1, val2) when is_struct(val1) and is_struct(val2),
+		do: [val1, val2]
+
 	# guard that defines which header is single or multivalued
 
 	defguardp is_single_value(k) when k in [ :from, :to, :callid, :cseq, :useragent, :contenttype ]
@@ -189,9 +199,17 @@ defmodule SIPMsg do
 	end
 
 	defp parse_header_content( :contact, value ) do
-		case SIP.Uri.parse(value) do
-			{ :ok, value } -> { :ok, value }
-			{ errcode, _value } -> { errcode, "Invalid contact URI" }
+		result = Enum.reduce_while(split_contact_list(value), [], fn part, acc ->
+			case SIP.Uri.parse(part) do
+				{ :ok, uri } -> { :cont, [uri | acc] }
+				{ errcode, _ } -> { :halt, { :error, errcode } }
+			end
+		end)
+
+		case result do
+			{ :error, errcode } -> { errcode, "Invalid contact URI" }
+			[ single ] -> { :ok, single }
+			uris -> { :ok, Enum.reverse(uris) }
 		end
 	end
 
@@ -215,6 +233,42 @@ defmodule SIPMsg do
 	defp parse_header_content( _key, value ) do
 		{ :ok, value }
 	end
+
+	# Split a Contact header value on commas, respecting angle brackets and quoted
+	# strings so that parameters like methods="INVITE, BYE" or
+	# +sip.instance="<urn:uuid:...>" are never split.
+	defp split_contact_list(value) do
+		{parts, current, _depth, _in_quote} =
+			Enum.reduce(String.graphemes(value), {[], "", 0, false}, &consume_contact_char/2)
+		final = String.trim(current)
+		all = if final == "", do: parts, else: [final | parts]
+		Enum.reverse(all)
+	end
+
+	# quote toggle — highest priority so "<" inside "..." is not mistaken for an angle bracket
+	defp consume_contact_char("\"", {parts, cur, depth, in_quote}),
+		do: {parts, cur <> "\"", depth, !in_quote}
+
+	# angle bracket open (outside quotes)
+	defp consume_contact_char("<", {parts, cur, depth, false}),
+		do: {parts, cur <> "<", depth + 1, false}
+
+	# angle bracket close (outside quotes, depth > 0)
+	defp consume_contact_char(">", {parts, cur, depth, false}) when depth > 0,
+		do: {parts, cur <> ">", depth - 1, false}
+
+	# comma separator — only when outside angle brackets and outside quotes
+	defp consume_contact_char(",", {parts, cur, 0, false}),
+		do: {[String.trim(cur) | parts], "", 0, false}
+
+	# leading whitespace after a separator (outside angle brackets, current buffer empty)
+	defp consume_contact_char(" ", {parts, "", 0, in_quote}),
+		do: {parts, "", 0, in_quote}
+
+	# everything else — just accumulate
+	defp consume_contact_char(char, {parts, cur, depth, in_quote}),
+		do: {parts, cur <> char, depth, in_quote}
+
 	#Parse empty header
 	defp parse_header(nil, _line_number, dest_map, _parse_error_callback) do
 		{ :end_of_message, dest_map }
@@ -610,10 +664,17 @@ defmodule SIPMsg do
 		end
 
 	# Serialize a contact header header
+	defp serialize_one_header( :contact, contacts ) when is_list(contacts) do
+		Enum.map_join(contacts, "", fn contact ->
+			case SIP.Uri.serialize(contact) do
+				{ :ok, contact_str } -> header_name_to_string(:contact) <> ": " <> contact_str <> "\r\n"
+			end
+		end)
+	end
+
 	defp serialize_one_header( :contact, contact ) do
 		case SIP.Uri.serialize(contact) do
 			{ :ok, contact_str} -> header_name_to_string(:contact) <> ": " <> contact_str <> "\r\n"
-			# _ -> raise "Invalid contact in SIP message"
 		end
 	end
 
