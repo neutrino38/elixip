@@ -122,13 +122,23 @@ defmodule SIP.Scenario.Monitor do
 
   @impl true
   def handle_cast({:report, call_id, scenario, username, state, event, event_type}, st) do
-    update(st, call_id, %{
+    fields = %{
       scenario: to_string(scenario),
-      account: to_string(username),
       state: to_string(state),
       event: to_string(event),
       event_type: event_type
-    })
+    }
+
+    # Only overwrite account when the caller provides a non-empty username;
+    # otherwise preserve a value set earlier by note_account/1 (e.g. UAS scenarios
+    # whose context has no local identity but learned the account after auth).
+    fields =
+      case to_string(username) do
+        "" -> fields
+        u -> Map.put(fields, :account, u)
+      end
+
+    update(st, call_id, fields)
   end
 
   @impl true
