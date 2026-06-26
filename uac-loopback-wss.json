@@ -1,0 +1,8 @@
+{
+  "domain": "example.com",
+  "proxyuri": "sip:127.0.0.1:8443;transport=WSS",
+  "proxyusesrv": false,
+  "accounts": [
+    { "username": "alice", "password": "changeme", "domain": "example.com" }
+  ]
+}

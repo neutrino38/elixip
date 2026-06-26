@@ -102,6 +102,11 @@ defmodule UAS.RegisterExample do
       {:scenario_ctl, :shutdown, _reason} ->
         scenario_aborted("Registrar stopped gracefully")
 
+      # Interrupted because client socket has been interrupted
+      {:dialog_terminated, _dialog_pid, reason}
+        when reason in [ :tcp_closed, :tls_closed, :wss_closed ]->
+          scenario_aborted("Client socket closed")
+
       {:dialog_terminated, _dialog_pid, _reason} ->
         scenario_success("registration ended")
     after
@@ -132,7 +137,7 @@ defmodule UAS.RegisterExample do
       _checked = SIP.Session.Registrar.check_register(req)
 
       contact =
-        case Keyword.get(opts, :contact) do
+        case Keyword.get(opts, :contact) doregistration ended
           nil -> set_contacts_expires(Map.get(req, :contact), expires)
           c -> c
         end

@@ -423,9 +423,8 @@ defmodule Elixipp.CLI do
     end
   end
 
-  # Start the configured listeners. Only UDP is wired in this MVP (it reuses the
-  # bidirectional SIP.Transport.UDP instance); connected transports (TCP/TLS/WSS)
-  # are not implemented yet and are reported as skipped.
+  # Start the configured listeners. UDP, TCP, TLS, and WSS are all wired.
+  # UDP reuses the bidirectional SIP.Transport.UDP instance.
   defp start_listeners(listeners) do
     Enum.map(listeners, fn
       {:udp, addr, port} = l ->
@@ -440,8 +439,17 @@ defmodule Elixipp.CLI do
           {:error, reason} -> {l, {:error, reason}}
         end
 
-      {proto, _addr, _port} = l when proto in [:tls, :wss] ->
-        {l, :not_implemented}
+      {:tls, addr, port} = l ->
+        case SIP.Transport.TLSListener.start({addr, port}) do
+          {:ok, _pid} -> {l, :ok}
+          {:error, reason} -> {l, {:error, reason}}
+        end
+
+      {:wss, addr, port} = l ->
+        case SIP.Transport.WSSListener.start({addr, port}) do
+          {:ok, _pid} -> {l, :ok}
+          {:error, reason} -> {l, {:error, reason}}
+        end
     end)
   end
 
@@ -1106,6 +1114,8 @@ defmodule Elixipp.CLI do
       elixipp -c accounts.json --max-run 0 scenarios/uac_register.exs  # balaye tous les comptes
       elixipp --listen udp:5060 scenarios/uas_register.exs  # serveur registrar UAS (UDP)
       elixipp -l 50 --listen udp:5060 scenarios/uas_register.exs  # serveur, 50 enregistrements max
+      elixipp --listen tls:5061 scenarios/uas_register.exs  # serveur registrar UAS (TLS)
+      elixipp --listen wss:5065 scenarios/uas_register.exs  # serveur registrar UAS (WSS)
 
     OPTIONS
       -m, --monitor      Affiche un tableau live des appels en cours.
@@ -1123,8 +1133,10 @@ defmodule Elixipp.CLI do
                          Les valeurs > 100 sont ignorées (retour au défaut).
       --listen PROTO:PORT  (mode serveur) Écoute les requêtes entrantes sur ce
       --listen PROTO:ADDR:PORT  protocole/port (ADDR optionnel pour fixer l'IP
-                         locale annoncée). Répétable. Protocoles : udp, tcp
-                         (tls|wss à venir). Défaut si absent : udp:5060.
+                         locale annoncée). Répétable. Protocoles : udp, tcp,
+                         tls, wss. TLS et WSS nécessitent un certificat
+                         (tls_certfile / tls_keyfile dans config/runtime.exs).
+                         Défaut si absent : udp:5060.
       --local-port PORT  (mode client) Port UDP local à utiliser pour émettre
                          (défaut 5060). Permet de lancer un UAC sur une machine qui
                          héberge déjà un UAS sur 5060 (test deux-process en local).

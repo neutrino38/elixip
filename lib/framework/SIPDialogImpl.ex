@@ -952,4 +952,15 @@ defmodule SIP.DialogImpl do
       {:noreply, state}
     end
   end
+
+  def handle_info({:wss_client_closed, closed_ip, closed_port}, state = %SIP.DialogImpl{}) do
+    ruri = state.msg.ruri
+    if ruri.tp_module == SIP.Transport.WSS and
+       ruri.destip == closed_ip and ruri.destport == closed_port do
+      if is_pid(state.app), do: send(state.app, {:dialog_terminated, self(), :wss_closed})
+      {:stop, :normal, state}
+    else
+      {:noreply, state}
+    end
+  end
 end

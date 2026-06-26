@@ -1,6 +1,7 @@
 defmodule SIP.Transport.WSS do
   @moduledoc """
-  TLS transport layer for SIP. Client version only for the moment
+  WSS (WebSocket over TLS) transport for SIP — outbound client connections and
+  inbound connections accepted by SIP.Transport.WSSListener.
   """
   alias SIP.NetUtils
   use GenServer
@@ -40,6 +41,20 @@ defmodule SIP.Transport.WSS do
     end
   end
 
+  # Inbound connection — %Socket.Web{} already upgraded; reader not yet started.
+  def init({:inbound, ws_socket, localip, localport, peer_ip, peer_port}) do
+    state = %{
+      t_isreliable: true,
+      upperlayer:   nil,
+      destip:       peer_ip,
+      destport:     peer_port,
+      socket:       ws_socket,
+      localip:      localip,
+      localport:    localport
+    }
+    {:ok, state}
+  end
+
   # Set the upper layer handler for transactions to process
 
   @impl true
@@ -64,7 +79,8 @@ defmodule SIP.Transport.WSS do
   def handle_call({ :sendmsg, msgstr, _destip, _dest_port }, _from, state) do
     try do
       Socket.Web.send!(state.socket, {:text, msgstr})
-      Logger.debug("WSS: Message sent to #{state.destip}:#{state.destport} ---->\r\n" <> msgstr <> "\r\n-----------------")
+      destipstr = if is_tuple(state.destip), do: SIP.NetUtils.ip2string(state.destip), else: state.destip
+      Logger.debug("WSS: Message sent to #{destipstr}:#{state.destport} ---->\r\n" <> msgstr <> "\r\n-----------------")
       { :reply, :ok, state }
       rescue
         err in Socket.Error ->
@@ -75,6 +91,17 @@ defmodule SIP.Transport.WSS do
 
 
 
+  # Activates the WebSocket reader once WSSListener has transferred the connection.
+  # Registers self() as target_pid, spawns the Socket.Web reader process, then
+  # monitors it so that a silent reader exit (e.g. socket closed by the peer without
+  # a WS close frame) propagates to this GenServer via a :DOWN message.
+  @impl true
+  def handle_cast(:activate_socket, state) do
+    ws = Socket.Web.process(state.socket, self()) |> Socket.Web.active(true)
+    Process.monitor(ws.active_pid)
+    {:noreply, %{state | socket: ws}}
+  end
+
   # Handle data reception
   @impl true
   def handle_info({:web, socket, data}, state ) do
@@ -82,12 +109,17 @@ defmodule SIP.Transport.WSS do
     { :noreply, state }
   end
 
-  def handle_info( {:web_closed, _socket}, state ) do
-    Logger.debug([ module: __MODULE__, message: "Cnx disconnected. stopping transport instance" ])
+  def handle_info({:web_closed, _socket}, state) do
+    Logger.debug([module: __MODULE__, message: "WSS connection closed by peer (WS close frame)"])
+    SIP.Dialog.broadcast({:wss_client_closed, state.destip, state.destport})
+    {:stop, :normal, state}
+  end
 
-    # Notify all dialogs to give them a chance to restart the TCP connection
-    SIP.Dialog.broadcast({ :wss_client_closed, state.destip, state.destport })
-    { :stop, state }
+  # The Socket.Web reader process exited (socket closed without WS close frame).
+  def handle_info({:DOWN, _ref, :process, _pid, _reason}, state) do
+    Logger.debug([module: __MODULE__, message: "WSS reader process exited, stopping transport"])
+    SIP.Dialog.broadcast({:wss_client_closed, state.destip, state.destport})
+    {:stop, :normal, state}
   end
 
   @impl true

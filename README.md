@@ -181,8 +181,15 @@ config :elixip2, :tcp_max_connections, 200
 Connections exceeding the limit are dropped at the transport level (TCP RST).
 
 A TLS listener (`SIP.Transport.TLSListener`) is now implemented on the same model as
-TCP. See [TLS_WSS.md](TLS_WSS.md) for certificate setup, runtime
-configuration, and security recommendations. WSS listener is planned for a later iteration.
+TCP. See [docs/tls_listener.md](docs/tls_listener.md) for certificate setup, runtime
+configuration, and security recommendations.
+
+A WSS listener (`SIP.Transport.WSSListener`) is also implemented: it binds a TLS
+server socket, performs the WebSocket HTTP upgrade handshake (RFC 6455), and spawns
+one `SIP.Transport.WSS` instance per accepted connection. Certificates are shared with
+the TLS listener (`:tls_certfile` / `:tls_keyfile`). The connection cap defaults to 100
+and can be overridden with `:wss_max_connections`. See [docs/wss_listener.md](docs/wss_listener.md)
+for details.
 
 Scenario can be parametrized using json files as described above.
 
@@ -227,7 +234,7 @@ elixipp --local-port 5070 --local-addr 127.0.0.1 -c uac-loopback-tcp.json scenar
 
 **TLS loopback:**
 
-TLS requires a certificate and private key on the UAS side. See [TLS_WSS.md](TLS_WSS.md)
+TLS requires a certificate and private key on the UAS side. See [docs/tls_listener.md](docs/tls_listener.md)
 for how to generate or obtain them. The certificate paths can be set globally in
 `config/runtime.exs` or passed via environment variables before launching `elixipp`.
 
@@ -255,8 +262,38 @@ elixipp --local-port 5071 --local-addr 127.0.0.1 -c uac-loopback-tls.json scenar
 
 > The UAC uses `SIP.Transport.TLS` which connects outbound; it does not verify the
 > server certificate by default (suitable for self-signed certs in development).
-> See [TLS_WSS.md](TLS_WSS.md) for enabling mutual TLS or strict cert
+> See [docs/tls_listener.md](docs/tls_listener.md) for enabling mutual TLS or strict cert
 > verification.
+
+**WSS loopback:**
+
+WSS uses the same certificate files as TLS. The UAC must target the server with a
+`sips:` URI or `transport=wss` parameter.
+
+```bash
+# config/runtime.exs (or export before running)
+# config :elixip2, tls_certfile: "certs/certificate.pem", tls_keyfile: "certs/private_key.pem"
+
+# Terminal 1 — the registrar (UAS) on WSS/5065
+elixipp --listen wss:127.0.0.1:5065 scenarios/uas_register.exs
+
+# Terminal 2 — the client (UAC) targeting the UAS over WSS
+elixipp --local-port 5075 --local-addr 127.0.0.1 -c uac-loopback-wss.json scenarios/uac_register.exs
+```
+
+`uac-loopback-wss.json` points the UAC at the WSS listener:
+
+```json
+{
+  "domain": "example.com",
+  "proxyuri": "sip:127.0.0.1:5065;transport=wss",
+  "proxyusesrv": false,
+  "accounts": [ { "username": "alice", "password": "changeme", "domain": "example.com" } ]
+}
+```
+
+See [docs/wss_listener.md](docs/wss_listener.md) for the full design, certificate
+requirements, and browser/WebRTC client interoperability notes.
 
 `uac-loopback.json` points the client at the UAS:
 
@@ -282,7 +319,7 @@ elixipp [OPTIONS] <scenario.exs | ModuleName>
 | `--max-run N` | Stop after `N` executions in total. | unlimited (`1` when neither `--limit` nor `--max-run` is set) |
 | `--rate N` | Number of calls started per second. Each new call creation is spaced by `1000 / N` ms. Values greater than `100` are ignored and fall back to the default. | `10` |
 | `-c FILE`, `--config FILE` | JSON file parameterizing the scenario (header + N accounts). Overrides the scenario `config` block. See [Paramétrage par fichier JSON](#paramétrage-par-fichier-json-externe). | none |
-| `--listen PROTO:PORT` | (server mode) Listen for inbound requests on this protocol/port. Repeatable. `PROTO:ADDR:PORT` also pins the advertised local IP. Protocols: `udp`, `tcp`, `tls` (wss planned). See [TLS_WSS.md](TLS_WSS.md) for TLS certificate setup. | `udp:5060` |
+| `--listen PROTO:PORT` | (server mode) Listen for inbound requests on this protocol/port. Repeatable. `PROTO:ADDR:PORT` also pins the advertised local IP. Protocols: `udp`, `tcp`, `tls`, `wss`. TLS and WSS share the same certificate files; see [docs/tls_listener.md](docs/tls_listener.md) and [docs/wss_listener.md](docs/wss_listener.md) for setup. | `udp:5060` |
 | `--local-port PORT` | (client mode) Local UDP port used to send (lets a UAC run on a host already serving a UAS on 5060). | `5060` |
 | `--local-addr ADDR` | (client mode) Local IP advertised in Via/Contact. | first local IPv4 |
 | `--log-file PATH` | Log file path. | `elixipp.log` |

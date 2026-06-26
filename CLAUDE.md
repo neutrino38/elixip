@@ -57,9 +57,15 @@ The `dsl` layer builds on `framework` (a scenario `use SIP.Scenario` pulls in
 tool drives the DSL engine; the DSL itself runs fine without the tool.
 
 ### Transport Layer (`SIP.Transport.*`)
-- `SIP.Transport.UDP`, `TCP`, `TLS`, `WSS` — protocol-specific transports
-- `SIP.Transport.Depack` — reassembles SIP messages from stream-based transports (TCP/TLS/WSS)
+- `SIP.Transport.UDP`, `TCP`, `TLS`, `WSS` — protocol-specific transports (outbound + inbound)
+- `SIP.Transport.TCPListener`, `TLSListener`, `WSSListener` — server-side listeners; each binds a port,
+  accepts connections, and spawns one transport instance per connection
+- `SIP.Transport.Depack` — reassembles SIP messages from stream-based transports (TCP/TLS); **not used
+  by WSS** — WebSocket frames are already message-delimited
 - `SIP.Transport.Selector` — picks the appropriate transport for an outbound message
+- WSS activation: inbound WSS connections use `Socket.Web.active/2` which spawns a separate reader
+  process delivering `{:web, ws, data}` frames; the WSS GenServer monitors that reader so a silent
+  disconnect stops the GenServer and decrements the listener connection count
 
 ### Message Layer (`SIPMsg`, `SIP.Msg.Ops`, `SIP.MsgTemplate`)
 - `SIPMsg` — parses and serializes SIP messages
