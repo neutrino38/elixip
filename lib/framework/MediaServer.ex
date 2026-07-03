@@ -37,7 +37,18 @@ defmodule MediaServer do
           # Server
           | :server_disconnected
 
-  @type ms_event :: {:ms_event, ref :: pid(), event()}
+  @typedoc """
+  Opaque handle identifying a media resource.
+
+  - `pid()` — used by `MediaServer.Mockup` (each resource is a GenServer)
+  - `{conn_pid, kind, ref}` — used by adapter implementations that manage all
+    sub-resources inside the connection GenServer (e.g. `MediaServer.Mendooze`)
+  """
+  @type resource_ref ::
+          pid()
+          | {conn :: pid(), kind :: :player | :recorder | :echo, ref :: reference()}
+
+  @type ms_event :: {:ms_event, resource_ref(), event()}
 
   @type conn_opts :: [
     ice_servers: [String.t()],
@@ -150,11 +161,11 @@ defmodule MediaServer do
                 conn :: pid(),
                 file_path :: String.t(),
                 MediaServer.player_opts()
-              ) :: {:ok, player :: pid()} | {:error, term()}
+              ) :: {:ok, player :: MediaServer.resource_ref()} | {:error, term()}
 
-    @callback start_player(player :: pid()) :: :ok | {:error, term()}
-    @callback pause_player(player :: pid()) :: :ok | {:error, term()}
-    @callback stop_player(player :: pid()) :: :ok
+    @callback start_player(player :: MediaServer.resource_ref()) :: :ok | {:error, term()}
+    @callback pause_player(player :: MediaServer.resource_ref()) :: :ok | {:error, term()}
+    @callback stop_player(player :: MediaServer.resource_ref()) :: :ok
 
     # ── Recorder ────────────────────────────────────────────────────────────
 
@@ -167,10 +178,10 @@ defmodule MediaServer do
                 file_path :: String.t(),
                 duration_ms :: non_neg_integer(),
                 MediaServer.recorder_opts()
-              ) :: {:ok, recorder :: pid()} | {:error, term()}
+              ) :: {:ok, recorder :: MediaServer.resource_ref()} | {:error, term()}
 
-    @callback start_recorder(recorder :: pid()) :: :ok | {:error, term()}
-    @callback stop_recorder(recorder :: pid()) :: :ok
+    @callback start_recorder(recorder :: MediaServer.resource_ref()) :: :ok | {:error, term()}
+    @callback stop_recorder(recorder :: MediaServer.resource_ref()) :: :ok
 
     # ── Echo ────────────────────────────────────────────────────────────────
 
@@ -179,8 +190,8 @@ defmodule MediaServer do
     the remote peer is sent straight back to it. Emits `:echo_started`.
     """
     @callback create_echo(conn :: pid()) ::
-                {:ok, echo :: pid()} | {:error, term()}
+                {:ok, echo :: MediaServer.resource_ref()} | {:error, term()}
 
-    @callback stop_echo(echo :: pid()) :: :ok
+    @callback stop_echo(echo :: MediaServer.resource_ref()) :: :ok
   end
 end
