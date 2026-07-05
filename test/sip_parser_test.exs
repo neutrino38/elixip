@@ -63,6 +63,36 @@ defmodule SIP.Test.Uri do
 		assert Map.get(parsed_uri.params, "expires") == "3600"
 	end
 
+	test "Quoted param value containing ';' is not split (no spurious transport param)" do
+		{ code, parsed_uri } =
+			SIP.Uri.parse("<sip:33970262546@172.22.0.3:50378>;expires=600;received=\"sip:37.71.250.86:41912;transport=TLS\"")
+
+		assert code == :ok
+		assert Map.get(parsed_uri.params, "expires") == "600"
+		assert Map.get(parsed_uri.params, "received") == "\"sip:37.71.250.86:41912;transport=TLS\""
+		# the ;transport=TLS inside the quotes must NOT become a URI param —
+		# it would make get_transport/1 route this contact over TLS
+		refute Map.has_key?(parsed_uri.params, "transport")
+	end
+
+	test "Quoted param value containing '=' is kept intact" do
+		{ code, parsed_uri } =
+			SIP.Uri.parse("<sip:bob@10.0.0.1>;+sip.instance=\"<urn:uuid:aa=bb==>\";expires=60")
+
+		assert code == :ok
+		assert Map.get(parsed_uri.params, "expires") == "60"
+		assert Map.get(parsed_uri.params, "+sip.instance") == "\"<urn:uuid:aa=bb==>\""
+	end
+
+	test "Quoted param on a bare URI form is not split" do
+		{ code, parsed_uri } =
+			SIP.Uri.parse("sip:alice@example.com;methods=\"INVITE;BYE\";tag=abcd")
+
+		assert code == :ok
+		assert Map.get(parsed_uri.params, "methods") == "\"INVITE;BYE\""
+		assert Map.get(parsed_uri.params, "tag") == "abcd"
+	end
+
 	test "Parse an URI with sips scheme and check port 5061" do
 		{ code, parsed_uri } = SIP.Uri.parse("sips:9999@visioassistance.net")
 		assert code == :ok

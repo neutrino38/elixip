@@ -17,7 +17,9 @@ defmodule SIP.Uri do
 
 	defp parse_uri_parameters(param_list) do
 		params = Enum.map( param_list, fn pv ->
-				case String.split(pv, "=") do
+				# Split on the first '=' only: quoted values may contain '='
+				# (e.g. base64 keys) and must stay intact
+				case String.split(pv, "=", parts: 2) do
 					[ p, v ] -> { p, v }
 					[ p ]  -> { p, true }
 				end
@@ -26,6 +28,25 @@ defmodule SIP.Uri do
 		# Convert list of couples [ {p1, v1}, {p2, v2}, ... ]
 		# into a map
 		Map.new(params)
+	end
+
+	# Split a parameter string on ";" respecting double-quoted values, so that
+	# params like received="sip:1.2.3.4:5060;transport=TLS" are never split in
+	# the middle. Empty fragments are dropped.
+	defp split_params(param_str) do
+		{ parts, cur, _in_quote } =
+			Enum.reduce(String.graphemes(param_str), { [], "", false }, fn ch, { parts, cur, in_quote } ->
+				cond do
+					ch == "\"" -> { parts, cur <> "\"", !in_quote }
+					ch == ";" and not in_quote -> { [ cur | parts ], "", false }
+					true -> { parts, cur <> ch, in_quote }
+				end
+			end)
+
+		[ cur | parts ]
+		|> Enum.reverse()
+		|> Enum.map(&String.trim/1)
+		|> Enum.reject(&(&1 == ""))
 	end
 
 	# parse domain, user@domain, user@domain:port
@@ -75,7 +96,7 @@ defmodule SIP.Uri do
 		case String.split(uri_string, proto, parts: 2) do
 			[ "", part2 ] ->
 				# Form sip:user@domain;param=value
-				parts = String.split( part2, ";" )
+				parts = split_params( part2 )
 
 				# parse core URI
 				case parse_core_uri( proto, Enum.at(parts, 0) ) do
@@ -104,13 +125,7 @@ defmodule SIP.Uri do
 				case SIP.Uri.parse( proto <> core_uri_str ) do
 					{ :ok, core_uri } ->
 						# Parse params
-						param_list = case String.split( String.trim_leading(params_str,";"), ";" ) do
-							[ "" ] -> []
-							[ "" | tail ] -> tail
-							[ p ] -> [ p ]
-							plist -> plist
-						end
-						params = parse_uri_parameters( param_list )
+						params = params_str |> split_params() |> parse_uri_parameters()
 
 						#Add params to URI and fix proto field
 						uri = %SIP.Uri{ core_uri | params: params, proto: get_transport(core_uri) }
