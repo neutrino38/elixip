@@ -62,9 +62,46 @@ defmodule SIP.Test.Register do
            "no contact binding with expires=#{expected} in #{inspect(contact)}"
   end
 
+  # The :test_registrar process is a named singleton shared by every test
+  # file that registers TestRegistrar (TCP/TLS/WSS listener tests do): it
+  # survives across tests and keeps counting. Stop any leftover instance so
+  # this test counts only its own REGISTER.
+  defp reset_test_registrar() do
+    case Process.whereis(:test_registrar) do
+      nil ->
+        :ok
+
+      pid ->
+        send(pid, {:stop, self()})
+
+        receive do
+          count when is_integer(count) -> :ok
+        after
+          1_000 -> :ok
+        end
+
+        # wait for the name to be released before going on
+        wait_disappears(:test_registrar, 1_000)
+    end
+  end
+
+  defp wait_disappears(_procname, timeout) when timeout <= 0 do
+    assert(false, "process did not stop on time")
+  end
+
+  defp wait_disappears(procname, timeout) do
+    if Process.whereis(procname) != nil do
+      Process.sleep(10)
+      wait_disappears(procname, timeout - 10)
+    end
+  end
+
   test "Inbound REGISTER" do
     # Define module as registrar module
     :ok = SIP.Session.ConfigRegistry.set_registration_processing_module(TestRegistrar)
+
+    # Discard any registration count accumulated by other test files
+    reset_test_registrar()
 
     # Load a REGISTER message from a file
     { code, msg } = File.read("test/SIP-REGISTER-LVP.txt")

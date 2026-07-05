@@ -10,11 +10,7 @@ defmodule TestRegistrar do
     expires = case SIP.Uri.get_uri_param(aor, "expires") do
       { :ok, value } ->
         value = String.to_integer(value)
-        if value > 300 or value < 60 do
-          300
-        else
-          value
-        end
+        value = if value > 300 or value < 60, do: 300, else: value
         Integer.to_string(value)
 
       _ -> "300"
