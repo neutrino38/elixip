@@ -285,16 +285,11 @@ defmodule SIP.DialogImpl do
   """
   def arm_expiration_timer(state = %SIP.DialogImpl{}, req) when req.method == :REGISTER do
     {expire, timeratom} =
-      case SIP.Uri.get_uri_param(req.contact, "expires") do
-        {:no_such_param, nil} ->
+      case max_contact_expires(req.contact) do
+        exp when exp in [nil, 0] ->
           {1, :unregister}
 
-        {:no_such_param, "0"} ->
-          {1, :unregister}
-
-        {:ok, value} ->
-          exp = String.to_integer(value)
-
+        exp ->
           if state.direction == :inbound do
             {exp, :registerexpire}
           else
@@ -313,6 +308,25 @@ defmodule SIP.DialogImpl do
   # Default, do nothing
   def arm_expiration_timer(state = %SIP.DialogImpl{}, _req) do
     state
+  end
+
+  # A REGISTER may carry several Contact headers (the parser then yields a
+  # list of URIs). The dialog lifetime follows the longest-lived binding.
+  # Returns nil when no contact carries an expires parameter.
+  defp max_contact_expires(contact) do
+    contact
+    |> List.wrap()
+    |> Enum.reduce(nil, fn c, acc ->
+      case SIP.Uri.get_uri_param(c, "expires") do
+        {:ok, value} -> max(acc || 0, String.to_integer(value))
+        _ -> acc
+      end
+    end)
+  end
+
+  # A 3xx response may carry several Contact targets; make them loggable.
+  defp contacts_to_string(contact) do
+    contact |> List.wrap() |> Enum.map_join(", ", &to_string/1)
   end
 
   @doc "Cancels the dialog expiration timer"
@@ -719,7 +733,7 @@ defmodule SIP.DialogImpl do
     Logger.debug(
       dialogpid: "#{inspect(self())}",
       module: __MODULE__,
-      message: "Redirected to #{rsp.contact}"
+      message: "Redirected to #{contacts_to_string(rsp.contact)}"
     )
 
     %{state | state: :redirected}
@@ -760,7 +774,7 @@ defmodule SIP.DialogImpl do
       Logger.debug(
         dialogpid: "#{inspect(self())}",
         module: __MODULE__,
-        message: "Closing request redirected to #{rsp.contact}"
+        message: "Closing request redirected to #{contacts_to_string(rsp.contact)}"
       )
 
       %{state | state: :redirected, closing_transaction: nil}
@@ -912,9 +926,10 @@ defmodule SIP.DialogImpl do
           module == SIP.ICT
 
         :REGISTER ->
-          case SIP.Uri.get_uri_param(req.contact, "expires") do
+          # unregister (all contact bindings carry expires=0)
+          case max_contact_expires(req.contact) do
             # true if this is a client transaction
-            {:ok, "0"} -> module == SIP.ICT
+            0 -> module == SIP.ICT
             _ -> false
           end
 

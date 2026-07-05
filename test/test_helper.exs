@@ -4,7 +4,9 @@ defmodule TestRegistrar do
   @behaviour SIP.Session.Registrar
 
   defp build_aor(reg) do
-    aor = reg.contact
+    # A REGISTER may carry several contacts; this dummy registrar only
+    # grants the first binding.
+    aor = SIP.Uri.first_contact(reg.contact)
     expires = case SIP.Uri.get_uri_param(aor, "expires") do
       { :ok, value } ->
         value = String.to_integer(value)

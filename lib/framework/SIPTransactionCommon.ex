@@ -181,7 +181,9 @@ defmodule SIP.Transac.Common do
             # Arm timer D in any case (transport unreliable or not).
             # That will limit the time
             # when the application layer can ACK the transaction.
-            Map.put(state, :remotecontact, sip_resp.contact)
+            # remotecontact becomes the ACK RURI — a 2xx to INVITE must carry
+            # exactly one Contact; guard against peers that send several.
+            Map.put(state, :remotecontact, SIP.Uri.first_contact(sip_resp.contact))
             |> Map.put(:route, routeset)
             |> cancel_timer_B()
             |> schedule_timer_D()

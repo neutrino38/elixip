@@ -49,6 +49,19 @@ defmodule SIP.Test.Register do
     assert(false, "registrar process did not launch on time")
   end
 
+  # The 200 OK to a REGISTER lists ALL active bindings of the account
+  # (RFC 3261 10.3) — ours plus any left by other transports or previous
+  # runs. Assert that one of them was granted the expiration we requested.
+  defp assert_a_binding_expires(contact, expected) do
+    expires_list =
+      contact
+      |> List.wrap()
+      |> Enum.map(&SIP.Uri.get_uri_param(&1, "expires"))
+
+    assert {:ok, expected} in expires_list,
+           "no contact binding with expires=#{expected} in #{inspect(contact)}"
+  end
+
   test "Inbound REGISTER" do
     # Define module as registrar module
     :ok = SIP.Session.ConfigRegistry.set_registration_processing_module(TestRegistrar)
@@ -133,7 +146,7 @@ defmodule SIP.Test.Register do
     ^sip_ctx = receive do
       { 200, rsp, _trans_pid, _dialog_pid } ->
         # IO.puts(inspect(rsp.contact.params))
-        assert SIP.Uri.get_uri_param(rsp.contact, "expires") == {:ok, "600"}
+        assert_a_binding_expires(rsp.contact, "600")
         sip_ctx
 
       { resp_code, _rsp, _trans_pid, _dialog_pid } when is_integer(resp_code) ->
@@ -215,7 +228,7 @@ defmodule SIP.Test.Register do
     ^sip_ctx = receive do
       { 200, rsp, _trans_pid, _dialog_pid } ->
         # IO.puts(inspect(rsp.contact.params))
-        assert SIP.Uri.get_uri_param(rsp.contact, "expires") == {:ok, "600"}
+        assert_a_binding_expires(rsp.contact, "600")
         sip_ctx
 
       { resp_code, _rsp, _trans_pid, _dialog_pid } when is_integer(resp_code) ->
@@ -260,7 +273,7 @@ defmodule SIP.Test.Register do
     ^sip_ctx = receive do
       { 200, rsp, _trans_pid, _dialog_pid } ->
         # IO.puts(inspect(rsp.contact.params))
-        assert SIP.Uri.get_uri_param(rsp.contact, "expires") == {:ok, "600"}
+        assert_a_binding_expires(rsp.contact, "600")
         sip_ctx
 
       { resp_code, _rsp, _trans_pid, _dialog_pid } when is_integer(resp_code) ->
@@ -351,7 +364,7 @@ defmodule SIP.Test.Register do
     ^sip_ctx = receive do
       { 200, rsp, _trans_pid, _dialog_pid } ->
         # IO.puts(inspect(rsp.contact.params))
-        assert SIP.Uri.get_uri_param(rsp.contact, "expires") == {:ok, "600"}
+        assert_a_binding_expires(rsp.contact, "600")
         sip_ctx
 
       { resp_code, _rsp, _trans_pid, _dialog_pid } when is_integer(resp_code) ->

@@ -184,6 +184,18 @@ defmodule SIP.Uri do
 		end
 	end
 
+	@doc """
+	Return the first URI of a Contact header value.
+
+	Since multiple contacts are supported, a parsed Contact header is either a
+	single `%SIP.Uri{}` or a list of them. Use this when a single URI is needed
+	(e.g. the remote target of a dialog); returns nil when no contact is present.
+	"""
+	@spec first_contact(%SIP.Uri{} | [%SIP.Uri{}] | nil) :: %SIP.Uri{} | nil
+	def first_contact([first | _]), do: first
+	def first_contact(sip_uri = %SIP.Uri{}), do: sip_uri
+	def first_contact(_), do: nil
+
 	@doc "Set an URI parameter"
 	def set_uri_param(sip_uri = %SIP.Uri{}, param, value) do
 		new_params = Map.put(sip_uri.params, param, value)
