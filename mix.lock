@@ -1,11 +1,14 @@
 %{
   "bunch": {:hex, :bunch, "1.6.1", "5393d827a64d5f846092703441ea50e65bc09f37fd8e320878f13e63d410aec7", [:mix], [], "hexpm", "286cc3add551628b30605efbe2fca4e38cc1bea89bcd0a1a7226920b3364fe4a"},
   "certifi": {:hex, :certifi, "2.17.0", "835748414307e15e05b17d0e518190228ce648b08d569a5cc93a85a40f3e5c9b", [:rebar3], [], "hexpm", "8122798a17f0293c80daada25d0f81c7f4d708c73fef782c7c9b1950e26e4d21"},
+  "decimal": {:hex, :decimal, "2.4.1", "6c0fbede12fb122ba685e9ab41c6a40c129e322b3aa192f9e072e61f3a6ffaf2", [:mix], [], "hexpm", "7e618897933a8455f19a727d7c5e50a2c071a544b700e5e724298ecb4340187f"},
   "elixir_uuid": {:hex, :elixir_uuid, "1.2.1", "dce506597acb7e6b0daeaff52ff6a9043f5919a4c3315abb4143f0b00378c097", [:mix], [], "hexpm", "f7eba2ea6c3555cea09706492716b0d87397b88946e6380898c2889d68585752"},
+  "erlsom": {:hex, :erlsom, "1.5.2", "3e47c53a199136fb4d20d5479edb7c9229f31624534c062633951c8d14dcd276", [:rebar3], [], "hexpm", "4e765cc677fb30509f7b628ff2914e124cf4dcc0fac1c0a62ee4dcee24215b5d"},
   "ex_sdp": {:hex, :ex_sdp, "1.1.1", "1a7b049491e5ec02dad9251c53d960835dc5631321ae978ec331831f3e4f6d5f", [:mix], [{:bunch, "~> 1.3", [hex: :bunch, repo: "hexpm", optional: false]}, {:elixir_uuid, "~> 1.2", [hex: :elixir_uuid, repo: "hexpm", optional: false]}], "hexpm", "1b13a72ac9c5c695b8824dbdffc671be8cbb4c0d1ccb4ff76a04a6826759f233"},
   "jason": {:hex, :jason, "1.4.4", "b9226785a9aa77b6857ca22832cffa5d5011a667207eb2a0ad56adb5db443b8a", [:mix], [{:decimal, "~> 1.0 or ~> 2.0", [hex: :decimal, repo: "hexpm", optional: true]}], "hexpm", "c5eb0cab91f094599f94d55bc63409236a8ec69a21a67814529e8d5f6cc90b3b"},
   "logger_file_backend": {:hex, :logger_file_backend, "0.0.14", "774bb661f1c3fed51b624d2859180c01e386eb1273dc22de4f4a155ef749a602", [:mix], [], "hexpm", "071354a18196468f3904ef09413af20971d55164267427f6257b52cfba03f9e6"},
   "owl": {:hex, :owl, "0.13.1", "1ec4a5dea170465f0e90c502c203079224516bc0cbd599281c8667b3c6ef8848", [:mix], [{:ucwidth, "~> 0.2", [hex: :ucwidth, repo: "hexpm", optional: true]}], "hexpm", "351e768af8f2edc575cdaab1a5a2f6d6381be591758a026c701c703145508a0c"},
   "socket": {:hex, :socket, "0.3.13", "98a2ab20ce17f95fb512c5cadddba32b57273e0d2dba2d2e5f976c5969d0c632", [:mix], [], "hexpm", "f82ea9833ef49dde272e6568ab8aac657a636acb4cf44a7de8a935acb8957c2e"},
   "socket2": {:git, "https://github.com/neutrino38/elixir-socket.git", "97f4b66528b4f5caaa6bcbb02a9c1cdcfa79f1d2", [branch: "feat/active-ws"]},
+  "xmlrpc": {:hex, :xmlrpc, "1.4.3", "6ddf3353c601b5e3f70ef9a02fb8959bb31391648c0177a67bcb8d6cd4ab4ae1", [:mix], [{:decimal, "~> 2.0", [hex: :decimal, repo: "hexpm", optional: false]}, {:erlsom, "~> 1.4", [hex: :erlsom, repo: "hexpm", optional: false]}], "hexpm", "43ca129384d422d9934823db6d6e9965fddb3828e91028dbe1c62327cc925387"},
 }

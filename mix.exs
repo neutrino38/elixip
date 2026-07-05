@@ -20,7 +20,7 @@ defmodule SIPParser.MixProject do
   # Run "mix help compile.app" to learn about applications.
   def application do
     [
-      extra_applications: [:logger]
+      extra_applications: [:logger, :inets]
     ]
   end
 
@@ -32,6 +32,8 @@ defmodule SIPParser.MixProject do
       # Fork adding active mode for WebSocket (delivers {:web, socket, data} to the owner)
       {:socket2, github: "neutrino38/elixir-socket", branch: "feat/active-ws"},
       {:ex_sdp, "~> 1.1.1"},
+      # XML-RPC encode/decode for the Mendooze JSR309 control interface
+      {:xmlrpc, "~> 1.4"},
       # Pure-Elixir terminal UI (tables + live screen) for the elixipp --monitor view.
       # No C NIF (its only dep, ucwidth, is optional), so it bundles cleanly in the escript.
       {:owl, "~> 0.12"}
