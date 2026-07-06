@@ -45,7 +45,7 @@ defmodule SIP.Scenario.ExternalConfig do
 
   # Whitelisted JSON keys. Conversion string -> atom is restricted to these, so
   # a malformed file cannot exhaust the atom table.
-  @header_keys ~w(domain proxyuri proxyusesrv optionkeepaliveperiod)
+  @header_keys ~w(domain proxyuri proxyusesrv optionkeepaliveperiod mediaserver)
   @account_keys ~w(username password authusername displayname domain)
 
   @doc """
@@ -137,6 +137,22 @@ defmodule SIP.Scenario.ExternalConfig do
 
   defp header_pair!("optionkeepaliveperiod", value) when is_integer(value),
     do: {:optionkeepaliveperiod, value}
+
+  # {"mediaserver": {"module": "mendooze", "url": "http://10.0.0.1:8080"}}
+  # Module names are whitelisted — a config file cannot inject arbitrary atoms.
+  defp header_pair!("mediaserver", %{"module" => module} = value)
+       when module in ["mockup", "mendooze"] do
+    cfg = [module: String.to_existing_atom(module)]
+
+    cfg =
+      case Map.get(value, "url") do
+        url when is_binary(url) -> Keyword.put(cfg, :url, url)
+        nil -> cfg
+        other -> raise ArgumentError, "URL mediaserver invalide : #{inspect(other)}"
+      end
+
+    {:mediaserver, cfg}
+  end
 
   defp header_pair!(key, value),
     do:

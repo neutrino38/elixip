@@ -584,13 +584,24 @@ Bottom-up, each phase compiles, is tested, and is committable on its own.
 - Verify `MediaServer.Mockup` still satisfies the behaviour (no change
   expected beyond the type union).
 
-### Phase 8 — Integration with the DSL and a real server — TODO
-- Wire adapter selection into `SIP.Session.Media` / `SIP.Context`
-  (config-driven: `MediaServer.Mockup` vs `MediaServer.Mendooze`).
-- End-to-end scenario against a real Mendooze instance: UAC call with player
-  (playback), then UAS echo scenario. Gate with an env var
-  (`MENDOOZE_URL`) so `mix test` stays green without a server; run as a
-  dedicated `mix scenario` when the server is available.
+### Phase 8 — Integration with the DSL and a real server — DONE
+- Adapter selection is config-driven: `config :elixip2, :mediaserver,
+  module: :mockup | :mendooze | Module, url: "..."`. A new zero-arg
+  `media_connect/0` DSL macro reads it via
+  `SIP.Session.Media.use_mediaserver/1`; the two-arg `media_connect/2` still
+  works for explicit selection. The `:mediaserver` key is a global scenario
+  `config` key (routed to the app env by the runner) and an external-JSON
+  header key (`"mediaserver": {"module": ..., "url": ...}`, module
+  whitelisted). `MediaServer.Mendooze.connect/1` accepts a URL string
+  (`http://host:port`, default port 8080) as well as `{host, port}`. The
+  built-in `UAC.Invite` scenario now uses `media_connect/0`.
+- **Tests**: config-driven selection (Mockup + Mendooze against the fake
+  server), external-JSON `mediaserver` header parsing. Real-server E2E in
+  `test/mendooze_integration_test.exs` (offer/answer loopback between two
+  endpoints, player lifecycle, echo) gated by `@describetag skip:` on
+  `MENDOOZE_URL` so `mix test` stays green without a server. Run against a
+  real Mendooze with:
+  `MENDOOZE_URL=http://host:8080 mix test test/mendooze_integration_test.exs`.
 
 ### Deferred (explicitly out of scope for now)
 - WebRTC media over WS (`ws://:9090/jsr309`), `GetMediaCandidates`/

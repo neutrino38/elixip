@@ -267,6 +267,16 @@ defmodule SIP.Session do
           end
         end
 
+        # Config-driven variant: the adapter and its URL come from the
+        # :mediaserver application config (scenario `config` block, external
+        # JSON header, or config.exs) instead of being hardcoded here.
+        defmacro media_connect() do
+          quote do
+            SIP.Scenario.Monitor.note_command(:media, "media_connect")
+            var!(sip_ctx) = SIP.Session.Media.use_mediaserver(var!(sip_ctx))
+          end
+        end
+
         defmacro media_start_echo() do
           quote do
             SIP.Scenario.Monitor.note_command(:media, "media_start_echo")
@@ -312,6 +322,29 @@ defmodule SIP.Session do
         end
       end
     end
+
+    @doc """
+    Connect to the media server designated by the `:mediaserver` application
+    config (`config :elixip2, :mediaserver, module: ..., url: ...`).
+
+    The `:module` value is either a module or one of the `:mockup` /
+    `:mendooze` shorthands usable from scenario `config` blocks and external
+    JSON files. Defaults to `MediaServer.Mockup`.
+    """
+    @spec use_mediaserver(%SIP.Context{}) :: %SIP.Context{}
+    def use_mediaserver(sip_ctx = %SIP.Context{}) do
+      cfg = Application.get_env(:elixip2, :mediaserver, []) |> normalize_ms_config()
+      module = Keyword.get(cfg, :module, :mockup) |> resolve_ms_module()
+      url = Keyword.get(cfg, :url, "sip:localhost:8080")
+      use_mediaserver(sip_ctx, module, url)
+    end
+
+    defp normalize_ms_config(cfg) when is_map(cfg), do: Map.to_list(cfg)
+    defp normalize_ms_config(cfg) when is_list(cfg), do: cfg
+
+    defp resolve_ms_module(:mockup), do: MediaServer.Mockup
+    defp resolve_ms_module(:mendooze), do: MediaServer.Mendooze
+    defp resolve_ms_module(module) when is_atom(module), do: module
 
     def use_mediaserver(sip_ctx = %SIP.Context{}, module, url)
         when is_atom(module) and is_binary(url) do

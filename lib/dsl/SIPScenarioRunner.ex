@@ -246,7 +246,7 @@ defmodule SIP.Scenario.Runner do
   # This is the single place that applies them, whether they come from the
   # scenario `config` block or from an external JSON header — so scenarios no
   # longer need to `Application.put_env` by hand in their initial_state.
-  @global_keys [:proxyuri, :proxyusesrv, :optionkeepaliveperiod]
+  @global_keys [:proxyuri, :proxyusesrv, :optionkeepaliveperiod, :mediaserver]
 
   defp put_config(ctx, key, value) when key in @global_keys do
     apply_global_key(key, value)
@@ -273,6 +273,14 @@ defmodule SIP.Scenario.Runner do
       {err, _} -> raise "invalid proxyuri #{inspect(value)}: #{inspect(err)}"
     end
   end
+
+  # :mediaserver selects the media adapter used by media_connect/0:
+  # [module: :mockup | :mendooze | Module, url: "..."] (map accepted too).
+  defp apply_global_key(:mediaserver, value) when is_list(value) or is_map(value),
+    do: Application.put_env(:elixip2, :mediaserver, value)
+
+  defp apply_global_key(:mediaserver, value),
+    do: raise("invalid mediaserver config #{inspect(value)}: expected [module: ..., url: ...]")
 
   defp apply_global_key(key, value), do: Application.put_env(:elixip2, key, value)
 

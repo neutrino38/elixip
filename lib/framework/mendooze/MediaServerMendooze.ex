@@ -32,12 +32,41 @@ defmodule MediaServer.Mendooze do
   XML-RPC interface. Returns `{:ok, server_pid}` or `{:error, reason}`.
   """
   @impl MediaServer.Behaviour
-  @spec connect(MediaServer.server_addr()) :: {:ok, pid()} | {:error, term()}
+  @spec connect(MediaServer.server_addr() | String.t()) :: {:ok, pid()} | {:error, term()}
   def connect({host, port}) do
     case GenServer.start(__MODULE__, "http://#{host}:#{port}") do
       {:ok, pid} -> {:ok, pid}
       {:error, {:connect_failed, reason}} -> {:error, reason}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # URL form used by scenarios (media_connect) and the MENDOOZE_URL env var:
+  # "http://host:port", "http://host" or "host:port"; default port 8080.
+  def connect(url) when is_binary(url) do
+    case parse_url(url) do
+      {:ok, host, port} -> connect({host, port})
+      {:error, _} = err -> err
+    end
+  end
+
+  @default_http_port 8080
+
+  defp parse_url(url) do
+    hostport = String.replace_prefix(url, "http://", "") |> String.trim_trailing("/")
+
+    case String.split(hostport, ":", parts: 2) do
+      [host, port_str] ->
+        case Integer.parse(port_str) do
+          {port, ""} when port in 1..65_535 -> {:ok, host, port}
+          _ -> {:error, {:bad_url, url}}
+        end
+
+      [host] when host != "" ->
+        {:ok, host, @default_http_port}
+
+      _ ->
+        {:error, {:bad_url, url}}
     end
   end
 

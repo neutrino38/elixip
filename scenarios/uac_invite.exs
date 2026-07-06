@@ -9,8 +9,6 @@ defmodule UAC.InviteExample do
   # use SIP.Session.CallUAC and use SIP.Session.Media.
   use SIP.Scenario
 
-  @mediaservermod MediaServer.Mockup
-
   # Standard placeholder identity — override at run time with `elixipp -c FILE`.
   @username "1000"
   @authusername "1000"
@@ -38,7 +36,10 @@ defmodule UAC.InviteExample do
 
   # -------------------------------------------------------------------------------
   state initial_state do
-    media_connect(@mediaservermod, "sip:localhost:8080")
+    # Config-driven: the media adapter (Mockup / Mendooze) and its URL come
+    # from `config :elixip2, :mediaserver` — override per run with a `-c FILE`
+    # JSON header `"mediaserver"` key. Defaults to the Mockup (see config.exs).
+    media_connect()
     goto(next)
   end
 

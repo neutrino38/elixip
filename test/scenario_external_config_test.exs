@@ -21,6 +21,34 @@ defmodule SIP.Test.ExternalConfig do
     assert %SIP.Uri{domain: "proxy.example.com", port: 5060} = header[:proxyuri]
   end
 
+  test "parses a mediaserver header selecting the mendooze adapter" do
+    %ExternalConfig{header: header} =
+      ExternalConfig.parse!(%{
+        "mediaserver" => %{"module" => "mendooze", "url" => "http://10.0.0.1:8080"},
+        "accounts" => [%{"username" => "1000", "password" => "pw", "domain" => "d.com"}]
+      })
+
+    assert header[:mediaserver][:module] == :mendooze
+    assert header[:mediaserver][:url] == "http://10.0.0.1:8080"
+  end
+
+  test "mediaserver header url is optional and module is whitelisted" do
+    %ExternalConfig{header: header} =
+      ExternalConfig.parse!(%{
+        "mediaserver" => %{"module" => "mockup"},
+        "accounts" => [%{"username" => "1000", "password" => "pw", "domain" => "d.com"}]
+      })
+
+    assert header[:mediaserver] == [module: :mockup]
+
+    assert_raise ArgumentError, fn ->
+      ExternalConfig.parse!(%{
+        "mediaserver" => %{"module" => "evil"},
+        "accounts" => [%{"username" => "1000", "password" => "pw", "domain" => "d.com"}]
+      })
+    end
+  end
+
   test "header is optional (only accounts required)" do
     %ExternalConfig{header: header, accounts: [acct]} =
       ExternalConfig.parse!(%{
