@@ -74,6 +74,7 @@ Le compte est choisi sur le **compteur monotone `total_started`** (et non sur
   "proxyuri": "sip:sip.djanah.com:5060",
   "proxyusesrv": false,
   "optionkeepaliveperiod": 5,
+  "mediaserver": { "module": "mendooze", "url": "http://10.0.0.1:8080" },
   "accounts": [
     { "username": "33970262546", "password": "TestKam1" },
     { "username": "33970262547", "password": "TestKam2", "domain": "autre.net" }
@@ -88,6 +89,10 @@ Règles :
   l'entête) ; `authusername` optionnel (⇐ `username`) ; `displayname` optionnel.
 - `domain` doit être résolu pour chaque compte (entête OU compte), sinon erreur.
 - Toute clé hors whitelist (entête ou compte) → **erreur bloquante**.
+- `mediaserver` (optionnel) sélectionne l'adaptateur média utilisé par
+  `media_connect/0` : objet `{ "module": "mockup" | "mendooze", "url": "..." }`.
+  `module` est **whitelisté** (un fichier ne peut pas injecter d'atome
+  arbitraire) ; `url` est optionnel (défaut de l'adaptateur).
 
 ## 5. Modèle de fusion (3 couches, précédence croissante)
 
@@ -115,7 +120,8 @@ Le `Runner` route chaque clé (qu'elle vienne du `config` block OU du JSON) selo
 une table unique :
 
 ```
-GLOBAL  (Application.put_env(:elixip2, …)) : :proxyuri, :proxyusesrv, :optionkeepaliveperiod
+GLOBAL  (Application.put_env(:elixip2, …)) : :proxyuri, :proxyusesrv,
+                                             :optionkeepaliveperiod, :mediaserver
 CONTEXTE (champs %SIP.Context{})           : :username, :authusername, :displayname,
                                              :domain, :algorithm, :debug, :passwd
 APPDATA  (reste)                           : toute autre clé connue routée en appdata

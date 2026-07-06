@@ -108,9 +108,12 @@ tool drives the DSL engine; the DSL itself runs fine without the tool.
 
 ### Media Layer (`MediaServer.*`)
 
-Elixip drives a **medooze** Node.js media server via an IPC channel (TCP/JSON).
-The interface is defined as a behaviour in `MediaServer.Behaviour` so the real
-implementation and `MediaServer.Mockup` are interchangeable in tests.
+Elixip drives a media server through the `MediaServer.Behaviour` behaviour, so
+implementations are interchangeable (selected via config — see Configuration):
+- `MediaServer.Mendooze` — the real adapter, driving the **Mendooze MCU** over
+  its JSR309 **XML-RPC** control interface (`lib/framework/mendooze/`; design
+  in `docs/mendooze_interface.md`). Events arrive over a chunked HTTP long-poll.
+- `MediaServer.Mockup` — in-process stub for call-flow tests.
 
 **Conceptual mapping — medooze → Elixir:**
 ```
@@ -169,6 +172,34 @@ Runtime config lives in `config/config.exs`:
 - Logger writes warnings to console and info+ to `elixip.log`
 - `:useragent` — the User-Agent header value (`"Elixipp-0.2"`)
 - `:optionkeepaliveperiod` — OPTIONS keep-alive interval in seconds (15)
+
+### Media server selection
+
+The media adapter used by the config-driven `media_connect/0` DSL macro is
+selected by the `:mediaserver` key:
+
+```elixir
+config :elixip2, :mediaserver,
+  module: :mockup,          # :mockup | :mendooze | a MediaServer.Behaviour module
+  url: "sip:localhost:8080" # passed to the adapter's connect/1
+```
+
+`:mockup` → `MediaServer.Mockup`, `:mendooze` → `MediaServer.Mendooze`. This
+key is overridable **per scenario** (a `config` block key) and **per run** (an
+external-JSON header key `"mediaserver": {"module": ..., "url": ...}`); the
+runner routes it to the application env. Scenarios can still hardcode an
+adapter with the two-arg `media_connect(module, url)`.
+
+`MediaServer.Mendooze` accepts a `"http://host:port"` URL (default port 8080)
+as well as `{host, port}`, and has its own tuning block:
+
+```elixir
+config :elixip2, MediaServer.Mendooze,
+  xmlrpc_timeout_ms: 10_000,   # per-call XML-RPC timeout
+  rtp_timeout_ms: 10_000,      # EndpointStartRTPTimeout inactivity watchdog
+  poller_retry_ms: 1_000,      # event stream reconnect delay
+  poller_max_failures: 5       # consecutive failures before :server_disconnected
+```
 
 ## Language & Comments Convention
 

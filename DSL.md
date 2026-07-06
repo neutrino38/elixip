@@ -15,8 +15,6 @@ defmodule UAC.Invite do
   # use SIP.Scenario pulls in the state-machine DSL together with
   # use SIP.Session.CallUAC and use SIP.Session.Media.
   use SIP.Scenario
-
-  @mediaservermod MediaServer.Mockup
   @domain "mydomain.com"
   @callee "sip:testcall@#{@domain}"
 
@@ -30,7 +28,7 @@ defmodule UAC.Invite do
          passwd:       "xxxx"
 # -------------------------------------------------------------------------------
   state initial_state do
-    media_connect(@mediaservermod, "sip:localhost:8080")
+    media_connect()   # adapter chosen by config (see "media macros" below)
     goto next
   end
 # -------------------------------------------------------------------------------
@@ -201,6 +199,27 @@ Those events are formatted as follow:
 ```Elixir
 { :ms_event, <pid of mediaserver>, <event>}
 ```
+
+## media macros
+
+`use SIP.Scenario` pulls in `SIP.Session.Media`, which exposes the media macros:
+
+| Macro | Effect |
+|-------|--------|
+| `media_connect()` | Connect the media server chosen by config (recommended) |
+| `media_connect(module, url)` | Connect an explicit adapter (e.g. `MediaServer.Mockup`) |
+| `media_play(file, opts \\ [])` | Play a media file to the peer |
+| `media_record(file, duration_ms, opts \\ [])` | Record the peer's media to a file |
+| `media_start_echo()` | Loop the peer's media back to it |
+| `media_stop()` | Stop the running player / recorder / echo |
+| `media_cleanup_ressources()` | Release media resources at end of call |
+
+The zero-arg `media_connect/0` reads `config :elixip2, :mediaserver`
+(`module: :mockup | :mendooze | Module, url: ...`). The adapter can therefore
+be switched between the in-process **Mockup** and the real **Mendooze** MCU
+without editing the scenario — set it in `config/config.exs`, in the scenario's
+own `config` block, or in an external-JSON header (`"mediaserver"` key). See the
+Configuration section of `CLAUDE.md` and `docs/mendooze_interface.md`.
 
 ## transitions: the goto macro, scenario_success(), scenario_failure()
 
