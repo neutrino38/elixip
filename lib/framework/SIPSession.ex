@@ -381,12 +381,18 @@ defmodule SIP.Session do
         case SIP.Context.appdata_get(sip_ctx, :mediapeerconnectionid) do
           nil ->
             # Create a new peer connection and store it in the session context
-            {:ok, cnx} =
-              apply(sip_ctx.mediaservermodule, :create_peer_connection, [
-                sip_ctx.mediaserverpid,
-                self(),
-                [webrtc_support: webrtc_support]
-              ])
+            cnx =
+              case apply(sip_ctx.mediaservermodule, :create_peer_connection, [
+                     sip_ctx.mediaserverpid,
+                     self(),
+                     [webrtc_support: webrtc_support]
+                   ]) do
+                {:ok, cnx} ->
+                  cnx
+
+                {:error, reason} ->
+                  raise "Media server failed to create peer connection: #{inspect(reason)}"
+              end
 
             {SIP.Context.appdata_set(sip_ctx, :mediapeerconnectionid, cnx), cnx}
 
@@ -395,7 +401,15 @@ defmodule SIP.Session do
             {sip_ctx, cnx}
         end
 
-      {:ok, offer} = apply(sip_ctx.mediaservermodule, :get_local_offer, [cnx])
+      offer =
+        case apply(sip_ctx.mediaservermodule, :get_local_offer, [cnx]) do
+          {:ok, offer} ->
+            offer
+
+          {:error, reason} ->
+            raise "Media server failed to build the SDP offer: #{inspect(reason)}"
+        end
+
       {sip_ctx, offer}
     end
 

@@ -160,6 +160,12 @@ defmodule MediaServer.Mendooze do
 
   @impl true
   def init(base_url) do
+    # The synchronous XML-RPC calls run on httpc's default profile. Raise its
+    # per-host session pool so many concurrent peer connections (each issuing
+    # several RPCs) don't serialize over the default of 2 connections. The
+    # event-stream long-poll lives on its own profile (see EventPoller).
+    :httpc.set_options(max_sessions: 100)
+
     case XmlRpc.call(base_url, "EventQueueCreate") do
       {:ok, [queue_id | rest]} when is_integer(queue_id) and queue_id >= 0 ->
         source_path = source_path(queue_id, rest)

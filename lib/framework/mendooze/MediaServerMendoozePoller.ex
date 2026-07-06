@@ -32,6 +32,13 @@ defmodule MediaServer.Mendooze.EventPoller do
   @default_max_failures 5
   @default_stall_ms 90_000
 
+  # Dedicated :httpc profile for the long-poll event stream. The stream request
+  # occupies its connection for the whole session, so it MUST NOT share the
+  # default profile with the synchronous XML-RPC calls: httpc serializes
+  # requests per profile/host and a busy long-poll would block every RPC
+  # (MediaSessionCreate, EndpointCreate, …) until they time out.
+  @httpc_profile :mendooze_event_poller
+
   @type event ::
           {:player_end_of_file, session_tag :: String.t(), player_tag :: String.t()}
           | {:player_started, session_tag :: String.t(), player_tag :: String.t()}
@@ -49,6 +56,8 @@ defmodule MediaServer.Mendooze.EventPoller do
 
   @doc false
   def run(opts) do
+    ensure_profile()
+
     cfg = %{
       url:
         String.to_charlist(Keyword.fetch!(opts, :base_url) <> Keyword.fetch!(opts, :source_path)),
@@ -59,6 +68,18 @@ defmodule MediaServer.Mendooze.EventPoller do
     }
 
     connect_loop(cfg, 0)
+  end
+
+  # Start the dedicated profile once (idempotent across pollers) and give it a
+  # generous session pool so pollers to several media servers never queue.
+  defp ensure_profile() do
+    case :inets.start(:httpc, [{:profile, @httpc_profile}]) do
+      {:ok, _pid} ->
+        :httpc.set_options([max_sessions: 100, max_keep_alive_length: 0], @httpc_profile)
+
+      {:error, {:already_started, _pid}} ->
+        :ok
+    end
   end
 
   # ── Connection loop ─────────────────────────────────────────────────────────
@@ -79,7 +100,7 @@ defmodule MediaServer.Mendooze.EventPoller do
   defp connect_loop(cfg, 0), do: attempt(cfg, 0)
 
   defp attempt(cfg, failures) do
-    case :httpc.request(:get, {cfg.url, []}, [], sync: false, stream: :self) do
+    case :httpc.request(:get, {cfg.url, []}, [], [sync: false, stream: :self], @httpc_profile) do
       {:ok, ref} ->
         case stream_loop(ref, cfg, "", false) do
           # the connection had been established: new failure sequence
@@ -120,7 +141,7 @@ defmodule MediaServer.Mendooze.EventPoller do
       cfg.stall_ms ->
         # no event nor keep-alive for several server cycles: dead connection
         Logger.warning("Mendooze.EventPoller: stream stalled, reconnecting")
-        :httpc.cancel_request(ref)
+        :httpc.cancel_request(ref, @httpc_profile)
         {:disconnected, connected}
     end
   end
