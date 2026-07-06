@@ -55,6 +55,23 @@ defmodule MediaServer.Mendooze.Conn do
     :exit, _ -> :ok
   end
 
+  # Sub-resources — handles are {conn_pid, kind, ref} tuples
+  def create_player(conn, file_path, opts),
+    do: GenServer.call(conn, {:create_player, file_path, opts}, @call_timeout)
+
+  def player_cmd({conn, :player, ref}, cmd),
+    do: GenServer.call(conn, {:player_cmd, cmd, ref}, @call_timeout)
+
+  def create_recorder(conn, file_path, duration_ms, opts),
+    do: GenServer.call(conn, {:create_recorder, file_path, duration_ms, opts}, @call_timeout)
+
+  def recorder_cmd({conn, :recorder, ref}, cmd),
+    do: GenServer.call(conn, {:recorder_cmd, cmd, ref}, @call_timeout)
+
+  def create_echo(conn), do: GenServer.call(conn, :create_echo, @call_timeout)
+
+  def stop_echo({conn, :echo, ref}), do: GenServer.call(conn, {:stop_echo, ref}, @call_timeout)
+
   # ── Initialisation ──────────────────────────────────────────────────────────
 
   @impl true
@@ -78,7 +95,8 @@ defmodule MediaServer.Mendooze.Conn do
       local_crypto: :none,
       local_ice: nil,
       status: :init,
-      # sub-resources (phase 6)
+      # sub-resources: ref => %{...}; tags "p-<n>"/"r-<n>" route server events
+      res_seq: 0,
       players: %{},
       recorders: %{},
       echo: nil
@@ -183,6 +201,104 @@ defmodule MediaServer.Mendooze.Conn do
     {:stop, :normal, :ok, state}
   end
 
+  # ── Player (server doc §6.3) ────────────────────────────────────────────────
+
+  def handle_call({:create_player, file_path, opts}, _from, state) do
+    tag = "p-#{state.res_seq}"
+    state = %{state | res_seq: state.res_seq + 1}
+
+    with {:ok, player_id} <- create(state, "PlayerCreate", [state.sess_id, tag]),
+         {:ok, _} <-
+           cleanup_on_error(
+             state,
+             player_id,
+             rpc(state, "PlayerOpen", [state.sess_id, player_id, file_path])
+           ),
+         :ok <- cleanup_on_error(state, player_id, attach_player_all(state, player_id)),
+         :ok <- maybe_seek(state, player_id, Keyword.get(opts, :start_time)) do
+      ref = make_ref()
+
+      players =
+        Map.put(state.players, ref, %{player_id: player_id, tag: tag, file: file_path, opts: opts})
+
+      {:reply, {:ok, {self(), :player, ref}}, %{state | players: players}}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:player_cmd, cmd, ref}, _from, state) do
+    case Map.get(state.players, ref) do
+      nil ->
+        {:reply, {:error, :no_such_player}, state}
+
+      player ->
+        do_player_cmd(cmd, ref, player, state)
+    end
+  end
+
+  # ── Recorder (server doc §6.4) ──────────────────────────────────────────────
+
+  def handle_call({:create_recorder, file_path, duration_ms, opts}, _from, state) do
+    warn_unsupported_recorder_opts(opts, state)
+    tag = "r-#{state.res_seq}"
+    state = %{state | res_seq: state.res_seq + 1}
+
+    with {:ok, recorder_id} <- create(state, "RecorderCreate", [state.sess_id, tag]),
+         :ok <- attach_recorder_all(state, recorder_id) do
+      ref = make_ref()
+
+      recorders =
+        Map.put(state.recorders, ref, %{
+          recorder_id: recorder_id,
+          tag: tag,
+          file: file_path,
+          duration_ms: duration_ms,
+          opts: opts,
+          stopping: false
+        })
+
+      {:reply, {:ok, {self(), :recorder, ref}}, %{state | recorders: recorders}}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:recorder_cmd, cmd, ref}, _from, state) do
+    case Map.get(state.recorders, ref) do
+      nil ->
+        {:reply, {:error, :no_such_recorder}, state}
+
+      recorder ->
+        do_recorder_cmd(cmd, ref, recorder, state)
+    end
+  end
+
+  # ── Echo (server doc §4.16: the endpoint is attached to itself) ────────────
+
+  def handle_call(:create_echo, _from, %{echo: nil} = state) do
+    case attach_endpoint_to_itself(state) do
+      :ok ->
+        ref = make_ref()
+        send(state.event_sink, {:ms_event, {self(), :echo, ref}, :echo_started})
+        {:reply, {:ok, {self(), :echo, ref}}, %{state | echo: ref}}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call(:create_echo, _from, state),
+    do: {:reply, {:error, :echo_already_started}, state}
+
+  def handle_call({:stop_echo, ref}, _from, %{echo: ref} = state) do
+    detach_all(state)
+    {:reply, :ok, %{state | echo: nil}}
+  end
+
+  def handle_call({:stop_echo, _ref}, _from, state),
+    do: {:reply, {:error, :no_such_echo}, state}
+
   # ── Server events routed by MediaServer.Mendooze ────────────────────────────
 
   @impl true
@@ -202,10 +318,73 @@ defmodule MediaServer.Mendooze.Conn do
     {:noreply, state}
   end
 
+  defp handle_server_event({:player_started, _tag, player_tag}, state) do
+    with_player(state, player_tag, fn ref, _player ->
+      send(state.event_sink, {:ms_event, {self(), :player, ref}, :player_started})
+      {:noreply, state}
+    end)
+  end
+
+  defp handle_server_event({:player_end_of_file, _tag, player_tag}, state) do
+    with_player(state, player_tag, fn ref, player ->
+      if Keyword.get(player.opts, :loop, false) do
+        # loop: rewind and replay without surfacing the end of file
+        rpc(state, "PlayerSeek", [state.sess_id, player.player_id, 0])
+        rpc(state, "PlayerPlay", [state.sess_id, player.player_id])
+        {:noreply, state}
+      else
+        send(state.event_sink, {:ms_event, {self(), :player, ref}, :player_ended})
+        {:noreply, state}
+      end
+    end)
+  end
+
+  defp handle_server_event({:recorder_started, _tag, recorder_tag}, state) do
+    with_recorder(state, recorder_tag, fn ref, _recorder ->
+      send(state.event_sink, {:ms_event, {self(), :recorder, ref}, :recorder_started})
+      {:noreply, state}
+    end)
+  end
+
+  defp handle_server_event({:recorder_stopped, _tag, recorder_tag, reason}, state) do
+    with_recorder(state, recorder_tag, fn ref, recorder ->
+      send(state.event_sink, {:ms_event, {self(), :recorder, ref}, {:recorder_stopped, reason}})
+
+      # a stop requested by stop_recorder/1 completes here
+      state =
+        if recorder.stopping,
+          do: %{state | recorders: Map.delete(state.recorders, ref)},
+          else: state
+
+      {:noreply, state}
+    end)
+  end
+
   defp handle_server_event(event, state) do
-    # player / recorder events are handled by the sub-resource layer (phase 6)
     Logger.debug("Mendooze.Conn #{state.sess_tag}: unhandled event #{inspect(event)}")
     {:noreply, state}
+  end
+
+  defp with_player(state, tag, fun) do
+    case Enum.find(state.players, fn {_ref, p} -> p.tag == tag end) do
+      {ref, player} ->
+        fun.(ref, player)
+
+      nil ->
+        Logger.debug("Mendooze.Conn #{state.sess_tag}: event for unknown player #{tag}")
+        {:noreply, state}
+    end
+  end
+
+  defp with_recorder(state, tag, fun) do
+    case Enum.find(state.recorders, fn {_ref, r} -> r.tag == tag end) do
+      {ref, recorder} ->
+        fun.(ref, recorder)
+
+      nil ->
+        Logger.debug("Mendooze.Conn #{state.sess_tag}: event for unknown recorder #{tag}")
+        {:noreply, state}
+    end
   end
 
   @impl true
@@ -415,6 +594,122 @@ defmodule MediaServer.Mendooze.Conn do
     case state.local_crypto do
       {:dtls, hash, fingerprint} -> {:dtls, setup, hash, fingerprint}
       :none -> :none
+    end
+  end
+
+  # ── Player / recorder / echo helpers ────────────────────────────────────────
+
+  # :start / :pause rely on server events (PlayerStartedEvent) — no synthesis.
+  defp do_player_cmd(:start, _ref, player, state) do
+    case rpc(state, "PlayerPlay", [state.sess_id, player.player_id]) do
+      {:ok, _} -> {:reply, :ok, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp do_player_cmd(:pause, _ref, player, state) do
+    # PlayerStop pauses; the file position is kept until PlayerPlay/PlayerSeek
+    case rpc(state, "PlayerStop", [state.sess_id, player.player_id]) do
+      {:ok, _} -> {:reply, :ok, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp do_player_cmd(:stop, ref, player, state) do
+    rpc(state, "PlayerStop", [state.sess_id, player.player_id])
+    detach_all(state)
+    rpc(state, "PlayerClose", [state.sess_id, player.player_id])
+    rpc(state, "PlayerDelete", [state.sess_id, player.player_id])
+    {:reply, :ok, %{state | players: Map.delete(state.players, ref)}}
+  end
+
+  defp do_recorder_cmd(:start, _ref, recorder, state) do
+    # maxDuration is enforced server-side (RecorderStoppedEvent reason=1)
+    case rpc(state, "RecorderRecord", [
+           state.sess_id,
+           recorder.recorder_id,
+           recorder.file,
+           recorder.duration_ms
+         ]) do
+      {:ok, _} -> {:reply, :ok, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp do_recorder_cmd(:stop, ref, recorder, state) do
+    rpc(state, "RecorderStop", [state.sess_id, recorder.recorder_id])
+
+    Enum.each(state.medias, fn media ->
+      rpc(state, "RecorderDettach", [state.sess_id, recorder.recorder_id, @media_int[media]])
+    end)
+
+    rpc(state, "RecorderDelete", [state.sess_id, recorder.recorder_id])
+
+    # keep the entry until the server RecorderStoppedEvent(reason=0) is
+    # routed to the event sink, then drop it (see handle_server_event)
+    recorders = Map.put(state.recorders, ref, %{recorder | stopping: true})
+    {:reply, :ok, %{state | recorders: recorders}}
+  end
+
+  defp attach_player_all(state, player_id) do
+    each_media_rpc(state, fn m ->
+      {"EndpointAttachToPlayer", [state.sess_id, state.endpoint_id, player_id, m]}
+    end)
+  end
+
+  defp attach_recorder_all(state, recorder_id) do
+    each_media_rpc(state, fn m ->
+      {"RecorderAttachToEndpoint", [state.sess_id, recorder_id, state.endpoint_id, m]}
+    end)
+  end
+
+  defp attach_endpoint_to_itself(state) do
+    each_media_rpc(state, fn m ->
+      {"EndpointAttachToEndpoint", [state.sess_id, state.endpoint_id, state.endpoint_id, m]}
+    end)
+  end
+
+  defp detach_all(state) do
+    Enum.each(state.medias, fn media ->
+      rpc(state, "EndpointDettach", [state.sess_id, state.endpoint_id, @media_int[media]])
+    end)
+  end
+
+  defp each_media_rpc(state, call_fun) do
+    Enum.reduce_while(state.medias, :ok, fn media, :ok ->
+      {method, params} = call_fun.(@media_int[media])
+
+      case rpc(state, method, params) do
+        {:ok, _} -> {:cont, :ok}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp maybe_seek(_state, _player_id, nil), do: :ok
+
+  defp maybe_seek(state, player_id, start_time_ms) do
+    case rpc(state, "PlayerSeek", [state.sess_id, player_id, start_time_ms]) do
+      {:ok, _} -> :ok
+      {:error, _} = err -> err
+    end
+  end
+
+  # Free a half-created player when a later setup step fails.
+  defp cleanup_on_error(_state, _player_id, {:ok, _} = ok), do: ok
+  defp cleanup_on_error(_state, _player_id, :ok), do: :ok
+
+  defp cleanup_on_error(state, player_id, {:error, _} = err) do
+    rpc(state, "PlayerDelete", [state.sess_id, player_id])
+    err
+  end
+
+  defp warn_unsupported_recorder_opts(opts, state) do
+    for opt <- [:stop_on_silence, :stop_on_dtmf], Keyword.get(opts, opt, false) do
+      Logger.warning(
+        "Mendooze.Conn #{state.sess_tag}: recorder option #{opt} is not implemented " <>
+          "by the media server yet and will be ignored"
+      )
     end
   end
 

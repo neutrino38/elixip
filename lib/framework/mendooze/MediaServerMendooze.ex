@@ -9,16 +9,18 @@ defmodule MediaServer.Mendooze do
   session tag carried by every event selects the destination
   `MediaServer.Mendooze.Conn` process from the registry.
 
-  The remaining `MediaServer.Behaviour` callbacks (peer connections,
-  players, recorders, echo) are implemented by `MediaServer.Mendooze.Conn`;
-  the `@behaviour` declaration lands once the full callback set exists.
+  This module is the `MediaServer.Behaviour` facade: peer connections and
+  their sub-resources (player, recorder, echo) are implemented by
+  `MediaServer.Mendooze.Conn` and delegated to from here.
 
   Configuration (`config :elixip2, MediaServer.Mendooze`):
   `:xmlrpc_timeout_ms` (see `XmlRpc`), `:poller_retry_ms`,
-  `:poller_max_failures` (see `EventPoller`).
+  `:poller_max_failures` (see `EventPoller`), `:rtp_timeout_ms`
+  (RTP inactivity watchdog, see `Conn`).
   """
 
   use GenServer
+  @behaviour MediaServer.Behaviour
   require Logger
 
   alias MediaServer.Mendooze.{Conn, EventPoller, XmlRpc}
@@ -29,6 +31,7 @@ defmodule MediaServer.Mendooze do
   Connect to a Mendooze media server: `{host, http_port}` of the JSR309
   XML-RPC interface. Returns `{:ok, server_pid}` or `{:error, reason}`.
   """
+  @impl MediaServer.Behaviour
   @spec connect(MediaServer.server_addr()) :: {:ok, pid()} | {:error, term()}
   def connect({host, port}) do
     case GenServer.start(__MODULE__, "http://#{host}:#{port}") do
@@ -43,6 +46,7 @@ defmodule MediaServer.Mendooze do
   any peer connection still registered is closed first; without it, callers
   are expected to have closed their connections already (teardown order).
   """
+  @impl MediaServer.Behaviour
   @spec disconnect(pid(), keyword()) :: :ok
   def disconnect(server, opts \\ []) do
     GenServer.call(server, {:disconnect, Keyword.get(opts, :force, false)})
@@ -51,20 +55,63 @@ defmodule MediaServer.Mendooze do
     :exit, _ -> :ok
   end
 
-  # ── Peer connections (MediaServer.Behaviour subset) ────────────────────────
+  # ── Peer connections ────────────────────────────────────────────────────────
 
+  @impl MediaServer.Behaviour
   @spec create_peer_connection(pid(), pid(), MediaServer.conn_opts()) ::
           {:ok, pid()} | {:error, term()}
   def create_peer_connection(server, event_sink, opts \\ []),
     do: Conn.start(server, event_sink, opts)
 
-  defdelegate get_local_offer(conn), to: Conn
-  defdelegate set_remote_answer(conn, sdp), to: Conn
-  defdelegate set_remote_offer(conn, sdp), to: Conn
-  defdelegate add_remote_candidate(conn, candidate), to: Conn
+  @impl MediaServer.Behaviour
+  def get_local_offer(conn), do: Conn.get_local_offer(conn)
 
+  @impl MediaServer.Behaviour
+  def set_remote_answer(conn, sdp), do: Conn.set_remote_answer(conn, sdp)
+
+  @impl MediaServer.Behaviour
+  def set_remote_offer(conn, sdp), do: Conn.set_remote_offer(conn, sdp)
+
+  @impl MediaServer.Behaviour
+  def add_remote_candidate(conn, candidate), do: Conn.add_remote_candidate(conn, candidate)
+
+  @impl MediaServer.Behaviour
   @spec close_peer_connection(pid()) :: :ok
   def close_peer_connection(conn), do: Conn.close(conn)
+
+  # ── Players ─────────────────────────────────────────────────────────────────
+
+  @impl MediaServer.Behaviour
+  def create_player(conn, file_path, opts \\ []), do: Conn.create_player(conn, file_path, opts)
+
+  @impl MediaServer.Behaviour
+  def start_player(player), do: Conn.player_cmd(player, :start)
+
+  @impl MediaServer.Behaviour
+  def pause_player(player), do: Conn.player_cmd(player, :pause)
+
+  @impl MediaServer.Behaviour
+  def stop_player(player), do: Conn.player_cmd(player, :stop)
+
+  # ── Recorders ───────────────────────────────────────────────────────────────
+
+  @impl MediaServer.Behaviour
+  def create_recorder(conn, file_path, duration_ms, opts \\ []),
+    do: Conn.create_recorder(conn, file_path, duration_ms, opts)
+
+  @impl MediaServer.Behaviour
+  def start_recorder(recorder), do: Conn.recorder_cmd(recorder, :start)
+
+  @impl MediaServer.Behaviour
+  def stop_recorder(recorder), do: Conn.recorder_cmd(recorder, :stop)
+
+  # ── Echo ────────────────────────────────────────────────────────────────────
+
+  @impl MediaServer.Behaviour
+  def create_echo(conn), do: Conn.create_echo(conn)
+
+  @impl MediaServer.Behaviour
+  def stop_echo(echo), do: Conn.stop_echo(echo)
 
   # ── Internal API for Conn processes ─────────────────────────────────────────
 
