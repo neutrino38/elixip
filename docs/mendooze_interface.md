@@ -533,14 +533,14 @@ before returning the error (server doc §9.6 — no leaked sessions).
 
 Bottom-up, each phase compiles, is tested, and is committable on its own.
 
-### Phase 1 — XML-RPC client (`XmlRpc` module)
+### Phase 1 — XML-RPC client (`XmlRpc` module) — DONE (2865b4a)
 - Add `{:xmlrpc, "~> 1.4"}`; wrap `:httpc` POST to `/jsr309`.
 - Envelope decoding: `returnCode`/`returnVal`/`errorMsg`, negative-id check,
   UTF-8, configurable timeout.
 - **Tests**: unit tests against a minimal `:gen_tcp`/Plug loopback returning
   canned XML — success, applicative error, HTTP error, timeout.
 
-### Phase 2 — SDP helpers (`Sdp` module)
+### Phase 2 — SDP helpers (`Sdp` module) — DONE (9039b50)
 - Codec tables (§8) and `rtp_map` construction (offer/answer, asymmetric).
 - Offer/answer build + parse with `ExSDP`: `c=`/`m=` from
   `GetMediaCandidates` output (`rtp://ip:port`), `a=fingerprint`, `a=setup`,
@@ -548,7 +548,7 @@ Bottom-up, each phase compiles, is tested, and is committable on its own.
 - **Tests**: pure round-trip tests offer→parse, answer→parse, audio-only,
   audio+video, RTP-clear / SDES / DTLS variants.
 
-### Phase 3 — Event poller
+### Phase 3 — Event poller — DONE
 - Chunked GET decode loop: split `<methodResponse>` frames, skip `\r\n`
   keep-alives, decode event tuples (types 1–6, unknown types logged).
 - Reconnect policy (§5.3); clean stop on queue deletion.
@@ -556,14 +556,14 @@ Bottom-up, each phase compiles, is tested, and is committable on its own.
   function on binaries → easy unit tests); reconnect logic with a fake HTTP
   server.
 
-### Phase 4 — Server GenServer (`MediaServer.Mendooze`)
+### Phase 4 — Server GenServer (`MediaServer.Mendooze`) — DONE
 - `connect/1` (EventQueueCreate + poller start, `sourceName` fallback),
   `disconnect/2`, `sess_tag → conn_pid` registry, event routing to Conns,
   `:server_disconnected` broadcast.
 - **Tests**: against a scripted fake JSR309 HTTP server (one module reused by
   all integration-style tests).
 
-### Phase 5 — Conn GenServer, audio-only RTP-clear first
+### Phase 5 — Conn GenServer — DONE
 - `create_peer_connection/3`, `get_local_offer/1`, `set_remote_answer/2`,
   `set_remote_offer/2`, `close_peer_connection/1` — plain RTP, one media.
   Includes `EndpointSetRTPProperties`, watchdog arming, `:ice_connected`
@@ -573,18 +573,18 @@ Bottom-up, each phase compiles, is tested, and is committable on its own.
 - **Tests**: fake-server driven, asserting exact RPC sequences/order per §9
   of the server doc (order of crypto vs start calls, watchdog last).
 
-### Phase 6 — Player / Recorder / Echo
+### Phase 6 — Player / Recorder / Echo — DONE
 - §4.9–4.17 including tag-based event routing (types 1, 3, 4, 5) and
   `maxDuration` on `RecorderRecord`; `:media_timeout` on event 6.
 - **Tests**: fake-server events pushed through the poller → assert
   `event_sink` deliveries.
 
-### Phase 7 — Behaviour update + Mockup parity
+### Phase 7 — Behaviour update + Mockup parity — DONE
 - Add `:media_timeout` to `MediaServer.event/0`; adjust docs.
 - Verify `MediaServer.Mockup` still satisfies the behaviour (no change
   expected beyond the type union).
 
-### Phase 8 — Integration with the DSL and a real server
+### Phase 8 — Integration with the DSL and a real server — TODO
 - Wire adapter selection into `SIP.Session.Media` / `SIP.Context`
   (config-driven: `MediaServer.Mockup` vs `MediaServer.Mendooze`).
 - End-to-end scenario against a real Mendooze instance: UAC call with player
