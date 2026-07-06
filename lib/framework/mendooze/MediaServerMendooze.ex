@@ -21,7 +21,7 @@ defmodule MediaServer.Mendooze do
   use GenServer
   require Logger
 
-  alias MediaServer.Mendooze.{EventPoller, XmlRpc}
+  alias MediaServer.Mendooze.{Conn, EventPoller, XmlRpc}
 
   # ── MediaServer.Behaviour subset ────────────────────────────────────────────
 
@@ -50,6 +50,21 @@ defmodule MediaServer.Mendooze do
     # already stopped — disconnect is idempotent
     :exit, _ -> :ok
   end
+
+  # ── Peer connections (MediaServer.Behaviour subset) ────────────────────────
+
+  @spec create_peer_connection(pid(), pid(), MediaServer.conn_opts()) ::
+          {:ok, pid()} | {:error, term()}
+  def create_peer_connection(server, event_sink, opts \\ []),
+    do: Conn.start(server, event_sink, opts)
+
+  defdelegate get_local_offer(conn), to: Conn
+  defdelegate set_remote_answer(conn, sdp), to: Conn
+  defdelegate set_remote_offer(conn, sdp), to: Conn
+  defdelegate add_remote_candidate(conn, candidate), to: Conn
+
+  @spec close_peer_connection(pid()) :: :ok
+  def close_peer_connection(conn), do: Conn.close(conn)
 
   # ── Internal API for Conn processes ─────────────────────────────────────────
 

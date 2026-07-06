@@ -18,11 +18,14 @@ defmodule MediaServer do
   the remote SDP (answer or offer) has been negotiated and connectivity checks
   succeed.
   """
+  # PeerConnection
   @type event ::
-          # PeerConnection
           :ice_connected
           | :ice_failed
           | {:ice_candidate, candidate :: String.t()}
+          # RTP inactivity watchdog fired: the peer stopped sending media
+          # (emitted by adapters with media-loss detection, e.g. Mendooze)
+          | :media_timeout
           | :closed
           # Player
           | :player_started
@@ -51,27 +54,27 @@ defmodule MediaServer do
   @type ms_event :: {:ms_event, resource_ref(), event()}
 
   @type conn_opts :: [
-    ice_servers: [String.t()],
-    video_codec: String.t(),
-    audio_codec: String.t(),
-    media: media_kind(),
-    video_bandwidth: pos_integer(),
-    audio_bandwidth: pos_integer(),
-    webrtc_support: :yes | :no | :if_offered | :no_avp
-  ]
+          ice_servers: [String.t()],
+          video_codec: String.t(),
+          audio_codec: String.t(),
+          media: media_kind(),
+          video_bandwidth: pos_integer(),
+          audio_bandwidth: pos_integer(),
+          webrtc_support: :yes | :no | :if_offered | :no_avp
+        ]
 
   @type player_opts :: [
-    loop: boolean(),
-    start_time: non_neg_integer()
-  ]
+          loop: boolean(),
+          start_time: non_neg_integer()
+        ]
 
   @type recorder_opts :: [
-    wait_for_keyframe: boolean(),
-    stop_on_silence: boolean(),
-    silence_timeout_ms: pos_integer(),
-    max_record_duration_sec: pos_integer(),
-    stop_on_dtmf: boolean()
-  ]
+          wait_for_keyframe: boolean(),
+          stop_on_silence: boolean(),
+          silence_timeout_ms: pos_integer(),
+          max_record_duration_sec: pos_integer(),
+          stop_on_dtmf: boolean()
+        ]
 
   defmodule Behaviour do
     @moduledoc """

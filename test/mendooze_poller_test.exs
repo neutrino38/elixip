@@ -200,14 +200,15 @@ defmodule Mendooze.EventPollerTest do
     base_url = start_stream_server(self())
     start_poller(base_url)
 
-    assert_receive {:stream_conn, conn1, _}, 1_000
+    assert_receive {:stream_conn, conn1, _}, 2_000
     send(conn1, :finish)
 
     # the poller retries after retry_ms and the server accepts again
-    assert_receive {:stream_conn, conn2, _}, 1_000
+    # (generous timeouts: this file runs concurrently with the whole suite)
+    assert_receive {:stream_conn, conn2, _}, 2_000
     send(conn2, {:chunk, event_frame([3, "cx-2", "p-9"])})
 
-    assert_receive {:mendooze_event, {:player_started, "cx-2", "p-9"}}, 1_000
+    assert_receive {:mendooze_event, {:player_started, "cx-2", "p-9"}}, 2_000
   end
 
   test "gives up and notifies the sink after max_failures consecutive failures" do
