@@ -252,12 +252,12 @@ defmodule SIP.Transport do
             {:ok, _tpid} = SIP.Transac.start_uas_transaction(msg, { local_ip, local_port, tp_name, state.upperlayer })
             { :noreply, state }
           else
-            Logger.warning("Received a SIP #{parsed_msg.response} response from #{state.destip}:#{state.destport} not linked to any transaction. Dropping it")
+            Logger.warning("Received a SIP #{parsed_msg.response} response from #{SIP.NetUtils.ip2string(destip)}:#{destport} not linked to any transaction. Dropping it")
             { :noreply, state }
           end
 
         _ ->
-          Logger.error("Received an invalid SIP message from #{SIP.NetUtils.ip2string(state.destip)}:#{state.destport}")
+          Logger.error("Received an invalid SIP message from #{SIP.NetUtils.ip2string(destip)}:#{destport}")
           { :noreply, state }
       end
     end
