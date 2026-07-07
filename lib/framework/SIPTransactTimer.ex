@@ -34,7 +34,10 @@ defmodule SIP.Trans.Timer do
     schedule_generic_timer(state, :timerB, :tB_ref, nil)
   end
 
-  def schedule_timer_D(state, ms \\ 32) do
+  # Timer D — RFC 3261 §17.1.1.2: at least 32 s for unreliable transport. It
+  # bounds the time the application layer has to ACK a 2xx INVITE response
+  # before the client transaction is destroyed (value in milliseconds).
+  def schedule_timer_D(state, ms \\ 32_000) do
     schedule_generic_timer(state, :timerD, :tD_ref, ms)
   end
 

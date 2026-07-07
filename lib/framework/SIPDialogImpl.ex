@@ -598,6 +598,14 @@ defmodule SIP.DialogImpl do
       # from the dialog so later in-dialog requests (BYE, re-INVITE…) start fresh.
       {:reply, reply, close_transaction(state, transact_pid)}
     else
+      Logger.warning(
+        dialogpid: "#{inspect(self())}",
+        module: __MODULE__,
+        message:
+          "Cannot ACK transaction #{inspect(transact_pid)}: not attached to the dialog " <>
+            "(already terminated?). ACK not sent."
+      )
+
       {:reply, :nosuchtransaction, state}
     end
   end
