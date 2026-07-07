@@ -208,13 +208,13 @@ defmodule MediaServer.Mendooze.Conn do
     state = %{state | res_seq: state.res_seq + 1}
 
     with {:ok, player_id} <- create(state, "PlayerCreate", [state.sess_id, tag]),
+        :ok <- cleanup_on_error(state, player_id, attach_player_all(state, player_id)),
          {:ok, _} <-
            cleanup_on_error(
              state,
              player_id,
              rpc(state, "PlayerOpen", [state.sess_id, player_id, file_path])
            ),
-         :ok <- cleanup_on_error(state, player_id, attach_player_all(state, player_id)),
          :ok <- maybe_seek(state, player_id, Keyword.get(opts, :start_time)) do
       ref = make_ref()
 
