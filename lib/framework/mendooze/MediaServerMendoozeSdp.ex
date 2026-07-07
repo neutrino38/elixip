@@ -35,6 +35,11 @@ defmodule MediaServer.Mendooze.Sdp do
     "VP8" => {107, 107, 90_000}
   }
 
+  @text_codecs %{
+    "T140" => {106, 106, 1000},
+    "T140RED" => {105, 105, 1000}
+  }
+
   # RFC 3551 static payload types, usable without an a=rtpmap line
   @static_pt %{0 => "PCMU", 8 => "PCMA", 9 => "G722"}
 
@@ -99,7 +104,7 @@ defmodule MediaServer.Mendooze.Sdp do
       iex> MediaServer.Mendooze.Sdp.local_rtp_map(:audio, ["PCMU", "PCMA"], true)
       %{"0" => 0, "8" => 8, "101" => 100}
   """
-  @spec local_rtp_map(:audio | :video, [codec_name()], boolean()) :: rtp_map()
+  @spec local_rtp_map(:audio | :video | :text, [codec_name()], boolean()) :: rtp_map()
   def local_rtp_map(kind, codec_names, dtmf \\ false) do
     base =
       Map.new(codec_names, fn name ->
@@ -128,6 +133,13 @@ defmodule MediaServer.Mendooze.Sdp do
     end
   end
 
+  defp codec_pt_code(:text, name) do
+    case Map.fetch(@text_codecs, String.upcase(name)) do
+      {:ok, {pt, code, _clock}} -> {pt, code}
+      :error -> raise ArgumentError, "unknown text codec #{inspect(name)}"
+    end
+  end
+
   defp codec_code(:audio, name) do
     case Map.fetch(@audio_codecs, String.upcase(name)) do
       {:ok, {_pt, code, _clock, _ch}} -> {:ok, code}
@@ -137,6 +149,13 @@ defmodule MediaServer.Mendooze.Sdp do
 
   defp codec_code(:video, name) do
     case Map.fetch(@video_codecs, String.upcase(name)) do
+      {:ok, {_pt, code, _clock}} -> {:ok, code}
+      :error -> :error
+    end
+  end
+
+  defp codec_code(:text, name) do
+    case Map.fetch(@text_codecs, String.upcase(name)) do
       {:ok, {_pt, code, _clock}} -> {:ok, code}
       :error -> :error
     end
@@ -223,6 +242,11 @@ defmodule MediaServer.Mendooze.Sdp do
 
   defp codec_sdp_info(:video, name) do
     {_pt, _code, clock} = Map.fetch!(@video_codecs, String.upcase(name))
+    {sdp_encoding(name), clock, nil}
+  end
+
+  defp codec_sdp_info(:text, name) do
+    {_pt, _code, clock} = Map.fetch!(@text_codecs, String.upcase(name))
     {sdp_encoding(name), clock, nil}
   end
 
