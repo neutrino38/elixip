@@ -113,10 +113,14 @@ defmodule MediaServer.Mendooze.Conn do
              sess_tag,
              :audio in medias,
              :video in medias,
-             false
+             :text in medias,
            ]) do
       :ok = Mendooze.register_conn(server, sess_tag, event_sink)
-      Logger.debug("Mendooze.Conn #{sess_tag}: created MediaSession #{sess_id} and Endpoint #{endpoint_id} with media #{inspect(medias)}")
+      Logger.debug([  module: __MODULE__, cnx_tag: state.sess_tag,
+                     message: "created MediaSession with media #{inspect(state.medias)}" ])
+      Logger.debug([ module: __MODULE__, cnx_tag: state.sess_tag,
+                     message: "created Endpoint #{endpoint_id} for MediaSession" ])
+      {:ok, %{state | sess_id: sess_id, endpoint_id: endpoint_id}}
       {:ok, %{state | endpoint_id: endpoint_id}}
     else
       {:error, reason} ->
@@ -149,6 +153,8 @@ defmodule MediaServer.Mendooze.Conn do
           medias: Enum.map(state.medias, &offer_media_spec(state, &1))
         })
 
+      Logger.debug([ module: __MODULE__, cnx_tag: state.sess_tag,
+                     message: "local offer built:\n#{inspect(offer)}" ])
       {:reply, {:ok, offer}, state}
     else
       {:error, reason} -> fail(state, reason)
@@ -762,7 +768,7 @@ defmodule MediaServer.Mendooze.Conn do
     do: List.wrap(Keyword.get(state.opts, :text_codec, @default_text_codecs))
 
   defp dtmf?(state, :audio), do: Keyword.get(state.opts, :dtmf, true)
-  defp dtmf?(_state, :video), do: false
+  defp dtmf?(_state, _media), do: false
 
   defp webrtc?(state), do: Keyword.get(state.opts, :webrtc_support, :no) == :yes
 
