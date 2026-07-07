@@ -100,6 +100,9 @@ defmodule SIP.Session.CallUAC do
       timeout = Keyword.get(options, :timeout, 20)
       webrtc_support = Keyword.get(options, :webrtc, :no)
       {sip_ctx, sdp_offer} = SIP.Session.Media.get_sdp_offer(sip_ctx, webrtc_support)
+      # Cache the offer so an authenticated retry (auth_invite) reuses the exact
+      # same SDP instead of rebuilding it — see auth_invite/5 for the rationale.
+      sip_ctx = SIP.Context.appdata_set(sip_ctx, :localsdpoffer, sdp_offer)
       client_invite(sip_ctx, ruri, sdp_offer, timeout)
     else
       raise "No media server connected to the session context"
@@ -119,8 +122,23 @@ defmodule SIP.Session.CallUAC do
   def auth_invite(sip_ctx = %SIP.Context{}, resp, ruri, :mediaserver, options) when is_list(options) do
     if is_pid(sip_ctx.mediaserverpid) do
       timeout = Keyword.get(options, :timeout, 20)
-      webrtc_support = Keyword.get(options, :webrtc, :no)
-      {sip_ctx, sdp_offer} = SIP.Session.Media.get_sdp_offer(sip_ctx, webrtc_support)
+
+      # An authenticated retry after a 401/407 is the same request re-sent with
+      # an Authorization header and a higher CSeq (RFC 3261 §22.2/§26.2): the
+      # SDP body MUST be identical to the initial INVITE. Reuse the offer built
+      # by client_invite rather than rebuilding it — rebuilding re-runs the
+      # media negotiation (a second EndpointStartReceiving on an endpoint that
+      # is already receiving), which the media server rejects.
+      {sip_ctx, sdp_offer} =
+        case SIP.Context.appdata_get(sip_ctx, :localsdpoffer) do
+          nil ->
+            webrtc_support = Keyword.get(options, :webrtc, :no)
+            SIP.Session.Media.get_sdp_offer(sip_ctx, webrtc_support)
+
+          cached_offer ->
+            {sip_ctx, cached_offer}
+        end
+
       auth_invite(sip_ctx, resp, ruri, sdp_offer, timeout)
     else
       raise "No media server connected to the session context"
