@@ -116,7 +116,7 @@ defmodule MediaServer.Mendooze.Conn do
              :text in medias,
            ]) do
       :ok = Mendooze.register_conn(server, sess_tag, event_sink)
-      Logger.debug([  module: __MODULE__, cnx_tag: state.sess_tag,
+      Logger.info([  module: __MODULE__, cnx_tag: state.sess_tag,
                      message: "created MediaSession with media #{inspect(state.medias)}" ])
       Logger.debug([ module: __MODULE__, cnx_tag: state.sess_tag,
                      message: "created Endpoint #{endpoint_id} for MediaSession" ])
@@ -233,6 +233,8 @@ defmodule MediaServer.Mendooze.Conn do
       players =
         Map.put(state.players, ref, %{player_id: player_id, tag: tag, file: file_path, opts: opts})
 
+      Logger.info([  module: __MODULE__, cnx_tag: state.sess_tag,
+                     message: "created Player for file #{file_path}" ])
       {:reply, {:ok, {self(), :player, ref}}, %{state | players: players}}
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
@@ -319,7 +321,7 @@ defmodule MediaServer.Mendooze.Conn do
   end
 
   defp handle_server_event({:endpoint_disconnected, _tag, _ep, media}, state) do
-    Logger.warning("Mendooze.Conn #{state.sess_tag}: RTP timeout on #{media}")
+    Logger.warning([ module: __MODULE__, session: state.sess_tag, message: "timeout on #{media}" ])
     send(state.event_sink, {:ms_event, self(), :media_timeout})
     {:noreply, state}
   end

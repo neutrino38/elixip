@@ -195,21 +195,36 @@ defmodule MediaServer.Mendooze.EventPoller do
     end
   end
 
-  defp translate_event([1, sess, player]), do: {:ok, {:player_end_of_file, sess, player}}
+  defp translate_event([1, sess, player]) do
+    Logger.info([ module: __MODULE__, session: sess, event: :player_end_of_file ])
+    {:ok, {:player_end_of_file, sess, player}}
+  end
 
   defp translate_event([2, sess, endpoint_id, media, _role]),
     do: {:ok, {:external_fir, sess, endpoint_id, media_atom(media)}}
 
-  defp translate_event([3, sess, player]), do: {:ok, {:player_started, sess, player}}
-  defp translate_event([4, sess, recorder]), do: {:ok, {:recorder_started, sess, recorder}}
+  defp translate_event([3, sess, player]) do
+    Logger.info([ module: __MODULE__, session: sess, event: :player_started ])
+    {:ok, {:player_started, sess, player}}
+  end
 
-  defp translate_event([5, sess, recorder, reason]),
-    do: {:ok, {:recorder_stopped, sess, recorder, reason_atom(reason)}}
+  defp translate_event([4, sess, recorder]) do
+    Logger.info([ module: __MODULE__, session: sess, event: :recorder_started ])
+    {:ok, {:recorder_started, sess, recorder}}
+  end
+
+  defp translate_event([5, sess, recorder, reason]) do
+    Logger.info([ module: __MODULE__, session: sess, event: :recorder_stopped, reason: reason_atom(reason) ])
+    {:ok, {:recorder_stopped, sess, recorder, reason_atom(reason)}}
+  end
 
   defp translate_event([6, sess, endpoint_id, media, _role]),
     do: {:ok, {:endpoint_disconnected, sess, endpoint_id, media_atom(media)}}
 
-  defp translate_event(other), do: {:error, {:unknown_event, other}}
+  defp translate_event(other) do
+    Logger.warning("Mendooze.EventPoller: unknown event tuple: #{inspect(other)}")
+    {:error, {:unknown_event, other}}
+  end
 
   defp media_atom(0), do: :audio
   defp media_atom(1), do: :video
