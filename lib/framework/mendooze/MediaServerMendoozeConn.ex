@@ -24,12 +24,14 @@ defmodule MediaServer.Mendooze.Conn do
   @default_rtp_timeout_ms 10_000
 
   # MediaFrame::Type wire values
-  @media_int %{audio: 0, video: 1}
+  @media_int %{audio: 0, video: 1, text: 2, application: 3}
   # MediaFrame::MediaProtocol RTP
   @proto_rtp 0
 
-  @default_audio_codecs ["PCMU", "PCMA"]
-  @default_video_codecs ["VP8"]
+  @default_audio_codecs ["OPUS", "PCMU", "PCMA"]
+  @default_video_codecs ["H264", "VP8"]
+  @default_text_codecs  ["T140", "T140RED"]
+
 
   # ── API (called through the MediaServer.Mendooze facade) ───────────────────
 
@@ -114,6 +116,7 @@ defmodule MediaServer.Mendooze.Conn do
              false
            ]) do
       :ok = Mendooze.register_conn(server, sess_tag, event_sink)
+      Logger.debug("Mendooze.Conn #{sess_tag}: created MediaSession #{sess_id} and Endpoint #{endpoint_id} with media #{inspect(medias)}")
       {:ok, %{state | endpoint_id: endpoint_id}}
     else
       {:error, reason} ->
@@ -128,6 +131,9 @@ defmodule MediaServer.Mendooze.Conn do
       :audio -> [:audio]
       :video -> [:video]
       :audio_video -> [:audio, :video]
+      :audio_video_text -> [:audio, :video, :text]
+      :total_conversation -> [:audio, :video, :text]
+      :tc -> [:audio, :video, :text]
     end
   end
 
@@ -751,6 +757,9 @@ defmodule MediaServer.Mendooze.Conn do
 
   defp codecs(state, :video),
     do: List.wrap(Keyword.get(state.opts, :video_codec, @default_video_codecs))
+
+  defp codecs(state, :text),
+    do: List.wrap(Keyword.get(state.opts, :text_codec, @default_text_codecs))
 
   defp dtmf?(state, :audio), do: Keyword.get(state.opts, :dtmf, true)
   defp dtmf?(_state, :video), do: false

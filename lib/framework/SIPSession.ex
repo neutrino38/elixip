@@ -371,8 +371,8 @@ defmodule SIP.Session do
     context appdata (`:mediapeerconnectionid`), so subsequent calls reuse it.
     Returns `{updated_ctx, sdp_offer}`.
     """
-    @spec get_sdp_offer(%SIP.Context{}, atom()) :: {%SIP.Context{}, binary()}
-    def get_sdp_offer(sip_ctx = %SIP.Context{}, webrtc_support) when is_atom(webrtc_support) do
+    @spec get_sdp_offer(%SIP.Context{}, atom(), atom()) :: {%SIP.Context{}, binary()}
+    def get_sdp_offer(sip_ctx = %SIP.Context{}, webrtc_support, medias) when is_atom(webrtc_support) do
       if not is_pid(sip_ctx.mediaserverpid) do
         raise "No media server connected to the session context"
       end
@@ -385,7 +385,7 @@ defmodule SIP.Session do
               case apply(sip_ctx.mediaservermodule, :create_peer_connection, [
                      sip_ctx.mediaserverpid,
                      self(),
-                     [webrtc_support: webrtc_support]
+                     [webrtc_support: webrtc_support, media: medias]
                    ]) do
                 {:ok, cnx} ->
                   cnx
