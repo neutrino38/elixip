@@ -17,6 +17,9 @@ defmodule SIP.Session.CallUAC do
   defmacro __using__(_opts) do
     quote do
       use SIP.Context
+      # In-dialog request senders (send_MESSAGE/INFO/BYE/REFER/UPDATE/reINVITE/
+      # NOTIFY/OPTIONS) and the generic reply_request, common to UAC and UAS.
+      use SIP.Session.CallInDialog
 
       defmacro send_INVITE(ruri, sdp_offer, options) do
         quote do
@@ -47,13 +50,6 @@ defmodule SIP.Session.CallUAC do
         quote do
           var!(sip_ctx) =
             SIP.Session.dispatch_reply(var!(sip_ctx), unquote(resp), unquote(transaction_id))
-        end
-      end
-
-      defmacro send_BYE() do
-        quote do
-          SIP.Scenario.Monitor.note_command(:sip, "send_BYE")
-          var!(sip_ctx) = SIP.Session.CallUAC.client_bye(var!(sip_ctx))
         end
       end
 
@@ -222,21 +218,6 @@ defmodule SIP.Session.CallUAC do
     SIP.Session.send_sip_request(sip_ctx, invite, timeout)
   end
 
-  defp bye_message(sip_ctx) do
-    %{
-      "Max-Forwards" => "70",
-      method: :BYE,
-      ruri: SIP.Context.to(sip_ctx, nil),
-      from: SIP.Context.from(sip_ctx),
-      to: SIP.Context.to(sip_ctx,nil),
-      useragent: Application.get_env(:elixip2, :useragent, "Elixipp/0.1"),
-      callid: nil,
-      contentlength: 0
-    }
-  end
-
-
-
   def process_sdp_resp(sip_ctx = %SIP.Context{}, resp) when resp.response in [200, 183] do
     case SIP.Session.extract_sdp(resp) do
       sdp_answer when is_binary(sdp_answer) ->
@@ -277,12 +258,6 @@ defmodule SIP.Session.CallUAC do
   def ack(sip_ctx = %SIP.Context{}, transaction_id) do
     SIP.Dialog.ack(sip_ctx.dialogpid, transaction_id)
   end
-
-  @spec client_bye(%SIP.Context{}) :: %SIP.Context{}
-  def client_bye(sip_ctx = %SIP.Context{})  do
-    bye = bye_message(sip_ctx)
-    SIP.Session.send_sip_request(sip_ctx, bye, 0)
-  end
 end
 
 defmodule SIP.Session.CallUAS do
@@ -311,6 +286,9 @@ defmodule SIP.Session.CallUAS do
   defmacro __using__(_opts) do
     quote do
       use SIP.Context
+      # In-dialog senders / reply_request (idempotent: CallUAC already pulled it
+      # in through SIP.Scenario; the guard makes the second use a no-op).
+      use SIP.Session.CallInDialog
 
       # 3xx redirect to one or more contacts. `contacts` is a String, a
       # %SIP.Uri{} or a list of either.
@@ -508,6 +486,250 @@ defmodule SIP.Session.CallUAS do
   # :ok and :ignore (final response already sent — e.g. the auto-487 after a
   # CANCEL, phase 1 §1.4) both mean success; any other value (transport error,
   # :invalid_sip_msg, :invalid_transaction…) is surfaced as lasterr.
+  defp reply_lasterr(:ok), do: :ok
+  defp reply_lasterr(:ignore), do: :ok
+  defp reply_lasterr(other), do: other
+end
+
+defmodule SIP.Session.CallInDialog do
+  @moduledoc """
+  Mixin of in-dialog request senders and the generic in-dialog reply, common to
+  UAC and UAS. Both `SIP.Session.CallUAC` and `SIP.Session.CallUAS` `use` it; the
+  `@sip_call_indialog_used` guard makes the second injection a no-op (a UAS
+  scenario pulls it in through both).
+
+  Sending macros (`send_MESSAGE`, `send_INFO`, `send_BYE`, `send_REFER`,
+  `send_UPDATE`, `send_reINVITE`, `send_NOTIFY`, `send_inDialog_OPTIONS`) build a
+  request from the session context and hand it to `SIP.Session.send_sip_request/3`,
+  which routes it through the dialog (route set / remote target / CSeq / tags are
+  filled in by `SIP.DialogImpl.fix_outbound_request/3`). `reply_request` replies
+  to an in-dialog request the scenario received (BYE, MESSAGE, INFO, OPTIONS,
+  NOTIFY, REFER…) via `SIP.Dialog.reply/5`, without checking the dialog state.
+
+  `send_UPDATE` / `send_reINVITE` accept `:mediaserver` (offer built with
+  `SIP.Session.Media.get_sdp_offer/3`) or an explicit SDP binary, like
+  `send_INVITE`. Other messages usable in-dialog: CANCEL (see
+  `SIP.Session.Common.send_CANCEL`), PRACK (100rel — out of scope), in-dialog
+  SUBSCRIBE (rare — out of scope).
+  """
+  require Logger
+
+  defmacro __using__(_opts) do
+    # Imperative guard set at expansion time (see SIP.Context for the rationale):
+    # a UAS scenario reaches this through both CallUAC and CallUAS.
+    if Module.get_attribute(__CALLER__.module, :sip_call_indialog_used) do
+      quote do
+      end
+    else
+      Module.put_attribute(__CALLER__.module, :sip_call_indialog_used, true)
+
+      quote do
+        use SIP.Context
+
+        defmacro send_MESSAGE(body, opts \\ []) do
+          quote do
+            SIP.Scenario.Monitor.note_command(:sip, "send_MESSAGE")
+
+            var!(sip_ctx) =
+              SIP.Session.CallInDialog.do_send_message(var!(sip_ctx), unquote(body), unquote(opts))
+          end
+        end
+
+        defmacro send_INFO(body, opts \\ []) do
+          quote do
+            SIP.Scenario.Monitor.note_command(:sip, "send_INFO")
+
+            var!(sip_ctx) =
+              SIP.Session.CallInDialog.do_send_info(var!(sip_ctx), unquote(body), unquote(opts))
+          end
+        end
+
+        defmacro send_BYE(body \\ nil) do
+          quote do
+            SIP.Scenario.Monitor.note_command(:sip, "send_BYE")
+
+            var!(sip_ctx) =
+              SIP.Session.CallInDialog.do_send_bye(var!(sip_ctx), unquote(body))
+          end
+        end
+
+        defmacro send_REFER(refer_to, opts \\ []) do
+          quote do
+            SIP.Scenario.Monitor.note_command(:sip, "send_REFER")
+
+            var!(sip_ctx) =
+              SIP.Session.CallInDialog.do_send_refer(var!(sip_ctx), unquote(refer_to), unquote(opts))
+          end
+        end
+
+        defmacro send_UPDATE(sdp_or_ms, opts \\ []) do
+          quote do
+            SIP.Scenario.Monitor.note_command(:sip, "send_UPDATE")
+
+            var!(sip_ctx) =
+              SIP.Session.CallInDialog.do_send_update(var!(sip_ctx), unquote(sdp_or_ms), unquote(opts))
+          end
+        end
+
+        defmacro send_reINVITE(sdp_or_ms, opts \\ []) do
+          quote do
+            SIP.Scenario.Monitor.note_command(:sip, "send_reINVITE")
+
+            var!(sip_ctx) =
+              SIP.Session.CallInDialog.do_send_reinvite(var!(sip_ctx), unquote(sdp_or_ms), unquote(opts))
+          end
+        end
+
+        defmacro send_NOTIFY(event, body, opts \\ []) do
+          quote do
+            SIP.Scenario.Monitor.note_command(:sip, "send_NOTIFY")
+
+            var!(sip_ctx) =
+              SIP.Session.CallInDialog.do_send_notify(
+                var!(sip_ctx), unquote(event), unquote(body), unquote(opts))
+          end
+        end
+
+        defmacro send_inDialog_OPTIONS() do
+          quote do
+            SIP.Scenario.Monitor.note_command(:sip, "send_inDialog_OPTIONS")
+
+            var!(sip_ctx) = SIP.Session.CallInDialog.do_send_options(var!(sip_ctx))
+          end
+        end
+
+        # Generic reply to an in-dialog request the scenario received (the request
+        # is passed explicitly — in-dialog requests are not stored in the context,
+        # only the offer INVITE/UPDATE is, and the on_events clause already has it).
+        defmacro reply_request(req, code, reason \\ nil, upd_fields \\ []) do
+          quote do
+            SIP.Scenario.Monitor.note_command(:sip, "reply_request #{unquote(code)}")
+
+            var!(sip_ctx) =
+              SIP.Session.CallInDialog.do_reply_request(
+                var!(sip_ctx), unquote(req), unquote(code), unquote(reason), unquote(upd_fields))
+          end
+        end
+      end
+    end
+  end
+
+  # ── Sending backing functions ───────────────────────────────────────────────
+
+  def do_send_message(sip_ctx = %SIP.Context{}, body, opts) when is_list(opts) do
+    ct = Keyword.get(opts, :contenttype, "text/plain")
+    req = in_dialog_request(sip_ctx, :MESSAGE) |> put_body(body, ct)
+    SIP.Session.send_sip_request(sip_ctx, req, 0)
+  end
+
+  def do_send_info(sip_ctx = %SIP.Context{}, body, opts) when is_list(opts) do
+    ct = Keyword.get(opts, :contenttype, "application/dtmf-relay")
+    req = in_dialog_request(sip_ctx, :INFO) |> put_body(body, ct)
+    SIP.Session.send_sip_request(sip_ctx, req, 0)
+  end
+
+  def do_send_bye(sip_ctx = %SIP.Context{}, body) do
+    req = in_dialog_request(sip_ctx, :BYE) |> put_body(body, "application/sdp")
+    SIP.Session.send_sip_request(sip_ctx, req, 0)
+  end
+
+  def do_send_refer(sip_ctx = %SIP.Context{}, refer_to, opts) when is_list(opts) do
+    extra = %{"Refer-To" => to_string(refer_to)}
+
+    extra =
+      case Keyword.get(opts, :referred_by) do
+        nil -> extra
+        rb -> Map.put(extra, "Referred-By", to_string(rb))
+      end
+
+    req = in_dialog_request(sip_ctx, :REFER, extra)
+    SIP.Session.send_sip_request(sip_ctx, req, 0)
+  end
+
+  def do_send_update(sip_ctx = %SIP.Context{}, sdp_or_ms, opts) when is_list(opts) do
+    send_offer_request(sip_ctx, :UPDATE, sdp_or_ms, opts)
+  end
+
+  def do_send_reinvite(sip_ctx = %SIP.Context{}, sdp_or_ms, opts) when is_list(opts) do
+    send_offer_request(sip_ctx, :INVITE, sdp_or_ms, opts)
+  end
+
+  def do_send_notify(sip_ctx = %SIP.Context{}, event, body, opts) when is_list(opts) do
+    ct = Keyword.get(opts, :contenttype, "message/sipfrag;version=2.0")
+    req = in_dialog_request(sip_ctx, :NOTIFY, %{"Event" => to_string(event)}) |> put_body(body, ct)
+    SIP.Session.send_sip_request(sip_ctx, req, 0)
+  end
+
+  def do_send_options(sip_ctx = %SIP.Context{}) do
+    req = in_dialog_request(sip_ctx, :OPTIONS)
+    SIP.Session.send_sip_request(sip_ctx, req, 0)
+  end
+
+  # ── Generic in-dialog reply ─────────────────────────────────────────────────
+
+  def do_reply_request(sip_ctx = %SIP.Context{}, req, code, reason, upd_fields)
+      when is_integer(code) do
+    rc = SIP.Dialog.reply(sip_ctx.dialogpid, req, code, reason, upd_fields)
+    SIP.Context.set(sip_ctx, :lasterr, reply_lasterr(rc))
+  end
+
+  # ── Helpers ─────────────────────────────────────────────────────────────────
+
+  # A UPDATE / re-INVITE carries an offer: either negotiated with the media
+  # server (:mediaserver) or an explicit SDP binary, same convention as
+  # send_INVITE. A local Contact is added (target-refresh request).
+  defp send_offer_request(sip_ctx, method, :mediaserver, opts) do
+    webrtc = Keyword.get(opts, :webrtc, :no)
+    medias = Keyword.get(opts, :media, :audio_video)
+    {sip_ctx, offer} = SIP.Session.Media.get_sdp_offer(sip_ctx, webrtc, medias)
+    send_offer_request(sip_ctx, method, offer, opts)
+  end
+
+  defp send_offer_request(sip_ctx, method, sdp, opts) when is_binary(sdp) do
+    req =
+      in_dialog_request(sip_ctx, method, %{contact: local_contact(sip_ctx)})
+      |> put_body(sdp, "application/sdp")
+
+    SIP.Session.send_sip_request(sip_ctx, req, Keyword.get(opts, :timeout, 20))
+  end
+
+  # Build a bare in-dialog request. The dialog layer fills in Call-ID, CSeq, the
+  # From/To tags, the remote target and the route set (fix_outbound_request/3),
+  # so only the skeleton (method, placeholder URIs, User-Agent) is needed here.
+  defp in_dialog_request(sip_ctx, method, extra \\ %{}) do
+    %{
+      "Max-Forwards" => "70",
+      method: method,
+      ruri: SIP.Context.to(sip_ctx, nil),
+      from: SIP.Context.from(sip_ctx),
+      to: SIP.Context.to(sip_ctx, nil),
+      useragent: Application.get_env(:elixip2, :useragent, "Elixipp/0.1"),
+      callid: nil,
+      contentlength: 0
+    }
+    |> Map.merge(extra)
+  end
+
+  # Attach a body and its Content-Type; no-op for a nil/empty body. A binary is
+  # taken verbatim; update_sip_msg computes the Content-Length and defaults the
+  # Content-Type to application/sdp, which we then override with `ct`.
+  defp put_body(req, nil, _ct), do: req
+  defp put_body(req, "", _ct), do: req
+
+  defp put_body(req, body, ct) when is_binary(body) do
+    req
+    |> SIP.Msg.Ops.update_sip_msg({:body, body})
+    |> Map.put(:contenttype, ct)
+  end
+
+  defp local_contact(sip_ctx) do
+    %SIP.Uri{
+      userpart: SIP.Context.get(sip_ctx, :username) || "anonymous",
+      domain: "0.0.0.0",
+      params: %{}
+    }
+  end
+
   defp reply_lasterr(:ok), do: :ok
   defp reply_lasterr(:ignore), do: :ok
   defp reply_lasterr(other), do: other

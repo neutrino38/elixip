@@ -1,8 +1,8 @@
 # Plan d'implémentation — scénarios UAS INVITE
 
 Découpage issu de `docs/uas_invite.md` §7. Ce document détaille la conception
-d'implémentation phase par phase. **Phases 1 à 3 réalisées** (2026-07-12) ;
-phases 4-6 à venir.
+d'implémentation phase par phase. **Phases 1 à 4 réalisées** (2026-07-12) ;
+phases 5-6 à venir.
 
 Rappel des phases :
 
@@ -801,3 +801,80 @@ et inchangés).
 | `SIPSessionInvite.ex` | `process_sdp_resp/2` réutilise `extract_sdp` ; macros `reply_invite_with_sdp`/`reply_invite_with_body` (dans `CallUAC`) ; backing `do_reply_invite_with_sdp/3`, `do_reply_invite_with_body/4` + helpers `reply_fields`/`local_contact`/`media_opts`/`normalize_bodies` |
 | `SIPSessionMedia.ex` | `get_sdp_answer/3` (nouveau) ; `ensure_peer_connection/3` factorisé ; défaut média `:audio_video` |
 | `test/uas_invite_test.exs` | tests média + e2e answer-with-SDP |
+
+---
+
+# Phase 4 — `SIP.Session.CallInDialog` (mixin commun UAC/UAS)  *(RÉALISÉE 2026-07-12)*
+
+> Envoi de requêtes in-dialog (D2) + réponse générique `reply_request`, migration
+> de `send_BYE`. Répond aussi à §2.8 (émission re-INVITE/UPDATE, commune UAC/UAS).
+
+## Ce qui a été fait
+
+**Nouveau module `SIP.Session.CallInDialog`** (dans `SIPSessionInvite.ex`), tiré
+par **`use SIP.Session.CallInDialog`** dans `CallUAC` **et** `CallUAS` (garde
+impérative `@sip_call_indialog_used`, patron `SIP.Context`, → 2ᵉ injection no-op
+pour un scénario UAS qui atteint le mixin par les deux chemins). Donc **toutes
+les macros sont disponibles dans tout scénario d'appel** via `SIP.Scenario`.
+
+Macros injectées (chacune backée par une fonction `do_*` pleinement qualifiée,
+construisant la requête et la passant à `SIP.Session.send_sip_request/3` — le
+dialogue remplit Call-ID/CSeq/tags/remote-target/route-set via
+`fix_outbound_request/3`) :
+
+| Macro | Méthode | Détails |
+|---|---|---|
+| `send_MESSAGE(body, opts \\ [])` | MESSAGE | contenttype défaut `text/plain` |
+| `send_INFO(body, opts \\ [])` | INFO | défaut `application/dtmf-relay` |
+| `send_BYE(body \\ nil)` | BYE | **migré depuis CallUAC** ; body optionnel |
+| `send_REFER(refer_to, opts \\ [])` | REFER | `Refer-To` + `opts[:referred_by]` |
+| `send_UPDATE(sdp_or_ms, opts \\ [])` | UPDATE | `:mediaserver` (offre via `get_sdp_offer/3`) ou SDP explicite + Contact local |
+| `send_reINVITE(sdp_or_ms, opts \\ [])` | INVITE | idem UPDATE |
+| `send_NOTIFY(event, body, opts \\ [])` | NOTIFY | header `Event` + body (défaut `message/sipfrag`) |
+| `send_inDialog_OPTIONS()` | OPTIONS | keepalive in-dialog |
+| `reply_request(req, code, reason \\ nil, upd_fields \\ [])` | — | réponse générique à une requête in-dialog reçue (BYE/MESSAGE/INFO/OPTIONS/NOTIFY/REFER) via `SIP.Dialog.reply/5` (pas de contrôle d'état ; `:ignore`→`:ok`) |
+
+Helpers privés : `in_dialog_request/3` (squelette method/URIs/UA — construit avec
+`SIP.Context.from/to`, exige username+domain comme l'ancien `bye_message`),
+`put_body/3` (body + Content-Type, no-op si nil/vide), `send_offer_request/4`
+(UPDATE/reINVITE : `:mediaserver` → `get_sdp_offer` puis récursion binaire),
+`local_contact/1`, `reply_lasterr/1`.
+
+**Migration `send_BYE`** : retiré de `CallUAC.__using__` ainsi que `client_bye/1`
+et `bye_message/1` ; l'arité 0 reste couverte par `send_BYE(body \\ nil)` de
+CallInDialog (aucun scénario/test à changer — `send_BYE()` marche toujours).
+
+**Migration DSL** : les scénarios de référence `lib/scenarios/uac_invite.ex` et
+`scenarios/uac_invite.exs` remplacent les `SIP.Dialog.reply(dialog_pid, req, …)`
+directs (MESSAGE/BYE) par `reply_request(req, 200, "OK")`.
+
+## Décisions / notes
+
+- **Signatures Elixir** : les macros à défaut multiple respectent l'ordre
+  (défauts en fin) ; `send_NOTIFY(event, body, opts)` a `event`/`body` requis.
+- Les autres méthodes in-dialog (CANCEL → `SIP.Session.Common.send_CANCEL`,
+  PRACK/100rel, SUBSCRIBE in-dialog) restent hors périmètre (§4.1 spec).
+- Un UAS qui envoie du in-dialog (BYE/reINVITE) doit avoir username+domain dans
+  son contexte (contrat inchangé depuis `bye_message`) — config de scénario.
+
+## Tests (`test/uas_invite_test.exs`, étendu — 33/33)
+
+`StubDialog` gère désormais `{:newreq, req}` (renvoie `{:ok, pid}`, notifie le
+test). Tests unitaires des backing `do_send_*` : MESSAGE (text/plain +
+Content-Length), INFO (défaut + override contenttype), BYE (avec/sans body),
+REFER (`Refer-To`/`Referred-By`), UPDATE/reINVITE (SDP explicite + Contact),
+UPDATE `:mediaserver` (offre négociée via mockup), NOTIFY (`Event`), OPTIONS ;
+`do_reply_request` (200 → `:ok` ; 487 → `:ignore`→`:ok`).
+
+Non-régression : `sip_call` 5/5, `scenario_engine`, `uas_register`,
+`sip_transaction` — verts. `scenario_integration` (1 échec) confirmé
+**préexistant** sur l'arbre propre (`git stash` : « UDP mockup transport was
+never created », lié au `:tc` média, indépendant de la phase 4).
+
+## Récapitulatif des changements phase 4
+
+| Fichier | Changement |
+|---|---|
+| `SIPSessionInvite.ex` | nouveau module `SIP.Session.CallInDialog` (macros send_* + reply_request + backing + helpers) ; `use CallInDialog` dans CallUAC & CallUAS ; `send_BYE`/`client_bye`/`bye_message` retirés de CallUAC |
+| `lib/scenarios/uac_invite.ex`, `scenarios/uac_invite.exs` | MESSAGE/BYE : `SIP.Dialog.reply` direct → `reply_request` |
+| `test/uas_invite_test.exs` | `StubDialog` +`{:newreq}` ; tests send_* + reply_request |
