@@ -1,8 +1,7 @@
 # Plan d'implémentation — scénarios UAS INVITE
 
 Découpage issu de `docs/uas_invite.md` §7. Ce document détaille la conception
-d'implémentation phase par phase. **Phases 1 à 5 réalisées** (2026-07-12) ;
-phase 6 (multipart) à venir.
+d'implémentation phase par phase. **Phases 1 à 6 réalisées** (2026-07-12).
 
 Rappel des phases :
 
@@ -942,3 +941,58 @@ never created », lié au `:tc` média, indépendant de la phase 4).
 | `lib/elixipp/ElixippCLI.ex` | `start_uas_server/4` (register + invite) ; réf → `ScenarioUAS` ; labels par kind ; exemples d'aide |
 | `scenarios/uas_invite.exs` | nouveau scénario de référence call server |
 | `test/scenario_uas_test.exs` | nouveau : fabrique (domaine/quota/dispatch/alias) |
+
+---
+
+# Phase 6 — Sérialisation multipart/mixed  *(RÉALISÉE 2026-07-12)*
+
+> Sérialisation RFC 2046 des bodies `multipart/mixed`. Débloque
+> `reply_invite_with_body` avec plusieurs parts.
+
+## Constat
+
+Le **parseur** produisait déjà une liste `[%{contenttype, data, boundary}, …]`,
+mais le **sérialiseur** avait des clauses multipart incohérentes (délimiteur sans
+`--`, `:data` d'un sous-body émis comme header) et jamais exercées, et
+`SIP.Msg.Ops.update_sip_msg({:body, liste>1})` **levait**. À noter : le parseur a
+un **décalage de −2 sur Content-Length** préexistant (`binary_part(body, 0,
+clen-2)`) — hors périmètre ; on produit un Content-Length correct pour le fil
+(octets réels du body) comme le fait déjà le chemin mono-body.
+
+## Ce qui a été fait
+
+1. **`SIP.Msg.Ops.update_sip_msg({:body, parts})`** (liste ≥ 2, `SIPMsgOps.ex`) :
+   valide que chaque part est `%{contenttype, data}`, génère une boundary
+   (`generate_boundary/0` : `elixip-boundary-<hex>`), la pose sur chaque part,
+   fixe `Content-Type: multipart/mixed; boundary=<token>` (format attendu par le
+   parseur : espace, sans guillemets) et `Content-Length = byte_size` du body
+   sérialisé. La clause mono-part `[%{contenttype, data}]` (single body simple)
+   reste prioritaire → un seul part n'est pas multipart.
+2. **Sérialiseur `SIPMsg.ex`** : nouvelles clauses propres —
+   `serialize_body(liste)` = `"\r\n" <> multipart_body(bodies)` ;
+   `multipart_body/1` (public, réutilisé pour le Content-Length) concatène les
+   sous-bodies + boundary de clôture `--boundary--\r\n` ;
+   `serialize_sub_body/1` : `--boundary` CRLF `Content-Type: …` CRLF CRLF data
+   CRLF. L'ancienne clause `serialize_body(map)` (fautive) supprimée.
+3. **`SIP.Session.CallUAS.normalize_bodies/1`** : accepte désormais une liste de
+   1..N maps (≥ 2 → multipart) ; ne lève plus sur liste > 1.
+
+## Tests
+
+- `test/sip_parser_test.exs` : « Build, serialize and re-parse a multipart/mixed
+  body » — construit via `update_sip_msg`, sérialise, reparse → **2 parts,
+  contenttype + data préservés**, boundary unique partagée, Content-Length
+  cohérent (round-trip du chemin réel de `reply_invite_with_body`).
+- `test/uas_invite_test.exs` : le test « multipart rejeté » devient « accepte un
+  body multipart » (`do_reply_invite_with_body/4` passe la liste au dialogue).
+- Non-régression `sip_ops` / `sip_depack` / `sip_parser` / `uas_*` / registrar :
+  verts (65 + 35 combinés).
+
+## Récapitulatif des changements phase 6
+
+| Fichier | Changement |
+|---|---|
+| `SIPMsgOps.ex` | `update_sip_msg({:body, liste≥2})` construit le multipart ; `generate_boundary/0` |
+| `SIPMsg.ex` | `serialize_body(liste)` + `multipart_body/1` (public) + `serialize_sub_body/1` ; clause `serialize_body(map)` fautive retirée |
+| `SIPSessionInvite.ex` | `normalize_bodies/1` accepte les listes multi-parts |
+| `test/sip_parser_test.exs`, `test/uas_invite_test.exs` | round-trip multipart + reply_invite_with_body multipart |

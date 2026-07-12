@@ -162,6 +162,11 @@ defmodule SIP.Msg.Ops do
     String.replace(random_branch, ~r/[^a-f0-9]/, "")
   end
 
+  @doc "Generate a unique MIME multipart boundary token (RFC 2046)."
+  def generate_boundary() do
+    "elixip-boundary-" <> (:crypto.strong_rand_bytes(12) |> Base.encode16(case: :lower))
+  end
+
   @doc "Met a jour ou ajout des champs dans un message SIP"
   def update_sip_msg(sipmsg, fields) when is_list(fields) do
     Enum.reduce(fields, sipmsg, fn {header, value}, acc ->
@@ -204,8 +209,23 @@ defmodule SIP.Msg.Ops do
     sipmsg |> Map.put(:body,  body_data) |>  Map.put(:contentlength, Kernel.byte_size(body_data)) |> Map.put(:contenttype, "application/sdp")
   end
 
-  def update_sip_msg(_sipmsg, { :body, body_list }) when is_list(body_list) do
-    raise "Multipart bodies are not yet supported"
+  # Multipart/mixed body (RFC 2046): a list of two or more sub-bodies. Generate a
+  # boundary, stamp it on every part, set the top-level Content-Type and compute
+  # the Content-Length from the serialized body octets. Each part must be a
+  # `%{contenttype: ct, data: bin}` map (extra keys are preserved).
+  def update_sip_msg(sipmsg, { :body, parts }) when is_list(parts) do
+    if not Enum.all?(parts, &match?(%{contenttype: _, data: _}, &1)) do
+      raise "Multipart body parts must be %{contenttype: ..., data: ...} maps, got #{inspect(parts)}"
+    end
+
+    boundary = generate_boundary()
+    parts = Enum.map(parts, &Map.put(&1, :boundary, boundary))
+    body_octets = SIPMsg.multipart_body(parts)
+
+    sipmsg
+    |> Map.put(:body, parts)
+    |> Map.put(:contenttype, "multipart/mixed; boundary=" <> boundary)
+    |> Map.put(:contentlength, Kernel.byte_size(body_octets))
   end
 
 

@@ -459,20 +459,23 @@ defmodule SIP.Session.CallUAS do
   defp media_opts(opts), do: Keyword.take(opts, [:webrtc, :media])
 
   # Normalize the `bodies` argument accepted by reply_invite_with_body into a
-  # value understood by update_sip_msg/2 ({:body, ...}). Multipart (list > 1)
-  # is not serializable yet (SIP.Msg.Ops raises); reject it with a clear error.
+  # value understood by update_sip_msg/2 ({:body, ...}): a raw binary, a single
+  # %{contenttype, data} map, or a list of such maps (one part → single body,
+  # two or more → multipart/mixed).
   defp normalize_bodies(body) when is_binary(body), do: body
   defp normalize_bodies(%{contenttype: _, data: _} = part), do: [part]
-  defp normalize_bodies([%{contenttype: _, data: _}] = parts), do: parts
 
-  defp normalize_bodies(parts) when is_list(parts) and length(parts) > 1 do
-    raise "reply_invite_with_body: multipart bodies are not yet supported " <>
-            "(multipart serialization is a later phase)"
+  defp normalize_bodies([%{contenttype: _, data: _} | _] = parts) do
+    if Enum.all?(parts, &match?(%{contenttype: _, data: _}, &1)) do
+      parts
+    else
+      raise "reply_invite_with_body: every multipart part must be a %{contenttype, data} map"
+    end
   end
 
   defp normalize_bodies(other) do
     raise "reply_invite_with_body: invalid body #{inspect(other)}; expected a binary, " <>
-            "a %{contenttype, data} map, or a one-element list of such maps"
+            "a %{contenttype, data} map, or a list of such maps"
   end
 
   defp has_sdp?(req) do

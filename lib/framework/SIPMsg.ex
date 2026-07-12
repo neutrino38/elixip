@@ -767,16 +767,29 @@ defmodule SIPMsg do
 		"\r\n" <> body.data
 	end
 
-	# Serialize a sub body of a multipart/mixed body
-	defp serialize_body(body) when is_map(body) do
-		h = "\r\n" <> body.boundary <> "\r\n" <> serialize_headers(body)
-		h <> "\r\n" <> body.data
+	# Serialize a list of two or more sub bodies as a multipart/mixed body. The
+	# leading CRLF is the blank line separating the SIP headers from the body;
+	# multipart_body/1 returns the octets counted by Content-Length.
+	defp serialize_body( bodies ) when is_list(bodies) do
+		"\r\n" <> multipart_body(bodies)
 	end
 
-	# Serialize a list of bodies into multipart/mixed body
-	defp serialize_body( bodies ) when is_list(bodies) do
-		bds = Enum.reduce(bodies, "", fn bd, acc -> acc <> serialize_body(bd) end)
-		bds <> "\r\n" <> Enum.at(bodies, 0).boundary <> "--\r\n"
+	@doc false
+	# Build the octets of a multipart/mixed body (RFC 2046) from a list of sub-body
+	# maps sharing a :boundary — i.e. everything Content-Length counts, from the
+	# first "--boundary" delimiter down to the closing "--boundary--". Shared by
+	# the serializer and by SIP.Msg.Ops.update_sip_msg/2 (Content-Length).
+	def multipart_body(bodies) when is_list(bodies) do
+		boundary = Enum.at(bodies, 0).boundary
+		Enum.map_join(bodies, "", &serialize_sub_body/1) <> "--" <> boundary <> "--\r\n"
+	end
+
+	# One MIME part: delimiter line, its Content-Type, blank line, data, trailing
+	# CRLF (the CRLF that precedes the next boundary delimiter).
+	defp serialize_sub_body(%{ boundary: boundary, contenttype: ctype, data: data }) do
+		"--" <> boundary <> "\r\n" <>
+			"Content-Type: " <> to_string(ctype) <> "\r\n\r\n" <>
+			data <> "\r\n"
 	end
 
 
