@@ -386,19 +386,39 @@ defmodule SIP.Scenario do
 
   # ── on_events event-type inference (compile time) ─────────────────────────
 
-  # Prepend the inferred event type (stored in the process dict) to a receive
-  # clause body, so the trailing `goto` picks it up.
+  # Instrument a receive clause with two compile-time additions:
+  #   1. store the inferred event type in the process dict, so the trailing
+  #      `goto` picks it up (event-type inference);
+  #   2. auto-store the matched event: bind it to a hygienic variable via an
+  #      as-pattern (`pattern = evt`) and prepend a call to
+  #      `SIP.Session.CallUAS.auto_store/2`, which stashes an inbound
+  #      INVITE/UPDATE (and its transaction pid) in the context so `reply_invite*`
+  #      can reply without re-passing the request. auto_store is a fully-qualified
+  #      runtime call (not an import): it works in every scenario — including a
+  #      UAC receiving a re-INVITE — and is a no-op for non-offer events.
   defp instrument_receive_clause({:->, meta, [head, body]}) do
+    # Compute the type from the ORIGINAL head, before the as-pattern rewrite.
     type = clause_event_type(head)
+    evt = Macro.unique_var(:evt, __MODULE__)
 
     new_body =
       quote do
         Process.put(:scenario_event_type, unquote(type))
+        var!(sip_ctx) = SIP.Session.CallUAS.auto_store(var!(sip_ctx), unquote(evt))
         unquote(body)
       end
 
-    {:->, meta, [head, new_body]}
+    {:->, meta, [bind_event_var(head, evt), new_body]}
   end
+
+  # Wrap the clause pattern in an as-pattern binding it to `evt`, keeping any
+  # `when` guard (which may reference variables bound by the pattern). Leaves
+  # anything unexpected untouched.
+  defp bind_event_var([{:when, m, [pattern | guards]}], evt),
+    do: [{:when, m, [{:=, [], [pattern, evt]} | guards]}]
+
+  defp bind_event_var([pattern], evt), do: [{:=, [], [pattern, evt]}]
+  defp bind_event_var(other, _evt), do: other
 
   # The clause head is a one-element list holding the pattern, optionally wrapped
   # in a `when` guard.

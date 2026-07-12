@@ -63,6 +63,22 @@ defmodule SIP.Session.CallUAC do
           SIP.Session.CallUAC.ack(var!(sip_ctx), unquote(transaction_id))
         end
       end
+
+      # Reply to the most recently received INVITE / re-INVITE / UPDATE (stored
+      # in the context by on_events auto_store) with a code that carries NO SDP.
+      # Common to UAC and UAS: a UAC in an established dialog can receive a
+      # re-INVITE/UPDATE and must be able to reply to it. SDP-bearing replies
+      # (183 / 2xx to an INVITE) are the job of reply_invite_with_sdp /
+      # reply_invite_with_body (phase 3); do_reply_invite guards against them.
+      defmacro reply_invite(code, reason \\ nil, upd_fields \\ []) do
+        quote do
+          SIP.Scenario.Monitor.note_command(:sip, "reply_invite #{unquote(code)}")
+
+          var!(sip_ctx) =
+            SIP.Session.CallUAS.do_reply_invite(
+              var!(sip_ctx), unquote(code), unquote(reason), unquote(upd_fields))
+        end
+      end
     end
   end
 
@@ -248,4 +264,135 @@ defmodule SIP.Session.CallUAC do
     bye = bye_message(sip_ctx)
     SIP.Session.send_sip_request(sip_ctx, bye, 0)
   end
+end
+
+defmodule SIP.Session.CallUAS do
+  @moduledoc """
+  UAS-side INVITE helpers: automatic storage of the inbound offer request and
+  server reply macros.
+
+  `auto_store/2` is called by the `on_events` instrumentation (SIP.Scenario) for
+  every matched event and stashes the most recent inbound INVITE / re-INVITE /
+  UPDATE (plus its server-transaction pid) in the context, so the reply macros
+  need not re-pass the request.
+
+  Reply macros:
+    * `reply_invite/1..3` — defined in `SIP.Session.CallUAC` (common to UAC and
+      UAS, since a UAC in a dialog can receive a re-INVITE/UPDATE). Backed by
+      `do_reply_invite/4` here.
+    * `redirect_invite/1..3` and `challenge_invite/1..2` — server-only, injected
+      by `use SIP.Session.CallUAS`.
+
+  All replies go through `SIP.Dialog.reply/5` / `SIP.Dialog.challenge/4`, which
+  do NOT check the dialog state (a scenario may deliberately reply out of order).
+  """
+  require Logger
+
+  defmacro __using__(_opts) do
+    quote do
+      use SIP.Context
+
+      # 3xx redirect to one or more contacts. `contacts` is a String, a
+      # %SIP.Uri{} or a list of either.
+      defmacro redirect_invite(contacts, code \\ 302, reason \\ nil) do
+        quote do
+          SIP.Scenario.Monitor.note_command(:sip, "redirect_invite #{unquote(code)}")
+
+          var!(sip_ctx) =
+            SIP.Session.CallUAS.do_redirect_invite(
+              var!(sip_ctx), unquote(contacts), unquote(code), unquote(reason))
+        end
+      end
+
+      # 401/407 digest challenge of the inbound INVITE. Reuses the dialog layer's
+      # nonce generation / storage (SIP.Dialog.challenge/4).
+      defmacro challenge_invite(realm, code \\ 407) do
+        quote do
+          SIP.Scenario.Monitor.note_command(:sip, "challenge_invite #{unquote(code)}")
+
+          var!(sip_ctx) =
+            SIP.Session.CallUAS.do_challenge_invite(
+              var!(sip_ctx), unquote(realm), unquote(code))
+        end
+      end
+    end
+  end
+
+  @doc """
+  Store the inbound offer request (INVITE / re-INVITE / UPDATE) and its server
+  transaction pid in the context appdata (single slot `:last_uas_req` /
+  `:last_uas_req_tid`), so the reply macros can serve it. No-op for any other
+  event. Called by the on_events instrumentation for every matched event.
+  """
+  def auto_store(sip_ctx, {m, req, trans_pid, _dlg})
+      when m in [:INVITE, :UPDATE] and is_map(req) do
+    sip_ctx
+    |> SIP.Context.appdata_set(:last_uas_req, req)
+    |> SIP.Context.appdata_set(:last_uas_req_tid, trans_pid)
+  end
+
+  def auto_store(sip_ctx, _evt), do: sip_ctx
+
+  @doc """
+  Reply to the stored INVITE/UPDATE with a code that carries NO SDP. Raises for
+  183 or 2xx (they require an SDP body → use reply_invite_with_sdp /
+  reply_invite_with_body, phase 3), except for a 2xx answering an UPDATE that
+  carried no offer (legal without SDP). Backs the `reply_invite` macro.
+  """
+  def do_reply_invite(sip_ctx = %SIP.Context{}, code, reason, upd_fields)
+      when is_integer(code) do
+    req = fetch_stored_req!(sip_ctx)
+
+    if needs_sdp?(code) and not (req.method == :UPDATE and not has_sdp?(req)) do
+      raise "reply_invite: code #{code} requires an SDP body; " <>
+              "use reply_invite_with_sdp/reply_invite_with_body (phase 3)"
+    end
+
+    rc = SIP.Dialog.reply(sip_ctx.dialogpid, req, code, reason, upd_fields)
+    SIP.Context.set(sip_ctx, :lasterr, reply_lasterr(rc))
+  end
+
+  @doc "3xx redirect + Contact(s). `contacts`: String | %SIP.Uri{} | list."
+  def do_redirect_invite(sip_ctx = %SIP.Context{}, contacts, code, reason)
+      when code in 300..399 do
+    req = fetch_stored_req!(sip_ctx)
+    rc = SIP.Dialog.reply(sip_ctx.dialogpid, req, code, reason, contact: contacts)
+    SIP.Context.set(sip_ctx, :lasterr, reply_lasterr(rc))
+  end
+
+  @doc "401/407 digest challenge (reuses the dialog nonce machinery)."
+  def do_challenge_invite(sip_ctx = %SIP.Context{}, realm, code)
+      when code in [401, 407] do
+    req = fetch_stored_req!(sip_ctx)
+    rc = SIP.Dialog.challenge(sip_ctx.dialogpid, req, code, realm)
+    SIP.Context.set(sip_ctx, :lasterr, reply_lasterr(rc))
+  end
+
+  # Prefer the auto-stored offer request; fall back to the initial inbound
+  # request (stashed by the runner) for the atypical case of a reply issued
+  # before any on_events clause matched.
+  defp fetch_stored_req!(sip_ctx) do
+    case SIP.Context.appdata_get(sip_ctx, :last_uas_req) ||
+           SIP.Context.appdata_get(sip_ctx, :inbound_request) do
+      req when is_map(req) -> req
+      _ -> raise "reply_invite*: no stored INVITE/UPDATE to reply to"
+    end
+  end
+
+  defp needs_sdp?(code), do: code == 183 or code in 200..299
+
+  defp has_sdp?(req) do
+    case Map.get(req, :body) do
+      b when is_binary(b) and b != "" -> true
+      [_ | _] -> true
+      _ -> false
+    end
+  end
+
+  # :ok and :ignore (final response already sent — e.g. the auto-487 after a
+  # CANCEL, phase 1 §1.4) both mean success; any other value (transport error,
+  # :invalid_sip_msg, :invalid_transaction…) is surfaced as lasterr.
+  defp reply_lasterr(:ok), do: :ok
+  defp reply_lasterr(:ignore), do: :ok
+  defp reply_lasterr(other), do: other
 end
