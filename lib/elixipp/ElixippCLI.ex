@@ -180,7 +180,23 @@ defmodule Elixipp.CLI do
   # the operator stops the tool. `limit` caps the number of concurrent scenario
   # instances (REGISTER beyond it are rejected with 503). Never returns.
   @spec run_server_mode(module(), atom(), keyword(), pos_integer()) :: no_return()
-  defp run_server_mode(module, :uas_register, opts, limit) do
+  defp run_server_mode(module, :uas_register, opts, limit),
+    do: start_uas_server(module, :uas_register, opts, limit)
+
+  defp run_server_mode(module, :uas_invite, opts, limit),
+    do: start_uas_server(module, :uas_invite, opts, limit)
+
+  defp run_server_mode(_module, type, _opts, _limit) do
+    abort("Type de scénario serveur non supporté : #{inspect(type)}", 2)
+  end
+
+  # Shared bring-up for both UAS server kinds: bind the UDP socket, bootstrap the
+  # stack, start the ScenarioUAS factory, register it as the registration or call
+  # processing module, start the listeners and enter the (monitored or plain)
+  # server loop. Never returns.
+  @spec start_uas_server(module(), :uas_register | :uas_invite, keyword(), pos_integer()) ::
+          no_return()
+  defp start_uas_server(module, kind, opts, limit) do
     listeners = parse_listeners(opts)
     max_run = opts[:max_run]
 
@@ -198,39 +214,43 @@ defmodule Elixipp.CLI do
     SIP.Scenario.Runner.bootstrap_stack()
 
     {:ok, _pid} =
-      Elixip.RegistrarUAS.start_link(scenario_module: module, max_instances: limit, max_run: max_run)
+      Elixip.ScenarioUAS.start_link(scenario_module: module, max_instances: limit, max_run: max_run)
 
-    :ok = SIP.Session.ConfigRegistry.set_registration_processing_module(Elixip.RegistrarUAS)
+    :ok =
+      case kind do
+        :uas_register -> SIP.Session.ConfigRegistry.set_registration_processing_module(Elixip.ScenarioUAS)
+        :uas_invite -> SIP.Session.ConfigRegistry.set_call_processing_module(Elixip.ScenarioUAS)
+      end
 
     started = start_listeners(listeners)
 
     # --monitor wires the same live call table as the UAC parallel mode. Without
     # it (or on a non-interactive stdin) we fall back to the plain text loop.
     if opts[:monitor] do
-      run_server_monitored(module, limit, max_run, started)
+      run_server_monitored(module, kind, limit, max_run, started)
     else
-      print_server_header(module, limit, started)
+      print_server_header(module, kind, limit, started)
       server_loop(module, max_run)
     end
   end
 
-  defp run_server_mode(_module, type, _opts, _limit) do
-    abort("Type de scénario serveur non supporté : #{inspect(type)}", 2)
-  end
-
-  defp print_server_header(module, limit, started) do
-    IO.puts("elixipp — mode serveur UAS Register (#{inspect(module)})")
+  defp print_server_header(module, kind, limit, started) do
+    IO.puts("elixipp — mode serveur #{server_kind_label(kind)} (#{inspect(module)})")
     IO.puts("  instances max : #{limit}")
     IO.puts("  listeners     : #{format_listeners(started)}")
     IO.puts("  (tapez 'q' puis Entrée pour arrêter)")
   end
 
+  defp server_kind_label(:uas_register), do: "UAS Register"
+  defp server_kind_label(:uas_invite), do: "UAS Invite (call server)"
+
   # Live monitored server loop: bring up Owl + the monitor, render the call table
   # in a live block and react to the keyboard (q / Ctrl+D / arrows). On a
   # non-interactive stdin the live table is impossible, so we degrade to the plain
   # text server loop. Never returns.
-  @spec run_server_monitored(module(), pos_integer(), non_neg_integer() | nil, list()) :: no_return()
-  defp run_server_monitored(module, limit, max_run, started) do
+  @spec run_server_monitored(module(), atom(), pos_integer(), non_neg_integer() | nil, list()) ::
+          no_return()
+  defp run_server_monitored(module, kind, limit, max_run, started) do
     {:ok, _} = Application.ensure_all_started(:owl)
     {:ok, _} = SIP.Scenario.Monitor.start()
 
@@ -245,7 +265,7 @@ defmodule Elixipp.CLI do
       start_input_reader(self())
       server_monitor_loop(%{scroll_offset: 0, raw?: raw?, shutdown: :none, module: module, max_run: max_run})
     else
-      print_server_header(module, limit, started)
+      print_server_header(module, kind, limit, started)
       server_loop(module, max_run)
     end
   end
@@ -254,11 +274,11 @@ defmodule Elixipp.CLI do
   defp server_monitor_loop(state) do
     receive do
       :graceful_stop when state.shutdown == :none ->
-        Elixip.RegistrarUAS.shutdown_all(:elixipp_graceful)
+        Elixip.ScenarioUAS.shutdown_all(:elixipp_graceful)
         state = %{state | shutdown: :graceful}
         Owl.LiveScreen.update(:display, {state.scroll_offset, state.shutdown})
         # If no instance was active, exit right away.
-        if Elixip.RegistrarUAS.stats().active == 0 do
+        if Elixip.ScenarioUAS.stats().active == 0 do
           server_monitor_halt(state)
         else
           server_monitor_loop(state)
@@ -288,7 +308,7 @@ defmodule Elixipp.CLI do
     after
       500 ->
         Owl.LiveScreen.update(:display, {state.scroll_offset, state.shutdown})
-        stats = Elixip.RegistrarUAS.stats()
+        stats = Elixip.ScenarioUAS.stats()
 
         # Auto-halt when max_run instances have all completed naturally.
         # RegistrarUAS already refuses new registrations once total_started >= max_run,
@@ -319,7 +339,7 @@ defmodule Elixipp.CLI do
   end
 
   defp drain_uas_instances do
-    if Elixip.RegistrarUAS.stats().active > 0 do
+    if Elixip.ScenarioUAS.stats().active > 0 do
       Process.sleep(200)
       drain_uas_instances()
     end
@@ -331,7 +351,7 @@ defmodule Elixipp.CLI do
       total_succeeded: succ,
       total_aborted: aborted,
       total_failed: failed
-    } = Elixip.RegistrarUAS.stats()
+    } = Elixip.ScenarioUAS.stats()
 
     IO.puts("══ Résumé ══════════════════")
     IO.puts("  Scénario    : #{inspect(module)}")
@@ -486,7 +506,7 @@ defmodule Elixipp.CLI do
       line when is_binary(line) ->
         if String.trim(line) == "q" do
           IO.puts("Arrêt propre en cours — attente des instances actives…")
-          Elixip.RegistrarUAS.shutdown_all(:elixipp_graceful)
+          Elixip.ScenarioUAS.shutdown_all(:elixipp_graceful)
           drain_uas_instances()
           IO.puts("Serveur arrêté.")
           print_uas_summary(module)
@@ -499,7 +519,7 @@ defmodule Elixipp.CLI do
 
   defp max_run_watcher(max_run, module) do
     Process.sleep(500)
-    stats = Elixip.RegistrarUAS.stats()
+    stats = Elixip.ScenarioUAS.stats()
 
     # Wait until all started instances have completed naturally.
     # RegistrarUAS already refuses new registrations once total_started >= max_run.
@@ -1116,6 +1136,8 @@ defmodule Elixipp.CLI do
       elixipp -l 50 --listen udp:5060 scenarios/uas_register.exs  # serveur, 50 enregistrements max
       elixipp --listen tls:5061 scenarios/uas_register.exs  # serveur registrar UAS (TLS)
       elixipp --listen wss:5065 scenarios/uas_register.exs  # serveur registrar UAS (WSS)
+      elixipp --listen udp:5060 scenarios/uas_invite.exs    # serveur d'appels UAS (répond aux INVITE)
+      elixipp -l 20 --listen udp:5060 scenarios/uas_invite.exs  # serveur d'appels, 20 appels simultanés max
 
     OPTIONS
       -m, --monitor      Affiche un tableau live des appels en cours.

@@ -1,8 +1,8 @@
 # Plan d'implémentation — scénarios UAS INVITE
 
 Découpage issu de `docs/uas_invite.md` §7. Ce document détaille la conception
-d'implémentation phase par phase. **Phases 1 à 4 réalisées** (2026-07-12) ;
-phases 5-6 à venir.
+d'implémentation phase par phase. **Phases 1 à 5 réalisées** (2026-07-12) ;
+phase 6 (multipart) à venir.
 
 Rappel des phases :
 
@@ -878,3 +878,67 @@ never created », lié au `:tc` média, indépendant de la phase 4).
 | `SIPSessionInvite.ex` | nouveau module `SIP.Session.CallInDialog` (macros send_* + reply_request + backing + helpers) ; `use CallInDialog` dans CallUAC & CallUAS ; `send_BYE`/`client_bye`/`bye_message` retirés de CallUAC |
 | `lib/scenarios/uac_invite.ex`, `scenarios/uac_invite.exs` | MESSAGE/BYE : `SIP.Dialog.reply` direct → `reply_request` |
 | `test/uas_invite_test.exs` | `StubDialog` +`{:newreq}` ; tests send_* + reply_request |
+
+---
+
+# Phase 5 — elixipp (fabrique généralisée + mode serveur :uas_invite)  *(RÉALISÉE 2026-07-12)*
+
+> Fabrique unique double-behaviour, mode serveur `:uas_invite` du CLI, contrôle
+> de domaine → 604, scénario de référence, tests.
+
+## Ce qui a été fait
+
+1. **`Elixip.RegistrarUAS` → `Elixip.ScenarioUAS`** (fichier renommé
+   `ElixippScenarioUAS.ex`). Le GenServer implémente désormais **les deux**
+   behaviours `SIP.Session.Registrar` **et** `SIP.Session.Call` :
+   - `on_new_call/3` : contrôle de domaine d'abord (R-URI vs `domains`) →
+     `{:reject, 604, "Does Not Exist Anywhere"}` sinon quota (`max_run` puis
+     `max_instances`) → 503, sinon spawn d'instance → `{:accept, pid}` ;
+   - `on_call_end/2` et `on_registration_expired/2` fusionnés sur un cast
+     `{:instance_ended, …}` ;
+   - quota + spawn factorisés (`accept_or_reject/4`) partagés REGISTER/INVITE ;
+   - `domains` résolu à l'`init` : option `:domains` explicite sinon
+     `scenario_module.__scenario_config__()[:domains]` sinon `:any` (catch-all) ;
+     normalisé (host unique → liste, comparaison **insensible à la casse**) ;
+   - nouveau compteur `total_rejected_domain` dans `stats/0`.
+2. **Alias `Elixip.RegistrarUAS`** conservé (module de délégation `defdelegate`
+   vers `ScenarioUAS`) → les tests `uas_register` et tout code existant marchent
+   sans changement (même GenServer sous-jacent, nom `Elixip.ScenarioUAS`).
+3. **`ElixippCLI`** : toutes les réf. `Elixip.RegistrarUAS` → `Elixip.ScenarioUAS` ;
+   `run_server_mode/4` factorisé en `start_uas_server/4` couvrant `:uas_register`
+   **et** `:uas_invite` (nouvelle clause) ; le mode `:uas_invite` enregistre la
+   fabrique via `set_call_processing_module/1` (le registrar reste sur
+   `set_registration_processing_module/1`) ; en-tête/label paramétrés par le
+   `kind` (`server_kind_label/1`) ; exemples d'aide ajoutés.
+4. **Scénario de référence `scenarios/uas_invite.exs`** (`UAS.InviteExample`,
+   `uas :invite`, `config domains: :any`) : `media_connect` → `reply_invite(180)`
+   → `reply_invite_with_sdp(200)` → echo, gère ACK / re-INVITE / UPDATE / BYE
+   (`reply_request`) / CANCEL / `dialog_terminated`.
+
+## Décision / notes
+
+- Type de scénario auto-détecté par `__scenario_type__/0` (`uas :invite` →
+  `:uas_invite`) → aucune option CLI nouvelle ; `elixipp --listen udp:5060
+  scenarios/uas_invite.exs` suffit.
+- L'ACK d'un 2xx ne remonte toujours pas e2e (écart phase 1) : le scénario de
+  référence n'en **dépend pas** (il passe direct en `in_call` après le 200 et
+  gère l'ACK s'il arrive).
+
+## Tests
+
+- **`test/scenario_uas_test.exs`** (nouveau, 8/8) : `on_new_call` 604 (domaine
+  non servi) / accept (match insensible à la casse) / `:any` catch-all / quota
+  503 / `max_run` 503 / override `:domains` ; **dispatch `ConfigRegistry`
+  → `ScenarioUAS.on_new_call`** (câblage du mode serveur) ; alias `RegistrarUAS`
+  délègue bien au même serveur.
+- Non-régression : `uas_register` (alias), `uas_invite`, `sip_call`,
+  `scenario_engine` — 63/63 combinés. `mix escript.build` OK, aide à jour.
+
+## Récapitulatif des changements phase 5
+
+| Fichier | Changement |
+|---|---|
+| `lib/elixipp/ElixippScenarioUAS.ex` | nouveau (remplace `ElixippRegistrarUAS.ex`) : `Elixip.ScenarioUAS` double-behaviour + contrôle domaine/604 + `Elixip.RegistrarUAS` alias |
+| `lib/elixipp/ElixippCLI.ex` | `start_uas_server/4` (register + invite) ; réf → `ScenarioUAS` ; labels par kind ; exemples d'aide |
+| `scenarios/uas_invite.exs` | nouveau scénario de référence call server |
+| `test/scenario_uas_test.exs` | nouveau : fabrique (domaine/quota/dispatch/alias) |
