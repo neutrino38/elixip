@@ -214,13 +214,13 @@ defmodule SIP.Session do
     """
     # Dispatch an initial inbound request to its processing module. The dialog
     # layer always provides the transaction pid that created the dialog; it is
-    # forwarded to the registration callback (on_new_registration/3) but ignored
-    # for INVITE (on_new_call/2 keeps its arity).
-    def dispatch(dialog_id, req, _transaction_id) when is_map(req) and req.method == :INVITE do
+    # forwarded to both the registration callback (on_new_registration/3) and
+    # the call callback (on_new_call/3).
+    def dispatch(dialog_id, req, transaction_id) when is_map(req) and req.method == :INVITE do
       internal_dispatch(
         :callprocessing,
         :on_new_call,
-        [dialog_id, req],
+        [dialog_id, req, transaction_id],
         "No call server defined"
       )
     end

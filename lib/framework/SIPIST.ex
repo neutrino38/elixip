@@ -57,6 +57,16 @@ defmodule SIP.IST do
                     message: "Replied 200 OK to CANCEL"])
       # Terminate transaction - timers are handled inside reply_to_UAC
       { _code, new_state } = reply_to_UAC(state, state.msg, 487, "Request interrupted", [], state.totag);
+
+      # The IST keeps its RFC handling (200 to CANCEL + 487 to the INVITE, no
+      # round-trip to the app), but now notifies the dialog layer so it can
+      # surface the CANCEL to the app and tear the early dialog down. state.app
+      # is the dialog pid (set by process_UAS_request); guard in case processing
+      # failed and it was never set.
+      if is_pid(new_state.app) do
+        GenServer.cast(new_state.app, {:sipmsg, req, self()})
+      end
+
       new_state
     else
       Logger.debug([ transid: state.msg.transid,  module: __MODULE__,
@@ -87,8 +97,14 @@ defmodule SIP.IST do
     Logger.info([ transid: state.msg.transid,  module: __MODULE__,
                     message: "SIP Request #{state.msg.method} received"])
     case process_UAS_request(state) do
-      # Schedule timer F (max NIST transaction)
-      { :ok, state } -> { :noreply, schedule_timer_F(state) }
+      # Request accepted by the upper layer. RFC 3261 §17.2.1: the IST emits the
+      # 100 Trying itself so the TU (scenario) never has to. Sent AFTER
+      # process_UAS_request so a reject (§1.2) goes out alone, without a 100
+      # first. reply_to_request accepts code 100 without a totag; fsm_reply moves
+      # the IST to :proceeding, and any later 100/1xx from the app stays accepted.
+      { :ok, state } ->
+        { _rc, state } = reply_to_UAC(state, state.msg, 100, "Trying", [], nil)
+        { :noreply, schedule_timer_F(state) }
 
       # In case of failure, timerK is scheduled by internal_reply()
       { :upperlayerfailure, state } -> { :noreply, state }

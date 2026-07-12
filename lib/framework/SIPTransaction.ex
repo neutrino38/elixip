@@ -181,6 +181,14 @@ alias SIP.NetUtils
     end
   end
 
+  # An ACK never creates a server transaction (RFC 3261 §17.2.3). Guard against
+  # the transport routing one here (symmetric to the UAC-side ACK guard): the ACK
+  # of a 2xx is dispatched straight to the dialog by the transport layer instead.
+  def start_uas_transaction(sipmsg, _params) when is_this_req(sipmsg, :ACK) do
+    Logger.error(module: __MODULE__, message: "SIP request ACK cannot create a server transaction")
+    { :req_cannot_create_trans, nil }
+  end
+
   def start_uas_transaction(sipmsg, { _local_ip, _local_port, _transport_str, upperlayer })
       when is_map(sipmsg) do
 

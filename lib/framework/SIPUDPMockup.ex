@@ -102,8 +102,10 @@ defmodule SIP.Test.Transport.UDPMockup do
   defp handle_resp(state, code, sipresp) do
     cond do
       state.scenario == :inboundinvite and state.testapppid != nil ->
-        # Forward event to the test process
+        # Forward event to the test process. 100 is forwarded too so tests can
+        # assert the IST-emitted automatic 100 Trying.
         case code do
+          100 -> send(state.testapppid, code)
           180 -> send(state.testapppid, code)
           c when c in 200..699 -> send(state.testapppid, c)
           _ -> nil

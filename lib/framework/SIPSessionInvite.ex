@@ -2,7 +2,11 @@
 # Part of the SIP.Session namespace; see SIPSession.ex for the common core.
 
 defmodule SIP.Session.Call do
-  @callback on_new_call(dialog_id :: pid, invitereq :: map) :: { :accept, pid } | { :reject, integer, binary }
+  # `transaction_id` is the server transaction (IST) that created the dialog,
+  # aligned on on_new_registration/3. Replies go through the dialog, so an
+  # implementation may ignore it.
+  @callback on_new_call(dialog_id :: pid, invitereq :: map, transaction_id :: pid) ::
+              { :accept, pid } | { :reject, integer, binary }
   @callback on_call_end(dialog_id :: pid, app_pid :: pid) :: nil
 end
 

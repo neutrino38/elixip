@@ -62,7 +62,9 @@ defmodule SIP.DialogImpl do
   end
 
   defp allows(:INVITE) do
-    [:BYE, :UPDATE, :ACK, :MESSAGE, :INFO, :INVITE, :REFER]
+    # :NOTIFY — implicit subscription of a REFER (RFC 3515).
+    # :OPTIONS — in-dialog keepalive.
+    [:BYE, :UPDATE, :ACK, :MESSAGE, :INFO, :INVITE, :REFER, :NOTIFY, :OPTIONS]
   end
 
   defp allows(:OPTIONS) do
@@ -378,15 +380,20 @@ defmodule SIP.DialogImpl do
         send(app_id, {req.method, req, pid, self()})
         {:ok, Map.put(state, :app, app_id)}
 
-      # Session has not been created. Abort dialog
+      # Session has not been created. Abort dialog and propagate the requested
+      # SIP status. The stop reason is the 4-tuple {:reject, code, reason, totag}
+      # — a VALID GenServer.init/1 stop return — which SIP.Dialog.start_dialog and
+      # process_incoming_request map back to a SIP response on the server
+      # transaction (registrar quota 503, UAS domain control 604, …). The totag
+      # (generated above) is embedded because a reply with code > 100 needs one.
       {:reject, code, reason} ->
-        Logger.error(
+        Logger.info(
           dialogpid: "#{inspect(self())}",
           module: __MODULE__,
-          message: "Failed to create the app process. Err: #{code}. Aborting dialog creation."
+          message: "App rejected the request with #{code} #{reason}. Aborting dialog creation."
         )
 
-        {:stop, :abnormal, reason}
+        {:stop, {:reject, code, reason, state.totag}}
     end
   end
 
@@ -516,6 +523,15 @@ defmodule SIP.DialogImpl do
   message is `self()` here, i.e. the same pid the app knows as its dialog.
   """
   def terminate(reason, state) do
+    # Unwrap {:shutdown, r} (used e.g. for a clean CANCEL teardown) so the app
+    # sees the bare reason it expects, preserving the {:dialog_terminated, _, r}
+    # contract. Bare-atom reasons (:normal, :tcp_closed, …) pass through.
+    reason =
+      case reason do
+        {:shutdown, r} -> r
+        r -> r
+      end
+
     if is_pid(state.app) do
       send(state.app, {:dialog_terminated, self(), reason})
     end
@@ -659,7 +675,27 @@ defmodule SIP.DialogImpl do
   # sent by calling process_incoming_request(). Typically
   # from NIST or IST transaction processes. Also get
 
+  # ACK to a 2xx: it carries no transaction (RFC 3261 §17.2.3) and reuses the
+  # INVITE CSeq, so it must bypass the generic in-dialog pipeline (on_new_transaction
+  # would drop it and check_seqno would reject it). Forward it as an app event;
+  # its body may carry a delayed SDP offer. Nothing to reply to an ACK (pid nil).
   @impl true
+  def handle_cast({:sipmsg, msg, _transact_pid}, state) when is_req(msg) and msg.method == :ACK do
+    if is_pid(state.app), do: send(state.app, {:ACK, msg, nil, self()})
+    {:noreply, state}
+  end
+
+  # CANCEL: the IST has already replied 200 (CANCEL) + 487 (INVITE) and then
+  # notified us. Surface the CANCEL to the app and tear the early dialog down;
+  # terminate/2 will follow with {:dialog_terminated, _, :cancelled}. The
+  # {:shutdown, _} reason avoids a spurious GenServer crash report.
+  # NB: this also fires if an outbound (UAC) dialog receives a CANCEL — a rare
+  # case where tearing down on {:shutdown, :cancelled} is equally acceptable.
+  def handle_cast({:sipmsg, msg, transact_pid}, state) when is_req(msg) and msg.method == :CANCEL do
+    if is_pid(state.app), do: send(state.app, {:CANCEL, msg, transact_pid, self()})
+    {:stop, {:shutdown, :cancelled}, state}
+  end
+
   def handle_cast({:sipmsg, msg, transact_pid}, state) when is_req(msg) do
     Logger.debug(
       dialogpid: self(),

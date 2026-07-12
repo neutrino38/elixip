@@ -3,6 +3,16 @@ defmodule TestCall do
   require Logger
   @behaviour SIP.Session.Call
 
+  # Forward an app-side event to the current test process when it registered
+  # itself as :sip_call_probe. Lets a test assert on events that reach the app
+  # (CANCEL, ACK, dialog termination) rather than the wire. No-op otherwise.
+  defp notify_probe(msg) do
+    case Process.whereis(:sip_call_probe) do
+      nil -> :ok
+      pid -> send(pid, msg)
+    end
+  end
+
   defp send_bye(state) do
     bye = %{
       "Max-Forwards" => "70",
@@ -85,9 +95,15 @@ a=rtcp-mux
       { :INVITE, req, _trans_pid, dialog_pid } ->
 
         Logger.info("CALLSERVER: processing call")
-        SIP.Dialog.reply(dialog_pid, req, 100, "Trying", [])
+        # No reply(100): the IST now emits 100 Trying automatically (RFC 3261 §17.2.1).
         :erlang.start_timer(100, self(), :ringing)
         answered_call_handling_process_loop(%{state | dlg_id: dialog_pid, state: :proceeding, req: req })
+
+      # ACK of our 2xx forwarded by the dialog layer (pid nil, nothing to reply).
+      { :ACK, _ack, _trans_pid, _dialog_pid } ->
+        Logger.info("CALLSERVER: received ACK")
+        notify_probe(:got_ack)
+        answered_call_handling_process_loop(state)
 
       { :timeout, _timerRef, :ringing } ->
         SIP.Dialog.reply(state.dlg_id, state.req, 180, "Ringing", [])
@@ -148,7 +164,7 @@ a=rtcp-mux
       { :INVITE, req, _trans_pid, dialog_pid } ->
 
         Logger.info("CALLSERVER: processing call - will not answer")
-        SIP.Dialog.reply(dialog_pid, req, 100, "Trying", [])
+        # No reply(100): the IST emits 100 Trying automatically now.
         :erlang.start_timer(100, self(), :ringing)
         %{state | dlg_id: dialog_pid, state: :proceeding, req: req }
 
@@ -165,19 +181,19 @@ a=rtcp-mux
       { :timeout, _timerRef, :waitabit } ->
         %{state | state: :end}
 
-      # Received CANCEL
-      { :CANCEL, cancel, _trans_pid, dialog_pid } ->
-        if state.state == :ringing do
-          SIP.Dialog.reply(dialog_pid, cancel, cancel, "OK", [])
-          :erlang.start_timer(100, self(), :cancelling)
-          %{state | state: :cancelling}
-        else
-          Logger.warning("Ignoring unexpected CANCEL")
-          state
-        end
+      # Received CANCEL forwarded by the dialog layer. The IST already answered
+      # 200 to the CANCEL and 487 to the INVITE, so there is nothing to reply
+      # here — just surface the event to the test. The dialog then tears down and
+      # {:dialog_terminated, _, :cancelled} follows.
+      { :CANCEL, _cancel, _trans_pid, _dialog_pid } ->
+        Logger.info("CALLSERVER: received CANCEL")
+        notify_probe(:got_cancel)
+        %{state | state: :cancelling}
 
-      { :timeout, _timerRef, :cancelling } ->
-        SIP.Dialog.reply(state.dlg_id, state.req, 487, "Request Terminated", [])
+      # Dialog terminated (here: after a CANCEL). End the scenario.
+      { :dialog_terminated, _dialog_pid, reason } ->
+        Logger.info("CALLSERVER: dialog terminated (#{inspect(reason)})")
+        notify_probe({:got_terminated, reason})
         %{state | state: :end}
 
       :stop ->
@@ -195,8 +211,12 @@ a=rtcp-mux
 
 
   @impl true
-  def on_new_call(dialog_id, req) do
+  def on_new_call(dialog_id, req, transaction_id) do
     Logger.info("on_new_call called in test")
+    # transaction_id is the server transaction that created the dialog (arity 3,
+    # aligned on on_new_registration/3); replies go through the dialog so it is
+    # only asserted to be a pid here.
+    true = is_pid(transaction_id)
     state = %{ state: :idle, dlg_id: dialog_id, req: req }
     case SIP.Uri.get_uri_param(req.ruri, "scenario") do
       { :ok, "answered_call" } ->
@@ -204,16 +224,32 @@ a=rtcp-mux
         { :accept, pid }
 
       { :ok, "timeout_call" } ->
-        pid = spawn_link(fn -> timeout_call_handling_process_loop(state) end)
+        # Trap exits: this fixture is spawn_link'd to the dialog (unlike the real
+        # spawn_monitor'd UAS instances). On a CANCEL the dialog stops with
+        # {:shutdown, :cancelled}; without trapping, that exit signal would kill
+        # this process before it drains the queued {:CANCEL}/{:dialog_terminated}
+        # events. Trapping turns the signal into an (ignored) {:EXIT, …} message.
+        pid = spawn_link(fn ->
+          Process.flag(:trap_exit, true)
+          timeout_call_handling_process_loop(state)
+        end)
         { :accept, pid }
+
+      # Application-level reject: the requested SIP status must reach the wire
+      # (validates the reject propagation of phase 1: {:reject, code, reason} →
+      # DialogImpl.init stop → SIP response). 604 mimics the future UAS domain
+      # control ("Does Not Exist Anywhere").
+      { :ok, "reject_604" } ->
+        Logger.info("on_new_call: rejecting call with 604")
+        { :reject, 604, "Does Not Exist Anywhere" }
 
         { :ok, truc } ->
           Logger.info("on_new_call: unsupported scenario #{truc}")
-          { :reject, :noscenario, "unsupported scenario #{truc}" }
+          { :reject, 404, "unsupported scenario #{truc}" }
 
         { :nosuchparam, nil } ->
           Logger.info("on_new_call: no scenario specified in RURI")
-          { :reject, :noscenario, "no scenario specified in RURI" }
+          { :reject, 404, "no scenario specified in RURI" }
 
     end
   end
@@ -324,6 +360,9 @@ defmodule SIP.Test.Call do
 
   test "Simulating an answered call and let the call end" do
     { parsed_msg, branch_id } = simulate_remote_invite("answered_call")
+    # The IST emits 100 Trying automatically (RFC 3261 §17.2.1); the scenario
+    # never sends it.
+    assert_receive(100, 2000, "Failed to receive the automatic 100 Trying")
     assert_receive(180, 2000, "Failed to receive 180 Ringing on time")
     assert_receive(200, 2000, "Failed to receive 200 OK on time")
     Process.sleep(1000)
@@ -364,16 +403,27 @@ defmodule SIP.Test.Call do
   end
 
   test "Simulating an abandonned call" do
+    # Register as the probe so the app forwards the CANCEL / dialog termination.
+    Process.register(self(), :sip_call_probe)
     { parsed_msg, branch_id } = simulate_remote_invite("timeout_call")
     assert_receive(180, 2000, "Failed to receive 180 Ringing on time")
     Process.sleep(100)
     simulate_remote_cancel(parsed_msg, branch_id)
+    # The IST answers 487 to the INVITE automatically...
     assert_receive(487, 1000, "Failed to receive 487 Request interrupted ")
+    # ...and (phase 1) the CANCEL is now surfaced to the app, which then sees the
+    # dialog terminate with reason :cancelled.
+    assert_receive(:got_cancel, 1000, "App did not receive the CANCEL event")
+    assert_receive({:got_terminated, :cancelled}, 1000, "App did not receive dialog_terminated :cancelled")
     Process.sleep(100)
+    Process.unregister(:sip_call_probe)
+  end
 
-    #Simulate ACK sending
-    _ack = simulate_remote_ack(parsed_msg, branch_id)
-    Process.sleep(1000)
+  test "Rejecting an incoming call maps the reject code to the wire" do
+    # on_new_call returns {:reject, 604, ...}; phase 1 propagates it as a real
+    # 604 SIP response (before the fix any reject was rewritten to 403).
+    { _parsed_msg, _branch_id } = simulate_remote_invite("reject_604")
+    assert_receive(604, 2000, "Failed to receive 604 rejection on the wire")
   end
 
 end

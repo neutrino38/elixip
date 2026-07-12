@@ -86,6 +86,13 @@ alias SIP.Transac
         Logger.info([ dialogpid: "#{inspect(dlg_pid)}", module: __MODULE__, message: "Created dialog #{inspect(dialog_id)}." ])
         { :ok, dlg_pid, dialog_id }
 
+      # Application rejected the request in DialogImpl.init/1 (nominal refusal,
+      # not a failure): propagate the reject tuple verbatim. process_incoming_request
+      # turns it into the requested SIP status. Logged at info, not error.
+      { :error, { :reject, code, reason, totag } } ->
+        Logger.info([ module: __MODULE__, message: "Dialog creation rejected by app: #{code} #{reason}." ])
+        { :error, { :reject, code, reason, totag } }
+
       { :error, err } when is_exception(err) ->
         Logger.error([ module: __MODULE__, message: "Failed to create dialog: exception raised" ])
         Logger.error(Exception.format(:error, err))
@@ -125,13 +132,13 @@ alias SIP.Transac
         case req.method do
           :INVITE ->
             # todo, add a timeout global parameter
-            start_dialog(req2, 1800, :inbound, debug)
+            start_inbound_dialog(req2, 1800, debug, dialog_id)
 
           :OPTIONS ->
-            start_dialog(req2, 60, :inbound, false)
+            start_inbound_dialog(req2, 60, false, dialog_id)
 
           :MESSAGE ->
-            start_dialog(req2, 60, :inbound, debug)
+            start_inbound_dialog(req2, 60, debug, dialog_id)
 
           :ACK ->
             # to add error log - ACK should be in dialog
@@ -152,7 +159,7 @@ alias SIP.Transac
           m when m in [ :PUBLISH, :REGISTER, :SUBSCRIBE ] ->
             #Todo compulte timeout from refresh contact period
             to = 600
-            start_dialog(req2, to, :inbound, debug)
+            start_inbound_dialog(req2, to, debug, dialog_id)
 
           :UPDATE ->
             SIP.Transac.reply(transact_id, 481, " Call/Transaction Does Not Exist")
@@ -174,6 +181,21 @@ alias SIP.Transac
       [ { dialog_pid, _value } | _ ] ->
         GenServer.cast(dialog_pid, {:sipmsg, req2, transact_id})
         { :ok, dialog_pid, dialog_id }
+    end
+  end
+
+  # Create an inbound dialog and, when the app rejected it in DialogImpl.init/1,
+  # map the {:reject, code, reason, totag} error to the {:error, {code, reason,
+  # dialog_id}} shape that process_UAS_request turns into a SIP response on the
+  # server transaction (registrar quota → 503, UAS domain control → 604, …).
+  # Any other start_dialog outcome (including generic errors → 403) is unchanged.
+  defp start_inbound_dialog(req, timeout, debug, { fromtag, callid, _totag }) do
+    case start_dialog(req, timeout, :inbound, debug) do
+      { :error, { :reject, code, reason, totag } } ->
+        { :error, { code, reason, { fromtag, callid, totag } } }
+
+      other ->
+        other
     end
   end
 

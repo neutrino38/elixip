@@ -220,37 +220,46 @@ defmodule SIP.Transport do
           # explicitly — otherwise a response with no matching transaction would
           # wrongly take the request path and crash on the missing :ruri).
           if parsed_msg.method != false and is_atom(parsed_msg.method) do
-            # We need to start a new transaction. Use the transport's own local
-            # IP/port (resolved at setup) rather than the socket's bound address,
-            # which is the 0.0.0.0 wildcard for UDP. Socket.local/1 also returns
-            # {:ok, {ip, port}}, so it cannot be destructured into {ip, port}.
-            { local_ip, local_port } = case socket do
-              { ip, port } -> { ip, port }
-              s when is_port(s) ->
-                # Raw :gen_tcp port (inbound TCP connections): Socket.local/1 only
-                # handles Socket structs, so use :inet.sockname directly.
-                case :inet.sockname(s) do
-                  { :ok, {{0,0,0,0}, _} } -> { state.localip, state.localport }
-                  { :ok, {ip, port} }     -> { ip, port }
-                  _                       -> { state.localip, state.localport }
-                end
-              s when is_tuple(s) and elem(s, 0) == :sslsocket ->
-                # Raw :ssl socket (inbound TLS connections via TLSListener).
-                case :ssl.sockname(s) do
-                  {:ok, {{0,0,0,0}, _}} -> {state.localip, state.localport}
-                  {:ok, {ip, port}}     -> {ip, port}
-                  _                     -> {state.localip, state.localport}
-                end
-              _ -> case Socket.local(socket) do
-                      { :ok, {{0,0,0,0}, _port} } -> { state.localip, state.localport }
-                      { :ok, {ip, port}} -> { ip, port }
-                   end
-            end
             ruri_with_tp_info = %SIP.Uri{ parsed_msg.ruri | destip: destip, destport: destport,
                                           tp_module: tp_mod, tp_pid: self() }
             msg = Map.put(parsed_msg, :ruri, ruri_with_tp_info )
-            {:ok, _tpid} = SIP.Transac.start_uas_transaction(msg, { local_ip, local_port, tp_name, state.upperlayer })
-            { :noreply, state }
+
+            if parsed_msg.method == :ACK do
+              # An ACK matching no transaction is the ACK of a 2xx (new branch,
+              # RFC 3261 §13.2.2.4): it creates NO server transaction (§17.2.3).
+              # Route it straight to the dialog, which forwards it to the app.
+              SIP.Dialog.process_incoming_request(msg, nil, false)
+              { :noreply, state }
+            else
+              # We need to start a new transaction. Use the transport's own local
+              # IP/port (resolved at setup) rather than the socket's bound address,
+              # which is the 0.0.0.0 wildcard for UDP. Socket.local/1 also returns
+              # {:ok, {ip, port}}, so it cannot be destructured into {ip, port}.
+              { local_ip, local_port } = case socket do
+                { ip, port } -> { ip, port }
+                s when is_port(s) ->
+                  # Raw :gen_tcp port (inbound TCP connections): Socket.local/1 only
+                  # handles Socket structs, so use :inet.sockname directly.
+                  case :inet.sockname(s) do
+                    { :ok, {{0,0,0,0}, _} } -> { state.localip, state.localport }
+                    { :ok, {ip, port} }     -> { ip, port }
+                    _                       -> { state.localip, state.localport }
+                  end
+                s when is_tuple(s) and elem(s, 0) == :sslsocket ->
+                  # Raw :ssl socket (inbound TLS connections via TLSListener).
+                  case :ssl.sockname(s) do
+                    {:ok, {{0,0,0,0}, _}} -> {state.localip, state.localport}
+                    {:ok, {ip, port}}     -> {ip, port}
+                    _                     -> {state.localip, state.localport}
+                  end
+                _ -> case Socket.local(socket) do
+                        { :ok, {{0,0,0,0}, _port} } -> { state.localip, state.localport }
+                        { :ok, {ip, port}} -> { ip, port }
+                     end
+              end
+              {:ok, _tpid} = SIP.Transac.start_uas_transaction(msg, { local_ip, local_port, tp_name, state.upperlayer })
+              { :noreply, state }
+            end
           else
             Logger.warning("Received a SIP #{parsed_msg.response} response from #{SIP.NetUtils.ip2string(destip)}:#{destport} not linked to any transaction. Dropping it")
             { :noreply, state }
