@@ -153,6 +153,41 @@ defmodule SIP.Session do
     end
   end
 
+  @doc """
+  Extract the SDP body from a SIP message, whether it is a bare binary body, a
+  single-part `[%{data: ...}]` body, or a multipart list (picks the part whose
+  Content-Type contains "sdp", falling back to the first part). Returns the SDP
+  binary, or `nil` when the message carries no usable SDP.
+
+  Shared by the UAC answer path (`CallUAC.process_sdp_resp/2`) and the UAS offer
+  path (`CallUAS.do_reply_invite_with_sdp/3`).
+  """
+  @spec extract_sdp(map()) :: binary() | nil
+  def extract_sdp(msg) when is_map(msg) do
+    case Map.get(msg, :body) do
+      sdp when is_binary(sdp) and sdp != "" ->
+        sdp
+
+      [%{data: sdp}] ->
+        sdp
+
+      list when is_list(list) and list != [] ->
+        case Enum.find(list, fn part -> to_string(Map.get(part, :contenttype)) =~ "sdp" end) do
+          %{data: sdp} ->
+            sdp
+
+          _ ->
+            case list do
+              [%{data: sdp} | _] -> sdp
+              _ -> nil
+            end
+        end
+
+      _ ->
+        nil
+    end
+  end
+
   defmodule ConfigRegistry do
     defstruct callprocessing: nil,
               mainapppid: nil,

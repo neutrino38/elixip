@@ -79,6 +79,39 @@ defmodule SIP.Session.CallUAC do
               var!(sip_ctx), unquote(code), unquote(reason), unquote(upd_fields))
         end
       end
+
+      # Reply 183 Session Progress or 200 OK to the stored INVITE/re-INVITE/UPDATE
+      # with an SDP answer negotiated with the connected media server (the
+      # scenario must have called media_connect()). A local Contact is added
+      # automatically (required by a 2xx to an INVITE). On media failure the
+      # reply is 500 Media Server Error (overridable with `on_media_error:
+      # {code, reason}`). `opts`: :reason, :contact, :webrtc, :media,
+      # :on_media_error. Common to UAC and UAS (a UAC answers a re-INVITE too).
+      defmacro reply_invite_with_sdp(code, opts \\ []) do
+        quote do
+          SIP.Scenario.Monitor.note_command(:sip, "reply_invite_with_sdp #{unquote(code)}")
+
+          var!(sip_ctx) =
+            SIP.Session.CallUAS.do_reply_invite_with_sdp(
+              var!(sip_ctx), unquote(code), unquote(opts))
+        end
+      end
+
+      # Reply to the stored INVITE/re-INVITE/UPDATE with an arbitrary body.
+      # `bodies` is a raw binary (Content-Type application/sdp), a single
+      # `%{contenttype: ct, data: bin}` map, or a one-element list of such maps
+      # — the structure yielded by the SIP parser. Multipart (list > 1) awaits
+      # the multipart serialization phase. `opts`: :reason, :contact and any
+      # extra reply field. Common to UAC and UAS.
+      defmacro reply_invite_with_body(code, bodies, opts \\ []) do
+        quote do
+          SIP.Scenario.Monitor.note_command(:sip, "reply_invite_with_body #{unquote(code)}")
+
+          var!(sip_ctx) =
+            SIP.Session.CallUAS.do_reply_invite_with_body(
+              var!(sip_ctx), unquote(code), unquote(bodies), unquote(opts))
+        end
+      end
     end
   end
 
@@ -205,30 +238,16 @@ defmodule SIP.Session.CallUAC do
 
 
   def process_sdp_resp(sip_ctx = %SIP.Context{}, resp) when resp.response in [200, 183] do
-    dlg_id = sip_ctx.dialogpid
-    case Map.get(resp, :body) do
+    case SIP.Session.extract_sdp(resp) do
       sdp_answer when is_binary(sdp_answer) ->
         SIP.Session.Media.process_sdp_answer(sip_ctx, sdp_answer)
 
-      [%{data: sdp_answer} | _] ->
-        SIP.Session.Media.process_sdp_answer(sip_ctx, sdp_answer)
-
-      list when is_list(list) ->
-        case Enum.find(list, fn part -> to_string(part[:contenttype]) =~ "sdp" end) do
-          %{data: sdp_answer} ->
-            Logger.debug([dialogpid: dlg_id, module: __MODULE__,
-                     message: "Processing SDP answer from 200 OK response in multipart body"])
-            SIP.Session.Media.process_sdp_answer(sip_ctx, sdp_answer)
-
-          _ ->
-            Logger.warning([dialogpid: dlg_id, module: __MODULE__,
-                     message: "No SDP answer found in 200 OK response, ignoring"])
-            sip_ctx
-        end
-
       _ ->
-        Logger.warning([dialogpid: dlg_id, module: __MODULE__,
-          message: "No SDP answer found in 200 OK response, ignoring"])
+        Logger.warning(
+          dialogpid: sip_ctx.dialogpid,
+          module: __MODULE__,
+          message: "No SDP answer found in #{resp.response} response, ignoring"
+        )
 
         sip_ctx
     end
@@ -277,9 +296,10 @@ defmodule SIP.Session.CallUAS do
   need not re-pass the request.
 
   Reply macros:
-    * `reply_invite/1..3` — defined in `SIP.Session.CallUAC` (common to UAC and
-      UAS, since a UAC in a dialog can receive a re-INVITE/UPDATE). Backed by
-      `do_reply_invite/4` here.
+    * `reply_invite/1..3` (no SDP), `reply_invite_with_sdp/1..2` (media-negotiated
+      183/200) and `reply_invite_with_body/2..3` (arbitrary body) — defined in
+      `SIP.Session.CallUAC` (common to UAC and UAS, since a UAC in a dialog can
+      receive a re-INVITE/UPDATE). Backed by `do_reply_invite*` here.
     * `redirect_invite/1..3` and `challenge_invite/1..2` — server-only, injected
       by `use SIP.Session.CallUAS`.
 
@@ -352,6 +372,64 @@ defmodule SIP.Session.CallUAS do
     SIP.Context.set(sip_ctx, :lasterr, reply_lasterr(rc))
   end
 
+  @doc """
+  Reply 183/200 to the stored INVITE/UPDATE with a media-negotiated SDP answer.
+  Backs the `reply_invite_with_sdp` macro. Extracts the remote offer from the
+  stored request, feeds it to the media server (`SIP.Session.Media.get_sdp_answer/3`),
+  and replies with the returned answer plus a local Contact. On media failure,
+  replies `500 Media Server Error` (overridable via `on_media_error: {code,
+  reason}`) and sets `lasterr` to `{:media_error, reason}`.
+  """
+  def do_reply_invite_with_sdp(sip_ctx = %SIP.Context{}, code, opts)
+      when code in [183, 200] and is_list(opts) do
+    req = fetch_stored_req!(sip_ctx)
+
+    remote_offer =
+      SIP.Session.extract_sdp(req) ||
+        raise "reply_invite_with_sdp: the stored #{req.method} carries no SDP offer " <>
+                "(delayed offer is not supported)"
+
+    case SIP.Session.Media.get_sdp_answer(sip_ctx, remote_offer, media_opts(opts)) do
+      {sip_ctx, {:ok, answer}} ->
+        fields = reply_fields(sip_ctx, opts, body: answer)
+        rc = SIP.Dialog.reply(sip_ctx.dialogpid, req, code, Keyword.get(opts, :reason), fields)
+        SIP.Context.set(sip_ctx, :lasterr, reply_lasterr(rc))
+
+      {sip_ctx, {:error, reason}} ->
+        {ecode, ereason} = Keyword.get(opts, :on_media_error, {500, "Media Server Error"})
+
+        Logger.warning(
+          dialogpid: sip_ctx.dialogpid,
+          module: __MODULE__,
+          message:
+            "Media server rejected the SDP offer (#{inspect(reason)}); replying #{ecode} #{ereason}"
+        )
+
+        _ = SIP.Dialog.reply(sip_ctx.dialogpid, req, ecode, ereason, [])
+        SIP.Context.set(sip_ctx, :lasterr, {:media_error, reason})
+    end
+  end
+
+  def do_reply_invite_with_sdp(_sip_ctx, code, _opts) do
+    raise "reply_invite_with_sdp: unsupported code #{inspect(code)} (only 183 and 200)"
+  end
+
+  @doc """
+  Reply to the stored INVITE/UPDATE with an arbitrary body. Backs the
+  `reply_invite_with_body` macro. `bodies` is a raw binary, a single
+  `%{contenttype, data}` map, or a one-element list of such maps (the SIP parser
+  structure, accepted directly by `update_sip_msg/2`). A list of more than one
+  body raises until multipart serialization lands. A local Contact is added for
+  a 2xx to an INVITE/UPDATE. `opts`: `:reason`, `:contact`, extra reply fields.
+  """
+  def do_reply_invite_with_body(sip_ctx = %SIP.Context{}, code, bodies, opts)
+      when is_integer(code) and is_list(opts) do
+    req = fetch_stored_req!(sip_ctx)
+    fields = reply_fields(sip_ctx, opts, body: normalize_bodies(bodies))
+    rc = SIP.Dialog.reply(sip_ctx.dialogpid, req, code, Keyword.get(opts, :reason), fields)
+    SIP.Context.set(sip_ctx, :lasterr, reply_lasterr(rc))
+  end
+
   @doc "3xx redirect + Contact(s). `contacts`: String | %SIP.Uri{} | list."
   def do_redirect_invite(sip_ctx = %SIP.Context{}, contacts, code, reason)
       when code in 300..399 do
@@ -380,6 +458,44 @@ defmodule SIP.Session.CallUAS do
   end
 
   defp needs_sdp?(code), do: code == 183 or code in 200..299
+
+  # Build the reply upd_fields: start from `base` (e.g. [body: sdp]) and add a
+  # local Contact unless the caller supplied one — a 2xx to an INVITE/UPDATE
+  # requires a Contact (see reply_to_request/5).
+  defp reply_fields(sip_ctx, opts, base) do
+    Keyword.put_new(base, :contact, Keyword.get(opts, :contact) || local_contact(sip_ctx))
+  end
+
+  # A local Contact URI built from the context username, mirroring the one
+  # CallUAC uses for outbound INVITEs. The transport layer rewrites the
+  # placeholder host/port with the actual bound address.
+  defp local_contact(sip_ctx) do
+    %SIP.Uri{
+      userpart: SIP.Context.get(sip_ctx, :username) || "anonymous",
+      domain: "0.0.0.0",
+      params: %{}
+    }
+  end
+
+  # Only :webrtc / :media are meaningful to the media negotiation.
+  defp media_opts(opts), do: Keyword.take(opts, [:webrtc, :media])
+
+  # Normalize the `bodies` argument accepted by reply_invite_with_body into a
+  # value understood by update_sip_msg/2 ({:body, ...}). Multipart (list > 1)
+  # is not serializable yet (SIP.Msg.Ops raises); reject it with a clear error.
+  defp normalize_bodies(body) when is_binary(body), do: body
+  defp normalize_bodies(%{contenttype: _, data: _} = part), do: [part]
+  defp normalize_bodies([%{contenttype: _, data: _}] = parts), do: parts
+
+  defp normalize_bodies(parts) when is_list(parts) and length(parts) > 1 do
+    raise "reply_invite_with_body: multipart bodies are not yet supported " <>
+            "(multipart serialization is a later phase)"
+  end
+
+  defp normalize_bodies(other) do
+    raise "reply_invite_with_body: invalid body #{inspect(other)}; expected a binary, " <>
+            "a %{contenttype, data} map, or a one-element list of such maps"
+  end
 
   defp has_sdp?(req) do
     case Map.get(req, :body) do

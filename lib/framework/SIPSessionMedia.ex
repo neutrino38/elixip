@@ -132,29 +132,7 @@ defmodule SIP.Session.Media do
       raise "No media server connected to the session context"
     end
 
-    {sip_ctx, cnx} =
-      case SIP.Context.appdata_get(sip_ctx, :mediapeerconnectionid) do
-        nil ->
-          # Create a new peer connection and store it in the session context
-          cnx =
-            case apply(sip_ctx.mediaservermodule, :create_peer_connection, [
-                   sip_ctx.mediaserverpid,
-                   self(),
-                   [webrtc_support: webrtc_support, media: medias]
-                 ]) do
-              {:ok, cnx} ->
-                cnx
-
-              {:error, reason} ->
-                raise "Media server failed to create peer connection: #{inspect(reason)}"
-            end
-
-          {SIP.Context.appdata_set(sip_ctx, :mediapeerconnectionid, cnx), cnx}
-
-        cnx ->
-          # Reuse the existing peer connection
-          {sip_ctx, cnx}
-      end
+    {sip_ctx, cnx} = ensure_peer_connection(sip_ctx, webrtc_support, medias)
 
     offer =
       case apply(sip_ctx.mediaservermodule, :get_local_offer, [cnx]) do
@@ -166,6 +144,63 @@ defmodule SIP.Session.Media do
       end
 
     {sip_ctx, offer}
+  end
+
+  @doc """
+  Accept an inbound remote SDP offer and negotiate the local SDP answer, the
+  UAS-side counterpart of `get_sdp_offer/3`.
+
+  Creates the peer connection on the first call and stores its handle in the
+  context appdata (`:mediapeerconnectionid`), reusing it afterwards (so a
+  re-INVITE renegotiates on the same connection). Returns
+  `{updated_ctx, {:ok, answer}}` on success or `{updated_ctx, {:error, reason}}`
+  when the media server rejects the offer — the caller
+  (`reply_invite_with_sdp`) maps that error to a `500 Media Server Error`
+  response. Raises when no media server is connected (the scenario must have
+  called `media_connect()` first), mirroring `get_sdp_offer/3`.
+
+  `opts` accepts `:webrtc` (default `:no`) and `:media` (default `:audio_video`)
+  used only when the peer connection is created.
+  """
+  @spec get_sdp_answer(%SIP.Context{}, binary(), keyword()) ::
+          {%SIP.Context{}, {:ok, binary()} | {:error, term()}}
+  def get_sdp_answer(sip_ctx = %SIP.Context{}, remote_offer, opts \\ [])
+      when is_binary(remote_offer) and is_list(opts) do
+    if not is_pid(sip_ctx.mediaserverpid) do
+      raise "No media server connected to the session context"
+    end
+
+    webrtc_support = Keyword.get(opts, :webrtc, :no)
+    medias = Keyword.get(opts, :media, :audio_video)
+    {sip_ctx, cnx} = ensure_peer_connection(sip_ctx, webrtc_support, medias)
+
+    {sip_ctx, apply(sip_ctx.mediaservermodule, :set_remote_offer, [cnx, remote_offer])}
+  end
+
+  # Return {ctx, cnx}: reuse the stored peer connection, creating one (and
+  # stashing its handle) on first use. Shared by get_sdp_offer/3 (UAC) and
+  # get_sdp_answer/3 (UAS). Raises when the media server cannot create it.
+  defp ensure_peer_connection(sip_ctx = %SIP.Context{}, webrtc_support, medias) do
+    case SIP.Context.appdata_get(sip_ctx, :mediapeerconnectionid) do
+      nil ->
+        cnx =
+          case apply(sip_ctx.mediaservermodule, :create_peer_connection, [
+                 sip_ctx.mediaserverpid,
+                 self(),
+                 [webrtc_support: webrtc_support, media: medias]
+               ]) do
+            {:ok, cnx} ->
+              cnx
+
+            {:error, reason} ->
+              raise "Media server failed to create peer connection: #{inspect(reason)}"
+          end
+
+        {SIP.Context.appdata_set(sip_ctx, :mediapeerconnectionid, cnx), cnx}
+
+      cnx ->
+        {sip_ctx, cnx}
+    end
   end
 
   @doc """
