@@ -81,12 +81,12 @@ defmodule UAC.Invite do
 
       {:ms_event, _player, :player_ended} -> goto hangup_call, "toto.mp4: EOF"
 
-      {:MESSAGE, req, _trans_pid, dialog_pid} ->
-        SIP.Dialog.reply(dialog_pid, req, 200, "OK", [])
+      {:MESSAGE, req, _trans_pid, _dialog_pid} ->
+        reply_request(req, 200, "OK")
         goto loop, "MESSAGE"
 
-      {:BYE, req, _trans_pid, dialog_pid} ->
-        SIP.Dialog.reply(dialog_pid, req, 200, "OK", [])
+      {:BYE, req, _trans_pid, _dialog_pid} ->
+        reply_request(req, 200, "OK")
         scenario_success("BYE")
     end
   end
@@ -294,6 +294,78 @@ end
 
 See [`scenarios/uas_register.exs`](scenarios/uas_register.exs) for the full scenario,
 including the reply helpers and the `registered` state.
+
+### Server (UAS) scenarios — incoming calls
+
+A scenario can also act as a **call server (UAS)** that answers inbound `INVITE`s.
+It declares its kind with `uas :invite`. When an inbound call arrives, one scenario
+instance is spawned and bound to the call dialog; the `{:INVITE, …}` event is already
+in its mailbox as the FSM starts.
+
+Replying to the call is done with the `reply_invite*` macros (see
+[SIP.Session.CallUAS](#sipsessioncalluas) below). The scenario **never** has to send
+`100 Trying` (the INVITE server transaction emits it automatically) nor `487 Request
+Terminated` on a CANCEL (also automatic); it is notified of the CANCEL and of the
+final call teardown through `{:CANCEL, …}` and `{:dialog_terminated, …}` events.
+
+```elixir
+defmodule UAS.InviteExample do
+  use SIP.Scenario
+  use SIP.Session.CallUAS      # adds redirect_invite / challenge_invite
+
+  uas :invite
+  # Domains served (virtual-server style): the INVITE R-URI must match, otherwise
+  # the call is rejected with 604. `:any` is the catch-all.
+  config domains: :any
+
+  # The {:INVITE, …} is already in the mailbox when the instance starts.
+  state initial_state do
+    media_connect()
+    goto wait_invite
+  end
+
+  state wait_invite do
+    on_events do
+      {:INVITE, _req, _t, _dlg} ->
+        # auto_store already stashed the request; reply macros read it back.
+        reply_invite(180, "Ringing")
+        goto answering, "INVITE"
+    after
+      32_000 -> scenario_failure("no INVITE received")
+    end
+  end
+
+  state answering do
+    reply_invite_with_sdp(200)          # negotiate the SDP answer + send 200 OK
+    goto wait_ack
+  end
+
+  state wait_ack do
+    on_events do
+      {:ACK, _req, _t, _dlg}    -> goto in_call, "ACK"
+      {:CANCEL, _req, _t, _dlg} -> scenario_success("caller cancelled")
+    after
+      10_000 -> scenario_failure("no ACK")
+    end
+  end
+
+  state in_call do
+    media_start_echo()
+    on_events do
+      {:BYE, req, _t, _dlg}       -> reply_request(req, 200); scenario_success("BYE")
+      {:INVITE, _req, _t, _dlg}   -> reply_invite_with_sdp(200); goto loop, "re-INVITE"
+      {:dialog_terminated, _d, _} -> scenario_success("call ended")
+    after
+      600_000 -> scenario_success("idle timeout")
+    end
+  end
+end
+```
+
+The inbound offer request (initial `INVITE`, re-`INVITE` or `UPDATE`) is stored
+automatically in the context by the `on_events` instrumentation, so the `reply_invite*`
+macros serve it without the scenario re-passing it. Media resources are released on the
+`{:dialog_terminated, …}` contract exactly as for a UAC call.
 
 
 ## Sub-scenarios (sub-FSM)
@@ -505,3 +577,63 @@ automatically by `use SIP.Scenario`. It exposes the following helper macros:
 
 The `send_CANCEL(transaction_id)` macro (from `SIP.Session.Common`) can be used to cancel an
 INVITE that has not been answered yet.
+
+The three `reply_invite*` macros documented under **SIP.Session.CallUAS** below are actually
+provided through `SIP.Session.CallUAC` (hence available in every call scenario, UAC included):
+a UAC in an established dialog can receive a re-`INVITE` / `UPDATE` and must be able to answer it.
+
+### SIP.Session.CallInDialog
+
+Common mixin of **in-dialog request senders** and the generic in-dialog reply. It is pulled in
+automatically by both `SIP.Session.CallUAC` and `SIP.Session.CallUAS`, so every call scenario has
+these macros. Each sender builds the request from the scenario context and routes it through the
+dialog (Call-ID, CSeq, From/To tags, remote target and route set are filled in automatically).
+
+- `send_MESSAGE(body, opts \\ [])` — in-dialog MESSAGE. `opts[:contenttype]` (default `text/plain`).
+- `send_INFO(body, opts \\ [])` — in-dialog INFO (default `application/dtmf-relay`, e.g. DTMF).
+- `send_BYE(body \\ nil)` — hang up the call; the body is optional.
+- `send_REFER(refer_to, opts \\ [])` — call transfer. `refer_to` is the target; `opts[:referred_by]`
+  sets the `Referred-By` header.
+- `send_UPDATE(sdp_or_ms, opts \\ [])` — in-dialog UPDATE carrying an offer: `:mediaserver` (offer
+  built by the media server) or an explicit SDP binary, same convention as `send_INVITE`.
+- `send_reINVITE(sdp_or_ms, opts \\ [])` — re-INVITE to renegotiate media (same convention).
+- `send_NOTIFY(event, body, opts \\ [])` — in-dialog NOTIFY (e.g. the implicit REFER subscription:
+  `Event: refer`, sipfrag body).
+- `send_inDialog_OPTIONS()` — in-dialog OPTIONS keep-alive.
+- `reply_request(req, code, reason \\ nil, upd_fields \\ [])` — reply to an in-dialog request the
+  scenario received (BYE, MESSAGE, INFO, OPTIONS, NOTIFY, REFER…). The request is passed explicitly
+  (only the offer INVITE/UPDATE is auto-stored). It does **not** check the dialog state, so a test
+  scenario may deliberately reply out of order.
+
+Other messages usable in-dialog: `CANCEL` (via `SIP.Session.Common.send_CANCEL`); `PRACK` (100rel)
+and in-dialog `SUBSCRIBE` are out of scope for now.
+
+### SIP.Session.CallUAS
+
+This module implements the **server side of an INVITE dialog** (incoming-call handling). The generic
+reply macros are available in every call scenario (via `SIP.Session.CallUAC`); the redirect/challenge
+macros are opt-in with `use SIP.Session.CallUAS`. All replies go through the dialog **without checking
+its state** (so out-of-order test scenarios are possible).
+
+The inbound offer request (`INVITE` / re-`INVITE` / `UPDATE`) and its server transaction are stored
+in the context **automatically** — the `on_events` macro instruments every clause to stash the most
+recent one — so the reply macros need not be passed the request.
+
+- `reply_invite(code, reason \\ nil, upd_fields \\ [])` — reply to the stored request with a code that
+  carries **no SDP** (100 is automatic, so typically 18x / 3xx-6xx). Raises for `183` or a `2xx`
+  (those need an SDP — use the macros below), except a `2xx` answering an `UPDATE` that had no offer.
+- `reply_invite_with_sdp(code, opts \\ [])` — reply `183` or `200` with an SDP answer **negotiated with
+  the connected media server** (the scenario must have called `media_connect()`). A local `Contact` is
+  added automatically. On a media failure the reply is `500 Media Server Error` (override with
+  `opts[:on_media_error] = {code, reason}`). Other `opts`: `:reason`, `:contact`, `:webrtc`, `:media`.
+- `reply_invite_with_body(code, bodies, opts \\ [])` — reply with an **arbitrary body**. `bodies` is a
+  raw binary (Content-Type `application/sdp`), a single `%{contenttype: ct, data: bin}` map, or a list
+  of such maps. A multi-element list is serialized as a `multipart/mixed` body (boundary generated
+  automatically). `opts`: `:reason`, `:contact` and any extra reply field.
+- `redirect_invite(contacts, code \\ 302, reason \\ nil)` — 3xx redirect. `contacts` is a String, a
+  `%SIP.Uri{}`, or a list of either (opt-in: `use SIP.Session.CallUAS`).
+- `challenge_invite(realm, code \\ 407)` — reply `401`/`407` with a digest challenge, reusing the
+  dialog nonce machinery (opt-in: `use SIP.Session.CallUAS`).
+
+A scenario **never** replies `100 Trying` or the `487` after a CANCEL itself — both are automatic
+(see the *incoming calls* section above).

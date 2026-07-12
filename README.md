@@ -56,7 +56,8 @@ Elixip provides a [Domain Specific Language](https://elixir.hexdocs.pm/1.20.1/do
 to describe SIP / call scenarios as finite state machines, written as `.exs` files. It covers the `config`
 block, the `state` / `on_events` / `goto` finite-state-machine model, the scenario context (`sip_ctx`),
 sub-scenarios (`sub_fsm`) and cooperative shutdown, exception handling, how the engine works under the hood,
-and the `SIP.Session.*` macro helpers.
+and the `SIP.Session.*` macro helpers — for both **client (UAC)** scenarios and **server (UAS)** scenarios
+(a REGISTER registrar, or a call server that answers incoming `INVITE`s with the `reply_invite*` macros).
 
 **👉 The full DSL reference now lives in [DSL.md](DSL.md).**
 
@@ -156,7 +157,7 @@ elixipp -c ives.json --max-run 0 UAC.Register      # walk through every account
 
 Both `elixipp` and `mix scenario` accept a built-in name in place of a file path.
 
-### Running Server (UAS) scenarios — registrar
+### Running Server (UAS) scenarios — registrar and call server
 
 Run it as a server UAS with one or more `--listen PROTO:PORT` listeners:
 
@@ -165,10 +166,19 @@ elixipp --listen udp:5060 scenarios/uas_register.exs         # registrar on UDP/
 elixipp --listen tcp:5060 scenarios/uas_register.exs         # registrar on TCP/5060
 elixipp --listen udp:5060 --listen tcp:5060 scenarios/uas_register.exs  # both protocols
 elixipp -l 50 --listen tcp:5060 scenarios/uas_register.exs   # cap at 50 concurrent registrations
+elixipp --listen udp:5060 scenarios/uas_invite.exs           # call server: answer inbound INVITEs
+elixipp -l 20 --listen udp:5060 scenarios/uas_invite.exs     # cap at 20 concurrent calls
 ```
 
-`elixipp` detects the `:uas_register` type, starts the listeners and registers
-itself automatically as a Registrar.
+`elixipp` reads the scenario type (`uas :register` → `:uas_register`,
+`uas :invite` → `:uas_invite`), starts the listeners and registers a single
+factory (`Elixip.ScenarioUAS`) as either the registration or the call processing
+module. The factory enforces the concurrency quota (`-l` → `503` beyond it) and,
+for a call server, checks the INVITE R-URI against the scenario's `config
+domains:` (a virtual-server domain list, or `:any` catch-all) — a non-served
+domain is rejected with `604 Does Not Exist Anywhere`. One scenario instance is
+spawned per inbound dialog. See the `SIP.Session.CallUAS` reply macros in
+[DSL.md](DSL.md).
 
 For TCP, the listener accepts inbound connections and spins up one
 `SIP.Transport.TCP` process per connection. The maximum number of simultaneous
