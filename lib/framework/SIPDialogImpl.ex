@@ -7,6 +7,8 @@ defmodule SIP.DialogImpl do
   require Logger
   require SIP.Uri
   import SIP.Msg.Ops
+  alias SIP.DialogImpl.KeepAlive
+  alias SIP.DialogImpl.Nonce
 
   defstruct [
     # SIP message that created this dialog
@@ -208,81 +210,6 @@ defmodule SIP.DialogImpl do
     end
   end
 
-  # --------------------------- OPTIONS keepalive -------------------------
-  # Number of consecutive unanswered OPTIONS keepalives after which the peer is
-  # deemed unreachable and the dialog is torn down.
-  @max_missed_keepalive 3
-
-  @doc "arm the registration keepalive timer"
-  def arm_options_keepalive_timer(state = %SIP.DialogImpl{}) do
-    if state.keepalivetimer == nil and state.direction == :outbound do
-      period = Application.get_env(:elixip2, :optionkeepaliveperiod, 15)
-
-      %SIP.DialogImpl{
-        state
-        | keepalivetimer: :erlang.start_timer(period * 1000, self(), :optionskeepalive)
-      }
-    else
-      state
-    end
-  end
-
-  def cancel_options_keepalive_timer(state = %SIP.DialogImpl{}) do
-    if state.keepalivetimer != nil do
-      :erlang.cancel_timer(state.keepalivetimer)
-      %SIP.DialogImpl{state | keepalivetimer: nil}
-    else
-      state
-    end
-  end
-
-  # True when the response answers our own OPTIONS keepalive: the keepalive is
-  # armed and the response CSeq method is OPTIONS. Used to keep those responses
-  # dialog-internal instead of forwarding them to the app.
-  defp keepalive_response?(%SIP.DialogImpl{keepalivetimer: t}, rsp) when t != nil do
-    match?([_, :OPTIONS], rsp.cseq)
-  end
-
-  defp keepalive_response?(_state, _rsp), do: false
-
-  def send_options_keepalive(state = %SIP.DialogImpl{}) do
-    msg = %{
-      "Accept" => "*/*",
-      "Accept-Encoding" => "UTF-8",
-      "Accept-Language" => "en",
-      "Supported" => "OPTIONS, REGISTER",
-      "Max-Forwards" => "70",
-      method: :OPTIONS,
-      ruri: state.msg.ruri,
-      from: state.msg.from,
-      to: state.msg.to,
-      contact: state.msg.contact,
-      useragent: Application.get_env(:elixip2, :useragent, "Elixipp/0.1"),
-      callid: nil,
-      contentlength: 0
-    }
-
-    case state.state do
-      :established ->
-        # Send OPTIONS message and count it as pending. The counter is reset to 0
-        # when the matching response arrives (see the {:response, ...} handler);
-        # if it keeps growing, the peer is deemed unreachable and the dialog is
-        # torn down (see handle_info/:optionskeepalive).
-        {_rc, state} = send_in_dialog_request(state, msg)
-        state = %SIP.DialogImpl{state | missedkeepalive: state.missedkeepalive + 1}
-
-        # Refresh timer
-        arm_options_keepalive_timer(state)
-
-      :terminated ->
-        # Dialog is dead. Kill timer
-        cancel_options_keepalive_timer(state)
-
-      _ ->
-        state
-    end
-  end
-
   # --------------------------- General expiration timer -------------------------
   def arm_expiration_timer(state = %SIP.DialogImpl{}, req) when req.method == :INVITE do
     expire =
@@ -480,62 +407,6 @@ defmodule SIP.DialogImpl do
     end
   end
 
-  defp check_expired_nonces(state) do
-    now = DateTime.utc_now()
-
-    new_nonce_map =
-      Enum.reduce(state.nonce_map, %{}, fn {nonce, expiration_time}, acc ->
-        if DateTime.compare(now, expiration_time) == :lt do
-          Map.put(acc, nonce, expiration_time)
-        else
-          Logger.debug(
-            dialogpid: self(),
-            module: __MODULE__,
-            message: "Nonce #{nonce} expired and removed from nonce_map"
-          )
-
-          acc
-        end
-      end)
-
-    %SIP.DialogImpl{state | nonce_map: new_nonce_map}
-  end
-
-  defp add_new_nonce(state, nonce) do
-    # Nonce valid for 30 seconds
-    expiration_time = DateTime.utc_now() |> DateTime.add(30, :second)
-    new_nonce_map = Map.put(state.nonce_map, nonce, expiration_time)
-    # Arm a timer to check for expired nonces after 30 seconds
-    Process.send_after(self(), :check_expired_nonces, 30100)
-    %SIP.DialogImpl{state | nonce_map: new_nonce_map}
-  end
-
-  defp valid_nonce?(state, nonce) do
-    case Map.get(state.nonce_map, nonce) do
-      nil ->
-        Logger.info(
-          dialogpid: self(),
-          module: __MODULE__,
-          message: "Nonce #{nonce} is invalid or expired"
-        )
-
-        false
-
-      expiration_time ->
-        if DateTime.compare(DateTime.utc_now(), expiration_time) == :lt do
-          true
-        else
-          Logger.info(
-            dialogpid: self(),
-            module: __MODULE__,
-            message: "Nonce #{nonce} has expired"
-          )
-
-          false
-        end
-    end
-  end
-
   @impl true
   @doc """
   Invoked when the dialog GenServer stops (end of call: BYE in either direction,
@@ -589,7 +460,7 @@ defmodule SIP.DialogImpl do
     case ret do
       {:ok, nonce} ->
         # Store the nonce and its expiration time in the nonce_map
-        new_state = add_new_nonce(state, nonce)
+        new_state = Nonce.add(state, nonce)
         {:reply, :ok, add_totag(new_state, nil) |> close_transaction(uas_t)}
 
       _ ->
@@ -616,10 +487,10 @@ defmodule SIP.DialogImpl do
   def handle_call({:newreq, req}, _from, state) when is_req(req) do
     # An app-initiated OPTIONS supersedes the automatic dialog keepalive: disarm
     # it so both don't run in parallel and so the OPTIONS responses flow back up
-    # to the app (see keepalive_response?/2 gating in the {:response, ...} path).
+    # to the app (see KeepAlive.response?/2 gating in the {:response, ...} path).
     state =
       if req.method == :OPTIONS do
-        cancel_options_keepalive_timer(state)
+        KeepAlive.cancel(state)
       else
         state
       end
@@ -659,14 +530,14 @@ defmodule SIP.DialogImpl do
 
   # Handle call to check if a nonce is valid
   def handle_call({:checknonce, nonce}, _from, state) do
-    is_valid = valid_nonce?(state, nonce)
+    is_valid = Nonce.valid?(state, nonce)
     {:reply, is_valid, state}
   end
 
   # Handle call to start options keepalive
   def handle_call(:option_keepalive, _from, state) do
     if state.msg.method == :REGISTER do
-      state = arm_options_keepalive_timer(state)
+      state = KeepAlive.arm(state)
       {:reply, :ok, state}
     else
       Logger.warning(
@@ -895,32 +766,16 @@ defmodule SIP.DialogImpl do
     state
   end
 
-  # Handle option keepalive timers: send an OPTIONS message
+  # Handle option keepalive timers: send an OPTIONS message or tear the dialog
+  # down when the peer stopped answering (see SIP.DialogImpl.KeepAlive).
   @impl true
   def handle_info({:timeout, _tref, :optionskeepalive}, state) do
-    if state.missedkeepalive >= @max_missed_keepalive do
-      # Peer failed to answer the last @max_missed_keepalive keepalives: consider
-      # it unreachable and tear the dialog down. terminate/2 unwraps the
-      # {:shutdown, _} reason into {:dialog_terminated, _, :keepalive_timeout}.
-      Logger.warning(
-        dialogpid: "#{inspect(self())}",
-        module: __MODULE__,
-        message:
-          "Peer unresponsive after #{@max_missed_keepalive} OPTIONS keepalives. Terminating dialog."
-      )
-
-      {:stop, {:shutdown, :keepalive_timeout}, state}
-    else
-      # Clear the fired timer ref so send_options_keepalive can re-arm a fresh one
-      # (arm_options_keepalive_timer only arms when keepalivetimer == nil).
-      newstate = send_options_keepalive(%SIP.DialogImpl{state | keepalivetimer: nil})
-      {:noreply, newstate}
-    end
+    KeepAlive.on_timeout(state)
   end
 
   # Handle timer for checking expired nonces
   def handle_info(:check_expired_nonces, state) do
-    {:noreply, check_expired_nonces(state)}
+    {:noreply, Nonce.purge_expired(state)}
   end
 
   # Invoked when a dialog receives a SIP response from an UAC transaction
@@ -934,7 +789,7 @@ defmodule SIP.DialogImpl do
         # response to the app. Any other response is forwarded as usual. In both
         # cases the transaction is still cleaned up below.
         state =
-          if keepalive_response?(state, rsp) do
+          if KeepAlive.response?(state, rsp) do
             %SIP.DialogImpl{state | missedkeepalive: 0}
           else
             send(state.app, {rsp.response, rsp, transact_pid, self()})
