@@ -28,7 +28,6 @@ defmodule UAS.InviteExample do
 
   # The {:INVITE, …} is already queued in our mailbox by the dialog layer.
   state initial_state do
-    media_connect()
     goto(wait_invite)
   end
 
@@ -36,6 +35,7 @@ defmodule UAS.InviteExample do
     on_events do
       {:INVITE, _req, _trans, _dlg} ->
         # auto_store stashed the request; reply_invite reads it back.
+        media_connect();
         reply_invite(180, "Ringing")
         goto(answering, "INVITE")
     after
@@ -51,7 +51,8 @@ defmodule UAS.InviteExample do
   end
 
   state in_call do
-    media_start_echo()
+    # media_start_echo()
+    media_record("record.mp4", 60000)
 
     on_events do
       # ACK of our 2xx (nothing to reply); confirms the call is established.
@@ -70,6 +71,7 @@ defmodule UAS.InviteExample do
 
       {:BYE, req, _trans, _dlg} ->
         reply_request(req, 200, "OK")
+        stop_media();
         scenario_success("BYE")
 
       # Caller cancelled before / around answer: the IST already sent 200 (CANCEL)
