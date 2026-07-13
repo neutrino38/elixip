@@ -8,7 +8,29 @@ defmodule MediaServer do
 
   @type server_addr :: {String.t(), pos_integer()}
   @type sdp :: String.t()
-  @type media_kind :: :audio | :video | :audio_video
+
+  @typedoc """
+  Media combination requested for a peer connection (the `:media` conn opt).
+
+  `:tc` / `:total_conversation` / `:audio_video_text` all select audio + video +
+  real-time text (T.140) — "Total Conversation" (ITU-T F.703).
+  """
+  @type media_kind ::
+          :audio | :video | :audio_video | :audio_video_text | :total_conversation | :tc
+
+  @type media :: :audio | :video | :text
+
+  @doc """
+  Maps a `media_kind()` option value to the list of individual medias it
+  selects. Shared by the adapters so they all accept the same `:media` values.
+  """
+  @spec media_list(media_kind()) :: [media()]
+  def media_list(:audio), do: [:audio]
+  def media_list(:video), do: [:video]
+  def media_list(:audio_video), do: [:audio, :video]
+
+  def media_list(kind) when kind in [:audio_video_text, :total_conversation, :tc],
+    do: [:audio, :video, :text]
 
   @typedoc """
   Asynchronous events delivered to the `event_sink` pid as `{:ms_event, ref, event}`.

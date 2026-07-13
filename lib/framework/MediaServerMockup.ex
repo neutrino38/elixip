@@ -142,12 +142,7 @@ defmodule MediaServer.Mockup.Conn do
 
   @impl true
   def init({event_sink, opts}) do
-    medias =
-      case Keyword.get(opts, :media, :audio_video) do
-        :audio -> [:audio]
-        :video -> [:video]
-        :audio_video -> [:audio, :video]
-      end
+    medias = Keyword.get(opts, :media, :audio_video) |> MediaServer.media_list()
 
     state = %__MODULE__{
       event_sink: event_sink,
@@ -201,7 +196,9 @@ defmodule MediaServer.Mockup.Conn do
       {:ok, remote_sdp} ->
         local_sdp = state.local_sdp || build_local_sdp(state)
         schedule_ice_connected(state)
-        {:reply, {:ok, to_string(local_sdp)}, %{state | remote_sdp: remote_sdp, local_sdp: local_sdp}}
+
+        {:reply, {:ok, to_string(local_sdp)},
+         %{state | remote_sdp: remote_sdp, local_sdp: local_sdp}}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -343,14 +340,18 @@ defmodule MediaServer.Mockup.Conn do
 
   defp add_codec(m, :audio, "PCMU") do
     ExSDP.add_attribute(m, %ExSDP.Attribute.RTPMapping{
-      payload_type: 0, encoding: "PCMU", clock_rate: 8000
+      payload_type: 0,
+      encoding: "PCMU",
+      clock_rate: 8000
     })
     |> append_pt(0)
   end
 
   defp add_codec(m, :audio, "OPUS") do
     ExSDP.add_attribute(m, %ExSDP.Attribute.RTPMapping{
-      payload_type: 99, encoding: "OPUS", clock_rate: 16000
+      payload_type: 99,
+      encoding: "OPUS",
+      clock_rate: 16000
     })
     |> ExSDP.add_attribute(%ExSDP.Attribute.FMTP{pt: 99, useinbandfec: "1", minptime: "10"})
     |> append_pt(99)
@@ -358,17 +359,23 @@ defmodule MediaServer.Mockup.Conn do
 
   defp add_codec(m, :video, "H264") do
     ExSDP.add_attribute(m, %ExSDP.Attribute.RTPMapping{
-      payload_type: 99, encoding: "H264", clock_rate: 90000
+      payload_type: 99,
+      encoding: "H264",
+      clock_rate: 90000
     })
     |> ExSDP.add_attribute(%ExSDP.Attribute.FMTP{
-      pt: 99, profile_level_id: 0x42E01F, packetization_mode: 1
+      pt: 99,
+      profile_level_id: 0x42E01F,
+      packetization_mode: 1
     })
     |> append_pt(99)
   end
 
   defp add_codec(m, :video, "VP8") do
     ExSDP.add_attribute(m, %ExSDP.Attribute.RTPMapping{
-      payload_type: 100, encoding: "VP8", clock_rate: 90000
+      payload_type: 100,
+      encoding: "VP8",
+      clock_rate: 90000
     })
     |> ExSDP.add_attribute(%ExSDP.Attribute.FMTP{pt: 100, max_fr: "30"})
     |> append_pt(100)
@@ -376,16 +383,20 @@ defmodule MediaServer.Mockup.Conn do
 
   defp add_codec(m, :text, "T140") do
     ExSDP.add_attribute(m, %ExSDP.Attribute.RTPMapping{
-      payload_type: 101, encoding: "T140", clock_rate: 1000
+      payload_type: 101,
+      encoding: "T140",
+      clock_rate: 1000
     })
     |> append_pt(101)
   end
 
   defp add_codec(m, :text, "RED") do
     ExSDP.add_attribute(m, %ExSDP.Attribute.RTPMapping{
-      payload_type: 102, encoding: "RED", clock_rate: 1000
+      payload_type: 102,
+      encoding: "RED",
+      clock_rate: 1000
     })
-    |> ExSDP.add_attribute(%ExSDP.Attribute.FMTP{pt: 102, redundant_payloads: "101/101/101"})
+    |> ExSDP.add_attribute(%ExSDP.Attribute.FMTP{pt: 102, redundant_payloads: [101, 101, 101]})
     |> append_pt(102)
   end
 

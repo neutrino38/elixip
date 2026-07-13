@@ -30,8 +30,7 @@ defmodule MediaServer.Mendooze.Conn do
 
   @default_audio_codecs ["OPUS", "PCMU", "PCMA"]
   @default_video_codecs ["H264", "VP8"]
-  @default_text_codecs  ["T140", "T140RED"]
-
+  @default_text_codecs ["T140", "T140RED"]
 
   # ── API (called through the MediaServer.Mendooze facade) ───────────────────
 
@@ -113,15 +112,23 @@ defmodule MediaServer.Mendooze.Conn do
              sess_tag,
              :audio in medias,
              :video in medias,
-             :text in medias,
+             :text in medias
            ]) do
       :ok = Mendooze.register_conn(server, sess_tag, event_sink)
-      Logger.info([  module: __MODULE__, cnx_tag: state.sess_tag,
-                     message: "created MediaSession with media #{inspect(state.medias)}" ])
-      Logger.debug([ module: __MODULE__, cnx_tag: state.sess_tag,
-                     message: "created Endpoint #{endpoint_id} for MediaSession" ])
+
+      Logger.info(
+        module: __MODULE__,
+        cnx_tag: state.sess_tag,
+        message: "created MediaSession with media #{inspect(state.medias)}"
+      )
+
+      Logger.debug(
+        module: __MODULE__,
+        cnx_tag: state.sess_tag,
+        message: "created Endpoint #{endpoint_id} for MediaSession"
+      )
+
       {:ok, %{state | sess_id: sess_id, endpoint_id: endpoint_id}}
-      {:ok, %{state | endpoint_id: endpoint_id}}
     else
       {:error, reason} ->
         # EndpointCreate may have failed with the session already created
@@ -131,14 +138,7 @@ defmodule MediaServer.Mendooze.Conn do
   end
 
   defp medias_from_opts(opts) do
-    case Keyword.get(opts, :media, :audio_video) do
-      :audio -> [:audio]
-      :video -> [:video]
-      :audio_video -> [:audio, :video]
-      :audio_video_text -> [:audio, :video, :text]
-      :total_conversation -> [:audio, :video, :text]
-      :tc -> [:audio, :video, :text]
-    end
+    Keyword.get(opts, :media, :audio_video) |> MediaServer.media_list()
   end
 
   # ── UAC flow: build the offer, then process the answer ─────────────────────
@@ -153,8 +153,12 @@ defmodule MediaServer.Mendooze.Conn do
           medias: Enum.map(state.medias, &offer_media_spec(state, &1))
         })
 
-      Logger.debug([ module: __MODULE__, cnx_tag: state.sess_tag,
-                     message: "local offer built:\n#{inspect(offer)}" ])
+      Logger.debug(
+        module: __MODULE__,
+        cnx_tag: state.sess_tag,
+        message: "local offer built:\n#{inspect(offer)}"
+      )
+
       {:reply, {:ok, offer}, state}
     else
       {:error, reason} -> fail(state, reason)
@@ -220,7 +224,7 @@ defmodule MediaServer.Mendooze.Conn do
     state = %{state | res_seq: state.res_seq + 1}
 
     with {:ok, player_id} <- create(state, "PlayerCreate", [state.sess_id, tag]),
-        :ok <- cleanup_on_error(state, player_id, attach_player_all(state, player_id)),
+         :ok <- cleanup_on_error(state, player_id, attach_player_all(state, player_id)),
          {:ok, _} <-
            cleanup_on_error(
              state,
@@ -233,8 +237,12 @@ defmodule MediaServer.Mendooze.Conn do
       players =
         Map.put(state.players, ref, %{player_id: player_id, tag: tag, file: file_path, opts: opts})
 
-      Logger.info([  module: __MODULE__, cnx_tag: state.sess_tag,
-                     message: "created Player for file #{file_path}" ])
+      Logger.info(
+        module: __MODULE__,
+        cnx_tag: state.sess_tag,
+        message: "created Player for file #{file_path}"
+      )
+
       {:reply, {:ok, {self(), :player, ref}}, %{state | players: players}}
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
@@ -321,7 +329,7 @@ defmodule MediaServer.Mendooze.Conn do
   end
 
   defp handle_server_event({:endpoint_disconnected, _tag, _ep, media}, state) do
-    Logger.warning([ module: __MODULE__, session: state.sess_tag, message: "timeout on #{media}" ])
+    Logger.warning(module: __MODULE__, session: state.sess_tag, message: "timeout on #{media}")
     send(state.event_sink, {:ms_event, self(), :media_timeout})
     {:noreply, state}
   end
