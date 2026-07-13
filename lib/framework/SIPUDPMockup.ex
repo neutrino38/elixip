@@ -45,6 +45,14 @@ defmodule SIP.Test.Transport.UDPMockup do
     GenServer.cast(t_pid, {:simulate, :successfulregister})
   end
 
+  # Control whether the mockup answers OPTIONS keepalives. Setting it to true
+  # simulates an unreachable peer (exercises the missed-keepalive dialog
+  # teardown). The instance is shared per destination, so tests reset it to
+  # false before establishing their dialog.
+  def drop_options(t_pid, drop \\ true) do
+    GenServer.cast(t_pid, {:drop_options, drop})
+  end
+
   defp handle_req(state, :INVITE, sipreq) do
     Map.put(state, :req, sipreq)
   end
@@ -90,6 +98,21 @@ defmodule SIP.Test.Transport.UDPMockup do
       if state.testapppid != nil do
         send(state.testapppid, :BYE)
       end
+    end
+
+    state
+  end
+
+  defp handle_req(state, :OPTIONS, sipreq) do
+    # Forward the sent OPTIONS to the test process so it can assert on keepalives.
+    if state.testapppid != nil do
+      send(state.testapppid, {:options_sent, sipreq})
+    end
+
+    # Auto-reply 200 OK unless the test asked us to stay silent (dead-peer sim).
+    unless Map.get(state, :drop_options, false) do
+      resp = SIP.Msg.Ops.reply_to_request(sipreq, 200, "OK", [], "as424e7930")
+      Process.send_after(self(), {:recv, resp}, 50)
     end
 
     state
@@ -219,6 +242,10 @@ defmodule SIP.Test.Transport.UDPMockup do
     siprsp = reply_to_request(state.req, 100, "Trying")
     Process.send_after(self(), {:recv, siprsp}, after_ms)
     {:noreply, state}
+  end
+
+  def handle_cast({:drop_options, drop}, state) do
+    {:noreply, Map.put(state, :drop_options, drop)}
   end
 
   def handle_cast({:simulate, scenario}, state) when is_atom(scenario) do

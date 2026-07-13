@@ -245,6 +245,10 @@ alias SIP.Transac
     GenServer.call(dialog_pid, { :ack, transac_pid})
   end
 
+  def start_options_keepalive(dialog_pid) do
+    GenServer.call(dialog_pid, :option_keepalive)
+  end
+
   def broadcast(msg_to_send) do
     # récupérer l'ensemble des PID
     pids = Registry.select(Registry.SIPDialog, [{{:_, :"$1", :_}, [], [:"$1"]}])

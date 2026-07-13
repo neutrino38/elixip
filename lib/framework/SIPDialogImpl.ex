@@ -209,12 +209,18 @@ defmodule SIP.DialogImpl do
   end
 
   # --------------------------- OPTIONS keepalive -------------------------
+  # Number of consecutive unanswered OPTIONS keepalives after which the peer is
+  # deemed unreachable and the dialog is torn down.
+  @max_missed_keepalive 3
+
   @doc "arm the registration keepalive timer"
   def arm_options_keepalive_timer(state = %SIP.DialogImpl{}) do
     if state.keepalivetimer == nil and state.direction == :outbound do
+      period = Application.get_env(:elixip2, :optionkeepaliveperiod, 15)
+
       %SIP.DialogImpl{
         state
-        | keepalivetimer: :erlang.start_timer(15000, :optionskeepalive, self())
+        | keepalivetimer: :erlang.start_timer(period * 1000, self(), :optionskeepalive)
       }
     else
       state
@@ -225,8 +231,19 @@ defmodule SIP.DialogImpl do
     if state.keepalivetimer != nil do
       :erlang.cancel_timer(state.keepalivetimer)
       %SIP.DialogImpl{state | keepalivetimer: nil}
+    else
+      state
     end
   end
+
+  # True when the response answers our own OPTIONS keepalive: the keepalive is
+  # armed and the response CSeq method is OPTIONS. Used to keep those responses
+  # dialog-internal instead of forwarding them to the app.
+  defp keepalive_response?(%SIP.DialogImpl{keepalivetimer: t}, rsp) when t != nil do
+    match?([_, :OPTIONS], rsp.cseq)
+  end
+
+  defp keepalive_response?(_state, _rsp), do: false
 
   def send_options_keepalive(state = %SIP.DialogImpl{}) do
     msg = %{
@@ -247,8 +264,12 @@ defmodule SIP.DialogImpl do
 
     case state.state do
       :established ->
-        # Send OPTIONS message
+        # Send OPTIONS message and count it as pending. The counter is reset to 0
+        # when the matching response arrives (see the {:response, ...} handler);
+        # if it keeps growing, the peer is deemed unreachable and the dialog is
+        # torn down (see handle_info/:optionskeepalive).
         {_rc, state} = send_in_dialog_request(state, msg)
+        state = %SIP.DialogImpl{state | missedkeepalive: state.missedkeepalive + 1}
 
         # Refresh timer
         arm_options_keepalive_timer(state)
@@ -274,7 +295,7 @@ defmodule SIP.DialogImpl do
 
     %SIP.DialogImpl{
       state
-      | expirationtimer: :erlang.start_timer(expire * 1000, :inviterefresh, self())
+      | expirationtimer: :erlang.start_timer(expire * 1000, self(), :inviterefresh)
     }
   end
 
@@ -303,7 +324,7 @@ defmodule SIP.DialogImpl do
 
     %SIP.DialogImpl{
       state
-      | expirationtimer: :erlang.start_timer(expire * 1000, timeratom, self())
+      | expirationtimer: :erlang.start_timer(expire * 1000, self(), timeratom)
     }
   end
 
@@ -593,6 +614,16 @@ defmodule SIP.DialogImpl do
 
   @doc "Handle call to send out a new in-dialog request"
   def handle_call({:newreq, req}, _from, state) when is_req(req) do
+    # An app-initiated OPTIONS supersedes the automatic dialog keepalive: disarm
+    # it so both don't run in parallel and so the OPTIONS responses flow back up
+    # to the app (see keepalive_response?/2 gating in the {:response, ...} path).
+    state =
+      if req.method == :OPTIONS do
+        cancel_options_keepalive_timer(state)
+      else
+        state
+      end
+
     {rc, state} = send_in_dialog_request(state, req)
     {:reply, rc, state}
   end
@@ -630,6 +661,22 @@ defmodule SIP.DialogImpl do
   def handle_call({:checknonce, nonce}, _from, state) do
     is_valid = valid_nonce?(state, nonce)
     {:reply, is_valid, state}
+  end
+
+  # Handle call to start options keepalive
+  def handle_call(:option_keepalive, _from, state) do
+    if state.msg.method == :REGISTER do
+      state = arm_options_keepalive_timer(state)
+      {:reply, :ok, state}
+    else
+      Logger.warning(
+        dialogpid: "#{inspect(self())}",
+        module: __MODULE__,
+        message: "Cannot start OPTIONS keepalive on an #{state.msg.method} dialog"
+      )
+
+      {:reply, :baddialogtype, state}
+    end
   end
 
   defp check_closing_transaction(state, msg, transact_pid) when msg.method in [:BYE] do
@@ -691,7 +738,8 @@ defmodule SIP.DialogImpl do
   # {:shutdown, _} reason avoids a spurious GenServer crash report.
   # NB: this also fires if an outbound (UAC) dialog receives a CANCEL — a rare
   # case where tearing down on {:shutdown, :cancelled} is equally acceptable.
-  def handle_cast({:sipmsg, msg, transact_pid}, state) when is_req(msg) and msg.method == :CANCEL do
+  def handle_cast({:sipmsg, msg, transact_pid}, state)
+      when is_req(msg) and msg.method == :CANCEL do
     if is_pid(state.app), do: send(state.app, {:CANCEL, msg, transact_pid, self()})
     {:stop, {:shutdown, :cancelled}, state}
   end
@@ -850,8 +898,24 @@ defmodule SIP.DialogImpl do
   # Handle option keepalive timers: send an OPTIONS message
   @impl true
   def handle_info({:timeout, _tref, :optionskeepalive}, state) do
-    newstate = send_options_keepalive(state)
-    {:noreply, newstate}
+    if state.missedkeepalive >= @max_missed_keepalive do
+      # Peer failed to answer the last @max_missed_keepalive keepalives: consider
+      # it unreachable and tear the dialog down. terminate/2 unwraps the
+      # {:shutdown, _} reason into {:dialog_terminated, _, :keepalive_timeout}.
+      Logger.warning(
+        dialogpid: "#{inspect(self())}",
+        module: __MODULE__,
+        message:
+          "Peer unresponsive after #{@max_missed_keepalive} OPTIONS keepalives. Terminating dialog."
+      )
+
+      {:stop, {:shutdown, :keepalive_timeout}, state}
+    else
+      # Clear the fired timer ref so send_options_keepalive can re-arm a fresh one
+      # (arm_options_keepalive_timer only arms when keepalivetimer == nil).
+      newstate = send_options_keepalive(%SIP.DialogImpl{state | keepalivetimer: nil})
+      {:noreply, newstate}
+    end
   end
 
   # Handle timer for checking expired nonces
@@ -865,7 +929,17 @@ defmodule SIP.DialogImpl do
       if transact_pid in state.transactions do
         {_rc, totag} = SIP.Uri.get_uri_param(rsp.to, "tag")
 
-        send(state.app, {rsp.response, rsp, transact_pid, self()})
+        # A response to our own OPTIONS keepalive is dialog-internal: the peer
+        # is alive, so reset the missed-keepalive counter and do NOT surface the
+        # response to the app. Any other response is forwarded as usual. In both
+        # cases the transaction is still cleaned up below.
+        state =
+          if keepalive_response?(state, rsp) do
+            %SIP.DialogImpl{state | missedkeepalive: 0}
+          else
+            send(state.app, {rsp.response, rsp, transact_pid, self()})
+            state
+          end
 
         # Only dialog-establishing responses set the dialog's remote tag:
         # provisional (1xx with a to-tag) for early dialogs and 2xx for confirmed
@@ -992,8 +1066,9 @@ defmodule SIP.DialogImpl do
   # Dialogs on other transports or other TCP peers silently ignore this.
   def handle_info({:tcp_client_closed, closed_ip, closed_port}, state = %SIP.DialogImpl{}) do
     ruri = state.msg.ruri
+
     if ruri.tp_module == SIP.Transport.TCP and
-       ruri.destip == closed_ip and ruri.destport == closed_port do
+         ruri.destip == closed_ip and ruri.destport == closed_port do
       if is_pid(state.app), do: send(state.app, {:dialog_terminated, self(), :tcp_closed})
       {:stop, :normal, state}
     else
@@ -1003,8 +1078,9 @@ defmodule SIP.DialogImpl do
 
   def handle_info({:tls_client_closed, closed_ip, closed_port}, state = %SIP.DialogImpl{}) do
     ruri = state.msg.ruri
+
     if ruri.tp_module == SIP.Transport.TLS and
-       ruri.destip == closed_ip and ruri.destport == closed_port do
+         ruri.destip == closed_ip and ruri.destport == closed_port do
       if is_pid(state.app), do: send(state.app, {:dialog_terminated, self(), :tls_closed})
       {:stop, :normal, state}
     else
@@ -1014,8 +1090,9 @@ defmodule SIP.DialogImpl do
 
   def handle_info({:wss_client_closed, closed_ip, closed_port}, state = %SIP.DialogImpl{}) do
     ruri = state.msg.ruri
+
     if ruri.tp_module == SIP.Transport.WSS and
-       ruri.destip == closed_ip and ruri.destport == closed_port do
+         ruri.destip == closed_ip and ruri.destport == closed_port do
       if is_pid(state.app), do: send(state.app, {:dialog_terminated, self(), :wss_closed})
       {:stop, :normal, state}
     else

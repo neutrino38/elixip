@@ -400,6 +400,43 @@ defmodule SIP.Test.Parser do
 		assert parsed.contact.domain == "192.168.1.1"
 	end
 
+	test "Build, serialize and re-parse a multipart/mixed body" do
+		req = %{
+			method: :INVITE,
+			ruri: %SIP.Uri{userpart: "bob", domain: "example.com"},
+			from: %SIP.Uri{userpart: "alice", domain: "example.com", params: %{"tag" => "t1"}},
+			to: %SIP.Uri{userpart: "bob", domain: "example.com"},
+			callid: "c1",
+			cseq: [1, :INVITE],
+			contentlength: 0
+		}
+
+		parts = [
+			%{contenttype: "application/sdp", data: "v=0\r\no=- 1 1 IN IP4 1.2.3.4\r\ns=-\r\nt=0 0\r\nm=audio 7344 RTP/AVP 0"},
+			%{contenttype: "application/pidf+xml", data: "<presence entity=\"sip:alice@example.com\"/>"}
+		]
+
+		req = SIP.Msg.Ops.update_sip_msg(req, {:body, parts})
+
+		# Top-level Content-Type / Content-Length reflect the multipart body.
+		assert String.starts_with?(req.contenttype, "multipart/mixed; boundary=")
+		assert req.contentlength == byte_size(SIPMsg.multipart_body(req.body))
+		# Every part got stamped with the shared boundary.
+		assert Enum.all?(req.body, fn p -> is_binary(p.boundary) end)
+		assert Enum.map(req.body, & &1.boundary) |> Enum.uniq() |> length() == 1
+
+		str = SIPMsg.serialize(req)
+		{code, parsed} = SIPMsg.parse(str, fn _c, _m, _l, _li -> nil end)
+		assert code == :ok
+		assert length(parsed.body) == 2
+
+		[p1, p2] = parsed.body
+		assert p1.contenttype == "application/sdp"
+		assert p1.data == Enum.at(parts, 0).data
+		assert p2.contenttype == "application/pidf+xml"
+		assert p2.data == Enum.at(parts, 1).data
+	end
+
 	test "Multiple contacts round-trip: serialize then re-parse preserves the list" do
 		{code, parsed} = parse_register(
 			"Contact: <sip:alice@192.168.1.1:5060>, <sip:alice@10.0.0.1:5061>\r\n"
