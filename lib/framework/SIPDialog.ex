@@ -148,30 +148,21 @@ alias SIP.Transac
             # to add error log - ACK should be in dialog
             :nomatchingdialog
 
-          :REFER ->
-            SIP.Transac.reply(transact_id, 481, " Call/Transaction Does Not Exist")
-            :no_matching_dialog
-
-          :CANCEL ->
-            SIP.Transac.reply(transact_id, 481, " Call/Transaction Does Not Exist")
-            :nomatchingdialog
-
           m when m in [ :PUBLISH, :REGISTER, :SUBSCRIBE ] ->
             #Todo compulte timeout from refresh contact period
             to = 600
             start_inbound_dialog(req2, to, debug, dialog_id)
 
-          :UPDATE ->
-            SIP.Transac.reply(transact_id, 481, " Call/Transaction Does Not Exist")
-            :no_matching_dialog
-
-          :BYE ->
-            SIP.Transac.reply(transact_id, 481, " Call/Transaction Does Not Exist")
-            :no_matching_dialog
+          m when m in [ :REFER, :CANCEL, :UPDATE, :BYE ] ->
+            # In-dialog-only request with no matching dialog: answer 481. Do NOT
+            # use SIP.Transac.reply/3 here — this function runs inside the server
+            # transaction process (via process_UAS_request), so a GenServer.call
+            # on transact_id would be a call to self. Returning the error tuple
+            # lets process_UAS_request send the response on its own transaction.
+            { :error, { 481, "Call/Transaction Does Not Exist", dialog_id } }
 
           _ ->
-            SIP.Transac.reply(transact_id, 500, " Unsupported request")
-            :no_matching_dialog
+            { :error, { 500, "Unsupported request", dialog_id } }
         end
 
       # Found a matching dialog.Forward the SIP msg to it

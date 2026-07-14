@@ -300,6 +300,14 @@ defmodule SIP.DialogImpl do
     # Generate totag if needed
     totag = if is_nil(totag), do: generate_from_or_to_tag(), else: totag
 
+    # The GenServer :via name only registered the id derived from the initial
+    # request, which carries no To tag: {fromtag, callid, nil}. Also register
+    # the complete dialog id so in-dialog requests bearing our totag (ACK of a
+    # 2xx, BYE, re-INVITE…) can be matched back to this dialog (RFC 3261 §12).
+    if is_nil(elem(dialog_id, 2)) do
+      Registry.register(Registry.SIPDialog, {fromtag, callid, totag}, :completedialog)
+    end
+
     state = %SIP.DialogImpl{
       msg: req,
       direction: :inbound,

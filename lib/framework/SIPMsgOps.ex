@@ -332,6 +332,12 @@ defmodule SIP.Msg.Ops do
     end
 
     rsp = req |> Map.filter(resp_filter) |> update_sip_msg(upd_map)
+
+    # A UAS copies the Record-Route set of the request only into dialog
+    # establishing 2xx responses (RFC 3261 §12.1.1). Provisional responses
+    # must not carry it (reliable 1xx / 100rel is not supported).
+    rsp = if resp_code in 100..199, do: Map.delete(rsp, :recordroute), else: rsp
+
     rsp = if Map.has_key?(req, :transid) do
       Map.put(rsp, :transid, req.transid )
     else
