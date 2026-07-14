@@ -279,7 +279,7 @@ defmodule SIP.Msg.Ops do
 				end
 		end
 	end
-  @reply_filter [ :via, :to, :from, :route, "Max-Forward", :cseq, :callid, :contentlength ]
+  @reply_filter [ :via, :to, :from, :route, :recordroute, :cseq, :callid, :contentlength ]
 
   @spec reply_to_request(
           %{:method => atom(), :to => binary(), optional(any()) => any()},

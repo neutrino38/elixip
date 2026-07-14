@@ -48,15 +48,13 @@ defmodule UAS.InviteExample do
   state answering do
     # Negotiate the SDP answer with the media server and send 200 OK. On a media
     # failure this replies 500 and sets lasterr, so the goto below aborts.
-    reply_invite_with_sdp(200)
+    reply_invite_with_sdp(200, [media: :tc])
+    # media_start_echo()
+    media_record("record.mp4", 60000)
     goto(in_call)
   end
 
   state in_call do
-    # media_start_echo()
-    media_record("record.mp4", 60000)
-    media_play("titi.mp4")
-
     on_events do
       # ACK of our 2xx (nothing to reply); confirms the call is established.
       {:ACK, _req, _trans, _dlg} ->
@@ -67,9 +65,12 @@ defmodule UAS.InviteExample do
         reply_invite_with_sdp(200)
         goto(loop, "re-INVITE")
 
+      {:ms_event, _recorder, :recorder_started} ->
+        goto loop, "recorder started"
+
       # In-dialog UPDATE.
       {:UPDATE, _req, _trans, _dlg} ->
-        reply_invite_with_sdp(200)
+        reply_invite_with_sdp(200, [media: :tc])
         goto(loop, "UPDATE")
 
       {:BYE, req, _trans, _dlg} ->
@@ -82,10 +83,23 @@ defmodule UAS.InviteExample do
       {:CANCEL, _req, _trans, _dlg} ->
         scenario_success("caller cancelled")
 
+      {:scenario_ctl, :shutdown, _reason } ->
+        send_BYE()
+        goto hanging_up, "shutdown"
+
       {:dialog_terminated, _dlg, _reason} ->
         scenario_success("call ended")
     after
       600_000 -> scenario_success("idle timeout")
     end
   end
+
+  state hanging_up do
+    media_stop();
+    on_events do
+      {200, _bye_rsp, _trans_pid, _dialog_pid} -> scenario_success("Clean shutdown")
+    after
+      10_000 -> scenario_failure("BYE not answered")
+    end
+   end
 end

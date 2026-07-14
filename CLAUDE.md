@@ -198,7 +198,8 @@ config :elixip2, MediaServer.Mendooze,
   xmlrpc_timeout_ms: 10_000,   # per-call XML-RPC timeout
   rtp_timeout_ms: 10_000,      # EndpointStartRTPTimeout inactivity watchdog
   poller_retry_ms: 1_000,      # event stream reconnect delay
-  poller_max_failures: 5       # consecutive failures before :server_disconnected
+  poller_max_failures: 5,      # consecutive failures before :server_disconnected
+  video_bandwidth_kbps: 800    # b=AS: advertised on video (answers: min with the offer)
 ```
 
 ## Language & Comments Convention

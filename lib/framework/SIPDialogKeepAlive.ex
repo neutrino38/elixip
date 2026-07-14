@@ -75,6 +75,9 @@ defmodule SIP.DialogImpl.KeepAlive do
   end
 
   def send_keepalive(state = %SIP.DialogImpl{}) do
+
+    ruri = %SIP.Uri{ domain: state.msg.to.domain }
+
     msg = %{
       "Accept" => "*/*",
       "Accept-Encoding" => "UTF-8",
@@ -82,9 +85,9 @@ defmodule SIP.DialogImpl.KeepAlive do
       "Supported" => "OPTIONS, REGISTER",
       "Max-Forwards" => "70",
       method: :OPTIONS,
-      ruri: state.msg.ruri,
+      ruri: ruri,
       from: state.msg.from,
-      to: state.msg.to,
+      to: ruri,
       contact: state.msg.contact,
       useragent: Application.get_env(:elixip2, :useragent, "Elixipp/0.1"),
       callid: nil,

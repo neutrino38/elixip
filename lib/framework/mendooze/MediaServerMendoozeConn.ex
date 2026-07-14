@@ -32,6 +32,9 @@ defmodule MediaServer.Mendooze.Conn do
   @default_video_codecs ["H264", "VP8"]
   @default_text_codecs ["T140", "T140RED"]
 
+  # Receive bandwidth advertised as b=AS: on the video media (kb/s)
+  @default_video_bandwidth_kbps 800
+
   # ── API (called through the MediaServer.Mendooze facade) ───────────────────
 
   def start(server, event_sink, opts) do
@@ -179,8 +182,17 @@ defmodule MediaServer.Mendooze.Conn do
 
   def handle_call({:set_remote_offer, sdp}, _from, state) do
     with {:ok, descs} <- Sdp.parse(sdp),
+         offered = Enum.map(descs, & &1.type),
          descs = Enum.filter(descs, &(&1.type in state.medias)),
          :ok <- ensure_media_present(descs),
+         _ =
+           Logger.info(
+             module: __MODULE__,
+             cnx_tag: state.sess_tag,
+             message:
+               "remote offer medias: #{inspect(offered)}, allowed: #{inspect(state.medias)}, " <>
+                 "answering: #{inspect(Enum.map(descs, & &1.type))}"
+           ),
          # answer only what the offer contains
          state = %{state | medias: Enum.map(descs, & &1.type)},
          {:ok, state} <- setup_local_security_for_offer(state, descs),
@@ -590,6 +602,8 @@ defmodule MediaServer.Mendooze.Conn do
       port: Map.fetch!(state.local_ports, media),
       codecs: codecs(state, media),
       dtmf: dtmf?(state, media),
+      bandwidth: bandwidth_kbps(state, media),
+      direction: :sendrecv,
       crypto: local_crypto_spec(state, :actpass),
       ice: state.local_ice,
       rtcp_mux: false
@@ -604,6 +618,8 @@ defmodule MediaServer.Mendooze.Conn do
       port: Map.fetch!(state.local_ports, desc.type),
       codecs: codec_names,
       dtmf: dtmf,
+      bandwidth: Sdp.negotiate_bandwidth(desc.bandwidth, bandwidth_kbps(state, desc.type)),
+      direction: Sdp.reverse_direction(desc.direction),
       crypto: local_crypto_spec(state, :active),
       ice: state.local_ice,
       rtcp_mux: desc.rtcp_mux,
@@ -779,6 +795,18 @@ defmodule MediaServer.Mendooze.Conn do
 
   defp dtmf?(state, :audio), do: Keyword.get(state.opts, :dtmf, true)
   defp dtmf?(_state, _media), do: false
+
+  # Receive bandwidth (b=AS, kb/s) per media; 0 = no b= line. Overridable per
+  # connection (:video_bandwidth opt) and globally (:video_bandwidth_kbps in
+  # the MediaServer.Mendooze config block).
+  defp bandwidth_kbps(state, :video) do
+    Keyword.get_lazy(state.opts, :video_bandwidth, fn ->
+      Application.get_env(:elixip2, MediaServer.Mendooze, [])
+      |> Keyword.get(:video_bandwidth_kbps, @default_video_bandwidth_kbps)
+    end)
+  end
+
+  defp bandwidth_kbps(_state, _media), do: 0
 
   defp webrtc?(state), do: Keyword.get(state.opts, :webrtc_support, :no) == :yes
 

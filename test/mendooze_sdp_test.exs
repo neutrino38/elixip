@@ -230,7 +230,37 @@ defmodule Mendooze.SdpTest do
       assert audio.ice == %{ufrag: "sess-ufrag", pwd: "sess-pwd-123456789012345"}
     end
 
-    test "non audio/video medias are ignored" do
+    test "text media with RED redundancy round-trips" do
+      sdp_str =
+        Sdp.build(%{
+          ip: "172.16.0.1",
+          medias: [%{type: :text, port: 24_000, codecs: ["T140", "T140RED"]}]
+        })
+
+      assert sdp_str =~ "m=text 24000 RTP/AVP 106 105"
+      assert sdp_str =~ "a=rtpmap:106 t140/1000"
+      assert sdp_str =~ "a=rtpmap:105 red/1000"
+      assert sdp_str =~ "a=fmtp:105 106/106/106"
+
+      assert {:ok, [text]} = Sdp.parse(sdp_str)
+      assert text.type == :text
+      assert text.port == 24_000
+      assert text.codecs == ["T140", "T140RED"]
+      assert text.rtp_map == %{"106" => 106, "105" => 105}
+    end
+
+    test "RED alone is advertised without an fmtp" do
+      sdp_str =
+        Sdp.build(%{
+          ip: "172.16.0.1",
+          medias: [%{type: :text, port: 24_000, codecs: ["T140RED"]}]
+        })
+
+      assert sdp_str =~ "a=rtpmap:105 red/1000"
+      refute sdp_str =~ "a=fmtp:105"
+    end
+
+    test "non audio/video/text medias are ignored" do
       sdp_str = """
       v=0
       o=- 1 1 IN IP4 172.16.0.1
@@ -246,6 +276,51 @@ defmodule Mendooze.SdpTest do
 
     test "garbage input is an error" do
       assert {:error, _} = Sdp.parse("this is not sdp")
+    end
+
+    test "direction and b=AS bandwidth round-trip" do
+      sdp_str =
+        Sdp.build(%{
+          ip: "10.0.0.1",
+          medias: [
+            %{type: :audio, port: 22_000, codecs: ["PCMU"]},
+            %{type: :video, port: 22_002, codecs: ["H264"], bandwidth: 800, direction: :sendonly}
+          ]
+        })
+
+      assert sdp_str =~ "a=sendrecv"
+      assert sdp_str =~ "b=AS:800"
+      assert sdp_str =~ "a=sendonly"
+
+      assert {:ok, [audio, video]} = Sdp.parse(sdp_str)
+      assert audio.direction == :sendrecv
+      assert audio.bandwidth == nil
+      assert video.direction == :sendonly
+      assert video.bandwidth == 800
+    end
+  end
+
+  # ── negotiate_bandwidth/2 and reverse_direction/1 ───────────────────────────
+
+  describe "negotiate_bandwidth/2" do
+    test "caps our bandwidth to the offered one" do
+      assert Sdp.negotiate_bandwidth(600, 800) == 600
+      assert Sdp.negotiate_bandwidth(1200, 800) == 800
+    end
+
+    test "falls back to the declared side" do
+      assert Sdp.negotiate_bandwidth(nil, 800) == 800
+      assert Sdp.negotiate_bandwidth(600, 0) == 600
+      assert Sdp.negotiate_bandwidth(nil, 0) == 0
+    end
+  end
+
+  describe "reverse_direction/1" do
+    test "mirrors one-way directions and keeps the others" do
+      assert Sdp.reverse_direction(:sendonly) == :recvonly
+      assert Sdp.reverse_direction(:recvonly) == :sendonly
+      assert Sdp.reverse_direction(:sendrecv) == :sendrecv
+      assert Sdp.reverse_direction(:inactive) == :inactive
     end
   end
 
@@ -285,6 +360,29 @@ defmodule Mendooze.SdpTest do
 
     test "no common codec is an error", %{offer: offer} do
       assert {:error, :no_common_codec} = Sdp.negotiate(offer, ["OPUS"])
+    end
+
+    test "text offer with red (RFC 4103) negotiates T140 + T140RED" do
+      {:ok, [text]} =
+        Sdp.parse("""
+        v=0
+        o=- 1 1 IN IP4 172.16.0.1
+        s=call
+        c=IN IP4 172.16.0.1
+        t=0 0
+        m=text 2918 RTP/AVP 98 99
+        a=rtpmap:98 t140/1000
+        a=fmtp:98 cps=30
+        a=rtpmap:99 red/1000
+        a=fmtp:99 98/98/98
+        """)
+
+      assert text.codecs == ["T140", "T140RED"]
+
+      assert {:ok, %{codecs: ["T140", "T140RED"], dtmf: false, rtp_map: rtp_map}} =
+               Sdp.negotiate(text, ["T140", "T140RED"], false)
+
+      assert rtp_map == %{"98" => 106, "99" => 105}
     end
   end
 

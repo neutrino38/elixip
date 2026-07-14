@@ -417,9 +417,18 @@ User-Agent: Elixip 0.2.0
   end
 
   test "Outbound register - proxy not responding" do
-    # Motify timer T1
-    # Timer F will be 64 * 10 = 640 ms
+    # Modify timer T1 for this test only. Timer F will be 64 * 10 = 640 ms.
+    # Restore it on exit so the shortened timers do not leak into other
+    # test files (it made timer F fire before the app answered in sip_call_test).
+    previous_t1 = Application.get_env(:elixip2, :sip_timer_T1)
     Application.put_env(:elixip2, :sip_timer_T1, 10)
+    on_exit(fn ->
+      if previous_t1 == nil do
+        Application.delete_env(:elixip2, :sip_timer_T1)
+      else
+        Application.put_env(:elixip2, :sip_timer_T1, previous_t1)
+      end
+    end)
     { code, msg } = File.read("test/SIP-REGISTER-LVP.txt")
     assert code == :ok
 

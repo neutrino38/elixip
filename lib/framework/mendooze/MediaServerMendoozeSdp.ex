@@ -62,10 +62,11 @@ defmodule MediaServer.Mendooze.Sdp do
 
   `rtp_map` maps the remote payload types (strings) to Mendooze codec codes —
   restricted to codecs we know. `dtmf_pt` is the remote telephone-event
-  payload type, if offered.
+  payload type, if offered. `bandwidth` is the `b=AS:` value in kb/s, if
+  present.
   """
   @type media_desc :: %{
-          type: :audio | :video,
+          type: :audio | :video | :text,
           ip: String.t() | nil,
           port: non_neg_integer(),
           protocol: String.t(),
@@ -74,6 +75,7 @@ defmodule MediaServer.Mendooze.Sdp do
           dtmf_pt: non_neg_integer() | nil,
           rtcp_mux: boolean(),
           direction: :sendrecv | :sendonly | :recvonly | :inactive,
+          bandwidth: non_neg_integer() | nil,
           crypto: crypto(),
           ice: nil | %{ufrag: String.t(), pwd: String.t()}
         }
@@ -82,17 +84,20 @@ defmodule MediaServer.Mendooze.Sdp do
   One `m=` section to build. `:crypto` carries the *local* material: the DTLS
   setup role (`:actpass` in an offer, `:active`/`:passive` in an answer), our
   fingerprint, or our SDES key. `:protocol` overrides the one derived from
-  `:crypto` (useful in answers, to mirror the offer).
+  `:crypto` (useful in answers, to mirror the offer). `:bandwidth` emits a
+  `b=AS:` line when positive; `:direction` defaults to `:sendrecv`.
   """
   @type media_spec :: %{
-          required(:type) => :audio | :video,
+          required(:type) => :audio | :video | :text,
           required(:port) => non_neg_integer(),
           required(:codecs) => [codec_name()],
           optional(:dtmf) => boolean(),
           optional(:crypto) => crypto(),
           optional(:ice) => nil | %{ufrag: String.t(), pwd: String.t()},
           optional(:rtcp_mux) => boolean(),
-          optional(:protocol) => String.t()
+          optional(:protocol) => String.t(),
+          optional(:bandwidth) => non_neg_integer() | nil,
+          optional(:direction) => :sendrecv | :sendonly | :recvonly | :inactive
         }
 
   # ── rtpMap for EndpointStartReceiving ───────────────────────────────────────
@@ -206,12 +211,19 @@ defmodule MediaServer.Mendooze.Sdp do
     dtmf = Map.get(mspec, :dtmf, false) and type == :audio
 
     %ExSDP.Media{type: type, port: port, protocol: protocol, fmt: []}
+    |> add_bandwidth(Map.get(mspec, :bandwidth))
     |> add_codecs(type, codecs)
     |> add_dtmf(dtmf)
+    |> ExSDP.add_attribute(Map.get(mspec, :direction, :sendrecv))
     |> add_crypto(crypto)
     |> add_ice(Map.get(mspec, :ice))
     |> add_rtcp_mux(Map.get(mspec, :rtcp_mux, false))
   end
+
+  defp add_bandwidth(m, bw) when is_integer(bw) and bw > 0,
+    do: Map.put(m, :bandwidth, [%ExSDP.Bandwidth{type: :AS, bandwidth: bw}])
+
+  defp add_bandwidth(m, _), do: m
 
   # Default transport per security stack; answers should mirror the offer via
   # the :protocol override instead.
@@ -231,9 +243,29 @@ defmodule MediaServer.Mendooze.Sdp do
         clock_rate: clock,
         params: channels
       })
+      |> add_red_fmtp(type, name, pt, codecs)
       |> append_pt(pt)
     end)
   end
+
+  # RFC 4103 §5: "red" needs an fmtp listing the generations, each referencing
+  # the T.140 payload type (primary + 2 redundant). Skipped if T140 itself is
+  # not advertised alongside.
+  defp add_red_fmtp(m, :text, name, red_pt, codecs) do
+    with "T140RED" <- String.upcase(name),
+         true <- Enum.any?(codecs, &(String.upcase(&1) == "T140")) do
+      {t140_pt, _code} = codec_pt_code(:text, "T140")
+
+      ExSDP.add_attribute(m, %ExSDP.Attribute.FMTP{
+        pt: red_pt,
+        redundant_payloads: [t140_pt, t140_pt, t140_pt]
+      })
+    else
+      _ -> m
+    end
+  end
+
+  defp add_red_fmtp(m, _type, _name, _red_pt, _codecs), do: m
 
   defp codec_sdp_info(:audio, name) do
     {_pt, _code, clock, channels} = Map.fetch!(@audio_codecs, String.upcase(name))
@@ -250,10 +282,13 @@ defmodule MediaServer.Mendooze.Sdp do
     {sdp_encoding(name), clock, nil}
   end
 
-  # Conventional SDP casing (matching is case-insensitive anyway)
+  # Conventional SDP casing (matching is case-insensitive anyway); T140RED is
+  # the Mendooze codec name, advertised as "red" per RFC 4103.
   defp sdp_encoding(name) do
     case String.upcase(name) do
       "OPUS" -> "opus"
+      "T140" -> "t140"
+      "T140RED" -> "red"
       other -> other
     end
   end
@@ -308,8 +343,8 @@ defmodule MediaServer.Mendooze.Sdp do
   # ── SDP parsing ─────────────────────────────────────────────────────────────
 
   @doc """
-  Parse a remote SDP into per-media descriptors. Only `audio` and `video`
-  sections are returned; session-level `c=`, crypto, ICE and direction
+  Parse a remote SDP into per-media descriptors. Only `audio`, `video` and
+  `text` sections are returned; session-level `c=`, crypto, ICE and direction
   attributes are inherited by each media (media-level values win).
   """
   @spec parse(String.t()) :: {:ok, [media_desc()]} | {:error, term()}
@@ -321,7 +356,7 @@ defmodule MediaServer.Mendooze.Sdp do
 
         medias =
           sdp.media
-          |> Enum.filter(&(&1.type in [:audio, :video]))
+          |> Enum.filter(&(&1.type in [:audio, :video, :text]))
           |> Enum.map(&parse_media(&1, session_ip, session_attrs))
 
         {:ok, medias}
@@ -347,10 +382,20 @@ defmodule MediaServer.Mendooze.Sdp do
       dtmf_pt: dtmf_pt,
       rtcp_mux: :rtcp_mux in attrs,
       direction: find_direction(attrs) || find_direction(session_attrs) || :sendrecv,
+      bandwidth: as_bandwidth(m.bandwidth),
       crypto: find_crypto(attrs, session_attrs),
       ice: find_ice(attrs) || find_ice(session_attrs)
     }
   end
+
+  defp as_bandwidth(bws) when is_list(bws) do
+    Enum.find_value(bws, fn
+      %ExSDP.Bandwidth{type: :AS, bandwidth: bw} -> bw
+      _ -> nil
+    end)
+  end
+
+  defp as_bandwidth(_), do: nil
 
   # ExSDP only converts fmt entries to integers for some protocol strings
   # (e.g. "RTP/AVP" yes, "RTP/SAVPF" no) — normalize to integers here.
@@ -386,6 +431,11 @@ defmodule MediaServer.Mendooze.Sdp do
     end)
   end
 
+  # RFC 4103 names the T.140 redundancy format "red"; the codec tables use the
+  # Mendooze name T140RED.
+  defp normalize_codec_name(:text, "RED"), do: "T140RED"
+  defp normalize_codec_name(_type, name), do: name
+
   defp codec_name_for_pt(type, pt, nil) do
     with :audio <- type,
          {:ok, name} <- Map.fetch(@static_pt, pt),
@@ -397,7 +447,7 @@ defmodule MediaServer.Mendooze.Sdp do
   end
 
   defp codec_name_for_pt(type, _pt, %ExSDP.Attribute.RTPMapping{encoding: encoding}) do
-    name = String.upcase(encoding)
+    name = normalize_codec_name(type, String.upcase(encoding))
 
     cond do
       name == "TELEPHONE-EVENT" ->
@@ -542,6 +592,28 @@ defmodule MediaServer.Mendooze.Sdp do
       {:ok, %{codecs: Enum.map(common, &String.upcase/1), dtmf: dtmf, rtp_map: send_map}}
     end
   end
+
+  @doc """
+  Answer-side `b=AS:` negotiation (kb/s): cap our configured receive bandwidth
+  to the offered one. `offered` is nil when the offer carries no `b=AS:` line;
+  `ours` is 0 when we have no configured cap. Returns 0 (no `b=` line) when
+  neither side declares one.
+  """
+  @spec negotiate_bandwidth(non_neg_integer() | nil, non_neg_integer()) :: non_neg_integer()
+  def negotiate_bandwidth(nil, ours), do: ours
+  def negotiate_bandwidth(offered, 0), do: offered
+  def negotiate_bandwidth(offered, ours), do: min(offered, ours)
+
+  @doc """
+  Direction an answer must declare in response to an offered direction
+  (RFC 3264 §6.1): `sendonly` and `recvonly` are mirrored, `sendrecv` and
+  `inactive` are kept.
+  """
+  @spec reverse_direction(:sendrecv | :sendonly | :recvonly | :inactive) ::
+          :sendrecv | :sendonly | :recvonly | :inactive
+  def reverse_direction(:sendonly), do: :recvonly
+  def reverse_direction(:recvonly), do: :sendonly
+  def reverse_direction(dir), do: dir
 
   # ── GetMediaCandidates ──────────────────────────────────────────────────────
 

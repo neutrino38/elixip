@@ -398,7 +398,7 @@ defmodule SIP.Transac.Common do
             new_state =
               if state.msg.method == :INVITE do
                 st =
-                  schedule_timer_F(state)
+                  cancel_timer_F(state)
                   |> Map.put(:state, :confirmed)
                   |> Map.put(:totag, totag)
 

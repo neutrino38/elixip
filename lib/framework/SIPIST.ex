@@ -114,9 +114,13 @@ defmodule SIP.IST do
   @impl true
   # Timer F - timeout
   def handle_info({ :timeout, _tref, :timerF } , state)  do
-    case reply_to_UAC(state, state.sipmsg, 408, "Timeout", [], state.totag) do
-      { :ok, new_state } -> { :noreply, new_state }
-      { _err, new_state } -> { :noreply, new_state }
+    if state.state in [ :trying, :proceeding ] do
+      # The app never sent a final response: answer 408 on its behalf
+      { _rc, new_state } = reply_to_UAC(state, state.msg, 408, "Timeout", [], state.totag)
+      { :noreply, new_state }
+    else
+      # Final response already sent; timer H owns the ACK timeout
+      { :noreply, state }
     end
   end
 
