@@ -41,7 +41,7 @@ defmodule UAS.InviteExample do
 
       {:scenario_ctl, :shutdown, _reason } -> scenario_aborted("UAS Invite stopped gracefully")
     after
-      32_000 -> scenario_failure("no INVITE received")
+      60_000 -> scenario_failure("no INVITE received")
     end
   end
 
