@@ -150,10 +150,18 @@ defmodule SIP.Scenario.Runner do
     args = Keyword.get(opts, :args, %{})
     module = resolve_target(target)
 
+    # Key the child's monitor row under its parent ({parent_slot, name}) so the
+    # live table shows it on its own line right below the parent, and so
+    # clearing the parent slot recycles the child rows too.
+    parent_slot = Process.get(:scenario_slot_id, parent_pid)
+
     {pid, ref} =
       spawn_monitor(fn ->
+        Process.put(:scenario_slot_id, {parent_slot, name})
         run_instance(module, parent_pid: parent_pid, self_name: name, appdata: args)
       end)
+
+    setup_uas_child(SIP.Scenario.Loader.scenario_type(module), pid)
 
     child = %SIP.Scenario.Child{name: name, pid: pid, ref: ref, module: module}
     children = ctx.appdata |> Map.get(:__children__, %{}) |> Map.put(name, child)
@@ -162,6 +170,38 @@ defmodule SIP.Scenario.Runner do
 
   defp resolve_target(target) when is_atom(target), do: target
   defp resolve_target(target) when is_binary(target), do: SIP.Scenario.Loader.load_file!(target)
+
+  # A `:uas_invite` child does not act on its own: it waits for an inbound
+  # INVITE. Route the next one to it by registering it with the call
+  # dispatcher, installed as the call processing module unless the app
+  # already configured one (e.g. Elixip.ScenarioUAS in elixipp server mode
+  # — never silently overridden).
+  defp setup_uas_child(:uas_invite, pid) do
+    {:ok, _} = SIP.Scenario.CallDispatcher.start()
+    :ok = SIP.Scenario.CallDispatcher.register_waiting(pid)
+
+    case SIP.Session.ConfigRegistry.get_call_processing_module() do
+      nil ->
+        SIP.Session.ConfigRegistry.set_call_processing_module(SIP.Scenario.CallDispatcher)
+
+      SIP.Scenario.CallDispatcher ->
+        :ok
+
+      other ->
+        Logger.warning(
+          "sub_fsm: call processing module #{inspect(other)} already configured; " <>
+            "the :uas_invite child will not receive inbound INVITEs through the dispatcher"
+        )
+    end
+
+    :ok
+  end
+
+  defp setup_uas_child(type, _pid) when type in [:uas_register] do
+    Logger.warning("sub_fsm: scenario type #{inspect(type)} is not supported as a sub-FSM yet")
+  end
+
+  defp setup_uas_child(_type, _pid), do: :ok
 
   @doc """
   Spawn a UAS scenario instance to handle one inbound dialog (e.g. a REGISTER).

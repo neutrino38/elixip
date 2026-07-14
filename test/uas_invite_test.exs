@@ -126,7 +126,10 @@ defmodule TestCallUAS do
           {:ok, mod} ->
             pid =
               spawn(fn ->
-                SIP.Scenario.Runner.run_instance(mod, dialog_pid: dialog_pid, inbound_request: req)
+                SIP.Scenario.Runner.run_instance(mod,
+                  dialog_pid: dialog_pid,
+                  inbound_request: req
+                )
               end)
 
             {:accept, pid}
@@ -202,12 +205,16 @@ defmodule SIP.Test.UASInvite do
 
   # ── Unit tests: auto_store ──────────────────────────────────────────────────
 
-  test "auto_store stashes an inbound INVITE and its transaction pid" do
+  test "auto_store stashes an inbound INVITE, its transaction pid and the dialog pid" do
     req = %{method: :INVITE, body: @sdp_body}
-    ctx = SIP.Session.CallUAS.auto_store(%SIP.Context{}, {:INVITE, req, self(), self()})
+    dlg = spawn(fn -> :ok end)
+    ctx = SIP.Session.CallUAS.auto_store(%SIP.Context{}, {:INVITE, req, self(), dlg})
 
     assert SIP.Context.appdata_get(ctx, :last_uas_req) == req
     assert SIP.Context.appdata_get(ctx, :last_uas_req_tid) == self()
+    # A sub_fsm child is spawned before the dialog exists: the event is its only
+    # way to learn the dialog pid the reply macros must target.
+    assert ctx.dialogpid == dlg
   end
 
   test "auto_store stashes an inbound UPDATE" do

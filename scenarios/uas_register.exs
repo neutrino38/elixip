@@ -14,7 +14,7 @@
 # no macro / `var!` plumbing is needed.
 defmodule UAS.RegisterExample do
   use SIP.Scenario
-  import SIP.Session.Registrar, only: [reply_options: 2, challenge_registration: 2, accept_registration: 3, reject_registration: 4, set_contacts_expires: 2]
+  import SIP.Session.Registrar, only: [challenge_registration: 2, accept_registration: 3, reject_registration: 4, set_contacts_expires: 2]
 
   # Marks the scenario type as :uas_register so elixipp runs it in server mode.
   uas(:register)
@@ -70,16 +70,13 @@ defmodule UAS.RegisterExample do
 
   # ---------------------------------------------------------------------------
   # Registered. Handle:
-  #   * OPTIONS keepalives → 200 OK (stay registered);
   #   * REGISTER refreshes → re-authenticate then 200 OK (stay registered);
   #   * un-REGISTER (a REGISTER with Expires/Contact expires 0) → 200 OK then end;
   #   * dialog termination → end.
+  # OPTIONS keepalives are answered by the dialog layer itself (200 OK) and never
+  # reach the scenario, so there is nothing to handle here for them.
   state registered do
     on_events do
-      {:OPTIONS, req, _trans_pid, dialog_pid} ->
-        reply_options(req, dialog_pid)
-        goto(loop, "OPTIONS keepalive")
-
       {:REGISTER, req, _trans_pid, dialog_pid} ->
         case check_registration_auth(req, dialog_pid, password: appdata_get(:password)) do
           :no_auth_header ->

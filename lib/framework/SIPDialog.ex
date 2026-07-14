@@ -245,6 +245,7 @@ alias SIP.Transac
     GenServer.call(dialog_pid, { :ack, transac_pid})
   end
 
+  @spec start_options_keepalive(atom() | pid()) :: any()
   def start_options_keepalive(dialog_pid) do
     GenServer.call(dialog_pid, :option_keepalive)
   end

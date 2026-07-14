@@ -3,9 +3,11 @@ defmodule SIP.Scenario.Monitor do
   In-memory registry of the scenario instances ("calls") currently running, used
   by the `elixipp --monitor` live view.
 
-  One entry per call, keyed by the scenario process pid. Each entry holds the
-  scenario name, the last command sent (e.g. `send_INVITE`), the current FSM
-  state and the event that triggered the last transition.
+  One entry per call, keyed by the scenario slot id (an integer for a CLI slot,
+  `{parent_slot, name}` for a `sub_fsm` child, the scenario process pid
+  otherwise). Each entry holds the scenario name, the last command sent (e.g.
+  `send_INVITE`), the current FSM state and the event that triggered the last
+  transition. A sub-FSM gets its own row, displayed right below its parent.
 
   Both `SIP.Scenario.Runner` (state transitions) and the `SIP.Session.*` send_*
   macros (commands) report here, but **only when the monitor is started** — the
@@ -142,8 +144,15 @@ defmodule SIP.Scenario.Monitor do
   end
 
   @impl true
+  # Clearing a slot also removes the rows of its sub-FSMs (keyed
+  # {parent_slot, name}, possibly nested), so a recycled slot starts clean.
   def handle_cast({:clear, slot_id}, st) do
-    {:noreply, %{st | calls: Map.delete(st.calls, slot_id)}}
+    calls =
+      st.calls
+      |> Enum.reject(fn {call_id, _entry} -> root_slot(call_id) == slot_id end)
+      |> Map.new()
+
+    {:noreply, %{st | calls: calls}}
   end
 
   @impl true
@@ -162,9 +171,11 @@ defmodule SIP.Scenario.Monitor do
       st.calls
       |> Map.values()
       |> Enum.sort_by(& &1.idx)
-      |> Enum.map(
-        &Map.take(&1, [:scenario, :account, :command, :command_type, :state, :event, :event_type])
-      )
+      |> Enum.map(fn entry ->
+        entry
+        |> Map.take([:scenario, :account, :command, :command_type, :state, :event, :event_type])
+        |> Map.put(:depth, length(entry.idx) - 1)
+      end)
 
     {:reply, rows, st}
   end
@@ -175,8 +186,7 @@ defmodule SIP.Scenario.Monitor do
     {base, seq} =
       case Map.fetch(st.calls, call_id) do
         :error ->
-          idx = if is_integer(call_id), do: call_id, else: st.seq
-          {Map.put(@empty, :idx, idx), st.seq + 1}
+          {Map.put(@empty, :idx, index_for(st, call_id)), st.seq + 1}
 
         {:ok, existing} ->
           {existing, st.seq}
@@ -185,4 +195,28 @@ defmodule SIP.Scenario.Monitor do
     entry = Map.merge(base, fields)
     {:noreply, %{st | calls: Map.put(st.calls, call_id, entry), seq: seq}}
   end
+
+  # Display index of a new entry, as a path so rows sort in tree order: a CLI
+  # slot sorts on its number, a sub-FSM right below its parent, anything else
+  # (e.g. a server-mode instance) in order of appearance.
+  defp index_for(st, call_id) do
+    case call_id do
+      slot when is_integer(slot) ->
+        [slot]
+
+      {parent_slot, _name} ->
+        case Map.fetch(st.calls, parent_slot) do
+          {:ok, %{idx: parent_idx}} -> parent_idx ++ [st.seq]
+          :error -> [st.seq]
+        end
+
+      _pid ->
+        [st.seq]
+    end
+  end
+
+  # Root CLI slot of a call id: {parent_slot, name} chains up to the slot that
+  # spawned the whole family.
+  defp root_slot({parent_slot, _name}), do: root_slot(parent_slot)
+  defp root_slot(call_id), do: call_id
 end

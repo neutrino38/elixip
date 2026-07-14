@@ -615,6 +615,35 @@ defmodule SIP.DialogImpl do
     {:stop, {:shutdown, :cancelled}, state}
   end
 
+  # An in-dialog OPTIONS is a keepalive (RFC 3261 §11): the dialog answers it
+  # itself with a 200 OK instead of forwarding it to the app. This keeps
+  # registrar / call scenarios free of keepalive plumbing — they no longer need
+  # to intercept {:OPTIONS, …} just to bounce back a 200 OK. The request still
+  # runs through the transaction / allow / sequence-number checks so a stale
+  # retransmit or an out-of-order OPTIONS is rejected like any other in-dialog
+  # request.
+  def handle_cast({:sipmsg, msg, transact_pid}, state)
+      when is_req(msg) and msg.method == :OPTIONS do
+    with {:ok, state} <- on_new_transaction(state, msg, transact_pid),
+         {:ok, state} <- check_allows(state, msg),
+         {:ok, state} <- check_seqno(state, msg) do
+      {_ret, uas_t} = SIP.Transac.reply_req(msg, 200, "OK", [], state.totag, state.transactions)
+      {:noreply, add_totag(state, nil) |> close_transaction(uas_t)}
+    else
+      {:notallowed, state} ->
+        SIP.Transac.reply(transact_pid, 405, "Method not allowed", [], state.totag)
+        {:noreply, state}
+
+      {:out_of_order, state} ->
+        SIP.Transac.reply(transact_pid, 500, "Out of order", [], state.totag)
+        {:noreply, state}
+
+      {:toomanytransactions, state} ->
+        SIP.Transac.reply(transact_pid, 503, "Service Denied", nil, state.totag)
+        {:noreply, state}
+    end
+  end
+
   def handle_cast({:sipmsg, msg, transact_pid}, state) when is_req(msg) do
     Logger.debug(
       dialogpid: self(),

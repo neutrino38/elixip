@@ -60,10 +60,11 @@ defmodule UAC.RegisterExample do
         send_auth_REGISTER(rsp, @registration_expire)
         goto(loop, "401 Unauthorized")
 
-      {200, rsp, trans_pid, _dialog_pid} ->
+      {200, rsp, trans_pid, dialog_pid} ->
         # Arms the refresh timer (:register_refresh at expire/2) and the OPTIONS
         # keepalive timer (:options_keepalive) from the granted expiration.
         process_sip_reply(rsp, trans_pid)
+        start_options_keepalive(dialog_pid)
         goto(registered, "200 OK")
 
       {errcode, _rsp, _trans_pid, _dialog_pid} when errcode in 400..699 ->

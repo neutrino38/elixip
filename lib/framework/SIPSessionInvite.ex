@@ -6,7 +6,7 @@ defmodule SIP.Session.Call do
   # aligned on on_new_registration/3. Replies go through the dialog, so an
   # implementation may ignore it.
   @callback on_new_call(dialog_id :: pid, invitereq :: map, transaction_id :: pid) ::
-              { :accept, pid } | { :reject, integer, binary }
+              {:accept, pid} | {:reject, integer, binary}
   @callback on_call_end(dialog_id :: pid, app_pid :: pid) :: nil
 end
 
@@ -24,14 +24,29 @@ defmodule SIP.Session.CallUAC do
       defmacro send_INVITE(ruri, sdp_offer, options) do
         quote do
           SIP.Scenario.Monitor.note_command(:sip, "send_INVITE")
-          var!(sip_ctx) = SIP.Session.CallUAC.client_invite(var!(sip_ctx), unquote(ruri), unquote(sdp_offer), unquote(options))
+
+          var!(sip_ctx) =
+            SIP.Session.CallUAC.client_invite(
+              var!(sip_ctx),
+              unquote(ruri),
+              unquote(sdp_offer),
+              unquote(options)
+            )
         end
       end
 
       defmacro send_auth_INVITE(resp, ruri, sdp_offer, options) do
         quote do
           SIP.Scenario.Monitor.note_command(:sip, "send_auth_INVITE")
-          var!(sip_ctx) = SIP.Session.CallUAC.auth_invite(var!(sip_ctx), unquote(resp), unquote(ruri), unquote(sdp_offer), unquote(options))
+
+          var!(sip_ctx) =
+            SIP.Session.CallUAC.auth_invite(
+              var!(sip_ctx),
+              unquote(resp),
+              unquote(ruri),
+              unquote(sdp_offer),
+              unquote(options)
+            )
         end
       end
 
@@ -39,7 +54,10 @@ defmodule SIP.Session.CallUAC do
         quote do
           var!(sip_ctx) =
             SIP.Session.CallUAC.process_invite_reply(
-              var!(sip_ctx), unquote(resp), unquote(transaction_id))
+              var!(sip_ctx),
+              unquote(resp),
+              unquote(transaction_id)
+            )
         end
       end
 
@@ -72,7 +90,11 @@ defmodule SIP.Session.CallUAC do
 
           var!(sip_ctx) =
             SIP.Session.CallUAS.do_reply_invite(
-              var!(sip_ctx), unquote(code), unquote(reason), unquote(upd_fields))
+              var!(sip_ctx),
+              unquote(code),
+              unquote(reason),
+              unquote(upd_fields)
+            )
         end
       end
 
@@ -89,7 +111,10 @@ defmodule SIP.Session.CallUAC do
 
           var!(sip_ctx) =
             SIP.Session.CallUAS.do_reply_invite_with_sdp(
-              var!(sip_ctx), unquote(code), unquote(opts))
+              var!(sip_ctx),
+              unquote(code),
+              unquote(opts)
+            )
         end
       end
 
@@ -105,7 +130,11 @@ defmodule SIP.Session.CallUAC do
 
           var!(sip_ctx) =
             SIP.Session.CallUAS.do_reply_invite_with_body(
-              var!(sip_ctx), unquote(code), unquote(bodies), unquote(opts))
+              var!(sip_ctx),
+              unquote(code),
+              unquote(bodies),
+              unquote(opts)
+            )
         end
       end
     end
@@ -121,7 +150,7 @@ defmodule SIP.Session.CallUAC do
     ruri =
       if is_binary(ruri) do
         case SIP.Uri.parse(ruri) do
-          { :ok, parsed } -> parsed
+          {:ok, parsed} -> parsed
           err -> raise "Invalid request URI #{inspect(ruri)}: #{inspect(err)}"
         end
       else
@@ -140,11 +169,14 @@ defmodule SIP.Session.CallUAC do
       callid: nil,
       contentlength: 0
     }
-    SIP.Msg.Ops.update_sip_msg(req, { :body, body })
+
+    SIP.Msg.Ops.update_sip_msg(req, {:body, body})
   end
 
-  @spec client_invite(%SIP.Context{}, binary(), binary() | list() | atom(), integer() | list()) :: %SIP.Context{}
-  def client_invite(sip_ctx = %SIP.Context{}, ruri, :mediaserver, options) when is_list(options) do
+  @spec client_invite(%SIP.Context{}, binary(), binary() | list() | atom(), integer() | list()) ::
+          %SIP.Context{}
+  def client_invite(sip_ctx = %SIP.Context{}, ruri, :mediaserver, options)
+      when is_list(options) do
     if is_pid(sip_ctx.mediaserverpid) do
       timeout = Keyword.get(options, :timeout, 20)
       webrtc_support = Keyword.get(options, :webrtc, :no)
@@ -159,7 +191,8 @@ defmodule SIP.Session.CallUAC do
     end
   end
 
-  def client_invite(sip_ctx = %SIP.Context{}, ruri, sdp_offer, timeout) when is_integer(timeout) do
+  def client_invite(sip_ctx = %SIP.Context{}, ruri, sdp_offer, timeout)
+      when is_integer(timeout) do
     invite = invite_msg(sip_ctx, ruri, sdp_offer)
     SIP.Session.send_sip_request(sip_ctx, invite, timeout)
   end
@@ -168,8 +201,15 @@ defmodule SIP.Session.CallUAC do
   Re-send an INVITE authenticated against a 401/407 challenge response `resp`.
   Mirrors `SIP.Session.RegisterUAC.auth_register/3` for the INVITE method.
   """
-  @spec auth_invite(%SIP.Context{}, map(), binary(), binary() | list() | atom(), integer() | list()) :: %SIP.Context{}
-  def auth_invite(sip_ctx = %SIP.Context{}, resp, ruri, :mediaserver, options) when is_list(options) do
+  @spec auth_invite(
+          %SIP.Context{},
+          map(),
+          binary(),
+          binary() | list() | atom(),
+          integer() | list()
+        ) :: %SIP.Context{}
+  def auth_invite(sip_ctx = %SIP.Context{}, resp, ruri, :mediaserver, options)
+      when is_list(options) do
     if is_pid(sip_ctx.mediaserverpid) do
       timeout = Keyword.get(options, :timeout, 20)
       medias = Keyword.get(options, :media, :tc)
@@ -212,7 +252,11 @@ defmodule SIP.Session.CallUAC do
     invite =
       invite_msg(sip_ctx, ruri, sdp_offer)
       |> SIP.Msg.Ops.add_authorization_to_req(
-        authparams, autheader, sip_ctx.authusername, sip_ctx.ha1, :ha1
+        authparams,
+        autheader,
+        sip_ctx.authusername,
+        sip_ctx.ha1,
+        :ha1
       )
 
     SIP.Session.send_sip_request(sip_ctx, invite, timeout)
@@ -298,7 +342,11 @@ defmodule SIP.Session.CallUAS do
 
           var!(sip_ctx) =
             SIP.Session.CallUAS.do_redirect_invite(
-              var!(sip_ctx), unquote(contacts), unquote(code), unquote(reason))
+              var!(sip_ctx),
+              unquote(contacts),
+              unquote(code),
+              unquote(reason)
+            )
         end
       end
 
@@ -310,7 +358,10 @@ defmodule SIP.Session.CallUAS do
 
           var!(sip_ctx) =
             SIP.Session.CallUAS.do_challenge_invite(
-              var!(sip_ctx), unquote(realm), unquote(code))
+              var!(sip_ctx),
+              unquote(realm),
+              unquote(code)
+            )
         end
       end
     end
@@ -319,12 +370,16 @@ defmodule SIP.Session.CallUAS do
   @doc """
   Store the inbound offer request (INVITE / re-INVITE / UPDATE) and its server
   transaction pid in the context appdata (single slot `:last_uas_req` /
-  `:last_uas_req_tid`), so the reply macros can serve it. No-op for any other
-  event. Called by the on_events instrumentation for every matched event.
+  `:last_uas_req_tid`), so the reply macros can serve it. Also binds the dialog
+  pid into the context: a UAS scenario spawned before the dialog exists (a
+  `sub_fsm` child waiting for a call) has no other way to learn it, and the
+  reply macros target `sip_ctx.dialogpid`. No-op for any other event. Called by
+  the on_events instrumentation for every matched event.
   """
-  def auto_store(sip_ctx, {m, req, trans_pid, _dlg})
+  def auto_store(sip_ctx, {m, req, trans_pid, dlg})
       when m in [:INVITE, :UPDATE] and is_map(req) do
     sip_ctx
+    |> SIP.Context.set(:dialogpid, dlg)
     |> SIP.Context.appdata_set(:last_uas_req, req)
     |> SIP.Context.appdata_set(:last_uas_req_tid, trans_pid)
   end
@@ -534,7 +589,11 @@ defmodule SIP.Session.CallInDialog do
             SIP.Scenario.Monitor.note_command(:sip, "send_MESSAGE")
 
             var!(sip_ctx) =
-              SIP.Session.CallInDialog.do_send_message(var!(sip_ctx), unquote(body), unquote(opts))
+              SIP.Session.CallInDialog.do_send_message(
+                var!(sip_ctx),
+                unquote(body),
+                unquote(opts)
+              )
           end
         end
 
@@ -561,7 +620,11 @@ defmodule SIP.Session.CallInDialog do
             SIP.Scenario.Monitor.note_command(:sip, "send_REFER")
 
             var!(sip_ctx) =
-              SIP.Session.CallInDialog.do_send_refer(var!(sip_ctx), unquote(refer_to), unquote(opts))
+              SIP.Session.CallInDialog.do_send_refer(
+                var!(sip_ctx),
+                unquote(refer_to),
+                unquote(opts)
+              )
           end
         end
 
@@ -570,7 +633,11 @@ defmodule SIP.Session.CallInDialog do
             SIP.Scenario.Monitor.note_command(:sip, "send_UPDATE")
 
             var!(sip_ctx) =
-              SIP.Session.CallInDialog.do_send_update(var!(sip_ctx), unquote(sdp_or_ms), unquote(opts))
+              SIP.Session.CallInDialog.do_send_update(
+                var!(sip_ctx),
+                unquote(sdp_or_ms),
+                unquote(opts)
+              )
           end
         end
 
@@ -579,7 +646,11 @@ defmodule SIP.Session.CallInDialog do
             SIP.Scenario.Monitor.note_command(:sip, "send_reINVITE")
 
             var!(sip_ctx) =
-              SIP.Session.CallInDialog.do_send_reinvite(var!(sip_ctx), unquote(sdp_or_ms), unquote(opts))
+              SIP.Session.CallInDialog.do_send_reinvite(
+                var!(sip_ctx),
+                unquote(sdp_or_ms),
+                unquote(opts)
+              )
           end
         end
 
@@ -589,7 +660,11 @@ defmodule SIP.Session.CallInDialog do
 
             var!(sip_ctx) =
               SIP.Session.CallInDialog.do_send_notify(
-                var!(sip_ctx), unquote(event), unquote(body), unquote(opts))
+                var!(sip_ctx),
+                unquote(event),
+                unquote(body),
+                unquote(opts)
+              )
           end
         end
 
@@ -610,7 +685,12 @@ defmodule SIP.Session.CallInDialog do
 
             var!(sip_ctx) =
               SIP.Session.CallInDialog.do_reply_request(
-                var!(sip_ctx), unquote(req), unquote(code), unquote(reason), unquote(upd_fields))
+                var!(sip_ctx),
+                unquote(req),
+                unquote(code),
+                unquote(reason),
+                unquote(upd_fields)
+              )
           end
         end
       end
@@ -659,7 +739,10 @@ defmodule SIP.Session.CallInDialog do
 
   def do_send_notify(sip_ctx = %SIP.Context{}, event, body, opts) when is_list(opts) do
     ct = Keyword.get(opts, :contenttype, "message/sipfrag;version=2.0")
-    req = in_dialog_request(sip_ctx, :NOTIFY, %{"Event" => to_string(event)}) |> put_body(body, ct)
+
+    req =
+      in_dialog_request(sip_ctx, :NOTIFY, %{"Event" => to_string(event)}) |> put_body(body, ct)
+
     SIP.Session.send_sip_request(sip_ctx, req, 0)
   end
 

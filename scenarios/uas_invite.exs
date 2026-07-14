@@ -38,6 +38,8 @@ defmodule UAS.InviteExample do
         media_connect();
         reply_invite(180, "Ringing")
         goto(answering, "INVITE")
+
+      {:scenario_ctl, :shutdown, _reason } -> scenario_aborted("UAS Invite stopped gracefully")
     after
       32_000 -> scenario_failure("no INVITE received")
     end
@@ -53,6 +55,7 @@ defmodule UAS.InviteExample do
   state in_call do
     # media_start_echo()
     media_record("record.mp4", 60000)
+    media_play("titi.mp4")
 
     on_events do
       # ACK of our 2xx (nothing to reply); confirms the call is established.
@@ -71,7 +74,7 @@ defmodule UAS.InviteExample do
 
       {:BYE, req, _trans, _dlg} ->
         reply_request(req, 200, "OK")
-        stop_media();
+        media_stop();
         scenario_success("BYE")
 
       # Caller cancelled before / around answer: the IST already sent 200 (CANCEL)

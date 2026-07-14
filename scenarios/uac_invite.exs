@@ -90,7 +90,7 @@ defmodule UAC.InviteExample do
 
   # -------------------------------------------------------------------------------
   state start_play do
-    media_play("toto.mp4")
+    media_play("titi.mp4")
     goto(next)
   end
 
@@ -103,12 +103,12 @@ defmodule UAC.InviteExample do
       {:ms_event, _player, :player_ended} ->
         goto(hangup_call, "toto.mp4: EOF")
 
-      {:MESSAGE, req, _trans_pid, dialog_pid} ->
-        SIP.Dialog.reply(dialog_pid, req, 200, "OK", [])
+      {:MESSAGE, req, _trans_pid, _dialog_pid} ->
+        reply_request(req, 200, "OK")
         goto(loop, "MESSAGE")
 
-      {:BYE, req, _trans_pid, dialog_pid} ->
-        SIP.Dialog.reply(dialog_pid, req, 200, "OK", [])
+      {:BYE, req, _trans_pid, _dialog_pid} ->
+        reply_request(req, 200, "OK")
         scenario_success("BYE")
     end
   end

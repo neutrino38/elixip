@@ -994,6 +994,14 @@ defmodule Elixipp.CLI do
     end)
   end
 
+  # Indent a sub-FSM's name under its parent scenario row.
+  defp scenario_cell(call) do
+    case Map.get(call, :depth, 0) do
+      0 -> call.scenario
+      depth -> String.duplicate("  ", depth - 1) <> "└ " <> call.scenario
+    end
+  end
+
   defp cell(call, :command, width, true),
     do: Owl.Data.tag(fit(call[:command], width), color_for(call[:command_type]))
 
@@ -1006,6 +1014,8 @@ defmodule Elixipp.CLI do
       color -> Owl.Data.tag(fit(call[:state], width), color)
     end
   end
+
+  defp cell(call, :scenario, width, _colorize?), do: fit(scenario_cell(call), width)
 
   defp cell(call, key, width, _colorize?), do: fit(Map.get(call, key, ""), width)
 

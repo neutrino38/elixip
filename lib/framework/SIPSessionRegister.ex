@@ -316,11 +316,26 @@ defmodule SIP.Session.RegisterUAC do
     end
   end
 
+  @doc """
+  Manually send an OPTIONS keepalive SIP message
+  """
   def send_options(sip_ctx = %SIP.Context{}, opts \\ []) when is_list(opts) do
     timeout = Keyword.get(opts, :timeout, 20)
     options = options_msg(sip_ctx)
     SIP.Session.send_sip_request(sip_ctx, options, timeout)
   end
+
+  @doc """
+  Start dialog OPTIONS keepalive in the dialog layer
+  Dialog message will be sent automatically and if no
+  answers are received after several attempts, the REGISTER
+  Dialog will be terminated
+  """
+  def start_options_keepalive(ctx = %SIP.Context{}) do
+    SIP.Dialog.start_options_keepalive(ctx.dialogpid)
+  end
+
+
 
   # Appdata keys under which the armed timer references are stored, so they can
   # be re-armed or cancelled later.

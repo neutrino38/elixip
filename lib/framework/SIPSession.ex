@@ -216,6 +216,14 @@ defmodule SIP.Session do
       end)
     end
 
+    @spec get_call_processing_module() :: module() | nil
+    @doc """
+    Return the currently configured call processing module (nil when none).
+    """
+    def get_call_processing_module() do
+      Agent.get(__MODULE__, fn reg -> reg.callprocessing end)
+    end
+
     @spec set_registration_processing_module(module()) :: :ok
     @doc """
     Specify which registration processing will be used by the Dialog Layer
