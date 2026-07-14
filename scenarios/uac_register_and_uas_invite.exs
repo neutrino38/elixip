@@ -59,7 +59,7 @@ defmodule UAC.RegisterThenWaitForCall do
         # keepalive timer (:options_keepalive) from the granted expiration.
         process_sip_reply(rsp, trans_pid)
         SIP.Session.RegisterUAC.start_options_keepalive(sip_ctx)
-        sub_fsm "scenarios/uas_invite.exs", as: :register_uac
+        sub_fsm "scenarios/uas_invite.exs", as: :invite_uas
         goto(registered, "200 OK")
 
       {errcode, _rsp, _trans_pid, _dialog_pid} when errcode in 400..699 ->
@@ -117,6 +117,10 @@ defmodule UAC.RegisterThenWaitForCall do
 
       {errcode, _rsp, _trans_pid, _dialog_pid} when errcode in 300..399 ->
         scenario_failure("Unexpected REGISTER redirect #{errcode}")
+
+      {:scenario_exit, :invite_uas, :success, _r} -> goto unregistering, "call complete"
+
+      {:scenario_exit, :invite_uas, :failure, _r} -> goto unregistering, "call failure"
     after
       5_000 ->
         scenario_failure("REGISTER refresh timeout")
