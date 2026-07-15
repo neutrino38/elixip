@@ -208,8 +208,9 @@ Scenario can be parametrized using json files as described above.
 You can exercise the registrar with the client scenario over a real UDP loopback
 on `127.0.0.1`. A genuine REGISTER exchange needs **two OS processes** (each BEAM
 has a single SIP transaction registry, so a single process can't be both the UAC
-and the UAS for the same transaction). They must bind different local UDP ports —
-hence `--listen … :PORT` on the server and `--local-port` on the client:
+and the UAS for the same transaction). They must bind different local UDP ports.
+Since the client now defaults to a random free port (≥ 5000), `--local-port` is
+optional; the examples below keep it explicit for reproducibility:
 
 **UDP loopback:**
 
@@ -329,8 +330,8 @@ elixipp [OPTIONS] <scenario.exs | ModuleName>
 | `--max-run N` | Stop after `N` executions in total. | unlimited (`1` when neither `--limit` nor `--max-run` is set) |
 | `--rate N` | Number of calls started per second. Each new call creation is spaced by `1000 / N` ms. Values greater than `100` are ignored and fall back to the default. | `10` |
 | `-c FILE`, `--config FILE` | JSON file parameterizing the scenario (header + N accounts). Overrides the scenario `config` block. See [Paramétrage par fichier JSON](#paramétrage-par-fichier-json-externe). | none |
-| `--listen PROTO:PORT` | (server mode) Listen for inbound requests on this protocol/port. Repeatable. `PROTO:ADDR:PORT` also pins the advertised local IP. Protocols: `udp`, `tcp`, `tls`, `wss`. TLS and WSS share the same certificate files; see [docs/tls_listener.md](docs/tls_listener.md) and [docs/wss_listener.md](docs/wss_listener.md) for setup. | `udp:5060` |
-| `--local-port PORT` | (client mode) Local UDP port used to send (lets a UAC run on a host already serving a UAS on 5060). | `5060` |
+| `--listen PROTO:PORT` | (server mode) Listen for inbound requests on this protocol/port. Repeatable. `PROTO:ADDR:PORT` also pins the advertised local IP; `PROTO` alone (e.g. `--listen udp`) picks a random free port (≥ 5000, availability checked). Protocols: `udp`, `tcp`, `tls`, `wss`. TLS and WSS share the same certificate files; see [docs/tls_listener.md](docs/tls_listener.md) and [docs/wss_listener.md](docs/wss_listener.md) for setup. | `udp:5060` |
+| `--local-port PORT` | (client mode) Local UDP port used to send. Without it, a random free UDP port (≥ 5000) is picked, so a UAC always starts even on a host already serving a UAS on 5060. | random free port ≥ 5000 |
 | `--local-addr ADDR` | (client mode) Local IP advertised in Via/Contact. | first local IPv4 |
 | `--log-file PATH` | Log file path. | `elixipp.log` |
 | `--log-level LEVEL` | File log level: `debug` \| `info` \| `warning` \| `error`. | `debug` |

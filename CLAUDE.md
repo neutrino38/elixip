@@ -95,9 +95,12 @@ tool drives the DSL engine; the DSL itself runs fine without the tool.
 ### UAS server scenarios (`SIP.Scenario` + `elixipp`)
 - A scenario can act as a server: `uas :register` sets `__scenario_type__/0` to
   `:uas_register` (default is `:uac`)
-- `elixipp` detects the type, starts `--listen PROTO:PORT` listeners (UDP only so
-  far) and registers `Elixip.RegistrarUAS` (instance factory + concurrency quota →
-  503) as the processing module
+- `elixipp` detects the type, starts `--listen PROTO:PORT` listeners (udp, tcp,
+  tls, wss; `PROTO` alone picks a random free port ≥ 5000) and registers
+  `Elixip.RegistrarUAS` (instance factory + concurrency quota → 503) as the
+  processing module
+- Client (UAC) mode without `--local-port` also binds a random free UDP port
+  ≥ 5000 (`SIP.NetUtils.pick_free_port/2`) instead of the transport's 5060 default
 - `SIP.Scenario.Runner.spawn_uas_instance/2` spawns one monitored instance per
   inbound dialog (`run_instance/2` opts `:dialog_pid`, `:inbound_request`, `:parent_pid`)
 

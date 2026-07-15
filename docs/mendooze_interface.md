@@ -322,8 +322,24 @@ Return `{:ok, {conn_pid, :recorder, ref}}`.
 ### 4.14 `start_recorder/1`
 
 ```
-RecorderRecord(S, recorder_id, file_path, duration_ms)   # 4th param optional, 0 = unlimited
+RecorderRecord(S, recorder_id, file_path, duration_ms [, waitVideo [, echoVideo]])
 ```
+
+- `duration_ms` — 4th param, optional, `0` = unlimited.
+- `waitVideo` — 5th param, optional, integer `0`/`1`, **server default `1`**.
+  When `1`, the recorder discards audio/text until the first video I-frame so
+  all tracks start together; auto-disabled server-side when no video is
+  negotiated. Mapped from the `:wait_video` recorder opt (Elixip default:
+  `true`, same as the server).
+- `echoVideo` — 6th param, optional, integer `0`/`1`, **server default `0`**.
+  When `1`, the recorder loops every received video packet back to the source
+  endpoint (self-view while recording); stops at `RecorderStop`. Requires
+  `EndpointStartSending(Video)` to already have been called, which is always
+  the case here (§4.6 arms sending before the recorder can be created).
+  Mapped from the `:echo` recorder opt (Elixip default: `false`).
+
+Elixip always sends both trailing params explicitly (never relies on the
+server defaults) so `:wait_video`/`:echo` opts are honored deterministically.
 
 No synthetic event: the server emits `RecorderStartedEvent` (type 4) →
 `:recorder_started`. Gap #3 closed.
@@ -440,6 +456,12 @@ loss (hang up or retry per policy). The Mockup never emits it.
 
 2. `recorder_opts` — document that `stop_on_silence`/`stop_on_dtmf` are
    accepted but currently inoperative with the Mendooze adapter.
+3. `recorder_opts` gained `:wait_video` (default `true`) and `:echo` (default
+   `false`), mapped to the `waitVideo`/`echoVideo` `RecorderRecord` params
+   (§4.14). `MediaServer.Mockup` mirrors both: `:echo` toggles the same RTP
+   loopback used by `create_echo/1` for the duration of the recording;
+   `:wait_video` is auto-disabled when the mock connection has no video
+   media, matching the server's own auto-disable behavior.
 
 ---
 
