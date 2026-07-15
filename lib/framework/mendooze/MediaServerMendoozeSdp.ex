@@ -17,7 +17,21 @@ defmodule MediaServer.Mendooze.Sdp do
   In a JSR309 `rtpMap`, each key is a payload type (string) and each value a
   Mendooze codec constant (integer); the receive map (what we accept) and the
   send map (what was negotiated) may differ.
+
+  ## Delegated SDP negotiation
+
+  Since the enriched `EndpointStartReceiving` return, the media server is
+  authoritative for the accepted payload types and their fmtp parameters (see
+  `docs/mendooze_sdp_delegation_plan.md`). `accepted_pts/2` reduces the server
+  struct to the accepted set; `pt_rtpmap/2` / `code_rtpmap/2` resolve the SDP
+  `rtpmap` fields for a payload type (the server returns fmtp only, so the
+  encoding name and clock still come from the local codec tables); and the
+  `:rtpmaps`/`:fmtp` variant of `media_spec` feeds `build/1` the server-driven
+  codec section. `restrict_send_map/3` keeps the send map in sync with what the
+  server accepted on receive.
   """
+
+  require Logger
 
   # ── Codec tables ────────────────────────────────────────────────────────────
   # name => {default payload type for our offers, mendooze code, clock, channels}
@@ -86,11 +100,26 @@ defmodule MediaServer.Mendooze.Sdp do
   fingerprint, or our SDES key. `:protocol` overrides the one derived from
   `:crypto` (useful in answers, to mirror the offer). `:bandwidth` emits a
   `b=AS:` line when positive; `:direction` defaults to `:sendrecv`.
+
+  The codec section is given **either** by `:codecs` (legacy, client-side codec
+  tables synthesize the `rtpmap`/`fmtp` lines) **or** by `:rtpmaps` + `:fmtp`
+  (server-driven: the ordered `rtpmap` entries are emitted verbatim and each
+  non-empty `:fmtp` string becomes an `a=fmtp:<pt> <string>` line). When both
+  are present the server-driven fields win.
   """
+  @type rtpmap_entry :: %{
+          required(:pt) => non_neg_integer(),
+          required(:encoding) => String.t(),
+          required(:clock) => non_neg_integer(),
+          optional(:channels) => non_neg_integer() | nil
+        }
+
   @type media_spec :: %{
           required(:type) => :audio | :video | :text,
           required(:port) => non_neg_integer(),
-          required(:codecs) => [codec_name()],
+          optional(:codecs) => [codec_name()],
+          optional(:rtpmaps) => [rtpmap_entry()],
+          optional(:fmtp) => %{optional(String.t()) => String.t()},
           optional(:dtmf) => boolean(),
           optional(:crypto) => crypto(),
           optional(:ice) => nil | %{ufrag: String.t(), pwd: String.t()},
@@ -205,6 +234,24 @@ defmodule MediaServer.Mendooze.Sdp do
     |> to_string()
   end
 
+  # Server-driven codec section: emit the accepted rtpmap entries and the fmtp
+  # strings returned by the media server verbatim.
+  defp build_media(%{type: type, port: port, rtpmaps: rtpmaps} = mspec) do
+    crypto = Map.get(mspec, :crypto, :none)
+    protocol = Map.get(mspec, :protocol, protocol_for(crypto))
+    fmtp = Map.get(mspec, :fmtp, %{})
+
+    %ExSDP.Media{type: type, port: port, protocol: protocol, fmt: []}
+    |> add_bandwidth(Map.get(mspec, :bandwidth))
+    |> add_server_codecs(rtpmaps, fmtp)
+    |> ExSDP.add_attribute(Map.get(mspec, :direction, :sendrecv))
+    |> add_crypto(crypto)
+    |> add_ice(Map.get(mspec, :ice))
+    |> add_rtcp_mux(Map.get(mspec, :rtcp_mux, false))
+  end
+
+  # Legacy client-side codec section (fallback when the server does not return
+  # the enriched fmtp struct).
   defp build_media(%{type: type, port: port, codecs: codecs} = mspec) do
     crypto = Map.get(mspec, :crypto, :none)
     protocol = Map.get(mspec, :protocol, protocol_for(crypto))
@@ -219,6 +266,27 @@ defmodule MediaServer.Mendooze.Sdp do
     |> add_ice(Map.get(mspec, :ice))
     |> add_rtcp_mux(Map.get(mspec, :rtcp_mux, false))
   end
+
+  defp add_server_codecs(m, rtpmaps, fmtp) do
+    Enum.reduce(rtpmaps, m, fn entry, acc ->
+      acc
+      |> ExSDP.add_attribute(%ExSDP.Attribute.RTPMapping{
+        payload_type: entry.pt,
+        encoding: entry.encoding,
+        clock_rate: entry.clock,
+        params: Map.get(entry, :channels)
+      })
+      |> add_server_fmtp(entry.pt, Map.get(fmtp, Integer.to_string(entry.pt)))
+      |> append_pt(entry.pt)
+    end)
+  end
+
+  # A fmtp-less codec (empty string per decision §8-E, or missing) emits no
+  # a=fmtp line; otherwise forward the server string verbatim (ExSDP renders a
+  # {"fmtp", val} tuple as `a=fmtp:val`).
+  defp add_server_fmtp(m, _pt, nil), do: m
+  defp add_server_fmtp(m, _pt, ""), do: m
+  defp add_server_fmtp(m, pt, params), do: ExSDP.add_attribute(m, {"fmtp", "#{pt} #{params}"})
 
   defp add_bandwidth(m, bw) when is_integer(bw) and bw > 0,
     do: Map.put(m, :bandwidth, [%ExSDP.Bandwidth{type: :AS, bandwidth: bw}])
@@ -614,6 +682,132 @@ defmodule MediaServer.Mendooze.Sdp do
   def reverse_direction(:sendonly), do: :recvonly
   def reverse_direction(:recvonly), do: :sendonly
   def reverse_direction(dir), do: dir
+
+  # ── Delegated SDP negotiation (enriched EndpointStartReceiving) ──────────────
+
+  @doc """
+  Reduce the media server's enriched `EndpointStartReceiving` return
+  (`returnVal[1]`, the fmtp-per-payload-type struct) to the authoritative set of
+  accepted payload types.
+
+  `proposed` is the receive `rtpMap` we sent to `EndpointStartReceiving`; keys of
+  the returned struct that were never proposed are dropped (defensive, logged).
+  Presence of a key means the payload type was accepted (empty fmtp value =
+  fmtp-less codec, decision §8-E); absence means it was filtered.
+
+  Returns `nil` when `fmtp_struct` is `nil` — an older server that returned only
+  the port, so the caller falls back to the client-side codec tables.
+
+      iex> MediaServer.Mendooze.Sdp.accepted_pts(%{"0" => 0, "96" => 99},
+      ...>   %{"0" => "", "96" => "profile-level-id=42801f"})
+      %{"0" => "", "96" => "profile-level-id=42801f"}
+  """
+  @spec accepted_pts(rtp_map(), %{optional(String.t()) => String.t()} | nil) ::
+          %{String.t() => String.t()} | nil
+  def accepted_pts(_proposed, nil), do: nil
+
+  def accepted_pts(proposed, fmtp_struct) when is_map(fmtp_struct) do
+    fmtp_struct
+    |> Map.new(fn {pt, fmtp} -> {to_string(pt), to_string(fmtp)} end)
+    |> Map.filter(fn {pt, _fmtp} ->
+      if Map.has_key?(proposed, pt) do
+        true
+      else
+        Logger.warning("Mendooze.Sdp: server accepted unproposed payload type #{pt}, ignoring")
+        false
+      end
+    end)
+  end
+
+  @doc """
+  Resolve the SDP `rtpmap` fields for one of *our* offered payload types
+  (`{encoding, clock, channels}`), or `:unknown`. Used on the offer side, where
+  the payload-type numbering is ours (the codec-table defaults).
+  """
+  @spec pt_rtpmap(:audio | :video | :text, non_neg_integer()) ::
+          {String.t(), non_neg_integer(), non_neg_integer() | nil} | :unknown
+  def pt_rtpmap(:audio, @dtmf_pt), do: {"telephone-event", 8000, nil}
+
+  def pt_rtpmap(:audio, pt) do
+    case Enum.find(@audio_codecs, fn {_name, {p, _code, _clk, _ch}} -> p == pt end) do
+      {name, {_p, _code, clock, ch}} -> {sdp_encoding(name), clock, channels(ch)}
+      nil -> :unknown
+    end
+  end
+
+  def pt_rtpmap(:video, pt) do
+    case Enum.find(@video_codecs, fn {_name, {p, _code, _clk}} -> p == pt end) do
+      {name, {_p, _code, clock}} -> {sdp_encoding(name), clock, nil}
+      nil -> :unknown
+    end
+  end
+
+  def pt_rtpmap(:text, pt) do
+    case Enum.find(@text_codecs, fn {_name, {p, _code, _clk}} -> p == pt end) do
+      {name, {_p, _code, clock}} -> {sdp_encoding(name), clock, nil}
+      nil -> :unknown
+    end
+  end
+
+  @doc """
+  Resolve the SDP `rtpmap` fields (`{encoding, clock, channels}`) from a Mendooze
+  codec code, or `:unknown`. Used on the answer side, where the payload-type
+  numbering is the offerer's: we look the accepted PT's code up in the parsed
+  offer, then derive the (numbering-independent) encoding and clock from it.
+  """
+  @spec code_rtpmap(:audio | :video | :text, non_neg_integer()) ::
+          {String.t(), non_neg_integer(), non_neg_integer() | nil} | :unknown
+  def code_rtpmap(:audio, @dtmf_code), do: {"telephone-event", 8000, nil}
+
+  def code_rtpmap(:audio, code) do
+    case Enum.find(@audio_codecs, fn {_name, {_p, c, _clk, _ch}} -> c == code end) do
+      {name, {_p, _c, clock, ch}} -> {sdp_encoding(name), clock, channels(ch)}
+      nil -> :unknown
+    end
+  end
+
+  def code_rtpmap(:video, code) do
+    case Enum.find(@video_codecs, fn {_name, {_p, c, _clk}} -> c == code end) do
+      {name, {_p, _c, clock}} -> {sdp_encoding(name), clock, nil}
+      nil -> :unknown
+    end
+  end
+
+  def code_rtpmap(:text, code) do
+    case Enum.find(@text_codecs, fn {_name, {_p, c, _clk}} -> c == code end) do
+      {name, {_p, _c, clock}} -> {sdp_encoding(name), clock, nil}
+      nil -> :unknown
+    end
+  end
+
+  @doc """
+  Restrict a send `rtpMap` (remote payload-type numbering → codec code) to the
+  codecs the media server accepted on receive, so we never send a codec it just
+  filtered. `proposed_recv` is the receive `rtpMap` we sent to
+  `EndpointStartReceiving` (local numbering → code); `accepted` is the result of
+  `accepted_pts/2`. When `accepted` is `nil` (older server) the send map is
+  returned unchanged.
+  """
+  @spec restrict_send_map(rtp_map(), rtp_map(), %{String.t() => String.t()} | nil) :: rtp_map()
+  def restrict_send_map(send_map, _proposed_recv, nil), do: send_map
+
+  def restrict_send_map(send_map, proposed_recv, accepted) do
+    codes =
+      accepted
+      |> Map.keys()
+      |> Enum.flat_map(fn pt ->
+        case Map.fetch(proposed_recv, pt) do
+          {:ok, code} -> [code]
+          :error -> []
+        end
+      end)
+      |> MapSet.new()
+
+    Map.filter(send_map, fn {_pt, code} -> MapSet.member?(codes, code) end)
+  end
+
+  defp channels(ch) when is_integer(ch) and ch > 1, do: ch
+  defp channels(_), do: nil
 
   # ── GetMediaCandidates ──────────────────────────────────────────────────────
 

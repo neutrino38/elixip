@@ -1,6 +1,8 @@
 defmodule Mendooze.SdpTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias MediaServer.Mendooze.Sdp
 
   @moduledoc """
@@ -402,6 +404,161 @@ defmodule Mendooze.SdpTest do
     test "rejects malformed candidates" do
       assert {:error, {:bad_candidate, _}} = Sdp.parse_media_candidate("nonsense")
       assert {:error, {:bad_candidate, _}} = Sdp.parse_media_candidate("rtp://hostonly")
+    end
+  end
+
+  # ── Delegated SDP negotiation (enriched EndpointStartReceiving) ──────────────
+
+  describe "accepted_pts/2" do
+    test "keeps only proposed PTs, preserving (possibly empty) fmtp" do
+      proposed = %{"0" => 0, "96" => 99, "101" => 100}
+
+      struct = %{
+        "0" => "",
+        "96" => "profile-level-id=42801f;packetization-mode=1",
+        "101" => "0-16"
+      }
+
+      assert Sdp.accepted_pts(proposed, struct) == struct
+    end
+
+    test "a proposed PT absent from the struct was filtered by the server" do
+      proposed = %{"0" => 0, "96" => 99}
+      # server dropped H264 (96): only PCMU accepted
+      assert Sdp.accepted_pts(proposed, %{"0" => ""}) == %{"0" => ""}
+    end
+
+    test "an unproposed PT returned by the server is dropped and logged" do
+      proposed = %{"0" => 0}
+
+      log =
+        capture_log(fn ->
+          assert Sdp.accepted_pts(proposed, %{"0" => "", "99" => "some=fmtp"}) == %{"0" => ""}
+        end)
+
+      assert log =~ "unproposed payload type 99"
+    end
+
+    test "nil struct (older server) yields nil → legacy path" do
+      assert Sdp.accepted_pts(%{"0" => 0}, nil) == nil
+    end
+  end
+
+  describe "pt_rtpmap/2 and code_rtpmap/2" do
+    test "pt_rtpmap resolves our offered payload types" do
+      assert Sdp.pt_rtpmap(:audio, 0) == {"PCMU", 8000, nil}
+      assert Sdp.pt_rtpmap(:audio, 98) == {"opus", 48_000, 2}
+      assert Sdp.pt_rtpmap(:audio, 101) == {"telephone-event", 8000, nil}
+      assert Sdp.pt_rtpmap(:video, 99) == {"H264", 90_000, nil}
+      assert Sdp.pt_rtpmap(:text, 105) == {"red", 1000, nil}
+      assert Sdp.pt_rtpmap(:audio, 42) == :unknown
+    end
+
+    test "code_rtpmap resolves from the Mendooze codec code (answer side)" do
+      assert Sdp.code_rtpmap(:audio, 0) == {"PCMU", 8000, nil}
+      assert Sdp.code_rtpmap(:audio, 98) == {"opus", 48_000, 2}
+      assert Sdp.code_rtpmap(:audio, 100) == {"telephone-event", 8000, nil}
+      assert Sdp.code_rtpmap(:video, 99) == {"H264", 90_000, nil}
+      assert Sdp.code_rtpmap(:audio, 42) == :unknown
+    end
+  end
+
+  describe "restrict_send_map/3" do
+    test "drops codes the server filtered on receive" do
+      # we proposed PCMU/H264/dtmf on receive; the server accepted PCMU + dtmf
+      proposed_recv = %{"0" => 0, "96" => 99, "101" => 100}
+      accepted = %{"0" => "", "101" => "0-16"}
+      # send map uses the remote numbering (H264 on 120 here)
+      send_map = %{"0" => 0, "120" => 99, "101" => 100}
+
+      assert Sdp.restrict_send_map(send_map, proposed_recv, accepted) ==
+               %{"0" => 0, "101" => 100}
+    end
+
+    test "nil accepted (older server) leaves the send map unchanged" do
+      send_map = %{"0" => 0, "8" => 8}
+      assert Sdp.restrict_send_map(send_map, %{"0" => 0}, nil) == send_map
+    end
+  end
+
+  describe "build/1 server-driven codec section" do
+    test "audio: emits accepted rtpmap entries + fmtp verbatim, none for empty fmtp" do
+      sdp_str =
+        Sdp.build(%{
+          ip: "192.168.1.10",
+          medias: [
+            %{
+              type: :audio,
+              port: 22_000,
+              rtpmaps: [
+                %{pt: 0, encoding: "PCMU", clock: 8000},
+                %{pt: 111, encoding: "opus", clock: 48_000, channels: 2},
+                %{pt: 101, encoding: "telephone-event", clock: 8000}
+              ],
+              fmtp: %{"0" => "", "111" => "minptime=10;useinbandfec=1", "101" => "0-16"}
+            }
+          ]
+        })
+
+      assert sdp_str =~ "m=audio 22000 RTP/AVP 0 111 101"
+      assert sdp_str =~ "a=rtpmap:0 PCMU/8000"
+      assert sdp_str =~ "a=rtpmap:111 opus/48000/2"
+      assert sdp_str =~ "a=rtpmap:101 telephone-event/8000"
+      assert sdp_str =~ "a=fmtp:111 minptime=10;useinbandfec=1"
+      assert sdp_str =~ "a=fmtp:101 0-16"
+      # PCMU has an empty fmtp → no a=fmtp line for PT 0
+      refute sdp_str =~ "a=fmtp:0 "
+
+      assert {:ok, [audio]} = Sdp.parse(sdp_str)
+      assert audio.rtp_map == %{"0" => 0, "111" => 98, "101" => 100}
+    end
+
+    test "video: H264 fmtp is forwarded verbatim and the SDP round-trips" do
+      fmtp = "profile-level-id=42801f;packetization-mode=1"
+
+      sdp_str =
+        Sdp.build(%{
+          ip: "10.0.0.1",
+          medias: [
+            %{
+              type: :video,
+              port: 30_000,
+              rtpmaps: [%{pt: 96, encoding: "H264", clock: 90_000}],
+              fmtp: %{"96" => fmtp},
+              bandwidth: 800
+            }
+          ]
+        })
+
+      assert sdp_str =~ "m=video 30000 RTP/AVP 96"
+      assert sdp_str =~ "a=rtpmap:96 H264/90000"
+      assert sdp_str =~ "a=fmtp:96 #{fmtp}"
+      assert sdp_str =~ "b=AS:800"
+
+      assert {:ok, [video]} = Sdp.parse(sdp_str)
+      assert video.type == :video
+      assert video.port == 30_000
+    end
+
+    test "server-driven fields win, and transport/crypto still apply" do
+      sdp_str =
+        Sdp.build(%{
+          ip: "10.0.0.2",
+          medias: [
+            %{
+              type: :audio,
+              port: 40_000,
+              rtpmaps: [%{pt: 8, encoding: "PCMA", clock: 8000}],
+              fmtp: %{"8" => ""},
+              crypto: {:sdes, "AES_CM_128_HMAC_SHA1_80", "key0123456789"},
+              direction: :sendonly
+            }
+          ]
+        })
+
+      assert sdp_str =~ "m=audio 40000 RTP/SAVP 8"
+      assert sdp_str =~ "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:key0123456789"
+      assert sdp_str =~ "a=sendonly"
     end
   end
 end
