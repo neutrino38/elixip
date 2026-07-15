@@ -91,7 +91,11 @@ defmodule MediaServer do
         ]
 
   @type recorder_opts :: [
-          wait_for_keyframe: boolean(),
+          # discard audio/text until the first video I-frame so all tracks start
+          # together (default true; ignored when video is not negotiated)
+          wait_video: boolean(),
+          # loop received video back to the sender while recording (default false)
+          echo: boolean(),
           stop_on_silence: boolean(),
           silence_timeout_ms: pos_integer(),
           max_record_duration_sec: pos_integer(),

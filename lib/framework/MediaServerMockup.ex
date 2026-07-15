@@ -67,7 +67,7 @@ defmodule MediaServer.Mockup do
   @impl MediaServer.Behaviour
   def create_recorder(conn, file_path, duration_ms, opts) do
     event_sink = GenServer.call(conn, :get_event_sink)
-    GenServer.start(__MODULE__.Recorder, {event_sink, file_path, duration_ms, opts})
+    GenServer.start(__MODULE__.Recorder, {conn, event_sink, file_path, duration_ms, opts})
   end
 
   @impl MediaServer.Behaviour
@@ -170,6 +170,11 @@ defmodule MediaServer.Mockup.Conn do
   @impl true
   def handle_call(:get_event_sink, _from, state) do
     {:reply, state.event_sink, state}
+  end
+
+  @impl true
+  def handle_call(:get_medias, _from, state) do
+    {:reply, state.medias, state}
   end
 
   @impl true
@@ -447,21 +452,42 @@ end
 defmodule MediaServer.Mockup.Recorder do
   use GenServer
 
-  defstruct [:event_sink, :file_path, :duration_ms, :opts, :timer_ref, status: :idle]
+  defstruct [
+    :conn,
+    :event_sink,
+    :file_path,
+    :duration_ms,
+    :opts,
+    :timer_ref,
+    wait_video: true,
+    echo: false,
+    status: :idle
+  ]
 
   @impl true
-  def init({event_sink, file_path, duration_ms, opts}) do
+  def init({conn, event_sink, file_path, duration_ms, opts}) do
+    # waitVideo is auto-disabled when video is not part of the connection,
+    # mirroring the real server (no video negotiated → record immediately).
+    wait_video =
+      Keyword.get(opts, :wait_video, true) and :video in GenServer.call(conn, :get_medias)
+
     {:ok,
      %__MODULE__{
+       conn: conn,
        event_sink: event_sink,
        file_path: file_path,
        duration_ms: duration_ms,
-       opts: opts
+       opts: opts,
+       wait_video: wait_video,
+       echo: Keyword.get(opts, :echo, false)
      }}
   end
 
   @impl true
   def handle_call(:start, _from, state) do
+    # echo: loop received media back to the sender while recording, using the
+    # peer connection loopback (same primitive as the Echo resource).
+    if state.echo, do: set_conn_echo(state, true)
     send(state.event_sink, {:ms_event, self(), :recorder_started})
 
     timer_ref =
@@ -475,14 +501,30 @@ defmodule MediaServer.Mockup.Recorder do
   @impl true
   def handle_call(:stop, _from, state) do
     if state.timer_ref, do: Process.cancel_timer(state.timer_ref)
+    if state.echo, do: set_conn_echo(state, false)
     send(state.event_sink, {:ms_event, self(), {:recorder_stopped, :caller}})
     {:reply, :ok, %{state | status: :stopped, timer_ref: nil}}
   end
 
   @impl true
   def handle_info(:duration_elapsed, state) do
+    if state.echo, do: set_conn_echo(state, false)
     send(state.event_sink, {:ms_event, self(), {:recorder_stopped, :duration}})
     {:noreply, %{state | status: :stopped, timer_ref: nil}}
+  end
+
+  @impl true
+  def terminate(_reason, state) do
+    # The echo stops with the recording; make sure it does not outlive a
+    # recorder killed while still recording.
+    if state.echo and state.status == :recording, do: set_conn_echo(state, false)
+    :ok
+  end
+
+  defp set_conn_echo(state, enabled) do
+    if state.conn && Process.alive?(state.conn) do
+      GenServer.call(state.conn, {:set_echo, enabled})
+    end
   end
 end
 

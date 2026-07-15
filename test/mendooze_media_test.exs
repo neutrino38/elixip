@@ -132,7 +132,8 @@ defmodule Mendooze.MediaTest do
     assert_receive {:jsr309_call, "RecorderAttachToEndpoint", [3, 11, 4, 0]}
 
     assert :ok = Mendooze.start_recorder(recorder)
-    assert_receive {:jsr309_call, "RecorderRecord", [3, 11, "/rec/call.mp4", 30_000]}
+    # defaults: waitVideo=1, echoVideo=0
+    assert_receive {:jsr309_call, "RecorderRecord", [3, 11, "/rec/call.mp4", 30_000, 1, 0]}
 
     send(stream, {:chunk, Jsr309FakeServer.event_frame([4, sess_tag, "r-0"])})
     assert_receive {:ms_event, ^recorder, :recorder_started}, 1_000
@@ -140,6 +141,16 @@ defmodule Mendooze.MediaTest do
     # max duration reached server-side
     send(stream, {:chunk, Jsr309FakeServer.event_frame([5, sess_tag, "r-0", 1])})
     assert_receive {:ms_event, ^recorder, {:recorder_stopped, :duration}}, 1_000
+  end
+
+  test "recorder options wait_video: false and echo: true map to RecorderRecord params" do
+    %{conn: conn} = start_conn()
+
+    {:ok, recorder} =
+      Mendooze.create_recorder(conn, "/rec/call.mp4", 0, wait_video: false, echo: true)
+
+    assert :ok = Mendooze.start_recorder(recorder)
+    assert_receive {:jsr309_call, "RecorderRecord", [3, 11, "/rec/call.mp4", 0, 0, 1]}
   end
 
   test "stop_recorder stops, detaches, deletes and routes the final event" do

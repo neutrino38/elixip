@@ -662,12 +662,19 @@ defmodule MediaServer.Mendooze.Conn do
   end
 
   defp do_recorder_cmd(:start, _ref, recorder, state) do
-    # maxDuration is enforced server-side (RecorderStoppedEvent reason=1)
+    # maxDuration is enforced server-side (RecorderStoppedEvent reason=1).
+    # waitVideo (server default 1) and echoVideo (server default 0) are the
+    # optional 5th/6th RecorderRecord parameters (server doc §6.4).
+    wait_video = if Keyword.get(recorder.opts, :wait_video, true), do: 1, else: 0
+    echo_video = if Keyword.get(recorder.opts, :echo, false), do: 1, else: 0
+
     case rpc(state, "RecorderRecord", [
            state.sess_id,
            recorder.recorder_id,
            recorder.file,
-           recorder.duration_ms
+           recorder.duration_ms,
+           wait_video,
+           echo_video
          ]) do
       {:ok, _} -> {:reply, :ok, state}
       {:error, reason} -> {:reply, {:error, reason}, state}
