@@ -50,7 +50,9 @@ defmodule UAS.InviteExample do
     # failure this replies 500 and sets lasterr, so the goto below aborts.
     reply_invite_with_sdp(200, [media: :tc])
     # media_start_echo()
-    media_record("record.mp4", 60000)
+    # wait_video: start all tracks on the first video I-frame; echo: loop the
+    # received video back to the caller while recording.
+    media_record("record.mp4", 60000, wait_video: true, echo: true)
     goto(in_call)
   end
 
