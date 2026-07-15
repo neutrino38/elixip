@@ -115,6 +115,15 @@ defmodule Elixipp.CLI do
       type -> run_server_mode(module, type, opts, limit)
     end
 
+    # Client mode without --local-port: bind a random free UDP port (>= 5000)
+    # instead of the transport's 5060 default, so a UAC can always start even
+    # when another SIP process already owns 5060 on this host.
+    unless opts[:local_port] do
+      port = random_free_port(:udp)
+      Application.put_env(:elixip2, :udp_local_port, port)
+      Logger.info("elixipp: no --local-port given, using random free UDP port #{port}")
+    end
+
     # When neither --limit nor --max-run is given, default to a single one-shot
     # run (--limit 1 --max-run 1). As soon as either is set, --max-run stays
     # unlimited unless explicitly provided.
@@ -400,6 +409,12 @@ defmodule Elixipp.CLI do
 
   defp parse_listen_spec(spec) do
     case String.split(spec, ":") do
+      # No port given: draw a random free one (>= 5000) for the protocol's
+      # socket family (tls/wss listen on TCP sockets).
+      [proto] ->
+        proto = parse_proto(proto)
+        {proto, :all, random_free_port(listen_sock_proto(proto))}
+
       [proto, port] ->
         {parse_proto(proto), :all, parse_port(port)}
 
@@ -407,9 +422,12 @@ defmodule Elixipp.CLI do
         {parse_proto(proto), parse_addr(addr), parse_port(port)}
 
       _ ->
-        abort("--listen invalide : #{inspect(spec)} (attendu proto:port ou proto:addr:port)", 2)
+        abort("--listen invalide : #{inspect(spec)} (attendu proto, proto:port ou proto:addr:port)", 2)
     end
   end
+
+  defp listen_sock_proto(:udp), do: :udp
+  defp listen_sock_proto(_tcp_based), do: :tcp
 
   defp parse_addr(addr) do
     case SIP.NetUtils.parse_address(addr) do
@@ -426,6 +444,15 @@ defmodule Elixipp.CLI do
     case opts[:local_addr] do
       nil -> :ok
       addr -> Application.put_env(:elixip2, :udp_local_addr, parse_addr(addr))
+    end
+  end
+
+  # Draw a random free local port (>= 5000) for the given socket protocol, or
+  # abort when none can be found.
+  defp random_free_port(sock_proto) do
+    case SIP.NetUtils.pick_free_port(sock_proto) do
+      {:ok, port} -> port
+      {:error, :nofreeport} -> abort("Impossible de trouver un port #{sock_proto} local libre (>= 5000)", 2)
     end
   end
 
@@ -1168,10 +1195,12 @@ defmodule Elixipp.CLI do
                          locale annoncée). Répétable. Protocoles : udp, tcp,
                          tls, wss. TLS et WSS nécessitent un certificat
                          (tls_certfile / tls_keyfile dans config/runtime.exs).
-                         Défaut si absent : udp:5060.
-      --local-port PORT  (mode client) Port UDP local à utiliser pour émettre
-                         (défaut 5060). Permet de lancer un UAC sur une machine qui
-                         héberge déjà un UAS sur 5060 (test deux-process en local).
+                         Sans PORT (--listen udp), un port libre est tiré au
+                         hasard (>= 5000). Défaut si absent : udp:5060.
+      --local-port PORT  (mode client) Port UDP local à utiliser pour émettre.
+                         Sans cette option, un port UDP libre est tiré au hasard
+                         (>= 5000), ce qui permet de lancer un UAC sur une machine
+                         qui héberge déjà un UAS sur 5060.
       --local-addr ADDR  (mode client) IP locale annoncée dans Via/Contact.
       --log-file PATH    Chemin du fichier de log (défaut : elixipp.log).
       --log-level LEVEL  Niveau : debug | info | warning | error (défaut : debug).

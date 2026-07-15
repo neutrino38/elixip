@@ -113,6 +113,29 @@ defmodule SIP.Test.NetUtils do
     assert one_ip in ips
   end
 
+  test "pick a free UDP port" do
+    {:ok, port} = SIP.NetUtils.pick_free_port(:udp)
+    assert port >= 5000 and port <= 65535
+    # The returned port must actually be bindable
+    {:ok, sock} = :gen_udp.open(port, [])
+    :gen_udp.close(sock)
+  end
+
+  test "pick a free TCP port" do
+    {:ok, port} = SIP.NetUtils.pick_free_port(:tcp)
+    assert port >= 5000 and port <= 65535
+    {:ok, sock} = :gen_tcp.listen(port, reuseaddr: true)
+    :gen_tcp.close(sock)
+  end
+
+  test "never pick an occupied port" do
+    # Occupy the single port of a one-port range: the picker must give up
+    # rather than return the busy port.
+    {:ok, sock} = :gen_udp.open(65535, [])
+    assert SIP.NetUtils.pick_free_port(:udp, 65535) == {:error, :nofreeport}
+    :gen_udp.close(sock)
+  end
+
   test "resolution" do
     assert :inet.getaddr(String.to_charlist("toto.tutu"), :inet) == { :error, :nxdomain}
     assert :inet.getaddr(String.to_charlist("sip.visioassistance.net"), :inet) == {:ok, {91, 134, 191, 39}}
