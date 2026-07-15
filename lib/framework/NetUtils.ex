@@ -233,4 +233,47 @@ defmodule SIP.NetUtils do
   def parse_address(ipaddr_str) when is_binary(ipaddr_str) do
     :inet.parse_address(String.to_charlist(ipaddr_str))
   end
+
+  @max_port 65_535
+  @free_port_attempts 100
+
+  @doc """
+  Pick a random free local port for the given protocol.
+
+  Draws random ports in `min_port..65535` and verifies each candidate by
+  binding (then closing) a socket, returning the first available one.
+  Note the check is inherently racy: the port could be taken by another
+  process between the check and the actual bind.
+  """
+  @spec pick_free_port(:udp | :tcp, pos_integer()) :: {:ok, :inet.port_number()} | {:error, :nofreeport}
+  def pick_free_port(proto, min_port \\ 5000)
+      when proto in [:udp, :tcp] and min_port > 0 and min_port <= @max_port do
+    pick_free_port(proto, min_port, @free_port_attempts)
+  end
+
+  defp pick_free_port(_proto, _min_port, 0), do: {:error, :nofreeport}
+
+  defp pick_free_port(proto, min_port, attempts) do
+    port = min_port + :rand.uniform(@max_port - min_port + 1) - 1
+
+    if port_free?(proto, port) do
+      {:ok, port}
+    else
+      pick_free_port(proto, min_port, attempts - 1)
+    end
+  end
+
+  defp port_free?(:udp, port) do
+    case :gen_udp.open(port, []) do
+      {:ok, sock} -> :gen_udp.close(sock) == :ok
+      {:error, _} -> false
+    end
+  end
+
+  defp port_free?(:tcp, port) do
+    case :gen_tcp.listen(port, reuseaddr: true) do
+      {:ok, sock} -> :gen_tcp.close(sock) == :ok
+      {:error, _} -> false
+    end
+  end
 end
