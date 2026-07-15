@@ -64,7 +64,7 @@ defmodule UAC.RegisterExample do
         # Arms the refresh timer (:register_refresh at expire/2) and the OPTIONS
         # keepalive timer (:options_keepalive) from the granted expiration.
         process_sip_reply(rsp, trans_pid)
-        start_options_keepalive(dialog_pid)
+         SIP.Session.RegisterUAC.start_options_keepalive(sip_ctx)
         goto(registered, "200 OK")
 
       {errcode, _rsp, _trans_pid, _dialog_pid} when errcode in 400..699 ->

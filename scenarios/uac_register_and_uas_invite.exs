@@ -80,6 +80,8 @@ defmodule UAC.RegisterThenWaitForCall do
     on_events do
       :register_refresh -> goto(refresh, "REGISTER refresh")
       {:scenario_ctl, :shutdown, _reason } -> scenario_aborted("UAC stopped gracefully")
+      {:scenario_exit, :invite_uas, :success, _r} -> goto unregistering, "call complete"
+      {:scenario_exit, :invite_uas, :failure, _r} -> goto unregistering, "call failure"
     after
       (@registration_expire + 5) * 1000 ->
         scenario_failure("No timer fired in registered state")
