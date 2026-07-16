@@ -98,6 +98,11 @@ defmodule MediaServer.Mendooze.Conn do
       local_ip: nil,
       local_crypto: :none,
       local_ice: nil,
+      # delegated SDP negotiation: the receive rtpMap we proposed and the
+      # server-accepted set (pt => fmtp) returned by EndpointStartReceiving.
+      # accepted[media] is nil for an older server (fallback to codec tables).
+      proposed_recv: %{},
+      accepted: %{},
       status: :init,
       # sub-resources: ref => %{...}; tags "p-<n>"/"r-<n>" route server events
       res_seq: 0,
@@ -481,7 +486,7 @@ defmodule MediaServer.Mendooze.Conn do
     Enum.reduce_while(state.medias, {:ok, state}, fn media, {:ok, st} ->
       rtp_map = Sdp.local_rtp_map(media, codecs(st, media), dtmf?(st, media))
 
-      with {:ok, [port | _]} <-
+      with {:ok, [port | rest]} <-
              rpc(st, "EndpointStartReceiving", [
                st.sess_id,
                st.endpoint_id,
@@ -496,7 +501,19 @@ defmodule MediaServer.Mendooze.Conn do
                @media_int[media]
              ]),
            {:ok, ip, _cport} <- Sdp.parse_media_candidate(candidate) do
-        {:cont, {:ok, %{st | local_ports: Map.put(st.local_ports, media, port), local_ip: ip}}}
+        # returnVal[1] (when present) is the fmtp-per-payload-type struct the
+        # server accepted; nil on an older server → codec-table fallback.
+        accepted = Sdp.accepted_pts(rtp_map, List.first(rest))
+
+        {:cont,
+         {:ok,
+          %{
+            st
+            | local_ports: Map.put(st.local_ports, media, port),
+              local_ip: ip,
+              proposed_recv: Map.put(st.proposed_recv, media, rtp_map),
+              accepted: Map.put(st.accepted, media, accepted)
+          }}}
       else
         {:error, _} = err -> {:halt, err}
       end
@@ -530,6 +547,14 @@ defmodule MediaServer.Mendooze.Conn do
 
     with {:ok, negotiated} <-
            Sdp.negotiate(desc, codecs(state, desc.type), dtmf?(state, desc.type)),
+         # never send a codec the server just filtered on receive (no-op when
+         # the server did not delegate, i.e. accepted[media] is nil)
+         send_map =
+           Sdp.restrict_send_map(
+             negotiated.rtp_map,
+             Map.get(state.proposed_recv, desc.type, %{}),
+             Map.get(state.accepted, desc.type)
+           ),
          :ok <- set_rtp_properties(state, m, desc),
          :ok <- set_remote_crypto(state, m, desc),
          {:ok, _} <-
@@ -539,7 +564,7 @@ defmodule MediaServer.Mendooze.Conn do
              m,
              desc.ip,
              desc.port,
-             negotiated.rtp_map
+             send_map
            ]),
          # the watchdog is armed last, once the answer has been processed
          {:ok, _} <-
@@ -549,7 +574,7 @@ defmodule MediaServer.Mendooze.Conn do
              m,
              rtp_timeout_ms()
            ]) do
-      {:ok, state, negotiated}
+      {:ok, state, Map.put(negotiated, :send_map, send_map)}
     end
   end
 
@@ -597,27 +622,34 @@ defmodule MediaServer.Mendooze.Conn do
   # ── SDP spec builders ───────────────────────────────────────────────────────
 
   defp offer_media_spec(state, media) do
-    %{
+    base = %{
       type: media,
       port: Map.fetch!(state.local_ports, media),
-      codecs: codecs(state, media),
-      dtmf: dtmf?(state, media),
       bandwidth: bandwidth_kbps(state, media),
       direction: :sendrecv,
       crypto: local_crypto_spec(state, :actpass),
       ice: state.local_ice,
       rtcp_mux: false
     }
+
+    case Map.get(state.accepted, media) do
+      nil ->
+        # legacy: the client-side codec tables synthesize the codec section
+        Map.merge(base, %{codecs: codecs(state, media), dtmf: dtmf?(state, media)})
+
+      accepted ->
+        # delegated: build the codec section from the server-accepted set,
+        # using our payload-type numbering (this is an offer)
+        Map.merge(base, server_driven_offer(state, media, accepted))
+    end
   end
 
   defp answer_media_spec(state, negotiated, desc) do
-    %{codecs: codec_names, dtmf: dtmf} = Map.fetch!(negotiated, desc.type)
+    neg = Map.fetch!(negotiated, desc.type)
 
-    %{
+    base = %{
       type: desc.type,
       port: Map.fetch!(state.local_ports, desc.type),
-      codecs: codec_names,
-      dtmf: dtmf,
       bandwidth: Sdp.negotiate_bandwidth(desc.bandwidth, bandwidth_kbps(state, desc.type)),
       direction: Sdp.reverse_direction(desc.direction),
       crypto: local_crypto_spec(state, :active),
@@ -626,6 +658,81 @@ defmodule MediaServer.Mendooze.Conn do
       # mirror the transport of the offer
       protocol: desc.protocol
     }
+
+    case Map.get(state.accepted, desc.type) do
+      nil ->
+        # legacy: client-side codec tables (our payload-type numbering)
+        Map.merge(base, %{codecs: neg.codecs, dtmf: neg.dtmf})
+
+      accepted ->
+        # delegated: build from the server-accepted set, honoring the
+        # offerer's payload-type numbering (RFC 3264)
+        Map.merge(base, server_driven_answer(desc.type, neg, accepted, state.proposed_recv))
+    end
+  end
+
+  # ── Delegated codec section (server-driven build path) ──────────────────────
+
+  # Offer: our payload-type numbering. Order the m= fmt list by our proposal
+  # preference (the server fmtp struct is unordered — plan §9 Q).
+  defp server_driven_offer(state, media, accepted) do
+    ordered = Enum.filter(proposed_pts(state, media), &Map.has_key?(accepted, &1))
+
+    rtpmaps =
+      Enum.flat_map(ordered, fn pt_str ->
+        pt = String.to_integer(pt_str)
+        rtpmap_entry(pt, Sdp.pt_rtpmap(media, pt))
+      end)
+
+    %{rtpmaps: rtpmaps, fmtp: Map.take(accepted, ordered)}
+  end
+
+  # Answer: the offerer's payload-type numbering. `neg.send_map` is the send
+  # rtpMap already restricted to the codecs the server accepted on receive
+  # (offerer pt => codec code), so it is exactly the accepted-and-common set.
+  defp server_driven_answer(media, neg, accepted, proposed_recv) do
+    # server fmtp is keyed by our receive pt; bridge to the codec code so it
+    # can be re-attached to the offerer's pt numbering
+    code_fmtp =
+      Map.new(accepted, fn {our_pt, fmtp} ->
+        {Map.get(Map.get(proposed_recv, media, %{}), our_pt), fmtp}
+      end)
+
+    ordered = Enum.sort_by(neg.send_map, fn {pt, _code} -> String.to_integer(pt) end)
+
+    rtpmaps =
+      Enum.flat_map(ordered, fn {pt_str, code} ->
+        rtpmap_entry(String.to_integer(pt_str), Sdp.code_rtpmap(media, code))
+      end)
+
+    fmtp =
+      for {pt_str, code} <- ordered,
+          params = Map.get(code_fmtp, code),
+          params not in [nil, ""],
+          into: %{},
+          do: {pt_str, params}
+
+    %{rtpmaps: rtpmaps, fmtp: fmtp}
+  end
+
+  defp rtpmap_entry(_pt, :unknown), do: []
+
+  defp rtpmap_entry(pt, {encoding, clock, channels}),
+    do: [%{pt: pt, encoding: encoding, clock: clock, channels: channels}]
+
+  # Payload types we proposed on receive for this media, in our preference
+  # order (codec-config order, telephone-event last).
+  defp proposed_pts(state, media) do
+    codec_pts =
+      Enum.flat_map(codecs(state, media), fn name ->
+        Map.keys(Sdp.local_rtp_map(media, [name]))
+      end)
+
+    if dtmf?(state, media) and media == :audio do
+      codec_pts ++ Map.keys(Sdp.local_rtp_map(:audio, [], true))
+    else
+      codec_pts
+    end
   end
 
   defp local_crypto_spec(state, setup) do

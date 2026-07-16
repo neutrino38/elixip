@@ -24,8 +24,8 @@ defmodule Mendooze.ConnTest do
   defp rpc_handler("EndpointGetLocalCryptoDTLSFingerprint", ["sha-256"]), do: {:ok, [@fp]}
   defp rpc_handler(_method, _params), do: {:ok, []}
 
-  defp start_media_server() do
-    fake = Jsr309FakeServer.start(self(), &rpc_handler/2)
+  defp start_media_server(handler \\ &rpc_handler/2) do
+    fake = Jsr309FakeServer.start(self(), handler)
     {:ok, server} = Mendooze.connect({fake.host, fake.port})
     on_exit(fn -> if Process.alive?(server), do: Mendooze.disconnect(server) end)
 
@@ -317,6 +317,124 @@ defmodule Mendooze.ConnTest do
       })
 
     assert {:error, :webrtc_not_supported} = Mendooze.set_remote_offer(conn, offer)
+  end
+
+  # ── Delegated SDP negotiation (enriched EndpointStartReceiving) ──────────────
+
+  # rpc_handler variant whose EndpointStartReceiving returns [port, fmtpStruct]
+  defp delegating_handler(audio_fmtp, video_fmtp \\ nil) do
+    fn
+      "EndpointStartReceiving", [_, _, 0, _] -> {:ok, [22_000, audio_fmtp]}
+      "EndpointStartReceiving", [_, _, 1, _] -> {:ok, [22_002, video_fmtp]}
+      m, p -> rpc_handler(m, p)
+    end
+  end
+
+  test "delegated offer emits the server fmtp verbatim and no fmtp for fmtp-less codecs" do
+    %{server: server} =
+      start_media_server(delegating_handler(%{"0" => "", "101" => "0-16"}))
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(), media: :audio, audio_codec: "PCMU")
+
+    assert {:ok, offer} = Mendooze.get_local_offer(conn)
+
+    # the receive map we proposed is unchanged
+    assert_receive {:jsr309_call, "EndpointStartReceiving", [3, 4, 0, %{"0" => 0, "101" => 100}]}
+
+    assert offer =~ "m=audio 22000 RTP/AVP 0 101"
+    assert offer =~ "a=rtpmap:0 PCMU/8000"
+    assert offer =~ "a=rtpmap:101 telephone-event/8000"
+    # telephone-event fmtp comes from the server, verbatim
+    assert offer =~ "a=fmtp:101 0-16"
+    # PCMU is fmtp-less (empty value) → no a=fmtp:0 line
+    refute offer =~ "a=fmtp:0 "
+
+    assert {:ok, [%{type: :audio, codecs: ["PCMU"], dtmf_pt: 101}]} = Sdp.parse(offer)
+  end
+
+  test "delegated H264 offer carries the server profile-level-id verbatim" do
+    fmtp = "profile-level-id=42801f;packetization-mode=1"
+
+    %{server: server} =
+      start_media_server(delegating_handler(nil, %{"99" => fmtp}))
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(), media: :video, video_codec: "H264")
+
+    assert {:ok, offer} = Mendooze.get_local_offer(conn)
+
+    assert offer =~ "m=video 22002 RTP/AVP 99"
+    assert offer =~ "a=rtpmap:99 H264/90000"
+    # the exact server string survives a build → parse round-trip
+    assert offer =~ "a=fmtp:99 #{fmtp}"
+  end
+
+  test "delegated answer honors offerer numbering and the server fmtp" do
+    %{server: server} =
+      start_media_server(delegating_handler(%{"0" => "", "8" => "", "101" => "0-16"}))
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(), audio_codec: ["PCMA", "PCMU"])
+
+    offer =
+      Sdp.build(%{
+        ip: "10.9.8.7",
+        medias: [%{type: :audio, port: 40_000, codecs: ["PCMU"], dtmf: true}]
+      })
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, offer)
+
+    # send side is the offerer numbering restricted to the accepted set
+    assert_receive {:jsr309_call, "EndpointStartSending", [3, 4, 0, "10.9.8.7", 40_000, send_map]}
+    assert send_map == %{"0" => 0, "101" => 100}
+
+    assert {:ok, [audio]} = Sdp.parse(answer)
+    assert audio.codecs == ["PCMU"]
+    assert audio.dtmf_pt == 101
+    assert answer =~ "a=rtpmap:0 PCMU/8000"
+    assert answer =~ "a=fmtp:101 0-16"
+  end
+
+  test "the send map drops codecs the server filtered on receive" do
+    # the server accepts PCMU + telephone-event but filters PCMA (no "8" key)
+    %{server: server} =
+      start_media_server(delegating_handler(%{"0" => "", "101" => "0-16"}))
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :audio,
+        audio_codec: ["PCMU", "PCMA"]
+      )
+
+    {:ok, _offer} = Mendooze.get_local_offer(conn)
+
+    # the peer answers with both PCMU and PCMA
+    answer =
+      Sdp.build(%{
+        ip: "10.9.8.7",
+        medias: [%{type: :audio, port: 40_000, codecs: ["PCMU", "PCMA"], dtmf: true}]
+      })
+
+    assert :ok = Mendooze.set_remote_answer(conn, answer)
+
+    assert_receive {:jsr309_call, "EndpointStartSending", [3, 4, 0, "10.9.8.7", 40_000, send_map]}
+    # PCMA (pt 8) is dropped: the server never accepted it on receive
+    assert send_map == %{"0" => 0, "101" => 100}
+  end
+
+  test "a one-element EndpointStartReceiving return falls back to the codec tables" do
+    # delegating_handler is not used → shared handler returns [22_000] only
+    %{server: server} = start_media_server()
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(), media: :audio, audio_codec: "PCMU")
+
+    assert {:ok, offer} = Mendooze.get_local_offer(conn)
+
+    # identical to the pre-delegation output (legacy client-side path)
+    assert offer =~ "m=audio 22000 RTP/AVP 0 101"
+    assert offer =~ "a=fmtp:101 0-16"
   end
 
   # ── Teardown and events ─────────────────────────────────────────────────────
