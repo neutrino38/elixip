@@ -32,6 +32,7 @@ defmodule MediaServer.Mendooze.Sdp do
   """
 
   require Logger
+  import Bitwise
 
   # ── Codec tables ────────────────────────────────────────────────────────────
   # name => {default payload type for our offers, mendooze code, clock, channels}
@@ -72,6 +73,21 @@ defmodule MediaServer.Mendooze.Sdp do
           | {:sdes, suite :: String.t(), key :: String.t()}
 
   @typedoc """
+  One ICE host candidate, as produced by `host_candidates/3` and rendered into
+  an `a=candidate` line by `build/1`. Component 1 carries RTP, component 2 RTCP
+  (only synthesized when rtcp-mux is not negotiated).
+  """
+  @type candidate :: %{
+          foundation: String.t(),
+          component: 1 | 2,
+          protocol: :udp,
+          priority: non_neg_integer(),
+          ip: String.t(),
+          port: non_neg_integer(),
+          type: :host
+        }
+
+  @typedoc """
   One parsed `m=` section of a remote SDP.
 
   `rtp_map` maps the remote payload types (strings) to Mendooze codec codes —
@@ -91,7 +107,10 @@ defmodule MediaServer.Mendooze.Sdp do
           direction: :sendrecv | :sendonly | :recvonly | :inactive,
           bandwidth: non_neg_integer() | nil,
           crypto: crypto(),
-          ice: nil | %{ufrag: String.t(), pwd: String.t()}
+          ice: nil | %{ufrag: String.t(), pwd: String.t()},
+          mid: String.t() | nil,
+          rtcp_fb: %{optional(integer()) => [String.t()]},
+          candidates: [String.t()]
         }
 
   @typedoc """
@@ -126,7 +145,10 @@ defmodule MediaServer.Mendooze.Sdp do
           optional(:rtcp_mux) => boolean(),
           optional(:protocol) => String.t(),
           optional(:bandwidth) => non_neg_integer() | nil,
-          optional(:direction) => :sendrecv | :sendonly | :recvonly | :inactive
+          optional(:direction) => :sendrecv | :sendonly | :recvonly | :inactive,
+          optional(:mid) => String.t() | nil,
+          optional(:candidates) => [candidate()],
+          optional(:rtcp_fb) => boolean()
         }
 
   # ── rtpMap for EndpointStartReceiving ───────────────────────────────────────
@@ -206,10 +228,11 @@ defmodule MediaServer.Mendooze.Sdp do
   """
   @spec build(%{
           required(:ip) => String.t() | :inet.ip_address(),
-          required(:medias) => [media_spec()]
+          required(:medias) => [media_spec()],
+          optional(:ice_lite) => boolean()
         }) ::
           String.t()
-  def build(%{ip: ip, medias: medias}) do
+  def build(%{ip: ip, medias: medias} = spec) do
     addr = to_addr(ip)
 
     cnx = %ExSDP.ConnectionData{
@@ -228,6 +251,7 @@ defmodule MediaServer.Mendooze.Sdp do
         address: addr
       )
       |> Map.put(:connection_data, cnx)
+      |> add_ice_lite(Map.get(spec, :ice_lite, false))
 
     medias
     |> Enum.reduce(sdp, fn mspec, acc -> ExSDP.add_media(acc, build_media(mspec)) end)
@@ -240,6 +264,7 @@ defmodule MediaServer.Mendooze.Sdp do
     crypto = Map.get(mspec, :crypto, :none)
     protocol = Map.get(mspec, :protocol, protocol_for(crypto))
     fmtp = Map.get(mspec, :fmtp, %{})
+    video_pts = if type == :video, do: Enum.map(rtpmaps, & &1.pt), else: []
 
     %ExSDP.Media{type: type, port: port, protocol: protocol, fmt: []}
     |> add_bandwidth(Map.get(mspec, :bandwidth))
@@ -248,6 +273,7 @@ defmodule MediaServer.Mendooze.Sdp do
     |> add_crypto(crypto)
     |> add_ice(Map.get(mspec, :ice))
     |> add_rtcp_mux(Map.get(mspec, :rtcp_mux, false))
+    |> add_transport_plane(mspec, video_pts)
   end
 
   # Legacy client-side codec section (fallback when the server does not return
@@ -257,6 +283,13 @@ defmodule MediaServer.Mendooze.Sdp do
     protocol = Map.get(mspec, :protocol, protocol_for(crypto))
     dtmf = Map.get(mspec, :dtmf, false) and type == :audio
 
+    video_pts =
+      if type == :video do
+        Enum.map(codecs, fn name -> elem(codec_pt_code(type, name), 0) end)
+      else
+        []
+      end
+
     %ExSDP.Media{type: type, port: port, protocol: protocol, fmt: []}
     |> add_bandwidth(Map.get(mspec, :bandwidth))
     |> add_codecs(type, codecs)
@@ -265,7 +298,44 @@ defmodule MediaServer.Mendooze.Sdp do
     |> add_crypto(crypto)
     |> add_ice(Map.get(mspec, :ice))
     |> add_rtcp_mux(Map.get(mspec, :rtcp_mux, false))
+    |> add_transport_plane(mspec, video_pts)
   end
+
+  # WebRTC transport-plane attributes shared by both codec-section branches:
+  # a=mid (mirrored), a=candidate lines, and per-video-PT a=rtcp-fb.
+  defp add_transport_plane(m, mspec, video_pts) do
+    m
+    |> add_mid(Map.get(mspec, :mid))
+    |> add_candidates(Map.get(mspec, :candidates, []))
+    |> add_rtcp_fb(Map.get(mspec, :rtcp_fb, false), video_pts)
+  end
+
+  defp add_mid(m, nil), do: m
+  defp add_mid(m, mid), do: ExSDP.add_attribute(m, {:mid, to_string(mid)})
+
+  defp add_candidates(m, candidates) do
+    Enum.reduce(candidates, m, fn cand, acc ->
+      ExSDP.add_attribute(acc, {"candidate", candidate_line(cand)})
+    end)
+  end
+
+  # a=rtcp-fb: three feedback types per video payload type (nack, ccm fir,
+  # goog-remb). Emitted verbatim as generic attributes so the wording matches
+  # the browser-validated Java gateway exactly.
+  defp add_rtcp_fb(m, false, _pts), do: m
+  defp add_rtcp_fb(m, true, []), do: m
+
+  defp add_rtcp_fb(m, true, pts) do
+    Enum.reduce(pts, m, fn pt, acc ->
+      acc
+      |> ExSDP.add_attribute({"rtcp-fb", "#{pt} nack"})
+      |> ExSDP.add_attribute({"rtcp-fb", "#{pt} ccm fir"})
+      |> ExSDP.add_attribute({"rtcp-fb", "#{pt} goog-remb"})
+    end)
+  end
+
+  defp add_ice_lite(sdp, false), do: sdp
+  defp add_ice_lite(sdp, true), do: ExSDP.add_attribute(sdp, :ice_lite)
 
   defp add_server_codecs(m, rtpmaps, fmtp) do
     Enum.reduce(rtpmaps, m, fn entry, acc ->
@@ -297,7 +367,9 @@ defmodule MediaServer.Mendooze.Sdp do
   # the :protocol override instead.
   defp protocol_for(:none), do: "RTP/AVP"
   defp protocol_for({:sdes, _, _}), do: "RTP/SAVP"
-  defp protocol_for({:dtls, _, _, _}), do: "RTP/SAVPF"
+  # G4: JSEP requires UDP/TLS/RTP/SAVPF in WebRTC offers. Answers mirror the
+  # offer's protocol string through the :protocol override instead.
+  defp protocol_for({:dtls, _, _, _}), do: "UDP/TLS/RTP/SAVPF"
 
   defp add_codecs(m, type, codecs) do
     Enum.reduce(codecs, m, fn name, acc ->
@@ -452,9 +524,43 @@ defmodule MediaServer.Mendooze.Sdp do
       direction: find_direction(attrs) || find_direction(session_attrs) || :sendrecv,
       bandwidth: as_bandwidth(m.bandwidth),
       crypto: find_crypto(attrs, session_attrs),
-      ice: find_ice(attrs) || find_ice(session_attrs)
+      ice: find_ice(attrs) || find_ice(session_attrs),
+      mid: find_mid(attrs),
+      rtcp_fb: parse_rtcp_fb(attrs),
+      candidates: raw_candidates(attrs)
     }
   end
+
+  defp find_mid(attrs) do
+    Enum.find_value(attrs, fn
+      {:mid, v} -> v
+      _ -> nil
+    end)
+  end
+
+  # a=candidate lines are kept verbatim (raw value, sans "a=candidate:" prefix)
+  # for later B2BUA forwarding; the answerer does not use them for addressing.
+  defp raw_candidates(attrs) do
+    for {"candidate", v} <- attrs, do: v
+  end
+
+  # a=rtcp-fb:<pt> <type> → %{pt => ["nack", "ccm fir", ...]}; "*" maps to -1.
+  # ExSDP parses these into %RTCPFeedback{}; reconstruct the SDP wording so the
+  # map round-trips regardless of ExSDP's internal atoms.
+  defp parse_rtcp_fb(attrs) do
+    for %ExSDP.Attribute.RTCPFeedback{pt: pt, feedback_type: fb} <- attrs, reduce: %{} do
+      acc ->
+        key = if pt == :all, do: -1, else: pt
+        Map.update(acc, key, [fb_to_string(fb)], &(&1 ++ [fb_to_string(fb)]))
+    end
+  end
+
+  defp fb_to_string(:nack), do: "nack"
+  defp fb_to_string(:fir), do: "ccm fir"
+  defp fb_to_string(:pli), do: "nack pli"
+  defp fb_to_string(:twcc), do: "transport-cc"
+  defp fb_to_string(:remb), do: "goog-remb"
+  defp fb_to_string(fb) when is_binary(fb), do: fb
 
   defp as_bandwidth(bws) when is_list(bws) do
     Enum.find_value(bws, fn
@@ -682,6 +788,65 @@ defmodule MediaServer.Mendooze.Sdp do
   def reverse_direction(:sendonly), do: :recvonly
   def reverse_direction(:recvonly), do: :sendonly
   def reverse_direction(dir), do: dir
+
+  # ── ICE host candidates ─────────────────────────────────────────────────────
+
+  @doc """
+  Build the local host candidate list for one media: one component-1 (RTP)
+  candidate, plus a component-2 (RTCP, `port + 1`) candidate when rtcp-mux is
+  not negotiated.
+
+  Priorities follow RFC 8445 §5.1.2.1 with a host type preference of 126 and a
+  local preference of 65535, i.e. `(126 <<< 24) + (65535 <<< 8) + (256 -
+  component)` — `2130706431` for component 1, `2130706430` for component 2.
+
+  The `port` is the `EndpointStartReceiving` return, inherited from the Java
+  gateway workaround (D6): `GetMediaCandidates` historically did not return a
+  usable per-media port.
+
+      iex> MediaServer.Mendooze.Sdp.host_candidates("192.168.1.10", 22000, true)
+      [%{foundation: "1", component: 1, protocol: :udp, priority: 2130706431,
+         ip: "192.168.1.10", port: 22000, type: :host}]
+  """
+  @spec host_candidates(String.t(), non_neg_integer(), boolean()) :: [candidate()]
+  def host_candidates(ip, port, rtcp_mux?) do
+    rtp = %{
+      foundation: "1",
+      component: 1,
+      protocol: :udp,
+      priority: candidate_priority(1),
+      ip: ip,
+      port: port,
+      type: :host
+    }
+
+    if rtcp_mux? do
+      [rtp]
+    else
+      [rtp, %{rtp | component: 2, priority: candidate_priority(2), port: port + 1}]
+    end
+  end
+
+  defp candidate_priority(component) do
+    (126 <<< 24) + (65535 <<< 8) + (256 - component)
+  end
+
+  @doc """
+  Render one `candidate/0` as the value of an `a=candidate` line (without the
+  `a=candidate:` prefix), e.g. `"1 1 udp 2130706431 192.168.1.10 22000 typ host"`.
+  """
+  @spec candidate_line(candidate()) :: String.t()
+  def candidate_line(%{
+        foundation: f,
+        component: c,
+        protocol: :udp,
+        priority: prio,
+        ip: ip,
+        port: port,
+        type: :host
+      }) do
+    "#{f} #{c} udp #{prio} #{ip} #{port} typ host"
+  end
 
   # ── Delegated SDP negotiation (enriched EndpointStartReceiving) ──────────────
 

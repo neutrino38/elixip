@@ -90,8 +90,8 @@ defmodule Mendooze.SdpTest do
           ]
         })
 
-      assert sdp_str =~ "m=audio 30000 RTP/SAVPF 98 101"
-      assert sdp_str =~ "m=video 30002 RTP/SAVPF 107"
+      assert sdp_str =~ "m=audio 30000 UDP/TLS/RTP/SAVPF 98 101"
+      assert sdp_str =~ "m=video 30002 UDP/TLS/RTP/SAVPF 107"
       assert sdp_str =~ "a=rtpmap:98 opus/48000/2"
       assert sdp_str =~ "a=fingerprint:sha-256 #{fp}"
       assert sdp_str =~ "a=setup:actpass"
@@ -559,6 +559,215 @@ defmodule Mendooze.SdpTest do
       assert sdp_str =~ "m=audio 40000 RTP/SAVP 8"
       assert sdp_str =~ "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:key0123456789"
       assert sdp_str =~ "a=sendonly"
+    end
+  end
+
+  # ── WebRTC transport plane (phase 1) ────────────────────────────────────────
+
+  describe "host_candidates/3" do
+    test "rtcp-mux: a single component-1 candidate with the RFC 8445 priority" do
+      assert Sdp.host_candidates("192.168.1.10", 22_000, true) ==
+               [
+                 %{
+                   foundation: "1",
+                   component: 1,
+                   protocol: :udp,
+                   priority: 2_130_706_431,
+                   ip: "192.168.1.10",
+                   port: 22_000,
+                   type: :host
+                 }
+               ]
+    end
+
+    test "no rtcp-mux: adds a component-2 candidate on port+1 (priority - 1)" do
+      assert [rtp, rtcp] = Sdp.host_candidates("192.168.1.10", 22_000, false)
+      assert rtp.component == 1 and rtp.port == 22_000 and rtp.priority == 2_130_706_431
+      assert rtcp.component == 2 and rtcp.port == 22_001 and rtcp.priority == 2_130_706_430
+    end
+
+    test "IPv6 candidate is rendered verbatim" do
+      [c] = Sdp.host_candidates("2a01:cb15::b8cd", 40_000, true)
+
+      assert Sdp.candidate_line(c) ==
+               "1 1 udp 2130706431 2a01:cb15::b8cd 40000 typ host"
+    end
+  end
+
+  describe "build/1 WebRTC offer (transport plane)" do
+    setup do
+      fp = "AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01"
+      ice = %{ufrag: "ufrag1", pwd: "pwd1234567890123456789012"}
+      %{fp: fp, ice: ice}
+    end
+
+    test "emits UDP/TLS/RTP/SAVPF, setup:actpass, mux, mid, candidates, rtcp-fb per video PT",
+         %{fp: fp, ice: ice} do
+      crypto = {:dtls, :actpass, "sha-256", fp}
+
+      sdp_str =
+        Sdp.build(%{
+          ip: "192.168.1.10",
+          medias: [
+            %{
+              type: :audio,
+              port: 22_000,
+              rtpmaps: [%{pt: 111, encoding: "opus", clock: 48_000, channels: 2}],
+              fmtp: %{"111" => "minptime=10;useinbandfec=1"},
+              crypto: crypto,
+              ice: ice,
+              rtcp_mux: true,
+              mid: "0",
+              candidates: Sdp.host_candidates("192.168.1.10", 22_000, true),
+              rtcp_fb: false
+            },
+            %{
+              type: :video,
+              port: 22_002,
+              rtpmaps: [
+                %{pt: 96, encoding: "H264", clock: 90_000},
+                %{pt: 98, encoding: "VP8", clock: 90_000}
+              ],
+              fmtp: %{"96" => "profile-level-id=42801f;packetization-mode=1"},
+              crypto: crypto,
+              ice: ice,
+              rtcp_mux: true,
+              mid: "1",
+              candidates: Sdp.host_candidates("192.168.1.10", 22_002, true),
+              rtcp_fb: true
+            }
+          ]
+        })
+
+      assert sdp_str =~ "m=audio 22000 UDP/TLS/RTP/SAVPF 111"
+      assert sdp_str =~ "m=video 22002 UDP/TLS/RTP/SAVPF 96 98"
+      assert sdp_str =~ "a=setup:actpass"
+      assert sdp_str =~ "a=rtcp-mux"
+      assert sdp_str =~ "a=mid:0"
+      assert sdp_str =~ "a=mid:1"
+      assert sdp_str =~ "a=candidate:1 1 udp 2130706431 192.168.1.10 22000 typ host"
+      assert sdp_str =~ "a=candidate:1 1 udp 2130706431 192.168.1.10 22002 typ host"
+
+      # rtcp-fb on every video PT, none on audio
+      for pt <- [96, 98] do
+        assert sdp_str =~ "a=rtcp-fb:#{pt} nack"
+        assert sdp_str =~ "a=rtcp-fb:#{pt} ccm fir"
+        assert sdp_str =~ "a=rtcp-fb:#{pt} goog-remb"
+      end
+
+      refute sdp_str =~ "a=rtcp-fb:111"
+
+      # no session ice-lite in offers (D7)
+      refute sdp_str =~ "a=ice-lite"
+
+      assert {:ok, [audio, video]} = Sdp.parse(sdp_str)
+      assert audio.mid == "0"
+      assert video.mid == "1"
+      assert Map.keys(video.rtcp_fb) |> Enum.sort() == [96, 98]
+      assert video.rtcp_fb[96] |> Enum.sort() == ["ccm fir", "goog-remb", "nack"]
+      assert audio.rtcp_fb == %{}
+    end
+
+    test "legacy codec branch also emits the transport plane", %{fp: fp, ice: ice} do
+      crypto = {:dtls, :actpass, "sha-256", fp}
+
+      sdp_str =
+        Sdp.build(%{
+          ip: "10.0.0.1",
+          medias: [
+            %{
+              type: :video,
+              port: 30_002,
+              codecs: ["H264", "VP8"],
+              crypto: crypto,
+              ice: ice,
+              rtcp_mux: true,
+              mid: "1",
+              candidates: Sdp.host_candidates("10.0.0.1", 30_002, true),
+              rtcp_fb: true
+            }
+          ]
+        })
+
+      assert sdp_str =~ "m=video 30002 UDP/TLS/RTP/SAVPF 99 107"
+      assert sdp_str =~ "a=mid:1"
+      assert sdp_str =~ "a=candidate:1 1 udp 2130706431 10.0.0.1 30002 typ host"
+      # H264 default PT is 99, VP8 is 107 (codec table)
+      assert sdp_str =~ "a=rtcp-fb:99 nack"
+      assert sdp_str =~ "a=rtcp-fb:107 goog-remb"
+    end
+  end
+
+  describe "build/1 WebRTC answer (mirroring + ice-lite)" do
+    test "session ice-lite, mirrored protocol/mid, setup:passive" do
+      sdp_str =
+        Sdp.build(%{
+          ip: "10.0.0.9",
+          ice_lite: true,
+          medias: [
+            %{
+              type: :audio,
+              port: 40_000,
+              rtpmaps: [%{pt: 0, encoding: "PCMU", clock: 8000}],
+              fmtp: %{"0" => ""},
+              crypto: {:dtls, :passive, "sha-256", "AA:BB"},
+              ice: %{ufrag: "u", pwd: "p234567890123456789012345"},
+              protocol: "UDP/TLS/RTP/SAVPF",
+              rtcp_mux: true,
+              mid: "0"
+            }
+          ]
+        })
+
+      assert sdp_str =~ "a=ice-lite"
+      assert sdp_str =~ "m=audio 40000 UDP/TLS/RTP/SAVPF 0"
+      assert sdp_str =~ "a=setup:passive"
+      assert sdp_str =~ "a=mid:0"
+    end
+  end
+
+  describe "parse/1 WebRTC extensions and §1.8 tolerance" do
+    test "non-WebRTC SDP yields empty transport-plane defaults (regression guard)" do
+      {:ok, [audio]} =
+        Sdp.parse("""
+        v=0
+        o=- 1 1 IN IP4 172.16.0.1
+        s=call
+        c=IN IP4 172.16.0.1
+        t=0 0
+        m=audio 5004 RTP/AVP 0 8
+        """)
+
+      assert audio.mid == nil
+      assert audio.rtcp_fb == %{}
+      assert audio.candidates == []
+    end
+
+    test "parses the captured Chrome 142 offer without choking" do
+      sdp_str = File.read!(Path.join(__DIR__, "SDP-chrome-142-offer.txt"))
+
+      assert {:ok, [audio, video, text]} = Sdp.parse(sdp_str)
+
+      # numeric mids echoed verbatim
+      assert audio.mid == "0"
+      assert video.mid == "1"
+
+      # candidates kept raw (host + tcp lines), never used for addressing
+      assert Enum.any?(audio.candidates, &String.contains?(&1, "172.22.0.4 53521 typ host"))
+      assert length(audio.candidates) == 6
+
+      # rtcp-fb parsed per video PT (six H264 + VP8)
+      assert Map.has_key?(video.rtcp_fb, 39)
+      assert "nack" in video.rtcp_fb[96]
+      assert "goog-remb" in video.rtcp_fb[96]
+
+      # tolerated attributes do not break parsing; mux detected
+      assert audio.rtcp_mux == true
+      assert video.rtcp_mux == true
+
+      # non-RTP text section is still returned (G9 handling is a later phase)
+      assert text.type == :text
+      assert text.protocol == "TCP/WSS"
     end
   end
 end
