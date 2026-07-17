@@ -341,6 +341,7 @@ defmodule Mendooze.ConnTest do
         webrtc_support: :if_offered
       )
 
+    # browser-shaped offer: DTLS actpass, rtcp-mux, mid
     offer =
       Sdp.build(%{
         ip: "10.9.8.7",
@@ -350,7 +351,10 @@ defmodule Mendooze.ConnTest do
             port: 40_000,
             codecs: ["OPUS"],
             crypto: {:dtls, :actpass, "sha-256", @fp},
-            ice: %{ufrag: "remote-uf", pwd: "remote-pwd-123456789012345"}
+            ice: %{ufrag: "remote-uf", pwd: "remote-pwd-123456789012345"},
+            protocol: "UDP/TLS/RTP/SAVPF",
+            rtcp_mux: true,
+            mid: "0"
           }
         ]
       })
@@ -361,8 +365,13 @@ defmodule Mendooze.ConnTest do
                     [3, 4, 0, "actpass", "sha-256", @fp]}
 
     assert {:ok, [audio]} = Sdp.parse(answer)
-    assert {:dtls, :active, "sha-256", @fp} = audio.crypto
+    # G3: the answer is setup:passive (mendooze is the DTLS server)
+    assert {:dtls, :passive, "sha-256", @fp} = audio.crypto
     assert audio.ice != nil
+    # G7: the offer's mid is echoed; ice-lite is advertised in answers (D7)
+    assert audio.mid == "0"
+    assert answer =~ "a=ice-lite"
+    assert answer =~ ~r{a=candidate:\d+ 1 udp \d+ 192.168.5.5 22000 typ host}
   end
 
   test "a DTLS offer is rejected when webrtc is disabled" do

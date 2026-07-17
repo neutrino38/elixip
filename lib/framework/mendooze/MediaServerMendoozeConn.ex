@@ -206,6 +206,9 @@ defmodule MediaServer.Mendooze.Conn do
       answer =
         Sdp.build(%{
           ip: state.local_ip,
+          # D7: a=ice-lite is advertised in answers only (Elixip behaves
+          # gateway-like there); emitted only for WebRTC (DTLS) answers.
+          ice_lite: match?({:dtls, _, _}, state.local_crypto),
           medias: Enum.map(descs, &answer_media_spec(state, negotiated, &1))
         })
 
@@ -659,6 +662,27 @@ defmodule MediaServer.Mendooze.Conn do
     end
   end
 
+  # WebRTC answer transport plane (§2.4). Mirror the offer's mid (G7), emit host
+  # candidates on the receive port (component-2 iff the offer had no rtcp-mux),
+  # and advertise rtcp-fb per video PT when the offer is AVPF. Session-level
+  # a=ice-lite is added in set_remote_offer (D7 — answers only).
+  defp add_answer_webrtc(base, state, desc) do
+    if match?({:dtls, _, _}, state.local_crypto) do
+      Map.merge(base, %{
+        mid: desc.mid,
+        candidates:
+          Sdp.host_candidates(
+            state.local_ip,
+            Map.fetch!(state.local_ports, desc.type),
+            desc.rtcp_mux
+          ),
+        rtcp_fb: desc.type == :video and String.ends_with?(desc.protocol, "F")
+      })
+    else
+      base
+    end
+  end
+
   # WebRTC offer transport plane (§2.4). rtcp-mux is always offered (G5), mid is
   # our media name (mirrored back by the peer), candidates are host-only with the
   # receive port (D6), and rtcp-fb is advertised per video PT. No a=ice-lite in
@@ -680,17 +704,21 @@ defmodule MediaServer.Mendooze.Conn do
   defp answer_media_spec(state, negotiated, desc) do
     neg = Map.fetch!(negotiated, desc.type)
 
-    base = %{
-      type: desc.type,
-      port: Map.fetch!(state.local_ports, desc.type),
-      bandwidth: Sdp.negotiate_bandwidth(desc.bandwidth, bandwidth_kbps(state, desc.type)),
-      direction: Sdp.reverse_direction(desc.direction),
-      crypto: local_crypto_spec(state, :active),
-      ice: state.local_ice,
-      rtcp_mux: desc.rtcp_mux,
-      # mirror the transport of the offer
-      protocol: desc.protocol
-    }
+    base =
+      %{
+        type: desc.type,
+        port: Map.fetch!(state.local_ports, desc.type),
+        bandwidth: Sdp.negotiate_bandwidth(desc.bandwidth, bandwidth_kbps(state, desc.type)),
+        direction: Sdp.reverse_direction(desc.direction),
+        # G3: mendooze answers DTLS as server (setup:passive) — the safe role a
+        # browser/gateway expects from the answerer. Ignored for non-DTLS crypto.
+        crypto: local_crypto_spec(state, :passive),
+        ice: state.local_ice,
+        rtcp_mux: desc.rtcp_mux,
+        # mirror the transport of the offer
+        protocol: desc.protocol
+      }
+      |> add_answer_webrtc(state, desc)
 
     case Map.get(state.accepted, desc.type) do
       nil ->
