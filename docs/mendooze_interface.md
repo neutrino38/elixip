@@ -201,6 +201,13 @@ Inside the Conn GenServer, for each media:
    verbatim; otherwise fall back to the client-side codec tables (mirror of the
    `rtp_map` used in step 2).
 
+When `webrtc_support: :yes`, the offer is browser-shaped
+(`webrtc_sdp_design.md` §2.4): transport string `UDP/TLS/RTP/SAVPF` (G4),
+`a=rtcp-mux` always offered (G5), `a=mid:<media>`, one host `a=candidate`
+per media (RFC 8445 priority, receive port — D6), and `a=rtcp-fb`
+(`nack`/`ccm fir`/`goog-remb`) per video payload type (G6). No session-level
+`a=ice-lite` in offers (D7).
+
 Store `local_ports`, `proposed_recv`, `accepted`. Return `{:ok, sdp_string}`.
 
 ### 4.5 `set_remote_answer/2` — UAC flow, continued
@@ -218,6 +225,14 @@ EndpointStartRTPTimeout(S, EP, media, timeout_ms)                   # arm watchd
 The send `rtp_map` is the negotiated map restricted to what the server
 accepted on receive (`Sdp.restrict_send_map/3`), so we never send a codec the
 server just filtered — a no-op on an older server (accepted set absent).
+
+The `EndpointSetRTPProperties` map is a single merged call: `rtcp-mux` when the
+answer mirrors it, plus `useNACK`/`tmmbr` when the answer is AVPF (G6). The
+`"secure"` hint is **not** set — it is a no-op once DTLS/SDES crypto is
+configured (server audit, `webrtc_sdp_design.md` Q2). When a WebRTC gateway
+answers `a=setup:passive`, that value is forwarded verbatim to
+`EndpointSetRemoteCryptoDTLS`; the server inverts it so **our** endpoint runs
+the DTLS handshake as client (Q4, resolved server-side).
 
 Remote security is set **before** `EndpointStartSending`; the watchdog is
 armed **after** the answer has been processed (doc §9.6), so no false

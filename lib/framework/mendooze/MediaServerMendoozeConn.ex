@@ -578,19 +578,32 @@ defmodule MediaServer.Mendooze.Conn do
     end
   end
 
-  defp set_rtp_properties(state, m, %{rtcp_mux: true}) do
-    case rpc(state, "EndpointSetRTPProperties", [
-           state.sess_id,
-           state.endpoint_id,
-           m,
-           %{"rtcp-mux" => "1"}
-         ]) do
-      {:ok, _} -> :ok
-      {:error, _} = err -> err
+  # rtcp-mux (mirrored from the peer) and, on AVPF media, the RTCP-feedback hints
+  # useNACK/tmmbr (G6) are merged into a single EndpointSetRTPProperties call.
+  # The "secure" hint is intentionally omitted: it is a no-op once DTLS/SDES
+  # crypto is configured (server audit, webrtc_sdp_design.md Q2).
+  defp set_rtp_properties(state, m, desc) do
+    props =
+      %{}
+      |> maybe_put(Map.get(desc, :rtcp_mux, false), "rtcp-mux", "1")
+      |> maybe_put(avpf?(desc), "useNACK", "1")
+      |> maybe_put(avpf?(desc), "tmmbr", "1")
+
+    if props == %{} do
+      :ok
+    else
+      case rpc(state, "EndpointSetRTPProperties", [state.sess_id, state.endpoint_id, m, props]) do
+        {:ok, _} -> :ok
+        {:error, _} = err -> err
+      end
     end
   end
 
-  defp set_rtp_properties(_state, _m, _desc), do: :ok
+  defp avpf?(%{protocol: protocol}) when is_binary(protocol), do: String.ends_with?(protocol, "F")
+  defp avpf?(_), do: false
+
+  defp maybe_put(map, true, key, value), do: Map.put(map, key, value)
+  defp maybe_put(map, false, _key, _value), do: map
 
   defp set_remote_crypto(state, m, desc) do
     crypto_calls =
@@ -622,15 +635,17 @@ defmodule MediaServer.Mendooze.Conn do
   # ── SDP spec builders ───────────────────────────────────────────────────────
 
   defp offer_media_spec(state, media) do
-    base = %{
-      type: media,
-      port: Map.fetch!(state.local_ports, media),
-      bandwidth: bandwidth_kbps(state, media),
-      direction: :sendrecv,
-      crypto: local_crypto_spec(state, :actpass),
-      ice: state.local_ice,
-      rtcp_mux: false
-    }
+    base =
+      %{
+        type: media,
+        port: Map.fetch!(state.local_ports, media),
+        bandwidth: bandwidth_kbps(state, media),
+        direction: :sendrecv,
+        crypto: local_crypto_spec(state, :actpass),
+        ice: state.local_ice,
+        rtcp_mux: false
+      }
+      |> add_offer_webrtc(state, media)
 
     case Map.get(state.accepted, media) do
       nil ->
@@ -641,6 +656,24 @@ defmodule MediaServer.Mendooze.Conn do
         # delegated: build the codec section from the server-accepted set,
         # using our payload-type numbering (this is an offer)
         Map.merge(base, server_driven_offer(state, media, accepted))
+    end
+  end
+
+  # WebRTC offer transport plane (§2.4). rtcp-mux is always offered (G5), mid is
+  # our media name (mirrored back by the peer), candidates are host-only with the
+  # receive port (D6), and rtcp-fb is advertised per video PT. No a=ice-lite in
+  # offers (D7): we emulate a browser-shaped offer.
+  defp add_offer_webrtc(base, state, media) do
+    if webrtc?(state) do
+      Map.merge(base, %{
+        rtcp_mux: true,
+        mid: to_string(media),
+        candidates:
+          Sdp.host_candidates(state.local_ip, Map.fetch!(state.local_ports, media), true),
+        rtcp_fb: media == :video
+      })
+    else
+      base
     end
   end
 

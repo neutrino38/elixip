@@ -201,6 +201,77 @@ defmodule Mendooze.ConnTest do
     assert_receive {:jsr309_call, "EndpointStartRTPTimeout", [3, 4, 0, _]}
   end
 
+  test "webrtc offer carries the full transport plane (mux, mid, candidates, rtcp-fb)" do
+    %{server: server} = start_media_server()
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(), media: :audio_video, webrtc_support: :yes)
+
+    assert {:ok, offer} = Mendooze.get_local_offer(conn)
+
+    # ICE credentials pushed per media
+    assert_receive {:jsr309_call, "EndpointSetLocalSTUNCredentials", [3, 4, 0, _, _]}
+    assert_receive {:jsr309_call, "EndpointSetLocalSTUNCredentials", [3, 4, 1, _, _]}
+
+    assert offer =~ "m=audio 22000 UDP/TLS/RTP/SAVPF"
+    assert offer =~ "m=video 22002 UDP/TLS/RTP/SAVPF"
+    assert offer =~ "a=setup:actpass"
+    assert offer =~ "a=rtcp-mux"
+    assert offer =~ "a=mid:audio"
+    assert offer =~ "a=mid:video"
+    assert offer =~ "a=candidate:1 1 udp 2130706431 192.168.5.5 22000 typ host"
+    assert offer =~ "a=candidate:1 1 udp 2130706431 192.168.5.5 22002 typ host"
+
+    # rtcp-fb only on the video PTs (H264 99, VP8 107 in the codec table)
+    assert offer =~ "a=rtcp-fb:99 nack"
+    assert offer =~ "a=rtcp-fb:107 goog-remb"
+
+    # D7: no session-level a=ice-lite in offers (browser-shaped)
+    refute offer =~ "a=ice-lite"
+  end
+
+  test "a gateway answer with setup:passive is forwarded and enables useNACK/tmmbr" do
+    %{server: server} = start_media_server()
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :video,
+        video_codec: "H264",
+        webrtc_support: :yes
+      )
+
+    {:ok, _offer} = Mendooze.get_local_offer(conn)
+
+    # gateway-shaped answer: ICE-lite, mirrored mux, setup:passive
+    answer =
+      Sdp.build(%{
+        ip: "10.9.8.7",
+        ice_lite: true,
+        medias: [
+          %{
+            type: :video,
+            port: 40_000,
+            codecs: ["H264"],
+            crypto: {:dtls, :passive, "sha-256", @fp},
+            ice: %{ufrag: "gw-uf", pwd: "gw-pwd-1234567890123456789"},
+            protocol: "UDP/TLS/RTP/SAVPF",
+            rtcp_mux: true
+          }
+        ]
+      })
+
+    assert :ok = Mendooze.set_remote_answer(conn, answer)
+
+    # remote setup:passive is forwarded verbatim; the server inverts it so our
+    # endpoint runs the DTLS handshake as client (Q4, resolved server-side)
+    assert_receive {:jsr309_call, "EndpointSetRemoteCryptoDTLS",
+                    [3, 4, 1, "passive", "sha-256", @fp]}
+
+    # AVPF answer → NACK/TMMBR hints merged into the single properties call (G6)
+    assert_receive {:jsr309_call, "EndpointSetRTPProperties", [3, 4, 1, props]}
+    assert props == %{"rtcp-mux" => "1", "useNACK" => "1", "tmmbr" => "1"}
+  end
+
   test "add_remote_candidate feeds EndpointAddICECandidate" do
     %{server: server} = start_media_server()
 
