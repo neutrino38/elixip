@@ -14,36 +14,38 @@ defmodule SIP.Test.ScenarioIntegration do
 
     @callee "sip:testcall@mydomain.com;unittest=1"
 
-    config username: "toto",
-           authusername: "toto",
-           displayname: "La tete a toto",
-           domain: "mydomain.com"
+    config(
+      username: "toto",
+      authusername: "toto",
+      displayname: "La tete a toto",
+      domain: "mydomain.com"
+    )
 
     state initial_state do
       media_connect(MediaServer.Mockup, "sip:localhost:8080")
-      goto next
+      goto(next)
     end
 
     state calling do
       send_INVITE(@callee, :mediaserver, timeout: 30, webrtc: :no)
-      goto call_progress
+      goto(call_progress)
     end
 
     state call_progress do
       receive do
         {100, _rsp, _trans_pid, _dialog_pid} ->
-          goto loop, "100 Trying"
+          goto(loop, "100 Trying")
 
         {180, _rsp, _trans_pid, _dialog_pid} ->
-          goto loop, "180 Ringing"
+          goto(loop, "180 Ringing")
 
         {183, rsp, trans_pid, _dialog_pid} ->
           process_invite_reply(rsp, trans_pid)
-          goto loop, "183 Session Progress"
+          goto(loop, "183 Session Progress")
 
         {200, rsp, trans_pid, _dialog_pid} ->
           process_invite_reply(rsp, trans_pid)
-          goto call_answered, "200 OK"
+          goto(call_answered, "200 OK")
 
         {code, _rsp, _trans_pid, _dialog_pid} when code in 400..699 ->
           scenario_failure("Call failure with code #{code}")
@@ -54,7 +56,7 @@ defmodule SIP.Test.ScenarioIntegration do
 
     state call_answered do
       receive do
-        {:ms_event, _conn, :ice_connected} -> goto start_play, "media connected"
+        {:ms_event, _conn, :ice_connected} -> goto(start_play, "media connected")
       after
         5_000 -> scenario_failure("No media after 5s")
       end
@@ -62,13 +64,13 @@ defmodule SIP.Test.ScenarioIntegration do
 
     state start_play do
       media_play("toto.mp4", duration_ms: 300)
-      goto next
+      goto(next)
     end
 
     state call_established do
       receive do
-        {:ms_event, _player, :player_started} -> goto loop, "player started"
-        {:ms_event, _player, :player_ended} -> goto hangup_call, "player EOF"
+        {:ms_event, _player, :player_started} -> goto(loop, "player started")
+        {:ms_event, _player, :player_ended} -> goto(hangup_call, "player EOF")
       after
         5_000 -> scenario_failure("No player events")
       end
@@ -85,9 +87,92 @@ defmodule SIP.Test.ScenarioIntegration do
     end
   end
 
+  # Same call flow but placing a browser-shaped WebRTC offer (webrtc: :yes). The
+  # media Mockup builds the WebRTC offer through the real get_sdp_offer plumbing;
+  # the UDP mockup answers with a plain SDP, which the Mockup accepts and turns
+  # into :ice_connected. Exercises the end-to-end WebRTC UAC offer path in CI.
+  defmodule OutboundWebRTCCall do
+    use SIP.Scenario
+
+    @callee "sip:testcall@mydomain.com;unittest=1"
+
+    config(username: "toto", authusername: "toto", displayname: "toto", domain: "mydomain.com")
+
+    state initial_state do
+      media_connect(MediaServer.Mockup, "sip:localhost:8080")
+      goto(calling)
+    end
+
+    state calling do
+      send_INVITE(@callee, :mediaserver, timeout: 30, webrtc: :yes)
+      goto(call_progress)
+    end
+
+    state call_progress do
+      receive do
+        {100, _rsp, _t, _d} ->
+          goto(loop, "100")
+
+        {180, _rsp, _t, _d} ->
+          goto(loop, "180")
+
+        {183, rsp, t, _d} ->
+          process_invite_reply(rsp, t)
+          goto(loop, "183")
+
+        {200, rsp, t, _d} ->
+          process_invite_reply(rsp, t)
+          goto(call_answered, "200")
+
+        {code, _rsp, _t, _d} when code in 400..699 ->
+          scenario_failure("code #{code}")
+      after
+        30_000 -> scenario_failure("Call not answered after 30s")
+      end
+    end
+
+    state call_answered do
+      receive do
+        {:ms_event, _conn, :ice_connected} -> goto(start_play, "media connected")
+      after
+        5_000 -> scenario_failure("No media after 5s")
+      end
+    end
+
+    state start_play do
+      media_play("toto.mp4", duration_ms: 300)
+      goto(next)
+    end
+
+    state call_established do
+      receive do
+        {:ms_event, _player, :player_started} -> goto(loop, "player started")
+        {:ms_event, _player, :player_ended} -> goto(hangup_call, "player EOF")
+      after
+        5_000 -> scenario_failure("No player events")
+      end
+    end
+
+    state hangup_call do
+      send_BYE()
+
+      receive do
+        {200, _bye_rsp, _t, _d} -> scenario_success("200 OK for BYE")
+      after
+        4_000 -> scenario_failure("No 200 OK for BYE")
+      end
+    end
+  end
+
   setup_all do
     :ok = SIP.Scenario.start_stack()
-    Application.put_env(:elixip2, :proxyuri, %SIP.Uri{domain: "mydomain.com", scheme: "sip:", port: 5060})
+
+    Application.put_env(:elixip2, :proxyuri, %SIP.Uri{
+      domain: "mydomain.com",
+      scheme: "sip:",
+      port: 5060
+    })
+
     Application.put_env(:elixip2, :proxyusesrv, false)
     :ok
   end
@@ -114,6 +199,18 @@ defmodule SIP.Test.ScenarioIntegration do
 
     # Wait for the INVITE to create the transport, then let it be actually sent
     # (so the mockup has stored the request) before driving the answer.
+    t_pid = wait_for_transport(100)
+    Process.sleep(200)
+    SIP.Test.Transport.UDPMockup.simulate_successful_answer(t_pid)
+
+    assert_receive {:scenario_result, :ok}, 25_000
+  end
+
+  @tag timeout: 30_000
+  test "outbound WebRTC INVITE (webrtc: :yes) runs to success" do
+    parent = self()
+    spawn(fn -> send(parent, {:scenario_result, OutboundWebRTCCall.run(false)}) end)
+
     t_pid = wait_for_transport(100)
     Process.sleep(200)
     SIP.Test.Transport.UDPMockup.simulate_successful_answer(t_pid)

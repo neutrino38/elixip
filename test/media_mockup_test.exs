@@ -98,4 +98,108 @@ defmodule MediaMockupTest do
     {:ok, rec} = Mockup.create_recorder(conn, "/rec/call.mp4", 0, wait_video: true)
     refute :sys.get_state(rec).wait_video
   end
+
+  # ── WebRTC offer/answer (§2.6 — converged on MediaServer.Mendooze.Sdp) ───────
+
+  alias MediaServer.Mendooze.Sdp
+
+  describe "get_local_offer asymmetry" do
+    test "webrtc_support: :yes produces a browser-shaped WebRTC offer" do
+      conn = start_conn(media: :audio_video, webrtc_support: :yes)
+      {:ok, offer} = Mockup.get_local_offer(conn)
+
+      assert offer =~ "UDP/TLS/RTP/SAVPF"
+      assert offer =~ "a=setup:actpass"
+      assert offer =~ "a=fingerprint:sha-256 "
+      assert offer =~ "a=ice-ufrag:"
+      assert offer =~ "a=rtcp-mux"
+      assert offer =~ "a=mid:audio"
+      assert offer =~ "a=mid:video"
+      assert offer =~ ~r{a=candidate:\d+ 1 udp \d+ }
+      assert offer =~ ~r{a=rtcp-fb:\d+ nack}
+      # offers do not claim ice-lite (D7)
+      refute offer =~ "a=ice-lite"
+    end
+
+    test "webrtc_support: :if_offered produces a plain RTP/AVP offer (not SAVPF)" do
+      conn = start_conn(media: :audio, webrtc_support: :if_offered)
+      {:ok, offer} = Mockup.get_local_offer(conn)
+
+      assert offer =~ "RTP/AVP "
+      refute offer =~ "SAVPF"
+      refute offer =~ "a=fingerprint"
+    end
+  end
+
+  describe "set_remote_offer answers gateway-like" do
+    test "a WebRTC offer is answered setup:passive, ice-lite, mirrored mux/mid" do
+      # caller builds a browser-shaped offer
+      offer =
+        Sdp.build(%{
+          ip: "10.1.2.3",
+          medias: [
+            %{
+              type: :audio,
+              port: 5000,
+              codecs: ["PCMU"],
+              dtmf: true,
+              crypto: {:dtls, :actpass, "sha-256", "AA:BB:CC"},
+              ice: %{ufrag: "calleruf", pwd: "callerpwd-01234567890123"},
+              protocol: "UDP/TLS/RTP/SAVPF",
+              rtcp_mux: true,
+              mid: "0"
+            }
+          ]
+        })
+
+      conn = start_conn(media: :audio, audio_codec: "PCMU", webrtc_support: :if_offered)
+      {:ok, answer} = Mockup.set_remote_offer(conn, offer)
+
+      assert answer =~ "a=ice-lite"
+      assert answer =~ "UDP/TLS/RTP/SAVPF"
+      assert answer =~ "a=setup:passive"
+      assert answer =~ "a=rtcp-mux"
+      assert answer =~ "a=mid:0"
+      assert answer =~ ~r{a=candidate:\d+ 1 udp \d+ }
+
+      # offerer PT numbering is preserved (PCMU on 0)
+      assert {:ok, [aud]} = Sdp.parse(answer)
+      assert aud.mid == "0"
+      assert aud.rtp_map == %{"0" => 0, "101" => 100}
+    end
+
+    test "a DTLS offer with webrtc_support: :no is refused" do
+      offer =
+        Sdp.build(%{
+          ip: "10.1.2.3",
+          medias: [
+            %{
+              type: :audio,
+              port: 5000,
+              codecs: ["PCMU"],
+              crypto: {:dtls, :actpass, "sha-256", "AA:BB"}
+            }
+          ]
+        })
+
+      conn = start_conn(media: :audio, webrtc_support: :no)
+      assert {:error, :webrtc_not_supported} = Mockup.set_remote_offer(conn, offer)
+    end
+  end
+
+  test "WebRTC bridge: UAC offer → gateway-like Mockup answer → :ice_connected" do
+    # This is the CI stand-in for the IVeS gateway (§2.5/§2.6): a WebRTC UAC
+    # Mockup offers, a second Mockup answers gateway-like, the UAC consumes it.
+    uac = start_conn(media: :audio_video, webrtc_support: :yes, ice_delay_ms: 0)
+    {:ok, offer} = Mockup.get_local_offer(uac)
+
+    gateway = start_conn(media: :audio_video, webrtc_support: :if_offered)
+    {:ok, answer} = Mockup.set_remote_offer(gateway, offer)
+
+    assert answer =~ "a=setup:passive"
+    assert answer =~ "a=ice-lite"
+
+    assert :ok = Mockup.set_remote_answer(uac, answer)
+    assert_receive {:ms_event, ^uac, :ice_connected}, 1_000
+  end
 end
