@@ -9,6 +9,6 @@
   "logger_file_backend": {:hex, :logger_file_backend, "0.0.14", "774bb661f1c3fed51b624d2859180c01e386eb1273dc22de4f4a155ef749a602", [:mix], [], "hexpm", "071354a18196468f3904ef09413af20971d55164267427f6257b52cfba03f9e6"},
   "owl": {:hex, :owl, "0.13.1", "1ec4a5dea170465f0e90c502c203079224516bc0cbd599281c8667b3c6ef8848", [:mix], [{:ucwidth, "~> 0.2", [hex: :ucwidth, repo: "hexpm", optional: true]}], "hexpm", "351e768af8f2edc575cdaab1a5a2f6d6381be591758a026c701c703145508a0c"},
   "socket": {:hex, :socket, "0.3.13", "98a2ab20ce17f95fb512c5cadddba32b57273e0d2dba2d2e5f976c5969d0c632", [:mix], [], "hexpm", "f82ea9833ef49dde272e6568ab8aac657a636acb4cf44a7de8a935acb8957c2e"},
-  "socket2": {:git, "https://github.com/neutrino38/elixir-socket.git", "97f4b66528b4f5caaa6bcbb02a9c1cdcfa79f1d2", [branch: "feat/active-ws"]},
+  "socket2": {:git, "https://github.com/neutrino38/elixir-socket.git", "7cb1381cdf6d435225ef441383f9784491217f63", [branch: "feat/active-ws"]},
   "xmlrpc": {:hex, :xmlrpc, "1.4.3", "6ddf3353c601b5e3f70ef9a02fb8959bb31391648c0177a67bcb8d6cd4ab4ae1", [:mix], [{:decimal, "~> 2.0", [hex: :decimal, repo: "hexpm", optional: false]}, {:erlsom, "~> 1.4", [hex: :erlsom, repo: "hexpm", optional: false]}], "hexpm", "43ca129384d422d9934823db6d6e9965fddb3828e91028dbe1c62327cc925387"},
 }
