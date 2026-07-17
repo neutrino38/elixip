@@ -103,6 +103,10 @@ back to the Conn GenServer (already reflected in
   local_ports: %{audio: integer() | nil, video: integer() | nil},
   status:      :init | :active | :closed,
 
+  # delegated SDP negotiation (enriched EndpointStartReceiving, §8.1)
+  proposed_recv: %{(:audio | :video | :text) => %{String.t() => integer()}}, # rtpMap we sent
+  accepted:      %{(:audio | :video | :text) => %{String.t() => String.t()} | nil}, # pt => fmtp; nil = older server
+
   # sub-resources — server ids AND tags stored here
   players:   %{reference() => %{player_id: integer(), tag: String.t(), opts: keyword()}},
   recorders: %{reference() => %{recorder_id: integer(), tag: String.t(),
@@ -183,15 +187,21 @@ Inside the Conn GenServer, for each media:
    - ICE: `EndpointSetLocalSTUNCredentials(S, EP, media, ufrag, pwd)`
      (ufrag/pwd generated locally, published in the SDP)
    - SDES (non-WebRTC SRTP): `EndpointSetLocalCryptoSDES(S, EP, media, suite, key)`
-2. `EndpointStartReceiving(S, EP, media, rtp_map)` → local port
+2. `EndpointStartReceiving(S, EP, media, rtp_map)` → `[local_port, fmtp_struct?]`
+   — `returnVal[1]` (when present) is the server-accepted fmtp-per-payload-type
+   struct (§8.1). Store the proposed `rtp_map` and the reduced accepted set
+   (`Sdp.accepted_pts/2`) per media.
 3. `GetMediaCandidates(S, EP, protocol=0 /*RTP*/, media)` → `"rtp://ip:port"`
    — the authoritative local address for the SDP `c=`/`m=` lines (do **not**
    derive it from `base_url`)
 4. Build the SDP offer with `ExSDP`: local ports + candidates + local crypto
-   (`a=fingerprint`, `a=setup:actpass`, `a=ice-ufrag/pwd`) + offered payload
-   types (mirror of the `rtp_map` used in step 2).
+   (`a=fingerprint`, `a=setup:actpass`, `a=ice-ufrag/pwd`) + the codec section.
+   When the server delegated (accepted set present), the `a=rtpmap`/`a=fmtp`
+   lines are built from that set — our payload-type numbering, server fmtp
+   verbatim; otherwise fall back to the client-side codec tables (mirror of the
+   `rtp_map` used in step 2).
 
-Store `local_ports`. Return `{:ok, sdp_string}`.
+Store `local_ports`, `proposed_recv`, `accepted`. Return `{:ok, sdp_string}`.
 
 ### 4.5 `set_remote_answer/2` — UAC flow, continued
 
@@ -204,6 +214,10 @@ EndpointSetRemoteSTUNCredentials(S, EP, media, ufrag, pwd)          # if ICE
 EndpointStartSending(S, EP, media, remote_ip, remote_port, rtp_map) # codecs retained
 EndpointStartRTPTimeout(S, EP, media, timeout_ms)                   # arm watchdog LAST
 ```
+
+The send `rtp_map` is the negotiated map restricted to what the server
+accepted on receive (`Sdp.restrict_send_map/3`), so we never send a codec the
+server just filtered — a no-op on an older server (accepted set absent).
 
 Remote security is set **before** `EndpointStartSending`; the watchdog is
 armed **after** the answer has been processed (doc §9.6), so no false
@@ -219,11 +233,16 @@ For each media of the offer:
 2. Remote security from the offer (`SetRemoteCryptoDTLS`/`SDES`,
    `SetRemoteSTUNCredentials`)
 3. Local security for the answer (fingerprint / local STUN credentials / SDES key)
-4. `EndpointStartReceiving(S, EP, media, rtp_map)` → local port
+4. `EndpointStartReceiving(S, EP, media, rtp_map)` → `[local_port, fmtp_struct?]`
+   (store proposed map + accepted set, as in §4.4 step 2)
 5. `GetMediaCandidates(S, EP, 0, media)` → local address
-6. `EndpointStartSending(S, EP, media, remote_ip, remote_port, rtp_map)`
+6. `EndpointStartSending(S, EP, media, remote_ip, remote_port, rtp_map)` — the
+   send map restricted to the accepted set (as in §4.5)
 
-Then build the answer SDP (`a=setup:active`), arm the watchdog
+Then build the answer SDP (`a=setup:active`). When the server delegated, the
+codec section is built from the accepted set honoring the **offerer's**
+payload-type numbering (RFC 3264): the encoding/clock come from the offer's
+payload type, the fmtp from the server. Arm the watchdog
 (`EndpointStartRTPTimeout`) and send `:ice_connected`. Return
 `{:ok, answer_sdp}`.
 
@@ -487,6 +506,27 @@ constants as integers**, e.g. `%{"0" => 0, "8" => 8, "101" => 100}`. The
 receive map (what we accept) and the send map (what was negotiated) may
 differ. The `conn_opts` `:audio_codec`/`:video_codec` strings select which
 entries go into the offer's receive map.
+
+### 8.1 Delegated negotiation — enriched `EndpointStartReceiving` return
+
+`EndpointStartReceiving` returns `[recvPort, fmtpStruct?]`. The optional
+`returnVal[1]` is a struct keyed by the **accepted** payload type (string) whose
+value is the **fmtp parameters only** (what follows `a=fmtp:<pt> `), empty for
+fmtp-less codecs (PCMU, telephone-event without params, …):
+
+```
+%{"0" => "", "8" => "", "96" => "profile-level-id=42801f;packetization-mode=1"}
+```
+
+With this return the **media server is authoritative** for the accepted payload
+types and their fmtp (H264 `profile-level-id`, opus, and telephone-event / RED
+redundancy fmtp are **server-owned**). The client no longer synthesizes fmtp:
+`accepted_pts/2` reduces the struct to the accepted set (presence = accepted,
+absence = filtered), and `build/1`'s server-driven path emits the codec section
+from it. Detection mirrors the `EventQueueCreate` `sourceName` tolerance
+(§4.1): `returnVal[1]` present and a map ⇒ delegated path; absent ⇒ the
+client-side codec tables (`accepted[media] = nil`). Full design in
+`docs/mendooze_sdp_delegation_plan.md`.
 
 ---
 

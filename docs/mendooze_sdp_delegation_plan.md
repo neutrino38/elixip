@@ -6,7 +6,7 @@ Implementation plan for aligning `MediaServer.Mendooze` with the **enriched
 branch `feat/alma_linux9`), so that codec/fmtp negotiation is driven by the
 media server instead of hard-coded on the Elixir side.
 
-Status: **plan only** — no code written yet.
+Status: **implemented** — all four phases landed (see §8 for per-phase notes).
 
 ---
 
@@ -248,8 +248,11 @@ Real server E2E (`test/mendooze_integration_test.exs`, gated on `MENDOOZE_URL`):
    `accepted` state fields, delegated offer/answer builders + `restrict_send_map`
    on `EndpointStartSending`; fake-server tests in `test/mendooze_conn_test.exs`.
 3. **Docs** — update `mendooze_interface.md`; add the enriched return to the
-   `EndpointStartReceiving` mapping.
+   `EndpointStartReceiving` mapping. **DONE** — §3.2 state map, §4.4/§4.5/§4.6
+   flows, and new §8.1 (delegated negotiation).
 4. **Real-server E2E** — H264 delegated negotiation behind `MENDOOZE_URL`.
+   **DONE** — `test/mendooze_integration_test.exs` "H264 audio+video loopback
+   carries the server-negotiated fmtp" (gated on `MENDOOZE_URL`).
 
 ---
 

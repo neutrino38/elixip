@@ -87,6 +87,35 @@ defmodule Mendooze.IntegrationTest do
       assert :ok = Mendooze.close_peer_connection(pc_a)
     end
 
+    test "H264 audio+video loopback carries the server-negotiated fmtp", %{server: server} do
+      # Delegated SDP negotiation (§8.1 of docs/mendooze_interface.md): the media
+      # server is authoritative for the H264 fmtp (profile-level-id /
+      # packetization-mode). This asserts the fmtp reaches both the offer and the
+      # answer, i.e. the enriched EndpointStartReceiving return is threaded
+      # end-to-end — the whole point of the delegation work.
+      opts = [media: :audio_video, audio_codec: "PCMU", video_codec: "H264"]
+
+      {:ok, pc_a} = Mendooze.create_peer_connection(server, self(), opts)
+      {:ok, offer_a} = Mendooze.get_local_offer(pc_a)
+      assert offer_a =~ "m=video"
+      assert offer_a =~ ~r{a=rtpmap:\d+ H264/90000}
+      # the server owns the fmtp — a profile-level-id line is present
+      assert offer_a =~ ~r{a=fmtp:\d+ [^\r\n]*profile-level-id}
+
+      {:ok, pc_b} = Mendooze.create_peer_connection(server, self(), opts)
+      {:ok, answer_b} = Mendooze.set_remote_offer(pc_b, offer_a)
+      assert answer_b =~ "m=video"
+      assert answer_b =~ ~r{a=rtpmap:\d+ H264/90000}
+      # the answer honors the offerer's payload type and re-attaches the fmtp
+      assert answer_b =~ ~r{a=fmtp:\d+ [^\r\n]*profile-level-id}
+
+      assert :ok = Mendooze.set_remote_answer(pc_a, answer_b)
+      assert_receive {:ms_event, ^pc_a, :ice_connected}, 5_000
+
+      assert :ok = Mendooze.close_peer_connection(pc_b)
+      assert :ok = Mendooze.close_peer_connection(pc_a)
+    end
+
     test "player lifecycle on a real endpoint", %{server: server} do
       {:ok, pc} = Mendooze.create_peer_connection(server, self(), media: :audio)
       {:ok, _offer} = Mendooze.get_local_offer(pc)
