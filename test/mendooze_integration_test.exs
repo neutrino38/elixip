@@ -116,6 +116,40 @@ defmodule Mendooze.IntegrationTest do
       assert :ok = Mendooze.close_peer_connection(pc_a)
     end
 
+    test "WebRTC-shaped offer/answer loopback (both legs webrtc)", %{server: server} do
+      # Phase 4 (webrtc_sdp_design.md §2.8 test 9): both endpoints negotiate the
+      # WebRTC transport plane. pc_a offers setup:actpass; pc_b answers, so one
+      # side runs DTLS as client and the other as server — the split the server
+      # side (branch feat/webrtc-improvement) had to support.
+      opts = [media: :audio_video, audio_codec: "OPUS", video_codec: "H264", webrtc_support: :yes]
+
+      {:ok, pc_a} = Mendooze.create_peer_connection(server, self(), opts)
+      {:ok, offer_a} = Mendooze.get_local_offer(pc_a)
+
+      # the offer carries the full browser-shaped transport plane
+      assert offer_a =~ "UDP/TLS/RTP/SAVPF"
+      assert offer_a =~ "a=setup:actpass"
+      assert offer_a =~ "a=ice-ufrag:"
+      assert offer_a =~ "a=fingerprint:sha-256 "
+      assert offer_a =~ "a=rtcp-mux"
+      assert offer_a =~ "a=mid:audio"
+      assert offer_a =~ "a=mid:video"
+      assert offer_a =~ ~r{a=candidate:\d+ 1 udp \d+ }
+      # rtcp-fb on the video PTs
+      assert offer_a =~ ~r{a=rtcp-fb:\d+ nack}
+
+      {:ok, pc_b} = Mendooze.create_peer_connection(server, self(), opts)
+      {:ok, answer_b} = Mendooze.set_remote_offer(pc_b, offer_a)
+      assert answer_b =~ "a=fingerprint:sha-256 "
+      assert answer_b =~ "a=ice-ufrag:"
+
+      assert :ok = Mendooze.set_remote_answer(pc_a, answer_b)
+      assert_receive {:ms_event, ^pc_a, :ice_connected}, 5_000
+
+      assert :ok = Mendooze.close_peer_connection(pc_b)
+      assert :ok = Mendooze.close_peer_connection(pc_a)
+    end
+
     test "player lifecycle on a real endpoint", %{server: server} do
       {:ok, pc} = Mendooze.create_peer_connection(server, self(), media: :audio)
       {:ok, _offer} = Mendooze.get_local_offer(pc)
