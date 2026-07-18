@@ -168,6 +168,44 @@ defmodule MediaMockupTest do
       assert aud.rtp_map == %{"0" => 0, "101" => 100}
     end
 
+    test "the captured Chrome 142 offer is answered completely (G9/G10)" do
+      offer = File.read!(Path.join(__DIR__, "SDP-chrome-142-offer.txt"))
+
+      # G.711 selected so the 8000 Hz telephone-event PT (126) is chosen, not
+      # the 48000 Hz one (110). Video accepts the offered VP8/H264.
+      conn =
+        start_conn(
+          media: :audio_video,
+          audio_codec: ["PCMU"],
+          video_codec: ["VP8", "H264"],
+          webrtc_support: :if_offered
+        )
+
+      {:ok, answer} = Mockup.set_remote_offer(conn, offer)
+
+      # G9: one answer m= per offered m=, in order — the non-RTP text section is
+      # declined with port 0 while audio/video carry real answers.
+      assert {:ok, [aud, vid, txt]} = Sdp.parse(answer)
+      assert aud.type == :audio and aud.port != 0
+      assert vid.type == :video and vid.port != 0
+      refute txt.supported?
+      assert txt.port == 0
+      assert answer =~ "m=text 0 TCP/WSS t140"
+
+      # numeric mids echoed verbatim, gateway-shaped DTLS role
+      assert aud.mid == "0"
+      assert vid.mid == "1"
+      assert answer =~ "a=setup:passive"
+
+      # G10: the 8000 Hz telephone-event PT (126) is answered, not 110@48000
+      assert aud.rtp_map == %{"0" => 0, "126" => 100}
+      assert answer =~ "a=rtpmap:126 telephone-event/8000"
+      refute answer =~ "telephone-event/48000"
+
+      # offerer PT numbering preserved on video (VP8 was PT 96 in the offer)
+      assert Map.get(vid.rtp_map, "96") == 107
+    end
+
     test "a DTLS offer with webrtc_support: :no is refused" do
       offer =
         Sdp.build(%{

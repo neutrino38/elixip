@@ -102,10 +102,19 @@ defmodule SIP.Transport.WSS do
     {:noreply, %{state | socket: ws}}
   end
 
-  # Handle data reception
+  # Handle data reception. `state.destip` is the dialed hostname for WSS (the
+  # resolver delegates DNS to the socket layer), so use the socket's real peer
+  # address as the message source — a proper IP tuple, like UDP passes. Falls
+  # back to the stored dest only if the peer address is momentarily unavailable.
   @impl true
   def handle_info({:web, socket, data}, state ) do
-    SIP.Transport.ImplHelpers.process_incoming_message(state, data, "WSS", __MODULE__, socket, state.destip, state.destport)
+    { src_ip, src_port } =
+      case SIP.Transport.ImplHelpers.remote_address(socket) do
+        { ip, port } -> { ip, port }
+        nil -> { state.destip, state.destport }
+      end
+
+    SIP.Transport.ImplHelpers.process_incoming_message(state, data, "WSS", __MODULE__, socket, src_ip, src_port)
     { :noreply, state }
   end
 

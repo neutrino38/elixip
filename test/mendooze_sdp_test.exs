@@ -55,7 +55,7 @@ defmodule Mendooze.SdpTest do
       assert audio.port == 22_000
       assert audio.rtp_map == %{"0" => 0, "8" => 8, "101" => 100}
       assert audio.codecs == ["PCMU", "PCMA"]
-      assert audio.dtmf_pt == 101
+      assert audio.dtmf_pts == %{8000 => 101}
       assert audio.crypto == :none
       assert audio.ice == nil
       assert audio.rtcp_mux == false
@@ -104,7 +104,7 @@ defmodule Mendooze.SdpTest do
       assert video.type == :video
       assert video.crypto == {:dtls, :actpass, "sha-256", fp}
       assert video.rtp_map == %{"107" => 107}
-      assert video.dtmf_pt == nil
+      assert video.dtmf_pts == %{}
     end
 
     test "SDES answer round-trips" do
@@ -153,7 +153,7 @@ defmodule Mendooze.SdpTest do
       assert audio.ip == "10.10.1.99"
       assert audio.port == 11_424
       assert audio.rtp_map == %{"0" => 0, "8" => 8, "101" => 100}
-      assert audio.dtmf_pt == 101
+      assert audio.dtmf_pts == %{8000 => 101}
       assert audio.direction == :sendrecv
       assert audio.crypto == :none
     end
@@ -189,7 +189,7 @@ defmodule Mendooze.SdpTest do
       assert {:ok, [audio]} = Sdp.parse(sdp_str)
       assert audio.rtp_map == %{"111" => 98, "110" => 100}
       assert audio.codecs == ["OPUS"]
-      assert audio.dtmf_pt == 110
+      assert audio.dtmf_pts == %{48_000 => 110}
       assert audio.direction == :sendonly
     end
 
@@ -262,7 +262,7 @@ defmodule Mendooze.SdpTest do
       refute sdp_str =~ "a=fmtp:105"
     end
 
-    test "non audio/video/text medias are ignored" do
+    test "non audio/video/text medias are returned as unsupported stubs (G9)" do
       sdp_str = """
       v=0
       o=- 1 1 IN IP4 172.16.0.1
@@ -273,7 +273,33 @@ defmodule Mendooze.SdpTest do
       m=application 5006 UDP/BFCP *
       """
 
-      assert {:ok, [%{type: :audio}]} = Sdp.parse(sdp_str)
+      # G9: every m= section is kept in offer order so the answerer can echo a
+      # port-0 rejection for the ones it cannot answer.
+      assert {:ok, [audio, app]} = Sdp.parse(sdp_str)
+      assert audio.supported? and audio.type == :audio
+      refute app.supported?
+      assert app.type == :application
+      assert app.protocol == "UDP/BFCP"
+      assert app.port == 5006
+    end
+
+    test "a supported media type on a non-RTP transport is an unsupported stub (G9)" do
+      sdp_str = """
+      v=0
+      o=- 1 1 IN IP4 172.16.0.1
+      s=call
+      c=IN IP4 172.16.0.1
+      t=0 0
+      m=audio 5004 RTP/AVP 0
+      m=text 60000 TCP/WSS t140
+      """
+
+      assert {:ok, [audio, text]} = Sdp.parse(sdp_str)
+      assert audio.supported?
+      refute text.supported?
+      assert text.type == :text
+      assert text.protocol == "TCP/WSS"
+      assert text.raw_fmt == "t140"
     end
 
     test "garbage input is an error" do
@@ -385,6 +411,71 @@ defmodule Mendooze.SdpTest do
                Sdp.negotiate(text, ["T140", "T140RED"], false)
 
       assert rtp_map == %{"98" => 106, "99" => 105}
+    end
+
+    # G10 — Chrome offers one telephone-event PT per clock (110@48000, 126@8000)
+    setup do
+      {:ok, [dual]} =
+        Sdp.parse("""
+        v=0
+        o=- 1 1 IN IP4 172.16.0.1
+        s=call
+        c=IN IP4 172.16.0.1
+        t=0 0
+        m=audio 5004 UDP/TLS/RTP/SAVPF 111 0 110 126
+        a=rtpmap:111 opus/48000/2
+        a=rtpmap:0 PCMU/8000
+        a=rtpmap:110 telephone-event/48000
+        a=rtpmap:126 telephone-event/8000
+        """)
+
+      %{dual: dual}
+    end
+
+    test "telephone-event PT matches the primary codec clock (OPUS → 48000)", %{dual: dual} do
+      assert {:ok, %{dtmf: true, dtmf_pt: 110, dtmf_clock: 48_000, rtp_map: rtp_map}} =
+               Sdp.negotiate(dual, ["OPUS", "PCMU"])
+
+      # both common codecs kept; only the matched telephone-event PT (110@48000,
+      # not 126@8000) is retained in the send map
+      assert rtp_map == %{"0" => 0, "111" => 98, "110" => 100}
+    end
+
+    test "telephone-event PT matches the primary codec clock (PCMU → 8000)", %{dual: dual} do
+      assert {:ok, %{dtmf: true, dtmf_pt: 126, dtmf_clock: 8000, rtp_map: rtp_map}} =
+               Sdp.negotiate(dual, ["PCMU", "OPUS"])
+
+      assert rtp_map == %{"0" => 0, "111" => 98, "126" => 100}
+    end
+
+    test "only the matched telephone-event PT survives when a single codec is picked",
+         %{dual: dual} do
+      assert {:ok, %{dtmf: true, dtmf_pt: 110, dtmf_clock: 48_000, rtp_map: rtp_map}} =
+               Sdp.negotiate(dual, ["OPUS"])
+
+      assert rtp_map == %{"111" => 98, "110" => 100}
+    end
+  end
+
+  # ── answer_rtpmaps/2 ────────────────────────────────────────────────────────
+
+  describe "answer_rtpmaps/2" do
+    test "emits the telephone-event PT with its negotiated clock (G10)" do
+      neg = %{rtp_map: %{"111" => 98, "110" => 100}, dtmf_clock: 48_000}
+
+      assert Sdp.answer_rtpmaps(:audio, neg) == [
+               %{pt: 110, encoding: "telephone-event", clock: 48_000, channels: nil},
+               %{pt: 111, encoding: "opus", clock: 48_000, channels: 2}
+             ]
+    end
+
+    test "defaults the telephone-event clock to 8000 when unspecified" do
+      neg = %{rtp_map: %{"0" => 0, "101" => 100}}
+
+      assert Sdp.answer_rtpmaps(:audio, neg) == [
+               %{pt: 0, encoding: "PCMU", clock: 8000, channels: nil},
+               %{pt: 101, encoding: "telephone-event", clock: 8000, channels: nil}
+             ]
     end
   end
 
@@ -747,10 +838,14 @@ defmodule Mendooze.SdpTest do
       sdp_str = File.read!(Path.join(__DIR__, "SDP-chrome-142-offer.txt"))
 
       assert {:ok, [audio, video, text]} = Sdp.parse(sdp_str)
+      assert audio.supported? and video.supported?
 
       # numeric mids echoed verbatim
       assert audio.mid == "0"
       assert video.mid == "1"
+
+      # G10: telephone-event PTs collected per clock (110@48000, 126@8000)
+      assert audio.dtmf_pts == %{48_000 => 110, 8000 => 126}
 
       # candidates kept raw (host + tcp lines), never used for addressing
       assert Enum.any?(audio.candidates, &String.contains?(&1, "172.22.0.4 53521 typ host"))
@@ -765,9 +860,12 @@ defmodule Mendooze.SdpTest do
       assert audio.rtcp_mux == true
       assert video.rtcp_mux == true
 
-      # non-RTP text section is still returned (G9 handling is a later phase)
+      # G9: the non-RTP text section (m=text TCP/WSS t140) is returned as an
+      # unsupported stub so the answerer can decline it with port 0.
+      refute text.supported?
       assert text.type == :text
       assert text.protocol == "TCP/WSS"
+      assert text.raw_fmt == "t140"
     end
   end
 end

@@ -206,6 +206,34 @@ defmodule SIP.Transport do
     defp local_address(sock), do: Socket.local!(sock)
 
     @doc """
+    Remote (peer) address `{ip, port}` of a connection-oriented socket, or `nil`
+    when it cannot be determined (e.g. the socket just closed).
+
+    Connection-oriented transports (WSS/TLS/TCP) dial the proxy by name — for
+    WS/WSS the SIP resolver deliberately keeps the hostname and lets the socket
+    layer resolve it (SNI / cert validation), so the transport's stored `destip`
+    is a hostname string, not an IP. On the receive path the true source of an
+    incoming message is therefore the socket's peer, not that hostname; this
+    yields it as a real IP tuple, consistent with the sender address UDP passes.
+    """
+    def remote_address(%Socket.Web{socket: ssl}) when is_tuple(ssl) and elem(ssl, 0) == :sslsocket,
+      do: unwrap_peer(:ssl.peername(ssl))
+
+    def remote_address(%Socket.Web{socket: tcp}) do
+      port = if is_tuple(tcp), do: elem(tcp, 1), else: tcp
+      unwrap_peer(:inet.peername(port))
+    end
+
+    def remote_address(s) when is_tuple(s) and elem(s, 0) == :sslsocket,
+      do: unwrap_peer(:ssl.peername(s))
+
+    def remote_address(s) when is_port(s), do: unwrap_peer(:inet.peername(s))
+    def remote_address(_), do: nil
+
+    defp unwrap_peer({:ok, {ip, port}}), do: {ip, port}
+    defp unwrap_peer(_), do: nil
+
+    @doc """
     Process an incoming message inside a transport. Message must be complete.
     Parse it, try to find an associated transaction and if not, create an UAS
     transaction

@@ -311,7 +311,7 @@ defmodule Mendooze.ConnTest do
     assert audio.ip == "192.168.5.5"
     # only the codec common with the offer is advertised
     assert audio.codecs == ["PCMU"]
-    assert audio.dtmf_pt != nil
+    assert audio.dtmf_pts != %{}
   end
 
   test "the answer only covers the medias present in the offer" do
@@ -329,6 +329,55 @@ defmodule Mendooze.ConnTest do
     assert {:ok, answer} = Mendooze.set_remote_offer(conn, offer)
     assert {:ok, [%{type: :audio}]} = Sdp.parse(answer)
     refute answer =~ "m=video"
+  end
+
+  test "an offered media we don't carry is declined with a port-0 rejection (G9)" do
+    %{server: server} = start_media_server()
+
+    # audio-only connection receiving an audio+video offer
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio)
+
+    offer =
+      Sdp.build(%{
+        ip: "10.9.8.7",
+        medias: [
+          %{type: :audio, port: 40_000, codecs: ["PCMU"]},
+          %{type: :video, port: 40_002, codecs: ["H264"]}
+        ]
+      })
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, offer)
+
+    # G9: RFC 3264 §6 — one answer m= per offered m=; the unconfigured video is
+    # echoed with port 0 and the offered format list, keeping the m= line count.
+    assert {:ok, [aud, vid]} = Sdp.parse(answer)
+    assert aud.type == :audio and aud.port == 22_000
+    assert vid.type == :video and vid.port == 0
+    assert answer =~ "m=video 0 RTP/AVP 99"
+  end
+
+  test "an offered media with no common codec is declined with port 0, not a failure (G9)" do
+    %{server: server} = start_media_server()
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(), media: :audio_video, video_codec: "H264")
+
+    # video offers only VP8 — no common codec with our H264-only config
+    offer =
+      Sdp.build(%{
+        ip: "10.9.8.7",
+        medias: [
+          %{type: :audio, port: 40_000, codecs: ["PCMU"]},
+          %{type: :video, port: 40_002, codecs: ["VP8"]}
+        ]
+      })
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, offer)
+
+    assert {:ok, [aud, vid]} = Sdp.parse(answer)
+    assert aud.type == :audio and aud.port == 22_000
+    assert vid.port == 0
+    assert answer =~ "m=video 0 "
   end
 
   test "a DTLS offer is answered with DTLS when webrtc is allowed" do
@@ -430,7 +479,7 @@ defmodule Mendooze.ConnTest do
     # PCMU is fmtp-less (empty value) → no a=fmtp:0 line
     refute offer =~ "a=fmtp:0 "
 
-    assert {:ok, [%{type: :audio, codecs: ["PCMU"], dtmf_pt: 101}]} = Sdp.parse(offer)
+    assert {:ok, [%{type: :audio, codecs: ["PCMU"], dtmf_pts: %{8000 => 101}}]} = Sdp.parse(offer)
   end
 
   test "delegated H264 offer carries the server profile-level-id verbatim" do
@@ -471,7 +520,7 @@ defmodule Mendooze.ConnTest do
 
     assert {:ok, [audio]} = Sdp.parse(answer)
     assert audio.codecs == ["PCMU"]
-    assert audio.dtmf_pt == 101
+    assert audio.dtmf_pts == %{8000 => 101}
     assert answer =~ "a=rtpmap:0 PCMU/8000"
     assert answer =~ "a=fmtp:101 0-16"
   end

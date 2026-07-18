@@ -187,29 +187,35 @@ defmodule MediaServer.Mendooze.Conn do
 
   def handle_call({:set_remote_offer, sdp}, _from, state) do
     with {:ok, descs} <- Sdp.parse(sdp),
-         offered = Enum.map(descs, & &1.type),
-         descs = Enum.filter(descs, &(&1.type in state.medias)),
-         :ok <- ensure_media_present(descs),
+         # G9: keep every offered m= section; the ones we can answer with real
+         # media are the supported RTP sections of a configured media type. The
+         # rest (unknown type, non-RTP transport, disabled media) are echoed as
+         # port-0 rejections so the answer keeps one m= per offer m= (RFC 3264).
+         answerable = Enum.filter(descs, &answerable?(&1, state.medias)),
+         :ok <- ensure_media_present(answerable),
          _ =
            Logger.info(
              module: __MODULE__,
              cnx_tag: state.sess_tag,
              message:
-               "remote offer medias: #{inspect(offered)}, allowed: #{inspect(state.medias)}, " <>
-                 "answering: #{inspect(Enum.map(descs, & &1.type))}"
+               "remote offer medias: #{inspect(Enum.map(descs, & &1.type))}, " <>
+                 "allowed: #{inspect(state.medias)}, " <>
+                 "answering: #{inspect(Enum.map(answerable, & &1.type))}"
            ),
-         # answer only what the offer contains
-         state = %{state | medias: Enum.map(descs, & &1.type)},
-         {:ok, state} <- setup_local_security_for_offer(state, descs),
+         # open the receive plane only for what we actually answer
+         state = %{state | medias: Enum.map(answerable, & &1.type)},
+         {:ok, state} <- setup_local_security_for_offer(state, answerable),
          {:ok, state} <- start_receiving_all(state),
-         {:ok, state, negotiated} <- apply_remote_medias_negotiated(state, descs) do
+         {:ok, state, negotiated} <- apply_remote_medias_negotiated(state, answerable) do
       answer =
         Sdp.build(%{
           ip: state.local_ip,
           # D7: a=ice-lite is advertised in answers only (Elixip behaves
           # gateway-like there); emitted only for WebRTC (DTLS) answers.
           ice_lite: match?({:dtls, _, _}, state.local_crypto),
-          medias: Enum.map(descs, &answer_media_spec(state, negotiated, &1))
+          # every offered section, in order: a real answer for the negotiated
+          # ones, a port-0 rejection for the rest.
+          medias: Enum.map(descs, &answer_or_reject(state, negotiated, &1))
         })
 
       send(state.event_sink, {:ms_event, self(), :ice_connected})
@@ -526,20 +532,24 @@ defmodule MediaServer.Mendooze.Conn do
   # ── Remote side: security, sending, watchdog ───────────────────────────────
 
   defp apply_remote_medias(state, descs) do
-    descs = Enum.filter(descs, &(&1.type in state.medias))
+    descs = Enum.filter(descs, &answerable?(&1, state.medias))
 
     with :ok <- ensure_media_present(descs),
-         {:ok, state, _negotiated} <- apply_remote_medias_negotiated(state, descs) do
+         {:ok, state, negotiated} <- apply_remote_medias_negotiated(state, descs),
+         :ok <- ensure_negotiated(negotiated) do
       {:ok, state}
     end
   end
 
-  # Applies §9 steps for each remote media and returns the negotiation
-  # results (%{media => %{codecs:, dtmf:, rtp_map:}}) for answer building.
+  # Applies §9 steps for each remote media and returns the negotiation results
+  # (%{media => %{codecs:, dtmf:, rtp_map:, send_map:, ...}}) for answer
+  # building. A media with no common codec is skipped (G9: it becomes a port-0
+  # rejection), not a call failure; RPC errors still abort the whole offer.
   defp apply_remote_medias_negotiated(state, descs) do
     Enum.reduce_while(descs, {:ok, state, %{}}, fn desc, {:ok, st, acc} ->
       case apply_remote_media(st, desc) do
         {:ok, st, negotiated} -> {:cont, {:ok, st, Map.put(acc, desc.type, negotiated)}}
+        {:skip, st} -> {:cont, {:ok, st, acc}}
         {:error, _} = err -> {:halt, err}
       end
     end)
@@ -548,36 +558,41 @@ defmodule MediaServer.Mendooze.Conn do
   defp apply_remote_media(state, desc) do
     m = @media_int[desc.type]
 
-    with {:ok, negotiated} <-
-           Sdp.negotiate(desc, codecs(state, desc.type), dtmf?(state, desc.type)),
-         # never send a codec the server just filtered on receive (no-op when
-         # the server did not delegate, i.e. accepted[media] is nil)
-         send_map =
-           Sdp.restrict_send_map(
-             negotiated.rtp_map,
-             Map.get(state.proposed_recv, desc.type, %{}),
-             Map.get(state.accepted, desc.type)
-           ),
-         :ok <- set_rtp_properties(state, m, desc),
-         :ok <- set_remote_crypto(state, m, desc),
-         {:ok, _} <-
-           rpc(state, "EndpointStartSending", [
-             state.sess_id,
-             state.endpoint_id,
-             m,
-             desc.ip,
-             desc.port,
-             send_map
-           ]),
-         # the watchdog is armed last, once the answer has been processed
-         {:ok, _} <-
-           rpc(state, "EndpointStartRTPTimeout", [
-             state.sess_id,
-             state.endpoint_id,
-             m,
-             rtp_timeout_ms()
-           ]) do
-      {:ok, state, Map.put(negotiated, :send_map, send_map)}
+    case Sdp.negotiate(desc, codecs(state, desc.type), dtmf?(state, desc.type)) do
+      {:error, :no_common_codec} ->
+        {:skip, state}
+
+      {:ok, negotiated} ->
+        # never send a codec the server just filtered on receive (no-op when
+        # the server did not delegate, i.e. accepted[media] is nil)
+        send_map =
+          Sdp.restrict_send_map(
+            negotiated.rtp_map,
+            Map.get(state.proposed_recv, desc.type, %{}),
+            Map.get(state.accepted, desc.type)
+          )
+
+        with :ok <- set_rtp_properties(state, m, desc),
+             :ok <- set_remote_crypto(state, m, desc),
+             {:ok, _} <-
+               rpc(state, "EndpointStartSending", [
+                 state.sess_id,
+                 state.endpoint_id,
+                 m,
+                 desc.ip,
+                 desc.port,
+                 send_map
+               ]),
+             # the watchdog is armed last, once the answer has been processed
+             {:ok, _} <-
+               rpc(state, "EndpointStartRTPTimeout", [
+                 state.sess_id,
+                 state.endpoint_id,
+                 m,
+                 rtp_timeout_ms()
+               ]) do
+          {:ok, state, Map.put(negotiated, :send_map, send_map)}
+        end
     end
   end
 
@@ -701,6 +716,22 @@ defmodule MediaServer.Mendooze.Conn do
     end
   end
 
+  # G9: one answer m= per offered m=. A negotiated section gets a full answer
+  # spec; anything else (unsupported, media-type not configured, or no common
+  # codec — hence absent from `negotiated`) is declined with a port-0 rejection
+  # echoing the offered transport and format list verbatim (RFC 3264 §6).
+  defp answer_or_reject(state, negotiated, desc) do
+    if answerable?(desc, state.medias) and Map.has_key?(negotiated, desc.type) do
+      answer_media_spec(state, negotiated, desc)
+    else
+      reject_media_spec(desc)
+    end
+  end
+
+  defp reject_media_spec(desc) do
+    %{type: desc.type, protocol: desc.protocol, reject_fmt: desc.raw_fmt}
+  end
+
   defp answer_media_spec(state, negotiated, desc) do
     neg = Map.fetch!(negotiated, desc.type)
 
@@ -761,10 +792,9 @@ defmodule MediaServer.Mendooze.Conn do
 
     ordered = Enum.sort_by(neg.send_map, fn {pt, _code} -> String.to_integer(pt) end)
 
-    rtpmaps =
-      Enum.flat_map(ordered, fn {pt_str, code} ->
-        rtpmap_entry(String.to_integer(pt_str), Sdp.code_rtpmap(media, code))
-      end)
+    # G10: the telephone-event PT keeps its offered clock. Use the restricted
+    # send map (never a codec the server filtered on receive).
+    rtpmaps = Sdp.answer_rtpmaps(media, %{rtp_map: neg.send_map, dtmf_clock: neg.dtmf_clock})
 
     fmtp =
       for {pt_str, code} <- ordered,
@@ -990,6 +1020,19 @@ defmodule MediaServer.Mendooze.Conn do
 
   defp ensure_media_present([]), do: {:error, :no_common_media}
   defp ensure_media_present(_descs), do: :ok
+
+  # A section we can answer with real media (G9): a supported RTP media_desc
+  # whose type is one we are configured to handle. Stubs (supported?: false) and
+  # media types we don't carry are declined with a port-0 rejection instead.
+  defp answerable?(desc, medias),
+    do: Map.get(desc, :supported?, false) and desc.type in medias
+
+  # After negotiation, at least one media must have produced a real answer
+  # (G9: skipped :no_common_codec sections do not count).
+  defp ensure_negotiated(negotiated) when map_size(negotiated) == 0,
+    do: {:error, :no_common_codec}
+
+  defp ensure_negotiated(_negotiated), do: :ok
 
   defp rtp_timeout_ms() do
     Application.get_env(:elixip2, MediaServer.Mendooze, [])

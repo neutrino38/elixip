@@ -51,26 +51,29 @@ defmodule SIPMsg do
 
 
 
-	# Translate header name to atoms for usual headers
+	# Translate header name to atoms for usual headers. Header field names are
+	# case-insensitive (RFC 3261 §7.3.1), so match on the lower-cased name — some
+	# servers send e.g. "Call-Id"/"Cseq" (Glassfish) instead of "Call-ID"/"CSeq".
+	# Unknown headers keep their original spelling (the `_ -> name` fallback).
 	defp headername_to_atomkey(name) do
-		case name do
-			"From" -> :from
-			"To" -> :to
-			"Via" -> :via
-			"Call-ID" -> :callid
-			"User-Agent" -> :useragent
-			"Route" -> :route
-			"Record-Route" -> :recordroute
-			"Content-Length" -> :contentlength
-			"Content-Type" -> :contenttype
-			"CSeq" -> :cseq
-			"Authorization" -> :authorization
-			"Proxy-Authorization" -> :proxyauthorization
-			"Proxy-Authenticate" -> :proxyauthenticate
-			"WWW-Authenticate" -> :wwwauthenticate
-			"Expires" -> :expires
-			"Contact" -> :contact
-			"Supported" -> :supported
+		case String.downcase(name) do
+			"from" -> :from
+			"to" -> :to
+			"via" -> :via
+			"call-id" -> :callid
+			"user-agent" -> :useragent
+			"route" -> :route
+			"record-route" -> :recordroute
+			"content-length" -> :contentlength
+			"content-type" -> :contenttype
+			"cseq" -> :cseq
+			"authorization" -> :authorization
+			"proxy-authorization" -> :proxyauthorization
+			"proxy-authenticate" -> :proxyauthenticate
+			"www-authenticate" -> :wwwauthenticate
+			"expires" -> :expires
+			"contact" -> :contact
+			"supported" -> :supported
 			_ -> name
 		end
 	end

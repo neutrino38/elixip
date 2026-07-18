@@ -305,6 +305,41 @@ defmodule SIP.Test.Parser do
 			assert parsed_msg.dialog_id == {"8075639", "32645600-4c01-bc8f-670c-deac31158db8", "as424e7930"}
 		end
 
+		test "Parse a 488 response with non-canonical header casing (Glassfish)" do
+			# RFC 3261 §7.3.1: header field names are case-insensitive. Glassfish
+			# (IVeS WebRTC gateway) sends "Cseq" and "Call-Id" instead of the
+			# canonical "CSeq"/"Call-ID"; the parser must still extract them (a
+			# missing Call-ID previously failed the whole message with
+			# :invalid_dialog_id_no_callid).
+			msg =
+				"SIP/2.0 488 Not acceptable here\r\n" <>
+				"Record-Route: <sip:91.134.191.39;r2=on;lr=on>\r\n" <>
+				"Record-Route: <sip:91.134.191.39:443;transport=ws;r2=on;lr=on>\r\n" <>
+				"Content-Length: 0\r\n" <>
+				"To: <sip:90901@visioassistance.net>;tag=mrqw5t74-2vwy\r\n" <>
+				"Cseq: 2 INVITE\r\n" <>
+				"Via: SIP/2.0/WSS 172.22.0.2:37322;rport=40594;received=37.71.250.86;branch=z9hG4bK0994662352530380\r\n" <>
+				"From: \"Test User\"<sip:33970262546@visioassistance.net>;tag=8385659591\r\n" <>
+				"Call-Id: 7793171530617\r\n" <>
+				"Server: Glassfish_SIP_2.0.0\r\n\r\n"
+
+			{ code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
+				IO.puts("\n" <> errmsg)
+				IO.puts("Offending line #{lineno}: #{line}")
+				IO.puts("Error code #{code}")
+			end)
+
+			assert code == :ok
+			assert parsed_msg.method == false
+			assert parsed_msg.response == 488
+			# case-insensitive Call-Id / Cseq were extracted
+			assert parsed_msg.callid == "7793171530617"
+			assert parsed_msg.cseq == [2, :INVITE]
+			# transaction id derives from the topmost Via branch
+			assert parsed_msg.transid == "z9hG4bK0994662352530380"
+			assert parsed_msg.dialog_id == {"8385659591", "7793171530617", "mrqw5t74-2vwy"}
+		end
+
 		test "Parse an BYE then reserialize it then reparse it" do
 			{ code, msg } = File.read("test/SIP-BYE-LVP.txt")
 			assert code == :ok # Test if file containing the SIP message is loaded

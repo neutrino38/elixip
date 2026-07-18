@@ -600,12 +600,19 @@ Real-platform E2E (manual, elixipp against the dev platform):
 UAC-first ordering — phases 1–4 deliver the `uac_invite_webrtc` scenario;
 phase 5 completes the UAS side.
 
-> **Status (2026-07-17):** phase 1 ✅ and phase 2 ✅ implemented and committed;
-> `scenarios/uac_invite_webrtc.exs` written (phase 3's no-code deliverable).
-> Remaining: phase 3 Mockup convergence on `Sdp` + CI acceptance test (§2.8
-> 6–8), phase 4 real E2E, phase 5 UAS answer path (G3/G9/G10). Note the Mockup
-> Chrome-offer test (§2.8 test 6) depends on the G9/G10 `Sdp` changes nominally
-> scheduled in phase 5, so those `Sdp`-level bits move up with phase 3.
+> **Status (2026-07-18):** phases 1–3, 5a ✅ implemented and committed and
+> validated on real mendooze; phase 4 test 9 (loopback) ✅. Phase 5b ✅
+> (this change): G10 telephone-event clock matching (`dtmf_pts` per clock,
+> `negotiate/3` selects by primary-codec clock, `answer_rtpmaps/2` emits the
+> true clock) and G9 answer completeness (`Sdp.parse/1` returns every offered
+> m= in order — unsupported/non-RTP ones as `supported?: false` stubs — and
+> `Conn`/`Mockup` echo one answer m= per offer m=, declining the rest with a
+> port-0 rejection). The captured Chrome 142 offer now answers completely
+> (§2.8 test 6). **Remaining: phase 4 test 10** — real-platform call
+> `elixipp -c ives.json scenarios/uac_invite_webrtc.exs` (settles Q4/Q5 on the
+> IVeS gateway; ives.json is UDP:5060, adjust proxyuri for WSS and confirm the
+> destination account before dialing) and the optional P5 wiring (replace the
+> synthetic `:ice_connected` with the real `EndpointConnectedEvent` type 7).
 
 1. **Sdp — transport-plane build/parse**: candidates, mid, rtcp-fb,
    `UDP/TLS/RTP/SAVPF`, ice-lite (answer side), parse extensions (incl. §1.8

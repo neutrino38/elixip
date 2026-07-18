@@ -325,8 +325,7 @@ defmodule MediaServer.Mockup.Conn do
   # protocol/mux/mid/direction, setup:passive, plus session-level a=ice-lite for
   # WebRTC answers (the mock stands in for the ICE-lite IVeS gateway in CI).
   defp build_answer(state, descs) do
-    descs = Enum.filter(descs, &(&1.type in state.medias))
-    offer_dtls? = Enum.any?(descs, &match?({:dtls, _, _, _}, &1.crypto))
+    offer_dtls? = Enum.any?(descs, &match?({:dtls, _, _, _}, Map.get(&1, :crypto)))
 
     cond do
       offer_dtls? and state.webrtc_support == :no ->
@@ -339,15 +338,18 @@ defmodule MediaServer.Mockup.Conn do
         {ip, ip_str, port} = local_media(state)
         webrtc? = offer_dtls? and state.webrtc_support in [:yes, :if_offered]
 
-        medias =
-          Enum.flat_map(descs, fn desc ->
-            case Sdp.negotiate(desc, codecs_for(state, desc.type), desc.type == :audio) do
-              {:ok, neg} -> [answer_media_spec(state, desc, neg, port, ip_str, webrtc?)]
-              {:error, :no_common_codec} -> []
+        # G9: one answer m= per offered m=, in order; sections we can't answer
+        # (unsupported transport/type, disabled media, or no common codec) are
+        # declined with a port-0 rejection echoing the offered transport + fmt.
+        {medias, accepted} =
+          Enum.map_reduce(descs, 0, fn desc, count ->
+            case answer_or_reject(state, desc, port, ip_str, webrtc?) do
+              {:answer, spec} -> {spec, count + 1}
+              {:reject, spec} -> {spec, count}
             end
           end)
 
-        if medias == [] do
+        if accepted == 0 do
           {:error, :no_common_codec}
         else
           {:ok, Sdp.build(%{ip: ip, ice_lite: webrtc?, medias: medias})}
@@ -355,21 +357,25 @@ defmodule MediaServer.Mockup.Conn do
     end
   end
 
-  defp answer_media_spec(state, desc, neg, port, ip_str, webrtc?) do
-    # offerer PT numbering: derive the rtpmap entries from the negotiated map
-    # (offerer pt => codec code). No delegation here, so fmtp stays empty.
-    rtpmaps =
-      neg.rtp_map
-      |> Enum.sort_by(fn {pt, _code} -> String.to_integer(pt) end)
-      |> Enum.flat_map(fn {pt_str, code} ->
-        case Sdp.code_rtpmap(desc.type, code) do
-          :unknown ->
-            []
+  defp answer_or_reject(state, desc, port, ip_str, webrtc?) do
+    if Map.get(desc, :supported?, false) and desc.type in state.medias do
+      case Sdp.negotiate(desc, codecs_for(state, desc.type), desc.type == :audio) do
+        {:ok, neg} -> {:answer, answer_media_spec(state, desc, neg, port, ip_str, webrtc?)}
+        {:error, :no_common_codec} -> {:reject, reject_media_spec(desc)}
+      end
+    else
+      {:reject, reject_media_spec(desc)}
+    end
+  end
 
-          {enc, clock, ch} ->
-            [%{pt: String.to_integer(pt_str), encoding: enc, clock: clock, channels: ch}]
-        end
-      end)
+  defp reject_media_spec(desc) do
+    %{type: desc.type, protocol: desc.protocol, reject_fmt: Map.get(desc, :raw_fmt, [])}
+  end
+
+  defp answer_media_spec(state, desc, neg, port, ip_str, webrtc?) do
+    # offerer PT numbering (offerer pt => codec code); no delegation here, so
+    # fmtp stays empty. G10: the telephone-event PT keeps its offered clock.
+    rtpmaps = Sdp.answer_rtpmaps(desc.type, neg)
 
     base =
       %{

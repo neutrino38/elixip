@@ -91,18 +91,28 @@ defmodule MediaServer.Mendooze.Sdp do
   One parsed `m=` section of a remote SDP.
 
   `rtp_map` maps the remote payload types (strings) to Mendooze codec codes —
-  restricted to codecs we know. `dtmf_pt` is the remote telephone-event
-  payload type, if offered. `bandwidth` is the `b=AS:` value in kb/s, if
-  present.
+  restricted to codecs we know. `dtmf_pts` maps each offered telephone-event
+  clock rate to its payload type (Chrome offers one PT per clock, e.g.
+  `%{48000 => 110, 8000 => 126}`); empty when none is offered. `bandwidth` is
+  the `b=AS:` value in kb/s, if present.
+
+  `supported?` is `true` for a media we can answer with real media (an
+  `audio`/`video`/`text` section carried over an RTP profile). Sections we
+  cannot answer — an unknown media type or a non-RTP transport — are returned
+  as `supported?: false` stubs (G9), carrying only `type`, `port`, `protocol`
+  and `raw_fmt` so the answerer can emit a port-0 rejection (RFC 3264 §6).
+  `raw_fmt` is the offered format list verbatim, echoed back in that rejection.
   """
   @type media_desc :: %{
+          supported?: true,
           type: :audio | :video | :text,
           ip: String.t() | nil,
           port: non_neg_integer(),
           protocol: String.t(),
+          raw_fmt: [0..127] | String.t(),
           rtp_map: rtp_map(),
           codecs: [codec_name()],
-          dtmf_pt: non_neg_integer() | nil,
+          dtmf_pts: %{optional(non_neg_integer()) => non_neg_integer()},
           rtcp_mux: boolean(),
           direction: :sendrecv | :sendonly | :recvonly | :inactive,
           bandwidth: non_neg_integer() | nil,
@@ -111,6 +121,18 @@ defmodule MediaServer.Mendooze.Sdp do
           mid: String.t() | nil,
           rtcp_fb: %{optional(integer()) => [String.t()]},
           candidates: [String.t()]
+        }
+
+  @typedoc """
+  A `supported?: false` stub for an `m=` section we cannot answer (G9): only the
+  fields needed to echo a port-0 rejection are kept.
+  """
+  @type media_stub :: %{
+          supported?: false,
+          type: atom(),
+          port: non_neg_integer(),
+          protocol: String.t(),
+          raw_fmt: [0..127] | String.t()
         }
 
   @typedoc """
@@ -125,6 +147,10 @@ defmodule MediaServer.Mendooze.Sdp do
   (server-driven: the ordered `rtpmap` entries are emitted verbatim and each
   non-empty `:fmtp` string becomes an `a=fmtp:<pt> <string>` line). When both
   are present the server-driven fields win.
+
+  A **rejection** spec (`:reject_fmt` present) renders `m=<type> 0 <protocol>
+  <reject_fmt>` with no attributes (G9): a declined section that keeps the m=
+  line count of the offer (RFC 3264 §6).
   """
   @type rtpmap_entry :: %{
           required(:pt) => non_neg_integer(),
@@ -148,7 +174,8 @@ defmodule MediaServer.Mendooze.Sdp do
           optional(:direction) => :sendrecv | :sendonly | :recvonly | :inactive,
           optional(:mid) => String.t() | nil,
           optional(:candidates) => [candidate()],
-          optional(:rtcp_fb) => boolean()
+          optional(:rtcp_fb) => boolean(),
+          optional(:reject_fmt) => [0..127] | String.t()
         }
 
   # ── rtpMap for EndpointStartReceiving ───────────────────────────────────────
@@ -256,6 +283,13 @@ defmodule MediaServer.Mendooze.Sdp do
     medias
     |> Enum.reduce(sdp, fn mspec, acc -> ExSDP.add_media(acc, build_media(mspec)) end)
     |> to_string()
+  end
+
+  # G9: a port-0 rejection echoes the offered transport and format list verbatim
+  # (RFC 3264 §6). No connection/attributes/codec section — the peer just sees
+  # the media declined while the answer keeps one m= line per offered m=.
+  defp build_media(%{reject_fmt: fmt, type: type, protocol: protocol}) do
+    %ExSDP.Media{type: type, port: 0, protocol: protocol, fmt: fmt}
   end
 
   # Server-driven codec section: emit the accepted rtpmap entries and the fmtp
@@ -482,23 +516,27 @@ defmodule MediaServer.Mendooze.Sdp do
 
   # ── SDP parsing ─────────────────────────────────────────────────────────────
 
+  # RTP profiles we can answer with real media; anything else (TCP/WSS,
+  # UDP/DTLS/SCTP, …) yields an unsupported stub (G9).
+  @rtp_profiles ~w(RTP/AVP RTP/AVPF RTP/SAVP RTP/SAVPF UDP/TLS/RTP/SAVPF)
+
   @doc """
-  Parse a remote SDP into per-media descriptors. Only `audio`, `video` and
-  `text` sections are returned; session-level `c=`, crypto, ICE and direction
-  attributes are inherited by each media (media-level values win).
+  Parse a remote SDP into per-media descriptors.
+
+  Every `m=` section is returned in offer order (G9): `audio`/`video`/`text`
+  sections carried over an RTP profile become full `media_desc/0` maps
+  (`supported?: true`, session-level `c=`, crypto, ICE and direction inherited,
+  media-level values winning); any other section — an unknown media type or a
+  non-RTP transport — becomes a `media_stub/0` (`supported?: false`) so the
+  answerer can echo a port-0 rejection.
   """
-  @spec parse(String.t()) :: {:ok, [media_desc()]} | {:error, term()}
+  @spec parse(String.t()) :: {:ok, [media_desc() | media_stub()]} | {:error, term()}
   def parse(sdp_str) do
     case ExSDP.parse(sdp_str) do
       {:ok, sdp} ->
         session_ip = connection_ip(sdp.connection_data)
         session_attrs = sdp.attributes
-
-        medias =
-          sdp.media
-          |> Enum.filter(&(&1.type in [:audio, :video, :text]))
-          |> Enum.map(&parse_media(&1, session_ip, session_attrs))
-
+        medias = Enum.map(sdp.media, &parse_media_section(&1, session_ip, session_attrs))
         {:ok, medias}
 
       {:error, _reason} = err ->
@@ -506,20 +544,30 @@ defmodule MediaServer.Mendooze.Sdp do
     end
   end
 
+  defp parse_media_section(m, session_ip, session_attrs) do
+    if m.type in [:audio, :video, :text] and m.protocol in @rtp_profiles do
+      parse_media(m, session_ip, session_attrs)
+    else
+      %{supported?: false, type: m.type, port: m.port, protocol: m.protocol, raw_fmt: m.fmt}
+    end
+  end
+
   defp parse_media(m, session_ip, session_attrs) do
     attrs = m.attributes
     fmt = normalize_fmt(m.fmt)
     rtpmaps = for %ExSDP.Attribute.RTPMapping{} = rm <- attrs, do: rm
-    {rtp_map, codecs, dtmf_pt} = remote_rtp_map(m.type, fmt, rtpmaps)
+    {rtp_map, codecs, dtmf_pts} = remote_rtp_map(m.type, fmt, rtpmaps)
 
     %{
+      supported?: true,
       type: m.type,
       ip: connection_ip(m.connection_data) || session_ip,
       port: m.port,
       protocol: m.protocol,
+      raw_fmt: m.fmt,
       rtp_map: rtp_map,
       codecs: codecs,
-      dtmf_pt: dtmf_pt,
+      dtmf_pts: dtmf_pts,
       rtcp_mux: :rtcp_mux in attrs,
       direction: find_direction(attrs) || find_direction(session_attrs) || :sendrecv,
       bandwidth: as_bandwidth(m.bandwidth),
@@ -588,19 +636,22 @@ defmodule MediaServer.Mendooze.Sdp do
 
   # Map each offered payload type to a Mendooze codec code, keeping only the
   # codecs we know. Static PTs are recognized without an a=rtpmap line.
+  # Telephone-event PTs are collected by clock rate (G10) — Chrome offers one
+  # per clock (110@48000, 126@8000).
   defp remote_rtp_map(type, fmt, rtpmaps) do
     by_pt = Map.new(rtpmaps, &{&1.payload_type, &1})
 
-    Enum.reduce(fmt, {%{}, [], nil}, fn pt, {map, codecs, dtmf_pt} ->
+    Enum.reduce(fmt, {%{}, [], %{}}, fn pt, {map, codecs, dtmf_pts} ->
       case codec_name_for_pt(type, pt, Map.get(by_pt, pt)) do
-        :dtmf ->
-          {Map.put(map, Integer.to_string(pt), @dtmf_code), codecs, dtmf_pt || pt}
+        {:dtmf, clock} ->
+          {Map.put(map, Integer.to_string(pt), @dtmf_code), codecs,
+           Map.put_new(dtmf_pts, clock, pt)}
 
         {:ok, name, code} ->
-          {Map.put(map, Integer.to_string(pt), code), codecs ++ [name], dtmf_pt}
+          {Map.put(map, Integer.to_string(pt), code), codecs ++ [name], dtmf_pts}
 
         :unknown ->
-          {map, codecs, dtmf_pt}
+          {map, codecs, dtmf_pts}
       end
     end)
   end
@@ -620,12 +671,15 @@ defmodule MediaServer.Mendooze.Sdp do
     end
   end
 
-  defp codec_name_for_pt(type, _pt, %ExSDP.Attribute.RTPMapping{encoding: encoding}) do
+  defp codec_name_for_pt(type, _pt, %ExSDP.Attribute.RTPMapping{
+         encoding: encoding,
+         clock_rate: clock
+       }) do
     name = normalize_codec_name(type, String.upcase(encoding))
 
     cond do
       name == "TELEPHONE-EVENT" ->
-        :dtmf
+        {:dtmf, clock}
 
       match?({:ok, _}, codec_code(type, name)) ->
         {:ok, code} = codec_code(type, name)
@@ -739,12 +793,21 @@ defmodule MediaServer.Mendooze.Sdp do
   Intersect a remote media descriptor with our supported codec names
   (preference order = `our_names` order).
 
-  Returns the common codec names, whether telephone-event was retained, and
-  the `rtpMap` for `EndpointStartSending` — the remote payload-type numbering,
-  since these are the PTs the remote peer expects to receive.
+  Returns the common codec names, whether telephone-event was retained, the
+  selected telephone-event PT and its clock (`dtmf_pt`/`dtmf_clock`, nil when
+  declined), and the `rtpMap` for `EndpointStartSending` — the remote
+  payload-type numbering, since these are the PTs the remote peer expects to
+  receive.
   """
   @spec negotiate(media_desc(), [codec_name()], boolean()) ::
-          {:ok, %{codecs: [codec_name()], dtmf: boolean(), rtp_map: rtp_map()}}
+          {:ok,
+           %{
+             codecs: [codec_name()],
+             dtmf: boolean(),
+             dtmf_pt: non_neg_integer() | nil,
+             dtmf_clock: non_neg_integer() | nil,
+             rtp_map: rtp_map()
+           }}
           | {:error, :no_common_codec}
   def negotiate(desc, our_names, want_dtmf \\ true) do
     remote = MapSet.new(desc.codecs)
@@ -753,18 +816,43 @@ defmodule MediaServer.Mendooze.Sdp do
     if common == [] do
       {:error, :no_common_codec}
     else
-      dtmf = want_dtmf and desc.dtmf_pt != nil
+      {dtmf?, dtmf_pt, dtmf_clock} = select_dtmf(desc, common, want_dtmf)
 
       send_map =
         Map.filter(desc.rtp_map, fn {pt, code} ->
           Enum.any?(common, fn name ->
             {:ok, c} = codec_code(desc.type, name)
             c == code
-          end) or (dtmf and pt == Integer.to_string(desc.dtmf_pt))
+          end) or (dtmf? and pt == Integer.to_string(dtmf_pt))
         end)
 
-      {:ok, %{codecs: Enum.map(common, &String.upcase/1), dtmf: dtmf, rtp_map: send_map}}
+      {:ok,
+       %{
+         codecs: Enum.map(common, &String.upcase/1),
+         dtmf: dtmf?,
+         dtmf_pt: dtmf_pt,
+         dtmf_clock: dtmf_clock,
+         rtp_map: send_map
+       }}
     end
+  end
+
+  # G10: pick the telephone-event PT whose clock matches the primary (preferred)
+  # common audio codec — 8000 for G.711/G722, 48000 for OPUS — so DTMF rides at
+  # the same rate. Falls back to the 8000 Hz PT, then to any offered one.
+  defp select_dtmf(%{type: :audio, dtmf_pts: dtmf_pts}, [primary | _], true)
+       when map_size(dtmf_pts) > 0 do
+    clock = audio_clock(primary)
+    pt = Map.get(dtmf_pts, clock) || Map.get(dtmf_pts, 8000) || dtmf_pts |> Map.values() |> hd()
+    matched_clock = Enum.find_value(dtmf_pts, fn {c, p} -> if p == pt, do: c end)
+    {true, pt, matched_clock}
+  end
+
+  defp select_dtmf(_desc, _common, _want_dtmf), do: {false, nil, nil}
+
+  defp audio_clock(name) do
+    {_pt, _code, clock, _ch} = Map.fetch!(@audio_codecs, String.upcase(name))
+    clock
   end
 
   @doc """
@@ -943,6 +1031,39 @@ defmodule MediaServer.Mendooze.Sdp do
       {name, {_p, _c, clock}} -> {sdp_encoding(name), clock, nil}
       nil -> :unknown
     end
+  end
+
+  @doc """
+  Build the ordered answer `rtpmap` entries from a `negotiate/3` result, in the
+  offerer's payload-type numbering (RFC 3264). Shared by the delegated Mendooze
+  answer path and the Mockup gateway answer.
+
+  The telephone-event entry is emitted with the negotiated clock (G10), not the
+  code table's fixed 8000 Hz, so answering OPUS keeps its 48 kHz DTMF PT.
+  """
+  @spec answer_rtpmaps(:audio | :video | :text, %{
+          required(:rtp_map) => rtp_map(),
+          optional(:dtmf_clock) => non_neg_integer() | nil
+        }) :: [rtpmap_entry()]
+  def answer_rtpmaps(media, %{rtp_map: send_map} = neg) do
+    dtmf_clock = Map.get(neg, :dtmf_clock) || 8000
+
+    send_map
+    |> Enum.sort_by(fn {pt, _code} -> String.to_integer(pt) end)
+    |> Enum.flat_map(fn {pt_str, code} ->
+      pt = String.to_integer(pt_str)
+
+      cond do
+        code == @dtmf_code ->
+          [%{pt: pt, encoding: "telephone-event", clock: dtmf_clock, channels: nil}]
+
+        true ->
+          case code_rtpmap(media, code) do
+            :unknown -> []
+            {enc, clock, ch} -> [%{pt: pt, encoding: enc, clock: clock, channels: ch}]
+          end
+      end
+    end)
   end
 
   @doc """

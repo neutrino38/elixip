@@ -111,9 +111,13 @@ defmodule SIP.Trans.Timer do
     case ms do
       nil -> state # Nothing to do as timer is already cancelled
 
-      # Send message immediatly
+      # Send message immediatly. Deliver the same shape as the ms>0 branch
+      # (:erlang.start_timer/3 sends {:timeout, ref, msg}) so the transaction
+      # FSMs' `handle_info({:timeout, _tref, timer})` clauses match. A bare atom
+      # would crash handle_info — e.g. an ICT arming timer K with ms=0 on a
+      # reliable transport (407/ACK over WSS).
       0 ->
-        send(self(), timer_id)
+        send(self(), {:timeout, make_ref(), timer_id})
         state
 
       # Schedule timer

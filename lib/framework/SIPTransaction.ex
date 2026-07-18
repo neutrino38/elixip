@@ -254,6 +254,14 @@ alias SIP.NetUtils
 
 
       { code, _err } ->
+        # Optionally dump the raw bytes (inspected, so CRLF/empty frames are
+        # visible) to diagnose what the transport delivered — e.g. a WebSocket
+        # keep-alive (RFC 7118: ping "\r\n\r\n", pong "\r\n") or a peer sending
+        # non-canonical SIP. Gated by :dump_unparsed_sip (off by default, noisy).
+        if Application.get_env(:elixip2, :dump_unparsed_sip, false) do
+          Logger.warning("Unparseable SIP message (#{code}), raw bytes: #{inspect(sipmsgstr)}")
+        end
+
         code
     end
   end

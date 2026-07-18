@@ -17,6 +17,11 @@ config :logger, :file_log,
 config :elixip2,
   useragent: "Elixipp-0.2",
   optionkeepaliveperiod: 15,
+  # When true, an unparseable incoming SIP message is dumped verbatim (inspected,
+  # so CRLF/empty frames are visible) at warning level — useful to diagnose a
+  # peer sending non-canonical or malformed SIP. Off by default (noisy: e.g.
+  # WebSocket keep-alives would be logged).
+  dump_unparsed_sip: false,
   # TLS/WSS cipher suites (charlists). Mozilla "intermediate" profile — all
   # provide PFS via ephemeral ECDHE key exchange. Override here to restrict or
   # extend the negotiable suites; if unset, the default baked into the transport

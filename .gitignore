@@ -12,6 +12,9 @@ elixipp.log
 # Real (non-committed) scenario config holding actual credentials. Use
 # scenario-config.json as a template.
 /ives.json
+/ives-wss.json
 
 # Debug logs produced by scenario runs
 uac_invite.log
+uac.log
+webrtc.log

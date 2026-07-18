@@ -325,10 +325,7 @@ defmodule SIP.Session.RegisterUAC do
     SIP.Session.send_sip_request(sip_ctx, options, timeout)
   end
 
-  @spec start_options_keepalive(%SIP.Context{
-          optional(:dialogpid) => atom() | pid(),
-          optional(any()) => any()
-        }) :: any()
+  @spec start_options_keepalive(%SIP.Context{}) :: any()
   @doc """
   Start dialog OPTIONS keepalive in the dialog layer
   Dialog message will be sent automatically and if no

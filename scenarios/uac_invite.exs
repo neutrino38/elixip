@@ -90,7 +90,7 @@ defmodule UAC.InviteExample do
 
   # -------------------------------------------------------------------------------
   state start_play do
-    media_play("titi.mp4")
+    media_play("/home/ebuu/mediaserver/titi.mp4")
     goto(next)
   end
 
