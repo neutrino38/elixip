@@ -446,6 +446,8 @@ defmodule Mendooze.ConnTest do
       })
 
     assert {:error, :webrtc_not_supported} = Mendooze.set_remote_offer(conn, offer)
+    # the setup failure is also signalled asynchronously (scenario-capturable)
+    assert_receive {:ms_event, ^conn, {:media_error, :webrtc_not_supported}}
   end
 
   # ── Delegated SDP negotiation (enriched EndpointStartReceiving) ──────────────

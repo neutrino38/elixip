@@ -222,6 +222,14 @@ defmodule MediaMockupTest do
 
       conn = start_conn(media: :audio, webrtc_support: :no)
       assert {:error, :webrtc_not_supported} = Mockup.set_remote_offer(conn, offer)
+      # the failure is also signalled asynchronously as a capturable event
+      assert_receive {:ms_event, ^conn, {:media_error, :webrtc_not_supported}}
+    end
+
+    test "an unparseable remote answer emits a {:media_error, _} event" do
+      conn = start_conn(media: :audio, webrtc_support: :yes)
+      assert {:error, _} = Mockup.set_remote_answer(conn, "not an sdp")
+      assert_receive {:ms_event, ^conn, {:media_error, _reason}}
     end
   end
 

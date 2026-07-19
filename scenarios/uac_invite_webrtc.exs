@@ -48,7 +48,7 @@ defmodule UAC.InviteWebRTC do
   state calling do
     # webrtc: :yes makes the media layer build a browser-shaped WebRTC offer
     # (UDP/TLS/RTP/SAVPF, setup:actpass, ice, rtcp-mux, mid, candidates).
-    send_INVITE("sip:#{@callee_num}@#{sip_ctx.domain}", :mediaserver, timeout: 90, webrtc: :yes)
+    send_INVITE("sip:#{@callee_num}@#{sip_ctx.domain}", :mediaserver, timeout: 90, webrtc: :yes, media: [ :audio, :video ])
     goto(call_progress)
   end
 
@@ -64,7 +64,8 @@ defmodule UAC.InviteWebRTC do
       {code, rsp, _trans_pid, _dialog_pid} when code in [401, 407] ->
         send_auth_INVITE(rsp, "sip:#{@callee_num}@#{sip_ctx.domain}", :mediaserver,
           timeout: 90,
-          webrtc: :yes
+          webrtc: :yes,
+          media: [ :audio, :video ]
         )
 
         goto(loop, "#{code} Authentication Required")
@@ -93,8 +94,14 @@ defmodule UAC.InviteWebRTC do
       # ICE/DTLS came up (real EndpointConnectedEvent on mendooze, simulated on
       # the Mockup): the media path is ready.
       {:ms_event, _conn, :ice_connected} -> goto(start_play, "media connected")
+
+      # Media negotiation/setup failed (bad remote SDP, no common codec, a
+      # control RPC error…). Trace the cause and hang up instead of waiting for
+      # the timeout.
+      {:ms_event, _conn, {:media_error, reason}} ->
+        goto(no_media_hangup, "media negotiation failed: #{inspect(reason)}")
     after
-      10_000 -> scenario_failure("No media connectivity after 10s")
+      30_000 -> goto(no_media_hangup, "no media connectivity after 30s")
     end
   end
 
@@ -129,4 +136,14 @@ defmodule UAC.InviteWebRTC do
       4_000 -> scenario_failure("No 200 OK received for BYE")
     end
   end
+  # -------------------------------------------------------------------------------
+  state no_media_hangup do
+    send_BYE()
+    on_events do
+      {200, _bye_rsp, _trans_pid, _dialog_pid} -> scenario_failure("rcv_media timed out")
+    after
+      4_000 -> scenario_failure("No 200 OK received for BYE")
+    end
+  end
+
 end

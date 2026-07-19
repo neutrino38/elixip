@@ -979,6 +979,10 @@ defmodule MediaServer.Mendooze.Conn do
   # and stop — a later close_peer_connection on this pid is a no-op.
   defp fail(state, reason) do
     Logger.error("Mendooze.Conn #{state.sess_tag}: setup failed: #{inspect(reason)}")
+    # Async, scenario-capturable signal of the setup/negotiation failure (the
+    # failing call also returns {:error, reason} synchronously). Sent before
+    # teardown so the pid in the event is still the one the app knows.
+    send(state.event_sink, {:ms_event, self(), {:media_error, reason}})
     state = teardown(state)
     {:stop, :normal, {:error, reason}, state}
   end

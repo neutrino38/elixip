@@ -201,7 +201,7 @@ defmodule MediaServer.Mockup.Conn do
         {:reply, :ok, %{state | remote_sdp: sdp_str}}
 
       {:error, reason} ->
-        {:reply, {:error, reason}, state}
+        {:reply, {:error, reason}, media_error(state, reason)}
     end
   end
 
@@ -212,7 +212,7 @@ defmodule MediaServer.Mockup.Conn do
       schedule_ice_connected(state)
       {:reply, {:ok, answer}, %{state | remote_sdp: sdp_str, local_sdp: answer}}
     else
-      {:error, reason} -> {:reply, {:error, reason}, state}
+      {:error, reason} -> {:reply, {:error, reason}, media_error(state, reason)}
     end
   end
 
@@ -241,6 +241,13 @@ defmodule MediaServer.Mockup.Conn do
     end
 
     {:noreply, %{state | remote_ip: ip, remote_port: port}}
+  end
+
+  # Emit the async media-negotiation-failure event (Behaviour {:media_error, _}),
+  # mirroring MediaServer.Mendooze.Conn.fail/2 so CI scenarios can capture it.
+  defp media_error(state, reason) do
+    send(state.event_sink, {:ms_event, self(), {:media_error, reason}})
+    state
   end
 
   # Simulate ICE/DTLS connectivity checks taking a short, non-zero time.

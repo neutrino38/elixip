@@ -74,6 +74,13 @@ defmodule MediaServer do
           :ice_connected
           | :ice_failed
           | {:ice_candidate, candidate :: String.t()}
+          # Peer-connection setup / SDP negotiation failed (bad remote SDP,
+          # no common codec, a control RPC error…). `reason` carries the cause.
+          # The connection is torn down; the application should release the call
+          # (e.g. hang up). Complements the synchronous {:error, reason} the
+          # failing call already returns — this is the async, scenario-capturable
+          # signal.
+          | {:media_error, reason :: term()}
           # RTP inactivity watchdog fired: the peer stopped sending media
           # (emitted by adapters with media-loss detection, e.g. Mendooze)
           | :media_timeout
@@ -148,6 +155,7 @@ defmodule MediaServer do
         {:ms_event, conn, :ice_connected}
         {:ms_event, conn, :ice_failed}
         {:ms_event, conn, {:ice_candidate, candidate :: String.t()}}
+        {:ms_event, conn, {:media_error, reason :: term()}}
         {:ms_event, conn, :closed}
 
         # Player
