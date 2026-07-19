@@ -137,12 +137,22 @@ defmodule SIP.DialogImpl do
     %{req | to: to_uri, ruri: ruri}
   end
 
-  # Add the dialog route set (single Record-Route is stored verbatim).
-  defp add_route_set(req, %SIP.DialogImpl{routeset: rs}) when is_binary(rs) and rs != "" do
+  @doc false
+  # Add the dialog route set (RFC 3261 §12.2.1.1) to in-dialog requests. A single
+  # Record-Route is stored as a binary; a proxy chain (several Record-Route
+  # headers, e.g. kamailio + the WebRTC gateway) is stored as a list. Both must
+  # be copied verbatim onto the request — same value the transaction puts on the
+  # ACK — otherwise the request (BYE, re-INVITE…) bypasses the proxies and never
+  # reaches the far end. Public only as a test seam.
+  def add_route_set(req, %SIP.DialogImpl{routeset: rs}) when is_binary(rs) and rs != "" do
     Map.put(req, :route, rs)
   end
 
-  defp add_route_set(req, _state), do: req
+  def add_route_set(req, %SIP.DialogImpl{routeset: rs}) when is_list(rs) and rs != [] do
+    Map.put(req, :route, rs)
+  end
+
+  def add_route_set(req, _state), do: req
 
   defp set_remote_totag(req, %SIP.DialogImpl{totag: totag}) when is_binary(totag) do
     set_tag(req, :to, totag)
