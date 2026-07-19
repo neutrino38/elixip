@@ -41,14 +41,15 @@ In terms of capabilities, the emphasis will be on:
 - SIP.Scenario Scripting Engine: done
 - Interactive command elixpp for testing tools: done
 - Interactive display for elixipp: done
-- multple calls + max duration of test and final reporting: to be done
+- multple calls + max duration of test and final reporting: done
+- Interface with [Medooze Media server](https://github.com/neutrino38/mediaserver): done
 
-- Interface with Medooze: to be done (priority)
+## Roadmap
 
-
+- **kelixip**: coming up soon!
 - distributed cluster tech: later
 - **borderline**: later
-- **kelixip**: later
+
 
 ## The Domain Specific Language for SIP scenarios
 
