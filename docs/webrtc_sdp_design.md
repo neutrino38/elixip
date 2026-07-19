@@ -540,8 +540,9 @@ Open:
   `EndpointStartSending` destination, so ICE-lite ↔ ICE-lite connectivity is
   established. ✅
 - **P5** — a positive `EndpointConnectedEvent` (type 7) now fires per media on
-  first validated RTP + DTLS-up. The synthetic `:ice_connected` can be
-  replaced by it (client-side follow-up, not yet done — see phasing).
+  first validated RTP + DTLS-up. The synthetic `:ice_connected` has been
+  replaced by it: the poller decodes event 7 and the Conn emits a single
+  connection-level `:ice_connected` (`connected_notified`). ✅
 
 The real-platform E2E (phase 4) remains the acceptance test, but Q4/Q5 are no
 longer expected blockers.
@@ -611,8 +612,8 @@ phase 5 completes the UAS side.
 > (§2.8 test 6). **Remaining: phase 4 test 10** — real-platform call
 > `elixipp -c ives.json scenarios/uac_invite_webrtc.exs` (settles Q4/Q5 on the
 > IVeS gateway; ives.json is UDP:5060, adjust proxyuri for WSS and confirm the
-> destination account before dialing) and the optional P5 wiring (replace the
-> synthetic `:ice_connected` with the real `EndpointConnectedEvent` type 7).
+> destination account before dialing). The P5 wiring (real `:ice_connected`
+> driven by `EndpointConnectedEvent` type 7) is done.
 
 1. **Sdp — transport-plane build/parse**: candidates, mid, rtcp-fb,
    `UDP/TLS/RTP/SAVPF`, ice-lite (answer side), parse extensions (incl. §1.8

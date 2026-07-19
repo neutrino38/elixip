@@ -84,7 +84,7 @@ defmodule UAC.InviteExample do
     on_events do
       {:ms_event, _conn, :ice_connected} -> goto(start_play, "media connected")
     after
-      5_000 -> scenario_failure("No media received after 5s")
+      10_000 -> scenario_failure("No media received after 10s")
     end
   end
 

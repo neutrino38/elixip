@@ -51,14 +51,15 @@ defmodule Mendooze.EventPollerTest do
   # ── decode_event/1 ──────────────────────────────────────────────────────────
 
   describe "decode_event/1" do
-    test "decodes the six JSR309 event types" do
+    test "decodes the seven JSR309 event types" do
       cases = [
         {[1, "cx-1", "p-1"], {:player_end_of_file, "cx-1", "p-1"}},
         {[2, "cx-1", 4, 1, 0], {:external_fir, "cx-1", 4, :video}},
         {[3, "cx-1", "p-1"], {:player_started, "cx-1", "p-1"}},
         {[4, "cx-1", "r-1"], {:recorder_started, "cx-1", "r-1"}},
         {[5, "cx-1", "r-1", 1], {:recorder_stopped, "cx-1", "r-1", :duration}},
-        {[6, "cx-1", 4, 0, 0], {:endpoint_disconnected, "cx-1", 4, :audio}}
+        {[6, "cx-1", 4, 0, 0], {:endpoint_disconnected, "cx-1", 4, :audio}},
+        {[7, "cx-1", 4, 0, 0], {:endpoint_connected, "cx-1", 4, :audio}}
       ]
 
       for {param, expected} <- cases do

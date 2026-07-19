@@ -104,6 +104,9 @@ defmodule MediaServer.Mendooze.Conn do
       proposed_recv: %{},
       accepted: %{},
       status: :init,
+      # set once the server signals the first validated RTP packet
+      # (EndpointConnectedEvent, type 7) so :ice_connected is emitted only once
+      connected_notified: false,
       # sub-resources: ref => %{...}; tags "p-<n>"/"r-<n>" route server events
       res_seq: 0,
       players: %{},
@@ -176,7 +179,9 @@ defmodule MediaServer.Mendooze.Conn do
   def handle_call({:set_remote_answer, sdp}, _from, state) do
     with {:ok, descs} <- Sdp.parse(sdp),
          {:ok, state} <- apply_remote_medias(state, descs) do
-      send(state.event_sink, {:ms_event, self(), :ice_connected})
+      # :ice_connected is no longer emitted here: it now reflects the real media
+      # connectivity, surfaced when the server reports the first validated RTP
+      # packet (EndpointConnectedEvent, type 7 → handle_server_event below).
       {:reply, :ok, %{state | status: :active}}
     else
       {:error, reason} -> fail(state, reason)
@@ -218,7 +223,8 @@ defmodule MediaServer.Mendooze.Conn do
           medias: Enum.map(descs, &answer_or_reject(state, negotiated, &1))
         })
 
-      send(state.event_sink, {:ms_event, self(), :ice_connected})
+      # :ice_connected deferred to the first validated RTP packet (type 7);
+      # see the set_remote_answer path and handle_server_event below.
       {:reply, {:ok, answer}, %{state | status: :active}}
     else
       {:error, reason} -> fail(state, reason)
@@ -358,6 +364,29 @@ defmodule MediaServer.Mendooze.Conn do
     Logger.warning(module: __MODULE__, session: state.sess_tag, message: "timeout on #{media}")
     send(state.event_sink, {:ms_event, self(), :media_timeout})
     {:noreply, state}
+  end
+
+  # First validated RTP/SRTP packet received for this connection (server
+  # EndpointConnectedEvent, type 7). A decrypted SRTP packet means ICE + DTLS
+  # completed (WebRTC case); a plain RTP packet is simply the first media packet
+  # (non-WebRTC). The server fires it per media and re-arms it on each
+  # StartReceiving, so surface a single connection-level :ice_connected.
+  defp handle_server_event(
+         {:endpoint_connected, _tag, _ep, _media},
+         %{connected_notified: true} = state
+       ) do
+    {:noreply, state}
+  end
+
+  defp handle_server_event({:endpoint_connected, _tag, _ep, media}, state) do
+    Logger.info(
+      module: __MODULE__,
+      session: state.sess_tag,
+      message: "media connected on #{media}"
+    )
+
+    send(state.event_sink, {:ms_event, self(), :ice_connected})
+    {:noreply, %{state | connected_notified: true, status: :active}}
   end
 
   defp handle_server_event({:external_fir, _tag, _ep, media}, state) do

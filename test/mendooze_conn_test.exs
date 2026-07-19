@@ -100,10 +100,12 @@ defmodule Mendooze.ConnTest do
   end
 
   test "set_remote_answer starts sending with the remote map then arms the watchdog" do
-    %{server: server} = start_media_server()
+    %{server: server, stream: stream} = start_media_server()
 
     {:ok, conn} =
       Mendooze.create_peer_connection(server, self(), media: :audio, audio_codec: "PCMU")
+
+    assert_receive {:jsr309_call, "MediaSessionCreate", [sess_tag, _q]}
 
     {:ok, _offer} = Mendooze.get_local_offer(conn)
     assert :ok = Mendooze.set_remote_answer(conn, remote_answer())
@@ -115,7 +117,25 @@ defmodule Mendooze.ConnTest do
     assert_receive {:jsr309_call, "EndpointStartRTPTimeout", [3, 4, 0, timeout]}
     assert timeout > 0
 
+    # :ice_connected is no longer emitted on the answer: it now reflects the
+    # first validated RTP packet the server reports (EndpointConnectedEvent, 7)
+    refute_receive {:ms_event, ^conn, :ice_connected}, 100
+    send(stream, {:chunk, Jsr309FakeServer.event_frame([7, sess_tag, 4, 0, 0])})
     assert_receive {:ms_event, ^conn, :ice_connected}
+  end
+
+  test "the connection-level :ice_connected is emitted once across medias" do
+    %{server: server, stream: stream} = start_media_server()
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio_video)
+    assert_receive {:jsr309_call, "MediaSessionCreate", [sess_tag, _q]}
+
+    # first validated packet on audio then video: only one :ice_connected
+    send(stream, {:chunk, Jsr309FakeServer.event_frame([7, sess_tag, 4, 0, 0])})
+    assert_receive {:ms_event, ^conn, :ice_connected}
+
+    send(stream, {:chunk, Jsr309FakeServer.event_frame([7, sess_tag, 4, 1, 0])})
+    refute_receive {:ms_event, ^conn, :ice_connected}, 200
   end
 
   test "an answer without any common codec tears the connection down" do
@@ -286,10 +306,12 @@ defmodule Mendooze.ConnTest do
   # ── UAS: offer in, answer out ───────────────────────────────────────────────
 
   test "set_remote_offer answers with negotiated codecs on our local port" do
-    %{server: server} = start_media_server()
+    %{server: server, stream: stream} = start_media_server()
 
     {:ok, conn} =
       Mendooze.create_peer_connection(server, self(), audio_codec: ["PCMA", "PCMU"])
+
+    assert_receive {:jsr309_call, "MediaSessionCreate", [sess_tag, _q]}
 
     offer =
       Sdp.build(%{
@@ -304,6 +326,10 @@ defmodule Mendooze.ConnTest do
     assert_receive {:jsr309_call, "EndpointStartSending", [3, 4, 0, "10.9.8.7", 40_000, send_map]}
     assert send_map == %{"0" => 0, "101" => 100}
     assert_receive {:jsr309_call, "EndpointStartRTPTimeout", [3, 4, 0, _]}
+
+    # :ice_connected follows the first validated RTP packet, not the answer
+    refute_receive {:ms_event, ^conn, :ice_connected}, 100
+    send(stream, {:chunk, Jsr309FakeServer.event_frame([7, sess_tag, 4, 0, 0])})
     assert_receive {:ms_event, ^conn, :ice_connected}
 
     assert {:ok, [audio]} = Sdp.parse(answer)

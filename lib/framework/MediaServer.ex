@@ -64,10 +64,12 @@ defmodule MediaServer do
   @typedoc """
   Asynchronous events delivered to the `event_sink` pid as `{:ms_event, ref, event}`.
 
-  `:ice_connected` notifies the application that ICE/DTLS connectivity has been
-  established on a peer connection — i.e. media can now flow. It is emitted once
-  the remote SDP (answer or offer) has been negotiated and connectivity checks
-  succeed.
+  `:ice_connected` notifies the application that media is actually flowing on a
+  peer connection. It is emitted when the media server reports the first
+  validated incoming RTP packet: for a WebRTC connection a decrypted SRTP packet
+  means ICE and the DTLS handshake both completed; for a plain-RTP connection it
+  is simply the first received media packet. The adapter surfaces a single
+  connection-level `:ice_connected` even though the server signals it per media.
   """
   # PeerConnection
   @type event ::
@@ -174,10 +176,12 @@ defmodule MediaServer do
         # Server
         {:ms_event, server, :server_disconnected}
 
-    `:ice_connected` is the notification that ICE/DTLS connectivity has been
-    established on a peer connection (media can now flow). Applications wait for
-    it after providing the remote SDP via `set_remote_answer/2` or
-    `set_remote_offer/2`.
+    `:ice_connected` is the notification that media is actually flowing: it is
+    emitted on the first validated incoming RTP packet (a decrypted SRTP packet
+    for WebRTC — ICE + DTLS done; the first media packet for plain RTP).
+    Applications provide the remote SDP via `set_remote_answer/2` or
+    `set_remote_offer/2` and then wait for it; it may arrive during early media
+    (a 183 answer) before the call is fully answered.
 
     ## Teardown order
 

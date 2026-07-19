@@ -49,6 +49,8 @@ defmodule MediaServer.Mendooze.EventPoller do
              media :: :audio | :video | :text | integer()}
           | {:endpoint_disconnected, session_tag :: String.t(), endpoint_id :: integer(),
              media :: :audio | :video | :text | integer()}
+          | {:endpoint_connected, session_tag :: String.t(), endpoint_id :: integer(),
+             media :: :audio | :video | :text | integer()}
 
   def start_link(opts) do
     Task.start_link(__MODULE__, :run, [opts])
@@ -196,7 +198,7 @@ defmodule MediaServer.Mendooze.EventPoller do
   end
 
   defp translate_event([1, sess, player]) do
-    Logger.info([ module: __MODULE__, session: sess, event: :player_end_of_file ])
+    Logger.info(module: __MODULE__, session: sess, event: :player_end_of_file)
     {:ok, {:player_end_of_file, sess, player}}
   end
 
@@ -204,22 +206,31 @@ defmodule MediaServer.Mendooze.EventPoller do
     do: {:ok, {:external_fir, sess, endpoint_id, media_atom(media)}}
 
   defp translate_event([3, sess, player]) do
-    Logger.info([ module: __MODULE__, session: sess, event: :player_started ])
+    Logger.info(module: __MODULE__, session: sess, event: :player_started)
     {:ok, {:player_started, sess, player}}
   end
 
   defp translate_event([4, sess, recorder]) do
-    Logger.info([ module: __MODULE__, session: sess, event: :recorder_started ])
+    Logger.info(module: __MODULE__, session: sess, event: :recorder_started)
     {:ok, {:recorder_started, sess, recorder}}
   end
 
   defp translate_event([5, sess, recorder, reason]) do
-    Logger.info([ module: __MODULE__, session: sess, event: :recorder_stopped, reason: reason_atom(reason) ])
+    Logger.info(
+      module: __MODULE__,
+      session: sess,
+      event: :recorder_stopped,
+      reason: reason_atom(reason)
+    )
+
     {:ok, {:recorder_stopped, sess, recorder, reason_atom(reason)}}
   end
 
   defp translate_event([6, sess, endpoint_id, media, _role]),
     do: {:ok, {:endpoint_disconnected, sess, endpoint_id, media_atom(media)}}
+
+  defp translate_event([7, sess, endpoint_id, media, _role]),
+    do: {:ok, {:endpoint_connected, sess, endpoint_id, media_atom(media)}}
 
   defp translate_event(other) do
     Logger.warning("Mendooze.EventPoller: unknown event tuple: #{inspect(other)}")

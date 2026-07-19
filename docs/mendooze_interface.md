@@ -236,9 +236,16 @@ the DTLS handshake as client (Q4, resolved server-side).
 
 Remote security is set **before** `EndpointStartSending`; the watchdog is
 armed **after** the answer has been processed (doc §9.6), so no false
-`EndpointDisconnectedEvent` fires during ringing. Then send
-`{:ms_event, conn_pid, :ice_connected}` to `event_sink` — mendooze has no
-"media flowing" event; loss of media is what gets reported (event 6).
+`EndpointDisconnectedEvent` fires during ringing. `:ice_connected` is **not**
+sent here: it is now driven by the server `EndpointConnectedEvent` (type 7),
+fired on the first validated incoming RTP packet (§5.1) — a real "media
+flowing" signal.
+
+Because `set_remote_answer/2` runs on both a 183 (early media) and the 200 OK,
+`EndpointStartSending` is issued twice: this is intentional — each call primes
+the send path toward the peer `c=` (NAT priming, §7.1), and the server sends a
+short burst of valid RTP packets so a symmetric-RTP peer (Asterisk `nat=yes`)
+latches and starts sending, which is what makes event 7 fire.
 
 ### 4.6 `set_remote_offer/2` — UAS flow (doc §9.1)
 
@@ -258,8 +265,9 @@ Then build the answer SDP (`a=setup:active`). When the server delegated, the
 codec section is built from the accepted set honoring the **offerer's**
 payload-type numbering (RFC 3264): the encoding/clock come from the offer's
 payload type, the fmtp from the server. Arm the watchdog
-(`EndpointStartRTPTimeout`) and send `:ice_connected`. Return
-`{:ok, answer_sdp}`.
+(`EndpointStartRTPTimeout`) and return `{:ok, answer_sdp}`. `:ice_connected` is
+**not** emitted here — like the UAC path it follows the server
+`EndpointConnectedEvent` (type 7, §5.1).
 
 > Note: the server doc arms the watchdog *after the 200 OK is emitted on the
 > wire*. The behaviour has no "answer sent" callback, so we arm it when
@@ -442,6 +450,12 @@ numeric codes are a wire contract — never reordered):
 | 4 | `RecorderStartedEvent` | `(sessionTag, recorderTag)` | `{:ms_event, {conn, :recorder, ref}, :recorder_started}` |
 | 5 | `RecorderStoppedEvent` | `(sessionTag, recorderTag, reason)` | `{:ms_event, {conn, :recorder, ref}, {:recorder_stopped, reason}}` |
 | 6 | `EndpointDisconnectedEvent` | `(sessionTag, joinableId, media, role)` | `{:ms_event, conn_pid, :media_timeout}` (see §7) |
+| 7 | `EndpointConnectedEvent` | `(sessionTag, joinableId, media, role)` | `{:ms_event, conn_pid, :ice_connected}` (once per conn) |
+
+Event 7 fires on the **first validated incoming RTP packet** per media (a
+decrypted SRTP packet ⇒ ICE + DTLS done for WebRTC; the first media packet for
+plain RTP). The Conn deduplicates it to a single connection-level
+`:ice_connected` (`connected_notified`).
 
 Recorder stop reasons: `0 → :caller`, `1 → :duration`, `2 → :silence`,
 `3 → :dtmf` (2 and 3 not emitted yet server-side).
@@ -470,7 +484,7 @@ The six gaps of revision 1 are closed. Remaining limitations to design around:
 |---|------------|----------------------|
 | 1 | Recorder stop-on-silence / stop-on-DTMF (reasons 2, 3) not implemented | warn + ignore the opts; revisit later |
 | 2 | Trickle ICE is "lite" (RTP component, host/srflx, highest-priority wins; no connectivity checks) | fine for test-tool use; no `ice_servers` handling |
-| 3 | No "media flowing" event (only the loss event 6) | keep synthetic `:ice_connected` after `EndpointStartSending` |
+| 3 | ~~No "media flowing" event~~ **resolved**: `EndpointConnectedEvent` (event 7) fires on the first validated RTP packet | drive `:ice_connected` from event 7 (§5.1) |
 | 4 | Watchdog must be armed/disarmed explicitly | arm after answer (§4.5/§4.6); disarm (`timeoutMs=0`) on hold, re-arm on resume when re-INVITE support lands |
 
 ---
@@ -487,6 +501,25 @@ The six gaps of revision 1 are closed. Remaining limitations to design around:
 
 Applications should treat `{:ms_event, conn_pid, :media_timeout}` as media
 loss (hang up or retry per policy). The Mockup never emits it.
+
+`:ice_connected` is now driven by the server `EndpointConnectedEvent` (event 7)
+instead of being emitted synchronously from `set_remote_answer`/`set_remote_offer`.
+It therefore means **media is really flowing**, not just "SDP negotiated". The
+adapter deduplicates the per-media event to one connection-level signal.
+
+### 7.1 Symmetric-NAT priming (server-side)
+
+A symmetric-RTP peer (Asterisk `nat=yes`, "comedia") only sends media toward the
+**source** address of RTP it has received — not necessarily the SDP `c=`. Since
+`:ice_connected` now waits for the first received packet, the media server must
+send first to open the NAT pinhole and make the peer latch. On `SetRemotePort`
+(reached from `EndpointStartSending`) the server sends a short burst of **valid
+RTP packets** (12-byte RTPv2 header with SSRC, `NAT_PRIMING_BURST = 3`, spaced
+`NAT_PRIMING_INTERVAL_MS = 20` via the `RTPSession::Run` poll loop). This
+replaces the single 8-byte `rtpEmpty` stub, which a strict RTP stack could
+ignore. The burst is **plain-RTP only** (`!encript`); WebRTC connections prime
+via STUN checks and the DTLS ClientHello instead. Because `EndpointStartSending`
+runs on both the 183 and the 200 OK, priming happens as early as the 183.
 
 2. `recorder_opts` — document that `stop_on_silence`/`stop_on_dtmf` are
    accepted but currently inoperative with the Mendooze adapter.

@@ -107,7 +107,7 @@ defmodule UAC.InviteWebRTC do
 
   # -------------------------------------------------------------------------------
   state start_play do
-    media_play("/home/ebuu/mediaserveur/titi.mp4")
+    media_play("/home/ebuu/mediaserver/titi.mp4")
     goto(next)
   end
 
