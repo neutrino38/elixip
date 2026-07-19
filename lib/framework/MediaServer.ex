@@ -14,23 +14,52 @@ defmodule MediaServer do
 
   `:tc` / `:total_conversation` / `:audio_video_text` all select audio + video +
   real-time text (T.140) — "Total Conversation" (ITU-T F.703).
+
+  An explicit list of `media()` (e.g. `[:audio, :video, :text]` or `[:audio,
+  :text]`) may also be given: it selects exactly those m-lines, in that order.
+  Kind atoms are allowed as list elements too and are expanded in place.
   """
   @type media_kind ::
-          :audio | :video | :audio_video | :audio_video_text | :total_conversation | :tc
+          :audio
+          | :video
+          | :text
+          | :audio_video
+          | :audio_video_text
+          | :total_conversation
+          | :tc
+          | [media_kind()]
 
   @type media :: :audio | :video | :text
 
   @doc """
   Maps a `media_kind()` option value to the list of individual medias it
   selects. Shared by the adapters so they all accept the same `:media` values.
+
+  Accepts either a kind atom (`:tc`, `:audio_video`, …) or an explicit list of
+  medias/kinds. Lists are expanded (a `:tc` element becomes audio+video+text)
+  and de-duplicated while preserving order — the order determines the order of
+  the offered m-lines. Raises `ArgumentError` on an unknown selection.
   """
   @spec media_list(media_kind()) :: [media()]
   def media_list(:audio), do: [:audio]
   def media_list(:video), do: [:video]
+  def media_list(:text), do: [:text]
   def media_list(:audio_video), do: [:audio, :video]
 
   def media_list(kind) when kind in [:audio_video_text, :total_conversation, :tc],
     do: [:audio, :video, :text]
+
+  def media_list(list) when is_list(list) do
+    list
+    |> Enum.flat_map(&media_list/1)
+    |> Enum.uniq()
+  end
+
+  def media_list(other) do
+    raise ArgumentError,
+          "unknown media selection: #{inspect(other)} " <>
+            "(expected :audio | :video | :text | :audio_video | :tc, or a list of these)"
+  end
 
   @typedoc """
   Asynchronous events delivered to the `event_sink` pid as `{:ms_event, ref, event}`.
