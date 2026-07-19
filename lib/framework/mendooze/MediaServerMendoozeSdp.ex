@@ -538,7 +538,7 @@ defmodule MediaServer.Mendooze.Sdp do
   """
   @spec parse(String.t()) :: {:ok, [media_desc() | media_stub()]} | {:error, term()}
   def parse(sdp_str) do
-    case ExSDP.parse(sdp_str) do
+    case ExSDP.parse(normalize_fingerprint_hash(sdp_str)) do
       {:ok, sdp} ->
         session_ip = connection_ip(sdp.connection_data)
         session_attrs = sdp.attributes
@@ -548,6 +548,18 @@ defmodule MediaServer.Mendooze.Sdp do
       {:error, _reason} = err ->
         err
     end
+  end
+
+  # RFC 8122: the a=fingerprint hash-func names are registered lower-case, and
+  # the token is case-insensitive, but ExSDP only accepts the lower-case spelling
+  # and rejects the whole SDP otherwise. Some stacks emit it upper-case — the
+  # IVeS Glassfish gateway sends "a=fingerprint:SHA-256 …" (CryptoInfo.java) —
+  # so lower-case just the hash-func token (never the fingerprint value) before
+  # handing the SDP to ExSDP.
+  defp normalize_fingerprint_hash(sdp_str) do
+    Regex.replace(~r/^(a=fingerprint:)(\S+)/im, sdp_str, fn _whole, prefix, hash ->
+      prefix <> String.downcase(hash)
+    end)
   end
 
   defp parse_media_section(m, session_ip, session_attrs) do

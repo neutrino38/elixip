@@ -235,6 +235,30 @@ defmodule Mendooze.SdpTest do
       assert audio.ice == %{ufrag: "sess-ufrag", pwd: "sess-pwd-123456789012345"}
     end
 
+    test "fingerprint hash-func is accepted case-insensitively (Glassfish SHA-256)" do
+      # RFC 8122: the hash-func token is case-insensitive. The IVeS Glassfish
+      # gateway emits it upper-case ("SHA-256"); ExSDP only accepts lower-case,
+      # so Sdp.parse must normalize it or the whole answer fails to parse
+      # (previously :invalid_fingerprint → no :ice_connected).
+      fp = "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD"
+
+      sdp_str = """
+      v=0
+      o=- 1 1 IN IP4 172.16.0.1
+      s=-
+      c=IN IP4 172.16.0.1
+      t=0 0
+      m=audio 10664 UDP/TLS/RTP/SAVPF 8 0
+      a=rtpmap:8 PCMA/8000
+      a=rtpmap:0 PCMU/8000
+      a=fingerprint:SHA-256 #{fp}
+      a=setup:passive
+      """
+
+      assert {:ok, [audio]} = Sdp.parse(sdp_str)
+      assert audio.crypto == {:dtls, :passive, "sha-256", fp}
+    end
+
     test "text media with RED redundancy round-trips" do
       sdp_str =
         Sdp.build(%{
