@@ -46,6 +46,9 @@ defmodule Mendooze.SdpTest do
 
       assert sdp_str =~ "m=audio 22000 RTP/AVP 0 8 101"
       assert sdp_str =~ "c=IN IP4 192.168.1.10"
+      # RFC 4566 §5.9: a session-level t= line is mandatory (strict parsers such
+      # as the murillo grammar reject its absence with a 488).
+      assert sdp_str =~ "t=0 0"
       assert sdp_str =~ "a=rtpmap:101 telephone-event/8000"
       assert sdp_str =~ "a=fmtp:101 0-16"
 

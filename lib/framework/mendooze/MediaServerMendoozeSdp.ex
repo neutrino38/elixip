@@ -278,6 +278,12 @@ defmodule MediaServer.Mendooze.Sdp do
         address: addr
       )
       |> Map.put(:connection_data, cnx)
+      # RFC 4566 §5.9 mandates a session-level timing line, positioned between
+      # the connection/bandwidth fields and the media descriptions. "t=0 0" is
+      # the unbounded ("permanent") session every SIP UA and browser emits.
+      # Without it, strict parsers (e.g. the murillo SDP grammar in the IVeS
+      # Glassfish gateway) reject the whole offer with a 488.
+      |> Map.put(:timing, %ExSDP.Timing{start_time: 0, stop_time: 0})
       |> add_ice_lite(Map.get(spec, :ice_lite, false))
 
     medias
