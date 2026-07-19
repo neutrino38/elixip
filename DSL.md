@@ -567,6 +567,13 @@ automatically by `use SIP.Scenario`. It exposes the following helper macros:
   build the offer automatically. `options` is a keyword list:
     - `timeout:` — INVITE transaction timeout, in seconds (default 20)
     - `webrtc:` — `:no` for plain RTP, or a WebRTC flavor forwarded to the media server
+    - `media:` — which m-lines to offer (only used when `sdp_offer` is `:mediaserver`).
+      Default `:tc` (Total Conversation = audio + video + real-time text). Accepts either a
+      **kind atom** — `:audio`, `:video`, `:text`, `:audio_video`, or `:tc` /
+      `:total_conversation` / `:audio_video_text` — **or an explicit list** of medias for full
+      control over the set and order of m-lines, e.g. `media: [:audio, :video, :text]` or
+      `media: [:audio, :text]` (audio + text, no video). List elements may themselves be kind
+      atoms (expanded in place) and duplicates are dropped while order is preserved.
 - `send_auth_INVITE(resp, ruri, sdp_offer, options)` — resend the INVITE authenticated against a
   `401`/`407` challenge response `resp`. Same arguments as `send_INVITE`.
 - `process_invite_reply(resp, transaction_id)` — process a `200 OK` or a `183 Session Progress`
@@ -595,8 +602,9 @@ dialog (Call-ID, CSeq, From/To tags, remote target and route set are filled in a
 - `send_REFER(refer_to, opts \\ [])` — call transfer. `refer_to` is the target; `opts[:referred_by]`
   sets the `Referred-By` header.
 - `send_UPDATE(sdp_or_ms, opts \\ [])` — in-dialog UPDATE carrying an offer: `:mediaserver` (offer
-  built by the media server) or an explicit SDP binary, same convention as `send_INVITE`.
-- `send_reINVITE(sdp_or_ms, opts \\ [])` — re-INVITE to renegotiate media (same convention).
+  built by the media server) or an explicit SDP binary, same convention as `send_INVITE`. `opts`
+  accepts `:webrtc` and `:media` (same values as `send_INVITE`; default `:audio_video` here).
+- `send_reINVITE(sdp_or_ms, opts \\ [])` — re-INVITE to renegotiate media (same convention and opts).
 - `send_NOTIFY(event, body, opts \\ [])` — in-dialog NOTIFY (e.g. the implicit REFER subscription:
   `Event: refer`, sipfrag body).
 - `send_inDialog_OPTIONS()` — in-dialog OPTIONS keep-alive.
@@ -625,7 +633,8 @@ recent one — so the reply macros need not be passed the request.
 - `reply_invite_with_sdp(code, opts \\ [])` — reply `183` or `200` with an SDP answer **negotiated with
   the connected media server** (the scenario must have called `media_connect()`). A local `Contact` is
   added automatically. On a media failure the reply is `500 Media Server Error` (override with
-  `opts[:on_media_error] = {code, reason}`). Other `opts`: `:reason`, `:contact`, `:webrtc`, `:media`.
+  `opts[:on_media_error] = {code, reason}`). Other `opts`: `:reason`, `:contact`, `:webrtc`, and
+  `:media` (same values as `send_INVITE`, including an explicit list; default `:audio_video`).
 - `reply_invite_with_body(code, bodies, opts \\ [])` — reply with an **arbitrary body**. `bodies` is a
   raw binary (Content-Type `application/sdp`), a single `%{contenttype: ct, data: bin}` map, or a list
   of such maps. A multi-element list is serialized as a `multipart/mixed` body (boundary generated
