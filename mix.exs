@@ -29,6 +29,9 @@ defmodule SIPParser.MixProject do
     [
       {:logger_file_backend, "~> 0.0.12"},
       {:jason, "~> 1.4"},
+      # HTTP client for the HTTP.Session scenario mixin (http_GET). Req 0.6 is
+      # the current line; it brings Finch/NimblePool for connection pooling.
+      {:req, "~> 0.6"},
       # Fork adding active mode for WebSocket (delivers {:web, socket, data} to the owner)
       {:socket2, github: "neutrino38/elixir-socket", branch: "feat/active-ws"},
       {:ex_sdp, "~> 1.1.1"},

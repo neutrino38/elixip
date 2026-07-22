@@ -200,6 +200,18 @@ Those events are formatted as follow:
 { :ms_event, <pid of mediaserver>, <event>}
 ```
 
+**HTTP reply events** are delivered by the `http_GET` macro (see the
+**HTTP.Session** helper below), one per request, tagged so several concurrent
+requests can be told apart:
+
+```Elixir
+{ <tag>, {:ok, %Req.Response{}} }
+{ <tag>, {:error, reason} }   # reason :: :timeout | Req exception | {:crash, r}
+```
+
+`<tag>` is whatever term you passed to `http_GET`; pick one distinctive enough
+not to collide with other events matched in the same `on_events`.
+
 ## media macros
 
 `use SIP.Scenario` pulls in `SIP.Session.Media`, which exposes the media macros:
@@ -646,3 +658,55 @@ recent one — so the reply macros need not be passed the request.
 
 A scenario **never** replies `100 Trying` or the `487` after a CANCEL itself — both are automatic
 (see the *incoming calls* section above).
+
+### HTTP.Session
+
+This module lets a scenario issue outbound **HTTP** requests (e.g. to a
+provisioning / policy backend) without ever blocking the finite-state machine.
+It is **opt-in**: add `use HTTP.Session` to the scenario. It exposes a single
+macro:
+
+- `http_GET(url, timeout, tag)` — fire an asynchronous HTTP GET.
+    - `url` — the target URL (binary).
+    - `timeout` — the **total** budget of the operation, in **milliseconds**.
+    - `tag` — an atom (or any term) discriminating several concurrent requests.
+
+Like the `SIP.Session.*` macros, `http_GET` operates on the implicit `sip_ctx`:
+it sets `sip_ctx.lasterr` to `:ok` and returns the updated context, so a `goto`
+may follow it directly. But unlike them it **does not** carry the result — the
+request runs in the background and its outcome is delivered **later**, as a
+single tagged message to the scenario mailbox, collected in `on_events`:
+
+```Elixir
+{tag, {:ok, %Req.Response{}}}
+{tag, {:error, reason}}   # reason :: :timeout | Req exception | {:crash, r}
+```
+
+```Elixir
+use HTTP.Session
+
+state query_backend do
+  http_GET("https://backend/api/x", 10_000, :provisioning)
+  on_events do
+    {:provisioning, {:ok, %Req.Response{status: 200, body: b}}} ->
+      appdata_set(:data, b); goto next, "backend OK"
+    {:provisioning, {:ok, %Req.Response{status: c}}} ->
+      scenario_failure("backend HTTP #{c}")
+    {:provisioning, {:error, :timeout}} ->
+      scenario_failure("backend timeout")
+    {:provisioning, {:error, r}} ->
+      scenario_failure("backend error: #{inspect(r)}")
+  end
+end
+```
+
+**Guarantees.** `http_GET` always produces **exactly one** `{tag, …}`
+message, even on timeout — so the `on_events` needs **no** `after` clause for
+that case; the timeout arrives as an `{:error, :timeout}` event. Internally a
+disposable *coordinator* process owns a monitored *worker* running `Req.get/2`
+and arbitrates the timeout with a single `receive`/`after`. On timeout the
+coordinator **kills** the worker, which cancels the in-flight request (its
+pooled connection is reclaimed) so **no late reply can ever pollute a later
+`on_events`**. The blocking wait lives entirely in the throwaway coordinator,
+never in the scenario. See `scenarios/http_get_example.exs` for a full example
+and the `HTTP.Session` module doc for the internals.
