@@ -628,3 +628,14 @@ sera bâti sur base elixip/kelixip. Les points d'extension sont les **modules**
 | Fonction `presence`                  | **futur** — squelette `SIP.Session.Presence` |
 | Persistance usrloc / registrar en BDD | **futur** |
 | Haute disponibilité (cluster 2-3)    | **futur**  |
+
+> **La fonction `calls` (B2BUA) est la suite logique du basic**, mais relève d'une
+> **version future** : c'est un chantier de cadrage à part entière, pas une simple
+> extension. Contrairement au registrar (une transaction, une réponse), le B2BUA
+> gère **deux tronçons de dialogue** (entrant + sortant) que le scénario doit
+> relayer lui-même (pas de bridging automatique façon `t_relay()`/`Dial()`), avec
+> tout ce que cela implique : macro de création du second dialogue, discrimination
+> des legs, relais requêtes/réponses, couplage média inter-legs, gestion des cas
+> d'erreur/annulation sur chaque leg. La conception démarre dans
+> `docs/b2bua_module.md` (aujourd'hui à l'état d'ébauche) et devra être menée avant
+> toute implémentation.
