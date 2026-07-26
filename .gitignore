@@ -15,6 +15,11 @@ elixipp.log
 /ives.json
 /ives-wss.json
 
+# Real (non-committed) auth_db live-test config (DB host/user/password). Use
+# apps/kelixip/test/fixtures/authdb.json.example as a template.
+authdb.json
+/apps/kelixip/authdb.json
+
 # Debug logs produced by scenario runs
 uac_invite.log
 uac.log

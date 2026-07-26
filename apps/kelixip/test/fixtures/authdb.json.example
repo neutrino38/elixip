@@ -1,0 +1,15 @@
+{
+  "host": "db.dev.ives.fr",
+  "port": 3306,
+  "database": "kamailio",
+  "username": "kamailio",
+  "password": "CHANGE_ME",
+  "table": "subscriber",
+  "ha1_column": "ha1",
+  "user_column": "username",
+  "domain_column": "domain",
+  "password_hash": "md5",
+
+  "realm": "example.com",
+  "testuser": "alice"
+}
