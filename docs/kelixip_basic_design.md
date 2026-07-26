@@ -78,12 +78,12 @@ test tool keeps working unchanged (it does not start the `Kelix.Application`).
 
 ### 2.1 Root application
 
-Add `Kelix.Application` (`use Application`) wired in `mix.exs` as
-`mod: {Kelix.Application, []}` **only for the kelixip release** (see §12) — the
-`:elixip2` app itself stays library-style so `elixipp`/`mix scenario`/tests keep
-their imperative bootstrap. The release's `application/0` env selects kelixip
-mode; `Application.start/2` reads `--config` (the TOML path) from an env var set
-by the boot script / systemd unit.
+`Kelix.Application` (`use Application`) lives in the **`apps/kelixip`** app
+(umbrella, §12.0) with `mod: {Kelix.Application, []}` in that app's `mix.exs` — so
+it starts only for the kelixip server. The shared **`apps/elixip`** library has no
+`Application` callback, so `elixipp`/`mix scenario`/tests keep their imperative
+bootstrap (`Runner.bootstrap_stack/0`). `Application.start/2` reads `--config`
+(the TOML path) from an env var set by the boot script / systemd unit.
 
 ```
 Kelix.Application  (use Application)
@@ -785,11 +785,14 @@ store (§6). `status/0` aggregates uptime + counters + pool state.
 
 ### 10.2 The `kelictl` CLI
 
-A **separate escript** installed as **`/usr/sbin/kelictl`** (spec §9.1),
-distinct from `elixipp`. It is a *local client* of the running node over
-**Erlang distribution / RPC**: it reads `server.node_name` + the cookie, does
+`kelictl` is **a command shipped inside the `kelixip` release** (not a separate
+escript — decided 2026-07-26, see §12), installed as **`/usr/sbin/kelictl`**
+(spec §9.1). It is a *local client* of the running node over **Erlang
+distribution / RPC**: it reads `server.node_name` + the cookie, does
 `:rpc.call(node, Kelix.Control, fun, args)`, and renders the result (reusing the
-Owl table rendering for `monitor`). It runs no SIP stack. Because it only calls
+Owl table rendering for `monitor`). The CLI logic (arg parsing, rendering) lives
+in a `Kelix.Control.CLI` module compiled into the release; a `bin/kelictl`
+overlay forwards `argv` to it. It runs no SIP stack. Because it only calls
 `Kelix.Control` (and the registered `Kelix.Mod.<Name>.Control`), parity with REST
 is automatic — adding a command = add the function + wire two thin frontals.
 
@@ -835,13 +838,49 @@ Spec §8.2. `:telemetry` events emitted at key points, exported as Prometheus.
 
 ## 12. Packaging
 
-Spec §7. Delivered as an **OTP release** (`mix release`, embedded ERTS), not an
-escript — a properly managed service.
+### 12.0 Repository structure — umbrella, 3 apps (decided 2026-07-26)
 
-- `mix.exs`: add a `releases:` section (`kelixip`) with
-  `mod: {Kelix.Application, []}` active for the release, `include_erts: true`,
-  a `rel/env.sh` exporting `RELEASE_NODE` (= `server.node_name`) and the cookie,
-  and `TOML config path` from an env var.
+One git repo, restructured into a Mix **umbrella** so each artifact carries only
+its own dependencies and the singular-`escript:` limitation disappears:
+
+```
+mix.exs                     # umbrella root (aggregate only)
+apps/
+  elixip/    # shared SIP stack + DSL + media = LIBRARY
+             #   deps: jason, req, socket2, ex_sdp, xmlrpc, logger_file_backend
+  elixipp/   # test tool → escript `elixipp`; depends on :elixip; + owl
+  kelixip/   # server → release `kelixip` (+ `kelictl`); depends on :elixip;
+             #   + toml, bandit, plug, telemetry*, myxql, (syslog)
+```
+
+- `elixipp` stays **lean** — it never pulls kelixip's HTTP/DB deps.
+- `kelixip` owns the server, its deps, and `kelictl`.
+- The middle `elixip` library depends on neither tool nor server.
+
+Build/run each artifact:
+
+```bash
+mix compile                                          # all three apps
+cd apps/elixipp && mix escript.build                 # -> elixipp
+cd apps/kelixip && MIX_ENV=prod mix release kelixip  # -> release + bin/kelixip + bin/kelictl
+```
+
+> Migration note: this is a one-time refactor moving today's `lib/` into
+> `apps/elixip/lib` (framework + DSL) and `apps/elixipp/lib` (the `Elixipp.CLI`
+> tool), and creating `apps/kelixip`. It is prerequisite work for P0 (§15) — the
+> `elixipp` escript and `mix test` must keep working throughout.
+
+### 12.1 The `kelixip` release & FHS
+
+Spec §7. The server is delivered as an **OTP release** (`mix release kelixip`,
+embedded ERTS), not an escript — a properly managed service. **`kelictl` ships
+inside this release** as a `bin/` command (option B, §10.2): a `Kelix.Control.CLI`
+module + a `bin/kelictl` overlay that RPCs the running node — no second escript.
+
+- `apps/kelixip/mix.exs`: a `releases:` section (`kelixip`) with
+  `mod: {Kelix.Application, []}`, `include_erts: true`, a `rel/env.sh` exporting
+  `RELEASE_NODE` (= `server.node_name`) and the cookie, the `bin/kelictl` overlay,
+  and the TOML config path from an env var.
 - **FHS layout** (spec §7): `/etc/kelixip/{config.toml,domains.toml,tls/}`,
   `/usr/share/kelixip/` (default scripts, package data), `/usr/lib/kelixip/`
   (release + `modules/`), `/var/lib/kelixip/` (mutable scripts, future usrloc),
@@ -884,6 +923,11 @@ hand-rolled UDP client (no heavy dep).
 
 Flagged in the spec as **"à faire"**:
 
+0. **Umbrella restructure (prerequisite, §12.0).** Move today's single `:elixip2`
+   app into an umbrella: `apps/elixip` (framework + DSL, library), `apps/elixipp`
+   (the `Elixipp.CLI` escript), `apps/kelixip` (server release + `kelictl`). Split
+   deps accordingly. The `elixipp` escript, `mix scenario` and `mix test` must
+   keep working throughout. This lands before P0.
 1. **Pull domain config out of UAS INVITE scenarios** (spec §4, §14). Today
    `scenarios/uas_invite.exs` carries its own `config domains:` and the factory
    reads it. With kelixip's declarative dispatch the domain + routing come from
@@ -923,7 +967,7 @@ before the features that need them.
 
 | Phase | Deliverable | Depends on |
 |---|---|---|
-| **P0 — OTP skeleton** | `Kelix.Application` + supervision tree; supervise registries/ConfigRegistry/listeners; `mix release` builds; boots with an empty config | — |
+| **P0 — Umbrella + OTP skeleton** | restructure into `apps/elixip` + `apps/elixipp` + `apps/kelixip` (§12.0, keep `elixipp`/tests green); `Kelix.Application` + supervision tree; supervise registries/ConfigRegistry/listeners; `mix release kelixip` builds; boots with an empty config | — |
 | **P1 — Config** | `toml` dep; `Kelix.Config` (infra→app env, per-listener certs); `Kelix.Domains` + `Kelix.DialPlan` compiler; atomic reload plumbing (no CLI yet) | P0 |
 | **P2 — Dispatch** | `Kelix.Router` (domain→function→script, 404/405/503); wire as ConfigRegistry processing module; `Kelix.ScriptRegistry` (version-suffixed modules + refcount) + load-time contract check; extract `Kelix.InstancePool` (shared quota, per-domain) | P1 |
 | **P5 — Module system** | `Kelix.Module` behaviour + `Kelix.ModuleSupervisor` + facade resolution + module control-surface registration (REST/CLI, §8.1) | P1 (config) |
@@ -931,7 +975,7 @@ before the features that need them.
 | **P4 — Auth** | `Kelix.Secret` + `Kelix.Nonce` (stateless HMAC) + `NonceCache`; `SIP.Auth` `qop=auth`; realm=domain (alias→nominal); remove stateful nonce; `Kelix.Mod.AuthDb` (HA1 lookup + 401/accept/reject) | P3, P5 |
 | **P6 — Media pool** | `Kelix.MediaPool` (round-robin, health-check, failover, toggle) over the Mendooze adapter | P0 |
 | **P6b — radius_billing** | `Kelix.Mod.RadiusBilling` | P5 |
-| **P7 — Control layer** | `Kelix.Control` (all verbs); `kelictl` escript over RPC; versioned/notify reload; graceful shutdown | P2–P6 |
+| **P7 — Control layer** | `Kelix.Control` (all verbs); `kelictl` release command over RPC (`Kelix.Control.CLI` + `bin/kelictl` overlay); versioned/notify reload; graceful shutdown | P2–P6 |
 | **P8 — REST API** | `bandit`+`plug` frontal; token/mtls auth; parity with CLI | P7 |
 | **P9 — Observability** | telemetry events + Prometheus exporter; `/metrics` + `/health`; per-domain labels | P2+ |
 | **P10 — Packaging (RPM d'abord)** | **produire le paquet RPM kelixip pour Alma Linux 9** : `mix release` (ERTS embarqué) → `.spec` (`%files` sur le layout FHS §12, `%pre`/`%post` créant l'utilisateur `kelixip` + l'unité systemd, `%config(noreplace)` sur `/etc/kelixip/*.toml`) → `rpmbuild`/`fpm` en CI, `module_dir` root-owned. Deb Ubuntu ensuite, même release. | P0–P9 |
