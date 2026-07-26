@@ -67,10 +67,10 @@ What is **missing** and must be built for kelixip basic (this is the real work):
 7. **No loadable module system, no media pool, no control layer, no metrics, no
    release packaging.** **§8–§12.**
 
-kelixip is delivered as a **new top namespace `Kelixip.*`** layered on top of
+kelixip is delivered as a **new top namespace `Kelix.*`** layered on top of
 `SIP.*` / `MediaServer.*`, plus a small number of surgical changes inside the
 framework (nonce, `qop`, connected-transport response routing). The `elixipp`
-test tool keeps working unchanged (it does not start the `Kelixip.Application`).
+test tool keeps working unchanged (it does not start the `Kelix.Application`).
 
 ---
 
@@ -78,38 +78,40 @@ test tool keeps working unchanged (it does not start the `Kelixip.Application`).
 
 ### 2.1 Root application
 
-Add `Kelixip.Application` (`use Application`) wired in `mix.exs` as
-`mod: {Kelixip.Application, []}` **only for the kelixip release** (see §12) — the
+Add `Kelix.Application` (`use Application`) wired in `mix.exs` as
+`mod: {Kelix.Application, []}` **only for the kelixip release** (see §12) — the
 `:elixip2` app itself stays library-style so `elixipp`/`mix scenario`/tests keep
 their imperative bootstrap. The release's `application/0` env selects kelixip
 mode; `Application.start/2` reads `--config` (the TOML path) from an env var set
 by the boot script / systemd unit.
 
 ```
-Kelixip.Application  (use Application)
-└── Kelixip.Supervisor            (:one_for_one, root)
-    ├── Kelixip.Config             — GenServer: parsed config.toml (read-only after boot)
+Kelix.Application  (use Application)
+└── Kelix.Supervisor            (:one_for_one, root)
+    ├── Kelix.Config             — GenServer: parsed config.toml (read-only after boot)
     ├── Registry.SIP.Transac       ┐  (the 3 stack registries, today started
     ├── Registry.SIPTransport      │   ad-hoc by bootstrap_stack/0 — now supervised)
     ├── Registry.SIPDialog         ┘
     ├── SIP.Resolver               — DNS defaults (was inside Selector.start/0)
     ├── SIP.Session.ConfigRegistry — kept, but demoted to a low-level primitive
     │                                 the Router configures (see §4)
-    ├── Kelixip.Secret             — Agent: ephemeral server_secret (boot-random)  §7
-    ├── Kelixip.NonceCache         — ETS owner: nonce→nc, TTL=max_age             §7
-    ├── Kelixip.ModuleSupervisor   — :one_for_one, loadable .beam services         §8
-    ├── Kelixip.MediaPool          — GenServer: MCU pool, health-check, failover   §9
-    ├── Kelixip.ScriptRegistry     — GenServer: loaded scenario versions + refcount §5
-    ├── Kelixip.Registrar.Store    — usrloc (Registry or ETS), AOR-keyed           §6
-    ├── Kelixip.Domains            — GenServer: hot-reloadable domains.toml (atomic) §4
-    ├── Kelixip.Router             — stateless dispatch; reads Domains + ScriptRegistry §4
-    ├── Kelixip.InstanceSupervisor — DynamicSupervisor: one child per scenario instance
-    ├── Kelixip.Listener.Supervisor
-    │   ├── Kelixip.Listener.ConnSupervisor  — DynamicSupervisor (per-connection transports)
+    ├── Kelix.Secret             — Agent: ephemeral server_secret (boot-random)  §7
+    ├── Kelix.NonceCache         — ETS owner: nonce→nc, TTL=max_age             §7
+    ├── Kelix.ModuleSupervisor   — :one_for_one, loadable .beam services         §8
+    │     ├── Kelix.Mod.Registrar   — usrloc / contact store (per-domain), AOR-keyed §6
+    │     ├── Kelix.Mod.AuthDb       — MariaDB/MySQL auth (HA1 + 401/accept/reject)   §7
+    │     └── Kelix.Mod.RadiusBilling — RADIUS billing                                §8
+    ├── Kelix.MediaPool          — GenServer: MCU pool, health-check, failover   §9
+    ├── Kelix.ScriptRegistry     — GenServer: loaded scenario versions + refcount §5
+    ├── Kelix.Domains            — GenServer: hot-reloadable domains.toml (atomic) §4
+    ├── Kelix.Router             — stateless dispatch; reads Domains + ScriptRegistry §4
+    ├── Kelix.InstanceSupervisor — DynamicSupervisor: one child per scenario instance
+    ├── Kelix.Listener.Supervisor
+    │   ├── Kelix.Listener.ConnSupervisor  — DynamicSupervisor (per-connection transports)
     │   └── {UDP|TCP|TLS|WSS} listeners       — one child per [[listen]]
-    ├── Kelixip.Control            — the command layer (§10), no transport of its own
-    ├── Kelixip.ControlAPI         — REST frontal (Plug/Bandit), [control_api]     §10
-    └── Kelixip.Metrics            — telemetry → Prometheus, /metrics + /health     §11
+    ├── Kelix.Control            — the command layer (§10), no transport of its own
+    ├── Kelix.ControlAPI         — REST frontal (Plug/Bandit), [control_api]     §10
+    └── Kelix.Metrics            — telemetry → Prometheus, /metrics + /health     §11
 ```
 
 Design choices:
@@ -120,13 +122,13 @@ Design choices:
   then listeners last (a listener must not accept before the router is ready).
 - **Listeners become supervised.** Today `Elixipp.CLI.start_listeners/1` does
   `GenServer.start` and discards the pid. Kelixip introduces
-  `Kelixip.Listener.Supervisor` with one child spec per `[[listen]]` entry and a
+  `Kelix.Listener.Supervisor` with one child spec per `[[listen]]` entry and a
   `DynamicSupervisor` for the per-connection transports the acceptors spawn
   (the acceptor `Task` stays inside each listener, unchanged). A crashing
   listener is restarted; existing connections are independent children.
 - **Instances become supervised.** `spawn_uas_instance/2` currently does
   `spawn_monitor` of a bare process. For a long-running server we route it under
-  `Kelixip.InstanceSupervisor` (a `DynamicSupervisor`, `:temporary` children) so
+  `Kelix.InstanceSupervisor` (a `DynamicSupervisor`, `:temporary` children) so
   instances are observable, countable (metrics), and drainable
   (`graceful_shutdown`). The factory still `Process.monitor`s each child to free
   its quota slot — the monitor and the supervisor are complementary (monitor =
@@ -135,9 +137,9 @@ Design choices:
 
 ### 2.2 Graceful shutdown
 
-systemd `stop` → `Kelixip.Control.graceful_shutdown/1` (also the CLI/REST verb):
+systemd `stop` → `Kelix.Control.graceful_shutdown/1` (also the CLI/REST verb):
 broadcast `{:scenario_ctl, :shutdown, :node_shutdown}` to every instance under
-`Kelixip.InstanceSupervisor`, wait for drain with a deadline, `Process.exit/2`
+`Kelix.InstanceSupervisor`, wait for drain with a deadline, `Process.exit/2`
 kill stragglers, then `System.stop/0`. This is exactly the existing cooperative
 shutdown contract (§9.2 of the spec) — hence the load-time requirement that
 every script has an `on_shutdown` block (§5.3). The systemd unit sets
@@ -150,7 +152,7 @@ every script has an `on_shutdown` block (§5.3). The systemd unit sets
 Two files, two lifecycles (spec §3). Parsed with a **pure-Elixir TOML parser**
 (`toml` hex package; no NIF, bundles in a release — see §13).
 
-### 3.1 `Kelixip.Config` — infra (`config.toml`)
+### 3.1 `Kelix.Config` — infra (`config.toml`)
 
 Loaded once at boot, held read-only in a GenServer. Responsibilities:
 
@@ -165,9 +167,9 @@ Loaded once at boot, held read-only in a GenServer. Responsibilities:
    | `[[listen]]` entries | listener child specs (§2.1); TLS/WSS `cert`/`key` → per-listener opts (today `:tls_certfile`/`:tls_keyfile` are global — see below) |
    | `log.*` | Logger backend config (syslog vs stdout) |
    | `server.max_calls` | server-wide quota gate in the Router/factory |
-   | `mediaserver.pool.*` | `Kelixip.MediaPool` children (§9) |
-   | `module.*` | `Kelixip.ModuleSupervisor` children (§8) |
-   | `control_api.*`, `metrics.*` | `Kelixip.ControlAPI` / `Kelixip.Metrics` |
+   | `mediaserver.pool.*` | `Kelix.MediaPool` children (§9) |
+   | `module.*` | `Kelix.ModuleSupervisor` children (§8) |
+   | `control_api.*`, `metrics.*` | `Kelix.ControlAPI` / `Kelix.Metrics` |
 
 3. **Per-listener certificates.** The framework listeners today read *global*
    `:tls_certfile`/`:tls_keyfile`. The spec wants `cert`/`key` per `[[listen]]`
@@ -180,27 +182,27 @@ Logging: `log.target = "syslog"` selects a syslog backend
 `"stdout"` (or `--stdout`) keeps the console backend. `log.level` sets the
 handler level.
 
-### 3.2 `Kelixip.Domains` — domains + dial-plan (`domains.toml`)
+### 3.2 `Kelix.Domains` — domains + dial-plan (`domains.toml`)
 
 Hot-reloadable (spec §3.2, §9.2). Held in a GenServer behind an **atomic swap**:
 
 ```elixir
-%Kelixip.Domains{
+%Kelix.Domains{
   version: pos_integer,          # bumped on each successful reload
-  domains: [%Kelixip.Domain{}],  # order preserved (TOML array-of-tables)
-  index: %{binary => %Kelixip.Domain{}}  # name + each alias → domain, for O(1) lookup
+  domains: [%Kelix.Domain{}],  # order preserved (TOML array-of-tables)
+  index: %{binary => %Kelix.Domain{}}  # name + each alias → domain, for O(1) lookup
 }
 
-%Kelixip.Domain{
+%Kelix.Domain{
   name: binary,
   aliases: [binary],
   max_calls: pos_integer | nil,
   registrar: %{script: binary, default_expires: .., min_expires: .., keepalive_period: ..} | nil,
   presence:  %{script: binary} | nil,                                  # future
-  dial_plan: [%Kelixip.DialRule{}]  # calls function; [] if calls disabled  # future
+  match_rules: [%Kelix.MatchRule{}]  # calls function; [] if calls disabled  # future
 }
 
-%Kelixip.DialRule{
+%Kelix.matchRule{
   matcher: (binary -> boolean),  # compiled from `pattern` (§3.3) or `default: true`
   raw: binary,                   # the original pattern text, for `status`/logs
   script: binary,
@@ -209,14 +211,14 @@ Hot-reloadable (spec §3.2, §9.2). Held in a GenServer behind an **atomic swap*
 ```
 
 **Reload is atomic / all-or-nothing** (spec §9.2): parse the whole file into a
-new `%Kelixip.Domains{}` off to the side — including compiling every dial-plan
+new `%Kelix.Domains{}` off to the side — including compiling every dial-plan
 pattern **and running the §5.3 load-time contract check on every referenced
 script** — and only if the entire structure validates do we swap it in
 (`:sys.replace_state`-style atomic assign). One bad element ⇒ reject, current
-config untouched, error returned to the caller. Reads (`Kelixip.Router`) always
+config untouched, error returned to the caller. Reads (`Kelix.Router`) always
 see one consistent version.
 
-### 3.3 Dial-plan pattern compiler (`Kelixip.DialPlan`)
+### 3.3 Match plan pattern compiler (`Kelix.DialPlan`)
 
 Asterisk extension patterns (spec §3.3) compiled **once at load** into a matcher.
 Two viable implementations; the design picks **(b)**:
@@ -243,16 +245,16 @@ routes an out-of-dialog request in three steps. Today
 *single* module held in `SIP.Session.ConfigRegistry`. Kelixip inserts a
 **domain-aware router** in that seam.
 
-### 4.1 `Kelixip.Router`
+### 4.1 `Kelix.Router`
 
 Configured (once, at boot) as the registration **and** call **and** presence
 processing module in `SIP.Session.ConfigRegistry` — so `internal_dispatch/4`
 calls into the Router regardless of method. The Router is otherwise stateless;
-it reads `Kelixip.Domains` (current version) and `Kelixip.ScriptRegistry`.
+it reads `Kelix.Domains` (current version) and `Kelix.ScriptRegistry`.
 
 ```
 on_new_registration/3 ─┐
-on_new_call/3          ├─► Kelixip.Router.route(method, dialog_id, req, transaction_id)
+on_new_call/3          ├─► Kelix.Router.route(method, dialog_id, req, transaction_id)
 on_new_subscribe/3 ────┘        │
                                 ├─ 1. domain   = match_domain(req)      -> 404 if none
                                 ├─ 2. function = function_for(method)   -> 405 if not enabled
@@ -274,8 +276,8 @@ on_new_subscribe/3 ────┘        │
   `404`.
 - **Step 4 — quota.** Per-domain `max_calls` then server `max_calls` (503). This
   supersedes the single flat quota currently in `Elixip.ScenarioUAS`.
-- **Step 5 — spawn.** Ask `Kelixip.ScriptRegistry` for the current version's
-  module, spawn under `Kelixip.InstanceSupervisor` via `spawn_uas_instance/2`
+- **Step 5 — spawn.** Ask `Kelix.ScriptRegistry` for the current version's
+  module, spawn under `Kelix.InstanceSupervisor` via `spawn_uas_instance/2`
   with `dialog_pid`/`parent_pid`/`inbound_request`, plus **injected config
   overrides**: the domain name (→ auth realm §7), the resolved
   `default_expires`/`min_expires`, and the selected media-pool handle (§9). The
@@ -284,12 +286,12 @@ on_new_subscribe/3 ────┘        │
 
 ### 4.2 Relationship to `Elixip.ScenarioUAS`
 
-`Elixip.ScenarioUAS` (the `elixipp` factory) and `Kelixip.Router` play the same
+`Elixip.ScenarioUAS` (the `elixipp` factory) and `Kelix.Router` play the same
 role — accept/reject + spawn + quota — but the factory is *single-scenario,
 single-domain* and the Router is *multi-domain, script-per-rule*. Rather than
 fork, the design **extracts the shared machinery** (quota accounting, instance
 monitoring, `{:scenario_exit,…}` counters, cooperative shutdown broadcast) into
-a small shared module (`Kelixip.InstancePool` / or keep it in `ScenarioUAS` and
+a small shared module (`Kelix.InstancePool` / or keep it in `ScenarioUAS` and
 have the Router delegate per (domain,function) slot). `elixipp` keeps using
 `ScenarioUAS` directly; kelixip uses the Router. Both ultimately call
 `SIP.Scenario.Runner.spawn_uas_instance/2`.
@@ -303,7 +305,7 @@ have the Router delegate per (domain,function) slot). `elixipp` keeps using
 
 ## 5. Script registry & versioned reload
 
-### 5.1 `Kelixip.ScriptRegistry`
+### 5.1 `Kelix.ScriptRegistry`
 
 A GenServer owning the mapping *script path → loaded versions*:
 
@@ -326,7 +328,7 @@ A GenServer owning the mapping *script path → loaded versions*:
   version counter; concurrent versions coexist because Elixir lets us
   recompile-and-purge selectively, or we rename via `Module.concat` at compile).
 - **Contract check at load (§5.3)** runs here, before a version is published.
-- **`current`** is what `Kelixip.Router` spawns. Existing instances keep the
+- **`current`** is what `Kelix.Router` spawns. Existing instances keep the
   version they started on (they already hold their `module` in the FSM context).
 - **Refcount**: incremented when the Router spawns an instance of a version,
   decremented on `{:scenario_exit,…}` / `:DOWN`. When an old version hits 0 it is
@@ -369,71 +371,156 @@ This is a pure check on already-existing DSL constructs — no DSL change needed
 
 ---
 
-## 6. Registrar & usrloc store
+## 6. Registrar module (`Kelix.Mod.Registrar`) & usrloc
 
 There is **no AOR-keyed location store today** — registrations are ephemeral
 dialog processes. Kelixip adds a real usrloc (spec §12), *in memory* (basic
 scope explicitly excludes persistence/HA).
 
-### 6.1 `Kelixip.Registrar.Store`
+Per the spec (§12.2) the registrar is delivered **as a bundled module**
+(`registrar.beam`, `Kelix.Mod.Registrar`) built on the `Kelix.Module` behaviour
+(§8) and started under `Kelix.ModuleSupervisor` — i.e. the module system is the
+extension mechanism, and even the first-party registrar uses it (Kamailio
+equivalent: `registrar` + `usrloc`). Its facade is imported by the registrar
+script (`import Kelix.Mod.Registrar`). It builds on the **Dialogue layer** and
+`SIP.Session.Registrar`; **expiry is handled in the dialogue layer** (not a
+bespoke timer here).
 
-In-memory, AOR-keyed. Backed by ETS (a named `:set`/`:bag` owned by the
-supervised store process) — chosen over `Registry` because bindings are *data*,
-not processes, and we want range/prefix queries for `kelixip regs [aor]`.
+### 6.1 Storage — strong per-domain separation
+
+> This is the storage note the spec (§12.2) explicitly marks *"à déplacer dans
+> kelixip_basic_design.md"*.
+
+Domains must be strongly separated. Two-level map (or a `Registry` per domain):
 
 ```elixir
-# key: {domain :: binary, aor :: binary}  (aor = user@domain, lowercased)
-# value: list of bindings
-%Kelixip.Registrar.Binding{
-  contact:    %SIP.Uri{},        # the Contact as announced (may be private/NATed)
-  received:   {ip, port},        # REAL source (spec §12.1) — used for routing, NOT contact
-  transport:  {proto, tp_pid},   # flow handle for connected transports (WSS/TCP/TLS)
-  flow_ref:   reference(),       # monitor of the transport pid → auto-purge on disconnect
-  path:       [%SIP.Uri{}] | [], # RFC 3327 Path, honored if present, not generated (basic)
-  cseq:       integer,
-  call_id:    binary,
-  expires_at: DateTime.t(),
-  q:          float | nil
+%{ domain :: binary => aor_map }
+#   aor_map ::  %{ aor :: binary => [contact_info] }
+#   aor = user-part of the REGISTER `To` header (RFC 3261 — decided 2026-07-26)
+```
+
+Module parameter — from its **`[module.registrar]`** block, which (unlike other
+modules' blocks in `config.toml`) lives in **`domains.toml`** so it is
+hot-reloadable alongside the domains it serves (decided 2026-07-26): the
+`Kelix.ModuleSupervisor` reads/reconfigures the registrar module from
+`domains.toml` on `reload_domains`. Per-domain expiry bounds
+(`default_expires`/`min_expires`) stay in `[domain.registrar]` (function
+activation), distinct from the module param below.
+
+Each `contact_info` stores (spec §12.2):
+
+```elixir
+%Kelix.Mod.Registrar.Contact{
+  domain:     binary,
+  contact:    %SIP.Uri{},        # the Contact SIP URI exactly as in the REGISTER
+  received:   {proto, ip, port}, # REAL transport + source addr/port of the REGISTER
+  dialog_pid: pid,               # the dialog process backing this registration
+  info:       term | nil,        # arbitrary scenario-supplied data (save/3 arg)
+  expires_at: DateTime.t()
 }
 ```
 
-Operations: `put/replace/remove` (on REGISTER refresh / expires=0 / expiry
-timer), `lookup(domain, aor)`, `all(domain \\ :all)` (for the monitor/CLI).
-Expiry is timer-driven (per binding, like the current dialog nonce timer) *and*
-event-driven: when a connected transport pid goes `:DOWN`, its bindings are
-purged immediately (flow is dead — spec §12.2 rationale).
+`received` is the **real source** (not the announced Contact — a NATed
+UA/browser puts a private, unusable address there, spec §12.1). Whether the
+real transport/addr is read off the REGISTER message or off the dialog is an
+open design point (spec §12.2 note) — see §6.4.
 
-### 6.2 NAT / flow routing (spec §12.1 — critical for WebRTC)
+`[module.registrar]` param: **`max_contacts_per_aor`**.
 
-- Store `received` (real IP:port), **not** the announced Contact.
-- Store the **flow handle** (`transport` = the connection's transport pid) for
-  connected transports — you cannot dial *into* a browser, so inbound reuses the
-  existing connection (RFC 5626).
-- Route every inbound request targeting the AOR onto the stored flow /
-  `received`. This requires the framework to let the Registrar hand a specific
-  transport pid to the outbound path — see §6.3.
+### 6.2 Facade API — the four exported functions
+
+```elixir
+save(req, domain, info \\ nil) :: {:ok, granted} | {:error, {code, reason}}
+```
+
+Takes a REGISTER `req`, the resolved `domain`, and optional scenario `info`.
+Extracts the contact(s), validates `Expires` against the `[domain.registrar]`
+bounds (`default_expires`/`min_expires`), performs the register **or** unregister
+(all contacts `expires=0`), and stores the bindings. It **does not compose the
+SIP response**: it returns `{:ok, granted}` where `granted` carries the contacts
+and expires **actually granted** (after clamp). The script feeds `granted` to
+`SIP.Session.Registrar.accept_registration(req, dialog_pid, granted)`, which
+merely echoes what was stored — so the `200 OK` matches the store *by
+construction*, with the expiry bounds applied in **one place** (`save`), never
+re-derived in the helper (a refactor of today's `accept_registration`, which
+re-runs `check_register`/`adjust`). On error → `{:error, {code, reason}}` and the
+script calls `reject_registration`. `save/3` subscribes to the dialog's events to
+catch the unregister and the **transport drop** — on a **connected transport**
+(WSS/TCP/TLS) a connection loss **invalidates** the registration.
+
+```elixir
+lookup(req) :: {:ok, [req]} | :notfound | {:error, reason}
+```
+
+Takes any SIP request to relay to a registered UA. Extracts the R-URI user-part
+as the AOR to reach and the R-URI domain (aliases folded to the domain's nominal
+`name`). Returns a list of **rewritten requests**, one per registered contact of
+the AOR — each a copy of the input with its R-URI **replaced by exactly the
+stored Contact** and `destip`/`destport`/`destproto` filled from `received`.
+No contact ⇒ `:notfound`; error ⇒ `{:error, reason}`.
+
+> **Routing contract (spec §12.2 note).** Passing a `lookup/1` R-URI to
+> `SIP.Transport.Selector.select_transport/1` must resolve to **exactly** the
+> transport usable to reach the UA — crucial for connected transports
+> (TCP/TLS/WSS), whose clients MUST keep a permanent connection to the registrar.
+> Concretely the rewritten R-URI carries the stored flow (`tp_pid`), which
+> already short-circuits `find_or_launch_transport` — see §6.4.
+
+```elixir
+subscribe_register_event(uri, pid)     # uri :: %SIP.Uri{} = aor@domain
+unsubscribe_register_event(uri, pid)
+```
+
+Pub/sub on an `aor@domain` (may be **not yet registered**). The subscriber `pid`
+receives:
+
+```elixir
+{:registrar, :registered,   "aor@domain"}
+{:registrar, :unregistered, "aor@domain"}
+{:registrar, :expired,      "aor@domain"}
+{:registrar, :disconnected, "aor@domain"}
+```
+
+This is what a future presence server, a `calls`/B2BUA leg waiting on an offline
+callee, or the future push-notification feature (§6.5) subscribe to.
+
+### 6.3 NAT / flow routing (spec §12.1 — critical for WebRTC)
+
+- Store `received` (real IP:port + proto), **not** the announced Contact.
+- Store the **flow** (the connection's transport pid) for connected transports —
+  you cannot dial *into* a browser, so inbound reuses the existing connection
+  (RFC 5626); a connection drop invalidates the binding (§6.2 `save`).
+- `lookup/1` routes every inbound request targeting the AOR onto that flow.
 - `Path` (RFC 3327): **honored if present** (stored as return route), **not
   generated** in basic (edge-proxy/multi-hop is roadmap).
 
-### 6.3 Framework touch-points
+### 6.4 Framework touch-points
 
-Two small framework capabilities the usrloc needs:
-
-1. **Capture the receiving transport on an inbound request.** Already partly
+1. **Capture the receiving transport on an inbound REGISTER.** Already partly
    present: `SIP.Transport.ImplHelpers.process_incoming_message/7` attaches
-   `tp_pid: self()` to the R-URI of inbound requests. The registrar reads it off
-   the REGISTER to fill `Binding.transport`.
-2. **Send an out-of-dialog request over a specific flow.** `SIP.Transport.Selector`
-   picks transports by destination; for connected flows we must *bypass*
-   selection and reuse a known `tp_pid`. Add a `send-over-flow` path (a
-   `%SIP.Uri{tp_pid: pid}` already short-circuits `find_or_launch_transport`, so
-   this may be mostly wiring). This is the same open item flagged in
-   `uas_scenario_design.md` §8.1 (connected-transport response routing).
+   `tp_pid: self()` to the R-URI of inbound requests; `SIP.Dialog` holds the
+   dialog pid. `save/3` reads the real transport/addr from there (open: from the
+   message vs from the dialog, §16).
+2. **Send over a specific flow.** `lookup/1`'s rewritten R-URI carries the stored
+   `tp_pid`; a `%SIP.Uri{tp_pid: pid}` already short-circuits
+   `find_or_launch_transport` in `SIP.Transport.Selector`, so this is mostly
+   wiring. Same open item as `uas_scenario_design.md` §8.1 (connected-transport
+   response routing).
 
-> The registrar *script* remains application-side (spec §11.1): 401/accept/reject
-> logic lives in the DSL. The `Store` is framework/infra the script calls into
-> (it will be exposed as `SIP.Session.Registrar` helpers or a `Kelixip.Registrar`
-> facade so the DSL stays declarative).
+### 6.5 Push notifications — *future, not basic*
+
+Spec §12.2: a later version associates an AOR with a push "contact" to wake iOS /
+Google / Microsoft mobile apps via push notification. Independent of HA,
+**explicitly not basic**. Naturally rides on `subscribe_register_event/2` and the
+contact model above; flagged here so the storage/API don't preclude it.
+
+> **Response ownership — resolved (spec §11.1/§12.3/§12.4).** Modules **decide**,
+> the **script composes** the SIP response via the `SIP.Session.Registrar.*`
+> helpers — no module ever builds a SIP message. `auth_db.do_registration_auth/2`
+> returns a verdict (`:ok | {:requireauth, stale} | {:reject, code, reason}`);
+> `registrar.save/3` returns `{:ok, granted}`; the thin `registrar.exs`
+> orchestrator routes verdicts to `challenge_registration` / `accept_registration`
+> / `reject_registration`. Each response type is composed in exactly one place.
 
 ---
 
@@ -443,7 +530,7 @@ Replaces the current stateful per-dialog nonce and the secret-less
 `SIP.Auth.generate_nonce` (spec §11.1). Applies to the registrar *and* all
 dialogue challenges.
 
-### 7.1 `Kelixip.Nonce` — stateless HMAC
+### 7.1 `Kelix.Nonce` — stateless HMAC
 
 ```
 nonce = base64url( ts ‖ rand ‖ HMAC-SHA256(server_secret, ts ‖ rand ‖ realm) )
@@ -457,14 +544,14 @@ nonce = base64url( ts ‖ rand ‖ HMAC-SHA256(server_secret, ts ‖ rand ‖ re
   transparently replays. `realm` bound into the HMAC ⇒ a nonce from one domain is
   useless on another.
 
-`Kelixip.Secret` (supervised Agent) holds the **ephemeral** `server_secret`,
+`Kelix.Secret` (supervised Agent) holds the **ephemeral** `server_secret`,
 regenerated at boot (a restart invalidates in-flight nonces ⇒ `stale`, harmless).
 Designed to become a **shared** secret across nodes for HA (roadmap) — any node
 then validates any node's nonce.
 
 ### 7.2 Anti-replay within the window — `qop=auth` + `nc`
 
-`Kelixip.NonceCache` — a supervised **ETS** table `nonce → max nc seen`, bounded,
+`Kelix.NonceCache` — a supervised **ETS** table `nonce → max nc seen`, bounded,
 TTL = `max_age`. On each authed request with `qop=auth`: reject if
 `nc ≤ last seen`, else record. Soft state, per-node, lost harmlessly on restart
 (⇒ `stale`). Old clients without `qop` fall back to window-only anti-replay
@@ -478,29 +565,55 @@ TTL = `max_age`. On each authed request with `qop=auth`: reject if
   `compute_auth_response_from_ha1/…` (or a new function) carrying `nc`/`cnonce`/
   `qop`.
 - The challenge builder (`SIP.Msg.Ops.challenge_request/7`) offers
-  `qop="auth"` and uses `Kelixip.Nonce.generate/1` instead of
+  `qop="auth"` and uses `Kelix.Nonce.generate/1` instead of
   `SIP.Auth.generate_nonce/0`. **algorithm = MD5** (do not require SHA-256 /
   RFC 8760 — poorly supported). Note today the registrar challenge is hardcoded
   to `SHA256` in `SIP.DialogImpl.handle_call({:replyreq,…})` — change to MD5 and
   drive realm/qop from the router-injected domain.
 - The verifier (`SIP.Msg.Ops.check_authrequest/3`) branches on the presence of
   `qop` in the client response: `qop=auth` → the nc/cnonce form + `NonceCache`
-  check; no `qop` → the RFC 2069 form. `Kelixip.Nonce.validate/2` replaces the
+  check; no `qop` → the RFC 2069 form. `Kelix.Nonce.validate/2` replaces the
   stateful `SIP.Dialog.check_nonce/2` lookup.
 
-### 7.4 Secret source & realm
+### 7.4 Secret source & realm — the `auth_db` module
 
-- **realm = the domain name** (one realm per domain), injected by the Router.
-- **secret via `subscriber_db`** in **HA1** form (`MD5(user:realm:password)`),
-  `password_format = "ha1" | "plain"` (default `ha1`) — mirrors Kamailio's
-  `subscriber` table. The module only does the lookup; **401/accept/reject stays
-  in the script.**
+- **realm = the domain's nominal `name`** (one realm per domain, spec §11.1). If
+  the R-URI targeted the domain via an **alias**, the challenge still returns the
+  domain's nominal `name` as the realm — so the HMAC-bound realm (§7.1) is stable
+  regardless of which alias the client used. The Router injects the nominal name.
+- **secret via `auth_db`** (renamed from `subscriber_db`) in **HA1** form
+  (`H(user:realm:password)`, no cleartext), where `H` is set by
+  **`password_hash = "md5" | "sha256"`** (default `"md5"`) in `[module.auth_db]`;
+  the DB, table, and the column holding the hash are configurable — mirrors
+  Kamailio's `subscriber` table.
+- **`auth_db` decides, the script composes** (spec §11.1 → §12.3). `auth_db`
+  evaluates the client's Authorization against the stored HA1 (nonce validation
+  via `Kelix.Nonce`, digest check via the extended `SIP.Auth` §7.3) and returns a
+  **verdict** — it builds no SIP message:
+
+  ```elixir
+  do_registration_auth(req, domain) :: :ok | {:requireauth, stale :: bool} | {:reject, code, reason}
+  ```
+
+  The `registrar.exs` script maps the verdict onto the `SIP.Session.Registrar.*`
+  helpers: `{:requireauth, stale}` → `challenge_registration(req, dialog_pid,
+  realm: domain, stale: stale)`; `:ok` → `save/3` then `accept_registration`;
+  `{:reject, …}` → `reject_registration`. This keeps SIP-response composition in
+  the script (elixip's "scenario owns the response") while the DB-dependent
+  decision lives in the module — it refines, rather than reverses, the earlier
+  "auth is application-side" decision (decision in the module, composition in the
+  script).
+
+> **Note (spec §11.1 residual).** The spec text still writes *"défaut `ha1`"* next
+> to the `"md5" | "sha256"` enum — `ha1` is not one of the two values (HA1 is the
+> *format*, md5/sha256 the *hash inside it*). Read as **default `"md5"`**; flagged
+> in §16 and corrected in the spec pass.
 
 ### 7.5 Removal / deprecation
 
 `SIP.DialogImpl.Nonce` (stateful map + purge timer) and
 `SIP.Auth.generate_nonce/0` are **removed** once callers move to
-`Kelixip.Nonce`. The nonce format is opaque to clients (they echo it) so the
+`Kelix.Nonce`. The nonce format is opaque to clients (they echo it) so the
 switch is transparent — no interop risk (spec §11.1). `elixipp`'s UAC digest
 already tolerates any nonce, so tests are unaffected.
 
@@ -511,12 +624,38 @@ already tolerates any nonce, so tests are unaffected.
 Spec §5. A module is a stateful OTP service **plus** stateless facades imported
 by scripts.
 
-### 8.1 `Kelixip.Module` behaviour
+### 8.1 `Kelix.Module` behaviour
 
 As specified (§5.1): `validate_config/1`, `child_spec/2`, `describe/0`, optional
-`reload/2`. `Kelixip.ModuleSupervisor` (`:one_for_one`) starts one child per
+`reload/2`. `Kelix.ModuleSupervisor` (`:one_for_one`) starts one child per
 `[module.<name>]` block; the TOML `<name>` is the registered name used by facade
-resolution.
+resolution. Provided modules live under the `Kelix.Mod.*` namespace
+(`Kelix.Mod.Registrar`, `Kelix.Mod.AuthDb`, `Kelix.Mod.RadiusBilling`).
+
+Like Kamailio modules (spec §5), a module has **three** ways to plug in:
+
+1. **Config** — parameters read from its `[module.<name>]` block in `config.toml`.
+   The one exception is `registrar`, whose `[module.registrar]` block lives in
+   `domains.toml` (hot-reloadable, domain-tied — §6.1); its per-domain expiry
+   bounds are separate, in `[domain.registrar]`.
+2. **REST** — it may enrich the control API with `/modules/<name>/…` endpoints.
+3. **CLI** — it may add `kelictl <name> <command> <args>` sub-commands.
+
+REST + CLI extensions use a **declarative-registration** mechanism (decided
+2026-07-26, spec §5.1/§10) — the same parity principle as the core
+`Kelix.Control`: one declaration, both frontals derive from it.
+
+- The `Kelix.Module` behaviour gains two **optional** callbacks:
+  `describe_control/0` (returns the command list — `name`, `args`, `rest`
+  `{method, path}`, `rw`, `help`) and `handle_control/2` (runs a command).
+- At module start `Kelix.ModuleSupervisor` reads `describe_control/0` and
+  registers the entries, keyed by module name, into a central
+  **`Kelix.Control.Registry`** (ETS/Agent); it deregisters on stop/reload.
+- Both frontals iterate that registry: `Kelix.ControlAPI` mounts the
+  `/modules/<name>/…` routes, `kelictl` generates the `<name> <cmd>` sub-commands
+  and their `--help`. Execution routes to `handle_control/2`.
+- `handle_control/2` **never checks auth** — authentication is enforced at the
+  frontal boundary (§10), keeping the module logic pure.
 
 ### 8.2 Facade contract (spec §5.2 — locked decisions)
 
@@ -532,15 +671,19 @@ resolution.
 
 ### 8.3 Provided modules
 
-- **`subscriber_db`** — MariaDB/MySQL access reading the `subscriber` table for
-  registrar **auth** (HA1 lookup, §7.4). Needs a MySQL driver dep
-  (`myxql`, §13). A connection pool is the module's supervised service; facades
-  (`lookup_ha1/2`, …) resolve it by name.
-- **`radius_billing`** — RADIUS billing. Dep or hand-rolled UDP RADIUS client.
+- **`registrar`** (`Kelix.Mod.Registrar`) — the usrloc / contact store and its
+  `save`/`lookup`/`subscribe` API. Fully specified in §6.
+- **`auth_db`** (`Kelix.Mod.AuthDb`) — MariaDB/MySQL access reading the
+  `subscriber` table for registrar **auth**: HA1 lookup **and** the
+  `401/accept/reject` verdict (§7.4). Needs a MySQL driver dep (`myxql`, §13); a
+  connection pool is its supervised service; the DB/table/hash-column and
+  `password_hash` are configurable.
+- **`radius_billing`** (`Kelix.Mod.RadiusBilling`) — RADIUS billing. Hand-rolled
+  UDP RADIUS client (no heavy dep).
 
-Facade import in a script: `import Kelixip.Module.SubscriberDB, only: [lookup_ha1: 2]`
-— the facade module is a thin stateless wrapper that finds the service by name
-and delegates (spec §5).
+Facade import in the registrar script: `import Kelix.Mod.Registrar` /
+`import Kelix.Mod.AuthDb` — the facade is a thin stateless wrapper resolving the
+service by its registered name and delegating (spec §5).
 
 > Open (spec): `.beam` **code-reload versioning** / OTP `code_change`-style state
 > migration is left unspecified — flagged §16.
@@ -551,7 +694,7 @@ and delegates (spec §5).
 
 Spec §6. Extends the current single-`:mediaserver` config to a pool.
 
-### 9.1 `Kelixip.MediaPool`
+### 9.1 `Kelix.MediaPool`
 
 Supervised GenServer over the `[mediaserver.pool.*]` entries:
 
@@ -573,45 +716,57 @@ active sessions per MCU, MCU up/down (§11).
 
 Spec §9–§10. **Parity by construction**: one command layer, two frontals.
 
-### 10.1 `Kelixip.Control`
+### 10.1 `Kelix.Control`
 
 The single source of truth — every operation is a function here; neither frontal
 holds business logic. Surface (spec §9.3):
 
-| Function | R/W | CLI | REST |
+| Function | R/W | CLI (`kelictl`) | REST |
 |---|---|---|---|
-| `monitor/0` | R | `kelixip monitor` | `GET /scenarios` |
-| `registrations/1` | R | `kelixip regs [aor]` | `GET /registrations` |
-| `status/0` | R | `kelixip status` | `GET /status` |
-| `unregister/2` | W | `kelixip unregister <aor> [contact]` | `DELETE /registrations/<aor>` |
-| `shutdown_scenario/1` | W | `kelixip stop <id>` | `POST /scenarios/<id>/shutdown` |
-| `reload_script/2` (notify?) | W | `kelixip reload-script [--notify] <name…>` | `POST /scripts/reload[?notify=1]` |
-| `reload_domains/0` | W | `kelixip reload-domains` | `POST /domains/reload` |
-| `module_reload/1` | W | `kelixip module reload <name>` | `POST /modules/<name>/reload` |
-| `mediaserver_toggle/2` | W | `kelixip mcu <name> on\|off` | `POST /mediaservers/<name>` |
-| `set_log_level/1` | W | `kelixip log-level <lvl>` | `PUT /log/level` |
-| `graceful_shutdown/0` | W | `kelixip graceful-shutdown` | `POST /graceful-shutdown` |
+| `status/0` — uptime, counters, pool, node state | R | `kelictl status` | `GET /status` |
+| `monitor/0` — scenarios in progress | R | `kelictl monitor` | `GET /scenarios` |
+| `registrations/1` | R | `kelictl regs [aor]` | `GET /registrations` |
+| `unregister/2` | W | `kelictl unregister <aor> [contact]` | `DELETE /registrations/<aor>` |
+| `shutdown_scenario/1` | W | `kelictl stop <id>` | `POST /scenarios/<id>/shutdown` |
+| `reload_script/2` (notify?) | W | `kelictl reload-script [--notify] <name…>` | `POST /scripts/reload[?notify=1]` |
+| `reload_domains/0` | W | `kelictl reload-domains` | `POST /domains/reload` |
+| `module_reload/1` | W | `kelictl module reload <name>` | `POST /modules/<name>/reload` |
+| `mediaserver_toggle/2` | W | `kelictl mcu <name> on\|off` | `POST /mediaservers/<name>` |
+| `set_log_level/1` | W | `kelictl log-level <lvl>` | `PUT /log/level` |
+| `graceful_shutdown/0` | W | `kelictl graceful-shutdown` | `POST /graceful-shutdown` |
+
+Plus, per §8.1, **module-contributed commands**: `kelictl <module> <cmd> <args>`
+↔ `… /modules/<name>/…`, sourced from each `Kelix.Mod.<Name>.Control`.
 
 `monitor/0` reuses the in-memory store already feeding `elixipp --monitor`
-(`SIP.Scenario.Monitor`). `registrations/1` reads `Kelixip.Registrar.Store`.
-`status/0` aggregates uptime + counters + pool state.
+(`SIP.Scenario.Monitor`). `registrations/1` reads the `Kelix.Mod.Registrar`
+store (§6). `status/0` aggregates uptime + counters + pool state.
 
-### 10.2 The `kelixip` CLI
+### 10.2 The `kelictl` CLI
 
-A **separate escript** (`kelixip`), distinct from `elixipp`. It is a *local
-client* of the running node over **Erlang distribution / RPC**: it reads
-`server.node_name` + the cookie, does `:rpc.call(node, Kelixip.Control, fun, args)`,
-and renders the result (reusing the Owl table rendering for `monitor`). It runs
-no SIP stack. Because it only calls `Kelixip.Control`, parity with REST is
-automatic — adding a command = add the function + wire two thin frontals.
+A **separate escript** installed as **`/usr/sbin/kelictl`** (spec §9.1),
+distinct from `elixipp`. It is a *local client* of the running node over
+**Erlang distribution / RPC**: it reads `server.node_name` + the cookie, does
+`:rpc.call(node, Kelix.Control, fun, args)`, and renders the result (reusing the
+Owl table rendering for `monitor`). It runs no SIP stack. Because it only calls
+`Kelix.Control` (and the registered `Kelix.Mod.<Name>.Control`), parity with REST
+is automatic — adding a command = add the function + wire two thin frontals.
 
-### 10.3 REST API (`Kelixip.ControlAPI`)
+### 10.3 REST API (`Kelix.ControlAPI`)
 
-A Plug router served by **Bandit** (§13), one endpoint per `Kelixip.Control`
-function. Defaults from `[control_api]`: **loopback + token auth** (Bearer token
-compared in constant time). `auth = "mtls"` enables client-cert verification for
-network exposure; `"none"` for trusted local only. **Basic auth model = a single
-admin token** (all commands, all domains); per-domain RBAC is roadmap (spec §10).
+A Plug router served by **Bandit** (§13), one endpoint per `Kelix.Control`
+function, plus the module-registered `/modules/<name>/…` endpoints (§8.1, from
+`Kelix.Control.Registry`).
+
+**Auth is a boundary concern, separate from the command logic** (decided
+2026-07-26). A Plug **middleware** validates the credential *before* dispatching
+to `Kelix.Control` / `handle_control`: `[control_api]` defaults to **loopback +
+token** (Bearer, constant-time compare); `auth = "mtls"` adds client-cert
+verification for network exposure; `"none"` for trusted local. On the CLI side,
+the Erlang distribution **cookie** is the credential (no token). Neither
+`Kelix.Control` nor any module `handle_control/2` inspects tokens — they assume an
+authenticated caller. **Basic model = a single admin token** (all commands, all
+domains, incl. module commands); per-domain RBAC is roadmap (spec §10).
 
 ---
 
@@ -619,12 +774,12 @@ admin token** (all commands, all domains); per-domain RBAC is roadmap (spec §10
 
 Spec §8.2. `:telemetry` events emitted at key points, exported as Prometheus.
 
-- **`Kelixip.Metrics`** attaches telemetry handlers and runs
+- **`Kelix.Metrics`** attaches telemetry handlers and runs
   `TelemetryMetricsPrometheus` (§13), serving `/metrics` + `/health` on the
   `[metrics]` port (separate from control API, loopback by default). `/health`
   returns liveness (node up) + readiness (config loaded, listeners bound) for
   systemd / orchestrators.
-- **Events** emitted from the router, registrar store, transaction layer,
+- **Events** emitted from the router, `Kelix.Mod.Registrar`, transaction layer,
   transports, media pool. All key metrics carry a **`domain` label** (spec §8.2):
   registrations gauge / REGISTER rate / auth failures; active dialogs / call
   attempts-answered-failed / setup time; transactions by method + response class;
@@ -632,7 +787,7 @@ Spec §8.2. `:telemetry` events emitted at key points, exported as Prometheus.
   per MCU + MCU up/down; system `503` (over `max_calls`), parse errors, timer
   B/F timeouts.
 - Instrumentation is added at the framework seams the events describe (mostly the
-  Router, `Kelixip.Registrar.Store`, `SIP.Transac`, transports). The `--monitor`
+  Router, `Kelix.Mod.Registrar`, `SIP.Transac`, transports). The `--monitor`
   TUI and per-instance PlantUML diagrams remain complementary debug tools.
 
 ---
@@ -643,7 +798,7 @@ Spec §7. Delivered as an **OTP release** (`mix release`, embedded ERTS), not an
 escript — a properly managed service.
 
 - `mix.exs`: add a `releases:` section (`kelixip`) with
-  `mod: {Kelixip.Application, []}` active for the release, `include_erts: true`,
+  `mod: {Kelix.Application, []}` active for the release, `include_erts: true`,
   a `rel/env.sh` exporting `RELEASE_NODE` (= `server.node_name`) and the cookie,
   and `TOML config path` from an env var.
 - **FHS layout** (spec §7): `/etc/kelixip/{config.toml,domains.toml,tls/}`,
@@ -651,7 +806,7 @@ escript — a properly managed service.
   (release + `modules/`), `/var/lib/kelixip/` (mutable scripts, future usrloc),
   `/var/log/kelixip/` (if stdout redirected; else syslog).
 - **systemd unit**: non-privileged `kelixip` user/group, `ExecStart` = release
-  `start`, `ExecStop` = `Kelixip.Control.graceful_shutdown` (drain, §2.2),
+  `start`, `ExecStop` = `Kelix.Control.graceful_shutdown` (drain, §2.2),
   `TimeoutStopSec` > drain deadline, `epmd` managed by the release.
 - **Platforms**: Alma Linux 9 (rpm) + Ubuntu (deb). Build via a release →
   fpm/`rpmbuild`/`dpkg-deb` step (CI). `module_dir` must be `root`-owned,
@@ -669,7 +824,7 @@ Launch: `kelixip --config /etc/kelixip/config.toml [--stdout]`.
 | `toml` | parse `config.toml` / `domains.toml` | pure Elixir, no NIF, release-safe |
 | `bandit` + `plug` | REST control API + `/metrics` + `/health` HTTP | pure Elixir; `req` (present) is client-only |
 | `telemetry`, `telemetry_metrics`, `telemetry_metrics_prometheus` | metrics | standard Elixir observability stack |
-| `myxql` | `subscriber_db` MariaDB/MySQL driver | only needed when that module is built |
+| `myxql` | `auth_db` MariaDB/MySQL driver | only needed when that module is built |
 | syslog backend (`logger_syslog` or erlang `:logger` syslog handler) | `log.target = "syslog"` | evaluate vs journald-only |
 
 All are pure-Elixir/BEAM (no C NIFs that would complicate the release) except the
@@ -691,15 +846,22 @@ Flagged in the spec as **"à faire"**:
    two dispatchers coexist.
 2. **Nonce migration** (§7.5): remove `SIP.DialogImpl.Nonce` +
    `SIP.Auth.generate_nonce`, switch the challenge/verify path to
-   `Kelixip.Nonce`. Update `scenarios/uas_register.exs`'s
+   `Kelix.Nonce`. Update `scenarios/uas_register.exs`'s
    `check_registration_auth/3` (which currently calls `SIP.Dialog.check_nonce/2`)
    to the stateless validate.
 3. **`qop=auth` in `SIP.Auth`** (§7.3) — additive, keeps RFC 2069 fallback.
 4. **Per-listener certs** (§3.1) — thread cert/key through listener opts.
 5. **Supervise the stack** (§2) — registries/ConfigRegistry/listeners as
    children; `Runner.bootstrap_stack/0` stays for `elixipp`/tests.
-6. **Connected-transport response routing / send-over-flow** (§6.3) — the open
+6. **Connected-transport response routing / send-over-flow** (§6.4) — the open
    item from `uas_scenario_design.md` §8.1.
+7. **Auth logic moves out of the script into `auth_db`** (spec §11.1 → §12.3).
+   Today `scenarios/uas_register.exs` holds `check_registration_auth/3` (the
+   401/accept/reject decision) *in the script*. The spec's latest edit moves that
+   decision **into the `auth_db` module**. This reverses the earlier
+   "auth logic is application-side" decision and reshapes the registrar script
+   into a thin orchestrator over `Kelix.Mod.AuthDb` + `Kelix.Mod.Registrar` — see
+   the open question §16.
 
 Guiding rule: **kelixip is additive**. The `elixipp` tool and existing tests must
 keep passing; framework changes are backward-compatible (fallbacks, opts with
@@ -714,17 +876,18 @@ before the features that need them.
 
 | Phase | Deliverable | Depends on |
 |---|---|---|
-| **P0 — OTP skeleton** | `Kelixip.Application` + supervision tree; supervise registries/ConfigRegistry/listeners; `mix release` builds; boots with an empty config | — |
-| **P1 — Config** | `toml` dep; `Kelixip.Config` (infra→app env, per-listener certs); `Kelixip.Domains` + `Kelixip.DialPlan` compiler; atomic reload plumbing (no CLI yet) | P0 |
-| **P2 — Dispatch** | `Kelixip.Router` (domain→function→script, 404/405/503); wire as ConfigRegistry processing module; `Kelixip.ScriptRegistry` + load-time contract check; extract shared factory machinery | P1 |
-| **P3 — Registrar + usrloc** | `Kelixip.Registrar.Store` (AOR-keyed, received+flow+Path); NAT/flow inbound routing; send-over-flow framework hook; registrar facade for the DSL | P2 |
-| **P4 — Auth** | `Kelixip.Secret` + `Kelixip.Nonce` (stateless HMAC) + `NonceCache`; `SIP.Auth` `qop=auth` extension; realm=domain wiring; remove stateful nonce | P3 |
-| **P5 — Modules** | `Kelixip.Module` behaviour + `ModuleSupervisor` + facade resolution; `subscriber_db` (HA1 lookup) feeding P4 auth; `radius_billing` | P1 (config), P4 (auth uses it) |
-| **P6 — Media pool** | `Kelixip.MediaPool` (round-robin, health-check, failover, toggle) over the Mendooze adapter | P0 |
-| **P7 — Control layer** | `Kelixip.Control` (all verbs); `kelixip` escript over RPC; versioned/notify reload; graceful shutdown | P2–P6 |
+| **P0 — OTP skeleton** | `Kelix.Application` + supervision tree; supervise registries/ConfigRegistry/listeners; `mix release` builds; boots with an empty config | — |
+| **P1 — Config** | `toml` dep; `Kelix.Config` (infra→app env, per-listener certs); `Kelix.Domains` + `Kelix.DialPlan` compiler; atomic reload plumbing (no CLI yet) | P0 |
+| **P2 — Dispatch** | `Kelix.Router` (domain→function→script, 404/405/503); wire as ConfigRegistry processing module; `Kelix.ScriptRegistry` + load-time contract check; extract shared factory machinery | P1 |
+| **P5 — Module system** | `Kelix.Module` behaviour + `Kelix.ModuleSupervisor` + facade resolution + module control-surface registration (REST/CLI, §8.1) | P1 (config) |
+| **P3 — Registrar module** | `Kelix.Mod.Registrar` (per-domain store; `save`/`lookup`/`subscribe`; received+flow+Path); NAT/flow inbound routing; send-over-flow framework hook | P2, P5 |
+| **P4 — Auth** | `Kelix.Secret` + `Kelix.Nonce` (stateless HMAC) + `NonceCache`; `SIP.Auth` `qop=auth`; realm=domain (alias→nominal); remove stateful nonce; `Kelix.Mod.AuthDb` (HA1 lookup + 401/accept/reject) | P3, P5 |
+| **P6 — Media pool** | `Kelix.MediaPool` (round-robin, health-check, failover, toggle) over the Mendooze adapter | P0 |
+| **P6b — radius_billing** | `Kelix.Mod.RadiusBilling` | P5 |
+| **P7 — Control layer** | `Kelix.Control` (all verbs); `kelictl` escript over RPC; versioned/notify reload; graceful shutdown | P2–P6 |
 | **P8 — REST API** | `bandit`+`plug` frontal; token/mtls auth; parity with CLI | P7 |
 | **P9 — Observability** | telemetry events + Prometheus exporter; `/metrics` + `/health`; per-domain labels | P2+ |
-| **P10 — Packaging** | rpm (Alma 9) + deb (Ubuntu); systemd unit; FHS install; graceful stop wired to systemd | P0–P9 |
+| **P10 — Packaging (RPM d'abord)** | **produire le paquet RPM kelixip pour Alma Linux 9** : `mix release` (ERTS embarqué) → `.spec` (`%files` sur le layout FHS §12, `%pre`/`%post` créant l'utilisateur `kelixip` + l'unité systemd, `%config(noreplace)` sur `/etc/kelixip/*.toml`) → `rpmbuild`/`fpm` en CI, `module_dir` root-owned. Deb Ubuntu ensuite, même release. | P0–P9 |
 
 P3+P4 (registrar + auth) are the functional core of "basic"; P0–P2 are the
 enabling infrastructure; P7–P10 make it a product.
@@ -734,10 +897,10 @@ enabling infrastructure; P7–P10 make it a product.
 ## 16. Open questions
 
 1. **Shared factory vs Router-owned pooling** (§4.2) — extract a
-   `Kelixip.InstancePool` shared with `Elixip.ScenarioUAS`, or have the Router
+   `Kelix.InstancePool` shared with `Elixip.ScenarioUAS`, or have the Router
    own per-(domain,function) slots and leave `ScenarioUAS` for `elixipp` only?
    Affects where per-domain quota lives.
-2. **`Kelixip.Module` contract** (memory: "forks ouverts sur le contrat behaviour
+2. **`Kelix.Module` contract** (memory: "forks ouverts sur le contrat behaviour
    module") — is `describe/0`'s `exports` list *enforced* (facade import checked
    against it) or purely informational? And the `.beam` code-reload / state
    migration story (spec §5 open item, §8.3).
@@ -747,9 +910,40 @@ enabling infrastructure; P7–P10 make it a product.
    reloads.
 4. **Syslog backend choice** (§13) — dedicated dep vs erlang `:logger` syslog
    handler vs journald-only (systemd captures stdout anyway).
-5. **usrloc query shape** (§6.1) — ETS `:set` keyed by `{domain, aor}` with a
-   binding list value, vs `:bag` with one row per binding. Impacts
-   `registrations` filtering/pagination for large deployments.
-6. **`send-over-flow`** (§6.3) — confirm a `%SIP.Uri{tp_pid: pid}` fully
-   short-circuits `Selector` for out-of-dialog inbound routing, or whether the
-   transaction layer needs an explicit "reply/route over this transport" path.
+5. **usrloc storage shape** (§6.1) — the spec suggests either a two-level map
+   `%{domain => %{aor => [contact]}}` **or a `Registry` per domain**. A Registry
+   ties bindings to processes and eases per-domain isolation/teardown; a plain map
+   (ETS-backed) eases `registrations` filtering/pagination. Pick one.
+6. **`send-over-flow`** (§6.4) — confirm a `%SIP.Uri{tp_pid: pid}` (as produced by
+   `Kelix.Mod.Registrar.lookup/1`) fully short-circuits `Selector` for
+   out-of-dialog inbound routing, or whether the transaction layer needs an
+   explicit "route over this transport" path.
+
+**New tensions introduced by the latest spec edits (§5, §11.1, §12):**
+
+7. **Where does the SIP auth response get composed?** — **RESOLVED**
+   (spec §11.1/§12.3/§12.4, 2026-07-26). Modules **decide** (`auth_db` verdict,
+   `registrar.save/3 → {:ok, granted}`), the **`registrar.exs` script composes**
+   via `SIP.Session.Registrar.*`. Each response type composed in exactly one
+   place; `save` clamps expiry once, `accept_registration` only echoes `granted`.
+   §12.3/§12.4 stubs filled.
+8. **Registrar module config block.** — **RESOLVED** (2026-07-26). Aligned on the
+   module convention: a **`[module.registrar]`** block holds the module param
+   (`max_contacts_per_aor`), placed in **`domains.toml`** (hot-reloadable,
+   domain-tied); per-domain expiry bounds stay in `[domain.registrar]`. The
+   `Kelix.ModuleSupervisor` reads/reconfigures the registrar from `domains.toml`.
+9. **AOR key source.** — **RESOLVED** (2026-07-26): the AOR is the user-part of
+   the **`To`** header (RFC 3261).
+10. **`password_hash` default.** Spec writes `"md5" | "sha256"` with default
+    `ha1` — `ha1` is not a valid value. Read as default `"md5"`; confirm.
+11. **Module control-surface registration** — **RESOLVED** (2026-07-26, Option B):
+    optional behaviour callbacks `describe_control/0` + `handle_control/2`,
+    registered at module start into a central `Kelix.Control.Registry` that both
+    frontals derive from (§8.1). Admin auth is enforced at the frontal boundary
+    (REST Plug middleware / CLI Erlang cookie), separate from the command logic
+    (§10.3); modules inherit the single admin token.
+12. **First-party registrar as a "loadable module".** The registrar is core/basic
+    yet modelled as a `.beam` module in `module_dir` (root-owned). Confirm it ships
+    **bundled** in the release (not a drop-in) while still built on the
+    `Kelix.Module` behaviour — i.e. the module system is the internal architecture,
+    not a third-party plug-in point, for it.

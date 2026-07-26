@@ -13,7 +13,7 @@ et **OpenSIPS**. Les scénarios de kelixip sont écrits dans le DSL elixip
 (`SIP.Scenario`) et exécutés par le moteur FSM déjà présent dans elixip.
 
 Kelixip est packagé comme un **service systemd** (release OTP) et se pilote via
-un CLI (`kelixip`) et une API de contrôle REST.
+un CLI (`kelictl`) et une API de contrôle REST.
 
 ## 2. Architecture : domaines et fonctions combinables
 
@@ -134,7 +134,7 @@ enabled = true
 # ─── Loadable modules (.beam) ────────────────────────────────────────────
 # [module.<name>] : the name links the .beam to its config block and is the
 # namespace a scenario imports.
-[module.subscriber_db]
+[module.auth_db]
 driver   = "mariadb"
 host     = "127.0.0.1"
 database = "kelixip"
@@ -274,18 +274,25 @@ bibliothèque de fonctions. Il a **deux facettes** :
 - **(A) un service** — un process (souvent un superviseur de pool) que kelixip
   démarre sous son propre superviseur, avec la config du bloc `[module.<nom>]` ;
 - **(B) des façades** — les fonctions **importées par le scénario** (`import
-  Kelixip.Module.SubscriberDB, only: [lookup: 2, ...]`), stateless, qui
+  Kelix.Mod.AuthDb, only: [lookup: 2, ...]`), stateless, qui
   retrouvent le service par son nom (le `<nom>` du bloc) et lui délèguent.
 
-### 5.1 Behaviour `Kelixip.Module`
+A l'instar des modules kamailio, chaque module peut:
+
+- disposer de paramètres qui sont lu dans le fichier de configuration (config.toml)
+- enrichir l'API REST en ajoutant des endpoint /modules/<nom>/...
+- ajouter des commandes dans kelictl <module> <commande> <argument>
+
+
+### 5.1 Behaviour `Kelix.Module`
 
 ```elixir
-defmodule Kelixip.Module do
+defmodule Kelix.Module do
   # Valider le bloc [module.<name>] AVANT de démarrer/reconfigurer quoi que ce
   # soit. Une config invalide est rejetée sans toucher au service en cours.
   @callback validate_config(config :: map) :: :ok | {:error, reason :: term}
 
-  # child_spec placé sous Kelixip.ModuleSupervisor. `name` = clé TOML, sert de
+  # child_spec placé sous Kelix.ModuleSupervisor. `name` = clé TOML, sert de
   # nom enregistré pour la résolution côté façade.
   @callback child_spec(name :: atom, config :: map) :: Supervisor.child_spec()
 
@@ -295,7 +302,22 @@ defmodule Kelixip.Module do
   # Reload à chaud — OPTIONNEL. Présent ⇒ reconfiguration en place (sans couper
   # les ressources). Absent ⇒ kelixip restart proprement le child.
   @callback reload(name :: atom, config :: map) :: :ok | {:error, term}
-  @optional_callbacks reload: 2
+
+  # Surface de contrôle (REST + CLI) — OPTIONNEL. Déclaration UNIQUE dont dérivent
+  # les DEUX frontaux (parité par construction). Enregistrée dans un registre
+  # central `Kelix.Control.Registry` par le ModuleSupervisor au démarrage,
+  # déregistrée au stop/reload. Voir §10.
+  @callback describe_control() :: [%{
+              name: String.t(),                                  # sous-commande
+              args: [%{name: String.t(), required: boolean}],
+              rest: {:get | :post | :delete, path :: String.t()},
+              rw:   :r | :w,
+              help: String.t()
+            }]
+  # Exécute une commande déclarée. NE vérifie PAS l'auth (déjà faite au frontal).
+  @callback handle_control(name :: String.t(), args :: map) :: {:ok, term} | {:error, term}
+
+  @optional_callbacks reload: 2, describe_control: 0, handle_control: 2
 end
 ```
 
@@ -313,9 +335,9 @@ end
 
 Modules prévus :
 
-- **`subscriber_db`** — accès BDD MariaDB/MySQL, lit la table `subscriber` pour
-  l'**authentification** du registrar (et, à terme, la persistance de la
-  localisation — voir §14).
+- **`registrar`** - gestion des contacts et enregistrement.
+- **`auth_db`** — accès BDD MariaDB/MySQL, lit la table `subscriber` pour
+  l'**authentification** du registrar.
 - **`radius_billing`** — facturation par RADIUS.
 
 > Reste à préciser : la **stratégie de versionnage** d'un module lors d'un
@@ -387,24 +409,25 @@ des outils de debug complémentaires.
 ## 9. Couche de contrôle, CLI et API — parité par construction
 
 Les opérations d'administration vivent dans **une seule couche de commandes
-interne** (un module `Kelixip.Control`). Le CLI et l'API REST n'en sont que deux
+interne** (un module `Kelix.Control`). Le CLI et l'API REST n'en sont que deux
 **frontaux** :
 
-- le **CLI `kelixip`** (§9.1) — client **local** du nœud via **Erlang
+- le **CLI `kelictl`** (§9.1) — client **local** du nœud via **Erlang
   distribution/RPC** (`node_name` + cookie) ;
 - l'**API REST** (§10) — frontal **HTTP** pour le distant et l'outillage.
 
 **Règle de parité :** toute opération est exposée par les **deux** frontaux.
 Cette parité est garantie *par construction* — les deux délèguent aux mêmes
-fonctions de `Kelixip.Control`, aucun frontal n'implémente de logique métier
+fonctions de `Kelix.Control`, aucun frontal n'implémente de logique métier
 propre. Ajouter une commande = l'ajouter à la couche, puis la câbler dans les
 deux frontaux.
 
-### 9.1 Le CLI `kelixip`
+### 9.1 kelictl : le CLI de contrôle
 
-Le script `kelixip` est un **client local** du nœud en cours d'exécution (Erlang
+Le script `/usr/sbin/kelictl` est un **client local** du nœud en cours d'exécution (Erlang
 RPC, `node_name` + cookie). Il permet de :
 
+- arrêter, démarrer et afficher l'état d'exécution
 - afficher le **moniteur** des scénarios en cours d'exécution ;
 - afficher le contenu du **registrar** (et du futur serveur de présence) ;
 - **désenregistrer** un AOR ou un contact ;
@@ -447,25 +470,25 @@ au chargement ci-dessus sur chaque script référencé**). Si un seul élément 
 invalide, le reload est **rejeté** : la config courante reste intacte, l'erreur
 est remontée au CLI/API. Jamais de config à moitié appliquée.
 
-### 9.3 Surface de commandes `Kelixip.Control`
+### 9.3 Surface de commandes `Kelix.Control`
 
 Source unique dont dérivent CLI et REST (parité). `R` = lecture, `W` = écriture.
 
 | Commande | | CLI | REST (indicatif) |
 |---|---|---|---|
-| `monitor` — scénarios en cours | R | `kelixip monitor` | `GET /scenarios` |
-| `registrations` — usrloc (filtrable par domaine) | R | `kelixip regs [aor]` | `GET /registrations` |
+| `monitor` — scénarios en cours | R | `kelictl monitor` | `GET /scenarios` |
+| `registrations` — usrloc (filtrable par domaine) | R | `kelictl regs [aor]` | `GET /registrations` |
 | `presence_state` *(futur)* | R | — | `GET /presence` |
-| `status` — uptime, compteurs, pool | R | `kelixip status` | `GET /status` |
-| `unregister` — purger un AOR ou un contact | W | `kelixip unregister <aor> [contact]` | `DELETE /registrations/<aor>` |
-| `shutdown_scenario` — `:shutdown` à une instance | W | `kelixip stop <id>` | `POST /scenarios/<id>/shutdown` |
-| `reload_script` — recharger un/des `.exs`, **versionné** (§9.2) | W | `kelixip reload-script <name…>` | `POST /scripts/reload` |
-| `reload_script_notify` — reload **+ prévient les instances en cours** | W | `kelixip reload-script --notify <name…>` | `POST /scripts/reload?notify=1` |
-| `reload_domains` — recharger `domains.toml` (§9.2) | W | `kelixip reload-domains` | `POST /domains/reload` |
-| `module_reload` — recharger un module (§5.2) | W | `kelixip module reload <name>` | `POST /modules/<name>/reload` |
-| `mediaserver_toggle` — activer/désactiver un MCU | W | `kelixip mcu <name> on\|off` | `POST /mediaservers/<name>` |
-| `set_log_level` — niveau de log (global) | W | `kelixip log-level <lvl>` | `PUT /log/level` |
-| `graceful_shutdown` — drain coopératif puis arrêt du nœud | W | `kelixip graceful-shutdown` | `POST /graceful-shutdown` |
+| `status` — uptime, compteurs, pool | R | `kelictl status` | `GET /status` |
+| `unregister` — purger un AOR ou un contact | W | `kelictl unregister <aor> [contact]` | `DELETE /registrations/<aor>` |
+| `shutdown_scenario` — `:shutdown` à une instance | W | `kelictl stop <id>` | `POST /scenarios/<id>/shutdown` |
+| `reload_script` — recharger un/des `.exs`, **versionné** (§9.2) | W | `kelictl reload-script <name…>` | `POST /scripts/reload` |
+| `reload_script_notify` — reload **+ prévient les instances en cours** | W | `kelictl reload-script --notify <name…>` | `POST /scripts/reload?notify=1` |
+| `reload_domains` — recharger `domains.toml` (§9.2) | W | `kelictl reload-domains` | `POST /domains/reload` |
+| `module_reload` — recharger un module (§5.2) | W | `kelictl module reload <name>` | `POST /modules/<name>/reload` |
+| `mediaserver_toggle` — activer/désactiver un MCU | W | `kelictl mcu <name> on\|off` | `POST /mediaservers/<name>` |
+| `set_log_level` — niveau de log (global) | W | `kelictl log-level <lvl>` | `PUT /log/level` |
+| `graceful_shutdown` — drain coopératif puis arrêt du nœud | W | `kelictl graceful-shutdown` | `POST /graceful-shutdown` |
 
 - **`graceful_shutdown`** : envoie `{:scenario_ctl, :shutdown, …}` à **toutes**
   les instances (drain coopératif — d'où l'exigence `on_shutdown` §9.2), attend
@@ -483,15 +506,28 @@ Source unique dont dérivent CLI et REST (parité). `R` = lecture, `W` = écritu
 
 Kelixip propose une API de contrôle REST sur un port configurable
 (`[control_api]`), destinée au **distant** et à l'**outillage**. C'est un
-frontal HTTP sur la couche `Kelixip.Control` (§9) : **même surface que le CLI**,
+frontal HTTP sur la couche `Kelix.Control` (§9) : **même surface que le CLI**,
 par construction (règle de parité). Par défaut : écoute en **loopback** avec
 authentification par **token** (exposition réseau = décision explicite ; `mtls`
 disponible pour l'exposer).
 
-Un endpoint par commande de `Kelixip.Control` (§9.3).
+Un endpoint par commande de `Kelix.Control` (§9.3), **plus** les endpoints
+`/modules/<nom>/…` contribués par chaque module. Ces derniers ne sont pas câblés
+à la main : chaque module **déclare** sa surface via `describe_control/0` (§5.1),
+que le `Kelix.ModuleSupervisor` enregistre dans un registre central
+**`Kelix.Control.Registry`** au démarrage (déregistre au stop/reload). **Les deux
+frontaux (REST et `kelictl`) dérivent de ce même registre** — parité par
+construction : REST y monte ses routes, `kelictl` y génère ses sous-commandes et
+son aide. L'exécution passe par `handle_control/2`.
 
-**Auth — basic** : un **unique token admin** (toutes commandes, tous domaines).
-Simple ; pas de RBAC.
+**Auth — séparée de la logique.** L'authentification admin est appliquée **à la
+frontière des frontaux**, jamais dans la couche commande : côté REST un
+middleware (Plug) valide le token (ou `mtls`) avant d'appeler `Kelix.Control` /
+`handle_control` ; côté CLI c'est le cookie Erlang de la distribution qui
+authentifie. Ni `Kelix.Control` ni les `handle_control/2` des modules ne
+vérifient de token — ils supposent l'appelant déjà authentifié. En **basic** : un
+**unique token admin** (toutes commandes, tous domaines, y compris celles des
+modules) ; pas de RBAC.
 
 > **Futur (RBAC par domaine)** : un **token admin** global (tous domaines) + par
 > domaine **deux tokens** — un **lecture seule** (le domaine + les paramètres
@@ -512,13 +548,31 @@ Simple ; pas de RBAC.
 
 **Auth du registrar.** `SIP.Auth` fournit déjà les primitives digest. Câblage :
 
-- **realm = le nom de domaine** (un realm par domaine) ;
-- **secret via `subscriber_db`** au format **HA1** (`MD5(user:realm:password)`,
-  pas de mot de passe en clair) ; `password_format = "ha1" | "plain"` configurable
-  dans `[module.subscriber_db]` (défaut `ha1`), comme la table `subscriber` de
-  Kamailio ;
-- la logique **401 / accept / reject** est **côté script** registrar ;
-  `subscriber_db` ne fournit que le lookup du secret.
+- **realm = le nom de domaine** (un realm par domaine qui correspond au champ name de chaque domaine) ;
+- Si la R-URI utilise un alias pour le domaine, le challenge renvoie le nom nominale (champ name) du domaine dans le challenge.
+- **secret via `auth_db`** au format **HA1** (`MD5(user:realm:password)`,
+  pas de mot de passe en clair) ; `password_hash = "md5" | "sha256"` configurable
+  dans `[module.auth_db]` (défaut `md5`), champ utilisé pour stocker le hash configurable ; 
+  table et BDD utilisée configurable.
+
+- **séparation décision / composition** : `auth_db` **décide** (verdict), le
+  **script compose et envoie** la réponse SIP via les helpers
+  `SIP.Session.Registrar.*` (challenge/accept/reject). `auth_db` ne construit
+  aucun message SIP. Concrètement `auth_db` expose :
+
+  ```elixir
+  do_registration_auth(req, domain) :: :ok | {:requireauth, stale :: bool} | {:reject, code, reason}
+  ```
+
+  - `{:requireauth, stale}` → le script appelle `challenge_registration(req,
+    dialog_pid, realm: domain, stale: stale)` (401 ; `stale` pour le re-challenge
+    transparent d'un nonce périmé) ;
+  - `:ok` → le script enchaîne sur `registrar.save/3` (voir §12.2) ;
+  - `{:reject, code, reason}` → `reject_registration(...)`.
+
+  `do_registration_auth` fait en interne : validation du nonce stateless
+  (`Kelix.Nonce`), lookup HA1, vérification de la réponse digest (via `SIP.Auth`
+  étendu §14). C'est la version BDD de l'actuel `check_registration_auth`.
 
 **Nonce unifié, stateless (remplace le stateful).** Le nonce stateful actuel
 (`SIP.DialogImpl.Nonce`, map par dialogue) et le `generate_nonce` faible
@@ -576,7 +630,124 @@ retour), mais **non généré** en basic — la génération/edge-proxy `Path` r
 du multi-hop (*futur*). Pour un kelixip seul, edge des clients WebRTC, le
 stockage du flow suffit à router l'inbound.
 
-### 12.2 usrloc en mémoire & haute disponibilité — *futur*
+### 12.2 registrar en mémoire & haute disponibilité — *futur*
+
+C'est un module supplémentaire `registrar.beam`, `Kelix.Mod.Registrar`. 
+
+Son rôle est de stocker les AOR (Address of Record) et les contacts des UA enregistrées. 
+L'équilent kamailo est le module `registrar` + `usrloc`. Comme kamailio, il stocke: les AOR, 
+c.-à-d. le **userpart du champ `To`** (l'AOR enregistré, conformément à la RFC 3261) et la
+liste des contacts.
+
+Pour chaque contact, il stocke également:
+
+- le domaine
+- la SIP URI du contact telle que présentée dans le message REGISTER
+- Le transport, l'adresse IP et le port réel d'où vient le message REGISTER (note de conception : extraire cet info du dialogue ?)
+- le PID du dialogue associé au register
+- une info supplémentaire arbitraire fournie par le scénario
+
+fournis par la fonction save() décrite plus bas.
+
+
+Note de conception à déplacer dans kelixip_basic_design.md: 
+
+pouvoir séparer fortement les domaines. Je suggère : 
+
+  %{ "domain" => aor_map  }, voire une Registry par domain.
+
+  aor_map:
+
+  %{ "aor" => [ contact_info1, ... ] }
+
+  La gestion de l'expiration doit être traitée dans la couche dialogue. Tout cela doit s'appuyer sur la couche Dialogue et  SIP.Session.Registrar
+
+On preprend la spec
+
+Comme tout module, il est configuré par un bloc **`[module.registrar]`** — mais,
+à la différence des autres modules (dont le bloc est dans `config.toml`), le
+sien est placé dans **`domains.toml`** (fichier des domaines), car sa
+configuration est liée aux domaines et **rechargeable à chaud**. Le
+`Kelix.ModuleSupervisor` lit donc ce module depuis `domains.toml` et le
+reconfigure lors d'un `reload_domains`.
+
+Paramètre du bloc `[module.registrar]` :
+- `max_contacts_per_aor` : le nombre max de contacts par AOR.
+
+(Les bornes d'expiration `default_expires` / `min_expires` restent **par
+domaine** dans `[domain.registrar]`, §3.2 — c'est de la config d'activation de la
+fonction, distincte des paramètres du module.)
+
+Il exporte quatre fonctions :
+
+``̀ Elixir
+save(req, domain, info \\ nil)
+``̀ 
+ou 
+- req est un message REGISTER
+- domaine
+- info est une info arbitraire fournie par le scénario.
+
+La fonction extrait le ou les contacts présent dans le message REGISTER, vérifie la validité
+du expire et effectue l'enregistrement ou le désenregistrement. Elle **ne compose PAS** la
+réponse SIP : elle renvoie `{ :ok, granted }` où `granted` porte les contacts et les
+expires **réellement accordés** (après clamp). Le script s'en sert pour appeler
+`SIP.Session.Registrar.accept_registration(req, dialog_pid, granted)`, qui échoe exactement
+ce qui a été stocké (le 200 OK est ainsi cohérent avec le store *par construction*, sans
+re-calcul des bornes). En cas d'erreur, elle renvoie `{ :error, { code, reason } }` et le
+script appelle `reject_registration(...)`.
+
+> Note de conception : les bornes d'expiration sont ainsi appliquées à **un seul endroit**
+> (`save`), jamais dupliquées dans `accept_registration` — le helper ne fait qu'échoer
+> `granted`. (Refactor du helper actuel qui re-fait `check_register`/`adjust`.)
+
+Elle lit les paramètres dans la section `[domain.registrar]` (dans `domains.toml`, cf. §3.2)
+pour valider les durées d'expiration. Elle s'abonne aux évènements du dialogue pour capter le
+désenregistrement ou la coupure du transport. En particulier dans le cas des transport connecté
+s'il y a rupture de connexion l'enregistrement est invalidé.
+
+``̀ Elixir
+lookup(reqn)
+``̀ 
+
+Cette fonction prend en entrée d'importe quel message SIP a relayer vers un UA enregistré. Elle
+extrait le userpart de la R-URI de la requête et la prend comme AOR à joindre. Utilise le domain de la R-URI (le rabat sur le nom principal en cas d'utilisation d'un alias). Puis elle retourne
+un liste de requêtes modifiées prêtes être envoyées vers l'UA enregistrée. Pour ce faire, pour chaque contact enregistré pour l'AOR, la fonction:
+
+- crée une copîe de la requête initiale,
+- remplace la R-URI de la requête initiale par exactement le contact
+- enrichi les champs destip, destport et destproto de la R-URI
+
+L'ensemble est retourné comme: 
+
+``̀ Elixir
+{ :ok, [ newreq1, newreq2 ... ] }
+``̀ 
+
+Aucun contact pour l'AOR :  retour `:notfound`
+
+En cas d'erreur elle renvoie : `{ :error, reason }`
+
+Note de conception, passer la R-URI des requêtes retournées par lookup() a TransportSelector.select_transport() doit permette de retrouver EXACTEMENT le transport utilisable pour joindre l'UA. C'est en particulier vrai pour les transports connectés comme TCP, TLS et WSS dont les client DOIVENT maintenir une connexion permanente avec le registrar.
+
+La dernière fonction permet de souscrire/désouscrir aux évènements relatifs à un AOR@domain exprimé comme un `%SIP.Uri{}`
+
+``̀ Elixir
+subscribe_register_event(uri, pid)
+unsubscribe_register_event(uri, pid)
+``̀ 
+
+Ce peut être pour un AOR non encore enregistré. Dans ce cas, le processus qui souscrit
+reçoit :
+
+``̀ Elixir
+{ :registrar, :registered, aor@domaine }
+{ :registrar, :unregistered, aor@domaine }
+{ :registrar, :expired, aor@domaine }
+{ :registrar, :disconnected, aor@domaine }
+``̀ 
+
+
 
 **Décision (basic) : l'usrloc reste 100 % en mémoire** (`Registry`), sans
 persistance ni abstraction de stockage anticipée. Rationale :
@@ -588,8 +759,9 @@ persistance ni abstraction de stockage anticipée. Rationale :
 - la persistance n'a de vraie valeur que pour l'**UDP** (sans connexion) et pour
   le **partage inter-nœuds** — qui relève de la HA, explicitement *futur*.
 
-Note : l'usrloc (**location**) est distinct de l'auth (**subscriber**, gérée par
-le module `subscriber_db`). Une future persistance usrloc serait une table
+
+Note : le registrar (**location**) est distinct de l'auth (**subscriber**, gérée par
+le module `auth_db`). Une future persistance usrloc serait une table
 `location` séparée (comme chez Kamailio).
 
 **Cluster 2-3 nœuds.** Cluster de **2 ou 3 instances** kelixip redondantes.
@@ -599,6 +771,62 @@ le module `subscriber_db`). Une future persistance usrloc serait une table
 > derrière un store** (`SIP.Registrar.Store`, in-memory par défaut) et de fournir
 > un backend répliqué (Mnesia / CRDT) ou *shared-nothing + persistance BDD*.
 > Assumé comme un chantier au moment d'attaquer la HA, pas avant.
+
+**Support natif des push notifications Google, iOS et Microsoft**
+
+Une version ultérieur permettra d'associer à AOR avec un "contact" permettant de notifier
+les applications mobiles iOS, Google et Microsoft par notification push. C'est un chantier
+a faire pour une version utlérieure. Indépendante de la HA mais PAS en version basique.
+
+### 12.3 module `auth_db` (`Kelix.Mod.AuthDb`)
+
+Module qui se connecte à une base de données **MySQL / MariaDB** et fournit
+l'**authentification** du registrar. Il **décide** mais ne compose **jamais** de
+réponse SIP (§11.1).
+
+Paramètres (`[module.auth_db]`) : `driver`, `host`, `database`, `username`,
+`password`, `table`, la colonne stockant le hash, et `password_hash =
+"md5" | "sha256"` (défaut `md5`) — au format HA1 `H(user:realm:password)`.
+
+Il exporte :
+
+```elixir
+# verdict d'authentification (aucune composition SIP)
+do_registration_auth(req, domain) :: :ok | {:requireauth, stale :: bool} | {:reject, code, reason}
+
+# lookup du secret HA1 (façade bas niveau, réutilisable)
+lookup_ha1(user, realm) :: {:ok, ha1 :: binary} | :notfound | {:error, reason}
+```
+
+`do_registration_auth` : valide le nonce stateless (`Kelix.Nonce`), fait le
+lookup HA1, vérifie la réponse digest (via `SIP.Auth` étendu `qop=auth`, §14).
+`{:requireauth, stale}` quand il n'y a pas d'`Authorization` valide (ou nonce
+périmé ⇒ `stale=true`). C'est la version BDD de l'actuel `check_registration_auth`.
+
+## 12.4 Scénario `registrar.exs`
+
+Orchestrateur **mince** : il ne contient aucune logique d'auth ni de stockage
+(déléguées aux modules) — il ne fait que router les verdicts vers les helpers
+`SIP.Session.Registrar.*` qui composent et envoient la réponse SIP. C'est aussi
+lui qui porte le bloc `on_shutdown` obligatoire (§9.2).
+
+```elixir
+# état sur réception d'un REGISTER (domaine injecté par le dispatch, cf. §2)
+case do_registration_auth(req, domain) do
+  {:requireauth, stale} -> challenge_registration(req, dialog_pid, realm: domain, stale: stale)
+  {:reject, code, reason} -> reject_registration(req, dialog_pid, code, reason)
+  :ok ->
+    case save(req, domain, info) do
+      {:ok, granted}          -> accept_registration(req, dialog_pid, granted)
+      {:error, {code, reason}} -> reject_registration(req, dialog_pid, code, reason)
+    end
+end
+```
+
+Le désenregistrement (Contact `expires=0`) et l'invalidation sur coupure de
+transport connecté sont gérés par `save/3` + l'abonnement du module `registrar`
+aux évènements du dialogue (§12.2) ; le script en est notifié via
+`subscribe_register_event/2` s'il en a besoin.
 
 ## 13. Intégration de kelixip dans un produit
 
@@ -611,7 +839,7 @@ sera bâti sur base elixip/kelixip. Les points d'extension sont les **modules**
 | Élément                              | Statut     |
 |--------------------------------------|------------|
 | Fonction `registrar` (UDP/TCP/TLS/WSS) | basic      |
-| Auth digest (realm=domaine, HA1 via `subscriber_db`) | basic |
+| Auth digest (realm=domaine, HA1 via `auth_db`) | basic |
 | Nonce stateless unifié (HMAC + `qop`/`nc` + `stale`) — remplace le nonce stateful | basic |
 | Extension `SIP.Auth` : support `qop=auth` (`nc`/`cnonce`) + fallback RFC 2069 | **à faire** |
 | NAT / flow (received + réutilisation de connexion), `Path` honoré | basic |
@@ -620,9 +848,9 @@ sera bâti sur base elixip/kelixip. Les points d'extension sont les **modules**
 | Multi-domaine + dial-plan déclaratif (patterns Asterisk) | basic |
 | Migration : sortir la config de domaine des scénarios UAS INVITE | **à faire** |
 | Packaging systemd (rpm/deb)          | basic      |
-| CLI `kelixip` + API de contrôle REST | basic      |
+| CLI `kelictl` + API de contrôle REST | basic      |
 | Observabilité : `:telemetry` + `/metrics` Prometheus + `/health` (labels par domaine) | basic |
-| Modules `.beam` (subscriber_db, radius_billing) | basic |
+| Modules `.beam` (registrar, auth_db, radius_billing) | basic |
 | Pool de media servers                | basic      |
 | Fonction `calls` (B2BUA)             | **futur** — conception `docs/b2bua_module.md` |
 | Fonction `presence`                  | **futur** — squelette `SIP.Session.Presence` |
