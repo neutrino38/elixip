@@ -46,7 +46,14 @@ defmodule Kelix.Application do
       {Kelix.Domains, path: domains_path},
       # Script loading/versioning (§5) and the shared instance factory (§4.2).
       Kelix.ScriptRegistry,
-      Kelix.InstancePool
+      Kelix.InstancePool,
+      # Module system (§8): the loaded-module catalogue + the module-contributed
+      # control-surface registry, then the supervisor that starts one child per
+      # [module.<name>] block (registrar from domains.toml, the rest from
+      # config.toml). Ordered after Config + Domains, which it reads.
+      Kelix.ModuleRegistry,
+      Kelix.Control.Registry,
+      Kelix.ModuleSupervisor
     ]
 
     opts = [strategy: :one_for_one, name: Kelix.Supervisor]
