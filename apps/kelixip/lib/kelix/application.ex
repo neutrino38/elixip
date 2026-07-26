@@ -43,10 +43,23 @@ defmodule Kelix.Application do
       ),
       # Domains + dial-plan (domains.toml): hot-reloadable snapshot with atomic
       # swap (§3.2). Started empty; reloaded via Kelix.Domains.reload/1.
-      {Kelix.Domains, path: domains_path}
+      {Kelix.Domains, path: domains_path},
+      # Script loading/versioning (§5) and the shared instance factory (§4.2).
+      Kelix.ScriptRegistry,
+      Kelix.InstancePool
     ]
 
     opts = [strategy: :one_for_one, name: Kelix.Supervisor]
-    Supervisor.start_link(children, opts)
+
+    case Supervisor.start_link(children, opts) do
+      {:ok, sup} ->
+        # Route inbound REGISTER through Kelix.Router (design §4.1). calls/presence
+        # processing modules are wired when those functions land (roadmap).
+        SIP.Session.ConfigRegistry.set_registration_processing_module(Kelix.Router)
+        {:ok, sup}
+
+      other ->
+        other
+    end
   end
 end

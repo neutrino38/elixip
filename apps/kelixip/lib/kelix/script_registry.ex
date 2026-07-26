@@ -163,7 +163,11 @@ defmodule Kelix.ScriptRegistry do
     state
   end
 
-  defp path_of(state, name), do: Path.join(state.script_dir, name)
+  # A name is resolved relative to script_dir; an absolute path is used as-is
+  # (config never uses absolute script names, but tests do).
+  defp path_of(state, name) do
+    if Path.type(name) == :absolute, do: name, else: Path.join(state.script_dir, name)
+  end
 
   # ── compile with a version-suffixed module name + contract check ─────────────
 

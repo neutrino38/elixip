@@ -39,34 +39,52 @@ defmodule Kelix.ScriptRegistryTest do
     end
   end
 
-  describe "GenServer — current / reload / versioning" do
-    setup do
-      pid = start_supervised!({ScriptRegistry, script_dir: @scripts})
-      %{pid: pid}
+  # These use the Kelix.ScriptRegistry singleton started by the :kelixip app.
+  # Each test writes a UNIQUE fixture (unique path + unique module name) so it is
+  # isolated on the shared registry and never redefines another test's module.
+  describe "GenServer — current / reload / checkout (app singleton)" do
+    test "current loads+caches, reload bumps to a distinct module, checkout/checkin" do
+      path = unique_valid_script()
+
+      assert {:ok, m1} = ScriptRegistry.current(path)
+      assert {:ok, ^m1} = ScriptRegistry.current(path)
+
+      assert :ok = ScriptRegistry.reload(path)
+      assert {:ok, m2} = ScriptRegistry.current(path)
+      refute m1 == m2
+      assert to_string(m2) =~ ".V"
+
+      assert {:ok, mod, ver} = ScriptRegistry.checkout(path)
+      assert is_atom(mod) and is_integer(ver)
+      assert :ok = ScriptRegistry.checkin(path, ver)
     end
 
-    test "current/1 loads on demand and caches the same module" do
-      assert {:ok, mod} = ScriptRegistry.current("valid_registrar.exs")
-      assert {:ok, ^mod} = ScriptRegistry.current("valid_registrar.exs")
-    end
-
-    test "current/1 refuses an invalid script" do
-      assert {:error, msg} = ScriptRegistry.current("no_shutdown.exs")
+    test "current refuses an invalid script" do
+      assert {:error, msg} = ScriptRegistry.current(Path.join(@scripts, "no_shutdown.exs"))
       assert msg =~ "cooperative shutdown"
     end
+  end
 
-    test "reload bumps the version to a distinct module" do
-      assert {:ok, v1} = ScriptRegistry.current("valid_registrar.exs")
-      assert :ok = ScriptRegistry.reload("valid_registrar.exs")
-      assert {:ok, v2} = ScriptRegistry.current("valid_registrar.exs")
-      refute v1 == v2
-      assert v2 == KelixTest.ValidRegistrar.V2
-    end
+  # a minimal valid registrar with a UNIQUE module name, written to a temp file
+  defp unique_valid_script do
+    mod = "KelixTest.Reg#{System.unique_integer([:positive])}"
 
-    test "checkout increments refcount and returns the current module + version" do
-      assert {:ok, mod, ver} = ScriptRegistry.checkout("valid_registrar.exs")
-      assert is_atom(mod) and is_integer(ver)
-      assert :ok = ScriptRegistry.checkin("valid_registrar.exs", ver)
+    src = """
+    defmodule #{mod} do
+      use SIP.Scenario
+      uas :register
+      state initial_state do
+        scenario_success("ok")
+      end
+      on_shutdown do
+        scenario_aborted("shutdown")
+      end
     end
+    """
+
+    path = Path.join(System.tmp_dir!(), "reg_#{System.unique_integer([:positive])}.exs")
+    File.write!(path, src)
+    on_exit(fn -> File.rm(path) end)
+    path
   end
 end

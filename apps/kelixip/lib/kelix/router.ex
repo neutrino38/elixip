@@ -12,7 +12,10 @@ defmodule Kelix.Router do
   (added next), which call `Kelix.Domains.current/0` then `resolve/2`.
   """
 
-  alias Kelix.{Domains, Domain, DialRule}
+  @behaviour SIP.Session.Registrar
+  require Logger
+
+  alias Kelix.{Domains, Domain, DialRule, InstancePool}
 
   @type function_kind :: :registrar | :calls | :presence
   @type route :: %{domain: Domain.t(), function: function_kind, script: String.t()}
@@ -26,6 +29,36 @@ defmodule Kelix.Router do
     PUBLISH: :presence,
     MESSAGE: :presence
   }
+
+  # ── processing-module callbacks (registered in SIP.Session.ConfigRegistry) ───
+
+  @impl SIP.Session.Registrar
+  def on_new_registration(dialog_id, registerreq, _transaction_id),
+    do: dispatch(dialog_id, registerreq)
+
+  @impl SIP.Session.Registrar
+  def on_registration_expired(_dialog_id, _app_pid), do: :ok
+
+  @doc """
+  Full dispatch of an out-of-dialog request: resolve (this module) then reserve a
+  slot + spawn via `Kelix.InstancePool`. Returns `{:accept, pid}` or
+  `{:reject, code, reason}` (404/405 from routing, 503 quota, 500 script load).
+  """
+  @spec dispatch(pid | nil, map, Domains.t() | nil) :: {:accept, pid} | {:reject, integer, String.t()}
+  def dispatch(dialog_id, req, domains \\ nil) do
+    case resolve(domains || Domains.current(), req) do
+      {:reject, code, reason} ->
+        {:reject, code, reason}
+
+      {:route, %{domain: domain, function: function, script: script}} ->
+        route = %{domain: domain.name, function: function, script: script, max_calls: domain.max_calls}
+        InstancePool.accept(route, dialog_id, req, overrides_for(domain))
+    end
+  end
+
+  # Config overrides injected into every spawned instance: the domain name (so the
+  # script no longer hardcodes it — migration §14) + a marker of the served domain.
+  defp overrides_for(%Domain{name: name}), do: [domain: name]
 
   @doc """
   Resolve a request against a domains snapshot.
