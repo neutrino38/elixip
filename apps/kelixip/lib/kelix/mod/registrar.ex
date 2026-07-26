@@ -314,13 +314,15 @@ defmodule Kelix.Mod.Registrar do
   defp header_or_default(exp) when is_integer(exp), do: exp
   defp header_or_default(_), do: @default_expires
 
-  defp to_int(v, _default) when is_integer(v), do: v
   defp to_int(v, default) when is_binary(v) do
     case Integer.parse(v) do
       {n, _} -> n
       :error -> default
     end
   end
+
+  # A valueless URI param (";expires" with no "=") is parsed as `true`.
+  defp to_int(_v, default), do: default
 
   defp granted_expires(actions) do
     case for({:add, _c, exp} <- actions, do: exp) do
