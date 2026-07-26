@@ -1,0 +1,13 @@
+#!/bin/sh
+# kelictl — thin admin CLI over Kelix.Control (design §10.2).
+#
+# Installed as /usr/sbin/kelictl. It runs the CLI *inside* the live kelixip node
+# via `kelixip rpc`, so it needs no SIP stack and shares the node's cookie. The
+# CLI logic + rendering live in Kelix.Control.CLI; this overlay only forwards argv.
+set -e
+DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Forward the whole argument line as one string; the CLI re-splits it with
+# OptionParser.split/1 (honouring quotes). Escape embedded double quotes.
+ARGS=$(printf '%s' "$*" | sed 's/"/\\"/g')
+exec "$DIR/kelixip" rpc "Kelix.Control.CLI.rpc_main(\"${ARGS}\")"
