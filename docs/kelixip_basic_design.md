@@ -882,6 +882,11 @@ Spec §8.2. `:telemetry` events emitted at key points, exported as Prometheus.
 
 ## 12. Packaging
 
+> **Build toolchain (P10):** how to build the AL9 RPM — build host, Erlang/Elixir
+> versions, embedded-ERTS constraints — is in
+> [`kelixip_packaging.md`](kelixip_packaging.md). This section covers the layout
+> (umbrella, FHS, subpackages); that note covers how to produce the artifact.
+
 ### 12.0 Repository structure — umbrella, 3 apps (decided 2026-07-26)
 
 One git repo, restructured into a Mix **umbrella** so each artifact carries only
