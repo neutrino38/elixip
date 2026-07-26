@@ -29,6 +29,48 @@ defmodule SIP.Auth do
     :crypto.hash(algoid, "#{ha1}:#{nonce}:#{ha2}") |> Base.encode16(case: :lower)
   end
 
+  @doc """
+  RFC 2617 `qop=auth` digest response:
+  `H(HA1:nonce:nc:cnonce:qop:HA2)` — additive to the RFC 2069 form above
+  (kept for the no-qop fallback). `qop` is a map with `"nc"`, `"cnonce"` and
+  (optionally) `"qop"` (defaults to `"auth"`).
+  """
+  def compute_auth_response_from_ha1(algorithm, nonce, ha1, method, uri, %{} = qop) do
+    algoid = if is_binary(algorithm), do: algo2atom(algorithm), else: algorithm
+    uri = to_string(uri)
+    ha2 = :crypto.hash(algoid, "#{method}:#{uri}") |> Base.encode16(case: :lower)
+    nc = Map.fetch!(qop, "nc")
+    cnonce = Map.fetch!(qop, "cnonce")
+    qopv = Map.get(qop, "qop", "auth")
+
+    :crypto.hash(algoid, "#{ha1}:#{nonce}:#{nc}:#{cnonce}:#{qopv}:#{ha2}")
+    |> Base.encode16(case: :lower)
+  end
+
+  @doc """
+  Expected digest response for a client's Authorization params, from a stored
+  HA1. Uses the `qop=auth` form when the client sent `qop`+`nc`+`cnonce`, else
+  the RFC 2069 form (very old clients). `params` is the string-keyed auth map
+  (`"nonce"`, `"uri"`, and for qop `"qop"`/`"nc"`/`"cnonce"`); `method` is the
+  request method.
+  """
+  def expected_response_from_ha1(algorithm, ha1, method, params) when is_map(params) do
+    nonce = params["nonce"]
+    uri = params["uri"]
+
+    case params["qop"] do
+      q when is_binary(q) and q != "" ->
+        compute_auth_response_from_ha1(algorithm, nonce, ha1, method, uri, %{
+          "nc" => params["nc"],
+          "cnonce" => params["cnonce"],
+          "qop" => q
+        })
+
+      _ ->
+        compute_auth_response_from_ha1(algorithm, nonce, ha1, method, uri)
+    end
+  end
+
   @spec build_auth_response( String.t(), String.t(), String.t(), String.t(), String.t(), atom(), atom(), String.t() | SIP.Uristruct) :: map()
   @doc "Build challenge on nonce and realm"
   def build_auth_response( algorithm, username, nonce, realm, passwd_or_hash, pwdformat, method, uri) do
