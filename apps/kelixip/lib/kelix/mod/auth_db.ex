@@ -127,9 +127,12 @@ defmodule Kelix.Mod.AuthDb do
 
   defp req_method(req), do: Map.get(req, :method, :REGISTER)
 
+  # HA1 source: explicit opt, else an app-env override (tests), else the DB.
   defp lookup(username, realm, opts) do
-    case Keyword.get(opts, :ha1_lookup) do
-      fun when is_function(fun, 2) -> fun.(username, realm)
+    fun = Keyword.get(opts, :ha1_lookup) || Application.get_env(:kelixip, :authdb_ha1_lookup)
+
+    case fun do
+      f when is_function(f, 2) -> f.(username, realm)
       _ -> lookup_ha1(username, realm)
     end
   end

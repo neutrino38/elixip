@@ -467,9 +467,18 @@ defmodule SIP.DialogImpl do
     {:reply, {state.fromtag, state.callid, state.totag}, state}
   end
 
-  # Reply to an in_dialog request
+  # Reply to an in_dialog request with a 401/407 challenge.
+  #
+  # Legacy path — the 5th arg is a **binary realm**: the framework builds the
+  # digest challenge and generates+stores a stateful nonce (SHA256). Kept for
+  # back-compat (elixipp scenarios).
+  #
+  # A 401/407 whose 5th arg is a keyword list (e.g. `[wwwauthenticate: params]`)
+  # falls through to the generic clause below, which sends the response with the
+  # caller-built header verbatim — no nonce generation/storage. kelixip uses this
+  # to challenge with a stateless Kelix.Nonce + qop (design §7.3).
   def handle_call({:replyreq, req, resp_code, reason, realm}, _from, state)
-      when resp_code in [401, 407] do
+      when resp_code in [401, 407] and is_binary(realm) do
     auth = %{realm: realm, algorithm: "SHA256", authproc: "Digest"}
 
     {ret, uas_t} =

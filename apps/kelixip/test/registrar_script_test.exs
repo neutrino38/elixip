@@ -1,13 +1,18 @@
 defmodule Kelix.RegistrarScriptTest do
-  # Drives a REGISTER through a spawned instance of the reference registrar
-  # script, with a mock dialog capturing the SIP reply — the whole script logic
-  # (save → compose 200 OK) minus the transport/transaction/dialog layers.
+  # Drives the full authenticated flow through a spawned instance of the
+  # reference registrar script, with a mock dialog capturing the SIP replies:
+  #   REGISTER (no auth) → 401 challenge → digest re-REGISTER → 200 + binding.
+  # The HA1 "DB" is injected via app env; nonce/secret run for real.
   use ExUnit.Case, async: false
 
   alias Kelix.Mod.Registrar
 
-  # a mock dialog: records the reply (SIP.Dialog.reply/5 → {:replyreq, …}) and
-  # forwards it to the test process.
+  @domain "example.com"
+  @user "alice"
+  @pass "secret"
+  @uri "sip:example.com"
+  @ha1 SIP.Auth.compute_ha1("MD5", @user, @domain, @pass)
+
   defmodule MockDialog do
     use GenServer
     def start_link(test), do: GenServer.start_link(__MODULE__, test)
@@ -23,61 +28,101 @@ defmodule Kelix.RegistrarScriptTest do
   end
 
   setup_all do
-    path = Path.expand("../scripts/registrar.exs", __DIR__)
-    %{scenario: SIP.Scenario.Loader.load_file!(path)}
+    %{scenario: SIP.Scenario.Loader.load_file!(Path.expand("../scripts/registrar.exs", __DIR__))}
   end
 
   setup do
+    start_supervised!(Kelix.Secret)
+    start_supervised!(Kelix.NonceCache)
     start_supervised!(Registrar)
+    # the "subscriber DB": alice@example.com resolves to the known HA1
+    Application.put_env(:kelixip, :authdb_ha1_lookup, fn @user, @domain -> {:ok, @ha1} end)
+    on_exit(fn -> Application.delete_env(:kelixip, :authdb_ha1_lookup) end)
     :ok
   end
 
-  defp register(user, contact_host, expires \\ 3600) do
-    %{
+  defp register(opts \\ []) do
+    base = %{
       method: :REGISTER,
-      to: %SIP.Uri{userpart: user, domain: "example.com"},
-      ruri: %SIP.Uri{userpart: user, domain: "example.com", destip: {1, 2, 3, 4}, destport: 5060, destproto: "UDP"},
-      contact: %SIP.Uri{userpart: user, domain: contact_host, port: 5060},
-      expires: expires,
-      callid: "call-#{user}"
+      to: %SIP.Uri{userpart: @user, domain: @domain},
+      ruri: %SIP.Uri{userpart: @user, domain: @domain, destip: {1, 2, 3, 4}, destport: 5060, destproto: "UDP"},
+      contact: %SIP.Uri{userpart: @user, domain: "10.0.0.9", port: 5060},
+      expires: Keyword.get(opts, :expires, 3600),
+      callid: "call-1"
+    }
+
+    case Keyword.get(opts, :authorization) do
+      nil -> base
+      auth -> Map.put(base, :authorization, auth)
+    end
+  end
+
+  # a qop=auth Authorization computed as a real client would, from the challenge nonce
+  defp digest_auth(nonce, nc \\ "00000001") do
+    cnonce = "0a4f113b"
+
+    response =
+      SIP.Auth.compute_auth_response_from_ha1("MD5", nonce, @ha1, "REGISTER", @uri, %{
+        "nc" => nc,
+        "cnonce" => cnonce,
+        "qop" => "auth"
+      })
+
+    %{
+      "username" => @user,
+      "realm" => @domain,
+      "nonce" => nonce,
+      "uri" => @uri,
+      "response" => response,
+      "algorithm" => "MD5",
+      "qop" => "auth",
+      "nc" => nc,
+      "cnonce" => cnonce
     }
   end
 
-  defp spawn_registrar(module, dialog, req) do
+  defp spawn_registrar(module, dialog) do
     {pid, _ref} =
       SIP.Scenario.Runner.spawn_uas_instance(module,
         dialog_pid: dialog,
-        inbound_request: req,
-        config_overrides: [domain: "example.com"]
+        inbound_request: register(),
+        config_overrides: [domain: @domain]
       )
 
     on_exit(fn -> send(pid, {:scenario_ctl, :shutdown, :test}) end)
     pid
   end
 
-  test "a REGISTER is stored and answered with 200 OK", %{scenario: module} do
+  test "REGISTER → 401 challenge → digest re-REGISTER → 200 + binding", %{scenario: module} do
     {:ok, dialog} = MockDialog.start_link(self())
-    req = register("alice", "10.0.0.9")
+    pid = spawn_registrar(module, dialog)
 
-    pid = spawn_registrar(module, dialog, req)
-    send(pid, {:REGISTER, req, nil, dialog})
+    # 1) unauthenticated REGISTER → 401 with a stateless-nonce challenge
+    send(pid, {:REGISTER, register(), nil, dialog})
+    assert_receive {:replied, 401, "Unauthorized", fields, _}, 1000
+    params = fields[:wwwauthenticate]
+    assert params["qop"] == "auth" and params["algorithm"] == "MD5"
+    nonce = params["nonce"]
+    assert Registrar.bindings(@domain, @user) == []
 
-    assert_receive {:replied, 200, "OK", _fields, _req}, 1000
-    assert [_binding] = Registrar.bindings("example.com", "alice")
+    # 2) the client replays with a digest response → 200 + stored binding
+    send(pid, {:REGISTER, register(authorization: digest_auth(nonce)), nil, dialog})
+    assert_receive {:replied, 200, "OK", _fields, _}, 1000
+    assert [_binding] = Registrar.bindings(@domain, @user)
   end
 
-  test "an un-REGISTER (expires 0) is answered 200 and clears the binding", %{scenario: module} do
+  test "a wrong password is rejected with 403", %{scenario: module} do
     {:ok, dialog} = MockDialog.start_link(self())
+    pid = spawn_registrar(module, dialog)
 
-    # first register…
-    pid = spawn_registrar(module, dialog, register("bob", "10.0.0.9"))
-    send(pid, {:REGISTER, register("bob", "10.0.0.9"), nil, dialog})
-    assert_receive {:replied, 200, "OK", _, _}, 1000
-    assert [_] = Registrar.bindings("example.com", "bob")
+    send(pid, {:REGISTER, register(), nil, dialog})
+    assert_receive {:replied, 401, _, fields, _}, 1000
+    nonce = fields[:wwwauthenticate]["nonce"]
 
-    # …then un-register
-    send(pid, {:REGISTER, register("bob", "10.0.0.9", 0), nil, dialog})
-    assert_receive {:replied, 200, "OK", _, _}, 1000
-    assert Registrar.bindings("example.com", "bob") == []
+    # a response computed with the wrong HA1
+    bad = %{digest_auth(nonce) | "response" => "ffffffffffffffffffffffffffffffff"}
+    send(pid, {:REGISTER, register(authorization: bad), nil, dialog})
+    assert_receive {:replied, 403, _, _, _}, 1000
+    assert Registrar.bindings(@domain, @user) == []
   end
 end

@@ -65,9 +65,6 @@ defmodule Kelix.NonceTest do
     assert :error = Nonce.timestamp("garbage")
   end
 
-  test "generate/validate use Kelix.Secret when no :secret is given" do
-    start_supervised!({Kelix.Secret, secret: @secret})
-    n = Nonce.generate(@realm, now: 1_000_000)
-    assert Nonce.validate(n, @realm, now: 1_000_000) == :ok
-  end
+  # (the no-:secret default path — reading Kelix.Secret — is covered by
+  # auth_db_test / registrar_script_test, which run the real Agent.)
 end
