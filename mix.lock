@@ -18,5 +18,6 @@
   "socket": {:hex, :socket, "0.3.13", "98a2ab20ce17f95fb512c5cadddba32b57273e0d2dba2d2e5f976c5969d0c632", [:mix], [], "hexpm", "f82ea9833ef49dde272e6568ab8aac657a636acb4cf44a7de8a935acb8957c2e"},
   "socket2": {:git, "https://github.com/neutrino38/elixir-socket.git", "7cb1381cdf6d435225ef441383f9784491217f63", [branch: "feat/active-ws"]},
   "telemetry": {:hex, :telemetry, "1.4.2", "a0cb522801dffb1c49fe6e30561badffc7b6d0e180db1300df759faa22062855", [:rebar3], [], "hexpm", "928f6495066506077862c0d1646609eed891a4326bee3126ba54b60af61febb1"},
+  "toml": {:hex, :toml, "0.7.0", "fbcd773caa937d0c7a02c301a1feea25612720ac3fa1ccb8bfd9d30d822911de", [:mix], [], "hexpm", "0690246a2478c1defd100b0c9b89b4ea280a22be9a7b313a8a058a2408a2fa70"},
   "xmlrpc": {:hex, :xmlrpc, "1.4.3", "6ddf3353c601b5e3f70ef9a02fb8959bb31391648c0177a67bcb8d6cd4ab4ae1", [:mix], [{:decimal, "~> 2.0", [hex: :decimal, repo: "hexpm", optional: false]}, {:erlsom, "~> 1.4", [hex: :erlsom, repo: "hexpm", optional: false]}], "hexpm", "43ca129384d422d9934823db6d6e9965fddb3828e91028dbe1c62327cc925387"},
 }

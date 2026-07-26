@@ -30,9 +30,12 @@ defmodule Kelixip.MixProject do
   defp deps do
     [
       # The shared SIP stack + DSL + media.
-      {:elixip2, in_umbrella: true}
-      # Server-only deps (toml, bandit, plug, telemetry_*, myxql) are added in
-      # later phases (P1+), so they never reach the elixipp escript.
+      {:elixip2, in_umbrella: true},
+      # Declarative config parser (config.toml / domains.toml). Pure Elixir,
+      # no NIF, release-safe (design §13).
+      {:toml, "~> 0.7"}
+      # Other server-only deps (bandit, plug, telemetry_*, myxql) are added in
+      # later phases, so they never reach the elixipp escript.
     ]
   end
 
