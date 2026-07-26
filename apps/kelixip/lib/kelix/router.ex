@@ -44,21 +44,47 @@ defmodule Kelix.Router do
   slot + spawn via `Kelix.InstancePool`. Returns `{:accept, pid}` or
   `{:reject, code, reason}` (404/405 from routing, 503 quota, 500 script load).
   """
-  @spec dispatch(pid | nil, map, Domains.t() | nil) :: {:accept, pid} | {:reject, integer, String.t()}
+  @spec dispatch(pid | nil, map, Domains.t() | nil) ::
+          {:accept, pid} | {:reject, integer, String.t()}
   def dispatch(dialog_id, req, domains \\ nil) do
     case resolve(domains || Domains.current(), req) do
       {:reject, code, reason} ->
         {:reject, code, reason}
 
       {:route, %{domain: domain, function: function, script: script}} ->
-        route = %{domain: domain.name, function: function, script: script, max_calls: domain.max_calls}
+        route = %{
+          domain: domain.name,
+          function: function,
+          script: script,
+          max_calls: domain.max_calls
+        }
+
         InstancePool.accept(route, dialog_id, req, overrides_for(domain))
     end
   end
 
   # Config overrides injected into every spawned instance: the domain name (so the
-  # script no longer hardcodes it — migration §14) + a marker of the served domain.
-  defp overrides_for(%Domain{name: name}), do: [domain: name]
+  # script no longer hardcodes it — migration §14) and, when a media pool is up, the
+  # per-call MCU it selected (§9). The `:mediaserver_instance` key lands in the
+  # instance's context appdata and is preferred by `media_connect/0` over the global
+  # media env, so concurrent calls don't race on a shared adapter config.
+  defp overrides_for(%Domain{name: name}) do
+    case media_override() do
+      nil -> [domain: name]
+      cfg -> [domain: name, mediaserver_instance: cfg]
+    end
+  end
+
+  # ask the pool for an MCU; nil when there is no pool or none is serviceable (the
+  # instance then falls back to the global :mediaserver config).
+  defp media_override() do
+    with pid when is_pid(pid) <- Process.whereis(Kelix.MediaPool),
+         {:ok, %{module: module, url: url}} <- Kelix.MediaPool.checkout() do
+      [module: module, url: url]
+    else
+      _ -> nil
+    end
+  end
 
   @doc """
   Resolve a request against a domains snapshot.
@@ -97,8 +123,13 @@ defmodule Kelix.Router do
 
   defp function_for(req, domain) do
     case Map.get(@method_function, Map.get(req, :method)) do
-      nil -> {:reject, 405, "Method Not Allowed"}
-      function -> if function_enabled?(domain, function), do: {:ok, function}, else: {:reject, 405, "Method Not Allowed"}
+      nil ->
+        {:reject, 405, "Method Not Allowed"}
+
+      function ->
+        if function_enabled?(domain, function),
+          do: {:ok, function},
+          else: {:reject, 405, "Method Not Allowed"}
     end
   end
 

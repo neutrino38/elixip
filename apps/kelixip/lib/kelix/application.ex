@@ -53,7 +53,11 @@ defmodule Kelix.Application do
       # config.toml). Ordered after Config + Domains, which it reads.
       Kelix.ModuleRegistry,
       Kelix.Control.Registry,
-      Kelix.ModuleSupervisor
+      Kelix.ModuleSupervisor,
+      # Media server pool (§9): round-robin selection over the [mediaserver.pool.*]
+      # entries, health-checked; the Router injects the chosen MCU per call. Reads
+      # Kelix.Config, so ordered after it; boots empty when no pool is configured.
+      Kelix.MediaPool
     ]
 
     opts = [strategy: :one_for_one, name: Kelix.Supervisor]
