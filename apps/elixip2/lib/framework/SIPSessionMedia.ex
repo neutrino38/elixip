@@ -88,10 +88,21 @@ defmodule SIP.Session.Media do
   """
   @spec use_mediaserver(%SIP.Context{}) :: %SIP.Context{}
   def use_mediaserver(sip_ctx = %SIP.Context{}) do
-    cfg = Application.get_env(:elixip2, :mediaserver, []) |> normalize_ms_config()
+    cfg = ms_config(sip_ctx) |> normalize_ms_config()
     module = Keyword.get(cfg, :module, :mockup) |> resolve_ms_module()
     url = Keyword.get(cfg, :url, "sip:localhost:8080")
     use_mediaserver(sip_ctx, module, url)
+  end
+
+  # A per-instance override (in the context appdata under `:mediaserver_instance`)
+  # wins over the global `:mediaserver` app env. This lets a server like kelixip
+  # pick a pool MCU *per call* without racing on the shared app env — the standalone
+  # tool, which sets no such override, keeps its global-config behaviour unchanged.
+  defp ms_config(sip_ctx) do
+    case SIP.Context.appdata_get(sip_ctx, :mediaserver_instance) do
+      nil -> Application.get_env(:elixip2, :mediaserver, [])
+      override -> override
+    end
   end
 
   defp normalize_ms_config(cfg) when is_map(cfg), do: Map.to_list(cfg)
@@ -128,7 +139,8 @@ defmodule SIP.Session.Media do
   """
   @spec get_sdp_offer(%SIP.Context{}, atom(), MediaServer.media_kind()) ::
           {%SIP.Context{}, binary()}
-  def get_sdp_offer(sip_ctx = %SIP.Context{}, webrtc_support, medias) when is_atom(webrtc_support) do
+  def get_sdp_offer(sip_ctx = %SIP.Context{}, webrtc_support, medias)
+      when is_atom(webrtc_support) do
     if not is_pid(sip_ctx.mediaserverpid) do
       raise "No media server connected to the session context"
     end
