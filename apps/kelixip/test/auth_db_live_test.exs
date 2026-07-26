@@ -24,9 +24,14 @@ defmodule Kelix.Mod.AuthDbLiveTest do
   @cfg_path System.get_env("KELIX_AUTHDB_CONFIG")
 
   @skip_reason (cond do
-                  is_nil(@cfg_path) -> "KELIX_AUTHDB_CONFIG not set"
-                  not File.exists?(@cfg_path) -> "KELIX_AUTHDB_CONFIG file not found: #{@cfg_path}"
-                  true -> false
+                  is_nil(@cfg_path) ->
+                    "KELIX_AUTHDB_CONFIG not set"
+
+                  not File.exists?(@cfg_path) ->
+                    "KELIX_AUTHDB_CONFIG file not found: #{@cfg_path}"
+
+                  true ->
+                    false
                 end)
 
   # test_helper does `exclude: [:skip]`, a bare-atom filter that excludes on the
@@ -51,10 +56,10 @@ defmodule Kelix.Mod.AuthDbLiveTest do
     # everything except the two test params is DB/facade config
     cfg = Map.drop(file, ["realm", "testuser"])
 
-    # facade config (table/columns/hash) → app env; the real DB connection as a
-    # supervised child; nonce infra for the end-to-end verdict path.
-    AuthDb.configure(cfg)
-    start_supervised!(AuthDb.child_spec(cfg))
+    # child_spec/2 stashes the facade config (table/columns/hash) into app env and
+    # returns the real DB connection as a supervised child; nonce infra for the
+    # end-to-end verdict path.
+    start_supervised!(AuthDb.child_spec(:auth_db, cfg))
     start_supervised!(Kelix.Secret)
     start_supervised!(Kelix.NonceCache)
 

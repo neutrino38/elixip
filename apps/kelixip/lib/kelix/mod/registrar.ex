@@ -10,7 +10,12 @@ defmodule Kelix.Mod.Registrar.Contact do
           expires_at: DateTime.t()
         }
 
-  defstruct contact: nil, received: nil, flow_pid: nil, dialog_pid: nil, info: nil, expires_at: nil
+  defstruct contact: nil,
+            received: nil,
+            flow_pid: nil,
+            dialog_pid: nil,
+            info: nil,
+            expires_at: nil
 end
 
 defmodule Kelix.Mod.Registrar do
@@ -27,11 +32,14 @@ defmodule Kelix.Mod.Registrar do
     * `lookup/1` — rewrite a request to reach the registered UA(s);
     * `subscribe_register_event/2` / `unsubscribe_register_event/2`.
 
-  It will be delivered as a loadable `Kelix.Module` (P5) and hook the dialogue
-  layer for expiry / connected-transport drop (§6.4, P3c). For now it is a plain
-  supervised GenServer; expiry is time-checked on read.
+  Delivered as a loadable `Kelix.Module` (P5): `validate_config/1`, `child_spec/2`
+  and `describe/0` below; the facades route through `Kelix.Module.safe_call/3` so
+  a down store never blocks nor crashes the scenario instance. Hooking the dialogue
+  layer for expiry / connected-transport drop is §6.4/P3c; for now expiry is
+  time-checked on read.
   """
   use GenServer
+  @behaviour Kelix.Module
   require Logger
 
   alias Kelix.Mod.Registrar.Contact
@@ -56,6 +64,43 @@ defmodule Kelix.Mod.Registrar do
 
   def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
+  # ── Kelix.Module behaviour ───────────────────────────────────────────────────
+
+  @impl Kelix.Module
+  def child_spec(_name, config) do
+    opts =
+      [max_contacts_per_aor: config["max_contacts_per_aor"], min_expires: config["min_expires"]]
+      |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+
+    %{id: __MODULE__, start: {__MODULE__, :start_link, [opts]}}
+  end
+
+  @impl Kelix.Module
+  def validate_config(config) when is_map(config) do
+    with :ok <- pos_int_ok(config, "max_contacts_per_aor"),
+         :ok <- pos_int_ok(config, "min_expires"),
+         :ok <- pos_int_ok(config, "call_timeout_ms") do
+      :ok
+    end
+  end
+
+  def validate_config(_), do: {:error, "block must be a table"}
+
+  @impl Kelix.Module
+  def describe(),
+    do: %{
+      version: "1.0",
+      exports: [save: 4, lookup: 1, subscribe_register_event: 2, unsubscribe_register_event: 2]
+    }
+
+  defp pos_int_ok(config, key) do
+    case Map.get(config, key) do
+      nil -> :ok
+      v when is_integer(v) and v > 0 -> :ok
+      _ -> {:error, "#{key} must be a positive integer"}
+    end
+  end
+
   @doc """
   Register/unregister the contacts of a REGISTER `req` under `domain`. `dialog_pid`
   is the backing dialog (stored per contact, used later for teardown); `info` is
@@ -64,26 +109,28 @@ defmodule Kelix.Mod.Registrar do
   """
   @spec save(map, String.t(), pid | nil, term) :: {:ok, map} | {:error, {integer, String.t()}}
   def save(req, domain, dialog_pid \\ nil, info \\ nil),
-    do: GenServer.call(__MODULE__, {:save, req, domain, dialog_pid, info})
+    do: Kelix.Module.safe_call(__MODULE__, {:save, req, domain, dialog_pid, info})
 
   @doc "Rewrite `req` to reach the AOR's registered contacts. `{:ok, [req]}` / `:notfound` / `{:error, r}`."
   @spec lookup(map) :: {:ok, [map]} | :notfound | {:error, term}
-  def lookup(req), do: GenServer.call(__MODULE__, {:lookup, req})
+  def lookup(req), do: Kelix.Module.safe_call(__MODULE__, {:lookup, req})
 
   @doc "Raw current contacts for an AOR (expired ones filtered out)."
   @spec bindings(String.t(), String.t()) :: [Contact.t()]
-  def bindings(domain, aor), do: GenServer.call(__MODULE__, {:bindings, domain, aor})
+  def bindings(domain, aor), do: Kelix.Module.safe_call(__MODULE__, {:bindings, domain, aor})
 
   @doc "All live bindings of a domain, as `%{aor => [Contact]}` (for status/CLI)."
   @spec all(String.t()) :: %{optional(String.t()) => [Contact.t()]}
-  def all(domain), do: GenServer.call(__MODULE__, {:all, domain})
+  def all(domain), do: Kelix.Module.safe_call(__MODULE__, {:all, domain})
 
   @doc "Subscribe `pid` to `{:registrar, event, \"aor@domain\"}` events for `uri` (may be unregistered)."
   @spec subscribe_register_event(SIP.Uri.t(), pid) :: :ok
-  def subscribe_register_event(uri, pid), do: GenServer.call(__MODULE__, {:subscribe, uri, pid})
+  def subscribe_register_event(uri, pid),
+    do: Kelix.Module.safe_call(__MODULE__, {:subscribe, uri, pid})
 
   @spec unsubscribe_register_event(SIP.Uri.t(), pid) :: :ok
-  def unsubscribe_register_event(uri, pid), do: GenServer.call(__MODULE__, {:unsubscribe, uri, pid})
+  def unsubscribe_register_event(uri, pid),
+    do: Kelix.Module.safe_call(__MODULE__, {:unsubscribe, uri, pid})
 
   # ── GenServer ────────────────────────────────────────────────────────────────
 
@@ -119,8 +166,13 @@ defmodule Kelix.Mod.Registrar do
   def handle_call({:all, domain}, _from, state) do
     result =
       case Map.get(state.tables, domain) do
-        nil -> %{}
-        tid -> for {aor, _} <- :ets.tab2list(tid), into: %{}, do: {aor, live_contacts(state, domain, aor)}
+        nil ->
+          %{}
+
+        tid ->
+          for {aor, _} <- :ets.tab2list(tid),
+              into: %{},
+              do: {aor, live_contacts(state, domain, aor)}
       end
 
     {:reply, result, state}
@@ -226,7 +278,10 @@ defmodule Kelix.Mod.Registrar do
 
       {{domain, aor, _pid}, mons} ->
         tid = Map.get(state.tables, domain)
-        remaining = tid && live_contacts_from(tid, aor) |> Enum.reject(&(&1.dialog_pid == dead_pid))
+
+        remaining =
+          tid && live_contacts_from(tid, aor) |> Enum.reject(&(&1.dialog_pid == dead_pid))
+
         store_or_delete(tid, aor, remaining || [])
         notify(state, domain, aor, :disconnected)
         {:noreply, %{state | mons: mons}}
@@ -295,8 +350,11 @@ defmodule Kelix.Mod.Registrar do
   defp rewrite(req, %Contact{contact: c, received: received, flow_pid: flow}) do
     ruri =
       case received do
-        {proto, ip, port} -> %SIP.Uri{c | destip: ip, destport: port, destproto: proto, tp_pid: flow}
-        _ -> %SIP.Uri{c | tp_pid: flow}
+        {proto, ip, port} ->
+          %SIP.Uri{c | destip: ip, destport: port, destproto: proto, tp_pid: flow}
+
+        _ ->
+          %SIP.Uri{c | tp_pid: flow}
       end
 
     Map.put(req, :ruri, ruri)
@@ -395,8 +453,11 @@ defmodule Kelix.Mod.Registrar do
 
   defp received_of(req) do
     case Map.get(req, :ruri) do
-      %SIP.Uri{destip: ip, destport: port, destproto: proto} when not is_nil(ip) -> {proto, ip, port}
-      _ -> nil
+      %SIP.Uri{destip: ip, destport: port, destproto: proto} when not is_nil(ip) ->
+        {proto, ip, port}
+
+      _ ->
+        nil
     end
   end
 
