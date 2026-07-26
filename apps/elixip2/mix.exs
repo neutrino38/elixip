@@ -12,14 +12,8 @@ defmodule SIPParser.MixProject do
       deps_path: "../../deps",
       lockfile: "../../mix.lock",
       start_permanent: Mix.env() == :prod,
-      escript: escript(),
       deps: deps()
     ]
-  end
-
-  # Standalone executable: `mix escript.build` produces ./elixipp
-  defp escript do
-    [main_module: Elixipp.CLI, name: "elixipp"]
   end
 
   # Run "mix help compile.app" to learn about applications.
@@ -41,10 +35,9 @@ defmodule SIPParser.MixProject do
       {:socket2, github: "neutrino38/elixir-socket", branch: "feat/active-ws"},
       {:ex_sdp, "~> 1.1.1"},
       # XML-RPC encode/decode for the Mendooze JSR309 control interface
-      {:xmlrpc, "~> 1.4"},
-      # Pure-Elixir terminal UI (tables + live screen) for the elixipp --monitor view.
-      # No C NIF (its only dep, ucwidth, is optional), so it bundles cleanly in the escript.
-      {:owl, "~> 0.12"}
+      {:xmlrpc, "~> 1.4"}
+      # NB: owl (terminal UI) moved to apps/elixipp — it is only used by the
+      # elixipp escript's --monitor view, not by the shared stack.
     ]
   end
 end

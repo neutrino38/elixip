@@ -5,9 +5,9 @@ erl_crash.dump
 *.ez
 elixip.log
 
-# Standalone executable produced by `mix escript.build`
+# Standalone executable produced by `mix escript.build` (any app dir)
 /elixipp
-/apps/elixip2/elixipp
+/apps/*/elixipp
 elixipp.log
 
 # Real (non-committed) scenario config holding actual credentials. Use
