@@ -787,6 +787,20 @@ active sessions per MCU, MCU up/down (§11).
 
 Spec §9–§10. **Parity by construction**: one command layer, two frontals.
 
+> **Implementation status (P7, 2026-07-26 — DONE).** `Kelix.Control` implements
+> every §10.1 verb (`status`, `monitor`, `registrations`, `unregister`,
+> `shutdown_scenario`, `reload_script`, `reload_domains`, `module_reload`,
+> `mediaserver_toggle`, `set_log_level`, `graceful_shutdown`) plus
+> `module_command/3` routing to a module's `handle_control/2`. `kelictl` is the
+> `Kelix.Control.CLI` module + a `rel/overlays/bin/kelictl` overlay driven by
+> `kelixip rpc`; `rel/env.sh.eex` starts the node distributed. Dispatch is local
+> when targeting this node (so `CLI.run/2` tests need no distribution) and
+> `:rpc.call` otherwise. Surface gaps filled: `InstancePool.list/0` + `shutdown/1`
+> (monotonic per-instance id), `Mod.Registrar.remove/3`, `ModuleSupervisor.reload/1`.
+> Verified end-to-end: `mix release kelixip` assembles the overlay and a real
+> distributed node answers `kelictl status/regs/mcu` over RPC. **P8 (REST frontal,
+> `Kelix.ControlAPI` on Bandit) is the remaining §10.3 piece.**
+
 ### 10.1 `Kelix.Control`
 
 The single source of truth — every operation is a function here; neither frontal
@@ -1017,7 +1031,7 @@ before the features that need them.
 | **P4 — Auth** | `Kelix.Secret` + `Kelix.Nonce` (stateless HMAC) + `NonceCache`; `SIP.Auth` `qop=auth`; realm=domain (alias→nominal); remove stateful nonce; `Kelix.Mod.AuthDb` (HA1 lookup + 401/accept/reject) | P3, P5 |
 | **P6 — Media pool** ✅ | `Kelix.MediaPool` (round-robin, health-check, failover, toggle) over the Mendooze adapter — **DONE 2026-07-26** (§9); + additive per-instance media override in `SIP.Session.Media` | P0 |
 | **P6b — radius_billing** | `Kelix.Mod.RadiusBilling` | P5 |
-| **P7 — Control layer** | `Kelix.Control` (all verbs); `kelictl` release command over RPC (`Kelix.Control.CLI` + `bin/kelictl` overlay); versioned/notify reload; graceful shutdown | P2–P6 |
+| **P7 — Control layer** ✅ | `Kelix.Control` (all verbs); `kelictl` release command over RPC (`Kelix.Control.CLI` + `bin/kelictl` overlay); versioned/notify reload; graceful shutdown — **DONE 2026-07-26** (§10) | P2–P6 |
 | **P8 — REST API** | `bandit`+`plug` frontal; token/mtls auth; parity with CLI | P7 |
 | **P9 — Observability** | telemetry events + Prometheus exporter; `/metrics` + `/health`; per-domain labels | P2+ |
 | **P10 — Packaging (RPM d'abord)** | **produire le paquet RPM kelixip pour Alma Linux 9** : `mix release` (ERTS embarqué) → `.spec` (`%files` sur le layout FHS §12, `%pre`/`%post` créant l'utilisateur `kelixip` + l'unité systemd, `%config(noreplace)` sur `/etc/kelixip/*.toml`) → `rpmbuild`/`fpm` en CI, `module_dir` root-owned. Deb Ubuntu ensuite, même release. | P0–P9 |
