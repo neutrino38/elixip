@@ -655,6 +655,21 @@ already tolerates any nonce, so tests are unaffected.
 Spec §5. A module is a stateful OTP service **plus** stateless facades imported
 by scripts.
 
+> **Implementation status (P5, 2026-07-26 — DONE).** `Kelix.Module` (behaviour +
+> `safe_call/3`), `Kelix.ModuleRegistry` (name → {module, config} catalogue +
+> `call_timeout_ms` resolution), `Kelix.Control.Registry` (module control-surface
+> registry), and `Kelix.ModuleSupervisor` (`:one_for_one`: resolve → validate →
+> register → start one child per `[module.<name>]`, invalid block logged & skipped)
+> are implemented and wired into `Kelix.Application`. Config-source split lives in
+> `ModuleSupervisor.block_sources/2`: every module from `config.toml` **except**
+> `registrar` (from `domains.toml`, §6.1). `Kelix.Mod.Registrar` and
+> `Kelix.Mod.AuthDb` were retrofitted to the behaviour (P3/P4 predate it); their
+> facades route through `safe_call/3` (down ⇒ `{:error, :down}`, slow ⇒
+> `{:error, :timeout}`). Deferred to later phases: the REST/CLI frontals that
+> *consume* `Kelix.Control.Registry` (P7); dynamic `.beam` loading from
+> `module_dir` (P10); `code_change`-style reload versioning (§16). User manual:
+> `docs/kelixip/modules/`.
+
 ### 8.1 `Kelix.Module` behaviour
 
 As specified (§5.1): `validate_config/1`, `child_spec/2`, `describe/0`, optional
@@ -982,7 +997,7 @@ before the features that need them.
 | **P0 — Umbrella + OTP skeleton** | restructure into `apps/elixip` + `apps/elixipp` + `apps/kelixip` (§12.0, keep `elixipp`/tests green); `Kelix.Application` + supervision tree; supervise registries/ConfigRegistry/listeners; `mix release kelixip` builds; boots with an empty config | — |
 | **P1 — Config** | `toml` dep; `Kelix.Config` (infra→app env, per-listener certs); `Kelix.Domains` + `Kelix.DialPlan` compiler; atomic reload plumbing (no CLI yet) | P0 |
 | **P2 — Dispatch** | `Kelix.Router` (domain→function→script, 404/405/503); wire as ConfigRegistry processing module; `Kelix.ScriptRegistry` (version-suffixed modules + refcount) + load-time contract check; extract `Kelix.InstancePool` (shared quota, per-domain) | P1 |
-| **P5 — Module system** | `Kelix.Module` behaviour + `Kelix.ModuleSupervisor` + facade resolution + module control-surface registration (REST/CLI, §8.1) | P1 (config) |
+| **P5 — Module system** ✅ | `Kelix.Module` behaviour + `Kelix.ModuleSupervisor` + facade resolution + module control-surface registration (REST/CLI, §8.1) — **DONE 2026-07-26** (§8) | P1 (config) |
 | **P3 — Registrar module** | `Kelix.Mod.Registrar` (per-domain store; `save`/`lookup`/`subscribe`; received+flow+Path); NAT/flow inbound routing; send-over-flow framework hook | P2, P5 |
 | **P4 — Auth** | `Kelix.Secret` + `Kelix.Nonce` (stateless HMAC) + `NonceCache`; `SIP.Auth` `qop=auth`; realm=domain (alias→nominal); remove stateful nonce; `Kelix.Mod.AuthDb` (HA1 lookup + 401/accept/reject) | P3, P5 |
 | **P6 — Media pool** | `Kelix.MediaPool` (round-robin, health-check, failover, toggle) over the Mendooze adapter | P0 |
