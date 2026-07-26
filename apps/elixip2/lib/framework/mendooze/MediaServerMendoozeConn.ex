@@ -646,8 +646,8 @@ defmodule MediaServer.Mendooze.Conn do
     end
   end
 
-  defp avpf?(%{protocol: protocol}) when is_binary(protocol), do: String.ends_with?(protocol, "F")
-  defp avpf?(_), do: false
+  # Every desc comes from the SDP parser, which always sets :protocol.
+  defp avpf?(%{protocol: protocol}), do: String.ends_with?(protocol, "F")
 
   defp maybe_put(map, true, key, value), do: Map.put(map, key, value)
   defp maybe_put(map, false, _key, _value), do: map

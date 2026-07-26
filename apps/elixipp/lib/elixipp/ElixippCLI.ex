@@ -39,6 +39,17 @@ defmodule Elixipp.CLI do
   """
   require Logger
 
+  # These all end on System.halt/1 (the tool's exit paths), so Dialyzer's
+  # "no local return" is expected — suppress it for them only.
+  @dialyzer {:no_return,
+             [
+               server_monitor_halt: 1,
+               run_parallel: 7,
+               handle_force_quit: 1,
+               abort: 2,
+               print_help: 0
+             ]}
+
   @default_log_file "elixipp.log"
   @default_log_level :info
 

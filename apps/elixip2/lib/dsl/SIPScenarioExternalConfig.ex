@@ -109,8 +109,8 @@ defmodule SIP.Scenario.ExternalConfig do
 
   # ── Header ──────────────────────────────────────────────────────────────
 
-  defp parse_header!(nil), do: []
-
+  # Always a map: it is the remainder of Map.pop/2 on the decoded JSON object (an
+  # absent header simply yields an empty one, hence no nil clause).
   defp parse_header!(header) when is_map(header) do
     Enum.map(header, fn {key, value} ->
       unless key in @header_keys do
@@ -121,8 +121,6 @@ defmodule SIP.Scenario.ExternalConfig do
       header_pair!(key, value)
     end)
   end
-
-  defp parse_header!(_), do: raise(ArgumentError, "L'entête doit être un objet JSON")
 
   defp header_pair!("domain", value) when is_binary(value), do: {:domain, value}
 

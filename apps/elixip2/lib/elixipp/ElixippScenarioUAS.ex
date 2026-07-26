@@ -61,7 +61,11 @@ defmodule Elixip.ScenarioUAS do
   @spec stats() :: %{
           active: non_neg_integer(),
           total_started: non_neg_integer(),
-          total_rejected_quota: non_neg_integer()
+          total_succeeded: non_neg_integer(),
+          total_aborted: non_neg_integer(),
+          total_failed: non_neg_integer(),
+          total_rejected_quota: non_neg_integer(),
+          total_rejected_domain: non_neg_integer()
         }
   def stats, do: GenServer.call(__MODULE__, :stats)
 

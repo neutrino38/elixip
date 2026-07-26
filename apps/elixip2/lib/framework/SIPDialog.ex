@@ -114,7 +114,9 @@ alias SIP.Transac
   end
 
 
-  @spec process_incoming_request(map(), pid(), boolean()) :: {:error, any()} | {:ok, pid()} | atom() | { any, any }
+  # transact_id is nil when the request created no server transaction (the ACK of
+  # a 2xx, RFC 3261 §17.2.3, routed straight to the dialog by the transport).
+  @spec process_incoming_request(map(), pid() | nil, boolean()) :: {:error, any()} | {:ok, pid()} | atom() | { any, any }
   def process_incoming_request(req, transact_id, debug) when is_req(req) do
     { req2, dialog_id } = get_or_create_dialog_id(req)
 

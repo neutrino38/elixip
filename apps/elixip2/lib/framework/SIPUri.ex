@@ -1,5 +1,25 @@
 defmodule SIP.Uri do
 
+	@typedoc """
+	A parsed SIP URI. `destip`/`destport`/`destproto`/`tp_module`/`tp_pid` are the
+	transport info attached once the URI has been resolved or received (see
+	`has_tp_info/1`); they are nil on a freshly parsed URI.
+	"""
+	@type t :: %__MODULE__{
+					displayname: String.t() | nil,
+					userpart: String.t() | nil,
+					domain: String.t() | nil,
+					port: non_neg_integer() | nil,
+					scheme: String.t(),
+					proto: String.t(),
+					destip: tuple() | nil,
+					destport: non_neg_integer(),
+					destproto: String.t() | nil,
+					tp_module: module() | nil,
+					tp_pid: pid() | nil,
+					params: %{optional(String.t()) => String.t() | true}
+				}
+
 	defstruct [
 		displayname: nil,
 		userpart: nil,

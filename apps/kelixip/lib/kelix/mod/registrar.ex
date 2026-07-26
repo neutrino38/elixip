@@ -421,11 +421,10 @@ defmodule Kelix.Mod.Registrar do
     end
   end
 
+  # serialize/1 always succeeds on a %SIP.Uri{}, hence the hard match.
   defp uri_key(%SIP.Uri{} = u) do
-    case SIP.Uri.serialize(u) do
-      {:ok, s} -> s
-      _ -> inspect(u)
-    end
+    {:ok, s} = SIP.Uri.serialize(u)
+    s
   end
 
   defp downcase(s) when is_binary(s), do: String.downcase(s)

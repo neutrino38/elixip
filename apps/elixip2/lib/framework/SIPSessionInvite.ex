@@ -7,7 +7,8 @@ defmodule SIP.Session.Call do
   # implementation may ignore it.
   @callback on_new_call(dialog_id :: pid, invitereq :: map, transaction_id :: pid) ::
               {:accept, pid} | {:reject, integer, binary}
-  @callback on_call_end(dialog_id :: pid, app_pid :: pid) :: nil
+  # Return value ignored by the caller (aligned on on_registration_expired/2).
+  @callback on_call_end(dialog_id :: pid, app_pid :: pid) :: any()
 end
 
 defmodule SIP.Session.CallUAC do

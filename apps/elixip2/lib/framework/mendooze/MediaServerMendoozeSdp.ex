@@ -375,7 +375,10 @@ defmodule MediaServer.Mendooze.Sdp do
   end
 
   defp add_ice_lite(sdp, false), do: sdp
-  defp add_ice_lite(sdp, true), do: ExSDP.add_attribute(sdp, :ice_lite)
+  # As the "ice-lite" string, not the :ice_lite atom: both serialize to
+  # `a=ice-lite`, but only the string is part of ExSDP.Attribute.t() (the atom is
+  # produced by ExSDP's parser, never accepted by add_attribute/2's contract).
+  defp add_ice_lite(sdp, true), do: ExSDP.add_attribute(sdp, "ice-lite")
 
   defp add_server_codecs(m, rtpmaps, fmtp) do
     Enum.reduce(rtpmaps, m, fn entry, acc ->
@@ -1059,9 +1062,12 @@ defmodule MediaServer.Mendooze.Sdp do
   The telephone-event entry is emitted with the negotiated clock (G10), not the
   code table's fixed 8000 Hz, so answering OPUS keeps its 48 kHz DTMF PT.
   """
+  # Callers pass either a full negotiate/3 result (Mockup) or just the two keys
+  # used here (MendoozeConn), hence the open map.
   @spec answer_rtpmaps(:audio | :video | :text, %{
           required(:rtp_map) => rtp_map(),
-          optional(:dtmf_clock) => non_neg_integer() | nil
+          optional(:dtmf_clock) => non_neg_integer() | nil,
+          optional(atom()) => any()
         }) :: [rtpmap_entry()]
   def answer_rtpmaps(media, %{rtp_map: send_map} = neg) do
     dtmf_clock = Map.get(neg, :dtmf_clock) || 8000
