@@ -654,7 +654,10 @@ Note de conception à déplacer dans kelixip_basic_design.md:
 
 pouvoir séparer fortement les domaines. Je suggère : 
 
-  %{ "domain" => aor_map  }, voire une Registry par domain.
+  **Décidé (2026-07-26) : une table ETS par domaine** (séparation forte), + un
+  index `%{ "domain" => tid }`. La table d'un domaine est créée/supprimée avec le
+  domaine ; purge par binding via un monitor du pid de dialogue. Détail dans
+  `kelixip_basic_design.md` §6.1.
 
   aor_map:
 
@@ -729,6 +732,14 @@ Aucun contact pour l'AOR :  retour `:notfound`
 En cas d'erreur elle renvoie : `{ :error, reason }`
 
 Note de conception, passer la R-URI des requêtes retournées par lookup() a TransportSelector.select_transport() doit permette de retrouver EXACTEMENT le transport utilisable pour joindre l'UA. C'est en particulier vrai pour les transports connectés comme TCP, TLS et WSS dont les client DOIVENT maintenir une connexion permanente avec le registrar.
+
+**Décidé (2026-07-26) — `select_transport/1` doit honorer une R-URI déjà résolue**
+(aujourd'hui il l'ignore et re-résout, cf. `kelixip_basic_design.md` §6.4).
+Court-circuit à deux niveaux : (1) si `tp_pid` est vivant → l'utiliser tel quel ;
+(2) sinon si `destip` et `destport` sont présents → utiliser `destip`/`destport`/
+`destproto` directement (`destproto = nil` ⇒ UDP par défaut), sans résolution DNS ;
+(3) sinon résolution complète depuis la R-URI. `lookup()` renseigne `tp_pid` **et**
+`destip`/`destport`/`destproto`.
 
 La dernière fonction permet de souscrire/désouscrir aux évènements relatifs à un AOR@domain exprimé comme un `%SIP.Uri{}`
 

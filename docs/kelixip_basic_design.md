@@ -97,10 +97,10 @@ Kelix.Application  (use Application)
     │                                 the Router configures (see §4)
     ├── Kelix.Secret             — Agent: ephemeral server_secret (boot-random)  §7
     ├── Kelix.NonceCache         — ETS owner: nonce→nc, TTL=max_age             §7
-    ├── Kelix.ModuleSupervisor   — :one_for_one, loadable .beam services         §8
-    │     ├── Kelix.Mod.Registrar   — usrloc / contact store (per-domain), AOR-keyed §6
-    │     ├── Kelix.Mod.AuthDb       — MariaDB/MySQL auth (HA1 + 401/accept/reject)   §7
-    │     └── Kelix.Mod.RadiusBilling — RADIUS billing                                §8
+    ├── Kelix.ModuleSupervisor   — :one_for_one, loadable .beam from module_dir   §8
+    │     └── (one child per [module.<name>] block — NONE are bundled in the core;
+    │          e.g. Kelix.Mod.Registrar §6 / Kelix.Mod.AuthDb §7 / Kelix.Mod.RadiusBilling,
+    │          each loaded only if configured — an MCU-only product loads none)
     ├── Kelix.MediaPool          — GenServer: MCU pool, health-check, failover   §9
     ├── Kelix.ScriptRegistry     — GenServer: loaded scenario versions + refcount §5
     ├── Kelix.Domains            — GenServer: hot-reloadable domains.toml (atomic) §4
@@ -289,12 +289,15 @@ on_new_subscribe/3 ────┘        │
 `Elixip.ScenarioUAS` (the `elixipp` factory) and `Kelix.Router` play the same
 role — accept/reject + spawn + quota — but the factory is *single-scenario,
 single-domain* and the Router is *multi-domain, script-per-rule*. Rather than
-fork, the design **extracts the shared machinery** (quota accounting, instance
-monitoring, `{:scenario_exit,…}` counters, cooperative shutdown broadcast) into
-a small shared module (`Kelix.InstancePool` / or keep it in `ScenarioUAS` and
-have the Router delegate per (domain,function) slot). `elixipp` keeps using
-`ScenarioUAS` directly; kelixip uses the Router. Both ultimately call
-`SIP.Scenario.Runner.spawn_uas_instance/2`.
+fork, the design **extracts the shared machinery into `Kelix.InstancePool`**
+(decided 2026-07-26): quota accounting, instance monitoring,
+`{:scenario_exit,…}` counters, and cooperative-shutdown broadcast. Both
+`Elixip.ScenarioUAS` (elixipp) and `Kelix.Router` (kelixip) use it; both
+ultimately call `SIP.Scenario.Runner.spawn_uas_instance/2`.
+**Per-domain quota lives in the pool, keyed by domain** — the Router asks the
+pool for a slot under `(domain, function)` (checking per-domain `max_calls` then
+server `max_calls`); `elixipp` uses a single unnamed bucket. DRY, consistent with
+the "additive, no fork" guiding rule (§14).
 
 > **No global routing script (spec §2.2).** The Router is pure config-driven
 > dispatch. Runtime-data routing (ported number, time-of-day) lives *in the
@@ -377,11 +380,14 @@ There is **no AOR-keyed location store today** — registrations are ephemeral
 dialog processes. Kelixip adds a real usrloc (spec §12), *in memory* (basic
 scope explicitly excludes persistence/HA).
 
-Per the spec (§12.2) the registrar is delivered **as a bundled module**
-(`registrar.beam`, `Kelix.Mod.Registrar`) built on the `Kelix.Module` behaviour
-(§8) and started under `Kelix.ModuleSupervisor` — i.e. the module system is the
-extension mechanism, and even the first-party registrar uses it (Kamailio
-equivalent: `registrar` + `usrloc`). Its facade is imported by the registrar
+Per the spec (§12.2) the registrar is a **loadable module** (`registrar.beam`,
+`Kelix.Mod.Registrar`) — **not compiled into the core release** (decided
+2026-07-26): it is a `.beam` dropped in `module_dir` and loaded per config, like
+any other module (§8.3). The core kelixip release is **function-agnostic** — a
+kelixip-based product that is, say, only an MCU does not load the registrar at
+all. It is built on the `Kelix.Module` behaviour (§8) and started under
+`Kelix.ModuleSupervisor` (Kamailio equivalent: `registrar` + `usrloc`). Its
+facade is imported by the registrar
 script (`import Kelix.Mod.Registrar`). It builds on the **Dialogue layer** and
 `SIP.Session.Registrar`; **expiry is handled in the dialogue layer** (not a
 bespoke timer here).
@@ -391,13 +397,24 @@ bespoke timer here).
 > This is the storage note the spec (§12.2) explicitly marks *"à déplacer dans
 > kelixip_basic_design.md"*.
 
-Domains must be strongly separated. Two-level map (or a `Registry` per domain):
+Domains must be strongly separated — so **one ETS table per domain** (decided
+2026-07-26), not a single shared table. `Kelix.Mod.Registrar` owns a small
+top-level index `%{domain :: binary => tid}` and one ETS table per served domain:
 
 ```elixir
-%{ domain :: binary => aor_map }
-#   aor_map ::  %{ aor :: binary => [contact_info] }
-#   aor = user-part of the REGISTER `To` header (RFC 3261 — decided 2026-07-26)
+# per-domain ETS table (owned by Kelix.Mod.Registrar), key = aor
+#   aor        :: binary  = user-part of the REGISTER `To` header (RFC 3261)
+#   value      :: [contact_info]
+# top-level:  %{ domain => :ets.tid }   — a domain's table is created when the
+#                                          domain is added, dropped when removed
 ```
+
+Strong isolation: a domain's bindings live in their own table (created/dropped
+with the domain on `reload_domains`), no cross-domain key space, and a domain can
+be flushed by dropping its table. Per-binding purge stays event-driven via a
+**monitor on the dialog pid** (transport drop / dialog death → remove the
+contact, emit `:disconnected`/`:expired`). Enumerate a domain for `kelictl regs`
+by scanning its table; `regs` with no domain iterates the index.
 
 Module parameter — from its **`[module.registrar]`** block, which (unlike other
 modules' blocks in `config.toml`) lives in **`domains.toml`** so it is
@@ -463,8 +480,10 @@ No contact ⇒ `:notfound`; error ⇒ `{:error, reason}`.
 > `SIP.Transport.Selector.select_transport/1` must resolve to **exactly** the
 > transport usable to reach the UA — crucial for connected transports
 > (TCP/TLS/WSS), whose clients MUST keep a permanent connection to the registrar.
-> Concretely the rewritten R-URI carries the stored flow (`tp_pid`), which
-> already short-circuits `find_or_launch_transport` — see §6.4.
+> The rewritten R-URI carries the stored flow (`tp_pid`) **and** the resolved
+> destination (`destip`/`destport`/`destproto`); `select_transport/1` must honor
+> them instead of re-resolving — see §6.4 (this needs a real change; the Selector
+> ignores a pre-set `tp_pid` today).
 
 ```elixir
 subscribe_register_event(uri, pid)     # uri :: %SIP.Uri{} = aor@domain
@@ -501,11 +520,23 @@ callee, or the future push-notification feature (§6.5) subscribe to.
    `tp_pid: self()` to the R-URI of inbound requests; `SIP.Dialog` holds the
    dialog pid. `save/3` reads the real transport/addr from there (open: from the
    message vs from the dialog, §16).
-2. **Send over a specific flow.** `lookup/1`'s rewritten R-URI carries the stored
-   `tp_pid`; a `%SIP.Uri{tp_pid: pid}` already short-circuits
-   `find_or_launch_transport` in `SIP.Transport.Selector`, so this is mostly
-   wiring. Same open item as `uas_scenario_design.md` §8.1 (connected-transport
-   response routing).
+2. **Send over a specific flow — `Selector` change (decided 2026-07-26).** Today
+   `select_transport/1` **ignores** a pre-set `tp_pid`: it always runs
+   `resolve_and_add_dest` then looks up `Registry.SIPTransport` by
+   `proto_ip:port`. Inbound connected transports (a client's WSS/TCP/TLS spawned
+   by the Listener) are **not** in that registry, so the Selector would try to
+   open a *new outbound* connection to the peer — impossible toward a NATed
+   browser. Fix: add a two-level short-circuit at the top of `select_transport/1`:
+   1. **`tp_pid` alive** → use it as-is (skip resolution *and* lookup);
+   2. else **`destip` + `destport` present** → use `destip`/`destport`/`destproto`
+      directly (skip DNS resolution), `destproto == nil` ⇒ default **UDP**, then
+      `find_or_launch_transport` on that destination (works for UDP; a dead
+      connected flow is unreachable anyway and its binding was already purged);
+   3. else → the current full resolve from the R-URI.
+
+   `registrar.lookup/1` stamps `tp_pid` + `destip`/`destport`/`destproto` from the
+   stored binding, so both fast paths apply. Same open item as
+   `uas_scenario_design.md` §8.1 (connected-transport response routing).
 
 ### 6.5 Push notifications — *future, not basic*
 
@@ -671,6 +702,12 @@ REST + CLI extensions use a **declarative-registration** mechanism (decided
 
 ### 8.3 Provided modules
 
+First-party but **not compiled into the core release** (decided 2026-07-26):
+each ships as a `.beam` in `module_dir` and is loaded only when a
+`[module.<name>]` block declares it. The core release carries no SIP *function* —
+a kelixip-based product loads exactly the modules it needs (an MCU-only product
+loads none of these).
+
 - **`registrar`** (`Kelix.Mod.Registrar`) — the usrloc / contact store and its
   `save`/`lookup`/`subscribe` API. Fully specified in §6.
 - **`auth_db`** (`Kelix.Mod.AuthDb`) — MariaDB/MySQL access reading the
@@ -680,6 +717,10 @@ REST + CLI extensions use a **declarative-registration** mechanism (decided
   `password_hash` are configurable.
 - **`radius_billing`** (`Kelix.Mod.RadiusBilling`) — RADIUS billing. Hand-rolled
   UDP RADIUS client (no heavy dep).
+
+Packaging then delivers the core release and these modules as **separate
+artifacts** (e.g. rpm subpackages) so a deployment installs only what it uses
+(§12).
 
 Facade import in the registrar script: `import Kelix.Mod.Registrar` /
 `import Kelix.Mod.AuthDb` — the facade is a thin stateless wrapper resolving the
@@ -812,6 +853,12 @@ escript — a properly managed service.
   fpm/`rpmbuild`/`dpkg-deb` step (CI). `module_dir` must be `root`-owned,
   non-writable by the service (security, spec §11 — loading `.beam` = executing
   code).
+- **Modules are separate artifacts** (decided 2026-07-26): the core release
+  ships **no SIP function**; `registrar`/`auth_db`/`radius_billing` are packaged
+  as **rpm/deb subpackages** (`kelixip-mod-registrar`, …) dropping their `.beam`
+  into `module_dir`. A deployment installs only the modules it uses (e.g. an
+  MCU-only product installs none). A domain that enables a function whose module
+  is not installed is a **config error caught at load/`reload_domains`** (§3.2).
 
 Launch: `kelixip --config /etc/kelixip/config.toml [--stdout]`.
 
@@ -878,7 +925,7 @@ before the features that need them.
 |---|---|---|
 | **P0 — OTP skeleton** | `Kelix.Application` + supervision tree; supervise registries/ConfigRegistry/listeners; `mix release` builds; boots with an empty config | — |
 | **P1 — Config** | `toml` dep; `Kelix.Config` (infra→app env, per-listener certs); `Kelix.Domains` + `Kelix.DialPlan` compiler; atomic reload plumbing (no CLI yet) | P0 |
-| **P2 — Dispatch** | `Kelix.Router` (domain→function→script, 404/405/503); wire as ConfigRegistry processing module; `Kelix.ScriptRegistry` + load-time contract check; extract shared factory machinery | P1 |
+| **P2 — Dispatch** | `Kelix.Router` (domain→function→script, 404/405/503); wire as ConfigRegistry processing module; `Kelix.ScriptRegistry` (version-suffixed modules + refcount) + load-time contract check; extract `Kelix.InstancePool` (shared quota, per-domain) | P1 |
 | **P5 — Module system** | `Kelix.Module` behaviour + `Kelix.ModuleSupervisor` + facade resolution + module control-surface registration (REST/CLI, §8.1) | P1 (config) |
 | **P3 — Registrar module** | `Kelix.Mod.Registrar` (per-domain store; `save`/`lookup`/`subscribe`; received+flow+Path); NAT/flow inbound routing; send-over-flow framework hook | P2, P5 |
 | **P4 — Auth** | `Kelix.Secret` + `Kelix.Nonce` (stateless HMAC) + `NonceCache`; `SIP.Auth` `qop=auth`; realm=domain (alias→nominal); remove stateful nonce; `Kelix.Mod.AuthDb` (HA1 lookup + 401/accept/reject) | P3, P5 |
@@ -896,30 +943,38 @@ enabling infrastructure; P7–P10 make it a product.
 
 ## 16. Open questions
 
-1. **Shared factory vs Router-owned pooling** (§4.2) — extract a
-   `Kelix.InstancePool` shared with `Elixip.ScenarioUAS`, or have the Router
-   own per-(domain,function) slots and leave `ScenarioUAS` for `elixipp` only?
-   Affects where per-domain quota lives.
-2. **`Kelix.Module` contract** (memory: "forks ouverts sur le contrat behaviour
-   module") — is `describe/0`'s `exports` list *enforced* (facade import checked
-   against it) or purely informational? And the `.beam` code-reload / state
-   migration story (spec §5 open item, §8.3).
-3. **Script version identity** (§5.1) — recompile into version-suffixed module
-   names, or keep one module name and rely on `:code` purge/refcount? The former
-   is cleaner for true concurrent versions but pollutes the atom table over many
-   reloads.
-4. **Syslog backend choice** (§13) — dedicated dep vs erlang `:logger` syslog
-   handler vs journald-only (systemd captures stdout anyway).
-5. **usrloc storage shape** (§6.1) — the spec suggests either a two-level map
-   `%{domain => %{aor => [contact]}}` **or a `Registry` per domain**. A Registry
-   ties bindings to processes and eases per-domain isolation/teardown; a plain map
-   (ETS-backed) eases `registrations` filtering/pagination. Pick one.
-6. **`send-over-flow`** (§6.4) — confirm a `%SIP.Uri{tp_pid: pid}` (as produced by
-   `Kelix.Mod.Registrar.lookup/1`) fully short-circuits `Selector` for
-   out-of-dialog inbound routing, or whether the transaction layer needs an
-   explicit "route over this transport" path.
+All questions below were decided on **2026-07-26** unless marked otherwise.
 
-**New tensions introduced by the latest spec edits (§5, §11.1, §12):**
+1. **Shared factory vs Router-owned pooling** (§4.2) — **RESOLVED**: extract
+   `Kelix.InstancePool` (quota + monitor + counters + shutdown broadcast), used by
+   both `Elixip.ScenarioUAS` and `Kelix.Router`. Per-domain quota lives in the
+   pool, keyed by `(domain, function)`.
+2. **`Kelix.Module` contract** — **RESOLVED**: `describe/0`'s `exports` is
+   **informational** in basic (introspection/help), not a runtime gate on facade
+   imports (resolved at compile time by Elixir). `.beam` code-reload with state
+   migration (`code_change`-style) is **out of basic** — reload = `validate_config`
+   + `reload/2` or clean restart (§5.2 / §8.2); state migration is future.
+3. **Script version identity** (§5.1) — **RESOLVED**: recompile each `.exs` into a
+   **version-suffixed module name**. *Why it matters in practice:* the BEAM keeps
+   only **two** code versions per module name (current + old), so if a script is
+   reloaded while a long call still runs on an already-superseded version, a single
+   name cannot hold all the in-flight versions. Distinct names per version remove
+   that limit; each is purged (`:code.purge`) once its refcount hits 0. Cost: minor
+   atom-table growth over many reloads (reloads are infrequent admin ops).
+4. **Syslog backend choice** (§13) — **RESOLVED**: default to **stdout/journald**
+   (systemd captures it); `log.target = "syslog"` optional via a small dep (to
+   evaluate). Do not over-invest.
+5. **usrloc storage shape** (§6.1) — **RESOLVED**: **one ETS table per domain**
+   (strong domain separation), plus a top-level `%{domain => tid}` index; per-domain
+   table created/dropped with the domain, per-binding purge via a monitor on the
+   dialog pid. (Not a single shared table, not a Registry-per-domain.)
+6. **`send-over-flow`** (§6.4) — **RESOLVED**: the `Selector` does **not** honor a
+   pre-set `tp_pid` today, so add a two-level short-circuit to `select_transport/1`
+   — (1) live `tp_pid` → use it; (2) `destip`+`destport` present → use the resolved
+   dest directly (`destproto == nil` ⇒ UDP); (3) else full resolve. `lookup/1`
+   stamps both. Same item as `uas_scenario_design.md` §8.1.
+
+**Tensions from the spec's manual edits (§5, §11.1, §12) — all resolved:**
 
 7. **Where does the SIP auth response get composed?** — **RESOLVED**
    (spec §11.1/§12.3/§12.4, 2026-07-26). Modules **decide** (`auth_db` verdict,
@@ -934,16 +989,22 @@ enabling infrastructure; P7–P10 make it a product.
    `Kelix.ModuleSupervisor` reads/reconfigures the registrar from `domains.toml`.
 9. **AOR key source.** — **RESOLVED** (2026-07-26): the AOR is the user-part of
    the **`To`** header (RFC 3261).
-10. **`password_hash` default.** Spec writes `"md5" | "sha256"` with default
-    `ha1` — `ha1` is not a valid value. Read as default `"md5"`; confirm.
+10. **`password_hash` default.** — **RESOLVED**: default `"md5"` (`ha1` in the
+    spec was an invalid leftover — HA1 is the format, md5/sha256 the hash inside;
+    corrected in the spec).
 11. **Module control-surface registration** — **RESOLVED** (2026-07-26, Option B):
     optional behaviour callbacks `describe_control/0` + `handle_control/2`,
     registered at module start into a central `Kelix.Control.Registry` that both
     frontals derive from (§8.1). Admin auth is enforced at the frontal boundary
     (REST Plug middleware / CLI Erlang cookie), separate from the command logic
     (§10.3); modules inherit the single admin token.
-12. **First-party registrar as a "loadable module".** The registrar is core/basic
-    yet modelled as a `.beam` module in `module_dir` (root-owned). Confirm it ships
-    **bundled** in the release (not a drop-in) while still built on the
-    `Kelix.Module` behaviour — i.e. the module system is the internal architecture,
-    not a third-party plug-in point, for it.
+12. **First-party registrar as a "loadable module".** — **RESOLVED**: the
+    registrar/auth_db/radius_billing are **not bundled** in the core release —
+    they are `.beam` modules in `module_dir`, loaded per config, shipped as
+    separate rpm/deb subpackages (§8.3, §12). The core release is
+    **function-agnostic**: a kelixip-based product (e.g. an MCU) loads only the
+    modules it needs, and may load none of these. The module system is thus both
+    the internal architecture *and* the third-party extension point.
+
+**Remaining open (not blocking basic):** none of the above. New items will be
+logged here as implementation proceeds.
