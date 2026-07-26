@@ -131,45 +131,31 @@ defmodule Kelix.DomainsTest do
     end
   end
 
-  describe "GenServer — atomic reload" do
-    setup do
-      pid = start_supervised!(Domains)
-      %{pid: pid}
-    end
+  # Uses the Kelix.Domains singleton started by the :kelixip application (booted
+  # for these tests). One sequential test so it is independent of test order:
+  # assertions are relative to the version captured at the start.
+  test "reload is atomic — swap on success, keep current on any failure" do
+    before = Domains.current()
 
-    test "starts empty (version 0, no domains)" do
-      snap = Domains.current()
-      assert snap.version == 0
-      assert snap.domains == []
-    end
+    # valid file -> version bumped, domains + index loaded
+    good = write_tmp(@valid)
+    assert :ok = Domains.reload(good)
+    v1 = Domains.current()
+    assert v1.version == before.version + 1
+    assert length(v1.domains) == 2
+    assert %Domain{} = Domains.lookup(v1, "example.fr")
 
-    test "reload swaps in a new version" do
-      path = write_tmp(@valid)
-      assert :ok = Domains.reload(path)
-      snap = Domains.current()
-      assert snap.version == 1
-      assert length(snap.domains) == 2
-      assert %Domain{} = Domains.lookup(snap, "example.fr")
-    end
+    # invalid content -> rejected, current version untouched
+    bad = write_tmp(~s([[domain]]\nname = "a"\nbogus = 1))
+    assert {:error, msg} = Domains.reload(bad)
+    assert msg =~ "unknown key"
+    assert Domains.current().version == v1.version
+    assert length(Domains.current().domains) == 2
 
-    test "an invalid reload is rejected and keeps the current version" do
-      good = write_tmp(@valid)
-      assert :ok = Domains.reload(good)
-      assert Domains.current().version == 1
-
-      bad = write_tmp(~s([[domain]]\nname = "a"\nbogus = 1))
-      assert {:error, msg} = Domains.reload(bad)
-      assert msg =~ "unknown key"
-      # current config untouched
-      assert Domains.current().version == 1
-      assert length(Domains.current().domains) == 2
-    end
-
-    test "reload of a missing file is rejected cleanly" do
-      assert {:error, msg} = Domains.reload("/no/such/domains.toml")
-      assert msg =~ "cannot read"
-      assert Domains.current().version == 0
-    end
+    # missing file -> rejected cleanly, current untouched
+    assert {:error, msg2} = Domains.reload("/no/such/domains.toml")
+    assert msg2 =~ "cannot read"
+    assert Domains.current().version == v1.version
   end
 
   defp write_tmp(content) do
