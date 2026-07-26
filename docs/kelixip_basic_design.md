@@ -870,6 +870,15 @@ cd apps/kelixip && MIX_ENV=prod mix release kelixip  # -> release + bin/kelixip 
 > tool), and creating `apps/kelixip`. It is prerequisite work for P0 (§15) — the
 > `elixipp` escript and `mix test` must keep working throughout.
 
+> **Implementation status (P0, 2026-07-26).** Done: umbrella created;
+> `apps/elixip2` holds all current code + the elixipp escript; `apps/kelixip`
+> added with `Kelix.Application` + release. The shared-library app keeps the name
+> **`:elixip2`** (not renamed to `:elixip`) to avoid churn on 114 `:elixip2`
+> config/env references — the `:elixip2 → :elixip` rename and the split of the
+> tool into a distinct **`apps/elixipp`** are deferred follow-ups (so the current
+> state is 2 apps: `elixip2` = library+tool, `kelixip` = server). Directory is
+> `apps/elixip2` accordingly.
+
 ### 12.1 The `kelixip` release & FHS
 
 Spec §7. The server is delivered as an **OTP release** (`mix release kelixip`,
