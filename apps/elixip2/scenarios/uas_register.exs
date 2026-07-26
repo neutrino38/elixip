@@ -113,6 +113,15 @@ defmodule UAS.RegisterExample do
     end
   end
 
+  # Cooperative shutdown — required by kelixip's load-time contract (§5.3), which
+  # forbids elixip's abrupt default. A registrar has no BYE to send nor media to
+  # release, so aborting cleanly is enough. The per-state {:scenario_ctl,…} clauses
+  # above drain the common in-wait cases; this explicit block is what proves the
+  # script is shutdown-aware and is the fallback for any other state.
+  on_shutdown do
+    scenario_aborted("Registrar stopped gracefully")
+  end
+
   # ── REGISTER reply helpers (application side) ──────────────────────────────
   # Thin wrappers over the framework's dialog/transaction machinery.
 
