@@ -16,13 +16,20 @@ defmodule Kelix.InstancePool do
 
   alias Kelix.{ScriptRegistry, Config}
 
-  @type route :: %{domain: String.t(), function: atom, script: String.t(), max_calls: pos_integer | nil}
+  @type route :: %{
+          domain: String.t(),
+          function: atom,
+          script: String.t(),
+          max_calls: pos_integer | nil
+        }
 
-  # instances: ref => %{pid, dialog_id, domain, function, script, version}
+  # instances: ref => %{id, pid, dialog_id, domain, function, script, version}
   # per_domain: domain => active count
+  # next_id:    monotonic id handed to each instance (stable handle for `shutdown/1`)
   defstruct instances: %{},
             per_domain: %{},
             total_active: 0,
+            next_id: 1,
             counters: %{started: 0, succeeded: 0, aborted: 0, failed: 0, rejected_quota: 0}
 
   # ── API ──────────────────────────────────────────────────────────────────────
@@ -38,7 +45,18 @@ defmodule Kelix.InstancePool do
   def stats(), do: GenServer.call(__MODULE__, :stats)
 
   @doc "Cooperatively shut down every running instance."
-  def shutdown_all(reason \\ :node_shutdown), do: GenServer.cast(__MODULE__, {:shutdown_all, reason})
+  def shutdown_all(reason \\ :node_shutdown),
+    do: GenServer.cast(__MODULE__, {:shutdown_all, reason})
+
+  @doc "Running instances, one row per instance (for `Kelix.Control` / status / CLI)."
+  @spec list() :: [
+          %{id: pos_integer, pid: pid, domain: String.t(), function: atom, script: String.t()}
+        ]
+  def list(), do: GenServer.call(__MODULE__, :list)
+
+  @doc "Cooperatively shut down one instance by its `id` (from `list/0`). `:ok` / `{:error, :not_found}`."
+  @spec shutdown(pos_integer, term) :: :ok | {:error, :not_found}
+  def shutdown(id, reason \\ :operator), do: GenServer.call(__MODULE__, {:shutdown, id, reason})
 
   # ── GenServer ────────────────────────────────────────────────────────────────
 
@@ -56,7 +74,11 @@ defmodule Kelix.InstancePool do
         {:reply, {:reject, 503, "Service Unavailable"}, bump(state, :rejected_quota)}
 
       is_integer(dmax) and Map.get(state.per_domain, domain, 0) >= dmax ->
-        Logger.warning(module: __MODULE__, message: "domain #{domain} max_calls #{dmax} reached; 503")
+        Logger.warning(
+          module: __MODULE__,
+          message: "domain #{domain} max_calls #{dmax} reached; 503"
+        )
+
         {:reply, {:reject, 503, "Service Unavailable"}, bump(state, :rejected_quota)}
 
       true ->
@@ -65,6 +87,25 @@ defmodule Kelix.InstancePool do
   end
 
   def handle_call(:stats, _from, state), do: {:reply, stats_map(state), state}
+
+  def handle_call(:list, _from, state) do
+    rows =
+      for {_ref, i} <- state.instances,
+          do: %{id: i.id, pid: i.pid, domain: i.domain, function: i.function, script: i.script}
+
+    {:reply, Enum.sort_by(rows, & &1.id), state}
+  end
+
+  def handle_call({:shutdown, id, reason}, _from, state) do
+    case Enum.find(Map.values(state.instances), &(&1.id == id)) do
+      nil ->
+        {:reply, {:error, :not_found}, state}
+
+      inst ->
+        send(inst.pid, {:scenario_ctl, :shutdown, reason})
+        {:reply, :ok, state}
+    end
+  end
 
   @impl true
   def handle_cast({:shutdown_all, reason}, state) do
@@ -81,20 +122,30 @@ defmodule Kelix.InstancePool do
 
       {inst, instances} ->
         ScriptRegistry.checkin(inst.script, inst.version)
-        Logger.debug(module: __MODULE__, message: "instance #{inspect(pid)} ended (#{inspect(reason)})")
+
+        Logger.debug(
+          module: __MODULE__,
+          message: "instance #{inspect(pid)} ended (#{inspect(reason)})"
+        )
 
         {:noreply,
-         %{state | instances: instances, per_domain: dec(state.per_domain, inst.domain), total_active: state.total_active - 1}}
+         %{
+           state
+           | instances: instances,
+             per_domain: dec(state.per_domain, inst.domain),
+             total_active: state.total_active - 1
+         }}
     end
   end
 
   # outcome notification from the instance finalizer (slot already freed by :DOWN)
   def handle_info({:scenario_exit, _name, outcome, _reason}, state) do
-    key = case outcome do
-      :success -> :succeeded
-      :aborted -> :aborted
-      _ -> :failed
-    end
+    key =
+      case outcome do
+        :success -> :succeeded
+        :aborted -> :aborted
+        _ -> :failed
+      end
 
     {:noreply, bump(state, key)}
   end
@@ -112,7 +163,11 @@ defmodule Kelix.InstancePool do
   defp spawn_instance(state, _route, function, domain, script, dialog_id, req, overrides) do
     case ScriptRegistry.checkout(script) do
       {:error, reason} ->
-        Logger.error(module: __MODULE__, message: "cannot load script #{inspect(script)}: #{inspect(reason)}")
+        Logger.error(
+          module: __MODULE__,
+          message: "cannot load script #{inspect(script)}: #{inspect(reason)}"
+        )
+
         {:reply, {:reject, 500, "Server Internal Error"}, state}
 
       {:ok, module, version} ->
@@ -124,22 +179,39 @@ defmodule Kelix.InstancePool do
             config_overrides: overrides
           )
 
-        inst = %{pid: pid, dialog_id: dialog_id, domain: domain, function: function, script: script, version: version}
+        id = state.next_id
+
+        inst = %{
+          id: id,
+          pid: pid,
+          dialog_id: dialog_id,
+          domain: domain,
+          function: function,
+          script: script,
+          version: version
+        }
 
         state2 = %{
           state
           | instances: Map.put(state.instances, ref, inst),
             per_domain: Map.update(state.per_domain, domain, 1, &(&1 + 1)),
-            total_active: state.total_active + 1
+            total_active: state.total_active + 1,
+            next_id: id + 1
         }
 
-        Logger.debug(module: __MODULE__, message: "accepted #{function} on #{domain} → #{inspect(pid)}")
+        Logger.debug(
+          module: __MODULE__,
+          message: "accepted #{function} on #{domain} → #{inspect(pid)}"
+        )
+
         {:reply, {:accept, pid}, bump(state2, :started)}
     end
   end
 
   defp broadcast_shutdown(state, reason) do
-    Enum.each(state.instances, fn {_ref, %{pid: pid}} -> send(pid, {:scenario_ctl, :shutdown, reason}) end)
+    Enum.each(state.instances, fn {_ref, %{pid: pid}} ->
+      send(pid, {:scenario_ctl, :shutdown, reason})
+    end)
   end
 
   defp server_max_calls() do

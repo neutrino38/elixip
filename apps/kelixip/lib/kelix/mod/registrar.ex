@@ -132,6 +132,15 @@ defmodule Kelix.Mod.Registrar do
   def unsubscribe_register_event(uri, pid),
     do: Kelix.Module.safe_call(__MODULE__, {:unsubscribe, uri, pid})
 
+  @doc """
+  Administratively remove an AOR's binding(s) (for `kelictl unregister`). `contact`
+  is a specific contact-URI string, or `:all` to drop the whole AOR. Returns `:ok`,
+  `:notfound`, or a facade error (`{:error, :down | :timeout}`).
+  """
+  @spec remove(String.t(), String.t(), String.t() | :all) :: :ok | :notfound | {:error, term}
+  def remove(domain, aor, contact \\ :all),
+    do: Kelix.Module.safe_call(__MODULE__, {:remove, domain, downcase(aor), contact})
+
   # ── GenServer ────────────────────────────────────────────────────────────────
 
   @impl true
@@ -188,6 +197,11 @@ defmodule Kelix.Mod.Registrar do
     key = aor_key(uri)
     subs = Map.update(state.subs, key, MapSet.new(), &MapSet.delete(&1, pid))
     {:reply, :ok, %{state | subs: subs}}
+  end
+
+  def handle_call({:remove, domain, aor, which}, _from, state) do
+    {reply, state2} = do_remove(state, domain, aor, which)
+    {:reply, reply, state2}
   end
 
   # ── save ─────────────────────────────────────────────────────────────────────
@@ -258,6 +272,44 @@ defmodule Kelix.Mod.Registrar do
         notify(state, domain, aor, :registered)
         {:ok, granted(aor, added, granted_expires(actions)), state}
       end
+    end
+  end
+
+  # ── administrative removal (kelictl unregister) ──────────────────────────────
+
+  defp do_remove(state, domain, aor, which) do
+    case Map.get(state.tables, domain) do
+      nil -> {:notfound, state}
+      tid -> remove_from(state, domain, aor, which, tid, live_contacts_from(tid, aor))
+    end
+  end
+
+  defp remove_from(state, _domain, _aor, _which, _tid, []), do: {:notfound, state}
+
+  defp remove_from(state, domain, aor, :all, tid, _contacts) do
+    :ets.delete(tid, aor)
+    state = demonitor_aor(state, domain, aor)
+    notify(state, domain, aor, :unregistered)
+    {:ok, state}
+  end
+
+  defp remove_from(state, domain, aor, contact_str, tid, contacts) do
+    kept = Enum.reject(contacts, &(uri_key(&1.contact) == contact_str))
+
+    cond do
+      kept == contacts ->
+        {:notfound, state}
+
+      kept == [] ->
+        :ets.delete(tid, aor)
+        state = demonitor_aor(state, domain, aor)
+        notify(state, domain, aor, :unregistered)
+        {:ok, state}
+
+      true ->
+        :ets.insert(tid, {aor, kept})
+        notify(state, domain, aor, :registered)
+        {:ok, state}
     end
   end
 

@@ -36,6 +36,62 @@ defmodule Kelix.ModuleSupervisor do
     Supervisor.init(children, strategy: :one_for_one)
   end
 
+  @doc """
+  Reload one module's config at runtime (`kelictl module reload <name>`, §8.1).
+  Re-reads its block from the config sources, `validate_config/1` first (an invalid
+  block is rejected, the running service untouched), then `reload/2` if the module
+  exports it, else a clean child restart; re-registers metadata + control surface.
+  """
+  @spec reload(String.t()) :: :ok | {:error, term}
+  def reload(name) when is_binary(name) do
+    case Map.get(gather_blocks(), name) do
+      nil ->
+        {:error, :not_configured}
+
+      config ->
+        with {:ok, module} <- ok_or_error(resolve_module(name, config)),
+             :ok <- ok_or_error(validate(module, name, config)) do
+          apply_reload(name, module, config)
+        end
+    end
+  end
+
+  # {:skip, reason} (boot's "log & skip") becomes {:error, reason} for reload
+  defp ok_or_error({:skip, reason}), do: {:error, reason}
+  defp ok_or_error(other), do: other
+
+  defp apply_reload(name, module, config) do
+    name_atom = String.to_atom(name)
+
+    outcome =
+      if function_exported?(module, :reload, 2),
+        do: module.reload(name_atom, config),
+        else: restart_child(module.child_spec(name_atom, config))
+
+    case outcome do
+      :ok ->
+        register(name, module, config)
+        :ok
+
+      other ->
+        other
+    end
+  end
+
+  defp restart_child(spec) do
+    id = spec_id(spec)
+    _ = Supervisor.terminate_child(__MODULE__, id)
+    _ = Supervisor.delete_child(__MODULE__, id)
+
+    case Supervisor.start_child(__MODULE__, spec) do
+      {:ok, _pid} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp spec_id(%{id: id}), do: id
+  defp spec_id(spec) when is_tuple(spec), do: elem(spec, 0)
+
   # ── block gathering (config.toml + registrar from domains.toml) ──────────────
 
   defp gather_blocks(), do: block_sources(current(Kelix.Config), current(Kelix.Domains))
