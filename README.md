@@ -76,6 +76,9 @@ fully simulate SIP calls.
 
 ## Writing and running a SIP scenario
 
+> **Building from source?** This repo is a Mix umbrella (`apps/elixip2`,
+> `apps/elixipp`, `apps/kelixip`). See **[BUILD.md](BUILD.md)** for the full
+> build guide — the `elixipp` escript and the `kelixip` server release.
 
 There are two ways to run a scenario.
 
@@ -111,13 +114,13 @@ mix run -e "MyCallScenario.run()" scenarios/my_call_scenario.exs
 ### Mode 2 — standalone executable of elixipp
 
 Use this to ship a self-contained tool that runs scenarios without a mix/Elixir
-install. The project builds an [escript](https://hexdocs.pm/mix/Mix.Tasks.Escript.Build.html)
+install. The `apps/elixipp` app builds an [escript](https://hexdocs.pm/mix/Mix.Tasks.Escript.Build.html)
 named `elixipp` (configured via `escript: [main_module: Elixipp.CLI, name: "elixipp"]`
-in `mix.exs`).
+in `apps/elixipp/mix.exs`).
 
 ```bash
-# build the self-contained executable once
-mix escript.build          # produces ./elixipp
+# build the self-contained executable once (from the elixipp app)
+cd apps/elixipp && mix escript.build     # produces apps/elixipp/elixipp
 ```
 
 Then run scenarios directly:
