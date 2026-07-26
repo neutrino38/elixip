@@ -39,11 +39,18 @@ defmodule Kelix.Mod.Registrar do
   @default_expires 3600
   @min_expires 60
   @default_max_contacts 10
+  @sweep_ms 30_000
 
   # state:
   #   tables   %{domain => :ets.tid}          per-domain AOR store (aor => [Contact])
   #   subs     %{"aor@domain" => MapSet(pid)} register-event subscribers
-  defstruct tables: %{}, subs: %{}, max_contacts: @default_max_contacts
+  #   mons     %{monitor_ref => {domain, aor, dialog_pid}}  connected-flow monitors
+  defstruct tables: %{},
+            subs: %{},
+            mons: %{},
+            max_contacts: @default_max_contacts,
+            min_expires: @min_expires,
+            sweep_ms: @sweep_ms
 
   # ── API ──────────────────────────────────────────────────────────────────────
 
@@ -82,7 +89,15 @@ defmodule Kelix.Mod.Registrar do
 
   @impl true
   def init(opts) do
-    {:ok, %__MODULE__{max_contacts: Keyword.get(opts, :max_contacts_per_aor, @default_max_contacts)}}
+    sweep_ms = Keyword.get(opts, :sweep_ms, @sweep_ms)
+    Process.send_after(self(), :sweep, sweep_ms)
+
+    {:ok,
+     %__MODULE__{
+       max_contacts: Keyword.get(opts, :max_contacts_per_aor, @default_max_contacts),
+       min_expires: Keyword.get(opts, :min_expires, @min_expires),
+       sweep_ms: sweep_ms
+     }}
   end
 
   @impl true
@@ -128,21 +143,21 @@ defmodule Kelix.Mod.Registrar do
   defp do_save(state, req, domain, dialog_pid, info) do
     with {:ok, aor} <- aor_of(req),
          contacts = List.wrap(Map.get(req, :contact)) |> Enum.reject(&is_nil/1),
-         {:ok, actions} <- plan_contacts(contacts, Map.get(req, :expires)) do
+         {:ok, actions} <- plan_contacts(contacts, Map.get(req, :expires), state.min_expires) do
       apply_actions(state, domain, aor, actions, req, dialog_pid, info)
     end
   end
 
   # Decide, per contact, whether to add (with granted expires) or remove (expires 0).
-  defp plan_contacts([], _header), do: {:error, {400, "No Contact"}}
+  defp plan_contacts([], _header, _min), do: {:error, {400, "No Contact"}}
 
-  defp plan_contacts(contacts, header_exp) do
+  defp plan_contacts(contacts, header_exp, min_exp) do
     Enum.reduce_while(contacts, {:ok, []}, fn c, {:ok, acc} ->
       exp = requested_expires(c, header_exp)
 
       cond do
         exp == 0 -> {:cont, {:ok, [{:remove, c} | acc]}}
-        exp < @min_expires -> {:halt, {:error, {423, "Interval Too Brief"}}}
+        exp < min_exp -> {:halt, {:error, {423, "Interval Too Brief"}}}
         true -> {:cont, {:ok, [{:add, c, min(exp, @default_expires)} | acc]}}
       end
     end)
@@ -155,12 +170,14 @@ defmodule Kelix.Mod.Registrar do
   defp apply_actions(state, domain, aor, actions, req, dialog_pid, info) do
     unregister? = Enum.all?(actions, &match?({:remove, _}, &1))
     tid = table_for(state, domain)
+    state = put_table(state, domain, tid)
     existing = live_contacts_from(tid, aor)
 
     if unregister? do
       :ets.delete(tid, aor)
+      state = demonitor_aor(state, domain, aor)
       notify(state, domain, aor, :unregistered)
-      {:ok, granted(aor, [], 0), put_table(state, domain, tid)}
+      {:ok, granted(aor, [], 0), state}
     else
       # apply removes then adds, keyed by contact URI string
       kept = drop_contacts(existing, for({:remove, c} <- actions, do: uri_key(c)))
@@ -183,10 +200,79 @@ defmodule Kelix.Mod.Registrar do
         {:error, {403, "Too many contacts"}}
       else
         :ets.insert(tid, {aor, merged})
+        # Monitor the backing dialog so a connected-transport drop invalidates the
+        # binding (§6.3, WebRTC-critical).
+        state = ensure_monitor(state, domain, aor, dialog_pid)
         notify(state, domain, aor, :registered)
-        {:ok, granted(aor, added, granted_expires(actions)), put_table(state, domain, tid)}
+        {:ok, granted(aor, added, granted_expires(actions)), state}
       end
     end
+  end
+
+  # ── expiry sweep + connected-flow monitoring ─────────────────────────────────
+
+  @impl true
+  def handle_info(:sweep, state) do
+    state = Enum.reduce(Map.keys(state.tables), state, &sweep_domain(&2, &1))
+    Process.send_after(self(), :sweep, state.sweep_ms)
+    {:noreply, state}
+  end
+
+  # a monitored dialog/flow died: drop its bindings and emit :disconnected
+  def handle_info({:DOWN, ref, :process, dead_pid, _reason}, state) do
+    case Map.pop(state.mons, ref) do
+      {nil, _} ->
+        {:noreply, state}
+
+      {{domain, aor, _pid}, mons} ->
+        tid = Map.get(state.tables, domain)
+        remaining = tid && live_contacts_from(tid, aor) |> Enum.reject(&(&1.dialog_pid == dead_pid))
+        store_or_delete(tid, aor, remaining || [])
+        notify(state, domain, aor, :disconnected)
+        {:noreply, %{state | mons: mons}}
+    end
+  end
+
+  def handle_info(_msg, state), do: {:noreply, state}
+
+  defp sweep_domain(state, domain) do
+    tid = Map.get(state.tables, domain)
+
+    Enum.reduce(:ets.tab2list(tid), state, fn {aor, contacts}, st ->
+      {live, expired} = Enum.split_with(contacts, &(not expired?(&1)))
+
+      if expired == [] do
+        st
+      else
+        store_or_delete(tid, aor, live)
+        notify(st, domain, aor, :expired)
+        if live == [], do: demonitor_aor(st, domain, aor), else: st
+      end
+    end)
+  end
+
+  defp store_or_delete(tid, aor, []), do: :ets.delete(tid, aor)
+  defp store_or_delete(tid, aor, contacts), do: :ets.insert(tid, {aor, contacts})
+
+  defp ensure_monitor(state, _domain, _aor, pid) when not is_pid(pid), do: state
+
+  defp ensure_monitor(state, domain, aor, pid) do
+    already? = Enum.any?(state.mons, fn {_ref, key} -> key == {domain, aor, pid} end)
+
+    if already? do
+      state
+    else
+      ref = Process.monitor(pid)
+      %{state | mons: Map.put(state.mons, ref, {domain, aor, pid})}
+    end
+  end
+
+  defp demonitor_aor(state, domain, aor) do
+    {to_drop, kept} =
+      Enum.split_with(state.mons, fn {_ref, {d, a, _pid}} -> d == domain and a == aor end)
+
+    Enum.each(to_drop, fn {ref, _} -> Process.demonitor(ref, [:flush]) end)
+    %{state | mons: Map.new(kept)}
   end
 
   # ── lookup ───────────────────────────────────────────────────────────────────

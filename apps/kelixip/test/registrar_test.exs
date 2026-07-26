@@ -138,4 +138,33 @@ defmodule Kelix.Mod.RegistrarTest do
       refute_receive {:registrar, :registered, _}, 100
     end
   end
+
+  describe "auto-invalidation" do
+    test "a dropped connected flow (dead dialog) invalidates the binding + emits :disconnected" do
+      uri = %SIP.Uri{userpart: "alice", domain: @domain}
+      Registrar.subscribe_register_event(uri, self())
+
+      flow = spawn(fn -> Process.sleep(:infinity) end)
+      Registrar.save(register("alice", "10.0.0.9"), @domain, flow)
+      assert [_one] = Registrar.bindings(@domain, "alice")
+
+      Process.exit(flow, :kill)
+      assert_receive {:registrar, :disconnected, "alice@example.com"}, 1000
+      assert Registrar.bindings(@domain, "alice") == []
+    end
+
+    test "the periodic sweep removes expired bindings + emits :expired" do
+      # a dedicated registrar with a low minimum and a fast sweep
+      stop_supervised!(Registrar)
+      start_supervised!({Registrar, min_expires: 1, sweep_ms: 150})
+
+      uri = %SIP.Uri{userpart: "carol", domain: @domain}
+      Registrar.subscribe_register_event(uri, self())
+      Registrar.save(register("carol", "10.0.0.9", expires: 1), @domain)
+      assert [_one] = Registrar.bindings(@domain, "carol")
+
+      assert_receive {:registrar, :expired, "carol@example.com"}, 2000
+      assert Registrar.bindings(@domain, "carol") == []
+    end
+  end
 end
