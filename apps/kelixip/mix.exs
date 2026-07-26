@@ -33,9 +33,11 @@ defmodule Kelixip.MixProject do
       {:elixip2, in_umbrella: true},
       # Declarative config parser (config.toml / domains.toml). Pure Elixir,
       # no NIF, release-safe (design §13).
-      {:toml, "~> 0.7"}
-      # Other server-only deps (bandit, plug, telemetry_*, myxql) are added in
-      # later phases, so they never reach the elixipp escript.
+      {:toml, "~> 0.7"},
+      # MariaDB/MySQL driver for the auth_db module (subscriber table HA1 lookup).
+      {:myxql, "~> 0.7"}
+      # Other server-only deps (bandit, plug, telemetry_*) are added in later
+      # phases, so they never reach the elixipp escript.
     ]
   end
 

@@ -1,0 +1,155 @@
+defmodule Kelix.Mod.AuthDb do
+  @moduledoc """
+  Registrar authentication backed by a MariaDB/MySQL `subscriber` table
+  (design §7.4, §12.3). It **decides**, it never composes a SIP response
+  (§11.1): `do_registration_auth/3` returns a verdict the registrar script maps
+  onto the `SIP.Session.Registrar.*` helpers.
+
+  The secret is stored as **HA1** (`H(user:realm:password)`); the hash `H` is
+  `password_hash = "md5" | "sha256"` (default `md5`). The realm is the domain's
+  nominal name.
+
+  Facades (imported by the script): `do_registration_auth/3`, `lookup_ha1/2`.
+  The DB connection is the module's supervised service (`child_spec/1`); the
+  verdict logic is pure apart from the HA1 lookup, which is injectable for tests
+  (`:ha1_lookup`).
+  """
+  require Logger
+
+  @conn __MODULE__.Conn
+
+  @type verdict :: :ok | {:requireauth, boolean} | {:reject, integer, String.t()}
+
+  # ── DB service ───────────────────────────────────────────────────────────────
+
+  @doc "Supervised child spec: a MyXQL connection to the subscriber DB."
+  def child_spec(config) do
+    myxql_opts =
+      [
+        name: @conn,
+        hostname: config["host"] || "127.0.0.1",
+        port: config["port"] || 3306,
+        database: config["database"],
+        username: config["username"],
+        password: config["password"]
+      ]
+
+    %{id: __MODULE__, start: {MyXQL, :start_link, [myxql_opts]}}
+    |> Map.put(:__auth_cfg__, auth_cfg(config))
+  end
+
+  # config the facades need (table / columns / hash), kept in app env under the
+  # module name so lookup_ha1/do_registration_auth can read it without the pid.
+  defp auth_cfg(config) do
+    %{
+      table: config["table"] || "subscriber",
+      ha1_column: config["ha1_column"] || "ha1",
+      user_column: config["user_column"] || "username",
+      domain_column: config["domain_column"] || "domain",
+      password_hash: config["password_hash"] || "md5"
+    }
+  end
+
+  @doc "Store the facade config in app env (called by the module loader, P5)."
+  def configure(config), do: Application.put_env(:kelixip, __MODULE__, auth_cfg(config))
+
+  defp cfg(), do: Application.get_env(:kelixip, __MODULE__, %{ha1_column: "ha1", table: "subscriber", user_column: "username", domain_column: "domain"})
+
+  # ── facades ──────────────────────────────────────────────────────────────────
+
+  @doc "HA1 for `username`@`realm` from the subscriber table. `{:ok, ha1}` / `:notfound` / `{:error, r}`."
+  @spec lookup_ha1(String.t(), String.t()) :: {:ok, String.t()} | :notfound | {:error, term}
+  def lookup_ha1(username, realm) do
+    c = cfg()
+    sql = "SELECT #{c.ha1_column} FROM #{c.table} WHERE #{c.user_column} = ? AND #{c.domain_column} = ? LIMIT 1"
+
+    case MyXQL.query(@conn, sql, [username, realm]) do
+      {:ok, %MyXQL.Result{rows: [[ha1]]}} -> {:ok, ha1}
+      {:ok, %MyXQL.Result{rows: []}} -> :notfound
+      {:error, reason} -> {:error, reason}
+    end
+  rescue
+    e -> {:error, e}
+  end
+
+  @doc """
+  Authentication verdict for a REGISTER against `domain` (the realm):
+  `:ok`, `{:requireauth, stale?}` (challenge; `stale=true` ⇒ old/replayed nonce),
+  or `{:reject, code, reason}`. Never builds a SIP message.
+
+  `opts`: `:ha1_lookup` (a `fn user, realm -> {:ok, ha1} | :notfound | {:error, r}`
+  for tests), plus `:now` / `:max_age` forwarded to `Kelix.Nonce.validate`.
+  """
+  @spec do_registration_auth(map, String.t(), keyword) :: verdict
+  def do_registration_auth(req, domain, opts \\ []) do
+    case auth_header(req) do
+      nil ->
+        {:requireauth, false}
+
+      auth when is_map(auth) ->
+        if auth["realm"] == domain do
+          verify(req, domain, auth, opts)
+        else
+          {:reject, 403, "Forbidden"}
+        end
+    end
+  end
+
+  defp verify(req, domain, auth, opts) do
+    case Kelix.Nonce.validate(auth["nonce"] || "", domain, nonce_opts(opts)) do
+      :invalid -> {:requireauth, false}
+      :stale -> {:requireauth, true}
+      :ok -> check_credentials(req, domain, auth, opts)
+    end
+  end
+
+  defp check_credentials(req, domain, auth, opts) do
+    with :ok <- check_nc(auth),
+         {:ok, ha1} <- lookup(auth["username"], domain, opts),
+         expected = SIP.Auth.expected_response_from_ha1(algorithm(auth), ha1, req_method(req), auth),
+         true <- secure_equal?(expected, auth["response"] || "") do
+      :ok
+    else
+      :replay -> {:requireauth, true}
+      :notfound -> {:reject, 403, "Forbidden"}
+      false -> {:reject, 403, "Forbidden"}
+      {:error, reason} ->
+        Logger.error(module: __MODULE__, message: "HA1 lookup failed: #{inspect(reason)}")
+        {:reject, 500, "Server Internal Error"}
+    end
+  end
+
+  # ── internals ────────────────────────────────────────────────────────────────
+
+  defp auth_header(req), do: Map.get(req, :authorization) || Map.get(req, :proxyauthorization)
+
+  defp algorithm(auth), do: auth["algorithm"] || "MD5"
+
+  defp req_method(req), do: Map.get(req, :method, :REGISTER)
+
+  defp lookup(username, realm, opts) do
+    case Keyword.get(opts, :ha1_lookup) do
+      fun when is_function(fun, 2) -> fun.(username, realm)
+      _ -> lookup_ha1(username, realm)
+    end
+  end
+
+  # anti-replay: only meaningful with qop; parse the hex nc and check the cache
+  defp check_nc(%{"qop" => qop, "nonce" => nonce, "nc" => nc}) when is_binary(qop) and qop != "" do
+    case Integer.parse(nc || "", 16) do
+      {n, _} -> if Process.whereis(Kelix.NonceCache), do: Kelix.NonceCache.check_nc(nonce, n), else: :ok
+      :error -> :ok
+    end
+  end
+
+  defp check_nc(_auth), do: :ok
+
+  defp nonce_opts(opts) do
+    Keyword.take(opts, [:now, :max_age, :secret])
+  end
+
+  defp secure_equal?(a, b) when is_binary(a) and is_binary(b) and byte_size(a) == byte_size(b),
+    do: :crypto.hash_equals(a, b)
+
+  defp secure_equal?(_, _), do: false
+end
