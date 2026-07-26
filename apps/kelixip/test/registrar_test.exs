@@ -1,5 +1,7 @@
 defmodule Kelix.Mod.RegistrarTest do
-  use ExUnit.Case, async: true
+  # async: false — Kelix.Mod.Registrar is a named singleton, shared with
+  # registrar_script_test; serialize to avoid concurrent start_supervised.
+  use ExUnit.Case, async: false
 
   alias Kelix.Mod.Registrar
   alias Kelix.Mod.Registrar.Contact
