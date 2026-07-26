@@ -750,6 +750,21 @@ service by its registered name and delegating (spec §5).
 
 Spec §6. Extends the current single-`:mediaserver` config to a pool.
 
+> **Implementation status (P6, 2026-07-26 — DONE).** `Kelix.MediaPool`
+> (`apps/kelixip`) is a supervised GenServer: `checkout/1` round-robins over the
+> `enabled` + healthy `[mediaserver.pool.*]` entries, `toggle/3` enables/disables
+> an entry at runtime, and a periodic health-check probes each MCU **off** the
+> GenServer (Task + cast, so a slow MCU never stalls checkouts) with a synchronous
+> `check_health/1` for admin/tests; malformed entries are logged and skipped.
+> `Kelix.Router.overrides_for/1` injects the chosen `%{module, url}` per call.
+> **Concurrency-safe injection** required one additive framework change:
+> `SIP.Session.Media.use_mediaserver/1` now prefers a per-instance override in the
+> context appdata (`:mediaserver_instance`) over the global `:mediaserver` app env,
+> so concurrent calls don't race on a shared adapter config — the standalone
+> `elixipp` tool sets no such override and keeps its global behaviour. Deferred:
+> per-MCU active-session **metrics** (P9); the `kelictl mcu … on|off` /
+> `POST /mediaservers/<name>` frontal that calls `toggle/3` (P7).
+
 ### 9.1 `Kelix.MediaPool`
 
 Supervised GenServer over the `[mediaserver.pool.*]` entries:
@@ -1000,7 +1015,7 @@ before the features that need them.
 | **P5 — Module system** ✅ | `Kelix.Module` behaviour + `Kelix.ModuleSupervisor` + facade resolution + module control-surface registration (REST/CLI, §8.1) — **DONE 2026-07-26** (§8) | P1 (config) |
 | **P3 — Registrar module** | `Kelix.Mod.Registrar` (per-domain store; `save`/`lookup`/`subscribe`; received+flow+Path); NAT/flow inbound routing; send-over-flow framework hook | P2, P5 |
 | **P4 — Auth** | `Kelix.Secret` + `Kelix.Nonce` (stateless HMAC) + `NonceCache`; `SIP.Auth` `qop=auth`; realm=domain (alias→nominal); remove stateful nonce; `Kelix.Mod.AuthDb` (HA1 lookup + 401/accept/reject) | P3, P5 |
-| **P6 — Media pool** | `Kelix.MediaPool` (round-robin, health-check, failover, toggle) over the Mendooze adapter | P0 |
+| **P6 — Media pool** ✅ | `Kelix.MediaPool` (round-robin, health-check, failover, toggle) over the Mendooze adapter — **DONE 2026-07-26** (§9); + additive per-instance media override in `SIP.Session.Media` | P0 |
 | **P6b — radius_billing** | `Kelix.Mod.RadiusBilling` | P5 |
 | **P7 — Control layer** | `Kelix.Control` (all verbs); `kelictl` release command over RPC (`Kelix.Control.CLI` + `bin/kelictl` overlay); versioned/notify reload; graceful shutdown | P2–P6 |
 | **P8 — REST API** | `bandit`+`plug` frontal; token/mtls auth; parity with CLI | P7 |
