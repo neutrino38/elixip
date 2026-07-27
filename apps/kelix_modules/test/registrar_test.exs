@@ -48,13 +48,31 @@ defmodule Kelix.Mod.RegistrarTest do
       assert [%Contact{}] = Registrar.bindings(@domain, "bob")
     end
 
+    # SIPMsg parses `:ruri` and `:contact` into %SIP.Uri{} but leaves `:to` as the
+    # RAW header string — so this, not the struct above, is the shape a REGISTER
+    # coming off the wire actually has. Matching only the struct made every real
+    # registration fail with "400 Missing To user-part".
+    test "AOR is extracted from a raw To header string (the on-the-wire shape)" do
+      req = %{
+        register("carol", "10.0.0.9")
+        | to: "<sip:Carol@#{@domain}>;tag=abc123"
+      }
+
+      assert {:ok, granted} = Registrar.save(req, @domain)
+      assert granted.aor == "carol"
+      assert [%Contact{}] = Registrar.bindings(@domain, "carol")
+    end
+
     test "clamps a too-long expires to the max" do
-      assert {:ok, granted} = Registrar.save(register("alice", "10.0.0.9", expires: 99_999), @domain)
+      assert {:ok, granted} =
+               Registrar.save(register("alice", "10.0.0.9", expires: 99_999), @domain)
+
       assert granted.expires == 3600
     end
 
     test "rejects an expires below the minimum" do
-      assert {:error, {423, _}} = Registrar.save(register("alice", "10.0.0.9", expires: 30), @domain)
+      assert {:error, {423, _}} =
+               Registrar.save(register("alice", "10.0.0.9", expires: 30), @domain)
     end
 
     test "a refresh of the same contact does not duplicate the binding" do
@@ -84,7 +102,16 @@ defmodule Kelix.Mod.RegistrarTest do
 
     test "domains are stored separately" do
       assert {:ok, _} = Registrar.save(register("alice", "10.0.0.9"), "example.com")
-      assert {:ok, _} = Registrar.save(%{register("alice", "10.0.0.9") | to: %SIP.Uri{userpart: "alice", domain: "other.net"}}, "other.net")
+
+      assert {:ok, _} =
+               Registrar.save(
+                 %{
+                   register("alice", "10.0.0.9")
+                   | to: %SIP.Uri{userpart: "alice", domain: "other.net"}
+                 },
+                 "other.net"
+               )
+
       assert length(Registrar.bindings("example.com", "alice")) == 1
       assert length(Registrar.bindings("other.net", "alice")) == 1
       # removing from one leaves the other
@@ -97,7 +124,11 @@ defmodule Kelix.Mod.RegistrarTest do
   describe "lookup/1 — NAT/flow rewrite" do
     test "rewrites the R-URI to the contact with the real received dest + flow" do
       flow = self()
-      Registrar.save(register("alice", "10.0.0.9", destip: {8, 8, 8, 8}, destport: 6000, flow: flow), @domain)
+
+      Registrar.save(
+        register("alice", "10.0.0.9", destip: {8, 8, 8, 8}, destport: 6000, flow: flow),
+        @domain
+      )
 
       invite = %{method: :INVITE, ruri: %SIP.Uri{userpart: "alice", domain: @domain}}
       assert {:ok, [rewritten]} = Registrar.lookup(invite)
@@ -112,12 +143,22 @@ defmodule Kelix.Mod.RegistrarTest do
     test "returns one rewritten request per contact" do
       Registrar.save(register("alice", "10.0.0.9"), @domain)
       Registrar.save(register("alice", "10.0.0.42"), @domain)
-      assert {:ok, reqs} = Registrar.lookup(%{method: :INVITE, ruri: %SIP.Uri{userpart: "alice", domain: @domain}})
+
+      assert {:ok, reqs} =
+               Registrar.lookup(%{
+                 method: :INVITE,
+                 ruri: %SIP.Uri{userpart: "alice", domain: @domain}
+               })
+
       assert length(reqs) == 2
     end
 
     test "unknown AOR → :notfound" do
-      assert :notfound = Registrar.lookup(%{method: :INVITE, ruri: %SIP.Uri{userpart: "ghost", domain: @domain}})
+      assert :notfound =
+               Registrar.lookup(%{
+                 method: :INVITE,
+                 ruri: %SIP.Uri{userpart: "ghost", domain: @domain}
+               })
     end
 
     test "the rewritten R-URI carries the flow's transport module, so it can be sent on" do
@@ -126,7 +167,10 @@ defmodule Kelix.Mod.RegistrarTest do
       Registrar.save(register("alice", "10.0.0.9", tp_module: SIP.Transport.WSS), @domain)
 
       assert {:ok, [rewritten]} =
-               Registrar.lookup(%{method: :INVITE, ruri: %SIP.Uri{userpart: "alice", domain: @domain}})
+               Registrar.lookup(%{
+                 method: :INVITE,
+                 ruri: %SIP.Uri{userpart: "alice", domain: @domain}
+               })
 
       assert rewritten.ruri.tp_module == SIP.Transport.WSS
     end
@@ -149,7 +193,10 @@ defmodule Kelix.Mod.RegistrarTest do
       Registrar.save(req, @domain)
 
       assert {:ok, [rewritten]} =
-               Registrar.lookup(%{method: :INVITE, ruri: %SIP.Uri{userpart: "alice", domain: @domain}})
+               Registrar.lookup(%{
+                 method: :INVITE,
+                 ruri: %SIP.Uri{userpart: "alice", domain: @domain}
+               })
 
       selected = SIP.Transport.Selector.select_transport(rewritten.ruri)
 

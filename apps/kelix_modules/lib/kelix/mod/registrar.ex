@@ -413,8 +413,14 @@ defmodule Kelix.Mod.Registrar do
     ruri =
       case binding.received do
         {proto, ip, port} ->
-          %SIP.Uri{c | destip: ip, destport: port, destproto: proto,
-                   tp_pid: binding.flow_pid, tp_module: binding.flow_module}
+          %SIP.Uri{
+            c
+            | destip: ip,
+              destport: port,
+              destproto: proto,
+              tp_pid: binding.flow_pid,
+              tp_module: binding.flow_module
+          }
 
         _ ->
           %SIP.Uri{c | tp_pid: binding.flow_pid, tp_module: binding.flow_module}
@@ -509,12 +515,27 @@ defmodule Kelix.Mod.Registrar do
 
   # ── request field helpers ────────────────────────────────────────────────────
 
+  # The AOR is the To user-part (§6.1, §16 #9). Beware: `SIPMsg` leaves `:to` as
+  # the RAW header string (only `:ruri` and `:contact` are parsed into a
+  # `%SIP.Uri{}`), so an inbound REGISTER arrives here with a binary — parse it.
+  # A struct is accepted too: that is what a scenario/test hands over directly.
   defp aor_of(req) do
-    case Map.get(req, :to) do
+    case to_uri(Map.get(req, :to)) do
       %SIP.Uri{userpart: u} when is_binary(u) and u != "" -> {:ok, downcase(u)}
       _ -> {:error, {400, "Missing To user-part (AOR)"}}
     end
   end
+
+  defp to_uri(%SIP.Uri{} = uri), do: uri
+
+  defp to_uri(header) when is_binary(header) do
+    case SIP.Uri.parse(header) do
+      {:ok, uri} -> uri
+      _ -> nil
+    end
+  end
+
+  defp to_uri(_), do: nil
 
   defp received_of(req) do
     case Map.get(req, :ruri) do
