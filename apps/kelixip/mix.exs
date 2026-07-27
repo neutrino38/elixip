@@ -35,9 +35,13 @@ defmodule Kelixip.MixProject do
       # no NIF, release-safe (design §13).
       {:toml, "~> 0.7"},
       # MariaDB/MySQL driver for the auth_db module (subscriber table HA1 lookup).
-      {:myxql, "~> 0.7"}
-      # Other server-only deps (bandit, plug, telemetry_*) are added in later
-      # phases, so they never reach the elixipp escript.
+      {:myxql, "~> 0.7"},
+      # REST control API (design §10.3): a Plug.Router served by Bandit. Pure
+      # Elixir, release-safe. Kept out of the elixipp escript (server-only).
+      {:plug, "~> 1.16"},
+      {:bandit, "~> 1.5"}
+      # Other server-only deps (telemetry_*) are added in later phases, so they
+      # never reach the elixipp escript.
     ]
   end
 

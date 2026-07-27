@@ -798,8 +798,18 @@ Spec §9–§10. **Parity by construction**: one command layer, two frontals.
 > `:rpc.call` otherwise. Surface gaps filled: `InstancePool.list/0` + `shutdown/1`
 > (monotonic per-instance id), `Mod.Registrar.remove/3`, `ModuleSupervisor.reload/1`.
 > Verified end-to-end: `mix release kelixip` assembles the overlay and a real
-> distributed node answers `kelictl status/regs/mcu` over RPC. **P8 (REST frontal,
-> `Kelix.ControlAPI` on Bandit) is the remaining §10.3 piece.**
+> distributed node answers `kelictl status/regs/mcu` over RPC.
+>
+> **Implementation status (P8, 2026-07-27 — DONE).** `Kelix.ControlAPI` is a
+> `Plug.Router` served by **Bandit**, one route per §10.1 verb plus the
+> module-contributed `<method> /modules/<name>/<cmd>` commands (looked up in
+> `Kelix.Control.Registry`). Every route is a thin translation onto the same
+> `Kelix.Control` function `kelictl` calls, so parity is automatic. Auth is a
+> boundary Plug (`Kelix.ControlAPI.Auth`): `token` (Bearer, constant-time
+> compare), `mtls` (TLS `verify_peer` + `fail_if_no_peer_cert`), or `none`, driven
+> by `[control_api]` (parsed/validated by `Kelix.Config`, pushed to the app env).
+> `Kelix.ControlAPI.Endpoint` starts Bandit only when `[control_api].enabled`
+> (`:ignore` otherwise), ordered after `Kelix.Config` in the tree.
 
 ### 10.1 `Kelix.Control`
 
@@ -1037,7 +1047,7 @@ before the features that need them.
 | **P6 — Media pool** ✅ | `Kelix.MediaPool` (round-robin, health-check, failover, toggle) over the Mendooze adapter — **DONE 2026-07-26** (§9); + additive per-instance media override in `SIP.Session.Media` | P0 |
 | **P6b — radius_billing** | `Kelix.Mod.RadiusBilling` | P5 |
 | **P7 — Control layer** ✅ | `Kelix.Control` (all verbs); `kelictl` release command over RPC (`Kelix.Control.CLI` + `bin/kelictl` overlay); versioned/notify reload; graceful shutdown — **DONE 2026-07-26** (§10) | P2–P6 |
-| **P8 — REST API** | `bandit`+`plug` frontal; token/mtls auth; parity with CLI | P7 |
+| **P8 — REST API** ✅ | `bandit`+`plug` frontal (`Kelix.ControlAPI` + `.Auth` + `.Endpoint`); token/mtls/none auth; parity with CLI by construction — **DONE 2026-07-27** (§10.3) | P7 |
 | **P9 — Observability** | telemetry events + Prometheus exporter; `/metrics` + `/health`; per-domain labels | P2+ |
 | **P10 — Packaging (RPM d'abord)** | **produire le paquet RPM kelixip pour Alma Linux 9** : `mix release` (ERTS embarqué) → `.spec` (`%files` sur le layout FHS §12, `%pre`/`%post` créant l'utilisateur `kelixip` + l'unité systemd, `%config(noreplace)` sur `/etc/kelixip/*.toml`) → `rpmbuild`/`fpm` en CI, `module_dir` root-owned. Deb Ubuntu ensuite, même release. | P0–P9 |
 

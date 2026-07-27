@@ -96,5 +96,5 @@ contributes one; the mechanism is documented in
 ## Parity with REST
 
 Every `kelictl` command maps to a `Kelix.Control` function, and the REST frontal
-(P8) exposes the same functions — same operation, two frontals. See
-[rest-api.md](rest-api.md).
+(`Kelix.ControlAPI`) exposes the same functions — same operation, two frontals.
+See [rest-api.md](rest-api.md).

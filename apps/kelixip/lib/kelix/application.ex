@@ -57,7 +57,11 @@ defmodule Kelix.Application do
       # Media server pool (§9): round-robin selection over the [mediaserver.pool.*]
       # entries, health-checked; the Router injects the chosen MCU per call. Reads
       # Kelix.Config, so ordered after it; boots empty when no pool is configured.
-      Kelix.MediaPool
+      Kelix.MediaPool,
+      # REST control frontal (§10.3): Bandit + Kelix.ControlAPI, gated on
+      # [control_api].enabled. Reads the app env populated by Kelix.Config, so
+      # ordered after it; returns :ignore (no server) when disabled/unconfigured.
+      Kelix.ControlAPI.Endpoint
     ]
 
     opts = [strategy: :one_for_one, name: Kelix.Supervisor]

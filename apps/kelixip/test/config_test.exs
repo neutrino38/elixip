@@ -32,6 +32,7 @@ defmodule Kelix.ConfigTest do
   [control_api]
   enabled = true
   port    = 8090
+  token   = "change-me"
   """
 
   describe "parse/1 — valid" do
@@ -63,7 +64,66 @@ defmodule Kelix.ConfigTest do
 
     test "carries the sub-blocks for later phases", %{cfg: cfg} do
       assert cfg.mediaserver_pool["mcu1"]["url"] == "http://10.0.0.1:8080"
-      assert cfg.control_api["port"] == 8090
+    end
+
+    test "control_api parsed into a typed map with defaults", %{cfg: cfg} do
+      assert cfg.control_api == %{
+               enabled: true,
+               addr: "127.0.0.1",
+               port: 8090,
+               auth: "token",
+               token: "change-me"
+             }
+    end
+  end
+
+  describe "parse/1 — [control_api]" do
+    test "absent → disabled" do
+      assert {:ok, cfg} = Config.parse("")
+      assert cfg.control_api == %{enabled: false}
+    end
+
+    test "token auth requires a non-empty token" do
+      assert {:error, msg} = Config.parse("[control_api]\nauth = \"token\"")
+      assert msg =~ "missing required `token`"
+    end
+
+    test "none auth needs no token" do
+      assert {:ok, cfg} = Config.parse("[control_api]\nauth = \"none\"")
+      assert cfg.control_api.auth == "none"
+      assert cfg.control_api.token == nil
+    end
+
+    test "unknown auth mode is rejected" do
+      assert {:error, msg} = Config.parse("[control_api]\nauth = \"basic\"")
+      assert msg =~ "must be one of"
+    end
+
+    test "bad port is rejected" do
+      assert {:error, msg} = Config.parse("[control_api]\nport = 70000\ntoken = \"x\"")
+      assert msg =~ "must be a port"
+    end
+
+    test "mtls requires cert/key/cacert" do
+      assert {:error, msg} = Config.parse("[control_api]\nauth = \"mtls\"")
+      assert msg =~ "missing required `cert`"
+
+      assert {:ok, cfg} =
+               Config.parse("""
+               [control_api]
+               auth   = "mtls"
+               cert   = "/c.pem"
+               key    = "/k.pem"
+               cacert = "/ca.pem"
+               """)
+
+      assert cfg.control_api.cert == "/c.pem"
+      assert cfg.control_api.cacert == "/ca.pem"
+    end
+
+    test "cert on a token endpoint is rejected" do
+      assert {:error, msg} = Config.parse("[control_api]\ntoken = \"x\"\ncert = \"/c.pem\"")
+      assert msg =~ "only apply to mtls"
     end
   end
 
@@ -102,7 +162,9 @@ defmodule Kelix.ConfigTest do
     end
 
     test "cert on a udp listener is rejected" do
-      assert {:error, msg} = Config.parse(~s([[listen]]\nproto = "udp"\nport = 5060\ncert = "x"\nkey = "y"))
+      assert {:error, msg} =
+               Config.parse(~s([[listen]]\nproto = "udp"\nport = 5060\ncert = "x"\nkey = "y"))
+
       assert msg =~ "only apply to tls/wss"
     end
 

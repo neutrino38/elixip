@@ -52,6 +52,7 @@ defmodule Kelix.Config do
   @protos %{"udp" => :udp, "tcp" => :tcp, "tls" => :tls, "wss" => :wss}
   @log_levels ~w(debug info warning error)
   @log_targets ~w(syslog stdout)
+  @auth_modes ~w(token mtls none)
 
   # ── API ──────────────────────────────────────────────────────────────────────
 
@@ -75,7 +76,12 @@ defmodule Kelix.Config do
         with {:ok, content} <- read_file(path),
              {:ok, cfg} <- parse(content) do
           apply_app_env(cfg)
-          Logger.info(module: __MODULE__, message: "config.toml loaded (#{length(cfg.listen)} listeners)")
+
+          Logger.info(
+            module: __MODULE__,
+            message: "config.toml loaded (#{length(cfg.listen)} listeners)"
+          )
+
           {:ok, cfg}
         else
           {:error, reason} -> {:stop, {:invalid_config, reason}}
@@ -92,6 +98,10 @@ defmodule Kelix.Config do
   @spec apply_app_env(t) :: :ok
   def apply_app_env(%__MODULE__{} = cfg) do
     Application.put_env(:elixip2, :useragent, cfg.user_agent)
+    # The REST frontal (Kelix.ControlAPI.Auth) reads its settings from the app
+    # env so both the boot-time child-spec gating and the per-request auth check
+    # share one source (and tests can override it).
+    Application.put_env(:kelixip, :control_api, cfg.control_api)
     :ok
   end
 
@@ -100,10 +110,16 @@ defmodule Kelix.Config do
   @spec parse(String.t()) :: {:ok, t} | {:error, String.t()}
   def parse(content) when is_binary(content) do
     with {:ok, map} <- decode(content),
-         :ok <- reject_keys(map, ~w(server log listen mediaserver module control_api metrics), "config"),
+         :ok <-
+           reject_keys(
+             map,
+             ~w(server log listen mediaserver module control_api metrics),
+             "config"
+           ),
          {:ok, server} <- parse_server(Map.get(map, "server", %{})),
          {:ok, log} <- parse_log(Map.get(map, "log", %{})),
-         {:ok, listen} <- parse_listeners(Map.get(map, "listen", [])) do
+         {:ok, listen} <- parse_listeners(Map.get(map, "listen", [])),
+         {:ok, control_api} <- parse_control_api(Map.get(map, "control_api")) do
       {:ok,
        %__MODULE__{
          node_name: server.node_name,
@@ -115,7 +131,7 @@ defmodule Kelix.Config do
          listen: listen,
          mediaserver_pool: get_in(map, ["mediaserver", "pool"]) || %{},
          modules: Map.get(map, "module", %{}),
-         control_api: Map.get(map, "control_api", %{}),
+         control_api: control_api,
          metrics: Map.get(map, "metrics", %{})
        }}
     end
@@ -124,13 +140,21 @@ defmodule Kelix.Config do
   defp parse_server(%{} = s) do
     defaults = %__MODULE__{}
 
-    with :ok <- reject_keys(s, ~w(node_name script_dir module_dir user_agent max_calls), "[server]"),
+    with :ok <-
+           reject_keys(s, ~w(node_name script_dir module_dir user_agent max_calls), "[server]"),
          {:ok, node_name} <- opt_string(s, "node_name", defaults.node_name, "[server]"),
          {:ok, script_dir} <- opt_string(s, "script_dir", defaults.script_dir, "[server]"),
          {:ok, module_dir} <- opt_string(s, "module_dir", defaults.module_dir, "[server]"),
          {:ok, user_agent} <- opt_string(s, "user_agent", defaults.user_agent, "[server]"),
          {:ok, max_calls} <- opt_pos_integer(s, "max_calls", "[server]") do
-      {:ok, %{node_name: node_name, script_dir: script_dir, module_dir: module_dir, user_agent: user_agent, max_calls: max_calls}}
+      {:ok,
+       %{
+         node_name: node_name,
+         script_dir: script_dir,
+         module_dir: module_dir,
+         user_agent: user_agent,
+         max_calls: max_calls
+       }}
     end
   end
 
@@ -146,6 +170,46 @@ defmodule Kelix.Config do
   end
 
   defp parse_log(_), do: {:error, "[log] must be a table"}
+
+  # [control_api] — the REST frontal (design §10.3). Absent ⇒ disabled. Present ⇒
+  # enabled by default, loopback + token; `auth = "token"` requires a non-empty
+  # token; `mtls`/`none` need none. Validated at boot so a bad config fails fast.
+  defp parse_control_api(nil), do: {:ok, %{enabled: false}}
+
+  defp parse_control_api(%{} = c) do
+    with :ok <- reject_keys(c, ~w(enabled addr port auth token cert key cacert), "[control_api]"),
+         {:ok, enabled} <- opt_bool(c, "enabled", true, "[control_api]"),
+         {:ok, addr} <- opt_string(c, "addr", "127.0.0.1", "[control_api]"),
+         {:ok, port} <- opt_port(c, "port", 8090, "[control_api]"),
+         {:ok, auth} <- opt_enum(c, "auth", @auth_modes, "token", "[control_api]"),
+         {:ok, token} <- control_api_token(c, auth),
+         {:ok, tls} <- control_api_tls(c, auth) do
+      {:ok, Map.merge(%{enabled: enabled, addr: addr, port: port, auth: auth, token: token}, tls)}
+    end
+  end
+
+  defp parse_control_api(_), do: {:error, "[control_api] must be a table"}
+
+  # token is required (non-empty) for auth = "token"; ignored for mtls/none
+  defp control_api_token(c, "token"), do: req_string(c, "token", "[control_api] token auth")
+  defp control_api_token(_c, _auth), do: {:ok, nil}
+
+  # mtls needs the server cert/key plus the CA that signs accepted client certs;
+  # the other modes run over plain HTTP (loopback-bound), so certs are forbidden
+  defp control_api_tls(c, "mtls") do
+    with {:ok, cert} <- req_string(c, "cert", "[control_api] mtls"),
+         {:ok, key} <- req_string(c, "key", "[control_api] mtls"),
+         {:ok, cacert} <- req_string(c, "cacert", "[control_api] mtls") do
+      {:ok, %{cert: cert, key: key, cacert: cacert}}
+    end
+  end
+
+  defp control_api_tls(c, _auth) do
+    case {Map.get(c, "cert"), Map.get(c, "key"), Map.get(c, "cacert")} do
+      {nil, nil, nil} -> {:ok, %{}}
+      _ -> {:error, "[control_api]: `cert`/`key`/`cacert` only apply to mtls auth"}
+    end
+  end
 
   defp parse_listeners(list) when is_list(list) do
     reduce_while_ok(list, &parse_listener/1)
@@ -173,8 +237,11 @@ defmodule Kelix.Config do
           atom -> {:ok, atom}
         end
 
-      nil -> {:error, "[[listen]]: missing required `proto`"}
-      _ -> {:error, "[[listen]]: `proto` must be a string"}
+      nil ->
+        {:error, "[[listen]]: missing required `proto`"}
+
+      _ ->
+        {:error, "[[listen]]: `proto` must be a string"}
     end
   end
 
@@ -227,11 +294,33 @@ defmodule Kelix.Config do
 
   defp opt_enum(map, key, allowed, default, ctx) do
     case Map.get(map, key) do
-      nil -> {:ok, default}
-      v when is_binary(v) ->
-        if v in allowed, do: {:ok, v}, else: {:error, "#{ctx}: `#{key}` must be one of #{Enum.join(allowed, "|")}"}
+      nil ->
+        {:ok, default}
 
-      _ -> {:error, "#{ctx}: `#{key}` must be a string"}
+      v when is_binary(v) ->
+        if v in allowed,
+          do: {:ok, v},
+          else: {:error, "#{ctx}: `#{key}` must be one of #{Enum.join(allowed, "|")}"}
+
+      _ ->
+        {:error, "#{ctx}: `#{key}` must be a string"}
+    end
+  end
+
+  defp opt_bool(map, key, default, ctx) do
+    case Map.get(map, key) do
+      nil -> {:ok, default}
+      v when is_boolean(v) -> {:ok, v}
+      _ -> {:error, "#{ctx}: `#{key}` must be a boolean"}
+    end
+  end
+
+  # a valid TCP port (1..65535) with a default
+  defp opt_port(map, key, default, ctx) do
+    case Map.get(map, key) do
+      nil -> {:ok, default}
+      v when is_integer(v) and v > 0 and v < 65_536 -> {:ok, v}
+      _ -> {:error, "#{ctx}: `#{key}` must be a port (1..65535)"}
     end
   end
 
