@@ -99,5 +99,21 @@ yet.
 
 ## Observability
 
-`/metrics` (Prometheus) and `/health` are served separately, on the `[metrics]`
-port — see the roadmap (**P9**), not this control API.
+`/metrics` (Prometheus) and `/health` are served **separately**, on the
+`[metrics]` port (loopback:9095 by default), not by this control API — no auth,
+scraped by a local Prometheus. Enable with:
+
+```toml
+[metrics]
+enabled = true
+addr    = "127.0.0.1"
+port    = 9095
+```
+
+- `GET /metrics` — Prometheus text. Metrics carry a `domain` label where natural:
+  `kelix_dispatch_accepted_count` / `kelix_dispatch_rejected_count` (by
+  `domain`,`function`,`code`), `kelix_registrar_event_count` (by `domain`,`event`),
+  and the gauges `kelix_calls_active`, `kelix_registrations_active`,
+  `kelix_mediaserver_up`.
+- `GET /health` — `{"live":true,"ready":true}` with `200` when ready (config
+  surfaces up), `503` while not ready — for systemd / orchestrators.

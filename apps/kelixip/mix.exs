@@ -39,9 +39,13 @@ defmodule Kelixip.MixProject do
       # REST control API (design §10.3): a Plug.Router served by Bandit. Pure
       # Elixir, release-safe. Kept out of the elixipp escript (server-only).
       {:plug, "~> 1.16"},
-      {:bandit, "~> 1.5"}
-      # Other server-only deps (telemetry_*) are added in later phases, so they
-      # never reach the elixipp escript.
+      {:bandit, "~> 1.5"},
+      # Observability (design §11): :telemetry events → Prometheus. The `_core`
+      # exporter aggregates in ETS and exposes `scrape/1`; we serve /metrics +
+      # /health ourselves over the existing Bandit, no second HTTP stack.
+      {:telemetry, "~> 1.2"},
+      {:telemetry_metrics, "~> 1.0"},
+      {:telemetry_metrics_prometheus_core, "~> 1.1"}
     ]
   end
 

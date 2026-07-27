@@ -49,6 +49,13 @@ defmodule Kelix.Router do
   def dispatch(dialog_id, req, domains \\ nil) do
     case resolve(domains || Domains.current(), req) do
       {:reject, code, reason} ->
+        # routing reject (404 no-domain / 405 method): label by host + method
+        Kelix.Metrics.Emit.dispatch_rejected(
+          req_host(req) || "unknown",
+          method_function(req),
+          code
+        )
+
         {:reject, code, reason}
 
       {:route, %{domain: domain, function: function, script: script}} ->
@@ -59,9 +66,28 @@ defmodule Kelix.Router do
           max_calls: domain.max_calls
         }
 
-        InstancePool.accept(route, dialog_id, req, overrides_for(domain))
+        emit_accept(
+          InstancePool.accept(route, dialog_id, req, overrides_for(domain)),
+          domain.name,
+          function
+        )
     end
   end
+
+  # single dispatch-metric funnel: label the InstancePool outcome (accepted, or
+  # 503 quota / 500 load reject) by the resolved domain + function
+  defp emit_accept({:accept, _pid} = ok, domain, function) do
+    Kelix.Metrics.Emit.dispatch_accepted(domain, function)
+    ok
+  end
+
+  defp emit_accept({:reject, code, _reason} = rej, domain, function) do
+    Kelix.Metrics.Emit.dispatch_rejected(domain, function, code)
+    rej
+  end
+
+  # method → function label for a routing reject (SUBSCRIBE/PUBLISH/… → :presence)
+  defp method_function(req), do: Map.get(@method_function, Map.get(req, :method), :unknown)
 
   # Config overrides injected into every spawned instance: the domain name (so the
   # script no longer hardcodes it — migration §14) and, when a media pool is up, the

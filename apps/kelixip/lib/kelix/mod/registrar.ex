@@ -491,6 +491,8 @@ defmodule Kelix.Mod.Registrar do
       send(pid, {:registrar, event, key})
     end
 
+    # observability (§11): registrar lifecycle counter, per domain
+    Kelix.Metrics.Emit.registrar_event(domain, event)
     :ok
   end
 

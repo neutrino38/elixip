@@ -61,7 +61,11 @@ defmodule Kelix.Application do
       # REST control frontal (§10.3): Bandit + Kelix.ControlAPI, gated on
       # [control_api].enabled. Reads the app env populated by Kelix.Config, so
       # ordered after it; returns :ignore (no server) when disabled/unconfigured.
-      Kelix.ControlAPI.Endpoint
+      Kelix.ControlAPI.Endpoint,
+      # Observability (§11): telemetry → Prometheus /metrics + /health, gated on
+      # [metrics].enabled. Supervises the Core reporter, the gauge poller and its
+      # Bandit endpoint; :ignore when disabled. Ordered last (reads the surfaces).
+      Kelix.Metrics
     ]
 
     opts = [strategy: :one_for_one, name: Kelix.Supervisor]

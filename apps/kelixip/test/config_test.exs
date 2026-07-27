@@ -127,6 +127,28 @@ defmodule Kelix.ConfigTest do
     end
   end
 
+  describe "parse/1 — [metrics]" do
+    test "absent → disabled" do
+      assert {:ok, cfg} = Config.parse("")
+      assert cfg.metrics == %{enabled: false}
+    end
+
+    test "present → enabled with loopback defaults" do
+      assert {:ok, cfg} = Config.parse("[metrics]\nport = 9095")
+      assert cfg.metrics == %{enabled: true, addr: "127.0.0.1", port: 9095}
+    end
+
+    test "unknown key is rejected" do
+      assert {:error, msg} = Config.parse("[metrics]\nbogus = 1")
+      assert msg =~ "unknown key"
+    end
+
+    test "bad port is rejected" do
+      assert {:error, msg} = Config.parse("[metrics]\nport = 0")
+      assert msg =~ "must be a port"
+    end
+  end
+
   test "defaults when sections are absent" do
     assert {:ok, cfg} = Config.parse("")
     assert cfg.node_name == "kelixip@127.0.0.1"

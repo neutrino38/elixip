@@ -872,6 +872,21 @@ domains, incl. module commands); per-domain RBAC is roadmap (spec §10).
 
 Spec §8.2. `:telemetry` events emitted at key points, exported as Prometheus.
 
+> **Implementation status (P9, 2026-07-27 — DONE).** `Kelix.Metrics` is a
+> supervisor gated on `[metrics].enabled` (`:ignore` otherwise) starting the
+> `TelemetryMetricsPrometheus.Core` reporter, `Kelix.Metrics.Poller` (gauge
+> sampler), and `Kelix.Metrics.Endpoint` (Bandit → `Kelix.Metrics.Router`,
+> `GET /metrics` + `GET /health`). Counter/distribution events are emitted at the
+> seams via `Kelix.Metrics.Emit`: `Kelix.Router.dispatch/3` is the single
+> dispatch funnel (accepted + every 404/405/500/503 reject, labelled by
+> `domain`+`function`+`code`) and `Kelix.Mod.Registrar.notify/4` emits the
+> per-domain registration lifecycle. The poller samples active instances
+> (total + per-domain), active registrations per domain, and MCU up/down. The
+> `[metrics]` block is parsed/validated by `Kelix.Config` (loopback:9095 default),
+> pushed to the app env. **Deferred to a later refinement:** transaction/transport
+> counters and auth-failure/parse-error/timer-timeout events live in the shared
+> `:elixip2` stack (`SIP.Transac`, transports) and are not yet instrumented.
+
 - **`Kelix.Metrics`** attaches telemetry handlers and runs
   `TelemetryMetricsPrometheus` (§13), serving `/metrics` + `/health` on the
   `[metrics]` port (separate from control API, loopback by default). `/health`
@@ -1048,7 +1063,7 @@ before the features that need them.
 | **P6b — radius_billing** | `Kelix.Mod.RadiusBilling` | P5 |
 | **P7 — Control layer** ✅ | `Kelix.Control` (all verbs); `kelictl` release command over RPC (`Kelix.Control.CLI` + `bin/kelictl` overlay); versioned/notify reload; graceful shutdown — **DONE 2026-07-26** (§10) | P2–P6 |
 | **P8 — REST API** ✅ | `bandit`+`plug` frontal (`Kelix.ControlAPI` + `.Auth` + `.Endpoint`); token/mtls/none auth; parity with CLI by construction — **DONE 2026-07-27** (§10.3) | P7 |
-| **P9 — Observability** | telemetry events + Prometheus exporter; `/metrics` + `/health`; per-domain labels | P2+ |
+| **P9 — Observability** ✅ | `Kelix.Metrics` (Prometheus Core reporter + gauge poller + `/metrics` + `/health` on Bandit); dispatch/registrar events labelled by `domain`; **DONE 2026-07-27** (§11). Transaction/transport counters in `:elixip2` deferred | P2+ |
 | **P10 — Packaging (RPM d'abord)** | **produire le paquet RPM kelixip pour Alma Linux 9** : `mix release` (ERTS embarqué) → `.spec` (`%files` sur le layout FHS §12, `%pre`/`%post` créant l'utilisateur `kelixip` + l'unité systemd, `%config(noreplace)` sur `/etc/kelixip/*.toml`) → `rpmbuild`/`fpm` en CI, `module_dir` root-owned. Deb Ubuntu ensuite, même release. | P0–P9 |
 
 P3+P4 (registrar + auth) are the functional core of "basic"; P0–P2 are the

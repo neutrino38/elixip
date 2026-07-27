@@ -102,6 +102,8 @@ defmodule Kelix.Config do
     # env so both the boot-time child-spec gating and the per-request auth check
     # share one source (and tests can override it).
     Application.put_env(:kelixip, :control_api, cfg.control_api)
+    # Same pattern for the metrics/health frontal (Kelix.Metrics.Endpoint, §11).
+    Application.put_env(:kelixip, :metrics, cfg.metrics)
     :ok
   end
 
@@ -119,7 +121,8 @@ defmodule Kelix.Config do
          {:ok, server} <- parse_server(Map.get(map, "server", %{})),
          {:ok, log} <- parse_log(Map.get(map, "log", %{})),
          {:ok, listen} <- parse_listeners(Map.get(map, "listen", [])),
-         {:ok, control_api} <- parse_control_api(Map.get(map, "control_api")) do
+         {:ok, control_api} <- parse_control_api(Map.get(map, "control_api")),
+         {:ok, metrics} <- parse_metrics(Map.get(map, "metrics")) do
       {:ok,
        %__MODULE__{
          node_name: server.node_name,
@@ -132,7 +135,7 @@ defmodule Kelix.Config do
          mediaserver_pool: get_in(map, ["mediaserver", "pool"]) || %{},
          modules: Map.get(map, "module", %{}),
          control_api: control_api,
-         metrics: Map.get(map, "metrics", %{})
+         metrics: metrics
        }}
     end
   end
@@ -210,6 +213,22 @@ defmodule Kelix.Config do
       _ -> {:error, "[control_api]: `cert`/`key`/`cacert` only apply to mtls auth"}
     end
   end
+
+  # [metrics] — the Prometheus /metrics + /health frontal (design §11). Absent ⇒
+  # disabled. Present ⇒ enabled by default, loopback (a separate port from the
+  # control API). No auth: loopback-bound, scraped by a local Prometheus.
+  defp parse_metrics(nil), do: {:ok, %{enabled: false}}
+
+  defp parse_metrics(%{} = m) do
+    with :ok <- reject_keys(m, ~w(enabled addr port), "[metrics]"),
+         {:ok, enabled} <- opt_bool(m, "enabled", true, "[metrics]"),
+         {:ok, addr} <- opt_string(m, "addr", "127.0.0.1", "[metrics]"),
+         {:ok, port} <- opt_port(m, "port", 9095, "[metrics]") do
+      {:ok, %{enabled: enabled, addr: addr, port: port}}
+    end
+  end
+
+  defp parse_metrics(_), do: {:error, "[metrics] must be a table"}
 
   defp parse_listeners(list) when is_list(list) do
     reduce_while_ok(list, &parse_listener/1)
