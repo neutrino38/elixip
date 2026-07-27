@@ -69,7 +69,7 @@ one file; it still needs an Erlang runtime (`erl`/`escript`) on the host. Instal
 it on your `PATH` with `mix escript.install`, or just copy the binary.
 
 Full usage — including `--config`, `--monitor`, server (UAS) mode and the JSON
-account files — is in the [README](README.md).
+account files — is in [ELIXIPP.md](ELIXIPP.md).
 
 ## kelixip — the server OTP release
 
