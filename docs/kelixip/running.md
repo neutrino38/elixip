@@ -4,49 +4,13 @@
 > (P0b). Only the **systemd/packaging** specifics are still pending (**P10**) —
 > until then, start the release by hand as shown below.
 
-## The two configuration files
+> kelixip is configured by two TOML files, `config.toml` (infrastructure,
+> restart-only) and `domains.toml` (domains + dial-plan, hot-reloadable).
+> **Every key of both is documented in
+> [installation.md § Configuration](installation.md#configuration)** — this page
+> covers only how to point the server at them and run it.
 
-kelixip is configured by two TOML files with distinct lifecycles:
-
-| File | Holds | Reload |
-|---|---|---|
-| `config.toml` | Infrastructure: `server`, `log`, listeners, media pool, most `[module.*]` blocks, control API, metrics | **Restart only** — a change means a server restart |
-| `domains.toml` | Domains, dial-plan, and the `[module.registrar]` block | **Hot** — `kelictl reload-domains` (atomic swap) |
-
-**Every key of both files is documented in
-[installation.md § Configuration](installation.md#configuration)**; this page
-covers only how to point the server at them and start it. See
-[modules/README.md](modules/README.md) for the `[module.<name>]` blocks and each
-module page for its parameters.
-
-## Minimal config
-
-```toml
-# /etc/kelixip/config.toml
-[server]
-node_name  = "kelixip@127.0.0.1"
-script_dir = "/usr/share/kelixip"
-module_dir = "/usr/lib/kelixip/modules"
-
-[[listen]]
-proto = "udp"
-addr  = "0.0.0.0"
-port  = 5060
-```
-
-```toml
-# /etc/kelixip/domains.toml
-[[domain]]
-name = "example.com"
-
-  [domain.registrar]
-  script = "registrar.exs"          # resolved under script_dir; keep the extension
-
-[module.registrar]
-max_contacts_per_aor = 5
-```
-
-## Where kelixip looks for those files
+## Where kelixip looks for its config
 
 The release reads two environment variables at every boot (set by the systemd
 unit; `rel/env.sh` defaults them to the FHS paths):
@@ -84,15 +48,10 @@ kelictl graceful-shutdown        # drain in-progress scenarios first
 4. Send a test `REGISTER` to a configured domain: an unauthenticated one must be
    answered `401` with a `WWW-Authenticate` challenge.
 
-> A `[[listen]]` UDP entry binds **one socket per node** (the framework's single
-> bidirectional UDP transport): `addr` only sets the IP advertised in Via/Contact,
-> the socket itself listens on every interface. Extra `udp` entries are ignored
-> with a warning.
-
 ## Logs
 
-`config.toml`'s `[log]` selects target (`stdout` | `syslog`), facility and level.
-Change the level at runtime with `kelictl log-level <lvl>` (see
+Logs go where `config.toml`'s `[log]` says. The level is the one setting worth
+changing without a restart: `kelictl log-level <lvl>` (see
 [administration.md](administration.md)).
 
 Next: [administration.md](administration.md).
