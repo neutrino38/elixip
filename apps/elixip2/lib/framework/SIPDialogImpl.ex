@@ -270,14 +270,20 @@ defmodule SIP.DialogImpl do
   # A REGISTER may carry several Contact headers (the parser then yields a
   # list of URIs). The dialog lifetime follows the longest-lived binding.
   # Returns nil when no contact carries an expires parameter.
+  # A wildcard Contact (:*, RFC 3261 §10.2.2) carries no expires parameter — it is
+  # an unregister-all, so it must read as "no lifetime", not blow up here.
   defp max_contact_expires(contact) do
     contact
     |> List.wrap()
-    |> Enum.reduce(nil, fn c, acc ->
-      case SIP.Uri.get_uri_param(c, "expires") do
-        {:ok, value} -> max(acc || 0, String.to_integer(value))
-        _ -> acc
-      end
+    |> Enum.reduce(nil, fn
+      %SIP.Uri{} = c, acc ->
+        case SIP.Uri.get_uri_param(c, "expires") do
+          {:ok, value} -> max(acc || 0, String.to_integer(value))
+          _ -> acc
+        end
+
+      _other, acc ->
+        acc
     end)
   end
 

@@ -163,18 +163,21 @@ defmodule Kelix.ModuleSupervisor do
     Code.ensure_loaded?(module) or match?({:module, ^module}, :code.load_file(module))
   end
 
-  # function → the module conventionally named after it
-  @function_modules %{registrar: "registrar", presence: "presence"}
+  # function → the modules its reference script needs. `registrar` needs two: the
+  # usrloc store AND the authentication backend — a registrar with no `auth_db`
+  # loaded fails exactly as hard as one with no `registrar`, and forgetting the
+  # auth half is the easier mistake of the two (nothing is named after it).
+  @function_modules %{registrar: ["registrar", "auth_db"], presence: ["presence"]}
 
   @doc """
-  Warn when a domain enables a SIP function whose same-named module is **not**
-  loaded. Since no module ships inside the core (§16.12), a deployment that enables
+  Warn when a domain enables a SIP function whose module(s) are **not** loaded.
+  Since no module ships inside the core (§16.12), a deployment that enables
   `registrar` without installing `kelixip-mod-registrar` is now a real (and easy)
   mistake — and a costly one: the function's script raises on its first facade call,
   the instance dies, and the request goes **unanswered** rather than refused.
 
-  A warning, not an error: a script is free to serve a function without that
-  module (its own store, another module). Turning it into the load-time config
+  A warning, not an error: a script is free to serve a function without a given
+  module (its own store, another backend). Turning it into the load-time config
   error §3.2 calls for would need scripts to *declare* the modules they use — see
   the open item in §16.
   """
@@ -182,7 +185,8 @@ defmodule Kelix.ModuleSupervisor do
   def warn_missing_function_modules() do
     loaded = Map.keys(Kelix.ModuleRegistry.all())
 
-    for {function, module_name} <- @function_modules,
+    for {function, module_names} <- @function_modules,
+        module_name <- module_names,
         module_name not in loaded,
         domain <- domains_enabling(function) do
       Logger.warning(

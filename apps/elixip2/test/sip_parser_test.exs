@@ -472,6 +472,26 @@ defmodule SIP.Test.Parser do
 		assert p2.data == Enum.at(parts, 1).data
 	end
 
+	# RFC 3261 §10.2.2: "Contact: *" with "Expires: 0" is the unregister-all a UA
+	# sends on shutdown. It is not a URI — before it had its own representation,
+	# SIP.Uri.parse("*") failed and the WHOLE message was discarded, so the client
+	# got no answer at all.
+	test "Wildcard Contact is parsed as :* rather than failing the whole message" do
+		{code, parsed} = parse_register("Contact: *\r\n")
+		assert code == :ok
+		assert parsed.contact == :*
+	end
+
+	test "Wildcard Contact round-trips through serialize" do
+		{:ok, parsed} = parse_register("Contact: *\r\n")
+		serialized = SIPMsg.serialize(parsed)
+		assert serialized =~ "Contact: *\r\n"
+
+		{code, reparsed} = SIPMsg.parse(serialized, fn _c, _m, _l, _li -> nil end)
+		assert code == :ok
+		assert reparsed.contact == :*
+	end
+
 	test "Multiple contacts round-trip: serialize then re-parse preserves the list" do
 		{code, parsed} = parse_register(
 			"Contact: <sip:alice@192.168.1.1:5060>, <sip:alice@10.0.0.1:5061>\r\n"

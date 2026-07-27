@@ -32,6 +32,9 @@ defmodule SIP.Session.Registrar do
               {:accept, pid} | {:reject, integer, binary}
   @callback on_registration_expired(dialog_id :: pid, app_pid :: pid) :: any()
 
+  # The wildcard Contact (:*) has no expires parameter to bound — pass it through.
+  defp adjust_contact_expires(:*), do: :*
+
   defp adjust_contact_expires(contact) do
     case SIP.Uri.get_uri_param(contact, "expires") do
       {:ok, value} ->
@@ -89,6 +92,10 @@ defmodule SIP.Session.Registrar do
   end
 
   def set_contacts_expires(nil, _expires), do: nil
+
+  # A wildcard Contact is never echoed back with an expiry: the 200 OK to a
+  # wildcard un-REGISTER simply lists no binding (there are none left).
+  def set_contacts_expires(:*, _expires), do: nil
 
   def set_contacts_expires(contacts, expires) when is_list(contacts),
     do: Enum.map(contacts, &set_contacts_expires(&1, expires))

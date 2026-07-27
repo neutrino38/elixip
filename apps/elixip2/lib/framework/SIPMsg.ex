@@ -201,18 +201,15 @@ defmodule SIPMsg do
 		{ :ok, String.to_integer(value) }
 	end
 
-	defp parse_header_content( :contact, value ) do
-		result = Enum.reduce_while(split_contact_list(value), [], fn part, acc ->
-			case SIP.Uri.parse(part) do
-				{ :ok, uri } -> { :cont, [uri | acc] }
-				{ errcode, _ } -> { :halt, { :error, errcode } }
-			end
-		end)
-
-		case result do
-			{ :error, errcode } -> { errcode, "Invalid contact URI" }
-			[ single ] -> { :ok, single }
-			uris -> { :ok, Enum.reverse(uris) }
+	# The wildcard Contact (RFC 3261 §10.2.2): "Contact: *" with "Expires: 0" is how
+	# a UA drops all of its bindings at once, and many do it on shutdown. It is not a
+	# URI, so it gets its own representation — before this, SIP.Uri.parse("*") failed
+	# and the WHOLE REGISTER was discarded, leaving the client with no answer at all.
+	defp parse_header_content( :contact, value ) when is_binary(value) do
+		if String.trim(value) == "*" do
+			{ :ok, :* }
+		else
+			parse_contact_list(value)
 		end
 	end
 
@@ -235,6 +232,21 @@ defmodule SIPMsg do
 
 	defp parse_header_content( _key, value ) do
 		{ :ok, value }
+	end
+
+	defp parse_contact_list( value ) do
+		result = Enum.reduce_while(split_contact_list(value), [], fn part, acc ->
+			case SIP.Uri.parse(part) do
+				{ :ok, uri } -> { :cont, [uri | acc] }
+				{ errcode, _ } -> { :halt, { :error, errcode } }
+			end
+		end)
+
+		case result do
+			{ :error, errcode } -> { errcode, "Invalid contact URI" }
+			[ single ] -> { :ok, single }
+			uris -> { :ok, Enum.reverse(uris) }
+		end
 	end
 
 	# Split a Contact header value on commas, respecting angle brackets and quoted
@@ -665,6 +677,12 @@ defmodule SIPMsg do
 				# _ -> raise "Invalid to in SIP message"
 			end
 		end
+
+	# The wildcard Contact (RFC 3261 §10.2.2) is not a URI: it is carried as :* and
+	# serialized back verbatim.
+	defp serialize_one_header( :contact, :* ) do
+		header_name_to_string(:contact) <> ": *\r\n"
+	end
 
 	# Serialize a contact header header
 	defp serialize_one_header( :contact, contacts ) when is_list(contacts) do

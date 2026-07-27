@@ -28,7 +28,12 @@ defmodule Kelix.RegistrarScriptTest do
   end
 
   setup_all do
-    %{scenario: SIP.Scenario.Loader.load_file!(Path.expand("../../kelixip/scripts/registrar.exs", __DIR__))}
+    %{
+      scenario:
+        SIP.Scenario.Loader.load_file!(
+          Path.expand("../../kelixip/scripts/registrar.exs", __DIR__)
+        )
+    }
   end
 
   setup do
@@ -44,8 +49,15 @@ defmodule Kelix.RegistrarScriptTest do
     base = %{
       method: :REGISTER,
       to: %SIP.Uri{userpart: @user, domain: @domain},
-      ruri: %SIP.Uri{userpart: @user, domain: @domain, destip: {1, 2, 3, 4}, destport: 5060, destproto: "UDP"},
-      contact: %SIP.Uri{userpart: @user, domain: "10.0.0.9", port: 5060},
+      ruri: %SIP.Uri{
+        userpart: @user,
+        domain: @domain,
+        destip: {1, 2, 3, 4},
+        destport: 5060,
+        destproto: "UDP"
+      },
+      contact:
+        Keyword.get(opts, :contact, %SIP.Uri{userpart: @user, domain: "10.0.0.9", port: 5060}),
       expires: Keyword.get(opts, :expires, 3600),
       callid: "call-1"
     }
@@ -123,5 +135,100 @@ defmodule Kelix.RegistrarScriptTest do
     send(pid, {:REGISTER, register(authorization: bad), nil, dialog})
     assert_receive {:replied, 403, _, _, _}, 1000
     assert Registrar.bindings(@domain, @user) == []
+  end
+
+  # Authenticate once and return the nonce-bearing digest for the next request.
+  defp authenticate(pid, dialog, req) do
+    send(pid, {:REGISTER, req, nil, dialog})
+    assert_receive {:replied, 401, _, fields, _}, 1000
+    digest_auth(fields[:wwwauthenticate]["nonce"])
+  end
+
+  test "a 423 carries the mandatory Min-Expires header", %{scenario: module} do
+    {:ok, dialog} = MockDialog.start_link(self())
+    pid = spawn_registrar(module, dialog)
+
+    short = register(expires: 10)
+    auth = authenticate(pid, dialog, short)
+
+    send(pid, {:REGISTER, Map.put(short, :authorization, auth), nil, dialog})
+    assert_receive {:replied, 423, "Interval Too Brief", fields, _}, 1000
+
+    # RFC 3261 §10.3-7: without it the client cannot know what to renegotiate.
+    assert {"Min-Expires", value} = List.keyfind(fields, "Min-Expires", 0)
+    assert String.to_integer(value) == Registrar.min_expires()
+  end
+
+  test "a wildcard Contact with Expires: 0 drops every binding", %{scenario: module} do
+    {:ok, dialog} = MockDialog.start_link(self())
+    pid = spawn_registrar(module, dialog)
+
+    # register two contacts first
+    send(
+      pid,
+      {:REGISTER, register(authorization: authenticate(pid, dialog, register())), nil, dialog}
+    )
+
+    assert_receive {:replied, 200, _, _, _}, 1000
+
+    second = register(contact: %SIP.Uri{userpart: @user, domain: "10.0.0.42", port: 5060})
+
+    send(
+      pid,
+      {:REGISTER, Map.put(second, :authorization, authenticate(pid, dialog, second)), nil, dialog}
+    )
+
+    assert_receive {:replied, 200, _, _, _}, 1000
+    assert length(Registrar.bindings(@domain, @user)) == 2
+
+    # "Contact: *" + "Expires: 0" — the UA-shutdown unregister-all (RFC 3261 §10.2.2)
+    wildcard = register(contact: :*, expires: 0)
+
+    send(
+      pid,
+      {:REGISTER, Map.put(wildcard, :authorization, authenticate(pid, dialog, wildcard)), nil,
+       dialog}
+    )
+
+    assert_receive {:replied, 200, "OK", fields, _}, 1000
+    # nothing is left to enumerate, so the 200 carries no Contact
+    assert fields[:contact] == nil
+    assert Registrar.bindings(@domain, @user) == []
+  end
+
+  test "a wildcard Contact without Expires: 0 is a 400, not an unregister", %{scenario: module} do
+    {:ok, dialog} = MockDialog.start_link(self())
+    pid = spawn_registrar(module, dialog)
+
+    send(
+      pid,
+      {:REGISTER, register(authorization: authenticate(pid, dialog, register())), nil, dialog}
+    )
+
+    assert_receive {:replied, 200, _, _, _}, 1000
+
+    bad = register(contact: :*, expires: 3600)
+
+    send(
+      pid,
+      {:REGISTER, Map.put(bad, :authorization, authenticate(pid, dialog, bad)), nil, dialog}
+    )
+
+    assert_receive {:replied, 400, _, _, _}, 1000
+    # the existing binding survives a malformed wildcard
+    assert length(Registrar.bindings(@domain, @user)) == 1
+  end
+
+  test "a store that is down answers 503 — never silence", %{scenario: module} do
+    {:ok, dialog} = MockDialog.start_link(self())
+    pid = spawn_registrar(module, dialog)
+    auth = authenticate(pid, dialog, register())
+
+    # Kelix.Module.safe_call/3 degrades to {:error, :down}; the script must map
+    # that onto a response, because an unanswered REGISTER is the worst outcome.
+    stop_supervised!(Registrar)
+
+    send(pid, {:REGISTER, register(authorization: auth), nil, dialog})
+    assert_receive {:replied, 503, _, _, _}, 1000
   end
 end

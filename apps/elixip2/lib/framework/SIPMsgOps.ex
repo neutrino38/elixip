@@ -359,7 +359,11 @@ defmodule SIP.Msg.Ops do
         raise "#{resp_code} response needs to be provided with a contact field"
       end
 
-      if resp_code in 200..202 and req.method in [ :INVITE, :UPDATE, :REGISTER ] do
+      # REGISTER is excluded on purpose: RFC 3261 §10.3 step 8 says the 200 SHOULD
+      # enumerate the *current* bindings, and after an un-REGISTER (`Expires: 0`, or
+      # the `Contact: *` wildcard) there are none — a Contact-less 200 is then the
+      # correct answer, not a programming error.
+      if resp_code in 200..202 and req.method in [ :INVITE, :UPDATE ] do
         raise "#{resp_code} response to #{req.method} needs to be provided with a contact field"
       end
     end

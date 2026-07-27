@@ -93,6 +93,33 @@ defmodule Kelix.Mod.RegistrarTest do
       assert {:error, {403, _}} = Registrar.save(register("alice", "10.0.0.3"), @domain)
     end
 
+    test "a wildcard Contact with Expires: 0 removes every binding" do
+      assert {:ok, _} = Registrar.save(register("alice", "10.0.0.1"), @domain)
+      assert {:ok, _} = Registrar.save(register("alice", "10.0.0.2"), @domain)
+
+      wildcard = %{register("alice", "unused") | contact: :*, expires: 0}
+      assert {:ok, granted} = Registrar.save(wildcard, @domain)
+      assert granted.expires == 0
+      assert Registrar.bindings(@domain, "alice") == []
+    end
+
+    test "a wildcard Contact without Expires: 0 is refused, bindings untouched" do
+      assert {:ok, _} = Registrar.save(register("alice", "10.0.0.1"), @domain)
+      wildcard = %{register("alice", "unused") | contact: :*, expires: 3600}
+      assert {:error, {400, _}} = Registrar.save(wildcard, @domain)
+      assert length(Registrar.bindings(@domain, "alice")) == 1
+    end
+
+    test "a wildcard mixed with a real Contact is refused" do
+      mixed = %{
+        register("alice", "unused")
+        | contact: [:*, %SIP.Uri{userpart: "alice", domain: "10.0.0.1"}],
+          expires: 0
+      }
+
+      assert {:error, {400, _}} = Registrar.save(mixed, @domain)
+    end
+
     test "unregister (expires 0) removes the AOR" do
       assert {:ok, _} = Registrar.save(register("alice", "10.0.0.9"), @domain)
       assert {:ok, granted} = Registrar.save(register("alice", "10.0.0.9", expires: 0), @domain)
@@ -118,6 +145,28 @@ defmodule Kelix.Mod.RegistrarTest do
       Registrar.save(register("alice", "10.0.0.9", expires: 0), "example.com")
       assert Registrar.bindings("example.com", "alice") == []
       assert length(Registrar.bindings("other.net", "alice")) == 1
+    end
+  end
+
+  describe "min_expires/0" do
+    test "reports the configured bound, so the script can send Min-Expires" do
+      assert Registrar.min_expires() == 60
+    end
+
+    test "falls back to the default when the store is down" do
+      stop_supervised!(Registrar)
+      assert Registrar.min_expires() == 60
+    end
+  end
+
+  describe "validate_config/1" do
+    test "accepts a known block" do
+      assert Registrar.validate_config(%{"max_contacts_per_aor" => 5}) == :ok
+    end
+
+    test "rejects an unknown key rather than silently ignoring it" do
+      assert {:error, reason} = Registrar.validate_config(%{"max_contact_per_aor" => 5})
+      assert reason =~ "max_contact_per_aor"
     end
   end
 

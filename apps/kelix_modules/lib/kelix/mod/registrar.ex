@@ -81,9 +81,14 @@ defmodule Kelix.Mod.Registrar do
     %{id: __MODULE__, start: {__MODULE__, :start_link, [opts]}}
   end
 
+  # Every key a [module.registrar] block may carry. `module` is the generic
+  # module-resolution key handled by Kelix.ModuleSupervisor.
+  @config_keys ~w(module max_contacts_per_aor min_expires call_timeout_ms)
+
   @impl Kelix.Module
   def validate_config(config) when is_map(config) do
-    with :ok <- pos_int_ok(config, "max_contacts_per_aor"),
+    with :ok <- reject_unknown_keys(config),
+         :ok <- pos_int_ok(config, "max_contacts_per_aor"),
          :ok <- pos_int_ok(config, "min_expires"),
          :ok <- pos_int_ok(config, "call_timeout_ms") do
       :ok
@@ -107,6 +112,14 @@ defmodule Kelix.Mod.Registrar do
     end
   end
 
+  # Fail fast on a typo instead of silently running on the default.
+  defp reject_unknown_keys(config) do
+    case Map.keys(config) -- @config_keys do
+      [] -> :ok
+      extra -> {:error, "unknown key(s): #{Enum.join(Enum.sort(extra), ", ")}"}
+    end
+  end
+
   @doc """
   Register/unregister the contacts of a REGISTER `req` under `domain`. `dialog_pid`
   is the backing dialog (stored per contact, used later for teardown); `info` is
@@ -120,6 +133,22 @@ defmodule Kelix.Mod.Registrar do
   @doc "Rewrite `req` to reach the AOR's registered contacts. `{:ok, [req]}` / `:notfound` / `{:error, r}`."
   @spec lookup(map) :: {:ok, [map]} | :notfound | {:error, term}
   def lookup(req), do: Kelix.Module.safe_call(__MODULE__, {:lookup, req})
+
+  @doc """
+  The shortest registration this store will grant (seconds).
+
+  Exists so the script can put the mandatory `Min-Expires` header on the `423`
+  `save/4` returns (RFC 3261 §10.3 step 7) without duplicating the bound: the
+  module owns the policy, the script composes the response (§11.1). Falls back to
+  the built-in default when the store is down.
+  """
+  @spec min_expires() :: pos_integer
+  def min_expires() do
+    case Kelix.Module.safe_call(__MODULE__, :min_expires) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> @min_expires
+    end
+  end
 
   @doc "Raw current contacts for an AOR (expired ones filtered out)."
   @spec bindings(String.t(), String.t()) :: [Contact.t()]
@@ -174,6 +203,8 @@ defmodule Kelix.Mod.Registrar do
     {:reply, do_lookup(state, req), state}
   end
 
+  def handle_call(:min_expires, _from, state), do: {:reply, state.min_expires, state}
+
   def handle_call({:bindings, domain, aor}, _from, state) do
     {:reply, live_contacts(state, domain, downcase(aor)), state}
   end
@@ -223,7 +254,31 @@ defmodule Kelix.Mod.Registrar do
   # Decide, per contact, whether to add (with granted expires) or remove (expires 0).
   defp plan_contacts([], _header, _min), do: {:error, {400, "No Contact"}}
 
-  defp plan_contacts(contacts, header_exp, min_exp) do
+  # `Contact: *` — remove every binding of the AOR (RFC 3261 §10.2.2). It is only
+  # legal alone and with `Expires: 0`; anything else is a malformed request, not a
+  # partial wildcard.
+  defp plan_contacts(contacts, header_exp, min_exp) when is_list(contacts) do
+    if Enum.any?(contacts, &wildcard?/1) do
+      cond do
+        length(contacts) > 1 ->
+          {:error, {400, "Wildcard Contact must be the only one"}}
+
+        header_or_default(header_exp) != 0 ->
+          {:error, {400, "Wildcard Contact requires Expires: 0"}}
+
+        true ->
+          {:ok, [:remove_all]}
+      end
+    else
+      plan_each_contact(contacts, header_exp, min_exp)
+    end
+  end
+
+  defp wildcard?(:*), do: true
+  defp wildcard?("*"), do: true
+  defp wildcard?(_), do: false
+
+  defp plan_each_contact(contacts, header_exp, min_exp) do
     Enum.reduce_while(contacts, {:ok, []}, fn c, {:ok, acc} ->
       exp = requested_expires(c, header_exp)
 
@@ -240,7 +295,9 @@ defmodule Kelix.Mod.Registrar do
   end
 
   defp apply_actions(state, domain, aor, actions, req, dialog_pid, info) do
-    unregister? = Enum.all?(actions, &match?({:remove, _}, &1))
+    # `[:remove_all]` (wildcard) and an all-`{:remove, _}` plan converge on the
+    # same outcome: the AOR loses every binding it had.
+    unregister? = actions == [:remove_all] or Enum.all?(actions, &match?({:remove, _}, &1))
     tid = table_for(state, domain)
     state = put_table(state, domain, tid)
     existing = live_contacts_from(tid, aor)
