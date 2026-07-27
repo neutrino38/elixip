@@ -148,7 +148,7 @@ defmodule Kelix.Mod.RegistrarTest do
     end
   end
 
-  describe "min_expires/0" do
+  describe "min_expires/1" do
     test "reports the configured bound, so the script can send Min-Expires" do
       assert Registrar.min_expires() == 60
     end
@@ -156,6 +156,92 @@ defmodule Kelix.Mod.RegistrarTest do
     test "falls back to the default when the store is down" do
       stop_supervised!(Registrar)
       assert Registrar.min_expires() == 60
+    end
+  end
+
+  describe "per-domain expiry bounds ([domain.registrar])" do
+    # domains.toml's [domain.registrar] keys were parsed and validated but read by
+    # nobody: the store applied its global bounds to every domain (design §16 #8).
+    setup do
+      dir = Path.join(System.tmp_dir!(), "kelix_bounds_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      path = Path.join(dir, "domains.toml")
+      empty = Path.join(dir, "empty.toml")
+      File.write!(empty, "")
+
+      File.write!(path, """
+      [[domain]]
+      name = "strict.example.com"
+
+        [domain.registrar]
+        script = "registrar.exs"
+        min_expires = 120
+        default_expires = 600
+
+      [[domain]]
+      name = "lax.example.com"
+
+        [domain.registrar]
+        script = "registrar.exs"
+      """)
+
+      :ok = Kelix.Domains.reload(path)
+      on_exit(fn -> Kelix.Domains.reload(empty) && File.rm_rf(dir) end)
+      :ok
+    end
+
+    test "the domain's min_expires overrides the store-wide one" do
+      assert Registrar.min_expires("strict.example.com") == 120
+      # no override on this domain → the [module.registrar] value
+      assert Registrar.min_expires("lax.example.com") == 60
+      # unknown domain → the store-wide value, never a crash
+      assert Registrar.min_expires("nope.example.com") == 60
+    end
+
+    test "a request under the domain's min_expires is refused there and granted elsewhere" do
+      req = fn domain ->
+        %{
+          register("alice", "10.0.0.9", expires: 100)
+          | to: %SIP.Uri{userpart: "alice", domain: domain}
+        }
+      end
+
+      assert {:error, {423, _}} = Registrar.save(req.("strict.example.com"), "strict.example.com")
+      assert {:ok, _} = Registrar.save(req.("lax.example.com"), "lax.example.com")
+    end
+
+    test "the domain's default_expires caps what is granted" do
+      req = %{
+        register("alice", "10.0.0.9", expires: 3600)
+        | to: %SIP.Uri{userpart: "alice", domain: "strict.example.com"}
+      }
+
+      assert {:ok, granted} = Registrar.save(req, "strict.example.com")
+      assert granted.expires == 600
+    end
+  end
+
+  describe "granted contacts (RFC 3261 §10.3-8)" do
+    test "the 200 OK material lists every current binding, not just the refreshed one" do
+      assert {:ok, _} = Registrar.save(register("alice", "10.0.0.1"), @domain)
+      assert {:ok, granted} = Registrar.save(register("alice", "10.0.0.2"), @domain)
+
+      hosts = Enum.map(granted.contacts, & &1.domain) |> Enum.sort()
+      assert hosts == ["10.0.0.1", "10.0.0.2"]
+    end
+
+    test "each contact carries its own remaining lifetime" do
+      assert {:ok, granted} = Registrar.save(register("alice", "10.0.0.1"), @domain)
+      assert [contact] = granted.contacts
+      assert {:ok, value} = SIP.Uri.get_uri_param(contact, "expires")
+      # 3600 granted, allow a second of clock drift through the GenServer call
+      assert String.to_integer(value) in 3599..3600
+    end
+
+    test "an un-REGISTER grants no contact at all" do
+      assert {:ok, _} = Registrar.save(register("alice", "10.0.0.1"), @domain)
+      assert {:ok, granted} = Registrar.save(register("alice", "10.0.0.1", expires: 0), @domain)
+      assert granted.contacts == []
     end
   end
 

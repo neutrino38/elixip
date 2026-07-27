@@ -87,6 +87,17 @@ defmodule SIPMsg do
 		expires: "Expires",
 		supported: "Supported" }
 
+	# Auth parameters that are bare tokens, never quoted strings (RFC 3261 ABNF /
+	# RFC 7616 §3.3-3.4). Quoting them is not cosmetic: a strict UA rejects
+	# `stale="true"` or an `nc` in quotes, and then never completes the challenge.
+	@unquoted_auth_params [ "algorithm", "stale", "nc" ]
+
+	# Credentials, as opposed to a challenge. `qop` differs between the two: the
+	# challenge advertises a quoted LIST (`qop="auth,auth-int"`), the credentials
+	# pick ONE as a bare token (`qop=auth`).
+	@credentials_headers [ :authorization, :proxyauthorization ]
+
+
 
 	# Convert SIP method name to atom or nil if not recognized
 	defp method_to_atom(reqname) do
@@ -232,6 +243,14 @@ defmodule SIPMsg do
 
 	defp parse_header_content( _key, value ) do
 		{ :ok, value }
+	end
+
+	defp auth_param_value( header, key, value ) do
+		cond do
+			key in @unquoted_auth_params -> value
+			key == "qop" and header in @credentials_headers -> value
+			true -> "\"" <> value <> "\""
+		end
 	end
 
 	defp parse_contact_list( value ) do
@@ -713,16 +732,14 @@ defmodule SIPMsg do
 		header_name_to_string(:cseq) <> ": " <> Integer.to_string(seqno) <> " " <> Atom.to_string(method) <> "\r\n"
 	end
 
-	# Serialize a Proxy-Authorization header
+	# Serialize an Authorization / WWW-Authenticate family header
 	defp serialize_one_header( name, authinfo ) when name in [ :proxyauthorization, :authorization, :proxyauthenticate, :wwwauthenticate]  do
-		header_name_to_string(name) <> ": " <> authinfo.authproc <> " " <>
-			String.trim_trailing(Enum.reduce(authinfo, "", fn {k, v}, acc ->
-				case k do
-					:authproc -> acc
-					"algorithm" -> acc <> k <> "=" <> v <> ", "
-					_ -> acc <> k <> "=" <> "\"" <> v <> "\", "
-				end
-			end), ", ") <> "\r\n"
+		params =
+			authinfo
+			|> Enum.reject(fn { k, _v } -> k == :authproc end)
+			|> Enum.map_join(", ", fn { k, v } -> k <> "=" <> auth_param_value(name, k, v) end)
+
+		header_name_to_string(name) <> ": " <> authinfo.authproc <> " " <> params <> "\r\n"
 	end
 
 	# Serialize a header that can have multiple string values represented as a list

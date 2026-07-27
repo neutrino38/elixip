@@ -121,6 +121,59 @@ defmodule Kelix.Mod.AuthDbTest do
     end
   end
 
+  describe "password_hash drives the algorithm" do
+    # The stored HA1 was salted with exactly one hash. Letting the client pick the
+    # algorithm made `password_hash` dead config and pushed unknown values into
+    # the raising SIP.Auth.algo2atom/1.
+    setup do
+      previous = Application.get_env(:kelixip, AuthDb)
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:kelixip, AuthDb, previous),
+          else: Application.delete_env(:kelixip, AuthDb)
+      end)
+
+      :ok
+    end
+
+    defp configure_hash(hash) do
+      AuthDb.configure(%{"database" => "d", "username" => "u", "password_hash" => hash})
+    end
+
+    test "the challenge advertises MD5 by default" do
+      assert AuthDb.challenge_algorithm() == "MD5"
+    end
+
+    test "the challenge advertises SHA-256 when the base stores sha256 HA1s" do
+      configure_hash("sha256")
+      assert AuthDb.challenge_algorithm() == "SHA-256"
+    end
+
+    test "a sha256 base verifies a SHA-256 credential" do
+      configure_hash("sha256")
+      ha1 = SIP.Auth.compute_ha1("SHA256", @user, @domain, @pass)
+      lookup = [ha1_lookup: fn @user, @domain -> {:ok, ha1} end]
+      n = nonce()
+
+      a = %{
+        auth(n)
+        | "algorithm" => "SHA-256",
+          "response" =>
+            SIP.Auth.compute_auth_response_from_ha1("SHA256", n, ha1, "REGISTER", @uri)
+      }
+
+      assert AuthDb.do_registration_auth(reg(a), @domain, [now: @now] ++ lookup) == :ok
+    end
+
+    test "a sha256 base re-challenges an MD5 credential instead of failing obscurely" do
+      configure_hash("sha256")
+
+      assert AuthDb.do_registration_auth(reg(auth(nonce())), @domain, [now: @now] ++ lookup()) ==
+               {:requireauth, false}
+    end
+  end
+
   describe "subscriber lookup key (ha1 vs ha1b conventions)" do
     test "a bare username is the row key as-is" do
       assert AuthDb.subscriber_of("alice") == "alice"
@@ -169,6 +222,23 @@ defmodule Kelix.Mod.AuthDbTest do
 
     test "rejects a column name that is not a plain SQL identifier" do
       assert {:error, _} = AuthDb.validate_config(Map.put(@valid, "ha1_column", "ha1; DROP"))
+    end
+
+    test "accepts the pool and TLS knobs" do
+      config =
+        Map.merge(@valid, %{
+          "pool_size" => 8,
+          "connect_timeout_ms" => 2_000,
+          "ssl" => true,
+          "ssl_ca_cert_file" => "/etc/pki/ca.pem"
+        })
+
+      assert AuthDb.validate_config(config) == :ok
+    end
+
+    test "rejects a non-integer pool_size and a non-boolean ssl" do
+      assert {:error, _} = AuthDb.validate_config(Map.put(@valid, "pool_size", "many"))
+      assert {:error, _} = AuthDb.validate_config(Map.put(@valid, "ssl", "yes"))
     end
   end
 

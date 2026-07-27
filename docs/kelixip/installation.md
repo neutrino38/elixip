@@ -128,11 +128,21 @@ user_column   = "username"
 domain_column = "domain"
 ha1_column    = "ha1"               # ha1 = H(user:realm:pw); ha1b = H(user@domain:realm:pw)
 password_hash = "md5"               # md5 | sha256
+
+pool_size          = 4              # DB connections; 1 serialises every REGISTER
+connect_timeout_ms = 5000
+ssl                = false          # TLS to the database
+ssl_ca_cert_file   = ""             # with a CA the server cert is verified; without, it is not
 ```
 
 > `ha1` vs `ha1b` must match how your UAs authenticate: `ha1` when they send a
 > bare username, `ha1b` when they send `user@domain`. Both are supported — the
 > subscriber row is always looked up on the bare user.
+>
+> `password_hash` is **authoritative**: it is the algorithm advertised in the
+> challenge (`MD5` / `SHA-256`) and the only one accepted back, because the
+> stored HA1 was salted with that hash and no other. A client offering anything
+> else is re-challenged.
 
 `[module.registrar]` lives in **`domains.toml`**, not here (see below).
 
@@ -205,7 +215,9 @@ Presence of the block = the function is enabled.
 | Key | Type | Required | Meaning |
 |---|---|---|---|
 | `script` | string | **yes** | Scenario script, resolved under `script_dir` (keep the `.exs`) |
-| `default_expires`, `min_expires`, `keepalive_period` | int > 0 | no | *Accepted and validated, but **not applied yet** — the registrar currently takes its bounds from `[module.registrar]`. Set them there.* |
+| `default_expires` | int > 0 | no | Overrides `[module.registrar].default_expires` **for this domain** |
+| `min_expires` | int > 0 | no | Overrides `[module.registrar].min_expires` **for this domain** |
+| `keepalive_period` | int > 0 | no | *Accepted and validated, but **not applied yet** — server-initiated OPTIONS keepalive towards registered UAs is not implemented (the framework's keepalive is outbound-only).* |
 
 #### `[[domain.call]]` — the dial-plan (`calls`)
 
@@ -235,7 +247,10 @@ ignored.
 |---|---|---|---|
 | `max_contacts_per_aor` | int > 0 | `10` | Beyond it a new binding is refused with `403` |
 | `min_expires` | int > 0 | `60` | Shortest registration granted; a shorter request gets `423` + `Min-Expires` |
+| `default_expires` | int > 0 | `3600` | Granted when the request asks for no expiry, **and** the ceiling on what is granted |
 | `call_timeout_ms` | int > 0 | `5000` | Facade call bound |
+
+Both expiry bounds are per-domain-overridable in `[domain.registrar]` above.
 
 #### A complete example
 

@@ -21,18 +21,24 @@ defmodule Kelix.Mod.AuthDb do
 
   @type verdict :: :ok | {:requireauth, boolean} | {:reject, integer, String.t()}
 
-  @valid_hashes ~w(md5 sha256)
-
-  # Digest algorithms `SIP.Auth` can actually compute. Anything else — including
-  # the RFC 8760 spellings (`SHA-256`, `SHA-512-256`) — must be refused *here*:
-  # `SIP.Auth.algo2atom/1` raises on an unknown one, and an exception in a facade
-  # kills the scenario instance and leaves the REGISTER unanswered (§8.2).
-  @supported_algorithms ~w(MD5 SHA1 SHA256)
+  # `password_hash` → { spelling advertised in the challenge, token SIP.Auth
+  # computes with }. The stored HA1 was salted with exactly one hash, so THAT is
+  # the algorithm — not whatever the client puts in its Authorization header.
+  # SIP clients spell it the RFC 8760 way (`SHA-256`); `SIP.Auth` wants `SHA256`.
+  #
+  # Anything outside this table must be refused *before* reaching
+  # `SIP.Auth.algo2atom/1`, which raises — and an exception in a facade kills the
+  # scenario instance, leaving the REGISTER unanswered (§8.2).
+  @hash_algorithms %{"md5" => {"MD5", "MD5"}, "sha256" => {"SHA-256", "SHA256"}}
 
   # Every key a [module.auth_db] block may carry. `module` is the generic
   # module-resolution key handled by Kelix.ModuleSupervisor.
   @config_keys ~w(module host port database username password table ha1_column
-                  user_column domain_column password_hash call_timeout_ms)
+                  user_column domain_column password_hash call_timeout_ms
+                  pool_size connect_timeout_ms ssl ssl_ca_cert_file)
+
+  @default_pool_size 4
+  @default_connect_timeout_ms 5_000
 
   # ── Kelix.Module behaviour ───────────────────────────────────────────────────
 
@@ -52,11 +58,51 @@ defmodule Kelix.Mod.AuthDb do
         port: config["port"] || 3306,
         database: config["database"],
         username: config["username"],
-        password: config["password"]
-      ]
+        password: config["password"],
+        # One connection (MyXQL's default) serialises EVERY registration behind a
+        # single socket: one slow query and the whole registrar queues up.
+        pool_size: config["pool_size"] || @default_pool_size,
+        connect_timeout: config["connect_timeout_ms"] || @default_connect_timeout_ms
+      ] ++ ssl_opts(config)
 
     %{id: __MODULE__, start: {MyXQL, :start_link, [myxql_opts]}}
   end
+
+  # TLS to the subscriber DB. With a CA file the server certificate is actually
+  # verified; without one the link is encrypted but unauthenticated — usable
+  # against a self-signed dev server, and said out loud so nobody mistakes it for
+  # a secure link.
+  defp ssl_opts(%{"ssl" => true} = config) do
+    case config["ssl_ca_cert_file"] do
+      path when is_binary(path) and path != "" ->
+        host = String.to_charlist(config["host"] || "127.0.0.1")
+
+        [
+          ssl: true,
+          ssl_opts: [
+            verify: :verify_peer,
+            cacertfile: path,
+            server_name_indication: host,
+            depth: 3,
+            customize_hostname_check: [
+              match_fun: :public_key.pkix_verify_hostname_match_fun(:https)
+            ]
+          ]
+        ]
+
+      _ ->
+        Logger.warning(
+          module: __MODULE__,
+          message:
+            "auth_db: ssl = true without ssl_ca_cert_file — the DB link is encrypted " <>
+              "but the server certificate is NOT verified"
+        )
+
+        [ssl: true, ssl_opts: [verify: :verify_none]]
+    end
+  end
+
+  defp ssl_opts(_config), do: []
 
   @impl Kelix.Module
   def validate_config(config) when is_map(config) do
@@ -65,8 +111,11 @@ defmodule Kelix.Mod.AuthDb do
          {:ok, _} <- req_string(config, "username"),
          :ok <- hash_ok(config),
          :ok <- identifiers_ok(config),
+         :ok <- bool_ok(config, "ssl"),
          :ok <- pos_int_ok(config, "port"),
-         :ok <- pos_int_ok(config, "call_timeout_ms") do
+         :ok <- pos_int_ok(config, "call_timeout_ms"),
+         :ok <- pos_int_ok(config, "pool_size"),
+         :ok <- pos_int_ok(config, "connect_timeout_ms") do
       :ok
     end
   end
@@ -86,8 +135,16 @@ defmodule Kelix.Mod.AuthDb do
   defp hash_ok(config) do
     case Map.get(config, "password_hash") do
       nil -> :ok
-      h when h in @valid_hashes -> :ok
-      _ -> {:error, "password_hash must be one of #{Enum.join(@valid_hashes, "|")}"}
+      h when is_map_key(@hash_algorithms, h) -> :ok
+      _ -> {:error, "password_hash must be one of #{Enum.join(Map.keys(@hash_algorithms), "|")}"}
+    end
+  end
+
+  defp bool_ok(config, key) do
+    case Map.get(config, key) do
+      nil -> :ok
+      v when is_boolean(v) -> :ok
+      _ -> {:error, "#{key} must be a boolean"}
     end
   end
 
@@ -149,15 +206,51 @@ defmodule Kelix.Mod.AuthDb do
   @doc "Store the facade config in app env (also done by `child_spec/2`)."
   def configure(config), do: Application.put_env(:kelixip, __MODULE__, auth_cfg(config))
 
-  defp cfg(),
-    do:
-      Application.get_env(:kelixip, __MODULE__, %{
-        ha1_column: "ha1",
-        table: "subscriber",
-        user_column: "username",
-        domain_column: "domain",
-        call_timeout_ms: Kelix.Module.default_call_timeout_ms()
-      })
+  @default_cfg %{
+    ha1_column: "ha1",
+    table: "subscriber",
+    user_column: "username",
+    domain_column: "domain",
+    password_hash: "md5"
+  }
+
+  # Anything but a map (unset, or explicitly set to nil) means "not configured".
+  defp cfg() do
+    case Application.get_env(:kelixip, __MODULE__) do
+      %{} = cfg -> cfg
+      _ -> Map.put(@default_cfg, :call_timeout_ms, Kelix.Module.default_call_timeout_ms())
+    end
+  end
+
+  @doc """
+  The digest algorithm this backend accepts, in the spelling to advertise in the
+  `WWW-Authenticate` challenge (`MD5` / `SHA-256`).
+
+  It follows `password_hash`, because the stored HA1 was salted with that hash
+  and no other: the script asks for it so the challenge names the algorithm the
+  base can actually verify (§11.1 — the module decides, the script composes).
+  """
+  @spec challenge_algorithm() :: String.t()
+  def challenge_algorithm() do
+    {advertised, _compute} = hash_algorithm(cfg())
+    advertised
+  end
+
+  defp hash_algorithm(cfg) do
+    Map.get(@hash_algorithms, Map.get(cfg, :password_hash) || "md5") ||
+      Map.fetch!(@hash_algorithms, "md5")
+  end
+
+  # A client's `algorithm` param → the canonical token, tolerating both spellings
+  # and any case. nil when we cannot compute it at all.
+  defp canonical_algorithm(algorithm) do
+    case String.upcase(algorithm) do
+      "MD5" -> "MD5"
+      "SHA-256" -> "SHA256"
+      "SHA256" -> "SHA256"
+      _ -> nil
+    end
+  end
 
   # ── facades ──────────────────────────────────────────────────────────────────
 
@@ -222,27 +315,27 @@ defmodule Kelix.Mod.AuthDb do
   end
 
   defp verify(req, domain, auth, opts) do
-    algorithm = algorithm(auth)
+    {_advertised, expected_algorithm} = hash_algorithm(cfg())
 
-    cond do
-      algorithm not in @supported_algorithms ->
-        # Re-challenge rather than reject: our challenge names the algorithm we
-        # want, so a client that picked another one (or the RFC 8760 `SHA-256`
-        # spelling) gets a chance to come back with it. Never a raise, never
-        # silence.
-        Logger.info(
-          module: __MODULE__,
-          message: "unsupported digest algorithm #{inspect(algorithm)}; re-challenging"
-        )
+    if canonical_algorithm(algorithm(auth)) == expected_algorithm do
+      case SIP.Auth.Nonce.validate(auth["nonce"] || "", domain, nonce_opts(opts)) do
+        :invalid -> {:requireauth, false}
+        :stale -> {:requireauth, true}
+        :ok -> check_credentials(req, domain, auth, expected_algorithm, opts)
+      end
+    else
+      # The stored HA1 only verifies under `password_hash`; trying to honour the
+      # client's choice would either fail obscurely or reach the raising
+      # algo2atom/1. Re-challenge instead — our challenge names the algorithm we
+      # want, so a sane client comes back with it. Never a raise, never silence.
+      Logger.info(
+        module: __MODULE__,
+        message:
+          "digest algorithm #{inspect(algorithm(auth))} does not match the stored " <>
+            "#{expected_algorithm} hash; re-challenging"
+      )
 
-        {:requireauth, false}
-
-      true ->
-        case SIP.Auth.Nonce.validate(auth["nonce"] || "", domain, nonce_opts(opts)) do
-          :invalid -> {:requireauth, false}
-          :stale -> {:requireauth, true}
-          :ok -> check_credentials(req, domain, auth, algorithm, opts)
-        end
+      {:requireauth, false}
     end
   end
 

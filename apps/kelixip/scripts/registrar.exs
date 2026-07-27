@@ -13,7 +13,6 @@
 defmodule Kelix.Registrar do
   use SIP.Scenario
   require Logger
-  import SIP.Session.Registrar, only: [set_contacts_expires: 2]
 
   uas(:register)
 
@@ -67,7 +66,14 @@ defmodule Kelix.Registrar do
   defp do_process_register(req, dialog_pid, domain) do
     case Kelix.Mod.AuthDb.do_registration_auth(req, domain) do
       {:requireauth, stale} ->
-        params = Kelix.Auth.challenge_www_authenticate(domain, stale: stale)
+        # The algorithm comes from the backend: advertising MD5 while the base
+        # stores SHA-256 HA1s would challenge forever.
+        params =
+          Kelix.Auth.challenge_www_authenticate(domain,
+            stale: stale,
+            algorithm: Kelix.Mod.AuthDb.challenge_algorithm()
+          )
+
         SIP.Dialog.reply(dialog_pid, req, 401, "Unauthorized", wwwauthenticate: params)
         if stale, do: "401 stale", else: "401 Unauthorized"
 
@@ -82,15 +88,21 @@ defmodule Kelix.Registrar do
 
   defp accept_or_reject(req, dialog_pid, domain) do
     case Kelix.Mod.Registrar.save(req, domain, dialog_pid) do
+      # RFC 3261 §10.3 step 8: enumerate ALL current bindings, each with its own
+      # remaining lifetime — `granted.contacts` already is that list (empty after
+      # an un-REGISTER, in which case the 200 carries no Contact at all).
       {:ok, granted} ->
-        contact = set_contacts_expires(Map.get(req, :contact), granted.expires)
-        SIP.Dialog.reply(dialog_pid, req, 200, "OK", contact: contact)
+        SIP.Dialog.reply(dialog_pid, req, 200, "OK",
+          contact: empty_to_nil(granted.contacts),
+          expires: granted.expires
+        )
+
         "200 OK"
 
       # RFC 3261 §10.3 step 7: a 423 MUST carry Min-Expires, otherwise the client
       # has no way to know what to ask for and simply fails.
       {:error, {423, reason}} ->
-        min = Kelix.Mod.Registrar.min_expires()
+        min = Kelix.Mod.Registrar.min_expires(domain)
 
         SIP.Dialog.reply(dialog_pid, req, 423, reason, [
           {"Min-Expires", to_string(min)}
@@ -111,4 +123,8 @@ defmodule Kelix.Registrar do
         "#{code} #{reason}"
     end
   end
+
+  # No binding left ⇒ no Contact header at all, rather than an empty one.
+  defp empty_to_nil([]), do: nil
+  defp empty_to_nil(contacts), do: contacts
 end

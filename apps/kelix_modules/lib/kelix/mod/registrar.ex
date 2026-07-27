@@ -64,6 +64,7 @@ defmodule Kelix.Mod.Registrar do
             mons: %{},
             max_contacts: @default_max_contacts,
             min_expires: @min_expires,
+            default_expires: @default_expires,
             sweep_ms: @sweep_ms
 
   # ── API ──────────────────────────────────────────────────────────────────────
@@ -75,7 +76,11 @@ defmodule Kelix.Mod.Registrar do
   @impl Kelix.Module
   def child_spec(_name, config) do
     opts =
-      [max_contacts_per_aor: config["max_contacts_per_aor"], min_expires: config["min_expires"]]
+      [
+        max_contacts_per_aor: config["max_contacts_per_aor"],
+        min_expires: config["min_expires"],
+        default_expires: config["default_expires"]
+      ]
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
 
     %{id: __MODULE__, start: {__MODULE__, :start_link, [opts]}}
@@ -83,13 +88,14 @@ defmodule Kelix.Mod.Registrar do
 
   # Every key a [module.registrar] block may carry. `module` is the generic
   # module-resolution key handled by Kelix.ModuleSupervisor.
-  @config_keys ~w(module max_contacts_per_aor min_expires call_timeout_ms)
+  @config_keys ~w(module max_contacts_per_aor min_expires default_expires call_timeout_ms)
 
   @impl Kelix.Module
   def validate_config(config) when is_map(config) do
     with :ok <- reject_unknown_keys(config),
          :ok <- pos_int_ok(config, "max_contacts_per_aor"),
          :ok <- pos_int_ok(config, "min_expires"),
+         :ok <- pos_int_ok(config, "default_expires"),
          :ok <- pos_int_ok(config, "call_timeout_ms") do
       :ok
     end
@@ -135,16 +141,16 @@ defmodule Kelix.Mod.Registrar do
   def lookup(req), do: Kelix.Module.safe_call(__MODULE__, {:lookup, req})
 
   @doc """
-  The shortest registration this store will grant (seconds).
+  The shortest registration granted on `domain` (seconds).
 
   Exists so the script can put the mandatory `Min-Expires` header on the `423`
   `save/4` returns (RFC 3261 §10.3 step 7) without duplicating the bound: the
   module owns the policy, the script composes the response (§11.1). Falls back to
   the built-in default when the store is down.
   """
-  @spec min_expires() :: pos_integer
-  def min_expires() do
-    case Kelix.Module.safe_call(__MODULE__, :min_expires) do
+  @spec min_expires(String.t() | nil) :: pos_integer
+  def min_expires(domain \\ nil) do
+    case Kelix.Module.safe_call(__MODULE__, {:min_expires, domain}) do
       n when is_integer(n) and n > 0 -> n
       _ -> @min_expires
     end
@@ -187,6 +193,7 @@ defmodule Kelix.Mod.Registrar do
      %__MODULE__{
        max_contacts: Keyword.get(opts, :max_contacts_per_aor, @default_max_contacts),
        min_expires: Keyword.get(opts, :min_expires, @min_expires),
+       default_expires: Keyword.get(opts, :default_expires, @default_expires),
        sweep_ms: sweep_ms
      }}
   end
@@ -203,7 +210,8 @@ defmodule Kelix.Mod.Registrar do
     {:reply, do_lookup(state, req), state}
   end
 
-  def handle_call(:min_expires, _from, state), do: {:reply, state.min_expires, state}
+  def handle_call({:min_expires, domain}, _from, state),
+    do: {:reply, bounds(state, domain).min_expires, state}
 
   def handle_call({:bindings, domain, aor}, _from, state) do
     {:reply, live_contacts(state, domain, downcase(aor)), state}
@@ -246,10 +254,41 @@ defmodule Kelix.Mod.Registrar do
   defp do_save(state, req, domain, dialog_pid, info) do
     with {:ok, aor} <- aor_of(req),
          contacts = List.wrap(Map.get(req, :contact)) |> Enum.reject(&is_nil/1),
-         {:ok, actions} <- plan_contacts(contacts, Map.get(req, :expires), state.min_expires) do
+         {:ok, actions} <- plan_contacts(contacts, Map.get(req, :expires), bounds(state, domain)) do
       apply_actions(state, domain, aor, actions, req, dialog_pid, info)
     end
   end
+
+  @doc false
+  # Expiry policy for a domain: `[domain.registrar]` in domains.toml overrides the
+  # store-wide `[module.registrar]` block, which overrides the built-in defaults
+  # (design §16 #8 — per-domain bounds live with the domain they serve).
+  #
+  # `default_expires` is both the value granted when the request asks for nothing
+  # AND the ceiling on what is granted; `min_expires` is the floor below which the
+  # request is refused with 423.
+  def bounds(state, domain) do
+    per_domain = domain_registrar_block(domain)
+
+    %{
+      min_expires: per_domain[:min_expires] || state.min_expires,
+      default_expires: per_domain[:default_expires] || state.default_expires
+    }
+  end
+
+  # the [domain.registrar] block of `domain`, or %{} (Domains not running, unknown
+  # domain, registrar not enabled — every one of them a "no override" case)
+  defp domain_registrar_block(domain) when is_binary(domain) do
+    with pid when not is_nil(pid) <- Process.whereis(Kelix.Domains),
+         %Kelix.Domain{registrar: %{} = block} <-
+           Kelix.Domains.lookup(Kelix.Domains.current(), domain) do
+      block
+    else
+      _ -> %{}
+    end
+  end
+
+  defp domain_registrar_block(_domain), do: %{}
 
   # Decide, per contact, whether to add (with granted expires) or remove (expires 0).
   defp plan_contacts([], _header, _min), do: {:error, {400, "No Contact"}}
@@ -257,20 +296,20 @@ defmodule Kelix.Mod.Registrar do
   # `Contact: *` — remove every binding of the AOR (RFC 3261 §10.2.2). It is only
   # legal alone and with `Expires: 0`; anything else is a malformed request, not a
   # partial wildcard.
-  defp plan_contacts(contacts, header_exp, min_exp) when is_list(contacts) do
+  defp plan_contacts(contacts, header_exp, bounds) when is_list(contacts) do
     if Enum.any?(contacts, &wildcard?/1) do
       cond do
         length(contacts) > 1 ->
           {:error, {400, "Wildcard Contact must be the only one"}}
 
-        header_or_default(header_exp) != 0 ->
+        header_or_default(header_exp, bounds) != 0 ->
           {:error, {400, "Wildcard Contact requires Expires: 0"}}
 
         true ->
           {:ok, [:remove_all]}
       end
     else
-      plan_each_contact(contacts, header_exp, min_exp)
+      plan_each_contact(contacts, header_exp, bounds)
     end
   end
 
@@ -278,14 +317,14 @@ defmodule Kelix.Mod.Registrar do
   defp wildcard?("*"), do: true
   defp wildcard?(_), do: false
 
-  defp plan_each_contact(contacts, header_exp, min_exp) do
+  defp plan_each_contact(contacts, header_exp, bounds) do
     Enum.reduce_while(contacts, {:ok, []}, fn c, {:ok, acc} ->
-      exp = requested_expires(c, header_exp)
+      exp = requested_expires(c, header_exp, bounds)
 
       cond do
         exp == 0 -> {:cont, {:ok, [{:remove, c} | acc]}}
-        exp < min_exp -> {:halt, {:error, {423, "Interval Too Brief"}}}
-        true -> {:cont, {:ok, [{:add, c, min(exp, @default_expires)} | acc]}}
+        exp < bounds.min_expires -> {:halt, {:error, {423, "Interval Too Brief"}}}
+        true -> {:cont, {:ok, [{:add, c, min(exp, bounds.default_expires)} | acc]}}
       end
     end)
     |> case do
@@ -330,11 +369,14 @@ defmodule Kelix.Mod.Registrar do
         {:error, {403, "Too many contacts"}}
       else
         :ets.insert(tid, {aor, merged})
+        # `merged`, not `added`: RFC 3261 §10.3 step 8 wants the 200 OK to
+        # enumerate ALL current bindings, so a UA refreshing one of its two
+        # contacts still learns about the other.
         # Monitor the backing dialog so a connected-transport drop invalidates the
         # binding (§6.3, WebRTC-critical).
         state = ensure_monitor(state, domain, aor, dialog_pid)
         notify(state, domain, aor, :registered)
-        {:ok, granted(aor, added, granted_expires(actions)), state}
+        {:ok, granted(aor, merged, granted_expires(actions)), state}
       end
     end
   end
@@ -488,15 +530,15 @@ defmodule Kelix.Mod.Registrar do
 
   # ── contact / expires helpers ────────────────────────────────────────────────
 
-  defp requested_expires(contact, header_exp) do
+  defp requested_expires(contact, header_exp, bounds) do
     case SIP.Uri.get_uri_param(contact, "expires") do
-      {:ok, v} -> to_int(v, header_or_default(header_exp))
-      _ -> header_or_default(header_exp)
+      {:ok, v} -> to_int(v, header_or_default(header_exp, bounds))
+      _ -> header_or_default(header_exp, bounds)
     end
   end
 
-  defp header_or_default(exp) when is_integer(exp), do: exp
-  defp header_or_default(_), do: @default_expires
+  defp header_or_default(exp, _bounds) when is_integer(exp), do: exp
+  defp header_or_default(_exp, bounds), do: bounds.default_expires
 
   defp to_int(v, default) when is_binary(v) do
     case Integer.parse(v) do
@@ -515,9 +557,18 @@ defmodule Kelix.Mod.Registrar do
     end
   end
 
+  # Each returned contact carries its OWN remaining lifetime as an `expires` URI
+  # param, so a 200 OK enumerating several bindings is accurate per binding
+  # instead of stamping them all with the expiry of the one just refreshed.
   defp granted(aor, contacts, expires) do
-    %{aor: aor, contacts: Enum.map(contacts, & &1.contact), expires: expires}
+    %{aor: aor, contacts: Enum.map(contacts, &contact_with_expires/1), expires: expires}
   end
+
+  defp contact_with_expires(%Contact{contact: uri, expires_at: at}) do
+    SIP.Uri.set_uri_param(uri, "expires", to_string(remaining_seconds(at)))
+  end
+
+  defp remaining_seconds(at), do: max(DateTime.diff(at, now(), :second), 0)
 
   # ── storage helpers ──────────────────────────────────────────────────────────
 
