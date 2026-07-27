@@ -377,7 +377,9 @@ defmodule SIP.Msg.Ops do
 
   def challenge_request(req, resp_code, "Digest", realm, algorithm, upd_fields, totag) when is_atom(req.method) and resp_code in [401, 407] do
     rsp = reply_to_request(req, resp_code, sip_reason(resp_code), upd_fields, totag)
-    authparams = %{ "realm" => realm, "nonce" => SIP.Auth.generate_nonce(), authproc: "Digest" }
+    # Stateless nonce, keyed by the server secret and bound to this realm: nothing
+    # to store, and a nonce minted for another realm cannot be replayed here.
+    authparams = %{ "realm" => realm, "nonce" => SIP.Auth.Nonce.generate(realm), authproc: "Digest" }
     authparams = if algorithm in [ "MD5", "SHA1", "SHA256" ], do: Map.put(authparams, "algorithm", algorithm), else: algorithm
 
     header = case resp_code do

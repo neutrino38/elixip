@@ -57,6 +57,9 @@ defmodule SIP.Scenario.Runner do
     :ok = SIP.Transport.Selector.start()
     :ok = SIP.Dialog.start()
     {:ok, _config_pid} = SIP.Session.ConfigRegistry.start()
+    # One server secret for the node's lifetime, keying every digest nonce
+    # (SIP.Auth.Nonce). kelixip supervises it instead; here it belongs to the run.
+    :ok = SIP.Auth.Secret.start()
     :ok
   end
 

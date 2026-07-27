@@ -145,7 +145,7 @@ defmodule Kelix.Mod.AuthDb do
   or `{:reject, code, reason}`. Never builds a SIP message.
 
   `opts`: `:ha1_lookup` (a `fn user, realm -> {:ok, ha1} | :notfound | {:error, r}`
-  for tests), plus `:now` / `:max_age` forwarded to `Kelix.Nonce.validate`.
+  for tests), plus `:now` / `:max_age` forwarded to `SIP.Auth.Nonce.validate`.
   """
   @spec do_registration_auth(map, String.t(), keyword) :: verdict
   def do_registration_auth(req, domain, opts \\ []) do
@@ -163,7 +163,7 @@ defmodule Kelix.Mod.AuthDb do
   end
 
   defp verify(req, domain, auth, opts) do
-    case Kelix.Nonce.validate(auth["nonce"] || "", domain, nonce_opts(opts)) do
+    case SIP.Auth.Nonce.validate(auth["nonce"] || "", domain, nonce_opts(opts)) do
       :invalid -> {:requireauth, false}
       :stale -> {:requireauth, true}
       :ok -> check_credentials(req, domain, auth, opts)

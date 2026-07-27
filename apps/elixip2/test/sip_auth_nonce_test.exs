@@ -1,7 +1,7 @@
-defmodule Kelix.NonceTest do
+defmodule SIP.Test.AuthNonce do
   use ExUnit.Case, async: true
 
-  alias Kelix.Nonce
+  alias SIP.Auth.Nonce
 
   @secret :binary.copy(<<0xA7>>, 32)
   @realm "example.com"
@@ -65,6 +65,15 @@ defmodule Kelix.NonceTest do
     assert :error = Nonce.timestamp("garbage")
   end
 
-  # (the no-:secret default path — reading Kelix.Secret — is covered by
-  # auth_db_test / registrar_script_test, which run the real Agent.)
+  test "with no :secret opt it uses the node secret, which round-trips" do
+    # SIP.Auth.Secret is started by bootstrap_stack/0 in the server and the tool;
+    # in a bare test it self-starts, and the same secret must validate the nonce.
+    n = Nonce.generate(@realm)
+    assert Nonce.validate(n, @realm) == :ok
+    assert Nonce.validate(n, "other.com") == :invalid
+  end
+
+  test "a non-binary nonce is :invalid, not a crash" do
+    assert Nonce.validate(nil, @realm) == :invalid
+  end
 end

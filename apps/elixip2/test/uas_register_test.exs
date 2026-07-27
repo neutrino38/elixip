@@ -25,27 +25,36 @@ defmodule SIP.Test.UASRegister do
 
   # ── Helpers ─────────────────────────────────────────────────────────────────
 
-  defp restart_registrar(module, max, overrides \\ []) do
-    case Process.whereis(Elixip.RegistrarUAS) do
-      nil ->
-        :ok
+  # `Elixip.RegistrarUAS` is a named singleton linked to the test process, so the
+  # previous test's instance may still be dying when the next one starts. Take the
+  # name over deterministically: stop whoever holds it, wait for its DOWN, retry.
+  defp restart_registrar(module, max, overrides \\ [], attempts \\ 10) do
+    opts = [scenario_module: module, max_instances: max, scenario_overrides: overrides]
 
-      pid ->
-        try do
-          GenServer.stop(pid)
-        catch
-          :exit, _ -> :ok
-        end
+    case Elixip.RegistrarUAS.start_link(opts) do
+      {:ok, _pid} ->
+        :ok = SIP.Session.ConfigRegistry.set_registration_processing_module(Elixip.RegistrarUAS)
+
+      {:error, {:already_started, pid}} when attempts > 0 ->
+        stop_and_await(pid)
+        restart_registrar(module, max, overrides, attempts - 1)
+    end
+  end
+
+  defp stop_and_await(pid) do
+    ref = Process.monitor(pid)
+
+    try do
+      GenServer.stop(pid)
+    catch
+      :exit, _ -> :ok
     end
 
-    {:ok, _pid} =
-      Elixip.RegistrarUAS.start_link(
-        scenario_module: module,
-        max_instances: max,
-        scenario_overrides: overrides
-      )
-
-    :ok = SIP.Session.ConfigRegistry.set_registration_processing_module(Elixip.RegistrarUAS)
+    receive do
+      {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+    after
+      1_000 -> Process.demonitor(ref, [:flush])
+    end
   end
 
   # Parse a REGISTER message file, mark it for the mockup transport, inject it as
@@ -118,6 +127,35 @@ defmodule SIP.Test.UASRegister do
     # by us (and whose realm is not example.com): the strict checks refuse it.
     cid = inject_register("test/SIP-REGISTER-AUTH.txt")
 
+    assert_receive {:uas_response, 403, %{callid: ^cid}}, 2_000
+  end
+
+  test "a forged nonce is rejected even with a valid digest and the right realm" do
+    # What the stateless nonce buys: the digest below is computed correctly with
+    # the configured password, and the realm matches — only the nonce is made up.
+    # The MAC does not verify, so it is refused. The former
+    # sha256("ElixSIP-day:hour:minute") nonce was keyless and could be recomputed
+    # by anyone with a clock, making this exact forgery succeed.
+    restart_registrar(@scenario, 5, password: "toto")
+
+    {:ok, msg} = File.read("test/SIP-REGISTER-LVP.txt")
+    {:ok, base} = SIPMsg.parse(msg, fn _c, _m, _l, _line -> :ok end)
+    upd_uri = SIP.Uri.set_uri_param(base.ruri, "unittest", "1")
+    base = SIP.Msg.Ops.update_sip_msg(base, {:ruri, upd_uri}) |> uniq_callid()
+    routed = SIP.Transport.Selector.select_transport(upd_uri)
+    :ok = GenServer.call(routed.tp_pid, :settestapp)
+    cid = base.callid
+
+    # right length (ts+rand+mac), wrong MAC
+    forged = Base.url_encode64(:crypto.strong_rand_bytes(48), padding: false)
+
+    authparams = %{"realm" => "example.com", "nonce" => forged, "algorithm" => "SHA256"}
+
+    req =
+      SIP.Msg.Ops.add_authorization_to_req(base, authparams, :wwwauthenticate, "5430", "toto", :plain)
+      |> fresh_branch()
+
+    send(routed.tp_pid, {:recv, req})
     assert_receive {:uas_response, 403, %{callid: ^cid}}, 2_000
   end
 

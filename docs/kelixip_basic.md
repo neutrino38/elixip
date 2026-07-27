@@ -571,7 +571,7 @@ modules) ; pas de RBAC.
   - `{:reject, code, reason}` → `reject_registration(...)`.
 
   `do_registration_auth` fait en interne : validation du nonce stateless
-  (`Kelix.Nonce`), lookup HA1, vérification de la réponse digest (via `SIP.Auth`
+  (`SIP.Auth.Nonce`), lookup HA1, vérification de la réponse digest (via `SIP.Auth`
   étendu §14). C'est la version BDD de l'actuel `check_registration_auth`.
 
 **Nonce unifié, stateless (remplace le stateful).** Le nonce stateful actuel
@@ -809,7 +809,7 @@ do_registration_auth(req, domain) :: :ok | {:requireauth, stale :: bool} | {:rej
 lookup_ha1(user, realm) :: {:ok, ha1 :: binary} | :notfound | {:error, reason}
 ```
 
-`do_registration_auth` : valide le nonce stateless (`Kelix.Nonce`), fait le
+`do_registration_auth` : valide le nonce stateless (`SIP.Auth.Nonce`), fait le
 lookup HA1, vérifie la réponse digest (via `SIP.Auth` étendu `qop=auth`, §14).
 `{:requireauth, stale}` quand il n'y a pas d'`Authorization` valide (ou nonce
 périmé ⇒ `stale=true`). C'est la version BDD de l'actuel `check_registration_auth`.

@@ -50,9 +50,10 @@ defmodule Kelix.Application do
       # swap (§3.2). Started empty; reloaded via Kelix.Domains.reload/1.
       {Kelix.Domains, path: domains_path},
       # Stateless-nonce material (§7): the boot-random server secret keying the
-      # HMAC nonce, and the intra-window `nc` anti-replay cache. Ordered before
-      # the modules — Kelix.Mod.AuthDb calls into both on every challenge.
-      Kelix.Secret,
+      # HMAC nonce (the holder lives in the framework — elixipp needs it too, §16.13),
+      # and the intra-window `nc` anti-replay cache. Ordered before the modules —
+      # Kelix.Mod.AuthDb calls into both on every challenge.
+      SIP.Auth.Secret,
       Kelix.NonceCache,
       # Script loading/versioning (§5) and the shared instance factory (§4.2).
       Kelix.ScriptRegistry,

@@ -84,17 +84,8 @@ defmodule SIP.Auth do
        "response" => response, :authproc => "Digest", "uri" => uri }
   end
 
-  @nonce_size 16  # 16 bytes = 128 bits
-
-  @doc "Generate a nonce for Digest auth procedure"
-  def generate_nonce do
-    now = DateTime.utc_now(:second)
-    generate_nonce(now)
-  end
-
-  def generate_nonce(date) do
-    :crypto.hash(:sha256, "ElixSIP-#{date.day}:#{date.hour}:#{date.minute}")
-      |> binary_part(0, @nonce_size)
-      |> Base.encode16(case: :lower)
-  end
+  # Nonce generation/validation lives in `SIP.Auth.Nonce` (stateless HMAC). The
+  # former `generate_nonce/0,1` — sha256("ElixSIP-day:hour:minute"), keyless and
+  # identical for every client within a minute — was removed with the per-dialog
+  # nonce map it fed (kelixip design §7.5).
 end

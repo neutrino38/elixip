@@ -257,11 +257,9 @@ alias SIP.Transac
     end
   end
 
-  @doc "check if a nonce was recorded in the dialog from a previous challenge"
-  @spec check_nonce(pid(), any()) :: boolean()
-  def check_nonce(dialog_pid, nonce) when is_pid(dialog_pid) do
-    GenServer.call(dialog_pid, { :checknonce, nonce})
-  end
+  # check_nonce/2 is gone with the per-dialog nonce map: a nonce carries its own
+  # proof now, so validate it directly with SIP.Auth.Nonce.validate/3 — no dialog
+  # round trip, and it also works across dialogs/nodes (design §7.5).
 
   @doc "Start sending OPTIONS keepalive - only available for REGISTER dialog"
   def start_keepalive(dialog_pid) when is_pid(dialog_pid) do

@@ -14,7 +14,7 @@
 # no macro / `var!` plumbing is needed.
 defmodule UAS.RegisterExample do
   use SIP.Scenario
-  import SIP.Session.Registrar, only: [challenge_registration: 2, accept_registration: 3, reject_registration: 4, set_contacts_expires: 2]
+  import SIP.Session.Registrar, only: [challenge_registration: 3, accept_registration: 3, reject_registration: 4, set_contacts_expires: 2]
 
   # Marks the scenario type as :uas_register so elixipp runs it in server mode.
   uas(:register)
@@ -48,9 +48,11 @@ defmodule UAS.RegisterExample do
     on_events do
       {:REGISTER, req, _trans_pid, dialog_pid} ->
         case check_registration_auth(req, dialog_pid, password: appdata_get(:password)) do
-          :no_auth_header ->
-            challenge_registration(req, dialog_pid)
-            goto(loop, "401 Unauthorized")
+          # A nonce that merely aged out is re-challenged, not refused: the client
+          # replays with the fresh one (RFC 3261 §22.2 stale).
+          why when why in [:no_auth_header, :stale_nonce] ->
+            challenge_registration(req, dialog_pid, realm: @domain)
+            goto(loop, "401 Unauthorized (#{why})")
 
           :ok ->
             accept_registration(req, dialog_pid, expires: @granted_expires)
@@ -79,9 +81,9 @@ defmodule UAS.RegisterExample do
     on_events do
       {:REGISTER, req, _trans_pid, dialog_pid} ->
         case check_registration_auth(req, dialog_pid, password: appdata_get(:password)) do
-          :no_auth_header ->
-            challenge_registration(req, dialog_pid)
-            goto(loop, "401 (re-auth)")
+          why when why in [:no_auth_header, :stale_nonce] ->
+            challenge_registration(req, dialog_pid, realm: @domain)
+            goto(loop, "401 (re-auth: #{why})")
 
           :ok ->
             if unregister?(req) do
@@ -156,11 +158,11 @@ defmodule UAS.RegisterExample do
     SIP.Dialog.reply(dialog_pid, req, 200, "OK", contact: contact)
   end
 
-  # Verify the inbound REGISTER credentials. Returns :no_auth_header (caller must
-  # challenge), :ok, or a refusal atom. With no configured password any
-  # well-formed Authorization is accepted; pass opts[:password] for a real digest
-  # check via SIP.Msg.Ops.check_authrequest/3.
-  defp check_registration_auth(req, dialog_pid, opts) do
+  # Verify the inbound REGISTER credentials. Returns :no_auth_header or
+  # :stale_nonce (caller must challenge), :ok, or a refusal atom. With no
+  # configured password any well-formed Authorization is accepted; pass
+  # opts[:password] for a real digest check via SIP.Msg.Ops.check_authrequest/3.
+  defp check_registration_auth(req, _dialog_pid, opts) do
     # Get auth header
     auth =
       cond do
@@ -176,20 +178,21 @@ defmodule UAS.RegisterExample do
       is_nil(Keyword.get(opts, :password)) ->
         :ok
 
-      # Digest auth params are string-keyed maps (only :authproc is an atom), so
-      # read them with the string keys — auth.nonce / auth.domain would raise.
-      SIP.Dialog.check_nonce(dialog_pid, auth["nonce"]) == false ->
-        :invalid_nonce
-
       auth["realm"] != @domain ->
         :invalid_domain
 
       true ->
-        SIP.Msg.Ops.check_authrequest(
-          req,
-          Keyword.get(opts, :password),
-          auth["nonce"]
-        )
+        # Digest auth params are string-keyed maps (only :authproc is an atom), so
+        # read them with the string keys — auth.nonce / auth.domain would raise.
+        # The nonce carries its own proof (HMAC over ts+rand+realm), so there is
+        # nothing to look up: validate it, and re-challenge when it merely aged
+        # out. `check_authrequest/3` then verifies the digest itself; its own
+        # nonce-equality check is left off (nil) — it is this validation's job.
+        case SIP.Auth.Nonce.validate(auth["nonce"], @domain) do
+          :ok -> SIP.Msg.Ops.check_authrequest(req, Keyword.get(opts, :password), nil)
+          :stale -> :stale_nonce
+          :invalid -> :invalid_nonce
+        end
     end
   end
 

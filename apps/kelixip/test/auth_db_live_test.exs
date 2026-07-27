@@ -78,7 +78,7 @@ defmodule Kelix.Mod.AuthDbLiveTest do
 
   test "do_registration_auth: a digest forged from the DB HA1 → :ok", %{realm: realm, user: user} do
     {:ok, ha1} = AuthDb.lookup_ha1(user, realm)
-    nonce = Kelix.Nonce.generate(realm)
+    nonce = SIP.Auth.Nonce.generate(realm)
 
     response = SIP.Auth.compute_auth_response_from_ha1("MD5", nonce, ha1, "REGISTER", @uri)
 
@@ -97,7 +97,7 @@ defmodule Kelix.Mod.AuthDbLiveTest do
   end
 
   test "do_registration_auth: a wrong response → 403", %{realm: realm, user: user} do
-    nonce = Kelix.Nonce.generate(realm)
+    nonce = SIP.Auth.Nonce.generate(realm)
 
     auth = %{
       "username" => user,

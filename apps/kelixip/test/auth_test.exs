@@ -11,8 +11,8 @@ defmodule Kelix.AuthTest do
     assert params["algorithm"] == "MD5"
     assert params[:authproc] == "Digest"
     refute Map.has_key?(params, "stale")
-    # the embedded nonce is a real Kelix.Nonce for this realm
-    assert Kelix.Nonce.validate(params["nonce"], "example.com", secret: @secret) == :ok
+    # the embedded nonce is a real SIP.Auth.Nonce for this realm
+    assert SIP.Auth.Nonce.validate(params["nonce"], "example.com", secret: @secret) == :ok
   end
 
   test "stale: true adds stale=true to the challenge" do

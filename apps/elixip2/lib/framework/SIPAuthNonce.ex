@@ -1,7 +1,6 @@
-defmodule Kelix.Nonce do
+defmodule SIP.Auth.Nonce do
   @moduledoc """
-  Stateless, unforgeable digest nonce (design §7.1, §11.1) — replaces the old
-  stateful per-dialog nonce and the secret-less `SIP.Auth.generate_nonce`.
+  Stateless, unforgeable digest nonce — the single nonce facility of the stack.
 
       nonce = base64url( ts ‖ rand ‖ HMAC-SHA256(server_secret, ts ‖ rand ‖ realm) )
 
@@ -10,8 +9,19 @@ defmodule Kelix.Nonce do
   with `stale=true` and the client replays transparently). `realm` is bound into
   the HMAC, so a nonce minted for one domain is useless on another.
 
-  The server secret comes from `Kelix.Secret`; both functions accept a `:secret`
-  (and `:now`) override for testing. base64url avoids `+`/`/` (spec §11.1).
+  The server secret comes from `SIP.Auth.Secret`; both functions accept a
+  `:secret` (and `:now`) override for testing. base64url avoids `+`/`/`.
+
+  It replaces two things it is strictly better than (kelixip design §7.1, §7.5):
+
+    * `SIP.Auth.generate_nonce/0` — a `sha256("ElixSIP-day:hour:minute")` digest:
+      keyless, identical for every client within the same minute, and trivially
+      recomputable by anyone.
+    * `SIP.DialogImpl.Nonce` — a per-dialog `nonce => expiry` map with a purge
+      timer: state to keep, per dialog, for something a MAC proves for free.
+
+  Lives in the shared framework so both artifacts reach it: `apps/elixipp`
+  depends only on `:elixip2` (decision §16.13).
   """
 
   @rand_bytes 8
@@ -38,7 +48,9 @@ defmodule Kelix.Nonce do
   `:invalid` (forged / wrong realm / malformed).
   """
   @spec validate(String.t(), String.t(), keyword) :: verdict
-  def validate(nonce, realm, opts \\ []) when is_binary(nonce) and is_binary(realm) do
+  def validate(nonce, realm, opts \\ [])
+
+  def validate(nonce, realm, opts) when is_binary(nonce) and is_binary(realm) do
     secret = secret(opts)
     max_age = Keyword.get(opts, :max_age, @default_max_age)
     now = Keyword.get(opts, :now, now())
@@ -52,6 +64,10 @@ defmodule Kelix.Nonce do
     end
   end
 
+  # A missing/non-binary nonce (no Authorization header, malformed params) is not
+  # a crash: it is simply not a nonce we minted.
+  def validate(_nonce, _realm, _opts), do: :invalid
+
   @doc "Extract the timestamp (unix seconds) from a nonce, without validating it."
   @spec timestamp(String.t()) :: {:ok, integer} | :error
   def timestamp(nonce) do
@@ -63,9 +79,11 @@ defmodule Kelix.Nonce do
 
   # ── internals ────────────────────────────────────────────────────────────────
 
-  defp decode(nonce) do
+  defp decode(nonce) when is_binary(nonce) do
     case Base.url_decode64(nonce, padding: false) do
-      {:ok, <<ts_bin::binary-size(@ts_bytes), rand::binary-size(@rand_bytes), mac::binary-size(@mac_bytes)>>} ->
+      {:ok,
+       <<ts_bin::binary-size(@ts_bytes), rand::binary-size(@rand_bytes),
+         mac::binary-size(@mac_bytes)>>} ->
         {:ok, ts_bin, rand, mac}
 
       _ ->
@@ -73,10 +91,12 @@ defmodule Kelix.Nonce do
     end
   end
 
+  defp decode(_nonce), do: :error
+
   defp mac(secret, ts_bin, rand, realm),
     do: :crypto.mac(:hmac, :sha256, secret, ts_bin <> rand <> realm)
 
-  defp secret(opts), do: Keyword.get(opts, :secret) || Kelix.Secret.get()
+  defp secret(opts), do: Keyword.get(opts, :secret) || SIP.Auth.Secret.get()
 
   defp now(), do: System.os_time(:second)
 

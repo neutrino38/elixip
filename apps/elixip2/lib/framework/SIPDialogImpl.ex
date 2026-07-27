@@ -8,7 +8,6 @@ defmodule SIP.DialogImpl do
   require SIP.Uri
   import SIP.Msg.Ops
   alias SIP.DialogImpl.KeepAlive
-  alias SIP.DialogImpl.Nonce
 
   defstruct [
     # SIP message that created this dialog
@@ -40,9 +39,7 @@ defmodule SIP.DialogImpl do
     callid: nil,
     totag: nil,
     destip: nil,
-    destport: 0,
-    # Map to store nonces and their expiration times
-    nonce_map: %{}
+    destport: 0
   ]
 
   defp on_new_transaction(state, req, _transact_id)
@@ -469,14 +466,15 @@ defmodule SIP.DialogImpl do
 
   # Reply to an in_dialog request with a 401/407 challenge.
   #
-  # Legacy path — the 5th arg is a **binary realm**: the framework builds the
-  # digest challenge and generates+stores a stateful nonce (SHA256). Kept for
-  # back-compat (elixipp scenarios).
+  # Short path — the 5th arg is a **binary realm**: the framework builds the digest
+  # challenge itself (SHA256), minting a stateless `SIP.Auth.Nonce` for that realm.
+  # Nothing is stored: the application validates the nonce it gets back with
+  # `SIP.Auth.Nonce.validate/3` (see `scenarios/uas_register.exs`).
   #
   # A 401/407 whose 5th arg is a keyword list (e.g. `[wwwauthenticate: params]`)
   # falls through to the generic clause below, which sends the response with the
-  # caller-built header verbatim — no nonce generation/storage. kelixip uses this
-  # to challenge with a stateless Kelix.Nonce + qop (design §7.3).
+  # caller-built header verbatim. kelixip uses that one to add `qop=auth` /
+  # `stale` (design §7.3) via `Kelix.Auth`.
   def handle_call({:replyreq, req, resp_code, reason, realm}, _from, state)
       when resp_code in [401, 407] and is_binary(realm) do
     auth = %{realm: realm, algorithm: "SHA256", authproc: "Digest"}
@@ -484,15 +482,10 @@ defmodule SIP.DialogImpl do
     {ret, uas_t} =
       SIP.Transac.reply_req(req, resp_code, reason, auth, state.totag, state.transactions)
 
-    case ret do
-      {:ok, nonce} ->
-        # Store the nonce and its expiration time in the nonce_map
-        new_state = Nonce.add(state, nonce)
-        {:reply, :ok, add_totag(new_state, nil) |> close_transaction(uas_t)}
-
-      _ ->
-        {:reply, ret, add_totag(state, nil) |> close_transaction(uas_t)}
-    end
+    # reply_req/6 answers {:ok, nonce} on the challenge path; the nonce needs no
+    # bookkeeping now, so normalize it to the usual :ok.
+    ret = if match?({:ok, _nonce}, ret), do: :ok, else: ret
+    {:reply, ret, add_totag(state, nil) |> close_transaction(uas_t)}
   end
 
   def handle_call({:replyreq, req, resp_code, reason, upd_field}, _from, state) do
@@ -553,12 +546,6 @@ defmodule SIP.DialogImpl do
 
       {:reply, :nosuchtransaction, state}
     end
-  end
-
-  # Handle call to check if a nonce is valid
-  def handle_call({:checknonce, nonce}, _from, state) do
-    is_valid = Nonce.valid?(state, nonce)
-    {:reply, is_valid, state}
   end
 
   # Handle call to start options keepalive
@@ -827,11 +814,6 @@ defmodule SIP.DialogImpl do
   @impl true
   def handle_info({:timeout, _tref, :optionskeepalive}, state) do
     KeepAlive.on_timeout(state)
-  end
-
-  # Handle timer for checking expired nonces
-  def handle_info(:check_expired_nonces, state) do
-    {:noreply, Nonce.purge_expired(state)}
   end
 
   # Invoked when a dialog receives a SIP response from an UAC transaction

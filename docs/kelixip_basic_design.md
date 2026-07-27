@@ -95,7 +95,7 @@ Kelix.Application  (use Application)
     ├── SIP.Resolver               — DNS defaults (was inside Selector.start/0)
     ├── SIP.Session.ConfigRegistry — kept, but demoted to a low-level primitive
     │                                 the Router configures (see §4)
-    ├── Kelix.Secret             — Agent: ephemeral server_secret (boot-random)  §7
+    ├── SIP.Auth.Secret          — Agent: ephemeral server_secret (boot-random)  §7
     ├── Kelix.NonceCache         — ETS owner: nonce→nc, TTL=max_age             §7
     ├── Kelix.ModuleSupervisor   — :one_for_one, loadable .beam from module_dir   §8
     │     └── (one child per [module.<name>] block — NONE are bundled in the core;
@@ -153,8 +153,8 @@ Design choices:
 >   **empty** config: no domain, no module, no frontal. A bad/missing file aborts
 >   the boot **and now says why on stderr** (a release dying during boot flushes no
 >   Logger output — journald would otherwise show only "Runtime terminating").
-> - **`Kelix.Secret` + `Kelix.NonceCache`** were supervised **only by the tests**:
->   in a release `Kelix.Nonce` → `Kelix.Secret.get()` raised `noproc`, i.e. digest
+> - **The secret + `Kelix.NonceCache`** were supervised **only by the tests**:
+>   in a release the nonce generator → `Secret.get()` raised `noproc`, i.e. digest
 >   auth was dead, and `nc` anti-replay silently off. Now root children.
 > - **`SIP.Resolver` DNS defaults** — done by `Selector.start/0`, which the server
 >   never calls; now at boot, tolerant of a host with no usable `resolv.conf`.
@@ -600,7 +600,7 @@ Replaces the current stateful per-dialog nonce and the secret-less
 `SIP.Auth.generate_nonce` (spec §11.1). Applies to the registrar *and* all
 dialogue challenges.
 
-### 7.1 `Kelix.Nonce` — stateless HMAC
+### 7.1 `SIP.Auth.Nonce` — stateless HMAC
 
 ```
 nonce = base64url( ts ‖ rand ‖ HMAC-SHA256(server_secret, ts ‖ rand ‖ realm) )
@@ -614,10 +614,18 @@ nonce = base64url( ts ‖ rand ‖ HMAC-SHA256(server_secret, ts ‖ rand ‖ re
   transparently replays. `realm` bound into the HMAC ⇒ a nonce from one domain is
   useless on another.
 
-`Kelix.Secret` (supervised Agent) holds the **ephemeral** `server_secret`,
+`SIP.Auth.Secret` (supervised Agent) holds the **ephemeral** `server_secret`,
 regenerated at boot (a restart invalidates in-flight nonces ⇒ `stale`, harmless).
 Designed to become a **shared** secret across nodes for HA (roadmap) — any node
 then validates any node's nonce.
+
+> **Both modules live in the shared framework** (`apps/elixip2`), not in kelixip —
+> decision §16.13. `apps/elixipp` depends only on `:elixip2`, so a nonce facility
+> inside `:kelixip` is unreachable from the tool's scenarios, which is exactly what
+> kept the stateful nonce alive (§7.5). kelixip supervises `SIP.Auth.Secret` as a
+> root child; `SIP.Scenario.Runner.bootstrap_stack/0` starts it for the tool and
+> the tests, and `get/0` self-starts it (unlinked) for a bare unit test that never
+> bootstrapped — losing a secret only costs one `stale` round trip.
 
 ### 7.2 Anti-replay within the window — `qop=auth` + `nc`
 
@@ -635,14 +643,14 @@ TTL = `max_age`. On each authed request with `qop=auth`: reject if
   `compute_auth_response_from_ha1/…` (or a new function) carrying `nc`/`cnonce`/
   `qop`.
 - The challenge builder (`SIP.Msg.Ops.challenge_request/7`) offers
-  `qop="auth"` and uses `Kelix.Nonce.generate/1` instead of
+  `qop="auth"` and uses `SIP.Auth.Nonce.generate/2` instead of
   `SIP.Auth.generate_nonce/0`. **algorithm = MD5** (do not require SHA-256 /
   RFC 8760 — poorly supported). Note today the registrar challenge is hardcoded
   to `SHA256` in `SIP.DialogImpl.handle_call({:replyreq,…})` — change to MD5 and
   drive realm/qop from the router-injected domain.
 - The verifier (`SIP.Msg.Ops.check_authrequest/3`) branches on the presence of
   `qop` in the client response: `qop=auth` → the nc/cnonce form + `NonceCache`
-  check; no `qop` → the RFC 2069 form. `Kelix.Nonce.validate/2` replaces the
+  check; no `qop` → the RFC 2069 form. `SIP.Auth.Nonce.validate/3` replaces the
   stateful `SIP.Dialog.check_nonce/2` lookup.
 
 ### 7.4 Secret source & realm — the `auth_db` module
@@ -658,7 +666,7 @@ TTL = `max_age`. On each authed request with `qop=auth`: reject if
   Kamailio's `subscriber` table.
 - **`auth_db` decides, the script composes** (spec §11.1 → §12.3). `auth_db`
   evaluates the client's Authorization against the stored HA1 (nonce validation
-  via `Kelix.Nonce`, digest check via the extended `SIP.Auth` §7.3) and returns a
+  via `SIP.Auth.Nonce`, digest check via the extended `SIP.Auth` §7.3) and returns a
   **verdict** — it builds no SIP message:
 
   ```elixir
@@ -679,13 +687,31 @@ TTL = `max_age`. On each authed request with `qop=auth`: reject if
 > *format*, md5/sha256 the *hash inside it*). Read as **default `"md5"`**; flagged
 > in §16 and corrected in the spec pass.
 
-### 7.5 Removal / deprecation
+### 7.5 Removal / deprecation — **DONE 2026-07-27**
 
-`SIP.DialogImpl.Nonce` (stateful map + purge timer) and
-`SIP.Auth.generate_nonce/0` are **removed** once callers move to
-`Kelix.Nonce`. The nonce format is opaque to clients (they echo it) so the
-switch is transparent — no interop risk (spec §11.1). `elixipp`'s UAC digest
-already tolerates any nonce, so tests are unaffected.
+`SIP.DialogImpl.Nonce` (stateful map + purge timer), `SIP.Dialog.check_nonce/2`
+and `SIP.Auth.generate_nonce/0,1` are **gone**; the stack has exactly one nonce
+facility, `SIP.Auth.Nonce`. What that changed:
+
+- `SIP.Msg.Ops.challenge_request/7` mints a stateless nonce bound to the realm it
+  is challenging for. Every challenge path in the framework goes through it, so
+  the dialog layer no longer stores anything: the `nonce_map` field, its
+  `:check_expired_nonces` timer and the per-dialog purge are removed.
+- `scenarios/uas_register.exs` (the `elixipp` reference registrar) validates with
+  `SIP.Auth.Nonce.validate/3` instead of asking its dialog. `:stale` now
+  **re-challenges** instead of refusing (RFC 3261 §22.2), and the tautological
+  nonce-equality argument of `check_authrequest/3` was dropped.
+- **Security, not just cleanliness.** The old `generate_nonce/0` was
+  `sha256("ElixSIP-day:hour:minute")` truncated to 16 bytes: keyless, identical
+  for every client within the same minute, and recomputable by anyone with a
+  clock — its only protection was the per-dialog map. The new one is an HMAC over
+  `ts ‖ rand ‖ realm` under the server secret; a nonce cannot be minted, reused
+  across realms, or replayed past `max_age`. Regression-tested in
+  `uas_register_test.exs` ("a forged nonce is rejected even with a valid digest
+  and the right realm").
+
+The nonce format is opaque to clients (they echo it), so the switch is transparent
+— no interop risk (spec §11.1).
 
 ---
 
@@ -1060,11 +1086,11 @@ Flagged in the spec as **"à faire"**:
    the domain into the instance context; scripts stop declaring `domains:`. Keep
    `elixipp`'s `ScenarioUAS` path working (it still reads `config domains:`) — the
    two dispatchers coexist.
-2. **Nonce migration** (§7.5): remove `SIP.DialogImpl.Nonce` +
-   `SIP.Auth.generate_nonce`, switch the challenge/verify path to
-   `Kelix.Nonce`. Update `scenarios/uas_register.exs`'s
-   `check_registration_auth/3` (which currently calls `SIP.Dialog.check_nonce/2`)
-   to the stateless validate.
+2. **Nonce migration** (§7.5) — **DONE 2026-07-27**: `SIP.DialogImpl.Nonce`,
+   `SIP.Dialog.check_nonce/2` and `SIP.Auth.generate_nonce/0,1` removed; the
+   challenge/verify path (framework *and* kelixip) goes through `SIP.Auth.Nonce`,
+   which moved into the shared library so `elixipp`'s `uas_register.exs` can reach
+   it (§16.13) — the dependency direction was what blocked this item.
 3. **`qop=auth` in `SIP.Auth`** (§7.3) — additive, keeps RFC 2069 fallback.
 4. **Per-listener certs** (§3.1) — thread cert/key through listener opts.
 5. **Supervise the stack** (§2) — registries/ConfigRegistry/listeners as
@@ -1093,12 +1119,12 @@ before the features that need them.
 | Phase | Deliverable | Depends on |
 |---|---|---|
 | **P0 — Umbrella + OTP skeleton** ✅ | restructure into `apps/elixip` + `apps/elixipp` + `apps/kelixip` (§12.0, keep `elixipp`/tests green); `Kelix.Application` + supervision tree; supervise registries/ConfigRegistry; `mix release kelixip` builds; boots with an empty config — **DONE 2026-07-26** (§12.0) | — |
-| **P0b — Complete the tree** ✅ | `Kelix.Listener.Supervisor` (one child per `[[listen]]`, per-listener certs, UDP shared with the `Selector`); TOML paths from `KELIXIP_CONFIG`/`KELIXIP_DOMAINS` via `config/runtime.exs` + visible fail-fast; `Kelix.Secret`/`NonceCache`/`SIP.Resolver` DNS/`[log].level` at boot; listeners in `status` — **DONE 2026-07-27** (§2.1) | P1–P9 |
+| **P0b — Complete the tree** ✅ | `Kelix.Listener.Supervisor` (one child per `[[listen]]`, per-listener certs, UDP shared with the `Selector`); TOML paths from `KELIXIP_CONFIG`/`KELIXIP_DOMAINS` via `config/runtime.exs` + visible fail-fast; secret/`NonceCache`/`SIP.Resolver` DNS/`[log].level` at boot; listeners in `status` — **DONE 2026-07-27** (§2.1) | P1–P9 |
 | **P1 — Config** ✅ | `toml` dep; `Kelix.Config` (infra→app env, per-listener certs); `Kelix.Domains` + `Kelix.DialPlan` compiler; atomic reload plumbing (no CLI yet) — **DONE 2026-07-26** (§3) | P0 |
 | **P2 — Dispatch** ✅ | `Kelix.Router` (domain→function→script, 404/405/503); wire as ConfigRegistry processing module; `Kelix.ScriptRegistry` (version-suffixed modules + refcount) + load-time contract check; extract `Kelix.InstancePool` (shared quota, per-domain) — **DONE 2026-07-26** (§4, §5) | P1 |
 | **P5 — Module system** ✅ | `Kelix.Module` behaviour + `Kelix.ModuleSupervisor` + facade resolution + module control-surface registration (REST/CLI, §8.1) — **DONE 2026-07-26** (§8) | P1 (config) |
 | **P3 — Registrar module** ✅ | `Kelix.Mod.Registrar` (per-domain store; `save`/`lookup`/`subscribe`; received+flow+Path); NAT/flow inbound routing — **DONE 2026-07-26** (§6). *Open:* the send-over-flow `Selector` short-circuit (§6.4 pt 2, §16.6) is decided but **not implemented** — `lookup/1` stamps `tp_pid`+dest, the `Selector` still ignores them | P2, P5 |
-| **P4 — Auth** ✅ | `Kelix.Secret` + `Kelix.Nonce` (stateless HMAC) + `NonceCache`; `SIP.Auth` `qop=auth`; realm=domain (alias→nominal); `Kelix.Mod.AuthDb` (HA1 lookup + 401/accept/reject) — **DONE 2026-07-26** (§7). *Open:* removing the now-unused stateful nonce (`SIP.DialogImpl.Nonce`, `SIP.Auth.generate_nonce/0`, §7.5) — still used by `elixipp`'s `uas_register.exs` | P3, P5 |
+| **P4 — Auth** ✅ | `SIP.Auth.Secret` + `SIP.Auth.Nonce` (stateless HMAC, in the shared library §16.13) + `Kelix.NonceCache`; `SIP.Auth` `qop=auth`; realm=domain (alias→nominal); `Kelix.Mod.AuthDb` (HA1 lookup + 401/accept/reject) — **DONE 2026-07-26**; stateful nonce removed and every caller migrated **2026-07-27** (§7.5) | P3, P5 |
 | **P6 — Media pool** ✅ | `Kelix.MediaPool` (round-robin, health-check, failover, toggle) over the Mendooze adapter — **DONE 2026-07-26** (§9); + additive per-instance media override in `SIP.Session.Media` | P0 |
 | **P6b — radius_billing** | `Kelix.Mod.RadiusBilling` | P5 |
 | **P7 — Control layer** ✅ | `Kelix.Control` (all verbs); `kelictl` release command over RPC (`Kelix.Control.CLI` + `bin/kelictl` overlay); versioned/notify reload; graceful shutdown — **DONE 2026-07-26** (§10) | P2–P6 |
@@ -1113,10 +1139,10 @@ there was nothing worth packaging.
 
 **Remaining for "basic"**, as of 2026-07-27: **P6b** (`radius_billing`, not
 started), **P10** (RPM: nothing produced beyond `rel/env.sh.eex` + the `kelictl`
-overlay), plus three decided-but-unimplemented items — the send-over-flow
-`Selector` short-circuit (§6.4/§16.6), dropping the stateful nonce (§7.5), and
-dynamic `.beam` loading from `module_dir` with the modules extracted out of the
-core release (§8, §16.12 — to land with P10). Deferred by choice:
+overlay), plus two decided-but-unimplemented items — the send-over-flow
+`Selector` short-circuit (§6.4/§16.6) and dynamic `.beam` loading from
+`module_dir` with the modules extracted out of the core release (§8, §16.12 — to
+land with P10). Deferred by choice:
 transaction/transport counters and per-MCU session gauges (§11, §9),
 `Kelix.InstanceSupervisor` (§2.1), the `:elixip2` → `:elixip` rename (§12.0).
 
@@ -1186,6 +1212,19 @@ All questions below were decided on **2026-07-26** unless marked otherwise.
     **function-agnostic**: a kelixip-based product (e.g. an MCU) loads only the
     modules it needs, and may load none of these. The module system is thus both
     the internal architecture *and* the third-party extension point.
+
+13. **Where does the stateless nonce live?** — **RESOLVED** (2026-07-27):
+    in the **shared framework** (`SIP.Auth.Nonce` + `SIP.Auth.Secret` in
+    `apps/elixip2`), not in `:kelixip`. Forced by the umbrella dependency
+    direction (§12.0): `apps/elixipp` depends on `:elixip2` only, so anything in
+    `:kelixip` is unreachable from the tool's scenarios — and `uas_register.exs`
+    was the last caller of the stateful nonce. Keeping the nonce in kelixip would
+    have meant either an impossible dependency (`elixipp` → `kelixip`) or two
+    nonce implementations in one stack. The server still owns the *lifecycle*
+    (kelixip supervises the secret as a root child); the framework owns the
+    *algorithm*. `Kelix.NonceCache` (the `qop`/`nc` anti-replay) stays in kelixip:
+    it is server-grade hardening consumed by `Kelix.Mod.AuthDb`, and the framework
+    path degrades cleanly without it (window-only anti-replay, §7.2).
 
 **Remaining open (not blocking basic):** none of the above. New items will be
 logged here as implementation proceeds.

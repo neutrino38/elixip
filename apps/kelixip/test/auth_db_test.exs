@@ -13,7 +13,7 @@ defmodule Kelix.Mod.AuthDbTest do
 
   @ha1 SIP.Auth.compute_ha1("MD5", @user, @domain, @pass)
 
-  # Kelix.Secret + Kelix.NonceCache are supervised by the application (§2.1), so
+  # SIP.Auth.Secret + Kelix.NonceCache are supervised by the application (§2.1), so
   # they are already up here — nothing to start.
 
   # inject the "DB": a valid user resolves to the known HA1
@@ -21,7 +21,7 @@ defmodule Kelix.Mod.AuthDbTest do
     [ha1_lookup: fn @user, @domain -> {:ok, @ha1} end]
   end
 
-  defp nonce(now \\ @now), do: Kelix.Nonce.generate(@domain, now: now)
+  defp nonce(now \\ @now), do: SIP.Auth.Nonce.generate(@domain, now: now)
 
   # a plain (no-qop) Authorization with a correct response
   defp auth(nonce, opts \\ []) do
