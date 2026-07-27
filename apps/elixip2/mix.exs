@@ -34,8 +34,10 @@ defmodule SIPParser.MixProject do
       # Fork adding active mode for WebSocket (delivers {:web, socket, data} to the owner)
       {:socket2, github: "neutrino38/elixir-socket", branch: "feat/active-ws"},
       {:ex_sdp, "~> 1.1.1"},
-      # XML-RPC encode/decode for the Mendooze JSR309 control interface
-      {:xmlrpc, "~> 1.4"}
+      # XML-RPC encode/decode for the Mendooze JSR309 control interface.
+      # 1.5 is the first release accepting decimal ~> 3.0, which is required to
+      # get away from the vulnerable decimal 2.x (EEF-CVE-2026-32686).
+      {:xmlrpc, "~> 1.5"}
       # NB: owl (terminal UI) moved to apps/elixipp — it is only used by the
       # elixipp escript's --monitor view, not by the shared stack.
     ]
