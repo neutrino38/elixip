@@ -39,7 +39,28 @@ defmodule Kelix.ModuleSupervisorTest do
     def handle_control("ping", _args), do: {:ok, :pong}
   end
 
+  # Same, minus the optional control callbacks: a module that contributes no
+  # REST/CLI command. (It used to be Kelix.Mod.Registrar, which is no longer
+  # compiled into the core — §16.12 — so the core's tests must not reach for it.)
+  defmodule Plain do
+    @behaviour Kelix.Module
+    use Agent
+
+    def start_link(config), do: Agent.start_link(fn -> config end, name: __MODULE__)
+
+    @impl Kelix.Module
+    def child_spec(_name, config),
+      do: %{id: __MODULE__, start: {__MODULE__, :start_link, [config]}}
+
+    @impl Kelix.Module
+    def validate_config(_config), do: :ok
+
+    @impl Kelix.Module
+    def describe(), do: %{version: "0.1", exports: []}
+  end
+
   @fake "Kelix.ModuleSupervisorTest.Fake"
+  @plain "Kelix.ModuleSupervisorTest.Plain"
 
   setup do
     # start from a clean slate in the shared registries
@@ -78,12 +99,11 @@ defmodule Kelix.ModuleSupervisorTest do
     end
 
     test "a module without describe_control registers no commands" do
-      # Kelix.Mod.Registrar has no control surface yet
-      start_sup(%{"registrar" => %{"max_contacts_per_aor" => 2}})
+      start_sup(%{"plain" => %{"module" => @plain, "max_contacts_per_aor" => 2}})
 
-      assert Process.whereis(Kelix.Mod.Registrar)
-      assert ModuleRegistry.lookup("registrar").config["max_contacts_per_aor"] == 2
-      assert ControlRegistry.commands_for("registrar") == []
+      assert Process.whereis(Plain)
+      assert ModuleRegistry.lookup("plain").config["max_contacts_per_aor"] == 2
+      assert ControlRegistry.commands_for("plain") == []
     end
   end
 

@@ -53,12 +53,32 @@ but the server and the other modules do (never a half-applied start).
 
 First-party modules (`registrar`, `auth_db`, `radius_billing`) are shipped as
 separate packaging artifacts and dropped into `module_dir`
-(`/usr/lib/kelixip/modules`, `server.module_dir`). A module is loaded only when a
-`[module.<name>]` block declares it.
+(`/usr/lib/kelixip/modules`, `server.module_dir`). **The server release contains
+none of them**: at boot it adds `module_dir` to its code path and loads a module
+only when a `[module.<name>]` block declares it.
 
-> Dynamic `.beam` loading from `module_dir` and `.beam` code-reload versioning
-> land with packaging — see the roadmap. In a source checkout every module is
-> already compiled into the umbrella.
+Two consequences worth knowing:
+
+- **A block is what loads the code.** A script calling `Kelix.Mod.AuthDb.…` needs
+  `[module.auth_db]` in `config.toml`, even if the facade would have worked
+  without configuration: a release does not lazily load code on first call. With
+  no block, the script raises on its first facade call and the request gets **no
+  answer at all**. Boot (and `kelictl reload-domains`) warns when a domain enables
+  a function whose same-named module is not loaded.
+- **Installing a new version is install + reload.** Drop the new `.beam` into
+  `module_dir` and run `kelictl module reload <name>`: the code is re-read from
+  disk, the block re-validated, and the service reconfigured or restarted. No
+  server restart.
+
+From a source checkout, build and install them with:
+
+```bash
+cd apps/kelix_modules && MIX_ENV=prod mix compile
+cp _build/prod/lib/kelix_modules/ebin/Elixir.Kelix.Mod.*.beam "$MODULE_DIR"/
+```
+
+> `.beam` code-reload **versioning** (OTP `code_change`-style state migration) is
+> still out of scope — a reload keeps the service's state as-is or restarts it.
 
 ## Using a module from a script
 

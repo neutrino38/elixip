@@ -37,8 +37,12 @@ mix format
 # Build the elixipp test-tool escript
 cd apps/elixipp && mix escript.build          # -> apps/elixipp/elixipp
 
-# Build the kelixip server release
+# Build the kelixip server release (contains NO module)
 cd apps/kelixip && MIX_ENV=prod mix release kelixip
+
+# Build the loadable modules and install them where the server looks for them
+cd apps/kelix_modules && MIX_ENV=prod mix compile
+cp _build/prod/lib/kelix_modules/ebin/Elixir.Kelix.Mod.*.beam "$MODULE_DIR"/
 ```
 
 > **Tests:** a few tests are order-dependent (named singletons leak state across
@@ -48,7 +52,7 @@ cd apps/kelixip && MIX_ENV=prod mix release kelixip
 
 ## Architecture
 
-### Umbrella layout (3 apps)
+### Umbrella layout (4 apps)
 
 The repo is a **Mix umbrella** (`apps/`), split so each build artifact carries
 only its own dependencies (design in
@@ -56,17 +60,26 @@ only its own dependencies (design in
 
 ```
 apps/
-├── elixip2/   # shared SIP stack + DSL + media = LIBRARY (app :elixip2)
-│              #   all the framework/dsl/session code + the test suite
-├── elixipp/   # the standalone test tool (escript `elixipp`)  — depends on :elixip2
+├── elixip2/       # shared SIP stack + DSL + media = LIBRARY (app :elixip2)
+│                  #   all the framework/dsl/session code + the test suite
+├── elixipp/       # the standalone test tool (escript `elixipp`) — depends on :elixip2
 │   └── lib/elixipp/ElixippCLI.ex   # CLI entry point + live --monitor rendering (owl)
-└── kelixip/   # the kelixip SIP server → OTP release + kelictl — depends on :elixip2
-    └── lib/kelix/application.ex     # Kelix.Application (supervision tree)
+├── kelixip/       # the kelixip SIP server → OTP release + kelictl — depends on :elixip2
+│   └── lib/kelix/application.ex    # Kelix.Application (supervision tree)
+└── kelix_modules/ # the provided loadable modules (registrar, auth_db) — depends
+                   #   on :kelixip. NOT in the release: their .beam are installed
+                   #   into `server.module_dir` and loaded per config (§8.3, §16.12)
 ```
 
 The app name of the shared library is kept as **`:elixip2`** (not renamed) to
 avoid churn on the many `:elixip2` config references; its directory is
 `apps/elixip2`. `apps/elixipp` and `apps/kelixip` both depend on it.
+
+`apps/kelix_modules` is deliberately **outside** the release: `apps/kelixip` does
+not depend on it, so `mix release kelixip` cannot pull it in — the core ships no
+SIP function. Its tests (registrar, auth_db, the reference registrar script, the
+core↔module control path) live in that app, since they are the only place both
+halves are present.
 
 ### The SIP stack inside `apps/elixip2/lib/`
 

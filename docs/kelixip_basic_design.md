@@ -753,9 +753,37 @@ by scripts.
 > `Kelix.Mod.AuthDb` were retrofitted to the behaviour (P3/P4 predate it); their
 > facades route through `safe_call/3` (down ⇒ `{:error, :down}`, slow ⇒
 > `{:error, :timeout}`). Deferred to later phases: the REST/CLI frontals that
-> *consume* `Kelix.Control.Registry` (P7); dynamic `.beam` loading from
-> `module_dir` (P10); `code_change`-style reload versioning (§16). User manual:
-> `docs/kelixip/modules/`.
+> *consume* `Kelix.Control.Registry` (P7); `code_change`-style reload versioning
+> (§16). User manual: `docs/kelixip/modules/`.
+>
+> **Implementation status (2026-07-27 — DONE).** Dynamic `.beam` loading from
+> `module_dir` + extraction of the provided modules out of the core (§8.3, §16.12):
+>
+> - `Kelix.ModuleSupervisor` puts `server.module_dir` on the code path before
+>   resolving anything (`add_module_dir/1`), and resolves through
+>   `ensure_loaded/1`.
+> - **The `.beam` files live in their own umbrella app, `apps/kelix_modules`**, on
+>   which `apps/kelixip` does *not* depend — so `mix release kelixip` cannot pull
+>   them in. Verified on the built release: zero `Elixir.Kelix.Mod.*.beam` in it,
+>   and both modules loaded from `module_dir` at boot (`kelictl status` →
+>   `modules: auth_db, registrar`), answering a REGISTER with a 401.
+> - The core no longer names a module at compile time: `Kelix.Control` reaches the
+>   registrar through `Kelix.ModuleRegistry.facade/4` (by configured name) and
+>   matches its `Contact` structurally rather than as a struct.
+> - `kelictl module reload <name>` now also **re-reads the `.beam` from disk**
+>   (`:code.purge` + `:code.load_file`), so installing a new version of a module is
+>   an install + reload, no restart.
+>
+> **Gotcha worth remembering: a release runs the code server in *embedded* mode**,
+> where it never searches the code path — `Code.ensure_loaded?/1` answers
+> `{:error, :embedded}` for anything not already loaded, and an undefined-function
+> call does *not* trigger an implicit load. Loading a module installed after boot is
+> therefore an explicit `:code.load_file/1`. Consequence for scripts: a script
+> calling a module's facade needs that module **configured** — the `[module.<name>]`
+> block is what gets its code loaded; there is no lazy fallback. When it is missing
+> the script raises on its first facade call and the request goes **unanswered**, so
+> boot (and `reload-domains`) now warns when a domain enables a function whose
+> same-named module is not loaded (`warn_missing_function_modules/0`).
 
 ### 8.1 `Kelix.Module` behaviour
 
@@ -823,6 +851,31 @@ loads none of these).
 Packaging then delivers the core release and these modules as **separate
 artifacts** (e.g. rpm subpackages) so a deployment installs only what it uses
 (§12).
+
+**How that is realised (2026-07-27).** The sources live in their own umbrella app,
+`apps/kelix_modules`, which depends on `:kelixip` (for the behaviour and the
+surfaces) — never the other way round, which is exactly what keeps them out of the
+release. Building and installing them is a compile + copy:
+
+```bash
+cd apps/kelix_modules && MIX_ENV=prod mix compile
+cp _build/prod/lib/kelix_modules/ebin/Elixir.Kelix.Mod.*.beam /usr/lib/kelixip/modules/
+```
+
+Per-module `%files` for the subpackages (a module = its own `.beam` plus the
+modules it defines):
+
+| Subpackage | Files |
+|---|---|
+| `kelixip-mod-registrar` | `Elixir.Kelix.Mod.Registrar.beam`, `Elixir.Kelix.Mod.Registrar.Contact.beam` |
+| `kelixip-mod-auth_db` | `Elixir.Kelix.Mod.AuthDb.beam` |
+
+> **The driver stays in the core.** `auth_db` needs `myxql` (§13), and a bare
+> `.beam` drop cannot bring an OTP application with it — so `myxql` remains a
+> dependency of the core release (an unused driver costs nothing) and the
+> `auth_db` subpackage stays a pure `.beam` drop. A third-party module needing a
+> dependency the core does not carry has to ship it, or be packaged as a release
+> of its own; out of scope for basic.
 
 Facade import in the registrar script: `import Kelix.Mod.Registrar` /
 `import Kelix.Mod.AuthDb` — the facade is a thin stateless wrapper resolving the
@@ -1007,11 +1060,13 @@ its own dependencies and the singular-`escript:` limitation disappears:
 ```
 mix.exs                     # umbrella root (aggregate only)
 apps/
-  elixip/    # shared SIP stack + DSL + media = LIBRARY
-             #   deps: jason, req, socket2, ex_sdp, xmlrpc, logger_file_backend
-  elixipp/   # test tool → escript `elixipp`; depends on :elixip; + owl
-  kelixip/   # server → release `kelixip` (+ `kelictl`); depends on :elixip;
-             #   + toml, bandit, plug, telemetry*, myxql, (syslog)
+  elixip/        # shared SIP stack + DSL + media = LIBRARY
+                 #   deps: jason, req, socket2, ex_sdp, xmlrpc, logger_file_backend
+  elixipp/       # test tool → escript `elixipp`; depends on :elixip; + owl
+  kelixip/       # server → release `kelixip` (+ `kelictl`); depends on :elixip;
+                 #   + toml, bandit, plug, telemetry*, myxql, (syslog)
+  kelix_modules/ # the provided loadable modules (registrar, auth_db); depends on
+                 #   :kelixip. NOT in the release — installed into module_dir (§8.3)
 ```
 
 - `elixipp` stays **lean** — it never pulls kelixip's HTTP/DB deps.
@@ -1161,9 +1216,9 @@ there was nothing worth packaging.
 
 **Remaining for "basic"**, as of 2026-07-27: **P6b** (`radius_billing`, not
 started), **P10** (RPM: nothing produced beyond `rel/env.sh.eex` + the `kelictl`
-overlay), plus one decided-but-unimplemented item — dynamic `.beam`
-loading from `module_dir` with the modules extracted out of the core release
-(§8, §16.12 — to land with P10). Deferred by choice:
+overlay), (dynamic `.beam` loading from `module_dir` and the
+extraction of the provided modules out of the core landed on 2026-07-27, §8/§16.12
+— what remains of P10 is the packaging itself). Deferred by choice:
 transaction/transport counters and per-MCU session gauges (§11, §9),
 `Kelix.InstanceSupervisor` (§2.1), the `:elixip2` → `:elixip` rename (§12.0).
 
@@ -1227,7 +1282,8 @@ All questions below were decided on **2026-07-26** unless marked otherwise.
     frontals derive from (§8.1). Admin auth is enforced at the frontal boundary
     (REST Plug middleware / CLI Erlang cookie), separate from the command logic
     (§10.3); modules inherit the single admin token.
-12. **First-party registrar as a "loadable module".** — **RESOLVED**: the
+12. **First-party registrar as a "loadable module".** — **RESOLVED**, and
+    **implemented 2026-07-27** (status note in §8): the
     registrar/auth_db/radius_billing are **not bundled** in the core release —
     they are `.beam` modules in `module_dir`, loaded per config, shipped as
     separate rpm/deb subpackages (§8.3, §12). The core release is
@@ -1248,5 +1304,17 @@ All questions below were decided on **2026-07-26** unless marked otherwise.
     it is server-grade hardening consumed by `Kelix.Mod.AuthDb`, and the framework
     path degrades cleanly without it (window-only anti-replay, §7.2).
 
-**Remaining open (not blocking basic):** none of the above. New items will be
-logged here as implementation proceeds.
+14. **How does a script declare the modules it needs?** — **OPEN** (2026-07-27,
+    not blocking basic). §3.2 wants "a domain that enables a function whose module
+    is not installed is a config error caught at load/`reload_domains`". Now that
+    modules really can be absent (§16.12), that check needs the missing piece: the
+    dependency script → modules is declared nowhere, and it cannot be inferred (a
+    custom registrar script may legitimately need no `registrar` module). Natural
+    resolution: a declaration in the script's `config` block (e.g.
+    `uses_modules: [:registrar, :auth_db]`), validated by the load-time contract
+    (§5.3) against `Kelix.ModuleRegistry`. Until then the mismatch is a **boot
+    warning** (`ModuleSupervisor.warn_missing_function_modules/0`), and a request
+    to such a domain dies inside the instance without a SIP reply.
+
+**Remaining open (not blocking basic):** item 14 above. New items will be logged
+here as implementation proceeds.

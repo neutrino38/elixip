@@ -1,12 +1,13 @@
 # Building elixip / elixipp / kelixip
 
-This repository is a **Mix umbrella** with three apps under `apps/`:
+This repository is a **Mix umbrella** with four apps under `apps/`:
 
 | App | Kind | Artifact | Depends on |
 |-----|------|----------|------------|
 | `elixip2` | library | — (shared SIP stack + DSL + media) | — |
 | `elixipp` | test tool | **escript** `elixipp` | `elixip2` |
 | `kelixip` | SIP server | **OTP release** `kelixip` (+ `kelictl`) | `elixip2` |
+| `kelix_modules` | loadable modules | **`.beam` files** for `module_dir` | `kelixip` |
 
 Each app pulls only its own dependencies, so the `elixipp` escript never carries
 the server's HTTP/DB stack, and vice-versa. The library app is named `:elixip2`
@@ -92,10 +93,37 @@ $REL stop         # graceful stop
 (it RPCs the running node) — it is not a separate escript. See
 [docs/kelixip_basic_design.md](docs/kelixip_basic_design.md) §10.2, §12.
 
-> Status: kelixip is under construction. Today the release is a **P0 skeleton**
-> — it boots `Kelix.Application` and its supervision tree with an empty
-> configuration. Config loading, dispatch, the registrar, the control API, etc.
-> arrive in later phases (design §15).
+Point it at its configuration (design §2.1, §12.1):
+
+```bash
+KELIXIP_CONFIG=/etc/kelixip/config.toml \
+KELIXIP_DOMAINS=/etc/kelixip/domains.toml $REL daemon
+```
+
+Both default to those FHS paths; an unreadable or invalid file aborts the boot and
+says why on stderr.
+
+> Status: the server boots, binds its `[[listen]]` ports, dispatches and answers
+> (registrar). What is still missing for "basic" is the **packaging** (rpm/systemd,
+> design §15 P10) and the `radius_billing` module.
+
+## kelix_modules — the loadable modules
+
+The release carries **no SIP function**: `registrar` and `auth_db` are installed
+as `.beam` files into `server.module_dir` and loaded per `[module.<name>]` block
+(design §8.3, §16.12). `apps/kelixip` does not depend on this app, which is what
+keeps them out of the release.
+
+```bash
+cd apps/kelix_modules
+MIX_ENV=prod mix compile
+# install where the server looks (default /usr/lib/kelixip/modules)
+cp _build/prod/lib/kelix_modules/ebin/Elixir.Kelix.Mod.*.beam "$MODULE_DIR"/
+```
+
+Check what a running node actually loaded with `kelictl status` (`modules:` line).
+Installing a new version of a module is a copy plus `kelictl module reload <name>`
+— no server restart.
 
 ## Development mode (no build artifact)
 

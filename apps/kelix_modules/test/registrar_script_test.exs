@@ -28,7 +28,7 @@ defmodule Kelix.RegistrarScriptTest do
   end
 
   setup_all do
-    %{scenario: SIP.Scenario.Loader.load_file!(Path.expand("../scripts/registrar.exs", __DIR__))}
+    %{scenario: SIP.Scenario.Loader.load_file!(Path.expand("../../kelixip/scripts/registrar.exs", __DIR__))}
   end
 
   setup do

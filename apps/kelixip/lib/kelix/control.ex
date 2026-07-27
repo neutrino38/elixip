@@ -65,7 +65,13 @@ defmodule Kelix.Control do
   def unregister(aor, contact \\ :all) do
     {user, dom} = split_aor(aor)
     targets = if dom, do: [dom], else: domain_names()
-    results = Enum.map(targets, &Kelix.Mod.Registrar.remove(&1, user, contact))
+    # via the registry: the registrar is a loadable module, absent from the core
+    results =
+      Enum.map(
+        targets,
+        &Kelix.ModuleRegistry.facade("registrar", :remove, [&1, user, contact], :notfound)
+      )
+
     if Enum.any?(results, &(&1 == :ok)), do: :ok, else: :notfound
   end
 
@@ -87,8 +93,14 @@ defmodule Kelix.Control do
   @spec reload_domains() :: :ok | {:error, term}
   def reload_domains() do
     case Application.get_env(:kelixip, :domains_path) do
-      nil -> {:error, :no_domains_path}
-      path -> Kelix.Domains.reload(path)
+      nil ->
+        {:error, :no_domains_path}
+
+      path ->
+        with :ok <- Kelix.Domains.reload(path) do
+          # a freshly enabled domain may need a module nobody installed (§8.3)
+          Kelix.ModuleSupervisor.warn_missing_function_modules()
+        end
     end
   end
 
@@ -157,13 +169,15 @@ defmodule Kelix.Control do
   end
 
   defp registrations_for(domain) do
-    case safe(fn -> Kelix.Mod.Registrar.all(domain) end, %{}) do
+    case Kelix.ModuleRegistry.facade("registrar", :all, [domain], %{}) do
       m when is_map(m) -> m
       _ -> %{}
     end
   end
 
-  defp render_contact(%Kelix.Mod.Registrar.Contact{contact: uri, expires_at: at}) do
+  # Matched structurally, not as `%Kelix.Mod.Registrar.Contact{}`: the core cannot
+  # reference a loadable module's struct at compile time (§16.12).
+  defp render_contact(%{contact: uri, expires_at: at}) do
     %{uri: uri_string(uri), expires_at: at}
   end
 

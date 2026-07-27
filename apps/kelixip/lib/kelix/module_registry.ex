@@ -37,6 +37,36 @@ defmodule Kelix.ModuleRegistry do
   def lookup(name) when is_binary(name), do: Map.get(all(), name)
 
   @doc """
+  Call a loaded module's **facade by its configured name**.
+
+  This is how the core reaches a module, and the only way it can: no module is
+  compiled into the core release (§16.12), so `Kelix.Control` must never name
+  `Kelix.Mod.…` at compile time — that would both fail to compile without the
+  module present and defeat the whole point of loading it from `module_dir`.
+
+  Returns `default` when the module is not loaded, does not export the function, or
+  raises/exits — the control layer answers a value, never crashes its caller.
+  """
+  @spec facade(String.t(), atom, [term], term) :: term
+  def facade(name, fun, args, default) when is_binary(name) and is_atom(fun) and is_list(args) do
+    case lookup(name) do
+      %{module: module} ->
+        if function_exported?(module, fun, length(args)) do
+          try do
+            apply(module, fun, args)
+          catch
+            _kind, _reason -> default
+          end
+        else
+          default
+        end
+
+      nil ->
+        default
+    end
+  end
+
+  @doc """
   The `call_timeout_ms` configured for a module, or `default`. `ref` is either the
   TOML name or the service module (facades pass their `__MODULE__`).
   """
