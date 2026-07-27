@@ -36,8 +36,15 @@ defmodule SIP.Transport.WSSListener do
 
   # ---- Public API -----------------------------------------------------------
 
+  # The 3-tuple form carries per-listener options (see init/1) — used by kelixip's
+  # supervised listeners to pass the per-listener cert/key (kelixip design §3.1).
   @spec start_link({:all | :inet.ip_address(), :inet.port_number()}) :: GenServer.on_start()
+  @spec start_link({:all | :inet.ip_address(), :inet.port_number(), keyword()}) ::
+          GenServer.on_start()
   def start_link({addr, port}), do: GenServer.start_link(__MODULE__, {addr, port, []})
+
+  def start_link({addr, port, opts}) when is_list(opts),
+    do: GenServer.start_link(__MODULE__, {addr, port, opts})
 
   @spec start({:all | :inet.ip_address(), :inet.port_number()}) :: GenServer.on_start()
   def start({addr, port}), do: GenServer.start(__MODULE__, {addr, port, []})
