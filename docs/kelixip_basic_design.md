@@ -135,6 +135,45 @@ Design choices:
   slot accounting, supervisor = lifecycle/observability). `spawn_uas_instance/2`
   gains an option to start under a supervisor instead of `spawn_monitor`.
 
+> **Implementation status (P0b, 2026-07-27 — DONE).** The tree above is wired,
+> in that order, in `Kelix.Application`. What P0b added on top of the P0 skeleton:
+>
+> - **`Kelix.Listener.Supervisor`** — one child per `[[listen]]` entry, **last** in
+>   the tree. `[[listen]]` was parsed since P1 but nothing consumed it: the server
+>   bound **no SIP port at all**. `tls`/`wss` get their **per-listener** cert/key
+>   (§3.1, `:certfile`/`:keyfile` opts — the framework listeners gained an additive
+>   3-tuple `start_link/1`); `udp` starts the bidirectional `SIP.Transport.UDP`
+>   registered as `"UDP"` in `Registry.SIPTransport`, i.e. the name the `Selector`
+>   looks up, so outbound UDP reuses the socket instead of re-binding the port.
+>   Still **one UDP socket per node** (framework limit): extra `udp` entries are
+>   logged and skipped.
+> - **TOML paths at boot** — `config/runtime.exs` reads `KELIXIP_CONFIG` /
+>   `KELIXIP_DOMAINS` (defaults: the FHS paths of §12.1) into the `:kelixip` app
+>   env. Before that, `:config_path` was never set, so a release booted with an
+>   **empty** config: no domain, no module, no frontal. A bad/missing file aborts
+>   the boot **and now says why on stderr** (a release dying during boot flushes no
+>   Logger output — journald would otherwise show only "Runtime terminating").
+> - **`Kelix.Secret` + `Kelix.NonceCache`** were supervised **only by the tests**:
+>   in a release `Kelix.Nonce` → `Kelix.Secret.get()` raised `noproc`, i.e. digest
+>   auth was dead, and `nc` anti-replay silently off. Now root children.
+> - **`SIP.Resolver` DNS defaults** — done by `Selector.start/0`, which the server
+>   never calls; now at boot, tolerant of a host with no usable `resolv.conf`.
+> - `[log].level` is applied to the Logger at boot; `target = "syslog"` warns that
+>   it is not wired (§16.4) instead of silently logging to stdout.
+> - `Kelix.Router` takes its place in the tree as a `:ignore` child that registers
+>   itself as the processing module — so the wiring provably precedes the listeners.
+> - `Kelix.Control.status/0` (and `kelictl status`) now report the listeners.
+>
+> Verified end-to-end on the built release: `[[listen]]` udp+tcp bound, a REGISTER
+> over each transport reaches `registrar.exs` through the Router and is answered
+> `401` with a **stateless `qop=auth` nonce** (proving the Secret/NonceCache path).
+>
+> **Not done** (the one §2.1 item left): `Kelix.InstanceSupervisor` — instances are
+> still `spawn_monitor`ed by `Kelix.InstancePool`, which owns quota accounting and
+> drain. A `DynamicSupervisor` would add observability/lifecycle, and requires an
+> opt-in option on `SIP.Scenario.Runner.spawn_uas_instance/2` (shared with
+> `elixipp`); functionally not required.
+
 ### 2.2 Graceful shutdown
 
 systemd `stop` → `Kelix.Control.graceful_shutdown/1` (also the CLI/REST verb):
@@ -1053,12 +1092,13 @@ before the features that need them.
 
 | Phase | Deliverable | Depends on |
 |---|---|---|
-| **P0 — Umbrella + OTP skeleton** | restructure into `apps/elixip` + `apps/elixipp` + `apps/kelixip` (§12.0, keep `elixipp`/tests green); `Kelix.Application` + supervision tree; supervise registries/ConfigRegistry/listeners; `mix release kelixip` builds; boots with an empty config | — |
-| **P1 — Config** | `toml` dep; `Kelix.Config` (infra→app env, per-listener certs); `Kelix.Domains` + `Kelix.DialPlan` compiler; atomic reload plumbing (no CLI yet) | P0 |
-| **P2 — Dispatch** | `Kelix.Router` (domain→function→script, 404/405/503); wire as ConfigRegistry processing module; `Kelix.ScriptRegistry` (version-suffixed modules + refcount) + load-time contract check; extract `Kelix.InstancePool` (shared quota, per-domain) | P1 |
+| **P0 — Umbrella + OTP skeleton** ✅ | restructure into `apps/elixip` + `apps/elixipp` + `apps/kelixip` (§12.0, keep `elixipp`/tests green); `Kelix.Application` + supervision tree; supervise registries/ConfigRegistry; `mix release kelixip` builds; boots with an empty config — **DONE 2026-07-26** (§12.0) | — |
+| **P0b — Complete the tree** ✅ | `Kelix.Listener.Supervisor` (one child per `[[listen]]`, per-listener certs, UDP shared with the `Selector`); TOML paths from `KELIXIP_CONFIG`/`KELIXIP_DOMAINS` via `config/runtime.exs` + visible fail-fast; `Kelix.Secret`/`NonceCache`/`SIP.Resolver` DNS/`[log].level` at boot; listeners in `status` — **DONE 2026-07-27** (§2.1) | P1–P9 |
+| **P1 — Config** ✅ | `toml` dep; `Kelix.Config` (infra→app env, per-listener certs); `Kelix.Domains` + `Kelix.DialPlan` compiler; atomic reload plumbing (no CLI yet) — **DONE 2026-07-26** (§3) | P0 |
+| **P2 — Dispatch** ✅ | `Kelix.Router` (domain→function→script, 404/405/503); wire as ConfigRegistry processing module; `Kelix.ScriptRegistry` (version-suffixed modules + refcount) + load-time contract check; extract `Kelix.InstancePool` (shared quota, per-domain) — **DONE 2026-07-26** (§4, §5) | P1 |
 | **P5 — Module system** ✅ | `Kelix.Module` behaviour + `Kelix.ModuleSupervisor` + facade resolution + module control-surface registration (REST/CLI, §8.1) — **DONE 2026-07-26** (§8) | P1 (config) |
-| **P3 — Registrar module** | `Kelix.Mod.Registrar` (per-domain store; `save`/`lookup`/`subscribe`; received+flow+Path); NAT/flow inbound routing; send-over-flow framework hook | P2, P5 |
-| **P4 — Auth** | `Kelix.Secret` + `Kelix.Nonce` (stateless HMAC) + `NonceCache`; `SIP.Auth` `qop=auth`; realm=domain (alias→nominal); remove stateful nonce; `Kelix.Mod.AuthDb` (HA1 lookup + 401/accept/reject) | P3, P5 |
+| **P3 — Registrar module** ✅ | `Kelix.Mod.Registrar` (per-domain store; `save`/`lookup`/`subscribe`; received+flow+Path); NAT/flow inbound routing — **DONE 2026-07-26** (§6). *Open:* the send-over-flow `Selector` short-circuit (§6.4 pt 2, §16.6) is decided but **not implemented** — `lookup/1` stamps `tp_pid`+dest, the `Selector` still ignores them | P2, P5 |
+| **P4 — Auth** ✅ | `Kelix.Secret` + `Kelix.Nonce` (stateless HMAC) + `NonceCache`; `SIP.Auth` `qop=auth`; realm=domain (alias→nominal); `Kelix.Mod.AuthDb` (HA1 lookup + 401/accept/reject) — **DONE 2026-07-26** (§7). *Open:* removing the now-unused stateful nonce (`SIP.DialogImpl.Nonce`, `SIP.Auth.generate_nonce/0`, §7.5) — still used by `elixipp`'s `uas_register.exs` | P3, P5 |
 | **P6 — Media pool** ✅ | `Kelix.MediaPool` (round-robin, health-check, failover, toggle) over the Mendooze adapter — **DONE 2026-07-26** (§9); + additive per-instance media override in `SIP.Session.Media` | P0 |
 | **P6b — radius_billing** | `Kelix.Mod.RadiusBilling` | P5 |
 | **P7 — Control layer** ✅ | `Kelix.Control` (all verbs); `kelictl` release command over RPC (`Kelix.Control.CLI` + `bin/kelictl` overlay); versioned/notify reload; graceful shutdown — **DONE 2026-07-26** (§10) | P2–P6 |
@@ -1067,7 +1107,18 @@ before the features that need them.
 | **P10 — Packaging (RPM d'abord)** | **produire le paquet RPM kelixip pour Alma Linux 9** : `mix release` (ERTS embarqué) → `.spec` (`%files` sur le layout FHS §12, `%pre`/`%post` créant l'utilisateur `kelixip` + l'unité systemd, `%config(noreplace)` sur `/etc/kelixip/*.toml`) → `rpmbuild`/`fpm` en CI, `module_dir` root-owned. Deb Ubuntu ensuite, même release. | P0–P9 |
 
 P3+P4 (registrar + auth) are the functional core of "basic"; P0–P2 are the
-enabling infrastructure; P7–P10 make it a product.
+enabling infrastructure; P7–P10 make it a product. **P0b is a prerequisite of
+P10**: before it, the packaged server bound no port and read no config file, so
+there was nothing worth packaging.
+
+**Remaining for "basic"**, as of 2026-07-27: **P6b** (`radius_billing`, not
+started), **P10** (RPM: nothing produced beyond `rel/env.sh.eex` + the `kelictl`
+overlay), plus three decided-but-unimplemented items — the send-over-flow
+`Selector` short-circuit (§6.4/§16.6), dropping the stateful nonce (§7.5), and
+dynamic `.beam` loading from `module_dir` with the modules extracted out of the
+core release (§8, §16.12 — to land with P10). Deferred by choice:
+transaction/transport counters and per-MCU session gauges (§11, §9),
+`Kelix.InstanceSupervisor` (§2.1), the `:elixip2` → `:elixip` rename (§12.0).
 
 ---
 

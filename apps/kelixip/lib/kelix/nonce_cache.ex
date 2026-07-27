@@ -15,15 +15,23 @@ defmodule Kelix.NonceCache do
 
   defstruct table: nil, ttl_ms: @default_ttl_ms
 
-  def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  # id follows :name so several caches can coexist under one supervisor (tests).
+  @spec child_spec(keyword) :: Supervisor.child_spec()
+  def child_spec(opts),
+    do: %{id: Keyword.get(opts, :name, __MODULE__), start: {__MODULE__, :start_link, [opts]}}
+
+  @spec start_link(keyword) :: GenServer.on_start()
+  def start_link(opts \\ []),
+    do: GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
 
   @doc """
   Record `nc` for `nonce` if it advances the count. `:ok` (fresh, recorded) or
-  `:replay` (nc ≤ a previously seen value for this nonce).
+  `:replay` (nc ≤ a previously seen value for this nonce). `server` targets a
+  specific cache (tests use their own instance with a short TTL).
   """
-  @spec check_nc(String.t(), non_neg_integer) :: :ok | :replay
-  def check_nc(nonce, nc) when is_binary(nonce) and is_integer(nc),
-    do: GenServer.call(__MODULE__, {:check, nonce, nc})
+  @spec check_nc(String.t(), non_neg_integer, GenServer.server()) :: :ok | :replay
+  def check_nc(nonce, nc, server \\ __MODULE__) when is_binary(nonce) and is_integer(nc),
+    do: GenServer.call(server, {:check, nonce, nc})
 
   @impl true
   def init(opts) do

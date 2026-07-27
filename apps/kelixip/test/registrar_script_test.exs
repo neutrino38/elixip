@@ -32,8 +32,7 @@ defmodule Kelix.RegistrarScriptTest do
   end
 
   setup do
-    start_supervised!(Kelix.Secret)
-    start_supervised!(Kelix.NonceCache)
+    # Kelix.Secret + Kelix.NonceCache come from the application tree (§2.1).
     start_supervised!(Registrar)
     # the "subscriber DB": alice@example.com resolves to the known HA1
     Application.put_env(:kelixip, :authdb_ha1_lookup, fn @user, @domain -> {:ok, @ha1} end)

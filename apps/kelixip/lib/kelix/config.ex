@@ -76,6 +76,9 @@ defmodule Kelix.Config do
         with {:ok, content} <- read_file(path),
              {:ok, cfg} <- parse(content) do
           apply_app_env(cfg)
+          # Only when a real config file was loaded: with no file we must not
+          # override the level the host (dev config / tests) already set.
+          apply_logger(cfg)
 
           Logger.info(
             module: __MODULE__,
@@ -84,9 +87,17 @@ defmodule Kelix.Config do
 
           {:ok, cfg}
         else
-          {:error, reason} -> {:stop, {:invalid_config, reason}}
+          {:error, reason} -> {:stop, {:invalid_config, abort(path, reason)}}
         end
     end
+  end
+
+  # Fail fast *visibly*: a release that dies during boot flushes no Logger output,
+  # so the operator would see only "Runtime terminating during boot". Write the
+  # reason on stderr — systemd/journald then records why the start failed.
+  defp abort(path, reason) do
+    IO.puts(:stderr, "kelixip: invalid configuration in #{path}: #{reason}")
+    reason
   end
 
   @impl true
@@ -104,6 +115,26 @@ defmodule Kelix.Config do
     Application.put_env(:kelixip, :control_api, cfg.control_api)
     # Same pattern for the metrics/health frontal (Kelix.Metrics.Endpoint, §11).
     Application.put_env(:kelixip, :metrics, cfg.metrics)
+    :ok
+  end
+
+  @doc """
+  Apply `[log]` to the running Logger: the level, and a warning when `target =
+  "syslog"` is asked for (not wired yet — §16 open item, stdout/journald is the
+  documented default, so an operator must not silently believe logs go to syslog).
+  """
+  @spec apply_logger(t) :: :ok
+  def apply_logger(%__MODULE__{log: log}) do
+    # `level` is validated against @log_levels, so the atom always exists.
+    Logger.configure(level: String.to_existing_atom(log.level))
+
+    if log.target == "syslog" do
+      Logger.warning(
+        module: __MODULE__,
+        message: ~s([log].target = "syslog" is not wired yet; logging to stdout/journald)
+      )
+    end
+
     :ok
   end
 
@@ -239,7 +270,7 @@ defmodule Kelix.Config do
   defp parse_listener(%{} = l) do
     with :ok <- reject_keys(l, ~w(proto addr port cert key), "[[listen]]"),
          {:ok, proto} <- req_proto(l),
-         {:ok, addr} <- opt_string(l, "addr", "0.0.0.0", "[[listen]]"),
+         {:ok, addr} <- opt_ip(l, "addr", "0.0.0.0", "[[listen]]"),
          {:ok, port} <- req_pos_integer(l, "port", "[[listen]]"),
          {:ok, cert, key} <- listener_certs(l, proto) do
       {:ok, %{proto: proto, addr: addr, port: port, cert: cert, key: key}}
@@ -308,6 +339,17 @@ defmodule Kelix.Config do
       v when is_binary(v) and v != "" -> {:ok, v}
       nil -> {:error, "#{ctx}: missing required `#{key}`"}
       _ -> {:error, "#{ctx}: `#{key}` must be a non-empty string"}
+    end
+  end
+
+  # A bind address, validated here so a typo fails the boot with a clear message
+  # rather than crashing Kelix.Listener.Supervisor when it converts it.
+  defp opt_ip(map, key, default, ctx) do
+    with {:ok, addr} <- opt_string(map, key, default, ctx) do
+      case :inet.parse_address(String.to_charlist(addr)) do
+        {:ok, _ip} -> {:ok, addr}
+        {:error, _} -> {:error, "#{ctx}: `#{key}` must be an IP address, got #{inspect(addr)}"}
+      end
     end
   end
 

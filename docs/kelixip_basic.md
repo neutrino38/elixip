@@ -852,7 +852,7 @@ sera bâti sur base elixip/kelixip. Les points d'extension sont les **modules**
 | Fonction `registrar` (UDP/TCP/TLS/WSS) | basic      |
 | Auth digest (realm=domaine, HA1 via `auth_db`) | basic |
 | Nonce stateless unifié (HMAC + `qop`/`nc` + `stale`) — remplace le nonce stateful | basic |
-| Extension `SIP.Auth` : support `qop=auth` (`nc`/`cnonce`) + fallback RFC 2069 | **à faire** |
+| Extension `SIP.Auth` : support `qop=auth` (`nc`/`cnonce`) + fallback RFC 2069 | basic — *fait (P4)* |
 | NAT / flow (received + réutilisation de connexion), `Path` honoré | basic |
 | Génération `Path` / edge-proxy multi-hop | **futur** |
 | Config déclarative TOML (`config.toml` + `domains.toml`) | basic |

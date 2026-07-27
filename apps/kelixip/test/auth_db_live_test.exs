@@ -57,11 +57,9 @@ defmodule Kelix.Mod.AuthDbLiveTest do
     cfg = Map.drop(file, ["realm", "testuser"])
 
     # child_spec/2 stashes the facade config (table/columns/hash) into app env and
-    # returns the real DB connection as a supervised child; nonce infra for the
-    # end-to-end verdict path.
+    # returns the real DB connection as a supervised child. The nonce infra needed
+    # by the end-to-end verdict path is supervised by the application (§2.1).
     start_supervised!(AuthDb.child_spec(:auth_db, cfg))
-    start_supervised!(Kelix.Secret)
-    start_supervised!(Kelix.NonceCache)
 
     %{realm: realm, user: user}
   end

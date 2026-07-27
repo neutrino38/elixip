@@ -24,6 +24,7 @@ defmodule Kelix.Control do
       node: node(),
       uptime_ms: uptime_ms(),
       instances: safe(fn -> Kelix.InstancePool.stats() end, %{}),
+      listeners: safe(fn -> Kelix.Listener.Supervisor.status() end, []),
       media_pool: safe(fn -> Kelix.MediaPool.status() end, []),
       modules: Map.keys(safe(fn -> Kelix.ModuleRegistry.all() end, %{})),
       domains_version: safe(fn -> Kelix.Domains.current().version end, 0)

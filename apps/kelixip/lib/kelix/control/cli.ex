@@ -111,6 +111,7 @@ defmodule Kelix.Control.CLI do
       "node:            #{s.node}",
       "uptime:          #{format_uptime(s.uptime_ms)}",
       "active calls:    #{Map.get(s.instances, :active, 0)}",
+      "listeners:       #{format_listeners(Map.get(s, :listeners, []))}",
       "domains version: #{s.domains_version}",
       "modules:         #{Enum.join(s.modules, ", ")}",
       "media pool:      #{format_pool(s.media_pool)}"
@@ -170,6 +171,14 @@ defmodule Kelix.Control.CLI do
   defp format_pool(entries) do
     Enum.map_join(entries, ", ", fn e ->
       "#{e.name}=#{if e.enabled, do: "on", else: "off"}/#{if e.healthy, do: "up", else: "down"}"
+    end)
+  end
+
+  defp format_listeners([]), do: "(none)"
+
+  defp format_listeners(entries) do
+    Enum.map_join(entries, ", ", fn l ->
+      "#{l.proto}:#{l.addr}:#{l.port}#{if l.up, do: "", else: " (down)"}"
     end)
   end
 

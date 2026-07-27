@@ -64,13 +64,19 @@ defmodule Kelix.Domains do
   def init(opts) do
     case Keyword.get(opts, :path) do
       nil ->
-        # P0/P1: boot with an empty config; the path is wired later.
+        # No path (elixipp, tests, a bare release): boot with an empty snapshot.
         {:ok, %__MODULE__{}}
 
       path ->
         case load_path(path, 1) do
-          {:ok, snapshot} -> {:ok, snapshot}
-          {:error, reason} -> {:stop, {:invalid_domains, reason}}
+          {:ok, snapshot} ->
+            {:ok, snapshot}
+
+          {:error, reason} ->
+            # A release dying during boot flushes no Logger output, so state the
+            # reason on stderr for journald (same as Kelix.Config).
+            IO.puts(:stderr, "kelixip: invalid domains in #{path}: #{reason}")
+            {:stop, {:invalid_domains, reason}}
         end
     end
   end

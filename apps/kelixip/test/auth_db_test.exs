@@ -13,11 +13,8 @@ defmodule Kelix.Mod.AuthDbTest do
 
   @ha1 SIP.Auth.compute_ha1("MD5", @user, @domain, @pass)
 
-  setup do
-    start_supervised!(Kelix.Secret)
-    start_supervised!(Kelix.NonceCache)
-    :ok
-  end
+  # Kelix.Secret + Kelix.NonceCache are supervised by the application (§2.1), so
+  # they are already up here — nothing to start.
 
   # inject the "DB": a valid user resolves to the known HA1
   defp lookup do

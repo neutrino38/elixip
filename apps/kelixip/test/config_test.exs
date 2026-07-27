@@ -183,6 +183,14 @@ defmodule Kelix.ConfigTest do
       assert msg =~ "missing required `cert`"
     end
 
+    # validated here so Kelix.Listener.Supervisor can convert it without guessing
+    test "listener addr must be an IP address" do
+      assert {:error, msg} =
+               Config.parse(~s([[listen]]\nproto = "udp"\nport = 5060\naddr = "sip.example.com"))
+
+      assert msg =~ "must be an IP address"
+    end
+
     test "cert on a udp listener is rejected" do
       assert {:error, msg} =
                Config.parse(~s([[listen]]\nproto = "udp"\nport = 5060\ncert = "x"\nkey = "y"))

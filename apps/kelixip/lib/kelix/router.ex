@@ -30,6 +30,27 @@ defmodule Kelix.Router do
     MESSAGE: :presence
   }
 
+  # ── supervision-tree entry (§2.1) ────────────────────────────────────────────
+
+  # The router is stateless — it runs no process. It still takes a place in the
+  # tree so the wiring happens **in boot order**: registered as the processing
+  # module here, before `Kelix.Listener.Supervisor` (the next child) accepts the
+  # first request. `:ignore` = nothing to supervise.
+  @spec child_spec(term) :: Supervisor.child_spec()
+  def child_spec(_opts) do
+    %{id: __MODULE__, start: {__MODULE__, :register_processing_modules, []}, type: :worker}
+  end
+
+  @doc """
+  Register the router as the processing module for every implemented SIP function
+  (`calls`/`presence` are wired when those functions land). Always `:ignore`.
+  """
+  @spec register_processing_modules() :: :ignore
+  def register_processing_modules() do
+    :ok = SIP.Session.ConfigRegistry.set_registration_processing_module(__MODULE__)
+    :ignore
+  end
+
   # ── processing-module callbacks (registered in SIP.Session.ConfigRegistry) ───
 
   @impl SIP.Session.Registrar

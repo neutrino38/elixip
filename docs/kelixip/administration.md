@@ -20,7 +20,7 @@ name comes from **`RELEASE_NODE`** (set in the release's `rel/env.sh.eex`, defau
 
 | Command | R/W | Does |
 |---|---|---|
-| `kelictl status` | R | Uptime, counters, media pool, node state |
+| `kelictl status` | R | Uptime, counters, listeners, media pool, node state |
 | `kelictl monitor` | R | Scenarios in progress (reuses the `--monitor` view) |
 | `kelictl regs [aor]` | R | Current registrations (all, or one AOR) |
 | `kelictl unregister <aor> [contact]` | W | Drop a registration |
@@ -39,6 +39,7 @@ $ kelictl status
 node:            kelixip@127.0.0.1
 uptime:          0h0m1s
 active calls:    0
+listeners:       udp:0.0.0.0:5060, tcp:0.0.0.0:5060
 domains version: 0
 modules:
 media pool:      (empty)

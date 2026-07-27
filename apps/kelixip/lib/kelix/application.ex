@@ -2,24 +2,29 @@ defmodule Kelix.Application do
   @moduledoc """
   OTP entry point of the kelixip server (design `docs/kelixip_basic_design.md` §2).
 
-  P0 skeleton: it boots the root supervision tree and supervises the shared SIP
-  stack registries + the `ConfigRegistry` — which the standalone stack otherwise
-  starts imperatively via `SIP.Scenario.Runner.bootstrap_stack/0`. The remaining
-  children (Config, Domains, Router, ModuleSupervisor, MediaPool, listeners,
-  ControlAPI, Metrics …) are added in later phases; today it boots with an empty
-  configuration.
+  It boots the root supervision tree in the order §2.1 prescribes: infra config,
+  then the shared SIP stack registries + the `ConfigRegistry` — which the
+  standalone stack otherwise starts imperatively via
+  `SIP.Scenario.Runner.bootstrap_stack/0` — then the stores, the modules, the
+  frontals, and the **listeners last** (a listener must not accept before the
+  router is ready).
+
+  The TOML paths come from the `:kelixip` app env, populated by
+  `config/runtime.exs` from `KELIXIP_CONFIG` / `KELIXIP_DOMAINS` (set by the
+  systemd unit, design §2.1/§12.1). With no path — `elixipp`, tests, a bare
+  release — every store boots empty and no port is bound.
   """
   use Application
   require Logger
 
   @impl true
   def start(_type, _args) do
-    Logger.info(module: __MODULE__, message: "kelixip starting (P0 skeleton)")
+    Logger.info(module: __MODULE__, message: "kelixip starting")
 
-    # Config file paths: wired later from an env var / systemd (design §12);
-    # for now they default to nil, so both start with an empty config.
     config_path = Application.get_env(:kelixip, :config_path)
     domains_path = Application.get_env(:kelixip, :domains_path)
+
+    resolve_default_dns()
 
     children = [
       # Infra config (config.toml): parsed once, pushes infra keys into the
@@ -44,6 +49,11 @@ defmodule Kelix.Application do
       # Domains + dial-plan (domains.toml): hot-reloadable snapshot with atomic
       # swap (§3.2). Started empty; reloaded via Kelix.Domains.reload/1.
       {Kelix.Domains, path: domains_path},
+      # Stateless-nonce material (§7): the boot-random server secret keying the
+      # HMAC nonce, and the intra-window `nc` anti-replay cache. Ordered before
+      # the modules — Kelix.Mod.AuthDb calls into both on every challenge.
+      Kelix.Secret,
+      Kelix.NonceCache,
       # Script loading/versioning (§5) and the shared instance factory (§4.2).
       Kelix.ScriptRegistry,
       Kelix.InstancePool,
@@ -64,21 +74,35 @@ defmodule Kelix.Application do
       Kelix.ControlAPI.Endpoint,
       # Observability (§11): telemetry → Prometheus /metrics + /health, gated on
       # [metrics].enabled. Supervises the Core reporter, the gauge poller and its
-      # Bandit endpoint; :ignore when disabled. Ordered last (reads the surfaces).
-      Kelix.Metrics
+      # Bandit endpoint; :ignore when disabled.
+      Kelix.Metrics,
+      # Dispatch (§4.1): registers the router as the processing module of every
+      # implemented SIP function. Stateless — starts no process (:ignore) — but
+      # sits here so the wiring precedes the listeners.
+      Kelix.Router,
+      # Inbound SIP listeners (§2.1): one child per [[listen]] entry. Last, so no
+      # request can arrive before the whole stack above is up. No [[listen]]
+      # entry ⇒ no child ⇒ no port bound.
+      Kelix.Listener.Supervisor
     ]
 
-    opts = [strategy: :one_for_one, name: Kelix.Supervisor]
+    Supervisor.start_link(children, strategy: :one_for_one, name: Kelix.Supervisor)
+  end
 
-    case Supervisor.start_link(children, opts) do
-      {:ok, sup} ->
-        # Route inbound REGISTER through Kelix.Router (design §4.1). calls/presence
-        # processing modules are wired when those functions land (roadmap).
-        SIP.Session.ConfigRegistry.set_registration_processing_module(Kelix.Router)
-        {:ok, sup}
+  # DNS defaults for SIP.Resolver — normally done by SIP.Transport.Selector.start/0,
+  # which the server never calls since the registries are supervised here (§2.1).
+  # A host with no usable /etc/resolv.conf must not prevent boot: IP-only routing
+  # (and every already-resolved flow) keeps working without a nameserver.
+  defp resolve_default_dns() do
+    SIP.Resolver.get_dns_default_dns_server()
+    :ok
+  rescue
+    e ->
+      Logger.warning(
+        module: __MODULE__,
+        message: "no default DNS server configured: #{Exception.message(e)}"
+      )
 
-      other ->
-        other
-    end
+      :ok
   end
 end
