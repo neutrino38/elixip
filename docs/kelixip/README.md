@@ -12,8 +12,8 @@ loadable **modules** (registrar, database auth, …) plugged in Kamailio-style.
 
 | Guide | What it covers |
 |---|---|
-| [installation.md](installation.md) | Prerequisites, RPM/deb install, FHS layout, the `kelixip` user, systemd |
-| [running.md](running.md) | The two config files, starting/stopping, first boot, logs |
+| [installation.md](installation.md) | Prerequisites, RPM/deb install, FHS layout, the `kelixip` user, systemd, and the **full `config.toml` / `domains.toml` reference** |
+| [running.md](running.md) | Pointing the server at its config, starting/stopping, first boot, logs |
 | [administration.md](administration.md) | `kelictl` — every command, with examples |
 | [rest-api.md](rest-api.md) | The core REST control API and its auth boundary |
 | [modules/](modules/README.md) | The module system and the reference for each module |

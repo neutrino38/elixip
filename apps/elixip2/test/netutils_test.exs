@@ -72,6 +72,29 @@ defmodule SIP.Test.NetUtils do
   end
 
 
+  # This one needs a real Wi-Fi interface, which build machines and servers
+  # generally do not have. Probe for one at compile time and skip when there is
+  # none: a host without Wi-Fi says nothing about the code under test, and a
+  # permanent red in the suite hides the failures that do matter.
+  # `mix test --exclude wifi` skips it explicitly too.
+  @wifi_interface (case :os.type() do
+                     {:unix, _} ->
+                       case File.ls("/sys/class/net") do
+                         {:ok, ifs} ->
+                           Enum.find(ifs, &File.exists?("/sys/class/net/#{&1}/wireless"))
+
+                         _ ->
+                           nil
+                       end
+
+                     # Windows: no cheap compile-time probe, let it run and report.
+                     _ ->
+                       :unknown
+                   end)
+
+  @tag :wifi
+  if is_nil(@wifi_interface), do: @tag(skip: "no Wi-Fi interface on this host")
+
   test "get local IPV4 from Wifi" do
     one_ip =
       case :os.type() do

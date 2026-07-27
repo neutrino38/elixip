@@ -13,8 +13,11 @@ kelixip is configured by two TOML files with distinct lifecycles:
 | `config.toml` | Infrastructure: `server`, `log`, listeners, media pool, most `[module.*]` blocks, control API, metrics | **Restart only** — a change means a server restart |
 | `domains.toml` | Domains, dial-plan, and the `[module.registrar]` block | **Hot** — `kelictl reload-domains` (atomic swap) |
 
-See [modules/README.md](modules/README.md) for the `[module.<name>]` blocks and
-each module page for its parameters.
+**Every key of both files is documented in
+[installation.md § Configuration](installation.md#configuration)**; this page
+covers only how to point the server at them and start it. See
+[modules/README.md](modules/README.md) for the `[module.<name>]` blocks and each
+module page for its parameters.
 
 ## Minimal config
 
