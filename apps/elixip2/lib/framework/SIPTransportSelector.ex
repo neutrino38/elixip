@@ -110,37 +110,82 @@ alias SIP.NetUtils
   end
 
   def select_transport(ruri = %SIP.Uri{}) do
-    #Check if this is a unit test. If this is the case use a mockup for transport
-    usemockup = case SIP.Uri.get_uri_param(ruri, "unittest") do
-      #{ :nosuchparam, _ } -> false
+    # Level 1 — send over an existing flow, short-circuiting everything below.
+    case send_over_flow(ruri) do
+      %SIP.Uri{} = flow_uri -> flow_uri
+      nil -> select_by_destination(ruri)
+    end
+  end
+
+  # An already-established flow (design §6.4, decision §16.6): the URI carries the
+  # pid of a **live** transport process — an inbound connected transport (a NATed
+  # browser's WSS/TCP/TLS spawned by a Listener) or a UDP socket already in use.
+  # Use it as-is: no DNS resolution, and no `Registry.SIPTransport` lookup either.
+  # That lookup is the trap: inbound connections are NOT registered there, so it
+  # would try to open a *new outbound* connection to the peer — impossible toward a
+  # NATed client, and pointless for a socket we already hold.
+  #
+  # `Kelix.Mod.Registrar.lookup/1` stamps `tp_pid` (+ `tp_module`) from the stored
+  # binding, so routing an inbound request to a registered contact takes this path.
+  #
+  # Requirements: the pid must be alive (a dead flow falls through — its binding is
+  # purged anyway) and the transport module must be *known*, from `tp_module` or
+  # from `destproto`. It is never guessed: with neither, we fall through rather
+  # than send over a transport whose semantics we cannot name.
+  #
+  # The `unittest` marker keeps winning over everything (as it does over DNS
+  # today), so unit-test URIs behave exactly as before.
+  defp send_over_flow(%SIP.Uri{tp_pid: pid} = uri) when is_pid(pid) do
+    with false <- unittest?(uri),
+         true <- Process.alive?(pid),
+         t_mod when not is_nil(t_mod) <- flow_module(uri) do
+      Logger.debug(module: __MODULE__,
+        message: "Sending over the existing #{inspect(t_mod)} flow #{inspect(pid)}")
+
+      %SIP.Uri{ uri | tp_module: t_mod, destproto: uri.destproto || proto_str(t_mod) }
+    else
+      _ -> nil
+    end
+  end
+
+  defp send_over_flow(_uri), do: nil
+
+  defp flow_module(%SIP.Uri{tp_module: t_mod}) when not is_nil(t_mod), do: t_mod
+  defp flow_module(%SIP.Uri{destproto: proto}) when is_binary(proto),
+    do: Map.get(@transport_map, proto)
+  defp flow_module(_uri), do: nil
+
+  # "UDP" / "WSS" / … as the transports themselves spell it
+  defp proto_str(t_mod), do: apply(t_mod, :transport_str, []) |> String.upcase()
+
+  defp unittest?(uri) do
+    case SIP.Uri.get_uri_param(uri, "unittest") do
       { :ok, "1" } -> true
       _ -> false
     end
+  end
 
-    newuri_or_err = if usemockup do
-      { :ok , destaddr } = SIP.NetUtils.parse_address("1.2.3.4")
+  # Levels 2 and 3: resolve a destination (or take the one already resolved), then
+  # find or launch the matching transport instance.
+  defp select_by_destination(ruri = %SIP.Uri{}) do
+    newuri_or_err = cond do
+      # Unit test: use the mockup transport
+      unittest?(ruri) ->
+        { :ok , destaddr } = SIP.NetUtils.parse_address("1.2.3.4")
 
-       # Here we use the mockup transport (for unit testing)
-       %SIP.Uri{ ruri | destip: destaddr, destport: 5080, destproto: "UDPMockup",
-                tp_module: SIP.Test.Transport.UDPMockup }
-    else
-      case SIP.Resolver.resolve_and_add_dest(ruri) do
-        # Error
-        err when err in [ :nxdomain, :error ] ->
-          :invalidsipdestination
+        %SIP.Uri{ ruri | destip: destaddr, destport: 5080, destproto: "UDPMockup",
+                 tp_module: SIP.Test.Transport.UDPMockup }
 
-        # Resolution successful
-        newruri ->
-          t_mod = Map.get(@transport_map, newruri.destproto)
-          if t_mod != nil do
-            # Add transport module
-            %SIP.Uri{ newruri | tp_module: t_mod }
-          else
-            Logger.error(module: __MODULE__, message: "Transport #{ruri.destproto} is not supported.")
-            :invalidtransport
-          end
+      # Level 2 — the destination is already resolved (IP + port known: a stored
+      # binding's `received`, a configured next hop). Skip DNS and use it as-is.
+      # No `destproto` ⇒ UDP (decision §16.6).
+      true ->
+        case resolved_dest(ruri) do
+          %SIP.Uri{} = resolved -> resolved
 
-      end
+          # Level 3 — the historical path: resolve the R-URI (DNS/NAPTR/SRV).
+          nil -> resolve_dest(ruri)
+        end
     end
 
     if is_map(newuri_or_err) do
@@ -162,6 +207,37 @@ alias SIP.NetUtils
       end
     else
       newuri_or_err
+    end
+  end
+
+  defp resolved_dest(%SIP.Uri{destip: destip, destport: destport} = uri)
+       when not is_nil(destip) and is_integer(destport) and destport > 0 do
+    proto = uri.destproto || "UDP"
+
+    case uri.tp_module || Map.get(@transport_map, proto) do
+      nil -> nil
+      t_mod -> %SIP.Uri{ uri | destproto: proto, tp_module: t_mod }
+    end
+  end
+
+  defp resolved_dest(_uri), do: nil
+
+  defp resolve_dest(ruri) do
+    case SIP.Resolver.resolve_and_add_dest(ruri) do
+      # Error
+      err when err in [ :nxdomain, :error ] ->
+        :invalidsipdestination
+
+      # Resolution successful
+      newruri ->
+        t_mod = Map.get(@transport_map, newruri.destproto)
+        if t_mod != nil do
+          # Add transport module
+          %SIP.Uri{ newruri | tp_module: t_mod }
+        else
+          Logger.error(module: __MODULE__, message: "Transport #{ruri.destproto} is not supported.")
+          :invalidtransport
+        end
     end
   end
 end

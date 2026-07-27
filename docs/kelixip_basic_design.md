@@ -577,6 +577,28 @@ callee, or the future push-notification feature (§6.5) subscribe to.
    stored binding, so both fast paths apply. Same open item as
    `uas_scenario_design.md` §8.1 (connected-transport response routing).
 
+> **Implementation status (2026-07-27 — DONE).** `select_transport/1` now has the
+> three levels above. Two details the design did not foresee:
+>
+> - **The transport module must travel with the flow.** Downstream code needs it
+>   (`SIPTransaction` calls `transport_str/0`, ICT/NICT read `ruri.tp_module`), and
+>   an inbound R-URI stamps `tp_module` but **no `destproto`**
+>   (`ImplHelpers.process_incoming_message/7` sets destip/destport/tp_module/tp_pid
+>   only) — while the *stored Contact URI* carries neither. So `%Contact{}` gained
+>   a **`flow_module`** field, saved from the inbound R-URI and stamped back by
+>   `lookup/1`. Level 1 resolves the module from `tp_module`, else from
+>   `destproto`, and otherwise **falls through rather than guess**: sending over a
+>   transport whose semantics we cannot name is worse than resolving.
+> - **The `unittest=1` marker keeps winning** over a live flow (as it already does
+>   over DNS), so the mockup-transport tests are untouched.
+>
+> Side effect, and the reason several listener tests now pass in isolation: an
+> **inbound** request's R-URI already carries `tp_pid` + `tp_module`, so in-dialog
+> requests and responses on a connected transport (TCP/TLS/WSS) now go back over
+> the connection they arrived on instead of attempting a new outbound one — that is
+> the open item of `uas_scenario_design.md` §8.1, answered at the `Selector` rather
+> than inside the transaction layer.
+
 ### 6.5 Push notifications — *future, not basic*
 
 Spec §12.2: a later version associates an AOR with a push "contact" to wake iOS /
@@ -1123,7 +1145,7 @@ before the features that need them.
 | **P1 — Config** ✅ | `toml` dep; `Kelix.Config` (infra→app env, per-listener certs); `Kelix.Domains` + `Kelix.DialPlan` compiler; atomic reload plumbing (no CLI yet) — **DONE 2026-07-26** (§3) | P0 |
 | **P2 — Dispatch** ✅ | `Kelix.Router` (domain→function→script, 404/405/503); wire as ConfigRegistry processing module; `Kelix.ScriptRegistry` (version-suffixed modules + refcount) + load-time contract check; extract `Kelix.InstancePool` (shared quota, per-domain) — **DONE 2026-07-26** (§4, §5) | P1 |
 | **P5 — Module system** ✅ | `Kelix.Module` behaviour + `Kelix.ModuleSupervisor` + facade resolution + module control-surface registration (REST/CLI, §8.1) — **DONE 2026-07-26** (§8) | P1 (config) |
-| **P3 — Registrar module** ✅ | `Kelix.Mod.Registrar` (per-domain store; `save`/`lookup`/`subscribe`; received+flow+Path); NAT/flow inbound routing — **DONE 2026-07-26** (§6). *Open:* the send-over-flow `Selector` short-circuit (§6.4 pt 2, §16.6) is decided but **not implemented** — `lookup/1` stamps `tp_pid`+dest, the `Selector` still ignores them | P2, P5 |
+| **P3 — Registrar module** ✅ | `Kelix.Mod.Registrar` (per-domain store; `save`/`lookup`/`subscribe`; received+flow+Path); NAT/flow inbound routing — **DONE 2026-07-26** (§6); send-over-flow `Selector` short-circuit + `Contact.flow_module` — **DONE 2026-07-27** (§6.4, §16.6) | P2, P5 |
 | **P4 — Auth** ✅ | `SIP.Auth.Secret` + `SIP.Auth.Nonce` (stateless HMAC, in the shared library §16.13) + `Kelix.NonceCache`; `SIP.Auth` `qop=auth`; realm=domain (alias→nominal); `Kelix.Mod.AuthDb` (HA1 lookup + 401/accept/reject) — **DONE 2026-07-26**; stateful nonce removed and every caller migrated **2026-07-27** (§7.5) | P3, P5 |
 | **P6 — Media pool** ✅ | `Kelix.MediaPool` (round-robin, health-check, failover, toggle) over the Mendooze adapter — **DONE 2026-07-26** (§9); + additive per-instance media override in `SIP.Session.Media` | P0 |
 | **P6b — radius_billing** | `Kelix.Mod.RadiusBilling` | P5 |
@@ -1139,10 +1161,9 @@ there was nothing worth packaging.
 
 **Remaining for "basic"**, as of 2026-07-27: **P6b** (`radius_billing`, not
 started), **P10** (RPM: nothing produced beyond `rel/env.sh.eex` + the `kelictl`
-overlay), plus two decided-but-unimplemented items — the send-over-flow
-`Selector` short-circuit (§6.4/§16.6) and dynamic `.beam` loading from
-`module_dir` with the modules extracted out of the core release (§8, §16.12 — to
-land with P10). Deferred by choice:
+overlay), plus one decided-but-unimplemented item — dynamic `.beam`
+loading from `module_dir` with the modules extracted out of the core release
+(§8, §16.12 — to land with P10). Deferred by choice:
 transaction/transport counters and per-MCU session gauges (§11, §9),
 `Kelix.InstanceSupervisor` (§2.1), the `:elixip2` → `:elixip` rename (§12.0).
 
@@ -1175,8 +1196,9 @@ All questions below were decided on **2026-07-26** unless marked otherwise.
    (strong domain separation), plus a top-level `%{domain => tid}` index; per-domain
    table created/dropped with the domain, per-binding purge via a monitor on the
    dialog pid. (Not a single shared table, not a Registry-per-domain.)
-6. **`send-over-flow`** (§6.4) — **RESOLVED**: the `Selector` does **not** honor a
-   pre-set `tp_pid` today, so add a two-level short-circuit to `select_transport/1`
+6. **`send-over-flow`** (§6.4) — **RESOLVED**, and **implemented 2026-07-27**
+   (see the status note in §6.4): the `Selector` did **not** honor a pre-set
+   `tp_pid`, so a two-level short-circuit was added to `select_transport/1`
    — (1) live `tp_pid` → use it; (2) `destip`+`destport` present → use the resolved
    dest directly (`destproto == nil` ⇒ UDP); (3) else full resolve. `lookup/1`
    stamps both. Same item as `uas_scenario_design.md` §8.1.

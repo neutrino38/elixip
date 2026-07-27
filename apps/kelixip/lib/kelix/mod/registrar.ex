@@ -3,16 +3,22 @@ defmodule Kelix.Mod.Registrar.Contact do
 
   @type t :: %__MODULE__{
           contact: SIP.Uri.t(),
-          received: {String.t(), tuple, non_neg_integer} | nil,
+          received: {String.t() | nil, tuple, non_neg_integer} | nil,
           flow_pid: pid | nil,
+          flow_module: module | nil,
           dialog_pid: pid | nil,
           info: term,
           expires_at: DateTime.t()
         }
 
+  # `flow_pid` + `flow_module` are the connection the REGISTER came in on (§6.3):
+  # the pid alone is not enough to send over it — `SIP.Transport.Selector` needs to
+  # know *which* transport it is (`transport_str`/`is_reliable`), and an inbound
+  # request stamps its R-URI with both while the stored Contact URI carries neither.
   defstruct contact: nil,
             received: nil,
             flow_pid: nil,
+            flow_module: nil,
             dialog_pid: nil,
             info: nil,
             expires_at: nil
@@ -254,6 +260,7 @@ defmodule Kelix.Mod.Registrar do
             contact: c,
             received: received_of(req),
             flow_pid: flow_of(req),
+            flow_module: flow_module_of(req),
             dialog_pid: dialog_pid,
             info: info,
             expires_at: DateTime.add(now(), exp, :second)
@@ -398,15 +405,19 @@ defmodule Kelix.Mod.Registrar do
     end
   end
 
-  # a copy of req with its R-URI replaced by the stored contact + resolved dest/flow
-  defp rewrite(req, %Contact{contact: c, received: received, flow_pid: flow}) do
+  # A copy of req with its R-URI replaced by the stored contact + the resolved
+  # destination and flow. Both are what `SIP.Transport.Selector.select_transport/1`
+  # short-circuits on (§6.4): a live `tp_pid`+`tp_module` sends straight over the
+  # existing connection, and failing that `destip`/`destport` skip DNS.
+  defp rewrite(req, %Contact{contact: c} = binding) do
     ruri =
-      case received do
+      case binding.received do
         {proto, ip, port} ->
-          %SIP.Uri{c | destip: ip, destport: port, destproto: proto, tp_pid: flow}
+          %SIP.Uri{c | destip: ip, destport: port, destproto: proto,
+                   tp_pid: binding.flow_pid, tp_module: binding.flow_module}
 
         _ ->
-          %SIP.Uri{c | tp_pid: flow}
+          %SIP.Uri{c | tp_pid: binding.flow_pid, tp_module: binding.flow_module}
       end
 
     Map.put(req, :ruri, ruri)
@@ -518,6 +529,13 @@ defmodule Kelix.Mod.Registrar do
   defp flow_of(req) do
     case Map.get(req, :ruri) do
       %SIP.Uri{tp_pid: pid} -> pid
+      _ -> nil
+    end
+  end
+
+  defp flow_module_of(req) do
+    case Map.get(req, :ruri) do
+      %SIP.Uri{tp_module: t_mod} -> t_mod
       _ -> nil
     end
   end

@@ -20,8 +20,9 @@ defmodule Kelix.Mod.RegistrarTest do
         domain: @domain,
         destip: Keyword.get(opts, :destip, {1, 2, 3, 4}),
         destport: Keyword.get(opts, :destport, 5060),
-        destproto: "UDP",
-        tp_pid: Keyword.get(opts, :flow, self())
+        destproto: Keyword.get(opts, :destproto, "UDP"),
+        tp_pid: Keyword.get(opts, :flow, self()),
+        tp_module: Keyword.get(opts, :tp_module)
       },
       contact: %SIP.Uri{userpart: user, domain: contact_host, port: 5060},
       expires: Keyword.get(opts, :expires, 3600),
@@ -117,6 +118,44 @@ defmodule Kelix.Mod.RegistrarTest do
 
     test "unknown AOR → :notfound" do
       assert :notfound = Registrar.lookup(%{method: :INVITE, ruri: %SIP.Uri{userpart: "ghost", domain: @domain}})
+    end
+
+    test "the rewritten R-URI carries the flow's transport module, so it can be sent on" do
+      # An inbound WSS/TCP/TLS connection: the pid alone is not enough — the
+      # Selector needs to know which transport it is (§6.4).
+      Registrar.save(register("alice", "10.0.0.9", tp_module: SIP.Transport.WSS), @domain)
+
+      assert {:ok, [rewritten]} =
+               Registrar.lookup(%{method: :INVITE, ruri: %SIP.Uri{userpart: "alice", domain: @domain}})
+
+      assert rewritten.ruri.tp_module == SIP.Transport.WSS
+    end
+
+    test "the Selector sends over that flow as-is — no DNS on the private contact" do
+      # A browser behind NAT: nothing can be dialed *toward* it and its contact host
+      # is private/unresolvable, so the binding must route onto the connection it
+      # registered from. With no `received` (an inbound R-URI carries no destproto),
+      # the stamped module is the only thing naming the transport.
+      flow = self()
+
+      req =
+        register("alice", "192.168.1.42",
+          flow: flow,
+          tp_module: SIP.Transport.WSS,
+          destip: nil,
+          destproto: nil
+        )
+
+      Registrar.save(req, @domain)
+
+      assert {:ok, [rewritten]} =
+               Registrar.lookup(%{method: :INVITE, ruri: %SIP.Uri{userpart: "alice", domain: @domain}})
+
+      selected = SIP.Transport.Selector.select_transport(rewritten.ruri)
+
+      assert selected.tp_pid == flow
+      assert selected.tp_module == SIP.Transport.WSS
+      assert selected.destproto == "WSS"
     end
   end
 

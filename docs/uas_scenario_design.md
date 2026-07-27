@@ -498,9 +498,15 @@ Au lancement avec un scénario de type `:uas_register` :
 
 ## 8. Points ouverts à confirmer
 
-1. **Routage des réponses UAS** sur transport connecté : où mémoriser
+1. ~~**Routage des réponses UAS** sur transport connecté : où mémoriser
    l'instance de transport (transaction IST/NIST ?) et comment court-circuiter
-   `Selector.select_transport/1`. Nécessite une revue de la couche Transaction.
+   `Selector.select_transport/1`.~~ **Résolu (2026-07-27)** : rien à mémoriser dans
+   la transaction, et pas de court-circuit *du* Selector — le court-circuit est
+   **dans** le Selector. `process_incoming_message/7` estampille déjà `tp_pid` +
+   `tp_module` sur la R-URI entrante ; `select_transport/1` détecte ce flux vivant
+   et le réutilise tel quel, sans résolution DNS ni lookup dans
+   `Registry.SIPTransport` (où les connexions entrantes ne figurent pas). Voir
+   `kelixip_basic_design.md` §6.4 et la décision §16.6.
 2. **Acceptors TCP/TLS/WSS** : réutiliser les modules transport existants avec
    un `init` « socket acceptée », ou créer des modules `*Server` dédiés ?
 3. **Forme CLI `--listen`** : ne supporte-t-on que `proto:port` (≡ `:all`), ou
