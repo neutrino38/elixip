@@ -1055,10 +1055,10 @@ Spec §8.2. `:telemetry` events emitted at key points, exported as Prometheus.
 
 ## 12. Packaging
 
-> **Build toolchain (P10):** how to build the AL9 RPM — build host, Erlang/Elixir
-> versions, embedded-ERTS constraints — is in
+> **Build toolchain (P10):** how to build the AL9 RPM and the Ubuntu/Debian deb —
+> build host, Erlang/Elixir versions, embedded-ERTS constraints — is in
 > [`kelixip_packaging.md`](kelixip_packaging.md). This section covers the layout
-> (umbrella, FHS, subpackages); that note covers how to produce the artifact.
+> (umbrella, FHS, subpackages); that note covers how to produce the artifacts.
 
 ### 12.0 Repository structure — umbrella, 3 apps (decided 2026-07-26)
 
@@ -1138,24 +1138,32 @@ module + a `bin/kelictl` overlay that RPCs the running node — no second escrip
 Launch: `systemctl start kelixip` (the TOML paths come from the environment, §2.1,
 not from a command-line flag).
 
-> **Implementation status (P10, 2026-07-28 — DONE for the RPM).** [`packaging/`](../packaging/README.md)
-> produces three RPMs from one `mix release`: `kelixip` (release + `kelictl` +
-> unit + `/etc/kelixip`), `kelixip-mod-registrar` and `kelixip-mod-auth_db` — the
-> core carries no module, exactly as §16.12 requires. `packaging/stage.sh` assembles
-> the release and the module `.beam` into a source tarball, `rpm/kelixip.spec`
-> installs it on the FHS layout above with `%config(noreplace)` on both TOML files
-> and on `/etc/sysconfig/kelixip`, `%pre` creating the unprivileged `kelixip` user
-> and `%post` generating a **per-host distribution cookie** (shipping one would make
-> it the same secret everywhere). `module_dir` is root-owned. The unit runs as that
-> user with `CAP_NET_BIND_SERVICE` as its only privilege, drains on `ExecStop` (plus
-> a wait on `$MAINPID`, since systemd kills what survives `ExecStop` and would
-> otherwise cut the drain short) and reloads `domains.toml` on `ExecReload`.
-> `/etc/sysconfig/kelixip` is the single override point: the unit reads it as an
-> `EnvironmentFile` and `rel/env.sh` sources it, so `kelictl` and the service agree
-> on node name, cookie and config paths. Build host and toolchain constraints
-> (embedded ERTS is native code — build **on** AL9):
-> [`kelixip_packaging.md`](kelixip_packaging.md). **Remaining:** the deb, and the
-> `RELEASE_NODE` ↔ `server.node_name` auto-sync.
+> **Implementation status (P10 — RPM 2026-07-28, deb 2026-07-29 — DONE).**
+> [`packaging/`](../packaging/README.md) produces three packages from one
+> `mix release`: `kelixip` (release + `kelictl` + unit + `/etc/kelixip`),
+> `kelixip-mod-registrar` and `kelixip-mod-auth_db` (`kelixip-mod-auth-db` on the deb,
+> where a package name may carry no underscore) — the core carries no module, exactly
+> as §16.12 requires. `packaging/stage.sh` assembles the release and the module `.beam`
+> once, and both formats package that same payload: `rpm/kelixip.spec` from the source
+> tarball, `build-deb.sh` from the staged tree (a `dpkg-deb --build` per package, no
+> debhelper — nothing is compiled at package time). Both keep the admin's TOML files
+> and environment file on upgrade (`%config(noreplace)` / `conffiles`), create the
+> unprivileged `kelixip` user before it is needed, and generate a **per-host
+> distribution cookie** at install time (shipping one would make it the same secret
+> everywhere). `module_dir` is root-owned. The unit runs as that user with
+> `CAP_NET_BIND_SERVICE` as its only privilege, drains on `ExecStop` (plus a wait on
+> `$MAINPID`, since systemd kills what survives `ExecStop` and would otherwise cut the
+> drain short) and reloads `domains.toml` on `ExecReload`. The environment file is the
+> single override point — `/etc/sysconfig/kelixip` on EL, `/etc/default/kelixip` on
+> Debian/Ubuntu, both declared by the unit and both sourced by `rel/env.sh`, so
+> `kelictl` and the service agree on node name, cookie and config paths. Neither
+> install *starts* the service: the shipped `config.toml` is a template. Both formats
+> are verified installed on their target (user, ownership, cookie, root-owned
+> `module_dir`, module loaded, listener bound, reload, drained stop, purge) — what was
+> checked, plus the build host and toolchain constraints (embedded ERTS is native code
+> — build **on** the target, and for the deb the `Depends` are computed from it):
+> [`kelixip_packaging.md`](kelixip_packaging.md). **Remaining:** the
+> `RELEASE_NODE` ↔ `server.node_name` auto-sync, repository metadata and signing.
 
 ---
 
@@ -1235,19 +1243,20 @@ before the features that need them.
 | **P7 — Control layer** ✅ | `Kelix.Control` (all verbs); `kelictl` release command over RPC (`Kelix.Control.CLI` + `bin/kelictl` overlay); versioned/notify reload; graceful shutdown — **DONE 2026-07-26** (§10) | P2–P6 |
 | **P8 — REST API** ✅ | `bandit`+`plug` frontal (`Kelix.ControlAPI` + `.Auth` + `.Endpoint`); token/mtls/none auth; parity with CLI by construction — **DONE 2026-07-27** (§10.3) | P7 |
 | **P9 — Observability** ✅ | `Kelix.Metrics` (Prometheus Core reporter + gauge poller + `/metrics` + `/health` on Bandit); dispatch/registrar events labelled by `domain`; **DONE 2026-07-27** (§11). Transaction/transport counters in `:elixip2` deferred | P2+ |
-| **P10 — Packaging (RPM d'abord)** ✅ | `packaging/` : `mix release` (ERTS embarqué) → `stage.sh` (tarball release + `.beam` des modules) → `.spec` (`%files` sur le layout FHS §12, `%pre` créant l'utilisateur `kelixip`, `%post` générant le cookie par hôte, `%config(noreplace)` sur `/etc/kelixip/*.toml` + `/etc/sysconfig/kelixip`, unité systemd non privilégiée qui drain à l'arrêt) → 3 RPM (core + `kelixip-mod-registrar` + `kelixip-mod-auth_db`), `module_dir` root-owned, build natif AL9 ou en conteneur `almalinux:9` — **DONE 2026-07-28** (§12.1). Deb Ubuntu ensuite, même release. | P0–P9 |
+| **P10 — Packaging (RPM puis deb)** ✅ | `packaging/` : `mix release` (ERTS embarqué) → `stage.sh` (tarball + arbre : release + `.beam` des modules) → **RPM** `.spec` (`%files` sur le layout FHS §12, `%pre` créant l'utilisateur `kelixip`, `%post` générant le cookie par hôte, `%config(noreplace)` sur `/etc/kelixip/*.toml` + `/etc/sysconfig/kelixip`) et **deb** `build-deb.sh` (`dpkg-deb --build` par paquet, `postinst` = utilisateur + droits + cookie, `conffiles`, `Depends` calculés par `dpkg-shlibdeps`, `/etc/default/kelixip`), unité systemd non privilégiée qui drain à l'arrêt, `module_dir` root-owned → 3 paquets par format (core + `kelixip-mod-registrar` + `kelixip-mod-auth_db` / `-auth-db`), build natif ou en conteneur (`almalinux:9`, `ubuntu:24.04`) — **RPM DONE 2026-07-28, deb DONE 2026-07-29** (§12.1). | P0–P9 |
 
 P3+P4 (registrar + auth) are the functional core of "basic"; P0–P2 are the
 enabling infrastructure; P7–P10 make it a product. **P0b is a prerequisite of
 P10**: before it, the packaged server bound no port and read no config file, so
 there was nothing worth packaging.
 
-**Remaining for "basic"**, as of 2026-07-28: **P6b** (`radius_billing`, not
-started) and, within P10, the **deb** for Ubuntu — the RPM for Alma Linux 9 is
-produced and verified installed (§12.1). Deferred by choice:
-transaction/transport counters and per-MCU session gauges (§11, §9),
-`Kelix.InstanceSupervisor` (§2.1), the `:elixip2` → `:elixip` rename (§12.0),
-`RELEASE_NODE` ↔ `server.node_name` auto-sync (§12.1).
+**Remaining for "basic"**, as of 2026-07-29: **P6b** (`radius_billing`, not
+started). P10 is complete — the RPM for Alma Linux 9 is produced and verified
+installed, the deb for Ubuntu/Debian is produced from the same payload (§12.1).
+Deferred by choice: transaction/transport counters and per-MCU session gauges
+(§11, §9), `Kelix.InstanceSupervisor` (§2.1), the `:elixip2` → `:elixip` rename
+(§12.0), `RELEASE_NODE` ↔ `server.node_name` auto-sync and package
+repository/signing (§12.1).
 
 ---
 

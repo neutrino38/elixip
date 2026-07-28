@@ -2,9 +2,13 @@
 
 ## Prerequisites
 
-- Alma Linux 9 (x86_64 or aarch64). The release embeds its own ERTS — no system
-  Erlang/Elixir required.
+- **Alma Linux 9** (RPM) or **Ubuntu / Debian** (deb), x86_64 or aarch64. The release
+  embeds its own ERTS — no system Erlang/Elixir required.
 - A database only if you load [`auth_db`](modules/auth_db.md) (MariaDB/MySQL).
+
+Each package is built for one distribution release: its embedded runtime is native
+code, and the dependencies name that release's libraries. An RPM is `.el9`, a deb is
+for the Ubuntu/Debian release it was built on.
 
 ## Packages
 
@@ -15,29 +19,41 @@ deployment installs only what it uses — the core itself implements no SIP func
 |---|---|
 | `kelixip` | the server + `kelictl` + the systemd unit + `/etc/kelixip` |
 | `kelixip-mod-registrar` | the [registrar](modules/registrar.md) / user-location module |
-| `kelixip-mod-auth_db` | the [database authentication](modules/auth_db.md) module |
+| `kelixip-mod-auth_db` (RPM)<br>`kelixip-mod-auth-db` (deb) | the [database authentication](modules/auth_db.md) module |
 
 ```bash
+# Alma Linux 9
 dnf install kelixip kelixip-mod-registrar kelixip-mod-auth_db
-# or, from the built files:
-rpm -ivh kelixip-*.rpm
+rpm -ivh kelixip-*.rpm                     # or, from the built files
+
+# Ubuntu / Debian
+apt install kelixip kelixip-mod-registrar kelixip-mod-auth-db
+apt install ./kelixip_*.deb ./kelixip-mod-registrar_*.deb   # from the built files
 ```
+
+> The module's **registered name is `auth_db`** on both — the config block is
+> `[module.auth_db]` everywhere. Only the deb *package* name differs, because a Debian
+> package name may not contain an underscore.
+>
+> From files, prefer `apt install ./file.deb` over `dpkg -i`: apt pulls the library
+> dependencies, `dpkg` only reports them missing.
 
 A domain that enables a function whose module is not installed is a **config error
 caught at load time** — it is not a runtime surprise. Installing a module later is a
 package install plus `kelictl module reload <name>`; no restart.
 
 Building the packages yourself — build-host toolchain included:
-[BUILD.md § Building the RPM packages](../../BUILD.md#building-the-rpm-packages-alma-linux-9).
+[BUILD.md § Building the RPM packages](../../BUILD.md#building-the-rpm-packages-alma-linux-9)
+and [§ Building the deb packages](../../BUILD.md#building-the-deb-packages-ubuntu--debian).
 
 ## Filesystem layout (FHS, §12)
 
 | Path | Contents |
 |---|---|
-| `/etc/kelixip/config.toml` | Infrastructure config (`%config(noreplace)`, 0640 `root:kelixip`) |
-| `/etc/kelixip/domains.toml` | Domains + dial-plan + registrar block (`%config(noreplace)`) |
+| `/etc/kelixip/config.toml` | Infrastructure config (kept on upgrade, 0640 `root:kelixip`) |
+| `/etc/kelixip/domains.toml` | Domains + dial-plan + registrar block (kept on upgrade) |
 | `/etc/kelixip/tls/` | Listener certificates (0750 `root:kelixip`) |
-| `/etc/sysconfig/kelixip` | Node name, cookie and the two TOML paths (`%config(noreplace)`) |
+| `/etc/sysconfig/kelixip` (RPM)<br>`/etc/default/kelixip` (deb) | Node name, cookie and the two TOML paths (kept on upgrade) |
 | `/usr/share/kelixip/` | Scenario scripts (`script_dir`) |
 | `/usr/lib/kelixip/` | The release itself (embedded ERTS) |
 | `/usr/lib/kelixip/modules/` | Loadable modules (`module_dir`, **root-owned**) |
@@ -54,13 +70,17 @@ The package creates an unprivileged `kelixip` system user and a systemd unit; th
 service runs as that user, with `CAP_NET_BIND_SERVICE` as its only privilege (so a
 `[[listen]]` entry may ask for port 443).
 
+The install **enables the unit but does not start it**: the shipped `config.toml` is a
+template that binds 5060 and serves no domain. Go through it first, then:
+
 ```bash
 systemctl enable --now kelixip
 systemctl status kelixip
 ```
 
-Everything an admin needs to override lives in **`/etc/sysconfig/kelixip`** — never
-in the unit, which the package replaces on upgrade:
+Everything an admin needs to override lives in the **environment file** —
+`/etc/sysconfig/kelixip` on Alma Linux, `/etc/default/kelixip` on Ubuntu/Debian, and
+never in the unit, which the package replaces on upgrade:
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -72,15 +92,22 @@ in the unit, which the package replaces on upgrade:
 changing `RELEASE_NODE` in one place is enough.
 
 > **The distribution cookie is generated per installation.** It is the credential
-> `kelictl` authenticates with, so no fixed cookie ships in the package: `%post`
-> generates `/usr/lib/kelixip/releases/COOKIE` from `/dev/urandom` (0640
-> `root:kelixip`), keeps it across upgrades and removes it on erase.
+> `kelictl` authenticates with, so no fixed cookie ships in the package: the
+> post-install script generates `/usr/lib/kelixip/releases/COOKIE` from `/dev/urandom`
+> (0640 `root:kelixip`), keeps it across upgrades and removes it on erase.
 
 ### Upgrades
 
-`config.toml` and `domains.toml` are `%config(noreplace)`: your files are kept and
-the packaged version lands next to them as `*.rpmnew` — worth diffing after an
-upgrade, since new keys show up there first. The unit is restarted by the upgrade.
+`config.toml`, `domains.toml` and the environment file are **kept**: your version
+survives the upgrade and the packaged one lands next to it — as `*.rpmnew` on the RPM
+(`%config(noreplace)`), as `*.dpkg-dist` on the deb (a `conffile`; an interactive
+`dpkg` may ask instead). Worth diffing either way, since new keys show up there first.
+The unit is restarted by the upgrade, which drains in-progress scenarios first.
+
+Removing the package stops the service and drops the generated cookie. On the deb, a
+plain `apt remove` keeps `/var/lib/kelixip` and `/var/log/kelixip`; `apt purge` removes
+them, along with the configuration. The `kelixip` system user is left in place on
+purpose — files elsewhere may still belong to it.
 
 ## Configuration
 

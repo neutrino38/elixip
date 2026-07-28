@@ -44,9 +44,11 @@ cd apps/kelixip && MIX_ENV=prod mix release kelixip
 cd apps/kelix_modules && MIX_ENV=prod mix compile
 cp _build/prod/lib/kelix_modules/ebin/Elixir.Kelix.Mod.*.beam "$MODULE_DIR"/
 
-# Build the Alma Linux 9 RPMs (core + one per module) -> packaging/dist/
-packaging/build-rpm.sh              # on an AL9 host
-packaging/build-in-container.sh     # anywhere else (podman/docker)
+# Build the packages (core + one per module) -> packaging/dist/
+packaging/build-rpm.sh                            # RPM, on an Alma Linux 9 host
+packaging/build-deb.sh                            # deb, on the target Ubuntu/Debian
+packaging/build-in-container.sh                   # RPM anywhere else (podman/docker)
+packaging/build-in-container.sh --target ubuntu   # deb likewise
 ```
 
 > **Tests:** a few tests are order-dependent (named singletons leak state across

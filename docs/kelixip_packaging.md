@@ -1,11 +1,11 @@
-# kelixip packaging (P10) — build toolchain & RPM
+# kelixip packaging (P10) — build toolchain, RPM & deb
 
-Status: **implemented** (RPM, 2026-07-28). This note records the build-environment
-decisions and **why** they are what they are; the artifacts live in
-[`packaging/`](../packaging/README.md) (spec, unit, build scripts) and the
-step-by-step build procedure — installing Erlang from EPEL, Elixir into
-`/opt/elixir`, running the build — is
-[BUILD.md § Building the RPM packages](../BUILD.md#building-the-rpm-packages-alma-linux-9).
+Status: **implemented** — RPM (2026-07-28), deb (2026-07-29). This note records the
+build-environment decisions and **why** they are what they are; the artifacts live in
+[`packaging/`](../packaging/README.md) (spec, deb control files, unit, build scripts)
+and the step-by-step build procedures are
+[BUILD.md § Building the RPM packages](../BUILD.md#building-the-rpm-packages-alma-linux-9)
+and [§ Building the deb packages](../BUILD.md#building-the-deb-packages-ubuntu--debian).
 The **what** — FHS layout, systemd unit, subpackages,
 `%config(noreplace)` — is in the design doc
 [§12](kelixip_basic_design.md#12-packaging); this note covers the **how to build**:
@@ -18,6 +18,20 @@ which OS, which Erlang/Elixir, and why.
 > root-owned `module_dir`, binds its listener, answers `401` then a `403` from
 > `auth_db` on a REGISTER, `systemctl reload` bumps the domains version, and
 > `systemctl stop` drains and exits without needing a `SIGTERM`.
+
+> **The deb followed on 2026-07-29**, from the same staged payload: Ubuntu 26.04,
+> apt OTP 27 (erts-15.2.7.4), Elixir 1.18.3 (otp-27 build). Output `kelixip`,
+> `kelixip-mod-registrar`, `kelixip-mod-auth-db` (6.9 MB core), `Depends` computed by
+> `dpkg-shlibdeps` (`libc6 (>= 2.38)`, `libssl3t64 (>= 3.4.0)`, …). **Verified
+> installed** on that host: the system user is created and the configuration lands
+> 0640 `root:kelixip`; the cookie is generated per host, 0640 `root:kelixip`, and owned
+> by no package; `module_dir` is root-owned and a `touch` as the service user is
+> refused; the unit is enabled and *not* started by the install; started, it loads
+> `registrar` from `module_dir`, binds `udp:0.0.0.0:5060`, answers `/health` and
+> `kelictl status`; `systemctl reload` bumps the domains version (1 → 2);
+> `systemctl stop` drains and exits on its own in ~8 s (`drain_wait_ms` 5 s +
+> `graceful_grace_ms` 2 s — no `SIGKILL`); `apt purge` removes the release, the
+> configuration, the state and log directories, and keeps the `kelixip` user.
 
 ## Target & golden rule
 
@@ -69,6 +83,35 @@ support it (1.18 covers OTP 25–27). The project requires only **`elixir: "~> 1
 > **fail to load** on an OTP-26 runtime. On OTP 26 → use the `otp-26` (or earlier)
 > Elixir build.
 
+## The deb target: Ubuntu / Debian
+
+Same golden rule, one target at a time — **build on the release you ship to**. Two
+things make it stricter than the RPM rather than looser:
+
+- **`Depends` are computed, not written.** `dpkg-shlibdeps` reads the ELF payload
+  (`beam.smp`, `erl_child_setup`, `inet_gethost`, the crypto NIF) and names the
+  library packages *of the build host*. Ubuntu 22.04 provides `libssl3`, 24.04+
+  provides `libssl3t64` (the 64-bit `time_t` transition), so a deb built on 24.04
+  refuses to install on 22.04. That refusal is the feature: the alternative is a
+  package that installs and then fails to load its crypto NIF.
+- **Erlang sources**, in the same order as EL's three:
+  - **A) the distribution's own `erlang-nox`** (+ `erlang-dev` for NIF headers) —
+    native to the image by construction. The OTP major varies a lot between Ubuntu
+    releases, and it is what decides the Elixir version.
+  - **B) the Erlang Solutions apt repo** (`packages.erlang-solutions.com`, package
+    `esl-erlang`) — the counterpart of the RabbitMQ RPM repo, for a newer or pinned
+    OTP than the distribution's.
+  - **C) from source** (`asdf`/`mise`/kerl) — max control, needs the build-deps.
+
+The Elixir rule is unchanged and is the one that bites: take the
+`elixir-otp-<major>.zip` matching the OTP you installed. Elixir 1.15 covers OTP 24–26,
+1.18 covers OTP 25–27; the project floor is `~> 1.15`. On an old Ubuntu whose apt OTP
+is below the Elixir you want, source **B** is the answer, not a mismatched zip.
+
+`dpkg-dev` is the only extra build tool (it carries `dpkg-shlibdeps`); packaging needs
+no debhelper and no `dpkg-buildpackage`, since the payload is a pre-assembled release
+and nothing is compiled at package time.
+
 ## Compatibility with Elixip
 
 **Compatible.** The project pins only `elixir: "~> 1.15"` and no OTP version; nothing
@@ -110,7 +153,7 @@ ENV PATH="/usr/local/elixir/bin:$PATH"
 > Verify the **current** versions when you build (EPEL's OTP ↔ a compatible Elixir
 > `otp-XX` zip); the numbers above are the 2026-07 snapshot, not pinned forever.
 
-## What the RPM does with the release
+## What the packages do with the release
 
 Details in [`packaging/README.md`](../packaging/README.md); the two decisions worth
 recording here, because both are security choices rather than mechanics:
@@ -118,14 +161,24 @@ recording here, because both are security choices rather than mechanics:
 - **The distribution cookie is generated per installation**, not shipped. It is the
   credential `kelictl` authenticates with, so one cookie inside the package would be
   the same secret on every host — and knowing it is enough to drive any reachable
-  node. `releases/COOKIE` is excluded from the payload, declared `%ghost`, created by
-  `%post` from `/dev/urandom` (0640 `root:kelixip`), kept across upgrades, removed on
-  erase.
-- **`/etc/sysconfig/kelixip` is the single place an admin overrides anything**
-  (node name, cookie, TOML paths). The systemd unit reads it as an `EnvironmentFile`
-  and — added with the packaging — the release's own `rel/env.sh` sources it too, so
-  `kelictl` run by hand targets the node the service actually runs. The environment
-  still wins over the file, so a per-invocation override keeps working.
+  node. `releases/COOKIE` is excluded from the payload, created from `/dev/urandom`
+  (0640 `root:kelixip`) at install time, kept across upgrades, removed on erase — on
+  the RPM as a `%ghost` + `%post`, on the deb in `postinst`/`postrm`.
+- **One environment file is the single place an admin overrides anything** (node
+  name, cookie, TOML paths): `/etc/sysconfig/kelixip` on EL, `/etc/default/kelixip`
+  on Debian/Ubuntu, each distribution's convention. The systemd unit declares both as
+  optional `EnvironmentFile=` and — added with the packaging — the release's own
+  `rel/env.sh` sources whichever exists, so `kelictl` run by hand targets the node the
+  service actually runs. The environment still wins over the file, so a per-invocation
+  override keeps working. `packaging/sysconfig/kelixip` is the single source for both:
+  `build-deb.sh` rewrites the path it names in its own comments rather than keeping a
+  second copy.
+
+A third choice is packaging mechanics but easy to get wrong: **the install enables the
+unit and does not start it**, on both formats. The shipped `config.toml` is a template
+that binds 5060 and serves no domain, so an auto-start would grab the port and answer
+404 — worse than nothing happening. (Debian's own convention is to start; this is a
+deliberate divergence, and the reason is in `postinst` next to the code.)
 
 The unit's `ExecStop` needed one non-obvious addition: `graceful_shutdown()` returns
 as soon as the drain is broadcast (it schedules the VM stop so `kelictl` does not
@@ -135,8 +188,12 @@ The unit therefore follows the rpc with a wait on `$MAINPID`, bounded by
 
 ## Open items (P10)
 
-- **deb (Ubuntu)** from the same release, after the RPM.
-- `RELEASE_NODE` ↔ `server.node_name` auto-sync at boot. Both now live in
-  `/etc/sysconfig/kelixip`, so there is one place to edit instead of two, but nothing
-  yet *derives* the VM node name from the TOML — a mismatch is still possible.
-- No `%check` stage: the suite runs from the repo, not against the staged payload.
+- `RELEASE_NODE` ↔ `server.node_name` auto-sync at boot. Both now live in the
+  environment file, so there is one place to edit instead of two, but nothing yet
+  *derives* the VM node name from the TOML — a mismatch is still possible.
+- No `%check` stage / no package-time test: the suite runs from the repo, not against
+  the staged payload.
+- No repository metadata (`createrepo` / `reprepro`) and no package signing — the
+  artifacts are loose files, installed by path.
+- The deb is built and verified on one Ubuntu release at a time; there is no matrix
+  build yet, and each supported release needs its own artifact.

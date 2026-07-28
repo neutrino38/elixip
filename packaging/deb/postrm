@@ -1,0 +1,49 @@
+#!/bin/sh
+# kelixip postrm — the deb counterpart of the .spec's %postun.
+set -e
+
+KELIXDIR=/usr/lib/kelixip
+COOKIE="$KELIXDIR/releases/COOKIE"
+
+# The cookie is not part of the payload (postinst generates one per host), so dpkg
+# does not remove it — and it leaves the directories that still hold it behind.
+drop_cookie() {
+  rm -f "$COOKIE"
+  rmdir "$KELIXDIR/releases" "$KELIXDIR/modules" "$KELIXDIR" 2>/dev/null || true
+}
+
+case "$1" in
+  remove)
+    drop_cookie
+    if [ -d /run/systemd/system ]; then
+      systemctl --system daemon-reload >/dev/null || true
+    fi
+    ;;
+
+  purge)
+    drop_cookie
+    if [ -x /usr/bin/deb-systemd-helper ]; then
+      deb-systemd-helper mask kelixip.service >/dev/null || true
+      deb-systemd-helper purge kelixip.service >/dev/null || true
+      deb-systemd-helper unmask kelixip.service >/dev/null || true
+    fi
+    # State and logs go on purge, not on remove — a remove/reinstall cycle must
+    # not lose them. The certificates in /etc/kelixip/tls are the admin's, so the
+    # rmdir only succeeds if the directory is empty.
+    rm -rf /var/lib/kelixip /var/log/kelixip
+    rmdir /etc/kelixip/tls /etc/kelixip 2>/dev/null || true
+    # The kelixip user is deliberately kept: files outside these paths (a log
+    # archive, a dump) may still be owned by it, and re-creating a system user
+    # with a different uid would silently orphan them.
+    ;;
+
+  upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+    ;;
+
+  *)
+    echo "postrm called with unknown argument '$1'" >&2
+    exit 1
+    ;;
+esac
+
+exit 0

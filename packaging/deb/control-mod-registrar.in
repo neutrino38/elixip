@@ -1,0 +1,18 @@
+Package: kelixip-mod-registrar
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Emmanuel BUU <emmanuel.buu@ives.fr>
+Installed-Size: @INSTALLED_SIZE@
+Section: net
+Priority: optional
+Homepage: https://www.ives.fr/
+Depends: kelixip (= @VERSION@)
+Description: Registrar / user-location module for kelixip
+ The usrloc store: per-domain contact bindings with NAT/flow handling
+ (received, flow, Path), expiry bounds and the save/lookup/subscribe facade the
+ registrar scripts drive. Enable it with a [module.registrar] block in
+ domains.toml.
+ .
+ The payload is BEAM bytecode, but the package is architecture-dependent on
+ purpose: it must be built and shipped alongside the core whose embedded ERTS
+ will load it.

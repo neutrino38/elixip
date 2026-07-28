@@ -10,9 +10,12 @@ User=kelixip
 Group=kelixip
 
 # Node name, cookie file location and the two TOML paths. Everything an admin
-# needs to change lives in /etc/sysconfig/kelixip (%config(noreplace)) — never in
-# this unit, which rpm replaces on upgrade.
+# needs to change lives in the environment file — never in this unit, which the
+# package replaces on upgrade. The RPM ships it as /etc/sysconfig/kelixip, the deb
+# as /etc/default/kelixip (each distribution's convention); an installation has one
+# of the two, so both are declared here and both are optional.
 EnvironmentFile=-/etc/sysconfig/kelixip
+EnvironmentFile=-/etc/default/kelixip
 
 # The boot script writes the per-boot runtime config under RELEASE_TMP. The
 # release tree is root-owned, so point it at the systemd-managed runtime dir.

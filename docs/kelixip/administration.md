@@ -8,13 +8,14 @@ the result as text.
 **How it reaches the node.** The `bin/kelictl` overlay runs the CLI *inside* the
 running release via `kelixip rpc`, so it shares the node's Erlang **cookie** — the
 credential is the cookie, not a token. On a packaged install the cookie is the
-per-host secret `%post` generated in `releases/COOKIE`, and the target node name
-comes from **`RELEASE_NODE`** in `/etc/sysconfig/kelixip` (default
-`kelixip@127.0.0.1`), the same file the systemd unit reads.
+per-host secret the post-install script generated in `releases/COOKIE`, and the target
+node name comes from **`RELEASE_NODE`** in the environment file (default
+`kelixip@127.0.0.1`) — `/etc/sysconfig/kelixip` on Alma Linux, `/etc/default/kelixip`
+on Ubuntu/Debian, the same file the systemd unit reads.
 
 > **Note.** `RELEASE_NODE` and `config.toml`'s `server.node_name` are **not
 > auto-synced**: if you change `server.node_name`, set the matching `RELEASE_NODE`
-> in `/etc/sysconfig/kelixip` too. There is now a single place to do it (the service
+> in the environment file too. There is now a single place to do it (the service
 > and the CLI both read that file), but nothing yet derives the VM node name from
 > the TOML at boot.
 

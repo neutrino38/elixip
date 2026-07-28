@@ -15,9 +15,10 @@ The release reads two environment variables at every boot:
 | `KELIXIP_CONFIG` | `/etc/kelixip/config.toml` |
 | `KELIXIP_DOMAINS` | `/etc/kelixip/domains.toml` |
 
-On a packaged install they come from **`/etc/sysconfig/kelixip`**, which both the
-systemd unit and the release's own `rel/env.sh` read — so `kelictl` and the service
-always agree on the node, the cookie and the config paths. Set them in the
+On a packaged install they come from the **environment file**
+(`/etc/sysconfig/kelixip` on Alma Linux, `/etc/default/kelixip` on Ubuntu/Debian),
+which both the systemd unit and the release's own `rel/env.sh` read — so `kelictl` and
+the service always agree on the node, the cookie and the config paths. Set them in the
 environment to override a single invocation; `rel/env.sh` lets the environment win
 over the file.
 

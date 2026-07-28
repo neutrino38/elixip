@@ -30,7 +30,7 @@ Name:           kelixip
 Version:        0.2.0
 Release:        1%{?dist}
 Summary:        kelixip SIP application server
-License:        Proprietary
+License:        BSL-1.1
 URL:            https://www.ives.fr/
 Source0:        %{name}-%{version}.tar.gz
 ExclusiveArch:  x86_64 aarch64

@@ -105,8 +105,9 @@ Both default to those FHS paths; an unreadable or invalid file aborts the boot a
 says why on stderr.
 
 > Status: the server boots, binds its `[[listen]]` ports, dispatches and answers
-> (registrar), and ships as an RPM (see below). What is still missing for "basic"
-> is the deb and the `radius_billing` module (design §15).
+> (registrar), and ships as an **RPM** (Alma Linux 9) and a **deb**
+> (Ubuntu/Debian) — both below. What is still missing for "basic" is the
+> `radius_billing` module (design §15).
 
 ## kelix_modules — the loadable modules
 
@@ -122,8 +123,9 @@ MIX_ENV=prod mix compile
 cp _build/prod/lib/kelix_modules/ebin/Elixir.Kelix.Mod.*.beam "$MODULE_DIR"/
 ```
 
-On a packaged host this copy is what `dnf install kelixip-mod-registrar` does; the
-manual form above is for development, where nothing rebuilds this app for you.
+On a packaged host this copy is what `dnf install kelixip-mod-registrar` (or
+`apt install kelixip-mod-registrar`) does; the manual form above is for development,
+where nothing rebuilds this app for you.
 
 Check what a running node actually loaded with `kelictl status` (`modules:` line).
 Installing a new version of a module is a copy plus `kelictl module reload <name>`
@@ -232,8 +234,8 @@ packaging/build-in-container.sh    # needs podman or docker; same output in pack
 
 It builds [`packaging/Containerfile.al9`](packaging/Containerfile.al9) — the same
 toolchain as above, EPEL Erlang plus the `otp-26` Elixir zip — and runs
-`build-rpm.sh` inside it. `_build` and `deps` get their own volumes so the
-container's OTP artifacts never mix with the host's.
+`build-rpm.sh` inside it. `_build` and `deps` get their own volumes (named per
+target) so the container's OTP artifacts never mix with the host's.
 
 ### Install and verify on the target
 
@@ -249,6 +251,150 @@ and the packaged versions land as `*.rpmnew`. What the packages install where, a
 how to configure the service, is the operator's guide:
 [docs/kelixip/installation.md](docs/kelixip/installation.md). What lives in
 `packaging/` and why: [packaging/README.md](packaging/README.md).
+
+## Building the deb packages (Ubuntu / Debian)
+
+The same three packages, from the same `mix release` and the same
+[`packaging/stage.sh`](packaging/stage.sh) staging step:
+
+| Package | Contents |
+|---|---|
+| `kelixip` | the release (embedded ERTS) + `kelictl` + systemd unit + `/etc/kelixip` |
+| `kelixip-mod-registrar` | the registrar module's `.beam`, for `module_dir` |
+| `kelixip-mod-auth-db` | the auth_db module's `.beam`, for `module_dir` |
+
+Two deliberate differences from the RPM, both distribution conventions:
+
+- the environment file is **`/etc/default/kelixip`**, not `/etc/sysconfig/kelixip`
+  (the unit declares both as optional `EnvironmentFile=`, and the release's
+  `rel/env.sh` sources whichever exists, so `kelictl` still targets the right node);
+- the auth_db package is **`kelixip-mod-auth-db`** — a Debian package name may not
+  contain an underscore. The module's registered name is still `auth_db`, and the
+  config block is still `[module.auth_db]`.
+
+### The golden rule, deb flavour: one package per target release
+
+Same reason as the RPM — the embedded ERTS is native code — with one extra
+consequence: the core's `Depends` are **computed** from the build host by
+`dpkg-shlibdeps`, so they name *that release's* library packages. Ubuntu 22.04 has
+`libssl3`, 24.04 and later have `libssl3t64` (the 64-bit `time_t` transition). A deb
+built on 24.04 therefore refuses to install on 22.04, which is the honest outcome:
+build one deb per Ubuntu/Debian release you support.
+
+### Build-host toolchain
+
+Only **Erlang** is OS-sensitive; Elixir is pure BEAM bytecode, so a precompiled zip
+is fine. (Verified 2026-07-29 on Ubuntu 26.04, OTP 27 + Elixir 1.18.3.)
+
+**1) Erlang/OTP.** The distribution's own package is native to it, which is the
+whole point:
+
+```bash
+sudo apt install -y erlang-nox erlang-dev
+erl -noshell -eval 'io:format("~s~n",[erlang:system_info(otp_release)]),halt().'
+```
+
+`erlang-nox` is the runtime without wx/GUI parts; `erlang-dev` carries the headers
+some deps compile NIFs against. Check what OTP major you got — it varies a lot
+between releases, and it decides the Elixir version below. If it is too old for the
+Elixir you want (or you need a pinned OTP), add the **Erlang Solutions** apt repo
+(`packages.erlang-solutions.com`, package `esl-erlang`) — the Debian counterpart of
+the RabbitMQ RPM repo used on EL.
+
+**2) Elixir by hand into `/opt/elixir`,** from the zip **matched to that OTP major**
+— `elixir-otp-27.zip` on OTP 27, `elixir-otp-26.zip` on OTP 26, and so on. Elixir is
+bytecode, but an artifact compiled under a newer OTP can fail to load on an older
+runtime.
+
+```bash
+sudo apt install -y unzip curl git ca-certificates
+ELIXIR_VERSION=1.18.3
+OTP=$(erl -noshell -eval 'io:format("~s",[erlang:system_info(otp_release)]),halt().')
+curl -fsSL -o /tmp/elixir.zip \
+  "https://github.com/elixir-lang/elixir/releases/download/v${ELIXIR_VERSION}/elixir-otp-${OTP}.zip"
+sudo mkdir -p /opt/elixir
+sudo unzip -q -o -d /opt/elixir /tmp/elixir.zip
+
+echo 'export PATH=/opt/elixir/bin:$PATH' | sudo tee /etc/profile.d/elixir.sh
+sudo chmod 0644 /etc/profile.d/elixir.sh
+export PATH=/opt/elixir/bin:$PATH
+
+mix local.hex --force && mix local.rebar --force
+elixir --version
+```
+
+> Mind the floor and the ceiling: the project requires `elixir: "~> 1.15"` with no
+> OTP pin, Elixir 1.15 supports OTP 24–26 and 1.18 supports OTP 25–27. If a 404 comes
+> back from the URL above, that Elixir version has no build for your OTP major — pick
+> the other end of the pair, not a random zip.
+
+**3) dpkg tooling.** `dpkg-deb` is in the base system; `dpkg-shlibdeps` (which
+computes the `Depends`) comes with `dpkg-dev`:
+
+```bash
+sudo apt install -y dpkg-dev
+```
+
+Without it the build still works but falls back to a hand-written dependency list
+and says so — fine for a local test, not for something you ship.
+
+### Build
+
+```bash
+mix deps.get                      # once, or let stage.sh do it
+packaging/build-deb.sh            # -> packaging/dist/*.deb
+```
+
+`build-deb.sh` runs `packaging/stage.sh` (same tarball/tree as the RPM), then
+assembles one `dpkg-deb --build` root per package — no debhelper and no
+`dpkg-buildpackage`, because the payload is a pre-assembled release and there is
+nothing to compile at package time. The deb version comes from
+[`packaging/deb/changelog`](packaging/deb/changelog) and its upstream part must
+match `apps/kelixip/mix.exs`, or the build stops.
+
+Result:
+
+```
+packaging/dist/kelixip_0.2.0-1_amd64.deb                 6.9M   (release + ERTS)
+packaging/dist/kelixip-mod-registrar_0.2.0-1_amd64.deb    36K
+packaging/dist/kelixip-mod-auth-db_0.2.0-1_amd64.deb      24K
+```
+
+### Build in a container instead
+
+```bash
+packaging/build-in-container.sh --target ubuntu                      # ubuntu:24.04
+packaging/build-in-container.sh --target ubuntu --os-version 22.04   # or any release
+```
+
+It builds [`packaging/Containerfile.ubuntu`](packaging/Containerfile.ubuntu) — apt
+Erlang, the matching Elixir zip (detected from the image's OTP major, not pinned),
+`dpkg-dev` — and runs `build-deb.sh` inside it. Same `packaging/dist` output as a
+native run.
+
+### Install and verify on the target
+
+```bash
+sudo apt install ./kelixip_0.2.0-1_amd64.deb ./kelixip-mod-registrar_0.2.0-1_amd64.deb
+sudo systemctl enable --now kelixip
+kelictl status                            # listeners bound, modules loaded
+curl -s http://127.0.0.1:9095/health
+```
+
+Use `apt install ./file.deb` rather than `dpkg -i`: apt pulls the computed library
+dependencies, `dpkg` only reports them missing. (Installing from a path under `$HOME`
+makes apt print a warning about fetching outside its sandbox, because the `_apt` user
+cannot read your home directory — harmless; copy the files to `/tmp` to silence it.)
+
+> The package **enables** the unit but does not start it — same choice as the RPM.
+> The shipped `config.toml` is a template that binds 5060 and serves no domain, so
+> starting it before an admin has been through it would be a surprise, not a service.
+
+`/etc/kelixip/config.toml`, `/etc/kelixip/domains.toml` and `/etc/default/kelixip`
+are **conffiles**: on upgrade dpkg keeps your version, and (non-interactively) leaves
+the packaged one next to it as `*.dpkg-dist` — the deb equivalent of `*.rpmnew`, and
+worth diffing, since new keys show up there first. `apt purge` removes the state and
+log directories; the `kelixip` system user is deliberately left behind.
 
 ## Development mode (no build artifact)
 
