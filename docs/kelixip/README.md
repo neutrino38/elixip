@@ -17,6 +17,11 @@ loadable **modules** (registrar, database auth, …) plugged in Kamailio-style.
 | [administration.md](administration.md) | `kelictl` — every command, with examples |
 | [rest-api.md](rest-api.md) | The core REST control API and its auth boundary |
 | [modules/](modules/README.md) | The module system and the reference for each module |
+| [../../BUILD.md](../../BUILD.md) | **Building the packages** — build-host toolchain (Erlang from EPEL, Elixir in `/opt/elixir`), the RPMs, install & verify |
+
+> Installing a released package? Start at [installation.md](installation.md).
+> Producing one from the sources — including how to set up an Alma Linux 9 build
+> host — is [BUILD.md § Building the RPM packages](../../BUILD.md#building-the-rpm-packages-alma-linux-9).
 
 ## Modules
 

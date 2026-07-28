@@ -27,7 +27,8 @@ A domain that enables a function whose module is not installed is a **config err
 caught at load time** — it is not a runtime surprise. Installing a module later is a
 package install plus `kelictl module reload <name>`; no restart.
 
-Building the packages yourself: [`packaging/README.md`](../../packaging/README.md).
+Building the packages yourself — build-host toolchain included:
+[BUILD.md § Building the RPM packages](../../BUILD.md#building-the-rpm-packages-alma-linux-9).
 
 ## Filesystem layout (FHS, §12)
 

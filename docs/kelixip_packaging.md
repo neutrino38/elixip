@@ -1,8 +1,12 @@
 # kelixip packaging (P10) — build toolchain & RPM
 
 Status: **implemented** (RPM, 2026-07-28). This note records the build-environment
-decisions; the artifacts themselves live in [`packaging/`](../packaging/README.md)
-(spec, unit, build scripts). The **what** — FHS layout, systemd unit, subpackages,
+decisions and **why** they are what they are; the artifacts live in
+[`packaging/`](../packaging/README.md) (spec, unit, build scripts) and the
+step-by-step build procedure — installing Erlang from EPEL, Elixir into
+`/opt/elixir`, running the build — is
+[BUILD.md § Building the RPM packages](../BUILD.md#building-the-rpm-packages-alma-linux-9).
+The **what** — FHS layout, systemd unit, subpackages,
 `%config(noreplace)` — is in the design doc
 [§12](kelixip_basic_design.md#12-packaging); this note covers the **how to build**:
 which OS, which Erlang/Elixir, and why.

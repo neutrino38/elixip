@@ -16,27 +16,27 @@ side — this file is about producing the artifacts.
 ## Build
 
 ```bash
-# On an Alma Linux 9 host (see the golden rule below):
+# On an Alma Linux 9 host:
 packaging/build-rpm.sh              # -> packaging/dist/*.rpm
 
 # Anywhere else (needs podman or docker):
 packaging/build-in-container.sh     # same output, built in an almalinux:9 image
 ```
 
-Both run `packaging/stage.sh` first, which assembles the release + the module
+➡️ **[../BUILD.md § Building the RPM packages](../BUILD.md#building-the-rpm-packages-alma-linux-9)**
+is the full guide: how to set up the build host (Erlang from EPEL, Elixir unzipped
+into `/opt/elixir`, `rpmbuild`), what comes out, and how to install and verify it.
+
+Both scripts run `packaging/stage.sh` first, which assembles the release + the module
 `.beam` into `packaging/build/SOURCES/kelixip-<version>.tar.gz`, then `rpmbuild`.
 The version comes from `apps/kelixip/mix.exs` and the build **fails loudly** if
 `rpm/kelixip.spec` disagrees with it — bump both.
 
-### The golden rule: build on the target OS
-
-The release embeds ERTS (`include_erts: true`), which is **native code** — the beam
-VM, `erl_child_setup`, `inet_gethost`, and the crypto NIF linked against OpenSSL.
-It is dynamically linked to the **build host's** glibc/OpenSSL/ncurses, so
-assembling it on Debian or Alpine produces a package that fails to load on AL9.
-The `.spec` and the scriptlets are portable; the payload is not. Details, including
-the Erlang/Elixir source options and the `hexpm/elixir` anti-pattern, in
-[../docs/kelixip_packaging.md](../docs/kelixip_packaging.md).
+> **Build on the target OS.** The release embeds ERTS, which is **native code**
+> dynamically linked to the build host's glibc/OpenSSL/ncurses — assemble it on
+> Debian or Alpine and it fails to load on AL9. The `.spec` and the scriptlets are
+> portable; the payload is not. Why, and the Erlang/Elixir source options, in
+> [../docs/kelixip_packaging.md](../docs/kelixip_packaging.md).
 
 ## Files here
 
