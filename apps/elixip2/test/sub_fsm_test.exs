@@ -125,6 +125,35 @@ defmodule SIP.Test.SubFsm do
     assert Parent.run(false) == :ok
   end
 
+  # `sub_fsm "child.exs"` names a file next to the scenario that declares it —
+  # include semantics, so a scenario is self-contained wherever it is run from.
+  # Resolving against the current directory instead is what made
+  # scenarios/uac_register_and_uas_invite.exs die with a bare "exception!" for anyone
+  # who did not happen to be standing in apps/elixip2. The fixture pair lives in
+  # test/support/scenarios/, which is NOT the suite's working directory: a
+  # cwd-relative resolution cannot find the child.
+  test "a sub_fsm path is resolved next to the file that declares it" do
+    parent = SIP.Scenario.Loader.load_file!("test/support/scenarios/sibling_parent.exs")
+    assert SIP.Scenario.Runner.run_instance(parent) == :ok
+  end
+
+  test "a sub-scenario that exists nowhere is reported with both paths tried" do
+    defmodule Missing do
+      use SIP.Scenario
+
+      config(username: "m", domain: "example.com")
+
+      state initial_state do
+        sub_fsm("no_such_child.exs", as: :ghost)
+        goto(loop)
+      end
+    end
+
+    # The state body rescues the raise and fails the scenario; the message itself is
+    # in the log (Exception.format), which is why the reason is spelled out there.
+    assert {:error, _} = SIP.Scenario.Runner.run_instance(Missing)
+  end
+
   test "notify_parent is a no-op when the scenario has no parent" do
     assert Orphan.run(false) == :ok
   end

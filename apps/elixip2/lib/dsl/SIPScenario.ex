@@ -319,9 +319,25 @@ defmodule SIP.Scenario do
       end
   """
   defmacro sub_fsm(target, opts \\ []) do
+    # A relative sub-scenario path is resolved against the directory of the file that
+    # declares it — `include` semantics, like PHP's, not "relative to wherever the
+    # tester happened to run from". `__CALLER__.file` is that file, known here at
+    # expansion time; expanding it now pins the directory the same way `__DIR__` does.
+    #
+    # Resolving against the cwd is what broke uac_register_and_uas_invite.exs, whose
+    # `sub_fsm "scenarios/uas_invite.exs"` died with a bare "exception!" for anyone
+    # not standing in apps/elixip2.
+    base_dir = Path.expand(Path.dirname(__CALLER__.file))
+
     quote do
       var!(sip_ctx) =
-        SIP.Scenario.Runner.spawn_child(var!(sip_ctx), unquote(target), unquote(opts), self())
+        SIP.Scenario.Runner.spawn_child(
+          var!(sip_ctx),
+          unquote(target),
+          unquote(opts),
+          self(),
+          unquote(base_dir)
+        )
     end
   end
 

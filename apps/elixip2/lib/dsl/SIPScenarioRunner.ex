@@ -147,11 +147,12 @@ defmodule SIP.Scenario.Runner do
   # Spawn `target` (a scenario module or a path to a .exs scenario file) as a
   # monitored child FSM, hand it our PID and the local name `as:`, and record the
   # resulting handle in the parent context appdata. Returns the updated context.
-  @spec spawn_child(%SIP.Context{}, module() | Path.t(), keyword(), pid()) :: %SIP.Context{}
-  def spawn_child(ctx, target, opts, parent_pid) do
+  @spec spawn_child(%SIP.Context{}, module() | Path.t(), keyword(), pid(), Path.t() | nil) ::
+          %SIP.Context{}
+  def spawn_child(ctx, target, opts, parent_pid, base_dir \\ nil) do
     name = Keyword.fetch!(opts, :as)
     args = Keyword.get(opts, :args, %{})
-    module = resolve_target(target)
+    module = resolve_target(target, base_dir)
 
     # Key the child's monitor row under its parent ({parent_slot, name}) so the
     # live table shows it on its own line right below the parent, and so
@@ -171,8 +172,42 @@ defmodule SIP.Scenario.Runner do
     SIP.Context.appdata_set(ctx, :__children__, children)
   end
 
-  defp resolve_target(target) when is_atom(target), do: target
-  defp resolve_target(target) when is_binary(target), do: SIP.Scenario.Loader.load_file!(target)
+  defp resolve_target(target, _base_dir) when is_atom(target), do: target
+
+  defp resolve_target(target, base_dir) when is_binary(target) do
+    target
+    |> sibling_path(base_dir)
+    |> SIP.Scenario.Loader.load_file!()
+  end
+
+  # `sub_fsm "child.exs"` names a file next to the scenario that declares it (the
+  # `include` rule, see the sub_fsm macro). The path as given is still honoured when
+  # it resolves — a scenario referring to a file elsewhere keeps working — and which
+  # one was used is logged, so a run never silently loads a file the reader did not
+  # expect.
+  defp sibling_path(target, base_dir) do
+    sibling = if base_dir, do: Path.join(base_dir, target), else: target
+
+    cond do
+      Path.type(target) == :absolute ->
+        target
+
+      File.regular?(sibling) ->
+        if Path.expand(sibling) != Path.expand(target) do
+          Logger.info("sub_fsm #{inspect(target)} resolved next to its parent: #{sibling}")
+        end
+
+        sibling
+
+      File.regular?(target) ->
+        Logger.info("sub_fsm #{inspect(target)} not found next to its parent, using #{target}")
+        target
+
+      true ->
+        raise "sub-scenario not found: #{inspect(target)} (looked for #{sibling} " <>
+                "next to the declaring scenario, then #{Path.expand(target)})"
+    end
+  end
 
   # A `:uas_invite` child does not act on its own: it waits for an inbound
   # INVITE. Route the next one to it by registering it with the call
@@ -218,7 +253,10 @@ defmodule SIP.Scenario.Runner do
   """
   @spec spawn_uas_instance(module() | Path.t(), keyword()) :: {pid(), reference()}
   def spawn_uas_instance(target, opts \\ []) do
-    module = resolve_target(target)
+    # No declaring scenario here: the target comes from the operator (elixipp's
+    # command line), so it is taken as given — cwd-relative, like any path a user
+    # types. Only `sub_fsm` resolves relative to the file that declares it.
+    module = resolve_target(target, nil)
     spawn_monitor(fn -> run_instance(module, opts) end)
   end
 
