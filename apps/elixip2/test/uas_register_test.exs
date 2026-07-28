@@ -180,10 +180,18 @@ defmodule SIP.Test.UASRegister do
     nonce = resp401.wwwauthenticate["nonce"]
     assert is_binary(nonce)
 
+    # The advertised algorithm must be one a UAC can actually answer with: it holds
+    # a single HA1, derived from its own `ctx.algorithm` (default MD5) with the clear
+    # password already discarded. Hardcoding the algorithm here instead of reading
+    # the challenge is what let the framework advertise SHA256 for months while no
+    # elixip UAC could ever produce a matching digest.
+    algorithm = resp401.wwwauthenticate["algorithm"]
+    assert algorithm == %SIP.Context{}.algorithm
+
     # 2. Authenticated retry on the SAME dialog (same From-tag/Call-ID, no To-tag):
     #    a new transaction (fresh Via branch) carrying a digest computed against
     #    our nonce, realm "example.com" and the configured password "toto".
-    authparams = %{"realm" => "example.com", "nonce" => nonce, "algorithm" => "SHA256"}
+    authparams = %{"realm" => "example.com", "nonce" => nonce, "algorithm" => algorithm}
 
     req2 =
       SIP.Msg.Ops.add_authorization_to_req(

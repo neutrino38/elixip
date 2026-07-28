@@ -130,12 +130,24 @@ defmodule SIP.Session.Registrar do
   end
 
   # Challenge with a 401 carrying a freshly generated WWW-Authenticate digest
-  # header. For a 401, SIP.Dialog.reply/5 interprets the 5th argument as the
-  # realm and the dialog layer generates + stores the nonce.
+  # header. For a 401, SIP.Dialog.reply/5 interprets the 5th argument as the realm
+  # and the dialog layer mints a stateless nonce for it (nothing is stored: the
+  # scenario validates what comes back with SIP.Auth.Nonce.validate/2).
+  # `:algorithm` overrides the digest algorithm the dialog layer advertises (MD5 by
+  # default — see SIP.DialogImpl @default_challenge_algorithm). Only raise it for a
+  # peer known to keep its clear password: an elixip UAC answers from a single HA1
+  # computed with its own `ctx.algorithm`, so a mismatch is an unavoidable 403.
   def challenge_registration(req, dialog_pid, opts \\ []) when req.method == :REGISTER do
     realm = Keyword.get(opts, :realm, "example.com")
     reason = Keyword.get(opts, :reason, "Unauthorized")
-    SIP.Session.reply(dialog_pid, req, 401, reason, realm, "challenge_registration")
+
+    challenge =
+      case Keyword.get(opts, :algorithm) do
+        nil -> realm
+        algorithm -> {realm, algorithm}
+      end
+
+    SIP.Session.reply(dialog_pid, req, 401, reason, challenge, "challenge_registration")
   end
 
   # Accept with a 200 OK echoing the Contact binding(s) with the granted
@@ -167,6 +179,8 @@ defmodule SIP.Session.Registrar do
 end
 
 defmodule SIP.Session.RegisterUAC do
+  require Logger
+
   defmacro __using__(_opts) do
     quote do
       use SIP.Context
@@ -302,6 +316,8 @@ defmodule SIP.Session.RegisterUAC do
     authparams = Map.get(rsp, :wwwauthenticate)
 
     if not is_nil(authparams) do
+      warn_on_algorithm_mismatch(sip_ctx, authparams)
+
       register =
         SIP.Msg.Ops.add_authorization_to_req(
           register,
@@ -315,6 +331,22 @@ defmodule SIP.Session.RegisterUAC do
       rez = SIP.Dialog.new_request(sip_ctx.dialogpid, register)
       SIP.Context.set(sip_ctx, :lasterr, rez)
       sip_ctx
+    end
+  end
+
+  # The context holds one HA1, computed once from `ctx.algorithm` when the password
+  # was set — the clear password is not kept, so answering a challenge that asks for
+  # another algorithm is arithmetically impossible: the digest goes out wrong and
+  # the server replies 403 with no clue as to why. Say it out loud instead.
+  defp warn_on_algorithm_mismatch(sip_ctx, authparams) do
+    challenged = Map.get(authparams, "algorithm", "MD5")
+
+    if challenged != sip_ctx.algorithm do
+      Logger.error(
+        "REGISTER challenged with algorithm #{inspect(challenged)} but our HA1 was computed " <>
+          "with #{inspect(sip_ctx.algorithm)}: the digest cannot match (expect a 403). " <>
+          "Set `algorithm: #{inspect(challenged)}` in the scenario config block."
+      )
     end
   end
 

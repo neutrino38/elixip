@@ -533,20 +533,42 @@ defmodule SIP.DialogImpl do
     {:reply, {state.fromtag, state.callid, state.totag}, state}
   end
 
+  # Digest algorithm advertised by the short-path challenge below.
+  #
+  # MD5, for the same reason kelixip settled on it (`Kelix.Auth`): the algorithm
+  # must be one the *verifier* can reproduce, and a UAC holds a single HA1 computed
+  # once from its `ctx.algorithm` (default MD5) — the clear password is not kept, so
+  # it cannot re-derive an HA1 for another algorithm. Challenging SHA256 here made
+  # every elixip UAC answer with an MD5 HA1 hashed as SHA256, i.e. a digest that can
+  # only ever be wrong (a plain 403, with nothing in the logs pointing at the
+  # algorithm). It is also the broadest client support.
+  @default_challenge_algorithm "MD5"
+
   # Reply to an in_dialog request with a 401/407 challenge.
   #
   # Short path — the 5th arg is a **binary realm**: the framework builds the digest
-  # challenge itself (SHA256), minting a stateless `SIP.Auth.Nonce` for that realm.
-  # Nothing is stored: the application validates the nonce it gets back with
-  # `SIP.Auth.Nonce.validate/3` (see `scenarios/uas_register.exs`).
+  # challenge itself, minting a stateless `SIP.Auth.Nonce` for that realm. Nothing
+  # is stored: the application validates the nonce it gets back with
+  # `SIP.Auth.Nonce.validate/3` (see `scenarios/uas_register.exs`). Pass
+  # `{realm, algorithm}` to advertise something else than the default above
+  # (`challenge_registration(…, algorithm: …)`).
   #
   # A 401/407 whose 5th arg is a keyword list (e.g. `[wwwauthenticate: params]`)
   # falls through to the generic clause below, which sends the response with the
   # caller-built header verbatim. kelixip uses that one to add `qop=auth` /
   # `stale` (design §7.3) via `Kelix.Auth`.
-  def handle_call({:replyreq, req, resp_code, reason, realm}, _from, state)
+  def handle_call({:replyreq, req, resp_code, reason, realm}, from, state)
       when resp_code in [401, 407] and is_binary(realm) do
-    auth = %{realm: realm, algorithm: "SHA256", authproc: "Digest"}
+    handle_call(
+      {:replyreq, req, resp_code, reason, {realm, @default_challenge_algorithm}},
+      from,
+      state
+    )
+  end
+
+  def handle_call({:replyreq, req, resp_code, reason, {realm, algorithm}}, _from, state)
+      when resp_code in [401, 407] and is_binary(realm) and is_binary(algorithm) do
+    auth = %{realm: realm, algorithm: algorithm, authproc: "Digest"}
 
     {ret, uas_t} =
       SIP.Transac.reply_req(req, resp_code, reason, auth, state.totag, state.transactions)

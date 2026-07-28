@@ -18,11 +18,13 @@ defmodule Elixipp.CLI do
 
     * `--monitor` / `-m`   — live table of calls in progress
     * `--limit N` / `-l N` — run N calls simultaneously (implies --monitor)
-    * `--max-run N`        — stop after N total executions (default: unlimited)
+    * `--max-run N`        — stop after N total executions (`0` = unlimited;
+      default: unlimited, except a bare run which does a single one)
     * `--rate N`           — calls started per second (default: 10, max: 100)
     * `--config FILE` / `-c` — JSON file parameterizing the scenario (header +
       N accounts). Overrides the scenario `config` block; accounts are picked
-      round-robin across runs.
+      round-robin across runs. In server (UAS) mode there is no run counter to
+      cycle on: the header and the first account are shared by every instance.
 
   ## Keys (interactive/live mode)
 
@@ -123,7 +125,7 @@ defmodule Elixipp.CLI do
     # spawn loop: switch to server mode and never return.
     case SIP.Scenario.Loader.scenario_type(module) do
       :uac -> :ok
-      type -> run_server_mode(module, type, opts, limit)
+      type -> run_server_mode(module, type, opts, limit, ext_config)
     end
 
     # Client mode without --local-port: bind a random free UDP port (>= 5000)
@@ -141,7 +143,7 @@ defmodule Elixipp.CLI do
     max_run =
       case {opts[:limit], opts[:max_run]} do
         {nil, nil} -> 1
-        {_, max} -> max
+        {_, max} -> resolve_max_run(max)
       end
 
     if limit < 1, do: abort("--limit must be >= 1", 2)
@@ -199,14 +201,12 @@ defmodule Elixipp.CLI do
   # register the scenario as the registration processing module, then block until
   # the operator stops the tool. `limit` caps the number of concurrent scenario
   # instances (REGISTER beyond it are rejected with 503). Never returns.
-  @spec run_server_mode(module(), atom(), keyword(), pos_integer()) :: no_return()
-  defp run_server_mode(module, :uas_register, opts, limit),
-    do: start_uas_server(module, :uas_register, opts, limit)
+  @spec run_server_mode(module(), atom(), keyword(), pos_integer(), term()) :: no_return()
+  defp run_server_mode(module, kind, opts, limit, ext_config)
+       when kind in [:uas_register, :uas_invite],
+       do: start_uas_server(module, kind, opts, limit, ext_config)
 
-  defp run_server_mode(module, :uas_invite, opts, limit),
-    do: start_uas_server(module, :uas_invite, opts, limit)
-
-  defp run_server_mode(_module, type, _opts, _limit) do
+  defp run_server_mode(_module, type, _opts, _limit, _ext_config) do
     abort("Type de scénario serveur non supporté : #{inspect(type)}", 2)
   end
 
@@ -214,11 +214,16 @@ defmodule Elixipp.CLI do
   # stack, start the ScenarioUAS factory, register it as the registration or call
   # processing module, start the listeners and enter the (monitored or plain)
   # server loop. Never returns.
-  @spec start_uas_server(module(), :uas_register | :uas_invite, keyword(), pos_integer()) ::
-          no_return()
-  defp start_uas_server(module, kind, opts, limit) do
+  @spec start_uas_server(
+          module(),
+          :uas_register | :uas_invite,
+          keyword(),
+          pos_integer(),
+          term()
+        ) :: no_return()
+  defp start_uas_server(module, kind, opts, limit, ext_config) do
     listeners = parse_listeners(opts)
-    max_run = opts[:max_run]
+    max_run = resolve_max_run(opts[:max_run])
 
     # Bind the UDP socket to the first UDP listener's address/port (one socket per
     # host for now — see phase 7). Done before bootstrap so the transport binds it.
@@ -234,7 +239,12 @@ defmodule Elixipp.CLI do
     SIP.Scenario.Runner.bootstrap_stack()
 
     {:ok, _pid} =
-      Elixip.ScenarioUAS.start_link(scenario_module: module, max_instances: limit, max_run: max_run)
+      Elixip.ScenarioUAS.start_link(
+        scenario_module: module,
+        max_instances: limit,
+        max_run: max_run,
+        scenario_overrides: server_scenario_overrides(ext_config)
+      )
 
     :ok =
       case kind do
@@ -243,6 +253,7 @@ defmodule Elixipp.CLI do
       end
 
     started = start_listeners(listeners)
+    check_listeners!(started)
 
     # --monitor wires the same live call table as the UAC parallel mode. Without
     # it (or on a non-interactive stdin) we fall back to the plain text loop.
@@ -253,6 +264,97 @@ defmodule Elixipp.CLI do
       server_loop(module, max_run)
     end
   end
+
+  # External-config overrides handed to *every* UAS instance. A server scenario is
+  # not driven by a spawn loop, so there is no run counter to cycle accounts on:
+  # the header keys and the first account are shared by all instances. This is what
+  # makes a real digest check reachable — the reference registrar scenario reads its
+  # `password` from these overrides (scenarios/uas_register.exs).
+  @doc false
+  @spec server_scenario_overrides(term()) :: keyword()
+  def server_scenario_overrides(nil), do: []
+
+  def server_scenario_overrides(ext_config) do
+    case SIP.Scenario.ExternalConfig.account_count(ext_config) do
+      n when n > 1 ->
+        IO.puts(
+          :stderr,
+          "elixipp: mode serveur — #{n} comptes déclarés dans --config, seul le premier est utilisé " <>
+            "(un UAS partage les mêmes identifiants entre toutes ses instances)."
+        )
+
+      _ ->
+        :ok
+    end
+
+    ext_config
+    |> SIP.Scenario.ExternalConfig.overrides_for(0)
+    |> as_server_credential()
+  end
+
+  # In a client run the account password is *our own* credential: the context
+  # turns `:passwd` into the ha1 of our identity (SIP.Context.set/3) and keeps no
+  # clear text. A server needs the opposite — the shared secret to verify an
+  # incoming client's digest against — so it is handed over as `:password`, an
+  # application key that lands in the context appdata, where the reference
+  # registrar reads it (`appdata_get(:password)` in scenarios/uas_register.exs).
+  defp as_server_credential(overrides) do
+    case Keyword.pop(overrides, :passwd) do
+      {nil, rest} -> rest
+      {passwd, rest} -> Keyword.put(rest, :password, passwd)
+    end
+  end
+
+  # A "server" whose listeners all failed answers nothing: say why on stderr and
+  # exit non-zero instead of parking forever on sockets that were never bound
+  # (kelixip does the same at boot — see Kelix.Listener.Supervisor). A partial
+  # failure is reported but lets the run continue on the listeners that are up.
+  @spec check_listeners!([{tuple(), :ok | {:error, term()}}]) :: :ok
+  defp check_listeners!(started) do
+    {verdict, messages} = listener_report(started)
+    Enum.each(messages, &IO.puts(:stderr, &1))
+
+    if verdict == :fatal do
+      abort("elixipp: aucun listener n'a pu être démarré, le serveur ne répondrait à rien.", 2)
+    end
+
+    :ok
+  end
+
+  @doc """
+  Turn the listener start results into `{verdict, messages}`: one operator-readable
+  message per failed listener, and `:fatal` when **every** listener failed (the
+  caller then aborts — a server with no socket is not a server).
+  """
+  @spec listener_report([{tuple(), :ok | {:error, term()}}]) ::
+          {:ok | :fatal, [String.t()]}
+  def listener_report(started) do
+    failed = Enum.reject(started, fn {_listener, status} -> status == :ok end)
+
+    messages =
+      Enum.map(failed, fn {{proto, addr, port}, status} ->
+        reason = with {:error, r} <- status, do: r
+
+        "elixipp: écoute #{proto} sur #{format_addr(addr)}:#{port} impossible — #{bind_error(reason)}"
+      end)
+
+    verdict = if failed != [] and length(failed) == length(started), do: :fatal, else: :ok
+
+    {verdict, messages}
+  end
+
+  defp bind_error(:eaddrinuse),
+    do: "port déjà utilisé (un autre SIP tourne dessus ? essayez un autre --listen)"
+
+  defp bind_error(:eacces),
+    do: "permission refusée (port < 1024 : lancez en root, ou donnez CAP_NET_BIND_SERVICE)"
+
+  defp bind_error(:eaddrnotavail), do: "adresse locale inexistante sur cette machine"
+
+  defp bind_error(:enoent),
+    do: "fichier introuvable — certificat/clé TLS manquants ? (tls_certfile / tls_keyfile)"
+
+  defp bind_error(reason), do: inspect(reason)
 
   defp print_server_header(module, kind, limit, started) do
     IO.puts("elixipp — mode serveur #{server_kind_label(kind)} (#{inspect(module)})")
@@ -514,11 +616,21 @@ defmodule Elixipp.CLI do
   defp format_listeners(started) do
     started
     |> Enum.map(fn {{proto, addr, port}, status} ->
-      a = if addr == :all, do: "*", else: inspect(addr)
-      "#{proto}:#{a}:#{port} (#{inspect(status)})"
+      "#{proto}:#{format_addr(addr)}:#{port} (#{inspect(status)})"
     end)
     |> Enum.join(", ")
   end
+
+  defp format_addr(:all), do: "*"
+
+  defp format_addr(addr) when is_tuple(addr) do
+    case :inet.ntoa(addr) do
+      {:error, _} -> inspect(addr)
+      str -> to_string(str)
+    end
+  end
+
+  defp format_addr(addr), do: to_string(addr)
 
   # Block the main process until the operator types 'q' (or stdin reaches EOF on a
   # non-interactive run, in which case we simply park forever).
@@ -596,6 +708,19 @@ defmodule Elixipp.CLI do
       :ok
     end
   end
+
+  @doc """
+  Normalise the `--max-run` value: `0` means **no limit**, which the run loops
+  express as `nil`.
+
+  Without this, `--max-run 0` — documented as "walk through every account", and the
+  only way to recycle slots indefinitely with an explicit flag — made
+  `can_start?/1` compare `total_started < 0` and start nothing at all (a run
+  reporting `Total : 0`).
+  """
+  @spec resolve_max_run(integer() | nil) :: pos_integer() | nil
+  def resolve_max_run(0), do: nil
+  def resolve_max_run(max_run), do: max_run
 
   defp resolve_rate(nil), do: @default_rate
 
@@ -1103,6 +1228,13 @@ defmodule Elixipp.CLI do
 
     Logger.configure(level: file_level)
 
+    # config/config.exs is baked into the escript, and it declares its own file
+    # sink ({LoggerFileBackend, :file_log} → elixip.log). Left in place, every line
+    # lands in a second file the tool never mentions, at a level --log-level does
+    # not control. elixipp owns its file logging (--log-file / --log-level), so
+    # drop that backend before installing ours.
+    _ = Logger.remove_backend({LoggerFileBackend, :file_log})
+
     backend = {LoggerFileBackend, :elixipp_log}
     Logger.add_backend(backend)
 
@@ -1192,12 +1324,16 @@ defmodule Elixipp.CLI do
       -l, --limit N      Lance N appels simultanés.
                          Sans --max-run, les slots sont recyclés indéfiniment.
       --max-run N        Arrête après N exécutions au total.
+                         0 = illimité (les slots sont recyclés sans fin).
       -c, --config FILE  Fichier JSON paramétrant le scénario : entête (domain,
-                         proxyuri, proxyusesrv, optionkeepaliveperiod) + N comptes
-                         {username, password, domain}. Surcharge le bloc config du
-                         scénario. Les comptes sont tirés en round-robin sur les
-                         exécutions (avec --limit 1, utilisez --max-run pour tous
-                         les parcourir).
+                         proxyuri, proxyusesrv, optionkeepaliveperiod,
+                         mediaserver) + N comptes {username, password, domain}.
+                         Surcharge le bloc config du scénario. Les comptes sont
+                         tirés en round-robin sur les exécutions (avec --limit 1,
+                         utilisez --max-run pour tous les parcourir).
+                         En mode serveur, l'entête et le PREMIER compte sont
+                         partagés par toutes les instances : c'est ainsi qu'on
+                         donne au registrar le mot de passe à vérifier.
       --rate N           Nombre d'appels créés par seconde (défaut : 10, max : 100).
                          Espace la création de chaque nouvel appel de 1000/N ms.
                          Les valeurs > 100 sont ignorées (retour au défaut).
