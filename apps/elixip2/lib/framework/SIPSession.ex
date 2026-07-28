@@ -308,6 +308,21 @@ defmodule SIP.Session do
         "No registration server defined"
       )
     end
+
+    # Any other initial request. There is no processing module for it, so say so
+    # with a SIP code instead of raising: a function_clause here dies inside
+    # SIP.DialogImpl.init/1, and the transaction layer turns any unrecognised
+    # dialog-layer failure into "403 Denied" — which is what an out-of-dialog
+    # OPTIONS used to get, telling the peer it was forbidden rather than
+    # unimplemented. Reaching this clause is a gap in the stack, hence the log.
+    def dispatch(dialog_id, req, _transaction_id) when is_map(req) do
+      Logger.warning(
+        "No processing module handles an initial #{req.method} " <>
+          "(dialog #{inspect(dialog_id)}): answering 501 Not Implemented."
+      )
+
+      {:reject, 501, "Not Implemented"}
+    end
   end
 
   defmodule Common do

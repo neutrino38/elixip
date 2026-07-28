@@ -303,6 +303,37 @@ defmodule SIP.Test.UASRegister do
     assert wait_until(fn -> Elixip.RegistrarUAS.stats().active == 0 end, 2_000) == :ok
   end
 
+  # RFC 3261 §12.2.2. This is what a client sees when its registration lapsed while
+  # it kept sending in-dialog keepalives: the dialog is gone, so the request matches
+  # nothing. It used to be treated as a brand-new dialog, whose dispatch had no
+  # clause for the method — a function_clause, and the transaction layer turned that
+  # into "403 Denied". A 403 tells a client it is unwelcome; 481 tells it to
+  # re-register, which is the actionable truth.
+  test "an in-dialog request whose dialog is gone is answered 481, not 403" do
+    restart_registrar(@scenario, 5)
+
+    {:ok, msg} = File.read("test/SIP-REGISTER-LVP.txt")
+    {:ok, base} = SIPMsg.parse(msg, fn _c, _m, _l, _line -> :ok end)
+    upd_uri = SIP.Uri.set_uri_param(base.ruri, "unittest", "1")
+    base = SIP.Msg.Ops.update_sip_msg(base, {:ruri, upd_uri}) |> uniq_callid()
+    routed = SIP.Transport.Selector.select_transport(upd_uri)
+    :ok = GenServer.call(routed.tp_pid, :settestapp)
+
+    cid = base.callid
+
+    # An OPTIONS bearing a To tag — i.e. sent inside a dialog — for a dialog that
+    # does not exist (this Call-ID was never registered).
+    orphan =
+      base
+      |> Map.put(:method, :OPTIONS)
+      |> Map.put(:to, "sip:5430@example.com;tag=ghost")
+      |> with_cseq(9, :OPTIONS)
+      |> fresh_branch()
+
+    send(routed.tp_pid, {:recv, orphan})
+    assert_receive {:uas_response, 481, %{callid: ^cid}}, 2_000
+  end
+
   # Replace the topmost Via branch so each injected message is a new transaction.
   defp fresh_branch(req) do
     [top | rest] = req.via

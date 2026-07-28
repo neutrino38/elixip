@@ -76,7 +76,12 @@ defmodule SIP.Uri do
   defp parse_core_uri(scheme, core_uri_str) do
     case String.split(core_uri_str, "@") do
       [user, domainport] ->
-        if String.match?(user, ~r/^[a-zA-Z0-9\+][a-zA-Z0-9\-\._]+$/) do
+        # `*`, not `+`, on the tail: a one-character user part is legal (RFC 3261
+        # §19.1.1 user = 1*…) and common in test labs and short extensions. Requiring
+        # a second character made SIP.Uri.parse/1 fail on `sip:1@example.com`, and a
+        # URI that does not parse discards the whole message — a REGISTER from
+        # extension "1" was answered by nothing at all.
+        if String.match?(user, ~r/^[a-zA-Z0-9\+][a-zA-Z0-9\-\._]*$/) do
           tmpuri = parse_core_uri(scheme, domainport)
 
           if is_map(tmpuri) do

@@ -23,6 +23,24 @@ defmodule SIP.Test.Uri do
 		assert code == :invalid_sip_uri_general
 	end
 
+  # A one-character user part is legal (RFC 3261 §19.1.1 user = 1*…) and routine:
+  # short extensions, and test labs that dial "1". The parser used to require a
+  # second character, and a URI that does not parse takes the whole message with it
+  # — a REGISTER from extension "1" was answered by nothing at all.
+  test "Parse an URI whose user part is a single character" do
+		for user <- ["1", "a", "Z", "+"] do
+			{ code, parsed_uri } = SIP.Uri.parse("sip:#{user}@domain.fr")
+			assert code == :ok, "sip:#{user}@domain.fr did not parse"
+			assert parsed_uri.userpart == user
+			assert parsed_uri.domain == "domain.fr"
+		end
+	end
+
+  test "An empty user part is still refused" do
+		{ code, _parsed_uri } = SIP.Uri.parse("sip:@domain.fr")
+		assert code != :ok
+	end
+
   test "Parse an URI with transport parameter" do
 		{ code, parsed_uri } = SIP.Uri.parse("sip:simple@domain.fr:5060;transport=TCP")
 			assert code == :ok

@@ -142,40 +142,26 @@ defmodule SIP.Dialog do
     case matches do
       # No such dialog - create it if the request
       [] ->
-        case req.method do
-          :INVITE ->
-            # todo, add a timeout global parameter
-            start_inbound_dialog(req2, 1800, debug, dialog_id)
-
-          :OPTIONS ->
-            start_inbound_dialog(req2, 60, false, dialog_id)
-
-          :MESSAGE ->
-            start_inbound_dialog(req2, 60, debug, dialog_id)
-
-          :ACK ->
-            # to add error log - ACK should be in dialog
+        cond do
+          # An ACK is never answered (RFC 3261 §17.1.1.3), so a dialog that is gone
+          # gets silence, not a 481.
+          req.method == :ACK ->
             :nomatchingdialog
 
-          :PRACK ->
-            # to add error log - ACK should be in dialog
-            :nomatchingdialog
-
-          m when m in [:PUBLISH, :REGISTER, :SUBSCRIBE] ->
-            # Todo compulte timeout from refresh contact period
-            to = 600
-            start_inbound_dialog(req2, to, debug, dialog_id)
-
-          m when m in [:REFER, :CANCEL, :UPDATE, :BYE] ->
-            # In-dialog-only request with no matching dialog: answer 481. Do NOT
-            # use SIP.Transac.reply/3 here — this function runs inside the server
-            # transaction process (via process_UAS_request), so a GenServer.call
-            # on transact_id would be a call to self. Returning the error tuple
-            # lets process_UAS_request send the response on its own transaction.
+          # RFC 3261 §12.2.2 — a request carrying a To tag claims to belong to an
+          # established dialog. When none matches, the answer is 481, whatever the
+          # method, and no dialog is created for it.
+          #
+          # Without this, an OPTIONS keepalive arriving after its dialog expired was
+          # taken for a brand-new dialog: SIP.Session.ConfigRegistry.dispatch/3 has
+          # no clause for :OPTIONS, so it raised a function_clause, the dialog died
+          # in init/1 and the peer was told "403 Denied" — for a request that was
+          # perfectly valid until its registration lapsed.
+          in_dialog_request?(dialog_id) ->
             {:error, {481, "Call/Transaction Does Not Exist", dialog_id}}
 
-          _ ->
-            {:error, {500, "Unsupported request", dialog_id}}
+          true ->
+            start_new_dialog_for(req2, dialog_id, debug)
         end
 
       # Found a matching dialog.Forward the SIP msg to it
@@ -185,6 +171,47 @@ defmodule SIP.Dialog do
       [{dialog_pid, _value} | _] ->
         GenServer.cast(dialog_pid, {:sipmsg, req2, transact_id})
         {:ok, dialog_pid, dialog_id}
+    end
+  end
+
+  # A request bearing a To tag was sent inside a dialog (only an initial request
+  # has none — get_or_create_dialog_id/1 fills in a missing Call-ID or From-tag,
+  # never a To tag).
+  defp in_dialog_request?({_fromtag, _callid, totag}), do: not is_nil(totag)
+
+  # Initial (out-of-dialog) request: create the dialog its method calls for.
+  defp start_new_dialog_for(req, dialog_id, debug) do
+    case req.method do
+      :INVITE ->
+        # todo, add a timeout global parameter
+        start_inbound_dialog(req, 1800, debug, dialog_id)
+
+      :OPTIONS ->
+        start_inbound_dialog(req, 60, false, dialog_id)
+
+      :MESSAGE ->
+        start_inbound_dialog(req, 60, debug, dialog_id)
+
+      :PRACK ->
+        # to add error log - PRACK should be in dialog
+        :nomatchingdialog
+
+      m when m in [:PUBLISH, :REGISTER, :SUBSCRIBE] ->
+        # Todo compulte timeout from refresh contact period
+        start_inbound_dialog(req, 600, debug, dialog_id)
+
+      m when m in [:REFER, :CANCEL, :UPDATE, :BYE] ->
+        # In-dialog-only request with no matching dialog: answer 481. Do NOT use
+        # SIP.Transac.reply/3 here — this function runs inside the server
+        # transaction process (via process_UAS_request), so a GenServer.call on
+        # transact_id would be a call to self. Returning the error tuple lets
+        # process_UAS_request send the response on its own transaction. (Such a
+        # request normally carries a To tag and is already answered 481 by the
+        # caller; this covers the ones that arrive without one.)
+        {:error, {481, "Call/Transaction Does Not Exist", dialog_id}}
+
+      _ ->
+        {:error, {500, "Unsupported request", dialog_id}}
     end
   end
 
