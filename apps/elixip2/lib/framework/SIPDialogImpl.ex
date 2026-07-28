@@ -241,8 +241,10 @@ defmodule SIP.DialogImpl do
     connectionfull co
   """
   def arm_expiration_timer(state = %SIP.DialogImpl{}, req) when req.method == :REGISTER do
+    requested = registration_expires(req)
+
     {expire, timeratom} =
-      case registration_expires(req) do
+      case requested do
         0 ->
           {1, :unregister}
 
@@ -253,6 +255,18 @@ defmodule SIP.DialogImpl do
             {trunc(exp / 2), :registerrefresh}
           end
       end
+
+    # Say which lifetime was read and from where. A registration that quietly
+    # evaporates is otherwise indistinguishable from one the peer never asked to
+    # keep, and the two have opposite fixes.
+    Logger.debug(
+      dialogpid: "#{inspect(self())}",
+      module: __MODULE__,
+      message:
+        "REGISTER lifetime #{requested}s (contact param: " <>
+          "#{inspect(max_contact_expires(req.contact))}, Expires header: " <>
+          "#{inspect(Map.get(req, :expires))}) -> #{timeratom} in #{expire}s"
+    )
 
     state = cancel_expiration_timer(state)
 
