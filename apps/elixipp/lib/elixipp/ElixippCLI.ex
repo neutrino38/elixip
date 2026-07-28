@@ -20,7 +20,7 @@ defmodule Elixipp.CLI do
     * `--limit N` / `-l N` — run N calls simultaneously (implies --monitor)
     * `--max-run N`        — stop after N total executions (`0` = unlimited;
       default: unlimited, except a bare run which does a single one)
-    * `--rate N`           — calls started per second (default: 10, max: 100)
+    * `--rate N`           — calls started per second (default: 2, max: 100)
     * `--config FILE` / `-c` — JSON file parameterizing the scenario (header +
       N accounts). Overrides the scenario `config` block; accounts are picked
       round-robin across runs. In server (UAS) mode there is no run counter to
@@ -63,6 +63,11 @@ defmodule Elixipp.CLI do
   # Grace period (ms) after a graceful stop before still-running calls that did
   # not honour the cooperative shutdown request are hard-killed.
   @shutdown_grace_ms 5_000
+
+  # Concurrent instances a server (UAS) scenario accepts when --limit is not given.
+  # Requests beyond it are rejected with 503, so the client-mode default of 1 made a
+  # registrar refuse every phone but the first.
+  @default_server_limit 50
 
   # Table columns: {header, monitor_key, fixed_cell_width}
   @columns [
@@ -115,15 +120,36 @@ defmodule Elixipp.CLI do
 
     module = resolve_module(arg)
     ext_config = load_config(opts[:config])
-    limit = opts[:limit] || 1
+    scenario_type = SIP.Scenario.Loader.scenario_type(module)
+
+    # `--limit` caps concurrent scenario instances. A client run defaults to a
+    # single one-shot call; a server accepts @default_server_limit registrations or
+    # calls, because the alternative is a test registrar that answers the second
+    # phone with a 503 for no reason the operator can see.
+    limit =
+      opts[:limit] ||
+        if scenario_type == :uac, do: 1, else: @default_server_limit
 
     # Optional local UDP bind overrides (so a UAC can run on a host that already
     # has a UAS bound to 5060 — see the two-process REGISTER recipe in the README).
     apply_local_udp_opts(opts)
 
+    # --log-sequence writes one PlantUML file per scenario instance, so it only makes
+    # sense when a single instance runs at a time — server mode included, where it
+    # used to be accepted and then silently ignored (the flag never reached the app
+    # env, because this check sat *after* the server-mode branch below).
+    case validate_log_sequence(opts, limit) do
+      :ok ->
+        if Keyword.get(opts, :log_sequence, false),
+          do: Application.put_env(:elixip2, :log_sequence, true)
+
+      {:error, msg} ->
+        abort(msg, 2)
+    end
+
     # A server (UAS) scenario is driven by inbound requests, not by an outbound
     # spawn loop: switch to server mode and never return.
-    case SIP.Scenario.Loader.scenario_type(module) do
+    case scenario_type do
       :uac -> :ok
       type -> run_server_mode(module, type, opts, limit, ext_config)
     end
@@ -148,17 +174,6 @@ defmodule Elixipp.CLI do
 
     if limit < 1, do: abort("--limit must be >= 1", 2)
     if max_run != nil and max_run < 0, do: abort("--max-run must be >= 0", 2)
-
-    # --log-sequence produces one PlantUML file per scenario instance, so it only
-    # makes sense for a single simultaneous call. Reject it for parallel runs.
-    case validate_log_sequence(opts, limit) do
-      :ok ->
-        if Keyword.get(opts, :log_sequence, false),
-          do: Application.put_env(:elixip2, :log_sequence, true)
-
-      {:error, msg} ->
-        abort(msg, 2)
-    end
 
     rate = resolve_rate(opts[:rate])
     spawn_interval_ms = round(1000 / rate)
@@ -399,12 +414,30 @@ defmodule Elixipp.CLI do
         Elixip.ScenarioUAS.shutdown_all(:elixipp_graceful)
         state = %{state | shutdown: :graceful}
         Owl.LiveScreen.update(:display, {state.scroll_offset, state.shutdown})
+        # Same deadline as the UAC path: an instance that does not honour the
+        # cooperative shutdown must not leave the operator with only Ctrl+D.
+        Process.send_after(self(), :shutdown_deadline, @shutdown_grace_ms)
+
         # If no instance was active, exit right away.
         if Elixip.ScenarioUAS.stats().active == 0 do
           server_monitor_halt(state)
         else
           server_monitor_loop(state)
         end
+
+      :shutdown_deadline ->
+        active = Elixip.ScenarioUAS.stats().active
+
+        if active > 0 do
+          Owl.LiveScreen.flush()
+
+          IO.puts(
+            "\r\n#{active} instance(s) n'ont pas honoré l'arrêt coopératif en " <>
+              "#{div(@shutdown_grace_ms, 1000)}s — arrêt forcé."
+          )
+        end
+
+        server_monitor_halt(state)
 
       :graceful_stop ->
         # Already draining — ignore.
@@ -460,10 +493,31 @@ defmodule Elixipp.CLI do
     System.halt(0)
   end
 
-  defp drain_uas_instances do
+  # Wait for the active instances to wind down after a cooperative shutdown request —
+  # but not forever. An instance stuck outside its on_events (or one that ignores
+  # {:scenario_ctl, :shutdown, _}) used to hold the tool hostage with no way out but
+  # Ctrl+D; the UAC path has always armed the same deadline.
+  defp drain_uas_instances(remaining \\ @shutdown_grace_ms)
+
+  defp drain_uas_instances(remaining) when remaining <= 0 do
+    case Elixip.ScenarioUAS.stats().active do
+      0 ->
+        :ok
+
+      active ->
+        IO.puts(
+          "#{active} instance(s) n'ont pas honoré l'arrêt coopératif en " <>
+            "#{div(@shutdown_grace_ms, 1000)}s — arrêt forcé."
+        )
+    end
+  end
+
+  defp drain_uas_instances(remaining) do
     if Elixip.ScenarioUAS.stats().active > 0 do
       Process.sleep(200)
-      drain_uas_instances()
+      drain_uas_instances(remaining - 200)
+    else
+      :ok
     end
   end
 
@@ -472,7 +526,9 @@ defmodule Elixipp.CLI do
       total_started: total,
       total_succeeded: succ,
       total_aborted: aborted,
-      total_failed: failed
+      total_failed: failed,
+      total_rejected_quota: rejected_quota,
+      total_rejected_domain: rejected_domain
     } = Elixip.ScenarioUAS.stats()
 
     IO.puts("══ Résumé ══════════════════")
@@ -481,6 +537,15 @@ defmodule Elixipp.CLI do
     IO.puts("  Succès      : #{succ}")
     IO.puts("  Interrompus : #{aborted}")
     IO.puts("  Échecs      : #{failed}")
+
+    # Rejections were counted but never shown: a run whose requests were all turned
+    # away read as "Total : 0", with nothing saying the tool had answered 503 or 604.
+    if rejected_quota > 0,
+      do: IO.puts("  Refusés 503 : #{rejected_quota} (quota d'instances atteint, voir -l)")
+
+    if rejected_domain > 0,
+      do: IO.puts("  Refusés 604 : #{rejected_domain} (domaine non servi, voir config domains:)")
+
     IO.puts("════════════════════════════")
   end
 
@@ -1321,8 +1386,11 @@ defmodule Elixipp.CLI do
 
     OPTIONS
       -m, --monitor      Affiche un tableau live des appels en cours.
-      -l, --limit N      Lance N appels simultanés.
+      -l, --limit N      Lance N appels simultanés (mode client).
                          Sans --max-run, les slots sont recyclés indéfiniment.
+                         En mode serveur : nombre d'instances simultanées
+                         acceptées, au-delà les requêtes reçoivent un 503.
+                         Défaut : 1 en client, #{@default_server_limit} en serveur.
       --max-run N        Arrête après N exécutions au total.
                          0 = illimité (les slots sont recyclés sans fin).
       -c, --config FILE  Fichier JSON paramétrant le scénario : entête (domain,
@@ -1334,7 +1402,7 @@ defmodule Elixipp.CLI do
                          En mode serveur, l'entête et le PREMIER compte sont
                          partagés par toutes les instances : c'est ainsi qu'on
                          donne au registrar le mot de passe à vérifier.
-      --rate N           Nombre d'appels créés par seconde (défaut : 10, max : 100).
+      --rate N           Nombre d'appels créés par seconde (défaut : #{@default_rate}, max : #{@max_rate}).
                          Espace la création de chaque nouvel appel de 1000/N ms.
                          Les valeurs > 100 sont ignorées (retour au défaut).
       --listen PROTO:PORT  (mode serveur) Écoute les requêtes entrantes sur ce
@@ -1350,11 +1418,12 @@ defmodule Elixipp.CLI do
                          qui héberge déjà un UAS sur 5060.
       --local-addr ADDR  (mode client) IP locale annoncée dans Via/Contact.
       --log-file PATH    Chemin du fichier de log (défaut : elixipp.log).
-      --log-level LEVEL  Niveau : debug | info | warning | error (défaut : debug).
+      --log-level LEVEL  Niveau : debug | info | warning | error (défaut : info).
       --log-sequence     Écrit un diagramme de séquence PlantUML par instance de
-                         scénario (<scenario>_<pid>.puml). Réservé à un seul appel
-                         simultané (refusé avec --limit > 1). Équivaut à activer le
-                         flag debug du scénario (ctx_set(:debug, true)).
+                         scénario (<scenario>_<pid>.puml). Réservé à une seule
+                         instance simultanée (refusé avec --limit > 1, en mode
+                         client comme serveur). Équivaut à activer le flag debug
+                         du scénario (ctx_set(:debug, true)).
       -h, --help         Affiche cette aide.
 
     Sans --limit ni --max-run, comportement équivalent à --limit 1 --max-run 1
