@@ -368,12 +368,30 @@ defmodule Kelix.Mod.RegistrarTest do
       Registrar.subscribe_register_event(uri, self())
 
       flow = spawn(fn -> Process.sleep(:infinity) end)
-      Registrar.save(register("alice", "10.0.0.9"), @domain, flow)
+      req = register("alice", "10.0.0.9", tp_module: SIP.Transport.WSS)
+      Registrar.save(req, @domain, flow)
       assert [_one] = Registrar.bindings(@domain, "alice")
 
       Process.exit(flow, :kill)
       assert_receive {:registrar, :disconnected, "alice@example.com"}, 1000
       assert Registrar.bindings(@domain, "alice") == []
+    end
+
+    # A UDP binding has no connection to lose: it must outlive the dialog that
+    # created it and expire on its own. Tying it to the dialog pid made a real
+    # handset's registration evaporate the moment that dialog ended early.
+    test "a UDP binding survives the death of the dialog that created it" do
+      uri = %SIP.Uri{userpart: "dave", domain: @domain}
+      Registrar.subscribe_register_event(uri, self())
+
+      dialog = spawn(fn -> Process.sleep(:infinity) end)
+      req = register("dave", "10.0.0.9", tp_module: SIP.Transport.UDP)
+      Registrar.save(req, @domain, dialog)
+      assert [_one] = Registrar.bindings(@domain, "dave")
+
+      Process.exit(dialog, :kill)
+      refute_receive {:registrar, :disconnected, "dave@example.com"}, 300
+      assert [_still_there] = Registrar.bindings(@domain, "dave")
     end
 
     test "the periodic sweep removes expired bindings + emits :expired" do

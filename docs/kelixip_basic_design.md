@@ -504,6 +504,14 @@ script calls `reject_registration`. `save/3` subscribes to the dialog's events t
 catch the unregister and the **transport drop** — on a **connected transport**
 (WSS/TCP/TLS) a connection loss **invalidates** the registration.
 
+> **And only there** (learned the hard way on 2026-07-28). Over a *connectionless*
+> transport a binding is shared by however many dialogs the UA takes part in, so it
+> belongs to none of them: it lives its own life, bounded by `expires_at` and
+> reclaimed by the sweep. This is a property of the transport **mode**, not of UDP
+> in particular. Tying the binding to the dialog pid regardless of transport made a
+> real handset's registration vanish the instant its REGISTER dialog ended, so
+> `ensure_monitor` is now armed for `@connected_transports` only.
+
 ```elixir
 lookup(req) :: {:ok, [req]} | :notfound | {:error, reason}
 ```

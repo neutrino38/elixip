@@ -374,7 +374,7 @@ defmodule Kelix.Mod.Registrar do
         # contacts still learns about the other.
         # Monitor the backing dialog so a connected-transport drop invalidates the
         # binding (§6.3, WebRTC-critical).
-        state = ensure_monitor(state, domain, aor, dialog_pid)
+        state = ensure_monitor(state, domain, aor, dialog_pid, flow_module_of(req))
         notify(state, domain, aor, :registered)
         {:ok, granted(aor, merged, granted_expires(actions)), state}
       end
@@ -467,9 +467,27 @@ defmodule Kelix.Mod.Registrar do
   defp store_or_delete(tid, aor, []), do: :ets.delete(tid, aor)
   defp store_or_delete(tid, aor, contacts), do: :ets.insert(tid, {aor, contacts})
 
-  defp ensure_monitor(state, _domain, _aor, pid) when not is_pid(pid), do: state
+  # A binding is tied to the dialog that created it **only over a
+  # connection-oriented transport** (§6.3, WebRTC-critical): there the UA is
+  # reachable over that one connection and nothing else, so losing it makes the
+  # contact undialable and the binding a lie.
+  #
+  # Over a **connectionless** transport the opposite holds, and this is a property
+  # of the transport mode, not of UDP specifically: one binding is shared by however
+  # many dialogs the UA takes part in, so it cannot belong to any single one of them.
+  # It lives its own life, bounded by `expires_at` and reclaimed by the periodic
+  # sweep — the usrloc semantics. Monitoring the dialog there made a registration
+  # evaporate as soon as that one dialog ended, which is exactly what a real handset
+  # triggered on 2026-07-28.
+  @connected_transports [SIP.Transport.TCP, SIP.Transport.TLS, SIP.Transport.WSS]
 
-  defp ensure_monitor(state, domain, aor, pid) do
+  defp ensure_monitor(state, _domain, _aor, pid, _flow) when not is_pid(pid), do: state
+
+  defp ensure_monitor(state, _domain, _aor, _pid, flow)
+       when flow not in @connected_transports,
+       do: state
+
+  defp ensure_monitor(state, domain, aor, pid, _flow) do
     already? = Enum.any?(state.mons, fn {_ref, key} -> key == {domain, aor, pid} end)
 
     if already? do
