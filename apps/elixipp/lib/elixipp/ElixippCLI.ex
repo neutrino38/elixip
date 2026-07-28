@@ -97,6 +97,8 @@ defmodule Elixipp.CLI do
           listen: :keep,
           local_port: :integer,
           local_addr: :string,
+          tls_cert: :string,
+          tls_key: :string,
           help: :boolean
         ],
         aliases: [m: :monitor, l: :limit, c: :config, h: :help]
@@ -133,6 +135,7 @@ defmodule Elixipp.CLI do
     # Optional local UDP bind overrides (so a UAC can run on a host that already
     # has a UAS bound to 5060 — see the two-process REGISTER recipe in the README).
     apply_local_udp_opts(opts)
+    apply_tls_opts(opts)
 
     # --log-sequence writes one PlantUML file per scenario instance, so it only makes
     # sense when a single instance runs at a time — server mode included, where it
@@ -622,6 +625,50 @@ defmodule Elixipp.CLI do
     case opts[:local_addr] do
       nil -> :ok
       addr -> Application.put_env(:elixip2, :udp_local_addr, parse_addr(addr))
+    end
+  end
+
+  # X.509 certificate and key used by the TLS and WSS listeners (they share both).
+  #
+  # The transports read them from the :elixip2 application env, which a standalone
+  # escript has no way to write: config/config.exs is baked in at build time and
+  # config/runtime.exs is never evaluated (and now holds kelixip's :prod settings
+  # only). Telling a tester to "set tls_certfile in config/runtime.exs" — as the help
+  # and the guide did — could not work. `ELIXIPP_TLS_CERT` / `ELIXIPP_TLS_KEY` are
+  # honoured too, for a run driven from a script or a systemd unit.
+  defp apply_tls_opts(opts) do
+    cert = opts[:tls_cert] || System.get_env("ELIXIPP_TLS_CERT")
+    key = opts[:tls_key] || System.get_env("ELIXIPP_TLS_KEY")
+
+    # One without the other is a mistake worth catching now rather than as an
+    # unexplained handshake failure on the first inbound connection.
+    cond do
+      cert && !key ->
+        abort("--tls-cert donné sans --tls-key : les deux sont requis.", 2)
+
+      key && !cert ->
+        abort("--tls-key donné sans --tls-cert : les deux sont requis.", 2)
+
+      cert && key ->
+        Application.put_env(:elixip2, :tls_certfile, check_readable!(cert, "--tls-cert"))
+        Application.put_env(:elixip2, :tls_keyfile, check_readable!(key, "--tls-key"))
+
+      true ->
+        :ok
+    end
+  end
+
+  # Fail now, with the path and the option name, rather than inside a TLS handshake.
+  defp check_readable!(path, opt) do
+    case File.stat(path) do
+      {:ok, %File.Stat{type: :regular}} ->
+        path
+
+      {:ok, _other} ->
+        abort("#{opt} : #{path} n'est pas un fichier.", 2)
+
+      {:error, reason} ->
+        abort("#{opt} : #{path} illisible (#{:file.format_error(reason)}).", 2)
     end
   end
 
@@ -1379,7 +1426,8 @@ defmodule Elixipp.CLI do
       elixipp -c accounts.json --max-run 0 scenarios/uac_register.exs  # balaye tous les comptes
       elixipp --listen udp:5060 scenarios/uas_register.exs  # serveur registrar UAS (UDP)
       elixipp -l 50 --listen udp:5060 scenarios/uas_register.exs  # serveur, 50 enregistrements max
-      elixipp --listen tls:5061 scenarios/uas_register.exs  # serveur registrar UAS (TLS)
+      elixipp --listen tls:5061 --tls-cert certs/cert.pem --tls-key certs/key.pem \
+              scenarios/uas_register.exs                    # serveur registrar UAS (TLS)
       elixipp --listen wss:5065 scenarios/uas_register.exs  # serveur registrar UAS (WSS)
       elixipp --listen udp:5060 scenarios/uas_invite.exs    # serveur d'appels UAS (répond aux INVITE)
       elixipp -l 20 --listen udp:5060 scenarios/uas_invite.exs  # serveur d'appels, 20 appels simultanés max
@@ -1408,10 +1456,16 @@ defmodule Elixipp.CLI do
       --listen PROTO:PORT  (mode serveur) Écoute les requêtes entrantes sur ce
       --listen PROTO:ADDR:PORT  protocole/port (ADDR optionnel pour fixer l'IP
                          locale annoncée). Répétable. Protocoles : udp, tcp,
-                         tls, wss. TLS et WSS nécessitent un certificat
-                         (tls_certfile / tls_keyfile dans config/runtime.exs).
+                         tls, wss. TLS et WSS nécessitent un certificat, voir
+                         --tls-cert / --tls-key.
                          Sans PORT (--listen udp), un port libre est tiré au
                          hasard (>= 5000). Défaut si absent : udp:5060.
+      --tls-cert FILE    Certificat X.509 (PEM) présenté par les listeners TLS
+      --tls-key FILE     et WSS, et sa clé privée. Les deux vont ensemble.
+                         Variables d'environnement équivalentes :
+                         ELIXIPP_TLS_CERT / ELIXIPP_TLS_KEY.
+                         Défaut : certs/certificate.pem et certs/private_key.pem
+                         (relatifs au répertoire courant).
       --local-port PORT  (mode client) Port UDP local à utiliser pour émettre.
                          Sans cette option, un port UDP libre est tiré au hasard
                          (>= 5000), ce qui permet de lancer un UAC sur une machine

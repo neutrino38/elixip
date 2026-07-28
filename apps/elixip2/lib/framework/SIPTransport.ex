@@ -146,16 +146,15 @@ defmodule SIP.Transport do
     ]
 
     def connect(state, transport, timeout \\ 10000) do
-      ssl_options = [
-        cert: [path: "certs/certificate.pem"],
-        key: [ path: "certs/private_key.pem" ],
-        verify: false, # Désactive la vérification du certificat pour simplifier l'exemple
-        versions: [:"tlsv1.2"], # Spécifie la version de TLS à utiliser
-        # Cipher suites are configurable via :elixip2/:tls_ciphers; @tls_ciphers is the default.
-        ciphers: Application.get_env(:elixip2, :tls_ciphers, @tls_ciphers),
-        timeout: timeout,
-        mode: :active
-      ]
+      ssl_options =
+        [
+          verify: false, # Désactive la vérification du certificat pour simplifier l'exemple
+          versions: [:"tlsv1.2"], # Spécifie la version de TLS à utiliser
+          # Cipher suites are configurable via :elixip2/:tls_ciphers; @tls_ciphers is the default.
+          ciphers: Application.get_env(:elixip2, :tls_ciphers, @tls_ciphers),
+          timeout: timeout,
+          mode: :active
+        ] ++ client_cert_options()
 
       sock = case transport do
         :tcp ->
@@ -188,6 +187,28 @@ defmodule SIP.Transport do
 
       # Return the local IP and port inside the state map.
       Map.put(state, :localip, local_ip) |> Map.put(:localport, local_port) |> Map.put(:socket, sock)
+    end
+
+    # Certificate a TLS/WSS *client* presents. It needs none unless the peer asks for
+    # mutual authentication, so the cert/key go in only when both are configured and
+    # readable — the same `:tls_certfile` / `:tls_keyfile` keys the listeners use
+    # (elixipp exposes them as --tls-cert / --tls-key).
+    #
+    # They used to be hardcoded to "certs/certificate.pem" / "certs/private_key.pem"
+    # and always passed to :ssl, so every outbound TLS or WSS connection failed with
+    # `{:options, {:keyfile, ~c"certs/private_key.pem", {:error, :enoent}}}` unless
+    # those two files happened to sit in the current directory. Dialling a TLS proxy
+    # from anywhere but a checkout could not work, and the error named a path nobody
+    # had asked for.
+    defp client_cert_options do
+      cert = Application.get_env(:elixip2, :tls_certfile)
+      key = Application.get_env(:elixip2, :tls_keyfile)
+
+      if is_binary(cert) and is_binary(key) and File.regular?(cert) and File.regular?(key) do
+        [cert: [path: cert], key: [path: key]]
+      else
+        []
+      end
     end
 
     # Local address of a WS/WSS socket: Socket.Web wraps the transport socket,
