@@ -124,7 +124,14 @@ defmodule SIP.Test.Transport.UDPMockup do
 
   defp handle_resp(state, code, sipresp) do
     cond do
-      state.scenario == :inboundinvite and state.testapppid != nil ->
+      # A response to an OPTIONS, first: the stack answers an out-of-dialog one on its
+      # own, under no canned scenario, and this instance is shared — a :inboundinvite
+      # left over from an earlier test file would otherwise capture it and forward a
+      # bare code where the test expects the parsed response.
+      match?([_, :OPTIONS], Map.get(sipresp, :cseq)) and state.testapppid != nil ->
+        send(state.testapppid, {:uas_response, code, sipresp})
+
+      Map.get(state, :scenario) == :inboundinvite and state.testapppid != nil ->
         # Forward event to the test process. 100 is forwarded too so tests can
         # assert the IST-emitted automatic 100 Trying.
         case code do
@@ -136,7 +143,7 @@ defmodule SIP.Test.Transport.UDPMockup do
 
       # For an inbound REGISTER handled by a UAS scenario, forward the full
       # parsed response (challenge / 200 OK / reject) so tests can assert on it.
-      state.scenario == :inboundregister and state.testapppid != nil ->
+      Map.get(state, :scenario) == :inboundregister and state.testapppid != nil ->
         send(state.testapppid, {:uas_response, code, sipresp})
 
       true ->
@@ -357,6 +364,10 @@ defmodule SIP.Test.Transport.UDPMockup do
     Map.put(state, :req, sipreq) |> Map.put(:scenario, :inboundinvite)
   end
 
+  # Any other inbound method (an OPTIONS, an in-dialog ACK or BYE…): leave the state
+  # alone. Claiming a scenario here would overwrite the one in progress — an inbound
+  # ACK during a call reset :inboundinvite and the canned call scenario stopped
+  # forwarding anything to the test.
   defp set_inbound_scenario(state, sipreq) when is_atom(sipreq.method) do
     state
   end
@@ -445,10 +456,13 @@ defmodule SIP.Test.Transport.UDPMockup do
   def handle_info({:recv, sipreq}, state) when is_atom(sipreq.method) do
     state = set_inbound_scenario(state, sipreq)
 
+    # Map.get, not state.scenario: a method with no canned scenario (an inbound
+    # OPTIONS) leaves the key absent, and this log used to raise a KeyError — the
+    # mockup died on the message it was asked to deliver.
     Logger.info(
       transid: sipreq.transid,
       module: SIP.Test.Transport.UDPMockup,
-      message: "Received SIP #{sipreq.method} in scenario #{state.scenario}"
+      message: "Received SIP #{sipreq.method} in scenario #{inspect(Map.get(state, :scenario))}"
     )
 
     # Simulate remote IP

@@ -160,6 +160,17 @@ defmodule SIP.Dialog do
           in_dialog_request?(dialog_id) ->
             {:error, {481, "Call/Transaction Does Not Exist", dialog_id}}
 
+          # A capability query / liveness ping (RFC 3261 §11.2). Answered here, by the
+          # module the application registered (SIP.Session.Options), and WITHOUT
+          # creating a dialog: an OPTIONS is not dialog-forming (§12.1), and the
+          # dialog this used to create lived 60 s — one lingering process per ping
+          # from a monitoring proxy.
+          req.method == :OPTIONS ->
+            {:reply, code, reason, fields} =
+              SIP.Session.ConfigRegistry.dispatch_options(req2, transact_id)
+
+            {:answered, code, reason, fields}
+
           true ->
             start_new_dialog_for(req2, dialog_id, debug)
         end
@@ -180,14 +191,12 @@ defmodule SIP.Dialog do
   defp in_dialog_request?({_fromtag, _callid, totag}), do: not is_nil(totag)
 
   # Initial (out-of-dialog) request: create the dialog its method calls for.
+  # (:OPTIONS is absent on purpose — it is answered above without a dialog.)
   defp start_new_dialog_for(req, dialog_id, debug) do
     case req.method do
       :INVITE ->
         # todo, add a timeout global parameter
         start_inbound_dialog(req, 1800, debug, dialog_id)
-
-      :OPTIONS ->
-        start_inbound_dialog(req, 60, false, dialog_id)
 
       :MESSAGE ->
         start_inbound_dialog(req, 60, debug, dialog_id)

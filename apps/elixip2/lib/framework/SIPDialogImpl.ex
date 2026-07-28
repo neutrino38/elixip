@@ -72,6 +72,11 @@ defmodule SIP.DialogImpl do
     [:BYE, :UPDATE, :ACK, :MESSAGE, :INFO, :INVITE, :REFER, :NOTIFY, :OPTIONS]
   end
 
+  # Outbound only: an OPTIONS *we* send out of dialog still gets a dialog to carry
+  # its transaction (SIP.Session.RegisterUAC.send_options/2 relies on it). An
+  # *inbound* out-of-dialog OPTIONS no longer creates one — it is answered straight
+  # from SIP.Dialog.process_incoming_request/3, since OPTIONS is not dialog-forming
+  # (RFC 3261 §12.1) and one process per liveness ping is a leak.
   defp allows(:OPTIONS) do
     [:OPTIONS]
   end

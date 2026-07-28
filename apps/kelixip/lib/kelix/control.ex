@@ -23,6 +23,12 @@ defmodule Kelix.Control do
     %{
       node: node(),
       uptime_ms: uptime_ms(),
+      # Whether this node still tells upstream it takes traffic. A draining node looks
+      # healthy in every other line here while answering 503 to the OPTIONS pings, so
+      # it has to be visible: it is the difference between "nobody calls us" and
+      # "we asked nobody to call us".
+      draining: draining?(),
+      options_allow: Kelix.Options.allow(),
       instances: safe(fn -> Kelix.InstancePool.stats() end, %{}),
       listeners: safe(fn -> Kelix.Listener.Supervisor.status() end, []),
       media_pool: safe(fn -> Kelix.MediaPool.status() end, []),
@@ -148,20 +154,70 @@ defmodule Kelix.Control do
     end
   end
 
+  # ── drain ─────────────────────────────────────────────────────────────────────
+
   @doc """
-  Drain running scenarios then stop the node (`kelictl graceful-shutdown`). The
-  final `System.stop/0` is suppressed when `:kelixip, :graceful_stop` is `false`
-  (tests), so the drain can be exercised without killing the VM.
+  Leave the upstream rotation without touching what is in flight (`kelictl drain`).
+
+  While draining, `Kelix.Options` answers **503** to the OPTIONS liveness pings, which
+  is how an upstream proxy or load balancer learns to stop sending new traffic here.
+  Registrations and calls already established keep working: nothing is torn down.
+
+  This is the missing half of a graceful stop. `graceful_shutdown/0` used to tear the
+  instances down immediately, while upstream — having no signal — kept sending new
+  REGISTERs and INVITEs into a node that was dying.
+  """
+  @spec drain() :: :ok
+  def drain() do
+    Application.put_env(:kelixip, :draining, true)
+    Logger.warning("Node draining: OPTIONS now answered 503, no new traffic expected.")
+    :ok
+  end
+
+  @doc "Return to service (`kelictl undrain`): OPTIONS are answered 200 again."
+  @spec undrain() :: :ok
+  def undrain() do
+    Application.put_env(:kelixip, :draining, false)
+    Logger.warning("Node back in service: OPTIONS answered 200.")
+    :ok
+  end
+
+  @doc "Whether the node is draining (read by `Kelix.Options` on every ping)."
+  @spec draining?() :: boolean()
+  def draining?(), do: Application.get_env(:kelixip, :draining, false)
+
+  @doc """
+  Drain, let upstream notice, then stop the node (`kelictl graceful-shutdown`).
+
+  The drain comes first and is held for `[server] drain_wait_ms` (default 5 s, i.e.
+  longer than a typical OPTIONS interval) so upstream takes this node out of rotation
+  *before* the instances go away. Set it to 0 to stop immediately, as this function
+  used to.
+
+  The final `System.stop/0` is suppressed when `:kelixip, :graceful_stop` is `false`
+  (tests), so the sequence can be exercised without killing the VM.
   """
   @spec graceful_shutdown() :: :ok
   def graceful_shutdown() do
-    Kelix.InstancePool.shutdown_all(:graceful_shutdown)
+    drain()
+    wait = Application.get_env(:kelixip, :drain_wait_ms, 5_000)
 
-    if Application.get_env(:kelixip, :graceful_stop, true) do
-      Task.start(fn ->
+    finish = fn ->
+      if wait > 0, do: Process.sleep(wait)
+      Kelix.InstancePool.shutdown_all(:graceful_shutdown)
+
+      if Application.get_env(:kelixip, :graceful_stop, true) do
         Process.sleep(Application.get_env(:kelixip, :graceful_grace_ms, 2_000))
         System.stop(0)
-      end)
+      end
+    end
+
+    # Don't hold the caller (a kelictl RPC) for the whole drain window: it would time
+    # out and leave the operator thinking the command failed.
+    if wait > 0 or Application.get_env(:kelixip, :graceful_stop, true) do
+      Task.start(finish)
+    else
+      finish.()
     end
 
     :ok

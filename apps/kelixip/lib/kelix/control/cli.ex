@@ -60,6 +60,8 @@ defmodule Kelix.Control.CLI do
 
   defp parse(["log-level", lvl]), do: {:ok, :ok, :set_log_level, [lvl]}
   defp parse(["graceful-shutdown"]), do: {:ok, :ok, :graceful_shutdown, []}
+  defp parse(["drain"]), do: {:ok, :ok, :drain, []}
+  defp parse(["undrain"]), do: {:ok, :ok, :undrain, []}
 
   defp parse(["stop", id]) do
     case Integer.parse(id) do
@@ -231,7 +233,11 @@ defmodule Kelix.Control.CLI do
       module reload <name>            reload a module's config
       mcu <name> on|off               enable/disable a media server
       log-level <lvl>                 set the runtime log level
-      graceful-shutdown               drain scenarios then stop
+      drain                           answer 503 to OPTIONS: leave the
+                                      upstream rotation, keep serving
+                                      what is already in flight
+      undrain                         back in service (OPTIONS -> 200)
+      graceful-shutdown               drain, let upstream notice, then stop
       <module> <cmd> [args…]          a module-contributed command
     """
   end

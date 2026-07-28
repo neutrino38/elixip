@@ -161,6 +161,12 @@ What to expect:
 - **Stopping**: type `q` then Enter for a graceful stop (no new instances, the active
   ones are asked to wind down), or `Ctrl+D` to stop now. Instances that ignore the
   request are forced after 5 s, with a line saying how many.
+- **An OPTIONS received outside any dialog is answered `500`.** Answering a liveness
+  ping is the application's business — what a node supports depends on what it runs —
+  and `elixipp` registers no handler yet, so a proxy that pings it will consider it
+  down. In-dialog OPTIONS keepalives are answered `200` by the dialog layer as usual,
+  so this only concerns a bare ping. kelixip answers those properly (200 with its
+  `Allow`, 503 while draining).
 
 Both listeners and the summary tell you what happened:
 

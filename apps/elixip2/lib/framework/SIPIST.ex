@@ -108,6 +108,11 @@ defmodule SIP.IST do
 
       # In case of failure, timerK is scheduled by internal_reply()
       { :upperlayerfailure, state } -> { :noreply, state }
+
+      # The dialog layer answered on its own. No INVITE takes that path today (only
+      # an out-of-dialog OPTIONS does, which is a NIST), but the shape is handled
+      # here too so a future one cannot fall through to an unmatched case.
+      { :answered, state } -> { :noreply, state }
     end
   end
 

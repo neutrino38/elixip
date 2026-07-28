@@ -22,6 +22,7 @@ defmodule Kelix.ControlAPI do
   | `mediaserver_toggle/2` | `POST /mediaservers/:name` (body `{"enabled": bool}`) |
   | `set_log_level/1` | `PUT /log/level` (body `{"level": …}`) |
   | `graceful_shutdown/0` | `POST /graceful-shutdown` |
+  | `drain/0` / `undrain/0` | `POST /drain` / `POST /undrain` |
   | `module_command/3` | `<METHOD> /modules/:name/:cmd` (body = args) |
   """
   use Plug.Router
@@ -111,6 +112,18 @@ defmodule Kelix.ControlAPI do
   post "/graceful-shutdown" do
     Control.graceful_shutdown()
     json(conn, 202, %{result: "draining"})
+  end
+
+  # Leave / rejoin the upstream rotation without touching what is in flight: while
+  # draining, the OPTIONS liveness ping is answered 503 (see Kelix.Options).
+  post "/drain" do
+    Control.drain()
+    json(conn, 200, %{result: "draining"})
+  end
+
+  post "/undrain" do
+    Control.undrain()
+    json(conn, 200, %{result: "in_service"})
   end
 
   # ── module-contributed commands (§8.1) ────────────────────────────────────────

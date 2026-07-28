@@ -48,6 +48,11 @@ defmodule Kelix.Router do
   @spec register_processing_modules() :: :ignore
   def register_processing_modules() do
     :ok = SIP.Session.ConfigRegistry.set_registration_processing_module(__MODULE__)
+    # Out-of-dialog OPTIONS do not go through the dial-plan: they are answered
+    # directly by Kelix.Options (200 with our Allow, or 503 while draining). Without
+    # a module registered the framework answers 500, which upstream reads as "node
+    # broken" — so this registration is what makes kelixip pingable at all.
+    :ok = SIP.Session.ConfigRegistry.set_options_processing_module(Kelix.Options)
     :ignore
   end
 

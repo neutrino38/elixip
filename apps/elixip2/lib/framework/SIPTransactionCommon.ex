@@ -546,6 +546,18 @@ defmodule SIP.Transac.Common do
         {_errcode, state} = reply_to_UAC(state, state.msg, code, reason, [], totag)
         {:upperlayerfailure, state}
 
+      # The dialog layer answered the request itself and there is nothing to bind to
+      # an application process: an out-of-dialog OPTIONS (RFC 3261 §11.2). Not a
+      # failure, hence its own shape rather than the :error channel above — a 200
+      # reported as an "upper layer failure" would be a lie in the logs. A To tag is
+      # generated here: any response above 100 needs one, and no dialog exists to
+      # provide it.
+      {:answered, code, reason, fields} ->
+        {_rc, state} =
+          reply_to_UAC(state, state.msg, code, reason, fields, generate_from_or_to_tag())
+
+        {:answered, state}
+
       # General error
       anything ->
         Logger.error(

@@ -202,11 +202,39 @@ defmodule SIP.Session do
     end
   end
 
+  defmodule Options do
+    @moduledoc """
+    Behaviour for the module answering **out-of-dialog** OPTIONS (RFC 3261 §11.2:
+    a capability query, and in practice the liveness ping a proxy or load balancer
+    sends to decide whether this node still takes traffic).
+
+    In-dialog OPTIONS are not concerned: the dialog answers those itself (keepalive).
+
+    The callback runs **inside the server transaction process**, so it must neither
+    reply itself (a `GenServer.call` on the transaction would be a call to self —
+    the same trap the 481 path documents) nor block. It decides, and returns what to
+    answer:
+
+      * `{:reply, code, reason, fields}` — `fields` is a list of `{header, value}`
+        pairs, e.g. `[{"Allow", "OPTIONS, REGISTER"}]`;
+      * `:default` — answer 200 with no capability header.
+
+    There is deliberately no framework-wide default answer: what a node supports
+    depends on the application running on it, so an application that wants to be
+    pingable registers a module (`ConfigRegistry.set_options_processing_module/1`).
+    With no module registered, an out-of-dialog OPTIONS is answered 500 — no dialog
+    is created for it either way.
+    """
+    @callback on_options(req :: map(), transaction_id :: pid()) ::
+                {:reply, 100..699, binary(), list()} | :default
+  end
+
   defmodule ConfigRegistry do
     defstruct callprocessing: nil,
               mainapppid: nil,
               registration: nil,
-              presence: nil
+              presence: nil,
+              options: nil
 
     use Agent
 
@@ -247,6 +275,22 @@ defmodule SIP.Session do
       Agent.update(__MODULE__, fn reg ->
         %ConfigRegistry{reg | registration: module}
       end)
+    end
+
+    @spec set_options_processing_module(module()) :: :ok
+    @doc """
+    Specify which module answers out-of-dialog OPTIONS (see `SIP.Session.Options`).
+    An application that wants to be pingable registers one at start-up; with none,
+    such an OPTIONS is answered 500.
+    """
+    def set_options_processing_module(module) do
+      Agent.update(__MODULE__, fn reg -> %ConfigRegistry{reg | options: module} end)
+    end
+
+    @spec get_options_processing_module() :: module() | nil
+    @doc "Return the configured OPTIONS processing module (nil when none)."
+    def get_options_processing_module() do
+      Agent.get(__MODULE__, fn reg -> reg.options end)
     end
 
     defp internal_dispatch(proc_atom, fun_atom, args, errormsg)
@@ -322,6 +366,42 @@ defmodule SIP.Session do
       )
 
       {:reject, 501, "Not Implemented"}
+    end
+
+    @doc """
+    Ask the configured module what to answer to an out-of-dialog OPTIONS. Returns
+    `{:reply, code, reason, fields}`; no module configured (or a module answering
+    `:default`) yields a bare answer with no capability header.
+
+    Called from the dialog layer *before* any dialog is created — an OPTIONS is not
+    dialog-forming (RFC 3261 §12.1), and creating one per liveness ping left a
+    60-second process behind for every ping a monitoring proxy sent.
+    """
+    @spec dispatch_options(map(), pid()) :: {:reply, 100..699, binary(), list()}
+    def dispatch_options(req, transaction_id) when is_map(req) do
+      case internal_dispatch(
+             :options,
+             :on_options,
+             [req, transaction_id],
+             "No OPTIONS handler defined"
+           ) do
+        {:reply, code, reason, fields} when is_integer(code) and is_list(fields) ->
+          {:reply, code, reason, fields}
+
+        :default ->
+          {:reply, 200, "OK", []}
+
+        # internal_dispatch's answer when the slot is empty.
+        {:reject, code, reason} ->
+          {:reply, code, reason, []}
+
+        other ->
+          Logger.error(
+            "OPTIONS handler returned #{inspect(other)}; expected {:reply, code, reason, fields}."
+          )
+
+          {:reply, 500, "Internal Server Error", []}
+      end
     end
   end
 

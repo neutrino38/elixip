@@ -134,9 +134,36 @@ defmodule Kelix.ControlTest do
 
     test "graceful_shutdown/0 drains without stopping the VM when suppressed" do
       Application.put_env(:kelixip, :graceful_stop, false)
-      on_exit(fn -> Application.delete_env(:kelixip, :graceful_stop) end)
+      # 0 keeps the whole sequence synchronous (and leaves no Task sleeping through
+      # the rest of the suite); the drain window is exercised in its own test below.
+      Application.put_env(:kelixip, :drain_wait_ms, 0)
+
+      on_exit(fn ->
+        Application.delete_env(:kelixip, :graceful_stop)
+        Application.delete_env(:kelixip, :drain_wait_ms)
+        Control.undrain()
+      end)
 
       assert Control.graceful_shutdown() == :ok
+      # The node took itself out of the upstream rotation before tearing anything down.
+      assert Control.draining?()
+    end
+
+    test "drain/0 and undrain/0 flip what the OPTIONS ping is answered" do
+      on_exit(fn -> Control.undrain() end)
+
+      refute Control.draining?()
+      assert {:reply, 200, _, _} = Kelix.Options.on_options(%{method: :OPTIONS}, self())
+
+      assert Control.drain() == :ok
+      assert Control.draining?()
+
+      # This is the whole point of draining: upstream stops sending, nothing in flight
+      # is touched.
+      assert {:reply, 503, _, []} = Kelix.Options.on_options(%{method: :OPTIONS}, self())
+
+      assert Control.undrain() == :ok
+      assert {:reply, 200, _, _} = Kelix.Options.on_options(%{method: :OPTIONS}, self())
     end
 
     test "module_command/3 on an unknown module" do

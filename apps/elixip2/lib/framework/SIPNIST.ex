@@ -32,6 +32,12 @@ defmodule SIP.NIST do
 
       # In case of failure, timerK is scheduled by internal_reply()
       { :upperlayerfailure, state } -> { :noreply, state }
+
+      # The dialog layer answered on its own (an out-of-dialog OPTIONS): the final
+      # response is out and internal_reply() has scheduled timer K, so there is no
+      # timer F to arm — nothing is expected from an upper layer that was never
+      # involved.
+      { :answered, state } -> { :noreply, state }
     end
   end
 
