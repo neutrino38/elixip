@@ -5,8 +5,8 @@ defmodule Kelix.Control do
   logic: `kelictl` (`Kelix.Control.CLI`, over Erlang RPC) and the REST API (P8).
 
   Every function delegates to an existing surface (`InstancePool`, `Domains`,
-  `ScriptRegistry`, `MediaPool`, `Mod.Registrar`, `SIP.Scenario.Monitor`, …) and
-  tolerates a surface being down (returns a value, never crashes the caller).
+  `ScriptRegistry`, `MediaPool`, `Mod.Registrar`, …) and tolerates a surface being
+  down (returns a value, never crashes the caller).
 
   Auth is a **frontal** concern (§10.3): neither this module nor a module's
   `handle_control/2` inspects credentials — they assume an authenticated caller.
@@ -31,10 +31,21 @@ defmodule Kelix.Control do
     }
   end
 
-  @doc "Scenarios in progress (`kelictl monitor`), reusing the `--monitor` store."
+  @doc """
+  Scenarios in progress (`kelictl monitor`), from `Kelix.InstancePool.list/0`.
+
+  It used to read `SIP.Scenario.Monitor` — the in-memory store behind elixipp's
+  `--monitor` view, which `Kelix.Application` never starts. The command was
+  therefore **always empty** on the server, while the pool held the answer all
+  along.
+
+  Each row is `%{id, pid, domain, function, script}`. The `id` matters: it is what
+  `shutdown_scenario/1` (`kelictl stop <id>`) takes, and no other command exposed
+  it — so `stop` was unusable in practice.
+  """
   @spec monitor() :: [map]
   def monitor() do
-    if Process.whereis(SIP.Scenario.Monitor), do: SIP.Scenario.Monitor.calls(), else: []
+    safe(fn -> Kelix.InstancePool.list() end, [])
   end
 
   @doc """

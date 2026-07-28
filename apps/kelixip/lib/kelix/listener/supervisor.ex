@@ -80,11 +80,17 @@ defmodule Kelix.Listener.Supervisor do
     %{
       id: {:udp, addr, port},
       start:
-        {GenServer, :start_link,
+        {__MODULE__, :start_listener,
          [
-           SIP.Transport.UDP,
-           {bind_addr(l), port},
-           [name: {:via, Registry, {Registry.SIPTransport, @udp_registry_key}}]
+           :udp,
+           addr,
+           port,
+           {GenServer, :start_link,
+            [
+              SIP.Transport.UDP,
+              {bind_addr(l), port},
+              [name: {:via, Registry, {Registry.SIPTransport, @udp_registry_key}}]
+            ]}
          ]},
       type: :worker,
       restart: :permanent
@@ -94,10 +100,42 @@ defmodule Kelix.Listener.Supervisor do
   defp child_spec_for(%{proto: proto, addr: addr, port: port} = l) do
     %{
       id: {proto, addr, port},
-      start: {listener_module(proto), :start_link, [{bind_addr(l), port, listener_opts(l)}]},
+      start:
+        {__MODULE__, :start_listener,
+         [
+           proto,
+           addr,
+           port,
+           {listener_module(proto), :start_link, [{bind_addr(l), port, listener_opts(l)}]}
+         ]},
       type: :worker,
       restart: :permanent
     }
+  end
+
+  @doc """
+  Start one listener, and on failure say so on **stderr** as well as in the log.
+
+  A listener that cannot bind aborts the boot — and a release dying during boot
+  flushes no Logger output, so the operator would only see "Runtime terminating
+  during boot" with no cause. Same reasoning (and same remedy) as
+  `Kelix.Config`'s fail-fast: journald must record *why* the start failed.
+  """
+  @spec start_listener(atom, String.t(), pos_integer, {module, atom, [term]}) ::
+          Supervisor.on_start_child()
+  def start_listener(proto, addr, port, {module, fun, args}) do
+    case apply(module, fun, args) do
+      {:error, reason} = err ->
+        IO.puts(
+          :stderr,
+          "kelixip: cannot bind the #{proto} listener on #{addr}:#{port}: #{inspect(reason)}"
+        )
+
+        err
+
+      other ->
+        other
+    end
   end
 
   defp listener_module(:tcp), do: SIP.Transport.TCPListener

@@ -120,12 +120,14 @@ defmodule Kelix.Control.CLI do
     {0, Enum.join(lines, "\n")}
   end
 
+  defp render(:monitor, []), do: {0, "no scenario in progress"}
+
   defp render(:monitor, rows) when is_list(rows) do
     {0,
      table(
-       ["scenario", "account", "state", "command"],
+       ["id", "domain", "function", "script", "pid"],
        rows,
-       &[&1.scenario, &1.account, &1.state, &1.command]
+       &[to_string(&1.id), &1.domain, to_string(&1.function), &1.script, inspect(&1.pid)]
      )}
   end
 

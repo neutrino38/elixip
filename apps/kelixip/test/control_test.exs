@@ -6,6 +6,9 @@ defmodule Kelix.ControlTest do
 
   alias Kelix.Control
 
+  # a valid registrar script that stays alive until told to shut down
+  @waiter Path.join(__DIR__, "support/scripts/waiter.exs")
+
   # a module exposing a control command, and one without a control surface
   defmodule FakeCtl do
     def handle_control("ping", _args), do: {:ok, :pong}
@@ -46,8 +49,24 @@ defmodule Kelix.ControlTest do
       assert is_list(s.modules)
     end
 
-    test "monitor/0 is a list (empty when the monitor isn't running)" do
-      assert is_list(Control.monitor())
+    # It used to read SIP.Scenario.Monitor — elixipp's --monitor store, which the
+    # server never starts — so it was always empty and `kelictl stop <id>` had no
+    # way to learn an id.
+    test "monitor/0 lists the running instances, with the id `stop` takes" do
+      assert Control.monitor() == []
+
+      route = %{domain: "mon.test", function: :registrar, script: @waiter, max_calls: nil}
+      assert {:accept, pid} = Kelix.InstancePool.accept(route, nil, %{method: :REGISTER})
+      on_exit(fn -> send(pid, {:scenario_ctl, :shutdown, :test}) end)
+
+      assert [row] = Control.monitor()
+      assert row.domain == "mon.test"
+      assert row.function == :registrar
+      assert is_integer(row.id)
+      assert row.pid == pid
+
+      # the id is usable as advertised
+      assert Control.shutdown_scenario(row.id) == :ok
     end
 
     test "set_log_level/1 applies a valid level and rejects a bad one" do

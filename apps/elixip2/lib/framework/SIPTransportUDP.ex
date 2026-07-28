@@ -48,7 +48,11 @@ defmodule SIP.Transport.UDP do
             {:ok, Map.put(initial_state, :socket, socket)}
 
           {:error, err} ->
-            Logger.error("Failed to create UDP socket on port #{port}.")
+            Logger.error(
+              module: __MODULE__,
+              message: "Failed to bind UDP socket on port #{port}: #{bind_error(err)}"
+            )
+
             {:stop, err}
         end
       end
@@ -59,6 +63,23 @@ defmodule SIP.Transport.UDP do
         {:stop, :failedtostart}
     end
   end
+
+  # A bind failure aborts the boot, so the log line is the operator's whole
+  # diagnosis: spell the posix reason out instead of leaving a bare atom, and for
+  # the overwhelmingly common one say what to look for. The socket binds EVERY
+  # interface (`:udp_local_addr` only sets the IP advertised in Via/Contact), so it
+  # collides with another process even when that one bound a single address.
+  defp bind_error(:eaddrinuse) do
+    ":eaddrinuse (address already in use) — another process holds this UDP port. " <>
+      "Note this socket binds every interface, so it also collides with a process " <>
+      "bound to one specific address on that port (check `ss -ulnp`)."
+  end
+
+  defp bind_error(reason) when is_atom(reason) do
+    "#{inspect(reason)} (#{:inet.format_error(reason)})"
+  end
+
+  defp bind_error(reason), do: inspect(reason)
 
   @impl true
   @spec handle_call({:sendmsg, binary(), :inet.ip_address(), :inet.port_number()}, any(), map()) ::
