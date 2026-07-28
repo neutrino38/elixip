@@ -32,6 +32,12 @@ defmodule SIP.DialogImpl do
     expirationtimer: nil,
     dialogtimeout: 0,
     keepalivetimer: nil,
+    # Who sends the OPTIONS keepalives on this dialog: :dialog (this layer, the
+    # default) or :app (the application drives them and handles the responses).
+    # Exactly one owner, decided before the first OPTIONS goes out — with both
+    # running, two OPTIONS went out per period and the spare response poisoned the
+    # application's mailbox (see SIP.Session.RegisterUAC.process_register_reply/3).
+    keepalive_owner: :dialog,
     missedkeepalive: 0,
     cseq: 1,
     cseqin: 1,
@@ -234,11 +240,18 @@ defmodule SIP.DialogImpl do
   end
 
   @doc """
-  For dialogs created by REGISTER message, we have two cases: client REGISTER or server REGISTER
+  Arm the lifetime of a REGISTER dialog, in both directions: it lives as long as the
+  registration it carries, and every REGISTER flowing through it re-arms the timer.
+  When the lifetime lapses with no refresh, the dialog terminates
+  (`:registerexpire`); an explicit expiry of 0 is an un-registration and tears it
+  down right away (`:unregister`).
 
-  - for client REGISTER, we arm a timer that is equal to half of the expiration time and send a refresh
-    register automatically. We also send an OPTIONS message every 15 seconds to keep the NAT or the
-    connectionfull co
+  Sending the refreshes is **not** this layer's job — the session layer arms
+  `:register_refresh` at half the granted lifetime and the application re-sends
+  (and re-authenticates) the REGISTER. This timer is the safety net behind it.
+
+  The periodic OPTIONS keepalive (NAT / connection liveness) *is* this layer's,
+  armed separately by `SIP.Dialog.start_options_keepalive/1`.
   """
   def arm_expiration_timer(state = %SIP.DialogImpl{}, req) when req.method == :REGISTER do
     requested = SIP.Msg.Ops.requested_expires(req)
@@ -248,12 +261,22 @@ defmodule SIP.DialogImpl do
         0 ->
           {1, :unregister}
 
+        # Both directions arm the same thing: the dialog lives as long as the
+        # registration it carries, and every REGISTER that flows through it (an
+        # inbound refresh, or one we send out) re-arms it. When the lifetime lapses
+        # with no refresh, the dialog terminates.
+        #
+        # Outbound used to arm a `:registerrefresh` timer at half the lifetime whose
+        # handler was a `# TODO send refresher` no-op — a timer that fired, logged
+        # "Sending REFRESH register" and did nothing. Sending the refresh is the
+        # session layer's job (`process_register_reply/3` arms `:register_refresh` at
+        # half the *granted* lifetime and hands it to the scenario, which
+        # re-authenticates it — credentials live in %SIP.Context{}, not here). What
+        # this layer owes is the safety net: expire if that refresh never comes. At
+        # half the lifetime it would race the refresh it is meant to catch, so it
+        # runs for the full lifetime — the moment the binding actually lapses.
         exp ->
-          if state.direction == :inbound do
-            {exp, :registerexpire}
-          else
-            {trunc(exp / 2), :registerrefresh}
-          end
+          {exp, :registerexpire}
       end
 
     # Say which lifetime was read and from where. A registration that quietly
@@ -536,12 +559,14 @@ defmodule SIP.DialogImpl do
 
   @doc "Handle call to send out a new in-dialog request"
   def handle_call({:newreq, req}, _from, state) when is_req(req) do
-    # An app-initiated OPTIONS supersedes the automatic dialog keepalive: disarm
-    # it so both don't run in parallel and so the OPTIONS responses flow back up
-    # to the app (see KeepAlive.response?/2 gating in the {:response, ...} path).
+    # An app-initiated OPTIONS supersedes the automatic dialog keepalive: disarm it
+    # so both don't run in parallel and so the OPTIONS responses flow back up to the
+    # app (see KeepAlive.response?/2 gating in the {:response, ...} path). The
+    # ownership is recorded, so a later start_options_keepalive/1 declines instead of
+    # quietly re-arming a second sender.
     state =
       if req.method == :OPTIONS do
-        KeepAlive.cancel(state)
+        %SIP.DialogImpl{KeepAlive.cancel(state) | keepalive_owner: :app}
       else
         state
       end
@@ -579,19 +604,38 @@ defmodule SIP.DialogImpl do
     end
   end
 
+  # The application announces that *it* drives the OPTIONS keepalive: stand down.
+  # Called before any OPTIONS is sent, so the two mechanisms never overlap — even
+  # for one period, which was enough to leave a stray response behind.
+  def handle_call(:app_drives_keepalive, _from, state) do
+    {:reply, :ok, %SIP.DialogImpl{KeepAlive.cancel(state) | keepalive_owner: :app}}
+  end
+
   # Handle call to start options keepalive
   def handle_call(:option_keepalive, _from, state) do
-    if state.msg.method == :REGISTER do
-      state = KeepAlive.arm(state)
-      {:reply, :ok, state}
-    else
-      Logger.warning(
-        dialogpid: "#{inspect(self())}",
-        module: __MODULE__,
-        message: "Cannot start OPTIONS keepalive on an #{state.msg.method} dialog"
-      )
+    cond do
+      state.keepalive_owner == :app ->
+        Logger.warning(
+          dialogpid: "#{inspect(self())}",
+          module: __MODULE__,
+          message:
+            "OPTIONS keepalive already driven by the application on this dialog: " <>
+              "not arming the dialog one (they are exclusive)."
+        )
 
-      {:reply, :baddialogtype, state}
+        {:reply, {:error, :app_driven}, state}
+
+      state.msg.method == :REGISTER ->
+        {:reply, :ok, KeepAlive.arm(state)}
+
+      true ->
+        Logger.warning(
+          dialogpid: "#{inspect(self())}",
+          module: __MODULE__,
+          message: "Cannot start OPTIONS keepalive on an #{state.msg.method} dialog"
+        )
+
+        {:reply, :baddialogtype, state}
     end
   end
 
@@ -941,16 +985,6 @@ defmodule SIP.DialogImpl do
     {:stop, :normal, state}
   end
 
-  def handle_info({:timeout, _timerRef, :registerrefresh}, state = %SIP.DialogImpl{}) do
-    Logger.debug(
-      dialogpid: "#{inspect(self())}",
-      module: __MODULE__,
-      message: "Sending REFRESH register"
-    )
-
-    # TODO send refresher
-    {:noreply, state}
-  end
 
   # ----------------------- transaction timers ------------------------------
   def handle_info(

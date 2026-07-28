@@ -397,9 +397,22 @@ defmodule SIP.Session.RegisterUAC do
   from the returned Contact (the binding matching our username, falling back to
   the first Contact, then the `Expires` header). When that expiration is > 0 the
   refresh timer is armed at half of it (delivering `:register_refresh` to the
-  scenario process) and the OPTIONS keepalive timer is armed (delivering
-  `:options_keepalive`). When it is 0 — an un-REGISTER — the keepalive timer is
-  cancelled. Non-2xx replies are ignored.
+  scenario process), and **one** OPTIONS keepalive is started. When it is 0 — an
+  un-REGISTER — the keepalive is stopped. Non-2xx replies are ignored.
+
+  Who sends the keepalives depends on the scenario's `options_keepalive` config key:
+
+    * `:dialog` (the default) — the dialog layer sends them and tears the dialog
+      down after several unanswered ones. The scenario sees nothing.
+    * `:scenario` — the scenario is handed `:options_keepalive` every period and
+      sends the OPTIONS itself (`send_OPTIONS()`), which is what makes them visible
+      in the monitor and the sequence diagram. The dialog stands down.
+
+  Exactly one is started. Arming both is the defect this key exists to prevent: two
+  OPTIONS went out per period, only one response was consumed, and the spare sat in
+  the scenario's mailbox where every later state read the *previous* request's
+  answer — a 401 challenging a refresh REGISTER surfaced 25 s later as
+  "OPTIONS failed with 401".
   """
   @spec process_register_reply(%SIP.Context{}, map(), pid() | reference()) :: %SIP.Context{}
   def process_register_reply(sip_ctx = %SIP.Context{}, resp, _transaction_id)
@@ -408,7 +421,7 @@ defmodule SIP.Session.RegisterUAC do
       expire when is_integer(expire) and expire > 0 ->
         sip_ctx
         |> arm_timer(@refresh_timer_key, :register_refresh, max(div(expire, 2), 1))
-        |> arm_timer(@keepalive_timer_key, :options_keepalive, keepalive_period())
+        |> start_keepalive()
 
       _ ->
         # expire == 0 (un-REGISTER) or no usable Contact: stop keepalives.
@@ -417,6 +430,22 @@ defmodule SIP.Session.RegisterUAC do
   end
 
   def process_register_reply(sip_ctx = %SIP.Context{}, _resp, _transaction_id), do: sip_ctx
+
+  # Start the one keepalive the scenario asked for. Reads `options_keepalive` from
+  # the context (a scenario `config` key, stored in appdata): :scenario hands the
+  # scenario a periodic `:options_keepalive` and tells the dialog to stand down;
+  # anything else (the default) leaves it to the dialog layer.
+  defp start_keepalive(sip_ctx) do
+    case SIP.Context.appdata_get(sip_ctx, :options_keepalive) do
+      :scenario ->
+        if is_pid(sip_ctx.dialogpid), do: SIP.Dialog.app_drives_keepalive(sip_ctx.dialogpid)
+        arm_timer(sip_ctx, @keepalive_timer_key, :options_keepalive, keepalive_period())
+
+      _ ->
+        if is_pid(sip_ctx.dialogpid), do: SIP.Dialog.start_options_keepalive(sip_ctx.dialogpid)
+        sip_ctx
+    end
+  end
 
   @doc """
   Process a reply to an OPTIONS keepalive: on a 2xx, re-arm the next

@@ -282,9 +282,28 @@ defmodule SIP.Dialog do
     GenServer.call(dialog_pid, {:ack, transac_pid})
   end
 
+  @doc """
+  Let the dialog layer send the periodic OPTIONS keepalives (NAT / connection
+  liveness) on this REGISTER dialog, and tear it down after several unanswered ones.
+
+  Returns `{:error, :app_driven}` when the application already drives the OPTIONS
+  itself: the two are exclusive. Running both sent two OPTIONS per period and left
+  the spare response in the application's mailbox, where every later state read the
+  previous request's answer.
+  """
   @spec start_options_keepalive(atom() | pid()) :: any()
   def start_options_keepalive(dialog_pid) do
     GenServer.call(dialog_pid, :option_keepalive)
+  end
+
+  @doc """
+  Announce that the application sends the OPTIONS keepalives itself: the dialog
+  stands down and a later `start_options_keepalive/1` on it declines. Call it before
+  the first OPTIONS, so the two never overlap.
+  """
+  @spec app_drives_keepalive(pid()) :: :ok
+  def app_drives_keepalive(dialog_pid) when is_pid(dialog_pid) do
+    GenServer.call(dialog_pid, :app_drives_keepalive)
   end
 
   def broadcast(msg_to_send) do

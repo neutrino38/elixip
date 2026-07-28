@@ -124,6 +124,43 @@ defmodule SIP.Test.Keepalive do
     assert_receive {200, %{cseq: [_, :OPTIONS]}, _tid2, ^dlg_pid}, 2_000
   end
 
+  # The two senders are exclusive, and the decision is taken before any OPTIONS goes
+  # out. With both armed, two OPTIONS left per period and only one response was
+  # consumed by the application: the spare stayed in its mailbox, where every later
+  # state read the previous request's answer (a 401 challenging a refresh REGISTER
+  # was reported, 25 s later, as "OPTIONS failed with 401").
+  test "the dialog declines its keepalive once the application drives the OPTIONS" do
+    {dlg_pid, _tp_pid} = establish_register_dialog(false)
+
+    assert :ok = SIP.Dialog.app_drives_keepalive(dlg_pid)
+    assert {:error, :app_driven} = SIP.Dialog.start_options_keepalive(dlg_pid)
+
+    # Nothing was armed, so no OPTIONS goes out by itself. Pinned on this dialog's
+    # Call-ID: the mockup transport is a shared singleton and forwards to whoever
+    # registered last, so a keepalive still ticking on an earlier test's dialog
+    # would otherwise be mistaken for ours.
+    {_ftag, cid, _totag} = GenServer.call(dlg_pid, :getdialogid)
+    refute_receive {:options_sent, %{callid: ^cid}}, 1_500
+  end
+
+  test "an app-initiated OPTIONS also takes ownership, so a later start declines" do
+    {dlg_pid, _tp_pid} = establish_register_dialog(false)
+
+    options = %{
+      "Max-Forwards" => "70",
+      method: :OPTIONS,
+      ruri: %SIP.Uri{scheme: "sip:", domain: "example.com"},
+      from: %SIP.Uri{scheme: "sip:", userpart: "alice", domain: "example.com"},
+      to: %SIP.Uri{scheme: "sip:", userpart: "alice", domain: "example.com"},
+      useragent: "Elixipp-test",
+      callid: nil,
+      contentlength: 0
+    }
+
+    assert {:ok, _tid} = SIP.Dialog.new_request(dlg_pid, options)
+    assert {:error, :app_driven} = SIP.Dialog.start_options_keepalive(dlg_pid)
+  end
+
   test "an unresponsive peer tears the dialog down after missed keepalives" do
     {dlg_pid, _tp_pid} = establish_register_dialog(true)
 

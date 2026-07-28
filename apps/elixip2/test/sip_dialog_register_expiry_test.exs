@@ -128,9 +128,21 @@ defmodule SIP.Test.DialogRegisterExpiry do
   end
 
   describe "outbound REGISTER" do
-    test "a client refreshes at half the granted lifetime" do
+    # The dialog's own timer is a safety net: it expires the dialog when the session
+    # layer stops refreshing. It therefore runs for the FULL lifetime — at half of it
+    # (which is when the session layer schedules its refresh) it would race the very
+    # refresh it exists to catch, and could tear the dialog down just as the refresh
+    # goes out. Sending the refresh was never done here: the handler behind the old
+    # half-lifetime timer was a `# TODO send refresher` no-op.
+    test "the dialog expires a client registration that is never refreshed" do
       req = register(contact: contact(%{}), expires: 600)
-      assert armed_seconds(req, :outbound) == 300
+      assert armed_seconds(req, :outbound) == 600
+    end
+
+    test "an un-REGISTER tears the dialog down at once, in both directions" do
+      req = register(contact: contact(%{"expires" => "0"}), expires: 0)
+      assert armed_seconds(req, :outbound) <= 1
+      assert armed_seconds(req, :inbound) <= 1
     end
   end
 end

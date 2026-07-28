@@ -55,10 +55,13 @@ defmodule UAC.RegisterThenWaitForCall do
         goto(loop, "401 Unauthorized")
 
       {200, rsp, trans_pid, _dialog_pid} ->
-        # Arms the refresh timer (:register_refresh at expire/2) and the OPTIONS
-        # keepalive timer (:options_keepalive) from the granted expiration.
+        # Arms the refresh timer (:register_refresh at expire/2) and starts the
+        # OPTIONS keepalive — in the dialog layer, since this scenario has no
+        # `keepalive` state of its own (the default: `options_keepalive: :dialog`).
+        # It used to call start_options_keepalive/1 *as well*, which armed both
+        # senders: two OPTIONS per period, and a `:options_keepalive` message that
+        # no state here ever consumed, piling up in the mailbox for the whole run.
         process_sip_reply(rsp, trans_pid)
-        SIP.Session.RegisterUAC.start_options_keepalive(sip_ctx)
         sub_fsm "scenarios/uas_invite.exs", as: :invite_uas
         goto(registered, "200 OK")
 

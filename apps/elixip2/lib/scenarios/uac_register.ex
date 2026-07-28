@@ -35,7 +35,11 @@ defmodule UAC.Register do
     passwd: @passwd,
     proxyuri: "sip:#{@proxy}:5060",
     proxyusesrv: false,
-    optionkeepaliveperiod: @options_keepalive
+    optionkeepaliveperiod: @options_keepalive,
+    # This scenario sends the OPTIONS keepalives itself, from its `keepalive`
+    # state, so they show up in the monitor and the sequence diagram. The
+    # dialog layer then stands down: the two senders are exclusive.
+    options_keepalive: :scenario
   )
 
   state initial_state do
@@ -104,8 +108,17 @@ defmodule UAC.Register do
         process_sip_reply(rsp, trans_pid)
         goto(registered, "OPTIONS OK")
 
-      {errcode, _rsp, _trans_pid, _dialog_pid} when errcode in 400..699 ->
-        scenario_failure("OPTIONS failed with #{errcode}")
+      # Only a response to *our* OPTIONS condemns the run. The refresh timer fires
+      # while keepalives are in flight, so the answer to a refresh REGISTER (a 401
+      # challenge, normally) can land here — a response is matched on its code, not
+      # on the request it answers. Reported as "OPTIONS failed with 401", it sent
+      # the reader hunting for a keepalive problem that did not exist.
+      {errcode, rsp, _trans_pid, _dialog_pid} when errcode in 400..699 ->
+        if SIP.Msg.Ops.is_response_for?(:OPTIONS, rsp) do
+          scenario_failure("OPTIONS failed with #{errcode}")
+        else
+          goto(loop, "#{errcode} for another request, ignored")
+        end
     after
       5_000 ->
         scenario_failure("OPTIONS timeout")
