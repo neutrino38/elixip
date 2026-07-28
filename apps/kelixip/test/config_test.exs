@@ -219,6 +219,39 @@ defmodule Kelix.ConfigTest do
       assert Application.get_env(:elixip2, :useragent) == "kelixip/test"
     end
 
+    # Logger.configure(level:) only moves the PRIMARY level; each sink filters
+    # again on its own, and config.exs caps the console at :warning — so
+    # `[log].level = "debug"` used to raise the primary level and change nothing
+    # the operator could actually see.
+    test "apply_logger pushes [log].level down to the sinks, not just the primary" do
+      {:ok, %{level: previous}} = :logger.get_handler_config(:default)
+      prev_primary = Logger.level()
+
+      on_exit(fn ->
+        :logger.update_handler_config(:default, :level, previous)
+        Logger.configure(level: prev_primary)
+      end)
+
+      {:ok, cfg} = Config.parse(~s([log]\nlevel = "debug"))
+      assert :ok = Config.apply_logger(cfg)
+
+      assert Logger.level() == :debug
+      assert {:ok, %{level: :debug}} = :logger.get_handler_config(:default)
+    end
+
+    test "apply_logger leaves OTP's TLS handler alone (it would bury the SIP trace)" do
+      case :logger.get_handler_config(:ssl_handler) do
+        {:ok, %{level: before}} ->
+          {:ok, cfg} = Config.parse(~s([log]\nlevel = "debug"))
+          assert :ok = Config.apply_logger(cfg)
+          assert {:ok, %{level: ^before}} = :logger.get_handler_config(:ssl_handler)
+
+        _ ->
+          # no ssl handler in this VM — nothing to protect
+          assert true
+      end
+    end
+
     test "the app-started Kelix.Config holds defaults (booted with no path)" do
       cfg = Config.current()
       assert cfg.node_name == "kelixip@127.0.0.1"

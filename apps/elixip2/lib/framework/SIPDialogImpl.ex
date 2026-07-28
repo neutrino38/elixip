@@ -242,8 +242,8 @@ defmodule SIP.DialogImpl do
   """
   def arm_expiration_timer(state = %SIP.DialogImpl{}, req) when req.method == :REGISTER do
     {expire, timeratom} =
-      case max_contact_expires(req.contact) do
-        exp when exp in [nil, 0] ->
+      case registration_expires(req) do
+        0 ->
           {1, :unregister}
 
         exp ->
@@ -265,6 +265,32 @@ defmodule SIP.DialogImpl do
   # Default, do nothing
   def arm_expiration_timer(state = %SIP.DialogImpl{}, _req) do
     state
+  end
+
+  # Registration lifetime asked for by a REGISTER, in the precedence RFC 3261
+  # §10.2.4 prescribes: the Contact `expires` parameter wins **when present**,
+  # otherwise the `Expires` header applies, otherwise the default (§20.19).
+  #
+  # Reading only the Contact parameter is what broke real phones: most send the
+  # lifetime as an `Expires` header and no parameter, so the dialog read "no
+  # lifetime", treated a plain registration as an un-registration and tore itself
+  # down after 1 s — which then dropped the binding through the registrar's monitor
+  # on this pid. An explicit 0 from either source IS an un-registration.
+  @default_register_expires 3600
+
+  defp registration_expires(req) do
+    case max_contact_expires(req.contact) do
+      nil -> header_expires(req)
+      exp -> exp
+    end
+  end
+
+  defp header_expires(req) do
+    case Map.get(req, :expires) do
+      exp when is_integer(exp) -> exp
+      exp when is_binary(exp) -> String.to_integer(exp)
+      _ -> @default_register_expires
+    end
   end
 
   # A REGISTER may carry several Contact headers (the parser then yields a

@@ -1313,8 +1313,16 @@ All questions below were decided on **2026-07-26** unless marked otherwise.
     resolution: a declaration in the script's `config` block (e.g.
     `uses_modules: [:registrar, :auth_db]`), validated by the load-time contract
     (§5.3) against `Kelix.ModuleRegistry`. Until then the mismatch is a **boot
-    warning** (`ModuleSupervisor.warn_missing_function_modules/0`), and a request
-    to such a domain dies inside the instance without a SIP reply.
+    warning** (`ModuleSupervisor.warn_missing_function_modules/0`, which covers
+    every module a function needs, not just its same-named one), and a request to
+    such a domain is answered **500** by the reference script's rescue — it used to
+    die inside the instance with no SIP reply at all.
+
+    Note a second gap of the same family: module start order is **alphabetical by
+    name**, and cannot be the declaration order — TOML tables parse into a map, so
+    the order written in the file is not recoverable. Harmless while no module needs
+    another at init (`registrar` and `auth_db` are independent); a real dependency
+    would need declaring too.
 
 **Remaining open (not blocking basic):** item 14 above. New items will be logged
 here as implementation proceeds.

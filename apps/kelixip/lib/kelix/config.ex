@@ -126,7 +126,9 @@ defmodule Kelix.Config do
   @spec apply_logger(t) :: :ok
   def apply_logger(%__MODULE__{log: log}) do
     # `level` is validated against @log_levels, so the atom always exists.
-    Logger.configure(level: String.to_existing_atom(log.level))
+    level = String.to_existing_atom(log.level)
+    Logger.configure(level: level)
+    apply_sink_levels(level)
 
     if log.target == "syslog" do
       Logger.warning(
@@ -136,6 +138,38 @@ defmodule Kelix.Config do
     end
 
     :ok
+  end
+
+  # `Logger.configure(level:)` only sets the *primary* level — what is allowed to
+  # enter the logger. Every sink then filters again on its own level, and the
+  # compiled-in defaults cap them (console at :warning, the file backend at :info),
+  # so `[log].level = "debug"` used to raise the primary level and change nothing an
+  # operator could see. Push it down to the sinks too.
+  #
+  # `:ssl_handler` is deliberately left alone: it is OTP's TLS logger, and putting
+  # it at debug buries the SIP trace under handshake internals.
+  defp apply_sink_levels(level) do
+    for handler <- :logger.get_handler_ids(), handler not in [:ssl_handler, Logger] do
+      :logger.update_handler_config(handler, :level, level)
+    end
+
+    # Legacy Elixir backends (this repo ships LoggerFileBackend) live behind a
+    # gen_event manager rather than an OTP handler.
+    if Process.whereis(Logger) do
+      for backend <- :gen_event.which_handlers(Logger), backend != Logger.Backends.Config do
+        Logger.configure_backend(backend, level: level)
+      end
+    end
+
+    :ok
+  rescue
+    e ->
+      Logger.warning(
+        module: __MODULE__,
+        message: "could not apply [log].level to every sink: #{Exception.message(e)}"
+      )
+
+      :ok
   end
 
   # ── pure parse + validation ──────────────────────────────────────────────────
