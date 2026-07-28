@@ -109,6 +109,20 @@ The config instruction declares the SIP parameters used by the scenario (usernam
 domain, proxy, passwd, ...). The framework reads this block to build the initial
 %SIP.Context{} — computing :ha1 from :passwd — before entering initial_state.
 
+Keys it does not recognise are kept in the context appdata, readable with
+`appdata_get/1` — which is how a scenario passes its own parameters through.
+
+One such key is read by the **kelixip** server (and ignored by `elixipp`):
+
+```elixir
+config uses_modules: [:registrar, :auth_db]
+```
+
+It names the loadable modules the script calls, so the server refuses to load the
+script when one of them is not installed, instead of letting the first request die
+on an undefined function. See
+[docs/kelixip/modules/README.md](docs/kelixip/modules/README.md).
+
 ## finite state machine description
 
 The scenario is a description of a finite state machine. States are declared
@@ -304,7 +318,7 @@ defmodule UAS.RegisterExample do
 end
 ```
 
-See [`scenarios/uas_register.exs`](scenarios/uas_register.exs) for the full scenario,
+See [`apps/elixip2/scenarios/uas_register.exs`](apps/elixip2/scenarios/uas_register.exs) for the full scenario,
 including the reply helpers and the `registered` state.
 
 ### Server (UAS) scenarios — incoming calls

@@ -90,6 +90,27 @@ import Kelix.Mod.Registrar, only: [save: 4, lookup: 1]
 import Kelix.Mod.AuthDb, only: [do_registration_auth: 3]
 ```
 
+### Declare what you use
+
+A script should also **declare** the modules it calls, in its `config` block:
+
+```elixir
+config uses_modules: [:registrar, :auth_db]
+```
+
+The names are the registered ones — the `<name>` of each `[module.<name>]` block,
+not the Elixir module.
+
+kelixip then refuses to load the script when one of them is not loaded, naming the
+missing module and listing those that are. Without the declaration the dependency
+is written nowhere and cannot be guessed (a custom registrar script may legitimately
+need no `registrar` module), so the mismatch could only ever be a boot *warning* —
+and the first request to that domain would die inside the instance, answered `500`
+by the reference script's rescue at best.
+
+The declaration is **optional**: a script that declares nothing still loads, exactly
+as before. Adding it turns a runtime surprise into a load-time error.
+
 ## Reloading
 
 `kelictl module reload <name>` re-reads the block: `validate_config/1` runs

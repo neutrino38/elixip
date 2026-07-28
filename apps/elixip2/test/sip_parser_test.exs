@@ -101,6 +101,49 @@ defmodule SIP.Test.Uri do
 		assert parsed_uri.proto == "TLS"
 	end
 
+	# A bracketed URI carries TWO kinds of parameter: the URI ones inside the `<>`
+	# and the header ones after it. They share one `params` map, and the header set
+	# used to OVERWRITE it — so every URI parameter of a bracketed URI silently
+	# vanished on parse. Found while reading a real handset's Contact.
+	test "URI parameters inside <> survive alongside the header parameters" do
+		{ :ok, uri } = SIP.Uri.parse("<sip:alice@example.com;user=phone;transport=tcp>;expires=0")
+		assert Map.get(uri.params, "user") == "phone"
+		assert Map.get(uri.params, "transport") == "tcp"
+		assert Map.get(uri.params, "expires") == "0"
+	end
+
+	test "a header parameter wins a name collision with a URI parameter" do
+		{ :ok, uri } = SIP.Uri.parse("<sip:alice@example.com;expires=10>;expires=600")
+		assert Map.get(uri.params, "expires") == "600"
+	end
+
+	test "the loose-routing marker of a Route survives" do
+		{ :ok, uri } = SIP.Uri.parse("<sip:proxy.example.com;lr>")
+		assert Map.get(uri.params, "lr") == true
+	end
+
+	# Both URI forms must agree on `proto`: the bracketed one derived it from the
+	# transport parameter while the bare one did not, so `sip:x@y;transport=tcp`
+	# came out of the parser claiming UDP.
+	test "proto follows the transport parameter in both URI forms" do
+		{ :ok, bare } = SIP.Uri.parse("sip:alice@example.com;transport=tcp")
+		{ :ok, bracketed } = SIP.Uri.parse("<sip:alice@example.com;transport=tcp>")
+		assert bare.proto == "TCP"
+		assert bracketed.proto == "TCP"
+	end
+
+	test "a parsed URI round-trips through serialize without losing a parameter" do
+		original = "<sip:alice@example.com:5070;user=phone;transport=tcp>;expires=600"
+		{ :ok, uri } = SIP.Uri.parse(original)
+		{ :ok, serialized } = SIP.Uri.serialize(uri)
+
+		{ :ok, reparsed } = SIP.Uri.parse(serialized)
+		assert reparsed.params == uri.params
+		assert reparsed.proto == "TCP"
+		assert reparsed.userpart == "alice"
+		assert reparsed.port == 5070
+	end
+
 	test "Serialize a SIP URI" do
 		uri = %SIP.Uri{
 			port: 50,
@@ -120,7 +163,9 @@ defmodule SIP.Test.Uri do
 		uri = %SIP.Uri{ domain: "domaine.fr" }
 		assert to_string(uri) == "sip:domaine.fr"
 		uri = %SIP.Uri{ userpart: nil, domain: "djanah.com", port: 5061, scheme: "sip:", proto: "TLS" }
-		assert to_string(uri) == "sip:djanah.com:5061;transport=TLS"
+		# lower-case: RFC 3261 §19.1.1 registers the transport values that way, and
+		# serialize synthesizes this one from `proto` (held upper-case internally)
+		assert to_string(uri) == "sip:djanah.com:5061;transport=tls"
 	end
 
 	test "Serialize a SIPS URI" do

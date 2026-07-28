@@ -22,12 +22,16 @@ defmodule Kelix.ScriptRegistryUsesModulesTest do
   defmodule NoConfigAtAll do
   end
 
+  # Kelix.ModuleRegistry is an application singleton other tests write to, so make
+  # the starting point explicit rather than assumed.
   setup do
-    on_exit(fn ->
+    clear = fn ->
       Kelix.ModuleRegistry.unregister("registrar")
       Kelix.ModuleRegistry.unregister("auth_db")
-    end)
+    end
 
+    clear.()
+    on_exit(clear)
     :ok
   end
 
@@ -43,8 +47,9 @@ defmodule Kelix.ScriptRegistryUsesModulesTest do
     assert {:error, reason} = ScriptRegistry.check_declared_modules(DeclaresTwo, "registrar.exs")
     assert reason =~ "auth_db"
     assert reason =~ "registrar.exs"
-    # the operator is told what IS loaded, so the fix is obvious
-    assert reason =~ ~s(["registrar"])
+    # the operator is told what IS loaded, so the fix is obvious. Matched loosely:
+    # the registry is shared, other tests may have left entries in it.
+    assert reason =~ ~r/loaded:.*"registrar"/
   end
 
   test "declaring nothing stays loadable — the declaration is opt-in" do

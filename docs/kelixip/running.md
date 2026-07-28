@@ -111,8 +111,35 @@ not with calls in progress.
 
 ## Logs
 
-Logs go where `config.toml`'s `[log]` says. The level is the one setting worth
-changing without a restart: `kelictl log-level <lvl>` (see
-[administration.md](administration.md)).
+Logs go where `config.toml`'s `[log]` says (keys in
+[installation.md](installation.md#log)). Two things worth knowing:
+
+**stdout is always live.** `target = "syslog"` *adds* a sink, it does not replace
+one — under systemd, journald captures stdout anyway, and a startup failure has to
+be visible there. So with `syslog` you get both.
+
+```toml
+[log]
+target   = "syslog"
+facility = "local2"
+level    = "info"
+```
+
+Lines then go to the local `/dev/log` socket as RFC 3164 datagrams, which journald
+and rsyslog both read:
+
+```bash
+journalctl -t kelixip -f          # journald
+tail -f /var/log/messages         # rsyslog, per its own routing rules
+```
+
+If you only want syslog *files* without changing kelixip's config, journald can
+forward what it already captures — `ForwardToSyslog=yes` in
+`/etc/systemd/journald.conf`.
+
+**The level reaches every sink.** `[log].level` is applied to the console, the file
+backend and the syslog sink, not just to the logger's own threshold — a `debug`
+there really does produce the SIP trace. Change it without a restart with
+`kelictl log-level <lvl>` (see [administration.md](administration.md)).
 
 Next: [administration.md](administration.md).
