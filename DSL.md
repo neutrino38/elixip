@@ -557,6 +557,27 @@ in scenarios. They should cover most standard cases.
 All these macros operate on the implicit `sip_ctx` variable: they update it in place and store the
 outcome of the operation in `sip_ctx.lasterr` (`:ok` on success, `{:error, reason}` otherwise).
 
+### Where instrumentation lives — never in the SIP stack
+
+Every helper reports the command it issues to `SIP.Scenario.Monitor` (`note_command/2`), which is what
+feeds the `--monitor` live view and `kelictl monitor`. That reporting belongs to the **session layer**:
+`SIP.Dialog` and below are a plain SIP stack and must stay unaware that scenarios are being watched, so
+they record nothing. A helper notes, then calls down.
+
+This matters when a scenario replies to an inbound request. `reply_invite*`, `reply_request` and the
+`SIP.Session.Registrar` helpers already do the noting; a scenario that composes its **own** responses
+must not reach for `SIP.Dialog.reply/5` directly — it would send correctly but appear frozen in the
+monitor, with no `command` and a `state` that never seems to act on anything. Use instead:
+
+```elixir
+SIP.Session.reply(dialog_pid, req, code, reason, upd_fields, label \\ nil)
+```
+
+It notes `label` (default `"reply_<code>"`) then replies. It is a plain function, not a macro, because a
+server scenario builds its responses in helpers that carry the dialog pid explicitly — outside a `state`
+body, where the implicit `sip_ctx` of a macro is out of reach. `label` is worth passing when the response
+has a meaning the bare status code does not convey (`"401 stale"`, `"423 too brief"`, `"503 store down"`).
+
 ### SIP.Session.RegisterUAC
 
 This module can be used to implement a client registration scenario. It is pulled in by

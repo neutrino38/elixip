@@ -1,6 +1,6 @@
 defmodule SIP.Dialog do
-@moduledoc "SIP module layer API"
-alias SIP.Transac
+  @moduledoc "SIP module layer API"
+  alias SIP.Transac
   require Logger
   require Registry
   require SIP.Uri
@@ -9,101 +9,112 @@ alias SIP.Transac
   @spec start() :: :error | :ok
   @doc "Start the dialog layer"
   def start() do
-    #Create the registry
+    # Create the registry
     case Registry.start_link(keys: :unique, name: Registry.SIPDialog) do
-      { :ok, pid } ->
+      {:ok, pid} ->
         Logger.info("SIP dialog layer started with PID #{inspect(pid)}")
         :ok
 
-      { :error, { :already_started, _pid } } ->
+      {:error, {:already_started, _pid}} ->
         # Layer already running (e.g. started by a previous test module): treat as success
         :ok
 
-      { code, _pid } ->
-        Logger.error ("SIP dialog layer failed to start with error #{code}")
+      {code, _pid} ->
+        Logger.error("SIP dialog layer failed to start with error #{code}")
         code
     end
   end
 
-    # Obtain the triplet that uniquely identify a dialog
-    defp get_dialog_id(req) do
-      { _code, fromtag } = SIP.Uri.get_uri_param(req.from, "tag")
-      { _code, totag } = SIP.Uri.get_uri_param(req.to, "tag")
-      { fromtag, req.callid, totag }
-    end
+  # Obtain the triplet that uniquely identify a dialog
+  defp get_dialog_id(req) do
+    {_code, fromtag} = SIP.Uri.get_uri_param(req.from, "tag")
+    {_code, totag} = SIP.Uri.get_uri_param(req.to, "tag")
+    {fromtag, req.callid, totag}
+  end
 
-    defp get_or_create_dialog_id( req ) do
-      get_or_create_dialog_id( req, get_dialog_id(req) )
-    end
+  defp get_or_create_dialog_id(req) do
+    get_or_create_dialog_id(req, get_dialog_id(req))
+  end
 
-    # Create call ID and add it to the request
-    @spec get_or_create_dialog_id( map(), { binary(), nil, binary() } ) :: tuple()
-    defp get_or_create_dialog_id( req, { fromtag, nil, totag }) do
-      callid = generate_from_or_to_tag()
-      req = Map.put(req, :callid, callid)
-      get_or_create_dialog_id( req, { fromtag, callid, totag } )
-    end
+  # Create call ID and add it to the request
+  @spec get_or_create_dialog_id(map(), {binary(), nil, binary()}) :: tuple()
+  defp get_or_create_dialog_id(req, {fromtag, nil, totag}) do
+    callid = generate_from_or_to_tag()
+    req = Map.put(req, :callid, callid)
+    get_or_create_dialog_id(req, {fromtag, callid, totag})
+  end
 
-    # Create from TAG and add it the from URI
-    defp get_or_create_dialog_id( req, { nil, callid , totag }) do
-      fromtag = generate_from_or_to_tag()
-      req = Map.put(req, :from, SIP.Uri.set_uri_param(req.from, "tag", fromtag))
-      get_or_create_dialog_id( req, { fromtag, callid, totag } )
-    end
+  # Create from TAG and add it the from URI
+  defp get_or_create_dialog_id(req, {nil, callid, totag}) do
+    fromtag = generate_from_or_to_tag()
+    req = Map.put(req, :from, SIP.Uri.set_uri_param(req.from, "tag", fromtag))
+    get_or_create_dialog_id(req, {fromtag, callid, totag})
+  end
 
-    # At least from tag and callid are present, return them and end the recursion
-    @spec get_or_create_dialog_id( map(), { binary(), binary(), binary() } ) :: tuple()
-    defp get_or_create_dialog_id( req, { fromtag, callid , totag } )  when is_binary(fromtag) and is_binary(callid) do
-      {req, { fromtag, callid , totag } }
-    end
+  # At least from tag and callid are present, return them and end the recursion
+  @spec get_or_create_dialog_id(map(), {binary(), binary(), binary()}) :: tuple()
+  defp get_or_create_dialog_id(req, {fromtag, callid, totag})
+       when is_binary(fromtag) and is_binary(callid) do
+    {req, {fromtag, callid, totag}}
+  end
 
-    def dlgid2string({ ftag, cid, nil}) do
-      ftag <> "-" <> cid
-    end
+  def dlgid2string({ftag, cid, nil}) do
+    ftag <> "-" <> cid
+  end
 
-    def dlgid2string({ ftag, cid, totag}) do
-      ftag <> "-" <> cid <> "-" <> totag
-    end
+  def dlgid2string({ftag, cid, totag}) do
+    ftag <> "-" <> cid <> "-" <> totag
+  end
 
-    # ---------------------- Public API ----------------------
+  # ---------------------- Public API ----------------------
 
   @doc "Start a dialog"
-  @spec start_dialog(map(), integer(), :inbound | :outbound, boolean() ) :: {:error, any()} | {:ok, pid(), tuple() }
-  def start_dialog(req, timeout, direction, debug) when is_integer(timeout) and is_atom(req.method) do
-
+  @spec start_dialog(map(), integer(), :inbound | :outbound, boolean()) ::
+          {:error, any()} | {:ok, pid(), tuple()}
+  def start_dialog(req, timeout, direction, debug)
+      when is_integer(timeout) and is_atom(req.method) do
     # Obtain or create the dialog id { fromtag, callid, totag } that identify the SIP dialog according to RFC 3261
     # Using the recusion and pattern matching
-    { req2, dialog_id } = get_or_create_dialog_id(req)
-    name = {:via, Registry, {Registry.SIPDialog, dialog_id, :cast }}
-    dialog_params = { req2, direction, self(), timeout, debug, dialog_id }
+    {req2, dialog_id} = get_or_create_dialog_id(req)
+    name = {:via, Registry, {Registry.SIPDialog, dialog_id, :cast}}
+    dialog_params = {req2, direction, self(), timeout, debug, dialog_id}
 
-    case GenServer.start(SIP.DialogImpl, dialog_params, name: name ) do
-      { :ok, dlg_pid } ->
+    case GenServer.start(SIP.DialogImpl, dialog_params, name: name) do
+      {:ok, dlg_pid} ->
         # Cause deadlock -- why ?
         # The GenServer.call() times out and caused the caller process to terminate.
         # As if the GenServer was not ready to process request at ths point
         # dialog_id = GenServer.call(dlg_pid, :getdialogid)
-        Logger.info([ dialogpid: "#{inspect(dlg_pid)}", module: __MODULE__, message: "Created dialog #{inspect(dialog_id)}." ])
-        { :ok, dlg_pid, dialog_id }
+        Logger.info(
+          dialogpid: "#{inspect(dlg_pid)}",
+          module: __MODULE__,
+          message: "Created dialog #{inspect(dialog_id)}."
+        )
+
+        {:ok, dlg_pid, dialog_id}
 
       # Application rejected the request in DialogImpl.init/1 (nominal refusal,
       # not a failure): propagate the reject tuple verbatim. process_incoming_request
       # turns it into the requested SIP status. Logged at info, not error.
-      { :error, { :reject, code, reason, totag } } ->
-        Logger.info([ module: __MODULE__, message: "Dialog creation rejected by app: #{code} #{reason}." ])
-        { :error, { :reject, code, reason, totag } }
+      {:error, {:reject, code, reason, totag}} ->
+        Logger.info(
+          module: __MODULE__,
+          message: "Dialog creation rejected by app: #{code} #{reason}."
+        )
 
-      { :error, err } when is_exception(err) ->
-        Logger.error([ module: __MODULE__, message: "Failed to create dialog: exception raised" ])
+        {:error, {:reject, code, reason, totag}}
+
+      {:error, err} when is_exception(err) ->
+        Logger.error(module: __MODULE__, message: "Failed to create dialog: exception raised")
         Logger.error(Exception.format(:error, err))
         :error
 
-      { :error, err } ->
-        Logger.error([ module: __MODULE__, message: "Failed to create dialog: #{inspect(err)}."])
-        { :error, err }
+      {:error, err} ->
+        Logger.error(module: __MODULE__, message: "Failed to create dialog: #{inspect(err)}.")
+        {:error, err}
 
       _ ->
-        Logger.error([ module: __MODULE__, message: "Failed to create dialog."])
+        Logger.error(module: __MODULE__, message: "Failed to create dialog.")
         :error
     end
   end
@@ -113,12 +124,12 @@ alias SIP.Transac
     :ok
   end
 
-
   # transact_id is nil when the request created no server transaction (the ACK of
   # a 2xx, RFC 3261 §17.2.3, routed straight to the dialog by the transport).
-  @spec process_incoming_request(map(), pid() | nil, boolean()) :: {:error, any()} | {:ok, pid()} | atom() | { any, any }
+  @spec process_incoming_request(map(), pid() | nil, boolean()) ::
+          {:error, any()} | {:ok, pid()} | atom() | {any, any}
   def process_incoming_request(req, transact_id, debug) when is_req(req) do
-    { req2, dialog_id } = get_or_create_dialog_id(req)
+    {req2, dialog_id} = get_or_create_dialog_id(req)
 
     # A request received in-dialog carries the tags in the opposite order to how
     # a dialog we initiated (UAC) is registered: its To-tag is our local tag and
@@ -150,30 +161,30 @@ alias SIP.Transac
             # to add error log - ACK should be in dialog
             :nomatchingdialog
 
-          m when m in [ :PUBLISH, :REGISTER, :SUBSCRIBE ] ->
-            #Todo compulte timeout from refresh contact period
+          m when m in [:PUBLISH, :REGISTER, :SUBSCRIBE] ->
+            # Todo compulte timeout from refresh contact period
             to = 600
             start_inbound_dialog(req2, to, debug, dialog_id)
 
-          m when m in [ :REFER, :CANCEL, :UPDATE, :BYE ] ->
+          m when m in [:REFER, :CANCEL, :UPDATE, :BYE] ->
             # In-dialog-only request with no matching dialog: answer 481. Do NOT
             # use SIP.Transac.reply/3 here — this function runs inside the server
             # transaction process (via process_UAS_request), so a GenServer.call
             # on transact_id would be a call to self. Returning the error tuple
             # lets process_UAS_request send the response on its own transaction.
-            { :error, { 481, "Call/Transaction Does Not Exist", dialog_id } }
+            {:error, {481, "Call/Transaction Does Not Exist", dialog_id}}
 
           _ ->
-            { :error, { 500, "Unsupported request", dialog_id } }
+            {:error, {500, "Unsupported request", dialog_id}}
         end
 
       # Found a matching dialog.Forward the SIP msg to it
       # We do not use dispatch because we have already looked up the transaction list
       # Note that lookup() should always return a single transaction here
 
-      [ { dialog_pid, _value } | _ ] ->
+      [{dialog_pid, _value} | _] ->
         GenServer.cast(dialog_pid, {:sipmsg, req2, transact_id})
-        { :ok, dialog_pid, dialog_id }
+        {:ok, dialog_pid, dialog_id}
     end
   end
 
@@ -182,10 +193,10 @@ alias SIP.Transac
   # dialog_id}} shape that process_UAS_request turns into a SIP response on the
   # server transaction (registrar quota → 503, UAS domain control → 604, …).
   # Any other start_dialog outcome (including generic errors → 403) is unchanged.
-  defp start_inbound_dialog(req, timeout, debug, { fromtag, callid, _totag }) do
+  defp start_inbound_dialog(req, timeout, debug, {fromtag, callid, _totag}) do
     case start_dialog(req, timeout, :inbound, debug) do
-      { :error, { :reject, code, reason, totag } } ->
-        { :error, { code, reason, { fromtag, callid, totag } } }
+      {:error, {:reject, code, reason, totag}} ->
+        {:error, {code, reason, {fromtag, callid, totag}}}
 
       other ->
         other
@@ -194,19 +205,19 @@ alias SIP.Transac
 
   # Swap the from/to tags of a dialog id. Used to match an in-dialog request
   # received on a dialog we initiated, where the tag roles are reversed.
-  defp swap_dialog_id({ fromtag, callid, totag }), do: { totag, callid, fromtag }
+  defp swap_dialog_id({fromtag, callid, totag}), do: {totag, callid, fromtag}
 
-  @doc "Reply to an in dialog request"
-  def reply(dialog_id, req, resp_code, reason, upd_fields) when is_pid(dialog_id) and is_req(req) do
-    # `reply/5` is the app→stack send primitive for a UAS, the counterpart of the
-    # instrumented `send_*` macros — so record it, and every script that composes
-    # its own responses (which is what a kelixip script does, design §11.1) shows
-    # up in the monitor without having to instrument itself. A helper that has a
-    # more meaningful label of its own notes it AFTER calling us, and wins.
-    SIP.Scenario.Monitor.note_command(:sip, "reply_#{resp_code}")
-    GenServer.call(dialog_id, { :replyreq, req, resp_code, reason, upd_fields})
+  @doc """
+  Reply to an in dialog request.
+
+  A scenario replies through the instrumented `SIP.Session.*` helpers instead
+  (`SIP.Session.Registrar.reply/6`, the `reply_*` macros); this layer records
+  nothing.
+  """
+  def reply(dialog_id, req, resp_code, reason, upd_fields)
+      when is_pid(dialog_id) and is_req(req) do
+    GenServer.call(dialog_id, {:replyreq, req, resp_code, reason, upd_fields})
   end
-
 
   @doc """
   Send a new in-dialog request out. On success returns `{ :ok, transaction_pid }`
@@ -215,25 +226,25 @@ alias SIP.Transac
   `:methodnotallowed`, `:toomanytransactons`, or a transport error code).
   """
   def new_request(dialog_pid, req) when is_pid(dialog_pid) and is_req(req) do
-    GenServer.call(dialog_pid, { :newreq, req })
+    GenServer.call(dialog_pid, {:newreq, req})
   end
 
   @spec challenge(pid(), map(), 401 | 407, any()) :: any()
-  def challenge(dialog_pid, req, resp_code, realm) when resp_code in [ 401, 407 ] and is_req(req) do
+  def challenge(dialog_pid, req, resp_code, realm) when resp_code in [401, 407] and is_req(req) do
     reply(dialog_pid, req, resp_code, nil, realm)
   end
 
   @doc "Cancel a request"
   @spec cancel(pid(), pid()) :: any()
   def cancel(dialog_pid, transac_pid) when is_pid(dialog_pid) do
-    GenServer.call(dialog_pid, { :cancel, transac_pid})
+    GenServer.call(dialog_pid, {:cancel, transac_pid})
   end
 
   @doc """
   ACK an INVITE SIP request.
   """
   @spec ack(pid() | map(), pid()) :: any()
-  def ack(dialog_pid, req) when is_req(req) when req.method in [ :INVITE ] do
+  def ack(dialog_pid, req) when is_req(req) when req.method in [:INVITE] do
     case Transac.get_transaction_pid(req) do
       :invalid_transaction -> :invalid_transaction
       ctrans_pid when is_pid(ctrans_pid) -> ack(dialog_pid, ctrans_pid)
@@ -241,7 +252,7 @@ alias SIP.Transac
   end
 
   def ack(dialog_pid, transac_pid) when is_pid(dialog_pid) do
-    GenServer.call(dialog_pid, { :ack, transac_pid})
+    GenServer.call(dialog_pid, {:ack, transac_pid})
   end
 
   @spec start_options_keepalive(atom() | pid()) :: any()
@@ -252,13 +263,17 @@ alias SIP.Transac
   def broadcast(msg_to_send) do
     # récupérer l'ensemble des PID
     pids = Registry.select(Registry.SIPDialog, [{{:_, :"$1", :_}, [], [:"$1"]}])
+
     for pid <- pids do
       send(pid, msg_to_send)
     end
   end
 
   def dump() do
-    for { k, p, _} <- Registry.select(Registry.SIPDialog, [{{:"$1", :"$2", :"$3"}, [], [{{:"$1", :"$2", :"$3"}}]}]) do
+    for {k, p, _} <-
+          Registry.select(Registry.SIPDialog, [
+            {{:"$1", :"$2", :"$3"}, [], [{{:"$1", :"$2", :"$3"}}]}
+          ]) do
       Logger.debug("callid: #{inspect(k)} -> #{inspect(p)}")
     end
   end
@@ -276,5 +291,4 @@ alias SIP.Transac
   def stop_keepalive(dialog_pid) when is_pid(dialog_pid) do
     GenServer.call(dialog_pid, :stop_keepalive)
   end
-
 end

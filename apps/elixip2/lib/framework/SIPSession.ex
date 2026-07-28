@@ -75,6 +75,20 @@ defmodule SIP.Session do
   @standalone_methods [:OPTIONS, :REGISTER, :PUBLISH, :SUBSCRIBE, :MESSAGE, :NOTIFY, :INFO]
 
   @doc """
+  Reply to an inbound request on `dialog_pid`, recording the command for the
+  scenario monitor.
+
+  What a UAS scenario should call instead of `SIP.Dialog.reply/5`, so its response
+  shows up in the `--monitor` view / `kelictl monitor`. `label` names the recorded
+  command; it defaults to `"reply_<code>"`.
+  """
+  @spec reply(pid, map, integer, String.t() | nil, keyword | String.t(), String.t() | nil) :: any
+  def reply(dialog_pid, req, code, reason, upd_fields \\ [], label \\ nil) do
+    SIP.Scenario.Monitor.note_command(:sip, label || "reply_#{code}")
+    SIP.Dialog.reply(dialog_pid, req, code, reason, upd_fields)
+  end
+
+  @doc """
   Send an outbound SIP request and create the dialog if needed
   Update the session sip_ctx accordingly
   """

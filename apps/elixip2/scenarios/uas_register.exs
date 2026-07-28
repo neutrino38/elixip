@@ -14,7 +14,16 @@
 # no macro / `var!` plumbing is needed.
 defmodule UAS.RegisterExample do
   use SIP.Scenario
-  import SIP.Session.Registrar, only: [challenge_registration: 3, accept_registration: 3, reject_registration: 4, set_contacts_expires: 2]
+
+  import SIP.Session.Registrar,
+    only: [
+      challenge_registration: 3,
+      accept_registration: 3,
+      reject_registration: 4,
+      set_contacts_expires: 2
+    ]
+
+  import SIP.Session, only: [reply: 6]
 
   # Marks the scenario type as :uas_register so elixipp runs it in server mode.
   uas(:register)
@@ -63,7 +72,8 @@ defmodule UAS.RegisterExample do
             scenario_failure("auth rejected: #{inspect(other)}")
         end
 
-      {:scenario_ctl, :shutdown, _reason } -> scenario_aborted("Registrar stopped gracefully")
+      {:scenario_ctl, :shutdown, _reason} ->
+        scenario_aborted("Registrar stopped gracefully")
     after
       32_000 ->
         scenario_failure("no REGISTER received")
@@ -104,8 +114,8 @@ defmodule UAS.RegisterExample do
 
       # Interrupted because client socket has been interrupted
       {:dialog_terminated, _dialog_pid, reason}
-        when reason in [ :tcp_closed, :tls_closed, :wss_closed ]->
-          scenario_aborted("Client socket closed")
+      when reason in [:tcp_closed, :tls_closed, :wss_closed] ->
+        scenario_aborted("Client socket closed")
 
       {:dialog_terminated, _dialog_pid, _reason} ->
         scenario_success("registration ended")
@@ -155,7 +165,7 @@ defmodule UAS.RegisterExample do
   # which would (wrongly) refuse a de-registration.
   defp accept_unregister(req, dialog_pid) do
     contact = set_contacts_expires(Map.get(req, :contact), 0)
-    SIP.Dialog.reply(dialog_pid, req, 200, "OK", contact: contact)
+    reply(dialog_pid, req, 200, "OK", [contact: contact], "accept_unregister")
   end
 
   # Verify the inbound REGISTER credentials. Returns :no_auth_header or
@@ -195,5 +205,4 @@ defmodule UAS.RegisterExample do
         end
     end
   end
-
 end

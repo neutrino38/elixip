@@ -5,7 +5,7 @@
 # Separation of concerns (§11.1): the MODULES decide, the SCRIPT composes the SIP
 # response. Kelix.Mod.AuthDb.do_registration_auth/2 returns the auth verdict;
 # Kelix.Mod.Registrar.save/4 stores the binding and returns the granted contacts.
-# This script maps those onto SIP.Session.Registrar helpers / SIP.Dialog.reply:
+# This script maps those onto SIP.Session.reply/6 (the instrumented reply):
 #
 #   {:requireauth, stale} -> 401 with a stateless-nonce challenge (Kelix.Auth)
 #   :ok                   -> save, then 200 OK echoing the granted contacts
@@ -13,6 +13,7 @@
 defmodule Kelix.Registrar do
   use SIP.Scenario
   require Logger
+  import SIP.Session, only: [reply: 5, reply: 6]
 
   uas(:register)
 
@@ -59,7 +60,7 @@ defmodule Kelix.Registrar do
         message: "registrar script failed: #{Exception.message(e)}"
       )
 
-      SIP.Dialog.reply(dialog_pid, req, 500, "Server Internal Error", [])
+      reply(dialog_pid, req, 500, "Server Internal Error", [], "script_failed")
       "500 Server Internal Error"
   end
 
@@ -74,14 +75,22 @@ defmodule Kelix.Registrar do
             algorithm: Kelix.Mod.AuthDb.challenge_algorithm()
           )
 
-        SIP.Dialog.reply(dialog_pid, req, 401, "Unauthorized", wwwauthenticate: params)
+        reply(
+          dialog_pid,
+          req,
+          401,
+          "Unauthorized",
+          [wwwauthenticate: params],
+          if(stale, do: "401 stale", else: "401 challenge")
+        )
+
         if stale, do: "401 stale", else: "401 Unauthorized"
 
       :ok ->
         accept_or_reject(req, dialog_pid, domain)
 
       {:reject, code, reason} ->
-        SIP.Dialog.reply(dialog_pid, req, code, reason, [])
+        reply(dialog_pid, req, code, reason, [])
         "#{code} #{reason}"
     end
   end
@@ -92,9 +101,13 @@ defmodule Kelix.Registrar do
       # remaining lifetime — `granted.contacts` already is that list (empty after
       # an un-REGISTER, in which case the 200 carries no Contact at all).
       {:ok, granted} ->
-        SIP.Dialog.reply(dialog_pid, req, 200, "OK",
-          contact: empty_to_nil(granted.contacts),
-          expires: granted.expires
+        reply(
+          dialog_pid,
+          req,
+          200,
+          "OK",
+          [contact: empty_to_nil(granted.contacts), expires: granted.expires],
+          "accept_registration"
         )
 
         # Name the identity this instance serves, so `kelictl monitor` says WHO is
@@ -107,9 +120,7 @@ defmodule Kelix.Registrar do
       {:error, {423, reason}} ->
         min = Kelix.Mod.Registrar.min_expires(domain)
 
-        SIP.Dialog.reply(dialog_pid, req, 423, reason, [
-          {"Min-Expires", to_string(min)}
-        ])
+        reply(dialog_pid, req, 423, reason, [{"Min-Expires", to_string(min)}], "423 too brief")
 
         "423 #{reason} (min #{min})"
 
@@ -118,11 +129,11 @@ defmodule Kelix.Registrar do
       # is momentarily unavailable and the client should retry.
       {:error, reason} when reason in [:down, :timeout] ->
         Logger.error(module: __MODULE__, message: "registrar store #{reason}")
-        SIP.Dialog.reply(dialog_pid, req, 503, "Service Unavailable", [])
+        reply(dialog_pid, req, 503, "Service Unavailable", [], "503 store down")
         "503 Service Unavailable"
 
       {:error, {code, reason}} ->
-        SIP.Dialog.reply(dialog_pid, req, code, reason, [])
+        reply(dialog_pid, req, code, reason, [])
         "#{code} #{reason}"
     end
   end

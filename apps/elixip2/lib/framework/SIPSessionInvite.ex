@@ -439,7 +439,11 @@ defmodule SIP.Session.CallUAS do
             "Media server rejected the SDP offer (#{inspect(reason)}); replying #{ecode} #{ereason}"
         )
 
-        _ = SIP.Dialog.reply(sip_ctx.dialogpid, req, ecode, ereason, [])
+        # Re-label: the macro already noted "reply_invite_with_sdp <code>", but what
+        # actually goes out on this path is the media-error code, not that code.
+        _ =
+          SIP.Session.reply(sip_ctx.dialogpid, req, ecode, ereason, [], "reply #{ecode} (media)")
+
         SIP.Context.set(sip_ctx, :lasterr, {:media_error, reason})
     end
   end

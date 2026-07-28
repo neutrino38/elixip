@@ -125,13 +125,8 @@ defmodule SIP.Session.Registrar do
     |> adjust_expires_header()
   end
 
-  # NB (here and below): the semantic label is noted AFTER the reply. Since
-  # SIP.Dialog.reply/5 records a generic "reply_<code>" of its own, noting first
-  # would let that overwrite this more meaningful one.
   def reply_options(req, dialog_pid) when req.method == :OPTIONS do
-    rc = SIP.Dialog.reply(dialog_pid, req, 200, "OK", [])
-    SIP.Scenario.Monitor.note_command(:sip, "reply_OPTIONS")
-    rc
+    SIP.Session.reply(dialog_pid, req, 200, "OK", [], "reply_OPTIONS")
   end
 
   # Challenge with a 401 carrying a freshly generated WWW-Authenticate digest
@@ -140,9 +135,7 @@ defmodule SIP.Session.Registrar do
   def challenge_registration(req, dialog_pid, opts \\ []) when req.method == :REGISTER do
     realm = Keyword.get(opts, :realm, "example.com")
     reason = Keyword.get(opts, :reason, "Unauthorized")
-    rc = SIP.Dialog.reply(dialog_pid, req, 401, reason, realm)
-    SIP.Scenario.Monitor.note_command(:sip, "challenge_registration")
-    rc
+    SIP.Session.reply(dialog_pid, req, 401, reason, realm, "challenge_registration")
   end
 
   # Accept with a 200 OK echoing the Contact binding(s) with the granted
@@ -160,10 +153,8 @@ defmodule SIP.Session.Registrar do
           c -> c
         end
 
-      rc = SIP.Dialog.reply(dialog_pid, req, 200, "OK", contact: contact)
-      SIP.Scenario.Monitor.note_command(:sip, "accept_registration")
       SIP.Scenario.Monitor.note_account(registered_username(req))
-      rc
+      SIP.Session.reply(dialog_pid, req, 200, "OK", [contact: contact], "accept_registration")
     catch
       {:reject, code, reason} ->
         reject_registration(req, dialog_pid, code, reason)
@@ -171,9 +162,7 @@ defmodule SIP.Session.Registrar do
   end
 
   def reject_registration(req, dialog_pid, code, reason) when req.method == :REGISTER do
-    rc = SIP.Dialog.reply(dialog_pid, req, code, reason, [])
-    SIP.Scenario.Monitor.note_command(:sip, "reject_reg #{code}")
-    rc
+    SIP.Session.reply(dialog_pid, req, code, reason, [], "reject_reg #{code}")
   end
 end
 
