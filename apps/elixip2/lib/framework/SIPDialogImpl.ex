@@ -263,8 +263,8 @@ defmodule SIP.DialogImpl do
       dialogpid: "#{inspect(self())}",
       module: __MODULE__,
       message:
-        "REGISTER lifetime #{requested}s (contact param: " <>
-          "#{inspect(max_contact_expires(req.contact))}, Expires header: " <>
+        "REGISTER lifetime #{requested}s (per-contact: " <>
+          "#{inspect(contact_lifetimes(req))}, Expires header: " <>
           "#{inspect(Map.get(req, :expires))}) -> #{timeratom} in #{expire}s"
     )
 
@@ -285,18 +285,41 @@ defmodule SIP.DialogImpl do
   # §10.2.4 prescribes: the Contact `expires` parameter wins **when present**,
   # otherwise the `Expires` header applies, otherwise the default (§20.19).
   #
-  # Reading only the Contact parameter is what broke real phones: most send the
-  # lifetime as an `Expires` header and no parameter, so the dialog read "no
-  # lifetime", treated a plain registration as an un-registration and tore itself
-  # down after 1 s — which then dropped the binding through the registrar's monitor
-  # on this pid. An explicit 0 from either source IS an un-registration.
+  # The precedence is **per contact**, and the dialog then follows the longest-lived
+  # binding of the request. This is what a real handset needs: rebinding, it sends a
+  # single REGISTER carrying TWO contacts — the old one with `;expires=0` to drop it,
+  # and the new one (with a `+sip.instance`) whose lifetime is in the `Expires`
+  # header. Resolving the parameter across the whole request instead of per contact
+  # yielded 0 — the removal alone — so the dialog read the request as an
+  # un-registration and tore itself down, taking the instance with it.
+  #
+  # It is an un-registration only when **every** contact resolves to 0.
   @default_register_expires 3600
 
   defp registration_expires(req) do
-    case max_contact_expires(req.contact) do
-      nil -> header_expires(req)
-      exp -> exp
+    header = header_expires(req)
+
+    case List.wrap(Map.get(req, :contact)) do
+      [] -> header
+      contacts -> contacts |> Enum.map(&contact_expires(&1, header)) |> Enum.max()
     end
+  end
+
+  defp contact_expires(%SIP.Uri{} = contact, header) do
+    case SIP.Uri.get_uri_param(contact, "expires") do
+      {:ok, value} -> String.to_integer(value)
+      _ -> header
+    end
+  end
+
+  # A wildcard Contact (:*) carries no lifetime of its own — the header states it.
+  defp contact_expires(_other, header), do: header
+
+  # Per-contact lifetimes, for the diagnostic log: a mixed remove+add request must
+  # be readable at a glance ([0, 600] is a rebinding, [0] an un-registration).
+  defp contact_lifetimes(req) do
+    header = header_expires(req)
+    Map.get(req, :contact) |> List.wrap() |> Enum.map(&contact_expires(&1, header))
   end
 
   defp header_expires(req) do

@@ -701,9 +701,30 @@ defmodule Kelix.Mod.Registrar do
     end
   end
 
+  # Contact **header** parameters, which `SIP.Uri.parse/1` folds into the URI's
+  # params map — in `<sip:u@h>;expires=0` everything after the `>` is a header
+  # parameter, not part of the URI. They must be excluded from binding identity:
+  # RFC 3261 §10.2.4 compares bindings by URI, so a refresh that merely changes
+  # `expires` has to REPLACE the binding rather than add a second one.
+  #
+  # Leaving them in meant a handset that rebinds (old contact with `;expires=0`,
+  # new one alongside) never got its old contact dropped — the key differed by that
+  # very parameter — so the AOR accumulated stale contacts until
+  # `max_contacts_per_aor` started refusing the next registration.
+  #
+  # `+`-prefixed feature tags (RFC 3840) go the same way. `+sip.instance`/`reg-id`
+  # would make a *better* binding key than the URI (RFC 5626 outbound), but that is
+  # its own feature; until then identity stays the URI, as RFC 3261 has it.
+  @contact_header_params ~w(expires q methods reg-id)
+
   # serialize/1 always succeeds on a %SIP.Uri{}, hence the hard match.
   defp uri_key(%SIP.Uri{} = u) do
-    {:ok, s} = SIP.Uri.serialize(u)
+    params =
+      u.params
+      |> Map.drop(@contact_header_params)
+      |> Map.reject(fn {k, _v} -> String.starts_with?(k, "+") end)
+
+    {:ok, s} = SIP.Uri.serialize(%SIP.Uri{u | params: params})
     s
   end
 

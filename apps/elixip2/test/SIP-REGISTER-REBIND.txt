@@ -1,0 +1,16 @@
+REGISTER sip:dev71.dev.ives.fr:5070 SIP/2.0
+Via: SIP/2.0/UDP 172.22.0.2:60259;rport;branch=z9hG4bKv56cX4S12NpKK
+Max-Forwards: 70
+From: <sip:50815019@dev71.dev.ives.fr>;tag=rpeB81mZZ54yg
+To: <sip:50815019@dev71.dev.ives.fr>
+Call-ID: 1dae1ac7-0503-1240-45af-60189533c4e1
+CSeq: 118060286 REGISTER
+Contact: <sip:50815019@172.21.104.60:47851;user=phone;transport=udp>;+sip.instance="<urn:uuid:5da07818-04fe-1240-45af-60189533c4e1>";reg-id=1;methods="INVITE,ACK,BYE,CANCEL,OPTIONS,PRACK,MESSAGE,SUBSCRIBE,NOTIFY,REFER,UPDATE"
+Contact: <sip:50815019@172.22.0.2:60259;user=phone>;methods="INVITE,ACK,BYE,CANCEL,OPTIONS,PRACK,MESSAGE,SUBSCRIBE,NOTIFY,REFER,UPDATE";expires=0
+Expires: 180
+User-Agent: calls sofia-sip/1.13.17
+Allow: INVITE, ACK, BYE, CANCEL, OPTIONS, PRACK, MESSAGE, SUBSCRIBE, NOTIFY, REFER, UPDATE
+Supported: timer, 100rel, replaces, gruu, outbound
+Authorization: Digest username="50815019", realm="visioassistance.net", nonce="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", cnonce="0000000000000000000000", algorithm=MD5, uri="sip:dev71.dev.ives.fr:5070", response="00000000000000000000000000000000", qop=auth, nc=00000004
+Content-Length: 0
+

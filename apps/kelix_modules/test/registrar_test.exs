@@ -148,6 +148,62 @@ defmodule Kelix.Mod.RegistrarTest do
     end
   end
 
+  # The rebinding REGISTER captured off a real handset on 2026-07-28: one request
+  # carrying the old contact with `;expires=0` and the new one (bearing the RFC 5626
+  # `+sip.instance` / `reg-id`) whose lifetime is in the `Expires` header. The store
+  # must replace, not wipe.
+  describe "a real handset's rebinding REGISTER" do
+    @fixture Path.expand("../../elixip2/test/SIP-REGISTER-REBIND.txt", __DIR__)
+    @rebind_domain "dev71.dev.ives.fr"
+
+    setup do
+      {:ok, raw} = File.read(@fixture)
+      {:ok, req} = SIPMsg.parse(raw, fn _c, _m, _l, _li -> nil end)
+      [new_contact, old_contact] = req.contact
+      %{req: req, new_contact: new_contact, old_contact: old_contact}
+    end
+
+    test "on a store already holding the old contact, it swaps one for the other", ctx do
+      # seed the binding the handset is about to drop
+      seeded = SIP.Uri.set_uri_param(ctx.old_contact, "expires", "180")
+      assert {:ok, _} = Registrar.save(%{ctx.req | contact: seeded}, @rebind_domain)
+
+      assert [%Contact{contact: %{domain: "172.22.0.2"}}] =
+               Registrar.bindings(@rebind_domain, "50815019")
+
+      # now the real rebinding request
+      assert {:ok, granted} = Registrar.save(ctx.req, @rebind_domain)
+      assert granted.expires == 180
+
+      assert [%Contact{contact: %{domain: "172.21.104.60"}}] =
+               Registrar.bindings(@rebind_domain, "50815019")
+    end
+
+    test "it is not read as an un-registration on an empty store", ctx do
+      assert {:ok, granted} = Registrar.save(ctx.req, @rebind_domain)
+      assert granted.expires == 180
+      assert [%Contact{}] = Registrar.bindings(@rebind_domain, "50815019")
+    end
+
+    test "a refresh that only changes the requested expires replaces the binding", ctx do
+      # The key must be the URI, not the URI plus its Contact header parameters:
+      # with `;expires=` in the key, every refresh whose lifetime changed added a
+      # second binding for the same contact.
+      short = SIP.Uri.set_uri_param(ctx.old_contact, "expires", "120")
+      long = SIP.Uri.set_uri_param(ctx.old_contact, "expires", "180")
+
+      assert {:ok, _} = Registrar.save(%{ctx.req | contact: short}, @rebind_domain)
+      assert {:ok, _} = Registrar.save(%{ctx.req | contact: long}, @rebind_domain)
+      assert [_one] = Registrar.bindings(@rebind_domain, "50815019")
+    end
+
+    test "the AOR comes from the raw To header the parser produces", ctx do
+      # SIPMsg leaves :to as a string; this is the shape that used to yield 400
+      assert is_binary(ctx.req.to)
+      assert {:ok, %{aor: "50815019"}} = Registrar.save(ctx.req, @rebind_domain)
+    end
+  end
+
   describe "min_expires/1" do
     test "reports the configured bound, so the script can send Min-Expires" do
       assert Registrar.min_expires() == 60
