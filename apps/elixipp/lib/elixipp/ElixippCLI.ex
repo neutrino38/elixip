@@ -1322,7 +1322,12 @@ defmodule Elixipp.CLI do
 
   defp resolve_module(arg) do
     if String.ends_with?(arg, ".exs") do
-      unless File.exists?(arg), do: abort("Scenario file not found: #{arg}", 2)
+      # The path is the tester's: taken as given, relative to the current directory.
+      # (A `sub_fsm` inside a scenario is the one exception — it names a file next to
+      # the scenario that declares it.)
+      unless File.exists?(arg),
+        do: abort("Scénario introuvable : #{Path.expand(arg)}", 2)
+
       SIP.Scenario.Loader.load_file!(arg)
     else
       SIP.Scenario.Loader.load_module!(arg)
@@ -1415,22 +1420,24 @@ defmodule Elixipp.CLI do
       elixipp [OPTIONS] <scenario.exs | NomDeModule>
 
     EXEMPLES
-      elixipp scenarios/uac_invite.exs            # depuis un fichier
+      Le chemin du scénario est celui que vous donnez, relatif au répertoire courant.
+      Les scénarios d'exemple du dépôt sont dans apps/elixip2/scenarios/.
+
+      elixipp mon_scenario.exs                    # depuis un fichier
       elixipp UAC.Invite                          # scénario intégré (sans fichier)
       elixipp UAC.Register                        # scénario intégré (sans fichier)
-      elixipp -m scenarios/uac_invite.exs         # affichage live d'un appel
-      elixipp -l 5 scenarios/uac_invite.exs       # 5 appels en continu
-      elixipp -l 5 --max-run 100 scenarios/uac_invite.exs   # 5 simultanés, 100 au total
-      elixipp -l 5 --rate 20 scenarios/uac_invite.exs       # 5 simultanés, 20 appels/s max
-      elixipp -c ives.json scenarios/uac_register.exs       # paramétré par un fichier JSON
-      elixipp -c accounts.json --max-run 0 scenarios/uac_register.exs  # balaye tous les comptes
-      elixipp --listen udp:5060 scenarios/uas_register.exs  # serveur registrar UAS (UDP)
-      elixipp -l 50 --listen udp:5060 scenarios/uas_register.exs  # serveur, 50 enregistrements max
-      elixipp --listen tls:5061 --tls-cert certs/cert.pem --tls-key certs/key.pem \
-              scenarios/uas_register.exs                    # serveur registrar UAS (TLS)
-      elixipp --listen wss:5065 scenarios/uas_register.exs  # serveur registrar UAS (WSS)
-      elixipp --listen udp:5060 scenarios/uas_invite.exs    # serveur d'appels UAS (répond aux INVITE)
-      elixipp -l 20 --listen udp:5060 scenarios/uas_invite.exs  # serveur d'appels, 20 appels simultanés max
+      elixipp -m mon_scenario.exs                 # affichage live d'un appel
+      elixipp -l 5 mon_scenario.exs               # 5 appels en continu
+      elixipp -l 5 --max-run 100 mon_scenario.exs # 5 simultanés, 100 au total
+      elixipp -l 5 --rate 20 mon_scenario.exs     # 5 simultanés, 20 appels/s max
+      elixipp -c comptes.json uac_register.exs    # paramétré par un fichier JSON
+      elixipp -c comptes.json --max-run 0 uac_register.exs   # balaye tous les comptes
+      elixipp --listen udp:5060 uas_register.exs  # serveur registrar UAS (UDP)
+      elixipp -l 200 --listen udp:5060 uas_register.exs      # serveur, 200 abonnés max
+      elixipp --listen tls:5061 --tls-cert cert.pem --tls-key key.pem uas_register.exs
+      elixipp --listen wss:5065 --tls-cert cert.pem --tls-key key.pem uas_register.exs
+      elixipp --listen udp:5060 uas_invite.exs    # serveur d'appels (répond aux INVITE)
+      elixipp -l 20 --listen udp:5060 uas_invite.exs         # 20 appels simultanés max
 
     OPTIONS
       -m, --monitor      Affiche un tableau live des appels en cours.
@@ -1487,6 +1494,8 @@ defmodule Elixipp.CLI do
       L'argument est soit un chemin vers un fichier .exs, soit le nom d'un
       scénario intégré (compilé dans l'exécutable) : UAC.Invite, UAC.Register.
       Les scénarios intégrés ne nécessitent aucun fichier sur la machine.
+      Dans un scénario, un sous-scénario (sub_fsm "autre.exs") est cherché à
+      côté du fichier qui le déclare, pas dans le répertoire courant.
 
     TOUCHES (mode live)
       q                  Arrêt propre : plus de nouveaux appels, attend les actifs.

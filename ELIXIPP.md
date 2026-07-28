@@ -7,251 +7,230 @@
 >
 > * Scenario language: **[DSL.md](DSL.md)**
 > * Building the escript: **[BUILD.md](BUILD.md)**
+> * TLS / WSS certificates: **[TLS_WSS.md](TLS_WSS.md)**
 
+## Quickstart
 
-## Writing and running a SIP scenario
-
-> **Building from source?** This repo is a Mix umbrella (`apps/elixip2`,
-> `apps/elixipp`, `apps/kelixip`). See **[BUILD.md](BUILD.md)** for the full
-> build guide — the `elixipp` escript and the `kelixip` server release.
-
-There are two ways to run a scenario.
-
-### Prerequisites
-
-- **Erlang/OTP** must be installed on the machine (the BEAM runtime).
-- **Elixir** is required for the `mix` mode; it is *not* required at run time for
-  the standalone `elixipp` mode (the escript only needs the Erlang runtime).
-
-### Mode 1 — with mix (development)
-
-Use this while writing and debugging scenarios.
+Five minutes, from nothing to a REGISTER against a real proxy.
 
 ```bash
-# fetch dependencies and compile once
-mix deps.get
-mix compile
+# 1. Get the tool (needs an Erlang/OTP runtime on the host, nothing else).
+cd apps/elixipp && mix escript.build          # -> ./elixipp
+cp elixipp ~/.local/bin/                      # optional
 
-# run a scenario file
-mix scenario scenarios/my_call_scenario.exs
+# 2. Describe your account. Copy the template and fill it in.
+cp ../../scenario-config.json accounts.json
+$EDITOR accounts.json
+
+# 3. Run the built-in REGISTER scenario against it.
+elixipp -c accounts.json UAC.Register
 ```
 
-`mix scenario` compiles the project, loads the given `.exs`, locates the scenario
-module, calls its `run/1`, logs the outcome and exits with status `0` on success
-or `1` on failure (so it can be used in CI).
+```
+Scenario UAC.Register succeeded.
+```
 
-Without the custom task, the plain equivalent is:
+That is the whole contract: **exit code 0 and a `succeeded` line**, or a non-zero
+exit and the reason. The SIP trace of the run is in `elixipp.log`.
+
+Nothing to fill in yet? `elixipp UAC.Invite` and `elixipp UAC.Register` are compiled
+into the binary and need no file at all, and `apps/elixip2/scenarios/` holds
+editable copies of everything (see [Scenarios](#scenarios)).
+
+## Reading the outcome
+
+`elixipp` answers in three places: the exit code, the summary, and the log.
+
+| Exit code | Meaning |
+|---|---|
+| `0` | no failure — every run either succeeded or was **aborted** on purpose (`scenario_aborted`, e.g. a graceful stop) |
+| `1` | at least one run failed (`scenario_failure`, a crash, or an unexpected SIP response) |
+| `2` | the tool refused to start: bad option, missing file, no listener could bind |
+
+A multi-run or server run ends with a summary:
+
+```
+══ Résumé ══════════════════
+  Scénario    : UAS.RegisterExample
+  Total       : 12        ← instances started
+  Succès      : 11        ← scenario_success
+  Interrompus : 1         ← scenario_aborted (graceful stop, peer hung up…) — not a failure
+  Échecs      : 0         ← scenario_failure
+  Refusés 503 : 3         ← turned away: the -l quota was full
+  Refusés 604 : 1         ← turned away: R-URI domain not in the scenario's `domains:`
+════════════════════════════
+```
+
+The two `Refusés` lines only appear when something was actually refused. They are
+the answer to "my phone got a 503 and the tool says nothing".
+
+## Running a scenario
+
+Two ways, same scenarios.
+
+### From the repo, with mix (writing and debugging)
 
 ```bash
-mix run -e "MyCallScenario.run()" scenarios/my_call_scenario.exs
+mix deps.get && mix compile
+mix scenario apps/elixip2/scenarios/uac_register.exs
+mix scenario --config accounts.json UAC.Register
 ```
 
-### Mode 2 — standalone executable of elixipp
+`mix scenario` starts the stack, loads the file (or the built-in module name),
+locates the scenario module, runs **one** instance, logs the outcome and exits `0`
+or `1` — usable in CI as-is.
 
-Use this to ship a self-contained tool that runs scenarios without a mix/Elixir
-install. The `apps/elixipp` app builds an [escript](https://hexdocs.pm/mix/Mix.Tasks.Escript.Build.html)
-named `elixipp` (configured via `escript: [main_module: Elixipp.CLI, name: "elixipp"]`
-in `apps/elixipp/mix.exs`).
+### Standalone, with the escript (running tests anywhere)
+
+`apps/elixipp` builds a self-contained [escript](https://hexdocs.pm/mix/Mix.Tasks.Escript.Build.html):
+all the compiled BEAM of `elixipp`, the SIP stack and their dependencies in one file.
+It still needs an Erlang runtime (`erl` / `escript`) on the host — but no Elixir, no
+mix, no source tree.
 
 ```bash
-# build the self-contained executable once (from the elixipp app)
-cd apps/elixipp && mix escript.build     # produces apps/elixipp/elixipp
+cd apps/elixipp && mix escript.build
+./elixipp --help
+./elixipp ../elixip2/scenarios/uac_register.exs
 ```
 
-Then run scenarios directly:
+Copy the binary anywhere (`cp elixipp ~/.local/bin/`). Same exit codes as
+`mix scenario`.
+
+### Scenarios
+
+The scenario argument is **either a path to a `.exs` file, or the name of a built-in
+module**. A path is yours: it is taken as given, relative to the current directory.
+Inside a scenario, a sub-scenario (`sub_fsm "other.exs"`) is looked up next to the
+file that declares it — so a scenario and its children stay a self-contained unit
+wherever you run them from.
+
+Two built-ins ship inside the binary and need no file on the host:
 
 ```bash
-./elixipp scenarios/my_call_scenario.exs   # by file path
-./elixipp UAC.Invite                       # by name, built-in scenario (no file)
+elixipp UAC.Invite      # outbound INVITE + media
+elixipp UAC.Register    # REGISTER + keepalive + refresh + un-REGISTER
 ```
 
-Install it on your `PATH` to call it from anywhere:
+Their sources are in [`apps/elixip2/lib/scenarios/`](apps/elixip2/lib/scenarios/).
+The editable copies in [`apps/elixip2/scenarios/`](apps/elixip2/scenarios/) are the
+same logic under a different module name (`UAC.InviteExample`,
+`UAC.RegisterExample`), so both can coexist:
+
+| File | What it does |
+|---|---|
+| `uac_register.exs` | REGISTER, digest auth, OPTIONS keepalive, one refresh, un-REGISTER |
+| `uac_invite.exs` | outbound call with media |
+| `uac_invite_webrtc.exs` | the same over WebRTC SDP |
+| `uas_register.exs` | **registrar**: challenges, verifies, accepts/refreshes/un-registers |
+| `uas_invite.exs` | **call server**: answers inbound INVITEs |
+| `uac_register_and_uas_invite.exs` | registers, then waits for an inbound call (uses `sub_fsm`) |
+| `smoke.exs` | no SIP traffic; checks the tool itself end to end |
+| `http_get_example.exs` | an HTTP call from a scenario |
+
+Start from one of these to write your own, and combine either form with `--config`
+to inject real accounts.
+
+## Server (UAS) mode — registrar and call server
+
+A scenario declaring `uas :register` or `uas :invite` is a server: `elixipp` binds
+the `--listen` sockets and lets inbound requests drive it, one instance per dialog.
 
 ```bash
-mix escript.install        # or simply: cp elixipp ~/.local/bin/
-elixipp my_call_scenario.exs
+# Registrar on UDP/5060, with the password it must verify taken from the JSON
+elixipp -c accounts.json --listen udp:5060 uas_register.exs
+
+# Several protocols at once, and a cap on concurrent registrations
+elixipp -l 200 --listen udp:5060 --listen tcp:5060 uas_register.exs
+
+# Call server: answer inbound INVITEs
+elixipp --listen udp:5060 uas_invite.exs
 ```
 
-The escript bundles the compiled BEAM modules of Elixip and its dependencies into
-a single file, but it still relies on an Erlang/OTP runtime (`erl` / `escript`)
-being available on the host. Like `mix scenario`, it exits with `0` on success
-and `1` on failure.
+What to expect:
 
-### Built-in scenarios
+- **`-l N` caps concurrent instances** — registrations or calls. Beyond it, requests
+  are answered `503 Service Unavailable` and counted in the summary. Default: 50.
+- **`--max-run N`** stops accepting after N instances in total, then exits when the
+  last one ends. `0` means no limit.
+- **A call server checks the INVITE R-URI** against the scenario's `config domains:`
+  (a list, or `:any`); a domain it does not serve gets `604 Does Not Exist Anywhere`.
+- **`--config` behaves differently here**: a server has no run counter to cycle
+  accounts on, so the header and the **first** account are shared by every instance.
+  That is how the reference registrar gets the password it verifies — without
+  `-c`, it accepts any well-formed `Authorization`.
+- **Stopping**: type `q` then Enter for a graceful stop (no new instances, the active
+  ones are asked to wind down), or `Ctrl+D` to stop now. Instances that ignore the
+  request are forced after 5 s, with a line saying how many.
 
-A scenario can be **bundled into the tool** instead of loaded from a `.exs` file:
-its module is compiled into `lib/` (so it ships inside the escript) and is run by
-**module name**, with no file on the host:
+Both listeners and the summary tell you what happened:
+
+```
+elixipp — mode serveur UAS Register (UAS.RegisterExample)
+  instances max : 50
+  listeners     : udp:127.0.0.1:5060 (:ok), tcp:*:5060 ({:error, :eaddrinuse})
+```
+
+A listener that fails says why on stderr; if **every** listener fails, the tool exits
+`2` rather than pretending to serve.
+
+### TLS and WSS
+
+Both need an X.509 certificate, given on the command line (or through
+`ELIXIPP_TLS_CERT` / `ELIXIPP_TLS_KEY`):
 
 ```bash
-elixipp UAC.Invite      # outbound INVITE + media (built-in)
-elixipp UAC.Register    # REGISTER + keepalive + refresh (built-in)
+elixipp --listen tls:5061 --tls-cert certs/cert.pem --tls-key certs/key.pem uas_register.exs
+elixipp --listen wss:5065 --tls-cert certs/cert.pem --tls-key certs/key.pem uas_register.exs
 ```
 
-The built-ins live in [`apps/elixip2/lib/scenarios/`](apps/elixip2/lib/scenarios/). The matching files in
-[`apps/elixip2/scenarios/`](apps/elixip2/scenarios/) (`uac_invite.exs`, `uac_register.exs`) are editable,
-file-loadable copies — same logic, but a distinct module name (`UAC.InviteExample`
-/ `UAC.RegisterExample`) so they do not collide with the bundled modules. Use the
-`.exs` files as a starting point to write your own, and combine either form with
-`--config` to inject real accounts:
+Generating a self-signed pair, mutual TLS, cipher suites and the operational
+guidance: **[TLS_WSS.md](TLS_WSS.md)**. As a **client**, `elixipp` needs no
+certificate of its own (it does not verify the server's either, by default), so
+dialling a TLS or WSS proxy works with nothing but the URI. Connection caps default
+to 100 per protocol (`:tcp_max_connections`, `:tls_max_connections`,
+`:wss_max_connections` in `config/config.exs`).
+
+Internals, if you need them: [docs/tls_listener.md](docs/tls_listener.md),
+[docs/wss_listener.md](docs/wss_listener.md).
+
+### Testing kelixip with elixipp
+
+The two artifacts of this repo are made to be pointed at each other: kelixip is the
+registrar under test, `elixipp` the client fleet.
 
 ```bash
-elixipp -c ives.json UAC.Register                 # built-in, JSON-parameterized
-elixipp -c ives.json --max-run 0 UAC.Register      # walk through every account
+# 1. kelixip, with a domain and a subscriber (see docs/kelixip/installation.md)
+KELIXIP_CONFIG=/etc/kelixip/config.toml $REL daemon
+
+# 2. one client, verbose, to see the exchange end to end
+elixipp -c accounts.json --log-level debug UAC.Register
+
+# 3. what the server thinks
+kelictl regs
+
+# 4. then the same at scale: 200 accounts, 20 new registrations per second
+elixipp -c accounts.json -l 200 --rate 20 --monitor UAC.Register
 ```
 
-Both `elixipp` and `mix scenario` accept a built-in name in place of a file path.
+The reverse direction works too: run `elixipp` as the registrar
+(`--listen udp:5060 uas_register.exs`) and point a real handset or a proxy at it.
 
-### Running Server (UAS) scenarios — registrar and call server
+### Two elixipp processes on one host
 
-Run it as a server UAS with one or more `--listen PROTO:PORT` listeners:
+A REGISTER exchange between two `elixipp` needs **two OS processes** (a single BEAM
+has one transaction registry, so it cannot be both ends of the same transaction), on
+different local ports. The client picks a free port ≥ 5000 by itself, so
+`--local-port` is only for reproducibility:
 
 ```bash
-elixipp --listen udp:5060 scenarios/uas_register.exs         # registrar on UDP/5060
-elixipp --listen tcp:5060 scenarios/uas_register.exs         # registrar on TCP/5060
-elixipp --listen udp:5060 --listen tcp:5060 scenarios/uas_register.exs  # both protocols
-elixipp -l 50 --listen tcp:5060 scenarios/uas_register.exs   # cap at 50 concurrent registrations
-elixipp --listen udp:5060 scenarios/uas_invite.exs           # call server: answer inbound INVITEs
-elixipp -l 20 --listen udp:5060 scenarios/uas_invite.exs     # cap at 20 concurrent calls
+# Terminal 1 — the registrar
+elixipp -c accounts.json --listen udp:127.0.0.1:5060 uas_register.exs
+
+# Terminal 2 — the client, pointed at it
+elixipp -c loopback.json --local-port 5070 --local-addr 127.0.0.1 uac_register.exs
 ```
 
-`elixipp` reads the scenario type (`uas :register` → `:uas_register`,
-`uas :invite` → `:uas_invite`), starts the listeners and registers a single
-factory (`Elixip.ScenarioUAS`) as either the registration or the call processing
-module. The factory enforces the concurrency quota (`-l` → `503` beyond it) and,
-for a call server, checks the INVITE R-URI against the scenario's `config
-domains:` (a virtual-server domain list, or `:any` catch-all) — a non-served
-domain is rejected with `604 Does Not Exist Anywhere`. One scenario instance is
-spawned per inbound dialog. See the `SIP.Session.CallUAS` reply macros in
-[DSL.md](DSL.md).
-
-For TCP, the listener accepts inbound connections and spins up one
-`SIP.Transport.TCP` process per connection. The maximum number of simultaneous
-TCP connections defaults to 100 and can be overridden in `config/config.exs`:
-
-```elixir
-config :elixip2, :tcp_max_connections, 200
-```
-
-Connections exceeding the limit are dropped at the transport level (TCP RST).
-
-A TLS listener (`SIP.Transport.TLSListener`) is now implemented on the same model as
-TCP. See [docs/tls_listener.md](docs/tls_listener.md) for certificate setup, runtime
-configuration, and security recommendations.
-
-A WSS listener (`SIP.Transport.WSSListener`) is also implemented: it binds a TLS
-server socket, performs the WebSocket HTTP upgrade handshake (RFC 6455), and spawns
-one `SIP.Transport.WSS` instance per accepted connection. Certificates are shared with
-the TLS listener (`:tls_certfile` / `:tls_keyfile`). The connection cap defaults to 100
-and can be overridden with `:wss_max_connections`. See [docs/wss_listener.md](docs/wss_listener.md)
-for details.
-
-Scenario can be parametrized using json files as described above.
-
-### Testing the UAS with the UAC, locally (two terminals)
-
-You can exercise the registrar with the client scenario over a real UDP loopback
-on `127.0.0.1`. A genuine REGISTER exchange needs **two OS processes** (each BEAM
-has a single SIP transaction registry, so a single process can't be both the UAC
-and the UAS for the same transaction). They must bind different local UDP ports.
-Since the client now defaults to a random free port (≥ 5000), `--local-port` is
-optional; the examples below keep it explicit for reproducibility:
-
-**UDP loopback:**
-
-```bash
-# Terminal 1 — the registrar (UAS), bound to 127.0.0.1:5060
-elixipp --listen udp:127.0.0.1:5060 scenarios/uas_register.exs
-
-# Terminal 2 — the client (UAC), bound to a different local port, proxy → the UAS
-elixipp --local-port 5070 --local-addr 127.0.0.1 -c uac-loopback.json scenarios/uac_register.exs
-```
-
-**TCP loopback:**
-
-```bash
-# Terminal 1 — the registrar (UAS) on TCP/5060
-elixipp --listen tcp:127.0.0.1:5060 scenarios/uas_register.exs
-
-# Terminal 2 — the client (UAC) targeting the UAS over TCP
-elixipp --local-port 5070 --local-addr 127.0.0.1 -c uac-loopback-tcp.json scenarios/uac_register.exs
-```
-
-`uac-loopback-tcp.json` is identical to the UDP version except the proxy URI uses the `sip-tcp` scheme (or the transport parameter, depending on how your scenario resolves it):
-
-```json
-{
-  "domain": "example.com",
-  "proxyuri": "sip:127.0.0.1:5060;transport=tcp",
-  "proxyusesrv": false,
-  "accounts": [ { "username": "alice", "password": "changeme", "domain": "example.com" } ]
-}
-```
-
-**TLS loopback:**
-
-TLS requires a certificate and private key on the UAS side. See [docs/tls_listener.md](docs/tls_listener.md)
-for how to generate or obtain them. The certificate paths can be set globally in
-`config/runtime.exs` or passed via environment variables before launching `elixipp`.
-
-```bash
-# config/runtime.exs (or export before running)
-# config :elixip2, tls_certfile: "certs/certificate.pem", tls_keyfile: "certs/private_key.pem"
-
-# Terminal 1 — the registrar (UAS) on TLS/5061
-elixipp --listen tls:127.0.0.1:5061 scenarios/uas_register.exs
-
-# Terminal 2 — the client (UAC) targeting the UAS over TLS
-elixipp --local-port 5071 --local-addr 127.0.0.1 -c uac-loopback-tls.json scenarios/uac_register.exs
-```
-
-`uac-loopback-tls.json` points the UAC at the TLS listener:
-
-```json
-{
-  "domain": "example.com",
-  "proxyuri": "sip:127.0.0.1:5061;transport=tls",
-  "proxyusesrv": false,
-  "accounts": [ { "username": "alice", "password": "changeme", "domain": "example.com" } ]
-}
-```
-
-> The UAC uses `SIP.Transport.TLS` which connects outbound; it does not verify the
-> server certificate by default (suitable for self-signed certs in development).
-> See [docs/tls_listener.md](docs/tls_listener.md) for enabling mutual TLS or strict cert
-> verification.
-
-**WSS loopback:**
-
-WSS uses the same certificate files as TLS. The UAC must target the server with a
-`sips:` URI or `transport=wss` parameter.
-
-```bash
-# config/runtime.exs (or export before running)
-# config :elixip2, tls_certfile: "certs/certificate.pem", tls_keyfile: "certs/private_key.pem"
-
-# Terminal 1 — the registrar (UAS) on WSS/5065
-elixipp --listen wss:127.0.0.1:5065 scenarios/uas_register.exs
-
-# Terminal 2 — the client (UAC) targeting the UAS over WSS
-elixipp --local-port 5075 --local-addr 127.0.0.1 -c uac-loopback-wss.json scenarios/uac_register.exs
-```
-
-`uac-loopback-wss.json` points the UAC at the WSS listener:
-
-```json
-{
-  "domain": "example.com",
-  "proxyuri": "sip:127.0.0.1:5065;transport=wss",
-  "proxyusesrv": false,
-  "accounts": [ { "username": "alice", "password": "changeme", "domain": "example.com" } ]
-}
-```
-
-See [docs/wss_listener.md](docs/wss_listener.md) for the full design, certificate
-requirements, and browser/WebRTC client interoperability notes.
-
-`uac-loopback.json` points the client at the UAS:
+with `loopback.json` pointing the client at the local registrar:
 
 ```json
 {
@@ -262,7 +241,11 @@ requirements, and browser/WebRTC client interoperability notes.
 }
 ```
 
-### Command-line options
+For TCP, TLS or WSS, add the transport to the proxy URI
+(`"sip:127.0.0.1:5060;transport=tcp"`, `;transport=tls`, `;transport=wss`) and give
+the server its certificate.
+
+## Command-line options
 
 ```bash
 elixipp [OPTIONS] <scenario.exs | ModuleName>
@@ -270,89 +253,66 @@ elixipp [OPTIONS] <scenario.exs | ModuleName>
 
 | Option | Meaning | Default |
 |---|---|---|
-| `-m`, `--monitor` | Display a live table of the calls in progress. | off |
-| `-l N`, `--limit N` | Run `N` calls simultaneously. Without `--max-run`, slots are recycled indefinitely. The live table is shown only with `--monitor`; otherwise the run is silent and prints the final summary. | `1` |
-| `--max-run N` | Stop after `N` executions in total. | unlimited (`1` when neither `--limit` nor `--max-run` is set) |
-| `--rate N` | Number of calls started per second. Each new call creation is spaced by `1000 / N` ms. Values greater than `100` are ignored and fall back to the default. | `10` |
-| `-c FILE`, `--config FILE` | JSON file parameterizing the scenario (header + N accounts). Overrides the scenario `config` block. See [Paramétrage par fichier JSON](#paramétrage-par-fichier-json-externe). | none |
-| `--listen PROTO:PORT` | (server mode) Listen for inbound requests on this protocol/port. Repeatable. `PROTO:ADDR:PORT` also pins the advertised local IP; `PROTO` alone (e.g. `--listen udp`) picks a random free port (≥ 5000, availability checked). Protocols: `udp`, `tcp`, `tls`, `wss`. TLS and WSS share the same certificate files; see [docs/tls_listener.md](docs/tls_listener.md) and [docs/wss_listener.md](docs/wss_listener.md) for setup. | `udp:5060` |
-| `--local-port PORT` | (client mode) Local UDP port used to send. Without it, a random free UDP port (≥ 5000) is picked, so a UAC always starts even on a host already serving a UAS on 5060. | random free port ≥ 5000 |
-| `--local-addr ADDR` | (client mode) Local IP advertised in Via/Contact. | first local IPv4 |
-| `--log-file PATH` | Log file path. | `elixipp.log` |
-| `--log-level LEVEL` | File log level: `debug` \| `info` \| `warning` \| `error`. | `debug` |
-| `--log-sequence` | Write one PlantUML sequence diagram per scenario instance. Single call only (`--limit 1`). | off |
-| `-h`, `--help` | Show the help text. | — |
+| `-m`, `--monitor` | Live table of the instances in progress. | off |
+| `-l N`, `--limit N` | Concurrent instances: calls in client mode, registrations/calls in server mode (503 beyond). Without `--max-run`, client slots are recycled indefinitely. | `1` client, `50` server |
+| `--max-run N` | Stop after `N` instances in total. `0` = no limit. | `1` for a bare run, unlimited as soon as `-l` or `--max-run` is given |
+| `--rate N` | New calls started per second (client mode); each creation is spaced by `1000 / N` ms. Values outside `0 < N ≤ 100` are ignored with a warning. | `2` |
+| `-c FILE`, `--config FILE` | JSON file parameterizing the scenario (header + N accounts). See [JSON parameterisation](#json-parameterisation). | none |
+| `--listen PROTO:PORT` | (server) Listen for inbound requests. Repeatable. `PROTO:ADDR:PORT` also pins the advertised local IP; `PROTO` alone picks a free port ≥ 5000. Protocols: `udp`, `tcp`, `tls`, `wss`. | `udp:5060` |
+| `--tls-cert FILE` | X.509 certificate (PEM) for the TLS/WSS listeners. Env: `ELIXIPP_TLS_CERT`. | `certs/certificate.pem` |
+| `--tls-key FILE` | Its private key. Required together with `--tls-cert`. Env: `ELIXIPP_TLS_KEY`. | `certs/private_key.pem` |
+| `--local-port PORT` | (client) Local UDP port to send from. | a free port ≥ 5000 |
+| `--local-addr ADDR` | (client) Local IP advertised in Via/Contact. | first local IPv4 |
+| `--log-file PATH` | Log file. | `elixipp.log` |
+| `--log-level LEVEL` | `debug` \| `info` \| `warning` \| `error`. `debug` is the one that shows the SIP messages. | `info` |
+| `--log-sequence` | Write a PlantUML sequence diagram per instance. One instance at a time only (refused with `-l > 1`, client or server). | off |
+| `-h`, `--help` | Show the help. | — |
 
-```bash
-# 5 simultaneous calls, starting at most 20 new calls per second
-elixipp -l 5 --rate 20 scenarios/my_call_scenario.exs
-```
-
-In live mode the following keys are available:
+Keys, in live mode:
 
 | Key | Action |
 |---|---|
-| `q` | Graceful shutdown: stop starting new calls, wait for the active ones. |
-| `Ctrl+D` | Immediate stop: print the summary and halt right away. |
-| `↑` / `↓` | Scroll the call table when it exceeds the terminal height. |
+| `q` | Graceful stop: no new instances, wait for the active ones (forced after 5 s). |
+| `Ctrl+D` | Stop now: print the summary and halt. |
+| `↑` / `↓` | Scroll the table when it exceeds the terminal height. |
 
-### Live monitor (`--monitor`)
+## Live monitor (`--monitor`)
 
-The `--monitor` (or `-m`) flag displays a live table of the calls in progress —
-one row per running scenario instance — with the scenario name, the last command
-it issued, its current FSM state and the event that triggered the last transition:
-
-```bash
-elixipp --monitor scenarios/my_call_scenario.exs
-```
+One row per running instance — the account it uses, the last high-level command it
+issued, its current FSM state and the event that caused the last transition:
 
 ```
-╭────────────────┬────────────────┬──────────────────┬────────────────────────────╮
-│Scénario        │Commande        │État              │Événement                   │
-├────────────────┼────────────────┼──────────────────┼────────────────────────────┤
-│UAC.Invite      │send_INVITE     │call_established  │toto.mp4: start             │
-╰────────────────┴────────────────┴──────────────────┴────────────────────────────╯
+╭────────────────┬────────────────┬────────────────┬──────────────────┬────────────────────────────╮
+│Scénario        │Compte          │Commande        │État              │Événement                   │
+├────────────────┼────────────────┼────────────────┼──────────────────┼────────────────────────────┤
+│UAC.Register    │33970262546     │send_REGISTER   │registered        │200 OK                      │
+│UAC.Invite      │1001            │media_play      │call_established  │toto.mp4: start             │
+│  └ callee      │1001            │reply_invite    │answered          │INVITE                      │
+╰────────────────┴────────────────┴────────────────┴──────────────────┴────────────────────────────╯
+  Actifs: 3/5  |  Succès: 41  |  Interrompus: 0  |  Échecs: 2  |  Total: 44/100  [q: arrêt propre | Ctrl+D: immédiat]
 ```
 
-- The **Commande** column display the last high level macro command used by the scenario.
-- the **Etat** column report the current state
-- the **Evènement
+- **Compte** is the account in use — set from the scenario config, or learned from
+  the REGISTER once a server scenario has authenticated it.
+- A **sub-FSM** (`sub_fsm`) is indented under its parent with `└`.
+- On a real terminal the cells are colour-coded: light green for `:sip`, orange for
+  `:media`, light blue otherwise; **État** turns green on success, red on failure.
+  Colours are emitted only on a TTY.
+- `--monitor` on a pipe or a CI log degrades to one final snapshot in plain text.
+  Without `--monitor`, a parallel run prints nothing until the summary.
 
-
-Transition **events** can be categorized the same way, via an optional third
-argument to `goto` (`goto target, desc, type`):
+The type carried by an event comes from `on_events`, which infers it from the matched
+pattern; `goto target, desc, type` overrides it:
 
 ```elixir
 goto call_answered, "200 OK", :sip
 goto start_play, "media connected", :media
 ```
 
-In practice you rarely write the type by hand: using `on_events` (instead of
-`receive`) infers it from the matched event pattern, so SIP events show green and
-media events orange automatically. The explicit third argument is only needed to
-override the inference or to type a `goto` outside an `on_events`. The event type
-is stored next to the event text (also for the sequence diagram).
+## JSON parameterisation
 
-On a real terminal the cells are color-coded: the **Commande** and **Événement**
-cells use light green for `:sip`, orange for `:media` and light blue for anything
-else, and the **État** cell turns green on success and red on failure. Colors are
-emitted only on a TTY — the non-interactive snapshot stays plain text.
-
-The view is rendered with [Owl](https://hexdocs.pm/owl) (pure Elixir, bundled in
-the escript). On a real terminal the table refreshes in place; on a non-interactive
-device (a pipe, a CI log) it degrades to a single final snapshot. Today a single
-row is shown; the table is built to hold one row per call once scenarios run in
-parallel.
-
-## Paramétrage par fichier JSON externe
-
-A scenario can be parameterized programmatically with its `config` block, **or**
-from an external JSON file passed with `--config` / `-c`. The two are not
-exclusive: the `config` block provides the defaults and the JSON file, when
-given, overrides them. Without `--config`, behavior is unchanged.
-
-The file holds a **header** (global / per-session defaults) and a list of **N
-accounts**:
+A scenario takes its parameters from its `config` block, from an external JSON file
+(`--config`), or both — the block provides the defaults, the file overrides them.
 
 ```json
 {
@@ -360,6 +320,7 @@ accounts**:
   "proxyuri": "sip:sip.example.com:5060",
   "proxyusesrv": false,
   "optionkeepaliveperiod": 15,
+  "mediaserver": { "module": "mendooze", "url": "http://10.0.0.1:8080" },
   "accounts": [
     { "username": "1000", "password": "secret1" },
     { "username": "1001", "password": "secret2", "displayname": "Bob" },
@@ -372,126 +333,133 @@ A ready-to-copy template lives in [`scenario-config.json`](scenario-config.json)
 
 **Header keys** (all optional):
 
-| Key | Routed to | Note |
-|---|---|---|
-| `domain` | `%SIP.Context{}` | default domain for accounts that omit it |
-| `proxyuri` | `:elixip2` app env | `"sip:host:port"`, parsed to a `%SIP.Uri{}` |
-| `proxyusesrv` | `:elixip2` app env | boolean |
-| `optionkeepaliveperiod` | `:elixip2` app env | integer (seconds) |
+| Key | Effect |
+|---|---|
+| `domain` | default domain for accounts that omit it |
+| `proxyuri` | `"sip:host:port"`, with `;transport=tcp\|tls\|wss` if needed |
+| `proxyusesrv` | boolean: resolve the proxy through SRV records |
+| `optionkeepaliveperiod` | OPTIONS keepalive period, in seconds |
+| `mediaserver` | `{"module": "mockup" \| "mendooze", "url": …}` — which media server `media_connect/0` drives |
 
-**Account keys**: `username` and `password` are **required**; `domain` (falls
-back to the header), `authusername` (defaults to `username`) and `displayname`
-are optional.
+**Account keys**: `username` and `password` are required; `domain` (falls back to the
+header), `authusername` (defaults to `username`) and `displayname` are optional.
 
-The `proxyuri` / `proxyusesrv` / `optionkeepaliveperiod` keys are *global* — the
-runner routes them to the `:elixip2` application env instead of the per-session
-context. They can equally appear in a scenario `config` block, so scenarios no
-longer call `Application.put_env` in `initial_state`:
+Validation is **strict**: an unknown key, a missing `username`/`password`, an
+unresolved domain or a type mismatch aborts before the run, naming the culprit.
 
-```elixir
-config username: "1000", domain: "example.com", passwd: "changeme",
-       proxyuri: "sip:sip.example.com:5060",
-       proxyusesrv: false,
-       optionkeepaliveperiod: 15
-```
+Precedence: `scenario config block  <  JSON header  <  JSON account`.
 
-### Merge precedence
+### Which account runs
 
-```
-scenario config block   <   JSON header   <   JSON account
-```
-
-### Selecting accounts
-
-Each scenario instance is built from one account, chosen round-robin on a
-monotonic run counter: `accounts[rem(run_index, N)]`. With the default
-`--limit 1`, one account is used per run, so to walk through every account you
-recycle slots with `--max-run`:
+Each instance takes one account, round-robin on a monotonic run counter:
+`accounts[rem(run_index, N)]`. So with the default `--limit 1`, walking every account
+means recycling slots:
 
 ```bash
-# one-shot, first account only
-elixipp -c ives.json scenarios/uac_register.exs
-
-# walk through all accounts sequentially (slots recycled, unlimited runs)
-elixipp -c ives.json --max-run 0 scenarios/uac_register.exs
-
-# N accounts in parallel
-elixipp -c ives.json --limit 3 scenarios/uac_register.exs
-
-# also available from mix (single instance, first account)
-mix scenario --config ives.json scenarios/uac_register.exs
+elixipp -c accounts.json uac_register.exs              # first account, one run
+elixipp -c accounts.json --max-run 0 uac_register.exs  # every account, in sequence, forever
+elixipp -c accounts.json -l 3 uac_register.exs         # three accounts in parallel
+mix scenario --config accounts.json uac_register.exs   # single instance, first account
 ```
 
-Validation is **strict**: an unknown key (header or account), a missing
-`username`/`password`, an unresolved domain or a type mismatch aborts before the
-run with a clear message.
+In **server** mode there is no run counter: the header and the first account are
+shared by every instance (that is the password a registrar verifies).
 
-> **Credentials** — keep real account files out of version control. The repo
-> ignores `ives.json` for that purpose; copy `scenario-config.json` to start.
+> **Credentials** — keep real account files out of version control. `ives.json` and
+> `ives-wss.json` are ignored by git anywhere in the tree for that purpose; copy
+> `scenario-config.json` to start.
 
 ## Logging
 
-Logs are written through Elixir's `Logger`. There are two distinct logging
-policies depending on how a scenario is run.
-
-### `mix scenario` and `mix test`
-
-These use the project configuration in `config/config.exs`: warnings and above
-go to the console, everything from `:debug` up is written to `elixip.log`. Change
-the level or the file there. `mix scenario` starts the application before running
-the scenario, so this configuration is fully applied.
-
-### Standalone `elixipp`
-
-A self-contained escript does not reliably apply `config/config.exs` (and never
-runs `config/runtime.exs`), so `elixipp` sets up **its own logging at startup**,
-overriding whatever was baked into the binary. It is driven by command-line
-options:
+`elixipp` writes its own log file and keeps the console for its verdict.
 
 | Option | Meaning | Default |
 |---|---|---|
-| `--log-file PATH`   | log file path | `elixipp.log` |
-| `--log-level LEVEL` | file log level: `debug` \| `info` \| `warning` \| `error` | `debug` |
-| `--log-sequence`    | write a PlantUML sequence diagram per instance (single call only) | off |
-
-The console is kept quiet (warnings and above) since `elixipp` prints its own
-success/failure line.
+| `--log-file PATH` | log file | `elixipp.log` |
+| `--log-level LEVEL` | `debug` \| `info` \| `warning` \| `error` | `info` |
+| `--log-sequence` | PlantUML sequence diagram per instance (one instance at a time) | off |
 
 ```bash
-# default: writes elixipp.log at :debug level
-elixipp scenarios/my_call_scenario.exs
-
-# override the file and level for a single run (e.g. in CI)
-elixipp --log-file ci_run.log --log-level info scenarios/my_call_scenario.exs
+elixipp mon_scenario.exs                                   # elixipp.log, at info
+elixipp --log-file ci_run.log --log-level debug mon_scenario.exs
 ```
+
+**`--log-level debug` is what shows the SIP messages** — every request and response,
+in full, plus each FSM transition. At `info` you get the lifecycle (transactions
+sent, responses received, scenario outcome) without the message bodies. The console
+stays at warnings and above, since the tool prints its own success/failure line.
+
+`mix scenario` and `mix test` use the project configuration instead
+(`config/config.exs`): warnings to the console, `:info` and above to `elixip.log`.
 
 ## Troubleshooting
 
-elixipp produces a log file (`elixipp.log` by default — see [Logging](#logging)
-for how to configure it).
+**The tool exits 2 immediately.** It refused to start, and said why on stderr: an
+unknown option, a scenario file that is not where you said, `--tls-cert` without
+`--tls-key`, or no listener able to bind.
 
-### Sequence diagram (`--log-sequence`)
+**`écoute … impossible — port déjà utilisé`.** Something already holds that port
+(another `elixipp`, kamailio, kelixip). Pick another `--listen`, or find the culprit
+with `ss -lunp | grep 5060`. In client mode the local port is picked automatically, so
+this only concerns servers.
 
-A PlantUML sequence diagram of a scenario instance can be produced either by
-passing `--log-sequence` to `elixipp`, or by setting the debug flag in the
-scenario `initial_state`:
+**`écoute … impossible — permission refusée`.** A port below 1024 as a normal user.
+Run as root, grant `CAP_NET_BIND_SERVICE`, or listen on 5060 and above.
 
-```Elixir
-# Storing some info into the context
+**`certificat/clé TLS manquants`, or a TLS listener that will not start.** The paths
+in `--tls-cert` / `--tls-key` are checked before binding; the message names the file
+it could not read. Default paths are `certs/certificate.pem` and
+`certs/private_key.pem`, relative to the current directory.
+
+**REGISTER loops on 401.** The digest is being refused. Check `--log-level debug` for
+the `realm` in the challenge and the `username` in your `Authorization`: a wrong
+`authusername`, a realm the scenario does not expect, or a password from the wrong
+account. The framework challenges with `MD5` because a client holds one HA1 computed
+from its own `algorithm` — a scenario answering a `SHA256` challenge must set
+`algorithm: "SHA256"` in its config block.
+
+**The registration is granted, then dies about a minute later.** The registrar granted
+a lifetime shorter than the refresh the client scheduled, or the refresh is being
+refused. The dialog layer logs the lifetime it read and where from
+(`REGISTER lifetime 60s (per-contact: [60], Expires header: nil)`).
+
+**`REGISTER failed with 503` against your own `elixipp` registrar.** The `-l` quota is
+full: every slot is held by a live registration. Raise `-l`, or check the summary's
+`Refusés 503` line.
+
+**`INVITE` refused with 604.** The R-URI domain is not in the server scenario's
+`config domains:`. Add it, or use `:any`.
+
+**The monitor table says `(aucun appel actif)`.** No instance is running: in client
+mode the run may already be over (look at the summary), in server mode nothing has
+arrived yet.
+
+**A phone behind NAT registers but calls never reach it.** Its Contact carries a
+private address. `elixipp`'s registrar keeps the flow the registration came in on for
+connected transports; over UDP, check that the `received` address is being used.
+
+**A scenario dies with `"exception!"`.** The reason and its stacktrace are in the log
+file, right after `Exception in scenario state <name>` — an undefined variable, a
+missing sub-scenario file, a misspelled macro.
+
+## Sequence diagram (`--log-sequence`)
+
+A PlantUML sequence diagram of an instance can be produced either with
+`--log-sequence`, or by setting the debug flag in the scenario itself:
+
+```elixir
 ctx_set(:debug, true)
 ```
 
-Either way, a file specific to each scenario execution (instance) is generated,
-named `<scenario_name>_<pid>.puml` (the pid is sanitized to digits and dots). It
-starts with the SIP configuration applied — passwords masked — as PlantUML
-comments, then renders every command sent, state transition and the terminal
-outcome of the FSM. `--log-sequence` is restricted to a **single simultaneous
-call** (rejected with `--limit > 1`), since one file is written per instance.
+Either way, one file per instance is written, named `<scenario>_<pid>.puml` (the pid
+sanitized to digits and dots). It opens with the SIP configuration applied —
+passwords masked — as PlantUML comments, then renders every command sent, every state
+transition and the terminal outcome. It is restricted to a **single simultaneous
+instance** (refused with `--limit > 1`), since one file is written per instance.
 
-The fidelity is reduced (v1): outbound commands become request arrows
-(`send_INVITE` → `INVITE`), state changes become notes, and a transition
-triggered by a SIP event carries its description as an inbound arrow. Example
-output:
+The fidelity is deliberately coarse (v1): outbound commands become request arrows
+(`send_INVITE` → `INVITE`), state changes become notes, and a transition triggered by
+a SIP event carries its description as an inbound arrow.
 
 ```plantuml
 ' Scenario      : UAC.Invite

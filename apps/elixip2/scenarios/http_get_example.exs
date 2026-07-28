@@ -1,8 +1,8 @@
 # Example scenario driving the HTTP.Session mixin: before placing a call, the
 # scenario queries a provisioning backend over HTTP and only proceeds if it
 # answers 200 OK. Run it with:
-#     elixipp scenarios/http_get_example.exs
-#     mix scenario scenarios/http_get_example.exs
+#     elixipp apps/elixip2/scenarios/http_get_example.exs
+#     mix scenario apps/elixip2/scenarios/http_get_example.exs
 defmodule HTTP.GetExample do
   use SIP.Scenario
   # Pull in the http_GET/3 macro. `use SIP.Scenario` already brought in the

@@ -1,5 +1,5 @@
 # Reference UAS (server-side) INVITE scenario — a minimal call server. Run it with:
-#     elixipp --listen udp:5060 scenarios/uas_invite.exs
+#     elixipp --listen udp:5060 apps/elixip2/scenarios/uas_invite.exs
 #
 # elixipp loads this file, sees it is a `:uas_invite` scenario (set by the
 # `uas :invite` annotation), starts the configured listeners and registers

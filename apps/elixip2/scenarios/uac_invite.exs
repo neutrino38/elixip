@@ -1,8 +1,8 @@
 # Editable, file-loadable copy of the built-in UAC.Invite scenario
 # (lib/scenarios/uac_invite.ex). The module is named UAC.InviteExample so it does
 # not collide with the bundled UAC.Invite. Run it with:
-#     elixipp scenarios/uac_invite.exs
-#     mix scenario scenarios/uac_invite.exs
+#     elixipp apps/elixip2/scenarios/uac_invite.exs
+#     mix scenario apps/elixip2/scenarios/uac_invite.exs
 # or run the bundled version by name: `elixipp UAC.Invite`.
 defmodule UAC.InviteExample do
   # use SIP.Scenario pulls in the state-machine DSL together with

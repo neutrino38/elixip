@@ -1,17 +1,18 @@
-# Editable, file-loadable copy of the built-in UAC.Register scenario
-# (lib/scenarios/uac_register.ex). The module is named UAC.RegisterExample so it
-# does not collide with the bundled UAC.Register. Run it with:
-#     elixipp scenarios/uac_register.exs
-#     mix scenario scenarios/uac_register.exs
-# or run the bundled version by name: `elixipp UAC.Register`.
+# Registers, then waits for an inbound call: the REGISTER client above and the
+# uas_invite.exs sub-scenario below, in one run. This is what a softphone does — be
+# reachable, then answer — and it is the scenario to point a proxy at when testing
+# that calls reach a registered user. Run it with:
+#     elixipp -c accounts.json apps/elixip2/scenarios/uac_register_and_uas_invite.exs
+#     mix scenario apps/elixip2/scenarios/uac_register_and_uas_invite.exs
+# It ends when the call is over (or after 5 refreshes with no call).
 defmodule UAC.RegisterThenWaitForCall do
   use SIP.Scenario
   use SIP.Session.RegisterUAC
 
 
-  # Standard placeholder identity. Real credentials are injected at run time from
-  # an external JSON file (e.g. `elixipp -c ives.json scenarios/uac_register.exs`)
-  # which overrides this config block. See README "Paramétrage par fichier JSON".
+  # Standard placeholder identity. Real credentials are injected at run time from an
+  # external JSON file (`elixipp -c accounts.json …`), which overrides this config
+  # block. See ELIXIPP.md, "JSON parameterisation".
   @username "1000"
   @authusername "1000"
   @displayname "Test User"

@@ -60,8 +60,9 @@ Notes:
 cd apps/elixipp
 mix escript.build            # produces apps/elixipp/elixipp (self-contained)
 ./elixipp --help
-./elixipp scenarios/uac_invite.exs                 # run a scenario file
-./elixipp --listen udp:5060 scenarios/uas_register.exs   # server (UAS) mode
+./elixipp ../elixip2/scenarios/uac_invite.exs      # run a scenario file
+./elixipp --listen udp:5060 ../elixip2/scenarios/uas_register.exs   # server (UAS) mode
+# The scenario path is taken as given, relative to the current directory.
 ```
 
 The escript bundles the compiled BEAM of `elixipp` + `elixip2` + their deps into
@@ -255,5 +256,5 @@ how to configure the service, is the operator's guide:
 # run a scenario through mix (from the tool app or the umbrella root)
 mix run -e "UAC.Invite.run()" apps/elixip2/scenarios/uac_invite.exs
 # or via the mix task:
-cd apps/elixip2 && mix scenario scenarios/uac_invite.exs
+mix scenario apps/elixip2/scenarios/uac_invite.exs
 ```

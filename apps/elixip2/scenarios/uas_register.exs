@@ -1,5 +1,5 @@
 # Reference UAS (server-side) REGISTER scenario. Run it as a registrar with:
-#     elixipp --listen udp:5060 scenarios/uas_register.exs
+#     elixipp --listen udp:5060 apps/elixip2/scenarios/uas_register.exs
 #
 # elixipp loads this file, sees it is a `:uas_register` scenario (set by the
 # `uas :register` annotation), starts the configured listeners and registers

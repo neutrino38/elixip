@@ -1,8 +1,8 @@
 # Editable, file-loadable copy of the built-in UAC.Register scenario
 # (lib/scenarios/uac_register.ex). The module is named UAC.RegisterExample so it
 # does not collide with the bundled UAC.Register. Run it with:
-#     elixipp scenarios/uac_register.exs
-#     mix scenario scenarios/uac_register.exs
+#     elixipp apps/elixip2/scenarios/uac_register.exs
+#     mix scenario apps/elixip2/scenarios/uac_register.exs
 # or run the bundled version by name: `elixipp UAC.Register`.
 defmodule UAC.RegisterExample do
   use SIP.Scenario

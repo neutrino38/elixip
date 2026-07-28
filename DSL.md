@@ -743,5 +743,5 @@ and arbitrates the timeout with a single `receive`/`after`. On timeout the
 coordinator **kills** the worker, which cancels the in-flight request (its
 pooled connection is reclaimed) so **no late reply can ever pollute a later
 `on_events`**. The blocking wait lives entirely in the throwaway coordinator,
-never in the scenario. See `scenarios/http_get_example.exs` for a full example
+never in the scenario. See `apps/elixip2/scenarios/http_get_example.exs` for a full example
 and the `HTTP.Session` module doc for the internals.
