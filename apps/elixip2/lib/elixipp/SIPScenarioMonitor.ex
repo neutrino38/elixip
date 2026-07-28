@@ -43,7 +43,12 @@ defmodule SIP.Scenario.Monitor do
 
   # ── Public API ──────────────────────────────────────────────────────────────
 
-  @doc "Start the monitor (idempotent — reuses an already-running instance)."
+  @doc """
+  Start the monitor **unlinked** (idempotent — reuses an already-running instance).
+
+  This is elixipp's imperative bootstrap, called from the CLI once it knows
+  `--monitor` was asked for. A supervised owner wants `start_link/1` instead.
+  """
   @spec start() :: {:ok, pid()}
   def start do
     case GenServer.start(__MODULE__, :ok, name: __MODULE__) do
@@ -52,6 +57,14 @@ defmodule SIP.Scenario.Monitor do
       err -> err
     end
   end
+
+  @doc """
+  Start the monitor under a supervisor — how the kelixip server runs it, so
+  `kelictl monitor` has FSM state to report (the `use GenServer` default
+  `child_spec/1` calls this).
+  """
+  @spec start_link(keyword) :: GenServer.on_start()
+  def start_link(_opts \\ []), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
   @doc """
   Upsert the state of a call. `call_id` is the scenario process pid. `event_type`
@@ -101,7 +114,14 @@ defmodule SIP.Scenario.Monitor do
     :ok
   end
 
-  @doc "Snapshot of all calls (one map per call), ordered by appearance."
+  @doc """
+  Snapshot of all calls (one map per call), ordered by appearance.
+
+  Each row carries its `:slot` — the key it was reported under — so a caller that
+  owns those slots can join this view with its own (kelixip keys them on the
+  instance id, see `Kelix.Control.monitor/0`). Renderers that build from named
+  columns simply ignore it.
+  """
   @spec calls() :: [call_info()]
   def calls do
     GenServer.call(__MODULE__, :calls)
@@ -175,6 +195,7 @@ defmodule SIP.Scenario.Monitor do
         entry
         |> Map.take([:scenario, :account, :command, :command_type, :state, :event, :event_type])
         |> Map.put(:depth, length(entry.idx) - 1)
+        |> Map.put(:slot, entry.slot)
       end)
 
     {:reply, rows, st}
@@ -186,7 +207,7 @@ defmodule SIP.Scenario.Monitor do
     {base, seq} =
       case Map.fetch(st.calls, call_id) do
         :error ->
-          {Map.put(@empty, :idx, index_for(st, call_id)), st.seq + 1}
+          {@empty |> Map.put(:idx, index_for(st, call_id)) |> Map.put(:slot, call_id), st.seq + 1}
 
         {:ok, existing} ->
           {existing, st.seq}

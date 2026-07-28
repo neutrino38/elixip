@@ -125,9 +125,17 @@ defmodule Kelix.Control.CLI do
   defp render(:monitor, rows) when is_list(rows) do
     {0,
      table(
-       ["id", "domain", "function", "script", "pid"],
+       ["id", "domain", "function", "account", "state", "event", "command"],
        rows,
-       &[to_string(&1.id), &1.domain, to_string(&1.function), &1.script, inspect(&1.pid)]
+       &[
+         to_string(&1.id),
+         &1.domain,
+         to_string(&1.function),
+         dash(&1.account),
+         dash(&1.state),
+         dash(&1.event),
+         dash(&1.command)
+       ]
      )}
   end
 
@@ -159,8 +167,27 @@ defmodule Kelix.Control.CLI do
   defp fmt(v) when is_binary(v), do: v
   defp fmt(v), do: inspect(v)
 
+  # An empty FSM cell reads as a missing column; a dash reads as "nothing yet".
+  defp dash(""), do: "-"
+  defp dash(nil), do: "-"
+  defp dash(v), do: to_string(v)
+
+  # Column-aligned, because an unpadded 7-column FSM table is unreadable in a
+  # terminal. Widths come from the content, so a narrow table stays narrow.
   defp table(headers, rows, to_cells) do
-    Enum.join([Enum.join(headers, "  ") | Enum.map(rows, &Enum.join(to_cells.(&1), "  "))], "\n")
+    cells = [headers | Enum.map(rows, to_cells)]
+
+    widths =
+      cells
+      |> Enum.zip_with(fn column -> Enum.map(column, &String.length/1) |> Enum.max() end)
+
+    cells
+    |> Enum.map_join("\n", fn row ->
+      row
+      |> Enum.zip(widths)
+      |> Enum.map_join("  ", fn {cell, w} -> String.pad_trailing(cell, w) end)
+      |> String.trim_trailing()
+    end)
   end
 
   defp format_uptime(ms) do

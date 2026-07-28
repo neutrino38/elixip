@@ -122,6 +122,9 @@ defmodule Kelix.InstancePool do
 
       {inst, instances} ->
         ScriptRegistry.checkin(inst.script, inst.version)
+        # Free the FSM monitor row (and those of any sub_fsm children) — otherwise
+        # a busy registrar accumulates one row per registration, forever.
+        SIP.Scenario.Monitor.clear(inst.id)
 
         Logger.debug(
           module: __MODULE__,
@@ -171,15 +174,19 @@ defmodule Kelix.InstancePool do
         {:reply, {:reject, 500, "Server Internal Error"}, state}
 
       {:ok, module, version} ->
+        id = state.next_id
+
         {pid, ref} =
           SIP.Scenario.Runner.spawn_uas_instance(module,
             dialog_pid: dialog_id,
             parent_pid: self(),
             inbound_request: req,
-            config_overrides: overrides
+            config_overrides: overrides,
+            # Key the FSM monitor row on OUR id rather than the instance pid, so
+            # `Kelix.Control.monitor/0` can join the two views — and so a `sub_fsm`
+            # child sorts right under its parent ({id, name}).
+            slot_id: id
           )
-
-        id = state.next_id
 
         inst = %{
           id: id,

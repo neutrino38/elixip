@@ -32,21 +32,37 @@ defmodule Kelix.Control do
   end
 
   @doc """
-  Scenarios in progress (`kelictl monitor`), from `Kelix.InstancePool.list/0`.
+  Scenarios in progress (`kelictl monitor`).
 
-  It used to read `SIP.Scenario.Monitor` — the in-memory store behind elixipp's
-  `--monitor` view, which `Kelix.Application` never starts. The command was
-  therefore **always empty** on the server, while the pool held the answer all
-  along.
+  Joins the two views that each hold half the answer, on the instance id:
 
-  Each row is `%{id, pid, domain, function, script}`. The `id` matters: it is what
-  `shutdown_scenario/1` (`kelictl stop <id>`) takes, and no other command exposed
-  it — so `stop` was unusable in practice.
+    * `Kelix.InstancePool.list/0` — **which** instances exist (`id`, `domain`,
+      `function`, `script`, `pid`). The `id` is what `shutdown_scenario/1`
+      (`kelictl stop <id>`) takes, and no other command exposes it.
+    * `SIP.Scenario.Monitor` — **where each FSM is**: current `state`, the `event`
+      that got it there, the last `command` it issued, and the `account` it serves.
+      Reading the FSM state is the whole point of a DSL-driven server; without it
+      the formalism is invisible from the outside.
+
+  Rows the pool does not know about (a `sub_fsm` child, keyed `{id, name}`) are not
+  surfaced: the server spawns none today (`:uas_register` is not supported as a
+  sub-FSM). A missing monitor row degrades to empty FSM columns, never an error.
   """
   @spec monitor() :: [map]
   def monitor() do
-    safe(fn -> Kelix.InstancePool.list() end, [])
+    fsm = safe(fn -> Map.new(SIP.Scenario.Monitor.calls(), &{&1.slot, &1}) end, %{})
+
+    for row <- safe(fn -> Kelix.InstancePool.list() end, []) do
+      Map.merge(row, fsm_fields(Map.get(fsm, row.id)))
+    end
   end
+
+  @empty_fsm %{scenario: "", state: "", event: "", command: "", account: ""}
+
+  defp fsm_fields(nil), do: @empty_fsm
+
+  defp fsm_fields(entry),
+    do: Map.merge(@empty_fsm, Map.take(entry, [:scenario, :state, :event, :command, :account]))
 
   @doc """
   Current registrations (`kelictl regs [aor]`). `aor` filters by user-part, and by

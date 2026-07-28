@@ -52,21 +52,54 @@ defmodule Kelix.ControlTest do
     # It used to read SIP.Scenario.Monitor — elixipp's --monitor store, which the
     # server never starts — so it was always empty and `kelictl stop <id>` had no
     # way to learn an id.
-    test "monitor/0 lists the running instances, with the id `stop` takes" do
-      assert Control.monitor() == []
-
-      route = %{domain: "mon.test", function: :registrar, script: @waiter, max_calls: nil}
+    # Instances of neighbouring tests may still be draining (the pool frees a slot
+    # on an async :DOWN), so every assertion here is scoped to its own domain.
+    defp spawn_watched(domain) do
+      route = %{domain: domain, function: :registrar, script: @waiter, max_calls: nil}
       assert {:accept, pid} = Kelix.InstancePool.accept(route, nil, %{method: :REGISTER})
       on_exit(fn -> send(pid, {:scenario_ctl, :shutdown, :test}) end)
+      pid
+    end
 
-      assert [row] = Control.monitor()
-      assert row.domain == "mon.test"
+    defp row_for(domain), do: Enum.find(Control.monitor(), &(&1.domain == domain))
+
+    # The FSM store is fed by casts, so let the first transition land.
+    defp await_state(domain) do
+      Enum.reduce_while(1..50, nil, fn _i, _acc ->
+        case row_for(domain) do
+          %{state: s} = row when s != "" -> {:halt, row}
+          _ -> Process.sleep(20) && {:cont, nil}
+        end
+      end)
+    end
+
+    test "monitor/0 lists the running instances, with the id `stop` takes" do
+      pid = spawn_watched("mon.test")
+
+      assert row = await_state("mon.test")
       assert row.function == :registrar
       assert is_integer(row.id)
       assert row.pid == pid
 
+      # …joined with the FSM view: which state the scenario sits in, and on what
+      # event. Reading that is the point of a DSL-driven server.
+      assert row.state == "initial_state"
+      assert row.scenario != ""
+
       # the id is usable as advertised
       assert Control.shutdown_scenario(row.id) == :ok
+    end
+
+    test "monitor/0 degrades to empty FSM columns rather than failing" do
+      spawn_watched("nofsm.test")
+      assert row = await_state("nofsm.test")
+
+      # drop the FSM row: the pool still knows the instance, the join must not care
+      SIP.Scenario.Monitor.clear(row.id)
+
+      assert row = row_for("nofsm.test")
+      assert row.state == ""
+      assert row.command == ""
     end
 
     test "set_log_level/1 applies a valid level and rejects a bad one" do

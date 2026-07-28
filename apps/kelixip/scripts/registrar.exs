@@ -97,6 +97,9 @@ defmodule Kelix.Registrar do
           expires: granted.expires
         )
 
+        # Name the identity this instance serves, so `kelictl monitor` says WHO is
+        # registering and not just that something is.
+        SIP.Scenario.Monitor.note_account(granted.aor)
         "200 OK"
 
       # RFC 3261 §10.3 step 7: a 423 MUST carry Min-Expires, otherwise the client

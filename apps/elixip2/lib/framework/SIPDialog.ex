@@ -198,6 +198,12 @@ alias SIP.Transac
 
   @doc "Reply to an in dialog request"
   def reply(dialog_id, req, resp_code, reason, upd_fields) when is_pid(dialog_id) and is_req(req) do
+    # `reply/5` is the app→stack send primitive for a UAS, the counterpart of the
+    # instrumented `send_*` macros — so record it, and every script that composes
+    # its own responses (which is what a kelixip script does, design §11.1) shows
+    # up in the monitor without having to instrument itself. A helper that has a
+    # more meaningful label of its own notes it AFTER calling us, and wins.
+    SIP.Scenario.Monitor.note_command(:sip, "reply_#{resp_code}")
     GenServer.call(dialog_id, { :replyreq, req, resp_code, reason, upd_fields})
   end
 
