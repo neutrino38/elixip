@@ -252,6 +252,57 @@ defmodule SIP.Test.UASRegister do
     assert wait_until(fn -> Elixip.RegistrarUAS.stats().active == 0 end, 2_000) == :ok
   end
 
+  test "a rebinding REGISTER refreshes the registration instead of ending it" do
+    # The shape a handset sends when it moves: drop the old binding
+    # (`Contact ;expires=0`), add the new one whose lifetime is in the `Expires`
+    # header only. Reading the header first — as this scenario used to, against
+    # RFC 3261 §10.2.4 — resolves the whole request to 0 and de-registers the user
+    # who was merely rebinding. The un-REGISTER test above cannot catch it: its
+    # Contact carries no `expires` parameter, so both readings agree there.
+    restart_registrar(@scenario, 5)
+
+    {:ok, msg} = File.read("test/SIP-REGISTER-LVP.txt")
+    {:ok, base} = SIPMsg.parse(msg, fn _c, _m, _l, _line -> :ok end)
+    upd_uri = SIP.Uri.set_uri_param(base.ruri, "unittest", "1")
+    base = SIP.Msg.Ops.update_sip_msg(base, {:ruri, upd_uri}) |> uniq_callid() |> with_cseq(1)
+    routed = SIP.Transport.Selector.select_transport(upd_uri)
+    :ok = GenServer.call(routed.tp_pid, :settestapp)
+    tp = routed.tp_pid
+
+    auth = %{"realm" => "example.com", "nonce" => "n0"}
+    cid = base.callid
+
+    send(tp, {:recv, fresh_branch(base)})
+    assert_receive {:uas_response, 401, %{callid: ^cid}}, 2_000
+
+    reg = base |> with_auth(auth) |> with_cseq(2) |> fresh_branch()
+    send(tp, {:recv, reg})
+    assert_receive {:uas_response, 200, %{callid: ^cid}}, 2_000
+
+    old = SIP.Uri.set_uri_param(List.first(List.wrap(base.contact)), "expires", "0")
+    {:ok, new} = SIP.Uri.parse("sip:5430@103.145.13.102:5191")
+
+    rebind =
+      base
+      |> Map.put(:contact, [old, new])
+      |> Map.put(:expires, 600)
+      |> with_auth(auth)
+      |> with_cseq(3)
+      |> fresh_branch()
+
+    send(tp, {:recv, rebind})
+    assert_receive {:uas_response, 200, %{callid: ^cid}}, 2_000
+
+    # Still registered: the instance must not have taken this for a goodbye.
+    Process.sleep(200)
+    assert Elixip.RegistrarUAS.stats().active == 1
+
+    # …and leave nothing behind: the factory is a named singleton shared with the
+    # other UAS test files, so an instance left registered here leaks into them.
+    Elixip.RegistrarUAS.shutdown_all(:test_cleanup)
+    assert wait_until(fn -> Elixip.RegistrarUAS.stats().active == 0 end, 2_000) == :ok
+  end
+
   # Replace the topmost Via branch so each injected message is a new transaction.
   defp fresh_branch(req) do
     [top | rest] = req.via

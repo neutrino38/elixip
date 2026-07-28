@@ -46,7 +46,119 @@ defmodule SIP.Msg.Ops do
 
   defguard is_failure_resp(msg) when is_resp(msg) and msg.response in 400..699
 
+  # ── REGISTER lifetimes (RFC 3261 §10.2.4 and §20.19) ─────────────────────────
+  #
+  # THE one place that answers "what lifetime does this REGISTER ask for". Callers
+  # add their policy on top (bounds, per-domain defaults, which code to reply);
+  # none of them re-reads the headers. See CLAUDE.md, Message Layer: this rule had
+  # been re-derived five times and no two derivations agreed, each divergence found
+  # on real traffic (a rebinding handset read as an un-registration, a registration
+  # evaporating after 1 s, a crash on a valueless `;expires`).
+  #
+  # The rule: a Contact's `expires` URI parameter wins **when present**, otherwise
+  # the request's `Expires` header applies, otherwise the default (3600). It is
+  # resolved **per contact** — a rebinding REGISTER carries the old binding with
+  # `;expires=0` and the new one whose lifetime is in the header, so the request as
+  # a whole asks for the longest-lived of its bindings.
 
+  @register_default_expires 3600
+
+  @doc "The lifetime a REGISTER gets when neither a Contact param nor a header says (RFC 3261 §20.19)."
+  @spec register_default_expires() :: pos_integer()
+  def register_default_expires, do: @register_default_expires
+
+  @doc """
+  The `Expires` header as an integer, or `nil` when absent (or unparseable).
+
+  The parser already yields an integer; a binary is accepted too, because a message
+  built by hand (templates, tests, a scenario) carries the header as text.
+  """
+  @spec expires_header(map()) :: non_neg_integer() | nil
+  def expires_header(msg) do
+    case Map.get(msg, :expires) do
+      exp when is_integer(exp) and exp >= 0 -> exp
+      exp when is_binary(exp) -> parse_expires(exp, nil)
+      _ -> nil
+    end
+  end
+
+  @doc """
+  The `expires` URI parameter of a single Contact, or `nil` when it carries none.
+
+  A wildcard Contact (`:*`, §10.2.2) and an unparsed Contact have no parameter of
+  their own, so they read as `nil` — the header speaks for them.
+  """
+  @spec contact_expires_param(term()) :: non_neg_integer() | nil
+  def contact_expires_param(%SIP.Uri{} = contact) do
+    case SIP.Uri.get_uri_param(contact, "expires") do
+      {:ok, value} -> parse_expires(value, nil)
+      _ -> nil
+    end
+  end
+
+  def contact_expires_param(_other), do: nil
+
+  @doc """
+  Lifetime asked for by **one** contact: its `expires` parameter when present, else
+  `header_expires` (as read by `expires_header/1`), else `default`.
+
+  Pass `default` to override the RFC default with a configured one (kelixip's
+  per-domain `default_expires`).
+  """
+  @spec contact_expires(term(), non_neg_integer() | nil, non_neg_integer()) ::
+          non_neg_integer()
+  def contact_expires(contact, header_expires, default \\ @register_default_expires) do
+    # 0 is a meaningful lifetime (an un-binding), and only nil is falsy here, so
+    # `||` resolves the precedence without swallowing it.
+    contact_expires_param(contact) || header_expires || default
+  end
+
+  @doc """
+  Per-contact lifetimes of a REGISTER, in header order — `[0, 600]` is a rebinding,
+  `[0]` an un-registration. Empty when the request carries no Contact at all.
+  """
+  @spec contact_lifetimes(map(), non_neg_integer()) :: [non_neg_integer()]
+  def contact_lifetimes(msg, default \\ @register_default_expires) do
+    header = expires_header(msg)
+
+    msg
+    |> Map.get(:contact)
+    |> List.wrap()
+    |> Enum.map(&contact_expires(&1, header, default))
+  end
+
+  @doc """
+  Lifetime the request asks for as a whole: the longest-lived binding in it, or the
+  header/default when it carries no Contact.
+  """
+  @spec requested_expires(map(), non_neg_integer()) :: non_neg_integer()
+  def requested_expires(msg, default \\ @register_default_expires) do
+    case contact_lifetimes(msg, default) do
+      [] -> expires_header(msg) || default
+      lifetimes -> Enum.max(lifetimes)
+    end
+  end
+
+  @doc """
+  True when the request drops every binding it mentions — i.e. its longest-lived
+  binding is 0. A request that drops one contact and refreshes another is *not* an
+  un-registration.
+  """
+  @spec unregister?(map(), non_neg_integer()) :: boolean()
+  def unregister?(msg, default \\ @register_default_expires) do
+    requested_expires(msg, default) == 0
+  end
+
+  # Be liberal in what we accept: a valueless `;expires` is parsed as `true`, and
+  # handsets have been seen sending junk. Neither may crash the dialog reading it.
+  defp parse_expires(value, fallback) when is_binary(value) do
+    case Integer.parse(value) do
+      {n, _rest} when n >= 0 -> n
+      _ -> fallback
+    end
+  end
+
+  defp parse_expires(_value, fallback), do: fallback
 
   @doc "Add a tomost via"
   def add_via(sipmsg, { local_ip, local_port, transport }, branch_id, additional_params \\ nil) when is_bitstring(branch_id) do

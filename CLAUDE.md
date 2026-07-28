@@ -134,6 +134,25 @@ today it is a P0 skeleton (`Kelix.Application` + supervision tree).
 - `SIP.MsgTemplate` — constructs common SIP requests/responses
 - `SIP.Uri` — SIP URI parsing and manipulation
 
+> **Message interpretation belongs to the framework, in exactly one place.**
+> Anything that reads meaning out of a SIP message — header precedence, defaults,
+> tolerance for malformed values, "what is this request actually asking for" — is
+> framework code in the message layer (`SIP.Msg.Ops` / `SIPMsg` / `SIP.Uri`), not
+> in the dialog layer, a session mixin, a kelixip module or a scenario. Callers
+> layer their own **policy** on top of that single reading (bounds, per-domain
+> config, which SIP code to answer), never their own re-parse.
+>
+> The rule is not stylistic. The REGISTER lifetime rule (RFC 3261 §10.2.4: the
+> Contact `expires` parameter wins *when present*, else the `Expires` header, else
+> the §20.19 default, resolved *per contact*) had been re-derived five times —
+> dialog timer, dialog end-of-transaction, the registrar session helpers, the
+> kelixip registrar module, the reference scenario — and no two agreed. One read
+> the header first, so a rebinding handset was taken for an un-registration; one
+> ignored the header, so a real phone's registration evaporated after 1 s; one
+> crashed on a valueless `;expires`. Each was found in production traffic, one at
+> a time, and fixing one never fixed the others. It now lives in
+> `SIP.Msg.Ops.requested_expires/2` & friends, with everything else delegating.
+
 ### Transaction Layer (`SIP.Transac.*`, `SIP.ICT`, `SIP.IST`, `SIP.NICT`, `SIP.NIST`)
 - Implements RFC 3261 transaction state machines
 - `ICT`/`NICT` — INVITE/non-INVITE client transactions

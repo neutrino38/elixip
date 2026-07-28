@@ -241,7 +241,7 @@ defmodule SIP.DialogImpl do
     connectionfull co
   """
   def arm_expiration_timer(state = %SIP.DialogImpl{}, req) when req.method == :REGISTER do
-    requested = registration_expires(req)
+    requested = SIP.Msg.Ops.requested_expires(req)
 
     {expire, timeratom} =
       case requested do
@@ -259,13 +259,17 @@ defmodule SIP.DialogImpl do
     # Say which lifetime was read and from where. A registration that quietly
     # evaporates is otherwise indistinguishable from one the peer never asked to
     # keep, and the two have opposite fixes.
+    # `charlists: :as_lists` or the per-contact list is unreadable: a single 60 s
+    # binding inspects as ~c"<" (60 is the codepoint of "<"), which is precisely
+    # what this log exists to make obvious.
     Logger.debug(
       dialogpid: "#{inspect(self())}",
       module: __MODULE__,
       message:
         "REGISTER lifetime #{requested}s (per-contact: " <>
-          "#{inspect(contact_lifetimes(req))}, Expires header: " <>
-          "#{inspect(Map.get(req, :expires))}) -> #{timeratom} in #{expire}s"
+          "#{inspect(SIP.Msg.Ops.contact_lifetimes(req), charlists: :as_lists)}, " <>
+          "Expires header: #{inspect(SIP.Msg.Ops.expires_header(req))}) " <>
+          "-> #{timeratom} in #{expire}s"
     )
 
     state = cancel_expiration_timer(state)
@@ -281,74 +285,10 @@ defmodule SIP.DialogImpl do
     state
   end
 
-  # Registration lifetime asked for by a REGISTER, in the precedence RFC 3261
-  # §10.2.4 prescribes: the Contact `expires` parameter wins **when present**,
-  # otherwise the `Expires` header applies, otherwise the default (§20.19).
-  #
-  # The precedence is **per contact**, and the dialog then follows the longest-lived
-  # binding of the request. This is what a real handset needs: rebinding, it sends a
-  # single REGISTER carrying TWO contacts — the old one with `;expires=0` to drop it,
-  # and the new one (with a `+sip.instance`) whose lifetime is in the `Expires`
-  # header. Resolving the parameter across the whole request instead of per contact
-  # yielded 0 — the removal alone — so the dialog read the request as an
-  # un-registration and tore itself down, taking the instance with it.
-  #
-  # It is an un-registration only when **every** contact resolves to 0.
-  @default_register_expires 3600
-
-  defp registration_expires(req) do
-    header = header_expires(req)
-
-    case List.wrap(Map.get(req, :contact)) do
-      [] -> header
-      contacts -> contacts |> Enum.map(&contact_expires(&1, header)) |> Enum.max()
-    end
-  end
-
-  defp contact_expires(%SIP.Uri{} = contact, header) do
-    case SIP.Uri.get_uri_param(contact, "expires") do
-      {:ok, value} -> String.to_integer(value)
-      _ -> header
-    end
-  end
-
-  # A wildcard Contact (:*) carries no lifetime of its own — the header states it.
-  defp contact_expires(_other, header), do: header
-
-  # Per-contact lifetimes, for the diagnostic log: a mixed remove+add request must
-  # be readable at a glance ([0, 600] is a rebinding, [0] an un-registration).
-  defp contact_lifetimes(req) do
-    header = header_expires(req)
-    Map.get(req, :contact) |> List.wrap() |> Enum.map(&contact_expires(&1, header))
-  end
-
-  defp header_expires(req) do
-    case Map.get(req, :expires) do
-      exp when is_integer(exp) -> exp
-      exp when is_binary(exp) -> String.to_integer(exp)
-      _ -> @default_register_expires
-    end
-  end
-
-  # A REGISTER may carry several Contact headers (the parser then yields a
-  # list of URIs). The dialog lifetime follows the longest-lived binding.
-  # Returns nil when no contact carries an expires parameter.
-  # A wildcard Contact (:*, RFC 3261 §10.2.2) carries no expires parameter — it is
-  # an unregister-all, so it must read as "no lifetime", not blow up here.
-  defp max_contact_expires(contact) do
-    contact
-    |> List.wrap()
-    |> Enum.reduce(nil, fn
-      %SIP.Uri{} = c, acc ->
-        case SIP.Uri.get_uri_param(c, "expires") do
-          {:ok, value} -> max(acc || 0, String.to_integer(value))
-          _ -> acc
-        end
-
-      _other, acc ->
-        acc
-    end)
-  end
+  # The lifetime a REGISTER asks for is read by SIP.Msg.Ops.requested_expires/2 —
+  # the framework's single implementation of the RFC 3261 §10.2.4 precedence (see
+  # CLAUDE.md, Message Layer). The dialog only decides what to do with it: follow
+  # the longest-lived binding, and treat 0 as an un-registration.
 
   # A 3xx response may carry several Contact targets; make them loggable.
   defp contacts_to_string(contact) do
@@ -1028,12 +968,12 @@ defmodule SIP.DialogImpl do
           module == SIP.ICT
 
         :REGISTER ->
-          # unregister (all contact bindings carry expires=0)
-          case max_contact_expires(req.contact) do
-            # true if this is a client transaction
-            0 -> module == SIP.ICT
-            _ -> false
-          end
+          # An un-REGISTER we sent ourselves ends the dialog once its transaction
+          # completes. Read through SIP.Msg.Ops so the header counts: this test used
+          # to look at the Contact `expires` parameter alone, so our own
+          # `Expires: 0` un-REGISTER (no parameter — the shape every real UA sends)
+          # read as "not an un-registration" and left the dialog behind.
+          SIP.Msg.Ops.unregister?(req) and module == SIP.ICT
 
         _ ->
           false

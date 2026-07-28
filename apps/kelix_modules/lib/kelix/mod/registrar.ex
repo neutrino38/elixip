@@ -264,7 +264,8 @@ defmodule Kelix.Mod.Registrar do
   defp do_save(state, req, domain, dialog_pid, info) do
     with {:ok, aor} <- aor_of(req),
          contacts = List.wrap(Map.get(req, :contact)) |> Enum.reject(&is_nil/1),
-         {:ok, actions} <- plan_contacts(contacts, Map.get(req, :expires), bounds(state, domain)) do
+         header_exp = SIP.Msg.Ops.expires_header(req),
+         {:ok, actions} <- plan_contacts(contacts, header_exp, bounds(state, domain)) do
       apply_actions(state, domain, aor, actions, req, dialog_pid, info)
     end
   end
@@ -561,25 +562,15 @@ defmodule Kelix.Mod.Registrar do
 
   # ── contact / expires helpers ────────────────────────────────────────────────
 
-  defp requested_expires(contact, header_exp, bounds) do
-    case SIP.Uri.get_uri_param(contact, "expires") do
-      {:ok, v} -> to_int(v, header_or_default(header_exp, bounds))
-      _ -> header_or_default(header_exp, bounds)
-    end
-  end
+  # The lifetime one contact asks for. The RFC 3261 §10.2.4 precedence (and its
+  # tolerance for a valueless or junk `;expires`) is the framework's, read once in
+  # SIP.Msg.Ops — see CLAUDE.md, Message Layer. What is ours is the *policy*: the
+  # per-domain `default_expires` used when neither the contact nor the header says.
+  defp requested_expires(contact, header_exp, bounds),
+    do: SIP.Msg.Ops.contact_expires(contact, header_exp, bounds.default_expires)
 
   defp header_or_default(exp, _bounds) when is_integer(exp), do: exp
   defp header_or_default(_exp, bounds), do: bounds.default_expires
-
-  defp to_int(v, default) when is_binary(v) do
-    case Integer.parse(v) do
-      {n, _} -> n
-      :error -> default
-    end
-  end
-
-  # A valueless URI param (";expires" with no "=") is parsed as `true`.
-  defp to_int(_v, default), do: default
 
   defp granted_expires(actions) do
     case for({:add, _c, exp} <- actions, do: exp) do

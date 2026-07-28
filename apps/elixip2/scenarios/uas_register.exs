@@ -29,8 +29,9 @@ defmodule UAS.RegisterExample do
   uas(:register)
 
   @domain "example.com"
-  # Granted registration lifetime (seconds), echoed back in the 200 OK Contact.
-  @granted_expires 300
+  # Ceiling on the registration lifetime we grant (seconds). What goes back in the
+  # 200 OK Contact is `min(what the client asked, this)` — see granted_expires/1.
+  @max_granted_expires 300
 
   # No outbound account here: a server scenario is seeded from the inbound
   # request, not from a local identity. `domain` is used as the digest realm.
@@ -64,7 +65,7 @@ defmodule UAS.RegisterExample do
             goto(loop, "401 Unauthorized (#{why})")
 
           :ok ->
-            accept_registration(req, dialog_pid, expires: @granted_expires)
+            accept_registration(req, dialog_pid, expires: granted_expires(req))
             goto(registered, "200 OK")
 
           other ->
@@ -100,7 +101,7 @@ defmodule UAS.RegisterExample do
               accept_unregister(req, dialog_pid)
               scenario_success("un-REGISTER")
             else
-              accept_registration(req, dialog_pid, expires: @granted_expires)
+              accept_registration(req, dialog_pid, expires: granted_expires(req))
               goto(loop, "REGISTER refreshed")
             end
 
@@ -137,28 +138,23 @@ defmodule UAS.RegisterExample do
   # ── REGISTER reply helpers (application side) ──────────────────────────────
   # Thin wrappers over the framework's dialog/transaction machinery.
 
-  # An un-REGISTER is a REGISTER requesting expiration 0 (Expires header or the
-  # Contact "expires" parameter).
-  defp unregister?(req), do: requested_expires(req) == 0
+  # An un-REGISTER drops every binding it mentions. Asking the framework
+  # (SIP.Msg.Ops) rather than re-reading the headers here is not a detail: this
+  # scenario used to read the `Expires` header *before* the Contact parameter, the
+  # opposite of RFC 3261 §10.2.4 and of what the dialog layer resolves — so a
+  # handset rebinding (old contact `;expires=0`, new lifetime in the header) was
+  # taken for a de-registration. See CLAUDE.md, Message Layer.
+  defp unregister?(req), do: SIP.Msg.Ops.unregister?(req)
 
-  defp requested_expires(req) do
-    case Map.get(req, :expires) do
-      e when is_integer(e) ->
-        e
-
-      _ ->
-        case List.wrap(Map.get(req, :contact)) do
-          [%SIP.Uri{} = contact | _] ->
-            case SIP.Uri.get_uri_param(contact, "expires") do
-              {:ok, v} -> String.to_integer(v)
-              _ -> nil
-            end
-
-          _ ->
-            nil
-        end
-    end
-  end
+  # Lifetime we grant: what the client asked for, capped at our ceiling. Granting a
+  # flat 300 s regardless is what made this registrar unusable past one minute: the
+  # dialog layer arms its expiry on the lifetime the REGISTER *asked* for, so a
+  # client asking 60 s got a dialog dying at 60 s while it believed it had 300 s
+  # and scheduled its refresh at 150 s — the binding vanished and its OPTIONS
+  # keepalives then hit a dead dialog. Granting min(asked, ceiling) keeps the two
+  # ends on the same clock (kelixip's registrar module does the same, per domain).
+  defp granted_expires(req),
+    do: min(SIP.Msg.Ops.requested_expires(req), @max_granted_expires)
 
   # Confirm an un-REGISTER with a 200 OK echoing the Contact at expires 0. We do
   # not run check_register/1 here: it rejects expirations below the 60 s minimum,

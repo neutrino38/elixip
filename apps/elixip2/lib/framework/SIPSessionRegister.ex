@@ -32,22 +32,32 @@ defmodule SIP.Session.Registrar do
               {:accept, pid} | {:reject, integer, binary}
   @callback on_registration_expired(dialog_id :: pid, app_pid :: pid) :: any()
 
+  # Bounds policy only — the lifetimes themselves are read by SIP.Msg.Ops (the
+  # framework's single reading of the RFC 3261 §10.2.4 precedence; see CLAUDE.md,
+  # Message Layer). Here we clamp what a contact/header *states*, so a contact
+  # carrying no parameter is left alone rather than being pinned to a resolved
+  # value: the 200 OK must not invent a per-contact expiry the request never gave.
+  #
   # The wildcard Contact (:*) has no expires parameter to bound — pass it through.
   defp adjust_contact_expires(:*), do: :*
 
   defp adjust_contact_expires(contact) do
-    case SIP.Uri.get_uri_param(contact, "expires") do
-      {:ok, value} ->
-        case String.to_integer(value) do
-          expires when expires > @max_expires ->
-            SIP.Uri.set_uri_param(contact, "expires", to_string(@max_expires))
+    case SIP.Msg.Ops.contact_expires_param(contact) do
+      nil ->
+        contact
 
-          expires when expires < @min_expires ->
-            raise "Contact expire value #{value} is below the minimum allowed #{@min_expires}"
+      # 0 drops this binding (§10.2.2). It is not a lifetime that is "too brief":
+      # refusing it made the framework unable to answer a rebinding REGISTER at all
+      # — the old contact carries `;expires=0`, so accept_registration/3 raised and
+      # the registrar instance died without replying anything.
+      0 ->
+        contact
 
-          _ ->
-            contact
-        end
+      expires when expires > @max_expires ->
+        SIP.Uri.set_uri_param(contact, "expires", to_string(@max_expires))
+
+      expires when expires < @min_expires ->
+        throw({:reject, 423, "Interval Too Brief"})
 
       _ ->
         contact
@@ -59,19 +69,24 @@ defmodule SIP.Session.Registrar do
   end
 
   defp adjust_expires_header(req) do
-    expires = Map.get(req, :expires)
-
-    cond do
-      is_nil(expires) ->
+    # Read through SIP.Msg.Ops: a header carried as text (a hand-built message)
+    # compared with `>` against an integer is always "greater" in Elixir term
+    # ordering, which silently rewrote every such Expires to the maximum.
+    case SIP.Msg.Ops.expires_header(req) do
+      nil ->
         req
 
-      expires > @max_expires ->
+      # An un-REGISTER, not a too-brief lifetime (same rule as per contact above).
+      0 ->
+        req
+
+      expires when expires > @max_expires ->
         Map.put(req, :expires, @max_expires)
 
-      expires < @min_expires ->
-        raise "Expires value #{expires} is too low."
+      expires when expires < @min_expires ->
+        throw({:reject, 423, "Interval Too Brief"})
 
-      true ->
+      _ ->
         req
     end
   end
@@ -434,21 +449,10 @@ defmodule SIP.Session.RegisterUAC do
         _ -> false
       end)
 
-    with %SIP.Uri{} <- contact,
-         {:ok, value} <- SIP.Uri.get_uri_param(contact, "expires") do
-      String.to_integer(value)
-    else
-      _ -> header_expire(resp)
-    end
-  end
-
-  defp header_expire(resp) do
-    # The parser maps the "Expires" header to :expires with an integer value.
-    case Map.get(resp, :expires) do
-      v when is_binary(v) -> String.to_integer(v)
-      v when is_integer(v) -> v
-      _ -> nil
-    end
+    # Same precedence as on the request side, read by the same framework function
+    # (SIP.Msg.Ops) — with no default: when the registrar states nothing, the
+    # caller keeps the lifetime it asked for rather than inventing one.
+    SIP.Msg.Ops.contact_expires_param(contact) || SIP.Msg.Ops.expires_header(resp)
   end
 
   # Cancel a previously armed timer (if any) then start a one-shot timer that
