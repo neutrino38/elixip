@@ -197,6 +197,46 @@ defmodule Kelix.Mod.RegistrarTest do
       assert [_one] = Registrar.bindings(@rebind_domain, "50815019")
     end
 
+    test "the instance and its capabilities are stored, not just the URI", ctx do
+      assert {:ok, _} = Registrar.save(ctx.req, @rebind_domain)
+      assert [binding] = Registrar.bindings(@rebind_domain, "50815019")
+
+      assert binding.instance == "<urn:uuid:5da07818-04fe-1240-45af-60189533c4e1>"
+      assert binding.reg_id == "1"
+      assert binding.methods =~ "INVITE"
+    end
+
+    # RFC 5626: the instance names the DEVICE, so the same phone reaching us from a
+    # new address replaces its binding. Keying on the URI alone is why the handset
+    # has to drop its old contact by hand on every network change.
+    test "the same instance from a new address replaces the binding, no hand cleanup", ctx do
+      assert {:ok, _} = Registrar.save(ctx.req, @rebind_domain)
+
+      assert [%Contact{contact: %{domain: "172.21.104.60"}}] =
+               Registrar.bindings(@rebind_domain, "50815019")
+
+      # the very same device, now behind another address, and NOT dropping anything
+      moved = %SIP.Uri{
+        ctx.new_contact
+        | domain: "192.168.7.7",
+          port: 5062
+      }
+
+      assert {:ok, _} = Registrar.save(%{ctx.req | contact: moved}, @rebind_domain)
+
+      assert [%Contact{contact: %{domain: "192.168.7.7"}}] =
+               Registrar.bindings(@rebind_domain, "50815019")
+    end
+
+    test "a different instance at the same address is a distinct binding", ctx do
+      other =
+        SIP.Uri.set_uri_param(ctx.new_contact, "+sip.instance", ~s("<urn:uuid:deadbeef>"))
+
+      assert {:ok, _} = Registrar.save(ctx.req, @rebind_domain)
+      assert {:ok, _} = Registrar.save(%{ctx.req | contact: other}, @rebind_domain)
+      assert length(Registrar.bindings(@rebind_domain, "50815019")) == 2
+    end
+
     test "the AOR comes from the raw To header the parser produces", ctx do
       # SIPMsg leaves :to as a string; this is the shape that used to yield 400
       assert is_binary(ctx.req.to)

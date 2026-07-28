@@ -72,8 +72,8 @@ Unknown keys are rejected too — a typo must not silently fall back to a defaul
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `target` | `stdout` \| `syslog` | `stdout` | Where logs go. **`syslog` is not wired yet** — it logs a warning and keeps using stdout/journald |
-| `facility` | string | `local0` | Syslog facility (unused while `target = "stdout"`) |
+| `target` | `stdout` \| `syslog` | `stdout` | `syslog` adds an RFC 3164 sink over the local `/dev/log` socket (journald and rsyslog both listen there). It **adds** a sink: stdout stays live, since systemd captures it |
+| `facility` | `kern`, `user`, `daemon`, `local0`…`local7`, … | `local0` | Syslog facility. Validated against the RFC 3164 list; unused while `target = "stdout"` |
 | `level` | `debug` \| `info` \| `warning` \| `error` | `info` | Also changeable at runtime with `kelictl log-level` |
 
 #### `[[listen]]` — one entry per inbound socket
@@ -214,7 +214,7 @@ Presence of the block = the function is enabled.
 
 | Key | Type | Required | Meaning |
 |---|---|---|---|
-| `script` | string | **yes** | Scenario script, resolved under `script_dir` (keep the `.exs`) |
+| `script` | string | **yes** | Scenario script, resolved under `script_dir` (keep the `.exs`). A script may declare `config uses_modules: [:registrar, :auth_db]`, and is then refused at load if one is not loaded |
 | `default_expires` | int > 0 | no | Overrides `[module.registrar].default_expires` **for this domain** |
 | `min_expires` | int > 0 | no | Overrides `[module.registrar].min_expires` **for this domain** |
 | `keepalive_period` | int > 0 | no | *Accepted and validated, but **not applied yet** — server-initiated OPTIONS keepalive towards registered UAs is not implemented (the framework's keepalive is outbound-only).* |

@@ -17,6 +17,10 @@ defmodule Kelix.Registrar do
 
   uas(:register)
 
+  # Declared so the load-time contract (§5.3) refuses this script when either module
+  # is missing, instead of letting the first REGISTER die on an undefined function.
+  config(uses_modules: [:registrar, :auth_db])
+
   # The {:REGISTER, …} is already queued by the dialog layer; wait for it.
   state initial_state do
     goto(wait_register)

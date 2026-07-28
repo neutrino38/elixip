@@ -1,3 +1,58 @@
+defmodule Kelix.ScriptRegistryUsesModulesTest do
+  # async: false — reads the global Kelix.ModuleRegistry.
+  use ExUnit.Case, async: false
+
+  @moduledoc """
+  The load-time check on a script's declared `uses_modules` (design §16 #14).
+  Before it, the dependency script → modules was written nowhere: a domain enabling
+  `registrar` with no module installed was only a boot *warning*, and the first
+  REGISTER died inside the instance.
+  """
+
+  alias Kelix.ScriptRegistry
+
+  defmodule DeclaresTwo do
+    def __scenario_config__, do: [domain: "example.com", uses_modules: [:registrar, :auth_db]]
+  end
+
+  defmodule DeclaresNothing do
+    def __scenario_config__, do: [domain: "example.com"]
+  end
+
+  defmodule NoConfigAtAll do
+  end
+
+  setup do
+    on_exit(fn ->
+      Kelix.ModuleRegistry.unregister("registrar")
+      Kelix.ModuleRegistry.unregister("auth_db")
+    end)
+
+    :ok
+  end
+
+  test "a script whose declared modules are all loaded passes" do
+    Kelix.ModuleRegistry.register("registrar", Some.Registrar, %{})
+    Kelix.ModuleRegistry.register("auth_db", Some.AuthDb, %{})
+    assert ScriptRegistry.check_declared_modules(DeclaresTwo, "registrar.exs") == :ok
+  end
+
+  test "a missing module names itself, and what is loaded" do
+    Kelix.ModuleRegistry.register("registrar", Some.Registrar, %{})
+
+    assert {:error, reason} = ScriptRegistry.check_declared_modules(DeclaresTwo, "registrar.exs")
+    assert reason =~ "auth_db"
+    assert reason =~ "registrar.exs"
+    # the operator is told what IS loaded, so the fix is obvious
+    assert reason =~ ~s(["registrar"])
+  end
+
+  test "declaring nothing stays loadable — the declaration is opt-in" do
+    assert ScriptRegistry.check_declared_modules(DeclaresNothing, "x.exs") == :ok
+    assert ScriptRegistry.check_declared_modules(NoConfigAtAll, "x.exs") == :ok
+  end
+end
+
 defmodule Kelix.ScriptRegistryTest do
   use ExUnit.Case, async: false
 
@@ -7,7 +62,9 @@ defmodule Kelix.ScriptRegistryTest do
 
   describe "compile_checked/2 — load-time contract (§5.3)" do
     test "a valid registrar script compiles to a version-suffixed module" do
-      assert {:ok, mod} = ScriptRegistry.compile_checked(Path.join(@scripts, "valid_registrar.exs"), 7)
+      assert {:ok, mod} =
+               ScriptRegistry.compile_checked(Path.join(@scripts, "valid_registrar.exs"), 7)
+
       assert mod == KelixTest.ValidRegistrar.V7
       assert function_exported?(mod, :__scenario_type__, 0)
       assert mod.__scenario_type__() == :uas_register
@@ -15,13 +72,17 @@ defmodule Kelix.ScriptRegistryTest do
     end
 
     test "a scenario without on_shutdown is refused" do
-      assert {:error, msg} = ScriptRegistry.compile_checked(Path.join(@scripts, "no_shutdown.exs"), 1)
+      assert {:error, msg} =
+               ScriptRegistry.compile_checked(Path.join(@scripts, "no_shutdown.exs"), 1)
+
       assert msg =~ "cooperative shutdown"
       assert msg =~ "on_shutdown"
     end
 
     test "a non-scenario module is refused" do
-      assert {:error, msg} = ScriptRegistry.compile_checked(Path.join(@scripts, "not_a_scenario.exs"), 1)
+      assert {:error, msg} =
+               ScriptRegistry.compile_checked(Path.join(@scripts, "not_a_scenario.exs"), 1)
+
       assert msg =~ "no scenario module"
     end
 

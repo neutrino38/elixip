@@ -1312,15 +1312,21 @@ All questions below were decided on **2026-07-26** unless marked otherwise.
     it is server-grade hardening consumed by `Kelix.Mod.AuthDb`, and the framework
     path degrades cleanly without it (window-only anti-replay, §7.2).
 
-14. **How does a script declare the modules it needs?** — **OPEN** (2026-07-27,
-    not blocking basic). §3.2 wants "a domain that enables a function whose module
-    is not installed is a config error caught at load/`reload_domains`". Now that
-    modules really can be absent (§16.12), that check needs the missing piece: the
-    dependency script → modules is declared nowhere, and it cannot be inferred (a
-    custom registrar script may legitimately need no `registrar` module). Natural
-    resolution: a declaration in the script's `config` block (e.g.
-    `uses_modules: [:registrar, :auth_db]`), validated by the load-time contract
-    (§5.3) against `Kelix.ModuleRegistry`. Until then the mismatch is a **boot
+14. **How does a script declare the modules it needs?** — **RESOLVED**, and
+    **implemented 2026-07-28**. §3.2 wanted "a domain that enables a function whose
+    module is not installed is a config error caught at load". The missing piece was
+    the dependency script → modules: declared nowhere, and not inferable (a custom
+    registrar script may legitimately need no `registrar` module). It is now
+    declared in the script's `config` block and checked by the load-time contract
+    (§5.3) against `Kelix.ModuleRegistry`:
+
+    ```elixir
+    config uses_modules: [:registrar, :auth_db]
+    ```
+
+    The check is **opt-in**: a script that declares nothing keeps loading, so every
+    scenario written before this stays valid. Declaring turns what was a boot
+    warning into a load error naming the missing module *and* what is loaded. Until then the mismatch is a **boot
     warning** (`ModuleSupervisor.warn_missing_function_modules/0`, which covers
     every module a function needs, not just its same-named one), and a request to
     such a domain is answered **500** by the reference script's rescue — it used to
@@ -1332,5 +1338,9 @@ All questions below were decided on **2026-07-26** unless marked otherwise.
     another at init (`registrar` and `auth_db` are independent); a real dependency
     would need declaring too.
 
-**Remaining open (not blocking basic):** item 14 above. New items will be logged
-here as implementation proceeds.
+**Remaining open (not blocking basic):** nothing in this list. Two items noted
+during the 2026-07-28 handset test and left for later: server-initiated OPTIONS
+keepalive towards registered UAs (`[domain.registrar].keepalive_period`, accepted
+and inert — the framework's keepalive is outbound-only), and `SIP.Uri.parse/1`
+losing genuine URI parameters (`user=phone`) while not re-emitting `transport=` on
+serialize. New items will be logged here as implementation proceeds.

@@ -110,7 +110,12 @@ defmodule Kelix.ScriptRegistry do
         old = Map.get(state.scripts, name)
         entry = %{module: mod, version: version, refcount: 0, path: path_of(state, name)}
         state2 = put_in(state.scripts[name], entry)
-        Logger.info(module: __MODULE__, message: "script #{name} loaded as v#{version} (#{inspect(mod)})")
+
+        Logger.info(
+          module: __MODULE__,
+          message: "script #{name} loaded as v#{version} (#{inspect(mod)})"
+        )
+
         {:ok, retire(state2, name, old)}
 
       {:error, _} = err ->
@@ -150,9 +155,14 @@ defmodule Kelix.ScriptRegistry do
 
   defp decrement_draining(state, key) do
     case Map.get(state.draining, key) do
-      nil -> state
-      %{refcount: 1, module: mod} -> purge(%{state | draining: Map.delete(state.draining, key)}, mod)
-      %{refcount: r} = d -> put_in(state.draining[key], %{d | refcount: r - 1})
+      nil ->
+        state
+
+      %{refcount: 1, module: mod} ->
+        purge(%{state | draining: Map.delete(state.draining, key)}, mod)
+
+      %{refcount: r} = d ->
+        put_in(state.draining[key], %{d | refcount: r - 1})
     end
   end
 
@@ -231,10 +241,56 @@ defmodule Kelix.ScriptRegistry do
         {:error, "#{path} is not a valid kelixip scenario (no __scenario_type__/0)"}
 
       not function_exported?(mod, :__state___shutdown__, 1) ->
-        {:error, "#{path} does not handle cooperative shutdown (missing `on_shutdown` block): refused"}
+        {:error,
+         "#{path} does not handle cooperative shutdown (missing `on_shutdown` block): refused"}
 
       true ->
+        check_declared_modules(mod, path)
+    end
+  end
+
+  @doc """
+  Refuse a script whose declared `uses_modules` are not loaded (design §16 #14).
+
+  A script names the modules it calls in its `config` block:
+
+      config domain: "example.com", uses_modules: [:registrar, :auth_db]
+
+  and this checks them against `Kelix.ModuleRegistry` at load. Without the
+  declaration the dependency is written nowhere and cannot be inferred — a custom
+  registrar script may legitimately need no `registrar` module — so the mismatch
+  could only ever be a boot *warning*, and the first request to that domain died
+  inside the instance. Declaring turns it into a load error, caught before any
+  request arrives.
+
+  Silent when a script declares nothing: the declaration is opt-in, and every
+  scenario written before it stays loadable.
+  """
+  @spec check_declared_modules(module, Path.t()) :: :ok | {:error, String.t()}
+  def check_declared_modules(mod, path) do
+    loaded = Map.keys(Kelix.ModuleRegistry.all())
+
+    case Enum.reject(declared_modules(mod), &(&1 in loaded)) do
+      [] ->
         :ok
+
+      missing ->
+        {:error,
+         "#{path} declares uses_modules #{inspect(missing)}, which " <>
+           "#{if length(missing) == 1, do: "is", else: "are"} not loaded " <>
+           "(no [module.<name>] block, or no .beam in module_dir); loaded: " <>
+           "#{inspect(Enum.sort(loaded))}"}
+    end
+  end
+
+  defp declared_modules(mod) do
+    if function_exported?(mod, :__scenario_config__, 0) do
+      mod.__scenario_config__()
+      |> Keyword.get(:uses_modules, [])
+      |> List.wrap()
+      |> Enum.map(&to_string/1)
+    else
+      []
     end
   end
 end

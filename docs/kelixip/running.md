@@ -30,12 +30,73 @@ KELIXIP_CONFIG=./config.toml KELIXIP_DOMAINS=./domains.toml \
 An unreadable or invalid file **aborts the boot** and prints the reason on
 stderr (journald records it), so a failed start always says why.
 
+## Running from a checkout, without packaging
+
+Until the packages exist (**P10**), this is how to run the real server from the
+repo. It is what the pre-packaging tests were done with.
+
+**Install the scripts and modules first.** The release carries neither: scripts are
+read from `script_dir`, modules loaded from `module_dir`.
+
+```bash
+sudo mkdir -p /usr/share/kelixip /usr/lib/kelixip/modules
+sudo cp apps/kelixip/scripts/registrar.exs /usr/share/kelixip/
+cd apps/kelix_modules && MIX_ENV=prod mix compile
+sudo cp ../../_build/prod/lib/kelix_modules/ebin/Elixir.Kelix.Mod.*.beam /usr/lib/kelixip/modules/
+```
+
+> **`kelix_modules` is not a dependency of `kelixip`** — deliberately, so the
+> release cannot pull the modules in (§16.12). The consequence bites in
+> development: **nothing recompiles it for you**. Change a module and the server
+> keeps running the `.beam` you installed last time, silently. Redo the compile +
+> copy above after every module change. `elixip2`, being a real dependency, *is*
+> rebuilt by the command below.
+
+**Start it.** `MIX_ENV=prod` matters: `config/runtime.exs` only reads
+`KELIXIP_CONFIG`/`KELIXIP_DOMAINS` in prod, so a dev run ignores your TOML
+entirely. The node name must be the one `kelictl` targets (`server.node_name`,
+default `kelixip@127.0.0.1`).
+
+```bash
+cd apps/kelixip
+MIX_ENV=prod elixir --name kelixip@127.0.0.1 --cookie kelixip-dev -S mix run --no-halt
+```
+
+It runs in the foreground and logs there. Point it elsewhere with
+`KELIXIP_CONFIG=… KELIXIP_DOMAINS=…` on the same line.
+
+**Drive it with `kelictl`.** The `bin/kelictl` wrapper only exists inside the
+release; from a checkout, this shell function is the same thing (the cookie must
+match):
+
+```bash
+cd apps/kelixip
+kelictl() { MIX_ENV=prod elixir --name kelictl@127.0.0.1 --cookie kelixip-dev \
+    -S mix run --no-start -e 'Kelix.Control.CLI.main(System.argv())' -- "$@"; }
+
+kelictl status
+kelictl regs
+kelictl monitor
+```
+
+> Pick a `[[listen]]` port nothing else holds. 5060/5061/5066/5067/443 are often
+> taken by a local kamailio or softswitch; a bind failure **aborts the boot** and
+> says so on stderr. The test suite binds `5070` by default too — override with
+> `ELIXIP_TEST_UDP_PORT` if you run `mix test --include live` against a live server.
+
 ## Start / stop
 
 ```bash
 # TODO (P10): systemctl start|stop|restart kelixip
 kelictl graceful-shutdown        # drain in-progress scenarios first
 ```
+
+`graceful-shutdown` is the clean way and what the systemd unit will use: it sends
+`{:scenario_ctl, :shutdown, …}` to every live instance (each script runs its
+`on_shutdown` block), waits a grace period, then stops the VM through the OTP
+shutdown sequence — listeners first, sockets closed, stores last. `Ctrl+C Ctrl+C`
+kills the VM outright: no `on_shutdown`, no orderly teardown. Fine in development,
+not with calls in progress.
 
 ## First boot
 

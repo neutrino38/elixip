@@ -7,6 +7,9 @@ defmodule Kelix.Mod.Registrar.Contact do
           flow_pid: pid | nil,
           flow_module: module | nil,
           dialog_pid: pid | nil,
+          instance: String.t() | nil,
+          reg_id: String.t() | nil,
+          methods: String.t() | nil,
           info: term,
           expires_at: DateTime.t()
         }
@@ -15,11 +18,18 @@ defmodule Kelix.Mod.Registrar.Contact do
   # the pid alone is not enough to send over it — `SIP.Transport.Selector` needs to
   # know *which* transport it is (`transport_str`/`is_reliable`), and an inbound
   # request stamps its R-URI with both while the stored Contact URI carries neither.
+  # `instance` + `reg_id` are the RFC 5626 (outbound) identity of the registering
+  # device, `methods` its RFC 3840 callee capabilities. Kept because they say things
+  # the contact URI cannot: which physical device this is (across an address change),
+  # and which methods it is willing to receive.
   defstruct contact: nil,
             received: nil,
             flow_pid: nil,
             flow_module: nil,
             dialog_pid: nil,
+            instance: nil,
+            reg_id: nil,
+            methods: nil,
             info: nil,
             expires_at: nil
 end
@@ -348,7 +358,7 @@ defmodule Kelix.Mod.Registrar do
       {:ok, granted(aor, [], 0), state}
     else
       # apply removes then adds, keyed by contact URI string
-      kept = drop_contacts(existing, for({:remove, c} <- actions, do: uri_key(c)))
+      kept = drop_contacts(existing, for({:remove, c} <- actions, do: binding_key(c)))
 
       added =
         for {:add, c, exp} <- actions do
@@ -358,6 +368,9 @@ defmodule Kelix.Mod.Registrar do
             flow_pid: flow_of(req),
             flow_module: flow_module_of(req),
             dialog_pid: dialog_pid,
+            instance: contact_param(c, "+sip.instance"),
+            reg_id: contact_param(c, "reg-id"),
+            methods: contact_param(c, "methods"),
             info: info,
             expires_at: DateTime.add(now(), exp, :second)
           }
@@ -616,14 +629,46 @@ defmodule Kelix.Mod.Registrar do
   defp expired?(%Contact{expires_at: at}), do: DateTime.compare(now(), at) != :lt
 
   defp drop_contacts(contacts, keys) do
-    Enum.reject(contacts, &(uri_key(&1.contact) in keys))
+    Enum.reject(contacts, &(binding_key(&1) in keys))
   end
 
-  # replace same-URI existing contacts with the new ones, then append the rest
+  # replace same-identity existing contacts with the new ones, then append the rest
   defp upsert(existing, added) do
-    added_keys = MapSet.new(added, &uri_key(&1.contact))
-    Enum.reject(existing, &(uri_key(&1.contact) in added_keys)) ++ added
+    added_keys = MapSet.new(added, &binding_key/1)
+    Enum.reject(existing, &(binding_key(&1) in added_keys)) ++ added
   end
+
+  @doc false
+  # Identity of a binding.
+  #
+  # `+sip.instance` (+ `reg-id`) when the UA offers them: that is RFC 5626's whole
+  # point — it names the **device**, so the same phone reaching us from a new address
+  # REPLACES its binding instead of adding a second one. Keying on the contact URI
+  # alone is why a handset has to drop its old contact by hand on every network
+  # change, and why a NAT rebind used to leave a stale binding behind.
+  #
+  # Falling back to the URI keeps RFC 3261 behaviour for UAs that offer no instance.
+  def binding_key(%Contact{contact: uri}), do: binding_key(uri)
+
+  def binding_key(%SIP.Uri{} = uri) do
+    case contact_param(uri, "+sip.instance") do
+      nil -> {:uri, uri_key(uri)}
+      # reg-id absent means "one flow", RFC 5626 §4.1 — not the same binding as an
+      # explicit reg-id, so it gets its own slot rather than being folded into one.
+      instance -> {:instance, instance, contact_param(uri, "reg-id")}
+    end
+  end
+
+  # Contact parameters reach us quoted (`+sip.instance="<urn:uuid:…>"`); compare and
+  # store the value, not the quoting.
+  defp contact_param(%SIP.Uri{} = uri, name) do
+    case SIP.Uri.get_uri_param(uri, name) do
+      {:ok, value} when is_binary(value) -> String.trim(value, "\"")
+      _ -> nil
+    end
+  end
+
+  defp contact_param(_other, _name), do: nil
 
   # ── events ───────────────────────────────────────────────────────────────────
 

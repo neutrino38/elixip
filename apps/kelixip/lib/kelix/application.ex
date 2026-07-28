@@ -27,8 +27,12 @@ defmodule Kelix.Application do
     resolve_default_dns()
 
     children = [
+      # Syslog sink (§3.1 `[log].target`). Before Kelix.Config, which decides in its
+      # own init whether to enable it — so it must already be there to be asked.
+      # Inert until enabled: no socket, no handler, nothing on the wire.
+      Kelix.Log.Syslog,
       # Infra config (config.toml): parsed once, pushes infra keys into the
-      # :elixip2 app env. Started first (§3.1).
+      # :elixip2 app env. Started right after (§3.1).
       {Kelix.Config, path: config_path},
       # SIP stack registries — today started ad-hoc by bootstrap_stack/0, here
       # supervised as first-class children (design §2.1).

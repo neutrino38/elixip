@@ -119,24 +119,26 @@ defmodule Kelix.Config do
   end
 
   @doc """
-  Apply `[log]` to the running Logger: the level, and a warning when `target =
-  "syslog"` is asked for (not wired yet — §16 open item, stdout/journald is the
-  documented default, so an operator must not silently believe logs go to syslog).
+  Apply `[log]` to the running Logger: the target, then the level.
+
+  `syslog` adds the `Kelix.Log.Syslog` sink under the configured facility;
+  anything else removes it. stdout/journald is always live either way — systemd
+  captures it — so `syslog` adds a sink rather than replacing one.
+
+  Order matters: the target is applied first so a freshly added sink is included
+  when the level is pushed down.
   """
   @spec apply_logger(t) :: :ok
   def apply_logger(%__MODULE__{log: log}) do
     # `level` is validated against @log_levels, so the atom always exists.
     level = String.to_existing_atom(log.level)
+
+    if log.target == "syslog",
+      do: Kelix.Log.Syslog.enable(log.facility),
+      else: Kelix.Log.Syslog.disable()
+
     Logger.configure(level: level)
     apply_sink_levels(level)
-
-    if log.target == "syslog" do
-      Logger.warning(
-        module: __MODULE__,
-        message: ~s([log].target = "syslog" is not wired yet; logging to stdout/journald)
-      )
-    end
-
     :ok
   end
 
@@ -231,7 +233,8 @@ defmodule Kelix.Config do
   defp parse_log(%{} = l) do
     with :ok <- reject_keys(l, ~w(target facility level), "[log]"),
          {:ok, target} <- opt_enum(l, "target", @log_targets, "stdout", "[log]"),
-         {:ok, facility} <- opt_string(l, "facility", "local0", "[log]"),
+         {:ok, facility} <-
+           opt_enum(l, "facility", Kelix.Log.Syslog.facilities(), "local0", "[log]"),
          {:ok, level} <- opt_enum(l, "level", @log_levels, "info", "[log]") do
       {:ok, %{target: target, facility: facility, level: level}}
     end
