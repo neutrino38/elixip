@@ -1,9 +1,5 @@
 # Running kelixip
 
-> **Status:** the server boots, binds its `[[listen]]` ports and answers REGISTER
-> (P0b). Only the **systemd/packaging** specifics are still pending (**P10**) —
-> until then, start the release by hand as shown below.
-
 > kelixip is configured by two TOML files, `config.toml` (infrastructure,
 > restart-only) and `domains.toml` (domains + dial-plan, hot-reloadable).
 > **Every key of both is documented in
@@ -12,13 +8,18 @@
 
 ## Where kelixip looks for its config
 
-The release reads two environment variables at every boot (set by the systemd
-unit; `rel/env.sh` defaults them to the FHS paths):
+The release reads two environment variables at every boot:
 
 | Variable | Default |
 |---|---|
 | `KELIXIP_CONFIG` | `/etc/kelixip/config.toml` |
 | `KELIXIP_DOMAINS` | `/etc/kelixip/domains.toml` |
+
+On a packaged install they come from **`/etc/sysconfig/kelixip`**, which both the
+systemd unit and the release's own `rel/env.sh` read — so `kelictl` and the service
+always agree on the node, the cookie and the config paths. Set them in the
+environment to override a single invocation; `rel/env.sh` lets the environment win
+over the file.
 
 Override them to run from a checkout:
 
@@ -32,8 +33,9 @@ stderr (journald records it), so a failed start always says why.
 
 ## Running from a checkout, without packaging
 
-Until the packages exist (**P10**), this is how to run the real server from the
-repo. It is what the pre-packaging tests were done with.
+This is how to run the real server from the repo — for development, when you do not
+want to rebuild a package for every change. On a real host, install the packages
+([installation.md](installation.md)) and use `systemctl` instead.
 
 **Install the scripts and modules first.** The release carries neither: scripts are
 read from `script_dir`, modules loaded from `module_dir`.
@@ -84,19 +86,31 @@ kelictl monitor
 > says so on stderr. The test suite binds `5070` by default too — override with
 > `ELIXIP_TEST_UDP_PORT` if you run `mix test --include live` against a live server.
 
-## Start / stop
+## Start / stop / reload
 
 ```bash
-# TODO (P10): systemctl start|stop|restart kelixip
-kelictl graceful-shutdown        # drain in-progress scenarios first
+systemctl start kelixip
+systemctl reload kelixip          # = kelictl reload-domains (atomic, no restart)
+systemctl stop kelixip            # drains first, see below
+systemctl restart kelixip         # the only way to apply a config.toml change
+kelictl graceful-shutdown         # same drain, without systemd
 ```
 
-`graceful-shutdown` is the clean way and what the systemd unit will use: it sends
+`graceful-shutdown` is the clean way and what the unit's `ExecStop` runs: it sends
 `{:scenario_ctl, :shutdown, …}` to every live instance (each script runs its
 `on_shutdown` block), waits a grace period, then stops the VM through the OTP
 shutdown sequence — listeners first, sockets closed, stores last. `Ctrl+C Ctrl+C`
 kills the VM outright: no `on_shutdown`, no orderly teardown. Fine in development,
 not with calls in progress.
+
+> The call **returns as soon as the drain is broadcast** — it schedules the VM stop
+> and hands control back, so `kelictl` does not hang. systemd kills whatever
+> survives `ExecStop`, which would cut the drain short, so the unit follows it with
+> a wait on the main PID, bounded by `TimeoutStopSec=90`. A `systemctl stop` on an
+> idle node takes a handful of seconds; with calls in progress it takes the drain.
+
+`systemctl reload` only reloads **`domains.toml`**. `config.toml` (listeners, media
+pool, control API, most modules) is restart-only by design.
 
 ## First boot
 

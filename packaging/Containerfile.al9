@@ -1,0 +1,35 @@
+# Alma Linux 9 build host for the kelixip RPM (design docs/kelixip_packaging.md).
+#
+# The golden rule: assemble the release HERE, not in a hexpm/elixir image. The
+# release embeds ERTS — native code linked against glibc/OpenSSL/ncurses — so the
+# build host's libraries must be the target's. AL9 = glibc 2.34 + OpenSSL 3.
+#
+#   podman build -f packaging/Containerfile.al9 -t kelixip-build packaging
+#   (or let packaging/build-in-container.sh do it)
+FROM almalinux:9
+
+# Only Erlang is OS-sensitive: EPEL 9 ships an AL9-native OTP 26, whose ERTS links
+# this image's OpenSSL 3. (Need a newer OTP? swap in the RabbitMQ erlang-rpm repo.)
+RUN dnf install -y epel-release \
+ && dnf install -y erlang git tar gzip rpm-build systemd-rpm-macros shadow-utils \
+ && dnf clean all
+
+# Elixir is pure BEAM, so the precompiled zip is enough — but it must be the
+# otp-26 build: an artifact compiled under OTP 27 can fail to load on an OTP-26
+# runtime. Check the current pair when you rebuild this image.
+ARG ELIXIR_VERSION=1.18.3
+ARG ELIXIR_OTP=26
+RUN curl -fsSL -o /tmp/elixir.zip \
+      "https://github.com/elixir-lang/elixir/releases/download/v${ELIXIR_VERSION}/elixir-otp-${ELIXIR_OTP}.zip" \
+ && mkdir -p /usr/local/elixir \
+ && unzip -q -d /usr/local/elixir /tmp/elixir.zip \
+ && rm /tmp/elixir.zip
+ENV PATH="/usr/local/elixir/bin:$PATH" \
+    LANG=C.UTF-8 \
+    MIX_HOME=/root/.mix \
+    HEX_HOME=/root/.hex
+
+RUN mix local.hex --force && mix local.rebar --force
+
+WORKDIR /src
+CMD ["/src/packaging/build-rpm.sh"]

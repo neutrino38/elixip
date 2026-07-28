@@ -1,10 +1,19 @@
 # kelixip packaging (P10) — build toolchain & RPM
 
-Status: **design note** (2026-07-27). Records the build-environment decisions for
-the P10 RPM (Alma Linux 9 first, then deb). The **what** — FHS layout, systemd
-unit, subpackages, `%config(noreplace)` — is in the design doc
+Status: **implemented** (RPM, 2026-07-28). This note records the build-environment
+decisions; the artifacts themselves live in [`packaging/`](../packaging/README.md)
+(spec, unit, build scripts). The **what** — FHS layout, systemd unit, subpackages,
+`%config(noreplace)` — is in the design doc
 [§12](kelixip_basic_design.md#12-packaging); this note covers the **how to build**:
 which OS, which Erlang/Elixir, and why.
+
+> **Built and verified on 2026-07-28** with the toolchain described below: Alma
+> Linux 9.6, EPEL OTP 26 (erts-14.2.5), Elixir 1.18.3 (otp-26 build). Output:
+> `kelixip`, `kelixip-mod-registrar`, `kelixip-mod-auth_db` (~9 MB core). Verified
+> installed: service boots as the unprivileged user, loads both modules from the
+> root-owned `module_dir`, binds its listener, answers `401` then a `403` from
+> `auth_db` on a REGISTER, `systemctl reload` bumps the domains version, and
+> `systemctl stop` drains and exits without needing a `SIGTERM`.
 
 ## Target & golden rule
 
@@ -97,10 +106,33 @@ ENV PATH="/usr/local/elixir/bin:$PATH"
 > Verify the **current** versions when you build (EPEL's OTP ↔ a compatible Elixir
 > `otp-XX` zip); the numbers above are the 2026-07 snapshot, not pinned forever.
 
+## What the RPM does with the release
+
+Details in [`packaging/README.md`](../packaging/README.md); the two decisions worth
+recording here, because both are security choices rather than mechanics:
+
+- **The distribution cookie is generated per installation**, not shipped. It is the
+  credential `kelictl` authenticates with, so one cookie inside the package would be
+  the same secret on every host — and knowing it is enough to drive any reachable
+  node. `releases/COOKIE` is excluded from the payload, declared `%ghost`, created by
+  `%post` from `/dev/urandom` (0640 `root:kelixip`), kept across upgrades, removed on
+  erase.
+- **`/etc/sysconfig/kelixip` is the single place an admin overrides anything**
+  (node name, cookie, TOML paths). The systemd unit reads it as an `EnvironmentFile`
+  and — added with the packaging — the release's own `rel/env.sh` sources it too, so
+  `kelictl` run by hand targets the node the service actually runs. The environment
+  still wins over the file, so a per-invocation override keeps working.
+
+The unit's `ExecStop` needed one non-obvious addition: `graceful_shutdown()` returns
+as soon as the drain is broadcast (it schedules the VM stop so `kelictl` does not
+hang), and systemd kills whatever survives `ExecStop` — which cut the drain short.
+The unit therefore follows the rpc with a wait on `$MAINPID`, bounded by
+`TimeoutStopSec`.
+
 ## Open items (P10)
 
-- `RELEASE_NODE` ↔ `server.node_name` auto-sync at boot (today set by hand in
-  `rel/env.sh.eex` — noted in the kelictl guide).
-- Module subpackages (`kelixip-mod-registrar`, …) dropping `.beam` into a
-  root-owned `module_dir` (§12.1).
-- deb (Ubuntu) from the same release, after the RPM.
+- **deb (Ubuntu)** from the same release, after the RPM.
+- `RELEASE_NODE` ↔ `server.node_name` auto-sync at boot. Both now live in
+  `/etc/sysconfig/kelixip`, so there is one place to edit instead of two, but nothing
+  yet *derives* the VM node name from the TOML — a mismatch is still possible.
+- No `%check` stage: the suite runs from the repo, not against the staged payload.

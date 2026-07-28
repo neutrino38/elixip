@@ -1,0 +1,46 @@
+# /etc/kelixip/domains.toml — the served domains and their dial-plan.
+#
+# Hot-reloadable: `kelictl reload-domains` (or `systemctl reload kelixip`) applies
+# it atomically — one bad value and the whole reload is rejected, the running
+# config untouched. Every key is documented in
+# /usr/share/doc/kelixip/installation.md.
+#
+# Shipped EMPTY on purpose: a fresh install serves no domain, so it answers 404
+# to everything until you declare what it is responsible for. Nothing here is a
+# default you inherit by accident.
+#
+# A request is routed by its R-URI host (falling back to the To host); no match is
+# a 404. The method then selects the function — REGISTER -> registrar,
+# INVITE -> calls — and a function with no block on that domain is a 405.
+
+#[[domain]]
+#name    = "example.com"
+#aliases = ["sip.example.com", "203.0.113.10"]     # also routed here; realm stays `name`
+#max_calls = 200                                   # per-domain cap, 503 beyond it
+#
+#  # Presence of the block enables the function. The script is resolved under
+#  # server.script_dir and is refused at load time if a module it declares in
+#  # `config uses_modules:` is not loaded — so install kelixip-mod-registrar and
+#  # kelixip-mod-auth_db before pointing a domain at registrar.exs.
+#  [domain.registrar]
+#  script = "registrar.exs"
+#  #default_expires = 3600       # per-domain override of [module.registrar]
+#  #min_expires     = 60
+#
+#  # The dial-plan: ordered, first match wins on the R-URI user-part. Asterisk-style
+#  # patterns (X=0-9, Z=1-9, N=2-9, [13-6], . = 1+, ! = 0+). The catch-all is last.
+#  [[domain.call]]
+#  pattern = "0[1-9]XXXXXXXX"
+#  script  = "national.exs"
+#
+#  [[domain.call]]
+#  default = true
+#  script  = "default_call.exs"
+
+# The usrloc store's own block. It lives HERE, not in config.toml, so it is
+# reloadable alongside the domains it serves — a stray copy in config.toml is
+# ignored. Uncommenting it loads the registrar module (kelixip-mod-registrar).
+#[module.registrar]
+#max_contacts_per_aor = 10
+#min_expires          = 60
+#default_expires      = 3600

@@ -43,6 +43,10 @@ cd apps/kelixip && MIX_ENV=prod mix release kelixip
 # Build the loadable modules and install them where the server looks for them
 cd apps/kelix_modules && MIX_ENV=prod mix compile
 cp _build/prod/lib/kelix_modules/ebin/Elixir.Kelix.Mod.*.beam "$MODULE_DIR"/
+
+# Build the Alma Linux 9 RPMs (core + one per module) -> packaging/dist/
+packaging/build-rpm.sh              # on an AL9 host
+packaging/build-in-container.sh     # anywhere else (podman/docker)
 ```
 
 > **Tests:** a few tests are order-dependent (named singletons leak state across
@@ -74,6 +78,11 @@ apps/
 The app name of the shared library is kept as **`:elixip2`** (not renamed) to
 avoid churn on the many `:elixip2` config references; its directory is
 `apps/elixip2`. `apps/elixipp` and `apps/kelixip` both depend on it.
+
+`packaging/` (outside `apps/`) turns the kelixip release into RPMs for Alma Linux 9
+— spec, systemd unit, shipped `/etc/kelixip` defaults and the build scripts. Its
+[README](packaging/README.md) is the guide; the build must run on the target OS
+because the release embeds a natively-linked ERTS.
 
 `apps/kelix_modules` is deliberately **outside** the release: `apps/kelixip` does
 not depend on it, so `mix release kelixip` cannot pull it in — the core ships no

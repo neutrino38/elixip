@@ -1,46 +1,85 @@
 # Installation
 
-> **Status: skeleton.** Finalized with packaging (**P10** — RPM for Alma Linux 9
-> first, then deb). The layout below reflects the locked design (§12); commands
-> are filled in when the packages are produced.
-
 ## Prerequisites
 
-- Alma Linux 9 (x86_64). The release embeds its own ERTS — no system Erlang/Elixir
-  required.
+- Alma Linux 9 (x86_64 or aarch64). The release embeds its own ERTS — no system
+  Erlang/Elixir required.
 - A database only if you load [`auth_db`](modules/auth_db.md) (MariaDB/MySQL).
 
 ## Packages
 
 kelixip is shipped as a **core** release plus **one package per module**, so a
-deployment installs only what it uses.
+deployment installs only what it uses — the core itself implements no SIP function.
 
-- `kelixip` — the core server + `kelictl`
-- `kelixip-registrar`, `kelixip-auth_db`, `kelixip-radius_billing` — modules
-  (`.beam` dropped into `module_dir`)
+| Package | Contents |
+|---|---|
+| `kelixip` | the server + `kelictl` + the systemd unit + `/etc/kelixip` |
+| `kelixip-mod-registrar` | the [registrar](modules/registrar.md) / user-location module |
+| `kelixip-mod-auth_db` | the [database authentication](modules/auth_db.md) module |
 
 ```bash
-# TODO (P10): dnf install kelixip kelixip-registrar kelixip-auth_db
+dnf install kelixip kelixip-mod-registrar kelixip-mod-auth_db
+# or, from the built files:
+rpm -ivh kelixip-*.rpm
 ```
+
+A domain that enables a function whose module is not installed is a **config error
+caught at load time** — it is not a runtime surprise. Installing a module later is a
+package install plus `kelictl module reload <name>`; no restart.
+
+Building the packages yourself: [`packaging/README.md`](../../packaging/README.md).
 
 ## Filesystem layout (FHS, §12)
 
 | Path | Contents |
 |---|---|
-| `/etc/kelixip/config.toml` | Infrastructure config (`%config(noreplace)`) |
+| `/etc/kelixip/config.toml` | Infrastructure config (`%config(noreplace)`, 0640 `root:kelixip`) |
 | `/etc/kelixip/domains.toml` | Domains + dial-plan + registrar block (`%config(noreplace)`) |
+| `/etc/kelixip/tls/` | Listener certificates (0750 `root:kelixip`) |
+| `/etc/sysconfig/kelixip` | Node name, cookie and the two TOML paths (`%config(noreplace)`) |
 | `/usr/share/kelixip/` | Scenario scripts (`script_dir`) |
-| `/usr/lib/kelixip/modules/` | Loadable modules (`module_dir`, root-owned) |
+| `/usr/lib/kelixip/` | The release itself (embedded ERTS) |
+| `/usr/lib/kelixip/modules/` | Loadable modules (`module_dir`, **root-owned**) |
 | `/usr/sbin/kelictl` | Admin CLI (a command inside the release) |
-| `/usr/lib/kelixip/` | The release itself |
+| `/usr/sbin/kelixip` | The release's own control script (`start`, `rpc`, …) |
+| `/var/lib/kelixip/`, `/var/log/kelixip/` | Mutable state; logs when stdout is redirected |
+
+`module_dir` is root-owned and **not writable by the service** on purpose: loading
+a `.beam` is executing code.
 
 ## System user & service
 
-The package creates a dedicated unprivileged `kelixip` user and a systemd unit.
+The package creates an unprivileged `kelixip` system user and a systemd unit; the
+service runs as that user, with `CAP_NET_BIND_SERVICE` as its only privilege (so a
+`[[listen]]` entry may ask for port 443).
 
 ```bash
-# TODO (P10): systemctl enable --now kelixip
+systemctl enable --now kelixip
+systemctl status kelixip
 ```
+
+Everything an admin needs to override lives in **`/etc/sysconfig/kelixip`** — never
+in the unit, which the package replaces on upgrade:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `RELEASE_NODE` | `kelixip@127.0.0.1` | Erlang node name. **Must match `server.node_name`** in config.toml |
+| `KELIXIP_CONFIG` / `KELIXIP_DOMAINS` | the two FHS paths | Where the TOML files are read from |
+| `RELEASE_COOKIE` | *(unset)* | Only to share one cookie across a cluster — see below |
+
+`kelictl` reads the same file, so it targets the node the service actually runs;
+changing `RELEASE_NODE` in one place is enough.
+
+> **The distribution cookie is generated per installation.** It is the credential
+> `kelictl` authenticates with, so no fixed cookie ships in the package: `%post`
+> generates `/usr/lib/kelixip/releases/COOKIE` from `/dev/urandom` (0640
+> `root:kelixip`), keeps it across upgrades and removes it on erase.
+
+### Upgrades
+
+`config.toml` and `domains.toml` are `%config(noreplace)`: your files are kept and
+the packaged version lands next to them as `*.rpmnew` — worth diffing after an
+upgrade, since new keys show up there first. The unit is restarted by the upgrade.
 
 ## Configuration
 
@@ -279,8 +318,14 @@ min_expires          = 60
 ## Verify
 
 ```bash
-# TODO (P7/P9): systemctl status kelixip
-# TODO (P9):    curl -s http://127.0.0.1:<metrics>/health
+systemctl status kelixip
+kelictl status                            # listeners bound, modules loaded, domains version
+curl -s http://127.0.0.1:9095/health      # {"status":"ok","live":true,"ready":true}
 ```
+
+`kelictl status` is the one that tells you whether the install took: it lists the
+**bound listeners** and the **modules actually loaded from `module_dir`** — a
+`[module.x]` block whose package is missing is logged and skipped, so it shows up
+here as an absence, not as an error at the first request.
 
 Next: [running.md](running.md).

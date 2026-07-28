@@ -1,0 +1,79 @@
+# /etc/kelixip/config.toml — infrastructure configuration (restart-only).
+#
+# Every key is documented in /usr/share/doc/kelixip/installation.md. The served
+# domains and the dial-plan are NOT here: they live in domains.toml, which is
+# hot-reloadable (`kelictl reload-domains` / `systemctl reload kelixip`).
+#
+# This file is validated at every boot. Any error — a bad value, an unknown key,
+# a port that cannot be bound — aborts the start with the reason on stderr, rather
+# than running half-configured.
+
+[server]
+# Must match RELEASE_NODE in /etc/sysconfig/kelixip: this is the name kelictl
+# resolves the node by.
+node_name  = "kelixip@127.0.0.1"
+script_dir = "/usr/share/kelixip"
+module_dir = "/usr/lib/kelixip/modules"
+# user_agent = "kelixip/1.0"
+# max_calls  = 1000          # node-wide concurrent-instance cap; 503 beyond it
+
+[log]
+# "syslog" ADDS an RFC 3164 sink over /dev/log; stdout stays live either way,
+# because systemd captures it and a startup failure has to be visible there.
+target = "stdout"
+level  = "info"
+# facility = "local0"
+
+# One [[listen]] block per inbound socket. UDP is one socket per node: extra udp
+# entries are ignored with a warning. tls/wss require `cert` + `key`.
+[[listen]]
+proto = "udp"
+addr  = "0.0.0.0"
+port  = 5060
+
+#[[listen]]
+#proto = "tcp"
+#port  = 5060
+
+#[[listen]]
+#proto = "wss"
+#port  = 8443
+#cert  = "/etc/kelixip/tls/fullchain.pem"
+#key   = "/etc/kelixip/tls/privkey.pem"
+
+# Prometheus /metrics + /health. No auth — keep it on loopback and let a local
+# Prometheus scrape it. Remove the block to disable it entirely.
+[metrics]
+addr = "127.0.0.1"
+port = 9095
+
+# The REST admin frontal. Disabled by default: enabling it means choosing a token,
+# and a token shipped in a package would be no secret at all. Uncomment, set your
+# own, and keep the listener on loopback unless you switch to auth = "mtls".
+#[control_api]
+#addr  = "127.0.0.1"
+#port  = 8090
+#auth  = "token"
+#token = "CHANGE-ME"
+
+# Loadable modules — one block per module to load, from module_dir. Nothing is
+# loaded by default: install the matching kelixip-mod-* package first, or the
+# block is logged and skipped.
+#
+# [module.registrar] lives in domains.toml, not here (it is hot-reloadable).
+
+#[module.auth_db]                  # dnf install kelixip-mod-auth_db
+#host          = "127.0.0.1"
+#port          = 3306
+#database      = "kamailio"
+#username      = "kamailio"
+#password      = "secret"
+#table         = "subscriber"
+#ha1_column    = "ha1"             # ha1 = H(user:realm:pw) | ha1b = H(user@domain:realm:pw)
+#password_hash = "md5"             # md5 | sha256 — authoritative, both ways
+#pool_size     = 4                 # 1 serialises every REGISTER
+
+# The MCU pool (round-robin + health-check). Not needed for a registrar-only node.
+#[mediaserver.pool.mcu1]
+#module = "mendooze"
+#url    = "http://mcu1.example.com:8080"

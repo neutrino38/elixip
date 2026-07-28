@@ -51,11 +51,11 @@ but the server and the other modules do (never a half-applied start).
 
 ## Loading
 
-First-party modules (`registrar`, `auth_db`, `radius_billing`) are shipped as
-separate packaging artifacts and dropped into `module_dir`
-(`/usr/lib/kelixip/modules`, `server.module_dir`). **The server release contains
-none of them**: at boot it adds `module_dir` to its code path and loads a module
-only when a `[module.<name>]` block declares it.
+First-party modules are shipped as **one package each** — `kelixip-mod-registrar`,
+`kelixip-mod-auth_db` (and `kelixip-mod-radius_billing` when it exists) — which drop
+their bytecode into `module_dir` (`/usr/lib/kelixip/modules`, `server.module_dir`).
+**The server release contains none of them**: at boot it adds `module_dir` to its
+code path and loads a module only when a `[module.<name>]` block declares it.
 
 Two consequences worth knowing:
 

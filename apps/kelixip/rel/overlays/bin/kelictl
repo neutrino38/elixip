@@ -5,7 +5,19 @@
 # via `kelixip rpc`, so it needs no SIP stack and shares the node's cookie. The
 # CLI logic + rendering live in Kelix.Control.CLI; this overlay only forwards argv.
 set -e
-DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Resolve our own symlink chain: the package links /usr/sbin/kelictl here, and the
+# sibling `kelixip` script must be looked up next to the REAL file, not next to the
+# link. (The release's own bin/kelixip does the same for RELEASE_ROOT.)
+SELF="$0"
+while [ -h "$SELF" ]; do
+  LINK="$(readlink "$SELF")"
+  case "$LINK" in
+    /*) SELF="$LINK" ;;
+    *) SELF="$(dirname "$SELF")/$LINK" ;;
+  esac
+done
+DIR="$(cd "$(dirname "$SELF")" && pwd)"
 
 # Forward the whole argument line as one string; the CLI re-splits it with
 # OptionParser.split/1 (honouring quotes). Escape embedded double quotes.

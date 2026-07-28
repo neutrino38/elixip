@@ -6,15 +6,17 @@ distribution and delegates to the control layer (`Kelix.Control`), then renders
 the result as text.
 
 **How it reaches the node.** The `bin/kelictl` overlay runs the CLI *inside* the
-running release via `kelixip rpc`, so it shares the node's Erlang **cookie**
-(`releases/COOKIE`) — the credential is the cookie, not a token. The target node
-name comes from **`RELEASE_NODE`** (set in the release's `rel/env.sh.eex`, default
-`kelixip@127.0.0.1`).
+running release via `kelixip rpc`, so it shares the node's Erlang **cookie** — the
+credential is the cookie, not a token. On a packaged install the cookie is the
+per-host secret `%post` generated in `releases/COOKIE`, and the target node name
+comes from **`RELEASE_NODE`** in `/etc/sysconfig/kelixip` (default
+`kelixip@127.0.0.1`), the same file the systemd unit reads.
 
-> **Note.** `RELEASE_NODE` and `config.toml`'s `server.node_name` are **not yet
+> **Note.** `RELEASE_NODE` and `config.toml`'s `server.node_name` are **not
 > auto-synced**: if you change `server.node_name`, set the matching `RELEASE_NODE`
-> in `env.sh` too. Wiring the VM node name from `server.node_name` at boot is a
-> packaging follow-up (P10).
+> in `/etc/sysconfig/kelixip` too. There is now a single place to do it (the service
+> and the CLI both read that file), but nothing yet derives the VM node name from
+> the TOML at boot.
 
 ## Core commands
 

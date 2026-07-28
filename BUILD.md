@@ -104,8 +104,22 @@ Both default to those FHS paths; an unreadable or invalid file aborts the boot a
 says why on stderr.
 
 > Status: the server boots, binds its `[[listen]]` ports, dispatches and answers
-> (registrar). What is still missing for "basic" is the **packaging** (rpm/systemd,
-> design §15 P10) and the `radius_billing` module.
+> (registrar), and ships as an RPM (see below). What is still missing for "basic"
+> is the deb and the `radius_billing` module (design §15).
+
+### The RPMs (Alma Linux 9)
+
+```bash
+packaging/build-rpm.sh            # on an AL9 host  -> packaging/dist/*.rpm
+packaging/build-in-container.sh   # anywhere else (podman/docker, almalinux:9 image)
+```
+
+Three packages: `kelixip` (release + `kelictl` + systemd unit + `/etc/kelixip`),
+`kelixip-mod-registrar`, `kelixip-mod-auth_db`. **Build on the target OS** — the
+release embeds ERTS, which is native code linked against the build host's
+glibc/OpenSSL. Full guide: [packaging/README.md](packaging/README.md); the toolchain
+constraints (which Erlang, which Elixir, and the `hexpm/elixir` anti-pattern) are in
+[docs/kelixip_packaging.md](docs/kelixip_packaging.md).
 
 ## kelix_modules — the loadable modules
 
@@ -120,6 +134,9 @@ MIX_ENV=prod mix compile
 # install where the server looks (default /usr/lib/kelixip/modules)
 cp _build/prod/lib/kelix_modules/ebin/Elixir.Kelix.Mod.*.beam "$MODULE_DIR"/
 ```
+
+On a packaged host this copy is what `dnf install kelixip-mod-registrar` does; the
+manual form above is for development, where nothing rebuilds this app for you.
 
 Check what a running node actually loaded with `kelictl status` (`modules:` line).
 Installing a new version of a module is a copy plus `kelictl module reload <name>`

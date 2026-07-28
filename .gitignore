@@ -20,6 +20,10 @@ elixipp.log
 authdb.json
 /apps/kelixip/authdb.json
 
+# Packaging outputs: the rpmbuild tree and the produced packages (packaging/README.md)
+/packaging/build
+/packaging/dist
+
 # Debug logs produced by scenario runs
 uac_invite.log
 uac.log
