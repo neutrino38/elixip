@@ -47,7 +47,7 @@ In terms of capabilities, the emphasis will be on:
 ## Roadmap
 
 - **kelixip**: coming up soon! A scriptable SIP application server (design in
-  [docs/kelixip_basic.md](docs/kelixip_basic.md)). Its *basic* scope delivers a
+  [docs/design/kelixip_basic.md](docs/design/kelixip_basic.md)). Its *basic* scope delivers a
   multi-domain **registrar** — declarative TOML config with hot-reloadable
   domains/dial-plan, digest auth (stateless nonce, HA1 via a `subscriber_db`
   module), NAT/flow for WebRTC — plus loadable `.beam` modules, a media-server

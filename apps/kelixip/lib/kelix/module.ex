@@ -1,6 +1,6 @@
 defmodule Kelix.Module do
   @moduledoc """
-  The loadable-module contract (design `docs/kelixip_basic_design.md` §8, spec §5).
+  The loadable-module contract (design `docs/design/kelixip_basic_design.md` §8, spec §5).
 
   A module is a **stateful OTP service** (a connection pool, a store …) **plus
   stateless facades** imported by scripts. `Kelix.ModuleSupervisor` starts one

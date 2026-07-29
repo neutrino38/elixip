@@ -194,7 +194,7 @@ New pure functions (unit-testable, the heart of the change):
 
 ### 5.4 Docs
 
-- Update `docs/mendooze_interface.md` §4.4/§4.6 (offer/answer flows), §6.7 (note
+- Update `docs/design/mendooze_interface.md` §4.4/§4.6 (offer/answer flows), §6.7 (note
   the enriched return), §8 (codec mapping — the client no longer owns fmtp), and
   the `Conn` state map.
 

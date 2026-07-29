@@ -4,7 +4,7 @@ This document covers certificate management, runtime configuration, and operatio
 guidance for the TLS (`SIP.Transport.TLS` / `SIP.Transport.TLSListener`) and WSS
 (`SIP.Transport.WSS`) transports.
 
-For the TLS listener internal design, see [docs/tls_listener.md](docs/tls_listener.md).
+For the TLS listener internal design, see [docs/design/tls_listener.md](docs/design/tls_listener.md).
 
 ---
 

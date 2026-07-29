@@ -84,7 +84,7 @@ En tant que lead dev versé en Elixir, en DSL et avec un parfaite connaissance d
 
 > Cette partie répond à la demande ci-dessus. Elle s'appuie sur l'architecture
 > existante (Transaction → Dialog → Session → DSL) et sur le travail Registrar
-> (`docs/uas_scenario_design.md`, `scenarios/uas_register.exs`,
+> (`docs/design/uas_scenario_design.md`, `scenarios/uas_register.exs`,
 > `Elixip.RegistrarUAS`). Les choix structurants ont été validés le 2026-07-12.
 
 ## 0. Décisions structurantes (validées)

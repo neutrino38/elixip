@@ -1,6 +1,6 @@
 # Mendooze — server-side work to support a WebRTC *client* (UAC) controller
 
-Companion to `docs/webrtc_sdp_design.md` (§2.5, §2.7). Elixip is being
+Companion to `docs/design/webrtc_sdp_design.md` (§2.5, §2.7). Elixip is being
 extended so that elixipp can place calls **as a WebRTC UAC** (browser-shaped
 offer, `setup:actpass`) toward the IVeS WebRTC gateway. In that call
 direction the mendooze endpoint driven by elixip sits on the **offerer**

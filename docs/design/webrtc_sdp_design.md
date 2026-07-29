@@ -9,7 +9,7 @@ This document has two parts:
 2. the **software design** of the equivalent capability in Elixip
    (`MediaServer.Mendooze` adapter and `MediaServer.Mockup`), taking into
    account the **delegated codec/fmtp negotiation** already implemented
-   (`docs/mendooze_sdp_delegation_plan.md`) — which the Java code predates and
+   (`docs/design/mendooze_sdp_delegation_plan.md`) — which the Java code predates and
    does not use.
 
 Design only — no implementation is part of this document.
@@ -114,7 +114,7 @@ with the server RPC that backs each element:
   configured with `useExtFIR=1` and the server raises a *FastUpdateRequested*
   event; the servlet converts it to a SIP INFO `picture_fast_update` on that
   leg. (B2BUA-specific — noted for the future Elixip B2BUA module,
-  `docs/b2bua_module.md`.)
+  `docs/design/b2bua_module.md`.)
 
 ### 1.6 fmtp and codec negotiation (superseded by delegation)
 

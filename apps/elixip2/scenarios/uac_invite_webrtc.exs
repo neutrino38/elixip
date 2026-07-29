@@ -2,7 +2,7 @@
 # WSS, a WebRTC offer (DTLS/ICE, rtcp-mux, mid, candidates), mendooze media — and
 # play a media file once the media path is up.
 #
-# Emulates the captured IVeS web client (docs/webrtc_sdp_design.md §1.8/§2.5)
+# Emulates the captured IVeS web client (docs/design/webrtc_sdp_design.md §1.8/§2.5)
 # against the IVeS WebRTC gateway. Run it against the dev platform with:
 #     elixipp -c ives.json scenarios/uac_invite_webrtc.exs
 #

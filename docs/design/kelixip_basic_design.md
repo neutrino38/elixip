@@ -1139,7 +1139,7 @@ Launch: `systemctl start kelixip` (the TOML paths come from the environment, §2
 not from a command-line flag).
 
 > **Implementation status (P10 — RPM 2026-07-28, deb 2026-07-29 — DONE).**
-> [`packaging/`](../packaging/README.md) produces three packages from one
+> [`packaging/`](../../packaging/README.md) produces three packages from one
 > `mix release`: `kelixip` (release + `kelictl` + unit + `/etc/kelixip`),
 > `kelixip-mod-registrar` and `kelixip-mod-auth_db` (`kelixip-mod-auth-db` on the deb,
 > where a package name may carry no underscore) — the core carries no module, exactly

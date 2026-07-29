@@ -574,7 +574,7 @@ absence = filtered), and `build/1`'s server-driven path emits the codec section
 from it. Detection mirrors the `EventQueueCreate` `sourceName` tolerance
 (§4.1): `returnVal[1]` present and a map ⇒ delegated path; absent ⇒ the
 client-side codec tables (`accepted[media] = nil`). Full design in
-`docs/mendooze_sdp_delegation_plan.md`.
+`docs/design/mendooze_sdp_delegation_plan.md`.
 
 ---
 

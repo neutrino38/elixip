@@ -1,4 +1,4 @@
-# kelixip.spec — Alma Linux 9 (design docs/kelixip_basic_design.md §12.1, §15 P10).
+# kelixip.spec — Alma Linux 9 (design docs/design/kelixip_basic_design.md §12.1, §15 P10).
 #
 # The payload is PRE-BUILT: Source0 is the staged tarball produced by
 # packaging/stage.sh (an assembled `mix release` tree with embedded ERTS, plus the

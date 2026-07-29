@@ -1,6 +1,6 @@
 defmodule Kelix.Application do
   @moduledoc """
-  OTP entry point of the kelixip server (design `docs/kelixip_basic_design.md` §2).
+  OTP entry point of the kelixip server (design `docs/design/kelixip_basic_design.md` §2).
 
   It boots the root supervision tree in the order §2.1 prescribes: infra config,
   then the shared SIP stack registries + the `ConfigRegistry` — which the

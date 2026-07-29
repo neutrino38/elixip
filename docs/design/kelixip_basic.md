@@ -257,7 +257,7 @@ Chaque fonction d'un domaine (`domains.toml`) référence son script par un chem
 domaines (ex. `registrar-common.exs`).
 
 > **À faire (migration DSL).** Les scénarios UAS INVITE actuels
-> (`scenarios/uas_invite.exs`, conception `docs/uas_invite.md`) embarquent leur
+> (`scenarios/uas_invite.exs`, conception `docs/design/uas_invite.md`) embarquent leur
 > propre configuration de domaine. Avec le dispatch déclaratif de kelixip
 > (§2.2), cette config de domaine doit **sortir des scénarios** : le domaine et
 > le routage viennent de `domains.toml`, le scénario ne porte plus que la
@@ -863,7 +863,7 @@ sera bâti sur base elixip/kelixip. Les points d'extension sont les **modules**
 | Observabilité : `:telemetry` + `/metrics` Prometheus + `/health` (labels par domaine) | basic |
 | Modules `.beam` (registrar, auth_db, radius_billing) | basic |
 | Pool de media servers                | basic      |
-| Fonction `calls` (B2BUA)             | **futur** — conception `docs/b2bua_module.md` |
+| Fonction `calls` (B2BUA)             | **futur** — conception `docs/design/b2bua_module.md` |
 | Fonction `presence`                  | **futur** — squelette `SIP.Session.Presence` |
 | Persistance usrloc / registrar en BDD | **futur** |
 | Haute disponibilité (cluster 2-3)    | **futur**  |
@@ -876,5 +876,5 @@ sera bâti sur base elixip/kelixip. Les points d'extension sont les **modules**
 > tout ce que cela implique : macro de création du second dialogue, discrimination
 > des legs, relais requêtes/réponses, couplage média inter-legs, gestion des cas
 > d'erreur/annulation sur chaque leg. La conception démarre dans
-> `docs/b2bua_module.md` (aujourd'hui à l'état d'ébauche) et devra être menée avant
+> `docs/design/b2bua_module.md` (aujourd'hui à l'état d'ébauche) et devra être menée avant
 > toute implémentation.

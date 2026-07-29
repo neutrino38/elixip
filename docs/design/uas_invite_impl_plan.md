@@ -1,6 +1,6 @@
 # Plan d'implémentation — scénarios UAS INVITE
 
-Découpage issu de `docs/uas_invite.md` §7. Ce document détaille la conception
+Découpage issu de `docs/design/uas_invite.md` §7. Ce document détaille la conception
 d'implémentation phase par phase. **Phases 1 à 6 réalisées** (2026-07-12).
 
 Rappel des phases :
@@ -613,7 +613,7 @@ end
 
 Rationale : `reply_invite` est une réponse in-dialog générique (offre/réponse),
 tandis que rediriger (3xx) ou défier (401/407) un appel entrant est un rôle
-serveur. **Conséquence** : l'exemple §5.3 de `docs/uas_invite.md` doit ajouter
+serveur. **Conséquence** : l'exemple §5.3 de `docs/design/uas_invite.md` doit ajouter
 `use SIP.Session.CallUAS` (uniquement s'il utilise redirect/challenge ; il
 utilise `reply_invite`, déjà couvert). Idem futur `scenarios/uas_invite.exs`.
 
@@ -679,7 +679,7 @@ Deux niveaux, sans dépendre de l'outil elixipp (phases 5) :
 | `SIPScenario.ex` | `instrument_receive_clause/1` étendu (as-pattern + `auto_store`) ; helper `bind_event_var/2`. **Pas** de `use CallUAS` ici |
 | `SIPSessionInvite.ex` (`CallUAC`) | macro **`reply_invite`** ajoutée à `__using__` (déléguant à `CallUAS.do_reply_invite/4`) |
 | `SIPSessionInvite.ex` (`CallUAS`, nouveau) | `auto_store/2` ; macros **`redirect_invite`/`challenge_invite`** ; backing `do_reply_invite/4`, `do_redirect_invite/4`, `do_challenge_invite/3` + helpers `fetch_stored_req!`/`needs_sdp?`/`has_sdp?`/`reply_lasterr` |
-| `docs/uas_invite.md` | corriger l'exemple §5.3 : ajouter `use SIP.Session.CallUAS` (pour redirect/challenge) |
+| `docs/design/uas_invite.md` | corriger l'exemple §5.3 : ajouter `use SIP.Session.CallUAS` (pour redirect/challenge) |
 | `test/uas_invite_test.exs` | nouveau — unitaire `auto_store` + scénario UDP mockup (`use SIP.Session.CallUAS` pour tester redirect/challenge) |
 
 ## 2.7 Hors périmètre phase 2 (→ phase 3)

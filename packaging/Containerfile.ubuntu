@@ -1,4 +1,4 @@
-# Ubuntu build host for the kelixip deb (design docs/kelixip_packaging.md).
+# Ubuntu build host for the kelixip deb (design docs/design/kelixip_packaging.md).
 #
 # Same golden rule as the AL9 image: assemble the release HERE, on the release you
 # are targeting. The release embeds ERTS — native code linked against glibc/OpenSSL/
@@ -15,7 +15,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Only Erlang is OS-sensitive: Ubuntu's own erlang-nox is native to this image, so
 # its ERTS links this image's OpenSSL. (Need a newer/pinned OTP? swap in the Erlang
-# Solutions apt repo — see docs/kelixip_packaging.md.)
+# Solutions apt repo — see docs/design/kelixip_packaging.md.)
 # dpkg-dev is what brings dpkg-shlibdeps, which computes the core package's Depends.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \

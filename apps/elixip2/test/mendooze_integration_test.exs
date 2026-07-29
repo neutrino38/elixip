@@ -88,7 +88,7 @@ defmodule Mendooze.IntegrationTest do
     end
 
     test "H264 audio+video loopback carries the server-negotiated fmtp", %{server: server} do
-      # Delegated SDP negotiation (§8.1 of docs/mendooze_interface.md): the media
+      # Delegated SDP negotiation (§8.1 of docs/design/mendooze_interface.md): the media
       # server is authoritative for the H264 fmtp (profile-level-id /
       # packetization-mode). This asserts the fmtp reaches both the offer and the
       # answer, i.e. the enriched EndpointStartReceiving return is threaded

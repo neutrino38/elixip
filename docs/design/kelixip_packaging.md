@@ -2,10 +2,10 @@
 
 Status: **implemented** — RPM (2026-07-28), deb (2026-07-29). This note records the
 build-environment decisions and **why** they are what they are; the artifacts live in
-[`packaging/`](../packaging/README.md) (spec, deb control files, unit, build scripts)
+[`packaging/`](../../packaging/README.md) (spec, deb control files, unit, build scripts)
 and the step-by-step build procedures are
-[BUILD.md § Building the RPM packages](../BUILD.md#building-the-rpm-packages-alma-linux-9)
-and [§ Building the deb packages](../BUILD.md#building-the-deb-packages-ubuntu--debian).
+[BUILD.md § Building the RPM packages](../../BUILD.md#building-the-rpm-packages-alma-linux-9)
+and [§ Building the deb packages](../../BUILD.md#building-the-deb-packages-ubuntu--debian).
 The **what** — FHS layout, systemd unit, subpackages,
 `%config(noreplace)` — is in the design doc
 [§12](kelixip_basic_design.md#12-packaging); this note covers the **how to build**:
@@ -155,7 +155,7 @@ ENV PATH="/usr/local/elixir/bin:$PATH"
 
 ## What the packages do with the release
 
-Details in [`packaging/README.md`](../packaging/README.md); the two decisions worth
+Details in [`packaging/README.md`](../../packaging/README.md); the two decisions worth
 recording here, because both are security choices rather than mechanics:
 
 - **The distribution cookie is generated per installation**, not shipped. It is the

@@ -1,7 +1,7 @@
 defmodule Kelixip.MixProject do
   use Mix.Project
 
-  # The kelixip server application (design docs/kelixip_basic_design.md).
+  # The kelixip server application (design docs/design/kelixip_basic_design.md).
   # Built on the shared :elixip2 SIP stack. Delivered as an OTP release
   # (`mix release kelixip`); the `kelictl` control CLI ships inside that release.
   def project do

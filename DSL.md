@@ -245,7 +245,7 @@ The zero-arg `media_connect/0` reads `config :elixip2, :mediaserver`
 be switched between the in-process **Mockup** and the real **Mendooze** MCU
 without editing the scenario — set it in `config/config.exs`, in the scenario's
 own `config` block, or in an external-JSON header (`"mediaserver"` key). See the
-Configuration section of `CLAUDE.md` and `docs/mendooze_interface.md`.
+Configuration section of `CLAUDE.md` and `docs/design/mendooze_interface.md`.
 
 ## transitions: the goto macro, scenario_success(), scenario_failure()
 

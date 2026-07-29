@@ -5,8 +5,8 @@ serves one or more SIP domains, each routed to DSL scenario scripts, with
 loadable **modules** (registrar, database auth, …) plugged in Kamailio-style.
 
 > This is the **operator/user** manual. The locked design and rationale live in
-> [`../kelixip_basic.md`](../kelixip_basic.md) (spec) and
-> [`../kelixip_basic_design.md`](../kelixip_basic_design.md) (design).
+> [`../design/kelixip_basic.md`](../design/kelixip_basic.md) (spec) and
+> [`../design/kelixip_basic_design.md`](../design/kelixip_basic_design.md) (design).
 
 ## Table of contents
 

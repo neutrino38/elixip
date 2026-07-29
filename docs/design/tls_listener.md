@@ -228,5 +228,5 @@ Client          TLSListener (accept Task)   SIP.Transport.TLS    RegistrarUAS
 A WSS listener will follow the same pattern: `:ssl.listen` + handshake in the Task,
 then a WebSocket upgrade (via `Socket.Web.accept!/1` or equivalent) before spawning a
 `SIP.Transport.WSS` inbound instance. Certificate configuration will reuse the same
-`tls_certfile` / `tls_keyfile` keys. See [TLS_WSS.md](../TLS_WSS.md) for shared
+`tls_certfile` / `tls_keyfile` keys. See [TLS_WSS.md](../../TLS_WSS.md) for shared
 certificate guidance.

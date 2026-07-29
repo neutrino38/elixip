@@ -22,7 +22,7 @@ defmodule MediaServer.Mendooze.Sdp do
 
   Since the enriched `EndpointStartReceiving` return, the media server is
   authoritative for the accepted payload types and their fmtp parameters (see
-  `docs/mendooze_sdp_delegation_plan.md`). `accepted_pts/2` reduces the server
+  `docs/design/mendooze_sdp_delegation_plan.md`). `accepted_pts/2` reduces the server
   struct to the accepted set; `pt_rtpmap/2` / `code_rtpmap/2` resolve the SDP
   `rtpmap` fields for a payload type (the server returns fmtp only, so the
   encoding name and clock still come from the local codec tables); and the

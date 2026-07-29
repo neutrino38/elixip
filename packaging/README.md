@@ -49,7 +49,7 @@ the first line of `deb/changelog` for the deb. Bump all three.
 > second reason: `dpkg-shlibdeps` computes the `Depends` from the build host, so they
 > name that release's library packages (`libssl3` on Ubuntu 22.04, `libssl3t64` on
 > 24.04+). One package per target release. Why, and the Erlang/Elixir source options,
-> in [../docs/kelixip_packaging.md](../docs/kelixip_packaging.md).
+> in [../docs/design/kelixip_packaging.md](../docs/design/kelixip_packaging.md).
 
 ## Files here
 

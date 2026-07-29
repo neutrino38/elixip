@@ -62,7 +62,7 @@ packaging/build-in-container.sh --target ubuntu   # deb likewise
 
 The repo is a **Mix umbrella** (`apps/`), split so each build artifact carries
 only its own dependencies (design in
-[docs/kelixip_basic_design.md](docs/kelixip_basic_design.md) §12.0):
+[docs/design/kelixip_basic_design.md](docs/design/kelixip_basic_design.md) §12.0):
 
 ```
 apps/
@@ -197,7 +197,7 @@ Elixip drives a media server through the `MediaServer.Behaviour` behaviour, so
 implementations are interchangeable (selected via config — see Configuration):
 - `MediaServer.Mendooze` — the real adapter, driving the **Mendooze MCU** over
   its JSR309 **XML-RPC** control interface (`apps/elixip2/lib/framework/mendooze/`; design
-  in `docs/mendooze_interface.md`). Events arrive over a chunked HTTP long-poll.
+  in `docs/design/mendooze_interface.md`). Events arrive over a chunked HTTP long-poll.
 - `MediaServer.Mockup` — in-process stub for call-flow tests.
 
 **Conceptual mapping — medooze → Elixir:**

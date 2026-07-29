@@ -1,4 +1,4 @@
-# Alma Linux 9 build host for the kelixip RPM (design docs/kelixip_packaging.md).
+# Alma Linux 9 build host for the kelixip RPM (design docs/design/kelixip_packaging.md).
 #
 # The golden rule: assemble the release HERE, not in a hexpm/elixir image. The
 # release embeds ERTS — native code linked against glibc/OpenSSL/ncurses — so the

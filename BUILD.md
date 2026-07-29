@@ -12,7 +12,7 @@ This repository is a **Mix umbrella** with four apps under `apps/`:
 Each app pulls only its own dependencies, so the `elixipp` escript never carries
 the server's HTTP/DB stack, and vice-versa. The library app is named `:elixip2`
 (kept as-is to avoid churn on its many config references); its directory is
-`apps/elixip2`. Design rationale: [docs/kelixip_basic_design.md](docs/kelixip_basic_design.md) §12.0.
+`apps/elixip2`. Design rationale: [docs/design/kelixip_basic_design.md](docs/design/kelixip_basic_design.md) §12.0.
 
 ## Prerequisites
 
@@ -92,7 +92,7 @@ $REL stop         # graceful stop
 
 `kelictl` (the control CLI) ships **inside this release** as a `bin/` command
 (it RPCs the running node) — it is not a separate escript. See
-[docs/kelixip_basic_design.md](docs/kelixip_basic_design.md) §10.2, §12.
+[docs/design/kelixip_basic_design.md](docs/design/kelixip_basic_design.md) §10.2, §12.
 
 Point it at its configuration (design §2.1, §12.1):
 
@@ -152,7 +152,7 @@ ships glibc 2.34 + OpenSSL 3).
 So: build on **AL9** — a real host, or the `almalinux:9` container below. Never in a
 Docker Hub `hexpm/elixir:*` image; those are Debian/Alpine-based, and the embedded
 ERTS would be theirs. (Rationale and the alternative Erlang sources:
-[docs/kelixip_packaging.md](docs/kelixip_packaging.md).)
+[docs/design/kelixip_packaging.md](docs/design/kelixip_packaging.md).)
 
 ### Build-host toolchain
 
