@@ -1,0 +1,418 @@
+defmodule SIP.Uri do
+  @typedoc """
+  A parsed SIP URI. `destip`/`destport`/`destproto`/`tp_module`/`tp_pid` are the
+  transport info attached once the URI has been resolved or received (see
+  `has_tp_info/1`); they are nil on a freshly parsed URI.
+  """
+  @type t :: %__MODULE__{
+          displayname: String.t() | nil,
+          userpart: String.t() | nil,
+          domain: String.t() | nil,
+          port: non_neg_integer() | nil,
+          scheme: String.t(),
+          proto: String.t(),
+          destip: tuple() | nil,
+          destport: non_neg_integer(),
+          destproto: String.t() | nil,
+          tp_module: module() | nil,
+          tp_pid: pid() | nil,
+          params: %{optional(String.t()) => String.t() | true}
+        }
+
+  defstruct displayname: nil,
+            userpart: nil,
+            domain: nil,
+            port: nil,
+            scheme: "sip:",
+            proto: "UDP",
+            # IP to be used
+            destip: nil,
+            # port to be used
+            destport: 0,
+            destproto: nil,
+            # transport module
+            tp_module: nil,
+            # transport PID
+            tp_pid: nil,
+            params: %{}
+
+  defp parse_uri_parameters(param_list) do
+    params =
+      Enum.map(param_list, fn pv ->
+        # Split on the first '=' only: quoted values may contain '='
+        # (e.g. base64 keys) and must stay intact
+        case String.split(pv, "=", parts: 2) do
+          [p, v] -> {p, v}
+          [p] -> {p, true}
+        end
+      end)
+
+    # Convert list of couples [ {p1, v1}, {p2, v2}, ... ]
+    # into a map
+    Map.new(params)
+  end
+
+  # Split a parameter string on ";" respecting double-quoted values, so that
+  # params like received="sip:1.2.3.4:5060;transport=TLS" are never split in
+  # the middle. Empty fragments are dropped.
+  defp split_params(param_str) do
+    {parts, cur, _in_quote} =
+      Enum.reduce(String.graphemes(param_str), {[], "", false}, fn ch, {parts, cur, in_quote} ->
+        cond do
+          ch == "\"" -> {parts, cur <> "\"", !in_quote}
+          ch == ";" and not in_quote -> {[cur | parts], "", false}
+          true -> {parts, cur <> ch, in_quote}
+        end
+      end)
+
+    [cur | parts]
+    |> Enum.reverse()
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  # parse domain, user@domain, user@domain:port
+
+  defp parse_core_uri(scheme, core_uri_str) do
+    case String.split(core_uri_str, "@") do
+      [user, domainport] ->
+        # `*`, not `+`, on the tail: a one-character user part is legal (RFC 3261
+        # §19.1.1 user = 1*…) and common in test labs and short extensions. Requiring
+        # a second character made SIP.Uri.parse/1 fail on `sip:1@example.com`, and a
+        # URI that does not parse discards the whole message — a REGISTER from
+        # extension "1" was answered by nothing at all.
+        if String.match?(user, ~r/^[a-zA-Z0-9\+][a-zA-Z0-9\-\._]*$/) do
+          tmpuri = parse_core_uri(scheme, domainport)
+
+          if is_map(tmpuri) do
+            Map.put(tmpuri, :userpart, user)
+          else
+            tmpuri
+          end
+        else
+          nil
+        end
+
+      [domainport] ->
+        case String.split(domainport, ":") do
+          [domain, port] ->
+            if String.match?(port, ~r/^[0-9]+$/) do
+              tmpuri = parse_core_uri(scheme, domain)
+
+              if is_map(tmpuri) do
+                Map.put(tmpuri, :port, String.to_integer(port))
+              else
+                tmpuri
+              end
+            else
+              :invalid_sip_uri_port
+            end
+
+          [domain] ->
+            if String.match?(domain, ~r/^[a-zA-Z0-9\-\.]+$/) do
+              %SIP.Uri{domain: domain}
+            else
+              :invalid_sip_domain
+            end
+        end
+    end
+  end
+
+  @doc """
+  Parse a single SIP URI and store its parts in a map
+  """
+  @spec parse(bitstring()) :: {atom(), map()}
+  def parse(uri_string) do
+    proto =
+      if String.contains?(uri_string, "sips:") do
+        "sips:"
+      else
+        "sip:"
+      end
+
+    case String.split(uri_string, proto, parts: 2) do
+      ["", part2] ->
+        # Form sip:user@domain;param=value
+        parts = split_params(part2)
+
+        # parse core URI
+        case parse_core_uri(proto, Enum.at(parts, 0)) do
+          err when is_atom(err) ->
+            {err, Map.new()}
+
+          core_uri ->
+            # Parse parameters
+            params = parse_uri_parameters(Enum.drop(parts, 1))
+
+            finalport =
+              if core_uri.port != nil do
+                core_uri.port
+              else
+                if proto == "sips:" do
+                  5061
+                else
+                  5060
+                end
+              end
+
+            finaluri = %SIP.Uri{core_uri | scheme: proto, params: params, port: finalport}
+
+            # Fix protocol. get_transport/1 reads the `transport` parameter first and
+            # falls back to sips: -> TLS, so BOTH URI forms agree on `proto`: the
+            # bracketed one derived it from the parameter while this one did not, and
+            # `sip:x@y;transport=tcp` came out claiming UDP.
+            finaluri = %SIP.Uri{finaluri | proto: get_transport(finaluri)}
+            {:ok, finaluri}
+        end
+
+      ["<", part2] ->
+        # Form <sip:user@domain>;param=value
+        [core_uri_str, params_str] = String.split(part2, ">", parts: 2)
+
+        case SIP.Uri.parse(proto <> core_uri_str) do
+          {:ok, core_uri} ->
+            # Parse the HEADER parameters (those after the `>`).
+            header_params = params_str |> split_params() |> parse_uri_parameters()
+
+            # MERGE with the URI parameters (those inside the `<>`), which the core
+            # parse above put in core_uri.params. Overwriting instead of merging is
+            # how every URI parameter of a bracketed URI silently vanished on parse
+            # — `user=phone`, but also `maddr`, `ttl`, `lr` on a Route. A name
+            # collision goes to the header parameter, the outer one.
+            params = Map.merge(core_uri.params, header_params)
+
+            # Add params to URI and fix proto field
+            uri = %SIP.Uri{core_uri | params: params, proto: get_transport(core_uri)}
+
+            if uri.scheme == "sips" and uri.proto != "TLS" do
+              raise "Invalid URI. sips is specified and transport is not TLS"
+            else
+              {:ok, uri}
+            end
+
+          {code, core_uri} ->
+            {code, core_uri}
+        end
+
+      [part1, part2] ->
+        # Form "Display Name" <sip:user@domain>;param=value
+        # Form "Display Name"<sip:user@domain>;param=value
+        # Form DisplayName <sip:user@domain>;param=value
+
+        display_name =
+          cond do
+            # test "Display Name" <....
+            String.contains?(part1, "\" <") ->
+              [d_name, _truc] = String.split(part1, "\" <")
+              URI.decode_www_form(String.slice(d_name, 1..-1//1))
+
+            # test "Display Name"<....
+            String.contains?(part1, "\"<") ->
+              [d_name, _truc] = String.split(part1, "\"<")
+              # URI.decode_www_form(String.slice(d_name, 1..-1))
+              URI.decode_www_form(String.slice(d_name, 1..-1//1))
+
+            # test DisplayName <....
+            String.contains?(part1, " <") ->
+              [d_name, _truc] = String.split(part1, " <")
+              URI.decode_www_form(d_name)
+
+            # test DisplayName <....
+            String.contains?(part1, "<") ->
+              [d_name, _truc] = String.split(part1, "<")
+              d_name
+
+            # Parse error
+            true ->
+              part1
+          end
+
+        # Recurse to parse the URI part
+        case SIP.Uri.parse("<" <> proto <> part2) do
+          {:ok, core_uri} ->
+            {:ok, Map.put(core_uri, :displayname, display_name)}
+
+          {code, core_uri} ->
+            {code, core_uri}
+        end
+
+      _ ->
+        {:invalid_sip_uri_general, Map.new()}
+    end
+  end
+
+  @doc "Obtain a parameter from an URI"
+  @spec get_uri_param(%SIP.Uri{} | binary(), binary()) ::
+          {:ok, binary()} | {:no_such_param, nil} | {atom(), nil}
+  def get_uri_param(sip_uri, param) when is_binary(sip_uri) do
+    case SIP.Uri.parse(sip_uri) do
+      {:ok, parsed_uri} -> get_uri_param(parsed_uri, param)
+      {code, _dump} -> {code, nil}
+    end
+  end
+
+  def get_uri_param(sip_uri = %SIP.Uri{}, param) do
+    case Map.get(sip_uri.params, param) do
+      nil -> {:no_such_param, nil}
+      val -> {:ok, val}
+    end
+  end
+
+  @doc """
+  Return the first URI of a Contact header value.
+
+  Since multiple contacts are supported, a parsed Contact header is either a
+  single `%SIP.Uri{}` or a list of them. Use this when a single URI is needed
+  (e.g. the remote target of a dialog); returns nil when no contact is present.
+  """
+  @spec first_contact(%SIP.Uri{} | [%SIP.Uri{}] | nil) :: %SIP.Uri{} | nil
+  def first_contact([first | _]), do: first
+  def first_contact(sip_uri = %SIP.Uri{}), do: sip_uri
+  def first_contact(_), do: nil
+
+  @doc "Set an URI parameter"
+  def set_uri_param(sip_uri = %SIP.Uri{}, param, value) do
+    new_params = Map.put(sip_uri.params, param, value)
+    Map.put(sip_uri, :params, new_params)
+  end
+
+  @doc "Obtain the transport string in capitals from the URI"
+  def get_transport(uri = %SIP.Uri{}) do
+    case get_uri_param(uri, "transport") do
+      {:no_such_param, nil} ->
+        if uri.scheme == "sips:", do: "TLS", else: uri.proto
+
+      {:ok, value} ->
+        String.upcase(value)
+    end
+  end
+
+  defp serialize_core_uri(scheme, user, host, port) when is_tuple(host) do
+    serialize_core_uri(scheme, user, SIP.NetUtils.ip2string(host), port)
+  end
+
+  defp serialize_core_uri("sips:", nil, host, 5061) do
+    "sips:" <> host
+  end
+
+  defp serialize_core_uri("sips:", nil, host, nil) do
+    "sips:" <> host
+  end
+
+  defp serialize_core_uri("sips:", user, host, 5061) do
+    "sips:" <> user <> "@" <> host
+  end
+
+  defp serialize_core_uri("sips:", user, host, nil) do
+    "sips:" <> user <> "@" <> host
+  end
+
+  defp serialize_core_uri("sips:", user, host, port) do
+    "sips:" <> user <> "@" <> host <> ":" <> Integer.to_string(port)
+  end
+
+  defp serialize_core_uri("sip:", nil, host, 5060) when is_binary(host) do
+    "sip:" <> host
+  end
+
+  defp serialize_core_uri("sip:", user, host, 5060) when is_binary(host) do
+    "sip:" <> user <> "@" <> host
+  end
+
+  defp serialize_core_uri("sip:", nil, host, nil) when is_binary(host) do
+    "sip:" <> host
+  end
+
+  defp serialize_core_uri("sip:", nil, host, port) when is_binary(host) do
+    "sip:" <> host <> ":" <> Integer.to_string(port)
+  end
+
+  defp serialize_core_uri("sip:", user, host, nil) do
+    "sip:" <> user <> "@" <> host
+  end
+
+  defp serialize_core_uri("sip:", user, host, port) when is_binary(host) do
+    "sip:" <> user <> "@" <> host <> ":" <> Integer.to_string(port)
+  end
+
+  defp serialize_one_param(key, value) when is_boolean(value) do
+    if value do
+      key
+    else
+      ""
+    end
+  end
+
+  defp serialize_one_param(key, value) when is_bitstring(value) do
+    key <> "=" <> value
+  end
+
+  # Turn the param map in a string param1=val1;param2=val2
+  defp serialize_params(params) when is_map(params) do
+    pstr =
+      Enum.reduce(params, "", fn {key, value}, acc ->
+        acc <> serialize_one_param(key, value) <> ";"
+      end)
+
+    String.trim_trailing(pstr, ";")
+  end
+
+  # Do not add transport=TLS for sips URI
+  defp fix_transport_param(params, "sips:", "TLS") do
+    params
+  end
+
+  # Do not add transport=UDP
+  defp fix_transport_param(params, _scheme, "UDP") do
+    params
+  end
+
+  defp fix_transport_param(params, _scheme, proto) do
+    if Map.has_key?(params, "transport") do
+      params
+    else
+      # RFC 3261 §19.1.1 registers the values lower-case (udp/tcp/tls/ws/wss);
+      # `proto` is held upper-case internally, so a synthesized parameter would
+      # otherwise go out as `transport=TCP`.
+      Map.put(params, "transport", String.downcase(proto))
+    end
+  end
+
+  # Serialize a map into a SIP URI
+  def serialize(uri = %SIP.Uri{}) do
+    # Serialize core part or the SIP URI
+    core_uri_str =
+      serialize_core_uri(
+        uri.scheme,
+        uri.userpart,
+        uri.domain,
+        uri.port
+      )
+
+    # add transport in params if needed and serialize params as string
+    params_str = fix_transport_param(uri.params, uri.scheme, uri.proto) |> serialize_params()
+
+    # Add Display Name
+    uri_str =
+      if uri.displayname != nil do
+        "\"" <>
+          URI.encode_www_form(uri.displayname) <> "\" <" <> core_uri_str <> ">;" <> params_str
+      else
+        core_uri_str <> ";" <> params_str
+      end
+
+    {:ok, String.trim_trailing(uri_str, ";")}
+  end
+
+  def has_tp_info(uri = %SIP.Uri{}) do
+    is_tuple(uri.destip) and uri.destport > 0 and is_pid(uri.tp_pid) and not is_nil(uri.tp_module)
+  end
+
+  defimpl String.Chars do
+    def to_string(uri) do
+      case SIP.Uri.serialize(uri) do
+        {:ok, uri_str} -> uri_str
+      end
+    end
+  end
+end

@@ -1,0 +1,575 @@
+defmodule SIP.Test.Uri do
+	use ExUnit.Case
+  doctest SIP.Uri
+
+  test "Parse an URI that has only a domain" do
+		{ code, parsed_uri } = SIP.Uri.parse("sip:domain.fr")
+		assert code == :ok
+		assert parsed_uri.domain == "domain.fr"
+  end
+
+  test "Parse a simple URI" do
+
+		{ code, parsed_uri } = SIP.Uri.parse("sip:simple@domain.fr")
+		assert code == :ok
+		assert parsed_uri.userpart == "simple"
+		assert parsed_uri.domain == "domain.fr"
+		assert Map.has_key?(parsed_uri, "port") == false
+		assert parsed_uri.params == %{}
+  end
+
+  test "Parse a faulty SIP URI" do
+		{ code, _parsed_uri } = SIP.Uri.parse("sipp:simple@domain.fr")
+		assert code == :invalid_sip_uri_general
+	end
+
+  # A one-character user part is legal (RFC 3261 §19.1.1 user = 1*…) and routine:
+  # short extensions, and test labs that dial "1". The parser used to require a
+  # second character, and a URI that does not parse takes the whole message with it
+  # — a REGISTER from extension "1" was answered by nothing at all.
+  test "Parse an URI whose user part is a single character" do
+		for user <- ["1", "a", "Z", "+"] do
+			{ code, parsed_uri } = SIP.Uri.parse("sip:#{user}@domain.fr")
+			assert code == :ok, "sip:#{user}@domain.fr did not parse"
+			assert parsed_uri.userpart == user
+			assert parsed_uri.domain == "domain.fr"
+		end
+	end
+
+  test "An empty user part is still refused" do
+		{ code, _parsed_uri } = SIP.Uri.parse("sip:@domain.fr")
+		assert code != :ok
+	end
+
+  test "Parse an URI with transport parameter" do
+		{ code, parsed_uri } = SIP.Uri.parse("sip:simple@domain.fr:5060;transport=TCP")
+			assert code == :ok
+			assert parsed_uri.userpart == "simple"
+			assert parsed_uri.domain == "domain.fr"
+			assert parsed_uri.port == 5060
+			assert parsed_uri.params == %{ "transport" => "TCP" }
+	end
+
+  test "Parse an URI with <> and transport parameter" do
+			{ code, parsed_uri } = SIP.Uri.parse("<sip:simple@domain.fr:5030>;transport=TCP;rport")
+			assert code == :ok
+			assert parsed_uri.userpart == "simple"
+			assert parsed_uri.domain == "domain.fr"
+			assert parsed_uri.port == 5030
+			assert parsed_uri.params == %{ "rport" => true, "transport" => "TCP"}
+	end
+
+  test "Parse an URI with a display name and several parameters" do
+			{ code, parsed_uri } = SIP.Uri.parse("\"omé tür\" <sip:simple@domain.fr:50>;transport=TCP;rport")
+			assert code == :ok
+			assert parsed_uri.userpart == "simple"
+			assert parsed_uri.domain == "domain.fr"
+			assert parsed_uri.port == 50
+			assert parsed_uri.params == %{ "rport" => true, "transport" => "TCP"}
+			assert parsed_uri.displayname == "omé tür"
+	end
+
+	test "Parse an URI with a display name without spece" do
+		{ code, parsed_uri } = SIP.Uri.parse("\"Site%20Arras%20POLE%20EMPLOI\"<sip:+33970260233@visioassistance.net>;tag=8075639")
+		assert code == :ok
+		assert parsed_uri.params == %{ "tag" => "8075639" }
+	end
+
+	test "Parse a register contact URI from the proxy"  do
+		{ code, parsed_uri } = SIP.Uri.parse("<sip:172.21.93.138>;expires=3600;received=\"sip:37.71.250.86:53266\"")
+		assert code == :ok
+		assert Map.get(parsed_uri.params, "expires") == "3600"
+	end
+
+	test "Quoted param value containing ';' is not split (no spurious transport param)" do
+		{ code, parsed_uri } =
+			SIP.Uri.parse("<sip:33970262546@172.22.0.3:50378>;expires=600;received=\"sip:37.71.250.86:41912;transport=TLS\"")
+
+		assert code == :ok
+		assert Map.get(parsed_uri.params, "expires") == "600"
+		assert Map.get(parsed_uri.params, "received") == "\"sip:37.71.250.86:41912;transport=TLS\""
+		# the ;transport=TLS inside the quotes must NOT become a URI param —
+		# it would make get_transport/1 route this contact over TLS
+		refute Map.has_key?(parsed_uri.params, "transport")
+	end
+
+	test "Quoted param value containing '=' is kept intact" do
+		{ code, parsed_uri } =
+			SIP.Uri.parse("<sip:bob@10.0.0.1>;+sip.instance=\"<urn:uuid:aa=bb==>\";expires=60")
+
+		assert code == :ok
+		assert Map.get(parsed_uri.params, "expires") == "60"
+		assert Map.get(parsed_uri.params, "+sip.instance") == "\"<urn:uuid:aa=bb==>\""
+	end
+
+	test "Quoted param on a bare URI form is not split" do
+		{ code, parsed_uri } =
+			SIP.Uri.parse("sip:alice@example.com;methods=\"INVITE;BYE\";tag=abcd")
+
+		assert code == :ok
+		assert Map.get(parsed_uri.params, "methods") == "\"INVITE;BYE\""
+		assert Map.get(parsed_uri.params, "tag") == "abcd"
+	end
+
+	test "Parse an URI with sips scheme and check port 5061" do
+		{ code, parsed_uri } = SIP.Uri.parse("sips:9999@visioassistance.net")
+		assert code == :ok
+		assert parsed_uri.scheme == "sips:"
+		assert parsed_uri.port == 5061
+		assert parsed_uri.proto == "TLS"
+	end
+
+	# A bracketed URI carries TWO kinds of parameter: the URI ones inside the `<>`
+	# and the header ones after it. They share one `params` map, and the header set
+	# used to OVERWRITE it — so every URI parameter of a bracketed URI silently
+	# vanished on parse. Found while reading a real handset's Contact.
+	test "URI parameters inside <> survive alongside the header parameters" do
+		{ :ok, uri } = SIP.Uri.parse("<sip:alice@example.com;user=phone;transport=tcp>;expires=0")
+		assert Map.get(uri.params, "user") == "phone"
+		assert Map.get(uri.params, "transport") == "tcp"
+		assert Map.get(uri.params, "expires") == "0"
+	end
+
+	test "a header parameter wins a name collision with a URI parameter" do
+		{ :ok, uri } = SIP.Uri.parse("<sip:alice@example.com;expires=10>;expires=600")
+		assert Map.get(uri.params, "expires") == "600"
+	end
+
+	test "the loose-routing marker of a Route survives" do
+		{ :ok, uri } = SIP.Uri.parse("<sip:proxy.example.com;lr>")
+		assert Map.get(uri.params, "lr") == true
+	end
+
+	# Both URI forms must agree on `proto`: the bracketed one derived it from the
+	# transport parameter while the bare one did not, so `sip:x@y;transport=tcp`
+	# came out of the parser claiming UDP.
+	test "proto follows the transport parameter in both URI forms" do
+		{ :ok, bare } = SIP.Uri.parse("sip:alice@example.com;transport=tcp")
+		{ :ok, bracketed } = SIP.Uri.parse("<sip:alice@example.com;transport=tcp>")
+		assert bare.proto == "TCP"
+		assert bracketed.proto == "TCP"
+	end
+
+	test "a parsed URI round-trips through serialize without losing a parameter" do
+		original = "<sip:alice@example.com:5070;user=phone;transport=tcp>;expires=600"
+		{ :ok, uri } = SIP.Uri.parse(original)
+		{ :ok, serialized } = SIP.Uri.serialize(uri)
+
+		{ :ok, reparsed } = SIP.Uri.parse(serialized)
+		assert reparsed.params == uri.params
+		assert reparsed.proto == "TCP"
+		assert reparsed.userpart == "alice"
+		assert reparsed.port == 5070
+	end
+
+	test "Serialize a SIP URI" do
+		uri = %SIP.Uri{
+			port: 50,
+			scheme: "sip:",
+			domain: "domain.fr",
+			params: %{"rport" => true, "transport" => "TCP"},
+			userpart: "simple",
+			displayname: "omé tür"
+		}
+
+		{ code, uristr } = SIP.Uri.serialize(uri)
+		assert code == :ok
+		assert uristr == "\"om%C3%A9+t%C3%BCr\" <sip:simple@domain.fr:50>;rport;transport=TCP"
+	end
+
+	test "Serialize a SIP URI with a domain only with to_string " do
+		uri = %SIP.Uri{ domain: "domaine.fr" }
+		assert to_string(uri) == "sip:domaine.fr"
+		uri = %SIP.Uri{ userpart: nil, domain: "djanah.com", port: 5061, scheme: "sip:", proto: "TLS" }
+		# lower-case: RFC 3261 §19.1.1 registers the transport values that way, and
+		# serialize synthesizes this one from `proto` (held upper-case internally)
+		assert to_string(uri) == "sip:djanah.com:5061;transport=tls"
+	end
+
+	test "Serialize a SIPS URI" do
+		uri = %SIP.Uri{ domain: "domaine.fr", scheme: "sips:" }
+		assert to_string(uri) == "sips:domaine.fr"
+		uri = %SIP.Uri{ domain: "domaine.fr", scheme: "sips:", port: 5061 }
+		assert to_string(uri) == "sips:domaine.fr"
+		uri = %SIP.Uri{ domain: "domaine.fr", scheme: "sips:", port: 5061, proto: "TLS" }
+		assert to_string(uri) == "sips:domaine.fr"
+	end
+
+	test "Serialize a SIP URI with a domain as IP addresses " do
+		uri = %SIP.Uri{ domain: { 1, 2, 3, 4} }
+		assert to_string(uri) == "sip:1.2.3.4"
+		uri = %SIP.Uri{ userpart: "toto", domain: { 1, 2, 3, 4} }
+		assert to_string(uri) == "sip:toto@1.2.3.4"
+		uri = %SIP.Uri{ userpart: "toto", domain: { 1, 2, 3, 4}, port: 5070 }
+		assert to_string(uri) == "sip:toto@1.2.3.4:5070"
+		uri = %SIP.Uri{ userpart: "toto", domain: { 1, 2, 3, 4}, port: 5070, params: %{ "transport" => "WSS"}}
+		assert to_string(uri) == "sip:toto@1.2.3.4:5070;transport=WSS"
+		uri = %SIP.Uri{ userpart: "toto", domain: { 1, 2, 3, 4}, port: 5070, scheme: "sips:" }
+		assert to_string(uri) == "sips:toto@1.2.3.4:5070"
+
+	end
+end
+
+defmodule SIP.Test.Parser do
+  use ExUnit.Case
+  doctest SIPMsg
+
+  test "Load and parse a REGISTER message" do
+    { code, msg } = File.read("test/SIP-REGISTER.txt")
+		assert code == :ok
+
+		{ code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
+			IO.puts("\n" <> errmsg)
+			IO.puts("Offending line #{lineno}: #{line}")
+			IO.puts("Error code #{code}")
+		end)
+
+    assert code == :ok
+		assert parsed_msg.method == :REGISTER
+		assert parsed_msg.ruri.domain == "example.com"
+		assert parsed_msg.contact.port == 3246
+		assert parsed_msg.proxyauthorization["realm"] == "SIP Communications Service"
+		assert parsed_msg.proxyauthorization["targetname"] == "lyncfe.example.com"
+		assert parsed_msg.from == "<sip:lynctest8@example.com>;tag=2257063211;epid=22570632"
+		assert parsed_msg.callid == "A2B000F95CB8XZRikcdYitb4QBvEr4P2"
+  end
+
+	test "Load and parse a spam REGISTER message" do
+    { code, msg } = File.read("test/SIP-REGISTER-LVP.txt")
+		assert code == :ok
+
+		{ code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
+			IO.puts("\n" <> errmsg)
+			IO.puts("Offending line #{lineno}: #{line}")
+			IO.puts("Error code #{code}")
+		end)
+
+    assert code == :ok
+		assert parsed_msg.method == :REGISTER
+		assert parsed_msg.ruri.domain == "212.83.152.250"
+		assert parsed_msg.expires == 1800
+  end
+
+  test "Load and parse an invalid unREGISTER message" do
+
+		{ code, msg } = File.read("test/SIP-unREGISTER.txt")
+		assert code == :ok
+
+		{ code, _parsed_msg } = SIPMsg.parse(msg, fn _code, _errmsg, lineno, line ->
+			assert lineno == 1
+			assert line == "UNREGISTER sip:example.com SIP/2.0"
+			end)
+		assert code == :invalid_request
+	end
+
+  test "Parse a SIMPLE body with correct content length" do
+		{ code, data } = File.read("test/SDP-SIMPLE.txt")
+		assert code == :ok
+
+		bodylist = SIPMsg.parse_multi_part_body("application/sdp", data)
+		assert code == :ok
+		[ body ] = bodylist
+		assert body.contenttype == "application/sdp"
+		assert body.data == data
+	end
+
+  test "Parse an INVITE message with a simple body" do
+
+  	{ code, msg } = File.read("test/SIP-INVITE-BASIC-AUDIO.txt")
+		assert code == :ok # Test if file containing the SIP message is loaded
+
+		{ code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
+			IO.puts("\n" <> errmsg)
+			IO.puts("Offending line #{lineno}: #{line}")
+			IO.puts("Error code #{code}")
+			end)
+
+    assert code == :ok
+		assert parsed_msg.method == :INVITE
+		assert parsed_msg.contenttype == "application/sdp"
+
+		[ body ] = parsed_msg.body
+		{ code, data } = File.read("test/SDP-SIMPLE.txt")
+		assert code == :ok
+		assert body.contenttype == "application/sdp"
+		assert body.data == data
+  end
+
+  test "Parse an INVITE message with a mixed/multipart body" do
+	{ code, msg } = File.read("test/SIP-INVITE-LOST.txt")
+  	assert code == :ok # Test if file containing the SIP message is loaded
+
+  	{ code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
+	  IO.puts("\n" <> errmsg)
+	  IO.puts("Offending line #{lineno}: #{line}")
+	  IO.puts("Error code #{code}")
+  	end)
+
+  	assert code == :ok
+  	assert parsed_msg.method == :INVITE
+  	assert parsed_msg.contenttype == "multipart/mixed; boundary=boundary1"
+		assert Kernel.length(parsed_msg.body) == 2
+		body2 = Enum.at(parsed_msg.body,1)
+		assert body2.contenttype == "application/pidf+xml"
+  end
+
+		test "Parse an INVITE message sent by the LiveVideoPlugin" do
+			{ code, msg } = File.read("test/SIP-INVITE-LVP.txt")
+			assert code == :ok # Test if file containing the SIP message is loaded
+
+			{ code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
+			IO.puts("\n" <> errmsg)
+			IO.puts("Offending line #{lineno}: #{line}")
+			IO.puts("Error code #{code}")
+			end)
+
+			assert code == :ok
+			assert parsed_msg.method == :INVITE
+			assert parsed_msg.contenttype == "application/sdp"
+			assert parsed_msg.transid == "z9hG4bK18d9.829852dcccb559fa7184dc4ab9a406e8.0"
+			assert parsed_msg.dialog_id == {"8075639", "32645600-4c01-bc8f-670c-deac31158db8", nil}
+			assert Map.get(parsed_msg.proxyauthorization, "nonce") == "YboVImG6E/ZJLQLgVnHNOj90ZCW0dNWR"
+			assert Map.get(parsed_msg.proxyauthorization, "uri") == "sip:90901@visioassistance.net"
+		end
+
+		test "Parse an 180 response sent by the LiveVideoPlugin" do
+			{ code, msg } = File.read("test/SIP-180-LVP.txt")
+			assert code == :ok # Test if file containing the SIP message is loaded
+
+			{ code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
+			IO.puts("\n" <> errmsg)
+			IO.puts("Offending line #{lineno}: #{line}")
+			IO.puts("Error code #{code}")
+			end)
+
+			assert code == :ok
+			assert parsed_msg.method == false
+			assert parsed_msg.response == 180
+			assert parsed_msg.transid == "z9hG4bK18d9.829852dcccb559fa7184dc4ab9a406e8.0"
+
+			# Reserialize it
+			_str = SIPMsg.serialize(parsed_msg)
+		end
+
+		test "Parse an 200 response sent by the LiveVideoPlugin" do
+			{ code, msg } = File.read("test/SIP-200-LVP.txt")
+			assert code == :ok # Test if file containing the SIP message is loaded
+
+			{ code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
+				IO.puts("\n" <> errmsg)
+				IO.puts("Offending line #{lineno}: #{line}")
+				IO.puts("Error code #{code}")
+			end)
+
+			assert code == :ok
+			assert parsed_msg.method == false
+			assert parsed_msg.response == 200
+			assert Kernel.length(parsed_msg.body) == 1
+			assert parsed_msg.dialog_id == {"8075639", "32645600-4c01-bc8f-670c-deac31158db8", "as424e7930"}
+		end
+
+		test "Parse a 488 response with non-canonical header casing (Glassfish)" do
+			# RFC 3261 §7.3.1: header field names are case-insensitive. Glassfish
+			# (IVeS WebRTC gateway) sends "Cseq" and "Call-Id" instead of the
+			# canonical "CSeq"/"Call-ID"; the parser must still extract them (a
+			# missing Call-ID previously failed the whole message with
+			# :invalid_dialog_id_no_callid).
+			msg =
+				"SIP/2.0 488 Not acceptable here\r\n" <>
+				"Record-Route: <sip:91.134.191.39;r2=on;lr=on>\r\n" <>
+				"Record-Route: <sip:91.134.191.39:443;transport=ws;r2=on;lr=on>\r\n" <>
+				"Content-Length: 0\r\n" <>
+				"To: <sip:90901@visioassistance.net>;tag=mrqw5t74-2vwy\r\n" <>
+				"Cseq: 2 INVITE\r\n" <>
+				"Via: SIP/2.0/WSS 172.22.0.2:37322;rport=40594;received=37.71.250.86;branch=z9hG4bK0994662352530380\r\n" <>
+				"From: \"Test User\"<sip:33970262546@visioassistance.net>;tag=8385659591\r\n" <>
+				"Call-Id: 7793171530617\r\n" <>
+				"Server: Glassfish_SIP_2.0.0\r\n\r\n"
+
+			{ code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
+				IO.puts("\n" <> errmsg)
+				IO.puts("Offending line #{lineno}: #{line}")
+				IO.puts("Error code #{code}")
+			end)
+
+			assert code == :ok
+			assert parsed_msg.method == false
+			assert parsed_msg.response == 488
+			# case-insensitive Call-Id / Cseq were extracted
+			assert parsed_msg.callid == "7793171530617"
+			assert parsed_msg.cseq == [2, :INVITE]
+			# transaction id derives from the topmost Via branch
+			assert parsed_msg.transid == "z9hG4bK0994662352530380"
+			assert parsed_msg.dialog_id == {"8385659591", "7793171530617", "mrqw5t74-2vwy"}
+		end
+
+		test "Parse an BYE then reserialize it then reparse it" do
+			{ code, msg } = File.read("test/SIP-BYE-LVP.txt")
+			assert code == :ok # Test if file containing the SIP message is loaded
+
+			{ code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
+				IO.puts("\n" <> errmsg)
+				IO.puts("Offending line #{lineno}: #{line}")
+				IO.puts("Error code #{code}")
+			end)
+
+			assert code == :ok
+			assert parsed_msg.method == :BYE
+			assert parsed_msg.dialog_id == {"8075639", "32645600-4c01-bc8f-670c-deac31158db8", "as424e7930"}
+
+			msg2 = SIPMsg.serialize(parsed_msg)
+			# IO.puts("\n")
+			# IO.puts(msg2)
+			{ code, parsed_msg2 } = SIPMsg.parse(msg2, fn code, errmsg, lineno, line ->
+				IO.puts("\n" <> errmsg)
+				IO.puts("Offending line #{lineno}: #{line}")
+				IO.puts("Error code #{code}")
+			end)
+
+			assert code == :ok
+			assert parsed_msg2.method == :BYE
+			assert parsed_msg2.dialog_id == {"8075639", "32645600-4c01-bc8f-670c-deac31158db8", "as424e7930"}
+		end
+
+	# Helper shared by the Contact tests below.
+	defp parse_register(extra_headers) do
+		msg =
+			"REGISTER sip:example.com SIP/2.0\r\n" <>
+			"Via: SIP/2.0/UDP 192.168.1.1:5060;branch=z9hG4bKtest\r\n" <>
+			"From: <sip:alice@example.com>;tag=1928301774\r\n" <>
+			"To: <sip:alice@example.com>\r\n" <>
+			"Call-ID: test-contact@example.com\r\n" <>
+			"CSeq: 1 REGISTER\r\n" <>
+			extra_headers <>
+			"Max-Forwards: 70\r\n" <>
+			"Expires: 3600\r\n" <>
+			"Content-Length: 0\r\n" <>
+			"\r\n"
+
+		SIPMsg.parse(msg, fn _code, errmsg, lineno, line ->
+			IO.puts("\n" <> errmsg)
+			IO.puts("Offending line #{lineno}: #{line}")
+		end)
+	end
+
+	test "Single Contact is parsed as a SIP.Uri struct, not a list" do
+		{code, parsed} = parse_register("Contact: <sip:alice@192.168.1.1:5060>\r\n")
+		assert code == :ok
+		assert is_struct(parsed.contact, SIP.Uri)
+		assert parsed.contact.userpart == "alice"
+		assert parsed.contact.domain == "192.168.1.1"
+		assert parsed.contact.port == 5060
+	end
+
+	test "Multiple contacts on one Contact line are parsed as a list of SIP.Uri" do
+		{code, parsed} = parse_register(
+			"Contact: <sip:alice@192.168.1.1:5060>, <sip:alice@10.0.0.1:5061>\r\n"
+		)
+		assert code == :ok
+		assert is_list(parsed.contact)
+		assert length(parsed.contact) == 2
+		[c1, c2] = parsed.contact
+		assert is_struct(c1, SIP.Uri)
+		assert c1.domain == "192.168.1.1"
+		assert c1.port == 5060
+		assert c2.domain == "10.0.0.1"
+		assert c2.port == 5061
+	end
+
+	test "Multiple Contact header lines are parsed as a list of SIP.Uri" do
+		{code, parsed} = parse_register(
+			"Contact: <sip:alice@192.168.1.1:5060>\r\n" <>
+			"Contact: <sip:alice@10.0.0.1:5061>\r\n"
+		)
+		assert code == :ok
+		assert is_list(parsed.contact)
+		assert length(parsed.contact) == 2
+		[c1, c2] = parsed.contact
+		assert c1.port == 5060
+		assert c2.port == 5061
+	end
+
+	test "Contact with quoted params containing commas is not split" do
+		{code, parsed} = parse_register(
+			"Contact: <sip:alice@192.168.1.1:5060>;methods=\"INVITE, BYE, OPTIONS\"\r\n"
+		)
+		assert code == :ok
+		assert is_struct(parsed.contact, SIP.Uri)
+		assert parsed.contact.domain == "192.168.1.1"
+	end
+
+	test "Build, serialize and re-parse a multipart/mixed body" do
+		req = %{
+			method: :INVITE,
+			ruri: %SIP.Uri{userpart: "bob", domain: "example.com"},
+			from: %SIP.Uri{userpart: "alice", domain: "example.com", params: %{"tag" => "t1"}},
+			to: %SIP.Uri{userpart: "bob", domain: "example.com"},
+			callid: "c1",
+			cseq: [1, :INVITE],
+			contentlength: 0
+		}
+
+		parts = [
+			%{contenttype: "application/sdp", data: "v=0\r\no=- 1 1 IN IP4 1.2.3.4\r\ns=-\r\nt=0 0\r\nm=audio 7344 RTP/AVP 0"},
+			%{contenttype: "application/pidf+xml", data: "<presence entity=\"sip:alice@example.com\"/>"}
+		]
+
+		req = SIP.Msg.Ops.update_sip_msg(req, {:body, parts})
+
+		# Top-level Content-Type / Content-Length reflect the multipart body.
+		assert String.starts_with?(req.contenttype, "multipart/mixed; boundary=")
+		assert req.contentlength == byte_size(SIPMsg.multipart_body(req.body))
+		# Every part got stamped with the shared boundary.
+		assert Enum.all?(req.body, fn p -> is_binary(p.boundary) end)
+		assert Enum.map(req.body, & &1.boundary) |> Enum.uniq() |> length() == 1
+
+		str = SIPMsg.serialize(req)
+		{code, parsed} = SIPMsg.parse(str, fn _c, _m, _l, _li -> nil end)
+		assert code == :ok
+		assert length(parsed.body) == 2
+
+		[p1, p2] = parsed.body
+		assert p1.contenttype == "application/sdp"
+		assert p1.data == Enum.at(parts, 0).data
+		assert p2.contenttype == "application/pidf+xml"
+		assert p2.data == Enum.at(parts, 1).data
+	end
+
+	# RFC 3261 §10.2.2: "Contact: *" with "Expires: 0" is the unregister-all a UA
+	# sends on shutdown. It is not a URI — before it had its own representation,
+	# SIP.Uri.parse("*") failed and the WHOLE message was discarded, so the client
+	# got no answer at all.
+	test "Wildcard Contact is parsed as :* rather than failing the whole message" do
+		{code, parsed} = parse_register("Contact: *\r\n")
+		assert code == :ok
+		assert parsed.contact == :*
+	end
+
+	test "Wildcard Contact round-trips through serialize" do
+		{:ok, parsed} = parse_register("Contact: *\r\n")
+		serialized = SIPMsg.serialize(parsed)
+		assert serialized =~ "Contact: *\r\n"
+
+		{code, reparsed} = SIPMsg.parse(serialized, fn _c, _m, _l, _li -> nil end)
+		assert code == :ok
+		assert reparsed.contact == :*
+	end
+
+	test "Multiple contacts round-trip: serialize then re-parse preserves the list" do
+		{code, parsed} = parse_register(
+			"Contact: <sip:alice@192.168.1.1:5060>, <sip:alice@10.0.0.1:5061>\r\n"
+		)
+		assert code == :ok
+		assert is_list(parsed.contact)
+
+		serialized = SIPMsg.serialize(parsed)
+		{code2, reparsed} = SIPMsg.parse(serialized, fn _c, _m, _l, _li -> nil end)
+		assert code2 == :ok
+		assert is_list(reparsed.contact)
+		assert length(reparsed.contact) == 2
+		[c1, c2] = reparsed.contact
+		assert c1.domain == "192.168.1.1"
+		assert c2.domain == "10.0.0.1"
+	end
+
+end

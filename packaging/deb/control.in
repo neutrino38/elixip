@@ -1,0 +1,22 @@
+Package: kelixip
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Emmanuel BUU <emmanuel.buu@ives.fr>
+Installed-Size: @INSTALLED_SIZE@
+Section: net
+Priority: optional
+Homepage: https://www.ives.fr/
+Depends: @DEPENDS@
+Suggests: kelixip-mod-registrar, kelixip-mod-auth-db
+Description: kelixip SIP application server
+ kelixip is a SIP application server: declarative per-domain dispatch
+ (config.toml + domains.toml) onto scenario scripts, a REST/CLI control surface
+ (kelictl), and Prometheus metrics.
+ .
+ The core ships NO SIP function. The registrar and the authentication back-end
+ are loadable modules delivered as separate packages (kelixip-mod-registrar,
+ kelixip-mod-auth-db) which drop their bytecode into the root-owned module
+ directory; a deployment installs only what it uses.
+ .
+ This package embeds its own Erlang runtime — no system Erlang or Elixir is
+ needed.

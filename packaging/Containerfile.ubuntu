@@ -1,0 +1,46 @@
+# Ubuntu build host for the kelixip deb (design docs/kelixip_packaging.md).
+#
+# Same golden rule as the AL9 image: assemble the release HERE, on the release you
+# are targeting. The release embeds ERTS — native code linked against glibc/OpenSSL/
+# ncurses — and the computed Depends name this image's library packages (libssl3 on
+# 22.04, libssl3t64 on 24.04+). One image per target release.
+#
+#   podman build -f packaging/Containerfile.ubuntu -t kelixip-build:ubuntu packaging
+#   podman build -f packaging/Containerfile.ubuntu --build-arg UBUNTU_VERSION=22.04 ...
+#   (or let packaging/build-in-container.sh --target ubuntu do it)
+ARG UBUNTU_VERSION=24.04
+FROM ubuntu:${UBUNTU_VERSION}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Only Erlang is OS-sensitive: Ubuntu's own erlang-nox is native to this image, so
+# its ERTS links this image's OpenSSL. (Need a newer/pinned OTP? swap in the Erlang
+# Solutions apt repo — see docs/kelixip_packaging.md.)
+# dpkg-dev is what brings dpkg-shlibdeps, which computes the core package's Depends.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      erlang-nox erlang-dev ca-certificates curl unzip git make \
+      dpkg-dev fakeroot xz-utils \
+ && rm -rf /var/lib/apt/lists/*
+
+# Elixir is pure BEAM, so the precompiled zip is enough — but it must match the OTP
+# major installed above (bytecode built under a newer OTP can fail to load on an
+# older runtime). Detected rather than pinned, because the apt OTP moves per release.
+ARG ELIXIR_VERSION=1.18.3
+RUN otp=$(erl -noshell -eval 'io:format("~s",[erlang:system_info(otp_release)]),halt().') \
+ && echo "OTP $otp -> elixir-otp-$otp.zip" \
+ && curl -fsSL -o /tmp/elixir.zip \
+      "https://github.com/elixir-lang/elixir/releases/download/v${ELIXIR_VERSION}/elixir-otp-${otp}.zip" \
+ && mkdir -p /usr/local/elixir \
+ && unzip -q -d /usr/local/elixir /tmp/elixir.zip \
+ && rm /tmp/elixir.zip
+
+ENV PATH="/usr/local/elixir/bin:$PATH" \
+    LANG=C.UTF-8 \
+    MIX_HOME=/root/.mix \
+    HEX_HOME=/root/.hex
+
+RUN mix local.hex --force && mix local.rebar --force
+
+WORKDIR /src
+CMD ["/src/packaging/build-deb.sh"]

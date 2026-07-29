@@ -1,0 +1,19 @@
+# /etc/sysconfig/kelixip — environment for the kelixip service and for kelictl.
+#
+# Read by the systemd unit (EnvironmentFile=) and, for the interactive commands,
+# by the release's own rel/env.sh, which honours every variable below.
+
+# Erlang node name. It must match `server.node_name` in config.toml — that is the
+# name `kelictl` resolves the node by. Change both or neither.
+RELEASE_NODE=kelixip@127.0.0.1
+
+# Where the two TOML files live. Both are read at every boot; an unreadable or
+# invalid file aborts the start with the reason on stderr (journald records it).
+KELIXIP_CONFIG=/etc/kelixip/config.toml
+KELIXIP_DOMAINS=/etc/kelixip/domains.toml
+
+# The Erlang distribution cookie is the credential kelictl authenticates with. It
+# is NOT set here: %post generated a random one per installation into
+# /usr/lib/kelixip/releases/COOKIE (0640 root:kelixip), which the release reads by
+# default. Set RELEASE_COOKIE only to share one cookie across a cluster.
+#RELEASE_COOKIE=

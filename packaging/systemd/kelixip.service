@@ -1,0 +1,74 @@
+[Unit]
+Description=kelixip SIP application server
+Documentation=file:///usr/share/doc/kelixip/running.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=kelixip
+Group=kelixip
+
+# Node name, cookie file location and the two TOML paths. Everything an admin
+# needs to change lives in the environment file — never in this unit, which the
+# package replaces on upgrade. The RPM ships it as /etc/sysconfig/kelixip, the deb
+# as /etc/default/kelixip (each distribution's convention); an installation has one
+# of the two, so both are declared here and both are optional.
+EnvironmentFile=-/etc/sysconfig/kelixip
+EnvironmentFile=-/etc/default/kelixip
+
+# The boot script writes the per-boot runtime config under RELEASE_TMP. The
+# release tree is root-owned, so point it at the systemd-managed runtime dir.
+Environment=RELEASE_TMP=/run/kelixip
+RuntimeDirectory=kelixip
+RuntimeDirectoryMode=0750
+StateDirectory=kelixip
+StateDirectoryMode=0750
+LogsDirectory=kelixip
+LogsDirectoryMode=0750
+
+ExecStart=/usr/lib/kelixip/bin/kelixip start
+
+# Atomic reload of domains.toml (design §3.2): one bad value and the whole reload
+# is rejected, the running config untouched. config.toml stays restart-only.
+ExecReload=/usr/lib/kelixip/bin/kelixip rpc "Kelix.Control.reload_domains()"
+
+# Drain in-progress scenarios (each script runs its on_shutdown block), then stop
+# the VM through the OTP shutdown sequence — listeners first, stores last.
+ExecStop=/usr/lib/kelixip/bin/kelixip rpc "Kelix.Control.graceful_shutdown()"
+
+# That call returns as soon as the drain is broadcast: it schedules the VM stop and
+# hands control back, so `kelictl graceful-shutdown` does not hang. But systemd
+# kills whatever is still alive once ExecStop returns, which would cut the drain
+# short — so wait here for the node to be really gone. TimeoutStopSec bounds it,
+# and must exceed the drain deadline.
+ExecStop=/bin/sh -c 'while kill -0 $MAINPID 2>/dev/null; do sleep 0.5; done'
+TimeoutStopSec=90
+
+Restart=on-failure
+RestartSec=5
+
+# A listener that cannot bind aborts the boot on purpose: a half-deaf server is
+# worse than a failed start. Do not restart-loop on a config error.
+RestartPreventExitStatus=1
+
+# Hardening. CAP_NET_BIND_SERVICE is kept because a [[listen]] entry may well ask
+# for 443 (wss) — nothing else needs privilege.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=full
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+# The BEAM is not frugal with file descriptors: every WSS/TCP connection is one.
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

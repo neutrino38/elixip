@@ -1,0 +1,859 @@
+defmodule SIPMsg do
+	@moduledoc "SIP protocol parser and serializer"
+
+	# Concat multi value headers in a single list
+	defp concat_multi_header_values(val1, val2) when is_list(val1) and is_list(val2) do
+		val1 ++ val2
+	end
+
+	defp concat_multi_header_values(val1, val2) when is_list(val1) and is_bitstring(val2) do
+		val1 ++ [ val2 ]
+ 	end
+
+	defp concat_multi_header_values(val1, val2) when is_bitstring(val1) and is_list(val2) do
+		[ val1 ] ++ val2
+ 	end
+
+	defp concat_multi_header_values(val1, val2) when is_bitstring(val1) and is_bitstring(val2) do
+		[ val1 , val2 ]
+ 	end
+
+	# Contact header: values are SIP.Uri structs, not strings
+	defp concat_multi_header_values(val1, val2) when is_list(val1) and is_struct(val2),
+		do: val1 ++ [val2]
+
+	defp concat_multi_header_values(val1, val2) when is_struct(val1) and is_list(val2),
+		do: [val1] ++ val2
+
+	defp concat_multi_header_values(val1, val2) when is_struct(val1) and is_struct(val2),
+		do: [val1, val2]
+
+	# guard that defines which header is single or multivalued
+
+	defguardp is_single_value(k) when k in [ :from, :to, :callid, :cseq, :useragent, :contenttype ]
+
+	# Predefined header that was not yet parsed
+	defp acc_header_values(key, nil, new_value, _parse_error_callback) when is_single_value(key) do
+			new_value
+	end
+
+	# Single value header with an incorrect duplicate value -> ignore
+	defp acc_header_values(key, old_value, _new_value, parse_error_callback) when is_single_value(key) do
+		parse_error_callback.( :duplicate, "Duplicate SIP header '#{key}'", 0, key )
+		old_value
+	end
+
+	# Process multivalued headers values
+	defp acc_header_values(_key, old_value, new_value, _parse_error_callback) do
+		# Add values in a list
+		concat_multi_header_values(old_value, new_value)
+	end
+
+
+
+	# Translate header name to atoms for usual headers. Header field names are
+	# case-insensitive (RFC 3261 §7.3.1), so match on the lower-cased name — some
+	# servers send e.g. "Call-Id"/"Cseq" (Glassfish) instead of "Call-ID"/"CSeq".
+	# Unknown headers keep their original spelling (the `_ -> name` fallback).
+	defp headername_to_atomkey(name) do
+		case String.downcase(name) do
+			"from" -> :from
+			"to" -> :to
+			"via" -> :via
+			"call-id" -> :callid
+			"user-agent" -> :useragent
+			"route" -> :route
+			"record-route" -> :recordroute
+			"content-length" -> :contentlength
+			"content-type" -> :contenttype
+			"cseq" -> :cseq
+			"authorization" -> :authorization
+			"proxy-authorization" -> :proxyauthorization
+			"proxy-authenticate" -> :proxyauthenticate
+			"www-authenticate" -> :wwwauthenticate
+			"expires" -> :expires
+			"contact" -> :contact
+			"supported" -> :supported
+			_ -> name
+		end
+	end
+
+	@common_headers_atoms %{ via: "Via", from: "From", to: "To", callid: "Call-ID",
+		route: "Route", recordroute: "Record-Route", useragent: "User-Agent",
+		contact: "Contact", cseq: "CSeq", contenttype: "Content-Type",
+		contentlength: "Content-Length", proxyauthorization: "Proxy-Authorization",
+		proxyauthenticate: "Proxy-Authenticate", wwwauthenticate: "WWW-Authenticate",
+		authorization: "Authorization",
+		expires: "Expires",
+		supported: "Supported" }
+
+	# Auth parameters that are bare tokens, never quoted strings (RFC 3261 ABNF /
+	# RFC 7616 §3.3-3.4). Quoting them is not cosmetic: a strict UA rejects
+	# `stale="true"` or an `nc` in quotes, and then never completes the challenge.
+	@unquoted_auth_params [ "algorithm", "stale", "nc" ]
+
+	# Credentials, as opposed to a challenge. `qop` differs between the two: the
+	# challenge advertises a quoted LIST (`qop="auth,auth-int"`), the credentials
+	# pick ONE as a bare token (`qop=auth`).
+	@credentials_headers [ :authorization, :proxyauthorization ]
+
+
+
+	# Convert SIP method name to atom or nil if not recognized
+	defp method_to_atom(reqname) do
+		case reqname do
+			"REGISTER" -> :REGISTER
+			"INVITE" -> :INVITE
+			"UPDATE" -> :UPDATE
+			"ACK" -> :ACK
+			"INFO" -> :INFO
+			"MESSAGE" -> :MESSAGE
+			"REFER" -> :REFER
+			"OPTIONS" -> :OPTIONS
+			"PUBLISH" -> :PUBLISH
+			"SUBSCRIBE" -> :SUBSCRIBE
+			"NOTIFY" -> :NOTIFY
+			"BYE" -> :BYE
+			"CANCEL" -> :CANCEL
+			_ -> nil
+		end
+	end
+
+	defp required_auth_params("NTLM", header) do
+		case header do
+			:wwwauthenticate -> [ "opaque", "realm", "targetname", "gssapi-data"]
+			:proxyauthenticate -> [ "opaque", "realm", "targetname", "gssapi-data"]
+		  :authorization -> [ "opaque", "realm", "targetname", "response", "gssapi-data"]
+			:proxyauthorization -> [ "opaque", "realm", "targetname", "response", "gssapi-data"]
+		end
+	end
+
+	defp required_auth_params("Digest", header) do
+		case header do
+			:wwwauthenticate -> [ "nonce", "realm" ]
+			:proxyauthenticate -> [ "nonce", "realm" ]
+		  :authorization -> [ "nonce", "realm", "username", "response", "uri"]
+			:proxyauthorization -> [ "nonce", "realm", "username", "response", "uri"]
+		end
+	end
+
+	# Check that a param map contains at list all the required parameters.
+	# returns :ok and the initial map if all are here
+	#         :ko and the first missing param if one is missing
+	def check_required_params(_param_map, []) do
+		:ok
+	end
+
+	def check_required_params(param_map, req_param_list) do
+		hd = hd(req_param_list)
+		Enum.reduce(req_param_list,
+		fn k, acc ->
+			if acc == hd || acc == :ok do
+				if !Map.has_key?(param_map, k), do: {:ko, k }, else: :ok
+			else
+				# There was an error already just propagate it
+				acc
+			end
+		end)
+	end
+
+	# Parse param list header content
+	defp parse_param_list(paramstring) do
+		Map.new(
+				Enum.map(
+					String.split(paramstring, ","),
+						fn val ->
+							[ k, v] = String.split(val, "=", parts: 2)
+							{ String.trim(k), String.trim(v, "\"") |> String.trim() }
+						end)
+				)
+	end
+
+ 	#Parse auth param content
+	defp parse_auth_param_list(paramstring, reqparams) do
+		authparams = parse_param_list(paramstring)
+
+		# Check that all required params are here
+		case check_required_params(authparams, reqparams) do
+			:ok -> { :ok, authparams }
+			{ :ko, mparam } -> { :invalid_auth, "Missing param #{mparam}" }
+		end
+	end
+
+
+	#Parse header content
+	defp parse_header_content( :cseq, value ) do
+		case String.split(value, " ") do
+			[ seqnum, method ] ->
+				rez = [ String.to_integer(seqnum), method_to_atom(method) ]
+				if is_atom(Enum.at(rez,1)) do
+					{ :ok, rez }
+				else
+					{ :invalid_cseq_header, "Invalid method #{method} referenced in CSeq header." }
+				end
+
+			_ -> { :invalid_cseq_header, "Invalid CSeq header format." }
+		end
+	end
+
+	defp parse_header_content( :via, value ) do
+		{ :ok, String.split(value, ", ") }
+	end
+
+	defp parse_header_content( :supported, value ) do
+		{ :ok, String.split(value, ", ") }
+	end
+
+	defp parse_header_content( :contentlength, value ) do
+		{ :ok, String.to_integer(value) }
+	end
+
+	defp parse_header_content( :expires, value ) do
+		{ :ok, String.to_integer(value) }
+	end
+
+	# The wildcard Contact (RFC 3261 §10.2.2): "Contact: *" with "Expires: 0" is how
+	# a UA drops all of its bindings at once, and many do it on shutdown. It is not a
+	# URI, so it gets its own representation — before this, SIP.Uri.parse("*") failed
+	# and the WHOLE REGISTER was discarded, leaving the client with no answer at all.
+	defp parse_header_content( :contact, value ) when is_binary(value) do
+		if String.trim(value) == "*" do
+			{ :ok, :* }
+		else
+			parse_contact_list(value)
+		end
+	end
+
+	# Parse Auth header
+	defp parse_header_content( header, value ) when header in [ :proxyauthorization, :authorization, :proxyauthenticate, :wwwauthenticate] do
+			[ authproc, rest ] = String.split(value, " ", parts: 2)
+
+			required_params = required_auth_params(authproc, header )
+			case parse_auth_param_list( rest, required_params ) do
+				{ :ok, authparams} -> { :ok, Map.put(authparams, :authproc, authproc) }
+				{ :invalid_auth,  errmsg } ->
+					header_name = header_name_to_string(header)
+					{ :invalid_auth_header, errmsg <> " in header " <> header_name}
+			end
+	end
+
+	defp parse_header_content( "Max-Forwards", value ) do
+		{ :ok, String.to_integer(value) }
+	end
+
+	defp parse_header_content( _key, value ) do
+		{ :ok, value }
+	end
+
+	defp auth_param_value( header, key, value ) do
+		cond do
+			key in @unquoted_auth_params -> value
+			key == "qop" and header in @credentials_headers -> value
+			true -> "\"" <> value <> "\""
+		end
+	end
+
+	defp parse_contact_list( value ) do
+		result = Enum.reduce_while(split_contact_list(value), [], fn part, acc ->
+			case SIP.Uri.parse(part) do
+				{ :ok, uri } -> { :cont, [uri | acc] }
+				{ errcode, _ } -> { :halt, { :error, errcode } }
+			end
+		end)
+
+		case result do
+			{ :error, errcode } -> { errcode, "Invalid contact URI" }
+			[ single ] -> { :ok, single }
+			uris -> { :ok, Enum.reverse(uris) }
+		end
+	end
+
+	# Split a Contact header value on commas, respecting angle brackets and quoted
+	# strings so that parameters like methods="INVITE, BYE" or
+	# +sip.instance="<urn:uuid:...>" are never split.
+	defp split_contact_list(value) do
+		{parts, current, _depth, _in_quote} =
+			Enum.reduce(String.graphemes(value), {[], "", 0, false}, &consume_contact_char/2)
+		final = String.trim(current)
+		all = if final == "", do: parts, else: [final | parts]
+		Enum.reverse(all)
+	end
+
+	# quote toggle — highest priority so "<" inside "..." is not mistaken for an angle bracket
+	defp consume_contact_char("\"", {parts, cur, depth, in_quote}),
+		do: {parts, cur <> "\"", depth, !in_quote}
+
+	# angle bracket open (outside quotes)
+	defp consume_contact_char("<", {parts, cur, depth, false}),
+		do: {parts, cur <> "<", depth + 1, false}
+
+	# angle bracket close (outside quotes, depth > 0)
+	defp consume_contact_char(">", {parts, cur, depth, false}) when depth > 0,
+		do: {parts, cur <> ">", depth - 1, false}
+
+	# comma separator — only when outside angle brackets and outside quotes
+	defp consume_contact_char(",", {parts, cur, 0, false}),
+		do: {[String.trim(cur) | parts], "", 0, false}
+
+	# leading whitespace after a separator (outside angle brackets, current buffer empty)
+	defp consume_contact_char(" ", {parts, "", 0, in_quote}),
+		do: {parts, "", 0, in_quote}
+
+	# everything else — just accumulate
+	defp consume_contact_char(char, {parts, cur, depth, in_quote}),
+		do: {parts, cur <> char, depth, in_quote}
+
+	#Parse empty header
+	defp parse_header(nil, _line_number, dest_map, _parse_error_callback) do
+		{ :end_of_message, dest_map }
+	end
+
+	#Parse empty header
+	defp parse_header("", _line_number, dest_map, _parse_error_callback) do
+		{ :end_of_message, dest_map }
+	end
+
+	#Parse one header line
+	defp parse_header(line, line_number, dest_map, parse_error_callback) do
+		case String.split(line, ": ", parts: 2) do
+			[ name, content ] ->
+				if String.match?(name,~r/^[A-Z][0-9 a-zA-Z\-]+$/) do
+					key = headername_to_atomkey(name)
+					# Now parse the header content
+					case parse_header_content( key, content ) do
+						{ :ok, value } ->
+							#Header Content parsed successfully. Add to the map
+							updated_map = Map.update(dest_map, key, value, fn existing_value ->
+								acc_header_values( key, existing_value, value, parse_error_callback)
+							end)
+							{ :ok, updated_map }
+
+						{ err, errmsg } ->
+							#Failed to parse header
+							parse_error_callback.( err, errmsg, line_number, line )
+							{ err, dest_map }
+					end
+				else
+					parse_error_callback.( :no_header_separator, "Invalid header name '#{name}'", line_number, line )
+					{ :invalid_header_name, dest_map }
+				end
+
+			_ ->
+				parse_error_callback.( :no_header_separator, "No header separator ':'", line_number, line )
+				{ :no_header_separator, dest_map }
+		end
+	end
+
+
+	# Parse a single line of header and recurse
+	defp parse_header_lines(lines, line_number, parsed_msg, parse_error_callback) do
+
+		# Parse the first header in the list and update the parsed message map
+		case parse_header( List.first(lines), line_number, parsed_msg, parse_error_callback) do
+
+			# Header successfully parsed and msg is updated
+			{ :ok, upd_msg } ->
+				#Now recurse to parse the following headers
+				parse_header_lines(List.delete_at(lines, 0), line_number+1, upd_msg, parse_error_callback)
+
+			# End of headers detected
+			{ :end_of_message, upd_msg } ->
+				{ :ok, lines, upd_msg }
+
+			# Parsing error. Stop it and report int
+			{ err, upd_msg } ->
+				# Parse error. Stop here. Do not remove the offending line from the list
+				{ err, lines, upd_msg }
+		end
+	end
+
+	# Create an empty SIP request
+	defp create_sip_req( req, ruri ) do
+		req2 = method_to_atom(req)
+		if !is_nil(req2) do
+			case SIP.Uri.parse(ruri) do
+				{ :ok, parsed_uri } ->
+					{ :ok, %{ method: req2, ruri: parsed_uri,
+					  from: nil, to: nil, via: [], callid: nil, cseq: nil } }
+					_ -> { :invalid_ruri,  Map.new() }
+			end
+		else
+			{ :invalid_request, Map.new() }
+		end
+
+	end
+
+	defp create_sip_resp( response_code, reason ) do
+		%{ method: false, response: String.to_integer(response_code),
+									reason: reason, from: nil, to: nil,
+									via: [], callid: nil, cseq: nil }
+	end
+
+
+	# Parse the first line, create the initial message map
+	# then recurse to parse the headers
+	defp start_header_parsing(lines,parse_error_callback) do
+		first_line = List.first(lines)
+		line_number = 1
+		if is_bitstring(first_line) do
+			case String.split(first_line, " ", parts: 3) do
+
+				# This is a SIP response
+				[ "SIP/2.0", response_code, reason ] ->
+					parse_header_lines(
+							List.delete_at(lines, 0),
+							line_number+1,
+							create_sip_resp(response_code, reason),
+							parse_error_callback)
+
+				# This is a SIP request
+				[ req, sip_uri, "SIP/2.0" ] ->
+					case create_sip_req(req, sip_uri) do
+							{ :ok, req_map } ->
+								parse_header_lines(
+									List.delete_at(lines, 0),
+									line_number+1,
+									req_map,
+									parse_error_callback)
+
+							# Request URI is invalid
+							{ :invalid_ruri, req_map } ->
+								parse_error_callback.( :invalid_ruri, "Invalid request URI '#{sip_uri}'", line_number, first_line )
+								{ :invalid_ruri, lines, req_map }
+
+							# Unrecognized request
+							{ :invalid_request, req_map } ->
+								parse_error_callback.( :invalid_request, "Unknown SIP request '#{req}'", line_number, first_line )
+								{ :invalid_request, lines, req_map }
+					end
+
+				_ ->
+					parse_error_callback.( :bad_first_line, "Failed to parse SIP msg first line", line_number, first_line )
+					{ :bad_first_line, lines, Map.new() }
+			end
+		else
+			parse_error_callback.( :empty_message, "Empty SIP message", line_number, first_line )
+			{ :bad_first_line, Map.new() }
+		end
+	end
+
+	# Parse the transaction ID from topmost via
+	def parse_transaction_id({ :ok, msg }, parse_error_callback) do
+		cond do
+			Map.has_key?(msg, :via) == false ->
+				# No via header
+				{ :ok, Map.put(msg, :transid, nil) }
+
+			is_nil(msg.via) or msg.via == [] ->
+				# Empty Via header
+				{ :ok, Map.put(msg, :transid, nil) }
+
+			length(msg.via) >= 1 ->
+				# Get topmost via and branch parameter
+				[ _transport, topmost_via ] = String.split(Enum.at(msg.via, 0), " ", parts: 2)
+
+				case SIP.Uri.get_uri_param("sip:" <> topmost_via, "branch") do
+					{ :ok, branch } ->
+						if String.starts_with?(branch, "z9hG4bK") do
+              Map.put(msg, :transid, branch)
+            else
+							parse_error_callback.( :invalid_tompost_via, "Branch ID does not start with z9hG4bK",1, topmost_via)
+              { :invalid_tompost_via, msg }
+            end
+						{ :ok, Map.put(msg, :transid, branch) }
+					{ :no_such_param, nil } ->
+						parse_error_callback.( :invalid_tompost_via, "top most via does not have any vranch parameter", 1, topmost_via)
+						{  :ok, Map.put(msg, :transid, nil) }
+
+					{ _code, _parsed_via } ->
+						parse_error_callback.( :invalid_tompost_via, "Failed to parse topmost via to obtain branch ID", 1, topmost_via)
+						{ :invalid_tompost_via, msg }
+				end
+		end
+	end
+
+	# We don't parse anything if the messge is not correct
+	def parse_transaction_id({ code, msg }) do
+		{ code, msg }
+	end
+
+	# Compute dialog ID using from tag, to tag and callid
+	# Then add it to parsed message
+	defp compute_dialog_id(msg, from, callid, to) do
+			{ _code_from, from_tag } = SIP.Uri.get_uri_param(from, "tag")
+			{ _code_to, to_tag } = SIP.Uri.get_uri_param(to, "tag")
+			case { from_tag, callid, to_tag } do
+				{ nil, _cid, _totag } -> { :invalid_dialog_id_no_from_tag, "no from tag" }
+				{ _from_tag, nil, _totag } -> { :invalid_dialog_id_no_callid, "no callid" }
+				{ f_tag, cid, t_tag } ->
+					{ :ok, Map.put(msg, :dialog_id, {f_tag, cid, t_tag}) }
+			end
+	end
+
+	# Compute dialog ID of a successfully parsed message
+	defp compute_dialog_id({ :ok, msg }) when is_map(msg) do
+			cond do
+				Map.has_key?(msg, :from) and Map.has_key?(msg, :to) and Map.has_key?(msg, :callid) ->
+						compute_dialog_id( msg, msg.from, msg.callid, msg.to )
+				!Map.has_key?(msg, :from) -> { :missing_from_header, "Missing From header" }
+				!Map.has_key?(msg, :to) -> { :missing_to_header, "Missing To header" }
+				!Map.has_key?(msg, :callid) -> { :missing_callid_header, "Missing Call-ID header" }
+				true -> { :invalid_dialog_id, "Failed to compte dialog ID (unspecified)" }
+			end
+	end
+
+	# Message was not successully parsed. Pass the error code down
+	defp compute_dialog_id({ code, msg }) when is_map(msg) do
+		{ code, msg }
+	end
+
+	defp do_final_checks(parsed_msg_or_error) do
+		{ code, msg } = parsed_msg_or_error
+		if code == :ok do
+			#Todo
+			{ :ok, msg }
+		else
+			{ code, msg }
+		end
+	end
+
+	# Parse RFC 2046 mime, multipart sub body and put it in a map
+	defp parse_sub_body(subbody) do
+
+		[ headers, data ] = case String.split(String.trim(subbody), "\r\n\r\n", parts: 2) do
+			[ h, d ] -> [ h, d ]
+			[ _one ] -> raise "mixed/multipart: Invalid body part. Missing empty line between MIME headers and data"
+		end
+		hlist = String.split(headers, "\r\n")
+
+		#Parse headers of subbody
+		{ code, _rest, dstmap } = parse_header_lines(hlist, 1, %{}, fn _code, _errmsg, _lineno, _line -> nil end)
+
+		if code == :ok do
+			dstmap = if Map.has_key?(dstmap, :contenttype) do
+				dstmap
+			else
+				Map.put(dstmap, :contenttype, "text/plain; charset=UTF-8")
+			end
+
+			#Add data body in the map
+			Map.put(dstmap, :data, data)
+		else
+			raise "Invalid header inside multipart/mixed message"
+		end
+	end
+
+	# Parse RFC 2046 mime, multipart body and returns a list of sub bodies
+	def parse_multi_part_body(ctype, body) do
+		case String.split(ctype, "; boundary=") do
+			[ "multipart/mixed", boundary] ->
+				# We do have a multipart mixed
+				# Spilt into the parts according to the boundaries
+				bodies = String.split(body, "--" <> boundary )
+				if Kernel.length(bodies) < 3 do # prologue, bodies, last boundary
+					raise "Invalid MIME multipart SIP message body. Missing boundaries."
+				else
+					# Remove everything before the first boundary
+				 	bodies = List.delete_at(bodies, 0)
+
+					#Remove last boundary
+					bodies = List.delete_at(bodies, -1)
+
+					# Parse all sub bodies and return them as a list of maps
+					Enum.map(bodies,
+						fn v -> Map.put(parse_sub_body(v), :boundary, boundary) end)
+				end
+			_ ->
+				# Single body
+				[ %{ contenttype: ctype, data: body } ]
+		end
+	end
+
+	# Parse data after the headers and add body in the SIP message map
+	defp add_body(parsed_msg, body) do
+		clen = parsed_msg.contentlength
+		sz = if is_nil(body) do
+			0
+		else
+			# Add 2 because Content-Length includes the \r\n separator
+			# between the message body and the headers
+			Kernel.byte_size(body) + 2
+		end
+
+		cond do
+			clen == 0 ->
+				# No body attached to this SIP message
+				{ :ok, parsed_msg, nil }
+
+			sz == 0 and clen > 0 ->
+				# content length > 0 and no body data
+				{ :missing_body, parsed_msg, nil }
+
+			!Map.has_key?(parsed_msg, :contenttype) and clen > 0 ->
+				# Missing content-type header
+				{ :missing_content_type, parsed_msg, body }
+
+			clen > sz ->
+				# ANnounced content length exceeds data read
+				IO.puts("Content-Length: #{clen} > data size: #{sz}")
+				{ :bad_body_size, parsed_msg, nil }
+
+			clen <= sz ->
+				# Multipart/mixed as defined by RFC 2046
+				mod_msg = Map.put(parsed_msg, :body,
+								  	parse_multi_part_body(
+											parsed_msg.contenttype,
+											Kernel.binary_part(body, 0, clen-2)))
+
+				rest = if clen < sz do Kernel.binary_part(body, clen-2, sz - clen) else "" end
+				{ :ok, mod_msg, rest }
+		end
+	end
+	@doc """
+	Parse a SIP message stored as a string and return it as map
+	Takes a callback that document all parsing errors. In case of
+	parsing error, the callback function is called as
+
+	parse_error_callback(err_code, err_message, line_num, offending_line)
+	"""
+	def parse(message, parse_error_callback) when is_binary(message) do
+		# Size check
+		if String.length(message) > 10000 do
+			raise "SIP message exceeds max length of 10000"
+		end
+
+		# Separate headers from the rest.
+		{ headers, body } = case String.split(message, "\r\n\r\n", parts: 2) do
+			[ hs, bd ] ->
+				{ String.split(hs, "\r\n"), bd }
+
+			[ _hs ] ->
+				{ String.split(message, "\r\n"), nil }
+		end
+
+		#Parse headers
+		{ code, _lines, parsed_msg } = start_header_parsing(headers, parse_error_callback)
+
+		if code == :ok do
+			{ code, parsed_msg_or_error	} = parse_transaction_id( { code, parsed_msg }, parse_error_callback )
+			   |> compute_dialog_id()
+				 |> do_final_checks()
+
+		#		= do_final_checks(
+		#			compute_dialog_id(
+		#				parse_transaction_id(
+		#					{ code, parsed_msg } )))
+
+			if code == :ok do
+				# Now parse message body and insert it into the map under de body key
+				{ code, final_msg, _rest } = add_body(parsed_msg_or_error, body)
+				if code == :ok do
+					{ code, final_msg }
+				else
+					{ code, parsed_msg_or_error }
+				end
+			else
+				parse_error_callback.(code, parsed_msg_or_error, 0, "")
+				{ code, parsed_msg }
+			end
+		else
+			{ code, parsed_msg }
+		end
+	end
+
+	# ---------------------- serialize -----------------------------------------
+	defp serialize_first_line(req, uri) when is_atom(req) do
+		{ :ok, uri_str } = SIP.Uri.serialize(uri)
+		Atom.to_string(req) <> " " <> uri_str <> " SIP/2.0\r\n"
+	end
+
+	defp serialize_first_line(response, reason) when is_integer(response) do
+		"SIP/2.0 " <> Integer.to_string(response) <> " " <> reason <> "\r\n"
+	end
+
+
+	defp header_name_to_string(name) when is_atom(name) do
+		str_name = @common_headers_atoms[name]
+		if is_nil(str_name) do
+			raise "This header #{name} is not a common header"
+		end
+		str_name
+	end
+
+	defp header_name_to_string(name) when is_bitstring(name) do
+		name
+	end
+
+	# Serialize an empty header
+	defp serialize_one_header( _name, nil ) do
+		""
+	end
+
+		# Serialize a contact header header
+		defp serialize_one_header( :to, to_uri ) when is_map(to_uri) do
+			case SIP.Uri.serialize(to_uri) do
+				{ :ok, to_str} -> header_name_to_string(:to) <> ": " <> to_str <> "\r\n"
+				# _ -> raise "Invalid to in SIP message"
+			end
+		end
+
+	# The wildcard Contact (RFC 3261 §10.2.2) is not a URI: it is carried as :* and
+	# serialized back verbatim.
+	defp serialize_one_header( :contact, :* ) do
+		header_name_to_string(:contact) <> ": *\r\n"
+	end
+
+	# Serialize a contact header header
+	defp serialize_one_header( :contact, contacts ) when is_list(contacts) do
+		Enum.map_join(contacts, "", fn contact ->
+			case SIP.Uri.serialize(contact) do
+				{ :ok, contact_str } -> header_name_to_string(:contact) <> ": " <> contact_str <> "\r\n"
+			end
+		end)
+	end
+
+	defp serialize_one_header( :contact, contact ) do
+		case SIP.Uri.serialize(contact) do
+			{ :ok, contact_str} -> header_name_to_string(:contact) <> ": " <> contact_str <> "\r\n"
+		end
+	end
+
+	defp serialize_one_header( name, val = %SIP.Uri{}) when name in  [ :from, :to ] do
+		header_name_to_string(name) <> ": " <> to_string(val) <> "\r\n"
+	end
+
+	# Serialize single value common headers (which name are represented by an atom)
+	defp serialize_one_header( name, val ) when name in [ :from, :to, :callid, :useragent, :contenttype	] and is_bitstring(val) do
+		header_name_to_string(name) <> ": " <> val <> "\r\n"
+	end
+
+	# Serialize a CSeq header
+	defp serialize_one_header( :cseq, [ seqno, method ] ) do
+		header_name_to_string(:cseq) <> ": " <> Integer.to_string(seqno) <> " " <> Atom.to_string(method) <> "\r\n"
+	end
+
+	# Serialize an Authorization / WWW-Authenticate family header
+	defp serialize_one_header( name, authinfo ) when name in [ :proxyauthorization, :authorization, :proxyauthenticate, :wwwauthenticate]  do
+		params =
+			authinfo
+			|> Enum.reject(fn { k, _v } -> k == :authproc end)
+			|> Enum.map_join(", ", fn { k, v } -> k <> "=" <> auth_param_value(name, k, v) end)
+
+		header_name_to_string(name) <> ": " <> authinfo.authproc <> " " <> params <> "\r\n"
+	end
+
+	# Serialize a header that can have multiple string values represented as a list
+	defp serialize_one_header( name, value ) when is_list(value) do
+		Enum.reduce(value, "", fn v, acc ->
+			acc <> header_name_to_string(name) <> ": " <> v <> "\r\n"
+		end)
+	end
+
+	# Serialize a single value header with a string value
+	defp serialize_one_header( name, value ) when is_bitstring(value) do
+		header_name_to_string(name) <> ": " <> value <> "\r\n"
+	end
+
+	# Serialize a single value header with an integer value
+	defp serialize_one_header( name, value ) when is_integer(value) do
+		header_name_to_string(name) <> ": " <> Integer.to_string(value) <> "\r\n"
+	end
+
+	defp serialize_headers(sipmsg, ordered_header_list, mandatory) do
+		Enum.reduce( ordered_header_list, "", fn h, acc ->
+			if Map.has_key?(sipmsg, h) do
+				acc <> serialize_one_header(h, sipmsg[h])
+			else
+				if mandatory and h not in [:via] do
+					name = header_name_to_string(h)
+					raise "Missing mandatory header #{name} in SIP message"
+				else
+					acc
+				end
+			end
+		end)
+	end
+
+	defp serialize_headers(sipmsg) do
+		header_order1 = [ :via, :from, :to, :callid, :cseq ]
+		header_order2 = [ :useragent, :contenttype, :contentlength ]
+		toskip = [ :transid, :body, :dialog_id, :boundary, :method, :response, :reason, :ruri, :response_code ]
+
+		remaining_headers = Enum.reduce(sipmsg, [], fn {k, _v}, acc ->
+			if k not in header_order1 and k not in toskip and k not in header_order2 do
+				List.insert_at(acc, -1, k)
+			else
+				acc
+			end
+		end)
+		# First we serialize all headers mentionned in "order1" in order
+		# They are mandatory so we fail if they are not in the SIP msg
+		serialize_headers(sipmsg, header_order1, true) <>
+			serialize_headers(sipmsg, remaining_headers, false) <>
+				serialize_headers(sipmsg, header_order2, false)
+	end
+
+	defp serialize_body([]) do
+		"\r\n"
+	end
+
+	defp serialize_body(body) when is_binary(body) do
+		"\r\n" <> body
+	end
+
+	defp serialize_body([ body ]) do
+		"\r\n" <> body.data
+	end
+
+	# Serialize a list of two or more sub bodies as a multipart/mixed body. The
+	# leading CRLF is the blank line separating the SIP headers from the body;
+	# multipart_body/1 returns the octets counted by Content-Length.
+	defp serialize_body( bodies ) when is_list(bodies) do
+		"\r\n" <> multipart_body(bodies)
+	end
+
+	@doc false
+	# Build the octets of a multipart/mixed body (RFC 2046) from a list of sub-body
+	# maps sharing a :boundary — i.e. everything Content-Length counts, from the
+	# first "--boundary" delimiter down to the closing "--boundary--". Shared by
+	# the serializer and by SIP.Msg.Ops.update_sip_msg/2 (Content-Length).
+	def multipart_body(bodies) when is_list(bodies) do
+		boundary = Enum.at(bodies, 0).boundary
+		Enum.map_join(bodies, "", &serialize_sub_body/1) <> "--" <> boundary <> "--\r\n"
+	end
+
+	# One MIME part: delimiter line, its Content-Type, blank line, data, trailing
+	# CRLF (the CRLF that precedes the next boundary delimiter).
+	defp serialize_sub_body(%{ boundary: boundary, contenttype: ctype, data: data }) do
+		"--" <> boundary <> "\r\n" <>
+			"Content-Type: " <> to_string(ctype) <> "\r\n\r\n" <>
+			data <> "\r\n"
+	end
+
+
+
+	@doc """
+	Serialize a SIP request into a string to be sent on the network
+	"""
+	def serialize(sipmsg) when is_map(sipmsg) and sipmsg.method == false do
+		msgstr = serialize_first_line(sipmsg.response, sipmsg.reason)
+
+		if Map.has_key?(sipmsg, :body) do
+			msgstr <> serialize_headers(sipmsg) <> serialize_body(sipmsg.body)
+		else
+			msgstr <> serialize_headers(sipmsg) <> "\r\n"
+		end
+	end
+
+	def serialize(sipmsg) when is_map(sipmsg) and is_atom(sipmsg.method) do
+		msgstr = serialize_first_line(sipmsg.method, sipmsg.ruri)
+
+		if Map.has_key?(sipmsg, :body) do
+			msgstr <> serialize_headers(sipmsg) <> serialize_body(sipmsg.body)
+		else
+			msgstr <> serialize_headers(sipmsg) <> "\r\n"
+		end
+	end
+
+
+end

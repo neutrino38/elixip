@@ -5,14 +5,27 @@ erl_crash.dump
 *.ez
 elixip.log
 
-# Standalone executable produced by `mix escript.build`
+# Standalone executable produced by `mix escript.build` (any app dir)
 /elixipp
+/apps/*/elixipp
 elixipp.log
 
 # Real (non-committed) scenario config holding actual credentials. Use
-# scenario-config.json as a template.
-/ives.json
-/ives-wss.json
+# scenario-config.json as a template. NOT anchored to the repo root on purpose:
+# these files get copied next to the escript (apps/elixipp/) to run scenarios from
+# there, and an anchored pattern left those copies tracked — one `git add -A` away
+# from committing live SIP credentials.
+ives.json
+ives-wss.json
+
+# Real (non-committed) auth_db live-test config (DB host/user/password). Use
+# apps/kelixip/test/fixtures/authdb.json.example as a template.
+authdb.json
+/apps/kelixip/authdb.json
+
+# Packaging outputs: the rpmbuild tree and the produced packages (packaging/README.md)
+/packaging/build
+/packaging/dist
 
 # Debug logs produced by scenario runs
 uac_invite.log

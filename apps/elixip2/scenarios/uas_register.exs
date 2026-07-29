@@ -1,0 +1,204 @@
+# Reference UAS (server-side) REGISTER scenario. Run it as a registrar with:
+#     elixipp --listen udp:5060 apps/elixip2/scenarios/uas_register.exs
+#
+# elixipp loads this file, sees it is a `:uas_register` scenario (set by the
+# `uas :register` annotation), starts the configured listeners and registers
+# Elixip.RegistrarUAS as the processing module. One instance of this scenario is
+# spawned per inbound REGISTER dialog and receives
+# `{:REGISTER, req, transaction_id, dialog_pid}` in its mailbox.
+#
+# Replying to a REGISTER (challenge / accept / reject) is the *application's*
+# responsibility, so the helpers live here in the scenario, not in the framework.
+# They are plain functions: a scenario module cannot call a macro it defines
+# itself, and inside a `state` body `sip_ctx` is just the function parameter, so
+# no macro / `var!` plumbing is needed.
+defmodule UAS.RegisterExample do
+  use SIP.Scenario
+
+  import SIP.Session.Registrar,
+    only: [
+      challenge_registration: 3,
+      accept_registration: 3,
+      reject_registration: 4,
+      set_contacts_expires: 2
+    ]
+
+  import SIP.Session, only: [reply: 6]
+
+  # Marks the scenario type as :uas_register so elixipp runs it in server mode.
+  uas(:register)
+
+  @domain "example.com"
+  # Ceiling on the registration lifetime we grant (seconds). What goes back in the
+  # 200 OK Contact is `min(what the client asked, this)` — see granted_expires/1.
+  @max_granted_expires 300
+
+  # No outbound account here: a server scenario is seeded from the inbound
+  # request, not from a local identity. `domain` is used as the digest realm.
+  #
+  # `password` is the shared secret used to verify the digest. It is left unset
+  # here on purpose — credential management is not this test scenario's job. When
+  # absent, any well-formed Authorization is accepted; set it from the config
+  # block (`config domain: …, password: "secret"`) or at runtime via the
+  # registrar's `:scenario_overrides` (e.g. an external JSON config) to enforce a
+  # real digest check. It is read back from the context appdata at runtime.
+  config(domain: @domain)
+
+  # The {:REGISTER, …} message is already queued in our mailbox by the dialog
+  # layer; jump straight to the waiting state.
+  state initial_state do
+    goto(next)
+  end
+
+  # ---------------------------------------------------------------------------
+  # First REGISTER: challenge if unauthenticated; once an Authorization is
+  # present, verify the nonce (must be one we issued for this dialog), the realm
+  # and the digest against the configured password before accepting.
+  state wait_register do
+    on_events do
+      {:REGISTER, req, _trans_pid, dialog_pid} ->
+        case check_registration_auth(req, dialog_pid, password: appdata_get(:password)) do
+          # A nonce that merely aged out is re-challenged, not refused: the client
+          # replays with the fresh one (RFC 3261 §22.2 stale).
+          why when why in [:no_auth_header, :stale_nonce] ->
+            challenge_registration(req, dialog_pid, realm: @domain)
+            goto(loop, "401 Unauthorized (#{why})")
+
+          :ok ->
+            accept_registration(req, dialog_pid, expires: granted_expires(req))
+            goto(registered, "200 OK")
+
+          other ->
+            reject_registration(req, dialog_pid, 403, "Forbidden")
+            scenario_failure("auth rejected: #{inspect(other)}")
+        end
+
+      {:scenario_ctl, :shutdown, _reason} ->
+        scenario_aborted("Registrar stopped gracefully")
+    after
+      32_000 ->
+        scenario_failure("no REGISTER received")
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Registered. Handle:
+  #   * REGISTER refreshes → re-authenticate then 200 OK (stay registered);
+  #   * un-REGISTER (a REGISTER with Expires/Contact expires 0) → 200 OK then end;
+  #   * dialog termination → end.
+  # OPTIONS keepalives are answered by the dialog layer itself (200 OK) and never
+  # reach the scenario, so there is nothing to handle here for them.
+  state registered do
+    on_events do
+      {:REGISTER, req, _trans_pid, dialog_pid} ->
+        case check_registration_auth(req, dialog_pid, password: appdata_get(:password)) do
+          why when why in [:no_auth_header, :stale_nonce] ->
+            challenge_registration(req, dialog_pid, realm: @domain)
+            goto(loop, "401 (re-auth: #{why})")
+
+          :ok ->
+            if unregister?(req) do
+              accept_unregister(req, dialog_pid)
+              scenario_success("un-REGISTER")
+            else
+              accept_registration(req, dialog_pid, expires: granted_expires(req))
+              goto(loop, "REGISTER refreshed")
+            end
+
+          other ->
+            reject_registration(req, dialog_pid, 403, "Forbidden")
+            goto(loop, "refresh auth rejected: #{inspect(other)}")
+        end
+
+      {:scenario_ctl, :shutdown, _reason} ->
+        scenario_aborted("Registrar stopped gracefully")
+
+      # Interrupted because client socket has been interrupted
+      {:dialog_terminated, _dialog_pid, reason}
+      when reason in [:tcp_closed, :tls_closed, :wss_closed] ->
+        scenario_aborted("Client socket closed")
+
+      {:dialog_terminated, _dialog_pid, _reason} ->
+        scenario_success("registration ended")
+    after
+      600_000 ->
+        scenario_success("registration idle timeout")
+    end
+  end
+
+  # Cooperative shutdown — required by kelixip's load-time contract (§5.3), which
+  # forbids elixip's abrupt default. A registrar has no BYE to send nor media to
+  # release, so aborting cleanly is enough. The per-state {:scenario_ctl,…} clauses
+  # above drain the common in-wait cases; this explicit block is what proves the
+  # script is shutdown-aware and is the fallback for any other state.
+  on_shutdown do
+    scenario_aborted("Registrar stopped gracefully")
+  end
+
+  # ── REGISTER reply helpers (application side) ──────────────────────────────
+  # Thin wrappers over the framework's dialog/transaction machinery.
+
+  # An un-REGISTER drops every binding it mentions. Asking the framework
+  # (SIP.Msg.Ops) rather than re-reading the headers here is not a detail: this
+  # scenario used to read the `Expires` header *before* the Contact parameter, the
+  # opposite of RFC 3261 §10.2.4 and of what the dialog layer resolves — so a
+  # handset rebinding (old contact `;expires=0`, new lifetime in the header) was
+  # taken for a de-registration. See CLAUDE.md, Message Layer.
+  defp unregister?(req), do: SIP.Msg.Ops.unregister?(req)
+
+  # Lifetime we grant: what the client asked for, capped at our ceiling. Granting a
+  # flat 300 s regardless is what made this registrar unusable past one minute: the
+  # dialog layer arms its expiry on the lifetime the REGISTER *asked* for, so a
+  # client asking 60 s got a dialog dying at 60 s while it believed it had 300 s
+  # and scheduled its refresh at 150 s — the binding vanished and its OPTIONS
+  # keepalives then hit a dead dialog. Granting min(asked, ceiling) keeps the two
+  # ends on the same clock (kelixip's registrar module does the same, per domain).
+  defp granted_expires(req),
+    do: min(SIP.Msg.Ops.requested_expires(req), @max_granted_expires)
+
+  # Confirm an un-REGISTER with a 200 OK echoing the Contact at expires 0. We do
+  # not run check_register/1 here: it rejects expirations below the 60 s minimum,
+  # which would (wrongly) refuse a de-registration.
+  defp accept_unregister(req, dialog_pid) do
+    contact = set_contacts_expires(Map.get(req, :contact), 0)
+    reply(dialog_pid, req, 200, "OK", [contact: contact], "accept_unregister")
+  end
+
+  # Verify the inbound REGISTER credentials. Returns :no_auth_header or
+  # :stale_nonce (caller must challenge), :ok, or a refusal atom. With no
+  # configured password any well-formed Authorization is accepted; pass
+  # opts[:password] for a real digest check via SIP.Msg.Ops.check_authrequest/3.
+  defp check_registration_auth(req, _dialog_pid, opts) do
+    # Get auth header
+    auth =
+      cond do
+        Map.has_key?(req, :authorization) -> Map.get(req, :authorization)
+        Map.has_key?(req, :proxyauthorization) -> Map.get(req, :proxyauthorization)
+        true -> nil
+      end
+
+    cond do
+      is_nil(auth) ->
+        :no_auth_header
+
+      is_nil(Keyword.get(opts, :password)) ->
+        :ok
+
+      auth["realm"] != @domain ->
+        :invalid_domain
+
+      true ->
+        # Digest auth params are string-keyed maps (only :authproc is an atom), so
+        # read them with the string keys — auth.nonce / auth.domain would raise.
+        # The nonce carries its own proof (HMAC over ts+rand+realm), so there is
+        # nothing to look up: validate it, and re-challenge when it merely aged
+        # out. `check_authrequest/3` then verifies the digest itself; its own
+        # nonce-equality check is left off (nil) — it is this validation's job.
+        case SIP.Auth.Nonce.validate(auth["nonce"], @domain) do
+          :ok -> SIP.Msg.Ops.check_authrequest(req, Keyword.get(opts, :password), nil)
+          :stale -> :stale_nonce
+          :invalid -> :invalid_nonce
+        end
+    end
+  end
+end

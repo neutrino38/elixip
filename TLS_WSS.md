@@ -94,7 +94,8 @@ GenServer.start(SIP.Transport.TLSListener,
 ## Starting a TLS Listener via `elixipp`
 
 ```bash
-elixipp --listen tls:5061 scenarios/uas_register.exs
+elixipp --listen tls:5061 --tls-cert certs/certificate.pem --tls-key certs/private_key.pem \
+        apps/elixip2/scenarios/uas_register.exs
 ```
 
 The `--listen tls:PORT` option is parsed by `ElixippCLI`. The listener reads

@@ -1,0 +1,22 @@
+#!/bin/sh
+# kelixip prerm — stop the service before its files go away.
+#
+# Nothing happens on upgrade: postinst does a try-restart instead, so the drain
+# runs once, with the new code already unpacked.
+set -e
+
+case "$1" in
+  remove|deconfigure)
+    if [ -d /run/systemd/system ] && [ -x /usr/bin/deb-systemd-invoke ]; then
+      deb-systemd-invoke stop kelixip.service >/dev/null || true
+    fi
+    ;;
+  upgrade|failed-upgrade)
+    ;;
+  *)
+    echo "prerm called with unknown argument '$1'" >&2
+    exit 1
+    ;;
+esac
+
+exit 0

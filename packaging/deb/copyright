@@ -1,0 +1,31 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: elixip
+Source: https://github.com/neutrino38/elixip
+
+Files: *
+Copyright: Emmanuel Buu / La Tribuu
+License: BSL-1.1
+
+License: BSL-1.1
+ Business Source License 1.1 — a source-available license.
+ .
+ Licensor: Emmanuel Buu / La Tribuu.
+ Licensed Work: Elixip and the tools built from it (elixipp, borderline,
+ kelixip).
+ Change License: GNU General Public License version 3.0 or later
+ (GPL-3.0-or-later).
+ Change Date: two years after the publication date of each released version;
+ on its Change Date, that version becomes available under the Change License.
+ .
+ The Licensor grants the right to copy, modify, create derivative works,
+ redistribute, and make non-production use of the Licensed Work. Production use
+ requires a commercial license from the Licensor, its affiliated entities, or
+ authorized resellers, unless an Additional Use Grant permits it.
+ .
+ TO THE EXTENT PERMITTED BY APPLICABLE LAW, THE LICENSED WORK IS PROVIDED ON AN
+ "AS IS" BASIS. LICENSOR DISCLAIMS ALL WARRANTIES AND CONDITIONS, EXPRESS OR
+ IMPLIED, INCLUDING (WITHOUT LIMITATION) WARRANTIES OF MERCHANTABILITY, FITNESS
+ FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, AND TITLE.
+ .
+ The full text, which is the binding one, ships with the sources as LICENSE.md
+ (French courtesy translation: LICENSE_fr.md).

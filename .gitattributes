@@ -1,2 +1,5 @@
-# Force CRLF line endings for all protocol test data files (RFC 3261 mandates CRLF)
-test/*.txt text eol=crlf
+# Force CRLF line endings for all protocol test data files (RFC 3261 mandates CRLF).
+# Leading **/ matters: a pattern containing a slash is anchored to this directory,
+# so plain `test/*.txt` stopped matching when the umbrella moved the fixtures to
+# apps/elixip2/test/ and they got checked out LF-only, breaking SIPMsg parsing.
+**/test/*.txt text eol=crlf

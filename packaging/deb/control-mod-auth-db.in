@@ -1,0 +1,22 @@
+Package: kelixip-mod-auth-db
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Emmanuel BUU <emmanuel.buu@ives.fr>
+Installed-Size: @INSTALLED_SIZE@
+Section: net
+Priority: optional
+Homepage: https://www.ives.fr/
+Depends: kelixip (= @VERSION@)
+Description: Database authentication module for kelixip
+ Digest authentication against a MariaDB/MySQL subscriber table
+ (kamailio-compatible ha1/ha1b columns): it owns the challenge/accept/reject
+ decision, the scripts only compose the SIP response. Enable it with a
+ [module.auth_db] block in config.toml.
+ .
+ The module's registered name is auth_db (the [module.auth_db] block); the
+ package is named kelixip-mod-auth-db because a Debian package name may not
+ contain an underscore. The RPM is kelixip-mod-auth_db.
+ .
+ The payload is BEAM bytecode, but the package is architecture-dependent on
+ purpose: it must be built and shipped alongside the core whose embedded ERTS
+ will load it.

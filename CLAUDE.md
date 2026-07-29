@@ -8,53 +8,116 @@ Elixip is a SIP (Session Initiation Protocol) application server and test tool w
 
 ## Commands
 
+This is a **Mix umbrella** (see Architecture below). Most commands run from the
+repo root and cover all apps. See [BUILD.md](BUILD.md) for the full build guide
+(the elixipp escript and the kelixip release).
+
 ```bash
-# Install dependencies
+# Install dependencies (all apps share the root deps/ + mix.lock)
 mix deps.get
 
-# Compile
+# Compile every app
 mix compile
 
-# Run all tests
+# Run all tests (every app, from its own dir)
 mix test
 
-# Run a specific test file
-mix test test/sip_parser_test.exs
+# Exclude the :live tests (they need outbound network to a real SIP proxy)
+mix test --exclude live
+
+# Run a specific test file (paths are under apps/<app>/test/)
+mix test apps/elixip2/test/sip_parser_test.exs
 
 # Run a specific test by line number
-mix test test/sip_parser_test.exs:42
-
-# Run tests with verbose output
-mix test --trace
+mix test apps/elixip2/test/sip_parser_test.exs:42
 
 # Format code
 mix format
+
+# Build the elixipp test-tool escript
+cd apps/elixipp && mix escript.build          # -> apps/elixipp/elixipp
+
+# Build the kelixip server release (contains NO module)
+cd apps/kelixip && MIX_ENV=prod mix release kelixip
+
+# Build the loadable modules and install them where the server looks for them
+cd apps/kelix_modules && MIX_ENV=prod mix compile
+cp _build/prod/lib/kelix_modules/ebin/Elixir.Kelix.Mod.*.beam "$MODULE_DIR"/
+
+# Build the packages (core + one per module) -> packaging/dist/
+packaging/build-rpm.sh                            # RPM, on an Alma Linux 9 host
+packaging/build-deb.sh                            # deb, on the target Ubuntu/Debian
+packaging/build-in-container.sh                   # RPM anywhere else (podman/docker)
+packaging/build-in-container.sh --target ubuntu   # deb likewise
 ```
+
+> **Tests:** a few tests are order-dependent (named singletons leak state across
+> test files) and the `ScenarioIntegration` media tests are flaky under load —
+> they all pass when run in isolation. The `:live` tests need outbound network.
+> So the meaningful bar is "green in isolation", not a perfect full-suite run.
 
 ## Architecture
 
-The project implements a layered SIP protocol stack. In Elixir the directory
-layout under `lib/` is independent of the module names (Mix compiles every
-`*.ex` recursively), so the tree below is purely organizational:
+### Umbrella layout (4 apps)
+
+The repo is a **Mix umbrella** (`apps/`), split so each build artifact carries
+only its own dependencies (design in
+[docs/kelixip_basic_design.md](docs/kelixip_basic_design.md) §12.0):
 
 ```
-lib/
+apps/
+├── elixip2/       # shared SIP stack + DSL + media = LIBRARY (app :elixip2)
+│                  #   all the framework/dsl/session code + the test suite
+├── elixipp/       # the standalone test tool (escript `elixipp`) — depends on :elixip2
+│   └── lib/elixipp/ElixippCLI.ex   # CLI entry point + live --monitor rendering (owl)
+├── kelixip/       # the kelixip SIP server → OTP release + kelictl — depends on :elixip2
+│   └── lib/kelix/application.ex    # Kelix.Application (supervision tree)
+└── kelix_modules/ # the provided loadable modules (registrar, auth_db) — depends
+                   #   on :kelixip. NOT in the release: their .beam are installed
+                   #   into `server.module_dir` and loaded per config (§8.3, §16.12)
+```
+
+The app name of the shared library is kept as **`:elixip2`** (not renamed) to
+avoid churn on the many `:elixip2` config references; its directory is
+`apps/elixip2`. `apps/elixipp` and `apps/kelixip` both depend on it.
+
+`packaging/` (outside `apps/`) turns the kelixip release into RPMs for Alma Linux 9
+— spec, systemd unit, shipped `/etc/kelixip` defaults and the build scripts. Its
+[README](packaging/README.md) is the guide; the build must run on the target OS
+because the release embeds a natively-linked ERTS.
+
+`apps/kelix_modules` is deliberately **outside** the release: `apps/kelixip` does
+not depend on it, so `mix release kelixip` cannot pull it in — the core ships no
+SIP function. Its tests (registrar, auth_db, the reference registrar script, the
+core↔module control path) live in that app, since they are the only place both
+halves are present.
+
+### The SIP stack inside `apps/elixip2/lib/`
+
+In Elixir the directory layout under `lib/` is independent of the module names
+(Mix compiles every `*.ex` recursively), so the tree below is purely
+organizational:
+
+```
+apps/elixip2/lib/
 ├── framework/   # the reusable SIP stack (transport → message → transaction →
 │                #   dialog → session/context → media). See the layers below.
 ├── dsl/         # the scenario DSL and its FSM engine (namespace SIP.Scenario)
 │   ├── SIPScenario.ex        # DSL macros: state, goto, config, on_events, …
 │   ├── SIPScenarioRunner.ex  # FSM execution engine
 │   └── SIPScenarioLoader.ex  # loads scenario .exs files / modules
-├── elixipp/     # the standalone test tool (escript `elixipp`)
-│   ├── ElixippCLI.ex         # CLI entry point + live --monitor table rendering
-│   └── SIPScenarioMonitor.ex # in-memory store feeding the --monitor view
-│                             #   (SIP.Scenario.Monitor; a no-op when not started)
+├── elixipp/     # scenario-engine support shared with the tool (stays in :elixip2)
+│   ├── SIPScenarioMonitor.ex # in-memory store feeding the --monitor view
+│   │                         #   (SIP.Scenario.Monitor; a no-op when not started)
+│   └── ElixippScenarioUAS.ex # Elixip.ScenarioUAS — UAS instance factory (quota)
 └── mix/tasks/scenario.ex     # `mix scenario` task
 ```
 
 The `dsl` layer builds on `framework` (a scenario `use SIP.Scenario` pulls in
 `SIP.Session.CallUAC`, `SIP.Session.Media` and `SIP.Context`). The `elixipp`
-tool drives the DSL engine; the DSL itself runs fine without the tool.
+tool (`apps/elixipp`) drives the DSL engine; the DSL itself runs fine without the
+tool. `kelixip` (`apps/kelixip`) is the productized server — see its design doc;
+today it is a P0 skeleton (`Kelix.Application` + supervision tree).
 
 ### Transport Layer (`SIP.Transport.*`)
 - `SIP.Transport.UDP`, `TCP`, `TLS`, `WSS` — protocol-specific transports (outbound + inbound)
@@ -72,6 +135,25 @@ tool drives the DSL engine; the DSL itself runs fine without the tool.
 - `SIP.Msg.Ops` — header manipulation helpers
 - `SIP.MsgTemplate` — constructs common SIP requests/responses
 - `SIP.Uri` — SIP URI parsing and manipulation
+
+> **Message interpretation belongs to the framework, in exactly one place.**
+> Anything that reads meaning out of a SIP message — header precedence, defaults,
+> tolerance for malformed values, "what is this request actually asking for" — is
+> framework code in the message layer (`SIP.Msg.Ops` / `SIPMsg` / `SIP.Uri`), not
+> in the dialog layer, a session mixin, a kelixip module or a scenario. Callers
+> layer their own **policy** on top of that single reading (bounds, per-domain
+> config, which SIP code to answer), never their own re-parse.
+>
+> The rule is not stylistic. The REGISTER lifetime rule (RFC 3261 §10.2.4: the
+> Contact `expires` parameter wins *when present*, else the `Expires` header, else
+> the §20.19 default, resolved *per contact*) had been re-derived five times —
+> dialog timer, dialog end-of-transaction, the registrar session helpers, the
+> kelixip registrar module, the reference scenario — and no two agreed. One read
+> the header first, so a rebinding handset was taken for an un-registration; one
+> ignored the header, so a real phone's registration evaporated after 1 s; one
+> crashed on a valueless `;expires`. Each was found in production traffic, one at
+> a time, and fixing one never fixed the others. It now lives in
+> `SIP.Msg.Ops.requested_expires/2` & friends, with everything else delegating.
 
 ### Transaction Layer (`SIP.Transac.*`, `SIP.ICT`, `SIP.IST`, `SIP.NICT`, `SIP.NIST`)
 - Implements RFC 3261 transaction state machines
@@ -114,7 +196,7 @@ tool drives the DSL engine; the DSL itself runs fine without the tool.
 Elixip drives a media server through the `MediaServer.Behaviour` behaviour, so
 implementations are interchangeable (selected via config — see Configuration):
 - `MediaServer.Mendooze` — the real adapter, driving the **Mendooze MCU** over
-  its JSR309 **XML-RPC** control interface (`lib/framework/mendooze/`; design
+  its JSR309 **XML-RPC** control interface (`apps/elixip2/lib/framework/mendooze/`; design
   in `docs/mendooze_interface.md`). Events arrive over a chunked HTTP long-poll.
 - `MediaServer.Mockup` — in-process stub for call-flow tests.
 
@@ -167,13 +249,13 @@ stop_player / stop_recorder / stop_echo
 ### Testing Infrastructure
 - `SIP.Test.Transport.UDPMockup` — in-process fake UDP transport
 - `MediaServer.Mockup` — stub media server for call flow tests
-- Sample SIP messages in `test/SIP-*.txt`
+- Sample SIP messages in `apps/elixip2/test/SIP-*.txt`
 
 ## Configuration
 
 Runtime config lives in `config/config.exs`:
 - Logger writes warnings to console and info+ to `elixip.log`
-- `:useragent` — the User-Agent header value (`"Elixipp-0.2"`)
+- `:useragent` — the User-Agent header value (`"Elixipp-1.1"`)
 - `:optionkeepaliveperiod` — OPTIONS keep-alive interval in seconds (15)
 
 ### Media server selection

@@ -1,0 +1,85 @@
+#!/bin/sh
+# kelixip postinst — the deb counterpart of the .spec's %pre + %post.
+#
+# The RPM creates the system user in %pre, before unpacking, and lets %files set
+# root:kelixip ownership. dpkg has no pre-unpack hook of that kind and stores the
+# payload root-owned (--root-owner-group), so both jobs land here: create the user,
+# then fix the handful of paths whose ownership matters.
+set -e
+
+KELIXDIR=/usr/lib/kelixip
+COOKIE="$KELIXDIR/releases/COOKIE"
+
+case "$1" in
+  configure|reconfigure)
+    # 1) The unprivileged system user the service runs as.
+    if ! getent group kelixip >/dev/null; then
+      addgroup --system kelixip
+    fi
+    if ! getent passwd kelixip >/dev/null; then
+      adduser --system --ingroup kelixip --home /var/lib/kelixip --no-create-home \
+              --gecos "kelixip SIP server" --shell /usr/sbin/nologin kelixip
+    fi
+
+    # 2) 0640 root:kelixip on the configuration: config.toml holds the database
+    #    password and the API token, so the service reads it and nobody else does.
+    chown root:kelixip /etc/kelixip /etc/kelixip/tls \
+                       /etc/kelixip/config.toml /etc/kelixip/domains.toml
+    chmod 0750 /etc/kelixip /etc/kelixip/tls
+    chmod 0640 /etc/kelixip/config.toml /etc/kelixip/domains.toml
+
+    # Mutable state and the log directory (used when stdout is redirected). The
+    # unit declares them too, so a tmpfs-only deployment still gets them.
+    chown kelixip:kelixip /var/lib/kelixip /var/log/kelixip
+    chmod 0750 /var/lib/kelixip /var/log/kelixip
+
+    # $KELIXDIR/modules stays root-owned and not writable by the service: loading
+    # a .beam is executing code, so the service must not be able to plant one.
+
+    # 3) Per-host distribution cookie: the credential kelictl authenticates with.
+    #    Shipping one in the package would make it the same secret on every
+    #    installation. Kept across upgrades; root and the service only.
+    if [ ! -s "$COOKIE" ]; then
+      ( umask 077
+        head -c 32 /dev/urandom | base64 > "$COOKIE" )
+      chown root:kelixip "$COOKIE"
+      chmod 0640 "$COOKIE"
+    fi
+    ;;
+
+  abort-upgrade|abort-remove|abort-deconfigure)
+    ;;
+
+  *)
+    echo "postinst called with unknown argument '$1'" >&2
+    exit 1
+    ;;
+esac
+
+# systemd, hand-written because this package is not built with debhelper.
+# Deliberately: enable the unit, do NOT start it. The shipped config.toml is a
+# template that binds 5060 and serves no domain — same choice as the RPM, where
+# %systemd_post enables per preset and starts nothing. The admin configures, then
+# `systemctl enable --now kelixip`.
+if [ "$1" = configure ]; then
+  if [ -x /usr/bin/deb-systemd-helper ]; then
+    if [ -z "${2:-}" ]; then
+      deb-systemd-helper unmask kelixip.service >/dev/null || true
+      deb-systemd-helper enable kelixip.service >/dev/null || true
+    else
+      # Upgrade: respect whatever the admin decided about enablement.
+      deb-systemd-helper update-state kelixip.service >/dev/null || true
+    fi
+  fi
+  if [ -d /run/systemd/system ]; then
+    systemctl --system daemon-reload >/dev/null || true
+    # Restart after the upgrade rather than stopping in prerm: the stop drains
+    # in-progress scenarios and can take up to TimeoutStopSec, and doing it here
+    # means the new code is already in place when the node comes back.
+    if [ -n "${2:-}" ]; then
+      deb-systemd-invoke try-restart kelixip.service >/dev/null || true
+    fi
+  fi
+fi
+
+exit 0
