@@ -219,9 +219,9 @@ spec disagrees, so bump both together.
 Result:
 
 ```
-packaging/dist/kelixip-0.2.0-1.el9.x86_64.rpm               7.1M   (release + ERTS)
-packaging/dist/kelixip-mod-registrar-0.2.0-1.el9.x86_64.rpm  41K
-packaging/dist/kelixip-mod-auth_db-0.2.0-1.el9.x86_64.rpm     26K
+packaging/dist/kelixip-1.1.0-1.el9.x86_64.rpm               7.1M   (release + ERTS)
+packaging/dist/kelixip-mod-registrar-1.1.0-1.el9.x86_64.rpm  41K
+packaging/dist/kelixip-mod-auth_db-1.1.0-1.el9.x86_64.rpm     26K
 ```
 
 ### Build in a container instead
@@ -355,9 +355,9 @@ match `apps/kelixip/mix.exs`, or the build stops.
 Result:
 
 ```
-packaging/dist/kelixip_0.2.0-1_amd64.deb                 6.9M   (release + ERTS)
-packaging/dist/kelixip-mod-registrar_0.2.0-1_amd64.deb    36K
-packaging/dist/kelixip-mod-auth-db_0.2.0-1_amd64.deb      24K
+packaging/dist/kelixip_1.1.0-1_amd64.deb                 6.9M   (release + ERTS)
+packaging/dist/kelixip-mod-registrar_1.1.0-1_amd64.deb    36K
+packaging/dist/kelixip-mod-auth-db_1.1.0-1_amd64.deb      24K
 ```
 
 ### Build in a container instead
@@ -375,7 +375,7 @@ native run.
 ### Install and verify on the target
 
 ```bash
-sudo apt install ./kelixip_0.2.0-1_amd64.deb ./kelixip-mod-registrar_0.2.0-1_amd64.deb
+sudo apt install ./kelixip_1.1.0-1_amd64.deb ./kelixip-mod-registrar_1.1.0-1_amd64.deb
 sudo systemctl enable --now kelixip
 kelictl status                            # listeners bound, modules loaded
 curl -s http://127.0.0.1:9095/health

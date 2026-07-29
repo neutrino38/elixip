@@ -27,7 +27,7 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        0.2.0
+Version:        1.1.0
 Release:        1%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
@@ -173,6 +173,9 @@ fi
 %{kelixdir}/modules/Elixir.Kelix.Mod.AuthDb*.beam
 
 %changelog
+* Wed Jul 29 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.1.0-1
+- Version bump to 1.1.0.
+
 * Tue Jul 28 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 0.2.0-1
 - First packaged release (design P10): core + mod-registrar + mod-auth_db
   subpackages, systemd unit with graceful-shutdown ExecStop, per-host cookie.
