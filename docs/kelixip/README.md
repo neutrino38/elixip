@@ -4,9 +4,7 @@ kelixip is a scriptable SIP application server built on the Elixip SIP stack. It
 serves one or more SIP domains, each routed to DSL scenario scripts, with
 loadable **modules** (registrar, database auth, …) plugged in Kamailio-style.
 
-> This is the **operator/user** manual. The locked design and rationale live in
-> [`../design/kelixip_basic.md`](../design/kelixip_basic.md) (spec) and
-> [`../design/kelixip_basic_design.md`](../design/kelixip_basic_design.md) (design).
+> This is the **operator/user** manual.
 
 ## Table of contents
 

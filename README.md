@@ -34,27 +34,37 @@ In terms of capabilities, the emphasis will be on:
 
 ## What is available, what is not.
 
+### Framework
 - Fully native Elixir SIP stack: implemented
 - Support for SIP over UDP, TCP, TLS and WSS: implemented
 - Media Control interface: implemented
 - Domain Specific Language definition: see [DSL.md](DSL.md)
 - SIP.Scenario Scripting Engine: done
+
+### Testing tool: elixipp
 - Interactive command elixpp for testing tools: done
 - Interactive display for elixipp: done
 - multple calls + max duration of test and final reporting: done
 - Interface with [Medooze Media server](https://github.com/neutrino38/mediaserver): done
 
-## Roadmap
+### Scriptable SIP server kelixip
 
-- **kelixip**: coming up soon! A scriptable SIP application server (design in
-  [docs/design/kelixip_basic.md](docs/design/kelixip_basic.md)). Its *basic* scope delivers a
-  multi-domain **registrar** — declarative TOML config with hot-reloadable
-  domains/dial-plan, digest auth (stateless nonce, HA1 via a `subscriber_db`
-  module), NAT/flow for WebRTC — plus loadable `.beam` modules, a media-server
-  pool, a CLI + REST control API, and Prometheus metrics. `calls` (B2BUA),
-  `presence` and HA come later.
-- distributed cluster tech: later
-- **borderline**: later
+**kelixip**: *basic* scope delivers:
+- plus loadable `.beam` modules,
+- declarative TOML config with hot-reloadable
+- a CLI + REST control API, and Prometheus metrics.
+- domains/dial-plan
+- digest auth (stateless nonce, HA1 via a `subscriber_db`  module)
+- a multi-domain **registrar** via the registrar mocule and the `registar.exs` script
+- NAT/flow for WebRTC —  a media-server pool, 
+
+
+## Roadmap
+- kelixip MCU based on Mendooze with harware acceleration
+- kelixip B2BUA and call processing
+- kelixip and elixip `presence` support including some level of LoST support
+- kelixip distributed cluster tech: later
+- **borderline** SBC: later
 
 
 ## The Domain Specific Language for SIP scenarios
