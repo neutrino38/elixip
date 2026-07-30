@@ -109,15 +109,16 @@ defmodule Kelix.Control.CLI do
   defp render(_tag, {:error, reason}), do: {1, "error: #{inspect(reason)}"}
 
   defp render(:status, %{} = s) do
-    lines = [
-      "node:            #{s.node}",
-      "uptime:          #{format_uptime(s.uptime_ms)}",
-      "active calls:    #{Map.get(s.instances, :active, 0)}",
-      "listeners:       #{format_listeners(Map.get(s, :listeners, []))}",
-      "domains version: #{s.domains_version}",
-      "modules:         #{Enum.join(s.modules, ", ")}",
-      "media pool:      #{format_pool(s.media_pool)}"
-    ]
+    lines =
+      [
+        "node:            #{s.node}",
+        "uptime:          #{format_uptime(s.uptime_ms)}",
+        "active calls:    #{Map.get(s.instances, :active, 0)}",
+        "listeners:       #{format_listeners(Map.get(s, :listeners, []))}",
+        "domains version: #{s.domains_version}",
+        "modules:         #{Enum.join(s.modules, ", ")}",
+        "media pool:      #{format_pool(s.media_pool)}"
+      ] ++ module_status_lines(Map.get(s, :module_status, %{}))
 
     {0, Enum.join(lines, "\n")}
   end
@@ -161,6 +162,22 @@ defmodule Kelix.Control.CLI do
   defp render(:ok, :ok), do: {0, "ok"}
   defp render(:ok, :notfound), do: {1, "not found"}
   defp render(_tag, other), do: {0, fmt(other)}
+
+  # One line per module that reports state of its own (`mcu: 2 conferences, …`).
+  # Rendered from whatever the module returned, so a new module needs no CLI change.
+  defp module_status_lines(status) when is_map(status) do
+    for {name, summary} <- Enum.sort_by(status, &elem(&1, 0)) do
+      String.pad_trailing("#{name}:", 17) <> format_summary(summary)
+    end
+  end
+
+  defp module_status_lines(_status), do: []
+
+  defp format_summary(summary) when is_map(summary) do
+    Enum.map_join(summary, ", ", fn {k, v} -> "#{k} #{fmt(v)}" end)
+  end
+
+  defp format_summary(other), do: fmt(other)
 
   defp exit_map(result), do: if(Enum.all?(result, fn {_k, v} -> v == :ok end), do: 0, else: 1)
 

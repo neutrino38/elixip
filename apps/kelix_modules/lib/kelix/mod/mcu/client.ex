@@ -237,11 +237,18 @@ defmodule Kelix.Mod.Mcu.Client do
   # A transport error means the channel is gone, so it also flips the health flag;
   # an applicative error ({:mcu_error, _}) does not — the server answered.
   defp rpc(state, method, params) do
+    started = System.monotonic_time()
+
     result =
       case state.transport do
         nil -> XmlRpc.call(state.base_url, method, params, timeout_ms: state.timeout_ms)
         fun when is_function(fun, 2) -> fun.(method, params)
       end
+
+    # §11: how long the media server takes to answer each method, per method. This is
+    # the first thing to look at when calls get slow to set up, since every leg's
+    # setup is a handful of these in series.
+    Kelix.Metrics.Emit.mcu_rpc(method, System.monotonic_time() - started)
 
     case result do
       {:ok, _} = ok ->
@@ -249,6 +256,7 @@ defmodule Kelix.Mod.Mcu.Client do
 
       {:error, {:mcu_error, msg}} = err ->
         Logger.warning(module: __MODULE__, message: "mcu #{state.name}: #{method}: #{msg}")
+        Kelix.Metrics.Emit.mcu_rpc_error(method, :mcu_error)
         {err, state}
 
       {:error, reason} = err ->
@@ -257,9 +265,25 @@ defmodule Kelix.Mod.Mcu.Client do
           message: "mcu #{state.name}: #{method} failed: #{inspect(reason)}"
         )
 
+        Kelix.Metrics.Emit.mcu_rpc_error(method, error_label(reason))
         {err, transport_lost(state, method)}
     end
   end
+
+  # A **bounded** label: the reason's shape, never the server's message or an
+  # `:inet` tuple, either of which would give the metric unbounded cardinality. The
+  # detail is one log line above.
+  defp error_label(reason) when is_atom(reason), do: reason
+  defp error_label({:failed_connect, _}), do: :unreachable
+
+  defp error_label(reason) when is_tuple(reason) and tuple_size(reason) > 0 do
+    case elem(reason, 0) do
+      atom when is_atom(atom) -> atom
+      _ -> :unknown
+    end
+  end
+
+  defp error_label(_reason), do: :unknown
 
   # EventQueueCreate failing during connect/1 is handled there (it must not
   # schedule two reconnects), so only in-service failures land here.

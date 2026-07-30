@@ -159,8 +159,10 @@ defmodule Kelix.Mod.McuControlRestTest do
       assert call(conn(:get, "/modules/mcu/conferences/#{uid}/#{path}")).status == 404
     end
 
-    # and so do the participant routes, which are P5's own increment
-    assert call(conn(:get, "/modules/mcu/conferences/#{uid}/participants")).status == 404
+    # the participant collection, by contrast, is served — and empty
+    listing = call(conn(:get, "/modules/mcu/conferences/#{uid}/participants"))
+    assert listing.status == 200
+    assert result(listing) == []
   end
 
   test "the flat form of every command is live alongside the canonical URL (§8.3.5)" do

@@ -32,6 +32,7 @@ defmodule Kelix.Mod.Mcu do
   @behaviour Kelix.Module
   require Logger
 
+  alias Kelix.Metrics.Emit
   alias Kelix.Mod.Mcu.{Adapter, Args, Client, Conference, Config, Event}
   alias Kelix.Mod.Mcu.Supervisor, as: McuSupervisor
 
@@ -85,6 +86,8 @@ defmodule Kelix.Mod.Mcu do
         leave: 1,
         leave: 2,
         send_fpu: 1,
+        mute: 3,
+        kick: 2,
         lookup_did: 2,
         conference: 1,
         mediaserver: 1,
@@ -158,6 +161,52 @@ defmodule Kelix.Mod.Mcu do
     end
   end
 
+  # ── what the module says about itself (§11) ───────────────────────────────────
+
+  @doc """
+  One-line state for `kelictl status` (§11): conferences, participants, and how many
+  of the configured media servers this module can currently reach.
+
+  Read by `Kelix.Control.status/0` through the module registry, so the core names no
+  module — anything exporting `status/0` contributes a line.
+  """
+  @spec status() :: map
+  def status() do
+    confs = conferences()
+    servers = mediaservers()
+
+    %{
+      conferences: length(confs),
+      participants: Enum.sum(Enum.map(confs, &Conference.count/1)),
+      mediaservers: "#{Enum.count(servers, &(&1.status == :up))}/#{length(servers)} up",
+      stale: Enum.count(confs, & &1.stale)
+    }
+  end
+
+  @doc """
+  Emit the point-in-time gauges of §11 (`kelix_mcu_conferences`,
+  `kelix_mcu_participants`, `kelix_mcu_mediaserver_up`).
+
+  Called on `Kelix.Metrics.Poller`'s tick rather than on a timer of our own: one
+  sampling clock for the node, and nothing to stop when metrics are disabled — the
+  telemetry calls are no-ops with no reporter attached.
+  """
+  @spec poll_metrics() :: :ok
+  def poll_metrics() do
+    confs = conferences()
+
+    for mcu <- mediaservers() do
+      Emit.mcu_mediaserver_up(mcu.name, mcu.status == :up)
+      Emit.mcu_conferences(mcu.name, Enum.count(confs, &(&1.mcu == mcu.name)))
+    end
+
+    for conf <- confs do
+      Emit.mcu_participants(conf.mcu, conf.uid, Conference.count(conf))
+    end
+
+    :ok
+  end
+
   # ── facade used by mcu.exs (§8.2) ─────────────────────────────────────────────
 
   @doc """
@@ -228,6 +277,40 @@ defmodule Kelix.Mod.Mcu do
 
   def leave(_part, _reason), do: :ok
 
+  @doc """
+  Mute or unmute one media of a participant (`SetMute`).
+
+  Backs `participant.update` (§8.3.3) and is exported for completeness: a derived
+  script that wants a moderated conference — everyone muted until the chair says
+  otherwise — needs it without going through the control API.
+  """
+  @spec mute(Conference.participant(), MediaServer.media(), boolean) :: :ok | {:error, term}
+  def mute(part, media, muted?) when is_map(part) and is_boolean(muted?) do
+    case participant(part) do
+      {:ok, row} -> do_mute(part.conf_uid, row.part_id, %{media => muted?})
+      :error -> {:error, :no_such_participant}
+    end
+    |> case do
+      {:ok, _changed} -> :ok
+      other -> other
+    end
+  end
+
+  @doc """
+  Disconnect a participant by its MCU-side id (`kelictl mcu participant.delete`).
+
+  The scenario is asked to wind down — it sends the BYE and releases its media — so
+  the caller sees the same teardown a hang-up produces, not a row yanked from under a
+  live dialog.
+  """
+  @spec kick(String.t(), non_neg_integer) :: :ok | {:error, :not_found | term}
+  def kick(uid, part_id) when is_binary(uid) and is_integer(part_id) do
+    case call({:kick, uid, part_id}) do
+      {:ok, _} -> :ok
+      other -> other
+    end
+  end
+
   @doc "Ask the MCU for a full intra-frame from that participant (`SendFPU`)."
   @spec send_fpu(Conference.participant()) :: :ok | {:error, term}
   def send_fpu(part) when is_map(part) do
@@ -276,6 +359,15 @@ defmodule Kelix.Mod.Mcu do
 
   @create_args ~w(domain name did mcu vad rate audio_codecs video_codecs text_codecs
                   video layout max_participants destroy_when_empty)
+
+  @update_args ~w(uid name vad rate layout video max_participants destroy_when_empty)
+
+  # Fields a client may read but never send (§8.3.3). Named as read-only rather than
+  # merely unknown: an operator who tries to move `conf_id` or `did` deserves to be
+  # told which of the two it is.
+  @conference_readonly ~w(conf_id created_at participants stale domain did mcu
+                          audio_codecs video_codecs text_codecs)
+  @participant_readonly ~w(name state medias joined_at conn scenario)
 
   @impl Kelix.Module
   def describe_control() do
@@ -328,12 +420,67 @@ defmodule Kelix.Mod.Mcu do
         help: "Show one conference and its participants"
       },
       %{
+        name: "conference.update",
+        # PUT with partial-merge semantics, PATCH as the honest verb for a strict
+        # client — one declaration, two methods (§8.3.2, decision 6a)
+        rest: {[:put, :patch], "/conferences/:uid"},
+        errors: %{not_found: 404, mcu_down: 503, rpc_error: 502},
+        rw: :w,
+        args: [
+          %{name: "uid", required: true},
+          %{name: "name", required: false},
+          %{name: "vad", required: false},
+          %{name: "rate", required: false},
+          %{name: "layout", required: false},
+          %{name: "video", required: false},
+          %{name: "max_participants", required: false},
+          %{name: "destroy_when_empty", required: false}
+        ],
+        help: "Update a conference (merges the fields given; omitted ones are untouched)"
+      },
+      %{
         name: "conference.delete",
         rest: {:delete, "/conferences/:uid"},
         errors: %{not_found: 404, not_empty: 409, mcu_down: 503, rpc_error: 502},
         rw: :w,
         args: [%{name: "uid", required: true}, %{name: "force", required: false}],
         help: "Destroy a conference (`force` disconnects the participants first)"
+      },
+      %{
+        name: "participant.list",
+        rest: {:get, "/conferences/:uid/participants"},
+        errors: %{not_found: 404},
+        rw: :r,
+        args: [%{name: "uid", required: true}],
+        help: "List a conference's participants"
+      },
+      %{
+        name: "participant.show",
+        rest: {:get, "/conferences/:uid/participants/:part_id"},
+        errors: %{not_found: 404},
+        rw: :r,
+        args: [%{name: "uid", required: true}, %{name: "part_id", required: true}],
+        help: "Show one participant, with its media server statistics"
+      },
+      %{
+        name: "participant.update",
+        rest: {[:put, :patch], "/conferences/:uid/participants/:part_id"},
+        errors: %{not_found: 404, mcu_down: 503, rpc_error: 502},
+        rw: :w,
+        args: [
+          %{name: "uid", required: true},
+          %{name: "part_id", required: true},
+          %{name: "muted", required: false}
+        ],
+        help: ~s(Mute or unmute a participant: muted={"audio":true,"video":false})
+      },
+      %{
+        name: "participant.delete",
+        rest: {:delete, "/conferences/:uid/participants/:part_id"},
+        errors: %{not_found: 404},
+        rw: :w,
+        args: [%{name: "uid", required: true}, %{name: "part_id", required: true}],
+        help: "Disconnect a participant (BYE, then teardown)"
       }
     ]
   end
@@ -391,6 +538,53 @@ defmodule Kelix.Mod.Mcu do
     end
   end
 
+  # §8.3.3: a partial merge. Omitted fields are left untouched — a PUT here never
+  # resets one to its default, which is the dangerous reading of PUT and the reason
+  # the semantics are stated in the design rather than implied.
+  defp do_control("conference.update", args) do
+    with :ok <- Args.reject_readonly(args, @conference_readonly),
+         :ok <- Args.reject_unknown(args, @update_args),
+         {:ok, uid} <- Args.required_string(args, "uid"),
+         {:ok, changes} <- update_changes(args) do
+      call({:update, uid, changes})
+    end
+  end
+
+  defp do_control("participant.list", args) do
+    with :ok <- Args.reject_unknown(args, ~w(uid)),
+         {:ok, uid} <- Args.required_string(args, "uid"),
+         {:ok, conf} <- found(conference(uid)) do
+      {:ok, Enum.map(Conference.participants(conf), &Conference.render_participant/1)}
+    end
+  end
+
+  defp do_control("participant.show", args) do
+    with :ok <- Args.reject_unknown(args, ~w(uid part_id)),
+         {:ok, uid} <- Args.required_string(args, "uid"),
+         {:ok, part_id} <- part_id(args),
+         {:ok, conf, row} <- find_participant(uid, part_id) do
+      {:ok, Map.merge(Conference.render_participant(row), statistics(conf, row))}
+    end
+  end
+
+  defp do_control("participant.update", args) do
+    with :ok <- Args.reject_readonly(args, @participant_readonly),
+         :ok <- Args.reject_unknown(args, ~w(uid part_id muted)),
+         {:ok, uid} <- Args.required_string(args, "uid"),
+         {:ok, part_id} <- part_id(args),
+         {:ok, muted} <- muted_changes(args) do
+      call({:mute, uid, part_id, muted})
+    end
+  end
+
+  defp do_control("participant.delete", args) do
+    with :ok <- Args.reject_unknown(args, ~w(uid part_id)),
+         {:ok, uid} <- Args.required_string(args, "uid"),
+         {:ok, part_id} <- part_id(args) do
+      call({:kick, uid, part_id})
+    end
+  end
+
   defp do_control(command, _args) do
     Logger.warning(module: __MODULE__, message: "unknown control command #{inspect(command)}")
     {:error, :unknown_command}
@@ -398,6 +592,115 @@ defmodule Kelix.Mod.Mcu do
 
   defp found({:ok, value}), do: {:ok, value}
   defp found(:error), do: {:error, :not_found}
+
+  # A path param arrives as a string, a CLI `part_id=7` token as an integer.
+  defp part_id(args) do
+    case Map.get(args, "part_id") do
+      id when is_integer(id) and id >= 0 ->
+        {:ok, id}
+
+      id when is_binary(id) ->
+        case Integer.parse(id) do
+          {n, ""} when n >= 0 -> {:ok, n}
+          _ -> {:error, "part_id must be a non-negative integer"}
+        end
+
+      nil ->
+        {:error, "part_id is required"}
+
+      other ->
+        {:error, "part_id must be a non-negative integer, got #{inspect(other)}"}
+    end
+  end
+
+  defp find_participant(uid, part_id) do
+    with {:ok, conf} <- found(conference(uid)) do
+      case Conference.by_part_id(conf, part_id) do
+        nil -> {:error, :not_found}
+        row -> {:ok, conf, row}
+      end
+    end
+  end
+
+  # The media server's own view of the leg (`GetParticipantStatistics`, §3.3): sent /
+  # received packets and bytes per media. A failure is reported rather than hidden —
+  # an operator reading zeros must be able to tell "no media" from "no answer".
+  defp statistics(conf, row) do
+    case mediaserver(conf.mcu) do
+      {:ok, mcu} ->
+        case rpc(mcu, "GetParticipantStatistics", [conf.conf_id, row.part_id]) do
+          {:ok, [stats | _]} -> %{stats: stats}
+          {:ok, _} -> %{stats: %{}}
+          {:error, reason} -> %{stats: %{}, stats_error: reason}
+        end
+
+      :error ->
+        %{stats: %{}, stats_error: :unknown_mcu}
+    end
+  end
+
+  # Decode the update body into the changes to apply, keeping only what was sent:
+  # that map *is* the partial-merge semantics.
+  defp update_changes(args) do
+    Enum.reduce_while(
+      [
+        {"name", &Args.string(&1, "name")},
+        {"vad", &Args.int(&1, "vad", nil, [0, 1, 2])},
+        {"rate", &Args.int(&1, "rate", nil, [8000, 16_000, 32_000, 48_000])},
+        {"max_participants", &Args.int(&1, "max_participants", nil)},
+        {"destroy_when_empty", &Args.bool(&1, "destroy_when_empty", nil)}
+      ],
+      {:ok, %{}},
+      fn {key, getter}, {:ok, acc} ->
+        if Map.has_key?(args, key) do
+          case getter.(args) do
+            {:ok, value} -> {:cont, {:ok, Map.put(acc, String.to_existing_atom(key), value)}}
+            {:error, _} = err -> {:halt, err}
+          end
+        else
+          {:cont, {:ok, acc}}
+        end
+      end
+    )
+    |> case do
+      # `video` and `layout` are merged over the conference's current values, which
+      # only the registry holds, so they travel raw
+      {:ok, changes} -> {:ok, Map.merge(changes, sub_map_changes(args))}
+      err -> err
+    end
+  end
+
+  defp sub_map_changes(args) do
+    for key <- ["video", "layout"], Map.has_key?(args, key), into: %{} do
+      {String.to_existing_atom(key), Map.get(args, key)}
+    end
+  end
+
+  # `muted` is a per-media map: `%{"audio" => true}` mutes the audio only and leaves
+  # the video as it was.
+  defp muted_changes(args) do
+    case Map.get(args, "muted") do
+      nil ->
+        {:ok, %{}}
+
+      map when is_map(map) ->
+        Enum.reduce_while(map, {:ok, %{}}, fn {media, value}, {:ok, acc} ->
+          cond do
+            media not in ~w(audio video text) ->
+              {:halt, {:error, "muted: unknown media #{inspect(media)}"}}
+
+            not is_boolean(value) ->
+              {:halt, {:error, "muted.#{media} must be a boolean"}}
+
+            true ->
+              {:cont, {:ok, Map.put(acc, String.to_existing_atom(media), value)}}
+          end
+        end)
+
+      other ->
+        {:error, ~s(muted must be a table like {"audio":true}, got #{inspect(other)})}
+    end
+  end
 
   # Decode + validate the create arguments into a spec the GenServer can apply
   # without re-parsing (and without ever raising inside the registry).
@@ -490,6 +793,35 @@ defmodule Kelix.Mod.Mcu do
     {:reply, do_delete(state, uid, force), state}
   end
 
+  def handle_call({:update, uid, changes}, _from, state) do
+    {:reply, do_update(state, uid, changes), state}
+  end
+
+  def handle_call({:mute, uid, part_id, muted}, _from, state) do
+    {:reply, do_mute(uid, part_id, muted), state}
+  end
+
+  def handle_call({:kick, uid, part_id}, _from, state) do
+    case find_participant(uid, part_id) do
+      {:ok, _conf, row} ->
+        # BYE + teardown: the scenario's cooperative shutdown does both (it sends the
+        # BYE, releases the media and calls `leave/2`), which is why this is a message
+        # and not a teardown we run behind its back.
+        if is_pid(row.scenario) and Process.alive?(row.scenario) do
+          send(row.scenario, {:scenario_ctl, :shutdown, :kicked})
+          {:reply, {:ok, %{part_id: part_id}}, state}
+        else
+          # its scenario is already gone: reap the row ourselves rather than leave a
+          # participant nobody will ever remove
+          Adapter.close(row.conn)
+          {:reply, {:ok, %{part_id: part_id}}, do_leave(state, uid, row.ref, :kick)}
+        end
+
+      {:error, _} = err ->
+        {:reply, err, state}
+    end
+  end
+
   # the configured defaults, for the phases that build on them
   def handle_call(:config, _from, state), do: {:reply, state.config, state}
 
@@ -520,6 +852,7 @@ defmodule Kelix.Mod.Mcu do
 
         # a leg joining the mosaic changes how many tiles the layout must show
         follow_auto_layout(conf.uid)
+        Emit.mcu_call(:joined)
 
         {:reply, :ok, state}
 
@@ -611,6 +944,7 @@ defmodule Kelix.Mod.Mcu do
           sip_code: sip_code(reason)
         })
 
+        Emit.mcu_call(sip_code(reason))
         {{:error, reason}, state}
     end
   end
@@ -709,12 +1043,16 @@ defmodule Kelix.Mod.Mcu do
         conf = %Conference{conf | participants: remaining}
         :ets.insert(@conf_table, {conf.uid, conf})
 
+        # §11.1 keeps `reason` an atom; the SIP code a media-refused leg carries is
+        # metric detail, not vocabulary, so it is split out here.
         Event.emit(:"participant.left", conf.uid, %{
           part_id: row.part_id,
           name: row.name,
-          reason: reason,
+          reason: event_reason(reason),
           duration_ms: duration_ms(row)
         })
+
+        emit_left_metric(reason, row)
 
         state = demonitor_participant(state, part_ref)
 
@@ -730,6 +1068,14 @@ defmodule Kelix.Mod.Mcu do
         state
     end
   end
+
+  defp event_reason({:no_media, _code}), do: :no_media
+  defp event_reason(reason), do: reason
+
+  # A leg that never joined is counted by the code it was refused with; one that did
+  # was already counted as `joined` when it entered the mix.
+  defp emit_left_metric({:no_media, code}, _row), do: Emit.mcu_call(code)
+  defp emit_left_metric(_reason, _row), do: :ok
 
   defp duration_ms(%{joined_at: nil}), do: 0
 
@@ -790,9 +1136,15 @@ defmodule Kelix.Mod.Mcu do
 
           status == :up ->
             Event.emit(:"mediaserver.up", nil, %{mcu: name})
+            # §9.2 then §9.4, in that order: recreate what is ours before sweeping
+            # what is not, or the sweep would delete the conferences we are about to
+            # rebuild.
+            recreate_stale(updated)
+            gc_orphans(state.config, updated)
 
           true ->
             Event.emit(:"mediaserver.down", nil, %{mcu: name, reason: :unreachable})
+            mark_stale(name)
             notify_mcu_lost(name)
         end
 
@@ -863,6 +1215,116 @@ defmodule Kelix.Mod.Mcu do
     |> Conference.participants()
     |> Enum.count(&(&1.state == :connected and Map.has_key?(&1.medias, :video)))
   end
+
+  # ── MCU restart (§9.2) and orphan collection (§9.4) ───────────────────────────
+
+  # The conference row and its DID survive the server; `conf_id` does not.
+  defp mark_stale(mcu_name) do
+    for conf <- conferences(), conf.mcu == mcu_name, not conf.stale do
+      :ets.insert(@conf_table, {conf.uid, %Conference{conf | stale: true, conf_id: nil}})
+    end
+
+    :ok
+  end
+
+  # Recreate every stale conference of a server that came back: **same `uid`** (so
+  # its DID answers again and REST clients keep their handle), new `conf_id`. The
+  # participants are not restored — those calls are gone, and their scenarios were
+  # told so when the server went away. This is mcuGold's `Conference.restart()`,
+  # minus the mosaic/sidebar zoo.
+  defp recreate_stale(mcu) do
+    for conf <- conferences(), conf.mcu == mcu.name, conf.stale do
+      case create_on_mcu(mcu, %Conference{conf | participants: %{}}) do
+        {:ok, recreated} ->
+          :ets.insert(@conf_table, {conf.uid, %Conference{recreated | stale: false}})
+
+          Event.emit(:"conference.created", conf.uid, %{
+            domain: conf.domain,
+            did: conf.did,
+            name: conf.name,
+            mcu: conf.mcu,
+            conf_id: recreated.conf_id,
+            recreated?: true
+          })
+
+        {:error, reason} ->
+          Logger.error(
+            module: __MODULE__,
+            message:
+              "conference #{conf.uid}: could not recreate on #{mcu.name}: #{inspect(reason)}"
+          )
+      end
+    end
+
+    :ok
+  end
+
+  @doc """
+  Delete every conference the MCU holds that this node does not know about (§9.4).
+
+  After a kelixip restart the media server may still hold the conferences of the
+  process that died: our registry is empty, so they are leftovers with no controller.
+  Safe because a kelixip node owns its MCUs exclusively — and gated on `gc_orphans`
+  for the day that stops being true.
+
+  **Deletes nothing** when `GetConferences` cannot be read with confidence: the shape
+  of that reply is documented loosely, and a misparse here would destroy live
+  conferences rather than leak dead ones.
+  """
+  @spec gc_orphans(Config.t(), map) :: :ok
+  def gc_orphans(%Config{gc_orphans: false}, _mcu), do: :ok
+
+  def gc_orphans(%Config{}, mcu) do
+    case rpc(mcu, "GetConferences", []) do
+      {:ok, [rows | _]} when is_list(rows) ->
+        ours = MapSet.new(conferences(), & &1.uid)
+
+        for {conf_id, tag} <- Enum.flat_map(rows, &decode_conference_row/1),
+            not MapSet.member?(ours, tag) do
+          Logger.warning(
+            module: __MODULE__,
+            message:
+              "mcu #{mcu.name}: deleting orphan conference #{conf_id} (tag #{inspect(tag)})"
+          )
+
+          rpc(mcu, "DeleteConference", [conf_id])
+        end
+
+        :ok
+
+      {:ok, other} ->
+        Logger.warning(
+          module: __MODULE__,
+          message:
+            "mcu #{mcu.name}: GetConferences returned #{inspect(other)}; " <>
+              "no orphan collected (deleting on a shape we cannot read would be worse)"
+        )
+
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          module: __MODULE__,
+          message: "mcu #{mcu.name}: GetConferences failed: #{inspect(reason)}"
+        )
+
+        :ok
+    end
+  end
+
+  # `(i id, s name, i numPart)` per §3.2 — as an array, or as a struct on a server
+  # that names its fields. Anything else is skipped rather than guessed at.
+  defp decode_conference_row([id, tag | _rest]) when is_integer(id) and is_binary(tag),
+    do: [{id, tag}]
+
+  defp decode_conference_row(%{} = row) do
+    id = Map.get(row, "id")
+    tag = Map.get(row, "tag") || Map.get(row, "name")
+
+    if is_integer(id) and is_binary(tag), do: [{id, tag}], else: []
+  end
+
+  defp decode_conference_row(_row), do: []
 
   # Its mixer is gone, so every call on it is over: each participant's scenario is
   # told, and hangs up on its own (§9.2). Recreating the stale conferences when the
@@ -1096,6 +1558,141 @@ defmodule Kelix.Mod.Mcu do
         # would sit on the MCU forever
         rpc(mcu, "DeleteConference", [conf.conf_id])
         {:error, reason}
+    end
+  end
+
+  # ── update (§8.3.3) ──────────────────────────────────────────────────────────
+
+  # Two kinds of field, and the difference is not cosmetic: `vad`/`rate`/`layout` are
+  # the *mixer's* state and go to the media server now; `name`, `video`,
+  # `max_participants` and `destroy_when_empty` are ours and apply to **new**
+  # participants — renegotiating a live encoder is out of scope (§8.3, L7).
+  defp do_update(state, uid, changes) do
+    with {:ok, conf} <- found(conference(uid)),
+         {:ok, mcu} <- update_target(conf),
+         {:ok, conf, video} <- merged_video(state, conf, changes),
+         {:ok, conf, layout} <- merged_layout(state, conf, changes),
+         :ok <- push_mixer_changes(mcu, conf, changes, layout) do
+      updated = %Conference{
+        conf
+        | name: Map.get(changes, :name, conf.name),
+          vad: Map.get(changes, :vad, conf.vad),
+          rate: Map.get(changes, :rate, conf.rate),
+          video: video,
+          layout: layout,
+          max_participants: Map.get(changes, :max_participants, conf.max_participants),
+          destroy_when_empty: Map.get(changes, :destroy_when_empty, conf.destroy_when_empty)
+      }
+
+      :ets.insert(@conf_table, {uid, updated})
+      changed = changes |> Map.keys() |> Enum.sort()
+      Event.emit(:"conference.updated", uid, %{changed: changed})
+
+      if Map.has_key?(changes, :layout) do
+        Event.emit(:"conference.layout_changed", uid, %{
+          comp: layout.comp,
+          size: layout.size,
+          auto?: layout.auto
+        })
+      end
+
+      {:ok, %{uid: uid, changed: changed}}
+    end
+  end
+
+  # Only a change the mixer must hear about needs the server; a purely local update
+  # (a rename) works on a conference whose MCU is momentarily down.
+  defp update_target(conf) do
+    case mediaserver(conf.mcu) do
+      {:ok, mcu} -> {:ok, mcu}
+      :error -> {:error, :mcu_down}
+    end
+  end
+
+  defp merged_video(_state, conf, changes) do
+    case Args.sub_map(%{"video" => Map.get(changes, :video)}, "video", conf.video, [
+           :size,
+           :fps,
+           :bitrate,
+           :intra_period
+         ]) do
+      {:ok, video} -> {:ok, conf, video}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp merged_layout(_state, conf, changes) do
+    case Args.sub_map(%{"layout" => Map.get(changes, :layout)}, "layout", conf.layout, [
+           :comp,
+           :size,
+           :auto
+         ]) do
+      {:ok, layout} -> {:ok, conf, layout}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp push_mixer_changes(mcu, conf, changes, layout) do
+    vad_rate? = Map.has_key?(changes, :vad) or Map.has_key?(changes, :rate)
+
+    with :ok <- maybe_update_conference(mcu, conf, changes, vad_rate?),
+         :ok <- maybe_set_composition(mcu, conf, changes, layout) do
+      :ok
+    end
+  end
+
+  defp maybe_update_conference(_mcu, _conf, _changes, false), do: :ok
+
+  defp maybe_update_conference(mcu, conf, changes, true) do
+    vad = Map.get(changes, :vad, conf.vad)
+    rate = Map.get(changes, :rate, conf.rate)
+
+    case rpc(mcu, "UpdateConference", [conf.conf_id, vad, rate]) do
+      {:ok, _} -> :ok
+      {:error, _} = err -> err
+    end
+  end
+
+  defp maybe_set_composition(mcu, conf, changes, layout) do
+    if Map.has_key?(changes, :layout) do
+      case rpc(mcu, "SetCompositionType", [
+             conf.conf_id,
+             @default_mosaic,
+             layout.comp,
+             layout.size
+           ]) do
+        {:ok, _} -> :ok
+        {:error, _} = err -> err
+      end
+    else
+      :ok
+    end
+  end
+
+  # ── mute (§8.3.3 participant.update) ─────────────────────────────────────────
+
+  defp do_mute(uid, part_id, muted) do
+    with {:ok, _conf, row} <- find_participant(uid, part_id) do
+      muted
+      |> Enum.reduce_while(:ok, fn {media, muted?}, :ok ->
+        case Adapter.mute(row.conn, media, muted?) do
+          :ok ->
+            Event.emit(:"participant.muted", uid, %{
+              part_id: part_id,
+              media: media,
+              muted: muted?
+            })
+
+            {:cont, :ok}
+
+          {:error, _} = err ->
+            {:halt, err}
+        end
+      end)
+      |> case do
+        :ok -> {:ok, %{part_id: part_id, changed: muted |> Map.keys() |> Enum.sort()}}
+        err -> err
+      end
     end
   end
 

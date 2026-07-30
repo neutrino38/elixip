@@ -39,6 +39,43 @@ defmodule Kelix.ControlTest do
     end
   end
 
+  describe "module status (generic, the core names no module)" do
+    defmodule Reporting do
+      def status(), do: %{conferences: 2, participants: 5}
+    end
+
+    defmodule Quiet do
+      def describe(), do: %{version: "1.0", exports: []}
+    end
+
+    setup do
+      Kelix.ModuleRegistry.register("reporting", Reporting, %{})
+      Kelix.ModuleRegistry.register("quiet", Quiet, %{})
+
+      on_exit(fn ->
+        Kelix.ModuleRegistry.unregister("reporting")
+        Kelix.ModuleRegistry.unregister("quiet")
+      end)
+
+      :ok
+    end
+
+    test "status/0 carries what each module reports, and nothing for the silent ones" do
+      status = Control.status().module_status
+
+      assert status["reporting"] == %{conferences: 2, participants: 5}
+      refute Map.has_key?(status, "quiet")
+    end
+
+    test "kelictl renders one line per reporting module" do
+      {0, text} = Kelix.Control.CLI.run(["status"], node())
+
+      assert text =~ "reporting:"
+      assert text =~ "conferences 2"
+      refute text =~ "quiet:"
+    end
+  end
+
   describe "read + simple verbs" do
     test "status/0 aggregates node + surfaces" do
       s = Control.status()

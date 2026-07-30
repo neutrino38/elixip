@@ -48,6 +48,11 @@ defmodule Kelix.Mod.Mcu.Conference do
             max_participants: 20,
             destroy_when_empty: false,
             created_at: nil,
+            # Set when the MCU holding this conference went away (§9.2): the row and
+            # its DID survive, `conf_id` does not, and the conference is recreated
+            # (same `uid`, new `conf_id`) when the server comes back. Visible in
+            # `show`/`list` so an operator sees why a DID answers 503.
+            stale: false,
             participants: %{}
 
   @doc "Live participants (every row `admit/2` reserved, including the ringing ones)."
@@ -88,6 +93,7 @@ defmodule Kelix.Mod.Mcu.Conference do
       max_participants: conf.max_participants,
       destroy_when_empty: conf.destroy_when_empty,
       created_at: conf.created_at,
+      stale: conf.stale,
       participants: count(conf)
     }
   end

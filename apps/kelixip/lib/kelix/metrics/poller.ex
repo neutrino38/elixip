@@ -46,6 +46,7 @@ defmodule Kelix.Metrics.Poller do
     sample_calls()
     sample_registrations()
     sample_mediaservers()
+    sample_modules()
     :ok
   end
 
@@ -85,6 +86,18 @@ defmodule Kelix.Metrics.Poller do
       for e <- Kelix.MediaPool.status() do
         up = if e.enabled and e.healthy, do: 1, else: 0
         :telemetry.execute([:kelix, :poll, :mcu], %{up: up}, %{mcu: e.name})
+      end
+    end)
+  end
+
+  # Loadable modules with point-in-time state of their own (conferences and their
+  # participants, for the `mcu` module) emit it here rather than each running a timer:
+  # a module that exports `poll_metrics/0` is sampled on our tick, one that does not
+  # is skipped. Generic on purpose — the core names no module.
+  defp sample_modules() do
+    safe(fn ->
+      for {name, _entry} <- Kelix.ModuleRegistry.all() do
+        Kelix.ModuleRegistry.facade(name, :poll_metrics, [], :ok)
       end
     end)
   end

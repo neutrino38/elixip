@@ -86,8 +86,9 @@ defmodule Kelix.Mod.McuTest do
     end
 
     test "the RPC order is CreateConference then SetCompositionType" do
-      # drain the EventQueueCreate the client did at start
-      assert ["EventQueueCreate"] = TestStub.rpc_order()
+      # drain what the channel coming up did: create its event queue, then sweep the
+      # server's orphan conferences (§9.4)
+      assert ["EventQueueCreate", "GetConferences"] = TestStub.rpc_order()
 
       assert {:ok, _} = create()
       assert ["CreateConference", "SetCompositionType"] = TestStub.rpc_order()
@@ -197,10 +198,9 @@ defmodule Kelix.Mod.McuTest do
       assert Mcu.conferences() == []
       assert Mcu.lookup_did(@domain, "8000") == :error
 
-      order = TestStub.rpc_order()
-
-      assert order == [
+      assert TestStub.rpc_order() == [
                "EventQueueCreate",
+               "GetConferences",
                "CreateConference",
                "SetCompositionType",
                "DeleteConference"
@@ -348,15 +348,26 @@ defmodule Kelix.Mod.McuTest do
       assert {:error, :unknown_command} = Mcu.handle_control("conference.explode", %{})
     end
 
-    test "the declared commands match the P1 surface of §8.3.3" do
+    test "the declared commands are the whole surface of §8.3.3" do
       names = Enum.map(Mcu.describe_control(), & &1.name)
 
       assert Enum.sort(names) == [
                "conference.create",
                "conference.delete",
                "conference.list",
-               "conference.show"
+               "conference.show",
+               "conference.update",
+               "participant.delete",
+               "participant.list",
+               "participant.show",
+               "participant.update"
              ]
+
+      # `mute` and `kick` are not verbs of their own: muting is participant.update,
+      # kicking is participant.delete (§8.3.3, the one simplification the resource
+      # shape buys us)
+      refute "mute" in names
+      refute "kick" in names
     end
 
     test "create declares 201 + Location + the error statuses FW-4 derives" do

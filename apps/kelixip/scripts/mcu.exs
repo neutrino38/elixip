@@ -89,10 +89,13 @@ defmodule Kelix.Mcu.Call do
 
     case sip_ctx.lasterr do
       {:media_error, reason} ->
-        # the error response is already out; release the slot and end cleanly
+        # The error response is already out; release the slot and end cleanly. The
+        # code we answered with travels with the reason so the module's call funnel
+        # (§11) can tell a 488 from a 500 — only the script knows which it chose.
+        {code, _text} = media_error(reason)
         media_cleanup_ressources()
-        leave(sip_ctx, :no_media)
-        scenario_success("media refused: #{inspect(reason)}")
+        leave(sip_ctx, {:no_media, code})
+        scenario_success("media refused: #{code} (#{inspect(reason)})")
 
       _ ->
         goto(in_call)

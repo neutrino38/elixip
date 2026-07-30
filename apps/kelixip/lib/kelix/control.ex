@@ -33,8 +33,21 @@ defmodule Kelix.Control do
       listeners: safe(fn -> Kelix.Listener.Supervisor.status() end, []),
       media_pool: safe(fn -> Kelix.MediaPool.status() end, []),
       modules: Map.keys(safe(fn -> Kelix.ModuleRegistry.all() end, %{})),
+      # What each loaded module says about itself right now (conferences and
+      # participants, for the conferencing module). Generic: a module that exports
+      # `status/0` contributes a line, one that does not is simply absent — the core
+      # names no module here.
+      module_status: module_status(),
       domains_version: safe(fn -> Kelix.Domains.current().version end, 0)
     }
+  end
+
+  defp module_status() do
+    for {name, _entry} <- safe(fn -> Kelix.ModuleRegistry.all() end, %{}),
+        summary = Kelix.ModuleRegistry.facade(name, :status, [], nil),
+        is_map(summary),
+        into: %{},
+        do: {name, summary}
   end
 
   @doc """
