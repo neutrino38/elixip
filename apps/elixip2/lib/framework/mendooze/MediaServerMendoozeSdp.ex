@@ -102,6 +102,13 @@ defmodule MediaServer.Mendooze.Sdp do
   as `supported?: false` stubs (G9), carrying only `type`, `port`, `protocol`
   and `raw_fmt` so the answerer can emit a port-0 rejection (RFC 3264 §6).
   `raw_fmt` is the offered format list verbatim, echoed back in that rejection.
+
+  `fmtp` holds the offered `a=fmtp` lines as **parsed** `ExSDP.Attribute.FMTP`
+  structs, keyed by payload type (string). Each consumer picks the parameters it
+  actually honours rather than echoing the line wholesale: for H.264,
+  `profile-level-id` must match for the two ends to decode each other, while
+  `sprop-parameter-sets` describes the *offerer's* encoder and must never be
+  reflected back.
   """
   @type media_desc :: %{
           supported?: true,
@@ -112,6 +119,7 @@ defmodule MediaServer.Mendooze.Sdp do
           raw_fmt: [0..127] | String.t(),
           rtp_map: rtp_map(),
           codecs: [codec_name()],
+          fmtp: %{optional(String.t()) => struct()},
           dtmf_pts: %{optional(non_neg_integer()) => non_neg_integer()},
           rtcp_mux: boolean(),
           direction: :sendrecv | :sendonly | :recvonly | :inactive,
@@ -588,6 +596,7 @@ defmodule MediaServer.Mendooze.Sdp do
       raw_fmt: m.fmt,
       rtp_map: rtp_map,
       codecs: codecs,
+      fmtp: offered_fmtp(attrs),
       dtmf_pts: dtmf_pts,
       rtcp_mux: :rtcp_mux in attrs,
       direction: find_direction(attrs) || find_direction(session_attrs) || :sendrecv,
@@ -598,6 +607,15 @@ defmodule MediaServer.Mendooze.Sdp do
       rtcp_fb: parse_rtcp_fb(attrs),
       candidates: raw_candidates(attrs)
     }
+  end
+
+  # The offered a=fmtp lines, parsed, keyed by payload type. Kept as structs on
+  # purpose: an answerer must choose *which* parameters it reflects (see the
+  # `media_desc` doc), and a raw string invites echoing the ones it must not.
+  defp offered_fmtp(attrs) do
+    for %ExSDP.Attribute.FMTP{pt: pt} = fmtp <- attrs,
+        into: %{},
+        do: {Integer.to_string(pt), fmtp}
   end
 
   defp find_mid(attrs) do

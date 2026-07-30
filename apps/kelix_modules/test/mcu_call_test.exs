@@ -17,7 +17,7 @@ defmodule Kelix.Mod.McuCallTest do
   @domain "example.com"
   @rec_port 52_014
 
-  # A plain-RTP audio offer from a SIP phone, plus a video section it will not get.
+  # A plain-RTP audio offer from a SIP phone.
   @offer """
   v=0\r
   o=- 1 1 IN IP4 192.168.1.50\r
@@ -29,8 +29,23 @@ defmodule Kelix.Mod.McuCallTest do
   a=rtpmap:0 PCMU/8000\r
   a=rtpmap:101 telephone-event/8000\r
   a=sendrecv\r
-  m=video 40002 RTP/AVP 99\r
+  """
+
+  # A video phone: audio + H.264, with the profile every handset states.
+  @offer_video """
+  v=0\r
+  o=- 1 1 IN IP4 192.168.1.50\r
+  s=-\r
+  c=IN IP4 192.168.1.50\r
+  t=0 0\r
+  m=audio 40000 RTP/AVP 8\r
+  a=rtpmap:8 PCMA/8000\r
+  a=sendrecv\r
+  m=video 40002 RTP/AVPF 99\r
+  b=AS:512\r
   a=rtpmap:99 H264/90000\r
+  a=fmtp:99 profile-level-id=42e01f;packetization-mode=1\r
+  a=rtcp-fb:99 nack\r
   a=sendrecv\r
   """
 
@@ -74,10 +89,11 @@ defmodule Kelix.Mod.McuCallTest do
       {:reply, :ok, test}
     end
 
-    # send_BYE goes through the dialog too; acknowledge it and report it
-    def handle_call({:sendreq, req}, _from, test) do
-      send(test, {:sent, Map.get(req, :method)})
-      {:reply, :ok, test}
+    # An in-dialog request we originate (INFO, BYE) reaches the dialog as :newreq.
+    # Reported so a test can read what the script actually put on the wire.
+    def handle_call({:newreq, req}, _from, test) do
+      send(test, {:sent_request, Map.get(req, :method), req})
+      {:reply, {:ok, self()}, test}
     end
 
     def handle_call(msg, _from, test) do
@@ -163,6 +179,17 @@ defmodule Kelix.Mod.McuCallTest do
     }
   end
 
+  # RFC 5168: what a video phone sends when its decoder needs a fresh intra-frame.
+  defp media_control_info() do
+    %{
+      method: :INFO,
+      contenttype: "application/media_control+xml",
+      body:
+        ~s(<?xml version="1.0" encoding="utf-8" ?><media_control><vc_primitive>) <>
+          ~s(<to_encoder><picture_fast_update/></to_encoder></vc_primitive></media_control>)
+    }
+  end
+
   defp spawn_call(scenario, dialog, req) do
     {pid, _ref} =
       SIP.Scenario.Runner.spawn_uas_instance(scenario,
@@ -222,7 +249,7 @@ defmodule Kelix.Mod.McuCallTest do
   # ── the happy path ───────────────────────────────────────────────────────────
 
   describe "a SIP phone joins the conference" do
-    test "180, then a 200 whose SDP answers audio and declines video", ctx do
+    test "180, then a 200 whose SDP answers the offered audio", ctx do
       {_pid, _dialog} = start_call(ctx.scenario, invite(ctx.did))
 
       assert_receive {:replied, 180, "Ringing", _fields, _req}, 2000
@@ -237,8 +264,6 @@ defmodule Kelix.Mod.McuCallTest do
       assert answer =~ "a=rtpmap:8 PCMA/8000"
       assert answer =~ "a=rtpmap:101 telephone-event/8000"
       assert answer =~ "a=fmtp:101 0-16"
-      # rule 2: no video in this increment ⇒ port 0, and the call goes on
-      assert answer =~ "m=video 0 RTP/AVP 99"
       # the mixed participant is sendrecv (rule 7)
       assert answer =~ "a=sendrecv"
     end
@@ -312,6 +337,191 @@ defmodule Kelix.Mod.McuCallTest do
       assert "DeleteParticipant" in teardown
 
       assert wait_for(fn -> participants(ctx.uid) == [] end)
+    end
+  end
+
+  # ── video (P3) ───────────────────────────────────────────────────────────────
+
+  describe "a video phone joins" do
+    test "the answer carries the video plane: port, bandwidth, fmtp and feedback", ctx do
+      {_pid, _dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
+      assert_receive {:replied, 200, _reason, fields, _req}, 2000
+
+      answer = fields[:body]
+      assert answer =~ "m=video #{@rec_port} RTP/AVPF 99"
+      assert answer =~ "a=rtpmap:99 H264/90000"
+      # §6.3 rule 8: min(offered 512, the conference profile's 1024)
+      assert answer =~ "b=AS:512"
+      # H.264 interop: the offered profile is reflected, the offerer's own
+      # sprop-parameter-sets never would be
+      assert answer =~ "a=fmtp:99 profile-level-id=42e01f;packetization-mode=1"
+      # an AVPF offer gets the feedback types advertised back, so its PLI/FIR are legitimate
+      assert answer =~ "a=rtcp-fb:99 nack"
+      refute answer =~ "m=video 0 "
+    end
+
+    test "the video RPCs are the ones §6.2 specifies, in order", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+
+      # answer time: one participant, a receive plane per media, no sending yet
+      assert TestStub.rpc_order() == [
+               "CreateParticipant",
+               "StartReceiving",
+               "StartReceiving",
+               "SetRTPProperties"
+             ]
+
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      ack_time = wait_for(fn -> non_empty(TestStub.rpc_order()) end)
+
+      assert ack_time == [
+               "SetAudioCodec",
+               "StartSending",
+               "SetVideoCodec",
+               "StartSending",
+               "AddSidebarParticipant",
+               "AddMosaicParticipant",
+               "SetCompositionType"
+             ]
+    end
+
+    test "the video RPCs carry the offered profile and the conference's own", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+
+      # §3.4: the H.264 profile the peer asked for is pushed to the encoder, so a
+      # baseline-only handset is not handed a stream it cannot decode
+      assert_receive {:rpc, "SetRTPProperties", [42, 7, 1, props, 0]}, 2000
+      assert props["h264.profile-level-id"] == "42e01f"
+      assert props["useNACK"] == "1"
+
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+
+      # SetVideoCodec carries the conference's inline profile (§5.1) — size, fps,
+      # bitrate, intra period — because every leg is encoded from the same mosaic
+      assert_receive {:rpc, "SetVideoCodec", [42, 7, 99, 6, 15, 1024, 300, %{}, 0]}, 2000
+      assert_receive {:rpc, "AddMosaicParticipant", [42, 0, 7]}, 2000
+    end
+
+    test "a video-less conference declines the video and keeps the audio", ctx do
+      {:ok, %{did: did}} =
+        Mcu.handle_control("conference.create", %{
+          "domain" => @domain,
+          "did" => "8300",
+          "video_codecs" => ["VP8"]
+        })
+
+      {_pid, _dialog} = start_call(ctx.scenario, invite(did, sdp: @offer_video))
+      assert_receive {:replied, 200, _reason, fields, _req}, 2000
+
+      answer = fields[:body]
+      # no common video codec ⇒ port 0, and the call proceeds audio-only (§6.3 rule 2)
+      assert answer =~ "m=video 0 RTP/AVPF 99"
+      assert answer =~ "m=audio #{@rec_port} RTP/AVP"
+    end
+  end
+
+  describe "the automatic layout (§1.1 point 3)" do
+    test "follows the number of video legs, and only moves when it changes", ctx do
+      {pid1, dialog1} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+      send(pid1, {:ACK, %{method: :ACK}, nil, dialog1})
+      # 1 video leg ⇒ 1x1 (comp 0), moving off the configured 2x2
+      assert_receive {:rpc, "SetCompositionType", [42, 0, 0, 6]}, 2000
+
+      {:ok, dialog2} = MockDialog.start_link(self())
+      req2 = invite(ctx.did, sdp: @offer_video)
+      pid2 = spawn_call(ctx.scenario, dialog2, req2)
+      send(pid2, {:INVITE, req2, nil, dialog2})
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+      send(pid2, {:ACK, %{method: :ACK}, nil, dialog2})
+      # 2 video legs ⇒ 1+1 (comp 6): side by side, not a 2x2 with two black tiles
+      assert_receive {:rpc, "SetCompositionType", [42, 0, 6, 6]}, 2000
+
+      {:ok, conf} = Mcu.conference(ctx.uid)
+      assert conf.layout.comp == 6
+
+      # one leaves ⇒ back to 1x1
+      send(pid2, {:BYE, %{method: :BYE}, nil, dialog2})
+      assert_receive {:rpc, "SetCompositionType", [42, 0, 0, 6]}, 2000
+    end
+
+    test "an audio-only conference issues no mosaic RPC at all", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      assert_receive {:rpc, "AddSidebarParticipant", _params}, 2000
+
+      order = wait_for(fn -> non_empty(TestStub.rpc_order()) end) || []
+      refute "SetCompositionType" in order
+      refute "AddMosaicParticipant" in order
+    end
+
+    test "`auto: false` leaves the layout to the operator", ctx do
+      {:ok, %{uid: uid, did: did}} =
+        Mcu.handle_control("conference.create", %{
+          "domain" => @domain,
+          "did" => "8400",
+          "layout" => %{"auto" => false, "comp" => 9}
+        })
+
+      # the creation's own SetCompositionType must not be mistaken for a layout move
+      _create_rpcs = TestStub.rpc_order()
+
+      {pid, dialog} = start_call(ctx.scenario, invite(did, sdp: @offer_video))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      assert_receive {:rpc, "AddMosaicParticipant", _params}, 2000
+
+      order = wait_for(fn -> non_empty(TestStub.rpc_order()) end) || []
+      refute "SetCompositionType" in order
+      assert {:ok, %{layout: %{comp: 9}}} = Mcu.conference(uid)
+    end
+
+    test "the ladder is the smallest layout holding n tiles" do
+      # 1x1, 1+1, 2x2, 1+4, 1+5, 1+7, 3x3, 4x4, 2+8 (§3.6 comp values)
+      assert Enum.map(0..10, &Mcu.auto_comp/1) == [0, 0, 6, 1, 1, 10, 5, 4, 4, 2, 9]
+      assert Mcu.auto_comp(16) == 9
+      assert Mcu.auto_comp(17) == 11
+    end
+  end
+
+  describe "FPU both ways (§6.4)" do
+    test "the MCU asking becomes an INFO carrying picture_fast_update", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      assert_receive {:rpc, "AddMosaicParticipant", _params}, 2000
+
+      [part] = participants(ctx.uid)
+      send(Mcu, {:mcu_event, "mcu1", {:fpu_requested, 42, ctx.uid, part.part_id}})
+
+      assert_receive {:sent_request, :INFO, req}, 2000
+      assert to_string(req.contenttype) =~ "media_control"
+      assert to_string(req.body) =~ "picture_fast_update"
+      assert Process.alive?(pid)
+    end
+
+    test "the peer asking becomes a SendFPU, and any INFO is still answered 200", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      assert_receive {:rpc, "AddMosaicParticipant", _params}, 2000
+      _drain = TestStub.rpc_order()
+
+      send(pid, {:INFO, media_control_info(), nil, dialog})
+      assert_receive {:replied, 200, "OK", _fields, _req}, 2000
+      assert_receive {:rpc, "SendFPU", [42, 7]}, 2000
+
+      # an INFO that is not a frame request is answered, and asks the MCU for nothing
+      send(
+        pid,
+        {:INFO, %{method: :INFO, contenttype: "application/dtmf-relay", body: "1"}, nil, dialog}
+      )
+
+      assert_receive {:replied, 200, "OK", _fields, _req}, 2000
+      refute_receive {:rpc, "SendFPU", _params}, 200
     end
   end
 

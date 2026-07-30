@@ -518,6 +518,9 @@ defmodule Kelix.Mod.Mcu do
           medias: Map.new(medias, fn {media, info} -> {media, Map.get(info, :codec)} end)
         })
 
+        # a leg joining the mosaic changes how many tiles the layout must show
+        follow_auto_layout(conf.uid)
+
         {:reply, :ok, state}
 
       :error ->
@@ -719,6 +722,9 @@ defmodule Kelix.Mod.Mcu do
         # participant, freeing its DID for the next allocation.
         if conf.destroy_when_empty and remaining == %{} do
           destroy(conf, :empty)
+        else
+          # one tile fewer: the automatic layout tightens back up
+          follow_auto_layout(conf.uid)
         end
 
         state
@@ -796,6 +802,66 @@ defmodule Kelix.Mod.Mcu do
         Logger.warning(module: __MODULE__, message: "health for unknown mcu #{inspect(name)}")
         state
     end
+  end
+
+  # ── automatic layout (§1.1 point 3, §6.2 last step) ──────────────────────────
+
+  @doc """
+  The mosaic layout for `n` video participants (`comp` values of §3.6).
+
+  A ladder rather than a formula, because the MCU's layouts are not a grid family:
+  two participants belong side by side (`1+1`), not in a 2x2 with two black tiles,
+  and five fit a `1+4` better than a 3x3. Each step is the smallest layout that
+  holds `n` tiles.
+
+  This is the *policy* half of "an optional automatic layout that follows the
+  participant count"; `auto: false` on a conference means the operator owns it and
+  nothing here fires.
+  """
+  @spec auto_comp(non_neg_integer) :: non_neg_integer
+  def auto_comp(n) when n <= 1, do: 0
+  def auto_comp(2), do: 6
+  def auto_comp(n) when n <= 4, do: 1
+  def auto_comp(5), do: 10
+  def auto_comp(6), do: 5
+  def auto_comp(n) when n <= 8, do: 4
+  def auto_comp(9), do: 2
+  def auto_comp(n) when n <= 16, do: 9
+  def auto_comp(_n), do: 11
+
+  # Re-evaluate the mosaic after a join or a leave. Only conferences that asked for
+  # it move, only when the layout actually changes (an unchanged `comp` would be an
+  # RPC per join for nothing), and only video legs count — an audio-only participant
+  # occupies no tile.
+  #
+  # With no video leg at all the layout is left alone rather than reset to 1x1: an
+  # audio-only conference must issue no mosaic RPC, and the last configured layout is
+  # the right thing to find when video comes back.
+  defp follow_auto_layout(uid) do
+    with {:ok, %Conference{layout: %{auto: true}} = conf} <- conference(uid),
+         tiles when tiles > 0 <- video_participants(conf),
+         comp = auto_comp(tiles),
+         true <- comp != conf.layout.comp,
+         {:ok, mcu} <- mediaserver(conf.mcu),
+         {:ok, _} <-
+           rpc(mcu, "SetCompositionType", [conf.conf_id, @default_mosaic, comp, conf.layout.size]) do
+      layout = %{conf.layout | comp: comp}
+      :ets.insert(@conf_table, {conf.uid, %Conference{conf | layout: layout}})
+
+      Event.emit(:"conference.layout_changed", conf.uid, %{
+        comp: comp,
+        size: conf.layout.size,
+        auto?: true
+      })
+    else
+      _ -> :ok
+    end
+  end
+
+  defp video_participants(conf) do
+    conf
+    |> Conference.participants()
+    |> Enum.count(&(&1.state == :connected and Map.has_key?(&1.medias, :video)))
   end
 
   # Its mixer is gone, so every call on it is over: each participant's scenario is

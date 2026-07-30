@@ -21,8 +21,9 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   Getting that order wrong yields a media server that answers `returnCode: 1` to
   everything and sends no RTP.
 
-  P2 perimeter: audio, plain RTP. `@supported_medias` is what gates it — a video or
-  text section is answered with port 0 rather than half-configured.
+  Perimeter: audio and video over plain RTP. `@supported_medias` is what gates it —
+  a text section is answered with port 0 rather than half-configured, and SDES/DTLS
+  is refused rather than answered in the clear (P4).
   """
   use GenServer
   require Logger
@@ -44,9 +45,9 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   @default_mosaic 0
   @default_sidebar 0
 
-  # Audio only in this increment: video is P3 (mosaic + SetVideoCodec + FPU), text
-  # needs SetTextCodec. Anything else offered is declined with port 0.
-  @supported_medias [:audio]
+  # Audio and video in this increment; text (T.140) needs SetTextCodec and is its
+  # own increment. Anything else offered is declined with port 0.
+  @supported_medias [:audio, :video]
 
   @call_timeout 30_000
 
@@ -122,6 +123,9 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
          part_id: part_id,
          # medias requested by the scenario, capped to what this increment answers
          medias: requested_medias(opts),
+         # the conference's inline video profile as of the answer (§5.1): what the
+         # mixer encodes towards this leg, and the cap on its b=AS:
+         video: conf.video,
          # per media: %{codec:, rec_port:, send: {ip, port}, rtp_map:, dtmf_clock:}
          negotiated: %{},
          receiving: [],
@@ -135,7 +139,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
 
   defp requested_medias(opts) do
     opts
-    |> Keyword.get(:media, :audio)
+    |> Keyword.get(:media, :audio_video)
     |> MediaServer.media_list()
     |> Enum.filter(&(&1 in @supported_medias))
   end
@@ -171,6 +175,9 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     with {:ok, descs} <- parse_offer(sdp),
          :ok <- ensure_insecure(descs),
          {:ok, conf} <- fetch_conference(state.conf_uid),
+         # re-read the profile: it is the conference's value *at answer time* that
+         # this leg keeps for its life (§8.3)
+         state = %{state | video: conf.video},
          {:ok, state, negotiated} <- open_receive_plane(state, conf, descs),
          :ok <- ensure_audio(negotiated) do
       answer =
@@ -291,6 +298,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
       |> put_if(Map.get(desc, :rtcp_mux, false), "rtcp-mux", "1")
       |> put_if(avpf?(desc), "useNACK", "1")
       |> put_if(avpf?(desc), "tmmbr", "1")
+      |> merge_video_props(desc)
 
     if props == %{} do
       :ok
@@ -307,6 +315,21 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
 
   defp put_if(map, true, key, value), do: Map.put(map, key, value)
   defp put_if(map, false, _key, _value), do: map
+
+  # `h264.profile-level-id` is the documented key the MCU takes to target the
+  # profile the peer asked for (§3.4, observed in mcuGold): without it the encoder
+  # runs on its own default and a baseline-only handset gets a stream it cannot
+  # decode — one-way video that looks like a network problem.
+  defp merge_video_props(props, %{type: :video} = desc) do
+    Enum.reduce(Map.get(desc, :fmtp, %{}), props, fn {_pt, fmtp}, acc ->
+      case Map.get(fmtp, :profile_level_id) do
+        plid when is_integer(plid) -> Map.put(acc, "h264.profile-level-id", hex6(plid))
+        _ -> acc
+      end
+    end)
+  end
+
+  defp merge_video_props(props, _desc), do: props
 
   defp avpf?(%{protocol: protocol}), do: String.ends_with?(protocol, "F")
 
@@ -357,8 +380,36 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     end
   end
 
-  # Video needs SetVideoCodec with the conference's inline profile (P3); until then
-  # no video media reaches here (@supported_medias).
+  # Video carries the conference's **inline profile** (§5.1): size, frame rate,
+  # bitrate and intra period are the conference's, not the offer's — every leg is
+  # encoded from the same mixed mosaic, so they cannot be per-participant. The `mode`
+  # argument is the video size constant (§3.6).
+  #
+  # The profile is read at attach time, which is what "an existing participant keeps
+  # its negotiated video profile" means (§8.3): a later `conference.update` moves new
+  # legs, not this one.
+  defp set_codec(state, :video, neg) do
+    case primary_code(:video, neg) do
+      nil ->
+        {:error, :no_common_codec}
+
+      code ->
+        video = state.video
+
+        void_rpc(state, "SetVideoCodec", [
+          state.conf_id,
+          state.part_id,
+          code,
+          video.size,
+          video.fps,
+          video.bitrate,
+          video.intra_period,
+          %{},
+          @role_main
+        ])
+    end
+  end
+
   defp set_codec(_state, media, _neg), do: {:error, {:media_not_supported, media}}
 
   # The Medooze constant of a codec name, read off the shared codec tables (a
@@ -371,20 +422,25 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   end
 
   # Audio joins the default **sidebar** (what the MCU API calls a sidebar is what
-  # mcuGold's UI calls the audio mixer); video would join the default mosaic (P3).
+  # mcuGold's UI calls the audio mixer), video the default mosaic — the only two this
+  # increment drives (decision 6b). Both are per-participant calls, hence here rather
+  # than in the registry; the *layout* of the mosaic is conference-level and stays
+  # with the registry (§4.2).
   defp join_mixer(state) do
-    if :audio in state.sending do
-      case void_rpc(state, "AddSidebarParticipant", [
-             state.conf_id,
-             @default_sidebar,
-             state.part_id
-           ]) do
-        :ok -> {:ok, state}
-        err -> err
+    [
+      {:audio, "AddSidebarParticipant", @default_sidebar},
+      {:video, "AddMosaicParticipant", @default_mosaic}
+    ]
+    |> Enum.reduce_while({:ok, state}, fn {media, method, group}, {:ok, st} ->
+      if media in st.sending do
+        case void_rpc(st, method, [st.conf_id, group, st.part_id]) do
+          :ok -> {:cont, {:ok, st}}
+          err -> {:halt, err}
+        end
+      else
+        {:cont, {:ok, st}}
       end
-    else
-      {:ok, state}
-    end
+    end)
   end
 
   # ── answer building ──────────────────────────────────────────────────────────
@@ -406,22 +462,71 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     }
   end
 
-  defp answer_spec(_state, desc, neg) do
+  defp answer_spec(state, desc, neg) do
+    rtpmaps = Sdp.answer_rtpmaps(desc.type, neg)
+
     %{
       type: desc.type,
       port: neg.rec_port,
       # the offerer's payload-type numbering (§6.3 rule 1)
-      rtpmaps: Sdp.answer_rtpmaps(desc.type, neg),
-      fmtp: dtmf_fmtp(neg),
+      rtpmaps: rtpmaps,
+      fmtp: Map.merge(dtmf_fmtp(neg), codec_fmtp(desc, rtpmaps)),
+      # rule 8: b=AS: on video is min(offered, the conference's profile)
+      bandwidth: answer_bandwidth(state, desc),
       # sendrecv for a mixed participant; a one-way offer is mirrored (rule 7)
       direction: Sdp.reverse_direction(desc.direction),
       # mirror the transport of the offer (rule 4)
       protocol: desc.protocol,
       rtcp_mux: Map.get(desc, :rtcp_mux, false),
+      # an AVPF offer gets the feedback types advertised back per video PT, which is
+      # what makes the peer's PLI/FIR requests legitimate
+      rtcp_fb: desc.type == :video and avpf?(desc),
       crypto: :none,
       ice: nil
     }
   end
+
+  # Only video carries a bandwidth line here: an audio b=AS: would cap the mixer for
+  # no benefit, and the conference profile has no audio bitrate to cap it with.
+  defp answer_bandwidth(state, %{type: :video} = desc),
+    do: Sdp.negotiate_bandwidth(desc.bandwidth, state.video.bitrate)
+
+  defp answer_bandwidth(_state, _desc), do: nil
+
+  # H.264 interop: `profile-level-id` must match for the two ends to decode each
+  # other, so the offered value is reflected (with `packetization-mode` when the offer
+  # states one). Deliberately NOT reflected: `sprop-parameter-sets`, which describes
+  # the offerer's own encoder — sending it back would advertise their SPS/PPS as ours.
+  #
+  # This is the local guesswork limitation L4 in miniature: kelixip decides what the
+  # MCU will encode. §16.3 (P8) makes the server authoritative and deletes it.
+  defp codec_fmtp(desc, rtpmaps) do
+    offered = Map.get(desc, :fmtp, %{})
+
+    for %{pt: pt} <- rtpmaps,
+        entry = Map.get(offered, Integer.to_string(pt)),
+        params = reflected_params(entry),
+        params != "",
+        into: %{},
+        do: {Integer.to_string(pt), params}
+  end
+
+  defp reflected_params(%{profile_level_id: plid} = fmtp) when is_integer(plid) do
+    ["profile-level-id=" <> hex6(plid)]
+    |> then(fn acc ->
+      case Map.get(fmtp, :packetization_mode) do
+        mode when is_integer(mode) -> acc ++ ["packetization-mode=#{mode}"]
+        _ -> acc
+      end
+    end)
+    |> Enum.join(";")
+  end
+
+  defp reflected_params(_fmtp), do: ""
+
+  # profile-level-id is three hex bytes, lower-case, zero-padded (RFC 6184 §8.1)
+  defp hex6(value),
+    do: value |> Integer.to_string(16) |> String.downcase() |> String.pad_leading(6, "0")
 
   # RFC 4733: the telephone-event PT carries the tone range it accepts.
   defp dtmf_fmtp(%{dtmf: true, dtmf_pt: pt}) when is_integer(pt),

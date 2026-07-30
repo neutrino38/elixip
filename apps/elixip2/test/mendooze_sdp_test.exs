@@ -161,6 +161,46 @@ defmodule Mendooze.SdpTest do
       assert audio.crypto == :none
     end
 
+    test "the offered a=fmtp lines are exposed, parsed, keyed by payload type" do
+      sdp_str = """
+      v=0
+      o=- 1 1 IN IP4 172.16.0.1
+      s=call
+      c=IN IP4 172.16.0.1
+      t=0 0
+      m=video 5006 RTP/AVP 99 107
+      a=rtpmap:99 H264/90000
+      a=fmtp:99 profile-level-id=42e01f;packetization-mode=1
+      a=rtpmap:107 VP8/90000
+      """
+
+      assert {:ok, [video]} = Sdp.parse(sdp_str)
+
+      # Structs, not strings: an answerer must reflect `profile-level-id` (both ends
+      # have to agree on it) while never reflecting `sprop-parameter-sets`, which
+      # describes the offerer's own encoder — a raw string invites echoing both.
+      assert %ExSDP.Attribute.FMTP{profile_level_id: 0x42E01F, packetization_mode: 1} =
+               video.fmtp["99"]
+
+      # a codec offered without fmtp simply has no entry
+      refute Map.has_key?(video.fmtp, "107")
+    end
+
+    test "a media with no fmtp at all yields an empty map, not nil" do
+      sdp_str = """
+      v=0
+      o=- 1 1 IN IP4 172.16.0.1
+      s=call
+      c=IN IP4 172.16.0.1
+      t=0 0
+      m=audio 5004 RTP/AVP 8
+      a=rtpmap:8 PCMA/8000
+      """
+
+      assert {:ok, [audio]} = Sdp.parse(sdp_str)
+      assert audio.fmtp == %{}
+    end
+
     test "static payload types are recognized without a=rtpmap lines" do
       sdp_str = """
       v=0

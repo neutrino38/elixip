@@ -18,8 +18,9 @@
 # digest challenge inserts it before the admit call below and points its dial rule at
 # the copy — no module change, no core change.
 #
-# This increment is audio over plain RTP (§14, P2): a video m= line is answered with
-# port 0 by the adapter and the call proceeds audio-only.
+# This increment is audio + video over plain RTP (§14, P2-P3). A media with no codec
+# in common is answered with port 0 and the call proceeds without it; a secure
+# (SDES/DTLS) offer is refused with a 488 until P4.
 defmodule Kelix.Mcu.Call do
   use SIP.Scenario
   use SIP.Session.CallUAS
@@ -77,7 +78,7 @@ defmodule Kelix.Mcu.Call do
     # → adapter set_remote_offer: negotiate, StartReceiving, build the answer. The
     # per-cause mapping matters (§6.5): an unusable offer is a 488 (retrying it is
     # pointless), a media-server failure a 500 (ours, and a retry may work).
-    reply_invite_with_sdp(200, media: :audio, on_media_error: &Kelix.Mcu.Call.media_error/1)
+    reply_invite_with_sdp(200, media: :audio_video, on_media_error: &Kelix.Mcu.Call.media_error/1)
 
     case sip_ctx.lasterr do
       {:media_error, reason} ->
@@ -100,16 +101,28 @@ defmodule Kelix.Mcu.Call do
 
       # Re-INVITE / UPDATE: renegotiate on the same participant.
       {:INVITE, _req, _trans, _dlg} ->
-        reply_invite_with_sdp(200, media: :audio, on_media_error: &Kelix.Mcu.Call.media_error/1)
+        reply_invite_with_sdp(200,
+          media: :audio_video,
+          on_media_error: &Kelix.Mcu.Call.media_error/1
+        )
+
         goto(loop, "re-INVITE")
 
       {:UPDATE, _req, _trans, _dlg} ->
-        reply_invite_with_sdp(200, media: :audio, on_media_error: &Kelix.Mcu.Call.media_error/1)
+        reply_invite_with_sdp(200,
+          media: :audio_video,
+          on_media_error: &Kelix.Mcu.Call.media_error/1
+        )
+
         goto(loop, "UPDATE")
 
+      # An INFO carrying media_control+xml is the peer asking for an intra-frame from
+      # what the mixer sends it (a decoder that lost sync). §6.4: answer 200 either
+      # way — an INFO we do not understand is still a request we must not leave
+      # unanswered — and ask the MCU for the frame when it is that.
       {:INFO, req, _trans, dialog_pid} ->
         reply(dialog_pid, req, 200, "OK", [])
-        goto(loop, "INFO")
+        goto(loop, request_fpu(sip_ctx, req))
 
       {:BYE, req, _trans, dialog_pid} ->
         reply(dialog_pid, req, 200, "OK", [])
@@ -131,8 +144,15 @@ defmodule Kelix.Mcu.Call do
         send_BYE()
         goto(hanging_up, "mcu lost")
 
-      # P3 turns an FPU request into an INFO carrying picture_fast_update; until then
-      # it is swallowed rather than left to rot in the mailbox.
+      # The mixer needs a fresh intra-frame from this leg (a new tile started, or a
+      # decoder lost sync): ask for one the way RFC 5168 has it (§6.4).
+      {:mcu_event, :fpu_requested} ->
+        send_INFO(Kelix.Mcu.Call.picture_fast_update(),
+          contenttype: "application/media_control+xml"
+        )
+
+        goto(loop, "FPU requested")
+
       {:mcu_event, _event} ->
         goto(loop, "mcu event")
 
@@ -231,6 +251,55 @@ defmodule Kelix.Mcu.Call do
     e ->
       Logger.error(module: __MODULE__, message: "attach raised: #{Exception.message(e)}")
       "ACK: attach failed"
+  end
+
+  @doc false
+  # RFC 5168: the one-primitive body every video UA understands as "send me a new
+  # intra-frame now". Kept whole rather than assembled, because this exact wording is
+  # what interoperates.
+  def picture_fast_update() do
+    """
+    <?xml version="1.0" encoding="utf-8" ?>\
+    <media_control><vc_primitive><to_encoder><picture_fast_update/>\
+    </to_encoder></vc_primitive></media_control>
+    """
+  end
+
+  # The other direction: the peer asks, the MCU obliges (`SendFPU`). A non-video
+  # conference or an unknown INFO is not an error — it is simply not a request for a
+  # frame.
+  defp request_fpu(sip_ctx, req) do
+    if media_control?(req) do
+      case Kelix.Mod.Mcu.send_fpu(SIP.Context.appdata_get(sip_ctx, :mcu_part)) do
+        :ok ->
+          "INFO: FPU"
+
+        {:error, reason} ->
+          Logger.warning(module: __MODULE__, message: "SendFPU failed: #{inspect(reason)}")
+          "INFO: FPU failed"
+      end
+    else
+      "INFO"
+    end
+  rescue
+    e ->
+      Logger.warning(module: __MODULE__, message: "SendFPU raised: #{Exception.message(e)}")
+      "INFO"
+  end
+
+  # Content-Type is what identifies it; the body is only checked for the primitive so
+  # a media_control message asking for something else is not taken for an FPU.
+  defp media_control?(req) do
+    String.contains?(to_string(Map.get(req, :contenttype)), "media_control") and
+      String.contains?(body_of(req), "picture_fast_update")
+  end
+
+  defp body_of(req) do
+    case Map.get(req, :body) do
+      body when is_binary(body) -> body
+      [%{data: body} | _] when is_binary(body) -> body
+      _ -> ""
+    end
   end
 
   # Idempotent teardown, called from seven places: `leave/2` tolerates an
