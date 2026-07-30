@@ -133,6 +133,44 @@ defmodule Kelix.Mod.Mcu.Config do
   def mcu(%__MODULE__{mcus: mcus}, name) when is_binary(name),
     do: Enum.find(mcus, &(&1.name == name))
 
+  @doc """
+  Validate a codec list against what the SDP layer can actually emit, and split the
+  audio one's DTMF flag out — the same reading `parse/1` applies to the config block.
+
+  Exported because **a per-conference codec list is exactly as dangerous as a
+  configured one**: `conference.create audio_codecs=["SPEEX"]` would otherwise build a
+  conference whose answer raises inside the SDP builder, one call at a time, which is
+  the failure §8.4 refuses for the config block. One vocabulary, checked wherever
+  codecs enter.
+
+  Returns `{:ok, names, dtmf?}` for audio and `{:ok, names, false}` for the rest.
+  """
+  @spec validate_codecs(:audio | :video | :text, [String.t()] | nil) ::
+          {:ok, [String.t()] | nil, boolean} | {:error, String.t()}
+  def validate_codecs(_kind, nil), do: {:ok, nil, false}
+
+  def validate_codecs(:audio, names) when is_list(names) do
+    {dtmf, codecs} = names |> Enum.map(&upcase/1) |> Enum.split_with(&(&1 == @dtmf_name))
+
+    case Enum.reject(codecs, &(&1 in @audio_codecs)) do
+      [] -> {:ok, codecs, dtmf != []}
+      bad -> {:error, "unknown audio codec(s): #{Enum.join(bad, ", ")}"}
+    end
+  end
+
+  def validate_codecs(kind, names) when is_list(names) do
+    allowed = if kind == :video, do: @video_codecs, else: @text_codecs
+    upcased = Enum.map(names, &upcase/1)
+
+    case Enum.reject(upcased, &(&1 in allowed)) do
+      [] -> {:ok, upcased, false}
+      bad -> {:error, "unknown #{kind} codec(s): #{Enum.join(bad, ", ")}"}
+    end
+  end
+
+  def validate_codecs(kind, other),
+    do: {:error, "#{kind}_codecs must be a list of codec names, got #{inspect(other)}"}
+
   # ── per-key validation ───────────────────────────────────────────────────────
 
   defp reject_unknown_keys(block) do

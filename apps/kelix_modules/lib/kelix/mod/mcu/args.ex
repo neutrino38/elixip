@@ -168,6 +168,10 @@ defmodule Kelix.Mod.Mcu.Args do
         {:ok, default}
 
       map when is_map(map) ->
+        # A script writes `video: %{fps: 25}`, a REST client sends `{"fps": 25}`:
+        # both are the same request, so the keys are levelled before validation
+        # (P5b, §17.2 — one validation, two shapes).
+        map = stringify_keys(map)
         allowed_names = Enum.map(allowed, &Atom.to_string/1)
 
         case Map.keys(map) -- allowed_names do
@@ -179,6 +183,28 @@ defmodule Kelix.Mod.Mcu.Args do
         {:error, "#{key} must be a table, got #{inspect(other)}"}
     end
   end
+
+  @doc """
+  Level a keyword list or an atom-keyed map into the string-keyed map every getter
+  here expects, nested one level (for `video`, `layout`, `muted`).
+
+  This is what lets the facade functions a scenario calls (`create_conference/2` and
+  friends, §17.2) share their validation with the control commands verbatim: the
+  script's `[name: "Weekly", video: %{fps: 25}]` becomes exactly what a REST body
+  decodes to.
+  """
+  @spec stringify_keys(keyword | map) :: t
+  def stringify_keys(opts) when is_list(opts), do: opts |> Map.new() |> stringify_keys()
+
+  def stringify_keys(map) when is_map(map) do
+    Map.new(map, fn {key, value} -> {to_string(key), stringify_value(value)} end)
+  end
+
+  defp stringify_value(value) when is_map(value) do
+    Map.new(value, fn {key, inner} -> {to_string(key), inner} end)
+  end
+
+  defp stringify_value(value), do: value
 
   defp merge_sub_map(map, default, key) do
     Enum.reduce_while(map, {:ok, default}, fn {name, value}, {:ok, acc} ->

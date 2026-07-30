@@ -53,6 +53,20 @@ defmodule Kelix.Mod.Mcu do
   # drives (§1.2, decision 6b).
   @default_mosaic 0
 
+  # ── argument vocabularies, shared by both frontals and the facade (§17.2) ─────
+
+  @create_args ~w(domain name did mcu vad rate audio_codecs video_codecs text_codecs
+                  video layout max_participants destroy_when_empty)
+
+  @update_args ~w(uid name vad rate layout video max_participants destroy_when_empty)
+
+  # Fields a client may read but never send (§8.3.3). Named as read-only rather than
+  # merely unknown: an operator who tries to move `conf_id` or `did` deserves to be
+  # told which of the two it is.
+  @conference_readonly ~w(conf_id created_at participants stale domain did mcu
+                          audio_codecs video_codecs text_codecs)
+  @participant_readonly ~w(name state medias joined_at conn scenario)
+
   # ── Kelix.Module behaviour ───────────────────────────────────────────────────
 
   @impl Kelix.Module
@@ -81,6 +95,13 @@ defmodule Kelix.Mod.Mcu do
     do: %{
       version: "1.0",
       exports: [
+        # conference lifecycle from a scenario (§17, P5b)
+        create_conference: 2,
+        ensure_conference: 3,
+        update_conference: 2,
+        destroy_conference: 2,
+        conferences: 1,
+        # the call path (§8.2)
         admit: 2,
         attach: 1,
         leave: 1,
@@ -205,6 +226,122 @@ defmodule Kelix.Mod.Mcu do
     end
 
     :ok
+  end
+
+  # ── conference lifecycle from a scenario (§17, P5b) ───────────────────────────
+
+  @doc """
+  Create a conference from a scenario (§17.2).
+
+  `opts` is a keyword list with atom keys — `name:`, `did:`, `mcu:`, `vad:`, `rate:`,
+  `audio_codecs:`, `video_codecs:`, `text_codecs:`, `video:`, `layout:`,
+  `max_participants:`, `destroy_when_empty:`, `owner:` — validated by exactly the same
+  code as the REST body of `conference.create`, so the two produce indistinguishable
+  conferences (§17.2).
+
+  ## Ownership
+
+  `owner: :caller` (the default) hands the conference's lifetime to the **calling
+  instance**: when it dies, the conference is destroyed *if it is empty*, and left
+  alone if anyone joined — the creator was merely the first to arrive (§17.3). Without
+  it, a script that dies before anyone joins leaks a conference permanently: the §9.4
+  sweep cannot collect a row our own registry holds.
+
+  It also covers the case where this very call times out. The registry finishes the
+  creation regardless, so `{:error, :timeout}` would otherwise leave a conference
+  nobody knows about; the monitor reaps it when the instance gives up and dies.
+
+  `owner: :none` is the persistent room a script destroys explicitly.
+  """
+  @spec create_conference(String.t(), keyword) ::
+          {:ok, Conference.t()} | {:error, atom | String.t()}
+  def create_conference(domain, opts \\ []) when is_binary(domain) and is_list(opts) do
+    with {:ok, spec, owner} <- create_args(domain, opts),
+         {:ok, conf, _warning} <- lifecycle_call({:create, spec, owner}) do
+      {:ok, conf}
+    end
+  end
+
+  @doc """
+  The conference on `did`, created if there is none — **atomically** (§17.4).
+
+  Returns `{:ok, conference, :created | :existing}`. The atomicity is the point: two
+  INVITEs arriving together on the same unknown DID would otherwise both see "no
+  conference", both create one, and the second caller would meet `:did_in_use` while
+  already ringing. Running the lookup and the creation in the registry process removes
+  that race, which a script cannot fix on its own.
+
+  A conference that already existed is **not** adopted: it outlived nothing of ours,
+  so `owner:` applies only to the `:created` case.
+  """
+  @spec ensure_conference(String.t(), String.t(), keyword) ::
+          {:ok, Conference.t(), :created | :existing} | {:error, atom | String.t()}
+  def ensure_conference(domain, did, opts \\ [])
+      when is_binary(domain) and is_binary(did) and is_list(opts) do
+    with {:ok, spec, owner} <- create_args(domain, Keyword.put(opts, :did, did)),
+         {:ok, conf, origin, _warning} <- lifecycle_call({:ensure, spec, owner}) do
+      {:ok, conf, origin}
+    end
+  end
+
+  @doc """
+  Update a conference from a scenario: the same partial merge as
+  `conference.update` (§8.3.3), with atom keys. Returns the fields that changed.
+  """
+  @spec update_conference(String.t(), keyword) :: {:ok, [atom]} | {:error, atom | String.t()}
+  def update_conference(uid, changes) when is_binary(uid) and is_list(changes) do
+    args = changes |> Args.stringify_keys() |> Map.put("uid", uid)
+
+    with :ok <- Args.reject_readonly(args, @conference_readonly),
+         :ok <- Args.reject_unknown(args, @update_args),
+         {:ok, decoded} <- update_changes(args),
+         {:ok, %{changed: changed}} <- lifecycle_call({:update, uid, decoded}) do
+      {:ok, changed}
+    end
+  end
+
+  @doc """
+  Destroy a conference from a scenario. `force: true` disconnects the participants
+  first (as `conference.delete` does); without it a populated conference is
+  `{:error, :not_empty}`.
+  """
+  @spec destroy_conference(String.t(), keyword) :: :ok | {:error, atom}
+  def destroy_conference(uid, opts \\ []) when is_binary(uid) and is_list(opts) do
+    case lifecycle_call({:delete, uid, Keyword.get(opts, :force, false)}) do
+      {:ok, _report} -> :ok
+      {:error, _} = err -> err
+    end
+  end
+
+  @doc "The conferences of one domain (pure ETS read, for a script that lists)."
+  @spec conferences(String.t()) :: [Conference.t()]
+  def conferences(domain) when is_binary(domain),
+    do: Enum.filter(conferences(), &(&1.domain == domain))
+
+  # Build the spec + the ownership choice from a keyword list, reusing the control
+  # commands' validation verbatim (§17.2). `owner` is deliberately NOT part of the
+  # spec the control path can reach: a REST caller's "instance" is the HTTP request
+  # process, so `owner: :caller` there would destroy the conference the moment the
+  # response was sent.
+  defp create_args(domain, opts) do
+    args = opts |> Args.stringify_keys() |> Map.put("domain", domain)
+    {owner, args} = Map.pop(args, "owner", :caller)
+
+    with :ok <- Args.reject_unknown(args, @create_args),
+         :ok <- valid_owner(owner),
+         {:ok, spec} <- create_spec(args) do
+      {:ok, spec, owner}
+    end
+  end
+
+  defp valid_owner(owner) when owner in [:caller, :none], do: :ok
+  defp valid_owner(other), do: {:error, "owner must be :caller or :none, got #{inspect(other)}"}
+
+  # A lifecycle call can sit behind two MCU round-trips, so it is bounded by the
+  # control timeout rather than the tight facade one — and a script must therefore do
+  # it *before* answering, which is what the ad-hoc reference script does.
+  defp lifecycle_call(request) do
+    Kelix.Module.safe_call(__MODULE__, request, timeout: @control_timeout_ms)
   end
 
   # ── facade used by mcu.exs (§8.2) ─────────────────────────────────────────────
@@ -357,18 +494,6 @@ defmodule Kelix.Mod.Mcu do
 
   # ── control surface (§8.3.3) ─────────────────────────────────────────────────
 
-  @create_args ~w(domain name did mcu vad rate audio_codecs video_codecs text_codecs
-                  video layout max_participants destroy_when_empty)
-
-  @update_args ~w(uid name vad rate layout video max_participants destroy_when_empty)
-
-  # Fields a client may read but never send (§8.3.3). Named as read-only rather than
-  # merely unknown: an operator who tries to move `conf_id` or `did` deserves to be
-  # told which of the two it is.
-  @conference_readonly ~w(conf_id created_at participants stale domain did mcu
-                          audio_codecs video_codecs text_codecs)
-  @participant_readonly ~w(name state medias joined_at conn scenario)
-
   @impl Kelix.Module
   def describe_control() do
     [
@@ -497,8 +622,11 @@ defmodule Kelix.Mod.Mcu do
 
   defp do_control("conference.create", args) do
     with :ok <- Args.reject_unknown(args, @create_args),
-         {:ok, spec} <- create_spec(args) do
-      call({:create, spec})
+         {:ok, spec} <- create_spec(args),
+         # `owner: :none`: a REST caller has no instance to own the conference — its
+         # "caller" is the HTTP request process, which dies as the response is sent
+         {:ok, conf, warning} <- call({:create, spec, :none}) do
+      {:ok, create_reply(conf, warning)}
     end
   end
 
@@ -592,6 +720,13 @@ defmodule Kelix.Mod.Mcu do
 
   defp found({:ok, value}), do: {:ok, value}
   defp found(:error), do: {:error, :not_found}
+
+  # What a REST/CLI client gets back: the handle, the DID it must dial, and the
+  # dial-plan warning when the two can no longer meet (§6.1).
+  defp create_reply(conf, warning) do
+    reply = %{uid: conf.uid, did: conf.did, conf_id: conf.conf_id, mcu: conf.mcu}
+    if warning, do: Map.put(reply, :warning, warning), else: reply
+  end
 
   # A path param arrives as a string, a CLI `part_id=7` token as an integer.
   defp part_id(args) do
@@ -733,9 +868,11 @@ defmodule Kelix.Mod.Mcu do
          {:ok, mcu} <- Args.string(args, "mcu"),
          {:ok, vad} <- Args.int(args, "vad", nil, [0, 1, 2]),
          {:ok, rate} <- Args.int(args, "rate", nil, [8000, 16_000, 32_000, 48_000]),
-         {:ok, audio} <- Args.codec_list(args, "audio_codecs", nil),
-         {:ok, video_codecs} <- Args.codec_list(args, "video_codecs", nil),
-         {:ok, text_codecs} <- Args.codec_list(args, "text_codecs", nil),
+         # the codec vocabulary is the config's, checked here too: a per-conference
+         # list is exactly as dangerous as a configured one (Config.validate_codecs/2)
+         {:ok, audio, dtmf} <- Config.validate_codecs(:audio, Map.get(args, "audio_codecs")),
+         {:ok, video_codecs, _} <- Config.validate_codecs(:video, Map.get(args, "video_codecs")),
+         {:ok, text_codecs, _} <- Config.validate_codecs(:text, Map.get(args, "text_codecs")),
          {:ok, max_participants} <- Args.int(args, "max_participants", nil),
          {:ok, destroy_when_empty} <- Args.bool(args, "destroy_when_empty", nil) do
       {:ok,
@@ -747,6 +884,9 @@ defmodule Kelix.Mod.Mcu do
          vad: vad,
          rate: rate,
          audio_codecs: audio,
+         # an explicit audio list decides this conference's DTMF too, exactly as the
+         # config block's does (TELEPHONE-EVENT is a flag, not a mixer codec)
+         dtmf: if(is_nil(audio), do: nil, else: dtmf),
          video_codecs: video_codecs,
          text_codecs: text_codecs,
          # `video` and `layout` are merged over the configured defaults, which are
@@ -802,17 +942,52 @@ defmodule Kelix.Mod.Mcu do
        config: config,
        module_name: Keyword.get(opts, :module_name, "mcu"),
        # monitor_ref => {conference uid, participant ref}: the crash reaper of §9.3
-       monitors: %{}
+       monitors: %{},
+       # monitor_ref => conference uid: the creator of a script-made conference
+       # (§17.3). Separate from `monitors` because the verdict differs — a dead
+       # creator only takes an *empty* conference with it.
+       conf_monitors: %{}
      }}
   end
 
   @impl true
-  def handle_call({:create, spec}, _from, state) do
-    {:reply, do_create(state, spec), state}
+  # `from` is the creating instance: with `owner: :caller` its death reaps an empty
+  # conference (§17.3), the same way a participant's scenario reaps its row (§9.3).
+  def handle_call({:create, spec, owner}, {caller, _tag}, state) do
+    case do_create(state, spec) do
+      {:ok, conf, warning} ->
+        {:reply, {:ok, conf, warning}, own_conference(state, conf.uid, owner, caller)}
+
+      {:error, _} = err ->
+        {:reply, err, state}
+    end
+  end
+
+  # Atomic get-or-create (§17.4): the lookup and the creation happen in the same
+  # message, so two INVITEs on the same unknown DID cannot both create one.
+  def handle_call({:ensure, spec, owner}, {caller, _tag}, state) do
+    case lookup_did(spec.domain, spec.did) do
+      {:ok, conf} ->
+        # it existed before us: not ours to own, and nothing to warn about
+        {:reply, {:ok, conf, :existing, nil}, state}
+
+      :error ->
+        case do_create(state, spec) do
+          {:ok, conf, warning} ->
+            {:reply, {:ok, conf, :created, warning},
+             own_conference(state, conf.uid, owner, caller)}
+
+          {:error, _} = err ->
+            {:reply, err, state}
+        end
+    end
   end
 
   def handle_call({:delete, uid, force}, _from, state) do
-    {:reply, do_delete(state, uid, force), state}
+    case do_delete(state, uid, force) do
+      {{:ok, _report} = reply, state} -> {:reply, reply, state}
+      {:error, _} = err -> {:reply, err, state}
+    end
   end
 
   def handle_call({:update, uid, changes}, _from, state) do
@@ -913,6 +1088,15 @@ defmodule Kelix.Mod.Mcu do
   # This is the safety net that makes "participant lifetime = adapter connection
   # lifetime" true even for a `kill` (§9.3).
   def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
+    case Map.pop(state.conf_monitors, ref) do
+      {nil, _} -> participant_down(ref, state)
+      {uid, monitors} -> {:noreply, creator_gone(%{state | conf_monitors: monitors}, uid)}
+    end
+  end
+
+  def handle_info(_msg, state), do: {:noreply, state}
+
+  defp participant_down(ref, state) do
     case Map.pop(state.monitors, ref) do
       {nil, _} ->
         {:noreply, state}
@@ -930,8 +1114,6 @@ defmodule Kelix.Mod.Mcu do
         {:noreply, do_leave(state, conf_uid, part_ref, :crash)}
     end
   end
-
-  def handle_info(_msg, state), do: {:noreply, state}
 
   # ── admit / join / leave ─────────────────────────────────────────────────────
 
@@ -968,6 +1150,57 @@ defmodule Kelix.Mod.Mcu do
 
         Emit.mcu_call(sip_code(reason))
         {{:error, reason}, state}
+    end
+  end
+
+  # ── conference ownership (§17.3) ──────────────────────────────────────────────
+
+  # `owner: :caller` monitors the creating instance. Same mechanism as the
+  # participant reaper, a separate map because the verdict differs: a dead
+  # participant is always removed, a dead creator only takes an **empty** conference
+  # with it.
+  defp own_conference(state, _uid, :none, _caller), do: state
+
+  defp own_conference(state, uid, :caller, caller) when is_pid(caller) do
+    ref = Process.monitor(caller)
+    %{state | conf_monitors: Map.put(state.conf_monitors, ref, uid)}
+  end
+
+  defp own_conference(state, _uid, _owner, _caller), do: state
+
+  # The creating instance is gone. An empty conference goes with it; a populated one
+  # stays, because the creator was only the first to arrive and tearing a live mix
+  # down because one leg hung up would be absurd.
+  defp creator_gone(state, uid) do
+    case conference(uid) do
+      {:ok, conf} ->
+        if Conference.count(conf) == 0 do
+          destroy(state, conf, :creator_gone)
+        else
+          Logger.debug(
+            module: __MODULE__,
+            message:
+              "conference #{uid}: creator gone but #{Conference.count(conf)} participant(s) " <>
+                "remain; keeping it"
+          )
+
+          state
+        end
+
+      :error ->
+        state
+    end
+  end
+
+  # Stop watching a conference's creator (it is being destroyed by another path).
+  defp disown_conference(state, uid) do
+    case Enum.find(state.conf_monitors, fn {_ref, owned} -> owned == uid end) do
+      {ref, _uid} ->
+        Process.demonitor(ref, [:flush])
+        %{state | conf_monitors: Map.delete(state.conf_monitors, ref)}
+
+      nil ->
+        state
     end
   end
 
@@ -1081,13 +1314,12 @@ defmodule Kelix.Mod.Mcu do
         # §8.3.3 / §5.1: an auto-destroying conference goes away with its last
         # participant, freeing its DID for the next allocation.
         if conf.destroy_when_empty and remaining == %{} do
-          destroy(conf, :empty)
+          destroy(state, conf, :empty)
         else
           # one tile fewer: the automatic layout tightens back up
           follow_auto_layout(conf.uid)
+          state
         end
-
-        state
     end
   end
 
@@ -1448,15 +1680,11 @@ defmodule Kelix.Mod.Mcu do
         allocated_did?: allocated?
       })
 
-      reply = %{uid: conf.uid, did: conf.did, conf_id: conf.conf_id, mcu: conf.mcu}
-
       # The module allocates DIDs; it does not edit domains.toml (§15, consequence
       # of decision 2). A DID no dial rule matches is a conference nobody can dial,
-      # so the drift is reported rather than left silent.
-      case dial_plan_warning(conf) do
-        nil -> {:ok, reply}
-        warning -> {:ok, Map.put(reply, :warning, warning)}
-      end
+      # so the drift is reported rather than left silent. The conference itself is
+      # returned, so a script gets the object and a REST client its rendering.
+      {:ok, conf, dial_plan_warning(conf)}
     end
   end
 
@@ -1548,7 +1776,7 @@ defmodule Kelix.Mod.Mcu do
            video: spec.video_codecs || config.video_codecs,
            text: spec.text_codecs || config.text_codecs
          },
-         dtmf: config.dtmf,
+         dtmf: if(is_nil(spec.dtmf), do: config.dtmf, else: spec.dtmf),
          video: video,
          layout: layout,
          max_participants: spec.max_participants || config.max_participants,
@@ -1741,8 +1969,8 @@ defmodule Kelix.Mod.Mcu do
 
         true ->
           disconnected = disconnect_participants(state, conf)
-          destroy(conf, if(force and disconnected > 0, do: :api_force, else: :api))
-          {:ok, %{uid: uid, disconnected: disconnected}}
+          reason = if force and disconnected > 0, do: :api_force, else: :api
+          {{:ok, %{uid: uid, disconnected: disconnected}}, destroy(state, conf, reason)}
       end
     end
   end
@@ -1764,10 +1992,11 @@ defmodule Kelix.Mod.Mcu do
     end)
   end
 
-  @doc false
   # Drop a conference: MCU side first (that is the resource that leaks), then the
-  # local rows. Emitted exactly once, before the row is dropped (§11.1).
-  def destroy(%Conference{} = conf, reason) do
+  # local rows, then the creator's monitor — a conference destroyed by any other path
+  # must stop being watched, or its creator's later death would look for a row that
+  # is no longer there (§17.3). Returns the state, since that monitor lives in it.
+  defp destroy(state, %Conference{} = conf, reason) do
     Event.emit(:"conference.destroyed", conf.uid, %{
       reason: reason,
       participants_at_end: Conference.count(conf)
@@ -1780,7 +2009,7 @@ defmodule Kelix.Mod.Mcu do
 
     :ets.delete(@did_table, {conf.domain, conf.did})
     :ets.delete(@conf_table, conf.uid)
-    :ok
+    disown_conference(state, conf.uid)
   end
 
   # ── RPC helpers ──────────────────────────────────────────────────────────────

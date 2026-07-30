@@ -1567,6 +1567,7 @@ what P6 ships is documented rather than merely installed.
 | §10 (FW-1) | "must merge extra options from the context" | landed as `SIP.Session.Media.extra_conn_opts/1`; **`on_media_error` also accepts a per-cause function**, which §6.5's table needs to be achievable at all — not in the FW list today |
 | §10 | FW-4 as a decided change | landed, with `Kelix.Control.Route` as the resolver; the `calls` path of the router had to be *registered* too (`SIP.Session.Call`), which the design assumed was already there |
 | §9.4 | "every conference whose `tag` is not in our registry is deleted" | keyed on the MCU-side **id**, for the truncation reason above |
+| §8.3.3 / §8.4 | the codec vocabulary is validated for the **config block** | it is validated wherever codecs enter, including `conference.create`'s own `audio_codecs`: found while writing P5b's tests, where `audio_codecs: ["SPEEX"]` was accepted and would have raised inside the SDP builder at answer time — the very failure §8.4 refuses for the config. `Config.validate_codecs/2` is now the single vocabulary, and an explicit audio list decides that conference's DTMF the way the block's does |
 | §1.1 point 3 | "an optional automatic layout that follows the participant count" | the ladder is `auto_comp/1`; only video legs count, and an audio-only conference issues no mosaic RPC |
 | §11 | the metric table | landed, plus the generic core seams that carry it (`poll_metrics/0`, `status/0` per module) |
 | §14 | phases | P0′-P5 done; P5b/P5c added |
