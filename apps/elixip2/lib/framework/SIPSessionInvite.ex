@@ -411,8 +411,18 @@ defmodule SIP.Session.CallUAS do
   Backs the `reply_invite_with_sdp` macro. Extracts the remote offer from the
   stored request, feeds it to the media server (`SIP.Session.Media.get_sdp_answer/3`),
   and replies with the returned answer plus a local Contact. On media failure,
-  replies `500 Media Server Error` (overridable via `on_media_error: {code,
-  reason}`) and sets `lasterr` to `{:media_error, reason}`.
+  replies `500 Media Server Error` and sets `lasterr` to `{:media_error, reason}`.
+
+  `on_media_error` overrides that response, as either
+
+    * `{code, reason}` — one answer for every failure, or
+    * a `(reason -> {code, reason})` function — an answer **per cause**.
+
+  The function form exists because the causes are not equivalent to the caller: "no
+  codec in common" is a `488 Not Acceptable Here` (the offer is unusable and
+  retrying it is pointless) while a media-server RPC failure is a `500` (our
+  problem, and a retry may well work). Collapsing the two into one code tells the
+  peer the wrong thing about what to do next.
   """
   def do_reply_invite_with_sdp(sip_ctx = %SIP.Context{}, code, opts)
       when code in [183, 200] and is_list(opts) do
@@ -430,7 +440,7 @@ defmodule SIP.Session.CallUAS do
         SIP.Context.set(sip_ctx, :lasterr, reply_lasterr(rc))
 
       {sip_ctx, {:error, reason}} ->
-        {ecode, ereason} = Keyword.get(opts, :on_media_error, {500, "Media Server Error"})
+        {ecode, ereason} = media_error_response(opts, reason)
 
         Logger.warning(
           dialogpid: sip_ctx.dialogpid,
@@ -450,6 +460,33 @@ defmodule SIP.Session.CallUAS do
 
   def do_reply_invite_with_sdp(_sip_ctx, code, _opts) do
     raise "reply_invite_with_sdp: unsupported code #{inspect(code)} (only 183 and 200)"
+  end
+
+  # `on_media_error` as a per-cause function, a fixed pair, or the default 500. A
+  # function returning something unusable falls back to the default rather than
+  # raising: we are already on the failure path, and the caller must still get a
+  # response.
+  defp media_error_response(opts, reason) do
+    case Keyword.get(opts, :on_media_error, {500, "Media Server Error"}) do
+      fun when is_function(fun, 1) ->
+        case fun.(reason) do
+          {code, text} when is_integer(code) and is_binary(text) ->
+            {code, text}
+
+          other ->
+            Logger.error(
+              module: __MODULE__,
+              message:
+                "on_media_error/1 returned #{inspect(other)}; expected {code, reason}. " <>
+                  "Answering 500."
+            )
+
+            {500, "Media Server Error"}
+        end
+
+      {code, text} ->
+        {code, text}
+    end
   end
 
   @doc """

@@ -32,7 +32,7 @@ defmodule Kelix.Mod.Mcu do
   @behaviour Kelix.Module
   require Logger
 
-  alias Kelix.Mod.Mcu.{Args, Client, Conference, Config, Event}
+  alias Kelix.Mod.Mcu.{Adapter, Args, Client, Conference, Config, Event}
   alias Kelix.Mod.Mcu.Supervisor, as: McuSupervisor
 
   @conf_table :kelix_mcu_conferences
@@ -42,6 +42,11 @@ defmodule Kelix.Mod.Mcu do
   # A control command may sit behind two MCU round-trips (CreateConference +
   # SetCompositionType); the RPCs are themselves bounded by xmlrpc_timeout_ms.
   @control_timeout_ms 30_000
+
+  # The facade calls a scenario instance makes hold no RPC — they only read or
+  # update a row — so they are bounded tightly: a wedged registry must answer the
+  # INVITE (with a 500) rather than let the caller retransmit into the void.
+  @facade_timeout_ms 5_000
 
   # The default mosaic and the default sidebar are the only ones this increment
   # drives (§1.2, decision 6b).
@@ -74,7 +79,17 @@ defmodule Kelix.Mod.Mcu do
   def describe(),
     do: %{
       version: "1.0",
-      exports: [lookup_did: 2, conference: 1, mediaserver: 1]
+      exports: [
+        admit: 2,
+        attach: 1,
+        leave: 1,
+        leave: 2,
+        send_fpu: 1,
+        lookup_did: 2,
+        conference: 1,
+        mediaserver: 1,
+        media_config: 1
+      ]
     }
 
   # ── reads (ETS, no GenServer hop) ─────────────────────────────────────────────
@@ -141,6 +156,120 @@ defmodule Kelix.Mod.Mcu do
           [] -> :error
         end
     end
+  end
+
+  # ── facade used by mcu.exs (§8.2) ─────────────────────────────────────────────
+
+  @doc """
+  Admit an inbound INVITE into the conference its R-URI user-part designates:
+  DID lookup, quota reservation and participant row, atomically (§8.2).
+
+  Returns `{:ok, conference, participant}` — the participant being the handle the
+  script passes back to `attach/1` and `leave/1` — or `{:error, :no_such_conference
+  | :full | :mcu_down}`, which the script maps onto `404` / `486` / `503` (§6.5).
+
+  It deliberately does **not** talk to the media server: the MCU-side participant is
+  created by the adapter inside `create_peer_connection/3`, so its lifetime is
+  exactly the adapter connection's and a crash cannot orphan it. What is reserved
+  here is the *slot*.
+  """
+  @spec admit(String.t(), map) ::
+          {:ok, Conference.t(), Conference.participant()}
+          | {:error, :no_such_conference | :full | :mcu_down | :down | :timeout}
+  def admit(domain, req) when is_binary(domain) and is_map(req),
+    do: Kelix.Module.safe_call(__MODULE__, {:admit, domain, req}, timeout: @facade_timeout_ms)
+
+  @doc """
+  ACK-time: start sending, join the audio mixer, and mark the participant joined
+  (§6.2, second half).
+
+  The RPCs run **from the calling scenario**, not inside the registry: a conference
+  filling up must not serialise its joins behind one process. Only the row update is
+  serialised, which is all that needs to be.
+  """
+  @spec attach(Conference.participant()) :: :ok | {:error, term}
+  def attach(part) when is_map(part) do
+    with {:ok, row} <- participant(part),
+         {:ok, medias} <- Adapter.attach(row.conn) do
+      Kelix.Module.safe_call(__MODULE__, {:joined, part.conf_uid, part.ref, medias},
+        timeout: @facade_timeout_ms
+      )
+    else
+      :error -> {:error, :no_such_participant}
+      {:error, _} = err -> err
+    end
+  end
+
+  @doc """
+  Remove a participant: tear the MCU side down, release the slot, and emit
+  `participant.left` **exactly once** (§11.1 invariant 1).
+
+  Idempotent by contract — the reference script calls it from five places, and the
+  crash reaper (§9.3) from a sixth.
+  """
+  @spec leave(Conference.participant(), atom) :: :ok
+  def leave(part, reason \\ :bye)
+
+  def leave(part, reason) when is_map(part) do
+    # close the adapter connection first: it owns the MCU-side participant
+    case participant(part) do
+      {:ok, row} -> Adapter.close(row.conn)
+      :error -> :ok
+    end
+
+    case Kelix.Module.safe_call(__MODULE__, {:left, part.conf_uid, part.ref, reason},
+           timeout: @facade_timeout_ms
+         ) do
+      :ok -> :ok
+      # a down or wedged registry must not turn a teardown into a raised error
+      {:error, _} -> :ok
+    end
+  end
+
+  def leave(_part, _reason), do: :ok
+
+  @doc "Ask the MCU for a full intra-frame from that participant (`SendFPU`)."
+  @spec send_fpu(Conference.participant()) :: :ok | {:error, term}
+  def send_fpu(part) when is_map(part) do
+    case participant(part) do
+      {:ok, row} -> Adapter.send_fpu(row.conn)
+      :error -> {:error, :no_such_participant}
+    end
+  end
+
+  @doc """
+  The media configuration a leg of `conference` must connect to, ready to be stored
+  in the context appdata as `:mediaserver_instance`.
+
+  A conference is **pinned** to its MCU (§1.3), so the leg cannot take whatever the
+  media pool would hand out: it must reach the server holding the mixer.
+  """
+  @spec media_config(Conference.t()) :: keyword
+  def media_config(%Conference{mcu: mcu}), do: [module: Adapter, url: "mcu://" <> mcu]
+
+  @doc "The live row of `part` (it carries the MCU-side id and the adapter connection)."
+  @spec participant(Conference.participant()) :: {:ok, Conference.participant()} | :error
+  def participant(%{conf_uid: uid, ref: ref}) do
+    with {:ok, conf} <- conference(uid) do
+      case Map.fetch(conf.participants, ref) do
+        {:ok, row} -> {:ok, row}
+        :error -> :error
+      end
+    end
+  end
+
+  def participant(_part), do: :error
+
+  @doc false
+  # Called by the adapter connection once the MCU-side participant exists, so the
+  # registry can report it and reach it (mute, FPU, stats, reaping).
+  @spec bind_participant(String.t(), reference, non_neg_integer, pid) :: :ok
+  def bind_participant(conf_uid, ref, part_id, conn) do
+    Kelix.Module.safe_call(__MODULE__, {:bind, conf_uid, ref, part_id, conn},
+      timeout: @facade_timeout_ms
+    )
+
+    :ok
   end
 
   # ── control surface (§8.3.3) ─────────────────────────────────────────────────
@@ -343,7 +472,13 @@ defmodule Kelix.Mod.Mcu do
           "(#{Enum.map_join(config.mcus, ", ", & &1.name)})"
     )
 
-    {:ok, %{config: config, module_name: Keyword.get(opts, :module_name, "mcu")}}
+    {:ok,
+     %{
+       config: config,
+       module_name: Keyword.get(opts, :module_name, "mcu"),
+       # monitor_ref => {conference uid, participant ref}: the crash reaper of §9.3
+       monitors: %{}
+     }}
   end
 
   @impl true
@@ -357,6 +492,42 @@ defmodule Kelix.Mod.Mcu do
 
   # the configured defaults, for the phases that build on them
   def handle_call(:config, _from, state), do: {:reply, state.config, state}
+
+  # `from` is the scenario instance: it is the process whose death must reap the
+  # participant (§9.3), so it is recorded as the row's owner.
+  def handle_call({:admit, domain, req}, {scenario, _tag}, state) do
+    {result, state} = do_admit(state, domain, req, scenario)
+    {:reply, result, state}
+  end
+
+  def handle_call({:bind, conf_uid, ref, part_id, conn}, _from, state) do
+    update_participant(conf_uid, ref, &%{&1 | part_id: part_id, conn: conn})
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:joined, conf_uid, ref, medias}, _from, state) do
+    case fetch_row(conf_uid, ref) do
+      {:ok, conf, row} ->
+        update_participant(conf_uid, ref, fn part ->
+          %{part | state: :connected, medias: medias, joined_at: DateTime.utc_now()}
+        end)
+
+        Event.emit(:"participant.joined", conf.uid, %{
+          part_id: row.part_id,
+          name: row.name,
+          medias: Map.new(medias, fn {media, info} -> {media, Map.get(info, :codec)} end)
+        })
+
+        {:reply, :ok, state}
+
+      :error ->
+        {:reply, {:error, :no_such_participant}, state}
+    end
+  end
+
+  def handle_call({:left, conf_uid, ref, reason}, _from, state) do
+    {:reply, :ok, do_leave(state, conf_uid, ref, reason)}
+  end
 
   @impl true
   # A client announcing itself (at start and on every health transition). This is
@@ -380,7 +551,216 @@ defmodule Kelix.Mod.Mcu do
     {:noreply, state}
   end
 
+  # A participant's scenario died without a clean `leave/1`: run the same teardown.
+  # This is the safety net that makes "participant lifetime = adapter connection
+  # lifetime" true even for a `kill` (§9.3).
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
+    case Map.pop(state.monitors, ref) do
+      {nil, _} ->
+        {:noreply, state}
+
+      {{conf_uid, part_ref}, monitors} ->
+        state = %{state | monitors: monitors}
+
+        # the connection usually died with its scenario; when it did not, closing it
+        # is what frees the MCU-side participant
+        case fetch_row(conf_uid, part_ref) do
+          {:ok, _conf, row} -> Adapter.close(row.conn)
+          :error -> :ok
+        end
+
+        {:noreply, do_leave(state, conf_uid, part_ref, :crash)}
+    end
+  end
+
   def handle_info(_msg, state), do: {:noreply, state}
+
+  # ── admit / join / leave ─────────────────────────────────────────────────────
+
+  defp do_admit(state, domain, req, scenario) do
+    did = ruri_user(req)
+
+    with {:ok, conf} <- did_or_reject(domain, did),
+         :ok <- mcu_up(conf),
+         :ok <- room_left(conf) do
+      part = new_participant(conf, req, scenario)
+
+      :ets.insert(
+        @conf_table,
+        {conf.uid, %Conference{conf | participants: Map.put(conf.participants, part.ref, part)}}
+      )
+
+      Event.emit(:"participant.ringing", conf.uid, %{
+        name: part.name,
+        from: part.from,
+        did: conf.did
+      })
+
+      {{:ok, conf, part}, monitor_scenario(state, conf.uid, part)}
+    else
+      {:error, reason} ->
+        # §11.1 invariant 2: a rejected call never emits participant.ringing, so a
+        # UI can read `ringing − joined` as "abandoned before answer"
+        Event.emit(:"participant.rejected", nil, %{
+          domain: domain,
+          did: did,
+          reason: reason,
+          sip_code: sip_code(reason)
+        })
+
+        {{:error, reason}, state}
+    end
+  end
+
+  # The scenario instance owns the participant: its death is what triggers the
+  # reaper (§9.3), so the row is only safe to hand out once it is monitored.
+  defp monitor_scenario(state, conf_uid, part) do
+    if is_pid(part.scenario) do
+      ref = Process.monitor(part.scenario)
+      %{state | monitors: Map.put(state.monitors, ref, {conf_uid, part.ref})}
+    else
+      state
+    end
+  end
+
+  defp did_or_reject(_domain, nil), do: {:error, :no_such_conference}
+
+  defp did_or_reject(domain, did) do
+    case lookup_did(domain, did) do
+      {:ok, conf} -> {:ok, conf}
+      :error -> {:error, :no_such_conference}
+    end
+  end
+
+  defp mcu_up(conf) do
+    case mediaserver(conf.mcu) do
+      {:ok, %{status: :up, client: client}} when is_pid(client) -> :ok
+      _ -> {:error, :mcu_down}
+    end
+  end
+
+  defp room_left(conf), do: if(Conference.full?(conf), do: {:error, :full}, else: :ok)
+
+  defp sip_code(:no_such_conference), do: 404
+  defp sip_code(:full), do: 486
+  defp sip_code(:mcu_down), do: 503
+  defp sip_code(_reason), do: 500
+
+  defp new_participant(conf, req, scenario) do
+    %{
+      ref: make_ref(),
+      part_id: nil,
+      conf_uid: conf.uid,
+      name: participant_name(req),
+      from: from_string(req),
+      scenario: scenario,
+      conn: nil,
+      state: :ringing,
+      medias: %{},
+      admitted_at: DateTime.utc_now(),
+      joined_at: nil
+    }
+  end
+
+  # `CreateParticipant`'s name must not contain a dot — mcuGold replaces it with
+  # `_`, and so do we (§3.3).
+  defp participant_name(req) do
+    (from_string(req) || "unknown")
+    |> String.replace(".", "_")
+  end
+
+  defp from_string(req) do
+    case uri_of(Map.get(req, :from)) do
+      %SIP.Uri{userpart: user, domain: domain} when is_binary(user) -> "#{user}@#{domain}"
+      _ -> nil
+    end
+  end
+
+  defp uri_of(%SIP.Uri{} = uri), do: uri
+
+  defp uri_of(header) when is_binary(header) do
+    case SIP.Uri.parse(header) do
+      {:ok, uri} -> uri
+      _ -> nil
+    end
+  end
+
+  defp uri_of(_other), do: nil
+
+  defp ruri_user(req) do
+    case Map.get(req, :ruri) do
+      %SIP.Uri{userpart: user} when is_binary(user) and user != "" -> user
+      _ -> nil
+    end
+  end
+
+  # Emitted exactly once per participant, whatever the teardown path: the row is the
+  # token, and it is removed here (§11.1 invariant 1).
+  defp do_leave(state, conf_uid, part_ref, reason) do
+    case fetch_row(conf_uid, part_ref) do
+      :error ->
+        state
+
+      {:ok, conf, row} ->
+        remaining = Map.delete(conf.participants, part_ref)
+        conf = %Conference{conf | participants: remaining}
+        :ets.insert(@conf_table, {conf.uid, conf})
+
+        Event.emit(:"participant.left", conf.uid, %{
+          part_id: row.part_id,
+          name: row.name,
+          reason: reason,
+          duration_ms: duration_ms(row)
+        })
+
+        state = demonitor_participant(state, part_ref)
+
+        # §8.3.3 / §5.1: an auto-destroying conference goes away with its last
+        # participant, freeing its DID for the next allocation.
+        if conf.destroy_when_empty and remaining == %{} do
+          destroy(conf, :empty)
+        end
+
+        state
+    end
+  end
+
+  defp duration_ms(%{joined_at: nil}), do: 0
+
+  defp duration_ms(%{joined_at: at}),
+    do: DateTime.diff(DateTime.utc_now(), at, :millisecond)
+
+  defp fetch_row(conf_uid, part_ref) do
+    with {:ok, conf} <- conference(conf_uid),
+         {:ok, row} <- Map.fetch(conf.participants, part_ref) do
+      {:ok, conf, row}
+    else
+      _ -> :error
+    end
+  end
+
+  defp update_participant(conf_uid, ref, fun) do
+    case fetch_row(conf_uid, ref) do
+      {:ok, conf, row} ->
+        participants = Map.put(conf.participants, ref, fun.(row))
+        :ets.insert(@conf_table, {conf.uid, %Conference{conf | participants: participants}})
+        :ok
+
+      :error ->
+        :error
+    end
+  end
+
+  defp demonitor_participant(state, part_ref) do
+    case Enum.find(state.monitors, fn {_ref, {_uid, r}} -> r == part_ref end) do
+      {monitor_ref, _} ->
+        Process.demonitor(monitor_ref, [:flush])
+        %{state | monitors: Map.delete(state.monitors, monitor_ref)}
+
+      nil ->
+        state
+    end
+  end
 
   # ── media server health ──────────────────────────────────────────────────────
 
@@ -407,6 +787,7 @@ defmodule Kelix.Mod.Mcu do
 
           true ->
             Event.emit(:"mediaserver.down", nil, %{mcu: name, reason: :unreachable})
+            notify_mcu_lost(name)
         end
 
         state
@@ -417,17 +798,33 @@ defmodule Kelix.Mod.Mcu do
     end
   end
 
+  # Its mixer is gone, so every call on it is over: each participant's scenario is
+  # told, and hangs up on its own (§9.2). Recreating the stale conferences when the
+  # server comes back is the other half, and it is its own increment — but leaving
+  # the calls hanging is not an option: they would hold their slots for hours with no
+  # media (G3 means SIP is the only other detection there is).
+  defp notify_mcu_lost(mcu_name) do
+    for conf <- conferences(),
+        conf.mcu == mcu_name,
+        part <- Conference.participants(conf),
+        is_pid(part.scenario) do
+      send(part.scenario, {:mcu_event, :server_disconnected})
+    end
+
+    :ok
+  end
+
   # ── MCU events (§3.7) ────────────────────────────────────────────────────────
 
-  # The `tag` is the conference uid — that is what makes an event routable back to
-  # a conference without keeping an MCU-side id map. Per-participant routing to the
-  # owning scenario lands with the call path (P2).
+  # The `tag` is the conference uid — that is what makes an event routable back to a
+  # conference without keeping an MCU-side id map, and `part_id` then names the row
+  # whose scenario must hear about it.
   defp handle_mcu_event(_state, mcu_name, event) do
     tag = event_tag(event)
 
     case tag && conference(tag) do
       {:ok, conf} ->
-        log_event(conf, event)
+        route_event(conf, event)
 
       _ ->
         # late events after a teardown are expected, an unknown tag is not
@@ -443,11 +840,27 @@ defmodule Kelix.Mod.Mcu do
   defp event_tag({:media_connected, _conf_id, tag, _part_id, _media}), do: tag
   defp event_tag(_event), do: nil
 
-  defp log_event(conf, {:fpu_requested, _conf_id, _tag, part_id}) do
+  # Of the §11.1 vocabulary, only the FPU request (and losing a media server) is any
+  # use to a script — the rest are node-level observations. The script turns it into
+  # an INFO carrying picture_fast_update (§6.4, P3); until then it swallows it.
+  defp route_event(conf, {:fpu_requested, _conf_id, _tag, part_id}) do
     Event.emit(:"participant.fpu_requested", conf.uid, %{part_id: part_id})
+
+    case Conference.by_part_id(conf, part_id) do
+      %{scenario: scenario} when is_pid(scenario) ->
+        send(scenario, {:mcu_event, :fpu_requested})
+
+      _ ->
+        Logger.debug(
+          module: __MODULE__,
+          message: "conference #{conf.uid}: FPU for unknown participant #{part_id}"
+        )
+    end
   end
 
-  defp log_event(conf, event) do
+  # Types 3 and 4 arrive with the server-side work of §16.1-16.2 (P7); decoded and
+  # logged now, acted on then.
+  defp route_event(conf, event) do
     Logger.debug(module: __MODULE__, message: "conference #{conf.uid}: #{inspect(event)}")
   end
 
