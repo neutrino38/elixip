@@ -1303,10 +1303,19 @@ defmodule Kelix.Mod.Mcu do
     # (rows at `returnVal[0]`) collected nothing and the stub agreed with it.
     case rpc(mcu, "GetConferences", []) do
       {:ok, rows} when is_list(rows) ->
-        ours = MapSet.new(conferences(), & &1.uid)
+        # Keyed on the MCU-side **id**, not on the tag, although the tag *is* our uid.
+        # Older media servers report it truncated to its first character ("c" for
+        # "c-a8592bc0"): a `std::wstring` handed to xmlrpc-c's `%s`, fixed in
+        # `xmlrpcmcu.cpp` on 2026-07-30 but not in builds already deployed. Matching on
+        # a truncated tag matches nothing, and the failure is not a sweep that
+        # under-collects: right after `recreate_stale/1` rebuilt our conferences, this
+        # pass would delete every one of them. The id is unambiguous and immune either
+        # way; the tag stays in the log line, where a truncated value is merely
+        # unhelpful.
+        ours = MapSet.new(conferences(), & &1.conf_id)
 
         for {conf_id, tag} <- Enum.flat_map(rows, &decode_conference_row/1),
-            not MapSet.member?(ours, tag) do
+            not MapSet.member?(ours, conf_id) do
           Logger.warning(
             module: __MODULE__,
             message:

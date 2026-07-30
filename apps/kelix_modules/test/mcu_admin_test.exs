@@ -600,6 +600,40 @@ defmodule Kelix.Mod.McuAdminTest do
       refute ctx2.uid == ctx.uid
     end
 
+    test "a truncated tag does not make the sweep delete our own conferences", ctx do
+      # what an unpatched media server reports: the tag cut to its first character
+      # (a std::wstring handed to xmlrpc-c's %s). Keyed on the tag, this sweep would
+      # delete the conference we hold; keyed on the id, it leaves it alone.
+      {:ok, conf} = Mcu.conference(ctx.uid)
+      ours = conf.conf_id
+      config = GenServer.call(Mcu, :config)
+      {:ok, entry} = Mcu.mediaserver("mcu1")
+
+      stop_supervised!(:client_mcu1)
+
+      start_supervised!(
+        {Client,
+         name: "mcu1",
+         base_url: "http://127.0.0.1:18080",
+         transport:
+           TestStub.transport(self(), %{
+             "GetConferences" => {:ok, [[ours, "c", 0], [99, "c", 0]]}
+           }),
+         register: {Mcu, "mcu1"},
+         reconnect_ms: 0},
+        id: :client_mcu3
+      )
+
+      assert wait_until(fn -> match?({:ok, %{status: :up}}, Mcu.mediaserver("mcu1")) end)
+      {:ok, entry} = {:ok, %{entry | client: elem(Mcu.mediaserver("mcu1"), 1).client}}
+
+      assert :ok = Mcu.gc_orphans(config, entry)
+
+      assert_receive {:rpc, "DeleteConference", [99]}, 2000
+      refute_receive {:rpc, "DeleteConference", [^ours]}, 200
+      assert {:ok, _} = Mcu.conference(ctx.uid)
+    end
+
     test "an unreadable GetConferences deletes nothing at all" do
       stop_supervised!(:client_mcu1)
       stop_supervised!(Mcu)
