@@ -1155,6 +1155,7 @@ observations the script has no use for.
 | L7 | A live participant's video profile is not renegotiated when the conference profile changes | §8.3 |
 | L8 | **Anyone who can dial the DID joins the conference.** No PIN, no digest challenge in the reference script; the perimeter must be protected upstream (trusted proxy, ACL) or by a derived script | §6.1.1 |
 | L9 | Event callbacks to an external UI are not delivered — only logged/metered. The vocabulary is frozen (§11.1), the transport is not built | §1.2 |
+| L10 | With **P5b**, a script may create conferences, so the perimeter protection L8 recommends stops being merely prudent: whoever reaches an ad-hoc DID can create a room, not just join one. The module still creates nothing by itself (§17.4) | §17 |
 
 ---
 
@@ -1186,6 +1187,8 @@ observations the script has no use for.
 | **P3** | Video: mosaic join, `SetVideoCodec`, auto-layout, FPU both ways | two video phones see each other |
 | **P4** | SDES + DTLS/ICE-lite legs | a WebRTC gateway leg joins |
 | **P5** | `conference.update`, `participant.*`, metrics, orphan GC, MCU-restart recovery | §9 and §11 fully covered |
+| **P5b** | **Conference lifecycle from a scenario** (§17): `create_conference/2`, `ensure_conference/3`, `update_conference/2`, `destroy_conference/1` as plain Elixir functions a script calls in-call, with creator ownership | a script creates a conference on an unknown DID, the caller joins it, and the conference goes away with the call that made it |
+| **P5c** | **Documentation** (§18): the design doc reconciled with what shipped, the operator/developer guides, and the "test without packaging" recipe | a reader who never saw this work can configure a node, dial a conference and drive it from a script, from the docs alone |
 | **P6** | Packaging: `kelixip-mod-mcu` RPM/deb, sample config, docs | `dnf install kelixip-mod-mcu` + a config snippet gets a working conference |
 | **P7** | **Server-side (Mendooze), §16.1-16.2**: `StartRTPTimeout` RPC + MCU event types `3` (media timeout) and `4` (media connected); kelixip arms/disarms the watchdog after the answer and handles both events | unplugging a phone's network mid-call frees its slot and its mosaic tile within `rtp_timeout_ms`, and the adapter emits `:ice_connected` on real media — **L1 and L2 lifted** |
 | **P8** | **Server-side (Mendooze), §16.3**: `StartReceiving` returns `(recPort, fmtpByPt)`; kelixip deletes its local codec arbitration and moves `SetRTPProperties(codec.*)` before `StartReceiving` | the SDP answer carries the fmtp the MCU will actually use, verbatim — **L4 lifted**; mcuGold on the same server is unaffected |
@@ -1400,3 +1403,243 @@ P7 first: it is smaller, purely additive on both sides, and fixes an operational
 hazard rather than an interop refinement. Both are independent of P0′-P6 and of
 each other — S3 does not need the watchdog, and the watchdog does not need the
 enriched return.
+
+---
+
+## 17. P5b — driving a conference from a scenario
+
+### 17.1 What it is for
+
+Today a conference is an *administrative* object: REST or `kelictl` creates it, and
+`mcu.exs` only ever **joins** the one a DID already designates. That covers the
+booked-conference case and nothing else. Three requested flows need a script to own
+the conference itself:
+
+| Flow | What the script does |
+|---|---|
+| **Ad-hoc room on a DID nobody booked** | the first caller on `8042` creates the conference, later callers join the same one |
+| **Room per caller / per account** | the conference is created with the caller's own DID range, name or codec set, from data only the script has (the `From`, an `auth_db` lookup, a REFER) |
+| **Room that outlives its creator, or does not** | a "meet me" room the script tears down when the last leg goes, versus a room the operator keeps |
+
+None of this is expressible through the control API from inside a call: the script
+would have to talk HTTP to its own node.
+
+### 17.2 The API
+
+Five functions on `Kelix.Mod.Mcu`, alongside `admit/2` and friends, all going through
+`Kelix.Module.safe_call/3` so a wedged module is an error the script answers with —
+never a hung call:
+
+| Function | Returns |
+|---|---|
+| `create_conference(domain, opts)` | `{:ok, conference}` \| `{:error, :did_in_use \| :no_did_available \| :did_required \| :unknown_mcu \| :no_mediaserver \| :mcu_down \| :rpc_error}` |
+| `ensure_conference(domain, did, opts)` | `{:ok, conference, :created \| :existing}` \| the same errors |
+| `update_conference(uid, changes)` | `{:ok, changed :: [atom]}` \| `{:error, :not_found \| …}` |
+| `destroy_conference(uid, opts)` | `:ok` \| `{:error, :not_found \| :not_empty}` |
+| `conferences(domain)` | `[conference]` — pure ETS read, for a script that lists |
+
+`opts` is a **keyword list with atom keys** (`name:`, `did:`, `mcu:`, `vad:`,
+`rate:`, `audio_codecs:`, `video_codecs:`, `video:`, `layout:`,
+`max_participants:`, `destroy_when_empty:`, `owner:`), not the string-keyed map the
+control commands receive. That is the one real asymmetry, and it is the right one: a
+script writes Elixir, not JSON.
+
+**One validation, two shapes.** The control commands become thin: `handle_control/2`
+normalises its arguments (`Args`) and then calls these functions. The GenServer
+messages, the RPC sequences and the §11.1 events stay where they are, so a
+conference created from a script and one created from REST are indistinguishable
+afterwards — same rollback on failure (§9.1), same DID allocation (§5.3), same
+recovery (§9.2).
+
+### 17.3 Ownership — the decision that shapes the rest
+
+A conference created from a script starts with **zero** participants, and
+`destroy_when_empty` only fires when the *last participant leaves*. A script that
+creates a conference and then dies before anyone joins would therefore leak it
+permanently: the §9.4 sweep cannot help, since our own registry still holds the row.
+
+**Decided (2026-07-30): the creating scenario owns it.** `create_conference/2`
+defaults to `owner: :caller`: the module monitors the calling instance and, when it
+dies, destroys the conference **if it is empty**. A conference with participants
+survives — the creator was merely the first to arrive, and dropping a live mix
+because one leg hung up would be absurd.
+
+```elixir
+create_conference(domain, owner: :caller)   # default: dies empty with its creator
+create_conference(domain, owner: :none)     # a persistent room, destroyed explicitly
+```
+
+Rejected alternatives, and why:
+
+* **no ownership at all** (consistent with REST): one crashed instance leaks a
+  conference for good, and nothing collects it. The consistency is not worth a
+  permanent leak on a path scripts will take by the thousand;
+* **a TTL on an empty conference**: it covers REST typos and abandoned rooms too, and
+  subsumes ownership. But it is a timer per conference and it changes the semantics
+  of conferences this module did not create. Kept as a later refinement (§17.6), not
+  a prerequisite.
+
+Implementation: the same `monitors` map that reaps participants (§9.3), keyed the
+same way. Nothing new to invent, and the reaper already runs in the registry.
+
+### 17.4 Ad-hoc creation, and what §1.2 actually forbade
+
+§1.2 drops "conference **templates** & ad-hoc conference creation on an unknown DID"
+and §6.1 says an unknown DID is a `404`. `ensure_conference/3` appears to reopen
+that. It does not, and the distinction is worth stating precisely:
+
+> The **module** still never creates a conference by itself. There is no template, no
+> implicit creation, no rule in the module that turns an unknown DID into a room. What
+> changes is that a **script** may now decide to, with an explicit call, on a DID
+> pattern its own dial-plan rule matched.
+
+That is the same separation the whole design rests on (§7: the module decides
+resource policy, the script decides SIP policy) and the same reason joining is not
+authenticated (§6.1.1): the reference `mcu.exs` keeps answering `404` on an unknown
+DID, and a deployment that wants ad-hoc rooms copies it and inserts the call. L8
+already says the perimeter must be protected upstream; ad-hoc creation makes that
+advice load-bearing rather than merely prudent, and §12 gains a limitation row
+saying so.
+
+`ensure_conference/3` is **atomic** — it runs inside the registry GenServer — because
+the alternative is a race a script cannot fix: two INVITEs arriving together on the
+same unknown DID would both see "no conference", both create one, and the second
+would fail on `:did_in_use` with a caller already ringing.
+
+### 17.5 What the reference script gains
+
+`mcu.exs` stays as it is — it is the *booked-conference* reference and must keep
+answering `404` on an unknown DID. P5b ships a second reference script,
+`mcu_adhoc.exs`, differing in one clause:
+
+```elixir
+{:INVITE, req, _trans, dialog_pid} ->
+  did = ruri_user(req)
+
+  case Kelix.Mod.Mcu.ensure_conference(sip_ctx.domain, did, name: "Ad-hoc #{did}",
+                                       destroy_when_empty: true) do
+    {:ok, conf, _created_or_existing} ->
+      # …identical to mcu.exs from here: admit, media_connect, 180, answer
+    {:error, reason} ->
+      reply(dialog_pid, req, code_for(reason), ...)
+  end
+```
+
+`destroy_when_empty: true` plus `owner: :caller` is the pair that makes an ad-hoc
+room behave the way a caller expects: it appears on the first INVITE, it survives as
+long as someone is in it, and it disappears with the last leg — or with the creating
+call if nobody ever joined.
+
+### 17.6 Scope, and what is deliberately left out
+
+| In | Out |
+|---|---|
+| the five functions, creator ownership, the `mcu_adhoc.exs` reference | a TTL on empty conferences (a refinement of §17.3, its own increment) |
+| `handle_control/2` refactored to call them, so both frontals share one validation | per-script quotas on how many conferences one instance may create — the node-wide `max_calls` and the DID range already bound it |
+| `participant`-level functions: already there (`attach/1`, `leave/2`, `mute/3`, `send_fpu/1`) | creating a conference on an MCU the module does not have configured |
+
+### 17.7 Test plan
+
+| Level | What |
+|---|---|
+| Unit | each function against a recording client: the same RPC sequence as the equivalent control command, the same rollback on failure |
+| Unit, ownership | the creator dies **empty** ⇒ `DeleteConference` and the row gone; the creator dies **with participants** ⇒ the conference survives; `owner: :none` ⇒ survives either way |
+| Unit, atomicity | N concurrent `ensure_conference/3` on the same unknown DID produce **one** conference and N `:existing`/`:created` answers that agree on its uid |
+| Unit, parity | a conference created from a script and one created from REST are byte-identical in `conference.show`, minus `created_at` |
+| Integration | `mcu_adhoc.exs` driven by the scenario harness: first INVITE creates + joins, second INVITE joins the same conference, last BYE destroys it |
+| Integration | the creating call is killed (`Process.exit`) before anyone joins ⇒ nothing leaks, on the MCU or in the registry |
+
+---
+
+## 18. P5c — documentation
+
+The code shipped ahead of the prose in several places, and three of those gaps are
+the kind that cost a reader an afternoon. P5c closes them **before** packaging, so
+what P6 ships is documented rather than merely installed.
+
+### 18.1 This design document
+
+| Where | What it says today | What shipped |
+|---|---|---|
+| §6.3 rule 6 | amended in place already (DTLS `passive`) | ✔ done |
+| §3.2 / §3.3 | `GetConferences` "A of (id, name, numPart)", statistics as "S per media" | `returnVal` **is** the row list, and both are arrays of positional rows; `isReceiving` precedes `isSending`. The tag was truncated by the server until the `xmlrpcmcu.cpp` fix of 2026-07-30 — worth a footnote, since a deployment may run an older build |
+| §6.3 | lists the `Mendooze.Sdp` functions reused | `parse/1` now also exposes the offer's `fmtp` per payload type, which is what makes the H.264 profile reflection of P3 possible; the neutral alias `MediaServer.SdpTools` landed |
+| §10 (FW-1) | "must merge extra options from the context" | landed as `SIP.Session.Media.extra_conn_opts/1`; **`on_media_error` also accepts a per-cause function**, which §6.5's table needs to be achievable at all — not in the FW list today |
+| §10 | FW-4 as a decided change | landed, with `Kelix.Control.Route` as the resolver; the `calls` path of the router had to be *registered* too (`SIP.Session.Call`), which the design assumed was already there |
+| §9.4 | "every conference whose `tag` is not in our registry is deleted" | keyed on the MCU-side **id**, for the truncation reason above |
+| §1.1 point 3 | "an optional automatic layout that follows the participant count" | the ladder is `auto_comp/1`; only video legs count, and an audio-only conference issues no mosaic RPC |
+| §11 | the metric table | landed, plus the generic core seams that carry it (`poll_metrics/0`, `status/0` per module) |
+| §14 | phases | P0′-P5 done; P5b/P5c added |
+
+The point is not bookkeeping: a design doc that disagrees with the code is worse than
+none, because the next reader trusts it.
+
+### 18.2 A module guide — `docs/mcu_module_guide.md` (new)
+
+The design doc explains *why*; nothing explains *how* to an operator or to whoever
+writes the next script. One new document, three audiences:
+
+1. **Operator** — the `[module.mcu]` block key by key, with the two-address story
+   (`rtp_ip` vs `public_ip`) that behind-NAT deployments get wrong; the dial-plan rule
+   the DID range needs; what `kelictl status`'s `mcu:` line means; the REST/CLI surface
+   as a table of curl and `kelictl` one-liners; the metrics and what a non-zero
+   `kelix_mcu_rpc_errors_total` means.
+2. **Script author** — the facade (`admit/2` → `attach/1` → `leave/2`, plus P5b's
+   lifecycle functions), the verdict-to-SIP-code table of §6.5, and why teardown must
+   be idempotent.
+3. **Whoever debugs a call** — the log line sequence of one successful join, and the
+   three failures that look alike from outside (no codec, secure offer refused, MCU
+   down) with the log that tells them apart.
+
+### 18.3 Testing without packaging — the recipe, in `BUILD.md`
+
+Verified on 2026-07-30 against a live media server; it belongs next to the release
+instructions rather than in a chat log.
+
+In dev the modules come from the umbrella's own `ebin`, so `module_dir` stays empty
+and nothing needs installing. What is missing is only that `config/runtime.exs`
+guards the TOML paths on `:prod`, so a dev boot reads no configuration:
+
+```elixir
+# iex -S mix, from the umbrella root
+Application.stop(:kelixip)
+Application.put_env(:kelixip, :config_path, "/path/to/config.toml")
+Application.put_env(:kelixip, :domains_path, "/path/to/domains.toml")
+Application.ensure_all_started(:kelixip)
+```
+
+with a `config.toml` carrying `[module.mcu]` + `[module.mcu.mediaserver.<name>]`
+pointed at a real `mediaserver --http-port`, and a `domains.toml` whose dial rule
+sends the DID pattern to `mcu.exs`. From there `kelictl status`, the REST API and a
+real SIP call all work against the real MCU.
+
+**Recommended alongside it (small, dev-ergonomics):** honour `KELIXIP_CONFIG` /
+`KELIXIP_DOMAINS` in every environment instead of only `:prod`, so the recipe becomes
+one command line. The guard exists so `mix test` boots empty — which an unset
+variable already achieves.
+
+### 18.4 The kelixip design document
+
+`docs/design/kelixip_basic_design.md` describes the module control layer and the
+dispatch path this work changed:
+
+* §8.1/§10 — the control-command declaration now carries path templates, method
+  lists and derived `status`/`location`/`errors` (FW-4). Its own text still describes
+  the single-segment route;
+* §4 — the `calls` path is wired: `Kelix.Router` implements `SIP.Session.Call` and
+  registers itself, which is what makes any INVITE dispatch at all;
+* §11 — `Kelix.Control.status/0` gained `module_status`, and the metrics poller
+  samples modules exporting `poll_metrics/0`.
+
+### 18.5 `CLAUDE.md` and `BUILD.md`
+
+Both enumerate the provided modules as `registrar, auth_db`. `mcu` is a third, with a
+media-server dependency the other two do not have — which changes what "install the
+module" means (a reachable MCU, not just a `.beam`).
+
+### 18.6 Done when
+
+A reader who never saw this work can, from the documents alone: configure a node with
+a conference DID, dial into it, drive it from REST and from `kelictl`, write a script
+that creates its own conference, and tell the three look-alike failures apart. Every
+statement in §3 matches what the server actually sends.
