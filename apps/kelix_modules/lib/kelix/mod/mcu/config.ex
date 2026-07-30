@@ -1,0 +1,311 @@
+defmodule Kelix.Mod.Mcu.Config do
+  @moduledoc """
+  The validated `[module.mcu]` block (design `docs/design/mcu_module.md` §8.4).
+
+  `parse/1` is the single reading of the TOML block: it is what
+  `Kelix.Mod.Mcu.validate_config/1` runs (so a typo is a boot-time config error,
+  never a silent default) **and** what the running module holds, so validation and
+  behaviour can never drift apart.
+
+  Two things live here rather than in the module: the **codec vocabulary** (only
+  names the SDP layer can actually emit are accepted — an unknown one is a config
+  error, not a call that fails at 3 a.m.) and the **DID allocation ranges**
+  (`did_range` / `did_ranges`, §5.3).
+  """
+
+  @type range :: {pos_integer, pos_integer}
+
+  @type mcu :: %{
+          name: String.t(),
+          url: String.t(),
+          rtp_ip: String.t() | nil,
+          public_ip: String.t() | nil
+        }
+
+  @type t :: %__MODULE__{}
+
+  defstruct vad: 1,
+            rate: 32_000,
+            audio_codecs: ["OPUS", "G722", "PCMA", "PCMU"],
+            # telephone-event is not a mixer codec but an RFC 4733 stream: it is a
+            # flag on the audio media, not an entry in the codec list.
+            dtmf: true,
+            video_codecs: ["H264"],
+            text_codecs: [],
+            max_participants: 20,
+            destroy_when_empty: false,
+            auto_layout: true,
+            layout_comp: 1,
+            video: %{size: 6, fps: 15, bitrate: 1024, intra_period: 300},
+            did_range: nil,
+            did_ranges: %{},
+            xmlrpc_timeout_ms: 10_000,
+            call_timeout_ms: 5_000,
+            shutdown_grace_ms: 5_000,
+            rtp_timeout_ms: 10_000,
+            gc_orphans: true,
+            mcus: []
+
+  # Codec names the SDP layer knows (MediaServer.Mendooze.Sdp tables). Accepting
+  # anything else would raise inside the answer builder, one call at a time.
+  @audio_codecs ~w(PCMU PCMA G722 OPUS)
+  @dtmf_name "TELEPHONE-EVENT"
+  @video_codecs ~w(H264 VP8)
+  @text_codecs ~w(T140 T140RED)
+
+  @vad_values [0, 1, 2]
+  # AudioMixer::Init refuses anything else (§15, decision 5)
+  @rates [8000, 16_000, 32_000, 48_000]
+  # Mosaic layouts of §3.6
+  @comp_values 0..11
+  @int_keys ~w(vad rate max_participants layout_comp video_size video_fps video_bitrate
+               video_intra_period xmlrpc_timeout_ms call_timeout_ms shutdown_grace_ms
+               rtp_timeout_ms)
+  @bool_keys ~w(destroy_when_empty auto_layout gc_orphans)
+
+  @keys ~w(module call_timeout_ms vad rate audio_codecs video_codecs text_codecs
+           max_participants destroy_when_empty auto_layout layout_comp did_range
+           did_ranges video_size video_fps video_bitrate video_intra_period
+           xmlrpc_timeout_ms shutdown_grace_ms rtp_timeout_ms gc_orphans mediaserver)
+
+  @doc """
+  Validate and decode a `[module.mcu]` block. `{:ok, %Config{}}` or
+  `{:error, message}` naming the offending key.
+  """
+  @spec parse(map) :: {:ok, t} | {:error, String.t()}
+  def parse(block) when is_map(block) do
+    with :ok <- reject_unknown_keys(block),
+         :ok <- check_ints(block),
+         :ok <- check_bools(block),
+         :ok <- check_enum(block, "vad", @vad_values),
+         :ok <- check_enum(block, "rate", @rates),
+         :ok <- check_enum(block, "layout_comp", Enum.to_list(@comp_values)),
+         {:ok, audio, dtmf} <- audio_codecs(block),
+         {:ok, video} <- codecs(block, "video_codecs", @video_codecs, ["H264"]),
+         {:ok, text} <- codecs(block, "text_codecs", @text_codecs, []),
+         {:ok, did_range} <- did_range(block, "did_range"),
+         {:ok, did_ranges} <- did_ranges(block),
+         {:ok, mcus} <- mediaservers(block) do
+      defaults = %__MODULE__{}
+
+      {:ok,
+       %__MODULE__{
+         vad: int(block, "vad", defaults.vad),
+         rate: int(block, "rate", defaults.rate),
+         audio_codecs: audio,
+         dtmf: dtmf,
+         video_codecs: video,
+         text_codecs: text,
+         max_participants: int(block, "max_participants", defaults.max_participants),
+         destroy_when_empty: bool(block, "destroy_when_empty", defaults.destroy_when_empty),
+         auto_layout: bool(block, "auto_layout", defaults.auto_layout),
+         layout_comp: int(block, "layout_comp", defaults.layout_comp),
+         video: %{
+           size: int(block, "video_size", defaults.video.size),
+           fps: int(block, "video_fps", defaults.video.fps),
+           bitrate: int(block, "video_bitrate", defaults.video.bitrate),
+           intra_period: int(block, "video_intra_period", defaults.video.intra_period)
+         },
+         did_range: did_range,
+         did_ranges: did_ranges,
+         xmlrpc_timeout_ms: int(block, "xmlrpc_timeout_ms", defaults.xmlrpc_timeout_ms),
+         call_timeout_ms: int(block, "call_timeout_ms", defaults.call_timeout_ms),
+         shutdown_grace_ms: int(block, "shutdown_grace_ms", defaults.shutdown_grace_ms),
+         rtp_timeout_ms: int(block, "rtp_timeout_ms", defaults.rtp_timeout_ms),
+         gc_orphans: bool(block, "gc_orphans", defaults.gc_orphans),
+         mcus: mcus
+       }}
+    end
+  end
+
+  def parse(_block), do: {:error, "block must be a table"}
+
+  @doc """
+  The allocation range serving `domain`: its `did_ranges` entry, else the
+  block-wide `did_range`, else `nil` (which makes `did` mandatory on create).
+  """
+  @spec range_for(t, String.t()) :: range | nil
+  def range_for(%__MODULE__{} = config, domain) when is_binary(domain),
+    do: Map.get(config.did_ranges, domain) || config.did_range
+
+  @doc "The configured entry named `name`, or `nil`."
+  @spec mcu(t, String.t()) :: mcu | nil
+  def mcu(%__MODULE__{mcus: mcus}, name) when is_binary(name),
+    do: Enum.find(mcus, &(&1.name == name))
+
+  # ── per-key validation ───────────────────────────────────────────────────────
+
+  defp reject_unknown_keys(block) do
+    case Map.keys(block) -- @keys do
+      [] -> :ok
+      extra -> {:error, "unknown key(s): #{Enum.join(Enum.sort(extra), ", ")}"}
+    end
+  end
+
+  defp check_ints(block) do
+    Enum.reduce_while(@int_keys, :ok, fn key, :ok ->
+      case Map.get(block, key) do
+        nil -> {:cont, :ok}
+        v when is_integer(v) and v >= 0 -> {:cont, :ok}
+        _ -> {:halt, {:error, "#{key} must be a non-negative integer"}}
+      end
+    end)
+  end
+
+  defp check_bools(block) do
+    Enum.reduce_while(@bool_keys, :ok, fn key, :ok ->
+      case Map.get(block, key) do
+        nil -> {:cont, :ok}
+        v when is_boolean(v) -> {:cont, :ok}
+        _ -> {:halt, {:error, "#{key} must be a boolean"}}
+      end
+    end)
+  end
+
+  defp check_enum(block, key, allowed) do
+    case Map.get(block, key) do
+      nil -> :ok
+      v -> if v in allowed, do: :ok, else: {:error, "#{key} must be one of #{inspect(allowed)}"}
+    end
+  end
+
+  # audio_codecs doubles as the DTMF switch: TELEPHONE-EVENT in the list means
+  # "offer telephone-event", it is not a codec the mixer knows.
+  defp audio_codecs(block) do
+    case Map.get(block, "audio_codecs") do
+      nil ->
+        d = %__MODULE__{}
+        {:ok, d.audio_codecs, d.dtmf}
+
+      list when is_list(list) ->
+        names = Enum.map(list, &upcase/1)
+        {dtmf, codecs} = Enum.split_with(names, &(&1 == @dtmf_name))
+
+        case Enum.reject(codecs, &(&1 in @audio_codecs)) do
+          [] -> {:ok, codecs, dtmf != []}
+          bad -> {:error, "unknown audio codec(s): #{Enum.join(bad, ", ")}"}
+        end
+
+      _ ->
+        {:error, "audio_codecs must be a list of codec names"}
+    end
+  end
+
+  defp codecs(block, key, allowed, default) do
+    case Map.get(block, key) do
+      nil ->
+        {:ok, default}
+
+      list when is_list(list) ->
+        names = Enum.map(list, &upcase/1)
+
+        case Enum.reject(names, &(&1 in allowed)) do
+          [] -> {:ok, names}
+          bad -> {:error, "unknown #{key}: #{Enum.join(bad, ", ")}"}
+        end
+
+      _ ->
+        {:error, "#{key} must be a list of codec names"}
+    end
+  end
+
+  defp upcase(name) when is_binary(name), do: String.upcase(name)
+  defp upcase(other), do: inspect(other)
+
+  # "8000-8099" → {8000, 8099}
+  defp did_range(block, key) do
+    case Map.get(block, key) do
+      nil -> {:ok, nil}
+      spec -> parse_range(spec, key)
+    end
+  end
+
+  defp did_ranges(block) do
+    case Map.get(block, "did_ranges") do
+      nil ->
+        {:ok, %{}}
+
+      map when is_map(map) ->
+        Enum.reduce_while(map, {:ok, %{}}, fn {domain, spec}, {:ok, acc} ->
+          case parse_range(spec, "did_ranges.#{domain}") do
+            {:ok, range} -> {:cont, {:ok, Map.put(acc, domain, range)}}
+            err -> {:halt, err}
+          end
+        end)
+
+      _ ->
+        {:error, "did_ranges must be a table of domain = \"lo-hi\""}
+    end
+  end
+
+  defp parse_range(spec, key) when is_binary(spec) do
+    with [lo, hi] <- String.split(spec, "-", parts: 2),
+         {lo_i, ""} <- Integer.parse(String.trim(lo)),
+         {hi_i, ""} <- Integer.parse(String.trim(hi)),
+         true <- lo_i <= hi_i do
+      {:ok, {lo_i, hi_i}}
+    else
+      _ -> {:error, ~s(#{key} must look like "8000-8099")}
+    end
+  end
+
+  defp parse_range(_spec, key), do: {:error, ~s(#{key} must look like "8000-8099")}
+
+  # [module.mcu.mediaserver.<name>] blocks
+  defp mediaservers(block) do
+    case Map.get(block, "mediaserver") do
+      nil ->
+        {:ok, []}
+
+      map when is_map(map) ->
+        map
+        |> Enum.sort_by(&elem(&1, 0))
+        |> Enum.reduce_while({:ok, []}, fn {name, attrs}, {:ok, acc} ->
+          case mediaserver(name, attrs) do
+            {:ok, entry} -> {:cont, {:ok, acc ++ [entry]}}
+            err -> {:halt, err}
+          end
+        end)
+
+      _ ->
+        {:error, "mediaserver must be a table of [module.mcu.mediaserver.<name>] blocks"}
+    end
+  end
+
+  @mcu_keys ~w(url rtp_ip public_ip)
+
+  defp mediaserver(name, attrs) when is_map(attrs) do
+    with [] <- Map.keys(attrs) -- @mcu_keys,
+         url when is_binary(url) and url != "" <- Map.get(attrs, "url") do
+      {:ok,
+       %{
+         name: name,
+         url: url,
+         rtp_ip: Map.get(attrs, "rtp_ip"),
+         public_ip: Map.get(attrs, "public_ip")
+       }}
+    else
+      extra when is_list(extra) ->
+        {:error, "mediaserver.#{name}: unknown key(s): #{Enum.join(Enum.sort(extra), ", ")}"}
+
+      _ ->
+        {:error, "mediaserver.#{name}: url is required"}
+    end
+  end
+
+  defp mediaserver(name, _attrs), do: {:error, "mediaserver.#{name} must be a table"}
+
+  defp int(block, key, default) do
+    case Map.get(block, key) do
+      v when is_integer(v) -> v
+      _ -> default
+    end
+  end
+
+  defp bool(block, key, default) do
+    case Map.get(block, key) do
+      v when is_boolean(v) -> v
+      _ -> default
+    end
+  end
+end
