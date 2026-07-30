@@ -21,9 +21,10 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   Getting that order wrong yields a media server that answers `returnCode: 1` to
   everything and sends no RTP.
 
-  Perimeter: audio and video over plain RTP. `@supported_medias` is what gates it —
-  a text section is answered with port 0 rather than half-configured, and SDES/DTLS
-  is refused rather than answered in the clear (P4).
+  Perimeter: audio and video, over plain RTP, SDES-SRTP or DTLS-SRTP + ICE-lite —
+  the three transports mcuGold supports, so a SIP phone and a WebRTC gateway join the
+  same conference. `@supported_medias` is what gates the media list; a text section is
+  answered with port 0 rather than half-configured.
   """
   use GenServer
   require Logger
@@ -48,6 +49,13 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # Audio and video in this increment; text (T.140) needs SetTextCodec and is its
   # own increment. Anything else offered is declined with port 0.
   @supported_medias [:audio, :video]
+
+  # The hash the DTLS fingerprint is fetched and advertised under (§6.3 rule 6).
+  @dtls_hash "SHA-256"
+
+  # SDES suites, in our preference order. The first is what an offer we do not
+  # recognise gets answered with; anything the offer states and we know is mirrored.
+  @sdes_suites ["AES_CM_128_HMAC_SHA1_80", "AES_CM_128_HMAC_SHA1_32"]
 
   @call_timeout 30_000
 
@@ -126,6 +134,14 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
          # the conference's inline video profile as of the answer (§5.1): what the
          # mixer encodes towards this leg, and the cap on its b=AS:
          video: conf.video,
+         # whether this scenario allows a DTLS/ICE leg at all (SDES needs no such
+         # permission: it is what a plain SIP phone offers)
+         webrtc: Keyword.get(opts, :webrtc_support, :if_offered),
+         # security material, per leg: our SDES key per media, our ICE credentials
+         # (one pair for the whole connection) and the server's DTLS fingerprint
+         local_sdes: %{},
+         local_ice: nil,
+         local_dtls: nil,
          # per media: %{codec:, rec_port:, send: {ip, port}, rtp_map:, dtmf_clock:}
          negotiated: %{},
          receiving: [],
@@ -173,16 +189,19 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   @impl true
   def handle_call({:set_remote_offer, sdp}, _from, state) do
     with {:ok, descs} <- parse_offer(sdp),
-         :ok <- ensure_insecure(descs),
          {:ok, conf} <- fetch_conference(state.conf_uid),
          # re-read the profile: it is the conference's value *at answer time* that
          # this leg keeps for its life (§8.3)
          state = %{state | video: conf.video},
+         {:ok, state} <- setup_local_security(state, descs),
          {:ok, state, negotiated} <- open_receive_plane(state, conf, descs),
          :ok <- ensure_audio(negotiated) do
       answer =
         Sdp.build(%{
           ip: media_ip(state),
+          # §6.3 rule 5: we advertise a=ice-lite and never gather reflexive
+          # candidates. Session level, hence here rather than per media.
+          ice_lite: state.local_ice != nil,
           # RFC 3264 §6: one answer m= per offered m=, in order. What we cannot
           # answer is declined with port 0 rather than omitted.
           medias: Enum.map(descs, &answer_or_reject(state, negotiated, &1))
@@ -240,6 +259,115 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     :ok
   end
 
+  # ── local security material (§2 point 3, §6.2) ───────────────────────────────
+
+  # Who generates what is not an implementation detail: for **SDES** the controller
+  # generates the local key and pushes it (`SetLocalCryptoSDES`); for **ICE** the
+  # controller generates ufrag/pwd (`SetLocalSTUNCredentials`); only the **DTLS**
+  # fingerprint belongs to the server, and it is server-wide, so it is fetched once
+  # per MCU and cached there.
+  #
+  # All of it goes in **before** `StartReceiving`: the receive plane must be keyed
+  # before it opens, or the first packets arrive on a session that cannot decrypt
+  # them.
+  defp setup_local_security(state, descs) do
+    answerable = Enum.filter(descs, &answerable?(&1, state.medias))
+
+    with {:ok, state} <- setup_dtls(state, answerable),
+         {:ok, state} <- setup_ice(state, answerable) do
+      setup_sdes(state, answerable)
+    end
+  end
+
+  defp setup_dtls(state, descs) do
+    case Enum.find(descs, &match?({:dtls, _, _, _}, &1.crypto)) do
+      nil ->
+        {:ok, state}
+
+      %{crypto: {:dtls, _setup, _hash, _fp}} ->
+        if webrtc_allowed?(state) do
+          case Client.dtls_fingerprint(state.client, @dtls_hash) do
+            {:ok, fingerprint} -> {:ok, %{state | local_dtls: {@dtls_hash, fingerprint}}}
+            {:error, _} = err -> err
+          end
+        else
+          # the scenario said no: refusing is the honest answer, and it becomes a 488
+          {:error, :secure_not_supported}
+        end
+    end
+  end
+
+  # One credential pair for the whole leg, pushed per media: that is what an offerer
+  # expects to find in every m= section of our answer.
+  defp setup_ice(state, descs) do
+    if Enum.any?(descs, &(&1.ice != nil)) and webrtc_allowed?(state) do
+      ice = %{ufrag: random_token(8), pwd: random_token(24)}
+
+      descs
+      |> Enum.reduce_while(:ok, fn desc, :ok ->
+        case void_rpc(state, "SetLocalSTUNCredentials", [
+               state.conf_id,
+               state.part_id,
+               media_int(desc.type),
+               ice.ufrag,
+               ice.pwd,
+               @role_main
+             ]) do
+          :ok -> {:cont, :ok}
+          err -> {:halt, err}
+        end
+      end)
+      |> case do
+        :ok -> {:ok, %{state | local_ice: ice}}
+        err -> err
+      end
+    else
+      {:ok, state}
+    end
+  end
+
+  # SDES keys are per media (each stream gets its own), and ours is the one the
+  # answer advertises — the peer decrypts what the mixer sends with it.
+  defp setup_sdes(state, descs) do
+    descs
+    |> Enum.filter(&match?({:sdes, _, _}, &1.crypto))
+    |> Enum.reduce_while({:ok, state}, fn desc, {:ok, st} ->
+      {:sdes, offered_suite, _key} = desc.crypto
+      suite = answer_suite(offered_suite)
+      key = random_sdes_key()
+
+      case void_rpc(st, "SetLocalCryptoSDES", [
+             st.conf_id,
+             st.part_id,
+             media_int(desc.type),
+             suite,
+             key,
+             @role_main
+           ]) do
+        :ok -> {:cont, {:ok, %{st | local_sdes: Map.put(st.local_sdes, desc.type, {suite, key})}}}
+        err -> {:halt, err}
+      end
+    end)
+  end
+
+  # Mirror the offered suite when we support it: the answerer picks *one* of the
+  # offered crypto lines (RFC 4568 §6.2), it does not propose its own.
+  defp answer_suite(offered) do
+    if offered in @sdes_suites, do: offered, else: hd(@sdes_suites)
+  end
+
+  # AES_CM_128 keying material is a 16-byte key plus a 14-byte salt, carried
+  # base64 in the a=crypto line (RFC 4568 §6.1).
+  defp random_sdes_key(), do: :crypto.strong_rand_bytes(30) |> Base.encode64()
+
+  defp random_token(bytes),
+    do: :crypto.strong_rand_bytes(bytes) |> Base.url_encode64(padding: false)
+
+  # `:no` refuses a DTLS/ICE leg outright; every other value accepts one when the
+  # offer asks for it (this leg never *offers*, so there is nothing to force).
+  defp webrtc_allowed?(%{webrtc: :no}), do: false
+  defp webrtc_allowed?(_state), do: true
+
   # ── receive plane ────────────────────────────────────────────────────────────
 
   # Per media: negotiate, StartReceiving (whose return is the port the SDP answer
@@ -282,6 +410,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
                  @role_main,
                  @proto_rtp
                ]),
+             :ok <- set_remote_security(state, m, desc),
              :ok <- set_rtp_properties(state, m, desc) do
           {:ok, %{state | receiving: [media | state.receiving]},
            Map.merge(neg, %{rec_port: rec_port, remote: {desc.ip, desc.port}})}
@@ -289,9 +418,51 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     end
   end
 
+  # The peer's own keys and ICE credentials, pushed **after** `StartReceiving`
+  # (§6.2): the session exists by then, which is what these attach to.
+  #
+  # `setup` is normalised to the peer's *resolved* role — the complement of the one
+  # our answer states — rather than forwarded as the literal `actpass`: the server
+  # would otherwise have to resolve it the same way we did, and the two could
+  # disagree about who initiates the handshake.
+  defp set_remote_security(state, m, desc) do
+    calls =
+      case desc.crypto do
+        {:dtls, setup, hash, fingerprint} ->
+          [
+            {"SetRemoteCryptoDTLS",
+             [@role_main, peer_setup(setup) |> to_string(), hash, fingerprint]}
+          ]
+
+        {:sdes, suite, key} ->
+          [{"SetRemoteCryptoSDES", [suite, key, @role_main]}]
+
+        :none ->
+          []
+      end
+
+    # only when we answered with ICE ourselves: pushing the peer's credentials to a
+    # session that has none of its own would leave the check pairs half-configured
+    ice_calls =
+      case {desc.ice, state.local_ice} do
+        {%{ufrag: ufrag, pwd: pwd}, %{}} ->
+          [{"SetRemoteSTUNCredentials", [ufrag, pwd, @role_main]}]
+
+        _ ->
+          []
+      end
+
+    Enum.reduce_while(calls ++ ice_calls, :ok, fn {method, args}, :ok ->
+      case void_rpc(state, method, [state.conf_id, state.part_id, m | args]) do
+        :ok -> {:cont, :ok}
+        err -> {:halt, err}
+      end
+    end)
+  end
+
   # rtcp-mux is mirrored from the offer; the RTCP-feedback hints ride along on an
-  # AVPF profile. `secure` is deliberately not sent: SDES/DTLS is P4, and claiming
-  # it here would configure a security level we never key.
+  # AVPF profile. `secure` is deliberately not sent: it is a no-op once the DTLS or
+  # SDES keys are configured (the same audit finding the JSR-309 adapter records).
   defp set_rtp_properties(state, m, desc) do
     props =
       %{}
@@ -335,10 +506,14 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
 
   # ── send plane + mixer join ──────────────────────────────────────────────────
 
+  # In the leg's media order (audio first), never the negotiation map's: iterating a
+  # map would leave the RPC sequence to term order, and this sequence is a documented
+  # contract with the media server (§2 point 1) that a test pins down.
   defp start_sending_all(state) do
-    state.negotiated
-    |> Enum.reduce_while({:ok, state}, fn {media, neg}, {:ok, st} ->
-      case start_sending(st, media, neg) do
+    state.medias
+    |> Enum.filter(&Map.has_key?(state.negotiated, &1))
+    |> Enum.reduce_while({:ok, state}, fn media, {:ok, st} ->
+      case start_sending(st, media, Map.fetch!(st.negotiated, media)) do
         {:ok, st} -> {:cont, {:ok, st}}
         {:error, _} = err -> {:halt, err}
       end
@@ -481,10 +656,47 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
       # an AVPF offer gets the feedback types advertised back per video PT, which is
       # what makes the peer's PLI/FIR requests legitimate
       rtcp_fb: desc.type == :video and avpf?(desc),
-      crypto: :none,
-      ice: nil
+      crypto: answer_crypto(state, desc),
+      ice: state.local_ice,
+      # §6.3 rule 3: host candidates on the receive port, from configuration (G2).
+      # Component 2 (RTCP) only when the offer did not ask for rtcp-mux, as mcuGold.
+      candidates: answer_candidates(state, desc, neg)
     }
   end
+
+  # Our side of the security handshake, as the answer states it: the server's
+  # fingerprint with the role we take, or the SDES key we generated for this media.
+  defp answer_crypto(%{local_dtls: {hash, fingerprint}}, desc),
+    do: {:dtls, our_setup(desc.crypto), hash, fingerprint}
+
+  defp answer_crypto(state, desc) do
+    case Map.get(state.local_sdes, desc.type) do
+      {suite, key} -> {:sdes, suite, key}
+      nil -> :none
+    end
+  end
+
+  defp answer_candidates(%{local_ice: nil}, _desc, _neg), do: []
+
+  defp answer_candidates(state, desc, neg),
+    do: Sdp.host_candidates(media_ip(state), neg.rec_port, Map.get(desc, :rtcp_mux, false))
+
+  # §6.3 rule 6, settled against the JSR-309 adapter's browser interop on this same
+  # daemon (2026-07-30): the MCU answers as the DTLS **server** — the role a browser
+  # or gateway expects from the answerer — so `actpass` becomes `passive` rather than
+  # RFC 5763 §5's `active` recommendation. An offer that already committed to a role
+  # is mirrored, which is not a choice.
+  defp our_setup({:dtls, :active, _hash, _fp}), do: :passive
+  defp our_setup({:dtls, :passive, _hash, _fp}), do: :active
+  defp our_setup(_crypto), do: :passive
+
+  # The peer's **resolved** role, which is what the server is told (see
+  # `set_remote_security/3`): its own choice when the offer made one, and the
+  # complement of ours when it left the choice open. Never the literal `actpass` —
+  # the server would then have to resolve it exactly as we did, and a disagreement
+  # about who initiates the handshake produces a DTLS stall neither side reports.
+  defp peer_setup(:actpass), do: :active
+  defp peer_setup(role), do: role
 
   # Only video carries a bandwidth line here: an audio b=AS: would cap the mixer for
   # no benefit, and the conference profile has no audio bitrate to cap it with.
@@ -549,14 +761,6 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
       # an unparsable offer is a 400 on the SIP side (§6.5)
       {:error, reason} -> {:error, {:bad_offer, reason}}
     end
-  end
-
-  # SDES / DTLS legs are P4. Refused explicitly: answering a secure offer with a
-  # clear-RTP answer would produce a call that connects and never decodes.
-  defp ensure_insecure(descs) do
-    if Enum.any?(descs, &(Map.get(&1, :crypto, :none) != :none)),
-      do: {:error, :secure_not_supported},
-      else: :ok
   end
 
   # No audio ⇒ no conference leg. Video-only would need P3 anyway.

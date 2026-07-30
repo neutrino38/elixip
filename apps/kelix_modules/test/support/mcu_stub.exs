@@ -28,6 +28,18 @@ defmodule Kelix.Mcu.TestStub do
     "SetVideoCodec" => {:ok, []},
     "SetTextCodec" => {:ok, []},
     "SetRTPProperties" => {:ok, []},
+    "SetLocalCryptoSDES" => {:ok, []},
+    "SetRemoteCryptoSDES" => {:ok, []},
+    "SetLocalSTUNCredentials" => {:ok, []},
+    "SetRemoteSTUNCredentials" => {:ok, []},
+    "SetRemoteCryptoDTLS" => {:ok, []},
+    # server-wide and cacheable (§2 point 3): the only secret the controller does
+    # not generate itself
+    "GetLocalCryptoDTLSFingerprint" =>
+      {:ok,
+       [
+         "11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00"
+       ]},
     "AddSidebarParticipant" => {:ok, []},
     "AddMosaicParticipant" => {:ok, []},
     "SendFPU" => {:ok, []},

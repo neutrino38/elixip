@@ -18,9 +18,10 @@
 # digest challenge inserts it before the admit call below and points its dial rule at
 # the copy — no module change, no core change.
 #
-# This increment is audio + video over plain RTP (§14, P2-P3). A media with no codec
-# in common is answered with port 0 and the call proceeds without it; a secure
-# (SDES/DTLS) offer is refused with a 488 until P4.
+# This increment answers audio + video over plain RTP, SDES-SRTP or DTLS-SRTP +
+# ICE-lite (§14, P2-P4), so a SIP phone and a WebRTC gateway join the same
+# conference. A media with no codec in common is answered with port 0 and the call
+# proceeds without it.
 defmodule Kelix.Mcu.Call do
   use SIP.Scenario
   use SIP.Session.CallUAS
@@ -78,7 +79,13 @@ defmodule Kelix.Mcu.Call do
     # → adapter set_remote_offer: negotiate, StartReceiving, build the answer. The
     # per-cause mapping matters (§6.5): an unusable offer is a 488 (retrying it is
     # pointless), a media-server failure a 500 (ours, and a retry may work).
-    reply_invite_with_sdp(200, media: :audio_video, on_media_error: &Kelix.Mcu.Call.media_error/1)
+    reply_invite_with_sdp(200,
+      media: :audio_video,
+      # accept a secure leg when the offer asks for one (SDES from a SIP phone,
+      # DTLS+ICE from a WebRTC gateway); `:no` would refuse it with a 488
+      webrtc: :if_offered,
+      on_media_error: &Kelix.Mcu.Call.media_error/1
+    )
 
     case sip_ctx.lasterr do
       {:media_error, reason} ->
@@ -103,6 +110,7 @@ defmodule Kelix.Mcu.Call do
       {:INVITE, _req, _trans, _dlg} ->
         reply_invite_with_sdp(200,
           media: :audio_video,
+          webrtc: :if_offered,
           on_media_error: &Kelix.Mcu.Call.media_error/1
         )
 
@@ -111,6 +119,7 @@ defmodule Kelix.Mcu.Call do
       {:UPDATE, _req, _trans, _dlg} ->
         reply_invite_with_sdp(200,
           media: :audio_video,
+          webrtc: :if_offered,
           on_media_error: &Kelix.Mcu.Call.media_error/1
         )
 

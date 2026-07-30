@@ -491,9 +491,25 @@ hard cases:
    `protocol_for/1` logic already in `Mendooze.Sdp`.
 5. **ICE-lite.** When the offer carries ICE credentials we answer `a=ice-lite`
    with our generated ufrag/pwd. We never gather reflexive candidates.
-6. **DTLS.** `a=setup:` is the mirror of the offer (`active` → `passive`,
-   `actpass` → `active`), `a=fingerprint:` is the server's, fetched once per
-   MCU with `GetLocalCryptoDTLSFingerprint("SHA-256")` and cached.
+6. **DTLS.** `a=setup:` mirrors an offer that already committed (`active` →
+   `passive`, `passive` → `active`); an `actpass` offer is answered **`passive`**,
+   i.e. the MCU is the DTLS *server* and the peer initiates the handshake.
+   `a=fingerprint:` is the server's, fetched once per MCU with
+   `GetLocalCryptoDTLSFingerprint("SHA-256")` and cached.
+
+   > **Decided 2026-07-30.** RFC 5763 §5 *recommends* `active` for the answerer
+   > (it can start the handshake immediately), and this rule said so. It is
+   > overruled by interop experience on this same daemon: `MediaServer.Mendooze`
+   > answers `passive` on the JSR-309 path with the note "the safe role a
+   > browser/gateway expects from the answerer". Since P4's whole point is that a
+   > WebRTC gateway leg joins, the empirically-working role wins over the
+   > recommendation.
+   >
+   > What is pushed to `SetRemoteCryptoDTLS` is the peer's **resolved** role — the
+   > complement of ours for an `actpass` offer, its own choice otherwise — never the
+   > literal `actpass`: the server would otherwise have to resolve it exactly as we
+   > did, and a disagreement about who initiates produces a DTLS stall neither side
+   > reports.
 7. **`a=sendrecv`** is the direction for a mixed participant; a `recvonly`
    offer is answered `sendonly` and vice-versa (`reverse_direction/1`).
 8. **Bandwidth.** `b=AS:` on video is `min(offered, conference video.bitrate)`.

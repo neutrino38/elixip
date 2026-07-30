@@ -61,7 +61,7 @@ defmodule Kelix.Mod.McuCallTest do
   a=sendrecv\r
   """
 
-  # A WebRTC-style DTLS offer: refused until P4 rather than answered in the clear.
+  # A WebRTC-gateway-shaped offer: DTLS-SRTP + ICE, rtcp-mux, opus.
   @offer_secure """
   v=0\r
   o=- 1 1 IN IP4 192.168.1.50\r
@@ -74,6 +74,7 @@ defmodule Kelix.Mod.McuCallTest do
   a=setup:actpass\r
   a=ice-ufrag:abcd\r
   a=ice-pwd:0123456789abcdef\r
+  a=rtcp-mux\r
   a=sendrecv\r
   """
 
@@ -422,6 +423,27 @@ defmodule Kelix.Mod.McuCallTest do
     end
   end
 
+  describe "a WebRTC gateway leg joins (P4)" do
+    test "the DTLS+ICE offer is answered and the leg reaches the mix", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_secure))
+      assert_receive {:replied, 200, _reason, fields, _req}, 2000
+
+      answer = fields[:body]
+      # ICE-lite is session level and answers only (§6.3 rule 5)
+      assert answer =~ "a=ice-lite"
+      assert answer =~ "a=setup:passive"
+      assert answer =~ "a=fingerprint:sha-256 "
+      assert answer =~ "a=ice-ufrag:"
+      assert answer =~ "a=candidate:"
+      # the transport of the offer is mirrored (rule 4)
+      assert answer =~ "m=audio #{@rec_port} UDP/TLS/RTP/SAVPF"
+
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      assert_receive {:rpc, "AddSidebarParticipant", [42, 0, 7]}, 2000
+      assert wait_for(fn -> Enum.find(participants(ctx.uid), &(&1.state == :connected)) end)
+    end
+  end
+
   describe "the automatic layout (§1.1 point 3)" do
     test "follows the number of video legs, and only moves when it changes", ctx do
       {pid1, dialog1} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
@@ -439,8 +461,8 @@ defmodule Kelix.Mod.McuCallTest do
       # 2 video legs ⇒ 1+1 (comp 6): side by side, not a 2x2 with two black tiles
       assert_receive {:rpc, "SetCompositionType", [42, 0, 6, 6]}, 2000
 
-      {:ok, conf} = Mcu.conference(ctx.uid)
-      assert conf.layout.comp == 6
+      # the registry records what it pushed, so `conference.show` tells the truth
+      assert wait_for(fn -> match?({:ok, %{layout: %{comp: 6}}}, Mcu.conference(ctx.uid)) end)
 
       # one leaves ⇒ back to 1x1
       send(pid2, {:BYE, %{method: :BYE}, nil, dialog2})
@@ -581,13 +603,6 @@ defmodule Kelix.Mod.McuCallTest do
       # must be deleted again — nothing may leak on a refused call (§9.1)
       order = wait_for(fn -> if "DeleteParticipant" in TestStub.rpc_order(), do: true end)
       assert order
-      assert wait_for(fn -> participants(ctx.uid) == [] end)
-    end
-
-    test "a secure offer is refused with a 488 until P4, not answered in the clear", ctx do
-      {_pid, _dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_secure))
-
-      assert_receive {:replied, 488, "Not Acceptable Here", _fields, _req}, 2000
       assert wait_for(fn -> participants(ctx.uid) == [] end)
     end
 
