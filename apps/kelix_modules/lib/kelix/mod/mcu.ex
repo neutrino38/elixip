@@ -629,8 +629,7 @@ defmodule Kelix.Mod.Mcu do
     case mediaserver(conf.mcu) do
       {:ok, mcu} ->
         case rpc(mcu, "GetParticipantStatistics", [conf.conf_id, row.part_id]) do
-          {:ok, [stats | _]} -> %{stats: stats}
-          {:ok, _} -> %{stats: %{}}
+          {:ok, rows} -> %{stats: decode_statistics(rows)}
           {:error, reason} -> %{stats: %{}, stats_error: reason}
         end
 
@@ -638,6 +637,29 @@ defmodule Kelix.Mod.Mcu do
         %{stats: %{}, stats_error: :unknown_mcu}
     end
   end
+
+  # `returnVal` is one `(s i i i i i i i)` row per media, in the server's own field
+  # order — read off `xmlrpcmcu.cpp:GetParticipantStatistics`, which is authoritative:
+  # `isReceiving` comes **before** `isSending`, the reverse of the order §3.3 lists
+  # them in. Named here so a caller never has to know that.
+  defp decode_statistics(rows) when is_list(rows) do
+    for [media, receiving, sending, lost, recv_packets, sent_packets, recv_bytes, sent_bytes] <-
+          rows,
+        into: %{} do
+      {media,
+       %{
+         receiving: receiving == 1,
+         sending: sending == 1,
+         lost_recv_packets: lost,
+         num_recv_packets: recv_packets,
+         num_send_packets: sent_packets,
+         total_recv_bytes: recv_bytes,
+         total_send_bytes: sent_bytes
+       }}
+    end
+  end
+
+  defp decode_statistics(_rows), do: %{}
 
   # Decode the update body into the changes to apply, keeping only what was sent:
   # that map *is* the partial-merge semantics.
@@ -1275,8 +1297,12 @@ defmodule Kelix.Mod.Mcu do
   def gc_orphans(%Config{gc_orphans: false}, _mcu), do: :ok
 
   def gc_orphans(%Config{}, mcu) do
+    # `returnVal` **is** the row list, not a list wrapping it: `xmlok()` passes the
+    # array straight into the envelope (`xmlhandler.cpp`), so a server holding nothing
+    # answers `returnVal: []`. Read off the server source, because the earlier reading
+    # (rows at `returnVal[0]`) collected nothing and the stub agreed with it.
     case rpc(mcu, "GetConferences", []) do
-      {:ok, [rows | _]} when is_list(rows) ->
+      {:ok, rows} when is_list(rows) ->
         ours = MapSet.new(conferences(), & &1.uid)
 
         for {conf_id, tag} <- Enum.flat_map(rows, &decode_conference_row/1),

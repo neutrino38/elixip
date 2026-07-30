@@ -249,7 +249,21 @@ defmodule Kelix.Mod.McuAdminTest do
 
       assert shown.part_id == 7
       assert_received {:rpc, "GetParticipantStatistics", [42, 7]}
-      assert shown.stats == %{}
+
+      # decoded per media, with the server's own field order named (its `isReceiving`
+      # comes before `isSending`, the reverse of the order §3.3 lists them in)
+      assert shown.stats == %{
+               "audio" => %{
+                 receiving: true,
+                 sending: true,
+                 lost_recv_packets: 0,
+                 num_recv_packets: 100,
+                 num_send_packets: 90,
+                 total_recv_bytes: 16_000,
+                 total_send_bytes: 14_400
+               }
+             }
+
       refute Map.has_key?(shown, :stats_error)
     end
 
@@ -551,7 +565,7 @@ defmodule Kelix.Mod.McuAdminTest do
       _ctx =
         start_mcu(
           drain: false,
-          returns: %{"GetConferences" => {:ok, [[[7, "c-leftover", 0], [8, "c-other", 2]]]}}
+          returns: %{"GetConferences" => {:ok, [[7, "c-leftover", 0], [8, "c-other", 2]]}}
         )
 
       assert_receive {:rpc, "GetConferences", []}, 2000
@@ -569,7 +583,7 @@ defmodule Kelix.Mod.McuAdminTest do
       # no conference exists yet.
       reported = fn _params ->
         ours = Enum.map(Mcu.conferences(), fn c -> [c.conf_id, c.uid, 0] end)
-        {:ok, [[[99, "c-stranger", 0] | ours]]}
+        {:ok, [[99, "c-stranger", 0] | ours]}
       end
 
       ctx2 = start_mcu(drain: false, returns: %{"GetConferences" => reported})
@@ -592,7 +606,8 @@ defmodule Kelix.Mod.McuAdminTest do
 
       # a shape we cannot decode with confidence: deleting on a guess would destroy
       # live conferences rather than leak dead ones
-      _ctx = start_mcu(drain: false, returns: %{"GetConferences" => {:ok, ["not-a-list"]}})
+      # a row shape we cannot decode: the sweep must not guess at it
+      _ctx = start_mcu(drain: false, returns: %{"GetConferences" => {:ok, ["not-a-row"]}})
 
       assert_receive {:rpc, "GetConferences", []}, 2000
       refute_receive {:rpc, "DeleteConference", _params}, 200
@@ -606,7 +621,7 @@ defmodule Kelix.Mod.McuAdminTest do
         start_mcu(
           drain: false,
           block: %{"gc_orphans" => false},
-          returns: %{"GetConferences" => {:ok, [[[7, "c-leftover", 0]]]}}
+          returns: %{"GetConferences" => {:ok, [[7, "c-leftover", 0]]}}
         )
 
       refute_receive {:rpc, "GetConferences", _params}, 300

@@ -17,7 +17,9 @@ defmodule Kelix.Mcu.TestStub do
     "SetCompositionType" => {:ok, []},
     "UpdateConference" => {:ok, []},
     "DeleteConference" => {:ok, []},
-    "GetConferences" => {:ok, [[]]},
+    # `returnVal` IS the row list (`xmlok()` in the server's xmlhandler.cpp), so a
+    # server holding no conference answers an empty one
+    "GetConferences" => {:ok, []},
     "CreateParticipant" => {:ok, [7]},
     "DeleteParticipant" => {:ok, []},
     "StartReceiving" => {:ok, [52_014]},
@@ -44,7 +46,8 @@ defmodule Kelix.Mcu.TestStub do
     "AddMosaicParticipant" => {:ok, []},
     "SendFPU" => {:ok, []},
     "SetMute" => {:ok, []},
-    "GetParticipantStatistics" => {:ok, [%{}]}
+    # one `(s i i i i i i i)` row per media, `isReceiving` before `isSending`
+    "GetParticipantStatistics" => {:ok, [["audio", 1, 1, 0, 100, 90, 16_000, 14_400]]}
   }
 
   @doc """
