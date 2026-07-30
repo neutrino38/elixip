@@ -111,10 +111,16 @@ says why on stderr.
 
 ## kelix_modules — the loadable modules
 
-The release carries **no SIP function**: `registrar` and `auth_db` are installed
-as `.beam` files into `server.module_dir` and loaded per `[module.<name>]` block
-(design §8.3, §16.12). `apps/kelixip` does not depend on this app, which is what
+The release carries **no SIP function**: `registrar`, `auth_db` and `mcu` are
+installed as `.beam` files into `server.module_dir` and loaded per `[module.<name>]`
+block (design §8.3, §16.12). `apps/kelixip` does not depend on this app, which is what
 keeps them out of the release.
+
+> `mcu` (conferencing — see [docs/mcu_module_guide.md](docs/mcu_module_guide.md)) is
+> the one module whose `.beam` is not enough: it needs a reachable **Medooze media
+> server**, configured per `[module.mcu.mediaserver.<name>]`. Installed without one it
+> starts, marks its entry `down`, and answers `503` to every conference — which is
+> the intended failure, not a broken install.
 
 ```bash
 cd apps/kelix_modules
@@ -130,6 +136,71 @@ where nothing rebuilds this app for you.
 Check what a running node actually loaded with `kelictl status` (`modules:` line).
 Installing a new version of a module is a copy plus `kelictl module reload <name>`
 — no server restart.
+
+### Running the mcu module from a checkout
+
+Testing a conference needs no packaging at all: in dev the loadable modules come from
+the umbrella's own `ebin`, already on the code path, so `server.module_dir` stays
+**empty** and nothing is installed. What you do need is a real media server — the
+module drives one, and there is no mock at this level.
+
+```bash
+# 1. a media server, with its XML-RPC port (this is `url` below, NOT 8080)
+/opt/ives/bin/mediaserver --http-port 9090 &
+
+# 2. a TOML pair somewhere writable
+cat > /tmp/kelix/config.toml <<'EOF'
+[server]
+node_name  = "kelixip@127.0.0.1"
+script_dir = "/path/to/elixip/apps/kelixip/scripts"
+module_dir = ""                       # dev: the modules are already on the path
+
+[[listen]]
+proto = "udp"
+addr  = "0.0.0.0"
+port  = 5080                          # 5060 is often taken on a dev box
+
+[control_api]
+addr = "127.0.0.1"
+port = 8090
+auth = "none"                         # loopback only
+
+[module.mcu]
+did_range = "8000-8099"
+
+  [module.mcu.mediaserver.mcu1]
+  url       = "http://127.0.0.1:9090"
+  rtp_ip    = "127.0.0.1"
+  public_ip = "127.0.0.1"
+EOF
+
+cat > /tmp/kelix/domains.toml <<'EOF'
+[[domain]]
+name = "dev.local"
+
+  [[domain.call]]
+  pattern = "8XXX"
+  script  = "mcu.exs"
+EOF
+
+# 3. boot the real server from the checkout
+KELIXIP_CONFIG=/tmp/kelix/config.toml KELIXIP_DOMAINS=/tmp/kelix/domains.toml iex -S mix
+```
+
+From that shell (or over REST on 8090, or with `kelictl` against the node):
+
+```elixir
+Kelix.Mod.Mcu.handle_control("conference.create", %{"domain" => "dev.local"})
+#=> {:ok, %{uid: "c-…", did: "8000", conf_id: 42, mcu: "mcu1"}}
+Kelix.Control.CLI.run(["status"], node()) |> elem(1) |> IO.puts()
+```
+
+then dial `sip:8000@dev.local` at port 5080 with a softphone, or with the `elixipp`
+test tool. The `mcu:` line of `kelictl status` and the `conference.*` /
+`participant.*` commands are the same ones a packaged host exposes.
+
+The environment variables are honoured in **every** Mix environment; unset, they leave
+the server booting empty exactly as `mix test` needs (`config/runtime.exs`).
 
 ## Building the RPM packages (Alma Linux 9)
 

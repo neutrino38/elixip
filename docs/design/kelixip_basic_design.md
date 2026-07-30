@@ -291,6 +291,15 @@ processing module in `SIP.Session.ConfigRegistry` — so `internal_dispatch/4`
 calls into the Router regardless of method. The Router is otherwise stateless;
 it reads `Kelix.Domains` (current version) and `Kelix.ScriptRegistry`.
 
+> **The `calls` half was only registered on 2026-07-30** (with the conferencing
+> module's P2). Everything below — resolve, quota, spawn — had been there since P2c and
+> was reachable for `REGISTER`, but `set_call_processing_module/1` was never called, so
+> the framework answered an INVITE `500 "No call server defined"` however complete the
+> domain's dial plan was. `Kelix.Router` now implements `SIP.Session.Call`
+> (`on_new_call/3` → the same `dispatch/3`, `on_call_end/2` → `:ok`, since
+> `Kelix.InstancePool` already frees the slot on `:DOWN`) and registers itself
+> alongside the registrar one. Presence is still pending its own function.
+
 ```
 on_new_registration/3 ─┐
 on_new_call/3          ├─► Kelix.Router.route(method, dialog_id, req, transaction_id)
@@ -816,15 +825,39 @@ REST + CLI extensions use a **declarative-registration** mechanism (decided
 
 - The `Kelix.Module` behaviour gains two **optional** callbacks:
   `describe_control/0` (returns the command list — `name`, `args`, `rest`
-  `{method, path}`, `rw`, `help`) and `handle_control/2` (runs a command).
+  `{method | [method], path_template}`, `rw`, `help`, plus the optional `status`,
+  `location` and `errors`) and `handle_control/2` (runs a command).
 - At module start `Kelix.ModuleSupervisor` reads `describe_control/0` and
   registers the entries, keyed by module name, into a central
   **`Kelix.Control.Registry`** (ETS/Agent); it deregisters on stop/reload.
 - Both frontals iterate that registry: `Kelix.ControlAPI` mounts the
   `/modules/<name>/…` routes, `kelictl` generates the `<name> <cmd>` sub-commands
   and their `--help`. Execution routes to `handle_control/2`.
+- **Nested resources (FW-4, done 2026-07-30, `docs/design/mcu_module.md` §8.3.4).**
+  The declared `rest` path is a **template** relative to `/modules/<name>`, and may
+  carry `:param` segments (`"/conferences/:uid/participants"`), so a module can expose
+  a resource tree instead of flat verbs. `Kelix.Control.Route` resolves a request
+  against those templates **most-literal-first**; an ambiguous pair is refused at
+  *registration* time rather than arbitrated per request, and the module keeps running
+  without its control surface. A method **list** lets one declaration answer both
+  `PUT` and `PATCH`; a path that matches a template but not its method is a `405` with
+  `Allow`. Args reaching `handle_control/2` are merged **path < query < body** (FW-2:
+  a `GET` command can finally be filtered), and a body key colliding with a path param
+  is a `400` — never a silent divergence between the URL and the effect. Declared
+  `status:` / `location:` / `errors:` let the frontal derive `201 Created` +
+  `Location` and a `409`, while `handle_control/2` keeps returning plain domain
+  results — which is exactly what keeps `kelictl` parity free. The **flat form**
+  (`/modules/<name>/<command.id>`) stays live, so every command written before FW-4
+  routes unchanged.
 - `handle_control/2` **never checks auth** — authentication is enforced at the
   frontal boundary (§10), keeping the module logic pure.
+- **Two further optional exports, honoured generically (done 2026-07-30).** A module
+  exporting `status/0` contributes a line to `Kelix.Control.status/0`
+  (`module_status`), which `kelictl status` renders — that is where the conferencing
+  module's `mcu: conferences 2, participants 5, …` comes from. A module exporting
+  `poll_metrics/0` is sampled on `Kelix.Metrics.Poller`'s tick, so its gauges share the
+  node's one sampling clock instead of each module running a timer. The core names no
+  module in either case; one that exports neither contributes nothing.
 
 ### 8.2 Facade contract (spec §5.2 — locked decisions)
 
@@ -948,10 +981,12 @@ Spec §9–§10. **Parity by construction**: one command layer, two frontals.
 > Verified end-to-end: `mix release kelixip` assembles the overlay and a real
 > distributed node answers `kelictl status/regs/mcu` over RPC.
 >
-> **Implementation status (P8, 2026-07-27 — DONE).** `Kelix.ControlAPI` is a
-> `Plug.Router` served by **Bandit**, one route per §10.1 verb plus the
-> module-contributed `<method> /modules/<name>/<cmd>` commands (looked up in
-> `Kelix.Control.Registry`). Every route is a thin translation onto the same
+> **Implementation status (P8, 2026-07-27 — DONE; route shape widened 2026-07-30).**
+> `Kelix.ControlAPI` is a `Plug.Router` served by **Bandit**, one route per §10.1 verb
+> plus the module-contributed commands, now matched as
+> `<method> /modules/<name>/*path` and resolved against the path templates each module
+> declared (§8.1, FW-4) — the single-segment `<cmd>` form remains valid and is still
+> the one `kelictl` names. Every route is a thin translation onto the same
 > `Kelix.Control` function `kelictl` calls, so parity is automatic. Auth is a
 > boundary Plug (`Kelix.ControlAPI.Auth`): `token` (Bearer, constant-time
 > compare), `mtls` (TLS `verify_peer` + `fail_if_no_peer_cert`), or `none`, driven

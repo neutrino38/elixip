@@ -4,6 +4,11 @@ A conferencing (MCU) function for **kelixip**, distilled from the Java
 `mcuGold` application server and rebuilt on the **Medooze MCU XML-RPC API**
 (`POST /mcu`) exposed by `../mediaserver`.
 
+> This document is the **why**: every decision, what was left out and on what
+> grounds. For the **how** — configuring a node, the REST/CLI surface, writing a
+> script, and reading the logs of a call that failed — see
+> [docs/mcu_module_guide.md](../mcu_module_guide.md). Delivery status is §14.
+
 The deliverable is deliberately **two artefacts** — no new frontal, no new
 daemon:
 
@@ -31,7 +36,10 @@ instance per call, `Kelix.ControlAPI` exposes the module's commands under
    without which the other three are unusable), exposed through the existing
    module-command mechanism, therefore available identically on `kelictl`.
 3. Audio + video mixing on the **default mosaic** and the **default sidebar**,
-   with an optional automatic layout that follows the participant count.
+   with an optional automatic layout that follows the participant count
+   (`Kelix.Mod.Mcu.auto_comp/1`: a ladder over the `comp` values of §3.6 — two
+   participants side by side rather than a 2x2 with two black tiles). Only **video**
+   legs count, and a conference with none issues no mosaic RPC at all.
 4. Plain RTP/AVP, **SDES-SRTP** and **DTLS-SRTP + ICE-lite** call legs (the
    three transports mcuGold supports), so both SIP phones and WebRTC gateways
    can join.
@@ -117,6 +125,14 @@ error    →  { "returnCode": 0, "errorMsg": "…" }
 > An HTTP `200` with `returnCode: 0` is an **application error**. Only a
 > parameter-parsing failure produces a real XML-RPC fault.
 
+> **`returnVal` *is* the returned value**, not a list wrapping it: the server builds
+> `{s:i,s:A}` with the array passed straight in (`mcu/src/xmlhandler.cpp:xmlok`). A
+> method returning one integer answers `returnVal: [42]`; a method returning a *list*
+> answers `returnVal: [row, row, …]`, and a server holding nothing answers
+> `returnVal: []`. Reading the second kind as "the list is at index 0" is a mistake a
+> stub happily reproduces — it cost us a garbage collector that silently collected
+> nothing (§9.4).
+
 Type notation below: `i` int, `s` string, `S` struct, `A` array.
 
 ### 3.2 Conference lifecycle
@@ -128,11 +144,19 @@ Type notation below: `i` int, `s` string, `S` struct, `A` array.
 | `CreateConference` | `(s tag, i vad, i rate, i queueId)` — 3-arg variant `(s, i vad, i queueId)` omits the rate | `(i confId)` |
 | `UpdateConference` | `(i confId, i vad, i rate)` | — |
 | `DeleteConference` | `(i confId)` | — |
-| `GetConferences` | `()` | `A` of `(i id, s name, i numPart)` |
+| `GetConferences` | `()` | `A` of `(i id, s tag, i numPart)` — the rows **are** `returnVal` |
 | `SetCompositionType` | `(i confId, i mosaicId, i comp, i size)` | — |
 
 `tag` is the conference's external name (we pass the kelixip UID); it is echoed
 in the event stream, which is how an event is mapped back to a conference.
+
+> **`GetConferences` truncated the tag** until 2026-07-30: `ConferenceInfo::name` is a
+> `std::wstring` and was handed to xmlrpc-c's `%s`, which reads it as `char*` and stops
+> at the first embedded NUL — `"c-a8592bc0"` came back as `"c"`. Fixed in
+> `mcu/src/xmlrpcmcu.cpp` (serialise through `UTF8Parser`, as
+> `GetBroadcastPublishedStreams` already did), but **deployed builds may predate the
+> fix**, so the orphan sweep keys on the MCU-side id instead (§9.4). The *event*
+> stream was never affected: it serialises the tag properly.
 
 ### 3.3 Participant lifecycle
 
@@ -144,10 +168,15 @@ in the event stream, which is how an event is mapped back to a conference.
 | `AddSidebarParticipant` / `RemoveSidebarParticipant` | `(i confId, i sidebarId, i partId)` | — |
 | `SetMute` | `(i confId, i partId, i media, i muted)` | — |
 | `SendFPU` | `(i confId, i partId)` | — |
-| `GetParticipantStatistics` | `(i confId, i partId)` | `S` per media: `isSending`, `isReceiving`, `lostRecvPackets`, `numRecvPackets`, `numSendPackets`, `totalRecvBytes`, `totalSendBytes` |
+| `GetParticipantStatistics` | `(i confId, i partId)` | `A` of one row per media: `(s media, i isReceiving, i isSending, i lostRecvPackets, i numRecvPackets, i numSendPackets, i totalRecvBytes, i totalSendBytes)` |
 
 `type` is `0` (RTP) for every participant we create; `1` (RTMP) is unused.
 `name` must not contain `.` — mcuGold replaces it with `_`; we do the same.
+
+> The statistics rows are **positional, and `isReceiving` precedes `isSending`** —
+> the reverse of the order this table used to list them in. `participant.show` names
+> the fields (`receiving:`, `sending:`, `lost_recv_packets:`, …) so no caller has to
+> know the wire order.
 
 ### 3.4 Media setup
 
@@ -515,12 +544,19 @@ hard cases:
 8. **Bandwidth.** `b=AS:` on video is `min(offered, conference video.bitrate)`.
 
 The implementation reuses `MediaServer.Mendooze.Sdp` for `parse/1`,
-`negotiate/3`, `build/1`, `local_rtp_map/3`, `host_candidates/3`,
-`negotiate_bandwidth/2` and `reverse_direction/1`. **Recommendation:** rename
-nothing yet, but expose that module under a neutral alias
-(`MediaServer.SdpTools`) in the same increment so the MCU adapter does not
-`alias MediaServer.Mendooze.Sdp` — the dependency is real but the name is
-misleading. Purely cosmetic, no behaviour change.
+`negotiate/3`, `build/1`, `local_rtp_map/3`, `answer_rtpmaps/2`,
+`host_candidates/3`, `negotiate_bandwidth/2` and `reverse_direction/1`, through the
+neutral alias **`MediaServer.SdpTools`** — landed as recommended, a rename with no
+move, so the MCU adapter does not claim a dependency on the JSR-309 API whose module
+they happen to live in.
+
+`parse/1` gained one field for this work: **`fmtp`**, the offer's `a=fmtp` lines as
+parsed structs per payload type. It is what lets the answerer reflect H.264's
+`profile-level-id` (and push it to the encoder as `h264.profile-level-id`, §3.4)
+instead of guessing — the difference between two video phones that see each other and
+two that negotiate successfully and decode nothing. Structs rather than raw strings on
+purpose: an answerer must reflect `profile-level-id` and must **not** reflect
+`sprop-parameter-sets`, which describes the offerer's own encoder.
 
 ### 6.4 In-call events
 
@@ -1025,16 +1061,27 @@ consecutive failures) or by an RPC returning a transport error. Consequences:
 ### 9.3 Scenario crash
 
 The module monitors each participant's scenario pid. On `:DOWN`, it runs the
-same teardown as `leave/1`. This is the safety net that makes the
+same teardown as `leave/1`. Since P5b it also monitors the **creator** of a
+script-made conference (§17.3), which is the same mechanism with a different verdict:
+a dead participant is always removed, a dead creator only takes an **empty**
+conference with it. This is the safety net that makes the
 "participant lifetime = adapter connection lifetime" rule true even for a
 `kill`.
 
 ### 9.4 kelixip restart
 
 Conferences are in memory only, so after a restart the MCU may hold orphan
-conferences. At module start, `GetConferences` is called on every configured
-MCU and every conference whose `tag` is not in our (empty) registry is
-**deleted** — a garbage collection pass. This is safe because a kelixip node
+conferences. At module start — and again whenever a control channel comes back up —
+`GetConferences` is called on that MCU and every conference **whose id our registry
+does not hold** is deleted: a garbage collection pass.
+
+It keys on the MCU-side `conf_id` rather than on the `tag`, although the tag *is* our
+uid, because a server built before the fix of §3.2 truncates it (`"c"`), so tag
+matching would match nothing — and the consequence is not an under-collecting sweep
+but the opposite: run right after the recovery of §9.2, it would delete every
+conference that recovery had just rebuilt. The pass also **deletes nothing** when the
+reply cannot be decoded with confidence, since a misparse here destroys live
+conferences rather than leaking dead ones. This is safe because a kelixip node
 owns its MCUs exclusively; if that ever stops being true, gate the pass behind
 a `gc_orphans = true` config key (recommended default: `true`, with the key
 present from day one).
@@ -1049,11 +1096,14 @@ CLI quality-of-life.
 
 | # | Change | Where | Required? |
 |---|---|---|---|
-| **FW-1** | `ensure_peer_connection/3` must merge extra options from the context (`appdata[:media_conn_opts]`) into the `create_peer_connection/3` opts, instead of passing only `[webrtc_support:, media:]` | `apps/elixip2/lib/framework/SIPSessionMedia.ex` | **yes** — this is how the script tells the adapter which conference the leg joins |
+| **FW-1** | `ensure_peer_connection/3` must merge extra options from the context (`appdata[:media_conn_opts]`) into the `create_peer_connection/3` opts, instead of passing only `[webrtc_support:, media:]` | `apps/elixip2/lib/framework/SIPSessionMedia.ex` | **yes** — this is how the script tells the adapter which conference the leg joins — **landed** as `SIP.Session.Media.extra_conn_opts/1` |
+| **FW-1b** | `on_media_error` accepts a `(reason -> {code, reason})` **function**, not only a fixed pair | `apps/elixip2/lib/framework/SIPSessionInvite.ex` | **yes**, discovered while implementing P2: without it §6.5's table is not expressible. "No codec in common" is a `488` (the offer is unusable, retrying is pointless) and a media-server RPC failure a `500` (ours, a retry may work); one code for both tells the peer the wrong thing about what to do next |
+| **FW-0** | `Kelix.Router` implements `SIP.Session.Call` and **registers itself** as the call processing module | `apps/kelixip/lib/kelix/router.ex` | **yes**, and it was not in this list: the design assumed the `calls` path was wired. Resolve → quota → spawn was all there, but nothing had registered the callback, so an INVITE was answered `500` however complete the dial plan was |
 | **FW-4** | **Nested resources for module commands**: `match "/modules/:name/*rest"` resolved against the path templates already carried by `control_command.rest`, method lists incl. `:put`/`:patch`, path params merged into args (path < query < body), and declared `status:` / `location:` / `errors:` so `201 Created` + `Location` and `409` are derived by the frontal | `apps/kelixip/lib/kelix/control_api.ex`, `lib/kelix/module.ex` | **decided** — but *not* a blocker: §8.3.5 keeps the module reachable at the flat route until it lands |
 | **FW-2** | Merge `conn.query_params` into the args map so a `GET` command can be filtered | `apps/kelixip/lib/kelix/control_api.ex` | yes, in practice — `conference.list?domain=…` has no other way to receive its filter. Best done **inside** FW-4: same function, same precedence rule |
 | FW-3 | `Kelix.Control.CLI` parses trailing `k=v` tokens into the args map instead of `%{"args" => [...]}` | `apps/kelixip/lib/kelix/control/cli.ex` | no — the module normalises both shapes (§8.3.6) |
 | FW-5 | `kelictl` reads `Kelix.Control.Registry` to offer `kelictl <module> help`, and maps a command's declared `errors:` onto non-zero exit codes | `apps/kelixip/lib/kelix/control/cli.ex` | no — but it is what closes the last parity gap of §8.3.6, and it is the prerequisite for positional CLI arguments |
+| **FW-6** | `Kelix.Control.status/0` collects `status/0` from every loaded module, and `Kelix.Metrics.Poller` samples every module exporting `poll_metrics/0` | `apps/kelixip/lib/kelix/control.ex`, `lib/kelix/metrics/poller.ex` | **landed with P5** — what gives `kelictl status` its `mcu:` line and the §11 gauges their clock. Generic: the core names no module, a module that exports neither contributes nothing |
 
 FW-1 is small and additive (an unknown key in `conn_opts` is ignored by every
 existing adapter), and it unblocks any future adapter that needs per-call
@@ -1179,19 +1229,23 @@ observations the script has no use for.
 
 ## 14. Delivery phases
 
-| Phase | Content | Done when |
-|---|---|---|
-| **P1** | `Client` (XML-RPC subset §3.2-3.5), `EventQueue`, conference registry + DID allocation, `conference.create/list/show/delete` declared with their templates | `kelictl mcu conference.create domain=… name=…` returns an allocated DID, the flat REST form answers, and the conference shows in `GetConferences` |
-| **P0′** | FW-4 (+FW-2) in the kelixip core: nested templates, path params in args, declared `status`/`location`/`errors` | `POST /modules/mcu/conferences` answers `201` + `Location`, `GET …/conferences/:uid/participants` routes, **and** every pre-existing flat command still answers identically |
-| **P2** | Adapter + FW-1 + `mcu.exs`, audio only, plain RTP | a SIP phone joins and hears the mix |
-| **P3** | Video: mosaic join, `SetVideoCodec`, auto-layout, FPU both ways | two video phones see each other |
-| **P4** | SDES + DTLS/ICE-lite legs | a WebRTC gateway leg joins |
-| **P5** | `conference.update`, `participant.*`, metrics, orphan GC, MCU-restart recovery | §9 and §11 fully covered |
-| **P5b** | **Conference lifecycle from a scenario** (§17): `create_conference/2`, `ensure_conference/3`, `update_conference/2`, `destroy_conference/1` as plain Elixir functions a script calls in-call, with creator ownership | a script creates a conference on an unknown DID, the caller joins it, and the conference goes away with the call that made it |
-| **P5c** | **Documentation** (§18): the design doc reconciled with what shipped, the operator/developer guides, and the "test without packaging" recipe | a reader who never saw this work can configure a node, dial a conference and drive it from a script, from the docs alone |
-| **P6** | Packaging: `kelixip-mod-mcu` RPM/deb, sample config, docs | `dnf install kelixip-mod-mcu` + a config snippet gets a working conference |
-| **P7** | **Server-side (Mendooze), §16.1-16.2**: `StartRTPTimeout` RPC + MCU event types `3` (media timeout) and `4` (media connected); kelixip arms/disarms the watchdog after the answer and handles both events | unplugging a phone's network mid-call frees its slot and its mosaic tile within `rtp_timeout_ms`, and the adapter emits `:ice_connected` on real media — **L1 and L2 lifted** |
-| **P8** | **Server-side (Mendooze), §16.3**: `StartReceiving` returns `(recPort, fmtpByPt)`; kelixip deletes its local codec arbitration and moves `SetRTPProperties(codec.*)` before `StartReceiving` | the SDP answer carries the fmtp the MCU will actually use, verbatim — **L4 lifted**; mcuGold on the same server is unaffected |
+Status as of 2026-07-30: **P0′ through P5b are implemented**, each verified against
+the live media server as well as against the recording stub. P5c is this section's own
+increment; P6 to P8 are open.
+
+| Phase | Status | Content | Done when |
+|---|---|---|---|
+| **P1** | ✔ | `Client` (XML-RPC subset §3.2-3.5), `EventQueue`, conference registry + DID allocation, `conference.create/list/show/delete` declared with their templates | `kelictl mcu conference.create domain=… name=…` returns an allocated DID, the flat REST form answers, and the conference shows in `GetConferences` |
+| **P0′** | ✔ | FW-4 (+FW-2) in the kelixip core: nested templates, path params in args, declared `status`/`location`/`errors` | `POST /modules/mcu/conferences` answers `201` + `Location`, `GET …/conferences/:uid/participants` routes, **and** every pre-existing flat command still answers identically |
+| **P2** | ✔ | Adapter + FW-1 + `mcu.exs`, audio only, plain RTP | a SIP phone joins and hears the mix |
+| **P3** | ✔ | Video: mosaic join, `SetVideoCodec`, auto-layout, FPU both ways | two video phones see each other |
+| **P4** | ✔ | SDES + DTLS/ICE-lite legs | a WebRTC gateway leg joins |
+| **P5** | ✔ | `conference.update`, `participant.*`, metrics, orphan GC, MCU-restart recovery | §9 and §11 fully covered |
+| **P5b** | ✔ | **Conference lifecycle from a scenario** (§17): `create_conference/2`, `ensure_conference/3`, `update_conference/2`, `destroy_conference/1` as plain Elixir functions a script calls in-call, with creator ownership | a script creates a conference on an unknown DID, the caller joins it, and the conference goes away with the call that made it |
+| **P5c** | → | **Documentation** (§18): the design doc reconciled with what shipped, the operator/developer guides, and the "test without packaging" recipe | a reader who never saw this work can configure a node, dial a conference and drive it from a script, from the docs alone |
+| **P6** |  | Packaging: `kelixip-mod-mcu` RPM/deb, sample config, docs | `dnf install kelixip-mod-mcu` + a config snippet gets a working conference |
+| **P7** |  | **Server-side (Mendooze), §16.1-16.2**: `StartRTPTimeout` RPC + MCU event types `3` (media timeout) and `4` (media connected); kelixip arms/disarms the watchdog after the answer and handles both events | unplugging a phone's network mid-call frees its slot and its mosaic tile within `rtp_timeout_ms`, and the adapter emits `:ice_connected` on real media — **L1 and L2 lifted** |
+| **P8** |  | **Server-side (Mendooze), §16.3**: `StartReceiving` returns `(recPort, fmtpByPt)`; kelixip deletes its local codec arbitration and moves `SetRTPProperties(codec.*)` before `StartReceiving` | the SDP answer carries the fmtp the MCU will actually use, verbatim — **L4 lifted**; mcuGold on the same server is unaffected |
 
 Phases P1-P2 are the minimum viable increment; everything after is additive and
 independently shippable. **P0′ is deliberately not numbered first**: it is the

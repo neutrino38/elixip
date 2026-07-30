@@ -8,14 +8,18 @@ import Config
 #   KELIXIP_CONFIG   → config.toml   (infra: listeners, media pool, modules, API)
 #   KELIXIP_DOMAINS  → domains.toml  (domains + dial-plan, hot-reloadable)
 #
-# Both default to the FHS location the package installs (§12.1). A missing or
-# invalid file aborts the boot with a clear message (fail fast, so systemd reports
-# a failed start) — point the variables elsewhere to run from a checkout.
+# In **:prod** both default to the FHS location the package installs (§12.1). A
+# missing or invalid file aborts the boot with a clear message (fail fast, so systemd
+# reports a failed start).
 #
-# Guarded on :prod so `mix test`, `mix scenario` and the elixipp escript keep
-# booting with an empty config (no file, no listener), as they always have.
-if config_env() == :prod do
-  config :kelixip,
-    config_path: System.get_env("KELIXIP_CONFIG", "/etc/kelixip/config.toml"),
-    domains_path: System.get_env("KELIXIP_DOMAINS", "/etc/kelixip/domains.toml")
-end
+# In every **other** environment the variables are honoured too, but there is no
+# default: unset means no path, so `mix test`, `mix scenario` and the elixipp escript
+# keep booting with an empty config — no file, no listener — exactly as they always
+# have. What this buys is running a real server from a checkout in one command line
+# (see BUILD.md, "Running the mcu module from a checkout"), instead of setting the app
+# env by hand before starting the application.
+default = fn fhs -> if config_env() == :prod, do: fhs, else: nil end
+
+config :kelixip,
+  config_path: System.get_env("KELIXIP_CONFIG", default.("/etc/kelixip/config.toml")),
+  domains_path: System.get_env("KELIXIP_DOMAINS", default.("/etc/kelixip/domains.toml"))
