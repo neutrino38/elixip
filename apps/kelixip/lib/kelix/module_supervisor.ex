@@ -318,8 +318,21 @@ defmodule Kelix.ModuleSupervisor do
   defp register(name, module, config) do
     Kelix.ModuleRegistry.register(name, module, config)
 
-    if function_exported?(module, :describe_control, 0),
-      do: Kelix.Control.Registry.register(name, module.describe_control())
+    # A refused command set (ambiguous templates, FW-4) is a declaration bug in the
+    # module: log it and keep the module running — its facades and config are fine,
+    # only its control surface is unavailable.
+    if function_exported?(module, :describe_control, 0) do
+      case Kelix.Control.Registry.register(name, module.describe_control()) do
+        {:error, reason} ->
+          Logger.error(
+            module: __MODULE__,
+            message: "module #{inspect(name)} has no control surface: #{inspect(reason)}"
+          )
+
+        _ ->
+          :ok
+      end
+    end
 
     Logger.info(
       module: __MODULE__,

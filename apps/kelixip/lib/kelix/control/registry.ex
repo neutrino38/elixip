@@ -11,20 +11,44 @@ defmodule Kelix.Control.Registry do
   the registry and its population.
 
   Held in a supervised `Agent`; reads tolerate it being absent.
+
+  Registration is also where a **conflicting command set is refused** (FW-4,
+  `docs/design/mcu_module.md` §8.3.4): two commands whose path templates no request
+  could tell apart would make dispatch depend on iteration order, so the module's
+  whole surface is rejected here instead — a declaration bug, caught once at start,
+  rather than a request-time coin flip.
   """
   use Agent
+  require Logger
 
   @type command :: Kelix.Module.control_command()
 
   @spec start_link(keyword) :: Agent.on_start()
   def start_link(_opts \\ []), do: Agent.start_link(fn -> %{} end, name: __MODULE__)
 
-  @doc "Register a module's declared commands (no-op for an empty list)."
-  @spec register(String.t(), [command]) :: :ok
+  @doc """
+  Register a module's declared commands (no-op for an empty list).
+
+  `{:error, {:ambiguous_templates, a, b}}` when two commands declare templates that
+  cannot be told apart; nothing is registered in that case.
+  """
+  @spec register(String.t(), [command]) :: :ok | {:error, term}
   def register(_name, []), do: :ok
 
   def register(name, commands) when is_binary(name) and is_list(commands) do
-    if alive?(), do: Agent.update(__MODULE__, &Map.put(&1, name, commands)), else: :ok
+    case Kelix.Control.Route.check_conflicts(commands) do
+      :ok ->
+        if alive?(), do: Agent.update(__MODULE__, &Map.put(&1, name, commands)), else: :ok
+
+      {:error, reason} ->
+        Logger.error(
+          module: __MODULE__,
+          message:
+            "module #{inspect(name)} declares an unroutable command set: #{inspect(reason)}"
+        )
+
+        {:error, reason}
+    end
   end
 
   @doc "Drop a module's commands (stop / reload)."
