@@ -43,6 +43,7 @@ vad                 = 1          # 0 none | 1 basic | 2 full
 rate                = 32000      # 8000 | 16000 | 32000 | 48000 — see below
 audio_codecs        = ["OPUS", "G722", "PCMA", "PCMU", "TELEPHONE-EVENT"]
 video_codecs        = ["H264"]
+text_codecs         = ["T140RED", "T140"]   # T.140 real-time text, redundancy first
 max_participants    = 20
 destroy_when_empty  = false
 auto_layout         = true       # the mosaic follows the number of video legs
@@ -91,6 +92,21 @@ ICE candidates. On the media server:
 * a media server too old to report the address gets its calls refused with `500` and
   a log line saying so — kelixip deliberately keeps no address to fall back on, since
   a guessed one produces a call that connects and never carries media.
+
+**Text is on by default — this MCU does total conversation.** `text_codecs`
+lists T.140 in preference order, and `T140RED` first means a caller offering RFC
+4103 redundancy gets it (a lost packet is a lost character, which is exactly what
+redundancy buys on an accessibility call). Three things follow:
+
+* a caller that offers no `m=text` is unaffected: only the medias the offer carries
+  are answered;
+* a caller offering plain `t140` gets plain `t140`, no `red`;
+* `text_codecs = []` turns text off for that conference, and its `m=text` section is
+  answered with **port 0** (the section keeps its place, RFC 3264 §6).
+
+Nothing else to configure: the media server mixes text on its own text mixer, which
+needs no layout and no join — a text leg is not a mosaic tile, and it does not move
+the automatic layout.
 
 **`rate` is the mixer's sampling rate, not a codec constraint.** The server accepts
 8000/16000/32000/48000 and resamples every participant to its own codec rate, so a

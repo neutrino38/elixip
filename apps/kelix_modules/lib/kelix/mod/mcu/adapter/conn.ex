@@ -21,10 +21,17 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   Getting that order wrong yields a media server that answers `returnCode: 1` to
   everything and sends no RTP.
 
-  Perimeter: audio and video, over plain RTP, SDES-SRTP or DTLS-SRTP + ICE-lite —
-  the three transports mcuGold supports, so a SIP phone and a WebRTC gateway join the
-  same conference. `@supported_medias` is what gates the media list; a text section is
-  answered with port 0 rather than half-configured.
+  Perimeter: **total conversation** — audio, video and T.140 text — over plain RTP,
+  SDES-SRTP or DTLS-SRTP + ICE-lite, the three transports mcuGold supports, so a SIP
+  phone, a text terminal and a WebRTC gateway join the same conference.
+  `@supported_medias` is what gates the media list; anything else offered is answered
+  with port 0 rather than half-configured.
+
+  Text is a media like the others here, with two differences worth knowing: the MCU
+  wires every participant into the text mixer at `CreateParticipant`, so there is no
+  join RPC to pair with `AddSidebarParticipant`/`AddMosaicParticipant`; and `T140RED`
+  (RFC 4103 redundancy) needs an `a=fmtp` naming the T.140 payload type, which
+  `red_fmtp/2` builds in the *offerer's* numbering like every other answer field.
   """
   use GenServer
   require Logger
@@ -46,9 +53,9 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   @default_mosaic 0
   @default_sidebar 0
 
-  # Audio and video in this increment; text (T.140) needs SetTextCodec and is its
-  # own increment. Anything else offered is declined with port 0.
-  @supported_medias [:audio, :video]
+  # Total conversation: audio, video and text. Anything else offered (an
+  # `application` section for BFCP, say) is declined with port 0.
+  @supported_medias [:audio, :video, :text]
 
   # The hash the DTLS fingerprint is fetched and advertised under (§6.3 rule 6).
   @dtls_hash "SHA-256"
@@ -584,6 +591,20 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     end
   end
 
+  # T.140. `SetTextCodec` takes the participant and the codec, nothing else: text has
+  # no profile to impose (no size, no rate, no bitrate), which is why this clause is
+  # the short one. `T140RED` is a codec here, not a modifier — the redundancy is the
+  # server's to produce once it is told to use it.
+  defp set_codec(state, :text, neg) do
+    case primary_code(:text, neg) do
+      nil ->
+        {:error, :no_common_codec}
+
+      code ->
+        void_rpc(state, "SetTextCodec", [state.conf_id, state.part_id, code])
+    end
+  end
+
   defp set_codec(_state, media, _neg), do: {:error, {:media_not_supported, media}}
 
   # The Medooze constant of a codec name, read off the shared codec tables (a
@@ -600,6 +621,11 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # increment drives (decision 6b). Both are per-participant calls, hence here rather
   # than in the registry; the *layout* of the mosaic is conference-level and stays
   # with the registry (§4.2).
+  #
+  # **Text is absent on purpose**: the MCU wires every participant into the text
+  # mixer at `CreateParticipant` (`multiconf.cpp`: `textMixer.CreateMixer` +
+  # `SetTextInput`/`SetTextOutput` + `InitMixer`), so there is no text equivalent of
+  # these two RPCs to call — and none to undo at teardown either.
   defp join_mixer(state) do
     [
       {:audio, "AddSidebarParticipant", @default_sidebar},
@@ -644,7 +670,10 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
       port: neg.rec_port,
       # the offerer's payload-type numbering (§6.3 rule 1)
       rtpmaps: rtpmaps,
-      fmtp: Map.merge(dtmf_fmtp(neg), codec_fmtp(desc, rtpmaps)),
+      fmtp:
+        dtmf_fmtp(neg)
+        |> Map.merge(codec_fmtp(desc, rtpmaps))
+        |> Map.merge(red_fmtp(desc.type, rtpmaps)),
       # rule 8: b=AS: on video is min(offered, the conference's profile)
       bandwidth: answer_bandwidth(state, desc),
       # sendrecv for a mixed participant; a one-way offer is mirrored (rule 7)
@@ -744,6 +773,23 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     do: %{Integer.to_string(pt) => "0-16"}
 
   defp dtmf_fmtp(_neg), do: %{}
+
+  # RFC 4103 §5: `red` carries an fmtp listing its generations, each naming the
+  # T.140 payload type — primary plus two redundant, as the framework's own offer
+  # builder emits. Two rules follow from the answer being in the **offerer's**
+  # numbering (§6.3 rule 1): the payload types quoted are the caller's, and the
+  # fmtp is emitted only when T.140 itself is answered alongside — `red` naming a
+  # payload type absent from the answer is not something a peer can decode.
+  defp red_fmtp(:text, rtpmaps) do
+    with %{pt: red_pt} <- Enum.find(rtpmaps, &(&1.encoding == "red")),
+         %{pt: t140_pt} <- Enum.find(rtpmaps, &(&1.encoding == "t140")) do
+      %{Integer.to_string(red_pt) => "#{t140_pt}/#{t140_pt}/#{t140_pt}"}
+    else
+      _ -> %{}
+    end
+  end
+
+  defp red_fmtp(_media, _rtpmaps), do: %{}
 
   # The address the answer advertises, set by `open_receive/3` from the media
   # server's own `StartReceiving` return (§16.5, G2 closed). Never nil here: the

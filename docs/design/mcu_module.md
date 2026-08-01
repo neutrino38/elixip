@@ -40,9 +40,15 @@ instance per call, `Kelix.ControlAPI` exposes the module's commands under
    (`Kelix.Mod.Mcu.auto_comp/1`: a ladder over the `comp` values of §3.6 — two
    participants side by side rather than a 2x2 with two black tiles). Only **video**
    legs count, and a conference with none issues no mosaic RPC at all.
-4. Plain RTP/AVP, **SDES-SRTP** and **DTLS-SRTP + ICE-lite** call legs (the
-   three transports mcuGold supports), so both SIP phones and WebRTC gateways
-   can join.
+4. **Total conversation**: T.140 real-time text alongside audio and video, with
+   RFC 4103 redundancy (`red`) when the caller offers it. Text is mixed by the
+   MCU's own text mixer, which needs no join RPC — the server wires every
+   participant into it at `CreateParticipant` — and no layout: a text leg is not
+   a mosaic tile. `text_codecs = []` on a conference turns it off, and its `m=text`
+   section is then declined with port 0.
+5. Plain RTP/AVP, **SDES-SRTP** and **DTLS-SRTP + ICE-lite** call legs (the
+   three transports mcuGold supports), so both SIP phones, text terminals and
+   WebRTC gateways can join.
 
 ### 1.2 Explicitly out of scope
 
@@ -545,6 +551,15 @@ hard cases:
 7. **`a=sendrecv`** is the direction for a mixed participant; a `recvonly`
    offer is answered `sendonly` and vice-versa (`reverse_direction/1`).
 8. **Bandwidth.** `b=AS:` on video is `min(offered, conference video.bitrate)`.
+9. **T.140 redundancy.** `t140` and `red` are answered like any other codec, in
+   the offerer's numbering. When both are answered, `red` carries the RFC 4103
+   fmtp naming the T.140 payload type — primary plus two redundant,
+   `a=fmtp:<red> <t140>/<t140>/<t140>`, the caller's payload types. It is emitted
+   **only** then: `red` quoting a payload type absent from the answer is not
+   decodable, which is the same reading the framework's own offer builder applies
+   (`Sdp.add_red_fmtp/5`). Preference comes from the conference's `text_codecs`,
+   `T140RED` first by default, so a caller offering redundancy gets it — on a lossy
+   link a lost packet is a lost character.
 
 The implementation reuses `MediaServer.Mendooze.Sdp` for `parse/1`,
 `negotiate/3`, `build/1`, `local_rtp_map/3`, `answer_rtpmaps/2`,
@@ -1000,6 +1015,9 @@ vad                 = 1
 rate                = 32000
 audio_codecs        = ["OPUS", "G722", "PCMA", "PCMU", "TELEPHONE-EVENT"]
 video_codecs        = ["H264"]
+# T.140 real-time text. Order is preference, so redundancy is used when the caller
+# offers it; `[]` turns text off and its m= section is declined with port 0.
+text_codecs         = ["T140RED", "T140"]
 max_participants    = 20
 destroy_when_empty  = false
 auto_layout         = true
@@ -1275,6 +1293,7 @@ of configuration failure rather than adding a feature; P6 to P8 are open.
 | **P6** |  | Packaging: `kelixip-mod-mcu` RPM/deb, sample config, docs | `dnf install kelixip-mod-mcu` + a config snippet gets a working conference |
 | **P7** |  | **Server-side (Mendooze), §16.1-16.2**: `StartRTPTimeout` RPC + MCU event types `3` (media timeout) and `4` (media connected); kelixip arms/disarms the watchdog after the answer and handles both events | unplugging a phone's network mid-call frees its slot and its mosaic tile within `rtp_timeout_ms`, and the adapter emits `:ice_connected` on real media — **L1 and L2 lifted** |
 | **P8** |  | **Server-side (Mendooze), §16.3**: `StartReceiving` returns `(recPort, fmtpByPt)`; kelixip deletes its local codec arbitration and moves `SetRTPProperties(codec.*)` before `StartReceiving` | the SDP answer carries the fmtp the MCU will actually use, verbatim — **L4 lifted**; mcuGold on the same server is unaffected |
+| **TC** | ✔ | **Total conversation** (§1.1 point 4): T.140 + RFC 4103 redundancy on the conference leg — `@supported_medias` gains `:text`, `SetTextCodec` at ACK time, the `red` fmtp in the answer, and the reference scripts ask for `media: :tc` | a terminal offering `m=text` with `red`+`t140` is answered on both, `SetTextCodec` carries `T140RED`, and the three medias flow on one leg |
 | **S4** | ✔ | **Server-side (Mendooze), §16.5**: `--public-ip` as the one announced address, read by `GetMediaCandidates` *and* returned by `StartReceiving`; the module drops `rtp_ip`/`public_ip` and takes its media servers from `[mediaserver.pool.*]` | a conference leg's `c=` line carries the address the *server* reported, a node behind NAT is fixed by one server flag, and the module declares no media server of its own — **G2 lifted** |
 
 Phases P1-P2 are the minimum viable increment; everything after is additive and

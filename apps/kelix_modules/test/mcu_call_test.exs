@@ -57,6 +57,44 @@ defmodule Kelix.Mod.McuCallTest do
   a=sendrecv\r
   """
 
+  # A total-conversation terminal: audio, video and T.140 with RFC 4103 redundancy.
+  # The text payload types are deliberately NOT the ones we would pick locally
+  # (105/106), so the answer proves it reuses the offerer's numbering everywhere,
+  # including inside the red fmtp.
+  @offer_tc """
+  v=0\r
+  o=- 1 1 IN IP4 192.168.1.50\r
+  s=-\r
+  c=IN IP4 192.168.1.50\r
+  t=0 0\r
+  m=audio 40000 RTP/AVP 8\r
+  a=rtpmap:8 PCMA/8000\r
+  a=sendrecv\r
+  m=video 40002 RTP/AVP 99\r
+  a=rtpmap:99 H264/90000\r
+  a=sendrecv\r
+  m=text 40004 RTP/AVP 98 97\r
+  a=rtpmap:98 red/1000\r
+  a=rtpmap:97 t140/1000\r
+  a=fmtp:98 97/97/97\r
+  a=sendrecv\r
+  """
+
+  # A text terminal that does not do redundancy: plain T.140 only.
+  @offer_text_plain """
+  v=0\r
+  o=- 1 1 IN IP4 192.168.1.50\r
+  s=-\r
+  c=IN IP4 192.168.1.50\r
+  t=0 0\r
+  m=audio 40000 RTP/AVP 8\r
+  a=rtpmap:8 PCMA/8000\r
+  a=sendrecv\r
+  m=text 40004 RTP/AVP 97\r
+  a=rtpmap:97 t140/1000\r
+  a=sendrecv\r
+  """
+
   # An offer with no codec the conference accepts (G.729 only).
   @offer_no_codec """
   v=0\r
@@ -459,6 +497,97 @@ defmodule Kelix.Mod.McuCallTest do
       send(pid, {:ACK, %{method: :ACK}, nil, dialog})
       assert_receive {:rpc, "AddSidebarParticipant", [42, 0, 7]}, 2000
       assert wait_for(fn -> Enum.find(participants(ctx.uid), &(&1.state == :connected)) end)
+    end
+  end
+
+  describe "total conversation — a T.140 leg joins" do
+    test "the text section is answered with red + t140 in the offerer's numbering", ctx do
+      {_pid, _dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_tc))
+      assert_receive {:replied, 200, _reason, fields, _req}, 2000
+
+      answer = fields[:body]
+      assert answer =~ "m=audio #{@rec_port} RTP/AVP"
+      assert answer =~ "m=video #{@rec_port} RTP/AVP"
+      # the text m= line carries both formats, on the caller's payload types
+      assert answer =~ "m=text #{@rec_port} RTP/AVP"
+      assert answer =~ "a=rtpmap:98 red/1000"
+      assert answer =~ "a=rtpmap:97 t140/1000"
+      # RFC 4103 §5: red names the T.140 payload type, primary + 2 redundant — and
+      # it names the CALLER's 97, not our local 106
+      assert answer =~ "a=fmtp:98 97/97/97"
+      refute answer =~ "a=fmtp:98 106"
+      # nothing was declined
+      refute answer =~ "m=text 0 "
+    end
+
+    test "the RPC sequence gains SetTextCodec, and no text join RPC", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_tc))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+
+      # answer time: one StartReceiving per media, in the offer's order
+      assert TestStub.rpc_order() == [
+               "CreateParticipant",
+               "StartReceiving",
+               "StartReceiving",
+               "StartReceiving"
+             ]
+
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      ack_time = wait_for(fn -> non_empty(TestStub.rpc_order()) end)
+
+      # T140RED is preferred when the caller offers red (105 = TextCodec::T140RED),
+      # and the text mixer needs no join: the MCU wires it at CreateParticipant
+      assert ack_time == [
+               "SetAudioCodec",
+               "StartSending",
+               "SetVideoCodec",
+               "StartSending",
+               "SetTextCodec",
+               "StartSending",
+               "AddSidebarParticipant",
+               "AddMosaicParticipant",
+               # the automatic layout still follows the *video* legs only: a text
+               # leg is not a tile
+               "SetCompositionType"
+             ]
+    end
+
+    test "T140RED is what the mixer is told to send when the caller offers it", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_tc))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+
+      # 105 = TextCodec::T140RED. Preference order comes from the conference's
+      # `text_codecs`, redundancy first — a lost packet is a lost character.
+      assert_receive {:rpc, "SetTextCodec", [42, 7, 105]}, 2000
+    end
+
+    test "a terminal without redundancy gets plain t140 and no red fmtp", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_text_plain))
+      assert_receive {:replied, 200, _reason, fields, _req}, 2000
+
+      answer = fields[:body]
+      assert answer =~ "a=rtpmap:97 t140/1000"
+      refute answer =~ "red/1000"
+      # red is what carries the redundancy: no red answered, no fmtp naming it
+      refute answer =~ "a=fmtp:97"
+
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      # 106 = TextCodec::T140
+      assert_receive {:rpc, "SetTextCodec", [42, 7, 106]}, 2000
+    end
+
+    test "a conference with text off declines the section with port 0", ctx do
+      {:ok, conf} =
+        Kelix.Mod.Mcu.create_conference(@domain, name: "audio only", text_codecs: [])
+
+      {_pid, _dialog} = start_call(ctx.scenario, invite(conf.did, sdp: @offer_tc))
+      assert_receive {:replied, 200, _reason, fields, _req}, 2000
+
+      answer = fields[:body]
+      # RFC 3264 §6: the section keeps its place, with port 0 and the offered formats
+      assert answer =~ "m=text 0 RTP/AVP 98 97"
+      assert answer =~ "m=audio #{@rec_port} RTP/AVP"
     end
   end
 

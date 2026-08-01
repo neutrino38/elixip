@@ -29,7 +29,12 @@ defmodule Kelix.Mod.Mcu.Config do
             # flag on the audio media, not an entry in the codec list.
             dtmf: true,
             video_codecs: ["H264"],
-            text_codecs: [],
+            # Total conversation is what this MCU is for, so T.140 is on by default.
+            # Order is preference: `T140RED` first means a caller that offers RFC 4103
+            # redundancy gets it — the point of RED being links where a lost packet is
+            # a lost character. A caller offering plain `t140` falls back to it, and
+            # `text_codecs = []` turns text off (its m= line is then answered port 0).
+            text_codecs: ["T140RED", "T140"],
             max_participants: 20,
             destroy_when_empty: false,
             auto_layout: true,
@@ -79,8 +84,8 @@ defmodule Kelix.Mod.Mcu.Config do
          :ok <- check_enum(block, "rate", @rates),
          :ok <- check_enum(block, "layout_comp", Enum.to_list(@comp_values)),
          {:ok, audio, dtmf} <- audio_codecs(block),
-         {:ok, video} <- codecs(block, "video_codecs", @video_codecs, ["H264"]),
-         {:ok, text} <- codecs(block, "text_codecs", @text_codecs, []),
+         {:ok, video} <- codecs(block, "video_codecs", @video_codecs, defaults().video_codecs),
+         {:ok, text} <- codecs(block, "text_codecs", @text_codecs, defaults().text_codecs),
          {:ok, did_range} <- did_range(block, "did_range"),
          {:ok, did_ranges} <- did_ranges(block) do
       defaults = %__MODULE__{}
@@ -218,7 +223,7 @@ defmodule Kelix.Mod.Mcu.Config do
   defp audio_codecs(block) do
     case Map.get(block, "audio_codecs") do
       nil ->
-        d = %__MODULE__{}
+        d = defaults()
         {:ok, d.audio_codecs, d.dtmf}
 
       list when is_list(list) ->
@@ -294,6 +299,10 @@ defmodule Kelix.Mod.Mcu.Config do
   end
 
   defp parse_range(_spec, key), do: {:error, ~s(#{key} must look like "8000-8099")}
+
+  # The struct is the single statement of every default, so a `parse/1` clause that
+  # needs one before building it reads it here rather than repeating the literal.
+  defp defaults(), do: %__MODULE__{}
 
   defp int(block, key, default) do
     case Map.get(block, key) do

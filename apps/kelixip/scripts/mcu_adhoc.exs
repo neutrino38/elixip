@@ -79,7 +79,11 @@ defmodule Kelix.Mcu.AdhocCall do
     # per-cause mapping matters (§6.5): an unusable offer is a 488 (retrying it is
     # pointless), a media-server failure a 500 (ours, and a retry may work).
     reply_invite_with_sdp(200,
-      media: :audio_video,
+      # total conversation: audio, video and T.140 text. This is what we *accept*,
+      # not what we demand — only the medias the offer actually carries are answered,
+      # so an audio-only phone is unaffected. A conference with `text_codecs = []`
+      # declines the text section with port 0 the same way.
+      media: :tc,
       # accept a secure leg when the offer asks for one (SDES from a SIP phone,
       # DTLS+ICE from a WebRTC gateway); `:no` would refuse it with a 488
       webrtc: :if_offered,
@@ -111,7 +115,7 @@ defmodule Kelix.Mcu.AdhocCall do
       # Re-INVITE / UPDATE: renegotiate on the same participant.
       {:INVITE, _req, _trans, _dlg} ->
         reply_invite_with_sdp(200,
-          media: :audio_video,
+          media: :tc,
           webrtc: :if_offered,
           on_media_error: &Kelix.Mcu.AdhocCall.media_error/1
         )
@@ -120,7 +124,7 @@ defmodule Kelix.Mcu.AdhocCall do
 
       {:UPDATE, _req, _trans, _dlg} ->
         reply_invite_with_sdp(200,
-          media: :audio_video,
+          media: :tc,
           webrtc: :if_offered,
           on_media_error: &Kelix.Mcu.AdhocCall.media_error/1
         )
