@@ -73,7 +73,13 @@ port = 9095
 #password_hash = "md5"             # md5 | sha256 — authoritative, both ways
 #pool_size     = 4                 # 1 serialises every REGISTER
 
-# The MCU pool (round-robin + health-check). Not needed for a registrar-only node.
+# The media servers, declared here and nowhere else: point-to-point calls take one
+# per call (round-robin + health-check), and the mcu module opens one control channel
+# per `mendooze` entry. Not needed for a registrar-only node.
+#
+# No media address here: what the server announces in the SDP is its own setting
+# (`mediaserver --public-ip`, mandatory behind a NAT) and it reports it per call.
 #[mediaserver.pool.mcu1]
 #module = "mendooze"
 #url    = "http://mcu1.example.com:8080"
+#enabled = true                    # kelictl can toggle it without a restart

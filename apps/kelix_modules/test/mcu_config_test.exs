@@ -25,7 +25,6 @@ defmodule Kelix.Mod.Mcu.ConfigTest do
       assert config.video == %{size: 6, fps: 15, bitrate: 1024, intra_period: 300}
       assert config.xmlrpc_timeout_ms == 10_000
       assert config.gc_orphans == true
-      assert config.mcus == []
       # no range configured ⇒ `did` is mandatory on create (§8.4)
       assert config.did_range == nil
     end
@@ -77,20 +76,6 @@ defmodule Kelix.Mod.Mcu.ConfigTest do
       assert {:error, _} = Config.parse(%{"did_range" => "8099-8000"})
     end
 
-    test "a mediaserver block with no url, or an unknown key" do
-      assert {:error, msg} =
-               Config.parse(%{"mediaserver" => %{"mcu1" => %{"rtp_ip" => "10.0.0.1"}}})
-
-      assert msg =~ "mediaserver.mcu1: url is required"
-
-      assert {:error, msg} =
-               Config.parse(%{
-                 "mediaserver" => %{"mcu1" => %{"url" => "http://x:8080", "prt" => 1}}
-               })
-
-      assert msg =~ "mediaserver.mcu1: unknown key(s): prt"
-    end
-
     test "a block that is not a table" do
       assert {:error, "block must be a table"} = Config.parse("nope")
     end
@@ -130,31 +115,25 @@ defmodule Kelix.Mod.Mcu.ConfigTest do
     end
   end
 
-  describe "mediaservers" do
-    test "are decoded in name order, keeping rtp_ip / public_ip (G2)" do
-      config =
-        parse!(%{
-          "mediaserver" => %{
-            "mcu2" => %{"url" => "http://10.0.0.13:8080"},
-            "mcu1" => %{
-              "url" => "http://10.0.0.12:8080",
-              "rtp_ip" => "10.0.0.12",
-              "public_ip" => "203.0.113.12"
-            }
-          }
-        })
+  describe "the media servers moved to [mediaserver.pool.*]" do
+    # The block is refused rather than ignored: an operator upgrading a node that
+    # worked would otherwise get a module with no media server at all, and discover
+    # it on the first call.
+    test "the old sub-block is refused, with the migration in the message" do
+      assert {:error, msg} =
+               Config.parse(%{"mediaserver" => %{"mcu1" => %{"url" => "http://x:8080"}}})
 
-      assert Enum.map(config.mcus, & &1.name) == ["mcu1", "mcu2"]
-      assert hd(config.mcus).rtp_ip == "10.0.0.12"
-      assert hd(config.mcus).public_ip == "203.0.113.12"
-      # absent is nil, not a made-up address
-      assert Enum.at(config.mcus, 1).rtp_ip == nil
+      assert msg =~ "[mediaserver.pool.<name>]"
+      assert msg =~ "rtp_ip"
     end
 
-    test "mcu/2 finds an entry by name" do
-      config = parse!(%{"mediaserver" => %{"mcu1" => %{"url" => "http://x:8080"}}})
-      assert Config.mcu(config, "mcu1").url == "http://x:8080"
-      assert Config.mcu(config, "ghost") == nil
+    test "so is a bare `mediaserver` key" do
+      assert {:error, msg} = Config.parse(%{"mediaserver" => "http://x:8080"})
+      assert msg =~ "[mediaserver.pool.<name>]"
+    end
+
+    test "and the block carries no media server list any more" do
+      refute Map.has_key?(parse!(%{}), :mcus)
     end
   end
 

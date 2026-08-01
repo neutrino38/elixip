@@ -22,7 +22,10 @@ defmodule Kelix.Mcu.TestStub do
     "GetConferences" => {:ok, []},
     "CreateParticipant" => {:ok, [7]},
     "DeleteParticipant" => {:ok, []},
-    "StartReceiving" => {:ok, [52_014]},
+    # `[recPort, announcedIp]`: the address to put in the SDP answer is the server's
+    # own, reported with the port it goes with (§16.5). A server returning the port
+    # alone is a server too old for this module — see the `:no_media_ip` test.
+    "StartReceiving" => {:ok, [52_014, "203.0.113.12"]},
     "StopReceiving" => {:ok, []},
     "StartSending" => {:ok, []},
     "StopSending" => {:ok, []},

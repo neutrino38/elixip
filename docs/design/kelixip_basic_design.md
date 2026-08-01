@@ -206,7 +206,7 @@ Loaded once at boot, held read-only in a GenServer. Responsibilities:
    | `[[listen]]` entries | listener child specs (§2.1); TLS/WSS `cert`/`key` → per-listener opts (today `:tls_certfile`/`:tls_keyfile` are global — see below) |
    | `log.*` | Logger backend config (syslog vs stdout) |
    | `server.max_calls` | server-wide quota gate in the Router/factory |
-   | `mediaserver.pool.*` | `Kelix.MediaPool` children (§9) |
+   | `mediaserver.pool.*` | decoded entries (§9), read by `Kelix.MediaPool` **and** by the `mcu` module — the one declaration of a media server |
    | `module.*` | `Kelix.ModuleSupervisor` children (§8) |
    | `control_api.*`, `metrics.*` | `Kelix.ControlAPI` / `Kelix.Metrics` |
 
@@ -936,7 +936,7 @@ Spec §6. Extends the current single-`:mediaserver` config to a pool.
 > `enabled` + healthy `[mediaserver.pool.*]` entries, `toggle/3` enables/disables
 > an entry at runtime, and a periodic health-check probes each MCU **off** the
 > GenServer (Task + cast, so a slow MCU never stalls checkouts) with a synchronous
-> `check_health/1` for admin/tests; malformed entries are logged and skipped.
+> `check_health/1` for admin/tests.
 > `Kelix.Router.overrides_for/1` injects the chosen `%{module, url}` per call.
 > **Concurrency-safe injection** required one additive framework change:
 > `SIP.Session.Media.use_mediaserver/1` now prefers a per-instance override in the
@@ -961,6 +961,25 @@ Each pool entry wraps an existing `MediaServer.Mendooze` adapter instance
 handle into the spawned instance's config (`mediaserver` override), so the DSL
 `media_connect/0` macro connects to a pool-chosen server transparently. Metrics:
 active sessions per MCU, MCU up/down (§11).
+
+**These entries are the node's only declaration of a media server** (amended
+2026-08-01). `Kelix.Config` decodes and validates them — `module`, `url`,
+`enabled`, nothing else, a malformed entry aborting the boot rather than being
+skipped — and hands the same list to both consumers:
+
+| Consumer | Reads | Selects |
+|---|---|---|
+| `Kelix.MediaPool` | the decoded entries | one per **call**, round-robin over `enabled` + probe-healthy |
+| the `mcu` module (`docs/design/mcu_module.md` §8.4) | the `mendooze` entries, at boot, from `Kelix.Config` | one per **conference**, round-robin over `enabled` + its own control-channel health |
+
+The module reads `Kelix.Config` and not this GenServer because the boot order puts
+`Kelix.MediaPool` *after* the modules, and because the list is a config fact rather
+than pool state; it asks the pool only for the runtime `enabled` flag. It
+deliberately ignores the pool's `healthy` flag: that is probed on the
+point-to-point adapter's channel (`/jsr309`), which is not the one conferences ride
+(`/mcu`) — hence two `*_mediaserver_up` metrics rather than one. A media address is
+**not** a pool key: the media server announces its own (`mediaserver --public-ip`)
+and reports it per call.
 
 ---
 

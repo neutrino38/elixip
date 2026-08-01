@@ -65,27 +65,32 @@ shutdown_grace_ms   = 5000
 rtp_timeout_ms      = 10000      # ignored until the server-side watchdog of P7
 gc_orphans          = true       # sweep conferences no controller owns (§9.4)
 
-# One block per media server. A conference is pinned to the one it was created on.
-[module.mcu.mediaserver.mcu1]
-url       = "http://10.0.0.12:9090"
-rtp_ip    = "10.0.0.12"
-public_ip = "203.0.113.12"
+# The media servers are NOT declared here: they are the [mediaserver.pool.*] entries,
+# the same block the point-to-point path uses. One control channel per `mendooze`
+# entry; a conference is pinned to the one it was created on.
+[mediaserver.pool.mcu1]
+module = "mendooze"
+url    = "http://10.0.0.12:9090"
 ```
 
 **`url` is the media server's XML-RPC port** — the `--http-port` it was started with
 (9090 in the IVèS deployment, *not* 8080). The module talks to `POST <url>/mcu`, a
 different endpoint from the JSR-309 `/jsr309` the point-to-point adapter uses.
 
-**`rtp_ip` vs `public_ip` is the setting deployments get wrong.** The MCU API has no
-"give me my media address" call (gap G2 in the design), so the address in the SDP
-answer comes from here:
+**The media address is the media server's own setting, not kelixip's.** It reports it
+on every `StartReceiving`, and that is what goes in the answer's `c=` line and in the
+ICE candidates. On the media server:
 
-* `public_ip` is what goes in the answer's `c=` line and in the ICE candidates — the
-  address the **caller** must send RTP to;
-* `rtp_ip` is what the media server binds locally;
-* behind NAT they differ, and `public_ip` must be the address reachable from the
-  callers. Set only `rtp_ip` and it is used for both, which is right on a flat
-  network and wrong behind NAT — with audio that connects and never arrives.
+* `mediaserver --public-ip <ip>` sets it; **behind a NAT it is mandatory** — it must
+  be the address reachable from the callers, which is not the one the server binds
+  (it binds `0.0.0.0`);
+* without the flag the server auto-detects the first non-loopback IPv4 of its host
+  name, which is right on a flat network and wrong behind NAT;
+* the server logs what it settled on at startup (`-RTPSession announced IP …`) and
+  **refuses to start** if it cannot determine one;
+* a media server too old to report the address gets its calls refused with `500` and
+  a log line saying so — kelixip deliberately keeps no address to fall back on, since
+  a guessed one produces a call that connects and never carries media.
 
 **`rate` is the mixer's sampling rate, not a codec constraint.** The server accepts
 8000/16000/32000/48000 and resamples every participant to its own codec rate, so a
@@ -316,16 +321,19 @@ The caller sees a code; only the log tells them apart.
 | `488` immediately | `offer refused (:secure_not_supported)` | a DTLS/SDES offer while the script passed `webrtc: :no` |
 | `503` immediately | `mediaserver.down : mcu=mcu1` earlier | the control channel is down; `kelictl status` shows `0/1 up` |
 | `500` | `mcu mcu1: <Method> failed: …` | an RPC failed. The line above it names the method and the server's message |
+| `500` | `mcu mcu1 returned no media IP from StartReceiving` | the media server predates the `--public-ip` work and cannot report the address to announce — upgrade it |
 | `404` | `participant.rejected: reason=no_such_conference` | the DID designates nothing — `conference.list` and the dial rule |
 
 ### 3.3 Connected but no audio
 
 The call is up and nobody hears anything. In order of likelihood:
 
-1. **`public_ip`** — the answer advertises an address the caller cannot reach (§1.2).
-   `participant.show`'s statistics settle it: `num_recv_packets` at 0 means nothing
-   arrives, non-zero `num_send_packets` with silence at the far end means our address
-   is wrong;
+1. **the announced address** — the answer advertises an address the caller cannot
+   reach. Check the media server's startup log (`-RTPSession announced IP …`) against
+   what the caller can route to, and set `mediaserver --public-ip` behind a NAT
+   (§1.2). `participant.show`'s statistics settle it: `num_recv_packets` at 0 means
+   nothing arrives, non-zero `num_send_packets` with silence at the far end means our
+   address is wrong;
 2. **no ACK** — the leg never joined the mix. `participant.list` shows `state:
    ringing`;
 3. **firewall on the RTP range** — the media server's `--min-rtp-port/--max-rtp-port`.
@@ -365,9 +373,20 @@ carrying `[module.mcu]` and a dial rule, with a real `mediaserver --http-port` r
 ### 5.1 One media server per conference
 
 A conference is pinned to the MCU it was created on and never migrates (design §1.3).
-The `[mediaserver.pool.*]` round-robin is for point-to-point calls and is only used
-here as a tie-breaker at `create` time when no `mcu` is named. Duplicating an address
-in both blocks is normal on a single-MCU node.
+That pinning is a property of the conference, not of where the servers are declared:
+`create` without an `mcu` takes the `[mediaserver.pool.*]` entries in turn, `create`
+with one always honours it, and either way the conference then stays put.
+
+Two flags decide whether a server is eligible for a **new** conference:
+
+* the pool's `enabled` — the operator's switch. Disabling a server stops new
+  conferences (and new point-to-point calls) landing on it; the live ones stay, and
+  naming it explicitly still works;
+* the module's own `status` — `kelictl status`'s `n/m up`. This is health as seen from
+  the control channel the conferences ride (`/mcu`), which is **not** what the pool
+  probes for point-to-point calls (`/jsr309`). A server can legitimately be up for one
+  and down for the other, which is why there are two metrics
+  (`kelix_mcu_mediaserver_up` and `kelix_mediaserver_up`).
 
 ### 5.2 Reloading and restarting
 

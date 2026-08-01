@@ -14,8 +14,16 @@ defmodule Kelix.Mod.McuCallTest do
   alias Kelix.Mod.Mcu
   alias Kelix.Mod.Mcu.{Client, Config, Conference}
 
+  # The media servers the module drives now come from [mediaserver.pool.*], decoded
+  # by Kelix.Config; the registry takes the resulting list directly so a test needs
+  # no config file.
+  @mediaservers [%{name: "mcu1", url: "http://127.0.0.1:18080"}]
+
   @domain "example.com"
   @rec_port 52_014
+  # the address the media server itself reports on StartReceiving (§16.5) —
+  # what the answer must advertise, and no longer a config value
+  @media_ip "203.0.113.12"
 
   # A plain-RTP audio offer from a SIP phone.
   @offer """
@@ -113,27 +121,25 @@ defmodule Kelix.Mod.McuCallTest do
     }
   end
 
-  setup do
+  setup context do
     {:ok, config} =
       Config.parse(%{
         "did_range" => "8000-8009",
-        "audio_codecs" => ["OPUS", "PCMA", "PCMU", "TELEPHONE-EVENT"],
-        "mediaserver" => %{
-          "mcu1" => %{
-            "url" => "http://127.0.0.1:18080",
-            "rtp_ip" => "10.0.0.12",
-            "public_ip" => "203.0.113.12"
-          }
-        }
+        "audio_codecs" => ["OPUS", "PCMA", "PCMU", "TELEPHONE-EVENT"]
       })
 
-    start_supervised!({Mcu, config: config, module_name: "mcu"})
+    start_supervised!({Mcu, config: config, module_name: "mcu", mediaservers: @mediaservers})
+
+    # `@tag start_receiving:` lets one test pretend the server is an older build
+    returns = %{
+      "StartReceiving" => Map.get(context, :start_receiving, {:ok, [@rec_port, @media_ip]})
+    }
 
     start_supervised!(
       {Client,
        name: "mcu1",
        base_url: "http://127.0.0.1:18080",
-       transport: TestStub.transport(self(), %{"StartReceiving" => {:ok, [@rec_port]}}),
+       transport: TestStub.transport(self(), returns),
        register: {Mcu, "mcu1"},
        reconnect_ms: 0},
       id: :client_mcu1
@@ -257,8 +263,9 @@ defmodule Kelix.Mod.McuCallTest do
       assert_receive {:replied, 200, _reason, fields, _req}, 2000
 
       answer = fields[:body]
-      # §6.3 rule 3: the c= line is the configured public_ip (G2), not the MCU's own
-      assert answer =~ "c=IN IP4 203.0.113.12"
+      # §6.3 rule 3: the c= line is the address the media server reported on
+      # StartReceiving (§16.5) — kelixip holds no media address of its own
+      assert answer =~ "c=IN IP4 #{@media_ip}"
       # the receive port StartReceiving returned
       assert answer =~ "m=audio #{@rec_port} RTP/AVP"
       # rule 1: the offer's payload-type numbering is reused verbatim
@@ -267,6 +274,17 @@ defmodule Kelix.Mod.McuCallTest do
       assert answer =~ "a=fmtp:101 0-16"
       # the mixed participant is sendrecv (rule 7)
       assert answer =~ "a=sendrecv"
+    end
+
+    # No fallback on purpose: a guessed address produces a 200 whose media silently
+    # goes nowhere, which is worse than a refused call (§16.5).
+    @tag start_receiving: {:ok, [52_014]}
+    test "a media server too old to report its media address gets no answer", ctx do
+      {_pid, _dialog} = start_call(ctx.scenario, invite(ctx.did))
+
+      assert_receive {:replied, 180, "Ringing", _fields, _req}, 2000
+      assert_receive {:replied, 500, _reason, _fields, _req}, 2000
+      refute_received {:replied, 200, _reason, _fields, _req}
     end
 
     test "the RPC order follows §6.2 and splits at the ACK", ctx do

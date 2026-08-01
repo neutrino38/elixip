@@ -15,8 +15,16 @@ defmodule Kelix.Mod.McuAdminTest do
   alias Kelix.Mod.Mcu
   alias Kelix.Mod.Mcu.{Adapter, Client, Conference, Config}
 
+  # The media servers the module drives now come from [mediaserver.pool.*], decoded
+  # by Kelix.Config; the registry takes the resulting list directly so a test needs
+  # no config file.
+  @mediaservers [%{name: "mcu1", url: "http://127.0.0.1:18080"}]
+
   @domain "example.com"
   @rec_port 52_014
+  # the address the media server itself reports on StartReceiving (§16.5) —
+  # what the answer must advertise, and no longer a config value
+  @media_ip "203.0.113.12"
 
   @offer """
   v=0\r
@@ -37,23 +45,19 @@ defmodule Kelix.Mod.McuAdminTest do
     block =
       Map.merge(
         %{
-          "did_range" => "8000-8009",
-          "mediaserver" => %{
-            "mcu1" => %{
-              "url" => "http://127.0.0.1:18080",
-              "rtp_ip" => "10.0.0.12",
-              "public_ip" => "203.0.113.12"
-            }
-          }
+          "did_range" => "8000-8009"
         },
         Keyword.get(opts, :block, %{})
       )
 
     {:ok, config} = Config.parse(block)
-    start_supervised!({Mcu, config: config, module_name: "mcu"})
+    start_supervised!({Mcu, config: config, module_name: "mcu", mediaservers: @mediaservers})
 
     returns =
-      Map.merge(%{"StartReceiving" => {:ok, [@rec_port]}}, Keyword.get(opts, :returns, %{}))
+      Map.merge(
+        %{"StartReceiving" => {:ok, [@rec_port, @media_ip]}},
+        Keyword.get(opts, :returns, %{})
+      )
 
     start_supervised!(
       {Client,

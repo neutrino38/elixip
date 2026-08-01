@@ -8,26 +8,24 @@ defmodule Kelix.Mod.McuTest do
   alias Kelix.Mod.Mcu
   alias Kelix.Mod.Mcu.{Client, Config}
 
+  # The media servers the module drives now come from [mediaserver.pool.*], decoded
+  # by Kelix.Config; the registry takes the resulting list directly so a test needs
+  # no config file.
+  @mediaservers [%{name: "mcu1", url: "http://127.0.0.1:18080"}]
+
   @domain "example.com"
 
   defp start_mcu(opts \\ []) do
     block =
       Map.merge(
         %{
-          "did_range" => "8000-8002",
-          "mediaserver" => %{
-            "mcu1" => %{
-              "url" => "http://127.0.0.1:18080",
-              "rtp_ip" => "10.0.0.12",
-              "public_ip" => "203.0.113.12"
-            }
-          }
+          "did_range" => "8000-8002"
         },
         Keyword.get(opts, :block, %{})
       )
 
     {:ok, config} = Config.parse(block)
-    start_supervised!({Mcu, config: config, module_name: "mcu"})
+    start_supervised!({Mcu, config: config, module_name: "mcu", mediaservers: @mediaservers})
 
     transport = TestStub.transport(self(), Keyword.get(opts, :returns, %{}))
 
@@ -64,6 +62,38 @@ defmodule Kelix.Mod.McuTest do
   end
 
   defp create(args \\ %{"domain" => @domain}), do: Mcu.handle_control("conference.create", args)
+
+  # Two servers, both up: what a create with no `mcu` has to choose between.
+  defp start_two_mcus(opts \\ []) do
+    {:ok, config} = Config.parse(%{"did_range" => "8000-8009"})
+
+    servers = [
+      %{name: "mcu1", url: "http://127.0.0.1:18080"},
+      %{name: "mcu2", url: "http://127.0.0.1:18081"}
+    ]
+
+    start_supervised!(
+      {Mcu,
+       [config: config, module_name: "mcu", mediaservers: servers] ++
+         Keyword.take(opts, [:pool])}
+    )
+
+    for %{name: name, url: url} <- servers do
+      start_supervised!(
+        {Client,
+         name: name,
+         base_url: url,
+         transport: TestStub.transport(self()),
+         register: {Mcu, name},
+         reconnect_ms: 0},
+        id: {:client, name}
+      )
+
+      wait_until(fn -> match?({:ok, %{status: :up}}, Mcu.mediaserver(name)) end)
+    end
+
+    :ok
+  end
 
   describe "conference.create" do
     setup do: start_mcu()
@@ -220,11 +250,10 @@ defmodule Kelix.Mod.McuTest do
     setup do
       {:ok, config} =
         Config.parse(%{
-          "did_range" => "8000-8002",
-          "mediaserver" => %{"mcu1" => %{"url" => "http://127.0.0.1:18080"}}
+          "did_range" => "8000-8002"
         })
 
-      start_supervised!({Mcu, config: config, module_name: "mcu"})
+      start_supervised!({Mcu, config: config, module_name: "mcu", mediaservers: @mediaservers})
 
       transport = TestStub.transport(self(), %{"EventQueueCreate" => {:error, :timeout}})
 
@@ -252,10 +281,77 @@ defmodule Kelix.Mod.McuTest do
     end
   end
 
+  describe "which media server a create lands on (§8.4)" do
+    setup do: start_two_mcus()
+
+    test "no `mcu` given: the servers are taken in turn" do
+      assert {:ok, %{mcu: first}} = create(%{"domain" => @domain})
+      assert {:ok, %{mcu: second}} = create(%{"domain" => @domain})
+      assert {:ok, %{mcu: third}} = create(%{"domain" => @domain})
+
+      assert Enum.sort([first, second]) == ["mcu1", "mcu2"]
+      # the cursor wraps rather than sticking to the last one
+      assert third == first
+    end
+
+    test "an explicit `mcu` is always honoured — a conference is pinned" do
+      assert {:ok, %{mcu: "mcu2"}} = create(%{"domain" => @domain, "mcu" => "mcu2"})
+      assert {:ok, %{mcu: "mcu2"}} = create(%{"domain" => @domain, "mcu" => "mcu2"})
+    end
+  end
+
+  describe "a media server the pool disabled (§8.4)" do
+    setup do
+      # a test-owned pool next to the node's (empty) singleton, so the module reads
+      # an `enabled` flag we control
+      pool =
+        for name <- ["mcu1", "mcu2"] do
+          %{name: name, module: :mendooze, url: "http://127.0.0.1:18080", enabled: true}
+        end
+
+      mp = :"mp_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {Kelix.MediaPool, name: mp, pool: pool, probe: fn _ -> true end, first_check_ms: 60_000}
+      )
+
+      start_two_mcus(pool: mp)
+      :ok = Kelix.MediaPool.toggle("mcu2", false, mp)
+      :ok
+    end
+
+    test "takes no new conference, but stays reachable by name" do
+      assert {:ok, %{mcu: "mcu1"}} = create(%{"domain" => @domain})
+      assert {:ok, %{mcu: "mcu1"}} = create(%{"domain" => @domain})
+      # disabled means "no new conference here", not "unusable": a conference is
+      # pinned, so an explicit name still works
+      assert {:ok, %{mcu: "mcu2"}} = create(%{"domain" => @domain, "mcu" => "mcu2"})
+    end
+  end
+
+  describe "mediaservers_from_pool/1" do
+    test "keeps the mendooze entries and leaves the others to their own adapter" do
+      entries = [
+        %{name: "mcu1", module: :mendooze, url: "http://10.0.0.12:8080", enabled: true},
+        %{name: "fake", module: :mockup, url: "http://10.0.0.99:8080", enabled: true},
+        %{name: "other", module: MediaServer.Mockup, url: "http://10.0.0.98:8080", enabled: true}
+      ]
+
+      assert Mcu.mediaservers_from_pool(entries) == [
+               %{name: "mcu1", url: "http://10.0.0.12:8080"}
+             ]
+    end
+
+    test "an empty pool yields no control channel" do
+      assert Mcu.mediaservers_from_pool([]) == []
+    end
+  end
+
   describe "conference.create with no media server configured" do
     setup do
+      # an empty [mediaserver.pool] — nothing for the module to drive
       {:ok, config} = Config.parse(%{"did_range" => "8000-8002"})
-      start_supervised!({Mcu, config: config, module_name: "mcu"})
+      start_supervised!({Mcu, config: config, module_name: "mcu", mediaservers: []})
       :ok
     end
 

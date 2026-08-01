@@ -62,8 +62,15 @@ defmodule Kelix.ConfigTest do
       assert tls.key == "/etc/kelixip/tls/privkey.pem"
     end
 
-    test "carries the sub-blocks for later phases", %{cfg: cfg} do
-      assert cfg.mediaserver_pool["mcu1"]["url"] == "http://10.0.0.1:8080"
+    test "media server pool decoded into typed entries", %{cfg: cfg} do
+      assert cfg.mediaserver_pool == [
+               %{
+                 name: "mcu1",
+                 module: :mendooze,
+                 url: "http://10.0.0.1:8080",
+                 enabled: true
+               }
+             ]
     end
 
     test "control_api parsed into a typed map with defaults", %{cfg: cfg} do
@@ -74,6 +81,80 @@ defmodule Kelix.ConfigTest do
                auth: "token",
                token: "change-me"
              }
+    end
+  end
+
+  describe "parse/1 — [mediaserver.pool.*]" do
+    # A media server is declared here and only here (the mcu module reads this same
+    # list), so a typo must abort the boot rather than silently drop a server.
+    test "absent → no pool" do
+      assert {:ok, cfg} = Config.parse("")
+      assert cfg.mediaserver_pool == []
+    end
+
+    test "entries come out in name order, whatever the file order" do
+      toml = """
+      [mediaserver.pool.zulu]
+      module = "mendooze"
+      url    = "http://10.0.0.9:8080"
+
+      [mediaserver.pool.alpha]
+      module = "mockup"
+      url    = "http://10.0.0.1:8080"
+      """
+
+      assert {:ok, cfg} = Config.parse(toml)
+      assert Enum.map(cfg.mediaserver_pool, & &1.name) == ["alpha", "zulu"]
+    end
+
+    test "enabled defaults to true and is honoured when given" do
+      toml = """
+      [mediaserver.pool.mcu1]
+      module  = "mendooze"
+      url     = "http://10.0.0.1:8080"
+      enabled = false
+      """
+
+      assert {:ok, cfg} = Config.parse(toml)
+      assert [%{enabled: false}] = cfg.mediaserver_pool
+    end
+
+    test "a module name that is neither shorthand is taken as a module" do
+      toml = """
+      [mediaserver.pool.mcu1]
+      module = "MediaServer.Mockup"
+      url    = "http://10.0.0.1:8080"
+      """
+
+      assert {:ok, cfg} = Config.parse(toml)
+      assert [%{module: MediaServer.Mockup}] = cfg.mediaserver_pool
+    end
+
+    test "url is required" do
+      assert {:error, msg} = Config.parse("[mediaserver.pool.mcu1]\nmodule = \"mendooze\"")
+      assert msg =~ "[mediaserver.pool.mcu1]: missing required `url`"
+    end
+
+    test "module is required" do
+      assert {:error, msg} = Config.parse("[mediaserver.pool.mcu1]\nurl = \"http://x:8080\"")
+      assert msg =~ "[mediaserver.pool.mcu1]: missing required `module`"
+    end
+
+    test "an unknown key is named, not ignored" do
+      toml = """
+      [mediaserver.pool.mcu1]
+      module    = "mendooze"
+      url       = "http://10.0.0.1:8080"
+      public_ip = "203.0.113.12"
+      """
+
+      assert {:error, msg} = Config.parse(toml)
+      assert msg =~ "[mediaserver.pool.mcu1]: unknown key(s): public_ip"
+    end
+
+    test "a stray key in [mediaserver] is rejected" do
+      assert {:error, msg} = Config.parse("[mediaserver]\nurl = \"http://x:8080\"")
+      assert msg =~ "[mediaserver]: unknown key(s): url"
     end
   end
 

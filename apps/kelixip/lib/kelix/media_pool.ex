@@ -11,12 +11,13 @@ defmodule Kelix.MediaPool do
   instance as a per-instance `:mediaserver_instance` override, so the DSL
   `media_connect/0` connects to a pool-chosen server transparently.
 
-  Config comes from `Kelix.Config.current().mediaserver_pool` (a raw
-  `%{name => %{"module", "url", "enabled"}}` map); a malformed entry is logged and
-  skipped. Tests bypass it with `start_link(pool: %{…}, probe: fn entry -> bool end)`.
+  Entries come from `Kelix.Config.current().mediaserver_pool`, already **decoded and
+  validated** there (`Kelix.Config.pool_entry`): a malformed entry aborts the boot
+  rather than being skipped here, and the mcu module reads that same list to open its
+  control channels — one declaration of a media server, one reading of it. Tests
+  bypass the config with `start_link(pool: [entry…], probe: fn entry -> bool end)`.
   """
   use GenServer
-  require Logger
 
   @health_interval_ms 10_000
 
@@ -56,7 +57,7 @@ defmodule Kelix.MediaPool do
 
   @impl true
   def init(opts) do
-    entries = build_entries(Keyword.get(opts, :pool) || pool_from_config())
+    entries = health_fields(Keyword.get(opts, :pool) || pool_from_config())
     interval = Keyword.get(opts, :health_interval_ms, @health_interval_ms)
 
     # optimistic (healthy: true) until the first probe lands; schedule that probe
@@ -174,55 +175,15 @@ defmodule Kelix.MediaPool do
   # ── config → entries ─────────────────────────────────────────────────────────
 
   defp pool_from_config() do
-    if Process.whereis(Kelix.Config), do: Kelix.Config.current().mediaserver_pool, else: %{}
+    if Process.whereis(Kelix.Config), do: Kelix.Config.current().mediaserver_pool, else: []
   end
 
-  # raw %{name => %{"module","url","enabled"}} → ordered [entry]; bad entries skipped
-  defp build_entries(pool) when is_map(pool) do
-    pool
-    |> Enum.sort_by(&elem(&1, 0))
-    |> Enum.flat_map(fn {name, attrs} -> build_entry(name, attrs) end)
-  end
+  # The decoded entries carry no health: add it here, optimistic until the first
+  # probe lands, so a boot cannot start by refusing every call.
+  defp health_fields(entries) when is_list(entries),
+    do: Enum.map(entries, &Map.put(&1, :healthy, true))
 
-  defp build_entries(_), do: []
-
-  defp build_entry(name, %{} = attrs) do
-    with {:ok, module} <- entry_module(attrs["module"]),
-         url when is_binary(url) and url != "" <- attrs["url"] do
-      [
-        %{
-          name: name,
-          module: module,
-          url: url,
-          enabled: Map.get(attrs, "enabled", true) == true,
-          healthy: true
-        }
-      ]
-    else
-      _ ->
-        Logger.error(
-          module: __MODULE__,
-          message: "media pool entry #{inspect(name)} skipped: needs a module + url"
-        )
-
-        []
-    end
-  end
-
-  defp build_entry(name, _attrs) do
-    Logger.error(
-      module: __MODULE__,
-      message: "media pool entry #{inspect(name)} skipped: must be a table"
-    )
-
-    []
-  end
-
-  # keep the :mockup/:mendooze shorthand (resolve_ms_module understands it), else a module
-  defp entry_module("mockup"), do: {:ok, :mockup}
-  defp entry_module("mendooze"), do: {:ok, :mendooze}
-  defp entry_module(m) when is_binary(m) and m != "", do: {:ok, Module.concat([m])}
-  defp entry_module(_), do: :error
+  defp health_fields(_), do: []
 
   defp resolve_module_atom(:mockup), do: MediaServer.Mockup
   defp resolve_module_atom(:mendooze), do: MediaServer.Mendooze

@@ -1,8 +1,10 @@
 defmodule Kelix.Mod.Mcu.Supervisor do
   @moduledoc """
   What `Kelix.Mod.Mcu.child_spec/2` returns (design `docs/design/mcu_module.md`
-  §4.1): the conference registry plus one `{Client, EventQueue}` pair per
-  `[module.mcu.mediaserver.<name>]` entry.
+  §4.1): the conference registry plus one `{Client, EventQueue}` pair per media
+  server — the `[mediaserver.pool.<name>]` entries `Kelix.Mod.Mcu`
+  `mediaservers_from_pool/0` selected, passed in as `:mediaservers` so tests can
+  inject a list without a config file.
 
   Strategy `:rest_for_one`, not `:one_for_one`: the registry (`Kelix.Mod.Mcu`, the
   first child) **owns the ETS tables** the clients and the adapter read, and holds
@@ -26,10 +28,11 @@ defmodule Kelix.Mod.Mcu.Supervisor do
   def init(opts) do
     config = Keyword.fetch!(opts, :config)
     module_name = Keyword.get(opts, :module_name, "mcu")
+    mcus = Keyword.get(opts, :mediaservers, [])
 
     children =
-      [{Mcu, config: config, module_name: module_name}] ++
-        Enum.flat_map(config.mcus, &mcu_children(&1, config))
+      [{Mcu, config: config, module_name: module_name, mediaservers: mcus}] ++
+        Enum.flat_map(mcus, &mcu_children(&1, config))
 
     Supervisor.init(children, strategy: :rest_for_one)
   end

@@ -23,6 +23,21 @@ defmodule Kelix.Config do
           key: String.t() | nil
         }
 
+  @typedoc """
+  One `[mediaserver.pool.<name>]` entry, decoded (design §9).
+
+  Decoded **here** rather than by each consumer: `Kelix.MediaPool` selects a server
+  per point-to-point call and the mcu module opens one control channel per server,
+  and both must see the same list — a media server declared once, read one way.
+  `module` keeps the `:mockup` / `:mendooze` shorthand the adapters understand.
+  """
+  @type pool_entry :: %{
+          name: String.t(),
+          module: :mockup | :mendooze | module,
+          url: String.t(),
+          enabled: boolean
+        }
+
   @type t :: %__MODULE__{
           node_name: String.t(),
           script_dir: String.t(),
@@ -31,7 +46,7 @@ defmodule Kelix.Config do
           max_calls: pos_integer | nil,
           log: map,
           listen: [listener],
-          mediaserver_pool: map,
+          mediaserver_pool: [pool_entry],
           modules: map,
           control_api: map,
           metrics: map
@@ -44,7 +59,7 @@ defmodule Kelix.Config do
             max_calls: nil,
             log: %{target: "stdout", facility: "local0", level: "info"},
             listen: [],
-            mediaserver_pool: %{},
+            mediaserver_pool: [],
             modules: %{},
             control_api: %{},
             metrics: %{}
@@ -189,7 +204,8 @@ defmodule Kelix.Config do
          {:ok, log} <- parse_log(Map.get(map, "log", %{})),
          {:ok, listen} <- parse_listeners(Map.get(map, "listen", [])),
          {:ok, control_api} <- parse_control_api(Map.get(map, "control_api")),
-         {:ok, metrics} <- parse_metrics(Map.get(map, "metrics")) do
+         {:ok, metrics} <- parse_metrics(Map.get(map, "metrics")),
+         {:ok, pool} <- parse_mediaserver(Map.get(map, "mediaserver")) do
       {:ok,
        %__MODULE__{
          node_name: server.node_name,
@@ -199,7 +215,7 @@ defmodule Kelix.Config do
          max_calls: server.max_calls,
          log: log,
          listen: listen,
-         mediaserver_pool: get_in(map, ["mediaserver", "pool"]) || %{},
+         mediaserver_pool: pool,
          modules: Map.get(map, "module", %{}),
          control_api: control_api,
          metrics: metrics
@@ -344,6 +360,60 @@ defmodule Kelix.Config do
     case {Map.get(l, "cert"), Map.get(l, "key")} do
       {nil, nil} -> {:ok, nil, nil}
       _ -> {:error, "[[listen]]: `cert`/`key` only apply to tls/wss listeners"}
+    end
+  end
+
+  # ── [mediaserver.pool.*] (§9) ────────────────────────────────────────────────
+
+  # The whole `[mediaserver]` section: `pool` is the only thing in it today, and a
+  # sibling key is a typo worth naming rather than ignoring.
+  defp parse_mediaserver(nil), do: {:ok, []}
+
+  defp parse_mediaserver(%{} = m) do
+    with :ok <- reject_keys(m, ~w(pool), "[mediaserver]") do
+      parse_pool(Map.get(m, "pool"))
+    end
+  end
+
+  defp parse_mediaserver(_), do: {:error, "[mediaserver] must be a table"}
+
+  defp parse_pool(nil), do: {:ok, []}
+
+  # Name order, not TOML order: it is what makes the round-robin sequence (and the
+  # boot log of the mcu module) reproducible from the file alone.
+  defp parse_pool(%{} = pool) do
+    pool
+    |> Enum.sort_by(&elem(&1, 0))
+    |> reduce_while_ok(fn {name, attrs} -> parse_pool_entry(name, attrs) end)
+  end
+
+  defp parse_pool(_),
+    do: {:error, "`mediaserver.pool` must be a table of [mediaserver.pool.<name>] blocks"}
+
+  defp parse_pool_entry(name, %{} = attrs) do
+    ctx = "[mediaserver.pool.#{name}]"
+
+    with :ok <- reject_keys(attrs, ~w(module url enabled), ctx),
+         {:ok, module} <- pool_module(attrs, ctx),
+         {:ok, url} <- req_string(attrs, "url", ctx),
+         {:ok, enabled} <- opt_bool(attrs, "enabled", true, ctx) do
+      {:ok, %{name: name, module: module, url: url, enabled: enabled}}
+    end
+  end
+
+  defp parse_pool_entry(name, _attrs),
+    do: {:error, "[mediaserver.pool.#{name}] must be a table"}
+
+  # `mockup`/`mendooze` stay atoms — the adapters resolve the shorthand — and
+  # anything else is taken as a `MediaServer.Behaviour` module name. Its existence
+  # is not checked here: a module shipped in `module_dir` is loaded after this.
+  defp pool_module(attrs, ctx) do
+    case Map.get(attrs, "module") do
+      "mockup" -> {:ok, :mockup}
+      "mendooze" -> {:ok, :mendooze}
+      m when is_binary(m) and m != "" -> {:ok, Module.concat([m])}
+      nil -> {:error, "#{ctx}: missing required `module` (mockup|mendooze|<module name>)"}
+      _ -> {:error, "#{ctx}: `module` must be a string"}
     end
   end
 

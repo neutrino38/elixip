@@ -110,7 +110,6 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   @impl true
   def init({client, event_sink, participant, opts}) do
     with {:ok, conf} <- fetch_conference(participant.conf_uid),
-         {:ok, entry} <- fetch_entry(conf.mcu),
          {:ok, part_id} <- create_participant(client, conf, participant) do
       Mcu.bind_participant(conf.uid, participant.ref, part_id, self())
 
@@ -124,7 +123,9 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
        %{
          client: client,
          event_sink: event_sink,
-         entry: entry,
+         # the MCU's name, for logs only: this leg needs nothing from the entry's
+         # configuration — the media address comes from the server itself (§16.5)
+         mcu: conf.mcu,
          conf_uid: conf.uid,
          conf_id: conf.conf_id,
          part_ref: participant.ref,
@@ -142,6 +143,10 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
          local_sdes: %{},
          local_ice: nil,
          local_dtls: nil,
+         # the address the SDP answer advertises, as the media server reported it on
+         # the first `StartReceiving` (§16.5). Server-wide, hence one value for the
+         # whole leg rather than one per m= line.
+         media_ip: nil,
          # per media: %{codec:, rec_port:, send: {ip, port}, rtp_map:, dtmf_clock:}
          negotiated: %{},
          receiving: [],
@@ -164,13 +169,6 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     case Mcu.conference(uid) do
       {:ok, conf} -> {:ok, conf}
       :error -> {:error, :no_such_conference}
-    end
-  end
-
-  defp fetch_entry(mcu) do
-    case Mcu.mediaserver(mcu) do
-      {:ok, entry} -> {:ok, entry}
-      :error -> {:error, {:unknown_mcu, mcu}}
     end
   end
 
@@ -401,7 +399,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
         # rtpMaps are keyed with the OFFERED PTs — no local renumbering.
         rtp_map = neg.rtp_map
 
-        with {:ok, [rec_port | _]} <-
+        with {:ok, [rec_port | returned]} <-
                rpc(state, "StartReceiving", [
                  state.conf_id,
                  state.part_id,
@@ -410,9 +408,10 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
                  @role_main,
                  @proto_rtp
                ]),
+             {:ok, ip} <- announced_ip(state, returned),
              :ok <- set_remote_security(state, m, desc),
              :ok <- set_rtp_properties(state, m, desc) do
-          {:ok, %{state | receiving: [media | state.receiving]},
+          {:ok, %{state | receiving: [media | state.receiving], media_ip: ip},
            Map.merge(neg, %{rec_port: rec_port, remote: {desc.ip, desc.port}})}
         end
     end
@@ -746,11 +745,30 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
 
   defp dtmf_fmtp(_neg), do: %{}
 
-  # G2: the media address is configuration, not a server answer — `public_ip` is
-  # what goes in the SDP (it differs from `rtp_ip` behind NAT).
-  defp media_ip(%{entry: entry}) do
-    entry.public_ip || entry.rtp_ip ||
-      raise "mcu #{entry.name} has neither public_ip nor rtp_ip: the SDP answer has no address"
+  # The address the answer advertises, set by `open_receive/3` from the media
+  # server's own `StartReceiving` return (§16.5, G2 closed). Never nil here: the
+  # answer is only built once at least one media was opened, and `ensure_audio/1`
+  # refuses the call otherwise.
+  defp media_ip(%{media_ip: ip}), do: ip
+
+  # `StartReceiving` returns `[recPort, ip]`. The address is the media server's
+  # own (`--public-ip`, else auto-detected), which is the only party that knows
+  # it: it is not derivable from the control channel, and behind a NAT it differs
+  # from the address we reach the server at. A server that returns the port alone
+  # predates that work, and there is deliberately no fallback — guessing produces
+  # an answer whose media silently goes nowhere.
+  defp announced_ip(_state, [ip | _]) when is_binary(ip) and ip != "", do: {:ok, ip}
+
+  defp announced_ip(state, _returned) do
+    Logger.error(
+      module: __MODULE__,
+      message:
+        "conference #{state.conf_uid}: mcu #{state.mcu} returned no media IP from " <>
+          "StartReceiving — upgrade the media server (it must announce its SDP " <>
+          "address, see docs/design/mcu_module.md §16.5)"
+    )
+
+    {:error, :no_media_ip}
   end
 
   # ── guards ───────────────────────────────────────────────────────────────────

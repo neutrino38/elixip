@@ -118,9 +118,10 @@ keeps them out of the release.
 
 > `mcu` (conferencing — see [docs/mcu_module_guide.md](docs/mcu_module_guide.md)) is
 > the one module whose `.beam` is not enough: it needs a reachable **Medooze media
-> server**, configured per `[module.mcu.mediaserver.<name>]`. Installed without one it
-> starts, marks its entry `down`, and answers `503` to every conference — which is
-> the intended failure, not a broken install.
+> server**, declared in `[mediaserver.pool.<name>]` (the same block the
+> point-to-point path uses — the module declares no server of its own). Installed
+> without one it starts, marks its entry `down`, and answers `503` to every
+> conference — which is the intended failure, not a broken install.
 
 ```bash
 cd apps/kelix_modules
@@ -168,10 +169,11 @@ auth = "none"                         # loopback only
 [module.mcu]
 did_range = "8000-8099"
 
-  [module.mcu.mediaserver.mcu1]
-  url       = "http://127.0.0.1:9090"
-  rtp_ip    = "127.0.0.1"
-  public_ip = "127.0.0.1"
+# the media server, declared once for every path that uses it. The address it puts
+# in the SDP is its own setting (`mediaserver --public-ip`), not kelixip's.
+[mediaserver.pool.mcu1]
+module = "mendooze"
+url    = "http://127.0.0.1:9090"
 EOF
 
 cat > /tmp/kelix/domains.toml <<'EOF'

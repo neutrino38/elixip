@@ -11,16 +11,14 @@ defmodule Kelix.Mod.Mcu.Config do
   names the SDP layer can actually emit are accepted — an unknown one is a config
   error, not a call that fails at 3 a.m.) and the **DID allocation ranges**
   (`did_range` / `did_ranges`, §5.3).
+
+  What is deliberately **not** here: the media servers. They are declared once, in
+  `[mediaserver.pool.<name>]`, and the module opens one control channel per entry
+  (§8.4) — a conference is still pinned to one of them, but where the list is
+  *declared* is not what pins it.
   """
 
   @type range :: {pos_integer, pos_integer}
-
-  @type mcu :: %{
-          name: String.t(),
-          url: String.t(),
-          rtp_ip: String.t() | nil,
-          public_ip: String.t() | nil
-        }
 
   @type t :: %__MODULE__{}
 
@@ -43,8 +41,7 @@ defmodule Kelix.Mod.Mcu.Config do
             call_timeout_ms: 5_000,
             shutdown_grace_ms: 5_000,
             rtp_timeout_ms: 10_000,
-            gc_orphans: true,
-            mcus: []
+            gc_orphans: true
 
   # Codec names the SDP layer knows (MediaServer.Mendooze.Sdp tables). Accepting
   # anything else would raise inside the answer builder, one call at a time.
@@ -66,7 +63,7 @@ defmodule Kelix.Mod.Mcu.Config do
   @keys ~w(module call_timeout_ms vad rate audio_codecs video_codecs text_codecs
            max_participants destroy_when_empty auto_layout layout_comp did_range
            did_ranges video_size video_fps video_bitrate video_intra_period
-           xmlrpc_timeout_ms shutdown_grace_ms rtp_timeout_ms gc_orphans mediaserver)
+           xmlrpc_timeout_ms shutdown_grace_ms rtp_timeout_ms gc_orphans)
 
   @doc """
   Validate and decode a `[module.mcu]` block. `{:ok, %Config{}}` or
@@ -74,7 +71,8 @@ defmodule Kelix.Mod.Mcu.Config do
   """
   @spec parse(map) :: {:ok, t} | {:error, String.t()}
   def parse(block) when is_map(block) do
-    with :ok <- reject_unknown_keys(block),
+    with :ok <- reject_moved_mediaserver(block),
+         :ok <- reject_unknown_keys(block),
          :ok <- check_ints(block),
          :ok <- check_bools(block),
          :ok <- check_enum(block, "vad", @vad_values),
@@ -84,8 +82,7 @@ defmodule Kelix.Mod.Mcu.Config do
          {:ok, video} <- codecs(block, "video_codecs", @video_codecs, ["H264"]),
          {:ok, text} <- codecs(block, "text_codecs", @text_codecs, []),
          {:ok, did_range} <- did_range(block, "did_range"),
-         {:ok, did_ranges} <- did_ranges(block),
-         {:ok, mcus} <- mediaservers(block) do
+         {:ok, did_ranges} <- did_ranges(block) do
       defaults = %__MODULE__{}
 
       {:ok,
@@ -112,8 +109,7 @@ defmodule Kelix.Mod.Mcu.Config do
          call_timeout_ms: int(block, "call_timeout_ms", defaults.call_timeout_ms),
          shutdown_grace_ms: int(block, "shutdown_grace_ms", defaults.shutdown_grace_ms),
          rtp_timeout_ms: int(block, "rtp_timeout_ms", defaults.rtp_timeout_ms),
-         gc_orphans: bool(block, "gc_orphans", defaults.gc_orphans),
-         mcus: mcus
+         gc_orphans: bool(block, "gc_orphans", defaults.gc_orphans)
        }}
     end
   end
@@ -127,11 +123,6 @@ defmodule Kelix.Mod.Mcu.Config do
   @spec range_for(t, String.t()) :: range | nil
   def range_for(%__MODULE__{} = config, domain) when is_binary(domain),
     do: Map.get(config.did_ranges, domain) || config.did_range
-
-  @doc "The configured entry named `name`, or `nil`."
-  @spec mcu(t, String.t()) :: mcu | nil
-  def mcu(%__MODULE__{mcus: mcus}, name) when is_binary(name),
-    do: Enum.find(mcus, &(&1.name == name))
 
   @doc """
   Validate a codec list against what the SDP layer can actually emit, and split the
@@ -172,6 +163,21 @@ defmodule Kelix.Mod.Mcu.Config do
     do: {:error, "#{kind}_codecs must be a list of codec names, got #{inspect(other)}"}
 
   # ── per-key validation ───────────────────────────────────────────────────────
+
+  # The media servers moved out of this block into `[mediaserver.pool.<name>]`, which
+  # the point-to-point path already used. Named explicitly rather than left to
+  # `reject_unknown_keys/1`: an operator upgrading a working node deserves the
+  # migration, not "unknown key: mediaserver".
+  defp reject_moved_mediaserver(block) do
+    if Map.has_key?(block, "mediaserver") do
+      {:error,
+       "[module.mcu.mediaserver.<name>] is gone: declare each media server once in " <>
+         "[mediaserver.pool.<name>] (module + url). `rtp_ip`/`public_ip` are no longer " <>
+         "needed either — the media server reports the address to announce itself"}
+    else
+      :ok
+    end
+  end
 
   defp reject_unknown_keys(block) do
     case Map.keys(block) -- @keys do
@@ -288,50 +294,6 @@ defmodule Kelix.Mod.Mcu.Config do
   end
 
   defp parse_range(_spec, key), do: {:error, ~s(#{key} must look like "8000-8099")}
-
-  # [module.mcu.mediaserver.<name>] blocks
-  defp mediaservers(block) do
-    case Map.get(block, "mediaserver") do
-      nil ->
-        {:ok, []}
-
-      map when is_map(map) ->
-        map
-        |> Enum.sort_by(&elem(&1, 0))
-        |> Enum.reduce_while({:ok, []}, fn {name, attrs}, {:ok, acc} ->
-          case mediaserver(name, attrs) do
-            {:ok, entry} -> {:cont, {:ok, acc ++ [entry]}}
-            err -> {:halt, err}
-          end
-        end)
-
-      _ ->
-        {:error, "mediaserver must be a table of [module.mcu.mediaserver.<name>] blocks"}
-    end
-  end
-
-  @mcu_keys ~w(url rtp_ip public_ip)
-
-  defp mediaserver(name, attrs) when is_map(attrs) do
-    with [] <- Map.keys(attrs) -- @mcu_keys,
-         url when is_binary(url) and url != "" <- Map.get(attrs, "url") do
-      {:ok,
-       %{
-         name: name,
-         url: url,
-         rtp_ip: Map.get(attrs, "rtp_ip"),
-         public_ip: Map.get(attrs, "public_ip")
-       }}
-    else
-      extra when is_list(extra) ->
-        {:error, "mediaserver.#{name}: unknown key(s): #{Enum.join(Enum.sort(extra), ", ")}"}
-
-      _ ->
-        {:error, "mediaserver.#{name}: url is required"}
-    end
-  end
-
-  defp mediaserver(name, _attrs), do: {:error, "mediaserver.#{name} must be a table"}
 
   defp int(block, key, default) do
     case Map.get(block, key) do

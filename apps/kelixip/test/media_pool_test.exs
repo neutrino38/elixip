@@ -6,10 +6,12 @@ defmodule Kelix.MediaPoolTest do
 
   alias Kelix.MediaPool
 
-  @pool %{
-    "mcu1" => %{"module" => "mockup", "url" => "http://10.0.0.1:8080", "enabled" => true},
-    "mcu2" => %{"module" => "mendooze", "url" => "http://10.0.0.2:8080", "enabled" => true}
-  }
+  # Entries as Kelix.Config decodes them (see ConfigTest for the decoding itself):
+  # the pool consumes them, it no longer parses TOML attributes.
+  @pool [
+    %{name: "mcu1", module: :mockup, url: "http://10.0.0.1:8080", enabled: true},
+    %{name: "mcu2", module: :mendooze, url: "http://10.0.0.2:8080", enabled: true}
+  ]
 
   # start a test-owned pool with an injected probe; periodic check pushed far out
   defp start_pool(pool, probe \\ fn _ -> true end) do
@@ -27,7 +29,7 @@ defmodule Kelix.MediaPoolTest do
     end
 
     test "an empty pool has nothing to hand out" do
-      mp = start_pool(%{})
+      mp = start_pool([])
       assert MediaPool.checkout(mp) == {:error, :no_mcu}
     end
   end
@@ -73,13 +75,21 @@ defmodule Kelix.MediaPoolTest do
     end
   end
 
-  describe "entry validation" do
-    test "a malformed entry (no url) is skipped, the rest load" do
-      pool = Map.put(@pool, "bad", %{"module" => "mockup"})
-      mp = start_pool(pool)
-      names = mp |> MediaPool.status() |> Enum.map(& &1.name)
-      assert "bad" not in names
-      assert "mcu1" in names and "mcu2" in names
+  describe "entries" do
+    test "are taken in the order given, with health optimistic until the first probe" do
+      mp = start_pool(@pool)
+
+      assert [
+               %{name: "mcu1", module: :mockup, enabled: true, healthy: true},
+               %{name: "mcu2", module: :mendooze, enabled: true, healthy: true}
+             ] = MediaPool.status(mp)
+    end
+
+    # Validation moved to Kelix.Config: a malformed entry aborts the boot instead of
+    # being skipped here, so there is nothing for the pool to reject any more.
+    test "status/1 exposes what a caller needs to reach the server" do
+      mp = start_pool(@pool)
+      assert Enum.all?(MediaPool.status(mp), &match?(%{url: "http://10.0.0." <> _}, &1))
     end
   end
 end

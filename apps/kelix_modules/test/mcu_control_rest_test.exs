@@ -17,6 +17,11 @@ defmodule Kelix.Mod.McuControlRestTest do
   alias Kelix.Mod.Mcu
   alias Kelix.Mod.Mcu.{Client, Config}
 
+  # The media servers the module drives now come from [mediaserver.pool.*], decoded
+  # by Kelix.Config; the registry takes the resulting list directly so a test needs
+  # no config file.
+  @mediaservers [%{name: "mcu1", url: "http://127.0.0.1:18080"}]
+
   @opts Kelix.ControlAPI.init([])
   @domain "example.com"
 
@@ -26,11 +31,10 @@ defmodule Kelix.Mod.McuControlRestTest do
 
     {:ok, config} =
       Config.parse(%{
-        "did_range" => "8000-8001",
-        "mediaserver" => %{"mcu1" => %{"url" => "http://127.0.0.1:18080"}}
+        "did_range" => "8000-8001"
       })
 
-    start_supervised!({Mcu, config: config, module_name: "mcu"})
+    start_supervised!({Mcu, config: config, module_name: "mcu", mediaservers: @mediaservers})
 
     start_supervised!(
       {Client,

@@ -7,7 +7,13 @@ defmodule Kelix.Mod.Mcu do
   `describe/0`, plus the REST + CLI commands of §8.3.3 declared once in
   `describe_control/0`. Its `child_spec/2` is the supervisor of §4.1
   (`Kelix.Mod.Mcu.Supervisor`): this registry, then one `{Client, EventQueue}` pair
-  per configured media server.
+  per media server.
+
+  The media servers are **not** declared in `[module.mcu]`: they are the
+  `[mediaserver.pool.*]` entries (§8.4), read once at boot by
+  `mediaservers_from_pool/0`. The pool is then consulted per conference-create for
+  its `enabled` switch, while the health that decides is this module's own control
+  channel.
 
   ## What lives where
 
@@ -86,8 +92,50 @@ defmodule Kelix.Mod.Mcu do
     %{
       id: __MODULE__,
       type: :supervisor,
-      start: {McuSupervisor, :start_link, [[config: parsed, module_name: to_string(name)]]}
+      start:
+        {McuSupervisor, :start_link,
+         [
+           [
+             config: parsed,
+             module_name: to_string(name),
+             mediaservers: mediaservers_from_pool()
+           ]
+         ]}
     }
+  end
+
+  @doc """
+  The media servers this module drives: the `[mediaserver.pool.*]` entries whose
+  adapter is the Medooze one (§8.4).
+
+  Read from `Kelix.Config` rather than from `Kelix.MediaPool`, which the boot order
+  starts *after* the modules — and the list is a config fact, not a pool state. The
+  pool is consulted at conference-create time instead, for `enabled` and the
+  round-robin.
+
+  Only `mendooze` entries become control channels: this module speaks the MCU
+  XML-RPC dialect, so a `mockup` entry would get a client retrying against a URL
+  nothing answers. The ones left out are named in the log rather than dropped
+  silently.
+  """
+  @spec mediaservers_from_pool([map]) :: [%{name: String.t(), url: String.t()}]
+  def mediaservers_from_pool(entries \\ pool_entries()) do
+    {mine, others} = Enum.split_with(entries, &(&1.module == :mendooze))
+
+    if others != [] do
+      Logger.info(
+        module: __MODULE__,
+        message:
+          "mcu module ignores #{length(others)} pool entry/entries driven by another " <>
+            "adapter: #{Enum.map_join(others, ", ", &"#{&1.name} (#{inspect(&1.module)})")}"
+      )
+    end
+
+    Enum.map(mine, &Map.take(&1, [:name, :url]))
+  end
+
+  defp pool_entries() do
+    if Process.whereis(Kelix.Config), do: Kelix.Config.current().mediaserver_pool, else: []
   end
 
   @impl Kelix.Module
@@ -142,16 +190,17 @@ defmodule Kelix.Mod.Mcu do
   def lookup_did(_domain, _did), do: :error
 
   @doc """
-  A configured media server: `%{name, url, rtp_ip, public_ip, status, client}`.
+  A media server this module drives: `%{name, url, status, client, queue_id}`.
 
-  `rtp_ip` / `public_ip` are what the SDP answer needs (G2: the media address comes
-  from configuration, the MCU API has no `GetMediaCandidates`), and `client` is the
-  control channel to drive it.
+  `client` is the control channel to drive it and `status` our own view of that
+  channel — the health a conference depends on. No media address here: the server
+  reports the one to advertise on each `StartReceiving` (§16.5), so a leg needs
+  nothing from this entry's configuration.
   """
   @spec mediaserver(String.t()) :: {:ok, map} | :error
   def mediaserver(name) when is_binary(name), do: lookup(@mcu_table, name)
 
-  @doc "Every configured media server, in config order."
+  @doc "Every media server this module drives, in name order."
   @spec mediaservers() :: [map]
   def mediaservers() do
     case :ets.whereis(@mcu_table) do
@@ -914,6 +963,7 @@ defmodule Kelix.Mod.Mcu do
   @impl true
   def init(opts) do
     config = Keyword.fetch!(opts, :config)
+    mcus = Keyword.get(opts, :mediaservers, [])
 
     tables = [:set, :protected, :named_table, read_concurrency: true]
     :ets.new(@conf_table, tables)
@@ -923,7 +973,7 @@ defmodule Kelix.Mod.Mcu do
     # Entries exist from the start, `down` until their client announces itself, so
     # `create` on an unreachable MCU is refused with a clear error instead of
     # looking like an unknown name.
-    for mcu <- config.mcus do
+    for mcu <- mcus do
       :ets.insert(
         @mcu_table,
         {mcu.name, Map.merge(mcu, %{status: :down, client: nil, queue_id: nil})}
@@ -933,14 +983,20 @@ defmodule Kelix.Mod.Mcu do
     Logger.info(
       module: __MODULE__,
       message:
-        "mcu module started: #{length(config.mcus)} media server(s) " <>
-          "(#{Enum.map_join(config.mcus, ", ", & &1.name)})"
+        "mcu module started: #{length(mcus)} media server(s) " <>
+          "(#{Enum.map_join(mcus, ", ", & &1.name)})"
     )
 
     {:ok,
      %{
        config: config,
        module_name: Keyword.get(opts, :module_name, "mcu"),
+       # round-robin cursor over the pool, for a create that names no mcu (§8.4).
+       # Held here because creates are serialised through this process anyway.
+       cursor: 0,
+       # the media pool to ask for the `enabled` switch; overridable so a test can
+       # run its own pool next to the node's singleton
+       pool: Keyword.get(opts, :pool, Kelix.MediaPool),
        # monitor_ref => {conference uid, participant ref}: the crash reaper of §9.3
        monitors: %{},
        # monitor_ref => conference uid: the creator of a script-made conference
@@ -955,7 +1011,7 @@ defmodule Kelix.Mod.Mcu do
   # conference (§17.3), the same way a participant's scenario reaps its row (§9.3).
   def handle_call({:create, spec, owner}, {caller, _tag}, state) do
     case do_create(state, spec) do
-      {:ok, conf, warning} ->
+      {:ok, conf, warning, state} ->
         {:reply, {:ok, conf, warning}, own_conference(state, conf.uid, owner, caller)}
 
       {:error, _} = err ->
@@ -973,7 +1029,7 @@ defmodule Kelix.Mod.Mcu do
 
       :error ->
         case do_create(state, spec) do
-          {:ok, conf, warning} ->
+          {:ok, conf, warning, state} ->
             {:reply, {:ok, conf, :created, warning},
              own_conference(state, conf.uid, owner, caller)}
 
@@ -1664,7 +1720,7 @@ defmodule Kelix.Mod.Mcu do
   defp do_create(state, spec) do
     config = state.config
 
-    with {:ok, mcu} <- pick_mcu(config, spec.mcu),
+    with {:ok, mcu, state} <- pick_mcu(state, spec.mcu),
          {:ok, did, allocated?} <- pick_did(config, spec.domain, spec.did),
          {:ok, conf} <- build_conference(config, spec, mcu, did),
          {:ok, conf} <- create_on_mcu(mcu, conf) do
@@ -1684,41 +1740,61 @@ defmodule Kelix.Mod.Mcu do
       # of decision 2). A DID no dial rule matches is a conference nobody can dial,
       # so the drift is reported rather than left silent. The conference itself is
       # returned, so a script gets the object and a REST client its rendering.
-      {:ok, conf, dial_plan_warning(conf)}
+      {:ok, conf, dial_plan_warning(conf), state}
     end
   end
 
-  # An explicit name must exist and be up; without one, the pool is asked first
-  # (§8.4: it is a tie-breaker, not the owner of the choice — a conference is
-  # pinned, which is not what a per-call pool expresses).
-  defp pick_mcu(_config, name) when is_binary(name) do
+  # An explicit name must exist and be up. A conference is **pinned** to its media
+  # server for its whole life (§1.3), so naming one is always honoured — that
+  # pinning is a runtime property of the conference, independent of the pool the
+  # list was declared in.
+  defp pick_mcu(state, name) when is_binary(name) do
     case mediaserver(name) do
-      {:ok, %{status: :up} = mcu} -> {:ok, mcu}
+      {:ok, %{status: :up} = mcu} -> {:ok, mcu, state}
       {:ok, _down} -> {:error, :mcu_down}
       :error -> {:error, :unknown_mcu}
     end
   end
 
-  defp pick_mcu(_config, nil) do
+  # Without a name: round-robin over the servers that are `enabled` in the pool and
+  # `up` on our own control channel (§8.4).
+  defp pick_mcu(state, nil) do
     entries = mediaservers()
 
+    serviceable =
+      Enum.filter(entries, &(&1.status == :up and enabled_in_pool?(state.pool, &1.name)))
+
     cond do
-      entries == [] -> {:error, :no_mediaserver}
-      up = pool_preference(entries) -> {:ok, up}
-      up = Enum.find(entries, &(&1.status == :up)) -> {:ok, up}
-      true -> {:error, :mcu_down}
+      entries == [] ->
+        {:error, :no_mediaserver}
+
+      serviceable == [] ->
+        {:error, :mcu_down}
+
+      true ->
+        idx = rem(state.cursor, length(serviceable))
+        {:ok, Enum.at(serviceable, idx), %{state | cursor: idx + 1}}
     end
   end
 
-  defp pool_preference(entries) do
-    with pid when is_pid(pid) <- Process.whereis(Kelix.MediaPool),
-         {:ok, %{name: name}} <- Kelix.MediaPool.checkout() do
-      Enum.find(entries, &(&1.name == name and &1.status == :up))
+  # The pool's `enabled` flag is an operator switch: toggling an entry off must stop
+  # new conferences landing on it (live ones stay — same semantics as for calls).
+  #
+  # Its `healthy` flag is deliberately **not** consulted: the pool probes the
+  # point-to-point adapter's own channel (`/jsr309`), while a conference rides the
+  # control channel this module holds (`/mcu`). A server whose JSR-309 side is
+  # unreachable can serve conferences perfectly, so our `status` is the health that
+  # decides here. A pool that has no opinion (not running, or the entry unknown to
+  # it) vetoes nothing.
+  defp enabled_in_pool?(pool, name) do
+    with pid when is_pid(pid) <- GenServer.whereis(pool),
+         %{enabled: enabled} <- Enum.find(Kelix.MediaPool.status(pool), &(&1.name == name)) do
+      enabled
     else
-      _ -> nil
+      _ -> true
     end
   catch
-    _, _ -> nil
+    _, _ -> true
   end
 
   # An explicit DID is always honoured, **including outside the range** (§5.3): the

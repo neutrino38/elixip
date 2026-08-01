@@ -18,8 +18,16 @@ defmodule Kelix.Mod.McuSecureTest do
   alias Kelix.Mod.Mcu
   alias Kelix.Mod.Mcu.{Adapter, Client, Config}
 
+  # The media servers the module drives now come from [mediaserver.pool.*], decoded
+  # by Kelix.Config; the registry takes the resulting list directly so a test needs
+  # no config file.
+  @mediaservers [%{name: "mcu1", url: "http://127.0.0.1:18080"}]
+
   @domain "example.com"
   @rec_port 52_014
+  # the address the media server itself reports on StartReceiving (§16.5) —
+  # what the answer must advertise, and no longer a config value
+  @media_ip "203.0.113.12"
   @fingerprint "11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:" <>
                  "11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00"
 
@@ -64,23 +72,16 @@ defmodule Kelix.Mod.McuSecureTest do
   setup do
     {:ok, config} =
       Config.parse(%{
-        "did_range" => "8000-8009",
-        "mediaserver" => %{
-          "mcu1" => %{
-            "url" => "http://127.0.0.1:18080",
-            "rtp_ip" => "10.0.0.12",
-            "public_ip" => "203.0.113.12"
-          }
-        }
+        "did_range" => "8000-8009"
       })
 
-    start_supervised!({Mcu, config: config, module_name: "mcu"})
+    start_supervised!({Mcu, config: config, module_name: "mcu", mediaservers: @mediaservers})
 
     start_supervised!(
       {Client,
        name: "mcu1",
        base_url: "http://127.0.0.1:18080",
-       transport: TestStub.transport(self(), %{"StartReceiving" => {:ok, [@rec_port]}}),
+       transport: TestStub.transport(self(), %{"StartReceiving" => {:ok, [@rec_port, @media_ip]}}),
        register: {Mcu, "mcu1"},
        reconnect_ms: 0},
       id: :client_mcu1

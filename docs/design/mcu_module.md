@@ -182,7 +182,7 @@ in the event stream, which is how an event is mapped back to a conference.
 
 | Method | Params | Returns |
 |---|---|---|
-| `StartReceiving` | `(i confId, i partId, i media, S rtpMap, i role[, i proto])` | `(i recPort)` |
+| `StartReceiving` | `(i confId, i partId, i media, S rtpMap, i role[, i proto])` | `(i recPort, s announcedIp)` — the address to advertise for this media (§16.5); `returnVal[0]` stays the port |
 | `StopReceiving` | `(i confId, i partId, i media[, i role])` | — |
 | `StartSending` | `(i confId, i partId, i media, s sendIp, i sendPort, S rtpMap[, i role])` | — |
 | `StopSending` | `(i confId, i partId, i media[, i role])` | — |
@@ -250,7 +250,7 @@ design must work without that, and get better with it.
 | # | Gap | Consequence | Closed by |
 |---|---|---|---|
 | G1 | `StartReceiving` returns **only the local port** — no accepted-PT/fmtp struct (JSR-309 returns both since the delegation work) | the SDP answer is built **entirely by kelixip**: no server-side codec arbitration. `MediaServer.Mendooze.Sdp.accepted_pts/2` and friends are *not* usable; `parse/1`, `negotiate/3`, `build/1`, `local_rtp_map/3` are | **S3 / P8** (§16.3) |
-| G2 | No `GetMediaCandidates` equivalent | the media IP for `c=` and the ICE host candidates come from **configuration** (`rtp_ip` / `public_ip`), exactly like mcuGold's `MediaMixer.getIp()` | — (config is fine) |
+| G2 | No `GetMediaCandidates` equivalent | ~~the media IP for `c=` and the ICE host candidates come from **configuration** (`rtp_ip` / `public_ip`), exactly like mcuGold's `MediaMixer.getIp()`~~ — **closed**: `StartReceiving` now returns the address to announce next to the port, so kelixip holds none | **S4** (§16.5) |
 | G3 | No `EndpointStartRTPTimeout` equivalent | **no media watchdog**. A silent leg is only detected by SIP (session timers / idle timeout in the script) | **S1 / P7** (§16.1) |
 | G4 | No per-participant "media started" event | `:ice_connected` cannot be emitted by the adapter. Scripts must not wait for it | **S2 / P7** (§16.2) |
 | G5 | No trickle-ICE input | `add_remote_candidate/2` is a no-op returning `:ok`; ICE-lite + the offerer's candidates are enough for the gateway/WebRTC cases we serve | — (not needed) |
@@ -300,16 +300,18 @@ design must work without that, and get better with it.
 | Process | Kind | Lifetime | Role |
 |---|---|---|---|
 | `Kelix.Mod.Mcu` | `GenServer`, registered under the module name | node | conference registry (ETS), DID index, per-MCU connection supervision, control commands |
-| `Kelix.Mod.Mcu.Client` | `GenServer`, one per configured MCU | node | XML-RPC channel + `queueId`; serialises calls, applies `xmlrpc_timeout_ms` |
+| `Kelix.Mod.Mcu.Client` | `GenServer`, one per `mendooze` pool entry | node | XML-RPC channel + `queueId`; serialises calls, applies `xmlrpc_timeout_ms` |
 | `Kelix.Mod.Mcu.EventQueue` | `GenServer` + a task, one per MCU | node | chunked long-poll, decode, dispatch to the owning participant's scenario pid |
 | `Kelix.Mod.Mcu.Adapter` conn | `GenServer`, one per **call leg** | call | holds `{conf_id, part_id, media map, crypto, ports}`; implements `MediaServer.Behaviour` |
 | `mcu.exs` instance | scenario | call | the SIP state machine |
 
-Supervision: the module's `child_spec/2` returns a `Supervisor` (one_for_one)
-holding `Kelix.Mod.Mcu` + one `{Client, EventQueue}` pair per MCU entry. An MCU
-that is unreachable at boot does **not** prevent the module from starting: its
-client is up but marked `down`, conferences on it are refused with a clear
-error (§9.4).
+Supervision: the module's `child_spec/2` returns a `Supervisor` (rest_for_one — the
+registry owns the ETS tables the others read) holding `Kelix.Mod.Mcu` + one
+`{Client, EventQueue}` pair per media server. The list comes from
+`[mediaserver.pool.*]` (§8.4), read once at boot from `Kelix.Config` — not from
+`Kelix.MediaPool`, which the node starts *after* its modules. An MCU that is
+unreachable at boot does **not** prevent the module from starting: its client is up
+but marked `down`, conferences on it are refused with a clear error (§9.4).
 
 ### 4.2 Why the adapter is a `MediaServer.Behaviour`
 
@@ -512,9 +514,10 @@ hard cases:
    `m=` line is answered with **port 0** and the call proceeds audio-only
    (mcuGold behaviour, and `Mendooze.Sdp.build/1` already supports the
    `reject_fmt` media spec).
-3. **`c=` line and ICE candidates** come from the MCU entry's `public_ip`
-   (falling back to `rtp_ip`) — G2. One host candidate for RTP, plus one for
-   RTCP when `rtcp-mux` was not offered (component ids 1 and 2, as mcuGold).
+3. **`c=` line and ICE candidates** carry the address `StartReceiving` returned
+   for this leg (§16.5, G2 closed) — the media server's own announced address,
+   which is the only party that knows it. One host candidate for RTP, plus one
+   for RTCP when `rtcp-mux` was not offered (component ids 1 and 2, as mcuGold).
 4. **Transport line.** `RTP/AVP`, `RTP/SAVP` (SDES) or `UDP/TLS/RTP/SAVP`
    (DTLS), `F` appended when RTCP feedback was offered — the same
    `protocol_for/1` logic already in `Mendooze.Sdp`.
@@ -698,7 +701,7 @@ Three properties this script must keep:
 
 | Callback | Content |
 |---|---|
-| `validate_config/1` | rejects unknown keys, validates each `[module.mcu.mediaserver.<name>]` sub-block (url, `rtp_ip`, `public_ip`), the defaults block, the timeouts |
+| `validate_config/1` | rejects unknown keys — including a leftover `mediaserver` sub-block, whose error message names its replacement (§8.4) — and validates the defaults block, the codec vocabulary, the allocation ranges and the timeouts. The media servers are validated by `Kelix.Config`, which owns `[mediaserver.pool.*]` |
 | `child_spec/2` | the supervisor described in §4.1 |
 | `describe/0` | `%{version: "1.0", exports: [admit: 2, attach: 1, leave: 1, send_fpu: 1, lookup_did: 2, conference: 1]}` |
 | `reload/2` | in-place: adds/removes MCU entries and changes defaults **without touching live conferences**; changing an MCU's URL while it hosts conferences is refused (`{:error, :mcu_in_use}`) |
@@ -981,9 +984,10 @@ declaration) and can be added then.
 
 ### 8.4 Configuration
 
-`[module.mcu]` lives in **`config.toml`** (it holds infrastructure: MCU
-addresses), while the DIDs it serves are ordinary dial-plan entries in
-`domains.toml`.
+`[module.mcu]` lives in **`config.toml`** (it holds infrastructure: mixer
+defaults, allocation ranges, timeouts), while the DIDs it serves are ordinary
+dial-plan entries in `domains.toml`. The **media servers are not in it**: see the
+end of this section.
 
 ```toml
 [module.mcu]
@@ -1017,21 +1021,45 @@ shutdown_grace_ms   = 5000
 # server-side `StartRTPTimeout` of §16.1 ships (P7); 0 disables it. Never applied
 # to text (T.140 is legitimately silent between keystrokes).
 rtp_timeout_ms      = 10000
-
-# One block per media server. `rtp_ip` is what the MCU binds; `public_ip` is what
-# goes in the SDP `c=` line and the ICE candidates (G2). They differ behind NAT.
-[module.mcu.mediaserver.mcu1]
-url       = "http://10.0.0.12:8080"
-rtp_ip    = "10.0.0.12"
-public_ip = "203.0.113.12"
 ```
 
-Relationship with `[mediaserver.pool.*]` (design §9): the pool selects an MCU
-**per call** for point-to-point media, which is not what a conference needs — a
-conference is pinned. The module therefore keeps **its own** MCU list and uses
-the pool only as a tie-breaker at `create` time when no `mcu` is given and the
-name matches a pool entry. Duplicating the address in both blocks is allowed
-and is the expected setup on a single-MCU node.
+### The media servers: `[mediaserver.pool.*]`, and only there
+
+They are the pool entries of design §9 — `module` + `url` + `enabled`, nothing
+else — and the module opens one control channel per entry whose `module` is
+`mendooze` (the dialect its `Client` speaks; the others are named in the boot log
+and left to their own adapter).
+
+This **reverses an earlier decision** of this section, which had the module keep
+its own `[module.mcu.mediaserver.<name>]` list on the grounds that a per-call pool
+does not express a pinned conference. The reasoning was wrong in one step: a
+conference is indeed pinned for its whole life (§1.3), but that pinning is a
+property of the *conference row* (`Conference.mcu`, honoured by `pick_mcu/2`
+whenever `create` names a server), not of the block the list is declared in.
+Nothing about a shared declaration unpins anything.
+
+What the duplication actually cost, and why it is gone:
+
+* the same address had to be written twice, and a node whose media server moved
+  worked on one path and failed on the other until both were edited;
+* `rtp_ip`/`public_ip` were kelixip's answer to G2, and both were **optional**, so
+  a perfectly valid config produced a leg that raised at answer time. That whole
+  class of failure disappears with S4 (§16.5): the media server reports the
+  address to announce on every `StartReceiving`, kelixip stores none, and a server
+  too old to report one gets a refused call with an explicit log line rather than
+  a guessed address;
+* pool entries were never validated (the pool logged and skipped a malformed one).
+  They are now decoded and checked in `Kelix.Config`, once, for both consumers: a
+  typo aborts the boot.
+
+What the module still asks the pool at `create` time, when no `mcu` is named: the
+`enabled` flag (the operator's switch — disabling stops *new* conferences landing
+there, live ones stay) and a round-robin turn over what is left. What it
+deliberately does **not** ask is the pool's `healthy` flag: that is probed on the
+point-to-point adapter's channel (`/jsr309`), whereas a conference rides the one
+this module holds (`/mcu`). A server can be up for one and down for the other, so
+the health that decides here is the module's own — which is also why §11 exposes
+two metrics rather than one.
 
 ---
 
@@ -1229,9 +1257,10 @@ observations the script has no use for.
 
 ## 14. Delivery phases
 
-Status as of 2026-07-30: **P0′ through P5b are implemented**, each verified against
-the live media server as well as against the recording stub. P5c is this section's own
-increment; P6 to P8 are open.
+Status as of 2026-08-01: **P0′ through P5c are implemented**, each verified against
+the live media server as well as against the recording stub. **S4 (§16.5) shipped
+out of order**, on the server *and* in the module, because it removes a whole class
+of configuration failure rather than adding a feature; P6 to P8 are open.
 
 | Phase | Status | Content | Done when |
 |---|---|---|---|
@@ -1246,6 +1275,7 @@ increment; P6 to P8 are open.
 | **P6** |  | Packaging: `kelixip-mod-mcu` RPM/deb, sample config, docs | `dnf install kelixip-mod-mcu` + a config snippet gets a working conference |
 | **P7** |  | **Server-side (Mendooze), §16.1-16.2**: `StartRTPTimeout` RPC + MCU event types `3` (media timeout) and `4` (media connected); kelixip arms/disarms the watchdog after the answer and handles both events | unplugging a phone's network mid-call frees its slot and its mosaic tile within `rtp_timeout_ms`, and the adapter emits `:ice_connected` on real media — **L1 and L2 lifted** |
 | **P8** |  | **Server-side (Mendooze), §16.3**: `StartReceiving` returns `(recPort, fmtpByPt)`; kelixip deletes its local codec arbitration and moves `SetRTPProperties(codec.*)` before `StartReceiving` | the SDP answer carries the fmtp the MCU will actually use, verbatim — **L4 lifted**; mcuGold on the same server is unaffected |
+| **S4** | ✔ | **Server-side (Mendooze), §16.5**: `--public-ip` as the one announced address, read by `GetMediaCandidates` *and* returned by `StartReceiving`; the module drops `rtp_ip`/`public_ip` and takes its media servers from `[mediaserver.pool.*]` | a conference leg's `c=` line carries the address the *server* reported, a node behind NAT is fixed by one server flag, and the module declares no media server of its own — **G2 lifted** |
 
 Phases P1-P2 are the minimum viable increment; everything after is additive and
 independently shippable. **P0′ is deliberately not numbered first**: it is the
@@ -1445,18 +1475,58 @@ what makes the change safe.
 
 ### 16.4 Sequencing and risk
 
-| | P7 (S1 + S2) | P8 (S3) |
-|---|---|---|
-| Server change | additive: 1 RPC, 2 event types, 2 listener overrides | 1 return value enriched, 1 negotiator call |
-| Breaks an existing client? | no (append-only) | no (`returnVal[0]` unchanged) |
-| kelixip change | arm/disarm + 2 event handlers | removes local arbitration, reorders `SetRTPProperties` |
-| Closes | L1, L2 | L4 |
-| Risk if skipped | dead legs occupy the mix for hours | silent one-way media on exotic fmtp |
+| | P7 (S1 + S2) | P8 (S3) | S4 (done) |
+|---|---|---|---|
+| Server change | additive: 1 RPC, 2 event types, 2 listener overrides | 1 return value enriched, 1 negotiator call | 1 argument, 1 global setting, 1 return value enriched |
+| Breaks an existing client? | no (append-only) | no (`returnVal[0]` unchanged) | no (`returnVal[0]` unchanged) |
+| kelixip change | arm/disarm + 2 event handlers | removes local arbitration, reorders `SetRTPProperties` | reads the address, deletes two config keys |
+| Closes | L1, L2 | L4 | G2 |
+| Risk if skipped | dead legs occupy the mix for hours | silent one-way media on exotic fmtp | media that connects and never arrives behind NAT |
 
 P7 first: it is smaller, purely additive on both sides, and fixes an operational
 hazard rather than an interop refinement. Both are independent of P0′-P6 and of
 each other — S3 does not need the watchdog, and the watchdog does not need the
 enriched return.
+
+### 16.5 S4 — the media server announces its own address (DONE, 2026-08-01)
+
+Closes **G2**, and it is the one server-side change already shipped.
+
+The address to put in the SDP answer (`c=` line and ICE host candidates) was the
+only thing about a leg that kelixip could not learn from the media server. The
+conference API has no `GetMediaCandidates`, so §8.4 carried `rtp_ip`/`public_ip`
+per MCU entry — an address duplicated in the controller's config, optional (hence a
+leg that raised at answer time when both were absent), and impossible to get right
+behind a NAT for the *point-to-point* path, which derived it server-side from
+`gethostname()` with no way to override.
+
+Both halves are now one server-wide setting:
+
+| Where | What changed |
+|---|---|
+| `mcu/src/main.cpp` | new `--public-ip <ip>`, resolved **before** any server starts. Absent ⇒ the previous auto-detection (first non-loopback IPv4 of the host name), now done once at startup and logged |
+| `RTPSession::Set/GetAnnouncedIp` | the single holder, next to `SetPortRange` — the RTP sockets bind `INADDR_ANY`, so what is *announced* is the only address there is to choose |
+| `Endpoint::GetMediaCandidates` (JSR-309) | reads it instead of re-deriving it per call. Fixes the p2p path behind NAT with **no** kelixip change — the adapter already parses the candidate |
+| `StartReceiving` (MCU) | returns `(i recPort, s ip)` |
+
+**Return shape.** Positional append: `returnVal[0]` is still the port, so
+mcuGold's `XmlRpcMcuClient` (which reads that index and ignores the rest) is
+unaffected, and the `fmtpByPt` struct of S3 (§16.3) appends at index 2 rather than
+displacing anything. Breaking the Java client was authorised and turned out to be
+unnecessary.
+
+**No announceable address ⇒ the server refuses to start**, naming the host name it
+tried and the two fixes. That is what lets the controller treat the value as always
+present: a server that answers has one.
+
+**kelixip side.** `Adapter.Conn` reads the address off the first `StartReceiving`
+and keeps it for the leg (it is server-wide, so not per `m=` line);
+`rtp_ip`/`public_ip` are gone from the config, and with them the `raise` that had no
+answer. A server that returns the port alone yields `{:error, :no_media_ip}` — a
+`500` with a log line naming the remedy. **No fallback on purpose**: a guessed
+address produces a `200 OK` whose media silently goes nowhere, which is strictly
+worse than a refused call. Consequence to plan for: **the media server must be
+upgraded before or with kelixip** on any node running conferences.
 
 ---
 
@@ -1634,8 +1704,9 @@ none, because the next reader trusts it.
 The design doc explains *why*; nothing explains *how* to an operator or to whoever
 writes the next script. One new document, three audiences:
 
-1. **Operator** — the `[module.mcu]` block key by key, with the two-address story
-   (`rtp_ip` vs `public_ip`) that behind-NAT deployments get wrong; the dial-plan rule
+1. **Operator** — the `[module.mcu]` block key by key, plus where the media servers
+   are actually declared and why the announced address is the *server's* setting
+   (`--public-ip`), which is what behind-NAT deployments get wrong; the dial-plan rule
    the DID range needs; what `kelictl status`'s `mcu:` line means; the REST/CLI surface
    as a table of curl and `kelictl` one-liners; the metrics and what a non-zero
    `kelix_mcu_rpc_errors_total` means.
@@ -1663,7 +1734,7 @@ Application.put_env(:kelixip, :domains_path, "/path/to/domains.toml")
 Application.ensure_all_started(:kelixip)
 ```
 
-with a `config.toml` carrying `[module.mcu]` + `[module.mcu.mediaserver.<name>]`
+with a `config.toml` carrying `[module.mcu]` + a `[mediaserver.pool.<name>]` entry
 pointed at a real `mediaserver --http-port`, and a `domains.toml` whose dial rule
 sends the DID pattern to `mcu.exs`. From there `kelictl status`, the REST API and a
 real SIP call all work against the real MCU.
