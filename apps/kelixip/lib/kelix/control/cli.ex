@@ -79,7 +79,12 @@ defmodule Kelix.Control.CLI do
   # module, which owns its own command namespace (`kelictl mcu conference.list`).
   defp parse(["mediaserver" | _]), do: {:error, usage_mediaserver()}
 
+  defp parse(["module", "list"]), do: {:ok, :module_list, :module_commands, []}
   defp parse(["module", "reload", name]), do: {:ok, :ok, :module_reload, [name]}
+  # `module` is a core noun, like `domain` above: a mistyped sub-command gets this
+  # usage instead of being taken for a module named "module".
+  defp parse(["module" | _]), do: {:error, usage_module()}
+
   defp parse(["log-level", lvl]), do: {:ok, :ok, :set_log_level, [lvl]}
   defp parse(["graceful-shutdown"]), do: {:ok, :ok, :graceful_shutdown, []}
   defp parse(["drain"]), do: {:ok, :ok, :drain, []}
@@ -99,6 +104,13 @@ defmodule Kelix.Control.CLI do
       do: {:error, "reload-script: needs at least one script name"},
       else: {:ok, :map, :reload_script, [names, notify?]}
   end
+
+  # `<module> help` is answered by the CLI from Kelix.Control.Registry (FW-5,
+  # `docs/design/mcu_module.md` §8.3.6): a module declares its command set once and
+  # gets its usage for free — nothing to write, nothing to keep in sync. `help` is
+  # therefore reserved on a module namespace; a module that declares a command of
+  # that name keeps it reachable over REST.
+  defp parse([module, "help"]), do: {:ok, {:module_help, module}, :module_commands, [module]}
 
   # module-contributed command: <module> <cmd> [args…]
   defp parse([module, cmd | rest]),
@@ -133,6 +145,9 @@ defmodule Kelix.Control.CLI do
   # what was not found and show the usage rather than a bare :unknown_module.
   defp render({:module, name}, {:error, :unknown_module}),
     do: {1, "error: \"#{name}\" is neither a kelictl command nor a loaded module\n\n" <> usage()}
+
+  defp render({:module_help, name}, {:error, :unknown_module}),
+    do: {1, "error: no module named \"#{name}\" is loaded (kelictl module list)"}
 
   defp render(:domain, {:error, :not_found}), do: {1, "no such domain"}
   defp render(:reg_domain, {:error, :not_found}), do: {1, "no such domain"}
@@ -257,6 +272,31 @@ defmodule Kelix.Control.CLI do
     {0, Enum.join(lines, "\n")}
   end
 
+  defp render(:module_list, modules) when modules == %{}, do: {0, "no module loaded"}
+
+  defp render(:module_list, modules) when is_map(modules) do
+    rows = Enum.sort_by(modules, &elem(&1, 0))
+
+    {0,
+     table(
+       ["module", "version", "implementation", "commands", "exports"],
+       rows,
+       fn {name, m} ->
+         [
+           name,
+           dash(m.version),
+           inspect(m.module),
+           to_string(length(m.commands)),
+           to_string(length(m.exports))
+         ]
+       end
+     ) <> "\n\nkelictl <module> help lists what a module contributes"}
+  end
+
+  defp render({:module_help, name}, {:ok, m}) do
+    {0, Enum.join(module_help_lines(name, m), "\n")}
+  end
+
   defp render(:map, result) when is_map(result) do
     {exit_map(result), Enum.map_join(result, "\n", fn {k, v} -> "#{k}: #{fmt(v)}" end)}
   end
@@ -265,6 +305,61 @@ defmodule Kelix.Control.CLI do
   defp render(:ok, :ok), do: {0, "ok"}
   defp render(:ok, :notfound), do: {1, "not found"}
   defp render(_tag, other), do: {0, fmt(other)}
+
+  # The whole surface of one module, rendered from its own declaration: the commands
+  # an operator can run (with their REST route, so the two frontals are visibly the
+  # same thing) and the facades a script imports.
+  defp module_help_lines(name, m) do
+    header = "#{name}#{if m.version, do: " #{m.version}", else: ""} (#{inspect(m.module)})"
+
+    commands =
+      case m.commands do
+        [] ->
+          ["", "commands: none — this module contributes no control command"]
+
+        cmds ->
+          width = cmds |> Enum.map(&String.length(&1.name)) |> Enum.max()
+          ["", "commands:"] ++ Enum.flat_map(cmds, &command_lines(&1, name, width))
+      end
+
+    exports =
+      case m.exports do
+        [] -> []
+        list -> ["", "facades (import #{inspect(m.module)}):", "  " <> format_exports(list)]
+      end
+
+    [header] ++ commands ++ exports
+  end
+
+  # `*` marks a required argument — the CLI form is `name=value` tokens, so the arg
+  # names are the whole calling convention. The REST route is shown next to it because
+  # both frontals come from this one declaration (§10).
+  defp command_lines(cmd, module_name, width) do
+    [
+      "  #{String.pad_trailing(cmd.name, width)}  " <>
+        "[#{format_methods(cmd)} /modules/#{module_name}#{cmd.path}]",
+      "      args: #{format_command_args(cmd)}",
+      "      #{cmd.help}"
+    ]
+  end
+
+  defp format_methods(cmd),
+    do: Enum.map_join(cmd.methods, "|", &String.upcase(to_string(&1)))
+
+  defp format_command_args(%{args: []}), do: "(none)"
+
+  defp format_command_args(%{args: args}) do
+    Enum.map_join(args, " ", fn a ->
+      if Map.get(a, :required, false), do: "#{a.name}*", else: a.name
+    end)
+  end
+
+  defp format_exports(exports) do
+    Enum.map_join(exports, ", ", fn
+      {fun, arity} -> "#{fun}/#{arity}"
+      other -> inspect(other)
+    end)
+  end
 
   # A function block: absent = the function is not served on this domain. Present,
   # it is the script plus whatever tuning the domain overrode.
@@ -460,6 +555,7 @@ defmodule Kelix.Control.CLI do
       mediaserver enable|disable <name>  take a media server in/out of the pool
       stop <id>                       shut down one scenario
       reload-script [--notify] <name…>  reload scenario script(s)
+      module list                     loaded modules, their commands and facades
       module reload <name>            reload a module's config
       log-level <lvl>                 set the runtime log level
       drain                           answer 503 to OPTIONS: leave the
@@ -467,9 +563,12 @@ defmodule Kelix.Control.CLI do
                                       what is already in flight
       undrain                         back in service (OPTIONS -> 200)
       graceful-shutdown               drain, let upstream notice, then stop
+      <module> help                   the commands a module contributes
       <module> <cmd> [args…]          a module-contributed command
     """
   end
+
+  defp usage_module(), do: "usage: kelictl module list | module reload <name>"
 
   defp usage_registration() do
     "usage: kelictl registration list [domain] | registration show <domain> <aor> | " <>

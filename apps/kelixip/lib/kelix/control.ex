@@ -421,6 +421,70 @@ defmodule Kelix.Control do
   # ── module-contributed commands (§8.1) ────────────────────────────────────────
 
   @doc """
+  What each loaded module contributes (`kelictl module list`, `GET /modules`).
+
+  One entry per `[module.<name>]` block that started, carrying the two surfaces a
+  module exposes and neither of which was discoverable at runtime (FW-5,
+  `docs/design/mcu_module.md` §8.3.6): the **control commands** it declared into
+  `Kelix.Control.Registry` (what an operator can run) and the **facade functions**
+  it exports to scenario scripts (what a script can call, from `describe/0`).
+
+  Generic by construction: the core names no module: a module without
+  `describe_control/0` simply lists no command, one without `describe/0` no version
+  and no export.
+  """
+  @spec module_commands() :: %{optional(String.t()) => map}
+  def module_commands() do
+    for {name, %{module: module}} <- safe(fn -> Kelix.ModuleRegistry.all() end, %{}), into: %{} do
+      described = Kelix.ModuleRegistry.facade(name, :describe, [], %{})
+
+      {name,
+       %{
+         module: module,
+         version: Map.get(described, :version),
+         exports: Map.get(described, :exports, []),
+         commands:
+           safe(fn -> Kelix.Control.Registry.commands_for(name) end, [])
+           |> Enum.map(&described_command/1)
+       }}
+    end
+  end
+
+  # A declaration read once, here, so both frontals render the same thing: the
+  # `rest:` tuple becomes an explicit method list + path template (through
+  # `Kelix.Control.Route`, which owns the defaults an incomplete declaration falls
+  # back to), and the optional keys get theirs. A frontal formats; it does not
+  # interpret.
+  defp described_command(cmd) do
+    %{
+      name: cmd.name,
+      methods: Kelix.Control.Route.methods(cmd),
+      path: Kelix.Control.Route.template(cmd),
+      args:
+        Enum.map(
+          Map.get(cmd, :args, []),
+          &%{name: &1.name, required: Map.get(&1, :required, false)}
+        ),
+      rw: Map.get(cmd, :rw, :w),
+      help: Map.get(cmd, :help, ""),
+      status: Map.get(cmd, :status, 200),
+      errors: Map.get(cmd, :errors, %{})
+    }
+  end
+
+  @doc """
+  One module's surface (`kelictl <module> help`, `GET /modules/<name>`), or
+  `{:error, :unknown_module}` when no `[module.<name>]` block is loaded.
+  """
+  @spec module_commands(String.t()) :: {:ok, map} | {:error, :unknown_module}
+  def module_commands(name) when is_binary(name) do
+    case Map.fetch(module_commands(), name) do
+      {:ok, entry} -> {:ok, Map.put(entry, :name, name)}
+      :error -> {:error, :unknown_module}
+    end
+  end
+
+  @doc """
   Run a module-contributed command (`kelictl <module> <cmd> <args>`). Resolves the
   module by its registered name and delegates to its `handle_control/2` (which
   never checks auth — that is the frontal's job).

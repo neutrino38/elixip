@@ -126,6 +126,22 @@ defmodule Kelix.ControlAPI do
     end
   end
 
+  # What the loaded modules contribute (FW-5): the command declarations a client can
+  # build its URLs from, instead of being handed the list out of band. Declared before
+  # `match "/modules/:name/*path"` below, whose glob would otherwise swallow
+  # `GET /modules/mcu` and answer 404 — the same reason `GET /domains/:name` precedes
+  # the domain write verbs.
+  get "/modules" do
+    json(conn, 200, Control.module_commands())
+  end
+
+  get "/modules/:name" do
+    case Control.module_commands(name) do
+      {:ok, entry} -> json(conn, 200, entry)
+      {:error, :unknown_module} -> json(conn, 404, %{error: "not found"})
+    end
+  end
+
   # ── write verbs ───────────────────────────────────────────────────────────────
 
   delete "/domains/:domain/registrations/:aor" do

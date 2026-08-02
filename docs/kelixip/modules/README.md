@@ -122,11 +122,22 @@ restarted. The `registrar` block additionally reloads on `kelictl domain reload-
 
 A module may contribute `kelictl <name> <cmd>` sub-commands and `/modules/<name>/…`
 REST endpoints from a single declaration (`describe_control/0`); both frontals
-derive from it. The control frontals land in P7 — see
-[administration.md](../administration.md) and [rest-api.md](../rest-api.md).
+derive from it — see [administration.md](../administration.md) and
+[rest-api.md](../rest-api.md).
+
+That declaration is also readable at runtime, so what a node serves never has to
+be looked up in a module's source:
+
+```console
+$ kelictl module list          # loaded modules, their commands and facades
+$ kelictl mcu help             # one module's commands, routes and arguments
+$ curl localhost:8090/modules  # the same declarations as JSON
+```
 
 ## Reference
 
 - [template.md](template.md) — the page layout every module doc follows
 - [registrar.md](registrar.md)
 - [auth_db.md](auth_db.md)
+- [mcu.md](mcu.md) — conferencing; the narrative guide is
+  [docs/mcu_module_guide.md](../../mcu_module_guide.md)

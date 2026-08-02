@@ -96,6 +96,26 @@ defmodule Kelix.ScriptRegistryTest do
       assert msg =~ "cannot read"
     end
 
+    # Regression: the suffixing means a script that names itself in full
+    # (`Kelix.Mcu.Call.media_error/1`) compiles fine and then dies at runtime, because
+    # the module is `Kelix.Mcu.Call.V<n>` and the unsuffixed one never exists. The
+    # loader in :elixip2 does NOT suffix, so the scenario tests cannot catch this —
+    # only a compile through this module can. The verdict is irrelevant here (the
+    # scripts declare `uses_modules`, which no module satisfies in this app); the
+    # warnings the compiler emits are what is being asserted on.
+    test "the shipped reference scripts have no dangling self-reference" do
+      for script <- ["registrar.exs", "mcu.exs", "mcu_adhoc.exs"] do
+        path = Path.expand("../scripts/#{script}", __DIR__)
+
+        warnings =
+          ExUnit.CaptureIO.capture_io(:stderr, fn ->
+            ScriptRegistry.compile_checked(path, 8_000 + System.unique_integer([:positive]))
+          end)
+
+        refute warnings =~ "is undefined", "#{script} references a module it does not define"
+      end
+    end
+
     test "a syntax error is reported, not raised" do
       path = Path.join(System.tmp_dir!(), "bad_#{System.unique_integer([:positive])}.exs")
       File.write!(path, "defmodule Bad do\n  state :x do\n")

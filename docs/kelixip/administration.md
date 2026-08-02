@@ -36,6 +36,7 @@ on Ubuntu/Debian, the same file the systemd unit reads.
 | `kelictl mediaserver enable\|disable <name>` | W | Take a media server in/out of the pool |
 | `kelictl stop <id>` | W | Cooperatively shut down one scenario (id from `monitor`) |
 | `kelictl reload-script [--notify] <name…>` | W | Reload scenario script(s) |
+| `kelictl module list` | R | Loaded modules: version, implementation, how many commands and facades each contributes |
 | `kelictl module reload <name>` | W | Reload a module's config |
 | `kelictl log-level <lvl>` | W | Change the log level at runtime (`debug\|info\|warning\|error`) |
 | `kelictl graceful-shutdown` | W | Drain scenarios, then shut the node down |
@@ -190,23 +191,58 @@ This propagation is a roadmap refinement.
 
 ## Module commands
 
-Modules may contribute their own sub-commands, discovered from each module's
-declaration (`describe_control/0`):
+Modules may contribute their own sub-commands, declared once per module
+(`describe_control/0`):
 
 ```
 kelictl <module> <command> [args…]
 ```
 
 The positional `args…` are handed to the module's `handle_control/2` as
-`%{"args" => [ ... ]}`. These share the same cookie boundary as the core commands.
+`%{"args" => [ ... ]}`; the convention is `name=value` tokens (`true`/`false` is a
+boolean, digits an integer, a leading `{`/`[` is JSON). These share the same
+cookie boundary as the core commands.
+
+**Ask the node what it serves** rather than reading the module's source — both
+listings are rendered from the declaration itself, so they cannot drift:
+
+```console
+$ kelictl module list
+module  version  implementation  commands  exports
+mcu     1.0      Kelix.Mod.Mcu   9         16
+
+kelictl <module> help lists what a module contributes
+
+$ kelictl mcu help
+mcu 1.0 (Kelix.Mod.Mcu)
+
+commands:
+  conference.create   [POST /modules/mcu/conferences]
+      args: domain* name did mcu vad rate audio_codecs video_codecs text_codecs video layout max_participants destroy_when_empty
+      Create a conference (allocates a DID when none is given)
+  conference.list     [GET /modules/mcu/conferences]
+      args: domain did
+      List the conferences, optionally filtered by domain and/or DID
+  …
+
+facades (import Kelix.Mod.Mcu):
+  create_conference/2, ensure_conference/3, …
+```
+
+`*` marks a required argument; the bracketed route is the same command over REST
+(`GET /modules` and `GET /modules/<name>` serve the same declarations as JSON).
+`help` is therefore reserved on a module namespace.
+
 A module's whole namespace is its own: `kelictl mcu <cmd>` is the `mcu` module's
 (`kelictl mcu conference.list`), and enabling or disabling a media server is
 `kelictl mediaserver enable|disable <name>` — it acts on a `[mediaserver.pool.*]`
 entry, of which the `mcu` module is only one consumer. `domain`, `mediaserver`
 and `module` are core nouns and never reach a module, so a mistyped sub-command
 prints their usage rather than "unknown module".
-Today neither [registrar](modules/registrar.md) nor [auth_db](modules/auth_db.md)
-contributes one; the mechanism is documented in
+
+Of the shipped modules, only [mcu](modules/mcu.md) contributes commands today —
+[registrar](modules/registrar.md) and [auth_db](modules/auth_db.md) contribute
+none. The mechanism is documented in
 [modules/README.md](modules/README.md#control-surface-kelictl--rest).
 
 ## Parity with REST

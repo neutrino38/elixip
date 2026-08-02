@@ -265,6 +265,36 @@ defmodule Kelix.ControlAPITest do
       assert conn.status == 404
       assert body(conn)["error"] == "unknown module command"
     end
+
+    # FW-5: the declarations are readable at runtime, so a client discovers the
+    # routes instead of being handed them out of band. `GET /modules/fake` must not
+    # be swallowed by the `/modules/:name/*path` glob that serves the commands.
+    test "GET /modules lists what each loaded module contributes" do
+      conn = call(conn(:get, "/modules"))
+      assert conn.status == 200
+
+      assert %{
+               "fake" => %{
+                 "commands" => [command],
+                 "module" => "Elixir.Kelix.ControlAPITest.FakeCtl"
+               }
+             } =
+               body(conn)
+
+      assert command["name"] == "ping"
+      assert command["methods"] == ["post"]
+      assert command["path"] == "/ping"
+    end
+
+    test "GET /modules/:name is one module's surface, 404 when not loaded" do
+      conn = call(conn(:get, "/modules/fake"))
+      assert conn.status == 200
+      assert body(conn)["name"] == "fake"
+      assert length(body(conn)["commands"]) == 1
+
+      conn = call(conn(:get, "/modules/ghost"))
+      assert conn.status == 404
+    end
   end
 
   describe "unknown route" do

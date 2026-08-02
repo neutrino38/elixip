@@ -342,4 +342,96 @@ defmodule Kelix.Control.CLITest do
     {1, out} = run(["mymod", "docmd", "arg"])
     assert out =~ "error:"
   end
+
+  # FW-5 (docs/design/mcu_module.md §8.3.6): the last CLI/REST parity gap was
+  # discovery — a module's command set existed only in its source. Both listings are
+  # rendered from `describe_control/0` + `describe/0`, so a module gets its usage
+  # without writing one.
+  describe "module list / <module> help — discovery" do
+    defmodule HelpCtl do
+      def describe(), do: %{version: "2.1.0", exports: [{:admit, 2}, {:leave, 2}]}
+
+      def describe_control() do
+        [
+          %{
+            name: "conference.create",
+            rest: {:post, "/conferences"},
+            status: 201,
+            errors: %{did_in_use: 400},
+            rw: :w,
+            args: [%{name: "domain", required: true}, %{name: "name", required: false}],
+            help: "Create a conference"
+          },
+          %{
+            name: "conference.update",
+            rest: {[:put, :patch], "/conferences/:uid"},
+            rw: :w,
+            args: [%{name: "uid", required: true}],
+            help: "Update a conference"
+          }
+        ]
+      end
+
+      def handle_control(cmd, args), do: {:ok, %{cmd: cmd, args: args}}
+    end
+
+    # A module with no control surface at all: it must still be listed (it is loaded,
+    # and its facades are callable), with an empty command set rather than an absence.
+    defmodule SilentCtl do
+      def describe(), do: %{version: "0.1.0", exports: []}
+    end
+
+    setup do
+      Kelix.ModuleRegistry.register("helpmod", HelpCtl, %{})
+      Kelix.ModuleRegistry.register("silentmod", SilentCtl, %{})
+      :ok = Kelix.Control.Registry.register("helpmod", HelpCtl.describe_control())
+
+      on_exit(fn ->
+        Kelix.ModuleRegistry.unregister("helpmod")
+        Kelix.ModuleRegistry.unregister("silentmod")
+        Kelix.Control.Registry.deregister("helpmod")
+      end)
+    end
+
+    test "module list shows one row per loaded module, with its counts" do
+      {0, out} = run(["module", "list"])
+      assert out =~ ~r/helpmod\s+2\.1\.0\s+Kelix\.Control\.CLITest\.HelpCtl\s+2\s+2/
+      assert out =~ ~r/silentmod\s+0\.1\.0\s+\S+\s+0\s+0/
+      assert out =~ "kelictl <module> help"
+    end
+
+    test "<module> help renders the commands, their route and their args" do
+      {0, out} = run(["helpmod", "help"])
+
+      assert out =~ "helpmod 2.1.0 (Kelix.Control.CLITest.HelpCtl)"
+      assert out =~ "conference.create  [POST /modules/helpmod/conferences]"
+      # required args are starred, so the calling convention is readable at a glance
+      assert out =~ "args: domain* name"
+      assert out =~ "Create a conference"
+      # a method list stays a method list: one declaration, two verbs
+      assert out =~ "conference.update  [PUT|PATCH /modules/helpmod/conferences/:uid]"
+      assert out =~ "facades (import Kelix.Control.CLITest.HelpCtl):"
+      assert out =~ "admit/2, leave/2"
+    end
+
+    test "<module> help on a module with no control surface says so" do
+      {0, out} = run(["silentmod", "help"])
+      assert out =~ "commands: none"
+    end
+
+    test "help on an unknown module → error, exit 1" do
+      {1, out} = run(["ghostmod", "help"])
+      assert out =~ ~s(no module named "ghostmod")
+    end
+
+    test "a declared command still dispatches (help shadows nothing else)" do
+      {0, out} = run(["helpmod", "conference.create", "domain=example.com"])
+      assert out =~ "example.com"
+    end
+  end
+
+  test "module with a bad sub-command prints the module usage, exit 2" do
+    {2, out} = run(["module", "frobnicate"])
+    assert out =~ "usage: kelictl module list"
+  end
 end

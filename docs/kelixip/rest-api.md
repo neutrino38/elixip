@@ -56,6 +56,8 @@ cert) with a JSON body `{"error": "…"}`.
 | `GET /domains/<domain>/registrations/<aor>` | R | `kelictl registration show` |
 | `GET /mediaservers` | R | `kelictl mediaserver list` |
 | `GET /mediaservers/<name>` | R | `kelictl mediaserver show` |
+| `GET /modules` | R | `kelictl module list` |
+| `GET /modules/<name>` | R | `kelictl <name> help` |
 | `DELETE /domains/<domain>/registrations/<aor>` | W | `kelictl registration remove` |
 | `POST /scenarios/<id>/shutdown` | W | `kelictl stop` |
 | `POST /scripts/reload[?notify=1]` | W | `kelictl reload-script` |
@@ -188,12 +190,27 @@ curl -s -X POST   -H "Authorization: Bearer $TOKEN" $BASE/graceful-shutdown
 
 Modules register their commands into `Kelix.Control.Registry` from the same
 `describe_control/0` declaration that produces their `kelictl` sub-commands (see
-[modules/README.md](modules/README.md#control-surface-kelictl--rest)). Each
-declared command is reachable as `<method> /modules/<name>/<cmd>` — the method is
-the one it declared (`get` for reads, `post` for writes) — with the JSON request
-body passed through as the command args. A command reached with the wrong method
-→ `405`; an undeclared command → `404`. None are contributed by the core modules
-yet.
+[modules/README.md](modules/README.md#control-surface-kelictl--rest)). A command
+declares a **path template** relative to `/modules/<name>`, so it is reachable
+both as a resource (`GET /modules/mcu/conferences/c-3f9a`) and in the flat form
+`<method> /modules/<name>/<cmd>`, for a client that cannot build URLs. Both
+dispatch to the same handler.
+
+Args are merged **path < query < body** (a body that tries to change a path
+parameter is a `400`). The declaration also carries the HTTP concerns the frontal
+derives: the success status (`201` on a creation), a `Location` template, and the
+per-reason error statuses (that is how a module answers `409`). A command reached
+with the wrong method → `405`; an undeclared one → `404`.
+
+**Discovery.** `GET /modules` returns what every loaded module contributes and
+`GET /modules/<name>` one module's surface — the command names, their methods,
+their path templates and their arguments, plus the facade functions the module
+exports to scripts. That is the same data `kelictl module list` / `kelictl <name>
+help` render, so a client can build its URLs from the node instead of from
+out-of-band documentation.
+
+Of the shipped modules, [mcu](modules/mcu.md) contributes nine commands
+(conferences and participants); `registrar` and `auth_db` contribute none.
 
 ## Observability
 
