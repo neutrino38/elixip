@@ -52,6 +52,11 @@ defmodule Kelix.Control.CLI do
   defp parse(["regs", aor]), do: {:ok, :regs, :registrations, [aor]}
   defp parse(["unregister", aor]), do: {:ok, :ok, :unregister, [aor, :all]}
   defp parse(["unregister", aor, contact]), do: {:ok, :ok, :unregister, [aor, contact]}
+  defp parse(["domain", "list"]), do: {:ok, :domains, :domains, []}
+  defp parse(["domain", "show", name]), do: {:ok, :domain, :domain, [name]}
+  # `domain` is a core noun, so it never reaches the module dispatch below: a
+  # mistyped sub-command gets the domain usage rather than "unknown module".
+  defp parse(["domain" | _]), do: {:error, "usage: kelictl domain list | domain show <domain>"}
   defp parse(["reload-domains"]), do: {:ok, :ok, :reload_domains, []}
   defp parse(["module", "reload", name]), do: {:ok, :ok, :module_reload, [name]}
 
@@ -80,7 +85,7 @@ defmodule Kelix.Control.CLI do
 
   # module-contributed command: <module> <cmd> [args…]
   defp parse([module, cmd | rest]),
-    do: {:ok, :module, :module_command, [module, cmd, %{"args" => rest}]}
+    do: {:ok, {:module, module}, :module_command, [module, cmd, %{"args" => rest}]}
 
   defp parse(_), do: {:error, usage()}
 
@@ -105,6 +110,14 @@ defmodule Kelix.Control.CLI do
   end
 
   # ── rendering ({tag, result} → {exit_code, text}) ────────────────────────────
+
+  # `<module> <cmd>` is also where an unrecognised built-in lands (a mistyped or
+  # over-qualified command such as `kelictl domains graceful-shutdown`), so name
+  # what was not found and show the usage rather than a bare :unknown_module.
+  defp render({:module, name}, {:error, :unknown_module}),
+    do: {1, "error: \"#{name}\" is neither a kelictl command nor a loaded module\n\n" <> usage()}
+
+  defp render(:domain, {:error, :not_found}), do: {1, "no such domain"}
 
   defp render(_tag, {:error, reason}), do: {1, "error: #{inspect(reason)}"}
 
@@ -154,14 +167,70 @@ defmodule Kelix.Control.CLI do
     end
   end
 
+  defp render(:domains, []), do: {0, "no domain served"}
+
+  defp render(:domains, rows) when is_list(rows) do
+    {0,
+     table(
+       ["domain", "aliases", "functions", "calls", "regs", "max"],
+       rows,
+       &[
+         &1.name,
+         dash(Enum.join(&1.aliases, ", ")),
+         dash(Enum.join(&1.functions, ", ")),
+         to_string(&1.active_calls),
+         to_string(&1.registrations),
+         if(&1.max_calls, do: to_string(&1.max_calls), else: "-")
+       ]
+     )}
+  end
+
+  defp render(:domain, {:ok, d}) do
+    lines =
+      [
+        "domain:        #{d.name}",
+        "aliases:       #{dash(Enum.join(d.aliases, ", "))}",
+        "max calls:     #{if d.max_calls, do: d.max_calls, else: "unlimited"}",
+        "active calls:  #{d.active_calls}",
+        "registrations: #{d.registrations}",
+        "registrar:     #{format_function(d.registrar)}",
+        "presence:      #{format_function(d.presence)}",
+        if(d.dial_plan == [], do: "dial-plan:     (disabled)", else: "dial-plan:")
+      ] ++ format_dial_plan(d.dial_plan)
+
+    {0, Enum.join(lines, "\n")}
+  end
+
   defp render(:map, result) when is_map(result) do
     {exit_map(result), Enum.map_join(result, "\n", fn {k, v} -> "#{k}: #{fmt(v)}" end)}
   end
 
-  defp render(:module, {:ok, value}), do: {0, fmt(value)}
+  defp render({:module, _name}, {:ok, value}), do: {0, fmt(value)}
   defp render(:ok, :ok), do: {0, "ok"}
   defp render(:ok, :notfound), do: {1, "not found"}
   defp render(_tag, other), do: {0, fmt(other)}
+
+  # A function block: absent = the function is not served on this domain. Present,
+  # it is the script plus whatever tuning the domain overrode.
+  defp format_function(nil), do: "(disabled)"
+
+  defp format_function(cfg) when is_map(cfg) do
+    Enum.map_join(Enum.sort(cfg), " ", fn {k, v} -> "#{k}=#{v}" end)
+  end
+
+  # Numbered, because the dial-plan is first-match-wins: the position *is* the
+  # semantics, and "which rule caught this call" is the usual question.
+  defp format_dial_plan(rules) do
+    patterns = Enum.map(rules, &(&1.pattern || "(default)"))
+    width = patterns |> Enum.map(&String.length/1) |> Enum.max(fn -> 0 end)
+
+    patterns
+    |> Enum.zip(rules)
+    |> Enum.with_index(1)
+    |> Enum.map(fn {{pattern, r}, i} ->
+      "  #{i}. #{String.pad_trailing(pattern, width)} -> #{r.script}"
+    end)
+  end
 
   # One line per module that reports state of its own (`mcu: 2 conferences, …`).
   # Rendered from whatever the module returned, so a new module needs no CLI change.
@@ -244,6 +313,8 @@ defmodule Kelix.Control.CLI do
       monitor                         scenarios in progress
       regs [aor]                      list registrations
       unregister <aor> [contact]      remove a registration
+      domain list                     served domains + their properties
+      domain show <domain>            one domain in detail (name or alias)
       stop <id>                       shut down one scenario
       reload-script [--notify] <name…>  reload scenario script(s)
       reload-domains                  hot-reload domains.toml

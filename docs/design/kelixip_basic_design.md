@@ -1012,6 +1012,13 @@ Spec §9–§10. **Parity by construction**: one command layer, two frontals.
 > by `[control_api]` (parsed/validated by `Kelix.Config`, pushed to the app env).
 > `Kelix.ControlAPI.Endpoint` starts Bandit only when `[control_api].enabled`
 > (`:ignore` otherwise), ordered after `Kelix.Config` in the tree.
+>
+> **Refinement (2026-08-02).** Added the two read verbs `domains/0` / `domain/1`
+> (`kelictl domain list` / `domain show <domain>`, `GET /domains[/<domain>]`):
+> `status` reported only the snapshot *version*, so nothing short of reading the
+> file on the server told an operator which domains are served, with which
+> functions, scripts and dial-plan — and the file is not necessarily what the
+> router loaded.
 
 ### 10.1 `Kelix.Control`
 
@@ -1023,6 +1030,8 @@ holds business logic. Surface (spec §9.3):
 | `status/0` — uptime, counters, pool, node state | R | `kelictl status` | `GET /status` |
 | `monitor/0` — scenarios in progress | R | `kelictl monitor` | `GET /scenarios` |
 | `registrations/1` | R | `kelictl regs [aor]` | `GET /registrations` |
+| `domains/0` — served domains + properties | R | `kelictl domain list` | `GET /domains` |
+| `domain/1` — one domain in detail | R | `kelictl domain show <domain>` | `GET /domains/<domain>` |
 | `unregister/2` | W | `kelictl unregister <aor> [contact]` | `DELETE /registrations/<aor>` |
 | `shutdown_scenario/1` | W | `kelictl stop <id>` | `POST /scenarios/<id>/shutdown` |
 | `reload_script/2` (notify?) | W | `kelictl reload-script [--notify] <name…>` | `POST /scripts/reload[?notify=1]` |
@@ -1038,6 +1047,18 @@ Plus, per §8.1, **module-contributed commands**: `kelictl <module> <cmd> <args>
 `monitor/0` reuses the in-memory store already feeding `elixipp --monitor`
 (`SIP.Scenario.Monitor`). `registrations/1` reads the `Kelix.Mod.Registrar`
 store (§6). `status/0` aggregates uptime + counters + pool state.
+
+`domains/0` / `domain/1` read the **live** `Kelix.Domains` snapshot (§3.2), not
+`domains.toml` on disk: after a rejected reload the two differ, and the operator
+question is what the router is doing. Both return the same per-domain shape — the
+configuration (aliases, `max_calls`, the enabled functions with their scripts and
+tuning, the ordered dial-plan) plus the live counters — so the list and the detail
+view cannot disagree about a field. Two readings are *asked for*, never re-derived
+here: whether a function is enabled comes from `Kelix.Router.function_enabled?/2`
+(the router's own reading of a function block, §4), and `domain/1` resolves its
+argument through `Kelix.Domains.lookup/2`, i.e. name **+** aliases,
+case-insensitively — the way an inbound R-URI is resolved, so the host an operator
+saw on the wire is a valid argument.
 
 ### 10.2 The `kelictl` CLI
 

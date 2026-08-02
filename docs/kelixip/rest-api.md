@@ -50,6 +50,8 @@ cert) with a JSON body `{"error": "…"}`.
 | `GET /status` | R | `kelictl status` |
 | `GET /scenarios` | R | `kelictl monitor` |
 | `GET /registrations` | R | `kelictl regs` |
+| `GET /domains` | R | `kelictl domain list` |
+| `GET /domains/<domain>` | R | `kelictl domain show` |
 | `DELETE /registrations/<aor>` | W | `kelictl unregister` |
 | `POST /scenarios/<id>/shutdown` | W | `kelictl stop` |
 | `POST /scripts/reload[?notify=1]` | W | `kelictl reload-script` |
@@ -63,6 +65,31 @@ Request bodies are JSON (`Content-Type: application/json`); responses are JSON.
 Result mapping: `:ok` → `200 {"result":"ok"}`; not-found → `404`; a bad
 argument → `400`; `graceful-shutdown` → `202 {"result":"draining"}`.
 
+`GET /domains` returns the list of these objects, in `domains.toml` order;
+`GET /domains/<domain>` returns one (matched on the name **or** an alias,
+case-insensitively) or `404`. Both read the live snapshot — what the router uses
+now, not what is on disk. `dial_plan` is ordered and first-match-wins, the
+catch-all being the entry with `"default": true` (and no `pattern`); a function
+absent from `functions` is not served on that domain (`registrar` / `presence`
+are then `null`).
+
+```json
+{
+  "name": "example.com",
+  "aliases": ["example.fr"],
+  "max_calls": 500,
+  "functions": ["registrar", "calls"],
+  "registrar": {"script": "registrar.exs", "default_expires": 3600},
+  "presence": null,
+  "dial_plan": [
+    {"pattern": "0[1-9]XXXXXXXX", "default": false, "script": "user2pstn.exs"},
+    {"pattern": null, "default": true, "script": "catchall.exs"}
+  ],
+  "active_calls": 0,
+  "registrations": 0
+}
+```
+
 ```bash
 TOKEN=change-me
 BASE=http://127.0.0.1:8090
@@ -71,6 +98,8 @@ BASE=http://127.0.0.1:8090
 curl -s -H "Authorization: Bearer $TOKEN" $BASE/status
 curl -s -H "Authorization: Bearer $TOKEN" $BASE/scenarios
 curl -s -H "Authorization: Bearer $TOKEN" "$BASE/registrations?aor=alice@example.com"
+curl -s -H "Authorization: Bearer $TOKEN" $BASE/domains
+curl -s -H "Authorization: Bearer $TOKEN" $BASE/domains/example.com
 
 # write verbs
 curl -s -X DELETE -H "Authorization: Bearer $TOKEN" \

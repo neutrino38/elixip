@@ -14,6 +14,8 @@ defmodule Kelix.ControlAPI do
   | `status/0` | `GET /status` |
   | `monitor/0` | `GET /scenarios` |
   | `registrations/1` | `GET /registrations[?aor=]` |
+  | `domains/0` | `GET /domains` |
+  | `domain/1` | `GET /domains/:name` |
   | `unregister/2` | `DELETE /registrations/:aor[?contact=]` |
   | `shutdown_scenario/1` | `POST /scenarios/:id/shutdown` |
   | `reload_script/2` | `POST /scripts/reload[?notify=1]` (body `{"names": […]}`) |
@@ -74,6 +76,20 @@ defmodule Kelix.ControlAPI do
   get "/registrations" do
     aor = conn.query_params["aor"]
     json(conn, 200, Control.registrations(aor))
+  end
+
+  get "/domains" do
+    json(conn, 200, Control.domains())
+  end
+
+  # Declared before `POST /domains/reload` is irrelevant (the method differs), but
+  # it does mean `GET /domains/reload` answers 404 "not found" — there is no
+  # domain by that name, which is the honest answer.
+  get "/domains/:name" do
+    case Control.domain(name) do
+      {:ok, domain} -> json(conn, 200, domain)
+      {:error, :not_found} -> json(conn, 404, %{error: "not found"})
+    end
   end
 
   # ── write verbs ───────────────────────────────────────────────────────────────

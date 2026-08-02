@@ -100,6 +100,70 @@ defmodule Kelix.Control do
     end
   end
 
+  @doc """
+  The served domains and their properties (`kelictl domain list`), in
+  `domains.toml` order — which is significant, the dial-plan is first-match-wins.
+
+  Each row is what `domain/1` returns for that domain: the configured properties
+  plus the live counters (active calls, registrations), so the list and the detail
+  view never disagree about a field.
+  """
+  @spec domains() :: [map]
+  def domains() do
+    snapshot = current_domains()
+    active = active_calls()
+
+    Enum.map(snapshot.domains, &describe_domain(&1, active))
+  end
+
+  @doc """
+  One domain and its properties (`kelictl domain show <domain>`). `name` is
+  matched the way inbound traffic is — against the domain name *and* its aliases,
+  case-insensitively — so `show` answers for whatever host an operator saw on the
+  wire. `{:error, :not_found}` if no domain serves that host.
+
+  The returned map is the configuration (`aliases`, `max_calls`, the enabled
+  functions with their scripts and tuning, the ordered dial-plan) plus the live
+  counters for that domain.
+  """
+  @spec domain(String.t()) :: {:ok, map} | {:error, :not_found}
+  def domain(name) when is_binary(name) do
+    case Kelix.Domains.lookup(current_domains(), name) do
+      nil -> {:error, :not_found}
+      d -> {:ok, describe_domain(d, active_calls())}
+    end
+  end
+
+  # A domain as both frontals show it. `function_enabled?/2` is asked rather than
+  # re-derived here: "a function block present = enabled" is the router's reading
+  # of domains.toml, and the operator must be told exactly what the router will do.
+  defp describe_domain(%Kelix.Domain{} = d, active) do
+    %{
+      name: d.name,
+      aliases: d.aliases,
+      max_calls: d.max_calls,
+      functions:
+        for(f <- [:registrar, :calls, :presence], Kelix.Router.function_enabled?(d, f), do: f),
+      registrar: d.registrar,
+      presence: d.presence,
+      dial_plan: Enum.map(d.dial_plan, &render_rule/1),
+      active_calls: Map.get(active, d.name, 0),
+      registrations: map_size(registrations_for(d.name))
+    }
+  end
+
+  defp render_rule(%Kelix.DialRule{default?: true, script: script}),
+    do: %{pattern: nil, default: true, script: script}
+
+  defp render_rule(%Kelix.DialRule{raw: raw, script: script}),
+    do: %{pattern: raw, default: false, script: script}
+
+  defp current_domains(), do: safe(fn -> Kelix.Domains.current() end, %Kelix.Domains{})
+
+  defp active_calls() do
+    safe(fn -> Map.get(Kelix.InstancePool.stats(), :per_domain, %{}) end, %{})
+  end
+
   # ── write verbs ───────────────────────────────────────────────────────────────
 
   @doc """

@@ -76,6 +76,98 @@ defmodule Kelix.ControlTest do
     end
   end
 
+  describe "domains/0 + domain/1" do
+    @domains_toml """
+    [[domain]]
+    name = "ctl.example.com"
+    aliases = ["ctl.example.fr"]
+    max_calls = 500
+
+    [domain.registrar]
+    script = "registrar-example.exs"
+    default_expires = 3600
+
+    [[domain.call]]
+    pattern = "0[1-9]XXXXXXXX"
+    script = "user2pstn.exs"
+
+    [[domain.call]]
+    default = true
+    script = "catchall.exs"
+
+    [[domain]]
+    name = "bare.example.net"
+    """
+
+    setup do
+      path =
+        Path.join(System.tmp_dir!(), "ctl_domains_#{System.unique_integer([:positive])}.toml")
+
+      File.write!(path, @domains_toml)
+      assert :ok = Kelix.Domains.reload(path)
+
+      # the singleton is shared with the rest of the suite: leave it empty again
+      on_exit(fn ->
+        empty = path <> ".empty"
+        File.write!(empty, "")
+        Kelix.Domains.reload(empty)
+        File.rm(path)
+        File.rm(empty)
+      end)
+
+      :ok
+    end
+
+    test "domains/0 lists every served domain, in domains.toml order" do
+      assert [first, second] = Control.domains()
+      assert first.name == "ctl.example.com"
+      assert second.name == "bare.example.net"
+    end
+
+    test "domains/0 carries the properties and the live counters" do
+      [d, bare] = Control.domains()
+
+      assert d.aliases == ["ctl.example.fr"]
+      assert d.max_calls == 500
+      assert d.functions == [:registrar, :calls]
+      assert d.registrar == %{script: "registrar-example.exs", default_expires: 3600}
+      assert d.presence == nil
+      assert d.active_calls == 0
+      assert d.registrations == 0
+
+      # a domain with no function block serves nothing — and says so
+      assert bare.functions == []
+      assert bare.max_calls == nil
+      assert bare.dial_plan == []
+    end
+
+    test "the dial-plan keeps its order, the catch-all marked as such" do
+      [d, _bare] = Control.domains()
+
+      assert d.dial_plan == [
+               %{pattern: "0[1-9]XXXXXXXX", default: false, script: "user2pstn.exs"},
+               %{pattern: nil, default: true, script: "catchall.exs"}
+             ]
+    end
+
+    test "domain/1 resolves a name or an alias, case-insensitively" do
+      assert {:ok, d} = Control.domain("ctl.example.com")
+      assert d.name == "ctl.example.com"
+
+      # an operator sees the alias on the wire, so `show` must answer for it
+      assert {:ok, ^d} = Control.domain("CTL.EXAMPLE.FR")
+      assert Control.domain("unknown.example.org") == {:error, :not_found}
+    end
+
+    test "domain/1 counts the calls in progress on that domain only" do
+      spawn_watched("ctl.example.com")
+
+      assert {:ok, d} = Control.domain("ctl.example.com")
+      assert d.active_calls == 1
+      assert {:ok, %{active_calls: 0}} = Control.domain("bare.example.net")
+    end
+  end
+
   describe "read + simple verbs" do
     test "status/0 aggregates node + surfaces" do
       s = Control.status()

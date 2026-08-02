@@ -46,6 +46,41 @@ defmodule Kelix.ControlAPITest do
       assert conn.status == 200
       assert is_list(body(conn))
     end
+
+    test "GET /domains returns a JSON list" do
+      conn = call(conn(:get, "/domains"))
+      assert conn.status == 200
+      assert is_list(body(conn))
+    end
+
+    test "GET /domains/:name serves the same view kelictl shows" do
+      path =
+        Path.join(System.tmp_dir!(), "api_domains_#{System.unique_integer([:positive])}.toml")
+
+      File.write!(
+        path,
+        ~s([[domain]]\nname = "api.example.com"\n\n[domain.registrar]\nscript = "r.exs"\n)
+      )
+
+      assert :ok = Kelix.Domains.reload(path)
+
+      on_exit(fn ->
+        empty = path <> ".empty"
+        File.write!(empty, "")
+        Kelix.Domains.reload(empty)
+        File.rm(path)
+        File.rm(empty)
+      end)
+
+      conn = call(conn(:get, "/domains/api.example.com"))
+      assert conn.status == 200
+      assert %{"name" => "api.example.com", "functions" => ["registrar"]} = body(conn)
+    end
+
+    test "GET /domains/:name on an unknown domain is a 404" do
+      conn = call(conn(:get, "/domains/ghost.example.org"))
+      assert conn.status == 404
+    end
   end
 
   describe "write verbs" do

@@ -27,6 +27,8 @@ on Ubuntu/Debian, the same file the systemd unit reads.
 | `kelictl monitor` | R | Scenarios in progress (reuses the `--monitor` view) |
 | `kelictl regs [aor]` | R | Current registrations (all, or one AOR) |
 | `kelictl unregister <aor> [contact]` | W | Drop a registration |
+| `kelictl domain list` | R | Served domains, their functions and live counters |
+| `kelictl domain show <domain>` | R | One domain in detail (name **or** alias) |
 | `kelictl stop <id>` | W | Cooperatively shut down one scenario (id from `monitor`) |
 | `kelictl reload-script [--notify] <name…>` | W | Reload scenario script(s) |
 | `kelictl reload-domains` | W | Hot-reload `domains.toml` (atomic) |
@@ -56,6 +58,26 @@ alice@example.com -> sip:alice@10.0.0.9:5060
 $ kelictl unregister alice@example.com
 ok
 
+$ kelictl domain list
+domain           aliases     functions         calls  regs  max
+example.com      example.fr  registrar, calls  0      0     500
+lab.example.net  -           registrar         0      0     -
+
+$ kelictl domain show example.com
+domain:        example.com
+aliases:       example.fr
+max calls:     500
+active calls:  0
+registrations: 0
+registrar:     default_expires=3600 script=registrar.exs
+presence:      (disabled)
+dial-plan:
+  1. 0[1-9]XXXXXXXX -> user2pstn.exs
+  2. (default)      -> catchall.exs
+
+$ kelictl domain show ghost.example.org
+no such domain
+
 $ kelictl mcu mcu1 off
 ok
 
@@ -69,6 +91,16 @@ ok
 `unregister <aor>` accepts `user@domain` (that domain) or `user` (every domain);
 an optional `contact` removes just that binding. `reload-script` reports one line
 per script (`<name>: ok` / `<name>: error: …`).
+
+`domain list` / `domain show` read the **live** `domains.toml` snapshot — what the
+router is using right now, which after a rejected `reload-domains` is *not* what
+is on disk (the version is in `kelictl status`). `show` resolves its argument the
+way inbound traffic is resolved, against the name **and** the aliases,
+case-insensitively, so the host seen on the wire is a valid argument. The
+dial-plan is listed in file order and numbered, because it is first-match-wins:
+rule *n* is only tried if rules *1…n-1* did not match. `functions` lists what the
+domain actually serves (a function block present in the TOML = enabled), so an
+empty column means every request to that domain is answered `404`.
 
 ### Exit codes
 
