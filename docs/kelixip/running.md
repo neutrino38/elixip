@@ -82,8 +82,7 @@ kelictl regs
 kelictl monitor
 ```
 
-> Pick a `[[listen]]` port nothing else holds. 5060/5061/5066/5067/443 are often
-> taken by a local kamailio or softswitch; a bind failure **aborts the boot** and
+> Pick a `[[listen]]` port nothing else holds. A bind failure **aborts the boot** and
 > says so on stderr. The test suite binds `5070` by default too — override with
 > `ELIXIP_TEST_UDP_PORT` if you run `mix test --include live` against a live server.
 
