@@ -84,40 +84,71 @@ defmodule Kelix.Control do
     do: Map.merge(@empty_fsm, Map.take(entry, [:scenario, :state, :event, :command, :account]))
 
   @doc """
-  Current registrations (`kelictl registration list [aor]`). `aor` filters by
-  user-part, and by domain when given as `"user@domain"`; `nil` lists every domain.
+  Every served domain and its registrations (`kelictl registration list`), in
+  `domains.toml` order.
 
-  Rows are `%{domain, aor, contacts}`, each contact carrying what the registrar
-  stored for that binding — see `registration/1`, which is this function narrowed
-  to one AOR, so the list and the detail view cannot disagree about a field.
+  **One entry per served domain**, `%{domain, registrations}`, including a domain
+  nobody is registered in — "served, empty" and "not served at all" are different
+  answers and an operator is usually asking which of the two it is. Registrations
+  are keyed per domain in the store (§6.1), so this is the shape they have.
   """
-  @spec registrations(String.t() | nil) :: [map]
-  def registrations(aor \\ nil) do
-    {user, dom} = if aor, do: split_aor(aor), else: {nil, nil}
+  @spec registrations() :: [map]
+  def registrations(), do: Enum.map(domain_names(), &domain_registrations/1)
 
-    for d <- domain_names(),
-        is_nil(dom) or d == dom,
-        {a, contacts} <- registrations_for(d),
-        is_nil(user) or a == user do
-      %{domain: d, aor: a, contacts: Enum.map(contacts, &render_contact/1)}
-    end
+  @doc """
+  One domain's registrations (`kelictl registration list <domain>`).
+
+  `domain` is matched the way inbound traffic is — name **and** aliases,
+  case-insensitively — so the host an operator saw on the wire is a valid argument.
+  `{:error, :not_found}` if no domain serves that host, which is *not* the same
+  answer as a served domain with nothing registered in it.
+
+  Returns the same `%{domain, registrations}` entry `registrations/0` lists, so the
+  two views cannot disagree about a field.
+  """
+  @spec registrations(String.t()) :: {:ok, map} | {:error, :not_found}
+  def registrations(domain) when is_binary(domain) do
+    with {:ok, name} <- resolve_domain(domain), do: {:ok, domain_registrations(name)}
   end
 
   @doc """
-  One AOR and its bindings (`kelictl registration show <aor>`).
+  One AOR and its bindings (`kelictl registration show <domain> <aor>`).
 
-  A **list** of rows, not one: an AOR is only unique within a domain, so a bare
-  `"user"` legitimately matches several — `"user@domain"` narrows it to one.
-  `{:error, :not_found}` when nothing is registered under that name, which is the
-  answer `unregister/2` would also give.
+  An AOR is only unique **within a domain** (§6.1), so the domain is part of the
+  address, not a filter on it. `aor` is the user-part, or the full `"user@domain"`
+  an operator copied out of a log — in which case its domain part must resolve to
+  `domain`, rather than being silently ignored.
+
+  Returns the row `registrations/1` holds for that AOR; `{:error, :not_found}` for
+  an unserved domain as much as for an unregistered AOR — neither is something the
+  operator can act on, and telling them apart would enumerate the served domains.
   """
-  @spec registration(String.t()) :: {:ok, [map]} | {:error, :not_found}
-  def registration(aor) when is_binary(aor) do
-    case registrations(aor) do
-      [] -> {:error, :not_found}
-      rows -> {:ok, rows}
+  @spec registration(String.t(), String.t()) :: {:ok, map} | {:error, :not_found}
+  def registration(domain, aor) when is_binary(domain) and is_binary(aor) do
+    with {:ok, name} <- resolve_domain(domain),
+         {:ok, user} <- aor_user(aor, name),
+         [_ | _] = contacts <- Map.get(registrations_for(name), user, :not_registered) do
+      {:ok, registration_row(name, user, contacts)}
+    else
+      _ -> {:error, :not_found}
     end
   end
+
+  defp domain_registrations(name) do
+    %{
+      domain: name,
+      # sorted: the store is an ETS table, whose enumeration order is arbitrary and
+      # would reshuffle the list between two otherwise identical calls
+      registrations:
+        for(
+          {aor, contacts} <- Enum.sort(registrations_for(name)),
+          do: registration_row(name, aor, contacts)
+        )
+    }
+  end
+
+  defp registration_row(domain, aor, contacts),
+    do: %{domain: domain, aor: aor, contacts: Enum.map(contacts, &render_contact/1)}
 
   @doc """
   The served domains and their properties (`kelictl domain list`), in
@@ -251,22 +282,25 @@ defmodule Kelix.Control do
   # ── write verbs ───────────────────────────────────────────────────────────────
 
   @doc """
-  Remove a registration (`kelictl registration remove <aor> [contact]`). `aor` may be
-  `"user@domain"` (that domain) or `"user"` (every domain). `contact` is a
-  contact-URI string or `:all`. `:ok` if anything was removed, else `:notfound`.
-  """
-  @spec unregister(String.t(), String.t() | :all) :: :ok | :notfound
-  def unregister(aor, contact \\ :all) do
-    {user, dom} = split_aor(aor)
-    targets = if dom, do: [dom], else: domain_names()
-    # via the registry: the registrar is a loadable module, absent from the core
-    results =
-      Enum.map(
-        targets,
-        &Kelix.ModuleRegistry.facade("registrar", :remove, [&1, user, contact], :notfound)
-      )
+  Remove a registration (`kelictl registration remove <domain> <aor> [contact]`).
 
-    if Enum.any?(results, &(&1 == :ok)), do: :ok, else: :notfound
+  `domain` and `aor` are read exactly as `registration/2` reads them; `contact` is a
+  contact-URI string, or `:all` to drop the whole AOR. `:ok` if anything was
+  removed, else `:notfound` — including for an unserved domain, since nothing was
+  removed either way.
+
+  Dropping a binding is destructive and per-domain by nature: there is deliberately
+  no form that removes `"alice"` from *every* domain at once.
+  """
+  @spec unregister(String.t(), String.t(), String.t() | :all) :: :ok | :notfound
+  def unregister(domain, aor, contact \\ :all) do
+    with {:ok, name} <- resolve_domain(domain),
+         {:ok, user} <- aor_user(aor, name) do
+      # via the registry: the registrar is a loadable module, absent from the core
+      Kelix.ModuleRegistry.facade("registrar", :remove, [name, user, contact], :notfound)
+    else
+      _ -> :notfound
+    end
   end
 
   @doc "Cooperatively shut down one scenario by id (`kelictl stop <id>`)."
@@ -472,11 +506,29 @@ defmodule Kelix.Control do
 
   defp uri_string(other), do: inspect(other)
 
-  # "user@domain" -> {"user", "domain"}; "user" -> {"user", nil}
-  defp split_aor(aor) do
+  # A host an operator saw on the wire is a valid argument: resolved through the
+  # router's own reading (`Kelix.Domains.lookup/2` — name + aliases, case-insensitive),
+  # and answered with the *canonical* name, which is what the registrar keys on.
+  defp resolve_domain(name) do
+    case Kelix.Domains.lookup(current_domains(), name) do
+      nil -> {:error, :not_found}
+      d -> {:ok, d.name}
+    end
+  end
+
+  # `alice`, or the `alice@example.com` an operator copied out of a log. A domain
+  # part naming *another* domain is refused rather than dropped:
+  # `show example.com bob@other.example.net` must not answer for example.com's bob.
+  defp aor_user(aor, domain) do
     case String.split(aor, "@", parts: 2) do
-      [user, domain] -> {String.downcase(user), String.downcase(domain)}
-      [user] -> {String.downcase(user), nil}
+      [user] ->
+        {:ok, String.downcase(user)}
+
+      [user, dom] ->
+        case resolve_domain(dom) do
+          {:ok, ^domain} -> {:ok, String.downcase(user)}
+          _ -> {:error, :not_found}
+        end
     end
   end
 

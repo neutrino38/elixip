@@ -14,15 +14,18 @@ defmodule Kelix.Control.CLITest do
     assert out =~ "media pool:"
   end
 
-  test "registration list on an empty registrar" do
+  test "registration list with no domain served" do
     {0, out} = run(["registration", "list"])
-    assert out == "no registrations"
+    assert out == "no domain served"
   end
 
   describe "registration list / show / remove" do
     @reg_domains """
     [[domain]]
     name = "cli.reg.example.com"
+
+    [[domain]]
+    name = "cli.empty.example.net"
     """
 
     # the registrar is a loadable module: a fake exporting `all/1` + `remove/3` is
@@ -72,21 +75,25 @@ defmodule Kelix.Control.CLITest do
       :ok
     end
 
-    test "registration list renders one row per AOR, with the soonest expiry" do
+    test "registration list renders one section per served domain" do
       {0, out} = run(["registration", "list"])
 
-      assert out =~ ~r/aor\s+domain\s+contacts\s+expires\s+bindings/
-      assert out =~ ~r/bob\s+cli\.reg\.example\.com\s+1\s+5m\d+s\s+sip:bob@10\.0\.0\.9:5062/
+      assert out =~ "cli.reg.example.com\n  aor  contacts  expires  bindings"
+      assert out =~ ~r/bob\s+1\s+5m\d+s\s+sip:bob@10\.0\.0\.9:5062/
+      # served, nobody registered — which is not the same thing as not served
+      assert out =~ "cli.empty.example.net\n  (no registration)"
     end
 
-    test "registration list takes the same filter regs took" do
-      assert {0, out} = run(["registration", "list", "bob@cli.reg.example.com"])
+    test "registration list <domain> renders that domain only" do
+      assert {0, out} = run(["registration", "list", "cli.reg.example.com"])
       assert out =~ "bob"
-      assert {0, "no registrations"} = run(["registration", "list", "ghost"])
+      refute out =~ "cli.empty.example.net"
+
+      assert {1, "no such domain"} = run(["registration", "list", "ghost.example.org"])
     end
 
     test "registration show details each binding" do
-      {0, out} = run(["registration", "show", "bob"])
+      {0, out} = run(["registration", "show", "cli.reg.example.com", "bob"])
 
       assert out =~ "aor:          bob@cli.reg.example.com"
       assert out =~ "contacts:     1"
@@ -102,18 +109,32 @@ defmodule Kelix.Control.CLITest do
     end
 
     test "registration show on an unregistered AOR → exit 1" do
-      assert {1, "no such registration"} = run(["registration", "show", "ghost"])
+      assert {1, "no such registration"} =
+               run(["registration", "show", "cli.reg.example.com", "x"])
+
+      assert {1, "no such registration"} =
+               run(["registration", "show", "ghost.example.org", "bob"])
     end
 
     test "registration remove drops the AOR, or reports not found" do
-      assert {0, "ok"} = run(["registration", "remove", "bob@cli.reg.example.com"])
-      assert {0, "ok"} = run(["registration", "remove", "bob", "sip:bob@10.0.0.9:5062"])
-      assert {1, "not found"} = run(["registration", "remove", "ghost"])
+      assert {0, "ok"} = run(["registration", "remove", "cli.reg.example.com", "bob"])
+
+      assert {0, "ok"} =
+               run([
+                 "registration",
+                 "remove",
+                 "cli.reg.example.com",
+                 "bob",
+                 "sip:bob@10.0.0.9:5062"
+               ])
+
+      assert {1, "not found"} = run(["registration", "remove", "cli.reg.example.com", "ghost"])
+      assert {1, "not found"} = run(["registration", "remove", "ghost.example.org", "bob"])
     end
 
     test "a mistyped registration sub-command gets the registration usage" do
       {2, out} = run(["registration", "shwo", "bob"])
-      assert out =~ "usage: kelictl registration list [aor] | registration show <aor>"
+      assert out =~ "usage: kelictl registration list [domain] | registration show <domain> <aor>"
     end
   end
 

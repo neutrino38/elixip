@@ -25,9 +25,9 @@ on Ubuntu/Debian, the same file the systemd unit reads.
 |---|---|---|
 | `kelictl status` | R | Uptime, counters, listeners, media pool, node state |
 | `kelictl monitor` | R | Scenarios in progress (reuses the `--monitor` view) |
-| `kelictl registration list [aor]` | R | Current registrations (all, or one AOR) |
-| `kelictl registration show <aor>` | R | One AOR and its bindings, in detail |
-| `kelictl registration remove <aor> [contact]` | W | Drop a registration |
+| `kelictl registration list [domain]` | R | Registrations, one list per domain (all domains, or one) |
+| `kelictl registration show <domain> <aor>` | R | One AOR and its bindings, in detail |
+| `kelictl registration remove <domain> <aor> [contact]` | W | Drop a registration |
 | `kelictl domain list` | R | Served domains, their functions and live counters |
 | `kelictl domain show <domain>` | R | One domain in detail (name **or** alias) |
 | `kelictl domain reload-all` | W | Hot-reload `domains.toml` (atomic) |
@@ -53,11 +53,19 @@ modules:
 media pool:      (empty)
 
 $ kelictl registration list
-aor    domain           contacts  expires  bindings
-alice  example.com      2         4m58s    sip:alice@10.0.0.9:5060, sip:alice@10.0.0.9:5062
-bob    lab.example.net  1         9m12s    sip:bob@10.0.0.22:5060
+example.com
+  aor    contacts  expires  bindings
+  alice  2         4m58s    sip:alice@10.0.0.9:5060, sip:alice@10.0.0.9:5062
+  bob    1         9m12s    sip:bob@10.0.0.22:5060
 
-$ kelictl registration show alice@example.com
+lab.example.net
+  (no registration)
+
+$ kelictl registration list lab.example.net
+lab.example.net
+  (no registration)
+
+$ kelictl registration show example.com alice
 aor:          alice@example.com
 contacts:     2
   1. sip:alice@10.0.0.9:5060
@@ -71,7 +79,7 @@ contacts:     2
      source:    tls 203.0.113.7:51044
      transport: tls
 
-$ kelictl registration remove alice@example.com
+$ kelictl registration remove example.com alice
 ok
 
 $ kelictl domain list
@@ -117,11 +125,20 @@ $ kelictl domain reload-all
 ok
 ```
 
-`registration list|show|remove` all read `<aor>` the same way: `user@domain` is
-that domain, a bare `user` is every domain — an AOR is only unique within a
-domain, so `show alice` answers with one block per domain `alice` is registered
-in. `remove` takes an optional `contact` to drop just that binding instead of the
-whole AOR. `reload-script` reports one line per script (`<name>: ok` /
+An AOR is only unique **within a domain**, so the domain is part of the address
+rather than a filter on it: `show` and `remove` take `<domain> <aor>`, and `list`
+groups its answer per domain. With no argument, `list` prints one section per
+**served** domain — including the ones nobody is registered in, because
+"served, empty" and "not served at all" are what an operator is usually trying to
+tell apart. `<domain>` is resolved the way inbound traffic is (name **or** alias,
+case-insensitively), so the host seen on the wire is a valid argument; an unserved
+one is `no such domain`, not an empty list.
+
+`<aor>` is the user-part (`alice`), or the full `alice@example.com` copied out of a
+log — in which case its domain part must be that same domain, rather than being
+silently ignored. `remove` takes an optional `contact` to drop just that binding
+instead of the whole AOR; there is deliberately no form that removes an AOR from
+every domain at once. `reload-script` reports one line per script (`<name>: ok` /
 `<name>: error: …`).
 
 `show` prints what the registrar stored, not just the URI: `expires` both ways

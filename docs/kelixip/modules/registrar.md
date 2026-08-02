@@ -117,7 +117,7 @@ drops (WebRTC-critical): the binding is invalidated even before its `Expires`.
 ## Control commands
 
 None yet. Registrations are inspected with the core commands
-`kelictl registration list|show`
+`kelictl registration list [domain]` / `registration show <domain> <aor>`
 (see [administration.md](../administration.md)).
 
 ## Examples

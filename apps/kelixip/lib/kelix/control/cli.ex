@@ -48,13 +48,17 @@ defmodule Kelix.Control.CLI do
 
   defp parse(["status"]), do: {:ok, :status, :status, []}
   defp parse(["monitor"]), do: {:ok, :monitor, :monitor, []}
-  defp parse(["registration", "list"]), do: {:ok, :regs, :registrations, [nil]}
-  defp parse(["registration", "list", aor]), do: {:ok, :regs, :registrations, [aor]}
-  defp parse(["registration", "show", aor]), do: {:ok, :registration, :registration, [aor]}
-  defp parse(["registration", "remove", aor]), do: {:ok, :ok, :unregister, [aor, :all]}
+  defp parse(["registration", "list"]), do: {:ok, :regs, :registrations, []}
+  defp parse(["registration", "list", domain]), do: {:ok, :reg_domain, :registrations, [domain]}
 
-  defp parse(["registration", "remove", aor, contact]),
-    do: {:ok, :ok, :unregister, [aor, contact]}
+  defp parse(["registration", "show", domain, aor]),
+    do: {:ok, :registration, :registration, [domain, aor]}
+
+  defp parse(["registration", "remove", domain, aor]),
+    do: {:ok, :ok, :unregister, [domain, aor, :all]}
+
+  defp parse(["registration", "remove", domain, aor, contact]),
+    do: {:ok, :ok, :unregister, [domain, aor, contact]}
 
   defp parse(["registration" | _]), do: {:error, usage_registration()}
 
@@ -131,6 +135,7 @@ defmodule Kelix.Control.CLI do
     do: {1, "error: \"#{name}\" is neither a kelictl command nor a loaded module\n\n" <> usage()}
 
   defp render(:domain, {:error, :not_found}), do: {1, "no such domain"}
+  defp render(:reg_domain, {:error, :not_found}), do: {1, "no such domain"}
   defp render(:registration, {:error, :not_found}), do: {1, "no such registration"}
   defp render(:mediaserver, {:error, :not_found}), do: {1, "no such media server"}
 
@@ -170,31 +175,20 @@ defmodule Kelix.Control.CLI do
      )}
   end
 
-  defp render(:regs, []), do: {0, "no registrations"}
+  defp render(:regs, []), do: {0, "no domain served"}
 
-  defp render(:regs, rows) when is_list(rows) do
-    {0,
-     table(
-       ["aor", "domain", "contacts", "expires", "bindings"],
-       rows,
-       &[
-         &1.aor,
-         &1.domain,
-         to_string(length(&1.contacts)),
-         # the soonest, i.e. when this AOR starts losing a way to be reached
-         dash(format_expires(soonest_expiry(&1.contacts))),
-         Enum.map_join(&1.contacts, ", ", fn c -> c.uri end)
-       ]
-     )}
-  end
+  # One section per served domain, in domains.toml order: registrations are keyed
+  # per domain in the store, and a domain with none is still worth a line — "served,
+  # empty" and "not served" are what the operator is trying to tell apart.
+  defp render(:regs, entries) when is_list(entries),
+    do: {0, Enum.map_join(entries, "\n\n", &domain_registrations_block/1)}
 
-  # One block per (domain, AOR) — a bare user-part can be registered in several
-  # domains — and one numbered paragraph per binding. Absent fields are omitted
-  # rather than dashed: `instance` / `reg-id` / `methods` are what a given handset
-  # chose to send, and a column of dashes says nothing.
-  defp render(:registration, {:ok, rows}) do
-    {0, Enum.map_join(rows, "\n\n", &registration_block/1)}
-  end
+  defp render(:reg_domain, {:ok, entry}), do: {0, domain_registrations_block(entry)}
+
+  # One numbered paragraph per binding. Absent fields are omitted rather than
+  # dashed: `instance` / `reg-id` / `methods` are what a given handset chose to
+  # send, and a column of dashes says nothing.
+  defp render(:registration, {:ok, row}), do: {0, registration_block(row)}
 
   defp render(:domains, []), do: {0, "no domain served"}
 
@@ -293,6 +287,28 @@ defmodule Kelix.Control.CLI do
       "  #{i}. #{String.pad_trailing(pattern, width)} -> #{r.script}"
     end)
   end
+
+  defp domain_registrations_block(%{domain: domain, registrations: []}),
+    do: "#{domain}\n  (no registration)"
+
+  defp domain_registrations_block(%{domain: domain, registrations: rows}) do
+    body =
+      table(
+        ["aor", "contacts", "expires", "bindings"],
+        rows,
+        &[
+          &1.aor,
+          to_string(length(&1.contacts)),
+          # the soonest, i.e. when this AOR starts losing a way to be reached
+          dash(format_expires(soonest_expiry(&1.contacts))),
+          Enum.map_join(&1.contacts, ", ", fn c -> c.uri end)
+        ]
+      )
+
+    domain <> "\n" <> indent(body)
+  end
+
+  defp indent(text), do: text |> String.split("\n") |> Enum.map_join("\n", &("  " <> &1))
 
   defp registration_block(row) do
     header = ["aor:          #{row.aor}@#{row.domain}", "contacts:     #{length(row.contacts)}"]
@@ -433,9 +449,9 @@ defmodule Kelix.Control.CLI do
 
       status                          uptime, counters, pool, node state
       monitor                         scenarios in progress
-      registration list [aor]         current registrations (all, or one AOR)
-      registration show <aor>         one AOR and its bindings, in detail
-      registration remove <aor> [contact]  drop a registration
+      registration list [domain]      registrations, per domain
+      registration show <domain> <aor>  one AOR and its bindings, in detail
+      registration remove <domain> <aor> [contact]  drop a registration
       domain list                     served domains + their properties
       domain show <domain>            one domain in detail (name or alias)
       domain reload-all               hot-reload domains.toml
@@ -456,8 +472,8 @@ defmodule Kelix.Control.CLI do
   end
 
   defp usage_registration() do
-    "usage: kelictl registration list [aor] | registration show <aor> | " <>
-      "registration remove <aor> [contact]"
+    "usage: kelictl registration list [domain] | registration show <domain> <aor> | " <>
+      "registration remove <domain> <aor> [contact]"
   end
 
   defp usage_domain(),

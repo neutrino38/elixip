@@ -1,7 +1,7 @@
 defmodule Kelix.ControlRegistrationsTest do
   @moduledoc """
-  Functional test of the **core ↔ module** pair: `Kelix.Control.registrations/1`
-  and `unregister/2` driven through the real `Kelix.Mod.Registrar`.
+  Functional test of the **core ↔ module** pair: `Kelix.Control.registrations/0,1`,
+  `registration/2` and `unregister/3` driven through the real `Kelix.Mod.Registrar`.
 
   It lives with the module, not with the core, precisely because the core no
   longer carries it (§16.12): `Kelix.Control` reaches the registrar by its
@@ -52,20 +52,38 @@ defmodule Kelix.ControlRegistrationsTest do
       :ok
     end
 
-    test "lists a registration then removes it" do
+    test "lists a registration, shows it, then removes it" do
       assert {:ok, _} = Kelix.Mod.Registrar.save(register("alice"), "example.com")
 
-      rows = Control.registrations()
-      assert Enum.any?(rows, &(&1.domain == "example.com" and &1.aor == "alice"))
+      # the cross-domain view: one entry per served domain
+      assert Enum.any?(Control.registrations(), fn entry ->
+               entry.domain == "example.com" and
+                 Enum.any?(entry.registrations, &(&1.aor == "alice"))
+             end)
 
-      assert Control.unregister("alice@example.com") == :ok
-      assert Control.registrations("alice") == []
+      # …the domain's own list, and the AOR in detail — with what the registrar
+      # actually stored: the REGISTER above came from 1.2.3.4:5060 over UDP
+      assert {:ok, %{domain: "example.com", registrations: [row]}} =
+               Control.registrations("example.com")
+
+      assert {:ok, ^row} = Control.registration("example.com", "alice")
+      assert [%{uri: "sip:alice@10.0.0.9", source: "UDP 1.2.3.4:5060"}] = row.contacts
+      assert hd(row.contacts).expires_in in 3599..3600
+
+      assert Control.unregister("example.com", "alice") == :ok
+      assert {:ok, %{registrations: []}} = Control.registrations("example.com")
+      assert Control.registration("example.com", "alice") == {:error, :not_found}
     end
 
-    test "unregister across all domains when no domain given" do
+    test "removal is per-domain: an unserved domain removes nothing" do
       assert {:ok, _} = Kelix.Mod.Registrar.save(register("bob"), "example.com")
-      assert Control.unregister("bob") == :ok
-      assert Control.unregister("bob") == :notfound
+
+      assert Control.unregister("ghost.example.org", "bob") == :notfound
+      # …and the binding is still there
+      assert {:ok, _} = Control.registration("example.com", "bob")
+
+      assert Control.unregister("example.com", "bob") == :ok
+      assert Control.unregister("example.com", "bob") == :notfound
     end
   end
 

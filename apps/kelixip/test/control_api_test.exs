@@ -47,10 +47,17 @@ defmodule Kelix.ControlAPITest do
       assert is_list(body(conn))
     end
 
-    test "GET /registrations/:aor on an unregistered aor → 404" do
-      conn = call(conn(:get, "/registrations/ghost@example.com"))
+    # Registrations are a sub-resource of the domain: an unserved domain is a 404 on
+    # the collection itself, not an empty list.
+    test "GET /domains/:domain/registrations on an unserved domain → 404" do
+      conn = call(conn(:get, "/domains/ghost.example.org/registrations"))
       assert conn.status == 404
       assert body(conn)["error"] == "not found"
+    end
+
+    test "GET /domains/:domain/registrations/:aor on an unregistered aor → 404" do
+      conn = call(conn(:get, "/domains/ghost.example.org/registrations/alice"))
+      assert conn.status == 404
     end
 
     test "GET /domains returns a JSON list" do
@@ -105,6 +112,12 @@ defmodule Kelix.ControlAPITest do
       conn = call(conn(:get, "/domains/api.example.com"))
       assert conn.status == 200
       assert %{"name" => "api.example.com", "functions" => ["registrar"]} = body(conn)
+
+      # …and the domain's registrations are a sub-resource of it (no registrar
+      # module loaded here, so the list is empty rather than absent)
+      conn = call(conn(:get, "/domains/api.example.com/registrations"))
+      assert conn.status == 200
+      assert body(conn) == %{"domain" => "api.example.com", "registrations" => []}
     end
 
     test "GET /domains/:name on an unknown domain is a 404" do
@@ -124,8 +137,8 @@ defmodule Kelix.ControlAPITest do
       assert conn.status == 400
     end
 
-    test "DELETE /registrations/:aor on an unknown aor → 404" do
-      conn = call(conn(:delete, "/registrations/ghost@example.com"))
+    test "DELETE /domains/:domain/registrations/:aor on an unknown aor → 404" do
+      conn = call(conn(:delete, "/domains/example.com/registrations/ghost"))
       assert conn.status == 404
       assert body(conn)["error"] == "not found"
     end

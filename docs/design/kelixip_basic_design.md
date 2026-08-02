@@ -1042,8 +1042,8 @@ Spec §9–§10. **Parity by construction**: one command layer, two frontals.
 > |---|---|
 > | `kelictl reload-domains` | `kelictl domain reload-all` |
 > | `kelictl mcu <name> on\|off` | `kelictl mediaserver enable\|disable <name>` |
-> | `kelictl regs [aor]` | `kelictl registration list [aor]` |
-> | `kelictl unregister <aor> [contact]` | `kelictl registration remove <aor> [contact]` |
+> | `kelictl regs [aor]` | `kelictl registration list [domain]` |
+> | `kelictl unregister <aor> [contact]` | `kelictl registration remove <domain> <aor> [contact]` |
 >
 > Two spellings that no longer paid for themselves. `domain` already owned `list`
 > and `show`, so the reload belongs there rather than in a top-level verb of its
@@ -1066,6 +1066,31 @@ Spec §9–§10. **Parity by construction**: one command layer, two frontals.
 > arrives with — how long is this binding good for, where did it really come from
 > (behind a NAT, not what the contact URI says), and which of a handset's several
 > bindings is which.
+>
+> **Amended the same day — the domain is part of the address, not a filter.** An
+> AOR is only unique *within* a domain (§6.1: one store per domain, no cross-domain
+> key space), so `<aor>` alone was never an address: `unregister alice` fanned out
+> over every served domain, and `show alice` answered with a pile of blocks the
+> operator then had to disambiguate. The surface now says what the store says:
+>
+> | Verb | CLI | REST |
+> |---|---|---|
+> | `registrations/0` | `registration list` | `GET /registrations` |
+> | `registrations/1` | `registration list <domain>` | `GET /domains/<domain>/registrations` |
+> | `registration/2` | `registration show <domain> <aor>` | `GET /domains/<domain>/registrations/<aor>` |
+> | `unregister/3` | `registration remove <domain> <aor> [contact]` | `DELETE /domains/<domain>/registrations/<aor>` |
+>
+> REST nests them under the domain accordingly — a registration *is* a sub-resource
+> of a domain, which the flat `/registrations/<aor>` could not express.
+> `GET /registrations` stays as the cross-domain view: one entry per served domain,
+> **including the empty ones**, because "served, empty" and "not served" are what an
+> operator is trying to tell apart — an unserved domain is a `404` / `no such
+> domain`, not an empty list. `<domain>` is resolved through
+> `Kelix.Domains.lookup/2` like everywhere else (name + aliases,
+> case-insensitively); `<aor>` still accepts the full `user@domain` copied out of a
+> log, whose domain part must resolve to that same domain rather than being dropped
+> silently. There is deliberately no form that removes an AOR from every domain at
+> once: it was the one cross-domain verb, and it was the destructive one.
 
 ### 10.1 `Kelix.Control`
 
@@ -1076,13 +1101,14 @@ holds business logic. Surface (spec §9.3):
 |---|---|---|---|
 | `status/0` — uptime, counters, pool, node state | R | `kelictl status` | `GET /status` |
 | `monitor/0` — scenarios in progress | R | `kelictl monitor` | `GET /scenarios` |
-| `registrations/1` | R | `kelictl registration list [aor]` | `GET /registrations` |
-| `registration/1` — one AOR and its bindings | R | `kelictl registration show <aor>` | `GET /registrations/<aor>` |
+| `registrations/0` — every served domain + its registrations | R | `kelictl registration list` | `GET /registrations` |
+| `registrations/1` — one domain's registrations | R | `kelictl registration list <domain>` | `GET /domains/<domain>/registrations` |
+| `registration/2` — one AOR and its bindings | R | `kelictl registration show <domain> <aor>` | `GET /domains/<domain>/registrations/<aor>` |
 | `domains/0` — served domains + properties | R | `kelictl domain list` | `GET /domains` |
 | `domain/1` — one domain in detail | R | `kelictl domain show <domain>` | `GET /domains/<domain>` |
 | `mediaservers/0` — the media-server pool + its state | R | `kelictl mediaserver list` | `GET /mediaservers` |
 | `mediaserver/1` — one media server in detail | R | `kelictl mediaserver show <name>` | `GET /mediaservers/<name>` |
-| `unregister/2` | W | `kelictl registration remove <aor> [contact]` | `DELETE /registrations/<aor>` |
+| `unregister/3` | W | `kelictl registration remove <domain> <aor> [contact]` | `DELETE /domains/<domain>/registrations/<aor>` |
 | `shutdown_scenario/1` | W | `kelictl stop <id>` | `POST /scenarios/<id>/shutdown` |
 | `reload_script/2` (notify?) | W | `kelictl reload-script [--notify] <name…>` | `POST /scripts/reload[?notify=1]` |
 | `reload_domains/0` | W | `kelictl domain reload-all` | `POST /domains/reload` |
@@ -1110,11 +1136,12 @@ argument through `Kelix.Domains.lookup/2`, i.e. name **+** aliases,
 case-insensitively — the way an inbound R-URI is resolved, so the host an operator
 saw on the wire is a valid argument.
 
-`registration/1` is `registrations/1` narrowed to one AOR, so the list and the
-detail view cannot disagree about a field. It returns a **list** of rows: an AOR
-is only unique within a domain, so a bare `"user"` legitimately matches several
-and `"user@domain"` narrows it to one — the same reading `unregister/2` applies.
-Each binding carries what the registrar stored (§6.1): the contact URI, the
+`registration/2` returns the row `registrations/1` holds for that AOR, and
+`registrations/1` the same `%{domain, registrations}` entry `registrations/0`
+lists — no view can disagree with another about a field. The domain is part of the
+address rather than a filter on it (§6.1 keys the store per domain), resolved
+through `Kelix.Domains.lookup/2`: name + aliases, case-insensitively. Each binding
+carries what the registrar stored (§6.1): the contact URI, the
 expiry both ways (`expires_at` + the derived `expires_in`, because "how long has
 this left" is the question and a UTC instant is not an answer to it), the
 `source` the REGISTER actually came from — behind a NAT, not what the contact URI

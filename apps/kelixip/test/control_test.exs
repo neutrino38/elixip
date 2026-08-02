@@ -172,9 +172,13 @@ defmodule Kelix.ControlTest do
     @reg_domains """
     [[domain]]
     name = "reg.example.com"
+    aliases = ["reg.example.fr"]
 
     [[domain]]
     name = "other.example.net"
+
+    [[domain]]
+    name = "thin.example.net"
     """
 
     # The registrar is a loadable module, absent from the core: Control reaches it
@@ -201,8 +205,8 @@ defmodule Kelix.ControlTest do
         }
       end
 
-      # the same user-part, registered in a second domain
-      def all("other.example.net"),
+      # a binding the registrar stored with nothing but a contact
+      def all("thin.example.net"),
         do: %{"alice" => [%{contact: @uri, expires_at: nil}]}
 
       def all(_domain), do: %{}
@@ -229,8 +233,8 @@ defmodule Kelix.ControlTest do
     end
 
     test "registrations/1 renders each binding with what the registrar stored" do
-      assert [%{domain: "reg.example.com", aor: "alice", contacts: [c]} | _] =
-               Control.registrations("alice@reg.example.com")
+      assert {:ok, %{domain: "reg.example.com", registrations: [%{aor: "alice", contacts: [c]}]}} =
+               Control.registrations("reg.example.com")
 
       # the default port is not spelled out — this is the stack's own serialization
       assert c.uri == "sip:alice@10.0.0.9"
@@ -243,25 +247,56 @@ defmodule Kelix.ControlTest do
       assert c.methods == nil
     end
 
-    test "registration/1 answers for every domain a bare user-part is in" do
-      assert {:ok, rows} = Control.registration("alice")
-      assert Enum.map(rows, & &1.domain) == ["reg.example.com", "other.example.net"]
+    test "registrations/0 lists every served domain, empty ones included" do
+      assert [first, second, _thin] = Control.registrations()
+      assert first.domain == "reg.example.com"
+      assert [%{aor: "alice"}] = first.registrations
 
-      # …and `user@domain` narrows it to one, with the same row as the list holds
-      # (bar `expires_in`, which counts down between the two reads)
-      assert {:ok, [row]} = Control.registration("alice@reg.example.com")
-      assert stable(row) == stable(hd(Control.registrations("alice@reg.example.com")))
+      # served, nobody registered: an entry, not an absence
+      assert second == %{domain: "other.example.net", registrations: []}
     end
 
-    test "registration/1 on an unregistered AOR" do
-      assert Control.registration("ghost@reg.example.com") == {:error, :not_found}
+    test "registration/2 returns the row the list holds for that AOR" do
+      assert {:ok, row} = Control.registration("reg.example.com", "alice")
+      assert {:ok, entry} = Control.registrations("reg.example.com")
+
+      # bar `expires_in`, which counts down between the two reads
+      assert stable(row) == stable(hd(entry.registrations))
+    end
+
+    test "the domain is resolved the way inbound traffic is: alias, any case" do
+      assert {:ok, %{domain: "reg.example.com"}} = Control.registrations("REG.EXAMPLE.FR")
+
+      assert {:ok, %{domain: "reg.example.com", aor: "alice"}} =
+               Control.registration("reg.example.fr", "alice")
+    end
+
+    test "an unserved domain and an unregistered AOR are both :not_found" do
+      assert Control.registrations("ghost.example.org") == {:error, :not_found}
+      assert Control.registration("ghost.example.org", "alice") == {:error, :not_found}
+      assert Control.registration("reg.example.com", "ghost") == {:error, :not_found}
+    end
+
+    test "a full user@domain is accepted, but only for the domain it names" do
+      assert {:ok, %{aor: "alice"}} =
+               Control.registration("reg.example.com", "alice@reg.example.com")
+
+      # …and never silently answered for another domain's AOR
+      assert Control.registration("reg.example.com", "alice@other.example.net") ==
+               {:error, :not_found}
+    end
+
+    test "unregister/3 is per-domain, and says so on an unserved one" do
+      assert Control.unregister("ghost.example.org", "alice") == :notfound
+      # the fake registrar has no remove/3: the facade default is what comes back
+      assert Control.unregister("reg.example.com", "alice") == :notfound
     end
 
     defp stable(row),
       do: %{row | contacts: Enum.map(row.contacts, &Map.drop(&1, [:expires_in]))}
 
     test "a binding with no expiry does not crash the rendering" do
-      assert {:ok, [%{contacts: [c]}]} = Control.registration("alice@other.example.net")
+      assert {:ok, %{contacts: [c]}} = Control.registration("thin.example.net", "alice")
       assert c.expires_in == nil
       assert c.source == nil
       assert c.transport == nil

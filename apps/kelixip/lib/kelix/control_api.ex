@@ -13,13 +13,14 @@ defmodule Kelix.ControlAPI do
   |---|---|
   | `status/0` | `GET /status` |
   | `monitor/0` | `GET /scenarios` |
-  | `registrations/1` | `GET /registrations[?aor=]` |
-  | `registration/1` | `GET /registrations/:aor` |
+  | `registrations/0` | `GET /registrations` |
+  | `registrations/1` | `GET /domains/:domain/registrations` |
+  | `registration/2` | `GET /domains/:domain/registrations/:aor` |
   | `domains/0` | `GET /domains` |
   | `domain/1` | `GET /domains/:name` |
   | `mediaservers/0` | `GET /mediaservers` |
   | `mediaserver/1` | `GET /mediaservers/:name` |
-  | `unregister/2` | `DELETE /registrations/:aor[?contact=]` |
+  | `unregister/3` | `DELETE /domains/:domain/registrations/:aor[?contact=]` |
   | `shutdown_scenario/1` | `POST /scenarios/:id/shutdown` |
   | `reload_script/2` | `POST /scripts/reload[?notify=1]` (body `{"names": […]}`) |
   | `reload_domains/0` | `POST /domains/reload` |
@@ -76,23 +77,32 @@ defmodule Kelix.ControlAPI do
     json(conn, 200, Control.monitor())
   end
 
+  # The cross-domain view: one entry per served domain, each with its registrations.
+  # A single domain is `GET /domains/:domain/registrations` below.
   get "/registrations" do
-    aor = conn.query_params["aor"]
-    json(conn, 200, Control.registrations(aor))
-  end
-
-  # An AOR contains no slash (it is a user-part, optionally `user@domain`), so it is
-  # one path segment. Declared after the collection, and DELETE on the same path is
-  # the removal below.
-  get "/registrations/:aor" do
-    case Control.registration(aor) do
-      {:ok, rows} -> json(conn, 200, rows)
-      {:error, :not_found} -> json(conn, 404, %{error: "not found"})
-    end
+    json(conn, 200, Control.registrations())
   end
 
   get "/domains" do
     json(conn, 200, Control.domains())
+  end
+
+  # Registrations are a **sub-resource of the domain**: an AOR is only unique within
+  # one (§6.1), so the domain belongs in the path rather than in the AOR string. An
+  # AOR contains no slash (a user-part, optionally `user@domain`), so it is one
+  # segment; `DELETE` on the same path is the removal below.
+  get "/domains/:domain/registrations" do
+    case Control.registrations(domain) do
+      {:ok, entry} -> json(conn, 200, entry)
+      {:error, :not_found} -> json(conn, 404, %{error: "not found"})
+    end
+  end
+
+  get "/domains/:domain/registrations/:aor" do
+    case Control.registration(domain, aor) do
+      {:ok, row} -> json(conn, 200, row)
+      {:error, :not_found} -> json(conn, 404, %{error: "not found"})
+    end
   end
 
   # Declared before `POST /domains/reload` is irrelevant (the method differs), but
@@ -118,7 +128,7 @@ defmodule Kelix.ControlAPI do
 
   # ── write verbs ───────────────────────────────────────────────────────────────
 
-  delete "/registrations/:aor" do
+  delete "/domains/:domain/registrations/:aor" do
     contact =
       case conn.query_params["contact"] do
         nil -> :all
@@ -126,7 +136,7 @@ defmodule Kelix.ControlAPI do
         c -> c
       end
 
-    respond(conn, Control.unregister(aor, contact))
+    respond(conn, Control.unregister(domain, aor, contact))
   end
 
   post "/scenarios/:id/shutdown" do
