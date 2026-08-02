@@ -21,6 +21,11 @@
 #
 # It is shipped as a REFERENCE: it lives in script_dir and a deployment is expected to
 # copy and adapt it.
+#
+# NOTE — self-references must go through `__MODULE__`, never through the name
+# written below: the script registry appends `.V<version>` to every module of a
+# loaded script (hot reload, §5.3), so this compiles as `Kelix.Mcu.AdhocCall.V1` and
+# a hardcoded `Kelix.Mcu.AdhocCall.f()` would call a module that does not exist.
 defmodule Kelix.Mcu.AdhocCall do
   use SIP.Scenario
   use SIP.Session.CallUAS
@@ -87,7 +92,7 @@ defmodule Kelix.Mcu.AdhocCall do
       # accept a secure leg when the offer asks for one (SDES from a SIP phone,
       # DTLS+ICE from a WebRTC gateway); `:no` would refuse it with a 488
       webrtc: :if_offered,
-      on_media_error: &Kelix.Mcu.AdhocCall.media_error/1
+      on_media_error: &__MODULE__.media_error/1
     )
 
     case sip_ctx.lasterr do
@@ -117,7 +122,7 @@ defmodule Kelix.Mcu.AdhocCall do
         reply_invite_with_sdp(200,
           media: :tc,
           webrtc: :if_offered,
-          on_media_error: &Kelix.Mcu.AdhocCall.media_error/1
+          on_media_error: &__MODULE__.media_error/1
         )
 
         goto(loop, "re-INVITE")
@@ -126,7 +131,7 @@ defmodule Kelix.Mcu.AdhocCall do
         reply_invite_with_sdp(200,
           media: :tc,
           webrtc: :if_offered,
-          on_media_error: &Kelix.Mcu.AdhocCall.media_error/1
+          on_media_error: &__MODULE__.media_error/1
         )
 
         goto(loop, "UPDATE")
@@ -162,7 +167,7 @@ defmodule Kelix.Mcu.AdhocCall do
       # The mixer needs a fresh intra-frame from this leg (a new tile started, or a
       # decoder lost sync): ask for one the way RFC 5168 has it (§6.4).
       {:mcu_event, :fpu_requested} ->
-        send_INFO(Kelix.Mcu.AdhocCall.picture_fast_update(),
+        send_INFO(__MODULE__.picture_fast_update(),
           contenttype: "application/media_control+xml"
         )
 
