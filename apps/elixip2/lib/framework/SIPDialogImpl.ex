@@ -24,6 +24,11 @@ defmodule SIP.DialogImpl do
     transactions: [],
     # PID of the transaction that should terminate the dialog
     closing_transaction: nil,
+    # PID of the INVITE server transaction that answered 2xx and is still waiting
+    # for the ACK. RFC 3261 §17.2.3: the ACK of a 2xx matches no transaction (a
+    # proxy re-branches it), so it reaches this layer — the TU — and nothing else.
+    # Kept here so we can tell that IST to stop retransmitting the 2xx (§13.3.1.4).
+    ist_awaiting_ack: nil,
     # PID of the application
     app: nil,
     state: :initial,
@@ -484,7 +489,37 @@ defmodule SIP.DialogImpl do
   end
 
   defp close_transaction(state, uas_t) do
-    %SIP.DialogImpl{state | transactions: List.delete(state.transactions, uas_t)}
+    # A transaction that is gone can no longer be told about the ACK (it dies on
+    # timer H). Clearing the field here means the 2xx path must record the IST
+    # *after* calling this, which is what it does.
+    ist = if state.ist_awaiting_ack == uas_t, do: nil, else: state.ist_awaiting_ack
+
+    %SIP.DialogImpl{
+      state
+      | transactions: List.delete(state.transactions, uas_t),
+        ist_awaiting_ack: ist
+    }
+  end
+
+  # Remember the INVITE server transaction that just answered 2xx: only the ACK
+  # stops its retransmissions, and the ACK is delivered here, not to it.
+  defp await_ack(state, req, resp_code, uas_t)
+       when req.method == :INVITE and resp_code in 200..299 and is_pid(uas_t) do
+    %SIP.DialogImpl{state | ist_awaiting_ack: uas_t}
+  end
+
+  defp await_ack(state, _req, _resp_code, _uas_t), do: state
+
+  # Counterpart of await_ack/4: the ACK arrived, so release the IST. Cast once —
+  # the transaction ignores the ACK retransmissions that follow, and it may
+  # already have died on timer H.
+  defp confirm_ist(state, ack) do
+    if is_pid(state.ist_awaiting_ack) do
+      SIP.Transac.confirm_uas_transaction(state.ist_awaiting_ack, ack)
+      %SIP.DialogImpl{state | ist_awaiting_ack: nil}
+    else
+      state
+    end
   end
 
   @impl true
@@ -553,10 +588,20 @@ defmodule SIP.DialogImpl do
 
     state =
       case resp_code do
-        100 -> state
-        rc when rc in 101..199 -> add_totag(state, nil)
-        rc when rc in 200..699 -> add_totag(state, nil) |> close_transaction(uas_t)
-        _ -> raise "Unsupported response code #{resp_code}"
+        100 ->
+          state
+
+        rc when rc in 101..199 ->
+          add_totag(state, nil)
+
+        rc when rc in 200..699 ->
+          # await_ack/4 after close_transaction/2: the latter clears the field.
+          add_totag(state, nil)
+          |> close_transaction(uas_t)
+          |> await_ack(req, resp_code, uas_t)
+
+        _ ->
+          raise "Unsupported response code #{resp_code}"
       end
 
     {:reply, ret, state}
@@ -691,8 +736,16 @@ defmodule SIP.DialogImpl do
   # INVITE CSeq, so it must bypass the generic in-dialog pipeline (on_new_transaction
   # would drop it and check_seqno would reject it). Forward it as an app event;
   # its body may carry a delayed SDP offer. Nothing to reply to an ACK (pid nil).
+  #
+  # It is also the *only* place the INVITE server transaction can learn that its
+  # 2xx got through: the ACK of a 2xx carries a fresh top Via branch (a proxy
+  # re-branches it — it is a transaction of its own, §17.1.1.3), so it never
+  # matches the IST in Registry.SIP.Transac and is dispatched straight here. Left
+  # unaware, the IST retransmitted the 200 OK every T1..T2 until timer H fired 32 s
+  # later — on a call that was up and talking. Hand it the ACK so it terminates.
   @impl true
   def handle_cast({:sipmsg, msg, _transact_pid}, state) when is_req(msg) and msg.method == :ACK do
+    state = confirm_ist(state, msg)
     if is_pid(state.app), do: send(state.app, {:ACK, msg, nil, self()})
     {:noreply, state}
   end
