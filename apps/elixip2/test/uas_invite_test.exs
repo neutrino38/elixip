@@ -568,6 +568,22 @@ defmodule SIP.Test.UASInvite do
     assert_receive 200, 3_000
   end
 
+  # RFC 3261 §17.2.1: an INVITE carrying our own branch is a retransmission (an
+  # in-dialog re-INVITE gets a new branch, hence a new IST), and the last response
+  # must be resent — the retransmission says the UAC has not seen it. The IST used to
+  # log "Ignoring unsupported SIP request INVITE" and drop it, so a caller
+  # retransmitting because the application answered slower than T1 kept retransmitting
+  # to the end. 1xx is what is asserted here: no timer resends those, so the second
+  # 180 can only come from the retransmission handler.
+  test "an INVITE retransmission gets the last response resent" do
+    invite = inject_invite("answer180")
+    assert_receive 100, 2_000
+    assert_receive 180, 2_000
+
+    send(invite.ruri.tp_pid, {:recv, invite})
+    assert_receive 180, 2_000
+  end
+
   # ── Helpers ─────────────────────────────────────────────────────────────────
 
   defp ctx_with(req, dialogpid) do

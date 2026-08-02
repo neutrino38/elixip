@@ -79,6 +79,29 @@ defmodule SIP.IST do
     { :noreply, state }
   end
 
+  # INVITE retransmission from the UAC (RFC 3261 §17.2.1). Everything carrying our
+  # branch is dispatched to us, and an in-dialog re-INVITE has a branch of its own, so
+  # an INVITE arriving here is a retransmission — never a new call.
+  #
+  # The window is wide: the automatic 100 is only sent once process_UAS_request has
+  # returned (see :sipreq below), so an application that takes longer than T1 to take
+  # the request — a DID lookup on a media server, a database — is retransmitted into
+  # before anything has gone out. Absorb it while we have no response, resend the last
+  # one once we have: the retransmission means the UAC has not seen it.
+  def handle_cast({:onsipmsg, req, _remoteip, _remoteport }, state) when is_map(req) and req.method == :INVITE do
+    case Map.get(state, :rspstr) do
+      rspstr when is_binary(rspstr) ->
+        Logger.debug([ transid: state.msg.transid,  module: __MODULE__,
+                       message: "Retransmitting last response to INVITE"])
+        sendout_msg(state, rspstr)
+
+      _ ->
+        Logger.debug([ transid: state.msg.transid,  module: __MODULE__,
+                       message: "Absorbing INVITE retransmission (no response yet)"])
+    end
+    { :noreply, state }
+  end
+
   def handle_cast({:onsipmsg, req, _remoteip, _remoteport }, state) when is_map(req) when is_atom(req.method) do
     Logger.warning([ transid: state.msg.transid,  module: __MODULE__,
                     message: "Ignoring unsupported SIP request #{req.method}"])

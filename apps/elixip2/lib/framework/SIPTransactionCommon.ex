@@ -397,8 +397,13 @@ defmodule SIP.Transac.Common do
             # set transaction state to terminated
             new_state =
               if state.msg.method == :INVITE do
+                # new_state, not state: sendout_msg/2 stored the serialized response in
+                # :rspstr, and that is what timer A and the request-retransmission
+                # handlers resend. Dropping it here (the code branched off `state`)
+                # left an IST on a reliable transport with the *previous* 1xx as its
+                # last response.
                 st =
-                  cancel_timer_F(state)
+                  cancel_timer_F(new_state)
                   |> Map.put(:state, :confirmed)
                   |> Map.put(:totag, totag)
 
@@ -415,9 +420,7 @@ defmodule SIP.Transac.Common do
                     message: "final response sent. Arming timer A for IST transaction"
                   )
 
-                  schedule_timer_A(st)
-                  |> Map.put(:rspstr, SIPMsg.serialize(rsp))
-                  |> schedule_timer_H()
+                  schedule_timer_A(st) |> schedule_timer_H()
                 end
               else
                 schedule_timer_K(new_state, :default)
