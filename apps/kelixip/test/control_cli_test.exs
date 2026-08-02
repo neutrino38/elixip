@@ -88,8 +88,83 @@ defmodule Kelix.Control.CLITest do
 
     test "a mistyped domain sub-command gets the domain usage, not `unknown module`" do
       {2, out} = run(["domain", "shwo", "x"])
-      assert out =~ "usage: kelictl domain list | domain show <domain>"
+      assert out =~ "usage: kelictl domain list | domain show <domain> | domain reload-all"
     end
+  end
+
+  describe "mediaserver list / show / enable / disable" do
+    @pool [
+      %{name: "mcu1", module: :mockup, url: "http://10.0.0.1:8080", enabled: true},
+      %{name: "mcu2", module: :mendooze, url: "http://10.0.0.2:8080", enabled: true}
+    ]
+
+    setup do
+      # Control reads the Kelix.MediaPool singleton by name: stand a populated one
+      # in the place of the app's (empty) one for the duration of the test.
+      :ok = Supervisor.terminate_child(Kelix.Supervisor, Kelix.MediaPool)
+      on_exit(fn -> Supervisor.restart_child(Kelix.Supervisor, Kelix.MediaPool) end)
+
+      start_supervised!(
+        {Kelix.MediaPool,
+         pool: @pool, probe: fn e -> e.name == "mcu1" end, first_check_ms: 60_000}
+      )
+
+      :ok = Kelix.MediaPool.check_health()
+      :ok
+    end
+
+    test "mediaserver list renders one row per pool entry" do
+      {0, out} = run(["mediaserver", "list"])
+
+      assert out =~ ~r/server\s+adapter\s+url\s+enabled\s+health\s+modules/
+      assert out =~ ~r|mcu1\s+mockup\s+http://10\.0\.0\.1:8080\s+on\s+up|
+      assert out =~ ~r|mcu2\s+mendooze\s+http://10\.0\.0\.2:8080\s+on\s+down|
+    end
+
+    test "mediaserver show renders the entry and names whose health it is" do
+      {0, out} = run(["mediaserver", "show", "mcu1"])
+
+      assert out =~ "media server: mcu1"
+      assert out =~ "adapter:      mockup"
+      assert out =~ "url:          http://10.0.0.1:8080"
+      assert out =~ "enabled:      on"
+      assert out =~ "health:       up (pool probe)"
+    end
+
+    test "mediaserver enable / disable flips the entry, and `list` shows it" do
+      assert {0, "ok"} = run(["mediaserver", "disable", "mcu1"])
+      assert {0, out} = run(["mediaserver", "list"])
+      assert out =~ ~r/mcu1\s+mockup\s+\S+\s+off\s+up/
+
+      assert {0, "ok"} = run(["mediaserver", "enable", "mcu1"])
+      assert {0, out} = run(["mediaserver", "list"])
+      assert out =~ ~r/mcu1\s+mockup\s+\S+\s+on\s+up/
+    end
+
+    test "mediaserver show / disable on an unknown server → exit 1" do
+      assert {1, "no such media server"} = run(["mediaserver", "show", "ghost"])
+      assert {1, out} = run(["mediaserver", "disable", "ghost"])
+      assert out =~ "error:"
+    end
+
+    test "a mistyped mediaserver sub-command gets the mediaserver usage" do
+      {2, out} = run(["mediaserver", "enabel", "mcu1"])
+      assert out =~ "usage: kelictl mediaserver list | mediaserver show <name>"
+    end
+  end
+
+  # the old spelling was `reload-domains`; the verb behind it is unchanged
+  test "domain reload-all reaches reload_domains/0" do
+    prev = Application.get_env(:kelixip, :domains_path)
+    Application.delete_env(:kelixip, :domains_path)
+    on_exit(fn -> if prev, do: Application.put_env(:kelixip, :domains_path, prev) end)
+
+    {1, out} = run(["domain", "reload-all"])
+    assert out =~ "no_domains_path"
+  end
+
+  test "mediaserver list with an empty pool" do
+    assert {0, "no media server in the pool"} = run(["mediaserver", "list"])
   end
 
   # The Kelix.Domains singleton is shared with the rest of the suite, so empty it
@@ -120,9 +195,11 @@ defmodule Kelix.Control.CLITest do
     assert out =~ "error:"
   end
 
-  test "mcu toggle on an unknown MCU → error, exit 1" do
+  # `mcu` is a module name, not a core noun: the enable/disable of a pool entry
+  # moved to `mediaserver …`, so `mcu …` is now the module's own namespace.
+  test "mcu <name> on|off is gone — it lands on the module dispatch" do
     {1, out} = run(["mcu", "ghost", "off"])
-    assert out =~ "error:"
+    assert out =~ ~s(is neither a kelictl command nor a loaded module)
   end
 
   test "log-level valid → ok" do

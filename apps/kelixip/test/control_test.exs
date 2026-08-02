@@ -168,6 +168,72 @@ defmodule Kelix.ControlTest do
     end
   end
 
+  describe "mediaservers/0 + mediaserver/1" do
+    # entries as Kelix.Config decodes them (the pool no longer parses TOML)
+    @pool [
+      %{name: "mcu1", module: :mockup, url: "http://10.0.0.1:8080", enabled: true},
+      %{name: "mcu2", module: :mendooze, url: "http://10.0.0.2:8080", enabled: false}
+    ]
+
+    # A module that drives media servers, i.e. one exporting `mediaserver/1` — the
+    # mcu module does, and holds a control channel whose health is not the pool's.
+    defmodule FakeMcu do
+      def mediaserver("mcu1"),
+        do: {:ok, %{name: "mcu1", status: :up, queue_id: "q-1", client: self()}}
+
+      def mediaserver(_name), do: :error
+    end
+
+    setup do
+      # The app runs an (empty) Kelix.MediaPool singleton and Control reads it by
+      # name: stand a populated one in its place for the duration of the test.
+      :ok = Supervisor.terminate_child(Kelix.Supervisor, Kelix.MediaPool)
+      on_exit(fn -> Supervisor.restart_child(Kelix.Supervisor, Kelix.MediaPool) end)
+
+      start_supervised!(
+        {Kelix.MediaPool,
+         pool: @pool, probe: fn e -> e.name == "mcu1" end, first_check_ms: 60_000}
+      )
+
+      # deterministic health: probe now rather than waiting for the periodic tick
+      :ok = Kelix.MediaPool.check_health()
+      :ok
+    end
+
+    test "mediaservers/0 lists the pool in order, with the switch and the probe" do
+      assert [mcu1, mcu2] = Control.mediaservers()
+
+      assert %{
+               name: "mcu1",
+               module: :mockup,
+               url: "http://10.0.0.1:8080",
+               enabled: true,
+               healthy: true
+             } = mcu1
+
+      # disabled by config, and down as far as the pool's own probe is concerned
+      assert %{name: "mcu2", module: :mendooze, enabled: false, healthy: false} = mcu2
+    end
+
+    test "mediaserver/1 returns exactly what the list holds for that entry" do
+      assert {:ok, mcu1} = Control.mediaserver("mcu1")
+      assert mcu1 == hd(Control.mediaservers())
+      assert Control.mediaserver("ghost") == {:error, :not_found}
+    end
+
+    test "a module driving the server contributes its own view of it" do
+      Kelix.ModuleRegistry.register("fakemcu", FakeMcu, %{})
+      on_exit(fn -> Kelix.ModuleRegistry.unregister("fakemcu") end)
+
+      assert {:ok, %{modules: modules}} = Control.mediaserver("mcu1")
+      # the module's shape, minus what means nothing outside the node (`client`)
+      assert modules == %{"fakemcu" => %{name: "mcu1", status: :up, queue_id: "q-1"}}
+
+      # a server that module does not drive: no entry rather than a fabricated one
+      assert {:ok, %{modules: %{}}} = Control.mediaserver("mcu2")
+    end
+  end
+
   describe "read + simple verbs" do
     test "status/0 aggregates node + surfaces" do
       s = Control.status()

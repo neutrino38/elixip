@@ -16,6 +16,8 @@ defmodule Kelix.ControlAPI do
   | `registrations/1` | `GET /registrations[?aor=]` |
   | `domains/0` | `GET /domains` |
   | `domain/1` | `GET /domains/:name` |
+  | `mediaservers/0` | `GET /mediaservers` |
+  | `mediaserver/1` | `GET /mediaservers/:name` |
   | `unregister/2` | `DELETE /registrations/:aor[?contact=]` |
   | `shutdown_scenario/1` | `POST /scenarios/:id/shutdown` |
   | `reload_script/2` | `POST /scripts/reload[?notify=1]` (body `{"names": […]}`) |
@@ -88,6 +90,17 @@ defmodule Kelix.ControlAPI do
   get "/domains/:name" do
     case Control.domain(name) do
       {:ok, domain} -> json(conn, 200, domain)
+      {:error, :not_found} -> json(conn, 404, %{error: "not found"})
+    end
+  end
+
+  get "/mediaservers" do
+    json(conn, 200, Control.mediaservers())
+  end
+
+  get "/mediaservers/:name" do
+    case Control.mediaserver(name) do
+      {:ok, mediaserver} -> json(conn, 200, mediaserver)
       {:error, :not_found} -> json(conn, 404, %{error: "not found"})
     end
   end

@@ -116,7 +116,7 @@ kelixip reads **two TOML files**, deliberately split by lifecycle:
 | File | Holds | Reload |
 |---|---|---|
 | `config.toml` | Infrastructure: `[server]`, `[log]`, listeners, media pool, most `[module.*]` blocks, control API, metrics | **Restart only** |
-| `domains.toml` | The served domains, their dial-plan and the `[module.registrar]` block | **Hot** — `kelictl reload-domains` (atomic: one bad value and the whole reload is rejected, the running config untouched) |
+| `domains.toml` | The served domains, their dial-plan and the `[module.registrar]` block | **Hot** — `kelictl domain reload-all` (atomic: one bad value and the whole reload is rejected, the running config untouched) |
 
 Their paths come from `KELIXIP_CONFIG` / `KELIXIP_DOMAINS` (see
 [running.md](running.md)). Both files are validated at boot: **any error aborts
@@ -227,7 +227,7 @@ load is a node that answers `503` to every call.
 |---|---|---|
 | `module` | string, required | Adapter: `mendooze`, `mockup`, or a `MediaServer.Behaviour` module. Only `mendooze` entries are usable for conferences |
 | `url` | string, required | Passed to the adapter's `connect/1`, e.g. `http://mcu1:8080` |
-| `enabled` | bool (default `true`) | Toggle without a restart (`kelictl mcu <name> on\|off`). Disabling stops **new** calls and conferences landing there; live ones stay |
+| `enabled` | bool (default `true`) | Toggle without a restart (`kelictl mediaserver enable\|disable <name>`; `kelictl mediaserver list` shows the pool). Disabling stops **new** calls and conferences landing there; live ones stay |
 
 > No media address here. The address a media server announces in the SDP (`c=`
 > line and ICE candidates) is the server's own setting — `mediaserver --public-ip`,

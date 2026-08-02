@@ -54,15 +54,22 @@ defmodule Kelix.Control.CLI do
   defp parse(["unregister", aor, contact]), do: {:ok, :ok, :unregister, [aor, contact]}
   defp parse(["domain", "list"]), do: {:ok, :domains, :domains, []}
   defp parse(["domain", "show", name]), do: {:ok, :domain, :domain, [name]}
+  defp parse(["domain", "reload-all"]), do: {:ok, :ok, :reload_domains, []}
   # `domain` is a core noun, so it never reaches the module dispatch below: a
   # mistyped sub-command gets the domain usage rather than "unknown module".
-  defp parse(["domain" | _]), do: {:error, "usage: kelictl domain list | domain show <domain>"}
-  defp parse(["reload-domains"]), do: {:ok, :ok, :reload_domains, []}
+  defp parse(["domain" | _]), do: {:error, usage_domain()}
+
+  defp parse(["mediaserver", "list"]), do: {:ok, :mediaservers, :mediaservers, []}
+  defp parse(["mediaserver", "show", name]), do: {:ok, :mediaserver, :mediaserver, [name]}
+
+  defp parse(["mediaserver", onoff, name]) when onoff in ["enable", "disable"],
+    do: {:ok, :ok, :mediaserver_toggle, [name, onoff == "enable"]}
+
+  # `mediaserver` is a core noun too — and the pool entry it names is not the `mcu`
+  # module, which owns its own command namespace (`kelictl mcu conference.list`).
+  defp parse(["mediaserver" | _]), do: {:error, usage_mediaserver()}
+
   defp parse(["module", "reload", name]), do: {:ok, :ok, :module_reload, [name]}
-
-  defp parse(["mcu", name, onoff]) when onoff in ["on", "off"],
-    do: {:ok, :ok, :mediaserver_toggle, [name, onoff == "on"]}
-
   defp parse(["log-level", lvl]), do: {:ok, :ok, :set_log_level, [lvl]}
   defp parse(["graceful-shutdown"]), do: {:ok, :ok, :graceful_shutdown, []}
   defp parse(["drain"]), do: {:ok, :ok, :drain, []}
@@ -118,6 +125,7 @@ defmodule Kelix.Control.CLI do
     do: {1, "error: \"#{name}\" is neither a kelictl command nor a loaded module\n\n" <> usage()}
 
   defp render(:domain, {:error, :not_found}), do: {1, "no such domain"}
+  defp render(:mediaserver, {:error, :not_found}), do: {1, "no such media server"}
 
   defp render(_tag, {:error, reason}), do: {1, "error: #{inspect(reason)}"}
 
@@ -201,6 +209,39 @@ defmodule Kelix.Control.CLI do
     {0, Enum.join(lines, "\n")}
   end
 
+  defp render(:mediaservers, []), do: {0, "no media server in the pool"}
+
+  defp render(:mediaservers, rows) when is_list(rows) do
+    {0,
+     table(
+       ["server", "adapter", "url", "enabled", "health", "modules"],
+       rows,
+       &[
+         &1.name,
+         to_string(&1.module),
+         &1.url,
+         if(&1.enabled, do: "on", else: "off"),
+         if(&1.healthy, do: "up", else: "down"),
+         format_module_views(&1.modules)
+       ]
+     )}
+  end
+
+  defp render(:mediaserver, {:ok, m}) do
+    lines =
+      [
+        "media server: #{m.name}",
+        "adapter:      #{m.module}",
+        "url:          #{m.url}",
+        "enabled:      #{if m.enabled, do: "on", else: "off"}",
+        # Named for what it is: this is the pool's own probe of the adapter channel,
+        # not the health a conference rides — the module lines below carry that one.
+        "health:       #{if m.healthy, do: "up", else: "down"} (pool probe)"
+      ] ++ module_view_lines(m.modules)
+
+    {0, Enum.join(lines, "\n")}
+  end
+
   defp render(:map, result) when is_map(result) do
     {exit_map(result), Enum.map_join(result, "\n", fn {k, v} -> "#{k}: #{fmt(v)}" end)}
   end
@@ -230,6 +271,26 @@ defmodule Kelix.Control.CLI do
     |> Enum.map(fn {{pattern, r}, i} ->
       "  #{i}. #{String.pad_trailing(pattern, width)} -> #{r.script}"
     end)
+  end
+
+  # What a module driving this media server says about it. In the list only its
+  # `status` fits a column (`mcu=up`); `show` prints the whole view, one line per
+  # module. Rendered from whatever the module returned, so a new one needs no CLI
+  # change.
+  defp format_module_views(views) when views == %{}, do: "-"
+
+  defp format_module_views(views) do
+    Enum.map_join(Enum.sort(views), ", ", fn {name, view} ->
+      case Map.get(view, :status) do
+        nil -> to_string(name)
+        status -> "#{name}=#{status}"
+      end
+    end)
+  end
+
+  defp module_view_lines(views) do
+    for {name, view} <- Enum.sort(views),
+        do: String.pad_trailing("#{name}:", 14) <> format_summary(view)
   end
 
   # One line per module that reports state of its own (`mcu: 2 conferences, …`).
@@ -315,11 +376,13 @@ defmodule Kelix.Control.CLI do
       unregister <aor> [contact]      remove a registration
       domain list                     served domains + their properties
       domain show <domain>            one domain in detail (name or alias)
+      domain reload-all               hot-reload domains.toml
+      mediaserver list                the media-server pool + its state
+      mediaserver show <name>         one media server in detail
+      mediaserver enable|disable <name>  take a media server in/out of the pool
       stop <id>                       shut down one scenario
       reload-script [--notify] <name…>  reload scenario script(s)
-      reload-domains                  hot-reload domains.toml
       module reload <name>            reload a module's config
-      mcu <name> on|off               enable/disable a media server
       log-level <lvl>                 set the runtime log level
       drain                           answer 503 to OPTIONS: leave the
                                       upstream rotation, keep serving
@@ -328,5 +391,13 @@ defmodule Kelix.Control.CLI do
       graceful-shutdown               drain, let upstream notice, then stop
       <module> <cmd> [args…]          a module-contributed command
     """
+  end
+
+  defp usage_domain(),
+    do: "usage: kelictl domain list | domain show <domain> | domain reload-all"
+
+  defp usage_mediaserver() do
+    "usage: kelictl mediaserver list | mediaserver show <name> | " <>
+      "mediaserver enable|disable <name>"
   end
 end

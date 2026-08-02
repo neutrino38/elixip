@@ -52,12 +52,14 @@ cert) with a JSON body `{"error": "…"}`.
 | `GET /registrations` | R | `kelictl regs` |
 | `GET /domains` | R | `kelictl domain list` |
 | `GET /domains/<domain>` | R | `kelictl domain show` |
+| `GET /mediaservers` | R | `kelictl mediaserver list` |
+| `GET /mediaservers/<name>` | R | `kelictl mediaserver show` |
 | `DELETE /registrations/<aor>` | W | `kelictl unregister` |
 | `POST /scenarios/<id>/shutdown` | W | `kelictl stop` |
 | `POST /scripts/reload[?notify=1]` | W | `kelictl reload-script` |
-| `POST /domains/reload` | W | `kelictl reload-domains` |
+| `POST /domains/reload` | W | `kelictl domain reload-all` |
 | `POST /modules/<name>/reload` | W | `kelictl module reload` |
-| `POST /mediaservers/<name>` | W | `kelictl mcu … on\|off` |
+| `POST /mediaservers/<name>` | W | `kelictl mediaserver enable\|disable` |
 | `PUT /log/level` | W | `kelictl log-level` |
 | `POST /graceful-shutdown` | W | `kelictl graceful-shutdown` |
 
@@ -90,6 +92,28 @@ are then `null`).
 }
 ```
 
+`GET /mediaservers` returns the `[mediaserver.pool.*]` entries in config order
+(the round-robin order); `GET /mediaservers/<name>` returns one or `404`.
+`enabled` is the operator switch (`POST /mediaservers/<name>` flips it), `healthy`
+the pool's own probe, and `modules` what each module driving that server says
+about it — the `mcu` module holds its own control channel, so its `status` and the
+pool's `healthy` are two different healths of the same box (see
+[administration](administration.md)). A module contributes its own shape; the
+core adds nothing to it.
+
+```json
+{
+  "name": "mcu1",
+  "module": "mendooze",
+  "url": "http://10.0.0.1:8080",
+  "enabled": true,
+  "healthy": true,
+  "modules": {
+    "mcu": {"name": "mcu1", "url": "http://10.0.0.1:8080", "status": "up", "queue_id": "q-42"}
+  }
+}
+```
+
 ```bash
 TOKEN=change-me
 BASE=http://127.0.0.1:8090
@@ -100,6 +124,8 @@ curl -s -H "Authorization: Bearer $TOKEN" $BASE/scenarios
 curl -s -H "Authorization: Bearer $TOKEN" "$BASE/registrations?aor=alice@example.com"
 curl -s -H "Authorization: Bearer $TOKEN" $BASE/domains
 curl -s -H "Authorization: Bearer $TOKEN" $BASE/domains/example.com
+curl -s -H "Authorization: Bearer $TOKEN" $BASE/mediaservers
+curl -s -H "Authorization: Bearer $TOKEN" $BASE/mediaservers/mcu1
 
 # write verbs
 curl -s -X DELETE -H "Authorization: Bearer $TOKEN" \

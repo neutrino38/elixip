@@ -861,7 +861,7 @@ mixer), so there is nothing to enumerate or create yet:
 | `<base>/conferences/:uid/mosaics[/:mosaic_id]` | video layout management beyond mosaic `0` |
 | `<base>/conferences/:uid/mixers[/:mixer_id]` | audio sidebars beyond mixer `0` (`CreateSidebar` & co.) |
 | `<base>/conferences/:uid/listeners` | the deferred event callbacks (§11.1) |
-| `<base>/mediaservers[/:name]` | the per-MCU health/enable view (`kelictl status` covers it today) |
+| `<base>/mediaservers[/:name]` | this module's own per-MCU view, if it ever needs one the core cannot carry — today the core serves it (`kelictl mediaserver list\|show`, `GET /mediaservers[/<name>]`), reading our `mediaserver/1` for the control-channel health it cannot probe itself |
 
 Reserving them now is what keeps the URL space free of future incompatibilities:
 the layout of a *single* mosaic is a field of the conference resource

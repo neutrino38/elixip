@@ -53,6 +53,30 @@ defmodule Kelix.ControlAPITest do
       assert is_list(body(conn))
     end
 
+    test "GET /mediaservers returns a JSON list; :name serves one entry" do
+      :ok = Supervisor.terminate_child(Kelix.Supervisor, Kelix.MediaPool)
+      on_exit(fn -> Supervisor.restart_child(Kelix.Supervisor, Kelix.MediaPool) end)
+
+      start_supervised!(
+        {Kelix.MediaPool,
+         pool: [%{name: "mcu1", module: :mockup, url: "http://10.0.0.1:8080", enabled: true}],
+         probe: fn _ -> true end,
+         first_check_ms: 60_000}
+      )
+
+      conn = call(conn(:get, "/mediaservers"))
+      assert conn.status == 200
+      assert [%{"name" => "mcu1", "module" => "mockup", "enabled" => true}] = body(conn)
+
+      conn = call(conn(:get, "/mediaservers/mcu1"))
+      assert conn.status == 200
+      assert body(conn)["url"] == "http://10.0.0.1:8080"
+
+      conn = call(conn(:get, "/mediaservers/ghost"))
+      assert conn.status == 404
+      assert body(conn)["error"] == "not found"
+    end
+
     test "GET /domains/:name serves the same view kelictl shows" do
       path =
         Path.join(System.tmp_dir!(), "api_domains_#{System.unique_integer([:positive])}.toml")

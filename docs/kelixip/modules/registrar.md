@@ -12,7 +12,7 @@ maps the facade result onto the `SIP.Session.Registrar.*` helpers.
 
 The `registrar` block lives in **`domains.toml`** (not `config.toml`) so it is
 hot-reloadable alongside the domains it serves — it reloads on
-`kelictl reload-domains`. A `[module.registrar]` in `config.toml` is ignored.
+`kelictl domain reload-all`. A `[module.registrar]` in `config.toml` is ignored.
 
 ```toml
 # domains.toml

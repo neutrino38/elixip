@@ -91,7 +91,7 @@ kelictl monitor
 
 ```bash
 systemctl start kelixip
-systemctl reload kelixip          # = kelictl reload-domains (atomic, no restart)
+systemctl reload kelixip          # = kelictl domain reload-all (atomic, no restart)
 systemctl stop kelixip            # drains first, see below
 systemctl restart kelixip         # the only way to apply a config.toml change
 kelictl graceful-shutdown         # same drain, without systemd

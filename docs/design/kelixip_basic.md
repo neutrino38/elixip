@@ -484,9 +484,9 @@ Source unique dont dérivent CLI et REST (parité). `R` = lecture, `W` = écritu
 | `shutdown_scenario` — `:shutdown` à une instance | W | `kelictl stop <id>` | `POST /scenarios/<id>/shutdown` |
 | `reload_script` — recharger un/des `.exs`, **versionné** (§9.2) | W | `kelictl reload-script <name…>` | `POST /scripts/reload` |
 | `reload_script_notify` — reload **+ prévient les instances en cours** | W | `kelictl reload-script --notify <name…>` | `POST /scripts/reload?notify=1` |
-| `reload_domains` — recharger `domains.toml` (§9.2) | W | `kelictl reload-domains` | `POST /domains/reload` |
+| `reload_domains` — recharger `domains.toml` (§9.2) | W | `kelictl domain reload-all` | `POST /domains/reload` |
 | `module_reload` — recharger un module (§5.2) | W | `kelictl module reload <name>` | `POST /modules/<name>/reload` |
-| `mediaserver_toggle` — activer/désactiver un MCU | W | `kelictl mcu <name> on\|off` | `POST /mediaservers/<name>` |
+| `mediaserver_toggle` — activer/désactiver un MCU | W | `kelictl mediaserver enable\|disable <name>` | `POST /mediaservers/<name>` |
 | `set_log_level` — niveau de log (global) | W | `kelictl log-level <lvl>` | `PUT /log/level` |
 | `graceful_shutdown` — drain coopératif puis arrêt du nœud | W | `kelictl graceful-shutdown` | `POST /graceful-shutdown` |
 
@@ -501,6 +501,13 @@ Source unique dont dérivent CLI et REST (parité). `R` = lecture, `W` = écritu
 
 > **Futur.** `set_log_level` **par domaine / par fonction** (`registrar`,
 > `calls`, `presence`) pour débugger sans noyer les logs. En basic : global.
+
+> **Orthographe CLI (2026-08-02).** La colonne `kelictl` ci-dessus porte les noms
+> effectivement livrés : les verbes sont regroupés **sous le nom qu'ils
+> manipulent** (`domain reload-all`, `mediaserver enable|disable <name>`), et
+> deux verbes de lecture s'y ajoutent (`mediaserver list` / `mediaserver show`,
+> `GET /mediaservers[/<name>]`) — voir la conception §10.1. Les fonctions de
+> `Kelix.Control` et les routes REST, elles, sont bien celles de ce tableau.
 
 ## 10. API de contrôle (REST)
 

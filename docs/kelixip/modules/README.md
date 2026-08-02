@@ -63,7 +63,7 @@ Two consequences worth knowing:
   `[module.auth_db]` in `config.toml`, even if the facade would have worked
   without configuration: a release does not lazily load code on first call. With
   no block, the script raises on its first facade call and the request gets **no
-  answer at all**. Boot (and `kelictl reload-domains`) warns when a domain enables
+  answer at all**. Boot (and `kelictl domain reload-all`) warns when a domain enables
   a function whose same-named module is not loaded.
 - **Installing a new version is install + reload.** Drop the new `.beam` into
   `module_dir` and run `kelictl module reload <name>`: the code is re-read from
@@ -116,7 +116,7 @@ as before. Adding it turns a runtime surprise into a load-time error.
 `kelictl module reload <name>` re-reads the block: `validate_config/1` runs
 first (an invalid block is rejected, the running service untouched), then the
 module reconfigures in place if it supports it, else the child is cleanly
-restarted. The `registrar` block additionally reloads on `kelictl reload-domains`.
+restarted. The `registrar` block additionally reloads on `kelictl domain reload-all`.
 
 ## Control surface (kelictl / REST)
 

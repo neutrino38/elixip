@@ -158,6 +158,71 @@ defmodule Kelix.Control do
   defp render_rule(%Kelix.DialRule{raw: raw, script: script}),
     do: %{pattern: raw, default: false, script: script}
 
+  @doc """
+  The media servers of the pool and their state (`kelictl mediaserver list`), in
+  `config.toml` order — which is significant, the pool is round-robin.
+
+  Each row is what `mediaserver/1` returns for that entry, so the list and the
+  detail view never disagree about a field.
+  """
+  @spec mediaservers() :: [map]
+  def mediaservers() do
+    modules = loaded_modules()
+
+    Enum.map(pool_entries(), &describe_mediaserver(&1, modules))
+  end
+
+  @doc """
+  One media server and its state (`kelictl mediaserver show <name>`), by its
+  `[mediaserver.pool.<name>]` name. `{:error, :not_found}` if the pool has no such
+  entry — the pool is the node's only declaration of a media server (§9).
+  """
+  @spec mediaserver(String.t()) :: {:ok, map} | {:error, :not_found}
+  def mediaserver(name) when is_binary(name) do
+    case Enum.find(pool_entries(), &(&1.name == name)) do
+      nil -> {:error, :not_found}
+      entry -> {:ok, describe_mediaserver(entry, loaded_modules())}
+    end
+  end
+
+  # The configured entry (name/adapter/url), the operator switch (`enabled`), the
+  # pool's own probe (`healthy`) and what each module driving media servers says
+  # about this one.
+  defp describe_mediaserver(entry, modules) do
+    %{
+      name: entry.name,
+      module: entry.module,
+      url: entry.url,
+      enabled: entry.enabled,
+      healthy: Map.get(entry, :healthy, true),
+      modules: module_mediaserver_views(modules, entry.name)
+    }
+  end
+
+  # `healthy` is the pool's probe of the point-to-point adapter's channel; the mcu
+  # module holds a *different* channel to the same server and has its own view of it
+  # (§9). A server can be up on one and down on the other, so both are reported.
+  # Generic: a module exporting `mediaserver/1` contributes an entry, one that does
+  # not is simply absent — the core names no module here.
+  defp module_mediaserver_views(modules, name) do
+    for m <- modules,
+        {:ok, view} <- [Kelix.ModuleRegistry.facade(m, :mediaserver, [name], :error)],
+        is_map(view),
+        into: %{},
+        do: {m, printable(view)}
+  end
+
+  # A module's view keeps its own shape — minus the values that mean nothing outside
+  # the node (the pid of its control channel, a monitor ref): both frontals render
+  # this, and neither a CLI line nor a JSON body has any use for `#PID<0.123.0>`.
+  defp printable(view), do: for({k, v} <- view, printable?(v), into: %{}, do: {k, v})
+
+  defp printable?(v), do: not (is_pid(v) or is_reference(v) or is_port(v) or is_function(v))
+
+  defp pool_entries(), do: safe(fn -> Kelix.MediaPool.status() end, [])
+
+  defp loaded_modules(), do: Map.keys(safe(fn -> Kelix.ModuleRegistry.all() end, %{}))
+
   defp current_domains(), do: safe(fn -> Kelix.Domains.current() end, %Kelix.Domains{})
 
   defp active_calls() do
@@ -199,7 +264,7 @@ defmodule Kelix.Control do
     Map.new(names, fn name -> {name, Kelix.ScriptRegistry.reload(name)} end)
   end
 
-  @doc "Hot-reload `domains.toml` (`kelictl reload-domains`). Path from the boot env."
+  @doc "Hot-reload `domains.toml` (`kelictl domain reload-all`). Path from the boot env."
   @spec reload_domains() :: :ok | {:error, term}
   def reload_domains() do
     case Application.get_env(:kelixip, :domains_path) do
@@ -218,7 +283,7 @@ defmodule Kelix.Control do
   @spec module_reload(String.t()) :: :ok | {:error, term}
   def module_reload(name) when is_binary(name), do: Kelix.ModuleSupervisor.reload(name)
 
-  @doc "Enable/disable a media server in the pool (`kelictl mcu <name> on|off`)."
+  @doc "Enable/disable a media server in the pool (`kelictl mediaserver enable|disable <name>`)."
   @spec mediaserver_toggle(String.t(), boolean) :: :ok | {:error, :unknown}
   def mediaserver_toggle(name, on?) when is_boolean(on?), do: Kelix.MediaPool.toggle(name, on?)
 

@@ -799,7 +799,7 @@ by scripts.
 > calling a module's facade needs that module **configured** — the `[module.<name>]`
 > block is what gets its code loaded; there is no lazy fallback. When it is missing
 > the script raises on its first facade call and the request goes **unanswered**, so
-> boot (and `reload-domains`) now warns when a domain enables a function whose
+> boot (and `domain reload-all`) now warns when a domain enables a function whose
 > same-named module is not loaded (`warn_missing_function_modules/0`).
 
 ### 8.1 `Kelix.Module` behaviour
@@ -943,8 +943,9 @@ Spec §6. Extends the current single-`:mediaserver` config to a pool.
 > context appdata (`:mediaserver_instance`) over the global `:mediaserver` app env,
 > so concurrent calls don't race on a shared adapter config — the standalone
 > `elixipp` tool sets no such override and keeps its global behaviour. Deferred:
-> per-MCU active-session **metrics** (P9); the `kelictl mcu … on|off` /
-> `POST /mediaservers/<name>` frontal that calls `toggle/3` (P7).
+> per-MCU active-session **metrics** (P9); the `kelictl mediaserver
+> enable|disable <name>` / `POST /mediaservers/<name>` frontal that calls
+> `toggle/3` (P7).
 
 ### 9.1 `Kelix.MediaPool`
 
@@ -953,8 +954,19 @@ Supervised GenServer over the `[mediaserver.pool.*]` entries:
 - **Selection** — round-robin over `enabled` + healthy MCUs for each new call.
 - **Health-check** — periodic probe (reuse `MediaServer.Behaviour.connect/1` /
   a lightweight ping) marking each MCU up/down; failover skips down MCUs.
-- **Enable/disable at runtime** — `mediaserver_toggle` (§10) flips a pool
-  entry's `enabled` flag without restart.
+  Every 30 s: the probe is a real connection (on Mendooze, an event queue plus
+  its poller) opened and closed again, so it is kept rare. It is announced with
+  `connect(url, purpose: :health_check)` to adapters that accept options, which
+  log that connection churn at `:debug`, stamped `keepalive` — a probe every
+  30 s must not read as call activity in the log.
+- **Enable/disable at runtime** — `mediaserver_toggle` (§10,
+  `kelictl mediaserver enable|disable <name>`) flips a pool entry's `enabled`
+  flag without restart. New calls and conferences stop landing there; live ones
+  are untouched.
+- **Inspection** — `mediaservers/0` / `mediaserver/1` (§10.1,
+  `kelictl mediaserver list|show`) render the entries with both healths: the
+  probe above, and what each module driving that server says about its own
+  channel.
 
 Each pool entry wraps an existing `MediaServer.Mendooze` adapter instance
 (reusing all of `lib/framework/mendooze/`). The Router injects the *selected* MCU
@@ -1019,6 +1031,27 @@ Spec §9–§10. **Parity by construction**: one command layer, two frontals.
 > file on the server told an operator which domains are served, with which
 > functions, scripts and dial-plan — and the file is not necessarily what the
 > router loaded.
+>
+> **Refinement (2026-08-02, same day).** Same treatment for the media-server pool
+> — `mediaservers/0` / `mediaserver/1` (`kelictl mediaserver list` /
+> `mediaserver show <name>`, `GET /mediaservers[/<name>]`) — and the CLI verbs
+> regrouped **under the noun they act on**:
+>
+> | Was | Is |
+> |---|---|
+> | `kelictl reload-domains` | `kelictl domain reload-all` |
+> | `kelictl mcu <name> on\|off` | `kelictl mediaserver enable\|disable <name>` |
+>
+> Two spellings that no longer paid for themselves. `domain` already owned `list`
+> and `show`, so the reload belongs there rather than in a top-level verb of its
+> own. And `mcu` is a **module** name: it owns a command namespace
+> (`kelictl mcu conference.list`), which the three-word `mcu <name> on|off` form
+> shadowed — `mcu foo on` was a pool toggle, `mcu foo bar` a module command. What
+> the flag acts on is a `[mediaserver.pool.*]` entry, which the `mcu` module is
+> only one consumer of (a `mockup` entry has no MCU at all). Neither the control
+> verb (`reload_domains/0`, `mediaserver_toggle/2`) nor the REST routes changed:
+> this is CLI spelling, and `systemctl reload kelixip` still calls
+> `Kelix.Control.reload_domains()` directly.
 
 ### 10.1 `Kelix.Control`
 
@@ -1032,12 +1065,14 @@ holds business logic. Surface (spec §9.3):
 | `registrations/1` | R | `kelictl regs [aor]` | `GET /registrations` |
 | `domains/0` — served domains + properties | R | `kelictl domain list` | `GET /domains` |
 | `domain/1` — one domain in detail | R | `kelictl domain show <domain>` | `GET /domains/<domain>` |
+| `mediaservers/0` — the media-server pool + its state | R | `kelictl mediaserver list` | `GET /mediaservers` |
+| `mediaserver/1` — one media server in detail | R | `kelictl mediaserver show <name>` | `GET /mediaservers/<name>` |
 | `unregister/2` | W | `kelictl unregister <aor> [contact]` | `DELETE /registrations/<aor>` |
 | `shutdown_scenario/1` | W | `kelictl stop <id>` | `POST /scenarios/<id>/shutdown` |
 | `reload_script/2` (notify?) | W | `kelictl reload-script [--notify] <name…>` | `POST /scripts/reload[?notify=1]` |
-| `reload_domains/0` | W | `kelictl reload-domains` | `POST /domains/reload` |
+| `reload_domains/0` | W | `kelictl domain reload-all` | `POST /domains/reload` |
 | `module_reload/1` | W | `kelictl module reload <name>` | `POST /modules/<name>/reload` |
-| `mediaserver_toggle/2` | W | `kelictl mcu <name> on\|off` | `POST /mediaservers/<name>` |
+| `mediaserver_toggle/2` | W | `kelictl mediaserver enable\|disable <name>` | `POST /mediaservers/<name>` |
 | `set_log_level/1` | W | `kelictl log-level <lvl>` | `PUT /log/level` |
 | `graceful_shutdown/0` | W | `kelictl graceful-shutdown` | `POST /graceful-shutdown` |
 
@@ -1059,6 +1094,20 @@ here: whether a function is enabled comes from `Kelix.Router.function_enabled?/2
 argument through `Kelix.Domains.lookup/2`, i.e. name **+** aliases,
 case-insensitively — the way an inbound R-URI is resolved, so the host an operator
 saw on the wire is a valid argument.
+
+`mediaservers/0` / `mediaserver/1` read `Kelix.MediaPool` (§9) — the pool is the
+node's only declaration of a media server — and return, per entry, the
+configuration (`name`, adapter `module`, `url`), the operator switch (`enabled`,
+what `mediaserver_toggle/2` flips) and the pool's own probe (`healthy`), plus a
+`modules` map: what each **module driving that server** says about it. That last
+one is not decoration. The pool probes the point-to-point adapter's channel
+(`/jsr309`) while the `mcu` module holds a different one (`/mcu`) to the same box,
+and §9 keeps the two deliberately apart (hence two `*_mediaserver_up` metrics); an
+operator asking "why did that conference fail on a server the pool calls healthy"
+needs both healths in one view. It is collected generically — a module exporting
+`mediaserver/1` contributes an entry, one that does not is absent, so the core
+names no module — and passed through as the module shaped it, minus the values
+that mean nothing outside the node (a pid, a monitor ref).
 
 ### 10.2 The `kelictl` CLI
 

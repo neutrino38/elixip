@@ -29,11 +29,13 @@ on Ubuntu/Debian, the same file the systemd unit reads.
 | `kelictl unregister <aor> [contact]` | W | Drop a registration |
 | `kelictl domain list` | R | Served domains, their functions and live counters |
 | `kelictl domain show <domain>` | R | One domain in detail (name **or** alias) |
+| `kelictl domain reload-all` | W | Hot-reload `domains.toml` (atomic) |
+| `kelictl mediaserver list` | R | The media-server pool: adapter, URL, switch, health |
+| `kelictl mediaserver show <name>` | R | One media server in detail |
+| `kelictl mediaserver enable\|disable <name>` | W | Take a media server in/out of the pool |
 | `kelictl stop <id>` | W | Cooperatively shut down one scenario (id from `monitor`) |
 | `kelictl reload-script [--notify] <name…>` | W | Reload scenario script(s) |
-| `kelictl reload-domains` | W | Hot-reload `domains.toml` (atomic) |
 | `kelictl module reload <name>` | W | Reload a module's config |
-| `kelictl mcu <name> on\|off` | W | Enable/disable a media server in the pool |
 | `kelictl log-level <lvl>` | W | Change the log level at runtime (`debug\|info\|warning\|error`) |
 | `kelictl graceful-shutdown` | W | Drain scenarios, then shut the node down |
 
@@ -78,13 +80,26 @@ dial-plan:
 $ kelictl domain show ghost.example.org
 no such domain
 
-$ kelictl mcu mcu1 off
+$ kelictl mediaserver list
+server  adapter   url                  enabled  health  modules
+mcu1    mendooze  http://10.0.0.1:8080  on       up      mcu=up
+mcu2    mendooze  http://10.0.0.2:8080  on       down    mcu=down
+
+$ kelictl mediaserver show mcu1
+media server: mcu1
+adapter:      mendooze
+url:          http://10.0.0.1:8080
+enabled:      on
+health:       up (pool probe)
+mcu:          name mcu1, queue_id q-42, status up, url http://10.0.0.1:8080
+
+$ kelictl mediaserver disable mcu1
 ok
 
-$ kelictl mcu ghost off
+$ kelictl mediaserver disable ghost
 error: :unknown
 
-$ kelictl reload-domains
+$ kelictl domain reload-all
 ok
 ```
 
@@ -93,7 +108,7 @@ an optional `contact` removes just that binding. `reload-script` reports one lin
 per script (`<name>: ok` / `<name>: error: …`).
 
 `domain list` / `domain show` read the **live** `domains.toml` snapshot — what the
-router is using right now, which after a rejected `reload-domains` is *not* what
+router is using right now, which after a rejected `domain reload-all` is *not* what
 is on disk (the version is in `kelictl status`). `show` resolves its argument the
 way inbound traffic is resolved, against the name **and** the aliases,
 case-insensitively, so the host seen on the wire is a valid argument. The
@@ -101,6 +116,23 @@ dial-plan is listed in file order and numbered, because it is first-match-wins:
 rule *n* is only tried if rules *1…n-1* did not match. `functions` lists what the
 domain actually serves (a function block present in the TOML = enabled), so an
 empty column means every request to that domain is answered `404`.
+
+`mediaserver list` / `mediaserver show` list the `[mediaserver.pool.*]` entries —
+the node's only declaration of a media server — in config order, which is the
+round-robin order. Two things that read alike are kept apart there:
+
+* **`enabled`** is the operator switch, flipped by `mediaserver enable|disable`
+  and by nothing else. Disabling stops **new** calls and conferences landing on
+  that server; what is already running stays until it ends.
+* **`health`** is the pool's own probe (a connect/disconnect on the
+  point-to-point adapter's channel, every 30 s), and the `modules` column is what
+  each module driving that server says about it — the `mcu` module holds a
+  *different* control channel to the same box. `up` on one side and `down` on the
+  other is a real state, not a contradiction: a server whose JSR-309 side is
+  unreachable can serve conferences perfectly, and vice versa.
+
+A server the pool does not declare is `error: :unknown` on `enable`/`disable` and
+`no such media server` on `show`.
 
 ### Exit codes
 
@@ -125,6 +157,12 @@ kelictl <module> <command> [args…]
 
 The positional `args…` are handed to the module's `handle_control/2` as
 `%{"args" => [ ... ]}`. These share the same cookie boundary as the core commands.
+A module's whole namespace is its own: `kelictl mcu <cmd>` is the `mcu` module's
+(`kelictl mcu conference.list`), and enabling or disabling a media server is
+`kelictl mediaserver enable|disable <name>` — it acts on a `[mediaserver.pool.*]`
+entry, of which the `mcu` module is only one consumer. `domain`, `mediaserver`
+and `module` are core nouns and never reach a module, so a mistyped sub-command
+prints their usage rather than "unknown module".
 Today neither [registrar](modules/registrar.md) nor [auth_db](modules/auth_db.md)
 contributes one; the mechanism is documented in
 [modules/README.md](modules/README.md#control-surface-kelictl--rest).
