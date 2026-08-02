@@ -133,6 +133,28 @@ defmodule Mendooze.ServerTest do
     assert_receive {:ms_event, ^server, :server_disconnected}, 2_000
   end
 
+  test "a 404 on the stream path stops the poller instead of retrying for ever" do
+    # the queue is gone server-side: every retry would 404 again
+    fake =
+      Jsr309FakeServer.start(
+        self(),
+        fn
+          "EventQueueCreate", _ -> {:ok, [7, "/events/jsr309/7"]}
+          _, _ -> {:ok, []}
+        end,
+        stream_status: 404
+      )
+
+    server = connect!(fake)
+
+    assert_receive {:stream_404, "/events/jsr309/7"}, 1_000
+    poller = :sys.get_state(server).poller
+
+    # retry_ms is 50 ms here: a retry loop would show up well within 500 ms
+    refute_receive {:stream_404, _}, 500
+    refute Process.alive?(poller)
+  end
+
   test "disconnect deletes the event queue and stops the server" do
     fake = Jsr309FakeServer.start(self())
     {:ok, server} = Mendooze.connect({fake.host, fake.port})

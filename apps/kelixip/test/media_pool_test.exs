@@ -13,10 +13,41 @@ defmodule Kelix.MediaPoolTest do
     %{name: "mcu2", module: :mendooze, url: "http://10.0.0.2:8080", enabled: true}
   ]
 
+  # Adapters spying on how the *default* probe calls them (the tests below inject
+  # their own probe instead, so these are the only two that exercise it).
+  defmodule SpyAdapter do
+    def connect(url, opts) do
+      send(:media_pool_probe_spy, {:spy_connect, url, opts})
+      {:ok, self()}
+    end
+
+    def disconnect(_pid, opts) do
+      send(:media_pool_probe_spy, {:spy_disconnect, opts})
+      :ok
+    end
+  end
+
+  defmodule LegacyAdapter do
+    def connect(url) do
+      send(:media_pool_probe_spy, {:legacy_connect, url})
+      {:ok, self()}
+    end
+
+    def disconnect(_pid, _opts), do: :ok
+  end
+
   # start a test-owned pool with an injected probe; periodic check pushed far out
   defp start_pool(pool, probe \\ fn _ -> true end) do
     name = :"mp_#{System.unique_integer([:positive])}"
     start_supervised!({MediaPool, name: name, pool: pool, probe: probe, first_check_ms: 60_000})
+    name
+  end
+
+  # same, but keeping the real probe: one entry on the given adapter module
+  defp start_pool_with_default_probe(module, url) do
+    name = :"mp_#{System.unique_integer([:positive])}"
+    entry = %{name: "spy", module: module, url: url, enabled: true}
+    start_supervised!({MediaPool, name: name, pool: [entry], first_check_ms: 60_000})
     name
   end
 
@@ -72,6 +103,30 @@ defmodule Kelix.MediaPoolTest do
       mp = start_pool(@pool, fn _ -> false end)
       assert :ok = MediaPool.check_health(mp)
       assert MediaPool.checkout(mp) == {:error, :no_mcu}
+    end
+
+    # The default probe opens a real connection every cycle. Adapters that accept
+    # options are told it is only a keepalive, so they log that churn at :debug.
+    test "the default probe announces itself as a keepalive to the adapter" do
+      # the name goes away with the test process
+      Process.register(self(), :media_pool_probe_spy)
+
+      mp = start_pool_with_default_probe(SpyAdapter, "http://spy:8080")
+      assert :ok = MediaPool.check_health(mp)
+
+      assert_received {:spy_connect, "http://spy:8080", [purpose: :health_check]}
+      assert_received {:spy_disconnect, [force: true]}
+    end
+
+    test "an adapter that only implements connect/1 is still probed" do
+      # the name goes away with the test process
+      Process.register(self(), :media_pool_probe_spy)
+
+      mp = start_pool_with_default_probe(LegacyAdapter, "http://legacy:8080")
+      assert :ok = MediaPool.check_health(mp)
+
+      assert_received {:legacy_connect, "http://legacy:8080"}
+      assert [%{healthy: true}] = MediaPool.status(mp)
     end
   end
 
