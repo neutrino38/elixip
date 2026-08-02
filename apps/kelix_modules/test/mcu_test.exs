@@ -534,6 +534,37 @@ defmodule Kelix.Mod.McuTest do
 
       assert {:error, :mcu_down} = create()
     end
+
+    # A restarted media server answers control RPCs as if nothing happened while
+    # 404ing the queue it no longer knows — only the poller sees it, and it says so
+    # through renew_queue/2. Without this the poller retried a dead id for ever and
+    # the module went deaf to every event.
+    test "a queue the server has forgotten is replaced" do
+      assert {:ok, %{client: client, status: :up}} = Mcu.mediaserver("mcu1")
+      stale = Client.queue_id(client)
+      assert is_integer(stale)
+      _ = TestStub.rpc_order()
+
+      :ok = Client.renew_queue(client, stale)
+
+      wait_until(fn -> "EventQueueCreate" in TestStub.rpc_order() end)
+      # and it went through :down, so the owner knows the conferences it held on
+      # that server are gone too
+      assert {:ok, %{status: :up}} = Mcu.mediaserver("mcu1")
+    end
+
+    test "renewing an id that is not the current one changes nothing" do
+      assert {:ok, %{client: client}} = Mcu.mediaserver("mcu1")
+      _ = TestStub.rpc_order()
+
+      # the poller asking twice about the same dead id while the replacement is in
+      # flight must not create a queue per attempt
+      :ok = Client.renew_queue(client, Client.queue_id(client) + 1_000)
+
+      # a round-trip through the client proves the cast has been processed
+      assert is_integer(Client.queue_id(client))
+      refute "EventQueueCreate" in TestStub.rpc_order()
+    end
   end
 
   describe "MCU events (§3.7)" do

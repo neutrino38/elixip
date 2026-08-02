@@ -77,6 +77,9 @@ defmodule Kelix.Mod.Mcu.EventQueue do
       failures: 0,
       connected?: false,
       down_notified?: false,
+      # the stale queue id we have already asked the client to replace, so the
+      # retry loop asks once per id and not once per second
+      renewing: nil,
       timer: nil
     }
 
@@ -91,8 +94,17 @@ defmodule Kelix.Mod.Mcu.EventQueue do
   def handle_info(:poll, state), do: {:noreply, start_request(%{state | timer: nil})}
 
   def handle_info({:http, {ref, :stream_start, _headers}}, %{request: ref} = state) do
-    Logger.info(module: __MODULE__, message: "mcu #{state.name}: event stream connected")
-    {:noreply, %{state | connected?: true, failures: 0, down_notified?: false}}
+    # Say how long it took when we had gone quiet: the failure lines stop after a
+    # few (see log_failure/2), so this is the only place the outage gets a size.
+    suffix =
+      if state.down_notified?,
+        do: " again after #{state.failures} failed attempts",
+        else: ""
+
+    Logger.info(module: __MODULE__, message: "mcu #{state.name}: event stream connected#{suffix}")
+
+    {:noreply,
+     %{state | connected?: true, failures: 0, down_notified?: false, renewing: nil}}
   end
 
   def handle_info({:http, {ref, :stream, chunk}}, %{request: ref} = state) do
@@ -107,26 +119,41 @@ defmodule Kelix.Mod.Mcu.EventQueue do
   end
 
   def handle_info({:http, {ref, {:error, reason}}}, %{request: ref} = state) do
-    Logger.warning(
-      module: __MODULE__,
-      message: "mcu #{state.name}: event stream error: #{inspect(reason)}"
-    )
+    state = log_failure(state, "event stream error: #{inspect(reason)}")
+    {:noreply, retry(state)}
+  end
+
+  # 404: the queue id we hold is unknown to the server. Ids are never reallocated,
+  # so this is not transient — the media server restarted and answers control RPCs
+  # perfectly well while knowing nothing of our queue. Retrying it is hopeless;
+  # ask the client for a fresh one and poll that. Guarded on the stale id so the
+  # ~1 Hz retry loop does not stack EventQueueCreate calls while one is in flight.
+  def handle_info(
+        {:http, {ref, {{_proto, 404, _reason}, _headers, _body}}},
+        %{request: ref} = state
+      ) do
+    stale = queue_id(state)
+
+    state =
+      if is_integer(stale) and stale != state.renewing do
+        state = log_failure(state, "event queue #{stale} is gone (404); asking for a new one")
+        renew_queue(state, stale)
+        %{state | renewing: stale}
+      else
+        state
+      end
 
     {:noreply, retry(state)}
   end
 
-  # a complete (non-streamed) response: an HTTP error status, e.g. an unknown queue
+  # any other complete (non-streamed) response: an HTTP error status
   def handle_info({:http, {ref, other}}, %{request: ref} = state) do
-    Logger.warning(
-      module: __MODULE__,
-      message: "mcu #{state.name}: unexpected event response: #{inspect(other)}"
-    )
-
+    state = log_failure(state, "unexpected event response: #{inspect(other)}")
     {:noreply, retry(state)}
   end
 
   def handle_info(:stall, state) do
-    Logger.warning(module: __MODULE__, message: "mcu #{state.name}: event stream stalled")
+    state = log_failure(state, "event stream stalled")
     cancel(state)
     {:noreply, retry(state)}
   end
@@ -158,14 +185,31 @@ defmodule Kelix.Mod.Mcu.EventQueue do
             arm_stall(%{state | request: ref, buffer: "", connected?: false})
 
           {:error, reason} ->
-            Logger.warning(
-              module: __MODULE__,
-              message: "mcu #{state.name}: event request failed: #{inspect(reason)}"
-            )
-
+            state = log_failure(state, "event request failed: #{inspect(reason)}")
             retry(state)
         end
     end
+  end
+
+  # The retry loop runs at ~1 Hz, so a media server that stays down would write a
+  # line a second for ever — and it did. Report the first few attempts, then go
+  # silent: retry/1 has the last word with a single error at :max_failures, and
+  # nothing more is said until the stream is really back (stream_start clears the
+  # flag and reports how many attempts it took).
+  defp log_failure(state, message) do
+    unless state.down_notified? do
+      Logger.warning(module: __MODULE__, message: "mcu #{state.name}: #{message}")
+    end
+
+    state
+  end
+
+  defp renew_queue(%{client: nil}, _stale_id), do: :ok
+
+  defp renew_queue(%{client: client}, stale_id) do
+    Client.renew_queue(client, stale_id)
+  catch
+    :exit, _ -> :ok
   end
 
   defp queue_id(%{client: nil}), do: nil

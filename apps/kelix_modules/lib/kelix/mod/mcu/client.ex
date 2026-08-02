@@ -76,6 +76,20 @@ defmodule Kelix.Mod.Mcu.Client do
   def queue_id(client), do: info(client).queue_id
 
   @doc """
+  Report that `stale_id` is gone from the server, so a fresh queue gets created.
+
+  The event poller is the only witness: a restarted media server answers control
+  RPCs perfectly well — the channel never looks down — but 404s the queue it no
+  longer knows, and queue ids are not reallocated. Without this the poller retries
+  a dead id for ever and the module goes deaf to every MCU event.
+
+  A no-op unless `stale_id` is still the current one, so the poller can keep
+  asking while a renewal is in flight without stacking `EventQueueCreate` calls.
+  """
+  @spec renew_queue(t, non_neg_integer) :: :ok
+  def renew_queue(client, stale_id), do: GenServer.cast(client, {:renew_queue, stale_id})
+
+  @doc """
   The server's DTLS fingerprint for `hash`, fetched once and cached: it is
   server-wide, not per participant (§2, `GetLocalCryptoDTLSFingerprint`).
   """
@@ -157,6 +171,27 @@ defmodule Kelix.Mod.Mcu.Client do
   end
 
   @impl true
+  def handle_cast({:renew_queue, stale_id}, %{queue_id: stale_id} = state) do
+    Logger.warning(
+      module: __MODULE__,
+      message:
+        "mcu #{state.name}: event queue #{stale_id} no longer exists on the server " <>
+          "(it restarted); creating a new one"
+    )
+
+    # Through :down and back up, not straight to a new queue: the media server we
+    # were talking to is gone, and with it every conference and participant it
+    # held. The owner learns that from the health transition — a silent swap would
+    # leave it addressing objects that no longer exist.
+    state = mark(state, :down)
+    {:noreply, connect(%{state | queue_id: nil})}
+  end
+
+  # already renewed (another poller got there first, or the poller asked twice
+  # while the EventQueueCreate was in flight)
+  def handle_cast({:renew_queue, _stale_id}, state), do: {:noreply, state}
+
+  @impl true
   def handle_info(:reconnect, state) do
     {:noreply, connect(state)}
   end
@@ -178,7 +213,11 @@ defmodule Kelix.Mod.Mcu.Client do
   # The event queue is what makes a channel usable: it is created once here and
   # passed to every CreateConference, so events can be routed back.
   defp connect(state) do
-    case rpc(%{state | status: :up}, "EventQueueCreate", []) do
+    # NOT `%{state | status: :up}`: pre-declaring the outcome made mark/2 see no
+    # transition on success, so a server coming back was never announced up and the
+    # owner kept refusing calls with 503 for ever. rpc/3 does not read the status;
+    # only mark/2 decides, from the status we actually had.
+    case rpc(state, "EventQueueCreate", []) do
       {{:ok, [queue_id | _]}, state} when is_integer(queue_id) and queue_id >= 0 ->
         Logger.info(
           module: __MODULE__,
