@@ -84,9 +84,12 @@ defmodule Kelix.Control do
     do: Map.merge(@empty_fsm, Map.take(entry, [:scenario, :state, :event, :command, :account]))
 
   @doc """
-  Current registrations (`kelictl regs [aor]`). `aor` filters by user-part, and by
-  domain when given as `"user@domain"`; `nil` lists every domain. Returns rows
-  `%{domain, aor, contacts}` where each contact is `%{uri, expires_at}`.
+  Current registrations (`kelictl registration list [aor]`). `aor` filters by
+  user-part, and by domain when given as `"user@domain"`; `nil` lists every domain.
+
+  Rows are `%{domain, aor, contacts}`, each contact carrying what the registrar
+  stored for that binding — see `registration/1`, which is this function narrowed
+  to one AOR, so the list and the detail view cannot disagree about a field.
   """
   @spec registrations(String.t() | nil) :: [map]
   def registrations(aor \\ nil) do
@@ -97,6 +100,22 @@ defmodule Kelix.Control do
         {a, contacts} <- registrations_for(d),
         is_nil(user) or a == user do
       %{domain: d, aor: a, contacts: Enum.map(contacts, &render_contact/1)}
+    end
+  end
+
+  @doc """
+  One AOR and its bindings (`kelictl registration show <aor>`).
+
+  A **list** of rows, not one: an AOR is only unique within a domain, so a bare
+  `"user"` legitimately matches several — `"user@domain"` narrows it to one.
+  `{:error, :not_found}` when nothing is registered under that name, which is the
+  answer `unregister/2` would also give.
+  """
+  @spec registration(String.t()) :: {:ok, [map]} | {:error, :not_found}
+  def registration(aor) when is_binary(aor) do
+    case registrations(aor) do
+      [] -> {:error, :not_found}
+      rows -> {:ok, rows}
     end
   end
 
@@ -232,7 +251,7 @@ defmodule Kelix.Control do
   # ── write verbs ───────────────────────────────────────────────────────────────
 
   @doc """
-  Remove a registration (`kelictl unregister <aor> [contact]`). `aor` may be
+  Remove a registration (`kelictl registration remove <aor> [contact]`). `aor` may be
   `"user@domain"` (that domain) or `"user"` (every domain). `contact` is a
   contact-URI string or `:all`. `:ok` if anything was removed, else `:notfound`.
   """
@@ -401,10 +420,48 @@ defmodule Kelix.Control do
   end
 
   # Matched structurally, not as `%Kelix.Mod.Registrar.Contact{}`: the core cannot
-  # reference a loadable module's struct at compile time (§16.12).
-  defp render_contact(%{contact: uri, expires_at: at}) do
-    %{uri: uri_string(uri), expires_at: at}
+  # reference a loadable module's struct at compile time (§16.12) — hence `Map.get`
+  # for the optional fields too.
+  #
+  # `expires_in` is derived here rather than left to each frontal: "how long has
+  # this binding left" is the operator question, and an absolute UTC timestamp is
+  # not an answer to it. `source` is where the REGISTER *actually* came from, which
+  # behind a NAT is not what the contact URI says — the difference is the usual
+  # reason a call to a registered phone never arrives.
+  defp render_contact(%{contact: uri, expires_at: at} = binding) do
+    %{
+      uri: uri_string(uri),
+      expires_at: at,
+      expires_in: expires_in(at),
+      source: source_string(Map.get(binding, :received)),
+      transport: transport_string(Map.get(binding, :flow_module)),
+      instance: Map.get(binding, :instance),
+      reg_id: Map.get(binding, :reg_id),
+      methods: Map.get(binding, :methods)
+    }
   end
+
+  defp expires_in(%DateTime{} = at), do: max(DateTime.diff(at, DateTime.utc_now()), 0)
+  defp expires_in(_at), do: nil
+
+  defp source_string({proto, ip, port}) when is_tuple(ip) do
+    case :inet.ntoa(ip) do
+      {:error, _} -> nil
+      addr -> "#{proto} #{addr}:#{port}"
+    end
+  end
+
+  defp source_string(_received), do: nil
+
+  # The transport the binding is reachable over, named the way the stack names it
+  # (`SIP.Transport.UDP.transport_str/0`) rather than by guessing from the module.
+  defp transport_string(module) when is_atom(module) and not is_nil(module) do
+    if Code.ensure_loaded?(module) and function_exported?(module, :transport_str, 0),
+      do: module.transport_str(),
+      else: nil
+  end
+
+  defp transport_string(_module), do: nil
 
   defp uri_string(%SIP.Uri{} = uri) do
     case SIP.Uri.serialize(uri) do

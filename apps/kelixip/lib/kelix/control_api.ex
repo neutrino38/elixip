@@ -14,6 +14,7 @@ defmodule Kelix.ControlAPI do
   | `status/0` | `GET /status` |
   | `monitor/0` | `GET /scenarios` |
   | `registrations/1` | `GET /registrations[?aor=]` |
+  | `registration/1` | `GET /registrations/:aor` |
   | `domains/0` | `GET /domains` |
   | `domain/1` | `GET /domains/:name` |
   | `mediaservers/0` | `GET /mediaservers` |
@@ -78,6 +79,16 @@ defmodule Kelix.ControlAPI do
   get "/registrations" do
     aor = conn.query_params["aor"]
     json(conn, 200, Control.registrations(aor))
+  end
+
+  # An AOR contains no slash (it is a user-part, optionally `user@domain`), so it is
+  # one path segment. Declared after the collection, and DELETE on the same path is
+  # the removal below.
+  get "/registrations/:aor" do
+    case Control.registration(aor) do
+      {:ok, rows} -> json(conn, 200, rows)
+      {:error, :not_found} -> json(conn, 404, %{error: "not found"})
+    end
   end
 
   get "/domains" do

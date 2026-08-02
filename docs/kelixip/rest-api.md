@@ -49,12 +49,13 @@ cert) with a JSON body `{"error": "…"}`.
 |---|---|---|
 | `GET /status` | R | `kelictl status` |
 | `GET /scenarios` | R | `kelictl monitor` |
-| `GET /registrations` | R | `kelictl regs` |
+| `GET /registrations` | R | `kelictl registration list` |
+| `GET /registrations/<aor>` | R | `kelictl registration show` |
 | `GET /domains` | R | `kelictl domain list` |
 | `GET /domains/<domain>` | R | `kelictl domain show` |
 | `GET /mediaservers` | R | `kelictl mediaserver list` |
 | `GET /mediaservers/<name>` | R | `kelictl mediaserver show` |
-| `DELETE /registrations/<aor>` | W | `kelictl unregister` |
+| `DELETE /registrations/<aor>` | W | `kelictl registration remove` |
 | `POST /scenarios/<id>/shutdown` | W | `kelictl stop` |
 | `POST /scripts/reload[?notify=1]` | W | `kelictl reload-script` |
 | `POST /domains/reload` | W | `kelictl domain reload-all` |
@@ -92,6 +93,34 @@ are then `null`).
 }
 ```
 
+`GET /registrations` returns one object per AOR (filtered by `?aor=`);
+`GET /registrations/<aor>` returns the **list** of objects that AOR matches — a
+bare user-part can be registered in several domains — or `404`. Each binding
+carries what the registrar stored: the expiry both ways (`expires_in` in seconds
+is the operator question, `expires_at` the instant), the `source` the REGISTER
+actually came from (behind a NAT, not what the contact URI says), the transport,
+and the RFC 5626/3840 identity the handset sent. A field the handset did not send
+is `null`.
+
+```json
+{
+  "domain": "example.com",
+  "aor": "alice",
+  "contacts": [
+    {
+      "uri": "sip:alice@10.0.0.9:5060",
+      "expires_at": "2026-08-02T12:34:56Z",
+      "expires_in": 298,
+      "source": "udp 203.0.113.7:45112",
+      "transport": "udp",
+      "instance": "<urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6>",
+      "reg_id": "1",
+      "methods": null
+    }
+  ]
+}
+```
+
 `GET /mediaservers` returns the `[mediaserver.pool.*]` entries in config order
 (the round-robin order); `GET /mediaservers/<name>` returns one or `404`.
 `enabled` is the operator switch (`POST /mediaservers/<name>` flips it), `healthy`
@@ -122,6 +151,7 @@ BASE=http://127.0.0.1:8090
 curl -s -H "Authorization: Bearer $TOKEN" $BASE/status
 curl -s -H "Authorization: Bearer $TOKEN" $BASE/scenarios
 curl -s -H "Authorization: Bearer $TOKEN" "$BASE/registrations?aor=alice@example.com"
+curl -s -H "Authorization: Bearer $TOKEN" $BASE/registrations/alice@example.com
 curl -s -H "Authorization: Bearer $TOKEN" $BASE/domains
 curl -s -H "Authorization: Bearer $TOKEN" $BASE/domains/example.com
 curl -s -H "Authorization: Bearer $TOKEN" $BASE/mediaservers

@@ -184,7 +184,7 @@ defmodule Kelix.Mod.Registrar do
     do: Kelix.Module.safe_call(__MODULE__, {:unsubscribe, uri, pid})
 
   @doc """
-  Administratively remove an AOR's binding(s) (for `kelictl unregister`). `contact`
+  Administratively remove an AOR's binding(s) (`kelictl registration remove`). `contact`
   is a specific contact-URI string, or `:all` to drop the whole AOR. Returns `:ok`,
   `:notfound`, or a facade error (`{:error, :down | :timeout}`).
   """
@@ -395,7 +395,7 @@ defmodule Kelix.Mod.Registrar do
     end
   end
 
-  # ── administrative removal (kelictl unregister) ──────────────────────────────
+  # ── administrative removal (kelictl registration remove) ─────────────────────
 
   defp do_remove(state, domain, aor, which) do
     case Map.get(state.tables, domain) do

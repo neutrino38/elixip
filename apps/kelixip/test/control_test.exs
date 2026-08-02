@@ -168,6 +168,106 @@ defmodule Kelix.ControlTest do
     end
   end
 
+  describe "registrations/1 + registration/1" do
+    @reg_domains """
+    [[domain]]
+    name = "reg.example.com"
+
+    [[domain]]
+    name = "other.example.net"
+    """
+
+    # The registrar is a loadable module, absent from the core: Control reaches it
+    # through the module registry, so a fake exporting `all/1` is all it takes. The
+    # bindings are plain maps — Control matches them structurally for that reason.
+    defmodule FakeRegistrar do
+      @uri %SIP.Uri{scheme: "sip:", userpart: "alice", domain: "10.0.0.9", port: 5060}
+
+      # fixed by the setup, so two reads of the same binding are the same binding
+      def all("reg.example.com") do
+        %{
+          "alice" => [
+            %{
+              contact: @uri,
+              expires_at: Application.get_env(:kelixip, :fake_reg_expires_at),
+              # behind a NAT this is *not* what the contact URI says
+              received: {"udp", {10, 0, 0, 9}, 45_112},
+              flow_module: SIP.Transport.UDP,
+              instance: "<urn:uuid:f81d4fae>",
+              reg_id: "1",
+              methods: nil
+            }
+          ]
+        }
+      end
+
+      # the same user-part, registered in a second domain
+      def all("other.example.net"),
+        do: %{"alice" => [%{contact: @uri, expires_at: nil}]}
+
+      def all(_domain), do: %{}
+    end
+
+    setup do
+      path = Path.join(System.tmp_dir!(), "ctl_regs_#{System.unique_integer([:positive])}.toml")
+      File.write!(path, @reg_domains)
+      assert :ok = Kelix.Domains.reload(path)
+      Kelix.ModuleRegistry.register("registrar", FakeRegistrar, %{})
+      Application.put_env(:kelixip, :fake_reg_expires_at, DateTime.add(DateTime.utc_now(), 340))
+
+      on_exit(fn ->
+        Application.delete_env(:kelixip, :fake_reg_expires_at)
+        Kelix.ModuleRegistry.unregister("registrar")
+        empty = path <> ".empty"
+        File.write!(empty, "")
+        Kelix.Domains.reload(empty)
+        File.rm(path)
+        File.rm(empty)
+      end)
+
+      :ok
+    end
+
+    test "registrations/1 renders each binding with what the registrar stored" do
+      assert [%{domain: "reg.example.com", aor: "alice", contacts: [c]} | _] =
+               Control.registrations("alice@reg.example.com")
+
+      # the default port is not spelled out — this is the stack's own serialization
+      assert c.uri == "sip:alice@10.0.0.9"
+      # the operator question is the remaining time, not an absolute instant
+      assert c.expires_in in 339..340
+      assert c.source == "udp 10.0.0.9:45112"
+      assert c.transport == "udp"
+      assert c.instance == "<urn:uuid:f81d4fae>"
+      assert c.reg_id == "1"
+      assert c.methods == nil
+    end
+
+    test "registration/1 answers for every domain a bare user-part is in" do
+      assert {:ok, rows} = Control.registration("alice")
+      assert Enum.map(rows, & &1.domain) == ["reg.example.com", "other.example.net"]
+
+      # …and `user@domain` narrows it to one, with the same row as the list holds
+      # (bar `expires_in`, which counts down between the two reads)
+      assert {:ok, [row]} = Control.registration("alice@reg.example.com")
+      assert stable(row) == stable(hd(Control.registrations("alice@reg.example.com")))
+    end
+
+    test "registration/1 on an unregistered AOR" do
+      assert Control.registration("ghost@reg.example.com") == {:error, :not_found}
+    end
+
+    defp stable(row),
+      do: %{row | contacts: Enum.map(row.contacts, &Map.drop(&1, [:expires_in]))}
+
+    test "a binding with no expiry does not crash the rendering" do
+      assert {:ok, [%{contacts: [c]}]} = Control.registration("alice@other.example.net")
+      assert c.expires_in == nil
+      assert c.source == nil
+      assert c.transport == nil
+    end
+  end
+
   describe "mediaservers/0 + mediaserver/1" do
     # entries as Kelix.Config decodes them (the pool no longer parses TOML)
     @pool [

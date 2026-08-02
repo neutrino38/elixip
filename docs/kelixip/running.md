@@ -78,7 +78,7 @@ kelictl() { MIX_ENV=prod elixir --name kelictl@127.0.0.1 --cookie kelixip-dev \
     -S mix run --no-start -e 'Kelix.Control.CLI.main(System.argv())' -- "$@"; }
 
 kelictl status
-kelictl regs
+kelictl registration list
 kelictl monitor
 ```
 

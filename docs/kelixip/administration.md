@@ -25,8 +25,9 @@ on Ubuntu/Debian, the same file the systemd unit reads.
 |---|---|---|
 | `kelictl status` | R | Uptime, counters, listeners, media pool, node state |
 | `kelictl monitor` | R | Scenarios in progress (reuses the `--monitor` view) |
-| `kelictl regs [aor]` | R | Current registrations (all, or one AOR) |
-| `kelictl unregister <aor> [contact]` | W | Drop a registration |
+| `kelictl registration list [aor]` | R | Current registrations (all, or one AOR) |
+| `kelictl registration show <aor>` | R | One AOR and its bindings, in detail |
+| `kelictl registration remove <aor> [contact]` | W | Drop a registration |
 | `kelictl domain list` | R | Served domains, their functions and live counters |
 | `kelictl domain show <domain>` | R | One domain in detail (name **or** alias) |
 | `kelictl domain reload-all` | W | Hot-reload `domains.toml` (atomic) |
@@ -51,13 +52,26 @@ domains version: 0
 modules:
 media pool:      (empty)
 
-$ kelictl regs
-no registrations
+$ kelictl registration list
+aor    domain           contacts  expires  bindings
+alice  example.com      2         4m58s    sip:alice@10.0.0.9:5060, sip:alice@10.0.0.9:5062
+bob    lab.example.net  1         9m12s    sip:bob@10.0.0.22:5060
 
-$ kelictl regs alice
-alice@example.com -> sip:alice@10.0.0.9:5060
+$ kelictl registration show alice@example.com
+aor:          alice@example.com
+contacts:     2
+  1. sip:alice@10.0.0.9:5060
+     expires:   in 4m58s (2026-08-02T12:34:56Z)
+     source:    udp 203.0.113.7:45112
+     transport: udp
+     instance:  <urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6>
+     reg-id:    1
+  2. sip:alice@10.0.0.9:5062
+     expires:   in 9m40s (2026-08-02T12:39:38Z)
+     source:    tls 203.0.113.7:51044
+     transport: tls
 
-$ kelictl unregister alice@example.com
+$ kelictl registration remove alice@example.com
 ok
 
 $ kelictl domain list
@@ -103,9 +117,20 @@ $ kelictl domain reload-all
 ok
 ```
 
-`unregister <aor>` accepts `user@domain` (that domain) or `user` (every domain);
-an optional `contact` removes just that binding. `reload-script` reports one line
-per script (`<name>: ok` / `<name>: error: …`).
+`registration list|show|remove` all read `<aor>` the same way: `user@domain` is
+that domain, a bare `user` is every domain — an AOR is only unique within a
+domain, so `show alice` answers with one block per domain `alice` is registered
+in. `remove` takes an optional `contact` to drop just that binding instead of the
+whole AOR. `reload-script` reports one line per script (`<name>: ok` /
+`<name>: error: …`).
+
+`show` prints what the registrar stored, not just the URI: `expires` both ways
+(the remaining time is the question, the instant is what a log line carries),
+`source` — where the REGISTER actually came from, which behind a NAT is **not**
+what the contact URI says, and the usual reason a call to a registered phone
+never arrives — the transport it is reachable over, and the identity the handset
+sent (`instance`, `reg-id`, `methods`, RFC 5626/3840). A field the handset did
+not send gets no line rather than a dash.
 
 `domain list` / `domain show` read the **live** `domains.toml` snapshot — what the
 router is using right now, which after a rejected `domain reload-all` is *not* what

@@ -477,10 +477,10 @@ Source unique dont dérivent CLI et REST (parité). `R` = lecture, `W` = écritu
 | Commande | | CLI | REST (indicatif) |
 |---|---|---|---|
 | `monitor` — scénarios en cours | R | `kelictl monitor` | `GET /scenarios` |
-| `registrations` — usrloc (filtrable par domaine) | R | `kelictl regs [aor]` | `GET /registrations` |
+| `registrations` — usrloc (filtrable par domaine) | R | `kelictl registration list [aor]` | `GET /registrations` |
 | `presence_state` *(futur)* | R | — | `GET /presence` |
 | `status` — uptime, compteurs, pool | R | `kelictl status` | `GET /status` |
-| `unregister` — purger un AOR ou un contact | W | `kelictl unregister <aor> [contact]` | `DELETE /registrations/<aor>` |
+| `unregister` — purger un AOR ou un contact | W | `kelictl registration remove <aor> [contact]` | `DELETE /registrations/<aor>` |
 | `shutdown_scenario` — `:shutdown` à une instance | W | `kelictl stop <id>` | `POST /scenarios/<id>/shutdown` |
 | `reload_script` — recharger un/des `.exs`, **versionné** (§9.2) | W | `kelictl reload-script <name…>` | `POST /scripts/reload` |
 | `reload_script_notify` — reload **+ prévient les instances en cours** | W | `kelictl reload-script --notify <name…>` | `POST /scripts/reload?notify=1` |
@@ -504,9 +504,11 @@ Source unique dont dérivent CLI et REST (parité). `R` = lecture, `W` = écritu
 
 > **Orthographe CLI (2026-08-02).** La colonne `kelictl` ci-dessus porte les noms
 > effectivement livrés : les verbes sont regroupés **sous le nom qu'ils
-> manipulent** (`domain reload-all`, `mediaserver enable|disable <name>`), et
-> deux verbes de lecture s'y ajoutent (`mediaserver list` / `mediaserver show`,
-> `GET /mediaservers[/<name>]`) — voir la conception §10.1. Les fonctions de
+> manipulent** (`domain reload-all`, `mediaserver enable|disable <name>`,
+> `registration list|show|remove`), et trois verbes de lecture s'y ajoutent
+> (`mediaserver list` / `mediaserver show` / `registration show`,
+> `GET /mediaservers[/<name>]`, `GET /registrations/<aor>`) — voir la conception
+> §10.1. Les fonctions de
 > `Kelix.Control` et les routes REST, elles, sont bien celles de ce tableau.
 
 ## 10. API de contrôle (REST)

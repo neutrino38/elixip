@@ -14,9 +14,107 @@ defmodule Kelix.Control.CLITest do
     assert out =~ "media pool:"
   end
 
-  test "regs on an empty registrar" do
-    {0, out} = run(["regs"])
+  test "registration list on an empty registrar" do
+    {0, out} = run(["registration", "list"])
     assert out == "no registrations"
+  end
+
+  describe "registration list / show / remove" do
+    @reg_domains """
+    [[domain]]
+    name = "cli.reg.example.com"
+    """
+
+    # the registrar is a loadable module: a fake exporting `all/1` + `remove/3` is
+    # the whole contract the core uses (see Kelix.ControlTest for the same trick)
+    defmodule FakeRegistrar do
+      @uri %SIP.Uri{scheme: "sip:", userpart: "bob", domain: "10.0.0.9", port: 5062}
+
+      def all("cli.reg.example.com") do
+        %{
+          "bob" => [
+            %{
+              contact: @uri,
+              expires_at: Application.get_env(:kelixip, :fake_reg_expires_at),
+              received: {"udp", {192, 168, 1, 4}, 45_112},
+              flow_module: SIP.Transport.UDP,
+              instance: "<urn:uuid:f81d4fae>",
+              reg_id: "1",
+              methods: nil
+            }
+          ]
+        }
+      end
+
+      def all(_domain), do: %{}
+
+      def remove(_domain, "bob", _contact), do: :ok
+      def remove(_domain, _aor, _contact), do: :notfound
+    end
+
+    setup do
+      path = Path.join(System.tmp_dir!(), "cli_regs_#{System.unique_integer([:positive])}.toml")
+      File.write!(path, @reg_domains)
+      assert :ok = Kelix.Domains.reload(path)
+      Kelix.ModuleRegistry.register("registrar", FakeRegistrar, %{})
+      Application.put_env(:kelixip, :fake_reg_expires_at, DateTime.add(DateTime.utc_now(), 340))
+
+      on_exit(fn ->
+        Application.delete_env(:kelixip, :fake_reg_expires_at)
+        Kelix.ModuleRegistry.unregister("registrar")
+        empty = path <> ".empty"
+        File.write!(empty, "")
+        Kelix.Domains.reload(empty)
+        File.rm(path)
+        File.rm(empty)
+      end)
+
+      :ok
+    end
+
+    test "registration list renders one row per AOR, with the soonest expiry" do
+      {0, out} = run(["registration", "list"])
+
+      assert out =~ ~r/aor\s+domain\s+contacts\s+expires\s+bindings/
+      assert out =~ ~r/bob\s+cli\.reg\.example\.com\s+1\s+5m\d+s\s+sip:bob@10\.0\.0\.9:5062/
+    end
+
+    test "registration list takes the same filter regs took" do
+      assert {0, out} = run(["registration", "list", "bob@cli.reg.example.com"])
+      assert out =~ "bob"
+      assert {0, "no registrations"} = run(["registration", "list", "ghost"])
+    end
+
+    test "registration show details each binding" do
+      {0, out} = run(["registration", "show", "bob"])
+
+      assert out =~ "aor:          bob@cli.reg.example.com"
+      assert out =~ "contacts:     1"
+      assert out =~ "1. sip:bob@10.0.0.9:5062"
+      assert out =~ ~r/expires:   in 5m\d+s \(20/
+      # where the REGISTER came from, which behind a NAT the contact URI does not say
+      assert out =~ "source:    udp 192.168.1.4:45112"
+      assert out =~ "transport: udp"
+      assert out =~ "instance:  <urn:uuid:f81d4fae>"
+      assert out =~ "reg-id:    1"
+      # the handset sent no `methods` param: no line rather than a dash
+      refute out =~ "methods:"
+    end
+
+    test "registration show on an unregistered AOR → exit 1" do
+      assert {1, "no such registration"} = run(["registration", "show", "ghost"])
+    end
+
+    test "registration remove drops the AOR, or reports not found" do
+      assert {0, "ok"} = run(["registration", "remove", "bob@cli.reg.example.com"])
+      assert {0, "ok"} = run(["registration", "remove", "bob", "sip:bob@10.0.0.9:5062"])
+      assert {1, "not found"} = run(["registration", "remove", "ghost"])
+    end
+
+    test "a mistyped registration sub-command gets the registration usage" do
+      {2, out} = run(["registration", "shwo", "bob"])
+      assert out =~ "usage: kelictl registration list [aor] | registration show <aor>"
+    end
   end
 
   describe "domain list / domain show" do

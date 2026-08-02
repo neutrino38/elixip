@@ -461,8 +461,9 @@ Strong isolation: a domain's bindings live in their own table (created/dropped
 with the domain on `reload_domains`), no cross-domain key space, and a domain can
 be flushed by dropping its table. Per-binding purge stays event-driven via a
 **monitor on the dialog pid** (transport drop / dialog death → remove the
-contact, emit `:disconnected`/`:expired`). Enumerate a domain for `kelictl regs`
-by scanning its table; `regs` with no domain iterates the index.
+contact, emit `:disconnected`/`:expired`). Enumerate a domain for
+`kelictl registration list` by scanning its table; the unfiltered form iterates
+the index.
 
 Module parameter — from its **`[module.registrar]`** block, which (unlike other
 modules' blocks in `config.toml`) lives in **`domains.toml`** so it is
@@ -1041,6 +1042,8 @@ Spec §9–§10. **Parity by construction**: one command layer, two frontals.
 > |---|---|
 > | `kelictl reload-domains` | `kelictl domain reload-all` |
 > | `kelictl mcu <name> on\|off` | `kelictl mediaserver enable\|disable <name>` |
+> | `kelictl regs [aor]` | `kelictl registration list [aor]` |
+> | `kelictl unregister <aor> [contact]` | `kelictl registration remove <aor> [contact]` |
 >
 > Two spellings that no longer paid for themselves. `domain` already owned `list`
 > and `show`, so the reload belongs there rather than in a top-level verb of its
@@ -1052,6 +1055,17 @@ Spec §9–§10. **Parity by construction**: one command layer, two frontals.
 > verb (`reload_domains/0`, `mediaserver_toggle/2`) nor the REST routes changed:
 > this is CLI spelling, and `systemctl reload kelixip` still calls
 > `Kelix.Control.reload_domains()` directly.
+>
+> **Refinement (2026-08-02, same day).** The registrations got the same shape —
+> `registration list [aor]` / `show <aor>` / `remove <aor> [contact]`, the last two
+> rows of the table above — plus the read verb `registration/1`
+> (`GET /registrations/<aor>`), and the bindings are rendered with what the
+> registrar actually stored rather than a URI and a UTC instant: `expires_in`,
+> `source`, `transport`, `instance`, `reg_id`, `methods`. `regs` printed
+> `aor@domain -> <uri>`, which answers none of the three questions an operator
+> arrives with — how long is this binding good for, where did it really come from
+> (behind a NAT, not what the contact URI says), and which of a handset's several
+> bindings is which.
 
 ### 10.1 `Kelix.Control`
 
@@ -1062,12 +1076,13 @@ holds business logic. Surface (spec §9.3):
 |---|---|---|---|
 | `status/0` — uptime, counters, pool, node state | R | `kelictl status` | `GET /status` |
 | `monitor/0` — scenarios in progress | R | `kelictl monitor` | `GET /scenarios` |
-| `registrations/1` | R | `kelictl regs [aor]` | `GET /registrations` |
+| `registrations/1` | R | `kelictl registration list [aor]` | `GET /registrations` |
+| `registration/1` — one AOR and its bindings | R | `kelictl registration show <aor>` | `GET /registrations/<aor>` |
 | `domains/0` — served domains + properties | R | `kelictl domain list` | `GET /domains` |
 | `domain/1` — one domain in detail | R | `kelictl domain show <domain>` | `GET /domains/<domain>` |
 | `mediaservers/0` — the media-server pool + its state | R | `kelictl mediaserver list` | `GET /mediaservers` |
 | `mediaserver/1` — one media server in detail | R | `kelictl mediaserver show <name>` | `GET /mediaservers/<name>` |
-| `unregister/2` | W | `kelictl unregister <aor> [contact]` | `DELETE /registrations/<aor>` |
+| `unregister/2` | W | `kelictl registration remove <aor> [contact]` | `DELETE /registrations/<aor>` |
 | `shutdown_scenario/1` | W | `kelictl stop <id>` | `POST /scenarios/<id>/shutdown` |
 | `reload_script/2` (notify?) | W | `kelictl reload-script [--notify] <name…>` | `POST /scripts/reload[?notify=1]` |
 | `reload_domains/0` | W | `kelictl domain reload-all` | `POST /domains/reload` |
@@ -1094,6 +1109,19 @@ here: whether a function is enabled comes from `Kelix.Router.function_enabled?/2
 argument through `Kelix.Domains.lookup/2`, i.e. name **+** aliases,
 case-insensitively — the way an inbound R-URI is resolved, so the host an operator
 saw on the wire is a valid argument.
+
+`registration/1` is `registrations/1` narrowed to one AOR, so the list and the
+detail view cannot disagree about a field. It returns a **list** of rows: an AOR
+is only unique within a domain, so a bare `"user"` legitimately matches several
+and `"user@domain"` narrows it to one — the same reading `unregister/2` applies.
+Each binding carries what the registrar stored (§6.1): the contact URI, the
+expiry both ways (`expires_at` + the derived `expires_in`, because "how long has
+this left" is the question and a UTC instant is not an answer to it), the
+`source` the REGISTER actually came from — behind a NAT, not what the contact URI
+says — the transport it is reachable over, and the RFC 5626/3840 identity the
+handset sent (`instance`, `reg_id`, `methods`). Read structurally, never as
+`%Kelix.Mod.Registrar.Contact{}`: the core cannot reference a loadable module's
+struct (§16.12).
 
 `mediaservers/0` / `mediaserver/1` read `Kelix.MediaPool` (§9) — the pool is the
 node's only declaration of a media server — and return, per entry, the

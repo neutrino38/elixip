@@ -47,6 +47,12 @@ defmodule Kelix.ControlAPITest do
       assert is_list(body(conn))
     end
 
+    test "GET /registrations/:aor on an unregistered aor → 404" do
+      conn = call(conn(:get, "/registrations/ghost@example.com"))
+      assert conn.status == 404
+      assert body(conn)["error"] == "not found"
+    end
+
     test "GET /domains returns a JSON list" do
       conn = call(conn(:get, "/domains"))
       assert conn.status == 200
