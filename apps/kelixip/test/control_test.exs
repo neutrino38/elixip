@@ -432,12 +432,22 @@ defmodule Kelix.ControlTest do
       assert row.command == ""
     end
 
-    test "set_log_level/1 applies a valid level and rejects a bad one" do
+    # Regression: `log-level debug` answered :ok while nothing showed up in the
+    # console or elixip.log. Setting the primary level alone leaves every sink on
+    # its own compiled-in level (console at :warning, the file backend at :info),
+    # so the level has to reach the sinks too — same rule as [log].level at boot.
+    test "set_log_level/1 applies a valid level to the sinks and rejects a bad one" do
       prev = Logger.level()
-      on_exit(fn -> Logger.configure(level: prev) end)
+      {:ok, %{level: prev_sink}} = :logger.get_handler_config(:default)
+
+      on_exit(fn ->
+        :logger.update_handler_config(:default, :level, prev_sink)
+        Logger.configure(level: prev)
+      end)
 
       assert Control.set_log_level("debug") == :ok
       assert Logger.level() == :debug
+      assert {:ok, %{level: :debug}} = :logger.get_handler_config(:default)
       assert Control.set_log_level("nope") == {:error, :invalid_level}
     end
 

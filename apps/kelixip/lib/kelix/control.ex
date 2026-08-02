@@ -340,12 +340,19 @@ defmodule Kelix.Control do
   @spec mediaserver_toggle(String.t(), boolean) :: :ok | {:error, :unknown}
   def mediaserver_toggle(name, on?) when is_boolean(on?), do: Kelix.MediaPool.toggle(name, on?)
 
-  @doc "Set the runtime log level (`kelictl log-level <lvl>`)."
+  @doc """
+  Set the runtime log level (`kelictl log-level <lvl>`).
+
+  Goes through `Kelix.Config.set_level/1` rather than `Logger.configure/1`: the
+  primary level alone leaves each sink on its own compiled-in level (console at
+  `:warning`, the file backend at `:info`), so `log-level debug` answered `:ok`
+  while no debug line ever reached the console or `elixip.log`.
+  """
   @spec set_log_level(String.t() | atom) :: :ok | {:error, :invalid_level}
   def set_log_level(level) do
     case @log_levels[to_string(level)] do
       nil -> {:error, :invalid_level}
-      lvl -> Logger.configure(level: lvl)
+      lvl -> Kelix.Config.set_level(lvl)
     end
   end
 

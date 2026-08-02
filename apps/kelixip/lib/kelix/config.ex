@@ -152,19 +152,28 @@ defmodule Kelix.Config do
       do: Kelix.Log.Syslog.enable(log.facility),
       else: Kelix.Log.Syslog.disable()
 
-    Logger.configure(level: level)
-    apply_sink_levels(level)
-    :ok
+    set_level(level)
   end
 
-  # `Logger.configure(level:)` only sets the *primary* level — what is allowed to
-  # enter the logger. Every sink then filters again on its own level, and the
-  # compiled-in defaults cap them (console at :warning, the file backend at :info),
-  # so `[log].level = "debug"` used to raise the primary level and change nothing an
-  # operator could see. Push it down to the sinks too.
-  #
-  # `:ssl_handler` is deliberately left alone: it is OTP's TLS logger, and putting
-  # it at debug buries the SIP trace under handshake internals.
+  @doc """
+  Set the log level everywhere: the primary level **and** every sink.
+
+  `Logger.configure(level:)` alone only sets the *primary* level — what is allowed
+  to enter the logger. Every sink then filters again on its own level, and the
+  compiled-in defaults cap them (console at `:warning`, the file backend at
+  `:info`), so raising the primary level to `:debug` changes nothing an operator
+  can see. This is the one place that pushes a level down to the sinks, shared by
+  `[log].level` at boot/reload and `kelictl log-level` at runtime.
+
+  `:ssl_handler` is deliberately left alone: it is OTP's TLS logger, and putting
+  it at debug buries the SIP trace under handshake internals.
+  """
+  @spec set_level(Logger.level()) :: :ok
+  def set_level(level) when is_atom(level) do
+    Logger.configure(level: level)
+    apply_sink_levels(level)
+  end
+
   defp apply_sink_levels(level) do
     for handler <- :logger.get_handler_ids(), handler not in [:ssl_handler, Logger] do
       :logger.update_handler_config(handler, :level, level)
