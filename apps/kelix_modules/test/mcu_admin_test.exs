@@ -174,7 +174,15 @@ defmodule Kelix.Mod.McuAdminTest do
                })
 
       assert {:ok, conf} = Mcu.conference(ctx.uid)
-      assert conf.video == %{size: 6, fps: 15, bitrate: 2048, intra_period: 300}
+
+      assert conf.video == %{
+               size: 6,
+               fps: 15,
+               bitrate: 2048,
+               intra_period: 300,
+               fmtp: "profile-level-id=42e01f;packetization-mode=1"
+             }
+
       assert conf.max_participants == 2
       assert TestStub.rpc_order() == []
     end

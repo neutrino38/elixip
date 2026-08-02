@@ -22,7 +22,15 @@ defmodule Kelix.Mod.Mcu.ConfigTest do
       assert config.max_participants == 20
       assert config.destroy_when_empty == false
       assert config.auto_layout == true
-      assert config.video == %{size: 6, fps: 15, bitrate: 1024, intra_period: 300}
+
+      assert config.video == %{
+               size: 6,
+               fps: 15,
+               bitrate: 1024,
+               intra_period: 300,
+               fmtp: "profile-level-id=42e01f;packetization-mode=1"
+             }
+
       assert config.xmlrpc_timeout_ms == 10_000
       assert config.gc_orphans == true
       # no range configured ⇒ `did` is mandatory on create (§8.4)
@@ -54,6 +62,11 @@ defmodule Kelix.Mod.Mcu.ConfigTest do
     test "a non-boolean flag" do
       assert {:error, msg} = Config.parse(%{"auto_layout" => "yes"})
       assert msg =~ "auto_layout must be a boolean"
+    end
+
+    test "a non-string where a string is expected" do
+      assert {:error, msg} = Config.parse(%{"video_fmtp" => 42})
+      assert msg =~ "video_fmtp must be a string"
     end
 
     test "a codec the SDP layer cannot emit" do
@@ -95,6 +108,15 @@ defmodule Kelix.Mod.Mcu.ConfigTest do
 
     test "names are case-insensitive" do
       assert parse!(%{"audio_codecs" => ["opus"]}).audio_codecs == ["OPUS"]
+    end
+
+    # The H.264 profile the answer states when the offer states none (§6.3). It is a
+    # stopgap for L4, so it is tunable without a rebuild — and switchable off.
+    test "video_fmtp overrides the announced H.264 profile, and can be emptied" do
+      assert parse!(%{"video_fmtp" => "profile-level-id=42801f"}).video.fmtp ==
+               "profile-level-id=42801f"
+
+      assert parse!(%{"video_fmtp" => ""}).video.fmtp == ""
     end
   end
 

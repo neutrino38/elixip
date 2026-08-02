@@ -190,7 +190,14 @@ defmodule Kelix.Mod.McuTest do
       assert conf.max_participants == 4
       assert conf.destroy_when_empty == true
       # a partial video override keeps the rest of the profile
-      assert conf.video == %{size: 6, fps: 25, bitrate: 1024, intra_period: 300}
+      assert conf.video == %{
+               size: 6,
+               fps: 25,
+               bitrate: 1024,
+               intra_period: 300,
+               fmtp: "profile-level-id=42e01f;packetization-mode=1"
+             }
+
       assert conf.layout == %{comp: 6, size: 2, auto: true}
       assert_received {:rpc, "CreateConference", [^uid, 2, 16_000, 7]}
       assert_received {:rpc, "SetCompositionType", [42, 0, 6, 2]}

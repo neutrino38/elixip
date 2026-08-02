@@ -44,6 +44,7 @@ rate                = 32000      # 8000 | 16000 | 32000 | 48000 — see below
 audio_codecs        = ["OPUS", "G722", "PCMA", "PCMU", "TELEPHONE-EVENT"]
 video_codecs        = ["H264"]
 text_codecs         = ["T140RED", "T140"]   # T.140 real-time text, redundancy first
+video_fmtp          = "profile-level-id=42e01f;packetization-mode=1"
 max_participants    = 20
 destroy_when_empty  = false
 auto_layout         = true       # the mosaic follows the number of video legs
@@ -92,6 +93,19 @@ ICE candidates. On the media server:
 * a media server too old to report the address gets its calls refused with `500` and
   a log line saying so — kelixip deliberately keeps no address to fall back on, since
   a guessed one produces a call that connects and never carries media.
+
+**`video_fmtp` is the H.264 profile the answer states when the caller states
+none** — a gateway, or a phone that lists `H264/90000` with no `a=fmtp`. Saying
+nothing is not neutral: RFC 6184 makes it mean Baseline level 1.0 to the peer,
+while the mixer encodes HD720p, and the call then "connects" without displaying.
+The same value is imposed on the encoder (`SetVideoCodec`), so the SDP and the
+stream agree — check `H264Encoder: … profile-level-id …` in the media server's
+log if in doubt.
+
+A profile the **offer** states always wins: `profile-level-id` has to match for
+the two ends to decode each other. Set `video_fmtp = ""` to go back to
+announcing nothing. The key disappears when the media server takes over the
+negotiation (design §16.3).
 
 **Text is on by default — this MCU does total conversation.** `text_codecs`
 lists T.140 in preference order, and `T140RED` first means a caller offering RFC

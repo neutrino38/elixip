@@ -39,7 +39,21 @@ defmodule Kelix.Mod.Mcu.Config do
             destroy_when_empty: false,
             auto_layout: true,
             layout_comp: 1,
-            video: %{size: 6, fps: 15, bitrate: 1024, intra_period: 300},
+            # The inline video profile, copied into every conference at create time.
+            # `fmtp` is what the answer advertises for H.264 **when the offer states
+            # no profile of its own** — a reflected one always wins (§6.3) — and it is
+            # also what the encoder is told to target, so the two agree. Constrained
+            # Baseline 3.1 matches the HD720P default output and is what every gateway
+            # and browser decodes. `""` advertises nothing, which is what this module
+            # did before, and the whole key goes away with the delegated negotiation
+            # of §16.3 (S3/P8), where the server reports what it actually accepted.
+            video: %{
+              size: 6,
+              fps: 15,
+              bitrate: 1024,
+              intra_period: 300,
+              fmtp: "profile-level-id=42e01f;packetization-mode=1"
+            },
             did_range: nil,
             did_ranges: %{},
             xmlrpc_timeout_ms: 10_000,
@@ -64,10 +78,11 @@ defmodule Kelix.Mod.Mcu.Config do
                video_intra_period xmlrpc_timeout_ms call_timeout_ms shutdown_grace_ms
                rtp_timeout_ms)
   @bool_keys ~w(destroy_when_empty auto_layout gc_orphans)
+  @string_keys ~w(video_fmtp)
 
   @keys ~w(module call_timeout_ms vad rate audio_codecs video_codecs text_codecs
            max_participants destroy_when_empty auto_layout layout_comp did_range
-           did_ranges video_size video_fps video_bitrate video_intra_period
+           did_ranges video_size video_fps video_bitrate video_intra_period video_fmtp
            xmlrpc_timeout_ms shutdown_grace_ms rtp_timeout_ms gc_orphans)
 
   @doc """
@@ -80,6 +95,7 @@ defmodule Kelix.Mod.Mcu.Config do
          :ok <- reject_unknown_keys(block),
          :ok <- check_ints(block),
          :ok <- check_bools(block),
+         :ok <- check_strings(block),
          :ok <- check_enum(block, "vad", @vad_values),
          :ok <- check_enum(block, "rate", @rates),
          :ok <- check_enum(block, "layout_comp", Enum.to_list(@comp_values)),
@@ -106,7 +122,8 @@ defmodule Kelix.Mod.Mcu.Config do
            size: int(block, "video_size", defaults.video.size),
            fps: int(block, "video_fps", defaults.video.fps),
            bitrate: int(block, "video_bitrate", defaults.video.bitrate),
-           intra_period: int(block, "video_intra_period", defaults.video.intra_period)
+           intra_period: int(block, "video_intra_period", defaults.video.intra_period),
+           fmtp: str(block, "video_fmtp", defaults.video.fmtp)
          },
          did_range: did_range,
          did_ranges: did_ranges,
@@ -197,6 +214,16 @@ defmodule Kelix.Mod.Mcu.Config do
         nil -> {:cont, :ok}
         v when is_integer(v) and v >= 0 -> {:cont, :ok}
         _ -> {:halt, {:error, "#{key} must be a non-negative integer"}}
+      end
+    end)
+  end
+
+  defp check_strings(block) do
+    Enum.reduce_while(@string_keys, :ok, fn key, :ok ->
+      case Map.get(block, key) do
+        nil -> {:cont, :ok}
+        v when is_binary(v) -> {:cont, :ok}
+        _ -> {:halt, {:error, "#{key} must be a string"}}
       end
     end)
   end
@@ -307,6 +334,13 @@ defmodule Kelix.Mod.Mcu.Config do
   defp int(block, key, default) do
     case Map.get(block, key) do
       v when is_integer(v) -> v
+      _ -> default
+    end
+  end
+
+  defp str(block, key, default) do
+    case Map.get(block, key) do
+      v when is_binary(v) -> v
       _ -> default
     end
   end

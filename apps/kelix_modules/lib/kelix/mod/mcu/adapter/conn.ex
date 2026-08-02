@@ -419,7 +419,13 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
              :ok <- set_remote_security(state, m, desc),
              :ok <- set_rtp_properties(state, m, desc) do
           {:ok, %{state | receiving: [media | state.receiving], media_ip: ip},
-           Map.merge(neg, %{rec_port: rec_port, remote: {desc.ip, desc.port}})}
+           Map.merge(neg, %{
+             rec_port: rec_port,
+             remote: {desc.ip, desc.port},
+             # decided once, here: the answer states it and the encoder is
+             # configured with it, so the two cannot drift apart
+             answered_profile_level_id: h264_profile_level_id(state, desc)
+           })}
         end
     end
   end
@@ -475,7 +481,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
       |> put_if(Map.get(desc, :rtcp_mux, false), "rtcp-mux", "1")
       |> put_if(avpf?(desc), "useNACK", "1")
       |> put_if(avpf?(desc), "tmmbr", "1")
-      |> merge_video_props(desc)
+      |> merge_video_props(state, desc)
 
     if props == %{} do
       :ok
@@ -493,20 +499,46 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   defp put_if(map, true, key, value), do: Map.put(map, key, value)
   defp put_if(map, false, _key, _value), do: map
 
-  # `h264.profile-level-id` is the documented key the MCU takes to target the
-  # profile the peer asked for (§3.4, observed in mcuGold): without it the encoder
-  # runs on its own default and a baseline-only handset gets a stream it cannot
-  # decode — one-way video that looks like a network problem.
-  defp merge_video_props(props, %{type: :video} = desc) do
-    Enum.reduce(Map.get(desc, :fmtp, %{}), props, fn {_pt, fmtp}, acc ->
-      case Map.get(fmtp, :profile_level_id) do
-        plid when is_integer(plid) -> Map.put(acc, "h264.profile-level-id", hex6(plid))
-        _ -> acc
-      end
-    end)
+  # The H.264 profile is **not** pushed here, and that is a correction rather than
+  # an omission (2026-08-01). It used to be, as `h264.profile-level-id`, and it
+  # never arrived: `VideoStream::SetRTPProperties` only keeps keys prefixed
+  # `codec.`, and the unprefixed one fell through to `RTPSession::SetProperties`,
+  # which logged `Unknown RTP property`. Prefixing it is not enough either —
+  # `SetVideoCodec` **replaces** the whole property map (`videoProperties =
+  # properties`) and runs after us, at ACK time. The profile therefore travels in
+  # `SetVideoCodec`'s own props map, which is the argument that reaches the encoder
+  # (`set_codec/3`).
+  defp merge_video_props(props, _state, _desc), do: props
+
+  # The peer's profile if it stated one, else ours. Reflection wins because
+  # `profile-level-id` has to match for the two ends to decode each other (§6.3
+  # rule 2), and a peer that states one has told us what it can handle.
+  defp h264_profile_level_id(state, %{type: :video} = desc) do
+    offered =
+      Map.get(desc, :fmtp, %{})
+      |> Map.values()
+      |> Enum.find_value(fn fmtp ->
+        case Map.get(fmtp, :profile_level_id) do
+          plid when is_integer(plid) -> hex6(plid)
+          _ -> nil
+        end
+      end)
+
+    offered || configured_profile_level_id(state)
   end
 
-  defp merge_video_props(props, _desc), do: props
+  defp h264_profile_level_id(_state, _desc), do: nil
+
+  # The `profile-level-id=` of the configured answer fmtp — the one place that string
+  # is read, so the SDP and the RPC cannot disagree.
+  defp configured_profile_level_id(state) do
+    case Regex.run(~r/profile-level-id=([0-9a-fA-F]{6})/, configured_video_fmtp(state)) do
+      [_, plid] -> String.downcase(plid)
+      nil -> nil
+    end
+  end
+
+  defp configured_video_fmtp(state), do: Map.get(state.video, :fmtp) || ""
 
   defp avpf?(%{protocol: protocol}), do: String.ends_with?(protocol, "F")
 
@@ -585,7 +617,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
           video.fps,
           video.bitrate,
           video.intra_period,
-          %{},
+          encoder_props(neg),
           @role_main
         ])
     end
@@ -606,6 +638,22 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   end
 
   defp set_codec(_state, media, _neg), do: {:error, {:media_not_supported, media}}
+
+  # What the encoder is configured with, and the only place it can be: this map
+  # becomes `VideoStream::videoProperties` wholesale, and `CreateEncoder` reads it at
+  # `StartSending`, one RPC later.
+  #
+  # `h264.profile-level-id` (unprefixed here — the `codec.` prefix belongs to
+  # `SetRTPProperties`, which strips it) makes the encoder emit, and write into every
+  # SPS, the profile the SDP answer advertised. Without it it runs on its own default
+  # `42801F` whatever we announced, and a handset that trusts the answer gets a
+  # stream it may not decode — one-way video that looks like a network problem.
+  defp encoder_props(neg) do
+    case Map.get(neg, :answered_profile_level_id) do
+      plid when is_binary(plid) -> %{"h264.profile-level-id" => plid}
+      _ -> %{}
+    end
+  end
 
   # The Medooze constant of a codec name, read off the shared codec tables (a
   # one-entry rtpMap is the table lookup those tables expose).
@@ -672,7 +720,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
       rtpmaps: rtpmaps,
       fmtp:
         dtmf_fmtp(neg)
-        |> Map.merge(codec_fmtp(desc, rtpmaps))
+        |> Map.merge(codec_fmtp(state, desc, rtpmaps))
         |> Map.merge(red_fmtp(desc.type, rtpmaps)),
       # rule 8: b=AS: on video is min(offered, the conference's profile)
       bandwidth: answer_bandwidth(state, desc),
@@ -738,18 +786,35 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # states one). Deliberately NOT reflected: `sprop-parameter-sets`, which describes
   # the offerer's own encoder — sending it back would advertise their SPS/PPS as ours.
   #
+  # When the offer states **nothing** — a gateway or a phone that lists `H264/90000`
+  # and no `a=fmtp` — the answer states the conference's own profile rather than
+  # staying silent: silence means RFC 6184's default (Baseline level 1.0) to the peer,
+  # while the mixer is encoding HD720p, and video that "connects" without displaying
+  # is the result. The same value is pushed to the encoder (`merge_video_props/3`).
+  #
   # This is the local guesswork limitation L4 in miniature: kelixip decides what the
   # MCU will encode. §16.3 (P8) makes the server authoritative and deletes it.
-  defp codec_fmtp(desc, rtpmaps) do
+  defp codec_fmtp(state, desc, rtpmaps) do
     offered = Map.get(desc, :fmtp, %{})
 
-    for %{pt: pt} <- rtpmaps,
-        entry = Map.get(offered, Integer.to_string(pt)),
-        params = reflected_params(entry),
-        params != "",
-        into: %{},
-        do: {Integer.to_string(pt), params}
+    Enum.reduce(rtpmaps, %{}, fn %{pt: pt} = entry, acc ->
+      case answered_params(state, desc, entry, Map.get(offered, Integer.to_string(pt))) do
+        "" -> acc
+        params -> Map.put(acc, Integer.to_string(pt), params)
+      end
+    end)
   end
+
+  # Reflection first; ours only for an H.264 payload type the offer said nothing
+  # usable about.
+  defp answered_params(state, %{type: :video}, %{encoding: "H264"}, offered) do
+    case reflected_params(offered) do
+      "" -> configured_video_fmtp(state)
+      reflected -> reflected
+    end
+  end
+
+  defp answered_params(_state, _desc, _entry, offered), do: reflected_params(offered)
 
   defp reflected_params(%{profile_level_id: plid} = fmtp) when is_integer(plid) do
     ["profile-level-id=" <> hex6(plid)]

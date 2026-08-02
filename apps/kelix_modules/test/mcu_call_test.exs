@@ -95,6 +95,23 @@ defmodule Kelix.Mod.McuCallTest do
   a=sendrecv\r
   """
 
+  # A video offer that states H.264 and no profile at all — a gateway, or a phone
+  # that leaves the fmtp out. RFC 6184 makes silence mean Baseline level 1.0, which
+  # is not what an HD720p mixer sends.
+  @offer_video_no_fmtp """
+  v=0\r
+  o=- 1 1 IN IP4 192.168.1.50\r
+  s=-\r
+  c=IN IP4 192.168.1.50\r
+  t=0 0\r
+  m=audio 40000 RTP/AVP 8\r
+  a=rtpmap:8 PCMA/8000\r
+  a=sendrecv\r
+  m=video 40002 RTP/AVP 99\r
+  a=rtpmap:99 H264/90000\r
+  a=sendrecv\r
+  """
+
   # An offer with no codec the conference accepts (G.729 only).
   @offer_no_codec """
   v=0\r
@@ -447,18 +464,57 @@ defmodule Kelix.Mod.McuCallTest do
       {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
       assert_receive {:replied, 200, _reason, _fields, _req}, 2000
 
-      # §3.4: the H.264 profile the peer asked for is pushed to the encoder, so a
-      # baseline-only handset is not handed a stream it cannot decode
+      # answer time carries the transport properties only
       assert_receive {:rpc, "SetRTPProperties", [42, 7, 1, props, 0]}, 2000
-      assert props["h264.profile-level-id"] == "42e01f"
       assert props["useNACK"] == "1"
+      refute Map.has_key?(props, "codec.h264.profile-level-id")
 
       send(pid, {:ACK, %{method: :ACK}, nil, dialog})
 
       # SetVideoCodec carries the conference's inline profile (§5.1) — size, fps,
-      # bitrate, intra period — because every leg is encoded from the same mosaic
-      assert_receive {:rpc, "SetVideoCodec", [42, 7, 99, 6, 15, 1024, 300, %{}, 0]}, 2000
+      # bitrate, intra period — because every leg is encoded from the same mosaic,
+      # plus the H.264 profile the peer asked for: this map IS the encoder's
+      # properties (`videoProperties`), and it replaces whatever SetRTPProperties set
+      assert_receive {:rpc, "SetVideoCodec", [42, 7, 99, 6, 15, 1024, 300, encoder, 0]}, 2000
+      assert encoder == %{"h264.profile-level-id" => "42e01f"}
       assert_receive {:rpc, "AddMosaicParticipant", [42, 0, 7]}, 2000
+    end
+
+    test "an offer with no H.264 profile is answered with the conference's own", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video_no_fmtp))
+      assert_receive {:replied, 200, _reason, fields, _req}, 2000
+
+      # staying silent would mean RFC 6184's default (Baseline 1.0) to the peer,
+      # while the mixer encodes HD720p
+      assert fields[:body] =~ "a=fmtp:99 profile-level-id=42e01f;packetization-mode=1"
+
+      # …and the encoder is asked for exactly what we announced: the SDP and the RPC
+      # cannot disagree, since both come from the same decision at answer time
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      assert_receive {:rpc, "SetVideoCodec", [42, 7, 99, 6, 15, 1024, 300, encoder, 0]}, 2000
+      assert encoder == %{"h264.profile-level-id" => "42e01f"}
+      assert_receive {:rpc, "AddMosaicParticipant", [42, 0, 7]}, 2000
+    end
+
+    test "a profile the offer does state still wins over ours", ctx do
+      # Main 4.0, deliberately different from the conference's 42e01f: reflection
+      # must win, because profile-level-id has to match for the ends to decode
+      offer =
+        String.replace(
+          @offer_video,
+          "a=fmtp:99 profile-level-id=42e01f;packetization-mode=1",
+          "a=fmtp:99 profile-level-id=4d0028;packetization-mode=1"
+        )
+
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: offer))
+      assert_receive {:replied, 200, _reason, fields, _req}, 2000
+
+      assert fields[:body] =~ "a=fmtp:99 profile-level-id=4d0028;packetization-mode=1"
+      refute fields[:body] =~ "42e01f"
+
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      assert_receive {:rpc, "SetVideoCodec", [42, 7, 99, 6, 15, 1024, 300, encoder, 0]}, 2000
+      assert encoder == %{"h264.profile-level-id" => "4d0028"}
     end
 
     test "a video-less conference declines the video and keeps the audio", ctx do
@@ -524,7 +580,9 @@ defmodule Kelix.Mod.McuCallTest do
       {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_tc))
       assert_receive {:replied, 200, _reason, _fields, _req}, 2000
 
-      # answer time: one StartReceiving per media, in the offer's order
+      # answer time: one StartReceiving per media, in the offer's order. No
+      # SetRTPProperties here — this offer is plain RTP/AVP with nothing to set, the
+      # H.264 profile travelling with SetVideoCodec at ACK time instead.
       assert TestStub.rpc_order() == [
                "CreateParticipant",
                "StartReceiving",

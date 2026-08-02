@@ -551,7 +551,29 @@ hard cases:
 7. **`a=sendrecv`** is the direction for a mixed participant; a `recvonly`
    offer is answered `sendonly` and vice-versa (`reverse_direction/1`).
 8. **Bandwidth.** `b=AS:` on video is `min(offered, conference video.bitrate)`.
-9. **T.140 redundancy.** `t140` and `red` are answered like any other codec, in
+9. **H.264 profile.** `profile-level-id` is reflected from the offer when it
+   states one, and is otherwise **the conference's own** (`video_fmtp`, default
+   `profile-level-id=42e01f;packetization-mode=1`) rather than absent: silence
+   means RFC 6184's default — Baseline level 1.0 — to the peer, while the mixer
+   encodes HD720p. The value the answer states is also what the encoder is
+   configured with, and the two travel from a single decision taken at answer
+   time (`neg.answered_profile_level_id`).
+
+   > **Where it is pushed, and why not where it was.** It goes in
+   > `SetVideoCodec`'s properties map, *not* `SetRTPProperties`. The module used
+   > to send `h264.profile-level-id` in the latter and it never arrived:
+   > `VideoStream::SetRTPProperties` keeps only keys prefixed `codec.`, so the
+   > unprefixed one fell through to `RTPSession::SetProperties`, which answered
+   > `Unknown RTP property` — the reflected profile of §3.4 was therefore never
+   > applied either. Prefixing it is not enough: `SetVideoCodec` runs later (ACK
+   > time) and **replaces** the whole map (`videoProperties = properties`), which
+   > is precisely why that map is the right place. Verified on the live server:
+   > `H264Encoder: … profile-level-id 42e01f` where it used to log its own
+   > default `42801F`.
+
+   This is L4 in miniature — kelixip decides what the MCU encodes — and §16.3
+   (S3/P8) removes the guess by having the server report what it accepted.
+10. **T.140 redundancy.** `t140` and `red` are answered like any other codec, in
    the offerer's numbering. When both are answered, `red` carries the RFC 4103
    fmtp naming the T.140 payload type — primary plus two redundant,
    `a=fmtp:<red> <t140>/<t140>/<t140>`, the caller's payload types. It is emitted
@@ -1018,6 +1040,9 @@ video_codecs        = ["H264"]
 # T.140 real-time text. Order is preference, so redundancy is used when the caller
 # offers it; `[]` turns text off and its m= section is declined with port 0.
 text_codecs         = ["T140RED", "T140"]
+# H.264 profile announced when the offer states none, and imposed on the encoder.
+# `""` announces nothing (the pre-2026-08 behaviour). Goes away with S3/P8.
+video_fmtp          = "profile-level-id=42e01f;packetization-mode=1"
 max_participants    = 20
 destroy_when_empty  = false
 auto_layout         = true
@@ -1245,7 +1270,7 @@ observations the script has no use for.
 | L1 | No media inactivity watchdog: a leg whose RTP stops is only detected by SIP | G3 | **P7** (§16.1) |
 | L2 | No `:ice_connected` notification; scripts cannot gate on media flowing | G4 | **P7** (§16.2) |
 | L3 | No trickle ICE | G5 | not planned |
-| L4 | Codec arbitration is done by kelixip, not the media server, so an fmtp subtlety the MCU dislikes surfaces as one-way media rather than a negotiation failure | G1 | **P8** (§16.3) |
+| L4 | Codec arbitration is done by kelixip, not the media server, so an fmtp subtlety the MCU dislikes surfaces as one-way media rather than a negotiation failure. Narrowed 2026-08-01: the H.264 profile is now stated in every answer and imposed on the encoder (§6.3 rule 9), so the two at least agree — but it is still kelixip that decides | G1 | **P8** (§16.3) |
 | L5 | Conferences do not survive a kelixip restart | §1.3 | not planned (§15.1) |
 | L6 | No outbound calls (dial-out into a conference) | needs B2BUA legs | not planned (§15.1) |
 | L7 | A live participant's video profile is not renegotiated when the conference profile changes | §8.3 |
