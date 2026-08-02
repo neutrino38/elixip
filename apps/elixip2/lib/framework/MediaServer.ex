@@ -120,7 +120,13 @@ defmodule MediaServer do
           media: media_kind(),
           video_bandwidth: pos_integer(),
           audio_bandwidth: pos_integer(),
-          webrtc_support: :yes | :no | :if_offered | :no_avp
+          webrtc_support: :yes | :no | :if_offered | :no_avp,
+          # let the media server follow a symmetric NAT's mapping instead of the
+          # send address the peer signalled. `:auto` (the default) leaves it to the
+          # adapter, which enables it on the legs that ANSWER a remote offer —
+          # the ones where the peer chose that address, and where a NATed peer
+          # therefore hands us its private one. Adapters that cannot latch ignore it.
+          nat_latch: boolean() | :auto
         ]
 
   @type player_opts :: [

@@ -83,6 +83,9 @@ defmodule Kelix.Mod.Mcu.Adapter do
   passes it through `appdata[:media_conn_opts]`, which FW-1 merges into these opts.
   Without it there is no conference to join, and that is a scenario bug rather than a
   call failure — hence the explicit error.
+
+  `opts[:nat_latch]` (default `false`) travels the same way and asks the MCU to
+  follow a symmetric NAT's mapping on this leg — see `Conn.set_rtp_properties/3`.
   """
   @impl MediaServer.Behaviour
   @spec create_peer_connection(pid, pid, keyword) :: {:ok, pid} | {:error, term}

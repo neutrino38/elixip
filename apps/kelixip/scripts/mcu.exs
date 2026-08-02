@@ -58,8 +58,10 @@ defmodule Kelix.Mcu.Call do
             appdata_set(:mcu_part, part)
             # FW-1: tells the adapter which conference this leg joins. The media
             # macros forward it to create_peer_connection/3 without having to know
-            # what it means.
-            appdata_set(:media_conn_opts, mcu_participant: part)
+            # what it means. `nat_latch` rides along: a conference leg always answers
+            # the caller's offer, so the address we are told to send to is the one the
+            # caller wrote down — its private one, for every handset behind a NAT.
+            appdata_set(:media_conn_opts, mcu_participant: part, nat_latch: true)
             # A conference is pinned to its MCU (§1.3): the leg must reach the server
             # holding the mixer, not whatever the media pool would hand out.
             appdata_set(:mediaserver_instance, Kelix.Mod.Mcu.media_config(conf))

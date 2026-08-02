@@ -145,6 +145,11 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
          # whether this scenario allows a DTLS/ICE leg at all (SDES needs no such
          # permission: it is what a plain SIP phone offers)
          webrtc: Keyword.get(opts, :webrtc_support, :if_offered),
+         # whether the MCU may re-target its send address to where the RTP really
+         # comes from (see set_rtp_properties/3). Off unless the script asks for
+         # it: the reference `mcu.exs` does, a leg driven by some other script may
+         # sit on a topology where following the source address is wrong.
+         nat_latch: Keyword.get(opts, :nat_latch, false) == true,
          # security material, per leg: our SDES key per media, our ICE credentials
          # (one pair for the whole connection) and the server's DTLS fingerprint
          local_sdes: %{},
@@ -475,12 +480,22 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # rtcp-mux is mirrored from the offer; the RTCP-feedback hints ride along on an
   # AVPF profile. `secure` is deliberately not sent: it is a no-op once the DTLS or
   # SDES keys are configured (the same audit finding the JSR-309 adapter records).
+  #
+  # `natLatch` asks the MCU to send back to where the RTP actually arrives from
+  # rather than to `desc.ip`/`desc.port`, and it belongs here for the same reason
+  # it exists at all: a conference leg only ever ANSWERS, so the destination is
+  # always the caller's own idea of its address — a private one for every handset
+  # behind a symmetric NAT. The server still ignores the request unless that
+  # destination really is private and ICE is not in use, so it is a hint, not an
+  # override. Opt-in per leg all the same (`state.nat_latch`), because the
+  # topology is the deployment's business and not this adapter's to assume.
   defp set_rtp_properties(state, m, desc) do
     props =
       %{}
       |> put_if(Map.get(desc, :rtcp_mux, false), "rtcp-mux", "1")
       |> put_if(avpf?(desc), "useNACK", "1")
       |> put_if(avpf?(desc), "tmmbr", "1")
+      |> put_if(state.nat_latch, "natLatch", "1")
       |> merge_video_props(state, desc)
 
     if props == %{} do

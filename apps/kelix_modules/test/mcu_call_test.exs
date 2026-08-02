@@ -346,14 +346,26 @@ defmodule Kelix.Mod.McuCallTest do
       {pid, dialog} = start_call(ctx.scenario, invite(ctx.did))
       assert_receive {:replied, 200, _reason, _fields, _req}, 2000
 
-      # answer time: the participant exists and receives, but sends nothing yet
+      # answer time: the participant exists and receives, but sends nothing yet.
+      # SetRTPProperties carries natLatch, which the script asks for on every leg.
       answer_time = TestStub.rpc_order()
-      assert answer_time == ["CreateParticipant", "StartReceiving"]
+      assert answer_time == ["CreateParticipant", "StartReceiving", "SetRTPProperties"]
 
       # ACK time: codec, sending, and only then the mixer
       send(pid, {:ACK, %{method: :ACK}, nil, dialog})
       ack_time = wait_for(fn -> non_empty(TestStub.rpc_order()) end)
       assert ack_time == ["SetAudioCodec", "StartSending", "AddSidebarParticipant"]
+    end
+
+    test "the leg asks the MCU to latch onto a symmetric NAT", ctx do
+      {_pid, _dialog} = start_call(ctx.scenario, invite(ctx.did))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+
+      # `mcu.exs` opts in for every leg: a conference leg only ever answers, so the
+      # address we are told to send to is the caller's own — a private one for any
+      # handset behind a NAT. Plain RTP/AVP offer, so nothing else is set.
+      assert_received {:rpc, "SetRTPProperties", [42, 7, 0, props, 0]}
+      assert props == %{"natLatch" => "1"}
     end
 
     test "CreateParticipant and StartSending carry the right arguments", ctx do
@@ -442,6 +454,7 @@ defmodule Kelix.Mod.McuCallTest do
       assert TestStub.rpc_order() == [
                "CreateParticipant",
                "StartReceiving",
+               "SetRTPProperties",
                "StartReceiving",
                "SetRTPProperties"
              ]
@@ -467,6 +480,7 @@ defmodule Kelix.Mod.McuCallTest do
       # answer time carries the transport properties only
       assert_receive {:rpc, "SetRTPProperties", [42, 7, 1, props, 0]}, 2000
       assert props["useNACK"] == "1"
+      assert props["natLatch"] == "1"
       refute Map.has_key?(props, "codec.h264.profile-level-id")
 
       send(pid, {:ACK, %{method: :ACK}, nil, dialog})
@@ -580,14 +594,18 @@ defmodule Kelix.Mod.McuCallTest do
       {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_tc))
       assert_receive {:replied, 200, _reason, _fields, _req}, 2000
 
-      # answer time: one StartReceiving per media, in the offer's order. No
-      # SetRTPProperties here — this offer is plain RTP/AVP with nothing to set, the
-      # H.264 profile travelling with SetVideoCodec at ACK time instead.
+      # answer time: one StartReceiving per media, in the offer's order, each
+      # followed by the properties call. This offer is plain RTP/AVP, so natLatch is
+      # the only thing that call carries — the H.264 profile travels with
+      # SetVideoCodec at ACK time instead.
       assert TestStub.rpc_order() == [
                "CreateParticipant",
                "StartReceiving",
+               "SetRTPProperties",
                "StartReceiving",
-               "StartReceiving"
+               "SetRTPProperties",
+               "StartReceiving",
+               "SetRTPProperties"
              ]
 
       send(pid, {:ACK, %{method: :ACK}, nil, dialog})

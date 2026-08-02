@@ -230,6 +230,17 @@ defmodule Kelix.Mod.McuSecureTest do
              ]
     end
 
+    test "natLatch is never volunteered: the script has to ask for it", ctx do
+      {conn, _part} = leg(ctx.did)
+      assert {:ok, _answer} = Adapter.set_remote_offer(conn, dtls_offer())
+
+      # this leg was opened without `nat_latch:`, so the properties call carries the
+      # transport hints and nothing else — following the source address is the
+      # deployment's decision, not this adapter's
+      assert_received {:rpc, "SetRTPProperties", [42, 7, 0, props, 0]}
+      refute Map.has_key?(props, "natLatch")
+    end
+
     test "the credentials pushed to the server are the ones the answer states", ctx do
       {conn, _part} = leg(ctx.did)
       assert {:ok, answer} = Adapter.set_remote_offer(conn, dtls_offer())
