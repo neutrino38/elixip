@@ -566,11 +566,11 @@ defmodule SIP.Test.UASInvite do
 
   # ── End-to-end over the UDP mockup ──────────────────────────────────────────
 
+  # The IST emits no automatic 100: the 180 is the first thing on the wire.
   test "reply_invite(180) reaches the wire" do
     inject_invite("answer180")
-    # IST emits the automatic 100 first (phase 1), then the scenario's 180.
-    assert_receive 100, 2_000
     assert_receive 180, 2_000
+    refute_received 100
   end
 
   test "reply_invite(486) reaches the wire" do

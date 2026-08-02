@@ -83,11 +83,11 @@ defmodule SIP.IST do
   # branch is dispatched to us, and an in-dialog re-INVITE has a branch of its own, so
   # an INVITE arriving here is a retransmission — never a new call.
   #
-  # The window is wide: the automatic 100 is only sent once process_UAS_request has
-  # returned (see :sipreq below), so an application that takes longer than T1 to take
-  # the request — a DID lookup on a media server, a database — is retransmitted into
-  # before anything has gone out. Absorb it while we have no response, resend the last
-  # one once we have: the retransmission means the UAC has not seen it.
+  # The window is wide: nothing goes out before the application answers (no automatic
+  # 100 — see :sipreq below), so an application that takes longer than T1 — a DID
+  # lookup on a media server, a database — is retransmitted into with nothing on the
+  # wire yet. Absorb it while we have no response, resend the last one once we have:
+  # the retransmission means the UAC has not seen it.
   def handle_cast({:onsipmsg, req, _remoteip, _remoteport }, state) when is_map(req) and req.method == :INVITE do
     case Map.get(state, :rspstr) do
       rspstr when is_binary(rspstr) ->
@@ -120,14 +120,13 @@ defmodule SIP.IST do
     Logger.info([ transid: state.msg.transid,  module: __MODULE__,
                     message: "SIP Request #{state.msg.method} received"])
     case process_UAS_request(state) do
-      # Request accepted by the upper layer. RFC 3261 §17.2.1: the IST emits the
-      # 100 Trying itself so the TU (scenario) never has to. Sent AFTER
-      # process_UAS_request so a reject (§1.2) goes out alone, without a 100
-      # first. reply_to_request accepts code 100 without a totag; fsm_reply moves
-      # the IST to :proceeding, and any later 100/1xx from the app stays accepted.
-      { :ok, state } ->
-        { _rc, state } = reply_to_UAC(state, state.msg, 100, "Trying", [], nil)
-        { :noreply, schedule_timer_F(state) }
+      # Request accepted by the upper layer. The IST sends NO automatic 100 Trying:
+      # deployed behind a proxy that already answers one of its own (kamailio's
+      # `sl_send_reply`), ours was a duplicate on the wire. Deviation from RFC 3261
+      # §17.2.1, which asks the server transaction for a 100 when the TU has not
+      # answered within 200 ms — a scenario that wants one calls `reply_invite(100)`,
+      # and until it answers anything, INVITE retransmissions are absorbed above.
+      { :ok, state } -> { :noreply, schedule_timer_F(state) }
 
       # In case of failure, timerK is scheduled by internal_reply()
       { :upperlayerfailure, state } -> { :noreply, state }

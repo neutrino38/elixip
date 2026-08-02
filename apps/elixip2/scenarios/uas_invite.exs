@@ -9,8 +9,8 @@
 #
 # The offer request (INVITE / re-INVITE / UPDATE) is stored automatically in the
 # context, so the reply_invite* macros serve it without re-passing it. The
-# scenario never sends 100 Trying (the INVITE server transaction does) nor the
-# 487 on a CANCEL (also automatic) — it is only notified of them.
+# scenario never sends the 487 on a CANCEL (it is automatic) — it is only notified
+# of it. A 100 Trying is not automatic: send `reply_invite(100, "Trying")` if needed.
 defmodule UAS.InviteExample do
   use SIP.Scenario
   # Adds the server-only redirect_invite / challenge_invite macros. The generic

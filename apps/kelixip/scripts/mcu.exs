@@ -48,6 +48,7 @@ defmodule Kelix.Mcu.Call do
   state wait_invite do
     on_events do
       {:INVITE, req, _trans, dialog_pid} ->
+        reply_invite(100, "Trying")
         case admit(req, dialog_pid, sip_ctx.domain) do
           {:ok, conf, part} ->
             # The local identity of this leg is the conference itself: it is what an

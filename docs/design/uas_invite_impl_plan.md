@@ -113,7 +113,12 @@ Bénéficiaires immédiats : le **503** de quota du registrar (aujourd'hui émis
 403) et le futur **604** de contrôle de domaine (phase 5). Aucun changement
 côté fabrique/callbacks.
 
-## 1.3 `100 Trying` automatique (IST)
+## 1.3 `100 Trying` automatique (IST) — ~~implémenté~~, **retiré le 2026-08-02**
+
+> Le 100 automatique décrit ci-dessous a été **supprimé** : derrière un proxy qui
+> répond déjà son propre 100 (kamailio), il faisait doublon sur le fil. Un scénario
+> qui répond lentement envoie `reply_invite(100, "Trying")` lui-même. Le reste de
+> cette section est conservé comme trace de la décision initiale.
 
 **Fichier** : `lib/framework/SIPIST.ex` (`handle_cast(:sipreq)`).
 
