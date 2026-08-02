@@ -19,7 +19,10 @@ defmodule Kelix.MediaPool do
   """
   use GenServer
 
-  @health_interval_ms 10_000
+  # The probe is a real connection (event queue + event poller) opened and closed
+  # again on every cycle, so keep it rare: 30 s still fails a dead MCU out of the
+  # rotation well before an operator notices, at a third of the server-side churn.
+  @health_interval_ms 30_000
 
   @type entry :: %{
           name: String.t(),
@@ -150,7 +153,7 @@ defmodule Kelix.MediaPool do
   defp default_probe(%{module: module, url: url}) do
     mod = resolve_module_atom(module)
 
-    case apply(mod, :connect, [url]) do
+    case probe_connect(mod, url) do
       {:ok, pid} ->
         try_disconnect(mod, pid)
         true
@@ -162,6 +165,15 @@ defmodule Kelix.MediaPool do
     _ -> false
   catch
     _, _ -> false
+  end
+
+  # Tell the adapter this connection is only a keepalive probe, so it can log its
+  # connection churn at :debug instead of drowning the log every cycle. The
+  # behaviour only requires `connect/1`: adapters that don't take options keep it.
+  defp probe_connect(mod, url) do
+    if Code.ensure_loaded?(mod) and function_exported?(mod, :connect, 2),
+      do: apply(mod, :connect, [url, [purpose: :health_check]]),
+      else: apply(mod, :connect, [url])
   end
 
   defp try_disconnect(mod, pid) do
