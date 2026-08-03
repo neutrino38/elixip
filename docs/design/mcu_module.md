@@ -1681,18 +1681,19 @@ observations the script has no use for.
 | P7, `:live` | a real leg whose network is cut is reaped within `rtp_timeout_ms`, and a leg that answers but never sends media is reaped too (the "answered, no media" case a SIP-only timeout never catches) |
 | P8 | the RPC-order test is **updated**: `SetRTPProperties(codec.*)` before `StartReceiving`, transport keys after. Answer construction from a server-returned `fmtpByPt`, including the two boundary cases of the contract: an accepted PT with an empty fmtp is advertised, an absent PT is not |
 | P9, unit | the recording and slot commands of §8.3.8: the resolved `record_dir` path, a second start ⇒ `409` with no RPC, a `file` containing `/` or `..` or a foreign extension ⇒ `400` **before** any RPC, every `holds` name to its wire value, an out-of-range slot judged by the *server's* slot table (`1+4` accepts slot 15), a pin turning `auto` off, and a participant name matching twice ⇒ `400` naming both |
+| P6, packaging | inspection of the built artifacts, not a unit test: **every** `Elixir.Kelix.Mod.Mcu*.beam` is claimed by `kelixip-mod-mcu` (rpmbuild's unpackaged-files check is the assertion — shipping the named module alone would install one whose every call fails), `Requires: kelixip = <version>`, the two documents under `/usr/share/doc/kelixip-mod-mcu/` with their cross-link rewritten for a flat directory, and the shipped `config.toml` still valid TOML whose commented `[module.mcu]` block is accepted verbatim by `Config.parse/1` — a sample that would be refused at boot is worse than none |
 | P9, `:live` (tests 5-7) | test 7: a two-leg conference recorded to `record.mp4`, stopped, and played back. Test 6: slot `0` pinned to `vad` and a leg pinned to slot `1`, read through `slot.list` under `vad=basic` then `vad=full` — the speaker shown twice, then moved with a ~5 s hold. Test 5: a `2x2` with one leg shows the logo in the other three slots |
 
 ---
 
 ## 14. Delivery phases
 
-Status as of 2026-08-03: **P0′ through P5c are implemented**, each verified against
+Status as of 2026-08-03: **P0′ through P6 are implemented**, each verified against
 the live media server as well as against the recording stub. **S4 (§16.5) shipped
 out of order**, on the server *and* in the module, because it removes a whole class
 of configuration failure rather than adding a feature; **P9 (§8.3.8) and TC shipped**
-likewise. What remains is **P6**, then **P7 and P8**, both gated on the server-side
-work of §16, and the deliberately-deferred items of §15.1.
+likewise. What remains is **P7 and P8**, both gated on the server-side work of §16,
+and the deliberately-deferred items of §15.1.
 
 | Phase | Status | Content | Done when |
 |---|---|---|---|
@@ -1704,7 +1705,7 @@ work of §16, and the deliberately-deferred items of §15.1.
 | **P5** | ✔ | `conference.update`, `participant.*`, metrics, orphan GC, MCU-restart recovery | §9 and §11 fully covered |
 | **P5b** | ✔ | **Conference lifecycle from a scenario** (§17): `create_conference/2`, `ensure_conference/3`, `update_conference/2`, `destroy_conference/1` as plain Elixir functions a script calls in-call, with creator ownership | a script creates a conference on an unknown DID, the caller joins it, and the conference goes away with the call that made it |
 | **P5c** | ✔ | **Documentation** (§18): the design doc reconciled with what shipped, the operator/developer guides, and the "test without packaging" recipe | a reader who never saw this work can configure a node, dial a conference and drive it from a script, from the docs alone |
-| **P6** |  | Packaging: `kelixip-mod-mcu` RPM/deb, sample config, docs | `dnf install kelixip-mod-mcu` + a config snippet gets a working conference |
+| **P6** | ✔ | Packaging: `kelixip-mod-mcu` RPM/deb, the commented `[module.mcu]` block in the shipped `config.toml`, and each module package carrying its own document | `dnf install kelixip-mod-mcu` + a config snippet gets a working conference. The RPM is **built and inspected on AL9** (four packages, every `Mcu*` beam claimed, `mcu.md` + the guide under `/usr/share/doc/kelixip-mod-mcu/`, the sample block accepted by `Config.parse/1`); the deb is wired but not yet built, which must happen on the target release |
 | **P7** |  | **Server-side (Mendooze), §16.1-16.2**: `StartRTPTimeout` RPC + MCU event types `3` (media timeout) and `4` (media connected); kelixip arms/disarms the watchdog after the answer and handles both events | unplugging a phone's network mid-call frees its slot and its mosaic tile within `rtp_timeout_ms`, and the adapter emits `:ice_connected` on real media — **L1 and L2 lifted** |
 | **P8** |  | **Server-side (Mendooze), §16.3**: `StartReceiving` returns `(recPort, fmtpByPt)`; kelixip deletes its local codec arbitration and moves `SetRTPProperties(codec.*)` before `StartReceiving` | the SDP answer carries the fmtp the MCU will actually use, verbatim — **L4 lifted**; mcuGold on the same server is unaffected |
 | **P9** | ✔ | **The inspection surface** (§8.3.8): `recording.start\|show\|stop`, `slot.list\|update`, the `logo` field and its `[module.mcu]` defaults | media-server tests 5, 6 and 7 are runnable from `kelictl` alone: a `record.mp4` to look at, a slot map that shows the VAD reshuffle, and a logo in the empty slots |

@@ -20,16 +20,22 @@ deployment installs only what it uses — the core itself implements no SIP func
 | `kelixip` | the server + `kelictl` + the systemd unit + `/etc/kelixip` |
 | `kelixip-mod-registrar` | the [registrar](modules/registrar.md) / user-location module |
 | `kelixip-mod-auth_db` (RPM)<br>`kelixip-mod-auth-db` (deb) | the [database authentication](modules/auth_db.md) module |
+| `kelixip-mod-mcu` | the [conference mixer](modules/mcu.md) — the one module that also needs a **reachable media server** |
 
 ```bash
 # Alma Linux 9
-dnf install kelixip kelixip-mod-registrar kelixip-mod-auth_db
+dnf install kelixip kelixip-mod-registrar kelixip-mod-auth_db kelixip-mod-mcu
 rpm -ivh kelixip-*.rpm                     # or, from the built files
 
 # Ubuntu / Debian
-apt install kelixip kelixip-mod-registrar kelixip-mod-auth-db
+apt install kelixip kelixip-mod-registrar kelixip-mod-auth-db kelixip-mod-mcu
 apt install ./kelixip_*.deb ./kelixip-mod-registrar_*.deb   # from the built files
 ```
+
+> Each module package carries its own document under `/usr/share/doc/<package>/`, so
+> a host documents what it can actually do: `kelixip-mod-mcu` ships `mcu.md` (the
+> block key by key, the control surface) and `mcu_module_guide.md` (operating and
+> debugging a conference).
 
 > The module's **registered name is `auth_db`** on both — the config block is
 > `[module.auth_db]` everywhere. Only the deb *package* name differs, because a Debian

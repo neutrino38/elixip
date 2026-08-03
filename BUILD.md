@@ -206,13 +206,17 @@ the server booting empty exactly as `mix test` needs (`config/runtime.exs`).
 
 ## Building the RPM packages (Alma Linux 9)
 
-Three packages come out of one `mix release`:
+Four packages come out of one `mix release`:
 
 | Package | Contents |
 |---|---|
 | `kelixip` | the release (embedded ERTS) + `kelictl` + systemd unit + `/etc/kelixip` |
 | `kelixip-mod-registrar` | the registrar module's `.beam`, for `module_dir` |
 | `kelixip-mod-auth_db` | the auth_db module's `.beam`, for `module_dir` |
+| `kelixip-mod-mcu` | the mcu module's `.beam`, for `module_dir` — plus a reachable media server, which no package can install |
+
+Each module package also carries its own document under `/usr/share/doc/<package>/`
+(`mcu.md` + `mcu_module_guide.md` for the mcu one).
 
 ### The golden rule: build on the target OS
 
@@ -292,9 +296,10 @@ spec disagrees, so bump both together.
 Result:
 
 ```
-packaging/dist/kelixip-1.1.0-1.el9.x86_64.rpm               7.1M   (release + ERTS)
-packaging/dist/kelixip-mod-registrar-1.1.0-1.el9.x86_64.rpm  41K
-packaging/dist/kelixip-mod-auth_db-1.1.0-1.el9.x86_64.rpm     26K
+packaging/dist/kelixip-1.2.0-1.el9.x86_64.rpm               7.3M   (release + ERTS)
+packaging/dist/kelixip-mod-registrar-1.2.0-1.el9.x86_64.rpm  43K
+packaging/dist/kelixip-mod-auth_db-1.2.0-1.el9.x86_64.rpm     28K
+packaging/dist/kelixip-mod-mcu-1.2.0-1.el9.x86_64.rpm        255K
 ```
 
 ### Build in a container instead
@@ -327,7 +332,7 @@ how to configure the service, is the operator's guide:
 
 ## Building the deb packages (Ubuntu / Debian)
 
-The same three packages, from the same `mix release` and the same
+The same four packages, from the same `mix release` and the same
 [`packaging/stage.sh`](packaging/stage.sh) staging step:
 
 | Package | Contents |
@@ -335,6 +340,7 @@ The same three packages, from the same `mix release` and the same
 | `kelixip` | the release (embedded ERTS) + `kelictl` + systemd unit + `/etc/kelixip` |
 | `kelixip-mod-registrar` | the registrar module's `.beam`, for `module_dir` |
 | `kelixip-mod-auth-db` | the auth_db module's `.beam`, for `module_dir` |
+| `kelixip-mod-mcu` | the mcu module's `.beam`, for `module_dir` — plus a reachable media server |
 
 Two deliberate differences from the RPM, both distribution conventions:
 
@@ -431,7 +437,13 @@ Result:
 packaging/dist/kelixip_1.1.0-1_amd64.deb                 6.9M   (release + ERTS)
 packaging/dist/kelixip-mod-registrar_1.1.0-1_amd64.deb    36K
 packaging/dist/kelixip-mod-auth-db_1.1.0-1_amd64.deb      24K
+packaging/dist/kelixip-mod-mcu_1.1.0-1_amd64.deb           —    (see below)
 ```
+
+> Those figures are from a 1.1.0 build on `ubuntu:24.04`, before the mcu package
+> existed; `kelixip-mod-mcu` joins them carrying the same bytecode as its RPM
+> (≈ 255 kB). The deb side of P6 is wired but has **not** been built yet — do it on
+> the target release, as the golden rule below says.
 
 ### Build in a container instead
 

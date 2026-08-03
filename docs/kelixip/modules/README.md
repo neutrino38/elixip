@@ -52,8 +52,10 @@ but the server and the other modules do (never a half-applied start).
 ## Loading
 
 First-party modules are shipped as **one package each** — `kelixip-mod-registrar`,
-`kelixip-mod-auth_db` (and `kelixip-mod-radius_billing` when it exists) — which drop
-their bytecode into `module_dir` (`/usr/lib/kelixip/modules`, `server.module_dir`).
+`kelixip-mod-auth_db`, `kelixip-mod-mcu` (and `kelixip-mod-radius_billing` when it
+exists) — which drop their bytecode into `module_dir` (`/usr/lib/kelixip/modules`,
+`server.module_dir`), plus their own page of this directory under
+`/usr/share/doc/<package>/`.
 **The server release contains none of them**: at boot it adds `module_dir` to its
 code path and loads a module only when a `[module.<name>]` block declares it.
 

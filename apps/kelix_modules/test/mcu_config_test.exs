@@ -198,4 +198,33 @@ defmodule Kelix.Mod.Mcu.ConfigTest do
     assert {:error, _} = Kelix.Mod.Mcu.validate_config(%{"vad" => 9})
     assert {:error, _} = Kelix.Mod.Mcu.validate_config("nope")
   end
+
+  # The [module.mcu] block the packages ship is commented out, so nothing would ever
+  # tell us it stopped parsing: an operator uncommenting it is the first one to find
+  # out, at boot, on their node. Uncomment it here and hand it to the real parser —
+  # a renamed key or a value the vocabulary no longer knows fails in CI instead (P6,
+  # §13).
+  test "the [module.mcu] block shipped in packaging/config/config.toml still parses" do
+    path = Path.expand("../../../packaging/config/config.toml", __DIR__)
+
+    uncommented =
+      path
+      |> File.read!()
+      |> String.split("\n")
+      |> Enum.drop_while(&(not String.starts_with?(&1, "#[module.mcu]")))
+      |> Enum.take_while(&(&1 != ""))
+      # the header and the `#key = value` lines; the prose comments in between are
+      # not TOML and an operator does not uncomment them either
+      |> Enum.filter(&Regex.match?(~r/^#(\[module\.mcu\]|[a-z_]+ *=)/, &1))
+      |> Enum.map_join("\n", &String.trim_leading(&1, "#"))
+
+    assert uncommented =~ "[module.mcu]", "the sample block is gone from #{path}"
+
+    {:ok, toml} = Toml.decode(uncommented)
+    config = parse!(toml["module"]["mcu"])
+
+    # a couple of values, so the test also proves it was the sample that parsed
+    assert config.did_range == {8000, 8099}
+    assert config.record_dir =~ "/"
+  end
 end

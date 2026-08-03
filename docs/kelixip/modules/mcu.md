@@ -17,6 +17,10 @@ for the four things that must be true before a call can succeed.
 
 ## Loading
 
+The bytecode comes from the `kelixip-mod-mcu` package (`dnf install` / `apt install`
+— the name has no underscore, so it is the same on both), and the block is what
+actually loads it.
+
 The `[module.mcu]` block lives in **`config.toml`** (infrastructure, not
 domain-tied). The media servers are **not** declared here: they are the
 `[mediaserver.pool.*]` entries, the same block the point-to-point path uses.

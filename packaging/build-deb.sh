@@ -204,19 +204,26 @@ finish_package "$root" "$DEBDIR/control.in" kelixip DEPENDS="$depends, adduser, 
 
 # --- one package per loadable module ----------------------------------------
 # The core implements no SIP function: a deployment installs only the modules it
-# uses (an MCU-only product installs none).
+# uses (a conferencing-only product installs kelixip-mod-mcu and nothing else).
 build_module() {
-  local name="$1" beam_glob="$2" tpl="$3"
+  local name="$1" beam_glob="$2" tpl="$3" doc_glob="$4"
   local mroot="$WORK/$name"
   echo "==> assembling $name"
   install -d -m 0755 "$mroot/usr/lib/kelixip/modules"
   install -m 0644 "$stage"/modules/$beam_glob "$mroot/usr/lib/kelixip/modules/"
   install_doc "$mroot" "$name"
+  # Its own document, alongside the copyright: what the docs on a host describe is
+  # then what that host can actually do (the .spec's %doc for the same subpackage).
+  install -m 0644 "$stage"/doc/modules/$doc_glob "$mroot/usr/share/doc/$name/"
   finish_package "$mroot" "$tpl" "$name"
 }
 
-build_module kelixip-mod-registrar 'Elixir.Kelix.Mod.Registrar*.beam' "$DEBDIR/control-mod-registrar.in"
-build_module kelixip-mod-auth-db   'Elixir.Kelix.Mod.AuthDb*.beam'    "$DEBDIR/control-mod-auth-db.in"
+# The .beam globs keep their trailing wildcard on purpose: a module is one named
+# module plus its implementation (Mcu.Client, Mcu.Adapter.Conn, Registrar.Contact,
+# …), and shipping only the named one installs a module whose every call fails.
+build_module kelixip-mod-registrar 'Elixir.Kelix.Mod.Registrar*.beam' "$DEBDIR/control-mod-registrar.in" 'registrar.md'
+build_module kelixip-mod-auth-db   'Elixir.Kelix.Mod.AuthDb*.beam'    "$DEBDIR/control-mod-auth-db.in"   'auth_db.md'
+build_module kelixip-mod-mcu       'Elixir.Kelix.Mod.Mcu*.beam'       "$DEBDIR/control-mod-mcu.in"       'mcu*.md'
 
 echo "==> packages in packaging/dist:"
 ls -1 "$DIST"/*.deb
