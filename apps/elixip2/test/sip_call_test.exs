@@ -313,17 +313,17 @@ defmodule SIP.Test.Call do
     parsed_msg = SIP.Msg.Ops.update_sip_msg( parsed_msg, { :ruri, upd_uri })
 
     # Indicate our test PID to receive events
-    GenServer.call(upd_uri.tp_pid, :settestapp)
+    SIP.Test.Transport.Mockup.attach_probe(upd_uri.tp_pid)
 
     # Simulate a received INVITE by UDP mockeup transport
-    send(upd_uri.tp_pid, { :recv, parsed_msg})
+    SIP.Test.Transport.Mockup.inject(upd_uri.tp_pid, parsed_msg)
     { parsed_msg, branch_id }
   end
 
   defp simulate_remote_ack(invite, branch_id) do
     ack = SIP.Msg.Ops.ack_request(invite, %SIP.Uri{ domain: "2.2.2.2", port: 5090 })
           |> Map.put( :transid, branch_id)
-    send(invite.ruri.tp_pid, { :recv, ack })
+    SIP.Test.Transport.Mockup.inject(invite.ruri.tp_pid, ack )
     ack
   end
 
@@ -331,7 +331,7 @@ defmodule SIP.Test.Call do
   defp simulate_remote_cancel(invite, branch_id) do
     ack = SIP.Msg.Ops.cancel_request(invite)
           |> Map.put( :transid, branch_id)
-    send(invite.ruri.tp_pid, { :recv, ack })
+    SIP.Test.Transport.Mockup.inject(invite.ruri.tp_pid, ack )
     ack
   end
 
@@ -355,21 +355,21 @@ defmodule SIP.Test.Call do
       contentlength: 0
     }
 
-    send(parsed_msg.ruri.tp_pid, { :recv, bye })
+    SIP.Test.Transport.Mockup.inject(parsed_msg.ruri.tp_pid, bye )
   end
 
   test "Simulating an answered call and let the call end" do
     { parsed_msg, branch_id } = simulate_remote_invite("answered_call")
     # No 100 Trying: the IST does not emit one and the scenario does not either.
-    assert_receive(180, 2000, "Failed to receive 180 Ringing on time")
-    assert_receive(200, 2000, "Failed to receive 200 OK on time")
+    assert_receive({:sip_mockup, {:response_sent, 180, _}}, 2000, "Failed to receive 180 Ringing on time")
+    assert_receive({:sip_mockup, {:response_sent, 200, _}}, 2000, "Failed to receive 200 OK on time")
     Process.sleep(1000)
 
     #Simulate ACK sending
     _ack = simulate_remote_ack(parsed_msg, branch_id)
 
     #Wait for BYE
-    assert_receive(:BYE, 6000, "Failed to receive BYE")
+    assert_receive({:sip_mockup, {:request_sent, :BYE, _}}, 6000, "Failed to receive BYE")
 
     # Wait for BYE transaction to die out
     Process.sleep(6000)
@@ -377,8 +377,8 @@ defmodule SIP.Test.Call do
 
   test "Simulating an answered call then hangup the call" do
     { parsed_msg, branch_id } = simulate_remote_invite("answered_call")
-    assert_receive(180, 2000, "Failed to receive 180 Ringing on time")
-    assert_receive(200, 2000, "Failed to receive 200 OK on time")
+    assert_receive({:sip_mockup, {:response_sent, 180, _}}, 2000, "Failed to receive 180 Ringing on time")
+    assert_receive({:sip_mockup, {:response_sent, 200, _}}, 2000, "Failed to receive 200 OK on time")
     Process.sleep(100)
 
     #Simulate ACK sending
@@ -391,8 +391,8 @@ defmodule SIP.Test.Call do
 
   test "Simulating an call without answser" do
     { parsed_msg, branch_id } = simulate_remote_invite("timeout_call")
-    assert_receive(180, 2000, "Failed to receive 180 Ringing on time")
-    assert_receive(408, 6000, "Failed to receive 408 Timeout ")
+    assert_receive({:sip_mockup, {:response_sent, 180, _}}, 2000, "Failed to receive 180 Ringing on time")
+    assert_receive({:sip_mockup, {:response_sent, 408, _}}, 6000, "Failed to receive 408 Timeout ")
     Process.sleep(100)
 
     #Simulate ACK sending
@@ -404,11 +404,11 @@ defmodule SIP.Test.Call do
     # Register as the probe so the app forwards the CANCEL / dialog termination.
     Process.register(self(), :sip_call_probe)
     { parsed_msg, branch_id } = simulate_remote_invite("timeout_call")
-    assert_receive(180, 2000, "Failed to receive 180 Ringing on time")
+    assert_receive({:sip_mockup, {:response_sent, 180, _}}, 2000, "Failed to receive 180 Ringing on time")
     Process.sleep(100)
     simulate_remote_cancel(parsed_msg, branch_id)
     # The IST answers 487 to the INVITE automatically...
-    assert_receive(487, 1000, "Failed to receive 487 Request interrupted ")
+    assert_receive({:sip_mockup, {:response_sent, 487, _}}, 1000, "Failed to receive 487 Request interrupted ")
     # ...and (phase 1) the CANCEL is now surfaced to the app, which then sees the
     # dialog terminate with reason :cancelled.
     assert_receive(:got_cancel, 1000, "App did not receive the CANCEL event")
@@ -421,7 +421,7 @@ defmodule SIP.Test.Call do
     # on_new_call returns {:reject, 604, ...}; phase 1 propagates it as a real
     # 604 SIP response (before the fix any reject was rewritten to 403).
     { _parsed_msg, _branch_id } = simulate_remote_invite("reject_604")
-    assert_receive(604, 2000, "Failed to receive 604 rejection on the wire")
+    assert_receive({:sip_mockup, {:response_sent, 604, _}}, 2000, "Failed to receive 604 rejection on the wire")
   end
 
 end

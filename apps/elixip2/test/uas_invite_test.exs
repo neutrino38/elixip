@@ -569,31 +569,31 @@ defmodule SIP.Test.UASInvite do
   # The IST emits no automatic 100: the 180 is the first thing on the wire.
   test "reply_invite(180) reaches the wire" do
     inject_invite("answer180")
-    assert_receive 180, 2_000
-    refute_received 100
+    assert_receive {:sip_mockup, {:response_sent, 180, _}}, 2_000
+    refute_received {:sip_mockup, {:response_sent, 100, _}}
   end
 
   test "reply_invite(486) reaches the wire" do
     invite = inject_invite("busy")
-    assert_receive 486, 2_000
+    assert_receive {:sip_mockup, {:response_sent, 486, _}}, 2_000
     ack_final(invite)
   end
 
   test "redirect_invite(302) reaches the wire" do
     invite = inject_invite("redirect")
-    assert_receive 302, 2_000
+    assert_receive {:sip_mockup, {:response_sent, 302, _}}, 2_000
     ack_final(invite)
   end
 
   test "challenge_invite(401) reaches the wire" do
     invite = inject_invite("challenge")
-    assert_receive 401, 2_000
+    assert_receive {:sip_mockup, {:response_sent, 401, _}}, 2_000
     ack_final(invite)
   end
 
   test "reply_invite_with_sdp(200) reaches the wire" do
     invite = inject_invite("answersdp")
-    assert_receive 200, 3_000
+    assert_receive {:sip_mockup, {:response_sent, 200, _}}, 3_000
     # ACK it: an unacked 2xx leaves an IST resending it for 32 s, into the tests
     # that follow (they share this mockup transport, hence this test process).
     ack_2xx(invite)
@@ -608,10 +608,10 @@ defmodule SIP.Test.UASInvite do
   # 180 can only come from the retransmission handler.
   test "an INVITE retransmission gets the last response resent" do
     invite = inject_invite("answer180")
-    assert_receive 180, 2_000
+    assert_receive {:sip_mockup, {:response_sent, 180, _}}, 2_000
 
-    send(invite.ruri.tp_pid, {:recv, invite})
-    assert_receive 180, 2_000
+    SIP.Test.Transport.Mockup.inject(invite.ruri.tp_pid, invite)
+    assert_receive {:sip_mockup, {:response_sent, 180, _}}, 2_000
   end
 
   # The ACK of a 2xx is a transaction of its own (RFC 3261 §17.1.1.3): it carries a
@@ -621,12 +621,12 @@ defmodule SIP.Test.UASInvite do
   # established call (seen against a real UA behind Kamailio).
   test "the ACK of a 2xx (own branch) stops the 200 OK retransmissions" do
     invite = inject_invite("answersdpack")
-    assert_receive 200, 3_000
+    assert_receive {:sip_mockup, {:response_sent, 200, _}}, 3_000
 
     ack_2xx(invite)
 
     # Timer A fires first at T1 = 500 ms; anything resent lands here as another 200.
-    refute_receive 200, 1_500
+    refute_receive {:sip_mockup, {:response_sent, 200, _}}, 1_500
     # ...and the silence is the fix, not a collapsed call: the dialog is still up.
     assert is_binary(dialog_totag(invite.callid))
   end
@@ -657,8 +657,8 @@ defmodule SIP.Test.UASInvite do
     routed = SIP.Transport.Selector.select_transport(upd_uri)
     parsed = SIP.Msg.Ops.update_sip_msg(parsed, {:ruri, routed})
 
-    :ok = GenServer.call(routed.tp_pid, :settestapp)
-    send(routed.tp_pid, {:recv, parsed})
+    :ok = SIP.Test.Transport.Mockup.attach_probe(routed.tp_pid)
+    SIP.Test.Transport.Mockup.inject(routed.tp_pid, parsed)
     parsed
   end
 
@@ -669,7 +669,7 @@ defmodule SIP.Test.UASInvite do
       SIP.Msg.Ops.ack_request(invite, %SIP.Uri{domain: "2.2.2.2", port: 5090})
       |> Map.put(:transid, invite.transid)
 
-    send(invite.ruri.tp_pid, {:recv, ack})
+    SIP.Test.Transport.Mockup.inject(invite.ruri.tp_pid, ack)
     :ok
   end
 
@@ -687,7 +687,7 @@ defmodule SIP.Test.UASInvite do
       |> Map.put(:to, SIP.Uri.set_uri_param(to, "tag", totag))
       |> rebranch()
 
-    send(invite.ruri.tp_pid, {:recv, ack})
+    SIP.Test.Transport.Mockup.inject(invite.ruri.tp_pid, ack)
     :ok
   end
 

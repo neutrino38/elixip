@@ -9,15 +9,16 @@ defmodule SIP.Test.Keepalive do
   - a peer that stops answering the keepalives triggers a dialog teardown with
     reason `:keepalive_timeout` after `@max_missed_keepalive` misses.
 
-  The dialog is driven through the in-process UDP mockup transport
-  (`SIP.Test.Transport.UDPMockup`), which captures sent OPTIONS, forwards them to
-  the test process and (optionally) auto-replies 200 OK.
+  The dialog is driven through the in-process mockup transport
+  (`SIP.Test.Transport.Mockup`): the attached probe reports every sent OPTIONS
+  and the `RegisterOK` peer (optionally) auto-replies 200 OK to them.
   """
   use ExUnit.Case
   require SIP.Dialog
   require SIP.Uri
 
-  alias SIP.Test.Transport.UDPMockup
+  alias SIP.Test.Transport.Mockup
+  alias SIP.Test.Peers
 
   setup_all do
     :ok = SIP.Transac.start()
@@ -48,10 +49,12 @@ defmodule SIP.Test.Keepalive do
     tp_pid = ruri.tp_pid
     assert is_pid(tp_pid)
 
-    # The test process becomes the mockup's "test app" (receives {:options_sent,…})
-    # and we reset the shared instance's keepalive-answering behaviour.
-    :ok = GenServer.call(tp_pid, :settestapp)
-    UDPMockup.drop_options(tp_pid, drop_options?)
+    # The test process becomes the probe (receives the {:sip_mockup, …} stream)
+    # and the fresh peer resets the shared instance's keepalive behaviour: the
+    # accepting registrar answers the REGISTER below on its own, and answers
+    # the keepalive OPTIONS unless the test simulates a dead peer.
+    :ok = Mockup.attach_probe(tp_pid)
+    :ok = Mockup.set_peer(tp_pid, Peers.RegisterOK, reply_options: not drop_options?)
 
     aor = %SIP.Uri{scheme: "sip:", userpart: "alice", domain: "example.com"}
 
@@ -72,10 +75,7 @@ defmodule SIP.Test.Keepalive do
     # The dialog signals creation and the initial client transaction.
     assert_receive {:onnewdialog, :ok, _tid}, 1_000
 
-    # Answer the REGISTER with a 200 OK to confirm the dialog. Going through the
-    # :successfulregister scenario also sets the mockup's :scenario field, which
-    # its response-logging path relies on.
-    UDPMockup.simulate_successful_register(tp_pid)
+    # The RegisterOK peer answers the REGISTER with a 200 OK, confirming the dialog.
     assert_receive {200, _rsp, _tid, ^dlg_pid}, 1_000
 
     {dlg_pid, tp_pid}
@@ -87,12 +87,12 @@ defmodule SIP.Test.Keepalive do
     assert :ok = SIP.Dialog.start_options_keepalive(dlg_pid)
 
     # A first keepalive OPTIONS goes out about one period later...
-    assert_receive {:options_sent, opt1}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :OPTIONS, opt1}}, 2_000
     assert opt1.method == :OPTIONS
 
     # ...and a second one, proving the timer re-arms itself (regression guard:
     # the timer ref used to never be cleared, so it fired only once).
-    assert_receive {:options_sent, _opt2}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :OPTIONS, _opt2}}, 2_000
 
     # The mockup answers each OPTIONS with a 200 OK. While the keepalive is
     # active those responses must NOT be surfaced to the application.
@@ -103,7 +103,7 @@ defmodule SIP.Test.Keepalive do
     {dlg_pid, _tp_pid} = establish_register_dialog(false)
 
     assert :ok = SIP.Dialog.start_options_keepalive(dlg_pid)
-    assert_receive {:options_sent, _opt}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :OPTIONS, _opt}}, 2_000
 
     # The app sends its own OPTIONS: this disarms the keepalive, so from now on
     # OPTIONS responses flow back up to the app as normal traffic.
@@ -137,10 +137,10 @@ defmodule SIP.Test.Keepalive do
 
     # Nothing was armed, so no OPTIONS goes out by itself. Pinned on this dialog's
     # Call-ID: the mockup transport is a shared singleton and forwards to whoever
-    # registered last, so a keepalive still ticking on an earlier test's dialog
-    # would otherwise be mistaken for ours.
+    # attached its probe last, so a keepalive still ticking on an earlier test's
+    # dialog would otherwise be mistaken for ours.
     {_ftag, cid, _totag} = GenServer.call(dlg_pid, :getdialogid)
-    refute_receive {:options_sent, %{callid: ^cid}}, 1_500
+    refute_receive {:sip_mockup, {:request_sent, :OPTIONS, %{callid: ^cid}}}, 1_500
   end
 
   test "an app-initiated OPTIONS also takes ownership, so a later start declines" do

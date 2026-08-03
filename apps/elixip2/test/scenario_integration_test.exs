@@ -177,43 +177,30 @@ defmodule SIP.Test.ScenarioIntegration do
     :ok
   end
 
-  # Poll the transport registry until the UDP mockup transport process exists
-  # (created when the scenario sends its INVITE).
-  defp wait_for_transport(0), do: flunk("UDP mockup transport was never created")
-
-  defp wait_for_transport(attempts) do
-    case Registry.lookup(Registry.SIPTransport, "UDPMockup") do
-      [{pid, _}] ->
-        pid
-
-      _ ->
-        Process.sleep(20)
-        wait_for_transport(attempts - 1)
-    end
+  # Launch the shared mockup transport ahead of the scenario and install the
+  # answering peer, so the INVITE is answered whenever it goes out — no need to
+  # poll for the transport nor to sleep until the request is captured.
+  defp arm_answering_peer do
+    t_pid = SIP.Test.Transport.Mockup.instance!()
+    :ok = SIP.Test.Transport.Mockup.set_peer(t_pid, SIP.Test.Peers.AnsweringUAS)
   end
 
   @tag timeout: 30_000
   test "outbound INVITE call with media playback runs to success" do
+    arm_answering_peer()
+
     parent = self()
     spawn(fn -> send(parent, {:scenario_result, OutboundCall.run(false)}) end)
-
-    # Wait for the INVITE to create the transport, then let it be actually sent
-    # (so the mockup has stored the request) before driving the answer.
-    t_pid = wait_for_transport(100)
-    Process.sleep(200)
-    SIP.Test.Transport.UDPMockup.simulate_successful_answer(t_pid)
 
     assert_receive {:scenario_result, :ok}, 25_000
   end
 
   @tag timeout: 30_000
   test "outbound WebRTC INVITE (webrtc: :yes) runs to success" do
+    arm_answering_peer()
+
     parent = self()
     spawn(fn -> send(parent, {:scenario_result, OutboundWebRTCCall.run(false)}) end)
-
-    t_pid = wait_for_transport(100)
-    Process.sleep(200)
-    SIP.Test.Transport.UDPMockup.simulate_successful_answer(t_pid)
 
     assert_receive {:scenario_result, :ok}, 25_000
   end

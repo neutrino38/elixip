@@ -12,9 +12,16 @@ defmodule SIPParser.MixProject do
       deps_path: "../../deps",
       lockfile: "../../mix.lock",
       start_permanent: Mix.env() == :prod,
+      elixirc_paths: elixirc_paths(Mix.env()),
       deps: deps()
     ]
   end
+
+  # test/support holds the test-only SIP transport mockup and its peers
+  # (SIP.Test.*). Keeping them out of :dev/:prod keeps them out of the
+  # library and of the kelixip release.
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_), do: ["lib"]
 
   # Run "mix help compile.app" to learn about applications.
   def application do

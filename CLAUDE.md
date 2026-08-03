@@ -246,8 +246,17 @@ stop_player / stop_recorder / stop_echo
 {:ms_event, server_pid, :server_disconnected}
 ```
 
-### Testing Infrastructure
-- `SIP.Test.Transport.UDPMockup` — in-process fake UDP transport
+### Testing Infrastructure (`apps/elixip2/test/support/`, compiled in :test only)
+- `SIP.Test.Transport.Mockup` — in-process fake transport; the Selector routes any
+  `;unittest=1` R-URI to it via the `:unittest_transport` app env (set in
+  `test_helper.exs`). Tests drive it with `set_peer/3` (behaviour of the fake
+  remote party), `attach_probe/2` (observation) and `inject/2` (inbound traffic)
+- `SIP.Test.Peer` — behaviour of a simulated remote peer: pure callbacks
+  returning actions (`{:inject, msg, after_ms}` / `{:notify, event}`); canned
+  peers in `SIP.Test.Peers.*` (Passive, AnsweringUAS, BusyUAS, NoAnswerUAS,
+  ChallengingUAS, RegisterOK), one module per scenario, delays as opts
+- `SIP.Test.Probe` — normalized event stream to the test process:
+  `{:sip_mockup, {:request_sent | :response_sent, …}}`
 - `MediaServer.Mockup` — stub media server for call flow tests
 - Sample SIP messages in `apps/elixip2/test/SIP-*.txt`
 

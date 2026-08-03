@@ -1,3 +1,7 @@
+# Route ";unittest=1" R-URIs to the mockup transport (see SIP.Transport.Selector
+# and test/support/transport_mockup.ex).
+Application.put_env(:elixip2, :unittest_transport, SIP.Test.Transport.Mockup)
+
 defmodule TestRegistrar do
   use SIP.Session.Registrar
   require Logger

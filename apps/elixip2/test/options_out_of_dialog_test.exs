@@ -70,7 +70,7 @@ defmodule SIP.Test.OptionsOutOfDialog do
       |> SIP.Uri.set_uri_param("unittest", "1")
       |> SIP.Transport.Selector.select_transport()
 
-    :ok = GenServer.call(ruri.tp_pid, :settestapp)
+    :ok = SIP.Test.Transport.Mockup.attach_probe(ruri.tp_pid)
 
     aor = %SIP.Uri{scheme: "sip:", userpart: "alice", domain: "example.com"}
     ftag = "ft-#{System.unique_integer([:positive])}"
@@ -90,7 +90,7 @@ defmodule SIP.Test.OptionsOutOfDialog do
       transid: "z9hG4bK#{System.unique_integer([:positive])}"
     }
 
-    send(ruri.tp_pid, {:recv, req})
+    SIP.Test.Transport.Mockup.inject(ruri.tp_pid, req)
     {ftag, callid}
   end
 
@@ -103,7 +103,7 @@ defmodule SIP.Test.OptionsOutOfDialog do
     cid = "opt-#{System.unique_integer([:positive])}"
 
     id = send_options(cid)
-    assert_receive {:uas_response, 200, %{callid: ^cid} = resp}, 2_000
+    assert_receive {:sip_mockup, {:response_sent, 200, %{callid: ^cid} = resp}}, 2_000
 
     # The capabilities the module advertised reached the wire…
     assert Map.get(resp, "Allow") == "OPTIONS, REGISTER"
@@ -120,7 +120,7 @@ defmodule SIP.Test.OptionsOutOfDialog do
     cid = "opt-#{System.unique_integer([:positive])}"
 
     send_options(cid)
-    assert_receive {:uas_response, 503, %{callid: ^cid}}, 2_000
+    assert_receive {:sip_mockup, {:response_sent, 503, %{callid: ^cid}}}, 2_000
   end
 
   test "a module answering :default gets a bare 200" do
@@ -128,7 +128,7 @@ defmodule SIP.Test.OptionsOutOfDialog do
     cid = "opt-#{System.unique_integer([:positive])}"
 
     send_options(cid)
-    assert_receive {:uas_response, 200, %{callid: ^cid} = resp}, 2_000
+    assert_receive {:sip_mockup, {:response_sent, 200, %{callid: ^cid} = resp}}, 2_000
     refute Map.has_key?(resp, "Allow")
   end
 
@@ -137,7 +137,7 @@ defmodule SIP.Test.OptionsOutOfDialog do
     cid = "opt-#{System.unique_integer([:positive])}"
 
     id = send_options(cid)
-    assert_receive {:uas_response, 500, %{callid: ^cid}}, 2_000
+    assert_receive {:sip_mockup, {:response_sent, 500, %{callid: ^cid}}}, 2_000
 
     Process.sleep(100)
     refute dialog_alive?(id)
