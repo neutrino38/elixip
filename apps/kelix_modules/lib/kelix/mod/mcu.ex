@@ -66,13 +66,27 @@ defmodule Kelix.Mod.Mcu do
   # The default mosaic and the default sidebar are the only ones this increment
   # drives (§1.2, decision 6b).
   @default_mosaic 0
+  @default_sidebar 0
+
+  # `SetParticipantBackground` with a non-positive participant id is the *mixer's*
+  # logo — the picture drawn in every empty mosaic slot (§8.3.8, `multiconf.cpp`).
+  @mixer_logo_part_id 0
+
+  # What `recording.start` may write. The server picks the container from the
+  # extension and errors on anything else, so refusing it here turns a "Could not
+  # record broadcast" into a message naming the two it accepts.
+  @record_extensions ~w(.mp4 .flv)
+
+  # `Mosaic::SlotReset`: the one `holds` value that clears the pin instead of setting
+  # one, so it is the one the write path has to recognise.
+  @slot_reset Vocabulary.slot_wire("reset")
 
   # ── argument vocabularies, shared by both frontals and the facade (§17.2) ─────
 
   @create_args ~w(domain name did mcu vad rate audio_codecs video_codecs text_codecs
-                  video layout max_participants destroy_when_empty)
+                  video layout logo max_participants destroy_when_empty)
 
-  @update_args ~w(uid name vad rate layout video max_participants destroy_when_empty)
+  @update_args ~w(uid name vad rate layout video logo max_participants destroy_when_empty)
 
   # Fields a client may read but never send (§8.3.3). Named as read-only rather than
   # merely unknown: an operator who tries to move `conf_id` or `did` deserves to be
@@ -594,6 +608,7 @@ defmodule Kelix.Mod.Mcu do
           %{name: "text_codecs", required: false},
           %{name: "video", required: false, help: Vocabulary.video_help()},
           %{name: "layout", required: false, help: Vocabulary.layout_help()},
+          %{name: "logo", required: false, help: Vocabulary.logo_help()},
           %{name: "max_participants", required: false},
           %{name: "destroy_when_empty", required: false}
         ],
@@ -619,7 +634,7 @@ defmodule Kelix.Mod.Mcu do
         render: %{
           kind: :detail,
           fields:
-            ~w(name domain did uid mcu conf_id stale created_at max_participants destroy_when_empty vad rate codecs video layout participants),
+            ~w(name domain did uid mcu conf_id stale created_at max_participants destroy_when_empty vad rate codecs video layout logo recording participants),
           labels: @conference_labels,
           # the roster, not the media detail of each leg — that is `participant.show`
           nested: %{"participants" => %{columns: ~w(part_id name from state joined_at)}}
@@ -640,6 +655,7 @@ defmodule Kelix.Mod.Mcu do
           %{name: "rate", required: false},
           %{name: "layout", required: false, help: Vocabulary.layout_help()},
           %{name: "video", required: false, help: Vocabulary.video_help()},
+          %{name: "logo", required: false, help: Vocabulary.logo_help()},
           %{name: "max_participants", required: false},
           %{name: "destroy_when_empty", required: false}
         ],
@@ -685,6 +701,74 @@ defmodule Kelix.Mod.Mcu do
           %{name: "muted", required: false}
         ],
         help: ~s(Mute or unmute a participant: muted={"audio":true,"video":false})
+      },
+      # ── the inspection surface (§8.3.8) ──────────────────────────────────────
+      %{
+        name: "recording.start",
+        rest: {:post, "/conferences/:uid/recording"},
+        status: 201,
+        location: "/conferences/:uid/recording",
+        errors: %{
+          not_found: 404,
+          already_recording: 409,
+          mcu_down: 503,
+          rpc_error: 502
+        },
+        rw: :w,
+        args: [
+          %{name: "uid", required: true},
+          %{name: "file", required: false, help: Vocabulary.record_file_help()}
+        ],
+        render: %{kind: :detail, fields: ~w(uid file path mcu)},
+        help: "Record the mix to a file on the media server (one recording per conference)"
+      },
+      %{
+        name: "recording.show",
+        rest: {:get, "/conferences/:uid/recording"},
+        errors: %{not_found: 404},
+        rw: :r,
+        args: [%{name: "uid", required: true}],
+        render: %{
+          kind: :detail,
+          fields: ~w(recording file path mcu started_at duration_s)
+        },
+        help: "Whether this conference is being recorded, and into which file"
+      },
+      %{
+        name: "recording.stop",
+        rest: {:delete, "/conferences/:uid/recording"},
+        errors: %{not_found: 404, not_recording: 404, mcu_down: 503, rpc_error: 502},
+        rw: :w,
+        args: [%{name: "uid", required: true}],
+        render: %{kind: :detail, fields: ~w(uid file duration_s)},
+        help: "Stop the recording and close the file"
+      },
+      %{
+        name: "slot.list",
+        rest: {:get, "/conferences/:uid/slots"},
+        errors: %{not_found: 404, mcu_down: 503, rpc_error: 502},
+        rw: :r,
+        args: [%{name: "uid", required: true}],
+        render: %{
+          kind: :detail,
+          fields: ~w(layout vad logo slots),
+          labels: @conference_labels,
+          nested: %{"slots" => %{columns: ~w(slot holds pinned part_id name)}}
+        },
+        help: "The mosaic slot map: what each slot was told to hold, and who is in it now"
+      },
+      %{
+        name: "slot.update",
+        rest: {[:put, :patch], "/conferences/:uid/slots/:slot"},
+        errors: %{not_found: 404, mcu_down: 503, rpc_error: 502},
+        rw: :w,
+        args: [
+          %{name: "uid", required: true},
+          %{name: "slot", required: true, help: Vocabulary.slot_help()},
+          %{name: "holds", required: true, help: Vocabulary.holds_help()}
+        ],
+        render: %{kind: :detail, fields: ~w(slot holds part_id)},
+        help: "Pin a mosaic slot: the active speaker, a participant, locked or free"
       },
       %{
         name: "participant.delete",
@@ -800,6 +884,52 @@ defmodule Kelix.Mod.Mcu do
     end
   end
 
+  # ── the inspection surface (§8.3.8) ──────────────────────────────────────────
+
+  defp do_control("recording.start", args) do
+    with :ok <- Args.reject_unknown(args, ~w(uid file)),
+         {:ok, uid} <- Args.required_string(args, "uid"),
+         {:ok, file} <- Args.string(args, "file") do
+      call({:record_start, uid, file})
+    end
+  end
+
+  # A read: the answer is our own row, since the server has no "am I recording?" RPC
+  # to ask and the file is ours to remember (§8.3.8, decision 3).
+  defp do_control("recording.show", args) do
+    with :ok <- Args.reject_unknown(args, ~w(uid)),
+         {:ok, uid} <- Args.required_string(args, "uid"),
+         {:ok, conf} <- found(conference(uid)) do
+      {:ok, recording_view(conf)}
+    end
+  end
+
+  defp do_control("recording.stop", args) do
+    with :ok <- Args.reject_unknown(args, ~w(uid)),
+         {:ok, uid} <- Args.required_string(args, "uid") do
+      call({:record_stop, uid})
+    end
+  end
+
+  # A read too, but one RPC deep: who is in which slot is the *mixer's* state, and it
+  # moves on its own every VAD period — so it is asked for, never cached.
+  defp do_control("slot.list", args) do
+    with :ok <- Args.reject_unknown(args, ~w(uid)),
+         {:ok, uid} <- Args.required_string(args, "uid"),
+         {:ok, conf} <- found(conference(uid)) do
+      slot_map(conf)
+    end
+  end
+
+  defp do_control("slot.update", args) do
+    with :ok <- Args.reject_unknown(args, ~w(uid slot holds)),
+         {:ok, uid} <- Args.required_string(args, "uid"),
+         {:ok, slot} <- slot_number(args),
+         {:ok, holds} <- Vocabulary.holds(Map.get(args, "holds")) do
+      call({:slot, uid, slot, holds})
+    end
+  end
+
   defp do_control(command, _args) do
     Logger.warning(module: __MODULE__, message: "unknown control command #{inspect(command)}")
     {:error, :unknown_command}
@@ -816,6 +946,37 @@ defmodule Kelix.Mod.Mcu do
   end
 
   # A path param arrives as a string, a CLI `part_id=7` token as an integer.
+  # An optional `logo`: a bare image name, validated here so a create or an update
+  # refuses a path before anything reaches the media server (§8.3.8, decision 1).
+  defp optional_logo(args) do
+    case Map.get(args, "logo") do
+      nil -> {:ok, nil}
+      name when is_binary(name) -> with :ok <- valid_basename(name, "logo"), do: {:ok, name}
+      other -> {:error, "logo must be a file name, got #{inspect(other)}"}
+    end
+  end
+
+  # The slot number, from a path param (a string) or a JSON body (an integer) —
+  # 0-based, as the media server numbers and logs them (§8.3.8).
+  defp slot_number(args) do
+    case Map.get(args, "slot") do
+      n when is_integer(n) and n >= 0 ->
+        {:ok, n}
+
+      s when is_binary(s) ->
+        case Integer.parse(s) do
+          {n, ""} when n >= 0 -> {:ok, n}
+          _ -> {:error, "slot must be a slot number, 0-based"}
+        end
+
+      nil ->
+        {:error, "slot is required (0-based; slot.list shows them)"}
+
+      other ->
+        {:error, "slot must be a slot number, got #{inspect(other)}"}
+    end
+  end
+
   defp part_id(args) do
     case Map.get(args, "part_id") do
       id when is_integer(id) and id >= 0 ->
@@ -897,7 +1058,8 @@ defmodule Kelix.Mod.Mcu do
         # only the registry holds — so they are decoded here (names → wire ids, the
         # short layout form → fields) and travel as a partial map
         {"video", &Vocabulary.video(Map.get(&1, "video"))},
-        {"layout", &Vocabulary.layout(Map.get(&1, "layout"))}
+        {"layout", &Vocabulary.layout(Map.get(&1, "layout"))},
+        {"logo", &optional_logo(&1)}
       ],
       {:ok, %{}},
       fn {key, getter}, {:ok, acc} ->
@@ -959,7 +1121,8 @@ defmodule Kelix.Mod.Mcu do
          # merge over the configured defaults happens in the registry, but the
          # *reading* of what was asked for belongs here, before anything is created
          {:ok, video} <- Vocabulary.video(Map.get(args, "video")),
-         {:ok, layout} <- Vocabulary.layout(Map.get(args, "layout")) do
+         {:ok, layout} <- Vocabulary.layout(Map.get(args, "layout")),
+         {:ok, logo} <- optional_logo(args) do
       {:ok,
        %{
          domain: domain,
@@ -976,6 +1139,7 @@ defmodule Kelix.Mod.Mcu do
          text_codecs: text_codecs,
          video: video,
          layout: layout,
+         logo: logo,
          max_participants: max_participants,
          destroy_when_empty: destroy_when_empty
        }}
@@ -1107,6 +1271,21 @@ defmodule Kelix.Mod.Mcu do
       {:error, _} = err ->
         {:reply, err, state}
     end
+  end
+
+  # §8.3.8. Writes, so they go through here: a recording is a singleton per conference
+  # and a slot pin is a row update, and both must be serialised against the create /
+  # recover paths that touch the same row.
+  def handle_call({:record_start, uid, file}, _from, state) do
+    {:reply, do_record_start(state, uid, file), state}
+  end
+
+  def handle_call({:record_stop, uid}, _from, state) do
+    {:reply, do_record_stop(uid), state}
+  end
+
+  def handle_call({:slot, uid, slot, holds}, _from, state) do
+    {:reply, do_slot(uid, slot, holds), state}
   end
 
   # the configured defaults, for the phases that build on them
@@ -1484,7 +1663,7 @@ defmodule Kelix.Mod.Mcu do
             # §9.2 then §9.4, in that order: recreate what is ours before sweeping
             # what is not, or the sweep would delete the conferences we are about to
             # rebuild.
-            recreate_stale(updated)
+            recreate_stale(state.config, updated)
             gc_orphans(state.config, updated)
 
           true ->
@@ -1569,7 +1748,16 @@ defmodule Kelix.Mod.Mcu do
   # The conference row and its DID survive the server; `conf_id` does not.
   defp mark_stale(mcu_name) do
     for conf <- conferences(), conf.mcu == mcu_name, not conf.stale do
-      :ets.insert(@conf_table, {conf.uid, %Conference{conf | stale: true, conf_id: nil}})
+      # The recording died with the server and is **not** resumed when it comes back
+      # (§8.3.8, decision 5): reopening it would produce a second, truncated file
+      # nobody asked for. The pins are kept — they are policy, and `replay_slots/2`
+      # puts them back.
+      if conf.recording, do: emit_recording_stopped(conf, conf.recording, :mcu_lost)
+
+      :ets.insert(
+        @conf_table,
+        {conf.uid, %Conference{conf | stale: true, conf_id: nil, recording: nil}}
+      )
     end
 
     :ok
@@ -1580,9 +1768,9 @@ defmodule Kelix.Mod.Mcu do
   # participants are not restored — those calls are gone, and their scenarios were
   # told so when the server went away. This is mcuGold's `Conference.restart()`,
   # minus the mosaic/sidebar zoo.
-  defp recreate_stale(mcu) do
+  defp recreate_stale(config, mcu) do
     for conf <- conferences(), conf.mcu == mcu.name, conf.stale do
-      case create_on_mcu(mcu, %Conference{conf | participants: %{}}) do
+      case create_on_mcu(config, mcu, %Conference{conf | participants: %{}}) do
         {:ok, recreated} ->
           :ets.insert(@conf_table, {conf.uid, %Conference{recreated | stale: false}})
 
@@ -1761,7 +1949,7 @@ defmodule Kelix.Mod.Mcu do
     with {:ok, mcu, state} <- pick_mcu(state, spec.mcu),
          {:ok, did, allocated?} <- pick_did(config, spec.domain, spec.did),
          {:ok, conf} <- build_conference(config, spec, mcu, did),
-         {:ok, conf} <- create_on_mcu(mcu, conf) do
+         {:ok, conf} <- create_on_mcu(config, mcu, conf) do
       :ets.insert(@conf_table, {conf.uid, conf})
       :ets.insert(@did_table, {{conf.domain, conf.did}, conf.uid})
 
@@ -1880,6 +2068,9 @@ defmodule Kelix.Mod.Mcu do
        %Conference{
          uid: new_uid(),
          name: spec.name || "conference #{did}",
+         # the conference's own logo, else the configured one: `logo_file` is what
+         # puts the company picture in every empty slot with no command at all
+         logo: spec.logo || config.logo_file,
          domain: spec.domain,
          did: did,
          mcu: mcu.name,
@@ -1906,9 +2097,9 @@ defmodule Kelix.Mod.Mcu do
 
   # CreateConference then SetCompositionType. A failure at any step leaves
   # **nothing** registered and deletes what was created MCU-side (§9.1).
-  defp create_on_mcu(%{queue_id: nil}, _conf), do: {:error, :mcu_down}
+  defp create_on_mcu(_config, %{queue_id: nil}, _conf), do: {:error, :mcu_down}
 
-  defp create_on_mcu(mcu, conf) do
+  defp create_on_mcu(config, mcu, conf) do
     # The queueId is passed at creation: it is what binds this conference's events
     # to the stream we poll, so creating one without it would produce a conference
     # whose FPU requests reach nobody.
@@ -1916,8 +2107,72 @@ defmodule Kelix.Mod.Mcu do
            rpc_create(mcu, "CreateConference", [conf.uid, conf.vad, conf.rate, mcu.queue_id]),
          conf = %Conference{conf | conf_id: conf_id},
          :ok <- set_composition(mcu, conf) do
-      {:ok, conf}
+      {:ok, conf |> apply_logo(mcu, config) |> replay_slots(mcu)}
     end
+  end
+
+  # A picture must never be why a conference cannot be created — a mistyped
+  # `logo_file` would otherwise take the whole MCU down, one call at a time. So the
+  # logo is applied **after** the conference exists and a failure only warns, leaving
+  # `logo: nil` so `conference.show` reports honestly what is on the mixer. An
+  # *explicit* `conference.update logo=…` is the opposite: the operator asked, so the
+  # server's refusal is returned to them (`do_update/3`).
+  #
+  # Both only ever see a *transport* failure: the server answers `1` whether or not the
+  # image loaded (`SetParticipantBackground`, `multiconf.cpp` — `LoadLogo`'s failure is
+  # in its own log and nowhere else), so `logo` records what was asked for. L14.
+  defp apply_logo(%Conference{logo: nil} = conf, _mcu, _config), do: conf
+
+  defp apply_logo(%Conference{} = conf, mcu, config) do
+    case set_logo(mcu, conf, conf.logo, config.image_dir) do
+      :ok ->
+        conf
+
+      {:error, reason} ->
+        Logger.warning(
+          module: __MODULE__,
+          message:
+            "conference #{conf.uid}: logo #{inspect(conf.logo)} not applied: #{inspect(reason)}"
+        )
+
+        %Conference{conf | logo: nil}
+    end
+  end
+
+  # The pins are *our* policy (§8.3.8, decision 5), so a conference recreated after a
+  # media-server restart gets them back with its composition — otherwise an operator's
+  # pinned mosaic would silently become whatever the mixer felt like. A pin the new
+  # composition cannot hold is dropped, and said so.
+  defp replay_slots(%Conference{slots: slots} = conf, _mcu) when map_size(slots) == 0, do: conf
+
+  defp replay_slots(%Conference{} = conf, mcu) do
+    kept =
+      for {slot, wire} <- conf.slots, valid_slot(conf, slot) == :ok, into: %{} do
+        case rpc(mcu, "SetMosaicSlot", [conf.conf_id, @default_mosaic, slot, wire]) do
+          {:ok, _} ->
+            {slot, wire}
+
+          {:error, reason} ->
+            Logger.warning(
+              module: __MODULE__,
+              message: "conference #{conf.uid}: slot #{slot} not replayed: #{inspect(reason)}"
+            )
+
+            {slot, wire}
+        end
+      end
+
+    dropped = map_size(conf.slots) - map_size(kept)
+
+    if dropped > 0,
+      do:
+        Logger.warning(
+          module: __MODULE__,
+          message:
+            "conference #{conf.uid}: #{dropped} pinned slot(s) do not fit the mosaic anymore"
+        )
+
+    %Conference{conf | slots: kept}
   end
 
   defp set_composition(mcu, conf) do
@@ -1949,7 +2204,8 @@ defmodule Kelix.Mod.Mcu do
          {:ok, mcu} <- update_target(conf),
          {:ok, conf, video} <- merged_video(state, conf, changes),
          {:ok, conf, layout} <- merged_layout(state, conf, changes),
-         :ok <- push_mixer_changes(mcu, conf, changes, layout) do
+         :ok <- push_mixer_changes(mcu, conf, changes, layout),
+         :ok <- maybe_set_logo(state, mcu, conf, changes) do
       updated = %Conference{
         conf
         | name: Map.get(changes, :name, conf.name),
@@ -1957,6 +2213,7 @@ defmodule Kelix.Mod.Mcu do
           rate: Map.get(changes, :rate, conf.rate),
           video: video,
           layout: layout,
+          logo: Map.get(changes, :logo, conf.logo),
           max_participants: Map.get(changes, :max_participants, conf.max_participants),
           destroy_when_empty: Map.get(changes, :destroy_when_empty, conf.destroy_when_empty)
       }
@@ -2046,6 +2303,17 @@ defmodule Kelix.Mod.Mcu do
     end
   end
 
+  # An explicit `logo` update is the operator's own ask, so the server's refusal (an
+  # image it cannot read, most often) is **returned** rather than warned about — the
+  # opposite of the create path, where a picture must not fail a conference.
+  defp maybe_set_logo(state, mcu, conf, changes) do
+    case Map.fetch(changes, :logo) do
+      :error -> :ok
+      {:ok, nil} -> {:error, "logo cannot be unset on a live conference (L11)"}
+      {:ok, logo} -> set_logo(mcu, conf, logo, state.config.image_dir)
+    end
+  end
+
   # ── mute (§8.3.3 participant.update) ─────────────────────────────────────────
 
   defp do_mute(uid, part_id, muted) do
@@ -2072,6 +2340,288 @@ defmodule Kelix.Mod.Mcu do
       end
     end
   end
+
+  # ── recording, slots, logo (§8.3.8) ──────────────────────────────────────────
+
+  defp recording_view(%Conference{recording: nil} = conf),
+    do: %{recording: false, file: nil, path: nil, mcu: conf.mcu, started_at: nil, duration_s: nil}
+
+  defp recording_view(%Conference{recording: rec} = conf) do
+    %{
+      recording: true,
+      file: rec.file,
+      path: rec.path,
+      mcu: conf.mcu,
+      started_at: rec.started_at,
+      duration_s: DateTime.diff(DateTime.utc_now(), rec.started_at)
+    }
+  end
+
+  # `GetMosaicPositions` answers the **occupancy** — the participant displayed in each
+  # slot, or 0 for nobody — never a slot state: `mosaicPos` only ever holds a positive
+  # `partId` or `SlotFree` (`mosaic.cpp`). What each slot was *told* to hold is ours
+  # (`conf.slots`), and the gap between the two is exactly what a VAD reshuffle looks
+  # like: `holds: "vad"` with a `part_id` that moves.
+  defp slot_map(conf) do
+    with {:ok, mcu} <- update_target(conf),
+         {:ok, positions} <- rpc(mcu, "GetMosaicPositions", [conf.conf_id, @default_mosaic]) do
+      {:ok,
+       %{
+         layout: conf.layout,
+         vad: conf.vad,
+         logo: conf.logo,
+         slots: slot_rows(conf, positions)
+       }}
+    end
+  end
+
+  defp slot_rows(conf, positions) when is_list(positions) do
+    for {shown, slot} <- Enum.with_index(positions) do
+      pinned = Map.get(conf.slots, slot)
+      part = if is_integer(shown) and shown > 0, do: Conference.by_part_id(conf, shown)
+
+      %{
+        slot: slot,
+        holds: Vocabulary.holds_name(pinned || 0),
+        pinned: if(is_integer(pinned) and pinned > 0, do: pinned),
+        part_id: part && part.part_id,
+        name: part && part.name
+      }
+    end
+  end
+
+  # A server too old to answer the array (or one that answered something else) must not
+  # be reported as an empty mosaic: say so instead.
+  defp slot_rows(_conf, _other), do: []
+
+  defp do_record_start(state, uid, file) do
+    with {:ok, conf} <- found(conference(uid)),
+         :ok <- not_recording(conf),
+         {:ok, mcu} <- update_target(conf),
+         {:ok, name, path} <- record_target(state.config, conf, file),
+         {:ok, _} <-
+           rpc(mcu, "StartRecordingBroadcaster", [
+             conf.conf_id,
+             path,
+             @default_mosaic,
+             @default_sidebar
+           ]) do
+      recording = %{file: name, path: path, started_at: DateTime.utc_now()}
+      :ets.insert(@conf_table, {uid, %Conference{conf | recording: recording}})
+      Event.emit(:"conference.recording_started", uid, %{file: name, mcu: conf.mcu})
+      {:ok, %{uid: uid, file: name, path: path, mcu: conf.mcu}}
+    end
+  end
+
+  defp do_record_stop(uid) do
+    with {:ok, conf} <- found(conference(uid)),
+         {:ok, recording} <- recording_of(conf),
+         {:ok, mcu} <- update_target(conf),
+         {:ok, _} <- rpc(mcu, "StopRecordingBroadcaster", [conf.conf_id]) do
+      :ets.insert(@conf_table, {uid, %Conference{conf | recording: nil}})
+      duration = DateTime.diff(DateTime.utc_now(), recording.started_at)
+      emit_recording_stopped(conf, recording, :api, duration)
+      {:ok, %{uid: uid, file: recording.file, duration_s: duration}}
+    end
+  end
+
+  defp not_recording(%Conference{recording: nil}), do: :ok
+  defp not_recording(%Conference{}), do: {:error, :already_recording}
+
+  defp recording_of(%Conference{recording: nil}), do: {:error, :not_recording}
+  defp recording_of(%Conference{recording: recording}), do: {:ok, recording}
+
+  # Emitted from every path that ends a recording, not only from `recording.stop`:
+  # destroying the conference and losing the media server both close the file, and a
+  # consumer that only saw `recording_started` would believe it is still running.
+  defp emit_recording_stopped(conf, recording, reason, duration) do
+    Event.emit(:"conference.recording_stopped", conf.uid, %{
+      file: recording.file,
+      mcu: conf.mcu,
+      duration_s: duration,
+      reason: reason
+    })
+  end
+
+  defp emit_recording_stopped(conf, recording, reason),
+    do:
+      emit_recording_stopped(
+        conf,
+        recording,
+        reason,
+        DateTime.diff(DateTime.utc_now(), recording.started_at)
+      )
+
+  # The file the media server will write. A **basename** under the configured
+  # `record_dir` and nothing else: the server writes wherever it has rights, so a path
+  # a client could choose would be a file-write primitive on that host for anyone
+  # holding the control token (§8.3.8, decision 1).
+  defp record_target(%Config{record_dir: nil}, _conf, _file) do
+    {:error,
+     "record_dir is not set in [module.mcu]: there is nowhere on the media server to write"}
+  end
+
+  defp record_target(%Config{record_dir: dir}, conf, nil),
+    do: {:ok, default_record_name(conf), Path.join(dir, default_record_name(conf))}
+
+  defp record_target(%Config{record_dir: dir}, _conf, file) do
+    with :ok <- valid_basename(file, "file"),
+         :ok <- valid_record_extension(file) do
+      {:ok, file, Path.join(dir, file)}
+    end
+  end
+
+  defp default_record_name(conf) do
+    stamp =
+      DateTime.utc_now()
+      |> Calendar.strftime("%Y%m%d-%H%M%S")
+
+    "#{conf.uid}-#{stamp}.mp4"
+  end
+
+  defp valid_record_extension(file) do
+    if String.downcase(Path.extname(file)) in @record_extensions,
+      do: :ok,
+      else:
+        {:error,
+         "file must end in #{Enum.join(@record_extensions, " or ")} " <>
+           "(the media server picks the container from the extension), got #{inspect(file)}"}
+  end
+
+  # No directory, no traversal, nothing hidden: the module appends this to a configured
+  # directory, and that is the whole guarantee.
+  defp valid_basename(name, key) do
+    cond do
+      not is_binary(name) or name == "" ->
+        {:error, "#{key} must be a file name"}
+
+      Path.basename(name) != name or name in [".", ".."] ->
+        {:error, "#{key} must be a bare file name, with no directory: got #{inspect(name)}"}
+
+      String.starts_with?(name, ".") ->
+        {:error, "#{key} must not start with a dot: got #{inspect(name)}"}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp do_slot(uid, slot, holds) do
+    with {:ok, conf} <- found(conference(uid)),
+         {:ok, mcu} <- update_target(conf),
+         :ok <- valid_slot(conf, slot),
+         {:ok, wire} <- resolve_holds(conf, holds),
+         {:ok, _} <-
+           rpc(mcu, "SetMosaicSlot", [conf.conf_id, @default_mosaic, slot, wire]) do
+      # `reset` is the one value that removes the pin instead of recording one: the
+      # slot goes back to being the mixer's business, so we must stop replaying it.
+      slots =
+        if wire == @slot_reset,
+          do: Map.delete(conf.slots, slot),
+          else: Map.put(conf.slots, slot, wire)
+
+      # Pinning implies `manual`, for the reason naming a mosaic does (§8.3.7): the
+      # automatic layout changes the composition, and a smaller mosaic drops the pins
+      # that no longer fit — the operator would watch their slot move on its own.
+      layout = %{conf.layout | auto: false}
+      :ets.insert(@conf_table, {uid, %Conference{conf | slots: slots, layout: layout}})
+
+      holds_name = Vocabulary.holds_name(wire)
+      part_id = if wire > 0, do: wire
+
+      Event.emit(:"conference.slot_changed", uid, %{
+        slot: slot,
+        holds: holds_name,
+        part_id: part_id
+      })
+
+      if conf.layout.auto,
+        do:
+          Event.emit(:"conference.layout_changed", uid, %{
+            comp: layout.comp,
+            size: layout.size,
+            auto?: false
+          })
+
+      {:ok, %{slot: slot, holds: holds_name, part_id: part_id}}
+    end
+  end
+
+  # Judged by the **server's** slot table, not by arithmetic on the name: `1+4` has 16
+  # slots, and a bound computed from "1 + 4" would refuse a pin the mixer accepts.
+  defp valid_slot(conf, slot) do
+    case Vocabulary.slots_for(conf.layout.comp) do
+      nil ->
+        :ok
+
+      slots when slot < slots ->
+        :ok
+
+      slots ->
+        {:error,
+         "slot must be 0..#{slots - 1} on a #{Vocabulary.mosaic_names()[to_string(conf.layout.comp)]} mosaic"}
+    end
+  end
+
+  # A name is resolved against this conference's roster — never guessed: two matches is
+  # a refusal naming both, so an operator is told to use the `part_id` instead of
+  # discovering later that the wrong leg was pinned.
+  defp resolve_holds(_conf, {:state, wire}), do: {:ok, wire}
+
+  defp resolve_holds(conf, {:part_id, part_id}) do
+    case Conference.by_part_id(conf, part_id) do
+      nil -> {:error, :not_found}
+      _row -> {:ok, part_id}
+    end
+  end
+
+  defp resolve_holds(conf, {:name, name}) do
+    wanted = String.downcase(name)
+
+    matches =
+      conf
+      |> Conference.participants()
+      |> Enum.filter(&(is_integer(&1.part_id) and name_matches?(&1.name, wanted)))
+
+    case matches do
+      [one] ->
+        {:ok, one.part_id}
+
+      [] ->
+        {:error, :not_found}
+
+      many ->
+        ids = many |> Enum.map(& &1.part_id) |> Enum.sort() |> Enum.join(" and ")
+        {:error, ~s(holds: "#{name}" matches participants #{ids} — use the part_id)}
+    end
+  end
+
+  # A participant's name is its full AOR (`alice@phone_example_com`), which nobody wants
+  # to type: the user part alone matches too, and two legs of the same user are a
+  # refusal rather than a coin flip.
+  defp name_matches?(nil, _wanted), do: false
+
+  defp name_matches?(name, wanted) do
+    name = String.downcase(name)
+    name == wanted or hd(String.split(name, "@")) == wanted
+  end
+
+  # The mixer's logo, applied at create time and on every `logo` update. Its own RPC
+  # rather than a field of another: `SetParticipantBackground` with a non-positive
+  # participant id is what loads it (§8.3.8).
+  defp set_logo(mcu, conf, logo, dir) do
+    with :ok <- valid_basename(logo, "logo"),
+         {:ok, path} <- image_path(dir, logo),
+         {:ok, _} <-
+           rpc(mcu, "SetParticipantBackground", [conf.conf_id, @mixer_logo_part_id, path]) do
+      :ok
+    end
+  end
+
+  defp image_path(nil, _logo),
+    do: {:error, "image_dir is not set in [module.mcu]: there is nowhere to read a logo from"}
+
+  defp image_path(dir, logo), do: {:ok, Path.join(dir, logo)}
 
   # ── delete ───────────────────────────────────────────────────────────────────
 
@@ -2115,6 +2665,11 @@ defmodule Kelix.Mod.Mcu do
       reason: reason,
       participants_at_end: Conference.count(conf)
     })
+
+    # `DeleteConference` closes the recorder with the conference, so the file ends
+    # here whether or not anyone called `recording.stop` — a consumer that only saw
+    # `recording_started` would otherwise believe it is still being written (§8.3.8).
+    if conf.recording, do: emit_recording_stopped(conf, conf.recording, :destroyed)
 
     case mediaserver(conf.mcu) do
       {:ok, mcu} -> rpc(mcu, "DeleteConference", [conf.conf_id])

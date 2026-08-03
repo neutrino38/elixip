@@ -83,4 +83,20 @@ defmodule Kelix.Mcu.TestStub do
       timeout -> []
     end
   end
+
+  @doc """
+  The calls **with their arguments**, in order (drains the mailbox).
+
+  For the assertions where the parameters are the point — a resolved recording path, a
+  slot's wire value — and where `assert_received` cannot be used because the call
+  happened during a setup that already drained.
+  """
+  @spec rpc_calls() :: [{String.t(), [term]}]
+  def rpc_calls(timeout \\ 50) do
+    receive do
+      {:rpc, method, params} -> [{method, params} | rpc_calls(timeout)]
+    after
+      timeout -> []
+    end
+  end
 end

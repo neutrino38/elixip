@@ -63,6 +63,13 @@ video_fps           = 15
 video_bitrate       = 1024       # kbps, also the cap on the answer's b=AS:
 video_intra_period  = 300
 
+# Recording + images. Both are directories on the MEDIA SERVER's filesystem; a command
+# chooses the file name, never the directory. No default: unset means the corresponding
+# command refuses rather than have the server fail on a guessed path.
+record_dir          = "/var/lib/kelixip/rec"
+image_dir           = "/var/lib/kelixip/img"
+logo_file           = "ives.png"  # drawn in every EMPTY mosaic slot, every conference
+
 xmlrpc_timeout_ms   = 10000      # per-RPC bound
 call_timeout_ms     = 5000       # facade bound (Kelix.Module.safe_call)
 shutdown_grace_ms   = 5000
@@ -167,6 +174,11 @@ Every command exists identically over REST and `kelictl`, from one declaration.
 | one participant | `GET …/participants/:part_id` | `kelictl mcu participant.show uid=c-3f9a part_id=7` |
 | mute | `PUT`/`PATCH` `…/participants/:part_id` | `kelictl mcu participant.update uid=c-3f9a part_id=7 muted='{"audio":true}'` |
 | disconnect | `DELETE …/participants/:part_id` | `kelictl mcu participant.delete uid=c-3f9a part_id=7` |
+| record | `POST …/conferences/:uid/recording` | `kelictl mcu recording.start uid=c-3f9a file=record.mp4` |
+| recording state | `GET …/conferences/:uid/recording` | `kelictl mcu recording.show uid=c-3f9a` |
+| stop recording | `DELETE …/conferences/:uid/recording` | `kelictl mcu recording.stop uid=c-3f9a` |
+| slot map | `GET …/conferences/:uid/slots` | `kelictl mcu slot.list uid=c-3f9a` |
+| pin a slot | `PUT`/`PATCH` `…/conferences/:uid/slots/:slot` | `kelictl mcu slot.update uid=c-3f9a slot=0 holds=vad` |
 
 ```bash
 # create: 201 + Location, and the DID the caller must dial
@@ -194,6 +206,26 @@ size (`qcif cif vga pal hvga qvga hd720p wqvga xga wvga`, `720p` = `hd720p`) and
 implies `manual`** — on a conference in `auto` the next arrival would otherwise undo
 it. `layout='auto 2x2'` means "set it now and keep following". The JSON form is
 still accepted and stays literal: `layout='{"comp":1,"size":6,"auto":false}'`.
+
+**Recording, slots and the logo** (§8.3.8) are what make a mix inspectable:
+
+```bash
+kelictl mcu recording.start uid=c-3f9a file=record.mp4   # -> <record_dir>/record.mp4
+kelictl mcu recording.show  uid=c-3f9a                   # running? how long?
+kelictl mcu recording.stop  uid=c-3f9a
+kelictl mcu slot.update uid=c-3f9a slot=0 holds=vad      # the active speaker, here
+kelictl mcu slot.update uid=c-3f9a slot=1 holds=alice    # nail a leg (or holds=7)
+kelictl mcu slot.list   uid=c-3f9a                       # who is in which slot NOW
+kelictl mcu conference.update uid=c-3f9a logo=ives.png   # every EMPTY slot
+```
+
+The file and the logo are **bare names** under `record_dir` / `image_dir`, on the media
+server — that is also where the `.mp4` ends up, which matters the moment the two hosts
+differ. `.mp4` or `.flv` only (the server picks the container from the extension), one
+recording per conference (`409` otherwise), slots **0-based** as the mixer logs them,
+and pinning a slot turns the automatic layout off. In `slot.list`, `holds` is what you
+asked for and `part_id` who is there now: the gap between them under `vad=full` is the
+speaker moving.
 
 Four more things worth knowing:
 

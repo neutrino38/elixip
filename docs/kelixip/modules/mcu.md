@@ -75,6 +75,9 @@ Module block — `[module.mcu]` (in `config.toml`):
 | `video_bitrate` | integer | `1024` | kbps, also the cap on the answer's `b=AS:` |
 | `video_intra_period` | integer | `300` | Frames between intra-frames |
 | `video_fmtp` | string | `profile-level-id=42e01f;packetization-mode=1` | H.264 profile the answer states **when the offer states none**; a reflected profile always wins. `""` announces nothing |
+| `logo_file` | string | — | Image drawn in **every empty mosaic slot**, on every conference (a bare name under `image_dir`) |
+| `record_dir` | string | — | Directory the media server writes recordings into. No default: unset means `recording.start` refuses |
+| `image_dir` | string | — | Directory the media server reads `logo_file` (and `logo=`) from. No default |
 | `did_range` | string | — | Allocation pool for a `create` that omits `did` (`"8000-8099"`) |
 | `did_ranges` | table | `{}` | Per-domain override: `{ "example.com" = "8000-8199" }` |
 | `xmlrpc_timeout_ms` | integer | `10000` | Per-RPC bound towards the media server |
@@ -85,6 +88,11 @@ Module block — `[module.mcu]` (in `config.toml`):
 
 `vad`, `layout_comp` and `video_size` take the same names the CLI renders and the
 control commands accept — one vocabulary, wherever a value enters.
+
+**`record_dir` and `image_dir` are paths on the media server**, not on the kelixip host
+(they are the same machine in a single-box deployment and will not be in production).
+The module only ever appends a file name it has validated: a command can choose the
+name, never the directory.
 
 With neither `did_range` nor a `did_ranges` entry for a domain, `did` becomes
 **mandatory** on create. An explicit DID is always honoured, including one
@@ -176,7 +184,7 @@ mediaserver(name)      :: {:ok, map} | :error
 
 ## Control commands
 
-Nine commands, declared once and served identically by both frontals. The
+Fourteen commands, declared once and served identically by both frontals. The
 authoritative list is the running node's:
 
 ```
@@ -196,6 +204,11 @@ kelictl module list               # every loaded module, its commands and facade
 | `participant.show` | `mcu participant.show uid=c-3f9a part_id=7` | `GET …/participants/:part_id` |
 | `participant.update` | `mcu participant.update uid=c-3f9a part_id=7 muted='{"audio":true}'` | `PUT`/`PATCH` `…/participants/:part_id` |
 | `participant.delete` | `mcu participant.delete uid=c-3f9a part_id=7` | `DELETE …/participants/:part_id` |
+| `recording.start` | `mcu recording.start uid=c-3f9a file=record.mp4` | `POST …/conferences/:uid/recording` → `201` |
+| `recording.show` | `mcu recording.show uid=c-3f9a` | `GET …/conferences/:uid/recording` |
+| `recording.stop` | `mcu recording.stop uid=c-3f9a` | `DELETE …/conferences/:uid/recording` |
+| `slot.list` | `mcu slot.list uid=c-3f9a` | `GET …/conferences/:uid/slots` |
+| `slot.update` | `mcu slot.update uid=c-3f9a slot=0 holds=vad` | `PUT`/`PATCH` `…/conferences/:uid/slots/:slot` |
 
 On the CLI, arguments are `name=value` tokens — path variables are ordinary named
 arguments, so the same map reaches the module either way. A value typed
@@ -241,6 +254,66 @@ online help (`kelictl mcu help conference.update`). The **wire form still works
 and stays literal** — `layout='{"comp":1,"size":6,"auto":false}'`, names allowed
 inside it (`{"comp":"2x2"}`) — so an existing REST client needs no change and a
 `PUT` body means exactly what it says.
+
+### Recording, slots and the logo
+
+```bash
+# record the mix — the file lands on the MEDIA SERVER, under record_dir
+kelictl mcu recording.start uid=c-3f9a                  # <uid>-20260803-141212.mp4
+kelictl mcu recording.start uid=c-3f9a file=record.mp4
+kelictl mcu recording.show  uid=c-3f9a                  # running? which file? how long?
+kelictl mcu recording.stop  uid=c-3f9a
+
+# the mosaic slot map, and what each slot must hold
+kelictl mcu slot.list   uid=c-3f9a
+kelictl mcu slot.update uid=c-3f9a slot=0 holds=vad     # the active speaker, here
+kelictl mcu slot.update uid=c-3f9a slot=1 holds=7       # nail participant 7
+kelictl mcu slot.update uid=c-3f9a slot=1 holds=alice   # …or name it
+kelictl mcu slot.update uid=c-3f9a slot=2 holds=locked  # shows nobody
+kelictl mcu slot.update uid=c-3f9a slot=2 holds=free    # the mixer decides again
+kelictl mcu slot.update uid=c-3f9a slot=2 holds=reset   # free, and forget the pin
+
+# the picture drawn in every EMPTY slot
+kelictl mcu conference.update uid=c-3f9a logo=ives.png
+```
+
+`file` and `logo` are **bare names**, resolved under `record_dir` / `image_dir` on the
+media server: a command chooses the name, never the directory. The extension decides
+the container (`.mp4` or `.flv`, nothing else). One recording per conference — a second
+`recording.start` is a `409`.
+
+Slots are **0-based**, as the media server numbers and logs them, and how many there
+are depends on the mosaic (`1x1` 1, `1+1` 2, `2x2` 4, `3x3` 9, `4x4` 16 …). Pinning a
+slot **turns the automatic layout off**: it changes the composition, and a smaller
+mosaic would drop the pin.
+
+`slot.list` separates what was asked from what is:
+
+```
+$ kelictl mcu slot.list uid=c-3f9a2b10
+Layout:  auto=false;comp=2x2;size=hd720p
+Vad:     full
+Logo:    ives.png
+Slots:
+  slot  holds  pinned  part_id  name
+  0     vad    -       7        alice@phone_example_com
+  1     part   9       9        bob@phone_example_com
+  2     free   -       -        -
+  3     free   -       -        -
+```
+
+`holds` is what the slot was **told**, `pinned` **whom** you pinned there, and
+`part_id`/`name` who the mixer shows **now** — for a `vad` slot the last one moves with
+the speaker, which is the whole point. An empty slot reads `free`; the logo is what is
+drawn in it, not something it holds.
+
+The logo **cannot be unset** on a live conference (the media server has no reset for
+it): set another one, or destroy the conference. And the server **never reports an
+unreadable image** — it answers OK whatever the picture did, so `logo` is what you
+asked for, and the mix (or the media server's `mcu.log`) is what tells you it loaded.
+Only a failure to reach the server is reported: on `conference.update` you get the
+error, on `conference.create` it is logged and the conference is created without a logo
+(a picture must not be why a conference does not exist).
 
 Three more things worth knowing: **`PUT` merges** (an omitted field is left alone, not
 reset), an **unknown or read-only field is a `400`** rather than a silent no-op,
@@ -304,7 +377,8 @@ in its mailbox:
 standard `{:scenario_ctl, :shutdown, :kicked}`.
 
 Node-level events (`conference.created`, `participant.joined`,
-`participant.left`, `mediaserver.down` …) are **logged**, one line per event
+`participant.left`, `conference.recording_started` / `_stopped`,
+`conference.slot_changed`, `mediaserver.down` …) are **logged**, one line per event
 carrying the conference `uid`, and counted in the Prometheus metrics
 (`kelix_mcu_calls_total{result}`, `kelix_mcu_participants{mcu,conference}`,
 `kelix_mcu_rpc_errors_total{method,reason}` …). They are not delivered to
@@ -321,6 +395,9 @@ did_range        = "8000-8099"
 vad              = "full"
 layout_comp      = "2x2"
 video_size       = "hd720p"
+record_dir       = "/var/lib/kelixip/rec"    # on the media server
+image_dir        = "/var/lib/kelixip/img"    # idem
+logo_file        = "ives.png"                # every empty mosaic slot
 video_fmtp       = "profile-level-id=42e01f;packetization-mode=1"
 
 [mediaserver.pool.mcu1]
@@ -347,6 +424,12 @@ $ kelictl mcu participant.list uid=c-3f9a2b10
 # pin a 2x2 in HD for a demo, then hand the layout back to the module
 $ kelictl mcu conference.update uid=c-3f9a2b10 layout='2x2 hd720p'
 $ kelictl mcu conference.update uid=c-3f9a2b10 layout=auto
+
+# record a meeting for review, watching the VAD move the speaker meanwhile
+$ kelictl mcu recording.start uid=c-3f9a2b10 file=demo.mp4
+$ kelictl mcu slot.update uid=c-3f9a2b10 slot=0 holds=vad
+$ watch -n1 kelictl mcu slot.list uid=c-3f9a2b10
+$ kelictl mcu recording.stop uid=c-3f9a2b10
 ```
 
 ```elixir

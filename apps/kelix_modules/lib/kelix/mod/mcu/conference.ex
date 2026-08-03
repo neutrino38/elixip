@@ -53,6 +53,17 @@ defmodule Kelix.Mod.Mcu.Conference do
             # (same `uid`, new `conf_id`) when the server comes back. Visible in
             # `show`/`list` so an operator sees why a DID answers 503.
             stale: false,
+            # §8.3.8. `logo` is the image drawn in every EMPTY mosaic slot (a basename
+            # under the configured `image_dir`, on the media server).
+            logo: nil,
+            # The slots **we** pinned: `%{slot => wire value}`. The mixer's own
+            # occupancy is not here — that is `GetMosaicPositions`, read on demand —
+            # because this map is *policy*, and policy is what has to be replayed when
+            # a restarted media server gets the conference recreated (§9.2).
+            slots: %{},
+            # `%{file, path, started_at}` while the mix is being recorded, else nil.
+            # Held here because the server has no "am I recording?" RPC to ask.
+            recording: nil,
             participants: %{}
 
   @doc "Live participants (every row `admit/2` reserved, including the ringing ones)."
@@ -94,6 +105,9 @@ defmodule Kelix.Mod.Mcu.Conference do
       destroy_when_empty: conf.destroy_when_empty,
       created_at: conf.created_at,
       stale: conf.stale,
+      logo: conf.logo,
+      # the file, not the map: `recording.show` is where the detail lives
+      recording: conf.recording && conf.recording.file,
       participants: count(conf)
     }
   end

@@ -67,6 +67,28 @@ defmodule Kelix.Mod.Mcu.Vocabulary do
 
   @vads [{0, "none"}, {1, "basic"}, {2, "full"}]
 
+  # What a mosaic slot may be told to hold (`Mosaic::Slot*`, `mcu/include/mosaic.h`),
+  # the `id` argument of `SetMosaicSlot` when it is not a `partId` (§8.3.8).
+  @slot_states [{-2, "vad"}, {-1, "locked"}, {0, "free"}, {-3, "reset"}]
+
+  # Slots per composition, **read from the server's own table**
+  # (`Mosaic::GetNumSlotsForType`) and not derived from the name: `1+4` reports 16,
+  # not 5, and arithmetic here would refuse a pin the mixer accepts.
+  @slots_per_comp %{
+    0 => 1,
+    1 => 4,
+    2 => 9,
+    3 => 7,
+    4 => 8,
+    5 => 6,
+    6 => 2,
+    7 => 2,
+    8 => 4,
+    9 => 16,
+    10 => 16,
+    11 => 10
+  }
+
   # One alias, for the size an operator types most: `720p` is what every other tool
   # in a video stack calls it. Kept to one entry on purpose — a dialect would have to
   # be documented, error-checked and rendered like the vocabulary itself.
@@ -289,6 +311,88 @@ defmodule Kelix.Mod.Mcu.Vocabulary do
       else: fields
   end
 
+  # ── mosaic slots (§8.3.8) ────────────────────────────────────────────────────
+
+  @doc """
+  How many slots a composition has — the server's own table, keyed by the mosaic id.
+
+  `nil` for an unknown id, which is not the same as `0`: a caller that cannot know the
+  slot count must not conclude "no slot is valid".
+  """
+  @spec slots_for(non_neg_integer) :: pos_integer | nil
+  def slots_for(comp), do: Map.get(@slots_per_comp, comp)
+
+  @doc "The slot-state names an operator may write (`vad`, `locked`, `free`, `reset`)."
+  @spec slot_states() :: [String.t()]
+  def slot_states(), do: Enum.map(@slot_states, &elem(&1, 1))
+
+  @doc """
+  What a slot was told to hold. `{:state, wire}` for a named state, `{:part_id, n}` for
+  a participant id, `{:name, s}` for anything else — a participant *name*, which only
+  the conference's roster can resolve, so it is handed back for the caller to look up.
+
+  A bare `0` or a negative number is **refused**: `0` is both "participant zero" and
+  `SlotFree`, and the state names exist precisely so that no one has to know which.
+  """
+  @spec holds(term, String.t()) ::
+          {:ok, {:state, integer} | {:part_id, pos_integer} | {:name, String.t()}}
+          | {:error, String.t()}
+  def holds(value, key \\ "holds")
+
+  def holds(nil, key), do: {:error, "#{key} is required — #{holds_vocabulary()}"}
+
+  def holds(value, _key) when is_integer(value) and value > 0, do: {:ok, {:part_id, value}}
+
+  def holds(value, key) when is_integer(value) do
+    {:error,
+     "#{key}: #{value} is not a participant id — say what you mean by name (#{holds_vocabulary()})"}
+  end
+
+  def holds(value, key) when is_binary(value) do
+    name = value |> String.trim() |> String.downcase()
+
+    case Enum.find(@slot_states, &(elem(&1, 1) == name)) do
+      {wire, _name} ->
+        {:ok, {:state, wire}}
+
+      nil ->
+        case Integer.parse(name) do
+          {id, ""} -> holds(id, key)
+          _ -> named_participant(String.trim(value), key)
+        end
+    end
+  end
+
+  def holds(value, key),
+    do: {:error, "#{key} must be a name or a participant id, got #{inspect(value)}"}
+
+  defp named_participant("", key), do: {:error, "#{key} is empty — #{holds_vocabulary()}"}
+  defp named_participant(name, _key), do: {:ok, {:name, name}}
+
+  @doc """
+  The wire value of a slot state, by name — `slot_wire("reset")`. Raises on an unknown
+  name, which can only be a typo in the module itself.
+  """
+  @spec slot_wire(String.t()) :: integer
+  def slot_wire(name) do
+    {wire, _name} = Enum.find(@slot_states, &(elem(&1, 1) == name))
+    wire
+  end
+
+  @doc """
+  The name of a slot's wire value, for rendering: a state name, or `\"part\"` when a
+  participant is nailed there.
+  """
+  @spec holds_name(integer) :: String.t()
+  def holds_name(wire) when wire > 0, do: "part"
+
+  def holds_name(wire) do
+    case Enum.find(@slot_states, &(elem(&1, 0) == wire)) do
+      {_wire, name} -> name
+      nil -> Integer.to_string(wire)
+    end
+  end
+
   # ── online help (§8.3.7) ─────────────────────────────────────────────────────
 
   @doc """
@@ -324,6 +428,49 @@ defmodule Kelix.Mod.Mcu.Vocabulary do
   @spec vad_help() :: [String.t()]
   def vad_help(),
     do: ["voice activity detection: " <> Enum.join(vads(), " | ") <> " (or 0 | 1 | 2)"]
+
+  @doc "The `holds` argument's help (§8.3.8)."
+  @spec holds_help() :: [String.t()]
+  def holds_help() do
+    [
+      "what the slot shows: " <> Enum.join(slot_states(), " | ") <> " | <part_id> | <name>",
+      "vad = follows the active speaker, locked = shows nobody, free = the mixer decides",
+      "reset = free again *and* forget the pin",
+      "a participant by name (its user part, or its full alice@host) when it matches one leg",
+      "pinning a slot turns the automatic layout off (it would move what you pinned)"
+    ]
+  end
+
+  @doc "The `slot` argument's help (§8.3.8)."
+  @spec slot_help() :: [String.t()]
+  def slot_help() do
+    [
+      "slot number, 0-based — as the media server numbers and logs them",
+      "how many depends on the mosaic: 1x1 1, 1+1 2, 2x2 4, 3x3 9, 4x4 16 … (slot.list shows them)"
+    ]
+  end
+
+  @doc "The `file` argument's help of `recording.start` (§8.3.8)."
+  @spec record_file_help() :: [String.t()]
+  def record_file_help() do
+    [
+      "a bare file name ending in .mp4 or .flv — no directory, no ..",
+      "written under the configured record_dir, on the MEDIA SERVER's filesystem",
+      "omitted: <uid>-<YYYYmmdd-HHMMSS>.mp4"
+    ]
+  end
+
+  @doc "The `logo` argument's help (§8.3.8)."
+  @spec logo_help() :: [String.t()]
+  def logo_help() do
+    [
+      "a bare image file name, read from the configured image_dir on the media server",
+      "drawn in every empty mosaic slot; it cannot be unset on a live conference (L11)"
+    ]
+  end
+
+  defp holds_vocabulary(),
+    do: "one of " <> Enum.join(slot_states(), ", ") <> ", a part_id, or a participant name"
 
   defp layout_syntax(),
     do: "a mosaic, a size and/or auto|manual, in any order, spaces or commas"

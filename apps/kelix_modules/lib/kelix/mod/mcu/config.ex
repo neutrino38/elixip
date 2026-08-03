@@ -58,6 +58,16 @@ defmodule Kelix.Mod.Mcu.Config do
             },
             did_range: nil,
             did_ranges: %{},
+            # Recording and images (§8.3.8). Paths on the **media server's**
+            # filesystem: the module resolves a validated basename under them and
+            # never lets a client send a path of its own. No default — a directory
+            # guessed for a host we cannot see would fail inside the server, one
+            # recording at a time, so an unset key is a clear refusal instead.
+            record_dir: nil,
+            image_dir: nil,
+            # Drawn in every empty mosaic slot of every conference, unless the
+            # conference names its own `logo`.
+            logo_file: nil,
             xmlrpc_timeout_ms: 10_000,
             call_timeout_ms: 5_000,
             shutdown_grace_ms: 5_000,
@@ -82,12 +92,13 @@ defmodule Kelix.Mod.Mcu.Config do
                video_intra_period xmlrpc_timeout_ms call_timeout_ms shutdown_grace_ms
                rtp_timeout_ms)
   @bool_keys ~w(destroy_when_empty auto_layout gc_orphans)
-  @string_keys ~w(video_fmtp)
+  @string_keys ~w(video_fmtp record_dir image_dir logo_file)
 
   @keys ~w(module call_timeout_ms vad rate audio_codecs video_codecs text_codecs
            max_participants destroy_when_empty auto_layout layout_comp did_range
            did_ranges video_size video_fps video_bitrate video_intra_period video_fmtp
-           xmlrpc_timeout_ms shutdown_grace_ms rtp_timeout_ms gc_orphans)
+           xmlrpc_timeout_ms shutdown_grace_ms rtp_timeout_ms gc_orphans
+           record_dir image_dir logo_file)
 
   @doc """
   Validate and decode a `[module.mcu]` block. `{:ok, %Config{}}` or
@@ -138,7 +149,10 @@ defmodule Kelix.Mod.Mcu.Config do
          call_timeout_ms: int(block, "call_timeout_ms", defaults.call_timeout_ms),
          shutdown_grace_ms: int(block, "shutdown_grace_ms", defaults.shutdown_grace_ms),
          rtp_timeout_ms: int(block, "rtp_timeout_ms", defaults.rtp_timeout_ms),
-         gc_orphans: bool(block, "gc_orphans", defaults.gc_orphans)
+         gc_orphans: bool(block, "gc_orphans", defaults.gc_orphans),
+         record_dir: str(block, "record_dir", defaults.record_dir),
+         image_dir: str(block, "image_dir", defaults.image_dir),
+         logo_file: str(block, "logo_file", defaults.logo_file)
        }}
     end
   end

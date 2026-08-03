@@ -474,7 +474,7 @@ defmodule Kelix.Mod.McuTest do
       assert {:error, :unknown_command} = Mcu.handle_control("conference.explode", %{})
     end
 
-    test "the declared commands are the whole surface of §8.3.3" do
+    test "the declared commands are the whole surface of §8.3.3 and §8.3.8" do
       names = Enum.map(Mcu.describe_control(), & &1.name)
 
       assert Enum.sort(names) == [
@@ -486,7 +486,13 @@ defmodule Kelix.Mod.McuTest do
                "participant.delete",
                "participant.list",
                "participant.show",
-               "participant.update"
+               "participant.update",
+               # the inspection surface of §8.3.8
+               "recording.show",
+               "recording.start",
+               "recording.stop",
+               "slot.list",
+               "slot.update"
              ]
 
       # `mute` and `kick` are not verbs of their own: muting is participant.update,

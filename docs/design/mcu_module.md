@@ -853,9 +853,10 @@ receives and what `kelictl mcu <id>` names.
 `participant.update`, kicking is `participant.delete`. That is the one real
 simplification the resource shape buys us.
 
-Two more sub-resources are specified in §8.3.8 and land with **P9**: the mix
+Two more sub-resources are specified in §8.3.8 and shipped with **P9**: the mix
 recording (`recording.start|show|stop`) and the mosaic slot map
-(`slot.list|update`), plus a `logo` field on the two conference commands.
+(`slot.list|update`), plus a `logo` field on the two conference commands. Fourteen
+commands in total.
 
 **`PUT` semantics (explicit).** A `PUT` on a conference or a participant **merges
 the fields present in the body** and leaves every other field untouched. It never
@@ -1120,7 +1121,7 @@ is untouched, and names are simply *also* accepted inside it
 (`layout='{"comp":"2x2"}'`). The only behaviour change for an existing caller is
 the error *text*, which now names the vocabulary instead of the id range.
 
-#### 8.3.8 The inspection surface — recording, slot pinning, logo (P9)
+#### 8.3.8 The inspection surface — recording, slot pinning, logo (P9) ✔
 
 Three media-server tests cannot be run today, and each is blocked by a *missing
 command*, not by a missing capability: the server implements all three, and nothing
@@ -1153,7 +1154,7 @@ the `/mcu` one:
 | `StopRecordingBroadcaster` | `(i confId)` | — | |
 | `StartRecordingParticipant` / `StopRecordingParticipant` | `(i confId, i partId, s filename)` / `(i confId, i partId)` | — | one leg instead of the mix — a neighbour, not needed by the three tests |
 | `SetMosaicSlot` | `(i confId, i mosaicId, i num, i id)` | — | `num` is **0-based** and out of range is an error; `id` is a `partId` or one of the special values below |
-| `GetMosaicPositions` | `(i confId, i mosaicId)` | `A` of `i` | one entry per slot, in slot order: the `partId` it holds, or a special value. **The read test 6 needs** |
+| `GetMosaicPositions` | `(i confId, i mosaicId)` | `A` of `i` | one entry per slot, in slot order: the `partId` **currently displayed** there, or `0` for nobody. It is `mosaicPos`, the occupancy — never a slot state, which only ever lives in `mosaicSlots` and is *not* exposed. **The read test 6 needs** |
 | `SetParticipantBackground` | `(i confId, i partId, s filename)` | `(i)` | `partId <= 0` ⇒ `videoMixer.LoadLogo(filename)`: the picture drawn in **every empty slot**. `partId > 0` ⇒ the still shown for that participant while it sends no video. Also reachable as `SetParticipantOrMosaicImage(confId, mosaicId, partId, filename, imageRole)` with `imageRole = 0` |
 | `SetMosaicOverlayImage` / `ResetMosaicOverlay` | `(i confId, i mosaicId, s filename)` / `(i confId, i mosaicId)` | `(i mosaicId)` | a transparent PNG over the **whole** mosaic — a frame or a watermark, *not* the empty-slot logo. A neighbour |
 
@@ -1171,6 +1172,11 @@ Slot values (`mcu/include/mosaic.h`) and the slot count per composition
 | Composition | `1x1` | `1+1` `pip1` | `2x2` `pip3` | `1+5` | `3+4` | `1+7` | `3x3` | `2+8` | `4x4` | `1+4` |
 |---|---|---|---|---|---|---|---|---|---|---|
 | Slots | 1 | 2 | 4 | 6 | 7 | 8 | 9 | 10 | 16 | **16** |
+
+That split decides the whole shape of `slot.list`: the **pins are ours** (nothing can
+be read back from the server) and the **occupancy is the mixer's** (nothing else knows
+it). Which is a gift rather than a nuisance — `holds: "vad"` beside a `part_id` that
+moves *is* the reshuffle test 6 looks for.
 
 `1+4` really does report **16** slots, not 5: the server's table is the authority and
 the module must read it from there rather than derive it from the name (a check
@@ -1224,29 +1230,36 @@ kelictl mcu conference.update uid=c-3f9a logo=ives.png
 kelictl mcu conference.update uid=c-3f9a vad=full       # §8.3.7, already there
 ```
 
-`slot.list` prints the mosaic as a grid as well as a table, because the whole point is
-to *see* the reshuffle, and counting rows in a 4x4 while a conference moves is not
-seeing:
+`slot.list` answers a `:detail` view — the mixer's state as a header, then the slots as
+an indented table — so an operator reads the reshuffle against the layout and the VAD
+mode that produce it:
 
 ```
 $ kelictl mcu slot.list uid=c-3f9a
-layout: 2x2 hd720p (manual)   vad: full   logo: ives.png
-
-slot  holds  part_id  name   fixed
-0     vad    7        alice   no
-1     part   9        bob     yes
-2     free   -        -       no
-3     free   -        -       no
-
-  0 alice (speaking)   1 bob
-  2 (logo)             3 (logo)
+Layout:  auto=false;comp=2x2;size=hd720p
+Vad:     full
+Logo:    ives.png
+Slots:
+  slot  holds  pinned  part_id  name
+  0     vad    -       7        alice@phone_example_com
+  1     part   9       9        bob@phone_example_com
+  2     free   -       -        -
+  3     free   -       -        -
 ```
 
-`holds` is what was *asked for*, `part_id`/`name` who is there **now** — the two differ
-for a `vad` slot by design, and that gap is the reshuffle. An empty slot reads `free`
-in the table and `(logo)` in the grid: the logo is what is drawn there, never a slot
-assignment, and calling it one in the `holds` column would invent a state the mixer
-does not have.
+Four columns, and the reason there are four: `holds` is what the slot was **told**,
+`pinned` **whom** we pinned there, `part_id`/`name` who the mixer shows **now**. A
+pinned participant with no video reads `holds: part`, `pinned: 9`, `part_id: -` — the
+pin stays visible even when nothing is drawn, which a three-column view would have
+hidden.
+
+**No ASCII grid**, although this section first specified one. It would have needed a
+new `render:` kind in the core for exactly one command, and the CLI's `:detail` +
+nested-table machinery already carries the header and the numbered slots. An empty slot
+reads `free`: the logo is what is *drawn* there, never a slot assignment, and putting it
+in the `holds` column would invent a state the mixer does not have. If the geometry
+turns out to be what is missing in practice, a `:grid` render kind is the increment —
+declared by the module like everything else.
 
 The command ids stay `<resource>.<verb>`, as every other one does, so `mcu help` reads
 as one list and a new operator has one convention to learn. `holds` is a **state**, not
@@ -1262,8 +1275,10 @@ Two ergonomic decisions and their cost:
   off by one on every line, which is worse than starting at zero. The printed grid is
   what removes the counting, and the help says "0-based, as the mixer logs them".
 * **`holds` accepts a participant name** when it resolves to exactly one leg of that
-  conference; two matches is a `400` naming both, so a guess is never made. `part_id`
-  always works and is what the reply echoes.
+  conference; two matches is a `400` naming both, so a guess is never made. A
+  participant's name is its full AOR with the dots replaced (`alice@phone_example_com`,
+  which the MCU requires), and nobody will type that — so the **user part alone matches
+  too**. `part_id` always works and is what the reply echoes.
 
 `holds` joins `Kelix.Mod.Mcu.Vocabulary` (§8.3.7), so it gets its online help, its
 labels and its refusal-with-the-vocabulary for free:
@@ -1279,8 +1294,12 @@ labels and its refusal-with-the-vocabulary for free:
 ##### Decisions
 
 1. **A recording file is a name, not a path.** `file` must be a bare basename —
-   no `/`, no `..` — resolved by the module under the configured `record_dir`, and its
-   extension must be `.mp4` or `.flv`. The alternative (an arbitrary absolute path) is
+   no `/`, no `..`, no leading dot — resolved by the module under the configured
+   `record_dir`, and its extension must be `.mp4` or `.flv`. `record_dir` and
+   `image_dir` have **no default**: a directory guessed for a host kelixip cannot see
+   would fail inside the media server one recording at a time, so an unset key answers
+   "record_dir is not set in [module.mcu]: there is nowhere on the media server to
+   write" instead. The alternative (an arbitrary absolute path) is
    a file-write primitive on the media server host for anyone holding the control
    token, and the server writes wherever it has rights. An operator who needs another
    directory edits `record_dir`, which is a deployment decision and belongs in
@@ -1307,6 +1326,21 @@ labels and its refusal-with-the-vocabulary for free:
    `video` or `layout`, and the useful production form is `logo_file` in
    `[module.mcu]` so every conference gets the company logo with no command at all.
    Same basename-under-`image_dir` rule as the recording file.
+
+   Its two paths are deliberately **not** symmetric. At **create** the RPC is
+   best-effort: a picture must never be why a conference cannot be created, or a
+   mistyped `logo_file` would take the whole MCU down one call at a time — so a
+   refusal is logged and the row keeps `logo: nil`, which is what is actually on the
+   mixer and what `conference.show` then reports. On **update** the operator asked
+   explicitly, so the server's refusal is returned to them and the field is left
+   alone.
+
+   That asymmetry only covers a **transport** failure, and the live run said why:
+   `MultiConf::SetParticipantBackground` returns `1` unconditionally for the mixer
+   logo (`if (id <= 0) { videoMixer.LoadLogo(filename); ret = 1; }`), so an image the
+   server cannot read is **never reported** — `Pict::Load`'s failure exists only in the
+   server's log. `logo` therefore records what was *asked for*, and the mix (or
+   `mcu.log`) is the only place that says whether it took. L14.
 7. **The slot map is read on demand, never pushed.** The mixer reshuffles on its own
    every `vadDefaultChangePeriod`, and the server emits no event for it, so there is
    no `slot_changed` event to declare — inventing one would mean polling
@@ -1343,6 +1377,7 @@ Listed in §12's table too, with what would lift them:
 | L11 | The empty-slot logo **cannot be unset** on a live conference: `LoadLogo` has no reset RPC, and an empty filename fails `Pict::Load` (the *overlay* does reset — different picture). Changing it means another `logo`, destroying the conference, or a server increment |
 | L12 | A recording started by kelixip is **not resumed** after a media-server restart (decision 5), and the partial file is left where it is — the module never deletes a file it did not write in full |
 | L13 | Only mosaic `0` and sidebar `0`, as everywhere else in this increment: `recording.start` always records mosaic `0` + sidebar `0`, and `slot.*` always addresses mosaic `0` |
+| L14 | An **unreadable logo is not reported**: `SetParticipantBackground` answers `1` whatever `Pict::Load` did, so `logo` is what was asked for and only the mix or `mcu.log` says whether it loaded |
 
 ##### Tests (§13 additions)
 
@@ -1625,6 +1660,7 @@ observations the script has no use for.
 | L11 | The empty-slot logo cannot be **unset** on a live conference (no reset RPC for `LoadLogo`) | server API | §8.3.8, a server increment |
 | L12 | A recording is **not resumed** after a media-server restart, and the partial file is left in place | §8.3.8 decision 5 | deliberate |
 | L13 | `recording.*` always records mosaic `0` + sidebar `0`, and `slot.*` always addresses mosaic `0` | §1.2 decision 6b | with `/mosaics` |
+| L14 | An unreadable `logo` is not reported — the server answers OK whatever the picture did | server API | a server increment |
 
 ---
 
@@ -1654,7 +1690,7 @@ observations the script has no use for.
 Status as of 2026-08-01: **P0′ through P5c are implemented**, each verified against
 the live media server as well as against the recording stub. **S4 (§16.5) shipped
 out of order**, on the server *and* in the module, because it removes a whole class
-of configuration failure rather than adding a feature; P6 to P9 are open.
+of configuration failure rather than adding a feature; P6 to P8 are open; **P9 shipped** (§8.3.8).
 
 | Phase | Status | Content | Done when |
 |---|---|---|---|
@@ -1669,7 +1705,7 @@ of configuration failure rather than adding a feature; P6 to P9 are open.
 | **P6** |  | Packaging: `kelixip-mod-mcu` RPM/deb, sample config, docs | `dnf install kelixip-mod-mcu` + a config snippet gets a working conference |
 | **P7** |  | **Server-side (Mendooze), §16.1-16.2**: `StartRTPTimeout` RPC + MCU event types `3` (media timeout) and `4` (media connected); kelixip arms/disarms the watchdog after the answer and handles both events | unplugging a phone's network mid-call frees its slot and its mosaic tile within `rtp_timeout_ms`, and the adapter emits `:ice_connected` on real media — **L1 and L2 lifted** |
 | **P8** |  | **Server-side (Mendooze), §16.3**: `StartReceiving` returns `(recPort, fmtpByPt)`; kelixip deletes its local codec arbitration and moves `SetRTPProperties(codec.*)` before `StartReceiving` | the SDP answer carries the fmtp the MCU will actually use, verbatim — **L4 lifted**; mcuGold on the same server is unaffected |
-| **P9** |  | **The inspection surface** (§8.3.8): `recording.start\|show\|stop`, `slot.list\|update`, the `logo` field and its `[module.mcu]` defaults | media-server tests 5, 6 and 7 are runnable from `kelictl` alone: a `record.mp4` to look at, a slot map that shows the VAD reshuffle, and a logo in the empty slots |
+| **P9** | ✔ | **The inspection surface** (§8.3.8): `recording.start\|show\|stop`, `slot.list\|update`, the `logo` field and its `[module.mcu]` defaults | media-server tests 5, 6 and 7 are runnable from `kelictl` alone: a `record.mp4` to look at, a slot map that shows the VAD reshuffle, and a logo in the empty slots |
 | **TC** | ✔ | **Total conversation** (§1.1 point 4): T.140 + RFC 4103 redundancy on the conference leg — `@supported_medias` gains `:text`, `SetTextCodec` at ACK time, the `red` fmtp in the answer, and the reference scripts ask for `media: :tc` | a terminal offering `m=text` with `red`+`t140` is answered on both, `SetTextCodec` carries `T140RED`, and the three medias flow on one leg |
 | **S4** | ✔ | **Server-side (Mendooze), §16.5**: `--public-ip` as the one announced address, read by `GetMediaCandidates` *and* returned by `StartReceiving`; the module drops `rtp_ip`/`public_ip` and takes its media servers from `[mediaserver.pool.*]` | a conference leg's `c=` line carries the address the *server* reported, a node behind NAT is fixed by one server flag, and the module declares no media server of its own — **G2 lifted** |
 
