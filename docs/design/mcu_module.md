@@ -1004,6 +1004,20 @@ two divergences are pre-existing CLI limitations, not consequences of nesting.
 Nesting makes them more visible, which is an argument for doing FW-3 and FW-5 —
 both small, both optional, neither blocking.
 
+**One of those limitations was worse than "a gap": it lost arguments.** The
+`bin/kelictl` overlay runs the CLI inside the node through `kelixip rpc`, and it
+joined `argv` into a single string for `OptionParser.split/1` to re-split — which
+cannot recover the shell's quoting. `name='Sales weekly'` arrived as *two*
+arguments (`unknown argument(s): weekly`) and `muted='{"audio":true}'` reached the
+module as `{audio:true}`, its inner quotes eaten by the re-split. Both are forms
+this document and the user docs show. The overlay now emits an Elixir **list**, one
+element per shell argument, and `rpc_main/1` takes it as such — there is no
+re-splitting left to get wrong. The string clause stays for a partial deploy (a new
+release under an old overlay), with its limitation documented rather than hidden.
+It is what makes the space-separated `layout` form of §8.3.7 usable at all, and the
+reason that form also accepts commas is independent: `layout=2x2,vga` needs no
+quoting from the operator in the first place.
+
 The recommended CLI form is named arguments, mirroring the merged map:
 
 ```

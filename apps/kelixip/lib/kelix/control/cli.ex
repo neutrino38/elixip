@@ -46,14 +46,24 @@ defmodule Kelix.Control.CLI do
 
   @doc """
   Entry point for the `bin/kelictl` overlay, which runs `kelixip rpc` so this
-  executes **inside** the live node: split the arg string, run against the local
-  node, and print the text. (`rpc` redirects IO back to the operator's terminal.)
+  executes **inside** the live node: run `argv` against the local node and print the
+  text. (`rpc` redirects IO back to the operator's terminal.)
+
+  The overlay passes a **list**, one element per shell argument. The `String` clause
+  is the older form, kept because a partial deploy can pair a new release with an old
+  overlay: it re-splits with `OptionParser.split/1` and therefore cannot recover the
+  shell's quoting — `layout='2x2 vga'` arrives as two arguments and
+  `muted='{"audio":true}'` loses its inner quotes. That is what the list form fixes,
+  and why the two clauses are not equivalent.
   """
-  @spec rpc_main(String.t()) :: :ok
-  def rpc_main(arg_string) when is_binary(arg_string) do
-    {_code, output} = run(OptionParser.split(arg_string), node())
+  @spec rpc_main([String.t()] | String.t()) :: :ok
+  def rpc_main(argv) when is_list(argv) do
+    {_code, output} = run(argv, node())
     IO.puts(output)
   end
+
+  def rpc_main(arg_string) when is_binary(arg_string),
+    do: rpc_main(OptionParser.split(arg_string))
 
   @doc "Parse + dispatch `argv` against `node`, returning `{exit_code, text}`."
   @spec run([String.t()], node) :: {non_neg_integer, String.t()}

@@ -218,6 +218,13 @@ The positional `args…` are handed to the module's `handle_control/2` as
 boolean, digits an integer, a leading `{`/`[` is JSON). These share the same
 cookie boundary as the core commands.
 
+**Quote a value that contains spaces** — `name='Sales weekly'`,
+`layout='2x2 hd720p'` — and the quotes reach the module intact, JSON included
+(`muted='{"audio":true}'`). Before 2026-08 the wrapper joined the argument line
+into one string and re-split it, which silently dropped that quoting; if a value
+with a space comes back as `unknown argument(s): <second word>`, the node is
+running an older release than its `kelictl`.
+
 **Ask the node what it serves** rather than reading the module's source — both
 listings are rendered from the declaration itself, so they cannot drift:
 

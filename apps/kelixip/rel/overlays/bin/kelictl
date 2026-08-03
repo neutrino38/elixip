@@ -19,7 +19,15 @@ while [ -h "$SELF" ]; do
 done
 DIR="$(cd "$(dirname "$SELF")" && pwd)"
 
-# Forward the whole argument line as one string; the CLI re-splits it with
-# OptionParser.split/1 (honouring quotes). Escape embedded double quotes.
-ARGS=$(printf '%s' "$*" | sed 's/"/\\"/g')
-exec "$DIR/kelixip" rpc "Kelix.Control.CLI.rpc_main(\"${ARGS}\")"
+# Forward argv as an Elixir **list**, one element per argument, quoted and escaped.
+#
+# It used to be joined into one string ("$*") for the CLI to re-split, and that lost
+# the shell's own quoting: `name='Sales weekly'` arrived as two arguments and
+# `muted='{"audio":true}'` lost its inner quotes to the re-split — the very forms the
+# documentation shows. A list has no re-splitting to get wrong.
+ARGS=""
+for arg in "$@"; do
+  ESC=$(printf '%s' "$arg" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+  if [ -z "$ARGS" ]; then ARGS="\"$ESC\""; else ARGS="$ARGS, \"$ESC\""; fi
+done
+exec "$DIR/kelixip" rpc "Kelix.Control.CLI.rpc_main([${ARGS}])"

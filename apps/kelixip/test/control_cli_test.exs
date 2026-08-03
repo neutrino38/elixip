@@ -460,6 +460,37 @@ defmodule Kelix.Control.CLITest do
       {0, out} = run(["helpmod", "conference.create", "domain=example.com"])
       assert out =~ "example.com"
     end
+
+    # The `bin/kelictl` overlay runs the CLI inside the node through `kelixip rpc`,
+    # and it used to join argv into one string for the CLI to re-split — which lost
+    # the shell's quoting: a value with a space became two arguments, and the JSON
+    # forms the docs show (`muted='{"audio":true}'`) lost their inner quotes. The
+    # overlay now passes a list, so what the operator quoted arrives intact.
+    test "rpc_main/1 takes argv as a list, keeping spaces and inner quotes" do
+      out =
+        ExUnit.CaptureIO.capture_io(fn ->
+          CLI.rpc_main([
+            "helpmod",
+            "conference.create",
+            "name=Sales weekly",
+            ~s(muted={"audio":true})
+          ])
+        end)
+
+      # the tokens reach the module whole — the space survived, and so did the quotes
+      # the JSON needs (this fake echoes its raw args; a real module decodes them)
+      assert out =~ ~s("name=Sales weekly")
+      assert out =~ ~S(muted={\"audio\":true})
+    end
+
+    test "rpc_main/1 still accepts the string form an older overlay sends" do
+      out =
+        ExUnit.CaptureIO.capture_io(fn ->
+          CLI.rpc_main("helpmod conference.create domain=example.com")
+        end)
+
+      assert out =~ "example.com"
+    end
   end
 
   test "module with a bad sub-command prints the module usage, exit 2" do
