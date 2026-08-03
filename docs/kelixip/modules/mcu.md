@@ -203,6 +203,14 @@ reset), an **unknown or read-only field is a `400`** rather than a silent no-op,
 and **the DID is not a URL** — a client holding only a DID uses
 `conference.list did=8001` and follows the `uid`.
 
+Each command declares the status of every failure it can produce, and both
+frontals answer with it: `404` for a DID or participant that does not exist, `409`
+for a DID already in use or a conference that is not empty, `503` when the media
+server does not answer, `400` for a bad argument. `kelictl` turns the same
+declaration into its exit code (`3` not found, `4` conflict, `5` unavailable, `2`
+bad argument) — see
+[administration.md](../administration.md#exit-codes).
+
 `kelictl status` carries the module's own line, and `stale` is the count of
 conferences whose media server went away (their DID answers `503` until it
 returns, then they are recreated with the same `uid`):

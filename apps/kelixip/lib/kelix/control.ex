@@ -498,6 +498,26 @@ defmodule Kelix.Control do
   end
 
   @doc """
+  The status `<module> <cmd>` declares for `reason` (FW-5).
+
+  What `kelictl` classifies a failed module command by: it holds the result but not
+  the declaration, which lives here. Same function the REST frontal answers with, so
+  a reason a module declared `409` is a conflict on both frontals or on neither.
+
+  An unknown module, or a command name the module never declared, gets the default
+  mapping — an ad-hoc command still fails with a usable code.
+  """
+  @spec command_error_status(String.t(), String.t(), term) :: 100..599
+  def command_error_status(module_name, cmd, reason)
+      when is_binary(module_name) and is_binary(cmd) do
+    declared =
+      safe(fn -> Kelix.Control.Registry.commands_for(module_name) end, [])
+      |> Enum.find(%{}, &(&1.name == cmd))
+
+    Kelix.Control.Route.error_status(declared, reason)
+  end
+
+  @doc """
   Run a module-contributed command (`kelictl <module> <cmd> <args>`). Resolves the
   module by its registered name and delegates to its `handle_control/2` (which
   never checks auth — that is the frontal's job).

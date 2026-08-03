@@ -179,11 +179,26 @@ A server the pool does not declare is `error: :unknown` on `enable`/`disable` an
 
 ### Exit codes
 
-`kelictl` classifies results as `0` (ok), `1` (command error, e.g. unknown MCU),
-or `2` (usage / bad arguments). **Caveat:** because the overlay dispatches through
-`kelixip rpc`, the numeric exit code is **not currently propagated to the shell**
-(it always returns `0`); scripts should match on the printed output, not `$?`.
-This propagation is a roadmap refinement.
+| Code | Means |
+|---|---|
+| `0` | ok |
+| `1` | the command failed, unclassified (e.g. an unknown module) |
+| `2` | usage, or an argument the command refused |
+| `3` | no such object |
+| `4` | conflict: it already exists, or is not empty |
+| `5` | unavailable: the node, the module or its backend did not answer |
+
+`3`/`4`/`5` apply to **module commands** and come from the failing command's own
+declaration (the `errors:` map of its `describe_control/0` entry) — the same
+declaration the REST frontal turns into `404`/`409`/`503`, so both frontals
+classify a failure identically. A reason a module declares nothing for falls back
+to `404` → `3` for `not_found`, `503` → `5` for a module that is absent or wedged,
+and `400` → `2` otherwise. Core commands use `0`/`1`/`2`.
+
+**Caveat:** because the overlay dispatches through `kelixip rpc`, the numeric exit
+code is **not currently propagated to the shell** (it always returns `0`); scripts
+should match on the printed output, not `$?`. This propagation is a roadmap
+refinement — the classification above is what it will carry once it lands.
 
 > `reload-script --notify` is **accepted but not yet active** — notifying
 > in-progress instances of a reload is a roadmap refinement; today the flag is a

@@ -134,6 +134,51 @@ defmodule Kelix.Control.Route do
   def ambiguous?(_a, _b), do: false
 
   @doc """
+  The status a command declares for `reason`, else the default mapping.
+
+  This is the **one** reading of a command's `errors:` map: the REST frontal turns
+  it into the HTTP status, `kelictl` into an exit code (FW-5), and neither invents
+  its own table — a module that declares `no_did_available: 409` is a `409` and a
+  non-zero-in-its-own-right exit code, from a single declaration.
+
+  The default mapping covers what a module returns without declaring it:
+
+    * `:not_found` / `:unknown` / `:unknown_module` → `404`, nothing to act on;
+    * `:down` / `:timeout` → `503`: these are `Kelix.Module.safe_call/3` saying the
+      service is absent or wedged, which is the server's problem and not the
+      caller's — the retry semantics of a `400` would be exactly wrong;
+    * anything else → `400`, i.e. "the request was not usable".
+
+  A `reason` that is a tuple is keyed on its first element (`{:bad_offer, detail}`
+  matches a declared `bad_offer:`), so a module can carry a detail without losing
+  its declaration.
+  """
+  @spec error_status(command | map, term) :: 100..599
+  def error_status(command, reason) when is_map(command) do
+    case Map.get(Map.get(command, :errors, %{}), reason_key(reason)) do
+      status when is_integer(status) -> status
+      nil -> default_error_status(reason)
+    end
+  end
+
+  defp reason_key(reason) when is_atom(reason), do: reason
+
+  defp reason_key(reason) when is_tuple(reason) and tuple_size(reason) > 0 do
+    case elem(reason, 0) do
+      atom when is_atom(atom) -> atom
+      _ -> nil
+    end
+  end
+
+  defp reason_key(_reason), do: nil
+
+  defp default_error_status(reason) when reason in [:not_found, :unknown, :unknown_module],
+    do: 404
+
+  defp default_error_status(reason) when reason in [:down, :timeout], do: 503
+  defp default_error_status(_reason), do: 400
+
+  @doc """
   Render a `location:` template from a result map, e.g. `"/conferences/:uid"` with
   `%{uid: "c-1"}` → `{:ok, "/conferences/c-1"}`. `:error` when the result does not
   carry every param the template names (the frontal then omits the header rather

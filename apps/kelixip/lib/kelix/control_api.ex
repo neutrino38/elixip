@@ -336,7 +336,7 @@ defmodule Kelix.ControlAPI do
     do: created_or_ok(conn, name, command, "ok")
 
   defp respond_command(conn, _name, command, {:error, reason}),
-    do: json(conn, error_status(command, reason), %{error: error_message(reason)})
+    do: json(conn, Route.error_status(command, reason), %{error: error_message(reason)})
 
   # anything else (a bare map / term) keeps the pre-FW-4 behaviour
   defp respond_command(conn, _name, _command, other), do: respond(conn, other)
@@ -360,31 +360,8 @@ defmodule Kelix.ControlAPI do
 
   defp put_location(conn, _name, _template, _value), do: conn
 
-  # the declared status for this reason, else today's default mapping
-  defp error_status(command, reason) do
-    declared = Map.get(command, :errors, %{})
-
-    case Map.get(declared, reason_key(reason)) do
-      status when is_integer(status) -> status
-      nil -> default_error_status(reason)
-    end
-  end
-
-  defp reason_key(reason) when is_atom(reason), do: reason
-
-  defp reason_key(reason) when is_tuple(reason) and tuple_size(reason) > 0 do
-    case elem(reason, 0) do
-      atom when is_atom(atom) -> atom
-      _ -> nil
-    end
-  end
-
-  defp reason_key(_reason), do: nil
-
-  defp default_error_status(reason) when reason in [:not_found, :unknown, :unknown_module],
-    do: 404
-
-  defp default_error_status(_reason), do: 400
+  # The status for a reason is `Kelix.Control.Route.error_status/2` — shared with the
+  # CLI's exit-code mapping, so one declaration drives both frontals.
 
   defp error_message(reason) when is_atom(reason), do: to_string(reason)
   defp error_message(reason) when is_binary(reason), do: reason

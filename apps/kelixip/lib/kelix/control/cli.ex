@@ -12,9 +12,29 @@ defmodule Kelix.Control.CLI do
   `run/2` (parse → dispatch → `{exit_code, text}`) is the testable core; `main/1`
   prints the text and halts. Dispatch is local when the target is this node (so
   tests need no distribution) and `:rpc.call` otherwise.
+
+  ## Exit codes
+
+  | Code | Means |
+  |---|---|
+  | `0` | ok |
+  | `1` | the command failed, unclassified |
+  | `2` | usage, or an argument the command refused (a declared `400`) |
+  | `3` | no such object (a declared `404`) |
+  | `4` | conflict: it already exists, or is not empty (a declared `409`) |
+  | `5` | unavailable: the node, the module or its backend did not answer (a declared `5xx`) |
+
+  `3`/`4`/`5` come from the failing command's **own declaration** (`errors:` in its
+  `describe_control/0` entry, read through `Kelix.Control.Route.error_status/2`), so
+  the class an operator scripts against is the same one the REST frontal answers with
+  — FW-5, `docs/design/mcu_module.md` §8.3.6.
   """
 
   @default_node "kelixip@127.0.0.1"
+
+  @exit_not_found 3
+  @exit_conflict 4
+  @exit_unavailable 5
 
   @doc "Release entry point: run `argv`, print the output, halt with the exit code."
   @spec main([String.t()]) :: no_return
@@ -316,8 +336,22 @@ defmodule Kelix.Control.CLI do
   defp render_module(name, _cmd, {:error, :unknown_module}, _target),
     do: {1, "error: \"#{name}\" is neither a kelictl command nor a loaded module\n\n" <> usage()}
 
-  defp render_module(_name, _cmd, {:error, reason}, _target),
-    do: {1, "error: #{inspect(reason)}"}
+  # The CLI's own failures, not a module verdict: the node did not answer, or the call
+  # raised inside it. Nothing the operator's arguments can fix, and asking the registry
+  # to classify it would fail the same way — so they are `unavailable` outright.
+  defp render_module(_name, _cmd, {:error, {kind, _detail} = reason}, _target)
+       when kind in [:unreachable, :exception],
+       do: {@exit_unavailable, "error: #{inspect(reason)}"}
+
+  # A failed command exits with the class the module **declared** for that reason
+  # (FW-5): a provisioning script can tell "fix the command" from "it is not there"
+  # from "it already exists" from "try again later" without parsing the message, and
+  # the class is the same one the REST frontal answers with. One extra call, on the
+  # failure path only.
+  defp render_module(name, cmd, {:error, reason}, target),
+    do:
+      {exit_class(call(target, :command_error_status, [name, cmd, reason])),
+       "error: #{inspect(reason)}"}
 
   # A command may declare what its result should look like (`render:` in its
   # describe_control/0 entry): a table with named columns for a list, a labelled
@@ -328,6 +362,17 @@ defmodule Kelix.Control.CLI do
     do: {0, render_hinted(value, render_hint(target, name, cmd))}
 
   defp render_module(_name, _cmd, other, _target), do: {0, fmt(other)}
+
+  # The declared status, classified into the exit codes kelictl already uses. `2` keeps
+  # its meaning — a usage error and a refused argument are the same thing to whoever
+  # has to fix the command line — and each of the others is a case an operator acts on
+  # differently. A status no class claims stays the generic `1`.
+  defp exit_class(status) when status in 200..299, do: 0
+  defp exit_class(status) when status in [400, 422], do: 2
+  defp exit_class(404), do: @exit_not_found
+  defp exit_class(409), do: @exit_conflict
+  defp exit_class(status) when status in 500..599, do: @exit_unavailable
+  defp exit_class(_status), do: 1
 
   defp render_hint(target, module, cmd) do
     case call(target, :module_commands, [module]) do

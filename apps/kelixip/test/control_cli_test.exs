@@ -561,4 +561,92 @@ defmodule Kelix.Control.CLITest do
       assert out =~ "%{name: \"raw\"}"
     end
   end
+
+  # FW-5, second half: a failed module command exits with the class the module
+  # declared for that reason, so a provisioning script can branch on the exit code
+  # instead of grepping the message. The classes come from the same `errors:` map the
+  # REST frontal turns into HTTP statuses — one declaration, two frontals.
+  describe "exit codes from a command's declared errors" do
+    defmodule ExitCtl do
+      def describe_control() do
+        [
+          %{
+            name: "thing.create",
+            rest: {:post, "/things"},
+            status: 201,
+            errors: %{taken: 409, backend_down: 503, bad_shape: 400},
+            rw: :w,
+            args: [],
+            help: "create"
+          },
+          %{
+            name: "thing.show",
+            rest: {:get, "/things/:uid"},
+            rw: :r,
+            args: [%{name: "uid", required: true}],
+            help: "show"
+          }
+        ]
+      end
+
+      def handle_control("thing.create", %{"args" => [reason]}),
+        do: {:error, String.to_atom(reason)}
+
+      def handle_control("thing.create", _args), do: {:ok, %{uid: "t-1"}}
+      # a reason this command declares nothing for: the default mapping decides
+      def handle_control("thing.show", _args), do: {:error, :not_found}
+    end
+
+    setup do
+      Kelix.ModuleRegistry.register("exitmod", ExitCtl, %{})
+      :ok = Kelix.Control.Registry.register("exitmod", ExitCtl.describe_control())
+
+      on_exit(fn ->
+        Kelix.ModuleRegistry.unregister("exitmod")
+        Kelix.Control.Registry.deregister("exitmod")
+      end)
+    end
+
+    test "a declared 409 is a conflict (4), a declared 503 unavailable (5)" do
+      assert {4, out} = run(["exitmod", "thing.create", "taken"])
+      assert out =~ "taken"
+      assert {5, _} = run(["exitmod", "thing.create", "backend_down"])
+    end
+
+    test "a declared 400 is a bad argument (2), like a usage error" do
+      assert {2, _} = run(["exitmod", "thing.create", "bad_shape"])
+    end
+
+    test "an undeclared reason keeps the default mapping: :not_found → 3" do
+      assert {3, out} = run(["exitmod", "thing.show", "uid=t-9"])
+      assert out =~ "not_found"
+    end
+
+    # safe_call/3's own verdicts: the service is absent or wedged, which is the
+    # server's problem — a 400's "fix your request" would be exactly wrong.
+    test "a wedged or absent module is unavailable (5), declared or not" do
+      assert {5, _} = run(["exitmod", "thing.create", "down"])
+      assert {5, _} = run(["exitmod", "thing.create", "timeout"])
+    end
+
+    test "an undeclared, unclassifiable reason stays a bad argument (2)" do
+      assert {2, _} = run(["exitmod", "thing.create", "something_else"])
+    end
+
+    test "success is still 0" do
+      assert {0, _} = run(["exitmod", "thing.create"])
+    end
+
+    # An unknown module is not a module verdict: it prints the usage and keeps the
+    # generic 1, as it did before this mapping existed.
+    test "an unknown module is unchanged (1)" do
+      assert {1, out} = run(["ghostmod", "thing.create"])
+      assert out =~ "is neither a kelictl command nor a loaded module"
+    end
+
+    test "a node that does not answer is unavailable (5)" do
+      assert {5, out} = CLI.run(["exitmod", "thing.create"], :"ghost@127.0.0.1")
+      assert out =~ "unreachable"
+    end
+  end
 end
