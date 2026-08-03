@@ -4,7 +4,7 @@ defmodule SIPParser.MixProject do
   def project do
     [
       app: :elixip2,
-      version: "1.1.0",
+      version: "1.2.0",
       elixir: "~> 1.15",
       # Umbrella: share the root _build / config / deps / lockfile
       build_path: "../../_build",
