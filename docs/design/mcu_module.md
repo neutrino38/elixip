@@ -1687,10 +1687,12 @@ observations the script has no use for.
 
 ## 14. Delivery phases
 
-Status as of 2026-08-01: **P0′ through P5c are implemented**, each verified against
+Status as of 2026-08-03: **P0′ through P5c are implemented**, each verified against
 the live media server as well as against the recording stub. **S4 (§16.5) shipped
 out of order**, on the server *and* in the module, because it removes a whole class
-of configuration failure rather than adding a feature; P6 to P8 are open; **P9 shipped** (§8.3.8).
+of configuration failure rather than adding a feature; **P9 (§8.3.8) and TC shipped**
+likewise. What remains is **P6**, then **P7 and P8**, both gated on the server-side
+work of §16, and the deliberately-deferred items of §15.1.
 
 | Phase | Status | Content | Done when |
 |---|---|---|---|
@@ -1701,7 +1703,7 @@ of configuration failure rather than adding a feature; P6 to P8 are open; **P9 s
 | **P4** | ✔ | SDES + DTLS/ICE-lite legs | a WebRTC gateway leg joins |
 | **P5** | ✔ | `conference.update`, `participant.*`, metrics, orphan GC, MCU-restart recovery | §9 and §11 fully covered |
 | **P5b** | ✔ | **Conference lifecycle from a scenario** (§17): `create_conference/2`, `ensure_conference/3`, `update_conference/2`, `destroy_conference/1` as plain Elixir functions a script calls in-call, with creator ownership | a script creates a conference on an unknown DID, the caller joins it, and the conference goes away with the call that made it |
-| **P5c** | → | **Documentation** (§18): the design doc reconciled with what shipped, the operator/developer guides, and the "test without packaging" recipe | a reader who never saw this work can configure a node, dial a conference and drive it from a script, from the docs alone |
+| **P5c** | ✔ | **Documentation** (§18): the design doc reconciled with what shipped, the operator/developer guides, and the "test without packaging" recipe | a reader who never saw this work can configure a node, dial a conference and drive it from a script, from the docs alone |
 | **P6** |  | Packaging: `kelixip-mod-mcu` RPM/deb, sample config, docs | `dnf install kelixip-mod-mcu` + a config snippet gets a working conference |
 | **P7** |  | **Server-side (Mendooze), §16.1-16.2**: `StartRTPTimeout` RPC + MCU event types `3` (media timeout) and `4` (media connected); kelixip arms/disarms the watchdog after the answer and handles both events | unplugging a phone's network mid-call frees its slot and its mosaic tile within `rtp_timeout_ms`, and the adapter emits `:ice_connected` on real media — **L1 and L2 lifted** |
 | **P8** |  | **Server-side (Mendooze), §16.3**: `StartReceiving` returns `(recPort, fmtpByPt)`; kelixip deletes its local codec arbitration and moves `SetRTPProperties(codec.*)` before `StartReceiving` | the SDP answer carries the fmtp the MCU will actually use, verbatim — **L4 lifted**; mcuGold on the same server is unaffected |
@@ -1763,9 +1765,11 @@ Nothing blocking P1-P2. Deliberately left for later, in rough priority order:
    per-conference URL, retry policy);
 2. **outbound calls** into a conference (L6), gated on the B2BUA leg primitives;
 3. **conference persistence** across a kelixip restart (L5) — only worth doing
-   if scheduled/long-lived conferences become a requirement;
-4. **recording** the mix (`StartRecordingBroadcaster`), whose RPCs are already
-   tabulated in §3.
+   if scheduled/long-lived conferences become a requirement.
+
+Recording the mix was the fourth item of this list; it **shipped with P9** (§8.3.8),
+along with slot pinning and the empty-slot logo. What it left behind is narrower and
+recorded as L11-L14.
 
 The two *server-side* evolutions that close L1/L2/L4 are not "open questions":
 they are specified in §16 and scheduled as P7/P8.
