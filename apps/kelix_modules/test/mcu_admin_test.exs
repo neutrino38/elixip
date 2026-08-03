@@ -314,6 +314,51 @@ defmodule Kelix.Mod.McuAdminTest do
     end
   end
 
+  # The same rows an operator actually reads, through the CLI frontal: a participant
+  # carries two maps-of-maps (the negotiated medias, the per-media statistics) and a
+  # conference carries a list of them, and neither may come out as an inspected term.
+  describe "kelictl rendering of the participant views" do
+    setup do
+      Kelix.ModuleRegistry.register("mcu", Mcu, %{})
+      :ok = Kelix.Control.Registry.register("mcu", Mcu.describe_control())
+
+      on_exit(fn ->
+        Kelix.ModuleRegistry.unregister("mcu")
+        Kelix.Control.Registry.deregister("mcu")
+      end)
+    end
+
+    test "conference.show lists the participants as an indented roster table", ctx do
+      _part = join(ctx.uid)
+
+      {0, out} = Kelix.Control.CLI.run(["mcu", "conference.show", "uid=#{ctx.uid}"], node())
+
+      assert out =~ """
+             Participants:
+               part_id  name                     from                     state      joined_at
+               7        alice@phone_example_com  alice@phone.example.com  connected  \
+             """
+
+      # the media detail of a leg belongs to participant.show, so the roster keeps to
+      # the declared columns
+      refute out =~ "codec"
+    end
+
+    test "participant.show blocks out the negotiated medias and the statistics", ctx do
+      _part = join(ctx.uid)
+
+      {0, out} =
+        Kelix.Control.CLI.run(["mcu", "participant.show", "uid=#{ctx.uid}", "part_id=7"], node())
+
+      # one line per media, the key aligned — a single k=v line cannot show these
+      assert out =~ ~r/^Medias:\n  audio  codec=PCMA dtmf=false rec_port=52014 /m
+      assert out =~ ~r/^Stats:\n  audio  lost_recv_packets=0 num_recv_packets=100 /m
+      # the address pair reads as its elements, not as an Elixir tuple
+      assert out =~ "send=(192.168.1.50, 40000)"
+      refute out =~ "%{"
+    end
+  end
+
   describe "participant.update (the former `mute`)" do
     test "mutes the medias given, and only those", ctx do
       _part = join(ctx.uid)

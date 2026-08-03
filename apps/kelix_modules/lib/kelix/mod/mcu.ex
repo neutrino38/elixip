@@ -645,7 +645,9 @@ defmodule Kelix.Mod.Mcu do
           kind: :detail,
           fields:
             ~w(name domain did uid mcu conf_id stale created_at max_participants destroy_when_empty vad rate codecs video layout participants),
-          labels: @conference_labels
+          labels: @conference_labels,
+          # the roster, not the media detail of each leg — that is `participant.show`
+          nested: %{"participants" => %{columns: ~w(part_id name from state joined_at)}}
         },
         help: "Show one conference and its participants"
       },

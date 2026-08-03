@@ -388,34 +388,89 @@ defmodule Kelix.Control.CLI do
 
   defp render_hinted([], %{kind: :table}), do: "(none)"
 
-  defp render_hinted(rows, %{kind: :table, columns: columns} = hint) when is_list(rows) do
+  defp render_hinted(rows, %{kind: :table} = hint) when is_list(rows) do
     labels = Map.get(hint, :labels, %{})
-
-    table(columns, rows, fn row ->
-      Enum.map(columns, &dash(scalar(field(row, &1), [&1], labels)))
-    end)
+    table_of(rows, Map.get(hint, :columns) || derived_columns(rows), labels, [])
   end
 
   defp render_hinted(map, %{kind: :detail} = hint) when is_map(map) do
     labels = Map.get(hint, :labels, %{})
+    nested = Map.get(hint, :nested, %{})
     fields = detail_fields(map, Map.get(hint, :fields, []))
     width = fields |> Enum.map(&String.length(humanize(&1))) |> Enum.max(fn -> 0 end)
 
     Enum.map_join(fields, "\n", fn name ->
       label = String.pad_trailing(humanize(name) <> ":", width + 2)
 
-      case field(map, name) do
-        # a list of maps (e.g. the participants of a conference): numbered sub-blocks
-        [%{} | _] = list ->
-          String.trim_trailing(label) <> "\n" <> numbered_values(list, [name], labels)
-
-        value ->
-          label <> detail_value(value, [name], labels)
+      case field_layout(field(map, name), [name], labels, Map.get(nested, name, %{})) do
+        {:block, text} -> String.trim_trailing(label) <> "\n" <> indent(text)
+        {:inline, text} -> label <> text
       end
     end)
   end
 
   defp render_hinted(value, _hint), do: fmt(value)
+
+  # How one field of a detail view is laid out. A value that cannot honestly fit a
+  # line gets a block of its own under the label — that is the whole difference
+  # between a readable roster and an inspected term. Everything else stays inline, so
+  # the common case is still one field per line.
+  defp field_layout(value, path, labels, nested) do
+    cond do
+      # a list of uniform maps (the participants of a conference) reads as a table,
+      # for the same reason `conference.list` does
+      rows?(value) ->
+        columns = Map.get(nested, :columns) || derived_columns(value)
+        {:block, table_of(value, columns, labels, path)}
+
+      # a map keyed by something that is *data* (per-media negotiation, per-media
+      # statistics): one line per key, which a single k=v line cannot show
+      map_of_maps?(value) ->
+        {:block, keyed_block(value, path, labels)}
+
+      true ->
+        {:inline, detail_value(value, path, labels)}
+    end
+  end
+
+  # `path` prefixes the label lookup, so a nested table's columns are declared the
+  # way every other field is — `"participants.state"`.
+  defp table_of(rows, columns, labels, path) do
+    table(columns, rows, fn row ->
+      Enum.map(columns, &dash(cell(field(row, &1), path ++ [&1], labels)))
+    end)
+  end
+
+  # Columns a hint did not declare: every key the rows carry, sorted. A module gets a
+  # readable table without declaring one; declaring `columns:` is how it says *which*
+  # fields, and in what order.
+  defp derived_columns(rows) do
+    rows
+    |> Enum.flat_map(fn row -> Enum.map(row, fn {k, _v} -> to_string(k) end) end)
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  # One line per key, the keys aligned. The outer key is data (a media name), so it
+  # is **not** part of the label path: `"medias.codec"` is declared once, not once
+  # per media.
+  defp keyed_block(map, path, labels) do
+    entries = Enum.sort_by(map, fn {k, _v} -> to_string(k) end)
+    width = entries |> Enum.map(fn {k, _v} -> String.length(to_string(k)) end) |> Enum.max()
+
+    Enum.map_join(entries, "\n", fn {k, v} ->
+      String.pad_trailing(to_string(k), width) <> "  " <> detail_value(v, path, labels)
+    end)
+  end
+
+  defp rows?([_ | _] = list), do: Enum.all?(list, &(is_map(&1) and not is_struct(&1)))
+  defp rows?(_value), do: false
+
+  defp map_of_maps?(%{} = map) when not is_struct(map) do
+    map_size(map) > 0 and Enum.all?(map, fn {_k, v} -> is_map(v) and not is_struct(v) end)
+  end
+
+  defp map_of_maps?(_value), do: false
 
   # Declared order first — that is the hint's whole point — then whatever else the
   # result carries (a module may merge extra keys, e.g. participant statistics).
@@ -438,12 +493,12 @@ defmodule Kelix.Control.CLI do
   defp detail_value([], _path, _labels), do: "(none)"
 
   defp detail_value(list, path, labels) when is_list(list),
-    do: Enum.map_join(list, ", ", &scalar(&1, path, labels))
+    do: Enum.map_join(list, ", ", &sub_value(&1, path, labels))
 
   defp detail_value(%DateTime{} = dt, path, labels), do: dash(scalar(dt, path, labels))
 
   # a nested map (video, layout, codecs…) fits one line as k=v pairs
-  defp detail_value(%{} = map, path, labels) do
+  defp detail_value(%{} = map, path, labels) when not is_struct(map) do
     map
     |> Enum.sort_by(fn {k, _v} -> to_string(k) end)
     |> Enum.map_join(" ", fn {k, v} ->
@@ -453,16 +508,35 @@ defmodule Kelix.Control.CLI do
 
   defp detail_value(value, path, labels), do: dash(scalar(value, path, labels))
 
+  # A table cell is one line by construction, so a value that would block is
+  # compacted instead: `;` between the entries of a map, `,` between the items of a
+  # list. Nothing here may emit a newline.
+  defp cell([], _path, _labels), do: nil
+
+  defp cell(%DateTime{} = dt, path, labels), do: scalar(dt, path, labels)
+
+  defp cell(%{} = map, path, labels) when not is_struct(map) do
+    map
+    |> Enum.sort_by(fn {k, _v} -> to_string(k) end)
+    |> Enum.map_join(";", fn {k, v} -> "#{k}=#{sub_value(v, path ++ [to_string(k)], labels)}" end)
+  end
+
+  defp cell(list, path, labels) when is_list(list),
+    do: Enum.map_join(list, ",", &sub_value(&1, path, labels))
+
+  defp cell(value, path, labels), do: scalar(value, path, labels)
+
   defp sub_value(list, path, labels) when is_list(list),
-    do: Enum.map_join(list, ",", &scalar(&1, path, labels))
+    do: Enum.map_join(list, ",", &sub_value(&1, path, labels))
+
+  defp sub_value(%DateTime{} = dt, path, labels), do: scalar(dt, path, labels)
+
+  # One level deeper than an inline k=v pair: parenthesised, or the inner pairs would
+  # read as belonging to the enclosing map.
+  defp sub_value(%{} = map, path, labels) when not is_struct(map),
+    do: "(" <> detail_value(map, path, labels) <> ")"
 
   defp sub_value(value, path, labels), do: scalar(value, path, labels)
-
-  defp numbered_values(list, path, labels) do
-    list
-    |> Enum.with_index(1)
-    |> Enum.map_join("\n", fn {row, i} -> "  #{i}. " <> detail_value(row, path, labels) end)
-  end
 
   # One displayable value. An enum integer gets the human name its command declared
   # (`labels: %{"video.size" => %{"6" => "hd720p"}}`); a timestamp loses its
@@ -477,6 +551,13 @@ defmodule Kelix.Control.CLI do
       nil -> to_string(value)
       names -> Map.get(names, to_string(value), to_string(value))
     end
+  end
+
+  # A positional aggregate — an address pair, say. Shown as its elements rather than
+  # as Elixir syntax; it is deliberately *not* rendered as `host:port`, since what the
+  # positions mean is the module's knowledge and not the CLI's.
+  defp scalar(value, path, labels) when is_tuple(value) do
+    "(" <> (value |> Tuple.to_list() |> Enum.map_join(", ", &scalar(&1, path, labels))) <> ")"
   end
 
   defp scalar(value, _path, _labels), do: inspect(value)

@@ -53,6 +53,12 @@ defmodule Kelix.Module do
   declared `fields:` first. `labels:` maps a dotted field path to `%{"raw" =>
   "human"}` value names (`"video.size" => %{"6" => "hd720p"}`) — everything is
   strings so the hint survives both the RPC and the JSON encoding of `GET /modules`.
+
+  In a `:detail` view a field holding a list of maps becomes an indented table and
+  one holding a map of maps an indented block, since neither fits a line. `nested:`
+  picks the columns of such a table (`%{"participants" => %{columns: [...]}}`);
+  without it they are derived from the rows, so a module gets a readable block
+  whether or not it declares one.
   """
   @type control_command :: %{
           required(:name) => String.t(),
@@ -67,7 +73,8 @@ defmodule Kelix.Module do
             required(:kind) => :table | :detail,
             optional(:columns) => [String.t()],
             optional(:fields) => [String.t()],
-            optional(:labels) => %{optional(String.t()) => %{optional(String.t()) => String.t()}}
+            optional(:labels) => %{optional(String.t()) => %{optional(String.t()) => String.t()}},
+            optional(:nested) => %{optional(String.t()) => %{optional(:columns) => [String.t()]}}
           }
         }
 

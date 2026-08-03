@@ -459,13 +459,24 @@ defmodule Kelix.Control.CLITest do
             args: [%{name: "uid", required: true}],
             render: %{
               kind: :detail,
-              fields: ~w(name domain video layout members),
+              fields: ~w(name domain video layout members medias),
               labels: %{
                 "video.size" => %{"6" => "hd720p"},
-                "layout.comp" => %{"0" => "1x1"}
-              }
+                "layout.comp" => %{"0" => "1x1"},
+                # a dotted path reaches a column of a *nested* table too
+                "members.state" => %{"ringing" => "alerting"}
+              },
+              nested: %{"members" => %{columns: ~w(id name state)}}
             },
             help: "Show one thing"
+          },
+          %{
+            name: "thing.derived",
+            rest: {:get, "/things/derived"},
+            rw: :r,
+            args: [],
+            render: %{kind: :detail, fields: ~w(members)},
+            help: "A detail view that declares no columns for its nested list"
           },
           %{
             name: "thing.raw",
@@ -500,10 +511,21 @@ defmodule Kelix.Control.CLITest do
            video: %{size: 6, fps: 15},
            layout: %{comp: 0, auto: true},
            codecs: %{audio: ["OPUS", "PCMA"]},
-           members: [%{name: "alice", state: :connected}],
+           members: [
+             %{id: 1, name: "alice", state: :connected},
+             %{id: 2, name: "bob", state: :ringing}
+           ],
+           # a map keyed by data, whose values are maps: one line per key
+           medias: %{
+             audio: %{codec: "PCMA", send: {"10.0.0.9", 40_000}},
+             video: %{codec: "H264", send: {"10.0.0.9", 40_002}}
+           },
            stale: false
          }}
       end
+
+      def handle_control("thing.derived", _args),
+        do: {:ok, %{members: [%{name: "alice", state: :connected}]}}
 
       def handle_control("thing.raw", _args), do: {:ok, %{name: "raw"}}
     end
@@ -534,26 +556,59 @@ defmodule Kelix.Control.CLITest do
 
     test "a :detail hint renders one labelled line per field, declared order first" do
       {0, out} = run(["rmod", "thing.show"])
-      lines = String.split(out, "\n")
 
       # declared fields lead, whatever else the result carries follows (sorted)
-      assert [
-               "Name:" <> _,
-               "Domain:" <> _,
-               "Video:" <> _,
-               "Layout:" <> _,
-               "Members:" <> _,
-               _member_row,
-               "Codecs:" <> _,
-               "Stale:" <> _
-             ] = lines
+      assert ["Name:" <> _, "Domain:" <> _, "Video:" <> _, "Layout:" <> _, "Members:" <> _ | _] =
+               String.split(out, "\n")
 
       # nested maps fit one line as k=v pairs, enum labels applied by dotted path
       assert out =~ ~r/Video:\s+fps=15 size=hd720p/
       assert out =~ ~r/Layout:\s+auto=true comp=1x1/
       assert out =~ ~r/Codecs:\s+audio=OPUS,PCMA/
-      # a list of maps becomes numbered sub-blocks
-      assert out =~ ~r/Members:\n  1\. name=alice state=connected/
+      # what the result carries but the hint does not declare still shows up
+      assert out =~ ~r/Stale:\s+false/
+    end
+
+    # A list of maps and a map of maps are the two shapes no line can hold: they were
+    # what came out as an inspected term, and each now gets a block of its own.
+    test "a field holding a list of maps becomes an indented table of the declared columns" do
+      {0, out} = run(["rmod", "thing.show"])
+
+      assert out =~ """
+             Members:
+               id  name   state
+               1   alice  connected
+               2   bob    alerting
+             """
+
+      # `members.state` renamed ringing → alerting: a dotted path reaches a nested
+      # column exactly as it reaches a top-level field
+      refute out =~ "ringing"
+    end
+
+    test "a field holding a map of maps becomes one aligned line per key" do
+      {0, out} = run(["rmod", "thing.show"])
+
+      # the key (a media name) is data, so it is a column, not a label; and an address
+      # pair reads as its elements rather than as an Elixir tuple
+      assert out =~ """
+             Medias:
+               audio  codec=PCMA send=(10.0.0.9, 40000)
+               video  codec=H264 send=(10.0.0.9, 40002)
+             """
+
+      refute out =~ "%{"
+    end
+
+    test "a nested list with no declared columns derives them from the rows" do
+      {0, out} = run(["rmod", "thing.derived"])
+
+      assert out ==
+               String.trim_trailing("""
+               Members:
+                 name   state
+                 alice  connected
+               """)
     end
 
     test "a command without a render hint keeps the raw term" do

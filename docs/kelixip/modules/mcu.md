@@ -211,6 +211,30 @@ declaration into its exit code (`3` not found, `4` conflict, `5` unavailable, `2
 bad argument) — see
 [administration.md](../administration.md#exit-codes).
 
+On the CLI each of these renders as text, from the same declaration: a list is a
+table of the columns that identify a row, and `show` is one `Label: value` per
+line, with the wire integers of §3.6 spelled out (`size=hd720p`, `comp=2x2`,
+`vad=basic`) — the API and the XML-RPC keep the numbers.
+
+```
+$ kelictl mcu conference.list domain=example.com
+name    domain       did   uid         max_participants  created_at
+Weekly  example.com  8000  c-3f9a2b10  8                 2026-08-03 09:59:39Z
+
+$ kelictl mcu conference.show uid=c-3f9a2b10
+Name:               Weekly
+Domain:             example.com
+…
+Layout:             auto=true comp=2x2 size=hd720p
+Participants:
+  part_id  name   from                     state      joined_at
+  7        alice  alice@phone.example.com  connected  2026-08-03 10:02:11Z
+```
+
+The media detail of a leg is one level down, in `participant.show`, where the
+negotiated medias and the media server's own per-media statistics each get a
+block (one line per media).
+
 `kelictl status` carries the module's own line, and `stale` is the count of
 conferences whose media server went away (their DID answers `503` until it
 returns, then they are recreated with the same `uid`):
