@@ -5,6 +5,10 @@ learns to process calls — a new **mcu** conference module, the UAS INVITE path
 hardened against real proxies and NATs, and a reworked kelictl/REST control
 surface.
 
+The MCU is the old-style one with decoding/encoding, image composition on the
+server. However it has been renovated and is one of the few Total Conversation
+capable MCU with full realtime text (T.140) support and a real text mixer.
+
 ## Framework changes
 
 - media: symmetric-NAT latching — the media server can be asked to re-target its
