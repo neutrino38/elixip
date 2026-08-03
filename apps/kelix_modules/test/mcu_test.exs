@@ -25,7 +25,12 @@ defmodule Kelix.Mod.McuTest do
       )
 
     {:ok, config} = Config.parse(block)
-    start_supervised!({Mcu, config: config, module_name: "mcu", mediaservers: @mediaservers})
+
+    start_supervised!(
+      {Mcu,
+       [config: config, module_name: "mcu", mediaservers: @mediaservers] ++
+         Keyword.take(opts, [:pool])}
+    )
 
     transport = TestStub.transport(self(), Keyword.get(opts, :returns, %{}))
 
@@ -520,6 +525,56 @@ defmodule Kelix.Mod.McuTest do
       assert reply.warning =~ "matches no call rule"
       # the conference is still created — the operator's dial plan is theirs to fix
       assert {:ok, _} = Mcu.lookup_did(@domain, "1234")
+    end
+  end
+
+  # This module's control channel is permanent, so it sees a media server die within
+  # its reconnect cycle where the pool's periodic probe may be a cycle away (§9). Each
+  # transition is pushed to the pool, which otherwise keeps handing the MCU out to the
+  # router for point-to-point calls — those go through the pool, not through here.
+  describe "MCU health → media pool" do
+    setup do
+      test = self()
+
+      # A probe that never answers: what the pool believes is then exactly what the
+      # module's hint told it, with no probe verdict racing the assertions.
+      pool = [%{name: "mcu1", module: :mendooze, url: "http://127.0.0.1:18080", enabled: true}]
+      mp = :"mp_#{System.unique_integer([:positive])}"
+
+      probe = fn e ->
+        send(test, {:probing, e.name})
+
+        receive do
+          :answer -> true
+        after
+          5_000 -> false
+        end
+      end
+
+      start_supervised!(
+        {Kelix.MediaPool, name: mp, pool: pool, probe: probe, first_check_ms: 60_000}
+      )
+
+      start_mcu(pool: mp)
+      %{pool: mp}
+    end
+
+    test "a lost event stream takes the entry out of the pool as well", %{pool: mp} do
+      assert {:ok, %{name: "mcu1"}} = Kelix.MediaPool.checkout(mp)
+
+      send(Mcu, {:mcu_event_stream_down, "mcu1"})
+
+      wait_until(fn -> match?([%{healthy: false}], Kelix.MediaPool.status(mp)) end)
+      assert Kelix.MediaPool.checkout(mp) == {:error, :no_mcu}
+    end
+
+    test "the hint reaches the pool named in the module's options, not the singleton",
+         %{pool: mp} do
+      # the node's own (empty) pool must be untouched by a test-owned module
+      send(Mcu, {:mcu_event_stream_down, "mcu1"})
+
+      wait_until(fn -> match?([%{healthy: false}], Kelix.MediaPool.status(mp)) end)
+      assert Kelix.MediaPool.status() == []
     end
   end
 

@@ -15,6 +15,14 @@ defmodule Kelix.Mod.Mcu do
   its `enabled` switch, while the health that decides is this module's own control
   channel.
 
+  That channel is also the fastest detector on the node — it is permanent, so it
+  sees a media server die within its reconnect cycle, where the pool's periodic
+  probe may be a cycle away. Every health *transition* therefore calls
+  `Kelix.MediaPool.recheck/3`. That call is a trigger, not a verdict: the pool
+  re-measures on its own channel and keeps owning `healthy` (`Kelix.MediaPool`).
+  The direction matters — this module depends on `:kelixip`, never the reverse, so
+  the core keeps working with no module loaded, only slower to notice.
+
   ## What lives where
 
   Conferences are held in **ETS**, not in this process's state: the hot path is one
@@ -1446,6 +1454,7 @@ defmodule Kelix.Mod.Mcu do
 
           status == :up ->
             Event.emit(:"mediaserver.up", nil, %{mcu: name})
+            Kelix.MediaPool.recheck(name, :up, state.pool)
             # §9.2 then §9.4, in that order: recreate what is ours before sweeping
             # what is not, or the sweep would delete the conferences we are about to
             # rebuild.
@@ -1454,6 +1463,9 @@ defmodule Kelix.Mod.Mcu do
 
           true ->
             Event.emit(:"mediaserver.down", nil, %{mcu: name, reason: :unreachable})
+            # Before the teardown below, not after: the pool must stop handing this
+            # MCU out for new calls while we clean up the ones it just lost.
+            Kelix.MediaPool.recheck(name, :down, state.pool)
             mark_stale(name)
             notify_mcu_lost(name)
         end
