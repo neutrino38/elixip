@@ -802,6 +802,21 @@ by scripts.
 > the script raises on its first facade call and the request goes **unanswered**, so
 > boot (and `domain reload-all`) now warns when a domain enables a function whose
 > same-named module is not loaded (`warn_missing_function_modules/0`).
+>
+> The same rule bites **one level further in**, which is what the `mcu` module found:
+> a module of any size is spread over several beams (`Kelix.Mod.Mcu` calls
+> `Kelix.Mod.Mcu.Config`, `.Client`, `.Conference`…), and in embedded mode the first
+> call to a companion raises `UndefinedFunctionError` — at boot, inside
+> `validate_config/1`, so the node never comes up. `ensure_loaded/1` therefore loads
+> the **companions** as well: every beam sharing the module's namespace prefix, taken
+> from the directory the module's own beam came from (`:code.which/1`), so it works
+> for a module installed in `module_dir` and for one built in place. `reload_code/1`
+> refreshes them too — a package installs `Mcu.beam` and `Mcu.Config.beam` together,
+> and reloading only the named one would run new code against a stale companion. The
+> registrar never hit this: its only companion is a struct, a compiled literal that is
+> never called. Tested in `apps/kelixip/test/module_dir_test.exs`, which drops a
+> two-beam module in a directory and asserts the companion is loaded *before* anything
+> calls it — the only part of embedded mode reproducible in an interactive test.
 
 ### 8.1 `Kelix.Module` behaviour
 

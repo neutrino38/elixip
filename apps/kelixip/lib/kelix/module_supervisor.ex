@@ -145,7 +145,8 @@ defmodule Kelix.ModuleSupervisor do
   end
 
   @doc """
-  Make `module` usable, loading it from the code path if needed.
+  Make `module` usable, loading it **and the beams it is implemented with** from the
+  code path if needed.
 
   `Code.ensure_loaded?/1` is **not enough in a release**: the code server then runs
   in *embedded* mode, where it never searches the code path — it answers
@@ -154,13 +155,65 @@ defmodule Kelix.ModuleSupervisor do
   is therefore an explicit act: try the implicit path first (dev/test, interactive
   mode), then `:code.load_file/1`, which searches the path in both modes.
 
+  The same reasoning applies one step further, and that step is what the `mcu` module
+  first tripped on: a module of any size is spread over several beams
+  (`Kelix.Mod.Mcu` calls `Kelix.Mod.Mcu.Config`, `.Client`, `.Conference`…), and in
+  embedded mode the *first call* to a companion raises `UndefinedFunctionError`
+  instead of loading it — a crash at boot, in `validate_config/1`, before anything
+  is running. So the **companions are loaded too**: every beam sharing the module's
+  namespace prefix, taken from the directory the module itself came from. A load
+  failure there is logged and tolerated — a stale or half-installed companion must
+  not be reported as "this module is fine".
+
+  The registrar never hit this: its only companion is a struct, i.e. a compiled
+  literal that is never called.
+
   Consequence worth knowing when writing scripts: a script that calls a module's
   facade needs that module **configured** (`[module.<name>]`) — that block is what
   gets it loaded. There is no lazy loading to fall back on in a release.
   """
   @spec ensure_loaded(module) :: boolean
   def ensure_loaded(module) when is_atom(module) do
-    Code.ensure_loaded?(module) or match?({:module, ^module}, :code.load_file(module))
+    if load_one(module) do
+      Enum.each(companions(module), &load_one/1)
+      true
+    else
+      false
+    end
+  end
+
+  defp load_one(module) do
+    Code.ensure_loaded?(module) or
+      case :code.load_file(module) do
+        {:module, ^module} ->
+          true
+
+        {:error, reason} ->
+          Logger.warning(
+            module: __MODULE__,
+            message: "could not load #{inspect(module)}: #{inspect(reason)}"
+          )
+
+          false
+      end
+  end
+
+  # The beams sharing `module`'s namespace, found next to its own beam rather than by
+  # asking the config: what a module is implemented with is decided by what was
+  # *installed*, and `:code.which/1` names the very file the module was loaded from —
+  # so this keeps working for a module that came from the build path in dev.
+  defp companions(module) do
+    with path when is_list(path) <- :code.which(module),
+         dir = Path.dirname(List.to_string(path)),
+         prefix = Atom.to_string(module) do
+      dir
+      |> Path.join(prefix <> ".*.beam")
+      |> Path.wildcard()
+      |> Enum.map(&String.to_atom(Path.basename(&1, ".beam")))
+    else
+      # :non_existing (defined in a test, never on disk), :preloaded, :cover_compiled
+      _ -> []
+    end
   end
 
   # function → the modules its reference script needs. `registrar` needs two: the
@@ -215,11 +268,22 @@ defmodule Kelix.ModuleSupervisor do
   # fine for a module that has no `.beam` of its own (defined in a test, or part of
   # a release's own code): there is simply nothing to re-read.
   #
+  # The companions are re-read too, and for a sharper reason than at load time: a
+  # package installs `Mcu.beam` and `Mcu.Config.beam` together, so reloading only the
+  # named one would run new code against a stale companion — a mismatch harder to
+  # diagnose than an outright failure to load. Collected *before* the purge, since
+  # `:code.which/1` cannot name the file of a module that is no longer loaded.
+  #
   # Note (§16.2): this replaces the *code*; a service that implements `reload/2`
   # keeps its state and adopts the new code on its next fully-qualified call, while
   # one without it is restarted cleanly just below. Full `code_change`-style state
   # migration is out of basic scope.
   defp reload_code(module) do
+    Enum.each([module | companions(module)], &purge_and_load/1)
+    :ok
+  end
+
+  defp purge_and_load(module) do
     :code.purge(module)
 
     case :code.load_file(module) do
