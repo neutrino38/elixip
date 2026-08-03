@@ -81,15 +81,24 @@ port = 9095
 #did_range        = "8000-8099"     # pool for a create that omits `did`; per-domain
                                    #   override: did_ranges = { "example.com" = "8100-8199" }
 #max_participants = 20              # reached => the next caller gets 486
+#destroy_when_empty = false         # destroy a conference with its last participant
 #vad              = "basic"         # none | basic | full — names, not wire integers
 #rate             = 32000           # mixer rate; participants are resampled to it
-#audio_codecs     = ["OPUS", "G722", "PCMA", "PCMU"]
+#audio_codecs     = ["OPUS", "G722", "PCMA", "PCMU", "TELEPHONE-EVENT"]
+                                   #   TELEPHONE-EVENT is the DTMF switch (RFC 4733),
+                                   #   not a codec: an explicit list without it turns
+                                   #   DTMF off (it is on by default)
 #video_codecs     = ["H264"]        # H264 | VP8
 #text_codecs      = ["T140RED", "T140"]   # T.140; [] answers m=text with port 0
 #auto_layout      = true            # the mosaic follows the number of video legs
 #layout_comp      = "2x2"           # starting mosaic when auto_layout is off
 #video_size       = "hd720p"
+#video_fps        = 15
 #video_bitrate    = 1024            # kbps, also the cap on the answer's b=AS:
+#video_intra_period = 300           # frames between intra-frames
+#video_fmtp       = "profile-level-id=42e01f;packetization-mode=1"
+                                   #   H.264 profile the answer states when the offer
+                                   #   states none; a reflected profile always wins
 # Paths on the MEDIA SERVER's filesystem, not on this host (the same box in a
 # single-machine deployment, and not in production). The module only ever appends a
 # file name it validated; a command chooses the name, never the directory. Unset
@@ -97,6 +106,11 @@ port = 9095
 #record_dir       = "/var/lib/mediaserver/rec"
 #image_dir        = "/var/lib/mediaserver/img"
 #logo_file        = "logo.png"      # drawn in every EMPTY mosaic slot, every conference
+#xmlrpc_timeout_ms = 10000          # per-RPC bound towards the media server
+#call_timeout_ms  = 5000            # upper bound on a facade call
+#shutdown_grace_ms = 5000           # grace given to live conferences at module stop
+#rtp_timeout_ms   = 10000           # RTP inactivity watchdog (needs media server support)
+#gc_orphans       = true            # sweep, at start, conferences no kelixip owns
 # /usr/share/doc/kelixip-mod-mcu/ has the whole block key by key (mcu.md), the
 # control surface and what to look at when a call does not join (mcu_module_guide.md).
 

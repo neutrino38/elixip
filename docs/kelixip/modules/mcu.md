@@ -67,7 +67,7 @@ Module block — `[module.mcu]` (in `config.toml`):
 |---|---|---|---|
 | `vad` | name or integer | `basic` | Voice activity detection: `none` / `basic` / `full` (or `0` / `1` / `2`) |
 | `rate` | integer | `32000` | Mixer sampling rate: `8000`/`16000`/`32000`/`48000`. Participants are resampled to it — not a codec constraint |
-| `audio_codecs` | list | `["OPUS","G722","PCMA","PCMU"]` | Accepted audio codecs. `TELEPHONE-EVENT` in the list is the **DTMF switch** (RFC 4733), not a mixer codec |
+| `audio_codecs` | list | `["OPUS","G722","PCMA","PCMU","TELEPHONE-EVENT"]` | Accepted audio codecs. `TELEPHONE-EVENT` in the list is the **DTMF switch** (RFC 4733), not a mixer codec — on by default; an explicit list that omits it turns DTMF off |
 | `video_codecs` | list | `["H264"]` | Accepted video codecs (`H264`, `VP8`) |
 | `text_codecs` | list | `["T140RED","T140"]` | T.140 real-time text, redundancy first. `[]` turns text off (its `m=text` is answered port 0) |
 | `max_participants` | integer | `20` | Per-conference cap; reached ⇒ the next caller gets `486` |
