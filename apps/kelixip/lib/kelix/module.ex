@@ -45,6 +45,14 @@ defmodule Kelix.Module do
 
   A command that declares none of them, with a single-segment template, behaves
   exactly as it did before FW-4.
+
+  `render:` — OPTIONAL — is how a command tells the **CLI** what its result should
+  look like, keeping `kelictl` module-agnostic (the REST frontal ignores it, JSON
+  is already structured). `kind: :table` renders a list of maps as a table of the
+  named `columns:`; `kind: :detail` renders one map as `Label: value` lines, the
+  declared `fields:` first. `labels:` maps a dotted field path to `%{"raw" =>
+  "human"}` value names (`"video.size" => %{"6" => "hd720p"}`) — everything is
+  strings so the hint survives both the RPC and the JSON encoding of `GET /modules`.
   """
   @type control_command :: %{
           required(:name) => String.t(),
@@ -54,7 +62,13 @@ defmodule Kelix.Module do
           required(:help) => String.t(),
           optional(:status) => 100..599,
           optional(:location) => String.t(),
-          optional(:errors) => %{optional(atom) => 100..599}
+          optional(:errors) => %{optional(atom) => 100..599},
+          optional(:render) => %{
+            required(:kind) => :table | :detail,
+            optional(:columns) => [String.t()],
+            optional(:fields) => [String.t()],
+            optional(:labels) => %{optional(String.t()) => %{optional(String.t()) => String.t()}}
+          }
         }
 
   # Validate the [module.<name>] block BEFORE starting/reconfiguring anything. An

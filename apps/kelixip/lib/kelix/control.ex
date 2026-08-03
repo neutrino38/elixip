@@ -463,7 +463,7 @@ defmodule Kelix.Control do
   # back to), and the optional keys get theirs. A frontal formats; it does not
   # interpret.
   defp described_command(cmd) do
-    %{
+    described = %{
       name: cmd.name,
       methods: Kelix.Control.Route.methods(cmd),
       path: Kelix.Control.Route.template(cmd),
@@ -477,6 +477,12 @@ defmodule Kelix.Control do
       status: Map.get(cmd, :status, 200),
       errors: Map.get(cmd, :errors, %{})
     }
+
+    # only when declared: most commands have none, and the CLI is its only reader
+    case Map.get(cmd, :render) do
+      nil -> described
+      render -> Map.put(described, :render, render)
+    end
   end
 
   @doc """

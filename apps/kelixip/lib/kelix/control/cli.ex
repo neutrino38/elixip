@@ -39,8 +39,17 @@ defmodule Kelix.Control.CLI do
   @spec run([String.t()], node) :: {non_neg_integer, String.t()}
   def run(argv, target \\ resolve_node()) do
     case parse(argv) do
-      {:ok, tag, fun, args} -> render(tag, call(target, fun, args))
-      {:error, msg} -> {2, msg}
+      # A module command's rendering may be declared by the module itself (the
+      # `render:` hint, §8.3.6); resolving it needs the target node, so this one
+      # cannot go through the pure render/2.
+      {:ok, {:module, module, cmd}, fun, args} ->
+        render_module(module, cmd, call(target, fun, args), target)
+
+      {:ok, tag, fun, args} ->
+        render(tag, call(target, fun, args))
+
+      {:error, msg} ->
+        {2, msg}
     end
   end
 
@@ -114,7 +123,7 @@ defmodule Kelix.Control.CLI do
 
   # module-contributed command: <module> <cmd> [args…]
   defp parse([module, cmd | rest]),
-    do: {:ok, {:module, module}, :module_command, [module, cmd, %{"args" => rest}]}
+    do: {:ok, {:module, module, cmd}, :module_command, [module, cmd, %{"args" => rest}]}
 
   defp parse(_), do: {:error, usage()}
 
@@ -139,12 +148,6 @@ defmodule Kelix.Control.CLI do
   end
 
   # ── rendering ({tag, result} → {exit_code, text}) ────────────────────────────
-
-  # `<module> <cmd>` is also where an unrecognised built-in lands (a mistyped or
-  # over-qualified command such as `kelictl domains graceful-shutdown`), so name
-  # what was not found and show the usage rather than a bare :unknown_module.
-  defp render({:module, name}, {:error, :unknown_module}),
-    do: {1, "error: \"#{name}\" is neither a kelictl command nor a loaded module\n\n" <> usage()}
 
   defp render({:module_help, name}, {:error, :unknown_module}),
     do: {1, "error: no module named \"#{name}\" is loaded (kelictl module list)"}
@@ -301,10 +304,139 @@ defmodule Kelix.Control.CLI do
     {exit_map(result), Enum.map_join(result, "\n", fn {k, v} -> "#{k}: #{fmt(v)}" end)}
   end
 
-  defp render({:module, _name}, {:ok, value}), do: {0, fmt(value)}
   defp render(:ok, :ok), do: {0, "ok"}
   defp render(:ok, :notfound), do: {1, "not found"}
   defp render(_tag, other), do: {0, fmt(other)}
+
+  # ── module-command rendering (declaration-driven, design §8.3.6) ──────────────
+
+  # `<module> <cmd>` is also where an unrecognised built-in lands (a mistyped or
+  # over-qualified command such as `kelictl domains graceful-shutdown`), so name
+  # what was not found and show the usage rather than a bare :unknown_module.
+  defp render_module(name, _cmd, {:error, :unknown_module}, _target),
+    do: {1, "error: \"#{name}\" is neither a kelictl command nor a loaded module\n\n" <> usage()}
+
+  defp render_module(_name, _cmd, {:error, reason}, _target),
+    do: {1, "error: #{inspect(reason)}"}
+
+  # A command may declare what its result should look like (`render:` in its
+  # describe_control/0 entry): a table with named columns for a list, a labelled
+  # detail view for a map. No declaration → the raw term, as before. The hint comes
+  # from the target's registry, so the CLI stays module-agnostic — it formats what
+  # the module declared, it never interprets.
+  defp render_module(name, cmd, {:ok, value}, target),
+    do: {0, render_hinted(value, render_hint(target, name, cmd))}
+
+  defp render_module(_name, _cmd, other, _target), do: {0, fmt(other)}
+
+  defp render_hint(target, module, cmd) do
+    case call(target, :module_commands, [module]) do
+      {:ok, %{commands: commands}} ->
+        Enum.find_value(commands, fn c -> c.name == cmd && Map.get(c, :render) end)
+
+      _ ->
+        nil
+    end
+  end
+
+  defp render_hinted(value, nil), do: fmt(value)
+
+  defp render_hinted([], %{kind: :table}), do: "(none)"
+
+  defp render_hinted(rows, %{kind: :table, columns: columns} = hint) when is_list(rows) do
+    labels = Map.get(hint, :labels, %{})
+
+    table(columns, rows, fn row ->
+      Enum.map(columns, &dash(scalar(field(row, &1), [&1], labels)))
+    end)
+  end
+
+  defp render_hinted(map, %{kind: :detail} = hint) when is_map(map) do
+    labels = Map.get(hint, :labels, %{})
+    fields = detail_fields(map, Map.get(hint, :fields, []))
+    width = fields |> Enum.map(&String.length(humanize(&1))) |> Enum.max(fn -> 0 end)
+
+    Enum.map_join(fields, "\n", fn name ->
+      label = String.pad_trailing(humanize(name) <> ":", width + 2)
+
+      case field(map, name) do
+        # a list of maps (e.g. the participants of a conference): numbered sub-blocks
+        [%{} | _] = list ->
+          String.trim_trailing(label) <> "\n" <> numbered_values(list, [name], labels)
+
+        value ->
+          label <> detail_value(value, [name], labels)
+      end
+    end)
+  end
+
+  defp render_hinted(value, _hint), do: fmt(value)
+
+  # Declared order first — that is the hint's whole point — then whatever else the
+  # result carries (a module may merge extra keys, e.g. participant statistics).
+  defp detail_fields(map, declared) do
+    all = map |> Map.keys() |> Enum.map(&to_string/1)
+    declared = Enum.filter(declared, &(&1 in all))
+    declared ++ Enum.sort(all -- declared)
+  end
+
+  # Result maps are atom-keyed but the hint travels as strings (it must survive
+  # both the RPC and the JSON of GET /modules): match on the printed name rather
+  # than minting atoms on the CLI side.
+  defp field(map, name) do
+    case Enum.find(map, fn {k, _v} -> to_string(k) == name end) do
+      {_k, v} -> v
+      nil -> nil
+    end
+  end
+
+  defp detail_value([], _path, _labels), do: "(none)"
+
+  defp detail_value(list, path, labels) when is_list(list),
+    do: Enum.map_join(list, ", ", &scalar(&1, path, labels))
+
+  defp detail_value(%DateTime{} = dt, path, labels), do: dash(scalar(dt, path, labels))
+
+  # a nested map (video, layout, codecs…) fits one line as k=v pairs
+  defp detail_value(%{} = map, path, labels) do
+    map
+    |> Enum.sort_by(fn {k, _v} -> to_string(k) end)
+    |> Enum.map_join(" ", fn {k, v} ->
+      "#{k}=#{sub_value(v, path ++ [to_string(k)], labels)}"
+    end)
+  end
+
+  defp detail_value(value, path, labels), do: dash(scalar(value, path, labels))
+
+  defp sub_value(list, path, labels) when is_list(list),
+    do: Enum.map_join(list, ",", &scalar(&1, path, labels))
+
+  defp sub_value(value, path, labels), do: scalar(value, path, labels)
+
+  defp numbered_values(list, path, labels) do
+    list
+    |> Enum.with_index(1)
+    |> Enum.map_join("\n", fn {row, i} -> "  #{i}. " <> detail_value(row, path, labels) end)
+  end
+
+  # One displayable value. An enum integer gets the human name its command declared
+  # (`labels: %{"video.size" => %{"6" => "hd720p"}}`); a timestamp loses its
+  # microseconds — the operator reads `hd720p`, the API keeps the 6.
+  defp scalar(nil, _path, _labels), do: nil
+
+  defp scalar(%DateTime{} = dt, _path, _labels),
+    do: dt |> DateTime.truncate(:second) |> to_string()
+
+  defp scalar(value, path, labels) when is_binary(value) or is_atom(value) or is_number(value) do
+    case Map.get(labels, Enum.join(path, ".")) do
+      nil -> to_string(value)
+      names -> Map.get(names, to_string(value), to_string(value))
+    end
+  end
+
+  defp scalar(value, _path, _labels), do: inspect(value)
+
+  defp humanize(name), do: name |> String.replace("_", " ") |> String.capitalize()
 
   # The whole surface of one module, rendered from its own declaration: the commands
   # an operator can run (with their REST route, so the two frontals are visibly the

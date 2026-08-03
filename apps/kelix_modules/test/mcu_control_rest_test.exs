@@ -147,6 +147,43 @@ defmodule Kelix.Mod.McuControlRestTest do
     assert body(duplicate)["error"] == "did_in_use"
   end
 
+  # The same conference through the other frontal: `kelictl mcu conference.list`
+  # is a table of the declared columns, `conference.show` a labelled detail view
+  # with the enum integers translated (hd720p, 3x3…) — not an inspect/1 dump.
+  test "kelictl renders the list as a table and the detail with human enum names" do
+    {_conn, %{"uid" => uid}} = create_conference(%{domain: @domain, name: "Sales weekly"})
+
+    {0, out} = Kelix.Control.CLI.run(["mcu", "conference.list"], node())
+    [header, row] = String.split(out, "\n")
+    assert header =~ ~r/^name\s+domain\s+did\s+uid\s+max_participants\s+created_at$/
+    assert row =~ ~r/^Sales weekly\s+example\.com\s+8000\s+#{uid}\s+20\s+\d{4}-\d\d-\d\d /
+
+    {0, out} = Kelix.Control.CLI.run(["mcu", "conference.show", "uid=#{uid}"], node())
+    assert out =~ ~r/^Name:\s+Sales weekly$/m
+    assert out =~ ~r/^Domain:\s+example\.com$/m
+    # the wire integers read as what they mean (video/layout sizes, mosaic, vad)
+    assert out =~ ~r/^Video:\s+.*size=hd720p/m
+    assert out =~ ~r/^Layout:\s+auto=true comp=2x2 size=hd720p$/m
+    assert out =~ ~r/^Vad:\s+basic$/m
+    assert out =~ ~r/^Codecs:\s+audio=/m
+  end
+
+  # The CLI render hints ride the same declaration the REST discovery serves: they
+  # must stay JSON-encodable (string paths, string enum keys) or GET /modules dies.
+  test "GET /modules/mcu publishes the render hints, JSON-encodable" do
+    conn = call(conn(:get, "/modules/mcu"))
+    assert conn.status == 200
+
+    commands = body(conn)["commands"]
+    list = Enum.find(commands, &(&1["name"] == "conference.list"))
+    show = Enum.find(commands, &(&1["name"] == "conference.show"))
+
+    assert list["render"]["kind"] == "table"
+    assert list["render"]["columns"] == ~w(name domain did uid max_participants created_at)
+    assert show["render"]["labels"]["video.size"]["6"] == "hd720p"
+    assert show["render"]["labels"]["layout.comp"]["2"] == "3x3"
+  end
+
   test "an unknown mediaserver name is a 400, a missing domain too" do
     assert post_json("/modules/mcu/conferences", %{domain: @domain, mcu: "ghost"}).status == 400
     assert post_json("/modules/mcu/conferences", %{}).status == 400

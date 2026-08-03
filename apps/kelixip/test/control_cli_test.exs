@@ -434,4 +434,131 @@ defmodule Kelix.Control.CLITest do
     {2, out} = run(["module", "frobnicate"])
     assert out =~ "usage: kelictl module list"
   end
+
+  # A command may declare its own rendering (`render:` in describe_control/0):
+  # the CLI formats what the module declared — a table for a list, a labelled
+  # detail view for a map — and stays module-agnostic doing so.
+  describe "module command rendering — render: hints" do
+    defmodule RenderCtl do
+      def describe(), do: %{version: "1.0.0", exports: []}
+
+      def describe_control() do
+        [
+          %{
+            name: "thing.list",
+            rest: {:get, "/things"},
+            rw: :r,
+            args: [],
+            render: %{kind: :table, columns: ~w(name domain created_at)},
+            help: "List the things"
+          },
+          %{
+            name: "thing.show",
+            rest: {:get, "/things/:uid"},
+            rw: :r,
+            args: [%{name: "uid", required: true}],
+            render: %{
+              kind: :detail,
+              fields: ~w(name domain video layout members),
+              labels: %{
+                "video.size" => %{"6" => "hd720p"},
+                "layout.comp" => %{"0" => "1x1"}
+              }
+            },
+            help: "Show one thing"
+          },
+          %{
+            name: "thing.raw",
+            rest: {:get, "/things/raw"},
+            rw: :r,
+            args: [],
+            help: "A command with no render hint"
+          }
+        ]
+      end
+
+      def handle_control("thing.list", %{"args" => ["empty"]}), do: {:ok, []}
+
+      def handle_control("thing.list", _args) do
+        {:ok,
+         [
+           %{
+             name: "test",
+             domain: "example.com",
+             created_at: ~U[2026-08-03 09:59:39.005163Z],
+             video: %{size: 6}
+           },
+           %{name: "other", domain: nil, created_at: nil}
+         ]}
+      end
+
+      def handle_control("thing.show", _args) do
+        {:ok,
+         %{
+           name: "test",
+           domain: "example.com",
+           video: %{size: 6, fps: 15},
+           layout: %{comp: 0, auto: true},
+           codecs: %{audio: ["OPUS", "PCMA"]},
+           members: [%{name: "alice", state: :connected}],
+           stale: false
+         }}
+      end
+
+      def handle_control("thing.raw", _args), do: {:ok, %{name: "raw"}}
+    end
+
+    setup do
+      Kelix.ModuleRegistry.register("rmod", RenderCtl, %{})
+      :ok = Kelix.Control.Registry.register("rmod", RenderCtl.describe_control())
+
+      on_exit(fn ->
+        Kelix.ModuleRegistry.unregister("rmod")
+        Kelix.Control.Registry.deregister("rmod")
+      end)
+    end
+
+    test "a :table hint renders the declared columns, in order, nil as a dash" do
+      {0, out} = run(["rmod", "thing.list"])
+      [header, row1, row2] = String.split(out, "\n")
+
+      assert header =~ ~r/^name\s+domain\s+created_at$/
+      # microseconds are dropped, undeclared keys (video) do not become columns
+      assert row1 =~ ~r/^test\s+example\.com\s+2026-08-03 09:59:39Z$/
+      assert row2 =~ ~r/^other\s+-\s+-$/
+    end
+
+    test "a :table hint on an empty list says so instead of printing []" do
+      assert {0, "(none)"} = run(["rmod", "thing.list", "empty"])
+    end
+
+    test "a :detail hint renders one labelled line per field, declared order first" do
+      {0, out} = run(["rmod", "thing.show"])
+      lines = String.split(out, "\n")
+
+      # declared fields lead, whatever else the result carries follows (sorted)
+      assert [
+               "Name:" <> _,
+               "Domain:" <> _,
+               "Video:" <> _,
+               "Layout:" <> _,
+               "Members:" <> _,
+               _member_row,
+               "Codecs:" <> _,
+               "Stale:" <> _
+             ] = lines
+
+      # nested maps fit one line as k=v pairs, enum labels applied by dotted path
+      assert out =~ ~r/Video:\s+fps=15 size=hd720p/
+      assert out =~ ~r/Layout:\s+auto=true comp=1x1/
+      assert out =~ ~r/Codecs:\s+audio=OPUS,PCMA/
+      # a list of maps becomes numbered sub-blocks
+      assert out =~ ~r/Members:\n  1\. name=alice state=connected/
+    end
+
+    test "a command without a render hint keeps the raw term" do
+      {0, out} = run(["rmod", "thing.raw"])
+      assert out =~ "%{name: \"raw\"}"
+    end
+  end
 end

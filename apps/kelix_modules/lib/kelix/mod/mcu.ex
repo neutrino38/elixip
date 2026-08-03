@@ -551,6 +551,44 @@ defmodule Kelix.Mod.Mcu do
 
   # ── control surface (§8.3.3) ─────────────────────────────────────────────────
 
+  # Human names for the MCU wire integers (§3.6), declared as CLI render labels:
+  # `kelictl` shows `hd720p` / `3x3`, the API and the XML-RPC keep the numbers.
+  # String keys throughout — the hint must survive the JSON of `GET /modules`.
+  @video_size_names %{
+    "0" => "qcif",
+    "1" => "cif",
+    "2" => "vga",
+    "3" => "pal",
+    "4" => "hvga",
+    "5" => "qvga",
+    "6" => "hd720p",
+    "7" => "wqvga",
+    "14" => "xga",
+    "15" => "wvga"
+  }
+  @mosaic_names %{
+    "0" => "1x1",
+    "1" => "2x2",
+    "2" => "3x3",
+    "3" => "3+4",
+    "4" => "1+7",
+    "5" => "1+5",
+    "6" => "1+1",
+    "7" => "pip1",
+    "8" => "pip3",
+    "9" => "4x4",
+    "10" => "1+4",
+    "11" => "2+8"
+  }
+  @vad_names %{"0" => "none", "1" => "basic", "2" => "full"}
+
+  @conference_labels %{
+    "video.size" => @video_size_names,
+    "layout.size" => @video_size_names,
+    "layout.comp" => @mosaic_names,
+    "vad" => @vad_names
+  }
+
   @impl Kelix.Module
   def describe_control() do
     [
@@ -591,6 +629,10 @@ defmodule Kelix.Mod.Mcu do
         rest: {:get, "/conferences"},
         rw: :r,
         args: [%{name: "domain", required: false}, %{name: "did", required: false}],
+        render: %{
+          kind: :table,
+          columns: ~w(name domain did uid max_participants created_at)
+        },
         help: "List the conferences, optionally filtered by domain and/or DID"
       },
       %{
@@ -599,6 +641,12 @@ defmodule Kelix.Mod.Mcu do
         errors: %{not_found: 404},
         rw: :r,
         args: [%{name: "uid", required: true}],
+        render: %{
+          kind: :detail,
+          fields:
+            ~w(name domain did uid mcu conf_id stale created_at max_participants destroy_when_empty vad rate codecs video layout participants),
+          labels: @conference_labels
+        },
         help: "Show one conference and its participants"
       },
       %{
@@ -634,6 +682,7 @@ defmodule Kelix.Mod.Mcu do
         errors: %{not_found: 404},
         rw: :r,
         args: [%{name: "uid", required: true}],
+        render: %{kind: :table, columns: ~w(part_id name from state joined_at)},
         help: "List a conference's participants"
       },
       %{
@@ -642,6 +691,10 @@ defmodule Kelix.Mod.Mcu do
         errors: %{not_found: 404},
         rw: :r,
         args: [%{name: "uid", required: true}, %{name: "part_id", required: true}],
+        render: %{
+          kind: :detail,
+          fields: ~w(name from part_id state joined_at medias)
+        },
         help: "Show one participant, with its media server statistics"
       },
       %{
