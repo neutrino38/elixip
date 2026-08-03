@@ -165,6 +165,49 @@ defmodule Kelix.Mod.McuAdminTest do
       assert {:ok, %{layout: %{comp: 9, size: 6, auto: true}}} = Mcu.conference(ctx.uid)
     end
 
+    test "the short layout form is the same update, in names (§8.3.7)", ctx do
+      assert {:ok, %{changed: [:layout]}} =
+               Mcu.handle_control("conference.update", %{
+                 "uid" => ctx.uid,
+                 "layout" => "3x3 vga"
+               })
+
+      assert_received {:rpc, "SetCompositionType", [42, 0, 2, 2]}
+      # naming a mosaic left `auto`, so the next arrival cannot undo the operator's
+      # choice — the reason the short form implies what the wire form does not
+      assert {:ok, %{layout: %{comp: 2, size: 2, auto: false}}} = Mcu.conference(ctx.uid)
+    end
+
+    test "a size alone keeps the mosaic, and `auto` alone keeps both", ctx do
+      assert {:ok, _} =
+               Mcu.handle_control("conference.update", %{"uid" => ctx.uid, "layout" => "cif"})
+
+      assert {:ok, %{layout: %{comp: 1, size: 1, auto: true}}} = Mcu.conference(ctx.uid)
+
+      assert {:ok, _} =
+               Mcu.handle_control("conference.update", %{"uid" => ctx.uid, "layout" => "manual"})
+
+      assert {:ok, %{layout: %{comp: 1, size: 1, auto: false}}} = Mcu.conference(ctx.uid)
+    end
+
+    test "a mistyped layout is a refusal that prints the vocabulary", ctx do
+      assert {:error, msg} =
+               Mcu.handle_control("conference.update", %{"uid" => ctx.uid, "layout" => "2+2 vga"})
+
+      assert msg =~ ~s(layout: unknown "2+2")
+      assert msg =~ "1x1 2x2 3x3"
+      # nothing reached the mixer
+      assert TestStub.rpc_order() == []
+    end
+
+    test "vad takes its name as well as its id", ctx do
+      assert {:ok, _} =
+               Mcu.handle_control("conference.update", %{"uid" => ctx.uid, "vad" => "full"})
+
+      assert_received {:rpc, "UpdateConference", [42, 2, 32_000]}
+      assert {:ok, %{vad: 2}} = Mcu.conference(ctx.uid)
+    end
+
     test "video and max_participants are local, and apply to new participants (L7)", ctx do
       assert {:ok, _} =
                Mcu.handle_control("conference.update", %{

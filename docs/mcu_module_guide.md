@@ -39,7 +39,7 @@ conferences** — see §5.2).
 ```toml
 [module.mcu]
 # Mixer defaults, applied to a conference created without the field.
-vad                 = 1          # 0 none | 1 basic | 2 full
+vad                 = "basic"    # none | basic | full  (or 0 | 1 | 2)
 rate                = 32000      # 8000 | 16000 | 32000 | 48000 — see below
 audio_codecs        = ["OPUS", "G722", "PCMA", "PCMU", "TELEPHONE-EVENT"]
 video_codecs        = ["H264"]
@@ -48,7 +48,8 @@ video_fmtp          = "profile-level-id=42e01f;packetization-mode=1"
 max_participants    = 20
 destroy_when_empty  = false
 auto_layout         = true       # the mosaic follows the number of video legs
-layout_comp         = 1          # starting layout (§3.6 of the design: 1 = 2x2)
+layout_comp         = "2x2"      # starting mosaic: 1x1 2x2 3x3 3+4 1+7 1+5 1+1
+                                 #   pip1 pip3 4x4 1+4 2+8 (or its wire id, §3.6)
 
 # DID allocation pool, used when `create` omits `did`. An explicit DID is always
 # honoured, including one outside the range. Omit both keys to make `did` mandatory.
@@ -56,7 +57,8 @@ did_range           = "8000-8099"
 did_ranges          = { "example.com" = "8000-8199", "lab.example.com" = "9000-9099" }
 
 # The inline video profile: what the mixer encodes towards every leg.
-video_size          = 6          # 6 = HD720P (§3.6)
+video_size          = "hd720p"   # qcif cif vga pal hvga qvga hd720p wqvga xga
+                                 #   wvga (or its wire id, §3.6)
 video_fps           = 15
 video_bitrate       = 1024       # kbps, also the cap on the answer's b=AS:
 video_intra_period  = 300
@@ -159,7 +161,7 @@ Every command exists identically over REST and `kelictl`, from one declaration.
 | create | `POST /modules/mcu/conferences` | `kelictl mcu conference.create domain=example.com name=Weekly` |
 | list | `GET /modules/mcu/conferences?domain=…&did=…` | `kelictl mcu conference.list domain=example.com` |
 | show | `GET /modules/mcu/conferences/:uid` | `kelictl mcu conference.show uid=c-3f9a` |
-| update | `PUT`/`PATCH` `/modules/mcu/conferences/:uid` | `kelictl mcu conference.update uid=c-3f9a layout='{"comp":6}'` |
+| update | `PUT`/`PATCH` `/modules/mcu/conferences/:uid` | `kelictl mcu conference.update uid=c-3f9a layout='1+1 vga'` |
 | destroy | `DELETE /modules/mcu/conferences/:uid` | `kelictl mcu conference.delete uid=c-3f9a force=true` |
 | participants | `GET /modules/mcu/conferences/:uid/participants` | `kelictl mcu participant.list uid=c-3f9a` |
 | one participant | `GET …/participants/:part_id` | `kelictl mcu participant.show uid=c-3f9a part_id=7` |
@@ -176,7 +178,24 @@ curl -si -X POST localhost:8090/modules/mcu/conferences \
 # {"result":{"uid":"c-3f9a2b10","did":"8000","conf_id":42,"mcu":"mcu1"}}
 ```
 
-Four things worth knowing:
+The mosaic, the video size and the VAD mode go by **name**, on either frontal
+(`kelictl mcu help conference.update` prints the vocabulary):
+
+```bash
+kelictl mcu conference.update uid=c-3f9a layout='2x2 hd720p'   # mosaic + size
+kelictl mcu conference.update uid=c-3f9a layout=auto,vga       # commas: no quoting
+kelictl mcu conference.update uid=c-3f9a layout=1+1            # mosaic alone
+kelictl mcu conference.update uid=c-3f9a vad=full
+```
+
+`layout` takes a mosaic (`1x1 2x2 3x3 3+4 1+7 1+5 1+1 pip1 pip3 4x4 1+4 2+8`), a
+size (`qcif cif vga pal hvga qvga hd720p wqvga xga wvga`, `720p` = `hd720p`) and/or
+`auto`|`manual`, **in any order**. Only what is named changes, and **naming a mosaic
+implies `manual`** — on a conference in `auto` the next arrival would otherwise undo
+it. `layout='auto 2x2'` means "set it now and keep following". The JSON form is
+still accepted and stays literal: `layout='{"comp":1,"size":6,"auto":false}'`.
+
+Four more things worth knowing:
 
 * **`PUT` merges.** A field you omit is left alone, never reset to its default.
   `vad`/`rate`/`layout` reach the mixer immediately; `video`, `max_participants`,
@@ -290,7 +309,7 @@ A script can create conferences, not just join them:
   )
 
 {:ok, conf}   = Kelix.Mod.Mcu.create_conference(domain, name: "Weekly", owner: :none)
-{:ok, fields} = Kelix.Mod.Mcu.update_conference(conf.uid, layout: %{comp: 6})
+{:ok, fields} = Kelix.Mod.Mcu.update_conference(conf.uid, layout: "1+1 vga")
 :ok           = Kelix.Mod.Mcu.destroy_conference(conf.uid, force: true)
 rooms         = Kelix.Mod.Mcu.conferences(domain)
 ```
@@ -301,7 +320,9 @@ timed out — the module destroys the **empty** conference. A conference somebod
 survives its creator, who was merely the first to arrive.
 
 Options are atom-keyed keyword lists, validated by exactly the same code as the REST
-body, so a conference a script creates and one REST creates are indistinguishable.
+body, so a conference a script creates and one REST creates are indistinguishable —
+including the vocabulary: `layout: "1+1 vga"`, `layout: %{comp: "1+1"}` and
+`layout: %{comp: 6}` are the same request.
 
 `apps/kelixip/scripts/mcu_adhoc.exs` is this in full. Note what it does **not** do:
 the module never creates a conference by itself — no template, no implicit rule. Ad-hoc

@@ -38,6 +38,40 @@ defmodule Kelix.Mod.Mcu.ConfigTest do
     end
   end
 
+  describe "the enum keys take a name (§8.3.7)" do
+    test "vad, layout_comp and video_size accept what the CLI renders" do
+      config = parse!(%{"vad" => "full", "layout_comp" => "2x2", "video_size" => "vga"})
+
+      assert config.vad == 2
+      assert config.layout_comp == 1
+      assert config.video.size == 2
+    end
+
+    test "the wire id still works, and `none`/`1x1` are not mistaken for absent" do
+      config = parse!(%{"vad" => 0, "layout_comp" => 0, "video_size" => 1})
+
+      assert config.vad == 0
+      assert config.layout_comp == 0
+      assert config.video.size == 1
+
+      config = parse!(%{"vad" => "none", "layout_comp" => "1x1"})
+      assert config.vad == 0
+      assert config.layout_comp == 0
+    end
+
+    test "a typo is a boot-time error naming the key and the vocabulary" do
+      assert {:error, msg} = Config.parse(%{"layout_comp" => "2+2"})
+      assert msg =~ ~s(layout_comp: unknown mosaic "2+2")
+      assert msg =~ "one of 1x1, 2x2"
+
+      assert {:error, msg} = Config.parse(%{"video_size" => "4k"})
+      assert msg =~ "video_size: unknown video size"
+
+      assert {:error, msg} = Config.parse(%{"vad" => "loud"})
+      assert msg =~ "vad: unknown vad mode"
+    end
+  end
+
   describe "rejection" do
     test "an unknown key" do
       assert {:error, msg} = Config.parse(%{"max_participant" => 5})

@@ -235,6 +235,10 @@ commands:
   conference.create   [POST /modules/mcu/conferences]
       args: domain* name did mcu vad rate audio_codecs video_codecs text_codecs video layout max_participants destroy_when_empty
       Create a conference (allocates a DID when none is given)
+      vad: voice activity detection: none | basic | full (or 0 | 1 | 2)
+      layout: a mosaic, a size and/or auto|manual, in any order, spaces or commas
+              mosaic: 1x1 2x2 3x3 3+4 1+7 1+5 1+1 pip1 pip3 4x4 1+4 2+8
+              …
   conference.list     [GET /modules/mcu/conferences]
       args: domain did
       List the conferences, optionally filtered by domain and/or DID
@@ -242,11 +246,20 @@ commands:
 
 facades (import Kelix.Mod.Mcu):
   create_conference/2, ensure_conference/3, …
+
+$ kelictl mcu help conference.update      # one command, in full
 ```
 
 `*` marks a required argument; the bracketed route is the same command over REST
 (`GET /modules` and `GET /modules/<name>` serve the same declarations as JSON).
-`help` is therefore reserved on a module namespace.
+`help` is therefore reserved on a module namespace, and so is
+`<module> help <cmd>` — which narrows the listing to one command, since a whole
+module's surface plus every vocabulary is a screenful.
+
+An argument whose **value** has a vocabulary of its own (a mosaic name, an enum, a
+compact syntax) is printed under the command, indented below its name. That text is
+the module's, declared next to the parser that enforces it: the CLI has no idea what
+a mosaic is, and cannot show one the module would refuse.
 
 A module's whole namespace is its own: `kelictl mcu <cmd>` is the `mcu` module's
 (`kelictl mcu conference.list`), and enabling or disabling a media server is

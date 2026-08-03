@@ -47,7 +47,7 @@ defmodule Kelix.Mod.Mcu do
   require Logger
 
   alias Kelix.Metrics.Emit
-  alias Kelix.Mod.Mcu.{Adapter, Args, Client, Conference, Config, Event}
+  alias Kelix.Mod.Mcu.{Adapter, Args, Client, Conference, Config, Event, Vocabulary}
   alias Kelix.Mod.Mcu.Supervisor, as: McuSupervisor
 
   @conf_table :kelix_mcu_conferences
@@ -554,39 +554,14 @@ defmodule Kelix.Mod.Mcu do
   # Human names for the MCU wire integers (§3.6), declared as CLI render labels:
   # `kelictl` shows `hd720p` / `3x3`, the API and the XML-RPC keep the numbers.
   # String keys throughout — the hint must survive the JSON of `GET /modules`.
-  @video_size_names %{
-    "0" => "qcif",
-    "1" => "cif",
-    "2" => "vga",
-    "3" => "pal",
-    "4" => "hvga",
-    "5" => "qvga",
-    "6" => "hd720p",
-    "7" => "wqvga",
-    "14" => "xga",
-    "15" => "wvga"
-  }
-  @mosaic_names %{
-    "0" => "1x1",
-    "1" => "2x2",
-    "2" => "3x3",
-    "3" => "3+4",
-    "4" => "1+7",
-    "5" => "1+5",
-    "6" => "1+1",
-    "7" => "pip1",
-    "8" => "pip3",
-    "9" => "4x4",
-    "10" => "1+4",
-    "11" => "2+8"
-  }
-  @vad_names %{"0" => "none", "1" => "basic", "2" => "full"}
-
+  #
+  # Read from `Vocabulary`, which is also what *accepts* those names as input: a
+  # second table here would render a mosaic the parser refuses (§8.3.7).
   @conference_labels %{
-    "video.size" => @video_size_names,
-    "layout.size" => @video_size_names,
-    "layout.comp" => @mosaic_names,
-    "vad" => @vad_names
+    "video.size" => Vocabulary.size_names(),
+    "layout.size" => Vocabulary.size_names(),
+    "layout.comp" => Vocabulary.mosaic_names(),
+    "vad" => Vocabulary.vad_names()
   }
 
   @impl Kelix.Module
@@ -612,13 +587,13 @@ defmodule Kelix.Mod.Mcu do
           %{name: "name", required: false},
           %{name: "did", required: false},
           %{name: "mcu", required: false},
-          %{name: "vad", required: false},
+          %{name: "vad", required: false, help: Vocabulary.vad_help()},
           %{name: "rate", required: false},
           %{name: "audio_codecs", required: false},
           %{name: "video_codecs", required: false},
           %{name: "text_codecs", required: false},
-          %{name: "video", required: false},
-          %{name: "layout", required: false},
+          %{name: "video", required: false, help: Vocabulary.video_help()},
+          %{name: "layout", required: false, help: Vocabulary.layout_help()},
           %{name: "max_participants", required: false},
           %{name: "destroy_when_empty", required: false}
         ],
@@ -661,10 +636,10 @@ defmodule Kelix.Mod.Mcu do
         args: [
           %{name: "uid", required: true},
           %{name: "name", required: false},
-          %{name: "vad", required: false},
+          %{name: "vad", required: false, help: Vocabulary.vad_help()},
           %{name: "rate", required: false},
-          %{name: "layout", required: false},
-          %{name: "video", required: false},
+          %{name: "layout", required: false, help: Vocabulary.layout_help()},
+          %{name: "video", required: false, help: Vocabulary.video_help()},
           %{name: "max_participants", required: false},
           %{name: "destroy_when_empty", required: false}
         ],
@@ -914,10 +889,15 @@ defmodule Kelix.Mod.Mcu do
     Enum.reduce_while(
       [
         {"name", &Args.string(&1, "name")},
-        {"vad", &Args.int(&1, "vad", nil, [0, 1, 2])},
+        {"vad", &Vocabulary.vad(Map.get(&1, "vad"))},
         {"rate", &Args.int(&1, "rate", nil, [8000, 16_000, 32_000, 48_000])},
         {"max_participants", &Args.int(&1, "max_participants", nil)},
-        {"destroy_when_empty", &Args.bool(&1, "destroy_when_empty", nil)}
+        {"destroy_when_empty", &Args.bool(&1, "destroy_when_empty", nil)},
+        # `video` and `layout` are merged over the conference's current values, which
+        # only the registry holds — so they are decoded here (names → wire ids, the
+        # short layout form → fields) and travel as a partial map
+        {"video", &Vocabulary.video(Map.get(&1, "video"))},
+        {"layout", &Vocabulary.layout(Map.get(&1, "layout"))}
       ],
       {:ok, %{}},
       fn {key, getter}, {:ok, acc} ->
@@ -931,18 +911,6 @@ defmodule Kelix.Mod.Mcu do
         end
       end
     )
-    |> case do
-      # `video` and `layout` are merged over the conference's current values, which
-      # only the registry holds, so they travel raw
-      {:ok, changes} -> {:ok, Map.merge(changes, sub_map_changes(args))}
-      err -> err
-    end
-  end
-
-  defp sub_map_changes(args) do
-    for key <- ["video", "layout"], Map.has_key?(args, key), into: %{} do
-      {String.to_existing_atom(key), Map.get(args, key)}
-    end
   end
 
   # `muted` is a per-media map: `%{"audio" => true}` mutes the audio only and leaves
@@ -978,7 +946,7 @@ defmodule Kelix.Mod.Mcu do
          {:ok, name} <- Args.string(args, "name"),
          {:ok, did} <- Args.string(args, "did"),
          {:ok, mcu} <- Args.string(args, "mcu"),
-         {:ok, vad} <- Args.int(args, "vad", nil, [0, 1, 2]),
+         {:ok, vad} <- Vocabulary.vad(Map.get(args, "vad")),
          {:ok, rate} <- Args.int(args, "rate", nil, [8000, 16_000, 32_000, 48_000]),
          # the codec vocabulary is the config's, checked here too: a per-conference
          # list is exactly as dangerous as a configured one (Config.validate_codecs/2)
@@ -986,7 +954,12 @@ defmodule Kelix.Mod.Mcu do
          {:ok, video_codecs, _} <- Config.validate_codecs(:video, Map.get(args, "video_codecs")),
          {:ok, text_codecs, _} <- Config.validate_codecs(:text, Map.get(args, "text_codecs")),
          {:ok, max_participants} <- Args.int(args, "max_participants", nil),
-         {:ok, destroy_when_empty} <- Args.bool(args, "destroy_when_empty", nil) do
+         {:ok, destroy_when_empty} <- Args.bool(args, "destroy_when_empty", nil),
+         # names → wire ids, and the short `layout` form → the fields it names: the
+         # merge over the configured defaults happens in the registry, but the
+         # *reading* of what was asked for belongs here, before anything is created
+         {:ok, video} <- Vocabulary.video(Map.get(args, "video")),
+         {:ok, layout} <- Vocabulary.layout(Map.get(args, "layout")) do
       {:ok,
        %{
          domain: domain,
@@ -1001,10 +974,8 @@ defmodule Kelix.Mod.Mcu do
          dtmf: if(is_nil(audio), do: nil, else: dtmf),
          video_codecs: video_codecs,
          text_codecs: text_codecs,
-         # `video` and `layout` are merged over the configured defaults, which are
-         # only known inside the GenServer — so they travel as raw args
-         video: Map.get(args, "video"),
-         layout: Map.get(args, "layout"),
+         video: video,
+         layout: layout,
          max_participants: max_participants,
          destroy_when_empty: destroy_when_empty
        }}

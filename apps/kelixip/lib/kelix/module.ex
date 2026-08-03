@@ -54,6 +54,12 @@ defmodule Kelix.Module do
   "human"}` value names (`"video.size" => %{"6" => "hd720p"}`) — everything is
   strings so the hint survives both the RPC and the JSON encoding of `GET /modules`.
 
+  An argument whose *value* has a vocabulary of its own (a mosaic name, an enum, a
+  compact syntax) may carry its own `help:` — one string or a list of lines, printed
+  under the command by `kelictl <module> help [<cmd>]`. Declared by the module for
+  the same reason `labels:` is: the CLI must not know what a mosaic is, and the
+  vocabulary an operator reads has to be the one the module's parser enforces.
+
   In a `:detail` view a field holding a list of maps becomes an indented table and
   one holding a map of maps an indented block, since neither fits a line. `nested:`
   picks the columns of such a table (`%{"participants" => %{columns: [...]}}`);
@@ -62,7 +68,13 @@ defmodule Kelix.Module do
   """
   @type control_command :: %{
           required(:name) => String.t(),
-          required(:args) => [%{name: String.t(), required: boolean}],
+          required(:args) => [
+            %{
+              required(:name) => String.t(),
+              required(:required) => boolean,
+              optional(:help) => String.t() | [String.t()]
+            }
+          ],
           required(:rest) => {control_method | [control_method], String.t()},
           required(:rw) => :r | :w,
           required(:help) => String.t(),

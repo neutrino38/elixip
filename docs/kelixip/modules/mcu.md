@@ -61,7 +61,7 @@ Module block — `[module.mcu]` (in `config.toml`):
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `vad` | integer | `1` | Voice activity detection: `0` none, `1` basic, `2` full |
+| `vad` | name or integer | `basic` | Voice activity detection: `none` / `basic` / `full` (or `0` / `1` / `2`) |
 | `rate` | integer | `32000` | Mixer sampling rate: `8000`/`16000`/`32000`/`48000`. Participants are resampled to it — not a codec constraint |
 | `audio_codecs` | list | `["OPUS","G722","PCMA","PCMU"]` | Accepted audio codecs. `TELEPHONE-EVENT` in the list is the **DTMF switch** (RFC 4733), not a mixer codec |
 | `video_codecs` | list | `["H264"]` | Accepted video codecs (`H264`, `VP8`) |
@@ -69,8 +69,8 @@ Module block — `[module.mcu]` (in `config.toml`):
 | `max_participants` | integer | `20` | Per-conference cap; reached ⇒ the next caller gets `486` |
 | `destroy_when_empty` | boolean | `false` | Destroy a conference with its last participant |
 | `auto_layout` | boolean | `true` | The mosaic follows the number of video legs |
-| `layout_comp` | integer | `1` | Starting layout (`1` = 2×2) |
-| `video_size` | integer | `6` | Encoded size (`6` = HD720P) |
+| `layout_comp` | name or integer | `2x2` | Starting mosaic — one of `1x1 2x2 3x3 3+4 1+7 1+5 1+1 pip1 pip3 4x4 1+4 2+8` (or its wire id) |
+| `video_size` | name or integer | `hd720p` | Encoded size — one of `qcif cif vga pal hvga qvga hd720p wqvga xga wvga` (or its wire id) |
 | `video_fps` | integer | `15` | Encoded frame rate |
 | `video_bitrate` | integer | `1024` | kbps, also the cap on the answer's `b=AS:` |
 | `video_intra_period` | integer | `300` | Frames between intra-frames |
@@ -82,6 +82,9 @@ Module block — `[module.mcu]` (in `config.toml`):
 | `shutdown_grace_ms` | integer | `5000` | Grace given to conferences at module stop |
 | `rtp_timeout_ms` | integer | `10000` | RTP inactivity watchdog — **ignored** until the server-side support of P7 (limitation L1) |
 | `gc_orphans` | boolean | `true` | Sweep, at start, the conferences the media server still holds and no kelixip owns |
+
+`vad`, `layout_comp` and `video_size` take the same names the CLI renders and the
+control commands accept — one vocabulary, wherever a value enters.
 
 With neither `did_range` nor a `did_ranges` entry for a domain, `did` becomes
 **mandatory** on create. An explicit DID is always honoured, including one
@@ -178,6 +181,7 @@ authoritative list is the running node's:
 
 ```
 kelictl mcu help                  # the commands, their REST route and their args
+kelictl mcu help conference.update  # one command, with each argument's own vocabulary
 kelictl module list               # every loaded module, its commands and facades
 ```
 
@@ -186,7 +190,7 @@ kelictl module list               # every loaded module, its commands and facade
 | `conference.create` | `mcu conference.create domain=example.com name=Weekly` | `POST /modules/mcu/conferences` → `201` + `Location` |
 | `conference.list` | `mcu conference.list domain=example.com` | `GET /modules/mcu/conferences?domain=…&did=…` |
 | `conference.show` | `mcu conference.show uid=c-3f9a` | `GET /modules/mcu/conferences/:uid` |
-| `conference.update` | `mcu conference.update uid=c-3f9a layout='{"comp":6}'` | `PUT`/`PATCH` `/modules/mcu/conferences/:uid` |
+| `conference.update` | `mcu conference.update uid=c-3f9a layout='1+1 vga'` | `PUT`/`PATCH` `/modules/mcu/conferences/:uid` |
 | `conference.delete` | `mcu conference.delete uid=c-3f9a force=true` | `DELETE /modules/mcu/conferences/:uid` |
 | `participant.list` | `mcu participant.list uid=c-3f9a` | `GET …/conferences/:uid/participants` |
 | `participant.show` | `mcu participant.show uid=c-3f9a part_id=7` | `GET …/participants/:part_id` |
@@ -196,9 +200,49 @@ kelictl module list               # every loaded module, its commands and facade
 On the CLI, arguments are `name=value` tokens — path variables are ordinary named
 arguments, so the same map reaches the module either way. A value typed
 `true`/`false` is a boolean, digits an integer, and a leading `{`/`[` is JSON
-(`layout='{"comp":1,"size":6}'`).
+(`muted='{"audio":true}'`).
 
-Three things worth knowing: **`PUT` merges** (an omitted field is left alone, not
+### Saying it in names, not in numbers
+
+The mosaic, the video size and the VAD mode have **names**, and they are accepted
+wherever a value enters — the CLI, a REST body, the config block, a script:
+
+```bash
+kelictl mcu conference.update uid=c-3f9a layout='2x2 hd720p'   # mosaic + size
+kelictl mcu conference.update uid=c-3f9a layout=auto,vga       # commas: no quoting
+kelictl mcu conference.update uid=c-3f9a layout=1+1            # mosaic alone
+kelictl mcu conference.update uid=c-3f9a layout=cif            # size alone
+kelictl mcu conference.update uid=c-3f9a layout=manual         # stop following
+kelictl mcu conference.update uid=c-3f9a vad=full
+kelictl mcu conference.create domain=example.com video='{"size":"vga","fps":25}'
+```
+
+`layout` takes a **mosaic**, a **size** and/or `auto`|`manual`, in **any order**,
+separated by spaces or commas. The three vocabularies are disjoint, so order
+carries no meaning:
+
+| Group | Values |
+|---|---|
+| mosaic | `1x1` `2x2` `3x3` `3+4` `1+7` `1+5` `1+1` `pip1` `pip3` `4x4` `1+4` `2+8` |
+| size | `qcif` `cif` `vga` `pal` `hvga` `qvga` `hd720p` (`720p`) `wqvga` `xga` `wvga` |
+| mode | `auto` — the mosaic follows the video-leg count — or `manual` |
+
+Two rules:
+
+* **only what is named changes** — `layout=vga` keeps the current mosaic, like
+  every other field of a `PUT` (see below);
+* **naming a mosaic implies `manual`**, unless `auto` is in the same value. On a
+  conference in `auto`, a fixed mosaic would otherwise be undone by the next
+  arrival — a command that appeared to work and did nothing. `layout='auto 2x2'`
+  is the explicit "set it now, keep following".
+
+A typo is a `400` that prints the vocabulary, and an argument's names are in the
+online help (`kelictl mcu help conference.update`). The **wire form still works
+and stays literal** — `layout='{"comp":1,"size":6,"auto":false}'`, names allowed
+inside it (`{"comp":"2x2"}`) — so an existing REST client needs no change and a
+`PUT` body means exactly what it says.
+
+Three more things worth knowing: **`PUT` merges** (an omitted field is left alone, not
 reset), an **unknown or read-only field is a `400`** rather than a silent no-op,
 and **the DID is not a URL** — a client holding only a DID uses
 `conference.list did=8001` and follows the `uid`.
@@ -214,7 +258,8 @@ bad argument) — see
 On the CLI each of these renders as text, from the same declaration: a list is a
 table of the columns that identify a row, and `show` is one `Label: value` per
 line, with the wire integers of §3.6 spelled out (`size=hd720p`, `comp=2x2`,
-`vad=basic`) — the API and the XML-RPC keep the numbers.
+`vad=basic`) — the API and the XML-RPC keep the numbers. What it prints is what it
+accepts: the names above are the ones read back here.
 
 ```
 $ kelictl mcu conference.list domain=example.com
@@ -273,6 +318,9 @@ scripts. See [§3.1 of the guide](../../mcu_module_guide.md#31-what-a-successful
 rate             = 32000
 max_participants = 8
 did_range        = "8000-8099"
+vad              = "full"
+layout_comp      = "2x2"
+video_size       = "hd720p"
 video_fmtp       = "profile-level-id=42e01f;packetization-mode=1"
 
 [mediaserver.pool.mcu1]
@@ -295,6 +343,10 @@ name = "example.com"
 $ kelictl mcu conference.create domain=example.com name=Weekly max_participants=8
 $ kelictl mcu conference.list domain=example.com
 $ kelictl mcu participant.list uid=c-3f9a2b10
+
+# pin a 2x2 in HD for a demo, then hand the layout back to the module
+$ kelictl mcu conference.update uid=c-3f9a2b10 layout='2x2 hd720p'
+$ kelictl mcu conference.update uid=c-3f9a2b10 layout=auto
 ```
 
 ```elixir

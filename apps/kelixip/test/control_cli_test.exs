@@ -359,7 +359,18 @@ defmodule Kelix.Control.CLITest do
             status: 201,
             errors: %{did_in_use: 400},
             rw: :w,
-            args: [%{name: "domain", required: true}, %{name: "name", required: false}],
+            args: [
+              %{name: "domain", required: true},
+              %{name: "name", required: false},
+              # an argument whose value has a vocabulary of its own carries it: the
+              # CLI prints it without knowing what a mosaic is (§8.3.7)
+              %{
+                name: "layout",
+                required: false,
+                help: ["a mosaic and/or a size, in any order", "mosaic: 1x1 2x2", "size: cif vga"]
+              },
+              %{name: "vad", required: false, help: "none | basic | full"}
+            ],
             help: "Create a conference"
           },
           %{
@@ -406,12 +417,33 @@ defmodule Kelix.Control.CLITest do
       assert out =~ "helpmod 2.1.0 (Kelix.Control.CLITest.HelpCtl)"
       assert out =~ "conference.create  [POST /modules/helpmod/conferences]"
       # required args are starred, so the calling convention is readable at a glance
-      assert out =~ "args: domain* name"
+      assert out =~ "args: domain* name layout vad"
       assert out =~ "Create a conference"
+      # an argument's own help, its continuation lines aligned under it
+      assert out =~ "      layout: a mosaic and/or a size, in any order\n"
+      assert out =~ "\n              mosaic: 1x1 2x2\n"
+      # one line or a list, both declared the same way
+      assert out =~ "      vad: none | basic | full"
       # a method list stays a method list: one declaration, two verbs
       assert out =~ "conference.update  [PUT|PATCH /modules/helpmod/conferences/:uid]"
       assert out =~ "facades (import Kelix.Control.CLITest.HelpCtl):"
       assert out =~ "admit/2, leave/2"
+    end
+
+    test "<module> help <cmd> narrows it to one command, keeping the arg help" do
+      {0, out} = run(["helpmod", "help", "conference.create"])
+
+      assert out =~ "conference.create  [POST /modules/helpmod/conferences]"
+      assert out =~ "layout: a mosaic and/or a size"
+      # …and nothing of the other commands
+      refute out =~ "conference.update"
+      refute out =~ "facades"
+    end
+
+    test "<module> help <cmd> on a command the module does not declare → exit 2" do
+      {2, out} = run(["helpmod", "help", "conference.explode"])
+      assert out =~ ~s(declares no command "conference.explode")
+      assert out =~ "kelictl helpmod help"
     end
 
     test "<module> help on a module with no control surface says so" do

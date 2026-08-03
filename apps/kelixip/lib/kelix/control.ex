@@ -467,11 +467,7 @@ defmodule Kelix.Control do
       name: cmd.name,
       methods: Kelix.Control.Route.methods(cmd),
       path: Kelix.Control.Route.template(cmd),
-      args:
-        Enum.map(
-          Map.get(cmd, :args, []),
-          &%{name: &1.name, required: Map.get(&1, :required, false)}
-        ),
+      args: Enum.map(Map.get(cmd, :args, []), &described_arg/1),
       rw: Map.get(cmd, :rw, :w),
       help: Map.get(cmd, :help, ""),
       status: Map.get(cmd, :status, 200),
@@ -482,6 +478,18 @@ defmodule Kelix.Control do
     case Map.get(cmd, :render) do
       nil -> described
       render -> Map.put(described, :render, render)
+    end
+  end
+
+  # An argument's own help travels when it is declared — a value with a vocabulary
+  # (a mosaic name, an enum, a compact syntax) explains itself where it is used,
+  # rather than in prose the operator has to go and find.
+  defp described_arg(arg) do
+    described = %{name: arg.name, required: Map.get(arg, :required, false)}
+
+    case Map.get(arg, :help) do
+      nil -> described
+      help -> Map.put(described, :help, help)
     end
   end
 

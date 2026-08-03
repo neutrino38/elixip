@@ -131,8 +131,14 @@ be looked up in a module's source:
 ```console
 $ kelictl module list          # loaded modules, their commands and facades
 $ kelictl mcu help             # one module's commands, routes and arguments
+$ kelictl mcu help conference.update   # one command, with its arguments' vocabulary
 $ curl localhost:8090/modules  # the same declarations as JSON
 ```
+
+An argument may carry its own `help:` (one line or several) for a value with a
+vocabulary of its own — a mosaic name, an enum, a compact syntax. It is printed
+under the command by the two `help` forms above and travels in the JSON, so the
+text an operator reads sits next to the parser that enforces it.
 
 ## Reference
 

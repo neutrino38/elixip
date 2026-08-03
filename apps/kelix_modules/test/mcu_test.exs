@@ -208,6 +208,24 @@ defmodule Kelix.Mod.McuTest do
       assert_received {:rpc, "SetCompositionType", [42, 0, 6, 2]}
     end
 
+    test "the human forms create the same conference (§8.3.7)" do
+      assert {:ok, %{uid: uid}} =
+               create(%{
+                 "domain" => @domain,
+                 "vad" => "full",
+                 "video" => %{"size" => "vga"},
+                 "layout" => "1+1,720p"
+               })
+
+      assert {:ok, conf} = Mcu.conference(uid)
+      assert conf.vad == 2
+      assert conf.video.size == 2
+      # `1+1` implies manual: an operator who names a mosaic at create time means it
+      assert conf.layout == %{comp: 6, size: 6, auto: false}
+      assert_received {:rpc, "CreateConference", [^uid, 2, 32_000, 7]}
+      assert_received {:rpc, "SetCompositionType", [42, 0, 6, 6]}
+    end
+
     test "an unknown or badly typed argument is refused, and nothing is created" do
       assert {:error, msg} = create(%{"domain" => @domain, "max_participant" => 4})
       assert msg =~ "unknown argument(s)"

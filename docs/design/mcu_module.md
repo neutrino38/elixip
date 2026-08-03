@@ -226,7 +226,7 @@ Medooze codec constant: `%{"96" => 99, "0" => 0}`. Same shape as the JSR-309
 | `MediaProtocol` | `0` RTP, `1` RTMP, `2` WS, `3` TCP, `4` UDP |
 | `Participant type` | `0` RTP, `1` RTMP |
 | VAD | `0` none, `1` basic, `2` full |
-| Mosaic layout | `0` 1x1, `1` 2x2, `2` 3x3, `3` 3+4, `4` 1+7, `5` 1+5, `6` 1+1, `7` PIP1, `8` PIP3, `9` 4x4, `10` 1+4, `11` 2+8 |
+| Mosaic layout | `0` 1x1, `1` 2x2, `2` 3x3, `3` 3+4, `4` 1+7, `5` 1+5, `6` 1+1, `7` PIP1, `8` PIP3, `9` 4x4, `10` 1+4, `11` 2+8 — those names are also the accepted *input*, §8.3.7 |
 | Video size | `0` QCIF, `1` CIF, `2` VGA, `3` PAL, `4` HVGA, `5` QVGA, `6` HD720P, `7` WQVGA, `14` XGA, `15` WVGA … (`XmlRpcMcuClient` constants) |
 
 Audio/video codec constants are the ones already tabulated in
@@ -833,7 +833,7 @@ receives and what `kelictl mcu <id>` names.
 | `conference.create` | `POST <base>/conferences` | w | `domain`, `name`, opt. `did` (allocated when absent), `mcu`, `vad`, `rate`, `audio_codecs`, `video_codecs`, `video`, `layout`, `max_participants`, `destroy_when_empty` | `201` + `Location: <base>/conferences/<uid>`, body `{uid, did, conf_id, mcu}` |
 | `conference.list` | `GET <base>/conferences` | r | opt. `domain` (query) | `[{uid, did, name, mcu, participants, created_at}]` |
 | `conference.show` | `GET <base>/conferences/:uid` | r | `uid` | conference + participants |
-| `conference.update` | `PUT` (or `PATCH`) `<base>/conferences/:uid` | w | `uid` + any subset of `name`, `vad`, `rate`, `layout`, `max_participants`, `video`, `destroy_when_empty` | `{uid, changed: [...]}` |
+| `conference.update` | `PUT` (or `PATCH`) `<base>/conferences/:uid` | w | `uid` + any subset of `name`, `vad`, `rate`, `layout`, `max_participants`, `video`, `destroy_when_empty` (the enums by name, §8.3.7) | `{uid, changed: [...]}` |
 | `conference.delete` | `DELETE <base>/conferences/:uid` | w | `uid`, opt. `force` | `{uid, disconnected: n}` |
 | `participant.list` | `GET <base>/conferences/:uid/participants` | r | `uid` | `[{part_id, name, state, medias, joined_at}]` |
 | `participant.show` | `GET <base>/conferences/:uid/participants/:part_id` | r | `uid`, `part_id` | participant + `GetParticipantStatistics` |
@@ -1009,7 +1009,7 @@ The recommended CLI form is named arguments, mirroring the merged map:
 ```
 kelictl mcu conference.create domain=example.com name=Weekly
 kelictl mcu conference.list   domain=example.com
-kelictl mcu conference.update uid=c-3f9a layout='{"comp":1,"size":6}'
+kelictl mcu conference.update uid=c-3f9a layout='2x2 hd720p'
 kelictl mcu participant.delete uid=c-3f9a part_id=7
 ```
 
@@ -1018,6 +1018,80 @@ deliberately **not** specified: deriving the order requires the CLI to read the
 templates, and a template edit would silently change the CLI's argument order.
 If FW-5 lands, positional sugar becomes safe (both come from the same
 declaration) and can be added then.
+
+#### 8.3.7 One vocabulary for the wire enums, and the online help
+
+The mosaic, the video size and the VAD mode are integers on the wire (§3.6) and
+were integers in the *arguments* too, while `kelictl` had already been rendering
+them as names for two releases:
+
+```
+kelictl mcu conference.update uid=c-a22db61a layout='{"comp":32,"size":6,"auto":false}'
+                                        ↑ 32 is not even a mosaic; the reply said so
+                                          in numbers, and the display says `2x2`
+```
+
+The output spoke the operator's language and the input did not, which is the
+whole of the problem: a value an operator can *read* off `conference.show` is a
+value they should be able to type back. So the names become the accepted input
+everywhere a value enters — CLI, REST body, `[module.mcu]`, scenario facade — and
+`Kelix.Mod.Mcu.Vocabulary` is the **single** table, in both directions.
+
+That single table is the point, not the shorthand. The CLI labels
+(`@conference_labels`), the parser, the config validation and the help text now all
+read the same list; three of them used to hold their own copy of a fragment of it,
+which is how `layout_comp` could accept an id no label could render.
+
+**The short `layout` form.** One string of tokens, separated by spaces or commas —
+commas so the common case needs no shell quoting — in **any order**, because the
+three vocabularies are disjoint:
+
+| Group | Values |
+|---|---|
+| mosaic | `1x1` `2x2` `3x3` `3+4` `1+7` `1+5` `1+1` `pip1` `pip3` `4x4` `1+4` `2+8` |
+| size | `qcif` `cif` `vga` `pal` `hvga` `qvga` `hd720p` `wqvga` `xga` `wvga`, plus the one alias `720p` = `hd720p` |
+| mode | `auto` \| `manual` |
+
+```
+layout='2x2 hd720p'    layout=auto,vga    layout=1+1    layout=cif    layout=manual
+```
+
+Four decisions, each of which could have gone the other way:
+
+1. **Only what is named changes.** `layout=vga` keeps the current mosaic. This is
+   the partial merge of §8.3.3 applied one level down, not a new rule — the
+   alternative (an unnamed field resets) is the dangerous reading of `PUT` that
+   §8.3.3 already refuses.
+2. **Naming a mosaic implies `manual`.** On a conference in `auto`, a fixed mosaic
+   is undone by the next arrival (`follow_auto_layout/1`), so `layout=2x2` would
+   have been a command that appeared to work and lasted seconds. `layout='auto
+   2x2'` is the explicit "set it now, keep following". The short form is an intent
+   ("show me a 2x2"); the **wire form stays literal** — a `PUT` body means exactly
+   what it says — which is the one deliberate asymmetry between the two.
+3. **Two tokens of one group is a refusal**, not last-one-wins: `layout='2x2 3x3'`
+   is a mistake, and silently honouring one of them hides it.
+4. **A bare number is refused as ambiguous.** `layout=6` is mosaic `1+1` *and*
+   size `hd720p`; guessing is exactly the failure mode this section exists to
+   remove. The error names both ways out.
+
+A refusal carries the vocabulary (`layout: unknown "2+2" — mosaics: 1x1 2x2 …`),
+because the moment of the typo is the moment the list is wanted.
+
+**The online help.** A command's arguments already travelled to both frontals
+(`Kelix.Control.module_commands/0`); an argument may now also declare its own
+`help:` — one line or several — printed under the command by
+`kelictl <module> help` and by the new `kelictl <module> help <cmd>`, which narrows
+the listing to one command (a whole module's surface plus every vocabulary is a
+screenful). It is declared **by the module**, next to the parser that enforces it,
+for the same reason `labels:` is: the CLI has no idea what a mosaic is, and must
+not be able to advertise one the module would refuse. It travels in the JSON of
+`GET /modules` too, so a REST client discovers the vocabulary as well.
+
+**Backward compatibility, by construction.** Wire ids are still accepted
+everywhere (quoted or not — a REST client may send `"6"`), the JSON `layout` form
+is untouched, and names are simply *also* accepted inside it
+(`layout='{"comp":"2x2"}'`). The only behaviour change for an existing caller is
+the error *text*, which now names the vocabulary instead of the id range.
 
 ### 8.4 Configuration
 
@@ -1028,8 +1102,9 @@ end of this section.
 
 ```toml
 [module.mcu]
-# defaults applied to a conference created without the corresponding field
-vad                 = 1
+# defaults applied to a conference created without the corresponding field.
+# `vad`, `layout_comp` and `video_size` take a name or the wire id (§8.3.7).
+vad                 = "basic"        # none | basic | full  (or 0 | 1 | 2)
 # Mixer sampling rate. The server accepts 8000 / 16000 / 32000 / 48000
 # (`AudioMixer::Init`) and resamples each participant to its own codec rate
 # (`PipeAudioInput`/`PipeAudioOutput`, libswresample), so a wideband mixer costs
@@ -1046,13 +1121,14 @@ video_fmtp          = "profile-level-id=42e01f;packetization-mode=1"
 max_participants    = 20
 destroy_when_empty  = false
 auto_layout         = true
+layout_comp         = "2x2"          # 1x1 2x2 3x3 3+4 1+7 1+5 1+1 pip1 pip3 4x4 1+4 2+8
 # DID allocation pool used when `create` omits `did` (§5.3). `did_range` is the
 # fallback for any domain absent from `did_ranges`; omit both to make `did`
 # mandatory. An explicit DID outside the range is still accepted.
 did_range           = "8000-8099"
 did_ranges          = { "example.com" = "8000-8199", "lab.example.com" = "9000-9099" }
 # inline video profile
-video_size          = 6        # HD720P
+video_size          = "hd720p"  # qcif cif vga pal hvga qvga hd720p wqvga xga wvga
 video_fps           = 15
 video_bitrate       = 1024     # kbps
 video_intra_period  = 300
@@ -1175,6 +1251,7 @@ CLI quality-of-life.
 | FW-3 | `Kelix.Control.CLI` parses trailing `k=v` tokens into the args map instead of `%{"args" => [...]}` | `apps/kelixip/lib/kelix/control/cli.ex` | no — the module normalises both shapes (§8.3.6) |
 | FW-5 | `kelictl` reads `Kelix.Control.Registry` to offer `kelictl <module> help`, and maps a command's declared `errors:` onto non-zero exit codes | `apps/kelixip/lib/kelix/control/cli.ex` | **landed** — discovery (`kelictl module list`, `kelictl <module> help`, `GET /modules[/<name>]`, all from `Kelix.Control.module_commands/0,1`) **and** the exit-code mapping (`Kelix.Control.command_error_status/3` → `Kelix.Control.Route.error_status/2`, shared with the REST frontal). It closes the last parity gap of §8.3.6 and is the prerequisite for positional CLI arguments. Not included: propagating the code past the `kelixip rpc` overlay to the shell, which is a shell-protocol change of its own |
 | **FW-6** | `Kelix.Control.status/0` collects `status/0` from every loaded module, and `Kelix.Metrics.Poller` samples every module exporting `poll_metrics/0` | `apps/kelixip/lib/kelix/control.ex`, `lib/kelix/metrics/poller.ex` | **landed with P5** — what gives `kelictl status` its `mcu:` line and the §11 gauges their clock. Generic: the core names no module, a module that exports neither contributes nothing |
+| **FW-7** | An **argument** may declare its own `help:` (a string or a list of lines), carried by `Kelix.Control.module_commands/0` and printed under the command by `kelictl <module> help` and the new `kelictl <module> help <cmd>` | `apps/kelixip/lib/kelix/control.ex`, `lib/kelix/control/cli.ex`, `lib/kelix/module.ex` | **landed with §8.3.7** — the vocabulary of a value belongs next to the parser that enforces it, exactly as `labels:` does for rendering. Generic: an argument that declares none prints as before |
 
 FW-1 is small and additive (an unknown key in `conn_opts` is ignored by every
 existing adapter), and it unblocks any future adapter that needs per-call
@@ -1288,6 +1365,7 @@ observations the script has no use for.
 | Unit, events | the §11.1 invariants: exactly one `participant.left` per participant on each teardown path, no `ringing` for a rejected call |
 | Unit, core (FW-4, `apps/kelixip/test/`) | template resolution most-literal-first, ambiguous templates refused **at registration**, path params merged into args, `path < query < body` precedence, `:path_conflict` ⇒ 400, method list (`PUT` **and** `PATCH` on one declaration), method mismatch ⇒ 405 + `Allow`, no template ⇒ 404, declared `status`/`location`/`errors` → `201` + `Location` + `409`, and two **regression tests**: every pre-existing single-segment command still routes, and the flat form of a nested command still dispatches to the same clause (§8.3.5) |
 | Unit, REST surface | each command of §8.3.3 reachable at its declared method+path **and** at its flat form; a `PUT` with an omitted field leaves that field untouched; a `PUT` carrying a server-owned field ⇒ 400; reserved paths (`mosaics`, `mixers`, `listeners`) answer 404 |
+| Unit, the vocabulary (§8.3.7) | every label round-trips to the id it was rendered from, so the CLI cannot print a name the parser refuses; the short `layout` form in both token orders and both separators; a size alone leaves the mosaic and its `auto` flag; naming a mosaic implies `manual` unless `auto` is in the same value; two tokens of one group, an unknown token, a bare number and an empty value are each a refusal that names the vocabulary; the wire form stays literal; `[module.mcu]` accepts `vad`/`layout_comp`/`video_size` by name and `0` is not mistaken for absent |
 | Unit, mocked MCU | a `Kelix.Mod.Mcu.Client` stub asserting the **exact RPC order** of §6.2 — this is the regression net for the ordering rule of §2 |
 | Integration | `mcu.exs` driven by the existing scenario test harness with the mocked client: 404 on unknown DID, 486 when full, 488 with no common codec, full join/leave, ACK-less caller (no mixer join), CANCEL before answer, scenario crash ⇒ participant reaped |
 | Integration, two legs | two `elixipp` UAC scenarios joining the same conference against a **real** mediaserver, tagged `:live`, asserting `GetParticipantStatistics` shows RTP in both directions |
@@ -1610,7 +1688,9 @@ never a hung call:
 `rate:`, `audio_codecs:`, `video_codecs:`, `video:`, `layout:`,
 `max_participants:`, `destroy_when_empty:`, `owner:`), not the string-keyed map the
 control commands receive. That is the one real asymmetry, and it is the right one: a
-script writes Elixir, not JSON.
+script writes Elixir, not JSON. The **values** are not an asymmetry: the vocabulary of
+§8.3.7 is read by the same code, so `layout: "1+1 vga"`, `layout: %{comp: "1+1"}` and
+`layout: %{comp: 6}` are one request.
 
 **One validation, two shapes.** The control commands become thin: `handle_control/2`
 normalises its arguments (`Args`) and then calls these functions. The GenServer

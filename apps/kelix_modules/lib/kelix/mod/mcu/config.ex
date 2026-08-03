@@ -18,6 +18,8 @@ defmodule Kelix.Mod.Mcu.Config do
   *declared* is not what pins it.
   """
 
+  alias Kelix.Mod.Mcu.Vocabulary
+
   @type range :: {pos_integer, pos_integer}
 
   @type t :: %__MODULE__{}
@@ -69,12 +71,14 @@ defmodule Kelix.Mod.Mcu.Config do
   @video_codecs ~w(H264 VP8)
   @text_codecs ~w(T140 T140RED)
 
-  @vad_values [0, 1, 2]
   # AudioMixer::Init refuses anything else (§15, decision 5)
   @rates [8000, 16_000, 32_000, 48_000]
-  # Mosaic layouts of §3.6
-  @comp_values 0..11
-  @int_keys ~w(vad rate max_participants layout_comp video_size video_fps video_bitrate
+
+  # `vad`, `layout_comp` and `video_size` accept a human name as well as the wire id
+  # (`layout_comp = "2x2"`, `video_size = "vga"`, `vad = "full"`, §8.3.7), decoded by
+  # the same `Vocabulary` the control commands and the CLI labels use. They are
+  # therefore **not** in @int_keys: a name is not a malformed integer.
+  @int_keys ~w(rate max_participants video_fps video_bitrate
                video_intra_period xmlrpc_timeout_ms call_timeout_ms shutdown_grace_ms
                rtp_timeout_ms)
   @bool_keys ~w(destroy_when_empty auto_layout gc_orphans)
@@ -96,9 +100,10 @@ defmodule Kelix.Mod.Mcu.Config do
          :ok <- check_ints(block),
          :ok <- check_bools(block),
          :ok <- check_strings(block),
-         :ok <- check_enum(block, "vad", @vad_values),
          :ok <- check_enum(block, "rate", @rates),
-         :ok <- check_enum(block, "layout_comp", Enum.to_list(@comp_values)),
+         {:ok, vad} <- Vocabulary.vad(Map.get(block, "vad"), "vad"),
+         {:ok, layout_comp} <- Vocabulary.comp(Map.get(block, "layout_comp"), "layout_comp"),
+         {:ok, video_size} <- Vocabulary.size(Map.get(block, "video_size"), "video_size"),
          {:ok, audio, dtmf} <- audio_codecs(block),
          {:ok, video} <- codecs(block, "video_codecs", @video_codecs, defaults().video_codecs),
          {:ok, text} <- codecs(block, "text_codecs", @text_codecs, defaults().text_codecs),
@@ -108,7 +113,9 @@ defmodule Kelix.Mod.Mcu.Config do
 
       {:ok,
        %__MODULE__{
-         vad: int(block, "vad", defaults.vad),
+         # an absent enum decodes to nil, so `||` picks the default — and it is safe
+         # for the id `0` (vad `none`, mosaic `1x1`), which is truthy here
+         vad: vad || defaults.vad,
          rate: int(block, "rate", defaults.rate),
          audio_codecs: audio,
          dtmf: dtmf,
@@ -117,9 +124,9 @@ defmodule Kelix.Mod.Mcu.Config do
          max_participants: int(block, "max_participants", defaults.max_participants),
          destroy_when_empty: bool(block, "destroy_when_empty", defaults.destroy_when_empty),
          auto_layout: bool(block, "auto_layout", defaults.auto_layout),
-         layout_comp: int(block, "layout_comp", defaults.layout_comp),
+         layout_comp: layout_comp || defaults.layout_comp,
          video: %{
-           size: int(block, "video_size", defaults.video.size),
+           size: video_size || defaults.video.size,
            fps: int(block, "video_fps", defaults.video.fps),
            bitrate: int(block, "video_bitrate", defaults.video.bitrate),
            intra_period: int(block, "video_intra_period", defaults.video.intra_period),

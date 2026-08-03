@@ -174,7 +174,8 @@ defmodule Kelix.Mod.McuLifecycleTest do
 
     test "the same validation as the REST body, with the same messages" do
       assert {:error, msg} = Mcu.create_conference(@domain, vad: 9)
-      assert msg =~ "vad must be one of"
+      # the vocabulary of §8.3.7 answers with the names, not with the wire ids
+      assert msg =~ "vad: 9 is not a vad mode id — one of none, basic, full"
 
       # the codec vocabulary is enforced here too, not only in the config block:
       # a conference on a codec the SDP layer cannot emit would raise at answer time

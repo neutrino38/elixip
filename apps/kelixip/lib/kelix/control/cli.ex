@@ -139,7 +139,12 @@ defmodule Kelix.Control.CLI do
   # gets its usage for free — nothing to write, nothing to keep in sync. `help` is
   # therefore reserved on a module namespace; a module that declares a command of
   # that name keeps it reachable over REST.
-  defp parse([module, "help"]), do: {:ok, {:module_help, module}, :module_commands, [module]}
+  defp parse([module, "help"]), do: {:ok, {:module_help, module, nil}, :module_commands, [module]}
+
+  # `<module> help <cmd>` narrows it to one command, with its arguments' own help —
+  # a module's full surface plus every vocabulary would be a screenful to scroll.
+  defp parse([module, "help", cmd]),
+    do: {:ok, {:module_help, module, cmd}, :module_commands, [module]}
 
   # module-contributed command: <module> <cmd> [args…]
   defp parse([module, cmd | rest]),
@@ -169,7 +174,7 @@ defmodule Kelix.Control.CLI do
 
   # ── rendering ({tag, result} → {exit_code, text}) ────────────────────────────
 
-  defp render({:module_help, name}, {:error, :unknown_module}),
+  defp render({:module_help, name, _cmd}, {:error, :unknown_module}),
     do: {1, "error: no module named \"#{name}\" is loaded (kelictl module list)"}
 
   defp render(:domain, {:error, :not_found}), do: {1, "no such domain"}
@@ -316,8 +321,20 @@ defmodule Kelix.Control.CLI do
      ) <> "\n\nkelictl <module> help lists what a module contributes"}
   end
 
-  defp render({:module_help, name}, {:ok, m}) do
+  defp render({:module_help, name, nil}, {:ok, m}) do
     {0, Enum.join(module_help_lines(name, m), "\n")}
+  end
+
+  defp render({:module_help, name, cmd}, {:ok, m}) do
+    case Enum.find(m.commands, &(&1.name == cmd)) do
+      nil ->
+        {2,
+         "error: module \"#{name}\" declares no command \"#{cmd}\" " <>
+           "(kelictl #{name} help lists them)"}
+
+      command ->
+        {0, Enum.join(command_lines(command, name, String.length(command.name)), "\n")}
+    end
   end
 
   defp render(:map, result) when is_map(result) do
@@ -598,8 +615,27 @@ defmodule Kelix.Control.CLI do
         "[#{format_methods(cmd)} /modules/#{module_name}#{cmd.path}]",
       "      args: #{format_command_args(cmd)}",
       "      #{cmd.help}"
-    ]
+    ] ++ arg_help_lines(cmd)
   end
+
+  # An argument whose value has a vocabulary of its own declares it (`help:` in its
+  # entry, one line or several): a mosaic name, an enum, a compact syntax. Printed
+  # under the command, indented below the argument's name — the CLI knows nothing
+  # about what it is showing, which is the point (§8.3.7).
+  defp arg_help_lines(%{args: args}) when is_list(args) do
+    Enum.flat_map(args, fn arg ->
+      case List.wrap(Map.get(arg, :help)) do
+        [] ->
+          []
+
+        [first | rest] ->
+          pad = String.duplicate(" ", String.length(arg.name) + 8)
+          ["      #{arg.name}: #{first}" | Enum.map(rest, &(pad <> &1))]
+      end
+    end)
+  end
+
+  defp arg_help_lines(_cmd), do: []
 
   defp format_methods(cmd),
     do: Enum.map_join(cmd.methods, "|", &String.upcase(to_string(&1)))
@@ -821,7 +857,8 @@ defmodule Kelix.Control.CLI do
                                       what is already in flight
       undrain                         back in service (OPTIONS -> 200)
       graceful-shutdown               drain, let upstream notice, then stop
-      <module> help                   the commands a module contributes
+      <module> help [<cmd>]           the commands a module contributes, or
+                                      one of them with its arguments' help
       <module> <cmd> [args…]          a module-contributed command
     """
   end
