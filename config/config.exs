@@ -15,7 +15,7 @@ config :logger, :file_log,
   level: :info
 
 config :elixip2,
-  useragent: "Elixipp-1.1",
+  useragent: "Elixipp-1.2",
   optionkeepaliveperiod: 15,
   # When true, an unparseable incoming SIP message is dumped verbatim (inspected,
   # so CRLF/empty frames are visible) at warning level — useful to diagnose a

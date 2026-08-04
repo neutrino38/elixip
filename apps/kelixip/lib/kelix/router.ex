@@ -13,6 +13,7 @@ defmodule Kelix.Router do
   """
 
   @behaviour SIP.Session.Registrar
+  @behaviour SIP.Session.Call
   require Logger
 
   alias Kelix.{Domains, Domain, DialRule, InstancePool}
@@ -43,11 +44,16 @@ defmodule Kelix.Router do
 
   @doc """
   Register the router as the processing module for every implemented SIP function
-  (`calls`/`presence` are wired when those functions land). Always `:ignore`.
+  (`presence` is wired when that function lands). Always `:ignore`.
   """
   @spec register_processing_modules() :: :ignore
   def register_processing_modules() do
     :ok = SIP.Session.ConfigRegistry.set_registration_processing_module(__MODULE__)
+    # Inbound calls go through the very same resolve → quota → spawn path as
+    # REGISTER; only the callback the dialog layer invokes differs. Without this
+    # registration the framework answers an INVITE 500 ("no call server defined")
+    # however complete the domain's dial plan is.
+    :ok = SIP.Session.ConfigRegistry.set_call_processing_module(__MODULE__)
     # Out-of-dialog OPTIONS do not go through the dial-plan: they are answered
     # directly by Kelix.Options (200 with our Allow, or 503 while draining). Without
     # a module registered the framework answers 500, which upstream reads as "node
@@ -64,6 +70,15 @@ defmodule Kelix.Router do
 
   @impl SIP.Session.Registrar
   def on_registration_expired(_dialog_id, _app_pid), do: :ok
+
+  @impl SIP.Session.Call
+  def on_new_call(dialog_id, invitereq, _transaction_id),
+    do: dispatch(dialog_id, invitereq)
+
+  # The instance is monitored by `Kelix.InstancePool`, which frees its slot on
+  # `:DOWN`; there is nothing left for the dialog layer to tell us here.
+  @impl SIP.Session.Call
+  def on_call_end(_dialog_id, _app_pid), do: :ok
 
   @doc """
   Full dispatch of an out-of-dialog request: resolve (this module) then reserve a

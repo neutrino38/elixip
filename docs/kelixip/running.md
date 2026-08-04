@@ -78,12 +78,11 @@ kelictl() { MIX_ENV=prod elixir --name kelictl@127.0.0.1 --cookie kelixip-dev \
     -S mix run --no-start -e 'Kelix.Control.CLI.main(System.argv())' -- "$@"; }
 
 kelictl status
-kelictl regs
+kelictl registration list
 kelictl monitor
 ```
 
-> Pick a `[[listen]]` port nothing else holds. 5060/5061/5066/5067/443 are often
-> taken by a local kamailio or softswitch; a bind failure **aborts the boot** and
+> Pick a `[[listen]]` port nothing else holds. A bind failure **aborts the boot** and
 > says so on stderr. The test suite binds `5070` by default too — override with
 > `ELIXIP_TEST_UDP_PORT` if you run `mix test --include live` against a live server.
 
@@ -91,7 +90,7 @@ kelictl monitor
 
 ```bash
 systemctl start kelixip
-systemctl reload kelixip          # = kelictl reload-domains (atomic, no restart)
+systemctl reload kelixip          # = kelictl domain reload-all (atomic, no restart)
 systemctl stop kelixip            # drains first, see below
 systemctl restart kelixip         # the only way to apply a config.toml change
 kelictl graceful-shutdown         # same drain, without systemd

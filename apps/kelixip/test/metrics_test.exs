@@ -63,6 +63,45 @@ defmodule Kelix.MetricsTest do
       Emit.registrar_event("example.com", :registered)
       assert_receive {:event, [:kelix, :registrar, :event], _, %{event: :registered}}
     end
+
+    test "the conferencing helpers label their events (docs/design/mcu_module.md §11)" do
+      forward([
+        [:kelix, :mcu, :call],
+        [:kelix, :mcu, :rpc],
+        [:kelix, :mcu, :rpc_error],
+        [:kelix, :poll, :mcu_conferences],
+        [:kelix, :poll, :mcu_participants],
+        [:kelix, :poll, :mcu_up]
+      ])
+
+      # the funnel takes a code or an atom, and labels it as a string either way
+      Emit.mcu_call(:joined)
+      assert_receive {:event, [:kelix, :mcu, :call], %{count: 1}, %{result: "joined"}}
+      Emit.mcu_call(486)
+      assert_receive {:event, [:kelix, :mcu, :call], %{count: 1}, %{result: "486"}}
+
+      Emit.mcu_rpc("CreateConference", 1234)
+
+      assert_receive {:event, [:kelix, :mcu, :rpc], %{duration: 1234},
+                      %{method: "CreateConference"}}
+
+      Emit.mcu_rpc_error("StartReceiving", :timeout)
+
+      assert_receive {:event, [:kelix, :mcu, :rpc_error], %{count: 1},
+                      %{method: "StartReceiving", reason: "timeout"}}
+
+      Emit.mcu_conferences("mcu1", 3)
+      assert_receive {:event, [:kelix, :poll, :mcu_conferences], %{count: 3}, %{mcu: "mcu1"}}
+
+      Emit.mcu_participants("mcu1", "c-1", 7)
+
+      assert_receive {:event, [:kelix, :poll, :mcu_participants], %{count: 7},
+                      %{mcu: "mcu1", conference: "c-1"}}
+
+      # a boolean gauge is exported as 1/0, which is what Prometheus wants
+      Emit.mcu_mediaserver_up("mcu1", false)
+      assert_receive {:event, [:kelix, :poll, :mcu_up], %{up: 0}, %{mcu: "mcu1"}}
+    end
   end
 
   describe "Poller" do
@@ -76,6 +115,29 @@ defmodule Kelix.MetricsTest do
     test "sample/0 never crashes even if a surface read fails" do
       # surfaces are up here; the guard is exercised structurally
       assert :ok = Poller.sample()
+    end
+
+    test "a module exporting poll_metrics/0 is sampled on our tick; one that does not is skipped" do
+      defmodule Sampled do
+        def poll_metrics(),
+          do: :telemetry.execute([:kelix, :test, :module_poll], %{count: 1}, %{})
+      end
+
+      defmodule Silent do
+        def describe(), do: %{version: "1.0", exports: []}
+      end
+
+      Kelix.ModuleRegistry.register("sampled", Sampled, %{})
+      Kelix.ModuleRegistry.register("silent", Silent, %{})
+
+      on_exit(fn ->
+        Kelix.ModuleRegistry.unregister("sampled")
+        Kelix.ModuleRegistry.unregister("silent")
+      end)
+
+      forward([[:kelix, :test, :module_poll]])
+      assert :ok = Poller.sample()
+      assert_receive {:event, [:kelix, :test, :module_poll], %{count: 1}, _}
     end
   end
 

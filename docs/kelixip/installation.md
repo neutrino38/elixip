@@ -20,16 +20,22 @@ deployment installs only what it uses — the core itself implements no SIP func
 | `kelixip` | the server + `kelictl` + the systemd unit + `/etc/kelixip` |
 | `kelixip-mod-registrar` | the [registrar](modules/registrar.md) / user-location module |
 | `kelixip-mod-auth_db` (RPM)<br>`kelixip-mod-auth-db` (deb) | the [database authentication](modules/auth_db.md) module |
+| `kelixip-mod-mcu` | the [conference mixer](modules/mcu.md) — the one module that also needs a **reachable media server** |
 
 ```bash
 # Alma Linux 9
-dnf install kelixip kelixip-mod-registrar kelixip-mod-auth_db
+dnf install kelixip kelixip-mod-registrar kelixip-mod-auth_db kelixip-mod-mcu
 rpm -ivh kelixip-*.rpm                     # or, from the built files
 
 # Ubuntu / Debian
-apt install kelixip kelixip-mod-registrar kelixip-mod-auth-db
+apt install kelixip kelixip-mod-registrar kelixip-mod-auth-db kelixip-mod-mcu
 apt install ./kelixip_*.deb ./kelixip-mod-registrar_*.deb   # from the built files
 ```
+
+> Each module package carries its own document under `/usr/share/doc/<package>/`, so
+> a host documents what it can actually do: `kelixip-mod-mcu` ships `mcu.md` (the
+> block key by key, the control surface) and `mcu_module_guide.md` (operating and
+> debugging a conference).
 
 > The module's **registered name is `auth_db`** on both — the config block is
 > `[module.auth_db]` everywhere. Only the deb *package* name differs, because a Debian
@@ -116,7 +122,7 @@ kelixip reads **two TOML files**, deliberately split by lifecycle:
 | File | Holds | Reload |
 |---|---|---|
 | `config.toml` | Infrastructure: `[server]`, `[log]`, listeners, media pool, most `[module.*]` blocks, control API, metrics | **Restart only** |
-| `domains.toml` | The served domains, their dial-plan and the `[module.registrar]` block | **Hot** — `kelictl reload-domains` (atomic: one bad value and the whole reload is rejected, the running config untouched) |
+| `domains.toml` | The served domains, their dial-plan and the `[module.registrar]` block | **Hot** — `kelictl domain reload-all` (atomic: one bad value and the whole reload is rejected, the running config untouched) |
 
 Their paths come from `KELIXIP_CONFIG` / `KELIXIP_DOMAINS` (see
 [running.md](running.md)). Both files are validated at boot: **any error aborts
@@ -213,16 +219,27 @@ ssl_ca_cert_file   = ""             # with a CA the server cert is verified; wit
 
 `[module.registrar]` lives in **`domains.toml`**, not here (see below).
 
-#### `[mediaserver.pool.<name>]` — the MCU pool
+#### `[mediaserver.pool.<name>]` — the media servers
 
-Round-robin selection with health-checking; the router injects the chosen server
-into each call.
+**The single place a media server is declared.** Point-to-point calls get one
+per call (round-robin over the healthy, enabled entries; the router injects the
+chosen one), and the `mcu` module opens one control channel per `mendooze` entry
+and picks one per conference — a conference then stays on it for its life.
+
+A malformed entry **aborts the boot**: a media server that silently failed to
+load is a node that answers `503` to every call.
 
 | Key | Type | Meaning |
 |---|---|---|
-| `module` | string | Adapter: `mendooze`, `mockup`, or a `MediaServer.Behaviour` module |
-| `url` | string | Passed to the adapter's `connect/1`, e.g. `http://mcu1:8080` |
-| `enabled` | bool (default `true`) | Toggle without a restart (`kelictl mcu <name> on\|off`) |
+| `module` | string, required | Adapter: `mendooze`, `mockup`, or a `MediaServer.Behaviour` module. Only `mendooze` entries are usable for conferences |
+| `url` | string, required | Passed to the adapter's `connect/1`, e.g. `http://mcu1:8080` |
+| `enabled` | bool (default `true`) | Toggle without a restart (`kelictl mediaserver enable\|disable <name>`; `kelictl mediaserver list` shows the pool). Disabling stops **new** calls and conferences landing there; live ones stay |
+
+> No media address here. The address a media server announces in the SDP (`c=`
+> line and ICE candidates) is the server's own setting — `mediaserver --public-ip`,
+> **mandatory behind a NAT** — and it reports it to kelixip on each
+> `StartReceiving`. A media server too old to report it gets its calls refused
+> with `500` rather than answered with a guessed address.
 
 ```toml
 [mediaserver.pool.mcu1]

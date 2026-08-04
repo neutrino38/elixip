@@ -212,7 +212,7 @@ KELIXIP_CONFIG=/etc/kelixip/config.toml $REL daemon
 elixipp -c accounts.json --log-level debug UAC.Register
 
 # 3. what the server thinks
-kelictl regs
+kelictl registration list
 
 # 4. then the same at scale: 200 accounts, 20 new registrations per second
 elixipp -c accounts.json -l 200 --rate 20 --monitor UAC.Register

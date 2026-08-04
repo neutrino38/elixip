@@ -12,7 +12,7 @@ maps the facade result onto the `SIP.Session.Registrar.*` helpers.
 
 The `registrar` block lives in **`domains.toml`** (not `config.toml`) so it is
 hot-reloadable alongside the domains it serves — it reloads on
-`kelictl reload-domains`. A `[module.registrar]` in `config.toml` is ignored.
+`kelictl domain reload-all`. A `[module.registrar]` in `config.toml` is ignored.
 
 ```toml
 # domains.toml
@@ -116,7 +116,8 @@ drops (WebRTC-critical): the binding is invalidated even before its `Expires`.
 
 ## Control commands
 
-None yet. Registrations are inspected with the core command `kelictl regs`
+None yet. Registrations are inspected with the core commands
+`kelictl registration list [domain]` / `registration show <domain> <aor>`
 (see [administration.md](../administration.md)).
 
 ## Examples

@@ -340,6 +340,69 @@ defmodule Mendooze.ConnTest do
     assert audio.dtmf_pts != %{}
   end
 
+  # ── Symmetric-NAT latching (natLatch) ───────────────────────────────────────
+
+  test "answering an offer asks the server to latch onto a symmetric NAT" do
+    %{server: server} = start_media_server()
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio)
+
+    offer =
+      Sdp.build(%{
+        ip: "10.9.8.7",
+        medias: [%{type: :audio, port: 40_000, codecs: ["PCMU"]}]
+      })
+
+    assert {:ok, _answer} = Mendooze.set_remote_offer(conn, offer)
+
+    # plain RTP/AVP without mux: natLatch is the only property, so the call exists
+    # solely because we are the answerer
+    assert_receive {:jsr309_call, "EndpointSetRTPProperties", [3, 4, 0, props]}
+    assert props == %{"natLatch" => "1"}
+  end
+
+  test "the answer to an offer of ours never asks for latching" do
+    %{server: server} = start_media_server()
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(), media: :audio, audio_codec: "PCMU")
+
+    {:ok, _offer} = Mendooze.get_local_offer(conn)
+    assert :ok = Mendooze.set_remote_answer(conn, remote_answer())
+
+    # the peer answered knowing its own NAT: its address is the one to trust
+    assert_receive {:jsr309_call, "EndpointStartSending", [3, 4, 0, "10.9.8.7", 40_000, _]}
+    refute_receive {:jsr309_call, "EndpointSetRTPProperties", _}, 100
+  end
+
+  test "nat_latch overrides the direction it is inferred from, either way" do
+    %{server: server} = start_media_server()
+
+    # forced on for a leg that offered
+    {:ok, uac} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :audio,
+        audio_codec: "PCMU",
+        nat_latch: true
+      )
+
+    {:ok, _offer} = Mendooze.get_local_offer(uac)
+    assert :ok = Mendooze.set_remote_answer(uac, remote_answer())
+    assert_receive {:jsr309_call, "EndpointSetRTPProperties", [3, 4, 0, %{"natLatch" => "1"}]}
+
+    # forced off for a leg that answers
+    {:ok, uas} = Mendooze.create_peer_connection(server, self(), media: :audio, nat_latch: false)
+
+    offer =
+      Sdp.build(%{
+        ip: "10.9.8.7",
+        medias: [%{type: :audio, port: 40_000, codecs: ["PCMU"]}]
+      })
+
+    assert {:ok, _answer} = Mendooze.set_remote_offer(uas, offer)
+    refute_receive {:jsr309_call, "EndpointSetRTPProperties", _}, 100
+  end
+
   test "the answer only covers the medias present in the offer" do
     %{server: server} = start_media_server()
 

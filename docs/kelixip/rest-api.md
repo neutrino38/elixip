@@ -49,19 +49,113 @@ cert) with a JSON body `{"error": "…"}`.
 |---|---|---|
 | `GET /status` | R | `kelictl status` |
 | `GET /scenarios` | R | `kelictl monitor` |
-| `GET /registrations` | R | `kelictl regs` |
-| `DELETE /registrations/<aor>` | W | `kelictl unregister` |
+| `GET /registrations` | R | `kelictl registration list` |
+| `GET /domains` | R | `kelictl domain list` |
+| `GET /domains/<domain>` | R | `kelictl domain show` |
+| `GET /domains/<domain>/registrations` | R | `kelictl registration list <domain>` |
+| `GET /domains/<domain>/registrations/<aor>` | R | `kelictl registration show` |
+| `GET /mediaservers` | R | `kelictl mediaserver list` |
+| `GET /mediaservers/<name>` | R | `kelictl mediaserver show` |
+| `GET /modules` | R | `kelictl module list` |
+| `GET /modules/<name>` | R | `kelictl <name> help` |
+| `DELETE /domains/<domain>/registrations/<aor>` | W | `kelictl registration remove` |
 | `POST /scenarios/<id>/shutdown` | W | `kelictl stop` |
 | `POST /scripts/reload[?notify=1]` | W | `kelictl reload-script` |
-| `POST /domains/reload` | W | `kelictl reload-domains` |
+| `POST /domains/reload` | W | `kelictl domain reload-all` |
 | `POST /modules/<name>/reload` | W | `kelictl module reload` |
-| `POST /mediaservers/<name>` | W | `kelictl mcu … on\|off` |
+| `POST /mediaservers/<name>` | W | `kelictl mediaserver enable\|disable` |
 | `PUT /log/level` | W | `kelictl log-level` |
 | `POST /graceful-shutdown` | W | `kelictl graceful-shutdown` |
 
 Request bodies are JSON (`Content-Type: application/json`); responses are JSON.
 Result mapping: `:ok` → `200 {"result":"ok"}`; not-found → `404`; a bad
 argument → `400`; `graceful-shutdown` → `202 {"result":"draining"}`.
+
+`GET /domains` returns the list of these objects, in `domains.toml` order;
+`GET /domains/<domain>` returns one (matched on the name **or** an alias,
+case-insensitively) or `404`. Both read the live snapshot — what the router uses
+now, not what is on disk. `dial_plan` is ordered and first-match-wins, the
+catch-all being the entry with `"default": true` (and no `pattern`); a function
+absent from `functions` is not served on that domain (`registrar` / `presence`
+are then `null`).
+
+```json
+{
+  "name": "example.com",
+  "aliases": ["example.fr"],
+  "max_calls": 500,
+  "functions": ["registrar", "calls"],
+  "registrar": {"script": "registrar.exs", "default_expires": 3600},
+  "presence": null,
+  "dial_plan": [
+    {"pattern": "0[1-9]XXXXXXXX", "default": false, "script": "user2pstn.exs"},
+    {"pattern": null, "default": true, "script": "catchall.exs"}
+  ],
+  "active_calls": 0,
+  "registrations": 0
+}
+```
+
+**Registrations are a sub-resource of the domain.** An AOR is only unique within a
+domain, so it is addressed as `/domains/<domain>/registrations/<aor>` — the domain
+is part of the address, not a query filter. `<domain>` is matched on the name
+**or** an alias, case-insensitively; an unserved domain is `404` on the collection
+itself, which is not the same answer as a served domain with an empty
+`registrations` list. `GET /registrations` is the cross-domain view: the array of
+these objects, one per served domain, in `domains.toml` order.
+
+```json
+{
+  "domain": "example.com",
+  "registrations": [
+    {
+      "domain": "example.com",
+      "aor": "alice",
+      "contacts": [
+        {
+          "uri": "sip:alice@10.0.0.9:5060",
+          "expires_at": "2026-08-02T12:34:56Z",
+          "expires_in": 298,
+          "source": "udp 203.0.113.7:45112",
+          "transport": "udp",
+          "instance": "<urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6>",
+          "reg_id": "1",
+          "methods": null
+        }
+      ]
+    }
+  ]
+}
+```
+
+`GET /domains/<domain>/registrations/<aor>` returns one of those inner objects (or
+`404`), so the list and the detail view cannot disagree. Each binding carries what
+the registrar stored: the expiry both ways (`expires_in` in seconds is the operator
+question, `expires_at` the instant), the `source` the REGISTER actually came from
+(behind a NAT, not what the contact URI says), the transport, and the RFC 5626/3840
+identity the handset sent. A field the handset did not send is `null`.
+
+`GET /mediaservers` returns the `[mediaserver.pool.*]` entries in config order
+(the round-robin order); `GET /mediaservers/<name>` returns one or `404`.
+`enabled` is the operator switch (`POST /mediaservers/<name>` flips it), `healthy`
+the pool's own probe, and `modules` what each module driving that server says
+about it — the `mcu` module holds its own control channel, so its `status` and the
+pool's `healthy` are two different healths of the same box (see
+[administration](administration.md)). A module contributes its own shape; the
+core adds nothing to it.
+
+```json
+{
+  "name": "mcu1",
+  "module": "mendooze",
+  "url": "http://10.0.0.1:8080",
+  "enabled": true,
+  "healthy": true,
+  "modules": {
+    "mcu": {"name": "mcu1", "url": "http://10.0.0.1:8080", "status": "up", "queue_id": "q-42"}
+  }
+}
+```
 
 ```bash
 TOKEN=change-me
@@ -70,11 +164,17 @@ BASE=http://127.0.0.1:8090
 # read verbs
 curl -s -H "Authorization: Bearer $TOKEN" $BASE/status
 curl -s -H "Authorization: Bearer $TOKEN" $BASE/scenarios
-curl -s -H "Authorization: Bearer $TOKEN" "$BASE/registrations?aor=alice@example.com"
+curl -s -H "Authorization: Bearer $TOKEN" $BASE/registrations
+curl -s -H "Authorization: Bearer $TOKEN" $BASE/domains
+curl -s -H "Authorization: Bearer $TOKEN" $BASE/domains/example.com
+curl -s -H "Authorization: Bearer $TOKEN" $BASE/domains/example.com/registrations
+curl -s -H "Authorization: Bearer $TOKEN" $BASE/domains/example.com/registrations/alice
+curl -s -H "Authorization: Bearer $TOKEN" $BASE/mediaservers
+curl -s -H "Authorization: Bearer $TOKEN" $BASE/mediaservers/mcu1
 
 # write verbs
 curl -s -X DELETE -H "Authorization: Bearer $TOKEN" \
-     "$BASE/registrations/alice@example.com"
+     "$BASE/domains/example.com/registrations/alice?contact=sip:alice@10.0.0.9:5060"
 curl -s -X POST   -H "Authorization: Bearer $TOKEN" $BASE/scenarios/42/shutdown
 curl -s -X POST   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
      -d '{"names":["uas_register"]}' "$BASE/scripts/reload?notify=1"
@@ -90,12 +190,27 @@ curl -s -X POST   -H "Authorization: Bearer $TOKEN" $BASE/graceful-shutdown
 
 Modules register their commands into `Kelix.Control.Registry` from the same
 `describe_control/0` declaration that produces their `kelictl` sub-commands (see
-[modules/README.md](modules/README.md#control-surface-kelictl--rest)). Each
-declared command is reachable as `<method> /modules/<name>/<cmd>` — the method is
-the one it declared (`get` for reads, `post` for writes) — with the JSON request
-body passed through as the command args. A command reached with the wrong method
-→ `405`; an undeclared command → `404`. None are contributed by the core modules
-yet.
+[modules/README.md](modules/README.md#control-surface-kelictl--rest)). A command
+declares a **path template** relative to `/modules/<name>`, so it is reachable
+both as a resource (`GET /modules/mcu/conferences/c-3f9a`) and in the flat form
+`<method> /modules/<name>/<cmd>`, for a client that cannot build URLs. Both
+dispatch to the same handler.
+
+Args are merged **path < query < body** (a body that tries to change a path
+parameter is a `400`). The declaration also carries the HTTP concerns the frontal
+derives: the success status (`201` on a creation), a `Location` template, and the
+per-reason error statuses (that is how a module answers `409`). A command reached
+with the wrong method → `405`; an undeclared one → `404`.
+
+**Discovery.** `GET /modules` returns what every loaded module contributes and
+`GET /modules/<name>` one module's surface — the command names, their methods,
+their path templates and their arguments, plus the facade functions the module
+exports to scripts. That is the same data `kelictl module list` / `kelictl <name>
+help` render, so a client can build its URLs from the node instead of from
+out-of-band documentation.
+
+Of the shipped modules, [mcu](modules/mcu.md) contributes nine commands
+(conferences and participants); `registrar` and `auth_db` contribute none.
 
 ## Observability
 

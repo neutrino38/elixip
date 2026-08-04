@@ -46,6 +46,84 @@ defmodule Kelix.ControlAPITest do
       assert conn.status == 200
       assert is_list(body(conn))
     end
+
+    # Registrations are a sub-resource of the domain: an unserved domain is a 404 on
+    # the collection itself, not an empty list.
+    test "GET /domains/:domain/registrations on an unserved domain → 404" do
+      conn = call(conn(:get, "/domains/ghost.example.org/registrations"))
+      assert conn.status == 404
+      assert body(conn)["error"] == "not found"
+    end
+
+    test "GET /domains/:domain/registrations/:aor on an unregistered aor → 404" do
+      conn = call(conn(:get, "/domains/ghost.example.org/registrations/alice"))
+      assert conn.status == 404
+    end
+
+    test "GET /domains returns a JSON list" do
+      conn = call(conn(:get, "/domains"))
+      assert conn.status == 200
+      assert is_list(body(conn))
+    end
+
+    test "GET /mediaservers returns a JSON list; :name serves one entry" do
+      :ok = Supervisor.terminate_child(Kelix.Supervisor, Kelix.MediaPool)
+      on_exit(fn -> Supervisor.restart_child(Kelix.Supervisor, Kelix.MediaPool) end)
+
+      start_supervised!(
+        {Kelix.MediaPool,
+         pool: [%{name: "mcu1", module: :mockup, url: "http://10.0.0.1:8080", enabled: true}],
+         probe: fn _ -> true end,
+         first_check_ms: 60_000}
+      )
+
+      conn = call(conn(:get, "/mediaservers"))
+      assert conn.status == 200
+      assert [%{"name" => "mcu1", "module" => "mockup", "enabled" => true}] = body(conn)
+
+      conn = call(conn(:get, "/mediaservers/mcu1"))
+      assert conn.status == 200
+      assert body(conn)["url"] == "http://10.0.0.1:8080"
+
+      conn = call(conn(:get, "/mediaservers/ghost"))
+      assert conn.status == 404
+      assert body(conn)["error"] == "not found"
+    end
+
+    test "GET /domains/:name serves the same view kelictl shows" do
+      path =
+        Path.join(System.tmp_dir!(), "api_domains_#{System.unique_integer([:positive])}.toml")
+
+      File.write!(
+        path,
+        ~s([[domain]]\nname = "api.example.com"\n\n[domain.registrar]\nscript = "r.exs"\n)
+      )
+
+      assert :ok = Kelix.Domains.reload(path)
+
+      on_exit(fn ->
+        empty = path <> ".empty"
+        File.write!(empty, "")
+        Kelix.Domains.reload(empty)
+        File.rm(path)
+        File.rm(empty)
+      end)
+
+      conn = call(conn(:get, "/domains/api.example.com"))
+      assert conn.status == 200
+      assert %{"name" => "api.example.com", "functions" => ["registrar"]} = body(conn)
+
+      # …and the domain's registrations are a sub-resource of it (no registrar
+      # module loaded here, so the list is empty rather than absent)
+      conn = call(conn(:get, "/domains/api.example.com/registrations"))
+      assert conn.status == 200
+      assert body(conn) == %{"domain" => "api.example.com", "registrations" => []}
+    end
+
+    test "GET /domains/:name on an unknown domain is a 404" do
+      conn = call(conn(:get, "/domains/ghost.example.org"))
+      assert conn.status == 404
+    end
   end
 
   describe "write verbs" do
@@ -59,8 +137,8 @@ defmodule Kelix.ControlAPITest do
       assert conn.status == 400
     end
 
-    test "DELETE /registrations/:aor on an unknown aor → 404" do
-      conn = call(conn(:delete, "/registrations/ghost@example.com"))
+    test "DELETE /domains/:domain/registrations/:aor on an unknown aor → 404" do
+      conn = call(conn(:delete, "/domains/example.com/registrations/ghost"))
       assert conn.status == 404
       assert body(conn)["error"] == "not found"
     end
@@ -186,6 +264,36 @@ defmodule Kelix.ControlAPITest do
       conn = call(conn(:post, "/modules/fake/nope"))
       assert conn.status == 404
       assert body(conn)["error"] == "unknown module command"
+    end
+
+    # FW-5: the declarations are readable at runtime, so a client discovers the
+    # routes instead of being handed them out of band. `GET /modules/fake` must not
+    # be swallowed by the `/modules/:name/*path` glob that serves the commands.
+    test "GET /modules lists what each loaded module contributes" do
+      conn = call(conn(:get, "/modules"))
+      assert conn.status == 200
+
+      assert %{
+               "fake" => %{
+                 "commands" => [command],
+                 "module" => "Elixir.Kelix.ControlAPITest.FakeCtl"
+               }
+             } =
+               body(conn)
+
+      assert command["name"] == "ping"
+      assert command["methods"] == ["post"]
+      assert command["path"] == "/ping"
+    end
+
+    test "GET /modules/:name is one module's surface, 404 when not loaded" do
+      conn = call(conn(:get, "/modules/fake"))
+      assert conn.status == 200
+      assert body(conn)["name"] == "fake"
+      assert length(body(conn)["commands"]) == 1
+
+      conn = call(conn(:get, "/modules/ghost"))
+      assert conn.status == 404
     end
   end
 

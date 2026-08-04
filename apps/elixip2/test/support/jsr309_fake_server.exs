@@ -14,14 +14,17 @@ defmodule Jsr309FakeServer do
 
   `stop_listening/1` closes the listen socket to simulate a dead server
   (established streams stay up until aborted).
+
+  Option `stream_status: 404` answers every stream GET with the server's
+  "queue not found" reply instead, and notifies `{:stream_404, path}`.
   """
 
-  def start(test_pid, rpc_handler \\ &default_handler/2) do
+  def start(test_pid, rpc_handler \\ &default_handler/2, opts \\ []) do
     {:ok, lsock} =
       :gen_tcp.listen(0, [:binary, packet: :http_bin, active: false, reuseaddr: true])
 
     {:ok, port} = :inet.port(lsock)
-    Task.start_link(fn -> accept_loop(lsock, test_pid, rpc_handler) end)
+    Task.start_link(fn -> accept_loop(lsock, test_pid, rpc_handler, opts) end)
     %{url: "http://127.0.0.1:#{port}", host: "127.0.0.1", port: port, lsock: lsock}
   end
 
@@ -36,26 +39,26 @@ defmodule Jsr309FakeServer do
 
   # ── Connection handling ─────────────────────────────────────────────────────
 
-  defp accept_loop(lsock, test_pid, handler) do
+  defp accept_loop(lsock, test_pid, handler, opts) do
     case :gen_tcp.accept(lsock) do
       {:ok, sock} ->
         pid =
           spawn_link(fn ->
             receive do
-              :go -> serve(sock, test_pid, handler)
+              :go -> serve(sock, test_pid, handler, opts)
             end
           end)
 
         :ok = :gen_tcp.controlling_process(sock, pid)
         send(pid, :go)
-        accept_loop(lsock, test_pid, handler)
+        accept_loop(lsock, test_pid, handler, opts)
 
       {:error, _} ->
         :ok
     end
   end
 
-  defp serve(sock, test_pid, handler) do
+  defp serve(sock, test_pid, handler, opts) do
     case :gen_tcp.recv(sock, 0) do
       {:ok, {:http_request, :POST, {:abs_path, "/jsr309"}, _}} ->
         len = read_headers(sock, 0)
@@ -70,13 +73,25 @@ defmodule Jsr309FakeServer do
         read_headers(sock, 0)
         :ok = :inet.setopts(sock, packet: :raw)
 
-        :gen_tcp.send(
-          sock,
-          "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\ncontent-type: text/xml\r\n\r\n"
-        )
+        if Keyword.get(opts, :stream_status) == 404 do
+          # what xmlrpc-c/Abyss answers on a queue that no longer exists
+          :gen_tcp.send(
+            sock,
+            "HTTP/1.1 404 Not Found\r\ncontent-type: text/html\r\n" <>
+              "content-length: 9\r\nconnection: close\r\n\r\nNot found"
+          )
 
-        send(test_pid, {:stream_conn, self(), path})
-        stream_commands(sock)
+          send(test_pid, {:stream_404, path})
+          :gen_tcp.close(sock)
+        else
+          :gen_tcp.send(
+            sock,
+            "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\ncontent-type: text/xml\r\n\r\n"
+          )
+
+          send(test_pid, {:stream_conn, self(), path})
+          stream_commands(sock)
+        end
 
       {:error, _} ->
         :ok

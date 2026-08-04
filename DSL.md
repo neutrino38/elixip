@@ -330,9 +330,15 @@ in its mailbox as the FSM starts.
 
 Replying to the call is done with the `reply_invite*` macros (see
 [SIP.Session.CallUAS](#sipsessioncalluas) below). The scenario **never** has to send
-`100 Trying` (the INVITE server transaction emits it automatically) nor `487 Request
-Terminated` on a CANCEL (also automatic); it is notified of the CANCEL and of the
-final call teardown through `{:CANCEL, …}` and `{:dialog_terminated, …}` events.
+`487 Request Terminated` on a CANCEL (it is automatic); it is notified of the CANCEL
+and of the final call teardown through `{:CANCEL, …}` and `{:dialog_terminated, …}`
+events.
+
+The INVITE server transaction sends **no automatic `100 Trying`** — deployed behind a
+proxy that answers one of its own, a second 100 is just a duplicate on the wire. A
+scenario that answers slowly and wants to stop the caller's retransmissions sends it
+itself with `reply_invite(100, "Trying")`; until anything is answered, the transaction
+absorbs the retransmitted INVITEs.
 
 ```elixir
 defmodule UAS.InviteExample do
@@ -691,8 +697,9 @@ recent one — so the reply macros need not be passed the request.
 - `challenge_invite(realm, code \\ 407)` — reply `401`/`407` with a digest challenge, reusing the
   dialog nonce machinery (opt-in: `use SIP.Session.CallUAS`).
 
-A scenario **never** replies `100 Trying` or the `487` after a CANCEL itself — both are automatic
-(see the *incoming calls* section above).
+A scenario **never** replies the `487` after a CANCEL itself — it is automatic. A `100 Trying`
+is *not* automatic: send it with `reply_invite(100, "Trying")` if the scenario needs one (see the
+*incoming calls* section above).
 
 ### HTTP.Session
 

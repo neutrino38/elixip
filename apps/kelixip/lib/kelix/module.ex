@@ -19,13 +19,75 @@ defmodule Kelix.Module do
   response.
   """
 
-  @typedoc "A REST+CLI command a module contributes (declared once, both frontals derive from it)."
+  @typedoc "An HTTP method a control command may declare."
+  @type control_method :: :get | :post | :put | :patch | :delete
+
+  @typedoc """
+  A REST+CLI command a module contributes (declared once, both frontals derive
+  from it).
+
+  `rest` is `{method | [method], path_template}`; the template is **relative to
+  `/modules/<name>`** and may contain `:param` segments
+  (`"/conferences/:uid/participants"`). A method list is what lets one declaration
+  answer both `PUT` and `PATCH`. Path params are merged into the args map handed to
+  `handle_control/2`, so a command receives `%{"uid" => …}` identically from REST
+  and from `kelictl` (design `docs/design/mcu_module.md` §8.3.4, FW-4).
+
+  The three optional keys let the REST frontal **derive** its HTTP concerns from
+  the declaration, so `handle_control/2` keeps returning plain domain results and
+  the same function serves `kelictl` unchanged:
+
+    * `status:` — success status (default `200`, e.g. `201` on a creation);
+    * `location:` — `Location:` template, rendered from the result map
+      (`"/conferences/:uid"` needs the result to carry `uid`);
+    * `errors:` — `%{reason_atom => status}`, consulted before the default
+      404/400 mapping (that is how a module gets a `409`).
+
+  A command that declares none of them, with a single-segment template, behaves
+  exactly as it did before FW-4.
+
+  `render:` — OPTIONAL — is how a command tells the **CLI** what its result should
+  look like, keeping `kelictl` module-agnostic (the REST frontal ignores it, JSON
+  is already structured). `kind: :table` renders a list of maps as a table of the
+  named `columns:`; `kind: :detail` renders one map as `Label: value` lines, the
+  declared `fields:` first. `labels:` maps a dotted field path to `%{"raw" =>
+  "human"}` value names (`"video.size" => %{"6" => "hd720p"}`) — everything is
+  strings so the hint survives both the RPC and the JSON encoding of `GET /modules`.
+
+  An argument whose *value* has a vocabulary of its own (a mosaic name, an enum, a
+  compact syntax) may carry its own `help:` — one string or a list of lines, printed
+  under the command by `kelictl <module> help [<cmd>]`. Declared by the module for
+  the same reason `labels:` is: the CLI must not know what a mosaic is, and the
+  vocabulary an operator reads has to be the one the module's parser enforces.
+
+  In a `:detail` view a field holding a list of maps becomes an indented table and
+  one holding a map of maps an indented block, since neither fits a line. `nested:`
+  picks the columns of such a table (`%{"participants" => %{columns: [...]}}`);
+  without it they are derived from the rows, so a module gets a readable block
+  whether or not it declares one.
+  """
   @type control_command :: %{
-          name: String.t(),
-          args: [%{name: String.t(), required: boolean}],
-          rest: {:get | :post | :delete, String.t()},
-          rw: :r | :w,
-          help: String.t()
+          required(:name) => String.t(),
+          required(:args) => [
+            %{
+              required(:name) => String.t(),
+              required(:required) => boolean,
+              optional(:help) => String.t() | [String.t()]
+            }
+          ],
+          required(:rest) => {control_method | [control_method], String.t()},
+          required(:rw) => :r | :w,
+          required(:help) => String.t(),
+          optional(:status) => 100..599,
+          optional(:location) => String.t(),
+          optional(:errors) => %{optional(atom) => 100..599},
+          optional(:render) => %{
+            required(:kind) => :table | :detail,
+            optional(:columns) => [String.t()],
+            optional(:fields) => [String.t()],
+            optional(:labels) => %{optional(String.t()) => %{optional(String.t()) => String.t()}},
+            optional(:nested) => %{optional(String.t()) => %{optional(:columns) => [String.t()]}}
+          }
         }
 
   # Validate the [module.<name>] block BEFORE starting/reconfiguring anything. An

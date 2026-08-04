@@ -18,11 +18,15 @@ defmodule MediaServer.Mendooze.EventPoller do
   Reconnect policy: on connection drop the poller sleeps `retry_ms` and
   retries; a successful connection resets the failure count. The stream
   closing after `EventQueueDelete` looks like any drop — `disconnect/2`
-  stops the task explicitly, so the poller never needs to tell them apart.
+  stops the task before deleting the queue, so the poller never needs to
+  tell them apart. A `404` says the queue is gone for good: retrying would
+  only 404 again, so the poller reports down and stops.
 
   Options: `:base_url`, `:source_path`, `:sink` (required);
   `:retry_ms` (1000), `:max_failures` (5), `:stall_ms` (90000 — three
-  missed keep-alive cycles means the connection is dead).
+  missed keep-alive cycles means the connection is dead), `:purpose`
+  (`:call` | `:health_check` — a pool keepalive probe logs its stream
+  lifecycle at `:debug`).
   """
 
   use Task, restart: :transient
@@ -64,6 +68,7 @@ defmodule MediaServer.Mendooze.EventPoller do
       url:
         String.to_charlist(Keyword.fetch!(opts, :base_url) <> Keyword.fetch!(opts, :source_path)),
       sink: Keyword.fetch!(opts, :sink),
+      purpose: Keyword.get(opts, :purpose, :call),
       retry_ms: Keyword.get(opts, :retry_ms, @default_retry_ms),
       max_failures: Keyword.get(opts, :max_failures, @default_max_failures),
       stall_ms: Keyword.get(opts, :stall_ms, @default_stall_ms)
@@ -105,6 +110,8 @@ defmodule MediaServer.Mendooze.EventPoller do
     case :httpc.request(:get, {cfg.url, []}, [], [sync: false, stream: :self], @httpc_profile) do
       {:ok, ref} ->
         case stream_loop(ref, cfg, "", false) do
+          # the queue is gone: nothing left to poll, the sink has been told
+          :stopped -> :ok
           # the connection had been established: new failure sequence
           {:disconnected, true} -> connect_loop(cfg, 1)
           {:disconnected, false} -> connect_loop(cfg, failures + 1)
@@ -119,7 +126,7 @@ defmodule MediaServer.Mendooze.EventPoller do
   defp stream_loop(ref, cfg, buffer, connected) do
     receive do
       {:http, {^ref, :stream_start, _headers}} ->
-        Logger.info("Mendooze.EventPoller: event stream connected")
+        log_lifecycle(cfg, "event stream connected")
         stream_loop(ref, cfg, buffer, true)
 
       {:http, {^ref, :stream, chunk}} ->
@@ -128,12 +135,19 @@ defmodule MediaServer.Mendooze.EventPoller do
         stream_loop(ref, cfg, rest, connected)
 
       {:http, {^ref, :stream_end, _headers}} ->
-        Logger.info("Mendooze.EventPoller: event stream closed by server")
+        log_lifecycle(cfg, "event stream closed by server")
         {:disconnected, connected}
 
       {:http, {^ref, {:error, reason}}} ->
         Logger.warning("Mendooze.EventPoller: stream error: #{inspect(reason)}")
         {:disconnected, connected}
+
+      # The queue does not exist server-side (deleted, or the server restarted).
+      # Retrying would 404 forever: report down once and end the task.
+      {:http, {^ref, {{_proto, 404, _reason}, _headers, _body}}} ->
+        Logger.warning("Mendooze.EventPoller: event queue #{cfg.url} is gone (404), stopping")
+        send(cfg.sink, {:mendooze_poller_down})
+        :stopped
 
       # complete non-streamed response, e.g. an HTTP error status
       {:http, {^ref, other}} ->
@@ -147,6 +161,14 @@ defmodule MediaServer.Mendooze.EventPoller do
         {:disconnected, connected}
     end
   end
+
+  # The pool keepalive probe opens and closes a stream on every cycle: that
+  # lifecycle is background noise, so keep it at :debug and label it. A real
+  # call connection keeps its stream for the whole session — worth an :info.
+  defp log_lifecycle(%{purpose: :health_check}, message),
+    do: Logger.debug("Mendooze.EventPoller: keepalive: #{message}")
+
+  defp log_lifecycle(_cfg, message), do: Logger.info("Mendooze.EventPoller: #{message}")
 
   defp dispatch_frame(frame, sink) do
     case decode_event(frame) do

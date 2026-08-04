@@ -100,6 +100,35 @@ defmodule UASInviteFixture.AnswerSdp do
   end
 end
 
+# Same, but the instance stays up after the 200 OK to wait for the ACK — what a
+# real call does, and what the 2xx-retransmission test needs (a dead app/dialog
+# would make "no retransmission" true for the wrong reason).
+defmodule UASInviteFixture.AnswerSdpAwaitAck do
+  use SIP.Scenario
+  uas(:invite)
+  config(domain: "example.com")
+
+  state initial_state do
+    media_connect()
+
+    on_events do
+      {:INVITE, _req, _t, _dlg} ->
+        reply_invite_with_sdp(200)
+        goto(in_call)
+    after
+      5_000 -> scenario_failure("no INVITE")
+    end
+  end
+
+  state in_call do
+    on_events do
+      {:ACK, _req, _t, _dlg} -> scenario_success("acked")
+    after
+      10_000 -> scenario_failure("no ACK")
+    end
+  end
+end
+
 # ── Call-processing fabricator (stands in for the phase-5 Elixip.ScenarioUAS) ──
 # Picks the scenario from the RURI "scenario" param and spawns an instance bound
 # to the inbound dialog. Uses run_instance/2 directly (plain spawn, no monitor
@@ -113,7 +142,8 @@ defmodule TestCallUAS do
     "busy" => UASInviteFixture.Busy,
     "redirect" => UASInviteFixture.Redirect,
     "challenge" => UASInviteFixture.Challenge,
-    "answersdp" => UASInviteFixture.AnswerSdp
+    "answersdp" => UASInviteFixture.AnswerSdp,
+    "answersdpack" => UASInviteFixture.AnswerSdpAwaitAck
   }
 
   @impl true
@@ -536,11 +566,11 @@ defmodule SIP.Test.UASInvite do
 
   # ── End-to-end over the UDP mockup ──────────────────────────────────────────
 
+  # The IST emits no automatic 100: the 180 is the first thing on the wire.
   test "reply_invite(180) reaches the wire" do
     inject_invite("answer180")
-    # IST emits the automatic 100 first (phase 1), then the scenario's 180.
-    assert_receive 100, 2_000
     assert_receive 180, 2_000
+    refute_received 100
   end
 
   test "reply_invite(486) reaches the wire" do
@@ -562,10 +592,43 @@ defmodule SIP.Test.UASInvite do
   end
 
   test "reply_invite_with_sdp(200) reaches the wire" do
-    inject_invite("answersdp")
-    # IST emits the automatic 100 first (phase 1), then the media-negotiated 200.
-    assert_receive 100, 2_000
+    invite = inject_invite("answersdp")
     assert_receive 200, 3_000
+    # ACK it: an unacked 2xx leaves an IST resending it for 32 s, into the tests
+    # that follow (they share this mockup transport, hence this test process).
+    ack_2xx(invite)
+  end
+
+  # RFC 3261 §17.2.1: an INVITE carrying our own branch is a retransmission (an
+  # in-dialog re-INVITE gets a new branch, hence a new IST), and the last response
+  # must be resent — the retransmission says the UAC has not seen it. The IST used to
+  # log "Ignoring unsupported SIP request INVITE" and drop it, so a caller
+  # retransmitting because the application answered slower than T1 kept retransmitting
+  # to the end. 1xx is what is asserted here: no timer resends those, so the second
+  # 180 can only come from the retransmission handler.
+  test "an INVITE retransmission gets the last response resent" do
+    invite = inject_invite("answer180")
+    assert_receive 180, 2_000
+
+    send(invite.ruri.tp_pid, {:recv, invite})
+    assert_receive 180, 2_000
+  end
+
+  # The ACK of a 2xx is a transaction of its own (RFC 3261 §17.1.1.3): it carries a
+  # fresh top Via branch — a proxy re-branches it — so it matches no IST and is
+  # dispatched to the dialog. The dialog must relay it to the IST, otherwise the IST
+  # keeps resending the 200 OK every T1..T2 until timer H fires 32 s into an
+  # established call (seen against a real UA behind Kamailio).
+  test "the ACK of a 2xx (own branch) stops the 200 OK retransmissions" do
+    invite = inject_invite("answersdpack")
+    assert_receive 200, 3_000
+
+    ack_2xx(invite)
+
+    # Timer A fires first at T1 = 500 ms; anything resent lands here as another 200.
+    refute_receive 200, 1_500
+    # ...and the silence is the fix, not a collapsed call: the dialog is still up.
+    assert is_binary(dialog_totag(invite.callid))
   end
 
   # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -608,5 +671,42 @@ defmodule SIP.Test.UASInvite do
 
     send(invite.ruri.tp_pid, {:recv, ack})
     :ok
+  end
+
+  # ACK a 2xx the way a UAC/proxy does: the dialog's To tag and a brand-new Via
+  # branch, so it reaches the dialog layer and no server transaction.
+  defp ack_2xx(invite) do
+    totag = dialog_totag(invite.callid)
+    assert is_binary(totag), "the inbound dialog has no To tag"
+
+    # The parser leaves To as the raw header; re-parse it to add the tag.
+    {:ok, to} = SIP.Uri.parse(invite.to)
+
+    ack =
+      SIP.Msg.Ops.ack_request(invite, %SIP.Uri{domain: "2.2.2.2", port: 5090})
+      |> Map.put(:to, SIP.Uri.set_uri_param(to, "tag", totag))
+      |> rebranch()
+
+    send(invite.ruri.tp_pid, {:recv, ack})
+    :ok
+  end
+
+  # Replace the branch of the (single) Via ack_request/2 copied from the INVITE.
+  defp rebranch(ack) do
+    branch = "z9hG4bK#{System.unique_integer([:positive])}"
+    # ack_request/2 drops :transid; the mockup logs it, so put the new one back.
+    ack
+    |> Map.put(:via, Regex.replace(~r/branch=[^;]+/, ack.via, "branch=#{branch}"))
+    |> Map.put(:transid, branch)
+  end
+
+  # The To tag the inbound dialog generated, read from its registry key
+  # ({fromtag, callid, totag}) — the mockup only forwards response codes.
+  defp dialog_totag(callid) do
+    Registry.select(Registry.SIPDialog, [{{:"$1", :_, :_}, [], [:"$1"]}])
+    |> Enum.find_value(fn
+      {_ftag, ^callid, totag} when is_binary(totag) -> totag
+      _ -> nil
+    end)
   end
 end

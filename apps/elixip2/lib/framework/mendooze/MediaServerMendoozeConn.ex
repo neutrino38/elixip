@@ -211,7 +211,8 @@ defmodule MediaServer.Mendooze.Conn do
          state = %{state | medias: Enum.map(answerable, & &1.type)},
          {:ok, state} <- setup_local_security_for_offer(state, answerable),
          {:ok, state} <- start_receiving_all(state),
-         {:ok, state, negotiated} <- apply_remote_medias_negotiated(state, answerable) do
+         # `true`: we are answering the peer's offer — see nat_latch?/2
+         {:ok, state, negotiated} <- apply_remote_medias_negotiated(state, answerable, true) do
       answer =
         Sdp.build(%{
           ip: state.local_ip,
@@ -564,7 +565,8 @@ defmodule MediaServer.Mendooze.Conn do
     descs = Enum.filter(descs, &answerable?(&1, state.medias))
 
     with :ok <- ensure_media_present(descs),
-         {:ok, state, negotiated} <- apply_remote_medias_negotiated(state, descs),
+         # `false`: this is the peer's *answer* to an offer we made — see nat_latch?/2
+         {:ok, state, negotiated} <- apply_remote_medias_negotiated(state, descs, false),
          :ok <- ensure_negotiated(negotiated) do
       {:ok, state}
     end
@@ -574,9 +576,9 @@ defmodule MediaServer.Mendooze.Conn do
   # (%{media => %{codecs:, dtmf:, rtp_map:, send_map:, ...}}) for answer
   # building. A media with no common codec is skipped (G9: it becomes a port-0
   # rejection), not a call failure; RPC errors still abort the whole offer.
-  defp apply_remote_medias_negotiated(state, descs) do
+  defp apply_remote_medias_negotiated(state, descs, answering_offer?) do
     Enum.reduce_while(descs, {:ok, state, %{}}, fn desc, {:ok, st, acc} ->
-      case apply_remote_media(st, desc) do
+      case apply_remote_media(st, desc, answering_offer?) do
         {:ok, st, negotiated} -> {:cont, {:ok, st, Map.put(acc, desc.type, negotiated)}}
         {:skip, st} -> {:cont, {:ok, st, acc}}
         {:error, _} = err -> {:halt, err}
@@ -584,7 +586,7 @@ defmodule MediaServer.Mendooze.Conn do
     end)
   end
 
-  defp apply_remote_media(state, desc) do
+  defp apply_remote_media(state, desc, answering_offer?) do
     m = @media_int[desc.type]
 
     case Sdp.negotiate(desc, codecs(state, desc.type), dtmf?(state, desc.type)) do
@@ -601,7 +603,7 @@ defmodule MediaServer.Mendooze.Conn do
             Map.get(state.accepted, desc.type)
           )
 
-        with :ok <- set_rtp_properties(state, m, desc),
+        with :ok <- set_rtp_properties(state, m, desc, answering_offer?),
              :ok <- set_remote_crypto(state, m, desc),
              {:ok, _} <-
                rpc(state, "EndpointStartSending", [
@@ -629,12 +631,13 @@ defmodule MediaServer.Mendooze.Conn do
   # useNACK/tmmbr (G6) are merged into a single EndpointSetRTPProperties call.
   # The "secure" hint is intentionally omitted: it is a no-op once DTLS/SDES
   # crypto is configured (server audit, webrtc_sdp_design.md Q2).
-  defp set_rtp_properties(state, m, desc) do
+  defp set_rtp_properties(state, m, desc, answering_offer?) do
     props =
       %{}
       |> maybe_put(Map.get(desc, :rtcp_mux, false), "rtcp-mux", "1")
       |> maybe_put(avpf?(desc), "useNACK", "1")
       |> maybe_put(avpf?(desc), "tmmbr", "1")
+      |> maybe_put(nat_latch?(state, answering_offer?), "natLatch", "1")
 
     if props == %{} do
       :ok
@@ -643,6 +646,26 @@ defmodule MediaServer.Mendooze.Conn do
         {:ok, _} -> :ok
         {:error, _} = err -> err
       end
+    end
+  end
+
+  # Symmetric-NAT latching: the server re-targets its send address *and* port to
+  # wherever the RTP is actually coming from, but only when the destination we gave
+  # it is a private (RFC1918/CGNAT/link-local) address and ICE is not in play. It
+  # is disabled server-side unless we ask for it, and we only ask on the direction
+  # where the peer picked that destination for us: when we ANSWER an offer, the
+  # send address is whatever the peer wrote in its own SDP, which for a NATed
+  # handset is its private address. On the direction we offered, the peer answered
+  # knowing its own NAT — a mismatch there is a routing fault we would be papering
+  # over, not a mapping worth following.
+  #
+  # `nat_latch: true | false` overrides the inference for a caller that knows its
+  # topology; the kelixip MCU sets it explicitly rather than relying on the fact
+  # that a conference leg happens to always answer.
+  defp nat_latch?(state, answering_offer?) do
+    case Keyword.get(state.opts, :nat_latch, :auto) do
+      :auto -> answering_offer?
+      enabled -> enabled == true
     end
   end
 

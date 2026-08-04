@@ -52,8 +52,10 @@ but the server and the other modules do (never a half-applied start).
 ## Loading
 
 First-party modules are shipped as **one package each** — `kelixip-mod-registrar`,
-`kelixip-mod-auth_db` (and `kelixip-mod-radius_billing` when it exists) — which drop
-their bytecode into `module_dir` (`/usr/lib/kelixip/modules`, `server.module_dir`).
+`kelixip-mod-auth_db`, `kelixip-mod-mcu` (and `kelixip-mod-radius_billing` when it
+exists) — which drop their bytecode into `module_dir` (`/usr/lib/kelixip/modules`,
+`server.module_dir`), plus their own page of this directory under
+`/usr/share/doc/<package>/`.
 **The server release contains none of them**: at boot it adds `module_dir` to its
 code path and loads a module only when a `[module.<name>]` block declares it.
 
@@ -63,7 +65,7 @@ Two consequences worth knowing:
   `[module.auth_db]` in `config.toml`, even if the facade would have worked
   without configuration: a release does not lazily load code on first call. With
   no block, the script raises on its first facade call and the request gets **no
-  answer at all**. Boot (and `kelictl reload-domains`) warns when a domain enables
+  answer at all**. Boot (and `kelictl domain reload-all`) warns when a domain enables
   a function whose same-named module is not loaded.
 - **Installing a new version is install + reload.** Drop the new `.beam` into
   `module_dir` and run `kelictl module reload <name>`: the code is re-read from
@@ -116,17 +118,34 @@ as before. Adding it turns a runtime surprise into a load-time error.
 `kelictl module reload <name>` re-reads the block: `validate_config/1` runs
 first (an invalid block is rejected, the running service untouched), then the
 module reconfigures in place if it supports it, else the child is cleanly
-restarted. The `registrar` block additionally reloads on `kelictl reload-domains`.
+restarted. The `registrar` block additionally reloads on `kelictl domain reload-all`.
 
 ## Control surface (kelictl / REST)
 
 A module may contribute `kelictl <name> <cmd>` sub-commands and `/modules/<name>/…`
 REST endpoints from a single declaration (`describe_control/0`); both frontals
-derive from it. The control frontals land in P7 — see
-[administration.md](../administration.md) and [rest-api.md](../rest-api.md).
+derive from it — see [administration.md](../administration.md) and
+[rest-api.md](../rest-api.md).
+
+That declaration is also readable at runtime, so what a node serves never has to
+be looked up in a module's source:
+
+```console
+$ kelictl module list          # loaded modules, their commands and facades
+$ kelictl mcu help             # one module's commands, routes and arguments
+$ kelictl mcu help conference.update   # one command, with its arguments' vocabulary
+$ curl localhost:8090/modules  # the same declarations as JSON
+```
+
+An argument may carry its own `help:` (one line or several) for a value with a
+vocabulary of its own — a mosaic name, an enum, a compact syntax. It is printed
+under the command by the two `help` forms above and travels in the JSON, so the
+text an operator reads sits next to the parser that enforces it.
 
 ## Reference
 
 - [template.md](template.md) — the page layout every module doc follows
 - [registrar.md](registrar.md)
 - [auth_db.md](auth_db.md)
+- [mcu.md](mcu.md) — conferencing; the narrative guide is
+  [docs/mcu_module_guide.md](../../mcu_module_guide.md)

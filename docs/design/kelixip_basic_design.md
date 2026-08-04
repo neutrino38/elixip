@@ -206,7 +206,7 @@ Loaded once at boot, held read-only in a GenServer. Responsibilities:
    | `[[listen]]` entries | listener child specs (§2.1); TLS/WSS `cert`/`key` → per-listener opts (today `:tls_certfile`/`:tls_keyfile` are global — see below) |
    | `log.*` | Logger backend config (syslog vs stdout) |
    | `server.max_calls` | server-wide quota gate in the Router/factory |
-   | `mediaserver.pool.*` | `Kelix.MediaPool` children (§9) |
+   | `mediaserver.pool.*` | decoded entries (§9), read by `Kelix.MediaPool` **and** by the `mcu` module — the one declaration of a media server |
    | `module.*` | `Kelix.ModuleSupervisor` children (§8) |
    | `control_api.*`, `metrics.*` | `Kelix.ControlAPI` / `Kelix.Metrics` |
 
@@ -290,6 +290,15 @@ Configured (once, at boot) as the registration **and** call **and** presence
 processing module in `SIP.Session.ConfigRegistry` — so `internal_dispatch/4`
 calls into the Router regardless of method. The Router is otherwise stateless;
 it reads `Kelix.Domains` (current version) and `Kelix.ScriptRegistry`.
+
+> **The `calls` half was only registered on 2026-07-30** (with the conferencing
+> module's P2). Everything below — resolve, quota, spawn — had been there since P2c and
+> was reachable for `REGISTER`, but `set_call_processing_module/1` was never called, so
+> the framework answered an INVITE `500 "No call server defined"` however complete the
+> domain's dial plan was. `Kelix.Router` now implements `SIP.Session.Call`
+> (`on_new_call/3` → the same `dispatch/3`, `on_call_end/2` → `:ok`, since
+> `Kelix.InstancePool` already frees the slot on `:DOWN`) and registers itself
+> alongside the registrar one. Presence is still pending its own function.
 
 ```
 on_new_registration/3 ─┐
@@ -452,8 +461,9 @@ Strong isolation: a domain's bindings live in their own table (created/dropped
 with the domain on `reload_domains`), no cross-domain key space, and a domain can
 be flushed by dropping its table. Per-binding purge stays event-driven via a
 **monitor on the dialog pid** (transport drop / dialog death → remove the
-contact, emit `:disconnected`/`:expired`). Enumerate a domain for `kelictl regs`
-by scanning its table; `regs` with no domain iterates the index.
+contact, emit `:disconnected`/`:expired`). Enumerate a domain for
+`kelictl registration list` by scanning its table; the unfiltered form iterates
+the index.
 
 Module parameter — from its **`[module.registrar]`** block, which (unlike other
 modules' blocks in `config.toml`) lives in **`domains.toml`** so it is
@@ -790,8 +800,23 @@ by scripts.
 > calling a module's facade needs that module **configured** — the `[module.<name>]`
 > block is what gets its code loaded; there is no lazy fallback. When it is missing
 > the script raises on its first facade call and the request goes **unanswered**, so
-> boot (and `reload-domains`) now warns when a domain enables a function whose
+> boot (and `domain reload-all`) now warns when a domain enables a function whose
 > same-named module is not loaded (`warn_missing_function_modules/0`).
+>
+> The same rule bites **one level further in**, which is what the `mcu` module found:
+> a module of any size is spread over several beams (`Kelix.Mod.Mcu` calls
+> `Kelix.Mod.Mcu.Config`, `.Client`, `.Conference`…), and in embedded mode the first
+> call to a companion raises `UndefinedFunctionError` — at boot, inside
+> `validate_config/1`, so the node never comes up. `ensure_loaded/1` therefore loads
+> the **companions** as well: every beam sharing the module's namespace prefix, taken
+> from the directory the module's own beam came from (`:code.which/1`), so it works
+> for a module installed in `module_dir` and for one built in place. `reload_code/1`
+> refreshes them too — a package installs `Mcu.beam` and `Mcu.Config.beam` together,
+> and reloading only the named one would run new code against a stale companion. The
+> registrar never hit this: its only companion is a struct, a compiled literal that is
+> never called. Tested in `apps/kelixip/test/module_dir_test.exs`, which drops a
+> two-beam module in a directory and asserts the companion is loaded *before* anything
+> calls it — the only part of embedded mode reproducible in an interactive test.
 
 ### 8.1 `Kelix.Module` behaviour
 
@@ -816,15 +841,39 @@ REST + CLI extensions use a **declarative-registration** mechanism (decided
 
 - The `Kelix.Module` behaviour gains two **optional** callbacks:
   `describe_control/0` (returns the command list — `name`, `args`, `rest`
-  `{method, path}`, `rw`, `help`) and `handle_control/2` (runs a command).
+  `{method | [method], path_template}`, `rw`, `help`, plus the optional `status`,
+  `location` and `errors`) and `handle_control/2` (runs a command).
 - At module start `Kelix.ModuleSupervisor` reads `describe_control/0` and
   registers the entries, keyed by module name, into a central
   **`Kelix.Control.Registry`** (ETS/Agent); it deregisters on stop/reload.
 - Both frontals iterate that registry: `Kelix.ControlAPI` mounts the
   `/modules/<name>/…` routes, `kelictl` generates the `<name> <cmd>` sub-commands
   and their `--help`. Execution routes to `handle_control/2`.
+- **Nested resources (FW-4, done 2026-07-30, `docs/design/mcu_module.md` §8.3.4).**
+  The declared `rest` path is a **template** relative to `/modules/<name>`, and may
+  carry `:param` segments (`"/conferences/:uid/participants"`), so a module can expose
+  a resource tree instead of flat verbs. `Kelix.Control.Route` resolves a request
+  against those templates **most-literal-first**; an ambiguous pair is refused at
+  *registration* time rather than arbitrated per request, and the module keeps running
+  without its control surface. A method **list** lets one declaration answer both
+  `PUT` and `PATCH`; a path that matches a template but not its method is a `405` with
+  `Allow`. Args reaching `handle_control/2` are merged **path < query < body** (FW-2:
+  a `GET` command can finally be filtered), and a body key colliding with a path param
+  is a `400` — never a silent divergence between the URL and the effect. Declared
+  `status:` / `location:` / `errors:` let the frontal derive `201 Created` +
+  `Location` and a `409`, while `handle_control/2` keeps returning plain domain
+  results — which is exactly what keeps `kelictl` parity free. The **flat form**
+  (`/modules/<name>/<command.id>`) stays live, so every command written before FW-4
+  routes unchanged.
 - `handle_control/2` **never checks auth** — authentication is enforced at the
   frontal boundary (§10), keeping the module logic pure.
+- **Two further optional exports, honoured generically (done 2026-07-30).** A module
+  exporting `status/0` contributes a line to `Kelix.Control.status/0`
+  (`module_status`), which `kelictl status` renders — that is where the conferencing
+  module's `mcu: conferences 2, participants 5, …` comes from. A module exporting
+  `poll_metrics/0` is sampled on `Kelix.Metrics.Poller`'s tick, so its gauges share the
+  node's one sampling clock instead of each module running a timer. The core names no
+  module in either case; one that exports neither contributes nothing.
 
 ### 8.2 Facade contract (spec §5.2 — locked decisions)
 
@@ -903,15 +952,16 @@ Spec §6. Extends the current single-`:mediaserver` config to a pool.
 > `enabled` + healthy `[mediaserver.pool.*]` entries, `toggle/3` enables/disables
 > an entry at runtime, and a periodic health-check probes each MCU **off** the
 > GenServer (Task + cast, so a slow MCU never stalls checkouts) with a synchronous
-> `check_health/1` for admin/tests; malformed entries are logged and skipped.
+> `check_health/1` for admin/tests.
 > `Kelix.Router.overrides_for/1` injects the chosen `%{module, url}` per call.
 > **Concurrency-safe injection** required one additive framework change:
 > `SIP.Session.Media.use_mediaserver/1` now prefers a per-instance override in the
 > context appdata (`:mediaserver_instance`) over the global `:mediaserver` app env,
 > so concurrent calls don't race on a shared adapter config — the standalone
 > `elixipp` tool sets no such override and keeps its global behaviour. Deferred:
-> per-MCU active-session **metrics** (P9); the `kelictl mcu … on|off` /
-> `POST /mediaservers/<name>` frontal that calls `toggle/3` (P7).
+> per-MCU active-session **metrics** (P9); the `kelictl mediaserver
+> enable|disable <name>` / `POST /mediaservers/<name>` frontal that calls
+> `toggle/3` (P7).
 
 ### 9.1 `Kelix.MediaPool`
 
@@ -920,14 +970,44 @@ Supervised GenServer over the `[mediaserver.pool.*]` entries:
 - **Selection** — round-robin over `enabled` + healthy MCUs for each new call.
 - **Health-check** — periodic probe (reuse `MediaServer.Behaviour.connect/1` /
   a lightweight ping) marking each MCU up/down; failover skips down MCUs.
-- **Enable/disable at runtime** — `mediaserver_toggle` (§10) flips a pool
-  entry's `enabled` flag without restart.
+  Every 30 s: the probe is a real connection (on Mendooze, an event queue plus
+  its poller) opened and closed again, so it is kept rare. It is announced with
+  `connect(url, purpose: :health_check)` to adapters that accept options, which
+  log that connection churn at `:debug`, stamped `keepalive` — a probe every
+  30 s must not read as call activity in the log.
+- **Enable/disable at runtime** — `mediaserver_toggle` (§10,
+  `kelictl mediaserver enable|disable <name>`) flips a pool entry's `enabled`
+  flag without restart. New calls and conferences stop landing there; live ones
+  are untouched.
+- **Inspection** — `mediaservers/0` / `mediaserver/1` (§10.1,
+  `kelictl mediaserver list|show`) render the entries with both healths: the
+  probe above, and what each module driving that server says about its own
+  channel.
 
 Each pool entry wraps an existing `MediaServer.Mendooze` adapter instance
 (reusing all of `lib/framework/mendooze/`). The Router injects the *selected* MCU
 handle into the spawned instance's config (`mediaserver` override), so the DSL
 `media_connect/0` macro connects to a pool-chosen server transparently. Metrics:
 active sessions per MCU, MCU up/down (§11).
+
+**These entries are the node's only declaration of a media server** (amended
+2026-08-01). `Kelix.Config` decodes and validates them — `module`, `url`,
+`enabled`, nothing else, a malformed entry aborting the boot rather than being
+skipped — and hands the same list to both consumers:
+
+| Consumer | Reads | Selects |
+|---|---|---|
+| `Kelix.MediaPool` | the decoded entries | one per **call**, round-robin over `enabled` + probe-healthy |
+| the `mcu` module (`docs/design/mcu_module.md` §8.4) | the `mendooze` entries, at boot, from `Kelix.Config` | one per **conference**, round-robin over `enabled` + its own control-channel health |
+
+The module reads `Kelix.Config` and not this GenServer because the boot order puts
+`Kelix.MediaPool` *after* the modules, and because the list is a config fact rather
+than pool state; it asks the pool only for the runtime `enabled` flag. It
+deliberately ignores the pool's `healthy` flag: that is probed on the
+point-to-point adapter's channel (`/jsr309`), which is not the one conferences ride
+(`/mcu`) — hence two `*_mediaserver_up` metrics rather than one. A media address is
+**not** a pool key: the media server announces its own (`mediaserver --public-ip`)
+and reports it per call.
 
 ---
 
@@ -948,16 +1028,84 @@ Spec §9–§10. **Parity by construction**: one command layer, two frontals.
 > Verified end-to-end: `mix release kelixip` assembles the overlay and a real
 > distributed node answers `kelictl status/regs/mcu` over RPC.
 >
-> **Implementation status (P8, 2026-07-27 — DONE).** `Kelix.ControlAPI` is a
-> `Plug.Router` served by **Bandit**, one route per §10.1 verb plus the
-> module-contributed `<method> /modules/<name>/<cmd>` commands (looked up in
-> `Kelix.Control.Registry`). Every route is a thin translation onto the same
+> **Implementation status (P8, 2026-07-27 — DONE; route shape widened 2026-07-30).**
+> `Kelix.ControlAPI` is a `Plug.Router` served by **Bandit**, one route per §10.1 verb
+> plus the module-contributed commands, now matched as
+> `<method> /modules/<name>/*path` and resolved against the path templates each module
+> declared (§8.1, FW-4) — the single-segment `<cmd>` form remains valid and is still
+> the one `kelictl` names. Every route is a thin translation onto the same
 > `Kelix.Control` function `kelictl` calls, so parity is automatic. Auth is a
 > boundary Plug (`Kelix.ControlAPI.Auth`): `token` (Bearer, constant-time
 > compare), `mtls` (TLS `verify_peer` + `fail_if_no_peer_cert`), or `none`, driven
 > by `[control_api]` (parsed/validated by `Kelix.Config`, pushed to the app env).
 > `Kelix.ControlAPI.Endpoint` starts Bandit only when `[control_api].enabled`
 > (`:ignore` otherwise), ordered after `Kelix.Config` in the tree.
+>
+> **Refinement (2026-08-02).** Added the two read verbs `domains/0` / `domain/1`
+> (`kelictl domain list` / `domain show <domain>`, `GET /domains[/<domain>]`):
+> `status` reported only the snapshot *version*, so nothing short of reading the
+> file on the server told an operator which domains are served, with which
+> functions, scripts and dial-plan — and the file is not necessarily what the
+> router loaded.
+>
+> **Refinement (2026-08-02, same day).** Same treatment for the media-server pool
+> — `mediaservers/0` / `mediaserver/1` (`kelictl mediaserver list` /
+> `mediaserver show <name>`, `GET /mediaservers[/<name>]`) — and the CLI verbs
+> regrouped **under the noun they act on**:
+>
+> | Was | Is |
+> |---|---|
+> | `kelictl reload-domains` | `kelictl domain reload-all` |
+> | `kelictl mcu <name> on\|off` | `kelictl mediaserver enable\|disable <name>` |
+> | `kelictl regs [aor]` | `kelictl registration list [domain]` |
+> | `kelictl unregister <aor> [contact]` | `kelictl registration remove <domain> <aor> [contact]` |
+>
+> Two spellings that no longer paid for themselves. `domain` already owned `list`
+> and `show`, so the reload belongs there rather than in a top-level verb of its
+> own. And `mcu` is a **module** name: it owns a command namespace
+> (`kelictl mcu conference.list`), which the three-word `mcu <name> on|off` form
+> shadowed — `mcu foo on` was a pool toggle, `mcu foo bar` a module command. What
+> the flag acts on is a `[mediaserver.pool.*]` entry, which the `mcu` module is
+> only one consumer of (a `mockup` entry has no MCU at all). Neither the control
+> verb (`reload_domains/0`, `mediaserver_toggle/2`) nor the REST routes changed:
+> this is CLI spelling, and `systemctl reload kelixip` still calls
+> `Kelix.Control.reload_domains()` directly.
+>
+> **Refinement (2026-08-02, same day).** The registrations got the same shape —
+> `registration list [aor]` / `show <aor>` / `remove <aor> [contact]`, the last two
+> rows of the table above — plus the read verb `registration/1`
+> (`GET /registrations/<aor>`), and the bindings are rendered with what the
+> registrar actually stored rather than a URI and a UTC instant: `expires_in`,
+> `source`, `transport`, `instance`, `reg_id`, `methods`. `regs` printed
+> `aor@domain -> <uri>`, which answers none of the three questions an operator
+> arrives with — how long is this binding good for, where did it really come from
+> (behind a NAT, not what the contact URI says), and which of a handset's several
+> bindings is which.
+>
+> **Amended the same day — the domain is part of the address, not a filter.** An
+> AOR is only unique *within* a domain (§6.1: one store per domain, no cross-domain
+> key space), so `<aor>` alone was never an address: `unregister alice` fanned out
+> over every served domain, and `show alice` answered with a pile of blocks the
+> operator then had to disambiguate. The surface now says what the store says:
+>
+> | Verb | CLI | REST |
+> |---|---|---|
+> | `registrations/0` | `registration list` | `GET /registrations` |
+> | `registrations/1` | `registration list <domain>` | `GET /domains/<domain>/registrations` |
+> | `registration/2` | `registration show <domain> <aor>` | `GET /domains/<domain>/registrations/<aor>` |
+> | `unregister/3` | `registration remove <domain> <aor> [contact]` | `DELETE /domains/<domain>/registrations/<aor>` |
+>
+> REST nests them under the domain accordingly — a registration *is* a sub-resource
+> of a domain, which the flat `/registrations/<aor>` could not express.
+> `GET /registrations` stays as the cross-domain view: one entry per served domain,
+> **including the empty ones**, because "served, empty" and "not served" are what an
+> operator is trying to tell apart — an unserved domain is a `404` / `no such
+> domain`, not an empty list. `<domain>` is resolved through
+> `Kelix.Domains.lookup/2` like everywhere else (name + aliases,
+> case-insensitively); `<aor>` still accepts the full `user@domain` copied out of a
+> log, whose domain part must resolve to that same domain rather than being dropped
+> silently. There is deliberately no form that removes an AOR from every domain at
+> once: it was the one cross-domain verb, and it was the destructive one.
 
 ### 10.1 `Kelix.Control`
 
@@ -968,13 +1116,19 @@ holds business logic. Surface (spec §9.3):
 |---|---|---|---|
 | `status/0` — uptime, counters, pool, node state | R | `kelictl status` | `GET /status` |
 | `monitor/0` — scenarios in progress | R | `kelictl monitor` | `GET /scenarios` |
-| `registrations/1` | R | `kelictl regs [aor]` | `GET /registrations` |
-| `unregister/2` | W | `kelictl unregister <aor> [contact]` | `DELETE /registrations/<aor>` |
+| `registrations/0` — every served domain + its registrations | R | `kelictl registration list` | `GET /registrations` |
+| `registrations/1` — one domain's registrations | R | `kelictl registration list <domain>` | `GET /domains/<domain>/registrations` |
+| `registration/2` — one AOR and its bindings | R | `kelictl registration show <domain> <aor>` | `GET /domains/<domain>/registrations/<aor>` |
+| `domains/0` — served domains + properties | R | `kelictl domain list` | `GET /domains` |
+| `domain/1` — one domain in detail | R | `kelictl domain show <domain>` | `GET /domains/<domain>` |
+| `mediaservers/0` — the media-server pool + its state | R | `kelictl mediaserver list` | `GET /mediaservers` |
+| `mediaserver/1` — one media server in detail | R | `kelictl mediaserver show <name>` | `GET /mediaservers/<name>` |
+| `unregister/3` | W | `kelictl registration remove <domain> <aor> [contact]` | `DELETE /domains/<domain>/registrations/<aor>` |
 | `shutdown_scenario/1` | W | `kelictl stop <id>` | `POST /scenarios/<id>/shutdown` |
 | `reload_script/2` (notify?) | W | `kelictl reload-script [--notify] <name…>` | `POST /scripts/reload[?notify=1]` |
-| `reload_domains/0` | W | `kelictl reload-domains` | `POST /domains/reload` |
+| `reload_domains/0` | W | `kelictl domain reload-all` | `POST /domains/reload` |
 | `module_reload/1` | W | `kelictl module reload <name>` | `POST /modules/<name>/reload` |
-| `mediaserver_toggle/2` | W | `kelictl mcu <name> on\|off` | `POST /mediaservers/<name>` |
+| `mediaserver_toggle/2` | W | `kelictl mediaserver enable\|disable <name>` | `POST /mediaservers/<name>` |
 | `set_log_level/1` | W | `kelictl log-level <lvl>` | `PUT /log/level` |
 | `graceful_shutdown/0` | W | `kelictl graceful-shutdown` | `POST /graceful-shutdown` |
 
@@ -984,6 +1138,46 @@ Plus, per §8.1, **module-contributed commands**: `kelictl <module> <cmd> <args>
 `monitor/0` reuses the in-memory store already feeding `elixipp --monitor`
 (`SIP.Scenario.Monitor`). `registrations/1` reads the `Kelix.Mod.Registrar`
 store (§6). `status/0` aggregates uptime + counters + pool state.
+
+`domains/0` / `domain/1` read the **live** `Kelix.Domains` snapshot (§3.2), not
+`domains.toml` on disk: after a rejected reload the two differ, and the operator
+question is what the router is doing. Both return the same per-domain shape — the
+configuration (aliases, `max_calls`, the enabled functions with their scripts and
+tuning, the ordered dial-plan) plus the live counters — so the list and the detail
+view cannot disagree about a field. Two readings are *asked for*, never re-derived
+here: whether a function is enabled comes from `Kelix.Router.function_enabled?/2`
+(the router's own reading of a function block, §4), and `domain/1` resolves its
+argument through `Kelix.Domains.lookup/2`, i.e. name **+** aliases,
+case-insensitively — the way an inbound R-URI is resolved, so the host an operator
+saw on the wire is a valid argument.
+
+`registration/2` returns the row `registrations/1` holds for that AOR, and
+`registrations/1` the same `%{domain, registrations}` entry `registrations/0`
+lists — no view can disagree with another about a field. The domain is part of the
+address rather than a filter on it (§6.1 keys the store per domain), resolved
+through `Kelix.Domains.lookup/2`: name + aliases, case-insensitively. Each binding
+carries what the registrar stored (§6.1): the contact URI, the
+expiry both ways (`expires_at` + the derived `expires_in`, because "how long has
+this left" is the question and a UTC instant is not an answer to it), the
+`source` the REGISTER actually came from — behind a NAT, not what the contact URI
+says — the transport it is reachable over, and the RFC 5626/3840 identity the
+handset sent (`instance`, `reg_id`, `methods`). Read structurally, never as
+`%Kelix.Mod.Registrar.Contact{}`: the core cannot reference a loadable module's
+struct (§16.12).
+
+`mediaservers/0` / `mediaserver/1` read `Kelix.MediaPool` (§9) — the pool is the
+node's only declaration of a media server — and return, per entry, the
+configuration (`name`, adapter `module`, `url`), the operator switch (`enabled`,
+what `mediaserver_toggle/2` flips) and the pool's own probe (`healthy`), plus a
+`modules` map: what each **module driving that server** says about it. That last
+one is not decoration. The pool probes the point-to-point adapter's channel
+(`/jsr309`) while the `mcu` module holds a different one (`/mcu`) to the same box,
+and §9 keeps the two deliberately apart (hence two `*_mediaserver_up` metrics); an
+operator asking "why did that conference fail on a server the pool calls healthy"
+needs both healths in one view. It is collected generically — a module exporting
+`mediaserver/1` contributes an entry, one that does not is absent, so the core
+names no module — and passed through as the module shaped it, minus the values
+that mean nothing outside the node (a pid, a monitor ref).
 
 ### 10.2 The `kelictl` CLI
 

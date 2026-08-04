@@ -57,10 +57,15 @@ In terms of capabilities, the emphasis will be on:
 - digest auth (stateless nonce, HA1 via a `subscriber_db`  module)
 - a multi-domain **registrar** via the registrar mocule and the `registar.exs` script
 - NAT/flow for WebRTC —  a media-server pool, 
+- a **conferencing (MCU)** function via the `mcu` module and the `mcu.exs` script:
+  audio + video mixing on a Medooze media server, conferences managed over REST /
+  `kelictl` / from a script, plain-RTP, SDES and DTLS-SRTP + ICE-lite legs —
+  see [docs/mcu_module_guide.md](docs/mcu_module_guide.md)
 
 
 ## Roadmap
-- kelixip MCU based on Mendooze with harware acceleration
+- kelixip MCU: hardware acceleration, RTP watchdog and delegated codec negotiation
+  (P7/P8 of [the MCU design](docs/design/mcu_module.md))
 - kelixip B2BUA and call processing
 - kelixip and elixip `presence` support including some level of LoST support
 - kelixip distributed cluster tech: later
@@ -93,9 +98,10 @@ the sequence diagram.
 
 `kelixip` is the productized SIP server built on the same stack: TOML-declared
 domains, script-per-function dispatch, loadable modules (registrar, database
-auth), a control CLI/REST API and Prometheus metrics.
+auth, conferencing), a control CLI/REST API and Prometheus metrics.
 
 **👉 The operator manual lives in [docs/kelixip/README.md](docs/kelixip/README.md).**
+**👉 The conferencing module has its own guide: [docs/mcu_module_guide.md](docs/mcu_module_guide.md).**
 
 # License
 

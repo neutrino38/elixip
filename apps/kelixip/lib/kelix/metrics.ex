@@ -113,6 +113,53 @@ defmodule Kelix.Metrics do
         tags: [:mcu],
         description: "Media server serviceable (enabled + healthy) — 1/0"
       )
+    ] ++ mcu_metrics()
+  end
+
+  # Conferencing (the `mcu` module, docs/design/mcu_module.md §11). Defined here
+  # rather than in the module for the same reason the registrar's are: a loadable
+  # module cannot carry half of an event-name contract, and the reporter needs every
+  # definition at start — long before a module is loaded.
+  defp mcu_metrics() do
+    [
+      counter("kelix.mcu.call.count",
+        event_name: [:kelix, :mcu, :call],
+        measurement: :count,
+        tags: [:result],
+        description: "Inbound conference calls by outcome (joined / 404 / 486 / 488 / 503 / 500)"
+      ),
+      distribution("kelix.mcu.rpc.duration.seconds",
+        event_name: [:kelix, :mcu, :rpc],
+        measurement: :duration,
+        tags: [:method],
+        unit: {:native, :second},
+        reporter_options: [buckets: [0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0]],
+        description: "MCU control RPC duration by method"
+      ),
+      counter("kelix.mcu.rpc.errors.count",
+        event_name: [:kelix, :mcu, :rpc_error],
+        measurement: :count,
+        tags: [:method, :reason],
+        description: "Failed MCU control RPCs by method and reason"
+      ),
+      last_value("kelix.mcu.conferences",
+        event_name: [:kelix, :poll, :mcu_conferences],
+        measurement: :count,
+        tags: [:mcu],
+        description: "Conferences held per media server"
+      ),
+      last_value("kelix.mcu.participants",
+        event_name: [:kelix, :poll, :mcu_participants],
+        measurement: :count,
+        tags: [:mcu, :conference],
+        description: "Participants per conference"
+      ),
+      last_value("kelix.mcu.mediaserver.up",
+        event_name: [:kelix, :poll, :mcu_up],
+        measurement: :up,
+        tags: [:mcu],
+        description: "MCU control channel up (as the conferencing module sees it) — 1/0"
+      )
     ]
   end
 end

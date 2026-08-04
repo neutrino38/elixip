@@ -477,16 +477,16 @@ Source unique dont dérivent CLI et REST (parité). `R` = lecture, `W` = écritu
 | Commande | | CLI | REST (indicatif) |
 |---|---|---|---|
 | `monitor` — scénarios en cours | R | `kelictl monitor` | `GET /scenarios` |
-| `registrations` — usrloc (filtrable par domaine) | R | `kelictl regs [aor]` | `GET /registrations` |
+| `registrations` — usrloc (filtrable par domaine) | R | `kelictl registration list [domain]` | `GET /registrations`, `GET /domains/<domaine>/registrations` |
 | `presence_state` *(futur)* | R | — | `GET /presence` |
 | `status` — uptime, compteurs, pool | R | `kelictl status` | `GET /status` |
-| `unregister` — purger un AOR ou un contact | W | `kelictl unregister <aor> [contact]` | `DELETE /registrations/<aor>` |
+| `unregister` — purger un AOR ou un contact | W | `kelictl registration remove <domain> <aor> [contact]` | `DELETE /domains/<domaine>/registrations/<aor>` |
 | `shutdown_scenario` — `:shutdown` à une instance | W | `kelictl stop <id>` | `POST /scenarios/<id>/shutdown` |
 | `reload_script` — recharger un/des `.exs`, **versionné** (§9.2) | W | `kelictl reload-script <name…>` | `POST /scripts/reload` |
 | `reload_script_notify` — reload **+ prévient les instances en cours** | W | `kelictl reload-script --notify <name…>` | `POST /scripts/reload?notify=1` |
-| `reload_domains` — recharger `domains.toml` (§9.2) | W | `kelictl reload-domains` | `POST /domains/reload` |
+| `reload_domains` — recharger `domains.toml` (§9.2) | W | `kelictl domain reload-all` | `POST /domains/reload` |
 | `module_reload` — recharger un module (§5.2) | W | `kelictl module reload <name>` | `POST /modules/<name>/reload` |
-| `mediaserver_toggle` — activer/désactiver un MCU | W | `kelictl mcu <name> on\|off` | `POST /mediaservers/<name>` |
+| `mediaserver_toggle` — activer/désactiver un MCU | W | `kelictl mediaserver enable\|disable <name>` | `POST /mediaservers/<name>` |
 | `set_log_level` — niveau de log (global) | W | `kelictl log-level <lvl>` | `PUT /log/level` |
 | `graceful_shutdown` — drain coopératif puis arrêt du nœud | W | `kelictl graceful-shutdown` | `POST /graceful-shutdown` |
 
@@ -501,6 +501,17 @@ Source unique dont dérivent CLI et REST (parité). `R` = lecture, `W` = écritu
 
 > **Futur.** `set_log_level` **par domaine / par fonction** (`registrar`,
 > `calls`, `presence`) pour débugger sans noyer les logs. En basic : global.
+
+> **Orthographe CLI (2026-08-02).** La colonne `kelictl` ci-dessus porte les noms
+> effectivement livrés : les verbes sont regroupés **sous le nom qu'ils
+> manipulent** (`domain reload-all`, `mediaserver enable|disable <name>`,
+> `registration list|show|remove`), et trois verbes de lecture s'y ajoutent
+> (`mediaserver list` / `mediaserver show` / `registration show`). Les
+> registrations étant propres à un domaine (§6.1), le domaine fait partie de
+> l'adresse et non d'un filtre : REST les imbrique sous
+> `/domains/<domaine>/registrations[/<aor>]` — voir la conception §10.1. Les
+> fonctions de
+> `Kelix.Control` et les routes REST, elles, sont bien celles de ce tableau.
 
 ## 10. API de contrôle (REST)
 

@@ -27,7 +27,7 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.1.0
+Version:        1.2.0
 Release:        1%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
@@ -44,10 +44,11 @@ kelixip is a SIP application server: declarative per-domain dispatch (config.tom
 + domains.toml) onto scenario scripts, a REST/CLI control surface (kelictl), and
 Prometheus metrics.
 
-The core ships NO SIP function. The registrar and the authentication back-end are
-loadable modules delivered as separate packages (kelixip-mod-registrar,
-kelixip-mod-auth_db) which drop their bytecode into the root-owned module
-directory; a deployment installs only what it uses.
+The core ships NO SIP function. The registrar, the authentication back-end and the
+conference mixer are loadable modules delivered as separate packages
+(kelixip-mod-registrar, kelixip-mod-auth_db, kelixip-mod-mcu) which drop their
+bytecode into the root-owned module directory; a deployment installs only what it
+uses.
 
 This package embeds its own Erlang runtime — no system Erlang or Elixir is needed.
 
@@ -68,6 +69,21 @@ Requires:       %{name} = %{version}-%{release}
 Digest authentication against a MariaDB/MySQL subscriber table (kamailio-compatible
 ha1/ha1b columns): it owns the challenge/accept/reject decision, the scripts only
 compose the SIP response. Enable it with a [module.auth_db] block in config.toml.
+
+%package mod-mcu
+Summary:        Conference mixer (MCU) module for kelixip
+Requires:       %{name} = %{version}-%{release}
+
+%description mod-mcu
+Audio/video/text conferencing: conferences addressed by DID, a mixed audio leg and
+a video mosaic per participant, driven over the Medooze MCU XML-RPC API, with the
+REST/CLI surface (conference.*, participant.*, recording.*, slot.*) to inspect and
+steer a live mix. Enable it with a [module.mcu] block in config.toml.
+
+Unlike the other modules, this one needs a service to talk to: at least one
+[mediaserver.pool.<name>] entry pointing at a reachable `mediaserver` process. The
+address announced in the SDP is that server's own setting (`--public-ip`), never
+kelixip's. Installing the package is not enough to make a conference work.
 
 %prep
 %setup -q
@@ -92,7 +108,11 @@ install -d -m 0755 %{buildroot}%{_sbindir}
 ln -s ../lib/kelixip/bin/kelictl %{buildroot}%{_sbindir}/kelictl
 ln -s ../lib/kelixip/bin/kelixip %{buildroot}%{_sbindir}/kelixip
 
-# script_dir — the reference scenario scripts.
+# script_dir — the reference scenario scripts. They all ship with the core, module
+# packages or not (registrar.exs already did): a script is reference material an
+# operator derives from, it is inert until a domains.toml rule names it, and one
+# directory that always holds the same set is easier to reason about than a
+# script_dir whose contents depend on which subpackages are installed.
 install -d -m 0755 %{buildroot}%{_datadir}/%{name}
 install -m 0644 scripts/*.exs %{buildroot}%{_datadir}/%{name}/
 
@@ -166,13 +186,28 @@ fi
 %dir %attr(0750,kelixip,kelixip) %{_sharedstatedir}/%{name}
 %dir %attr(0750,kelixip,kelixip) %{_localstatedir}/log/%{name}
 
+# Each module ships its own document: what the docs on a host describe is then what
+# that host can actually do. The .beam globs keep their trailing wildcard — a module
+# is one named module plus its implementation (Registrar.Contact, Mcu.Client,
+# Mcu.Adapter.Conn, …), and shipping only the named one installs a module whose every
+# call fails.
 %files mod-registrar
+%doc doc/modules/registrar.md
 %{kelixdir}/modules/Elixir.Kelix.Mod.Registrar*.beam
 
 %files mod-auth_db
+%doc doc/modules/auth_db.md
 %{kelixdir}/modules/Elixir.Kelix.Mod.AuthDb*.beam
 
+%files mod-mcu
+%doc doc/modules/mcu.md doc/modules/mcu_module_guide.md
+%{kelixdir}/modules/Elixir.Kelix.Mod.Mcu*.beam
+
 %changelog
+* Sun Aug 02 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.2.0-1
+- Version bump to 1.2.0.
+- New subpackage kelixip-mod-mcu: the conference mixer (design P6).
+
 * Wed Jul 29 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.1.0-1
 - Version bump to 1.1.0.
 

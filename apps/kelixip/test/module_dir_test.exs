@@ -13,7 +13,15 @@ defmodule Kelix.ModuleDirTest do
   alias Kelix.{ModuleRegistry, ModuleSupervisor}
 
   # A minimal Kelix.Module, compiled at runtime so it exists only as a .beam file
-  # in the directory we choose (never on the build path).
+  # in the directory we choose (never on the build path). It is deliberately spread
+  # over two beams, like every real module of any size: the named one and a companion
+  # it calls.
+  @companion_source ~S"""
+  defmodule Kelix.Mod.Dropped.Helper do
+    def double(n), do: n * 2
+  end
+  """
+
   @source ~S"""
   defmodule Kelix.Mod.Dropped do
     @behaviour Kelix.Module
@@ -31,19 +39,23 @@ defmodule Kelix.ModuleDirTest do
     @impl Kelix.Module
     def describe(), do: %{version: "9.9", exports: [{:answer, 0}]}
 
-    def answer(), do: 42
+    def answer(), do: Kelix.Mod.Dropped.Helper.double(21)
   end
   """
 
   @module Kelix.Mod.Dropped
+  @companion Kelix.Mod.Dropped.Helper
 
   setup do
     dir = Path.join(System.tmp_dir!(), "kelix_moddir_#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
 
-    # Compile to a .beam in `dir`, then wipe the module from the VM so the only way
-    # to reach it is through that directory.
+    # Compile to .beam files in `dir`, then wipe both modules from the VM so the only
+    # way to reach them is through that directory. The companion is compiled first, so
+    # the caller's remote call resolves at compile time.
+    [{@companion, companion_bytecode}] = Code.compile_string(@companion_source)
     [{@module, bytecode}] = Code.compile_string(@source)
+    File.write!(Path.join(dir, "#{@companion}.beam"), companion_bytecode)
     File.write!(Path.join(dir, "#{@module}.beam"), bytecode)
     unload()
 
@@ -58,9 +70,11 @@ defmodule Kelix.ModuleDirTest do
   end
 
   defp unload() do
-    :code.purge(@module)
-    :code.delete(@module)
-    :code.purge(@module)
+    for mod <- [@module, @companion] do
+      :code.purge(mod)
+      :code.delete(mod)
+      :code.purge(mod)
+    end
   end
 
   defp start_sup(opts) do
@@ -83,6 +97,22 @@ defmodule Kelix.ModuleDirTest do
     # through apply/3: the module does not exist at compile time, by design)
     assert apply(@module, :answer, []) == 42
     assert apply(@module, :describe, []).version == "9.9"
+  end
+
+  # The trap a release springs and a dev run hides: in embedded mode the code server
+  # never loads a module implicitly, so the *first call* to a companion raises
+  # UndefinedFunctionError — for the mcu module that was `Mcu.Config.parse/1`, inside
+  # `validate_config/1`, killing the boot. The companions must therefore be loaded
+  # with the module, before anything calls them.
+  test "the beams the module is implemented with are loaded with it", %{dir: dir} do
+    refute :code.is_loaded(@companion), "the companion must not be reachable before the test"
+
+    start_sup(module_dir: dir)
+
+    # loaded eagerly: nothing has called it yet, and in a release nothing could
+    assert :code.is_loaded(@companion)
+    # and the module really works through it
+    assert apply(@module, :answer, []) == 42
   end
 
   test "without that directory the block is skipped, and the boot survives it", %{dir: _dir} do

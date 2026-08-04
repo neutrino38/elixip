@@ -297,6 +297,20 @@ alias SIP.NetUtils
     end
   end
 
+  @doc """
+  Hand an INVITE server transaction the ACK that confirms its 2xx.
+
+  The ACK of a 2xx is a transaction of its own (RFC 3261 §17.1.1.3): its top Via
+  branch differs from the INVITE's, so the transport cannot route it to the IST.
+  The dialog layer — the TU — receives it and calls this to stop the 2xx
+  retransmissions (§13.3.1.4). A cast, and the pid may already be dead: an ACK
+  arriving after timer H is a no-op, not an error.
+  """
+  @spec confirm_uas_transaction(pid(), map()) :: :ok
+  def confirm_uas_transaction(uas_t, ack) when is_pid(uas_t) and is_req(ack) do
+    GenServer.cast(uas_t, {:onsipmsg, ack, nil, nil})
+  end
+
   @doc "Send an ACK message when a 2xx answer has been received for in an UAC transaction"
   @spec ack_uac_transaction(pid()) :: any()
   def ack_uac_transaction(uac_t) do

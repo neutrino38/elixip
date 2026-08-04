@@ -51,6 +51,42 @@ You do **not** need a dedicated AL9 machine — an **`almalinux:9` container in 
 is the build host (§15 P10 already says "rpmbuild/fpm en CI"). Podman/Docker on any
 host works.
 
+### Decision (2026-07-30): the ERTS stays embedded
+
+Depending on the distribution's `erlang` package instead was evaluated and rejected.
+It **works** — `include_erts: false` ships no `erts-*/` and, verified on a throwaway
+release, **no OTP application either**: `lib/` holds only `elixir`, `iex`, `logger`
+and our own apps, `ERTS_BIN=` is empty so `erl` comes from the `PATH`, and the boot
+script resolves `$ROOT/lib/kernel-9.2.4/ebin` from the system Erlang (crypto included,
+so the NIF is the distribution's). No dependency in `deps/` carries native code — no
+`c_src`, no `Makefile` — so that payload would be pure BEAM: `BuildArch: noarch`,
+`Architecture: all`, no `dpkg-shlibdeps`, ~5 MB instead of 18 MB. Rejected anyway:
+
+- **The security argument is already satisfied.** The embedded ERTS links the host's
+  OpenSSL/glibc *dynamically* — that is what `dpkg-shlibdeps` records as
+  `libssl3t64 (>= 3.4.0)`, `libc6 (>= 2.38)`. An OpenSSL or glibc CVE is fixed by the
+  customer's `dnf`/`apt update`, with no rebuild here. What stays frozen is OTP itself
+  — chiefly the pure-BEAM `ssl` application — i.e. one kelixip rebuild per OTP CVE,
+  not a permanent hole.
+- **It does not shrink the build matrix.** `start.script` hardcodes the *exact* OTP
+  application versions, so the `Requires` must pin them (`erlang-erts = 26.2.5-1.el9`,
+  not `>= 26`): one build per exact OTP version per target instead of one per target
+  OS release. Same matrix, plus a package that breaks when the customer patches Erlang.
+  The `noarch` win only materialises with install-time boot regeneration
+  (`systools:make_script` in `%post`/`postinst` + a trigger on the erlang package),
+  which is a project, not a `mix.exs` line.
+- **The support cost is asymmetric.** The remaining benefit is ~15 MB nobody notices;
+  the risk is "kelixip no longer starts after a system update", not reproducible here.
+  On AL9 it comes on top of `erlang` not being in the base repositories at all — the
+  install would require EPEL, whose OTP major has already jumped in the past.
+
+Revisit if — and only if — a customer policy forbids vendored runtimes or a
+vulnerability scanner blocks the embedded ERTS. That argument is contractual, not
+technical, and it wins: the answer then is the full job (`include_erts: false` **plus**
+install-time boot regeneration) as a **second build flavour** next to the embedded
+package, not as a replacement — self-contained stays the right default for an
+appliance-style deployment.
+
 ## Toolchain: only Erlang is OS-sensitive
 
 **Elixir is pure BEAM** (no native code), so it is trivial: download the

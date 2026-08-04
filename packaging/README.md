@@ -1,6 +1,6 @@
 # Packaging kelixip (design §12.1, §15 P10)
 
-Produces three packages — RPM for Alma Linux 9, deb for Ubuntu/Debian — from one
+Produces four packages — RPM for Alma Linux 9, deb for Ubuntu/Debian — from one
 `mix release`:
 
 | Package (RPM / deb) | Contents |
@@ -8,9 +8,13 @@ Produces three packages — RPM for Alma Linux 9, deb for Ubuntu/Debian — from
 | `kelixip` | the release (embedded ERTS) + `kelictl` + systemd unit + `/etc/kelixip` |
 | `kelixip-mod-registrar` | `Kelix.Mod.Registrar` bytecode, dropped into `module_dir` |
 | `kelixip-mod-auth_db` / `kelixip-mod-auth-db` | `Kelix.Mod.AuthDb` bytecode, dropped into `module_dir` |
+| `kelixip-mod-mcu` | `Kelix.Mod.Mcu` bytecode — the conference mixer, which also needs a reachable media server |
+
+Each module package carries **its own document** under `/usr/share/doc/<package>/`,
+so what the docs on a host describe is what that host can actually do.
 
 The core ships **no SIP function**: a deployment installs only the modules it uses
-(an MCU-only product installs none). See
+(a conferencing-only product installs `kelixip-mod-mcu` and nothing else). See
 [../docs/kelixip/installation.md](../docs/kelixip/installation.md) for the admin
 side — this file is about producing the artifacts.
 

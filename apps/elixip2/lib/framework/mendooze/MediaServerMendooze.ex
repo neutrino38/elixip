@@ -33,8 +33,20 @@ defmodule MediaServer.Mendooze do
   """
   @impl MediaServer.Behaviour
   @spec connect(MediaServer.server_addr() | String.t()) :: {:ok, pid()} | {:error, term()}
-  def connect({host, port}) do
-    case GenServer.start(__MODULE__, "http://#{host}:#{port}") do
+  def connect(addr), do: connect(addr, [])
+
+  @doc """
+  Same as `connect/1` with options.
+
+  `:purpose` — `:call` (default) or `:health_check`. A health check is the pool
+  keepalive probe (`Kelix.MediaPool`), which connects and disconnects on every
+  cycle: its event-queue lifecycle is then logged at `:debug` and stamped
+  `keepalive`, so the probe does not flood the log with queue churn.
+  """
+  @spec connect(MediaServer.server_addr() | String.t(), keyword()) ::
+          {:ok, pid()} | {:error, term()}
+  def connect({host, port}, opts) do
+    case GenServer.start(__MODULE__, {"http://#{host}:#{port}", opts}) do
       {:ok, pid} -> {:ok, pid}
       {:error, {:connect_failed, reason}} -> {:error, reason}
       {:error, reason} -> {:error, reason}
@@ -43,9 +55,9 @@ defmodule MediaServer.Mendooze do
 
   # URL form used by scenarios (media_connect) and the MENDOOZE_URL env var:
   # "http://host:port", "http://host" or "host:port"; default port 8080.
-  def connect(url) when is_binary(url) do
+  def connect(url, opts) when is_binary(url) do
     case parse_url(url) do
-      {:ok, host, port} -> connect({host, port})
+      {:ok, host, port} -> connect({host, port}, opts)
       {:error, _} = err -> err
     end
   end
@@ -159,7 +171,9 @@ defmodule MediaServer.Mendooze do
   # ── GenServer callbacks ─────────────────────────────────────────────────────
 
   @impl true
-  def init(base_url) do
+  def init({base_url, opts}) do
+    purpose = Keyword.get(opts, :purpose, :call)
+
     # The synchronous XML-RPC calls run on httpc's default profile. Raise its
     # per-host session pool so many concurrent peer connections (each issuing
     # several RPCs) don't serialize over the default of 2 connections. The
@@ -176,11 +190,12 @@ defmodule MediaServer.Mendooze do
             base_url: base_url,
             source_path: source_path,
             sink: self(),
+            purpose: purpose,
             retry_ms: Keyword.get(cfg, :poller_retry_ms, 1_000),
             max_failures: Keyword.get(cfg, :poller_max_failures, 5)
           )
 
-        Logger.info("Mendooze: connected to #{base_url}, event queue #{queue_id}")
+        log_connected(purpose, base_url, queue_id)
 
         {:ok,
          %{
@@ -188,6 +203,7 @@ defmodule MediaServer.Mendooze do
            queue_id: queue_id,
            source_path: source_path,
            poller: poller,
+           purpose: purpose,
            # sess_tag => %{pid: conn_pid, sink: event_sink_pid}
            conns: %{}
          }}
@@ -199,6 +215,16 @@ defmodule MediaServer.Mendooze do
         {:stop, {:connect_failed, reason}}
     end
   end
+
+  def init(base_url) when is_binary(base_url), do: init({base_url, []})
+
+  # A pool keepalive probe creates and deletes a queue on every cycle: log that
+  # churn at :debug, and say what it is, so it is not read as call activity.
+  defp log_connected(:health_check, base_url, queue_id),
+    do: Logger.debug("Mendooze: keepalive probe on #{base_url}, event queue #{queue_id}")
+
+  defp log_connected(_purpose, base_url, queue_id),
+    do: Logger.info("Mendooze: connected to #{base_url}, event queue #{queue_id}")
 
   # Older servers return only [queueId]; the documented fallback path applies.
   defp source_path(_queue_id, [path | _]) when is_binary(path), do: path
@@ -218,14 +244,20 @@ defmodule MediaServer.Mendooze do
       end)
     end
 
+    # Stop the poller *before* deleting the queue. The other order is a race the
+    # server loses: deleting the queue closes the stream, the poller sees the
+    # end-of-stream and schedules its 1 s reconnect, and if the RPC round-trip
+    # takes longer than that the retry GETs a queue that no longer exists —
+    # "unexpected response: 404 Not Found" in the log, once in a while.
+    Process.unlink(state.poller)
+    Process.exit(state.poller, :shutdown)
+
     case XmlRpc.call(state.base_url, "EventQueueDelete", [state.queue_id]) do
       {:ok, _} -> :ok
       # the server may already be gone; disconnect must still succeed
       {:error, reason} -> Logger.warning("Mendooze: EventQueueDelete failed: #{inspect(reason)}")
     end
 
-    Process.unlink(state.poller)
-    Process.exit(state.poller, :shutdown)
     {:stop, :normal, :ok, state}
   end
 

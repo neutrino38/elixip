@@ -474,6 +474,16 @@ retries. After 5 consecutive failures it casts `{:poller_down}` to the server
 GenServer, which broadcasts `{:ms_event, server_pid, :server_disconnected}` to
 the `event_sink` of every registered Conn.
 
+An HTTP **404** on the stream path is not a drop: the queue no longer exists
+(deleted, or the server restarted), so retrying can only 404 again. The poller
+reports `{:poller_down}` once and ends.
+
+`disconnect/2` therefore stops the poller **before** `EventQueueDelete`. The
+other order is a race the client loses when the RPC round-trip outlasts the 1 s
+retry delay: deleting the queue ends the stream, the poller schedules its
+reconnect, and the retry lands on a queue that is already gone — an occasional
+`unexpected response: 404 Not Found` in the log, with no other consequence.
+
 ---
 
 ## 6. Residual Server Limitations

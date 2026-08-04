@@ -1,6 +1,6 @@
 # /etc/kelixip/domains.toml — the served domains and their dial-plan.
 #
-# Hot-reloadable: `kelictl reload-domains` (or `systemctl reload kelixip`) applies
+# Hot-reloadable: `kelictl domain reload-all` (or `systemctl reload kelixip`) applies
 # it atomically — one bad value and the whole reload is rejected, the running
 # config untouched. Every key is documented in
 # /usr/share/doc/kelixip/installation.md.

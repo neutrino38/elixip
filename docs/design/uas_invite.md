@@ -422,6 +422,12 @@ end
    phase 1 (voir `uas_invite_impl_plan.md` §1.3). De même, le **487 sur
    CANCEL est automatique** (déjà le cas dans l'IST) : les scénarios n'ont ni
    `reply_invite(100)` ni `reply_invite(487)` à faire.
+   **Retranché (2026-08-02)** : le 100 automatique est **retiré**. Déployé
+   derrière un proxy qui répond déjà son propre 100 (kamailio `sl_send_reply`),
+   le nôtre n'était qu'un doublon sur le fil. Écart assumé au §17.2.1 : un
+   scénario lent envoie `reply_invite(100, "Trying")` lui-même ; tant qu'il n'a
+   rien répondu, l'IST absorbe les retransmissions d'INVITE. Le 487 sur CANCEL,
+   lui, reste automatique.
 2. Sémantique fine du 604 : la spec dit 604 ; 404/420 possibles selon le cas —
    on garde **604** configurable plus tard si besoin.
 3. Source des credentials pour `challenge_invite` : même statut que le

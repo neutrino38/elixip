@@ -200,7 +200,7 @@ defmodule SIP.Session.Media do
           case apply(sip_ctx.mediaservermodule, :create_peer_connection, [
                  sip_ctx.mediaserverpid,
                  self(),
-                 [webrtc_support: webrtc_support, media: medias]
+                 [webrtc_support: webrtc_support, media: medias] ++ extra_conn_opts(sip_ctx)
                ]) do
             {:ok, cnx} ->
               cnx
@@ -213,6 +213,26 @@ defmodule SIP.Session.Media do
 
       cnx ->
         {sip_ctx, cnx}
+    end
+  end
+
+  @doc """
+  Per-call options a scenario adds to `create_peer_connection/3`, read from the
+  context appdata key `:media_conn_opts` (a keyword list or a map).
+
+  This is how a script passes an adapter *the context of this call* — which
+  conference this leg joins, for instance — without the media macros having to know
+  what that means. The macros' own keys (`:webrtc_support`, `:media`) come first and
+  therefore win, since adapters read them with `Keyword.get/3`; an adapter that does
+  not know an extra key ignores it, which is what makes this additive for every
+  existing one.
+  """
+  @spec extra_conn_opts(%SIP.Context{}) :: keyword()
+  def extra_conn_opts(sip_ctx = %SIP.Context{}) do
+    case SIP.Context.appdata_get(sip_ctx, :media_conn_opts) do
+      opts when is_list(opts) -> opts
+      opts when is_map(opts) -> Map.to_list(opts)
+      _ -> []
     end
   end
 

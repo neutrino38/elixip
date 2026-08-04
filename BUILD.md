@@ -111,10 +111,17 @@ says why on stderr.
 
 ## kelix_modules — the loadable modules
 
-The release carries **no SIP function**: `registrar` and `auth_db` are installed
-as `.beam` files into `server.module_dir` and loaded per `[module.<name>]` block
-(design §8.3, §16.12). `apps/kelixip` does not depend on this app, which is what
+The release carries **no SIP function**: `registrar`, `auth_db` and `mcu` are
+installed as `.beam` files into `server.module_dir` and loaded per `[module.<name>]`
+block (design §8.3, §16.12). `apps/kelixip` does not depend on this app, which is what
 keeps them out of the release.
+
+> `mcu` (conferencing — see [docs/mcu_module_guide.md](docs/mcu_module_guide.md)) is
+> the one module whose `.beam` is not enough: it needs a reachable **Medooze media
+> server**, declared in `[mediaserver.pool.<name>]` (the same block the
+> point-to-point path uses — the module declares no server of its own). Installed
+> without one it starts, marks its entry `down`, and answers `503` to every
+> conference — which is the intended failure, not a broken install.
 
 ```bash
 cd apps/kelix_modules
@@ -131,15 +138,85 @@ Check what a running node actually loaded with `kelictl status` (`modules:` line
 Installing a new version of a module is a copy plus `kelictl module reload <name>`
 — no server restart.
 
+### Running the mcu module from a checkout
+
+Testing a conference needs no packaging at all: in dev the loadable modules come from
+the umbrella's own `ebin`, already on the code path, so `server.module_dir` stays
+**empty** and nothing is installed. What you do need is a real media server — the
+module drives one, and there is no mock at this level.
+
+```bash
+# 1. a media server, with its XML-RPC port (this is `url` below, NOT 8080)
+/opt/ives/bin/mediaserver --http-port 9090 &
+
+# 2. a TOML pair somewhere writable
+cat > /tmp/kelix/config.toml <<'EOF'
+[server]
+node_name  = "kelixip@127.0.0.1"
+script_dir = "/path/to/elixip/apps/kelixip/scripts"
+module_dir = ""                       # dev: the modules are already on the path
+
+[[listen]]
+proto = "udp"
+addr  = "0.0.0.0"
+port  = 5080                          # 5060 is often taken on a dev box
+
+[control_api]
+addr = "127.0.0.1"
+port = 8090
+auth = "none"                         # loopback only
+
+[module.mcu]
+did_range = "8000-8099"
+
+# the media server, declared once for every path that uses it. The address it puts
+# in the SDP is its own setting (`mediaserver --public-ip`), not kelixip's.
+[mediaserver.pool.mcu1]
+module = "mendooze"
+url    = "http://127.0.0.1:9090"
+EOF
+
+cat > /tmp/kelix/domains.toml <<'EOF'
+[[domain]]
+name = "dev.local"
+
+  [[domain.call]]
+  pattern = "8XXX"
+  script  = "mcu.exs"
+EOF
+
+# 3. boot the real server from the checkout
+KELIXIP_CONFIG=/tmp/kelix/config.toml KELIXIP_DOMAINS=/tmp/kelix/domains.toml iex -S mix
+```
+
+From that shell (or over REST on 8090, or with `kelictl` against the node):
+
+```elixir
+Kelix.Mod.Mcu.handle_control("conference.create", %{"domain" => "dev.local"})
+#=> {:ok, %{uid: "c-…", did: "8000", conf_id: 42, mcu: "mcu1"}}
+Kelix.Control.CLI.run(["status"], node()) |> elem(1) |> IO.puts()
+```
+
+then dial `sip:8000@dev.local` at port 5080 with a softphone, or with the `elixipp`
+test tool. The `mcu:` line of `kelictl status` and the `conference.*` /
+`participant.*` commands are the same ones a packaged host exposes.
+
+The environment variables are honoured in **every** Mix environment; unset, they leave
+the server booting empty exactly as `mix test` needs (`config/runtime.exs`).
+
 ## Building the RPM packages (Alma Linux 9)
 
-Three packages come out of one `mix release`:
+Four packages come out of one `mix release`:
 
 | Package | Contents |
 |---|---|
 | `kelixip` | the release (embedded ERTS) + `kelictl` + systemd unit + `/etc/kelixip` |
 | `kelixip-mod-registrar` | the registrar module's `.beam`, for `module_dir` |
 | `kelixip-mod-auth_db` | the auth_db module's `.beam`, for `module_dir` |
+| `kelixip-mod-mcu` | the mcu module's `.beam`, for `module_dir` — plus a reachable media server, which no package can install |
+
+Each module package also carries its own document under `/usr/share/doc/<package>/`
+(`mcu.md` + `mcu_module_guide.md` for the mcu one).
 
 ### The golden rule: build on the target OS
 
@@ -219,9 +296,10 @@ spec disagrees, so bump both together.
 Result:
 
 ```
-packaging/dist/kelixip-1.1.0-1.el9.x86_64.rpm               7.1M   (release + ERTS)
-packaging/dist/kelixip-mod-registrar-1.1.0-1.el9.x86_64.rpm  41K
-packaging/dist/kelixip-mod-auth_db-1.1.0-1.el9.x86_64.rpm     26K
+packaging/dist/kelixip-1.2.0-1.el9.x86_64.rpm               7.3M   (release + ERTS)
+packaging/dist/kelixip-mod-registrar-1.2.0-1.el9.x86_64.rpm  43K
+packaging/dist/kelixip-mod-auth_db-1.2.0-1.el9.x86_64.rpm     28K
+packaging/dist/kelixip-mod-mcu-1.2.0-1.el9.x86_64.rpm        255K
 ```
 
 ### Build in a container instead
@@ -254,7 +332,7 @@ how to configure the service, is the operator's guide:
 
 ## Building the deb packages (Ubuntu / Debian)
 
-The same three packages, from the same `mix release` and the same
+The same four packages, from the same `mix release` and the same
 [`packaging/stage.sh`](packaging/stage.sh) staging step:
 
 | Package | Contents |
@@ -262,6 +340,7 @@ The same three packages, from the same `mix release` and the same
 | `kelixip` | the release (embedded ERTS) + `kelictl` + systemd unit + `/etc/kelixip` |
 | `kelixip-mod-registrar` | the registrar module's `.beam`, for `module_dir` |
 | `kelixip-mod-auth-db` | the auth_db module's `.beam`, for `module_dir` |
+| `kelixip-mod-mcu` | the mcu module's `.beam`, for `module_dir` — plus a reachable media server |
 
 Two deliberate differences from the RPM, both distribution conventions:
 
@@ -358,7 +437,13 @@ Result:
 packaging/dist/kelixip_1.1.0-1_amd64.deb                 6.9M   (release + ERTS)
 packaging/dist/kelixip-mod-registrar_1.1.0-1_amd64.deb    36K
 packaging/dist/kelixip-mod-auth-db_1.1.0-1_amd64.deb      24K
+packaging/dist/kelixip-mod-mcu_1.1.0-1_amd64.deb           —    (see below)
 ```
+
+> Those figures are from a 1.1.0 build on `ubuntu:24.04`, before the mcu package
+> existed; `kelixip-mod-mcu` joins them carrying the same bytecode as its RPM
+> (≈ 255 kB). The deb side of P6 is wired but has **not** been built yet — do it on
+> the target release, as the golden rule below says.
 
 ### Build in a container instead
 

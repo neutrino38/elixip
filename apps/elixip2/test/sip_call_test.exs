@@ -360,9 +360,7 @@ defmodule SIP.Test.Call do
 
   test "Simulating an answered call and let the call end" do
     { parsed_msg, branch_id } = simulate_remote_invite("answered_call")
-    # The IST emits 100 Trying automatically (RFC 3261 §17.2.1); the scenario
-    # never sends it.
-    assert_receive(100, 2000, "Failed to receive the automatic 100 Trying")
+    # No 100 Trying: the IST does not emit one and the scenario does not either.
     assert_receive(180, 2000, "Failed to receive 180 Ringing on time")
     assert_receive(200, 2000, "Failed to receive 200 OK on time")
     Process.sleep(1000)

@@ -72,7 +72,7 @@ apps/
 │   └── lib/elixipp/ElixippCLI.ex   # CLI entry point + live --monitor rendering (owl)
 ├── kelixip/       # the kelixip SIP server → OTP release + kelictl — depends on :elixip2
 │   └── lib/kelix/application.ex    # Kelix.Application (supervision tree)
-└── kelix_modules/ # the provided loadable modules (registrar, auth_db) — depends
+└── kelix_modules/ # the provided loadable modules (registrar, auth_db, mcu) — depends
                    #   on :kelixip. NOT in the release: their .beam are installed
                    #   into `server.module_dir` and loaded per config (§8.3, §16.12)
 ```
@@ -88,7 +88,7 @@ because the release embeds a natively-linked ERTS.
 
 `apps/kelix_modules` is deliberately **outside** the release: `apps/kelixip` does
 not depend on it, so `mix release kelixip` cannot pull it in — the core ships no
-SIP function. Its tests (registrar, auth_db, the reference registrar script, the
+SIP function. Its tests (registrar, auth_db, mcu, the reference scripts, the
 core↔module control path) live in that app, since they are the only place both
 halves are present.
 

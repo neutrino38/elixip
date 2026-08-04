@@ -25,13 +25,19 @@ on Ubuntu/Debian, the same file the systemd unit reads.
 |---|---|---|
 | `kelictl status` | R | Uptime, counters, listeners, media pool, node state |
 | `kelictl monitor` | R | Scenarios in progress (reuses the `--monitor` view) |
-| `kelictl regs [aor]` | R | Current registrations (all, or one AOR) |
-| `kelictl unregister <aor> [contact]` | W | Drop a registration |
+| `kelictl registration list [domain]` | R | Registrations, one list per domain (all domains, or one) |
+| `kelictl registration show <domain> <aor>` | R | One AOR and its bindings, in detail |
+| `kelictl registration remove <domain> <aor> [contact]` | W | Drop a registration |
+| `kelictl domain list` | R | Served domains, their functions and live counters |
+| `kelictl domain show <domain>` | R | One domain in detail (name **or** alias) |
+| `kelictl domain reload-all` | W | Hot-reload `domains.toml` (atomic) |
+| `kelictl mediaserver list` | R | The media-server pool: adapter, URL, switch, health |
+| `kelictl mediaserver show <name>` | R | One media server in detail |
+| `kelictl mediaserver enable\|disable <name>` | W | Take a media server in/out of the pool |
 | `kelictl stop <id>` | W | Cooperatively shut down one scenario (id from `monitor`) |
 | `kelictl reload-script [--notify] <name…>` | W | Reload scenario script(s) |
-| `kelictl reload-domains` | W | Hot-reload `domains.toml` (atomic) |
+| `kelictl module list` | R | Loaded modules: version, implementation, how many commands and facades each contributes |
 | `kelictl module reload <name>` | W | Reload a module's config |
-| `kelictl mcu <name> on\|off` | W | Enable/disable a media server in the pool |
 | `kelictl log-level <lvl>` | W | Change the log level at runtime (`debug\|info\|warning\|error`) |
 | `kelictl graceful-shutdown` | W | Drain scenarios, then shut the node down |
 
@@ -47,36 +53,152 @@ domains version: 0
 modules:
 media pool:      (empty)
 
-$ kelictl regs
-no registrations
+$ kelictl registration list
+example.com
+  aor    contacts  expires  bindings
+  alice  2         4m58s    sip:alice@10.0.0.9:5060, sip:alice@10.0.0.9:5062
+  bob    1         9m12s    sip:bob@10.0.0.22:5060
 
-$ kelictl regs alice
-alice@example.com -> sip:alice@10.0.0.9:5060
+lab.example.net
+  (no registration)
 
-$ kelictl unregister alice@example.com
+$ kelictl registration list lab.example.net
+lab.example.net
+  (no registration)
+
+$ kelictl registration show example.com alice
+aor:          alice@example.com
+contacts:     2
+  1. sip:alice@10.0.0.9:5060
+     expires:   in 4m58s (2026-08-02T12:34:56Z)
+     source:    udp 203.0.113.7:45112
+     transport: udp
+     instance:  <urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6>
+     reg-id:    1
+  2. sip:alice@10.0.0.9:5062
+     expires:   in 9m40s (2026-08-02T12:39:38Z)
+     source:    tls 203.0.113.7:51044
+     transport: tls
+
+$ kelictl registration remove example.com alice
 ok
 
-$ kelictl mcu mcu1 off
+$ kelictl domain list
+domain           aliases     functions         calls  regs  max
+example.com      example.fr  registrar, calls  0      0     500
+lab.example.net  -           registrar         0      0     -
+
+$ kelictl domain show example.com
+domain:        example.com
+aliases:       example.fr
+max calls:     500
+active calls:  0
+registrations: 0
+registrar:     default_expires=3600 script=registrar.exs
+presence:      (disabled)
+dial-plan:
+  1. 0[1-9]XXXXXXXX -> user2pstn.exs
+  2. (default)      -> catchall.exs
+
+$ kelictl domain show ghost.example.org
+no such domain
+
+$ kelictl mediaserver list
+server  adapter   url                  enabled  health  modules
+mcu1    mendooze  http://10.0.0.1:8080  on       up      mcu=up
+mcu2    mendooze  http://10.0.0.2:8080  on       down    mcu=down
+
+$ kelictl mediaserver show mcu1
+media server: mcu1
+adapter:      mendooze
+url:          http://10.0.0.1:8080
+enabled:      on
+health:       up (pool probe)
+mcu:          name mcu1, queue_id q-42, status up, url http://10.0.0.1:8080
+
+$ kelictl mediaserver disable mcu1
 ok
 
-$ kelictl mcu ghost off
+$ kelictl mediaserver disable ghost
 error: :unknown
 
-$ kelictl reload-domains
+$ kelictl domain reload-all
 ok
 ```
 
-`unregister <aor>` accepts `user@domain` (that domain) or `user` (every domain);
-an optional `contact` removes just that binding. `reload-script` reports one line
-per script (`<name>: ok` / `<name>: error: …`).
+An AOR is only unique **within a domain**, so the domain is part of the address
+rather than a filter on it: `show` and `remove` take `<domain> <aor>`, and `list`
+groups its answer per domain. With no argument, `list` prints one section per
+**served** domain — including the ones nobody is registered in, because
+"served, empty" and "not served at all" are what an operator is usually trying to
+tell apart. `<domain>` is resolved the way inbound traffic is (name **or** alias,
+case-insensitively), so the host seen on the wire is a valid argument; an unserved
+one is `no such domain`, not an empty list.
+
+`<aor>` is the user-part (`alice`), or the full `alice@example.com` copied out of a
+log — in which case its domain part must be that same domain, rather than being
+silently ignored. `remove` takes an optional `contact` to drop just that binding
+instead of the whole AOR; there is deliberately no form that removes an AOR from
+every domain at once. `reload-script` reports one line per script (`<name>: ok` /
+`<name>: error: …`).
+
+`show` prints what the registrar stored, not just the URI: `expires` both ways
+(the remaining time is the question, the instant is what a log line carries),
+`source` — where the REGISTER actually came from, which behind a NAT is **not**
+what the contact URI says, and the usual reason a call to a registered phone
+never arrives — the transport it is reachable over, and the identity the handset
+sent (`instance`, `reg-id`, `methods`, RFC 5626/3840). A field the handset did
+not send gets no line rather than a dash.
+
+`domain list` / `domain show` read the **live** `domains.toml` snapshot — what the
+router is using right now, which after a rejected `domain reload-all` is *not* what
+is on disk (the version is in `kelictl status`). `show` resolves its argument the
+way inbound traffic is resolved, against the name **and** the aliases,
+case-insensitively, so the host seen on the wire is a valid argument. The
+dial-plan is listed in file order and numbered, because it is first-match-wins:
+rule *n* is only tried if rules *1…n-1* did not match. `functions` lists what the
+domain actually serves (a function block present in the TOML = enabled), so an
+empty column means every request to that domain is answered `404`.
+
+`mediaserver list` / `mediaserver show` list the `[mediaserver.pool.*]` entries —
+the node's only declaration of a media server — in config order, which is the
+round-robin order. Two things that read alike are kept apart there:
+
+* **`enabled`** is the operator switch, flipped by `mediaserver enable|disable`
+  and by nothing else. Disabling stops **new** calls and conferences landing on
+  that server; what is already running stays until it ends.
+* **`health`** is the pool's own probe (a connect/disconnect on the
+  point-to-point adapter's channel, every 30 s), and the `modules` column is what
+  each module driving that server says about it — the `mcu` module holds a
+  *different* control channel to the same box. `up` on one side and `down` on the
+  other is a real state, not a contradiction: a server whose JSR-309 side is
+  unreachable can serve conferences perfectly, and vice versa.
+
+A server the pool does not declare is `error: :unknown` on `enable`/`disable` and
+`no such media server` on `show`.
 
 ### Exit codes
 
-`kelictl` classifies results as `0` (ok), `1` (command error, e.g. unknown MCU),
-or `2` (usage / bad arguments). **Caveat:** because the overlay dispatches through
-`kelixip rpc`, the numeric exit code is **not currently propagated to the shell**
-(it always returns `0`); scripts should match on the printed output, not `$?`.
-This propagation is a roadmap refinement.
+| Code | Means |
+|---|---|
+| `0` | ok |
+| `1` | the command failed, unclassified (e.g. an unknown module) |
+| `2` | usage, or an argument the command refused |
+| `3` | no such object |
+| `4` | conflict: it already exists, or is not empty |
+| `5` | unavailable: the node, the module or its backend did not answer |
+
+`3`/`4`/`5` apply to **module commands** and come from the failing command's own
+declaration (the `errors:` map of its `describe_control/0` entry) — the same
+declaration the REST frontal turns into `404`/`409`/`503`, so both frontals
+classify a failure identically. A reason a module declares nothing for falls back
+to `404` → `3` for `not_found`, `503` → `5` for a module that is absent or wedged,
+and `400` → `2` otherwise. Core commands use `0`/`1`/`2`.
+
+**Caveat:** because the overlay dispatches through `kelixip rpc`, the numeric exit
+code is **not currently propagated to the shell** (it always returns `0`); scripts
+should match on the printed output, not `$?`. This propagation is a roadmap
+refinement — the classification above is what it will carry once it lands.
 
 > `reload-script --notify` is **accepted but not yet active** — notifying
 > in-progress instances of a reload is a roadmap refinement; today the flag is a
@@ -84,17 +206,78 @@ This propagation is a roadmap refinement.
 
 ## Module commands
 
-Modules may contribute their own sub-commands, discovered from each module's
-declaration (`describe_control/0`):
+Modules may contribute their own sub-commands, declared once per module
+(`describe_control/0`):
 
 ```
 kelictl <module> <command> [args…]
 ```
 
 The positional `args…` are handed to the module's `handle_control/2` as
-`%{"args" => [ ... ]}`. These share the same cookie boundary as the core commands.
-Today neither [registrar](modules/registrar.md) nor [auth_db](modules/auth_db.md)
-contributes one; the mechanism is documented in
+`%{"args" => [ ... ]}`; the convention is `name=value` tokens (`true`/`false` is a
+boolean, digits an integer, a leading `{`/`[` is JSON). These share the same
+cookie boundary as the core commands.
+
+**Quote a value that contains spaces** — `name='Sales weekly'`,
+`layout='2x2 hd720p'` — and the quotes reach the module intact, JSON included
+(`muted='{"audio":true}'`). Before 2026-08 the wrapper joined the argument line
+into one string and re-split it, which silently dropped that quoting; if a value
+with a space comes back as `unknown argument(s): <second word>`, the node is
+running an older release than its `kelictl`.
+
+**Ask the node what it serves** rather than reading the module's source — both
+listings are rendered from the declaration itself, so they cannot drift:
+
+```console
+$ kelictl module list
+module  version  implementation  commands  exports
+mcu     1.0      Kelix.Mod.Mcu   9         16
+
+kelictl <module> help lists what a module contributes
+
+$ kelictl mcu help
+mcu 1.0 (Kelix.Mod.Mcu)
+
+commands:
+  conference.create   [POST /modules/mcu/conferences]
+      args: domain* name did mcu vad rate audio_codecs video_codecs text_codecs video layout max_participants destroy_when_empty
+      Create a conference (allocates a DID when none is given)
+      vad: voice activity detection: none | basic | full (or 0 | 1 | 2)
+      layout: a mosaic, a size and/or auto|manual, in any order, spaces or commas
+              mosaic: 1x1 2x2 3x3 3+4 1+7 1+5 1+1 pip1 pip3 4x4 1+4 2+8
+              …
+  conference.list     [GET /modules/mcu/conferences]
+      args: domain did
+      List the conferences, optionally filtered by domain and/or DID
+  …
+
+facades (import Kelix.Mod.Mcu):
+  create_conference/2, ensure_conference/3, …
+
+$ kelictl mcu help conference.update      # one command, in full
+```
+
+`*` marks a required argument; the bracketed route is the same command over REST
+(`GET /modules` and `GET /modules/<name>` serve the same declarations as JSON).
+`help` is therefore reserved on a module namespace, and so is
+`<module> help <cmd>` — which narrows the listing to one command, since a whole
+module's surface plus every vocabulary is a screenful.
+
+An argument whose **value** has a vocabulary of its own (a mosaic name, an enum, a
+compact syntax) is printed under the command, indented below its name. That text is
+the module's, declared next to the parser that enforces it: the CLI has no idea what
+a mosaic is, and cannot show one the module would refuse.
+
+A module's whole namespace is its own: `kelictl mcu <cmd>` is the `mcu` module's
+(`kelictl mcu conference.list`), and enabling or disabling a media server is
+`kelictl mediaserver enable|disable <name>` — it acts on a `[mediaserver.pool.*]`
+entry, of which the `mcu` module is only one consumer. `domain`, `mediaserver`
+and `module` are core nouns and never reach a module, so a mistyped sub-command
+prints their usage rather than "unknown module".
+
+Of the shipped modules, only [mcu](modules/mcu.md) contributes commands today —
+[registrar](modules/registrar.md) and [auth_db](modules/auth_db.md) contribute
+none. The mechanism is documented in
 [modules/README.md](modules/README.md#control-surface-kelictl--rest).
 
 ## Parity with REST
