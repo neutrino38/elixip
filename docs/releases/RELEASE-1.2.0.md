@@ -1,6 +1,6 @@
 # Release 1.2.0
 
-2026-08-03 — 41 commits since 1.1.0 (2026-07-29). Theme of the release: kelixip
+2026-08-04 — 48 commits since 1.1.0 (2026-07-29). Theme of the release: kelixip
 learns to process calls — a new **mcu** conference module, the UAS INVITE path
 hardened against real proxies and NATs, and a reworked kelictl/REST control
 surface.
@@ -128,8 +128,24 @@ New module: a SIP conference bridge driving the Mendooze MCU over its XML-RPC
   `participant.*` (list, show, update, kick), `recording.start/stop`, slot
   pinning (`slot.list/update`), conference logo — layouts are entered as names
   (`layout='2x2 vga'`, `layout=auto`), the wire integers stay accepted
+- a name banner can be overlaid on a leg's tile: `admit/3` takes
+  `displayname: "..."` or `:auto` (derived from the `From` header)
+- fixes: a retransmitted ACK (RFC 3261 §13.2.2.4) re-attached the leg and
+  re-emitted `participant.joined` per copy — the reference scenarios now split
+  `in_call` into `in_call` + `in_conference` so only the first ACK runs the
+  ACK-time sequence, and the registry guards on the participant's state
+- the shipped `[module.mcu]` sample block was incomplete while claiming to hold
+  the defaults; notably its `audio_codecs` line omitted `TELEPHONE-EVENT`, so
+  uncommenting it as shipped silently turned DTMF off
+
+## Documentation
+
+- the design and specification documents are gathered under `docs/design/`; the
+  kelixip README points at the user documentation instead of the design docs
+- each module ships its own guide (`docs/kelixip/modules/`), installed with its
+  package
 
 ## Dependencies
 
-- mediaserver 1.20.0 and above (MCU XML-RPC interface, `natLatch`,
+- (mediaserver 1.12.0)[https://github.com/neutrino38/mediaserver/releases/tag/1.12.0] and above (MCU XML-RPC interface, `natLatch`,
   `StartReceiving` returning the announce address).
