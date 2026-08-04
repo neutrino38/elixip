@@ -72,6 +72,13 @@ defmodule Kelix.Mod.Mcu do
   # logo — the picture drawn in every empty mosaic slot (§8.3.8, `multiconf.cpp`).
   @mixer_logo_part_id 0
 
+  # `SetParticipantDisplayName`: mosaic id `-1` targets every *existing* mosaic of
+  # the conference, and ISO 15924 script code `0` picks the font from the name's
+  # characters. Wire order is (confId, mosaicId, partId, name, scriptCode) —
+  # `mosaicId` BEFORE `partId`, whatever older docs said (MCU-API.md §6.5).
+  @all_mosaics -1
+  @autodetect_script 0
+
   # What `recording.start` may write. The server picks the container from the
   # extension and errors on anything else, so refusing it here turns a "Could not
   # record broadcast" into a message naming the two it accepts.
@@ -429,12 +436,29 @@ defmodule Kelix.Mod.Mcu do
   created by the adapter inside `create_peer_connection/3`, so its lifetime is
   exactly the adapter connection's and a crash cannot orphan it. What is reserved
   here is the *slot*.
+
+  Options:
+
+    * `:displayname` — overlay a name banner on this leg's tile
+      (`SetParticipantDisplayName`). Either the string to show, or `:auto`, which
+      takes the INVITE From header's display name and falls back to the From URI's
+      user part. Resolved here (only this call still holds the request), stored on
+      the row, and sent at `attach/1` time — the MCU-side participant does not
+      exist yet during admit. Anything else is `{:error, :bad_displayname}`.
   """
-  @spec admit(String.t(), map) ::
+  @spec admit(String.t(), map, keyword) ::
           {:ok, Conference.t(), Conference.participant()}
-          | {:error, :no_such_conference | :full | :mcu_down | :down | :timeout}
-  def admit(domain, req) when is_binary(domain) and is_map(req),
-    do: Kelix.Module.safe_call(__MODULE__, {:admit, domain, req}, timeout: @facade_timeout_ms)
+          | {:error,
+             :no_such_conference | :full | :mcu_down | :bad_displayname | :down | :timeout}
+  def admit(domain, req, opts \\ [])
+
+  def admit(domain, req, opts) when is_binary(domain) and is_map(req) and is_list(opts) do
+    with {:ok, display_name} <- requested_displayname(Keyword.get(opts, :displayname), req) do
+      Kelix.Module.safe_call(__MODULE__, {:admit, domain, req, display_name},
+        timeout: @facade_timeout_ms
+      )
+    end
+  end
 
   @doc """
   ACK-time: start sending, join the audio mixer, and mark the participant joined
@@ -448,6 +472,8 @@ defmodule Kelix.Mod.Mcu do
   def attach(part) when is_map(part) do
     with {:ok, row} <- participant(part),
          {:ok, medias} <- Adapter.attach(row.conn) do
+      set_display_name(row)
+
       Kelix.Module.safe_call(__MODULE__, {:joined, part.conf_uid, part.ref, medias},
         timeout: @facade_timeout_ms
       )
@@ -456,6 +482,44 @@ defmodule Kelix.Mod.Mcu do
       {:error, _} = err -> err
     end
   end
+
+  # The banner of admit/3's `:displayname` option, sent from the calling scenario
+  # like the rest of attach — the MCU-side participant exists from
+  # `create_peer_connection/3` onwards, which `SetParticipantDisplayName` requires
+  # (MCU-API.md §6.5). Cosmetic by contract: a refusal (unsupported script, missing
+  # font — `mcu.log` has the detail) is logged and must not keep the leg out of the
+  # mix, so this always answers `:ok`.
+  defp set_display_name(%{display_name: name, part_id: part_id} = row)
+       when is_binary(name) and is_integer(part_id) do
+    result =
+      with {:ok, conf} <- conference(row.conf_uid),
+           {:ok, mcu} <- mediaserver(conf.mcu) do
+        rpc(mcu, "SetParticipantDisplayName", [
+          conf.conf_id,
+          @all_mosaics,
+          part_id,
+          name,
+          @autodetect_script
+        ])
+      end
+
+    case result do
+      {:ok, _} ->
+        :ok
+
+      other ->
+        Logger.warning(
+          module: __MODULE__,
+          message:
+            "SetParticipantDisplayName(#{inspect(name)}) for participant #{part_id} " <>
+              "failed: #{inspect(other)}"
+        )
+
+        :ok
+    end
+  end
+
+  defp set_display_name(_row), do: :ok
 
   @doc """
   Remove a participant: tear the MCU side down, release the slot, and emit
@@ -1293,8 +1357,8 @@ defmodule Kelix.Mod.Mcu do
 
   # `from` is the scenario instance: it is the process whose death must reap the
   # participant (§9.3), so it is recorded as the row's owner.
-  def handle_call({:admit, domain, req}, {scenario, _tag}, state) do
-    {result, state} = do_admit(state, domain, req, scenario)
+  def handle_call({:admit, domain, req, display_name}, {scenario, _tag}, state) do
+    {result, state} = do_admit(state, domain, req, scenario, display_name)
     {:reply, result, state}
   end
 
@@ -1307,18 +1371,32 @@ defmodule Kelix.Mod.Mcu do
     case fetch_row(conf_uid, ref) do
       {:ok, conf, row} ->
         update_participant(conf_uid, ref, fn part ->
-          %{part | state: :connected, medias: medias, joined_at: DateTime.utc_now()}
+          %{
+            part
+            | state: :connected,
+              medias: medias,
+              joined_at: part.joined_at || DateTime.utc_now()
+          }
         end)
 
-        Event.emit(:"participant.joined", conf.uid, %{
-          part_id: row.part_id,
-          name: row.name,
-          medias: Map.new(medias, fn {media, info} -> {media, Map.get(info, :codec)} end)
-        })
+        # One join, one event (§11.1, invariant 3): attach/1 may legitimately run
+        # again on the same leg — a renegotiation, or a retransmitted ACK reaching
+        # a script without the in_conference state — and only the first entry into
+        # the mix is a participant.joined. The medias above still refresh: a
+        # renegotiation may have changed them.
+        if row.state != :connected do
+          Event.emit(:"participant.joined", conf.uid, %{
+            part_id: row.part_id,
+            name: row.name,
+            medias: Map.new(medias, fn {media, info} -> {media, Map.get(info, :codec)} end)
+          })
 
-        # a leg joining the mosaic changes how many tiles the layout must show
+          Emit.mcu_call(:joined)
+        end
+
+        # a leg joining the mosaic — or renegotiating video in or out — changes
+        # how many tiles the layout must show
         follow_auto_layout(conf.uid)
-        Emit.mcu_call(:joined)
 
         {:reply, :ok, state}
 
@@ -1386,13 +1464,13 @@ defmodule Kelix.Mod.Mcu do
 
   # ── admit / join / leave ─────────────────────────────────────────────────────
 
-  defp do_admit(state, domain, req, scenario) do
+  defp do_admit(state, domain, req, scenario, display_name) do
     did = ruri_user(req)
 
     with {:ok, conf} <- did_or_reject(domain, did),
          :ok <- mcu_up(conf),
          :ok <- room_left(conf) do
-      part = new_participant(conf, req, scenario)
+      part = new_participant(conf, req, scenario, display_name)
 
       :ets.insert(
         @conf_table,
@@ -1507,12 +1585,13 @@ defmodule Kelix.Mod.Mcu do
   defp sip_code(:mcu_down), do: 503
   defp sip_code(_reason), do: 500
 
-  defp new_participant(conf, req, scenario) do
+  defp new_participant(conf, req, scenario, display_name) do
     %{
       ref: make_ref(),
       part_id: nil,
       conf_uid: conf.uid,
       name: participant_name(req),
+      display_name: display_name,
       from: from_string(req),
       scenario: scenario,
       conn: nil,
@@ -1536,6 +1615,23 @@ defmodule Kelix.Mod.Mcu do
       _ -> nil
     end
   end
+
+  # Resolve admit/3's `:displayname` option into what the banner will show — or nil
+  # for no banner at all, which is also what an empty string means (the RPC's
+  # "clear" form has nothing to clear at admit time).
+  defp requested_displayname(nil, _req), do: {:ok, nil}
+  defp requested_displayname("", _req), do: {:ok, nil}
+  defp requested_displayname(name, _req) when is_binary(name), do: {:ok, name}
+
+  defp requested_displayname(:auto, req) do
+    case uri_of(Map.get(req, :from)) do
+      %SIP.Uri{displayname: shown} when is_binary(shown) and shown != "" -> {:ok, shown}
+      %SIP.Uri{userpart: user} when is_binary(user) and user != "" -> {:ok, user}
+      _ -> {:ok, nil}
+    end
+  end
+
+  defp requested_displayname(_other, _req), do: {:error, :bad_displayname}
 
   defp uri_of(%SIP.Uri{} = uri), do: uri
 

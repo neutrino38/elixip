@@ -763,6 +763,76 @@ defmodule Kelix.Mod.McuAdminTest do
     end
   end
 
+  # ── admit `:displayname` → SetParticipantDisplayName at attach ────────────────
+
+  describe "admit displayname" do
+    test "`:auto` takes the From display name; the RPC has mosaicId before partId", ctx do
+      from = %SIP.Uri{displayname: "Alice W", userpart: "alice", domain: "phone.example.com"}
+      {conf, part} = join_with(ctx.uid, from, displayname: :auto)
+
+      {:ok, row} = Mcu.participant(part)
+      assert row.display_name == "Alice W"
+
+      # wire order per MCU-API.md §6.5: (confId, mosaicId=-1, partId, name, script=0)
+      assert {"SetParticipantDisplayName", [conf.conf_id, -1, row.part_id, "Alice W", 0]} in TestStub.rpc_calls()
+    end
+
+    test "`:auto` falls back to the From URI's user part", ctx do
+      from = %SIP.Uri{userpart: "alice", domain: "phone.example.com"}
+      {_conf, part} = join_with(ctx.uid, from, displayname: :auto)
+
+      {:ok, row} = Mcu.participant(part)
+      assert row.display_name == "alice"
+    end
+
+    test "a literal string is sent as given", ctx do
+      from = %SIP.Uri{displayname: "Ignored", userpart: "alice", domain: "phone.example.com"}
+      {conf, part} = join_with(ctx.uid, from, displayname: "Salle 4")
+
+      {:ok, row} = Mcu.participant(part)
+
+      assert {"SetParticipantDisplayName", [conf.conf_id, -1, row.part_id, "Salle 4", 0]} in TestStub.rpc_calls()
+    end
+
+    test "no option means no banner RPC at all", ctx do
+      from = %SIP.Uri{userpart: "alice", domain: "phone.example.com"}
+      {_conf, part} = join_with(ctx.uid, from, [])
+
+      {:ok, row} = Mcu.participant(part)
+      assert row.display_name == nil
+      refute Enum.any?(TestStub.rpc_calls(), &match?({"SetParticipantDisplayName", _}, &1))
+    end
+
+    test "anything else is refused before the registry is asked", ctx do
+      {:ok, conf} = Mcu.conference(ctx.uid)
+      assert {:error, :bad_displayname} = Mcu.admit(@domain, invite(conf.did), displayname: 42)
+    end
+  end
+
+  # `join/1` with a caller-controlled From and admit options: admitted, then attached
+  # through the adapter, so the banner RPC of `attach/1` really fires.
+  defp join_with(uid, from, opts) do
+    {:ok, conf} = Mcu.conference(uid)
+
+    req = %{
+      method: :INVITE,
+      ruri: %SIP.Uri{userpart: conf.did, domain: @domain},
+      from: from,
+      to: %SIP.Uri{userpart: conf.did, domain: @domain}
+    }
+
+    {:ok, ^conf, part} = Mcu.admit(@domain, req, opts)
+    {:ok, client} = Adapter.connect("mcu://" <> conf.mcu)
+
+    {:ok, conn} =
+      Adapter.create_peer_connection(client, self(), mcu_participant: part, media: :audio)
+
+    {:ok, _answer} = Adapter.set_remote_offer(conn, @offer)
+    :ok = Mcu.attach(part)
+
+    {conf, part}
+  end
+
   defp invite(did) do
     %{
       method: :INVITE,

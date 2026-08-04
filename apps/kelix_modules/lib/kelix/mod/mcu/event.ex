@@ -14,6 +14,9 @@ defmodule Kelix.Mod.Mcu.Event do
   2. **A rejected call never emits `participant.ringing`**, so a UI can count
      `ringing − joined` as "abandoned before answer" without correcting for 404s
      and 486s.
+  3. **`participant.joined` is emitted once per entry into the mix** — the
+     registry absorbs a repeated `attach/1` (a retransmitted ACK, a re-INVITE
+     renegotiation), so a joined count is a call count, not an ACK count.
 
   `participant.media_connected` / `participant.media_timeout` are declared although
   the server does not emit them before P7 (§16.1-16.2): a consumer written today

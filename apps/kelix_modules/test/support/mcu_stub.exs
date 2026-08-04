@@ -49,6 +49,7 @@ defmodule Kelix.Mcu.TestStub do
     "AddMosaicParticipant" => {:ok, []},
     "SendFPU" => {:ok, []},
     "SetMute" => {:ok, []},
+    "SetParticipantDisplayName" => {:ok, [1]},
     # one `(s i i i i i i i)` row per media, `isReceiving` before `isSending`
     "GetParticipantStatistics" => {:ok, [["audio", 1, 1, 0, 100, 90, 16_000, 14_400]]}
   }

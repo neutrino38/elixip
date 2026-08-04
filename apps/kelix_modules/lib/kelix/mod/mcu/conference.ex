@@ -22,6 +22,8 @@ defmodule Kelix.Mod.Mcu.Conference do
           part_id: non_neg_integer | nil,
           conf_uid: String.t(),
           name: String.t(),
+          # the tile banner admit/3's `:displayname` option asked for, nil for none
+          display_name: String.t() | nil,
           from: String.t() | nil,
           scenario: pid | nil,
           conn: pid | nil,

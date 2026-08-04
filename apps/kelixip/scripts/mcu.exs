@@ -49,6 +49,7 @@ defmodule Kelix.Mcu.Call do
     on_events do
       {:INVITE, req, _trans, dialog_pid} ->
         reply_invite(100, "Trying")
+
         case admit(req, dialog_pid, sip_ctx.domain) do
           {:ok, conf, part} ->
             # The local identity of this leg is the conference itself: it is what an
@@ -118,9 +119,12 @@ defmodule Kelix.Mcu.Call do
   state in_call do
     on_events do
       # The ACK is what puts the participant in the mix: a caller that never ACKs
-      # never enters it, and no RTP leaves the MCU before that (§2, point 2).
+      # never enters it, and no RTP leaves the MCU before that (§2, point 2). Once
+      # in, move to in_conference: the caller re-sends this ACK for every 200 the
+      # transaction layer retransmits (RFC 3261 §13.2.2.4), and those copies must
+      # not re-run the ACK-time sequence.
       {:ACK, _req, _trans, _dlg} ->
-        goto(loop, attach(sip_ctx))
+        goto(in_conference, attach(sip_ctx))
 
       # Re-INVITE / UPDATE: renegotiate on the same participant.
       {:INVITE, _req, _trans, _dlg} ->
@@ -198,6 +202,86 @@ defmodule Kelix.Mcu.Call do
     end
   end
 
+  # The steady state, split from in_call so only the FIRST ACK runs the ACK-time
+  # sequence. Retransmitted ACKs are a normal fact of UDP life — each one used to
+  # re-run attach/1 and re-emit participant.joined per retransmission.
+  state in_conference do
+    on_events do
+      # the retransmission itself: this leg is already in the mix
+      {:ACK, _req, _trans, _dlg} ->
+        goto(loop, "ACK retransmitted; already in the mix")
+
+      # Re-INVITE: renegotiate on the same participant. Answering rewinds the
+      # adapter to answered, and the re-INVITE's own ACK must re-run the ACK-time
+      # sequence on the changed medias — wait for it back in in_call.
+      {:INVITE, _req, _trans, _dlg} ->
+        reply_invite_with_sdp(200,
+          media: :tc,
+          webrtc: :if_offered,
+          on_media_error: &__MODULE__.media_error/1
+        )
+
+        goto(in_call, "re-INVITE")
+
+      # UPDATE renegotiates too but carries no ACK (RFC 3311): its 200 concludes
+      # the offer/answer, so the ACK-time sequence runs right away.
+      {:UPDATE, _req, _trans, _dlg} ->
+        reply_invite_with_sdp(200,
+          media: :tc,
+          webrtc: :if_offered,
+          on_media_error: &__MODULE__.media_error/1
+        )
+
+        goto(loop, attach(sip_ctx))
+
+      # From here on, exactly what in_call handles.
+      {:INFO, req, _trans, dialog_pid} ->
+        reply(dialog_pid, req, 200, "OK", [])
+        goto(loop, request_fpu(sip_ctx, req))
+
+      {:BYE, req, _trans, dialog_pid} ->
+        reply(dialog_pid, req, 200, "OK", [])
+        media_cleanup_ressources()
+        leave(sip_ctx, :bye)
+        scenario_success("BYE")
+
+      {:CANCEL, _req, _trans, _dlg} ->
+        media_cleanup_ressources()
+        leave(sip_ctx, :cancel)
+        scenario_success("cancelled")
+
+      {:mcu_event, :server_disconnected} ->
+        media_cleanup_ressources()
+        leave(sip_ctx, :mcu_lost)
+        send_BYE()
+        goto(hanging_up, "mcu lost")
+
+      {:mcu_event, :fpu_requested} ->
+        send_INFO(__MODULE__.picture_fast_update(),
+          contenttype: "application/media_control+xml"
+        )
+
+        goto(loop, "FPU requested")
+
+      {:mcu_event, _event} ->
+        goto(loop, "mcu event")
+
+      {:dialog_terminated, _dlg, _reason} ->
+        media_cleanup_ressources()
+        leave(sip_ctx, :bye)
+        scenario_success("dialog ended")
+
+      {:scenario_ctl, :shutdown, _reason} ->
+        send_BYE()
+        goto(hanging_up, "shutdown")
+    after
+      # G3 again: the idle backstop must keep running once in the mix.
+      7_200_000 ->
+        send_BYE()
+        goto(hanging_up, "idle timeout")
+    end
+  end
+
   state hanging_up do
     on_events do
       {200, _rsp, _trans, _dlg} ->
@@ -226,7 +310,10 @@ defmodule Kelix.Mcu.Call do
   # retransmit into the void.
 
   defp admit(req, dialog_pid, domain) do
-    case Kelix.Mod.Mcu.admit(domain, req) do
+    # `displayname: :auto` overlays the caller's name on its tile — the From
+    # header's display name, else the From URI's user part. Replace with a string
+    # (or drop the option) in a copy that wants its own naming policy.
+    case Kelix.Mod.Mcu.admit(domain, req, displayname: :auto) do
       {:ok, conf, part} ->
         # name the conference this instance serves, so `kelictl monitor` says WHICH
         SIP.Scenario.Monitor.note_account(conf.did)

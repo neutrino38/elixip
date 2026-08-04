@@ -10,6 +10,8 @@ defmodule Kelix.Mod.McuCallTest do
   """
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias Kelix.Mcu.TestStub
   alias Kelix.Mod.Mcu
   alias Kelix.Mod.Mcu.{Client, Config, Conference}
@@ -351,10 +353,68 @@ defmodule Kelix.Mod.McuCallTest do
       answer_time = TestStub.rpc_order()
       assert answer_time == ["CreateParticipant", "StartReceiving", "SetRTPProperties"]
 
-      # ACK time: codec, sending, and only then the mixer
+      # ACK time: codec, sending, and only then the mixer. The banner comes last:
+      # `mcu.exs` asks for `displayname: :auto`, sent once the leg is in the mix.
       send(pid, {:ACK, %{method: :ACK}, nil, dialog})
       ack_time = wait_for(fn -> non_empty(TestStub.rpc_order()) end)
-      assert ack_time == ["SetAudioCodec", "StartSending", "AddSidebarParticipant"]
+
+      assert ack_time == [
+               "SetAudioCodec",
+               "StartSending",
+               "AddSidebarParticipant",
+               "SetParticipantDisplayName"
+             ]
+    end
+
+    test "a retransmitted ACK does not re-run the ACK-time sequence", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      first = wait_for(fn -> non_empty(TestStub.rpc_order()) end)
+      assert "StartSending" in first
+
+      connected =
+        wait_for(fn -> Enum.find(participants(ctx.uid), &(&1.state == :connected)) end)
+
+      # Over UDP the caller re-sends the ACK for every retransmitted 200
+      # (RFC 3261 §13.2.2.4); the leg must not rejoin the mixer. The INFO
+      # serialises: once it is answered, both ACK copies have been processed,
+      # and the only RPC they left behind is the INFO's own SendFPU.
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      send(pid, {:INFO, media_control_info(), nil, dialog})
+      assert_receive {:replied, 200, "OK", _fields, _req}, 2000
+
+      assert wait_for(fn -> non_empty(TestStub.rpc_order()) end) == ["SendFPU"]
+
+      # still one participant, joined once: the join timestamp did not move
+      [row] = participants(ctx.uid)
+      assert row.state == :connected
+      assert row.joined_at == connected.joined_at
+    end
+
+    test "attach/1 is idempotent: a second attach does not re-emit participant.joined", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+
+      joined_log =
+        capture_log(fn ->
+          send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+          assert wait_for(fn -> Enum.find(participants(ctx.uid), &(&1.state == :connected)) end)
+        end)
+
+      # the channel works: the first join is an event…
+      assert joined_log =~ "participant.joined"
+      [connected] = participants(ctx.uid)
+
+      # …and a script copy that kept re-attaching per ACK is absorbed by the
+      # registry (§11.1, invariant 3): no second event, the join timestamp holds
+      second_log = capture_log(fn -> assert :ok = Mcu.attach(connected) end)
+      refute second_log =~ "participant.joined"
+
+      [row] = participants(ctx.uid)
+      assert row.joined_at == connected.joined_at
     end
 
     test "the leg asks the MCU to latch onto a symmetric NAT", ctx do
@@ -469,6 +529,9 @@ defmodule Kelix.Mod.McuCallTest do
                "StartSending",
                "AddSidebarParticipant",
                "AddMosaicParticipant",
+               # the script's `displayname: :auto` banner, from the scenario process,
+               # before the registry's layout follow-up on `{:joined}`
+               "SetParticipantDisplayName",
                "SetCompositionType"
              ]
     end
@@ -622,8 +685,9 @@ defmodule Kelix.Mod.McuCallTest do
                "StartSending",
                "AddSidebarParticipant",
                "AddMosaicParticipant",
-               # the automatic layout still follows the *video* legs only: a text
-               # leg is not a tile
+               # the script's `displayname: :auto` banner, then the automatic layout,
+               # which still follows the *video* legs only: a text leg is not a tile
+               "SetParticipantDisplayName",
                "SetCompositionType"
              ]
     end
