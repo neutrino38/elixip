@@ -147,5 +147,5 @@ New module: a SIP conference bridge driving the Mendooze MCU over its XML-RPC
 
 ## Dependencies
 
-- (mediaserver 1.12.0)[https://github.com/neutrino38/mediaserver/releases/tag/1.12.0] and above (MCU XML-RPC interface, `natLatch`,
+- [mediaserver 1.12.0](https://github.com/neutrino38/mediaserver/releases/tag/1.12.0) and above (MCU XML-RPC interface, `natLatch`,
   `StartReceiving` returning the announce address).
