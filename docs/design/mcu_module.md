@@ -44,11 +44,12 @@ instance per call, `Kelix.ControlAPI` exposes the module's commands under
    RFC 4103 redundancy (`red`) when the caller offers it. Text is mixed by the
    MCU's own text mixer, which needs no join RPC — the server wires every
    participant into it at `CreateParticipant` — and no layout: a text leg is not
-   a mosaic tile. `text_codecs = []` on a conference turns it off, and its `m=text`
-   section is then declined with port 0.
-5. Plain RTP/AVP, **SDES-SRTP** and **DTLS-SRTP + ICE-lite** call legs (the
-   three transports mcuGold supports), so both SIP phones, text terminals and
-   WebRTC gateways can join.
+   a mosaic tile. Dropping `"text"` from a conference's `medias` turns it off, and
+   its `m=text` section is then declined with port 0.
+5. Plain **RTP/AVP and RTP/AVPF**, **SDES-SRTP** (`RTP/SAVP(F)`) and **DTLS-SRTP +
+   ICE-lite** (`UDP/TLS/RTP/SAVPF`) call legs, so SIP phones, text terminals and
+   WebRTC gateways can join. The three cases are classified and traced explicitly
+   (§6.3.1) rather than falling out of per-attribute handling.
 
 ### 1.2 Explicitly out of scope
 
@@ -197,7 +198,7 @@ there, with the server file each was read from.
 
 | Method | Params | Returns |
 |---|---|---|
-| `StartReceiving` | `(i confId, i partId, i media, S rtpMap, i role[, i proto])` | `(i recPort, s announcedIp)` — the address to advertise for this media (§16.5); `returnVal[0]` stays the port |
+| `StartReceiving` | `(i confId, i partId, i media, S rtpMap, i role[, i proto[, S offer]])` | `(i recPort, s announcedIp[, S fmtpByPt])` — the address to advertise for this media (§16.5); `returnVal[0]` stays the port. `offer` and `fmtpByPt` are the delegated negotiation of **S3/P8** (§16.3) |
 | `StopReceiving` | `(i confId, i partId, i media[, i role])` | — |
 | `StartSending` | `(i confId, i partId, i media, s sendIp, i sendPort, S rtpMap[, i role])` | — |
 | `StopSending` | `(i confId, i partId, i media[, i role])` | — |
@@ -210,10 +211,28 @@ there, with the server file each was read from.
 Medooze codec constant: `%{"96" => 99, "0" => 0}`. Same shape as the JSR-309
 `rtpMap` already produced by `MediaServer.Mendooze.Sdp.local_rtp_map/3`.
 
-`SetRTPProperties` keys observed in mcuGold and supported server-side:
-`rtcp-mux`, `secure`, `ssrc`, `cname`, `tmmbr`, `useNACK`, `useFEC`,
-`h264.profile-level-id`, plus one entry per RTP header extension
-(`<extension-uri> => <id>`).
+`SetRTPProperties` keys **actually recognised** by the server
+(`RTPSession::SetProperties`, `mcu/src/rtpsession.cpp:486-561` — anything else is
+answered with an `Unknown RTP property` log line and dropped):
+
+| Group | Keys |
+|---|---|
+| Transport | `rtcp-mux`, `natLatch`, `ssrc`, `cname`, `rtpTimeout` |
+| RTCP feedback | `useNACK`, `useFEC`, `tmmbr`, `useRtcpFIR`, `useExtFIR`, `useOriSeqNum` |
+| Header extensions | `urn:ietf:params:rtp-hdrext:toffset`, `http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time` |
+| Codec | anything prefixed `codec.` — kept by `VideoStream`/`AudioStream::SetRTPProperties` into the stream's own property map, and *ignored* by `RTPSession` |
+
+Two corrections to what this table used to claim. **`secure` is not a recognised
+key** — it was listed here from mcuGold's call sites, but the server has no such
+property: it is a no-op once the SDES or DTLS material is configured, which is
+why the adapter deliberately does not send it. And **`h264.profile-level-id`
+unprefixed goes nowhere**: only `codec.`-prefixed keys survive
+`VideoStream::SetRTPProperties`, the unprefixed one falls through to
+`RTPSession`, which rejects it (the incident recorded in §6.3 rule 9).
+
+The feedback keys are what make the AVPF cases of §6.3.1 more than an SDP
+attribute: `useNACK`, `useRtcpFIR`/`useExtFIR` and `tmmbr` are the server-side
+switches behind `a=rtcp-fb: … nack`, `ccm fir` and `ccm tmmbr`.
 
 ### 3.5 Security
 
@@ -264,7 +283,7 @@ design must work without that, and get better with it.
 
 | # | Gap | Consequence | Closed by |
 |---|---|---|---|
-| G1 | `StartReceiving` returns **only the local port** — no accepted-PT/fmtp struct (JSR-309 returns both since the delegation work) | the SDP answer is built **entirely by kelixip**: no server-side codec arbitration. `MediaServer.Mendooze.Sdp.accepted_pts/2` and friends are *not* usable; `parse/1`, `negotiate/3`, `build/1`, `local_rtp_map/3` are | **S3 / P8** (§16.3) |
+| G1 | `StartReceiving` returns the port and the announced address, but **no accepted-PT/fmtp struct**, and there is no way to hand the server the peer's `a=fmtp` either — the conference API has neither the enriched return of JSR-309 nor its `codec.<x>.fmtp` intake | the SDP answer is arbitrated **entirely by kelixip**, from its own codec name lists, and the fmtp it advertises is a guess about what the mixer will emit. `MediaServer.Mendooze.Sdp.accepted_pts/2` and friends are *not* usable; `parse/1`, `negotiate/3`, `build/1`, `local_rtp_map/3` are | **S3 / P8** (§16.3) |
 | G2 | No `GetMediaCandidates` equivalent | ~~the media IP for `c=` and the ICE host candidates come from **configuration** (`rtp_ip` / `public_ip`), exactly like mcuGold's `MediaMixer.getIp()`~~ — **closed**: `StartReceiving` now returns the address to announce next to the port, so kelixip holds none | **S4** (§16.5) |
 | G3 | No `EndpointStartRTPTimeout` equivalent | **no media watchdog**. A silent leg is only detected by SIP (session timers / idle timeout in the script) | **S1 / P7** (§16.1) |
 | G4 | No per-participant "media started" event | `:ice_connected` cannot be emitted by the adapter. Scripts must not wait for it | **S2 / P7** (§16.2) |
@@ -482,14 +501,15 @@ sequenceDiagram
     A->>MCU: CreateParticipant(confId, name, 0, 0, 0)
     MCU-->>A: partId
     S->>A: set_remote_offer(offer)     %% reply_invite_with_sdp(200)
-    A->>A: parse offer, negotiate codecs per media
+    A->>A: parse offer, classify transport case (§6.3.1)
     loop per media (audio, video, text)
         A->>MCU: SetLocalCryptoSDES / SetLocalSTUNCredentials   (if secure / ICE)
-        A->>MCU: StartReceiving(confId, partId, media, rtpInMap, 0, proto)
-        MCU-->>A: recPort
+        A->>MCU: SetRTPProperties(codec.*)                 %% codec INTENT, before
+        A->>MCU: StartReceiving(confId, partId, media, rtpInMap, 0, proto, offerFmtp)
+        MCU-->>A: recPort, announcedIp, fmtpByPt   %% the negotiation verdict
         A->>MCU: SetRemoteCryptoDTLS | SetRemoteCryptoSDES      (if secure)
         A->>MCU: SetRemoteSTUNCredentials                       (if ICE)
-        A->>MCU: SetRTPProperties(props)
+        A->>MCU: SetRTPProperties(transport keys)          %% rtcp-mux, natLatch, fb
     end
     A-->>S: SDP answer
     S->>UA: 200 OK (SDP answer)
@@ -514,6 +534,20 @@ sequenceDiagram
     end
 ```
 
+**S3 leaves the RPC order alone** (decision 11, which superseded decision 8 the same
+day). An earlier draft split `SetRTPProperties` in two so the negotiator would see
+the conference's codec intent before negotiating. That split has no content: the
+adapter sends **no `codec.*` property at all** — `merge_video_props/3` has been a
+no-op since the 2026-08-01 correction — because the media server owns its own decode
+capability and the controller declares none.
+
+What the negotiation needs from the peer travels in `StartReceiving`'s **`offer`**
+parameter, so the remote half arrives with the call that needs it and cannot be stale
+from a previous re-INVITE. `SetVideoCodec` keeps carrying the codec **choice** plus
+encoder tuning at the ACK, because the chosen codec does not exist until the
+negotiation has run — asking for it earlier is circular. Two things, two moments,
+and no third.
+
 ### 6.3 SDP rules (answerer side)
 
 kelixip is the answerer for every leg in this scope, which removes most of the
@@ -523,19 +557,48 @@ hard cases:
    for every accepted codec. Both `rtpMap` structs (`StartReceiving` and
    `StartSending`) are therefore keyed with the **offered** PTs — no local
    renumbering, unlike the UAC path in `MediaServer.Mendooze`.
-2. **Codec selection.** Intersect the conference's `codecs` list (in conference
-   priority order) with the offer; the first match wins per media. An empty
-   intersection for audio ⇒ `488 Not Acceptable Here`; for video ⇒ the video
-   `m=` line is answered with **port 0** and the call proceeds audio-only
-   (mcuGold behaviour, and `Mendooze.Sdp.build/1` already supports the
-   `reject_fmt` media spec).
+2. **Codec selection is the media server's** (S3/P8, §16.3). kelixip does not
+   arbitrate codecs and holds no per-conference codec list: **the offer is the
+   menu**. It proposes to `StartReceiving` every payload type the offer contains
+   that it can name (§6.3.2), passes the offer's `a=fmtp` along, and the server
+   answers with the payload types it actually accepted and the fmtp it will
+   actually use. The answer is built from that return, verbatim.
+
+   **Per-media outcome.** Negotiation is per `m=` line, and an empty accepted set
+   means that media is declined — the `m=` line is answered with **port 0**
+   (`Mendooze.Sdp.build/1` already supports the `reject_fmt` media spec) and the
+   call proceeds on whatever is left. `488 Not Acceptable Here` is answered only
+   when **every** offered media came back empty, i.e. there is nothing to
+   establish at all.
+
+   > **This lifts the audio-mandatory guard** (`ensure_audio/1`, which answered
+   > `488` on an empty *audio* intersection whatever video did). Decided
+   > 2026-08-05: with the server as the arbiter, "no audio" is no longer evidence
+   > of a misconfiguration worth refusing the call over, and a video-only leg —
+   > a display wall, a recording-only viewer — is a legitimate conference
+   > participant. The visible consequence is that a leg with no audio now gets a
+   > `200 OK` where it used to get a `488`; it joins the mosaic and not the
+   > audio mixer.
 3. **`c=` line and ICE candidates** carry the address `StartReceiving` returned
    for this leg (§16.5, G2 closed) — the media server's own announced address,
    which is the only party that knows it. One host candidate for RTP, plus one
    for RTCP when `rtcp-mux` was not offered (component ids 1 and 2, as mcuGold).
-4. **Transport line.** `RTP/AVP`, `RTP/SAVP` (SDES) or `UDP/TLS/RTP/SAVP`
-   (DTLS), `F` appended when RTCP feedback was offered — the same
-   `protocol_for/1` logic already in `Mendooze.Sdp`.
+4. **Transport line.** The offered profile is **mirrored**, not recomputed — see
+   §6.3.1, which is where the three cases this module must serve (plain RTP,
+   SDES-SRTP, DTLS-SRTP) are pinned down together with the RTCP-feedback
+   attributes each one carries.
+
+   > **Correction.** This rule used to say "the same `protocol_for/1` logic
+   > already in `Mendooze.Sdp`". That was wrong on two counts, and the mistake is
+   > worth recording because it is the kind that produces a `200 OK` no one
+   > refuses and media no one receives. `Mendooze.Sdp.protocol_for/1`
+   > (`MediaServerMendoozeSdp.ex:419-423`) derives the profile from the **crypto
+   > alone** — `:none → RTP/AVP`, `{:sdes,…} → RTP/SAVP`,
+   > `{:dtls,…} → UDP/TLS/RTP/SAVPF` — so it never appends `F` for a plain
+   > `RTP/AVPF` offer and never answers `RTP/SAVPF` to an SDES offer that asked
+   > for feedback. The MCU adapter never used it: it mirrors `desc.protocol`
+   > (`conn.ex:745`), which is the correct answerer behaviour. §6.3.1 states the
+   > rule the MCU actually follows, and §19 records the JSR-309 gap.
 5. **ICE-lite.** When the offer carries ICE credentials we answer `a=ice-lite`
    with our generated ufrag/pwd. We never gather reflexive candidates.
 6. **DTLS.** `a=setup:` mirrors an offer that already committed (`active` →
@@ -560,13 +623,37 @@ hard cases:
 7. **`a=sendrecv`** is the direction for a mixed participant; a `recvonly`
    offer is answered `sendonly` and vice-versa (`reverse_direction/1`).
 8. **Bandwidth.** `b=AS:` on video is `min(offered, conference video.bitrate)`.
-9. **H.264 profile.** `profile-level-id` is reflected from the offer when it
-   states one, and is otherwise **the conference's own** (`video_fmtp`, default
-   `profile-level-id=42e01f;packetization-mode=1`) rather than absent: silence
-   means RFC 6184's default — Baseline level 1.0 — to the peer, while the mixer
-   encodes HD720p. The value the answer states is also what the encoder is
-   configured with, and the two travel from a single decision taken at answer
-   time (`neg.answered_profile_level_id`).
+9. **H.264 profile — decided by the server** (S3/P8). `profile-level-id`,
+   `packetization-mode` and `level-asymmetry-allowed` are whatever the fmtp string
+   `StartReceiving` returned for the H.264 payload type says they are, copied into
+   the answer verbatim. The offer's own fmtp reaches the negotiator through the
+   `offer` parameter (§16.3), so the whole decision is taken by the party that
+   will actually encode.
+
+   The rule it applies is **not** "reflect the caller" but RFC 6184 §8.2.2, whose
+   two halves this document used to conflate (§16.3.4 decision (b)): what we
+   *announce* is what **we** can decode — same profile as the offer, our own level
+   when both sides sent `level-asymmetry-allowed=1`, the offer's level otherwise —
+   while what bounds **our encoder** is the level the *peer* declared it can
+   decode. On an offer without `level-asymmetry-allowed`, the two coincide and the
+   answer is the reflection this rule used to prescribe; it is on WebRTC and
+   gateway legs that they diverge.
+
+   kelixip keeps exactly one job here, and it is a **relay, not a decision**: the
+   params the server returned are echoed back to it in `SetVideoCodec`'s
+   properties map at ACK time (`codec.h264.profile-level-id=…`), because that call
+   *replaces* the stream's property map and would otherwise drop what the
+   negotiation established. Announced and encoded therefore remain the same
+   string by construction — the invariant the old rule protected with a local
+   decision, now protected by copying the server's.
+
+   > **Before S3** this rule read: reflect the offer's `profile-level-id` when it
+   > states one, else announce the conference's own `video_fmtp` (default
+   > `profile-level-id=42e01f;packetization-mode=1`) rather than nothing, since
+   > silence means RFC 6184's Baseline level 1.0 to the peer while the mixer
+   > encodes HD720p. That reasoning was right and is now the *server's* to apply
+   > (`H264Encoder::GetFmtpParams` derives it from the encoder's own properties);
+   > `video_fmtp` goes away with the codec lists (§8.4).
 
    > **Where it is pushed, and why not where it was.** It goes in
    > `SetVideoCodec`'s properties map, *not* `SetRTPProperties`. The module used
@@ -580,32 +667,109 @@ hard cases:
    > `H264Encoder: … profile-level-id 42e01f` where it used to log its own
    > default `42801F`.
 
-   This is L4 in miniature — kelixip decides what the MCU encodes — and §16.3
-   (S3/P8) removes the guess by having the server report what it accepted.
-10. **T.140 redundancy.** `t140` and `red` are answered like any other codec, in
-   the offerer's numbering. When both are answered, `red` carries the RFC 4103
-   fmtp naming the T.140 payload type — primary plus two redundant,
-   `a=fmtp:<red> <t140>/<t140>/<t140>`, the caller's payload types. It is emitted
-   **only** then: `red` quoting a payload type absent from the answer is not
-   decodable, which is the same reading the framework's own offer builder applies
-   (`Sdp.add_red_fmtp/5`). Preference comes from the conference's `text_codecs`,
-   `T140RED` first by default, so a caller offering redundancy gets it — on a lossy
-   link a lost packet is a lost character.
+   Rule 9 was **L4 in miniature** — kelixip deciding what the MCU encodes. S3
+   settles it in the only place that can be right about it.
+10. **T.140 redundancy — the server's fmtp too.** `t140` and `red` are answered
+   like any other codec, in the offerer's numbering, and when both are accepted
+   `red` carries the RFC 4103 fmtp naming the T.140 payload type — primary plus
+   two redundant, `a=fmtp:<red> <t140>/<t140>/<t140>`. That string now comes from
+   the server, which already builds it correctly and with the same guard kelixip
+   applied: `CodecNegotiator::Negotiate` emits the T140RED fmtp **only** when a
+   T140 companion is itself proposed and supported, and an empty fmtp otherwise
+   (`negotiator.cpp:79-93,119-122`) — `red` quoting a payload type absent from the
+   answer is not decodable. `Sdp.add_red_fmtp/5` and the adapter's own
+   `red_fmtp/2` are therefore dead code on the delegated path. Preference is no
+   longer configured (`text_codecs` is gone, §8.4): it is the **caller's** own
+   order, which is what an answerer should honour anyway.
 
-The implementation reuses `MediaServer.Mendooze.Sdp` for `parse/1`,
-`negotiate/3`, `build/1`, `local_rtp_map/3`, `answer_rtpmaps/2`,
-`host_candidates/3`, `negotiate_bandwidth/2` and `reverse_direction/1`, through the
-neutral alias **`MediaServer.SdpTools`** — landed as recommended, a rename with no
-move, so the MCU adapter does not claim a dependency on the JSR-309 API whose module
-they happen to live in.
+The implementation reuses `MediaServer.Mendooze.Sdp` for `parse/1`, `build/1`,
+`local_rtp_map/3`, `answer_rtpmaps/2`, `host_candidates/3`,
+`negotiate_bandwidth/2` and `reverse_direction/1`, through the neutral alias
+**`MediaServer.SdpTools`** — a rename with no move, so the MCU adapter does not
+claim a dependency on the JSR-309 API whose module they happen to live in. S3
+**adds** `accepted_pts/2`, `code_rtpmap/2` and `restrict_send_map/3` to that
+re-export (the module currently withholds them, saying in as many words that "the
+MCU API returns no accepted-PT struct yet") and **removes** `negotiate/3` from the
+MCU's usage: intersecting codec lists is exactly the job that moves to the server.
 
-`parse/1` gained one field for this work: **`fmtp`**, the offer's `a=fmtp` lines as
-parsed structs per payload type. It is what lets the answerer reflect H.264's
-`profile-level-id` (and push it to the encoder as `h264.profile-level-id`, §3.4)
-instead of guessing — the difference between two video phones that see each other and
-two that negotiate successfully and decode nothing. Structs rather than raw strings on
-purpose: an answerer must reflect `profile-level-id` and must **not** reflect
-`sprop-parameter-sets`, which describes the offerer's own encoder.
+`parse/1` needs one new field for this work. It already exposes **`fmtp`** as
+parsed structs per payload type — the right shape for an answerer that must reflect
+`profile-level-id` and must *not* reflect `sprop-parameter-sets`, which describes
+the offerer's own encoder. But S3 does not reflect anything locally: it
+**forwards** the offer's fmtp to the server, and forwarding a re-serialised struct
+would silently drop every parameter ExSDP does not model. So `parse/1` also returns
+**`fmtp_raw: %{pt => String.t()}`**, the parameter string exactly as it arrived,
+and that is what travels in the `offer` parameter of `StartReceiving`. Two
+representations of one input, each with one job: `fmtp` to reason about, `fmtp_raw`
+to relay.
+
+### 6.3.1 The three transport cases, named and traced
+
+The module must serve three kinds of caller, and they differ in more than a
+profile string. They were being handled *incidentally* — the code did roughly the
+right thing per attribute without ever naming the case — which is why an operator
+reading a log could not tell which one a leg took. Each leg is now **classified
+once**, at answer time, and the classification is logged.
+
+| Case | Recognised by | Answered profile | RTCP feedback | Server calls |
+|---|---|---|---|---|
+| **`:rtp`** — plain SIP | no `a=crypto`, no `a=fingerprint` | mirror: `RTP/AVP` or `RTP/AVPF` | AVPF only | — |
+| **`:sdes`** — SIP with SRTP keys in the SDP (RFC 4568) | `a=crypto` present, no `a=fingerprint` | mirror: `RTP/SAVP` or `RTP/SAVPF` | AVPF only | `SetLocalCryptoSDES` + `SetRemoteCryptoSDES` |
+| **`:dtls`** — WebRTC | `a=fingerprint` present (whatever `a=crypto` says) | mirror: `UDP/TLS/RTP/SAVPF` | always | `GetLocalCryptoDTLSFingerprint` (cached) + `SetRemoteCryptoDTLS`, plus `Set{Local,Remote}STUNCredentials` when ICE is offered |
+
+Rules that hold across all three:
+
+1. **The profile is mirrored, never recomputed.** RFC 3264 §6 leaves an answerer
+   no choice: the answer's `m=` line must carry the transport the offer named.
+   Mirroring also gets `RTP/AVPF` and `RTP/SAVPF` right for free, which deriving
+   the profile from the crypto cannot (§6.3 rule 4).
+2. **`a=fingerprint` wins over `a=crypto`.** A browser or gateway that offers both
+   is offering DTLS-SRTP; picking SDES because its attribute parsed first would
+   negotiate a key exchange the peer never completes. This is what the adapter
+   already does — DTLS is looked for across all medias first — and it is now
+   stated as a rule rather than left as an ordering accident.
+3. **Feedback attributes are emitted only under an AVPF profile.** `a=rtcp-fb`
+   under `RTP/AVP` is not just useless, it is RFC 4585 §4 non-conformance: the
+   attribute is defined for the feedback profile. The set answered is the
+   **intersection** of what the offer asked for with what this server can do —
+   `nack`, `ccm fir`, `ccm tmmbr` — and never a fixed list, so a caller asking for
+   nothing gets nothing back.
+4. **What is announced is what is switched on.** Each answered feedback type has
+   its `SetRTPProperties` counterpart (§3.4), and they travel together:
+   `nack → useNACK`, `ccm fir → useRtcpFIR`, `ccm tmmbr → tmmbr`. Announcing
+   `ccm fir` while never asking the server for RTCP FIR is the same class of bug
+   as rule 9's unprefixed property — a capability the peer is told it has and that
+   nothing implements.
+5. **`goog-remb` is not answered.** It has no server-side switch (`tmmbr` is the
+   `ccm` one), and announcing congestion-control feedback the mixer never sends
+   invites the peer to wait for it.
+
+**The trace.** One `Logger.info` per leg, at answer time, naming the case and what
+came with it — the line an operator greps when a WebRTC leg is silent:
+
+```
+[info] mcu: leg conf=42 part=7 case=:dtls profile=UDP/TLS/RTP/SAVPF \
+       medias=[audio: 2 pt, video: 1 pt, text: declined] \
+       ice=yes rtcp-mux=yes setup=passive fb=[nack, ccm fir] negotiated-by=server
+```
+
+`negotiated-by=server` versus `negotiated-by=local` is what distinguishes a
+delegated negotiation from the compatibility fallback of §16.3, and it is
+deliberately on the same line: "which of my two code paths ran" is the first
+question any codec complaint raises.
+
+### 6.3.2 What kelixip still owns
+
+Delegation is not abdication. After S3 the answer is assembled from the server's
+verdict, but these remain kelixip's, and it is worth being explicit about why:
+
+| Owned by kelixip | Why it cannot be the server's |
+|---|---|
+| Which `m=` sections are answered at all (`medias`, §8.4) | a deployment policy — audio-only conferences are a product decision, not a codec capability |
+| Codec **name → Medooze constant** mapping | the server's API speaks integer codec ids; something must turn `H264` into `99`. An offered codec absent from that table cannot even be proposed, and is logged — this is the one residual local filter, and it is a vocabulary, not a policy |
+| The RTP profile, ICE, DTLS role resolution, `c=` line assembly, direction, `b=AS:` | SDP-level answerer duties; the server has no view of the SDP |
+| The `a=rtcp-fb` intersection and its `SetRTPProperties` counterparts | RFC 4585 semantics, and the server has no feedback-capability query to delegate to |
+| `488` versus per-media port 0 | a SIP response-code decision (§6.5) |
 
 ### 6.4 In-call events
 
@@ -617,7 +781,7 @@ purpose: an answerer must reflect `profile-level-id` and must **not** reflect
 | re-INVITE with hold (`a=sendonly`/`inactive`, or `c=0.0.0.0`) | `StopSending` on the held medias; the participant stays in the mix (muted upstream), no mosaic change. From P7: **disarm the watchdog** on those medias (`StartRTPTimeout(…, 0)`), else a legitimate hold reads as a dead leg |
 | `CANCEL` | the IST answers 487; script tears the participant down |
 | Idle timeout (script `after`) | BYE + teardown; **today the only protection against a dead leg** (G3) — from P7 it becomes the last resort behind the RTP watchdog |
-| MCU event type `3` (media timeout) — **P7**, §16.1 | `{:mcu_event, :media_timeout, media}` → BYE + teardown, `participant.left` with `reason: :media_timeout` |
+| MCU event type `3` (media timeout) — **P7**, §16.1 | per-media `participant.media_timeout` for the operator view, **always**; the scenario is told — and BYEs, `leave(:media_timeout)` — only once **every** watched media is silent (§16.1, the AND). Event `4` on a media clears its flag |
 | MCU event type `4` (media connected) — **P7**, §16.2 | `{:ms_event, conn, :ice_connected}` (behaviour-conformant) → optional mosaic join on real video instead of at ACK time |
 
 ### 6.5 SIP response mapping
@@ -627,7 +791,8 @@ purpose: an answerer must reflect `profile-level-id` and must **not** reflect
 | DID matches no conference | `404 Not Found` |
 | Conference full (`max_participants`) | `486 Busy Here` (mcuGold answers `603`; `486` is the correct in-dialog semantics for a full resource) |
 | Node/domain call quota reached | `503` — existing `InstancePool` behaviour, untouched |
-| No codec in common (audio) | `488 Not Acceptable Here` |
+| No codec accepted on **any** offered media (§6.3 rule 2) | `488 Not Acceptable Here` |
+| No codec accepted on *some* media | not a failure: that `m=` line is answered with port 0 |
 | MCU unreachable / RPC error | `500 Server Internal Error` + `Retry-After` when the MCU is marked down |
 | Conference exists but its MCU is down | `503 Service Unavailable` |
 | Offer unparsable | `400 Bad Request` |
@@ -839,7 +1004,7 @@ receives and what `kelictl mcu <id>` names.
 
 | Command id | Method + path | rw | Args | Result |
 |---|---|---|---|---|
-| `conference.create` | `POST <base>/conferences` | w | `domain`, `name`, opt. `did` (allocated when absent), `mcu`, `vad`, `rate`, `audio_codecs`, `video_codecs`, `video`, `layout`, `max_participants`, `destroy_when_empty` | `201` + `Location: <base>/conferences/<uid>`, body `{uid, did, conf_id, mcu}` |
+| `conference.create` | `POST <base>/conferences` | w | `domain`, `name`, opt. `did` (allocated when absent), `mcu`, `vad`, `rate`, `medias`, `dtmf`, `video`, `layout`, `max_participants`, `destroy_when_empty` (the codec lists are gone — §8.4) | `201` + `Location: <base>/conferences/<uid>`, body `{uid, did, conf_id, mcu}` |
 | `conference.list` | `GET <base>/conferences` | r | opt. `domain` (query) | `[{uid, did, name, mcu, participants, created_at}]` |
 | `conference.show` | `GET <base>/conferences/:uid` | r | `uid` | conference + participants |
 | `conference.update` | `PUT` (or `PATCH`) `<base>/conferences/:uid` | w | `uid` + any subset of `name`, `vad`, `rate`, `layout`, `max_participants`, `video`, `destroy_when_empty` (the enums by name, §8.3.7) | `{uid, changed: [...]}` |
@@ -1406,14 +1571,14 @@ vad                 = "basic"        # none | basic | full  (or 0 | 1 | 2)
 # (`PipeAudioInput`/`PipeAudioOutput`, libswresample), so a wideband mixer costs
 # a narrowband participant nothing but the transrating.
 rate                = 32000
-audio_codecs        = ["OPUS", "G722", "PCMA", "PCMU", "TELEPHONE-EVENT"]
-video_codecs        = ["H264"]
-# T.140 real-time text. Order is preference, so redundancy is used when the caller
-# offers it; `[]` turns text off and its m= section is declined with port 0.
-text_codecs         = ["T140RED", "T140"]
-# H.264 profile announced when the offer states none, and imposed on the encoder.
-# `""` announces nothing (the pre-2026-08 behaviour). Goes away with S3/P8.
-video_fmtp          = "profile-level-id=42e01f;packetization-mode=1"
+# Which m= sections this conference answers at all. Codecs are NOT listed: the media
+# server arbitrates them (§6.3 rule 2, S3/P8). Dropping a media here declines its
+# m= section with port 0 — `medias = ["audio"]` is an audio-only conference, and
+# omitting "text" is what `text_codecs = []` used to mean.
+medias              = ["audio", "video", "text"]
+# telephone-event (RFC 4733). A policy switch, not a codec list: when false the DTMF
+# payload type is dropped from what is proposed, so the server never accepts it.
+dtmf                = true
 max_participants    = 20
 destroy_when_empty  = false
 auto_layout         = true
@@ -1442,6 +1607,33 @@ record_dir          = "/var/lib/kelixip/rec"
 image_dir           = "/var/lib/kelixip/img"
 logo_file           = "ives.png"     # drawn in every empty mosaic slot
 ```
+
+#### Keys S3/P8 removes, and what happens to a config that still has them
+
+`audio_codecs`, `video_codecs`, `text_codecs` and `video_fmtp` **are deleted** —
+from `[module.mcu]`, from `conference.create` / `conference.update`, from the
+`Conference` struct, and from the CLI/REST argument lists. With the server
+arbitrating codecs there is nothing for them to mean, and keeping them as
+"preferences" would be worse than removing them: an operator would list a codec,
+watch the server ignore it, and have no way to tell whether the list or the mixer
+was at fault. `Config.validate_codecs/2` goes with them, and with it the codec
+vocabulary the module maintained in parallel with the server's.
+
+Three consequences that need a home rather than a silent drop:
+
+1. **`text_codecs = []` was the only way to turn text off.** Its replacement is
+   `medias`, which says the same thing for all three medias instead of encoding it
+   in an empty codec list. `medias = ["audio", "video"]` is the migration.
+2. **`audio_codecs` doubled as the DTMF switch** (`TELEPHONE-EVENT` in the list).
+   It is promoted to its own boolean `dtmf`, which the config block already had
+   internally — the switch survives, the list does not.
+3. **A deployed `config.toml` still carries the old keys.** They are
+   **accepted and ignored for one release**, each with a `Logger.warning` naming
+   its replacement, then rejected. Refusing them outright would turn an upgrade
+   into a node that will not boot, and this module ships as an RPM installed
+   next to a config file nobody edits during the upgrade. The same tolerance
+   applies to `conference.create` arguments, which come from scripts we do not
+   own — there they are ignored with a warning and never a `400`.
 
 ### The media servers: `[mediaserver.pool.*]`, and only there
 
@@ -1650,7 +1842,7 @@ observations the script has no use for.
 | L1 | No media inactivity watchdog: a leg whose RTP stops is only detected by SIP | G3 | **P7** (§16.1) |
 | L2 | No `:ice_connected` notification; scripts cannot gate on media flowing | G4 | **P7** (§16.2) |
 | L3 | No trickle ICE | G5 | not planned |
-| L4 | Codec arbitration is done by kelixip, not the media server, so an fmtp subtlety the MCU dislikes surfaces as one-way media rather than a negotiation failure. Narrowed 2026-08-01: the H.264 profile is now stated in every answer and imposed on the encoder (§6.3 rule 9), so the two at least agree — but it is still kelixip that decides | G1 | **P8** (§16.3) |
+| L4 | Codec arbitration is done by kelixip, not the media server, so an fmtp subtlety the MCU dislikes surfaces as one-way media rather than a negotiation failure. Narrowed 2026-08-01: the H.264 profile is now stated in every answer and imposed on the encoder (§6.3 rule 9), so the two at least agree — but it is still kelixip that decides, from a codec list an operator maintains in parallel with the server's real capabilities | G1 | **P8** (§16.3), which deletes the list rather than syncing it |
 | L5 | Conferences do not survive a kelixip restart | §1.3 | not planned (§15.1) |
 | L6 | No outbound calls (dial-out into a conference) | needs B2BUA legs | not planned (§15.1) |
 | L7 | A live participant's video profile is not renegotiated when the conference profile changes | §8.3 |
@@ -1677,9 +1869,16 @@ observations the script has no use for.
 | Integration | `mcu.exs` driven by the existing scenario test harness with the mocked client: 404 on unknown DID, 486 when full, 488 with no common codec, full join/leave, ACK-less caller (no mixer join), CANCEL before answer, scenario crash ⇒ participant reaped |
 | Integration, two legs | two `elixipp` UAC scenarios joining the same conference against a **real** mediaserver, tagged `:live`, asserting `GetParticipantStatistics` shows RTP in both directions |
 | Manual | one SIP phone + one WebRTC gateway leg in the same conference, checking audio mix and the 1+1 mosaic |
-| P7, integration | mocked event queue injecting event `3` ⇒ the script BYEs and the slot is freed; event `4` ⇒ `:ice_connected` reaches the scenario; **the watchdog is armed after the 200 OK and never on text**; a hold re-INVITE disarms it (no false timeout while on hold) |
+| P7, unit ✔ | the RPC-order tests of §6.2 assert the arming: one `StartRTPTimeout` per receiving media at the ACK, and **two on a three-media leg** — text is never armed. The AND has its own four: one silent media is reported but does not hang up (and the `silent` flag is recorded), the last one does, a media coming back **clears** its flag so a later timeout on another media is not fatal, and an audio-only leg hangs up on its single timeout. Hold has three, pinning the criterion rather than the word: an `inactive` re-INVITE disarms both medias, a `sendonly` one leaves them armed (the holder still sends music-on-hold), and resuming re-arms |
 | P7, `:live` | a real leg whose network is cut is reaped within `rtp_timeout_ms`, and a leg that answers but never sends media is reaped too (the "answered, no media" case a SIP-only timeout never catches) |
-| P8 | the RPC-order test is **updated**: `SetRTPProperties(codec.*)` before `StartReceiving`, transport keys after. Answer construction from a server-returned `fmtpByPt`, including the two boundary cases of the contract: an accepted PT with an empty fmtp is advertised, an absent PT is not |
+| P8a, unit ✔ | the RPC order is **unchanged** (decision 11): `StartReceiving` gains the `offer` struct and returns three elements, and that is all. Tests pin the arguments (`offer == %{"fmtp" => …}`, the peer's parameters verbatim) and the answer built from the verdict. Answer construction from a server-returned `fmtpByPt`, including the two boundary cases of the contract — an accepted PT with an **empty** fmtp is advertised with an `a=rtpmap` and no `a=fmtp`, an **absent** PT is not advertised at all. The fmtp string reaches the answer **byte-for-byte** (round-trip parse), and `fmtp_raw` forwards a parameter ExSDP does not model without losing it |
+| P8, unit | per-media outcomes: one empty media ⇒ that `m=` line at port 0 and a `200 OK`; **all** medias empty ⇒ `488`; a video-only leg (empty audio) is now accepted and joins the mosaic but not the audio mixer — the test that pins the lifted `ensure_audio` guard |
+| P8, unit | the **fallback**: a stub returning `[port, ip]` with no third element reproduces the pre-S3 answer byte-for-byte, and logs `negotiated-by=local`. This is the rolling-upgrade path, so it is a first-class test and not an afterthought |
+| P8, unit | the three transport cases of §6.3.1 against captured offers: `RTP/AVP`, `RTP/AVPF`, `RTP/SAVP` + `a=crypto`, `RTP/SAVPF` + `a=crypto`, and `UDP/TLS/RTP/SAVPF` + `a=fingerprint`. Each asserts the mirrored profile, the classification in the trace, the `a=rtcp-fb` set as the **intersection** with the offer (a caller asking for nothing gets nothing, `goog-remb` is never answered), and the matching `SetRTPProperties` switches (`nack→useNACK`, `ccm fir→useRtcpFIR`, `ccm tmmbr→tmmbr`). Plus the precedence case: an offer carrying **both** `a=crypto` and `a=fingerprint` is classified `:dtls` |
+| P8, config | the removed keys (§8.4) are accepted with a warning naming their replacement and change nothing; `medias` declines the medias it omits; `dtmf = false` drops the telephone-event PT from what is proposed |
+| P8c, unit (server) | the RFC 6184 §8.2.2 rules of §16.3.4 (b), against the negotiator directly: the answer keeps the **offer's profile**; with `level-asymmetry-allowed=1` on both sides the announced level is **ours**; without it, the **offer's** level — the case that must keep producing today's byte-for-byte answer for a plain SIP handset; the encoder is bound to `min(ours, the peer's)`; `sprop-parameter-sets` is neither reflected nor emitted |
+| P8c, unit (server) | the pragmatic escape: an offer naming a level **above** our decoding capability is answered with **our maximum**, the payload type is **kept**, and a `warning` naming `offered=`, `announced=` and the participant is emitted — the log being the only evidence, its absence is a test failure, not a detail. And the escape does **not** leak into the send direction: the encoder is still bound by the peer's declared level and packetization mode |
+| P8, `:live` | an H.264 leg against a real server: the `profile-level-id` in the answer is the one the server negotiated, and `H264Encoder` logs the level it was actually bound to — the announced/encoded invariant of §6.3 rule 9, verified end to end rather than asserted. Run twice: once from a SIP handset (no asymmetry ⇒ the offer's level), once from a browser (asymmetry ⇒ ours) |
 | P9, unit | the recording and slot commands of §8.3.8: the resolved `record_dir` path, a second start ⇒ `409` with no RPC, a `file` containing `/` or `..` or a foreign extension ⇒ `400` **before** any RPC, every `holds` name to its wire value, an out-of-range slot judged by the *server's* slot table (`1+4` accepts slot 15), a pin turning `auto` off, and a participant name matching twice ⇒ `400` naming both |
 | P6, packaging | inspection of the built artifacts, not a unit test: **every** `Elixir.Kelix.Mod.Mcu*.beam` is claimed by `kelixip-mod-mcu` (rpmbuild's unpackaged-files check is the assertion — shipping the named module alone would install one whose every call fails), `Requires: kelixip = <version>`, the two documents under `/usr/share/doc/kelixip-mod-mcu/` with their cross-link rewritten for a flat directory, and the shipped `config.toml` still valid TOML whose commented `[module.mcu]` block is accepted verbatim by `Config.parse/1` — a sample that would be refused at boot is worse than none |
 | P9, `:live` (tests 5-7) | test 7: a two-leg conference recorded to `record.mp4`, stopped, and played back. Test 6: slot `0` pinned to `vad` and a leg pinned to slot `1`, read through `slot.list` under `vad=basic` then `vad=full` — the speaker shown twice, then moved with a ~5 s hold. Test 5: a `2x2` with one leg shows the logo in the other three slots |
@@ -1706,8 +1905,10 @@ and the deliberately-deferred items of §15.1.
 | **P5b** | ✔ | **Conference lifecycle from a scenario** (§17): `create_conference/2`, `ensure_conference/3`, `update_conference/2`, `destroy_conference/1` as plain Elixir functions a script calls in-call, with creator ownership | a script creates a conference on an unknown DID, the caller joins it, and the conference goes away with the call that made it |
 | **P5c** | ✔ | **Documentation** (§18): the design doc reconciled with what shipped, the operator/developer guides, and the "test without packaging" recipe | a reader who never saw this work can configure a node, dial a conference and drive it from a script, from the docs alone |
 | **P6** | ✔ | Packaging: `kelixip-mod-mcu` RPM/deb, the commented `[module.mcu]` block in the shipped `config.toml`, and each module package carrying its own document | `dnf install kelixip-mod-mcu` + a config snippet gets a working conference. The RPM is **built and inspected on AL9** (four packages, every `Mcu*` beam claimed, `mcu.md` + the guide under `/usr/share/doc/kelixip-mod-mcu/`, the sample block accepted by `Config.parse/1`); the deb is wired but not yet built, which must happen on the target release |
-| **P7** |  | **Server-side (Mendooze), §16.1-16.2**: `StartRTPTimeout` RPC + MCU event types `3` (media timeout) and `4` (media connected); kelixip arms/disarms the watchdog after the answer and handles both events | unplugging a phone's network mid-call frees its slot and its mosaic tile within `rtp_timeout_ms`, and the adapter emits `:ice_connected` on real media — **L1 and L2 lifted** |
-| **P8** |  | **Server-side (Mendooze), §16.3**: `StartReceiving` returns `(recPort, fmtpByPt)`; kelixip deletes its local codec arbitration and moves `SetRTPProperties(codec.*)` before `StartReceiving` | the SDP answer carries the fmtp the MCU will actually use, verbatim — **L4 lifted**; mcuGold on the same server is unaffected |
+| **P7** | ✔ | **Server-side (Mendooze), §16.1-16.2**: `StartRTPTimeout` RPC + MCU event types `3` and `4`, wired `RTPSession::Listener` → `RTPParticipant` → `MultiConf` → `MCU` event queue; kelixip arms per media at the ACK (never on text), ANDs the timeouts (§16.1) and routes both events to the operator view and the scenario | unplugging a phone's network mid-call frees its slot and its mosaic tile within `rtp_timeout_ms`, a leg that answered and never sent media is reaped, and a *single* dead media no longer kills a working call — **L1 lifted**. **L2 only partly**: event `4` reaches the scenario as `{:mcu_event, :media_connected, media}`, not yet as the behaviour's `{:ms_event, conn, :ice_connected}` — that mapping needs the conn ref, which the module does not hold, and the mosaic-join-on-real-video it would enable is not done |
+| **P8a** |  | **Delegated negotiation — the plumbing, §16.3.1-16.3.3**: `StartReceiving` takes the offer's fmtp and returns `(recPort, announcedIp, fmtpByPt)`; the server calls the negotiator and installs the **filtered** map; `SetRTPProperties` splits around it (decision 8); kelixip deletes its local arbitration and its four codec config keys, classifies and traces the three transport cases of §6.3.1, and answers `a=rtcp-fb` as an intersection | the accepted payload types and their fmtp come from the server, verbatim — **most of L4 lifted**; a plain-RTP, an SDES and a WebRTC leg are each identifiable from one log line; mcuGold and a pre-S3 kelixip on the same server are unaffected. Ships without P8c thanks to the fallback |
+| **P8c** |  | **Remote-fmtp ingestion, §16.3.4 (b)**: `CodecNegotiator::Negotiate` stops ignoring `remoteFmtp`; `H264Encoder::GetFmtpParams` implements RFC 6184 §8.2.2 (profile kept, level per `level-asymmetry-allowed`, that parameter emitted); `effectiveProps` bound to `min(ours, the peer's)` and applied to the encoder; `CODECS.md` documents the new key | a caller that allows level asymmetry is answered our real decoding capability and receives a stream bounded by *its* declared level — **L4 fully lifted**, and a plain SIP handset's answer is unchanged byte-for-byte |
+| **P8b** |  | **JSR-309 answerer alignment** (§19.3, C2-C4): the point-to-point path adopts the answerer rule of §6.3.1 — mirror the offered profile, intersect `a=rtcp-fb`, send `useRtcpFIR`, drop `goog-remb` — through the shared helpers in `MediaServer.SdpTools`. **kelixip-only, no server change.** Gated on P8 being implemented *and tested* against real callers | an `RTP/AVPF` offer is answered `RTP/AVPF` on both paths, the feedback answered is the feedback asked for, and every announced type has its server-side switch — one rule, one implementation, two adapters |
 | **P9** | ✔ | **The inspection surface** (§8.3.8): `recording.start\|show\|stop`, `slot.list\|update`, the `logo` field and its `[module.mcu]` defaults | media-server tests 5, 6 and 7 are runnable from `kelictl` alone: a `record.mp4` to look at, a slot map that shows the VAD reshuffle, and a logo in the empty slots |
 | **TC** | ✔ | **Total conversation** (§1.1 point 4): T.140 + RFC 4103 redundancy on the conference leg — `@supported_medias` gains `:text`, `SetTextCodec` at ACK time, the `red` fmtp in the answer, and the reference scripts ask for `media: :tc` | a terminal offering `m=text` with `red`+`t140` is answered on both, `SetTextCodec` carries `T140RED`, and the three medias flow on one leg |
 | **S4** | ✔ | **Server-side (Mendooze), §16.5**: `--public-ip` as the one announced address, read by `GetMediaCandidates` *and* returned by `StartReceiving`; the module drops `rtp_ip`/`public_ip` and takes its media servers from `[mediaserver.pool.*]` | a conference leg's `c=` line carries the address the *server* reported, a node behind NAT is fixed by one server flag, and the module declares no media server of its own — **G2 lifted** |
@@ -1740,6 +1941,11 @@ specification.
 | 6c | `201 Created` | **Required**, obtained **declaratively**: the command declares `status:` / `location:` / `errors:` and the frontal derives status, `Location` and the error codes. `handle_control/2` keeps returning plain domain results | §8.3.4 |
 | 6d | Sequencing | **Compromise**: command ids are valid single-segment paths, so the module ships on today's flat route and FW-4 *adds* the canonical URLs later — the two coexist, dispatching to the same clause | §8.3.5, §14 |
 | 6e | CLI parity | **Examined** (§8.3.6): exact on command set, arguments and results; HTTP status/headers are REST-only by design; the two real gaps (arg shape, discoverability) are pre-existing CLI limitations ⇒ FW-3 and the new FW-5, both optional | §8.3.6, §10 |
+| 7 | `fmtpByPt` and codecs that have **no** fmtp — the struct omits them (the server's `nego_fmtp.md` §5.2/§8-E) or lists them with an empty value (what the code does)? | **Align on the code: every accepted payload type is a key, empty value included.** Decided 2026-08-05. The presence of the key *is* the accept signal, because it is the controller's only source for the accepted set — omitting fmtp-less codecs would erase PCMU, PCMA, G722 and T140 from every SDP it builds. The alternative was never tenable: it would have required a second, parallel channel to say which PTs were accepted, next to the one already carrying it | §16.3.1, §19.1 C1 |
+| 8 | Where does the negotiator get the **local** codec properties, given that `StartReceiving` runs before anything sets them? | **~~The reorder~~ — SUPERSEDED 2026-08-05, same day.** The answer turned out to be *nowhere, and that is correct*: the adapter sends no `codec.*` property at all (`merge_video_props/3` is a no-op since the 2026-08-01 correction), so there was nothing to reorder. Settled by decision 11 instead — the server owns its own decode capability, so the controller declares no codec intent | §16.3.4 (a), §6.2 |
+| 11 | Does the controller declare a codec **intent** (a level derived from the mixer's real size/fps), or does the media server own its decode capability outright? | **The server, outright.** Decided 2026-08-05. A controller that derives a level becomes, again, the place that decides what the server can do — the very coupling P8 exists to remove, and the one that produced the `42801F` vs `42e01f` incident. The case it was meant to guard (the mixer encoding above what the peer decodes) is already covered from the correct side: `effectiveProps`, bounded by what the peer declared. Kills decision 8, and removes the same open question from the AV1 work (`nego_fmtp.md` phase 5b) | §16.3.4, decision 8 |
+| 9 | H.264: does the answer **reflect** the caller's `profile-level-id`, or announce our own decoding capability? | **Correct semantics, with `level-asymmetry-allowed`.** Decided 2026-08-05. What we announce is what *we* decode (same profile as the offer; our level only when both sides allow asymmetry, the offer's level otherwise); what bounds our encoder is the level the *peer* declared. The two coincide on an offer that omits the parameter — the answer then echoes the caller's `profile-level-id` byte for byte — so the visible change is confined to WebRTC and gateway legs, where reflection was a polite fiction. **One pragmatic exception**, taken knowingly: a level we cannot decode is answered with our maximum plus a `warning`, never by declining the payload type — refusing video is a harder failure than understating a receive capability, and understating is what lets a correct peer encode down to us | §6.3 rule 9, §16.3.4 (b), P8c |
+| 10 | Does a single silent media kill the leg, and who decides — the media server or the controller? | **The controller, and only when EVERY watched media (all but text) is silent.** Decided 2026-08-05. Whoever ANDs needs the same state machine, the reset signal is already on the wire (event 4 clears a media's flag), and "how many dead medias make a dead leg" is policy. Doing it server-side would also have destroyed information — one-way video is the most common video-call complaint and this event is its only witness — and forced a wire-contract question, the `media` field of an "everything is silent" event having no honest value | §16.1, §6.4, P7 |
 
 Three consequences worth flagging to whoever implements P0-P1:
 
@@ -1833,16 +2039,56 @@ path: `RTPParticipant::onRTPTimeout` (new override) → new
 → `eventMngr->AddEvent(queueId, new ParticipantMediaTimeoutEvent(…))`, next to
 `PlayerRequestFPUEvent` in `mcu/include/mcu.h`.
 
-**kelixip side.** The adapter arms the watchdog per media **right after the SDP
-answer is sent** (a new step 7 in §6.2, after the 200 OK, not before it),
-disarms it (`timeoutMs = 0`) when a media is put on hold, and **never arms it on
-text** — T.140 is silent between keystrokes and would false-positive. The event
-becomes `{:mcu_event, :media_timeout, media}`; `mcu.exs` sends BYE and leaves,
-exactly as it does for `:server_disconnected`. New config key
-`rtp_timeout_ms` in `[module.mcu]` (default `10000`, `0` disables), mirroring
-`MediaServer.Mendooze`'s. New metric
-`kelix_mcu_media_timeouts_total{media}`; new event
-`participant.media_timeout` in the §11.1 vocabulary.
+**kelixip side.** The adapter arms the watchdog per media **at the ACK**, once
+`start_sending_all/1` has put the leg in the mix — the first moment the 200 OK is
+known to have gone out. That is what makes "answered but no media ever arrived"
+detectable while never surveilling the ringing phase; a caller that never ACKs is
+the script's idle timeout to catch. It **never arms text** (T.140 is legitimately
+silent between keystrokes) and treats a failed arm as non-fatal but logged: a leg
+that carries media is worth more than a leg that is monitored, and a fleet where
+nothing is ever armed must not pass for working. `rtp_timeout_ms` travels on the
+**conference** (from `[module.mcu]`, default `10000`, `0` disables), like `video`,
+so the adapter reads it off the leg it is setting up rather than from a script knob.
+
+**Hold disarms, and the criterion is not "hold".** The watchdog watches *our
+reception*, so what matters is whether the **peer will send**: `a=recvonly`,
+`a=inactive` or `c=0.0.0.0` (RFC 3264 §8.4, the legacy hold every old handset uses)
+⇒ disarm that media. A caller holding with `a=sendonly` keeps sending music-on-hold,
+so its RTP never stops and its watchdog stays armed — treating that as a hold would
+have disarmed a leg that is perfectly observable. A **renegotiation** applies this at
+the *answer* rather than waiting for an ACK: the dialog is already established, so
+there is no ringing phase to avoid surveilling, and the ACK path returns early on an
+attached leg — waiting for it would leave a resumed media unwatched for good.
+
+Without this half, P7 hangs up held calls: ten seconds of `rtp_timeout_ms` is an
+ordinary consultation transfer.
+
+**One dead media is not a dead leg — the AND (decided 2026-08-05).** The server
+reports one media at a time; the *controller* decides what constitutes a dead leg,
+and it only tells the scenario once **every watched media is silent** (watched = the
+medias this leg negotiated, minus text). Per-media events are still emitted for the
+operator view: "video died, audio alive" is the most common complaint about a video
+call and this event is its only witness, so suppressing it would be a real loss.
+The AND's state is a `silent` map on the participant row — event 3 sets a media's
+flag, **event 4 clears it**, which is what makes a media that comes back forgettable.
+Without that clearing, a leg that flapped once would be reaped the next time any
+*other* media hiccupped.
+
+The decision to do this in the controller rather than the media server rests on three
+things: whoever ANDs needs that state machine anyway (the server would build the same
+one), the reset signal is already on the wire, and "how many dead medias make a dead
+leg" is policy — while a server-side AND would also have forced a wire-contract
+question, since the `media` field of an "everything is silent" event has no honest
+value. An **empty** watched set (a timeout reaching a leg whose ACK was never
+processed) satisfies the AND on the first event, deliberately: one dead media is then
+all the evidence there will ever be.
+
+`mcu.exs` gains `{:mcu_event, :media_timeout, media}` → BYE + `leave(:media_timeout)`,
+in **both** the `in_call` and `in_conference` states, plus a 3-tuple catch-all — its
+existing catch-all only matched 2-tuples, so these messages would have gone
+unhandled. New event `participant.media_timeout` in the §11.1 vocabulary (already
+declared), and `silent` is exposable in `participant.show` so an operator sees *which*
+media died rather than a boolean.
 
 ### 16.2 S2 — "media established" event (P7, same wiring)
 
@@ -1867,57 +2113,319 @@ what mcuGold approximates with its `onMediaChanged` heuristic), and reporting a
 
 ### 16.3 S3 — delegated codec negotiation on the MCU API (P8)
 
-Closes **L4 (G1)**: today kelixip arbitrates codecs alone and guesses the fmtp
-the MCU will actually use, so a disagreement surfaces as one-way media instead of
-a negotiation failure.
+Closes **L4 (G1)**: today kelixip arbitrates codecs alone and guesses the fmtp the
+MCU will actually use, so a disagreement surfaces as one-way media instead of a
+negotiation failure.
 
-**Enriched return**, mirroring the JSR-309 delegation work:
+Scope decided 2026-08-05: the conference API gains the **same delegation the
+JSR-309 API already has**, in both directions — the offer goes down, the verdict
+comes back — and the module's own codec configuration is deleted rather than
+demoted (§8.4).
+
+#### 16.3.1 The wire change
 
 | Method | Params | Returns |
 |---|---|---|
-| `StartReceiving` | unchanged | `(i recPort, S fmtpByPt)` |
+| `StartReceiving` | `(i confId, i partId, i media, S rtpMap, i role[, i proto[, S offer]])` | `(i recPort, s announcedIp[, S fmtpByPt])` |
 
-Contract, identical to the JSR-309 one (and this is the part that must not be
-approximated): **every accepted payload type is a key** of `fmtpByPt`, *including
-codecs that have no fmtp* (value = empty string); an **absent** PT means
-filtered/unsupported. The presence of the key is the accept signal — that is how
-the controller derives the accepted set, so "accepted with no fmtp" and
-"rejected" must be distinguishable.
+**`offer` (new, 7th param)** — the offered media's codec-level attributes, the
+part the `rtpMap` cannot carry:
 
-**Ascending compatible**: `returnVal[0]` is still the port, so every current
-client — including mcuGold's `XmlRpcMcuClient`, which reads index 0 — is
-unaffected. This is what makes S3 safe to deploy on a server that still hosts
-mcuGold.
+```
+offer = {
+  "fmtp": { "<pt>": "<params>" }    // the offer's a=fmtp, PARAMS ONLY, verbatim
+}
+```
 
-**Server work.** In `RTPParticipant`'s receive path, per media: call
-`CodecNegotiator::Negotiate(media, proposedMap, codecProperties, NULL, result)`,
-install `result.acceptedMap` (the **filtered** map) on the RTP session instead of
-the proposed one, and memorise `negotiatedFmtp[pt] = codec.fmtp`; then have
-`xmlrpcmcu.cpp:StartReceiving` serialise it as the second `returnVal` element —
-the same ~20 lines as `xmlrpcjsr309.cpp:1204`. The `codec.*` input already
-arrives through the MCU's own `SetRTPProperties`, so nothing new is needed on
-that side.
+A struct with one member rather than a bare fmtp struct, deliberately: it is the
+extension point for whatever the negotiator needs next (remote header extensions,
+per-PT constraints) without a further positional parameter and its fallback
+signature. It carries the *offer's* payload-type numbering, which for an answerer
+is also the numbering everything else uses.
 
-**kelixip side — this one is a *deletion*.** The adapter drops its local
-arbitration and reuses the delegated helpers that already exist for the JSR-309
-adapter: `accepted_pts/2`, `pt_rtpmap/2`, `code_rtpmap/2`,
-`restrict_send_map/3`, and the fmtp strings emitted **verbatim** in the answer.
+> **Why not the raw SDP.** "Pass the whole offer" is tempting and wrong: it would
+> put a second SDP parser in the media server, one release away from disagreeing
+> with the first about header precedence and malformed values. The same rule
+> kelixip applies to itself — message interpretation lives in exactly one place —
+> applies across the control channel. kelixip parses SDP; the server negotiates
+> codecs; the struct is the contract between the two.
 
-One consequence to plan for: **the RPC order of §6.2 changes.**
-`SetRTPProperties` splits in two — the `codec.*` keys must be sent **before**
-`StartReceiving` (they drive the local fmtp), the transport keys (`rtcp-mux`,
-`secure`, `ssrc`, `useNACK`…) stay after it. The §13 "exact RPC order" test is
-therefore updated in P8, not merely extended; that test existing is precisely
-what makes the change safe.
+**`fmtpByPt` (new, 3rd return element)** — the verdict. Contract, identical to the
+JSR-309 one and the part that must not be approximated: **every accepted payload
+type is a key**, *including codecs that have no fmtp* (value = empty string); an
+**absent** PT means filtered/unsupported. Presence of the key is the accept signal,
+which is how the controller derives the accepted set — so "accepted with no fmtp"
+and "rejected" have to stay distinguishable.
+
+**Ascending compatible on both ends.** `returnVal[0]` is still the port and
+`returnVal[1]` still the announced address of §16.5, so mcuGold's
+`XmlRpcMcuClient` (which reads index 0) is unaffected, and a kelixip that predates
+S3 keeps working against an S3 server. The parameter follows the same
+already-established pattern as `role` and `proto`: the handler tries the widest
+signature `(iiiSiiS)` first and falls back to `(iiiSii)` then `(iiiSi)`.
+
+#### 16.3.2 Server work
+
+Smaller than it looks, because the negotiator is shared code that the JSR-309 path
+already exercises — the MCU side is wiring, not algorithm.
+
+1. **`xmlrpcmcu.cpp:StartReceiving`** (`mcu/src/xmlrpcmcu.cpp:2012`): parse the
+   optional `offer` struct into a `Properties` of remote fmtp; pass it down; build
+   the `fmtpByPt` struct into the return. The serialisation is the same ~20 lines
+   as `xmlrpcjsr309.cpp:1204`, and the return grows from `(is)` to `(isS)`.
+2. **`MultiConf::StartReceiving` → `RTPParticipant`**: call
+   `CodecNegotiator::Negotiate(media, proposedMap, localProps, remoteFmtp, result)`,
+   install `result.acceptedMap` — the **filtered** map — on the stream instead of
+   the proposed one, and memorise `negotiatedFmtp[pt] = codec.fmtp` plus
+   `negotiatedProps[pt] = codec.effectiveProps` per media. This mirrors
+   `Endpoint::Port::NegotiateReceiving` (`mcu/src/jsr309/Endpoint.cpp:516`) closely
+   enough to be read side by side with it.
+3. **Remote fmtp ingestion — the one piece that does not exist yet, and it is
+   P8c.** `CodecNegotiator::Negotiate` takes a `const Properties* remoteFmtp` and
+   currently ignores it (`negotiator.cpp:68-69`, `(void) remoteFmtp` — "phase 5" in
+   the server's own `nego_fmtp.md`). What it must do for **H.264 first** is rules
+   1-4 of §16.3.4: keep the offer's profile, choose the level according to
+   `level-asymmetry-allowed`, emit that parameter ourselves, and set
+   `effectiveProps` to `min(our capability, the peer's declared level)`.
+   `H264Encoder::GetFmtpParams` grows the level and asymmetry logic; the
+   `codec.*` vocabulary in `CODECS.md` grows `level-asymmetry-allowed`. Without this
+   step the delegation still filters payload types correctly but announces the
+   server's *default* profile at a caller that asked for another — today's bug with
+   the decision moved one process to the left, which is why P8a and P8c ship in that
+   order and not in the other.
+4. **Feedback switches**: nothing new. `useNACK`, `useRtcpFIR`/`useExtFIR` and
+   `tmmbr` already exist in `RTPSession::SetProperties`
+   (`mcu/src/rtpsession.cpp:486-561`) and keep arriving through `SetRTPProperties`
+   after `StartReceiving`, as transport properties always have.
+5. **What the encoder gets.** `negotiatedProps` must reach the participant's
+   encoder or the announced fmtp is again a claim nobody honours. On the MCU path
+   this is *easier* than the JSR-309 one, whose hard part is wiring an endpoint to
+   whatever produces its outgoing stream (`nego_fmtp.md` §6.3): an MCU participant
+   owns its `VideoStream`, whose `SetVideoCodec` properties map feeds the encoder
+   directly. For P8 the module **relays** the negotiated params back in
+   `SetVideoCodec` (§6.3 rule 9) — no server change, announced and encoded are the
+   same string by construction. Making the server merge `negotiatedProps` into the
+   stream's own map is the cleaner follow-up, and it is blocked on one thing worth
+   knowing before starting: `VideoStream::SetRTPProperties` *merges* into
+   `videoProperties` but `SetVideoCodec` **replaces** it wholesale
+   (`videoProperties = properties`), so the merge has to happen on the
+   `SetVideoCodec` side or be reapplied after it.
+
+Two server-side documents need the same correction while we are in there, and it
+is not cosmetic — a client written against them would break:
+
+- **`MCU-API.md`** §6.7: the new parameter, the third return element, and the
+  contract wording (copied from `xmlrpc_jsr309_api.md` §5.2 so the two APIs read
+  identically).
+- **`nego_fmtp.md`** §5.2 and decision **§8-E**, which stated that "un codec sans
+  fmtp est **absent** de la struct". **The shipped code does the opposite** and is
+  right to: `NegotiateReceiving` pushes every accepted codec into `negotiatedFmtp`,
+  empty fmtp included (`Endpoint.cpp:551-555`), and `xmlrpcjsr309.cpp` serialises
+  the map as it stands. Elixip's JSR-309 delegation depends on the code's
+  behaviour, not that document's. **Settled on the code** (decision 7, §15); both
+  the plan and the misleading comment above the serialisation loop are corrected,
+  and the MCU inherits the contract that actually shipped.
+
+The **wording to copy** for `MCU-API.md` is `xmlrpc_jsr309_api.md` §6.7, which
+already gets this right and is what any client of either API reads: *"un codec sans
+`fmtp` (PCMU, PCMA, G722, T140…) est **présent** avec la valeur **chaîne vide
+`""`**"*, plus the accepted-set rule at its steps 6 and 10. Two APIs, one sentence —
+that is the point of doing S3 as a mirror rather than as a fresh design.
+
+#### 16.3.3 kelixip work — mostly deletion
+
+| Deleted | Replaced by |
+|---|---|
+| `Sdp.negotiate/3` call in the adapter, and the conference codec lists behind it | the offer's own payload types, proposed as-is |
+| `codec_fmtp/3`, `reflected_params/1`, `h264_profile_level_id/2`, `configured_video_fmtp/1` | `fmtpByPt`, emitted verbatim |
+| `dtmf_fmtp/1` (`0-16`) | the server's, which owns that range (`negotiator.cpp:43`) |
+| `red_fmtp/2` (RFC 4103) | the server's, with the same T140-companion guard (`negotiator.cpp:79-93`) |
+| `Config.validate_codecs/2` and the module's codec vocabulary | the server's `IsSupported` catalogue |
+| `ensure_audio/1` | the all-medias-empty rule of §6.3 rule 2 |
+
+What is added is small: `fmtp_raw` in `SdpTools.parse/1` (§6.3), the `offer` struct,
+reading `returnVal[2]`, the three delegated helpers re-exported through
+`MediaServer.SdpTools`, the transport-case classification and trace of §6.3.1, and
+the `a=rtcp-fb` intersection.
+
+#### 16.3.4 The two H.264 decisions (resolved 2026-08-05)
+
+Both were open long enough to be worth recording with their reasoning, because both
+would otherwise be re-derived — badly — inside the C++.
+
+**(a) → nothing to send** (superseded the same day, decision 11). The question assumed
+the controller declares a codec intent. It does not: `merge_video_props/3` is a no-op,
+so no `codec.*` key is sent, and the media server owns its own decode capability. There
+is therefore no ordering constraint to satisfy and no reorder — the paragraph below is
+kept only because the *failure mode* it describes is what a future intent-sending
+controller would walk back into.
+
+**(a), as originally resolved — for the record.** `SetRTPProperties(codec.*)` before
+`StartReceiving`; the transport keys after it. Chosen over carrying the local
+intent in the `offer` struct (which would have mixed "what the peer said" with "what
+we want" under one parameter) and over letting the server derive it from conference
+state (largest server change, and it would make the announced profile depend on
+state the controller cannot see). The deciding argument is that this is **already
+how the JSR-309 path primes the negotiator** — decisions A and C of the server's
+`nego_fmtp.md`, `EndpointSetRTPProperties` first — so both paths feed it identically
+and the server keeps one intake convention instead of two.
+
+Consequences, all of them wanted:
+
+- `SetRTPProperties` **splits in two calls** per media: the codec intent before
+  `StartReceiving`, the transport keys (`rtcp-mux`, `natLatch`, the feedback
+  switches) after it. §6.2's sequence and §13's order test both reflect this.
+- `SetVideoCodec` still runs at ACK time and still carries the negotiated params:
+  it needs the *chosen* codec, which does not exist until the negotiation has run.
+  **Intent and choice are two calls at two moments** — the distinction the old
+  single-call design blurred, and the reason rule 9's incident was possible at all.
+- The intent sent is the conference's video configuration expressed as `codec.*`
+  keys, so the value the negotiator derives its announcement from is the one the
+  mixer will actually encode with.
+
+**(b) → correct semantics, with `level-asymmetry-allowed`.** The two things today's
+rule 9 conflates are separated:
+
+| | What it is | Where it comes from |
+|---|---|---|
+| The `profile-level-id` **we announce** | what *we* can decode | our own capability (the conference's intent, per (a)) — bounded by the RFC rule below |
+| The bound on **our encoder** | what the *peer* can decode | the peer's offered `profile-level-id`, ingested as `effectiveProps` |
+
+The RFC 6184 §8.2.2 rule an answerer must respect, and it is narrower than "announce
+whatever we like":
+
+1. The answer's `profile-level-id` carries the **same profile** (profile_idc and
+   constraint flags) as the offer's. We do not answer a profile the offerer did not
+   name.
+2. The **level** may differ from the offer's **only if both sides allow asymmetry** —
+   `level-asymmetry-allowed=1` present in the offer *and* in our answer. Absent, or
+   `=0`, asymmetry is **not** allowed and the answer's level must be the **offer's**.
+
+   > **Combined with rule 1, "no asymmetry" means we echo the offer's
+   > `profile-level-id` byte for byte.** Confirmed 2026-08-05. The value is
+   > `profile_idc || profile_iop || level_idc`; rule 1 pins the first two to the
+   > offer's and rule 2 pins the third, so there is nothing left to choose — the
+   > answer carries the caller's own string. This is worth stating as one sentence
+   > rather than leaving the reader to compose two rules, because it is the case
+   > that covers most SIP handsets and it is the one a regression test asserts.
+   >
+   > Two consequences that follow from it and are easy to miss:
+   >
+   > - **If we cannot decode the offered level, we answer our own maximum and log
+   >   it** — we do *not* decline the payload type. **Decided 2026-08-05**, and it is
+   >   a deliberate deviation from RFC 6184 §8.2.2, which under no-asymmetry leaves an
+   >   answerer only "echo or drop". Same reasoning as the DTLS `passive` decision of
+   >   §6.3 rule 6: a conference bridge that refuses video because a caller offered
+   >   level 5.1 has failed harder than one that answers 3.1 and works.
+   >
+   >   What the deviation actually trades, stated so nobody has to rediscover it:
+   >   announcing a level *below* the offer's is what a well-behaved peer needs in
+   >   order to encode down to us, so in the common case this **raises** the success
+   >   rate rather than lowering it. Two residual risks, both narrower than declining:
+   >   a peer that strictly validates offer/answer level equality may reject the
+   >   answer, and a peer that ignores it altogether sends above our capability and we
+   >   decode nothing from that leg. The second is a *visible* decode failure, not a
+   >   silent one — which is precisely why the log is load-bearing here and must name
+   >   **both** values and the participant (`offered=… announced=… part=…`), at
+   >   `warning`: it is the only evidence linking "no video from that leg" to its
+   >   cause.
+   >
+   >   This escape hatch exists for what we **announce** (a receive capability, where
+   >   understating is safe). It does **not** extend to what we **send**: the peer's
+   >   declared level and packetization mode are hard bounds on our encoder, because
+   >   overstepping them produces a stream it cannot decode and there is no
+   >   pragmatic version of that.
+   > - **`packetization-mode` is not governed by the asymmetry rule** and must not be
+   >   swept into the reflection. It is a per-direction receiving capability, and
+   >   `GetFmtpParams` currently **hard-codes `packetization-mode=1`**
+   >   (`h264encoder.cpp:322`) — so a caller that only supports single-NAL mode 0 is
+   >   answered mode 1 today. Latent, pre-existing, and squarely in P8c's path since
+   >   that is where the offer's fmtp becomes readable: the mode we *send* must be
+   >   one the peer declared, the mode we *announce* is our own.
+3. We do emit `level-asymmetry-allowed=1`. A mixer transcodes in both directions by
+   construction, so the one case the parameter exists for — decode at one level,
+   encode at another — is exactly ours.
+4. The encoder is configured with `min(our capability, the peer's declared level)`:
+   the peer told us what it can decode and sending above it is how a stream is
+   negotiated successfully and decoded by nobody.
+
+> **This makes the change smaller than it sounds**, which is the useful part. When
+> the offer omits `level-asymmetry-allowed`, rule 2 requires us to answer the
+> offer's own level — i.e. **today's blanket reflection is already correct in that
+> case**, and it is the common case for SIP handsets. What changes is the WebRTC and
+> gateway case, where the peer does allow asymmetry and we may finally announce our
+> real decoding capability instead of pretending to match theirs.
+>
+> `sprop-parameter-sets` is still never reflected (it describes the offerer's
+> encoder) and still never emitted — `GetFmtpParams` deliberately omits it.
+
+**Where it is implemented.** Rules 1-3 are the answer string, produced by
+`H264Encoder::GetFmtpParams` from the local properties plus the ingested remote
+fmtp; rule 4 is `effectiveProps` reaching the encoder. Both are server-side, in the
+negotiator — which is the entire point of S3 — and both are **P8c**, since they are
+what "remote fmtp ingestion" means concretely. `level-asymmetry-allowed` therefore
+joins the `codec.*` vocabulary of `CODECS.md`.
+
+#### 16.3.5 The problem those two decisions solved
+
+Kept because the failure mode is instructive, and because anyone reordering these
+calls again should know what the order is protecting.
+
+**(a) The negotiator had no local properties when `StartReceiving` ran.**
+`H264Encoder::GetFmtpParams` derives the announced string from
+`h264.profile-level-id` in the properties it is handed, defaulting to **`42801F`**
+(`h264encoder.cpp:312-323`). On the MCU path those properties live in the stream's
+own map, filled by `SetRTPProperties(codec.*)` and `SetVideoCodec` — **and both run
+after `StartReceiving`** (§6.2: the transport properties follow it, `SetVideoCodec`
+waits for the ACK). So a first INVITE would negotiate against an empty map and
+announce `42801f`, which is precisely the default the live-server fix of §6.3 rule 9
+replaced with `42e01f`. Worse, it would work on a **re-INVITE** — by then the map is
+populated from the previous cycle — so the regression would look intermittent.
+
+The reorder of (a) is what prevents it: by the time `StartReceiving` runs, the
+stream's property map carries the conference's codec intent, so the string the
+negotiator derives is the one the mixer will encode with. Two lessons worth keeping
+attached to the order rather than to this paragraph:
+
+- **an empty property map is not an error the server can report** — it produces a
+  plausible default, and a plausible default is what makes a bug intermittent;
+- the JSR-309 path had the same exposure and closed it the same way, which is why
+  the two now share an intake convention rather than each having its own.
+
+**(b) had two answers that look alike on a SIP handset.** Announcing our own decode
+capability and reflecting the peer's give the *same* string whenever the offer omits
+`level-asymmetry-allowed` — see rule 2 of §16.3.4 — so the distinction only becomes
+visible on the WebRTC and gateway legs, which is exactly where it would have been
+found last.
+
+**Phasing.** Neither decision blocks the *plumbing*, so P8 splits:
+
+- **P8a** — the `offer` parameter, the third return element, the negotiator call,
+  the filtered map, the reorder, and kelixip's whole deletion. Delivers accepted-PT
+  delegation and lifts most of L4, using the server's own default fmtp. Testable end
+  to end on its own.
+- **P8c** — remote-fmtp ingestion: rules 1-4 of §16.3.4, `level-asymmetry-allowed`
+  in `CODECS.md`, and `effectiveProps` reaching the encoder.
+
+The fallback below is what makes P8a safe to ship alone.
+
+**Fallback.** One detection rule, the same as the JSR-309 path: `returnVal[2]`
+present and a map ⇒ delegated; absent ⇒ the pre-S3 local arbitration, kept intact
+so a kelixip upgrade does not require the server to move first. The trace of
+§6.3.1 says which ran (`negotiated-by=server|local`). Unlike S4 — which chose to
+fail rather than guess an address — a stale server here degrades to today's
+behaviour, because guessing a codec set is exactly what today's behaviour *is*.
+That fallback is the one thing S3 must not leave untested: it is the path every
+node takes for the duration of a rolling upgrade.
 
 ### 16.4 Sequencing and risk
 
-| | P7 (S1 + S2) | P8 (S3) | S4 (done) |
-|---|---|---|---|
-| Server change | additive: 1 RPC, 2 event types, 2 listener overrides | 1 return value enriched, 1 negotiator call | 1 argument, 1 global setting, 1 return value enriched |
-| Breaks an existing client? | no (append-only) | no (`returnVal[0]` unchanged) | no (`returnVal[0]` unchanged) |
-| kelixip change | arm/disarm + 2 event handlers | removes local arbitration, reorders `SetRTPProperties` | reads the address, deletes two config keys |
-| Closes | L1, L2 | L4 | G2 |
+| | P7 (S1 + S2) | P8a (S3 plumbing) | P8c (ingestion) | S4 (done) |
+|---|---|---|---|---|
+| Server change | additive: 1 RPC, 2 event types, 2 listener overrides | 1 optional param, 1 return element, 1 negotiator call, filtered map installed | `remoteFmtp` honoured, RFC 6184 §8.2.2 in `GetFmtpParams`, `effectiveProps` to the encoder — **the only genuinely new algorithm in S3** | 1 argument, 1 global setting, 1 return value enriched |
+| Breaks an existing client? | no (append-only) | no (`returnVal[0..1]` unchanged, param optional) | no (fmtp values change, shape does not) | no (`returnVal[0]` unchanged) |
+| kelixip change | arm/disarm + 2 event handlers | **deletes** local arbitration and 4 config keys; adds the offer struct, the property split, the transport-case trace and the `a=rtcp-fb` intersection | none | reads the address, deletes two config keys |
+| Closes | L1, L2 | most of L4 | the rest of L4 | G2 |
 | Risk if skipped | dead legs occupy the mix for hours | silent one-way media on exotic fmtp | media that connects and never arrives behind NAT |
 
 P7 first: it is smaller, purely additive on both sides, and fixes an operational
@@ -2000,7 +2508,7 @@ never a hung call:
 | `conferences(domain)` | `[conference]` — pure ETS read, for a script that lists |
 
 `opts` is a **keyword list with atom keys** (`name:`, `did:`, `mcu:`, `vad:`,
-`rate:`, `audio_codecs:`, `video_codecs:`, `video:`, `layout:`,
+`rate:`, `medias:`, `dtmf:`, `video:`, `layout:`,
 `max_participants:`, `destroy_when_empty:`, `owner:`), not the string-keyed map the
 control commands receive. That is the one real asymmetry, and it is the right one: a
 script writes Elixir, not JSON. The **values** are not an asymmetry: the vocabulary of
@@ -2126,11 +2634,11 @@ what P6 ships is documented rather than merely installed.
 |---|---|---|
 | §6.3 rule 6 | amended in place already (DTLS `passive`) | ✔ done |
 | §3.2 / §3.3 | `GetConferences` "A of (id, name, numPart)", statistics as "S per media" | `returnVal` **is** the row list, and both are arrays of positional rows; `isReceiving` precedes `isSending`. The tag was truncated by the server until the `xmlrpcmcu.cpp` fix of 2026-07-30 — worth a footnote, since a deployment may run an older build |
-| §6.3 | lists the `Mendooze.Sdp` functions reused | `parse/1` now also exposes the offer's `fmtp` per payload type, which is what makes the H.264 profile reflection of P3 possible; the neutral alias `MediaServer.SdpTools` landed |
+| §6.3 | lists the `Mendooze.Sdp` functions reused | `parse/1` now also exposes the offer's `fmtp` per payload type, which is what makes the H.264 profile reflection of P3 possible; the neutral alias `MediaServer.SdpTools` landed. P8 adds `fmtp_raw` (the unparsed params, to *forward*) and drops `negotiate/3` from the MCU's usage |
 | §10 (FW-1) | "must merge extra options from the context" | landed as `SIP.Session.Media.extra_conn_opts/1`; **`on_media_error` also accepts a per-cause function**, which §6.5's table needs to be achievable at all — not in the FW list today |
 | §10 | FW-4 as a decided change | landed, with `Kelix.Control.Route` as the resolver; the `calls` path of the router had to be *registered* too (`SIP.Session.Call`), which the design assumed was already there |
 | §9.4 | "every conference whose `tag` is not in our registry is deleted" | keyed on the MCU-side **id**, for the truncation reason above |
-| §8.3.3 / §8.4 | the codec vocabulary is validated for the **config block** | it is validated wherever codecs enter, including `conference.create`'s own `audio_codecs`: found while writing P5b's tests, where `audio_codecs: ["SPEEX"]` was accepted and would have raised inside the SDP builder at answer time — the very failure §8.4 refuses for the config. `Config.validate_codecs/2` is now the single vocabulary, and an explicit audio list decides that conference's DTMF the way the block's does |
+| §8.3.3 / §8.4 | the codec vocabulary is validated for the **config block** | it is validated wherever codecs enter, including `conference.create`'s own `audio_codecs`: found while writing P5b's tests, where `audio_codecs: ["SPEEX"]` was accepted and would have raised inside the SDP builder at answer time — the very failure §8.4 refuses for the config. `Config.validate_codecs/2` is now the single vocabulary, and an explicit audio list decides that conference's DTMF the way the block's does. **P8 deletes all of it** (§8.4): a vocabulary maintained next to the server's own is the defect one level up, and `SPEEX` would now simply not be proposed |
 | §1.1 point 3 | "an optional automatic layout that follows the participant count" | the ladder is `auto_comp/1`; only video legs count, and an audio-only conference issues no mosaic RPC |
 | §11 | the metric table | landed, plus the generic core seams that carry it (`poll_metrics/0`, `status/0` per module) |
 | §14 | phases | P0′-P5 done; P5b/P5c added |
@@ -2208,3 +2716,56 @@ A reader who never saw this work can, from the documents alone: configure a node
 a conference DID, dial into it, drive it from REST and from `kelictl`, write a script
 that creates its own conference, and tell the three look-alike failures apart. Every
 statement in §3 matches what the server actually sends.
+
+---
+
+## 19. Alignment with the JSR-309 implementation
+
+S3 makes the MCU path do what the JSR-309 path already does, so the two are now
+close enough that their *differences* need to be deliberate. This section is the
+audit: what was found when comparing them, and what was decided about each. Every
+row was verified against the code, not against the documents.
+
+### 19.1 Contradictions found — and they run both ways
+
+| # | What | Who is right | Resolution |
+|---|---|---|---|
+| C1 | **The "no fmtp" contract.** `nego_fmtp.md` §5.2 and decision §8-E say a codec without fmtp is **absent** from the returned struct. The shipped server does the opposite (`Endpoint.cpp:551-555`: every accepted codec, empty string included), and Elixip's `accepted_pts/2` *depends* on that — presence of the key is its accept signal (`mendooze_sdp_delegation_plan.md` §4, "Option A") | the **code** | **Settled on the code** (decision 7 of §15). Reassuringly, the *client-facing* spec was never wrong: `xmlrpc_jsr309_api.md` §6.7 already states "un codec sans `fmtp` … est **présent** avec la valeur **chaîne vide**", and it is the wording the MCU API should copy. Wrong in two internal places only, both now fixed: `nego_fmtp.md` §5.2/§8-E, and the comment sitting directly above the serialisation loop (`xmlrpcjsr309.cpp:1200`), which now carries an explicit "do not 'fix' this by filtering empty values" and says what breaks if you do |
+| C2 | **The RTP profile.** `Mendooze.Sdp.protocol_for/1` derives the answer's profile from the crypto alone (`:none→RTP/AVP`, `{:sdes,…}→RTP/SAVP`, `{:dtls,…}→UDP/TLS/RTP/SAVPF`), so a `RTP/AVPF` offer is answered `RTP/AVP` and an SDES offer that wanted feedback is answered `RTP/SAVP`. §6.3 rule 4 of *this* document claimed it appended `F` "when RTCP feedback was offered". It never did | the **MCU adapter**, which mirrors `desc.protocol` (`conn.ex:745`) | §6.3.1 states mirroring as the rule, for **both** paths. The JSR-309 answerer will be brought onto that model — decided 2026-08-05, scheduled as **P8b** after P8 is implemented and tested (§19.3), so the rule is proven against real callers before it moves into the path that serves the point-to-point calls |
+| C3 | **`a=rtcp-fb` is emitted as a fixed list.** `Sdp.add_rtcp_fb/3` emits `nack`, `ccm fir` and `goog-remb` on every video PT whenever the caller sets `rtcp_fb: true`, ignoring `desc.rtcp_fb` — which `parse/1` carefully parses (`:637`) and nobody reads. The MCU adapter sets that flag from `avpf?(desc)`, so an AVPF caller that asked for nothing gets three attributes back | neither | §6.3.1 rule 3: the answered set is the **intersection** with the offer. The JSR-309 offerer keeps proposing its own list, which is correct for an *offer* |
+| C4 | **Announced feedback nobody switches on.** The answer offers `ccm fir`, but the adapter only ever sends `useNACK` and `tmmbr` — `useRtcpFIR` exists server-side (`rtpsession.cpp:535`) and is never set. `goog-remb` has no switch at all | the server | §6.3.1 rules 4 and 5. This is the same failure mode as the unprefixed `h264.profile-level-id` of §6.3 rule 9: a capability the peer is told it has, that nothing implements |
+| C5 | **`secure` documented as a supported `SetRTPProperties` key** (§3.4). `RTPSession::SetProperties` has no such key; it would be logged `Unknown RTP property`. Both adapters already avoid sending it, each with a comment saying it is a no-op | the adapters | §3.4 corrected, with the full recognised-key list from `rtpsession.cpp:486-561` |
+| C6 | **Two different channels for the same information.** JSR-309 feeds the negotiator through `EndpointSetRTPProperties` with `codec.<x>.fmtp` keys, *before* `StartReceiving` (server decisions A and C). The MCU takes it as a `StartReceiving` parameter | the MCU, for its case | Deliberate divergence, §16.3.1. The MCU is always the answerer, so one atomic "here is the offer, what do you accept" call is both simpler and safer than an ordering rule. The JSR-309 path is also an *offerer*, where the properties must be set before `StartSending` too, and its channel suits that. The shared part is what matters: the negotiator and, in phase 5, the fmtp parser |
+
+### 19.2 Deliberate divergences (not to be "harmonised" later)
+
+| Topic | JSR-309 | MCU | Why |
+|---|---|---|---|
+| Payload-type numbering | its own, in an offer | the **offerer's**, always (RFC 3264 §6) | the MCU only answers. This is why it needs `code_rtpmap/2` and not `pt_rtpmap/2` — the accepted PT resolves to an encoding name through the *codec constant* the offer was mapped to, not through our own table |
+| Codec source | `conn_opts` (`:audio_codec`…), a test-tool knob | nothing — the offer is the menu | the JSR-309 adapter serves `elixipp`, whose whole job is to *state* what it offers. A conference has no such need |
+| Missing-address handling | n/a | hard failure (`{:error, :no_media_ip}`, §16.5) | a guessed address gives a `200 OK` whose media goes nowhere |
+| Missing `fmtpByPt` | legacy client-side build | same fallback | a guessed *codec set* is what the pre-S3 behaviour already is, so degrading is honest here where guessing an address was not |
+
+### 19.3 The JSR-309 answerer will follow the MCU — after P8, not with it
+
+**Decided 2026-08-05.** The three defects C2-C4 are real and they are *scheduled*,
+not merely recorded: the JSR-309 answering path will be brought onto the model
+§6.3.1 defines — mirror the offered profile, intersect `a=rtcp-fb` with the offer,
+and switch on server-side what the answer announces.
+
+| # | Defect | What the fix is |
+|---|---|---|
+| C2 | `protocol_for/1` derives the profile from the crypto, so an `RTP/AVPF` offer is answered `RTP/AVP` and an SDES offer wanting feedback gets `RTP/SAVP` | mirror `desc.protocol` on the answering side (`set_remote_offer/2`), as the MCU adapter does. The **offerer** side keeps choosing its own profile — that freedom is the offerer's and conflating the two is how this got wrong |
+| C3 | `desc.rtcp_fb` is parsed and never read; `add_rtcp_fb/3` emits a fixed `nack`/`ccm fir`/`goog-remb` list | answer the intersection; keep proposing our own list in an offer |
+| C4 | `useRtcpFIR` is never sent on either path, while both announce `ccm fir` | send it, and stop announcing `goog-remb`, which has no switch |
+
+**Sequenced deliberately after P8 ships and is tested.** The MCU is where the model
+gets validated against real callers — a SIP phone, a gateway, a browser — and
+porting an unproven rule into the path that currently serves `elixipp` and the
+point-to-point calls would put two things at risk to fix one. Once the MCU has run
+it, the port is mechanical: §6.3.1 is written as the answerer rule for **both**
+paths, and the helpers implementing it belong in `MediaServer.SdpTools` — the
+neutral module — so the second path adopts them rather than reimplementing them.
+
+That is also what keeps this section from rotting: the fix and the rule it follows
+are one sentence apart, and the rule is not MCU-specific.
