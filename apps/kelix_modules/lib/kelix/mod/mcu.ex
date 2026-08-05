@@ -1707,6 +1707,7 @@ defmodule Kelix.Mod.Mcu do
       conn: nil,
       state: :ringing,
       medias: %{},
+      silent: %{},
       admitted_at: DateTime.utc_now(),
       joined_at: nil
     }
@@ -2141,11 +2142,97 @@ defmodule Kelix.Mod.Mcu do
     end
   end
 
-  # Types 3 and 4 arrive with the server-side work of §16.1-16.2 (P7); decoded and
-  # logged now, acted on then.
+  # Type 3 (§16.1, P7): a media of this leg has gone silent. The server does not
+  # remove the participant from the mix — deciding that is ours — so this is where a
+  # dead leg stops holding its quota slot and its mosaic tile for hours (G3/L1).
+  #
+  # The event is emitted for the operator view whether or not a scenario is still
+  # around to hear it: a leg whose scenario already died is exactly the case the
+  # watchdog exists for.
+  # A leg is **not** dead because one media went quiet: a video phone whose video
+  # stops while its audio keeps flowing is still a participant. So the per-media
+  # event is always reported for the operator view — one-way video is the most common
+  # complaint about a video call, and this event is its only witness — but the
+  # scenario is only told (and only then hangs up) once **every watched media is
+  # silent**. Watched = the medias this leg negotiated, minus text: T.140 is
+  # legitimately silent between keystrokes and is never armed (§16.1).
+  #
+  # Decided 2026-08-05 to live here rather than in the media server: whoever does the
+  # AND needs this state machine, the reset signal is already on the wire (event 4),
+  # and "how many dead medias make a dead leg" is policy — the server reports facts.
+  defp route_event(conf, {:media_timeout, _conf_id, _tag, part_id, media}) do
+    Event.emit(:"participant.media_timeout", conf.uid, %{part_id: part_id, media: media})
+
+    case Conference.by_part_id(conf, part_id) do
+      nil ->
+        Logger.debug(
+          module: __MODULE__,
+          message: "conference #{conf.uid}: #{media} timeout for unknown participant #{part_id}"
+        )
+
+      row ->
+        silent = Map.put(row.silent || %{}, media, true)
+        update_participant(conf.uid, row.ref, &%{&1 | silent: silent})
+        watched = watched_medias(row)
+
+        cond do
+          not Enum.all?(watched, &Map.has_key?(silent, &1)) ->
+            # Partially silent: reported, deliberately not fatal.
+            Logger.info(
+              module: __MODULE__,
+              message:
+                "conference #{conf.uid}: participant #{part_id} lost #{media}, still has " <>
+                  "#{inspect(watched -- Map.keys(silent))} — leg kept"
+            )
+
+          is_pid(row.scenario) ->
+            send(row.scenario, {:mcu_event, :media_timeout, media})
+
+          true ->
+            Logger.info(
+              module: __MODULE__,
+              message:
+                "conference #{conf.uid}: participant #{part_id} silent on every media, " <>
+                  "no scenario to tell — the orphan GC owns it now"
+            )
+        end
+    end
+  end
+
+  # Type 4 (§16.2, P7): first validated RTP/SRTP packet of a reception cycle. On a
+  # secure leg, receiving it intrinsically proves the DTLS handshake completed, which
+  # is what makes it worth surfacing rather than just counting.
+  defp route_event(conf, {:media_connected, _conf_id, _tag, part_id, media}) do
+    Event.emit(:"participant.media_connected", conf.uid, %{part_id: part_id, media: media})
+
+    case Conference.by_part_id(conf, part_id) do
+      nil ->
+        :ok
+
+      row ->
+        # Clearing the flag is what makes the AND survive a media that comes back —
+        # a re-INVITE, or RTP that resumes after a network blip. Without it, a leg
+        # that flapped once would be reaped the next time any *other* media hiccups.
+        if Map.has_key?(row.silent || %{}, media),
+          do: update_participant(conf.uid, row.ref, &%{&1 | silent: Map.delete(&1.silent, media)})
+
+        if is_pid(row.scenario), do: send(row.scenario, {:mcu_event, :media_connected, media})
+    end
+  end
+
   defp route_event(conf, event) do
     Logger.debug(module: __MODULE__, message: "conference #{conf.uid}: #{inspect(event)}")
   end
+
+  # The medias whose silence counts against this leg: everything it negotiated, minus
+  # text.
+  #
+  # An **empty** set makes the AND vacuously true, so the leg is reaped on that single
+  # timeout — and that is the right answer, not an oversight. The row only carries its
+  # medias once the ACK has been processed, and the watchdog is only armed at that same
+  # ACK; so an empty set means a leg that timed out before it was ever fully joined,
+  # for which one dead media is all the evidence there will ever be.
+  defp watched_medias(row), do: Map.keys(row.medias || %{}) -- [:text]
 
   # ── create ───────────────────────────────────────────────────────────────────
 
@@ -2288,6 +2375,7 @@ defmodule Kelix.Mod.Mcu do
            text: spec.text_codecs || config.text_codecs
          },
          dtmf: if(is_nil(spec.dtmf), do: config.dtmf, else: spec.dtmf),
+         rtp_timeout_ms: config.rtp_timeout_ms,
          video: video,
          layout: layout,
          max_participants: spec.max_participants || config.max_participants,

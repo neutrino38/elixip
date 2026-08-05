@@ -201,7 +201,25 @@ defmodule Kelix.Mcu.Call do
 
         goto(loop, "FPU requested")
 
+      # P7/S1 (§16.1): every media of this leg has gone silent — the module only sends
+      # this once the AND is satisfied, so one dead media does not get us here. Same
+      # teardown as losing the media server: the call is over, it just has not been
+      # hung up yet.
+      {:mcu_event, :media_timeout, media} ->
+        media_cleanup_ressources()
+        leave(:media_timeout)
+        send_BYE()
+        goto(hanging_up, "media timeout on #{media}")
+
+      # P7/S2: real media is flowing. An observation for the operator view, already
+      # emitted by the module — nothing for the call to do.
+      {:mcu_event, :media_connected, _media} ->
+        goto(loop, "media connected")
+
       {:mcu_event, _event} ->
+        goto(loop, "mcu event")
+
+      {:mcu_event, _event, _arg} ->
         goto(loop, "mcu event")
 
       {:dialog_terminated, _dlg, _reason} ->
@@ -283,7 +301,25 @@ defmodule Kelix.Mcu.Call do
 
         goto(loop, "FPU requested")
 
+      # P7/S1 (§16.1): every media of this leg has gone silent — the module only sends
+      # this once the AND is satisfied, so one dead media does not get us here. Same
+      # teardown as losing the media server: the call is over, it just has not been
+      # hung up yet.
+      {:mcu_event, :media_timeout, media} ->
+        media_cleanup_ressources()
+        leave(:media_timeout)
+        send_BYE()
+        goto(hanging_up, "media timeout on #{media}")
+
+      # P7/S2: real media is flowing. An observation for the operator view, already
+      # emitted by the module — nothing for the call to do.
+      {:mcu_event, :media_connected, _media} ->
+        goto(loop, "media connected")
+
       {:mcu_event, _event} ->
+        goto(loop, "mcu event")
+
+      {:mcu_event, _event, _arg} ->
         goto(loop, "mcu event")
 
       {:dialog_terminated, _dlg, _reason} ->

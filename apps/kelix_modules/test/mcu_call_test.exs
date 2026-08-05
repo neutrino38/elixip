@@ -278,6 +278,19 @@ defmodule Kelix.Mod.McuCallTest do
     Conference.participants(conf)
   end
 
+  # The AND needs the row's media set, which `joined/2` fills after attach returns.
+  # Waiting for it is not incidental: with an empty set the documented fallback reaps
+  # the leg on its first timeout, which is right in production (a leg that never
+  # joined) and wrong in a test that means to check the AND.
+  defp joined_participant(uid) do
+    wait_for(fn ->
+      case participants(uid) do
+        [%{medias: medias} = part] when map_size(medias) > 0 -> part
+        _ -> nil
+      end
+    end)
+  end
+
   defp wait_for(fun, attempts \\ 200) do
     case fun.() do
       nil when attempts > 0 ->
@@ -358,10 +371,13 @@ defmodule Kelix.Mod.McuCallTest do
       send(pid, {:ACK, %{method: :ACK}, nil, dialog})
       ack_time = wait_for(fn -> non_empty(TestStub.rpc_order()) end)
 
+      # P7/S1: the RTP watchdog is armed once the leg is really in the mix — one
+      # StartRTPTimeout per receiving media, and NEVER on text (§16.1).
       assert ack_time == [
                "SetAudioCodec",
                "StartSending",
                "AddSidebarParticipant",
+               "StartRTPTimeout",
                "SetParticipantDisplayName"
              ]
     end
@@ -529,6 +545,10 @@ defmodule Kelix.Mod.McuCallTest do
                "StartSending",
                "AddSidebarParticipant",
                "AddMosaicParticipant",
+               # P7/S1: one watchdog per receiving media (§16.1), armed once the leg
+               # is really in the mix
+               "StartRTPTimeout",
+               "StartRTPTimeout",
                # the script's `displayname: :auto` banner, from the scenario process,
                # before the registry's layout follow-up on `{:joined}`
                "SetParticipantDisplayName",
@@ -685,6 +705,10 @@ defmodule Kelix.Mod.McuCallTest do
                "StartSending",
                "AddSidebarParticipant",
                "AddMosaicParticipant",
+               # P7/S1: still only TWO watchdogs on a three-media leg — text is never
+               # armed, T.140 being legitimately silent between keystrokes (§16.1)
+               "StartRTPTimeout",
+               "StartRTPTimeout",
                # the script's `displayname: :auto` banner, then the automatic layout,
                # which still follows the *video* legs only: a text leg is not a tile
                "SetParticipantDisplayName",
@@ -793,6 +817,74 @@ defmodule Kelix.Mod.McuCallTest do
       assert Enum.map(0..10, &Mcu.auto_comp/1) == [0, 0, 6, 1, 1, 10, 5, 4, 4, 2, 9]
       assert Mcu.auto_comp(16) == 9
       assert Mcu.auto_comp(17) == 11
+    end
+  end
+
+  describe "RTP inactivity watchdog (§16.1, P7)" do
+    # The AND lives in the controller (decided 2026-08-05): the server reports one
+    # media at a time, and only "every watched media is silent" is a dead leg.
+    test "one silent media is reported but does not hang up the call", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      assert_receive {:rpc, "AddMosaicParticipant", _params}, 2000
+
+      part = joined_participant(ctx.uid)
+      send(Mcu, {:mcu_event, "mcu1", {:media_timeout, 42, ctx.uid, part.part_id, :video}})
+
+      # the leg keeps its slot and its tile: audio is still flowing
+      refute_receive {:sent_request, :BYE, _req}, 500
+      assert Process.alive?(pid)
+
+      # and the silence is recorded, so the operator view can show which media died
+      [part] = participants(ctx.uid)
+      assert Map.has_key?(part.silent, :video)
+    end
+
+    test "the last silent media hangs up the call", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      assert_receive {:rpc, "AddMosaicParticipant", _params}, 2000
+
+      part = joined_participant(ctx.uid)
+      send(Mcu, {:mcu_event, "mcu1", {:media_timeout, 42, ctx.uid, part.part_id, :video}})
+      refute_receive {:sent_request, :BYE, _req}, 300
+      send(Mcu, {:mcu_event, "mcu1", {:media_timeout, 42, ctx.uid, part.part_id, :audio}})
+
+      assert_receive {:sent_request, :BYE, _req}, 2000
+    end
+
+    # Without this, a leg that flapped once would be reaped the next time any OTHER
+    # media hiccups — the AND would never forget.
+    test "a media coming back clears its silence", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      assert_receive {:rpc, "AddMosaicParticipant", _params}, 2000
+
+      part = joined_participant(ctx.uid)
+      send(Mcu, {:mcu_event, "mcu1", {:media_timeout, 42, ctx.uid, part.part_id, :video}})
+      send(Mcu, {:mcu_event, "mcu1", {:media_connected, 42, ctx.uid, part.part_id, :video}})
+
+      # video is alive again, so audio going quiet is NOT the whole leg
+      send(Mcu, {:mcu_event, "mcu1", {:media_timeout, 42, ctx.uid, part.part_id, :audio}})
+      refute_receive {:sent_request, :BYE, _req}, 500
+      assert Process.alive?(pid)
+    end
+
+    # An audio-only leg has a watched set of exactly one, so its single timeout IS
+    # every media — the AND must not need two events to fire.
+    test "an audio-only leg hangs up on its single timeout", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      assert_receive {:rpc, "AddSidebarParticipant", _params}, 2000
+
+      part = joined_participant(ctx.uid)
+      send(Mcu, {:mcu_event, "mcu1", {:media_timeout, 42, ctx.uid, part.part_id, :audio}})
+
+      assert_receive {:sent_request, :BYE, _req}, 2000
     end
   end
 

@@ -150,6 +150,11 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
          # it: the reference `mcu.exs` does, a leg driven by some other script may
          # sit on a topology where following the source address is wrong.
          nat_latch: Keyword.get(opts, :nat_latch, false) == true,
+         # RTP inactivity watchdog (§16.1), armed per media at the ACK. Config, not a
+         # script knob: it describes the deployment's tolerance for a silent leg, not
+         # this call's intent. 0 disables it, and so does a media server that predates
+         # the `StartRTPTimeout` RPC.
+         rtp_timeout_ms: Map.get(conf, :rtp_timeout_ms, 0),
          # security material, per leg: our SDES key per media, our ICE credentials
          # (one pair for the whole connection) and the server's DTLS fingerprint
          local_sdes: %{},
@@ -240,6 +245,12 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   def handle_call(:attach, _from, state) do
     case start_sending_all(state) do
       {:ok, state} ->
+        # §16.1: the watchdog is armed HERE and not at answer time. The ACK is the
+        # first moment the 200 OK is known to have gone out, and arming from it is
+        # what makes "answered but no media ever arrived" detectable while never
+        # surveilling the ringing phase. A caller that never ACKs is the script's
+        # idle timeout to catch, not ours.
+        arm_rtp_timeouts(state)
         {:reply, {:ok, media_summary(state)}, %{state | status: :attached}}
 
       {:error, reason} ->
@@ -562,6 +573,57 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # In the leg's media order (audio first), never the negotiation map's: iterating a
   # map would leave the RPC sequence to term order, and this sequence is a documented
   # contract with the media server (§2 point 1) that a test pins down.
+  # ── RTP inactivity watchdog (§16.1, P7) ──────────────────────────────────────
+
+  # Arms one watchdog per receiving media, **except text**: T.140 is legitimately
+  # silent between keystrokes, so watching it would reap a working leg the moment its
+  # user stops typing. `rtp_timeout_ms = 0` disables the feature entirely.
+  #
+  # Best-effort on purpose: a server that predates §16.1 answers "method not found",
+  # and a leg that carries media is worth more than a leg that is monitored. The
+  # failure is logged once per media rather than swallowed, so a silent fleet-wide
+  # "nothing is ever armed" cannot pass for working.
+  defp arm_rtp_timeouts(%{rtp_timeout_ms: ms} = state) when is_integer(ms) and ms > 0 do
+    for media <- state.receiving, media != :text do
+      case rpc(state, "StartRTPTimeout", [
+             state.conf_id,
+             state.part_id,
+             media_int(media),
+             ms,
+             @role_main
+           ]) do
+        {:ok, _} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning(
+            module: __MODULE__,
+            message:
+              "conf=#{state.conf_id} part=#{state.part_id}: could not arm the #{media} " <>
+                "RTP watchdog (#{inspect(reason)}) — a silent leg will only be caught " <>
+                "by the script's idle timeout"
+          )
+      end
+    end
+
+    :ok
+  end
+
+  defp arm_rtp_timeouts(_state), do: :ok
+
+  # Disarms a media's watchdog. Used when a media is put on hold (§6.4): a legitimate
+  # hold stops the RTP, and an armed watchdog would read it as a dead leg.
+  @doc false
+  def disarm_rtp_timeout(state, media) do
+    void_rpc(state, "StartRTPTimeout", [
+      state.conf_id,
+      state.part_id,
+      media_int(media),
+      0,
+      @role_main
+    ])
+  end
+
   defp start_sending_all(state) do
     state.medias
     |> Enum.filter(&Map.has_key?(state.negotiated, &1))

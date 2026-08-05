@@ -29,6 +29,10 @@ defmodule Kelix.Mod.Mcu.Conference do
           conn: pid | nil,
           state: :ringing | :connected | :leaving,
           medias: map,
+          # P7/S1: per-media RTP silence, keyed by media atom. A leg is only
+          # reaped once EVERY watched media (all but text) is silent, so this
+          # is the AND's state — set by event 3, cleared by event 4.
+          silent: %{optional(atom) => true},
           admitted_at: DateTime.t(),
           joined_at: DateTime.t() | nil
         }
@@ -45,6 +49,10 @@ defmodule Kelix.Mod.Mcu.Conference do
             rate: 32_000,
             codecs: %{audio: [], video: [], text: []},
             dtmf: true,
+            # RTP inactivity watchdog armed per media at the ACK (§16.1). Comes from
+            # `[module.mcu] rtp_timeout_ms`; 0 disables it. Lives on the conference so
+            # the adapter reads it off the leg it is setting up, like `video`.
+            rtp_timeout_ms: 10_000,
             video: %{size: 6, fps: 15, bitrate: 1024, intra_period: 300},
             layout: %{comp: 1, size: 6, auto: true},
             max_participants: 20,
