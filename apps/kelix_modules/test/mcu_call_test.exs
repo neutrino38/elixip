@@ -15,6 +15,7 @@ defmodule Kelix.Mod.McuCallTest do
   alias Kelix.Mcu.TestStub
   alias Kelix.Mod.Mcu
   alias Kelix.Mod.Mcu.{Client, Config, Conference}
+  alias Kelix.Mod.Mcu.Adapter.Conn
 
   # The media servers the module drives now come from [mediaserver.pool.*], decoded
   # by Kelix.Config; the registry takes the resulting list directly so a test needs
@@ -58,6 +59,13 @@ defmodule Kelix.Mod.McuCallTest do
   a=rtcp-fb:99 nack\r
   a=sendrecv\r
   """
+
+  # Hold, the flavour that starves our reception: the peer says it will not send.
+  @offer_hold_inactive String.replace(@offer_video, "a=sendrecv", "a=inactive")
+
+  # Hold, the flavour that does NOT: a caller holding with sendonly keeps sending
+  # music-on-hold, so its RTP never stops and the watchdog must stay armed.
+  @offer_hold_sendonly String.replace(@offer_video, "a=sendrecv", "a=sendonly")
 
   # A total-conversation terminal: audio, video and T.140 with RFC 4103 redundancy.
   # The text payload types are deliberately NOT the ones we would pick locally
@@ -885,6 +893,53 @@ defmodule Kelix.Mod.McuCallTest do
       send(Mcu, {:mcu_event, "mcu1", {:media_timeout, 42, ctx.uid, part.part_id, :audio}})
 
       assert_receive {:sent_request, :BYE, _req}, 2000
+    end
+  end
+
+  describe "hold and resume (§6.4, P7)" do
+    # Without the disarming half of the watchdog, a hold longer than rtp_timeout_ms
+    # reads as a dead leg and hangs up a working call — ten seconds being an ordinary
+    # consultation transfer. The criterion is "will the peer send", not "is this hold".
+    test "a hold the peer stops sending on disarms the watchdog", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      part = joined_participant(ctx.uid)
+
+      TestStub.rpc_order()
+      assert {:ok, _answer} = Conn.set_remote_offer(part.conn, @offer_hold_inactive)
+
+      # both medias disarmed (timeoutMs = 0), and text was never armed to begin with
+      assert_received {:rpc, "StartRTPTimeout", [_conf, _part, 0, 0, _role]}
+      assert_received {:rpc, "StartRTPTimeout", [_conf, _part, 1, 0, _role]}
+    end
+
+    test "a hold the peer keeps sending on leaves it armed", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      part = joined_participant(ctx.uid)
+
+      TestStub.rpc_order()
+      assert {:ok, _answer} = Conn.set_remote_offer(part.conn, @offer_hold_sendonly)
+
+      assert_received {:rpc, "StartRTPTimeout", [_conf, _part, 0, ms, _role]} when ms > 0
+      refute_received {:rpc, "StartRTPTimeout", [_conf, _part, _media, 0, _role]}
+    end
+
+    test "resuming re-arms it", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      part = joined_participant(ctx.uid)
+
+      assert {:ok, _} = Conn.set_remote_offer(part.conn, @offer_hold_inactive)
+      TestStub.rpc_order()
+      assert {:ok, _} = Conn.set_remote_offer(part.conn, @offer_video)
+
+      # the ACK path returns early on an attached leg, so if the answer did not
+      # re-arm, a resumed media would stay unwatched for good
+      assert_received {:rpc, "StartRTPTimeout", [_conf, _part, 0, ms, _role]} when ms > 0
     end
   end
 
