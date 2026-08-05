@@ -458,9 +458,15 @@ defmodule Kelix.Mod.McuCallTest do
 
       # name from the From header, RTP participant, default mosaic and sidebar (§3.3)
       assert_received {:rpc, "CreateParticipant", [42, "alice@phone_example_com", 0, 0, 0]}
-      # audio (0), the offered PT numbering, main role, RTP protocol
-      assert_received {:rpc, "StartReceiving", [42, 7, 0, rtp_map, 0, 0]}
+      # audio (0), the offered PT numbering, main role, RTP protocol, and the offer's
+      # codec attributes (P8a): the media server negotiates against them and answers
+      # with what it accepted.
+      assert_received {:rpc, "StartReceiving", [42, 7, 0, rtp_map, 0, 0, offer]}
       assert rtp_map == %{"8" => 8, "0" => 0, "101" => 100}
+      # this offer carries no a=fmtp, so the struct is present but its fmtp map empty —
+      # the member always travels, so the server never has to distinguish "absent" from
+      # "no fmtp offered"
+      assert offer == %{"fmtp" => %{}}
 
       send(pid, {:ACK, %{method: :ACK}, nil, dialog})
 
@@ -469,6 +475,34 @@ defmodule Kelix.Mod.McuCallTest do
       assert_receive {:rpc, "SetAudioCodec", [42, 7, 8]}, 2000
       assert_receive {:rpc, "StartSending", [42, 7, 0, "192.168.1.50", 40_000, _map, 0]}, 2000
       assert_receive {:rpc, "AddSidebarParticipant", [42, 0, 7]}, 2000
+    end
+
+    # The offer's fmtp is what the media server negotiates against, so it has to reach
+    # it unchanged — the reason parse/1 keeps a raw form alongside the parsed structs.
+    test "the offer's fmtp is forwarded verbatim", ctx do
+      {_pid, _dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+
+      assert_received {:rpc, "StartReceiving", [42, 7, 1, _map, 0, 0, offer]}
+
+      assert offer == %{
+               "fmtp" => %{"99" => "profile-level-id=42e01f;packetization-mode=1"}
+             }
+    end
+
+    # The verdict restricts what we SEND: never a codec the server just filtered on
+    # receive. A stub that returns only [port, ip] is a pre-P8a server, which is what
+    # every other test here exercises — this one is the delegated path.
+    @tag start_receiving: {:ok, [@rec_port, @media_ip, %{"8" => ""}]}
+    test "the send map is restricted to what the server accepted", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+
+      # the offer proposed PCMA, PCMU and telephone-event; the server accepted PCMA
+      # alone, so that is all we send
+      assert_receive {:rpc, "StartSending", [42, 7, 0, _ip, _port, send_map, 0]}, 2000
+      assert send_map == %{"8" => 8}
     end
 
     test "the participant row tracks ringing → connected", ctx do

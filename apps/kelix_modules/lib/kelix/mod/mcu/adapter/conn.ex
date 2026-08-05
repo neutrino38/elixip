@@ -434,6 +434,12 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
         # rtpMaps are keyed with the OFFERED PTs — no local renumbering.
         rtp_map = neg.rtp_map
 
+        # P8a: the offer's codec-level attributes, the part `rtpMap` cannot carry. A
+        # struct with one member rather than a bare fmtp map, so the negotiator can
+        # ask for more later without another positional parameter. `fmtp_raw` and not
+        # the parsed structs: what goes on the wire must be what the peer wrote.
+        offer = %{"fmtp" => Map.get(desc, :fmtp_raw, %{})}
+
         with {:ok, [rec_port | returned]} <-
                rpc(state, "StartReceiving", [
                  state.conf_id,
@@ -441,11 +447,29 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
                  m,
                  rtp_map,
                  @role_main,
-                 @proto_rtp
+                 @proto_rtp,
+                 offer
                ]),
              {:ok, ip} <- announced_ip(state, returned),
              :ok <- set_remote_security(state, m, desc),
              :ok <- set_rtp_properties(state, m, desc) do
+          # P8a: `returnVal[2]` is the negotiation verdict — every accepted payload
+          # type is a key, empty value included, so presence IS the accept signal.
+          # `nil` means a media server that predates the delegation, which selects the
+          # legacy client-side construction (§16.3.3, the rolling-upgrade path).
+          accepted = Sdp.accepted_pts(rtp_map, Enum.at(returned, 1))
+
+          Logger.info(
+            module: __MODULE__,
+            message:
+              "conf=#{state.conf_id} part=#{state.part_id} #{media}: " <>
+                "proposed #{map_size(rtp_map)} pt, " <>
+                if(accepted,
+                  do: "accepted #{map_size(accepted)} negotiated-by=server",
+                  else: "negotiated-by=local (media server predates P8a)"
+                )
+          )
+
           {:ok, %{state | receiving: [media | state.receiving], media_ip: ip},
            Map.merge(neg, %{
              rec_port: rec_port,
@@ -453,6 +477,8 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
              # decided once, here: the answer states it and the encoder is
              # configured with it, so the two cannot drift apart
              answered_profile_level_id: h264_profile_level_id(state, desc),
+             # the server's verdict, or nil on a pre-P8a server
+             accepted: accepted,
              # drives the receive watchdog (§16.1): a media the peer says it will not
              # send must not be watched, or a hold hangs up the call
              peer_sends: peer_sends?(desc)
@@ -672,7 +698,10 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
              m,
              ip,
              port,
-             neg.rtp_map,
+             # P8a: never send a codec the server filtered on receive. Symmetric-codec
+             # assumption, which is what a mixer does anyway; a nil verdict leaves the
+             # map untouched.
+             Sdp.restrict_send_map(neg.rtp_map, neg.rtp_map, Map.get(neg, :accepted)),
              @role_main
            ]) do
       {:ok, %{state | sending: [media | state.sending]}}
