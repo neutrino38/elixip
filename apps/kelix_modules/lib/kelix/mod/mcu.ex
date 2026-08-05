@@ -63,6 +63,11 @@ defmodule Kelix.Mod.Mcu do
   # INVITE (with a 500) rather than let the caller retransmit into the void.
   @facade_timeout_ms 5_000
 
+  # What the context-aware facade (`admit/4`, `attach/2`, `leave/3`) answers — and
+  # stores in `sip_ctx.lasterr` — when the session already runs a JSR309 media
+  # session: MCU and JSR309 calls are mutually exclusive.
+  @jsr309_error :jsr309_media_already_in_use
+
   # The default mosaic and the default sidebar are the only ones this increment
   # drives (§1.2, decision 6b).
   @default_mosaic 0
@@ -460,6 +465,43 @@ defmodule Kelix.Mod.Mcu do
     end
   end
 
+  def admit(sip_ctx = %SIP.Context{}, domain, req), do: admit(sip_ctx, domain, req, [])
+
+  @doc """
+  Context-aware `admit/3`, for scenario scripts. The verdict travels through the
+  context, never through the return value — this returns the updated `sip_ctx`
+  only, and the scenario tests `sip_ctx.lasterr` and reacts:
+
+    * `:ok` — admitted; the conference and the participant handle are stored in
+      the context appdata under `:mcu_conf` and `:mcu_part` (where the
+      context-aware `attach/1` and `leave/2` read them back);
+    * `{:error, reason}` — `admit/3`'s verdicts, for the script to map onto a
+      SIP response;
+    * `#{inspect(@jsr309_error)}` — an MCU call and a JSR309 media session are
+      mutually exclusive on the same SIP session: the context already carries a
+      JSR309 peer connection, so the call is refused without touching the
+      conference and an error is logged. A pending `goto` aborts the scenario
+      on any non-`:ok` value.
+  """
+  @spec admit(%SIP.Context{}, String.t(), map, keyword) :: %SIP.Context{}
+  def admit(sip_ctx = %SIP.Context{}, domain, req, opts) do
+    case no_jsr309_media(sip_ctx) do
+      {:ok, sip_ctx} ->
+        case admit(domain, req, opts) do
+          {:ok, conf, part} ->
+            sip_ctx
+            |> SIP.Context.appdata_set(:mcu_conf, conf)
+            |> SIP.Context.appdata_set(:mcu_part, part)
+
+          {:error, _reason} = err ->
+            SIP.Context.set(sip_ctx, :lasterr, err)
+        end
+
+      {:error, sip_ctx} ->
+        sip_ctx
+    end
+  end
+
   @doc """
   ACK-time: start sending, join the audio mixer, and mark the participant joined
   (§6.2, second half).
@@ -468,7 +510,34 @@ defmodule Kelix.Mod.Mcu do
   filling up must not serialise its joins behind one process. Only the row update is
   serialised, which is all that needs to be.
   """
+  @spec attach(%SIP.Context{}) :: %SIP.Context{}
   @spec attach(Conference.participant()) :: :ok | {:error, term}
+
+  # Context-aware clause, for scenario scripts — must stay ahead of the
+  # `is_map/1` clause below: a %SIP.Context{} is a map too. Same JSR309 mutual
+  # exclusion as `admit/4`, same contract: the verdict goes to `sip_ctx.lasterr`
+  # (`:ok`, `{:error, reason}` or the JSR309 refusal), never to the return value
+  # — this returns the updated context only. The participant is read back from
+  # the `:mcu_part` appdata key `admit/4` stored. The MCU leg's own peer
+  # connection (created by the media macros on this module's adapter between
+  # admit and attach) passes the check; only a *JSR309* media session refuses
+  # the call.
+  def attach(sip_ctx = %SIP.Context{}) do
+    case no_jsr309_media(sip_ctx) do
+      {:ok, sip_ctx} ->
+        rez =
+          case SIP.Context.appdata_get(sip_ctx, :mcu_part) do
+            nil -> {:error, :no_such_participant}
+            part -> attach(part)
+          end
+
+        SIP.Context.set(sip_ctx, :lasterr, rez)
+
+      {:error, sip_ctx} ->
+        sip_ctx
+    end
+  end
+
   def attach(part) when is_map(part) do
     with {:ok, row} <- participant(part),
          {:ok, medias} <- Adapter.attach(row.conn) do
@@ -528,8 +597,27 @@ defmodule Kelix.Mod.Mcu do
   Idempotent by contract — the reference script calls it from five places, and the
   crash reaper (§9.3) from a sixth.
   """
+  @spec leave(%SIP.Context{}, atom) :: %SIP.Context{}
   @spec leave(Conference.participant(), atom) :: :ok
   def leave(part, reason \\ :bye)
+
+  # Context-aware clause, for scenario scripts — must stay ahead of the
+  # `is_map/1` clause below: a %SIP.Context{} is a map too. Same JSR309 mutual
+  # exclusion as `admit/4`, verdict in `sip_ctx.lasterr`, participant read back
+  # from the `:mcu_part` appdata key `admit/4` stored (nothing to do when it is
+  # absent — leave stays idempotent). Returns the updated context only.
+  def leave(sip_ctx = %SIP.Context{}, reason) do
+    case no_jsr309_media(sip_ctx) do
+      {:ok, sip_ctx} ->
+        case SIP.Context.appdata_get(sip_ctx, :mcu_part) do
+          nil -> sip_ctx
+          part -> SIP.Context.set(sip_ctx, :lasterr, leave(part, reason))
+        end
+
+      {:error, sip_ctx} ->
+        sip_ctx
+    end
+  end
 
   def leave(part, reason) when is_map(part) do
     # close the adapter connection first: it owns the MCU-side participant
@@ -548,6 +636,28 @@ defmodule Kelix.Mod.Mcu do
   end
 
   def leave(_part, _reason), do: :ok
+
+  # ── JSR309 mutual exclusion ───────────────────────────────────────────────────
+  # A session context can only carry ONE media leg. "A JSR309 session is in
+  # progress" means the media macros already created a peer connection
+  # (`:mediapeerconnectionid`) on a media server OTHER than this module's adapter:
+  # the MCU leg's own connection — stored under the same key by
+  # `reply_invite_with_sdp` between admit and attach — must keep passing, or the
+  # check would refuse every normal MCU call at ACK time.
+  defp no_jsr309_media(sip_ctx = %SIP.Context{}) do
+    cnx = SIP.Context.appdata_get(sip_ctx, :mediapeerconnectionid)
+
+    if is_nil(cnx) or sip_ctx.mediaservermodule == Adapter do
+      {:ok, SIP.Context.set(sip_ctx, :lasterr, :ok)}
+    else
+      Logger.error(
+        module: __MODULE__,
+        message: "A JSR309 media session is already in progress. Cannot handle an MCU call here"
+      )
+
+      {:error, SIP.Context.set(sip_ctx, :lasterr, @jsr309_error)}
+    end
+  end
 
   @doc """
   Mute or unmute one media of a participant (`SetMute`).

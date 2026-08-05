@@ -29,6 +29,8 @@
 defmodule Kelix.Mcu.AdhocCall do
   use SIP.Scenario
   use SIP.Session.CallUAS
+  # the admit/attach/leave DSL macros — rebind sip_ctx in place, verdict in sip_ctx.lasterr
+  use Kelix.Mod.Mcu.Script
   require Logger
   import SIP.Session, only: [reply: 5, reply: 6]
 
@@ -46,13 +48,18 @@ defmodule Kelix.Mcu.AdhocCall do
   state wait_invite do
     on_events do
       {:INVITE, req, _trans, dialog_pid} ->
-        case admit(req, dialog_pid, sip_ctx.domain) do
-          {:ok, conf, part} ->
+        admit(req, dialog_pid)
+
+        case sip_ctx.lasterr do
+          :ok ->
+            # admit/4 stored the conference and the participant handle in the appdata
+            conf = SIP.Context.appdata_get(sip_ctx, :mcu_conf)
+            part = SIP.Context.appdata_get(sip_ctx, :mcu_part)
+
             # The local identity of this leg is the conference itself: it is what an
             # in-dialog request we originate (the BYE below) puts in From/To, and
             # without it `send_BYE()` has no URI to build.
             ctx_set(:username, conf.did)
-            appdata_set(:mcu_part, part)
             # FW-1: tells the adapter which conference this leg joins. The media
             # macros forward it to create_peer_connection/3 without having to know
             # what it means. `nat_latch` rides along: a conference leg always answers
@@ -67,8 +74,13 @@ defmodule Kelix.Mcu.AdhocCall do
             reply_invite(180, "Ringing")
             goto(answering, "INVITE #{conf.did}")
 
-          {:rejected, description} ->
-            scenario_success(description)
+          # MCU and JSR309 calls are mutually exclusive; the 500 is already out
+          :jsr309_media_already_in_use ->
+            scenario_failure("JSR309 media session already in progress")
+
+          # module verdict; the SIP error response is already out
+          {:error, reason} ->
+            scenario_success("rejected: #{inspect(reason)}")
         end
 
       {:CANCEL, _req, _trans, _dlg} ->
@@ -104,7 +116,7 @@ defmodule Kelix.Mcu.AdhocCall do
         # (§11) can tell a 488 from a 500 — only the script knows which it chose.
         {code, _text} = media_error(reason)
         media_cleanup_ressources()
-        leave(sip_ctx, {:no_media, code})
+        leave({:no_media, code})
         scenario_success("media refused: #{code} (#{inspect(reason)})")
 
       _ ->
@@ -120,7 +132,8 @@ defmodule Kelix.Mcu.AdhocCall do
       # transaction layer retransmits (RFC 3261 §13.2.2.4), and those copies must
       # not re-run the ACK-time sequence.
       {:ACK, _req, _trans, _dlg} ->
-        goto(in_conference, attach(sip_ctx))
+        attach()
+        goto(in_conference, "ACK: in the mix")
 
       # Re-INVITE / UPDATE: renegotiate on the same participant.
       {:INVITE, _req, _trans, _dlg} ->
@@ -152,20 +165,20 @@ defmodule Kelix.Mcu.AdhocCall do
       {:BYE, req, _trans, dialog_pid} ->
         reply(dialog_pid, req, 200, "OK", [])
         media_cleanup_ressources()
-        leave(sip_ctx, :bye)
+        leave(:bye)
         scenario_success("BYE")
 
       # The caller cancelled around the answer: the IST already sent 487, only the
       # teardown is ours.
       {:CANCEL, _req, _trans, _dlg} ->
         media_cleanup_ressources()
-        leave(sip_ctx, :cancel)
+        leave(:cancel)
         scenario_success("cancelled")
 
       # The media server went away (§9.2): the mix is gone, so the call is too.
       {:mcu_event, :server_disconnected} ->
         media_cleanup_ressources()
-        leave(sip_ctx, :mcu_lost)
+        leave(:mcu_lost)
         send_BYE()
         goto(hanging_up, "mcu lost")
 
@@ -183,7 +196,7 @@ defmodule Kelix.Mcu.AdhocCall do
 
       {:dialog_terminated, _dlg, _reason} ->
         media_cleanup_ressources()
-        leave(sip_ctx, :bye)
+        leave(:bye)
         scenario_success("dialog ended")
 
       {:scenario_ctl, :shutdown, _reason} ->
@@ -228,7 +241,8 @@ defmodule Kelix.Mcu.AdhocCall do
           on_media_error: &__MODULE__.media_error/1
         )
 
-        goto(loop, attach(sip_ctx))
+        attach()
+        goto(loop, "UPDATE: renegotiated")
 
       # From here on, exactly what in_call handles.
       {:INFO, req, _trans, dialog_pid} ->
@@ -238,17 +252,17 @@ defmodule Kelix.Mcu.AdhocCall do
       {:BYE, req, _trans, dialog_pid} ->
         reply(dialog_pid, req, 200, "OK", [])
         media_cleanup_ressources()
-        leave(sip_ctx, :bye)
+        leave(:bye)
         scenario_success("BYE")
 
       {:CANCEL, _req, _trans, _dlg} ->
         media_cleanup_ressources()
-        leave(sip_ctx, :cancel)
+        leave(:cancel)
         scenario_success("cancelled")
 
       {:mcu_event, :server_disconnected} ->
         media_cleanup_ressources()
-        leave(sip_ctx, :mcu_lost)
+        leave(:mcu_lost)
         send_BYE()
         goto(hanging_up, "mcu lost")
 
@@ -264,7 +278,7 @@ defmodule Kelix.Mcu.AdhocCall do
 
       {:dialog_terminated, _dlg, _reason} ->
         media_cleanup_ressources()
-        leave(sip_ctx, :bye)
+        leave(:bye)
         scenario_success("dialog ended")
 
       {:scenario_ctl, :shutdown, _reason} ->
@@ -282,12 +296,12 @@ defmodule Kelix.Mcu.AdhocCall do
     on_events do
       {200, _rsp, _trans, _dlg} ->
         media_cleanup_ressources()
-        leave(sip_ctx, :bye)
+        leave(:bye)
         scenario_success("clean shutdown")
     after
       10_000 ->
         media_cleanup_ressources()
-        leave(sip_ctx, :bye)
+        leave(:bye)
         scenario_failure("BYE not answered")
     end
   end
@@ -295,7 +309,7 @@ defmodule Kelix.Mcu.AdhocCall do
   on_shutdown do
     send_BYE()
     media_cleanup_ressources()
-    leave(sip_ctx, :bye)
+    leave(:bye)
     scenario_aborted("MCU call stopped gracefully")
   end
 
@@ -305,27 +319,46 @@ defmodule Kelix.Mcu.AdhocCall do
   # must become a SIP response, never a dead instance — the caller would otherwise
   # retransmit into the void.
 
-  defp admit(req, dialog_pid, domain) do
-    # `displayname: :auto` overlays the caller's name on its tile — the From
-    # header's display name, else the From URI's user part. Replace with a string
-    # (or drop the option) in a copy that wants its own naming policy.
-    with {:ok, _conf, origin} <- ensure_room(domain, req),
-         {:ok, conf, part} <- Kelix.Mod.Mcu.admit(domain, req, displayname: :auto) do
-      # name the conference this instance serves, so `kelictl monitor` says WHICH
-      SIP.Scenario.Monitor.note_account(conf.did)
-      Logger.info(module: __MODULE__, message: "#{conf.did}: room #{origin} (#{conf.uid})")
-      {:ok, conf, part}
-    else
+  # Backs the `admit` macro (Kelix.Mod.Mcu.Script). The module decides — its
+  # verdict comes back in `sip_ctx.lasterr`, including the JSR309 mutual exclusion
+  # refusal — this composes the SIP reply for the error verdicts and returns the
+  # updated context; the state code tests `sip_ctx.lasterr`.
+  defp do_admit(sip_ctx, req, dialog_pid, domain) do
+    case ensure_room(domain, req) do
+      {:ok, _conf, origin} ->
+        # `displayname: :auto` overlays the caller's name on its tile — the From
+        # header's display name, else the From URI's user part. Replace with a string
+        # (or drop the option) in a copy that wants its own naming policy.
+        sip_ctx = Kelix.Mod.Mcu.admit(sip_ctx, domain, req, displayname: :auto)
+
+        case sip_ctx.lasterr do
+          :ok ->
+            # name the conference this instance serves, so `kelictl monitor` says WHICH
+            conf = SIP.Context.appdata_get(sip_ctx, :mcu_conf)
+            SIP.Scenario.Monitor.note_account(conf.did)
+            Logger.info(module: __MODULE__, message: "#{conf.did}: room #{origin} (#{conf.uid})")
+
+          :jsr309_media_already_in_use ->
+            {code, text} = sip_response(:jsr309_media_already_in_use)
+            reply(dialog_pid, req, code, text, [], "reply #{code}")
+
+          {:error, reason} ->
+            {code, text} = sip_response(reason)
+            reply(dialog_pid, req, code, text, [], "reply #{code}")
+        end
+
+        sip_ctx
+
       {:error, reason} ->
         {code, text} = sip_response(reason)
         reply(dialog_pid, req, code, text, [], "reply #{code}")
-        {:rejected, "#{code} #{text}"}
+        SIP.Context.set(sip_ctx, :lasterr, {:error, reason})
     end
   rescue
     e ->
       Logger.error(module: __MODULE__, message: "mcu script failed: #{Exception.message(e)}")
       reply(dialog_pid, req, 500, "Server Internal Error", [], "script_failed")
-      {:rejected, "500 Server Internal Error"}
+      SIP.Context.set(sip_ctx, :lasterr, {:error, :script_failed})
   end
 
   # Resolve the room the R-URI names, creating it on first arrival — atomically, so
@@ -369,6 +402,8 @@ defmodule Kelix.Mcu.AdhocCall do
   defp sip_response(:rpc_error), do: {500, "Server Internal Error"}
   defp sip_response(:full), do: {486, "Busy Here"}
   defp sip_response(:mcu_down), do: {503, "Service Unavailable"}
+  # a JSR309 media session already owns this session's medias (mutual exclusion)
+  defp sip_response(:jsr309_media_already_in_use), do: {500, "Server Internal Error"}
   defp sip_response(_reason), do: {500, "Server Internal Error"}
 
   @doc false
@@ -379,23 +414,32 @@ defmodule Kelix.Mcu.AdhocCall do
   def media_error({:bad_offer, _reason}), do: {400, "Bad Request"}
   def media_error(_reason), do: {500, "Server Internal Error"}
 
-  # ACK time: codecs, StartSending, mixer join. A failure here leaves an established
-  # call whose leg is not in the mix; it is logged and the call kept, because the
-  # caller can hear the problem and hang up, and tearing a confirmed dialog down on a
-  # transient RPC error is worse.
-  defp attach(sip_ctx) do
-    case Kelix.Mod.Mcu.attach(SIP.Context.appdata_get(sip_ctx, :mcu_part)) do
+  # Backs the `attach` macro (Kelix.Mod.Mcu.Script). ACK time: codecs,
+  # StartSending, mixer join. A transient failure here leaves an established call
+  # whose leg is not in the mix; it is logged and the call kept (lasterr reset to
+  # :ok), because the caller can hear the problem and hang up, and tearing a
+  # confirmed dialog down on a transient RPC error is worse.
+  defp do_attach(sip_ctx) do
+    sip_ctx = Kelix.Mod.Mcu.attach(sip_ctx)
+
+    case sip_ctx.lasterr do
       :ok ->
-        "ACK: in the mix"
+        sip_ctx
+
+      # MCU and JSR309 are mutually exclusive: the module refused the leg (and
+      # logged why); the refusal stays in lasterr, so the goto that follows
+      # aborts the scenario
+      :jsr309_media_already_in_use ->
+        sip_ctx
 
       {:error, reason} ->
         Logger.error(module: __MODULE__, message: "attach failed: #{inspect(reason)}")
-        "ACK: attach failed"
+        SIP.Context.set(sip_ctx, :lasterr, :ok)
     end
   rescue
     e ->
       Logger.error(module: __MODULE__, message: "attach raised: #{Exception.message(e)}")
-      "ACK: attach failed"
+      SIP.Context.set(sip_ctx, :lasterr, :ok)
   end
 
   @doc false
@@ -447,17 +491,17 @@ defmodule Kelix.Mcu.AdhocCall do
     end
   end
 
-  # Idempotent teardown, called from seven places: `leave/2` tolerates an
-  # already-removed participant by contract (§7, property 1), and the media resources
-  # are released first — the adapter connection owns the MCU-side participant.
-  defp leave(sip_ctx, reason) do
-    case SIP.Context.appdata_get(sip_ctx, :mcu_part) do
-      nil -> :ok
-      part -> Kelix.Mod.Mcu.leave(part, reason)
-    end
+  # Backs the `leave` macro (Kelix.Mod.Mcu.Script). Idempotent teardown, called
+  # from seven places: `leave/2` tolerates an already-removed participant by
+  # contract (§7, property 1), and the media resources are released first — the
+  # adapter connection owns the MCU-side participant. The context-aware facade
+  # reads the `:mcu_part` handle back from the appdata (a nil one is a no-op) and
+  # applies the JSR309 mutual exclusion.
+  defp do_leave(sip_ctx, reason) do
+    Kelix.Mod.Mcu.leave(sip_ctx, reason)
   rescue
     e ->
       Logger.warning(module: __MODULE__, message: "leave raised: #{Exception.message(e)}")
-      :ok
+      sip_ctx
   end
 end

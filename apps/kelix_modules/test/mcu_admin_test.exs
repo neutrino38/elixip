@@ -809,6 +809,72 @@ defmodule Kelix.Mod.McuAdminTest do
     end
   end
 
+  # ── JSR309 mutual exclusion (context-aware facade) ────────────────────────────
+  # MCU and JSR309 calls are mutually exclusive on one SIP session: the
+  # context-aware admit/attach/leave answer through `sip_ctx.lasterr` only, and
+  # refuse a context that already carries a JSR309 peer connection.
+
+  describe "JSR309 mutual exclusion" do
+    test "a context with no media session goes through admit, attach and leave", ctx do
+      {:ok, conf} = Mcu.conference(ctx.uid)
+
+      sip_ctx = Mcu.admit(%SIP.Context{}, @domain, invite(conf.did))
+
+      assert sip_ctx.lasterr == :ok
+      assert SIP.Context.appdata_get(sip_ctx, :mcu_conf).uid == ctx.uid
+      part = SIP.Context.appdata_get(sip_ctx, :mcu_part)
+      assert part.conf_uid == ctx.uid
+
+      # the MCU leg's own peer connection — what the media macros store between
+      # admit and attach — must keep passing the check
+      {:ok, client} = Adapter.connect("mcu://" <> conf.mcu)
+
+      {:ok, conn} =
+        Adapter.create_peer_connection(client, self(), mcu_participant: part, media: :audio)
+
+      {:ok, _answer} = Adapter.set_remote_offer(conn, @offer)
+
+      sip_ctx =
+        sip_ctx
+        |> SIP.Context.set(:mediaservermodule, Adapter)
+        |> SIP.Context.appdata_set(:mediapeerconnectionid, conn)
+
+      sip_ctx = Mcu.attach(sip_ctx)
+      assert sip_ctx.lasterr == :ok
+
+      sip_ctx = Mcu.leave(sip_ctx, :bye)
+      assert sip_ctx.lasterr == :ok
+      {:ok, conf} = Mcu.conference(ctx.uid)
+      assert conf.participants == %{}
+    end
+
+    test "a JSR309 media session in the context refuses admit, attach and leave", ctx do
+      {:ok, conf} = Mcu.conference(ctx.uid)
+
+      # what a scenario that ran media_connect() + an SDP exchange on a JSR309
+      # media server carries in its context
+      jsr_ctx =
+        %SIP.Context{}
+        |> SIP.Context.set(:mediaservermodule, MediaServer.Mockup)
+        |> SIP.Context.appdata_set(:mediapeerconnectionid, make_ref())
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert Mcu.admit(jsr_ctx, @domain, invite(conf.did)).lasterr ==
+                   :jsr309_media_already_in_use
+        end)
+
+      assert log =~ "A JSR309 media session is already in progress"
+
+      # refused before touching the conference: no slot was reserved
+      {:ok, conf} = Mcu.conference(ctx.uid)
+      assert conf.participants == %{}
+
+      assert Mcu.attach(jsr_ctx).lasterr == :jsr309_media_already_in_use
+      assert Mcu.leave(jsr_ctx, :bye).lasterr == :jsr309_media_already_in_use
+    end
+  end
+
   # `join/1` with a caller-controlled From and admit options: admitted, then attached
   # through the adapter, so the banner RPC of `attach/1` really fires.
   defp join_with(uid, from, opts) do
