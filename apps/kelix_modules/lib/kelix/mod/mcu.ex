@@ -2376,6 +2376,7 @@ defmodule Kelix.Mod.Mcu do
          },
          dtmf: if(is_nil(spec.dtmf), do: config.dtmf, else: spec.dtmf),
          rtp_timeout_ms: config.rtp_timeout_ms,
+         medias: spec_medias(spec) || config.medias,
          video: video,
          layout: layout,
          max_participants: spec.max_participants || config.max_participants,
@@ -2386,6 +2387,18 @@ defmodule Kelix.Mod.Mcu do
            ),
          created_at: DateTime.utc_now()
        }}
+    end
+  end
+
+  # `medias` from a create/update spec, normalised to atoms. nil when the spec says
+  # nothing, so the config default applies.
+  defp spec_medias(spec) do
+    case Map.get(spec, :medias) do
+      nil ->
+        nil
+
+      list when is_list(list) ->
+        Enum.map(list, &String.to_existing_atom(String.downcase(to_string(&1))))
     end
   end
 

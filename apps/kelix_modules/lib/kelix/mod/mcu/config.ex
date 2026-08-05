@@ -29,6 +29,10 @@ defmodule Kelix.Mod.Mcu.Config do
             audio_codecs: ["OPUS", "G722", "PCMA", "PCMU"],
             # telephone-event is not a mixer codec but an RFC 4733 stream: it is a
             # flag on the audio media, not an entry in the codec list.
+            # Which m= sections a conference answers at all (§8.4). Codec NAMES are the
+            # media server's business since P8a; this is a deployment policy — an
+            # audio-only conference is a product decision, not a codec capability.
+            medias: [:audio, :video, :text],
             dtmf: true,
             video_codecs: ["H264"],
             # Total conversation is what this MCU is for, so T.140 is on by default.
@@ -94,7 +98,7 @@ defmodule Kelix.Mod.Mcu.Config do
   @bool_keys ~w(destroy_when_empty auto_layout gc_orphans)
   @string_keys ~w(video_fmtp record_dir image_dir logo_file)
 
-  @keys ~w(module call_timeout_ms vad rate audio_codecs video_codecs text_codecs
+  @keys ~w(module call_timeout_ms vad rate medias audio_codecs video_codecs text_codecs
            max_participants destroy_when_empty auto_layout layout_comp did_range
            did_ranges video_size video_fps video_bitrate video_intra_period video_fmtp
            xmlrpc_timeout_ms shutdown_grace_ms rtp_timeout_ms gc_orphans
@@ -115,6 +119,7 @@ defmodule Kelix.Mod.Mcu.Config do
          {:ok, vad} <- Vocabulary.vad(Map.get(block, "vad"), "vad"),
          {:ok, layout_comp} <- Vocabulary.comp(Map.get(block, "layout_comp"), "layout_comp"),
          {:ok, video_size} <- Vocabulary.size(Map.get(block, "video_size"), "video_size"),
+         {:ok, medias} <- medias(block),
          {:ok, audio, dtmf} <- audio_codecs(block),
          {:ok, video} <- codecs(block, "video_codecs", @video_codecs, defaults().video_codecs),
          {:ok, text} <- codecs(block, "text_codecs", @text_codecs, defaults().text_codecs),
@@ -128,6 +133,7 @@ defmodule Kelix.Mod.Mcu.Config do
          # for the id `0` (vad `none`, mosaic `1x1`), which is truthy here
          vad: vad || defaults.vad,
          rate: int(block, "rate", defaults.rate),
+         medias: medias,
          audio_codecs: audio,
          dtmf: dtmf,
          video_codecs: video,
@@ -263,6 +269,35 @@ defmodule Kelix.Mod.Mcu.Config do
     case Map.get(block, key) do
       nil -> :ok
       v -> if v in allowed, do: :ok, else: {:error, "#{key} must be one of #{inspect(allowed)}"}
+    end
+  end
+
+  # Which m= sections a conference answers. Names only — the codecs inside them are
+  # the media server's call since P8a. An empty list would be a conference that
+  # answers nothing, so it is refused rather than silently accepted.
+  @media_names ~w(audio video text)
+
+  defp medias(block) do
+    case Map.get(block, "medias") do
+      nil ->
+        {:ok, defaults().medias}
+
+      names when is_list(names) ->
+        names = Enum.map(names, &String.downcase(to_string(&1)))
+
+        case Enum.reject(names, &(&1 in @media_names)) do
+          [] when names != [] ->
+            {:ok, Enum.map(names, &String.to_existing_atom/1)}
+
+          [] ->
+            {:error, "medias must name at least one of #{Enum.join(@media_names, ", ")}"}
+
+          bad ->
+            {:error, "unknown media(s) #{Enum.join(bad, ", ")}; expected audio, video or text"}
+        end
+
+      _ ->
+        {:error, "medias must be a list of media names"}
     end
   end
 

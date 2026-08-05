@@ -16,6 +16,7 @@ defmodule Kelix.Mod.Mcu.ConfigTest do
 
       assert config.vad == 1
       assert config.rate == 32_000
+      assert config.medias == [:audio, :video, :text]
       assert config.audio_codecs == ["OPUS", "G722", "PCMA", "PCMU"]
       assert config.dtmf == true
       assert config.video_codecs == ["H264"]
@@ -226,5 +227,23 @@ defmodule Kelix.Mod.Mcu.ConfigTest do
     # a couple of values, so the test also proves it was the sample that parsed
     assert config.did_range == {8000, 8099}
     assert config.record_dir =~ "/"
+  end
+
+  describe "medias (§8.4, P8a)" do
+    test "names which m= sections a conference answers" do
+      assert {:ok, config} = Config.parse(%{"medias" => ["audio", "text"]})
+      assert config.medias == [:audio, :text]
+    end
+
+    test "an unknown media names the vocabulary" do
+      assert {:error, msg} = Config.parse(%{"medias" => ["audio", "hologram"]})
+      assert msg =~ "hologram"
+      assert msg =~ "audio, video or text"
+    end
+
+    test "an empty list is refused: a conference that answers nothing is a mistake" do
+      assert {:error, msg} = Config.parse(%{"medias" => []})
+      assert msg =~ "at least one"
+    end
   end
 end

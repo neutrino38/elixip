@@ -141,7 +141,11 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
          part_ref: participant.ref,
          part_id: part_id,
          # medias requested by the scenario, capped to what this increment answers
-         medias: requested_medias(opts),
+         # what this leg answers: what the scenario asked for, intersected with what the
+         # conference serves (§8.4 `medias`). Dropping a media from the conference is
+         # what `text_codecs = []` used to mean, said once for all three.
+         medias:
+           Enum.filter(requested_medias(opts), &(&1 in Map.get(conf, :medias, @supported_medias))),
          # the conference's inline video profile as of the answer (§5.1): what the
          # mixer encodes towards this leg, and the cap on its b=AS:
          video: conf.video,

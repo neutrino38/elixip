@@ -48,6 +48,9 @@ defmodule Kelix.Mod.Mcu.Conference do
             vad: 1,
             rate: 32_000,
             codecs: %{audio: [], video: [], text: []},
+            # Which m= sections this conference answers at all (§8.4). The codecs inside
+            # them are the media server's call since P8a.
+            medias: [:audio, :video, :text],
             dtmf: true,
             # RTP inactivity watchdog armed per media at the ACK (§16.1). Comes from
             # `[module.mcu] rtp_timeout_ms`; 0 disables it. Lives on the conference so
