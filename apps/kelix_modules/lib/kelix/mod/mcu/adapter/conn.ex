@@ -232,7 +232,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
          state = %{state | video: conf.video},
          {:ok, state} <- setup_local_security(state, descs),
          {:ok, state, negotiated} <- open_receive_plane(state, conf, descs),
-         :ok <- ensure_audio(negotiated) do
+         :ok <- ensure_any_media(negotiated) do
       answer =
         Sdp.build(%{
           ip: media_ip(state),
@@ -437,10 +437,11 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   end
 
   defp open_receive(state, conf, desc) do
-    codecs = Map.get(conf.codecs, desc.type, [])
-
-    case Sdp.negotiate(desc, codecs, conf.dtmf) do
-      # nothing in common on this media: it is declined (port 0), not a call failure
+    # P8a: the offer IS the menu. We propose every payload type it names that our codec
+    # table can turn into a Medooze constant, and the media server decides — it is the
+    # party that knows what it supports, and the one that will encode.
+    case Sdp.propose_all(desc, Map.get(conf, :dtmf, true)) do
+      # nothing nameable to propose on this media: declined (port 0), not a call failure
       {:error, :no_common_codec} ->
         :skip
 
@@ -1146,8 +1147,16 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   end
 
   # No audio ⇒ no conference leg. Video-only would need P3 anyway.
-  defp ensure_audio(negotiated) do
-    if Map.has_key?(negotiated, :audio), do: :ok, else: {:error, :no_common_codec}
+  # §6.3 rule 2: a media with nothing accepted is declined with port 0; only a leg
+  # where EVERY offered media came back empty is a 488, there being nothing to
+  # establish at all.
+  #
+  # This lifts the audio-mandatory guard `ensure_audio/1` deliberately: with the server
+  # arbitrating, "no audio" is no longer evidence of a misconfiguration worth refusing
+  # a call over, and a video-only leg — a display wall, a recording viewer — is a
+  # legitimate participant. It joins the mosaic and not the audio mixer.
+  defp ensure_any_media(negotiated) do
+    if negotiated == %{}, do: {:error, :no_common_codec}, else: :ok
   end
 
   defp answerable?(desc, medias) do

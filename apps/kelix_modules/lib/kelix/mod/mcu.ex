@@ -95,10 +95,16 @@ defmodule Kelix.Mod.Mcu do
 
   # ── argument vocabularies, shared by both frontals and the facade (§17.2) ─────
 
-  @create_args ~w(domain name did mcu vad rate audio_codecs video_codecs text_codecs
+  # `medias` and `dtmf` are the policy the codec lists used to encode (§8.4, P8a). The
+  # lists themselves are still accepted so a script written against them keeps working
+  # for one release; they no longer decide anything — the media server arbitrates
+  # codecs (§16.3).
+  @create_args ~w(domain name did mcu vad rate medias dtmf
+                  audio_codecs video_codecs text_codecs
                   video layout logo max_participants destroy_when_empty)
 
-  @update_args ~w(uid name vad rate layout video logo max_participants destroy_when_empty)
+  @update_args ~w(uid name vad rate medias dtmf layout video logo max_participants
+                  destroy_when_empty)
 
   # Fields a client may read but never send (§8.3.3). Named as read-only rather than
   # merely unknown: an operator who tries to move `conf_id` or `did` deserves to be
@@ -1296,19 +1302,30 @@ defmodule Kelix.Mod.Mcu do
          # *reading* of what was asked for belongs here, before anything is created
          {:ok, video} <- Vocabulary.video(Map.get(args, "video")),
          {:ok, layout} <- Vocabulary.layout(Map.get(args, "layout")),
-         {:ok, logo} <- optional_logo(args) do
+         {:ok, logo} <- optional_logo(args),
+         # P8a: which m= sections this conference answers. The policy the codec lists
+         # used to express sideways (§8.4).
+         {:ok, medias} <- validate_medias(Map.get(args, "medias")),
+         {:ok, dtmf_arg} <- Args.bool(args, "dtmf", nil) do
       {:ok,
        %{
          domain: domain,
          name: name,
+         medias: medias,
          did: did,
          mcu: mcu,
          vad: vad,
          rate: rate,
          audio_codecs: audio,
-         # an explicit audio list decides this conference's DTMF too, exactly as the
-         # config block's does (TELEPHONE-EVENT is a flag, not a mixer codec)
-         dtmf: if(is_nil(audio), do: nil, else: dtmf),
+         # `dtmf` is now its own switch (§8.4). An explicit one wins; absent it, a
+         # legacy audio list still decides, TELEPHONE-EVENT in that list having been
+         # the flag before it had a name of its own.
+         dtmf:
+           cond do
+             not is_nil(dtmf_arg) -> dtmf_arg
+             is_nil(audio) -> nil
+             true -> dtmf
+           end,
          video_codecs: video_codecs,
          text_codecs: text_codecs,
          video: video,
@@ -2389,6 +2406,25 @@ defmodule Kelix.Mod.Mcu do
        }}
     end
   end
+
+  @media_names ~w(audio video text)
+
+  # A media list from a client, refused rather than silently narrowed: naming a media
+  # this module cannot answer is a mistake worth reporting, and an empty list is a
+  # conference that answers nothing.
+  defp validate_medias(nil), do: {:ok, nil}
+
+  defp validate_medias(names) when is_list(names) and names != [] do
+    names = Enum.map(names, &String.downcase(to_string(&1)))
+
+    case Enum.reject(names, &(&1 in @media_names)) do
+      [] -> {:ok, names}
+      bad -> {:error, "unknown media(s) #{Enum.join(bad, ", ")}; expected audio, video or text"}
+    end
+  end
+
+  defp validate_medias(_other),
+    do: {:error, "medias must be a non-empty list naming audio, video or text"}
 
   # `medias` from a create/update spec, normalised to atoms. nil when the spec says
   # nothing, so the config default applies.

@@ -504,6 +504,33 @@ defmodule Kelix.Mod.McuCallTest do
 
     # The offer's fmtp is what the media server negotiates against, so it has to reach
     # it unchanged — the reason parse/1 keeps a raw form alongside the parsed structs.
+    # The central property of P8a: the offer IS the menu. Before step 3b, kelixip
+    # intersected the offer with the conference's codec list before the server saw it,
+    # so a codec absent from that list was dropped silently and the server never got to
+    # say whether it supported it.
+    test "every offered codec is proposed to the server, not just the configured ones", ctx do
+      # G.722 (9) and PCMU (0) are in this offer; the old default conference list would
+      # have decided on them locally
+      {_pid, _dialog} = start_call(ctx.scenario, invite(ctx.did))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+
+      assert_received {:rpc, "StartReceiving", [42, 7, 0, rtp_map, 0, 0, _offer]}
+      # the whole offered set, telephone-event included, is what the server arbitrates
+      assert rtp_map == %{"8" => 8, "0" => 0, "101" => 100}
+    end
+
+    # DTMF is a policy switch, not a codec list: it is the one thing a caller cannot
+    # overrule, so it is filtered before the server is asked.
+    test "dtmf = false drops the telephone-event payload type from the proposal", ctx do
+      {:ok, conf} = Mcu.create_conference(@domain, name: "no dtmf", dtmf: false)
+      {_pid, _dialog} = start_call(ctx.scenario, invite(conf.did))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+
+      assert_received {:rpc, "StartReceiving", [_conf, _part, 0, rtp_map, 0, 0, _offer]}
+      refute Map.has_key?(rtp_map, "101")
+      assert Map.has_key?(rtp_map, "8")
+    end
+
     test "the offer's fmtp is forwarded verbatim", ctx do
       {_pid, _dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
       assert_receive {:replied, 200, _reason, _fields, _req}, 2000
@@ -725,12 +752,14 @@ defmodule Kelix.Mod.McuCallTest do
       assert encoder == %{"h264.profile-level-id" => "4d0028"}
     end
 
+    # Turning a media off used to be expressed as an incompatible codec list; since
+    # the media server arbitrates codecs (P8a), it is `medias` that says it.
     test "a video-less conference declines the video and keeps the audio", ctx do
       {:ok, %{did: did}} =
         Mcu.handle_control("conference.create", %{
           "domain" => @domain,
           "did" => "8300",
-          "video_codecs" => ["VP8"]
+          "medias" => ["audio"]
         })
 
       {_pid, _dialog} = start_call(ctx.scenario, invite(did, sdp: @offer_video))
@@ -854,7 +883,10 @@ defmodule Kelix.Mod.McuCallTest do
 
     test "a conference with text off declines the section with port 0", ctx do
       {:ok, conf} =
-        Kelix.Mod.Mcu.create_conference(@domain, name: "audio only", text_codecs: [])
+        Kelix.Mod.Mcu.create_conference(@domain,
+          name: "audio only",
+          medias: ["audio", "video"]
+        )
 
       {_pid, _dialog} = start_call(ctx.scenario, invite(conf.did, sdp: @offer_tc))
       assert_receive {:replied, 200, _reason, fields, _req}, 2000

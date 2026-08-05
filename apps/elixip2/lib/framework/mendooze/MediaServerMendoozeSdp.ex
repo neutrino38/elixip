@@ -1015,6 +1015,55 @@ defmodule MediaServer.Mendooze.Sdp do
     end
   end
 
+  @doc """
+  Propose **every** offered payload type, for a delegated negotiation.
+
+  The counterpart of `negotiate/3`, and its replacement wherever the media server
+  arbitrates (`docs/design/mcu_module.md` §16.3): the offer *is* the menu, so nothing
+  is filtered on codec identity here. `parse/1` has already dropped the payload types
+  the codec tables cannot name — that table is a vocabulary, not a policy, and it is
+  the one filter that necessarily stays client-side, since the server's API speaks
+  integer codec ids.
+
+  `want_dtmf: false` drops the telephone-event payload types: refusing DTMF is a
+  deployment policy, not a codec capability, so it is the one thing a caller cannot
+  overrule.
+
+  Returns the same shape as `negotiate/3`, so the answer builders are unchanged, and
+  `{:error, :no_common_codec}` when nothing nameable is left to propose.
+  """
+  @spec propose_all(media_desc(), boolean()) ::
+          {:ok,
+           %{
+             codecs: [codec_name()],
+             dtmf: boolean(),
+             dtmf_pt: integer() | nil,
+             dtmf_clock: integer() | nil,
+             rtp_map: rtp_map()
+           }}
+          | {:error, :no_common_codec}
+  def propose_all(desc, want_dtmf \\ true) do
+    {dtmf?, dtmf_pt, dtmf_clock} = select_dtmf(desc, desc.codecs, want_dtmf)
+
+    rtp_map =
+      if dtmf?,
+        do: desc.rtp_map,
+        else: Map.reject(desc.rtp_map, fn {_pt, code} -> code == @dtmf_code end)
+
+    if map_size(rtp_map) == 0 do
+      {:error, :no_common_codec}
+    else
+      {:ok,
+       %{
+         codecs: desc.codecs,
+         dtmf: dtmf?,
+         dtmf_pt: dtmf_pt,
+         dtmf_clock: dtmf_clock,
+         rtp_map: rtp_map
+       }}
+    end
+  end
+
   # G10: pick the telephone-event PT whose clock matches the primary (preferred)
   # common audio codec — 8000 for G.711/G722, 48000 for OPUS — so DTMF rides at
   # the same rate. Falls back to the 8000 Hz PT, then to any offered one.

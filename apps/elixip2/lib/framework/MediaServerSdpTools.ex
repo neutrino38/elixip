@@ -31,6 +31,14 @@ defmodule MediaServer.SdpTools do
   @doc "Intersect a remote media descriptor with our codec list. See `MediaServer.Mendooze.Sdp.negotiate/3`."
   defdelegate negotiate(desc, our_names, want_dtmf), to: Sdp
 
+  @doc """
+  Propose every offered payload type, for a delegated negotiation (P8a).
+
+  The replacement for `negotiate/3` wherever the media server arbitrates: the offer is
+  the menu. See `MediaServer.Mendooze.Sdp.propose_all/2`.
+  """
+  defdelegate propose_all(desc, want_dtmf), to: Sdp
+
   @doc "The `rtpMap` struct for our own payload-type numbering."
   defdelegate local_rtp_map(kind, codec_names, dtmf), to: Sdp
 
