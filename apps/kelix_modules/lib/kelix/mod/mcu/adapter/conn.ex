@@ -67,6 +67,17 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # recognise gets answered with; anything the offer states and we know is mirrored.
   @sdes_suites ["AES_CM_128_HMAC_SHA1_80", "AES_CM_128_HMAC_SHA1_32"]
 
+  # The feedback types this mixer can actually honour, each with the server-side switch
+  # that implements it (§3.4). Announcing anything else would tell the peer it has a
+  # capability nothing implements — the same class of defect as the unprefixed
+  # `h264.profile-level-id` of rule 9.
+  #
+  # `nack pli` is deliberately absent: it has no distinct switch, and a keyframe request
+  # already has a path through `ccm fir` (the FPU flow of §6.4). `goog-remb` likewise —
+  # `tmmbr` is the `ccm` one, and announcing congestion feedback the mixer never sends
+  # invites the peer to wait for it.
+  @supported_rtcp_fb %{"nack" => "useNACK", "ccm fir" => "useRtcpFIR", "ccm tmmbr" => "tmmbr"}
+
   @call_timeout 30_000
 
   # ── API ──────────────────────────────────────────────────────────────────────
@@ -552,8 +563,11 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     props =
       %{}
       |> put_if(Map.get(desc, :rtcp_mux, false), "rtcp-mux", "1")
-      |> put_if(avpf?(desc), "useNACK", "1")
-      |> put_if(avpf?(desc), "tmmbr", "1")
+      # §6.3.1 rule 4: exactly the switches behind the feedback types the ANSWER
+      # advertises. Announcing `ccm fir` while never asking for RTCP FIR — which is
+      # what the old `avpf?(desc)` pair did — tells the peer it has a capability
+      # nothing implements.
+      |> Map.merge(rtcp_fb_props(desc))
       |> put_if(state.nat_latch, "natLatch", "1")
       |> merge_video_props(state, desc)
 
@@ -572,6 +586,17 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
 
   defp put_if(map, true, key, value), do: Map.put(map, key, value)
   defp put_if(map, false, _key, _value), do: map
+
+  # The server-side switch for each feedback type we answered, and nothing else.
+  defp rtcp_fb_props(desc) do
+    case answered_rtcp_fb(desc) do
+      types when is_list(types) ->
+        Map.new(types, fn type -> {Map.fetch!(@supported_rtcp_fb, type), "1"} end)
+
+      _ ->
+        %{}
+    end
+  end
 
   # The H.264 profile is **not** pushed here, and that is a correction rather than
   # an omission (2026-08-01). It used to be, as `h264.profile-level-id`, and it
@@ -613,8 +638,6 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   end
 
   defp configured_video_fmtp(state), do: Map.get(state.video, :fmtp) || ""
-
-  defp avpf?(%{protocol: protocol}), do: String.ends_with?(protocol, "F")
 
   # ── send plane + mixer join ──────────────────────────────────────────────────
 
@@ -874,12 +897,13 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
       bandwidth: answer_bandwidth(state, desc),
       # sendrecv for a mixed participant; a one-way offer is mirrored (rule 7)
       direction: Sdp.reverse_direction(desc.direction),
-      # mirror the transport of the offer (rule 4)
-      protocol: desc.protocol,
+      # mirror the transport of the offer (rule 4), unless we accept an RFC 5939
+      # potential configuration that upgrades it
+      protocol: answered_protocol(desc),
+      acfg: accepted_capneg(desc),
       rtcp_mux: Map.get(desc, :rtcp_mux, false),
-      # an AVPF offer gets the feedback types advertised back per video PT, which is
-      # what makes the peer's PLI/FIR requests legitimate
-      rtcp_fb: desc.type == :video and avpf?(desc),
+      # the feedback types actually agreed, per video PT (§6.3.1 rule 3)
+      rtcp_fb: answered_rtcp_fb(desc),
       crypto: answer_crypto(state, desc),
       ice: state.local_ice,
       # §6.3 rule 3: host candidates on the receive port, from configuration (G2).
@@ -916,6 +940,57 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
       |> Map.merge(red_fmtp(desc.type, rtpmaps))
 
     {rtpmaps, fmtp}
+  end
+
+  # ── RTCP feedback and RFC 5939 (§6.3.1 rules 3-5) ────────────────────────────
+
+  # We only take the AVPF upgrade on VIDEO. The caller may offer it on every media —
+  # the capture that prompted this work does — but there is no audio or text feedback
+  # to switch on, so accepting it there would announce a profile we do nothing with.
+  # Acceptance is per media in RFC 5939, so this is legal as well as honest.
+  defp accepted_capneg(%{type: :video} = desc) do
+    case Map.get(desc, :capneg) do
+      %{protocol: protocol} = capneg ->
+        # only worth taking if it is a feedback profile AND the offer asks for feedback
+        # we can honour; upgrading the profile to then answer nothing would be pointless
+        if String.ends_with?(protocol, "F") and requested_rtcp_fb(desc) != [],
+          do: capneg,
+          else: nil
+
+      _ ->
+        nil
+    end
+  end
+
+  defp accepted_capneg(_desc), do: nil
+
+  defp answered_protocol(desc) do
+    case accepted_capneg(desc) do
+      %{protocol: protocol} -> protocol
+      nil -> desc.protocol
+    end
+  end
+
+  # The feedback the offer asks for on this media, wildcard included: `a=rtcp-fb:*`
+  # (parsed as payload type -1) applies to every format of the section.
+  defp requested_rtcp_fb(desc) do
+    fb = Map.get(desc, :rtcp_fb, %{})
+
+    fb
+    |> Map.values()
+    |> List.flatten()
+    |> Enum.uniq()
+    |> Enum.filter(&Map.has_key?(@supported_rtcp_fb, &1))
+  end
+
+  # What the answer advertises: the INTERSECTION of what the offer asked for with what
+  # we can do, and only under a feedback profile — `a=rtcp-fb` is defined for AVPF
+  # (RFC 4585 §4), so emitting it under plain AVP is not merely useless but wrong.
+  # A caller that asks for nothing gets nothing back.
+  defp answered_rtcp_fb(desc) do
+    if desc.type == :video and String.ends_with?(answered_protocol(desc), "F"),
+      do: requested_rtcp_fb(desc),
+      else: false
   end
 
   # Our side of the security handshake, as the answer states it: the server's

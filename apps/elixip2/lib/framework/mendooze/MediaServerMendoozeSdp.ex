@@ -184,7 +184,8 @@ defmodule MediaServer.Mendooze.Sdp do
           optional(:direction) => :sendrecv | :sendonly | :recvonly | :inactive,
           optional(:mid) => String.t() | nil,
           optional(:candidates) => [candidate()],
-          optional(:rtcp_fb) => boolean(),
+          optional(:rtcp_fb) => boolean() | [String.t()],
+          optional(:acfg) => nil | %{config: integer(), tcap: integer()},
           optional(:reject_fmt) => [0..127] | String.t()
         }
 
@@ -358,6 +359,7 @@ defmodule MediaServer.Mendooze.Sdp do
     |> add_mid(Map.get(mspec, :mid))
     |> add_candidates(Map.get(mspec, :candidates, []))
     |> add_rtcp_fb(Map.get(mspec, :rtcp_fb, false), video_pts)
+    |> add_acfg(Map.get(mspec, :acfg))
   end
 
   defp add_mid(m, nil), do: m
@@ -373,8 +375,11 @@ defmodule MediaServer.Mendooze.Sdp do
   # goog-remb). Emitted verbatim as generic attributes so the wording matches
   # the browser-validated Java gateway exactly.
   defp add_rtcp_fb(m, false, _pts), do: m
-  defp add_rtcp_fb(m, true, []), do: m
+  defp add_rtcp_fb(m, _fb, []), do: m
+  defp add_rtcp_fb(m, [], _pts), do: m
 
+  # `true` keeps the OFFERER's behaviour: we propose the feedback we are willing to
+  # do, and the answerer picks. Unchanged, because an offer has no set to intersect.
   defp add_rtcp_fb(m, true, pts) do
     Enum.reduce(pts, m, fn pt, acc ->
       acc
@@ -383,6 +388,25 @@ defmodule MediaServer.Mendooze.Sdp do
       |> ExSDP.add_attribute({"rtcp-fb", "#{pt} goog-remb"})
     end)
   end
+
+  # A LIST is the ANSWERER's form: exactly the feedback types agreed, emitted per
+  # explicit payload type rather than with the `*` wildcard the offer may have used.
+  # Verbose on purpose — a wildcard answer leaves what we accepted ambiguous, and this
+  # is the attribute a peer reads to decide whether to bother sending NACKs.
+  defp add_rtcp_fb(m, types, pts) when is_list(types) do
+    for pt <- pts, type <- types, reduce: m do
+      acc -> ExSDP.add_attribute(acc, {"rtcp-fb", "#{pt} #{type}"})
+    end
+  end
+
+  # RFC 5939 §3.5.2: accepting a potential configuration is stated, not implied. The
+  # answer's m= line carries the negotiated profile AND this attribute naming which
+  # configuration was taken — without it the peer cannot tell an accepted capability
+  # negotiation from an answerer that simply changed the transport on its own.
+  defp add_acfg(m, nil), do: m
+
+  defp add_acfg(m, %{config: config, tcap: tcap}),
+    do: ExSDP.add_attribute(m, {"acfg", "#{config} t=#{tcap}"})
 
   defp add_ice_lite(sdp, false), do: sdp
   # As the "ice-lite" string, not the :ice_lite atom: both serialize to

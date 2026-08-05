@@ -67,6 +67,31 @@ defmodule Kelix.Mod.McuCallTest do
   # music-on-hold, so its RTP never stops and the watchdog must stay armed.
   @offer_hold_sendonly String.replace(@offer_video, "a=sendrecv", "a=sendonly")
 
+  # RFC 5939, taken from a real capture (LiveVideoPlugin 4.4.10): AVP on the m= line,
+  # AVPF declared as a potential configuration, and the feedback types it wants.
+  @offer_capneg """
+  v=0\r
+  o=- 1 1 IN IP4 192.168.1.50\r
+  s=-\r
+  c=IN IP4 192.168.1.50\r
+  t=0 0\r
+  a=tcap:1 RTP/AVPF\r
+  m=audio 40000 RTP/AVP 8\r
+  a=rtpmap:8 PCMA/8000\r
+  a=pcfg:1 t=1\r
+  a=sendrecv\r
+  m=video 40002 RTP/AVP 99\r
+  a=rtpmap:99 H264/90000\r
+  a=fmtp:99 profile-level-id=42e01f;packetization-mode=1\r
+  a=pcfg:1 t=1\r
+  a=rtcp-fb:* nack\r
+  a=rtcp-fb:* nack pli\r
+  a=rtcp-fb:* ccm fir\r
+  a=rtcp-fb:* ccm tmmbr\r
+  a=rtcp-fb:* goog-remb\r
+  a=sendrecv\r
+  """
+
   # A total-conversation terminal: audio, video and T.140 with RFC 4103 redundancy.
   # The text payload types are deliberately NOT the ones we would pick locally
   # (105/106), so the answer proves it reuses the offerer's numbering everywhere,
@@ -1018,6 +1043,71 @@ defmodule Kelix.Mod.McuCallTest do
       # the ACK path returns early on an attached leg, so if the answer did not
       # re-arm, a resumed media would stay unwatched for good
       assert_received {:rpc, "StartRTPTimeout", [_conf, _part, 0, ms, _role]} when ms > 0
+    end
+  end
+
+  describe "RFC 5939 capability negotiation (§6.3.1)" do
+    test "an AVPF potential configuration is accepted on video, and stated", ctx do
+      {_pid, _dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_capneg))
+      assert_receive {:replied, 200, _reason, fields, _req}, 2000
+
+      answer = fields[:body]
+
+      # the video m= line carries the upgraded profile, and a=acfg says WHICH
+      # configuration was taken — without it the peer cannot tell an accepted capneg
+      # from an answerer that changed the transport on its own
+      assert answer =~ ~r/m=video \d+ RTP\/AVPF/
+      assert answer =~ "a=acfg:1 t=1"
+
+      # audio keeps AVP: the caller offers the upgrade there too, but there is no audio
+      # feedback to switch on, so taking it would announce a profile we do nothing with
+      assert answer =~ ~r/m=audio \d+ RTP\/AVP /
+      refute answer =~ "RTP/AVPF 8"
+    end
+
+    test "the answered feedback is the intersection, per explicit payload type", ctx do
+      {_pid, _dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_capneg))
+      assert_receive {:replied, 200, _reason, fields, _req}, 2000
+
+      answer = fields[:body]
+
+      # what we can honour, named per PT rather than with the offer's `*` wildcard
+      assert answer =~ "a=rtcp-fb:99 nack"
+      assert answer =~ "a=rtcp-fb:99 ccm fir"
+      assert answer =~ "a=rtcp-fb:99 ccm tmmbr"
+      refute answer =~ "rtcp-fb:*"
+
+      # and NOT what has no server-side switch: announcing these would promise a
+      # capability nothing implements
+      refute answer =~ "goog-remb"
+      refute answer =~ "nack pli"
+    end
+
+    test "what is announced is what is switched on server-side", ctx do
+      {_pid, _dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_capneg))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+
+      # video (1) carries the three switches behind the three answered types
+      assert_received {:rpc, "SetRTPProperties", [42, 7, 1, props, 0]}
+      assert props["useNACK"] == "1"
+      assert props["useRtcpFIR"] == "1"
+      assert props["tmmbr"] == "1"
+
+      # audio stayed AVP, so it gets none of them
+      assert_received {:rpc, "SetRTPProperties", [42, 7, 0, audio_props, 0]}
+      refute Map.has_key?(audio_props, "useNACK")
+    end
+
+    test "a caller that asks for no feedback gets none, and no upgrade", ctx do
+      # same offer without the rtcp-fb lines: the upgrade would buy nothing
+      offer = String.replace(@offer_capneg, ~r/a=rtcp-fb:[^\r]*\r\n/, "")
+      {_pid, _dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: offer))
+      assert_receive {:replied, 200, _reason, fields, _req}, 2000
+
+      answer = fields[:body]
+      refute answer =~ "RTP/AVPF"
+      refute answer =~ "a=acfg"
+      refute answer =~ "a=rtcp-fb"
     end
   end
 
