@@ -47,6 +47,9 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   @role_main 0
   # MediaProtocol: RTP
   @proto_rtp 0
+  # telephone-event's Medooze codec constant (§3.6): a payload type the mixer never
+  # encodes towards anyone, so it can never be a primary codec.
+  @dtmf_code 100
   # RTP participant (1 is RTMP, unused)
   @participant_rtp 0
   # the default mosaic and the default sidebar (decision 6b)
@@ -784,6 +787,23 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
 
   # The Medooze constant of a codec name, read off the shared codec tables (a
   # one-entry rtpMap is the table lookup those tables expose).
+  # The codec the mixer encodes towards this leg. It must come from the **accepted**
+  # set when the server gave one: telling it to encode a codec it just filtered on
+  # receive would produce a leg that negotiated successfully and decodes nothing. The
+  # send map is restricted the same way (`start_sending/3`), so the two agree.
+  #
+  # Order comes from the receive map, i.e. the offerer's numbering — the same order the
+  # answer advertises, so the primary is the first codec the peer will see.
+  defp primary_code(_media, %{accepted: accepted} = neg) when is_map(accepted) do
+    neg.rtp_map
+    |> Map.take(Map.keys(accepted))
+    |> Enum.sort_by(fn {pt, _code} -> String.to_integer(pt) end)
+    |> Enum.map(fn {_pt, code} -> code end)
+    # telephone-event is not something the mixer encodes towards anyone
+    |> Enum.reject(&(&1 == @dtmf_code))
+    |> List.first()
+  end
+
   defp primary_code(media, neg) do
     case neg.codecs do
       [name | _] -> media |> Sdp.local_rtp_map([name], false) |> Map.values() |> List.first()

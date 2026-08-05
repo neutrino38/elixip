@@ -490,6 +490,20 @@ defmodule Kelix.Mod.McuCallTest do
              }
     end
 
+    # The verdict also picks the PRIMARY codec, not just the send map: telling the mixer
+    # to encode a codec the server filtered on receive would negotiate successfully and
+    # decode nothing.
+    @tag start_receiving: {:ok, [@rec_port, @media_ip, %{"0" => "", "101" => ""}]}
+    test "the primary codec comes from the accepted set", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+
+      # the offer proposed PCMA first, but the server accepted only PCMU (0) and
+      # telephone-event — so PCMU is what the mixer is told to encode, never the DTMF
+      assert_receive {:rpc, "SetAudioCodec", [42, 7, 0]}, 2000
+    end
+
     # The verdict restricts what we SEND: never a codec the server just filtered on
     # receive. A stub that returns only [port, ip] is a pre-P8a server, which is what
     # every other test here exercises — this one is the delegated path.
