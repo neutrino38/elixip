@@ -120,6 +120,7 @@ defmodule MediaServer.Mendooze.Sdp do
           rtp_map: rtp_map(),
           codecs: [codec_name()],
           fmtp: %{optional(String.t()) => struct()},
+          fmtp_raw: %{optional(String.t()) => String.t()},
           dtmf_pts: %{optional(non_neg_integer()) => non_neg_integer()},
           rtcp_mux: boolean(),
           direction: :sendrecv | :sendonly | :recvonly | :inactive,
@@ -553,7 +554,16 @@ defmodule MediaServer.Mendooze.Sdp do
       {:ok, sdp} ->
         session_ip = connection_ip(sdp.connection_data)
         session_attrs = sdp.attributes
-        medias = Enum.map(sdp.media, &parse_media_section(&1, session_ip, session_attrs))
+        # the raw a=fmtp strings, per m= section in order (see raw_fmtp_sections/1)
+        raw = raw_fmtp_sections(sdp_str)
+
+        medias =
+          sdp.media
+          |> Enum.with_index()
+          |> Enum.map(fn {m, i} ->
+            parse_media_section(m, session_ip, session_attrs, Enum.at(raw, i, %{}))
+          end)
+
         {:ok, medias}
 
       {:error, _reason} = err ->
@@ -573,15 +583,35 @@ defmodule MediaServer.Mendooze.Sdp do
     end)
   end
 
-  defp parse_media_section(m, session_ip, session_attrs) do
+  # The raw `a=fmtp:<pt> <params>` values, one map per m= section, in section order.
+  #
+  # Taken from the TEXT rather than from the parsed attributes on purpose: an answerer
+  # that *forwards* the peer's fmtp — which is what the delegated negotiation does,
+  # handing it to the media server — must forward it verbatim. Rebuilding the string
+  # from `ExSDP.Attribute.FMTP` would not round-trip: `profile_level_id` is held as an
+  # integer, so `42e01f` comes back re-rendered, and parameter order is lost. The
+  # parsed `:fmtp` structs remain the thing to *reason* about; this is the thing to
+  # relay.
+  defp raw_fmtp_sections(sdp_str) do
+    sdp_str
+    |> String.split(~r/^m=/m)
+    # the first chunk is the session part, before any m= line
+    |> Enum.drop(1)
+    |> Enum.map(fn section ->
+      Regex.scan(~r/^a=fmtp:(\d+)[ \t]+(.*?)\s*$/m, section)
+      |> Map.new(fn [_line, pt, params] -> {pt, params} end)
+    end)
+  end
+
+  defp parse_media_section(m, session_ip, session_attrs, raw_fmtp) do
     if m.type in [:audio, :video, :text] and m.protocol in @rtp_profiles do
-      parse_media(m, session_ip, session_attrs)
+      parse_media(m, session_ip, session_attrs, raw_fmtp)
     else
       %{supported?: false, type: m.type, port: m.port, protocol: m.protocol, raw_fmt: m.fmt}
     end
   end
 
-  defp parse_media(m, session_ip, session_attrs) do
+  defp parse_media(m, session_ip, session_attrs, raw_fmtp) do
     attrs = m.attributes
     fmt = normalize_fmt(m.fmt)
     rtpmaps = for %ExSDP.Attribute.RTPMapping{} = rm <- attrs, do: rm
@@ -597,6 +627,9 @@ defmodule MediaServer.Mendooze.Sdp do
       rtp_map: rtp_map,
       codecs: codecs,
       fmtp: offered_fmtp(attrs),
+      # the same lines, unparsed, to RELAY (see raw_fmtp_sections/1). Only the payload
+      # types this section actually offers, so a stray a=fmtp cannot leak across medias.
+      fmtp_raw: Map.take(raw_fmtp, Enum.map(Map.keys(rtp_map), &to_string/1)),
       dtmf_pts: dtmf_pts,
       rtcp_mux: :rtcp_mux in attrs,
       direction: find_direction(attrs) || find_direction(session_attrs) || :sendrecv,

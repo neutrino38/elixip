@@ -186,6 +186,52 @@ defmodule Mendooze.SdpTest do
       refute Map.has_key?(video.fmtp, "107")
     end
 
+    test "fmtp_raw relays the parameters verbatim, including ones ExSDP does not model" do
+      sdp_str = """
+      v=0
+      o=- 1 1 IN IP4 172.16.0.1
+      s=call
+      c=IN IP4 172.16.0.1
+      t=0 0
+      m=audio 5004 RTP/AVP 96
+      a=rtpmap:96 opus/48000/2
+      a=fmtp:96 useinbandfec=1;some-vendor-param=7
+      m=video 5006 RTP/AVP 99
+      a=rtpmap:99 H264/90000
+      a=fmtp:99 profile-level-id=42e01f;packetization-mode=1;sprop-parameter-sets=Z0IACpZTBYmI,aMljiA==
+      """
+
+      assert {:ok, [audio, video]} = Sdp.parse(sdp_str)
+
+      # Byte for byte: this string is FORWARDED to the media server, which negotiates
+      # against it. Rebuilding it from the parsed struct would re-render
+      # profile_level_id (held as an integer) and lose parameter order.
+      assert video.fmtp_raw["99"] ==
+               "profile-level-id=42e01f;packetization-mode=1;sprop-parameter-sets=Z0IACpZTBYmI,aMljiA=="
+
+      # The reason the raw form exists: a parameter ExSDP has no field for survives.
+      assert audio.fmtp_raw["96"] == "useinbandfec=1;some-vendor-param=7"
+
+      # And it does not leak across m= sections — each media sees only its own.
+      refute Map.has_key?(video.fmtp_raw, "96")
+      refute Map.has_key?(audio.fmtp_raw, "99")
+    end
+
+    test "fmtp_raw is an empty map when the media offers no fmtp" do
+      sdp_str = """
+      v=0
+      o=- 1 1 IN IP4 172.16.0.1
+      s=call
+      c=IN IP4 172.16.0.1
+      t=0 0
+      m=audio 5004 RTP/AVP 8
+      a=rtpmap:8 PCMA/8000
+      """
+
+      assert {:ok, [audio]} = Sdp.parse(sdp_str)
+      assert audio.fmtp_raw == %{}
+    end
+
     test "a media with no fmtp at all yields an empty map, not nil" do
       sdp_str = """
       v=0
