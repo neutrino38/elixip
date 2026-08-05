@@ -505,6 +505,36 @@ defmodule Kelix.Mod.McuCallTest do
       assert send_map == %{"8" => 8}
     end
 
+    # The two boundary cases of the contract, in one answer: a PT accepted with a
+    # NON-EMPTY fmtp is advertised with that exact string; a PT accepted with an EMPTY
+    # one gets an a=rtpmap and no a=fmtp; a PT the server did not name is not
+    # advertised at all.
+    @tag start_receiving:
+           {:ok,
+            [
+              @rec_port,
+              @media_ip,
+              %{"8" => "", "101" => "0-15"}
+            ]}
+    test "the answer is built from the server's verdict, verbatim", ctx do
+      {_pid, _dialog} = start_call(ctx.scenario, invite(ctx.did))
+      assert_receive {:replied, 200, _reason, fields, _req}, 2000
+
+      answer = fields[:body]
+
+      # accepted with no fmtp: rtpmap only
+      assert answer =~ "a=rtpmap:8 PCMA/8000"
+      refute answer =~ "a=fmtp:8"
+
+      # accepted with an fmtp: the server's string, NOT the 0-16 kelixip used to
+      # synthesise — proving the value is relayed and not rebuilt
+      assert answer =~ "a=rtpmap:101 telephone-event/8000"
+      assert answer =~ "a=fmtp:101 0-15"
+
+      # PCMU was offered and proposed, but the server did not accept it
+      refute answer =~ "a=rtpmap:0 PCMU/8000"
+    end
+
     test "the participant row tracks ringing → connected", ctx do
       {pid, dialog} = start_call(ctx.scenario, invite(ctx.did))
       assert_receive {:replied, 200, _reason, _fields, _req}, 2000

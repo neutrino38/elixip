@@ -838,17 +838,14 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   end
 
   defp answer_spec(state, desc, neg) do
-    rtpmaps = Sdp.answer_rtpmaps(desc.type, neg)
+    {rtpmaps, fmtp} = answer_codecs(state, desc, neg)
 
     %{
       type: desc.type,
       port: neg.rec_port,
       # the offerer's payload-type numbering (§6.3 rule 1)
       rtpmaps: rtpmaps,
-      fmtp:
-        dtmf_fmtp(neg)
-        |> Map.merge(codec_fmtp(state, desc, rtpmaps))
-        |> Map.merge(red_fmtp(desc.type, rtpmaps)),
+      fmtp: fmtp,
       # rule 8: b=AS: on video is min(offered, the conference's profile)
       bandwidth: answer_bandwidth(state, desc),
       # sendrecv for a mixed participant; a one-way offer is mirrored (rule 7)
@@ -865,6 +862,36 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
       # Component 2 (RTCP) only when the offer did not ask for rtcp-mux, as mcuGold.
       candidates: answer_candidates(state, desc, neg)
     }
+  end
+
+  # DELEGATED (P8a): the accepted payload types and their fmtp are the media server's,
+  # copied out verbatim. This is the whole point of §16.3 — the party that will encode
+  # is the one that says what it accepts and with which parameters, so kelixip stops
+  # guessing H.264 profiles, DTMF ranges and RFC 4103 redundancy lists.
+  #
+  # `answer_rtpmaps/2` is reused with the rtp_map restricted to the accepted set, so
+  # the ordering and the telephone-event special case stay exactly what they were.
+  # An empty fmtp value means "accepted, no a=fmtp line" — the contract's other half,
+  # and the reason the value is dropped rather than emitted as `a=fmtp:<pt> `.
+  defp answer_codecs(_state, desc, %{accepted: accepted} = neg) when is_map(accepted) do
+    accepted_map = Map.take(neg.rtp_map, Map.keys(accepted))
+    rtpmaps = Sdp.answer_rtpmaps(desc.type, %{neg | rtp_map: accepted_map})
+    fmtp = for {pt, params} <- accepted, params != "", into: %{}, do: {pt, params}
+    {rtpmaps, fmtp}
+  end
+
+  # LEGACY: a media server that predates the delegation returned no verdict, so the
+  # answer is built the way it was before P8a. Kept intact rather than approximated —
+  # it is the path every node takes for the duration of a rolling upgrade.
+  defp answer_codecs(state, desc, neg) do
+    rtpmaps = Sdp.answer_rtpmaps(desc.type, neg)
+
+    fmtp =
+      dtmf_fmtp(neg)
+      |> Map.merge(codec_fmtp(state, desc, rtpmaps))
+      |> Map.merge(red_fmtp(desc.type, rtpmaps))
+
+    {rtpmaps, fmtp}
   end
 
   # Our side of the security handshake, as the answer states it: the server's
