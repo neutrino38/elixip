@@ -129,6 +129,7 @@ defmodule MediaServer.Mendooze.Sdp do
           ice: nil | %{ufrag: String.t(), pwd: String.t()},
           mid: String.t() | nil,
           rtcp_fb: %{optional(integer()) => [String.t()]},
+          capneg: nil | %{config: integer(), tcap: integer(), protocol: String.t()},
           candidates: [String.t()]
         }
 
@@ -638,6 +639,7 @@ defmodule MediaServer.Mendooze.Sdp do
       ice: find_ice(attrs) || find_ice(session_attrs),
       mid: find_mid(attrs),
       rtcp_fb: parse_rtcp_fb(attrs),
+      capneg: find_capneg(attrs, session_attrs),
       candidates: raw_candidates(attrs)
     }
   end
@@ -662,6 +664,86 @@ defmodule MediaServer.Mendooze.Sdp do
   # for later B2BUA forwarding; the answerer does not use them for addressing.
   defp raw_candidates(attrs) do
     for {"candidate", v} <- attrs, do: v
+  end
+
+  # RFC 5939 (SDP Capability Negotiation), the transport-protocol case only.
+  #
+  # A caller may offer one profile on the m= line while declaring it *could* do
+  # another — the LiveVideoPlugin offers `RTP/AVP` with `a=tcap:1 RTP/AVPF` and
+  # `a=pcfg:1 t=1`, meaning "I am on AVP now, accept configuration 1 and we run AVPF".
+  # An answerer that ignores this answers AVP and the call runs without NACK, FIR or
+  # TMMBR, which on a lossy link is the whole difference. Answering AVPF *without*
+  # accepting the configuration is not the fix: RFC 3264 binds the answer to the
+  # offered transport, and RFC 5939 exists precisely to negotiate a change.
+  #
+  # Returns the potential configuration we could accept, or nil.
+  #
+  # **Minimal on purpose**: a pcfg is only considered when its element list is exactly
+  # one `t=`. RFC 5939 §3.6.1 obliges an answerer to satisfy the WHOLE configuration it
+  # accepts, so a pcfg that also demands attribute or bandwidth changes we do not
+  # implement must be declined — claiming it would be a lie the peer acts on. Lowest
+  # config number wins, that being RFC 5939's preference order.
+  defp find_capneg(attrs, session_attrs) do
+    caps = tcaps(session_attrs, attrs)
+
+    attrs
+    |> Enum.flat_map(fn
+      {"pcfg", value} -> List.wrap(parse_pcfg(value, caps))
+      _ -> []
+    end)
+    |> Enum.sort_by(& &1.config)
+    |> List.first()
+  end
+
+  # `a=tcap:<num> <proto> [<proto> ...]` — the protocols are numbered consecutively
+  # from <num> (§3.3.1). Declared at session level, at media level, or both; a media
+  # declaration wins for the numbers it redefines.
+  defp tcaps(session_attrs, attrs) do
+    Map.merge(collect_tcaps(session_attrs), collect_tcaps(attrs))
+  end
+
+  defp collect_tcaps(attrs) do
+    for {"tcap", value} <- attrs, reduce: %{} do
+      acc ->
+        case String.split(value, ~r/\s+/, trim: true) do
+          [num | protos] when protos != [] ->
+            case Integer.parse(num) do
+              {first, ""} ->
+                protos
+                |> Enum.with_index(first)
+                |> Enum.reduce(acc, fn {proto, n}, m -> Map.put(m, n, proto) end)
+
+              _ ->
+                acc
+            end
+
+          _ ->
+            acc
+        end
+    end
+  end
+
+  defp parse_pcfg(value, caps) do
+    case String.split(value, ~r/\s+/, trim: true) do
+      [num, element] ->
+        with {config, ""} <- Integer.parse(num),
+             "t=" <> list <- element,
+             # alternatives are `|`-separated and each may itself be a `,` list; the
+             # first is the caller's preferred one, and one is all we need
+             [first | _] <- String.split(list, ["|", ","], trim: true),
+             {tcap, ""} <- Integer.parse(first),
+             {:ok, protocol} <- Map.fetch(caps, tcap),
+             true <- protocol in @rtp_profiles do
+          %{config: config, tcap: tcap, protocol: protocol}
+        else
+          _ -> nil
+        end
+
+      # anything other than exactly one `t=` element is a configuration we cannot
+      # promise to satisfy (see the note above)
+      _ ->
+        nil
+    end
   end
 
   # a=rtcp-fb:<pt> <type> → %{pt => ["nack", "ccm fir", ...]}; "*" maps to -1.

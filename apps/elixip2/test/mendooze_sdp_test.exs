@@ -217,6 +217,114 @@ defmodule Mendooze.SdpTest do
       refute Map.has_key?(audio.fmtp_raw, "99")
     end
 
+    # RFC 5939. Shape taken from a real capture (LiveVideoPlugin 4.4.10): the m= line
+    # says AVP, a session-level tcap declares AVPF, and each media points at it.
+    test "capneg finds the AVPF potential configuration the offer declares" do
+      sdp_str = """
+      v=0
+      o=- 1 1 IN IP4 172.16.0.1
+      s=-
+      c=IN IP4 172.16.0.1
+      t=0 0
+      a=tcap:1 RTP/AVPF
+      m=video 5006 RTP/AVP 96
+      a=rtpmap:96 H264/90000
+      a=pcfg:1 t=1
+      a=rtcp-fb:* nack
+      """
+
+      assert {:ok, [video]} = Sdp.parse(sdp_str)
+      assert video.protocol == "RTP/AVP"
+      assert video.capneg == %{config: 1, tcap: 1, protocol: "RTP/AVPF"}
+    end
+
+    test "tcap numbers its protocols consecutively from the declared number" do
+      sdp_str = """
+      v=0
+      o=- 1 1 IN IP4 172.16.0.1
+      s=-
+      c=IN IP4 172.16.0.1
+      t=0 0
+      a=tcap:1 RTP/AVPF RTP/SAVPF
+      m=video 5006 RTP/AVP 96
+      a=rtpmap:96 H264/90000
+      a=pcfg:1 t=2
+      """
+
+      # t=2 is the SECOND protocol of the list, not a second tcap line
+      assert {:ok, [video]} = Sdp.parse(sdp_str)
+      assert video.capneg.protocol == "RTP/SAVPF"
+    end
+
+    # RFC 5939 §3.6.1 binds an answerer to the WHOLE configuration it accepts, so a
+    # pcfg asking for anything beyond the transport is declined rather than half-honoured.
+    test "a potential configuration demanding more than the transport is declined" do
+      sdp_str = """
+      v=0
+      o=- 1 1 IN IP4 172.16.0.1
+      s=-
+      c=IN IP4 172.16.0.1
+      t=0 0
+      a=tcap:1 RTP/AVPF
+      m=video 5006 RTP/AVP 96
+      a=rtpmap:96 H264/90000
+      a=pcfg:1 t=1 a=1
+      """
+
+      assert {:ok, [video]} = Sdp.parse(sdp_str)
+      assert video.capneg == nil
+    end
+
+    test "a tcap naming a profile we cannot answer is ignored" do
+      sdp_str = """
+      v=0
+      o=- 1 1 IN IP4 172.16.0.1
+      s=-
+      c=IN IP4 172.16.0.1
+      t=0 0
+      a=tcap:1 TCP/DTLS/RTP/SAVPF
+      m=video 5006 RTP/AVP 96
+      a=rtpmap:96 H264/90000
+      a=pcfg:1 t=1
+      """
+
+      assert {:ok, [video]} = Sdp.parse(sdp_str)
+      assert video.capneg == nil
+    end
+
+    test "the lowest config number wins, that being RFC 5939's preference order" do
+      sdp_str = """
+      v=0
+      o=- 1 1 IN IP4 172.16.0.1
+      s=-
+      c=IN IP4 172.16.0.1
+      t=0 0
+      a=tcap:1 RTP/SAVPF RTP/AVPF
+      m=video 5006 RTP/AVP 96
+      a=rtpmap:96 H264/90000
+      a=pcfg:2 t=2
+      a=pcfg:1 t=1
+      """
+
+      assert {:ok, [video]} = Sdp.parse(sdp_str)
+      assert video.capneg == %{config: 1, tcap: 1, protocol: "RTP/SAVPF"}
+    end
+
+    test "no capability negotiation at all leaves capneg nil" do
+      sdp_str = """
+      v=0
+      o=- 1 1 IN IP4 172.16.0.1
+      s=-
+      c=IN IP4 172.16.0.1
+      t=0 0
+      m=video 5006 RTP/AVP 96
+      a=rtpmap:96 H264/90000
+      """
+
+      assert {:ok, [video]} = Sdp.parse(sdp_str)
+      assert video.capneg == nil
+    end
+
     test "fmtp_raw is an empty map when the media offers no fmtp" do
       sdp_str = """
       v=0
