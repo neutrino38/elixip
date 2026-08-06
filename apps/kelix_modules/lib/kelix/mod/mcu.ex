@@ -96,11 +96,11 @@ defmodule Kelix.Mod.Mcu do
   # ── argument vocabularies, shared by both frontals and the facade (§17.2) ─────
 
   # `medias` and `dtmf` are the policy the codec lists used to encode (§8.4, P8a). The
-  # lists themselves are still accepted so a script written against them keeps working
-  # for one release; they no longer decide anything — the media server arbitrates
-  # codecs (§16.3).
+  # lists themselves are gone: `drop_retired/2` strips them — with a warning — before
+  # any of these vocabularies is consulted, so a script written against them keeps
+  # working for one release without them deciding anything (§16.3, the media server
+  # arbitrates codecs).
   @create_args ~w(domain name did mcu vad rate medias dtmf
-                  audio_codecs video_codecs text_codecs
                   video layout logo max_participants destroy_when_empty)
 
   @update_args ~w(uid name vad rate medias dtmf layout video logo max_participants
@@ -109,8 +109,7 @@ defmodule Kelix.Mod.Mcu do
   # Fields a client may read but never send (§8.3.3). Named as read-only rather than
   # merely unknown: an operator who tries to move `conf_id` or `did` deserves to be
   # told which of the two it is.
-  @conference_readonly ~w(conf_id created_at participants stale domain did mcu
-                          audio_codecs video_codecs text_codecs)
+  @conference_readonly ~w(conf_id created_at participants stale domain did mcu)
   @participant_readonly ~w(name state medias joined_at conn scenario)
 
   # ── Kelix.Module behaviour ───────────────────────────────────────────────────
@@ -323,10 +322,12 @@ defmodule Kelix.Mod.Mcu do
   Create a conference from a scenario (§17.2).
 
   `opts` is a keyword list with atom keys — `name:`, `did:`, `mcu:`, `vad:`, `rate:`,
-  `audio_codecs:`, `video_codecs:`, `text_codecs:`, `video:`, `layout:`,
-  `max_participants:`, `destroy_when_empty:`, `owner:` — validated by exactly the same
-  code as the REST body of `conference.create`, so the two produce indistinguishable
-  conferences (§17.2).
+  `medias:`, `dtmf:`, `video:`, `layout:`, `logo:`, `max_participants:`,
+  `destroy_when_empty:`, `owner:` — validated by exactly the same code as the REST body
+  of `conference.create`, so the two produce indistinguishable conferences (§17.2).
+  There is no codec list: the media server arbitrates codecs (§16.3), and the retired
+  `audio_codecs:` / `video_codecs:` / `text_codecs:` / `video_fmtp:` are accepted and
+  ignored with a warning for one release.
 
   ## Ownership
 
@@ -379,7 +380,11 @@ defmodule Kelix.Mod.Mcu do
   """
   @spec update_conference(String.t(), keyword) :: {:ok, [atom]} | {:error, atom | String.t()}
   def update_conference(uid, changes) when is_binary(uid) and is_list(changes) do
-    args = changes |> Args.stringify_keys() |> Map.put("uid", uid)
+    args =
+      changes
+      |> Args.stringify_keys()
+      |> Map.put("uid", uid)
+      |> drop_retired("update_conference")
 
     with :ok <- Args.reject_readonly(args, @conference_readonly),
          :ok <- Args.reject_unknown(args, @update_args),
@@ -413,7 +418,12 @@ defmodule Kelix.Mod.Mcu do
   # process, so `owner: :caller` there would destroy the conference the moment the
   # response was sent.
   defp create_args(domain, opts) do
-    args = opts |> Args.stringify_keys() |> Map.put("domain", domain)
+    args =
+      opts
+      |> Args.stringify_keys()
+      |> Map.put("domain", domain)
+      |> drop_retired("create_conference")
+
     {owner, args} = Map.pop(args, "owner", :caller)
 
     with :ok <- Args.reject_unknown(args, @create_args),
@@ -783,9 +793,8 @@ defmodule Kelix.Mod.Mcu do
           %{name: "mcu", required: false},
           %{name: "vad", required: false, help: Vocabulary.vad_help()},
           %{name: "rate", required: false},
-          %{name: "audio_codecs", required: false},
-          %{name: "video_codecs", required: false},
-          %{name: "text_codecs", required: false},
+          %{name: "medias", required: false, help: "audio, video and/or text"},
+          %{name: "dtmf", required: false, help: "propose telephone-event (default true)"},
           %{name: "video", required: false, help: Vocabulary.video_help()},
           %{name: "layout", required: false, help: Vocabulary.layout_help()},
           %{name: "logo", required: false, help: Vocabulary.logo_help()},
@@ -814,7 +823,7 @@ defmodule Kelix.Mod.Mcu do
         render: %{
           kind: :detail,
           fields:
-            ~w(name domain did uid mcu conf_id stale created_at max_participants destroy_when_empty vad rate codecs video layout logo recording participants),
+            ~w(name domain did uid mcu conf_id stale created_at max_participants destroy_when_empty vad rate medias dtmf video layout logo recording participants),
           labels: @conference_labels,
           # the roster, not the media detail of each leg — that is `participant.show`
           nested: %{"participants" => %{columns: ~w(part_id name from state joined_at)}}
@@ -972,6 +981,8 @@ defmodule Kelix.Mod.Mcu do
   end
 
   defp do_control("conference.create", args) do
+    args = drop_retired(args, "conference.create")
+
     with :ok <- Args.reject_unknown(args, @create_args),
          {:ok, spec} <- create_spec(args),
          # `owner: :none`: a REST caller has no instance to own the conference — its
@@ -1021,6 +1032,8 @@ defmodule Kelix.Mod.Mcu do
   # resets one to its default, which is the dangerous reading of PUT and the reason
   # the semantics are stated in the design rather than implied.
   defp do_control("conference.update", args) do
+    args = drop_retired(args, "conference.update")
+
     with :ok <- Args.reject_readonly(args, @conference_readonly),
          :ok <- Args.reject_unknown(args, @update_args),
          {:ok, uid} <- Args.required_string(args, "uid"),
@@ -1290,11 +1303,6 @@ defmodule Kelix.Mod.Mcu do
          {:ok, mcu} <- Args.string(args, "mcu"),
          {:ok, vad} <- Vocabulary.vad(Map.get(args, "vad")),
          {:ok, rate} <- Args.int(args, "rate", nil, [8000, 16_000, 32_000, 48_000]),
-         # the codec vocabulary is the config's, checked here too: a per-conference
-         # list is exactly as dangerous as a configured one (Config.validate_codecs/2)
-         {:ok, audio, dtmf} <- Config.validate_codecs(:audio, Map.get(args, "audio_codecs")),
-         {:ok, video_codecs, _} <- Config.validate_codecs(:video, Map.get(args, "video_codecs")),
-         {:ok, text_codecs, _} <- Config.validate_codecs(:text, Map.get(args, "text_codecs")),
          {:ok, max_participants} <- Args.int(args, "max_participants", nil),
          {:ok, destroy_when_empty} <- Args.bool(args, "destroy_when_empty", nil),
          # names → wire ids, and the short `layout` form → the fields it names: the
@@ -1316,18 +1324,10 @@ defmodule Kelix.Mod.Mcu do
          mcu: mcu,
          vad: vad,
          rate: rate,
-         audio_codecs: audio,
-         # `dtmf` is now its own switch (§8.4). An explicit one wins; absent it, a
-         # legacy audio list still decides, TELEPHONE-EVENT in that list having been
-         # the flag before it had a name of its own.
-         dtmf:
-           cond do
-             not is_nil(dtmf_arg) -> dtmf_arg
-             is_nil(audio) -> nil
-             true -> dtmf
-           end,
-         video_codecs: video_codecs,
-         text_codecs: text_codecs,
+         # `dtmf` is its own switch (§8.4) — nil means "whatever the conference default
+         # says", which is what the registry merges it against. It no longer reads a
+         # TELEPHONE-EVENT entry out of a codec list: that list is ignored now.
+         dtmf: dtmf_arg,
          video: video,
          layout: layout,
          logo: logo,
@@ -1335,6 +1335,15 @@ defmodule Kelix.Mod.Mcu do
          destroy_when_empty: destroy_when_empty
        }}
     end
+  end
+
+  # P8a: the codec arguments the media server made pointless (§8.4), stripped before any
+  # vocabulary reads them and reported once. They come from `conference.create` bodies
+  # and from scripts we do not own, so ignoring them is a migration and answering `400`
+  # is an outage; they become an unknown argument in the release after this one.
+  defp drop_retired(args, context) do
+    Config.warn_retired(Map.keys(args), context)
+    Map.drop(args, Map.keys(Config.retired_keys()))
   end
 
   defp call(request) do
@@ -2386,11 +2395,6 @@ defmodule Kelix.Mod.Mcu do
          mcu: mcu.name,
          vad: spec.vad || config.vad,
          rate: spec.rate || config.rate,
-         codecs: %{
-           audio: spec.audio_codecs || config.audio_codecs,
-           video: spec.video_codecs || config.video_codecs,
-           text: spec.text_codecs || config.text_codecs
-         },
          dtmf: if(is_nil(spec.dtmf), do: config.dtmf, else: spec.dtmf),
          rtp_timeout_ms: config.rtp_timeout_ms,
          medias: spec_medias(spec) || config.medias,

@@ -116,7 +116,9 @@ defmodule Kelix.Mod.McuTest do
       # defaults applied from the config block
       assert conf.vad == 1
       assert conf.rate == 32_000
-      assert conf.codecs.audio == ["OPUS", "G722", "PCMA", "PCMU"]
+      # what it answers, not which codecs: the media server arbitrates those (P8a)
+      assert conf.medias == [:audio, :video, :text]
+      assert conf.dtmf == true
       assert conf.layout == %{comp: 1, size: 6, auto: true}
     end
 
@@ -180,7 +182,8 @@ defmodule Kelix.Mod.McuTest do
                  "name" => "Sales weekly",
                  "vad" => 2,
                  "rate" => 16_000,
-                 "audio_codecs" => ["pcma"],
+                 "medias" => ["audio", "video"],
+                 "dtmf" => false,
                  "max_participants" => 4,
                  "destroy_when_empty" => true,
                  "video" => %{"fps" => 25},
@@ -191,17 +194,12 @@ defmodule Kelix.Mod.McuTest do
       assert conf.name == "Sales weekly"
       assert conf.vad == 2
       assert conf.rate == 16_000
-      assert conf.codecs.audio == ["PCMA"]
+      assert conf.medias == [:audio, :video]
+      assert conf.dtmf == false
       assert conf.max_participants == 4
       assert conf.destroy_when_empty == true
       # a partial video override keeps the rest of the profile
-      assert conf.video == %{
-               size: 6,
-               fps: 25,
-               bitrate: 1024,
-               intra_period: 300,
-               fmtp: "profile-level-id=42e01f;packetization-mode=1"
-             }
+      assert conf.video == %{size: 6, fps: 25, bitrate: 1024, intra_period: 300}
 
       assert conf.layout == %{comp: 6, size: 2, auto: true}
       assert_received {:rpc, "CreateConference", [^uid, 2, 16_000, 7]}
@@ -237,6 +235,27 @@ defmodule Kelix.Mod.McuTest do
 
     test "an unknown mcu name is refused" do
       assert {:error, :unknown_mcu} = create(%{"domain" => @domain, "mcu" => "ghost"})
+    end
+
+    # §8.4: the REST body of a client we do not own may still carry them. Ignored with
+    # a warning, never a 400 — the same tolerance the config block gives them.
+    test "the retired codec arguments are ignored with a warning" do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, %{uid: uid}} =
+                   create(%{
+                     "domain" => @domain,
+                     "audio_codecs" => ["pcma"],
+                     "video_codecs" => ["h264"]
+                   })
+
+          assert {:ok, conf} = Mcu.conference(uid)
+          assert conf.medias == [:audio, :video, :text]
+          assert conf.dtmf == true
+        end)
+
+      assert log =~ "conference.create: `audio_codecs` is no longer honoured"
+      assert log =~ "conference.create: `video_codecs` is no longer honoured"
     end
 
     test "the CLI arg shape reaches the same place" do

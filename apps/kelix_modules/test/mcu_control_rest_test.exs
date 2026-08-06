@@ -165,7 +165,9 @@ defmodule Kelix.Mod.McuControlRestTest do
     assert out =~ ~r/^Video:\s+.*size=hd720p/m
     assert out =~ ~r/^Layout:\s+auto=true comp=2x2 size=hd720p$/m
     assert out =~ ~r/^Vad:\s+basic$/m
-    assert out =~ ~r/^Codecs:\s+audio=/m
+    # what the conference answers, which is what the codec lists used to say sideways
+    assert out =~ ~r/^Medias:\s+audio, video, text$/m
+    assert out =~ ~r/^Dtmf:\s+true$/m
   end
 
   # The CLI render hints ride the same declaration the REST discovery serves: they

@@ -47,9 +47,9 @@ defmodule Kelix.Mod.Mcu.Conference do
             conf_id: nil,
             vad: 1,
             rate: 32_000,
-            codecs: %{audio: [], video: [], text: []},
             # Which m= sections this conference answers at all (§8.4). The codecs inside
-            # them are the media server's call since P8a.
+            # them are the media server's call since P8a — a conference holds no codec
+            # list at all, which is what made `medias` necessary.
             medias: [:audio, :video, :text],
             dtmf: true,
             # RTP inactivity watchdog armed per media at the ACK (§16.1). Comes from
@@ -111,7 +111,10 @@ defmodule Kelix.Mod.Mcu.Conference do
       conf_id: conf.conf_id,
       vad: conf.vad,
       rate: conf.rate,
-      codecs: conf.codecs,
+      # what this conference answers, which is the policy the codec lists used to
+      # express: the codecs themselves are the media server's and not ours to report
+      medias: conf.medias,
+      dtmf: conf.dtmf,
       video: conf.video,
       layout: conf.layout,
       max_participants: conf.max_participants,

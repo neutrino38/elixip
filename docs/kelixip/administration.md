@@ -240,7 +240,7 @@ mcu 1.0 (Kelix.Mod.Mcu)
 
 commands:
   conference.create   [POST /modules/mcu/conferences]
-      args: domain* name did mcu vad rate audio_codecs video_codecs text_codecs video layout max_participants destroy_when_empty
+      args: domain* name did mcu vad rate medias dtmf video layout logo max_participants destroy_when_empty
       Create a conference (allocates a DID when none is given)
       vad: voice activity detection: none | basic | full (or 0 | 1 | 2)
       layout: a mosaic, a size and/or auto|manual, in any order, spaces or commas

@@ -69,8 +69,7 @@ defmodule Kelix.Mod.McuAdhocScriptTest do
   setup do
     {:ok, config} =
       Config.parse(%{
-        "did_range" => "8000-8009",
-        "audio_codecs" => ["PCMA", "PCMU"]
+        "did_range" => "8000-8009"
       })
 
     start_supervised!({Mcu, config: config, module_name: "mcu", mediaservers: @mediaservers})

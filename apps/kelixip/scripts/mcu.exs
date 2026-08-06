@@ -110,7 +110,7 @@ defmodule Kelix.Mcu.Call do
     reply_invite_with_sdp(200,
       # total conversation: audio, video and T.140 text. This is what we *accept*,
       # not what we demand — only the medias the offer actually carries are answered,
-      # so an audio-only phone is unaffected. A conference with `text_codecs = []`
+      # so an audio-only phone is unaffected. A conference whose `medias` omits "text"
       # declines the text section with port 0 the same way.
       media: :tc,
       # accept a secure leg when the offer asks for one (SDES from a SIP phone,

@@ -67,9 +67,8 @@ Module block — `[module.mcu]` (in `config.toml`):
 |---|---|---|---|
 | `vad` | name or integer | `basic` | Voice activity detection: `none` / `basic` / `full` (or `0` / `1` / `2`) |
 | `rate` | integer | `32000` | Mixer sampling rate: `8000`/`16000`/`32000`/`48000`. Participants are resampled to it — not a codec constraint |
-| `audio_codecs` | list | `["OPUS","G722","PCMA","PCMU","TELEPHONE-EVENT"]` | Accepted audio codecs. `TELEPHONE-EVENT` in the list is the **DTMF switch** (RFC 4733), not a mixer codec — on by default; an explicit list that omits it turns DTMF off |
-| `video_codecs` | list | `["H264"]` | Accepted video codecs (`H264`, `VP8`) |
-| `text_codecs` | list | `["T140RED","T140"]` | T.140 real-time text, redundancy first. `[]` turns text off (its `m=text` is answered port 0) |
+| `medias` | list | `["audio","video","text"]` | Which `m=` sections a conference answers. An omitted media is answered **port 0** — how you turn video or text off. Codecs *inside* a media are the media server's call, not a config key |
+| `dtmf` | boolean | `true` | Propose telephone-event (RFC 4733) on audio. A stream the mixer never encodes, hence a switch and not a codec |
 | `max_participants` | integer | `20` | Per-conference cap; reached ⇒ the next caller gets `486` |
 | `destroy_when_empty` | boolean | `false` | Destroy a conference with its last participant |
 | `auto_layout` | boolean | `true` | The mosaic follows the number of video legs |
@@ -78,7 +77,6 @@ Module block — `[module.mcu]` (in `config.toml`):
 | `video_fps` | integer | `15` | Encoded frame rate |
 | `video_bitrate` | integer | `1024` | kbps, also the cap on the answer's `b=AS:` |
 | `video_intra_period` | integer | `300` | Frames between intra-frames |
-| `video_fmtp` | string | `profile-level-id=42e01f;packetization-mode=1` | H.264 profile the answer states **when the offer states none**; a reflected profile always wins. `""` announces nothing |
 | `logo_file` | string | — | Image drawn in **every empty mosaic slot**, on every conference (a bare name under `image_dir`) |
 | `record_dir` | string | — | Directory the media server writes recordings into. No default: unset means `recording.start` refuses |
 | `image_dir` | string | — | Directory the media server reads `logo_file` (and `logo=`) from. No default |
@@ -402,7 +400,8 @@ video_size       = "hd720p"
 record_dir       = "/var/lib/kelixip/rec"    # on the media server
 image_dir        = "/var/lib/kelixip/img"    # idem
 logo_file        = "ives.png"                # every empty mosaic slot
-video_fmtp       = "profile-level-id=42e01f;packetization-mode=1"
+medias           = ["audio", "video", "text"]
+dtmf             = true
 
 [mediaserver.pool.mcu1]
 module = "mendooze"

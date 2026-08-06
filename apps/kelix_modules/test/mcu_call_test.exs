@@ -215,7 +215,9 @@ defmodule Kelix.Mod.McuCallTest do
     {:ok, config} =
       Config.parse(%{
         "did_range" => "8000-8009",
-        "audio_codecs" => ["OPUS", "PCMA", "PCMU", "TELEPHONE-EVENT"]
+        # no codec list: the media server arbitrates (P8a). `dtmf` is what says
+        # telephone-event is proposed, and it is on by default.
+        "dtmf" => true
       })
 
     start_supervised!({Mcu, config: config, module_name: "mcu", mediaservers: @mediaservers})
@@ -880,8 +882,8 @@ defmodule Kelix.Mod.McuCallTest do
       assert_receive {:replied, 200, _reason, _fields, _req}, 2000
       send(pid, {:ACK, %{method: :ACK}, nil, dialog})
 
-      # 105 = TextCodec::T140RED. Preference order comes from the conference's
-      # `text_codecs`, redundancy first — a lost packet is a lost character.
+      # 105 = TextCodec::T140RED. Preference order is the CALLER's, honoured by the
+      # media server — redundancy first here, and a lost packet is a lost character.
       assert_receive {:rpc, "SetTextCodec", [42, 7, 105]}, 2000
     end
 

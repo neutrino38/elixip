@@ -81,14 +81,10 @@ defmodule Kelix.Mod.Mcu.ArgsTest do
       assert {:error, _} = Args.int(%{"n" => -1}, "n", nil)
     end
 
-    test "bool/3 and codec_list/3" do
+    test "bool/3" do
       assert {:ok, true} = Args.bool(%{"force" => true}, "force", false)
+      assert {:ok, false} = Args.bool(%{}, "force", false)
       assert {:error, _} = Args.bool(%{"force" => "yes"}, "force", false)
-
-      assert {:ok, ["PCMA", "OPUS"]} =
-               Args.codec_list(%{"audio_codecs" => ["pcma", "opus"]}, "audio_codecs", [])
-
-      assert {:error, _} = Args.codec_list(%{"audio_codecs" => "PCMA"}, "audio_codecs", [])
     end
 
     test "sub_map/4 merges over the default and refuses unknown fields" do

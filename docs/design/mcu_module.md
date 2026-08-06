@@ -1665,6 +1665,19 @@ Three consequences that need a home rather than a silent drop:
    applies to `conference.create` arguments, which come from scripts we do not
    own — there they are ignored with a warning and never a `400`.
 
+> **Landed 2026-08-06** (P8a, step 3b). Exactly as specified above: the four keys are
+> gone from `Config` (struct, defaults, `@keys`, `@string_keys`), from the `Conference`
+> struct (`codecs:` and `video.fmtp`), from `build_conference/4` and from the published
+> `conference.create` argument list. `Config.validate_codecs/2` and the three codec
+> vocabularies went with them, as did `Args.codec_list/3`. `dtmf` is now a first-class
+> boolean key of the block (it was reachable only through `conference.create` before).
+> The tolerance is one function, `Config.warn_retired/2`, fed by `Config.retired_keys/0`
+> — read by the config block and by `drop_retired/2`, which strips the retired arguments
+> off `conference.create` / `conference.update` before any vocabulary sees them. What an
+> operator sees on the two behaviour changes: an `audio_codecs` list without
+> `TELEPHONE-EVENT` no longer turns DTMF off, and `text_codecs = []` no longer turns
+> text off — each named in its warning, with the key that does it now.
+
 ### The media servers: `[mediaserver.pool.*]`, and only there
 
 They are the pool entries of design §9 — `module` + `url` + `enabled`, nothing
@@ -1936,7 +1949,7 @@ and the deliberately-deferred items of §15.1.
 | **P5c** | ✔ | **Documentation** (§18): the design doc reconciled with what shipped, the operator/developer guides, and the "test without packaging" recipe | a reader who never saw this work can configure a node, dial a conference and drive it from a script, from the docs alone |
 | **P6** | ✔ | Packaging: `kelixip-mod-mcu` RPM/deb, the commented `[module.mcu]` block in the shipped `config.toml`, and each module package carrying its own document | `dnf install kelixip-mod-mcu` + a config snippet gets a working conference. The RPM is **built and inspected on AL9** (four packages, every `Mcu*` beam claimed, `mcu.md` + the guide under `/usr/share/doc/kelixip-mod-mcu/`, the sample block accepted by `Config.parse/1`); the deb is wired but not yet built, which must happen on the target release |
 | **P7** | ✔ | **Server-side (Mendooze), §16.1-16.2**: `StartRTPTimeout` RPC + MCU event types `3` and `4`, wired `RTPSession::Listener` → `RTPParticipant` → `MultiConf` → `MCU` event queue; kelixip arms per media at the ACK (never on text), ANDs the timeouts (§16.1) and routes both events to the operator view and the scenario | unplugging a phone's network mid-call frees its slot and its mosaic tile within `rtp_timeout_ms`, a leg that answered and never sent media is reaped, and a *single* dead media no longer kills a working call — **L1 lifted**. **L2 only partly**: event `4` reaches the scenario as `{:mcu_event, :media_connected, media}`, not yet as the behaviour's `{:ms_event, conn, :ice_connected}` — that mapping needs the conn ref, which the module does not hold, and the mosaic-join-on-real-video it would enable is not done |
-| **P8a** |  | **Delegated negotiation — the plumbing, §16.3.1-16.3.3**: `StartReceiving` takes the offer's fmtp and returns `(recPort, announcedIp, fmtpByPt)`; the server calls the negotiator and installs the **filtered** map; `SetRTPProperties` splits around it (decision 8); kelixip deletes its local arbitration and its four codec config keys, classifies and traces the three transport cases of §6.3.1, and answers `a=rtcp-fb` as an intersection | the accepted payload types and their fmtp come from the server, verbatim — **most of L4 lifted**; a plain-RTP, an SDES and a WebRTC leg are each identifiable from one log line; mcuGold and a pre-S3 kelixip on the same server are unaffected. Ships without P8c thanks to the fallback |
+| **P8a** | ✔ | **Delegated negotiation — the plumbing, §16.3.1-16.3.3**: `StartReceiving` takes the offer's fmtp and returns `(recPort, announcedIp, fmtpByPt)`; the server calls the negotiator and installs the **filtered** map; `SetRTPProperties` splits around it (decision 8); kelixip deletes its local arbitration and its four codec config keys, classifies and traces the three transport cases of §6.3.1, and answers `a=rtcp-fb` as an intersection | the accepted payload types and their fmtp come from the server, verbatim — **most of L4 lifted**; a plain-RTP, an SDES and a WebRTC leg are each identifiable from one log line; mcuGold and a pre-S3 kelixip on the same server are unaffected. Ships without P8c thanks to the fallback |
 | **P8c** |  | **Remote-fmtp ingestion, §16.3.4 (b)**: `CodecNegotiator::Negotiate` stops ignoring `remoteFmtp`; `H264Encoder::GetFmtpParams` implements RFC 6184 §8.2.2 (profile kept, level per `level-asymmetry-allowed`, that parameter emitted); `effectiveProps` bound to `min(ours, the peer's)` and applied to the encoder; `CODECS.md` documents the new key | a caller that allows level asymmetry is answered our real decoding capability and receives a stream bounded by *its* declared level — **L4 fully lifted**, and a plain SIP handset's answer is unchanged byte-for-byte |
 | **P8b** |  | **JSR-309 answerer alignment** (§19.3, C2-C4): the point-to-point path adopts the answerer rule of §6.3.1 — mirror the offered profile, intersect `a=rtcp-fb`, send `useRtcpFIR`, drop `goog-remb` — through the shared helpers in `MediaServer.SdpTools`. **kelixip-only, no server change.** Gated on P8 being implemented *and tested* against real callers | an `RTP/AVPF` offer is answered `RTP/AVPF` on both paths, the feedback answered is the feedback asked for, and every announced type has its server-side switch — one rule, one implementation, two adapters |
 | **P9** | ✔ | **The inspection surface** (§8.3.8): `recording.start\|show\|stop`, `slot.list\|update`, the `logo` field and its `[module.mcu]` defaults | media-server tests 5, 6 and 7 are runnable from `kelictl` alone: a `record.mp4` to look at, a slot map that shows the VAD reshuffle, and a logo in the empty slots |
@@ -2267,9 +2280,8 @@ that is the point of doing S3 as a mirror rather than as a fresh design.
 | Deleted | Replaced by |
 |---|---|
 | `Sdp.negotiate/3` call in the adapter, and the conference codec lists behind it | the offer's own payload types, proposed as-is |
-| `codec_fmtp/3`, `reflected_params/1`, `h264_profile_level_id/2`, `configured_video_fmtp/1` | `fmtpByPt`, emitted verbatim |
-| `dtmf_fmtp/1` (`0-16`) | the server's, which owns that range (`negotiator.cpp:43`) |
-| `red_fmtp/2` (RFC 4103) | the server's, with the same T140-companion guard (`negotiator.cpp:79-93`) |
+| `configured_video_fmtp/1`, and the configured-profile half of `codec_fmtp/3` | `fmtpByPt`, emitted verbatim |
+| `dtmf_fmtp/1` (`0-16`), `red_fmtp/2` (RFC 4103), `codec_fmtp/3` + `reflected_params/1` **on the delegated path** | the server's, which owns those ranges and the T140-companion guard (`negotiator.cpp:43,79-93`). They survive as the **no-verdict** path only, reached by a media server that predates P8a — a rolling upgrade runs on it |
 | `Config.validate_codecs/2` and the module's codec vocabulary | the server's `IsSupported` catalogue |
 | `ensure_audio/1` | the all-medias-empty rule of §6.3 rule 2 |
 

@@ -41,10 +41,8 @@ conferences** — see §5.2).
 # Mixer defaults, applied to a conference created without the field.
 vad                 = "basic"    # none | basic | full  (or 0 | 1 | 2)
 rate                = 32000      # 8000 | 16000 | 32000 | 48000 — see below
-audio_codecs        = ["OPUS", "G722", "PCMA", "PCMU", "TELEPHONE-EVENT"]
-video_codecs        = ["H264"]
-text_codecs         = ["T140RED", "T140"]   # T.140 real-time text, redundancy first
-video_fmtp          = "profile-level-id=42e01f;packetization-mode=1"
+medias              = ["audio", "video", "text"]  # which m= sections a conference answers
+dtmf                = true       # propose telephone-event (RFC 4733) on audio
 max_participants    = 20
 destroy_when_empty  = false
 auto_layout         = true       # the mosaic follows the number of video legs
@@ -103,44 +101,52 @@ ICE candidates. On the media server:
   a log line saying so — kelixip deliberately keeps no address to fall back on, since
   a guessed one produces a call that connects and never carries media.
 
-**`video_fmtp` is the H.264 profile the answer states when the caller states
-none** — a gateway, or a phone that lists `H264/90000` with no `a=fmtp`. Saying
-nothing is not neutral: RFC 6184 makes it mean Baseline level 1.0 to the peer,
-while the mixer encodes HD720p, and the call then "connects" without displaying.
-The same value is imposed on the encoder (`SetVideoCodec`), so the SDP and the
-stream agree — check `H264Encoder: … profile-level-id …` in the media server's
-log if in doubt.
+**There is no codec list to configure — the media server negotiates.** The offer is
+the menu: kelixip proposes every payload type the caller offered that it can name,
+passes the caller's `a=fmtp` along, and the media server answers with the payload
+types it accepted and the parameters it will actually use. That answer is what goes on
+the wire, verbatim. H.264 included: `profile-level-id`, `packetization-mode` and
+`level-asymmetry-allowed` come from the party that encodes, so the SDP and the stream
+cannot disagree — check `H264Encoder: … profile-level-id …` in the media server's log
+if in doubt.
 
-A profile the **offer** states always wins: `profile-level-id` has to match for
-the two ends to decode each other. Set `video_fmtp = ""` to go back to
-announcing nothing. The key disappears when the media server takes over the
-negotiation (design §16.3).
+Two consequences worth knowing:
 
-**Text is on by default — this MCU does total conversation.** `text_codecs`
-lists T.140 in preference order, and `T140RED` first means a caller offering RFC
-4103 redundancy gets it (a lost packet is a lost character, which is exactly what
-redundancy buys on an accessibility call). Three things follow:
+* a caller offering a codec this MCU used to exclude (G.729, iLBC…) now gets it if the
+  media server supports it, and a clean `a=rtpmap`-less rejection if it does not;
+* what you can no longer do from `config.toml` is *prefer* one codec over another. The
+  caller's own preference order is honoured, which is what an answerer should do
+  anyway.
 
-* a caller that offers no `m=text` is unaffected: only the medias the offer carries
-  are answered;
-* a caller offering plain `t140` gets plain `t140`, no `red`;
-* `text_codecs = []` turns text off for that conference, and its `m=text` section is
-  answered with **port 0** (the section keeps its place, RFC 3264 §6).
+**What replaces the lists are two policy keys**, because turning a media off is a
+deployment decision and not a codec capability:
 
-Nothing else to configure: the media server mixes text on its own text mixer, which
-needs no layout and no join — a text leg is not a mosaic tile, and it does not move
-the automatic layout.
+* **`medias`** — which `m=` sections a conference answers at all. Dropping `"text"`
+  answers every offered `m=text` with **port 0** (the section keeps its place,
+  RFC 3264 §6), which is what `text_codecs = []` used to mean; the same for
+  `"video"` on an audio-only conference. A caller that offers no `m=text` is
+  unaffected either way — only the medias the offer carries are answered.
+* **`dtmf`** — whether telephone-event (RFC 4733) is proposed on audio at all. It is a
+  stream the mixer never encodes, so it was never really a codec; `TELEPHONE-EVENT` in
+  the old `audio_codecs` list was this switch under another name.
+
+> **Upgrading from 1.2.** `audio_codecs`, `video_codecs`, `text_codecs` and
+> `video_fmtp` are still **accepted and ignored**, with a warning naming the
+> replacement, so a node upgrades without editing its config first. They become an
+> error in the release after this one. Two behaviour changes to expect: an
+> `audio_codecs` list that omitted `TELEPHONE-EVENT` no longer turns DTMF off (set
+> `dtmf = false`), and `text_codecs = []` no longer turns text off (drop `"text"` from
+> `medias`).
+
+Text needs nothing else configured: the media server mixes it on its own text mixer,
+which needs no layout and no join — a text leg is not a mosaic tile, and it does not
+move the automatic layout.
 
 **`rate` is the mixer's sampling rate, not a codec constraint.** The server accepts
 8000/16000/32000/48000 and resamples every participant to its own codec rate, so a
 G.711 phone in a 32 kHz conference costs nothing but the transrating. Any other value
 is refused at boot.
 
-**`audio_codecs` doubles as the DTMF switch**: `TELEPHONE-EVENT` in the list means
-"offer telephone-event", it is not a codec the mixer knows. Codec names are validated
-at boot *and* on every `create`, against what the SDP layer can actually emit
-(`PCMU PCMA G722 OPUS` / `H264 VP8` / `T140 T140RED`) — a name it cannot emit is a
-configuration error, never a call that fails later.
 
 ### 1.3 Routing the DIDs — `domains.toml`
 
@@ -261,7 +267,7 @@ Prometheus, on the `[metrics]` port:
 
 | Metric | Read it for |
 |---|---|
-| `kelix_mcu_calls_total{result}` | the funnel: `joined` versus `404` / `486` / `488` / `503` / `500`. A rising `486` means conferences are full; a rising `488` means callers offer codecs you do not accept |
+| `kelix_mcu_calls_total{result}` | the funnel: `joined` versus `404` / `486` / `488` / `503` / `500`. A rising `486` means conferences are full; a rising `488` means callers offer codecs the media server does not accept |
 | `kelix_mcu_conferences{mcu}` / `kelix_mcu_participants{mcu,conference}` | occupancy |
 | `kelix_mcu_mediaserver_up{mcu}` | the module's own view of its control channel — distinct from `kelix_mediaserver_up`, which is the point-to-point *pool*'s view |
 | `kelix_mcu_rpc_duration_seconds{method}` | the first place to look when calls get slow to set up: every leg's setup is a handful of these in series |
@@ -400,7 +406,7 @@ The caller sees a code; only the log tells them apart.
 
 | Symptom | Log line | Cause |
 |---|---|---|
-| `488` immediately | `offer refused (:no_common_codec)` | no codec in common — compare the offer's `m=` line with the conference's `codecs` |
+| `488` immediately | `offer refused (:no_common_codec)` | **every** offered media came back empty. The `proposed N pt, accepted M` line above it says what the media server turned down; a single media coming back empty is answered port 0, not `488` |
 | `488` immediately | `offer refused (:secure_not_supported)` | a DTLS/SDES offer while the script passed `webrtc: :no` |
 | `503` immediately | `mediaserver.down : mcu=mcu1` earlier | the control channel is down; `kelictl status` shows `0/1 up` |
 | `500` | `mcu mcu1: <Method> failed: …` | an RPC failed. The line above it names the method and the server's message |

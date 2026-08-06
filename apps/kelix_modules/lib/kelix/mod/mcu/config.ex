@@ -7,16 +7,25 @@ defmodule Kelix.Mod.Mcu.Config do
   never a silent default) **and** what the running module holds, so validation and
   behaviour can never drift apart.
 
-  Two things live here rather than in the module: the **codec vocabulary** (only
-  names the SDP layer can actually emit are accepted — an unknown one is a config
-  error, not a call that fails at 3 a.m.) and the **DID allocation ranges**
+  What lives here rather than in the module: the **DID allocation ranges**
   (`did_range` / `did_ranges`, §5.3).
 
   What is deliberately **not** here: the media servers. They are declared once, in
   `[mediaserver.pool.<name>]`, and the module opens one control channel per entry
   (§8.4) — a conference is still pinned to one of them, but where the list is
   *declared* is not what pins it.
+
+  And no longer here either: the **codec lists**. `audio_codecs`, `video_codecs`,
+  `text_codecs` and `video_fmtp` are gone with P8a — the offer is the menu and the
+  media server arbitrates (§16.3, §6.3.2). What they were really encoding survives as
+  two keys that say it directly: `medias` (which `m=` sections a conference answers)
+  and `dtmf` (whether telephone-event is proposed at all). The four are still
+  *accepted* for one release, ignored with a warning naming the replacement, because
+  an RPM-installed node has them in `/etc/kelixip/config.toml` and refusing them
+  outright turns an upgrade into a node that will not boot (§8.4).
   """
+
+  require Logger
 
   alias Kelix.Mod.Mcu.Vocabulary
 
@@ -26,40 +35,25 @@ defmodule Kelix.Mod.Mcu.Config do
 
   defstruct vad: 1,
             rate: 32_000,
-            audio_codecs: ["OPUS", "G722", "PCMA", "PCMU"],
-            # telephone-event is not a mixer codec but an RFC 4733 stream: it is a
-            # flag on the audio media, not an entry in the codec list.
             # Which m= sections a conference answers at all (§8.4). Codec NAMES are the
             # media server's business since P8a; this is a deployment policy — an
-            # audio-only conference is a product decision, not a codec capability.
+            # audio-only conference is a product decision, not a codec capability, and
+            # dropping `text` here is what `text_codecs = []` used to mean.
             medias: [:audio, :video, :text],
+            # Whether telephone-event is proposed on audio (§6.3.2). Also a policy and
+            # not a codec: it is an RFC 4733 stream the mixer never encodes, and it is
+            # what `TELEPHONE-EVENT` in the old `audio_codecs` list was really saying.
             dtmf: true,
-            video_codecs: ["H264"],
-            # Total conversation is what this MCU is for, so T.140 is on by default.
-            # Order is preference: `T140RED` first means a caller that offers RFC 4103
-            # redundancy gets it — the point of RED being links where a lost packet is
-            # a lost character. A caller offering plain `t140` falls back to it, and
-            # `text_codecs = []` turns text off (its m= line is then answered port 0).
-            text_codecs: ["T140RED", "T140"],
             max_participants: 20,
             destroy_when_empty: false,
             auto_layout: true,
             layout_comp: 1,
-            # The inline video profile, copied into every conference at create time.
-            # `fmtp` is what the answer advertises for H.264 **when the offer states
-            # no profile of its own** — a reflected one always wins (§6.3) — and it is
-            # also what the encoder is told to target, so the two agree. Constrained
-            # Baseline 3.1 matches the HD720P default output and is what every gateway
-            # and browser decodes. `""` advertises nothing, which is what this module
-            # did before, and the whole key goes away with the delegated negotiation
-            # of §16.3 (S3/P8), where the server reports what it actually accepted.
-            video: %{
-              size: 6,
-              fps: 15,
-              bitrate: 1024,
-              intra_period: 300,
-              fmtp: "profile-level-id=42e01f;packetization-mode=1"
-            },
+            # The inline video profile, copied into every conference at create time:
+            # what the mixer encodes towards every leg. There is no `fmtp` here any
+            # more — what the answer advertises for H.264 is what the media server
+            # reported it accepted (§6.3 rule 9), and announcing a profile the encoder
+            # was not configured with is the drift that key invited.
+            video: %{size: 6, fps: 15, bitrate: 1024, intra_period: 300},
             did_range: nil,
             did_ranges: %{},
             # Recording and images (§8.3.8). Paths on the **media server's**
@@ -78,13 +72,6 @@ defmodule Kelix.Mod.Mcu.Config do
             rtp_timeout_ms: 10_000,
             gc_orphans: true
 
-  # Codec names the SDP layer knows (MediaServer.Mendooze.Sdp tables). Accepting
-  # anything else would raise inside the answer builder, one call at a time.
-  @audio_codecs ~w(PCMU PCMA G722 OPUS)
-  @dtmf_name "TELEPHONE-EVENT"
-  @video_codecs ~w(H264 VP8)
-  @text_codecs ~w(T140 T140RED)
-
   # AudioMixer::Init refuses anything else (§15, decision 5)
   @rates [8000, 16_000, 32_000, 48_000]
 
@@ -95,14 +82,29 @@ defmodule Kelix.Mod.Mcu.Config do
   @int_keys ~w(rate max_participants video_fps video_bitrate
                video_intra_period xmlrpc_timeout_ms call_timeout_ms shutdown_grace_ms
                rtp_timeout_ms)
-  @bool_keys ~w(destroy_when_empty auto_layout gc_orphans)
-  @string_keys ~w(video_fmtp record_dir image_dir logo_file)
+  @bool_keys ~w(dtmf destroy_when_empty auto_layout gc_orphans)
+  @string_keys ~w(record_dir image_dir logo_file)
 
-  @keys ~w(module call_timeout_ms vad rate medias audio_codecs video_codecs text_codecs
+  # The keys P8a retired, with what replaces each. Accepted for one release and
+  # ignored with a warning (§8.4): they sit in the config file of every node this
+  # release upgrades, and a node that refuses to boot is a worse migration than a
+  # node that says what it stopped honouring. Reject them in the release after.
+  @retired_keys %{
+    "audio_codecs" =>
+      "the media server decides which codecs it accepts; use `dtmf = false` to stop " <>
+        "proposing telephone-event and `medias` to turn a media off",
+    "video_codecs" => "the media server decides which codecs it accepts; see `medias`",
+    "text_codecs" =>
+      "the media server decides which codecs it accepts; drop \"text\" from `medias` " <>
+        "to turn text off",
+    "video_fmtp" => "the H.264 profile answered is the one the media server reported it accepted"
+  }
+
+  @keys ~w(module call_timeout_ms vad rate medias dtmf
            max_participants destroy_when_empty auto_layout layout_comp did_range
-           did_ranges video_size video_fps video_bitrate video_intra_period video_fmtp
+           did_ranges video_size video_fps video_bitrate video_intra_period
            xmlrpc_timeout_ms shutdown_grace_ms rtp_timeout_ms gc_orphans
-           record_dir image_dir logo_file)
+           record_dir image_dir logo_file) ++ Map.keys(@retired_keys)
 
   @doc """
   Validate and decode a `[module.mcu]` block. `{:ok, %Config{}}` or
@@ -112,6 +114,7 @@ defmodule Kelix.Mod.Mcu.Config do
   def parse(block) when is_map(block) do
     with :ok <- reject_moved_mediaserver(block),
          :ok <- reject_unknown_keys(block),
+         :ok <- warn_retired_keys(block),
          :ok <- check_ints(block),
          :ok <- check_bools(block),
          :ok <- check_strings(block),
@@ -120,9 +123,6 @@ defmodule Kelix.Mod.Mcu.Config do
          {:ok, layout_comp} <- Vocabulary.comp(Map.get(block, "layout_comp"), "layout_comp"),
          {:ok, video_size} <- Vocabulary.size(Map.get(block, "video_size"), "video_size"),
          {:ok, medias} <- medias(block),
-         {:ok, audio, dtmf} <- audio_codecs(block),
-         {:ok, video} <- codecs(block, "video_codecs", @video_codecs, defaults().video_codecs),
-         {:ok, text} <- codecs(block, "text_codecs", @text_codecs, defaults().text_codecs),
          {:ok, did_range} <- did_range(block, "did_range"),
          {:ok, did_ranges} <- did_ranges(block) do
       defaults = %__MODULE__{}
@@ -134,10 +134,7 @@ defmodule Kelix.Mod.Mcu.Config do
          vad: vad || defaults.vad,
          rate: int(block, "rate", defaults.rate),
          medias: medias,
-         audio_codecs: audio,
-         dtmf: dtmf,
-         video_codecs: video,
-         text_codecs: text,
+         dtmf: bool(block, "dtmf", defaults.dtmf),
          max_participants: int(block, "max_participants", defaults.max_participants),
          destroy_when_empty: bool(block, "destroy_when_empty", defaults.destroy_when_empty),
          auto_layout: bool(block, "auto_layout", defaults.auto_layout),
@@ -146,8 +143,7 @@ defmodule Kelix.Mod.Mcu.Config do
            size: video_size || defaults.video.size,
            fps: int(block, "video_fps", defaults.video.fps),
            bitrate: int(block, "video_bitrate", defaults.video.bitrate),
-           intra_period: int(block, "video_intra_period", defaults.video.intra_period),
-           fmtp: str(block, "video_fmtp", defaults.video.fmtp)
+           intra_period: int(block, "video_intra_period", defaults.video.intra_period)
          },
          did_range: did_range,
          did_ranges: did_ranges,
@@ -174,42 +170,35 @@ defmodule Kelix.Mod.Mcu.Config do
     do: Map.get(config.did_ranges, domain) || config.did_range
 
   @doc """
-  Validate a codec list against what the SDP layer can actually emit, and split the
-  audio one's DTMF flag out — the same reading `parse/1` applies to the config block.
+  The retired keys, mapped to what replaces each.
 
-  Exported because **a per-conference codec list is exactly as dangerous as a
-  configured one**: `conference.create audio_codecs=["SPEEX"]` would otherwise build a
-  conference whose answer raises inside the SDP builder, one call at a time, which is
-  the failure §8.4 refuses for the config block. One vocabulary, checked wherever
-  codecs enter.
-
-  Returns `{:ok, names, dtmf?}` for audio and `{:ok, names, false}` for the rest.
+  Exported because the same tolerance applies to `conference.create` / `update`
+  arguments (§8.4): those come from scripts we do not own, so they are ignored with a
+  warning rather than answered `400`. One statement of what is retired and why, read by
+  both the config block and the control commands.
   """
-  @spec validate_codecs(:audio | :video | :text, [String.t()] | nil) ::
-          {:ok, [String.t()] | nil, boolean} | {:error, String.t()}
-  def validate_codecs(_kind, nil), do: {:ok, nil, false}
+  @spec retired_keys() :: %{String.t() => String.t()}
+  def retired_keys(), do: @retired_keys
 
-  def validate_codecs(:audio, names) when is_list(names) do
-    {dtmf, codecs} = names |> Enum.map(&upcase/1) |> Enum.split_with(&(&1 == @dtmf_name))
+  @doc """
+  Log one warning per retired key present in `given`, naming its replacement.
 
-    case Enum.reject(codecs, &(&1 in @audio_codecs)) do
-      [] -> {:ok, codecs, dtmf != []}
-      bad -> {:error, "unknown audio codec(s): #{Enum.join(bad, ", ")}"}
+  `context` says where they came from, so an operator can tell a stale config file from
+  a stale script. Always returns `:ok` — this is a migration aid, never a refusal.
+  """
+  @spec warn_retired(Enumerable.t(), String.t()) :: :ok
+  def warn_retired(given, context) do
+    for key <- given, replacement = Map.get(@retired_keys, to_string(key)) do
+      Logger.warning(
+        module: __MODULE__,
+        message:
+          "#{context}: `#{key}` is no longer honoured and was ignored — #{replacement} " <>
+            "(remove it: it becomes an error in the next release)"
+      )
     end
+
+    :ok
   end
-
-  def validate_codecs(kind, names) when is_list(names) do
-    allowed = if kind == :video, do: @video_codecs, else: @text_codecs
-    upcased = Enum.map(names, &upcase/1)
-
-    case Enum.reject(upcased, &(&1 in allowed)) do
-      [] -> {:ok, upcased, false}
-      bad -> {:error, "unknown #{kind} codec(s): #{Enum.join(bad, ", ")}"}
-    end
-  end
-
-  def validate_codecs(kind, other),
-    do: {:error, "#{kind}_codecs must be a list of codec names, got #{inspect(other)}"}
 
   # ── per-key validation ───────────────────────────────────────────────────────
 
@@ -234,6 +223,8 @@ defmodule Kelix.Mod.Mcu.Config do
       extra -> {:error, "unknown key(s): #{Enum.join(Enum.sort(extra), ", ")}"}
     end
   end
+
+  defp warn_retired_keys(block), do: warn_retired(Map.keys(block), "[module.mcu]")
 
   defp check_ints(block) do
     Enum.reduce_while(@int_keys, :ok, fn key, :ok ->
@@ -300,49 +291,6 @@ defmodule Kelix.Mod.Mcu.Config do
         {:error, "medias must be a list of media names"}
     end
   end
-
-  # audio_codecs doubles as the DTMF switch: TELEPHONE-EVENT in the list means
-  # "offer telephone-event", it is not a codec the mixer knows.
-  defp audio_codecs(block) do
-    case Map.get(block, "audio_codecs") do
-      nil ->
-        d = defaults()
-        {:ok, d.audio_codecs, d.dtmf}
-
-      list when is_list(list) ->
-        names = Enum.map(list, &upcase/1)
-        {dtmf, codecs} = Enum.split_with(names, &(&1 == @dtmf_name))
-
-        case Enum.reject(codecs, &(&1 in @audio_codecs)) do
-          [] -> {:ok, codecs, dtmf != []}
-          bad -> {:error, "unknown audio codec(s): #{Enum.join(bad, ", ")}"}
-        end
-
-      _ ->
-        {:error, "audio_codecs must be a list of codec names"}
-    end
-  end
-
-  defp codecs(block, key, allowed, default) do
-    case Map.get(block, key) do
-      nil ->
-        {:ok, default}
-
-      list when is_list(list) ->
-        names = Enum.map(list, &upcase/1)
-
-        case Enum.reject(names, &(&1 in allowed)) do
-          [] -> {:ok, names}
-          bad -> {:error, "unknown #{key}: #{Enum.join(bad, ", ")}"}
-        end
-
-      _ ->
-        {:error, "#{key} must be a list of codec names"}
-    end
-  end
-
-  defp upcase(name) when is_binary(name), do: String.upcase(name)
-  defp upcase(other), do: inspect(other)
 
   # "8000-8099" → {8000, 8099}
   defp did_range(block, key) do

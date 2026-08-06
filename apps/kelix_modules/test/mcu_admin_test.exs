@@ -218,16 +218,27 @@ defmodule Kelix.Mod.McuAdminTest do
 
       assert {:ok, conf} = Mcu.conference(ctx.uid)
 
-      assert conf.video == %{
-               size: 6,
-               fps: 15,
-               bitrate: 2048,
-               intra_period: 300,
-               fmtp: "profile-level-id=42e01f;packetization-mode=1"
-             }
+      assert conf.video == %{size: 6, fps: 15, bitrate: 2048, intra_period: 300}
 
       assert conf.max_participants == 2
       assert TestStub.rpc_order() == []
+    end
+
+    # §8.4: they used to be answered "read-only field"; now they are simply dropped with
+    # a warning, so an old client's update still applies the fields that do exist.
+    test "the retired codec arguments are ignored, and the rest of the update applies", ctx do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, _} =
+                   Mcu.handle_control("conference.update", %{
+                     "uid" => ctx.uid,
+                     "audio_codecs" => ["pcma"],
+                     "max_participants" => 7
+                   })
+        end)
+
+      assert log =~ "conference.update: `audio_codecs` is no longer honoured"
+      assert {:ok, %{max_participants: 7}} = Mcu.conference(ctx.uid)
     end
 
     test "lowering max_participants below the current count disconnects nobody", ctx do

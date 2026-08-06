@@ -17,20 +17,14 @@ defmodule Kelix.Mod.Mcu.ConfigTest do
       assert config.vad == 1
       assert config.rate == 32_000
       assert config.medias == [:audio, :video, :text]
-      assert config.audio_codecs == ["OPUS", "G722", "PCMA", "PCMU"]
       assert config.dtmf == true
-      assert config.video_codecs == ["H264"]
       assert config.max_participants == 20
       assert config.destroy_when_empty == false
       assert config.auto_layout == true
 
-      assert config.video == %{
-               size: 6,
-               fps: 15,
-               bitrate: 1024,
-               intra_period: 300,
-               fmtp: "profile-level-id=42e01f;packetization-mode=1"
-             }
+      # no codec list and no fmtp: the media server arbitrates (P8a, §16.3)
+      refute Map.has_key?(config, :audio_codecs)
+      assert config.video == %{size: 6, fps: 15, bitrate: 1024, intra_period: 300}
 
       assert config.xmlrpc_timeout_ms == 10_000
       assert config.gc_orphans == true
@@ -100,16 +94,8 @@ defmodule Kelix.Mod.Mcu.ConfigTest do
     end
 
     test "a non-string where a string is expected" do
-      assert {:error, msg} = Config.parse(%{"video_fmtp" => 42})
-      assert msg =~ "video_fmtp must be a string"
-    end
-
-    test "a codec the SDP layer cannot emit" do
-      assert {:error, msg} = Config.parse(%{"audio_codecs" => ["OPUS", "SPEEX"]})
-      assert msg =~ "unknown audio codec(s): SPEEX"
-
-      assert {:error, msg} = Config.parse(%{"video_codecs" => ["H265"]})
-      assert msg =~ "unknown video_codecs: H265"
+      assert {:error, msg} = Config.parse(%{"record_dir" => 42})
+      assert msg =~ "record_dir must be a string"
     end
 
     test "a malformed range" do
@@ -129,29 +115,53 @@ defmodule Kelix.Mod.Mcu.ConfigTest do
     end
   end
 
-  describe "codecs" do
-    test "TELEPHONE-EVENT is a flag on the audio media, not a mixer codec" do
-      config = parse!(%{"audio_codecs" => ["PCMA", "TELEPHONE-EVENT"]})
-      assert config.audio_codecs == ["PCMA"]
+  # P8a: the codec lists are gone, and what replaces them are two policy keys.
+  describe "the policy the codec lists used to encode (§8.4)" do
+    test "`medias` says which m= sections a conference answers" do
+      assert parse!(%{"medias" => ["audio", "text"]}).medias == [:audio, :text]
+      assert {:error, msg} = Config.parse(%{"medias" => ["audio", "slides"]})
+      assert msg =~ "unknown media(s) slides"
+    end
+
+    test "`dtmf` is its own switch, on by default" do
+      assert parse!(%{}).dtmf == true
+      assert parse!(%{"dtmf" => false}).dtmf == false
+      assert {:error, msg} = Config.parse(%{"dtmf" => "no"})
+      assert msg =~ "dtmf must be a boolean"
+    end
+  end
+
+  # §8.4: an RPM-installed node has these in /etc/kelixip/config.toml. Refusing them
+  # would turn an upgrade into a node that does not boot, so they are accepted, ignored
+  # and warned about — and become an error in the release after.
+  describe "the retired codec keys are tolerated for one release" do
+    test "they are accepted, they change nothing, and they say so" do
+      block = %{
+        "audio_codecs" => ["PCMA", "TELEPHONE-EVENT"],
+        "video_codecs" => ["H264"],
+        "text_codecs" => [],
+        "video_fmtp" => "profile-level-id=42801f"
+      }
+
+      log = ExUnit.CaptureLog.capture_log(fn -> assert {:ok, _config} = Config.parse(block) end)
+
+      # every one of them is named, with its replacement
+      assert log =~ "`audio_codecs` is no longer honoured"
+      assert log =~ "`dtmf = false`"
+      assert log =~ "`video_codecs` is no longer honoured"
+      assert log =~ "`text_codecs` is no longer honoured"
+      assert log =~ "`video_fmtp` is no longer honoured"
+
+      config = parse!(block)
+      # `text_codecs = []` no longer turns text off — `medias` does, and it is untouched
+      assert config.medias == [:audio, :video, :text]
+      # nor does an audio list without TELEPHONE-EVENT turn DTMF off any more
       assert config.dtmf == true
+      refute Map.has_key?(config.video, :fmtp)
     end
 
-    test "no TELEPHONE-EVENT means no telephone-event offered" do
-      config = parse!(%{"audio_codecs" => ["PCMA"]})
-      assert config.dtmf == false
-    end
-
-    test "names are case-insensitive" do
-      assert parse!(%{"audio_codecs" => ["opus"]}).audio_codecs == ["OPUS"]
-    end
-
-    # The H.264 profile the answer states when the offer states none (§6.3). It is a
-    # stopgap for L4, so it is tunable without a rebuild — and switchable off.
-    test "video_fmtp overrides the announced H.264 profile, and can be emptied" do
-      assert parse!(%{"video_fmtp" => "profile-level-id=42801f"}).video.fmtp ==
-               "profile-level-id=42801f"
-
-      assert parse!(%{"video_fmtp" => ""}).video.fmtp == ""
+    test "a value of the wrong type is not even looked at" do
+      assert {:ok, _config} = Config.parse(%{"audio_codecs" => "PCMA"})
     end
   end
 

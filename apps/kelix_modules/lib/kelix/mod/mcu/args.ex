@@ -139,23 +139,6 @@ defmodule Kelix.Mod.Mcu.Args do
     end
   end
 
-  @doc "An optional list-of-strings argument (upcased — codec names are case-insensitive)."
-  @spec codec_list(t, String.t(), [String.t()]) :: {:ok, [String.t()]} | {:error, String.t()}
-  def codec_list(args, key, default) do
-    case Map.get(args, key) do
-      nil ->
-        {:ok, default}
-
-      list when is_list(list) ->
-        if Enum.all?(list, &is_binary/1),
-          do: {:ok, Enum.map(list, &String.upcase/1)},
-          else: {:error, "#{key} must be a list of codec names"}
-
-      other ->
-        {:error, "#{key} must be a list of codec names, got #{inspect(other)}"}
-    end
-  end
-
   @doc """
   An optional sub-map argument (`video`, `layout`), merged over `default` and
   restricted to `allowed` keys — so `video='{"fps":25}'` changes the frame rate and

@@ -84,21 +84,25 @@ port = 9095
 #destroy_when_empty = false         # destroy a conference with its last participant
 #vad              = "basic"         # none | basic | full — names, not wire integers
 #rate             = 32000           # mixer rate; participants are resampled to it
-#audio_codecs     = ["OPUS", "G722", "PCMA", "PCMU", "TELEPHONE-EVENT"]
-                                   #   TELEPHONE-EVENT is the DTMF switch (RFC 4733),
-                                   #   not a codec: an explicit list without it turns
-                                   #   DTMF off (it is on by default)
-#video_codecs     = ["H264"]        # H264 | VP8
-#text_codecs      = ["T140RED", "T140"]   # T.140; [] answers m=text with port 0
+# No codec list: the offer is the menu and the media server arbitrates (P8a). What is
+# left is the deployment policy — which medias a conference answers, and whether DTMF
+# is proposed at all. `audio_codecs` / `video_codecs` / `text_codecs` / `video_fmtp`
+# are still accepted for one release, ignored with a warning naming the replacement.
+#medias           = ["audio", "video", "text"]
+                                   #   an omitted media is answered with port 0: this
+                                   #   is how video or T.140 text is turned off
+#dtmf             = true            # propose telephone-event (RFC 4733) on audio —
+                                   #   a stream the mixer never encodes, so a switch
+                                   #   and not a codec
 #auto_layout      = true            # the mosaic follows the number of video legs
 #layout_comp      = "2x2"           # starting mosaic when auto_layout is off
 #video_size       = "hd720p"
 #video_fps        = 15
 #video_bitrate    = 1024            # kbps, also the cap on the answer's b=AS:
 #video_intra_period = 300           # frames between intra-frames
-#video_fmtp       = "profile-level-id=42e01f;packetization-mode=1"
-                                   #   H.264 profile the answer states when the offer
-                                   #   states none; a reflected profile always wins
+                                   #   (the H.264 profile the answer states is the one
+                                   #   the media server reported it accepted, so there
+                                   #   is no fmtp key to set here)
 # Paths on the MEDIA SERVER's filesystem, not on this host (the same box in a
 # single-machine deployment, and not in production). The module only ever appends a
 # file name it validated; a command chooses the name, never the directory. Unset
