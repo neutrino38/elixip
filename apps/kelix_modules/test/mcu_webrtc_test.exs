@@ -252,7 +252,7 @@ defmodule Kelix.Mod.McuWebrtcTest do
     test "every answered section carries the offer's mid, verbatim", ctx do
       answer = answer_for(ctx.did, @chrome_offer)
 
-      [audio, video, _text] = sections(answer)
+      [audio, video] = sections(answer)
 
       assert "a=mid:0" in audio
       assert "a=mid:1" in video
@@ -265,12 +265,26 @@ defmodule Kelix.Mod.McuWebrtcTest do
     test "a declined section names itself too", ctx do
       answer = answer_for(ctx.did, @chrome_offer <> @datachannel_section)
 
-      [_audio, _video, _text, data] = sections(answer)
+      [_audio, _video, data] = sections(answer)
 
       # port 0 with the offered transport and format echoed (RFC 3264 §6), plus the
       # mid: the browser has to know *which* of its sections we turned down
       assert hd(data) == "m=application 0 UDP/DTLS/SCTP webrtc-datachannel"
       assert "a=mid:2" in data
+    end
+
+    test "the WebSocket text section is omitted, not declined", ctx do
+      answer = answer_for(ctx.did, @chrome_offer <> @datachannel_section)
+
+      # Deliberate RFC 3264 §6 deviation (see ws_text_section?/1): the Elioz client
+      # injects `m=text … TCP/WSS` into the wire SDP after setLocalDescription and
+      # fails to strip our port-0 echo on the way back, so libwebrtc counted three
+      # answer sections against its two-section local offer and rejected the whole
+      # answer. The data-channel section, which IS in the browser's real offer,
+      # keeps the standard port-0 echo — omitting THAT would break the same check.
+      refute answer =~ "m=text"
+      assert [_audio, _video, data] = sections(answer)
+      assert hd(data) == "m=application 0 UDP/DTLS/SCTP webrtc-datachannel"
     end
 
     test "an offer without mids is answered without any: nothing is invented", ctx do
@@ -331,7 +345,7 @@ defmodule Kelix.Mod.McuWebrtcTest do
 
       assert_received {:answer, answer}
 
-      [_audio, video, _text] = sections(answer)
+      [_audio, video] = sections(answer)
 
       # 119 is the only payload type the caller offered as 64001f/pm=1, which is what
       # the server answered for all of them
@@ -416,14 +430,15 @@ defmodule Kelix.Mod.McuWebrtcTest do
         end)
 
       assert_received {:answer, answer}
-      [audio, video, text] = sections(answer)
+      [audio, video] = sections(answer)
 
       # audio still negotiates, so the call is answered (§6.3 rule 2): only a leg where
       # EVERY media came back empty is a 488
       assert hd(audio) =~ "m=audio #{@audio_port} "
       # the offered format list, echoed verbatim in its own order (RFC 3264 §6)
       assert hd(video) == "m=video 0 UDP/TLS/RTP/SAVPF 103 107 109 115 39 117 119"
-      assert hd(text) == "m=text 0 TCP/WSS t140"
+      # the WS text section is omitted, not declined (see ws_text_section?/1)
+      refute answer =~ "m=text"
       assert log =~ "dropped pt 119 from the verdict"
 
       # and the port the server opened for a media we just declined is given back
@@ -496,7 +511,7 @@ defmodule Kelix.Mod.McuWebrtcTest do
         end)
 
       assert_received {:answer, answer}
-      [_audio, video, _text] = sections(answer)
+      [_audio, video] = sections(answer)
 
       # all seven payload types are announced, each with ITS OWN profile/mode pair
       assert hd(video) == "m=video #{@video_port} UDP/TLS/RTP/SAVPF 103 107 109 115 39 117 119"
@@ -537,7 +552,7 @@ defmodule Kelix.Mod.McuWebrtcTest do
       assert {:ok, answer} = Adapter.set_remote_offer(conn, @electron_offer)
       assert {:ok, summary} = Adapter.attach(conn)
 
-      [audio, _video, _text] = sections(answer)
+      [audio, _video] = sections(answer)
 
       # the offer lists 111 9 0 110 126 — OPUS first. Answering 0 9 110 111 126 (ascending
       # payload type) would tell the browser we prefer G.711 and it would send G.711.
@@ -572,12 +587,10 @@ defmodule Kelix.Mod.McuWebrtcTest do
          ctx do
       answer = answer_for(ctx.did, @chrome_offer)
 
-      assert [audio, video, text] = sections(answer)
+      assert [audio, video] = sections(answer)
 
       assert hd(audio) == "m=audio #{@audio_port} UDP/TLS/RTP/SAVPF 111 126"
       assert hd(video) =~ "m=video #{@video_port} UDP/TLS/RTP/SAVPF 109"
-      # the m=text section of that offer is TCP/WSS: not RTP, so declined (G9)
-      assert hd(text) == "m=text 0 TCP/WSS t140"
 
       assert "a=candidate:1 1 udp 2130706431 #{@media_ip} #{@audio_port} typ host" in audio
       assert "a=candidate:1 1 udp 2130706431 #{@media_ip} #{@video_port} typ host" in video
@@ -593,7 +606,7 @@ defmodule Kelix.Mod.McuWebrtcTest do
     test "the feedback answered on video is the intersection, per accepted PT", ctx do
       answer = answer_for(ctx.did, @chrome_offer)
 
-      [audio, video, _text] = sections(answer)
+      [audio, video] = sections(answer)
 
       assert "a=rtcp-fb:109 nack" in video
       assert "a=rtcp-fb:109 ccm fir" in video

@@ -247,8 +247,12 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
           # candidates. Session level, hence here rather than per media.
           ice_lite: state.local_ice != nil,
           # RFC 3264 §6: one answer m= per offered m=, in order. What we cannot
-          # answer is declined with port 0 rather than omitted.
-          medias: Enum.map(descs, &answer_or_reject(state, negotiated, &1))
+          # answer is declined with port 0 rather than omitted — except the
+          # WebSocket text section, which is omitted (see ws_text_section?/1).
+          medias:
+            descs
+            |> Enum.reject(&ws_text_section?/1)
+            |> Enum.map(&answer_or_reject(state, negotiated, &1))
         })
 
       state = %{state | negotiated: negotiated, status: :answered}
@@ -1154,6 +1158,20 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
       neg -> answer_spec(state, desc, neg)
     end
   end
+
+  # A deliberate RFC 3264 §6 violation, scoped to one section: the text-over-WebSocket
+  # m= line is OMITTED from the answer, not declined with port 0. The Elioz/WebRTComm
+  # client injects `m=text … TCP/WSS t140` into the wire SDP *after* setLocalDescription
+  # and strips the answer's text section before setRemoteDescription — but its strip does
+  # not recognize our port-0 echo (the legacy gateway answered that section for real,
+  # WebSocketLeg), so the browser got three answer sections against its two-section local
+  # offer and libwebrtc rejected the whole answer (kMlineMismatchInAnswer, verified in
+  # edge://webrtc-internals, 2026-08-06). Omitting the section is what deployed clients
+  # digest. Only these WS transports are concerned — a text section offered over RTP is
+  # real T.140 and keeps the standard echo (and, one day, a real answer: chantier TC).
+  @ws_text_protocols ~w(TCP/WSS TLS/WSS TLS/WS)
+  defp ws_text_section?(desc),
+    do: desc.type == :text and Map.get(desc, :protocol) in @ws_text_protocols
 
   # A declined section keeps its place in the answer with port 0 and the offered
   # format list echoed verbatim (RFC 3264 §6): the m= line count must match. Its
