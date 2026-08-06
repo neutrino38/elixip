@@ -492,13 +492,16 @@ defmodule Mendooze.SdpTest do
       t=0 0
       m=audio 5004 RTP/AVP 0
       m=application 5006 UDP/BFCP *
+      a=mid:bfcp
       """
 
       # G9: every m= section is kept in offer order so the answerer can echo a
-      # port-0 rejection for the ones it cannot answer.
+      # port-0 rejection for the ones it cannot answer — mid included, since JSEP
+      # requires the rejection to name the section it declines.
       assert {:ok, [audio, app]} = Sdp.parse(sdp_str)
       assert audio.supported? and audio.type == :audio
       refute app.supported?
+      assert app.mid == "bfcp"
       assert app.type == :application
       assert app.protocol == "UDP/BFCP"
       assert app.port == 5006
@@ -696,6 +699,29 @@ defmodule Mendooze.SdpTest do
       assert Sdp.answer_rtpmaps(:audio, neg) == [
                %{pt: 0, encoding: "PCMU", clock: 8000, channels: nil},
                %{pt: 101, encoding: "telephone-event", clock: 8000, channels: nil}
+             ]
+    end
+
+    test "`dtmf_pts` gives each telephone-event PT the clock the OFFER gave it" do
+      # a delegated negotiation: the server kept the 8 kHz PT while the primary codec
+      # is OPUS, so `dtmf_clock` (48000, the codec's) must not win over the offer
+      neg = %{
+        rtp_map: %{"111" => 98, "126" => 100},
+        dtmf_clock: 48_000,
+        dtmf_pts: %{48_000 => 110, 8000 => 126}
+      }
+
+      assert Sdp.answer_rtpmaps(:audio, neg) == [
+               %{pt: 111, encoding: "opus", clock: 48_000, channels: 2},
+               %{pt: 126, encoding: "telephone-event", clock: 8000, channels: nil}
+             ]
+    end
+
+    test "a PT absent from `dtmf_pts` still falls back to the negotiated clock" do
+      neg = %{rtp_map: %{"101" => 100}, dtmf_clock: 16_000, dtmf_pts: %{8000 => 126}}
+
+      assert Sdp.answer_rtpmaps(:audio, neg) == [
+               %{pt: 101, encoding: "telephone-event", clock: 16_000, channels: nil}
              ]
     end
   end
@@ -1035,6 +1061,27 @@ defmodule Mendooze.SdpTest do
       assert sdp_str =~ "m=audio 40000 UDP/TLS/RTP/SAVPF 0"
       assert sdp_str =~ "a=setup:passive"
       assert sdp_str =~ "a=mid:0"
+    end
+
+    test "a declined section keeps its mid, and nothing else (JSEP §5.3.1)" do
+      sdp_str =
+        Sdp.build(%{
+          ip: "10.0.0.9",
+          medias: [
+            %{
+              type: :application,
+              protocol: "UDP/DTLS/SCTP",
+              reject_fmt: "webrtc-datachannel",
+              mid: "2"
+            }
+          ]
+        })
+
+      assert sdp_str =~ "m=application 0 UDP/DTLS/SCTP webrtc-datachannel"
+      assert sdp_str =~ "a=mid:2"
+      # a rejection states no transport and no codec: there is nothing to state
+      refute sdp_str =~ "a=candidate"
+      refute sdp_str =~ "a=rtpmap"
     end
   end
 

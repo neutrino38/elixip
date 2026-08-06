@@ -780,8 +780,15 @@ defmodule MediaServer.Mendooze.Conn do
     end
   end
 
+  # A declined section still carries the offer's `a=mid` (JSEP §5.3.1): it is how the
+  # peer knows *which* of its sections we turned down.
   defp reject_media_spec(desc) do
-    %{type: desc.type, protocol: desc.protocol, reject_fmt: desc.raw_fmt}
+    %{
+      type: desc.type,
+      protocol: desc.protocol,
+      reject_fmt: desc.raw_fmt,
+      mid: Map.get(desc, :mid)
+    }
   end
 
   defp answer_media_spec(state, negotiated, desc) do

@@ -609,7 +609,15 @@ phase 5 completes the UAS side.
 > m= in order — unsupported/non-RTP ones as `supported?: false` stubs — and
 > `Conn`/`Mockup` echo one answer m= per offer m=, declining the rest with a
 > port-0 rejection). The captured Chrome 142 offer now answers completely
-> (§2.8 test 6). **Remaining: phase 4 test 10** — real-platform call
+> (§2.8 test 6).
+>
+> **2026-08-06** — a port-0 rejection now also echoes the offered section's
+> `a=mid` (JSEP RFC 8829 §5.3.1 asks for it on *every* answer section, and a
+> browser matches its transceivers by that name): `parse/1` keeps `mid` in the
+> `supported?: false` stubs, `build/1` emits it on a `reject_fmt` spec, and both
+> answerers pass it. Found while making the **MCU** module's answer
+> browser-proof — that adapter mirrored the whole transport plane except the mid,
+> which no SIP handset and no gateway offers, so nothing had exercised it. **Remaining: phase 4 test 10** — real-platform call
 > `elixipp -c ives.json scenarios/uac_invite_webrtc.exs` (settles Q4/Q5 on the
 > IVeS gateway; ives.json is UDP:5060, adjust proxyuri for WSS and confirm the
 > destination account before dialing). The P5 wiring (real `:ice_connected`

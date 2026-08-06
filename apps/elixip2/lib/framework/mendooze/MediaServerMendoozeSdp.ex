@@ -136,13 +136,19 @@ defmodule MediaServer.Mendooze.Sdp do
   @typedoc """
   A `supported?: false` stub for an `m=` section we cannot answer (G9): only the
   fields needed to echo a port-0 rejection are kept.
+
+  `mid` is among them: JSEP (RFC 8829 §5.3.1) requires **every** answer section to
+  carry the offer's `a=mid`, rejected ones included — a browser offering a data
+  channel next to its audio and video is the ordinary case, and an answer that
+  declines that section without naming it is one a browser can refuse wholesale.
   """
   @type media_stub :: %{
           supported?: false,
           type: atom(),
           port: non_neg_integer(),
           protocol: String.t(),
-          raw_fmt: [0..127] | String.t()
+          raw_fmt: [0..127] | String.t(),
+          mid: String.t() | nil
         }
 
   @typedoc """
@@ -159,8 +165,10 @@ defmodule MediaServer.Mendooze.Sdp do
   are present the server-driven fields win.
 
   A **rejection** spec (`:reject_fmt` present) renders `m=<type> 0 <protocol>
-  <reject_fmt>` with no attributes (G9): a declined section that keeps the m=
-  line count of the offer (RFC 3264 §6).
+  <reject_fmt>` (G9): a declined section that keeps the m= line count of the offer
+  (RFC 3264 §6). Its only attribute is `a=mid`, when the offer named the section —
+  JSEP requires the mid on every answer section, and a rejected one carries nothing
+  else worth stating.
   """
   @type rtpmap_entry :: %{
           required(:pt) => non_neg_integer(),
@@ -303,10 +311,13 @@ defmodule MediaServer.Mendooze.Sdp do
   end
 
   # G9: a port-0 rejection echoes the offered transport and format list verbatim
-  # (RFC 3264 §6). No connection/attributes/codec section — the peer just sees
-  # the media declined while the answer keeps one m= line per offered m=.
-  defp build_media(%{reject_fmt: fmt, type: type, protocol: protocol}) do
+  # (RFC 3264 §6). No connection or codec section — the peer just sees the media
+  # declined while the answer keeps one m= line per offered m=. The offer's `a=mid`
+  # is the one attribute kept: JSEP (RFC 8829 §5.3.1) requires it on every answer
+  # section, and libwebrtc matches the answer to its transceivers by that name.
+  defp build_media(%{reject_fmt: fmt, type: type, protocol: protocol} = mspec) do
     %ExSDP.Media{type: type, port: 0, protocol: protocol, fmt: fmt}
+    |> add_mid(Map.get(mspec, :mid))
   end
 
   # Server-driven codec section: emit the accepted rtpmap entries and the fmtp
@@ -632,7 +643,16 @@ defmodule MediaServer.Mendooze.Sdp do
     if m.type in [:audio, :video, :text] and m.protocol in @rtp_profiles do
       parse_media(m, session_ip, session_attrs, raw_fmtp)
     else
-      %{supported?: false, type: m.type, port: m.port, protocol: m.protocol, raw_fmt: m.fmt}
+      %{
+        supported?: false,
+        type: m.type,
+        port: m.port,
+        protocol: m.protocol,
+        raw_fmt: m.fmt,
+        # kept for the port-0 rejection to echo (JSEP §5.3.1): the section we decline
+        # still has to be identifiable by the mid the offerer gave it
+        mid: find_mid(m.attributes)
+      }
     end
   end
 
@@ -1267,16 +1287,30 @@ defmodule MediaServer.Mendooze.Sdp do
 
   The telephone-event entry is emitted with the negotiated clock (G10), not the
   code table's fixed 8000 Hz, so answering OPUS keeps its 48 kHz DTMF PT.
+
+  **Which clock, per payload type.** `dtmf_pts` (the offer's clock → PT map, as
+  `parse/1` returns it) is what settles it, and passing it is what a delegated
+  negotiation must do: the party that chose the telephone-event PT is the media
+  server, and it may well have kept the 8 kHz one while the primary codec is OPUS.
+  The answer then has to state *the offered clock of that PT* — a payload type
+  re-announced with a clock rate the offer never gave it is not a codec the peer
+  can match (libwebrtc drops it; DTMF then rides at the wrong rate or not at all).
+  `dtmf_clock` remains the fallback for the local path, where the selected PT and
+  its clock were chosen together.
   """
-  # Callers pass either a full negotiate/3 result (Mockup) or just the two keys
-  # used here (MendoozeConn), hence the open map.
+  # Callers pass either a full negotiate/3 result (Mockup) or just the keys used
+  # here (MendoozeConn, the MCU adapter), hence the open map.
   @spec answer_rtpmaps(:audio | :video | :text, %{
           required(:rtp_map) => rtp_map(),
           optional(:dtmf_clock) => non_neg_integer() | nil,
+          optional(:dtmf_pts) => %{optional(non_neg_integer()) => non_neg_integer()},
           optional(atom()) => any()
         }) :: [rtpmap_entry()]
   def answer_rtpmaps(media, %{rtp_map: send_map} = neg) do
-    dtmf_clock = Map.get(neg, :dtmf_clock) || 8000
+    offered_clocks =
+      for {clock, pt} <- Map.get(neg, :dtmf_pts) || %{}, into: %{}, do: {pt, clock}
+
+    fallback_clock = Map.get(neg, :dtmf_clock) || 8000
 
     send_map
     |> Enum.sort_by(fn {pt, _code} -> String.to_integer(pt) end)
@@ -1285,7 +1319,8 @@ defmodule MediaServer.Mendooze.Sdp do
 
       cond do
         code == @dtmf_code ->
-          [%{pt: pt, encoding: "telephone-event", clock: dtmf_clock, channels: nil}]
+          clock = Map.get(offered_clocks, pt, fallback_clock)
+          [%{pt: pt, encoding: "telephone-event", clock: clock, channels: nil}]
 
         true ->
           case code_rtpmap(media, code) do

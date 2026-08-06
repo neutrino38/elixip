@@ -375,8 +375,15 @@ defmodule MediaServer.Mockup.Conn do
     end
   end
 
+  # The offer's `a=mid` survives a rejection too (JSEP §5.3.1) — same rule as the real
+  # adapter, so the mock's dialect keeps converging with it.
   defp reject_media_spec(desc) do
-    %{type: desc.type, protocol: desc.protocol, reject_fmt: Map.get(desc, :raw_fmt, [])}
+    %{
+      type: desc.type,
+      protocol: desc.protocol,
+      reject_fmt: Map.get(desc, :raw_fmt, []),
+      mid: Map.get(desc, :mid)
+    }
   end
 
   defp answer_media_spec(state, desc, neg, port, ip_str, webrtc?) do

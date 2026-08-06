@@ -411,8 +411,17 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # base64 in the a=crypto line (RFC 4568 §6.1).
   defp random_sdes_key(), do: :crypto.strong_rand_bytes(30) |> Base.encode64()
 
+  # ICE credentials, in the alphabet ICE actually defines for them: `ice-char =
+  # ALPHA / DIGIT / "+" / "/"` (RFC 8839 §5.4, RFC 5245 §15.4 before it). Hex is a
+  # strict subset, and it is what the field-proven gateway emits. Base64**url** —
+  # which this used — produces `-` and `_`, outside that grammar: browsers happen not
+  # to check, strict SDP parsers (the Glassfish gateway's among them) do, and a leg
+  # rejected for a stray dash is a 488 no log explains.
+  #
+  # Lengths land where ICE wants them: 8 bytes → a 16-char ufrag, 24 → a 48-char pwd
+  # (minimum 4 and 22 respectively).
   defp random_token(bytes),
-    do: :crypto.strong_rand_bytes(bytes) |> Base.url_encode64(padding: false)
+    do: :crypto.strong_rand_bytes(bytes) |> Base.encode16(case: :lower)
 
   # `:no` refuses a DTLS/ICE leg outright; every other value accepts one when the
   # offer asks for it (this leg never *offers*, so there is nothing to force).
@@ -495,7 +504,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
              remote: {desc.ip, desc.port},
              # decided once, here: the answer states it and the encoder is
              # configured with it, so the two cannot drift apart
-             answered_profile_level_id: answered_profile_level_id(state, desc, accepted),
+             answered_profile_level_id: answered_profile_level_id(desc, accepted),
              # the server's verdict, or nil on a pre-P8a server
              accepted: accepted,
              # drives the receive watchdog (§16.1): a media the peer says it will not
@@ -610,10 +619,12 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # (`set_codec/3`).
   defp merge_video_props(props, _state, _desc), do: props
 
-  # The peer's profile if it stated one, else ours. Reflection wins because
+  # The peer's profile if it stated one, else nothing. Reflection wins because
   # `profile-level-id` has to match for the two ends to decode each other (§6.3
-  # rule 2), and a peer that states one has told us what it can handle.
-  defp h264_profile_level_id(_state, %{type: :video} = desc) do
+  # rule 2), and a peer that states one has told us what it can handle. There is no
+  # configured fallback any more (§8.4, decision 11): what the mixer can encode is the
+  # media server's to declare, and on the delegated path it already did.
+  defp h264_profile_level_id(%{type: :video} = desc) do
     offered =
       Map.get(desc, :fmtp, %{})
       |> Map.values()
@@ -627,14 +638,14 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     offered
   end
 
-  defp h264_profile_level_id(_state, _desc), do: nil
+  defp h264_profile_level_id(_desc), do: nil
 
   # What `SetVideoCodec` is told to encode with (§6.3 rule 9). On the delegated path
   # this is a RELAY, not a decision: the server already applied RFC 6184 §8.2.2 and put
   # the result in the fmtp it returned, so announced and encoded are the same string by
   # construction. Parsing it back out is the price of `SetVideoCodec` replacing the
   # stream's whole property map — send nothing and the negotiated profile is lost.
-  defp answered_profile_level_id(state, %{type: :video} = desc, accepted) when is_map(accepted) do
+  defp answered_profile_level_id(%{type: :video} = desc, accepted) when is_map(accepted) do
     accepted
     |> Map.values()
     |> Enum.find_value(fn params ->
@@ -642,11 +653,10 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
         [_, plid] -> String.downcase(plid)
         nil -> nil
       end
-    end) || h264_profile_level_id(state, desc)
+    end) || h264_profile_level_id(desc)
   end
 
-  defp answered_profile_level_id(state, desc, _accepted),
-    do: h264_profile_level_id(state, desc)
+  defp answered_profile_level_id(desc, _accepted), do: h264_profile_level_id(desc)
 
   # The `profile-level-id=` of the configured answer fmtp — the one place that string
   # is read, so the SDP and the RPC cannot disagree.
@@ -886,17 +896,20 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   end
 
   # A declined section keeps its place in the answer with port 0 and the offered
-  # format list echoed verbatim (RFC 3264 §6): the m= line count must match.
+  # format list echoed verbatim (RFC 3264 §6): the m= line count must match. Its
+  # `a=mid` is echoed for the same reason an accepted section's is (§6.3 rule 11) —
+  # a browser's data-channel section is declined here, and it must still be named.
   defp reject_spec(desc) do
     %{
       type: desc.type,
       protocol: Map.get(desc, :protocol, "RTP/AVP"),
-      reject_fmt: Map.get(desc, :raw_fmt, [])
+      reject_fmt: Map.get(desc, :raw_fmt, []),
+      mid: Map.get(desc, :mid)
     }
   end
 
   defp answer_spec(state, desc, neg) do
-    {rtpmaps, fmtp} = answer_codecs(state, desc, neg)
+    {rtpmaps, fmtp} = answer_codecs(desc, neg)
 
     %{
       type: desc.type,
@@ -917,6 +930,11 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
       rtcp_fb: answered_rtcp_fb(desc),
       crypto: answer_crypto(state, desc),
       ice: state.local_ice,
+      # §6.3 rule 11: the offer's `a=mid`, echoed verbatim. It is how a browser (and
+      # anything else speaking JSEP, RFC 8829 §5.3.1) pairs our answer sections with
+      # the transceivers it offered — never rebuilt from the media name, which would
+      # name a section the peer does not have.
+      mid: Map.get(desc, :mid),
       # §6.3 rule 3: host candidates on the receive port, from configuration (G2).
       # Component 2 (RTCP) only when the offer did not ask for rtcp-mux, as mcuGold.
       candidates: answer_candidates(state, desc, neg)
@@ -932,9 +950,22 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # the ordering and the telephone-event special case stay exactly what they were.
   # An empty fmtp value means "accepted, no a=fmtp line" — the contract's other half,
   # and the reason the value is dropped rather than emitted as `a=fmtp:<pt> `.
-  defp answer_codecs(_state, desc, %{accepted: accepted} = neg) when is_map(accepted) do
+  defp answer_codecs(desc, %{accepted: accepted} = neg) when is_map(accepted) do
     accepted_map = Map.take(neg.rtp_map, Map.keys(accepted))
-    rtpmaps = Sdp.answer_rtpmaps(desc.type, %{neg | rtp_map: accepted_map})
+
+    rtpmaps =
+      Sdp.answer_rtpmaps(
+        desc.type,
+        # `dtmf_pts` is the offer's clock→PT map, and it has to travel with the
+        # accepted set: the server picks which telephone-event PT it keeps, and the
+        # answer must re-announce that PT with the clock the OFFER gave it. Chrome
+        # offers one per clock (110@48000, 126@8000), so announcing the selected
+        # audio codec's clock for whichever PT came back is a rate the peer never
+        # proposed — silent DTMF, and a payload type libwebrtc discards.
+        %{neg | rtp_map: accepted_map}
+        |> Map.put(:dtmf_pts, Map.get(desc, :dtmf_pts, %{}))
+      )
+
     fmtp = for {pt, params} <- accepted, params != "", into: %{}, do: {pt, params}
     {rtpmaps, fmtp}
   end
@@ -942,12 +973,13 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # LEGACY: a media server that predates the delegation returned no verdict, so the
   # answer is built the way it was before P8a. Kept intact rather than approximated —
   # it is the path every node takes for the duration of a rolling upgrade.
-  defp answer_codecs(state, desc, neg) do
-    rtpmaps = Sdp.answer_rtpmaps(desc.type, neg)
+  defp answer_codecs(desc, neg) do
+    rtpmaps =
+      Sdp.answer_rtpmaps(desc.type, Map.put(neg, :dtmf_pts, Map.get(desc, :dtmf_pts, %{})))
 
     fmtp =
       dtmf_fmtp(neg)
-      |> Map.merge(codec_fmtp(state, desc, rtpmaps))
+      |> Map.merge(codec_fmtp(desc, rtpmaps))
       |> Map.merge(red_fmtp(desc.type, rtpmaps))
 
     {rtpmaps, fmtp}
@@ -1045,42 +1077,27 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
 
   defp answer_bandwidth(_state, _desc), do: nil
 
-  # H.264 interop: `profile-level-id` must match for the two ends to decode each
-  # other, so the offered value is reflected (with `packetization-mode` when the offer
-  # states one). Deliberately NOT reflected: `sprop-parameter-sets`, which describes
-  # the offerer's own encoder — sending it back would advertise their SPS/PPS as ours.
+  # H.264 interop on the no-verdict path: `profile-level-id` must match for the two ends
+  # to decode each other, so the offered value is reflected (with `packetization-mode`
+  # when the offer states one). Deliberately NOT reflected: `sprop-parameter-sets`,
+  # which describes the offerer's own encoder — sending it back would advertise their
+  # SPS/PPS as ours.
   #
-  # When the offer states **nothing** — a gateway or a phone that lists `H264/90000`
-  # and no `a=fmtp` — the answer states the conference's own profile rather than
-  # staying silent: silence means RFC 6184's default (Baseline level 1.0) to the peer,
-  # while the mixer is encoding HD720p, and video that "connects" without displaying
-  # is the result. The same value is pushed to the encoder (`merge_video_props/3`).
-  #
-  # This is the local guesswork limitation L4 in miniature: kelixip decides what the
-  # MCU will encode. §16.3 (P8) makes the server authoritative and deletes it.
-  defp codec_fmtp(state, desc, rtpmaps) do
+  # An offer that states **nothing** is answered with nothing: there is no configured
+  # profile to fall back on since §8.4 (decision 11) — what the mixer can encode is the
+  # media server's to declare, and a server that declares it is a server that returns a
+  # verdict, which is the other branch of `answer_codecs/3`. Reflection is therefore all
+  # this path does, uniformly across medias and payload types.
+  defp codec_fmtp(desc, rtpmaps) do
     offered = Map.get(desc, :fmtp, %{})
 
-    Enum.reduce(rtpmaps, %{}, fn %{pt: pt} = entry, acc ->
-      case answered_params(state, desc, entry, Map.get(offered, Integer.to_string(pt))) do
+    Enum.reduce(rtpmaps, %{}, fn %{pt: pt}, acc ->
+      case reflected_params(Map.get(offered, Integer.to_string(pt))) do
         "" -> acc
         params -> Map.put(acc, Integer.to_string(pt), params)
       end
     end)
   end
-
-  # Reflection first; ours only for an H.264 payload type the offer said nothing
-  # usable about.
-  defp answered_params(_state, %{type: :video}, %{encoding: "H264"}, offered) do
-    case reflected_params(offered) do
-      # no configured fmtp any more (§8.4, decision 11: the server owns its capability),
-      # so the legacy path reflects what the offer stated and otherwise says nothing
-      "" -> ""
-      reflected -> reflected
-    end
-  end
-
-  defp answered_params(_state, _desc, _entry, offered), do: reflected_params(offered)
 
   defp reflected_params(%{profile_level_id: plid} = fmtp) when is_integer(plid) do
     ["profile-level-id=" <> hex6(plid)]

@@ -681,6 +681,36 @@ hard cases:
    `red_fmtp/2` are therefore dead code on the delegated path. Preference is no
    longer configured (`text_codecs` is gone, §8.4): it is the **caller's** own
    order, which is what an answerer should honour anyway.
+11. **`a=mid` is mirrored, on every section.** The offer's mid is echoed verbatim on
+   each answered `m=` line **and on each port-0 rejection** — never rebuilt from the
+   media name, which would name a section the peer does not have. This is a JSEP
+   requirement (RFC 8829 §5.3.1), and it is how a browser pairs the answer with the
+   transceivers it offered: a Chrome offer carries `a=group:BUNDLE 0 1` with numeric
+   mids, and its data-channel section — declined here, there being no `application`
+   media to answer — is one of the sections that must still be named.
+
+   > **Added 2026-08-06.** The MCU adapter mirrored the whole transport plane except
+   > this: ICE, DTLS, `rtcp-mux`, candidates and feedback were all answered, and the
+   > sections were anonymous. It worked with the SIP handsets and the gateway (which
+   > offer no mid at all, so there is nothing to echo) and was invisible until a
+   > browser offered directly. `a=group:BUNDLE` is still **not** answered — bundling
+   > stays declined by omission, each `m=` keeping its own port (§19, D2 of
+   > `webrtc_sdp_design.md`); mirroring the mid is what makes declining it legible
+   > rather than malformed.
+
+Two answerer details that are not rules of their own but have bitten once each:
+
+- **A payload type is re-announced with the clock rate the offer gave *that* PT.**
+  Chrome offers one telephone-event per clock (`110 telephone-event/48000`,
+  `126 telephone-event/8000`), the server picks one, and the answer must state the
+  clock that came with the PT it picked — not the primary codec's. Announcing
+  `126 telephone-event/48000` because the primary is OPUS at 48 kHz describes a
+  codec the peer never offered: libwebrtc discards it and DTMF stops working. The
+  offer's clock→PT map travels with the accepted set into `answer_rtpmaps/2`.
+- **ICE credentials use the `ice-char` alphabet** (`ALPHA / DIGIT / "+" / "/"`, RFC
+  8839 §5.4) — hex, as the field-proven gateway emits. Base64**url** produces `-`
+  and `_`, outside that grammar: browsers do not check, strict SDP parsers do, and
+  a leg refused over a stray dash is a `488` no log explains.
 
 The implementation reuses `MediaServer.Mendooze.Sdp` for `parse/1`, `build/1`,
 `local_rtp_map/3`, `answer_rtpmaps/2`, `host_candidates/3`,
