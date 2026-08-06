@@ -580,8 +580,11 @@ defmodule MediaServer.Mendooze.Sdp do
   # ── SDP parsing ─────────────────────────────────────────────────────────────
 
   # RTP profiles we can answer with real media; anything else (TCP/WSS,
-  # UDP/DTLS/SCTP, …) yields an unsupported stub (G9).
-  @rtp_profiles ~w(RTP/AVP RTP/AVPF RTP/SAVP RTP/SAVPF UDP/TLS/RTP/SAVPF)
+  # UDP/DTLS/SCTP, …) yields an unsupported stub (G9). Both DTLS-SRTP variants
+  # belong here: browsers offer UDP/TLS/RTP/SAVPF (JSEP), a SIP phone offers
+  # plain UDP/TLS/RTP/SAVP (RFC 5764 §8 — Linphone 6.2 does), and dropping the
+  # latter turned every Linphone DTLS call into a 488 :no_common_codec.
+  @rtp_profiles ~w(RTP/AVP RTP/AVPF RTP/SAVP RTP/SAVPF UDP/TLS/RTP/SAVP UDP/TLS/RTP/SAVPF)
 
   @doc """
   Parse a remote SDP into per-media descriptors.

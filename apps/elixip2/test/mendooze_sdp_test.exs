@@ -526,6 +526,37 @@ defmodule Mendooze.SdpTest do
       assert text.raw_fmt == "t140"
     end
 
+    test "UDP/TLS/RTP/SAVP (DTLS without AVPF, as Linphone offers) is a supported media" do
+      # RFC 5764 §8: a plain SIP phone offers DTLS-SRTP without the feedback
+      # profile — only browsers are bound to SAVPF (JSEP). Linphone 6.2 sent
+      # exactly this and every m= line came back as an unsupported stub, so the
+      # whole call died on a 488 :no_common_codec before DTLS was even tried.
+      sdp_str = """
+      v=0
+      o=50815019 3171 840 IN IP4 172.21.92.83
+      s=Talk
+      c=IN IP4 172.21.92.83
+      t=0 0
+      m=audio 50518 UDP/TLS/RTP/SAVP 96 0 8
+      a=rtpmap:96 opus/48000/2
+      a=setup:actpass
+      a=fingerprint:SHA-256 3D:FB:88:B4:8C:2B:03:84:7E:AC:DD:5E:59:8F:7B:B9:51:3C:DD:C9:09:96:8B:99:7E:BA:A3:DC:13:D6:F1:FB
+      m=video 38547 UDP/TLS/RTP/SAVP 97
+      a=rtpmap:97 H264/90000
+      a=fmtp:97 profile-level-id=42801F
+      a=setup:actpass
+      a=fingerprint:SHA-256 3D:FB:88:B4:8C:2B:03:84:7E:AC:DD:5E:59:8F:7B:B9:51:3C:DD:C9:09:96:8B:99:7E:BA:A3:DC:13:D6:F1:FB
+      """
+
+      assert {:ok, [audio, video]} = Sdp.parse(sdp_str)
+      assert audio.supported? and audio.protocol == "UDP/TLS/RTP/SAVP"
+      assert video.supported? and video.protocol == "UDP/TLS/RTP/SAVP"
+      assert {:dtls, :actpass, "sha-256", _fp} = audio.crypto
+      assert {:dtls, :actpass, "sha-256", _fp} = video.crypto
+      # DTLS without ICE: nothing to latch onto, and that is fine (RFC 5764)
+      assert audio.ice == nil
+    end
+
     test "garbage input is an error" do
       assert {:error, _} = Sdp.parse("this is not sdp")
     end
