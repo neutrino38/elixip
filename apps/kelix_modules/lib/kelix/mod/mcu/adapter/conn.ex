@@ -38,6 +38,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
 
   alias Kelix.Mod.Mcu
   alias Kelix.Mod.Mcu.Client
+  alias Kelix.Mod.Mcu.Vocabulary
   alias MediaServer.SdpTools, as: Sdp
 
   # MediaFrame::Type wire values (§3.6)
@@ -510,6 +511,11 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
         # the parsed structs: what goes on the wire must be what the peer wrote.
         offer = %{"fmtp" => Map.get(desc, :fmtp_raw, %{})}
 
+        # Our own codec capability, pushed BEFORE StartReceiving because that is
+        # when the negotiator reads it (§16.3.4 (a)): sent after, it would
+        # negotiate against an empty map and announce the server's defaults.
+        push_local_codec_props(state, m, media)
+
         with {:ok, [rec_port | returned]} <-
                rpc(state, "StartReceiving", [
                  state.conf_id,
@@ -579,6 +585,35 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
         end
     end
   end
+
+  # What WE can decode, in the codecs' own vocabulary — the input side of the
+  # negotiation, sent as `codec.*` properties (the media server routes them to
+  # the negotiator and the RTP session ignores them).
+  #
+  # AV1's `level-idx` is the one entry so far, and it is derived rather than
+  # configured (decided 2026-08-06): the parameter bounds what the PEER may
+  # send us, so it has to describe the mosaic this conference really produces.
+  # The server's static default 5 (level 3.1) covers 720p15 and becomes a lie at
+  # 720p60 or 1080p — an operator moving `video.size` would otherwise announce a
+  # capability the mixer exceeds, which is the H.264 `profile-level-id` incident
+  # transposed. Nothing to say for H.264 (its profile comes from the offer) nor
+  # for VP8 (no parameter).
+  defp push_local_codec_props(state, m, :video) do
+    with {width, height} <- Vocabulary.size_dimensions(state.video.size),
+         level when is_integer(level) <- Sdp.av1_level_idx(width, height, state.video.fps) do
+      void_rpc(state, "SetRTPProperties", [
+        state.conf_id,
+        state.part_id,
+        m,
+        %{"codec.av1.level-idx" => Integer.to_string(level)},
+        @role_main
+      ])
+    else
+      _ -> :ok
+    end
+  end
+
+  defp push_local_codec_props(_state, _m, _media), do: :ok
 
   # ── the one thing kelixip checks in the server's verdict (§6.3 rule 12) ──────
   #

@@ -666,10 +666,14 @@ defmodule Kelix.Mod.McuCallTest do
       {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
       assert_receive {:replied, 200, _reason, _fields, _req}, 2000
 
-      # answer time: one participant, a receive plane per media, no sending yet
+      # answer time: one participant, a receive plane per media, no sending yet.
+      # Video carries one extra SetRTPProperties, BEFORE its StartReceiving: our
+      # own codec capability, which the negotiator reads when it runs
+      # (§16.3.4 (a)). Audio and text have none to declare.
       assert TestStub.rpc_order() == [
                "CreateParticipant",
                "StartReceiving",
+               "SetRTPProperties",
                "SetRTPProperties",
                "StartReceiving",
                "SetRTPProperties"
@@ -700,7 +704,14 @@ defmodule Kelix.Mod.McuCallTest do
       {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
       assert_receive {:replied, 200, _reason, _fields, _req}, 2000
 
-      # answer time carries the transport properties only
+      # video gets TWO properties calls, and the order is the contract
+      # (§16.3.4 (a)): our own codec capability first, because the negotiator
+      # reads it at StartReceiving...
+      assert_receive {:rpc, "SetRTPProperties", [42, 7, 1, codec_props, 0]}, 2000
+      assert Map.has_key?(codec_props, "codec.av1.level-idx")
+
+      # ...then the transport switches. The H.264 profile is in NEITHER: it
+      # travels with SetVideoCodec at ACK time, the encoder's only channel.
       assert_receive {:rpc, "SetRTPProperties", [42, 7, 1, props, 0]}, 2000
       assert props["useNACK"] == "1"
       assert props["natLatch"] == "1"
@@ -852,6 +863,8 @@ defmodule Kelix.Mod.McuCallTest do
       assert TestStub.rpc_order() == [
                "CreateParticipant",
                "StartReceiving",
+               "SetRTPProperties",
+               # video declares its own codec capability before opening (§16.3.4 (a))
                "SetRTPProperties",
                "StartReceiving",
                "SetRTPProperties",
@@ -1146,6 +1159,11 @@ defmodule Kelix.Mod.McuCallTest do
     test "what is announced is what is switched on server-side", ctx do
       {_pid, _dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_capneg))
       assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+
+      # the first video properties call is our local codec capability (§16.3.4 (a));
+      # the transport switches follow in the second
+      assert_received {:rpc, "SetRTPProperties", [42, 7, 1, codec_props, 0]}
+      assert Map.has_key?(codec_props, "codec.av1.level-idx")
 
       # video (1) carries the three switches behind the three answered types
       assert_received {:rpc, "SetRTPProperties", [42, 7, 1, props, 0]}

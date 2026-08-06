@@ -86,4 +86,12 @@ defmodule MediaServer.SdpTools do
   `MediaServer.Mendooze.Sdp.conformant_pts/3`.
   """
   defdelegate conformant_pts(accepted, desc, rtp_map), to: Sdp
+
+  @doc """
+  The lowest AV1 `seq_level_idx` covering a picture size and frame rate.
+
+  What the announced `level-idx` must be, derived from what we will really
+  encode. See `MediaServer.Mendooze.Sdp.av1_level_idx/3`.
+  """
+  defdelegate av1_level_idx(width, height, fps), to: Sdp
 end

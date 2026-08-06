@@ -47,7 +47,8 @@ defmodule MediaServer.Mendooze.Sdp do
 
   @video_codecs %{
     "H264" => {99, 99, 90_000},
-    "VP8" => {107, 107, 90_000}
+    "VP8" => {107, 107, 90_000},
+    "AV1" => {110, 110, 90_000}
   }
 
   @text_codecs %{
@@ -1415,6 +1416,68 @@ defmodule MediaServer.Mendooze.Sdp do
 
   defp channels(ch) when is_integer(ch) and ch > 1, do: ch
   defp channels(_), do: nil
+
+  # ── AV1 level derivation (bitstream spec Annex A.3) ─────────────────────────
+
+  # `{seq_level_idx, MaxPicSize, MaxHSize, MaxVSize, MaxDisplayRate}` for the
+  # levels the spec DEFINES, in ascending order. 2.2/2.3, 3.2/3.3 and 4.2/4.3
+  # have no definition, hence the gaps in the index.
+  @av1_levels [
+    {0, 147_456, 2048, 1152, 4_423_680},
+    {1, 278_784, 2816, 1584, 8_363_520},
+    {4, 665_856, 4352, 2448, 19_975_680},
+    {5, 1_065_024, 5504, 3096, 31_950_720},
+    {8, 2_359_296, 6144, 3456, 70_778_880},
+    {9, 2_359_296, 6144, 3456, 141_557_760},
+    {12, 8_912_896, 8192, 4352, 267_386_880},
+    {13, 8_912_896, 8192, 4352, 534_773_760},
+    {14, 8_912_896, 8192, 4352, 1_069_547_520},
+    {16, 35_651_584, 16_384, 8704, 1_069_547_520},
+    {17, 35_651_584, 16_384, 8704, 2_139_095_040},
+    {18, 35_651_584, 16_384, 8704, 4_278_190_080}
+  ]
+
+  @doc """
+  The lowest AV1 `seq_level_idx` that covers a picture size and frame rate
+  (bitstream spec Annex A.3: `MaxPicSize`, `MaxHSize`, `MaxVSize`,
+  `MaxDisplayRate`).
+
+  This is what an SDP `a=fmtp:<pt> level-idx=` must state, and it is the
+  **controller's** to derive rather than a static server setting (decided
+  2026-08-06): the media server has no idea what the mixer will actually
+  encode, and the spec default `5` (level 3.1) becomes a lie the moment a
+  deployment runs its mixer at 720p60 or 1080p — `level-idx` bounds what the
+  *peer* may send us, and a peer that believes 3.1 while we produce 4.0 is the
+  `profile-level-id` incident of H.264 transposed.
+
+  Returns the highest defined level when nothing covers the request (a 8K
+  mosaic is not a level we can name), so an answer always carries a value.
+
+      iex> MediaServer.Mendooze.Sdp.av1_level_idx(1280, 720, 15)
+      5
+      iex> MediaServer.Mendooze.Sdp.av1_level_idx(1280, 720, 60)
+      8
+  """
+  @spec av1_level_idx(pos_integer(), pos_integer(), pos_integer()) :: non_neg_integer()
+  def av1_level_idx(width, height, fps)
+      when is_integer(width) and width > 0 and is_integer(height) and height > 0 and
+             is_integer(fps) and fps > 0 do
+    pic_size = width * height
+    display_rate = pic_size * fps
+
+    Enum.find_value(@av1_levels, highest_av1_level(), fn
+      {idx, max_pic, max_h, max_v, max_rate} ->
+        if pic_size <= max_pic and width <= max_h and height <= max_v and
+             display_rate <= max_rate,
+           do: idx,
+           else: nil
+    end)
+  end
+
+  defp highest_av1_level do
+    {idx, _pic, _h, _v, _rate} = List.last(@av1_levels)
+    idx
+  end
 
   # ── Verdict conformance (RFC 3264 §6.1 / RFC 6184 §8.2.2) ───────────────────
 

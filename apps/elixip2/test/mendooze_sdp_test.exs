@@ -1254,4 +1254,64 @@ defmodule Mendooze.SdpTest do
       assert {^verdict, []} = Sdp.conformant_pts(verdict, audio, %{"0" => 0})
     end
   end
+
+  describe "av1_level_idx/3 (AV1 Annex A.3)" do
+    test "the announced level covers what the mixer really produces" do
+      # the conference default (HD720p at 15 i/s) fits level 3.1, which is also
+      # the spec default — so nothing changes for it
+      assert Sdp.av1_level_idx(1280, 720, 15) == 5
+
+      # 720p60 needs 4.0: 55_296_000 samples/s exceeds 3.1's 31_950_720. This is
+      # the case the static default silently lied about.
+      assert Sdp.av1_level_idx(1280, 720, 60) == 8
+
+      # 1080p30 exceeds 3.1's MaxPicSize (2_073_600 > 1_065_024) -> 4.0
+      assert Sdp.av1_level_idx(1920, 1080, 30) == 8
+
+      # 1080p60 needs 4.1 (rate 124_416_000 > 4.0's 70_778_880)
+      assert Sdp.av1_level_idx(1920, 1080, 60) == 9
+
+      # small sizes stay at the bottom of the ladder
+      assert Sdp.av1_level_idx(352, 288, 15) == 0
+    end
+
+    test "undefined levels are never named" do
+      # 2.2/2.3 (2-3), 3.2/3.3 (6-7) and 4.2/4.3 (10-11) have no definition in
+      # the spec: no input may yield one.
+      undefined = [2, 3, 6, 7, 10, 11, 15]
+
+      for w <- [176, 352, 640, 1280, 1920, 3840],
+          fps <- [5, 15, 30, 60] do
+        refute Sdp.av1_level_idx(w, div(w * 9, 16), fps) in undefined
+      end
+    end
+
+    test "an unnameable size still yields a level, the highest defined one" do
+      assert Sdp.av1_level_idx(16_384, 8704, 120) == 18
+    end
+  end
+
+  describe "AV1 in the codec vocabulary" do
+    test "an AV1 offer is nameable, so it reaches the media server" do
+      sdp_str = """
+      v=0
+      o=- 1 1 IN IP4 172.16.0.1
+      s=call
+      c=IN IP4 172.16.0.1
+      t=0 0
+      m=video 5006 RTP/AVP 45 99
+      a=rtpmap:45 AV1/90000
+      a=fmtp:45 profile=0;level-idx=5;tier=0
+      a=rtpmap:99 H264/90000
+      """
+
+      assert {:ok, [video]} = Sdp.parse(sdp_str)
+      # VideoCodec::AV1 = 110 server-side; before this the PT was dropped from
+      # the menu and a Linphone 6.2 offer (AV1 first) lost its preferred codec
+      assert video.rtp_map == %{"45" => 110, "99" => 99}
+      assert "AV1" in video.codecs
+      assert Sdp.code_rtpmap(:video, 110) == {"AV1", 90_000, nil}
+      assert video.fmtp_raw["45"] == "profile=0;level-idx=5;tier=0"
+    end
+  end
 end

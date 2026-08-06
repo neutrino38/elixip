@@ -467,7 +467,7 @@ defmodule Mendooze.ConnTest do
           %{
             type: :video,
             port: 40_002,
-            rtpmaps: [%{pt: 96, encoding: "AV1", clock: 90_000}],
+            rtpmaps: [%{pt: 96, encoding: "H263-1998", clock: 90_000}],
             fmtp: %{}
           }
         ]

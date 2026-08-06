@@ -128,6 +128,31 @@ defmodule Kelix.Mod.Mcu.Vocabulary do
   @spec vads() :: [String.t()]
   def vads(), do: Enum.map(@vads, &elem(&1, 1))
 
+  # Pixel dimensions of each video size id, transcribed from the media server's
+  # own table (`GetWidth`/`GetHeight`, `libmedikit/medkit/config.h`) — the wire
+  # ids carry no dimensions, and a codec parameter derived from the *wrong*
+  # dimensions announces a capability the mixer does not have.
+  @size_dimensions %{
+    0 => {176, 144},
+    1 => {352, 288},
+    2 => {640, 480},
+    3 => {768, 576},
+    4 => {320, 240},
+    5 => {160, 120},
+    6 => {1280, 720},
+    7 => {400, 240},
+    14 => {1024, 768},
+    15 => {800, 480}
+  }
+
+  @doc """
+  `{width, height}` of a video size id, or `nil` for an id this table does not
+  carry. Needed by anything that must state a codec capability in real pixels
+  (the AV1 `level-idx`, for one) rather than in medooze size ids.
+  """
+  @spec size_dimensions(non_neg_integer) :: {pos_integer, pos_integer} | nil
+  def size_dimensions(id), do: Map.get(@size_dimensions, id)
+
   defp label_map(table), do: Map.new(table, fn {id, name} -> {Integer.to_string(id), name} end)
 
   # ── one value ────────────────────────────────────────────────────────────────
