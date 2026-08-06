@@ -137,6 +137,22 @@ defmodule Kelix.Mod.McuWebrtcTest do
     {:ok, [port_for(params), @media_ip, accepted]}
   end
 
+  # A verdict shaped like the Linphone 6.2 case: the offered profile echoed back with
+  # packetization-mode **1**, against an offer that stated no mode at all.
+  @linphone_fmtp "profile-level-id=42801f;packetization-mode=1;level-asymmetry-allowed=1"
+
+  defp linphone_verdict(params) do
+    proposed = Enum.at(params, 3)
+
+    accepted =
+      case Enum.at(params, 2) do
+        1 -> Map.new(proposed, fn {pt, _code} -> {pt, @linphone_fmtp} end)
+        _ -> Map.new(proposed, fn {pt, code} -> {pt, audio_fmtp(code)} end)
+      end
+
+    {:ok, [port_for(params), @media_ip, accepted]}
+  end
+
   defp port_for(params) do
     case Enum.at(params, 2) do
       0 -> @audio_port
@@ -150,6 +166,7 @@ defmodule Kelix.Mod.McuWebrtcTest do
       case context[:verdict] do
         :server_capability -> &capability_verdict/1
         :per_pt -> &per_pt_verdict/1
+        :linphone -> &linphone_verdict/1
         :unanswerable -> &unanswerable_verdict/1
         _ -> &verdict/1
       end
@@ -327,8 +344,8 @@ defmodule Kelix.Mod.McuWebrtcTest do
         assert log =~ "dropped pt #{pt} from the verdict"
       end
 
-      # and the log says where the real fix is, so this is not read as a codec choice
-      assert log =~ "resolved per codec instead of per payload type (P8c)"
+      # and the log sends the reader to the server's own resolution, not to a code path
+      assert log =~ "check what it resolved for THIS payload type in its log"
     end
 
     @tag verdict: :server_capability
@@ -352,7 +369,10 @@ defmodule Kelix.Mod.McuWebrtcTest do
       # and the encoder is configured with the profile that answer states
       assert Enum.any?(calls, fn
                {"SetVideoCodec", [_c, _p, 99, _s, _f, _b, _i, props, 0]} ->
-                 props == %{"h264.profile-level-id" => "64001f"}
+                 props == %{
+                   "h264.profile-level-id" => "64001f",
+                   "h264.packetization-mode" => "1"
+                 }
 
                _ ->
                  false
@@ -411,6 +431,57 @@ defmodule Kelix.Mod.McuWebrtcTest do
       assert Enum.any?(calls, &match?({"StopReceiving", [_c, _p, 1, 0]}, &1))
     end
 
+    # An offer that states no packetization-mode at all — Linphone 6.2 with OpenH264 —
+    # is NOT read as mode 0 (RFC 6184 §8.1 says it is; decided 2026-08-06 to differ).
+    # Reading it that way cost H.264 entirely: the server answers its own mode 1, the
+    # modes "differed", and the payload type was dropped.
+    @tag verdict: :linphone
+    test "an offer stating no packetization-mode keeps its H.264 payload type", ctx do
+      offer =
+        Enum.join(
+          [
+            "v=0",
+            "o=- 1 1 IN IP4 192.168.1.50",
+            "s=-",
+            "c=IN IP4 192.168.1.50",
+            "t=0 0",
+            "m=video 40000 RTP/AVP 97",
+            "a=rtpmap:97 H264/90000",
+            "a=fmtp:97 profile-level-id=42801F",
+            "a=sendrecv",
+            ""
+          ],
+          "\r\n"
+        )
+
+      conn = leg(ctx.did)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, answer} = Adapter.set_remote_offer(conn, offer)
+          assert {:ok, _summary} = Adapter.attach(conn)
+          send(self(), {:answer, answer})
+        end)
+
+      assert_received {:answer, answer}
+      refute log =~ "dropped pt"
+      assert answer =~ "a=rtpmap:97 H264/90000"
+      assert answer =~ "a=fmtp:97 #{@linphone_fmtp}"
+
+      # and the negotiated mode reaches the encoder by the same channel as the profile —
+      # it decides the slice size, hence mode-0 conformance, and the software fallback
+      assert Enum.any?(TestStub.rpc_calls(), fn
+               {"SetVideoCodec", [_c, _p, 99, _s, _f, _b, _i, props, 0]} ->
+                 props == %{
+                   "h264.profile-level-id" => "42801f",
+                   "h264.packetization-mode" => "1"
+                 }
+
+               _ ->
+                 false
+             end)
+    end
+
     # The fixed server (per-PT resolution): nothing is dropped any more, and it is then
     # kelixip's job to keep what it sends consistent with what it announced.
     @tag verdict: :per_pt
@@ -447,7 +518,10 @@ defmodule Kelix.Mod.McuWebrtcTest do
 
       assert Enum.any?(calls, fn
                {"SetVideoCodec", [_c, _p, 99, _s, _f, _b, _i, props, 0]} ->
-                 props == %{"h264.profile-level-id" => "42001f"}
+                 props == %{
+                   "h264.profile-level-id" => "42001f",
+                   "h264.packetization-mode" => "1"
+                 }
 
                _ ->
                  false

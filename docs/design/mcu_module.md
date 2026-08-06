@@ -718,6 +718,11 @@ hard cases:
    lists `H264/90000` bare decodes what it is sent, and declining its video over a
    parameter it never wrote would be the harder failure.
 
+   The **mode is compared only when the peer wrote one**. RFC 6184 §8.1 makes the absent
+   value 0; we deliberately read absence as *no constraint* (decided 2026-08-06, §6.3.3),
+   so an asymmetry there contradicts nothing the peer stated and the payload type is
+   kept.
+
    > **Found 2026-08-06** on `webrtc.pcap`: an Electron/Chrome 138 client offered seven
    > H.264 payload types (four profiles × two packetization modes) and got all seven
    > accepted — each answered with `profile-level-id=64001f;packetization-mode=1`, the
@@ -773,6 +778,40 @@ hard cases:
    > §3.5 table. It answered a parse fault, which kelixip turned into a `500`. A stub
    > that accepts any arity is why no test caught either: both are contract bugs, and
    > the contract is `MCU-API.md`.
+
+#### 6.3.3 `packetization-mode`, and the deviation we take
+
+RFC 6184 §8.1 says an absent `packetization-mode` means **0** — single-NAL-unit mode,
+no FU-A. Linphone 6.2 with OpenH264 offers H.264 with `profile-level-id` alone and no
+mode, and reading that as 0 cost it H.264 entirely: the media server answered its own
+mode 1, rule 12 saw two different modes, and the payload type was dropped (the call ran
+on VP8). **Decided 2026-08-06: absence is read as "no constraint", i.e. mode 1.** A peer
+that omits the parameter is an incomplete SDP more than a single-NAL-only decoder — every
+modern decoder depacketizes FU-A. The bet is falsifiable and cheap to check: H.264
+negotiated and no picture with that client, and the explicit-0 branch below is what it
+falls back to.
+
+The three cases, and what each does:
+
+| Offered | Announced | Encoder |
+|---|---|---|
+| `packetization-mode=1` | 1 | slices bounded loosely (10000 B) — the FU-A fragments, so the constraint has no reason to exist |
+| `packetization-mode=0` | 0 | slices bounded to the RTP payload (no NALU exceeds one packet, hence no FU-A) **and libx264 forced**: VAAPI cannot bound a slice. The server logs `falling back to software encoding because of requested packetization_mode 0` |
+| absent | 1 | as the `=1` case |
+
+Before this, x264 was configured `slice-max-size=RTPPAYLOADSIZE-8` for **every** leg, so
+all of them paid the mode-0 cost — many slices per frame, intra prediction cut at each
+boundary, more bitrate for the same quality — including the ones that accept FU-A.
+
+The mode reaches the encoder the same way the profile does, through `SetVideoCodec`'s
+properties map (§6.3 rule 9): it is the only channel that gets there, and reading it off
+the **announced** fmtp is exact rather than convenient — the server puts the peer's mode
+there when the peer stated one and 1 otherwise, so announced and emitted are the same
+mode by construction.
+
+Still open server-side: the packetiser does not *enforce* mode 0, it merely never needs
+FU-A once the slices are bounded. Making it refuse to fragment on such a leg would turn a
+property of the current settings into a guarantee.
 
 Two answerer details that are not rules of their own but have bitten once each:
 

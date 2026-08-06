@@ -749,7 +749,14 @@ defmodule Kelix.Mod.McuCallTest do
 
       send(pid, {:ACK, %{method: :ACK}, nil, dialog})
       assert_receive {:rpc, "SetVideoCodec", [42, 7, 99, 6, 15, 1024, 300, encoder, 0]}, 2000
-      assert encoder == %{"h264.profile-level-id" => "640028"}
+
+      # the packetization mode travels with the profile, by the same channel and for the
+      # same reason: it is what bounds the slices the encoder produces, and server-side it
+      # decides between VAAPI and libx264
+      assert encoder == %{
+               "h264.profile-level-id" => "640028",
+               "h264.packetization-mode" => "1"
+             }
     end
 
     test "a profile the offer does state still wins over ours", ctx do

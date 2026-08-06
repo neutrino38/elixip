@@ -567,7 +567,9 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
               # decided once, here, from the payload type we will actually send on: the
               # answer states that profile and the encoder is configured with it, so the
               # two cannot drift apart
-              Map.put(neg, :answered_profile_level_id, answered_profile_level_id(desc, neg))
+              neg
+              |> Map.put(:answered_profile_level_id, answered_profile_level_id(desc, neg))
+              |> Map.put(:answered_video_fmtp, answered_video_fmtp(desc, neg))
             }
           end
         end
@@ -620,8 +622,10 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
       nil ->
         true
 
-      offered ->
-        got = answered_h264_config(answered)
+      {offered_profile, offered_mode} ->
+        {got_profile, got_mode} = answered_h264_config(answered)
+        offered = {offered_profile, offered_mode}
+        got = {got_profile, if(is_nil(offered_mode), do: nil, else: got_mode)}
 
         if offered == got do
           true
@@ -632,9 +636,9 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
               "conf=#{state.conf_id} part=#{state.part_id} video: dropped pt #{pt} from " <>
                 "the verdict — the media server answered H.264 #{describe(got)} where the " <>
                 "offer declared #{describe(offered)} for that payload type. Announcing it " <>
-                "would be a codec the caller never offered (RFC 6184 §8.2.2); a browser " <>
-                "refuses the whole answer. Fix is server-side: H.264 is resolved per codec " <>
-                "instead of per payload type (P8c)"
+                "would be a codec the caller never offered (RFC 6184 §8.2.2), and a browser " <>
+                "refuses the whole answer over it. Both come from the server's negotiation: " <>
+                "check what it resolved for THIS payload type in its log"
           )
 
           false
@@ -643,11 +647,21 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   end
 
   # The identity half of an H.264 fmtp: the profile (`profile_idc` + `profile_iop`, the
-  # first two bytes) and the packetization mode, which defaults to 0 when unstated.
+  # first two bytes) and the packetization mode **as the peer wrote it** — `nil` when it
+  # wrote none, which is not the same as 0.
+  #
+  # RFC 6184 §8.1 makes the absent value 0, and we deliberately do not read it that way
+  # (decided 2026-08-06): a peer that omits the parameter is an incomplete SDP more than
+  # a single-NAL-only decoder — every modern decoder depacketizes FU-A. Linphone 6.2 with
+  # OpenH264 omits it, and reading absence as 0 cost it H.264 entirely: the media server
+  # answered mode 1 (its own), the modes "differed", and the payload type was dropped.
+  # So: absent ⇒ no constraint, the mode is not compared, and the asymmetry contradicts
+  # nothing the peer stated. If the bet is wrong the symptom is unmistakable — H.264
+  # negotiated and no picture with that client.
   defp offered_h264_config(desc, pt) do
     case Map.get(Map.get(desc, :fmtp, %{}), pt) do
       %{profile_level_id: plid} = fmtp when is_integer(plid) ->
-        {plid |> hex6() |> String.slice(0, 4), Map.get(fmtp, :packetization_mode) || 0}
+        {plid |> hex6() |> String.slice(0, 4), Map.get(fmtp, :packetization_mode)}
 
       _ ->
         nil
@@ -670,7 +684,8 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     {profile, mode}
   end
 
-  defp describe({profile, mode}), do: "#{profile || "(no profile)"}/pm=#{mode}"
+  defp describe({profile, mode}),
+    do: "#{profile || "(no profile)"}/pm=#{if is_nil(mode), do: "(unstated)", else: mode}"
 
   # The peer's own keys and ICE credentials, pushed **after** `StartReceiving`
   # (§6.2): the session exists by then, which is what these attach to.
@@ -824,6 +839,18 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   end
 
   defp answered_profile_level_id(desc, _neg), do: h264_profile_level_id(desc)
+
+  # Le fmtp que le serveur a rendu pour le payload type PRIMAIRE — celui sur lequel nous
+  # émettrons. `encoder_props/1` y lit le mode de paquetisation ; le profil est déjà
+  # extrait par `answered_profile_level_id/2`, qui applique la même règle du PT primaire.
+  defp answered_video_fmtp(%{type: :video}, %{accepted: accepted} = neg) when is_map(accepted) do
+    case primary_entry(neg) do
+      {pt, _code} -> Map.get(accepted, pt)
+      nil -> nil
+    end
+  end
+
+  defp answered_video_fmtp(_desc, _neg), do: nil
 
   defp plid_of(params) when is_binary(params) do
     case Regex.run(~r/profile-level-id=([0-9a-fA-F]{6})/, params) do
@@ -1025,12 +1052,34 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # SPS, the profile the SDP answer advertised. Without it it runs on its own default
   # `42801F` whatever we announced, and a handset that trusts the answer gets a
   # stream it may not decode — one-way video that looks like a network problem.
+  # `h264.packetization-mode` travels by the same channel and for the same reason: it is
+  # the only one that reaches the encoder. It decides the slice size the encoder produces
+  # — hence whether the stream is mode-0 conformant, which forbids FU-A — and server-side
+  # it forces the software encoder, VAAPI being unable to bound a slice.
+  #
+  # Reading it off the **announced** fmtp is not a shortcut: the server puts the peer's
+  # mode there when the peer stated one, and 1 otherwise, so announced and emitted are
+  # the same mode by construction — the same invariant the profile relay relies on.
   defp encoder_props(neg) do
-    case Map.get(neg, :answered_profile_level_id) do
-      plid when is_binary(plid) -> %{"h264.profile-level-id" => plid}
-      _ -> %{}
+    %{}
+    |> put_encoder_prop("h264.profile-level-id", Map.get(neg, :answered_profile_level_id))
+    |> put_encoder_prop(
+      "h264.packetization-mode",
+      packetization_mode_of(Map.get(neg, :answered_video_fmtp))
+    )
+  end
+
+  defp put_encoder_prop(props, _key, nil), do: props
+  defp put_encoder_prop(props, key, value), do: Map.put(props, key, value)
+
+  defp packetization_mode_of(params) when is_binary(params) do
+    case Regex.run(~r/packetization-mode=(\d+)/, params) do
+      [_, mode] -> mode
+      nil -> nil
     end
   end
+
+  defp packetization_mode_of(_params), do: nil
 
   # The Medooze constant of a codec name, read off the shared codec tables (a
   # one-entry rtpMap is the table lookup those tables expose).
