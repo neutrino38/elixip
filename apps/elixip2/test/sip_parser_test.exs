@@ -273,6 +273,55 @@ defmodule SIP.Test.Parser do
 		assert body.data == data
 	end
 
+  # RFC 3261 §20.14 makes Content-Length OPTIONAL on a datagram transport: absent, the
+	# body is the rest of the datagram. Linphone 6.2 omits it on its in-dialog requests,
+	# and reading the header with dot access raised a KeyError that killed the whole UDP
+	# transport process — so the ACK never reached its transaction (a call that answered
+	# and carried no media) and every BYE retransmission killed it again.
+	test "Parse a bodyless request with no Content-Length (UDP, RFC 3261 §20.14)" do
+		msg = Enum.join([
+			"BYE sip:900020123@172.21.105.71:5070 SIP/2.0",
+			"Via: SIP/2.0/UDP 172.21.92.83:5060;branch=z9hG4bK.L3BfT1JYs;rport=5060",
+			"From: \"Test AL9\" <sip:50815019@visioassistance.net>;tag=P2ccTtNY6",
+			"To: <sip:900020123@visioassistance.net>;tag=2734911207626",
+			"CSeq: 22 BYE",
+			"Call-ID: EQGF0Mi7gF",
+			"Max-Forwards: 70",
+			"User-Agent: Linphone-Desktop/6.2.0",
+			"", "" ], "\r\n")
+
+		{ code, parsed_msg } = SIPMsg.parse(msg, fn _code, _errmsg, _lineno, _line -> nil end)
+
+		assert code == :ok
+		assert parsed_msg.method == :BYE
+		# no header, no body — and above all no raise
+		refute Map.has_key?(parsed_msg, :contentlength)
+		refute Map.has_key?(parsed_msg, :body)
+	end
+
+	test "Parse a request with a body but no Content-Length (the datagram is the length)" do
+		{ :ok, sdp } = File.read("test/SDP-SIMPLE.txt")
+
+		msg = Enum.join([
+			"INVITE sip:900020123@172.21.105.71:5070 SIP/2.0",
+			"Via: SIP/2.0/UDP 172.21.92.83:5060;branch=z9hG4bK.nocl;rport=5060",
+			"From: <sip:50815019@visioassistance.net>;tag=P2ccTtNY6",
+			"To: <sip:900020123@visioassistance.net>",
+			"CSeq: 21 INVITE",
+			"Call-ID: nocl-1",
+			"Max-Forwards: 70",
+			"Content-Type: application/sdp",
+			"", sdp ], "\r\n")
+
+		{ code, parsed_msg } = SIPMsg.parse(msg, fn _code, _errmsg, _lineno, _line -> nil end)
+
+		assert code == :ok
+		assert parsed_msg.method == :INVITE
+		[ body ] = parsed_msg.body
+		assert body.contenttype == "application/sdp"
+		assert body.data == sdp
+	end
+
   test "Parse an INVITE message with a simple body" do
 
   	{ code, msg } = File.read("test/SIP-INVITE-BASIC-AUDIO.txt")
