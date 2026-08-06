@@ -698,6 +698,61 @@ hard cases:
    > `webrtc_sdp_design.md`); mirroring the mid is what makes declining it legible
    > rather than malformed.
 
+12. **The verdict is checked against the offer, per payload type.** The answer may not
+   describe, for a payload type, a codec the offer did not describe for **that** payload
+   type (RFC 3264 §6.1). An accepted PT whose returned fmtp contradicts the offered one
+   is dropped from the answer — and from the send map and the encoder configuration with
+   it, so all three keep saying the same thing. If that empties a media, the media is
+   declined with port 0 (rule 2) and its receive plane is closed again.
+
+   This is **not** a re-entry of the codec arbitration that §16.3 moved to the server:
+   nothing is chosen here. It is the answerer's own conformance duty (§6.3.2 — "SDP-level
+   answerer duties"), and it exists because a browser enumerates one codec under many
+   payload types precisely to describe several configurations of it.
+
+   Where it bites is H.264, whose payload-type identity is its `profile-level-id`
+   *profile* (the first two bytes) plus its `packetization-mode` — RFC 6184 §8.2.2. The
+   *level* may legitimately differ, that is what level asymmetry is for, so only the
+   profile and the mode are compared. An offer that states no `profile-level-id` for a
+   payload type has nothing to contradict and is left alone: a gateway or a handset that
+   lists `H264/90000` bare decodes what it is sent, and declining its video over a
+   parameter it never wrote would be the harder failure.
+
+   > **Found 2026-08-06** on `webrtc.pcap`: an Electron/Chrome 138 client offered seven
+   > H.264 payload types (four profiles × two packetization modes) and got all seven
+   > accepted — each answered with `profile-level-id=64001f;packetization-mode=1`, the
+   > *server's own* capability. Six of them therefore described a codec the caller never
+   > offered; libwebrtc refused the whole answer and the app sent `BYE` 16 ms after its
+   > `ACK`. With the check, the one payload type the caller did offer as `64001f`/pm=1
+   > survives and the call carries video.
+   >
+   > **The server was fixed the same day**, which makes this check a safety net rather
+   > than the load-bearing part: against a per-payload-type verdict it drops nothing.
+   > It stays because an answerer must not state a verdict it cannot state, and because
+   > a controller upgrade and a media-server upgrade never land at the same minute.
+   >
+   > **What was wrong server-side** (`negotiator.cpp`, `rtpparticipant.cpp`,
+   > `h264encoder.cpp`): H.264 was resolved per *codec*, not per payload type.
+   > `RTPParticipant::StartReceiving` collapsed the offer's per-PT fmtp into a single
+   > `h264.fmtp` property (`remoteFmtp[name + ".fmtp"] = …` in a loop over payload
+   > types, so the last one iterated won), and `CodecNegotiator::Negotiate` then handed
+   > that one entry to every H.264 PT it accepted. `H264Encoder::ResolveNegotiation`
+   > itself was correct — it announces the *peer's* profile — it was simply given the
+   > wrong peer. The remote fmtp is now keyed by payload type (`pt.<pt>.fmtp`, the
+   > codec-name key kept as the JSR-309 shortcut, which has one PT per codec), and
+   > `GetFmtpParams` stopped hard-coding `packetization-mode=1` — announcing our own
+   > mode on a PT offered as mode 0 was the same contradiction. All seven payload types
+   > of that capture now come back with their own parameters.
+   >
+   > One consequence lands back here: a truthful seven-PT verdict means the mixer has
+   > to pick **one** payload type to send on, and the encoder must be configured with
+   > *that* one's profile — `send_map/2` restricts video to the primary payload type
+   > and `answered_profile_level_id/2` reads the profile off it. Otherwise we encode
+   > `42001f` and stamp it with a payload type the peer reads as `4d001f`.
+   >
+   > Still open server-side: the packetiser does not honour mode 0 (it emits FU-A),
+   > which `ResolveNegotiation` now logs when a peer offers it.
+
 Two answerer details that are not rules of their own but have bitten once each:
 
 - **A payload type is re-announced with the clock rate the offer gave *that* PT.**
@@ -707,6 +762,13 @@ Two answerer details that are not rules of their own but have bitten once each:
   `126 telephone-event/48000` because the primary is OPUS at 48 kHz describes a
   codec the peer never offered: libwebrtc discards it and DTMF stops working. The
   offer's clock→PT map travels with the accepted set into `answer_rtpmaps/2`.
+- **The answer's format list is the offer's order.** In an answer the order *is* a
+  preference statement (RFC 3264 §6.1) and a mixer has none of its own to make, so the
+  caller's order is honoured — in the `a=rtpmap` list **and** in the codec the mixer is
+  told to encode, which must be the same reading or the SDP and the wire disagree.
+  Ascending payload type, which is what sorting the accepted map gives, is not a
+  preference at all: a browser offering `111 9 0` (OPUS first) was answered `0 9 111`
+  and then sent G.711 to a conference that could have had OPUS.
 - **ICE credentials use the `ice-char` alphabet** (`ALPHA / DIGIT / "+" / "/"`, RFC
   8839 §5.4) — hex, as the field-proven gateway emits. Base64**url** produces `-`
   and `_`, outside that grammar: browsers do not check, strict SDP parsers do, and

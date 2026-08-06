@@ -717,6 +717,28 @@ defmodule Mendooze.SdpTest do
              ]
     end
 
+    test "`fmt_order` puts the entries in the offer's order, not in payload-type order" do
+      # a browser offering `111 9 0` prefers OPUS; answering `0 9 111` would tell it we
+      # prefer G.711, and it would then send G.711
+      neg = %{rtp_map: %{"0" => 0, "9" => 9, "111" => 98}, fmt_order: [111, 9, 0]}
+
+      assert Enum.map(Sdp.answer_rtpmaps(:audio, neg), & &1.pt) == [111, 9, 0]
+
+      # the same list in the shape ExSDP hands back for the profiles it does not decode
+      # numerically (a raw string)
+      assert Enum.map(Sdp.answer_rtpmaps(:audio, %{neg | fmt_order: "111 9 0"}), & &1.pt) ==
+               [111, 9, 0]
+
+      # and without it, ascending payload type as before (regression guard)
+      assert Enum.map(Sdp.answer_rtpmaps(:audio, Map.delete(neg, :fmt_order)), & &1.pt) ==
+               [0, 9, 111]
+    end
+
+    test "a PT the offer's list does not mention sorts after the ones it does" do
+      neg = %{rtp_map: %{"8" => 8, "111" => 98}, fmt_order: [111]}
+      assert Enum.map(Sdp.answer_rtpmaps(:audio, neg), & &1.pt) == [111, 8]
+    end
+
     test "a PT absent from `dtmf_pts` still falls back to the negotiated clock" do
       neg = %{rtp_map: %{"101" => 100}, dtmf_clock: 16_000, dtmf_pts: %{8000 => 126}}
 

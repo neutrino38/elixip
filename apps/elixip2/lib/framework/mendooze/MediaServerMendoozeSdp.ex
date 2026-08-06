@@ -1297,6 +1297,13 @@ defmodule MediaServer.Mendooze.Sdp do
   can match (libwebrtc drops it; DTMF then rides at the wrong rate or not at all).
   `dtmf_clock` remains the fallback for the local path, where the selected PT and
   its clock were chosen together.
+
+  **Order.** `fmt_order` — the offer's own `m=` format list — is what the entries are
+  ordered by when it is given, because in an answer the order *is* a preference
+  statement (RFC 3264 §6.1) and a mixer has none of its own to state. Without it the
+  order falls back to ascending payload type, which is not a preference at all: a
+  browser offering `111 9 0` (OPUS first) would be answered `0 9 111` and would then
+  send G.711 to a conference that could have had OPUS.
   """
   # Callers pass either a full negotiate/3 result (Mockup) or just the keys used
   # here (MendoozeConn, the MCU adapter), hence the open map.
@@ -1304,6 +1311,7 @@ defmodule MediaServer.Mendooze.Sdp do
           required(:rtp_map) => rtp_map(),
           optional(:dtmf_clock) => non_neg_integer() | nil,
           optional(:dtmf_pts) => %{optional(non_neg_integer()) => non_neg_integer()},
+          optional(:fmt_order) => [non_neg_integer() | String.t()],
           optional(atom()) => any()
         }) :: [rtpmap_entry()]
   def answer_rtpmaps(media, %{rtp_map: send_map} = neg) do
@@ -1313,7 +1321,7 @@ defmodule MediaServer.Mendooze.Sdp do
     fallback_clock = Map.get(neg, :dtmf_clock) || 8000
 
     send_map
-    |> Enum.sort_by(fn {pt, _code} -> String.to_integer(pt) end)
+    |> Enum.sort_by(&pt_rank(&1, Map.get(neg, :fmt_order)))
     |> Enum.flat_map(fn {pt_str, code} ->
       pt = String.to_integer(pt_str)
 
@@ -1330,6 +1338,33 @@ defmodule MediaServer.Mendooze.Sdp do
       end
     end)
   end
+
+  @doc """
+  Rank a payload type against an offered format list: its position there, and its
+  own number for anything the list does not mention (or when there is no list).
+
+  Exported because the answer's `rtpmap` order and the *primary codec* the mixer is
+  told to encode must be the same reading of the caller's preference — two orderings
+  would put the peer's first choice in the SDP and something else on the wire.
+  """
+  @spec pt_rank(String.t() | non_neg_integer() | {String.t(), term()}, [term()] | nil) ::
+          {non_neg_integer(), non_neg_integer()}
+  def pt_rank({pt, _value}, fmt_order), do: pt_rank(pt, fmt_order)
+
+  def pt_rank(pt, fmt_order) do
+    number = if is_integer(pt), do: pt, else: String.to_integer(pt)
+    order = normalize_fmt_order(fmt_order)
+    {Enum.find_index(order, &(&1 == Integer.to_string(number))) || length(order), number}
+  end
+
+  # `m=` format lists reach us in both shapes ExSDP produces: a list of integers for the
+  # profiles it decodes numerically, and the raw string for the others (`"99"`,
+  # `"103 107 109"`, `"t140"`). Same reading for both, or the order silently depends on
+  # which transport the offer named.
+  defp normalize_fmt_order(nil), do: []
+  defp normalize_fmt_order(fmt) when is_binary(fmt), do: String.split(fmt, ~r/\s+/, trim: true)
+  defp normalize_fmt_order(fmt) when is_list(fmt), do: Enum.map(fmt, &to_string/1)
+  defp normalize_fmt_order(fmt), do: [to_string(fmt)]
 
   @doc """
   Restrict a send `rtpMap` (remote payload-type numbering → codec code) to the

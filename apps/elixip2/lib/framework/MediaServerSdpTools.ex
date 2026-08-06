@@ -45,6 +45,9 @@ defmodule MediaServer.SdpTools do
   @doc "Ordered answer `rtpmap` entries in the offerer's payload-type numbering (RFC 3264)."
   defdelegate answer_rtpmaps(media, negotiated), to: Sdp
 
+  @doc "Rank a payload type against the offer's format list (its preference order)."
+  defdelegate pt_rank(pt, fmt_order), to: Sdp
+
   @doc "Local ICE host candidates for one media."
   defdelegate host_candidates(ip, port, rtcp_mux?), to: Sdp
 

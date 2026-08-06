@@ -39,6 +39,12 @@ defmodule Kelix.Mod.McuWebrtcTest do
   @chrome_offer Path.expand("../../elixip2/test/SDP-chrome-142-offer.txt", __DIR__)
                 |> File.read!()
 
+  # The offer of the call that failed on 2026-08-06 10:55 (`webrtc.pcap`): the IVeS
+  # Electron client, Chrome 138, **seven** H.264 payload types — four profiles times
+  # two packetization modes. Kept verbatim because it is the offer that showed the
+  # verdict guard was needed.
+  @electron_offer File.read!(Path.expand("fixtures/SDP-webrtc-electron-offer.txt", __DIR__))
+
   # What Chrome adds to that offer when the page also opens a data channel: a media
   # type this MCU has nothing to answer with, carrying a mid of its own.
   @datachannel_section "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" <>
@@ -61,18 +67,93 @@ defmodule Kelix.Mod.McuWebrtcTest do
 
   defp verdict(params) do
     accepted = Map.take(@accepts, Map.keys(Enum.at(params, 3)))
-
-    port =
-      case Enum.at(params, 2) do
-        0 -> @audio_port
-        1 -> @video_port
-        _ -> @text_port
-      end
-
-    {:ok, [port, @media_ip, accepted]}
+    {:ok, [port_for(params), @media_ip, accepted]}
   end
 
-  setup do
+  # What the **real** media server answers today (`webrtc.pcap`, and
+  # `RTPParticipant::StartReceiving` collapsing the offer's per-PT fmtp into one
+  # `h264.fmtp`): every accepted H.264 payload type gets the server's own capability,
+  # High profile 3.1 in packetization mode 1, whatever that payload type was offered as.
+  @server_capability "profile-level-id=64001f;packetization-mode=1;level-asymmetry-allowed=1"
+
+  # Everything proposed accepted, which is what the live server does: on video with its
+  # own capability for every payload type, on audio with the fmtp of each codec.
+  defp capability_verdict(params) do
+    proposed = Enum.at(params, 3)
+
+    accepted =
+      case Enum.at(params, 2) do
+        1 -> Map.new(proposed, fn {pt, _code} -> {pt, @server_capability} end)
+        _ -> Map.new(proposed, fn {pt, code} -> {pt, audio_fmtp(code)} end)
+      end
+
+    {:ok, [port_for(params), @media_ip, accepted]}
+  end
+
+  # 98 = AudioCodec::OPUS, 100 = TELEPHONE_EVENT (§3.6); the rest carry no fmtp.
+  defp audio_fmtp(98), do: "useinbandfec=0;usedtx=0"
+  defp audio_fmtp(100), do: "0-16"
+  defp audio_fmtp(_code), do: ""
+
+  # A verdict where nothing survives the check: a profile the offer never named at all.
+  defp unanswerable_verdict(params) do
+    proposed = Enum.at(params, 3)
+
+    accepted =
+      case Enum.at(params, 2) do
+        1 ->
+          Map.new(proposed, fn {pt, _} -> {pt, "profile-level-id=58001f;packetization-mode=1"} end)
+
+        _ ->
+          Map.new(proposed, fn {pt, code} -> {pt, audio_fmtp(code)} end)
+      end
+
+    {:ok, [port_for(params), @media_ip, accepted]}
+  end
+
+  # What the **fixed** media server returns (per-payload-type resolution): each PT keeps
+  # its own profile and its own mode, at our level since the peer allows asymmetry. This
+  # is the conformant verdict — the one the guard drops nothing from, and the one where
+  # kelixip still has to pick a single payload type to send on.
+  @per_pt_verdict %{
+    "39" => "profile-level-id=4d001f;packetization-mode=0;level-asymmetry-allowed=1",
+    "103" => "profile-level-id=42001f;packetization-mode=1;level-asymmetry-allowed=1",
+    "107" => "profile-level-id=42001f;packetization-mode=0;level-asymmetry-allowed=1",
+    "109" => "profile-level-id=42e01f;packetization-mode=1;level-asymmetry-allowed=1",
+    "115" => "profile-level-id=42e01f;packetization-mode=0;level-asymmetry-allowed=1",
+    "117" => "profile-level-id=4d001f;packetization-mode=1;level-asymmetry-allowed=1",
+    "119" => "profile-level-id=64001f;packetization-mode=1;level-asymmetry-allowed=1"
+  }
+
+  defp per_pt_verdict(params) do
+    proposed = Enum.at(params, 3)
+
+    accepted =
+      case Enum.at(params, 2) do
+        1 -> Map.take(@per_pt_verdict, Map.keys(proposed))
+        _ -> Map.new(proposed, fn {pt, code} -> {pt, audio_fmtp(code)} end)
+      end
+
+    {:ok, [port_for(params), @media_ip, accepted]}
+  end
+
+  defp port_for(params) do
+    case Enum.at(params, 2) do
+      0 -> @audio_port
+      1 -> @video_port
+      _ -> @text_port
+    end
+  end
+
+  setup context do
+    verdict =
+      case context[:verdict] do
+        :server_capability -> &capability_verdict/1
+        :per_pt -> &per_pt_verdict/1
+        :unanswerable -> &unanswerable_verdict/1
+        _ -> &verdict/1
+      end
+
     {:ok, config} = Config.parse(%{"did_range" => "8000-8009"})
     start_supervised!({Mcu, config: config, module_name: "mcu", mediaservers: @mediaservers})
 
@@ -80,7 +161,7 @@ defmodule Kelix.Mod.McuWebrtcTest do
       {Client,
        name: "mcu1",
        base_url: "http://127.0.0.1:18080",
-       transport: TestStub.transport(self(), %{"StartReceiving" => &verdict/1}),
+       transport: TestStub.transport(self(), %{"StartReceiving" => verdict}),
        register: {Mcu, "mcu1"},
        reconnect_ms: 0},
       id: :client_mcu1
@@ -217,6 +298,180 @@ defmodule Kelix.Mod.McuWebrtcTest do
       # the fmtp is the server's, verbatim (P8a)
       assert answer =~
                "a=fmtp:109 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+    end
+  end
+
+  # The failure of webrtc.pcap: the answer described, for six of the seven offered H.264
+  # payload types, a codec the offer never declared for them. libwebrtc refuses the whole
+  # answer and the app hangs up right after the ACK.
+  describe "the verdict is checked against the offer, per payload type (§6.3 rule 12)" do
+    @tag verdict: :server_capability
+    test "an H.264 PT answered with another PT's profile is dropped", ctx do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          send(self(), {:answer, answer_for(ctx.did, @electron_offer)})
+        end)
+
+      assert_received {:answer, answer}
+
+      [_audio, video, _text] = sections(answer)
+
+      # 119 is the only payload type the caller offered as 64001f/pm=1, which is what
+      # the server answered for all of them
+      assert hd(video) == "m=video #{@video_port} UDP/TLS/RTP/SAVPF 119"
+      assert "a=fmtp:119 #{@server_capability}" in video
+
+      # the six others named a profile or a packetization mode of their own
+      for pt <- [39, 103, 107, 109, 115, 117] do
+        refute answer =~ "a=rtpmap:#{pt} "
+        assert log =~ "dropped pt #{pt} from the verdict"
+      end
+
+      # and the log says where the real fix is, so this is not read as a codec choice
+      assert log =~ "resolved per codec instead of per payload type (P8c)"
+    end
+
+    @tag verdict: :server_capability
+    test "the mixer sends on exactly the payload types the answer announced", ctx do
+      conn = leg(ctx.did)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:ok, _answer} = Adapter.set_remote_offer(conn, @electron_offer)
+        assert {:ok, _summary} = Adapter.attach(conn)
+      end)
+
+      calls = TestStub.rpc_calls()
+
+      # StartSending's rtpMap is the answered set, not every PT that mapped to H.264 —
+      # a stream on a payload type the answer left out is one the peer discards
+      assert Enum.any?(calls, fn
+               {"StartSending", [_conf, _part, 1, _ip, _port, %{"119" => 99}, 0]} -> true
+               _ -> false
+             end)
+
+      # and the encoder is configured with the profile that answer states
+      assert Enum.any?(calls, fn
+               {"SetVideoCodec", [_c, _p, 99, _s, _f, _b, _i, props, 0]} ->
+                 props == %{"h264.profile-level-id" => "64001f"}
+
+               _ ->
+                 false
+             end)
+    end
+
+    @tag verdict: :server_capability
+    test "an offer that states no H.264 fmtp has nothing to contradict", ctx do
+      offer =
+        Enum.join(
+          [
+            "v=0",
+            "o=- 1 1 IN IP4 192.168.1.50",
+            "s=-",
+            "c=IN IP4 192.168.1.50",
+            "t=0 0",
+            "m=video 40000 RTP/AVP 96",
+            "a=rtpmap:96 H264/90000",
+            "a=sendrecv",
+            ""
+          ],
+          "\r\n"
+        )
+
+      # the server accepts PT 96 with a profile of its own; a gateway that wrote no fmtp
+      # gets it rather than losing its video over a parameter it never stated
+      answer = answer_for(ctx.did, offer)
+      assert answer =~ "a=rtpmap:96 H264/90000"
+      assert answer =~ "a=fmtp:96 #{@server_capability}"
+    end
+
+    @tag verdict: :unanswerable
+    test "a media where nothing survives is declined with port 0, and its receive plane closed",
+         ctx do
+      conn = leg(ctx.did)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, answer} = Adapter.set_remote_offer(conn, @electron_offer)
+          send(self(), {:answer, answer})
+        end)
+
+      assert_received {:answer, answer}
+      [audio, video, text] = sections(answer)
+
+      # audio still negotiates, so the call is answered (§6.3 rule 2): only a leg where
+      # EVERY media came back empty is a 488
+      assert hd(audio) =~ "m=audio #{@audio_port} "
+      # the offered format list, echoed verbatim in its own order (RFC 3264 §6)
+      assert hd(video) == "m=video 0 UDP/TLS/RTP/SAVPF 103 107 109 115 39 117 119"
+      assert hd(text) == "m=text 0 TCP/WSS t140"
+      assert log =~ "dropped pt 119 from the verdict"
+
+      # and the port the server opened for a media we just declined is given back
+      calls = TestStub.rpc_calls()
+      assert Enum.any?(calls, &match?({"StopReceiving", [_c, _p, 1, 0]}, &1))
+    end
+
+    # The fixed server (per-PT resolution): nothing is dropped any more, and it is then
+    # kelixip's job to keep what it sends consistent with what it announced.
+    @tag verdict: :per_pt
+    test "a per-payload-type verdict passes whole, and one PT carries the stream", ctx do
+      conn = leg(ctx.did)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, answer} = Adapter.set_remote_offer(conn, @electron_offer)
+          assert {:ok, _summary} = Adapter.attach(conn)
+          send(self(), {:answer, answer})
+        end)
+
+      assert_received {:answer, answer}
+      [_audio, video, _text] = sections(answer)
+
+      # all seven payload types are announced, each with ITS OWN profile/mode pair
+      assert hd(video) == "m=video #{@video_port} UDP/TLS/RTP/SAVPF 103 107 109 115 39 117 119"
+
+      assert "a=fmtp:103 profile-level-id=42001f;packetization-mode=1;level-asymmetry-allowed=1" in video
+
+      assert "a=fmtp:39 profile-level-id=4d001f;packetization-mode=0;level-asymmetry-allowed=1" in video
+
+      refute log =~ "dropped pt"
+
+      calls = TestStub.rpc_calls()
+
+      # but the stream goes out on ONE payload type — the caller's first choice (103) —
+      # and the encoder is configured with THAT payload type's profile, not another's
+      assert Enum.any?(calls, fn
+               {"StartSending", [_c, _p, 1, _ip, _port, %{"103" => 99}, 0]} -> true
+               _ -> false
+             end)
+
+      assert Enum.any?(calls, fn
+               {"SetVideoCodec", [_c, _p, 99, _s, _f, _b, _i, props, 0]} ->
+                 props == %{"h264.profile-level-id" => "42001f"}
+
+               _ ->
+                 false
+             end)
+    end
+  end
+
+  describe "the answer honours the caller's preference order (§6.3 rule 1)" do
+    @tag verdict: :server_capability
+    test "the audio format list keeps the offer's order, and so does the primary codec",
+         ctx do
+      conn = leg(ctx.did)
+      assert {:ok, answer} = Adapter.set_remote_offer(conn, @electron_offer)
+      assert {:ok, summary} = Adapter.attach(conn)
+
+      [audio, _video, _text] = sections(answer)
+
+      # the offer lists 111 9 0 110 126 — OPUS first. Answering 0 9 110 111 126 (ascending
+      # payload type) would tell the browser we prefer G.711 and it would send G.711.
+      assert hd(audio) == "m=audio #{@audio_port} UDP/TLS/RTP/SAVPF 111 9 0 110 126"
+
+      # and the mixer encodes towards this leg with the caller's first choice
+      assert summary.audio.codec == "OPUS"
+      assert_received {:rpc, "SetAudioCodec", [_conf, _part, 98]}
     end
   end
 

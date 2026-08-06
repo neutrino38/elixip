@@ -485,7 +485,9 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
           # type is a key, empty value included, so presence IS the accept signal.
           # `nil` means a media server that predates the delegation, which selects the
           # legacy client-side construction (§16.3.3, the rolling-upgrade path).
-          accepted = Sdp.accepted_pts(rtp_map, Enum.at(returned, 1))
+          accepted =
+            Sdp.accepted_pts(rtp_map, Enum.at(returned, 1))
+            |> keep_answerable(state, desc, rtp_map)
 
           Logger.info(
             module: __MODULE__,
@@ -498,22 +500,139 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
                 )
           )
 
-          {:ok, %{state | receiving: [media | state.receiving], media_ip: ip},
-           Map.merge(neg, %{
-             rec_port: rec_port,
-             remote: {desc.ip, desc.port},
-             # decided once, here: the answer states it and the encoder is
-             # configured with it, so the two cannot drift apart
-             answered_profile_level_id: answered_profile_level_id(desc, accepted),
-             # the server's verdict, or nil on a pre-P8a server
-             accepted: accepted,
-             # drives the receive watchdog (§16.1): a media the peer says it will not
-             # send must not be watched, or a hold hangs up the call
-             peer_sends: peer_sends?(desc)
-           })}
+          if accepted == %{} do
+            # Nothing the verdict accepted can be stated in an answer to THIS offer
+            # (see `keep_answerable/4`). Decline the media rather than answer a codec
+            # the caller cannot match — and close the receive plane we just opened, or
+            # the server holds a port for a media the answer says is off.
+            void_rpc(state, "StopReceiving", [state.conf_id, state.part_id, m, @role_main])
+            :skip
+          else
+            neg =
+              Map.merge(neg, %{
+                rec_port: rec_port,
+                remote: {desc.ip, desc.port},
+                # the offer's own format order, kept for the three places that must
+                # agree about the caller's preference: the answer's rtpmap order, the
+                # payload type we send on, and the codec the mixer encodes (§6.3 rule 1)
+                fmt_order: Map.get(desc, :raw_fmt, []),
+                # the server's verdict, or nil on a pre-P8a server
+                accepted: accepted,
+                # drives the receive watchdog (§16.1): a media the peer says it will not
+                # send must not be watched, or a hold hangs up the call
+                peer_sends: peer_sends?(desc)
+              })
+
+            {
+              :ok,
+              %{state | receiving: [media | state.receiving], media_ip: ip},
+              # decided once, here, from the payload type we will actually send on: the
+              # answer states that profile and the encoder is configured with it, so the
+              # two cannot drift apart
+              Map.put(neg, :answered_profile_level_id, answered_profile_level_id(desc, neg))
+            }
+          end
         end
     end
   end
+
+  # ── the one thing kelixip checks in the server's verdict (§6.3 rule 12) ──────
+  #
+  # An answer may not describe, for a payload type, a codec the offer did not describe
+  # for **that** payload type (RFC 3264 §6.1). That is an SDP-answerer duty and stays
+  # kelixip's (§6.3.2) — it is not codec arbitration: nothing is chosen here, an entry
+  # that cannot legally be stated is simply not stated.
+  #
+  # It bites on H.264, where a payload type's identity is its `profile-level-id` profile
+  # plus its `packetization-mode` (RFC 6184 §8.2.2 — the *level* may legitimately
+  # differ, that is what level asymmetry is for). A browser offers the same codec under
+  # six or seven payload types precisely to enumerate those pairs, and answering one of
+  # them with another pair's parameters describes a codec it never offered: libwebrtc
+  # refuses the whole answer (`Failed to set remote video description send parameters`)
+  # and the app hangs up right after the ACK.
+  #
+  # **The media server is what needs fixing** (P8c): it resolves H.264 per *codec* and
+  # not per payload type — `RTPParticipant::StartReceiving` collapses the offer's
+  # per-PT fmtp into one `h264.fmtp` property, so the last payload type iterated wins
+  # and every accepted PT is answered with its parameters. Until then this guard keeps
+  # the answer conformant, at the cost of the payload types that were misresolved.
+  defp keep_answerable(nil, _state, _desc, _rtp_map), do: nil
+
+  defp keep_answerable(accepted, state, %{type: :video} = desc, rtp_map) do
+    Map.filter(accepted, fn {pt, answered} ->
+      h264?(rtp_map, pt) == false or answerable_h264?(state, desc, pt, answered)
+    end)
+  end
+
+  defp keep_answerable(accepted, _state, _desc, _rtp_map), do: accepted
+
+  defp h264?(rtp_map, pt) do
+    case Sdp.code_rtpmap(:video, Map.get(rtp_map, pt)) do
+      {"H264", _clock, _ch} -> true
+      _ -> false
+    end
+  end
+
+  # An offer that stated no `profile-level-id` for the payload type has nothing to
+  # contradict: RFC 6184's default applies in theory, but a gateway or a handset that
+  # lists `H264/90000` bare decodes what it is sent, and declining its video over a
+  # parameter it never wrote would be the harder failure.
+  defp answerable_h264?(state, desc, pt, answered) do
+    case offered_h264_config(desc, pt) do
+      nil ->
+        true
+
+      offered ->
+        got = answered_h264_config(answered)
+
+        if offered == got do
+          true
+        else
+          Logger.warning(
+            module: __MODULE__,
+            message:
+              "conf=#{state.conf_id} part=#{state.part_id} video: dropped pt #{pt} from " <>
+                "the verdict — the media server answered H.264 #{describe(got)} where the " <>
+                "offer declared #{describe(offered)} for that payload type. Announcing it " <>
+                "would be a codec the caller never offered (RFC 6184 §8.2.2); a browser " <>
+                "refuses the whole answer. Fix is server-side: H.264 is resolved per codec " <>
+                "instead of per payload type (P8c)"
+          )
+
+          false
+        end
+    end
+  end
+
+  # The identity half of an H.264 fmtp: the profile (`profile_idc` + `profile_iop`, the
+  # first two bytes) and the packetization mode, which defaults to 0 when unstated.
+  defp offered_h264_config(desc, pt) do
+    case Map.get(Map.get(desc, :fmtp, %{}), pt) do
+      %{profile_level_id: plid} = fmtp when is_integer(plid) ->
+        {plid |> hex6() |> String.slice(0, 4), Map.get(fmtp, :packetization_mode) || 0}
+
+      _ ->
+        nil
+    end
+  end
+
+  defp answered_h264_config(params) do
+    profile =
+      case Regex.run(~r/profile-level-id=([0-9a-fA-F]{6})/, params) do
+        [_, plid] -> plid |> String.downcase() |> String.slice(0, 4)
+        nil -> nil
+      end
+
+    mode =
+      case Regex.run(~r/packetization-mode=(\d+)/, params) do
+        [_, mode] -> String.to_integer(mode)
+        nil -> 0
+      end
+
+    {profile, mode}
+  end
+
+  defp describe({profile, mode}), do: "#{profile || "(no profile)"}/pm=#{mode}"
 
   # The peer's own keys and ICE credentials, pushed **after** `StartReceiving`
   # (§6.2): the session exists by then, which is what these attach to.
@@ -645,18 +764,31 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # the result in the fmtp it returned, so announced and encoded are the same string by
   # construction. Parsing it back out is the price of `SetVideoCodec` replacing the
   # stream's whole property map — send nothing and the negotiated profile is lost.
-  defp answered_profile_level_id(%{type: :video} = desc, accepted) when is_map(accepted) do
-    accepted
-    |> Map.values()
-    |> Enum.find_value(fn params ->
-      case Regex.run(~r/profile-level-id=([0-9a-fA-F]{6})/, params) do
-        [_, plid] -> String.downcase(plid)
+  # It is the profile of the **primary** payload type — the one `StartSending` will
+  # stamp the stream with — and not "the first profile found in the verdict": with a
+  # browser's several H.264 payload types those two differ, and the difference is a
+  # stream whose SPS contradicts the payload type carrying it.
+  defp answered_profile_level_id(%{type: :video} = desc, %{accepted: accepted} = neg)
+       when is_map(accepted) do
+    primary_plid =
+      case primary_entry(neg) do
+        {pt, _code} -> plid_of(Map.get(accepted, pt))
         nil -> nil
       end
-    end) || h264_profile_level_id(desc)
+
+    primary_plid || h264_profile_level_id(desc)
   end
 
-  defp answered_profile_level_id(desc, _accepted), do: h264_profile_level_id(desc)
+  defp answered_profile_level_id(desc, _neg), do: h264_profile_level_id(desc)
+
+  defp plid_of(params) when is_binary(params) do
+    case Regex.run(~r/profile-level-id=([0-9a-fA-F]{6})/, params) do
+      [_, plid] -> String.downcase(plid)
+      nil -> nil
+    end
+  end
+
+  defp plid_of(_params), do: nil
 
   # The `profile-level-id=` of the configured answer fmtp — the one place that string
   # is read, so the SDP and the RPC cannot disagree.
@@ -749,15 +881,38 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
              m,
              ip,
              port,
-             # P8a: never send a codec the server filtered on receive. Symmetric-codec
-             # assumption, which is what a mixer does anyway; a nil verdict leaves the
-             # map untouched.
-             Sdp.restrict_send_map(neg.rtp_map, neg.rtp_map, Map.get(neg, :accepted)),
+             # P8a: we send on exactly the payload types the ANSWER announced, which on
+             # this path is the accepted set — both maps being in the offerer's own
+             # numbering (§6.3 rule 1), the restriction is per payload type and not per
+             # codec. Sending on a PT the answer left out is a stream the peer discards:
+             # it happens as soon as one codec is offered under several payload types and
+             # only some of them survive (rule 12). A nil verdict leaves the map alone.
+             send_map(media, neg),
              @role_main
            ]) do
       {:ok, %{state | sending: [media | state.sending]}}
     end
   end
+
+  # What `StartSending` may use, in the offerer's numbering.
+  #
+  # **Video: exactly one payload type**, the primary. One encoder means one profile, and
+  # leaving several H.264 payload types in the map would let the server pick which one
+  # it stamps the stream with — a peer offering seven of them (a browser does) would
+  # then read our High-profile frames as whatever that payload type declared. Audio and
+  # text keep the whole accepted set: the mixer's codec is chosen by `SetAudioCodec` and
+  # the extra entries are the telephone-event stream it rides alongside.
+  defp send_map(:video, %{accepted: accepted, rtp_map: rtp_map} = neg) when is_map(accepted) do
+    case primary_entry(neg) do
+      {pt, _code} -> Map.take(rtp_map, [pt])
+      nil -> Map.take(rtp_map, Map.keys(accepted))
+    end
+  end
+
+  defp send_map(_media, %{accepted: accepted, rtp_map: rtp_map}) when is_map(accepted),
+    do: Map.take(rtp_map, Map.keys(accepted))
+
+  defp send_map(_media, %{rtp_map: rtp_map}), do: rtp_map
 
   # The codec the mixer encodes *towards* this participant: the first common one, in
   # the conference's preference order (which `negotiate/3` preserved).
@@ -835,21 +990,33 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
 
   # The Medooze constant of a codec name, read off the shared codec tables (a
   # one-entry rtpMap is the table lookup those tables expose).
+  # The one accepted payload type the mixer encodes towards this leg: the caller's own
+  # first choice (offer order) among what the server accepted, telephone-event excluded
+  # — that is a stream the mixer never encodes towards anyone.
+  #
+  # It has to be **one payload type and not one codec**, because a peer may offer the
+  # same codec under several payload types with different parameters: the profile we
+  # configure the encoder with and the payload type we send on must be the same entry,
+  # or we encode 42001f and stamp it with a payload type the peer reads as 4d001f.
+  defp primary_entry(%{accepted: accepted} = neg) when is_map(accepted) do
+    neg.rtp_map
+    |> Map.take(Map.keys(accepted))
+    |> Enum.reject(fn {_pt, code} -> code == @dtmf_code end)
+    |> Enum.sort_by(&Sdp.pt_rank(&1, Map.get(neg, :fmt_order)))
+    |> List.first()
+  end
+
+  defp primary_entry(_neg), do: nil
+
   # The codec the mixer encodes towards this leg. It must come from the **accepted**
   # set when the server gave one: telling it to encode a codec it just filtered on
   # receive would produce a leg that negotiated successfully and decodes nothing. The
   # send map is restricted the same way (`start_sending/3`), so the two agree.
-  #
-  # Order comes from the receive map, i.e. the offerer's numbering — the same order the
-  # answer advertises, so the primary is the first codec the peer will see.
   defp primary_code(_media, %{accepted: accepted} = neg) when is_map(accepted) do
-    neg.rtp_map
-    |> Map.take(Map.keys(accepted))
-    |> Enum.sort_by(fn {pt, _code} -> String.to_integer(pt) end)
-    |> Enum.map(fn {_pt, code} -> code end)
-    # telephone-event is not something the mixer encodes towards anyone
-    |> Enum.reject(&(&1 == @dtmf_code))
-    |> List.first()
+    case primary_entry(neg) do
+      {_pt, code} -> code
+      nil -> nil
+    end
   end
 
   defp primary_code(media, neg) do
@@ -964,6 +1131,9 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
         # proposed — silent DTMF, and a payload type libwebrtc discards.
         %{neg | rtp_map: accepted_map}
         |> Map.put(:dtmf_pts, Map.get(desc, :dtmf_pts, %{}))
+        # the caller's own preference order (§6.3 rule 1): in an answer the order IS a
+        # preference statement, and a mixer has none of its own to make
+        |> Map.put(:fmt_order, Map.get(desc, :raw_fmt, []))
       )
 
     fmtp = for {pt, params} <- accepted, params != "", into: %{}, do: {pt, params}
@@ -975,7 +1145,12 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # it is the path every node takes for the duration of a rolling upgrade.
   defp answer_codecs(desc, neg) do
     rtpmaps =
-      Sdp.answer_rtpmaps(desc.type, Map.put(neg, :dtmf_pts, Map.get(desc, :dtmf_pts, %{})))
+      Sdp.answer_rtpmaps(
+        desc.type,
+        neg
+        |> Map.put(:dtmf_pts, Map.get(desc, :dtmf_pts, %{}))
+        |> Map.put(:fmt_order, Map.get(desc, :raw_fmt, []))
+      )
 
     fmtp =
       dtmf_fmtp(neg)
