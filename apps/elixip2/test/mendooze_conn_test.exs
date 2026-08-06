@@ -17,6 +17,7 @@ defmodule Mendooze.ConnTest do
   defp rpc_handler("EndpointCreate", _), do: {:ok, [4]}
   defp rpc_handler("EndpointStartReceiving", [_, _, 0, _]), do: {:ok, [22_000]}
   defp rpc_handler("EndpointStartReceiving", [_, _, 1, _]), do: {:ok, [22_002]}
+  defp rpc_handler("EndpointStartReceiving", [_, _, 2, _]), do: {:ok, [22_004]}
 
   defp rpc_handler("GetMediaCandidates", [_, _, 0, media]),
     do: {:ok, ["rtp://192.168.5.5:#{22_000 + 2 * media}"]}
@@ -250,7 +251,7 @@ defmodule Mendooze.ConnTest do
     refute offer =~ "a=ice-lite"
   end
 
-  test "a gateway answer with setup:passive is forwarded and enables useNACK/tmmbr" do
+  test "a gateway answer with setup:passive enables exactly the agreed feedback switches" do
     %{server: server} = start_media_server()
 
     {:ok, conn} =
@@ -262,7 +263,8 @@ defmodule Mendooze.ConnTest do
 
     {:ok, _offer} = Mendooze.get_local_offer(conn)
 
-    # gateway-shaped answer: ICE-lite, mirrored mux, setup:passive
+    # gateway-shaped answer: ICE-lite, mirrored mux, setup:passive, and the
+    # feedback types the gateway agreed to (a=rtcp-fb per PT)
     answer =
       Sdp.build(%{
         ip: "10.9.8.7",
@@ -275,19 +277,20 @@ defmodule Mendooze.ConnTest do
             crypto: {:dtls, :passive, "sha-256", @fp},
             ice: %{ufrag: "gw-uf", pwd: "gw-pwd-1234567890123456789"},
             protocol: "UDP/TLS/RTP/SAVPF",
-            rtcp_mux: true
+            rtcp_mux: true,
+            rtcp_fb: ["nack", "ccm tmmbr"]
           }
         ]
       })
 
     assert :ok = Mendooze.set_remote_answer(conn, answer)
 
-    # remote setup:passive is forwarded verbatim; the server inverts it so our
-    # endpoint runs the DTLS handshake as client (Q4, resolved server-side)
+    # remote setup:passive is a committed role and is forwarded as-is
     assert_receive {:jsr309_call, "EndpointSetRemoteCryptoDTLS",
                     [3, 4, 1, "passive", "sha-256", @fp]}
 
-    # AVPF answer → NACK/TMMBR hints merged into the single properties call (G6)
+    # the switches behind the feedback types the answer agreed — and none other
+    # (no useRtcpFIR: the answer never stated `ccm fir`)
     assert_receive {:jsr309_call, "EndpointSetRTPProperties", [3, 4, 1, props]}
     assert props == %{"rtcp-mux" => "1", "useNACK" => "1", "tmmbr" => "1"}
   end
@@ -445,19 +448,25 @@ defmodule Mendooze.ConnTest do
     assert answer =~ "m=video 0 RTP/AVP 99"
   end
 
-  test "an offered media with no common codec is declined with port 0, not a failure (G9)" do
+  test "an offered media with no codec we can name is declined with port 0, not a failure (G9)" do
     %{server: server} = start_media_server()
 
-    {:ok, conn} =
-      Mendooze.create_peer_connection(server, self(), media: :audio_video, video_codec: "H264")
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio_video)
 
-    # video offers only VP8 — no common codec with our H264-only config
+    # the video section offers only a codec outside the vocabulary: nothing is
+    # nameable to the server, so the media is declined — the configured codec
+    # list no longer arbitrates an answer (delegated negotiation)
     offer =
       Sdp.build(%{
         ip: "10.9.8.7",
         medias: [
           %{type: :audio, port: 40_000, codecs: ["PCMU"]},
-          %{type: :video, port: 40_002, codecs: ["VP8"]}
+          %{
+            type: :video,
+            port: 40_002,
+            rtpmaps: [%{pt: 96, encoding: "AV1", clock: 90_000}],
+            fmtp: %{}
+          }
         ]
       })
 
@@ -499,8 +508,10 @@ defmodule Mendooze.ConnTest do
 
     assert {:ok, answer} = Mendooze.set_remote_offer(conn, offer)
 
+    # the peer's RESOLVED role, never the literal actpass: we answer passive,
+    # so the offerer becomes the DTLS client
     assert_receive {:jsr309_call, "EndpointSetRemoteCryptoDTLS",
-                    [3, 4, 0, "actpass", "sha-256", @fp]}
+                    [3, 4, 0, "active", "sha-256", @fp]}
 
     assert {:ok, [audio]} = Sdp.parse(answer)
     # G3: the answer is setup:passive (mendooze is the DTLS server)
@@ -706,5 +717,355 @@ defmodule Mendooze.ConnTest do
     send(stream, {:chunk, Jsr309FakeServer.event_frame([2, sess_tag, 4, 1, 0])})
 
     assert_receive {:jsr309_call, "EndpointRequestUpdate", [3, 4, 1]}, 1_000
+  end
+
+  # ── UAS delegated negotiation (the offer is the menu) ───────────────────────
+
+  test "the offer is the menu: its own payload types are proposed and answered in its order" do
+    # verdict accepts everything proposed; OPUS carries a server fmtp
+    %{server: server} =
+      start_media_server(
+        delegating_handler(%{
+          "111" => "minptime=10;useinbandfec=1",
+          "0" => "",
+          "110" => "0-16",
+          "126" => "0-16"
+        })
+      )
+
+    # audio_codec config no longer arbitrates the answer: the offer decides
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(), media: :audio, audio_codec: "PCMU")
+
+    # Chrome-shaped audio: OPUS first, one telephone-event PT per clock
+    offer =
+      Sdp.build(%{
+        ip: "10.9.8.7",
+        medias: [
+          %{
+            type: :audio,
+            port: 40_000,
+            rtpmaps: [
+              %{pt: 111, encoding: "opus", clock: 48_000, channels: 2},
+              %{pt: 0, encoding: "PCMU", clock: 8_000},
+              %{pt: 110, encoding: "telephone-event", clock: 48_000},
+              %{pt: 126, encoding: "telephone-event", clock: 8_000}
+            ],
+            fmtp: %{}
+          }
+        ]
+      })
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, offer)
+
+    # the receive map proposed to the server is the OFFER's numbering, complete
+    assert_receive {:jsr309_call, "EndpointStartReceiving", [3, 4, 0, rtp_map]}
+    assert rtp_map == %{"111" => 98, "0" => 0, "110" => 100, "126" => 100}
+
+    # the answer's format order is the caller's own preference, not ascending PT
+    assert answer =~ "m=audio 22000 RTP/AVP 111 0 110 126"
+    assert answer =~ "a=rtpmap:111 opus/48000/2"
+    # each telephone-event PT keeps the clock the OFFER gave it
+    assert answer =~ "a=rtpmap:110 telephone-event/48000"
+    assert answer =~ "a=rtpmap:126 telephone-event/8000"
+    # server fmtp copied out verbatim; fmtp-less PCMU gets no a=fmtp line
+    assert answer =~ "a=fmtp:111 minptime=10;useinbandfec=1"
+    refute answer =~ "a=fmtp:0 "
+
+    # audio sends on the whole accepted set (telephone-event rides alongside)
+    assert_receive {:jsr309_call, "EndpointStartSending", [3, 4, 0, "10.9.8.7", 40_000, send_map]}
+    assert send_map == %{"111" => 98, "0" => 0, "110" => 100, "126" => 100}
+  end
+
+  test "an empty verdict declines the media with port 0 and closes its receive plane" do
+    %{server: server} = start_media_server(delegating_handler(%{"0" => ""}, %{}))
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self())
+
+    offer =
+      Sdp.build(%{
+        ip: "10.9.8.7",
+        medias: [
+          %{type: :audio, port: 40_000, codecs: ["PCMU"]},
+          %{type: :video, port: 40_002, codecs: ["H264"]}
+        ]
+      })
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, offer)
+
+    # the port the server held for the declined media is released
+    assert_receive {:jsr309_call, "EndpointStopReceiving", [3, 4, 1]}
+
+    assert {:ok, [aud, vid]} = Sdp.parse(answer)
+    assert aud.type == :audio and aud.port == 22_000
+    assert vid.port == 0
+  end
+
+  test "a verdict entry contradicting the offered H.264 identity is dropped (RFC 6184 §8.2.2)" do
+    # the server answers BOTH payload types with the second one's profile
+    bad = "profile-level-id=64001f;packetization-mode=1"
+
+    %{server: server} =
+      start_media_server(delegating_handler(nil, %{"97" => bad, "99" => bad}))
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :video)
+
+    offer =
+      Sdp.build(%{
+        ip: "10.9.8.7",
+        medias: [
+          %{
+            type: :video,
+            port: 40_002,
+            rtpmaps: [
+              %{pt: 97, encoding: "H264", clock: 90_000},
+              %{pt: 99, encoding: "H264", clock: 90_000}
+            ],
+            fmtp: %{
+              "97" => "profile-level-id=42e01f;packetization-mode=1",
+              "99" => "profile-level-id=64001f;packetization-mode=1"
+            }
+          }
+        ]
+      })
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, offer)
+
+    # pt 97 (baseline offered, high answered) cannot be stated; pt 99 matches
+    assert answer =~ "m=video 22002 RTP/AVP 99"
+    refute answer =~ "a=rtpmap:97"
+    assert answer =~ "a=fmtp:99 #{bad}"
+
+    # video sends on exactly one payload type, the primary of the accepted set
+    assert_receive {:jsr309_call, "EndpointStartSending", [3, 4, 1, "10.9.8.7", 40_002, send_map]}
+    assert send_map == %{"99" => 99}
+  end
+
+  test "the offered fmtp is relayed as codec properties before EndpointStartReceiving" do
+    %{server: server} = start_media_server()
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :video)
+
+    fmtp = "profile-level-id=42e01f;packetization-mode=1"
+
+    offer =
+      Sdp.build(%{
+        ip: "10.9.8.7",
+        medias: [
+          %{
+            type: :video,
+            port: 40_002,
+            rtpmaps: [%{pt: 99, encoding: "H264", clock: 90_000}],
+            fmtp: %{"99" => fmtp}
+          }
+        ]
+      })
+
+    assert {:ok, _answer} = Mendooze.set_remote_offer(conn, offer)
+
+    # the phase-5 channel: codec.<name>.fmtp, the raw string, per codec
+    assert_receive {:jsr309_call, "EndpointSetRTPProperties",
+                    [3, 4, 1, %{"codec.h264.fmtp" => ^fmtp}]}
+  end
+
+  # ── UAS answer-side security (SDES) ─────────────────────────────────────────
+
+  test "one offered SDES line is selected, its tag echoed, and both keys pushed" do
+    %{server: server} = start_media_server()
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio)
+
+    peer_key = "UGVlcktleVBlZXJLZXlQZWVyS2V5UGVlcktleVBlZXI="
+
+    # Linphone-shaped: the preferred suite (GCM) is one we do not implement
+    offer = """
+    v=0
+    o=- 1 1 IN IP4 10.9.8.7
+    s=call
+    c=IN IP4 10.9.8.7
+    t=0 0
+    m=audio 40000 RTP/SAVP 0
+    a=rtpmap:0 PCMU/8000
+    a=crypto:1 AEAD_AES_128_GCM inline:Z2NtZ2NtZ2NtZ2NtZ2NtZ2NtZ2NtZ2NtZ2NtZ2NtZ2Nt
+    a=crypto:2 AES_CM_128_HMAC_SHA1_80 inline:#{peer_key}
+    """
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, offer)
+
+    # our key is generated for the SELECTED suite and pushed before receiving
+    assert_receive {:jsr309_call, "EndpointSetLocalCryptoSDES",
+                    [3, 4, 0, "AES_CM_128_HMAC_SHA1_80", local_key]}
+
+    assert {:ok, raw} = Base.decode64(local_key)
+    assert byte_size(raw) == 30
+
+    # the peer key handed to the server is the SELECTED line's, not the first's
+    assert_receive {:jsr309_call, "EndpointSetRemoteCryptoSDES",
+                    [3, 4, 0, "AES_CM_128_HMAC_SHA1_80", ^peer_key]}
+
+    # the answer mirrors the transport and echoes the accepted line's TAG
+    assert answer =~ "m=audio 22000 RTP/SAVP 0"
+    assert answer =~ "a=crypto:2 AES_CM_128_HMAC_SHA1_80 inline:#{local_key}"
+
+    assert {:ok, [audio]} = Sdp.parse(answer)
+    assert {:sdes, "AES_CM_128_HMAC_SHA1_80", ^local_key} = audio.crypto
+  end
+
+  test "an offer with no SDES suite we support is refused, not half-keyed" do
+    %{server: server} = start_media_server()
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio)
+
+    offer = """
+    v=0
+    o=- 1 1 IN IP4 10.9.8.7
+    s=call
+    c=IN IP4 10.9.8.7
+    t=0 0
+    m=audio 40000 RTP/SAVP 0
+    a=rtpmap:0 PCMU/8000
+    a=crypto:1 AEAD_AES_128_GCM inline:Z2NtZ2NtZ2NtZ2NtZ2NtZ2NtZ2NtZ2NtZ2NtZ2NtZ2Nt
+    """
+
+    assert {:error, :no_common_sdes_suite} = Mendooze.set_remote_offer(conn, offer)
+    assert_receive {:ms_event, ^conn, {:media_error, :no_common_sdes_suite}}
+  end
+
+  # ── RFC 5939 capability negotiation and rtcp-fb intersection ────────────────
+
+  test "an offered AVPF potential configuration is accepted and answered with real feedback" do
+    %{server: server} = start_media_server()
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :video)
+
+    offer = """
+    v=0
+    o=- 1 1 IN IP4 10.9.8.7
+    s=call
+    c=IN IP4 10.9.8.7
+    t=0 0
+    m=video 40002 RTP/AVP 99
+    a=rtpmap:99 H264/90000
+    a=tcap:1 RTP/AVPF
+    a=pcfg:1 t=1
+    a=rtcp-fb:* nack
+    a=rtcp-fb:* ccm fir
+    a=rtcp-fb:* goog-remb
+    """
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, offer)
+
+    # the m= line carries the upgraded profile AND names the taken configuration
+    assert answer =~ "m=video 22002 RTP/AVPF 99"
+    assert answer =~ "a=acfg:1 t=1"
+    # the intersection of asked-for and implemented, per explicit PT
+    assert answer =~ "a=rtcp-fb:99 nack"
+    assert answer =~ "a=rtcp-fb:99 ccm fir"
+    # goog-remb has no server switch and is deliberately not answered
+    refute answer =~ "goog-remb"
+
+    # exactly the switches behind the answered feedback types
+    assert_receive {:jsr309_call, "EndpointSetRTPProperties", [3, 4, 1, props]}
+    assert props == %{"useNACK" => "1", "useRtcpFIR" => "1", "natLatch" => "1"}
+  end
+
+  # ── Answer shape: WS text omission, mid, ICE tokens, watchdog ───────────────
+
+  test "a text section offered over WebSocket is omitted from the answer, not declined" do
+    %{server: server} = start_media_server()
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio)
+
+    offer = """
+    v=0
+    o=- 1 1 IN IP4 10.9.8.7
+    s=call
+    c=IN IP4 10.9.8.7
+    t=0 0
+    m=audio 40000 RTP/AVP 0
+    a=rtpmap:0 PCMU/8000
+    m=text 9 TCP/WSS t140
+    """
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, offer)
+
+    # one answer section, not two: no m=text echo of any kind
+    refute answer =~ "m=text"
+    assert {:ok, [%{type: :audio}]} = Sdp.parse(answer)
+  end
+
+  test "the offer's a=mid is echoed on a plain-RTP answer too" do
+    %{server: server} = start_media_server()
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio)
+
+    offer =
+      Sdp.build(%{
+        ip: "10.9.8.7",
+        medias: [%{type: :audio, port: 40_000, codecs: ["PCMU"], mid: "0"}]
+      })
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, offer)
+    assert answer =~ "a=mid:0"
+  end
+
+  test "ICE credentials are emitted in the ice-char alphabet (hex)" do
+    %{server: server} = start_media_server()
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :audio,
+        audio_codec: "OPUS",
+        webrtc_support: :if_offered
+      )
+
+    offer =
+      Sdp.build(%{
+        ip: "10.9.8.7",
+        medias: [
+          %{
+            type: :audio,
+            port: 40_000,
+            codecs: ["OPUS"],
+            crypto: {:dtls, :actpass, "sha-256", @fp},
+            ice: %{ufrag: "remote-uf", pwd: "remote-pwd-123456789012345"},
+            protocol: "UDP/TLS/RTP/SAVPF",
+            rtcp_mux: true
+          }
+        ]
+      })
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, offer)
+
+    assert {:ok, [audio]} = Sdp.parse(answer)
+    # base64url would leak `-`/`_`, outside RFC 8839's ice-char grammar
+    assert audio.ice.ufrag =~ ~r/^[0-9a-f]{16}$/
+    assert audio.ice.pwd =~ ~r/^[0-9a-f]{48}$/
+  end
+
+  test "the RTP watchdog follows the offer's directions, and text is never armed" do
+    %{server: server} = start_media_server()
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :tc)
+
+    offer =
+      Sdp.build(%{
+        ip: "10.9.8.7",
+        medias: [
+          %{type: :audio, port: 40_000, codecs: ["PCMU"]},
+          # the peer declares it will not send video: watching it would reap a
+          # working call at the first hold
+          %{type: :video, port: 40_002, codecs: ["H264"], direction: :recvonly},
+          %{type: :text, port: 40_004, codecs: ["T140"]}
+        ]
+      })
+
+    assert {:ok, _answer} = Mendooze.set_remote_offer(conn, offer)
+
+    # audio: armed; video: explicitly disarmed; text: never armed at all
+    assert_receive {:jsr309_call, "EndpointStartRTPTimeout", [3, 4, 0, audio_ms]}
+    assert audio_ms > 0
+    assert_receive {:jsr309_call, "EndpointStartRTPTimeout", [3, 4, 1, 0]}
+    refute_received {:jsr309_call, "EndpointStartRTPTimeout", [3, 4, 2, _]}
   end
 end

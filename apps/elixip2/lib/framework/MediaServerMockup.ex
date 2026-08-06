@@ -438,9 +438,10 @@ defmodule MediaServer.Mockup.Conn do
   defp maybe_dtmf(spec, :audio), do: Map.put(spec, :dtmf, true)
   defp maybe_dtmf(spec, _), do: spec
 
-  defp random_token(len) do
-    :crypto.strong_rand_bytes(len) |> Base.url_encode64(padding: false) |> binary_part(0, len)
-  end
+  # ice-char alphabet (RFC 8839 §5.4): hex, like the real adapters — base64url
+  # emits `-`/`_`, which strict SDP parsers reject.
+  defp random_token(bytes),
+    do: :crypto.strong_rand_bytes(bytes) |> Base.encode16(case: :lower)
 
   # Plausible SHA-256 fingerprint (AA:BB:...) — no real DTLS stack behind it.
   defp random_fingerprint do
