@@ -166,28 +166,58 @@ defmodule Kelix.Mod.McuAdminTest do
     end
 
     test "the short layout form is the same update, in names (§8.3.7)", ctx do
-      assert {:ok, %{changed: [:layout]}} =
-               Mcu.handle_control("conference.update", %{
-                 "uid" => ctx.uid,
-                 "layout" => "3x3 vga"
-               })
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, %{changed: [:layout]}} =
+                   Mcu.handle_control("conference.update", %{
+                     "uid" => ctx.uid,
+                     "layout" => "3x3 vga"
+                   })
+        end)
 
-      assert_received {:rpc, "SetCompositionType", [42, 0, 2, 2]}
+      # the mosaic moves; the canvas SIZE does not, because the canvas is the encoded
+      # picture (`align_canvas/3`) and this conference encodes hd720p
+      assert_received {:rpc, "SetCompositionType", [42, 0, 2, 6]}
+      assert log =~ "mosaic canvas size vga ignored"
+      assert log =~ "ENCODED size hd720p"
+
       # naming a mosaic left `auto`, so the next arrival cannot undo the operator's
       # choice — the reason the short form implies what the wire form does not
-      assert {:ok, %{layout: %{comp: 2, size: 2, auto: false}}} = Mcu.conference(ctx.uid)
+      assert {:ok, %{layout: %{comp: 2, size: 6, auto: false}}} = Mcu.conference(ctx.uid)
     end
 
-    test "a size alone keeps the mosaic, and `auto` alone keeps both", ctx do
-      assert {:ok, _} =
-               Mcu.handle_control("conference.update", %{"uid" => ctx.uid, "layout" => "cif"})
+    # A canvas of its own is what produced the stretched mosaic of 2026-08-06: composing
+    # at one geometry and encoding at another means rescaling between the two, which the
+    # media server does without preserving the aspect ratio. So a size in `layout` is
+    # reported and dropped; `video.size` is the one that moves the picture.
+    test "a canvas size alone changes nothing, and `auto` alone keeps the rest", ctx do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, _} =
+                   Mcu.handle_control("conference.update", %{"uid" => ctx.uid, "layout" => "cif"})
+        end)
 
-      assert {:ok, %{layout: %{comp: 1, size: 1, auto: true}}} = Mcu.conference(ctx.uid)
+      assert log =~ "mosaic canvas size cif ignored"
+      assert {:ok, %{layout: %{comp: 1, size: 6, auto: true}}} = Mcu.conference(ctx.uid)
 
       assert {:ok, _} =
                Mcu.handle_control("conference.update", %{"uid" => ctx.uid, "layout" => "manual"})
 
-      assert {:ok, %{layout: %{comp: 1, size: 1, auto: false}}} = Mcu.conference(ctx.uid)
+      assert {:ok, %{layout: %{comp: 1, size: 6, auto: false}}} = Mcu.conference(ctx.uid)
+    end
+
+    # The other half of the same rule: moving the ENCODED size moves the canvas, even
+    # when the caller never mentioned the layout — otherwise the composite would go back
+    # to being rescaled.
+    test "changing video.size re-issues the composition", ctx do
+      assert {:ok, _} =
+               Mcu.handle_control("conference.update", %{
+                 "uid" => ctx.uid,
+                 "video" => %{"size" => 2}
+               })
+
+      assert_received {:rpc, "SetCompositionType", [42, 0, 1, 2]}
+      assert {:ok, %{layout: %{size: 2}, video: %{size: 2}}} = Mcu.conference(ctx.uid)
     end
 
     test "a mistyped layout is a refusal that prints the vocabulary", ctx do
