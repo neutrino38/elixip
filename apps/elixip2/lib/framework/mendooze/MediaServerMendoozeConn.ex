@@ -686,13 +686,7 @@ defmodule MediaServer.Mendooze.Conn do
         # codec properties when it runs)
         relay_offered_fmtp(state, m, desc, rtp_map)
 
-        with {:ok, [port | rest]} <-
-               rpc(state, "EndpointStartReceiving", [
-                 state.sess_id,
-                 state.endpoint_id,
-                 m,
-                 rtp_map
-               ]),
+        with {:ok, [port | rest]} <- start_receiving_offered(state, m, desc, rtp_map),
              {:ok, [candidate | _]} <-
                rpc(state, "GetMediaCandidates", [
                  state.sess_id,
@@ -764,14 +758,45 @@ defmodule MediaServer.Mendooze.Conn do
     end
   end
 
-  # The JSR-309 API has no `offer` struct on `EndpointStartReceiving` (unlike the
-  # MCU API's `StartReceiving`), so the peer's fmtp travels through the documented
-  # phase-5 channel instead: `codec.<name>.fmtp` properties, stored per endpoint
-  # and consumed by the negotiator once the server-side parsing lands
-  # (xmlrpc_jsr309_api.md §6.7). Per CODEC, not per payload type — the channel's
-  # own granularity — so the primary (offer-order) payload type of each codec
-  # elects the relayed string. Best-effort: an older server logs an unknown
-  # property and moves on, and a leg that negotiates is worth more than a relay.
+  # P8a parity (server side landed 2026-08-06): the offer's fmtp travels as the
+  # `offer` struct, EndpointStartReceiving's optional 5th parameter — per PAYLOAD
+  # TYPE, the granularity a browser offer needs (several H.264 PTs, one
+  # (profile, packetization-mode) pair each). A media server that predates the
+  # parameter faults on the extra argument, so the legacy 4-parameter form is
+  # retried once — the codec.* relay (relay_offered_fmtp/4) already handed that
+  # server the fmtp per codec, its own best granularity.
+  defp start_receiving_offered(state, m, desc, rtp_map) do
+    offer_fmtp = Map.take(Map.get(desc, :fmtp_raw, %{}), Map.keys(rtp_map))
+    args = [state.sess_id, state.endpoint_id, m, rtp_map]
+
+    if offer_fmtp == %{} do
+      rpc(state, "EndpointStartReceiving", args)
+    else
+      case rpc(state, "EndpointStartReceiving", args ++ [%{"fmtp" => offer_fmtp}]) do
+        {:ok, _} = ok ->
+          ok
+
+        {:error, reason} ->
+          Logger.warning(
+            module: __MODULE__,
+            cnx_tag: state.sess_tag,
+            message:
+              "EndpointStartReceiving with the offer struct failed (#{inspect(reason)}); " <>
+                "retrying the legacy form — media server predates the offer parameter"
+          )
+
+          rpc(state, "EndpointStartReceiving", args)
+      end
+    end
+  end
+
+  # The `codec.<name>.fmtp` channel — per CODEC, the coarser of the two relays —
+  # is kept alongside the offer struct: it is what a server that predates the
+  # offer parameter reads (the retry path above), and on a current server the
+  # per-PT offer wins for every payload type it covers (xmlrpc_jsr309_api.md
+  # §6.7). The primary (offer-order) payload type of each codec elects the
+  # relayed string. Best-effort: an older server logs an unknown property and
+  # moves on, and a leg that negotiates is worth more than a relay.
   defp relay_offered_fmtp(state, m, desc, rtp_map) do
     fmtp_raw = Map.get(desc, :fmtp_raw, %{})
 

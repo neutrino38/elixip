@@ -15,9 +15,10 @@ defmodule Mendooze.ConnTest do
   defp rpc_handler("EventQueueCreate", _), do: {:ok, [7, "/events/jsr309/7"]}
   defp rpc_handler("MediaSessionCreate", _), do: {:ok, [3]}
   defp rpc_handler("EndpointCreate", _), do: {:ok, [4]}
-  defp rpc_handler("EndpointStartReceiving", [_, _, 0, _]), do: {:ok, [22_000]}
-  defp rpc_handler("EndpointStartReceiving", [_, _, 1, _]), do: {:ok, [22_002]}
-  defp rpc_handler("EndpointStartReceiving", [_, _, 2, _]), do: {:ok, [22_004]}
+  # both arities: legacy [sess, ep, media, rtpMap] and P8a [... , offer]
+  defp rpc_handler("EndpointStartReceiving", [_, _, 0 | _]), do: {:ok, [22_000]}
+  defp rpc_handler("EndpointStartReceiving", [_, _, 1 | _]), do: {:ok, [22_002]}
+  defp rpc_handler("EndpointStartReceiving", [_, _, 2 | _]), do: {:ok, [22_004]}
 
   defp rpc_handler("GetMediaCandidates", [_, _, 0, media]),
     do: {:ok, ["rtp://192.168.5.5:#{22_000 + 2 * media}"]}
@@ -324,8 +325,10 @@ defmodule Mendooze.ConnTest do
 
     assert {:ok, answer} = Mendooze.set_remote_offer(conn, offer)
 
-    # receive side opened with our full codec list, send side negotiated
-    assert_receive {:jsr309_call, "EndpointStartReceiving", [3, 4, 0, _]}
+    # the offered fmtp (telephone-event range) rides in the offer struct (P8a)
+    assert_receive {:jsr309_call, "EndpointStartReceiving",
+                    [3, 4, 0, _, %{"fmtp" => %{"101" => "0-16"}}]}
+
     assert_receive {:jsr309_call, "EndpointStartSending", [3, 4, 0, "10.9.8.7", 40_000, send_map]}
     assert send_map == %{"0" => 0, "101" => 100}
     assert_receive {:jsr309_call, "EndpointStartRTPTimeout", [3, 4, 0, _]}
@@ -555,8 +558,8 @@ defmodule Mendooze.ConnTest do
   # rpc_handler variant whose EndpointStartReceiving returns [port, fmtpStruct]
   defp delegating_handler(audio_fmtp, video_fmtp \\ nil) do
     fn
-      "EndpointStartReceiving", [_, _, 0, _] -> {:ok, [22_000, audio_fmtp]}
-      "EndpointStartReceiving", [_, _, 1, _] -> {:ok, [22_002, video_fmtp]}
+      "EndpointStartReceiving", [_, _, 0 | _] -> {:ok, [22_000, audio_fmtp]}
+      "EndpointStartReceiving", [_, _, 1 | _] -> {:ok, [22_002, video_fmtp]}
       m, p -> rpc_handler(m, p)
     end
   end
@@ -831,6 +834,11 @@ defmodule Mendooze.ConnTest do
 
     assert {:ok, answer} = Mendooze.set_remote_offer(conn, offer)
 
+    # each offered profile rides per PT in the offer struct (P8a)
+    assert_receive {:jsr309_call, "EndpointStartReceiving", [3, 4, 1, _, %{"fmtp" => sent}]}
+    assert sent["97"] =~ "42e01f"
+    assert sent["99"] =~ "64001f"
+
     # pt 97 (baseline offered, high answered) cannot be stated; pt 99 matches
     assert answer =~ "m=video 22002 RTP/AVP 99"
     refute answer =~ "a=rtpmap:97"
@@ -863,9 +871,36 @@ defmodule Mendooze.ConnTest do
 
     assert {:ok, _answer} = Mendooze.set_remote_offer(conn, offer)
 
-    # the phase-5 channel: codec.<name>.fmtp, the raw string, per codec
+    # the per-codec channel: codec.<name>.fmtp, the raw string — kept alongside
+    # the offer struct for servers that predate the offer parameter
     assert_receive {:jsr309_call, "EndpointSetRTPProperties",
                     [3, 4, 1, %{"codec.h264.fmtp" => ^fmtp}]}
+  end
+
+  test "a server predating the offer parameter gets one legacy retry" do
+    handler = fn
+      # the 5-param form faults (pre-P8a server); the legacy form succeeds
+      "EndpointStartReceiving", [_, _, 0, _, _] -> {:error, "parse error"}
+      "EndpointStartReceiving", [_, _, 0, _] -> {:ok, [22_000]}
+      m, p -> rpc_handler(m, p)
+    end
+
+    %{server: server} = start_media_server(handler)
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio)
+
+    offer =
+      Sdp.build(%{
+        ip: "10.9.8.7",
+        medias: [%{type: :audio, port: 40_000, codecs: ["PCMU"], dtmf: true}]
+      })
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, offer)
+
+    # tried with the offer struct first, then downgraded to the 4-param form
+    assert_receive {:jsr309_call, "EndpointStartReceiving", [3, 4, 0, _, %{"fmtp" => _}]}
+    assert_receive {:jsr309_call, "EndpointStartReceiving", [3, 4, 0, _]}
+    assert answer =~ "m=audio 22000"
   end
 
   # ── UAS answer-side security (SDES) ─────────────────────────────────────────
