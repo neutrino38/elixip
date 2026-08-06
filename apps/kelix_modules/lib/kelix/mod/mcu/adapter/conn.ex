@@ -65,7 +65,14 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
 
   # SDES suites, in our preference order. The first is what an offer we do not
   # recognise gets answered with; anything the offer states and we know is mirrored.
+  # SDES suites this mixer implements, in our preference order. An offer whose every
+  # `a=crypto` line names something else is refused (`:no_common_sdes_suite`), which is
+  # honest: the alternative is a call that establishes and decrypts nothing.
   @sdes_suites ["AES_CM_128_HMAC_SHA1_80", "AES_CM_128_HMAC_SHA1_32"]
+
+  # MKI rank of the remote key (`SetRemoteCryptoSDES`'s seventh argument, MCU-API):
+  # 0 when the offered line declares no MKI, which is every offer seen so far.
+  @sdes_key_rank 0
 
   # The feedback types this mixer can actually honour, each with the server-side switch
   # that implements it (§3.4). Announcing anything else would tell the peer it has a
@@ -377,34 +384,65 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     end
   end
 
-  # SDES keys are per media (each stream gets its own), and ours is the one the
-  # answer advertises — the peer decrypts what the mixer sends with it.
+  # SDES keys are per media (each stream gets its own), and ours is the one the answer
+  # advertises — the peer decrypts what the mixer sends with it.
+  #
+  # The *selection* is the part that matters (RFC 4568 §6.2): an answerer picks **one**
+  # of the offered `a=crypto` lines — one whose suite it actually supports — echoes that
+  # line's **tag**, and keys its own direction with the same suite. So all three of
+  # suite, tag and the peer's key come from the same offered line, and a leg whose
+  # offered lines we all fail to support is refused rather than half-keyed.
+  #
+  # Reading only the first line (what this did) breaks on any modern client: Linphone
+  # 6.2 offers four, `AEAD_AES_128_GCM` first — a suite this mixer does not do — so we
+  # answered `AES_CM_128_HMAC_SHA1_80` while handing the server the GCM line's key. The
+  # call established and neither side could decrypt the other.
   defp setup_sdes(state, descs) do
     descs
-    |> Enum.filter(&match?({:sdes, _, _}, &1.crypto))
+    |> Enum.filter(&(&1.crypto != :none and sdes_offered?(&1)))
     |> Enum.reduce_while({:ok, state}, fn desc, {:ok, st} ->
-      {:sdes, offered_suite, _key} = desc.crypto
-      suite = answer_suite(offered_suite)
-      key = random_sdes_key()
+      case pick_sdes(desc) do
+        nil ->
+          Logger.warning(
+            module: __MODULE__,
+            message:
+              "conference #{st.conf_uid}: #{desc.type} offers no SDES suite we support " <>
+                "(#{desc.sdes_offers |> Enum.map(& &1.suite) |> Enum.join(", ")}); " <>
+                "we do #{Enum.join(@sdes_suites, ", ")}"
+          )
 
-      case void_rpc(st, "SetLocalCryptoSDES", [
-             st.conf_id,
-             st.part_id,
-             media_int(desc.type),
-             suite,
-             key,
-             @role_main
-           ]) do
-        :ok -> {:cont, {:ok, %{st | local_sdes: Map.put(st.local_sdes, desc.type, {suite, key})}}}
-        err -> {:halt, err}
+          {:halt, {:error, :no_common_sdes_suite}}
+
+        %{tag: tag, suite: suite, key: peer_key} ->
+          key = random_sdes_key()
+
+          case void_rpc(st, "SetLocalCryptoSDES", [
+                 st.conf_id,
+                 st.part_id,
+                 media_int(desc.type),
+                 suite,
+                 key,
+                 @role_main
+               ]) do
+            :ok ->
+              chosen = %{tag: tag, suite: suite, key: key, peer_key: peer_key}
+              {:cont, {:ok, %{st | local_sdes: Map.put(st.local_sdes, desc.type, chosen)}}}
+
+            err ->
+              {:halt, err}
+          end
       end
     end)
   end
 
-  # Mirror the offered suite when we support it: the answerer picks *one* of the
-  # offered crypto lines (RFC 4568 §6.2), it does not propose its own.
-  defp answer_suite(offered) do
-    if offered in @sdes_suites, do: offered, else: hd(@sdes_suites)
+  # An offer carrying `a=crypto` at all — `crypto` alone would be the DTLS tuple on a
+  # leg that offers both, and DTLS wins there (§6.3.1 rule 2).
+  defp sdes_offered?(desc), do: Map.get(desc, :sdes_offers, []) != []
+
+  # The first offered line whose suite this mixer implements, in the OFFERER's order:
+  # its preference, honoured, which is what an answerer owes it.
+  defp pick_sdes(desc) do
+    Enum.find(Map.get(desc, :sdes_offers, []), &(&1.suite in @sdes_suites))
   end
 
   # AES_CM_128 keying material is a 16-byte key plus a 14-byte salt, carried
@@ -643,17 +681,23 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # disagree about who initiates the handshake.
   defp set_remote_security(state, m, desc) do
     calls =
-      case desc.crypto do
-        {:dtls, setup, hash, fingerprint} ->
+      case {desc.crypto, Map.get(state.local_sdes, desc.type)} do
+        {{:dtls, setup, hash, fingerprint}, _} ->
           [
             {"SetRemoteCryptoDTLS",
              [@role_main, peer_setup(setup) |> to_string(), hash, fingerprint]}
           ]
 
-        {:sdes, suite, key} ->
-          [{"SetRemoteCryptoSDES", [suite, key, @role_main]}]
+        {_, %{suite: suite, peer_key: peer_key}} ->
+          # the suite and key of the ONE line `setup_sdes/2` selected — never the first
+          # line of the offer, which may name a suite we do not implement. `keyRank` is
+          # the MKI rank, 0 for an offer that declares none, and it is the seventh
+          # argument the MCU API asks for: `(iiissii)`. Sending six was the one arity
+          # the server has no format string for (7 with role+rank, or the legacy 5
+          # without either), so it answered a parse fault and the call became a 500.
+          [{"SetRemoteCryptoSDES", [suite, peer_key, @role_main, @sdes_key_rank]}]
 
-        :none ->
+        _ ->
           []
       end
 
@@ -1096,6 +1140,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
       # the feedback types actually agreed, per video PT (§6.3.1 rule 3)
       rtcp_fb: answered_rtcp_fb(desc),
       crypto: answer_crypto(state, desc),
+      crypto_tag: answer_crypto_tag(state, desc),
       ice: state.local_ice,
       # §6.3 rule 11: the offer's `a=mid`, echoed verbatim. It is how a browser (and
       # anything else speaking JSEP, RFC 8829 §5.3.1) pairs our answer sections with
@@ -1218,8 +1263,18 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
 
   defp answer_crypto(state, desc) do
     case Map.get(state.local_sdes, desc.type) do
-      {suite, key} -> {:sdes, suite, key}
+      %{suite: suite, key: key} -> {:sdes, suite, key}
       nil -> :none
+    end
+  end
+
+  # RFC 4568 §6.2: the answer carries the TAG of the offered line we accepted. Linphone
+  # offers four lines and we take the second — answering `a=crypto:1` there names a line
+  # the offerer keyed differently.
+  defp answer_crypto_tag(state, desc) do
+    case Map.get(state.local_sdes, desc.type) do
+      %{tag: tag} -> tag
+      nil -> 1
     end
   end
 

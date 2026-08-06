@@ -126,6 +126,7 @@ defmodule MediaServer.Mendooze.Sdp do
           direction: :sendrecv | :sendonly | :recvonly | :inactive,
           bandwidth: non_neg_integer() | nil,
           crypto: crypto(),
+          sdes_offers: [%{tag: String.t(), suite: String.t(), key: String.t()}],
           ice: nil | %{ufrag: String.t(), pwd: String.t()},
           mid: String.t() | nil,
           rtcp_fb: %{optional(integer()) => [String.t()]},
@@ -185,6 +186,7 @@ defmodule MediaServer.Mendooze.Sdp do
           optional(:fmtp) => %{optional(String.t()) => String.t()},
           optional(:dtmf) => boolean(),
           optional(:crypto) => crypto(),
+          optional(:crypto_tag) => String.t() | non_neg_integer(),
           optional(:ice) => nil | %{ufrag: String.t(), pwd: String.t()},
           optional(:rtcp_mux) => boolean(),
           optional(:protocol) => String.t(),
@@ -332,7 +334,7 @@ defmodule MediaServer.Mendooze.Sdp do
     |> add_bandwidth(Map.get(mspec, :bandwidth))
     |> add_server_codecs(rtpmaps, fmtp)
     |> ExSDP.add_attribute(Map.get(mspec, :direction, :sendrecv))
-    |> add_crypto(crypto)
+    |> add_crypto(crypto, Map.get(mspec, :crypto_tag, 1))
     |> add_ice(Map.get(mspec, :ice))
     |> add_rtcp_mux(Map.get(mspec, :rtcp_mux, false))
     |> add_transport_plane(mspec, video_pts)
@@ -357,7 +359,7 @@ defmodule MediaServer.Mendooze.Sdp do
     |> add_codecs(type, codecs)
     |> add_dtmf(dtmf)
     |> ExSDP.add_attribute(Map.get(mspec, :direction, :sendrecv))
-    |> add_crypto(crypto)
+    |> add_crypto(crypto, Map.get(mspec, :crypto_tag, 1))
     |> add_ice(Map.get(mspec, :ice))
     |> add_rtcp_mux(Map.get(mspec, :rtcp_mux, false))
     |> add_transport_plane(mspec, video_pts)
@@ -536,15 +538,22 @@ defmodule MediaServer.Mendooze.Sdp do
 
   defp add_crypto(m, :none), do: m
 
+  defp add_crypto(m, {:sdes, suite, key}),
+    do: ExSDP.add_attribute(m, {"crypto", "1 #{suite} inline:#{key}"})
+
   defp add_crypto(m, {:dtls, setup, hash, fingerprint}) do
     m
     |> ExSDP.add_attribute({:fingerprint, {hash_to_atom(hash), fingerprint}})
     |> ExSDP.add_attribute({:setup, setup})
   end
 
-  defp add_crypto(m, {:sdes, suite, key}) do
-    ExSDP.add_attribute(m, {"crypto", "1 #{suite} inline:#{key}"})
+  # RFC 4568 §6.2: the answer's tag is the tag of the offered line it accepted, not a
+  # fresh one. `crypto_tag` carries it (default 1, which is what an OFFER uses).
+  defp add_crypto(m, {:sdes, suite, key}, tag) do
+    ExSDP.add_attribute(m, {"crypto", "#{tag} #{suite} inline:#{key}"})
   end
+
+  defp add_crypto(m, crypto, _tag), do: add_crypto(m, crypto)
 
   defp add_ice(m, nil), do: m
 
@@ -680,6 +689,9 @@ defmodule MediaServer.Mendooze.Sdp do
       direction: find_direction(attrs) || find_direction(session_attrs) || :sendrecv,
       bandwidth: as_bandwidth(m.bandwidth),
       crypto: find_crypto(attrs, session_attrs),
+      # every offered SDES line (empty unless the offer carries `a=crypto`): the
+      # answerer picks one it supports and echoes its tag (RFC 4568 §6.2)
+      sdes_offers: sdes_offers(attrs) ++ sdes_offers(session_attrs),
       ice: find_ice(attrs) || find_ice(session_attrs),
       mid: find_mid(attrs),
       rtcp_fb: parse_rtcp_fb(attrs),
@@ -934,19 +946,25 @@ defmodule MediaServer.Mendooze.Sdp do
 
   # a=crypto:<tag> <suite> inline:<key>[|lifetime|MKI] — keep the base64 key only
   defp find_sdes(attrs) do
-    Enum.find_value(attrs, fn
-      {"crypto", value} ->
-        case String.split(value, " ", trim: true) do
-          [_tag, suite, "inline:" <> keypart | _] ->
-            {:sdes, suite, keypart |> String.split("|") |> hd()}
+    case sdes_offers(attrs) do
+      [%{suite: suite, key: key} | _] -> {:sdes, suite, key}
+      [] -> nil
+    end
+  end
 
-          _ ->
-            nil
-        end
-
-      _ ->
-        nil
-    end)
+  # EVERY `a=crypto` line of the section, in offer order, tag included.
+  #
+  # An answerer needs them all, not just the first: RFC 4568 §6.2 has it pick **one**
+  # offered line, echo its tag, and key its own direction with the same suite — so the
+  # line it picks has to be one it supports. Linphone offers four (AEAD_AES_128_GCM
+  # first, AES_CM_128_HMAC_SHA1_80 second), and reading only the first means either
+  # refusing a call we can serve or answering a suite whose key belongs to another line.
+  defp sdes_offers(attrs) do
+    for {"crypto", value} <- attrs,
+        [tag, suite, "inline:" <> keypart | _] = String.split(value, " ", trim: true),
+        into: [] do
+      %{tag: tag, suite: suite, key: keypart |> String.split("|") |> hd()}
+    end
   end
 
   defp find_ice(attrs) do

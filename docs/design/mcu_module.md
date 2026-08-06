@@ -239,7 +239,7 @@ switches behind `a=rtcp-fb: … nack`, `ccm fir` and `ccm tmmbr`.
 | Method | Params | Returns |
 |---|---|---|
 | `SetLocalCryptoSDES` | `(i confId, i partId, i media, s suite, s key[, i role])` | — |
-| `SetRemoteCryptoSDES` | `(i confId, i partId, i media, s suite, s key[, i role, i keyRank])` | — |
+| `SetRemoteCryptoSDES` | `(iiissii)` = `confId, partId, media, suite, key, role, keyRank` — **or** the legacy `(iiiss)` with neither. Not six: `role` without `keyRank` is the one arity the server has no format string for, and it answers a parse fault | — |
 | `GetLocalCryptoDTLSFingerprint` | `(s hash)` | `(s fingerprint)` |
 | `SetRemoteCryptoDTLS` | `(i confId, i partId, i media, i role, s setup, s hash, s fingerprint)` — 6-arg variant drops `role` | — |
 | `SetLocalSTUNCredentials` | `(i confId, i partId, i media, s ufrag, s pwd[, i role])` | — |
@@ -752,6 +752,27 @@ hard cases:
    >
    > Still open server-side: the packetiser does not honour mode 0 (it emits FU-A),
    > which `ResolveNegotiation` now logs when a peer offers it.
+
+13. **One offered `a=crypto` line is selected, and everything follows from it**
+   (RFC 4568 §6.2). The line is the first the offer lists whose suite this mixer
+   implements; the answer echoes **that line's tag**, states our own key for the same
+   suite, and the key pushed to `SetRemoteCryptoSDES` is the one published on **that**
+   line. An offer whose every line names a suite we do not implement is refused
+   (`:no_common_sdes_suite` → `488`), which is the honest outcome: the alternative is a
+   call that establishes and decrypts nothing.
+
+   > **Found 2026-08-06** with Linphone 6.2.0 (`linphone.pcap`). It offers four lines
+   > per media, `AEAD_AES_128_GCM` first — a suite the mixer does not do. The adapter
+   > read only the first line, answered `AES_CM_128_HMAC_SHA1_80` (a suite it does),
+   > and handed the server the **GCM line's key**: three inconsistent things at once.
+   > `Sdp.parse/1` now exposes every offered line (`sdes_offers`) and the selection is
+   > the adapter's, where the list of implemented suites lives.
+   >
+   > The same call also failed on an arity: `SetRemoteCryptoSDES` was sent with six
+   > arguments (role, no `keyRank`), the one form the MCU API does not parse — see the
+   > §3.5 table. It answered a parse fault, which kelixip turned into a `500`. A stub
+   > that accepts any arity is why no test caught either: both are contract bugs, and
+   > the contract is `MCU-API.md`.
 
 Two answerer details that are not rules of their own but have bitten once each:
 
