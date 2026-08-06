@@ -1189,4 +1189,69 @@ defmodule Mendooze.SdpTest do
       assert text.raw_fmt == "t140"
     end
   end
+
+  describe "conformant_pts/3 (verdict vs offer, RFC 6184 §8.2.2)" do
+    # one H.264 video desc, two payload types with distinct offered identities
+    defp video_desc(fmtp) do
+      sdp_str = """
+      v=0
+      o=- 1 1 IN IP4 172.16.0.1
+      s=call
+      c=IN IP4 172.16.0.1
+      t=0 0
+      m=video 5006 RTP/AVP 97 99
+      a=rtpmap:97 H264/90000
+      #{fmtp}
+      a=rtpmap:99 H264/90000
+      """
+
+      {:ok, [desc]} = Sdp.parse(sdp_str)
+      desc
+    end
+
+    @rtp_map %{"97" => 99, "99" => 99}
+
+    test "a verdict contradicting the offered profile for that PT is dropped" do
+      desc = video_desc("a=fmtp:97 profile-level-id=42e01f;packetization-mode=1")
+      verdict = %{"97" => "profile-level-id=64001f;packetization-mode=1", "99" => ""}
+
+      assert {kept, [dropped]} = Sdp.conformant_pts(verdict, desc, @rtp_map)
+      # pt 99 offered no profile-level-id: nothing to contradict, kept
+      assert Map.keys(kept) == ["99"]
+      assert dropped.pt == "97"
+      assert dropped.offered =~ "42e0"
+      assert dropped.answered =~ "6400"
+    end
+
+    test "an absent packetization-mode is no constraint, not RFC 6184's default 0" do
+      # Linphone 6.2 + OpenH264: profile stated, mode omitted; the server answers
+      # its own mode 1 — the asymmetry contradicts nothing the peer stated
+      desc = video_desc("a=fmtp:97 profile-level-id=42e01f")
+      verdict = %{"97" => "profile-level-id=42e01f;packetization-mode=1"}
+
+      assert {verdict, []} == Sdp.conformant_pts(verdict, desc, @rtp_map)
+    end
+
+    test "an explicit packetization-mode 0 is still honoured" do
+      desc = video_desc("a=fmtp:97 profile-level-id=42e01f;packetization-mode=0")
+      verdict = %{"97" => "profile-level-id=42e01f;packetization-mode=1"}
+
+      assert {%{}, [%{pt: "97"}]} = Sdp.conformant_pts(verdict, desc, @rtp_map)
+    end
+
+    test "a level difference alone is legitimate asymmetry and kept" do
+      desc = video_desc("a=fmtp:97 profile-level-id=42e01f;packetization-mode=1")
+      verdict = %{"97" => "profile-level-id=42e034;packetization-mode=1"}
+
+      assert {^verdict, []} = Sdp.conformant_pts(verdict, desc, @rtp_map)
+    end
+
+    test "nil (pre-delegation server) and non-video descs pass through untouched" do
+      assert {nil, []} = Sdp.conformant_pts(nil, video_desc(""), @rtp_map)
+
+      audio = %{type: :audio, fmtp: %{}}
+      verdict = %{"0" => ""}
+      assert {^verdict, []} = Sdp.conformant_pts(verdict, audio, %{"0" => 0})
+    end
+  end
 end

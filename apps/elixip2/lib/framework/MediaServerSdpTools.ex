@@ -77,4 +77,13 @@ defmodule MediaServer.SdpTools do
   assumption, which is what a conference mixer does anyway.
   """
   defdelegate restrict_send_map(send_map, proposed_recv, accepted), to: Sdp
+
+  @doc """
+  Drop, from a server verdict, the payload types whose returned fmtp contradicts
+  what the offer declared for that payload type (RFC 3264 §6.1, RFC 6184 §8.2.2).
+
+  Returns `{kept, dropped}`; the caller logs `dropped` with its own context. See
+  `MediaServer.Mendooze.Sdp.conformant_pts/3`.
+  """
+  defdelegate conformant_pts(accepted, desc, rtp_map), to: Sdp
 end

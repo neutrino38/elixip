@@ -600,96 +600,27 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # per-PT fmtp into one `h264.fmtp` property, so the last payload type iterated wins
   # and every accepted PT is answered with its parameters. Until then this guard keeps
   # the answer conformant, at the cost of the payload types that were misresolved.
-  defp keep_answerable(nil, _state, _desc, _rtp_map), do: nil
+  # The comparison itself (profile identity, the absent-packetization-mode rule) is
+  # SDP interpretation and lives in one place, the shared SDP layer — this wrapper
+  # only adds the conference context to the log.
+  defp keep_answerable(accepted, state, desc, rtp_map) do
+    {kept, dropped} = Sdp.conformant_pts(accepted, desc, rtp_map)
 
-  defp keep_answerable(accepted, state, %{type: :video} = desc, rtp_map) do
-    Map.filter(accepted, fn {pt, answered} ->
-      h264?(rtp_map, pt) == false or answerable_h264?(state, desc, pt, answered)
+    Enum.each(dropped, fn %{pt: pt, offered: offered, answered: answered} ->
+      Logger.warning(
+        module: __MODULE__,
+        message:
+          "conf=#{state.conf_id} part=#{state.part_id} video: dropped pt #{pt} from " <>
+            "the verdict — the media server answered H.264 #{answered} where the " <>
+            "offer declared #{offered} for that payload type. Announcing it " <>
+            "would be a codec the caller never offered (RFC 6184 §8.2.2), and a browser " <>
+            "refuses the whole answer over it. Both come from the server's negotiation: " <>
+            "check what it resolved for THIS payload type in its log"
+      )
     end)
+
+    kept
   end
-
-  defp keep_answerable(accepted, _state, _desc, _rtp_map), do: accepted
-
-  defp h264?(rtp_map, pt) do
-    case Sdp.code_rtpmap(:video, Map.get(rtp_map, pt)) do
-      {"H264", _clock, _ch} -> true
-      _ -> false
-    end
-  end
-
-  # An offer that stated no `profile-level-id` for the payload type has nothing to
-  # contradict: RFC 6184's default applies in theory, but a gateway or a handset that
-  # lists `H264/90000` bare decodes what it is sent, and declining its video over a
-  # parameter it never wrote would be the harder failure.
-  defp answerable_h264?(state, desc, pt, answered) do
-    case offered_h264_config(desc, pt) do
-      nil ->
-        true
-
-      {offered_profile, offered_mode} ->
-        {got_profile, got_mode} = answered_h264_config(answered)
-        offered = {offered_profile, offered_mode}
-        got = {got_profile, if(is_nil(offered_mode), do: nil, else: got_mode)}
-
-        if offered == got do
-          true
-        else
-          Logger.warning(
-            module: __MODULE__,
-            message:
-              "conf=#{state.conf_id} part=#{state.part_id} video: dropped pt #{pt} from " <>
-                "the verdict — the media server answered H.264 #{describe(got)} where the " <>
-                "offer declared #{describe(offered)} for that payload type. Announcing it " <>
-                "would be a codec the caller never offered (RFC 6184 §8.2.2), and a browser " <>
-                "refuses the whole answer over it. Both come from the server's negotiation: " <>
-                "check what it resolved for THIS payload type in its log"
-          )
-
-          false
-        end
-    end
-  end
-
-  # The identity half of an H.264 fmtp: the profile (`profile_idc` + `profile_iop`, the
-  # first two bytes) and the packetization mode **as the peer wrote it** — `nil` when it
-  # wrote none, which is not the same as 0.
-  #
-  # RFC 6184 §8.1 makes the absent value 0, and we deliberately do not read it that way
-  # (decided 2026-08-06): a peer that omits the parameter is an incomplete SDP more than
-  # a single-NAL-only decoder — every modern decoder depacketizes FU-A. Linphone 6.2 with
-  # OpenH264 omits it, and reading absence as 0 cost it H.264 entirely: the media server
-  # answered mode 1 (its own), the modes "differed", and the payload type was dropped.
-  # So: absent ⇒ no constraint, the mode is not compared, and the asymmetry contradicts
-  # nothing the peer stated. If the bet is wrong the symptom is unmistakable — H.264
-  # negotiated and no picture with that client.
-  defp offered_h264_config(desc, pt) do
-    case Map.get(Map.get(desc, :fmtp, %{}), pt) do
-      %{profile_level_id: plid} = fmtp when is_integer(plid) ->
-        {plid |> hex6() |> String.slice(0, 4), Map.get(fmtp, :packetization_mode)}
-
-      _ ->
-        nil
-    end
-  end
-
-  defp answered_h264_config(params) do
-    profile =
-      case Regex.run(~r/profile-level-id=([0-9a-fA-F]{6})/, params) do
-        [_, plid] -> plid |> String.downcase() |> String.slice(0, 4)
-        nil -> nil
-      end
-
-    mode =
-      case Regex.run(~r/packetization-mode=(\d+)/, params) do
-        [_, mode] -> String.to_integer(mode)
-        nil -> 0
-      end
-
-    {profile, mode}
-  end
-
-  defp describe({profile, mode}),
-    do: "#{profile || "(no profile)"}/pm=#{if is_nil(mode), do: "(unstated)", else: mode}"
 
   # The peer's own keys and ICE credentials, pushed **after** `StartReceiving`
   # (§6.2): the session exists by then, which is what these attach to.
