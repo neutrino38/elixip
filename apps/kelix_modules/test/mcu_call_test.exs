@@ -715,20 +715,39 @@ defmodule Kelix.Mod.McuCallTest do
       assert_receive {:rpc, "AddMosaicParticipant", [42, 0, 7]}, 2000
     end
 
-    test "an offer with no H.264 profile is answered with the conference's own", ctx do
+    # Decision 11: the media server owns its decode capability, so the conference
+    # declares no profile of its own. On the legacy path (no verdict) an offer that
+    # states nothing is therefore answered with nothing — kelixip has nothing truthful
+    # to say about what the mixer accepts.
+    test "with no verdict and no offered profile, no fmtp is invented", ctx do
+      {_pid, _dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video_no_fmtp))
+      assert_receive {:replied, 200, _reason, fields, _req}, 2000
+
+      assert fields[:body] =~ "a=rtpmap:99 H264/90000"
+      refute fields[:body] =~ "a=fmtp:99"
+    end
+
+    # …and on the delegated path the server supplies it. This pins rule 9's invariant:
+    # what the answer ANNOUNCES and what SetVideoCodec asks the encoder for are the
+    # same string, because the second is a relay of the first and not a second decision.
+    @tag start_receiving:
+           {:ok,
+            [
+              @rec_port,
+              @media_ip,
+              # the stub answers every media with the same verdict, so the audio PT has
+              # to be in it or the audio plane is declined and the leg never attaches
+              %{"8" => "", "99" => "profile-level-id=640028;packetization-mode=1"}
+            ]}
+    test "the profile the server negotiated is announced AND given to the encoder", ctx do
       {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video_no_fmtp))
       assert_receive {:replied, 200, _reason, fields, _req}, 2000
 
-      # staying silent would mean RFC 6184's default (Baseline 1.0) to the peer,
-      # while the mixer encodes HD720p
-      assert fields[:body] =~ "a=fmtp:99 profile-level-id=42e01f;packetization-mode=1"
+      assert fields[:body] =~ "a=fmtp:99 profile-level-id=640028;packetization-mode=1"
 
-      # …and the encoder is asked for exactly what we announced: the SDP and the RPC
-      # cannot disagree, since both come from the same decision at answer time
       send(pid, {:ACK, %{method: :ACK}, nil, dialog})
       assert_receive {:rpc, "SetVideoCodec", [42, 7, 99, 6, 15, 1024, 300, encoder, 0]}, 2000
-      assert encoder == %{"h264.profile-level-id" => "42e01f"}
-      assert_receive {:rpc, "AddMosaicParticipant", [42, 0, 7]}, 2000
+      assert encoder == %{"h264.profile-level-id" => "640028"}
     end
 
     test "a profile the offer does state still wins over ours", ctx do

@@ -495,7 +495,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
              remote: {desc.ip, desc.port},
              # decided once, here: the answer states it and the encoder is
              # configured with it, so the two cannot drift apart
-             answered_profile_level_id: h264_profile_level_id(state, desc),
+             answered_profile_level_id: answered_profile_level_id(state, desc, accepted),
              # the server's verdict, or nil on a pre-P8a server
              accepted: accepted,
              # drives the receive watchdog (§16.1): a media the peer says it will not
@@ -613,7 +613,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # The peer's profile if it stated one, else ours. Reflection wins because
   # `profile-level-id` has to match for the two ends to decode each other (§6.3
   # rule 2), and a peer that states one has told us what it can handle.
-  defp h264_profile_level_id(state, %{type: :video} = desc) do
+  defp h264_profile_level_id(_state, %{type: :video} = desc) do
     offered =
       Map.get(desc, :fmtp, %{})
       |> Map.values()
@@ -624,22 +624,32 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
         end
       end)
 
-    offered || configured_profile_level_id(state)
+    offered
   end
 
   defp h264_profile_level_id(_state, _desc), do: nil
 
-  # The `profile-level-id=` of the configured answer fmtp — the one place that string
-  # is read, so the SDP and the RPC cannot disagree.
-  defp configured_profile_level_id(state) do
-    case Regex.run(~r/profile-level-id=([0-9a-fA-F]{6})/, configured_video_fmtp(state)) do
-      [_, plid] -> String.downcase(plid)
-      nil -> nil
-    end
+  # What `SetVideoCodec` is told to encode with (§6.3 rule 9). On the delegated path
+  # this is a RELAY, not a decision: the server already applied RFC 6184 §8.2.2 and put
+  # the result in the fmtp it returned, so announced and encoded are the same string by
+  # construction. Parsing it back out is the price of `SetVideoCodec` replacing the
+  # stream's whole property map — send nothing and the negotiated profile is lost.
+  defp answered_profile_level_id(state, %{type: :video} = desc, accepted) when is_map(accepted) do
+    accepted
+    |> Map.values()
+    |> Enum.find_value(fn params ->
+      case Regex.run(~r/profile-level-id=([0-9a-fA-F]{6})/, params) do
+        [_, plid] -> String.downcase(plid)
+        nil -> nil
+      end
+    end) || h264_profile_level_id(state, desc)
   end
 
-  defp configured_video_fmtp(state), do: Map.get(state.video, :fmtp) || ""
+  defp answered_profile_level_id(state, desc, _accepted),
+    do: h264_profile_level_id(state, desc)
 
+  # The `profile-level-id=` of the configured answer fmtp — the one place that string
+  # is read, so the SDP and the RPC cannot disagree.
   # ── send plane + mixer join ──────────────────────────────────────────────────
 
   # In the leg's media order (audio first), never the negotiation map's: iterating a
@@ -1061,9 +1071,11 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
 
   # Reflection first; ours only for an H.264 payload type the offer said nothing
   # usable about.
-  defp answered_params(state, %{type: :video}, %{encoding: "H264"}, offered) do
+  defp answered_params(_state, %{type: :video}, %{encoding: "H264"}, offered) do
     case reflected_params(offered) do
-      "" -> configured_video_fmtp(state)
+      # no configured fmtp any more (§8.4, decision 11: the server owns its capability),
+      # so the legacy path reflects what the offer stated and otherwise says nothing
+      "" -> ""
       reflected -> reflected
     end
   end
