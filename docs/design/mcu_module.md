@@ -2018,6 +2018,7 @@ observations the script has no use for.
 | L12 | A recording is **not resumed** after a media-server restart, and the partial file is left in place | §8.3.8 decision 5 | deliberate |
 | L13 | `recording.*` always records mosaic `0` + sidebar `0`, and `slot.*` always addresses mosaic `0` | §1.2 decision 6b | with `/mosaics` |
 | L14 | An unreadable `logo` is not reported — the server answers OK whatever the picture did | server API | a server increment |
+| L15 | **No real-time text over WebSocket for a conference participant.** A browser cannot carry T.140 on an RTP profile, so a WebRTC participant has no chat — while T.140 **over RTP** works (the MCU wires every participant into the text mixer at `CreateParticipant`). The capability exists, but only on the JSR-309 API (`jsr309_text_over_wss.md`, delivered 2026-08-07): the conference API has no `ConfigureMediaConnection`, and the media server registers a single WebSocket handler, `/jsr309/<sessionId>/<token>`, keyed on a `MediaSession`. This adapter therefore omits such a section from its answer, which is the honest answer — it cannot host it | server API | a server increment, §16.6 (S5) |
 
 ---
 
@@ -2636,6 +2637,39 @@ answer. A server that returns the port alone yields `{:error, :no_media_ip}` —
 address produces a `200 OK` whose media silently goes nowhere, which is strictly
 worse than a refused call. Consequence to plan for: **the media server must be
 upgraded before or with kelixip** on any node running conferences.
+
+---
+
+### 16.6 S5 — text over WebSocket for a conference participant (not started)
+
+Lifts **L15**. The whole media plane already exists and is proven: `WSEndpoint`
+converts T.140/RED ⇄ WebSocket frames, the `/jsr309/<sessionId>/<token>` handler
+accepts the browser's connection, and the JSR-309 adapter drives it end to end
+(design and status: `jsr309_text_over_wss.md` in the media-server repo). What is
+missing is the **door on the conference API**, and it is exactly two things:
+
+1. **Server**: an equivalent of `ConfigureMediaConnection` for a *participant* —
+   switch its text port to a `WSEndpoint` and register a token against
+   `(confId, partId, media)` — plus a WebSocket handler that resolves a token to
+   a conference participant instead of a `MediaSession`. `Endpoint::
+   ConfigureMediaConnection` is the template; `RTPParticipant` holds the text
+   stream to swap. `GetMediaCandidates` has no conference equivalent either, so
+   the participant's WebSocket address has to come back from that same call (or
+   from `StartReceiving`, which already announces the media address since S4).
+2. **This module**: the mirror of what the JSR-309 adapter now does — recognise
+   the section (the SDP layer already parses it, `transport: :ws`), call the two
+   RPCs before `StartReceiving`, and answer with the URL. The T140RED half is
+   free: the rtpMap already carries it.
+
+Worth knowing before starting: the answer is signalling only (the client strips
+the section before handing the SDP to the browser), the URL form is the
+gateway's (value relative to the protocol, scheme in the attribute name), and a
+section we cannot configure must be **omitted** rather than declined with port 0
+— an echo the deployed client does not digest. All three are recorded in
+`jsr309_text_over_wss.md` §5.3 and §6.
+
+Not scheduled: it only becomes worth doing when a WebRTC participant needs chat
+*in a conference*, which no requirement asks for today.
 
 ---
 
