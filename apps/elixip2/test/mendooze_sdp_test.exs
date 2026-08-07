@@ -507,7 +507,7 @@ defmodule Mendooze.SdpTest do
       assert app.port == 5006
     end
 
-    test "a supported media type on a non-RTP transport is an unsupported stub (G9)" do
+    test "a media type we carry on a transport we do not is an unsupported stub (G9)" do
       sdp_str = """
       v=0
       o=- 1 1 IN IP4 172.16.0.1
@@ -515,14 +515,15 @@ defmodule Mendooze.SdpTest do
       c=IN IP4 172.16.0.1
       t=0 0
       m=audio 5004 RTP/AVP 0
-      m=text 60000 TCP/WSS t140
+      m=text 60000 UDP/DTLS/SCTP t140
       """
 
       assert {:ok, [audio, text]} = Sdp.parse(sdp_str)
       assert audio.supported?
+      # neither an RTP profile nor a WebSocket one: nothing we can answer
       refute text.supported?
       assert text.type == :text
-      assert text.protocol == "TCP/WSS"
+      assert text.protocol == "UDP/DTLS/SCTP"
       assert text.raw_fmt == "t140"
     end
 
@@ -1181,9 +1182,11 @@ defmodule Mendooze.SdpTest do
       assert audio.rtcp_mux == true
       assert video.rtcp_mux == true
 
-      # G9: the non-RTP text section (m=text TCP/WSS t140) is returned as an
-      # unsupported stub so the answerer can decline it with port 0.
-      refute text.supported?
+      # The client's injected `m=text … TCP/WSS t140` is real-time text over a
+      # WebSocket (jsr309_text_over_wss.md), not a section to decline: it is
+      # answered with the URL the client connects to.
+      assert text.supported?
+      assert text.transport == :ws
       assert text.type == :text
       assert text.protocol == "TCP/WSS"
       assert text.raw_fmt == "t140"
@@ -1312,6 +1315,128 @@ defmodule Mendooze.SdpTest do
       assert "AV1" in video.codecs
       assert Sdp.code_rtpmap(:video, 110) == {"AV1", 90_000, nil}
       assert video.fmtp_raw["45"] == "profile=0;level-idx=5;tier=0"
+    end
+  end
+
+  describe "text over WebSocket (jsr309_text_over_wss.md)" do
+    defp ws_text_offer(proto, extra \\ "a=setup:active") do
+      """
+      v=0
+      o=- 1 1 IN IP4 10.9.8.7
+      s=call
+      c=IN IP4 10.9.8.7
+      t=0 0
+      m=text 60000 #{proto} t140
+      #{extra}
+      a=connection:new
+      """
+    end
+
+    test "the four WebSocket transports are recognised as text sections" do
+      # the deployed client emits TCP/WS; the historical Java gateway dropped
+      # TLS/* into its RTP branch, which was a bug and not a contract
+      for proto <- ["TCP/WS", "TCP/WSS", "TLS/WS", "TLS/WSS"] do
+        assert {:ok, [desc]} = Sdp.parse(ws_text_offer(proto))
+        assert desc.supported?, "#{proto} was not supported"
+        assert desc.transport == :ws
+        assert desc.type == :text
+        assert desc.protocol == proto
+        assert desc.port == 60_000
+        # the format is the literal token, never a payload type
+        assert desc.raw_fmt == "t140"
+        assert desc.rtp_map == %{}
+        assert desc.setup == :active
+      end
+    end
+
+    test "an RTP media is marked as such, so a consumer can branch on transport" do
+      # real T.140 over RTP: same media type, numeric payload type, no WebSocket
+      sdp_str = """
+      v=0
+      o=- 1 1 IN IP4 10.9.8.7
+      s=call
+      c=IN IP4 10.9.8.7
+      t=0 0
+      m=text 5006 RTP/AVP 106
+      a=rtpmap:106 t140/1000
+      """
+
+      assert {:ok, [desc]} = Sdp.parse(sdp_str)
+      assert desc.transport == :rtp
+      assert desc.rtp_map == %{"106" => 106}
+    end
+
+    test "a text section over a transport we do not carry stays an unsupported stub" do
+      assert {:ok, [desc]} = Sdp.parse(ws_text_offer("UDP/DTLS/SCTP"))
+      refute desc.supported?
+      assert desc.transport == :unsupported
+    end
+
+    test "a WebSocket section without t140 is not one we can answer" do
+      offer = String.replace(ws_text_offer("TCP/WS"), "t140", "webrtc-datachannel")
+      assert {:ok, [desc]} = Sdp.parse(offer)
+      refute desc.supported?
+    end
+
+    test "both attribute names and both URL forms are read" do
+      for {attr, value} <- [
+            {"ws", "//1.2.3.4:9090/jsr309/7/tok"},
+            {"ws", "http://1.2.3.4:9090/jsr309/7/tok"},
+            {"wss", "https://1.2.3.4:9090/jsr309/7/tok"},
+            {"wss", "wss://1.2.3.4:9090/jsr309/7/tok"}
+          ] do
+        offer = ws_text_offer("TCP/WS", "a=setup:active\na=#{attr}:#{value}")
+        assert {:ok, [desc]} = Sdp.parse(offer)
+        assert desc.ws_url == value
+      end
+    end
+
+    test "an absent a=setup reads as actpass (the peer will connect)" do
+      assert {:ok, [desc]} = Sdp.parse(ws_text_offer("TCP/WS", "a=sendrecv"))
+      assert desc.setup == :actpass
+    end
+
+    test "ws_url_for_sdp/1 states the scheme the deployed client can use" do
+      # it reads only a=ws, and an https URL there is what it turns into wss
+      assert Sdp.ws_url_for_sdp("wss://h:9090/p") == "https://h:9090/p"
+      assert Sdp.ws_url_for_sdp("ws://h:9090/p") == "http://h:9090/p"
+      # already-HTTP and scheme-less values pass through
+      assert Sdp.ws_url_for_sdp("https://h:9090/p") == "https://h:9090/p"
+      assert Sdp.ws_url_for_sdp("//h:9090/p") == "//h:9090/p"
+    end
+
+    test "the built section is signalling only, and round-trips" do
+      sdp_str =
+        Sdp.build(%{
+          ip: "192.168.5.5",
+          medias: [
+            %{
+              ws_text: "https://192.168.5.5:9090/jsr309/7/tok",
+              type: :text,
+              port: 9090,
+              protocol: "TCP/WSS",
+              setup: :passive,
+              direction: :sendrecv,
+              mid: "2"
+            }
+          ]
+        })
+
+      assert sdp_str =~ "m=text 9090 TCP/WSS t140"
+      assert sdp_str =~ "a=setup:passive"
+      assert sdp_str =~ "a=connection:new"
+      assert sdp_str =~ "a=ws:https://192.168.5.5:9090/jsr309/7/tok"
+      assert sdp_str =~ "a=mid:2"
+      # no payload type, no fmtp: the T.140 redundancy is the media server's
+      # business and is never negotiated on this section
+      refute sdp_str =~ "a=rtpmap"
+      refute sdp_str =~ "a=fmtp"
+
+      assert {:ok, [desc]} = Sdp.parse(sdp_str)
+      assert desc.transport == :ws
+      assert desc.setup == :passive
+      assert desc.ws_url == "https://192.168.5.5:9090/jsr309/7/tok"
+      assert desc.mid == "2"
     end
   end
 end

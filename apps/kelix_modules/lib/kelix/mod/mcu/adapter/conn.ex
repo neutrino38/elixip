@@ -1452,7 +1452,12 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   end
 
   defp answerable?(desc, medias) do
-    Map.get(desc, :supported?, false) and desc.type in medias
+    # `transport: :ws` is real-time text over a WebSocket, which only the
+    # JSR-309 API can host (`ConfigureMediaConnection` has no conference-API
+    # equivalent): on this adapter such a section is omitted from the answer
+    # (`ws_text_section?/1`), never negotiated.
+    Map.get(desc, :transport, :rtp) == :rtp and
+      Map.get(desc, :supported?, false) and desc.type in medias
   end
 
   # ── teardown ─────────────────────────────────────────────────────────────────

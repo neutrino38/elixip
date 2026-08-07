@@ -1103,4 +1103,116 @@ defmodule Mendooze.ConnTest do
     assert_receive {:jsr309_call, "EndpointStartRTPTimeout", [3, 4, 1, 0]}
     refute_received {:jsr309_call, "EndpointStartRTPTimeout", [3, 4, 2, _]}
   end
+
+  # ── Text over WebSocket (jsr309_text_over_wss.md) ───────────────────────────
+
+  # The section the Elioz/WebRTComm client injects into its own SDP after
+  # setLocalDescription: TCP/WS, port 60000, c= 127.0.0.1, a=setup:active.
+  @elioz_offer """
+  v=0
+  o=- 3 1 IN IP4 10.9.8.7
+  s=-
+  c=IN IP4 10.9.8.7
+  t=0 0
+  m=audio 40000 RTP/AVP 0
+  a=rtpmap:0 PCMU/8000
+  m=text 60000 TCP/WS t140
+  c=IN IP4 127.0.0.1
+  a=setup:active
+  a=connection:new
+  a=sendrecv
+  """
+
+  defp ws_handler() do
+    fn
+      "GetMediaCandidates", [_, _, 2, 2] -> {:ok, ["ws://192.168.5.5:9090"]}
+      "EndpointStartReceiving", [_, _, 2, _] -> {:ok, [9090]}
+      m, p -> rpc_handler(m, p)
+    end
+  end
+
+  test "a text-over-WebSocket offer is configured and answered with its URL" do
+    %{server: server} = start_media_server(ws_handler())
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: [:audio, :text])
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, @elioz_offer)
+
+    # the port is switched to a WebSocket one BEFORE the receive plane opens:
+    # the token has to exist before a browser can use it
+    assert_receive {:jsr309_call, "ConfigureMediaConnection", [3, 4, 2, 0, 2, token, "t140"]}
+
+    assert token =~ ~r/^[0-9a-f-]{36}$/
+
+    assert_receive {:jsr309_call, "GetMediaCandidates", [3, 4, 2, 2]}
+
+    # T.140 AND its RFC 4103 redundancy: the rtpMap is what switches RED on
+    # server-side, and redundancy is what the RTP leg facing us needs
+    assert_receive {:jsr309_call, "EndpointStartReceiving", [3, 4, 2, rtp_map]}
+    assert rtp_map == %{"106" => 106, "105" => 105}
+
+    # a WebSocket leg has no remote RTP side: nothing to send to, nothing to key,
+    # nothing for the watchdog to watch
+    refute_received {:jsr309_call, "EndpointStartSending", [3, 4, 2, _, _, _]}
+    refute_received {:jsr309_call, "EndpointStartRTPTimeout", [3, 4, 2, _]}
+
+    # the answer mirrors the offered transport, states the literal t140, and
+    # publishes the URL under a=ws with an http scheme — the form the deployed
+    # client turns into a WebSocket connection
+    assert answer =~ "m=text 9090 TCP/WS t140"
+    assert answer =~ "a=setup:passive"
+    assert answer =~ "a=connection:new"
+    assert answer =~ "a=ws:http://192.168.5.5:9090/jsr309/3/#{token}"
+    # no payload types and no fmtp on a WebSocket section
+    refute answer =~ "a=rtpmap:106"
+
+    # and the audio leg is unaffected
+    assert answer =~ "m=audio 22000 RTP/AVP 0"
+  end
+
+  test "a secure media server yields an https URL, under the same a=ws name" do
+    handler = fn
+      "GetMediaCandidates", [_, _, 2, 2] -> {:ok, ["wss://192.168.5.5:9090"]}
+      m, p -> ws_handler().(m, p)
+    end
+
+    %{server: server} = start_media_server(handler)
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :text)
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, @elioz_offer)
+
+    # `a=wss` is never emitted: the deployed client reads only `a=ws`, and an
+    # https URL there is what it uses over TLS
+    assert answer =~ "a=ws:https://192.168.5.5:9090/jsr309/3/"
+    refute answer =~ "a=wss:"
+  end
+
+  test "a peer committed to setup:passive is declined, not answered" do
+    %{server: server} = start_media_server(ws_handler())
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: [:audio, :text])
+
+    # nobody would connect: we are the WebSocket server
+    offer = String.replace(@elioz_offer, "a=setup:active", "a=setup:passive")
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, offer)
+
+    refute_received {:jsr309_call, "ConfigureMediaConnection", _}
+    # omitted rather than echoed with port 0 (the client cannot digest that)
+    refute answer =~ "m=text"
+    assert answer =~ "m=audio 22000"
+  end
+
+  test "a media server that cannot host the WebSocket loses the text, not the call" do
+    handler = fn
+      "ConfigureMediaConnection", _ -> {:error, "not supported"}
+      m, p -> ws_handler().(m, p)
+    end
+
+    %{server: server} = start_media_server(handler)
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: [:audio, :text])
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, @elioz_offer)
+    refute answer =~ "m=text"
+    assert answer =~ "m=audio 22000"
+  end
 end

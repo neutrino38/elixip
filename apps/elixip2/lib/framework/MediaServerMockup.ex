@@ -365,7 +365,11 @@ defmodule MediaServer.Mockup.Conn do
   end
 
   defp answer_or_reject(state, desc, port, ip_str, webrtc?) do
-    if Map.get(desc, :supported?, false) and desc.type in state.medias do
+    # `transport: :ws` is real-time text over a WebSocket: it needs a WebSocket
+    # server, which this in-process stub is not. Declined with port 0 — the
+    # JSR-309 adapter is the one that can host it.
+    if Map.get(desc, :transport, :rtp) == :rtp and
+         Map.get(desc, :supported?, false) and desc.type in state.medias do
       case Sdp.negotiate(desc, codecs_for(state, desc.type), desc.type == :audio) do
         {:ok, neg} -> {:answer, answer_media_spec(state, desc, neg, port, ip_str, webrtc?)}
         {:error, :no_common_codec} -> {:reject, reject_media_spec(desc)}

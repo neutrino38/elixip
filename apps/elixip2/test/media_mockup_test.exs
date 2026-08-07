@@ -188,7 +188,10 @@ defmodule MediaMockupTest do
       assert {:ok, [aud, vid, txt]} = Sdp.parse(answer)
       assert aud.type == :audio and aud.port != 0
       assert vid.type == :video and vid.port != 0
-      refute txt.supported?
+      # the text section is real-time text over a WebSocket, which this in-process
+      # stub cannot host (no WebSocket server): it is declined with port 0, and
+      # the declined section still names its transport and format
+      assert txt.transport == :ws
       assert txt.port == 0
       assert answer =~ "m=text 0 TCP/WSS t140"
 

@@ -323,6 +323,22 @@ defmodule MediaServer.Mendooze.Sdp do
     |> add_mid(Map.get(mspec, :mid))
   end
 
+  # Text over WebSocket: signalling only, and shaped by what the deployed client
+  # reads (design §5.3). The format is the literal `t140`; `a=setup` says who
+  # connects (we are the server, hence `passive`); `a=connection:new` is RFC 4145;
+  # and the URL travels in **`a=ws`** — always that name, even in TLS — with an
+  # absolute `http`/`https` scheme, which is the form the client turns into
+  # `ws://`/`wss://`. No rtpmap, no fmtp: there is no payload type here, and the
+  # T.140 redundancy is the media server's business, not a negotiated parameter.
+  defp build_media(%{ws_text: url, type: :text, port: port, protocol: protocol} = mspec) do
+    %ExSDP.Media{type: :text, port: port, protocol: protocol, fmt: "t140"}
+    |> ExSDP.add_attribute({:setup, Map.get(mspec, :setup, :passive)})
+    |> ExSDP.add_attribute({"connection", "new"})
+    |> maybe_add_ws_url(url)
+    |> ExSDP.add_attribute(Map.get(mspec, :direction, :sendrecv))
+    |> add_mid(Map.get(mspec, :mid))
+  end
+
   # Server-driven codec section: emit the accepted rtpmap entries and the fmtp
   # strings returned by the media server verbatim.
   defp build_media(%{type: type, port: port, rtpmaps: rtpmaps} = mspec) do
@@ -378,6 +394,27 @@ defmodule MediaServer.Mendooze.Sdp do
 
   defp add_mid(m, nil), do: m
   defp add_mid(m, mid), do: ExSDP.add_attribute(m, {:mid, to_string(mid)})
+
+  defp maybe_add_ws_url(m, nil), do: m
+  defp maybe_add_ws_url(m, url), do: ExSDP.add_attribute(m, {"ws", url})
+
+  @doc """
+  Turn the media server's own WebSocket URL into the one to publish in SDP:
+  `ws://…` becomes `http://…`, `wss://…` becomes `https://…`.
+
+  Not cosmetic. `GetMediaCandidates` states the real transport (`ws`/`wss`), and
+  what goes in `a=ws` has to be what the deployed client can use: it reads only
+  that attribute, and an absolute `https://` URL there is what it turns into a
+  `wss://` connection (verified in production 2026-08-07). Anything already in
+  `http`/`https`, or with no scheme at all, is passed through untouched.
+
+      iex> MediaServer.Mendooze.Sdp.ws_url_for_sdp("wss://10.0.0.1:9090/jsr309/7/tok")
+      "https://10.0.0.1:9090/jsr309/7/tok"
+  """
+  @spec ws_url_for_sdp(String.t()) :: String.t()
+  def ws_url_for_sdp("wss://" <> rest), do: "https://" <> rest
+  def ws_url_for_sdp("ws://" <> rest), do: "http://" <> rest
+  def ws_url_for_sdp(url), do: url
 
   defp add_candidates(m, candidates) do
     Enum.reduce(candidates, m, fn cand, acc ->
@@ -587,6 +624,22 @@ defmodule MediaServer.Mendooze.Sdp do
   # latter turned every Linphone DTLS call into a 488 :no_common_codec.
   @rtp_profiles ~w(RTP/AVP RTP/AVPF RTP/SAVP RTP/SAVPF UDP/TLS/RTP/SAVP UDP/TLS/RTP/SAVPF)
 
+  # Real-time text carried over a WebSocket instead of RTP (IVeS/Omnitor spec,
+  # `docs/design/jsr309_text_over_wss.md` in the media server): a browser cannot
+  # put T.140 on an RTP profile — `RTCPeerConnection` has no such media — so the
+  # transport of that one `m=` section becomes a WebSocket the peer opens towards
+  # the media server. The four spellings are accepted: the deployed client emits
+  # `TCP/WS`, the historical gateway only ever recognised `TCP/*` and dropped
+  # `TLS/*` into its RTP branch, which was a bug and not a contract.
+  @ws_text_protocols ~w(TCP/WS TCP/WSS TLS/WS TLS/WSS)
+
+  @doc """
+  The WebSocket transports a text media may be offered over. Exposed so an
+  adapter can recognise such a section without re-listing them.
+  """
+  @spec ws_text_protocols() :: [String.t()]
+  def ws_text_protocols(), do: @ws_text_protocols
+
   @doc """
   Parse a remote SDP into per-media descriptors.
 
@@ -653,20 +706,96 @@ defmodule MediaServer.Mendooze.Sdp do
   end
 
   defp parse_media_section(m, session_ip, session_attrs, raw_fmtp) do
-    if m.type in [:audio, :video, :text] and m.protocol in @rtp_profiles do
-      parse_media(m, session_ip, session_attrs, raw_fmtp)
-    else
-      %{
-        supported?: false,
-        type: m.type,
-        port: m.port,
-        protocol: m.protocol,
-        raw_fmt: m.fmt,
-        # kept for the port-0 rejection to echo (JSEP §5.3.1): the section we decline
-        # still has to be identifiable by the mid the offerer gave it
-        mid: find_mid(m.attributes)
-      }
+    cond do
+      m.type in [:audio, :video, :text] and m.protocol in @rtp_profiles ->
+        parse_media(m, session_ip, session_attrs, raw_fmtp)
+
+      m.type == :text and m.protocol in @ws_text_protocols and ws_text_fmt?(m.fmt) ->
+        parse_ws_text(m, session_ip, session_attrs)
+
+      true ->
+        %{
+          supported?: false,
+          transport: :unsupported,
+          type: m.type,
+          port: m.port,
+          protocol: m.protocol,
+          raw_fmt: m.fmt,
+          # kept for the port-0 rejection to echo (JSEP §5.3.1): the section we decline
+          # still has to be identifiable by the mid the offerer gave it
+          mid: find_mid(m.attributes)
+        }
     end
+  end
+
+  # The format list of a text-over-WebSocket section is the literal token `t140`,
+  # never a payload type — there is no RTP numbering to allocate on a WebSocket.
+  # ExSDP keeps it as a string because the transport is not an RTP profile.
+  defp ws_text_fmt?(fmt) when is_binary(fmt) do
+    fmt
+    |> String.split(~r/\s+/, trim: true)
+    |> Enum.any?(&(String.downcase(&1) == "t140"))
+  end
+
+  defp ws_text_fmt?(_fmt), do: false
+
+  # A text-over-WebSocket section, as a media_desc an answerer can act on.
+  #
+  # The RTP-shaped fields are present and neutral on purpose: everything that
+  # walks a media list (media selection, rejection, bandwidth) keeps working
+  # without knowing about this transport, and only the places that must branch
+  # read `transport: :ws`. There is no codec to negotiate here — `t140` is the
+  # whole vocabulary — no crypto (the WebSocket's own TLS carries it), no ICE and
+  # no rtcp-mux.
+  defp parse_ws_text(m, session_ip, session_attrs) do
+    attrs = m.attributes
+
+    %{
+      supported?: true,
+      transport: :ws,
+      type: :text,
+      ip: connection_ip(m.connection_data) || session_ip,
+      port: m.port,
+      protocol: m.protocol,
+      raw_fmt: m.fmt,
+      # RFC 4145: who opens the connection. `active`/`actpass` means the peer
+      # will connect to us, which is the only arrangement we can serve — we are
+      # the WebSocket server. A committed `passive` peer is answering a call
+      # nobody will ever place.
+      setup: find_setup(attrs) || find_setup(session_attrs) || :actpass,
+      # the peer's own WebSocket URL, when it is the one hosting (a=ws / a=wss,
+      # absolute or protocol-relative)
+      ws_url: find_ws_url(attrs),
+      direction: find_direction(attrs) || find_direction(session_attrs) || :sendrecv,
+      mid: find_mid(attrs),
+      # neutral RTP fields — see above
+      rtp_map: %{},
+      codecs: ["T140"],
+      fmtp: %{},
+      fmtp_raw: %{},
+      dtmf_pts: %{},
+      rtcp_mux: false,
+      bandwidth: as_bandwidth(m.bandwidth),
+      crypto: :none,
+      sdes_offers: [],
+      ice: nil,
+      rtcp_fb: %{},
+      capneg: nil,
+      candidates: []
+    }
+  end
+
+  # `a=ws:<url>` / `a=wss:<url>`. Both attribute names are read, and the value
+  # may be absolute (`ws|wss|http|https`) or protocol-relative (`//host:port/…`,
+  # the form the historical Java gateway emitted because its client re-prefixed
+  # the scheme itself). Returns the value verbatim; interpreting it is the
+  # caller's business.
+  defp find_ws_url(attrs) do
+    Enum.find_value(attrs, fn
+      {"ws", v} -> v
+      {"wss", v} -> v
+      _ -> nil
+    end)
   end
 
   defp parse_media(m, session_ip, session_attrs, raw_fmtp) do
@@ -677,6 +806,7 @@ defmodule MediaServer.Mendooze.Sdp do
 
     %{
       supported?: true,
+      transport: :rtp,
       type: m.type,
       ip: connection_ip(m.connection_data) || session_ip,
       port: m.port,

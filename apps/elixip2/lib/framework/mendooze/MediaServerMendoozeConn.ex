@@ -27,6 +27,11 @@ defmodule MediaServer.Mendooze.Conn do
   @media_int %{audio: 0, video: 1, text: 2, application: 3}
   # MediaFrame::MediaProtocol RTP
   @proto_rtp 0
+  # MediaFrame::MediaProtocol WS — the transport of a text-over-WebSocket media
+  @proto_ws 2
+  # MediaRole::VIDEO_MAIN. For a text media this is not a mistake: it is the
+  # "main" port of any media, whatever its type (Endpoint::GetPort).
+  @role_main 0
 
   @default_audio_codecs ["OPUS", "PCMU", "PCMA"]
   @default_video_codecs ["H264", "VP8"]
@@ -52,9 +57,12 @@ defmodule MediaServer.Mendooze.Conn do
   # congestion feedback the server never sends invites the peer to wait for it).
   @supported_rtcp_fb %{"nack" => "useNACK", "ccm fir" => "useRtcpFIR", "ccm tmmbr" => "tmmbr"}
 
-  # A text section offered over one of these WS transports is OMITTED from the
-  # answer instead of declined with port 0 — see ws_text_section?/1.
-  @ws_text_protocols ~w(TCP/WSS TLS/WSS TLS/WS)
+  # Text-over-WebSocket codecs proposed to the media server: T.140 and its RFC
+  # 4103 redundancy. The rtpMap is what switches redundancy on server-side
+  # (`Endpoint::StartReceiving` case WS), and it is on the RTP leg facing us that
+  # redundancy earns its keep — the WebSocket itself only ever carries plain
+  # de-redundified text.
+  @ws_text_codecs ["T140", "T140RED"]
 
   # ── API (called through the MediaServer.Mendooze facade) ───────────────────
 
@@ -122,6 +130,10 @@ defmodule MediaServer.Mendooze.Conn do
       # per media: the SDES line we selected from the offer and the key we
       # generated for it — %{media => %{tag:, suite:, key:, peer_key:}}
       local_sdes: %{},
+      # text-over-WebSocket: the URL to publish for each media we configured
+      # that way (%{media => url}). Its presence is what says "answer this
+      # section for real" rather than omitting it.
+      ws_urls: %{},
       # delegated SDP negotiation: the receive rtpMap we proposed and the
       # server-accepted set (pt => fmtp) returned by EndpointStartReceiving.
       # accepted[media] is nil for an older server (fallback to codec tables).
@@ -252,7 +264,7 @@ defmodule MediaServer.Mendooze.Conn do
           # section, which is omitted (see ws_text_section?/1).
           medias:
             descs
-            |> Enum.reject(&ws_text_section?/1)
+            |> Enum.reject(&omit_from_answer?(&1, negotiated))
             |> Enum.map(&answer_or_reject(state, negotiated, &1))
         })
 
@@ -671,6 +683,108 @@ defmodule MediaServer.Mendooze.Conn do
   # return's fmtpByPt struct is the verdict the answer is built from. `nil` means
   # a media server that predates the delegation, which selects the legacy
   # reflection path in answer_codecs/2.
+  # Text over WebSocket: the peer opens a WebSocket towards the media server, so
+  # the receive plane is configured rather than negotiated — there is no codec to
+  # arbitrate (`t140` is the whole vocabulary) and no payload type to allocate.
+  # Three RPCs, in this order: switch the port to a WebSocket one (which mints
+  # the token the URL carries), ask the server for its own WebSocket address,
+  # then open the plane — the token has to exist before a browser can use it.
+  defp open_offered_receive(state, %{transport: :ws} = desc) do
+    media = desc.type
+    m = @media_int[media]
+
+    # RFC 4145: we are the WebSocket server, so the peer must be the one
+    # connecting. A peer committed to `passive` is waiting for a connection we
+    # will never make — decline the section rather than answer a dead one.
+    if Map.get(desc, :setup, :actpass) == :passive do
+      Logger.warning(
+        module: __MODULE__,
+        cnx_tag: state.sess_tag,
+        message:
+          "text over WebSocket offered with a=setup:passive; we are the server, " <>
+            "so nobody would connect — declining the section"
+      )
+
+      {:skip, state}
+    else
+      token = ws_token()
+      rtp_map = Sdp.local_rtp_map(media, @ws_text_codecs)
+
+      with {:ok, _} <-
+             rpc(state, "ConfigureMediaConnection", [
+               state.sess_id,
+               state.endpoint_id,
+               m,
+               @role_main,
+               @proto_ws,
+               token,
+               "t140"
+             ]),
+           {:ok, candidates} when candidates != [] <-
+             rpc(state, "GetMediaCandidates", [
+               state.sess_id,
+               state.endpoint_id,
+               @proto_ws,
+               m
+             ]),
+           {:ok, [port | _rest]} <-
+             rpc(state, "EndpointStartReceiving", [
+               state.sess_id,
+               state.endpoint_id,
+               m,
+               rtp_map
+             ]) do
+        # `<base>/jsr309/<sessionId>/<token>` — the path the server's WebSocket
+        # handler parses, and the token is the only thing tying that URL to this
+        # endpoint's text port.
+        base = candidates |> List.last() |> to_string() |> String.trim_trailing("/")
+        url = Sdp.ws_url_for_sdp("#{base}/jsr309/#{state.sess_id}/#{token}")
+
+        Logger.info(
+          module: __MODULE__,
+          cnx_tag: state.sess_tag,
+          message: "text over WebSocket at #{url}"
+        )
+
+        {:ok,
+         %{
+           state
+           | local_ports: Map.put(state.local_ports, media, port),
+             ws_urls: Map.put(state.ws_urls, media, url),
+             proposed_recv: Map.put(state.proposed_recv, media, rtp_map),
+             # A text-only WebSocket leg has no RTP address, and the session
+             # still needs a `c=` line (RFC 4566 §5.7). The WebSocket's own host
+             # is the honest answer — it IS where this media lives. An RTP media
+             # in the same session stays authoritative.
+             local_ip: state.local_ip || ws_url_host(url)
+         }, %{transport: :ws, rtp_map: rtp_map, send_map: %{}, codecs: ["T140"], dtmf: false}}
+      else
+        {:error, reason} ->
+          # A media server that cannot host the WebSocket is not a reason to
+          # refuse the call: the section is declined (in fact omitted, see
+          # answer_or_reject/3) and the audio/video legs stand.
+          Logger.warning(
+            module: __MODULE__,
+            cnx_tag: state.sess_tag,
+            message:
+              "could not configure text over WebSocket (#{inspect(reason)}); " <>
+                "the text section will be left out of the answer"
+          )
+
+          {:skip, state}
+
+        {:ok, []} ->
+          Logger.warning(
+            module: __MODULE__,
+            cnx_tag: state.sess_tag,
+            message: "media server returned no WebSocket address; text section left out"
+          )
+
+          {:skip, state}
+      end
+    end
+  end
+
   defp open_offered_receive(state, desc) do
     media = desc.type
     m = @media_int[media]
@@ -881,6 +995,13 @@ defmodule MediaServer.Mendooze.Conn do
       end
     end)
   end
+
+  # A text-over-WebSocket leg has no remote side to configure: no RTP
+  # destination to send to (the peer connects to us), no crypto (the WebSocket's
+  # own TLS carries it) and nothing for the RTP watchdog to watch — T.140 is
+  # legitimately silent between keystrokes anyway.
+  defp apply_remote_media(state, %{transport: :ws}, neg, _answering_offer?),
+    do: {:ok, state, neg}
 
   # Applies the §9 remote-side steps for one media: transport properties, the
   # peer's security material, StartSending, then the watchdog — armed last, once
@@ -1117,11 +1238,54 @@ defmodule MediaServer.Mendooze.Conn do
   # codec — hence absent from `negotiated`) is declined with a port-0 rejection
   # echoing the offered transport and format list verbatim (RFC 3264 §6).
   defp answer_or_reject(state, negotiated, desc) do
-    if answerable?(desc, state.medias) and Map.has_key?(negotiated, desc.type) do
-      answer_media_spec(state, negotiated, desc)
-    else
-      reject_media_spec(desc)
+    cond do
+      # A configured text-over-WebSocket section is answered for real, URL
+      # included — this is the section the client is waiting for to open its chat.
+      match?(%{transport: :ws}, desc) and Map.has_key?(negotiated, desc.type) ->
+        ws_answer_spec(state, desc)
+
+      answerable?(desc, state.medias) and Map.has_key?(negotiated, desc.type) ->
+        answer_media_spec(state, negotiated, desc)
+
+      true ->
+        reject_media_spec(desc)
     end
+  end
+
+  # The answer to a text-over-WebSocket offer (design §5.3): the offered
+  # transport mirrored, the literal `t140`, `a=setup:passive` (we are the
+  # server), `a=connection:new`, and the URL in `a=ws`. The port is the one
+  # `EndpointStartReceiving` returned, which for a WebSocket port is the media
+  # server's WebSocket port.
+  defp ws_answer_spec(state, desc) do
+    %{
+      ws_text: Map.fetch!(state.ws_urls, desc.type),
+      type: :text,
+      port: Map.fetch!(state.local_ports, desc.type),
+      protocol: desc.protocol,
+      setup: :passive,
+      direction: Sdp.reverse_direction(desc.direction),
+      mid: Map.get(desc, :mid)
+    }
+  end
+
+  defp ws_url_host(url) do
+    case URI.parse(url) do
+      %URI{host: host} when is_binary(host) and host != "" -> host
+      _ -> "0.0.0.0"
+    end
+  end
+
+  # 128 random bits in the UUID shape the historical gateway used — the server
+  # treats it as an opaque token (`StringParser::ParseToken`), so what matters is
+  # that it is unguessable, not that the version bits are set. One per
+  # configuration: a re-negotiation mints a new URL, which the answer re-signals.
+  defp ws_token() do
+    <<a::binary-4, b::binary-2, c::binary-2, d::binary-2, e::binary-6>> =
+      :crypto.strong_rand_bytes(16)
+
+    [a, b, c, d, e]
+    |> Enum.map_join("-", &Base.encode16(&1, case: :lower))
   end
 
   # A declined section still carries the offer's `a=mid` (JSEP §5.3.1): it is how the
@@ -1593,18 +1757,23 @@ defmodule MediaServer.Mendooze.Conn do
   defp answerable?(desc, medias),
     do: Map.get(desc, :supported?, false) and desc.type in medias
 
-  # A deliberate RFC 3264 §6 violation, scoped to one section: the
-  # text-over-WebSocket m= line is OMITTED from the answer, not declined with
-  # port 0. The Elioz/WebRTComm client injects `m=text … TCP/WSS t140` into the
-  # wire SDP after setLocalDescription and strips the answer's text section
-  # before setRemoteDescription — but its strip does not recognise the port-0
-  # echo, so the browser saw three answer sections against its two-section local
-  # offer and libwebrtc rejected the whole answer (kMlineMismatchInAnswer).
-  # Omitting the section is what deployed clients digest. Only these WS
-  # transports are concerned — a text section offered over RTP is real T.140 and
-  # keeps the standard treatment.
-  defp ws_text_section?(desc),
-    do: desc.type == :text and Map.get(desc, :protocol) in @ws_text_protocols
+  # A deliberate RFC 3264 §6 violation, scoped to one case: a text-over-WebSocket
+  # section we could NOT configure is OMITTED from the answer rather than
+  # declined with port 0. The Elioz/WebRTComm client injects `m=text … TCP/WS
+  # t140` into the wire SDP after setLocalDescription and strips the answer's text
+  # section before setRemoteDescription — but its strip does not recognise the
+  # port-0 echo, so the browser saw three answer sections against its two-section
+  # local offer and libwebrtc rejected the whole answer
+  # (kMlineMismatchInAnswer).
+  #
+  # A section we DID configure is answered for real (`ws_answer_spec/2`): that
+  # answer, and its `a=ws` URL, is precisely what the client is waiting for to
+  # open its chat — and it removes the section itself before handing the SDP to
+  # the browser.
+  defp omit_from_answer?(%{transport: :ws} = desc, negotiated),
+    do: not Map.has_key?(negotiated, desc.type)
+
+  defp omit_from_answer?(_desc, _negotiated), do: false
 
   # After negotiation, at least one media must have produced a real answer
   # (G9: skipped :no_common_codec sections do not count).
