@@ -1396,13 +1396,17 @@ defmodule Mendooze.SdpTest do
       assert desc.setup == :actpass
     end
 
-    test "ws_url_for_sdp/1 states the scheme the deployed client can use" do
-      # it reads only a=ws, and an https URL there is what it turns into wss
-      assert Sdp.ws_url_for_sdp("wss://h:9090/p") == "https://h:9090/p"
-      assert Sdp.ws_url_for_sdp("ws://h:9090/p") == "http://h:9090/p"
-      # already-HTTP and scheme-less values pass through
-      assert Sdp.ws_url_for_sdp("https://h:9090/p") == "https://h:9090/p"
-      assert Sdp.ws_url_for_sdp("//h:9090/p") == "//h:9090/p"
+    test "ws_url_attribute/1 puts the scheme in the attribute name, as the gateway did" do
+      # value relative to the protocol, scheme carried by the name: the line then
+      # reads a=ws://… , which is what lets a client re-prefix "ws:"
+      assert Sdp.ws_url_attribute("ws://h:9090/p") == {"ws", "//h:9090/p"}
+      assert Sdp.ws_url_attribute("wss://h:9090/p") == {"wss", "//h:9090/p"}
+      # the scheme may arrive in either family, since it comes from whatever
+      # GetMediaCandidates answered
+      assert Sdp.ws_url_attribute("http://h:9090/p") == {"ws", "//h:9090/p"}
+      assert Sdp.ws_url_attribute("https://h:9090/p") == {"wss", "//h:9090/p"}
+      # already relative: clear by default
+      assert Sdp.ws_url_attribute("//h:9090/p") == {"ws", "//h:9090/p"}
     end
 
     test "the built section is signalling only, and round-trips" do
@@ -1411,7 +1415,8 @@ defmodule Mendooze.SdpTest do
           ip: "192.168.5.5",
           medias: [
             %{
-              ws_text: "https://192.168.5.5:9090/jsr309/7/tok",
+              ws_text: "//192.168.5.5:9090/jsr309/7/tok",
+              ws_attribute: "wss",
               type: :text,
               port: 9090,
               protocol: "TCP/WSS",
@@ -1425,7 +1430,7 @@ defmodule Mendooze.SdpTest do
       assert sdp_str =~ "m=text 9090 TCP/WSS t140"
       assert sdp_str =~ "a=setup:passive"
       assert sdp_str =~ "a=connection:new"
-      assert sdp_str =~ "a=ws:https://192.168.5.5:9090/jsr309/7/tok"
+      assert sdp_str =~ "a=wss://192.168.5.5:9090/jsr309/7/tok"
       assert sdp_str =~ "a=mid:2"
       # no payload type, no fmtp: the T.140 redundancy is the media server's
       # business and is never negotiated on this section
@@ -1435,7 +1440,7 @@ defmodule Mendooze.SdpTest do
       assert {:ok, [desc]} = Sdp.parse(sdp_str)
       assert desc.transport == :ws
       assert desc.setup == :passive
-      assert desc.ws_url == "https://192.168.5.5:9090/jsr309/7/tok"
+      assert desc.ws_url == "//192.168.5.5:9090/jsr309/7/tok"
       assert desc.mid == "2"
     end
   end

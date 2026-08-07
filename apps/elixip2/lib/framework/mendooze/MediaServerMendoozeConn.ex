@@ -736,21 +736,22 @@ defmodule MediaServer.Mendooze.Conn do
              ]) do
         # `<base>/jsr309/<sessionId>/<token>` — the path the server's WebSocket
         # handler parses, and the token is the only thing tying that URL to this
-        # endpoint's text port.
+        # endpoint's text port. Published the way the gateway did: value relative
+        # to the protocol, scheme in the attribute name (`ws`/`wss`).
         base = candidates |> List.last() |> to_string() |> String.trim_trailing("/")
-        url = Sdp.ws_url_for_sdp("#{base}/jsr309/#{state.sess_id}/#{token}")
+        {attribute, url} = Sdp.ws_url_attribute("#{base}/jsr309/#{state.sess_id}/#{token}")
 
         Logger.info(
           module: __MODULE__,
           cnx_tag: state.sess_tag,
-          message: "text over WebSocket at #{url}"
+          message: "text over WebSocket at a=#{attribute}:#{url}"
         )
 
         {:ok,
          %{
            state
            | local_ports: Map.put(state.local_ports, media, port),
-             ws_urls: Map.put(state.ws_urls, media, url),
+             ws_urls: Map.put(state.ws_urls, media, {attribute, url}),
              proposed_recv: Map.put(state.proposed_recv, media, rtp_map),
              # A text-only WebSocket leg has no RTP address, and the session
              # still needs a `c=` line (RFC 4566 §5.7). The WebSocket's own host
@@ -1254,12 +1255,15 @@ defmodule MediaServer.Mendooze.Conn do
 
   # The answer to a text-over-WebSocket offer (design §5.3): the offered
   # transport mirrored, the literal `t140`, `a=setup:passive` (we are the
-  # server), `a=connection:new`, and the URL in `a=ws`. The port is the one
-  # `EndpointStartReceiving` returned, which for a WebSocket port is the media
-  # server's WebSocket port.
+  # server), `a=connection:new`, and the URL under `a=ws`/`a=wss`. The port is
+  # the one `EndpointStartReceiving` returned, which for a WebSocket port is the
+  # media server's WebSocket port.
   defp ws_answer_spec(state, desc) do
+    {attribute, url} = Map.fetch!(state.ws_urls, desc.type)
+
     %{
-      ws_text: Map.fetch!(state.ws_urls, desc.type),
+      ws_text: url,
+      ws_attribute: attribute,
       type: :text,
       port: Map.fetch!(state.local_ports, desc.type),
       protocol: desc.protocol,
@@ -1269,6 +1273,9 @@ defmodule MediaServer.Mendooze.Conn do
     }
   end
 
+  # The host of a protocol-relative WebSocket URL (`//host:port/path`), for the
+  # session's `c=` line. `URI.parse/1` reads the authority of such a URL without
+  # needing a scheme.
   defp ws_url_host(url) do
     case URI.parse(url) do
       %URI{host: host} when is_binary(host) and host != "" -> host

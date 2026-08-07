@@ -323,18 +323,18 @@ defmodule MediaServer.Mendooze.Sdp do
     |> add_mid(Map.get(mspec, :mid))
   end
 
-  # Text over WebSocket: signalling only, and shaped by what the deployed client
-  # reads (design §5.3). The format is the literal `t140`; `a=setup` says who
-  # connects (we are the server, hence `passive`); `a=connection:new` is RFC 4145;
-  # and the URL travels in **`a=ws`** — always that name, even in TLS — with an
-  # absolute `http`/`https` scheme, which is the form the client turns into
-  # `ws://`/`wss://`. No rtpmap, no fmtp: there is no payload type here, and the
-  # T.140 redundancy is the media server's business, not a negotiated parameter.
+  # Text over WebSocket: signalling only, and shaped by what the deployed clients
+  # were built against (design §5.3). The format is the literal `t140`; `a=setup`
+  # says who connects (we are the server, hence `passive`); `a=connection:new` is
+  # RFC 4145; and the URL travels protocol-relative under `a=ws` or `a=wss`, the
+  # attribute name carrying the scheme (see `ws_url_attribute/1`). No rtpmap, no
+  # fmtp: there is no payload type here, and the T.140 redundancy is the media
+  # server's business, not a negotiated parameter.
   defp build_media(%{ws_text: url, type: :text, port: port, protocol: protocol} = mspec) do
     %ExSDP.Media{type: :text, port: port, protocol: protocol, fmt: "t140"}
     |> ExSDP.add_attribute({:setup, Map.get(mspec, :setup, :passive)})
     |> ExSDP.add_attribute({"connection", "new"})
-    |> maybe_add_ws_url(url)
+    |> maybe_add_ws_url(Map.get(mspec, :ws_attribute, "ws"), url)
     |> ExSDP.add_attribute(Map.get(mspec, :direction, :sendrecv))
     |> add_mid(Map.get(mspec, :mid))
   end
@@ -395,26 +395,36 @@ defmodule MediaServer.Mendooze.Sdp do
   defp add_mid(m, nil), do: m
   defp add_mid(m, mid), do: ExSDP.add_attribute(m, {:mid, to_string(mid)})
 
-  defp maybe_add_ws_url(m, nil), do: m
-  defp maybe_add_ws_url(m, url), do: ExSDP.add_attribute(m, {"ws", url})
+  defp maybe_add_ws_url(m, _attribute, nil), do: m
+  defp maybe_add_ws_url(m, attribute, url), do: ExSDP.add_attribute(m, {attribute, url})
 
   @doc """
-  Turn the media server's own WebSocket URL into the one to publish in SDP:
-  `ws://…` becomes `http://…`, `wss://…` becomes `https://…`.
+  Split a WebSocket URL into the SDP attribute **name** and the **value** to
+  publish, the way the historical gateway did it (`WebSocketLeg.java:88-142`):
+  the value is **relative to the protocol** — `//host:port/path`, no scheme —
+  and the scheme is carried by the attribute name, `ws` in the clear and `wss`
+  over TLS.
 
-  Not cosmetic. `GetMediaCandidates` states the real transport (`ws`/`wss`), and
-  what goes in `a=ws` has to be what the deployed client can use: it reads only
-  that attribute, and an absolute `https://` URL there is what it turns into a
-  `wss://` connection (verified in production 2026-08-07). Anything already in
-  `http`/`https`, or with no scheme at all, is passed through untouched.
+  So the line reads `a=ws://host:port/…`, which looks like a URL only because
+  the SDP separator `:` lands in front of the value's `//`. That is exactly what
+  lets a client re-prefix `"ws:"` and end up with a usable URL — the arrangement
+  the deployed clients were built against.
 
-      iex> MediaServer.Mendooze.Sdp.ws_url_for_sdp("wss://10.0.0.1:9090/jsr309/7/tok")
-      "https://10.0.0.1:9090/jsr309/7/tok"
+  Accepts the four forms in input (`ws`, `wss`, `http`, `https`, or already
+  protocol-relative), since the scheme comes from whatever `GetMediaCandidates`
+  answered.
+
+      iex> MediaServer.Mendooze.Sdp.ws_url_attribute("wss://10.0.0.1:9090/jsr309/7/tok")
+      {"wss", "//10.0.0.1:9090/jsr309/7/tok"}
+      iex> MediaServer.Mendooze.Sdp.ws_url_attribute("ws://10.0.0.1:9090/jsr309/7/tok")
+      {"ws", "//10.0.0.1:9090/jsr309/7/tok"}
   """
-  @spec ws_url_for_sdp(String.t()) :: String.t()
-  def ws_url_for_sdp("wss://" <> rest), do: "https://" <> rest
-  def ws_url_for_sdp("ws://" <> rest), do: "http://" <> rest
-  def ws_url_for_sdp(url), do: url
+  @spec ws_url_attribute(String.t()) :: {String.t(), String.t()}
+  def ws_url_attribute("wss://" <> rest), do: {"wss", "//" <> rest}
+  def ws_url_attribute("ws://" <> rest), do: {"ws", "//" <> rest}
+  def ws_url_attribute("https://" <> rest), do: {"wss", "//" <> rest}
+  def ws_url_attribute("http://" <> rest), do: {"ws", "//" <> rest}
+  def ws_url_attribute("//" <> _rest = url), do: {"ws", url}
 
   defp add_candidates(m, candidates) do
     Enum.reduce(candidates, m, fn cand, acc ->

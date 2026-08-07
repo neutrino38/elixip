@@ -1157,12 +1157,12 @@ defmodule Mendooze.ConnTest do
     refute_received {:jsr309_call, "EndpointStartRTPTimeout", [3, 4, 2, _]}
 
     # the answer mirrors the offered transport, states the literal t140, and
-    # publishes the URL under a=ws with an http scheme — the form the deployed
-    # client turns into a WebSocket connection
+    # publishes the URL the way the historical gateway did: protocol-relative
+    # value, scheme in the attribute name — so the line reads a=ws://…
     assert answer =~ "m=text 9090 TCP/WS t140"
     assert answer =~ "a=setup:passive"
     assert answer =~ "a=connection:new"
-    assert answer =~ "a=ws:http://192.168.5.5:9090/jsr309/3/#{token}"
+    assert answer =~ "a=ws://192.168.5.5:9090/jsr309/3/#{token}"
     # no payload types and no fmtp on a WebSocket section
     refute answer =~ "a=rtpmap:106"
 
@@ -1170,7 +1170,7 @@ defmodule Mendooze.ConnTest do
     assert answer =~ "m=audio 22000 RTP/AVP 0"
   end
 
-  test "a secure media server yields an https URL, under the same a=ws name" do
+  test "a secure media server carries the scheme in the attribute name (a=wss)" do
     handler = fn
       "GetMediaCandidates", [_, _, 2, 2] -> {:ok, ["wss://192.168.5.5:9090"]}
       m, p -> ws_handler().(m, p)
@@ -1181,10 +1181,12 @@ defmodule Mendooze.ConnTest do
 
     assert {:ok, answer} = Mendooze.set_remote_offer(conn, @elioz_offer)
 
-    # `a=wss` is never emitted: the deployed client reads only `a=ws`, and an
-    # https URL there is what it uses over TLS
-    assert answer =~ "a=ws:https://192.168.5.5:9090/jsr309/3/"
-    refute answer =~ "a=wss:"
+    # TLS moves the scheme to the attribute NAME, the value stays relative —
+    # exactly what the gateway emitted (WebSocketLeg.java:123-142)
+    assert answer =~ "a=wss://192.168.5.5:9090/jsr309/3/"
+    # and the port is NOT incremented: the server listens on one port and
+    # switches TLS in place, so the gateway's historical +1 would point nowhere
+    assert answer =~ "m=text 9090 TCP/WS t140"
   end
 
   test "a peer committed to setup:passive is declined, not answered" do
