@@ -2030,7 +2030,7 @@ observations the script has no use for.
 | L12 | A recording is **not resumed** after a media-server restart, and the partial file is left in place | §8.3.8 decision 5 | deliberate |
 | L13 | `recording.*` always records mosaic `0` + sidebar `0`, and `slot.*` always addresses mosaic `0` | §1.2 decision 6b | with `/mosaics` |
 | L14 | An unreadable `logo` is not reported — the server answers OK whatever the picture did | server API | a server increment |
-| L15 | **No real-time text over WebSocket for a conference participant.** A browser cannot carry T.140 on an RTP profile, so a WebRTC participant has no chat — while T.140 **over RTP** works (the MCU wires every participant into the text mixer at `CreateParticipant`). The capability exists, but only on the JSR-309 API (`jsr309_text_over_wss.md`, delivered 2026-08-07): the conference API has no `ConfigureMediaConnection`, and the media server registers a single WebSocket handler, `/jsr309/<sessionId>/<token>`, keyed on a `MediaSession`. This adapter therefore omits such a section from its answer, which is the honest answer — it cannot host it | server API | a server increment, §16.6 (S5) |
+| L15 | ~~**No real-time text over WebSocket for a conference participant.**~~ **Lifted (S5, 2026-08-08)**: the conference API grew `ConfigureParticipantMediaConnection` (one RPC, returns the full URL) and the `/mcu/<confId>/<token>` WebSocket door, and this adapter answers the section on a text-admitted leg (§16.6). What remains true: a text-less admit — or a media server that cannot host the WebSocket — **omits** every `m=text` section from the answer, never a port-0 echo | — | interop campaign with the deployed client |
 | L16 | A script that does not declare `accepts_messages` receives no collaboration message — by design (§20.5 G-2), and the first thing to check when one "does not arrive" | §20 |
 | L17 | The collaboration channel has no total order across senders and no delivery receipt | §20.7 |
 
@@ -2660,13 +2660,36 @@ upgraded before or with kelixip** on any node running conferences.
 
 ---
 
-### 16.6 S5 — text over WebSocket for a conference participant (planned)
+### 16.6 S5 — text over WebSocket for a conference participant (SHIPPED, 2026-08-08)
 
-**Implementation plan (2026-08-08): [mcu_text_over_wss_impl_plan.md](mcu_text_over_wss_impl_plan.md)** —
-both repos phased, plus the answer rule that an admit without text **omits**
-every `m=text` section entirely (never port 0).
+**Shipped on both repos** following
+[mcu_text_over_wss_impl_plan.md](mcu_text_over_wss_impl_plan.md), and proven
+end to end against the binary twice over: raw XML-RPC + two WebSockets
+exchanging text through the mixer (U+FFFD, token lifecycle, guards), then the
+real module + adapter answering the Chrome offer with the URL and a 101 on it.
 
-Lifts **L15**. The whole media plane already exists and is proven: `WSEndpoint`
+- **Server** (mediaserver, 3 commits): `ParticipantTextWS` bridges the
+  WebSocket to the participant's own mixer pipes (no RTP, no RED on that leg);
+  `MultiConf::ConfigureParticipantMediaConnection` switches the text plane,
+  registers the token — which **dies with the participant**, unlike the
+  JSR-309 registry — and refuses `StartReceiving/StartSending(TEXT)`
+  afterwards; the `/mcu/<confId>/<token>` door resolves a token to the bridge.
+  One RPC returns the full URL, scheme decided by the server.
+- **This module** (2 commits + the groundwork): the adapter drives that RPC on
+  a `transport: :ws` section of a text-admitted leg and answers proto-mirrored
+  `t140` + `a=setup:passive` + `a=connection:new` + the URL in the gateway
+  form; nothing else runs on the leg. Omission is the only "no" (§D7): peer
+  `setup:passive`, RPC failure, or a **text-less admit — which now omits every
+  `m=text` section, RTP included, never a port-0 echo**. The Mockup aligned on
+  omission.
+
+Remains: the interop campaign with the deployed Elioz client (the TLS `a=wss`
+defect n°6 in particular — the `https://` absolute-URL fallback is proven).
+
+---
+
+The original statement of the gap, for the record. The whole media plane
+already existed and was proven: `WSEndpoint`
 converts T.140/RED ⇄ WebSocket frames, the `/jsr309/<sessionId>/<token>` handler
 accepts the browser's connection, and the JSR-309 adapter drives it end to end
 (design and status: `jsr309_text_over_wss.md` in the media-server repo). What is

@@ -1,5 +1,18 @@
 # Text over WebSocket for a conference participant — implementation plan
 
+> **Status (2026-08-08): SHIPPED, phases 1-7.** Server: mediaserver commits
+> a0b13be (S5.1 bridge), 56265f1 (S5.2 door), b5a5afc (S5.3 RPC + `/mcu`
+> handler + MCU-API.md) — proven by a raw-XML-RPC smoke run: two WebSockets
+> exchanging text through the mixer, U+FFFD to the survivor, token lifecycle,
+> RTP-text guards. Controller: elixip commits 62f94fd (C5.0), 977f106 (C5.2,
+> the admit-without-text omission), 30356c4 (C5.1+C5.4), e91f1e6 (C5.3) —
+> proven E2E: the real module + adapter answered the Chrome offer against the
+> real binary with the URL, and the published URL took a 101 handshake.
+> Remains: phase 8, the interop campaign with the deployed Elioz client.
+> One deviation from the plan as written: the answer's `m=` port is taken from
+> the returned URL (the WS server port) rather than from a `StartReceiving`,
+> which is never called on that leg.
+
 Chantier **S5** of [mcu_module.md](mcu_module.md) §16.6; lifts limitation **L15**.
 Companion of `jsr309_text_over_wss.md` (media-server repo), whose §11 states the
 problem and whose §5-§7 carry the decisions this plan inherits (URL form, no
