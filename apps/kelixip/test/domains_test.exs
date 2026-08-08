@@ -50,7 +50,13 @@ defmodule Kelix.DomainsTest do
       [ex, my] = snap.domains
       assert ex.aliases == ["example.fr", "example.ca"]
       assert ex.max_calls == 500
-      assert ex.registrar == %{script: "registrar-example.exs", default_expires: 3600, min_expires: 60}
+
+      assert ex.registrar == %{
+               script: "registrar-example.exs",
+               default_expires: 3600,
+               min_expires: 60
+             }
+
       assert ex.presence == %{script: "presence-example.exs"}
       assert ex.dial_plan == []
       assert my.max_calls == nil
@@ -156,6 +162,82 @@ defmodule Kelix.DomainsTest do
     assert {:error, msg2} = Domains.reload("/no/such/domains.toml")
     assert msg2 =~ "cannot read"
     assert Domains.current().version == v1.version
+  end
+
+  describe "script_refs/1 — every script the config names" do
+    test "registrar, presence and each call rule, with the context that names them" do
+      {:ok, snap} = Domains.parse(@valid)
+
+      assert Domains.script_refs(snap) == [
+               {"registrar-example.exs", "domain example.com [domain.registrar]"},
+               {"presence-example.exs", "domain example.com [domain.presence]"},
+               {"registrar-common.exs", "domain mydomain.de [domain.registrar]"},
+               {"user2user.exs", ~s(domain mydomain.de call rule "XXXX")},
+               {"user2pstn.exs", ~s(domain mydomain.de call rule "0[1-9]XXXXXXXX")},
+               {"catchall.exs", "domain mydomain.de call rule default = true"}
+             ]
+    end
+
+    test "a script reused by two rules is listed once" do
+      {:ok, snap} =
+        Domains.parse("""
+        [[domain]]
+        name = "a"
+        [[domain.call]]
+        pattern = "X"
+        script = "same.exs"
+        [[domain.call]]
+        default = true
+        script = "same.exs"
+        """)
+
+      assert [{"same.exs", _}] = Domains.script_refs(snap)
+    end
+
+    test "a domain enabling nothing refers to no script" do
+      {:ok, snap} = Domains.parse(~s([[domain]]\nname = "a"))
+      assert Domains.script_refs(snap) == []
+    end
+  end
+
+  # The regression this whole check exists for: `kelictl domain reload-all` used to
+  # answer :ok on a config whose scripts were missing / uncompilable / not
+  # shutdown-aware, and the operator only found out on the first call routed there.
+  # Asserts on what was swapped in rather than on version numbers: the singleton is
+  # shared with the rest of the suite, which reloads it too.
+  test "reload(check_scripts: true) rejects a config whose scripts are not servable" do
+    scripts = Path.join(__DIR__, "support/scripts")
+    empty = write_tmp("")
+    on_exit(fn -> Domains.reload(empty) end)
+
+    missing = write_tmp(domain_using(Path.join(scripts, "nope.exs")))
+    assert {:error, msg} = Domains.reload(missing, check_scripts: true)
+    assert msg =~ "1 script(s) rejected"
+    assert msg =~ "domain check.example.com [domain.registrar]"
+    assert msg =~ "cannot read"
+    refute Domains.lookup(Domains.current(), "check.example.com")
+
+    no_shutdown = write_tmp(domain_using(Path.join(scripts, "no_shutdown.exs")))
+    assert {:error, msg2} = Domains.reload(no_shutdown, check_scripts: true)
+    assert msg2 =~ "cooperative shutdown"
+    refute Domains.lookup(Domains.current(), "check.example.com")
+
+    # …and accepts the very same config once the script it names is servable
+    good = write_tmp(domain_using(Path.join(scripts, "valid_registrar.exs")))
+    assert :ok = Domains.reload(good, check_scripts: true)
+
+    assert %Domain{name: "check.example.com"} =
+             Domains.lookup(Domains.current(), "check.example.com")
+  end
+
+  defp domain_using(script) do
+    """
+    [[domain]]
+    name = "check.example.com"
+
+    [domain.registrar]
+    script = "#{script}"
+    """
   end
 
   defp write_tmp(content) do

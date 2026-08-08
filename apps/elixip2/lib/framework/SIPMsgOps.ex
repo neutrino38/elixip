@@ -160,6 +160,110 @@ defmodule SIP.Msg.Ops do
 
   defp parse_expires(_value, fallback), do: fallback
 
+  # ── Who a request says it is from (RFC 3261 §8.1.1.3, RFC 3325 §9) ───────────
+  #
+  # THE one place that answers "which identity does this request assert for its
+  # sender", for the same reason as the REGISTER lifetimes above (CLAUDE.md,
+  # Message Layer): every caller — the monitor's `account` column, a module
+  # deciding what to display or to bill — layers its policy on this single
+  # reading rather than picking a header of its own.
+  #
+  # In decreasing order of how much the name can be trusted:
+  #
+  #   1. the digest `username` of Authorization / Proxy-Authorization — the only
+  #      name the server has had a chance to verify;
+  #   2. the user part of P-Asserted-Identity (RFC 3325) — asserted by a trusted
+  #      upstream on the caller's behalf, not by the caller itself;
+  #   3. the user part of From — what the caller claims, which any UA sets freely.
+
+  @doc """
+  The identity a request asserts for its sender, as a bare user name: the digest
+  username it authenticates with, else the user part of P-Asserted-Identity, else
+  the user part of From. `nil` when none of the three yields a name.
+
+  P-Asserted-Identity may carry two values (RFC 3325 §9.1: one `sip:`, one
+  `tel:`), on one line or on two — the first one that yields a user wins, and a
+  `tel:` URI counts (its number IS the user part, even though it is not a SIP URI
+  and does not parse as one).
+  """
+  @spec asserted_username(map()) :: String.t() | nil
+  def asserted_username(msg) when is_map(msg) do
+    auth_username(msg) || header_userpart(msg, "p-asserted-identity") ||
+      uri_userpart(Map.get(msg, :from))
+  end
+
+  @doc """
+  The digest username a request authenticates with (Authorization, else
+  Proxy-Authorization), `nil` when it carries no credentials.
+
+  This is the *claimed* username: the header is only proof once the digest has
+  been checked (`check_authrequest/3`), which is the caller's business.
+  """
+  @spec auth_username(map()) :: String.t() | nil
+  def auth_username(msg) when is_map(msg) do
+    case Map.get(msg, :authorization) || Map.get(msg, :proxyauthorization) do
+      %{"username" => user} -> presence(user)
+      _ -> nil
+    end
+  end
+
+  # A header SIPMsg has no atom for keeps the spelling the peer used as its map key
+  # (`headername_to_atomkey/1`), and header names are case-insensitive (RFC 3261
+  # §7.3.1) — so the lookup is too. Repeated occurrences arrive as a list.
+  defp header_userpart(msg, lowercase_name) do
+    msg
+    |> Enum.find_value(fn
+      {key, value} when is_binary(key) ->
+        if String.downcase(key) == lowercase_name, do: value
+
+      _other ->
+        nil
+    end)
+    |> List.wrap()
+    |> Enum.find_value(&value_userpart/1)
+  end
+
+  # One header value, which may itself hold several comma-separated URIs.
+  defp value_userpart(value) when is_binary(value) do
+    case uri_userpart(value) do
+      nil -> value |> String.split(",") |> Enum.find_value(&uri_userpart/1)
+      user -> user
+    end
+  end
+
+  defp value_userpart(other), do: uri_userpart(other)
+
+  defp uri_userpart(%SIP.Uri{userpart: user}), do: presence(user)
+
+  defp uri_userpart(value) when is_binary(value) do
+    value = String.trim(value)
+
+    case SIP.Uri.parse(value) do
+      {:ok, uri} -> uri_userpart(uri)
+      _not_a_sip_uri -> tel_number(value)
+    end
+  end
+
+  defp uri_userpart(_other), do: nil
+
+  # `tel:+33970260233;phone-context=+33` and `<tel:+33970260233>` assert
+  # +33970260233. SIP.Uri does not model a tel: URI, and teaching it to would
+  # change every parse in the stack — the number is read here instead.
+  @tel_uri ~r/^(?:[^<]*<)?tel:([^;>\s]+)/i
+
+  defp tel_number(value) do
+    case Regex.run(@tel_uri, value) do
+      [_match, number] -> presence(number)
+      _no_tel_uri -> nil
+    end
+  end
+
+  defp presence(value) when is_binary(value) do
+    if String.trim(value) == "", do: nil, else: value
+  end
+
+  defp presence(_other), do: nil
+
   @doc "Add a tomost via"
   def add_via(sipmsg, { local_ip, local_port, transport }, branch_id, additional_params \\ nil) when is_bitstring(branch_id) do
     via = build_via_addr(local_ip, local_port, transport)

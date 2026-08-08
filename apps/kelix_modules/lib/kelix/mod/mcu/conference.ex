@@ -29,6 +29,13 @@ defmodule Kelix.Mod.Mcu.Conference do
           conn: pid | nil,
           state: :ringing | :connected | :leaving,
           medias: map,
+          # §20: whether this leg's script declared it handles the collaboration
+          # channel. Only a leg that did is ever sent a `{:mcu_message, …}`.
+          accepts_messages: boolean,
+          # P7/S1: per-media RTP silence, keyed by media atom. A leg is only
+          # reaped once EVERY watched media (all but text) is silent, so this
+          # is the AND's state — set by event 3, cleared by event 4.
+          silent: %{optional(atom) => true},
           admitted_at: DateTime.t(),
           joined_at: DateTime.t() | nil
         }
@@ -43,8 +50,15 @@ defmodule Kelix.Mod.Mcu.Conference do
             conf_id: nil,
             vad: 1,
             rate: 32_000,
-            codecs: %{audio: [], video: [], text: []},
+            # Which m= sections this conference answers at all (§8.4). The codecs inside
+            # them are the media server's call since P8a — a conference holds no codec
+            # list at all, which is what made `medias` necessary.
+            medias: [:audio, :video, :text],
             dtmf: true,
+            # RTP inactivity watchdog armed per media at the ACK (§16.1). Comes from
+            # `[module.mcu] rtp_timeout_ms`; 0 disables it. Lives on the conference so
+            # the adapter reads it off the leg it is setting up, like `video`.
+            rtp_timeout_ms: 10_000,
             video: %{size: 6, fps: 15, bitrate: 1024, intra_period: 300},
             layout: %{comp: 1, size: 6, auto: true},
             max_participants: 20,
@@ -86,6 +100,35 @@ defmodule Kelix.Mod.Mcu.Conference do
     do: Enum.find(participants(conf), &(&1.part_id == part_id))
 
   @doc """
+  The participant a **human-typed name** designates: its full name
+  (`alice@phone_example_com`) or just the user part — nobody wants to type the first.
+
+  `{:ambiguous, [part_id]}` when two legs of the same user match: a coin flip between
+  them is never the right answer, and the caller can say which ids to choose from.
+  Only legs that reached the mixer (`part_id` set) are candidates.
+
+  One reading, two callers: pinning a mosaic slot by name (§8.3.8) and addressing a
+  collaboration message by name (§20.4).
+  """
+  @spec by_name(t, String.t()) :: {:ok, participant} | :error | {:ambiguous, [pos_integer]}
+  def by_name(%__MODULE__{} = conf, name) when is_binary(name) do
+    wanted = name |> String.trim() |> String.downcase()
+
+    case Enum.filter(participants(conf), &(is_integer(&1.part_id) and matches?(&1.name, wanted))) do
+      [one] -> {:ok, one}
+      [] -> :error
+      many -> {:ambiguous, many |> Enum.map(& &1.part_id) |> Enum.sort()}
+    end
+  end
+
+  defp matches?(nil, _wanted), do: false
+
+  defp matches?(name, wanted) do
+    name = String.downcase(name)
+    name == wanted or hd(String.split(name, "@")) == wanted
+  end
+
+  @doc """
   A REST/CLI view of the conference: the operator-facing fields, participants
   summarised rather than dumped (pids and media detail are not an API).
   """
@@ -100,7 +143,10 @@ defmodule Kelix.Mod.Mcu.Conference do
       conf_id: conf.conf_id,
       vad: conf.vad,
       rate: conf.rate,
-      codecs: conf.codecs,
+      # what this conference answers, which is the policy the codec lists used to
+      # express: the codecs themselves are the media server's and not ours to report
+      medias: conf.medias,
+      dtmf: conf.dtmf,
       video: conf.video,
       layout: conf.layout,
       max_participants: conf.max_participants,

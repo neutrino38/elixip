@@ -327,6 +327,14 @@ candidates: Sdp.host_candidates(local_ip, port, desc.rtcp_mux)
 rtcp_fb:   media == :video and String.ends_with?(desc.protocol, "F")
 ```
 
+> **Superseded (2026-08)**: the answer no longer gates `rtcp_fb` on a feedback
+> profile — it is the intersection of the offered `a=rtcp-fb` set with the
+> supported types (`answered_rtcp_fb/1`), emitted under plain `RTP/AVP`/`RTP/SAVP`
+> too. Linphone 6.2.0 offers `RTP/SAVP` with `a=rtcp-fb` lines and reads the
+> answer's attributes, not its profile string; an assumed RFC 4585 §4 deviation,
+> documented in `mcu_module.md` §6.3.1 rule 3. On the DTLS path shown here the
+> profile always ends in `F`, so the WebRTC behaviour is unchanged.
+
 plus `ice_lite: true` at session level. No `a=group:BUNDLE` is emitted or
 acknowledged (Java-validated scope, §1.7); each m= keeps its own port. Note
 the answer `setup` fix (G3) applies to *every* DTLS answer, browser-facing or
@@ -609,7 +617,15 @@ phase 5 completes the UAS side.
 > m= in order — unsupported/non-RTP ones as `supported?: false` stubs — and
 > `Conn`/`Mockup` echo one answer m= per offer m=, declining the rest with a
 > port-0 rejection). The captured Chrome 142 offer now answers completely
-> (§2.8 test 6). **Remaining: phase 4 test 10** — real-platform call
+> (§2.8 test 6).
+>
+> **2026-08-06** — a port-0 rejection now also echoes the offered section's
+> `a=mid` (JSEP RFC 8829 §5.3.1 asks for it on *every* answer section, and a
+> browser matches its transceivers by that name): `parse/1` keeps `mid` in the
+> `supported?: false` stubs, `build/1` emits it on a `reject_fmt` spec, and both
+> answerers pass it. Found while making the **MCU** module's answer
+> browser-proof — that adapter mirrored the whole transport plane except the mid,
+> which no SIP handset and no gateway offers, so nothing had exercised it. **Remaining: phase 4 test 10** — real-platform call
 > `elixipp -c ives.json scenarios/uac_invite_webrtc.exs` (settles Q4/Q5 on the
 > IVeS gateway; ives.json is UDP:5060, adjust proxyuri for WSS and confirm the
 > destination account before dialing). The P5 wiring (real `:ice_connected`

@@ -13,9 +13,11 @@ defmodule MediaServer.SdpTools do
   `docs/design/mcu_module.md` §6.3): new adapters use this name, the JSR-309 one
   keeps calling its own module directly, and the codec tables stay in one place.
 
-  Only the answerer-side subset is re-exported. Everything about the delegated
-  negotiation of the JSR-309 path (`accepted_pts/2`, `restrict_send_map/3`) stays
-  where it is used — the MCU API returns no accepted-PT struct yet (G1).
+  The **delegated negotiation** helpers are re-exported too since P8a: the MCU API now
+  returns an accepted-PT struct of its own (`StartReceiving`'s `returnVal[2]`), so
+  `accepted_pts/2` and `restrict_send_map/3` are no longer JSR-309-only. What is
+  deliberately NOT re-exported is `negotiate/3`: intersecting codec lists is exactly
+  the job that moved to the media server, and a conference has no list to intersect.
   """
 
   alias MediaServer.Mendooze.Sdp
@@ -29,11 +31,22 @@ defmodule MediaServer.SdpTools do
   @doc "Intersect a remote media descriptor with our codec list. See `MediaServer.Mendooze.Sdp.negotiate/3`."
   defdelegate negotiate(desc, our_names, want_dtmf), to: Sdp
 
+  @doc """
+  Propose every offered payload type, for a delegated negotiation (P8a).
+
+  The replacement for `negotiate/3` wherever the media server arbitrates: the offer is
+  the menu. See `MediaServer.Mendooze.Sdp.propose_all/2`.
+  """
+  defdelegate propose_all(desc, want_dtmf), to: Sdp
+
   @doc "The `rtpMap` struct for our own payload-type numbering."
   defdelegate local_rtp_map(kind, codec_names, dtmf), to: Sdp
 
   @doc "Ordered answer `rtpmap` entries in the offerer's payload-type numbering (RFC 3264)."
   defdelegate answer_rtpmaps(media, negotiated), to: Sdp
+
+  @doc "Rank a payload type against the offer's format list (its preference order)."
+  defdelegate pt_rank(pt, fmt_order), to: Sdp
 
   @doc "Local ICE host candidates for one media."
   defdelegate host_candidates(ip, port, rtcp_mux?), to: Sdp
@@ -46,4 +59,46 @@ defmodule MediaServer.SdpTools do
 
   @doc "SDP `rtpmap` fields for a Medooze codec constant."
   defdelegate code_rtpmap(media, code), to: Sdp
+
+  @doc """
+  Reduce the server's fmtp-by-payload-type struct to the accepted set.
+
+  Presence of a key **is** the accept signal — a codec with no fmtp is present with an
+  empty value, and an absent payload type was filtered. Returns `nil` when the struct
+  is `nil` (a media server that predates the delegation), which is what selects the
+  legacy client-side path.
+  """
+  defdelegate accepted_pts(proposed, fmtp_struct), to: Sdp
+
+  @doc """
+  Restrict a send `rtpMap` to what the server accepted on receive.
+
+  Keeps us from sending a codec the server just filtered — the symmetric-codec
+  assumption, which is what a conference mixer does anyway.
+  """
+  defdelegate restrict_send_map(send_map, proposed_recv, accepted), to: Sdp
+
+  @doc """
+  Drop, from a server verdict, the payload types whose returned fmtp contradicts
+  what the offer declared for that payload type (RFC 3264 §6.1, RFC 6184 §8.2.2).
+
+  Returns `{kept, dropped}`; the caller logs `dropped` with its own context. See
+  `MediaServer.Mendooze.Sdp.conformant_pts/3`.
+  """
+  defdelegate conformant_pts(accepted, desc, rtp_map), to: Sdp
+
+  @doc """
+  The `{attribute_name, value}` pair publishing a WebSocket text URL in an
+  answer — scheme in the attribute name (`ws`/`wss`), protocol-relative value.
+  See `MediaServer.Mendooze.Sdp.ws_url_attribute/1`.
+  """
+  defdelegate ws_url_attribute(url), to: Sdp
+
+  @doc """
+  The lowest AV1 `seq_level_idx` covering a picture size and frame rate.
+
+  What the announced `level-idx` must be, derived from what we will really
+  encode. See `MediaServer.Mendooze.Sdp.av1_level_idx/3`.
+  """
+  defdelegate av1_level_idx(width, height, fps), to: Sdp
 end

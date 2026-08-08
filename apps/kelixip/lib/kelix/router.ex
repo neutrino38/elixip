@@ -100,6 +100,17 @@ defmodule Kelix.Router do
         {:reject, code, reason}
 
       {:route, %{domain: domain, function: function, script: script}} ->
+        # The routing decision itself, before the quota and the spawn: without it
+        # the only script name in the log is the one the operator *believes* is
+        # served, and a dial-plan mismatch is invisible until someone reads the
+        # media the call actually produced.
+        Logger.info(
+          module: __MODULE__,
+          message:
+            "dial-plan: #{Map.get(req, :method)} #{ruri_user(req) || "-"}@#{domain.name} " <>
+              "-> #{function} script #{script}"
+        )
+
         route = %{
           domain: domain.name,
           function: function,

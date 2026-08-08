@@ -206,9 +206,15 @@ defmodule Kelix.InstancePool do
             next_id: id + 1
         }
 
-        Logger.debug(
+        # INFO, not debug, and it names the *module*: the script name comes from the
+        # dial plan, the module is what actually runs. Two scripts that declare the
+        # same `defmodule` compile to the same versioned BEAM module, so the two
+        # differ — and that is the only place it shows.
+        Logger.info(
           module: __MODULE__,
-          message: "accepted #{function} on #{domain} → #{inspect(pid)}"
+          message:
+            "instance #{id}: #{function} on #{domain} script #{script} " <>
+              "running #{inspect(module)} (v#{version}) → #{inspect(pid)}"
         )
 
         {:reply, {:accept, pid}, bump(state2, :started)}

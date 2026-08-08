@@ -183,14 +183,14 @@ defmodule MediaMockupTest do
 
       {:ok, answer} = Mockup.set_remote_offer(conn, offer)
 
-      # G9: one answer m= per offered m=, in order — the non-RTP text section is
-      # declined with port 0 while audio/video carry real answers.
-      assert {:ok, [aud, vid, txt]} = Sdp.parse(answer)
+      # G9: one answer m= per offered m=, in order — except the WS text section,
+      # which is OMITTED like both real adapters do (S5 plan §D7: the deployed
+      # client does not digest a port-0 echo), this stub having no WebSocket
+      # server to host it anyway.
+      assert {:ok, [aud, vid]} = Sdp.parse(answer)
       assert aud.type == :audio and aud.port != 0
       assert vid.type == :video and vid.port != 0
-      refute txt.supported?
-      assert txt.port == 0
-      assert answer =~ "m=text 0 TCP/WSS t140"
+      refute answer =~ "m=text"
 
       # numeric mids echoed verbatim, gateway-shaped DTLS role
       assert aud.mid == "0"

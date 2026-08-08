@@ -166,28 +166,58 @@ defmodule Kelix.Mod.McuAdminTest do
     end
 
     test "the short layout form is the same update, in names (§8.3.7)", ctx do
-      assert {:ok, %{changed: [:layout]}} =
-               Mcu.handle_control("conference.update", %{
-                 "uid" => ctx.uid,
-                 "layout" => "3x3 vga"
-               })
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, %{changed: [:layout]}} =
+                   Mcu.handle_control("conference.update", %{
+                     "uid" => ctx.uid,
+                     "layout" => "3x3 vga"
+                   })
+        end)
 
-      assert_received {:rpc, "SetCompositionType", [42, 0, 2, 2]}
+      # the mosaic moves; the canvas SIZE does not, because the canvas is the encoded
+      # picture (`align_canvas/3`) and this conference encodes hd720p
+      assert_received {:rpc, "SetCompositionType", [42, 0, 2, 6]}
+      assert log =~ "mosaic canvas size vga ignored"
+      assert log =~ "ENCODED size hd720p"
+
       # naming a mosaic left `auto`, so the next arrival cannot undo the operator's
       # choice — the reason the short form implies what the wire form does not
-      assert {:ok, %{layout: %{comp: 2, size: 2, auto: false}}} = Mcu.conference(ctx.uid)
+      assert {:ok, %{layout: %{comp: 2, size: 6, auto: false}}} = Mcu.conference(ctx.uid)
     end
 
-    test "a size alone keeps the mosaic, and `auto` alone keeps both", ctx do
-      assert {:ok, _} =
-               Mcu.handle_control("conference.update", %{"uid" => ctx.uid, "layout" => "cif"})
+    # A canvas of its own is what produced the stretched mosaic of 2026-08-06: composing
+    # at one geometry and encoding at another means rescaling between the two, which the
+    # media server does without preserving the aspect ratio. So a size in `layout` is
+    # reported and dropped; `video.size` is the one that moves the picture.
+    test "a canvas size alone changes nothing, and `auto` alone keeps the rest", ctx do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, _} =
+                   Mcu.handle_control("conference.update", %{"uid" => ctx.uid, "layout" => "cif"})
+        end)
 
-      assert {:ok, %{layout: %{comp: 1, size: 1, auto: true}}} = Mcu.conference(ctx.uid)
+      assert log =~ "mosaic canvas size cif ignored"
+      assert {:ok, %{layout: %{comp: 1, size: 6, auto: true}}} = Mcu.conference(ctx.uid)
 
       assert {:ok, _} =
                Mcu.handle_control("conference.update", %{"uid" => ctx.uid, "layout" => "manual"})
 
-      assert {:ok, %{layout: %{comp: 1, size: 1, auto: false}}} = Mcu.conference(ctx.uid)
+      assert {:ok, %{layout: %{comp: 1, size: 6, auto: false}}} = Mcu.conference(ctx.uid)
+    end
+
+    # The other half of the same rule: moving the ENCODED size moves the canvas, even
+    # when the caller never mentioned the layout — otherwise the composite would go back
+    # to being rescaled.
+    test "changing video.size re-issues the composition", ctx do
+      assert {:ok, _} =
+               Mcu.handle_control("conference.update", %{
+                 "uid" => ctx.uid,
+                 "video" => %{"size" => 2}
+               })
+
+      assert_received {:rpc, "SetCompositionType", [42, 0, 1, 2]}
+      assert {:ok, %{layout: %{size: 2}, video: %{size: 2}}} = Mcu.conference(ctx.uid)
     end
 
     test "a mistyped layout is a refusal that prints the vocabulary", ctx do
@@ -218,16 +248,27 @@ defmodule Kelix.Mod.McuAdminTest do
 
       assert {:ok, conf} = Mcu.conference(ctx.uid)
 
-      assert conf.video == %{
-               size: 6,
-               fps: 15,
-               bitrate: 2048,
-               intra_period: 300,
-               fmtp: "profile-level-id=42e01f;packetization-mode=1"
-             }
+      assert conf.video == %{size: 6, fps: 15, bitrate: 2048, intra_period: 300}
 
       assert conf.max_participants == 2
       assert TestStub.rpc_order() == []
+    end
+
+    # §8.4: they used to be answered "read-only field"; now they are simply dropped with
+    # a warning, so an old client's update still applies the fields that do exist.
+    test "the retired codec arguments are ignored, and the rest of the update applies", ctx do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, _} =
+                   Mcu.handle_control("conference.update", %{
+                     "uid" => ctx.uid,
+                     "audio_codecs" => ["pcma"],
+                     "max_participants" => 7
+                   })
+        end)
+
+      assert log =~ "conference.update: `audio_codecs` is no longer honoured"
+      assert {:ok, %{max_participants: 7}} = Mcu.conference(ctx.uid)
     end
 
     test "lowering max_participants below the current count disconnects nobody", ctx do
@@ -806,6 +847,72 @@ defmodule Kelix.Mod.McuAdminTest do
     test "anything else is refused before the registry is asked", ctx do
       {:ok, conf} = Mcu.conference(ctx.uid)
       assert {:error, :bad_displayname} = Mcu.admit(@domain, invite(conf.did), displayname: 42)
+    end
+  end
+
+  # ── JSR309 mutual exclusion (context-aware facade) ────────────────────────────
+  # MCU and JSR309 calls are mutually exclusive on one SIP session: the
+  # context-aware admit/attach/leave answer through `sip_ctx.lasterr` only, and
+  # refuse a context that already carries a JSR309 peer connection.
+
+  describe "JSR309 mutual exclusion" do
+    test "a context with no media session goes through admit, attach and leave", ctx do
+      {:ok, conf} = Mcu.conference(ctx.uid)
+
+      sip_ctx = Mcu.admit(%SIP.Context{}, @domain, invite(conf.did))
+
+      assert sip_ctx.lasterr == :ok
+      assert SIP.Context.appdata_get(sip_ctx, :mcu_conf).uid == ctx.uid
+      part = SIP.Context.appdata_get(sip_ctx, :mcu_part)
+      assert part.conf_uid == ctx.uid
+
+      # the MCU leg's own peer connection — what the media macros store between
+      # admit and attach — must keep passing the check
+      {:ok, client} = Adapter.connect("mcu://" <> conf.mcu)
+
+      {:ok, conn} =
+        Adapter.create_peer_connection(client, self(), mcu_participant: part, media: :audio)
+
+      {:ok, _answer} = Adapter.set_remote_offer(conn, @offer)
+
+      sip_ctx =
+        sip_ctx
+        |> SIP.Context.set(:mediaservermodule, Adapter)
+        |> SIP.Context.appdata_set(:mediapeerconnectionid, conn)
+
+      sip_ctx = Mcu.attach(sip_ctx)
+      assert sip_ctx.lasterr == :ok
+
+      sip_ctx = Mcu.leave(sip_ctx, :bye)
+      assert sip_ctx.lasterr == :ok
+      {:ok, conf} = Mcu.conference(ctx.uid)
+      assert conf.participants == %{}
+    end
+
+    test "a JSR309 media session in the context refuses admit, attach and leave", ctx do
+      {:ok, conf} = Mcu.conference(ctx.uid)
+
+      # what a scenario that ran media_connect() + an SDP exchange on a JSR309
+      # media server carries in its context
+      jsr_ctx =
+        %SIP.Context{}
+        |> SIP.Context.set(:mediaservermodule, MediaServer.Mockup)
+        |> SIP.Context.appdata_set(:mediapeerconnectionid, make_ref())
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert Mcu.admit(jsr_ctx, @domain, invite(conf.did)).lasterr ==
+                   :jsr309_media_already_in_use
+        end)
+
+      assert log =~ "A JSR309 media session is already in progress"
+
+      # refused before touching the conference: no slot was reserved
+      {:ok, conf} = Mcu.conference(ctx.uid)
+      assert conf.participants == %{}
+
+      assert Mcu.attach(jsr_ctx).lasterr == :jsr309_media_already_in_use
+      assert Mcu.leave(jsr_ctx, :bye).lasterr == :jsr309_media_already_in_use
     end
   end
 

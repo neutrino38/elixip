@@ -116,7 +116,9 @@ defmodule Kelix.Mod.McuTest do
       # defaults applied from the config block
       assert conf.vad == 1
       assert conf.rate == 32_000
-      assert conf.codecs.audio == ["OPUS", "G722", "PCMA", "PCMU"]
+      # what it answers, not which codecs: the media server arbitrates those (P8a)
+      assert conf.medias == [:audio, :video, :text]
+      assert conf.dtmf == true
       assert conf.layout == %{comp: 1, size: 6, auto: true}
     end
 
@@ -180,7 +182,8 @@ defmodule Kelix.Mod.McuTest do
                  "name" => "Sales weekly",
                  "vad" => 2,
                  "rate" => 16_000,
-                 "audio_codecs" => ["pcma"],
+                 "medias" => ["audio", "video"],
+                 "dtmf" => false,
                  "max_participants" => 4,
                  "destroy_when_empty" => true,
                  "video" => %{"fps" => 25},
@@ -191,21 +194,19 @@ defmodule Kelix.Mod.McuTest do
       assert conf.name == "Sales weekly"
       assert conf.vad == 2
       assert conf.rate == 16_000
-      assert conf.codecs.audio == ["PCMA"]
+      assert conf.medias == [:audio, :video]
+      assert conf.dtmf == false
       assert conf.max_participants == 4
       assert conf.destroy_when_empty == true
       # a partial video override keeps the rest of the profile
-      assert conf.video == %{
-               size: 6,
-               fps: 25,
-               bitrate: 1024,
-               intra_period: 300,
-               fmtp: "profile-level-id=42e01f;packetization-mode=1"
-             }
+      assert conf.video == %{size: 6, fps: 25, bitrate: 1024, intra_period: 300}
 
-      assert conf.layout == %{comp: 6, size: 2, auto: true}
+      # the mosaic keeps the requested composition but NOT a canvas size of its own: the
+      # canvas is the encoded picture, so it follows `video.size` (hd720p here, the
+      # configured default this create did not override)
+      assert conf.layout == %{comp: 6, size: 6, auto: true}
       assert_received {:rpc, "CreateConference", [^uid, 2, 16_000, 7]}
-      assert_received {:rpc, "SetCompositionType", [42, 0, 6, 2]}
+      assert_received {:rpc, "SetCompositionType", [42, 0, 6, 6]}
     end
 
     test "the human forms create the same conference (§8.3.7)" do
@@ -220,10 +221,12 @@ defmodule Kelix.Mod.McuTest do
       assert {:ok, conf} = Mcu.conference(uid)
       assert conf.vad == 2
       assert conf.video.size == 2
-      # `1+1` implies manual: an operator who names a mosaic at create time means it
-      assert conf.layout == %{comp: 6, size: 6, auto: false}
+      # `1+1` implies manual: an operator who names a mosaic at create time means it.
+      # `720p` in the layout is a canvas size, so it is dropped for `video.size` (vga
+      # here) — composing and encoding at two geometries is what stretched the mosaic.
+      assert conf.layout == %{comp: 6, size: 2, auto: false}
       assert_received {:rpc, "CreateConference", [^uid, 2, 32_000, 7]}
-      assert_received {:rpc, "SetCompositionType", [42, 0, 6, 6]}
+      assert_received {:rpc, "SetCompositionType", [42, 0, 6, 2]}
     end
 
     test "an unknown or badly typed argument is refused, and nothing is created" do
@@ -237,6 +240,27 @@ defmodule Kelix.Mod.McuTest do
 
     test "an unknown mcu name is refused" do
       assert {:error, :unknown_mcu} = create(%{"domain" => @domain, "mcu" => "ghost"})
+    end
+
+    # §8.4: the REST body of a client we do not own may still carry them. Ignored with
+    # a warning, never a 400 — the same tolerance the config block gives them.
+    test "the retired codec arguments are ignored with a warning" do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, %{uid: uid}} =
+                   create(%{
+                     "domain" => @domain,
+                     "audio_codecs" => ["pcma"],
+                     "video_codecs" => ["h264"]
+                   })
+
+          assert {:ok, conf} = Mcu.conference(uid)
+          assert conf.medias == [:audio, :video, :text]
+          assert conf.dtmf == true
+        end)
+
+      assert log =~ "conference.create: `audio_codecs` is no longer honoured"
+      assert log =~ "conference.create: `video_codecs` is no longer honoured"
     end
 
     test "the CLI arg shape reaches the same place" do

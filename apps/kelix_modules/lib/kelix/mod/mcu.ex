@@ -47,7 +47,7 @@ defmodule Kelix.Mod.Mcu do
   require Logger
 
   alias Kelix.Metrics.Emit
-  alias Kelix.Mod.Mcu.{Adapter, Args, Client, Conference, Config, Event, Vocabulary}
+  alias Kelix.Mod.Mcu.{Adapter, Args, Client, Conference, Config, Event, Message, Vocabulary}
   alias Kelix.Mod.Mcu.Supervisor, as: McuSupervisor
 
   @conf_table :kelix_mcu_conferences
@@ -62,6 +62,11 @@ defmodule Kelix.Mod.Mcu do
   # update a row — so they are bounded tightly: a wedged registry must answer the
   # INVITE (with a 500) rather than let the caller retransmit into the void.
   @facade_timeout_ms 5_000
+
+  # What the context-aware facade (`admit/4`, `attach/2`, `leave/3`) answers — and
+  # stores in `sip_ctx.lasterr` — when the session already runs a JSR309 media
+  # session: MCU and JSR309 calls are mutually exclusive.
+  @jsr309_error :jsr309_media_already_in_use
 
   # The default mosaic and the default sidebar are the only ones this increment
   # drives (§1.2, decision 6b).
@@ -90,16 +95,21 @@ defmodule Kelix.Mod.Mcu do
 
   # ── argument vocabularies, shared by both frontals and the facade (§17.2) ─────
 
-  @create_args ~w(domain name did mcu vad rate audio_codecs video_codecs text_codecs
+  # `medias` and `dtmf` are the policy the codec lists used to encode (§8.4, P8a). The
+  # lists themselves are gone: `drop_retired/2` strips them — with a warning — before
+  # any of these vocabularies is consulted, so a script written against them keeps
+  # working for one release without them deciding anything (§16.3, the media server
+  # arbitrates codecs).
+  @create_args ~w(domain name did mcu vad rate medias dtmf
                   video layout logo max_participants destroy_when_empty)
 
-  @update_args ~w(uid name vad rate layout video logo max_participants destroy_when_empty)
+  @update_args ~w(uid name vad rate medias dtmf layout video logo max_participants
+                  destroy_when_empty)
 
   # Fields a client may read but never send (§8.3.3). Named as read-only rather than
   # merely unknown: an operator who tries to move `conf_id` or `did` deserves to be
   # told which of the two it is.
-  @conference_readonly ~w(conf_id created_at participants stale domain did mcu
-                          audio_codecs video_codecs text_codecs)
+  @conference_readonly ~w(conf_id created_at participants stale domain did mcu)
   @participant_readonly ~w(name state medias joined_at conn scenario)
 
   # ── Kelix.Module behaviour ───────────────────────────────────────────────────
@@ -189,7 +199,11 @@ defmodule Kelix.Mod.Mcu do
         lookup_did: 2,
         conference: 1,
         mediaserver: 1,
-        media_config: 1
+        media_config: 1,
+        # the collaboration channel (§20, P10)
+        accept_messages: 1,
+        send_message: 4,
+        send_message: 5
       ]
     }
 
@@ -312,10 +326,12 @@ defmodule Kelix.Mod.Mcu do
   Create a conference from a scenario (§17.2).
 
   `opts` is a keyword list with atom keys — `name:`, `did:`, `mcu:`, `vad:`, `rate:`,
-  `audio_codecs:`, `video_codecs:`, `text_codecs:`, `video:`, `layout:`,
-  `max_participants:`, `destroy_when_empty:`, `owner:` — validated by exactly the same
-  code as the REST body of `conference.create`, so the two produce indistinguishable
-  conferences (§17.2).
+  `medias:`, `dtmf:`, `video:`, `layout:`, `logo:`, `max_participants:`,
+  `destroy_when_empty:`, `owner:` — validated by exactly the same code as the REST body
+  of `conference.create`, so the two produce indistinguishable conferences (§17.2).
+  There is no codec list: the media server arbitrates codecs (§16.3), and the retired
+  `audio_codecs:` / `video_codecs:` / `text_codecs:` / `video_fmtp:` are accepted and
+  ignored with a warning for one release.
 
   ## Ownership
 
@@ -368,7 +384,11 @@ defmodule Kelix.Mod.Mcu do
   """
   @spec update_conference(String.t(), keyword) :: {:ok, [atom]} | {:error, atom | String.t()}
   def update_conference(uid, changes) when is_binary(uid) and is_list(changes) do
-    args = changes |> Args.stringify_keys() |> Map.put("uid", uid)
+    args =
+      changes
+      |> Args.stringify_keys()
+      |> Map.put("uid", uid)
+      |> drop_retired("update_conference")
 
     with :ok <- Args.reject_readonly(args, @conference_readonly),
          :ok <- Args.reject_unknown(args, @update_args),
@@ -402,7 +422,12 @@ defmodule Kelix.Mod.Mcu do
   # process, so `owner: :caller` there would destroy the conference the moment the
   # response was sent.
   defp create_args(domain, opts) do
-    args = opts |> Args.stringify_keys() |> Map.put("domain", domain)
+    args =
+      opts
+      |> Args.stringify_keys()
+      |> Map.put("domain", domain)
+      |> drop_retired("create_conference")
+
     {owner, args} = Map.pop(args, "owner", :caller)
 
     with :ok <- Args.reject_unknown(args, @create_args),
@@ -460,6 +485,43 @@ defmodule Kelix.Mod.Mcu do
     end
   end
 
+  def admit(sip_ctx = %SIP.Context{}, domain, req), do: admit(sip_ctx, domain, req, [])
+
+  @doc """
+  Context-aware `admit/3`, for scenario scripts. The verdict travels through the
+  context, never through the return value — this returns the updated `sip_ctx`
+  only, and the scenario tests `sip_ctx.lasterr` and reacts:
+
+    * `:ok` — admitted; the conference and the participant handle are stored in
+      the context appdata under `:mcu_conf` and `:mcu_part` (where the
+      context-aware `attach/1` and `leave/2` read them back);
+    * `{:error, reason}` — `admit/3`'s verdicts, for the script to map onto a
+      SIP response;
+    * `#{inspect(@jsr309_error)}` — an MCU call and a JSR309 media session are
+      mutually exclusive on the same SIP session: the context already carries a
+      JSR309 peer connection, so the call is refused without touching the
+      conference and an error is logged. A pending `goto` aborts the scenario
+      on any non-`:ok` value.
+  """
+  @spec admit(%SIP.Context{}, String.t(), map, keyword) :: %SIP.Context{}
+  def admit(sip_ctx = %SIP.Context{}, domain, req, opts) do
+    case no_jsr309_media(sip_ctx) do
+      {:ok, sip_ctx} ->
+        case admit(domain, req, opts) do
+          {:ok, conf, part} ->
+            sip_ctx
+            |> SIP.Context.appdata_set(:mcu_conf, conf)
+            |> SIP.Context.appdata_set(:mcu_part, part)
+
+          {:error, _reason} = err ->
+            SIP.Context.set(sip_ctx, :lasterr, err)
+        end
+
+      {:error, sip_ctx} ->
+        sip_ctx
+    end
+  end
+
   @doc """
   ACK-time: start sending, join the audio mixer, and mark the participant joined
   (§6.2, second half).
@@ -468,7 +530,34 @@ defmodule Kelix.Mod.Mcu do
   filling up must not serialise its joins behind one process. Only the row update is
   serialised, which is all that needs to be.
   """
+  @spec attach(%SIP.Context{}) :: %SIP.Context{}
   @spec attach(Conference.participant()) :: :ok | {:error, term}
+
+  # Context-aware clause, for scenario scripts — must stay ahead of the
+  # `is_map/1` clause below: a %SIP.Context{} is a map too. Same JSR309 mutual
+  # exclusion as `admit/4`, same contract: the verdict goes to `sip_ctx.lasterr`
+  # (`:ok`, `{:error, reason}` or the JSR309 refusal), never to the return value
+  # — this returns the updated context only. The participant is read back from
+  # the `:mcu_part` appdata key `admit/4` stored. The MCU leg's own peer
+  # connection (created by the media macros on this module's adapter between
+  # admit and attach) passes the check; only a *JSR309* media session refuses
+  # the call.
+  def attach(sip_ctx = %SIP.Context{}) do
+    case no_jsr309_media(sip_ctx) do
+      {:ok, sip_ctx} ->
+        rez =
+          case SIP.Context.appdata_get(sip_ctx, :mcu_part) do
+            nil -> {:error, :no_such_participant}
+            part -> attach(part)
+          end
+
+        SIP.Context.set(sip_ctx, :lasterr, rez)
+
+      {:error, sip_ctx} ->
+        sip_ctx
+    end
+  end
+
   def attach(part) when is_map(part) do
     with {:ok, row} <- participant(part),
          {:ok, medias} <- Adapter.attach(row.conn) do
@@ -528,8 +617,27 @@ defmodule Kelix.Mod.Mcu do
   Idempotent by contract — the reference script calls it from five places, and the
   crash reaper (§9.3) from a sixth.
   """
+  @spec leave(%SIP.Context{}, atom) :: %SIP.Context{}
   @spec leave(Conference.participant(), atom) :: :ok
   def leave(part, reason \\ :bye)
+
+  # Context-aware clause, for scenario scripts — must stay ahead of the
+  # `is_map/1` clause below: a %SIP.Context{} is a map too. Same JSR309 mutual
+  # exclusion as `admit/4`, verdict in `sip_ctx.lasterr`, participant read back
+  # from the `:mcu_part` appdata key `admit/4` stored (nothing to do when it is
+  # absent — leave stays idempotent). Returns the updated context only.
+  def leave(sip_ctx = %SIP.Context{}, reason) do
+    case no_jsr309_media(sip_ctx) do
+      {:ok, sip_ctx} ->
+        case SIP.Context.appdata_get(sip_ctx, :mcu_part) do
+          nil -> sip_ctx
+          part -> SIP.Context.set(sip_ctx, :lasterr, leave(part, reason))
+        end
+
+      {:error, sip_ctx} ->
+        sip_ctx
+    end
+  end
 
   def leave(part, reason) when is_map(part) do
     # close the adapter connection first: it owns the MCU-side participant
@@ -548,6 +656,28 @@ defmodule Kelix.Mod.Mcu do
   end
 
   def leave(_part, _reason), do: :ok
+
+  # ── JSR309 mutual exclusion ───────────────────────────────────────────────────
+  # A session context can only carry ONE media leg. "A JSR309 session is in
+  # progress" means the media macros already created a peer connection
+  # (`:mediapeerconnectionid`) on a media server OTHER than this module's adapter:
+  # the MCU leg's own connection — stored under the same key by
+  # `reply_invite_with_sdp` between admit and attach — must keep passing, or the
+  # check would refuse every normal MCU call at ACK time.
+  defp no_jsr309_media(sip_ctx = %SIP.Context{}) do
+    cnx = SIP.Context.appdata_get(sip_ctx, :mediapeerconnectionid)
+
+    if is_nil(cnx) or sip_ctx.mediaservermodule == Adapter do
+      {:ok, SIP.Context.set(sip_ctx, :lasterr, :ok)}
+    else
+      Logger.error(
+        module: __MODULE__,
+        message: "A JSR309 media session is already in progress. Cannot handle an MCU call here"
+      )
+
+      {:error, SIP.Context.set(sip_ctx, :lasterr, @jsr309_error)}
+    end
+  end
 
   @doc """
   Mute or unmute one media of a participant (`SetMute`).
@@ -591,6 +721,100 @@ defmodule Kelix.Mod.Mcu do
       :error -> {:error, :no_such_participant}
     end
   end
+
+  # ── the collaboration channel (§20, P10) ─────────────────────────────────────
+
+  @doc """
+  Declare that **this leg's script handles `{:mcu_message, envelope}`** (§20.5 G-2),
+  and may therefore be addressed by its peers. Idempotent.
+
+  Nothing is delivered to a leg that has not said this. An `on_events` block compiles
+  to a plain `receive`, so a message no clause matches stays in that mailbox for the
+  rest of the call — which on a conference leg is hours. Declaring is what turns that
+  leak into a `skipped: :not_accepted` line in the sender's report.
+
+  The `mcu_accept_messages()` DSL macro is how a script says it; call it once, in the
+  state where the leg is admitted.
+  """
+  @spec accept_messages(SIP.Context.t() | Conference.participant()) ::
+          SIP.Context.t() | :ok | {:error, :no_such_participant}
+  def accept_messages(%SIP.Context{} = sip_ctx) do
+    outcome =
+      case SIP.Context.appdata_get(sip_ctx, :mcu_part) do
+        nil -> {:error, :no_such_participant}
+        part -> accept_messages(part)
+      end
+
+    # Never in `lasterr` (see `send_message/5`): failing to open a collaboration
+    # channel is not a reason to end a call.
+    SIP.Context.appdata_set(sip_ctx, :mcu_messages, outcome)
+  end
+
+  def accept_messages(%{conf_uid: uid, ref: ref}) do
+    case call({:accept_messages, uid, ref}) do
+      {:ok, _} -> :ok
+      other -> other
+    end
+  end
+
+  def accept_messages(_part), do: {:error, :no_such_participant}
+
+  @doc """
+  Send a collaboration message from `part` to its peers (§20).
+
+  `target` is `:all`, `:others`, `{:part_id, n}` or `{:name, "alice"}` — the
+  conference is the sender's own, deduced from its handle, so a script cannot address
+  a conference it is not in (§20.3: membership *is* the permission).
+
+  `kind` must be one of `[module.mcu] message_kinds` — an operator-declared
+  vocabulary, empty by default, which is what keeps the channel closed on a
+  deployment that does not use it. `payload` is a UTF-8 binary bounded by
+  `message_max_bytes`, opaque to the module.
+
+  `{:ok, %{delivered: n, skipped: [%{part_id:, reason:}]}}` — `delivered` counts the
+  **scenarios the message was handed to**, not the UAs that received something
+  (§20.7). Ordering is per sender, there is no acknowledgement, and a leg that joins
+  later sees nothing that was sent before it.
+
+  What the module does *not* do: put anything on the wire. The recipient's script
+  decides what a message becomes, and **sanitises it for whatever wire format it
+  chooses** — the bus validated the size and the type, nothing more (§20.5 G-6).
+  """
+  @spec send_message(
+          SIP.Context.t() | Conference.participant(),
+          Message.target(),
+          String.t(),
+          binary,
+          keyword
+        ) :: SIP.Context.t() | {:ok, Message.report()} | {:error, atom}
+  def send_message(part_or_ctx, target, kind, payload, opts \\ [])
+
+  # The context-aware form the `mcu_send` DSL macro expands to. The outcome goes to
+  # **appdata, not to `lasterr`**: a `goto` aborts the scenario on any `lasterr` other
+  # than `:ok`, and a rate-limited "hand raised" must never end a call. A script that
+  # cares reads `appdata_get(:mcu_last_send)`.
+  def send_message(%SIP.Context{} = sip_ctx, target, kind, payload, opts) do
+    outcome =
+      case SIP.Context.appdata_get(sip_ctx, :mcu_part) do
+        nil -> {:error, :no_such_participant}
+        part -> send_message(part, target, kind, payload, opts)
+      end
+
+    SIP.Context.appdata_set(sip_ctx, :mcu_last_send, outcome)
+  end
+
+  def send_message(%{conf_uid: uid} = part, target, kind, payload, opts)
+      when is_binary(kind) and is_binary(payload) and is_list(opts) do
+    with {:ok, conf} <- found(conference(uid)),
+         {:ok, sender} <- ok_or_no_participant(participant(part)) do
+      Message.send(conf, sender, target, kind, payload, opts)
+    end
+  end
+
+  def send_message(_part, _target, _kind, _payload, _opts), do: {:error, :bad_payload}
+
+  defp ok_or_no_participant({:ok, row}), do: {:ok, row}
+  defp ok_or_no_participant(:error), do: {:error, :no_such_participant}
 
   @doc """
   The media configuration a leg of `conference` must connect to, ready to be stored
@@ -667,9 +891,8 @@ defmodule Kelix.Mod.Mcu do
           %{name: "mcu", required: false},
           %{name: "vad", required: false, help: Vocabulary.vad_help()},
           %{name: "rate", required: false},
-          %{name: "audio_codecs", required: false},
-          %{name: "video_codecs", required: false},
-          %{name: "text_codecs", required: false},
+          %{name: "medias", required: false, help: "audio, video and/or text"},
+          %{name: "dtmf", required: false, help: "propose telephone-event (default true)"},
           %{name: "video", required: false, help: Vocabulary.video_help()},
           %{name: "layout", required: false, help: Vocabulary.layout_help()},
           %{name: "logo", required: false, help: Vocabulary.logo_help()},
@@ -698,7 +921,7 @@ defmodule Kelix.Mod.Mcu do
         render: %{
           kind: :detail,
           fields:
-            ~w(name domain did uid mcu conf_id stale created_at max_participants destroy_when_empty vad rate codecs video layout logo recording participants),
+            ~w(name domain did uid mcu conf_id stale created_at max_participants destroy_when_empty vad rate medias dtmf video layout logo recording participants),
           labels: @conference_labels,
           # the roster, not the media detail of each leg — that is `participant.show`
           nested: %{"participants" => %{columns: ~w(part_id name from state joined_at)}}
@@ -856,6 +1079,8 @@ defmodule Kelix.Mod.Mcu do
   end
 
   defp do_control("conference.create", args) do
+    args = drop_retired(args, "conference.create")
+
     with :ok <- Args.reject_unknown(args, @create_args),
          {:ok, spec} <- create_spec(args),
          # `owner: :none`: a REST caller has no instance to own the conference — its
@@ -905,6 +1130,8 @@ defmodule Kelix.Mod.Mcu do
   # resets one to its default, which is the dangerous reading of PUT and the reason
   # the semantics are stated in the design rather than implied.
   defp do_control("conference.update", args) do
+    args = drop_retired(args, "conference.update")
+
     with :ok <- Args.reject_readonly(args, @conference_readonly),
          :ok <- Args.reject_unknown(args, @update_args),
          {:ok, uid} <- Args.required_string(args, "uid"),
@@ -1174,11 +1401,6 @@ defmodule Kelix.Mod.Mcu do
          {:ok, mcu} <- Args.string(args, "mcu"),
          {:ok, vad} <- Vocabulary.vad(Map.get(args, "vad")),
          {:ok, rate} <- Args.int(args, "rate", nil, [8000, 16_000, 32_000, 48_000]),
-         # the codec vocabulary is the config's, checked here too: a per-conference
-         # list is exactly as dangerous as a configured one (Config.validate_codecs/2)
-         {:ok, audio, dtmf} <- Config.validate_codecs(:audio, Map.get(args, "audio_codecs")),
-         {:ok, video_codecs, _} <- Config.validate_codecs(:video, Map.get(args, "video_codecs")),
-         {:ok, text_codecs, _} <- Config.validate_codecs(:text, Map.get(args, "text_codecs")),
          {:ok, max_participants} <- Args.int(args, "max_participants", nil),
          {:ok, destroy_when_empty} <- Args.bool(args, "destroy_when_empty", nil),
          # names → wire ids, and the short `layout` form → the fields it names: the
@@ -1186,21 +1408,24 @@ defmodule Kelix.Mod.Mcu do
          # *reading* of what was asked for belongs here, before anything is created
          {:ok, video} <- Vocabulary.video(Map.get(args, "video")),
          {:ok, layout} <- Vocabulary.layout(Map.get(args, "layout")),
-         {:ok, logo} <- optional_logo(args) do
+         {:ok, logo} <- optional_logo(args),
+         # P8a: which m= sections this conference answers. The policy the codec lists
+         # used to express sideways (§8.4).
+         {:ok, medias} <- validate_medias(Map.get(args, "medias")),
+         {:ok, dtmf_arg} <- Args.bool(args, "dtmf", nil) do
       {:ok,
        %{
          domain: domain,
          name: name,
+         medias: medias,
          did: did,
          mcu: mcu,
          vad: vad,
          rate: rate,
-         audio_codecs: audio,
-         # an explicit audio list decides this conference's DTMF too, exactly as the
-         # config block's does (TELEPHONE-EVENT is a flag, not a mixer codec)
-         dtmf: if(is_nil(audio), do: nil, else: dtmf),
-         video_codecs: video_codecs,
-         text_codecs: text_codecs,
+         # `dtmf` is its own switch (§8.4) — nil means "whatever the conference default
+         # says", which is what the registry merges it against. It no longer reads a
+         # TELEPHONE-EVENT entry out of a codec list: that list is ignored now.
+         dtmf: dtmf_arg,
          video: video,
          layout: layout,
          logo: logo,
@@ -1208,6 +1433,15 @@ defmodule Kelix.Mod.Mcu do
          destroy_when_empty: destroy_when_empty
        }}
     end
+  end
+
+  # P8a: the codec arguments the media server made pointless (§8.4), stripped before any
+  # vocabulary reads them and reported once. They come from `conference.create` bodies
+  # and from scripts we do not own, so ignoring them is a migration and answering `400`
+  # is an outage; they become an unknown argument in the release after this one.
+  defp drop_retired(args, context) do
+    Config.warn_retired(Map.keys(args), context)
+    Map.drop(args, Map.keys(Config.retired_keys()))
   end
 
   defp call(request) do
@@ -1231,6 +1465,11 @@ defmodule Kelix.Mod.Mcu do
     :ets.new(@conf_table, tables)
     :ets.new(@did_table, tables)
     :ets.new(@mcu_table, tables)
+    # The collaboration channel's counters (§20.6): its own table, and the only
+    # `:public` one — a sender updates its rate bucket from its own process, which the
+    # three tables above (owner-writes-only) cannot allow. It holds counters and the
+    # bounds, never a roster and never a payload.
+    Message.create_table(config)
 
     # Entries exist from the start, `down` until their client announces itself, so
     # `create` on an unreachable MCU is refused with a clear error instead of
@@ -1340,6 +1579,19 @@ defmodule Kelix.Mod.Mcu do
   # §8.3.8. Writes, so they go through here: a recording is a singleton per conference
   # and a slot pin is a row update, and both must be serialised against the create /
   # recover paths that touch the same row.
+  # §20.5 G-2. A write on a participant row, so it goes through the owner process like
+  # every other one — once per leg, not once per message.
+  def handle_call({:accept_messages, conf_uid, ref}, _from, state) do
+    case fetch_row(conf_uid, ref) do
+      {:ok, _conf, _row} ->
+        update_participant(conf_uid, ref, &%{&1 | accepts_messages: true})
+        {:reply, {:ok, %{}}, state}
+
+      :error ->
+        {:reply, {:error, :no_such_participant}, state}
+    end
+  end
+
   def handle_call({:record_start, uid, file}, _from, state) do
     {:reply, do_record_start(state, uid, file), state}
   end
@@ -1597,6 +1849,12 @@ defmodule Kelix.Mod.Mcu do
       conn: nil,
       state: :ringing,
       medias: %{},
+      silent: %{},
+      # §20.5 G-2: this leg receives collaboration messages only once its script has
+      # said it handles them (`mcu_accept_messages()`). Default false — an unhandled
+      # message would sit in a mailbox for the whole call, and a script written before
+      # the channel existed handles none.
+      accepts_messages: false,
       admitted_at: DateTime.utc_now(),
       joined_at: nil
     }
@@ -1673,6 +1931,10 @@ defmodule Kelix.Mod.Mcu do
         })
 
         emit_left_metric(reason, row)
+
+        # its rate bucket goes with it (§20.6) — a ref is never reused, so a bucket
+        # left behind would be a row nothing ever reads again
+        Message.forget_participant(conf.uid, part_ref)
 
         state = demonitor_participant(state, part_ref)
 
@@ -2031,11 +2293,97 @@ defmodule Kelix.Mod.Mcu do
     end
   end
 
-  # Types 3 and 4 arrive with the server-side work of §16.1-16.2 (P7); decoded and
-  # logged now, acted on then.
+  # Type 3 (§16.1, P7): a media of this leg has gone silent. The server does not
+  # remove the participant from the mix — deciding that is ours — so this is where a
+  # dead leg stops holding its quota slot and its mosaic tile for hours (G3/L1).
+  #
+  # The event is emitted for the operator view whether or not a scenario is still
+  # around to hear it: a leg whose scenario already died is exactly the case the
+  # watchdog exists for.
+  # A leg is **not** dead because one media went quiet: a video phone whose video
+  # stops while its audio keeps flowing is still a participant. So the per-media
+  # event is always reported for the operator view — one-way video is the most common
+  # complaint about a video call, and this event is its only witness — but the
+  # scenario is only told (and only then hangs up) once **every watched media is
+  # silent**. Watched = the medias this leg negotiated, minus text: T.140 is
+  # legitimately silent between keystrokes and is never armed (§16.1).
+  #
+  # Decided 2026-08-05 to live here rather than in the media server: whoever does the
+  # AND needs this state machine, the reset signal is already on the wire (event 4),
+  # and "how many dead medias make a dead leg" is policy — the server reports facts.
+  defp route_event(conf, {:media_timeout, _conf_id, _tag, part_id, media}) do
+    Event.emit(:"participant.media_timeout", conf.uid, %{part_id: part_id, media: media})
+
+    case Conference.by_part_id(conf, part_id) do
+      nil ->
+        Logger.debug(
+          module: __MODULE__,
+          message: "conference #{conf.uid}: #{media} timeout for unknown participant #{part_id}"
+        )
+
+      row ->
+        silent = Map.put(row.silent || %{}, media, true)
+        update_participant(conf.uid, row.ref, &%{&1 | silent: silent})
+        watched = watched_medias(row)
+
+        cond do
+          not Enum.all?(watched, &Map.has_key?(silent, &1)) ->
+            # Partially silent: reported, deliberately not fatal.
+            Logger.info(
+              module: __MODULE__,
+              message:
+                "conference #{conf.uid}: participant #{part_id} lost #{media}, still has " <>
+                  "#{inspect(watched -- Map.keys(silent))} — leg kept"
+            )
+
+          is_pid(row.scenario) ->
+            send(row.scenario, {:mcu_event, :media_timeout, media})
+
+          true ->
+            Logger.info(
+              module: __MODULE__,
+              message:
+                "conference #{conf.uid}: participant #{part_id} silent on every media, " <>
+                  "no scenario to tell — the orphan GC owns it now"
+            )
+        end
+    end
+  end
+
+  # Type 4 (§16.2, P7): first validated RTP/SRTP packet of a reception cycle. On a
+  # secure leg, receiving it intrinsically proves the DTLS handshake completed, which
+  # is what makes it worth surfacing rather than just counting.
+  defp route_event(conf, {:media_connected, _conf_id, _tag, part_id, media}) do
+    Event.emit(:"participant.media_connected", conf.uid, %{part_id: part_id, media: media})
+
+    case Conference.by_part_id(conf, part_id) do
+      nil ->
+        :ok
+
+      row ->
+        # Clearing the flag is what makes the AND survive a media that comes back —
+        # a re-INVITE, or RTP that resumes after a network blip. Without it, a leg
+        # that flapped once would be reaped the next time any *other* media hiccups.
+        if Map.has_key?(row.silent || %{}, media),
+          do: update_participant(conf.uid, row.ref, &%{&1 | silent: Map.delete(&1.silent, media)})
+
+        if is_pid(row.scenario), do: send(row.scenario, {:mcu_event, :media_connected, media})
+    end
+  end
+
   defp route_event(conf, event) do
     Logger.debug(module: __MODULE__, message: "conference #{conf.uid}: #{inspect(event)}")
   end
+
+  # The medias whose silence counts against this leg: everything it negotiated, minus
+  # text.
+  #
+  # An **empty** set makes the AND vacuously true, so the leg is reaped on that single
+  # timeout — and that is the right answer, not an oversight. The row only carries its
+  # medias once the ACK has been processed, and the watchdog is only armed at that same
+  # ACK; so an empty set means a leg that timed out before it was ever fully joined,
+  # for which one dead media is all the evidence there will ever be.
+  defp watched_medias(row), do: Map.keys(row.medias || %{}) -- [:text]
 
   # ── create ───────────────────────────────────────────────────────────────────
 
@@ -2160,6 +2508,8 @@ defmodule Kelix.Mod.Mcu do
              :size,
              :auto
            ]) do
+      layout = align_canvas(layout, video, spec.domain, spec.layout != nil)
+
       {:ok,
        %Conference{
          uid: new_uid(),
@@ -2172,12 +2522,9 @@ defmodule Kelix.Mod.Mcu do
          mcu: mcu.name,
          vad: spec.vad || config.vad,
          rate: spec.rate || config.rate,
-         codecs: %{
-           audio: spec.audio_codecs || config.audio_codecs,
-           video: spec.video_codecs || config.video_codecs,
-           text: spec.text_codecs || config.text_codecs
-         },
          dtmf: if(is_nil(spec.dtmf), do: config.dtmf, else: spec.dtmf),
+         rtp_timeout_ms: config.rtp_timeout_ms,
+         medias: spec_medias(spec) || config.medias,
          video: video,
          layout: layout,
          max_participants: spec.max_participants || config.max_participants,
@@ -2188,6 +2535,37 @@ defmodule Kelix.Mod.Mcu do
            ),
          created_at: DateTime.utc_now()
        }}
+    end
+  end
+
+  @media_names ~w(audio video text)
+
+  # A media list from a client, refused rather than silently narrowed: naming a media
+  # this module cannot answer is a mistake worth reporting, and an empty list is a
+  # conference that answers nothing.
+  defp validate_medias(nil), do: {:ok, nil}
+
+  defp validate_medias(names) when is_list(names) and names != [] do
+    names = Enum.map(names, &String.downcase(to_string(&1)))
+
+    case Enum.reject(names, &(&1 in @media_names)) do
+      [] -> {:ok, names}
+      bad -> {:error, "unknown media(s) #{Enum.join(bad, ", ")}; expected audio, video or text"}
+    end
+  end
+
+  defp validate_medias(_other),
+    do: {:error, "medias must be a non-empty list naming audio, video or text"}
+
+  # `medias` from a create/update spec, normalised to atoms. nil when the spec says
+  # nothing, so the config default applies.
+  defp spec_medias(spec) do
+    case Map.get(spec, :medias) do
+      nil ->
+        nil
+
+      list when is_list(list) ->
+        Enum.map(list, &String.to_existing_atom(String.downcase(to_string(&1))))
     end
   end
 
@@ -2271,6 +2649,42 @@ defmodule Kelix.Mod.Mcu do
     %Conference{conf | slots: kept}
   end
 
+  # The mosaic canvas **is** the encoded picture, so its size is not a knob of its own.
+  #
+  # Composing at one geometry and encoding at another means scaling between the two, and
+  # the media server does that without preserving the aspect ratio
+  # (`PipeVideoInput`/`VideoRescaler`, which has no letterbox): a VGA canvas encoded as
+  # HD720p widens every tile by 33 %, letterboxed thumbnails included. Found 2026-08-06
+  # on a Linphone call whose 4:3 camera came out at 16:9 — see D1 of the media server's
+  # `mosaic_aspect_ratio_plan.md`.
+  #
+  # So the canvas follows `video.size`, and a caller that asked for another one is told
+  # rather than silently obeyed: the value it sent would have described the composition
+  # and not the picture, which is exactly the confusion that produced the bug.
+  defp align_canvas(layout, video, context, asked?) do
+    # On n'avertit que si l'appelant a demandé une toile dans CET appel : quand il
+    # redimensionne l'encodeur sans parler de la disposition, la toile suit sans bruit —
+    # c'est le comportement voulu, pas une demande ignorée.
+    if asked? and layout.size != video.size do
+      Logger.warning(
+        module: __MODULE__,
+        message:
+          "#{context}: mosaic canvas size #{size_label(layout.size)} ignored — the mosaic " <>
+            "is composed at the ENCODED size #{size_label(video.size)}, since anything " <>
+            "else would be rescaled without preserving the aspect ratio"
+      )
+    end
+
+    %{layout | size: video.size}
+  end
+
+  # The operator-facing name of a video size id (`6` -> `"hd720p"`), read off the same
+  # vocabulary the CLI renders: a log that says `2` when the command said `vga` is a log
+  # nobody connects to what they typed.
+  defp size_label(id) do
+    Vocabulary.size_names() |> Map.get(Integer.to_string(id), Integer.to_string(id))
+  end
+
   defp set_composition(mcu, conf) do
     case rpc(mcu, "SetCompositionType", [
            conf.conf_id,
@@ -2300,7 +2714,8 @@ defmodule Kelix.Mod.Mcu do
          {:ok, mcu} <- update_target(conf),
          {:ok, conf, video} <- merged_video(state, conf, changes),
          {:ok, conf, layout} <- merged_layout(state, conf, changes),
-         :ok <- push_mixer_changes(mcu, conf, changes, layout),
+         layout = align_canvas(layout, video, conf.uid, Map.has_key?(changes, :layout)),
+         :ok <- push_mixer_changes(mcu, conf, changes, video, layout),
          :ok <- maybe_set_logo(state, mcu, conf, changes) do
       updated = %Conference{
         conf
@@ -2362,11 +2777,17 @@ defmodule Kelix.Mod.Mcu do
     end
   end
 
-  defp push_mixer_changes(mcu, conf, changes, layout) do
+  defp push_mixer_changes(mcu, conf, changes, video, layout) do
     vad_rate? = Map.has_key?(changes, :vad) or Map.has_key?(changes, :rate)
 
+    # La toile suit la taille encodée (`align_canvas/3`), donc changer `video.size`
+    # déplace la mosaïque : il faut repousser la composition même quand l'appelant n'a
+    # pas touché à `layout`, ou la toile resterait à l'ancienne géométrie et le composite
+    # repartirait à l'échelle — le défaut que cet alignement supprime.
+    compose? = Map.has_key?(changes, :layout) or video.size != conf.video.size
+
     with :ok <- maybe_update_conference(mcu, conf, changes, vad_rate?),
-         :ok <- maybe_set_composition(mcu, conf, changes, layout) do
+         :ok <- maybe_set_composition(mcu, conf, compose?, layout) do
       :ok
     end
   end
@@ -2383,8 +2804,10 @@ defmodule Kelix.Mod.Mcu do
     end
   end
 
-  defp maybe_set_composition(mcu, conf, changes, layout) do
-    if Map.has_key?(changes, :layout) do
+  defp maybe_set_composition(_mcu, _conf, false, _layout), do: :ok
+
+  defp maybe_set_composition(mcu, conf, true, layout) do
+    if true do
       case rpc(mcu, "SetCompositionType", [
              conf.conf_id,
              @default_mosaic,
@@ -2671,35 +3094,22 @@ defmodule Kelix.Mod.Mcu do
     end
   end
 
+  # The name → participant reading lives in `Conference.by_name/2` (its full name or
+  # just the user part, two legs of the same user refused rather than coin-flipped):
+  # pinning a slot by name and addressing a message by name (§20.4) must agree, and
+  # they only can if there is one of it.
   defp resolve_holds(conf, {:name, name}) do
-    wanted = String.downcase(name)
+    case Conference.by_name(conf, name) do
+      {:ok, row} ->
+        {:ok, row.part_id}
 
-    matches =
-      conf
-      |> Conference.participants()
-      |> Enum.filter(&(is_integer(&1.part_id) and name_matches?(&1.name, wanted)))
-
-    case matches do
-      [one] ->
-        {:ok, one.part_id}
-
-      [] ->
+      :error ->
         {:error, :not_found}
 
-      many ->
-        ids = many |> Enum.map(& &1.part_id) |> Enum.sort() |> Enum.join(" and ")
-        {:error, ~s(holds: "#{name}" matches participants #{ids} — use the part_id)}
+      {:ambiguous, ids} ->
+        {:error,
+         ~s(holds: "#{name}" matches participants #{Enum.join(ids, " and ")} — use the part_id)}
     end
-  end
-
-  # A participant's name is its full AOR (`alice@phone_example_com`), which nobody wants
-  # to type: the user part alone matches too, and two legs of the same user are a
-  # refusal rather than a coin flip.
-  defp name_matches?(nil, _wanted), do: false
-
-  defp name_matches?(name, wanted) do
-    name = String.downcase(name)
-    name == wanted or hd(String.split(name, "@")) == wanted
   end
 
   # The mixer's logo, applied at create time and on every `logo` update. Its own RPC
@@ -2774,6 +3184,8 @@ defmodule Kelix.Mod.Mcu do
 
     :ets.delete(@did_table, {conf.domain, conf.did})
     :ets.delete(@conf_table, conf.uid)
+    # the sequence, the seen-ids and any surviving bucket (§20.6)
+    Message.forget_conference(conf.uid)
     disown_conference(state, conf.uid)
   end
 

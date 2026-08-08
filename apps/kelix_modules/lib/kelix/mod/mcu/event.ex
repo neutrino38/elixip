@@ -37,6 +37,7 @@ defmodule Kelix.Mod.Mcu.Event do
           | :"participant.left"
           | :"participant.rejected"
           | :"participant.muted"
+          | :"participant.message"
           | :"participant.fpu_requested"
           | :"participant.media_connected"
           | :"participant.media_timeout"

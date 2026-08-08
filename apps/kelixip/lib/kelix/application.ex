@@ -75,6 +75,12 @@ defmodule Kelix.Application do
       Kelix.ModuleRegistry,
       Kelix.Control.Registry,
       Kelix.ModuleSupervisor,
+      # Load-time contract check on every script domains.toml refers to (§3.2/§5.3).
+      # Here and not earlier: a script's `uses_modules` needs the modules above
+      # loaded, and those blocks come from domains.toml itself. Starts no process; a
+      # missing / uncompilable / not-shutdown-aware script aborts the boot rather
+      # than 500-ing the first call routed to that domain.
+      Kelix.ScriptPreflight,
       # Media server pool (§9): round-robin selection over the [mediaserver.pool.*]
       # entries, health-checked; the Router injects the chosen MCU per call. Reads
       # Kelix.Config, so ordered after it; boots empty when no pool is configured.

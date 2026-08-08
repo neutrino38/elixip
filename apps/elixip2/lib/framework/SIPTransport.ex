@@ -260,6 +260,25 @@ defmodule SIP.Transport do
     transaction
     """
     def process_incoming_message(state, message, tp_name, tp_mod, socket, destip, destport) do
+      # One peer's odd datagram must not take down the transport that serves everyone
+      # else on this socket. It did: a Linphone ACK with no Content-Length raised inside
+      # the parser, this process died, the ACK never reached its transaction — so the
+      # call answered and then carried no media — and each retransmission killed the
+      # restarted process again. Dropping the datagram with a log is the behaviour a
+      # transport owes its other dialogs; the parse bugs it uncovers are fixed where
+      # they live, in the message layer.
+      try do
+        do_process_incoming_message(state, message, tp_name, tp_mod, socket, destip, destport)
+      rescue
+        e ->
+          Logger.error([module: __MODULE__, message: "#{tp_name}: dropping an unparsable " <>
+            "message from #{inspect(destip)}:#{destport} (#{Exception.message(e)})"])
+          Logger.debug([module: __MODULE__, message: "offending message: #{inspect(message)}"])
+          { :noreply, state }
+      end
+    end
+
+    defp do_process_incoming_message(state, message, tp_name, tp_mod, socket, destip, destport) do
       case SIP.Transac.process_sip_message(message) do
         :ok -> { :noreply, state }
 

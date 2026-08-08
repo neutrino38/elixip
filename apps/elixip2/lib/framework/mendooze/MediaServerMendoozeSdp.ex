@@ -47,7 +47,8 @@ defmodule MediaServer.Mendooze.Sdp do
 
   @video_codecs %{
     "H264" => {99, 99, 90_000},
-    "VP8" => {107, 107, 90_000}
+    "VP8" => {107, 107, 90_000},
+    "AV1" => {110, 110, 90_000}
   }
 
   @text_codecs %{
@@ -120,27 +121,36 @@ defmodule MediaServer.Mendooze.Sdp do
           rtp_map: rtp_map(),
           codecs: [codec_name()],
           fmtp: %{optional(String.t()) => struct()},
+          fmtp_raw: %{optional(String.t()) => String.t()},
           dtmf_pts: %{optional(non_neg_integer()) => non_neg_integer()},
           rtcp_mux: boolean(),
           direction: :sendrecv | :sendonly | :recvonly | :inactive,
           bandwidth: non_neg_integer() | nil,
           crypto: crypto(),
+          sdes_offers: [%{tag: String.t(), suite: String.t(), key: String.t()}],
           ice: nil | %{ufrag: String.t(), pwd: String.t()},
           mid: String.t() | nil,
           rtcp_fb: %{optional(integer()) => [String.t()]},
+          capneg: nil | %{config: integer(), tcap: integer(), protocol: String.t()},
           candidates: [String.t()]
         }
 
   @typedoc """
   A `supported?: false` stub for an `m=` section we cannot answer (G9): only the
   fields needed to echo a port-0 rejection are kept.
+
+  `mid` is among them: JSEP (RFC 8829 §5.3.1) requires **every** answer section to
+  carry the offer's `a=mid`, rejected ones included — a browser offering a data
+  channel next to its audio and video is the ordinary case, and an answer that
+  declines that section without naming it is one a browser can refuse wholesale.
   """
   @type media_stub :: %{
           supported?: false,
           type: atom(),
           port: non_neg_integer(),
           protocol: String.t(),
-          raw_fmt: [0..127] | String.t()
+          raw_fmt: [0..127] | String.t(),
+          mid: String.t() | nil
         }
 
   @typedoc """
@@ -157,8 +167,10 @@ defmodule MediaServer.Mendooze.Sdp do
   are present the server-driven fields win.
 
   A **rejection** spec (`:reject_fmt` present) renders `m=<type> 0 <protocol>
-  <reject_fmt>` with no attributes (G9): a declined section that keeps the m=
-  line count of the offer (RFC 3264 §6).
+  <reject_fmt>` (G9): a declined section that keeps the m= line count of the offer
+  (RFC 3264 §6). Its only attribute is `a=mid`, when the offer named the section —
+  JSEP requires the mid on every answer section, and a rejected one carries nothing
+  else worth stating.
   """
   @type rtpmap_entry :: %{
           required(:pt) => non_neg_integer(),
@@ -175,6 +187,7 @@ defmodule MediaServer.Mendooze.Sdp do
           optional(:fmtp) => %{optional(String.t()) => String.t()},
           optional(:dtmf) => boolean(),
           optional(:crypto) => crypto(),
+          optional(:crypto_tag) => String.t() | non_neg_integer(),
           optional(:ice) => nil | %{ufrag: String.t(), pwd: String.t()},
           optional(:rtcp_mux) => boolean(),
           optional(:protocol) => String.t(),
@@ -182,7 +195,8 @@ defmodule MediaServer.Mendooze.Sdp do
           optional(:direction) => :sendrecv | :sendonly | :recvonly | :inactive,
           optional(:mid) => String.t() | nil,
           optional(:candidates) => [candidate()],
-          optional(:rtcp_fb) => boolean(),
+          optional(:rtcp_fb) => boolean() | [String.t()],
+          optional(:acfg) => nil | %{config: integer(), tcap: integer()},
           optional(:reject_fmt) => [0..127] | String.t()
         }
 
@@ -300,10 +314,29 @@ defmodule MediaServer.Mendooze.Sdp do
   end
 
   # G9: a port-0 rejection echoes the offered transport and format list verbatim
-  # (RFC 3264 §6). No connection/attributes/codec section — the peer just sees
-  # the media declined while the answer keeps one m= line per offered m=.
-  defp build_media(%{reject_fmt: fmt, type: type, protocol: protocol}) do
+  # (RFC 3264 §6). No connection or codec section — the peer just sees the media
+  # declined while the answer keeps one m= line per offered m=. The offer's `a=mid`
+  # is the one attribute kept: JSEP (RFC 8829 §5.3.1) requires it on every answer
+  # section, and libwebrtc matches the answer to its transceivers by that name.
+  defp build_media(%{reject_fmt: fmt, type: type, protocol: protocol} = mspec) do
     %ExSDP.Media{type: type, port: 0, protocol: protocol, fmt: fmt}
+    |> add_mid(Map.get(mspec, :mid))
+  end
+
+  # Text over WebSocket: signalling only, and shaped by what the deployed clients
+  # were built against (design §5.3). The format is the literal `t140`; `a=setup`
+  # says who connects (we are the server, hence `passive`); `a=connection:new` is
+  # RFC 4145; and the URL travels protocol-relative under `a=ws` or `a=wss`, the
+  # attribute name carrying the scheme (see `ws_url_attribute/1`). No rtpmap, no
+  # fmtp: there is no payload type here, and the T.140 redundancy is the media
+  # server's business, not a negotiated parameter.
+  defp build_media(%{ws_text: url, type: :text, port: port, protocol: protocol} = mspec) do
+    %ExSDP.Media{type: :text, port: port, protocol: protocol, fmt: "t140"}
+    |> ExSDP.add_attribute({:setup, Map.get(mspec, :setup, :passive)})
+    |> ExSDP.add_attribute({"connection", "new"})
+    |> maybe_add_ws_url(Map.get(mspec, :ws_attribute, "ws"), url)
+    |> ExSDP.add_attribute(Map.get(mspec, :direction, :sendrecv))
+    |> add_mid(Map.get(mspec, :mid))
   end
 
   # Server-driven codec section: emit the accepted rtpmap entries and the fmtp
@@ -318,7 +351,7 @@ defmodule MediaServer.Mendooze.Sdp do
     |> add_bandwidth(Map.get(mspec, :bandwidth))
     |> add_server_codecs(rtpmaps, fmtp)
     |> ExSDP.add_attribute(Map.get(mspec, :direction, :sendrecv))
-    |> add_crypto(crypto)
+    |> add_crypto(crypto, Map.get(mspec, :crypto_tag, 1))
     |> add_ice(Map.get(mspec, :ice))
     |> add_rtcp_mux(Map.get(mspec, :rtcp_mux, false))
     |> add_transport_plane(mspec, video_pts)
@@ -343,7 +376,7 @@ defmodule MediaServer.Mendooze.Sdp do
     |> add_codecs(type, codecs)
     |> add_dtmf(dtmf)
     |> ExSDP.add_attribute(Map.get(mspec, :direction, :sendrecv))
-    |> add_crypto(crypto)
+    |> add_crypto(crypto, Map.get(mspec, :crypto_tag, 1))
     |> add_ice(Map.get(mspec, :ice))
     |> add_rtcp_mux(Map.get(mspec, :rtcp_mux, false))
     |> add_transport_plane(mspec, video_pts)
@@ -356,10 +389,42 @@ defmodule MediaServer.Mendooze.Sdp do
     |> add_mid(Map.get(mspec, :mid))
     |> add_candidates(Map.get(mspec, :candidates, []))
     |> add_rtcp_fb(Map.get(mspec, :rtcp_fb, false), video_pts)
+    |> add_acfg(Map.get(mspec, :acfg))
   end
 
   defp add_mid(m, nil), do: m
   defp add_mid(m, mid), do: ExSDP.add_attribute(m, {:mid, to_string(mid)})
+
+  defp maybe_add_ws_url(m, _attribute, nil), do: m
+  defp maybe_add_ws_url(m, attribute, url), do: ExSDP.add_attribute(m, {attribute, url})
+
+  @doc """
+  Split a WebSocket URL into the SDP attribute **name** and the **value** to
+  publish, the way the historical gateway did it (`WebSocketLeg.java:88-142`):
+  the value is **relative to the protocol** — `//host:port/path`, no scheme —
+  and the scheme is carried by the attribute name, `ws` in the clear and `wss`
+  over TLS.
+
+  So the line reads `a=ws://host:port/…`, which looks like a URL only because
+  the SDP separator `:` lands in front of the value's `//`. That is exactly what
+  lets a client re-prefix `"ws:"` and end up with a usable URL — the arrangement
+  the deployed clients were built against.
+
+  Accepts the four forms in input (`ws`, `wss`, `http`, `https`, or already
+  protocol-relative), since the scheme comes from whatever `GetMediaCandidates`
+  answered.
+
+      iex> MediaServer.Mendooze.Sdp.ws_url_attribute("wss://10.0.0.1:9090/jsr309/7/tok")
+      {"wss", "//10.0.0.1:9090/jsr309/7/tok"}
+      iex> MediaServer.Mendooze.Sdp.ws_url_attribute("ws://10.0.0.1:9090/jsr309/7/tok")
+      {"ws", "//10.0.0.1:9090/jsr309/7/tok"}
+  """
+  @spec ws_url_attribute(String.t()) :: {String.t(), String.t()}
+  def ws_url_attribute("wss://" <> rest), do: {"wss", "//" <> rest}
+  def ws_url_attribute("ws://" <> rest), do: {"ws", "//" <> rest}
+  def ws_url_attribute("https://" <> rest), do: {"wss", "//" <> rest}
+  def ws_url_attribute("http://" <> rest), do: {"ws", "//" <> rest}
+  def ws_url_attribute("//" <> _rest = url), do: {"ws", url}
 
   defp add_candidates(m, candidates) do
     Enum.reduce(candidates, m, fn cand, acc ->
@@ -371,8 +436,11 @@ defmodule MediaServer.Mendooze.Sdp do
   # goog-remb). Emitted verbatim as generic attributes so the wording matches
   # the browser-validated Java gateway exactly.
   defp add_rtcp_fb(m, false, _pts), do: m
-  defp add_rtcp_fb(m, true, []), do: m
+  defp add_rtcp_fb(m, _fb, []), do: m
+  defp add_rtcp_fb(m, [], _pts), do: m
 
+  # `true` keeps the OFFERER's behaviour: we propose the feedback we are willing to
+  # do, and the answerer picks. Unchanged, because an offer has no set to intersect.
   defp add_rtcp_fb(m, true, pts) do
     Enum.reduce(pts, m, fn pt, acc ->
       acc
@@ -381,6 +449,25 @@ defmodule MediaServer.Mendooze.Sdp do
       |> ExSDP.add_attribute({"rtcp-fb", "#{pt} goog-remb"})
     end)
   end
+
+  # A LIST is the ANSWERER's form: exactly the feedback types agreed, emitted per
+  # explicit payload type rather than with the `*` wildcard the offer may have used.
+  # Verbose on purpose — a wildcard answer leaves what we accepted ambiguous, and this
+  # is the attribute a peer reads to decide whether to bother sending NACKs.
+  defp add_rtcp_fb(m, types, pts) when is_list(types) do
+    for pt <- pts, type <- types, reduce: m do
+      acc -> ExSDP.add_attribute(acc, {"rtcp-fb", "#{pt} #{type}"})
+    end
+  end
+
+  # RFC 5939 §3.5.2: accepting a potential configuration is stated, not implied. The
+  # answer's m= line carries the negotiated profile AND this attribute naming which
+  # configuration was taken — without it the peer cannot tell an accepted capability
+  # negotiation from an answerer that simply changed the transport on its own.
+  defp add_acfg(m, nil), do: m
+
+  defp add_acfg(m, %{config: config, tcap: tcap}),
+    do: ExSDP.add_attribute(m, {"acfg", "#{config} t=#{tcap}"})
 
   defp add_ice_lite(sdp, false), do: sdp
   # As the "ice-lite" string, not the :ice_lite atom: both serialize to
@@ -499,15 +586,22 @@ defmodule MediaServer.Mendooze.Sdp do
 
   defp add_crypto(m, :none), do: m
 
+  defp add_crypto(m, {:sdes, suite, key}),
+    do: ExSDP.add_attribute(m, {"crypto", "1 #{suite} inline:#{key}"})
+
   defp add_crypto(m, {:dtls, setup, hash, fingerprint}) do
     m
     |> ExSDP.add_attribute({:fingerprint, {hash_to_atom(hash), fingerprint}})
     |> ExSDP.add_attribute({:setup, setup})
   end
 
-  defp add_crypto(m, {:sdes, suite, key}) do
-    ExSDP.add_attribute(m, {"crypto", "1 #{suite} inline:#{key}"})
+  # RFC 4568 §6.2: the answer's tag is the tag of the offered line it accepted, not a
+  # fresh one. `crypto_tag` carries it (default 1, which is what an OFFER uses).
+  defp add_crypto(m, {:sdes, suite, key}, tag) do
+    ExSDP.add_attribute(m, {"crypto", "#{tag} #{suite} inline:#{key}"})
   end
+
+  defp add_crypto(m, crypto, _tag), do: add_crypto(m, crypto)
 
   defp add_ice(m, nil), do: m
 
@@ -534,8 +628,27 @@ defmodule MediaServer.Mendooze.Sdp do
   # ── SDP parsing ─────────────────────────────────────────────────────────────
 
   # RTP profiles we can answer with real media; anything else (TCP/WSS,
-  # UDP/DTLS/SCTP, …) yields an unsupported stub (G9).
-  @rtp_profiles ~w(RTP/AVP RTP/AVPF RTP/SAVP RTP/SAVPF UDP/TLS/RTP/SAVPF)
+  # UDP/DTLS/SCTP, …) yields an unsupported stub (G9). Both DTLS-SRTP variants
+  # belong here: browsers offer UDP/TLS/RTP/SAVPF (JSEP), a SIP phone offers
+  # plain UDP/TLS/RTP/SAVP (RFC 5764 §8 — Linphone 6.2 does), and dropping the
+  # latter turned every Linphone DTLS call into a 488 :no_common_codec.
+  @rtp_profiles ~w(RTP/AVP RTP/AVPF RTP/SAVP RTP/SAVPF UDP/TLS/RTP/SAVP UDP/TLS/RTP/SAVPF)
+
+  # Real-time text carried over a WebSocket instead of RTP (IVeS/Omnitor spec,
+  # `docs/design/jsr309_text_over_wss.md` in the media server): a browser cannot
+  # put T.140 on an RTP profile — `RTCPeerConnection` has no such media — so the
+  # transport of that one `m=` section becomes a WebSocket the peer opens towards
+  # the media server. The four spellings are accepted: the deployed client emits
+  # `TCP/WS`, the historical gateway only ever recognised `TCP/*` and dropped
+  # `TLS/*` into its RTP branch, which was a bug and not a contract.
+  @ws_text_protocols ~w(TCP/WS TCP/WSS TLS/WS TLS/WSS)
+
+  @doc """
+  The WebSocket transports a text media may be offered over. Exposed so an
+  adapter can recognise such a section without re-listing them.
+  """
+  @spec ws_text_protocols() :: [String.t()]
+  def ws_text_protocols(), do: @ws_text_protocols
 
   @doc """
   Parse a remote SDP into per-media descriptors.
@@ -553,7 +666,16 @@ defmodule MediaServer.Mendooze.Sdp do
       {:ok, sdp} ->
         session_ip = connection_ip(sdp.connection_data)
         session_attrs = sdp.attributes
-        medias = Enum.map(sdp.media, &parse_media_section(&1, session_ip, session_attrs))
+        # the raw a=fmtp strings, per m= section in order (see raw_fmtp_sections/1)
+        raw = raw_fmtp_sections(sdp_str)
+
+        medias =
+          sdp.media
+          |> Enum.with_index()
+          |> Enum.map(fn {m, i} ->
+            parse_media_section(m, session_ip, session_attrs, Enum.at(raw, i, %{}))
+          end)
+
         {:ok, medias}
 
       {:error, _reason} = err ->
@@ -573,15 +695,120 @@ defmodule MediaServer.Mendooze.Sdp do
     end)
   end
 
-  defp parse_media_section(m, session_ip, session_attrs) do
-    if m.type in [:audio, :video, :text] and m.protocol in @rtp_profiles do
-      parse_media(m, session_ip, session_attrs)
-    else
-      %{supported?: false, type: m.type, port: m.port, protocol: m.protocol, raw_fmt: m.fmt}
+  # The raw `a=fmtp:<pt> <params>` values, one map per m= section, in section order.
+  #
+  # Taken from the TEXT rather than from the parsed attributes on purpose: an answerer
+  # that *forwards* the peer's fmtp — which is what the delegated negotiation does,
+  # handing it to the media server — must forward it verbatim. Rebuilding the string
+  # from `ExSDP.Attribute.FMTP` would not round-trip: `profile_level_id` is held as an
+  # integer, so `42e01f` comes back re-rendered, and parameter order is lost. The
+  # parsed `:fmtp` structs remain the thing to *reason* about; this is the thing to
+  # relay.
+  defp raw_fmtp_sections(sdp_str) do
+    sdp_str
+    |> String.split(~r/^m=/m)
+    # the first chunk is the session part, before any m= line
+    |> Enum.drop(1)
+    |> Enum.map(fn section ->
+      Regex.scan(~r/^a=fmtp:(\d+)[ \t]+(.*?)\s*$/m, section)
+      |> Map.new(fn [_line, pt, params] -> {pt, params} end)
+    end)
+  end
+
+  defp parse_media_section(m, session_ip, session_attrs, raw_fmtp) do
+    cond do
+      m.type in [:audio, :video, :text] and m.protocol in @rtp_profiles ->
+        parse_media(m, session_ip, session_attrs, raw_fmtp)
+
+      m.type == :text and m.protocol in @ws_text_protocols and ws_text_fmt?(m.fmt) ->
+        parse_ws_text(m, session_ip, session_attrs)
+
+      true ->
+        %{
+          supported?: false,
+          transport: :unsupported,
+          type: m.type,
+          port: m.port,
+          protocol: m.protocol,
+          raw_fmt: m.fmt,
+          # kept for the port-0 rejection to echo (JSEP §5.3.1): the section we decline
+          # still has to be identifiable by the mid the offerer gave it
+          mid: find_mid(m.attributes)
+        }
     end
   end
 
-  defp parse_media(m, session_ip, session_attrs) do
+  # The format list of a text-over-WebSocket section is the literal token `t140`,
+  # never a payload type — there is no RTP numbering to allocate on a WebSocket.
+  # ExSDP keeps it as a string because the transport is not an RTP profile.
+  defp ws_text_fmt?(fmt) when is_binary(fmt) do
+    fmt
+    |> String.split(~r/\s+/, trim: true)
+    |> Enum.any?(&(String.downcase(&1) == "t140"))
+  end
+
+  defp ws_text_fmt?(_fmt), do: false
+
+  # A text-over-WebSocket section, as a media_desc an answerer can act on.
+  #
+  # The RTP-shaped fields are present and neutral on purpose: everything that
+  # walks a media list (media selection, rejection, bandwidth) keeps working
+  # without knowing about this transport, and only the places that must branch
+  # read `transport: :ws`. There is no codec to negotiate here — `t140` is the
+  # whole vocabulary — no crypto (the WebSocket's own TLS carries it), no ICE and
+  # no rtcp-mux.
+  defp parse_ws_text(m, session_ip, session_attrs) do
+    attrs = m.attributes
+
+    %{
+      supported?: true,
+      transport: :ws,
+      type: :text,
+      ip: connection_ip(m.connection_data) || session_ip,
+      port: m.port,
+      protocol: m.protocol,
+      raw_fmt: m.fmt,
+      # RFC 4145: who opens the connection. `active`/`actpass` means the peer
+      # will connect to us, which is the only arrangement we can serve — we are
+      # the WebSocket server. A committed `passive` peer is answering a call
+      # nobody will ever place.
+      setup: find_setup(attrs) || find_setup(session_attrs) || :actpass,
+      # the peer's own WebSocket URL, when it is the one hosting (a=ws / a=wss,
+      # absolute or protocol-relative)
+      ws_url: find_ws_url(attrs),
+      direction: find_direction(attrs) || find_direction(session_attrs) || :sendrecv,
+      mid: find_mid(attrs),
+      # neutral RTP fields — see above
+      rtp_map: %{},
+      codecs: ["T140"],
+      fmtp: %{},
+      fmtp_raw: %{},
+      dtmf_pts: %{},
+      rtcp_mux: false,
+      bandwidth: as_bandwidth(m.bandwidth),
+      crypto: :none,
+      sdes_offers: [],
+      ice: nil,
+      rtcp_fb: %{},
+      capneg: nil,
+      candidates: []
+    }
+  end
+
+  # `a=ws:<url>` / `a=wss:<url>`. Both attribute names are read, and the value
+  # may be absolute (`ws|wss|http|https`) or protocol-relative (`//host:port/…`,
+  # the form the historical Java gateway emitted because its client re-prefixed
+  # the scheme itself). Returns the value verbatim; interpreting it is the
+  # caller's business.
+  defp find_ws_url(attrs) do
+    Enum.find_value(attrs, fn
+      {"ws", v} -> v
+      {"wss", v} -> v
+      _ -> nil
+    end)
+  end
+
+  defp parse_media(m, session_ip, session_attrs, raw_fmtp) do
     attrs = m.attributes
     fmt = normalize_fmt(m.fmt)
     rtpmaps = for %ExSDP.Attribute.RTPMapping{} = rm <- attrs, do: rm
@@ -589,6 +816,7 @@ defmodule MediaServer.Mendooze.Sdp do
 
     %{
       supported?: true,
+      transport: :rtp,
       type: m.type,
       ip: connection_ip(m.connection_data) || session_ip,
       port: m.port,
@@ -597,14 +825,21 @@ defmodule MediaServer.Mendooze.Sdp do
       rtp_map: rtp_map,
       codecs: codecs,
       fmtp: offered_fmtp(attrs),
+      # the same lines, unparsed, to RELAY (see raw_fmtp_sections/1). Only the payload
+      # types this section actually offers, so a stray a=fmtp cannot leak across medias.
+      fmtp_raw: Map.take(raw_fmtp, Enum.map(Map.keys(rtp_map), &to_string/1)),
       dtmf_pts: dtmf_pts,
       rtcp_mux: :rtcp_mux in attrs,
       direction: find_direction(attrs) || find_direction(session_attrs) || :sendrecv,
       bandwidth: as_bandwidth(m.bandwidth),
       crypto: find_crypto(attrs, session_attrs),
+      # every offered SDES line (empty unless the offer carries `a=crypto`): the
+      # answerer picks one it supports and echoes its tag (RFC 4568 §6.2)
+      sdes_offers: sdes_offers(attrs) ++ sdes_offers(session_attrs),
       ice: find_ice(attrs) || find_ice(session_attrs),
       mid: find_mid(attrs),
       rtcp_fb: parse_rtcp_fb(attrs),
+      capneg: find_capneg(attrs, session_attrs),
       candidates: raw_candidates(attrs)
     }
   end
@@ -629,6 +864,86 @@ defmodule MediaServer.Mendooze.Sdp do
   # for later B2BUA forwarding; the answerer does not use them for addressing.
   defp raw_candidates(attrs) do
     for {"candidate", v} <- attrs, do: v
+  end
+
+  # RFC 5939 (SDP Capability Negotiation), the transport-protocol case only.
+  #
+  # A caller may offer one profile on the m= line while declaring it *could* do
+  # another — the LiveVideoPlugin offers `RTP/AVP` with `a=tcap:1 RTP/AVPF` and
+  # `a=pcfg:1 t=1`, meaning "I am on AVP now, accept configuration 1 and we run AVPF".
+  # An answerer that ignores this answers AVP and the call runs without NACK, FIR or
+  # TMMBR, which on a lossy link is the whole difference. Answering AVPF *without*
+  # accepting the configuration is not the fix: RFC 3264 binds the answer to the
+  # offered transport, and RFC 5939 exists precisely to negotiate a change.
+  #
+  # Returns the potential configuration we could accept, or nil.
+  #
+  # **Minimal on purpose**: a pcfg is only considered when its element list is exactly
+  # one `t=`. RFC 5939 §3.6.1 obliges an answerer to satisfy the WHOLE configuration it
+  # accepts, so a pcfg that also demands attribute or bandwidth changes we do not
+  # implement must be declined — claiming it would be a lie the peer acts on. Lowest
+  # config number wins, that being RFC 5939's preference order.
+  defp find_capneg(attrs, session_attrs) do
+    caps = tcaps(session_attrs, attrs)
+
+    attrs
+    |> Enum.flat_map(fn
+      {"pcfg", value} -> List.wrap(parse_pcfg(value, caps))
+      _ -> []
+    end)
+    |> Enum.sort_by(& &1.config)
+    |> List.first()
+  end
+
+  # `a=tcap:<num> <proto> [<proto> ...]` — the protocols are numbered consecutively
+  # from <num> (§3.3.1). Declared at session level, at media level, or both; a media
+  # declaration wins for the numbers it redefines.
+  defp tcaps(session_attrs, attrs) do
+    Map.merge(collect_tcaps(session_attrs), collect_tcaps(attrs))
+  end
+
+  defp collect_tcaps(attrs) do
+    for {"tcap", value} <- attrs, reduce: %{} do
+      acc ->
+        case String.split(value, ~r/\s+/, trim: true) do
+          [num | protos] when protos != [] ->
+            case Integer.parse(num) do
+              {first, ""} ->
+                protos
+                |> Enum.with_index(first)
+                |> Enum.reduce(acc, fn {proto, n}, m -> Map.put(m, n, proto) end)
+
+              _ ->
+                acc
+            end
+
+          _ ->
+            acc
+        end
+    end
+  end
+
+  defp parse_pcfg(value, caps) do
+    case String.split(value, ~r/\s+/, trim: true) do
+      [num, element] ->
+        with {config, ""} <- Integer.parse(num),
+             "t=" <> list <- element,
+             # alternatives are `|`-separated and each may itself be a `,` list; the
+             # first is the caller's preferred one, and one is all we need
+             [first | _] <- String.split(list, ["|", ","], trim: true),
+             {tcap, ""} <- Integer.parse(first),
+             {:ok, protocol} <- Map.fetch(caps, tcap),
+             true <- protocol in @rtp_profiles do
+          %{config: config, tcap: tcap, protocol: protocol}
+        else
+          _ -> nil
+        end
+
+      # anything other than exactly one `t=` element is a configuration we cannot
+      # promise to satisfy (see the note above)
+      _ ->
+        nil
+    end
   end
 
   # a=rtcp-fb:<pt> <type> → %{pt => ["nack", "ccm fir", ...]}; "*" maps to -1.
@@ -775,19 +1090,25 @@ defmodule MediaServer.Mendooze.Sdp do
 
   # a=crypto:<tag> <suite> inline:<key>[|lifetime|MKI] — keep the base64 key only
   defp find_sdes(attrs) do
-    Enum.find_value(attrs, fn
-      {"crypto", value} ->
-        case String.split(value, " ", trim: true) do
-          [_tag, suite, "inline:" <> keypart | _] ->
-            {:sdes, suite, keypart |> String.split("|") |> hd()}
+    case sdes_offers(attrs) do
+      [%{suite: suite, key: key} | _] -> {:sdes, suite, key}
+      [] -> nil
+    end
+  end
 
-          _ ->
-            nil
-        end
-
-      _ ->
-        nil
-    end)
+  # EVERY `a=crypto` line of the section, in offer order, tag included.
+  #
+  # An answerer needs them all, not just the first: RFC 4568 §6.2 has it pick **one**
+  # offered line, echo its tag, and key its own direction with the same suite — so the
+  # line it picks has to be one it supports. Linphone offers four (AEAD_AES_128_GCM
+  # first, AES_CM_128_HMAC_SHA1_80 second), and reading only the first means either
+  # refusing a call we can serve or answering a suite whose key belongs to another line.
+  defp sdes_offers(attrs) do
+    for {"crypto", value} <- attrs,
+        [tag, suite, "inline:" <> keypart | _] = String.split(value, " ", trim: true),
+        into: [] do
+      %{tag: tag, suite: suite, key: keypart |> String.split("|") |> hd()}
+    end
   end
 
   defp find_ice(attrs) do
@@ -872,6 +1193,55 @@ defmodule MediaServer.Mendooze.Sdp do
          dtmf_pt: dtmf_pt,
          dtmf_clock: dtmf_clock,
          rtp_map: send_map
+       }}
+    end
+  end
+
+  @doc """
+  Propose **every** offered payload type, for a delegated negotiation.
+
+  The counterpart of `negotiate/3`, and its replacement wherever the media server
+  arbitrates (`docs/design/mcu_module.md` §16.3): the offer *is* the menu, so nothing
+  is filtered on codec identity here. `parse/1` has already dropped the payload types
+  the codec tables cannot name — that table is a vocabulary, not a policy, and it is
+  the one filter that necessarily stays client-side, since the server's API speaks
+  integer codec ids.
+
+  `want_dtmf: false` drops the telephone-event payload types: refusing DTMF is a
+  deployment policy, not a codec capability, so it is the one thing a caller cannot
+  overrule.
+
+  Returns the same shape as `negotiate/3`, so the answer builders are unchanged, and
+  `{:error, :no_common_codec}` when nothing nameable is left to propose.
+  """
+  @spec propose_all(media_desc(), boolean()) ::
+          {:ok,
+           %{
+             codecs: [codec_name()],
+             dtmf: boolean(),
+             dtmf_pt: integer() | nil,
+             dtmf_clock: integer() | nil,
+             rtp_map: rtp_map()
+           }}
+          | {:error, :no_common_codec}
+  def propose_all(desc, want_dtmf \\ true) do
+    {dtmf?, dtmf_pt, dtmf_clock} = select_dtmf(desc, desc.codecs, want_dtmf)
+
+    rtp_map =
+      if dtmf?,
+        do: desc.rtp_map,
+        else: Map.reject(desc.rtp_map, fn {_pt, code} -> code == @dtmf_code end)
+
+    if map_size(rtp_map) == 0 do
+      {:error, :no_common_codec}
+    else
+      {:ok,
+       %{
+         codecs: desc.codecs,
+         dtmf: dtmf?,
+         dtmf_pt: dtmf_pt,
+         dtmf_clock: dtmf_clock,
+         rtp_map: rtp_map
        }}
     end
   end
@@ -1079,25 +1449,48 @@ defmodule MediaServer.Mendooze.Sdp do
 
   The telephone-event entry is emitted with the negotiated clock (G10), not the
   code table's fixed 8000 Hz, so answering OPUS keeps its 48 kHz DTMF PT.
+
+  **Which clock, per payload type.** `dtmf_pts` (the offer's clock → PT map, as
+  `parse/1` returns it) is what settles it, and passing it is what a delegated
+  negotiation must do: the party that chose the telephone-event PT is the media
+  server, and it may well have kept the 8 kHz one while the primary codec is OPUS.
+  The answer then has to state *the offered clock of that PT* — a payload type
+  re-announced with a clock rate the offer never gave it is not a codec the peer
+  can match (libwebrtc drops it; DTMF then rides at the wrong rate or not at all).
+  `dtmf_clock` remains the fallback for the local path, where the selected PT and
+  its clock were chosen together.
+
+  **Order.** `fmt_order` — the offer's own `m=` format list — is what the entries are
+  ordered by when it is given, because in an answer the order *is* a preference
+  statement (RFC 3264 §6.1) and a mixer has none of its own to state. Without it the
+  order falls back to ascending payload type, which is not a preference at all: a
+  browser offering `111 9 0` (OPUS first) would be answered `0 9 111` and would then
+  send G.711 to a conference that could have had OPUS.
   """
-  # Callers pass either a full negotiate/3 result (Mockup) or just the two keys
-  # used here (MendoozeConn), hence the open map.
+  # Callers pass either a full negotiate/3 result (Mockup) or just the keys used
+  # here (MendoozeConn, the MCU adapter), hence the open map.
   @spec answer_rtpmaps(:audio | :video | :text, %{
           required(:rtp_map) => rtp_map(),
           optional(:dtmf_clock) => non_neg_integer() | nil,
+          optional(:dtmf_pts) => %{optional(non_neg_integer()) => non_neg_integer()},
+          optional(:fmt_order) => [non_neg_integer() | String.t()],
           optional(atom()) => any()
         }) :: [rtpmap_entry()]
   def answer_rtpmaps(media, %{rtp_map: send_map} = neg) do
-    dtmf_clock = Map.get(neg, :dtmf_clock) || 8000
+    offered_clocks =
+      for {clock, pt} <- Map.get(neg, :dtmf_pts) || %{}, into: %{}, do: {pt, clock}
+
+    fallback_clock = Map.get(neg, :dtmf_clock) || 8000
 
     send_map
-    |> Enum.sort_by(fn {pt, _code} -> String.to_integer(pt) end)
+    |> Enum.sort_by(&pt_rank(&1, Map.get(neg, :fmt_order)))
     |> Enum.flat_map(fn {pt_str, code} ->
       pt = String.to_integer(pt_str)
 
       cond do
         code == @dtmf_code ->
-          [%{pt: pt, encoding: "telephone-event", clock: dtmf_clock, channels: nil}]
+          clock = Map.get(offered_clocks, pt, fallback_clock)
+          [%{pt: pt, encoding: "telephone-event", clock: clock, channels: nil}]
 
         true ->
           case code_rtpmap(media, code) do
@@ -1107,6 +1500,33 @@ defmodule MediaServer.Mendooze.Sdp do
       end
     end)
   end
+
+  @doc """
+  Rank a payload type against an offered format list: its position there, and its
+  own number for anything the list does not mention (or when there is no list).
+
+  Exported because the answer's `rtpmap` order and the *primary codec* the mixer is
+  told to encode must be the same reading of the caller's preference — two orderings
+  would put the peer's first choice in the SDP and something else on the wire.
+  """
+  @spec pt_rank(String.t() | non_neg_integer() | {String.t(), term()}, [term()] | nil) ::
+          {non_neg_integer(), non_neg_integer()}
+  def pt_rank({pt, _value}, fmt_order), do: pt_rank(pt, fmt_order)
+
+  def pt_rank(pt, fmt_order) do
+    number = if is_integer(pt), do: pt, else: String.to_integer(pt)
+    order = normalize_fmt_order(fmt_order)
+    {Enum.find_index(order, &(&1 == Integer.to_string(number))) || length(order), number}
+  end
+
+  # `m=` format lists reach us in both shapes ExSDP produces: a list of integers for the
+  # profiles it decodes numerically, and the raw string for the others (`"99"`,
+  # `"103 107 109"`, `"t140"`). Same reading for both, or the order silently depends on
+  # which transport the offer named.
+  defp normalize_fmt_order(nil), do: []
+  defp normalize_fmt_order(fmt) when is_binary(fmt), do: String.split(fmt, ~r/\s+/, trim: true)
+  defp normalize_fmt_order(fmt) when is_list(fmt), do: Enum.map(fmt, &to_string/1)
+  defp normalize_fmt_order(fmt), do: [to_string(fmt)]
 
   @doc """
   Restrict a send `rtpMap` (remote payload-type numbering → codec code) to the
@@ -1136,6 +1556,183 @@ defmodule MediaServer.Mendooze.Sdp do
 
   defp channels(ch) when is_integer(ch) and ch > 1, do: ch
   defp channels(_), do: nil
+
+  # ── AV1 level derivation (bitstream spec Annex A.3) ─────────────────────────
+
+  # `{seq_level_idx, MaxPicSize, MaxHSize, MaxVSize, MaxDisplayRate}` for the
+  # levels the spec DEFINES, in ascending order. 2.2/2.3, 3.2/3.3 and 4.2/4.3
+  # have no definition, hence the gaps in the index.
+  @av1_levels [
+    {0, 147_456, 2048, 1152, 4_423_680},
+    {1, 278_784, 2816, 1584, 8_363_520},
+    {4, 665_856, 4352, 2448, 19_975_680},
+    {5, 1_065_024, 5504, 3096, 31_950_720},
+    {8, 2_359_296, 6144, 3456, 70_778_880},
+    {9, 2_359_296, 6144, 3456, 141_557_760},
+    {12, 8_912_896, 8192, 4352, 267_386_880},
+    {13, 8_912_896, 8192, 4352, 534_773_760},
+    {14, 8_912_896, 8192, 4352, 1_069_547_520},
+    {16, 35_651_584, 16_384, 8704, 1_069_547_520},
+    {17, 35_651_584, 16_384, 8704, 2_139_095_040},
+    {18, 35_651_584, 16_384, 8704, 4_278_190_080}
+  ]
+
+  @doc """
+  The lowest AV1 `seq_level_idx` that covers a picture size and frame rate
+  (bitstream spec Annex A.3: `MaxPicSize`, `MaxHSize`, `MaxVSize`,
+  `MaxDisplayRate`).
+
+  This is what an SDP `a=fmtp:<pt> level-idx=` must state, and it is the
+  **controller's** to derive rather than a static server setting (decided
+  2026-08-06): the media server has no idea what the mixer will actually
+  encode, and the spec default `5` (level 3.1) becomes a lie the moment a
+  deployment runs its mixer at 720p60 or 1080p — `level-idx` bounds what the
+  *peer* may send us, and a peer that believes 3.1 while we produce 4.0 is the
+  `profile-level-id` incident of H.264 transposed.
+
+  Returns the highest defined level when nothing covers the request (a 8K
+  mosaic is not a level we can name), so an answer always carries a value.
+
+      iex> MediaServer.Mendooze.Sdp.av1_level_idx(1280, 720, 15)
+      5
+      iex> MediaServer.Mendooze.Sdp.av1_level_idx(1280, 720, 60)
+      8
+  """
+  @spec av1_level_idx(pos_integer(), pos_integer(), pos_integer()) :: non_neg_integer()
+  def av1_level_idx(width, height, fps)
+      when is_integer(width) and width > 0 and is_integer(height) and height > 0 and
+             is_integer(fps) and fps > 0 do
+    pic_size = width * height
+    display_rate = pic_size * fps
+
+    Enum.find_value(@av1_levels, highest_av1_level(), fn
+      {idx, max_pic, max_h, max_v, max_rate} ->
+        if pic_size <= max_pic and width <= max_h and height <= max_v and
+             display_rate <= max_rate,
+           do: idx,
+           else: nil
+    end)
+  end
+
+  defp highest_av1_level do
+    {idx, _pic, _h, _v, _rate} = List.last(@av1_levels)
+    idx
+  end
+
+  # ── Verdict conformance (RFC 3264 §6.1 / RFC 6184 §8.2.2) ───────────────────
+
+  @doc """
+  Drop, from a server verdict, the payload types whose returned fmtp describes a
+  codec the offer did not describe for **that** payload type.
+
+  An answer may not re-define a payload type (RFC 3264 §6.1). It bites on H.264,
+  whose PT identity is its `profile-level-id` *profile* (the first two bytes —
+  the level may legitimately differ, that is level asymmetry) plus its
+  `packetization-mode` (RFC 6184 §8.2.2). A browser offers the same codec under
+  several payload types precisely to enumerate those pairs, and answering one of
+  them with another pair's parameters is a codec it never offered: libwebrtc
+  refuses the whole answer and the app hangs up right after the ACK.
+
+  Two deliberate readings:
+
+  * an offer that stated no `profile-level-id` for the PT has nothing to
+    contradict — a handset that lists `H264/90000` bare decodes what it is sent,
+    and declining its video over a parameter it never wrote is the harder failure;
+  * an absent `packetization-mode` is **no constraint**, not RFC 6184 §8.1's
+    default 0 (decided 2026-08-06): Linphone 6.2 + OpenH264 omits it, and reading
+    absence as 0 made the mode "differ" from the server's 1 and dropped H.264
+    entirely. An explicit `0` is still honoured.
+
+  `accepted` is the `accepted_pts/2` result (`nil` passes through — a pre-P8a
+  server has no verdict to check); `rtp_map` maps the proposed payload types to
+  codec codes (how H.264 entries are recognized). Returns `{kept, dropped}`,
+  `dropped` carrying one `%{pt:, offered:, answered:}` per discarded entry
+  (human-readable configs) for the caller to log with its own context.
+  """
+  @spec conformant_pts(
+          %{String.t() => String.t()} | nil,
+          media_desc() | map(),
+          rtp_map()
+        ) ::
+          {%{String.t() => String.t()} | nil,
+           [%{pt: String.t(), offered: String.t(), answered: String.t()}]}
+  def conformant_pts(nil, _desc, _rtp_map), do: {nil, []}
+
+  def conformant_pts(accepted, %{type: :video} = desc, rtp_map) do
+    Enum.reduce(accepted, {%{}, []}, fn {pt, answered}, {kept, dropped} ->
+      case verdict_conflict(desc, rtp_map, pt, answered) do
+        nil -> {Map.put(kept, pt, answered), dropped}
+        conflict -> {kept, dropped ++ [conflict]}
+      end
+    end)
+  end
+
+  def conformant_pts(accepted, _desc, _rtp_map), do: {accepted, []}
+
+  defp verdict_conflict(desc, rtp_map, pt, answered) do
+    with true <- h264_pt?(rtp_map, pt),
+         {offered_profile, offered_mode} <- offered_h264_config(desc, pt) do
+      {got_profile, raw_mode} = answered_h264_config(answered)
+      # absent packetization-mode in the offer ⇒ the mode is not compared at all
+      got_mode = if is_nil(offered_mode), do: nil, else: raw_mode
+
+      if {offered_profile, offered_mode} == {got_profile, got_mode} do
+        nil
+      else
+        %{
+          pt: pt,
+          offered: describe_h264({offered_profile, offered_mode}),
+          answered: describe_h264({got_profile, got_mode})
+        }
+      end
+    else
+      # not H.264, or the offer stated no profile-level-id for this PT
+      _ -> nil
+    end
+  end
+
+  defp h264_pt?(rtp_map, pt) do
+    case code_rtpmap(:video, Map.get(rtp_map, pt)) do
+      {"H264", _clock, _ch} -> true
+      _ -> false
+    end
+  end
+
+  # The identity half of an H.264 fmtp, as the peer wrote it: the profile
+  # (`profile_idc` + `profile_iop`, first two bytes) and the packetization mode —
+  # `nil` when it wrote none, which is not the same as 0 (see `conformant_pts/3`).
+  defp offered_h264_config(desc, pt) do
+    case Map.get(Map.get(desc, :fmtp, %{}), pt) do
+      %{profile_level_id: plid} = fmtp when is_integer(plid) ->
+        {plid |> hex6() |> String.slice(0, 4), Map.get(fmtp, :packetization_mode)}
+
+      _ ->
+        nil
+    end
+  end
+
+  defp answered_h264_config(params) do
+    profile =
+      case Regex.run(~r/profile-level-id=([0-9a-fA-F]{6})/, params) do
+        [_, plid] -> plid |> String.downcase() |> String.slice(0, 4)
+        nil -> nil
+      end
+
+    mode =
+      case Regex.run(~r/packetization-mode=(\d+)/, params) do
+        [_, mode] -> String.to_integer(mode)
+        nil -> 0
+      end
+
+    {profile, mode}
+  end
+
+  defp describe_h264({profile, mode}),
+    do: "#{profile || "(no profile)"}/pm=#{if is_nil(mode), do: "(unstated)", else: mode}"
+
+  # profile-level-id is three hex bytes, lower-case, zero-padded (RFC 6184 §8.1)
+  defp hex6(value),
+    do: value |> Integer.to_string(16) |> String.downcase() |> String.pad_leading(6, "0")
 
   # ── GetMediaCandidates ──────────────────────────────────────────────────────
 

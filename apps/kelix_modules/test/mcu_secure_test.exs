@@ -14,6 +14,8 @@ defmodule Kelix.Mod.McuSecureTest do
   """
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias Kelix.Mcu.TestStub
   alias Kelix.Mod.Mcu
   alias Kelix.Mod.Mcu.{Adapter, Client, Config}
@@ -150,10 +152,43 @@ defmodule Kelix.Mod.McuSecureTest do
       assert answer =~ "m=audio #{@rec_port} RTP/SAVP"
     end
 
-    test "a suite we do not know is answered with one we do", ctx do
+    # This used to answer "a suite we do know" and hand the server the key of the line
+    # we did NOT accept — a call that established and decrypted nothing. RFC 4568 §6.2
+    # leaves an answerer two options, take one offered line or refuse; inventing a
+    # third is what produced silent one-way SRTP.
+    test "an offer whose every suite is unknown is refused, not half-keyed", ctx do
       {conn, _part} = leg(ctx.did)
-      assert {:ok, answer} = Adapter.set_remote_offer(conn, sdes_offer("F8_128_HMAC_SHA1_80"))
-      assert answer =~ "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:"
+
+      assert capture_log(fn ->
+               assert {:error, :no_common_sdes_suite} =
+                        Adapter.set_remote_offer(conn, sdes_offer("F8_128_HMAC_SHA1_80"))
+             end) =~ "offers no SDES suite we support"
+    end
+
+    # Linphone 6.2 offers four lines, `AEAD_AES_128_GCM` first — a suite this mixer does
+    # not implement. The answerer takes the first line it *can* honour, echoes that
+    # line's tag, and keys the remote direction with that line's key.
+    test "the supported line is selected, its tag echoed and its key pushed", ctx do
+      {conn, _part} = leg(ctx.did)
+
+      offer =
+        offer(
+          crypto: [
+            "a=crypto:1 AEAD_AES_128_GCM inline:SCFAW7LH8WVTcjfQFVBErzFCrpgfcSEXP0rsug==",
+            "a=crypto:2 AES_CM_128_HMAC_SHA1_80 inline:#{@sdes_key}",
+            "a=crypto:3 AES_256_CM_HMAC_SHA1_80 inline:eP9kHri2wJ9sjh+O51WbrTsqkux2Zp8T"
+          ]
+        )
+
+      assert {:ok, answer} = Adapter.set_remote_offer(conn, offer)
+
+      # tag 2, the line we accepted — not tag 1, whose key belongs to the GCM suite
+      assert answer =~ "a=crypto:2 AES_CM_128_HMAC_SHA1_80 inline:"
+      refute answer =~ "AEAD_AES_128_GCM"
+
+      # and the remote key is the one published on THAT line
+      assert_received {:rpc, "SetRemoteCryptoSDES",
+                       [42, 7, 0, "AES_CM_128_HMAC_SHA1_80", @sdes_key, 0, 0]}
     end
 
     test "local before StartReceiving, remote after (§6.2)", ctx do
@@ -176,7 +211,40 @@ defmodule Kelix.Mod.McuSecureTest do
       assert suite == "AES_CM_128_HMAC_SHA1_80"
       assert answer =~ "inline:#{our_key}"
 
-      assert_received {:rpc, "SetRemoteCryptoSDES", [42, 7, 0, ^suite, @sdes_key, 0]}
+      # seven arguments: `(iiissii)` — role AND keyRank (MCU-API `SetRemoteCryptoSDES`).
+      # Six was the one arity the server has no format string for: it answered a parse
+      # fault, kelixip turned it into a 500, and Linphone hung up.
+      assert_received {:rpc, "SetRemoteCryptoSDES", [42, 7, 0, ^suite, @sdes_key, 0, 0]}
+    end
+
+    # The real Linphone 6.2.0 offer of 2026-08-06 (`linphone.pcap`), kept verbatim: four
+    # crypto lines per media, GCM first, and a media list this mixer only partly serves
+    # (speex, G.729, AV1). It is the offer that found both SDES defects at once.
+    test "the captured Linphone 6.2 offer is answered, keyed on its second line", ctx do
+      {conn, _part} = leg(ctx.did, media: :audio_video)
+
+      offer =
+        File.read!(Path.expand("fixtures/SDP-linphone-620-srtp-offer.txt", __DIR__))
+
+      assert {:ok, answer} = Adapter.set_remote_offer(conn, offer)
+
+      # audio and video each keyed on their own tag-2 line, with our own keys
+      assert answer =~ "a=crypto:2 AES_CM_128_HMAC_SHA1_80 inline:"
+      refute answer =~ "AEAD_AES"
+      # the offer's transport is mirrored (§6.3 rule 4)
+      assert answer =~ "RTP/SAVP "
+
+      # the peer's audio key is the one on ITS tag-2 line, pushed with role and keyRank
+      assert_received {:rpc, "SetRemoteCryptoSDES",
+                       [
+                         42,
+                         7,
+                         0,
+                         "AES_CM_128_HMAC_SHA1_80",
+                         "gYwkkzbCwvqlHH+Bcq1FQGTanPHdh9z/F/3Co35r",
+                         0,
+                         0
+                       ]}
     end
 
     test "an SDES leg needs no WebRTC permission: it is what a SIP phone offers", ctx do

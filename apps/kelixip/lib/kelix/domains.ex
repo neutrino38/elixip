@@ -4,9 +4,11 @@ defmodule Kelix.Domains do
   (design `docs/design/kelixip_basic_design.md` §3.2, §9.2).
 
   The whole file is parsed and validated into a fresh `%Kelix.Domains{}` *off to
-  the side*; only if everything validates is it swapped in. One bad element ⇒ the
-  reload is rejected and the current config stays intact — never a half-applied
-  config. Reads (`current/0`) always see one consistent version.
+  the side* — including compiling every dial-plan pattern and, on the operator's
+  reload, running the §5.3 load-time contract check on every **referenced script**
+  (`check_scripts/1`); only if everything validates is it swapped in. One bad
+  element ⇒ the reload is rejected and the current config stays intact — never a
+  half-applied config. Reads (`current/0`) always see one consistent version.
 
   This module is both the supervised GenServer and the snapshot struct it holds:
     * `version`  — bumped on each successful reload
@@ -49,9 +51,33 @@ defmodule Kelix.Domains do
   @doc """
   Atomically reload `domains.toml` from `path`. Returns `:ok` on success (the new
   version is swapped in) or `{:error, reason}` (current version kept intact).
+
+  With `check_scripts: true` — what the operator command (`Kelix.Control.reload_domains/0`)
+  passes — every script the file refers to must also pass the §5.3 load-time
+  contract (`check_scripts/1`) before the swap: a config whose scripts are missing,
+  uncompilable or not shutdown-aware is *not* servable, and is rejected here rather
+  than discovered on the first call routed to it. Off by default, for the callers
+  that only swap a snapshot without serving traffic from it (the test suite).
+
+  Parsing, and the script check with it, run in the **caller's** process; the
+  GenServer call is the swap alone. `current/0` is on the path of every inbound
+  request — a reload compiling a handful of scenarios must not block it.
   """
-  @spec reload(Path.t()) :: :ok | {:error, term}
-  def reload(path), do: GenServer.call(__MODULE__, {:reload, path})
+  @spec reload(Path.t(), keyword) :: :ok | {:error, term}
+  def reload(path, opts \\ []) do
+    case load(path, Keyword.get(opts, :check_scripts, false)) do
+      {:ok, snapshot} ->
+        GenServer.call(__MODULE__, {:swap, snapshot})
+
+      {:error, reason} = err ->
+        Logger.error(
+          module: __MODULE__,
+          message: "domains.toml reload rejected: #{reason} — current version kept"
+        )
+
+        err
+    end
+  end
 
   @doc "Resolve a host (R-URI/To host) to its domain, or nil. `name` + aliases, case-insensitive."
   @spec lookup(t, String.t()) :: Domain.t() | nil
@@ -68,9 +94,14 @@ defmodule Kelix.Domains do
         {:ok, %__MODULE__{}}
 
       path ->
-        case load_path(path, 1) do
+        # No script check here, deliberately: the `[module.*]` blocks live in this
+        # very file, so `Kelix.ModuleSupervisor` can only start the modules once the
+        # snapshot exists — and a script's `uses_modules` can only be resolved once
+        # those modules are loaded. The boot check is therefore a later child in the
+        # tree (`Kelix.ScriptPreflight`), which aborts the boot on a bad script.
+        case load(path, false) do
           {:ok, snapshot} ->
-            {:ok, snapshot}
+            {:ok, %{snapshot | version: 1}}
 
           {:error, reason} ->
             # A release dying during boot flushes no Logger output, so state the
@@ -84,22 +115,24 @@ defmodule Kelix.Domains do
   @impl true
   def handle_call(:current, _from, state), do: {:reply, state, state}
 
-  def handle_call({:reload, path}, _from, state) do
-    case load_path(path, state.version + 1) do
-      {:ok, snapshot} ->
-        Logger.info(module: __MODULE__, message: "domains.toml reloaded (v#{snapshot.version}, #{length(snapshot.domains)} domains)")
-        {:reply, :ok, snapshot}
+  # The swap itself: the snapshot arrives fully parsed and validated (reload/2), so
+  # this cannot fail — it only stamps the next version and replaces the state.
+  def handle_call({:swap, snapshot}, _from, state) do
+    snapshot = %{snapshot | version: state.version + 1}
 
-      {:error, reason} = err ->
-        Logger.error(module: __MODULE__, message: "domains.toml reload rejected: #{inspect(reason)} — keeping v#{state.version}")
-        {:reply, err, state}
-    end
+    Logger.info(
+      module: __MODULE__,
+      message: "domains.toml reloaded (v#{snapshot.version}, #{length(snapshot.domains)} domains)"
+    )
+
+    {:reply, :ok, snapshot}
   end
 
-  defp load_path(path, version) do
+  defp load(path, check_scripts?) do
     with {:ok, content} <- read_file(path),
-         {:ok, snapshot} <- parse(content) do
-      {:ok, %{snapshot | version: version}}
+         {:ok, snapshot} <- parse(content),
+         :ok <- if(check_scripts?, do: check_scripts(snapshot), else: :ok) do
+      {:ok, snapshot}
     end
   end
 
@@ -109,6 +142,79 @@ defmodule Kelix.Domains do
       {:error, reason} -> {:error, "cannot read #{path}: #{:file.format_error(reason)}"}
     end
   end
+
+  # ── referenced scripts: enumeration + load-time contract check ───────────────
+
+  @doc """
+  Every script a snapshot refers to — the `registrar`/`presence` block's `script`
+  and each dial-plan rule's — as `[{name, context}]`, deduped by name (first
+  reference wins). `context` says *where* the reference comes from, so an error
+  message can name the domain and the rule an operator has to go and fix.
+  """
+  @spec script_refs(t) :: [{String.t(), String.t()}]
+  def script_refs(%__MODULE__{domains: domains}) do
+    domains
+    |> Enum.flat_map(&domain_script_refs/1)
+    |> Enum.uniq_by(&elem(&1, 0))
+  end
+
+  defp domain_script_refs(%Domain{} = d) do
+    function_refs =
+      for {key, block} <- [registrar: d.registrar, presence: d.presence],
+          is_map(block),
+          do: {block.script, "domain #{d.name} [domain.#{key}]"}
+
+    call_refs =
+      for rule <- d.dial_plan,
+          do: {rule.script, "domain #{d.name} call rule #{rule_label(rule)}"}
+
+    function_refs ++ call_refs
+  end
+
+  defp rule_label(%DialRule{default?: true}), do: "default = true"
+  defp rule_label(%DialRule{raw: raw}), do: inspect(raw)
+
+  @doc """
+  Run the §5.3 load-time contract check on every script a snapshot refers to,
+  through `Kelix.ScriptRegistry.validate/1` — the one place that knows what a
+  servable script is (present, compiling, a scenario, shutdown-aware, its declared
+  `uses_modules` loaded). `:ok`, or `{:error, message}` listing each offender with
+  the domain and rule that names it.
+
+  Called on the operator's reload (`reload/2` with `check_scripts: true`) and at
+  boot (`Kelix.ScriptPreflight`) — not from `init/1`, see the comment there.
+  """
+  @spec check_scripts(t) :: :ok | {:error, String.t()}
+  def check_scripts(%__MODULE__{} = snapshot) do
+    refs = script_refs(snapshot)
+
+    cond do
+      refs == [] ->
+        :ok
+
+      is_nil(Process.whereis(Kelix.ScriptRegistry)) ->
+        {:error,
+         "cannot check the #{length(refs)} referenced script(s): Kelix.ScriptRegistry is not running"}
+
+      true ->
+        case Kelix.ScriptRegistry.validate(Enum.map(refs, &elem(&1, 0))) do
+          :ok -> :ok
+          {:error, failures} -> {:error, format_failures(refs, failures)}
+        end
+    end
+  end
+
+  defp format_failures(refs, failures) do
+    contexts = Map.new(refs)
+
+    "#{length(failures)} script(s) rejected:" <>
+      Enum.map_join(failures, "", fn {name, reason} ->
+        "\n  - #{Map.get(contexts, name, name)}: #{describe(reason)}"
+      end)
+  end
+
+  defp describe(reason) when is_binary(reason), do: reason
+  defp describe(reason), do: inspect(reason)
 
   # ── Pure parse + validation (testable without the GenServer) ─────────────────
 
@@ -122,7 +228,13 @@ defmodule Kelix.Domains do
          :ok <- check_top_keys(map),
          {:ok, domains} <- parse_domains(Map.get(map, "domain", [])),
          {:ok, index} <- build_index(domains) do
-      {:ok, %__MODULE__{version: 0, domains: domains, index: index, modules: Map.get(map, "module", %{})}}
+      {:ok,
+       %__MODULE__{
+         version: 0,
+         domains: domains,
+         index: index,
+         modules: Map.get(map, "module", %{})
+       }}
     end
   end
 
@@ -185,7 +297,8 @@ defmodule Kelix.Domains do
     end
   end
 
-  defp parse_dial_plan(_, domain), do: {:error, "domain #{inspect(domain)}: `call` must be an array of tables"}
+  defp parse_dial_plan(_, domain),
+    do: {:error, "domain #{inspect(domain)}: `call` must be an array of tables"}
 
   defp parse_rule(%{"default" => true} = r, domain) do
     with {:ok, script} <- req_string(r, "script", "call rule (domain #{domain})"),
@@ -203,20 +316,32 @@ defmodule Kelix.Domains do
   end
 
   defp parse_rule(_, domain),
-    do: {:error, "domain #{inspect(domain)}: each [[domain.call]] needs `pattern = \"...\"` or `default = true`"}
+    do:
+      {:error,
+       "domain #{inspect(domain)}: each [[domain.call]] needs `pattern = \"...\"` or `default = true`"}
 
   defp compile_pattern(pattern, domain) do
     case DialPlan.compile(pattern) do
-      {:ok, matcher} -> {:ok, matcher}
-      {:error, reason} -> {:error, "domain #{inspect(domain)}: bad pattern #{inspect(pattern)} (#{inspect(reason)})"}
+      {:ok, matcher} ->
+        {:ok, matcher}
+
+      {:error, reason} ->
+        {:error,
+         "domain #{inspect(domain)}: bad pattern #{inspect(pattern)} (#{inspect(reason)})"}
     end
   end
 
   defp validate_catch_all(rules, domain) do
     case Enum.split_while(rules, &(not &1.default?)) do
-      {_before, []} -> :ok
-      {_before, [_default]} -> :ok
-      {_before, [_default | _after]} -> {:error, "domain #{inspect(domain)}: the catch-all (default = true) must be the last call rule"}
+      {_before, []} ->
+        :ok
+
+      {_before, [_default]} ->
+        :ok
+
+      {_before, [_default | _after]} ->
+        {:error,
+         "domain #{inspect(domain)}: the catch-all (default = true) must be the last call rule"}
     end
   end
 
@@ -227,8 +352,11 @@ defmodule Kelix.Domains do
       keys = [d.name | d.aliases] |> Enum.map(&String.downcase/1)
 
       case Enum.find(keys, &Map.has_key?(acc, &1)) do
-        nil -> {:cont, {:ok, Enum.reduce(keys, acc, &Map.put(&2, &1, d))}}
-        dup -> {:halt, {:error, "domain name/alias #{inspect(dup)} is used by more than one domain"}}
+        nil ->
+          {:cont, {:ok, Enum.reduce(keys, acc, &Map.put(&2, &1, d))}}
+
+        dup ->
+          {:halt, {:error, "domain name/alias #{inspect(dup)} is used by more than one domain"}}
       end
     end)
   end
@@ -245,13 +373,16 @@ defmodule Kelix.Domains do
 
   defp opt_string_list(map, key, ctx) do
     case Map.get(map, key) do
-      nil -> {:ok, []}
+      nil ->
+        {:ok, []}
+
       list when is_list(list) ->
         if Enum.all?(list, &is_binary/1),
           do: {:ok, list},
           else: {:error, "domain #{inspect(ctx)}: `#{key}` must be a list of strings"}
 
-      _ -> {:error, "domain #{inspect(ctx)}: `#{key}` must be a list of strings"}
+      _ ->
+        {:error, "domain #{inspect(ctx)}: `#{key}` must be a list of strings"}
     end
   end
 
@@ -287,7 +418,9 @@ defmodule Kelix.Domains do
   defp pick_typed(block, allowed, ctx) do
     Enum.reduce_while(allowed, {:ok, %{}}, fn {key, type}, {:ok, acc} ->
       case Map.get(block, key) do
-        nil -> {:cont, {:ok, acc}}
+        nil ->
+          {:cont, {:ok, acc}}
+
         v ->
           case check_type(v, type) do
             :ok -> {:cont, {:ok, Map.put(acc, known_atom(key), v)}}

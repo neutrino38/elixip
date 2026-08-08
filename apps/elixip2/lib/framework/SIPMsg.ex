@@ -571,7 +571,22 @@ defmodule SIPMsg do
 
 	# Parse data after the headers and add body in the SIP message map
 	defp add_body(parsed_msg, body) do
-		clen = parsed_msg.contentlength
+		# Content-Length is OPTIONAL on a datagram transport (RFC 3261 §20.14: absent, the
+		# body is "the rest of the datagram"), and Linphone 6.2 omits it on its in-dialog
+		# requests. Reading it with dot access raised a KeyError that killed the whole UDP
+		# transport process, so the ACK never reached its transaction — the call answered and
+		# then carried no media — and every BYE retransmission killed it again.
+		#
+		# A datagram that stops at the blank line leaves an EMPTY body here, not nil: that is
+		# the bodyless request (an ACK, a BYE) and it has no body at all. The `+ 2` follows
+		# the convention below, where the sizes compared count the CRLF that separates the
+		# headers from the body.
+		clen = case Map.get(parsed_msg, :contentlength) do
+			nil ->
+				if is_nil(body) or body == "" do 0 else Kernel.byte_size(body) + 2 end
+
+			value -> value
+		end
 		sz = if is_nil(body) do
 			0
 		else

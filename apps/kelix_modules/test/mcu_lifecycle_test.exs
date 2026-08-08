@@ -136,7 +136,7 @@ defmodule Kelix.Mod.McuLifecycleTest do
                  name: "From a script",
                  vad: 2,
                  rate: 16_000,
-                 audio_codecs: ["pcma"],
+                 medias: [:audio, :video],
                  video: %{fps: 25},
                  layout: %{comp: 6},
                  max_participants: 4,
@@ -147,15 +147,9 @@ defmodule Kelix.Mod.McuLifecycleTest do
       assert conf.name == "From a script"
       assert conf.vad == 2
       assert conf.rate == 16_000
-      assert conf.codecs.audio == ["PCMA"]
+      assert conf.medias == [:audio, :video]
       # a nested atom-keyed map is levelled and merged, like its JSON counterpart
-      assert conf.video == %{
-               size: 6,
-               fps: 25,
-               bitrate: 1024,
-               intra_period: 300,
-               fmtp: "profile-level-id=42e01f;packetization-mode=1"
-             }
+      assert conf.video == %{size: 6, fps: 25, bitrate: 1024, intra_period: 300}
 
       assert conf.layout == %{comp: 6, size: 6, auto: true}
       assert conf.max_participants == 4
@@ -177,10 +171,10 @@ defmodule Kelix.Mod.McuLifecycleTest do
       # the vocabulary of §8.3.7 answers with the names, not with the wire ids
       assert msg =~ "vad: 9 is not a vad mode id — one of none, basic, full"
 
-      # the codec vocabulary is enforced here too, not only in the config block:
-      # a conference on a codec the SDP layer cannot emit would raise at answer time
-      assert {:error, msg} = Mcu.create_conference(@domain, audio_codecs: ["SPEEX"])
-      assert msg =~ "unknown audio codec(s): SPEEX"
+      # `medias` is the vocabulary that survived P8a, and it is enforced here too:
+      # a conference answering a media nothing can mix is a call that fails later
+      assert {:error, msg} = Mcu.create_conference(@domain, medias: [:slides])
+      assert msg =~ "unknown media(s) slides"
 
       assert {:error, msg} = Mcu.create_conference(@domain, nam: "typo")
       assert msg =~ "unknown argument(s): nam"
@@ -189,6 +183,32 @@ defmodule Kelix.Mod.McuLifecycleTest do
       assert msg =~ "owner must be :caller or :none"
 
       assert Mcu.conferences() == []
+    end
+
+    # §8.4: a script written against the codec lists must keep working for one release.
+    # They decide nothing (the media server arbitrates), so they are dropped with a
+    # warning naming the replacement — never a 400, which would break a script we do
+    # not own on an upgrade.
+    test "the retired codec arguments are ignored with a warning, not refused" do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, conf} =
+                   Mcu.create_conference(@domain,
+                     audio_codecs: ["pcma"],
+                     text_codecs: [],
+                     video_fmtp: "profile-level-id=42801f",
+                     owner: :none
+                   )
+
+          # nothing they used to imply happened: text is still answered, DTMF still on
+          assert conf.medias == [:audio, :video, :text]
+          assert conf.dtmf == true
+          refute Map.has_key?(conf.video, :fmtp)
+        end)
+
+      assert log =~ "create_conference: `audio_codecs` is no longer honoured"
+      assert log =~ "create_conference: `text_codecs` is no longer honoured"
+      assert log =~ "create_conference: `video_fmtp` is no longer honoured"
     end
 
     test "the resource errors reach the script unchanged" do

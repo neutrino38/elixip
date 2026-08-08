@@ -186,6 +186,160 @@ defmodule Mendooze.SdpTest do
       refute Map.has_key?(video.fmtp, "107")
     end
 
+    test "fmtp_raw relays the parameters verbatim, including ones ExSDP does not model" do
+      sdp_str = """
+      v=0
+      o=- 1 1 IN IP4 172.16.0.1
+      s=call
+      c=IN IP4 172.16.0.1
+      t=0 0
+      m=audio 5004 RTP/AVP 96
+      a=rtpmap:96 opus/48000/2
+      a=fmtp:96 useinbandfec=1;some-vendor-param=7
+      m=video 5006 RTP/AVP 99
+      a=rtpmap:99 H264/90000
+      a=fmtp:99 profile-level-id=42e01f;packetization-mode=1;sprop-parameter-sets=Z0IACpZTBYmI,aMljiA==
+      """
+
+      assert {:ok, [audio, video]} = Sdp.parse(sdp_str)
+
+      # Byte for byte: this string is FORWARDED to the media server, which negotiates
+      # against it. Rebuilding it from the parsed struct would re-render
+      # profile_level_id (held as an integer) and lose parameter order.
+      assert video.fmtp_raw["99"] ==
+               "profile-level-id=42e01f;packetization-mode=1;sprop-parameter-sets=Z0IACpZTBYmI,aMljiA=="
+
+      # The reason the raw form exists: a parameter ExSDP has no field for survives.
+      assert audio.fmtp_raw["96"] == "useinbandfec=1;some-vendor-param=7"
+
+      # And it does not leak across m= sections — each media sees only its own.
+      refute Map.has_key?(video.fmtp_raw, "96")
+      refute Map.has_key?(audio.fmtp_raw, "99")
+    end
+
+    # RFC 5939. Shape taken from a real capture (LiveVideoPlugin 4.4.10): the m= line
+    # says AVP, a session-level tcap declares AVPF, and each media points at it.
+    test "capneg finds the AVPF potential configuration the offer declares" do
+      sdp_str = """
+      v=0
+      o=- 1 1 IN IP4 172.16.0.1
+      s=-
+      c=IN IP4 172.16.0.1
+      t=0 0
+      a=tcap:1 RTP/AVPF
+      m=video 5006 RTP/AVP 96
+      a=rtpmap:96 H264/90000
+      a=pcfg:1 t=1
+      a=rtcp-fb:* nack
+      """
+
+      assert {:ok, [video]} = Sdp.parse(sdp_str)
+      assert video.protocol == "RTP/AVP"
+      assert video.capneg == %{config: 1, tcap: 1, protocol: "RTP/AVPF"}
+    end
+
+    test "tcap numbers its protocols consecutively from the declared number" do
+      sdp_str = """
+      v=0
+      o=- 1 1 IN IP4 172.16.0.1
+      s=-
+      c=IN IP4 172.16.0.1
+      t=0 0
+      a=tcap:1 RTP/AVPF RTP/SAVPF
+      m=video 5006 RTP/AVP 96
+      a=rtpmap:96 H264/90000
+      a=pcfg:1 t=2
+      """
+
+      # t=2 is the SECOND protocol of the list, not a second tcap line
+      assert {:ok, [video]} = Sdp.parse(sdp_str)
+      assert video.capneg.protocol == "RTP/SAVPF"
+    end
+
+    # RFC 5939 §3.6.1 binds an answerer to the WHOLE configuration it accepts, so a
+    # pcfg asking for anything beyond the transport is declined rather than half-honoured.
+    test "a potential configuration demanding more than the transport is declined" do
+      sdp_str = """
+      v=0
+      o=- 1 1 IN IP4 172.16.0.1
+      s=-
+      c=IN IP4 172.16.0.1
+      t=0 0
+      a=tcap:1 RTP/AVPF
+      m=video 5006 RTP/AVP 96
+      a=rtpmap:96 H264/90000
+      a=pcfg:1 t=1 a=1
+      """
+
+      assert {:ok, [video]} = Sdp.parse(sdp_str)
+      assert video.capneg == nil
+    end
+
+    test "a tcap naming a profile we cannot answer is ignored" do
+      sdp_str = """
+      v=0
+      o=- 1 1 IN IP4 172.16.0.1
+      s=-
+      c=IN IP4 172.16.0.1
+      t=0 0
+      a=tcap:1 TCP/DTLS/RTP/SAVPF
+      m=video 5006 RTP/AVP 96
+      a=rtpmap:96 H264/90000
+      a=pcfg:1 t=1
+      """
+
+      assert {:ok, [video]} = Sdp.parse(sdp_str)
+      assert video.capneg == nil
+    end
+
+    test "the lowest config number wins, that being RFC 5939's preference order" do
+      sdp_str = """
+      v=0
+      o=- 1 1 IN IP4 172.16.0.1
+      s=-
+      c=IN IP4 172.16.0.1
+      t=0 0
+      a=tcap:1 RTP/SAVPF RTP/AVPF
+      m=video 5006 RTP/AVP 96
+      a=rtpmap:96 H264/90000
+      a=pcfg:2 t=2
+      a=pcfg:1 t=1
+      """
+
+      assert {:ok, [video]} = Sdp.parse(sdp_str)
+      assert video.capneg == %{config: 1, tcap: 1, protocol: "RTP/SAVPF"}
+    end
+
+    test "no capability negotiation at all leaves capneg nil" do
+      sdp_str = """
+      v=0
+      o=- 1 1 IN IP4 172.16.0.1
+      s=-
+      c=IN IP4 172.16.0.1
+      t=0 0
+      m=video 5006 RTP/AVP 96
+      a=rtpmap:96 H264/90000
+      """
+
+      assert {:ok, [video]} = Sdp.parse(sdp_str)
+      assert video.capneg == nil
+    end
+
+    test "fmtp_raw is an empty map when the media offers no fmtp" do
+      sdp_str = """
+      v=0
+      o=- 1 1 IN IP4 172.16.0.1
+      s=call
+      c=IN IP4 172.16.0.1
+      t=0 0
+      m=audio 5004 RTP/AVP 8
+      a=rtpmap:8 PCMA/8000
+      """
+
+      assert {:ok, [audio]} = Sdp.parse(sdp_str)
+      assert audio.fmtp_raw == %{}
+    end
+
     test "a media with no fmtp at all yields an empty map, not nil" do
       sdp_str = """
       v=0
@@ -338,19 +492,22 @@ defmodule Mendooze.SdpTest do
       t=0 0
       m=audio 5004 RTP/AVP 0
       m=application 5006 UDP/BFCP *
+      a=mid:bfcp
       """
 
       # G9: every m= section is kept in offer order so the answerer can echo a
-      # port-0 rejection for the ones it cannot answer.
+      # port-0 rejection for the ones it cannot answer — mid included, since JSEP
+      # requires the rejection to name the section it declines.
       assert {:ok, [audio, app]} = Sdp.parse(sdp_str)
       assert audio.supported? and audio.type == :audio
       refute app.supported?
+      assert app.mid == "bfcp"
       assert app.type == :application
       assert app.protocol == "UDP/BFCP"
       assert app.port == 5006
     end
 
-    test "a supported media type on a non-RTP transport is an unsupported stub (G9)" do
+    test "a media type we carry on a transport we do not is an unsupported stub (G9)" do
       sdp_str = """
       v=0
       o=- 1 1 IN IP4 172.16.0.1
@@ -358,15 +515,47 @@ defmodule Mendooze.SdpTest do
       c=IN IP4 172.16.0.1
       t=0 0
       m=audio 5004 RTP/AVP 0
-      m=text 60000 TCP/WSS t140
+      m=text 60000 UDP/DTLS/SCTP t140
       """
 
       assert {:ok, [audio, text]} = Sdp.parse(sdp_str)
       assert audio.supported?
+      # neither an RTP profile nor a WebSocket one: nothing we can answer
       refute text.supported?
       assert text.type == :text
-      assert text.protocol == "TCP/WSS"
+      assert text.protocol == "UDP/DTLS/SCTP"
       assert text.raw_fmt == "t140"
+    end
+
+    test "UDP/TLS/RTP/SAVP (DTLS without AVPF, as Linphone offers) is a supported media" do
+      # RFC 5764 §8: a plain SIP phone offers DTLS-SRTP without the feedback
+      # profile — only browsers are bound to SAVPF (JSEP). Linphone 6.2 sent
+      # exactly this and every m= line came back as an unsupported stub, so the
+      # whole call died on a 488 :no_common_codec before DTLS was even tried.
+      sdp_str = """
+      v=0
+      o=50815019 3171 840 IN IP4 172.21.92.83
+      s=Talk
+      c=IN IP4 172.21.92.83
+      t=0 0
+      m=audio 50518 UDP/TLS/RTP/SAVP 96 0 8
+      a=rtpmap:96 opus/48000/2
+      a=setup:actpass
+      a=fingerprint:SHA-256 3D:FB:88:B4:8C:2B:03:84:7E:AC:DD:5E:59:8F:7B:B9:51:3C:DD:C9:09:96:8B:99:7E:BA:A3:DC:13:D6:F1:FB
+      m=video 38547 UDP/TLS/RTP/SAVP 97
+      a=rtpmap:97 H264/90000
+      a=fmtp:97 profile-level-id=42801F
+      a=setup:actpass
+      a=fingerprint:SHA-256 3D:FB:88:B4:8C:2B:03:84:7E:AC:DD:5E:59:8F:7B:B9:51:3C:DD:C9:09:96:8B:99:7E:BA:A3:DC:13:D6:F1:FB
+      """
+
+      assert {:ok, [audio, video]} = Sdp.parse(sdp_str)
+      assert audio.supported? and audio.protocol == "UDP/TLS/RTP/SAVP"
+      assert video.supported? and video.protocol == "UDP/TLS/RTP/SAVP"
+      assert {:dtls, :actpass, "sha-256", _fp} = audio.crypto
+      assert {:dtls, :actpass, "sha-256", _fp} = video.crypto
+      # DTLS without ICE: nothing to latch onto, and that is fine (RFC 5764)
+      assert audio.ice == nil
     end
 
     test "garbage input is an error" do
@@ -542,6 +731,51 @@ defmodule Mendooze.SdpTest do
       assert Sdp.answer_rtpmaps(:audio, neg) == [
                %{pt: 0, encoding: "PCMU", clock: 8000, channels: nil},
                %{pt: 101, encoding: "telephone-event", clock: 8000, channels: nil}
+             ]
+    end
+
+    test "`dtmf_pts` gives each telephone-event PT the clock the OFFER gave it" do
+      # a delegated negotiation: the server kept the 8 kHz PT while the primary codec
+      # is OPUS, so `dtmf_clock` (48000, the codec's) must not win over the offer
+      neg = %{
+        rtp_map: %{"111" => 98, "126" => 100},
+        dtmf_clock: 48_000,
+        dtmf_pts: %{48_000 => 110, 8000 => 126}
+      }
+
+      assert Sdp.answer_rtpmaps(:audio, neg) == [
+               %{pt: 111, encoding: "opus", clock: 48_000, channels: 2},
+               %{pt: 126, encoding: "telephone-event", clock: 8000, channels: nil}
+             ]
+    end
+
+    test "`fmt_order` puts the entries in the offer's order, not in payload-type order" do
+      # a browser offering `111 9 0` prefers OPUS; answering `0 9 111` would tell it we
+      # prefer G.711, and it would then send G.711
+      neg = %{rtp_map: %{"0" => 0, "9" => 9, "111" => 98}, fmt_order: [111, 9, 0]}
+
+      assert Enum.map(Sdp.answer_rtpmaps(:audio, neg), & &1.pt) == [111, 9, 0]
+
+      # the same list in the shape ExSDP hands back for the profiles it does not decode
+      # numerically (a raw string)
+      assert Enum.map(Sdp.answer_rtpmaps(:audio, %{neg | fmt_order: "111 9 0"}), & &1.pt) ==
+               [111, 9, 0]
+
+      # and without it, ascending payload type as before (regression guard)
+      assert Enum.map(Sdp.answer_rtpmaps(:audio, Map.delete(neg, :fmt_order)), & &1.pt) ==
+               [0, 9, 111]
+    end
+
+    test "a PT the offer's list does not mention sorts after the ones it does" do
+      neg = %{rtp_map: %{"8" => 8, "111" => 98}, fmt_order: [111]}
+      assert Enum.map(Sdp.answer_rtpmaps(:audio, neg), & &1.pt) == [111, 8]
+    end
+
+    test "a PT absent from `dtmf_pts` still falls back to the negotiated clock" do
+      neg = %{rtp_map: %{"101" => 100}, dtmf_clock: 16_000, dtmf_pts: %{8000 => 126}}
+
+      assert Sdp.answer_rtpmaps(:audio, neg) == [
+               %{pt: 101, encoding: "telephone-event", clock: 16_000, channels: nil}
              ]
     end
   end
@@ -882,6 +1116,27 @@ defmodule Mendooze.SdpTest do
       assert sdp_str =~ "a=setup:passive"
       assert sdp_str =~ "a=mid:0"
     end
+
+    test "a declined section keeps its mid, and nothing else (JSEP §5.3.1)" do
+      sdp_str =
+        Sdp.build(%{
+          ip: "10.0.0.9",
+          medias: [
+            %{
+              type: :application,
+              protocol: "UDP/DTLS/SCTP",
+              reject_fmt: "webrtc-datachannel",
+              mid: "2"
+            }
+          ]
+        })
+
+      assert sdp_str =~ "m=application 0 UDP/DTLS/SCTP webrtc-datachannel"
+      assert sdp_str =~ "a=mid:2"
+      # a rejection states no transport and no codec: there is nothing to state
+      refute sdp_str =~ "a=candidate"
+      refute sdp_str =~ "a=rtpmap"
+    end
   end
 
   describe "parse/1 WebRTC extensions and §1.8 tolerance" do
@@ -927,12 +1182,266 @@ defmodule Mendooze.SdpTest do
       assert audio.rtcp_mux == true
       assert video.rtcp_mux == true
 
-      # G9: the non-RTP text section (m=text TCP/WSS t140) is returned as an
-      # unsupported stub so the answerer can decline it with port 0.
-      refute text.supported?
+      # The client's injected `m=text … TCP/WSS t140` is real-time text over a
+      # WebSocket (jsr309_text_over_wss.md), not a section to decline: it is
+      # answered with the URL the client connects to.
+      assert text.supported?
+      assert text.transport == :ws
       assert text.type == :text
       assert text.protocol == "TCP/WSS"
       assert text.raw_fmt == "t140"
+    end
+  end
+
+  describe "conformant_pts/3 (verdict vs offer, RFC 6184 §8.2.2)" do
+    # one H.264 video desc, two payload types with distinct offered identities
+    defp video_desc(fmtp) do
+      sdp_str = """
+      v=0
+      o=- 1 1 IN IP4 172.16.0.1
+      s=call
+      c=IN IP4 172.16.0.1
+      t=0 0
+      m=video 5006 RTP/AVP 97 99
+      a=rtpmap:97 H264/90000
+      #{fmtp}
+      a=rtpmap:99 H264/90000
+      """
+
+      {:ok, [desc]} = Sdp.parse(sdp_str)
+      desc
+    end
+
+    @rtp_map %{"97" => 99, "99" => 99}
+
+    test "a verdict contradicting the offered profile for that PT is dropped" do
+      desc = video_desc("a=fmtp:97 profile-level-id=42e01f;packetization-mode=1")
+      verdict = %{"97" => "profile-level-id=64001f;packetization-mode=1", "99" => ""}
+
+      assert {kept, [dropped]} = Sdp.conformant_pts(verdict, desc, @rtp_map)
+      # pt 99 offered no profile-level-id: nothing to contradict, kept
+      assert Map.keys(kept) == ["99"]
+      assert dropped.pt == "97"
+      assert dropped.offered =~ "42e0"
+      assert dropped.answered =~ "6400"
+    end
+
+    test "an absent packetization-mode is no constraint, not RFC 6184's default 0" do
+      # Linphone 6.2 + OpenH264: profile stated, mode omitted; the server answers
+      # its own mode 1 — the asymmetry contradicts nothing the peer stated
+      desc = video_desc("a=fmtp:97 profile-level-id=42e01f")
+      verdict = %{"97" => "profile-level-id=42e01f;packetization-mode=1"}
+
+      assert {verdict, []} == Sdp.conformant_pts(verdict, desc, @rtp_map)
+    end
+
+    test "an explicit packetization-mode 0 is still honoured" do
+      desc = video_desc("a=fmtp:97 profile-level-id=42e01f;packetization-mode=0")
+      verdict = %{"97" => "profile-level-id=42e01f;packetization-mode=1"}
+
+      assert {%{}, [%{pt: "97"}]} = Sdp.conformant_pts(verdict, desc, @rtp_map)
+    end
+
+    test "a level difference alone is legitimate asymmetry and kept" do
+      desc = video_desc("a=fmtp:97 profile-level-id=42e01f;packetization-mode=1")
+      verdict = %{"97" => "profile-level-id=42e034;packetization-mode=1"}
+
+      assert {^verdict, []} = Sdp.conformant_pts(verdict, desc, @rtp_map)
+    end
+
+    test "nil (pre-delegation server) and non-video descs pass through untouched" do
+      assert {nil, []} = Sdp.conformant_pts(nil, video_desc(""), @rtp_map)
+
+      audio = %{type: :audio, fmtp: %{}}
+      verdict = %{"0" => ""}
+      assert {^verdict, []} = Sdp.conformant_pts(verdict, audio, %{"0" => 0})
+    end
+  end
+
+  describe "av1_level_idx/3 (AV1 Annex A.3)" do
+    test "the announced level covers what the mixer really produces" do
+      # the conference default (HD720p at 15 i/s) fits level 3.1, which is also
+      # the spec default — so nothing changes for it
+      assert Sdp.av1_level_idx(1280, 720, 15) == 5
+
+      # 720p60 needs 4.0: 55_296_000 samples/s exceeds 3.1's 31_950_720. This is
+      # the case the static default silently lied about.
+      assert Sdp.av1_level_idx(1280, 720, 60) == 8
+
+      # 1080p30 exceeds 3.1's MaxPicSize (2_073_600 > 1_065_024) -> 4.0
+      assert Sdp.av1_level_idx(1920, 1080, 30) == 8
+
+      # 1080p60 needs 4.1 (rate 124_416_000 > 4.0's 70_778_880)
+      assert Sdp.av1_level_idx(1920, 1080, 60) == 9
+
+      # small sizes stay at the bottom of the ladder
+      assert Sdp.av1_level_idx(352, 288, 15) == 0
+    end
+
+    test "undefined levels are never named" do
+      # 2.2/2.3 (2-3), 3.2/3.3 (6-7) and 4.2/4.3 (10-11) have no definition in
+      # the spec: no input may yield one.
+      undefined = [2, 3, 6, 7, 10, 11, 15]
+
+      for w <- [176, 352, 640, 1280, 1920, 3840],
+          fps <- [5, 15, 30, 60] do
+        refute Sdp.av1_level_idx(w, div(w * 9, 16), fps) in undefined
+      end
+    end
+
+    test "an unnameable size still yields a level, the highest defined one" do
+      assert Sdp.av1_level_idx(16_384, 8704, 120) == 18
+    end
+  end
+
+  describe "AV1 in the codec vocabulary" do
+    test "an AV1 offer is nameable, so it reaches the media server" do
+      sdp_str = """
+      v=0
+      o=- 1 1 IN IP4 172.16.0.1
+      s=call
+      c=IN IP4 172.16.0.1
+      t=0 0
+      m=video 5006 RTP/AVP 45 99
+      a=rtpmap:45 AV1/90000
+      a=fmtp:45 profile=0;level-idx=5;tier=0
+      a=rtpmap:99 H264/90000
+      """
+
+      assert {:ok, [video]} = Sdp.parse(sdp_str)
+      # VideoCodec::AV1 = 110 server-side; before this the PT was dropped from
+      # the menu and a Linphone 6.2 offer (AV1 first) lost its preferred codec
+      assert video.rtp_map == %{"45" => 110, "99" => 99}
+      assert "AV1" in video.codecs
+      assert Sdp.code_rtpmap(:video, 110) == {"AV1", 90_000, nil}
+      assert video.fmtp_raw["45"] == "profile=0;level-idx=5;tier=0"
+    end
+  end
+
+  describe "text over WebSocket (jsr309_text_over_wss.md)" do
+    defp ws_text_offer(proto, extra \\ "a=setup:active") do
+      """
+      v=0
+      o=- 1 1 IN IP4 10.9.8.7
+      s=call
+      c=IN IP4 10.9.8.7
+      t=0 0
+      m=text 60000 #{proto} t140
+      #{extra}
+      a=connection:new
+      """
+    end
+
+    test "the four WebSocket transports are recognised as text sections" do
+      # the deployed client emits TCP/WS; the historical Java gateway dropped
+      # TLS/* into its RTP branch, which was a bug and not a contract
+      for proto <- ["TCP/WS", "TCP/WSS", "TLS/WS", "TLS/WSS"] do
+        assert {:ok, [desc]} = Sdp.parse(ws_text_offer(proto))
+        assert desc.supported?, "#{proto} was not supported"
+        assert desc.transport == :ws
+        assert desc.type == :text
+        assert desc.protocol == proto
+        assert desc.port == 60_000
+        # the format is the literal token, never a payload type
+        assert desc.raw_fmt == "t140"
+        assert desc.rtp_map == %{}
+        assert desc.setup == :active
+      end
+    end
+
+    test "an RTP media is marked as such, so a consumer can branch on transport" do
+      # real T.140 over RTP: same media type, numeric payload type, no WebSocket
+      sdp_str = """
+      v=0
+      o=- 1 1 IN IP4 10.9.8.7
+      s=call
+      c=IN IP4 10.9.8.7
+      t=0 0
+      m=text 5006 RTP/AVP 106
+      a=rtpmap:106 t140/1000
+      """
+
+      assert {:ok, [desc]} = Sdp.parse(sdp_str)
+      assert desc.transport == :rtp
+      assert desc.rtp_map == %{"106" => 106}
+    end
+
+    test "a text section over a transport we do not carry stays an unsupported stub" do
+      assert {:ok, [desc]} = Sdp.parse(ws_text_offer("UDP/DTLS/SCTP"))
+      refute desc.supported?
+      assert desc.transport == :unsupported
+    end
+
+    test "a WebSocket section without t140 is not one we can answer" do
+      offer = String.replace(ws_text_offer("TCP/WS"), "t140", "webrtc-datachannel")
+      assert {:ok, [desc]} = Sdp.parse(offer)
+      refute desc.supported?
+    end
+
+    test "both attribute names and both URL forms are read" do
+      for {attr, value} <- [
+            {"ws", "//1.2.3.4:9090/jsr309/7/tok"},
+            {"ws", "http://1.2.3.4:9090/jsr309/7/tok"},
+            {"wss", "https://1.2.3.4:9090/jsr309/7/tok"},
+            {"wss", "wss://1.2.3.4:9090/jsr309/7/tok"}
+          ] do
+        offer = ws_text_offer("TCP/WS", "a=setup:active\na=#{attr}:#{value}")
+        assert {:ok, [desc]} = Sdp.parse(offer)
+        assert desc.ws_url == value
+      end
+    end
+
+    test "an absent a=setup reads as actpass (the peer will connect)" do
+      assert {:ok, [desc]} = Sdp.parse(ws_text_offer("TCP/WS", "a=sendrecv"))
+      assert desc.setup == :actpass
+    end
+
+    test "ws_url_attribute/1 puts the scheme in the attribute name, as the gateway did" do
+      # value relative to the protocol, scheme carried by the name: the line then
+      # reads a=ws://… , which is what lets a client re-prefix "ws:"
+      assert Sdp.ws_url_attribute("ws://h:9090/p") == {"ws", "//h:9090/p"}
+      assert Sdp.ws_url_attribute("wss://h:9090/p") == {"wss", "//h:9090/p"}
+      # the scheme may arrive in either family, since it comes from whatever
+      # GetMediaCandidates answered
+      assert Sdp.ws_url_attribute("http://h:9090/p") == {"ws", "//h:9090/p"}
+      assert Sdp.ws_url_attribute("https://h:9090/p") == {"wss", "//h:9090/p"}
+      # already relative: clear by default
+      assert Sdp.ws_url_attribute("//h:9090/p") == {"ws", "//h:9090/p"}
+    end
+
+    test "the built section is signalling only, and round-trips" do
+      sdp_str =
+        Sdp.build(%{
+          ip: "192.168.5.5",
+          medias: [
+            %{
+              ws_text: "//192.168.5.5:9090/jsr309/7/tok",
+              ws_attribute: "wss",
+              type: :text,
+              port: 9090,
+              protocol: "TCP/WSS",
+              setup: :passive,
+              direction: :sendrecv,
+              mid: "2"
+            }
+          ]
+        })
+
+      assert sdp_str =~ "m=text 9090 TCP/WSS t140"
+      assert sdp_str =~ "a=setup:passive"
+      assert sdp_str =~ "a=connection:new"
+      assert sdp_str =~ "a=wss://192.168.5.5:9090/jsr309/7/tok"
+      assert sdp_str =~ "a=mid:2"
+      # no payload type, no fmtp: the T.140 redundancy is the media server's
+      # business and is never negotiated on this section
+      refute sdp_str =~ "a=rtpmap"
+      refute sdp_str =~ "a=fmtp"
+
+      assert {:ok, [desc]} = Sdp.parse(sdp_str)
+      assert desc.transport == :ws
+      assert desc.setup == :passive
+      assert desc.ws_url == "//192.168.5.5:9090/jsr309/7/tok"
+      assert desc.mid == "2"
     end
   end
 end

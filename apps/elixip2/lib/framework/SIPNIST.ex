@@ -66,7 +66,7 @@ defmodule SIP.NIST do
 
   # Timer F - timeout
   def handle_info({ :timeout, _tref, :timerF } , state)  do
-    case reply_to_UAC(state, state.sipmsg, 408, "Timeout", [], state.totag) do
+    case reply_to_UAC(state, state.msg, 408, "Timeout", [], state.totag) do
       { :ok, new_state } -> { :noreply, new_state }
       { _err, new_state } -> { :noreply, new_state }
     end

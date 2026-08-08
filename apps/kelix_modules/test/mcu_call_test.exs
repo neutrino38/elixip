@@ -15,6 +15,7 @@ defmodule Kelix.Mod.McuCallTest do
   alias Kelix.Mcu.TestStub
   alias Kelix.Mod.Mcu
   alias Kelix.Mod.Mcu.{Client, Config, Conference}
+  alias Kelix.Mod.Mcu.Adapter.Conn
 
   # The media servers the module drives now come from [mediaserver.pool.*], decoded
   # by Kelix.Config; the registry takes the resulting list directly so a test needs
@@ -56,6 +57,38 @@ defmodule Kelix.Mod.McuCallTest do
   a=rtpmap:99 H264/90000\r
   a=fmtp:99 profile-level-id=42e01f;packetization-mode=1\r
   a=rtcp-fb:99 nack\r
+  a=sendrecv\r
+  """
+
+  # Hold, the flavour that starves our reception: the peer says it will not send.
+  @offer_hold_inactive String.replace(@offer_video, "a=sendrecv", "a=inactive")
+
+  # Hold, the flavour that does NOT: a caller holding with sendonly keeps sending
+  # music-on-hold, so its RTP never stops and the watchdog must stay armed.
+  @offer_hold_sendonly String.replace(@offer_video, "a=sendrecv", "a=sendonly")
+
+  # RFC 5939, taken from a real capture (LiveVideoPlugin 4.4.10): AVP on the m= line,
+  # AVPF declared as a potential configuration, and the feedback types it wants.
+  @offer_capneg """
+  v=0\r
+  o=- 1 1 IN IP4 192.168.1.50\r
+  s=-\r
+  c=IN IP4 192.168.1.50\r
+  t=0 0\r
+  a=tcap:1 RTP/AVPF\r
+  m=audio 40000 RTP/AVP 8\r
+  a=rtpmap:8 PCMA/8000\r
+  a=pcfg:1 t=1\r
+  a=sendrecv\r
+  m=video 40002 RTP/AVP 99\r
+  a=rtpmap:99 H264/90000\r
+  a=fmtp:99 profile-level-id=42e01f;packetization-mode=1\r
+  a=pcfg:1 t=1\r
+  a=rtcp-fb:* nack\r
+  a=rtcp-fb:* nack pli\r
+  a=rtcp-fb:* ccm fir\r
+  a=rtcp-fb:* ccm tmmbr\r
+  a=rtcp-fb:* goog-remb\r
   a=sendrecv\r
   """
 
@@ -182,7 +215,9 @@ defmodule Kelix.Mod.McuCallTest do
     {:ok, config} =
       Config.parse(%{
         "did_range" => "8000-8009",
-        "audio_codecs" => ["OPUS", "PCMA", "PCMU", "TELEPHONE-EVENT"]
+        # no codec list: the media server arbitrates (P8a). `dtmf` is what says
+        # telephone-event is proposed, and it is on by default.
+        "dtmf" => true
       })
 
     start_supervised!({Mcu, config: config, module_name: "mcu", mediaservers: @mediaservers})
@@ -278,6 +313,19 @@ defmodule Kelix.Mod.McuCallTest do
     Conference.participants(conf)
   end
 
+  # The AND needs the row's media set, which `joined/2` fills after attach returns.
+  # Waiting for it is not incidental: with an empty set the documented fallback reaps
+  # the leg on its first timeout, which is right in production (a leg that never
+  # joined) and wrong in a test that means to check the AND.
+  defp joined_participant(uid) do
+    wait_for(fn ->
+      case participants(uid) do
+        [%{medias: medias} = part] when map_size(medias) > 0 -> part
+        _ -> nil
+      end
+    end)
+  end
+
   defp wait_for(fun, attempts \\ 200) do
     case fun.() do
       nil when attempts > 0 ->
@@ -358,10 +406,13 @@ defmodule Kelix.Mod.McuCallTest do
       send(pid, {:ACK, %{method: :ACK}, nil, dialog})
       ack_time = wait_for(fn -> non_empty(TestStub.rpc_order()) end)
 
+      # P7/S1: the RTP watchdog is armed once the leg is really in the mix — one
+      # StartRTPTimeout per receiving media, and NEVER on text (§16.1).
       assert ack_time == [
                "SetAudioCodec",
                "StartSending",
                "AddSidebarParticipant",
+               "StartRTPTimeout",
                "SetParticipantDisplayName"
              ]
     end
@@ -434,9 +485,15 @@ defmodule Kelix.Mod.McuCallTest do
 
       # name from the From header, RTP participant, default mosaic and sidebar (§3.3)
       assert_received {:rpc, "CreateParticipant", [42, "alice@phone_example_com", 0, 0, 0]}
-      # audio (0), the offered PT numbering, main role, RTP protocol
-      assert_received {:rpc, "StartReceiving", [42, 7, 0, rtp_map, 0, 0]}
+      # audio (0), the offered PT numbering, main role, RTP protocol, and the offer's
+      # codec attributes (P8a): the media server negotiates against them and answers
+      # with what it accepted.
+      assert_received {:rpc, "StartReceiving", [42, 7, 0, rtp_map, 0, 0, offer]}
       assert rtp_map == %{"8" => 8, "0" => 0, "101" => 100}
+      # this offer carries no a=fmtp, so the struct is present but its fmtp map empty —
+      # the member always travels, so the server never has to distinguish "absent" from
+      # "no fmtp offered"
+      assert offer == %{"fmtp" => %{}}
 
       send(pid, {:ACK, %{method: :ACK}, nil, dialog})
 
@@ -445,6 +502,105 @@ defmodule Kelix.Mod.McuCallTest do
       assert_receive {:rpc, "SetAudioCodec", [42, 7, 8]}, 2000
       assert_receive {:rpc, "StartSending", [42, 7, 0, "192.168.1.50", 40_000, _map, 0]}, 2000
       assert_receive {:rpc, "AddSidebarParticipant", [42, 0, 7]}, 2000
+    end
+
+    # The offer's fmtp is what the media server negotiates against, so it has to reach
+    # it unchanged — the reason parse/1 keeps a raw form alongside the parsed structs.
+    # The central property of P8a: the offer IS the menu. Before step 3b, kelixip
+    # intersected the offer with the conference's codec list before the server saw it,
+    # so a codec absent from that list was dropped silently and the server never got to
+    # say whether it supported it.
+    test "every offered codec is proposed to the server, not just the configured ones", ctx do
+      # G.722 (9) and PCMU (0) are in this offer; the old default conference list would
+      # have decided on them locally
+      {_pid, _dialog} = start_call(ctx.scenario, invite(ctx.did))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+
+      assert_received {:rpc, "StartReceiving", [42, 7, 0, rtp_map, 0, 0, _offer]}
+      # the whole offered set, telephone-event included, is what the server arbitrates
+      assert rtp_map == %{"8" => 8, "0" => 0, "101" => 100}
+    end
+
+    # DTMF is a policy switch, not a codec list: it is the one thing a caller cannot
+    # overrule, so it is filtered before the server is asked.
+    test "dtmf = false drops the telephone-event payload type from the proposal", ctx do
+      {:ok, conf} = Mcu.create_conference(@domain, name: "no dtmf", dtmf: false)
+      {_pid, _dialog} = start_call(ctx.scenario, invite(conf.did))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+
+      assert_received {:rpc, "StartReceiving", [_conf, _part, 0, rtp_map, 0, 0, _offer]}
+      refute Map.has_key?(rtp_map, "101")
+      assert Map.has_key?(rtp_map, "8")
+    end
+
+    test "the offer's fmtp is forwarded verbatim", ctx do
+      {_pid, _dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+
+      assert_received {:rpc, "StartReceiving", [42, 7, 1, _map, 0, 0, offer]}
+
+      assert offer == %{
+               "fmtp" => %{"99" => "profile-level-id=42e01f;packetization-mode=1"}
+             }
+    end
+
+    # The verdict also picks the PRIMARY codec, not just the send map: telling the mixer
+    # to encode a codec the server filtered on receive would negotiate successfully and
+    # decode nothing.
+    @tag start_receiving: {:ok, [@rec_port, @media_ip, %{"0" => "", "101" => ""}]}
+    test "the primary codec comes from the accepted set", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+
+      # the offer proposed PCMA first, but the server accepted only PCMU (0) and
+      # telephone-event — so PCMU is what the mixer is told to encode, never the DTMF
+      assert_receive {:rpc, "SetAudioCodec", [42, 7, 0]}, 2000
+    end
+
+    # The verdict restricts what we SEND: never a codec the server just filtered on
+    # receive. A stub that returns only [port, ip] is a pre-P8a server, which is what
+    # every other test here exercises — this one is the delegated path.
+    @tag start_receiving: {:ok, [@rec_port, @media_ip, %{"8" => ""}]}
+    test "the send map is restricted to what the server accepted", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+
+      # the offer proposed PCMA, PCMU and telephone-event; the server accepted PCMA
+      # alone, so that is all we send
+      assert_receive {:rpc, "StartSending", [42, 7, 0, _ip, _port, send_map, 0]}, 2000
+      assert send_map == %{"8" => 8}
+    end
+
+    # The two boundary cases of the contract, in one answer: a PT accepted with a
+    # NON-EMPTY fmtp is advertised with that exact string; a PT accepted with an EMPTY
+    # one gets an a=rtpmap and no a=fmtp; a PT the server did not name is not
+    # advertised at all.
+    @tag start_receiving:
+           {:ok,
+            [
+              @rec_port,
+              @media_ip,
+              %{"8" => "", "101" => "0-15"}
+            ]}
+    test "the answer is built from the server's verdict, verbatim", ctx do
+      {_pid, _dialog} = start_call(ctx.scenario, invite(ctx.did))
+      assert_receive {:replied, 200, _reason, fields, _req}, 2000
+
+      answer = fields[:body]
+
+      # accepted with no fmtp: rtpmap only
+      assert answer =~ "a=rtpmap:8 PCMA/8000"
+      refute answer =~ "a=fmtp:8"
+
+      # accepted with an fmtp: the server's string, NOT the 0-16 kelixip used to
+      # synthesise — proving the value is relayed and not rebuilt
+      assert answer =~ "a=rtpmap:101 telephone-event/8000"
+      assert answer =~ "a=fmtp:101 0-15"
+
+      # PCMU was offered and proposed, but the server did not accept it
+      refute answer =~ "a=rtpmap:0 PCMU/8000"
     end
 
     test "the participant row tracks ringing → connected", ctx do
@@ -510,10 +666,14 @@ defmodule Kelix.Mod.McuCallTest do
       {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
       assert_receive {:replied, 200, _reason, _fields, _req}, 2000
 
-      # answer time: one participant, a receive plane per media, no sending yet
+      # answer time: one participant, a receive plane per media, no sending yet.
+      # Video carries one extra SetRTPProperties, BEFORE its StartReceiving: our
+      # own codec capability, which the negotiator reads when it runs
+      # (§16.3.4 (a)). Audio and text have none to declare.
       assert TestStub.rpc_order() == [
                "CreateParticipant",
                "StartReceiving",
+               "SetRTPProperties",
                "SetRTPProperties",
                "StartReceiving",
                "SetRTPProperties"
@@ -529,6 +689,10 @@ defmodule Kelix.Mod.McuCallTest do
                "StartSending",
                "AddSidebarParticipant",
                "AddMosaicParticipant",
+               # P7/S1: one watchdog per receiving media (§16.1), armed once the leg
+               # is really in the mix
+               "StartRTPTimeout",
+               "StartRTPTimeout",
                # the script's `displayname: :auto` banner, from the scenario process,
                # before the registry's layout follow-up on `{:joined}`
                "SetParticipantDisplayName",
@@ -540,7 +704,14 @@ defmodule Kelix.Mod.McuCallTest do
       {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
       assert_receive {:replied, 200, _reason, _fields, _req}, 2000
 
-      # answer time carries the transport properties only
+      # video gets TWO properties calls, and the order is the contract
+      # (§16.3.4 (a)): our own codec capability first, because the negotiator
+      # reads it at StartReceiving...
+      assert_receive {:rpc, "SetRTPProperties", [42, 7, 1, codec_props, 0]}, 2000
+      assert Map.has_key?(codec_props, "codec.av1.level-idx")
+
+      # ...then the transport switches. The H.264 profile is in NEITHER: it
+      # travels with SetVideoCodec at ACK time, the encoder's only channel.
       assert_receive {:rpc, "SetRTPProperties", [42, 7, 1, props, 0]}, 2000
       assert props["useNACK"] == "1"
       assert props["natLatch"] == "1"
@@ -557,20 +728,46 @@ defmodule Kelix.Mod.McuCallTest do
       assert_receive {:rpc, "AddMosaicParticipant", [42, 0, 7]}, 2000
     end
 
-    test "an offer with no H.264 profile is answered with the conference's own", ctx do
+    # Decision 11: the media server owns its decode capability, so the conference
+    # declares no profile of its own. On the legacy path (no verdict) an offer that
+    # states nothing is therefore answered with nothing — kelixip has nothing truthful
+    # to say about what the mixer accepts.
+    test "with no verdict and no offered profile, no fmtp is invented", ctx do
+      {_pid, _dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video_no_fmtp))
+      assert_receive {:replied, 200, _reason, fields, _req}, 2000
+
+      assert fields[:body] =~ "a=rtpmap:99 H264/90000"
+      refute fields[:body] =~ "a=fmtp:99"
+    end
+
+    # …and on the delegated path the server supplies it. This pins rule 9's invariant:
+    # what the answer ANNOUNCES and what SetVideoCodec asks the encoder for are the
+    # same string, because the second is a relay of the first and not a second decision.
+    @tag start_receiving:
+           {:ok,
+            [
+              @rec_port,
+              @media_ip,
+              # the stub answers every media with the same verdict, so the audio PT has
+              # to be in it or the audio plane is declined and the leg never attaches
+              %{"8" => "", "99" => "profile-level-id=640028;packetization-mode=1"}
+            ]}
+    test "the profile the server negotiated is announced AND given to the encoder", ctx do
       {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video_no_fmtp))
       assert_receive {:replied, 200, _reason, fields, _req}, 2000
 
-      # staying silent would mean RFC 6184's default (Baseline 1.0) to the peer,
-      # while the mixer encodes HD720p
-      assert fields[:body] =~ "a=fmtp:99 profile-level-id=42e01f;packetization-mode=1"
+      assert fields[:body] =~ "a=fmtp:99 profile-level-id=640028;packetization-mode=1"
 
-      # …and the encoder is asked for exactly what we announced: the SDP and the RPC
-      # cannot disagree, since both come from the same decision at answer time
       send(pid, {:ACK, %{method: :ACK}, nil, dialog})
       assert_receive {:rpc, "SetVideoCodec", [42, 7, 99, 6, 15, 1024, 300, encoder, 0]}, 2000
-      assert encoder == %{"h264.profile-level-id" => "42e01f"}
-      assert_receive {:rpc, "AddMosaicParticipant", [42, 0, 7]}, 2000
+
+      # the packetization mode travels with the profile, by the same channel and for the
+      # same reason: it is what bounds the slices the encoder produces, and server-side it
+      # decides between VAAPI and libx264
+      assert encoder == %{
+               "h264.profile-level-id" => "640028",
+               "h264.packetization-mode" => "1"
+             }
     end
 
     test "a profile the offer does state still wins over ours", ctx do
@@ -594,12 +791,14 @@ defmodule Kelix.Mod.McuCallTest do
       assert encoder == %{"h264.profile-level-id" => "4d0028"}
     end
 
+    # Turning a media off used to be expressed as an incompatible codec list; since
+    # the media server arbitrates codecs (P8a), it is `medias` that says it.
     test "a video-less conference declines the video and keeps the audio", ctx do
       {:ok, %{did: did}} =
         Mcu.handle_control("conference.create", %{
           "domain" => @domain,
           "did" => "8300",
-          "video_codecs" => ["VP8"]
+          "medias" => ["audio"]
         })
 
       {_pid, _dialog} = start_call(ctx.scenario, invite(did, sdp: @offer_video))
@@ -665,6 +864,8 @@ defmodule Kelix.Mod.McuCallTest do
                "CreateParticipant",
                "StartReceiving",
                "SetRTPProperties",
+               # video declares its own codec capability before opening (§16.3.4 (a))
+               "SetRTPProperties",
                "StartReceiving",
                "SetRTPProperties",
                "StartReceiving",
@@ -685,6 +886,10 @@ defmodule Kelix.Mod.McuCallTest do
                "StartSending",
                "AddSidebarParticipant",
                "AddMosaicParticipant",
+               # P7/S1: still only TWO watchdogs on a three-media leg — text is never
+               # armed, T.140 being legitimately silent between keystrokes (§16.1)
+               "StartRTPTimeout",
+               "StartRTPTimeout",
                # the script's `displayname: :auto` banner, then the automatic layout,
                # which still follows the *video* legs only: a text leg is not a tile
                "SetParticipantDisplayName",
@@ -697,8 +902,8 @@ defmodule Kelix.Mod.McuCallTest do
       assert_receive {:replied, 200, _reason, _fields, _req}, 2000
       send(pid, {:ACK, %{method: :ACK}, nil, dialog})
 
-      # 105 = TextCodec::T140RED. Preference order comes from the conference's
-      # `text_codecs`, redundancy first — a lost packet is a lost character.
+      # 105 = TextCodec::T140RED. Preference order is the CALLER's, honoured by the
+      # media server — redundancy first here, and a lost packet is a lost character.
       assert_receive {:rpc, "SetTextCodec", [42, 7, 105]}, 2000
     end
 
@@ -717,17 +922,50 @@ defmodule Kelix.Mod.McuCallTest do
       assert_receive {:rpc, "SetTextCodec", [42, 7, 106]}, 2000
     end
 
-    test "a conference with text off declines the section with port 0", ctx do
+    test "a conference with text off removes the text section from the answer entirely", ctx do
       {:ok, conf} =
-        Kelix.Mod.Mcu.create_conference(@domain, name: "audio only", text_codecs: [])
+        Kelix.Mod.Mcu.create_conference(@domain,
+          name: "audio video only",
+          medias: ["audio", "video"]
+        )
 
       {_pid, _dialog} = start_call(ctx.scenario, invite(conf.did, sdp: @offer_tc))
       assert_receive {:replied, 200, _reason, fields, _req}, 2000
 
       answer = fields[:body]
-      # RFC 3264 §6: the section keeps its place, with port 0 and the offered formats
-      assert answer =~ "m=text 0 RTP/AVP 98 97"
+      # S5 rule (mcu_text_over_wss_impl_plan.md §D7, 2026-08-08): a participant
+      # admitted without text gets NO m=text in the answer — not a port-0 echo,
+      # which the deployed WebRTC client rejects wholesale (kMlineMismatchInAnswer).
+      # A deliberate, text-scoped deviation from RFC 3264 §6.
+      refute answer =~ "m=text"
       assert answer =~ "m=audio #{@rec_port} RTP/AVP"
+      assert answer =~ "m=video #{@rec_port} RTP/AVP"
+    end
+
+    test "a text-only offer on a conference with text off is refused, not answered empty", ctx do
+      {:ok, conf} =
+        Kelix.Mod.Mcu.create_conference(@domain,
+          name: "audio video only bis",
+          medias: ["audio", "video"]
+        )
+
+      offer = """
+      v=0\r
+      o=- 1 1 IN IP4 192.168.1.50\r
+      s=-\r
+      c=IN IP4 192.168.1.50\r
+      t=0 0\r
+      m=text 40004 RTP/AVP 98 97\r
+      a=rtpmap:98 red/1000\r
+      a=rtpmap:97 t140/1000\r
+      a=fmtp:98 97/97/97\r
+      a=sendrecv\r
+      """
+
+      # omitting the only section would leave an answer with zero m= lines, which
+      # is not an answer: the offer is refused (488 via :no_common_codec)
+      {_pid, _dialog} = start_call(ctx.scenario, invite(conf.did, sdp: offer))
+      assert_receive {:replied, 488, _reason, _fields, _req}, 2000
     end
   end
 
@@ -793,6 +1031,227 @@ defmodule Kelix.Mod.McuCallTest do
       assert Enum.map(0..10, &Mcu.auto_comp/1) == [0, 0, 6, 1, 1, 10, 5, 4, 4, 2, 9]
       assert Mcu.auto_comp(16) == 9
       assert Mcu.auto_comp(17) == 11
+    end
+  end
+
+  describe "RTP inactivity watchdog (§16.1, P7)" do
+    # The AND lives in the controller (decided 2026-08-05): the server reports one
+    # media at a time, and only "every watched media is silent" is a dead leg.
+    test "one silent media is reported but does not hang up the call", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      assert_receive {:rpc, "AddMosaicParticipant", _params}, 2000
+
+      part = joined_participant(ctx.uid)
+      send(Mcu, {:mcu_event, "mcu1", {:media_timeout, 42, ctx.uid, part.part_id, :video}})
+
+      # the leg keeps its slot and its tile: audio is still flowing
+      refute_receive {:sent_request, :BYE, _req}, 500
+      assert Process.alive?(pid)
+
+      # and the silence is recorded, so the operator view can show which media died
+      [part] = participants(ctx.uid)
+      assert Map.has_key?(part.silent, :video)
+    end
+
+    test "the last silent media hangs up the call", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      assert_receive {:rpc, "AddMosaicParticipant", _params}, 2000
+
+      part = joined_participant(ctx.uid)
+      send(Mcu, {:mcu_event, "mcu1", {:media_timeout, 42, ctx.uid, part.part_id, :video}})
+      refute_receive {:sent_request, :BYE, _req}, 300
+      send(Mcu, {:mcu_event, "mcu1", {:media_timeout, 42, ctx.uid, part.part_id, :audio}})
+
+      assert_receive {:sent_request, :BYE, _req}, 2000
+    end
+
+    # Without this, a leg that flapped once would be reaped the next time any OTHER
+    # media hiccups — the AND would never forget.
+    test "a media coming back clears its silence", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      assert_receive {:rpc, "AddMosaicParticipant", _params}, 2000
+
+      part = joined_participant(ctx.uid)
+      send(Mcu, {:mcu_event, "mcu1", {:media_timeout, 42, ctx.uid, part.part_id, :video}})
+      send(Mcu, {:mcu_event, "mcu1", {:media_connected, 42, ctx.uid, part.part_id, :video}})
+
+      # video is alive again, so audio going quiet is NOT the whole leg
+      send(Mcu, {:mcu_event, "mcu1", {:media_timeout, 42, ctx.uid, part.part_id, :audio}})
+      refute_receive {:sent_request, :BYE, _req}, 500
+      assert Process.alive?(pid)
+    end
+
+    # An audio-only leg has a watched set of exactly one, so its single timeout IS
+    # every media — the AND must not need two events to fire.
+    test "an audio-only leg hangs up on its single timeout", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      assert_receive {:rpc, "AddSidebarParticipant", _params}, 2000
+
+      part = joined_participant(ctx.uid)
+      send(Mcu, {:mcu_event, "mcu1", {:media_timeout, 42, ctx.uid, part.part_id, :audio}})
+
+      assert_receive {:sent_request, :BYE, _req}, 2000
+    end
+  end
+
+  describe "hold and resume (§6.4, P7)" do
+    # Without the disarming half of the watchdog, a hold longer than rtp_timeout_ms
+    # reads as a dead leg and hangs up a working call — ten seconds being an ordinary
+    # consultation transfer. The criterion is "will the peer send", not "is this hold".
+    test "a hold the peer stops sending on disarms the watchdog", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      part = joined_participant(ctx.uid)
+
+      TestStub.rpc_order()
+      assert {:ok, _answer} = Conn.set_remote_offer(part.conn, @offer_hold_inactive)
+
+      # both medias disarmed (timeoutMs = 0), and text was never armed to begin with
+      assert_received {:rpc, "StartRTPTimeout", [_conf, _part, 0, 0, _role]}
+      assert_received {:rpc, "StartRTPTimeout", [_conf, _part, 1, 0, _role]}
+    end
+
+    test "a hold the peer keeps sending on leaves it armed", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      part = joined_participant(ctx.uid)
+
+      TestStub.rpc_order()
+      assert {:ok, _answer} = Conn.set_remote_offer(part.conn, @offer_hold_sendonly)
+
+      assert_received {:rpc, "StartRTPTimeout", [_conf, _part, 0, ms, _role]} when ms > 0
+      refute_received {:rpc, "StartRTPTimeout", [_conf, _part, _media, 0, _role]}
+    end
+
+    test "resuming re-arms it", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      part = joined_participant(ctx.uid)
+
+      assert {:ok, _} = Conn.set_remote_offer(part.conn, @offer_hold_inactive)
+      TestStub.rpc_order()
+      assert {:ok, _} = Conn.set_remote_offer(part.conn, @offer_video)
+
+      # the ACK path returns early on an attached leg, so if the answer did not
+      # re-arm, a resumed media would stay unwatched for good
+      assert_received {:rpc, "StartRTPTimeout", [_conf, _part, 0, ms, _role]} when ms > 0
+    end
+  end
+
+  describe "RFC 5939 capability negotiation (§6.3.1)" do
+    test "an AVPF potential configuration is accepted on video, and stated", ctx do
+      {_pid, _dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_capneg))
+      assert_receive {:replied, 200, _reason, fields, _req}, 2000
+
+      answer = fields[:body]
+
+      # the video m= line carries the upgraded profile, and a=acfg says WHICH
+      # configuration was taken — without it the peer cannot tell an accepted capneg
+      # from an answerer that changed the transport on its own
+      assert answer =~ ~r/m=video \d+ RTP\/AVPF/
+      assert answer =~ "a=acfg:1 t=1"
+
+      # audio keeps AVP: the caller offers the upgrade there too, but there is no audio
+      # feedback to switch on, so taking it would announce a profile we do nothing with
+      assert answer =~ ~r/m=audio \d+ RTP\/AVP /
+      refute answer =~ "RTP/AVPF 8"
+    end
+
+    test "the answered feedback is the intersection, per explicit payload type", ctx do
+      {_pid, _dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_capneg))
+      assert_receive {:replied, 200, _reason, fields, _req}, 2000
+
+      answer = fields[:body]
+
+      # what we can honour, named per PT rather than with the offer's `*` wildcard
+      # (`nack pli` included: it rides the FIR switch, see @supported_rtcp_fb)
+      assert answer =~ "a=rtcp-fb:99 nack\r\n"
+      assert answer =~ "a=rtcp-fb:99 nack pli"
+      assert answer =~ "a=rtcp-fb:99 ccm fir"
+      assert answer =~ "a=rtcp-fb:99 ccm tmmbr"
+      refute answer =~ "rtcp-fb:*"
+
+      # and NOT what has no server-side switch: announcing it would promise a
+      # capability nothing implements
+      refute answer =~ "goog-remb"
+    end
+
+    test "what is announced is what is switched on server-side", ctx do
+      {_pid, _dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_capneg))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+
+      # the first video properties call is our local codec capability (§16.3.4 (a));
+      # the transport switches follow in the second
+      assert_received {:rpc, "SetRTPProperties", [42, 7, 1, codec_props, 0]}
+      assert Map.has_key?(codec_props, "codec.av1.level-idx")
+
+      # video (1) carries the three switches behind the three answered types
+      assert_received {:rpc, "SetRTPProperties", [42, 7, 1, props, 0]}
+      assert props["useNACK"] == "1"
+      assert props["useRtcpFIR"] == "1"
+      assert props["tmmbr"] == "1"
+
+      # audio stayed AVP, so it gets none of them
+      assert_received {:rpc, "SetRTPProperties", [42, 7, 0, audio_props, 0]}
+      refute Map.has_key?(audio_props, "useNACK")
+    end
+
+    test "a caller that asks for no feedback gets none, and no upgrade", ctx do
+      # same offer without the rtcp-fb lines: the upgrade would buy nothing
+      offer = String.replace(@offer_capneg, ~r/a=rtcp-fb:[^\r]*\r\n/, "")
+      {_pid, _dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: offer))
+      assert_receive {:replied, 200, _reason, fields, _req}, 2000
+
+      answer = fields[:body]
+      refute answer =~ "RTP/AVPF"
+      refute answer =~ "a=acfg"
+      refute answer =~ "a=rtcp-fb"
+    end
+
+    test "feedback offered under plain RTP/AVP is confirmed, and the profile untouched",
+         ctx do
+      # Linphone-style: a plain AVP profile, no capneg, a=rtcp-fb lines anyway.
+      # Confirming them is an assumed RFC 4585 §4 deviation (see answered_rtcp_fb/1):
+      # the peer drives its NACK/FIR off the answer's attributes, not its profile.
+      offer =
+        @offer_video
+        |> String.replace("RTP/AVPF", "RTP/AVP")
+        |> String.replace(
+          "a=rtcp-fb:99 nack\r\n",
+          "a=rtcp-fb:99 nack\r\na=rtcp-fb:99 nack pli\r\na=rtcp-fb:99 ccm fir\r\n"
+        )
+
+      {_pid, _dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: offer))
+      assert_receive {:replied, 200, _reason, fields, _req}, 2000
+
+      answer = fields[:body]
+
+      # no capneg in the offer, so the answered profile is plain RFC 3264 mirroring
+      assert answer =~ ~r/m=video \d+ RTP\/AVP 99/
+      refute answer =~ "RTP/AVPF"
+      refute answer =~ "a=acfg"
+      # ...but the requested-and-implemented feedback is confirmed anyway,
+      # `nack pli` included (it rides the FIR switch, see @supported_rtcp_fb)
+      assert answer =~ "a=rtcp-fb:99 nack\r\n"
+      assert answer =~ "a=rtcp-fb:99 nack pli"
+      assert answer =~ "a=rtcp-fb:99 ccm fir"
+
+      # and the server switches follow the answered set, profile notwithstanding
+      assert_received {:rpc, "SetRTPProperties", [42, 7, 1, _codec_props, 0]}
+      assert_received {:rpc, "SetRTPProperties", [42, 7, 1, props, 0]}
+      assert props["useNACK"] == "1"
+      assert props["useRtcpFIR"] == "1"
     end
   end
 

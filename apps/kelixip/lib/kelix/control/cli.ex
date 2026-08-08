@@ -65,6 +65,30 @@ defmodule Kelix.Control.CLI do
   def rpc_main(arg_string) when is_binary(arg_string),
     do: rpc_main(OptionParser.split(arg_string))
 
+  @doc """
+  The systemd `ExecReload` entry point — `systemctl reload kelixip` is exactly
+  `kelictl reload-all`, run inside the node.
+
+  It prints the same report (the IO of an `rpc` call comes back to the caller, so the
+  report lands in the journal) and **raises** when the reload was rejected: a raise is
+  how the release's `rpc` command exits non-zero, and without it systemd would report a
+  successful reload of a config the node refused — the very failure the load-time
+  contract check exists to prevent.
+
+  Only the reload verdict raises. Nothing here stops or restarts the node.
+  """
+  @spec reload_main() :: :ok
+  def reload_main() do
+    {code, output} = run(["reload-all"], node())
+    IO.puts(output)
+
+    if code != 0 do
+      raise "kelixip reload rejected — the running configuration is unchanged (see above)"
+    end
+
+    :ok
+  end
+
   @doc "Parse + dispatch `argv` against `node`, returning `{exit_code, text}`."
   @spec run([String.t()], node) :: {non_neg_integer, String.t()}
   def run(argv, target \\ resolve_node()) do
@@ -136,6 +160,8 @@ defmodule Kelix.Control.CLI do
     end
   end
 
+  defp parse(["reload-all"]), do: {:ok, :reload_all, :reload_all, []}
+
   defp parse(["reload-script" | rest]) do
     {notify?, names} = pop_flag(rest, "--notify")
 
@@ -192,6 +218,11 @@ defmodule Kelix.Control.CLI do
   defp render(:registration, {:error, :not_found}), do: {1, "no such registration"}
   defp render(:mediaserver, {:error, :not_found}), do: {1, "no such media server"}
 
+  # A command that already phrased its own failure (the TOML/script reasons of
+  # `reload_domains`, multi-line and meant to be read) is printed as written:
+  # `inspect/1` would escape it into one quoted line.
+  defp render(_tag, {:error, reason}) when is_binary(reason), do: {1, "error: #{reason}"}
+
   defp render(_tag, {:error, reason}), do: {1, "error: #{inspect(reason)}"}
 
   defp render(:status, %{} = s) do
@@ -214,12 +245,16 @@ defmodule Kelix.Control.CLI do
   defp render(:monitor, rows) when is_list(rows) do
     {0,
      table(
-       ["id", "domain", "function", "account", "state", "event", "command"],
+       ["id", "domain", "function", "script", "account", "state", "event", "command"],
        rows,
        &[
          to_string(&1.id),
          &1.domain,
          to_string(&1.function),
+         # WHICH scenario runs here — the file domains.toml routed to, the way
+         # elixipp's --monitor names the scenario module. The pool knows it even
+         # when the FSM view does not, so it is never empty for a live instance.
+         dash(Map.get(&1, :script)),
          dash(&1.account),
          dash(&1.state),
          dash(&1.event),
@@ -351,9 +386,70 @@ defmodule Kelix.Control.CLI do
     {exit_map(result), Enum.map_join(result, "\n", fn {k, v} -> "#{k}: #{fmt(v)}" end)}
   end
 
+  # `reload-all`: one line per stage, and the exit code is the aggregate verdict — this
+  # is also what `systemctl reload` prints into the journal (see reload_main/0).
+  defp render(:reload_all, %{} = report) do
+    lines =
+      [
+        "domains.toml:  " <> reload_domains_line(report),
+        "scripts:       " <> reload_scripts_line(report),
+        "modules:       " <> reload_modules_line(report)
+      ] ++ reload_footer(report)
+
+    {if(Kelix.Control.reload_ok?(report), do: 0, else: 1), Enum.join(lines, "\n")}
+  end
+
   defp render(:ok, :ok), do: {0, "ok"}
   defp render(:ok, :notfound), do: {1, "not found"}
   defp render(_tag, other), do: {0, fmt(other)}
+
+  # ── reload-all rendering ──────────────────────────────────────────────────────
+
+  defp reload_domains_line(%{domains: :ok, version: version}),
+    do: "reloaded (v#{version})"
+
+  defp reload_domains_line(%{domains: {:error, reason}, version: version}),
+    do: "REJECTED, still v#{version} — #{fmt(reason)}"
+
+  defp reload_scripts_line(%{scripts: scripts}) when map_size(scripts) == 0,
+    do: "(none loaded)"
+
+  defp reload_scripts_line(%{scripts: scripts}) do
+    scripts
+    |> Enum.sort()
+    |> Enum.map_join(", ", fn {name, version} -> "#{name} v#{version}" end)
+  end
+
+  defp reload_modules_line(%{modules: modules}) when map_size(modules) == 0,
+    do: "(none configured)"
+
+  defp reload_modules_line(%{modules: modules}) do
+    modules
+    |> Enum.sort()
+    |> Enum.map_join(", ", fn {name, outcome} -> "#{name} #{module_outcome(outcome)}" end)
+  end
+
+  defp module_outcome(:ok), do: "reloaded"
+  defp module_outcome(:unchanged), do: "unchanged"
+  defp module_outcome({:skipped, :restart_required}), do: "CHANGED, needs a restart"
+  defp module_outcome({:skipped, :not_loaded}), do: "not loaded, needs a restart"
+  defp module_outcome({:error, reason}), do: "FAILED — #{fmt(reason)}"
+  defp module_outcome(other), do: fmt(other)
+
+  # Say what a reload cannot do, at the moment it matters: an operator who edited a
+  # module block gets no hint otherwise, and would take "ok" for "applied".
+  defp reload_footer(%{modules: modules}) do
+    if Enum.any?(modules, &match?({_name, {:skipped, _}}, &1)) do
+      [
+        "",
+        "A module block changed but its module was kept running: reloading it would",
+        "drop live state (conferences, registrations). Apply it with",
+        "`systemctl restart kelixip`. config.toml is restart-only too."
+      ]
+    else
+      []
+    end
+  end
 
   # ── module-command rendering (declaration-driven, design §8.3.6) ──────────────
 
@@ -674,18 +770,39 @@ defmodule Kelix.Control.CLI do
   end
 
   # Numbered, because the dial-plan is first-match-wins: the position *is* the
-  # semantics, and "which rule caught this call" is the usual question.
+  # semantics, and "which rule caught this call" is the usual question. The module
+  # is printed next to the script because it is the file's `defmodule`, not its
+  # name, that decides what runs — two rules showing the same module is a bug the
+  # operator can now see here.
   defp format_dial_plan(rules) do
     patterns = Enum.map(rules, &(&1.pattern || "(default)"))
-    width = patterns |> Enum.map(&String.length/1) |> Enum.max(fn -> 0 end)
+    pw = patterns |> Enum.map(&String.length/1) |> Enum.max(fn -> 0 end)
+    sw = rules |> Enum.map(&String.length(&1.script)) |> Enum.max(fn -> 0 end)
 
     patterns
     |> Enum.zip(rules)
     |> Enum.with_index(1)
     |> Enum.map(fn {{pattern, r}, i} ->
-      "  #{i}. #{String.pad_trailing(pattern, width)} -> #{r.script}"
+      "  #{i}. #{String.pad_trailing(pattern, pw)} -> " <>
+        "#{String.pad_trailing(r.script, sw)}  #{format_script_module(r)}"
     end)
   end
+
+  # A script the registry has never loaded has no module yet — say so rather than
+  # printing a blank, which would read as "no module" instead of "not loaded".
+  # No separate version: the module name already ends in `.V<n>` — that suffix IS
+  # the version, and printing it twice reads as two different numbers.
+  defp format_script_module(%{module: mod} = r),
+    do: "[#{mod}#{format_staleness(Map.get(r, :stale))}]"
+
+  defp format_script_module(_), do: "[not loaded]"
+
+  # Absent/false = the module was compiled from the file as it stands. The others say
+  # what a `kelictl domain reload-script <name>` would change, in the operator's terms.
+  defp format_staleness(:changed), do: " — file changed since load"
+  defp format_staleness(:missing), do: " — file missing"
+  defp format_staleness(:unknown), do: " — file unstamped"
+  defp format_staleness(_), do: ""
 
   defp domain_registrations_block(%{domain: domain, registrations: []}),
     do: "#{domain}\n  (no registration)"
@@ -858,6 +975,10 @@ defmodule Kelix.Control.CLI do
       mediaserver show <name>         one media server in detail
       mediaserver enable|disable <name>  take a media server in/out of the pool
       stop <id>                       shut down one scenario
+      reload-all                      reload domains.toml + the scripts + the
+                                      module configs that can be applied live
+                                      (what systemctl reload runs; config.toml
+                                      is restart-only)
       reload-script [--notify] <name…>  reload scenario script(s)
       module list                     loaded modules, their commands and facades
       module reload <name>            reload a module's config

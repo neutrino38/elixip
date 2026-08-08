@@ -101,6 +101,8 @@ Kelix.Application  (use Application)
     │     └── (one child per [module.<name>] block — NONE are bundled in the core;
     │          e.g. Kelix.Mod.Registrar §6 / Kelix.Mod.AuthDb §7 / Kelix.Mod.RadiusBilling,
     │          each loaded only if configured — an MCU-only product loads none)
+    ├── Kelix.ScriptPreflight    — :ignore child: §5.3 contract on every script
+    │                              domains.toml names; a bad one aborts the boot  §5
     ├── Kelix.MediaPool          — GenServer: MCU pool, health-check, failover   §9
     ├── Kelix.ScriptRegistry     — GenServer: loaded scenario versions + refcount §5
     ├── Kelix.Domains            — GenServer: hot-reloadable domains.toml (atomic) §4
@@ -397,20 +399,41 @@ A GenServer owning the mapping *script path → loaded versions*:
   registrar ignores it. The DSL auto-injects a no-op clause for `:reloaded`
   (like it does for `:shutdown`) so scripts that don't handle it are unaffected.
 - `reload_domains` — atomic `domains.toml` reload (§3.2). Validates every
-  referenced script through `ScriptRegistry` (contract check) as part of the
-  all-or-nothing swap.
+  referenced script through `ScriptRegistry.validate/1` (contract check) as part of
+  the all-or-nothing swap — **against the disk**: a script whose file changed since
+  it was loaded is recompiled as a new version, so the reload checks (and publishes)
+  the operator's edit rather than the copy in memory. Parsing and that check run in
+  the caller's process; only the swap enters the `Kelix.Domains` GenServer, which is
+  on the path of every inbound request.
 
 ### 5.3 Load-time contract (mandatory, spec §9.2)
 
-kelixip **refuses** a script (and logs a clear error) unless **both** hold:
+kelixip **refuses** a script (and logs a clear error) unless **all** hold:
 
 1. `function_exported?(mod, :__scenario_type__, 0)` — *"… is not a valid kelixip
    scenario"*.
 2. `function_exported?(mod, :__state___shutdown__, 1)` — i.e. it has an
    `on_shutdown` block — *"… does not handle cooperative shutdown (missing
    `on_shutdown`): rejected"*.
+3. No module it declares is already owned by another loaded script — *"… defines
+   `UAS.InviteExample` (owned by record.exs); two scripts cannot share a module
+   name"*. Checked on the **AST, before the compile**, because compiling is the act
+   that overwrites the other script's module: a check made afterwards would report
+   damage it had already done. It covers every top-level `defmodule` in the file,
+   not only the scenario one — a helper module clobbers just as thoroughly.
+4. Its declared `uses_modules` are loaded (§16 #14).
 
-Rationale (spec): elixip makes every scenario shutdown-aware *by default*, but
+Rationale for 3: the module name comes from the file's `defmodule`, not from its
+name, and the version suffix is per *name* (`Foo` → `Foo.V1`), not per script — so
+two copies of one scenario, the usual way a `record.exs` and a `play.exs` are born,
+compile to the *same* `Foo.V1`. The second load silently overwrites the first and
+both dial-plan rules run one body; retiring either one then purges the module both
+point at. Found in production: `900031111 → record.exs` answered with `play.exs`'s
+Player. The dial plan was right, the registry was right, and nothing in the logs
+named the module — which is why `kelictl domain show` now prints it (§10.2) and
+`Kelix.InstancePool` logs it at INFO on every spawn.
+
+Rationale for 2 (spec): elixip makes every scenario shutdown-aware *by default*, but
 that default is **abrupt** (terminates `:aborted`, no BYE, no media release). In
 production kelixip forbids the default: every served script must prove it drains
 cleanly. A registrar can satisfy it in one line
@@ -1559,6 +1582,36 @@ All questions below were decided on **2026-07-26** unless marked otherwise.
     the order written in the file is not recoverable. Harmless while no module needs
     another at init (`registrar` and `auth_db` are independent); a real dependency
     would need declaring too.
+
+15. **When is a script proved servable?** — **RESOLVED**, and **implemented
+    2026-08-07**. §3.2 and §5.3 both said the load-time contract runs on every
+    referenced script, at boot *and* at every reload. Neither did: `Kelix.Domains`
+    validated the TOML and the dial-plan patterns only, and `Kelix.ScriptRegistry`
+    compiled a script **lazily**, on the `checkout/1` of the first instance. So
+    `kelictl domain reload-all` answered `ok` on a config whose scripts were
+    missing, uncompilable or had no `on_shutdown` — and the operator found out on
+    the first call routed there, which is the one place it must not be found.
+
+    Now: `Kelix.Domains.script_refs/1` enumerates what a snapshot names (the
+    `registrar`/`presence` block, each dial-plan rule) and `check_scripts/1` runs
+    them through `ScriptRegistry.validate/1`, which reports **every** offender with
+    the domain and rule that names it, not just the first. Two entry points:
+
+    - **reload** — `Kelix.Domains.reload(path, check_scripts: true)`, from
+      `Kelix.Control.reload_domains/0`. One bad script ⇒ the swap is refused, the
+      running config untouched (§3.2's all-or-nothing, now including the scripts).
+    - **boot** — `Kelix.ScriptPreflight`, an `:ignore` child, and its **position**
+      is the design: after `Kelix.ModuleSupervisor` (a script's `uses_modules`
+      needs those modules loaded, and their blocks come from `domains.toml`, so the
+      snapshot must exist first) and before the listeners. A rejected script
+      **aborts the boot** — decided 2026-08-07, over a log-and-serve warning: the
+      alternative is a node that starts clean and 500s every call to that domain.
+      That is why `Kelix.Domains.init/1` deliberately does *not* check.
+
+    Freshness is per file (`mtime` + `size`): an unchanged script is already proven
+    and is not recompiled, a changed one is reloaded as a new version — an operator
+    who edits a script and reloads the domains gets that edit checked *and* served,
+    without `reload-script`. In-flight instances keep their version (§5.1).
 
 **Remaining open (not blocking basic):** nothing in this list. Two items noted
 during the 2026-07-28 handset test and left for later: server-initiated OPTIONS

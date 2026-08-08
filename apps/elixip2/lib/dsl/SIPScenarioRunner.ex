@@ -29,6 +29,8 @@ defmodule SIP.Scenario.Runner do
       the stack, then run one instance.
   """
   require Logger
+  # is_req/1: only an inbound *request* names an identity (see initial_account/1)
+  import SIP.Msg.Ops, only: [is_req: 1]
 
   @doc """
   Run a single scenario instance, optionally starting the SIP stack first.
@@ -91,8 +93,70 @@ defmodule SIP.Scenario.Runner do
 
     maybe_start_sequence_journal(module, ctx)
 
-    report(module, ctx.username || "", :initial_state, "start", nil)
+    report(module, initial_account(ctx), :initial_state, "start", nil)
     loop(module, :initial_state, ctx, states)
+  end
+
+  # What the monitor's `account` column shows until the scenario says better.
+  #
+  # A UAS instance serves whoever called it, so it shows the identity the inbound
+  # request asserts — digest username, else P-Asserted-Identity, else From, the
+  # framework's single reading of that question (SIP.Msg.Ops.asserted_username/1).
+  # Its own `config` username, if it even has one, is the same string on every row
+  # and answers nothing. A UAC keeps showing its own account, untouched.
+  #
+  # "Is this a UAS instance" is decided on the **inbound request**, not on the
+  # `uas` annotation: that annotation is what tells `elixipp` to open listeners,
+  # and a kelixip script does not carry it — the server knows a script serves
+  # inbound traffic from `domains.toml`. A UAS instance is precisely one spawned
+  # with the request that created it (`spawn_uas_instance/2` — the only paths that
+  # pass `:inbound_request` are Kelix.InstancePool and Elixip.ScenarioUAS), and a
+  # UAC instance has none by construction, so it never reaches the request branch.
+  #
+  # A script that knows a better name (the AOR it registered, the conference it
+  # joined) overwrites it with `SIP.Scenario.Monitor.note_account/1` — see
+  # report_account/1 for why the transitions that follow keep quiet about it.
+  defp initial_account(ctx) do
+    case inbound_request(ctx) do
+      nil -> own_username(ctx)
+      req -> SIP.Msg.Ops.asserted_username(req) || own_username(ctx)
+    end
+  end
+
+  # What every report AFTER the first one says about the account.
+  #
+  # For a UAS instance: nothing. Its identity was resolved once, from the request
+  # that spawned it, and from then on only the script speaks. An empty username is
+  # how the monitor is told "keep what you have" — re-pushing the resolved identity
+  # on every transition would clobber the AOR the registrar noted or the conference
+  # DID an MCU call joined, which are the whole point of `note_account/1`.
+  #
+  # A UAC keeps reporting its own account, which a scenario may legitimately rebind
+  # mid-run.
+  defp report_account(ctx) do
+    case inbound_request(ctx) do
+      nil -> own_username(ctx)
+      _uas_instance -> ""
+    end
+  end
+
+  # The request that spawned this instance — set by `spawn_uas_instance/2` and by
+  # nothing else, so its presence IS "this is a UAS instance". Deliberately not the
+  # `uas` annotation: that one tells `elixipp` to open listeners, and the kelixip
+  # scripts carry none — the server knows they serve inbound traffic from
+  # `domains.toml`. Only a request names a sender, hence the `is_req` guard.
+  defp inbound_request(ctx) do
+    case SIP.Context.appdata_get(ctx, :inbound_request) do
+      req when is_req(req) -> req
+      _none -> nil
+    end
+  end
+
+  defp own_username(ctx) do
+    case ctx.username do
+      username when is_binary(username) -> username
+      _ -> ""
+    end
   end
 
   # Seed the context from run_instance/2 options: the parent PID (struct field),
@@ -374,12 +438,12 @@ defmodule SIP.Scenario.Runner do
       {:goto, :next, desc, type, ctx2} ->
         next = next_state(state_name, states)
         log_transition(state_name, next, desc)
-        report(module, ctx2.username, next, desc, type)
+        report(module, report_account(ctx2), next, desc, type)
         loop(module, next, SIP.Context.set(ctx2, :currentstate, next), states)
 
       {:goto, :loop, desc, type, ctx2} ->
         log_transition(state_name, state_name, desc)
-        report(module, ctx2.username, state_name, desc, type)
+        report(module, report_account(ctx2), state_name, desc, type)
         loop(module, state_name, ctx2, states)
 
       # Cooperative shutdown: the auto-injected on_events clause (or an explicit
@@ -389,35 +453,35 @@ defmodule SIP.Scenario.Runner do
       {:goto, :__shutdown__, desc, type, ctx2} ->
         if function_exported?(module, :__state___shutdown__, 1) do
           log_transition(state_name, :__shutdown__, desc)
-          report(module, ctx2.username, :__shutdown__, desc, type)
+          report(module, report_account(ctx2), :__shutdown__, desc, type)
           loop(module, :__shutdown__, SIP.Context.set(ctx2, :currentstate, :__shutdown__), states)
         else
-          report(module, ctx2.username, :aborted, desc, type)
+          report(module, report_account(ctx2), :aborted, desc, type)
           finalize(module, ctx2, :aborted, "shutdown")
         end
 
       {:goto, target, desc, type, ctx2} when is_atom(target) ->
         if target in states do
           log_transition(state_name, target, desc)
-          report(module, ctx2.username, target, desc, type)
+          report(module, report_account(ctx2), target, desc, type)
           loop(module, target, SIP.Context.set(ctx2, :currentstate, target), states)
         else
           reason = "jumped from state #{inspect(state_name)} to unknown state #{inspect(target)}"
           Logger.error("Scenario #{inspect(module)} #{reason}.")
-          report(module, ctx2.username, :failed, "unknown state #{target}", type)
+          report(module, report_account(ctx2), :failed, "unknown state #{target}", type)
           finalize(module, ctx2, :failure, {:unknown_state, target})
         end
 
       {:terminal, :success, reason, type, ctx2} ->
-        report(module, ctx2.username, :succeeded, reason, type)
+        report(module, report_account(ctx2), :succeeded, reason, type)
         finalize(module, ctx2, :success, reason)
 
       {:terminal, :failure, reason, type, ctx2} ->
-        report(module, ctx2.username, :failed, reason, type)
+        report(module, report_account(ctx2), :failed, reason, type)
         finalize(module, ctx2, :failure, reason)
 
       {:terminal, :aborted, reason, type, ctx2} ->
-        report(module, ctx2.username, :aborted, reason, type)
+        report(module, report_account(ctx2), :aborted, reason, type)
         finalize(module, ctx2, :aborted, reason)
 
       # A state must end with goto / scenario_success / scenario_failure. Anything
@@ -429,7 +493,7 @@ defmodule SIP.Scenario.Runner do
             "scenario_success / scenario_failure, got: #{inspect(other)}"
         )
 
-        report(module, ctx.username, :failed, "invalid transition", nil)
+        report(module, report_account(ctx), :failed, "invalid transition", nil)
         finalize(module, ctx, :failure, {:invalid_transition, state_name})
     end
   end
