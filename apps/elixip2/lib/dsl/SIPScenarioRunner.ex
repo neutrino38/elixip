@@ -555,6 +555,7 @@ defmodule SIP.Scenario.Runner do
     shutdown_children(ctx)
 
     ctx
+    |> release_b2bua_legs()
     |> release_media()
     |> run_cleanup_callback(module)
 
@@ -642,12 +643,21 @@ defmodule SIP.Scenario.Runner do
     :ok
   end
 
+  # Wind down the B2BUA legs this scenario created, before the media: a leg left
+  # behind holds a call up at the far end. No-op for a scenario that created none
+  # (SIP.Session.B2bua.release_legs/1 returns the context untouched).
+  defp release_b2bua_legs(ctx), do: SIP.Session.B2bua.release_legs(ctx)
+
   # If a media server is in use, wait (max 5 s) for the dialog to terminate
   # before releasing media resources, as specified in the README.
   defp release_media(ctx) do
     if is_pid(ctx.mediaserverpid) and not is_nil(ctx.mediaservermodule) do
       receive do
         {:dialog_terminated, _dialog_pid, _reason} -> :ok
+        # The same event from a tagged leg (a B2BUA outbound leg): it says just
+        # as much about the call being over, and ignoring it would stall here
+        # for the full timeout.
+        {_tag, {:dialog_terminated, _dialog_pid, _reason}} -> :ok
       after
         5_000 -> :ok
       end

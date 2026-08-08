@@ -34,11 +34,18 @@ end
 
 defmodule SIP.B2bua.Leg do
   @moduledoc "One call leg of a B2BUA scenario (the outbound one; see SIP.B2bua.State)."
+  # `local_uri` / `remote_uri` are the From and To of the request that opened the
+  # leg. Kept because a request this layer originates later (the teardown BYE)
+  # must carry the dialog's own identity, and `SIP.DialogImpl.address_in_dialog/2`
+  # restores only the To on an outbound dialog — the From is taken from the
+  # request as given (see the open question in docs/design/b2bua_module.md §12).
   defstruct tag: nil,
             dialogpid: nil,
             peer: nil,
             target: nil,
             method: nil,
+            local_uri: nil,
+            remote_uri: nil,
             initial_trans: nil,
             media: false
 end
@@ -270,6 +277,8 @@ defmodule SIP.Session.B2bua do
           peer: peer,
           target: target,
           method: fwd.method,
+          local_uri: Map.get(fwd, :from),
+          remote_uri: Map.get(fwd, :to),
           initial_trans: trans_pid,
           media: media
         }
@@ -512,6 +521,137 @@ defmodule SIP.Session.B2bua do
         rc = SIP.Session.reply(dialog_pid, req, code, reason, upd_fields, "b2bua_reply #{code}")
         SIP.Context.set(sip_ctx, :lasterr, reply_lasterr(rc))
     end
+  end
+
+  # ── Teardown ────────────────────────────────────────────────────────────────
+
+  @doc """
+  Wind down every leg this scenario created, whatever the exit path (success,
+  failure, abort, exception). Called by `SIP.Scenario.Runner.finalize/4` before
+  the media is released — the media of a leg outlives nothing, but a leg left
+  behind holds a call up at the far end for as long as its session timer runs.
+
+  Three things are owed at this point (§8):
+
+    * an initial request still awaiting its final response is CANCELled — the
+      callee is ringing for a call nobody will take;
+    * an established INVITE leg gets a BYE;
+    * every request relayed onto a leg and still unanswered gets a final
+      response on the leg it came from, so no transaction is left hanging
+      (487 for an INVITE, whose attempt we just terminated; 408 otherwise).
+
+  Returns the context with the leg bookkeeping cleared, so a second call is a
+  no-op. Never raises: a leg that dies underneath us is exactly the state we
+  were trying to reach.
+  """
+  @spec release_legs(%SIP.Context{}) :: %SIP.Context{}
+  def release_legs(sip_ctx = %SIP.Context{}) do
+    state = state(sip_ctx)
+
+    if state.legs == %{} and state.pending == %{} do
+      sip_ctx
+    else
+      Enum.each(Map.values(state.legs), &wind_down_leg(&1, state))
+      Enum.each(state.pending, fn {_tid, pending} -> answer_orphan(sip_ctx, pending) end)
+      put_state(sip_ctx, %State{})
+    end
+  end
+
+  defp wind_down_leg(%Leg{} = leg, state) do
+    cond do
+      not leg_alive?(leg) ->
+        :ok
+
+      # The initial request is still in `pending`: it never got a final answer,
+      # so the leg is an attempt in progress, not a session.
+      Map.has_key?(state.pending, leg.initial_trans) ->
+        protect("CANCEL leg #{inspect(leg.dialogpid)}", fn ->
+          SIP.Dialog.cancel(leg.dialogpid, leg.initial_trans)
+        end)
+
+      leg.method == :INVITE and established?(leg) ->
+        protect("BYE leg #{inspect(leg.dialogpid)}", fn ->
+          SIP.Dialog.new_request(leg.dialogpid, bye_request(leg))
+        end)
+
+      # A leg carrying anything else (MESSAGE, SUBSCRIBE…) has no teardown
+      # request of its own: it expires with its dialog.
+      true ->
+        :ok
+    end
+  end
+
+  # Did this leg ever become a session? "Its initial transaction is over" does
+  # NOT answer that: it is equally true of an INVITE answered 486 Busy, and
+  # BYEing *that* dialog sends a BYE with no remote target (RFC 3261 §12.1
+  # — a non-2xx final establishes no dialog, so nothing was learned from it).
+  #
+  # The dialog's remote tag is the honest signal: `add_totag/2` sets it only for
+  # a dialog-establishing response (< 300). An early dialog has one too, but a
+  # leg still ringing was already caught by the CANCEL branch above.
+  defp established?(%Leg{dialogpid: pid}) do
+    case protect("read dialog id", fn -> GenServer.call(pid, :getdialogid) end) do
+      {_fromtag, _callid, totag} -> is_binary(totag)
+      _ -> false
+    end
+  end
+
+  defp answer_orphan(sip_ctx, %Pending{orig_req: req, orig_leg: leg, method: method}) do
+    case leg_pid(sip_ctx, leg) do
+      nil ->
+        :ok
+
+      dialog_pid ->
+        {code, reason} =
+          if method == :INVITE,
+            do: {487, "Request Terminated"},
+            else: {408, "Request Timeout"}
+
+        protect("answer orphan #{method} with #{code}", fn ->
+          SIP.Dialog.reply(dialog_pid, req, code, reason, [])
+        end)
+    end
+  end
+
+  # The teardown BYE. The dialog layer fills in Call-ID, CSeq, the tags, the
+  # route set and the remote target (fix_outbound_request/3), so the R-URI and
+  # the To are placeholders — but the From is NOT one: on an outbound dialog
+  # `address_in_dialog/2` only restores the To, and a From with no domain
+  # serializes to nothing and takes the whole message down. Hence the leg's own
+  # identity, captured when it was created.
+  defp bye_request(%Leg{} = leg) do
+    local = leg.local_uri || %SIP.Uri{userpart: nil, domain: nil}
+    remote = leg.remote_uri || local
+
+    %{
+      "Max-Forwards" => "70",
+      method: :BYE,
+      ruri: remote,
+      from: local,
+      to: remote,
+      useragent: Application.get_env(:elixip2, :useragent, "Elixipp/0.1"),
+      callid: nil,
+      contentlength: 0
+    }
+  end
+
+  # Teardown runs on the way out, often while the far end is already gone: a
+  # dialog that dies between the liveness check and the call must not turn a
+  # finished scenario into a crash.
+  defp protect(what, fun) do
+    fun.()
+  rescue
+    err ->
+      Logger.debug(
+        module: __MODULE__,
+        message: "b2bua teardown: #{what} — #{Exception.message(err)}"
+      )
+
+      :ok
+  catch
+    :exit, reason ->
+      Logger.debug(module: __MODULE__, message: "b2bua teardown: #{what} — #{inspect(reason)}")
+      :ok
   end
 
   # ── Leg / correlation state ─────────────────────────────────────────────────

@@ -69,19 +69,29 @@ defmodule SIP.Test.Transport.UDPMockup do
     end
   end
 
+  # Answering a CANCEL *we* received, i.e. one the stack sent out (a B2BUA
+  # cancelling the call attempt it forwarded). Two responses go back: 200 to the
+  # CANCEL itself, then 487 to the INVITE it cancels — which is the request the
+  # 487 must be built from (RFC 3261 §9.2), not the CANCEL.
+  #
+  # Both carry a To tag: any response above 100 needs one, and reply_to_request/5
+  # raises without it. The CANCEL as sent has no tag on its To (it copies the
+  # INVITE's), so the tag has to be supplied here — the same one for both, since
+  # they belong to the same dialog as far as the peer is concerned.
+  @cancel_totag "mockupcancel"
+
   defp handle_req(state, :CANCEL, sipreq) do
     if Map.has_key?(state, :req) do
       if sipreq.transid == state.req.transid do
-        # Simulate cancellig
-        siprsp = reply_to_request(sipreq, 200, "OK")
+        siprsp = reply_to_request(sipreq, 200, "OK", [], @cancel_totag)
         Process.send_after(self(), {:recv, siprsp}, 100)
-        siprsp2 = reply_to_request(sipreq, 487, nil)
+        siprsp2 = reply_to_request(state.req, 487, nil, [], @cancel_totag)
         Process.send_after(self(), {:recv, siprsp2}, 200)
       end
 
       state
     else
-      siprsp = reply_to_request(sipreq, 481, "No such transaction")
+      siprsp = reply_to_request(sipreq, 481, "No such transaction", [], @cancel_totag)
       Process.send_after(self(), {:recv, siprsp}, 100)
       state
     end

@@ -254,20 +254,84 @@ defmodule SIP.Test.B2bua.Session do
     end
   end
 
-  describe "the outbound leg on the wire" do
-    test "the forwarded INVITE reaches the peer and its answers come back tagged", %{ctx: ctx} do
+  describe "release_legs/1 — automatic teardown" do
+    test "a scenario that created no leg is left alone", %{ctx: ctx} do
+      assert B2bua.release_legs(ctx) == ctx
+    end
+
+    test "an attempt still ringing is CANCELled and its caller told 487", %{ctx: ctx} do
       ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), false)
       leg = B2bua.outbound_leg(ctx)
-      tp_pid = transport_pid(leg)
+      assert [{_tid, %Pending{}}] = B2bua.pending(ctx)
 
-      # The mockup received the INVITE (it keeps it as its current request) and
-      # can now answer it. Which code it starts with depends on where the shared
-      # mockup instance stands; what this asserts is that whatever comes back
-      # arrives WRAPPED in the leg tag — the property the scenario patterns on.
-      UDPMockup.simulate_successful_answer(tp_pid)
+      ctx = B2bua.release_legs(ctx)
 
+      # The caller is not left hanging on a call attempt nobody will take.
+      assert_receive {:replied, 487, "Request Terminated", _req, []}
+
+      # The attempt was cancelled rather than hung up: no BYE went out (the
+      # callee never answered, so there is no session to end).
+      refute_receive :BYE, 200
+      refute leg == nil
+
+      # Bookkeeping cleared, so a second pass has nothing left to do.
+      assert B2bua.outbound_leg(ctx) == nil
+      assert B2bua.pending(ctx) == []
+      assert B2bua.release_legs(ctx) == ctx
+    end
+
+    test "an established call is hung up with a BYE", %{ctx: ctx} do
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), false)
+      leg = B2bua.outbound_leg(ctx)
       dlg = leg.dialogpid
-      assert_receive {:outbound, {code, _rsp, _tid, ^dlg}} when is_integer(code), 2_000
+
+      # Let the callee actually answer: only a 2xx makes this a session (it is
+      # what teaches the dialog its remote tag and target). The scenario would
+      # relay that 200 and drop the correlation; do both here.
+      # The mockup reports the BYE it receives to its "test app": be that.
+      tp_pid = transport_pid(leg)
+      :ok = GenServer.call(tp_pid, :settestapp)
+
+      # The mockup rings for a while before answering (100 → 180 → 200 OK, the
+      # last one 4 s after the 180), hence the generous wait.
+      UDPMockup.simulate_successful_answer(tp_pid)
+      assert_receive {:outbound, {200, _rsp, _tid, ^dlg}}, 8_000
+      ctx = B2bua.drop_pending(ctx, leg.initial_trans)
+
+      ctx = B2bua.release_legs(ctx)
+
+      assert_receive :BYE, 2_000
+      # No orphan answer: nobody was waiting on a relayed request.
+      refute_receive {:replied, _, _, _, _}, 200
+      assert B2bua.outbound_leg(ctx) == nil
+    end
+
+    # The trap this guards: "the initial transaction is over" is NOT "the call
+    # is up". An INVITE answered 486 leaves a dialog with no remote target, and
+    # the BYE built for it goes out with an empty Request-URI.
+    test "a call attempt that was refused is not BYEd", %{ctx: ctx} do
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), false)
+      leg = B2bua.outbound_leg(ctx)
+
+      # A final response arrived and the scenario relayed it: correlation gone,
+      # but the dialog never became a session.
+      ctx = B2bua.drop_pending(ctx, leg.initial_trans)
+
+      ctx = B2bua.release_legs(ctx)
+
+      refute_receive :BYE, 500
+      assert B2bua.outbound_leg(ctx) == nil
+    end
+
+    test "a leg that already died is not a crash", %{ctx: ctx} do
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), false)
+      leg = B2bua.outbound_leg(ctx)
+
+      GenServer.stop(leg.dialogpid)
+      refute Process.alive?(leg.dialogpid)
+
+      ctx = B2bua.release_legs(ctx)
+      assert B2bua.outbound_leg(ctx) == nil
     end
   end
 end

@@ -708,3 +708,15 @@ message-layer suite with the sample messages of `test/SIP-*.txt`.
 6. **q-value storage** — confirm `save/4` keeps the Contact `q` parameter on
    the stored URI params (§3.2 reads it back for fork ordering); if the parse
    drops it, add it to `%Contact{}` explicitly.
+7. **`address_in_dialog/2` is asymmetric** (found implementing the P1 teardown).
+   Its inbound clause restores **both** ends from the dialog (`from: msg.to,
+   to: msg.from`); its outbound clause restores only the To and takes the From
+   from the request as given. So an in-dialog request originated with a
+   placeholder From — the shape `SIP.Session.CallInDialog` builds for a context
+   with no identity — goes out with an empty From, which serializes to nothing
+   and takes the whole message down (`SIPMsg.serialize_one_header/2` raises).
+   The B2BUA teardown works around it by keeping the leg's own identity
+   (`%Leg{local_uri:}`). The symmetric fix — outbound restores `from: msg.from`
+   — looks right and would make every in-dialog request robust, but it changes
+   shared dialog-layer behaviour, so it wants a deliberate pass with the
+   dialog/call suites rather than a drive-by.
