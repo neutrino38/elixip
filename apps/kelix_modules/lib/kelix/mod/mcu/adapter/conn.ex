@@ -257,11 +257,12 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
           # candidates. Session level, hence here rather than per media.
           ice_lite: state.local_ice != nil,
           # RFC 3264 §6: one answer m= per offered m=, in order. What we cannot
-          # answer is declined with port 0 rather than omitted — except the
-          # WebSocket text section, which is omitted (see ws_text_section?/1).
+          # answer is declined with port 0 rather than omitted — except `m=text`
+          # sections, which are OMITTED entirely when we do not serve them (see
+          # omit_from_answer?/2).
           medias:
             descs
-            |> Enum.reject(&ws_text_section?/1)
+            |> Enum.reject(&omit_from_answer?(state, &1))
             |> Enum.map(&answer_or_reject(state, negotiated, &1))
         })
 
@@ -1142,11 +1143,19 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # WebSocketLeg), so the browser got three answer sections against its two-section local
   # offer and libwebrtc rejected the whole answer (kMlineMismatchInAnswer, verified in
   # edge://webrtc-internals, 2026-08-06). Omitting the section is what deployed clients
-  # digest. Only the WS transport is concerned — a text section offered over RTP is
-  # real T.140 and keeps the standard echo (and, one day, a real answer: chantier TC).
-  # Detection keys on the parsed `transport: :ws`, which covers all four proto
-  # spellings (TCP/WS included — the one the deployed Elioz client emits; a local
-  # protocol list here had missed it).
+  # digest. Detection keys on the parsed `transport: :ws`, which covers all four
+  # proto spellings (TCP/WS included — the one the deployed Elioz client emits; a
+  # local protocol list here had missed it).
+  #
+  # The same omission applies to EVERY text section — RTP T.140 included — when
+  # the participant was admitted without text (`:text` not in its media set):
+  # never a port-0 echo (S5 plan §D7, decided 2026-08-08). Port 0 remains the
+  # answer for rejected audio/video sections, and for a text section we DO serve
+  # but could not negotiate (text admitted, no common codec).
+  defp omit_from_answer?(state, desc) do
+    ws_text_section?(desc) or (desc.type == :text and :text not in state.medias)
+  end
+
   defp ws_text_section?(desc), do: Map.get(desc, :transport, :rtp) == :ws
 
   # A declined section keeps its place in the answer with port 0 and the offered

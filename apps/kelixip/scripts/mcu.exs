@@ -111,7 +111,8 @@ defmodule Kelix.Mcu.Call do
       # total conversation: audio, video and T.140 text. This is what we *accept*,
       # not what we demand — only the medias the offer actually carries are answered,
       # so an audio-only phone is unaffected. A conference whose `medias` omits "text"
-      # declines the text section with port 0 the same way.
+      # gets the text section removed from the answer entirely (never port 0 — the
+      # deployed WebRTC client chokes on a port-0 text echo).
       media: :tc,
       # accept a secure leg when the offer asks for one (SDES from a SIP phone,
       # DTLS+ICE from a WebRTC gateway); `:no` would refuse it with a 488

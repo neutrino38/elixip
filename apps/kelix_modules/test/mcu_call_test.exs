@@ -922,10 +922,10 @@ defmodule Kelix.Mod.McuCallTest do
       assert_receive {:rpc, "SetTextCodec", [42, 7, 106]}, 2000
     end
 
-    test "a conference with text off declines the section with port 0", ctx do
+    test "a conference with text off removes the text section from the answer entirely", ctx do
       {:ok, conf} =
         Kelix.Mod.Mcu.create_conference(@domain,
-          name: "audio only",
+          name: "audio video only",
           medias: ["audio", "video"]
         )
 
@@ -933,9 +933,39 @@ defmodule Kelix.Mod.McuCallTest do
       assert_receive {:replied, 200, _reason, fields, _req}, 2000
 
       answer = fields[:body]
-      # RFC 3264 §6: the section keeps its place, with port 0 and the offered formats
-      assert answer =~ "m=text 0 RTP/AVP 98 97"
+      # S5 rule (mcu_text_over_wss_impl_plan.md §D7, 2026-08-08): a participant
+      # admitted without text gets NO m=text in the answer — not a port-0 echo,
+      # which the deployed WebRTC client rejects wholesale (kMlineMismatchInAnswer).
+      # A deliberate, text-scoped deviation from RFC 3264 §6.
+      refute answer =~ "m=text"
       assert answer =~ "m=audio #{@rec_port} RTP/AVP"
+      assert answer =~ "m=video #{@rec_port} RTP/AVP"
+    end
+
+    test "a text-only offer on a conference with text off is refused, not answered empty", ctx do
+      {:ok, conf} =
+        Kelix.Mod.Mcu.create_conference(@domain,
+          name: "audio video only bis",
+          medias: ["audio", "video"]
+        )
+
+      offer = """
+      v=0\r
+      o=- 1 1 IN IP4 192.168.1.50\r
+      s=-\r
+      c=IN IP4 192.168.1.50\r
+      t=0 0\r
+      m=text 40004 RTP/AVP 98 97\r
+      a=rtpmap:98 red/1000\r
+      a=rtpmap:97 t140/1000\r
+      a=fmtp:98 97/97/97\r
+      a=sendrecv\r
+      """
+
+      # omitting the only section would leave an answer with zero m= lines, which
+      # is not an answer: the offer is refused (488 via :no_common_codec)
+      {_pid, _dialog} = start_call(ctx.scenario, invite(conf.did, sdp: offer))
+      assert_receive {:replied, 488, _reason, _fields, _req}, 2000
     end
   end
 
