@@ -393,8 +393,16 @@ defmodule MediaServer.Mockup.Conn do
         # G9: one answer m= per offered m=, in order; sections we can't answer
         # (unsupported transport/type, disabled media, or no common codec) are
         # declined with a port-0 rejection echoing the offered transport + fmt.
+        #
+        # Except `transport: :ws` (text over a WebSocket): both real adapters
+        # OMIT that section rather than decline it — the deployed client does
+        # not digest a port-0 echo (S5 plan §D7) — and this stub cannot host a
+        # WebSocket anyway. Omitting keeps the mock's dialect converging with
+        # the adapters call-flow tests actually rehearse.
         {medias, accepted} =
-          Enum.map_reduce(descs, 0, fn desc, count ->
+          descs
+          |> Enum.reject(&(Map.get(&1, :transport, :rtp) == :ws))
+          |> Enum.map_reduce(0, fn desc, count ->
             case answer_or_reject(state, desc, port, ip_str, webrtc?) do
               {:answer, spec} -> {spec, count + 1}
               {:reject, spec} -> {spec, count}
@@ -410,9 +418,8 @@ defmodule MediaServer.Mockup.Conn do
   end
 
   defp answer_or_reject(state, desc, port, ip_str, webrtc?) do
-    # `transport: :ws` is real-time text over a WebSocket: it needs a WebSocket
-    # server, which this in-process stub is not. Declined with port 0 — the
-    # JSR-309 adapter is the one that can host it.
+    # the `transport: :rtp` guard is a belt: WS text sections were already
+    # omitted upstream (see set_remote_offer)
     if Map.get(desc, :transport, :rtp) == :rtp and
          Map.get(desc, :supported?, false) and desc.type in state.medias do
       case Sdp.negotiate(desc, codecs_for(state, desc.type), desc.type == :audio) do
