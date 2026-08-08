@@ -62,6 +62,16 @@ defmodule SIP.Session.CallUAC do
         end
       end
 
+      # The inbound offer request auto_store kept (INVITE / re-INVITE / UPDATE),
+      # or the request that spawned this UAS instance, or nil. What `reply_invite*`
+      # answers implicitly — readable when a clause with no event in hand needs it
+      # (an `after` timeout answering the caller, say).
+      defmacro last_uas_req() do
+        quote do
+          SIP.Session.CallUAS.stored_req(var!(sip_ctx))
+        end
+      end
+
       # Dispatch any SIP reply to the right per-method handler based on the
       # method carried in the response CSeq. INVITE/OPTIONS/REGISTER are
       # handled; other methods are ignored. See `SIP.Session.dispatch_reply/3`.
@@ -385,6 +395,13 @@ defmodule SIP.Session.CallUAS do
     |> SIP.Context.appdata_set(:last_uas_req_tid, trans_pid)
   end
 
+  # A tagged event belongs to another B2BUA leg (`{:outbound, {…}}`). It must NOT
+  # land in the inbound slot: the slot is what `reply_invite*` answers, and
+  # binding `dialogpid` to the outbound dialog would silently redirect every
+  # subsequent inbound reply onto the callee. The B2BUA macros carry their own
+  # leg bookkeeping (SIP.Session.B2bua), so nothing is lost here.
+  def auto_store(sip_ctx, {tag, inner}) when is_atom(tag) and is_tuple(inner), do: sip_ctx
+
   def auto_store(sip_ctx, _evt), do: sip_ctx
 
   @doc """
@@ -521,15 +538,23 @@ defmodule SIP.Session.CallUAS do
     SIP.Context.set(sip_ctx, :lasterr, reply_lasterr(rc))
   end
 
-  # Prefer the auto-stored offer request; fall back to the initial inbound
-  # request (stashed by the runner) for the atypical case of a reply issued
-  # before any on_events clause matched.
-  defp fetch_stored_req!(sip_ctx) do
+  @doc """
+  The stored inbound offer request, or nil. Prefers the auto-stored one; falls
+  back to the initial inbound request (stashed by the runner) for the atypical
+  case of a reply issued before any on_events clause matched. Backs the
+  `last_uas_req` macro.
+  """
+  @spec stored_req(%SIP.Context{}) :: map() | nil
+  def stored_req(sip_ctx = %SIP.Context{}) do
     case SIP.Context.appdata_get(sip_ctx, :last_uas_req) ||
            SIP.Context.appdata_get(sip_ctx, :inbound_request) do
       req when is_map(req) -> req
-      _ -> raise "reply_invite*: no stored INVITE/UPDATE to reply to"
+      _ -> nil
     end
+  end
+
+  defp fetch_stored_req!(sip_ctx) do
+    stored_req(sip_ctx) || raise "reply_invite*: no stored INVITE/UPDATE to reply to"
   end
 
   defp needs_sdp?(code), do: code == 183 or code in 200..299

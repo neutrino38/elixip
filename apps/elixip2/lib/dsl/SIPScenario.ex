@@ -65,6 +65,7 @@ defmodule SIP.Scenario do
     quote do
       use SIP.Session.CallUAC
       use SIP.Session.Media
+      use SIP.Session.B2bua
 
       import SIP.Scenario,
         only: [
@@ -164,8 +165,11 @@ defmodule SIP.Scenario do
         # trigger an "unused variable" warning.
         _ = var!(sip_ctx)
         # Clear the event type inferred by on_events, so a `goto` in this state
-        # that is not inside a on_events clause stays untyped.
+        # that is not inside a on_events clause stays untyped. Same for the
+        # B2BUA leg/transaction of the matched event: an `after` clause acts on
+        # the inbound leg, not on whatever the previous state matched.
         Process.delete(:scenario_event_type)
+        SIP.Session.B2bua.forget_event()
 
         try do
           unquote(body)
@@ -420,6 +424,11 @@ defmodule SIP.Scenario do
     new_body =
       quote do
         Process.put(:scenario_event_type, unquote(type))
+        # Which B2BUA leg this event came from and which transaction it carries,
+        # so the b2bua_* macros need no direction argument. Runtime, not
+        # compile-time: a catch-all clause ({tag, evt}) has no literal tag to
+        # read off the pattern.
+        SIP.Session.B2bua.note_event(unquote(evt))
         var!(sip_ctx) = SIP.Session.CallUAS.auto_store(var!(sip_ctx), unquote(evt))
         unquote(body)
       end
