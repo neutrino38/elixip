@@ -27,7 +27,7 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.2.0
+Version:        1.2.1
 Release:        1%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
@@ -204,6 +204,15 @@ fi
 %{kelixdir}/modules/Elixir.Kelix.Mod.Mcu*.beam
 
 %changelog
+* Sat Aug 08 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.2.1-1
+- Version bump to 1.2.1: the interoperability release. WebRTC calls proven
+  with MS Edge and Chrome, and with Linphone 6.2.0 in SDES as well as DTLS.
+- Codec negotiation fully delegated to the medooze media server; AV1 support,
+  H.264 packetization-mode tolerance, realtime text over WebSocket.
+- kelixip: scenario configurations are prechecked at boot and reload; a refused
+  reload leaves the running configuration untouched. systemctl reload supported.
+- New kelictl reload-all to reload every configured domain.
+
 * Sun Aug 02 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.2.0-1
 - Version bump to 1.2.0.
 - New subpackage kelixip-mod-mcu: the conference mixer (design P6).

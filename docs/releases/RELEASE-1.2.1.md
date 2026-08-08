@@ -92,6 +92,7 @@ No change.
 - **new: a collaboration channel between participants script.** A participant's script can
   collaborate other participants' scripts —i e.g. a raised hand, a floor-control
   token — addressed to everyone, to everyone but itself, or to one participant 
+- support for participant with text over WebSocket.
 - As codec negotiation is delegated to the media server (see *Framework changes*): a
   conference no longer holds codec lists
 - admit()  has new `medias` parameter to specify with which of audio / video / text
@@ -115,4 +116,4 @@ No change.
 
 ## Dependencies
 
-- [mediaserver 1.12.1](https://github.com/neutrino38/mediaserver/releases/tag/1.12.1) 
+- [mediaserver 1.12.2](https://github.com/neutrino38/mediaserver/releases/tag/1.12.2) 
