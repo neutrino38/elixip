@@ -2660,7 +2660,11 @@ upgraded before or with kelixip** on any node running conferences.
 
 ---
 
-### 16.6 S5 — text over WebSocket for a conference participant (not started)
+### 16.6 S5 — text over WebSocket for a conference participant (planned)
+
+**Implementation plan (2026-08-08): [mcu_text_over_wss_impl_plan.md](mcu_text_over_wss_impl_plan.md)** —
+both repos phased, plus the answer rule that an admit without text **omits**
+every `m=text` section entirely (never port 0).
 
 Lifts **L15**. The whole media plane already exists and is proven: `WSEndpoint`
 converts T.140/RED ⇄ WebSocket frames, the `/jsr309/<sessionId>/<token>` handler
