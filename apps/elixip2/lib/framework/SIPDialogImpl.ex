@@ -31,6 +31,10 @@ defmodule SIP.DialogImpl do
     ist_awaiting_ack: nil,
     # PID of the application
     app: nil,
+    # Event tag: when set (an atom), every message delivered to the app is
+    # wrapped as {tag, msg} — see SIP.Dialog.start_dialog/5 and send_to_app/2.
+    # nil (the default) delivers bare messages.
+    tag: nil,
     state: :initial,
     # If we should output debug logs for this dialog
     debuglog: true,
@@ -354,11 +358,25 @@ defmodule SIP.DialogImpl do
 
   # -------- GenServer callbacks --------------------
 
-  @impl true
-  @spec init({map(), :inbound | :outbound, pid(), integer(), boolean(), {any(), any(), any()}}) ::
-          {:ok, map()} | {:stop, atom() | {any(), any()}}
+  # Deliver a message to the bound application process, wrapped in the dialog's
+  # event tag when one was set at creation ({tag, msg} — how a B2BUA leg's
+  # events are told apart, design docs/design/b2bua_module.md §2). Untagged
+  # dialogs (the default) deliver the bare message: existing apps are untouched.
+  defp send_to_app(state, msg) do
+    if is_pid(state.app), do: send(state.app, wrap_tag(state.tag, msg))
+    :ok
+  end
 
-  def init({req, :inbound, pid, timeout, debug, dialog_id}) when is_req(req) do
+  defp wrap_tag(nil, msg), do: msg
+  defp wrap_tag(tag, msg) when is_atom(tag), do: {tag, msg}
+
+  @impl true
+  @spec init(
+          {map(), :inbound | :outbound, pid(), integer(), boolean(), {any(), any(), any()},
+           atom() | nil}
+        ) :: {:ok, map()} | {:stop, atom() | {any(), any()}}
+
+  def init({req, :inbound, pid, timeout, debug, dialog_id, tag}) when is_req(req) do
     {fromtag, callid, totag} = dialog_id
     # Generate totag if needed
     totag = if is_nil(totag), do: generate_from_or_to_tag(), else: totag
@@ -375,6 +393,7 @@ defmodule SIP.DialogImpl do
       msg: req,
       direction: :inbound,
       app: nil,
+      tag: tag,
       dialogtimeout: timeout,
       debuglog: debug,
       transactions: [pid],
@@ -403,7 +422,7 @@ defmodule SIP.DialogImpl do
         )
 
         # Send the message to the newly created app layer
-        send(app_id, {req.method, req, pid, self()})
+        send(app_id, wrap_tag(state.tag, {req.method, req, pid, self()}))
         {:ok, Map.put(state, :app, app_id)}
 
       # Session has not been created. Abort dialog and propagate the requested
@@ -424,13 +443,14 @@ defmodule SIP.DialogImpl do
   end
 
   # Dialog started by an outbound request
-  def init({req, :outbound, pid, timeout, debug, dialog_id}) when is_req(req) do
+  def init({req, :outbound, pid, timeout, debug, dialog_id, tag}) when is_req(req) do
     {fromtag, callid, _totag} = dialog_id
 
     state = %SIP.DialogImpl{
       msg: req,
       direction: :outbound,
       app: pid,
+      tag: tag,
       dialogtimeout: timeout,
       debuglog: debug,
       transactions: [],
@@ -446,7 +466,7 @@ defmodule SIP.DialogImpl do
       # In case of an outbound dialog, start a, UAC transaction
       case SIP.Transac.start_uac_transaction(req, timeout) do
         {:ok, transaction_pid, modmsg} ->
-          send(state.app, {:onnewdialog, :ok, transaction_pid})
+          send_to_app(state, {:onnewdialog, :ok, transaction_pid})
 
           %SIP.DialogImpl{state | transactions: [transaction_pid], msg: modmsg}
           |> arm_expiration_timer(modmsg)
@@ -502,9 +522,7 @@ defmodule SIP.DialogImpl do
         r -> r
       end
 
-    if is_pid(state.app) do
-      send(state.app, {:dialog_terminated, self(), reason})
-    end
+    send_to_app(state, {:dialog_terminated, self(), reason})
 
     :ok
   end
@@ -738,7 +756,7 @@ defmodule SIP.DialogImpl do
 
   defp send_req_to_app(state, msg, transact_pid) do
     # Forward request to app layer
-    send(state.app, {msg.method, msg, transact_pid, self()})
+    send_to_app(state, {msg.method, msg, transact_pid, self()})
 
     Logger.debug(
       dialogpid: self(),
@@ -767,7 +785,7 @@ defmodule SIP.DialogImpl do
   @impl true
   def handle_cast({:sipmsg, msg, _transact_pid}, state) when is_req(msg) and msg.method == :ACK do
     state = confirm_ist(state, msg)
-    if is_pid(state.app), do: send(state.app, {:ACK, msg, nil, self()})
+    send_to_app(state, {:ACK, msg, nil, self()})
     {:noreply, state}
   end
 
@@ -779,7 +797,7 @@ defmodule SIP.DialogImpl do
   # case where tearing down on {:shutdown, :cancelled} is equally acceptable.
   def handle_cast({:sipmsg, msg, transact_pid}, state)
       when is_req(msg) and msg.method == :CANCEL do
-    if is_pid(state.app), do: send(state.app, {:CANCEL, msg, transact_pid, self()})
+    send_to_app(state, {:CANCEL, msg, transact_pid, self()})
     {:stop, {:shutdown, :cancelled}, state}
   end
 
@@ -984,7 +1002,7 @@ defmodule SIP.DialogImpl do
           if KeepAlive.response?(state, rsp) do
             %SIP.DialogImpl{state | missedkeepalive: 0}
           else
-            send(state.app, {rsp.response, rsp, transact_pid, self()})
+            send_to_app(state, {rsp.response, rsp, transact_pid, self()})
             state
           end
 
@@ -1106,7 +1124,7 @@ defmodule SIP.DialogImpl do
 
     if ruri.tp_module == SIP.Transport.TCP and
          ruri.destip == closed_ip and ruri.destport == closed_port do
-      if is_pid(state.app), do: send(state.app, {:dialog_terminated, self(), :tcp_closed})
+      send_to_app(state, {:dialog_terminated, self(), :tcp_closed})
       {:stop, :normal, state}
     else
       {:noreply, state}
@@ -1118,7 +1136,7 @@ defmodule SIP.DialogImpl do
 
     if ruri.tp_module == SIP.Transport.TLS and
          ruri.destip == closed_ip and ruri.destport == closed_port do
-      if is_pid(state.app), do: send(state.app, {:dialog_terminated, self(), :tls_closed})
+      send_to_app(state, {:dialog_terminated, self(), :tls_closed})
       {:stop, :normal, state}
     else
       {:noreply, state}
@@ -1130,7 +1148,7 @@ defmodule SIP.DialogImpl do
 
     if ruri.tp_module == SIP.Transport.WSS and
          ruri.destip == closed_ip and ruri.destport == closed_port do
-      if is_pid(state.app), do: send(state.app, {:dialog_terminated, self(), :wss_closed})
+      send_to_app(state, {:dialog_terminated, self(), :wss_closed})
       {:stop, :normal, state}
     else
       {:noreply, state}

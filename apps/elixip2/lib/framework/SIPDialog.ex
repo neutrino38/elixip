@@ -68,16 +68,28 @@ defmodule SIP.Dialog do
 
   # ---------------------- Public API ----------------------
 
-  @doc "Start a dialog"
-  @spec start_dialog(map(), integer(), :inbound | :outbound, boolean()) ::
+  @doc """
+  Start a dialog.
+
+  Options:
+
+    * `:tag` — event tag of the dialog (an atom). When set, every message the
+      dialog delivers to its application process is wrapped as `{tag, msg}` —
+      requests, responses, `:onnewdialog` and `:dialog_terminated` alike. This
+      is how a B2BUA scenario tells its outbound leg's events apart from the
+      inbound ones (design docs/design/b2bua_module.md §2). Default `nil`:
+      bare messages, the historical behaviour.
+  """
+  @spec start_dialog(map(), integer(), :inbound | :outbound, boolean(), keyword()) ::
           {:error, any()} | {:ok, pid(), tuple()}
-  def start_dialog(req, timeout, direction, debug)
+  def start_dialog(req, timeout, direction, debug, opts \\ [])
       when is_integer(timeout) and is_atom(req.method) do
     # Obtain or create the dialog id { fromtag, callid, totag } that identify the SIP dialog according to RFC 3261
     # Using the recusion and pattern matching
     {req2, dialog_id} = get_or_create_dialog_id(req)
     name = {:via, Registry, {Registry.SIPDialog, dialog_id, :cast}}
-    dialog_params = {req2, direction, self(), timeout, debug, dialog_id}
+    tag = Keyword.get(opts, :tag)
+    dialog_params = {req2, direction, self(), timeout, debug, dialog_id, tag}
 
     case GenServer.start(SIP.DialogImpl, dialog_params, name: name) do
       {:ok, dlg_pid} ->
