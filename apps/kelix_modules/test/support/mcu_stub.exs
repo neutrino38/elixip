@@ -63,7 +63,20 @@ defmodule Kelix.Mcu.TestStub do
   """
   @spec transport(pid, map) :: (String.t(), [term] -> {:ok, [term]} | {:error, term})
   def transport(test_pid, overrides \\ %{}) do
-    returns = Map.merge(@default_returns, overrides)
+    # a lambda cannot live in a module attribute, hence the runtime merge:
+    # S5's WS text door echoes the token back inside the full URL, exactly like
+    # the real server (scheme decided server-side; override with a wss://
+    # variant to rehearse TLS)
+    defaults =
+      Map.put(
+        @default_returns,
+        "ConfigureParticipantMediaConnection",
+        fn [conf_id, _part_id, _media, _proto, token] ->
+          {:ok, ["ws://203.0.113.12:9090/mcu/#{conf_id}/#{token}"]}
+        end
+      )
+
+    returns = Map.merge(defaults, overrides)
 
     fn method, params ->
       send(test_pid, {:rpc, method, params})

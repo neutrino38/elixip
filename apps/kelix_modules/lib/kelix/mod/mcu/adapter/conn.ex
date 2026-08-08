@@ -48,6 +48,9 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   @role_main 0
   # MediaProtocol: RTP
   @proto_rtp 0
+  # MediaProtocol: WS — the only non-RTP transport this adapter drives, and only
+  # for text (S5, mcu_text_over_wss_impl_plan.md)
+  @proto_ws 2
   # telephone-event's Medooze codec constant (§3.6): a payload type the mixer never
   # encodes towards anyone, so it can never be a primary codec.
   @dtmf_code 100
@@ -259,10 +262,10 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
           # RFC 3264 §6: one answer m= per offered m=, in order. What we cannot
           # answer is declined with port 0 rather than omitted — except `m=text`
           # sections, which are OMITTED entirely when we do not serve them (see
-          # omit_from_answer?/2).
+          # omit_from_answer?/3).
           medias:
             descs
-            |> Enum.reject(&omit_from_answer?(state, &1))
+            |> Enum.reject(&omit_from_answer?(state, negotiated, &1))
             |> Enum.map(&answer_or_reject(state, negotiated, &1))
         })
 
@@ -487,15 +490,89 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # advertises), then the transport properties. Nothing is sent yet.
   defp open_receive_plane(state, conf, descs) do
     descs
-    |> Enum.filter(&answerable?(&1, state.medias))
+    |> Enum.filter(&(answerable?(&1, state.medias) or ws_answerable?(&1, state.medias)))
     |> Enum.reduce_while({:ok, state, %{}}, fn desc, {:ok, st, acc} ->
-      case open_receive(st, conf, desc) do
-        {:ok, st, neg} -> {:cont, {:ok, st, Map.put(acc, desc.type, neg)}}
-        # no codec in common on this media: declined (port 0), not a call failure
-        :skip -> {:cont, {:ok, st, acc}}
-        {:error, _} = err -> {:halt, err}
+      cond do
+        # the verdict map is keyed by media type: an offer carrying TWO text
+        # sections (an RTP one and a WS one, say) gets the first answered and
+        # the other declined/omitted, instead of one verdict silently
+        # overwriting the other
+        Map.has_key?(acc, desc.type) ->
+          {:cont, {:ok, st, acc}}
+
+        true ->
+          case open_receive(st, conf, desc) do
+            {:ok, st, neg} -> {:cont, {:ok, st, Map.put(acc, desc.type, neg)}}
+            # no codec in common on this media: declined (port 0), not a call failure
+            :skip -> {:cont, {:ok, st, acc}}
+            {:error, _} = err -> {:halt, err}
+          end
       end
     end)
+  end
+
+  # ── the WebSocket text leg (S5) ──────────────────────────────────────────────
+  #
+  # The conference-API mirror of the JSR-309 adapter's WS path
+  # (MediaServerMendoozeConn.open_offered_receive/2): ONE RPC — the media server
+  # switches the participant's text plane to a WebSocket bridge at the text-mixer
+  # seam and returns the full URL, scheme included (ws:// or wss://, its call:
+  # TLS lives on the same port). Nothing else ever runs on this leg: no
+  # StartReceiving/StartSending, no SetTextCodec, no crypto, no watchdog — and no
+  # RED either, redundancy being a per-RTP-leg affair the mixer handles.
+  defp open_receive(state, _conf, %{transport: :ws} = desc) do
+    if Map.get(desc, :setup) == :passive do
+      # RFC 4145: a peer that declares itself passive will never connect to us,
+      # and we (the media server) never connect out. Nobody would ever dial the
+      # WebSocket: the section is omitted, the call stands.
+      Logger.warning(
+        module: __MODULE__,
+        message: "conference #{state.conf_uid}: peer offered a=setup:passive on its " <>
+          "WS text section; omitting it (nobody would connect)"
+      )
+
+      :skip
+    else
+      token = ws_token()
+
+      case rpc(state, "ConfigureParticipantMediaConnection", [
+             state.conf_id,
+             state.part_id,
+             media_int(desc.type),
+             @proto_ws,
+             token
+           ]) do
+        {:ok, [url | _]} ->
+          {attribute, value} = url |> to_string() |> Sdp.ws_url_attribute()
+
+          {:ok, state,
+           %{
+             transport: :ws,
+             ws_url: value,
+             ws_attribute: attribute,
+             # the m= line port is the WS server's (a nonzero port is all the
+             # deployed client checks); `remote: nil` keeps media_summary honest
+             rec_port: ws_url_port(to_string(url)),
+             remote: nil,
+             rtp_map: %{},
+             send_map: %{},
+             codecs: ["T140"],
+             dtmf: false
+           }}
+
+        {:error, reason} ->
+          # the media server cannot host the WebSocket (older binary, no
+          # announced address…): the text is lost, not the call — the section
+          # is omitted from the answer, audio/video stand (plan §D7)
+          Logger.warning(
+            module: __MODULE__,
+            message: "conference #{state.conf_uid}: ConfigureParticipantMediaConnection " <>
+              "failed (#{inspect(reason)}); the WS text section is omitted, the call stands"
+          )
+
+          :skip
+      end
+    end
   end
 
   defp open_receive(state, conf, desc) do
@@ -908,6 +985,10 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   defp start_sending_all(state) do
     state.medias
     |> Enum.filter(&Map.has_key?(state.negotiated, &1))
+    # a WS text leg has no send plane of ours: the media server owns the
+    # WebSocket, and the server refuses StartSending(TEXT) after the switch
+    # anyway (S5). SetTextCodec is skipped with it — no payload type exists.
+    |> Enum.reject(&(Map.fetch!(state.negotiated, &1) |> Map.get(:transport) == :ws))
     |> Enum.reduce_while({:ok, state}, fn media, {:ok, st} ->
       case start_sending(st, media, Map.fetch!(st.negotiated, media)) do
         {:ok, st} -> {:cont, {:ok, st}}
@@ -1129,9 +1210,33 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # ── answer building ──────────────────────────────────────────────────────────
 
   defp answer_or_reject(state, negotiated, desc) do
-    case Map.get(negotiated, desc.type) do
-      nil -> reject_spec(desc)
-      neg -> answer_spec(state, desc, neg)
+    case {Map.get(desc, :transport, :rtp), Map.get(negotiated, desc.type)} do
+      # only reached when the WS leg WAS configured (omit_from_answer?/3
+      # removed it otherwise): answer with the URL, in the gateway's historical
+      # form — proto mirrored, literal `t140`, the scheme in the attribute NAME
+      # and a protocol-relative value, no rtpmap/fmtp/crypto (signalling only,
+      # the client strips the section before setRemoteDescription)
+      {:ws, %{transport: :ws} = neg} ->
+        %{
+          ws_text: neg.ws_url,
+          ws_attribute: neg.ws_attribute,
+          type: desc.type,
+          port: neg.rec_port,
+          protocol: desc.protocol,
+          setup: :passive,
+          direction: Sdp.reverse_direction(desc.direction),
+          mid: Map.get(desc, :mid)
+        }
+
+      # a second text section when the first (WS) took the verdict: port 0
+      {:rtp, %{transport: :ws}} ->
+        reject_spec(desc)
+
+      {_, nil} ->
+        reject_spec(desc)
+
+      {_, neg} ->
+        answer_spec(state, desc, neg)
     end
   end
 
@@ -1147,13 +1252,26 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # proto spellings (TCP/WS included — the one the deployed Elioz client emits; a
   # local protocol list here had missed it).
   #
-  # The same omission applies to EVERY text section — RTP T.140 included — when
-  # the participant was admitted without text (`:text` not in its media set):
-  # never a port-0 echo (S5 plan §D7, decided 2026-08-08). Port 0 remains the
-  # answer for rejected audio/video sections, and for a text section we DO serve
-  # but could not negotiate (text admitted, no common codec).
-  defp omit_from_answer?(state, desc) do
-    ws_text_section?(desc) or (desc.type == :text and :text not in state.medias)
+  # Three omission cases, one behaviour (S5 plan §D7, decided 2026-08-08):
+  #   1. the participant was admitted WITHOUT text (`:text` not in its media
+  #      set): every text section goes — RTP T.140 included, never a port-0 echo;
+  #   2. a WS text section whose configuration failed (media server that cannot
+  #      host it, no announced address…): the text is lost, not the call;
+  #   3. a WS text section whose peer declared `a=setup:passive` (nobody would
+  #      ever connect) — it never reached the verdict map, same test as 2.
+  # Port 0 remains the answer for rejected audio/video sections, and for a text
+  # section we DO serve but could not negotiate (text admitted, no common codec).
+  defp omit_from_answer?(state, negotiated, desc) do
+    cond do
+      desc.type == :text and :text not in state.medias ->
+        true
+
+      ws_text_section?(desc) ->
+        not match?(%{transport: :ws}, Map.get(negotiated, desc.type))
+
+      true ->
+        false
+    end
   end
 
   defp ws_text_section?(desc), do: Map.get(desc, :transport, :rtp) == :ws
@@ -1479,13 +1597,43 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     if negotiated == %{}, do: {:error, :no_common_codec}, else: :ok
   end
 
+  # The RTP gate. `transport: :ws` sections take their own path (S5): they are
+  # negotiated by `ws_answerable?/2` + the WS clause of `open_receive/3`, not
+  # by the codec machinery below.
   defp answerable?(desc, medias) do
-    # `transport: :ws` is real-time text over a WebSocket, which only the
-    # JSR-309 API can host (`ConfigureMediaConnection` has no conference-API
-    # equivalent): on this adapter such a section is omitted from the answer
-    # (`ws_text_section?/1`), never negotiated.
     Map.get(desc, :transport, :rtp) == :rtp and
       Map.get(desc, :supported?, false) and desc.type in medias
+  end
+
+  # A text-over-WebSocket section we can serve: text admitted, and the media
+  # server will say for itself whether it can host the WebSocket (a failure
+  # omits the section, never the call).
+  defp ws_answerable?(desc, medias) do
+    Map.get(desc, :transport, :rtp) == :ws and
+      Map.get(desc, :supported?, false) and desc.type in medias
+  end
+
+  # One token per (re)configuration, UUID-shaped, hex from a CSPRNG — same
+  # scheme as the JSR-309 adapter. It travels in the SDP and gates the
+  # WebSocket, so it must not be guessable.
+  defp ws_token do
+    <<a::binary-size(4), b::binary-size(2), c::binary-size(2), d::binary-size(2),
+      e::binary-size(6)>> = :crypto.strong_rand_bytes(16)
+
+    [a, b, c, d, e]
+    |> Enum.map(&Base.encode16(&1, case: :lower))
+    |> Enum.join("-")
+  end
+
+  # The port of the WS server, for the answer's m= line — a nonzero port is all
+  # the deployed client checks (its liveness lock). The URL always carries one
+  # in practice; the scheme default is the belt.
+  defp ws_url_port(url) do
+    case URI.parse(url) do
+      %URI{port: port} when is_integer(port) and port > 0 -> port
+      %URI{scheme: "wss"} -> 443
+      _ -> 80
+    end
   end
 
   # ── teardown ─────────────────────────────────────────────────────────────────

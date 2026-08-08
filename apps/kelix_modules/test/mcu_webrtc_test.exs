@@ -171,6 +171,24 @@ defmodule Kelix.Mod.McuWebrtcTest do
         _ -> &verdict/1
       end
 
+    # S5: the WS text door, in its two failure shades. The default (stub) answers
+    # a ws:// URL echoing the token.
+    ws_override =
+      case context[:ws] do
+        :wss ->
+          %{
+            "ConfigureParticipantMediaConnection" => fn [c, _p, _m, _proto, t] ->
+              {:ok, ["wss://203.0.113.12:9090/mcu/#{c}/#{t}"]}
+            end
+          }
+
+        :fail ->
+          %{"ConfigureParticipantMediaConnection" => {:error, :rpc_error}}
+
+        _ ->
+          %{}
+      end
+
     {:ok, config} = Config.parse(%{"did_range" => "8000-8009"})
     start_supervised!({Mcu, config: config, module_name: "mcu", mediaservers: @mediaservers})
 
@@ -178,14 +196,26 @@ defmodule Kelix.Mod.McuWebrtcTest do
       {Client,
        name: "mcu1",
        base_url: "http://127.0.0.1:18080",
-       transport: TestStub.transport(self(), %{"StartReceiving" => verdict}),
+       transport: TestStub.transport(self(), Map.merge(%{"StartReceiving" => verdict}, ws_override)),
        register: {Mcu, "mcu1"},
        reconnect_ms: 0},
       id: :client_mcu1
     )
 
     wait_for_client()
-    {:ok, %{did: did}} = Mcu.handle_control("conference.create", %{"domain" => @domain})
+
+    # The file-wide conference deliberately has NO text: the browser fixtures all
+    # carry the Elioz-injected `m=text … TCP/WSS` section, and these tests are
+    # about audio/video rules — a text-less conference keeps their section maths
+    # stable AND permanently rehearses the S5 §D7 rule (an admit without text
+    # omits every m=text from the answer). The S5 describe below creates its own
+    # conference, with text.
+    {:ok, %{did: did}} =
+      Mcu.handle_control("conference.create", %{
+        "domain" => @domain,
+        "medias" => ["audio", "video"]
+      })
+
     _setup_rpcs = TestStub.rpc_order()
 
     %{did: did}
@@ -273,15 +303,17 @@ defmodule Kelix.Mod.McuWebrtcTest do
       assert "a=mid:2" in data
     end
 
-    test "the WebSocket text section is omitted, not declined", ctx do
+    test "on a text-less conference the WebSocket text section is omitted, not declined", ctx do
       answer = answer_for(ctx.did, @chrome_offer <> @datachannel_section)
 
-      # Deliberate RFC 3264 §6 deviation (see ws_text_section?/1): the Elioz client
-      # injects `m=text … TCP/WSS` into the wire SDP after setLocalDescription and
-      # fails to strip our port-0 echo on the way back, so libwebrtc counted three
-      # answer sections against its two-section local offer and rejected the whole
-      # answer. The data-channel section, which IS in the browser's real offer,
-      # keeps the standard port-0 echo — omitting THAT would break the same check.
+      # Deliberate RFC 3264 §6 deviation (S5 plan §D7): the Elioz client injects
+      # `m=text … TCP/WSS` into the wire SDP after setLocalDescription and fails
+      # to strip our port-0 echo on the way back, so libwebrtc counted three
+      # answer sections against its two-section local offer and rejected the
+      # whole answer. This conference has no text, so the section vanishes
+      # entirely. The data-channel section, which IS in the browser's real
+      # offer, keeps the standard port-0 echo — omitting THAT would break the
+      # same check.
       refute answer =~ "m=text"
       assert [_audio, _video, data] = sections(answer)
       assert hd(data) == "m=application 0 UDP/DTLS/SCTP webrtc-datachannel"
@@ -437,7 +469,7 @@ defmodule Kelix.Mod.McuWebrtcTest do
       assert hd(audio) =~ "m=audio #{@audio_port} "
       # the offered format list, echoed verbatim in its own order (RFC 3264 §6)
       assert hd(video) == "m=video 0 UDP/TLS/RTP/SAVPF 103 107 109 115 39 117 119"
-      # the WS text section is omitted, not declined (see ws_text_section?/1)
+      # the WS text section is omitted, not declined (text-less conference, §D7)
       refute answer =~ "m=text"
       assert log =~ "dropped pt 119 from the verdict"
 
@@ -616,6 +648,99 @@ defmodule Kelix.Mod.McuWebrtcTest do
       # no feedback on audio, whatever the offer asked for there — there is no audio
       # feedback this mixer acts on
       refute Enum.any?(audio, &String.starts_with?(&1, "a=rtcp-fb"))
+    end
+  end
+
+  describe "text over WebSocket for a conference participant (S5)" do
+    # Mirrors the four JSR-309 adapter tests (mendooze_conn_test.exs, "Text over
+    # WebSocket"), transposed to the conference API: ONE RPC returns the full
+    # URL, and nothing else ever runs on that leg.
+    setup do
+      # a conference of its own, WITH text — the file-wide one deliberately
+      # has none (see the top-level setup)
+      {:ok, %{did: did}} =
+        Mcu.handle_control("conference.create", %{
+          "domain" => @domain,
+          "name" => "with text",
+          "medias" => ["audio", "video", "text"]
+        })
+
+      _setup_rpcs = TestStub.rpc_order()
+      %{ws_did: did}
+    end
+
+    test "the offered WS text section is configured and answered with its URL", ctx do
+      answer = answer_for(ctx.ws_did, @chrome_offer)
+
+      [_audio, _video, text] = sections(answer)
+
+      # proto mirrored from the offer, the literal `t140`, and the WS server's
+      # port on the m= line (a nonzero port is the deployed client's liveness lock)
+      assert hd(text) == "m=text 9090 TCP/WSS t140"
+      assert "a=setup:passive" in text
+      assert "a=connection:new" in text
+
+      # the URL in the gateway's historical form: the scheme carried by the
+      # attribute NAME, the value protocol-relative — the line only reads as a
+      # URL because SDP's `:` separator falls before the `//`
+      assert [url_line] = Enum.filter(text, &String.starts_with?(&1, "a=ws:"))
+      assert url_line =~ ~r"^a=ws://203\.0\.113\.12:9090/mcu/42/[0-9a-f-]+$"
+
+      # signalling only: no payload types, no redundancy, no crypto on this leg
+      refute Enum.any?(text, &(&1 =~ "rtpmap" or &1 =~ "fmtp" or &1 =~ "crypto"))
+
+      # ONE rpc drove it, carrying the very token the URL publishes — and text
+      # never went near the RTP machinery (no StartReceiving, media 2)
+      calls = TestStub.rpc_calls()
+
+      assert {_, [42, 7, 2, 2, token]} =
+               Enum.find(calls, &match?({"ConfigureParticipantMediaConnection", _}, &1))
+
+      assert url_line =~ token
+      refute Enum.any?(calls, &match?({"StartReceiving", [_, _, 2 | _]}, &1))
+    end
+
+    @tag ws: :wss
+    test "a TLS media server yields a=wss — the scheme is the server's, never guessed", ctx do
+      answer = answer_for(ctx.ws_did, @chrome_offer)
+
+      assert answer =~ "a=wss://203.0.113.12:9090/mcu/42/"
+      refute answer =~ "a=ws://"
+    end
+
+    test "a peer declaring itself passive gets no text section: nobody would connect", ctx do
+      # RFC 4145: both sides passive means the WebSocket would never be dialed
+      offer = String.replace(@chrome_offer, "a=setup:active", "a=setup:passive")
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          send(self(), {:answer, answer_for(ctx.ws_did, offer)})
+        end)
+
+      assert_received {:answer, answer}
+      refute answer =~ "m=text"
+      assert [_audio, _video] = sections(answer)
+      assert log =~ "setup:passive"
+      # the media server was never even asked
+      refute Enum.any?(
+               TestStub.rpc_calls(),
+               &match?({"ConfigureParticipantMediaConnection", _}, &1)
+             )
+    end
+
+    @tag ws: :fail
+    test "a media server that cannot host the WebSocket loses the text, not the call", ctx do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          send(self(), {:answer, answer_for(ctx.ws_did, @chrome_offer)})
+        end)
+
+      assert_received {:answer, answer}
+      # the section is omitted — never a port-0 echo — and the call stands
+      refute answer =~ "m=text"
+      assert [audio, _video] = sections(answer)
+      assert hd(audio) =~ "m=audio #{@audio_port} "
+      assert log =~ "the WS text section is omitted, the call stands"
     end
   end
 end
