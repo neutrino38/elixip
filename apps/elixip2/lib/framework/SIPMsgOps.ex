@@ -469,6 +469,169 @@ defmodule SIP.Msg.Ops do
     sipmsg
   end
 
+  # ── B2BUA forwarding (docs/design/b2bua_module.md §1, §4, §5) ─────────────────
+  #
+  # THE one place that answers "what part of a SIP message crosses a B2BUA leg
+  # boundary". The session layer (SIP.Session.B2bua) decides *whether* and *where*
+  # a message is relayed; these two functions decide *what survives* the crossing.
+
+  # Fields that never cross a leg boundary: hop-scoped routing (Via, Route,
+  # Record-Route, Path), the receiving leg's target (Contact), the credentials
+  # presented to *us* (they answered our challenge, for our realm — the outbound
+  # leg authenticates itself when challenged), and the receiving side's
+  # transaction id. The dialog identity (Call-ID, tags) is cleared separately in
+  # prepare_forwarded_request/2 rather than dropped: reusing the inbound
+  # Call-ID/from-tag on the outbound leg would collide with the inbound dialog in
+  # Registry.SIPDialog.
+  @b2bua_dropped_fields [
+    :via,
+    :route,
+    :recordroute,
+    "Path",
+    :contact,
+    :authorization,
+    :proxyauthorization,
+    :transid
+  ]
+
+  # Response headers copied verbatim when a reply is relayed leg-to-leg.
+  @b2bua_reply_passthrough ["Reason", "Warning", "Retry-After"]
+
+  @doc """
+  Prepare a request received on one B2BUA leg to be re-sent on another leg.
+
+  Strips everything hop- or dialog-scoped (see `@b2bua_dropped_fields`), clears
+  the dialog identity — `Call-ID` and the `From`/`To` tags are left for the
+  dialog layer to mint afresh — resets the R-URI routing fields (the stamped
+  `destip`/`tp_pid` point back at the leg the request came in on), replaces the
+  User-Agent and decrements `Max-Forwards`.
+
+  The body and every other header (identity `From`/`To`, `P-Asserted-Identity`,
+  `Privacy`, custom `X-*`…) cross unchanged. Callers layer their own policy on
+  top; they do not re-read the message.
+
+  Returns `{:ok, req}`, or `{:error, :too_many_hops}` when `Max-Forwards` is
+  exhausted (RFC 3261 §16.6 — answer 483).
+
+  Options: `:useragent` overrides the User-Agent stamped on the forwarded
+  request (defaults to the `:elixip2 :useragent` application env).
+  """
+  @spec prepare_forwarded_request(map(), keyword()) ::
+          {:ok, map()} | {:error, :too_many_hops}
+  def prepare_forwarded_request(req, opts \\ []) when is_req(req) do
+    case forwarded_max_forwards(req) do
+      {:error, _} = err ->
+        err
+
+      {:ok, max_forwards} ->
+        useragent =
+          Keyword.get(
+            opts,
+            :useragent,
+            Application.get_env(:elixip2, :useragent, "Elixipp/0.1")
+          )
+
+        req2 =
+          req
+          |> Map.drop(@b2bua_dropped_fields)
+          |> Map.put("Max-Forwards", max_forwards)
+          |> Map.put(:callid, nil)
+          |> strip_tag(:from)
+          |> strip_tag(:to)
+          |> Map.put(:useragent, useragent)
+          |> Map.update(:ruri, nil, &reset_uri_routing/1)
+
+        {:ok, req2}
+    end
+  end
+
+  @doc """
+  What a response relayed leg-to-leg carries over: the body (normalized to the
+  `[%{contenttype, data}]` part shape so its Content-Type survives
+  `update_sip_msg/2`) and the `#{inspect(@b2bua_reply_passthrough)}` headers.
+  Returned as an `upd_fields` keyword list for `SIP.Dialog.reply/5`.
+
+  The Contact is deliberately NOT copied: the relayed response must advertise
+  *our* contact on the answering leg, which the reply path adds (same rule as
+  `reply_invite_with_sdp`).
+  """
+  @spec forwarded_reply_fields(map()) :: keyword()
+  def forwarded_reply_fields(resp) when is_resp(resp) do
+    body_fields =
+      case normalize_forwarded_body(Map.get(resp, :body), Map.get(resp, :contenttype)) do
+        nil -> []
+        parts -> [body: parts]
+      end
+
+    passthrough = for h <- @b2bua_reply_passthrough, v = Map.get(resp, h), do: {h, v}
+    body_fields ++ passthrough
+  end
+
+  # Current Max-Forwards, tolerant of the shapes seen in traffic: parsed integer,
+  # textual value, absent (RFC 3261 §20.22 default 70), or garbage (treated as
+  # the default rather than taking the whole relay down).
+  defp forwarded_max_forwards(req) do
+    value =
+      case Map.get(req, "Max-Forwards", 70) do
+        v when is_integer(v) ->
+          v
+
+        v when is_binary(v) ->
+          case Integer.parse(v) do
+            {n, _} -> n
+            :error -> 70
+          end
+
+        _ ->
+          70
+      end
+
+    if value <= 0, do: {:error, :too_many_hops}, else: {:ok, value - 1}
+  end
+
+  # Remove the `tag` parameter from a From/To header (kept as a %SIP.Uri{} or a
+  # binary depending on the path the message took). A missing or unparsable
+  # header is left untouched.
+  defp strip_tag(req, field) do
+    case Map.get(req, field) do
+      %SIP.Uri{} = uri ->
+        Map.put(req, field, %SIP.Uri{uri | params: Map.delete(uri.params, "tag")})
+
+      bin when is_binary(bin) ->
+        case SIP.Uri.parse(bin) do
+          {:ok, uri} ->
+            Map.put(req, field, %SIP.Uri{uri | params: Map.delete(uri.params, "tag")})
+
+          _ ->
+            req
+        end
+
+      _ ->
+        req
+    end
+  end
+
+  # Clear the routing side of a URI (destination and transport handles) while
+  # keeping its textual identity — the forwarded request must not short-circuit
+  # back over the connection it arrived on.
+  defp reset_uri_routing(%SIP.Uri{} = uri) do
+    %SIP.Uri{uri | destip: nil, destport: 0, destproto: nil, tp_module: nil, tp_pid: nil}
+  end
+
+  defp reset_uri_routing(other), do: other
+
+  # nil / empty body -> nothing to carry; a bare binary is wrapped with its
+  # Content-Type (defaulting to SDP, the overwhelmingly common case); the parser
+  # part shapes pass through as-is.
+  defp normalize_forwarded_body(nil, _ct), do: nil
+  defp normalize_forwarded_body("", _ct), do: nil
+  defp normalize_forwarded_body([], _ct), do: nil
+
+  defp normalize_forwarded_body(bin, ct) when is_binary(bin),
+    do: [%{contenttype: ct || "application/sdp", data: bin}]
+
+  defp normalize_forwarded_body(parts, _ct) when is_list(parts), do: parts
+
   def add_transaction_id(msg) do
 		cond do
 			Map.has_key?(msg, :via) == false ->
