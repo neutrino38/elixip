@@ -88,6 +88,13 @@ defmodule MediaServer.SdpTools do
   defdelegate conformant_pts(accepted, desc, rtp_map), to: Sdp
 
   @doc """
+  The `{attribute_name, value}` pair publishing a WebSocket text URL in an
+  answer — scheme in the attribute name (`ws`/`wss`), protocol-relative value.
+  See `MediaServer.Mendooze.Sdp.ws_url_attribute/1`.
+  """
+  defdelegate ws_url_attribute(url), to: Sdp
+
+  @doc """
   The lowest AV1 `seq_level_idx` covering a picture size and frame rate.
 
   What the announced `level-idx` must be, derived from what we will really

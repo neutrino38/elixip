@@ -1142,11 +1142,12 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # WebSocketLeg), so the browser got three answer sections against its two-section local
   # offer and libwebrtc rejected the whole answer (kMlineMismatchInAnswer, verified in
   # edge://webrtc-internals, 2026-08-06). Omitting the section is what deployed clients
-  # digest. Only these WS transports are concerned — a text section offered over RTP is
+  # digest. Only the WS transport is concerned — a text section offered over RTP is
   # real T.140 and keeps the standard echo (and, one day, a real answer: chantier TC).
-  @ws_text_protocols ~w(TCP/WSS TLS/WSS TLS/WS)
-  defp ws_text_section?(desc),
-    do: desc.type == :text and Map.get(desc, :protocol) in @ws_text_protocols
+  # Detection keys on the parsed `transport: :ws`, which covers all four proto
+  # spellings (TCP/WS included — the one the deployed Elioz client emits; a local
+  # protocol list here had missed it).
+  defp ws_text_section?(desc), do: Map.get(desc, :transport, :rtp) == :ws
 
   # A declined section keeps its place in the answer with port 0 and the offered
   # format list echoed verbatim (RFC 3264 §6): the m= line count must match. Its
