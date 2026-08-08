@@ -80,11 +80,20 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # capability nothing implements — the same class of defect as the unprefixed
   # `h264.profile-level-id` of rule 9.
   #
-  # `nack pli` is deliberately absent: it has no distinct switch, and a keyframe request
-  # already has a path through `ccm fir` (the FPU flow of §6.4). `goog-remb` likewise —
-  # `tmmbr` is the `ccm` one, and announcing congestion feedback the mixer never sends
-  # invites the peer to wait for it.
-  @supported_rtcp_fb %{"nack" => "useNACK", "ccm fir" => "useRtcpFIR", "ccm tmmbr" => "tmmbr"}
+  # `nack pli` shares the FIR switch: the server treats an incoming PLI exactly like
+  # a FIR (both land in onFPURequested, rtpsession.cpp), so there is nothing more to
+  # enable — but a peer that negotiated `nack pli` may send PLI *instead of* FIR
+  # (Linphone does), so it must be confirmed in the answer, not dropped (the FPU flow
+  # of §6.4 covers both). NOT `useNACK`: PLI is a keyframe request, not a
+  # retransmission request. `goog-remb` stays absent — `tmmbr` is the `ccm` one, and
+  # announcing congestion feedback the mixer never sends invites the peer to wait
+  # for it.
+  @supported_rtcp_fb %{
+    "nack" => "useNACK",
+    "nack pli" => "useRtcpFIR",
+    "ccm fir" => "useRtcpFIR",
+    "ccm tmmbr" => "tmmbr"
+  }
 
   @call_timeout 30_000
 
@@ -1280,11 +1289,20 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   end
 
   # What the answer advertises: the INTERSECTION of what the offer asked for with what
-  # we can do, and only under a feedback profile — `a=rtcp-fb` is defined for AVPF
-  # (RFC 4585 §4), so emitting it under plain AVP is not merely useless but wrong.
-  # A caller that asks for nothing gets nothing back.
+  # we can do — deliberately NOT gated on a feedback profile. RFC 4585 §4 defines
+  # `a=rtcp-fb` for AVPF, but real endpoints keep a plain RTP/AVP or RTP/SAVP profile
+  # while listing `a=rtcp-fb` lines — Linphone 6.2.0 is the motivating one: its SRTP
+  # offer (the mcu_secure_test fixture) says RTP/SAVP yet asks for `ccm tmmbr` and
+  # `ccm fir` — and they drive their NACK/FIR/TMMBR off the answer's attributes, not
+  # its profile string; refusing to confirm them cost those calls their loss
+  # recovery. This is an assumed deviation from the RFC (same policy as
+  # the H.264 packetization-mode default of §6.3). The profile we ANSWER is
+  # untouched — RFC 3264 mirroring and the RFC 5939 capneg upgrade
+  # (accepted_capneg/1) decide it as before; only the attribute emission is
+  # decoupled from it, and the server-side switches (rtcp_fb_props/1) follow the
+  # same set. A caller that asks for nothing gets nothing back.
   defp answered_rtcp_fb(desc) do
-    if desc.type == :video and String.ends_with?(answered_protocol(desc), "F"),
+    if desc.type == :video,
       do: requested_rtcp_fb(desc),
       else: false
   end

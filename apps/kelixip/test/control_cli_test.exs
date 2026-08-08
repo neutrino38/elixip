@@ -196,6 +196,11 @@ defmodule Kelix.Control.CLITest do
       assert out =~ "2. (default)      -> catchall.exs"
     end
 
+    test "an unloaded script says so rather than showing a blank module" do
+      {0, out} = run(["domain", "show", "cli.example.com"])
+      assert out =~ "user2pstn.exs  [not loaded]"
+    end
+
     test "domain show accepts an alias" do
       {0, out} = run(["domain", "show", "cli.example.fr"])
       assert out =~ "domain:        cli.example.com"
@@ -208,6 +213,73 @@ defmodule Kelix.Control.CLITest do
     test "a mistyped domain sub-command gets the domain usage, not `unknown module`" do
       {2, out} = run(["domain", "shwo", "x"])
       assert out =~ "usage: kelictl domain list | domain show <domain> | domain reload-all"
+    end
+  end
+
+  # The script name is what the operator configured; the module is what the BEAM
+  # runs, and only the script's own `defmodule` relates the two. `show` prints both,
+  # plus whether the module still matches the file.
+  describe "domain show — the module behind each script" do
+    setup do
+      mod = "KelixTest.CLIShow#{System.unique_integer([:positive])}"
+      script = Path.join(System.tmp_dir!(), "cli_show_#{System.unique_integer([:positive])}.exs")
+
+      File.write!(script, """
+      defmodule #{mod} do
+        use SIP.Scenario
+        uas :invite
+        state initial_state do
+          scenario_success("ok")
+        end
+        on_shutdown do
+          scenario_aborted("shutdown")
+        end
+      end
+      """)
+
+      toml = Path.join(System.tmp_dir!(), "cli_show_#{System.unique_integer([:positive])}.toml")
+
+      File.write!(toml, """
+      [[domain]]
+      name = "cli.show.example.com"
+
+      [[domain.call]]
+      pattern = "1XXX"
+      script = "#{script}"
+      """)
+
+      assert :ok = Kelix.Domains.reload(toml)
+      assert {:ok, _} = Kelix.ScriptRegistry.current(script)
+
+      on_exit(fn ->
+        empty = toml <> ".empty"
+        File.write!(empty, "")
+        Kelix.Domains.reload(empty)
+        Enum.each([toml, empty, script], &File.rm/1)
+      end)
+
+      %{mod: mod, script: script}
+    end
+
+    test "a loaded script shows its module and version, with no staleness marker", %{mod: mod} do
+      {0, out} = run(["domain", "show", "cli.show.example.com"])
+      # the `.V1` suffix IS the version — the registry compiles each load under it
+      assert out =~ "[#{mod}.V1]"
+      refute out =~ "file changed"
+    end
+
+    test "editing the file on disk is reported, without reloading anything", %{script: script} do
+      File.write!(script, File.read!(script) |> String.replace(~s("ok"), ~s("edited")))
+
+      {0, out} = run(["domain", "show", "cli.show.example.com"])
+      assert out =~ "— file changed since load"
+    end
+
+    test "a deleted file is reported as missing", %{script: script} do
+      File.rm!(script)
+
+      {0, out} = run(["domain", "show", "cli.show.example.com"])
+      assert out =~ "— file missing"
     end
   end
 
@@ -282,6 +354,91 @@ defmodule Kelix.Control.CLITest do
     assert out =~ "no_domains_path"
   end
 
+  # `kelictl reload-all` is what `systemctl reload kelixip` runs (through
+  # Kelix.Control.CLI.reload_main/0), so this rendering is also what lands in the journal.
+  test "reload-all reports every stage, and exits non-zero when it was rejected" do
+    dir = Path.join(System.tmp_dir!(), "cli_reload_all_#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    path = Path.join(dir, "domains.toml")
+    prev = Application.get_env(:kelixip, :domains_path)
+    Application.put_env(:kelixip, :domains_path, path)
+
+    on_exit(fn ->
+      if prev,
+        do: Application.put_env(:kelixip, :domains_path, prev),
+        else: Application.delete_env(:kelixip, :domains_path)
+
+      empty = Path.join(dir, "empty.toml")
+      File.write!(empty, "")
+      Kelix.Domains.reload(empty)
+      File.rm_rf(dir)
+    end)
+
+    File.write!(path, """
+    [[domain]]
+    name = "cliall.example.com"
+
+    [domain.registrar]
+    script = "#{Path.join(__DIR__, "support/scripts/valid_registrar.exs")}"
+    """)
+
+    {0, out} = run(["reload-all"])
+    assert out =~ ~r/^domains\.toml:\s+reloaded \(v\d+\)$/m
+    assert out =~ ~r/^scripts:\s+/m
+    assert out =~ ~r/^modules:\s+/m
+
+    # a script the node refuses: the reload is rejected, and the exit code says so —
+    # which is what makes `systemctl reload` fail instead of answering "ok"
+    File.write!(path, """
+    [[domain]]
+    name = "cliall.example.com"
+
+    [domain.registrar]
+    script = "#{Path.join(__DIR__, "support/scripts/no_shutdown.exs")}"
+    """)
+
+    {1, out} = run(["reload-all"])
+    assert out =~ "REJECTED"
+    assert out =~ "cooperative shutdown"
+    # the config that was running is still the one running
+    assert Kelix.Domains.lookup(Kelix.Domains.current(), "cliall.example.com")
+  end
+
+  # The point of the reload's script check is that the operator reads it *here*,
+  # instead of on the first call routed to that domain.
+  test "domain reload-all refuses a config whose script is not servable, and says which" do
+    dir = Path.join(System.tmp_dir!(), "cli_reload_#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    path = Path.join(dir, "domains.toml")
+
+    File.write!(path, """
+    [[domain]]
+    name = "cli.example.com"
+
+    [domain.registrar]
+    script = "#{Path.join(__DIR__, "support/scripts/no_shutdown.exs")}"
+    """)
+
+    prev = Application.get_env(:kelixip, :domains_path)
+    Application.put_env(:kelixip, :domains_path, path)
+
+    on_exit(fn ->
+      if prev,
+        do: Application.put_env(:kelixip, :domains_path, prev),
+        else: Application.delete_env(:kelixip, :domains_path)
+
+      File.rm_rf(dir)
+    end)
+
+    {1, out} = run(["domain", "reload-all"])
+    assert out =~ "1 script(s) rejected"
+    assert out =~ "domain cli.example.com [domain.registrar]"
+    assert out =~ "cooperative shutdown"
+    # printed as written, not inspect-escaped into one quoted line
+    assert out =~ "\n  - "
+    refute Kelix.Domains.lookup(Kelix.Domains.current(), "cli.example.com")
+  end
+
   test "mediaserver list with an empty pool" do
     assert {0, "no media server in the pool"} = run(["mediaserver", "list"])
   end
@@ -302,6 +459,36 @@ defmodule Kelix.Control.CLITest do
   test "an unknown command prints usage, exit 2" do
     {2, out} = run(["frobnicate"])
     assert out =~ "usage: kelictl"
+  end
+
+  # The two columns an operator reads to know WHAT is running and FOR WHOM: the
+  # script domains.toml routed to (the pool always knows it) and the account. A UAS
+  # instance has no account of its own, so it shows the identity the inbound request
+  # asserts (SIP.Msg.Ops.asserted_username/1 — P-Asserted-Identity here) until the
+  # script names a better one (an AOR, a conference DID) with note_account/1.
+  test "monitor names the running script and the identity the instance serves" do
+    waiter = Path.join(__DIR__, "support/scripts/waiter.exs")
+    route = %{domain: "cli.mon.example.com", function: :registrar, script: waiter, max_calls: nil}
+
+    req = %{
+      "P-Asserted-Identity" => "<sip:900012345@cli.mon.example.com>",
+      method: :REGISTER,
+      from: "\"Someone\" <sip:anonymous@anonymous.invalid>;tag=x"
+    }
+
+    assert {:accept, pid} = Kelix.InstancePool.accept(route, nil, req)
+    on_exit(fn -> send(pid, {:scenario_ctl, :shutdown, :test}) end)
+
+    # the FSM store is fed by casts: wait for the initial_state report to land
+    out =
+      Enum.reduce_while(1..50, "", fn _i, _acc ->
+        {0, out} = run(["monitor"])
+        if out =~ "900012345", do: {:halt, out}, else: Process.sleep(20) && {:cont, out}
+      end)
+
+    assert out =~ "script"
+    assert out =~ "waiter.exs"
+    assert out =~ "900012345"
   end
 
   test "stop with a non-integer id → error, exit 2" do

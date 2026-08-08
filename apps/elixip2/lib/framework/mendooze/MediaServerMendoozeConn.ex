@@ -52,10 +52,21 @@ defmodule MediaServer.Mendooze.Conn do
   @sdes_suites ["AES_CM_128_HMAC_SHA1_80", "AES_CM_128_HMAC_SHA1_32"]
 
   # The feedback types this adapter can honour, each with the server-side switch
-  # that implements it. `nack pli` is deliberately absent (no distinct switch — a
-  # keyframe request already travels as FIR), and so is `goog-remb` (announcing
-  # congestion feedback the server never sends invites the peer to wait for it).
-  @supported_rtcp_fb %{"nack" => "useNACK", "ccm fir" => "useRtcpFIR", "ccm tmmbr" => "tmmbr"}
+  # that implements it. `nack pli` shares the FIR switch: the server treats an
+  # incoming PLI exactly like a FIR (both land in onFPURequested,
+  # rtpsession.cpp) so there is nothing more to enable — but a peer that
+  # negotiated `nack pli` may send PLI *instead of* FIR (Linphone does), so it
+  # must be confirmed in the answer, not dropped. NOT `useNACK`: PLI is a
+  # keyframe request, not a retransmission request, and switching the NACK/rtx
+  # machinery on for it would enable feedback the peer never asked for.
+  # `goog-remb` stays absent (announcing congestion feedback the server never
+  # sends invites the peer to wait for it).
+  @supported_rtcp_fb %{
+    "nack" => "useNACK",
+    "nack pli" => "useRtcpFIR",
+    "ccm fir" => "useRtcpFIR",
+    "ccm tmmbr" => "tmmbr"
+  }
 
   # Text-over-WebSocket codecs proposed to the media server: T.140 and its RFC
   # 4103 redundancy. The rtpMap is what switches redundancy on server-side
@@ -140,9 +151,14 @@ defmodule MediaServer.Mendooze.Conn do
       proposed_recv: %{},
       accepted: %{},
       status: :init,
-      # set once the server signals the first validated RTP packet
-      # (EndpointConnectedEvent, type 7) so :ice_connected is emitted only once
-      connected_notified: false,
+      # media-connectivity state (docs/design/media-connectivity.md). `connected`
+      # accumulates the medias the server reported as flowing; `recv_medias` is
+      # the set R — the medias the peer transmits on, the only ones a
+      # connectivity event can ever arrive for; `ice_notified` keeps
+      # :ice_connected one-shot for the life of the connection.
+      connected: MapSet.new(),
+      recv_medias: nil,
+      ice_notified: false,
       # sub-resources: ref => %{...}; tags "p-<n>"/"r-<n>" route server events
       res_seq: 0,
       players: %{},
@@ -269,7 +285,12 @@ defmodule MediaServer.Mendooze.Conn do
         })
 
       # :ice_connected deferred to the first validated RTP packet (type 7);
-      # see the set_remote_answer path and handle_server_event below.
+      # see the set_remote_answer path and handle_server_event below. Every
+      # StartSending has been issued at this point, so R is known (§4).
+      state =
+        state
+        |> note_receiving_medias(Enum.filter(answerable, &Map.has_key?(negotiated, &1.type)))
+
       {:reply, {:ok, answer}, %{state | status: :active}}
     else
       {:error, reason} -> fail(state, reason)
@@ -411,18 +432,11 @@ defmodule MediaServer.Mendooze.Conn do
     {:noreply, state}
   end
 
-  # First validated RTP/SRTP packet received for this connection (server
-  # EndpointConnectedEvent, type 7). A decrypted SRTP packet means ICE + DTLS
-  # completed (WebRTC case); a plain RTP packet is simply the first media packet
-  # (non-WebRTC). The server fires it per media and re-arms it on each
-  # StartReceiving, so surface a single connection-level :ice_connected.
-  defp handle_server_event(
-         {:endpoint_connected, _tag, _ep, _media},
-         %{connected_notified: true} = state
-       ) do
-    {:noreply, state}
-  end
-
+  # First validated RTP/SRTP packet on one media (server EndpointConnectedEvent,
+  # type 7). A decrypted SRTP packet means ICE + DTLS completed (WebRTC case); a
+  # plain RTP packet is simply the first media packet. The server re-arms it on
+  # each StartReceiving, so the raw event repeats on renegotiation while
+  # :ice_connected stays one-shot — docs/design/media-connectivity.md §3, §5.
   defp handle_server_event({:endpoint_connected, _tag, _ep, media}, state) do
     Logger.info(
       module: __MODULE__,
@@ -430,8 +444,10 @@ defmodule MediaServer.Mendooze.Conn do
       message: "media connected on #{media}"
     )
 
-    send(state.event_sink, {:ms_event, self(), :ice_connected})
-    {:noreply, %{state | connected_notified: true, status: :active}}
+    send(state.event_sink, {:ms_event, self(), {:media_connected, media}})
+
+    state = %{state | connected: MapSet.put(state.connected, media), status: :active}
+    {:noreply, maybe_notify_ice_connected(state, media)}
   end
 
   defp handle_server_event({:external_fir, _tag, _ep, media}, state) do
@@ -485,6 +501,60 @@ defmodule MediaServer.Mendooze.Conn do
   defp handle_server_event(event, state) do
     Logger.debug("Mendooze.Conn #{state.sess_tag}: unhandled event #{inspect(event)}")
     {:noreply, state}
+  end
+
+  # The derivation rule of docs/design/media-connectivity.md §4, on the media
+  # that just connected. R (`recv_medias`) is the set of medias the peer
+  # transmits on; rule 1 (R empty) never reaches here since no event can arrive.
+  defp maybe_notify_ice_connected(%{ice_notified: true} = state, _media), do: state
+
+  defp maybe_notify_ice_connected(state, media) do
+    r = state.recv_medias || MapSet.new()
+
+    ready? =
+      cond do
+        # rule 2: video is expected, and only video releases the milestone
+        :video in r -> media == :video
+        # rule 3: no video expected, the first media of R releases it
+        true -> media in r
+      end
+
+    if ready? do
+      send(state.event_sink, {:ms_event, self(), :ice_connected})
+      %{state | ice_notified: true}
+    else
+      state
+    end
+  end
+
+  # R: the negotiated medias the peer transmits on, normalised to our point of
+  # view (§4). A text-over-WebSocket section carries no RTP leg and can never
+  # produce a connectivity event, so it is excluded.
+  defp receiving_medias(descs) do
+    for %{transport: t} = d <- descs,
+        t != :ws,
+        Map.get(d, :direction, :sendrecv) in [:sendrecv, :sendonly],
+        into: MapSet.new(),
+        do: d.type
+  end
+
+  # Called once the send plane is up for every media. With R empty no
+  # connectivity event will ever arrive, so the application is told that
+  # :ice_connected is not coming (§4 rule 1) rather than left waiting.
+  defp note_receiving_medias(state, descs) do
+    r = receiving_medias(descs)
+
+    if MapSet.size(r) == 0 do
+      Logger.info(
+        module: __MODULE__,
+        cnx_tag: state.sess_tag,
+        message: "no media the peer transmits on; :ice_connected will not be emitted"
+      )
+
+      send(state.event_sink, {:ms_event, self(), :media_send_only})
+    end
+
+    %{state | recv_medias: r}
   end
 
   defp with_player(state, tag, fun) do
@@ -955,7 +1025,8 @@ defmodule MediaServer.Mendooze.Conn do
     with :ok <- ensure_media_present(descs),
          {:ok, state, negotiated} <- apply_answered_medias(state, descs),
          :ok <- ensure_negotiated(negotiated) do
-      {:ok, state}
+      # every StartSending has been issued: R is known (§4)
+      {:ok, note_receiving_medias(state, Enum.filter(descs, &Map.has_key?(negotiated, &1.type)))}
     end
   end
 
@@ -1426,11 +1497,21 @@ defmodule MediaServer.Mendooze.Conn do
   end
 
   # What the answer advertises: the INTERSECTION of what the offer asked for
-  # with what the server implements, and only under a feedback profile —
-  # `a=rtcp-fb` is defined for AVPF (RFC 4585 §4), so emitting it under plain
-  # AVP is not merely useless but wrong.
+  # with what the server implements — deliberately NOT gated on a feedback
+  # profile. RFC 4585 §4 defines `a=rtcp-fb` for AVPF, but real endpoints —
+  # Linphone 6.2.0 is the motivating one: its SRTP offer says RTP/SAVP yet lists
+  # `a=rtcp-fb:* ccm tmmbr`, `ccm fir` and more — keep a plain RTP/AVP or
+  # RTP/SAVP profile while listing `a=rtcp-fb` lines, and drive their
+  # NACK/FIR/TMMBR off the answer's attributes, not its profile string;
+  # refusing to confirm them cost those calls their loss recovery. This is an
+  # assumed deviation from the RFC (same policy as the H.264
+  # packetization-mode default). The profile we ANSWER is untouched — RFC
+  # 3264 mirroring and the RFC 5939 capneg upgrade (accepted_capneg/1) decide
+  # it as before; only the attribute emission is decoupled from it, and the
+  # server-side switches (rtcp_fb_props/1) follow the same set. An offer that
+  # asks for no usable feedback still gets none back.
   defp answered_rtcp_fb(desc) do
-    if desc.type == :video and String.ends_with?(answered_protocol(desc), "F"),
+    if desc.type == :video,
       do: requested_rtcp_fb(desc),
       else: false
   end

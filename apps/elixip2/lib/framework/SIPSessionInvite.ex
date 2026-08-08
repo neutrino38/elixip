@@ -821,21 +821,36 @@ defmodule SIP.Session.CallInDialog do
     SIP.Session.send_sip_request(sip_ctx, req, Keyword.get(opts, :timeout, 20))
   end
 
-  # Build a bare in-dialog request. The dialog layer fills in Call-ID, CSeq, the
-  # From/To tags, the remote target and the route set (fix_outbound_request/3),
-  # so only the skeleton (method, placeholder URIs, User-Agent) is needed here.
+  # Build a bare in-dialog request. The dialog layer overwrites Call-ID, CSeq,
+  # From, To, their tags, the Request-URI and the route set
+  # (`fix_outbound_request/3`), so these URIs are placeholders — hence
+  # `context_uri/2` rather than `SIP.Context.to/2`, which raises when the context
+  # carries no identity. A UAS instance spawned per inbound dialog has none:
+  # `username`/`domain` are UAC configuration, and its identity lives in the
+  # dialog, not in the context.
   defp in_dialog_request(sip_ctx, method, extra \\ %{}) do
+    uri = context_uri(sip_ctx)
+
     %{
       "Max-Forwards" => "70",
       method: method,
-      ruri: SIP.Context.to(sip_ctx, nil),
-      from: SIP.Context.from(sip_ctx),
-      to: SIP.Context.to(sip_ctx, nil),
+      ruri: uri,
+      from: uri,
+      to: uri,
       useragent: Application.get_env(:elixip2, :useragent, "Elixipp/0.1"),
       callid: nil,
       contentlength: 0
     }
     |> Map.merge(extra)
+  end
+
+  # The context's identity when it has one, an empty URI otherwise.
+  defp context_uri(sip_ctx) do
+    if is_nil(sip_ctx.username) or is_nil(sip_ctx.domain) do
+      %SIP.Uri{userpart: nil, domain: nil}
+    else
+      SIP.Context.to(sip_ctx, nil)
+    end
   end
 
   # Attach a body and its Content-Type; no-op for a nil/empty body. A binary is

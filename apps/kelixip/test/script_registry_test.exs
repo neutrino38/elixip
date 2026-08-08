@@ -151,10 +151,168 @@ defmodule Kelix.ScriptRegistryTest do
     end
   end
 
+  # What `kelictl domain reload-all` leans on: the contract is checked when the
+  # config is loaded, not when the first call is routed to it.
+  describe "validate/1 — the batch check the domains reload runs (§3.2)" do
+    test "valid scripts pass, and are loaded (so the first call needs no compile)" do
+      path = unique_valid_script()
+
+      assert :ok = ScriptRegistry.validate([path, path])
+      assert {:ok, mod} = ScriptRegistry.current(path)
+      assert to_string(mod) =~ ".V"
+    end
+
+    test "every offender is reported, not just the first" do
+      good = unique_valid_script()
+      missing = Path.join(@scripts, "nope.exs")
+      no_shutdown = Path.join(@scripts, "no_shutdown.exs")
+
+      assert {:error, failures} = ScriptRegistry.validate([good, missing, no_shutdown])
+      assert length(failures) == 2
+      assert {^missing, missing_reason} = List.keyfind(failures, missing, 0)
+      assert missing_reason =~ "cannot read"
+      assert {^no_shutdown, shutdown_reason} = List.keyfind(failures, no_shutdown, 0)
+      assert shutdown_reason =~ "cooperative shutdown"
+    end
+
+    test "a script edited on disk is recompiled; an untouched one is not" do
+      path = unique_valid_script()
+      assert :ok = ScriptRegistry.validate([path])
+      assert {:ok, v1} = ScriptRegistry.current(path)
+
+      # untouched: same version, no new module
+      assert :ok = ScriptRegistry.validate([path])
+      assert {:ok, ^v1} = ScriptRegistry.current(path)
+
+      # edited: the stamp changed, so the edit is what gets checked and served
+      File.write!(path, File.read!(path) |> String.replace(~s("ok"), ~s("edited")))
+      assert :ok = ScriptRegistry.validate([path])
+      assert {:ok, v2} = ScriptRegistry.current(path)
+      refute v1 == v2
+    end
+
+    test "an edit that breaks the contract is caught, not served" do
+      path = unique_valid_script()
+      assert :ok = ScriptRegistry.validate([path])
+      assert {:ok, v1} = ScriptRegistry.current(path)
+
+      # drop the on_shutdown block: the file no longer satisfies §5.3
+      File.write!(
+        path,
+        File.read!(path) |> String.replace(~r/\n  on_shutdown do.*?\n  end\n/s, "\n")
+      )
+
+      assert {:error, [{^path, reason}]} = ScriptRegistry.validate([path])
+      assert reason =~ "cooperative shutdown"
+      # the rejected version is not published: instances keep getting the good one
+      assert {:ok, ^v1} = ScriptRegistry.current(path)
+    end
+  end
+
+  # Two scripts declaring the same `defmodule` compile to the same versioned module,
+  # so the second load silently overwrites the first and both dial-plan entries run
+  # one body. Found in production: 900031111 → record.exs answered with play.exs's
+  # Player, because both files still said `defmodule UAS.InviteExample`.
+  describe "module ownership — two scripts cannot share a module name" do
+    test "the second script is refused, naming the module and the owner" do
+      mod = "KelixTest.Twin#{System.unique_integer([:positive])}"
+      first = script_named(mod)
+      second = script_named(mod)
+
+      assert :ok = ScriptRegistry.validate([first])
+      assert {:ok, m1} = ScriptRegistry.current(first)
+
+      assert {:error, [{^second, reason}]} = ScriptRegistry.validate([second])
+      assert reason =~ mod
+      assert reason =~ first
+      assert reason =~ "rename the module"
+
+      # and the first script is untouched — refused BEFORE the compile that would
+      # have overwritten its module, so it still serves its own body.
+      assert {:ok, ^m1} = ScriptRegistry.current(first)
+      assert function_exported?(m1, :run, 1)
+    end
+
+    test "a script reloading keeps its own modules (it is not its own squatter)" do
+      path = unique_valid_script()
+      assert :ok = ScriptRegistry.validate([path])
+      assert :ok = ScriptRegistry.reload(path)
+      assert {:ok, mod} = ScriptRegistry.current(path)
+      assert to_string(mod) =~ ".V2"
+    end
+
+    test "a name freed by a rename can be taken over" do
+      mod = "KelixTest.Freed#{System.unique_integer([:positive])}"
+      squatted = script_named(mod)
+      other = script_named(mod <> "Other")
+
+      assert :ok = ScriptRegistry.validate([squatted, other])
+      # `other` renames itself onto a name nobody owns any more
+      File.write!(squatted, File.read!(squatted) |> String.replace(mod, mod <> "Renamed"))
+      assert :ok = ScriptRegistry.validate([squatted])
+      File.write!(other, File.read!(other) |> String.replace(mod <> "Other", mod))
+      assert :ok = ScriptRegistry.validate([other])
+    end
+  end
+
+  # "is what runs still what I edited?" — the operator's other question, answered
+  # without reloading anything.
+  describe "loaded/0 — module, version and disk freshness" do
+    test "a freshly loaded script is not stale, and names its module" do
+      path = unique_valid_script()
+      assert {:ok, mod} = ScriptRegistry.current(path)
+
+      assert %{^path => entry} = ScriptRegistry.loaded()
+      assert entry.module == mod
+      assert entry.version == 1
+      assert entry.path == path
+      assert entry.stale == false
+    end
+
+    test "an edit on disk shows as :changed until it is reloaded" do
+      path = unique_valid_script()
+      assert {:ok, _} = ScriptRegistry.current(path)
+
+      File.write!(path, File.read!(path) |> String.replace(~s("ok"), ~s("edited")))
+      assert ScriptRegistry.loaded()[path].stale == :changed
+
+      assert :ok = ScriptRegistry.reload(path)
+      assert ScriptRegistry.loaded()[path].stale == false
+    end
+
+    test "a deleted file shows as :missing, and the loaded version keeps serving" do
+      path = unique_valid_script()
+      assert {:ok, mod} = ScriptRegistry.current(path)
+
+      File.rm!(path)
+      assert ScriptRegistry.loaded()[path].stale == :missing
+      assert {:ok, ^mod} = ScriptRegistry.current(path)
+    end
+  end
+
+  # `check_module_ownership/3` on its own, with no registry state involved
+  describe "check_module_ownership/3" do
+    test "an unclaimed module passes" do
+      assert ScriptRegistry.check_module_ownership([A.B], %{C.D => "x.exs"}, "y.exs") == :ok
+      assert ScriptRegistry.check_module_ownership([], %{}, "y.exs") == :ok
+    end
+
+    test "every clashing module is listed, not just the first" do
+      owned = %{A.B => "x.exs", C.D => "z.exs"}
+      assert {:error, msg} = ScriptRegistry.check_module_ownership([A.B, C.D], owned, "y.exs")
+      assert msg =~ "A.B"
+      assert msg =~ "x.exs"
+      assert msg =~ "C.D"
+      assert msg =~ "z.exs"
+    end
+  end
+
   # a minimal valid registrar with a UNIQUE module name, written to a temp file
   defp unique_valid_script do
-    mod = "KelixTest.Reg#{System.unique_integer([:positive])}"
+    script_named("KelixTest.Reg#{System.unique_integer([:positive])}")
+  end
 
+  defp script_named(mod) do
     src = """
     defmodule #{mod} do
       use SIP.Scenario

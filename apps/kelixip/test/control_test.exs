@@ -459,6 +459,66 @@ defmodule Kelix.ControlTest do
       assert Control.reload_domains() == {:error, :no_domains_path}
     end
 
+    # `kelictl reload-all` and `systemctl reload` are the same call: what it applies,
+    # what it refuses, and what it deliberately leaves for a restart.
+    test "reload_all/0 applies a servable config and says at which version" do
+      script = Path.join(__DIR__, "support/scripts/valid_registrar.exs")
+
+      use_domains("""
+      [[domain]]
+      name = "reloadall.example.com"
+
+      [domain.registrar]
+      script = "#{script}"
+      """)
+
+      report = Control.reload_all()
+
+      assert report.domains == :ok
+      assert Control.reload_ok?(report)
+      assert report.version > 0
+      # the referenced script is loaded, so no inbound call has to compile it
+      assert Map.has_key?(report.scripts, script)
+    end
+
+    test "reload_all/0 rejects the whole reload on a script that is not servable" do
+      use_domains("""
+      [[domain]]
+      name = "reloadall.example.com"
+
+      [domain.registrar]
+      script = "#{Path.join(__DIR__, "support/scripts/no_shutdown.exs")}"
+      """)
+
+      report = Control.reload_all()
+
+      assert {:error, message} = report.domains
+      assert message =~ "cooperative shutdown"
+      refute Control.reload_ok?(report)
+      # the stages after the domains file are not attempted: no half-applied config
+      assert report.scripts == %{}
+      assert report.modules == %{}
+    end
+
+    test "reload_all/0 with no configured domains.toml is a clean refusal" do
+      prev = Application.get_env(:kelixip, :domains_path)
+      Application.delete_env(:kelixip, :domains_path)
+      on_exit(fn -> if prev, do: Application.put_env(:kelixip, :domains_path, prev) end)
+
+      report = Control.reload_all()
+      assert report.domains == {:error, :no_domains_path}
+      refute Control.reload_ok?(report)
+    end
+
+    test "reload_ok?/1 ignores a skipped module and fails on a failed one" do
+      base = %{domains: :ok, version: 1, scripts: %{}, modules: %{}}
+
+      assert Control.reload_ok?(%{base | modules: %{"mcu" => {:skipped, :restart_required}}})
+      assert Control.reload_ok?(%{base | modules: %{"registrar" => :unchanged}})
+      refute Control.reload_ok?(%{base | modules: %{"registrar" => {:error, :not_configured}}})
+      refute Control.reload_ok?(%{base | domains: {:error, :no_domains_path}})
+    end
+
     test "reload_script/2 reports a per-name result" do
       res = Control.reload_script(["does-not-exist"])
       assert match?({:error, _}, res["does-not-exist"])
@@ -509,5 +569,28 @@ defmodule Kelix.ControlTest do
     test "module_command/3 on an unknown module" do
       assert Control.module_command("ghost", "do", %{}) == {:error, :unknown_module}
     end
+  end
+
+  # Point the node's `domains_path` at a temporary file for one test, and put back
+  # whatever the rest of the suite expects afterwards.
+  defp use_domains(content) do
+    prev = Application.get_env(:kelixip, :domains_path)
+    path = Path.join(System.tmp_dir!(), "reload_all_#{System.unique_integer([:positive])}.toml")
+    File.write!(path, content)
+    Application.put_env(:kelixip, :domains_path, path)
+
+    on_exit(fn ->
+      if prev,
+        do: Application.put_env(:kelixip, :domains_path, prev),
+        else: Application.delete_env(:kelixip, :domains_path)
+
+      empty = path <> ".empty"
+      File.write!(empty, "")
+      Kelix.Domains.reload(empty)
+      File.rm(empty)
+      File.rm(path)
+    end)
+
+    path
   end
 end

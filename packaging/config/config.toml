@@ -115,6 +115,14 @@ port = 9095
 #shutdown_grace_ms = 5000           # grace given to live conferences at module stop
 #rtp_timeout_ms   = 10000           # RTP inactivity watchdog (needs media server support)
 #gc_orphans       = true            # sweep, at start, conferences no kelixip owns
+# The collaboration channel between the participants' SCRIPTS (a raised hand, a floor
+# token — not chat: text a human reads in the call is T.140, which the mixer handles).
+# CLOSED until you list the kinds it accepts, and a script must also declare that it
+# handles messages before any reaches it.
+#message_kinds    = ["hand.raised", "hand.lowered", "floor.request", "floor.grant"]
+#message_rate     = 5               # messages per second and per participant
+#message_max_bytes = 1024           # longer payloads are refused, never truncated
+#message_queue_max = 100            # skip a leg whose script is that far behind
 # /usr/share/doc/kelixip-mod-mcu/ has the whole block key by key (mcu.md), the
 # control surface and what to look at when a call does not join (mcu_module_guide.md).
 

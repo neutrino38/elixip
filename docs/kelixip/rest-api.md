@@ -62,6 +62,7 @@ cert) with a JSON body `{"error": "…"}`.
 | `POST /scenarios/<id>/shutdown` | W | `kelictl stop` |
 | `POST /scripts/reload[?notify=1]` | W | `kelictl reload-script` |
 | `POST /domains/reload` | W | `kelictl domain reload-all` |
+| `POST /reload-all` | W | `kelictl reload-all` (what `systemctl reload` runs) |
 | `POST /modules/<name>/reload` | W | `kelictl module reload` |
 | `POST /mediaservers/<name>` | W | `kelictl mediaserver enable\|disable` |
 | `PUT /log/level` | W | `kelictl log-level` |
@@ -71,6 +72,30 @@ Request bodies are JSON (`Content-Type: application/json`); responses are JSON.
 Result mapping: `:ok` → `200 {"result":"ok"}`; not-found → `404`; a bad
 argument → `400`; `graceful-shutdown` → `202 {"result":"draining"}`.
 
+`POST /reload-all` answers a per-stage report — `200` when it was applied, `400` when
+it was refused (the body says by what, and nothing was changed):
+
+```json
+{
+  "domains": "ok",
+  "version": 4,
+  "scripts": {"registrar.exs": 1, "mcu.exs": 2},
+  "modules": {"registrar": "unchanged", "mcu": ["skipped", "restart_required"]}
+}
+```
+
+On a refusal, `domains` carries the reason and the later stages are empty — the
+running configuration is unchanged:
+
+```json
+{
+  "domains": ["error", "1 script(s) rejected:\n  - domain example.com [domain.registrar]: …"],
+  "version": 4,
+  "scripts": {},
+  "modules": {}
+}
+```
+
 `GET /domains` returns the list of these objects, in `domains.toml` order;
 `GET /domains/<domain>` returns one (matched on the name **or** an alias,
 case-insensitively) or `404`. Both read the live snapshot — what the router uses
@@ -79,17 +104,31 @@ catch-all being the entry with `"default": true` (and no `pattern`); a function
 absent from `functions` is not served on that domain (`registrar` / `presence`
 are then `null`).
 
+Every place a `script` appears — the `dial_plan` entries and the function blocks —
+carries the **`module`** the BEAM actually runs for it and its load **`version`**, as
+soon as the script is loaded (both keys are absent until then). The module comes from
+the file's own `defmodule`, not from its name, so it is the only reliable answer to
+"what does this rule run". A **`stale`** key is added *only when it is one*, comparing
+the loaded code with the file at read time: `"changed"` (edited since load — a
+`reload-script` would pick it up), `"missing"` (the file is gone; the loaded version
+keeps serving) or `"unknown"` (it could not be stat'ed at load).
+
 ```json
 {
   "name": "example.com",
   "aliases": ["example.fr"],
   "max_calls": 500,
   "functions": ["registrar", "calls"],
-  "registrar": {"script": "registrar.exs", "default_expires": 3600},
+  "registrar": {
+    "script": "registrar.exs", "default_expires": 3600,
+    "module": "Registrar.Example.V1", "version": 1
+  },
   "presence": null,
   "dial_plan": [
-    {"pattern": "0[1-9]XXXXXXXX", "default": false, "script": "user2pstn.exs"},
-    {"pattern": null, "default": true, "script": "catchall.exs"}
+    {"pattern": "0[1-9]XXXXXXXX", "default": false, "script": "user2pstn.exs",
+     "module": "User2Pstn.V1", "version": 1},
+    {"pattern": null, "default": true, "script": "catchall.exs",
+     "module": "Catchall.V3", "version": 3, "stale": "changed"}
   ],
   "active_calls": 0,
   "registrations": 0
@@ -209,8 +248,10 @@ exports to scripts. That is the same data `kelictl module list` / `kelictl <name
 help` render, so a client can build its URLs from the node instead of from
 out-of-band documentation.
 
-Of the shipped modules, [mcu](modules/mcu.md) contributes nine commands
-(conferences and participants); `registrar` and `auth_db` contribute none.
+Of the shipped modules, [mcu](modules/mcu.md) contributes fourteen commands
+(conferences, participants, recording and mosaic slots) — its endpoints are documented
+one by one, with their payloads, in **[modules/mcu-api.md](modules/mcu-api.md)**;
+`registrar` and `auth_db` contribute none.
 
 ## Observability
 

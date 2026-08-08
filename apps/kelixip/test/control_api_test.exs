@@ -172,6 +172,62 @@ defmodule Kelix.ControlAPITest do
       assert body(conn)["error"] == "no_domains_path"
     end
 
+    # The umbrella reload: the body is the per-stage report either way, so a client can
+    # tell what was applied from what was refused.
+    test "POST /reload-all reports every stage, and 400s on a refusal" do
+      prev = Application.get_env(:kelixip, :domains_path)
+
+      on_exit(fn ->
+        if prev,
+          do: Application.put_env(:kelixip, :domains_path, prev),
+          else: Application.delete_env(:kelixip, :domains_path)
+      end)
+
+      dir = Path.join(System.tmp_dir!(), "api_reload_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      path = Path.join(dir, "domains.toml")
+      Application.put_env(:kelixip, :domains_path, path)
+
+      on_exit(fn ->
+        empty = Path.join(dir, "empty.toml")
+        File.write!(empty, "")
+        Kelix.Domains.reload(empty)
+        File.rm_rf(dir)
+      end)
+
+      File.write!(path, """
+      [[domain]]
+      name = "apiall.example.com"
+
+      [domain.registrar]
+      script = "#{Path.join(__DIR__, "support/scripts/valid_registrar.exs")}"
+      """)
+
+      conn = call(conn(:post, "/reload-all"))
+      assert conn.status == 200
+      report = body(conn)
+      assert report["domains"] == "ok"
+      assert is_integer(report["version"])
+      assert is_map(report["scripts"])
+      assert is_map(report["modules"])
+
+      # a script the node refuses: 400, and the report names it — nothing was applied
+      File.write!(path, """
+      [[domain]]
+      name = "apiall.example.com"
+
+      [domain.registrar]
+      script = "#{Path.join(__DIR__, "support/scripts/no_shutdown.exs")}"
+      """)
+
+      conn = call(conn(:post, "/reload-all"))
+      assert conn.status == 400
+      report = body(conn)
+      assert ["error", message] = report["domains"]
+      assert message =~ "cooperative shutdown"
+      assert report["scripts"] == %{}
+    end
+
     test "POST /mediaservers/:name toggles; unknown MCU → 404" do
       conn =
         conn(:post, "/mediaservers/ghost", Jason.encode!(%{enabled: false}))

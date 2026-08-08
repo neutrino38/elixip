@@ -90,7 +90,7 @@ kelictl monitor
 
 ```bash
 systemctl start kelixip
-systemctl reload kelixip          # = kelictl domain reload-all (atomic, no restart)
+systemctl reload kelixip          # = kelictl reload-all (atomic, no restart)
 systemctl stop kelixip            # drains first, see below
 systemctl restart kelixip         # the only way to apply a config.toml change
 kelictl graceful-shutdown         # same drain, without systemd
@@ -109,8 +109,18 @@ not with calls in progress.
 > a wait on the main PID, bounded by `TimeoutStopSec=90`. A `systemctl stop` on an
 > idle node takes a handful of seconds; with calls in progress it takes the drain.
 
-`systemctl reload` only reloads **`domains.toml`**. `config.toml` (listeners, media
-pool, control API, most modules) is restart-only by design.
+`systemctl reload` applies **`domains.toml`** (domains, dial-plan, registrar block),
+re-reads the **scenario scripts** that changed on disk, and applies the module blocks
+that can be changed live. It is all-or-nothing: a `domains.toml` that does not
+validate, or that names a script the node cannot serve, is **refused** — the running
+configuration is untouched, the reason goes to the journal, and the `systemctl reload`
+command itself fails. The same check runs at boot, where it aborts the start instead of
+serving calls that would fail one by one. Details and the report format:
+[administration.md](administration.md#reloading-a-running-node).
+
+`config.toml` (listeners, ports, media pool, control API) is restart-only by design,
+and so is a module whose configuration changed but whose restart would drop live state
+— `reload` says so instead of doing it behind your back.
 
 ## First boot
 

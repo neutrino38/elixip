@@ -70,7 +70,18 @@ defmodule Kelix.Mod.Mcu.Config do
             call_timeout_ms: 5_000,
             shutdown_grace_ms: 5_000,
             rtp_timeout_ms: 10_000,
-            gc_orphans: true
+            gc_orphans: true,
+            # The collaboration channel between participants' scripts (§20). Bounds,
+            # not features: a fan-out over the roster is N² messages if nothing caps
+            # it, and a payload nobody bounded is a payload a script puts on the wire.
+            message_rate: 5,
+            message_max_bytes: 1024,
+            message_queue_max: 100,
+            # Default-deny (§20.8): no `kind` is accepted until an operator declares
+            # it, so the channel a deployment does not use is a channel it does not
+            # expose. Not a codec-style list — a vocabulary the scripts and the
+            # operator agree on.
+            message_kinds: []
 
   # AudioMixer::Init refuses anything else (§15, decision 5)
   @rates [8000, 16_000, 32_000, 48_000]
@@ -81,7 +92,7 @@ defmodule Kelix.Mod.Mcu.Config do
   # therefore **not** in @int_keys: a name is not a malformed integer.
   @int_keys ~w(rate max_participants video_fps video_bitrate
                video_intra_period xmlrpc_timeout_ms call_timeout_ms shutdown_grace_ms
-               rtp_timeout_ms)
+               rtp_timeout_ms message_rate message_max_bytes message_queue_max)
   @bool_keys ~w(dtmf destroy_when_empty auto_layout gc_orphans)
   @string_keys ~w(record_dir image_dir logo_file)
 
@@ -104,7 +115,9 @@ defmodule Kelix.Mod.Mcu.Config do
            max_participants destroy_when_empty auto_layout layout_comp did_range
            did_ranges video_size video_fps video_bitrate video_intra_period
            xmlrpc_timeout_ms shutdown_grace_ms rtp_timeout_ms gc_orphans
-           record_dir image_dir logo_file) ++ Map.keys(@retired_keys)
+           record_dir image_dir logo_file
+           message_rate message_max_bytes message_queue_max message_kinds) ++
+          Map.keys(@retired_keys)
 
   @doc """
   Validate and decode a `[module.mcu]` block. `{:ok, %Config{}}` or
@@ -123,6 +136,7 @@ defmodule Kelix.Mod.Mcu.Config do
          {:ok, layout_comp} <- Vocabulary.comp(Map.get(block, "layout_comp"), "layout_comp"),
          {:ok, video_size} <- Vocabulary.size(Map.get(block, "video_size"), "video_size"),
          {:ok, medias} <- medias(block),
+         {:ok, message_kinds} <- message_kinds(block),
          {:ok, did_range} <- did_range(block, "did_range"),
          {:ok, did_ranges} <- did_ranges(block) do
       defaults = %__MODULE__{}
@@ -154,7 +168,11 @@ defmodule Kelix.Mod.Mcu.Config do
          gc_orphans: bool(block, "gc_orphans", defaults.gc_orphans),
          record_dir: str(block, "record_dir", defaults.record_dir),
          image_dir: str(block, "image_dir", defaults.image_dir),
-         logo_file: str(block, "logo_file", defaults.logo_file)
+         logo_file: str(block, "logo_file", defaults.logo_file),
+         message_rate: int(block, "message_rate", defaults.message_rate),
+         message_max_bytes: int(block, "message_max_bytes", defaults.message_max_bytes),
+         message_queue_max: int(block, "message_queue_max", defaults.message_queue_max),
+         message_kinds: message_kinds
        }}
     end
   end
@@ -260,6 +278,38 @@ defmodule Kelix.Mod.Mcu.Config do
     case Map.get(block, key) do
       nil -> :ok
       v -> if v in allowed, do: :ok, else: {:error, "#{key} must be one of #{inspect(allowed)}"}
+    end
+  end
+
+  # The `kind` vocabulary of the collaboration channel (§20.5 G-5). Unlike `medias`,
+  # an **empty list is meaningful**: it is the default, and it means the channel is
+  # closed on this node — a script's `mcu_send` is then refused by name, which is a
+  # far better answer than a message nobody documented reaching a script nobody
+  # expected. Kept to plain short tokens: they end up in log lines and in metric
+  # labels, so an arbitrary string would be a cardinality and an injection question
+  # at once.
+  @kind_format ~r/^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$/
+
+  defp message_kinds(block) do
+    case Map.get(block, "message_kinds") do
+      nil ->
+        {:ok, defaults().message_kinds}
+
+      kinds when is_list(kinds) ->
+        case Enum.reject(kinds, &(is_binary(&1) and Regex.match?(@kind_format, &1))) do
+          [] ->
+            {:ok, kinds}
+
+          bad ->
+            # each entry inspected on its own: `inspect/1` on a *list* of small
+            # integers renders a charlist (`[42]` → `~c"*"`), which names nothing
+            {:error,
+             "message_kinds: #{Enum.map_join(bad, ", ", &inspect/1)} — a kind is a " <>
+               "lower-case dotted token like \"hand.raised\""}
+        end
+
+      _ ->
+        {:error, ~s(message_kinds must be a list of strings like ["hand.raised"])}
     end
   end
 

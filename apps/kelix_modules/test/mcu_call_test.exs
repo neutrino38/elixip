@@ -1145,15 +1145,16 @@ defmodule Kelix.Mod.McuCallTest do
       answer = fields[:body]
 
       # what we can honour, named per PT rather than with the offer's `*` wildcard
-      assert answer =~ "a=rtcp-fb:99 nack"
+      # (`nack pli` included: it rides the FIR switch, see @supported_rtcp_fb)
+      assert answer =~ "a=rtcp-fb:99 nack\r\n"
+      assert answer =~ "a=rtcp-fb:99 nack pli"
       assert answer =~ "a=rtcp-fb:99 ccm fir"
       assert answer =~ "a=rtcp-fb:99 ccm tmmbr"
       refute answer =~ "rtcp-fb:*"
 
-      # and NOT what has no server-side switch: announcing these would promise a
+      # and NOT what has no server-side switch: announcing it would promise a
       # capability nothing implements
       refute answer =~ "goog-remb"
-      refute answer =~ "nack pli"
     end
 
     test "what is announced is what is switched on server-side", ctx do
@@ -1186,6 +1187,41 @@ defmodule Kelix.Mod.McuCallTest do
       refute answer =~ "RTP/AVPF"
       refute answer =~ "a=acfg"
       refute answer =~ "a=rtcp-fb"
+    end
+
+    test "feedback offered under plain RTP/AVP is confirmed, and the profile untouched",
+         ctx do
+      # Linphone-style: a plain AVP profile, no capneg, a=rtcp-fb lines anyway.
+      # Confirming them is an assumed RFC 4585 §4 deviation (see answered_rtcp_fb/1):
+      # the peer drives its NACK/FIR off the answer's attributes, not its profile.
+      offer =
+        @offer_video
+        |> String.replace("RTP/AVPF", "RTP/AVP")
+        |> String.replace(
+          "a=rtcp-fb:99 nack\r\n",
+          "a=rtcp-fb:99 nack\r\na=rtcp-fb:99 nack pli\r\na=rtcp-fb:99 ccm fir\r\n"
+        )
+
+      {_pid, _dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: offer))
+      assert_receive {:replied, 200, _reason, fields, _req}, 2000
+
+      answer = fields[:body]
+
+      # no capneg in the offer, so the answered profile is plain RFC 3264 mirroring
+      assert answer =~ ~r/m=video \d+ RTP\/AVP 99/
+      refute answer =~ "RTP/AVPF"
+      refute answer =~ "a=acfg"
+      # ...but the requested-and-implemented feedback is confirmed anyway,
+      # `nack pli` included (it rides the FIR switch, see @supported_rtcp_fb)
+      assert answer =~ "a=rtcp-fb:99 nack\r\n"
+      assert answer =~ "a=rtcp-fb:99 nack pli"
+      assert answer =~ "a=rtcp-fb:99 ccm fir"
+
+      # and the server switches follow the answered set, profile notwithstanding
+      assert_received {:rpc, "SetRTPProperties", [42, 7, 1, _codec_props, 0]}
+      assert_received {:rpc, "SetRTPProperties", [42, 7, 1, props, 0]}
+      assert props["useNACK"] == "1"
+      assert props["useRtcpFIR"] == "1"
     end
   end
 

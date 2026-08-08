@@ -10,8 +10,10 @@ server**: installing the `.beam` is half of a working setup — see
 [§1.1 of the guide](../../mcu_module_guide.md#11-what-must-be-true-before-a-call-can-succeed)
 for the four things that must be true before a call can succeed.
 
-> This page is the **reference** — parameters, facades, commands. The narrative
-> (running a node, writing a script, debugging a call that did not work) is
+> This page is the **reference** — parameters, facades, commands. The **REST API** of
+> those commands (every endpoint, its payloads, its statuses, enough to implement a
+> client) is [mcu-api.md](mcu-api.md). The narrative (running a node, writing a
+> script, debugging a call that did not work) is
 > [docs/mcu_module_guide.md](../../mcu_module_guide.md), and the *why* of every
 > decision and limitation is [docs/design/mcu_module.md](../../design/mcu_module.md).
 
@@ -87,6 +89,10 @@ Module block — `[module.mcu]` (in `config.toml`):
 | `shutdown_grace_ms` | integer | `5000` | Grace given to conferences at module stop |
 | `rtp_timeout_ms` | integer | `10000` | RTP inactivity watchdog — **ignored** until the server-side support of P7 (limitation L1) |
 | `gc_orphans` | boolean | `true` | Sweep, at start, the conferences the media server still holds and no kelixip owns |
+| `message_kinds` | list | `[]` | The message kinds the collaboration channel accepts (see below). **Empty = the channel is closed** |
+| `message_rate` | integer | `5` | Messages per second and per participant (burst: twice that) |
+| `message_max_bytes` | integer | `1024` | Longer payloads are refused, never truncated |
+| `message_queue_max` | integer | `100` | A leg whose script is that far behind is skipped rather than fed |
 
 `vad`, `layout_comp` and `video_size` take the same names the CLI renders and the
 control commands accept — one vocabulary, wherever a value enters.
@@ -157,6 +163,73 @@ kick(uid, part_id)      :: :ok | {:error, :not_found | term}
 `kick/2` asks that leg's scenario to wind down (BYE + teardown); it does not cut
 the media under a live dialog.
 
+### Talking to the other participants
+
+```elixir
+accept_messages(part)                      :: :ok | {:error, :no_such_participant}
+send_message(part, target, kind, payload, opts \\ [])
+  :: {:ok, %{delivered: n, skipped: [%{part_id: id, reason: atom}]}} | {:error, atom}
+
+# target :: :all | :others | {:part_id, 7} | {:name, "alice"}
+```
+
+A participant's script can say something to the other participants' **scripts** — a
+raised hand, a floor-control token, "I am sharing my screen". This is a signalling
+channel between scripts: it is **not** chat. Text a human reads in the call is T.140,
+which the media server already mixes for every leg that negotiated `m=text`.
+
+The module addresses and delivers; **your script decides what a received message
+becomes** (an in-dialog MESSAGE, an INFO, a state change, nothing at all) and is
+responsible for sanitising it for whatever it puts on the wire — the module checked
+the size and the type, nothing more.
+
+Two things are required before anything flows:
+
+1. the **operator** declares the vocabulary — `message_kinds` in `[module.mcu]`. It is
+   empty by default, so the channel is closed until a deployment opens it, and a `kind`
+   outside the list is refused by name;
+2. the **script** declares that it handles messages, with `mcu_accept_messages()`, and
+   then handles `{:mcu_message, envelope}` in **every** `on_events` it goes through. A
+   leg that did not declare receives nothing (it shows up as `skipped: :not_accepted`
+   in the sender's report) — which is deliberate: an `on_events` is a `receive`, and a
+   message no clause matches would sit in that leg's mailbox for the whole call.
+
+```elixir
+# in a uas(:invite) scenario, once the leg is admitted
+mcu_accept_messages()
+
+# and wherever the call waits
+on_events do
+  {:mcu_message, %{kind: "hand.raised", from: %{display_name: who}}} ->
+    mcu_send(:others, "floor.request", who)      # or send a SIP MESSAGE, or ignore it
+    goto in_call, "hand raised"
+
+  {:mcu_message, _envelope} -> goto in_call, "message ignored"
+end
+```
+
+The envelope is `%{msg_id, seq, from: %{part_id, display_name}, kind, payload,
+sent_at}`. It never carries the sender's AOR — `display_name`, or the user part when
+the leg set none.
+
+What the channel guarantees, and what it does not:
+
+* `delivered` counts the **scenarios the message was handed to** — not the phones that
+  received something, and not the humans who saw it;
+* order is preserved **per sender**; two participants' messages may arrive in different
+  orders at different legs. `seq` lets a script notice it;
+* no acknowledgement, no retry, and **no history**: a leg that joins later sees nothing
+  that was sent before it arrived;
+* a refusal (over the rate, unknown kind, payload too long) **never ends the call**:
+  unlike `admit`/`attach`, the outcome goes to `appdata_get(:mcu_last_send)`, not to
+  `lasterr`, so a following `goto` is unaffected;
+* forwarding a message you received? Pass its `msg_id: envelope.msg_id` — the module
+  refuses to fan the same id out twice, which is what stops a rebroadcast storm.
+
+There is deliberately **no operator command and no REST endpoint** to broadcast into a
+conference: sending is a participant's act, and being in the conference is the only
+permission there is.
+
 ### Conference lifecycle (from a script)
 
 ```elixir
@@ -195,22 +268,28 @@ kelictl mcu help conference.update  # one command, with each argument's own voca
 kelictl module list               # every loaded module, its commands and facades
 ```
 
-| Command | `kelictl` | REST |
-|---|---|---|
-| `conference.create` | `mcu conference.create domain=example.com name=Weekly` | `POST /modules/mcu/conferences` → `201` + `Location` |
-| `conference.list` | `mcu conference.list domain=example.com` | `GET /modules/mcu/conferences?domain=…&did=…` |
-| `conference.show` | `mcu conference.show uid=c-3f9a` | `GET /modules/mcu/conferences/:uid` |
-| `conference.update` | `mcu conference.update uid=c-3f9a layout='1+1 vga'` | `PUT`/`PATCH` `/modules/mcu/conferences/:uid` |
-| `conference.delete` | `mcu conference.delete uid=c-3f9a force=true` | `DELETE /modules/mcu/conferences/:uid` |
-| `participant.list` | `mcu participant.list uid=c-3f9a` | `GET …/conferences/:uid/participants` |
-| `participant.show` | `mcu participant.show uid=c-3f9a part_id=7` | `GET …/participants/:part_id` |
-| `participant.update` | `mcu participant.update uid=c-3f9a part_id=7 muted='{"audio":true}'` | `PUT`/`PATCH` `…/participants/:part_id` |
-| `participant.delete` | `mcu participant.delete uid=c-3f9a part_id=7` | `DELETE …/participants/:part_id` |
-| `recording.start` | `mcu recording.start uid=c-3f9a file=record.mp4` | `POST …/conferences/:uid/recording` → `201` |
-| `recording.show` | `mcu recording.show uid=c-3f9a` | `GET …/conferences/:uid/recording` |
-| `recording.stop` | `mcu recording.stop uid=c-3f9a` | `DELETE …/conferences/:uid/recording` |
-| `slot.list` | `mcu slot.list uid=c-3f9a` | `GET …/conferences/:uid/slots` |
-| `slot.update` | `mcu slot.update uid=c-3f9a slot=0 holds=vad` | `PUT`/`PATCH` `…/conferences/:uid/slots/:slot` |
+| Command | `kelictl` |
+|---|---|
+| `conference.create` | `mcu conference.create domain=example.com name=Weekly` |
+| `conference.list` | `mcu conference.list domain=example.com` |
+| `conference.show` | `mcu conference.show uid=c-3f9a` |
+| `conference.update` | `mcu conference.update uid=c-3f9a layout='1+1 vga'` |
+| `conference.delete` | `mcu conference.delete uid=c-3f9a force=true` |
+| `participant.list` | `mcu participant.list uid=c-3f9a` |
+| `participant.show` | `mcu participant.show uid=c-3f9a part_id=7` |
+| `participant.update` | `mcu participant.update uid=c-3f9a part_id=7 muted='{"audio":true}'` |
+| `participant.delete` | `mcu participant.delete uid=c-3f9a part_id=7` |
+| `recording.start` | `mcu recording.start uid=c-3f9a file=record.mp4` |
+| `recording.show` | `mcu recording.show uid=c-3f9a` |
+| `recording.stop` | `mcu recording.stop uid=c-3f9a` |
+| `slot.list` | `mcu slot.list uid=c-3f9a` |
+| `slot.update` | `mcu slot.update uid=c-3f9a slot=0 holds=vad` |
+
+**Each of these is also an HTTP endpoint** — a resource tree
+(`/modules/mcu/conferences/:uid/participants/:part_id`) plus a flat form for a client
+that cannot build URLs. The endpoints, their arguments, their JSON payloads and their
+statuses are **[mcu-api.md](mcu-api.md)**, which is written to be enough on its own to
+implement a client.
 
 On the CLI, arguments are `name=value` tokens — path variables are ordinary named
 arguments, so the same map reaches the module either way. A value typed
@@ -317,18 +396,17 @@ Only a failure to reach the server is reported: on `conference.update` you get t
 error, on `conference.create` it is logged and the conference is created without a logo
 (a picture must not be why a conference does not exist).
 
-Three more things worth knowing: **`PUT` merges** (an omitted field is left alone, not
-reset), an **unknown or read-only field is a `400`** rather than a silent no-op,
-and **the DID is not a URL** — a client holding only a DID uses
-`conference.list did=8001` and follows the `uid`.
+Two more things worth knowing: an **unknown or read-only field is a `400`** rather than
+a silent no-op, and **an update merges** — an omitted field is left alone, never reset.
 
 Each command declares the status of every failure it can produce, and both
-frontals answer with it: `404` for a DID or participant that does not exist, `409`
-for a DID already in use or a conference that is not empty, `503` when the media
-server does not answer, `400` for a bad argument. `kelictl` turns the same
-declaration into its exit code (`3` not found, `4` conflict, `5` unavailable, `2`
-bad argument) — see
-[administration.md](../administration.md#exit-codes).
+frontals answer with it: `404` for a conference or participant that does not exist,
+`409` for an exhausted DID range, a conference that is not empty or a second recording,
+`503` when the media server does not answer, `400` for a bad argument (including a DID
+already in use). `kelictl` turns the same declaration into its exit code (`3` not found,
+`4` conflict, `5` unavailable, `2` bad argument) — see
+[administration.md](../administration.md#exit-codes); the HTTP half, per command, is in
+[mcu-api.md](mcu-api.md#7-statuses-and-retry-semantics).
 
 On the CLI each of these renders as text, from the same declaration: a list is a
 table of the columns that identify a row, and `show` is one `Label: value` per
@@ -374,14 +452,21 @@ in its mailbox:
 {:mcu_event, :server_disconnected}  # the mix is gone: BYE and leave
 ```
 
+A third one reaches a leg **only if its script asked for it** with
+`mcu_accept_messages()` (see [Talking to the other participants](#talking-to-the-other-participants)):
+
+```elixir
+{:mcu_message, envelope}            # a peer's script is saying something
+```
+
 `:fpu_requested` is answered with an INFO carrying RFC 5168
 `picture_fast_update` (`mcu.exs` does it). A kicked leg additionally receives the
 standard `{:scenario_ctl, :shutdown, :kicked}`.
 
 Node-level events (`conference.created`, `participant.joined`,
 `participant.left`, `conference.recording_started` / `_stopped`,
-`conference.slot_changed`, `mediaserver.down` …) are **logged**, one line per event
-carrying the conference `uid`, and counted in the Prometheus metrics
+`conference.slot_changed`, `participant.message`, `mediaserver.down` …) are **logged**,
+one line per event carrying the conference `uid`, and counted in the Prometheus metrics
 (`kelix_mcu_calls_total{result}`, `kelix_mcu_participants{mcu,conference}`,
 `kelix_mcu_rpc_errors_total{method,reason}` …). They are not delivered to
 scripts. See [§3.1 of the guide](../../mcu_module_guide.md#31-what-a-successful-join-looks-like).
@@ -402,6 +487,8 @@ image_dir        = "/var/lib/kelixip/img"    # idem
 logo_file        = "ives.png"                # every empty mosaic slot
 medias           = ["audio", "video", "text"]
 dtmf             = true
+# the collaboration channel: closed until the kinds are declared
+message_kinds    = ["hand.raised", "hand.lowered", "floor.request", "floor.grant"]
 
 [mediaserver.pool.mcu1]
 module = "mendooze"

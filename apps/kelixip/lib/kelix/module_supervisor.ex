@@ -71,6 +71,41 @@ defmodule Kelix.ModuleSupervisor do
     end
   end
 
+  @doc """
+  Reload the config of every loaded module whose block **changed** — the module half of
+  `kelictl reload-all` / `systemctl reload`.
+
+  A reload must not destroy live state, so a module that cannot reconfigure itself in
+  place (no `reload/2`) is **left running** and reported `{:skipped, :restart_required}`:
+  restarting `mcu` drops the live conferences and restarting `registrar` drops every
+  registration, which is not what an operator asking for a reload agreed to. An
+  unchanged block is `:unchanged`, and a block whose module is not loaded needs a
+  restart too — nothing is *started* here.
+
+  Returns `%{name => outcome}` over the blocks currently configured.
+  """
+  @spec reload_changed() :: %{
+          optional(String.t()) => :ok | :unchanged | {:skipped, atom} | {:error, term}
+        }
+  def reload_changed() do
+    loaded = Kelix.ModuleRegistry.all()
+    add_module_dir(module_dir_from_config())
+
+    Map.new(gather_blocks(), fn {name, config} ->
+      {name, reload_if_changed(name, config, Map.get(loaded, name))}
+    end)
+  end
+
+  defp reload_if_changed(_name, _config, nil), do: {:skipped, :not_loaded}
+  # the registry holds the raw block it was started with, so this compares like with like
+  defp reload_if_changed(_name, config, %{config: config}), do: :unchanged
+
+  defp reload_if_changed(name, _config, %{module: module}) do
+    if function_exported?(module, :reload, 2),
+      do: reload(name),
+      else: {:skipped, :restart_required}
+  end
+
   # {:skip, reason} (boot's "log & skip") becomes {:error, reason} for reload
   defp ok_or_error({:skip, reason}), do: {:error, reason}
   defp ok_or_error(other), do: other

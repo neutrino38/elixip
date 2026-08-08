@@ -47,7 +47,7 @@ defmodule Kelix.Mod.Mcu do
   require Logger
 
   alias Kelix.Metrics.Emit
-  alias Kelix.Mod.Mcu.{Adapter, Args, Client, Conference, Config, Event, Vocabulary}
+  alias Kelix.Mod.Mcu.{Adapter, Args, Client, Conference, Config, Event, Message, Vocabulary}
   alias Kelix.Mod.Mcu.Supervisor, as: McuSupervisor
 
   @conf_table :kelix_mcu_conferences
@@ -199,7 +199,11 @@ defmodule Kelix.Mod.Mcu do
         lookup_did: 2,
         conference: 1,
         mediaserver: 1,
-        media_config: 1
+        media_config: 1,
+        # the collaboration channel (§20, P10)
+        accept_messages: 1,
+        send_message: 4,
+        send_message: 5
       ]
     }
 
@@ -717,6 +721,100 @@ defmodule Kelix.Mod.Mcu do
       :error -> {:error, :no_such_participant}
     end
   end
+
+  # ── the collaboration channel (§20, P10) ─────────────────────────────────────
+
+  @doc """
+  Declare that **this leg's script handles `{:mcu_message, envelope}`** (§20.5 G-2),
+  and may therefore be addressed by its peers. Idempotent.
+
+  Nothing is delivered to a leg that has not said this. An `on_events` block compiles
+  to a plain `receive`, so a message no clause matches stays in that mailbox for the
+  rest of the call — which on a conference leg is hours. Declaring is what turns that
+  leak into a `skipped: :not_accepted` line in the sender's report.
+
+  The `mcu_accept_messages()` DSL macro is how a script says it; call it once, in the
+  state where the leg is admitted.
+  """
+  @spec accept_messages(SIP.Context.t() | Conference.participant()) ::
+          SIP.Context.t() | :ok | {:error, :no_such_participant}
+  def accept_messages(%SIP.Context{} = sip_ctx) do
+    outcome =
+      case SIP.Context.appdata_get(sip_ctx, :mcu_part) do
+        nil -> {:error, :no_such_participant}
+        part -> accept_messages(part)
+      end
+
+    # Never in `lasterr` (see `send_message/5`): failing to open a collaboration
+    # channel is not a reason to end a call.
+    SIP.Context.appdata_set(sip_ctx, :mcu_messages, outcome)
+  end
+
+  def accept_messages(%{conf_uid: uid, ref: ref}) do
+    case call({:accept_messages, uid, ref}) do
+      {:ok, _} -> :ok
+      other -> other
+    end
+  end
+
+  def accept_messages(_part), do: {:error, :no_such_participant}
+
+  @doc """
+  Send a collaboration message from `part` to its peers (§20).
+
+  `target` is `:all`, `:others`, `{:part_id, n}` or `{:name, "alice"}` — the
+  conference is the sender's own, deduced from its handle, so a script cannot address
+  a conference it is not in (§20.3: membership *is* the permission).
+
+  `kind` must be one of `[module.mcu] message_kinds` — an operator-declared
+  vocabulary, empty by default, which is what keeps the channel closed on a
+  deployment that does not use it. `payload` is a UTF-8 binary bounded by
+  `message_max_bytes`, opaque to the module.
+
+  `{:ok, %{delivered: n, skipped: [%{part_id:, reason:}]}}` — `delivered` counts the
+  **scenarios the message was handed to**, not the UAs that received something
+  (§20.7). Ordering is per sender, there is no acknowledgement, and a leg that joins
+  later sees nothing that was sent before it.
+
+  What the module does *not* do: put anything on the wire. The recipient's script
+  decides what a message becomes, and **sanitises it for whatever wire format it
+  chooses** — the bus validated the size and the type, nothing more (§20.5 G-6).
+  """
+  @spec send_message(
+          SIP.Context.t() | Conference.participant(),
+          Message.target(),
+          String.t(),
+          binary,
+          keyword
+        ) :: SIP.Context.t() | {:ok, Message.report()} | {:error, atom}
+  def send_message(part_or_ctx, target, kind, payload, opts \\ [])
+
+  # The context-aware form the `mcu_send` DSL macro expands to. The outcome goes to
+  # **appdata, not to `lasterr`**: a `goto` aborts the scenario on any `lasterr` other
+  # than `:ok`, and a rate-limited "hand raised" must never end a call. A script that
+  # cares reads `appdata_get(:mcu_last_send)`.
+  def send_message(%SIP.Context{} = sip_ctx, target, kind, payload, opts) do
+    outcome =
+      case SIP.Context.appdata_get(sip_ctx, :mcu_part) do
+        nil -> {:error, :no_such_participant}
+        part -> send_message(part, target, kind, payload, opts)
+      end
+
+    SIP.Context.appdata_set(sip_ctx, :mcu_last_send, outcome)
+  end
+
+  def send_message(%{conf_uid: uid} = part, target, kind, payload, opts)
+      when is_binary(kind) and is_binary(payload) and is_list(opts) do
+    with {:ok, conf} <- found(conference(uid)),
+         {:ok, sender} <- ok_or_no_participant(participant(part)) do
+      Message.send(conf, sender, target, kind, payload, opts)
+    end
+  end
+
+  def send_message(_part, _target, _kind, _payload, _opts), do: {:error, :bad_payload}
+
+  defp ok_or_no_participant({:ok, row}), do: {:ok, row}
+  defp ok_or_no_participant(:error), do: {:error, :no_such_participant}
 
   @doc """
   The media configuration a leg of `conference` must connect to, ready to be stored
@@ -1367,6 +1465,11 @@ defmodule Kelix.Mod.Mcu do
     :ets.new(@conf_table, tables)
     :ets.new(@did_table, tables)
     :ets.new(@mcu_table, tables)
+    # The collaboration channel's counters (§20.6): its own table, and the only
+    # `:public` one — a sender updates its rate bucket from its own process, which the
+    # three tables above (owner-writes-only) cannot allow. It holds counters and the
+    # bounds, never a roster and never a payload.
+    Message.create_table(config)
 
     # Entries exist from the start, `down` until their client announces itself, so
     # `create` on an unreachable MCU is refused with a clear error instead of
@@ -1476,6 +1579,19 @@ defmodule Kelix.Mod.Mcu do
   # §8.3.8. Writes, so they go through here: a recording is a singleton per conference
   # and a slot pin is a row update, and both must be serialised against the create /
   # recover paths that touch the same row.
+  # §20.5 G-2. A write on a participant row, so it goes through the owner process like
+  # every other one — once per leg, not once per message.
+  def handle_call({:accept_messages, conf_uid, ref}, _from, state) do
+    case fetch_row(conf_uid, ref) do
+      {:ok, _conf, _row} ->
+        update_participant(conf_uid, ref, &%{&1 | accepts_messages: true})
+        {:reply, {:ok, %{}}, state}
+
+      :error ->
+        {:reply, {:error, :no_such_participant}, state}
+    end
+  end
+
   def handle_call({:record_start, uid, file}, _from, state) do
     {:reply, do_record_start(state, uid, file), state}
   end
@@ -1734,6 +1850,11 @@ defmodule Kelix.Mod.Mcu do
       state: :ringing,
       medias: %{},
       silent: %{},
+      # §20.5 G-2: this leg receives collaboration messages only once its script has
+      # said it handles them (`mcu_accept_messages()`). Default false — an unhandled
+      # message would sit in a mailbox for the whole call, and a script written before
+      # the channel existed handles none.
+      accepts_messages: false,
       admitted_at: DateTime.utc_now(),
       joined_at: nil
     }
@@ -1810,6 +1931,10 @@ defmodule Kelix.Mod.Mcu do
         })
 
         emit_left_metric(reason, row)
+
+        # its rate bucket goes with it (§20.6) — a ref is never reused, so a bucket
+        # left behind would be a row nothing ever reads again
+        Message.forget_participant(conf.uid, part_ref)
 
         state = demonitor_participant(state, part_ref)
 
@@ -2969,35 +3094,22 @@ defmodule Kelix.Mod.Mcu do
     end
   end
 
+  # The name → participant reading lives in `Conference.by_name/2` (its full name or
+  # just the user part, two legs of the same user refused rather than coin-flipped):
+  # pinning a slot by name and addressing a message by name (§20.4) must agree, and
+  # they only can if there is one of it.
   defp resolve_holds(conf, {:name, name}) do
-    wanted = String.downcase(name)
+    case Conference.by_name(conf, name) do
+      {:ok, row} ->
+        {:ok, row.part_id}
 
-    matches =
-      conf
-      |> Conference.participants()
-      |> Enum.filter(&(is_integer(&1.part_id) and name_matches?(&1.name, wanted)))
-
-    case matches do
-      [one] ->
-        {:ok, one.part_id}
-
-      [] ->
+      :error ->
         {:error, :not_found}
 
-      many ->
-        ids = many |> Enum.map(& &1.part_id) |> Enum.sort() |> Enum.join(" and ")
-        {:error, ~s(holds: "#{name}" matches participants #{ids} — use the part_id)}
+      {:ambiguous, ids} ->
+        {:error,
+         ~s(holds: "#{name}" matches participants #{Enum.join(ids, " and ")} — use the part_id)}
     end
-  end
-
-  # A participant's name is its full AOR (`alice@phone_example_com`), which nobody wants
-  # to type: the user part alone matches too, and two legs of the same user are a
-  # refusal rather than a coin flip.
-  defp name_matches?(nil, _wanted), do: false
-
-  defp name_matches?(name, wanted) do
-    name = String.downcase(name)
-    name == wanted or hd(String.split(name, "@")) == wanted
   end
 
   # The mixer's logo, applied at create time and on every `logo` update. Its own RPC
@@ -3072,6 +3184,8 @@ defmodule Kelix.Mod.Mcu do
 
     :ets.delete(@did_table, {conf.domain, conf.did})
     :ets.delete(@conf_table, conf.uid)
+    # the sequence, the seen-ids and any surviving bucket (§20.6)
+    Message.forget_conference(conf.uid)
     disown_conference(state, conf.uid)
   end
 

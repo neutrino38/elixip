@@ -126,17 +126,114 @@ defmodule Mendooze.ConnTest do
     assert_receive {:ms_event, ^conn, :ice_connected}
   end
 
-  test "the connection-level :ice_connected is emitted once across medias" do
+  # ── Media connectivity (docs/design/media-connectivity.md) ──────────────────
+
+  # An offer the peer transmits on, media by media. `directions` overrides the
+  # default :sendrecv per media type.
+  defp av_offer(directions \\ %{}) do
+    Sdp.build(%{
+      ip: "10.9.8.7",
+      medias: [
+        %{
+          type: :audio,
+          port: 40_000,
+          codecs: ["PCMU"],
+          direction: Map.get(directions, :audio, :sendrecv)
+        },
+        %{
+          type: :video,
+          port: 40_002,
+          codecs: ["H264"],
+          direction: Map.get(directions, :video, :sendrecv)
+        }
+      ]
+    })
+  end
+
+  defp connected(stream, sess_tag, media),
+    do: send(stream, {:chunk, Jsr309FakeServer.event_frame([7, sess_tag, 4, media, 0])})
+
+  # Rule 2: video is in R, so only video releases the milestone. Releasing it on
+  # audio is what sent the opening keyframe into an unlatched video leg.
+  test "with video negotiated, only the video connectivity event emits :ice_connected" do
+    %{server: server, stream: stream} = start_media_server()
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio_video)
+    assert_receive {:jsr309_call, "MediaSessionCreate", [sess_tag, _q]}
+    assert {:ok, _answer} = Mendooze.set_remote_offer(conn, av_offer())
+
+    connected(stream, sess_tag, 0)
+    assert_receive {:ms_event, ^conn, {:media_connected, :audio}}
+    refute_receive {:ms_event, ^conn, :ice_connected}, 100
+
+    connected(stream, sess_tag, 1)
+    assert_receive {:ms_event, ^conn, {:media_connected, :video}}
+    assert_receive {:ms_event, ^conn, :ice_connected}
+  end
+
+  # Rule 3: no video in R, the first media of R releases it.
+  test "with no video negotiated, the first media emits :ice_connected" do
+    %{server: server, stream: stream} = start_media_server()
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio)
+    assert_receive {:jsr309_call, "MediaSessionCreate", [sess_tag, _q]}
+    {:ok, _offer} = Mendooze.get_local_offer(conn)
+    assert :ok = Mendooze.set_remote_answer(conn, remote_answer())
+
+    connected(stream, sess_tag, 0)
+    assert_receive {:ms_event, ^conn, {:media_connected, :audio}}
+    assert_receive {:ms_event, ^conn, :ice_connected}
+  end
+
+  # Rule 1: R is empty — no connectivity event can ever arrive, so the
+  # application is told rather than left waiting.
+  test "a peer that transmits on nothing gets :media_send_only and no :ice_connected" do
     %{server: server, stream: stream} = start_media_server()
 
     {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio_video)
     assert_receive {:jsr309_call, "MediaSessionCreate", [sess_tag, _q]}
 
-    # first validated packet on audio then video: only one :ice_connected
-    send(stream, {:chunk, Jsr309FakeServer.event_frame([7, sess_tag, 4, 0, 0])})
+    offer = av_offer(%{audio: :recvonly, video: :recvonly})
+    assert {:ok, _answer} = Mendooze.set_remote_offer(conn, offer)
+
+    assert_receive {:ms_event, ^conn, :media_send_only}
+
+    # even if the server did report one, the rule holds: R is empty
+    connected(stream, sess_tag, 0)
+    refute_receive {:ms_event, ^conn, :ice_connected}, 100
+  end
+
+  # The §4 limitation, asserted so it stays a known behaviour rather than a
+  # surprise: video is negotiated but the peer never transmits it, so video is
+  # not in R and audio releases the milestone.
+  test "video negotiated but not transmitted by the peer falls back to rule 3" do
+    %{server: server, stream: stream} = start_media_server()
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio_video)
+    assert_receive {:jsr309_call, "MediaSessionCreate", [sess_tag, _q]}
+
+    offer = av_offer(%{video: :recvonly})
+    assert {:ok, _answer} = Mendooze.set_remote_offer(conn, offer)
+    refute_receive {:ms_event, ^conn, :media_send_only}, 100
+
+    connected(stream, sess_tag, 0)
+    assert_receive {:ms_event, ^conn, :ice_connected}
+  end
+
+  # §5: the raw event follows the server's re-arming, the milestone does not.
+  test "a second receive cycle re-emits the raw event but not :ice_connected" do
+    %{server: server, stream: stream} = start_media_server()
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio_video)
+    assert_receive {:jsr309_call, "MediaSessionCreate", [sess_tag, _q]}
+    assert {:ok, _answer} = Mendooze.set_remote_offer(conn, av_offer())
+
+    connected(stream, sess_tag, 1)
+    assert_receive {:ms_event, ^conn, {:media_connected, :video}}
     assert_receive {:ms_event, ^conn, :ice_connected}
 
-    send(stream, {:chunk, Jsr309FakeServer.event_frame([7, sess_tag, 4, 1, 0])})
+    connected(stream, sess_tag, 1)
+    assert_receive {:ms_event, ^conn, {:media_connected, :video}}
     refute_receive {:ms_event, ^conn, :ice_connected}, 200
   end
 
@@ -1000,6 +1097,45 @@ defmodule Mendooze.ConnTest do
     refute answer =~ "goog-remb"
 
     # exactly the switches behind the answered feedback types
+    assert_receive {:jsr309_call, "EndpointSetRTPProperties", [3, 4, 1, props]}
+    assert props == %{"useNACK" => "1", "useRtcpFIR" => "1", "natLatch" => "1"}
+  end
+
+  # The assumed RFC 4585 §4 deviation (see answered_rtcp_fb/1): endpoints such as
+  # Linphone keep a plain RTP/AVP or RTP/SAVP profile while listing a=rtcp-fb, and
+  # drive their NACK/FIR off the answer's attributes, not its profile string. The
+  # feedback is confirmed; the profile stays what RFC 3264 mirroring dictates.
+  test "feedback offered under plain RTP/AVP is confirmed without upgrading the profile" do
+    %{server: server} = start_media_server()
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :video)
+
+    offer = """
+    v=0
+    o=- 1 1 IN IP4 10.9.8.7
+    s=call
+    c=IN IP4 10.9.8.7
+    t=0 0
+    m=video 40002 RTP/AVP 99
+    a=rtpmap:99 H264/90000
+    a=rtcp-fb:99 nack
+    a=rtcp-fb:99 nack pli
+    a=rtcp-fb:99 ccm fir
+    """
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, offer)
+
+    # no capability negotiation in the offer, so no upgrade and nothing to acfg
+    assert answer =~ "m=video 22002 RTP/AVP 99"
+    refute answer =~ "RTP/AVPF"
+    refute answer =~ "a=acfg"
+    # ...but the requested-and-implemented feedback is confirmed anyway,
+    # `nack pli` included (it rides the FIR switch, see @supported_rtcp_fb)
+    assert answer =~ "a=rtcp-fb:99 nack\r\n"
+    assert answer =~ "a=rtcp-fb:99 nack pli"
+    assert answer =~ "a=rtcp-fb:99 ccm fir"
+
+    # and the server switches follow the answered set, profile notwithstanding
     assert_receive {:jsr309_call, "EndpointSetRTPProperties", [3, 4, 1, props]}
     assert props == %{"useNACK" => "1", "useRtcpFIR" => "1", "natLatch" => "1"}
   end

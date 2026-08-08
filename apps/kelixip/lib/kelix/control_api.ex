@@ -24,6 +24,7 @@ defmodule Kelix.ControlAPI do
   | `shutdown_scenario/1` | `POST /scenarios/:id/shutdown` |
   | `reload_script/2` | `POST /scripts/reload[?notify=1]` (body `{"names": […]}`) |
   | `reload_domains/0` | `POST /domains/reload` |
+  | `reload_all/0` | `POST /reload-all` |
   | `module_reload/1` | `POST /modules/:name/reload` |
   | `mediaserver_toggle/2` | `POST /mediaservers/:name` (body `{"enabled": bool}`) |
   | `set_log_level/1` | `PUT /log/level` (body `{"level": …}`) |
@@ -175,6 +176,14 @@ defmodule Kelix.ControlAPI do
 
   post "/domains/reload" do
     respond(conn, Control.reload_domains())
+  end
+
+  # The umbrella reload (`kelictl reload-all`, `systemctl reload`): the report is the
+  # body either way, so a client sees per-stage what was applied and what was not — a
+  # bare 400 with no detail would be unusable here.
+  post "/reload-all" do
+    report = Control.reload_all()
+    json(conn, if(Control.reload_ok?(report), do: 200, else: 400), report)
   end
 
   post "/modules/:name/reload" do

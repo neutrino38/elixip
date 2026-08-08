@@ -75,6 +75,16 @@ defmodule UAS.InviteExample do
         reply_invite_with_sdp(200, [media: :tc])
         goto(loop, "UPDATE")
 
+      # In-dialog INFO — in practice a media_control picture_fast_update, which
+      # Linphone repeats every 15 s. We have nothing to do with it yet (relaying
+      # the FPU to the media server is the job of the mcu module), but it must
+      # still be answered: on_events is a plain receive, so an unmatched INFO
+      # stays in the mailbox, its server transaction sits in :trying and timer F
+      # fires 32 s later.
+      {:INFO, req, _trans, _dlg} ->
+        reply_request(req, 200, "OK")
+        goto(loop, "INFO")
+
       {:BYE, req, _trans, _dlg} ->
         reply_request(req, 200, "OK")
         media_stop();
@@ -104,4 +114,24 @@ defmodule UAS.InviteExample do
       10_000 -> scenario_failure("BYE not answered")
     end
    end
+
+  # Cooperative shutdown catch-all. The two states that know what a wind-down
+  # means for them handle it themselves above (wait_invite aborts, in_call sends
+  # a BYE and waits for its 200); this covers every other state — today
+  # hanging_up, where a second shutdown means "stop waiting for that 200" — and
+  # any state added later, which would otherwise leave the media resources
+  # allocated on the server.
+  #
+  # It also makes the script servable by kelixip: Kelix.ScriptRegistry refuses a
+  # script with no `on_shutdown` block, precisely so no served scenario relies on
+  # elixip's default (abrupt) abort.
+  #
+  # media_cleanup_ressources, not media_stop: it releases the action, the peer
+  # connection and the server handle, and is nil-safe — reached before
+  # media_connect() (or after a media_stop) it is a no-op, where media_stop
+  # raises on a context with no media server.
+  on_shutdown do
+    media_cleanup_ressources()
+    scenario_aborted("UAS Invite stopped gracefully")
+  end
 end

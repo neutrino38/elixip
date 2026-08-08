@@ -327,6 +327,14 @@ candidates: Sdp.host_candidates(local_ip, port, desc.rtcp_mux)
 rtcp_fb:   media == :video and String.ends_with?(desc.protocol, "F")
 ```
 
+> **Superseded (2026-08)**: the answer no longer gates `rtcp_fb` on a feedback
+> profile — it is the intersection of the offered `a=rtcp-fb` set with the
+> supported types (`answered_rtcp_fb/1`), emitted under plain `RTP/AVP`/`RTP/SAVP`
+> too. Linphone 6.2.0 offers `RTP/SAVP` with `a=rtcp-fb` lines and reads the
+> answer's attributes, not its profile string; an assumed RFC 4585 §4 deviation,
+> documented in `mcu_module.md` §6.3.1 rule 3. On the DTLS path shown here the
+> profile always ends in `F`, so the WebRTC behaviour is unchanged.
+
 plus `ice_lite: true` at session level. No `a=group:BUNDLE` is emitted or
 acknowledged (Java-validated scope, §1.7); each m= keeps its own port. Note
 the answer `setup` fix (G3) applies to *every* DTLS answer, browser-facing or

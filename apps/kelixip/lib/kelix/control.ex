@@ -162,8 +162,9 @@ defmodule Kelix.Control do
   def domains() do
     snapshot = current_domains()
     active = active_calls()
+    loaded = loaded_scripts()
 
-    Enum.map(snapshot.domains, &describe_domain(&1, active))
+    Enum.map(snapshot.domains, &describe_domain(&1, active, loaded))
   end
 
   @doc """
@@ -180,33 +181,63 @@ defmodule Kelix.Control do
   def domain(name) when is_binary(name) do
     case Kelix.Domains.lookup(current_domains(), name) do
       nil -> {:error, :not_found}
-      d -> {:ok, describe_domain(d, active_calls())}
+      d -> {:ok, describe_domain(d, active_calls(), loaded_scripts())}
     end
   end
 
   # A domain as both frontals show it. `function_enabled?/2` is asked rather than
   # re-derived here: "a function block present = enabled" is the router's reading
   # of domains.toml, and the operator must be told exactly what the router will do.
-  defp describe_domain(%Kelix.Domain{} = d, active) do
+  # `loaded` is passed in, not read here: `domains/0` renders every domain from one
+  # snapshot of the registry, so the list cannot show two domains disagreeing about
+  # the same script — and it is one call, not one per domain.
+  defp describe_domain(%Kelix.Domain{} = d, active, loaded) do
     %{
       name: d.name,
       aliases: d.aliases,
       max_calls: d.max_calls,
       functions:
         for(f <- [:registrar, :calls, :presence], Kelix.Router.function_enabled?(d, f), do: f),
-      registrar: d.registrar,
-      presence: d.presence,
-      dial_plan: Enum.map(d.dial_plan, &render_rule/1),
+      registrar: with_module(d.registrar, loaded),
+      presence: with_module(d.presence, loaded),
+      dial_plan: Enum.map(d.dial_plan, &render_rule(&1, loaded)),
       active_calls: Map.get(active, d.name, 0),
       registrations: map_size(registrations_for(d.name))
     }
   end
 
-  defp render_rule(%Kelix.DialRule{default?: true, script: script}),
-    do: %{pattern: nil, default: true, script: script}
+  # The script → module mapping, alongside every script name this view shows. The
+  # file name is what the operator configured; the module is what the BEAM runs, and
+  # the two are only related by the script's own `defmodule`. Printing both is how a
+  # routing surprise ("this DID answers with the wrong scenario") is read off the
+  # config instead of off the media.
+  defp loaded_scripts(), do: safe(fn -> Kelix.ScriptRegistry.loaded() end, %{})
 
-  defp render_rule(%Kelix.DialRule{raw: raw, script: script}),
-    do: %{pattern: raw, default: false, script: script}
+  # nil (function disabled) and a never-loaded script both stay as they were: a
+  # module is added only when the registry actually holds one.
+  defp with_module(nil, _loaded), do: nil
+
+  defp with_module(%{script: script} = cfg, loaded) do
+    case Map.get(loaded, script) do
+      # `stale` is added only when it is one — a `stale=false` on every line is noise,
+      # and its absence already means "the module matches the file".
+      %{module: mod, version: v, stale: stale} ->
+        cfg
+        |> Map.merge(%{module: inspect(mod), version: v})
+        |> then(&if stale, do: Map.put(&1, :stale, stale), else: &1)
+
+      nil ->
+        cfg
+    end
+  end
+
+  defp with_module(cfg, _loaded), do: cfg
+
+  defp render_rule(%Kelix.DialRule{default?: true, script: script}, loaded),
+    do: with_module(%{pattern: nil, default: true, script: script}, loaded)
+
+  defp render_rule(%Kelix.DialRule{raw: raw, script: script}, loaded),
+    do: with_module(%{pattern: raw, default: false, script: script}, loaded)
 
   @doc """
   The media servers of the pool and their state (`kelictl mediaserver list`), in
@@ -317,7 +348,15 @@ defmodule Kelix.Control do
     Map.new(names, fn name -> {name, Kelix.ScriptRegistry.reload(name)} end)
   end
 
-  @doc "Hot-reload `domains.toml` (`kelictl domain reload-all`). Path from the boot env."
+  @doc """
+  Hot-reload `domains.toml` (`kelictl domain reload-all`). Path from the boot env.
+
+  `check_scripts: true`: the new config is only accepted if every script it refers
+  to passes the §5.3 load-time contract (present, compiling, shutdown-aware, its
+  declared modules loaded), and a script edited on disk is recompiled as part of it.
+  Answering `:ok` on a config whose scripts cannot run is what left the operator to
+  discover it on the first call routed there.
+  """
   @spec reload_domains() :: :ok | {:error, term}
   def reload_domains() do
     case Application.get_env(:kelixip, :domains_path) do
@@ -325,12 +364,74 @@ defmodule Kelix.Control do
         {:error, :no_domains_path}
 
       path ->
-        with :ok <- Kelix.Domains.reload(path) do
+        with :ok <- Kelix.Domains.reload(path, check_scripts: true) do
           # a freshly enabled domain may need a module nobody installed (§8.3)
           Kelix.ModuleSupervisor.warn_missing_function_modules()
         end
     end
   end
+
+  @doc """
+  Reload **everything that can be reloaded without a restart** (`kelictl reload-all`,
+  and `systemctl reload kelixip`, which runs the same thing).
+
+  In order, and stopping at the first refusal:
+
+    1. `domains.toml`, atomically, with the load-time contract check on every script it
+       references (`reload_domains/0`) — so a config whose scripts are missing,
+       uncompilable or not shutdown-aware is refused here and **nothing** is applied;
+    2. the scripts, which step 1 already re-reads from disk: the report carries the live
+       version of each so an operator can see the edit went through;
+    3. the config block of every loaded module whose block changed
+       (`Kelix.ModuleSupervisor.reload_changed/0`), skipping the ones that would need a
+       restart rather than dropping their live state.
+
+  `config.toml` is deliberately **not** in the list: it is infrastructure (listeners,
+  ports, media pool, the control frontals) read once at boot, and changing it means
+  `systemctl restart`.
+
+  A rejected `domains.toml` leaves steps 2 and 3 unattempted — that file says which
+  script serves what and carries the registrar's own module block, so applying the rest
+  under a config the node refused is exactly the half-applied state §3.2 forbids.
+  """
+  @spec reload_all() :: %{
+          domains: :ok | {:error, term},
+          version: non_neg_integer,
+          scripts: %{optional(String.t()) => pos_integer},
+          modules: %{optional(String.t()) => atom | tuple}
+        }
+  def reload_all() do
+    case reload_domains() do
+      :ok ->
+        %{
+          domains: :ok,
+          version: safe(fn -> Kelix.Domains.current().version end, 0),
+          scripts: safe(fn -> Kelix.ScriptRegistry.versions() end, %{}),
+          modules: safe(fn -> Kelix.ModuleSupervisor.reload_changed() end, %{})
+        }
+
+      {:error, _} = err ->
+        %{
+          domains: err,
+          version: safe(fn -> Kelix.Domains.current().version end, 0),
+          scripts: %{},
+          modules: %{}
+        }
+    end
+  end
+
+  @doc """
+  Whether a `reload_all/0` report is a success — the **one** reading of it, shared by
+  `kelictl`'s exit code, the REST status and the `systemctl reload` outcome.
+
+  A skipped module is not a failure: it is a change that needs a restart, reported as
+  such, and the reload itself did what it could.
+  """
+  @spec reload_ok?(map) :: boolean
+  def reload_ok?(%{domains: :ok, modules: modules}),
+    do: not Enum.any?(modules, &match?({_name, {:error, _}}, &1))
+
+  def reload_ok?(_report), do: false
 
   @doc "Reload a module's config (`kelictl module reload <name>`)."
   @spec module_reload(String.t()) :: :ok | {:error, term}

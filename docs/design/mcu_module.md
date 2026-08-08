@@ -232,7 +232,10 @@ unprefixed goes nowhere**: only `codec.`-prefixed keys survive
 
 The feedback keys are what make the AVPF cases of §6.3.1 more than an SDP
 attribute: `useNACK`, `useRtcpFIR`/`useExtFIR` and `tmmbr` are the server-side
-switches behind `a=rtcp-fb: … nack`, `ccm fir` and `ccm tmmbr`.
+switches behind `a=rtcp-fb: … nack`, `ccm fir` and `ccm tmmbr`. `nack pli`
+rides the FIR switch: the server handles an incoming PLI exactly like a FIR
+(both reach `onFPURequested`), so confirming it costs nothing — and a peer
+that negotiated it may send PLI *instead of* FIR (Linphone does).
 
 ### 3.5 Security
 
@@ -865,8 +868,8 @@ once**, at answer time, and the classification is logged.
 
 | Case | Recognised by | Answered profile | RTCP feedback | Server calls |
 |---|---|---|---|---|
-| **`:rtp`** — plain SIP | no `a=crypto`, no `a=fingerprint` | mirror: `RTP/AVP` or `RTP/AVPF` | AVPF only | — |
-| **`:sdes`** — SIP with SRTP keys in the SDP (RFC 4568) | `a=crypto` present, no `a=fingerprint` | mirror: `RTP/SAVP` or `RTP/SAVPF` | AVPF only | `SetLocalCryptoSDES` + `SetRemoteCryptoSDES` |
+| **`:rtp`** — plain SIP | no `a=crypto`, no `a=fingerprint` | mirror: `RTP/AVP` or `RTP/AVPF` | intersection, any profile (rule 3) | — |
+| **`:sdes`** — SIP with SRTP keys in the SDP (RFC 4568) | `a=crypto` present, no `a=fingerprint` | mirror: `RTP/SAVP` or `RTP/SAVPF` | intersection, any profile (rule 3) | `SetLocalCryptoSDES` + `SetRemoteCryptoSDES` |
 | **`:dtls`** — WebRTC | `a=fingerprint` present (whatever `a=crypto` says) | mirror: `UDP/TLS/RTP/SAVPF` | always | `GetLocalCryptoDTLSFingerprint` (cached) + `SetRemoteCryptoDTLS`, plus `Set{Local,Remote}STUNCredentials` when ICE is offered |
 
 Rules that hold across all three:
@@ -880,15 +883,23 @@ Rules that hold across all three:
    negotiate a key exchange the peer never completes. This is what the adapter
    already does — DTLS is looked for across all medias first — and it is now
    stated as a rule rather than left as an ordering accident.
-3. **Feedback attributes are emitted only under an AVPF profile.** `a=rtcp-fb`
-   under `RTP/AVP` is not just useless, it is RFC 4585 §4 non-conformance: the
-   attribute is defined for the feedback profile. The set answered is the
-   **intersection** of what the offer asked for with what this server can do —
-   `nack`, `ccm fir`, `ccm tmmbr` — and never a fixed list, so a caller asking for
-   nothing gets nothing back.
+3. **Feedback asked for is feedback confirmed, whatever the profile says.** The
+   set answered is the **intersection** of what the offer asked for with what
+   this server can do — `nack`, `nack pli`, `ccm fir`, `ccm tmmbr` — and never a fixed list,
+   so a caller asking for nothing gets nothing back. The rule used to gate this
+   on a feedback profile (`…AVPF`) on RFC 4585 §4 grounds — `a=rtcp-fb` is
+   defined for AVPF — but real endpoints do not read it that way: Linphone 6.2.0
+   offers `RTP/SAVP` while listing `a=rtcp-fb:* ccm tmmbr`, `ccm fir` and more,
+   and drives its NACK/FIR/TMMBR off the answer's *attributes*, not its profile
+   string. Refusing to confirm them cost those calls their loss recovery, so the
+   emission is now decoupled from the profile — an **assumed deviation** from
+   RFC 4585, the same posture as the H.264 packetization-mode default (§6.3).
+   The answered *profile* is a separate question and is untouched: rule 1
+   mirroring and the RFC 5939 upgrade (§6.3.1) decide it exactly as before.
 4. **What is announced is what is switched on.** Each answered feedback type has
    its `SetRTPProperties` counterpart (§3.4), and they travel together:
-   `nack → useNACK`, `ccm fir → useRtcpFIR`, `ccm tmmbr → tmmbr`. Announcing
+   `nack → useNACK`, `nack pli → useRtcpFIR`, `ccm fir → useRtcpFIR`,
+   `ccm tmmbr → tmmbr`. Announcing
    `ccm fir` while never asking the server for RTCP FIR is the same class of bug
    as rule 9's unprefixed property — a capability the peer is told it has and that
    nothing implements.
@@ -1979,6 +1990,7 @@ callback fan-out is a fourth consumer.
 | `participant.media_timeout` | `part_id, media` | MCU event type `3` — RTP inactivity watchdog (**P7**, §16.1) |
 | `conference.recording_started` / `conference.recording_stopped` | `file, mcu` / `+ duration_s, reason` | **P9**, §8.3.8 |
 | `conference.slot_changed` | `slot, holds, part_id` | **P9**, §8.3.8 — our `SetMosaicSlot`, never a VAD reshuffle |
+| `participant.message` | `from_part_id, kind, size, delivered` | **P10**, §20 — one per fan-out. The **payload is never carried here**, nor logged |
 | `mediaserver.up` / `mediaserver.down` | `mcu, reason` | health transition (§9.2) |
 
 The last two are declared here from the start although the server does not emit
@@ -2019,6 +2031,8 @@ observations the script has no use for.
 | L13 | `recording.*` always records mosaic `0` + sidebar `0`, and `slot.*` always addresses mosaic `0` | §1.2 decision 6b | with `/mosaics` |
 | L14 | An unreadable `logo` is not reported — the server answers OK whatever the picture did | server API | a server increment |
 | L15 | **No real-time text over WebSocket for a conference participant.** A browser cannot carry T.140 on an RTP profile, so a WebRTC participant has no chat — while T.140 **over RTP** works (the MCU wires every participant into the text mixer at `CreateParticipant`). The capability exists, but only on the JSR-309 API (`jsr309_text_over_wss.md`, delivered 2026-08-07): the conference API has no `ConfigureMediaConnection`, and the media server registers a single WebSocket handler, `/jsr309/<sessionId>/<token>`, keyed on a `MediaSession`. This adapter therefore omits such a section from its answer, which is the honest answer — it cannot host it | server API | a server increment, §16.6 (S5) |
+| L16 | A script that does not declare `accepts_messages` receives no collaboration message — by design (§20.5 G-2), and the first thing to check when one "does not arrive" | §20 |
+| L17 | The collaboration channel has no total order across senders and no delivery receipt | §20.7 |
 
 ---
 
@@ -2040,7 +2054,7 @@ observations the script has no use for.
 | P8a, unit ✔ | the RPC order is **unchanged** (decision 11): `StartReceiving` gains the `offer` struct and returns three elements, and that is all. Tests pin the arguments (`offer == %{"fmtp" => …}`, the peer's parameters verbatim) and the answer built from the verdict. Answer construction from a server-returned `fmtpByPt`, including the two boundary cases of the contract — an accepted PT with an **empty** fmtp is advertised with an `a=rtpmap` and no `a=fmtp`, an **absent** PT is not advertised at all. The fmtp string reaches the answer **byte-for-byte** (round-trip parse), and `fmtp_raw` forwards a parameter ExSDP does not model without losing it |
 | P8, unit | per-media outcomes: one empty media ⇒ that `m=` line at port 0 and a `200 OK`; **all** medias empty ⇒ `488`; a video-only leg (empty audio) is now accepted and joins the mosaic but not the audio mixer — the test that pins the lifted `ensure_audio` guard |
 | P8, unit | the **fallback**: a stub returning `[port, ip]` with no third element reproduces the pre-S3 answer byte-for-byte, and logs `negotiated-by=local`. This is the rolling-upgrade path, so it is a first-class test and not an afterthought |
-| P8, unit | the three transport cases of §6.3.1 against captured offers: `RTP/AVP`, `RTP/AVPF`, `RTP/SAVP` + `a=crypto`, `RTP/SAVPF` + `a=crypto`, and `UDP/TLS/RTP/SAVPF` + `a=fingerprint`. Each asserts the mirrored profile, the classification in the trace, the `a=rtcp-fb` set as the **intersection** with the offer (a caller asking for nothing gets nothing, `goog-remb` is never answered), and the matching `SetRTPProperties` switches (`nack→useNACK`, `ccm fir→useRtcpFIR`, `ccm tmmbr→tmmbr`). Plus the precedence case: an offer carrying **both** `a=crypto` and `a=fingerprint` is classified `:dtls` |
+| P8, unit | the three transport cases of §6.3.1 against captured offers: `RTP/AVP`, `RTP/AVPF`, `RTP/SAVP` + `a=crypto`, `RTP/SAVPF` + `a=crypto`, and `UDP/TLS/RTP/SAVPF` + `a=fingerprint`. Each asserts the mirrored profile, the classification in the trace, the `a=rtcp-fb` set as the **intersection** with the offer (a caller asking for nothing gets nothing, `goog-remb` is never answered), and the matching `SetRTPProperties` switches (`nack→useNACK`, `nack pli→useRtcpFIR`, `ccm fir→useRtcpFIR`, `ccm tmmbr→tmmbr`). Plus the precedence case: an offer carrying **both** `a=crypto` and `a=fingerprint` is classified `:dtls` |
 | P8, config | the removed keys (§8.4) are accepted with a warning naming their replacement and change nothing; `medias` declines the medias it omits; `dtmf = false` drops the telephone-event PT from what is proposed |
 | P8c, unit (server) | the RFC 6184 §8.2.2 rules of §16.3.4 (b), against the negotiator directly: the answer keeps the **offer's profile**; with `level-asymmetry-allowed=1` on both sides the announced level is **ours**; without it, the **offer's** level — the case that must keep producing today's byte-for-byte answer for a plain SIP handset; the encoder is bound to `min(ours, the peer's)`; `sprop-parameter-sets` is neither reflected nor emitted |
 | P8c, unit (server) | the pragmatic escape: an offer naming a level **above** our decoding capability is answered with **our maximum**, the payload type is **kept**, and a `warning` naming `offered=`, `announced=` and the participant is emitted — the log being the only evidence, its absence is a test failure, not a detail. And the escape does **not** leak into the send direction: the encoder is still bound by the peer's declared level and packetization mode |
@@ -2056,7 +2070,7 @@ observations the script has no use for.
 Status as of 2026-08-03: **P0′ through P6 are implemented**, each verified against
 the live media server as well as against the recording stub. **S4 (§16.5) shipped
 out of order**, on the server *and* in the module, because it removes a whole class
-of configuration failure rather than adding a feature; **P9 (§8.3.8) and TC shipped**
+of configuration failure rather than adding a feature; **P10 (§20) shipped**; **P9 (§8.3.8) and TC shipped**
 likewise. What remains is **P7 and P8**, both gated on the server-side work of §16,
 and the deliberately-deferred items of §15.1.
 
@@ -2073,11 +2087,12 @@ and the deliberately-deferred items of §15.1.
 | **P6** | ✔ | Packaging: `kelixip-mod-mcu` RPM/deb, the commented `[module.mcu]` block in the shipped `config.toml`, and each module package carrying its own document | `dnf install kelixip-mod-mcu` + a config snippet gets a working conference. The RPM is **built and inspected on AL9** (four packages, every `Mcu*` beam claimed, `mcu.md` + the guide under `/usr/share/doc/kelixip-mod-mcu/`, the sample block accepted by `Config.parse/1`); the deb is wired but not yet built, which must happen on the target release |
 | **P7** | ✔ | **Server-side (Mendooze), §16.1-16.2**: `StartRTPTimeout` RPC + MCU event types `3` and `4`, wired `RTPSession::Listener` → `RTPParticipant` → `MultiConf` → `MCU` event queue; kelixip arms per media at the ACK (never on text), ANDs the timeouts (§16.1) and routes both events to the operator view and the scenario | unplugging a phone's network mid-call frees its slot and its mosaic tile within `rtp_timeout_ms`, a leg that answered and never sent media is reaped, and a *single* dead media no longer kills a working call — **L1 lifted**. **L2 only partly**: event `4` reaches the scenario as `{:mcu_event, :media_connected, media}`, not yet as the behaviour's `{:ms_event, conn, :ice_connected}` — that mapping needs the conn ref, which the module does not hold, and the mosaic-join-on-real-video it would enable is not done |
 | **P8a** | ✔ | **Delegated negotiation — the plumbing, §16.3.1-16.3.3**: `StartReceiving` takes the offer's fmtp and returns `(recPort, announcedIp, fmtpByPt)`; the server calls the negotiator and installs the **filtered** map; `SetRTPProperties` splits around it (decision 8); kelixip deletes its local arbitration and its four codec config keys, classifies and traces the three transport cases of §6.3.1, and answers `a=rtcp-fb` as an intersection | the accepted payload types and their fmtp come from the server, verbatim — **most of L4 lifted**; a plain-RTP, an SDES and a WebRTC leg are each identifiable from one log line; mcuGold and a pre-S3 kelixip on the same server are unaffected. Ships without P8c thanks to the fallback |
-| **P8c** |  | **Remote-fmtp ingestion, §16.3.4 (b)**: `CodecNegotiator::Negotiate` stops ignoring `remoteFmtp`; `H264Encoder::GetFmtpParams` implements RFC 6184 §8.2.2 (profile kept, level per `level-asymmetry-allowed`, that parameter emitted); `effectiveProps` bound to `min(ours, the peer's)` and applied to the encoder; `CODECS.md` documents the new key | a caller that allows level asymmetry is answered our real decoding capability and receives a stream bounded by *its* declared level — **L4 fully lifted**, and a plain SIP handset's answer is unchanged byte-for-byte |
+| **P8c** | ✔ | **Remote-fmtp ingestion, §16.3.4 (b)** (server phase 5, mediaserver 1.12.1): `CodecNegotiator::Negotiate` stops ignoring `remoteFmtp`; `H264Encoder::GetFmtpParams` implements RFC 6184 §8.2.2 (profile kept, level per `level-asymmetry-allowed`, that parameter emitted); `effectiveProps` bound to `min(ours, the peer's)` and applied to the encoder; `CODECS.md` documents the new key | a caller that allows level asymmetry is answered our real decoding capability and receives a stream bounded by *its* declared level — **L4 fully lifted**, and a plain SIP handset's answer is unchanged byte-for-byte |
 | **P8b** |  | **JSR-309 answerer alignment** (§19.3, C2-C4): the point-to-point path adopts the answerer rule of §6.3.1 — mirror the offered profile, intersect `a=rtcp-fb`, send `useRtcpFIR`, drop `goog-remb` — through the shared helpers in `MediaServer.SdpTools`. **kelixip-only, no server change.** Gated on P8 being implemented *and tested* against real callers | an `RTP/AVPF` offer is answered `RTP/AVPF` on both paths, the feedback answered is the feedback asked for, and every announced type has its server-side switch — one rule, one implementation, two adapters |
 | **P9** | ✔ | **The inspection surface** (§8.3.8): `recording.start\|show\|stop`, `slot.list\|update`, the `logo` field and its `[module.mcu]` defaults | media-server tests 5, 6 and 7 are runnable from `kelictl` alone: a `record.mp4` to look at, a slot map that shows the VAD reshuffle, and a logo in the empty slots |
 | **TC** | ✔ | **Total conversation** (§1.1 point 4): T.140 + RFC 4103 redundancy on the conference leg — `@supported_medias` gains `:text`, `SetTextCodec` at ACK time, the `red` fmtp in the answer, and the reference scripts ask for `media: :tc` | a terminal offering `m=text` with `red`+`t140` is answered on both, `SetTextCodec` carries `T140RED`, and the three medias flow on one leg |
 | **S4** | ✔ | **Server-side (Mendooze), §16.5**: `--public-ip` as the one announced address, read by `GetMediaCandidates` *and* returned by `StartReceiving`; the module drops `rtp_ip`/`public_ip` and takes its media servers from `[mediaserver.pool.*]` | a conference leg's `c=` line carries the address the *server* reported, a node behind NAT is fixed by one server flag, and the module declares no media server of its own — **G2 lifted** |
+| **P10** | ✔ | **The collaboration channel** (§20): `send_message/4` on the roster (`:all` / `:others` / one participant), the `{:mcu_message, …}` envelope, the `accepts_messages` load-time declaration, the per-sender token bucket in a public ETS table and the `participant.message` event | two admitted legs exchange a `hand.raised` through their scripts, a leg that declared nothing is reported skipped rather than silently leaking a mailbox, and a sender over its rate is refused `:rate_limited` — **no payload in any log line** |
 
 Phases P1-P2 are the minimum viable increment; everything after is additive and
 independently shippable. **P0′ is deliberately not numbered first**: it is the
@@ -2346,13 +2361,18 @@ already exercises — the MCU side is wiring, not algorithm.
    `negotiatedProps[pt] = codec.effectiveProps` per media. This mirrors
    `Endpoint::Port::NegotiateReceiving` (`mcu/src/jsr309/Endpoint.cpp:516`) closely
    enough to be read side by side with it.
-3. **Remote fmtp ingestion — the one piece that does not exist yet, and it is
-   P8c.** `CodecNegotiator::Negotiate` takes a `const Properties* remoteFmtp` and
-   currently ignores it (`negotiator.cpp:68-69`, `(void) remoteFmtp` — "phase 5" in
-   the server's own `nego_fmtp.md`). What it must do for **H.264 first** is rules
-   1-4 of §16.3.4: keep the offer's profile, choose the level according to
-   `level-asymmetry-allowed`, emit that parameter ourselves, and set
-   `effectiveProps` to `min(our capability, the peer's declared level)`.
+3. **Remote fmtp ingestion — P8c, since implemented server-side** ("phase 5" in the
+   server's own `nego_fmtp.md`, shipped in mediaserver 1.12.1). `CodecNegotiator::Negotiate`
+   resolves per payload type through the codec's `ResolveNegotiation` (`negotiator.cpp`,
+   `ResolveAudio`/`ResolveVideo`): **H.264** applies rules 1-4 of §16.3.4 — offer's
+   profile kept, level per `level-asymmetry-allowed`, that parameter emitted, and
+   `effectiveProps` bound to `min(our capability, the peer's declared level)`
+   (`h264encoder.cpp:430`); **AV1** clamps emission to the peer's declared level
+   (phase 5b); **opus** announces the *local* receive preference per RFC 7587 §7
+   (never a reflection — the answered `useinbandfec=0;usedtx=0` is the local
+   default, honest while the decoder does not exploit FEC) while ingesting the
+   peer's `useinbandfec`/`maxaveragebitrate` into the emitting encoder's
+   `effectiveProps`. Verified against a live Linphone 6.2 offer on 2026-08-07.
    `H264Encoder::GetFmtpParams` grows the level and asymmetry logic; the
    `codec.*` vocabulary in `CODECS.md` grows `level-asymmetry-allowed`. Without this
    step the delegation still filters payload types correctly but announces the
@@ -2967,3 +2987,184 @@ neutral module — so the second path adopts them rather than reimplementing the
 
 That is also what keeps this section from rotting: the fix and the rule it follows
 are one sentence apart, and the rule is not MCU-specific.
+
+---
+
+## 20. P10 — the collaboration channel between participants
+
+**Status: specified and implemented 2026-08-07.** Decisions (A)/(no admin entry
+point)/(ETS buckets) taken with the operator on the same day; they are recorded as
+20.3, 20.9 and 20.6. Two points moved between the specification and the
+implementation, both noted where they belong: how a leg declares that it accepts
+messages (20.5 G-2) and where the outcome of a send lands (20.4).
+
+### 20.1 What it is for, and the line it must not cross
+
+A participant's script needs to say something to the *other participants' scripts*:
+a raised hand, a floor-control token, "I am sharing my screen", "mute yourself".
+Today it cannot — the roster is inside the module and a scenario has no handle on
+its peers.
+
+**This is a signalling channel, not text.** The MCU already mixes T.140 real-time
+text between the legs that negotiated `m=text`, in the media server, and that is
+what a Total Conversation client displays. This channel is invisible to the mixer
+and carries **application state between scripts**. The two must not be conflated:
+anything a human is meant to *read as text in the call* belongs to the text mixer,
+and putting chat here would mean re-implementing, badly, a mixer that already works.
+
+### 20.2 The module is a bus, the script owns the wire
+
+The module does the **addressing and the fan-out** — it is the only thing that
+knows who is in a conference. The scenario owns the **SIP dialog** — it is the only
+thing that can emit on it, and the only thing that knows what its UA understands.
+
+So the module delivers a message *to the recipient's scenario process*, and that
+scenario decides what it becomes: an in-dialog MESSAGE, an INFO, a state change, or
+nothing at all. Same principle as `kick/2` (§8.2), which asks the scenario to wind
+down instead of tearing its dialog down behind its back.
+
+**The module never writes on the wire, and never renders anything into the mix.**
+
+### 20.3 Membership is the permission
+
+One decision shapes everything else: the sender is identified by **its own
+participant handle**, and the conference is deduced from it. A script passes no
+`uid`, so it cannot address a conference it is not in — there is no cross-conference
+messaging, and no permission model to write, review or get wrong. The check is the
+one `attach/1` and `mute/3` already do: resolve the handle against the roster, or
+`{:error, :no_such_participant}`.
+
+### 20.4 The API
+
+One function, because the three cases the operator asked for differ only in the
+addressing — three copies would be three copies of the guards of 20.5:
+
+```elixir
+@spec send_message(Conference.participant(), target, kind :: String.t(), payload :: binary, keyword) ::
+        {:ok, %{delivered: non_neg_integer, skipped: [%{part_id: term, reason: atom}]}}
+        | {:error, :no_such_participant | :no_such_target | :ambiguous_target
+                 | :channel_closed | :unknown_kind | :too_large | :bad_payload
+                 | :rate_limited | :duplicate_message | :not_found}
+
+# target :: :all | :others | {:part_id, pos_integer} | {:name, String.t()}
+# opts   :: [msg_id: String.t(), include_ringing: boolean]
+```
+
+`kind` is **positional and required**: it is checked against an operator-declared
+whitelist, and a required value hidden in `opts` is a required value a caller forgets.
+
+`:all` includes the sender, `:others` does not — a script that echoes its own
+message to itself is a common enough bug that the distinction is worth being in the
+address rather than in each script.
+
+What a recipient's scenario receives, on the channel `{:mcu_event, …}` already uses:
+
+```elixir
+{:mcu_message,
+ %{
+   msg_id: "m-3f9a2b10",              # unique per message, for the loop guard of 20.5
+   seq: 42,                           # monotonic per conference — detects reordering
+   from: %{part_id: 7, display_name: "Alice"},
+   kind: "hand.raised",               # from a declared whitelist, so a receiver dispatches
+   payload: <<…>>,                    # opaque to the module
+   sent_at: ~U[2026-08-07 10:38:31Z]
+ }}
+```
+
+The DSL sugar follows the `Kelix.Mod.Mcu.Script` scheme (the `admit`/`attach`/`leave`
+mixin): `mcu_send(target, kind, payload)` and `mcu_accept_messages()`, rebinding
+`sip_ctx` in place.
+
+**The outcome does not go to `lasterr`** — the one place the implementation departs
+from the sketch above, and it is not cosmetic: `goto` aborts the scenario as a failure
+on any `lasterr` other than `:ok`, so a "hand raised" refused because the sender was
+over its rate would **end the call**. A collaboration message is never a reason to
+tear a call down. It lands in `appdata_get(:mcu_last_send)` (`{:ok, report}` or
+`{:error, reason}`) for the scripts that care, and there is no `do_mcu_send/4`
+indirection either: the delegation exists for `admit`/`attach`/`leave` because they
+have a SIP response to compose, and this has none.
+
+### 20.5 The guards, and what each one is there to prevent
+
+| # | Risk | Guard |
+|---|---|---|
+| G-1 | Addressing outside one's own conference | the sender's handle carries the `conf_uid` (20.3); no `uid` argument exists |
+| G-2 | A message rotting in a mailbox — the leak the `{:mcu_event, …}` channel already warns about, on calls that last hours | deliver **only** to legs that declared they handle it, with `mcu_accept_messages()` (`Kelix.Mod.Mcu.accept_messages/1`), once, where the leg is admitted. The others come back in `skipped` with `:not_accepted`, so the count never lies. *Specified as a `config` block key checked at load; implemented as this call instead — the module holds a leg's scenario **pid**, not its script module, so a declaration in the `config` block could only be read by walking the instance pool on every message. And there was never anything to "check" at load: the declaration is not a claim about the world, it is a fact the bus needs at send time* |
+| G-3 | A wedged scenario | check `message_queue_len` before sending; above `message_queue_max` (default 100) the leg is skipped `:backpressure`. A backstop, not a policy: G-2 is what makes it rare |
+| G-4 | Flood — N senders × M messages × N recipients | a token bucket **per sender**: `message_rate` (default 5/s, burst 10) ⇒ `:rate_limited`. The fan-out itself is bounded by `max_participants` |
+| G-5 | An abusive payload | `message_max_bytes` (default 1024) ⇒ **refused, never truncated**; UTF-8 validated; `kind` must be in `message_kinds` (a configured whitelist) |
+| G-6 | Injection on the wire (a CRLF into a SIP body, a control character into T.140) | the module validates **type and size**; the **script sanitises for its own wire format**, which it alone knows. Stated here because "the module validated it" is exactly the false assumption that produces header injection |
+| G-7 | A rebroadcast storm | the envelope carries `msg_id`, and a small per-conference LRU refuses to fan out an id already seen. Documented rule: a script does not rebroadcast what it received |
+| G-8 | Legs that are not ready, or gone | default `state: :connected` only (a `:ringing` leg is mid-negotiation, a `:leaving` one is winding down); `Process.alive?` on the scenario pid. `include_ringing: true` exists and is rarely right |
+| G-9 | Identity leak in a conference where participants must not learn each other's AOR | the envelope carries `part_id` and `display_name` only — **never** the `from` AOR |
+| G-10 | Chat content in the logs and the metrics | one `participant.message` event with `from_part_id, kind, size, delivered`; the **payload is never logged**, at any level |
+
+### 20.6 Where the fan-out runs — and why the buckets are their own table
+
+The roster is read **straight from ETS**, and the fan-out runs **in the caller's
+process**: routing every message through the registry GenServer would put a
+per-message round-trip on the process that also serialises creates, updates and the
+recovery paths. Reads already work this way (§5.3).
+
+The token buckets of G-4 therefore cannot live in the registry's own tables, which
+are `:protected` — only the owner writes. They get **one dedicated `:public` ETS
+table** of counters, updated with `:ets.update_counter/4` (a decayed bucket:
+`{key, tokens, last_refill_ms}`), keyed by `{conf_uid, part_ref}` and swept with the
+participant row. That table holds **nothing but counters**: no payload, no roster, no
+state anyone else reads — which is what makes a public table acceptable here and not
+a hole in §5.
+
+### 20.7 The delivery contract — stated so that nobody assumes more
+
+* **`delivered` counts the scenarios the message was handed to.** Not the UAs that
+  received something, not the humans who saw it. Whether a SIP MESSAGE got its 200
+  is the *receiving* script's business, and it can report it as its own message.
+* **Order is per sender, not global.** Erlang guarantees ordering between one sender
+  and one receiver; two participants' messages may be observed in different orders
+  by different legs. `seq` lets a script *detect* reordering or loss; it does not
+  remove it, and the module will not promise a total order it would need a single
+  writer to give.
+* **No acknowledgement, no retry, no store-and-forward.** A leg that joins later
+  sees nothing that was sent before it arrived. History is a different feature, with
+  a retention policy, and it is not this one.
+
+### 20.8 Configuration (§8.4 additions)
+
+```toml
+[module.mcu]
+# The collaboration channel (§20). Absent = the defaults below; message_kinds = []
+# turns the channel off for every conference on this node.
+message_rate       = 5        # per sender, per second (burst = 2 x rate)
+message_max_bytes  = 1024     # refused above, never truncated
+message_queue_max  = 100      # skip a scenario whose mailbox is longer than this
+message_kinds      = ["hand.raised", "hand.lowered", "floor.request", "floor.grant"]
+```
+
+### 20.9 Scope — what is deliberately left out of v1
+
+* **No administration entry point.** No `POST /conferences/:uid/messages`, no
+  `kelictl mcu message.send`: an operator announcement is a *second* authorisation
+  model (admin credential, sender `:system`, no membership) grafted onto a design
+  whose whole simplicity is 20.3. When it is wanted it is one command with the same
+  fan-out — and that decision can be taken with a real use case in hand.
+* **No history, no persistence, no delivery receipts** (20.7).
+* **No transport to an external UI**: `participant.message` is emitted like every
+  other event of §11.1 and, like them, is logged and metered rather than pushed (L9).
+* **No inter-conference messaging** (20.3).
+
+### 20.10 Limitations this adds
+
+| # | Limitation | Origin |
+|---|---|---|
+| L16 | A script that does not declare `accepts_messages` receives nothing — silently, from the sender's point of view, apart from its `part_id` appearing in `skipped`. This is G-2 working as intended, and it is also the first thing to check when a message "does not arrive" | 20.5 G-2 |
+| L17 | No total order across senders, and no delivery receipt: a script that needs either has to build it on top of `seq`/`msg_id` | 20.7 |
+
+### 20.11 Test plan (§13 additions)
+
+| Level | What |
+|---|---|
+| Unit | the three targets resolve (`:all`, `:others`, by `part_id`, by `name`, ambiguous name ⇒ refusal); a handle from another conference is refused; a leg that declared nothing is `skipped`, not delivered to; a `:ringing` leg is skipped by default |
+| Unit, guards | payload over `message_max_bytes` refused whole; a `kind` outside the whitelist refused; the bucket empties and refills (`:rate_limited` then accepted again); a scenario with a long mailbox is skipped; the same `msg_id` fanned out twice is refused once |
+| Unit, envelope | `from` carries `display_name` and never the AOR; `seq` is monotonic per conference across senders |
+| Integration | two admitted legs, one sends `:others`: the peer's scenario receives exactly one `{:mcu_message, …}`, the sender none; a leg whose scenario is dead is skipped and its row reaped as usual |
+| Observability | one `participant.message` event per fan-out, and the payload appears in **no** log line at any level |

@@ -24,13 +24,14 @@ on Ubuntu/Debian, the same file the systemd unit reads.
 | Command | R/W | Does |
 |---|---|---|
 | `kelictl status` | R | Uptime, counters, listeners, media pool, node state |
-| `kelictl monitor` | R | Scenarios in progress (reuses the `--monitor` view) |
+| `kelictl monitor` | R | Scenarios in progress: id, domain, function, **script**, account, FSM state/event/command (reuses the `--monitor` view) |
 | `kelictl registration list [domain]` | R | Registrations, one list per domain (all domains, or one) |
 | `kelictl registration show <domain> <aor>` | R | One AOR and its bindings, in detail |
 | `kelictl registration remove <domain> <aor> [contact]` | W | Drop a registration |
 | `kelictl domain list` | R | Served domains, their functions and live counters |
 | `kelictl domain show <domain>` | R | One domain in detail (name **or** alias) |
-| `kelictl domain reload-all` | W | Hot-reload `domains.toml` (atomic) |
+| `kelictl domain reload-all` | W | Hot-reload `domains.toml` (atomic, scripts checked) |
+| `kelictl reload-all` | W | Reload everything that can be applied live: `domains.toml`, the scenario scripts, the module configs. What `systemctl reload` runs |
 | `kelictl mediaserver list` | R | The media-server pool: adapter, URL, switch, health |
 | `kelictl mediaserver show <name>` | R | One media server in detail |
 | `kelictl mediaserver enable\|disable <name>` | W | Take a media server in/out of the pool |
@@ -94,14 +95,19 @@ aliases:       example.fr
 max calls:     500
 active calls:  0
 registrations: 0
-registrar:     default_expires=3600 script=registrar.exs
+registrar:     default_expires=3600 module=Registrar.Example.V1 script=registrar.exs version=1
 presence:      (disabled)
 dial-plan:
-  1. 0[1-9]XXXXXXXX -> user2pstn.exs
-  2. (default)      -> catchall.exs
+  1. 0[1-9]XXXXXXXX -> user2pstn.exs  [User2Pstn.V1]
+  2. (default)      -> catchall.exs   [Catchall.V3 — file changed since load]
 
 $ kelictl domain show ghost.example.org
 no such domain
+
+$ kelictl monitor
+id  domain       function   script         account       state       event     command
+3   example.com  calls      play.exs       +33970260233  in_call     ACK       media_play
+4   example.com  registrar  registrar.exs  alice         registered  REGISTER  reply 200
 
 $ kelictl mediaserver list
 server  adapter   url                  enabled  health  modules
@@ -125,6 +131,16 @@ error: :unknown
 $ kelictl domain reload-all
 ok
 ```
+
+`monitor` joins two views on the instance `id` (the id `stop` takes): what the
+pool knows — domain, function and the **script** `domains.toml` routed to — and
+where the scenario's FSM sits: its state, the event that got it there, the last
+command it issued. `account` is **who this instance serves**: a script that knows
+the answer says so (the registrar shows the AOR it bound, an MCU call the DID of
+the conference it joined), and until it does, the framework shows the identity the
+inbound request asserts — its digest username, else the user part of
+`P-Asserted-Identity`, else the one in `From`. A `-` means the column has no value
+yet, not that it is unsupported.
 
 An AOR is only unique **within a domain**, so the domain is part of the address
 rather than a filter on it: `show` and `remove` take `<domain> <aor>`, and `list`
@@ -177,6 +193,82 @@ round-robin order. Two things that read alike are kept apart there:
 A server the pool does not declare is `error: :unknown` on `enable`/`disable` and
 `no such media server` on `show`.
 
+### Reloading a running node
+
+```console
+$ kelictl reload-all
+domains.toml:  reloaded (v4)
+scripts:       mcu.exs v2, registrar.exs v1
+modules:       auth_db unchanged, mcu unchanged, registrar unchanged
+```
+
+`kelictl reload-all` is what `systemctl reload kelixip` runs. In one step it applies
+`domains.toml` (domains, dial-plan, the registrar's block), re-reads the **scenario
+scripts** whose file changed on disk, and applies the module blocks that can be
+changed without interrupting anything.
+
+It is **all-or-nothing on `domains.toml`**: the file is only accepted if it parses,
+its dial-plan patterns compile, *and* every script it names is servable — present in
+`script_dir`, compiling, and handling shutdown. One offender and the reload is
+refused, naming the domain and the rule that points at it; the configuration that was
+running stays exactly as it was, and nothing else is touched:
+
+```console
+$ kelictl reload-all
+domains.toml:  REJECTED, still v4 — 1 script(s) rejected:
+  - domain example.com [domain.registrar]: /etc/kelixip/scripts/registrar.exs does not
+    handle cooperative shutdown (missing `on_shutdown` block): refused
+scripts:       (none loaded)
+modules:       (none configured)
+```
+
+The same check runs at **boot**: a `domains.toml` naming a script the node cannot
+serve aborts the start, with the reason on stderr (so `systemctl status` and the
+journal show it) rather than starting a server that answers every call to that domain
+with a `500`.
+
+Part of that check is that **two scripts may not declare the same module**. The module
+name comes from the file's own `defmodule`, not from its name, so two copies of the
+same scenario — the usual way a `record.exs` and a `play.exs` are born — compile to the
+same module and the second load silently overwrites the first: both dial-plan rules
+then run one body. Copying a script means renaming its module too, and a node that
+finds a duplicate refuses the second script by name:
+
+```console
+$ kelictl reload-all
+domains.toml:  REJECTED, still v4 — 1 script(s) rejected:
+  - domain example.com call rule "900032222": /etc/kelixip/scripts/play.exs defines
+    UAS.InviteExample (owned by record.exs); two scripts cannot share a module name —
+    rename the module in one of them
+```
+
+### What is actually running
+
+`kelictl domain show` prints, in brackets after each script, the **module** the BEAM
+runs for it — the compiled truth, next to the file name you configured. The `.V<n>`
+suffix is the load version: it goes up on every reload, and two rules showing the same
+module mean the two scripts collided.
+
+It also compares the loaded code against the file **right now**, without reloading
+anything, and marks the difference: `— file changed since load` (an edit is waiting for
+a `kelictl reload-script <name>`), `— file missing` (the file is gone; the loaded
+version keeps serving), or `— file unstamped` (it could not be read at load time).
+`[not loaded]` means no call has reached that rule yet and no reload has pre-loaded it.
+
+What a reload deliberately does **not** do:
+
+* **`config.toml`** — listeners, ports, media-server pool, control API, log target:
+  read once at boot. Changing it means `systemctl restart kelixip`.
+* **a module whose block changed but that cannot be reconfigured live** — reloading it
+  means restarting it, which drops its live state (the conferences of `mcu`, the
+  registrations of `registrar`). It is left running and reported
+  `CHANGED, needs a restart`, so the choice of when to lose that state stays yours.
+
+Narrower verbs remain, when that is what you want: `kelictl domain reload-all` for
+`domains.toml` alone, `kelictl reload-script <name…>` for one script, and
+`kelictl module reload <name>` to force one module's config through (a restart of that
+module included).
+
 ### Exit codes
 
 | Code | Means |
@@ -199,6 +291,8 @@ and `400` → `2` otherwise. Core commands use `0`/`1`/`2`.
 code is **not currently propagated to the shell** (it always returns `0`); scripts
 should match on the printed output, not `$?`. This propagation is a roadmap
 refinement — the classification above is what it will carry once it lands.
+`systemctl reload` is not affected: a refused reload makes the unit's reload command
+fail, so systemd and the journal report the failure.
 
 > `reload-script --notify` is **accepted but not yet active** — notifying
 > in-progress instances of a reload is a roadmap refinement; today the flag is a

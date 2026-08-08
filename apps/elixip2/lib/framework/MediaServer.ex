@@ -64,16 +64,34 @@ defmodule MediaServer do
   @typedoc """
   Asynchronous events delivered to the `event_sink` pid as `{:ms_event, ref, event}`.
 
-  `:ice_connected` notifies the application that media is actually flowing on a
-  peer connection. It is emitted when the media server reports the first
-  validated incoming RTP packet: for a WebRTC connection a decrypted SRTP packet
-  means ICE and the DTLS handshake both completed; for a plain-RTP connection it
-  is simply the first received media packet. The adapter surfaces a single
-  connection-level `:ice_connected` even though the server signals it per media.
+  Media connectivity comes in two events (`docs/design/media-connectivity.md`).
+
+  `{:media_connected, media}` is the raw per-media fact: the server validated the
+  first incoming packet of that media. Under SRTP/DTLS a successful decrypt
+  proves the handshake completed; in the clear it is simply the first received
+  packet. The server re-arms it on every `StartReceiving`, so it repeats on
+  renegotiation.
+
+  `:ice_connected` is the derived milestone a scenario waits on before sending
+  into the leg, emitted **at most once** per connection. It is not "some media
+  flows" but "the media that matters flows": when the peer transmits video, only
+  video releases it — starting playback on the audio latch while the video leg is
+  still unlatched sends the opening keyframe to an address nothing listens on.
+  With no video expected, the first media the peer transmits on releases it.
+
+  `:media_send_only` says no `:ice_connected` is coming: the peer transmits on no
+  negotiated media, so no connectivity event can ever arrive. It is emitted once
+  the send plane is up for every media.
+
+  Neither the adapter nor the framework arms a timer: a peer that negotiates
+  video and never sends any produces no `:ice_connected`. Bounding that wait is
+  the scenario's job, with an `after` clause on the `on_events` block.
   """
   # PeerConnection
   @type event ::
           :ice_connected
+          | {:media_connected, media :: media()}
+          | :media_send_only
           | :ice_failed
           | {:ice_candidate, candidate :: String.t()}
           # Peer-connection setup / SDP negotiation failed (bad remote SDP,
@@ -160,7 +178,9 @@ defmodule MediaServer do
     ### Events per resource type
 
         # PeerConnection
+        {:ms_event, conn, {:media_connected, media :: media()}}
         {:ms_event, conn, :ice_connected}
+        {:ms_event, conn, :media_send_only}
         {:ms_event, conn, :ice_failed}
         {:ms_event, conn, {:ice_candidate, candidate :: String.t()}}
         {:ms_event, conn, {:media_error, reason :: term()}}

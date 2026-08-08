@@ -256,4 +256,39 @@ defmodule Kelix.Mod.Mcu.ConfigTest do
       assert msg =~ "at least one"
     end
   end
+
+  describe "the collaboration channel (§20.8)" do
+    test "closed by default, opened by naming the kinds" do
+      assert {:ok, closed} = Config.parse(%{})
+      assert closed.message_kinds == []
+      assert closed.message_rate == 5
+      assert closed.message_max_bytes == 1024
+      assert closed.message_queue_max == 100
+
+      assert {:ok, open} = Config.parse(%{"message_kinds" => ["hand.raised"]})
+      assert open.message_kinds == ["hand.raised"]
+    end
+
+    test "a kind is a lower-case dotted token — anything else is refused by name" do
+      assert {:error, msg} = Config.parse(%{"message_kinds" => ["Hand Raised"]})
+      assert msg =~ "Hand Raised"
+      assert msg =~ "hand.raised"
+
+      assert {:error, msg} = Config.parse(%{"message_kinds" => [42]})
+      assert msg =~ "42"
+
+      assert {:error, msg} = Config.parse(%{"message_kinds" => "hand.raised"})
+      assert msg =~ "must be a list"
+    end
+
+    test "the bounds are integers" do
+      assert {:error, msg} = Config.parse(%{"message_rate" => "fast"})
+      assert msg =~ "message_rate"
+
+      assert {:error, _} = Config.parse(%{"message_max_bytes" => -1})
+      assert {:ok, config} = Config.parse(%{"message_rate" => 1, "message_max_bytes" => 64})
+      assert config.message_rate == 1
+      assert config.message_max_bytes == 64
+    end
+  end
 end

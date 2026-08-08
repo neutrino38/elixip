@@ -45,6 +45,43 @@ defmodule Kelix.Mod.Mcu.Script do
         end
       end
 
+      # Declare that this script handles `{:mcu_message, envelope}` (§20.5 G-2), so
+      # its leg may be addressed by its peers. Nothing is delivered to a leg that
+      # did not say it: an `on_events` block is a plain `receive`, and a message no
+      # clause matches would sit in the mailbox for the whole call. Call it once,
+      # where the leg is admitted — and then handle `{:mcu_message, _}` in every
+      # `on_events` the call goes through.
+      defmacro mcu_accept_messages() do
+        quote do
+          SIP.Scenario.Monitor.note_command(:media, "mcu_accept_messages")
+          var!(sip_ctx) = Kelix.Mod.Mcu.accept_messages(var!(sip_ctx))
+        end
+      end
+
+      # Send a collaboration message to the other participants' scripts (§20):
+      # `mcu_send(:others, "hand.raised", "")`, `mcu_send({:part_id, 7}, …)`,
+      # `mcu_send(:all, …)`.
+      #
+      # Unlike `admit`/`attach`/`leave`, the outcome does **not** land in `lasterr`:
+      # a `goto` aborts on any `lasterr` other than `:ok`, and a message refused
+      # because the sender is over its rate must never end a call. It goes to
+      # `appdata_get(:mcu_last_send)` — `{:ok, %{delivered: n, skipped: […]}}` or
+      # `{:error, reason}` — for the scripts that care to look.
+      defmacro mcu_send(target, kind, payload, opts \\ []) do
+        quote do
+          SIP.Scenario.Monitor.note_command(:media, "mcu_send")
+
+          var!(sip_ctx) =
+            Kelix.Mod.Mcu.send_message(
+              var!(sip_ctx),
+              unquote(target),
+              unquote(kind),
+              unquote(payload),
+              unquote(opts)
+            )
+        end
+      end
+
       # Teardown: remove the participant and release the slot, idempotently.
       # Delegates to the script's own `do_leave/2` — `do_leave(sip_ctx, reason)`
       # — which wraps the context-aware `Kelix.Mod.Mcu.leave/2`.

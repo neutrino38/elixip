@@ -92,19 +92,17 @@ defmodule SIP.Session.Registrar do
   end
 
   # Extract the registering identity: prefer the auth username (present after a
-  # successful digest challenge), fall back to the Contact URI userpart.
+  # successful digest challenge — read by the message layer, which owns that
+  # question), fall back to the Contact URI userpart. The fallback is the Contact
+  # rather than From because what a REGISTER binds is the contact it carries.
   defp registered_username(req) do
-    auth = Map.get(req, :authorization) || Map.get(req, :proxyauthorization)
+    SIP.Msg.Ops.auth_username(req) || contact_username(req)
+  end
 
-    case auth do
-      %{"username" => u} when is_binary(u) and u != "" ->
-        u
-
-      _ ->
-        case List.wrap(Map.get(req, :contact)) do
-          [%SIP.Uri{userpart: u} | _] when is_binary(u) -> u
-          _ -> ""
-        end
+  defp contact_username(req) do
+    case List.wrap(Map.get(req, :contact)) do
+      [%SIP.Uri{userpart: u} | _] when is_binary(u) -> u
+      _ -> ""
     end
   end
 

@@ -110,7 +110,6 @@ defmodule SIP.DialogImpl do
     newreq =
       Map.put(req, :cseq, [state.cseq, req.method])
       |> Map.put(:callid, state.callid)
-      |> set_tag(:from, state.fromtag)
 
     # True in-dialog requests (everything but the very first one) must be
     # addressed to the remote party: the To URI of the original request plus the
@@ -128,11 +127,10 @@ defmodule SIP.DialogImpl do
     newreq =
       if not is_initial and req.method not in [:OPTIONS, :REGISTER] do
         newreq
-        |> route_to_remote_target(state)
+        |> address_in_dialog(state)
         |> add_route_set(state)
-        |> set_remote_totag(state)
       else
-        newreq
+        set_tag(newreq, :from, state.fromtag)
       end
 
     # Increment cseq for outbound and store modified request
@@ -141,13 +139,29 @@ defmodule SIP.DialogImpl do
     {newstate, newreq}
   end
 
-  # Address the request to the remote party: To URI from the original request
-  # and request URI set to the remote target learned from the establishing
-  # response. Falls back to the request's own values when nothing is known yet.
-  defp route_to_remote_target(req, state) do
+  @doc false
+  # Address a request WE originate inside the dialog (RFC 3261 §12.2.1.1): local
+  # identity in From with the local tag, remote identity in To with the remote
+  # tag, sent to the remote target.
+  #
+  # Which side is "local" depends on who created the dialog. On an OUTBOUND
+  # dialog we are the original From and `fromtag` is ours; on an INBOUND one we
+  # are the original To and `totag` is ours — the roles swap wholesale. Getting
+  # this wrong is not cosmetic: a BYE that names the callee in both From and To
+  # matches no dialog at the far end. Public only as a test seam.
+  def address_in_dialog(req, %SIP.DialogImpl{direction: :inbound, msg: msg} = state)
+      when not is_nil(msg) do
+    %{req | from: msg.to, to: msg.from, ruri: state.remotetarget || req.ruri}
+    |> set_tag(:from, state.totag)
+    |> set_tag(:to, state.fromtag)
+  end
+
+  def address_in_dialog(req, state) do
     to_uri = if state.msg, do: state.msg.to, else: req.to
-    ruri = state.remotetarget || req.ruri
-    %{req | to: to_uri, ruri: ruri}
+
+    %{req | to: to_uri, ruri: state.remotetarget || req.ruri}
+    |> set_tag(:from, state.fromtag)
+    |> set_remote_totag(state)
   end
 
   @doc false
@@ -367,6 +381,13 @@ defmodule SIP.DialogImpl do
       fromtag: fromtag,
       callid: callid,
       totag: totag,
+      # An outbound dialog learns these from the establishing RESPONSE
+      # (handle_UAC_response). An inbound one has them in the request that
+      # created it, and nothing else will ever supply them — without this, an
+      # in-dialog request we originate (BYE at end of media, re-INVITE) has no
+      # remote target to be routed to.
+      remotetarget: Map.get(req, :contact),
+      routeset: Map.get(req, :recordroute, []),
       allows: allows(req.method)
     }
 

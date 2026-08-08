@@ -142,7 +142,10 @@ defmodule MediaServer.Mockup.Conn do
     text_codecs: ["T140", "T140RED"],
     webrtc_support: :if_offered,
     ice_delay_ms: @default_ice_delay_ms,
-    echo: false
+    echo: false,
+    # media-connectivity state, mirroring the real adapter (§4)
+    recv_medias: nil,
+    ice_notified: false
   ]
 
   @impl true
@@ -196,8 +199,8 @@ defmodule MediaServer.Mockup.Conn do
   @impl true
   def handle_call({:set_remote_answer, sdp_str}, _from, state) do
     case Sdp.parse(sdp_str) do
-      {:ok, _descs} ->
-        schedule_ice_connected(state)
+      {:ok, descs} ->
+        state = schedule_connectivity(state, descs)
         {:reply, :ok, %{state | remote_sdp: sdp_str}}
 
       {:error, reason} ->
@@ -209,7 +212,7 @@ defmodule MediaServer.Mockup.Conn do
   def handle_call({:set_remote_offer, sdp_str}, _from, state) do
     with {:ok, descs} <- Sdp.parse(sdp_str),
          {:ok, answer} <- build_answer(state, descs) do
-      schedule_ice_connected(state)
+      state = schedule_connectivity(state, descs)
       {:reply, {:ok, answer}, %{state | remote_sdp: sdp_str, local_sdp: answer}}
     else
       {:error, reason} -> {:reply, {:error, reason}, media_error(state, reason)}
@@ -227,10 +230,12 @@ defmodule MediaServer.Mockup.Conn do
     {:reply, :ok, %{state | echo: enabled}}
   end
 
+  # One simulated connectivity event per media of R, in negotiation order, then
+  # the derived :ice_connected — the rule of docs/design/media-connectivity.md §4.
   @impl true
-  def handle_info(:notify_ice_connected, state) do
-    send(state.event_sink, {:ms_event, self(), :ice_connected})
-    {:noreply, state}
+  def handle_info({:notify_media_connected, media}, state) do
+    send(state.event_sink, {:ms_event, self(), {:media_connected, media}})
+    {:noreply, maybe_notify_ice_connected(state, media)}
   end
 
   @impl true
@@ -250,12 +255,52 @@ defmodule MediaServer.Mockup.Conn do
     state
   end
 
-  # Simulate ICE/DTLS connectivity checks taking a short, non-zero time.
-  defp schedule_ice_connected(state) do
-    if state.ice_delay_ms > 0 do
-      Process.send_after(self(), :notify_ice_connected, state.ice_delay_ms)
+  # Simulate ICE/DTLS connectivity checks taking a short, non-zero time. Video
+  # is delivered last on purpose: that is the ordering the real peers show (a
+  # camera opens well after the microphone) and the one the rule must survive.
+  defp schedule_connectivity(state, descs) do
+    r = receiving_medias(descs)
+
+    if MapSet.size(r) == 0 do
+      send(state.event_sink, {:ms_event, self(), :media_send_only})
+      %{state | recv_medias: r}
     else
-      send(self(), :notify_ice_connected)
+      r
+      |> Enum.sort_by(&if(&1 == :video, do: 1, else: 0))
+      |> Enum.with_index()
+      |> Enum.each(fn {media, i} ->
+        delay = state.ice_delay_ms + i * div(state.ice_delay_ms, 2)
+
+        if delay > 0 do
+          Process.send_after(self(), {:notify_media_connected, media}, delay)
+        else
+          send(self(), {:notify_media_connected, media})
+        end
+      end)
+
+      %{state | recv_medias: r}
+    end
+  end
+
+  defp receiving_medias(descs) do
+    for %{transport: t} = d <- descs,
+        t != :ws,
+        Map.get(d, :direction, :sendrecv) in [:sendrecv, :sendonly],
+        into: MapSet.new(),
+        do: d.type
+  end
+
+  defp maybe_notify_ice_connected(%{ice_notified: true} = state, _media), do: state
+
+  defp maybe_notify_ice_connected(state, media) do
+    r = state.recv_medias || MapSet.new()
+    ready? = if :video in r, do: media == :video, else: media in r
+
+    if ready? do
+      send(state.event_sink, {:ms_event, self(), :ice_connected})
+      %{state | ice_notified: true}
+    else
+      state
     end
   end
 
