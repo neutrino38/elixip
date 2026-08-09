@@ -88,9 +88,24 @@ What remains:
   every case return `{:transcoding_not_implemented, media}` rather than
   attaching endpoints that would exchange codecs neither can decode. Which also
   means **audio is not always transcoded** the way the Java gateway does it;
-- **`b2bua_reoffer_kind/1`** (§R4.1b), without which every re-offer crosses;
-- an **E2E run against `MENDOOZE_URL`**, which is the only thing that can
-  confirm the server accepts two endpoints in one session and attaches them.
+- **`b2bua_reoffer_kind/1`** (§R4.1b), without which every re-offer crosses.
+
+### The two-endpoint arrangement is confirmed (2026-08-09, dev71)
+
+`mendooze_integration_test.exs` gained the test that settles it, and it passes
+against a real server: the second `EndpointCreate` succeeds in the existing
+`MediaSession`, `EndpointAttachToEndpoint` succeeds in both directions,
+unbridge-then-rebridge works, and releasing one leg keeps the session while the
+last one takes it with it.
+
+Run it with **`--include skip`** as well as `MENDOOZE_URL`: the gate sets the
+tag to `false` when the variable is present, and ExUnit excludes it anyway.
+
+**Pre-existing and unrelated**: three of that suite's older tests fail on
+`assert_receive {:ms_event, pc_a, :ice_connected}` — the *offering* side of a
+server-loopback pair gets `{:media_connected, :audio}` but never the derived
+milestone, while the answering side gets both. Verified identical at the commit
+before P3 started, so it is not a P3 regression; it wants its own look.
 
 ### R6 as built, and the one item left out
 
