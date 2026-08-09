@@ -73,6 +73,7 @@ defmodule B2BUA.Basic do
       # and 487'd its INVITE by itself; what we owe the callee is the CANCEL of
       # the INVITE we sent it.
       {:CANCEL, req, _trans, _dlg} ->
+        b2bua_cancel_forward()
         b2bua_forward(req)
         scenario_aborted("caller cancelled")
 
@@ -81,9 +82,10 @@ defmodule B2BUA.Basic do
       # without this clause it matched nothing and sat in the mailbox until the
       # state timed out — three minutes of ringing a callee nobody is waiting
       # for. Nothing is relayed: the outbound INVITE has no dialog to BYE, it
-      # has an attempt to CANCEL, which the automatic teardown does on the way
-      # out (§8).
+      # has an attempt to CANCEL — which is what b2bua_cancel_forward/0 says,
+      # rather than leaving it as a side effect of the scenario ending.
       {:BYE, req, _trans, _dlg} ->
+        b2bua_cancel_forward()
         b2bua_reply(req, 200, "OK")
         scenario_success("caller hung up before answer")
 

@@ -55,6 +55,11 @@ defmodule SIP.B2bua.Leg do
             untried: [],
             method: nil,
             initial_trans: nil,
+            # Set by b2bua_cancel_forward/0: the search was told to stop, as
+            # opposed to having run out of targets. It is what keeps
+            # `hunting?/1` from reading the attempt still being cancelled as a
+            # hunt in progress.
+            cancelled: false,
             media: false
 end
 
@@ -182,6 +187,23 @@ defmodule SIP.Session.B2bua do
           SIP.Scenario.Monitor.note_command(:sip, "b2bua_send_BYE")
 
           var!(sip_ctx) = SIP.Session.B2bua.do_send_bye(var!(sip_ctx))
+        end
+      end
+
+      @doc """
+      Stop hunting. CANCELs the attempt in flight if one is ringing, drops the
+      targets not yet tried, and arms nothing more.
+
+      Distinct from relaying the caller's CANCEL, and both are usually wanted:
+      `b2bua_forward(req)` tells the *callee* to stop ringing,
+      `b2bua_cancel_forward()` tells the *search* to stop looking. Relaying alone
+      leaves it running.
+      """
+      defmacro b2bua_cancel_forward() do
+        quote do
+          SIP.Scenario.Monitor.note_command(:sip, "b2bua_cancel_forward")
+
+          var!(sip_ctx) = SIP.Session.B2bua.do_cancel_forward(var!(sip_ctx))
         end
       end
 
@@ -645,8 +667,39 @@ defmodule SIP.Session.B2bua do
   @spec hunting?(%SIP.Context{}) :: boolean()
   def hunting?(sip_ctx = %SIP.Context{}) do
     case outbound_leg(sip_ctx) do
+      %Leg{cancelled: true} -> false
       %Leg{initial_trans: tid} -> Map.has_key?(state(sip_ctx).pending, tid)
       _ -> false
+    end
+  end
+
+  @doc """
+  Stop the hunt: CANCEL the attempt in flight, drop the untried targets, arm
+  nothing more. Backs the `b2bua_cancel_forward` macro (design §3.5).
+
+  The correlation is deliberately **kept**. The caller's INVITE still owes a
+  final response, and leaving the entry in place is what gets them one — the
+  branch's 487 relayed through, or failing that the §8 teardown's. Dropping it
+  would leave their server transaction to time out.
+  """
+  @spec do_cancel_forward(%SIP.Context{}) :: %SIP.Context{}
+  def do_cancel_forward(sip_ctx = %SIP.Context{}) do
+    case outbound_leg(sip_ctx) do
+      nil ->
+        # Nothing to stop. Not an error: a scenario may say it defensively, and
+        # on a path where no leg was ever created it is simply true already.
+        SIP.Context.set(sip_ctx, :lasterr, :ok)
+
+      %Leg{} = leg ->
+        if leg_alive?(leg) and Map.has_key?(state(sip_ctx).pending, leg.initial_trans) do
+          protect("cancel the attempt toward #{leg.target}", fn ->
+            SIP.Dialog.cancel(leg.dialogpid, leg.initial_trans)
+          end)
+        end
+
+        sip_ctx
+        |> put_leg(@outbound_tag, %Leg{leg | untried: [], cancelled: true})
+        |> SIP.Context.set(:lasterr, :ok)
     end
   end
 

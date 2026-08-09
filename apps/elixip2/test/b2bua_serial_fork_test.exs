@@ -300,6 +300,52 @@ defmodule SIP.Test.B2bua.SerialFork do
     end
   end
 
+  describe "b2bua_cancel_forward/0 (§3.5)" do
+    test "stops the search: nothing more is armed however many targets were left",
+         %{ctx: ctx} do
+      _a = peer!("cxl1a")
+      _b = peer!("cxl1b")
+
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), serial_peer(["cxl1a", "cxl1b"]), false)
+      assert_receive {:invite_sent, _first}, 2_000
+      assert B2bua.outbound_leg(ctx).untried != []
+
+      ctx = B2bua.do_cancel_forward(ctx)
+      assert ctx.lasterr == :ok
+      assert B2bua.outbound_leg(ctx).untried == []
+      refute B2bua.hunting?(ctx)
+
+      # And the 487 the cancelled branch answers with does NOT restart it — the
+      # very trap @never_retry closes, seen from the other side.
+      ctx = relay_final(ctx, 487)
+      refute_receive {:invite_sent, _second}, 300
+      refute B2bua.hunting?(ctx)
+    end
+
+    # The caller's INVITE still owes a final response. Keeping the correlation is
+    # what gets them one; dropping it would leave their server transaction to
+    # time out.
+    test "the caller is still answered — by the branch's 487, or by the teardown",
+         %{ctx: ctx} do
+      _a = peer!("cxl2a")
+
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), serial_peer(["cxl2a"]), false)
+      assert_receive {:invite_sent, _first}, 2_000
+
+      ctx = B2bua.do_cancel_forward(ctx)
+      assert [{_tid, %Pending{}}] = B2bua.pending(ctx)
+
+      ctx = B2bua.release_legs(ctx)
+      assert_receive {:replied, 487, "Request Terminated", _req, _}, 2_000
+    end
+
+    test "cancelling when nothing is in flight is not an error", %{ctx: ctx} do
+      ctx = B2bua.do_cancel_forward(ctx)
+      assert ctx.lasterr == :ok
+      assert B2bua.outbound_leg(ctx) == nil
+    end
+  end
+
   test "the teardown CANCELs whichever branch is in flight", %{ctx: ctx} do
     _a = peer!("srl7a")
     _b = peer!("srl7b")

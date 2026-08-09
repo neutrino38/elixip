@@ -85,6 +85,7 @@ defmodule Kelix.B2bua do
       # The caller gave up. The inbound dialog has already answered the CANCEL
       # and 487'd its INVITE; what we owe the callee is the CANCEL of its INVITE.
       {:CANCEL, req, _trans, _dlg} ->
+        b2bua_cancel_forward()
         b2bua_forward(req)
         scenario_aborted("caller cancelled")
 
@@ -92,8 +93,9 @@ defmodule Kelix.B2bua do
       # RFC asks for (that is a CANCEL), but real user agents send it, and
       # without this clause it matched nothing and sat in the mailbox until the
       # state timed out. Nothing is relayed: the outbound INVITE has no dialog to
-      # BYE, it has an attempt to CANCEL, which the teardown does on the way out.
+      # BYE, it has an attempt to CANCEL, which b2bua_cancel_forward/0 does.
       {:BYE, req, _trans, _dlg} ->
+        b2bua_cancel_forward()
         b2bua_reply(req, 200, "OK")
         scenario_success("caller hung up before answer")
 

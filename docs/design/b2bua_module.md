@@ -496,13 +496,17 @@ almost always the **caller** — a CANCEL before answer, a BYE once connected �
 and until now there was no way to say so:
 
 ```elixir
-b2bua_cancel_forward()
+b2bua_cancel_forward()      # delivered
 ```
 
 Stop hunting, whatever stage it is at: CANCEL the branch in flight if one is
 ringing, drop the untried targets, tell a provider the call was `:abandoned`
-(§3.4 — its reservation must be released), and arm nothing more. The leg is
-left with no attempt outstanding, which is what the §8 teardown then finds.
+(§3.4 — its reservation must be released), and arm nothing more.
+
+The correlation is deliberately **kept**: the caller's INVITE still owes a final
+response, and leaving the entry in place is what gets them one — the cancelled
+branch's 487 relayed through, or failing that the §8 teardown's. Dropping it
+would leave their server transaction to time out.
 
 It is a separate act from relaying the CANCEL, and both are usually wanted:
 `b2bua_forward(req)` tells the *callee* to stop ringing, `b2bua_cancel_forward()`
@@ -520,8 +524,8 @@ one. The caller hung up and a second agent starts ringing. Two things follow:
   a caller who hangs up *while the callee is being rung* matched nothing there
   and sat in the mailbox until the state timed out. Nothing is relayed — the
   outbound INVITE has no dialog to BYE, it has an attempt to CANCEL, which the
-  §8 teardown does as the scenario ends. `b2bua_cancel_forward/0` will make that
-  explicit rather than a consequence of ending.
+  §8 teardown does as the scenario ends — now said explicitly with
+  `b2bua_cancel_forward/0` rather than left as a consequence of ending.
 
 ```elixir
 state proceeding do
