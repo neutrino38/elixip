@@ -957,6 +957,12 @@ path (success, failure, abort, exception) — extending the existing
 The dialog-terminated contract (`{:dialog_terminated, dialogpid, reason}`) is
 unchanged; the outbound leg's is simply tagged.
 
+Everything in this section assumes the layers under a leg fail by *telling us*.
+The 2026-08-09 resilience review showed they often do not — a crashed
+transaction or transport can take a leg down silently, or take the scenario
+process down with it, in which case none of the above runs. §14 traces those
+paths and designs the hardening (P2d).
+
 ## 9. Reference scenario (target formalism)
 
 The acceptance test for the formalism: a complete pure-signaling B2BUA in
@@ -1105,8 +1111,9 @@ ACK+BYE the late 2xx" cannot be tested credibly against a single shared peer.
 
 ## 11. Phasing
 
-**P1 and P2 are complete.** What remains is media (P3) and parallel forking
-(P4); the §7.5 offer profiles depend on P3.
+**P1 and P2a–c are complete.** What remains is the resilience hardening (P2d,
+§14 — scheduled before media because it changes layer contracts P3 will build
+on), media (P3) and parallel forking (P4); the §7.5 offer profiles depend on P3.
 
 | Phase | Content |
 |---|---|
@@ -1149,6 +1156,7 @@ One consequence to note: SRV failover now depends on `fork: :serial` rather than
 being unconditional as §3.1 first put it. `:none` means one attempt and no
 failover at all — the simpler contract, and the honest one.
 | **P2c** ✅ | dynamic targets (§3.4): the `SIP.B2bua.TargetProvider` behaviour, `%Peer{provider:}`, `b2bua_try_next/0` + the per-attempt ring timeout; `b2bua_cancel_forward/0` (§3.5) with 487 out of the default retry-on list; hunt progress events (§3.6, `notify_progress`). Extends the SERIAL hunt, so it needed nothing from P4; a complete call queue additionally needs P3 for music on hold |
+| **P2d** | resilience hardening (§14): the dialog traps exits and converts a transaction crash into a synthetic 408 (R1); the scenario engine catches exits so teardown always runs (R2); connectionless transport re-selection + exit-safe transport calls (R3); transport-down broadcast from `terminate/2`, single `{:dialog_terminated}` (R4); transport-down during a hunt = branch failure, not dialog death (R5); B2BUA leg-death hook purging the leg and answering its pending requests (R6); the failure-injection test set (R7) |
 | **P3** | `{:mediaserver, …}` mode: leg-qualified media handles, `bridge/2` callback in `MediaServer.Behaviour` + Mendooze implementation, offer/answer choreography |
 | **P4** | parallel forking (branch sets in the leg dialog, §3.3: winner adoption, late-2xx ACK+BYE, best-response aggregation; q-group semantics of §3.2), trunk processes (`trunk_pid`); multi-leg generalization only if attended transfer / 3pcc demands it. `{:rtpengine, …}` is **out of scope** — deferred to the borderline work |
 
@@ -1217,3 +1225,177 @@ one are a different scenario, not a flag.
    nothing and takes the whole message down. Both ends now come from the dialog,
    symmetrically with the inbound clause, as RFC 3261 §12.2.1.1 requires. The
    `%Leg{local_uri:}` workaround is gone with it.
+
+## 14. Resilience — crashes and disconnections under a leg (P2d)
+
+Design from the 2026-08-09 resilience review. Three questions were asked of the
+outbound leg: what happens when its **transport crashes** (does a connectionless
+leg recover, does a leg otherwise stop cleanly with the scenario told), when a
+**transaction crashes** inside its dialog, and when a **connected transport
+disconnects** under it. The review traced all three through the actual process
+topology; none of them behaves as §8 assumes, and two of them can take the
+scenario down with the leg. Everything here is framework work — nothing in the
+B2BUA formalism changes, which is the point: a scenario should see a failure as
+one more SIP-shaped event.
+
+### 14.1 The process topology, as built
+
+What links and monitors what decides everything below:
+
+| Relation | Mechanism | Consequence on failure |
+|---|---|---|
+| dialog → client transaction (ICT/NICT) | `GenServer.start_link` from the dialog process (`SIP.Transac.transaction_start_common/3`) — **linked**, and the dialog does **not** trap exits | a transaction crash **kills the dialog by exit signal, bypassing `terminate/2`** |
+| dialog → server transaction (IST/NIST) | `GenServer.start` — unlinked | a crash is contained (asymmetry to keep) |
+| app (scenario) → dialog | `GenServer.start` — unlinked; the app learns of death only through the send in `DialogImpl.terminate/2` | any path that skips `terminate/2` leaves the app ignorant |
+| transaction / dialog → transport | plain `GenServer.call` on a cached `tp_pid` (`state.tpid`, `state.msg.ruri.tp_pid`) — no link, no monitor, never re-resolved | a call on a dead transport **exits in the caller's callback** |
+| transport | `GenServer.start` from the Selector — unlinked, unsupervised; re-launched lazily on the next `select_transport` for a dead registry entry | existing dialogs and transactions never benefit from the relaunch |
+
+### 14.2 As-is: the three failure paths traced
+
+**(a) Transaction crash** (a `raise` in an ICT/NICT callback — including the
+`GenServer.call` on a dead transport in the timer-A retransmit,
+`SIP.Trans.Timer.handle_timer/2`): the exit signal crosses the link and kills
+the dialog **without running `terminate/2`** — no `{:dialog_terminated, …}` is
+ever sent. The scenario waits on its `after`; the B2BUA `Leg` and `pending`
+entries go stale (`hunting?/1` keeps answering true); the caller waits for a
+final response that only the §8 teardown will send, *if* every state has an
+`after` clause. The module's resilience currently rests on that unenforced
+discipline.
+
+**(b) Dead transport hit inside a dialog callback** (relaying a BYE or
+re-INVITE onto the leg: `transaction_start_common` calls
+`GenServer.call(tp_pid, :getlocalipandport)`): the exit is raised *inside*
+`handle_call`, so `terminate/2` does run and the tagged
+`{:dialog_terminated, …}` goes out — but the scenario's own `GenServer.call`
+(`SIP.Dialog.new_request/2`) exits with the same reason, and the `state` macro
+rescues **exceptions only**, not exits. The scenario process dies;
+`Runner.finalize/4` never runs; the §8 teardown never happens. The inbound leg
+is orphaned until its expiration timer (1800 s for INVITE) and the caller never
+gets a final response. This is the worst path: the safety net is precisely what
+gets skipped.
+
+**(c) Connected transport disconnect** (TCP/TLS/WSS): the orderly-close path
+works — the transport broadcasts `{:tcp_client_closed, ip, port}` (and tls/wss
+variants), the matching dialog notifies the app and stops. Four defects around
+it:
+
+- **double notification** — the handler sends `{:dialog_terminated, …,
+  :tcp_closed}` explicitly *and* stops `:normal`, so `terminate/2` sends a
+  second `{:dialog_terminated, …, :normal}` that lingers in the mailbox and can
+  be matched later against the *other* leg's termination;
+- **a hunt's current branch is not matched** — the filter compares the closed
+  connection to `state.msg.ruri`, which stays the *first* target until
+  `adopt_winning_branch/2`; a disconnect under branch N goes unnoticed and the
+  hunt only advances on timer B's synthetic 408 (64×T1 — slow, though correct);
+- **a transport *crash* broadcasts nothing** — the broadcast lives in the
+  orderly-close `handle_info` clauses, not in `terminate/2`; a crashed
+  connected transport degrades to case (b);
+- **transactions outlive the dialog** — the dialog stops `:normal`, an exit
+  signal links ignore, so its live client transactions keep retransmitting into
+  the void until timer B/K.
+
+**What already works and is kept**: the synthetic 408 on client-transaction
+timeout (P2b-3) — the recovery event everything below reuses; `release_legs/1`
+answering orphans under `protect/2`; the Selector relaunching dead transports
+for new selections; provider calls already exit-safe.
+
+### 14.3 Invariants to establish
+
+1. **`{:dialog_terminated, pid, reason}` is an invariant** — delivered exactly
+   once, on every exit path of a dialog, whatever killed it.
+2. **The scenario's teardown always runs** — no failure below the session layer
+   may take the scenario process down.
+3. **A failure under one branch or one leg is an event, not a death** — it
+   reaches the scenario as SIP-shaped traffic (a synthetic 408, a terminated
+   event) that the existing hunt and relay machinery already consume.
+
+### 14.4 Decisions
+
+**R1 — the dialog traps exits; a transaction crash becomes a synthetic 408.**
+`DialogImpl.init/1` sets `trap_exit`; a `{:EXIT, trans_pid, reason}` from a
+listed transaction is handled exactly like `{:transaction_timeout, …}`:
+synthesize the 408 (it flows through `b2bua_forward_reply`, the hunt's
+`retry_on` and the forking clause of `handle_UAS_response` unchanged), then
+`close_transaction/2`. A `:normal` EXIT is bookkeeping only. To synthesize the
+408 the dialog must be able to name the dead transaction's request: the bare
+`transactions` list becomes a map `pid → {method, cseq}` (plus what
+`timeout_response/1` reads), which also subsumes the `branches` map lookup.
+Trapping exits has the decisive side effect that **`terminate/2` now runs on
+every path** — invariant 1 holds. `terminate/2` additionally stops the
+remaining client transactions (`Process.exit(pid, :shutdown)`), closing defect
+(c-4).
+
+**R2 — the scenario engine catches exits.** The `state` macro's `try` gains
+`catch :exit, reason → scenario_failure({:exit, reason})` next to its `rescue`.
+This is the safety net for invariant 2, not the nominal path (R6 keeps exits
+out of the relay helpers in the first place); with it, even an unforeseen exit
+ends in `finalize` → `release_legs` → the caller answered.
+
+**R3 — connectionless recovery, and exit-safe transport calls.** At transaction
+creation, a `tp_pid` that is no longer alive is re-resolved through
+`Selector.select_transport/1` (tp_pid cleared) before giving up: for UDP the
+instance is the process-wide singleton, so re-selection relaunches it and the
+leg **recovers** — this is the whole connectionless-recovery story, and it is
+cheap. A dead *inbound flow* (a NATed client's connection, §3.2) is not
+re-selectable by construction: fail with `:transporterror`, the binding is
+stale. Independently, every `GenServer.call` toward a transport (`sendout_msg`,
+the timer retransmit paths, `getlocalipandport`) is wrapped `catch :exit →
+{:transporterror, state}` so a dead transport looks like a send failure — a
+path every caller already handles — never like a crash. Closes path (b).
+
+**R4 — transport-down is broadcast from `terminate/2`, once, uniformly.** The
+per-protocol broadcasts move from the orderly-close clauses into the
+transports' `terminate/2` (covering close *and* crash), unified as
+`{:transport_down, tp_module, destip, destport}`; the three per-protocol dialog
+clauses collapse into one. The dialog handler stops with
+`{:shutdown, :transport_down}` and **stops sending the explicit notification**
+— the unwrap in `DialogImpl.terminate/2` already turns that into a single
+`{:dialog_terminated, pid, :transport_down}`. Fixes defects (c-1) and (c-3).
+Caveat, accepted: `terminate/2` does not run on a brutal kill of the transport;
+R3's exit-safe calls absorb that residue.
+
+**R5 — transport-down during a hunt is a branch failure, not a dialog death.**
+When `forking: true` and the dead flow carries the *current branch's* target
+(matched against the `branches` map, not `state.msg.ruri` — defect c-2), the
+dialog synthesizes the branch's 408 instead of stopping: the hunt advances
+immediately, consistent with the SRV failover semantics (`:transport_error` at
+`fork_branch` time already advances it). Only an **established** dialog dies on
+transport-down, per R4. No reconnection is attempted for connected transports —
+a flow toward a NATed peer cannot be re-established from our side; re-creating
+it is registration policy, not leg policy.
+
+**R6 — B2BUA leg-death hook.** In the `on_events` instrumentation (next to
+`auto_store`/`note_event`), a matched `{tag, {:dialog_terminated, dlg, reason}}`
+purges `state.legs[tag]` and immediately answers, on their origin leg, every
+`%Pending{}` whose response was owed *by* the dead leg — 487 for an INVITE, 408
+otherwise — then drops those entries. The caller gets its final response the
+moment the leg dies instead of at `finalize`. If a provider hunt is running,
+`report_outcome(:abandoned)` releases the reservation (this narrows open
+question 8). Separately, the relay paths that today call a leg unguarded
+(`do_relay_request`, `do_relay_reply`, `fork_branch` in
+`arm_target`/`try_next_target`, the correlated ACK/CANCEL) capture
+`:exit`/`:noproc` into `lasterr = {:b2bua, :leg_dead}` — the scenario decides
+through the ordinary `goto`/lasterr contract.
+
+Deliberately unchanged: server transactions stay unlinked (containment is the
+right behaviour); transports stay unsupervised in the library (kelixip may
+supervise them in its tree later — out of scope here).
+
+Dependencies: R1 and R2 are independent of everything and of each other — do
+them first; R4 and R5 touch the same dialog handler and land together; R3 is
+independent; R6 assumes R1 (it consumes a terminated event that must be
+reliable to be worth hooking).
+
+### 14.5 Test plan (R7)
+
+Failure injection, one test per traced path, all asserting the same two
+outcomes — *the caller receives a final response* and *no dialog or transaction
+process survives the scenario*:
+
+| Injection | Expected (with P2d) | Today |
+|---|---|---|
+| `Process.exit(leg.initial_trans, :kill)` mid-hunt | synthetic 408 → hunt advances to the next target | dialog dies silently, scenario waits |
+| kill the UDP transport, then relay a BYE | transport relaunched by re-selection, BYE sent (recovery) | scenario process crashes, teardown skipped |
+| TCP close under the ringing branch of a hunt | immediate branch failure → next target | unnoticed until timer B |
+| TCP close under an established leg | exactly one `{:outbound, {:dialog_terminated, _, :transport_down}}`; pending answered at once | double notification; pending waits for finalize |
+| forced exit inside a scenario state | `scenario_failure` → finalize → inbound answered 487 | scenario process dies, inbound orphaned |
