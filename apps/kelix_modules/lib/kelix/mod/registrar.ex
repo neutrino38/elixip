@@ -117,7 +117,13 @@ defmodule Kelix.Mod.Registrar do
   def describe(),
     do: %{
       version: "1.0",
-      exports: [save: 4, lookup: 1, subscribe_register_event: 2, unsubscribe_register_event: 2]
+      exports: [
+        save: 4,
+        lookup: 1,
+        targets: 2,
+        subscribe_register_event: 2,
+        unsubscribe_register_event: 2
+      ]
     }
 
   defp pos_int_ok(config, key) do
@@ -149,6 +155,30 @@ defmodule Kelix.Mod.Registrar do
   @doc "Rewrite `req` to reach the AOR's registered contacts. `{:ok, [req]}` / `:notfound` / `{:error, r}`."
   @spec lookup(map) :: {:ok, [map]} | :notfound | {:error, term}
   def lookup(req), do: Kelix.Module.safe_call(__MODULE__, {:lookup, req})
+
+  @doc """
+  The AOR's live contacts as ready-to-dial URIs, ordered by descending q-value.
+
+  The B2BUA-shaped counterpart of `lookup/1`. `lookup/1` answers a *proxy*
+  question — "rewrite this request, once per binding" — and hands back requests;
+  a B2BUA builds its own forwarded request (`SIP.Msg.Ops.prepare_forwarded_request/2`)
+  and needs **targets**. Feed the result straight to a `%SIP.B2bua.Peer{uris: …}`
+  (design docs/design/b2bua_module.md §3.2).
+
+  Each URI is the stored contact stamped with its destination and registration
+  flow — what `SIP.Transport.Selector` short-circuits on, so the call reaches a
+  NATed device over the connection it registered on and skips DNS.
+
+  Ordering is the Contact `q` parameter, highest first (RFC 3261 §20.10; absent
+  means no stated preference, taken as the highest, 1.0). Equal q keeps
+  registration order. Turning that order into serial or parallel branches is the
+  caller's policy — `%Peer{fork:}`.
+
+  Returns `{:ok, uris}`, `:notfound` when the AOR has no live binding (answer
+  480), or `{:error, reason}` when the store is unreachable.
+  """
+  @spec targets(String.t(), String.t()) :: {:ok, [SIP.Uri.t()]} | :notfound | {:error, term}
+  def targets(domain, aor), do: Kelix.Module.safe_call(__MODULE__, {:targets, domain, aor})
 
   @doc """
   The shortest registration granted on `domain` (seconds).
@@ -218,6 +248,10 @@ defmodule Kelix.Mod.Registrar do
 
   def handle_call({:lookup, req}, _from, state) do
     {:reply, do_lookup(state, req), state}
+  end
+
+  def handle_call({:targets, domain, aor}, _from, state) do
+    {:reply, do_targets(state, domain, aor), state}
   end
 
   def handle_call({:min_expires, domain}, _from, state),
@@ -536,28 +570,54 @@ defmodule Kelix.Mod.Registrar do
     end
   end
 
+  # ── targets (B2BUA-shaped lookup) ────────────────────────────────────────────
+
+  defp do_targets(state, domain, aor) when is_binary(domain) and is_binary(aor) do
+    case live_contacts(state, fold_alias(domain), downcase(aor)) do
+      [] -> :notfound
+      contacts -> {:ok, contacts |> Enum.sort_by(&q_of/1, :desc) |> Enum.map(&target_uri/1)}
+    end
+  end
+
+  defp do_targets(_state, _domain, _aor), do: {:error, :no_aor}
+
+  # The Contact `q` (RFC 3261 §20.10): 0..1, highest preference first. Absent
+  # means the device stated no preference, which ranks it top — the single-contact
+  # case, i.e. nearly all of them, must not sort below one that asked for 0.3.
+  # Junk is read as absent rather than raising: an unparsable q is a reason to
+  # ignore the preference, not to fail the call.
+  defp q_of(%Contact{contact: uri}) do
+    with {:ok, v} <- SIP.Uri.get_uri_param(uri, "q"),
+         {q, _rest} <- Float.parse(v) do
+      q
+    else
+      _ -> 1.0
+    end
+  end
+
   # A copy of req with its R-URI replaced by the stored contact + the resolved
-  # destination and flow. Both are what `SIP.Transport.Selector.select_transport/1`
-  # short-circuits on (§6.4): a live `tp_pid`+`tp_module` sends straight over the
-  # existing connection, and failing that `destip`/`destport` skip DNS.
-  defp rewrite(req, %Contact{contact: c} = binding) do
-    ruri =
-      case binding.received do
-        {proto, ip, port} ->
-          %SIP.Uri{
-            c
-            | destip: ip,
-              destport: port,
-              destproto: proto,
-              tp_pid: binding.flow_pid,
-              tp_module: binding.flow_module
-          }
+  # destination and flow.
+  defp rewrite(req, %Contact{} = binding), do: Map.put(req, :ruri, target_uri(binding))
 
-        _ ->
-          %SIP.Uri{c | tp_pid: binding.flow_pid, tp_module: binding.flow_module}
-      end
+  # The stored contact stamped with the destination and flow it registered over.
+  # Both are what `SIP.Transport.Selector.select_transport/1` short-circuits on
+  # (§6.4): a live `tp_pid`+`tp_module` sends straight over the existing
+  # connection, and failing that `destip`/`destport` skip DNS.
+  defp target_uri(%Contact{contact: c} = binding) do
+    case binding.received do
+      {proto, ip, port} ->
+        %SIP.Uri{
+          c
+          | destip: ip,
+            destport: port,
+            destproto: proto,
+            tp_pid: binding.flow_pid,
+            tp_module: binding.flow_module
+        }
 
-    Map.put(req, :ruri, ruri)
+      _ ->
+        %SIP.Uri{c | tp_pid: binding.flow_pid, tp_module: binding.flow_module}
+    end
   end
 
   # ── contact / expires helpers ────────────────────────────────────────────────

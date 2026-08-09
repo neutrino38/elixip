@@ -24,11 +24,18 @@ defmodule Kelix.Mod.RegistrarTest do
         tp_pid: Keyword.get(opts, :flow, self()),
         tp_module: Keyword.get(opts, :tp_module)
       },
-      contact: %SIP.Uri{userpart: user, domain: contact_host, port: 5060},
+      contact: contact_uri(user, contact_host, Keyword.get(opts, :q)),
       expires: Keyword.get(opts, :expires, 3600),
       callid: Keyword.get(opts, :callid, "call-1")
     }
   end
+
+  # A Contact, optionally carrying the `q` preference parameter (RFC 3261 §20.10).
+  defp contact_uri(user, host, nil),
+    do: %SIP.Uri{userpart: user, domain: host, port: 5060}
+
+  defp contact_uri(user, host, q),
+    do: SIP.Uri.set_uri_param(contact_uri(user, host, nil), "q", to_string(q))
 
   setup do
     pid = start_supervised!({Registrar, max_contacts_per_aor: 2})
@@ -430,6 +437,110 @@ defmodule Kelix.Mod.RegistrarTest do
                })
 
       selected = SIP.Transport.Selector.select_transport(rewritten.ruri)
+
+      assert selected.tp_pid == flow
+      assert selected.tp_module == SIP.Transport.WSS
+      assert selected.destproto == "WSS"
+    end
+  end
+
+  describe "targets/2 — B2BUA-shaped lookup" do
+    test "returns ready-to-dial URIs stamped with the received dest and the flow" do
+      flow = self()
+
+      Registrar.save(
+        register("alice", "10.0.0.9", destip: {8, 8, 8, 8}, destport: 6000, flow: flow),
+        @domain
+      )
+
+      assert {:ok, [uri]} = Registrar.targets(@domain, "alice")
+
+      # The contact itself, not a request built around it — that is what a B2BUA
+      # peer takes (design §3.2).
+      assert %SIP.Uri{} = uri
+      assert uri.domain == "10.0.0.9"
+      # …carrying the real source and the connection it registered over, which
+      # is what the Selector short-circuits on.
+      assert uri.destip == {8, 8, 8, 8}
+      assert uri.destport == 6000
+      assert uri.tp_pid == flow
+    end
+
+    test "one URI per live contact" do
+      Registrar.save(register("alice", "10.0.0.9"), @domain)
+      Registrar.save(register("alice", "10.0.0.42"), @domain)
+
+      assert {:ok, uris} = Registrar.targets(@domain, "alice")
+      assert length(uris) == 2
+      assert Enum.sort(Enum.map(uris, & &1.domain)) == ["10.0.0.42", "10.0.0.9"]
+    end
+
+    # Registration order is deliberately the reverse of the wanted order, so a
+    # passing assertion cannot be explained by insertion order alone.
+    test "ordered by descending q — the device that asked for priority comes first" do
+      Registrar.save(register("alice", "10.0.0.9", q: 0.3, callid: "c1"), @domain)
+      Registrar.save(register("alice", "10.0.0.42", q: 0.9, callid: "c2"), @domain)
+
+      assert {:ok, [first, second]} = Registrar.targets(@domain, "alice")
+      assert first.domain == "10.0.0.42"
+      assert second.domain == "10.0.0.9"
+    end
+
+    # RFC 3261 §20.10: a device that states no preference is not a device that
+    # wants to be called last. The single-contact case — nearly all of them —
+    # would otherwise sort below anyone who asked for 0.3.
+    test "an absent q ranks top, not bottom" do
+      Registrar.save(register("alice", "10.0.0.9", q: 0.3, callid: "c1"), @domain)
+      Registrar.save(register("alice", "10.0.0.42", callid: "c2"), @domain)
+
+      assert {:ok, [first, _]} = Registrar.targets(@domain, "alice")
+      assert first.domain == "10.0.0.42"
+    end
+
+    test "an unparsable q is read as absent, not as a failure" do
+      Registrar.save(register("alice", "10.0.0.9", q: "high", callid: "c1"), @domain)
+
+      assert {:ok, [uri]} = Registrar.targets(@domain, "alice")
+      assert uri.domain == "10.0.0.9"
+    end
+
+    # Open question §12.6 of the B2BUA design, answered here: save/4 stores the
+    # whole Contact URI, so its q parameter survives and targets/2 can order on
+    # it. Nothing had to be added to %Contact{}.
+    test "the q parameter survives registration" do
+      Registrar.save(register("alice", "10.0.0.9", q: 0.7), @domain)
+
+      assert {:ok, [uri]} = Registrar.targets(@domain, "alice")
+      assert SIP.Uri.get_uri_param(uri, "q") == {:ok, "0.7"}
+    end
+
+    test "the AOR is matched case-insensitively, like every other lookup" do
+      Registrar.save(register("alice", "10.0.0.9"), @domain)
+
+      assert {:ok, [_uri]} = Registrar.targets(@domain, "ALICE")
+    end
+
+    test "an AOR with no live binding is :notfound (the script answers 480)" do
+      assert :notfound = Registrar.targets(@domain, "ghost")
+    end
+
+    test "a target routes over its registration flow, with no DNS on a private contact" do
+      # The end-to-end point of the facade: a browser behind NAT is reachable
+      # only over the connection it registered from.
+      flow = self()
+
+      Registrar.save(
+        register("alice", "192.168.1.42",
+          flow: flow,
+          tp_module: SIP.Transport.WSS,
+          destip: nil,
+          destproto: nil
+        ),
+        @domain
+      )
+
+      assert {:ok, [uri]} = Registrar.targets(@domain, "alice")
+      selected = SIP.Transport.Selector.select_transport(uri)
 
       assert selected.tp_pid == flow
       assert selected.tp_module == SIP.Transport.WSS

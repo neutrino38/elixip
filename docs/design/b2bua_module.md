@@ -237,8 +237,8 @@ onto per-contact rewritten requests.
 
 That proxy-shaped `lookup(req) → {:ok, [req]}` does not fit `b2bua_forward/3`,
 which builds its own forwarded request (`prepare_forwarded_request`) and wants
-**targets**, not requests. **API addition** (the `rewrite/2` helper is
-factored, `lookup/1` stays for the registrar script):
+**targets**, not requests. **API addition — delivered** (the `rewrite/2` helper
+was factored into `target_uri/1`; `lookup/1` stays for the registrar script):
 
 ```elixir
 @doc "B2BUA-shaped lookup: the AOR's live contacts as ready-to-dial URIs,
@@ -284,16 +284,26 @@ end
 The default `ruri: :peer` is the right one here, and the only valid one: the
 R-URI of each branch must become the registered contact, §3.1.)
 
+The reference script is `apps/kelixip/scripts/b2bua.exs`, tested in
+`apps/kelix_modules/test/b2bua_script_test.exs` — the only app where both
+halves exist.
+
 Fork ordering follows the **q-value** of the Contact header (RFC 3261
 §10.2.1.2), with kamailio/proxy semantics (RFC 3261 §16.6): parallel within a
 group of equal q, serial across groups in descending q. Two consequences:
 
-- `save/4` must **preserve the `q` parameter** on the stored contact URI (to
-  be verified during P2 — it travels in `contact.params`, where the grouping
-  code reads it back);
-- phasing: P2 delivers serial forking across all targets in q order; P4 adds
-  parallel forking *within* each q group (first 2xx wins, losers CANCELled).
-  Both use the branch mechanics of §3.3 — the fork never creates extra legs.
+- `save/4` **preserves the `q` parameter** — confirmed: it stores the whole
+  Contact `%SIP.Uri{}`, so `q` survives in `contact.params` and `targets/2`
+  orders on it. Nothing had to be added to `%Contact{}`. An absent q ranks
+  **top** (RFC 3261 §20.10: no stated preference is not last preference —
+  otherwise the single-contact case would sort below anyone who asked for 0.3),
+  and an unparsable one is read as absent rather than raising;
+- phasing: **P2a (delivered)** dials the highest-q contact, which is the whole
+  call for a single-contact AOR. **P2b** turns the rest of the ordered list
+  into serial branches; **P4** adds parallel forking *within* each q group
+  (first 2xx wins, losers CANCELled). Both use the branch mechanics of §3.3 —
+  the fork never creates extra legs, so the script above does not change shape
+  when they land.
 
 When every branch fails, the B2BUA relays one final response to the caller: a
 6xx ends the hunt immediately (RFC 3261 §16.7); otherwise the serial hunt
@@ -701,7 +711,8 @@ ACK+BYE the late 2xx" cannot be tested credibly against a single shared peer.
 | Phase | Content |
 |---|---|
 | **P1** ✅ | message-layer purge/copy functions; dialog `tag:` option; leg + correlation state; `b2bua_forward/3` (single URI, media `false`), `b2bua_forward/1`, `b2bua_forward_reply/1`, `b2bua_reply/3..4`, `b2bua_send_BYE/0`; ACK/CANCEL special cases; automatic teardown; reference scenario `scenarios/b2bua_basic.exs` + 38 tests. **Left open:** the three-party test (§10) |
-| **P2** | `%SIP.B2bua.Peer{}` in full: serial forking (branch-per-attempt in the leg dialog, §3.3) with retry-on list, failover across SRV priorities, per-peer `outbound_proxy`; registrar-driven forking (§3.2): `Kelix.Mod.Registrar.targets/2`, q-value preservation in `save/4`, serial hunt in q order |
+| **P2a** ✅ | registrar-driven calling (§3.2): `Kelix.Mod.Registrar.targets/2`, q ordering, `apps/kelixip/scripts/b2bua.exs`. Dials the highest-q contact — the whole call for a single-contact AOR, and no shape change when P2b lands |
+| **P2b** | `%SIP.B2bua.Peer{}` in full: serial forking (branch-per-attempt in the leg dialog, §3.3) with retry-on list, failover across SRV priorities, per-peer `outbound_proxy`; serial hunt down the q-ordered list. Needs the multi-party test harness of §10 first |
 | **P3** | `{:mediaserver, …}` mode: leg-qualified media handles, `bridge/2` callback in `MediaServer.Behaviour` + Mendooze implementation, offer/answer choreography |
 | **P4** | parallel forking (branch sets in the leg dialog, §3.3: winner adoption, late-2xx ACK+BYE, best-response aggregation; q-group semantics of §3.2), `{:rtpengine, …}` mode, trunk processes (`trunk_pid`); multi-leg generalization only if attended transfer / 3pcc demands it |
 
@@ -725,9 +736,9 @@ ACK+BYE the late 2xx" cannot be tested credibly against a single shared peer.
    exception, where the script legitimately queries the location store
    itself). Belongs to the kelixip design doc, flagged here so the `Peer`
    struct stays serializable (TOML-friendly).
-6. **q-value storage** — confirm `save/4` keeps the Contact `q` parameter on
-   the stored URI params (§3.2 reads it back for fork ordering); if the parse
-   drops it, add it to `%Contact{}` explicitly.
+6. ~~**q-value storage**~~ — **confirmed 2026-08-09.** `save/4` stores the whole
+   Contact `%SIP.Uri{}`, and the parser puts the header's `q` in its params, so
+   the preference survives with nothing added to `%Contact{}`. Pinned by a test.
 7. ~~**`address_in_dialog/2` is asymmetric**~~ — **fixed 2026-08-09.** Its
    outbound clause restored only the To and took the From from the request as
    given, so an in-dialog request originated with a placeholder From (the shape
