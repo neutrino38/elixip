@@ -217,6 +217,99 @@ Explicit primitives exist for the cases where the policy must take over, and are
 `b2bua_forward_reply/1` bridges only if `b2bua_bridge/0..1` has not already done
 it, so a scenario that bridged on the 183 relays the 200 without a second attach.
 
+### R4.1b — Re-INVITE and UPDATE: four cases, and where they diverge
+
+A re-INVITE or an UPDATE on an established call carries four different
+intentions, and the mode decides which of them cross:
+
+| what changed in the offer | signalling (`false`) | `{:mediaserver, …}` |
+|---|---|---|
+| **hold / retrieve** (`a=sendonly`, `a=inactive`, and back) | relay | **relay** — the far end must stop sending, or play its own hold |
+| **a media added or withdrawn** (a new `m=`, or one set to port 0) | relay | **relay** — only the far end can offer or drop it |
+| **a changed address** (`c=`, port, ICE restart, new DTLS fingerprint) | relay | **local** — the peer moved, *our* endpoint did not, and the far end's media path is unchanged |
+| **a session-timer refresh** (RFC 4028, usually no SDP) | relay | **local** — each leg has its own timer, and we are a UA on both |
+
+The signalling column is one rule, not four: the SDP belongs to the endpoints, so
+every one of these is a conversation between them that the B2BUA only carries.
+Even the timer refresh crosses, and for a reason worth writing down — answering
+it locally would mean putting **our own** offer in the 200 (RFC 3261 §14.2, an
+offerless re-INVITE is answered with an offer), and a signalling B2BUA has no
+media of its own to offer.
+
+The media column needs the framework to *read* the re-offer, which is message
+interpretation and therefore belongs in exactly one place (CLAUDE.md, Message
+Layer). A reader macro over the previous offer stored on that leg:
+
+```elixir
+b2bua_reoffer_kind(req)   # => :hold | :resume | :media_change | :address_change | :no_sdp
+```
+
+`:hold`/`:resume`/`:media_change` are *propagated* — relayed as a re-INVITE on
+the other leg, with our own offer substituted the way the initial INVITE was
+(R4). `:address_change` and `:no_sdp` are *local*: the media server is fed the
+new remote description on that leg only, and the 200 carries its answer. The
+scenario writes the policy, the framework does the reading:
+
+```elixir
+{m, req, _trans, _dlg} when m in [:INVITE, :UPDATE] ->
+  case b2bua_reoffer_kind(req) do
+    kind when kind in [:address_change, :no_sdp] ->
+      b2bua_reply_reoffer(req)                 # answered here, far end undisturbed
+      goto(loop, "re-offer handled locally (#{kind})")
+
+    kind ->
+      b2bua_forward(req)                       # the far end has to know
+      goto(loop, "re-offer relayed (#{kind})")
+  end
+```
+
+This is the Java gateway's `propagate` flag, made explicit and inverted in its
+default. `MediaGwSipServlet` decides it from the SIP session state and defaults a
+re-INVITE on an established call to **local** (`updateLocally = true`), which is
+why `processSDP` has to refuse a media addition outright — "we cannot add or
+enable a new media" (`MediaTranscodingSession.java:427-435`). Reading the offer
+instead of the session state is what lets the first two rows work.
+
+**Not in P3**: full RFC 4028 support (negotiating `Session-Expires`/`Min-SE` per
+leg, being the refresher, sending our own refreshes). Detecting an offerless
+re-INVITE and answering it locally is enough to keep a session timer from
+crossing; owning the timer is a separate piece of work.
+
+### R4.1c — The ACK of a re-INVITE (found while exploring, fixed 2026-08-09)
+
+Not a media item — it broke the *signalling* B2BUA, and it had to be fixed
+before any of the above could be relayed at all.
+
+RFC 3261 §13.2.2.4 makes the ACK of a 2xx a transaction of its own, so every
+re-INVITE that crosses owes one back on the transaction *it* opened.
+`correlated_invite/2` posted it on `%Leg{initial_trans}` — the initial INVITE's
+transaction, done minutes earlier. Worse than losing the ACK: the relay returned
+`{:error, :nosuchtransaction}` and the scenario died on it. Both reference
+scenarios also excluded ACK from their relay (`m != :ACK`), so it never got that
+far anyway.
+
+Fixed by `%State{last_invite}`, keyed by the leg an INVITE was **sent to**, and
+symmetric — a re-INVITE from the *callee* is relayed onto the inbound leg where
+we are the UAC for it, so the callee's ACK now has an inbound client transaction
+to act on. The previous code returned `nil` there unconditionally, which made
+callee-originated re-INVITEs unacknowledgeable by construction.
+
+### R4.1d — A relayed request whose far end never answers
+
+Verified rather than built: the P2d R1 machinery already carries it end to end.
+The outbound client transaction's timer F fires → `SIP.DialogImpl` converts it
+into a synthetic 408 (`timeout_response/1`, RFC 3261 §17.1.1.2 / §8.1.3.1) →
+delivered as `{:outbound, {408, resp, trans_pid, dlg}}` → the scenario relays it
+like any other final → `pending[trans_pid]` finds the request it answers →
+`SIP.Dialog.reply/5` puts the 408 on the leg the request came from, on **that
+request**, not on the call. The call survives; one dead in-dialog request is not
+a hangup.
+
+Now covered by a test that shortens `:sip_timer_T1` instead of waiting 32 s. The
+mirror direction (a callee-originated request the caller never answers) uses the
+same correlation with `orig_leg: :outbound`; testing it needs two real
+transports, so it belongs in `b2bua_three_party_test.exs`.
+
 ### R4.2 — Failure semantics
 
 Three failure points, and they are not the same failure.
