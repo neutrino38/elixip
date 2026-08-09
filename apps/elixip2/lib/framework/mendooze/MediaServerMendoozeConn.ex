@@ -81,42 +81,140 @@ defmodule MediaServer.Mendooze.Conn do
     GenServer.start(__MODULE__, {server, event_sink, opts})
   end
 
-  def get_local_offer(conn), do: GenServer.call(conn, :get_local_offer, @call_timeout)
+  # Every entry point takes a `MediaServer.conn_ref/0`: a bare pid names the
+  # inbound (or only) leg, `{pid, name}` names another endpoint of the same
+  # session. Splitting it here means the handlers below never see the two forms.
+  defp ref(conn) when is_pid(conn), do: {conn, :inbound}
+  defp ref({conn, name}) when is_pid(conn) and is_atom(name), do: {conn, name}
 
-  def set_remote_answer(conn, sdp),
-    do: GenServer.call(conn, {:set_remote_answer, sdp}, @call_timeout)
+  def get_local_offer(conn) do
+    {pid, name} = ref(conn)
+    GenServer.call(pid, {:get_local_offer, name}, @call_timeout)
+  end
 
-  def set_remote_offer(conn, sdp),
-    do: GenServer.call(conn, {:set_remote_offer, sdp}, @call_timeout)
+  def set_remote_answer(conn, sdp) do
+    {pid, name} = ref(conn)
+    GenServer.call(pid, {:set_remote_answer, name, sdp}, @call_timeout)
+  end
 
-  def add_remote_candidate(conn, candidate),
-    do: GenServer.call(conn, {:add_remote_candidate, candidate}, @call_timeout)
+  def set_remote_offer(conn, sdp) do
+    {pid, name} = ref(conn)
+    GenServer.call(pid, {:set_remote_offer, name, sdp}, @call_timeout)
+  end
+
+  def add_remote_candidate(conn, candidate) do
+    {pid, name} = ref(conn)
+    GenServer.call(pid, {:add_remote_candidate, name, candidate}, @call_timeout)
+  end
 
   def close(conn) do
-    GenServer.call(conn, :close, @call_timeout)
+    {pid, name} = ref(conn)
+    GenServer.call(pid, {:close, name}, @call_timeout)
   catch
     # already stopped (e.g. torn down after a setup failure) — close is idempotent
     :exit, _ -> :ok
   end
 
   # Sub-resources — handles are {conn_pid, kind, ref} tuples
-  def create_player(conn, file_path, opts),
-    do: GenServer.call(conn, {:create_player, file_path, opts}, @call_timeout)
+  def create_player(conn, file_path, opts) do
+    {pid, name} = ref(conn)
+    GenServer.call(pid, {:create_player, name, file_path, opts}, @call_timeout)
+  end
 
   def player_cmd({conn, :player, ref}, cmd),
     do: GenServer.call(conn, {:player_cmd, cmd, ref}, @call_timeout)
 
-  def create_recorder(conn, file_path, duration_ms, opts),
-    do: GenServer.call(conn, {:create_recorder, file_path, duration_ms, opts}, @call_timeout)
+  def create_recorder(conn, file_path, duration_ms, opts) do
+    {pid, name} = ref(conn)
+    GenServer.call(pid, {:create_recorder, name, file_path, duration_ms, opts}, @call_timeout)
+  end
 
   def recorder_cmd({conn, :recorder, ref}, cmd),
     do: GenServer.call(conn, {:recorder_cmd, cmd, ref}, @call_timeout)
 
-  def create_echo(conn), do: GenServer.call(conn, :create_echo, @call_timeout)
+  def create_echo(conn) do
+    {pid, name} = ref(conn)
+    GenServer.call(pid, {:create_echo, name}, @call_timeout)
+  end
 
   def stop_echo({conn, :echo, ref}), do: GenServer.call(conn, {:stop_echo, ref}, @call_timeout)
 
   # ── Initialisation ──────────────────────────────────────────────────────────
+
+  # ── Legs ────────────────────────────────────────────────────────────────────
+  #
+  # A B2BUA call is ONE MediaSession holding TWO Endpoints, because
+  # `EndpointAttachToEndpoint` takes a single session id and two endpoints are
+  # connectable only inside one session (docs/design/mediagw_b2bua_jsr309.md §2).
+  # So this process owns the session and one *leg* per SIP leg.
+  #
+  # A leg is a plain map carrying its own endpoint state AND a copy of the
+  # connection's immutable fields (`sess_id`, `base_url`, `sess_tag`,
+  # `event_sink`, `server`, `opts`). That denormalisation is deliberate: it makes
+  # a leg look exactly like the flat state every per-endpoint function in this
+  # module already takes, so those functions — SDP building, security, the
+  # receive and send planes, the watchdog — did not change at all. The fields it
+  # duplicates are set once in `init/1` and never written again.
+  defp new_leg(state, name, endpoint_id, medias) do
+    %{
+      # connection-level, immutable
+      server: state.server,
+      base_url: state.base_url,
+      sess_id: state.sess_id,
+      sess_tag: state.sess_tag,
+      event_sink: state.event_sink,
+      opts: state.opts,
+      # this leg
+      leg: name,
+      endpoint_id: endpoint_id,
+      medias: medias,
+      local_ports: %{},
+      local_ip: nil,
+      local_crypto: :none,
+      local_ice: nil,
+      local_sdes: %{},
+      ws_urls: %{},
+      proposed_recv: %{},
+      accepted: %{},
+      status: :init,
+      connected: MapSet.new(),
+      recv_medias: nil,
+      ice_notified: false,
+      timed_out: MapSet.new(),
+      lost_notified: false
+    }
+  end
+
+  defp leg(state, name), do: Map.get(state.legs, name)
+
+  defp put_leg(state, name, leg), do: %{state | legs: Map.put(state.legs, name, leg)}
+
+  defp drop_leg(state, name), do: %{state | legs: Map.delete(state.legs, name)}
+
+  # Run a per-leg handler and fold its result back into the connection. The
+  # handlers speak in leg views and say `{:fail, reason}` rather than tearing the
+  # connection down themselves — ending the session is a connection-level
+  # decision, and with two legs it is no longer the same thing as one leg
+  # failing.
+  defp on_leg(state, name, fun) do
+    case leg(state, name) do
+      nil ->
+        {:reply, {:error, {:no_such_leg, name}}, state}
+
+      leg ->
+        case fun.(leg) do
+          {:reply, reply, leg} -> {:reply, reply, put_leg(state, name, leg)}
+          {:noreply, leg} -> {:noreply, put_leg(state, name, leg)}
+          {:fail, reason} -> fail(state, reason)
+        end
+    end
+  end
+
+  # The handle an event or a returned reference carries for a leg. The inbound
+  # (or only) leg keeps the bare pid every existing scenario, adapter caller and
+  # test matches on; any other leg is named — `MediaServer.conn_ref/0`.
+  defp handle_of(:inbound), do: self()
+  defp handle_of(name), do: {self(), name}
 
   @impl true
   def init({server, event_sink, opts}) do
@@ -131,41 +229,15 @@ defmodule MediaServer.Mendooze.Conn do
       opts: opts,
       sess_tag: sess_tag,
       sess_id: nil,
-      endpoint_id: nil,
+      # The endpoint(s) this session holds — see new_leg/4. `medias` and
+      # `endpoint_id` stay here only until the first leg exists: EndpointCreate
+      # needs them and there is no leg to read them from yet.
       medias: medias,
-      # per-media local data filled by offer/answer processing
-      local_ports: %{},
-      local_ip: nil,
-      local_crypto: :none,
-      local_ice: nil,
-      # per media: the SDES line we selected from the offer and the key we
-      # generated for it — %{media => %{tag:, suite:, key:, peer_key:}}
-      local_sdes: %{},
-      # text-over-WebSocket: the URL to publish for each media we configured
-      # that way (%{media => url}). Its presence is what says "answer this
-      # section for real" rather than omitting it.
-      ws_urls: %{},
-      # delegated SDP negotiation: the receive rtpMap we proposed and the
-      # server-accepted set (pt => fmtp) returned by EndpointStartReceiving.
-      # accepted[media] is nil for an older server (fallback to codec tables).
-      proposed_recv: %{},
-      accepted: %{},
+      endpoint_id: nil,
+      legs: %{},
       status: :init,
-      # media-connectivity state (docs/design/media-connectivity.md). `connected`
-      # accumulates the medias the server reported as flowing; `recv_medias` is
-      # the set R — the medias the peer transmits on, the only ones a
-      # connectivity event can ever arrive for; `ice_notified` keeps
-      # :ice_connected one-shot for the life of the connection.
-      connected: MapSet.new(),
-      recv_medias: nil,
-      ice_notified: false,
-      # The mirror of `connected`, for loss: the medias whose RTP watchdog has
-      # fired. `:media_lost` is derived from it covering R, exactly as
-      # `:ice_connected` is derived from `connected` reaching it — see
-      # maybe_notify_media_lost/1.
-      timed_out: MapSet.new(),
-      lost_notified: false,
-      # sub-resources: ref => %{...}; tags "p-<n>"/"r-<n>" route server events
+      # sub-resources: ref => %{...}; tags "p-<n>"/"r-<n>" route server events.
+      # Each records the leg whose endpoint it is attached to.
       res_seq: 0,
       players: %{},
       recorders: %{},
@@ -197,7 +269,8 @@ defmodule MediaServer.Mendooze.Conn do
         message: "created Endpoint #{endpoint_id} for MediaSession"
       )
 
-      {:ok, %{state | sess_id: sess_id, endpoint_id: endpoint_id}}
+      state = %{state | sess_id: sess_id, endpoint_id: endpoint_id}
+      {:ok, put_leg(state, :inbound, new_leg(state, :inbound, endpoint_id, medias))}
     else
       {:error, reason} ->
         # EndpointCreate may have failed with the session already created
@@ -213,7 +286,154 @@ defmodule MediaServer.Mendooze.Conn do
   # ── UAC flow: build the offer, then process the answer ─────────────────────
 
   @impl true
-  def handle_call(:get_local_offer, _from, state) do
+  def handle_call({:get_local_offer, name}, _from, state),
+    do: on_leg(state, name, &do_get_local_offer/1)
+
+  def handle_call({:set_remote_answer, name, sdp}, _from, state),
+    do: on_leg(state, name, &do_set_remote_answer(&1, sdp))
+
+  def handle_call({:set_remote_offer, name, sdp}, _from, state),
+    do: on_leg(state, name, &do_set_remote_offer(&1, sdp))
+
+  def handle_call({:add_remote_candidate, name, candidate}, _from, state),
+    do: on_leg(state, name, &do_add_remote_candidate(&1, candidate))
+
+  # Closing a leg deletes ITS endpoint; the session — and this process — go when
+  # the last leg is closed. Order-independent on purpose: the media mixin walks
+  # the legs in creation order, so the inbound one is released first, and a rule
+  # that tore the session down with it would take the outbound endpoint with it.
+  def handle_call({:close, name}, _from, state) do
+    case leg(state, name) do
+      nil ->
+        {:reply, :ok, state}
+
+      leg ->
+        state = state |> release_leg(leg) |> drop_leg(name)
+
+        if map_size(state.legs) == 0 do
+          {:stop, :normal, :ok, teardown(state)}
+        else
+          {:reply, :ok, state}
+        end
+    end
+  end
+
+  # ── Player (server doc §6.3) ────────────────────────────────────────────────
+
+  def handle_call({:create_player, name, file_path, opts}, _from, state) do
+    tag = "p-#{state.res_seq}"
+    state = %{state | res_seq: state.res_seq + 1}
+    l = leg(state, name)
+
+    with {:ok, player_id} <- create(state, "PlayerCreate", [state.sess_id, tag]),
+         :ok <- cleanup_on_error(state, player_id, attach_player_all(l, player_id)),
+         {:ok, _} <-
+           cleanup_on_error(
+             state,
+             player_id,
+             rpc(state, "PlayerOpen", [state.sess_id, player_id, file_path])
+           ),
+         :ok <- maybe_seek(state, player_id, Keyword.get(opts, :start_time)) do
+      ref = make_ref()
+
+      players =
+        Map.put(state.players, ref, %{
+          player_id: player_id,
+          tag: tag,
+          file: file_path,
+          opts: opts,
+          leg: name
+        })
+
+      Logger.info(
+        module: __MODULE__,
+        cnx_tag: state.sess_tag,
+        message: "created Player for file #{file_path}"
+      )
+
+      {:reply, {:ok, {self(), :player, ref}}, %{state | players: players}}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:player_cmd, cmd, ref}, _from, state) do
+    case Map.get(state.players, ref) do
+      nil ->
+        {:reply, {:error, :no_such_player}, state}
+
+      player ->
+        do_player_cmd(cmd, ref, player, state)
+    end
+  end
+
+  # ── Recorder (server doc §6.4) ──────────────────────────────────────────────
+
+  def handle_call({:create_recorder, name, file_path, duration_ms, opts}, _from, state) do
+    warn_unsupported_recorder_opts(opts, state)
+    tag = "r-#{state.res_seq}"
+    state = %{state | res_seq: state.res_seq + 1}
+    l = leg(state, name)
+
+    with {:ok, recorder_id} <- create(state, "RecorderCreate", [state.sess_id, tag]),
+         :ok <- attach_recorder_all(l, recorder_id) do
+      ref = make_ref()
+
+      recorders =
+        Map.put(state.recorders, ref, %{
+          recorder_id: recorder_id,
+          tag: tag,
+          file: file_path,
+          duration_ms: duration_ms,
+          opts: opts,
+          stopping: false,
+          leg: name
+        })
+
+      {:reply, {:ok, {self(), :recorder, ref}}, %{state | recorders: recorders}}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:recorder_cmd, cmd, ref}, _from, state) do
+    case Map.get(state.recorders, ref) do
+      nil ->
+        {:reply, {:error, :no_such_recorder}, state}
+
+      recorder ->
+        do_recorder_cmd(cmd, ref, recorder, state)
+    end
+  end
+
+  # ── Echo (server doc §4.16: the endpoint is attached to itself) ────────────
+
+  def handle_call({:create_echo, name}, _from, %{echo: nil} = state) do
+    case attach_endpoint_to_itself(leg(state, name)) do
+      :ok ->
+        ref = make_ref()
+        send(state.event_sink, {:ms_event, {self(), :echo, ref}, :echo_started})
+        {:reply, {:ok, {self(), :echo, ref}}, %{state | echo: {ref, name}}}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:create_echo, _name}, _from, state),
+    do: {:reply, {:error, :echo_already_started}, state}
+
+  def handle_call({:stop_echo, ref}, _from, %{echo: {ref, name}} = state) do
+    detach_all(leg(state, name))
+    {:reply, :ok, %{state | echo: nil}}
+  end
+
+  def handle_call({:stop_echo, _ref}, _from, state),
+    do: {:reply, {:error, :no_such_echo}, state}
+
+  # ── Per-leg handlers (run through on_leg/3) ─────────────────────────────────
+
+  defp do_get_local_offer(state) do
     with {:ok, state} <- setup_local_security(state),
          {:ok, state} <- start_receiving_all(state) do
       offer =
@@ -230,11 +450,11 @@ defmodule MediaServer.Mendooze.Conn do
 
       {:reply, {:ok, offer}, state}
     else
-      {:error, reason} -> fail(state, reason)
+      {:error, reason} -> {:fail, reason}
     end
   end
 
-  def handle_call({:set_remote_answer, sdp}, _from, state) do
+  defp do_set_remote_answer(state, sdp) do
     with {:ok, descs} <- Sdp.parse(sdp),
          {:ok, state} <- apply_remote_medias(state, descs) do
       # :ice_connected is no longer emitted here: it now reflects the real media
@@ -242,13 +462,13 @@ defmodule MediaServer.Mendooze.Conn do
       # packet (EndpointConnectedEvent, type 7 → handle_server_event below).
       {:reply, :ok, %{state | status: :active}}
     else
-      {:error, reason} -> fail(state, reason)
+      {:error, reason} -> {:fail, reason}
     end
   end
 
   # ── UAS flow: process the offer and build the answer ───────────────────────
 
-  def handle_call({:set_remote_offer, sdp}, _from, state) do
+  defp do_set_remote_offer(state, sdp) do
     with {:ok, descs} <- Sdp.parse(sdp),
          # G9: keep every offered m= section; the ones we can answer with real
          # media are the supported RTP sections of a configured media type. The
@@ -299,11 +519,11 @@ defmodule MediaServer.Mendooze.Conn do
 
       {:reply, {:ok, answer}, %{state | status: :active}}
     else
-      {:error, reason} -> fail(state, reason)
+      {:error, reason} -> {:fail, reason}
     end
   end
 
-  def handle_call({:add_remote_candidate, candidate}, _from, state) do
+  defp do_add_remote_candidate(state, candidate) do
     # media selection is not carried by the candidate line: apply to audio
     case rpc(state, "EndpointAddICECandidate", [
            state.sess_id,
@@ -315,115 +535,6 @@ defmodule MediaServer.Mendooze.Conn do
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
-
-  def handle_call(:close, _from, state) do
-    state = teardown(state)
-    {:stop, :normal, :ok, state}
-  end
-
-  # ── Player (server doc §6.3) ────────────────────────────────────────────────
-
-  def handle_call({:create_player, file_path, opts}, _from, state) do
-    tag = "p-#{state.res_seq}"
-    state = %{state | res_seq: state.res_seq + 1}
-
-    with {:ok, player_id} <- create(state, "PlayerCreate", [state.sess_id, tag]),
-         :ok <- cleanup_on_error(state, player_id, attach_player_all(state, player_id)),
-         {:ok, _} <-
-           cleanup_on_error(
-             state,
-             player_id,
-             rpc(state, "PlayerOpen", [state.sess_id, player_id, file_path])
-           ),
-         :ok <- maybe_seek(state, player_id, Keyword.get(opts, :start_time)) do
-      ref = make_ref()
-
-      players =
-        Map.put(state.players, ref, %{player_id: player_id, tag: tag, file: file_path, opts: opts})
-
-      Logger.info(
-        module: __MODULE__,
-        cnx_tag: state.sess_tag,
-        message: "created Player for file #{file_path}"
-      )
-
-      {:reply, {:ok, {self(), :player, ref}}, %{state | players: players}}
-    else
-      {:error, reason} -> {:reply, {:error, reason}, state}
-    end
-  end
-
-  def handle_call({:player_cmd, cmd, ref}, _from, state) do
-    case Map.get(state.players, ref) do
-      nil ->
-        {:reply, {:error, :no_such_player}, state}
-
-      player ->
-        do_player_cmd(cmd, ref, player, state)
-    end
-  end
-
-  # ── Recorder (server doc §6.4) ──────────────────────────────────────────────
-
-  def handle_call({:create_recorder, file_path, duration_ms, opts}, _from, state) do
-    warn_unsupported_recorder_opts(opts, state)
-    tag = "r-#{state.res_seq}"
-    state = %{state | res_seq: state.res_seq + 1}
-
-    with {:ok, recorder_id} <- create(state, "RecorderCreate", [state.sess_id, tag]),
-         :ok <- attach_recorder_all(state, recorder_id) do
-      ref = make_ref()
-
-      recorders =
-        Map.put(state.recorders, ref, %{
-          recorder_id: recorder_id,
-          tag: tag,
-          file: file_path,
-          duration_ms: duration_ms,
-          opts: opts,
-          stopping: false
-        })
-
-      {:reply, {:ok, {self(), :recorder, ref}}, %{state | recorders: recorders}}
-    else
-      {:error, reason} -> {:reply, {:error, reason}, state}
-    end
-  end
-
-  def handle_call({:recorder_cmd, cmd, ref}, _from, state) do
-    case Map.get(state.recorders, ref) do
-      nil ->
-        {:reply, {:error, :no_such_recorder}, state}
-
-      recorder ->
-        do_recorder_cmd(cmd, ref, recorder, state)
-    end
-  end
-
-  # ── Echo (server doc §4.16: the endpoint is attached to itself) ────────────
-
-  def handle_call(:create_echo, _from, %{echo: nil} = state) do
-    case attach_endpoint_to_itself(state) do
-      :ok ->
-        ref = make_ref()
-        send(state.event_sink, {:ms_event, {self(), :echo, ref}, :echo_started})
-        {:reply, {:ok, {self(), :echo, ref}}, %{state | echo: ref}}
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
-    end
-  end
-
-  def handle_call(:create_echo, _from, state),
-    do: {:reply, {:error, :echo_already_started}, state}
-
-  def handle_call({:stop_echo, ref}, _from, %{echo: ref} = state) do
-    detach_all(state)
-    {:reply, :ok, %{state | echo: nil}}
-  end
-
-  def handle_call({:stop_echo, _ref}, _from, state),
-    do: {:reply, {:error, :no_such_echo}, state}
 
   # ── Server events routed by MediaServer.Mendooze ────────────────────────────
 
@@ -437,17 +548,43 @@ defmodule MediaServer.Mendooze.Conn do
   # merely stopped its camera cannot then be told from one that has gone silent
   # altogether — which for a B2BUA is the difference between a media problem and
   # a dead call.
-  defp handle_server_event({:endpoint_disconnected, _tag, _ep, media}, state) do
-    Logger.warning(module: __MODULE__, session: state.sess_tag, message: "timeout on #{media}")
-    send(state.event_sink, {:ms_event, self(), {:media_timeout, media}})
+  # Endpoint events name the endpoint they concern (the JSR309 `joinableId`),
+  # which is how one session holding two of them tells its legs apart. An id that
+  # matches none of them falls back to the inbound leg: older servers do not
+  # always carry it, and a connectivity event attributed to the only leg there is
+  # cannot be attributed wrongly.
+  defp leg_by_endpoint(state, ep) do
+    case Enum.find(state.legs, fn {_name, l} -> l.endpoint_id == ep end) do
+      {name, _leg} -> name
+      nil -> :inbound
+    end
+  end
 
-    state = %{
-      state
-      | timed_out: MapSet.put(state.timed_out, media),
-        connected: MapSet.delete(state.connected, media)
-    }
+  # Everything a leg's endpoint reports is emitted with THAT leg's handle, so a
+  # B2BUA scenario can tell "the callee stopped sending" from "the caller did".
+  # The inbound leg keeps the bare pid (handle_of/1), which is why no existing
+  # scenario or test had to change.
+  defp on_endpoint_event(state, ep, fun) do
+    name = leg_by_endpoint(state, ep)
 
-    {:noreply, maybe_notify_media_lost(state)}
+    case leg(state, name) do
+      nil -> {:noreply, state}
+      l -> {:noreply, put_leg(state, name, fun.(l, handle_of(name)))}
+    end
+  end
+
+  defp handle_server_event({:endpoint_disconnected, _tag, ep, media}, state) do
+    on_endpoint_event(state, ep, fn l, handle ->
+      Logger.warning(module: __MODULE__, session: l.sess_tag, message: "timeout on #{media}")
+      send(l.event_sink, {:ms_event, handle, {:media_timeout, media}})
+
+      %{
+        l
+        | timed_out: MapSet.put(l.timed_out, media),
+          connected: MapSet.delete(l.connected, media)
+      }
+      |> maybe_notify_media_lost(handle)
+    end)
   end
 
   # First validated RTP/SRTP packet on one media (server EndpointConnectedEvent,
@@ -455,33 +592,31 @@ defmodule MediaServer.Mendooze.Conn do
   # plain RTP packet is simply the first media packet. The server re-arms it on
   # each StartReceiving, so the raw event repeats on renegotiation while
   # :ice_connected stays one-shot — docs/design/media-connectivity.md §3, §5.
-  defp handle_server_event({:endpoint_connected, _tag, _ep, media}, state) do
-    Logger.info(
-      module: __MODULE__,
-      session: state.sess_tag,
-      message: "media connected on #{media}"
-    )
+  defp handle_server_event({:endpoint_connected, _tag, ep, media}, state) do
+    on_endpoint_event(state, ep, fn l, handle ->
+      Logger.info(module: __MODULE__, session: l.sess_tag, message: "media connected on #{media}")
+      send(l.event_sink, {:ms_event, handle, {:media_connected, media}})
 
-    send(state.event_sink, {:ms_event, self(), {:media_connected, media}})
-
-    # Media flowing again clears both the media's own timeout and the one-shot
-    # latch, so a second silence produces a second `:media_lost` rather than
-    # being swallowed by the first.
-    state = %{
-      state
-      | connected: MapSet.put(state.connected, media),
-        timed_out: MapSet.delete(state.timed_out, media),
-        lost_notified: false,
-        status: :active
-    }
-
-    {:noreply, maybe_notify_ice_connected(state, media)}
+      # Media flowing again clears both the media's own timeout and the one-shot
+      # latch, so a second silence produces a second `:media_lost` rather than
+      # being swallowed by the first.
+      %{
+        l
+        | connected: MapSet.put(l.connected, media),
+          timed_out: MapSet.delete(l.timed_out, media),
+          lost_notified: false,
+          status: :active
+      }
+      |> maybe_notify_ice_connected(media, handle)
+    end)
   end
 
-  defp handle_server_event({:external_fir, _tag, _ep, media}, state) do
-    # remote peer asked for a full intra frame: forward the update request
-    rpc(state, "EndpointRequestUpdate", [state.sess_id, state.endpoint_id, @media_int[media]])
-    {:noreply, state}
+  defp handle_server_event({:external_fir, _tag, ep, media}, state) do
+    on_endpoint_event(state, ep, fn l, _handle ->
+      # remote peer asked for a full intra frame: forward the update request
+      rpc(l, "EndpointRequestUpdate", [l.sess_id, l.endpoint_id, @media_int[media]])
+      l
+    end)
   end
 
   defp handle_server_event({:player_started, _tag, player_tag}, state) do
@@ -534,9 +669,9 @@ defmodule MediaServer.Mendooze.Conn do
   # The derivation rule of docs/design/media-connectivity.md §4, on the media
   # that just connected. R (`recv_medias`) is the set of medias the peer
   # transmits on; rule 1 (R empty) never reaches here since no event can arrive.
-  defp maybe_notify_ice_connected(%{ice_notified: true} = state, _media), do: state
+  defp maybe_notify_ice_connected(%{ice_notified: true} = state, _media, _handle), do: state
 
-  defp maybe_notify_ice_connected(state, media) do
+  defp maybe_notify_ice_connected(state, media, handle) do
     r = state.recv_medias || MapSet.new()
 
     ready? =
@@ -548,7 +683,7 @@ defmodule MediaServer.Mendooze.Conn do
       end
 
     if ready? do
-      send(state.event_sink, {:ms_event, self(), :ice_connected})
+      send(state.event_sink, {:ms_event, handle, :ice_connected})
       %{state | ice_notified: true}
     else
       state
@@ -565,9 +700,9 @@ defmodule MediaServer.Mendooze.Conn do
   # One dead media is a media problem — a camera switched off, a video codec the
   # peer gave up on — and only every dead media is a dead call. A B2BUA hangs up
   # on this one; it must not hang up on the other.
-  defp maybe_notify_media_lost(%{lost_notified: true} = state), do: state
+  defp maybe_notify_media_lost(%{lost_notified: true} = state, _handle), do: state
 
-  defp maybe_notify_media_lost(state) do
+  defp maybe_notify_media_lost(state, handle) do
     r = state.recv_medias || MapSet.new()
 
     if MapSet.size(r) > 0 and MapSet.subset?(r, state.timed_out) do
@@ -577,7 +712,7 @@ defmodule MediaServer.Mendooze.Conn do
         message: "every media the peer was sending has gone silent"
       )
 
-      send(state.event_sink, {:ms_event, self(), :media_lost})
+      send(state.event_sink, {:ms_event, handle, :media_lost})
       %{state | lost_notified: true}
     else
       state
@@ -1832,18 +1967,30 @@ defmodule MediaServer.Mendooze.Conn do
   defp teardown(%{status: :closed} = state), do: state
 
   defp teardown(state) do
-    Enum.each(state.medias, fn media ->
-      m = @media_int[media]
-      rpc(state, "EndpointStopSending", [state.sess_id, state.endpoint_id, m])
-      rpc(state, "EndpointStopReceiving", [state.sess_id, state.endpoint_id, m])
-    end)
+    # Whatever legs are left — `close` releases them one at a time, a crash or a
+    # setup failure leaves them all.
+    Enum.each(Map.values(state.legs), &release_leg(state, &1))
 
-    if state.endpoint_id, do: rpc(state, "EndpointDelete", [state.sess_id, state.endpoint_id])
     if state.sess_id, do: rpc(state, "MediaSessionDelete", [state.sess_id])
 
     Mendooze.unregister_conn(state.server, state.sess_tag)
     send(state.event_sink, {:ms_event, self(), :closed})
-    %{state | status: :closed}
+    %{state | status: :closed, legs: %{}}
+  end
+
+  # One endpoint: stop both planes per media, then delete it. The session is not
+  # this function's business — it belongs to the connection, not to a leg.
+  defp release_leg(state, nil), do: state
+
+  defp release_leg(state, leg) do
+    Enum.each(leg.medias, fn media ->
+      m = @media_int[media]
+      rpc(leg, "EndpointStopSending", [leg.sess_id, leg.endpoint_id, m])
+      rpc(leg, "EndpointStopReceiving", [leg.sess_id, leg.endpoint_id, m])
+    end)
+
+    if leg.endpoint_id, do: rpc(leg, "EndpointDelete", [leg.sess_id, leg.endpoint_id])
+    state
   end
 
   # On a setup failure: free the server-side resources, reply with the error
