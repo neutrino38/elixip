@@ -19,8 +19,10 @@ defmodule SIP.B2bua.Peer do
       `$ru`; mandatory to reach a registered contact), `:keep` preserves the
       original R-URI and only routes to the target (kamailio `$du`; the
       trunk/SBC case).
+    * `retry_on` — which final responses make a `:serial` hunt move on to the
+      next target: a list of codes and/or ranges, or `nil` for the default.
     * `outbound_proxy` — per-peer next hop; `nil` falls back to the global
-      `:proxyuri` application env. (P2 — the global one is honoured today.)
+      `:proxyuri` application env. (P2b-3 — the global one is honoured today.)
     * `trunk_pid` — reserved for the future trunk process holding reachability
       state. Ignored in v1.
   """
@@ -28,16 +30,22 @@ defmodule SIP.B2bua.Peer do
             use_srv: false,
             fork: :none,
             ruri: :peer,
+            retry_on: nil,
             outbound_proxy: nil,
             trunk_pid: nil
 end
 
 defmodule SIP.B2bua.Leg do
   @moduledoc "One call leg of a B2BUA scenario (the outbound one; see SIP.B2bua.State)."
+  # `target` is the one currently being tried and `untried` those left after it,
+  # in the order the peer gave them (for a registrar peer, descending q). A
+  # serial hunt walks that list; each attempt is a branch of the SAME dialog, so
+  # the leg — and everything keyed on it — never changes.
   defstruct tag: nil,
             dialogpid: nil,
             peer: nil,
             target: nil,
+            untried: [],
             method: nil,
             initial_trans: nil,
             media: false
@@ -170,6 +178,17 @@ defmodule SIP.Session.B2bua do
         end
       end
 
+      @doc """
+      True while a serial hunt is still running: the target that just answered
+      refused, and the next one is being tried. What tells "this device said no"
+      from "the call is over" after a `b2bua_forward_reply/1`.
+      """
+      defmacro b2bua_hunting?() do
+        quote do
+          SIP.Session.B2bua.hunting?(var!(sip_ctx))
+        end
+      end
+
       @doc "The outbound leg (a `%SIP.B2bua.Leg{}`), or nil when none was created."
       defmacro b2bua_outbound_leg() do
         quote do
@@ -254,26 +273,33 @@ defmodule SIP.Session.B2bua do
         fail(sip_ctx, {:b2bua, reason})
 
       {:ok, fwd} ->
-        # v1 uses the head of the target list; the branch orchestration that
-        # walks the rest is P2/P4 (§3.3) and lands inside the dialog, not here.
-        target = peer.uris |> hd() |> normalize_uri()
+        # The first target is dialled now; the rest are kept on the leg for a
+        # serial hunt to walk (§3.1). `fork: :none` keeps them unused.
+        [target | rest] = Enum.map(peer.uris, &normalize_uri/1)
+        untried = if peer.fork == :serial, do: rest, else: []
 
         case apply_ruri_policy(fwd, target, peer.ruri) do
           {:error, reason} ->
             fail(sip_ctx, {:b2bua, reason})
 
           {:ok, fwd} ->
-            start_outbound_dialog(sip_ctx, req, fwd, peer, target, media, opts)
+            start_outbound_dialog(sip_ctx, req, fwd, peer, target, untried, media, opts)
         end
     end
   end
 
-  defp start_outbound_dialog(sip_ctx, orig_req, fwd, peer, target, media, opts) do
+  defp start_outbound_dialog(sip_ctx, orig_req, fwd, peer, target, untried, media, opts) do
     timeout = Keyword.get(opts, :timeout, Map.get(@default_timeouts, fwd.method, 60))
 
     # NOT SIP.Session.send_sip_request/3: that one routes through
     # sip_ctx.dialogpid, which is the INBOUND leg.
-    case SIP.Dialog.start_dialog(fwd, timeout, :outbound, sip_ctx.debug, tag: @outbound_tag) do
+    #
+    # `fork:` is declared here, not on the first fork_branch/2: this very request
+    # is the first branch, and with more targets behind it its failure must end
+    # the branch rather than the dialog.
+    dialog_opts = [tag: @outbound_tag, fork: untried != []]
+
+    case SIP.Dialog.start_dialog(fwd, timeout, :outbound, sip_ctx.debug, dialog_opts) do
       {:ok, dialog_pid, _dialog_id} ->
         trans_pid = await_initial_transaction()
 
@@ -282,6 +308,7 @@ defmodule SIP.Session.B2bua do
           dialogpid: dialog_pid,
           peer: peer,
           target: target,
+          untried: untried,
           method: fwd.method,
           initial_trans: trans_pid,
           media: media
@@ -453,7 +480,14 @@ defmodule SIP.Session.B2bua do
 
     case Map.get(state.pending, tid) do
       %Pending{} = pending ->
-        relay_reply(sip_ctx, resp, pending, tid)
+        # A refusal from one target of a serial hunt is not the answer to the
+        # call — it is the answer of one device. Try the next one instead of
+        # telling the caller the call failed.
+        if next_target(sip_ctx, resp, tid) do
+          try_next_target(sip_ctx, resp, pending, tid)
+        else
+          relay_reply(sip_ctx, resp, pending, tid)
+        end
 
       nil ->
         # A retransmitted final, or a response to something this scenario never
@@ -466,6 +500,101 @@ defmodule SIP.Session.B2bua do
         )
 
         SIP.Context.set(sip_ctx, :lasterr, :ok)
+    end
+  end
+
+  # ── Serial hunt (§3.1, §3.3) ────────────────────────────────────────────────
+
+  # Which final responses make a hunt move on. The default is any 4xx or 5xx:
+  # the device refused, timed out or broke, and another one may still answer.
+  #
+  # NOT 6xx — a 6xx is a global refusal ("Decline", "Does Not Exist Anywhere")
+  # and RFC 3261 §16.7 stops the search on it; ringing the user's other phones
+  # after they pressed Decline is exactly what they asked not to happen.
+  # NOT 3xx — a redirect names new targets, which is its own handling (P4).
+  @default_retry_on [400..599]
+
+  # The next target to try, or nil when this response ends the hunt. Only the
+  # leg's *current* initial transaction is a hunt candidate: a response to some
+  # in-dialog request relayed later has nothing to do with it.
+  defp next_target(sip_ctx, resp, tid) do
+    with %Leg{initial_trans: ^tid, untried: [next | _], peer: peer} <- outbound_leg(sip_ctx),
+         :serial <- peer.fork,
+         true <- resp.response >= 300 and retryable?(peer, resp.response) do
+      next
+    else
+      _ -> nil
+    end
+  end
+
+  defp try_next_target(sip_ctx, resp, %Pending{} = pending, tid) do
+    leg = outbound_leg(sip_ctx)
+    [next | rest] = leg.untried
+
+    case SIP.Dialog.fork_branch(leg.dialogpid, next) do
+      {:ok, new_trans} ->
+        Logger.info(
+          module: __MODULE__,
+          message:
+            "b2bua: #{leg.target} answered #{resp.response}; trying #{next} " <>
+              "(#{length(rest)} target(s) left)"
+        )
+
+        # The correlation moves with the hunt: the caller is still waiting for an
+        # answer to the SAME request, it is just a different branch that will
+        # provide it now.
+        sip_ctx
+        |> drop_pending(tid)
+        |> add_pending(new_trans, pending.orig_req, pending.orig_leg, pending.method)
+        |> put_leg(@outbound_tag, %Leg{
+          leg
+          | target: next,
+            untried: rest,
+            initial_trans: new_trans
+        })
+        |> SIP.Context.set(:lasterr, :ok)
+
+      {:error, reason} ->
+        # The hunt cannot go on (the dialog is gone, the transport failed…).
+        # Relay what we have: the caller learns something rather than waiting
+        # for an answer that will never come. Clearing `untried` first stops
+        # this from being retried on the next response.
+        Logger.warning(
+          module: __MODULE__,
+          message: "b2bua: cannot try #{next} (#{inspect(reason)}); relaying #{resp.response}"
+        )
+
+        sip_ctx
+        |> put_leg(@outbound_tag, %Leg{leg | untried: []})
+        |> relay_reply(resp, pending, tid)
+    end
+  end
+
+  defp retryable?(%Peer{retry_on: nil}, code), do: matches_any?(@default_retry_on, code)
+  defp retryable?(%Peer{retry_on: specs}, code) when is_list(specs), do: matches_any?(specs, code)
+  defp retryable?(%Peer{retry_on: %Range{} = r}, code), do: code in r
+  defp retryable?(_peer, _code), do: false
+
+  defp matches_any?(specs, code) do
+    Enum.any?(specs, fn
+      %Range{} = range -> code in range
+      wanted when is_integer(wanted) -> wanted == code
+      _ -> false
+    end)
+  end
+
+  @doc """
+  Is a hunt still running on the outbound leg — i.e. did the last final response
+  send us to another target rather than end the call?
+
+  What a scenario asks after relaying a failure, to tell "this device refused,
+  another is ringing" from "the call is over".
+  """
+  @spec hunting?(%SIP.Context{}) :: boolean()
+  def hunting?(sip_ctx = %SIP.Context{}) do
+    case outbound_leg(sip_ctx) do
+      %Leg{initial_trans: tid} -> Map.has_key?(state(sip_ctx).pending, tid)
+      _ -> false
     end
   end
 

@@ -79,6 +79,13 @@ defmodule SIP.Dialog do
       is how a B2BUA scenario tells its outbound leg's events apart from the
       inbound ones (design docs/design/b2bua_module.md §2). Default `nil`:
       bare messages, the historical behaviour.
+
+    * `:fork` — `true` when this request is the first branch of a hunt with more
+      targets behind it. A non-2xx final then ends the BRANCH, not the dialog,
+      so the caller can arm the next target (`fork_branch/2`). It has to be
+      declared here rather than inferred from the first `fork_branch/2`: the
+      first branch goes out with the dialog, and its failure would otherwise
+      have torn the dialog down before anyone could ask for a second.
   """
   @spec start_dialog(map(), integer(), :inbound | :outbound, boolean(), keyword()) ::
           {:error, any()} | {:ok, pid(), tuple()}
@@ -89,7 +96,8 @@ defmodule SIP.Dialog do
     {req2, dialog_id} = get_or_create_dialog_id(req)
     name = {:via, Registry, {Registry.SIPDialog, dialog_id, :cast}}
     tag = Keyword.get(opts, :tag)
-    dialog_params = {req2, direction, self(), timeout, debug, dialog_id, tag}
+    forking = Keyword.get(opts, :fork, false)
+    dialog_params = {req2, direction, self(), timeout, debug, dialog_id, tag, forking}
 
     case GenServer.start(SIP.DialogImpl, dialog_params, name: name) do
       {:ok, dlg_pid} ->

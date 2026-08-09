@@ -599,11 +599,21 @@ defmodule Kelix.Mod.Registrar do
   # destination and flow.
   defp rewrite(req, %Contact{} = binding), do: Map.put(req, :ruri, target_uri(binding))
 
+  # Parameters of the Contact HEADER, not of the address it holds: they describe
+  # the binding (its preference, its lifetime), so they have no business on a
+  # Request-URI we then send. The parser folds header and URI parameters into one
+  # map, which is why they have to be dropped explicitly — a forwarded INVITE
+  # otherwise went out to `sip:bob@10.0.0.9;q=0.9;expires=3600`.
+  @binding_only_params ["q", "expires"]
+
   # The stored contact stamped with the destination and flow it registered over.
   # Both are what `SIP.Transport.Selector.select_transport/1` short-circuits on
   # (§6.4): a live `tp_pid`+`tp_module` sends straight over the existing
   # connection, and failing that `destip`/`destport` skip DNS.
   defp target_uri(%Contact{contact: c} = binding) do
+    c = %SIP.Uri{c | params: Map.drop(c.params, @binding_only_params)}
+    binding = %Contact{binding | contact: c}
+
     case binding.received do
       {proto, ip, port} ->
         %SIP.Uri{

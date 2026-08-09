@@ -16,8 +16,6 @@ defmodule Kelix.B2buaScriptTest do
   use ExUnit.Case, async: false
 
   alias Kelix.Mod.Registrar
-  alias SIP.Test.Transport.UDPMockup
-
   @domain "example.com"
   @callee "bob"
 
@@ -51,10 +49,12 @@ defmodule Kelix.B2buaScriptTest do
     :ok
   end
 
-  # Bob's handset, registered at an address that routes to the mockup.
-  defp contact(host) do
+  # Bob's handset, registered at an address that routes to the mockup. `peer:`
+  # names the mockup instance, so two registered devices really are two
+  # processes — which is what a hunt needs.
+  defp contact(host, peer) do
     %SIP.Uri{userpart: @callee, domain: host, port: 5060}
-    |> SIP.Uri.set_uri_param("unittest", "1")
+    |> SIP.Uri.set_uri_param("unittest", peer)
   end
 
   defp register_callee(host \\ "10.0.0.9", opts \\ []) do
@@ -62,7 +62,7 @@ defmodule Kelix.B2buaScriptTest do
       method: :REGISTER,
       to: %SIP.Uri{userpart: @callee, domain: @domain},
       ruri: %SIP.Uri{userpart: @callee, domain: @domain},
-      contact: apply_q(contact(host), Keyword.get(opts, :q)),
+      contact: apply_q(contact(host, Keyword.get(opts, :peer, "1")), Keyword.get(opts, :q)),
       expires: 3600,
       callid: Keyword.get(opts, :callid, "reg-#{host}")
     }
@@ -101,8 +101,10 @@ defmodule Kelix.B2buaScriptTest do
     pid
   end
 
-  defp mockup_pid do
-    SIP.Transport.Selector.select_transport(contact("10.0.0.9")).tp_pid
+  defp mockup_pid(peer \\ "1") do
+    tp = SIP.Transport.Selector.select_transport(contact("10.0.0.9", peer)).tp_pid
+    :ok = GenServer.call(tp, :settestapp)
+    tp
   end
 
   test "a call to a registered subscriber is relayed to the contact the store holds",
@@ -110,7 +112,6 @@ defmodule Kelix.B2buaScriptTest do
     :ok = register_callee()
 
     tp_pid = mockup_pid()
-    :ok = GenServer.call(tp_pid, :settestapp)
 
     {:ok, dialog} = MockDialog.start_link(self())
     req = invite()
@@ -135,8 +136,7 @@ defmodule Kelix.B2buaScriptTest do
     :ok = register_callee("10.0.0.9", q: 0.2, callid: "reg-low")
     :ok = register_callee("10.0.0.42", q: 0.9, callid: "reg-high")
 
-    tp_pid = mockup_pid()
-    :ok = GenServer.call(tp_pid, :settestapp)
+    _tp_pid = mockup_pid()
 
     {:ok, dialog} = MockDialog.start_link(self())
     req = invite()
@@ -150,8 +150,7 @@ defmodule Kelix.B2buaScriptTest do
 
   test "an AOR nobody registered is answered 480, and no call goes out",
        %{scenario: module} do
-    tp_pid = mockup_pid()
-    :ok = GenServer.call(tp_pid, :settestapp)
+    _tp_pid = mockup_pid()
 
     {:ok, dialog} = MockDialog.start_link(self())
     req = invite()
@@ -161,6 +160,42 @@ defmodule Kelix.B2buaScriptTest do
     assert_receive {:replied, 100, "Trying", _fields, _req}, 5_000
     assert_receive {:replied, 480, "Temporarily Unavailable", _fields, _req}, 5_000
     refute_receive {:invite_sent, _fwd}, 500
+  end
+
+  # P2a + P2b together, and the payoff of both: a subscriber with two devices
+  # registered. The preferred one refuses, and the call goes on to the other —
+  # over the SAME outbound leg, as another branch of its dialog.
+  test "a device that refuses sends the call on to the subscriber's other device",
+       %{scenario: module} do
+    :ok = register_callee("10.0.0.9", q: 0.9, peer: "hunt_a", callid: "reg-a")
+    :ok = register_callee("10.0.0.42", q: 0.2, peer: "hunt_b", callid: "reg-b")
+
+    a = mockup_pid("hunt_a")
+    _b = mockup_pid("hunt_b")
+
+    {:ok, dialog} = MockDialog.start_link(self())
+    req = invite()
+    pid = spawn_b2bua(module, dialog, req)
+    send(pid, {:INVITE, req, self(), dialog})
+
+    assert_receive {:replied, 100, "Trying", _fields, _req}, 5_000
+
+    # The q=0.9 device is tried first…
+    assert_receive {:invite_sent, first}, 5_000
+    assert first.ruri.domain == "10.0.0.9"
+
+    # …it is busy, so the other one is tried. The caller is told nothing yet:
+    # one device saying no is not the call failing.
+    GenServer.cast(a, {:simulate, 486, 100})
+
+    assert_receive {:invite_sent, second}, 5_000
+    assert second.ruri.domain == "10.0.0.42"
+    refute_receive {:replied, 486, _, _, _}, 300
+
+    # Same call throughout: both branches carry the dialog's Call-ID, not the
+    # caller's and not one each.
+    assert second.callid == first.callid
+    refute second.callid == req.callid
   end
 
   test "the script declares the module it needs, so a node without it refuses to load it",

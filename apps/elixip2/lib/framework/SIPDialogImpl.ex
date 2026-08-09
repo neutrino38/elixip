@@ -420,10 +420,10 @@ defmodule SIP.DialogImpl do
   @impl true
   @spec init(
           {map(), :inbound | :outbound, pid(), integer(), boolean(), {any(), any(), any()},
-           atom() | nil}
+           atom() | nil, boolean()}
         ) :: {:ok, map()} | {:stop, atom() | {any(), any()}}
 
-  def init({req, :inbound, pid, timeout, debug, dialog_id, tag}) when is_req(req) do
+  def init({req, :inbound, pid, timeout, debug, dialog_id, tag, _forking}) when is_req(req) do
     {fromtag, callid, totag} = dialog_id
     # Generate totag if needed
     totag = if is_nil(totag), do: generate_from_or_to_tag(), else: totag
@@ -490,7 +490,7 @@ defmodule SIP.DialogImpl do
   end
 
   # Dialog started by an outbound request
-  def init({req, :outbound, pid, timeout, debug, dialog_id, tag}) when is_req(req) do
+  def init({req, :outbound, pid, timeout, debug, dialog_id, tag, forking}) when is_req(req) do
     {fromtag, callid, _totag} = dialog_id
 
     state = %SIP.DialogImpl{
@@ -498,6 +498,9 @@ defmodule SIP.DialogImpl do
       direction: :outbound,
       app: pid,
       tag: tag,
+      # Declared up front: the first branch goes out with the dialog, so its
+      # failure must not tear the dialog down when more targets are waiting.
+      forking: forking,
       dialogtimeout: timeout,
       debuglog: debug,
       transactions: [],
@@ -515,7 +518,15 @@ defmodule SIP.DialogImpl do
         {:ok, transaction_pid, modmsg} ->
           send_to_app(state, {:onnewdialog, :ok, transaction_pid})
 
-          %SIP.DialogImpl{state | transactions: [transaction_pid], msg: modmsg}
+          branches =
+            if forking, do: %{transaction_pid => modmsg.ruri}, else: state.branches
+
+          %SIP.DialogImpl{
+            state
+            | transactions: [transaction_pid],
+              msg: modmsg,
+              branches: branches
+          }
           |> arm_expiration_timer(modmsg)
           # This returns { :ok, newstate } as expected by init()
           |> check_closing_transaction(modmsg, transaction_pid)

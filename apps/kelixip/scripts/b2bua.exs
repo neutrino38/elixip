@@ -48,9 +48,10 @@ defmodule Kelix.B2bua do
 
     case lookup_targets(req, ctx_get(:domain)) do
       {:ok, peer} ->
-        # v1 dials the highest-q contact. Ringing all of them at once is P2b
-        # (branches inside this leg, §3.3), and the peer already carries the
-        # ordered list for when it lands.
+        # The highest-q contact is dialled first; if it refuses, the hunt walks
+        # down the rest — as branches of this same leg, so nothing above the
+        # dialog notices how many devices were tried. Ringing them all at once
+        # is P4.
         b2bua_forward(req, peer, false)
         goto(proceeding, "call forwarded")
 
@@ -70,9 +71,16 @@ defmodule Kelix.B2bua do
         b2bua_forward_reply(resp)
         goto(wait_ack, "200 OK relayed")
 
+      # A final from the callee. With a serial hunt this may be one device
+      # refusing rather than the call failing, so ask before concluding.
       {:outbound, {code, resp, _trans, _dlg}} when code >= 300 ->
         b2bua_forward_reply(resp)
-        scenario_success("callee answered #{code}")
+
+        if b2bua_hunting?() do
+          goto(loop, "#{code}, trying the next target")
+        else
+          scenario_success("callee answered #{code}")
+        end
 
       # The caller gave up. The inbound dialog has already answered the CANCEL
       # and 487'd its INVITE; what we owe the callee is the CANCEL of its INVITE.
@@ -177,7 +185,10 @@ defmodule Kelix.B2bua do
 
     case Kelix.Mod.Registrar.targets(domain, aor) do
       {:ok, uris} ->
-        {:ok, %SIP.B2bua.Peer{uris: uris, use_srv: false, ruri: :peer}}
+        # Serial: a subscriber's devices are alternatives, not a group to ring
+        # together — the store already ordered them by q, i.e. by which one the
+        # subscriber wants tried first.
+        {:ok, %SIP.B2bua.Peer{uris: uris, use_srv: false, ruri: :peer, fork: :serial}}
 
       :notfound ->
         # Registered nowhere right now — the subscriber exists, the device does

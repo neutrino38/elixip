@@ -58,9 +58,16 @@ defmodule B2BUA.Basic do
         b2bua_forward_reply(resp)
         goto(wait_ack, "200 OK relayed")
 
+      # A final from the callee. With a serial hunt this may be one device
+      # refusing rather than the call failing, so ask before concluding.
       {:outbound, {code, resp, _trans, _dlg}} when code >= 300 ->
         b2bua_forward_reply(resp)
-        scenario_success("callee answered #{code}")
+
+        if b2bua_hunting?() do
+          goto(loop, "#{code}, trying the next target")
+        else
+          scenario_success("callee answered #{code}")
+        end
 
       # The caller gave up. The inbound dialog has already answered the CANCEL
       # and 487'd its INVITE by itself; what we owe the callee is the CANCEL of

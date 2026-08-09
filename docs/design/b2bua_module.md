@@ -208,10 +208,13 @@ branches are URI-level and SRV failover happens per branch below TM.
   single dialog; each fork target is a *branch*, i.e. one more client
   transaction inside that dialog, sharing the dialog-forming fields (Call-ID,
   from-tag, CSeq) and differing only by its Via branch and R-URI.
-  - `:serial` (P2): on failure of the current branch (transport error,
-    transaction timeout, 5xx/6xx — the retry-on list is a peer option), arm
+  - `:serial` (delivered): on a retryable final from the current branch, arm
     the next target as a new branch of the same dialog (kamailio
-    failure-route style).
+    failure-route style). `retry_on` is a peer option — a list of codes and/or
+    ranges; the default is **any 4xx or 5xx**. Not 6xx: that is a global
+    refusal (RFC 3261 §16.7), and ringing a subscriber's other phones after
+    they pressed Decline is what they asked not to happen. Not 3xx either — a
+    redirect names new targets, which is its own handling (P4).
   - `:parallel` (P4): send all branches at once; first 2xx/6xx wins, pending
     branches are CANCELled.
 - `trunk_pid` — reserved: attaches the peer to a trunk process that will hold
@@ -717,7 +720,7 @@ ACK+BYE the late 2xx" cannot be tested credibly against a single shared peer.
 | **P1** ✅ | message-layer purge/copy functions; dialog `tag:` option; leg + correlation state; `b2bua_forward/3` (single URI, media `false`), `b2bua_forward/1`, `b2bua_forward_reply/1`, `b2bua_reply/3..4`, `b2bua_send_BYE/0`; ACK/CANCEL special cases; automatic teardown; reference scenario `scenarios/b2bua_basic.exs` + 38 tests. **Left open:** the three-party test (§10) |
 | **P2a** ✅ | registrar-driven calling (§3.2): `Kelix.Mod.Registrar.targets/2`, q ordering, `apps/kelixip/scripts/b2bua.exs`. Dials the highest-q contact — the whole call for a single-contact AOR, and no shape change when P2b lands |
 | **P2b-1** ✅ | dialog-layer branches: `SIP.Dialog.fork_branch/2`, the branch table, the `add_totag` rework (a forked dialog adopts only a 2xx's tag), winner adoption + CANCEL of the losers, and the dialog surviving a branch failure so the next target can be armed |
-| **P2b-2** | session-layer serial hunt: `%Peer{fork: :serial}` + the retry-on list, the untried-target list on the leg, `b2bua_hunting?/0` |
+| **P2b-2** ✅ | session-layer serial hunt: `%Peer{fork: :serial}` + the `retry_on` list, the untried-target list on the leg, `b2bua_hunting?/0`, and the kelixip script hunting an AOR's contacts in q order |
 | **P2b-3** | failover across SRV priorities, per-peer `outbound_proxy` |
 | **P3** | `{:mediaserver, …}` mode: leg-qualified media handles, `bridge/2` callback in `MediaServer.Behaviour` + Mendooze implementation, offer/answer choreography |
 | **P4** | parallel forking (branch sets in the leg dialog, §3.3: winner adoption, late-2xx ACK+BYE, best-response aggregation; q-group semantics of §3.2), `{:rtpengine, …}` mode, trunk processes (`trunk_pid`); multi-leg generalization only if attended transfer / 3pcc demands it |

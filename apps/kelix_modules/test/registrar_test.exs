@@ -510,8 +510,23 @@ defmodule Kelix.Mod.RegistrarTest do
     test "the q parameter survives registration" do
       Registrar.save(register("alice", "10.0.0.9", q: 0.7), @domain)
 
+      assert [%Contact{contact: stored}] = Registrar.bindings(@domain, "alice")
+      assert SIP.Uri.get_uri_param(stored, "q") == {:ok, "0.7"}
+    end
+
+    # …but it does not travel onto the wire. `q` and `expires` describe the
+    # BINDING, not the address, and the parser folds header parameters into the
+    # URI's — so without dropping them the forwarded INVITE went out to
+    # `sip:alice@10.0.0.9;q=0.7;expires=3600`.
+    test "binding-only parameters are not carried onto the dialable URI" do
+      Registrar.save(register("alice", "10.0.0.9", q: 0.7), @domain)
+
       assert {:ok, [uri]} = Registrar.targets(@domain, "alice")
-      assert SIP.Uri.get_uri_param(uri, "q") == {:ok, "0.7"}
+      assert SIP.Uri.get_uri_param(uri, "q") == {:no_such_param, nil}
+      assert SIP.Uri.get_uri_param(uri, "expires") == {:no_such_param, nil}
+      # The address itself is untouched.
+      assert uri.userpart == "alice"
+      assert uri.domain == "10.0.0.9"
     end
 
     test "the AOR is matched case-insensitively, like every other lookup" do
