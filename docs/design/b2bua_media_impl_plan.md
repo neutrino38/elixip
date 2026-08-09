@@ -67,7 +67,7 @@ opposite of the order the design lists them in.
 | **R4** | the offer/answer choreography in `SIP.Session.B2bua`, the implicit bridge (R4.1) and the failure semantics (R4.2) | yes | ✅ |
 | **R5** | `scenarios/b2bua_media.exs` + its own test | yes | ✅ |
 | **R3** | `MediaServer.Mendooze.Conn`: two endpoints, cross-leg negotiation, the bridge | **yes**, mostly | R3a ✅ R3b ✅ R3c ✅ *(direct attach; transcoders open)* |
-| **R6** | §14.6 — the media server as a failure domain | partly | scenario clauses ✅, framework default open |
+| **R6** | §14.6 — the media server as a failure domain | yes | ✅ *(`stall_ms` left alone — see below)* |
 
 **State (2026-08-09): P3 is delivered except the transcoder chain.** 294 tests
 across the B2BUA, media and Mendooze suites; the media mode works end to end on
@@ -88,12 +88,31 @@ What remains:
   every case return `{:transcoding_not_implemented, media}` rather than
   attaching endpoints that would exchange codecs neither can decode. Which also
   means **audio is not always transcoded** the way the Java gateway does it;
-- **the framework default of R6** (§14.6's sketch: the media mixin monitoring
-  the server pid, the default cooperative shutdown, the configurable Conn
-  timeout);
 - **`b2bua_reoffer_kind/1`** (§R4.1b), without which every re-offer crosses;
 - an **E2E run against `MENDOOZE_URL`**, which is the only thing that can
   confirm the server accepts two endpoints in one session and attaches them.
+
+### R6 as built, and the one item left out
+
+Item 1 of §14.6's sketch asked the media mixin to *monitor* the server pid. It
+does it from a **watcher process** instead, because a scenario already receives
+`{:DOWN, …}` for its sub-FSM children: a DOWN clause in `on_events` would fire on
+those too, and it would have to be a clause, since a plain `receive` cannot see
+what it does not match. The watcher converts the signal into the
+`:server_disconnected` everything downstream already understands, and misfires on
+nothing.
+
+Item 4 — reconsidering the 90 s `stall_ms` — is **deliberately not done**. It is
+derived from the server's keepalive period, so changing it without knowing that
+period is picking a number that looks better next to the 10 s RPC timeout rather
+than one that is right. The keepalive period is the thing to argue about, and
+that argument needs the E2E.
+
+One consequence of R3 sharpened item 3 and is worth keeping in view: one process
+now serves both legs, so a slow RPC on one blocks the other at the head of the
+queue while the caller's own clock runs. `call_timeout_ms` bounds it; it does not
+remove it. If it ever bites, the answer is a per-leg RPC worker, not a bigger
+number.
 
 Two things moved during the implementation and are worth knowing before reading
 the sections above:
