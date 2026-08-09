@@ -1115,6 +1115,14 @@ ACK+BYE the late 2xx" cannot be tested credibly against a single shared peer.
 §7.5 offer profiles depend on P3, and so does the media-server resilience
 sketched in §14.6.
 
+P3 has two documents of its own, because §7's "a `bridge/2` callback must be
+added" turned out to understate the problem:
+[mediagw_b2bua_jsr309.md](mediagw_b2bua_jsr309.md) is the source study of the
+Java gateway that has been doing this in production — one media session per call
+holding two endpoints, and a codec negotiation that crosses the legs — and
+[b2bua_media_impl_plan.md](b2bua_media_impl_plan.md) is the resulting work
+breakdown.
+
 | Phase | Content |
 |---|---|
 | **P1** ✅ | message-layer purge/copy functions; dialog `tag:` option; leg + correlation state; `b2bua_forward/3` (single URI, media `false`), `b2bua_forward/1`, `b2bua_forward_reply/1`, `b2bua_reply/3..4`, `b2bua_send_BYE/0`; ACK/CANCEL special cases; automatic teardown; reference scenario `scenarios/b2bua_basic.exs` + 38 tests |
