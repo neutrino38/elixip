@@ -29,7 +29,11 @@ defmodule Mendooze.ConnTest do
   defp start_media_server(handler \\ &rpc_handler/2) do
     fake = Jsr309FakeServer.start(self(), handler)
     {:ok, server} = Mendooze.connect({fake.host, fake.port})
-    on_exit(fn -> if Process.alive?(server), do: Mendooze.disconnect(server) end)
+    # force: a Conn is not linked to the server process, so stopping the server
+    # alone leaves every peer connection of the test running — retrying RPCs
+    # against a fake server that is gone, and holding httpc sessions the whole
+    # run shares. That is enough to make unrelated timing-sensitive suites fail.
+    on_exit(fn -> if Process.alive?(server), do: Mendooze.disconnect(server, force: true) end)
 
     assert_receive {:jsr309_call, "EventQueueCreate", []}, 1_000
     assert_receive {:stream_conn, stream, _}, 1_000
@@ -43,6 +47,204 @@ defmodule Mendooze.ConnTest do
         Keyword.get(opts, :audio, %{type: :audio, port: 40_000, codecs: ["PCMU"], dtmf: true})
       ]
     })
+  end
+
+  # ── Two endpoints in one session (P3 R3b/R3c) ───────────────────────────────
+
+  # The stock handler gives every endpoint id 4, which cannot express a session
+  # holding two of them. Endpoint tags are distinct by construction, so they are
+  # what the ids key off here.
+  defp two_leg_handler("EndpointCreate", [_sess, tag | _]) do
+    if String.ends_with?(tag, "-outbound"), do: {:ok, [5]}, else: {:ok, [4]}
+  end
+
+  defp two_leg_handler(method, params), do: rpc_handler(method, params)
+
+  # Both legs negotiated on PCMU, which is what lets them be attached directly.
+  defp two_negotiated_legs(server) do
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio)
+    assert_receive {:jsr309_call, "MediaSessionCreate", [sess_tag, _q]}, 1_000
+
+    {:ok, out} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :audio,
+        audio_codec: "PCMU",
+        bridge_with: conn
+      )
+
+    # inbound answers an offer, outbound offers and reads an answer: the two
+    # directions a B2BUA actually uses.
+    {:ok, _answer} = Mendooze.set_remote_offer(conn, remote_answer())
+    {:ok, _offer} = Mendooze.get_local_offer(out)
+    :ok = Mendooze.set_remote_answer(out, remote_answer(ip: "10.9.8.6"))
+
+    {conn, out, sess_tag}
+  end
+
+  test "a second leg is an endpoint of the SAME session, not a second session" do
+    %{server: server} = start_media_server(&two_leg_handler/2)
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio)
+    assert_receive {:jsr309_call, "MediaSessionCreate", [sess_tag, _q]}, 1_000
+    assert_receive {:jsr309_call, "EndpointCreate", [3, ^sess_tag, true, false, false]}, 1_000
+
+    {:ok, out} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :audio_video,
+        bridge_with: conn
+      )
+
+    # Named, and sharing the process that owns the session — that is what
+    # `MediaServer.conn_ref/0` is for.
+    assert out == {conn, :outbound}
+
+    # A second Endpoint in session 3, with ITS media selection…
+    out_tag = "#{sess_tag}-outbound"
+    assert_receive {:jsr309_call, "EndpointCreate", [3, ^out_tag, true, true, false]}, 1_000
+
+    # …and no second MediaSession: EndpointAttachToEndpoint takes one session id,
+    # so a second session would make the two legs unbridgeable.
+    refute_receive {:jsr309_call, "MediaSessionCreate", _}, 200
+  end
+
+  test "a leg cannot be added twice" do
+    %{server: server} = start_media_server(&two_leg_handler/2)
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio)
+    {:ok, _out} = Mendooze.create_peer_connection(server, self(), bridge_with: conn)
+
+    assert {:error, {:leg_exists, :outbound}} =
+             Mendooze.create_peer_connection(server, self(), bridge_with: conn)
+  end
+
+  test "bridging attaches both directions and keeps the original sequence numbers" do
+    %{server: server} = start_media_server(&two_leg_handler/2)
+    {conn, out, _tag} = two_negotiated_legs(server)
+
+    assert :ok = Mendooze.bridge(conn, out, audio: :avoid, video: :avoid)
+
+    # Both directions — a bridge is two one-way attaches, not one call.
+    assert_receive {:jsr309_call, "EndpointAttachToEndpoint", [3, 4, 5, 0]}, 1_000
+    assert_receive {:jsr309_call, "EndpointAttachToEndpoint", [3, 5, 4, 0]}, 1_000
+
+    # …and the rule that goes with relaying rather than transcoding: without it
+    # the server restamps the stream and the far end sees a discontinuity.
+    assert_receive {:jsr309_call, "EndpointSetRTPProperties",
+                    [3, 4, 0, %{"useOriSeqNum" => "1"}]},
+                   1_000
+
+    assert_receive {:jsr309_call, "EndpointSetRTPProperties",
+                    [3, 5, 0, %{"useOriSeqNum" => "1"}]},
+                   1_000
+  end
+
+  test "legs that settled on different codecs are refused, in the policy's own words" do
+    %{server: server} = start_media_server(&two_leg_handler/2)
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio)
+    assert_receive {:jsr309_call, "MediaSessionCreate", [_tag, _q]}, 1_000
+
+    {:ok, out} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :audio,
+        audio_codec: ["PCMA"],
+        bridge_with: conn
+      )
+
+    {:ok, _answer} = Mendooze.set_remote_offer(conn, remote_answer())
+    {:ok, _offer} = Mendooze.get_local_offer(out)
+
+    pcma = %{type: :audio, port: 40_000, codecs: ["PCMA"], dtmf: false}
+    :ok = Mendooze.set_remote_answer(out, remote_answer(audio: pcma))
+
+    # :forbid says what it means — the call fails rather than being transcoded.
+    assert {:error, {:no_common_codec, :audio}} = Mendooze.bridge(conn, out, audio: :forbid)
+
+    # :avoid would transcode, and the transcoder chain is the half of §3 that is
+    # not built. Refusing names that, instead of attaching two endpoints that
+    # would exchange codecs neither can decode.
+    assert {:error, {:transcoding_not_implemented, :audio}} =
+             Mendooze.bridge(conn, out, audio: :avoid)
+
+    # :force always transcodes, so it is refused even when the codecs agree.
+    assert {:error, {:transcoding_not_implemented, :audio}} =
+             Mendooze.bridge(conn, out, audio: :force)
+
+    # Nothing was attached on the way out.
+    refute_receive {:jsr309_call, "EndpointAttachToEndpoint", _}, 200
+  end
+
+  test "a media neither leg has negotiated is not attached" do
+    %{server: server} = start_media_server(&two_leg_handler/2)
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio)
+    {:ok, out} = Mendooze.create_peer_connection(server, self(), media: :audio, bridge_with: conn)
+
+    assert {:error, {:not_negotiated, :audio}} = Mendooze.bridge(conn, out, [])
+  end
+
+  test "unbridge detaches both endpoints, and a bad pair is not an error" do
+    %{server: server} = start_media_server(&two_leg_handler/2)
+    {conn, out, _tag} = two_negotiated_legs(server)
+    :ok = Mendooze.bridge(conn, out, audio: :avoid)
+
+    assert :ok = Mendooze.unbridge(conn, out)
+    assert_receive {:jsr309_call, "EndpointDettach", [3, 4, 0]}, 1_000
+    assert_receive {:jsr309_call, "EndpointDettach", [3, 5, 0]}, 1_000
+  end
+
+  test "two legs of different connections cannot be bridged" do
+    %{server: server} = start_media_server(&two_leg_handler/2)
+    {:ok, a} = Mendooze.create_peer_connection(server, self(), media: :audio)
+    {:ok, b} = Mendooze.create_peer_connection(server, self(), media: :audio)
+
+    assert {:error, :not_same_media_session} = Mendooze.bridge(a, b, [])
+  end
+
+  test "closing one leg deletes its endpoint; the session goes with the last one" do
+    %{server: server} = start_media_server(&two_leg_handler/2)
+    {conn, out, _tag} = two_negotiated_legs(server)
+
+    :ok = Mendooze.close_peer_connection(out)
+    assert_receive {:jsr309_call, "EndpointDelete", [3, 5]}, 1_000
+    refute_receive {:jsr309_call, "MediaSessionDelete", _}, 200
+    assert Process.alive?(conn)
+
+    :ok = Mendooze.close_peer_connection(conn)
+    assert_receive {:jsr309_call, "EndpointDelete", [3, 4]}, 1_000
+    assert_receive {:jsr309_call, "MediaSessionDelete", [3]}, 1_000
+    refute Process.alive?(conn)
+  end
+
+  # The order the media mixin releases in — inbound first, since that is the
+  # order the legs were created. "The inbound leg owns the session" would have
+  # deleted the outbound endpoint out from under itself.
+  test "releasing the inbound leg first does not take the outbound endpoint with it" do
+    %{server: server} = start_media_server(&two_leg_handler/2)
+    {conn, out, _tag} = two_negotiated_legs(server)
+
+    :ok = Mendooze.close_peer_connection(conn)
+    assert_receive {:jsr309_call, "EndpointDelete", [3, 4]}, 1_000
+    refute_receive {:jsr309_call, "MediaSessionDelete", _}, 200
+    assert Process.alive?(conn)
+
+    :ok = Mendooze.close_peer_connection(out)
+    assert_receive {:jsr309_call, "MediaSessionDelete", [3]}, 1_000
+  end
+
+  # One session, two endpoints, one event queue: what tells the legs apart is
+  # the endpoint id the event carries. Emitting both legs' events under the same
+  # handle would leave a B2BUA unable to say WHICH side went silent.
+  test "an endpoint event is attributed to the leg whose endpoint it names" do
+    %{server: server, stream: stream} = start_media_server(&two_leg_handler/2)
+    {conn, out, sess_tag} = two_negotiated_legs(server)
+
+    # endpoint 5 is the outbound one
+    send(stream, {:chunk, Jsr309FakeServer.event_frame([7, sess_tag, 5, 0, 0])})
+    assert_receive {:ms_event, ^out, {:media_connected, :audio}}, 1_000
+
+    # endpoint 4 is the inbound one, and it keeps the bare pid — which is why
+    # nothing written before legs existed had to change.
+    send(stream, {:chunk, Jsr309FakeServer.event_frame([7, sess_tag, 4, 0, 0])})
+    assert_receive {:ms_event, ^conn, {:media_connected, :audio}}, 1_000
   end
 
   # ── Connection setup ────────────────────────────────────────────────────────

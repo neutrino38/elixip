@@ -81,6 +81,24 @@ defmodule MediaServer.Mendooze.Conn do
     GenServer.start(__MODULE__, {server, event_sink, opts})
   end
 
+  @doc """
+  Add a second endpoint to the media session `sibling` already owns, and return
+  its handle.
+
+  This is what `create_peer_connection(server, sink, bridge_with: <ref>)` routes
+  to. The B2BUA's outbound leg is not a second connection: two endpoints can only
+  be attached to each other inside one `MediaSession`
+  (docs/design/mediagw_b2bua_jsr309.md §2), so the placement has to be decided
+  when the endpoint is created and cannot be repaired later by `bridge/3`.
+
+  `opts` are the new leg's OWN — codecs, `:media`, `:webrtc_support`, bandwidth.
+  Two legs of a gateway call rarely agree on them; that asymmetry is the point.
+  """
+  def add_leg(sibling, opts) do
+    {pid, _name} = ref(sibling)
+    GenServer.call(pid, {:add_leg, :outbound, opts}, @call_timeout)
+  end
+
   # Every entry point takes a `MediaServer.conn_ref/0`: a bare pid names the
   # inbound (or only) leg, `{pid, name}` names another endpoint of the same
   # session. Splitting it here means the handlers below never see the two forms.
@@ -105,6 +123,36 @@ defmodule MediaServer.Mendooze.Conn do
   def add_remote_candidate(conn, candidate) do
     {pid, name} = ref(conn)
     GenServer.call(pid, {:add_remote_candidate, name, candidate}, @call_timeout)
+  end
+
+  @doc """
+  Attach two of this session's endpoints to each other, per media, in both
+  directions — the `buildBridge` moment. Both refs must name legs of the SAME
+  connection: that is what "two endpoints of one MediaSession" means, and it is
+  decided by `add_leg/2`, not here.
+  """
+  def bridge(a, b, opts) do
+    {pid_a, name_a} = ref(a)
+    {pid_b, name_b} = ref(b)
+
+    if pid_a == pid_b do
+      GenServer.call(pid_a, {:bridge, name_a, name_b, opts}, @call_timeout)
+    else
+      {:error, :not_same_media_session}
+    end
+  end
+
+  def unbridge(a, b) do
+    {pid_a, name_a} = ref(a)
+    {pid_b, name_b} = ref(b)
+
+    if pid_a == pid_b do
+      GenServer.call(pid_a, {:unbridge, name_a, name_b}, @call_timeout)
+    else
+      :ok
+    end
+  catch
+    :exit, _ -> :ok
   end
 
   def close(conn) do
@@ -176,6 +224,11 @@ defmodule MediaServer.Mendooze.Conn do
       ws_urls: %{},
       proposed_recv: %{},
       accepted: %{},
+      # The Medooze codec CODE this leg settled on, per media. Payload types are
+      # each peer's own numbering and mean nothing across legs; the code is the
+      # codec itself, which is what makes `bridge/3`'s "do these two agree?"
+      # exact rather than a guess.
+      negotiated: %{},
       status: :init,
       connected: MapSet.new(),
       recv_medias: nil,
@@ -297,6 +350,86 @@ defmodule MediaServer.Mendooze.Conn do
 
   def handle_call({:add_remote_candidate, name, candidate}, _from, state),
     do: on_leg(state, name, &do_add_remote_candidate(&1, candidate))
+
+  def handle_call({:add_leg, name, opts}, _from, state) do
+    cond do
+      leg(state, name) != nil ->
+        {:reply, {:error, {:leg_exists, name}}, state}
+
+      is_nil(state.sess_id) ->
+        {:reply, {:error, :no_media_session}, state}
+
+      true ->
+        medias = medias_from_opts(opts)
+        tag = "#{state.sess_tag}-#{name}"
+
+        case create(state, "EndpointCreate", [
+               state.sess_id,
+               tag,
+               :audio in medias,
+               :video in medias,
+               :text in medias
+             ]) do
+          {:ok, endpoint_id} ->
+            Logger.info(
+              module: __MODULE__,
+              cnx_tag: state.sess_tag,
+              message:
+                "created Endpoint #{endpoint_id} (#{name}) in the same MediaSession, " <>
+                  "media #{inspect(medias)}"
+            )
+
+            # The leg carries ITS opts, not the connection's: an inbound WebRTC
+            # leg and an outbound plain-RTP one is the gateway case, and it is
+            # `opts` that says which is which.
+            l = new_leg(%{state | opts: opts}, name, endpoint_id, medias)
+            {:reply, {:ok, handle_of(name)}, put_leg(state, name, l)}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
+    end
+  end
+
+  # ── The bridge (docs/design/mediagw_b2bua_jsr309.md §3) ─────────────────────
+
+  def handle_call({:bridge, a, b, opts}, _from, state) do
+    with {:ok, policy} <- MediaServer.transcoding_policy(opts),
+         {:ok, la, lb} <- both_legs(state, a, b),
+         {:ok, medias} <- bridgeable_medias(la, lb, policy) do
+      case Enum.reduce_while(medias, :ok, fn media, :ok ->
+             case attach_pair(state, la, lb, media) do
+               :ok -> {:cont, :ok}
+               err -> {:halt, err}
+             end
+           end) do
+        :ok ->
+          Logger.info(
+            module: __MODULE__,
+            cnx_tag: state.sess_tag,
+            message: "bridged #{la.leg} <-> #{lb.leg} on #{inspect(medias)}"
+          )
+
+          {:reply, :ok, state}
+
+        err ->
+          {:reply, err, state}
+      end
+    else
+      {:error, _} = err -> {:reply, err, state}
+    end
+  end
+
+  def handle_call({:unbridge, a, b}, _from, state) do
+    case both_legs(state, a, b) do
+      {:ok, la, lb} ->
+        Enum.each([la, lb], &detach_all/1)
+        {:reply, :ok, state}
+
+      {:error, _} ->
+        {:reply, :ok, state}
+    end
+  end
 
   # Closing a leg deletes ITS endpoint; the session — and this process — go when
   # the last leg is closed. Order-independent on purpose: the media mixin walks
@@ -430,6 +563,85 @@ defmodule MediaServer.Mendooze.Conn do
 
   def handle_call({:stop_echo, _ref}, _from, state),
     do: {:reply, {:error, :no_such_echo}, state}
+
+  defp both_legs(state, a, b) do
+    case {leg(state, a), leg(state, b)} do
+      {nil, _} -> {:error, {:no_such_leg, a}}
+      {_, nil} -> {:error, {:no_such_leg, b}}
+      {la, lb} -> {:ok, la, lb}
+    end
+  end
+
+  # Which medias can be connected directly, and what to do about the ones that
+  # cannot. The comparison is on the negotiated codec CODE, so it is exact: two
+  # legs "agree" when the server settled them on the same codec, whatever payload
+  # numbers their peers happened to use.
+  #
+  # Text is never transcoded — the Java gateway does not either, and the T.140 /
+  # text-over-WebSocket gateway depends on it being a straight attach.
+  defp bridgeable_medias(la, lb, policy) do
+    common = Enum.filter(la.medias, &(&1 in lb.medias))
+
+    Enum.reduce_while(common, {:ok, []}, fn media, {:ok, acc} ->
+      case bridge_decision(la, lb, media, policy) do
+        :attach -> {:cont, {:ok, acc ++ [media]}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp bridge_decision(_la, _lb, :text, _policy), do: :attach
+
+  defp bridge_decision(la, lb, media, policy) do
+    mode = Map.get(policy, media, :avoid)
+    code_a = Map.get(la.negotiated, media)
+    code_b = Map.get(lb.negotiated, media)
+
+    cond do
+      # Nothing settled on this media yet: attaching would connect two endpoints
+      # that have not agreed on anything.
+      is_nil(code_a) or is_nil(code_b) -> {:error, {:not_negotiated, media}}
+      mode == :force -> {:error, {:transcoding_not_implemented, media}}
+      code_a == code_b -> :attach
+      mode == :forbid -> {:error, {:no_common_codec, media}}
+      # :avoid wanted a common codec and there is none. The transcoder chain
+      # (Video/AudioTranscoderCreate + the two attach pairs) is the remaining
+      # half of §3 and is not built, so this refuses rather than attaching two
+      # endpoints that would exchange codecs neither can decode.
+      true -> {:error, {:transcoding_not_implemented, media}}
+    end
+  end
+
+  # Both directions, plus the sequence-number rule the Java gateway applies when
+  # it relays rather than transcodes: without `useOriSeqNum` the server restamps
+  # the stream and the far end sees a discontinuity on every re-bridge.
+  defp attach_pair(state, la, lb, media) do
+    m = @media_int[media]
+    props = %{"useOriSeqNum" => "1"}
+
+    with {:ok, _} <-
+           rpc(state, "EndpointAttachToEndpoint", [
+             state.sess_id,
+             la.endpoint_id,
+             lb.endpoint_id,
+             m
+           ]),
+         {:ok, _} <-
+           rpc(state, "EndpointAttachToEndpoint", [
+             state.sess_id,
+             lb.endpoint_id,
+             la.endpoint_id,
+             m
+           ]),
+         {:ok, _} <-
+           rpc(state, "EndpointSetRTPProperties", [state.sess_id, la.endpoint_id, m, props]),
+         {:ok, _} <-
+           rpc(state, "EndpointSetRTPProperties", [state.sess_id, lb.endpoint_id, m, props]) do
+      :ok
+    else
+      {:error, reason} -> {:error, {:attach_failed, media, reason}}
+    end
+  end
 
   # ── Per-leg handlers (run through on_leg/3) ─────────────────────────────────
 
@@ -1285,7 +1497,41 @@ defmodule MediaServer.Mendooze.Conn do
              neg.send_map
            ]),
          :ok <- arm_watchdog(state, m, desc) do
-      {:ok, state, neg}
+      {:ok, note_negotiated(state, desc.type, neg), neg}
+    end
+  end
+
+  defp note_negotiated(state, media, neg) do
+    case primary_code(neg) do
+      nil -> state
+      code -> %{state | negotiated: Map.put(state.negotiated, media, code)}
+    end
+  end
+
+  # The codec this leg will actually put on the wire toward its peer, as a
+  # Medooze code. Taken from the SEND map, because that is what a direct attach
+  # relays: two legs can be connected without a transcoder exactly when they send
+  # the same thing.
+  #
+  # `primary_entry/1` needs the server's fmtp verdict and returns nil without it
+  # (an older server, or one that answers StartReceiving with the port alone), so
+  # the same ranking is applied to the send map when it does. Falling back rather
+  # than giving up matters: with no code recorded, `bridge/3` would refuse every
+  # call on such a server.
+  defp primary_code(neg) do
+    case primary_entry(neg) do
+      {_pt, code} ->
+        code
+
+      nil ->
+        neg
+        |> Map.get(:send_map, Map.get(neg, :rtp_map, %{}))
+        |> Enum.reject(fn {_pt, code} -> code == @dtmf_code end)
+        |> Enum.sort_by(&Sdp.pt_rank(&1, Map.get(neg, :fmt_order)))
+        |> case do
+          [{_pt, code} | _] -> code
+          [] -> nil
+        end
     end
   end
 

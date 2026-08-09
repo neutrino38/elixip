@@ -29,9 +29,14 @@ defmodule SIP.Test.B2bua.MediaScenario do
     %{stub: stub}
   end
 
-  defp peer_uri do
+  # One mockup instance PER TEST. The mockup announces a hangup as the bare atom
+  # `:BYE`, which carries no identity, so a teardown BYE still in flight from
+  # another test of this module lands in whichever test is running — and
+  # `refute_receive :BYE` then fails on someone else's call. Draining cannot fix
+  # that (the arrival is not ordered against the drain); a peer of one's own can.
+  defp peer_uri(name) do
     %SIP.Uri{scheme: "sip:", userpart: "callee", domain: "example.com", port: 5060}
-    |> SIP.Uri.set_uri_param("unittest", "b2bua_media")
+    |> SIP.Uri.set_uri_param("unittest", "b2bua_media_#{name}")
   end
 
   defp inbound_invite do
@@ -44,7 +49,7 @@ defmodule SIP.Test.B2bua.MediaScenario do
     %{invite | method: method, body: [], contentlength: 0, cseq: [2, method]}
   end
 
-  defp start_instance(module, stub, invite) do
+  defp start_instance(module, stub, invite, name) do
     test_pid = self()
 
     spawn_monitor(fn ->
@@ -53,7 +58,7 @@ defmodule SIP.Test.B2bua.MediaScenario do
           dialog_pid: stub,
           inbound_request: invite,
           config_overrides: [
-            peer: peer_uri(),
+            peer: peer_uri(name),
             mediaserver: %{module: :mockup, url: "http://127.0.0.1:8080"}
           ]
         )
@@ -62,7 +67,8 @@ defmodule SIP.Test.B2bua.MediaScenario do
     end)
   end
 
-  defp transport_pid, do: SIP.Transport.Selector.select_transport(peer_uri()).tp_pid
+  defp transport_pid(name),
+    do: SIP.Transport.Selector.select_transport(peer_uri(name)).tp_pid
 
   test "it is the same shape as the signalling scenario, plus a media plane", %{scenario: module} do
     assert module.__scenario_type__() == :uas_invite
@@ -81,10 +87,10 @@ defmodule SIP.Test.B2bua.MediaScenario do
     caller_sdp = SIP.Session.extract_sdp(invite)
     assert is_binary(caller_sdp)
 
-    tp_pid = transport_pid()
+    tp_pid = transport_pid(:relayed)
     :ok = GenServer.call(tp_pid, :settestapp)
 
-    {instance, ref} = start_instance(module, stub, invite)
+    {instance, ref} = start_instance(module, stub, invite, :relayed)
     send(instance, {:INVITE, invite, self(), stub})
 
     assert_receive {:replied, 100, "Trying", _req, _fields}, 5_000
@@ -128,10 +134,10 @@ defmodule SIP.Test.B2bua.MediaScenario do
   @tag timeout: 60_000
   test "the media server going away hangs up both legs", %{scenario: module, stub: stub} do
     invite = inbound_invite()
-    tp_pid = transport_pid()
+    tp_pid = transport_pid(:server_gone)
     :ok = GenServer.call(tp_pid, :settestapp)
 
-    {instance, _ref} = start_instance(module, stub, invite)
+    {instance, _ref} = start_instance(module, stub, invite, :server_gone)
     send(instance, {:INVITE, invite, self(), stub})
 
     assert_receive {:replied, 100, "Trying", _req, _fields}, 5_000
@@ -152,10 +158,10 @@ defmodule SIP.Test.B2bua.MediaScenario do
   @tag timeout: 60_000
   test "one media going silent is not a hangup, every media is", %{scenario: module, stub: stub} do
     invite = inbound_invite()
-    tp_pid = transport_pid()
+    tp_pid = transport_pid(:media_lost)
     :ok = GenServer.call(tp_pid, :settestapp)
 
-    {instance, _ref} = start_instance(module, stub, invite)
+    {instance, _ref} = start_instance(module, stub, invite, :media_lost)
     send(instance, {:INVITE, invite, self(), stub})
 
     assert_receive {:replied, 100, "Trying", _req, _fields}, 5_000

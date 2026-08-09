@@ -98,11 +98,24 @@ defmodule MediaServer.Mendooze do
 
   # ── Peer connections ────────────────────────────────────────────────────────
 
+  @doc """
+  Create a peer connection, or — with `bridge_with:` — a second endpoint inside
+  the media session that connection already owns.
+
+  The distinction is not an optimisation. `EndpointAttachToEndpoint` takes a
+  single session id, so two endpoints are connectable only inside one
+  `MediaSession`: where the endpoint lives has to be decided when it is created,
+  and `bridge/3` cannot repair it afterwards.
+  """
   @impl MediaServer.Behaviour
   @spec create_peer_connection(pid(), pid(), MediaServer.conn_opts()) ::
-          {:ok, pid()} | {:error, term()}
-  def create_peer_connection(server, event_sink, opts \\ []),
-    do: Conn.start(server, event_sink, opts)
+          {:ok, MediaServer.conn_ref()} | {:error, term()}
+  def create_peer_connection(server, event_sink, opts \\ []) do
+    case Keyword.get(opts, :bridge_with) do
+      nil -> Conn.start(server, event_sink, opts)
+      sibling -> Conn.add_leg(sibling, opts)
+    end
+  end
 
   @impl MediaServer.Behaviour
   def get_local_offer(conn), do: Conn.get_local_offer(conn)
@@ -122,17 +135,11 @@ defmodule MediaServer.Mendooze do
 
   # ── Bridge ──────────────────────────────────────────────────────────────────
 
-  # P3 R3. Bridging two endpoints is `EndpointAttachToEndpoint` in both
-  # directions, and that RPC takes a SINGLE session id — so the two legs have to
-  # be two endpoints of ONE MediaSession, which today's Conn (one session, one
-  # endpoint) cannot yet produce. Refusing plainly is the honest state; the
-  # session layer turns it into a 488 for the caller rather than answering a 200
-  # whose SDP promises a media path nobody wired.
   @impl MediaServer.Behaviour
-  def bridge(_a, _b, _opts), do: {:error, :not_supported}
+  def bridge(a, b, opts), do: Conn.bridge(a, b, opts)
 
   @impl MediaServer.Behaviour
-  def unbridge(_a, _b), do: :ok
+  def unbridge(a, b), do: Conn.unbridge(a, b)
 
   # ── Players ─────────────────────────────────────────────────────────────────
 

@@ -455,6 +455,23 @@ defmodule SIP.Test.B2bua.Session do
       %{ctx: ctx}
     end
 
+    # A mockup instance of the media tests' OWN. Sharing the file's one meant a
+    # previous test's dialog, still retransmitting its INVITE on timer A, could
+    # overwrite the request `{:simulate, 200, …}` answers — the hazard CLAUDE.md
+    # warns about, and it made this block fail once in a while.
+    defp media_peer_target do
+      %SIP.Uri{scheme: "sip:", userpart: "callee", domain: "example.com", port: 5060}
+      |> SIP.Uri.set_uri_param("unittest", "b2bua_session_media")
+    end
+
+    defp arm_media_peer! do
+      tp_pid = SIP.Transport.Selector.select_transport(media_peer_target()).tp_pid
+      :ok = GenServer.call(tp_pid, :settestapp)
+      tp_pid
+    end
+
+    defp media_peer, do: %Peer{uris: [media_peer_target()]}
+
     defp media_mode do
       {:mediaserver,
        inbound: [webrtc: :no, media: :audio],
@@ -463,11 +480,11 @@ defmodule SIP.Test.B2bua.Session do
     end
 
     test "the INVITE we forward carries OUR offer, not the caller's", %{ctx: ctx} do
-      arm_peer!()
+      arm_media_peer!()
       invite = inbound_invite()
       caller_sdp = SIP.Session.extract_sdp(invite)
 
-      ctx = B2bua.do_create_leg(ctx, invite, mockup_peer(), media_mode())
+      ctx = B2bua.do_create_leg(ctx, invite, media_peer(), media_mode())
       assert ctx.lasterr == :ok
 
       assert_receive {:invite_sent, fwd}, 5_000
@@ -484,8 +501,8 @@ defmodule SIP.Test.B2bua.Session do
     end
 
     test "the caller's answer is held back until the callee answers, then relayed", %{ctx: ctx} do
-      tp_pid = arm_peer!()
-      ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), media_mode())
+      tp_pid = arm_media_peer!()
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), media_peer(), media_mode())
       leg = B2bua.outbound_leg(ctx)
       dlg = leg.dialogpid
       assert_receive {:invite_sent, _fwd}, 5_000
@@ -517,8 +534,8 @@ defmodule SIP.Test.B2bua.Session do
     end
 
     test "an early 18x carrying SDP is relayed without it, so the hunt stays open", %{ctx: ctx} do
-      tp_pid = arm_peer!()
-      ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), media_mode())
+      tp_pid = arm_media_peer!()
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), media_peer(), media_mode())
       leg = B2bua.outbound_leg(ctx)
       dlg = leg.dialogpid
       assert_receive {:invite_sent, _fwd}, 5_000
@@ -548,8 +565,8 @@ defmodule SIP.Test.B2bua.Session do
     test "a 2xx whose media cannot be bridged becomes a failed attempt, not the answer", %{
       ctx: ctx
     } do
-      tp_pid = arm_peer!()
-      ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), media_mode())
+      tp_pid = arm_media_peer!()
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), media_peer(), media_mode())
       leg = B2bua.outbound_leg(ctx)
       dlg = leg.dialogpid
       assert_receive {:invite_sent, _fwd}, 5_000
