@@ -21,7 +21,16 @@ defmodule SIP.DialogImpl do
     direction: :outbound,
     # Current transaction
     curtrans: nil,
-    transactions: [],
+    # The transactions this dialog owns: `pid => %{req: request, module: module}`.
+    #
+    # A bare pid list was enough while a transaction only ever ended by saying so.
+    # It no longer is: a transaction that CRASHES says nothing, and to hand the
+    # application the synthetic 408 it is owed (design §14.4, R1) the dialog must
+    # be able to name the request that died with it — `timeout_response/1` reads
+    # the Call-ID, CSeq and both identities off it — and to tell a client
+    # transaction from a server one, since only the former's failure is the
+    # application's business.
+    transactions: %{},
     # PID of the transaction that should terminate the dialog
     closing_transaction: nil,
     # PID of the INVITE server transaction that answered 2xx and is still waiting
@@ -71,13 +80,34 @@ defmodule SIP.DialogImpl do
     {:nonewtrans, state}
   end
 
-  defp on_new_transaction(state, _req, transact_id) do
-    if Enum.count(state.transactions) < 4 do
-      {:ok, Map.put(state, :transactions, List.insert_at(state.transactions, -1, transact_id))}
+  defp on_new_transaction(state, req, transact_id) do
+    if map_size(state.transactions) < 4 do
+      {:ok, add_transaction(state, transact_id, req, uas_module(req))}
     else
       {:toomanytransactions, state}
     end
   end
+
+  # Remember a transaction and what it carries. `nil` is tolerated so the callers
+  # that may not have a transaction (a reply on a request the transport routed
+  # here directly) need no guard of their own.
+  defp add_transaction(state, nil, _req, _module), do: state
+
+  defp add_transaction(state, trans_pid, req, module) when is_pid(trans_pid) do
+    %SIP.DialogImpl{
+      state
+      | transactions: Map.put(state.transactions, trans_pid, %{req: req, module: module})
+    }
+  end
+
+  # Which state machine runs a transaction, derived from the method and the side
+  # we are on. Both are known at the point every transaction is recorded, and
+  # keeping them out of the state is what lets `client_transaction?/1` stay a
+  # single test rather than a role flag to keep in sync.
+  defp uac_module(req), do: if(req.method == :INVITE, do: SIP.ICT, else: SIP.NICT)
+  defp uas_module(req), do: if(req.method == :INVITE, do: SIP.IST, else: SIP.NIST)
+
+  defp client_transaction?(module), do: module in [SIP.ICT, SIP.NICT]
 
   defp allows(:REGISTER) do
     [:REGISTER, :OPTIONS]
@@ -210,7 +240,7 @@ defmodule SIP.DialogImpl do
 
   def send_in_dialog_request(state = %SIP.DialogImpl{}, req) do
     if req.method in state.allows do
-      if Enum.count(state.transactions) < 4 do
+      if map_size(state.transactions) < 4 do
         {state, req} = fix_outbound_request(state, req)
 
         # Copy transport parameters from the request that opened the dialog into the RURI to reuse them
@@ -231,12 +261,9 @@ defmodule SIP.DialogImpl do
           {code, nil} ->
             {code, state}
 
-          {:ok, transaction_pid, _modmsg} ->
+          {:ok, transaction_pid, modmsg} ->
             # Add the transaction in the transaction list
-            newstate = %SIP.DialogImpl{
-              state
-              | transactions: List.insert_at(state.transactions, -1, transaction_pid)
-            }
+            newstate = add_transaction(state, transaction_pid, modmsg, uac_module(modmsg))
 
             # Handle expiration timer and closing transaction
             {:ok, newstate} =
@@ -274,13 +301,14 @@ defmodule SIP.DialogImpl do
     req = %{state.msg | ruri: target}
 
     case SIP.Transac.start_uac_transaction(req, state.dialogtimeout) do
-      {:ok, trans_pid, _modmsg} ->
-        newstate = %SIP.DialogImpl{
-          state
-          | forking: true,
-            transactions: [trans_pid | state.transactions],
-            branches: Map.put(state.branches, trans_pid, target)
-        }
+      {:ok, trans_pid, modmsg} ->
+        newstate =
+          %SIP.DialogImpl{
+            state
+            | forking: true,
+              branches: Map.put(state.branches, trans_pid, target)
+          }
+          |> add_transaction(trans_pid, modmsg, uac_module(modmsg))
 
         {:reply, {:ok, trans_pid}, newstate}
 
@@ -417,6 +445,18 @@ defmodule SIP.DialogImpl do
   defp wrap_tag(nil, msg), do: msg
   defp wrap_tag(tag, msg) when is_atom(tag), do: {tag, msg}
 
+  # Client transactions are `start_link`ed from this process. Until this flag was
+  # set, one of them crashing killed the dialog by exit signal — which does NOT
+  # run `terminate/2`, so the application was never sent the
+  # `{:dialog_terminated, …}` its whole cleanup hangs off, and a B2BUA leg simply
+  # went quiet (design §14.2, path (a)).
+  #
+  # Trapping turns that signal into a message `handle_info({:EXIT, …})` acts on,
+  # and — the reason it is the first decision of §14.4 — makes `terminate/2` run
+  # on EVERY exit path, which is what promotes the dialog-terminated contract from
+  # a convention to an invariant.
+  defp trap_transaction_exits, do: Process.flag(:trap_exit, true)
+
   @impl true
   @spec init(
           {map(), :inbound | :outbound, pid(), integer(), boolean(), {any(), any(), any()},
@@ -424,6 +464,7 @@ defmodule SIP.DialogImpl do
         ) :: {:ok, map()} | {:stop, atom() | {any(), any()}}
 
   def init({req, :inbound, pid, timeout, debug, dialog_id, tag, _forking}) when is_req(req) do
+    trap_transaction_exits()
     {fromtag, callid, totag} = dialog_id
     # Generate totag if needed
     totag = if is_nil(totag), do: generate_from_or_to_tag(), else: totag
@@ -443,7 +484,7 @@ defmodule SIP.DialogImpl do
       tag: tag,
       dialogtimeout: timeout,
       debuglog: debug,
-      transactions: [pid],
+      transactions: %{},
       fromtag: fromtag,
       callid: callid,
       totag: totag,
@@ -456,6 +497,10 @@ defmodule SIP.DialogImpl do
       routeset: Map.get(req, :recordroute, []),
       allows: allows(req.method)
     }
+
+    # `pid` is the server transaction that created this dialog — recorded like
+    # every other one, with the request it carries.
+    state = add_transaction(state, pid, req, uas_module(req))
 
     # Dispatch the initial request to the upper layer. `pid` is the server
     # transaction that created this dialog; it is forwarded so the processing
@@ -491,6 +536,7 @@ defmodule SIP.DialogImpl do
 
   # Dialog started by an outbound request
   def init({req, :outbound, pid, timeout, debug, dialog_id, tag, forking}) when is_req(req) do
+    trap_transaction_exits()
     {fromtag, callid, _totag} = dialog_id
 
     state = %SIP.DialogImpl{
@@ -503,7 +549,7 @@ defmodule SIP.DialogImpl do
       forking: forking,
       dialogtimeout: timeout,
       debuglog: debug,
-      transactions: [],
+      transactions: %{},
       fromtag: fromtag,
       callid: callid,
       totag: nil,
@@ -521,12 +567,8 @@ defmodule SIP.DialogImpl do
           branches =
             if forking, do: %{transaction_pid => modmsg.ruri}, else: state.branches
 
-          %SIP.DialogImpl{
-            state
-            | transactions: [transaction_pid],
-              msg: modmsg,
-              branches: branches
-          }
+          %SIP.DialogImpl{state | msg: modmsg, branches: branches}
+          |> add_transaction(transaction_pid, modmsg, uac_module(modmsg))
           |> arm_expiration_timer(modmsg)
           # This returns { :ok, newstate } as expected by init()
           |> check_closing_transaction(modmsg, transaction_pid)
@@ -538,7 +580,11 @@ defmodule SIP.DialogImpl do
             message: "Failed to create client transaction, err: #{code}."
           )
 
-          {:stop, :abnormal, code}
+          # `{:stop, reason}` — the 2-tuple init/1 actually accepts. The 3-tuple
+          # that stood here is not a valid init return, so GenServer answered the
+          # caller {:error, {:bad_return_value, …}} and the real error code, the
+          # one worth reporting, never reached it.
+          {:stop, code}
 
         :no_transport_available ->
           Logger.debug(
@@ -580,10 +626,36 @@ defmodule SIP.DialogImpl do
         r -> r
       end
 
+    stop_client_transactions(state)
     send_to_app(state, {:dialog_terminated, self(), reason})
 
     :ok
   end
+
+  # Take the dialog's client transactions down with it.
+  #
+  # They are linked to us, but a dialog stopping `:normal` propagates a signal
+  # they ignore — so an ICT whose dialog just died kept retransmitting its INVITE
+  # every T1..T2 until timer B, on the wire, for a call nobody was following any
+  # more (design §14.2, defect c-4).
+  #
+  # SERVER transactions are deliberately left alone: an IST that answered 2xx is
+  # still retransmitting it until the ACK comes back, and that ACK is the last
+  # thing the far end owes us — killing it would strand a call that did connect.
+  defp stop_client_transactions(state) do
+    for {pid, %{module: module}} <- transactions_of(state),
+        client_transaction?(module) and Process.alive?(pid) do
+      Process.exit(pid, :shutdown)
+    end
+
+    :ok
+  end
+
+  # `terminate/2` may be handed a state that never became one (an init that
+  # stopped early), so read the field defensively — this is the one path that
+  # must not raise.
+  defp transactions_of(%SIP.DialogImpl{transactions: t}) when is_map(t), do: t
+  defp transactions_of(_state), do: %{}
 
   defp close_transaction(state, uas_t) do
     # A transaction that is gone can no longer be told about the ACK (it dies on
@@ -593,7 +665,7 @@ defmodule SIP.DialogImpl do
 
     %SIP.DialogImpl{
       state
-      | transactions: List.delete(state.transactions, uas_t),
+      | transactions: Map.delete(state.transactions, uas_t),
         ist_awaiting_ack: ist
     }
   end
@@ -671,7 +743,14 @@ defmodule SIP.DialogImpl do
     auth = %{realm: realm, algorithm: algorithm, authproc: "Digest"}
 
     {ret, uas_t} =
-      SIP.Transac.reply_req(req, resp_code, reason, auth, state.totag, state.transactions)
+      SIP.Transac.reply_req(
+        req,
+        resp_code,
+        reason,
+        auth,
+        state.totag,
+        Map.keys(state.transactions)
+      )
 
     # reply_req/6 answers {:ok, nonce} on the challenge path; the nonce needs no
     # bookkeeping now, so normalize it to the usual :ok.
@@ -681,7 +760,14 @@ defmodule SIP.DialogImpl do
 
   def handle_call({:replyreq, req, resp_code, reason, upd_field}, _from, state) do
     {ret, uas_t} =
-      SIP.Transac.reply_req(req, resp_code, reason, upd_field, state.totag, state.transactions)
+      SIP.Transac.reply_req(
+        req,
+        resp_code,
+        reason,
+        upd_field,
+        state.totag,
+        Map.keys(state.transactions)
+      )
 
     state =
       case resp_code do
@@ -750,7 +836,7 @@ defmodule SIP.DialogImpl do
   end
 
   def handle_call({:cancel, transact_pid}, _from, state) do
-    if transact_pid in state.transactions do
+    if Map.has_key?(state.transactions, transact_pid) do
       reply = SIP.Transac.cancel_uac_transaction(transact_pid)
       {:reply, reply, state}
     else
@@ -760,7 +846,7 @@ defmodule SIP.DialogImpl do
 
   # Handle call to send out an ACK for an INVITE request
   def handle_call({:ack, transact_pid}, _from, state) do
-    if transact_pid in state.transactions do
+    if Map.has_key?(state.transactions, transact_pid) do
       reply = SIP.Transac.ack_uac_transaction(transact_pid)
       # The INVITE client transaction is done once it has been ACKed; drop it
       # from the dialog so later in-dialog requests (BYE, re-INVITE…) start fresh.
@@ -898,7 +984,9 @@ defmodule SIP.DialogImpl do
     with {:ok, state} <- on_new_transaction(state, msg, transact_pid),
          {:ok, state} <- check_allows(state, msg),
          {:ok, state} <- check_seqno(state, msg) do
-      {_ret, uas_t} = SIP.Transac.reply_req(msg, 200, "OK", [], state.totag, state.transactions)
+      {_ret, uas_t} =
+        SIP.Transac.reply_req(msg, 200, "OK", [], state.totag, Map.keys(state.transactions))
+
       {:noreply, add_totag(state, nil) |> close_transaction(uas_t)}
     else
       {:notallowed, state} ->
@@ -1159,6 +1247,70 @@ defmodule SIP.DialogImpl do
     state
   end
 
+  # The dialog states in which the dialog goes on living. Anything else is a
+  # dialog that has said its last word and must stop — the single reading of that
+  # question, used by every path that ends a transaction.
+  @live_states [:initial, :established, :redirected, :uac_challenged, :uas_challenged]
+
+  # A client transaction ended with no final response — it timed out (timer B/F),
+  # or it crashed. Both mean the same thing one layer up, so both land here.
+  #
+  # The synthetic 408 is then run through `handle_UAS_response/3`, exactly as a
+  # 408 arriving off the wire would be. That is the whole point of synthesizing a
+  # response rather than inventing a private failure path, and it was the one
+  # thing the timeout handler did not do: it notified the application and left the
+  # dialog in `:initial` for ever. A failed outbound INVITE therefore left its
+  # dialog process alive for the full 1800 s expiration — one leaked dialog per
+  # unanswered call, which for a B2BUA is one per failed leg.
+  #
+  # Routing it through that function also gets the fork case right for free: its
+  # `forking: true` clause ends the BRANCH and keeps the dialog for the next
+  # target, which is precisely what a hunt needs when a branch dies without
+  # answering.
+  defp unanswered_request(state, req, transact_pid, module) do
+    state =
+      notify_transaction_timeout(state, req, transact_pid, module)
+      |> close_transaction(transact_pid)
+
+    # A SERVER transaction that ends unanswered says nothing about the dialog:
+    # it means the application never replied, and handle_UAS_response/3 reads
+    # responses we RECEIVED. Leave the dialog alone.
+    if client_transaction?(module) do
+      state =
+        handle_UAS_response(state, timeout_response(req), transact_pid)
+        |> end_on_unregister(req)
+
+      if state.state in @live_states do
+        {:noreply, state}
+      else
+        # `state`, not the atom `:state` that stood here. terminate/2 was handed
+        # an atom, `state.app` raised on it, and the dialog died of that error
+        # instead of stopping — so the application was never sent
+        # {:dialog_terminated, …} on the one path meant to end a dialog cleanly.
+        {:stop, :normal, state}
+      end
+    else
+      {:noreply, state}
+    end
+  end
+
+  # An un-REGISTER we sent ourselves ends the dialog once its transaction is over,
+  # answered or not — the registration is gone either way. It needs saying here
+  # because a REGISTER dialog has no closing transaction for handle_UAS_response/3
+  # to recognize (only a BYE sets one).
+  #
+  # Read through SIP.Msg.Ops so the header counts: this test used to look at the
+  # Contact `expires` parameter alone, so our own `Expires: 0` un-REGISTER (no
+  # parameter — the shape every real UA sends) read as "not an un-registration"
+  # and left the dialog behind.
+  defp end_on_unregister(state, req) do
+    if req.method == :REGISTER and SIP.Msg.Ops.unregister?(req) do
+      %SIP.DialogImpl{state | state: :terminated}
+    else
+      state
+    end
+  end
+
   # Handle option keepalive timers: send an OPTIONS message or tear the dialog
   # down when the peer stopped answering (see SIP.DialogImpl.KeepAlive).
   @impl true
@@ -1169,7 +1321,7 @@ defmodule SIP.DialogImpl do
   # Invoked when a dialog receives a SIP response from an UAC transaction
   def handle_info({:response, rsp, transact_pid}, state) when is_resp(rsp) do
     state =
-      if transact_pid in state.transactions do
+      if Map.has_key?(state.transactions, transact_pid) do
         {_rc, totag} = SIP.Uri.get_uri_param(rsp.to, "tag")
 
         # A response to our own OPTIONS keepalive is dialog-internal: the peer
@@ -1236,7 +1388,7 @@ defmodule SIP.DialogImpl do
         state
       end
 
-    if state.state in [:initial, :established, :redirected, :uac_challenged, :uas_challenged] do
+    if state.state in @live_states do
       {:noreply, state}
     else
       Logger.info(
@@ -1288,33 +1440,41 @@ defmodule SIP.DialogImpl do
     # 408 also needs no new plumbing anywhere above: it flows through
     # `process_sip_reply`, `b2bua_forward_reply` and a hunt's retry-on list like
     # any other final.
-    state = notify_transaction_timeout(state, req, transact_pid, module)
+    unanswered_request(state, req, transact_pid, module)
+  end
 
-    # Transaction expired -> remove it
-    state = close_transaction(state, transact_pid)
+  # A transaction of ours died. Trapping exits (see `trap_transaction_exits/0`)
+  # is what turns the signal that used to kill this dialog outright — silently,
+  # without running `terminate/2` — into something we can act on (design §14.4,
+  # R1).
+  #
+  # A `:normal` exit is bookkeeping: the transaction finished (timer K, a final
+  # response, a timeout that already sent `{:transaction_timeout, …}`) and
+  # whatever had to be said has been said. A CRASH said nothing at all, and the
+  # application is waiting on an answer that will now never come — so it gets the
+  # same synthetic 408 an unanswered request gets, and for the same reason
+  # (RFC 3261 §17.1.1.2: a client transaction that fails informs the TU, which
+  # treats it as a 408). A hunt then walks to its next target, a scenario stops
+  # waiting on its `after`, and none of it needs plumbing of its own.
+  def handle_info({:EXIT, trans_pid, reason}, state = %SIP.DialogImpl{}) do
+    case Map.get(state.transactions, trans_pid) do
+      # Not ours, or already closed by the path that ended it.
+      nil ->
+        {:noreply, state}
 
-    end_dialog =
-      case req.method do
-        # true if this is a client transaction
-        :BYE ->
-          module == SIP.ICT
+      %{} when reason in [:normal, :shutdown] ->
+        {:noreply, close_transaction(state, trans_pid)}
 
-        :REGISTER ->
-          # An un-REGISTER we sent ourselves ends the dialog once its transaction
-          # completes. Read through SIP.Msg.Ops so the header counts: this test used
-          # to look at the Contact `expires` parameter alone, so our own
-          # `Expires: 0` un-REGISTER (no parameter — the shape every real UA sends)
-          # read as "not an un-registration" and left the dialog behind.
-          SIP.Msg.Ops.unregister?(req) and module == SIP.ICT
+      %{req: req, module: module} ->
+        Logger.warning(
+          dialogpid: "#{inspect(self())}",
+          module: __MODULE__,
+          message:
+            "#{inspect(module)} #{inspect(trans_pid)} carrying #{req.method} crashed " <>
+              "(#{inspect(reason)}); reporting it as a 408"
+        )
 
-        _ ->
-          false
-      end
-
-    if end_dialog do
-      {:stop, :normal, :state}
-    else
-      {:noreply, state}
+        unanswered_request(state, req, trans_pid, module)
     end
   end
 
@@ -1354,5 +1514,23 @@ defmodule SIP.DialogImpl do
     else
       {:noreply, state}
     end
+  end
+
+  # Anything else is logged and ignored rather than fatal.
+  #
+  # `use GenServer` provides such a fallback, but a module that defines its own
+  # `handle_info/2` replaces it wholesale — so until now an unrecognized message
+  # raised a FunctionClause and took the dialog with it. `SIP.Dialog.broadcast/1`
+  # makes that a live hazard rather than a theoretical one: it sends to EVERY
+  # dialog, so a message shape one of them does not know is a message that kills
+  # all of them.
+  def handle_info(msg, state) do
+    Logger.debug(
+      dialogpid: "#{inspect(self())}",
+      module: __MODULE__,
+      message: "Ignoring unexpected message #{inspect(msg)}"
+    )
+
+    {:noreply, state}
   end
 end

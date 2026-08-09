@@ -1156,7 +1156,7 @@ One consequence to note: SRV failover now depends on `fork: :serial` rather than
 being unconditional as §3.1 first put it. `:none` means one attempt and no
 failover at all — the simpler contract, and the honest one.
 | **P2c** ✅ | dynamic targets (§3.4): the `SIP.B2bua.TargetProvider` behaviour, `%Peer{provider:}`, `b2bua_try_next/0` + the per-attempt ring timeout; `b2bua_cancel_forward/0` (§3.5) with 487 out of the default retry-on list; hunt progress events (§3.6, `notify_progress`). Extends the SERIAL hunt, so it needed nothing from P4; a complete call queue additionally needs P3 for music on hold |
-| **P2d** | resilience hardening (§14): the dialog traps exits and converts a transaction crash into a synthetic 408 (R1); the scenario engine catches exits so teardown always runs (R2); connectionless transport re-selection + exit-safe transport calls (R3); transport-down broadcast from `terminate/2`, single `{:dialog_terminated}` (R4); transport-down during a hunt = branch failure, not dialog death (R5); B2BUA leg-death hook purging the leg and answering its pending requests (R6); the failure-injection test set (R7) |
+| **P2d** (R1–R2 ✅) | resilience hardening (§14): the dialog traps exits and converts a transaction crash into a synthetic 408 (R1); the scenario engine catches exits so teardown always runs (R2); connectionless transport re-selection + exit-safe transport calls (R3); transport-down broadcast from `terminate/2`, single `{:dialog_terminated}` (R4); transport-down during a hunt = branch failure, not dialog death (R5); B2BUA leg-death hook purging the leg and answering its pending requests (R6); the failure-injection test set (R7) |
 | **P3** | `{:mediaserver, …}` mode: leg-qualified media handles, `bridge/2` callback in `MediaServer.Behaviour` + Mendooze implementation, offer/answer choreography |
 | **P4** | parallel forking (branch sets in the leg dialog, §3.3: winner adoption, late-2xx ACK+BYE, best-response aggregation; q-group semantics of §3.2), trunk processes (`trunk_pid`); multi-leg generalization only if attended transfer / 3pcc demands it. `{:rtpengine, …}` is **out of scope** — deferred to the borderline work |
 
@@ -1311,25 +1311,48 @@ for new selections; provider calls already exit-safe.
 
 ### 14.4 Decisions
 
-**R1 — the dialog traps exits; a transaction crash becomes a synthetic 408.**
+**R1 ✅ — the dialog traps exits; a transaction crash becomes a synthetic 408.**
 `DialogImpl.init/1` sets `trap_exit`; a `{:EXIT, trans_pid, reason}` from a
-listed transaction is handled exactly like `{:transaction_timeout, …}`:
-synthesize the 408 (it flows through `b2bua_forward_reply`, the hunt's
-`retry_on` and the forking clause of `handle_UAS_response` unchanged), then
-`close_transaction/2`. A `:normal` EXIT is bookkeeping only. To synthesize the
-408 the dialog must be able to name the dead transaction's request: the bare
-`transactions` list becomes a map `pid → {method, cseq}` (plus what
-`timeout_response/1` reads), which also subsumes the `branches` map lookup.
-Trapping exits has the decisive side effect that **`terminate/2` now runs on
-every path** — invariant 1 holds. `terminate/2` additionally stops the
-remaining client transactions (`Process.exit(pid, :shutdown)`), closing defect
-(c-4).
+listed transaction is handled exactly like `{:transaction_timeout, …}`. A
+`:normal` (or `:shutdown`) EXIT is bookkeeping only. To synthesize the 408 the
+dialog must be able to name the dead transaction's request: the bare
+`transactions` list becomes a map `pid → %{req, module}`. Trapping exits has the
+decisive side effect that **`terminate/2` now runs on every path** — invariant 1
+holds. `terminate/2` additionally stops the remaining CLIENT transactions
+(`Process.exit(pid, :shutdown)`), closing defect (c-4); server transactions are
+left alone, since an IST that answered 2xx is still waiting for its ACK.
 
-**R2 — the scenario engine catches exits.** The `state` macro's `try` gains
-`catch :exit, reason → scenario_failure({:exit, reason})` next to its `rescue`.
-This is the safety net for invariant 2, not the nominal path (R6 keeps exits
-out of the relay helpers in the first place); with it, even an unforeseen exit
-ends in `finalize` → `release_legs` → the caller answered.
+*Refined during implementation.* Both entry points (timer, crash) now converge on
+one function which runs the synthetic 408 through **`handle_UAS_response/3`**,
+exactly as a 408 arriving off the wire would be. That is the point of
+synthesizing a *response* rather than inventing a private failure path, and it
+was the one thing the timeout handler did not do: it notified the application and
+left the dialog in `:initial` for ever, so a failed outbound INVITE leaked its
+dialog process for the full 1800 s expiration — one per failed call, which for a
+B2BUA is one per failed leg. It also gets the fork case right for free (the
+`forking: true` clause ends the branch and keeps the dialog), which removed the
+branch bookkeeping this decision first called for.
+
+Two dead branches were found in the timeout handler on the way, each hiding the
+other. It asked `module == SIP.ICT` to mean "is this a client transaction" — but
+a BYE or a REGISTER is answered by a **NICT**, never an ICT, so the test was
+false for every message that can reach it and an unanswered BYE never terminated
+its dialog. And had it ever been true, it stopped with the *atom* `:state`
+instead of the state: `terminate/2` would have raised on `state.app` and the
+dialog would have died of that error — sending no `{:dialog_terminated, …}` at
+all, on the one path that exists to end a dialog cleanly.
+
+`handle_info/2` also gains a catch-all. `use GenServer` provides one, but a
+module defining its own clauses replaces it wholesale, so an unrecognized message
+raised a FunctionClause and took the dialog with it — and `SIP.Dialog.broadcast/1`
+sends to *every* dialog, which makes one unknown shape a message that kills all
+of them.
+
+**R2 ✅ — the scenario engine catches exits.** The `state` macro's `try` gains
+`catch :exit, reason → scenario_failure("exit!")` next to its `rescue`. This is
+the safety net for invariant 2, not the nominal path (R6 keeps exits out of the
+relay helpers in the first place); with it, even an unforeseen exit ends in
+`finalize` → `release_legs` → the caller answered.
 
 **R3 — connectionless recovery, and exit-safe transport calls.** At transaction
 creation, a `tp_pid` that is no longer alive is re-resolved through
@@ -1391,6 +1414,10 @@ reliable to be worth hooking).
 Failure injection, one test per traced path, all asserting the same two
 outcomes — *the caller receives a final response* and *no dialog or transaction
 process survives the scenario*:
+
+Delivered with R1/R2: `test/dialog_resilience_test.exs` and
+`test/scenario_resilience_test.exs` (9 tests). The remaining rows land with
+R3–R5.
 
 | Injection | Expected (with P2d) | Today |
 |---|---|---|

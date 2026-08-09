@@ -178,6 +178,22 @@ defmodule SIP.Scenario do
             Logger.error("Exception in scenario state #{unquote(name)}")
             Logger.error(Exception.format(:error, e, __STACKTRACE__))
             scenario_failure("exception!")
+        catch
+          # An exit, not an exception — and until now nothing caught it, so it
+          # killed the scenario process outright and `Runner.finalize/4` never
+          # ran: no B2BUA leg was torn down, no media released, and the caller of
+          # a relayed INVITE waited for a final response nobody would ever send
+          # (design §14.4, R2).
+          #
+          # It reaches us through a `GenServer.call` — every SIP primitive here is
+          # one — toward a dialog or transport that died between the check and the
+          # call. R3 and R6 keep the ordinary cases from getting this far; this is
+          # the net under them, so that whatever happens the scenario ENDS, which
+          # is what runs the teardown that answers the caller.
+          :exit, reason ->
+            Logger.error("Exit in scenario state #{unquote(name)}: #{inspect(reason)}")
+
+            scenario_failure("exit!")
         end
       end
     end
