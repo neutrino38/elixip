@@ -121,6 +121,16 @@ defmodule Kelix.Mod.Mcu.Adapter do
   @impl MediaServer.Behaviour
   def set_remote_answer(_conn, _sdp), do: {:error, :not_supported}
 
+  # A conference leg's far end is the mixer, and a mixer is what two legs are
+  # already joined THROUGH — bridging a pair of them directly would take them out
+  # of the mix, which is the opposite of what this adapter is for. A two-party
+  # call is a conference of two; nothing here needs bridge/3.
+  @impl MediaServer.Behaviour
+  def bridge(_a, _b, _opts), do: {:error, :not_supported}
+
+  @impl MediaServer.Behaviour
+  def unbridge(_a, _b), do: :ok
+
   # ── participant-level extras (not part of the behaviour) ─────────────────────
 
   @doc "ACK-time: codecs, `StartSending`, mixer join. Returns the per-media summary."

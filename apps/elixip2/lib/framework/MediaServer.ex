@@ -129,6 +129,57 @@ defmodule MediaServer do
           pid()
           | {conn :: pid(), kind :: :player | :recorder | :echo, ref :: reference()}
 
+  @typedoc """
+  Handle of a peer connection.
+
+  A single-leg connection is a bare `pid()` — what every adapter returned before
+  B2BUA media existed, and what `MediaServer.Mockup` still returns. A connection
+  carrying **two endpoints** (the B2BUA case: one media session per call, one
+  endpoint per SIP leg — `docs/design/mediagw_b2bua_jsr309.md` §2) hands out one
+  handle per leg, sharing the process that owns the session.
+
+  Callers never inspect it: it is created by `create_peer_connection/3` and
+  handed back to the adapter unchanged.
+  """
+  @type conn_ref :: pid() | {conn :: pid(), leg :: atom()}
+
+  @typedoc """
+  What to do when the two legs of a bridge do not agree on a codec, per media.
+
+  * `:force`  — always transcode. Each leg is answered with the first codec of
+    its own list, so the answer is what that leg asked for whatever the other
+    one settled on. This is what the Java media gateway does for audio.
+  * `:avoid`  — the default: pick a codec both legs support and connect them
+    directly; transcode only when there is none.
+  * `:forbid` — never transcode: with no common codec the call fails.
+
+  Text is not configurable — always bridged, never transcoded (RFC 4103 / T.140
+  and the WebSocket text gateway depend on it).
+  """
+  @type transcoding :: :force | :avoid | :forbid
+
+  @transcoding_values [:force, :avoid, :forbid]
+
+  @doc """
+  Read a `bridge/3` transcoding policy, defaulting each media to `:avoid`.
+
+  Lives here, next to `media_list/1`, for the same reason: every adapter must
+  accept the same values, and a scenario typo has to fail at the call rather
+  than inside the media server.
+  """
+  @spec transcoding_policy(keyword()) ::
+          {:ok, %{audio: transcoding(), video: transcoding()}} | {:error, term()}
+  def transcoding_policy(opts) when is_list(opts) do
+    audio = Keyword.get(opts, :audio, :avoid)
+    video = Keyword.get(opts, :video, :avoid)
+
+    cond do
+      audio not in @transcoding_values -> {:error, {:bad_transcoding_policy, :audio, audio}}
+      video not in @transcoding_values -> {:error, {:bad_transcoding_policy, :video, video}}
+      true -> {:ok, %{audio: audio, video: video}}
+    end
+  end
+
   @type ms_event :: {:ms_event, resource_ref(), event()}
 
   @type conn_opts :: [
@@ -212,8 +263,9 @@ defmodule MediaServer do
     ## Teardown order
 
         stop_player / stop_recorder / stop_echo
-            -> close_peer_connection
-                -> disconnect
+            -> unbridge
+                -> close_peer_connection
+                    -> disconnect
     """
 
     # ── Server lifecycle ────────────────────────────────────────────────────
@@ -249,6 +301,33 @@ defmodule MediaServer do
                 :ok | {:error, term()}
 
     @callback close_peer_connection(conn :: pid()) :: :ok
+
+    # ── Bridging two peer connections ───────────────────────────────────────
+
+    @doc """
+    Connect two peer connections so each one's incoming media is sent out of the
+    other — the B2BUA media path.
+
+    Called **once both legs have negotiated**, which is the only moment it can be:
+    what a leg sends depends on what the other leg can receive. It is therefore
+    not the same request as `create_peer_connection/3`'s `bridge_with:` option,
+    which says where the endpoint lives and has to be answered at creation time.
+
+    `opts` carries the per-media transcoding policy (see
+    `MediaServer.transcoding_policy/1`): `[audio: :avoid, video: :avoid]`.
+    `{:error, :no_common_codec}` is the expected refusal under `:forbid`.
+
+    Idempotent: bridging an already-bridged pair changes nothing.
+    """
+    @callback bridge(a :: MediaServer.conn_ref(), b :: MediaServer.conn_ref(), opts :: keyword()) ::
+                :ok | {:error, term()}
+
+    @doc """
+    Take the media path down without closing either connection — putting a call
+    on hold, re-pointing a hunt at another target. A pair that is not bridged is
+    not an error.
+    """
+    @callback unbridge(a :: MediaServer.conn_ref(), b :: MediaServer.conn_ref()) :: :ok
 
     # ── Player ──────────────────────────────────────────────────────────────
 

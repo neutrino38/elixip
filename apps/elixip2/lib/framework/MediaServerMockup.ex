@@ -42,6 +42,46 @@ defmodule MediaServer.Mockup do
     :ok
   end
 
+  # ── Bridge ────────────────────────────────────────────────────────────────
+
+  @doc """
+  Cross the two connections' media: what arrives on one goes out of the other,
+  from that one's own socket to that one's own peer.
+
+  A real bridge rather than a recorded call, so a call-flow test can assert that
+  a packet sent into one leg comes out of the other. The transcoding policy is
+  validated (a scenario typo must fail here, not silently) but has no effect:
+  this stub relays payloads without looking at them, which is `:avoid` finding a
+  common codec every time.
+  """
+  @impl MediaServer.Behaviour
+  def bridge(a, b, opts) do
+    case MediaServer.transcoding_policy(opts) do
+      {:ok, _policy} ->
+        :ok = GenServer.call(a, {:set_bridge_peer, b})
+        :ok = GenServer.call(b, {:set_bridge_peer, a})
+        :ok
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  @impl MediaServer.Behaviour
+  def unbridge(a, b) do
+    clear_bridge_peer(a)
+    clear_bridge_peer(b)
+    :ok
+  end
+
+  defp clear_bridge_peer(conn) do
+    if is_pid(conn) and Process.alive?(conn) do
+      GenServer.call(conn, {:set_bridge_peer, nil})
+    end
+
+    :ok
+  end
+
   # ── Player ────────────────────────────────────────────────────────────────
 
   @impl MediaServer.Behaviour
@@ -143,6 +183,10 @@ defmodule MediaServer.Mockup.Conn do
     webrtc_support: :if_offered,
     ice_delay_ms: @default_ice_delay_ms,
     echo: false,
+    # The other half of a B2BUA media path: incoming packets are handed to it,
+    # and it sends them out of ITS socket toward ITS peer — the same shape a
+    # real server's two endpoints have.
+    bridge_peer: nil,
     # media-connectivity state, mirroring the real adapter (§4)
     recv_medias: nil,
     ice_notified: false
@@ -200,7 +244,7 @@ defmodule MediaServer.Mockup.Conn do
   def handle_call({:set_remote_answer, sdp_str}, _from, state) do
     case Sdp.parse(sdp_str) do
       {:ok, descs} ->
-        state = schedule_connectivity(state, descs)
+        state = state |> learn_remote(descs) |> schedule_connectivity(descs)
         {:reply, :ok, %{state | remote_sdp: sdp_str}}
 
       {:error, reason} ->
@@ -212,7 +256,7 @@ defmodule MediaServer.Mockup.Conn do
   def handle_call({:set_remote_offer, sdp_str}, _from, state) do
     with {:ok, descs} <- Sdp.parse(sdp_str),
          {:ok, answer} <- build_answer(state, descs) do
-      state = schedule_connectivity(state, descs)
+      state = state |> learn_remote(descs) |> schedule_connectivity(descs)
       {:reply, {:ok, answer}, %{state | remote_sdp: sdp_str, local_sdp: answer}}
     else
       {:error, reason} -> {:reply, {:error, reason}, media_error(state, reason)}
@@ -230,6 +274,27 @@ defmodule MediaServer.Mockup.Conn do
     {:reply, :ok, %{state | echo: enabled}}
   end
 
+  # Half of a bridge (MediaServer.Mockup.bridge/3): where this connection's
+  # incoming media goes. nil takes the path down again.
+  def handle_call({:set_bridge_peer, peer}, _from, state) do
+    {:reply, :ok, %{state | bridge_peer: peer}}
+  end
+
+  # Media handed over by the other half of the bridge. It leaves through OUR
+  # socket toward OUR peer — which is what makes the two directions independent,
+  # and what a test asserting "it came out of the other leg" is really watching.
+  #
+  # A cast, not a call: both connections relay into each other, and two calls
+  # crossing would deadlock the pair the first time media flowed both ways.
+  @impl true
+  def handle_cast({:bridged_media, packet}, state) do
+    if state.rtp_socket && state.remote_ip do
+      Socket.Datagram.send(state.rtp_socket, packet, {state.remote_ip, state.remote_port})
+    end
+
+    {:noreply, state}
+  end
+
   # One simulated connectivity event per media of R, in negotiation order, then
   # the derived :ice_connected — the rule of docs/design/media-connectivity.md §4.
   @impl true
@@ -245,6 +310,13 @@ defmodule MediaServer.Mockup.Conn do
       Socket.Datagram.send(state.rtp_socket, packet, {ip, port})
     end
 
+    # Bridge: hand it to the other leg, which sends it on from its own socket.
+    if is_pid(state.bridge_peer) and Process.alive?(state.bridge_peer) do
+      GenServer.cast(state.bridge_peer, {:bridged_media, packet})
+    end
+
+    # Latch onto where the media actually comes from, which is what a NATed peer
+    # makes necessary — it overrides the address its SDP announced.
     {:noreply, %{state | remote_ip: ip, remote_port: port}}
   end
 
@@ -253,6 +325,25 @@ defmodule MediaServer.Mockup.Conn do
   defp media_error(state, reason) do
     send(state.event_sink, {:ms_event, self(), {:media_error, reason}})
     state
+  end
+
+  # Where this connection sends: what the peer's SDP says, taken from the first
+  # media it did not decline. Until now the mock only ever learned that from
+  # traffic it received, which is enough for an echo (you answer the sender) and
+  # not for a bridge — the leg that has to speak first would have nowhere to
+  # send. A real server addresses the SDP and only *latches* onto the observed
+  # source afterwards, which is what handle_info({:udp, …}) does.
+  defp learn_remote(state, descs) do
+    case Enum.find(descs, &(Map.get(&1, :port, 0) > 0 and not is_nil(Map.get(&1, :ip)))) do
+      %{ip: ip, port: port} ->
+        case :inet.parse_address(String.to_charlist(ip)) do
+          {:ok, addr} -> %{state | remote_ip: addr, remote_port: port}
+          _ -> state
+        end
+
+      _ ->
+        state
+    end
   end
 
   # Simulate ICE/DTLS connectivity checks taking a short, non-zero time. Video

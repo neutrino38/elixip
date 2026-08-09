@@ -120,6 +120,20 @@ defmodule MediaServer.Mendooze do
   @spec close_peer_connection(pid()) :: :ok
   def close_peer_connection(conn), do: Conn.close(conn)
 
+  # ── Bridge ──────────────────────────────────────────────────────────────────
+
+  # P3 R3. Bridging two endpoints is `EndpointAttachToEndpoint` in both
+  # directions, and that RPC takes a SINGLE session id — so the two legs have to
+  # be two endpoints of ONE MediaSession, which today's Conn (one session, one
+  # endpoint) cannot yet produce. Refusing plainly is the honest state; the
+  # session layer turns it into a 488 for the caller rather than answering a 200
+  # whose SDP promises a media path nobody wired.
+  @impl MediaServer.Behaviour
+  def bridge(_a, _b, _opts), do: {:error, :not_supported}
+
+  @impl MediaServer.Behaviour
+  def unbridge(_a, _b), do: :ok
+
   # ── Players ─────────────────────────────────────────────────────────────────
 
   @impl MediaServer.Behaviour
