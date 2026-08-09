@@ -87,6 +87,55 @@ defmodule Mendooze.IntegrationTest do
       assert :ok = Mendooze.close_peer_connection(pc_a)
     end
 
+    # The one claim P3 rests on and that no unit test can settle: the server
+    # accepts a SECOND Endpoint in a MediaSession it already has, and attaches
+    # the two to each other. Everything else in the media B2BUA is built on top
+    # of it — EndpointAttachToEndpoint takes a single session id, so if this
+    # arrangement were refused there would be no other one.
+    #
+    # Both legs face a peer of their own, which is what a B2BUA is: the inbound
+    # one answers a caller's offer, the outbound one offers and reads an answer.
+    # The peers are the other endpoint of a plain loopback pair, so the SDP is
+    # the server's own and genuinely negotiable.
+    test "a B2BUA call is two endpoints of ONE media session, attached", %{server: server} do
+      opts = [media: :audio, audio_codec: "PCMU"]
+
+      # The caller, and the inbound leg answering it.
+      {:ok, caller} = Mendooze.create_peer_connection(server, self(), opts)
+      {:ok, caller_offer} = Mendooze.get_local_offer(caller)
+
+      {:ok, inbound} = Mendooze.create_peer_connection(server, self(), opts)
+      {:ok, our_answer} = Mendooze.set_remote_offer(inbound, caller_offer)
+      assert :ok = Mendooze.set_remote_answer(caller, our_answer)
+
+      # The outbound leg: a second endpoint IN THE SAME SESSION.
+      {:ok, outbound} = Mendooze.create_peer_connection(server, self(), opts ++ [bridge_with: inbound])
+      assert outbound == {inbound, :outbound}
+
+      {:ok, our_offer} = Mendooze.get_local_offer(outbound)
+      assert our_offer =~ "m=audio"
+
+      {:ok, callee} = Mendooze.create_peer_connection(server, self(), opts)
+      {:ok, callee_answer} = Mendooze.set_remote_offer(callee, our_offer)
+      assert :ok = Mendooze.set_remote_answer(outbound, callee_answer)
+
+      # …and the attach the whole mode depends on.
+      assert :ok = Mendooze.bridge(inbound, outbound, audio: :avoid)
+
+      # Taking it down again leaves both legs usable — hold, not hangup.
+      assert :ok = Mendooze.unbridge(inbound, outbound)
+      assert :ok = Mendooze.bridge(inbound, outbound, audio: :avoid)
+
+      # Releasing one leg keeps the session; the last one takes it with it.
+      assert :ok = Mendooze.close_peer_connection(inbound)
+      assert Process.alive?(inbound)
+      assert :ok = Mendooze.close_peer_connection(outbound)
+      refute Process.alive?(inbound)
+
+      assert :ok = Mendooze.close_peer_connection(callee)
+      assert :ok = Mendooze.close_peer_connection(caller)
+    end
+
     test "H264 audio+video loopback carries the server-negotiated fmtp", %{server: server} do
       # Delegated SDP negotiation (§8.1 of docs/design/mendooze_interface.md): the media
       # server is authoritative for the H264 fmtp (profile-level-id /
