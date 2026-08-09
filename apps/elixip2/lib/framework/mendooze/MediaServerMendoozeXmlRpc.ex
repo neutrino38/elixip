@@ -114,6 +114,17 @@ defmodule MediaServer.Mendooze.XmlRpc do
 
   defp log_error(ok, _method), do: ok
 
+  @doc """
+  The configured per-request timeout (`:xmlrpc_timeout_ms`, default
+  #{@default_timeout_ms} ms).
+
+  Public because `MediaServer.Mendooze.Conn` floors its own GenServer timeout on
+  a multiple of it: the inner timeout has to fire first, or a slow server turns
+  a call that would have returned an error into an exit.
+  """
+  @spec timeout_ms() :: pos_integer()
+  def timeout_ms(), do: config_timeout()
+
   defp config_timeout() do
     Application.get_env(:elixip2, MediaServer.Mendooze, [])
     |> Keyword.get(:xmlrpc_timeout_ms, @default_timeout_ms)

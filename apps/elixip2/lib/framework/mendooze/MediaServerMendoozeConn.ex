@@ -20,7 +20,19 @@ defmodule MediaServer.Mendooze.Conn do
   alias MediaServer.Mendooze
   alias MediaServer.Mendooze.{Sdp, XmlRpc}
 
-  @call_timeout 30_000
+  # How long a caller waits for this GenServer, as opposed to how long ONE
+  # XML-RPC request waits (`xmlrpc_timeout_ms`, default 10 s). The two-level
+  # arrangement is deliberate: the inner one must fire first, so a slow server
+  # makes a call RETURN an error instead of exiting. The outer one is for a Conn
+  # wedged somewhere other than in an RPC.
+  #
+  # It matters more since one process serves both legs of a B2BUA: a slow
+  # `EndpointStartReceiving` on one leg now blocks the other at the head of the
+  # queue, and this timeout is counted by the CALLER — so the second leg can
+  # expire having never been served. Hence configurable, and hence the floor.
+  @default_call_timeout 30_000
+  @min_call_timeout_factor 3
+
   @default_rtp_timeout_ms 10_000
 
   # MediaFrame::Type wire values
@@ -96,7 +108,7 @@ defmodule MediaServer.Mendooze.Conn do
   """
   def add_leg(sibling, opts) do
     {pid, _name} = ref(sibling)
-    GenServer.call(pid, {:add_leg, :outbound, opts}, @call_timeout)
+    GenServer.call(pid, {:add_leg, :outbound, opts}, call_timeout())
   end
 
   # Every entry point takes a `MediaServer.conn_ref/0`: a bare pid names the
@@ -107,22 +119,22 @@ defmodule MediaServer.Mendooze.Conn do
 
   def get_local_offer(conn) do
     {pid, name} = ref(conn)
-    GenServer.call(pid, {:get_local_offer, name}, @call_timeout)
+    GenServer.call(pid, {:get_local_offer, name}, call_timeout())
   end
 
   def set_remote_answer(conn, sdp) do
     {pid, name} = ref(conn)
-    GenServer.call(pid, {:set_remote_answer, name, sdp}, @call_timeout)
+    GenServer.call(pid, {:set_remote_answer, name, sdp}, call_timeout())
   end
 
   def set_remote_offer(conn, sdp) do
     {pid, name} = ref(conn)
-    GenServer.call(pid, {:set_remote_offer, name, sdp}, @call_timeout)
+    GenServer.call(pid, {:set_remote_offer, name, sdp}, call_timeout())
   end
 
   def add_remote_candidate(conn, candidate) do
     {pid, name} = ref(conn)
-    GenServer.call(pid, {:add_remote_candidate, name, candidate}, @call_timeout)
+    GenServer.call(pid, {:add_remote_candidate, name, candidate}, call_timeout())
   end
 
   @doc """
@@ -136,7 +148,7 @@ defmodule MediaServer.Mendooze.Conn do
     {pid_b, name_b} = ref(b)
 
     if pid_a == pid_b do
-      GenServer.call(pid_a, {:bridge, name_a, name_b, opts}, @call_timeout)
+      GenServer.call(pid_a, {:bridge, name_a, name_b, opts}, call_timeout())
     else
       {:error, :not_same_media_session}
     end
@@ -147,7 +159,7 @@ defmodule MediaServer.Mendooze.Conn do
     {pid_b, name_b} = ref(b)
 
     if pid_a == pid_b do
-      GenServer.call(pid_a, {:unbridge, name_a, name_b}, @call_timeout)
+      GenServer.call(pid_a, {:unbridge, name_a, name_b}, call_timeout())
     else
       :ok
     end
@@ -157,7 +169,7 @@ defmodule MediaServer.Mendooze.Conn do
 
   def close(conn) do
     {pid, name} = ref(conn)
-    GenServer.call(pid, {:close, name}, @call_timeout)
+    GenServer.call(pid, {:close, name}, call_timeout())
   catch
     # already stopped (e.g. torn down after a setup failure) — close is idempotent
     :exit, _ -> :ok
@@ -166,26 +178,26 @@ defmodule MediaServer.Mendooze.Conn do
   # Sub-resources — handles are {conn_pid, kind, ref} tuples
   def create_player(conn, file_path, opts) do
     {pid, name} = ref(conn)
-    GenServer.call(pid, {:create_player, name, file_path, opts}, @call_timeout)
+    GenServer.call(pid, {:create_player, name, file_path, opts}, call_timeout())
   end
 
   def player_cmd({conn, :player, ref}, cmd),
-    do: GenServer.call(conn, {:player_cmd, cmd, ref}, @call_timeout)
+    do: GenServer.call(conn, {:player_cmd, cmd, ref}, call_timeout())
 
   def create_recorder(conn, file_path, duration_ms, opts) do
     {pid, name} = ref(conn)
-    GenServer.call(pid, {:create_recorder, name, file_path, duration_ms, opts}, @call_timeout)
+    GenServer.call(pid, {:create_recorder, name, file_path, duration_ms, opts}, call_timeout())
   end
 
   def recorder_cmd({conn, :recorder, ref}, cmd),
-    do: GenServer.call(conn, {:recorder_cmd, cmd, ref}, @call_timeout)
+    do: GenServer.call(conn, {:recorder_cmd, cmd, ref}, call_timeout())
 
   def create_echo(conn) do
     {pid, name} = ref(conn)
-    GenServer.call(pid, {:create_echo, name}, @call_timeout)
+    GenServer.call(pid, {:create_echo, name}, call_timeout())
   end
 
-  def stop_echo({conn, :echo, ref}), do: GenServer.call(conn, {:stop_echo, ref}, @call_timeout)
+  def stop_echo({conn, :echo, ref}), do: GenServer.call(conn, {:stop_echo, ref}, call_timeout())
 
   # ── Initialisation ──────────────────────────────────────────────────────────
 
@@ -2254,6 +2266,20 @@ defmodule MediaServer.Mendooze.Conn do
   # ── Helpers ─────────────────────────────────────────────────────────────────
 
   defp rpc(state, method, params), do: XmlRpc.call(state.base_url, method, params)
+
+  @doc false
+  # `call_timeout_ms` from the MediaServer.Mendooze config block, floored at
+  # @min_call_timeout_factor times the XML-RPC timeout. The floor is the
+  # invariant, not politeness: a deployment that raised xmlrpc_timeout_ms above
+  # this one would turn every slow call into an exit instead of an error, which
+  # is precisely the failure mode the two levels exist to avoid.
+  def call_timeout do
+    cfg = Application.get_env(:elixip2, MediaServer.Mendooze, [])
+    configured = Keyword.get(cfg, :call_timeout_ms, @default_call_timeout)
+    floor_ms = @min_call_timeout_factor * XmlRpc.timeout_ms()
+
+    max(configured, floor_ms)
+  end
 
   defp create(state, method, params), do: XmlRpc.created_id(rpc(state, method, params))
 

@@ -89,9 +89,15 @@ defmodule SIP.Session.Media do
   # of the appdata all keep addressing the leg they always addressed.
   @default_leg :inbound
 
-  # Options this module reads itself; everything else in an `opts` list is the
+  # This module's own vocabulary; everything else in an `opts` list is the
   # adapter's (`create_peer_connection/3`, `create_player/3`, …).
-  @framework_opts [:leg, :bridge_with]
+  #
+  # `:webrtc` and `:media` are ours even though the adapter has keys of its own
+  # that mean the same thing: we translate them into the `webrtc_support:` and
+  # `media:` we pass explicitly, so forwarding them again would put the same
+  # decision in the list twice, under two spellings, with only `Keyword.get`
+  # ordering deciding which one an adapter reads.
+  @framework_opts [:leg, :bridge_with, :webrtc, :media]
 
   defp leg_of(opts), do: Keyword.get(opts, :leg, @default_leg)
   defp adapter_opts(opts), do: Keyword.drop(opts, @framework_opts)
@@ -191,11 +197,59 @@ defmodule SIP.Session.Media do
 
     sip_ctx =
       case rez do
-        {:ok, pid} -> SIP.Context.set(sip_ctx, :mediaserverpid, pid)
-        _ -> raise "Failed to connect to media server #{url}"
+        {:ok, pid} ->
+          sip_ctx
+          |> SIP.Context.set(:mediaserverpid, pid)
+          |> watch_media_server(pid)
+
+        _ ->
+          raise "Failed to connect to media server #{url}"
       end
 
     sip_ctx
+  end
+
+  @doc """
+  Watch the media server process, so that it **dying** reaches the scenario as
+  the same `:server_disconnected` it already gets when the server *disconnects*
+  (design docs/design/b2bua_module.md §14.6, R8 item 1). One event, one meaning:
+  the media plane is gone.
+
+  A separate watcher process rather than a monitor in the scenario: a scenario
+  already receives `{:DOWN, …}` for its sub-FSM children, so a `DOWN` clause in
+  `on_events` would fire on those too — and it would have to be a clause, since
+  `on_events` is a plain `receive` and cannot see what it does not match. The
+  watcher converts the signal into the message shape everything downstream
+  already understands, and misfires on nothing.
+
+  Without it the gap is not theoretical: an adapter killed outright runs no
+  `terminate/2` and announces nothing, so the scenario waits for media that
+  cannot come until its own `after` fires, and only discovers the truth when its
+  next media call exits `:noproc`.
+  """
+  @spec watch_media_server(%SIP.Context{}, pid()) :: %SIP.Context{}
+  def watch_media_server(sip_ctx = %SIP.Context{}, server) when is_pid(server) do
+    scenario = self()
+
+    watcher =
+      spawn(fn ->
+        ref = Process.monitor(server)
+
+        receive do
+          {:DOWN, ^ref, :process, ^server, reason} ->
+            # A normal stop is what `disconnect/2` does, and the scenario asked
+            # for it — announcing that would turn every clean teardown into a
+            # media failure.
+            if reason not in [:normal, :shutdown] do
+              send(scenario, {:ms_event, server, :server_disconnected})
+            end
+
+          :stop_watching ->
+            :ok
+        end
+      end)
+
+    SIP.Context.appdata_set(sip_ctx, :mediaserverwatcher, watcher)
   end
 
   @doc """
@@ -546,11 +600,27 @@ defmodule SIP.Session.Media do
   end
 
   defp cleanup_media_server(sip_ctx) do
+    # The watcher goes first: releasing the server is exactly the death it exists
+    # to report, and reporting it into a scenario that is already tearing down
+    # would be noise at best.
+    sip_ctx = stop_watching(sip_ctx)
+
     if is_nil(sip_ctx.mediaserverpid) do
       sip_ctx
     else
       safe_ms_call(sip_ctx.mediaservermodule, :disconnect, [sip_ctx.mediaserverpid, []])
       SIP.Context.set(sip_ctx, :mediaserverpid, nil)
+    end
+  end
+
+  defp stop_watching(sip_ctx) do
+    case SIP.Context.appdata_get(sip_ctx, :mediaserverwatcher) do
+      pid when is_pid(pid) ->
+        send(pid, :stop_watching)
+        SIP.Context.appdata_set(sip_ctx, :mediaserverwatcher, nil)
+
+      _ ->
+        sip_ctx
     end
   end
 

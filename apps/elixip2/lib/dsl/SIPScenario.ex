@@ -259,6 +259,19 @@ defmodule SIP.Scenario do
         do: do_clauses,
         else: [shutdown_clause() | do_clauses]
 
+    # …and media-server-death-aware, the same way and for the same reason
+    # (design docs/design/b2bua_module.md §14.6, R8). `:server_disconnected` is
+    # delivered to every sink and acted upon by nothing: a scenario without a
+    # clause for it leaves the event in its mailbox and goes on waiting for media
+    # that will never come, until its own `after` fires — if it has one.
+    #
+    # Injected only when the scenario handles no media death itself, so a policy
+    # that wants control keeps it — the rule `on_events` clauses already follow.
+    do_clauses =
+      if Enum.any?(do_clauses, &handles_media_down?/1),
+        do: do_clauses,
+        else: [media_down_clause() | do_clauses]
+
     instrumented = Enum.map(do_clauses, &instrument_receive_clause/1)
 
     new_blocks =
@@ -282,6 +295,52 @@ defmodule SIP.Scenario do
       quote do
         {:scenario_ctl, :shutdown, _reason} ->
           {:goto, :__shutdown__, "shutdown", :control, var!(sip_ctx)}
+      end
+
+    clause
+  end
+
+  # Would any of this scenario's own clauses catch a media server going away?
+  #
+  # Deliberately generous: a clause matching `{:ms_event, _, :server_disconnected}`
+  # obviously does, but so does one matching every media event
+  # (`{:ms_event, _, evt}` and then deciding), and so does a catch-all. Being
+  # generous errs toward leaving the scenario in charge, which is the safe
+  # direction — the default exists for scenarios that never considered the case,
+  # not to overrule those that did.
+  defp handles_media_down?({:->, _meta, [head, _body]}), do: head_handles_media_down?(head)
+  defp handles_media_down?(_), do: false
+
+  defp head_handles_media_down?([{:when, _meta, [pattern | _guards]}]),
+    do: pattern_handles_media_down?(pattern)
+
+  defp head_handles_media_down?([pattern]), do: pattern_handles_media_down?(pattern)
+  defp head_handles_media_down?(_), do: false
+
+  # `{:ms_event, ref, evt}` is a 3-tuple, i.e. `{:{}, _, elems}` in quoted form.
+  defp pattern_handles_media_down?({:{}, _meta, [:ms_event, _ref, event]}),
+    do: event == :server_disconnected or variable?(event)
+
+  # A bare variable or `_`: a catch-all, which catches this too.
+  defp pattern_handles_media_down?(pattern), do: variable?(pattern)
+
+  defp variable?({name, _meta, ctx}) when is_atom(name) and is_atom(ctx), do: true
+  defp variable?(_), do: false
+
+  # The default reaction: the cooperative shutdown a controller would ask for, so
+  # `on_shutdown` runs if declared (and `:aborted` otherwise), `finalize` releases
+  # the legs and the media, and the caller is answered. R6's rule applied to the
+  # media plane — a dead resource ends the call it was serving, promptly, instead
+  # of being discovered at teardown.
+  #
+  # Idempotent by construction: it leaves the state, so a second
+  # `:server_disconnected` (the MCU case relays the fact AND passes it through)
+  # finds no `on_events` to match against.
+  defp media_down_clause do
+    [clause] =
+      quote do
+        {:ms_event, _ref, :server_disconnected} ->
+          {:goto, :__shutdown__, "media server down", :media, var!(sip_ctx)}
       end
 
     clause
