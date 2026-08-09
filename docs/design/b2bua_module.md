@@ -187,7 +187,8 @@ forked serially or in parallel), each with an ordered list of
 branches are URI-level and SRV failover happens per branch below TM.
 
 - `uris` — ordered target list (strings or `%SIP.Uri{}`, possibly
-  pre-resolved). With `fork: :none`, only the head is used.
+  pre-resolved). With `fork: :none`, only the head is used. A peer whose
+  targets are not knowable up front names a `provider` instead (§3.4).
 - `ruri` — **is the R-URI rewritten or not?** Kamailio's `$ru`/`$du`
   distinction, which the framework already embodies: a `%SIP.Uri{}` carries
   its routing (`destip`/`destport`/`destproto`/`tp_pid`) *next to* its
@@ -378,6 +379,155 @@ untouched. This also settles the first draft's open question ("should
 forking go in the transaction layer?"): *between* the layers — the
 transaction layer is already per-branch by construction (RFC 3261 §17), and
 the branch set is dialog-layer orchestration.
+
+### 3.4 Dynamic targets: a provider process (the `app_queue` case)
+
+Everything above computes the target list **once**, when the leg is created. For
+a call queue that is the wrong shape, and not by a little: the next agent to try
+depends on the state of the world *at the moment the previous attempt failed* —
+who hung up since, who just logged in, whose wrap-up expired. A list is a
+snapshot; a queue is a live thing.
+
+So a peer may name a **provider** instead of a list: a process the hunt asks for
+the next target, each time it needs one. This is an extension of the **serial**
+hunt of §3.1 — one target at a time, exactly what §3.3's branches already walk —
+so it needs nothing from parallel forking and can be built on what exists today.
+
+```elixir
+%SIP.B2bua.Peer{provider: queue_pid, fork: :serial}
+# shorthand, since a bare pid can mean nothing else:
+b2bua_forward(req, queue_pid, false)
+```
+
+`provider` and `uris` are exclusive: with a provider set, `uris` is ignored (a
+peer carrying both is a configuration error, not a merge).
+
+#### The protocol
+
+A first sketch — `get_next_target(pid) :: {:ok, uri} | :no_more_targets` — is
+the obvious shape and it is not enough. Four things a queue needs that a static
+list never had to say:
+
+```elixir
+defmodule SIP.B2bua.TargetProvider do
+  @doc "The next target for this call, or why there is none yet."
+  @callback next_target(provider :: pid, call :: reference, req :: map) ::
+              {:ok, SIP.Uri.t()}
+              | {:ok, SIP.Uri.t(), opts :: keyword}
+              | {:wait, milliseconds :: non_neg_integer}
+              | :exhausted
+              | {:error, term}
+
+  @doc "How the attempt this provider handed out ended."
+  @callback attempt_ended(provider :: pid, call :: reference, outcome) :: :ok
+  # outcome :: {:answered, uri} | {:rejected, uri, code} | {:no_answer, uri} | :abandoned
+end
+```
+
+**1. `{:wait, ms}` — the difference between a queue and a hunt list.** When no
+agent is free, the answer is not "give up": the caller *waits*, and is asked
+about again later. Without this, an empty queue reads as exhausted and the call
+is refused — the one behaviour a queue exists to avoid. It also means the
+outbound leg does **not** exist while the caller is queued; it is created by the
+first real target, so the scenario has a "queued" state with one leg only.
+
+**2. `call` — a reservation handle.** Two calls asking the queue at the same
+instant must not be handed the same agent. The provider therefore has to
+*reserve*, which it can only do against a stable identity for the call: a
+reference the B2BUA mints with the leg and passes on every call. It is also what
+lets a queue implement rrmemory, penalties or wrap-up at all.
+
+**3. `attempt_ended/3` — the reservation must be released.** Answered, refused,
+rung-out, or the caller hung up while queued (`:abandoned`): the provider is
+told, or its agents leak as permanently reserved. This is the half a
+`get_next_target/1` shape has no room for, and the half without which a queue
+degrades after the first failed call.
+
+**4. A per-attempt ring timeout.** "Ring this agent for 15 s, then take the
+next" is not RFC 3261 timer B (32 s, and it ends the transaction rather than the
+attempt). The value belongs to the queue, so the provider returns it
+(`{:ok, uri, ring_timeout: 15_000}`), while *acting* on it stays the scenario's,
+as every other policy here:
+
+```elixir
+state ringing_agent do
+  on_events do
+    {:outbound, {200, resp, _t, _d}} -> b2bua_forward_reply(resp); goto wait_ack
+    {:outbound, {code, resp, _t, _d}} when code >= 300 ->
+      b2bua_try_next()                       # tell the queue, ask for another
+      goto next_agent, "agent refused #{code}"
+    {:CANCEL, req, _t, _d} -> b2bua_forward(req); scenario_aborted("caller left")
+  after
+    b2bua_ring_timeout() ->                  # what the queue asked for
+      b2bua_try_next()                       # CANCELs the branch, next agent
+      goto next_agent, "agent did not answer"
+  end
+end
+```
+
+`b2bua_try_next/0` is the one new primitive: abandon the branch in flight
+(CANCEL it if it is ringing), report the outcome to the provider, ask for the
+next target, and arm it as a new branch — or surface `{:wait, ms}` / `:exhausted`
+to the scenario. It is also what makes the ring timeout expressible at all,
+since today a branch is only abandoned when it answers.
+
+#### What it does not solve
+
+A real `app_queue` also plays music on hold and position announcements to the
+waiting caller, which is media — so a *complete* queue depends on §7's
+`{:mediaserver, …}` mode (P3), not on this section. Signalling-only queueing
+works and is worth having (the caller hears ringback), but say so rather than
+discover it.
+
+The provider itself is **not** built here: for kelixip it is a loadable module
+(`Kelix.Mod.Queue`, the `Kelix.Mod.Registrar` pattern of §3.2), so `elixip2`
+keeps knowing nothing about it — the script holds the pid and puts it in the
+peer.
+
+### 3.5 Interrupting a hunt: `b2bua_cancel_forward/0`
+
+A hunt runs because nothing has told it to stop. What tells it to stop is
+almost always the **caller** — a CANCEL before answer, a BYE once connected —
+and until now there was no way to say so:
+
+```elixir
+b2bua_cancel_forward()
+```
+
+Stop hunting, whatever stage it is at: CANCEL the branch in flight if one is
+ringing, drop the untried targets, tell a provider the call was `:abandoned`
+(§3.4 — its reservation must be released), and arm nothing more. The leg is
+left with no attempt outstanding, which is what the §8 teardown then finds.
+
+It is a separate act from relaying the CANCEL, and both are usually wanted:
+`b2bua_forward(req)` tells the *callee* to stop ringing, `b2bua_cancel_forward()`
+tells the *hunt* to stop looking. Relaying alone leaves the search running.
+
+**The trap it closes.** Cancelling a branch makes it answer `487 Request
+Terminated` — and 487 falls inside the default retry-on range (§3.1), so the
+hunt reads the caller's own CANCEL as "this device refused" and rings the next
+one. The caller hung up and a second agent starts ringing. Two things follow:
+
+- **487 leaves the default retry-on list.** A 487 answers an INVITE *we*
+  terminated; there is no case where it means "try someone else".
+- The reference scenarios gain a `{:BYE, …}` clause in `proceeding`, which they
+  lack today: a caller who hangs up *while the callee is being rung* currently
+  matches nothing there and sits in the mailbox until the state times out.
+
+```elixir
+state proceeding do
+  on_events do
+    {:CANCEL, req, _t, _d} ->
+      b2bua_cancel_forward()                 # stop looking
+      b2bua_forward(req)                     # and stop the phone that is ringing
+      scenario_aborted("caller cancelled")
+
+    {:BYE, req, _t, _d} ->
+      b2bua_cancel_forward()
+      b2bua_reply(req, 200, "OK")
+      scenario_success("caller hung up while we were looking")
+    …
+```
 
 ## 4. Relaying in-dialog requests: `b2bua_forward/1`
 
@@ -749,6 +899,7 @@ SRV failover depend on `fork: :serial` rather than being unconditional as §3.1
 first put it; `:none` then means one attempt and no failover at all, which is
 the simpler contract.
 | **P3** | `{:mediaserver, …}` mode: leg-qualified media handles, `bridge/2` callback in `MediaServer.Behaviour` + Mendooze implementation, offer/answer choreography |
+| **P2c** | dynamic targets (§3.4): the `SIP.B2bua.TargetProvider` behaviour, `%Peer{provider:}`, `b2bua_try_next/0` + the per-attempt ring timeout, and `b2bua_cancel_forward/0` (§3.5) with 487 out of the default retry-on list. Extends the SERIAL hunt, so it needs nothing from P4; a complete call queue additionally needs P3 for music on hold |
 | **P4** | parallel forking (branch sets in the leg dialog, §3.3: winner adoption, late-2xx ACK+BYE, best-response aggregation; q-group semantics of §3.2), trunk processes (`trunk_pid`); multi-leg generalization only if attended transfer / 3pcc demands it. `{:rtpengine, …}` is **out of scope** — deferred to the borderline work |
 
 ## 12. Open questions
@@ -774,7 +925,19 @@ the simpler contract.
 6. ~~**q-value storage**~~ — **confirmed 2026-08-09.** `save/4` stores the whole
    Contact `%SIP.Uri{}`, and the parser puts the header's `q` in its params, so
    the preference survives with nothing added to `%Contact{}`. Pinned by a test.
-7. ~~**`address_in_dialog/2` is asymmetric**~~ — **fixed 2026-08-09.** Its
+7. **How much of a queue belongs in the framework** (§3.4). The provider
+   protocol puts reservation, strategy and ring timeouts in the *provider*, and
+   keeps arming, cancelling and timing in the scenario — deliberately, since
+   that is where every other policy lives here. The line is defensible but not
+   obvious: a `b2bua_queue` mixin that ran the whole loop would make a queue
+   script three lines long and would bury the one thing worth reading. Revisit
+   once a real `Kelix.Mod.Queue` exists.
+8. **`attempt_ended/3` on an instance that dies** (§3.4). A scenario killed
+   mid-hunt must still release the provider's reservation; today the §8 teardown
+   is the only thing that runs, so it has to make that call — and it runs in a
+   process that may be terminating. Whether that is reliable enough, or whether
+   the provider should monitor the call reference itself, is open.
+9. ~~**`address_in_dialog/2` is asymmetric**~~ — **fixed 2026-08-09.** Its
    outbound clause restored only the To and took the From from the request as
    given, so an in-dialog request originated with a placeholder From (the shape
    `SIP.Session.CallInDialog` builds for a context with no identity of its own —
