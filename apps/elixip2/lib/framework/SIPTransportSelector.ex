@@ -33,14 +33,42 @@ alias SIP.NetUtils
     end
   end
 
-  defp find_or_launch_transport(uri = %SIP.Uri{}) do
-    reliable = apply(uri.tp_module, :is_reliable, [])
-    destip = if is_tuple(uri.destip) do NetUtils.ip2string(uri.destip) else uri.destip end
-    instance_name = if reliable do
+  # How many processes of a transport module exist, and which one a URI gets.
+  #
+  # The default is the historical rule: one instance per connection for a reliable
+  # transport (TCP/TLS/WSS — the name carries the peer), one per protocol for an
+  # unreliable one (a node has a single UDP socket, which is also what the kelixip
+  # listener config enforces).
+  #
+  # A module may override it by exporting `select_instance/1`: given the resolved
+  # URI it returns the instance name it wants, or nil to keep the default. That is
+  # how the test mockup gives a suite two *distinct* peers — a B2BUA has two legs,
+  # and with one shared instance the two directions answer each other's requests.
+  defp instance_name(uri, destip) do
+    case module_instance_name(uri) do
+      name when is_binary(name) -> name
+      _ -> default_instance_name(uri, destip)
+    end
+  end
+
+  defp module_instance_name(uri) do
+    # The module is loaded: is_reliable/0 is applied on it in the default below.
+    if function_exported?(uri.tp_module, :select_instance, 1) do
+      apply(uri.tp_module, :select_instance, [ uri ])
+    end
+  end
+
+  defp default_instance_name(uri, destip) do
+    if apply(uri.tp_module, :is_reliable, []) do
       uri.destproto <> "_" <> destip <> ":" <> Integer.to_string(uri.destport)
     else
       uri.destproto
     end
+  end
+
+  defp find_or_launch_transport(uri = %SIP.Uri{}) do
+    destip = if is_tuple(uri.destip) do NetUtils.ip2string(uri.destip) else uri.destip end
+    instance_name = instance_name(uri, destip)
 
     # Lookup a process matching the existing instance name
     Logger.debug([ module: __MODULE__,
@@ -158,9 +186,12 @@ alias SIP.NetUtils
   # "UDP" / "WSS" / … as the transports themselves spell it
   defp proto_str(t_mod), do: apply(t_mod, :transport_str, []) |> String.upcase()
 
+  # A URI aimed at the in-process test mockup. Any non-empty `unittest` value
+  # counts: `unittest=1` is the shared instance every existing suite uses, and any
+  # other value names a peer of its own (see UDPMockup.select_instance/1).
   defp unittest?(uri) do
     case SIP.Uri.get_uri_param(uri, "unittest") do
-      { :ok, "1" } -> true
+      { :ok, value } when is_binary(value) and value != "" -> true
       _ -> false
     end
   end

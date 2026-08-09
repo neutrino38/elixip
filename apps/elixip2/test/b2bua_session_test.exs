@@ -40,10 +40,11 @@ defmodule SIP.Test.B2bua.Session do
     struct(%Peer{uris: [peer_target()]}, opts)
   end
 
-  # The one target every peer in this suite points at (the mockup instance).
+  # The one target every peer in this suite points at — a mockup instance of this
+  # suite's own, so no other suite's traffic reaches it (or ours theirs).
   defp peer_target do
     %SIP.Uri{scheme: "sip:", userpart: "callee", domain: "example.com", port: 5060}
-    |> SIP.Uri.set_uri_param("unittest", "1")
+    |> SIP.Uri.set_uri_param("unittest", "b2bua_session")
   end
 
   describe "current-event bookkeeping" do

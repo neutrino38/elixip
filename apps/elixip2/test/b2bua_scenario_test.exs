@@ -9,10 +9,9 @@ defmodule SIP.Test.B2bua.Scenario do
   bypasses by calling the backing functions directly.
 
   The outbound leg is real (a dialog, a transaction, the UDP mockup on the
-  wire). The inbound leg is a stub dialog recording what the B2BUA replies on
-  it, because both legs would otherwise land on the *same* shared mockup
-  instance — every `unittest` URI resolves to one destination. A three-party
-  test on real sockets is the next step (see the P1e note in the design doc).
+  wire); the inbound leg is a stub dialog recording what the B2BUA replies on
+  it, which keeps this suite on the macros rather than on the crossing.
+  `b2bua_three_party_test.exs` is the one with two real transports.
   """
   use ExUnit.Case
 
@@ -34,9 +33,13 @@ defmodule SIP.Test.B2bua.Scenario do
     %{stub: stub}
   end
 
+  # A mockup peer of this suite's OWN — not the shared `unittest=1` instance every
+  # other suite drives. Sharing it meant another suite's retransmitted INVITEs
+  # landed in this test's mailbox as {:invite_sent, …}, ahead of the answer it was
+  # waiting for.
   defp peer_uri do
     %SIP.Uri{scheme: "sip:", userpart: "callee", domain: "example.com", port: 5060}
-    |> SIP.Uri.set_uri_param("unittest", "1")
+    |> SIP.Uri.set_uri_param("unittest", "b2bua_scenario")
   end
 
   defp inbound_invite do

@@ -19,7 +19,24 @@ defmodule SIP.Test.Transport.UDPMockup do
   @spec is_reliable() :: boolean()
   def is_reliable, do: false
 
-  def select_instance(_ruri) do
+  @doc """
+  Which mockup process serves this URI (see `SIP.Transport.Selector`).
+
+  `;unittest=1` is THE shared instance every suite has always used — unchanged,
+  so nothing existing moves. Any other value names a peer of its own:
+  `;unittest=callee` and `;unittest=caller` are two different processes, each
+  with its own current request and canned scenario.
+
+  That distinction is what a B2BUA test needs: with one shared instance the two
+  legs overwrite each other's `state.req`, and an answer meant for the callee is
+  built from the caller's INVITE.
+  """
+  def select_instance(ruri) do
+    case SIP.Uri.get_uri_param(ruri, "unittest") do
+      {:ok, "1"} -> "UDPMockup"
+      {:ok, name} when is_binary(name) and name != "" -> "UDPMockup:" <> name
+      _ -> "UDPMockup"
+    end
   end
 
   # Simulated call scenarii

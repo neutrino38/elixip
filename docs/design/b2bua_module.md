@@ -683,27 +683,31 @@ Four suites, from the bottom up. The first three are delivered with P1:
 | `msg_ops_b2bua_test.exs` | the leg-crossing rules alone, on the real-traffic samples of `test/SIP-*.txt`: what is dropped, what crosses, Max-Forwards |
 | `sip_dialog_tag_test.exs` | the dialog event tag over a full dialog lifecycle, and that an untagged dialog is byte-for-byte unchanged |
 | `b2bua_session_test.exs` | leg bookkeeping, correlation and teardown, by calling the backing functions directly |
-| `b2bua_scenario_test.exs` | the **macro** layer: the reference scenario driven from INVITE to BYE |
+| `b2bua_scenario_test.exs` | the **macro** layer: the reference scenario driven from INVITE to BYE, real outbound leg, stub inbound dialog |
+| `b2bua_three_party_test.exs` | the crossing itself: a caller, the B2BUA and a callee, **each on its own transport**, nothing stubbed |
+| `kelix_modules/test/b2bua_script_test.exs` | the registrar-driven script (§3.2), where both halves exist |
 
-The last one runs the scenario with a **real outbound leg** (dialog,
-transaction, UDP mockup on the wire) and a **stub inbound dialog** that records
-what the B2BUA answers on it. The stub is not laziness: every `unittest` URI
-resolves to the same destination in `SIP.Transport.Selector`, so both legs
-would otherwise share one mockup instance and the two directions would tangle.
+### Named mockup peers (delivered 2026-08-09)
 
-**Next (decided 2026-08-09): per-destination mockup instances.** A genuine
-three-party test — a caller, this B2BUA and a UAS, each with its own transport
-— needs the two legs on two transports. `SIP.Test.Transport.UDPMockup`
-`select_instance/1` ignores the R-URI today, so every `unittest` URI lands on
-one shared instance; keying instances by destination gives each leg its own,
-deterministically and in-process.
+A three-party test needs the two legs on two transports.
+`SIP.Transport.Selector` gave every unreliable transport a single instance per
+protocol, so both legs shared one mockup process and overwrote each other's
+current request — an answer meant for the callee was built from the caller's
+INVITE.
+
+The fix revives a hook that already existed and was never called: a transport
+module may export **`select_instance/1`** and name the instance a URI gets;
+the historical rule (one per connection when reliable, one per protocol
+otherwise) is the fallback. `UDPMockup` implements it on the `unittest`
+parameter — `;unittest=1` stays THE shared instance every existing suite uses,
+and any other value (`;unittest=callee`) names a peer of its own.
 
 Real loopback sockets were the alternative and are more faithful, but also the
 more likely to be flaky under load — which the existing `ScenarioIntegration`
 media tests already are. They remain worth having later as a separate `:live`
 test; the CI-facing one stays on the mockup.
 
-This is a prerequisite for **P2b**: "first 2xx wins, CANCEL the losers,
+This was the prerequisite for **P2b**: "first 2xx wins, CANCEL the losers,
 ACK+BYE the late 2xx" cannot be tested credibly against a single shared peer.
 
 ## 11. Phasing
