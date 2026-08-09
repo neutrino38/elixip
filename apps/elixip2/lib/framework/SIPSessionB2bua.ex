@@ -164,6 +164,19 @@ defmodule SIP.Session.B2bua do
         end
       end
 
+      @doc """
+      Hang up the outbound leg on our own initiative — not a relay: no BYE was
+      received. For the policies where the B2BUA decides the call is over
+      (no ACK from the caller, a session timer, an administrative hangup).
+      """
+      defmacro b2bua_send_BYE() do
+        quote do
+          SIP.Scenario.Monitor.note_command(:sip, "b2bua_send_BYE")
+
+          var!(sip_ctx) = SIP.Session.B2bua.do_send_bye(var!(sip_ctx))
+        end
+      end
+
       @doc "The outbound leg (a `%SIP.B2bua.Leg{}`), or nil when none was created."
       defmacro b2bua_outbound_leg() do
         quote do
@@ -504,6 +517,28 @@ defmodule SIP.Session.B2bua do
       domain: "0.0.0.0",
       params: %{}
     }
+  end
+
+  # ── Originating on a leg ────────────────────────────────────────────────────
+
+  @doc false
+  @spec do_send_bye(%SIP.Context{}) :: %SIP.Context{}
+  def do_send_bye(sip_ctx = %SIP.Context{}) do
+    case outbound_leg(sip_ctx) do
+      %Leg{} = leg ->
+        if leg_alive?(leg) do
+          case SIP.Dialog.new_request(leg.dialogpid, bye_request(leg)) do
+            {:ok, _trans_pid} -> SIP.Context.set(sip_ctx, :lasterr, :ok)
+            err -> fail(sip_ctx, {:b2bua, :bye_failed, err})
+          end
+        else
+          # Already gone: what we wanted has happened.
+          SIP.Context.set(sip_ctx, :lasterr, :ok)
+        end
+
+      nil ->
+        fail(sip_ctx, {:b2bua, :no_outbound_leg})
+    end
   end
 
   # ── Local replies ───────────────────────────────────────────────────────────

@@ -666,21 +666,38 @@ Notes on the formalism this example locks in:
 
 ## 10. Testing strategy
 
-The `sub_fsm` machinery makes a 3-party test run in one BEAM node: a parent
-test scenario spawns the B2BUA as a `:uas_invite` child (routed via
-`SIP.Scenario.CallDispatcher`) and an auto-answer UAS as a second child, then
-plays the caller itself over the loopback UDP transport. Assertions: header
-purge on the forwarded INVITE (fresh Call-ID / tags / Via), provisional and
-final relay, ACK/BYE crossing, teardown with a scenario killed mid-call
-(legs must be CANCELled/BYEd by `release_b2bua_legs`). Unit tests for
-`prepare_forwarded_request/2` / `forwarded_reply_fields/1` live in the
-message-layer suite with the sample messages of `test/SIP-*.txt`.
+Four suites, from the bottom up. The first three are delivered with P1:
+
+| Suite | What it pins |
+|---|---|
+| `msg_ops_b2bua_test.exs` | the leg-crossing rules alone, on the real-traffic samples of `test/SIP-*.txt`: what is dropped, what crosses, Max-Forwards |
+| `sip_dialog_tag_test.exs` | the dialog event tag over a full dialog lifecycle, and that an untagged dialog is byte-for-byte unchanged |
+| `b2bua_session_test.exs` | leg bookkeeping, correlation and teardown, by calling the backing functions directly |
+| `b2bua_scenario_test.exs` | the **macro** layer: the reference scenario driven from INVITE to BYE |
+
+The last one runs the scenario with a **real outbound leg** (dialog,
+transaction, UDP mockup on the wire) and a **stub inbound dialog** that records
+what the B2BUA answers on it. The stub is not laziness: every `unittest` URI
+resolves to the same destination in `SIP.Transport.Selector`, so both legs
+would otherwise share one mockup instance and the two directions would tangle.
+
+**Still open (P1e):** a genuine three-party test — a caller, this B2BUA and a
+UAS, each with its own transport. Two ways in:
+
+  * give the UDP mockup **per-destination instances** (its `select_instance/1`
+    ignores the R-URI today), so each leg gets its own; or
+  * run the three parties over **real loopback sockets** on distinct ports,
+    with `sub_fsm` spawning the B2BUA and an auto-answer UAS as children.
+
+The second is the more faithful and also the more likely to be flaky under
+load, which the existing `ScenarioIntegration` media tests already are. Worth
+deciding deliberately rather than by default.
 
 ## 11. Phasing
 
 | Phase | Content |
 |---|---|
-| **P1** | message-layer purge/copy functions; dialog `tag:` option; leg + correlation state; `b2bua_forward/3` (single URI, `use_srv` honored, media `false`), `b2bua_forward/1`, `b2bua_forward_reply/1`, `b2bua_reply/3..4`; ACK/CANCEL special cases; automatic teardown; reference scenario + tests |
+| **P1** ✅ | message-layer purge/copy functions; dialog `tag:` option; leg + correlation state; `b2bua_forward/3` (single URI, media `false`), `b2bua_forward/1`, `b2bua_forward_reply/1`, `b2bua_reply/3..4`, `b2bua_send_BYE/0`; ACK/CANCEL special cases; automatic teardown; reference scenario `scenarios/b2bua_basic.exs` + 38 tests. **Left open:** the three-party test (§10) |
 | **P2** | `%SIP.B2bua.Peer{}` in full: serial forking (branch-per-attempt in the leg dialog, §3.3) with retry-on list, failover across SRV priorities, per-peer `outbound_proxy`; registrar-driven forking (§3.2): `Kelix.Mod.Registrar.targets/2`, q-value preservation in `save/4`, serial hunt in q order |
 | **P3** | `{:mediaserver, …}` mode: leg-qualified media handles, `bridge/2` callback in `MediaServer.Behaviour` + Mendooze implementation, offer/answer choreography |
 | **P4** | parallel forking (branch sets in the leg dialog, §3.3: winner adoption, late-2xx ACK+BYE, best-response aggregation; q-group semantics of §3.2), `{:rtpengine, …}` mode, trunk processes (`trunk_pid`); multi-leg generalization only if attended transfer / 3pcc demands it |

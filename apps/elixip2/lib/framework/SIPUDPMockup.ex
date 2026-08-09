@@ -54,6 +54,12 @@ defmodule SIP.Test.Transport.UDPMockup do
   end
 
   defp handle_req(state, :INVITE, sipreq) do
+    # Tell the test the INVITE actually went out, mirroring {:options_sent, …}.
+    # Without it a test cannot know *when* to simulate an answer: it would race
+    # the request it is answering, and `{:simulate, …}` reads `state.req`. It
+    # also hands the test the request as it left the stack, which is what a
+    # B2BUA suite asserts the forwarding rules on.
+    if state.testapppid != nil, do: send(state.testapppid, {:invite_sent, sipreq})
     Map.put(state, :req, sipreq)
   end
 
@@ -98,16 +104,20 @@ defmodule SIP.Test.Transport.UDPMockup do
   end
 
   defp handle_req(state, :BYE, sipreq) do
-    if state.scenario in [:inboundinvite, :successfulcall] do
-      # Handle the BYE request and answers it
+    # Say that a BYE went out whenever someone is listening — pure observation,
+    # independent of any canned scenario. A test that hangs a call up itself
+    # (a B2BUA relaying a BYE, say) has no scenario selected, and gating the
+    # notification on one made "no BYE was sent" assertions pass vacuously.
+    if state.testapppid != nil do
+      send(state.testapppid, :BYE)
+    end
+
+    # Answering it, on the other hand, stays part of the canned call scenarios:
+    # that is a response on the wire, and it ends the dialog.
+    if Map.get(state, :scenario) in [:inboundinvite, :successfulcall] do
       resp = SIP.Msg.Ops.reply_to_request(sipreq, 200, "OK")
       Process.send_after(self(), {:recv, resp}, 100)
       Logger.debug("UDPMockup: replied to BYE")
-
-      # Forward event to the test process
-      if state.testapppid != nil do
-        send(state.testapppid, :BYE)
-      end
     end
 
     state
@@ -255,6 +265,21 @@ defmodule SIP.Test.Transport.UDPMockup do
   # Simulate call scenario
   @impl true
   @spec handle_cast({:simulate, 100, non_neg_integer()}, map()) :: {:noreply, map()}
+  # Simulating an answer before there is anything to answer. It used to raise
+  # (`badkey :req`) inside the GenServer, killing the transport instance — which
+  # is *shared*, so one mis-ordered test took the following ones down with it.
+  # Say so and carry on: the test will fail on its own assertion, which is the
+  # failure that names the actual problem.
+  def handle_cast({:simulate, code, _after_ms}, state)
+      when is_integer(code) and not is_map_key(state, :req) do
+    Logger.warning(
+      module: SIP.Test.Transport.UDPMockup,
+      message: "Asked to simulate a #{code} but no request has been sent yet. Ignoring."
+    )
+
+    {:noreply, state}
+  end
+
   def handle_cast({:simulate, 100, after_ms}, state) do
     siprsp = reply_to_request(state.req, 100, "Trying")
     Process.send_after(self(), {:recv, siprsp}, after_ms)
@@ -389,15 +414,20 @@ defmodule SIP.Test.Transport.UDPMockup do
     Logger.debug(
       transid: state.req.transid,
       module: SIP.Test.Transport.UDPMockup,
-      message: "Received SIP resp #{siprsp.response} scenario #{state.scenario}"
+      message:
+        "Received SIP resp #{siprsp.response} scenario #{inspect(Map.get(state, :scenario))}"
     )
 
     SIP.Transac.process_sip_message(SIPMsg.serialize(siprsp))
 
-    case state.scenario do
+    case Map.get(state, :scenario) do
       :successfulcall ->
         # We received the 100 Trying -- simulate a 180 ringing after some time
         GenServer.cast(self(), {:simulate, 180, 200})
+
+      # No canned scenario: the test drives the responses itself.
+      nil ->
+        :ok
 
       :notregistered ->
         # answer with 480 Temporary Unavailable
@@ -416,7 +446,7 @@ defmodule SIP.Test.Transport.UDPMockup do
       _ ->
         Logger.warning(
           module: SIP.Test.Transport.UDPMockup,
-          message: "Unidentified SIP scenario #{state.scenario}"
+          message: "Unidentified SIP scenario #{inspect(Map.get(state, :scenario))}"
         )
 
         GenServer.cast(self(), {:simulate, 404, 200})
@@ -430,12 +460,13 @@ defmodule SIP.Test.Transport.UDPMockup do
     Logger.debug(
       transid: state.req.transid,
       module: SIP.Test.Transport.UDPMockup,
-      message: "Received SIP resp #{siprsp.response} scenario #{state.scenario}"
+      message:
+        "Received SIP resp #{siprsp.response} scenario #{inspect(Map.get(state, :scenario))}"
     )
 
     SIP.Transac.process_sip_message(SIPMsg.serialize(siprsp))
 
-    case state.scenario do
+    case Map.get(state, :scenario) do
       :successfulcall ->
         # We received the 180 Ringing -- simulate a 200 OK after some time
         GenServer.cast(self(), {:simulate, 200, 4000})
@@ -445,6 +476,13 @@ defmodule SIP.Test.Transport.UDPMockup do
 
       :busy ->
         GenServer.cast(self(), {:simulate, 486, 2000})
+
+      # No canned scenario: the test drives the responses itself, one
+      # `{:simulate, …}` at a time. Reading `state.scenario` directly used to
+      # raise here (the key is absent until a scenario is selected), killing the
+      # shared instance.
+      _ ->
+        :ok
     end
 
     {:noreply, state}
@@ -455,7 +493,8 @@ defmodule SIP.Test.Transport.UDPMockup do
     Logger.debug(
       transid: state.req.transid,
       module: SIP.Test.Transport.UDPMockup,
-      message: "Received SIP resp #{siprsp.response} scenario #{state.scenario}"
+      message:
+        "Received SIP resp #{siprsp.response} scenario #{inspect(Map.get(state, :scenario))}"
     )
 
     SIP.Transac.process_sip_message(SIPMsg.serialize(siprsp))

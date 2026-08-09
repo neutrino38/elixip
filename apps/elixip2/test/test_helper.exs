@@ -58,4 +58,27 @@ defmodule TestRegistrar do
   end
 end
 
+defmodule SIP.Test.B2bua.InboundDialogStub do
+  @moduledoc """
+  Stands in for a B2BUA's inbound-leg dialog: records the replies sent on it and
+  forwards them to the test process as `{:replied, code, reason, req, fields}`.
+
+  Shared by the B2BUA suites. A stub rather than a real dialog because both legs
+  would otherwise land on the *same* UDP mockup instance — every `unittest` URI
+  resolves to one destination — which would tangle the two directions.
+  """
+  use GenServer
+
+  def start_link(test_pid), do: GenServer.start_link(__MODULE__, test_pid)
+
+  @impl true
+  def init(test_pid), do: {:ok, test_pid}
+
+  @impl true
+  def handle_call({:replyreq, req, code, reason, fields}, _from, test_pid) do
+    send(test_pid, {:replied, code, reason, req, fields})
+    {:reply, :ok, test_pid}
+  end
+end
+
 ExUnit.start(exclude: [:skip])

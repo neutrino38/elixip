@@ -1,25 +1,3 @@
-defmodule SIP.Test.B2bua.InboundDialogStub do
-  @moduledoc """
-  Stands in for the inbound leg's dialog process: records the replies the B2BUA
-  sends on it and forwards them to the test. Using a stub rather than a real
-  inbound dialog keeps this suite on what it is about — leg bookkeeping and
-  request↔response correlation — and leaves the end-to-end crossing to the
-  integration test.
-  """
-  use GenServer
-
-  def start_link(test_pid), do: GenServer.start_link(__MODULE__, test_pid)
-
-  @impl true
-  def init(test_pid), do: {:ok, test_pid}
-
-  @impl true
-  def handle_call({:replyreq, req, code, reason, fields}, _from, test_pid) do
-    send(test_pid, {:replied, code, reason, req, fields})
-    {:reply, :ok, test_pid}
-  end
-end
-
 defmodule SIP.Test.B2bua.Session do
   @moduledoc """
   The B2BUA session layer (`SIP.Session.B2bua`, design docs/design/b2bua_module.md
@@ -33,7 +11,6 @@ defmodule SIP.Test.B2bua.Session do
 
   alias SIP.B2bua.{Leg, Peer, Pending}
   alias SIP.Session.B2bua
-  alias SIP.Test.Transport.UDPMockup
 
   setup_all do
     :ok = SIP.Transac.start()
@@ -60,16 +37,13 @@ defmodule SIP.Test.B2bua.Session do
   # A peer routed through the mockup transport (the `unittest` marker wins over
   # DNS and the proxy config in SIP.Transport.Selector).
   defp mockup_peer(opts \\ []) do
-    uri =
-      %SIP.Uri{scheme: "sip:", userpart: "callee", domain: "example.com", port: 5060}
-      |> SIP.Uri.set_uri_param("unittest", "1")
-
-    struct(%Peer{uris: [uri]}, opts)
+    struct(%Peer{uris: [peer_target()]}, opts)
   end
 
-  defp transport_pid(%Leg{} = leg) do
-    tp = SIP.Transport.Selector.select_transport(leg.target)
-    tp.tp_pid
+  # The one target every peer in this suite points at (the mockup instance).
+  defp peer_target do
+    %SIP.Uri{scheme: "sip:", userpart: "callee", domain: "example.com", port: 5060}
+    |> SIP.Uri.set_uri_param("unittest", "1")
   end
 
   describe "current-event bookkeeping" do
@@ -281,21 +255,23 @@ defmodule SIP.Test.B2bua.Session do
     end
 
     test "an established call is hung up with a BYE", %{ctx: ctx} do
+      # Be the mockup's "test app" before anything goes out: it then tells us
+      # when it holds the INVITE, and answering before that would race it.
+      tp_pid = SIP.Transport.Selector.select_transport(peer_target()).tp_pid
+      :ok = GenServer.call(tp_pid, :settestapp)
+
       ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), false)
       leg = B2bua.outbound_leg(ctx)
       dlg = leg.dialogpid
+      assert_receive {:invite_sent, _fwd}, 5_000
 
       # Let the callee actually answer: only a 2xx makes this a session (it is
       # what teaches the dialog its remote tag and target). The scenario would
-      # relay that 200 and drop the correlation; do both here.
-      # The mockup reports the BYE it receives to its "test app": be that.
-      tp_pid = transport_pid(leg)
-      :ok = GenServer.call(tp_pid, :settestapp)
-
-      # The mockup rings for a while before answering (100 → 180 → 200 OK, the
-      # last one 4 s after the 180), hence the generous wait.
-      UDPMockup.simulate_successful_answer(tp_pid)
-      assert_receive {:outbound, {200, _rsp, _tid, ^dlg}}, 8_000
+      # relay that 200 and drop the correlation; do both here. Driven one
+      # response at a time rather than through a canned scenario, so this does
+      # not depend on what the shared mockup instance was last used for.
+      GenServer.cast(tp_pid, {:simulate, 200, 100})
+      assert_receive {:outbound, {200, _rsp, _tid, ^dlg}}, 5_000
       ctx = B2bua.drop_pending(ctx, leg.initial_trans)
 
       ctx = B2bua.release_legs(ctx)
