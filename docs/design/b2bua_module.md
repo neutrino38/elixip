@@ -99,8 +99,9 @@ Creates the outbound dialog and attaches it to the scenario. Rebinds
   - `false` — pure signaling B2BUA, SDP relayed verbatim;
   - `{:mediaserver, media_opts}` — terminate media on both legs on a Medooze
     server (relay + transcoding);
-  - `{:rtpengine, opts}` — future: drive an
-    [rtpengine](https://github.com/sipwise/rtpengine) for media relay.
+  - `{:rtpengine, opts}` — reserved, **not planned here**: driving an
+    [rtpengine](https://github.com/sipwise/rtpengine) belongs to the
+    `borderline` work (§7).
 
 What it does, in order:
 
@@ -537,13 +538,17 @@ grow leg-qualified handles. Plan:
 `media_opts` carries the usual `:webrtc` / `:media` options per leg
 (`inbound: [webrtc: :yes], outbound: [webrtc: :no]` — the gateway case).
 
-### `{:rtpengine, opts}` — future
+### `{:rtpengine, opts}` — **deferred to the borderline work** (decided 2026-08-09)
 
 rtpengine keeps the media path in kernel space and only rewrites SDP
-(ng-protocol over UDP). Fits the same seam as `forwarded_reply_fields`: offer
-and answer bodies are passed through rtpengine instead of verbatim. Out of
-scope for now; the mode atom is reserved so scenarios written today don't
-need to change shape later.
+(ng-protocol over UDP). It fits the same seam as `forwarded_reply_fields` —
+offer and answer bodies pass through rtpengine instead of verbatim — but it
+will not be built here: it belongs to the `borderline` product work, and this
+module has no need of it that `{:mediaserver, …}` does not already cover.
+
+The mode atom stays reserved, so a scenario that one day asks for it does not
+change shape; `b2bua_forward/3` refuses it today with
+`{:b2bua, :media_mode_not_implemented, …}` rather than pretending.
 
 ## 8. Lifecycle and automatic teardown
 
@@ -744,7 +749,7 @@ SRV failover depend on `fork: :serial` rather than being unconditional as §3.1
 first put it; `:none` then means one attempt and no failover at all, which is
 the simpler contract.
 | **P3** | `{:mediaserver, …}` mode: leg-qualified media handles, `bridge/2` callback in `MediaServer.Behaviour` + Mendooze implementation, offer/answer choreography |
-| **P4** | parallel forking (branch sets in the leg dialog, §3.3: winner adoption, late-2xx ACK+BYE, best-response aggregation; q-group semantics of §3.2), `{:rtpengine, …}` mode, trunk processes (`trunk_pid`); multi-leg generalization only if attended transfer / 3pcc demands it |
+| **P4** | parallel forking (branch sets in the leg dialog, §3.3: winner adoption, late-2xx ACK+BYE, best-response aggregation; q-group semantics of §3.2), trunk processes (`trunk_pid`); multi-leg generalization only if attended transfer / 3pcc demands it. `{:rtpengine, …}` is **out of scope** — deferred to the borderline work |
 
 ## 12. Open questions
 
