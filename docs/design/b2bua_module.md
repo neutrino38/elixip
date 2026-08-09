@@ -22,6 +22,11 @@ Guiding principles (unchanged from the first draft):
 This is **not** a kelixip module: it is part of the shared library
 (`apps/elixip2`), usable from `elixipp` and from kelixip scripts alike.
 
+A layer above these primitives — `Kelixip.B2bua.call/1` and `queue/1`, the
+Asterisk verbs, with the SIP trunks and queue agents they would name — is
+sketched in [kelixip-b2bua.md](kelixip-b2bua.md) and is **out of scope here**.
+It is written down so that what is built now does not foreclose it.
+
 ## 1. Placement and naming
 
 The code goes in the **framework**, next to the other session mixins
@@ -594,6 +599,31 @@ not refused — so a fourth event follows it:
 which is what a "you are in position N" announcement, or a hold-time metric,
 hangs off.
 
+#### What a queued caller hears
+
+The two media modes make the same queue sound different, and the difference is
+entirely the scenario's to write:
+
+**Without a media server**, nothing can be played — so the caller is kept on
+`180 Ringing` and hears its own local ringback. Queue position travels in a
+header on that 180, which needs no new primitive:
+
+```elixir
+{:outbound, {:serial_waiting, _ms, _at}} ->
+  b2bua_reply(last_uas_req(), 180, "Ringing", ["X-Queue-Position": position()])
+  goto loop, "still queued"
+```
+
+**With a media server**, the caller is answered with `183 Session Progress`
+carrying the media server's SDP, and a file is played to them — music on hold,
+announcements. The 183 is safe here for the reason §7.4 gives: the answer comes
+from the media server and never changes, whichever agent eventually takes the
+call.
+
+And in that mode outbound 18x are **ignored outright**. The caller is listening
+to the media server; an agent's ringback has no way to reach them and no reason
+to.
+
 ## 4. Relaying in-dialog requests: `b2bua_forward/1`
 
 ```elixir
@@ -764,6 +794,94 @@ module has no need of it that `{:mediaserver, …}` does not already cover.
 The mode atom stays reserved, so a scenario that one day asks for it does not
 change shape; `b2bua_forward/3` refuses it today with
 `{:b2bua, :media_mode_not_implemented, …}` rather than pretending.
+
+### 7.4 Early media (a 18x carrying SDP) and forking
+
+A target answers `183 Session Progress` with SDP while the hunt is running.
+Does the B2BUA relay it? **Without a media server the answer is dictated by
+offer/answer, not by taste.**
+
+Follow the bodies:
+
+1. the caller's INVITE carries offer **O**; we relay O to target A;
+2. A answers 183 with **S_a**. Relaying it hands the caller its **answer** —
+   offer/answer for that dialog is now complete (RFC 3261 §13.2.1; RFC 6337
+   §3.1.1 for the unreliable-provisional case);
+3. A fails, we try B, B answers 200 with **S_b**;
+4. relaying S_b is a *second, different answer to the same offer*, with no new
+   offer in between. That is not allowed, and user agents diverge on what they
+   do with it — some keep sending to A, which is a media black hole.
+
+So relaying early-media SDP is not a preference, it is a **foreclosure**:
+
+| what the scenario relays | effect on the hunt |
+|---|---|
+| 180, or any 18x with **no** SDP | nothing — the hunt stays open |
+| a 18x **with** SDP | pins the leg to that target; the hunt is over |
+
+Once pinned, only that target may answer. If it then fails busy or times out,
+the call fails — there is no going back to 180 and no re-pointing the caller's
+media, because both need an offer/answer exchange the early dialog has already
+spent. Answering the question in the design brief directly: **neither** falling
+back to 180 nor sending a second 183 with the next target's SDP is safe; the
+choice has to be made *before* relaying the first one.
+
+Which makes the second 183 a non-question. It can only arrive from a branch the
+pinning already cancelled, so the session layer **drops it** and the scenario
+never sees it. (A scenario that insists can ask for them with
+`b2bua_forward_reply(resp, on_pinned: :surface)`.)
+
+A scenario that wants to keep hunting relays progress **without** the body —
+`b2bua_forward_reply(resp, strip_sdp: true)` — or ignores the outbound 18x
+entirely and answers 180 itself with `b2bua_reply/3..4`. That is what the
+reference scenarios do, and it is the interop-safe default.
+
+#### With a media server the problem dissolves
+
+The design brief reads this case as worse. It is the opposite, and the reason is
+worth stating: with `{:mediaserver, …}` the caller's answer comes from **the
+media server**, not from the callee. It is generated once, when the inbound leg
+is answered, and it does not change as targets change — only the *outbound*
+connection is re-pointed (re-bridged). The inbound offer/answer completes
+exactly once and is never re-answered.
+
+So the sharp statement is: **early media and forking together require a media
+server.** Without one they are mutually exclusive, per the table above.
+
+In that mode an outbound 183 is a **media** event, not something to relay: the
+media server decides whether the callee's early media is bridged through to the
+caller. The scenario relays no SDP, and §3.6's progress events are what it
+watches instead.
+
+### 7.5 Offer profiles and fallback (the WebRTC gateway)
+
+Only meaningful with `{:mediaserver, …}`: choosing a profile means *generating*
+an offer, and without a media server the offer is the caller's, relayed
+verbatim — an AVP caller cannot be turned into a WebRTC one.
+
+```elixir
+%SIP.B2bua.Peer{profile: :webrtc_if_supported}
+```
+
+| profile | offered | on 488 |
+|---|---|---|
+| `:webrtc_required` | DTLS-SRTP / RTP-SAVPF, ICE, rtcp-mux | the attempt failed |
+| `:webrtc_if_supported` | same | **fall back** one rung |
+| `:avpf_required` | RTP/AVPF | the attempt failed |
+| `:avpf_if_supported` | same | **fall back** one rung |
+| `:avp` | plain RTP/AVP | the attempt failed (nothing below) |
+
+The ladder is `webrtc → avpf → avp`, and it applies to serial and parallel
+forking alike. Two consequences worth naming:
+
+- **A fallback is a retry of the same target, not the next one.** It is another
+  branch (§3.3) toward the same URI carrying a different body, so
+  `fork_branch/2` grows an option for the replacement offer. The hunt only moves
+  to the next target once the ladder bottoms out.
+- **488 must not reach `retry_on`** while a rung is left: in `_if_supported`
+  mode it means "offer me something else", not "this device refuses". Which
+  codes trigger a fallback is configurable for the same reason `retry_on` is —
+  `415` and `606` carry the same meaning from some equipment.
 
 ## 8. Lifecycle and automatic teardown
 
@@ -967,7 +1085,29 @@ the simpler contract.
 | **P2c** | dynamic targets (§3.4): the `SIP.B2bua.TargetProvider` behaviour, `%Peer{provider:}`, `b2bua_try_next/0` + the per-attempt ring timeout; `b2bua_cancel_forward/0` (§3.5) with 487 out of the default retry-on list; hunt progress events (§3.6, `notify_progress`) — independently useful and small enough to land first. Extends the SERIAL hunt, so it needs nothing from P4; a complete call queue additionally needs P3 for music on hold |
 | **P4** | parallel forking (branch sets in the leg dialog, §3.3: winner adoption, late-2xx ACK+BYE, best-response aggregation; q-group semantics of §3.2), trunk processes (`trunk_pid`); multi-leg generalization only if attended transfer / 3pcc demands it. `{:rtpengine, …}` is **out of scope** — deferred to the borderline work |
 
-## 12. Open questions
+## 12. Documentation plan
+
+Documenting every primitive in detail would be effort spent in the wrong place:
+the primitives are small and the difficulty is never in one of them, it is in
+how a handful of them compose into a working call. So: a **sober** paragraph per
+primitive — what it does, what it costs, what it forecloses — and the weight of
+the documentation carried by **reference scenarios, one per use case**, which
+are executable and therefore cannot rot silently.
+
+| # | Use case | Variants |
+|---|---|---|
+| a | Call to another SIP server named by its URI | no media server / media server / WebRTC gateway (§7.5) |
+| b | Call to a SIP server with failover | no media server / media server |
+| c | Call to a UA registered in kelixip, through the registrar (§3.2) | no media server / media server |
+| d | ACD queue (§3.4, §3.6) | no media server (180 + position header) / media server (183 + music on hold) |
+
+Each ships as a runnable scenario with its own test, the way
+`scenarios/b2bua_basic.exs` and `apps/kelixip/scripts/b2bua.exs` already do. The
+per-use-case split is what makes the media-mode difference visible: (a) and (c)
+without a media server are ten lines and relay SDP verbatim; the same cases with
+one are a different scenario, not a flag.
+
+## 13. Open questions
 
 1. **Tag shape** — nested `{:outbound, {…}}` is specified here (uniform, tags
    `:dialog_terminated` too); the flat 5-tuple `{:outbound, 200, resp, tpid,
