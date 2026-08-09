@@ -529,6 +529,71 @@ state proceeding do
     …
 ```
 
+### 3.6 Watching a hunt: progress events
+
+A hunt is **silent**. `b2bua_forward_reply/1` swallows the refusal, arms the next
+target and says nothing; all a scenario can ask afterwards is the boolean
+`b2bua_hunting?/0`. Which agent was tried, when, and how it went never reaches
+it — so it can write no CDR, feed no wallboard, and make no decision that
+depends on the attempt rather than on the call.
+
+A peer may therefore ask to be told. Opt-in, because most scenarios do not care
+and because a scenario with a catch-all `{:outbound, evt}` clause should not
+start relaying framework bookkeeping:
+
+```elixir
+%SIP.B2bua.Peer{provider: queue_pid, fork: :serial, notify_progress: true}
+```
+
+The events arrive on the leg they concern, wrapped in its tag like everything
+else it produces, so they are matched exactly where the rest of the outbound
+traffic is:
+
+```elixir
+{:outbound, {:serial_attempting,    uri, at}}
+{:outbound, {:serial_not_reachable, uri, cause, at}}
+{:outbound, {:serial_connected,     uri, at}}
+{:outbound, {:serial_exhausted,     at}}
+```
+
+`at` is a `DateTime` in UTC — wall clock, because what these feed is a record of
+when things happened. (A duration measured from them inherits the clock's jumps;
+somewhere precise enough to care, take it from `System.monotonic_time/0`
+instead.)
+
+They cannot collide with the traffic events: those are 4-tuples whose first
+element is a status code or a method, these are 3- and 4-tuples led by a
+`:serial_*` atom.
+
+#### Why `:serial_not_reachable` carries a cause
+
+The other two are as sketched; this one gains a field, and it earns it. "The
+attempt failed" is not one thing, and a queue acts differently on each:
+
+| cause | what it says | what a queue does with it |
+|---|---|---|
+| `486` | the agent is there, on another call | leave them in rotation, try again soon |
+| `480`, `603` | the agent declined | penalise, or log them out |
+| `408`, `:timeout` | rang out — nobody picked up | usually a real agent who stepped away |
+| `:transport_error` | the phone is not on the network | log the agent out; ringing them again is wasted |
+
+Collapsing all of that into "not reachable" throws away the distinction the
+operational decision rests on. `cause` is a SIP status code, or `:timeout` /
+`:transport_error` when no response ever came.
+
+#### With a provider
+
+`{:serial_exhausted, at}` is the end of a static list. A provider's `{:wait, ms}`
+(§3.4) is a different state and deserves its own note — the caller is queued,
+not refused — so a fourth event follows it:
+
+```elixir
+{:outbound, {:serial_waiting, ms, at}}
+```
+
+which is what a "you are in position N" announcement, or a hold-time metric,
+hangs off.
+
 ## 4. Relaying in-dialog requests: `b2bua_forward/1`
 
 ```elixir
@@ -899,7 +964,7 @@ SRV failover depend on `fork: :serial` rather than being unconditional as §3.1
 first put it; `:none` then means one attempt and no failover at all, which is
 the simpler contract.
 | **P3** | `{:mediaserver, …}` mode: leg-qualified media handles, `bridge/2` callback in `MediaServer.Behaviour` + Mendooze implementation, offer/answer choreography |
-| **P2c** | dynamic targets (§3.4): the `SIP.B2bua.TargetProvider` behaviour, `%Peer{provider:}`, `b2bua_try_next/0` + the per-attempt ring timeout, and `b2bua_cancel_forward/0` (§3.5) with 487 out of the default retry-on list. Extends the SERIAL hunt, so it needs nothing from P4; a complete call queue additionally needs P3 for music on hold |
+| **P2c** | dynamic targets (§3.4): the `SIP.B2bua.TargetProvider` behaviour, `%Peer{provider:}`, `b2bua_try_next/0` + the per-attempt ring timeout; `b2bua_cancel_forward/0` (§3.5) with 487 out of the default retry-on list; hunt progress events (§3.6, `notify_progress`) — independently useful and small enough to land first. Extends the SERIAL hunt, so it needs nothing from P4; a complete call queue additionally needs P3 for music on hold |
 | **P4** | parallel forking (branch sets in the leg dialog, §3.3: winner adoption, late-2xx ACK+BYE, best-response aggregation; q-group semantics of §3.2), trunk processes (`trunk_pid`); multi-leg generalization only if attended transfer / 3pcc demands it. `{:rtpengine, …}` is **out of scope** — deferred to the borderline work |
 
 ## 12. Open questions
