@@ -970,7 +970,34 @@ defmodule MediaServer.Mendooze.Conn do
       send(state.event_sink, {:ms_event, self(), :media_send_only})
     end
 
-    %{state | recv_medias: r}
+    %{state | recv_medias: r} |> replay_connectivity()
+  end
+
+  # Media can arrive BEFORE we know which media to expect.
+  #
+  # The receive plane opens early — `EndpointStartReceiving` is what allocates
+  # the port we then advertise — so the far end can be sending to us well before
+  # its SDP reaches us. As a UAC that is the ordinary case, not a corner one: we
+  # offer, the callee starts sending, and its answer arrives afterwards. Early
+  # media makes the gap wider still.
+  #
+  # `maybe_notify_ice_connected/3` needs R, and R is only learned here. Each raw
+  # `{:media_connected, media}` was therefore evaluated against an empty R,
+  # decided "not ready", and thrown away — and since the server re-arms that
+  # event only on the next `StartReceiving`, `:ice_connected` never came at all.
+  # A UAC scenario waiting on it waited for ever; against a real server that is
+  # exactly what happened, on every offering leg.
+  #
+  # `connected` has been accumulating those medias all along, so the fix is to
+  # re-run the derivation over them the moment R becomes known. Rule 2 still
+  # holds: with video expected, an audio packet that arrived early does not
+  # release the milestone — we go on waiting for video's own event.
+  defp replay_connectivity(%{ice_notified: true} = state), do: state
+
+  defp replay_connectivity(state) do
+    Enum.reduce(state.connected, state, fn media, acc ->
+      maybe_notify_ice_connected(acc, media, handle_of(acc.leg))
+    end)
   end
 
   defp with_player(state, tag, fun) do

@@ -437,6 +437,48 @@ defmodule Mendooze.ConnTest do
     assert_receive {:ms_event, ^conn, :media_lost}, 1_000
   end
 
+  # The receive plane opens before the far end's SDP arrives — StartReceiving is
+  # what allocates the port we advertise — so as a UAC, media reaching us BEFORE
+  # the answer is the ordinary case rather than a corner one. R is only learned
+  # from that answer, so the raw event was evaluated against an empty R, decided
+  # "not ready", and dropped; the server re-arms it only on the next
+  # StartReceiving, so :ice_connected never came at all.
+  test "media that arrives before the answer still releases :ice_connected" do
+    %{server: server, stream: stream} = start_media_server()
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio)
+    assert_receive {:jsr309_call, "MediaSessionCreate", [sess_tag, _q]}, 1_000
+    {:ok, _offer} = Mendooze.get_local_offer(conn)
+
+    # The callee is already sending — its answer has not reached us yet.
+    connected(stream, sess_tag, 0)
+    assert_receive {:ms_event, ^conn, {:media_connected, :audio}}, 1_000
+    refute_receive {:ms_event, ^conn, :ice_connected}, 200
+
+    # …and now it does. What already arrived counts.
+    assert :ok = Mendooze.set_remote_answer(conn, remote_answer())
+    assert_receive {:ms_event, ^conn, :ice_connected}, 1_000
+  end
+
+  # Rule 2 survives the replay: an audio packet that arrived early must not
+  # release a leg that negotiated video — that is the whole reason rule 2 exists
+  # (the opening keyframe would go to an unlatched video leg).
+  test "media that arrives early does not release a leg that expects video" do
+    %{server: server, stream: stream} = start_media_server()
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio_video)
+    assert_receive {:jsr309_call, "MediaSessionCreate", [sess_tag, _q]}, 1_000
+
+    connected(stream, sess_tag, 0)
+    assert_receive {:ms_event, ^conn, {:media_connected, :audio}}, 1_000
+
+    assert {:ok, _answer} = Mendooze.set_remote_offer(conn, av_offer())
+    refute_receive {:ms_event, ^conn, :ice_connected}, 200
+
+    connected(stream, sess_tag, 1)
+    assert_receive {:ms_event, ^conn, :ice_connected}, 1_000
+  end
+
   # Rule 1: R is empty — no connectivity event can ever arrive, so the
   # application is told rather than left waiting.
   test "a peer that transmits on nothing gets :media_send_only and no :ice_connected" do
