@@ -59,15 +59,29 @@ R2/R4/R5 are fully testable on `MediaServer.Mockup`; R3 needs a live Medooze
 (`MENDOOZE_URL`). So the framework lands first and the adapter second — the
 opposite of the order the design lists them in.
 
-| | What | Testable in CI |
-|---|---|---|
-| **R1** | leg-qualified media handles in `SIP.Session.Media` | yes |
-| **R2** | `bridge/3` + `unbridge/2` in the behaviour, `MediaServer.Mockup` implementation | yes |
-| **R2b** | `{:media_timeout, media}` and the derived `:media_lost` | yes |
-| **R4** | the offer/answer choreography in `SIP.Session.B2bua`, the implicit bridge (R4.1) and the failure semantics (R4.2) | yes |
-| **R5** | `scenarios/b2bua_media.exs` + its own test | yes |
-| **R3** | `MediaServer.Mendooze.Conn`: two endpoints, cross-leg negotiation, the bridge | E2E, gated |
-| **R6** | §14.6 — the media server as a failure domain | partly |
+| | What | Testable in CI | |
+|---|---|---|---|
+| **R1** | leg-qualified media handles in `SIP.Session.Media` | yes | ✅ |
+| **R2** | `bridge/3` + `unbridge/2` in the behaviour, `MediaServer.Mockup` implementation | yes | ✅ |
+| **R2b** | `{:media_timeout, media}` and the derived `:media_lost` | yes | ✅ |
+| **R4** | the offer/answer choreography in `SIP.Session.B2bua`, the implicit bridge (R4.1) and the failure semantics (R4.2) | yes | ✅ |
+| **R5** | `scenarios/b2bua_media.exs` + its own test | yes | ✅ |
+| **R3** | `MediaServer.Mendooze.Conn`: two endpoints, cross-leg negotiation, the bridge | E2E, gated | |
+| **R6** | §14.6 — the media server as a failure domain | partly | scenario clauses ✅, framework default open |
+
+**State (2026-08-09): the framework half is done and green.** The media mode
+works end to end on `MediaServer.Mockup` — 105 tests across the B2BUA and media
+suites — and `MediaServer.Mendooze.bridge/3` refuses plainly until R3 gives it
+two endpoints in one session. What remains: R3, and the framework default of R6.
+
+Two things moved during the implementation and are worth knowing before reading
+the sections above:
+
+- the media failure reason is read through **`b2bua_media_error/0`**, not
+  `lasterr` (see R4.2);
+- `b2bua_media.exs` still relays every re-INVITE, because `b2bua_reoffer_kind/1`
+  (R4.1b) is not built. The table in R4.1b is the target, not the current
+  behaviour.
 
 ---
 
