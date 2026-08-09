@@ -81,14 +81,40 @@ the per-media policy decision and the close ordering are all covered. What still
 needs a real Medooze is only whether the server behaves as its documentation
 says.
 
-What remains:
+What remains: **`b2bua_reoffer_kind/1`** (§R4.1b), without which every re-offer
+crosses.
 
-- **the transcoder chain** (`Video|AudioTranscoderCreate` + the two attach pairs
-  + `…SetCodec`). Until it exists, `:avoid` with no common codec and `:force` in
-  every case return `{:transcoding_not_implemented, media}` rather than
-  attaching endpoints that would exchange codecs neither can decode. Which also
-  means **audio is not always transcoded** the way the Java gateway does it;
-- **`b2bua_reoffer_kind/1`** (§R4.1b), without which every re-offer crosses.
+### The transcoder chain (delivered 2026-08-10)
+
+`:avoid` with no common codec, and `:force` in every case, build a chain instead
+of refusing. Text stays a straight attach, as it must.
+
+The RPC surface was read from the **media server's own source** on dev71 rather
+than inferred from the Java client, and that mattered immediately: the client
+calls `AudioTranscoderDetach`, the server registers `AudioTranscoderDettach`.
+`VideoTranscoderSetCodec` is `(sessionId, transcoderId, codec, size, fps,
+bitrate, intraPeriod, props)` and the size constants are `config.h`'s
+(`CIF = 1`).
+
+Two chains per media, because a transcoder is one-way, and both attach RPCs put
+the **sink first, source second** — exactly like `EndpointAttachToEndpoint`:
+
+```
+EndpointAttachTo<Kind>Transcoder(S, EP, TR)   →  EP ← TR
+<Kind>TranscoderAttachToEndpoint(S, TR, EP)   →  TR ← EP
+```
+
+so `la ← tr_a ← lb` feeds `la` with `lb`'s media re-encoded, and the codec set
+on `tr_a` is **la's**. That is what `:force` buys: each side served the codec it
+asked for whatever the other settled on — which is why `:force` now transcodes
+even when the two agree.
+
+Transcoders are **deleted**, not merely detached: one left behind survives every
+re-bridge for the life of the call.
+
+**Not forwarded yet**: the codec parameters (`profile-level-id`,
+`packetization-mode`). The props map is empty and the server picks its default —
+worth knowing before trusting this with a picky H.264 endpoint.
 
 ### The two-endpoint arrangement is confirmed (2026-08-09, dev71)
 
