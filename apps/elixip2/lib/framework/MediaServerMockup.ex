@@ -67,6 +67,17 @@ defmodule MediaServer.Mockup do
     end
   end
 
+  @doc """
+  Test hook: play the RTP inactivity watchdog firing for `media` on `conn`.
+
+  The mock has no watchdog of its own — it has no media to lose — but scenarios
+  react to loss, so the events have to be producible. `{:media_timeout, media}`
+  goes out at once, and `:media_lost` follows when every media the peer was
+  sending has timed out, derived exactly as the real adapter derives it.
+  """
+  @spec simulate_media_timeout(pid(), MediaServer.media()) :: :ok
+  def simulate_media_timeout(conn, media), do: GenServer.call(conn, {:media_timeout, media})
+
   @impl MediaServer.Behaviour
   def unbridge(a, b) do
     clear_bridge_peer(a)
@@ -189,7 +200,10 @@ defmodule MediaServer.Mockup.Conn do
     bridge_peer: nil,
     # media-connectivity state, mirroring the real adapter (§4)
     recv_medias: nil,
-    ice_notified: false
+    ice_notified: false,
+    # …and its mirror for loss (see simulate_media_timeout/2)
+    timed_out: MapSet.new(),
+    lost_notified: false
   ]
 
   @impl true
@@ -280,6 +294,26 @@ defmodule MediaServer.Mockup.Conn do
     {:reply, :ok, %{state | bridge_peer: peer}}
   end
 
+  # The watchdog firing for one media, and the derived loss when every media of
+  # R has fired — the same rule the real adapter applies, so a scenario clause
+  # rehearsed here is the one that will run in production.
+  def handle_call({:media_timeout, media}, _from, state) do
+    send(state.event_sink, {:ms_event, self(), {:media_timeout, media}})
+
+    state = %{state | timed_out: MapSet.put(state.timed_out, media)}
+    r = state.recv_medias || MapSet.new()
+
+    state =
+      if not state.lost_notified and MapSet.size(r) > 0 and MapSet.subset?(r, state.timed_out) do
+        send(state.event_sink, {:ms_event, self(), :media_lost})
+        %{state | lost_notified: true}
+      else
+        state
+      end
+
+    {:reply, :ok, state}
+  end
+
   # Media handed over by the other half of the bridge. It leaves through OUR
   # socket toward OUR peer — which is what makes the two directions independent,
   # and what a test asserting "it came out of the other leg" is really watching.
@@ -300,6 +334,13 @@ defmodule MediaServer.Mockup.Conn do
   @impl true
   def handle_info({:notify_media_connected, media}, state) do
     send(state.event_sink, {:ms_event, self(), {:media_connected, media}})
+
+    state = %{
+      state
+      | timed_out: MapSet.delete(state.timed_out, media),
+        lost_notified: false
+    }
+
     {:noreply, maybe_notify_ice_connected(state, media)}
   end
 

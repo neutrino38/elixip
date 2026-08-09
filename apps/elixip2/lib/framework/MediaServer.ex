@@ -83,6 +83,13 @@ defmodule MediaServer do
   negotiated media, so no connectivity event can ever arrive. It is emitted once
   the send plane is up for every media.
 
+  Loss is the same pair, mirrored. `{:media_timeout, media}` is the raw per-media
+  fact — the RTP inactivity watchdog fired for that one — and repeats, since the
+  server re-arms it. `:media_lost` is the derived milestone: **every** media of R
+  has gone silent, i.e. the peer has stopped sending rather than merely turned
+  something off. One dead media is a media problem; every dead media is a dead
+  call, and only the second is a reason to hang up.
+
   Neither the adapter nor the framework arms a timer: a peer that negotiates
   video and never sends any produces no `:ice_connected`. Bounding that wait is
   the scenario's job, with an `after` clause on the `on_events` block.
@@ -101,9 +108,14 @@ defmodule MediaServer do
           # failing call already returns — this is the async, scenario-capturable
           # signal.
           | {:media_error, reason :: term()}
-          # RTP inactivity watchdog fired: the peer stopped sending media
-          # (emitted by adapters with media-loss detection, e.g. Mendooze)
-          | :media_timeout
+          # RTP inactivity watchdog fired for ONE media: the peer stopped sending
+          # it (emitted by adapters with media-loss detection, e.g. Mendooze).
+          # Repeats — the server re-arms the watchdog on every StartReceiving.
+          | {:media_timeout, media :: media()}
+          # Every media of R has timed out: the peer stopped sending, full stop.
+          # The derived milestone, `:ice_connected`'s mirror — emitted at most
+          # once per loss episode, and re-armed when any media comes back.
+          | :media_lost
           | :closed
           # Player
           | :player_started
@@ -235,6 +247,8 @@ defmodule MediaServer do
         {:ms_event, conn, :ice_failed}
         {:ms_event, conn, {:ice_candidate, candidate :: String.t()}}
         {:ms_event, conn, {:media_error, reason :: term()}}
+        {:ms_event, conn, {:media_timeout, media :: media()}}
+        {:ms_event, conn, :media_lost}
         {:ms_event, conn, :closed}
 
         # Player

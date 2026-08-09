@@ -159,6 +159,12 @@ defmodule MediaServer.Mendooze.Conn do
       connected: MapSet.new(),
       recv_medias: nil,
       ice_notified: false,
+      # The mirror of `connected`, for loss: the medias whose RTP watchdog has
+      # fired. `:media_lost` is derived from it covering R, exactly as
+      # `:ice_connected` is derived from `connected` reaching it — see
+      # maybe_notify_media_lost/1.
+      timed_out: MapSet.new(),
+      lost_notified: false,
       # sub-resources: ref => %{...}; tags "p-<n>"/"r-<n>" route server events
       res_seq: 0,
       players: %{},
@@ -426,10 +432,22 @@ defmodule MediaServer.Mendooze.Conn do
     handle_server_event(event, state)
   end
 
+  # The RTP inactivity watchdog fired for ONE media. It carries which one: the
+  # bare `:media_timeout` this used to send threw that away, and a leg that has
+  # merely stopped its camera cannot then be told from one that has gone silent
+  # altogether — which for a B2BUA is the difference between a media problem and
+  # a dead call.
   defp handle_server_event({:endpoint_disconnected, _tag, _ep, media}, state) do
     Logger.warning(module: __MODULE__, session: state.sess_tag, message: "timeout on #{media}")
-    send(state.event_sink, {:ms_event, self(), :media_timeout})
-    {:noreply, state}
+    send(state.event_sink, {:ms_event, self(), {:media_timeout, media}})
+
+    state = %{
+      state
+      | timed_out: MapSet.put(state.timed_out, media),
+        connected: MapSet.delete(state.connected, media)
+    }
+
+    {:noreply, maybe_notify_media_lost(state)}
   end
 
   # First validated RTP/SRTP packet on one media (server EndpointConnectedEvent,
@@ -446,7 +464,17 @@ defmodule MediaServer.Mendooze.Conn do
 
     send(state.event_sink, {:ms_event, self(), {:media_connected, media}})
 
-    state = %{state | connected: MapSet.put(state.connected, media), status: :active}
+    # Media flowing again clears both the media's own timeout and the one-shot
+    # latch, so a second silence produces a second `:media_lost` rather than
+    # being swallowed by the first.
+    state = %{
+      state
+      | connected: MapSet.put(state.connected, media),
+        timed_out: MapSet.delete(state.timed_out, media),
+        lost_notified: false,
+        status: :active
+    }
+
     {:noreply, maybe_notify_ice_connected(state, media)}
   end
 
@@ -522,6 +550,35 @@ defmodule MediaServer.Mendooze.Conn do
     if ready? do
       send(state.event_sink, {:ms_event, self(), :ice_connected})
       %{state | ice_notified: true}
+    else
+      state
+    end
+  end
+
+  # `:media_lost` — the peer has stopped sending, full stop. Derived from
+  # `{:media_timeout, media}` the way `:ice_connected` is derived from
+  # `{:media_connected, media}`, and exact rather than heuristic for the same
+  # reason: the watchdog is armed on precisely the medias of R (`peer_sends?/1`
+  # at StartRTPTimeout time), so R being covered means every media that could
+  # have gone silent has.
+  #
+  # One dead media is a media problem — a camera switched off, a video codec the
+  # peer gave up on — and only every dead media is a dead call. A B2BUA hangs up
+  # on this one; it must not hang up on the other.
+  defp maybe_notify_media_lost(%{lost_notified: true} = state), do: state
+
+  defp maybe_notify_media_lost(state) do
+    r = state.recv_medias || MapSet.new()
+
+    if MapSet.size(r) > 0 and MapSet.subset?(r, state.timed_out) do
+      Logger.warning(
+        module: __MODULE__,
+        cnx_tag: state.sess_tag,
+        message: "every media the peer was sending has gone silent"
+      )
+
+      send(state.event_sink, {:ms_event, self(), :media_lost})
+      %{state | lost_notified: true}
     else
       state
     end

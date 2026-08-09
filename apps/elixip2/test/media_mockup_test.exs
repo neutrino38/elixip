@@ -248,4 +248,42 @@ defmodule MediaMockupTest do
     assert :ok = Mockup.set_remote_answer(uac, answer)
     assert_receive {:ms_event, ^uac, :ice_connected}, 1_000
   end
+
+  # The mock has no watchdog of its own, but scenarios react to loss, so the two
+  # events have to be producible here — with the SAME derivation the real adapter
+  # applies, or a clause rehearsed in CI would not be the clause that runs.
+  describe "media loss" do
+    test "one media of two is a media problem, both are a lost call" do
+      conn = start_conn(media: :audio_video, ice_delay_ms: 0)
+      {:ok, offer} = Mockup.get_local_offer(conn)
+
+      # A peer that transmits on both, so R = {audio, video}.
+      peer = start_conn(media: :audio_video, ice_delay_ms: 0)
+      {:ok, answer} = Mockup.set_remote_offer(peer, offer)
+      :ok = Mockup.set_remote_answer(conn, answer)
+
+      :ok = Mockup.simulate_media_timeout(conn, :video)
+      assert_receive {:ms_event, ^conn, {:media_timeout, :video}}
+      refute_receive {:ms_event, ^conn, :media_lost}, 200
+
+      :ok = Mockup.simulate_media_timeout(conn, :audio)
+      assert_receive {:ms_event, ^conn, {:media_timeout, :audio}}
+      assert_receive {:ms_event, ^conn, :media_lost}
+    end
+
+    test ":media_lost is emitted once per loss episode" do
+      conn = start_conn(media: :audio, ice_delay_ms: 0)
+      {:ok, offer} = Mockup.get_local_offer(conn)
+      peer = start_conn(media: :audio, ice_delay_ms: 0)
+      {:ok, answer} = Mockup.set_remote_offer(peer, offer)
+      :ok = Mockup.set_remote_answer(conn, answer)
+
+      :ok = Mockup.simulate_media_timeout(conn, :audio)
+      assert_receive {:ms_event, ^conn, :media_lost}
+
+      :ok = Mockup.simulate_media_timeout(conn, :audio)
+      assert_receive {:ms_event, ^conn, {:media_timeout, :audio}}
+      refute_receive {:ms_event, ^conn, :media_lost}, 200
+    end
+  end
 end

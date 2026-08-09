@@ -185,6 +185,56 @@ defmodule Mendooze.ConnTest do
     assert_receive {:ms_event, ^conn, :ice_connected}
   end
 
+  # ── Media loss, the mirror of the above (P3 R2b) ────────────────────────────
+
+  defp timed_out(stream, sess_tag, media),
+    do: send(stream, {:chunk, Jsr309FakeServer.event_frame([6, sess_tag, 4, media, 0])})
+
+  # The distinction the bare `:media_timeout` could not make, and the one a
+  # B2BUA hangs up on: a peer that stopped its camera is still on the call.
+  test "one media going silent is reported as itself and is not a lost call" do
+    %{server: server, stream: stream} = start_media_server()
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio_video)
+    assert_receive {:jsr309_call, "MediaSessionCreate", [sess_tag, _q]}
+    assert {:ok, _answer} = Mendooze.set_remote_offer(conn, av_offer())
+
+    timed_out(stream, sess_tag, 1)
+    assert_receive {:ms_event, ^conn, {:media_timeout, :video}}, 1_000
+    refute_receive {:ms_event, ^conn, :media_lost}, 200
+
+    # …and the second one completes R, which is a peer that has stopped sending.
+    timed_out(stream, sess_tag, 0)
+    assert_receive {:ms_event, ^conn, {:media_timeout, :audio}}, 1_000
+    assert_receive {:ms_event, ^conn, :media_lost}, 1_000
+  end
+
+  test ":media_lost is emitted once, and re-armed by media coming back" do
+    %{server: server, stream: stream} = start_media_server()
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio)
+    assert_receive {:jsr309_call, "MediaSessionCreate", [sess_tag, _q]}
+    {:ok, _offer} = Mendooze.get_local_offer(conn)
+    assert :ok = Mendooze.set_remote_answer(conn, remote_answer())
+
+    timed_out(stream, sess_tag, 0)
+    assert_receive {:ms_event, ^conn, :media_lost}, 1_000
+
+    # The server re-arms its watchdog on every StartReceiving, so the raw event
+    # repeats; the milestone must not.
+    timed_out(stream, sess_tag, 0)
+    assert_receive {:ms_event, ^conn, {:media_timeout, :audio}}, 1_000
+    refute_receive {:ms_event, ^conn, :media_lost}, 200
+
+    # Media flowing again clears the latch: a second silence is a second loss,
+    # not a repeat of the first one.
+    connected(stream, sess_tag, 0)
+    assert_receive {:ms_event, ^conn, {:media_connected, :audio}}, 1_000
+
+    timed_out(stream, sess_tag, 0)
+    assert_receive {:ms_event, ^conn, :media_lost}, 1_000
+  end
+
   # Rule 1: R is empty — no connectivity event can ever arrive, so the
   # application is told rather than left waiting.
   test "a peer that transmits on nothing gets :media_send_only and no :ice_connected" do
@@ -795,7 +845,7 @@ defmodule Mendooze.ConnTest do
     assert :ok = Mendooze.close_peer_connection(conn)
   end
 
-  test "an RTP timeout event surfaces as :media_timeout on the event sink" do
+  test "an RTP timeout event surfaces as {:media_timeout, media} on the event sink" do
     %{server: server, stream: stream} = start_media_server()
 
     {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio)
@@ -805,7 +855,9 @@ defmodule Mendooze.ConnTest do
 
     send(stream, {:chunk, Jsr309FakeServer.event_frame([6, sess_tag, 4, 0, 0])})
 
-    assert_receive {:ms_event, ^conn, :media_timeout}, 1_000
+    # Which media went silent, not merely that something did: a leg that turned
+    # its camera off must be distinguishable from one that has gone quiet.
+    assert_receive {:ms_event, ^conn, {:media_timeout, :audio}}, 1_000
   end
 
   test "an external FIR request triggers EndpointRequestUpdate" do
