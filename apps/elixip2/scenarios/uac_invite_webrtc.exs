@@ -100,6 +100,11 @@ defmodule UAC.InviteWebRTC do
       # the timeout.
       {:ms_event, _conn, {:media_error, reason}} ->
         goto(no_media_hangup, "media negotiation failed: #{inspect(reason)}")
+
+      # Not a negotiation failure: the server itself is gone, so there is nothing
+      # to renegotiate with. Same destination, and for a stronger reason.
+      {:ms_event, _server, :server_disconnected} ->
+        goto(no_media_hangup, "media server disconnected")
     after
       30_000 -> goto(no_media_hangup, "no media connectivity after 30s")
     end
@@ -123,11 +128,22 @@ defmodule UAC.InviteWebRTC do
       {:BYE, req, _trans_pid, _dialog_pid} ->
         reply_request(req, 200, "OK")
         scenario_success("BYE")
+
+      # The media plane died under an established call: hang up rather than hold
+      # a silent call open. `:server_disconnected` is delivered to us but the
+      # framework acts on none of it (design docs/design/b2bua_module.md §14.6),
+      # so every media scenario owes this clause.
+      {:ms_event, _server, :server_disconnected} ->
+        goto(hangup_call, "media server disconnected")
     end
   end
 
   # -------------------------------------------------------------------------------
   state hangup_call do
+    # Before the BYE, and with the defensive helper rather than media_stop/0: it
+    # skips dead handles and swallows their errors, where media_stop/0 would call
+    # a server that may be the very thing that died.
+    media_cleanup_ressources()
     send_BYE()
 
     on_events do
@@ -138,6 +154,7 @@ defmodule UAC.InviteWebRTC do
   end
   # -------------------------------------------------------------------------------
   state no_media_hangup do
+    media_cleanup_ressources()
     send_BYE()
     on_events do
       {200, _bye_rsp, _trans_pid, _dialog_pid} -> scenario_failure("rcv_media timed out")

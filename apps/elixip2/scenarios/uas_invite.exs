@@ -70,6 +70,16 @@ defmodule UAS.InviteExample do
       {:ms_event, _recorder, :recorder_started} ->
         goto loop, "recorder started"
 
+      # The media plane went away under an established call: the recording is
+      # over and there is nothing left to carry the call, so hang up rather than
+      # hold a silent one open. `:server_disconnected` is delivered to us but
+      # acted upon by nothing in the framework (design
+      # docs/design/b2bua_module.md §14.6) — every media scenario owes this
+      # clause, and a UAS more than most: it is the side left holding the call.
+      {:ms_event, _server, :server_disconnected} ->
+        send_BYE()
+        goto hanging_up, "media server disconnected"
+
       # In-dialog UPDATE.
       {:UPDATE, _req, _trans, _dlg} ->
         reply_invite_with_sdp(200, [media: :tc])
@@ -107,7 +117,11 @@ defmodule UAS.InviteExample do
   end
 
   state hanging_up do
-    media_stop();
+    # media_cleanup_ressources/0, not media_stop/0: this state is now also reached
+    # WITH the media server gone, and only the former skips dead handles and
+    # swallows their errors. It also releases the peer connection and the server
+    # handle, which media_stop/0 leaves behind.
+    media_cleanup_ressources();
     on_events do
       {200, _bye_rsp, _trans_pid, _dialog_pid} -> scenario_success("Clean shutdown")
     after

@@ -193,6 +193,18 @@ defmodule Kelix.Mcu.Call do
         send_BYE()
         goto(hanging_up, "mcu lost")
 
+      # The same fact, reported by the other route. The module relays
+      # :server_disconnected because it watches the server on behalf of every
+      # leg; this one is what our OWN media connection reports — media_connect/0
+      # makes this process the event sink, so both reach us and neither is
+      # guaranteed to be first. Whichever arrives tears the call down; the other
+      # then lands in a state that ignores it.
+      {:ms_event, _server, :server_disconnected} ->
+        media_cleanup_ressources()
+        leave(:mcu_lost)
+        send_BYE()
+        goto(hanging_up, "media server disconnected")
+
       # The mixer needs a fresh intra-frame from this leg (a new tile started, or a
       # decoder lost sync): ask for one the way RFC 5168 has it (§6.4).
       {:mcu_event, :fpu_requested} ->
@@ -294,6 +306,18 @@ defmodule Kelix.Mcu.Call do
         leave(:mcu_lost)
         send_BYE()
         goto(hanging_up, "mcu lost")
+
+      # The same fact, reported by the other route. The module relays
+      # :server_disconnected because it watches the server on behalf of every
+      # leg; this one is what our OWN media connection reports — media_connect/0
+      # makes this process the event sink, so both reach us and neither is
+      # guaranteed to be first. Whichever arrives tears the call down; the other
+      # then lands in a state that ignores it.
+      {:ms_event, _server, :server_disconnected} ->
+        media_cleanup_ressources()
+        leave(:mcu_lost)
+        send_BYE()
+        goto(hanging_up, "media server disconnected")
 
       {:mcu_event, :fpu_requested} ->
         send_INFO(__MODULE__.picture_fast_update(),

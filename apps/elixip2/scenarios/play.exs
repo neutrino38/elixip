@@ -82,6 +82,13 @@ defmodule UAS.Example.Call.Play do
         reply_request(req, 200, "OK")
         media_stop()
         scenario_success("BYE before media")
+
+      # The server we answered with is gone: the SDP we sent names a dead media
+      # path, so hang up instead of waiting out the timeout. `:server_disconnected`
+      # is delivered to us but acted upon by nothing in the framework (design
+      # docs/design/b2bua_module.md §14.6) — every media scenario owes this clause.
+      {:ms_event, _server, :server_disconnected} ->
+        goto(hanging_up, "media server disconnected")
     after
       # a caller that never sends RTP (broken NAT path) must not pin the call
       15_000 -> scenario_failure("no media from caller")
@@ -97,6 +104,9 @@ defmodule UAS.Example.Call.Play do
 
       {:ms_event, _res, {:player_error, reason}} ->
         scenario_failure("player error: #{inspect(reason)}")
+
+      {:ms_event, _server, :server_disconnected} ->
+        goto(hanging_up, "media server disconnected")
 
       {:BYE, req, _trans, _dlg} ->
         reply_request(req, 200, "OK")
@@ -136,6 +146,10 @@ defmodule UAS.Example.Call.Play do
       {:ms_event, _res, {:player_error, reason}} ->
         goto(hanging_up, "player error: #{inspect(reason)}")
 
+      # Not one resource failing but the whole media plane going away.
+      {:ms_event, _server, :server_disconnected} ->
+        goto(hanging_up, "media server disconnected")
+
       {:scenario_ctl, :shutdown, _reason} ->
         goto(hanging_up, "shutdown")
 
@@ -147,7 +161,11 @@ defmodule UAS.Example.Call.Play do
   end
 
   state hanging_up do
-    media_stop()
+    # media_cleanup_ressources/0, not media_stop/0: this state is now also reached
+    # WITH the media server gone, and only the former skips dead handles and
+    # swallows their errors. On the ordinary paths it does everything media_stop/0
+    # did and releases the peer connection too.
+    media_cleanup_ressources()
     send_BYE()
 
     on_events do

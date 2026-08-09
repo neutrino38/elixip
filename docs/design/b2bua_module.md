@@ -1495,6 +1495,27 @@ waiting for a media event that will never come, until its own `after` fires —
 if it has one. That is precisely the shape §14.2 (a) had on the SIP side, and it
 deserves the same answer rather than a per-scenario convention.
 
+**Closed by hand for now (2026-08-09).** Every reference scenario that connects
+a media server carries the clause: `uac_invite`, `uac_invite_webrtc`, `play`,
+`uas_invite`, and the kelixip `mcu` / `mcu_adhoc` scripts. The rule they all
+apply — hang up if the call is up, fail if it is not — is the one R8 proposes to
+make the default. Two things surfaced in doing it, both worth keeping when R8
+lands:
+
+- the teardown states are now reached **with the server already gone**, so they
+  call `media_cleanup_ressources/0` rather than `media_stop/0`: only the former
+  skips dead handles and swallows their errors (`safe_ms_call/3`), and it
+  releases the peer connection and the server handle besides;
+- a scenario driven by a *module* that also watches the server (the MCU case)
+  receives the fact twice — once relayed as `{:mcu_event, :server_disconnected}`,
+  once raw as `{:ms_event, _, :server_disconnected}`, since `media_connect/0`
+  makes the scenario process an event sink of its own. Both must be handled, and
+  neither may assume it is first. R8's framework default has to be idempotent for
+  the same reason.
+
+That these six scenarios agree on the same clause is the argument for R8, not a
+substitute for it: nothing stops the seventh from forgetting it.
+
 ### Sketch (R8)
 
 1. **A liveness contract on the adapter, not on each scenario.** The media mixin
