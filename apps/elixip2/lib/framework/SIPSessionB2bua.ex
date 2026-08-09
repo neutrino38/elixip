@@ -21,6 +21,10 @@ defmodule SIP.B2bua.Peer do
       trunk/SBC case).
     * `retry_on` — which final responses make a `:serial` hunt move on to the
       next target: a list of codes and/or ranges, or `nil` for the default.
+    * `notify_progress` — surface `{:outbound, {:serial_*, …}}` events as the
+      hunt walks its targets (design §3.6). Off by default: a hunt is otherwise
+      silent, and a scenario that did not ask should not receive framework
+      bookkeeping it might relay.
     * `outbound_proxy` — per-peer next hop; `nil` falls back to the global
       `:proxyuri` application env. (P2b-3 — the global one is honoured today.)
     * `trunk_pid` — reserved for the future trunk process holding reachability
@@ -31,6 +35,7 @@ defmodule SIP.B2bua.Peer do
             fork: :none,
             ruri: :peer,
             retry_on: nil,
+            notify_progress: false,
             outbound_proxy: nil,
             trunk_pid: nil
 
@@ -319,6 +324,7 @@ defmodule SIP.Session.B2bua do
         sip_ctx
         |> put_leg(@outbound_tag, leg)
         |> add_pending(trans_pid, orig_req, :inbound, fwd.method)
+        |> note_progress({:serial_attempting, target, now()})
         |> SIP.Context.set(:lasterr, :ok)
 
       {:error, reason} ->
@@ -586,6 +592,8 @@ defmodule SIP.Session.B2bua do
             untried: rest,
             initial_trans: new_trans
         })
+        |> note_progress({:serial_not_reachable, leg.target, resp.response, now()})
+        |> note_progress({:serial_attempting, next, now()})
         |> SIP.Context.set(:lasterr, :ok)
 
       {:error, reason} ->
@@ -600,6 +608,7 @@ defmodule SIP.Session.B2bua do
 
         sip_ctx
         |> put_leg(@outbound_tag, %Leg{leg | untried: []})
+        |> note_progress({:serial_not_reachable, next, :transport_error, now()})
         |> relay_reply(resp, pending, tid)
     end
   end
@@ -641,7 +650,53 @@ defmodule SIP.Session.B2bua do
     end
   end
 
+  # ── Progress events (§3.6) ──────────────────────────────────────────────────
+
+  # A final that is about to be relayed rather than hunted on: the attempt the
+  # caller is finally told about. Only for the leg's CURRENT initial transaction
+  # — a 200 answering some relayed BYE is not a hunt outcome.
+  defp note_attempt_outcome(sip_ctx, resp, tid) do
+    case outbound_leg(sip_ctx) do
+      %Leg{initial_trans: ^tid, target: target} when resp.response in 200..299 ->
+        note_progress(sip_ctx, {:serial_connected, target, now()})
+
+      %Leg{initial_trans: ^tid, target: target} when resp.response >= 300 ->
+        sip_ctx
+        |> note_progress({:serial_not_reachable, target, resp.response, now()})
+        |> note_progress({:serial_exhausted, now()})
+
+      _ ->
+        sip_ctx
+    end
+  end
+
+  # Put a progress event in our own mailbox, wrapped in the leg's tag like
+  # everything else that leg produces — so a scenario matches it exactly where it
+  # matches the traffic. Silent unless the peer asked (`notify_progress`).
+  #
+  # Ordering against the traffic of the next branch is not guaranteed: these come
+  # from us, those from the dialog. What is exact is the timestamp, which is what
+  # a record of the hunt is built from.
+  defp note_progress(sip_ctx, event) do
+    case outbound_leg(sip_ctx) do
+      %Leg{peer: %Peer{notify_progress: true}, tag: tag} when not is_nil(tag) ->
+        send(self(), {tag, event})
+
+      _ ->
+        :ok
+    end
+
+    sip_ctx
+  end
+
+  # Wall clock, because what these feed is a record of WHEN things happened. A
+  # duration taken between two of them inherits the clock's jumps; somewhere
+  # precise enough to care, use System.monotonic_time/0.
+  defp now, do: DateTime.utc_now()
+
   defp relay_reply(sip_ctx, resp, %Pending{} = pending, tid) do
+    sip_ctx = note_attempt_outcome(sip_ctx, resp, tid)
+
     case leg_pid(sip_ctx, pending.orig_leg) do
       nil ->
         fail(sip_ctx, {:b2bua, :no_leg_to_reply_on, pending.orig_leg})

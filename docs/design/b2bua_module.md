@@ -574,6 +574,29 @@ They cannot collide with the traffic events: those are 4-tuples whose first
 element is a status code or a method, these are 3- and 4-tuples led by a
 `:serial_*` atom.
 
+Ordering against the *traffic* of the next branch is not guaranteed — a progress
+event comes from the scenario process itself, the traffic from the dialog. What
+is exact is the timestamp, which is what a record of the hunt is built from.
+
+#### Against Asterisk's `queue_log`
+
+Checked before freezing the set, since a missing event is cheap now and awkward
+later. Everything a serial queue writes is derivable:
+
+| `queue_log` | from |
+|---|---|
+| `ENTERQUEUE` | the scenario — it is the one that entered |
+| `CONNECT` | `:serial_connected`; hold time and ring time from the timestamps |
+| `RINGNOANSWER` | `:serial_not_reachable` with cause `408`, ring time likewise |
+| `ABANDON` | the inbound `{:BYE, …}` / `{:CANCEL, …}` the scenario already sees |
+| `EXITWITHTIMEOUT` | the scenario's `after` clause |
+| `EXITEMPTY` | `:serial_exhausted` |
+| `COMPLETECALLER` / `COMPLETEAGENT` | which leg the BYE came from — the tag says |
+
+One gap, and it belongs to P4: `RINGCANCELED`, an agent whose ring was cut
+short because another answered, has no event because serial forking rings one
+agent at a time. Parallel forking will need it when it lands.
+
 #### Why `:serial_not_reachable` carries a cause
 
 The other two are as sketched; this one gains a field, and it earns it. "The
@@ -583,12 +606,17 @@ attempt failed" is not one thing, and a queue acts differently on each:
 |---|---|---|
 | `486` | the agent is there, on another call | leave them in rotation, try again soon |
 | `480`, `603` | the agent declined | penalise, or log them out |
-| `408`, `:timeout` | rang out — nobody picked up | usually a real agent who stepped away |
-| `:transport_error` | the phone is not on the network | log the agent out; ringing them again is wasted |
+| `408` | rang out — nobody picked up | usually a real agent who stepped away |
+| `:transport_error` | the branch could not even be sent | log the agent out; ringing them again is wasted |
 
 Collapsing all of that into "not reachable" throws away the distinction the
-operational decision rests on. `cause` is a SIP status code, or `:timeout` /
-`:transport_error` when no response ever came.
+operational decision rests on.
+
+`cause` is the SIP status code, or `:transport_error` when the branch could not
+be armed at all. Note there is deliberately no `:timeout`: a client transaction
+that times out is reported as a **408** (RFC 3261 §8.1.3.1 — that is what the TU
+is told to treat it as, and the dialog layer synthesises exactly that), so a
+timeout and a far-end 408 are the same event and mean the same thing to a queue.
 
 #### With a provider
 
@@ -601,7 +629,8 @@ not refused — so a fourth event follows it:
 ```
 
 which is what a "you are in position N" announcement, or a hold-time metric,
-hangs off.
+hangs off. It arrives with the provider (P2c); the four events above are
+delivered.
 
 #### What a queued caller hears
 
@@ -1086,7 +1115,7 @@ SRV failover depend on `fork: :serial` rather than being unconditional as §3.1
 first put it; `:none` then means one attempt and no failover at all, which is
 the simpler contract.
 | **P3** | `{:mediaserver, …}` mode: leg-qualified media handles, `bridge/2` callback in `MediaServer.Behaviour` + Mendooze implementation, offer/answer choreography |
-| **P2c** | dynamic targets (§3.4): the `SIP.B2bua.TargetProvider` behaviour, `%Peer{provider:}`, `b2bua_try_next/0` + the per-attempt ring timeout; `b2bua_cancel_forward/0` (§3.5) with 487 out of the default retry-on list; hunt progress events (§3.6, `notify_progress`) — independently useful and small enough to land first. Extends the SERIAL hunt, so it needs nothing from P4; a complete call queue additionally needs P3 for music on hold |
+| **P2c** | dynamic targets (§3.4): the `SIP.B2bua.TargetProvider` behaviour, `%Peer{provider:}`, `b2bua_try_next/0` + the per-attempt ring timeout; `b2bua_cancel_forward/0` (§3.5) with 487 out of the default retry-on list; hunt progress events (§3.6, `notify_progress`) ✅ delivered. Extends the SERIAL hunt, so it needs nothing from P4; a complete call queue additionally needs P3 for music on hold |
 | **P4** | parallel forking (branch sets in the leg dialog, §3.3: winner adoption, late-2xx ACK+BYE, best-response aggregation; q-group semantics of §3.2), trunk processes (`trunk_pid`); multi-leg generalization only if attended transfer / 3pcc demands it. `{:rtpengine, …}` is **out of scope** — deferred to the borderline work |
 
 ## 12. Documentation plan

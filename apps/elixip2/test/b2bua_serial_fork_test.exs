@@ -218,6 +218,88 @@ defmodule SIP.Test.B2bua.SerialFork do
     refute_receive {:invite_sent, _second}, 300
   end
 
+  describe "progress events (§3.6)" do
+    test "a hunt says nothing unless the peer asked", %{ctx: ctx} do
+      _a = peer!("prg0a")
+      _b = peer!("prg0b")
+
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), serial_peer(["prg0a", "prg0b"]), false)
+      assert_receive {:invite_sent, _first}, 2_000
+      ctx = relay_final(ctx, 486)
+      assert_receive {:invite_sent, _second}, 2_000
+
+      refute_receive {:outbound, {:serial_attempting, _, _}}, 200
+      refute_receive {:outbound, {:serial_not_reachable, _, _, _}}, 200
+      _ = ctx
+    end
+
+    test "each attempt, its outcome and the end of the search are reported in order",
+         %{ctx: ctx} do
+      _a = peer!("prg1a")
+      _b = peer!("prg1b")
+
+      peer = serial_peer(["prg1a", "prg1b"], notify_progress: true)
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), peer, false)
+
+      # The first target is being tried…
+      assert_receive {:outbound, {:serial_attempting, first, at1}}, 2_000
+      assert first.domain == "prg1a.example.com"
+      assert %DateTime{} = at1
+
+      # …it is busy, and the next one is tried. The cause travels with it: a queue
+      # keeps a busy agent in rotation and logs a dead phone out.
+      ctx = relay_final(ctx, 486)
+      assert_receive {:outbound, {:serial_not_reachable, ^first, 486, _at}}, 2_000
+      assert_receive {:outbound, {:serial_attempting, second, _at}}, 2_000
+      assert second.domain == "prg1b.example.com"
+
+      # The last one refuses too: its outcome, then the search giving up.
+      ctx = relay_final(ctx, 480)
+      assert_receive {:outbound, {:serial_not_reachable, ^second, 480, _at}}, 2_000
+      assert_receive {:outbound, {:serial_exhausted, _at}}, 2_000
+      refute B2bua.hunting?(ctx)
+    end
+
+    test "an answer is reported as connected, and ends the reporting", %{ctx: ctx} do
+      _a = peer!("prg2a")
+      b = peer!("prg2b")
+
+      peer = serial_peer(["prg2a", "prg2b"], notify_progress: true)
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), peer, false)
+      assert_receive {:outbound, {:serial_attempting, _first, _}}, 2_000
+
+      ctx = relay_final(ctx, 486)
+      assert_receive {:outbound, {:serial_attempting, second, _}}, 2_000
+
+      dlg = B2bua.outbound_leg(ctx).dialogpid
+      GenServer.cast(b, {:simulate, 200, 100})
+      assert_receive {:outbound, {200, ok_resp, tid, ^dlg}}, 3_000
+      B2bua.note_event({:outbound, {200, ok_resp, tid, dlg}})
+      ctx = B2bua.do_relay_reply(ctx, ok_resp)
+
+      assert_receive {:outbound, {:serial_connected, ^second, _at}}, 2_000
+      refute_receive {:outbound, {:serial_exhausted, _}}, 300
+      _ = ctx
+    end
+
+    # The events say which attempt, so a CDR line can be built from two of them;
+    # what they must NOT do is be mistaken for traffic by a catch-all clause.
+    test "they cannot be confused with the leg's traffic events", %{ctx: ctx} do
+      _a = peer!("prg3a")
+      peer = serial_peer(["prg3a"], notify_progress: true)
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), peer, false)
+
+      assert_receive {:outbound, evt}, 2_000
+
+      # A traffic clause matches {code, resp, tid, dlg} or {method, req, tid, dlg}
+      # — 4-tuples led by an integer or a method. A progress event is neither.
+      refute match?({code, _, _, _} when is_integer(code), evt)
+      refute match?({m, _, _, _} when is_atom(m) and m not in [:serial_attempting], evt)
+      assert match?({:serial_attempting, _uri, _at}, evt)
+      _ = ctx
+    end
+  end
+
   test "the teardown CANCELs whichever branch is in flight", %{ctx: ctx} do
     _a = peer!("srl7a")
     _b = peer!("srl7b")
