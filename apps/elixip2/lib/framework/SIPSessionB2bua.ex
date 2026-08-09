@@ -278,7 +278,7 @@ defmodule SIP.Session.B2bua do
         [target | rest] = Enum.map(peer.uris, &normalize_uri/1)
         untried = if peer.fork == :serial, do: rest, else: []
 
-        case apply_ruri_policy(fwd, target, peer.ruri) do
+        case apply_target(fwd, target, peer) do
           {:error, reason} ->
             fail(sip_ctx, {:b2bua, reason})
 
@@ -346,6 +346,16 @@ defmodule SIP.Session.B2bua do
     end
   end
 
+  # Two separate questions, answered in order: WHAT the forwarded request asks
+  # for (the R-URI policy) and WHERE it is sent (the peer's outbound proxy, when
+  # it has one). They are orthogonal, which is the whole reason %SIP.Uri{} keeps
+  # its routing next to its identity.
+  defp apply_target(req, target, %Peer{} = peer) do
+    with {:ok, req} <- apply_ruri_policy(req, target, peer.ruri) do
+      route_via(req, peer.outbound_proxy)
+    end
+  end
+
   # `:peer` — the forwarded request asks for the target itself (kamailio $ru).
   # `:keep` — the request keeps asking for what it asked for, and is merely SENT
   # to the target (kamailio $du): resolve the target and copy its routing onto
@@ -356,16 +366,7 @@ defmodule SIP.Session.B2bua do
   defp apply_ruri_policy(req, target, :keep) do
     case resolve(target) do
       %SIP.Uri{} = resolved ->
-        ruri = %SIP.Uri{
-          req.ruri
-          | destip: resolved.destip,
-            destport: resolved.destport,
-            destproto: resolved.destproto,
-            tp_module: resolved.tp_module,
-            tp_pid: resolved.tp_pid
-        }
-
-        {:ok, %{req | ruri: ruri}}
+        {:ok, %{req | ruri: stamp_destination(req.ruri, resolved)}}
 
       err ->
         {:error, {:cannot_route_to, target, err}}
@@ -373,6 +374,36 @@ defmodule SIP.Session.B2bua do
   end
 
   defp apply_ruri_policy(_req, _target, other), do: {:error, {:bad_ruri_policy, other}}
+
+  # This peer's own next hop. The global `:proxyuri` application env is still
+  # honoured underneath (SIP.Resolver.resolve_and_add_dest/1 applies it when
+  # nothing here does), but it is process-global: one next hop for the whole
+  # node, which is fine for elixipp and wrong for a server whose peers sit behind
+  # different gateways. Set here, it wins — including over the destination a
+  # `:keep` policy just stamped, since the proxy IS where the request goes.
+  defp route_via(req, nil), do: {:ok, req}
+
+  defp route_via(req, proxy) do
+    case resolve(normalize_uri(proxy)) do
+      %SIP.Uri{} = resolved ->
+        {:ok, %{req | ruri: stamp_destination(req.ruri, resolved)}}
+
+      err ->
+        {:error, {:cannot_route_via_proxy, proxy, err}}
+    end
+  end
+
+  # Copy the routing of `from` onto `uri`, leaving what the URI *says* alone.
+  defp stamp_destination(%SIP.Uri{} = uri, %SIP.Uri{} = from) do
+    %SIP.Uri{
+      uri
+      | destip: from.destip,
+        destport: from.destport,
+        destproto: from.destproto,
+        tp_module: from.tp_module,
+        tp_pid: from.tp_pid
+    }
+  end
 
   # A target that already carries its destination (a registrar contact, §3.2) is
   # taken as is — that is the whole point of storing the registration flow.

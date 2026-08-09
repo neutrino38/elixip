@@ -138,6 +138,33 @@ defmodule SIP.Test.B2bua.Session do
       assert {:b2bua, :outbound_leg_exists} = ctx2.lasterr
     end
 
+    # The two questions are orthogonal: the R-URI says what the request asks
+    # for, the outbound proxy says where it goes. A gateway in front of the peer
+    # must not change the callee the INVITE names.
+    test "a per-peer outbound proxy is where the request goes, not what it asks for",
+         %{ctx: ctx} do
+      gw =
+        %SIP.Uri{scheme: "sip:", domain: "gw.example.com", port: 5060}
+        |> SIP.Uri.set_uri_param("unittest", "b2bua_session_gw")
+
+      gw_tp = SIP.Transport.Selector.select_transport(gw).tp_pid
+      :ok = GenServer.call(gw_tp, :settestapp)
+
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(outbound_proxy: gw), false)
+      assert ctx.lasterr == :ok
+
+      # It reached the GATEWAY's transport, not the target's…
+      assert_receive {:invite_sent, fwd}, 2_000
+      # …while still naming the callee it was always for.
+      assert fwd.ruri.userpart == "callee"
+      assert fwd.ruri.domain == "example.com"
+    end
+
+    # (A proxy that cannot be resolved yields {:cannot_route_via_proxy, …}, but
+    # asserting it here would be a test of ambient state rather than of this
+    # code: with a global `:proxyuri` configured — which other suites do, in the
+    # same VM — an unresolvable host is routed to that proxy and resolves fine.)
+
     test "ruri: :keep preserves what the request asks for and only routes it", %{ctx: ctx} do
       req = inbound_invite()
       ctx = B2bua.do_create_leg(ctx, req, mockup_peer(ruri: :keep), false)
