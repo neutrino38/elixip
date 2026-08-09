@@ -117,5 +117,31 @@ defmodule SIP.Test.DialogInboundRequest do
       assert req.to.params["tag"] == "bob-tag"
       assert req.ruri.domain == "10.0.0.7"
     end
+
+    # Both ends come from the dialog, symmetrically with the inbound clause. The
+    # From used to be taken from the request as given, so a caller with no
+    # identity of its own — a UAS instance, a B2BUA leg, anything using the
+    # placeholder URI `SIP.Session.CallInDialog` builds — sent a From with no
+    # domain. That serializes to nothing and takes the whole message down, which
+    # is how the B2BUA teardown BYE first surfaced it.
+    test "a placeholder From is replaced by the dialog's own identity" do
+      req =
+        DialogImpl.address_in_dialog(
+          %{
+            method: :BYE,
+            ruri: %SIP.Uri{userpart: nil, domain: nil},
+            from: %SIP.Uri{userpart: nil, domain: nil},
+            to: nil
+          },
+          outbound_dialog()
+        )
+
+      assert req.from.userpart == "alice"
+      assert req.from.domain == "example.com"
+      assert req.from.params["tag"] == "alice-tag"
+
+      # And the result actually serializes, which is the point.
+      assert {:ok, _} = SIP.Uri.serialize(req.from)
+    end
   end
 end

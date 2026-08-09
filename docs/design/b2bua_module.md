@@ -681,17 +681,20 @@ what the B2BUA answers on it. The stub is not laziness: every `unittest` URI
 resolves to the same destination in `SIP.Transport.Selector`, so both legs
 would otherwise share one mockup instance and the two directions would tangle.
 
-**Still open (P1e):** a genuine three-party test — a caller, this B2BUA and a
-UAS, each with its own transport. Two ways in:
+**Next (decided 2026-08-09): per-destination mockup instances.** A genuine
+three-party test — a caller, this B2BUA and a UAS, each with its own transport
+— needs the two legs on two transports. `SIP.Test.Transport.UDPMockup`
+`select_instance/1` ignores the R-URI today, so every `unittest` URI lands on
+one shared instance; keying instances by destination gives each leg its own,
+deterministically and in-process.
 
-  * give the UDP mockup **per-destination instances** (its `select_instance/1`
-    ignores the R-URI today), so each leg gets its own; or
-  * run the three parties over **real loopback sockets** on distinct ports,
-    with `sub_fsm` spawning the B2BUA and an auto-answer UAS as children.
+Real loopback sockets were the alternative and are more faithful, but also the
+more likely to be flaky under load — which the existing `ScenarioIntegration`
+media tests already are. They remain worth having later as a separate `:live`
+test; the CI-facing one stays on the mockup.
 
-The second is the more faithful and also the more likely to be flaky under
-load, which the existing `ScenarioIntegration` media tests already are. Worth
-deciding deliberately rather than by default.
+This is a prerequisite for **P2b**: "first 2xx wins, CANCEL the losers,
+ACK+BYE the late 2xx" cannot be tested credibly against a single shared peer.
 
 ## 11. Phasing
 
@@ -725,15 +728,11 @@ deciding deliberately rather than by default.
 6. **q-value storage** — confirm `save/4` keeps the Contact `q` parameter on
    the stored URI params (§3.2 reads it back for fork ordering); if the parse
    drops it, add it to `%Contact{}` explicitly.
-7. **`address_in_dialog/2` is asymmetric** (found implementing the P1 teardown).
-   Its inbound clause restores **both** ends from the dialog (`from: msg.to,
-   to: msg.from`); its outbound clause restores only the To and takes the From
-   from the request as given. So an in-dialog request originated with a
-   placeholder From — the shape `SIP.Session.CallInDialog` builds for a context
-   with no identity — goes out with an empty From, which serializes to nothing
-   and takes the whole message down (`SIPMsg.serialize_one_header/2` raises).
-   The B2BUA teardown works around it by keeping the leg's own identity
-   (`%Leg{local_uri:}`). The symmetric fix — outbound restores `from: msg.from`
-   — looks right and would make every in-dialog request robust, but it changes
-   shared dialog-layer behaviour, so it wants a deliberate pass with the
-   dialog/call suites rather than a drive-by.
+7. ~~**`address_in_dialog/2` is asymmetric**~~ — **fixed 2026-08-09.** Its
+   outbound clause restored only the To and took the From from the request as
+   given, so an in-dialog request originated with a placeholder From (the shape
+   `SIP.Session.CallInDialog` builds for a context with no identity of its own —
+   a UAS instance, a B2BUA leg) went out with an empty From, which serializes to
+   nothing and takes the whole message down. Both ends now come from the dialog,
+   symmetrically with the inbound clause, as RFC 3261 §12.2.1.1 requires. The
+   `%Leg{local_uri:}` workaround is gone with it.

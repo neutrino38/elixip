@@ -34,18 +34,11 @@ end
 
 defmodule SIP.B2bua.Leg do
   @moduledoc "One call leg of a B2BUA scenario (the outbound one; see SIP.B2bua.State)."
-  # `local_uri` / `remote_uri` are the From and To of the request that opened the
-  # leg. Kept because a request this layer originates later (the teardown BYE)
-  # must carry the dialog's own identity, and `SIP.DialogImpl.address_in_dialog/2`
-  # restores only the To on an outbound dialog — the From is taken from the
-  # request as given (see the open question in docs/design/b2bua_module.md §12).
   defstruct tag: nil,
             dialogpid: nil,
             peer: nil,
             target: nil,
             method: nil,
-            local_uri: nil,
-            remote_uri: nil,
             initial_trans: nil,
             media: false
 end
@@ -290,8 +283,6 @@ defmodule SIP.Session.B2bua do
           peer: peer,
           target: target,
           method: fwd.method,
-          local_uri: Map.get(fwd, :from),
-          remote_uri: Map.get(fwd, :to),
           initial_trans: trans_pid,
           media: media
         }
@@ -527,7 +518,7 @@ defmodule SIP.Session.B2bua do
     case outbound_leg(sip_ctx) do
       %Leg{} = leg ->
         if leg_alive?(leg) do
-          case SIP.Dialog.new_request(leg.dialogpid, bye_request(leg)) do
+          case SIP.Dialog.new_request(leg.dialogpid, bye_request()) do
             {:ok, _trans_pid} -> SIP.Context.set(sip_ctx, :lasterr, :ok)
             err -> fail(sip_ctx, {:b2bua, :bye_failed, err})
           end
@@ -606,7 +597,7 @@ defmodule SIP.Session.B2bua do
 
       leg.method == :INVITE and established?(leg) ->
         protect("BYE leg #{inspect(leg.dialogpid)}", fn ->
-          SIP.Dialog.new_request(leg.dialogpid, bye_request(leg))
+          SIP.Dialog.new_request(leg.dialogpid, bye_request())
         end)
 
       # A leg carrying anything else (MESSAGE, SUBSCRIBE…) has no teardown
@@ -648,22 +639,19 @@ defmodule SIP.Session.B2bua do
     end
   end
 
-  # The teardown BYE. The dialog layer fills in Call-ID, CSeq, the tags, the
-  # route set and the remote target (fix_outbound_request/3), so the R-URI and
-  # the To are placeholders — but the From is NOT one: on an outbound dialog
-  # `address_in_dialog/2` only restores the To, and a From with no domain
-  # serializes to nothing and takes the whole message down. Hence the leg's own
-  # identity, captured when it was created.
-  defp bye_request(%Leg{} = leg) do
-    local = leg.local_uri || %SIP.Uri{userpart: nil, domain: nil}
-    remote = leg.remote_uri || local
+  # The teardown BYE. Every addressing field is a placeholder: the dialog layer
+  # fills in Call-ID, CSeq, both identities, their tags, the route set and the
+  # remote target (fix_outbound_request/3 -> address_in_dialog/2). Same shape
+  # `SIP.Session.CallInDialog` builds for a scenario-sent BYE.
+  defp bye_request do
+    uri = %SIP.Uri{userpart: nil, domain: nil}
 
     %{
       "Max-Forwards" => "70",
       method: :BYE,
-      ruri: remote,
-      from: local,
-      to: remote,
+      ruri: uri,
+      from: uri,
+      to: uri,
       useragent: Application.get_env(:elixip2, :useragent, "Elixipp/0.1"),
       callid: nil,
       contentlength: 0

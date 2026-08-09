@@ -161,9 +161,18 @@ defmodule SIP.DialogImpl do
   end
 
   def address_in_dialog(req, state) do
-    to_uri = if state.msg, do: state.msg.to, else: req.to
+    # BOTH ends come from the dialog, exactly as in the inbound clause above.
+    # Taking the From from the request as given was an asymmetry, not a
+    # shorthand: RFC 3261 §12.2.1.1 fixes the From of an in-dialog request to the
+    # dialog's local URI, so there is nothing for a caller to decide — and a
+    # caller with no identity to offer (a UAS instance, a B2BUA leg: their
+    # identity lives in the dialog, not in a context) passed the placeholder URI
+    # that `SIP.Session.CallInDialog` builds. That From has no domain, serializes
+    # to nothing, and takes the whole message down in SIPMsg.serialize_one_header/2.
+    {from_uri, to_uri} =
+      if state.msg, do: {state.msg.from, state.msg.to}, else: {req.from, req.to}
 
-    %{req | to: to_uri, ruri: state.remotetarget || req.ruri}
+    %{req | from: from_uri, to: to_uri, ruri: state.remotetarget || req.ruri}
     |> set_tag(:from, state.fromtag)
     |> set_remote_totag(state)
   end
@@ -1081,7 +1090,6 @@ defmodule SIP.DialogImpl do
 
     {:stop, :normal, state}
   end
-
 
   # ----------------------- transaction timers ------------------------------
   def handle_info(
