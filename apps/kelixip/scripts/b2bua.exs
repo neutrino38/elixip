@@ -141,9 +141,34 @@ defmodule Kelix.B2bua do
       {:outbound, {:dialog_terminated, _dlg, reason}} ->
         scenario_success("outbound leg ended: #{inspect(reason)}")
 
-      # Default relay, written out rather than assumed. ACK is excluded: it was
-      # relayed in wait_ack and a stray one would target a finished transaction.
-      {:outbound, {m, req, _trans, _dlg}} when is_atom(m) and m != :ACK ->
+      # A re-INVITE or an UPDATE. Four different things arrive under this shape —
+      # hold/retrieve, a media added or withdrawn, a changed address, a session
+      # timer refresh — and with no media server all four cross: the SDP belongs
+      # to the endpoints, so each of these is a conversation between them that we
+      # only carry. scenarios/b2bua_media.exs is where the third case stops
+      # crossing, because there the peer moves and our endpoint does not.
+      {m, req, _trans, _dlg} when m in [:INVITE, :UPDATE] ->
+        b2bua_forward(req)
+        goto(loop, "relayed #{m} (caller -> callee)")
+
+      {:outbound, {m, req, _trans, _dlg}} when m in [:INVITE, :UPDATE] ->
+        b2bua_forward(req)
+        goto(loop, "relayed #{m} (callee -> caller)")
+
+      # The ACK of a re-INVITE's 200: a transaction of its own (RFC 3261
+      # §13.2.2.4), so every re-INVITE that crosses owes one back. Without this
+      # the far end retransmits its 200 until timer H and drops a live call.
+      {:ACK, req, _trans, _dlg} ->
+        b2bua_forward(req)
+        goto(loop, "ACK relayed (caller -> callee)")
+
+      {:outbound, {:ACK, req, _trans, _dlg}} ->
+        b2bua_forward(req)
+        goto(loop, "ACK relayed (callee -> caller)")
+
+      # Default relay, written out rather than assumed: everything else in-dialog
+      # (INFO, MESSAGE, NOTIFY, REFER…), then the responses.
+      {:outbound, {m, req, _trans, _dlg}} when is_atom(m) ->
         b2bua_forward(req)
         goto(loop, "relayed #{m} (callee -> caller)")
 
@@ -151,7 +176,7 @@ defmodule Kelix.B2bua do
         b2bua_forward_reply(resp)
         goto(loop, "relayed #{code} (callee -> caller)")
 
-      {m, req, _trans, _dlg} when is_atom(m) and m != :ACK ->
+      {m, req, _trans, _dlg} when is_atom(m) ->
         b2bua_forward(req)
         goto(loop, "relayed #{m} (caller -> callee)")
 

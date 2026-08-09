@@ -99,8 +99,16 @@ defmodule SIP.B2bua.Pending do
 end
 
 defmodule SIP.B2bua.State do
-  @moduledoc "B2BUA bookkeeping, stored in the scenario context appdata under `:__b2bua__`."
-  defstruct legs: %{}, pending: %{}, hunt: nil
+  @moduledoc """
+  B2BUA bookkeeping, stored in the scenario context appdata under `:__b2bua__`.
+
+  `last_invite` is keyed by the leg an INVITE was **sent to** and holds that
+  request's client transaction: what an ACK arriving on the *other* leg acts
+  upon. It is not the same thing as `%Leg{initial_trans}` — that one is the
+  attempt a hunt is walking, and it stops being the right target the moment a
+  re-INVITE is relayed on an established call (§6).
+  """
+  defstruct legs: %{}, pending: %{}, hunt: nil, last_invite: %{}
 end
 
 defmodule SIP.Session.B2bua do
@@ -392,7 +400,13 @@ defmodule SIP.Session.B2bua do
       report_outcome(sip_ctx, :abandoned)
 
       state = state(sip_ctx)
-      put_state(sip_ctx, %State{state | legs: Map.delete(state.legs, dead_leg), hunt: nil})
+
+      put_state(sip_ctx, %State{
+        state
+        | legs: Map.delete(state.legs, dead_leg),
+          hunt: nil,
+          last_invite: Map.delete(state.last_invite, dead_leg)
+      })
     end
   end
 
@@ -520,6 +534,7 @@ defmodule SIP.Session.B2bua do
             sip_ctx
             |> move_correlation(leg.initial_trans, new_trans)
             |> put_leg(@outbound_tag, %Leg{leg | target: uri, initial_trans: new_trans})
+            |> put_last_invite(@outbound_tag, leg.method, new_trans)
             |> note_progress({:serial_attempting, uri, now()})
             |> SIP.Context.set(:lasterr, :ok)
 
@@ -625,6 +640,7 @@ defmodule SIP.Session.B2bua do
         sip_ctx
         |> put_leg(@outbound_tag, leg)
         |> add_pending(trans_pid, orig_req, :inbound, fwd.method)
+        |> put_last_invite(@outbound_tag, fwd.method, trans_pid)
         |> note_progress({:serial_attempting, target, now()})
         |> SIP.Context.set(:lasterr, :ok)
 
@@ -816,6 +832,7 @@ defmodule SIP.Session.B2bua do
           {:ok, trans_pid} ->
             sip_ctx
             |> add_pending(trans_pid, req, from_leg, req.method)
+            |> put_last_invite(other_leg(from_leg), req.method, trans_pid)
             |> SIP.Context.set(:lasterr, :ok)
 
           :leg_dead ->
@@ -829,17 +846,32 @@ defmodule SIP.Session.B2bua do
 
   # The INVITE transaction of the leg opposite `from_leg`: what an ACK or a
   # CANCEL arriving on `from_leg` acts upon.
-  defp correlated_invite(sip_ctx, :inbound) do
-    case outbound_leg(sip_ctx) do
-      %Leg{dialogpid: dialog_pid, initial_trans: trans_pid} -> {dialog_pid, trans_pid}
-      _ -> nil
+  #
+  # `last_invite` and not `%Leg{initial_trans}`, because the two stop agreeing as
+  # soon as the call is established: a re-INVITE relayed onto a leg opens a NEW
+  # client transaction, and the 2xx that answers it is acknowledged on that one
+  # (RFC 3261 §13.2.2.4 — the ACK of a 2xx is a transaction of its own). Posting
+  # it on `initial_trans` acknowledges an INVITE that was answered minutes ago,
+  # which the far end reads as "no ACK": it retransmits its 200 until timer H and
+  # then gives up on a call that is up.
+  #
+  # Symmetric, and that is the point: a re-INVITE from the CALLEE is relayed onto
+  # the inbound leg, where we are the UAC for it — so the callee's ACK has an
+  # inbound client transaction to act on, which the previous nil-returning clause
+  # made unreachable. The initial INVITE keeps its old behaviour: nothing was
+  # ever sent toward the inbound leg, so `last_invite[:inbound]` is nil and the
+  # caller's ACK still finds nothing to translate there.
+  defp correlated_invite(sip_ctx, from_leg) do
+    target = other_leg(from_leg)
+
+    case {leg_pid(sip_ctx, target), Map.get(state(sip_ctx).last_invite, target)} do
+      {dialog_pid, trans_pid} when is_pid(dialog_pid) and is_pid(trans_pid) ->
+        {dialog_pid, trans_pid}
+
+      _ ->
+        nil
     end
   end
-
-  # An ACK/CANCEL arriving on the outbound leg acts on the inbound INVITE, whose
-  # server transaction the scenario answers through the dialog: nothing to
-  # translate (the inbound side is a UAS, it has no client transaction to ACK).
-  defp correlated_invite(_sip_ctx, _outbound), do: nil
 
   # ── Relaying responses ──────────────────────────────────────────────────────
 
@@ -955,6 +987,7 @@ defmodule SIP.Session.B2bua do
             untried: rest,
             initial_trans: new_trans
         })
+        |> put_last_invite(@outbound_tag, leg.method, new_trans)
         |> note_progress({:serial_not_reachable, leg.target, resp.response, now()})
         |> note_progress({:serial_attempting, next, now()})
         |> SIP.Context.set(:lasterr, :ok)
@@ -1472,6 +1505,24 @@ defmodule SIP.Session.B2bua do
     put_state(sip_ctx, %State{state | pending: Map.delete(state.pending, trans_pid)})
   end
 
+  # Remember the client transaction of an INVITE sent toward `leg` — what the
+  # far end's ACK will act upon (see correlated_invite/2). Only INVITE: nothing
+  # else is acknowledged, and an UPDATE deliberately does not overwrite it
+  # (RFC 3311 — an UPDATE has no ACK, and a call may carry both).
+  defp put_last_invite(sip_ctx, _leg, _method, nil), do: sip_ctx
+
+  defp put_last_invite(sip_ctx, leg, :INVITE, trans_pid) do
+    state = state(sip_ctx)
+    put_state(sip_ctx, %State{state | last_invite: Map.put(state.last_invite, leg, trans_pid)})
+  end
+
+  defp put_last_invite(sip_ctx, _leg, _method, _trans_pid), do: sip_ctx
+
+  # The leg an event's counterpart lives on. Sole reading of "the other leg" in
+  # this module, so it cannot drift from other_leg_pid/2.
+  defp other_leg(:inbound), do: @outbound_tag
+  defp other_leg(_outbound), do: :inbound
+
   # The dialog pid of a named leg: the inbound leg is the scenario's own dialog,
   # every other one lives in the leg map.
   defp leg_pid(sip_ctx, :inbound), do: sip_ctx.dialogpid
@@ -1483,14 +1534,7 @@ defmodule SIP.Session.B2bua do
     end
   end
 
-  defp other_leg_pid(sip_ctx, :inbound) do
-    case outbound_leg(sip_ctx) do
-      %Leg{dialogpid: pid} -> pid
-      _ -> nil
-    end
-  end
-
-  defp other_leg_pid(sip_ctx, _outbound), do: sip_ctx.dialogpid
+  defp other_leg_pid(sip_ctx, from_leg), do: leg_pid(sip_ctx, other_leg(from_leg))
 
   # ── Helpers ─────────────────────────────────────────────────────────────────
 

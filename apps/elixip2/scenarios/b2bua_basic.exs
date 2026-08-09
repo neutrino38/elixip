@@ -141,11 +141,50 @@ defmodule B2BUA.Basic do
       {:outbound, {:dialog_terminated, _dlg, reason}} ->
         scenario_success("outbound leg ended: #{inspect(reason)}")
 
-      # The default relay, written out rather than assumed. Requests first
-      # (re-INVITE, UPDATE, INFO, MESSAGE, NOTIFY, REFER…), then responses.
-      # ACK is excluded: it was already relayed in wait_ack, and a stray one
-      # here would be re-sent against a transaction that is done.
-      {:outbound, {m, req, _trans, _dlg}} when is_atom(m) and m != :ACK ->
+      # A re-INVITE or an UPDATE. Four different things arrive under this shape,
+      # and in a pure signaling B2BUA all four cross — because the SDP is the
+      # endpoints' own, so every one of them is a conversation between them that
+      # we are only carrying:
+      #
+      #   * hold and retrieve (a=sendonly / a=inactive and back) — the far end
+      #     has to know, or it keeps sending into a stream nobody plays;
+      #   * a media added or withdrawn (a new m= line, or one set to port 0) —
+      #     the far end must offer or drop it too, and only it can;
+      #   * a changed address (c=, port, an ICE restart) — the far end sends
+      #     there from now on, and nothing here can forward on its behalf;
+      #   * a session-timer refresh (RFC 4028), usually with no SDP at all. This
+      #     one *could* be answered locally, and a B2BUA with media does exactly
+      #     that — but a 200 to an offerless re-INVITE must carry an offer of our
+      #     own (RFC 3261 §14.2), and a signaling B2BUA has no media to offer.
+      #
+      # The third case is precisely where scenarios/b2bua_media.exs diverges:
+      # with a media server the peer moved but our endpoint did not, so the far
+      # end must NOT be disturbed and the re-offer is answered locally.
+      {m, req, _trans, _dlg} when m in [:INVITE, :UPDATE] ->
+        b2bua_forward(req)
+        goto(loop, "relayed #{m} (caller -> callee)")
+
+      {:outbound, {m, req, _trans, _dlg}} when m in [:INVITE, :UPDATE] ->
+        b2bua_forward(req)
+        goto(loop, "relayed #{m} (callee -> caller)")
+
+      # The ACK of a re-INVITE's 200 — not the initial one, which `wait_ack`
+      # relayed, and not a stray: RFC 3261 §13.2.2.4 makes the ACK of a 2xx a
+      # transaction of its own, so every re-INVITE that crosses owes one back.
+      # Dropping it (which is what excluding ACK from the relay below used to do)
+      # leaves the far end retransmitting its 200 until timer H, and then tearing
+      # down a call that is up.
+      {:ACK, req, _trans, _dlg} ->
+        b2bua_forward(req)
+        goto(loop, "ACK relayed (caller -> callee)")
+
+      {:outbound, {:ACK, req, _trans, _dlg}} ->
+        b2bua_forward(req)
+        goto(loop, "ACK relayed (callee -> caller)")
+
+      # The default relay, written out rather than assumed: everything else
+      # in-dialog (INFO, MESSAGE, NOTIFY, REFER…), then the responses.
+      {:outbound, {m, req, _trans, _dlg}} when is_atom(m) ->
         b2bua_forward(req)
         goto(loop, "relayed #{m} (callee -> caller)")
 
@@ -153,7 +192,7 @@ defmodule B2BUA.Basic do
         b2bua_forward_reply(resp)
         goto(loop, "relayed #{code} (callee -> caller)")
 
-      {m, req, _trans, _dlg} when is_atom(m) and m != :ACK ->
+      {m, req, _trans, _dlg} when is_atom(m) ->
         b2bua_forward(req)
         goto(loop, "relayed #{m} (caller -> callee)")
 

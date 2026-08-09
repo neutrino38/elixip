@@ -145,6 +145,63 @@ defmodule SIP.Test.B2bua.Scenario do
     assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
   end
 
+  # The four things a re-INVITE can mean (hold, a media added or withdrawn, a
+  # changed address, a session-timer refresh) all cross in signaling mode, so
+  # what this pins is the mechanism they share — and the ACK, which is where it
+  # used to break: the ACK of a re-INVITE's 200 is a transaction of ITS OWN (RFC
+  # 3261 §13.2.2.4), and posting it on the initial INVITE's transaction leaves
+  # the callee retransmitting a 200 nobody confirmed.
+  @tag timeout: 60_000
+  test "a re-INVITE crosses, and its ACK reaches the transaction it confirms", %{
+    scenario: module,
+    stub: stub
+  } do
+    invite = inbound_invite()
+    tp_pid = transport_pid()
+    :ok = GenServer.call(tp_pid, :settestapp)
+
+    {instance, _ref} = start_instance(module, stub, invite)
+    send(instance, {:INVITE, invite, self(), stub})
+
+    assert_receive {:replied, 100, "Trying", _req, _fields}, 5_000
+    assert_receive {:invite_sent, _fwd}, 5_000
+    GenServer.cast(tp_pid, {:simulate, 200, 100})
+    assert_receive {:replied, 200, _reason, _req, _fields}, 5_000
+
+    # The call is up: the initial ACK crosses (wait_ack) and lands on the initial
+    # INVITE's transaction.
+    send(instance, {:ACK, in_dialog(:ACK, invite), nil, stub})
+
+    # The caller now re-INVITEs — a hold, a codec change, a new address; in
+    # signaling mode the scenario does not read the body, it carries it.
+    reinvite = %{in_dialog(:INVITE, invite) | cseq: [3, :INVITE], body: invite.body}
+    send(instance, {:INVITE, reinvite, self(), stub})
+
+    assert_receive {:invite_sent, fwd_reinvite}, 5_000
+    assert fwd_reinvite.method == :INVITE
+    # Same dialog on the callee's side, a later CSeq: a re-INVITE, not a new call.
+    assert fwd_reinvite.callid != invite.callid
+    assert [cseq_num, :INVITE] = fwd_reinvite.cseq
+    assert cseq_num > 1
+
+    # The callee accepts, and that 200 goes back to the caller on the re-INVITE.
+    GenServer.cast(tp_pid, {:simulate, 200, 100})
+    assert_receive {:replied, 200, _reason, answered_req, _fields}, 5_000
+    assert answered_req.cseq == [3, :INVITE]
+
+    # …and the caller's ACK confirms it. It must land on the RE-INVITE's client
+    # transaction, and this is what says it did: posted on the initial INVITE's
+    # transaction instead — which is what the leg-level `initial_trans` gave —
+    # the relay comes back `{:error, :nosuchtransaction}` and takes the whole
+    # scenario down with it. The call surviving to its BYE IS the assertion.
+    send(instance, {:ACK, %{in_dialog(:ACK, invite) | cseq: [3, :ACK]}, nil, stub})
+
+    send(instance, {:BYE, in_dialog(:BYE, invite), self(), stub})
+    assert_receive {:replied, 200, "OK", bye_req, _}, 5_000
+    assert bye_req.method == :BYE
+    assert_receive {:instance_done, :ok}, 10_000
+  end
+
   @tag timeout: 60_000
   test "a callee that refuses is relayed verbatim and ends the call", %{
     scenario: module,

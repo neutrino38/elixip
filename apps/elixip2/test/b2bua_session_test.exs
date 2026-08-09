@@ -419,6 +419,74 @@ defmodule SIP.Test.B2bua.Session do
     end
   end
 
+  # ── A relayed request whose far end never answers ───────────────────────────
+  describe "a request relayed onto a leg nobody answers" do
+    # What the caller must NOT get is silence. Their server transaction would sit
+    # there until it gave up on its own, with nothing said. RFC 3261 §17.1.1.2
+    # and §8.1.3.1: a client transaction that fails or times out is reported to
+    # the TU as a 408 — and the B2BUA's job is to carry that back onto the leg
+    # the request came from, on THAT request, not on the call.
+    test "ends as a 408 relayed onto the leg the request came from", %{ctx: ctx} do
+      tp_pid = arm_peer!()
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), false)
+      leg = B2bua.outbound_leg(ctx)
+      dlg = leg.dialogpid
+      assert_receive {:invite_sent, _fwd}, 5_000
+
+      # The call has to be up first: only a 2xx makes the outbound leg a session,
+      # and an in-dialog request needs one. The scenario would relay that 200 and
+      # drop the correlation; do both here.
+      GenServer.cast(tp_pid, {:simulate, 200, 100})
+      assert_receive {:outbound, {200, _rsp, _tid, ^dlg}}, 5_000
+      ctx = B2bua.drop_pending(ctx, leg.initial_trans)
+
+      # An in-dialog request from the caller, relayed onto the outbound leg. The
+      # mockup has no answer for an INFO — it drops it, which is exactly the far
+      # end this test needs.
+      Process.put(:scenario_event_leg, :inbound)
+      uri = %SIP.Uri{userpart: nil, domain: nil}
+
+      info = %{
+        "Max-Forwards" => "70",
+        method: :INFO,
+        ruri: uri,
+        from: uri,
+        to: uri,
+        useragent: "Elixipp-test",
+        callid: nil,
+        cseq: [3, :INFO],
+        contentlength: 0
+      }
+
+      ctx = B2bua.do_relay_request(ctx, info)
+
+      assert {tid, %Pending{orig_leg: :inbound, method: :INFO}} =
+               Enum.find(B2bua.pending(ctx), fn {_t, p} -> p.method == :INFO end)
+
+      # Nobody answers it. Killing the client transaction reaches the same place
+      # timer F would have reached, without the 32 s wait — and without touching
+      # the process-global T1, which other suites read.
+      Process.exit(tid, :kill)
+
+      # The dialog synthesises the 408 and delivers it like any response, tagged
+      # with the leg and carrying the transaction the correlation is keyed on.
+      assert_receive {:outbound, {408, resp, ^tid, _dlg}}, 5_000
+
+      # Which is all a scenario needs to relay it the ordinary way.
+      B2bua.note_event({:outbound, {408, resp, tid, self()}})
+      ctx = B2bua.do_relay_reply(ctx, resp)
+
+      assert_receive {:replied, 408, _reason, answered, _fields}, 2_000
+      assert answered.method == :INFO
+      assert answered.cseq == [3, :INFO]
+
+      # The correlation closes with it, and the call is untouched: one dead
+      # in-dialog request is not a hangup.
+      refute Enum.any?(B2bua.pending(ctx), fn {_t, p} -> p.method == :INFO end)
+      assert %Leg{} = B2bua.outbound_leg(ctx)
+    end
+  end
+
   # ── R6: talking to a leg that is already gone ───────────────────────────────
   describe "a dialog that dies under a relay" do
     # Every b2bua_* primitive is a GenServer.call on a pid the leg map has held
