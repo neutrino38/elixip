@@ -103,12 +103,15 @@ defmodule SIP.Transport.TLS do
 
   def handle_info({:ssl_closed, _socket}, state) do
     Logger.debug([module: __MODULE__, message: "TLS connection closed, stopping transport instance"])
-    SIP.Dialog.broadcast({:tls_client_closed, state.destip, state.destport})
     {:stop, :normal, state}
   end
 
+  # See SIP.Transport.TCP.terminate/2: announced here so a crash says as much as
+  # a clean close (design §14.4, R4).
   @impl true
   def terminate(_reason, state) do
+    SIP.Transport.ImplHelpers.notify_transport_down(__MODULE__, state)
+
     if not is_nil(state.socket) do
       tls_close(state.socket)
     end

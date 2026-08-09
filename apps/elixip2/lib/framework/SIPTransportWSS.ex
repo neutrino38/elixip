@@ -120,19 +120,22 @@ defmodule SIP.Transport.WSS do
 
   def handle_info({:web_closed, _socket}, state) do
     Logger.debug([module: __MODULE__, message: "WSS connection closed by peer (WS close frame)"])
-    SIP.Dialog.broadcast({:wss_client_closed, state.destip, state.destport})
     {:stop, :normal, state}
   end
 
   # The Socket.Web reader process exited (socket closed without WS close frame).
   def handle_info({:DOWN, _ref, :process, _pid, _reason}, state) do
     Logger.debug([module: __MODULE__, message: "WSS reader process exited, stopping transport"])
-    SIP.Dialog.broadcast({:wss_client_closed, state.destip, state.destport})
     {:stop, :normal, state}
   end
 
+  # See SIP.Transport.TCP.terminate/2: announced here so a crash says as much as
+  # a clean close (design §14.4, R4). Both stop paths above converge on it, which
+  # is also why neither announces anything itself.
   @impl true
   def terminate(_reason, state) do
+    SIP.Transport.ImplHelpers.notify_transport_down(__MODULE__, state)
+
     if not is_nil(state.socket) do
       Socket.close(state.socket)
     end

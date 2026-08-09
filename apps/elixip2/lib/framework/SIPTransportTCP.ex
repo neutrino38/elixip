@@ -106,12 +106,16 @@ defmodule SIP.Transport.TCP do
 
   def handle_info({:tcp_closed, _socket}, state) do
     Logger.debug([module: __MODULE__, message: "Cnx disconnected. stopping transport instance"])
-    SIP.Dialog.broadcast({:tcp_client_closed, state.destip, state.destport})
     {:stop, :normal, state}
   end
 
+  # The dialogs riding this connection are told from here rather than from the
+  # close handler above, so that a transport dying of a CRASH says as much as one
+  # closing cleanly (design §14.4, R4).
   @impl true
   def terminate(_reason, state) do
+    SIP.Transport.ImplHelpers.notify_transport_down(__MODULE__, state)
+
     if not is_nil(state.socket) do
       tcp_close(state.socket)
     end

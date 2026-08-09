@@ -255,6 +255,35 @@ defmodule SIP.Transport do
     defp unwrap_peer(_), do: nil
 
     @doc """
+    Tell every dialog that this connected transport is gone, so the ones riding it
+    can act (design docs/design/b2bua_module.md §14.4, R4).
+
+    Called from a transport's `terminate/2`, not from its close handlers, and that
+    placement is the decision: an orderly close announced itself while a CRASH
+    announced nothing at all, so a dialog whose transport died of an exception
+    waited for timer B to notice — the difference between an immediate failover
+    and 32 s of silence. `terminate/2` covers both. (It does not run on a brutal
+    kill; R3's exit-safe transport calls absorb that residue.)
+
+    Only for CONNECTED transports. A connectionless one has no flow to lose: its
+    socket is a process-wide singleton the Selector relaunches, so a UDP transport
+    going away means "recover" (R3), and announcing it here would kill every
+    dialog on the node instead.
+
+    Never raises: this runs while a process is already dying, sometimes during a
+    node shutdown where the dialog registry is gone before us.
+    """
+    def notify_transport_down(tp_module, %{destip: destip, destport: destport}) do
+      SIP.Dialog.broadcast({ :transport_down, tp_module, destip, destport })
+    rescue
+      _ -> :ok
+    catch
+      :exit, _ -> :ok
+    end
+
+    def notify_transport_down(_tp_module, _state), do: :ok
+
+    @doc """
     Process an incoming message inside a transport. Message must be complete.
     Parse it, try to find an associated transaction and if not, create an UAS
     transaction

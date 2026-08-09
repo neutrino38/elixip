@@ -1268,6 +1268,23 @@ defmodule SIP.DialogImpl do
   # target, which is precisely what a hunt needs when a branch dies without
   # answering.
   defp unanswered_request(state, req, transact_pid, module) do
+    state = report_unanswered(state, req, transact_pid, module)
+
+    if state.state in @live_states do
+      {:noreply, state}
+    else
+      # `state`, not the atom `:state` that stood here. terminate/2 was handed
+      # an atom, `state.app` raised on it, and the dialog died of that error
+      # instead of stopping — so the application was never sent
+      # {:dialog_terminated, …} on the one path meant to end a dialog cleanly.
+      {:stop, :normal, state}
+    end
+  end
+
+  # The state half of the above, so a caller with several dead transactions to
+  # report (a transport taking its whole flow down, R4/R5) can fold over them and
+  # decide the dialog's fate once.
+  defp report_unanswered(state, req, transact_pid, module) do
     state =
       notify_transaction_timeout(state, req, transact_pid, module)
       |> close_transaction(transact_pid)
@@ -1276,21 +1293,10 @@ defmodule SIP.DialogImpl do
     # it means the application never replied, and handle_UAS_response/3 reads
     # responses we RECEIVED. Leave the dialog alone.
     if client_transaction?(module) do
-      state =
-        handle_UAS_response(state, timeout_response(req), transact_pid)
-        |> end_on_unregister(req)
-
-      if state.state in @live_states do
-        {:noreply, state}
-      else
-        # `state`, not the atom `:state` that stood here. terminate/2 was handed
-        # an atom, `state.app` raised on it, and the dialog died of that error
-        # instead of stopping — so the application was never sent
-        # {:dialog_terminated, …} on the one path meant to end a dialog cleanly.
-        {:stop, :normal, state}
-      end
+      handle_UAS_response(state, timeout_response(req), transact_pid)
+      |> end_on_unregister(req)
     else
-      {:noreply, state}
+      state
     end
   end
 
@@ -1310,6 +1316,23 @@ defmodule SIP.DialogImpl do
       state
     end
   end
+
+  # Our client transactions whose request was travelling over that flow.
+  #
+  # Matched on the request stored with each transaction, whose R-URI is the
+  # RESOLVED one the transaction layer handed back — the branch table holds the
+  # target as asked for, which may still be a name.
+  defp transactions_on_flow(state, tp_module, ip, port) do
+    Enum.filter(state.transactions, fn {_pid, %{req: req, module: module}} ->
+      client_transaction?(module) and on_flow?(req, tp_module, ip, port)
+    end)
+  end
+
+  defp on_flow?(%{ruri: %SIP.Uri{} = ruri}, tp_module, ip, port) do
+    ruri.tp_module == tp_module and ruri.destip == ip and ruri.destport == port
+  end
+
+  defp on_flow?(_msg, _tp_module, _ip, _port), do: false
 
   # Handle option keepalive timers: send an OPTIONS message or tear the dialog
   # down when the peer stopped answering (see SIP.DialogImpl.KeepAlive).
@@ -1478,41 +1501,46 @@ defmodule SIP.DialogImpl do
     end
   end
 
-  # TCP connection closed: stop any dialog that was using this connection.
-  # Dialogs on other transports or other TCP peers silently ignore this.
-  def handle_info({:tcp_client_closed, closed_ip, closed_port}, state = %SIP.DialogImpl{}) do
-    ruri = state.msg.ruri
+  # A connected transport is gone (design §14.4, R4/R5). Broadcast to every
+  # dialog, so the first job is deciding whether it concerns us at all.
+  #
+  # One clause where there were three, one per protocol — they differed only in
+  # the module they compared and the reason atom they invented (`:tcp_closed`,
+  # `:tls_closed`, `:wss_closed`), which said which wire broke rather than what
+  # happened to the call. `:transport_down` is the fact; the module is carried
+  # alongside for whoever wants it.
+  def handle_info({:transport_down, tp_module, dead_ip, dead_port}, state = %SIP.DialogImpl{}) do
+    dead = transactions_on_flow(state, tp_module, dead_ip, dead_port)
 
-    if ruri.tp_module == SIP.Transport.TCP and
-         ruri.destip == closed_ip and ruri.destport == closed_port do
-      send_to_app(state, {:dialog_terminated, self(), :tcp_closed})
-      {:stop, :normal, state}
-    else
-      {:noreply, state}
-    end
-  end
+    # Every request in flight on that connection has lost its answer. Reported as
+    # the 408 it amounts to, which is what a hunt reads to move on and what the
+    # application reads to stop waiting.
+    state =
+      Enum.reduce(dead, state, fn {pid, %{req: req, module: module}}, st ->
+        report_unanswered(st, req, pid, module)
+      end)
 
-  def handle_info({:tls_client_closed, closed_ip, closed_port}, state = %SIP.DialogImpl{}) do
-    ruri = state.msg.ruri
+    cond do
+      # R5 — a hunt was riding it: what died is the BRANCH, not the call. The
+      # dialog stays so the next target can be armed at once, instead of the
+      # search stalling until timer B (64×T1) noticed. This is what the old
+      # per-protocol clauses could not do: they compared the closed connection to
+      # `state.msg.ruri`, which stays the FIRST target until a branch wins, so a
+      # disconnect under any later branch went unseen entirely.
+      state.forking and dead != [] ->
+        {:noreply, state}
 
-    if ruri.tp_module == SIP.Transport.TLS and
-         ruri.destip == closed_ip and ruri.destport == closed_port do
-      send_to_app(state, {:dialog_terminated, self(), :tls_closed})
-      {:stop, :normal, state}
-    else
-      {:noreply, state}
-    end
-  end
+      # Our own flow died, or what died took the dialog's last word with it.
+      on_flow?(state.msg, tp_module, dead_ip, dead_port) or state.state not in @live_states ->
+        # {:shutdown, reason} rather than a hand-rolled send: terminate/2 unwraps
+        # it and delivers the ONE {:dialog_terminated, …} the application expects.
+        # Doing both — announcing here and stopping — left a second, spurious
+        # `:normal` notification in the mailbox, which a later state could match
+        # against the OTHER leg's termination.
+        {:stop, {:shutdown, :transport_down}, state}
 
-  def handle_info({:wss_client_closed, closed_ip, closed_port}, state = %SIP.DialogImpl{}) do
-    ruri = state.msg.ruri
-
-    if ruri.tp_module == SIP.Transport.WSS and
-         ruri.destip == closed_ip and ruri.destport == closed_port do
-      send_to_app(state, {:dialog_terminated, self(), :wss_closed})
-      {:stop, :normal, state}
-    else
-      {:noreply, state}
+      true ->
+        {:noreply, state}
     end
   end
 

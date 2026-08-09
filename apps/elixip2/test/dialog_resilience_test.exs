@@ -174,6 +174,122 @@ defmodule SIP.Test.DialogResilience do
     assert_dies(tid)
   end
 
+  # ── R4/R5: a connected transport going away ─────────────────────────────────
+
+  # `{:transport_down, …}` is broadcast to EVERY dialog, so these drive the
+  # dialog's side of it directly. The mockup is connectionless, which does not
+  # matter here: what is under test is what a dialog does with the message, and
+  # the rule that only connected transports SEND it lives in the transports.
+  defp transport_down(dlg) do
+    send(dlg, {:transport_down, SIP.Test.Transport.UDPMockup, {1, 2, 3, 4}, 5080})
+  end
+
+  # One notification, not two. The old per-protocol clauses sent
+  # {:dialog_terminated, …, :tcp_closed} themselves AND stopped `:normal`, so
+  # terminate/2 sent a second one — which a later state could match against the
+  # OTHER leg's termination.
+  test "a transport going down terminates the dialog riding it, exactly once" do
+    peer = peer!("rs7")
+    {dlg, _tid} = start_call("rs7")
+    assert_receive {:invite_sent, _req}, 2_000
+
+    GenServer.cast(peer, {:simulate, 200, 50})
+    assert_receive {:outbound, {200, _ok, _t, ^dlg}}, 3_000
+
+    transport_down(dlg)
+
+    assert_receive {:outbound, {:dialog_terminated, ^dlg, :transport_down}}, 2_000
+    assert_dies(dlg)
+
+    # The reason also says what happened to the CALL, where `:tcp_closed` said
+    # which wire broke.
+    refute_receive {:outbound, {:dialog_terminated, ^dlg, _}}, 300
+  end
+
+  test "a dialog on another flow ignores it" do
+    _peer = peer!("rs8")
+    {dlg, _tid} = start_call("rs8")
+    assert_receive {:invite_sent, _req}, 2_000
+
+    send(dlg, {:transport_down, SIP.Transport.TCP, {9, 9, 9, 9}, 5060})
+
+    Process.sleep(100)
+    assert Process.alive?(dlg)
+  end
+
+  # R5. The old clauses compared the closed connection to `state.msg.ruri`, which
+  # stays the FIRST target until a branch wins — so a disconnect under a later
+  # branch went unseen, and the hunt only moved on when timer B fired 64×T1
+  # later. And when it WAS seen, it killed the dialog: the call ended because one
+  # of several targets became unreachable.
+  test "a transport going down under a hunting branch ends the branch, not the call" do
+    _a = peer!("rs9a")
+    _b = peer!("rs9b")
+
+    {dlg, tid1} = start_call("rs9a", tag: :outbound, fork: true)
+    assert_receive {:invite_sent, _first}, 2_000
+
+    transport_down(dlg)
+
+    # The branch is reported as unreachable, in the shape a hunt already reads.
+    assert_receive {:outbound, {408, _rsp, ^tid1, ^dlg}}, 2_000
+
+    # …and the search goes on.
+    Process.sleep(100)
+    assert Process.alive?(dlg)
+    assert {:ok, _tid2} = SIP.Dialog.fork_branch(dlg, target("rs9b"))
+  end
+
+  # ── R4: where the announcement comes from ───────────────────────────────────
+
+  # The two above drive the dialog with a message written by hand. These two
+  # drive a REAL TCP transport and watch what it says on the way out, which is
+  # the half that moved: the announcement left the close handlers for
+  # `terminate/2`, so that a transport dying of a crash says as much as one
+  # closing cleanly. Before, a crashed transport said nothing and its dialogs
+  # waited for timer B — 32 s of silence instead of an immediate failover.
+  #
+  # `SIP.Dialog.broadcast/1` sends to whatever is registered in
+  # Registry.SIPDialog, so the test process registers itself and reads the
+  # broadcast directly.
+  defp listen_and_connect do
+    {:ok, listener} = GenServer.start(SIP.Transport.TCPListener, {:all, 0, []})
+    {:ok, _ip, port} = GenServer.call(listener, :getlocalipandport)
+    on_exit(fn -> if Process.alive?(listener), do: GenServer.stop(listener) end)
+
+    {:ok, socket} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, {:active, false}])
+
+    conn =
+      Enum.reduce_while(1..50, nil, fn _, _ ->
+        case :sys.get_state(listener).connections |> Map.values() do
+          [{_ip, _port, pid} | _] -> {:halt, pid}
+          [] -> Process.sleep(20) && {:cont, nil}
+        end
+      end)
+
+    assert is_pid(conn)
+    Registry.register(Registry.SIPDialog, {"resilience", "tp-#{inspect(conn)}", nil}, :test)
+    {socket, conn}
+  end
+
+  test "a connected transport closing announces it to the dialogs" do
+    {socket, _conn} = listen_and_connect()
+
+    :gen_tcp.close(socket)
+
+    assert_receive {:transport_down, SIP.Transport.TCP, _ip, _port}, 2_000
+  end
+
+  test "…and so does one that dies abnormally, which is the point of moving it" do
+    {_socket, conn} = listen_and_connect()
+
+    # An abnormal stop, which is the reason terminate/2 receives on a crash. The
+    # transport is unlinked from us, so this returns rather than exiting here.
+    GenServer.stop(conn, :boom)
+
+    assert_receive {:transport_down, SIP.Transport.TCP, _ip, _port}, 2_000
+  end
+
   # The catch-all handle_info/2. `use GenServer` provides one, but a module that
   # defines its own clauses replaces it wholesale — so an unrecognized message
   # raised a FunctionClause and took the dialog with it. SIP.Dialog.broadcast/1
