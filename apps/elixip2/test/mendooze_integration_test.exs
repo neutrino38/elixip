@@ -136,6 +136,49 @@ defmodule Mendooze.IntegrationTest do
       assert :ok = Mendooze.close_peer_connection(caller)
     end
 
+    # The transcoder chain, against the server that owns the method names. A
+    # wrong spelling or arity is a fault here and nothing at all against a
+    # mock — and there IS a wrong spelling to fall into: the Java client says
+    # `AudioTranscoderDetach`, the server registers `AudioTranscoderDettach`.
+    #
+    # `:force` rather than `:avoid` on purpose: both legs are configured alike,
+    # so they would agree on a codec and be attached directly. Forcing is how the
+    # chain gets built at all.
+    test "a transcoded bridge is built and torn down on the server", %{server: server} do
+      opts = [media: :audio_video, audio_codec: "PCMU", video_codec: "H264"]
+
+      {:ok, caller} = Mendooze.create_peer_connection(server, self(), opts)
+      {:ok, caller_offer} = Mendooze.get_local_offer(caller)
+
+      {:ok, inbound} = Mendooze.create_peer_connection(server, self(), opts)
+      {:ok, our_answer} = Mendooze.set_remote_offer(inbound, caller_offer)
+      assert :ok = Mendooze.set_remote_answer(caller, our_answer)
+
+      {:ok, outbound} =
+        Mendooze.create_peer_connection(server, self(), opts ++ [bridge_with: inbound])
+
+      {:ok, our_offer} = Mendooze.get_local_offer(outbound)
+      {:ok, callee} = Mendooze.create_peer_connection(server, self(), opts)
+      {:ok, callee_answer} = Mendooze.set_remote_offer(callee, our_offer)
+      assert :ok = Mendooze.set_remote_answer(outbound, callee_answer)
+
+      # Audio and video both through a transcoder: four chains, and for video the
+      # size/fps/bitrate/intra-period the server's own config.h defines.
+      assert :ok = Mendooze.bridge(inbound, outbound, audio: :force, video: :force)
+
+      # …and taken down again, transcoders deleted rather than merely detached.
+      assert :ok = Mendooze.unbridge(inbound, outbound)
+
+      # Re-bridging after that must work: a transcoder left behind would still be
+      # attached and the second build would fail or leak.
+      assert :ok = Mendooze.bridge(inbound, outbound, audio: :force, video: :force)
+
+      assert :ok = Mendooze.close_peer_connection(inbound)
+      assert :ok = Mendooze.close_peer_connection(outbound)
+      assert :ok = Mendooze.close_peer_connection(callee)
+      assert :ok = Mendooze.close_peer_connection(caller)
+    end
+
     test "H264 audio+video loopback carries the server-negotiated fmtp", %{server: server} do
       # Delegated SDP negotiation (§8.1 of docs/design/mendooze_interface.md): the media
       # server is authoritative for the H264 fmtp (profile-level-id /

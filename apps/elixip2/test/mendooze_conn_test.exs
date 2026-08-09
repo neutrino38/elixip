@@ -58,6 +58,14 @@ defmodule Mendooze.ConnTest do
     if String.ends_with?(tag, "-outbound"), do: {:ok, [5]}, else: {:ok, [4]}
   end
 
+  # Transcoders are session resources with ids of their own; 30/31 keeps them
+  # clearly apart from the endpoints (4/5) in the assertions below.
+  defp two_leg_handler("AudioTranscoderCreate", [_sess, tag]),
+    do: {:ok, [if(String.contains?(tag, "outbound"), do: 31, else: 30)]}
+
+  defp two_leg_handler("VideoTranscoderCreate", [_sess, tag]),
+    do: {:ok, [if(String.contains?(tag, "outbound"), do: 31, else: 30)]}
+
   defp two_leg_handler(method, params), do: rpc_handler(method, params)
 
   # Both legs negotiated on PCMU, which is what lets them be attached directly.
@@ -137,7 +145,9 @@ defmodule Mendooze.ConnTest do
                    1_000
   end
 
-  test "legs that settled on different codecs are refused, in the policy's own words" do
+  # Two legs that did NOT settle on the same codec. What happens then is the
+  # policy's to say, and each answer is different.
+  test "legs that settled on different codecs follow the policy, in its own words" do
     %{server: server} = start_media_server(&two_leg_handler/2)
 
     {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio)
@@ -158,19 +168,51 @@ defmodule Mendooze.ConnTest do
 
     # :forbid says what it means — the call fails rather than being transcoded.
     assert {:error, {:no_common_codec, :audio}} = Mendooze.bridge(conn, out, audio: :forbid)
+    refute_receive {:jsr309_call, "AudioTranscoderCreate", _}, 200
 
-    # :avoid would transcode, and the transcoder chain is the half of §3 that is
-    # not built. Refusing names that, instead of attaching two endpoints that
-    # would exchange codecs neither can decode.
-    assert {:error, {:transcoding_not_implemented, :audio}} =
-             Mendooze.bridge(conn, out, audio: :avoid)
+    # :avoid wanted a common codec, there is none, so it transcodes: one chain
+    # per direction, each encoding for the leg it FEEDS.
+    assert :ok = Mendooze.bridge(conn, out, audio: :avoid)
 
-    # :force always transcodes, so it is refused even when the codecs agree.
-    assert {:error, {:transcoding_not_implemented, :audio}} =
-             Mendooze.bridge(conn, out, audio: :force)
+    assert_receive {:jsr309_call, "AudioTranscoderCreate", [3, _tag_a]}, 1_000
+    # sink ← transcoder, then transcoder ← source: endpoint 4 is fed by 30,
+    # which draws from endpoint 5.
+    assert_receive {:jsr309_call, "EndpointAttachToAudioTranscoder", [3, 4, 30]}, 1_000
+    assert_receive {:jsr309_call, "AudioTranscoderAttachToEndpoint", [3, 30, 5]}, 1_000
+    # …and the mirror chain.
+    assert_receive {:jsr309_call, "EndpointAttachToAudioTranscoder", [3, 5, 31]}, 1_000
+    assert_receive {:jsr309_call, "AudioTranscoderAttachToEndpoint", [3, 31, 4]}, 1_000
 
-    # Nothing was attached on the way out.
+    # Nothing was attached endpoint-to-endpoint: that is the point of a
+    # transcoder standing between them.
     refute_receive {:jsr309_call, "EndpointAttachToEndpoint", _}, 200
+  end
+
+  # :force transcodes even when the codecs AGREE — which is what it buys: each
+  # leg is served the codec it asked for, whatever the other settled on.
+  test "with :force, agreeing on a codec is not a reason to relay" do
+    %{server: server} = start_media_server(&two_leg_handler/2)
+    {conn, out, _tag} = two_negotiated_legs(server)
+
+    assert :ok = Mendooze.bridge(conn, out, audio: :force)
+
+    assert_receive {:jsr309_call, "EndpointAttachToAudioTranscoder", [3, 4, 30]}, 1_000
+    refute_receive {:jsr309_call, "EndpointAttachToEndpoint", _}, 200
+  end
+
+  # A transcoder is a session resource, not a wire: detaching the endpoints
+  # leaves it running for the life of the call.
+  test "unbridging a transcoded media deletes the transcoders, not just the attaches" do
+    %{server: server} = start_media_server(&two_leg_handler/2)
+    {conn, out, _tag} = two_negotiated_legs(server)
+    :ok = Mendooze.bridge(conn, out, audio: :force)
+
+    assert :ok = Mendooze.unbridge(conn, out)
+
+    assert_receive {:jsr309_call, "AudioTranscoderDettach", [3, 30]}, 1_000
+    assert_receive {:jsr309_call, "AudioTranscoderDelete", [3, 30]}, 1_000
+    assert_receive {:jsr309_call, "AudioTranscoderDettach", [3, 31]}, 1_000
+    assert_receive {:jsr309_call, "AudioTranscoderDelete", [3, 31]}, 1_000
   end
 
   test "a media neither leg has negotiated is not attached" do

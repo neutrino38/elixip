@@ -35,6 +35,33 @@ defmodule MediaServer.Mendooze.Conn do
 
   @default_rtp_timeout_ms 10_000
 
+  # Video sizes, from the server's own config.h (CIF = 1 → 352x288). Read there
+  # rather than from the Java client's constants: the client spells one of the
+  # transcoder RPCs `AudioTranscoderDetach` while the server registers
+  # `AudioTranscoderDettach`, which is a good reminder of which side is
+  # authoritative.
+  @video_sizes %{
+    qcif: 0,
+    cif: 1,
+    vga: 2,
+    pal: 3,
+    hvga: 4,
+    qvga: 5,
+    hd720p: 6,
+    wqvga: 7,
+    fourcif: 12,
+    foursif: 13,
+    xga: 14,
+    dcif: 16
+  }
+
+  # What the Java gateway passes, and what a transcoded leg gets unless the
+  # connection opts say otherwise (`:video_size`, `:video_fps`,
+  # `:video_intra_period`).
+  @default_video_size :cif
+  @default_video_fps 20
+  @default_video_intra_period 200
+
   # MediaFrame::Type wire values
   @media_int %{audio: 0, video: 1, text: 2, application: 3}
   # MediaFrame::MediaProtocol RTP
@@ -300,6 +327,10 @@ defmodule MediaServer.Mendooze.Conn do
       medias: medias,
       endpoint_id: nil,
       legs: %{},
+      # What each media is wired with: %{media => :attach | {:transcode, [ids]}}.
+      # The transcoder ids are why this is kept — they are session resources and
+      # have to be deleted, not merely detached.
+      bridges: %{},
       status: :init,
       # sub-resources: ref => %{...}; tags "p-<n>"/"r-<n>" route server events.
       # Each records the leg whose endpoint it is attached to.
@@ -409,17 +440,19 @@ defmodule MediaServer.Mendooze.Conn do
     with {:ok, policy} <- MediaServer.transcoding_policy(opts),
          {:ok, la, lb} <- both_legs(state, a, b),
          {:ok, medias} <- bridgeable_medias(la, lb, policy) do
-      case Enum.reduce_while(medias, :ok, fn media, :ok ->
-             case attach_pair(state, la, lb, media) do
-               :ok -> {:cont, :ok}
+      case Enum.reduce_while(medias, {:ok, state}, fn {media, how}, {:ok, st} ->
+             case wire_media(st, la, lb, media, how) do
+               {:ok, st} -> {:cont, {:ok, st}}
                err -> {:halt, err}
              end
            end) do
-        :ok ->
+        {:ok, state} ->
           Logger.info(
             module: __MODULE__,
             cnx_tag: state.sess_tag,
-            message: "bridged #{la.leg} <-> #{lb.leg} on #{inspect(medias)}"
+            message:
+              "bridged #{la.leg} <-> #{lb.leg} on " <>
+                inspect(Enum.map(medias, fn {m, how} -> {m, how} end))
           )
 
           {:reply, :ok, state}
@@ -436,10 +469,10 @@ defmodule MediaServer.Mendooze.Conn do
     case both_legs(state, a, b) do
       {:ok, la, lb} ->
         Enum.each([la, lb], &detach_all/1)
-        {:reply, :ok, state}
+        {:reply, :ok, release_transcoders(state)}
 
       {:error, _} ->
-        {:reply, :ok, state}
+        {:reply, :ok, release_transcoders(state)}
     end
   end
 
@@ -576,6 +609,26 @@ defmodule MediaServer.Mendooze.Conn do
   def handle_call({:stop_echo, _ref}, _from, state),
     do: {:reply, {:error, :no_such_echo}, state}
 
+  # Detaching the endpoints is not enough: a transcoder is a session resource of
+  # its own, and one left behind survives every re-bridge for the life of the
+  # call. The Java gateway deletes them for the same reason.
+  defp release_transcoders(state) do
+    Enum.each(state.bridges, fn
+      {media, {:transcode, ids}} ->
+        kind = transcoder_kind(media)
+
+        Enum.each(ids, fn tr ->
+          rpc(state, "#{kind}TranscoderDettach", [state.sess_id, tr])
+          rpc(state, "#{kind}TranscoderDelete", [state.sess_id, tr])
+        end)
+
+      {_media, :attach} ->
+        :ok
+    end)
+
+    %{state | bridges: %{}}
+  end
+
   defp both_legs(state, a, b) do
     case {leg(state, a), leg(state, b)} do
       {nil, _} -> {:error, {:no_such_leg, a}}
@@ -596,8 +649,8 @@ defmodule MediaServer.Mendooze.Conn do
 
     Enum.reduce_while(common, {:ok, []}, fn media, {:ok, acc} ->
       case bridge_decision(la, lb, media, policy) do
-        :attach -> {:cont, {:ok, acc ++ [media]}}
         {:error, _} = err -> {:halt, err}
+        how -> {:cont, {:ok, acc ++ [{media, how}]}}
       end
     end)
   end
@@ -613,14 +666,114 @@ defmodule MediaServer.Mendooze.Conn do
       # Nothing settled on this media yet: attaching would connect two endpoints
       # that have not agreed on anything.
       is_nil(code_a) or is_nil(code_b) -> {:error, {:not_negotiated, media}}
-      mode == :force -> {:error, {:transcoding_not_implemented, media}}
+      # Always transcode, even when the codecs agree: what :force buys is that
+      # each leg is served the codec IT asked for, whatever the other settled on.
+      mode == :force -> :transcode
       code_a == code_b -> :attach
       mode == :forbid -> {:error, {:no_common_codec, media}}
-      # :avoid wanted a common codec and there is none. The transcoder chain
-      # (Video/AudioTranscoderCreate + the two attach pairs) is the remaining
-      # half of §3 and is not built, so this refuses rather than attaching two
-      # endpoints that would exchange codecs neither can decode.
-      true -> {:error, {:transcoding_not_implemented, media}}
+      true -> :transcode
+    end
+  end
+
+  defp wire_media(state, la, lb, media, :attach) do
+    case attach_pair(state, la, lb, media) do
+      :ok -> {:ok, put_bridge(state, media, :attach)}
+      err -> err
+    end
+  end
+
+  defp wire_media(state, la, lb, media, :transcode) do
+    case transcode_pair(state, la, lb, media) do
+      {:ok, ids} -> {:ok, put_bridge(state, media, {:transcode, ids})}
+      err -> err
+    end
+  end
+
+  defp put_bridge(state, media, how), do: %{state | bridges: Map.put(state.bridges, media, how)}
+
+  # Two chains, one per direction — a transcoder is one-way. Reading the
+  # attach direction right is the whole difference between a working call and a
+  # silent one, and both RPCs put the SINK first and the SOURCE second, exactly
+  # like EndpointAttachToEndpoint:
+  #
+  #   EndpointAttachTo<Kind>Transcoder(S, EP, TR)  →  EP  ← TR
+  #   <Kind>TranscoderAttachToEndpoint(S, TR, EP)  →  TR  ← EP
+  #
+  # so `la ← tr_a ← lb` is what feeds la with lb's media, re-encoded. The codec
+  # set on tr_a is therefore LA's: the transcoder produces what the leg it feeds
+  # asked for. That is what makes `:force` mean something — each side is served
+  # its own codec whatever the other settled on.
+  defp transcode_pair(state, la, lb, media) do
+    with {:ok, tr_a} <- build_chain(state, la, lb, media),
+         {:ok, tr_b} <- build_chain(state, lb, la, media) do
+      {:ok, [tr_a, tr_b]}
+    else
+      {:error, reason} -> {:error, {:transcode_failed, media, reason}}
+    end
+  end
+
+  # One direction: `sink ← transcoder ← source`, encoding for `sink`.
+  defp build_chain(state, sink, source, media) do
+    kind = transcoder_kind(media)
+    tag = "#{media} transcoder #{sink.leg}"
+
+    with {:ok, tr} <- create(state, "#{kind}TranscoderCreate", [state.sess_id, tag]),
+         {:ok, _} <-
+           rpc(state, "EndpointAttachTo#{kind}Transcoder", [
+             state.sess_id,
+             sink.endpoint_id,
+             tr
+           ]),
+         {:ok, _} <-
+           rpc(state, "#{kind}TranscoderAttachToEndpoint", [
+             state.sess_id,
+             tr,
+             source.endpoint_id
+           ]),
+         :ok <- set_transcoder_codec(state, sink, media, tr) do
+      {:ok, tr}
+    else
+      {:error, _} = err -> err
+    end
+  end
+
+  defp transcoder_kind(:audio), do: "Audio"
+  defp transcoder_kind(:video), do: "Video"
+
+  # The codec the transcoder must PRODUCE: the one its sink negotiated.
+  #
+  # Video carries a size, a frame rate, a bitrate and an intra period; audio
+  # carries none of that. The codec parameters (an H.264 profile-level-id, say)
+  # are NOT forwarded yet — the props map is empty, so the server picks its own
+  # default. Worth knowing before trusting this with a picky H.264 endpoint.
+  defp set_transcoder_codec(state, sink, :video, tr) do
+    size = Map.fetch!(@video_sizes, Keyword.get(sink.opts, :video_size, @default_video_size))
+    fps = Keyword.get(sink.opts, :video_fps, @default_video_fps)
+    intra = Keyword.get(sink.opts, :video_intra_period, @default_video_intra_period)
+
+    args = [
+      state.sess_id,
+      tr,
+      Map.fetch!(sink.negotiated, :video),
+      size,
+      fps,
+      bandwidth_kbps(sink, :video),
+      intra,
+      %{}
+    ]
+
+    case rpc(state, "VideoTranscoderSetCodec", args) do
+      {:ok, _} -> :ok
+      err -> err
+    end
+  end
+
+  defp set_transcoder_codec(state, sink, :audio, tr) do
+    args = [state.sess_id, tr, Map.fetch!(sink.negotiated, :audio), %{}]
+
+    case rpc(state, "AudioTranscoderSetCodec", args) do
+      {:ok, _} -> :ok
+      err -> err
     end
   end
 
@@ -2252,6 +2405,10 @@ defmodule MediaServer.Mendooze.Conn do
   defp teardown(%{status: :closed} = state), do: state
 
   defp teardown(state) do
+    # Transcoders first: they sit between the endpoints, and deleting the session
+    # underneath them is not a reason to leave them to it.
+    state = release_transcoders(state)
+
     # Whatever legs are left — `close` releases them one at a time, a crash or a
     # setup failure leaves them all.
     Enum.each(Map.values(state.legs), &release_leg(state, &1))
