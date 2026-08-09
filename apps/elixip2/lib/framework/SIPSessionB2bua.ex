@@ -19,6 +19,10 @@ defmodule SIP.B2bua.Peer do
       `$ru`; mandatory to reach a registered contact), `:keep` preserves the
       original R-URI and only routes to the target (kamailio `$du`; the
       trunk/SBC case).
+    * `provider` — `{module, server}` (or a bare `module` registered under its
+      own name) handing out targets one at a time instead of a static `uris`
+      list: the call-queue case, see `SIP.B2bua.TargetProvider`. Exclusive with
+      `uris`.
     * `retry_on` — which final responses make a `:serial` hunt move on to the
       next target: a list of codes and/or ranges, or `nil` for the default.
     * `notify_progress` — surface `{:outbound, {:serial_*, …}}` events as the
@@ -34,12 +38,33 @@ defmodule SIP.B2bua.Peer do
             use_srv: false,
             fork: :none,
             ruri: :peer,
+            provider: nil,
             retry_on: nil,
             notify_progress: false,
             outbound_proxy: nil,
             trunk_pid: nil
+end
 
-  @callback get_next_target(pid()) :: {:ok, %SIP.Uri{}} | {:error, term()} | :no_more_targets
+defmodule SIP.B2bua.Hunt do
+  @moduledoc """
+  A search for a target driven by a `SIP.B2bua.TargetProvider` (design §3.4).
+
+  It outlives the leg in both directions: it exists before one, because a
+  provider may answer `{:wait, ms}` to the very first ask — the caller is queued
+  and nothing has been dialled yet — and it carries what creating that leg will
+  need when a target finally comes.
+
+  `call_ref` is the identity the provider holds its reservation against, stable
+  for the whole search.
+  """
+  defstruct provider: nil,
+            call_ref: nil,
+            peer: nil,
+            orig_req: nil,
+            media: false,
+            opts: [],
+            waiting: false,
+            ring_timeout: nil
 end
 
 defmodule SIP.B2bua.Leg do
@@ -75,7 +100,7 @@ end
 
 defmodule SIP.B2bua.State do
   @moduledoc "B2BUA bookkeeping, stored in the scenario context appdata under `:__b2bua__`."
-  defstruct legs: %{}, pending: %{}
+  defstruct legs: %{}, pending: %{}, hunt: nil
 end
 
 defmodule SIP.Session.B2bua do
@@ -97,7 +122,7 @@ defmodule SIP.Session.B2bua do
   """
   require Logger
 
-  alias SIP.B2bua.{Leg, Peer, Pending, State}
+  alias SIP.B2bua.{Hunt, Leg, Peer, Pending, State}
 
   @appdata_key :__b2bua__
   @outbound_tag :outbound
@@ -187,6 +212,38 @@ defmodule SIP.Session.B2bua do
           SIP.Scenario.Monitor.note_command(:sip, "b2bua_send_BYE")
 
           var!(sip_ctx) = SIP.Session.B2bua.do_send_bye(var!(sip_ctx))
+        end
+      end
+
+      @doc """
+      Give up on the target being tried and ask for the next one.
+
+      What a ring timeout acts on — "ring this agent 15 s, then take the next" —
+      and what resumes a search a provider parked with `{:wait, ms}`. The
+      attempt in flight, if any, is CANCELled and reported to the provider as
+      `:no_answer`.
+
+      Only meaningful with a `%Peer{provider:}`: a static list needs nothing,
+      its failures already walk it.
+      """
+      defmacro b2bua_try_next() do
+        quote do
+          SIP.Scenario.Monitor.note_command(:sip, "b2bua_try_next")
+
+          var!(sip_ctx) = SIP.Session.B2bua.do_try_next(var!(sip_ctx))
+        end
+      end
+
+      @doc """
+      How long the provider asked for this target to be rung, in milliseconds,
+      or nil when it said nothing. Meant to be read straight into an `after`:
+
+          after
+            b2bua_ring_timeout() || 20_000 -> b2bua_try_next(); goto loop
+      """
+      defmacro b2bua_ring_timeout() do
+        quote do
+          SIP.Session.B2bua.ring_timeout(var!(sip_ctx))
         end
       end
 
@@ -288,12 +345,164 @@ defmodule SIP.Session.B2bua do
         # bridge/2 callback in MediaServer.Behaviour), {:rtpengine, _} is P4.
         fail(sip_ctx, {:b2bua, :media_mode_not_implemented, media})
 
-      peer.uris == [] ->
+      # A peer names its targets one way or the other. With a provider `uris` is
+      # empty by construction — the provider IS the list (§3.4).
+      peer.uris == [] and provider_of(peer) == nil ->
         fail(sip_ctx, {:b2bua, :no_target})
 
       true ->
-        create_leg(sip_ctx, req, peer, media, opts)
+        case provider_of(peer) do
+          nil ->
+            create_leg(sip_ctx, req, peer, media, opts)
+
+          provider ->
+            # The targets are not knowable up front: keep what creating the leg
+            # will need, and ask. The leg itself waits for a target — with a
+            # queue there may be none yet (§3.4).
+            hunt = %Hunt{
+              provider: provider,
+              call_ref: make_ref(),
+              peer: peer,
+              orig_req: req,
+              media: media,
+              opts: opts
+            }
+
+            sip_ctx |> put_hunt(hunt) |> ask_provider_and_arm(hunt)
+        end
     end
+  end
+
+  # ── The provider (§3.4) ─────────────────────────────────────────────────────
+
+  # `{module, server}`, or a bare module registered under its own name — the
+  # kelixip module pattern. A bare pid cannot work: the callbacks have to be
+  # dispatched somewhere, and only the module says where.
+  defp provider_of(%Peer{provider: nil}), do: nil
+  defp provider_of(%Peer{provider: {mod, server}}) when is_atom(mod), do: {mod, server}
+  defp provider_of(%Peer{provider: mod}) when is_atom(mod), do: {mod, mod}
+  defp provider_of(_peer), do: nil
+
+  # Ask for a target and act on the answer. The one place that decides what each
+  # reply means, so `b2bua_forward/3` and `b2bua_try_next/0` cannot drift.
+  defp ask_provider_and_arm(sip_ctx, hunt, on_exhausted \\ &Function.identity/1)
+
+  defp ask_provider_and_arm(sip_ctx, %Hunt{} = hunt, on_exhausted) do
+    case ask(hunt.provider, hunt.call_ref, hunt.orig_req) do
+      {:ok, uri} ->
+        arm_target(sip_ctx, hunt, normalize_uri(uri), [])
+
+      {:ok, uri, opts} when is_list(opts) ->
+        arm_target(sip_ctx, hunt, normalize_uri(uri), opts)
+
+      {:wait, ms} when is_integer(ms) and ms >= 0 ->
+        sip_ctx
+        |> put_hunt(%Hunt{hunt | waiting: true})
+        |> note_progress({:serial_waiting, ms, now()})
+        |> SIP.Context.set(:lasterr, :ok)
+
+      :exhausted ->
+        sip_ctx
+        |> put_hunt(%Hunt{hunt | waiting: false})
+        |> note_progress({:serial_exhausted, now()})
+        |> SIP.Context.set(:lasterr, :ok)
+        |> on_exhausted.()
+
+      {:error, reason} ->
+        Logger.warning(module: __MODULE__, message: "b2bua: provider failed: #{inspect(reason)}")
+
+        sip_ctx
+        |> put_hunt(%Hunt{hunt | waiting: false})
+        |> note_progress({:serial_exhausted, now()})
+        |> SIP.Context.set(:lasterr, :ok)
+        |> on_exhausted.()
+
+      other ->
+        Logger.error(
+          module: __MODULE__,
+          message: "b2bua: provider returned #{inspect(other)}; treating it as exhausted"
+        )
+
+        sip_ctx
+        |> put_hunt(%Hunt{hunt | waiting: false})
+        |> note_progress({:serial_exhausted, now()})
+        |> SIP.Context.set(:lasterr, :ok)
+        |> on_exhausted.()
+    end
+  end
+
+  # The first target creates the leg; every later one is another branch of it.
+  defp arm_target(sip_ctx, %Hunt{} = hunt, uri, opts) do
+    hunt = %Hunt{hunt | waiting: false, ring_timeout: Keyword.get(opts, :ring_timeout)}
+    sip_ctx = put_hunt(sip_ctx, hunt)
+
+    case outbound_leg(sip_ctx) do
+      nil ->
+        # A peer of one target, so the static machinery below builds the leg;
+        # the provider stays on it, which is what later asks read.
+        sip_ctx
+        |> create_leg(hunt.orig_req, %Peer{hunt.peer | uris: [uri]}, hunt.media, hunt.opts)
+        |> note_progress({:serial_attempting, uri, now()})
+
+      %Leg{} = leg ->
+        case SIP.Dialog.fork_branch(leg.dialogpid, uri) do
+          {:ok, new_trans} ->
+            sip_ctx
+            |> move_correlation(leg.initial_trans, new_trans)
+            |> put_leg(@outbound_tag, %Leg{leg | target: uri, initial_trans: new_trans})
+            |> note_progress({:serial_attempting, uri, now()})
+            |> SIP.Context.set(:lasterr, :ok)
+
+          {:error, reason} ->
+            Logger.warning(
+              module: __MODULE__,
+              message: "b2bua: cannot try #{uri} (#{inspect(reason)}); the search stops"
+            )
+
+            sip_ctx
+            |> note_progress({:serial_not_reachable, uri, :transport_error, now()})
+            |> note_progress({:serial_exhausted, now()})
+            |> SIP.Context.set(:lasterr, :ok)
+        end
+    end
+  end
+
+  # The caller is still waiting for an answer to the SAME request; only the
+  # branch that will provide it changed.
+  defp move_correlation(sip_ctx, from_tid, to_tid) do
+    case Map.get(state(sip_ctx).pending, from_tid) do
+      %Pending{} = pending ->
+        sip_ctx
+        |> drop_pending(from_tid)
+        |> add_pending(to_tid, pending.orig_req, pending.orig_leg, pending.method)
+
+      nil ->
+        sip_ctx
+    end
+  end
+
+  defp ask({mod, server}, call_ref, req) do
+    mod.next_target(server, call_ref, req)
+  rescue
+    err -> {:error, {:provider_raised, Exception.message(err)}}
+  catch
+    :exit, reason -> {:error, {:provider_down, reason}}
+  end
+
+  # Tell the provider how the attempt it handed out ended, so the reservation it
+  # is holding is released. Never lets the provider's trouble become the call's.
+  defp report_outcome(sip_ctx, outcome) do
+    case hunt(sip_ctx) do
+      %Hunt{provider: {mod, server}, call_ref: ref} ->
+        protect("report #{inspect(outcome)} to the provider", fn ->
+          mod.attempt_ended(server, ref, outcome)
+        end)
+
+      _ ->
+        :ok
+    end
+
+    sip_ctx
   end
 
   defp create_leg(sip_ctx, req, peer, media, opts) do
@@ -326,7 +535,7 @@ defmodule SIP.Session.B2bua do
     # `fork:` is declared here, not on the first fork_branch/2: this very request
     # is the first branch, and with more targets behind it its failure must end
     # the branch rather than the dialog.
-    dialog_opts = [tag: @outbound_tag, fork: untried != []]
+    dialog_opts = [tag: @outbound_tag, fork: untried != [] or provider_of(peer) != nil]
 
     case SIP.Dialog.start_dialog(fwd, timeout, :outbound, sip_ctx.debug, dialog_opts) do
       {:ok, dialog_pid, _dialog_id} ->
@@ -544,10 +753,15 @@ defmodule SIP.Session.B2bua do
         # A refusal from one target of a serial hunt is not the answer to the
         # call — it is the answer of one device. Try the next one instead of
         # telling the caller the call failed.
-        if next_target(sip_ctx, resp, tid) do
-          try_next_target(sip_ctx, resp, pending, tid)
-        else
-          relay_reply(sip_ctx, resp, pending, tid)
+        cond do
+          provider_hunt?(sip_ctx, resp, tid) ->
+            ask_provider_next(sip_ctx, resp, pending, tid)
+
+          next_target(sip_ctx, resp, tid) ->
+            try_next_target(sip_ctx, resp, pending, tid)
+
+          true ->
+            relay_reply(sip_ctx, resp, pending, tid)
         end
 
       nil ->
@@ -575,6 +789,32 @@ defmodule SIP.Session.B2bua do
   # NOT 3xx — a redirect names new targets, which is its own handling (P4).
   # NOT 487 either, whatever the peer asks for — see @never_retry.
   @default_retry_on [400..599]
+
+  # Is this final one the PROVIDER should be asked about, rather than the end of
+  # the call? Same test as the static hunt, minus the untried list — the provider
+  # is the list.
+  defp provider_hunt?(sip_ctx, resp, tid) do
+    with %Leg{initial_trans: ^tid, cancelled: false, peer: peer} <- outbound_leg(sip_ctx),
+         %Hunt{} <- hunt(sip_ctx),
+         :serial <- peer.fork,
+         true <- resp.response >= 300 and retryable?(peer, resp.response) do
+      true
+    else
+      _ -> false
+    end
+  end
+
+  # Report the refusal, then ask for another target. If the provider has none
+  # left, the response the caller has been waiting for is relayed after all —
+  # that is what `on_exhausted` carries.
+  defp ask_provider_next(sip_ctx, resp, %Pending{} = pending, tid) do
+    leg = outbound_leg(sip_ctx)
+
+    sip_ctx
+    |> note_progress({:serial_not_reachable, leg.target, resp.response, now()})
+    |> report_outcome({:rejected, leg.target, resp.response})
+    |> ask_provider_and_arm(hunt(sip_ctx), &relay_reply(&1, resp, pending, tid))
+  end
 
   # The next target to try, or nil when this response ends the hunt. Only the
   # leg's *current* initial transaction is a hunt candidate: a response to some
@@ -666,11 +906,77 @@ defmodule SIP.Session.B2bua do
   """
   @spec hunting?(%SIP.Context{}) :: boolean()
   def hunting?(sip_ctx = %SIP.Context{}) do
+    cond do
+      match?(%Leg{cancelled: true}, outbound_leg(sip_ctx)) -> false
+      # Parked on {:wait, ms}: nothing is ringing, and the search is very much on.
+      match?(%Hunt{waiting: true}, hunt(sip_ctx)) -> true
+      true -> attempt_in_flight?(sip_ctx)
+    end
+  end
+
+  defp attempt_in_flight?(sip_ctx) do
     case outbound_leg(sip_ctx) do
-      %Leg{cancelled: true} -> false
       %Leg{initial_trans: tid} -> Map.has_key?(state(sip_ctx).pending, tid)
       _ -> false
     end
+  end
+
+  @doc "How long the provider asked for the current target to be rung, or nil."
+  @spec ring_timeout(%SIP.Context{}) :: non_neg_integer() | nil
+  def ring_timeout(sip_ctx) do
+    case hunt(sip_ctx) do
+      %Hunt{ring_timeout: ms} -> ms
+      _ -> nil
+    end
+  end
+
+  @doc """
+  Give up on the target being tried and ask the provider for the next one.
+  Backs the `b2bua_try_next` macro (design §3.4).
+
+  The attempt in flight is CANCELled and reported as `:no_answer` — which is
+  what it is, whether a ring timeout fired or the scenario simply moved on. With
+  no provider there is nothing to ask, and the call is left alone.
+  """
+  @spec do_try_next(%SIP.Context{}) :: %SIP.Context{}
+  def do_try_next(sip_ctx = %SIP.Context{}) do
+    case hunt(sip_ctx) do
+      nil ->
+        fail(sip_ctx, {:b2bua, :no_provider_to_ask})
+
+      %Hunt{} = hunt ->
+        sip_ctx
+        |> cancel_attempt_in_flight()
+        |> report_outcome(attempt_outcome(sip_ctx))
+        |> ask_provider_and_arm(hunt)
+    end
+  end
+
+  # What to tell the provider about the attempt we are abandoning. No leg yet
+  # means the search was parked on `{:wait, ms}` and nothing was ever tried.
+  defp attempt_outcome(sip_ctx) do
+    case outbound_leg(sip_ctx) do
+      %Leg{target: target} when not is_nil(target) -> {:no_answer, target}
+      _ -> :abandoned
+    end
+  end
+
+  # CANCEL whatever branch is ringing, if one is. Silent when there is none —
+  # the hunt may be parked, or the attempt already finished.
+  defp cancel_attempt_in_flight(sip_ctx) do
+    case outbound_leg(sip_ctx) do
+      %Leg{} = leg ->
+        if leg_alive?(leg) and Map.has_key?(state(sip_ctx).pending, leg.initial_trans) do
+          protect("cancel the attempt toward #{leg.target}", fn ->
+            SIP.Dialog.cancel(leg.dialogpid, leg.initial_trans)
+          end)
+        end
+
+      _ ->
+        :ok
+    end
+
+    sip_ctx
   end
 
   @doc """
@@ -686,18 +992,19 @@ defmodule SIP.Session.B2bua do
   def do_cancel_forward(sip_ctx = %SIP.Context{}) do
     case outbound_leg(sip_ctx) do
       nil ->
-        # Nothing to stop. Not an error: a scenario may say it defensively, and
-        # on a path where no leg was ever created it is simply true already.
-        SIP.Context.set(sip_ctx, :lasterr, :ok)
+        # No leg — but there may be a search parked on {:wait, ms}, whose
+        # reservation still has to be released. Otherwise a no-op: a scenario
+        # may say this defensively.
+        sip_ctx
+        |> report_outcome(:abandoned)
+        |> put_hunt(nil)
+        |> SIP.Context.set(:lasterr, :ok)
 
       %Leg{} = leg ->
-        if leg_alive?(leg) and Map.has_key?(state(sip_ctx).pending, leg.initial_trans) do
-          protect("cancel the attempt toward #{leg.target}", fn ->
-            SIP.Dialog.cancel(leg.dialogpid, leg.initial_trans)
-          end)
-        end
-
         sip_ctx
+        |> cancel_attempt_in_flight()
+        |> report_outcome(:abandoned)
+        |> put_hunt(nil)
         |> put_leg(@outbound_tag, %Leg{leg | untried: [], cancelled: true})
         |> SIP.Context.set(:lasterr, :ok)
     end
@@ -731,13 +1038,21 @@ defmodule SIP.Session.B2bua do
   # from us, those from the dialog. What is exact is the timestamp, which is what
   # a record of the hunt is built from.
   defp note_progress(sip_ctx, event) do
-    case outbound_leg(sip_ctx) do
-      %Leg{peer: %Peer{notify_progress: true}, tag: tag} when not is_nil(tag) ->
-        send(self(), {tag, event})
+    # From the leg, or from the hunt when there is not one yet — a provider can
+    # park a caller on {:wait, ms} before anything has been dialled.
+    peer =
+      case outbound_leg(sip_ctx) do
+        %Leg{peer: %Peer{} = peer} ->
+          peer
 
-      _ ->
-        :ok
-    end
+        _ ->
+          case hunt(sip_ctx) do
+            %Hunt{peer: %Peer{} = peer} -> peer
+            _ -> nil
+          end
+      end
+
+    if match?(%Peer{notify_progress: true}, peer), do: send(self(), {@outbound_tag, event})
 
     sip_ctx
   end
@@ -854,9 +1169,13 @@ defmodule SIP.Session.B2bua do
   def release_legs(sip_ctx = %SIP.Context{}) do
     state = state(sip_ctx)
 
-    if state.legs == %{} and state.pending == %{} do
+    if state.legs == %{} and state.pending == %{} and is_nil(state.hunt) do
       sip_ctx
     else
+      # Release whatever a provider is holding for this call before anything
+      # else: an agent reserved for a call that no longer exists is an agent the
+      # queue believes is busy for good (§3.4).
+      report_outcome(sip_ctx, :abandoned)
       Enum.each(Map.values(state.legs), &wind_down_leg(&1, state))
       Enum.each(state.pending, fn {_tid, pending} -> answer_orphan(sip_ctx, pending) end)
       put_state(sip_ctx, %State{})
@@ -982,6 +1301,14 @@ defmodule SIP.Session.B2bua do
   def leg_alive?(_), do: false
 
   defp put_state(sip_ctx, state), do: SIP.Context.appdata_set(sip_ctx, @appdata_key, state)
+
+  @doc "The provider-driven search in progress, or nil."
+  @spec hunt(%SIP.Context{}) :: %Hunt{} | nil
+  def hunt(sip_ctx), do: state(sip_ctx).hunt
+
+  defp put_hunt(sip_ctx, hunt) do
+    put_state(sip_ctx, %State{state(sip_ctx) | hunt: hunt})
+  end
 
   defp put_leg(sip_ctx, tag, leg) do
     state = state(sip_ctx)

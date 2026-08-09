@@ -399,10 +399,13 @@ hunt of §3.1 — one target at a time, exactly what §3.3's branches already wa
 so it needs nothing from parallel forking and can be built on what exists today.
 
 ```elixir
-%SIP.B2bua.Peer{provider: queue_pid, fork: :serial}
-# shorthand, since a bare pid can mean nothing else:
-b2bua_forward(req, queue_pid, false)
+%SIP.B2bua.Peer{provider: {Kelix.Mod.Queue, queue_pid}, fork: :serial}
+%SIP.B2bua.Peer{provider: Kelix.Mod.Queue}   # server registered under its own name
 ```
+
+**Delivered**, with one refinement on the sketch: `{module, server}` rather than
+a bare pid. The callbacks have to be dispatched somewhere, and only the module
+says where; the server (a pid or a registered name) is the instance they act on.
 
 `provider` and `uris` are exclusive: with a provider set, `uris` is ignored (a
 peer carrying both is a configuration error, not a merge).
@@ -471,10 +474,22 @@ end
 ```
 
 `b2bua_try_next/0` is the one new primitive: abandon the branch in flight
-(CANCEL it if it is ringing), report the outcome to the provider, ask for the
-next target, and arm it as a new branch — or surface `{:wait, ms}` / `:exhausted`
-to the scenario. It is also what makes the ring timeout expressible at all,
-since today a branch is only abandoned when it answers.
+(CANCEL it if it is ringing), report it to the provider as `:no_answer`, ask for
+the next target, and arm it as a new branch — or park the search on
+`{:wait, ms}`. It is also what makes the ring timeout expressible at all, since
+before it a branch was only abandoned when it answered.
+
+Two things worth knowing about the shape it took:
+
+- **A refusal asks the provider on its own**, through the same path
+  `b2bua_forward_reply/1` already walked for a static list: `retry_on` decides,
+  the provider supplies. `b2bua_try_next/0` is for what no response covers — a
+  ring timeout, or resuming a search parked on `{:wait, ms}`.
+- **The `%Hunt{}` outlives the leg in both directions.** It exists before one,
+  because a provider may answer `{:wait, ms}` to the very first ask — the caller
+  is queued and nothing has been dialled — so it carries what creating that leg
+  will need. `hunting?/0` is true while parked, which is the honest answer:
+  nothing is ringing and the search is very much on.
 
 #### What it does not solve
 
