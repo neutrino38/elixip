@@ -172,6 +172,37 @@ defmodule SIP.Test.DialogFork do
     assert totag == early_tag
   end
 
+  # RFC 3261 §17.1.1.2 / §8.1.3.1: a client transaction that times out tells the
+  # TU, which treats it as a 408. Nothing was said at all before, so a request
+  # that got no answer left the application waiting on its own timer with no idea
+  # why — and a hunt never moved past an unreachable device.
+  test "a request nobody answers is reported to the application as a 408" do
+    # A peer that never answers: nothing is simulated on it.
+    _silent = peer!("fk6")
+
+    invite = %{
+      "Max-Forwards" => "70",
+      method: :INVITE,
+      ruri: target("fk6"),
+      from: %SIP.Uri{scheme: "sip:", userpart: "alice", domain: "example.com"},
+      to: %SIP.Uri{scheme: "sip:", userpart: "bob", domain: "example.com"},
+      contact: %SIP.Uri{userpart: "alice", domain: "0.0.0.0", params: %{}},
+      useragent: "Elixipp-test",
+      callid: nil,
+      contentlength: 0
+    }
+
+    # A short ring timeout so timer B fires inside the test rather than in 32 s.
+    {:ok, dlg, _id} = SIP.Dialog.start_dialog(invite, 2, :outbound, false, tag: :outbound)
+    assert_receive {:outbound, {:onnewdialog, :ok, _tid}}, 2_000
+
+    assert_receive {:outbound, {408, rsp, _tid, ^dlg}}, 8_000
+    assert rsp.response == 408
+    # It says WHICH request went unanswered: the CSeq method is what
+    # SIP.Session.dispatch_reply/3 routes on.
+    assert match?([_, :INVITE], rsp.cseq)
+  end
+
   test "forking is refused on a dialog we did not originate" do
     # An inbound dialog has nothing to fork: the request came to us.
     state = %SIP.DialogImpl{direction: :inbound}

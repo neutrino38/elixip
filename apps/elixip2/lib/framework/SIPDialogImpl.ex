@@ -954,6 +954,44 @@ defmodule SIP.DialogImpl do
     end
   end
 
+  # Only a CLIENT transaction is reported: a server transaction timing out means
+  # the application never answered, which it hardly needs telling. The keepalive
+  # OPTIONS we send ourselves stay dialog-internal too — an unanswered one is
+  # counted by SIP.DialogImpl.KeepAlive, which tears the dialog down after
+  # several, and surfacing it here would put a 408 in the application's mailbox
+  # for a request it never sent.
+  defp notify_transaction_timeout(state, req, transact_pid, module)
+       when module in [SIP.ICT, SIP.NICT] do
+    rsp = timeout_response(req)
+
+    unless KeepAlive.response?(state, rsp) do
+      send_to_app(state, {408, rsp, transact_pid, self()})
+    end
+
+    state
+  end
+
+  defp notify_transaction_timeout(state, _req, _transact_pid, _module), do: state
+
+  # A 408 the stack makes up for a request that was never answered. It is a local
+  # notification and never goes on the wire, so it carries only what a reader of
+  # a response needs: the status, and the dialog/CSeq coordinates that say WHICH
+  # request went unanswered (`SIP.Session.dispatch_reply/3` routes on the CSeq
+  # method, and the B2BUA correlates on the transaction pid delivered alongside).
+  defp timeout_response(req) do
+    %{
+      method: false,
+      response: 408,
+      reason: "Request Timeout",
+      callid: Map.get(req, :callid),
+      cseq: Map.get(req, :cseq),
+      from: Map.get(req, :from),
+      to: Map.get(req, :to),
+      contentlength: 0,
+      body: []
+    }
+  end
+
   defp adopts_totag?(%SIP.DialogImpl{forking: true}, rsp), do: rsp.response in 200..299
   defp adopts_totag?(_state, rsp), do: rsp.response < 300
 
@@ -1240,6 +1278,18 @@ defmodule SIP.DialogImpl do
         state = %SIP.DialogImpl{}
       )
       when is_pid(transact_pid) do
+    # Tell the application before forgetting the transaction. RFC 3261 §17.1.1.2
+    # and §8.1.3.1: a client transaction that times out informs the TU, which
+    # treats it exactly as a 408 — so that is what the application is handed.
+    #
+    # Nothing was said at all until now: a request that got no answer left the
+    # scenario waiting on its own `after` clause with no idea why, and a B2BUA
+    # hunting an unreachable device never moved on to the next one. A synthetic
+    # 408 also needs no new plumbing anywhere above: it flows through
+    # `process_sip_reply`, `b2bua_forward_reply` and a hunt's retry-on list like
+    # any other final.
+    state = notify_transaction_timeout(state, req, transact_pid, module)
+
     # Transaction expired -> remove it
     state = close_transaction(state, transact_pid)
 

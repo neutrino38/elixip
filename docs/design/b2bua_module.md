@@ -721,7 +721,7 @@ ACK+BYE the late 2xx" cannot be tested credibly against a single shared peer.
 | **P2a** ✅ | registrar-driven calling (§3.2): `Kelix.Mod.Registrar.targets/2`, q ordering, `apps/kelixip/scripts/b2bua.exs`. Dials the highest-q contact — the whole call for a single-contact AOR, and no shape change when P2b lands |
 | **P2b-1** ✅ | dialog-layer branches: `SIP.Dialog.fork_branch/2`, the branch table, the `add_totag` rework (a forked dialog adopts only a 2xx's tag), winner adoption + CANCEL of the losers, and the dialog surviving a branch failure so the next target can be armed |
 | **P2b-2** ✅ | session-layer serial hunt: `%Peer{fork: :serial}` + the `retry_on` list, the untried-target list on the leg, `b2bua_hunting?/0`, and the kelixip script hunting an AOR's contacts in q order |
-| **P2b-3** | failover across SRV priorities, per-peer `outbound_proxy` |
+| **P2b-3** | failover across SRV priorities, per-peer `outbound_proxy`. A branch that dies **without** a response already drives the hunt: the dialog reports a client-transaction timeout to the application as a synthetic 408 (RFC 3261 §17.1.1.2, §8.1.3.1), which the default retry-on list covers |
 | **P3** | `{:mediaserver, …}` mode: leg-qualified media handles, `bridge/2` callback in `MediaServer.Behaviour` + Mendooze implementation, offer/answer choreography |
 | **P4** | parallel forking (branch sets in the leg dialog, §3.3: winner adoption, late-2xx ACK+BYE, best-response aggregation; q-group semantics of §3.2), `{:rtpengine, …}` mode, trunk processes (`trunk_pid`); multi-leg generalization only if attended transfer / 3pcc demands it |
 
