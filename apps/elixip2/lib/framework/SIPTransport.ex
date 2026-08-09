@@ -373,33 +373,76 @@ defmodule SIP.Transport do
 
 
   # ------------------------------------- Transport Public API ----------------------------------------
-  @spec send_msg( pid(), binary(), binary() | tuple(), integer() ) :: any()
-  @doc "Send a SIP message through a transport instance designated by its process ID"
-  def send_msg(tid, msg, destip, destport) when is_bitstring(msg) and is_tuple(destip) and is_integer(destport) do
-    GenServer.call(tid, { :sendmsg, msg, destip, destport})
+
+  @doc """
+  Call a transport instance, turning its death into a transport error.
+
+  A transport is a plain process reached by `GenServer.call`, and its pid is
+  CACHED — in a transaction's state, in a dialog's `msg.ruri` — so it long
+  outlives any check that it is alive. Calling a dead one raises an exit **in the
+  caller's callback**, and the callers here are a transaction (whose death used to
+  take its dialog with it, §14.2 (a)) and a dialog handling a scenario's
+  `GenServer.call` (whose exit propagated to the scenario and skipped its whole
+  teardown, §14.2 (b)).
+
+  So it is turned into `:transporterror` — a return value every caller of a
+  transport already handles, because a send can always fail. Design §14.4, R3.
+  """
+  @spec safe_call(pid(), any()) :: any() | :transporterror
+  def safe_call(tid, request) do
+    GenServer.call(tid, request)
+  catch
+    :exit, reason ->
+      Logger.debug(module: __MODULE__,
+        message: "transport #{inspect(tid)} is gone (#{inspect(reason)}): #{inspect(request)}")
+      :transporterror
   end
 
-  @doc "Get the IP and port associated with the transport instance"
+  @spec send_msg( pid(), binary(), binary() | tuple(), integer() ) :: any()
+  @doc "Send a SIP message through a transport instance designated by its process ID"
+  def send_msg(tid, msg, destip, destport) when is_bitstring(msg) and is_integer(destport) do
+    safe_call(tid, { :sendmsg, msg, destip, destport})
+  end
+
+  @doc """
+  The IP and port a transport instance is bound to, or `:transporterror` when it
+  is gone. Callers must handle both — see `safe_call/2`.
+  """
   def get_local_ip_port(tid) do
-    GenServer.call(tid, :getlocalipandport);
+    safe_call(tid, :getlocalipandport)
   end
 
   @doc "Create a local contact URI associated with a given transport instance"
-  @spec build_contact_uri(module(), pid()) :: %SIP.Uri{ domain: binary(), port: integer(), scheme: binary() }
+  @spec build_contact_uri(module(), pid()) :: %SIP.Uri{ domain: binary(), port: integer(), scheme: binary() } | nil
   def build_contact_uri(tmod, tid) do
-    { :ok, localip, localport } = get_local_ip_port(tid)
-    transport_str = apply(tmod, :transport_str, [])
-    %SIP.Uri{
-     domain: localip,
-     port: localport,
-     scheme: "sip:",
-     proto: String.upcase(transport_str)
-    }
+    case get_local_ip_port(tid) do
+      { :ok, localip, localport } ->
+        transport_str = apply(tmod, :transport_str, [])
+        %SIP.Uri{
+         domain: localip,
+         port: localport,
+         scheme: "sip:",
+         proto: String.upcase(transport_str)
+        }
+
+      # The transport died before it could say where it is bound. There is no
+      # honest Contact to build, and raising here would take the transaction —
+      # and with it its dialog — down over a header (design §14.4, R3).
+      _err -> nil
+    end
   end
 
   # Add /fix contact header to a SIP message given the transport
   def add_contact_header(tmod, tid, msg) when is_pid(tid) and is_map(msg) do
-    new_contact = build_contact_uri(tmod, tid)
+    add_contact_header(build_contact_uri(tmod, tid), msg)
+  end
+
+  # No local address to advertise: leave the message as it stands rather than
+  # stamp a Contact we cannot fill in. The send that follows will fail on its own,
+  # through the error path, which is where a dead transport belongs.
+  defp add_contact_header(nil, msg), do: msg
+
+  defp add_contact_header(new_contact, msg) do
     old_contact = Map.get(msg, :contact)
 
     new_contact = if not is_nil(old_contact) do

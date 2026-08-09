@@ -261,6 +261,20 @@ defmodule SIP.DialogImpl do
           {code, nil} ->
             {code, state}
 
+          # A bare atom — no transport could be found or started for this request
+          # (`:no_transport_available`). It matched neither clause below, so it
+          # raised a CaseClause inside the dialog, which R3 makes reachable far
+          # more often: every in-dialog request sent over a transport that has
+          # since died lands here first.
+          code when is_atom(code) ->
+            Logger.warning(
+              dialogpid: "#{inspect(self())}",
+              module: __MODULE__,
+              message: "Cannot send #{req.method}: #{code}"
+            )
+
+            {code, state}
+
           {:ok, transaction_pid, modmsg} ->
             # Add the transaction in the transaction list
             newstate = add_transaction(state, transaction_pid, modmsg, uac_module(modmsg))

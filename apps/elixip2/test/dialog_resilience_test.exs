@@ -290,6 +290,98 @@ defmodule SIP.Test.DialogResilience do
     assert_receive {:transport_down, SIP.Transport.TCP, _ip, _port}, 2_000
   end
 
+  # ── R3: a transport that dies under a live dialog ───────────────────────────
+
+  # The recovery R3 promises, and the whole of it. A resolved R-URI carries the
+  # transport pid it was resolved with, and a dialog caches that pid for its
+  # lifetime — nothing ever asked again whether it was alive, so the next
+  # in-dialog request exited on a dead pid, inside the dialog, inside the
+  # scenario's own GenServer.call (§14.2 (b)).
+  #
+  # A node has ONE connectionless socket, named by its protocol in
+  # Registry.SIPTransport, so re-selecting relaunches that singleton and the call
+  # carries on. The far end never learns anything happened.
+  test "a connectionless transport that dies is re-selected, and the call goes on" do
+    peer = peer!("rs10")
+    {dlg, _tid} = start_call("rs10")
+    assert_receive {:invite_sent, _req}, 2_000
+
+    GenServer.cast(peer, {:simulate, 200, 50})
+    assert_receive {:outbound, {200, _ok, _t, ^dlg}}, 3_000
+
+    Process.exit(peer, :kill)
+    assert_dies(peer)
+
+    bye = %{
+      "Max-Forwards" => "70",
+      method: :BYE,
+      ruri: %SIP.Uri{userpart: nil, domain: nil},
+      from: %SIP.Uri{userpart: nil, domain: nil},
+      to: %SIP.Uri{userpart: nil, domain: nil},
+      useragent: "Elixipp-test",
+      callid: nil,
+      contentlength: 0
+    }
+
+    # Before R3 this exited on the dead pid rather than returning anything.
+    assert {:ok, _bye_tid} = SIP.Dialog.new_request(dlg, bye)
+
+    # …and it went out over a NEW instance of the same transport.
+    revived = SIP.Transport.Selector.select_transport(target("rs10")).tp_pid
+    assert is_pid(revived)
+    refute revived == peer
+  end
+
+  # The counterpart, and the reason the rule is "connectionless", not "any dead
+  # transport": re-resolving a connected one would open a NEW connection — a
+  # different flow, with a different source port, not the one the peer is
+  # answering on. Toward a NATed client it cannot even be attempted. Same
+  # decision as R4/R5: a lost connection ends the dialogs riding it.
+  test "a dead connected transport is not silently reopened on another flow" do
+    dead = spawn(fn -> :ok end)
+    assert_dies(dead)
+
+    req = %{
+      "Max-Forwards" => "70",
+      method: :MESSAGE,
+      ruri: %SIP.Uri{
+        scheme: "sip:",
+        userpart: "bob",
+        domain: "example.com",
+        destip: {127, 0, 0, 1},
+        destport: 5060,
+        destproto: "TCP",
+        tp_module: SIP.Transport.TCP,
+        tp_pid: dead
+      },
+      from: %SIP.Uri{scheme: "sip:", userpart: "alice", domain: "example.com"},
+      to: %SIP.Uri{scheme: "sip:", userpart: "bob", domain: "example.com"},
+      useragent: "Elixipp-test",
+      callid: "rs11",
+      contentlength: 0
+    }
+
+    assert SIP.Transac.start_uac_transaction(req, 5) == :no_transport_available
+  end
+
+  # The other half of R3, under everything above: a call toward a transport is a
+  # GenServer.call on a cached pid, and an exit there happens inside a
+  # transaction (linked to its dialog) or inside a dialog (answering the
+  # scenario). It is answered as a send failure — a code every caller of a
+  # transport already reads, because a send can always fail.
+  test "talking to a dead transport is a transport error, not an exit" do
+    dead = spawn(fn -> :ok end)
+    assert_dies(dead)
+
+    assert SIP.Transport.send_msg(dead, "OPTIONS sip:x SIP/2.0\r\n\r\n", {1, 2, 3, 4}, 5080) ==
+             :transporterror
+
+    assert SIP.Transport.get_local_ip_port(dead) == :transporterror
+
+    # And nothing is stamped on a message we cannot address.
+    assert SIP.Transport.build_contact_uri(SIP.Transport.UDP, dead) == nil
+  end
+
   # The catch-all handle_info/2. `use GenServer` provides one, but a module that
   # defines its own clauses replaces it wholesale — so an unrecognized message
   # raised a FunctionClause and took the dialog with it. SIP.Dialog.broadcast/1

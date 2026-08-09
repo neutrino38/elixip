@@ -57,25 +57,78 @@ alias SIP.NetUtils
     tp_pid = sipmsg.ruri.tp_pid
     transport_str = apply(tp_module, :transport_str, [])
 
-    # Get the local and IP port from the transport process
-    { :ok, local_ip, local_port  } = GenServer.call(tp_pid, :getlocalipandport)
-    local_ip_str = SIP.NetUtils.ip2string(local_ip)
+    # Get the local and IP port from the transport process. Not a bare
+    # GenServer.call: this is the first thing said to a transport whose pid may
+    # have been cached minutes ago, and an exit here happens inside the DIALOG
+    # process (it is the dialog that opens transactions), where it propagated to
+    # the scenario's own call and skipped its entire teardown — §14.2 (b).
+    case SIP.Transport.get_local_ip_port(tp_pid) do
+      { :ok, local_ip, local_port } ->
+        local_ip_str = SIP.NetUtils.ip2string(local_ip)
 
-    #Add the topmost via header
-    sipmsg = SIP.Msg.Ops.add_via(sipmsg, { local_ip_str, local_port, transport_str }, branch_id)
+        #Add the topmost via header
+        sipmsg = SIP.Msg.Ops.add_via(sipmsg, { local_ip_str, local_port, transport_str }, branch_id)
 
-    # Start a new GenServer for each transaction and register it in Registry.SIPTransaction
-    # The process created IS the transaction
-    name = {:via, Registry, {Registry.SIP.Transac, branch_id, :cast }}
-    transact_params = { sipmsg, self(), timeout }
-    case GenServer.start_link(tc_mod, transact_params, name: name ) do
-      { :ok, trans_pid } ->
-        Logger.debug([ transid: branch_id, message: "Created #{tc_mod} with PID #{inspect(trans_pid)}." ])
-        { :ok, trans_pid, sipmsg }
+        # Start a new GenServer for each transaction and register it in Registry.SIPTransaction
+        # The process created IS the transaction
+        name = {:via, Registry, {Registry.SIP.Transac, branch_id, :cast }}
+        transact_params = { sipmsg, self(), timeout }
+        case GenServer.start_link(tc_mod, transact_params, name: name ) do
+          { :ok, trans_pid } ->
+            Logger.debug([ transid: branch_id, message: "Created #{tc_mod} with PID #{inspect(trans_pid)}." ])
+            { :ok, trans_pid, sipmsg }
 
-      { code, err } ->
-        Logger.error("Failed to create #{tc_mod} transaction. Error: #{code}.")
-        { code, err }
+          { code, err } ->
+            Logger.error("Failed to create #{tc_mod} transaction. Error: #{code}.")
+            { code, err }
+        end
+
+      _err ->
+        Logger.warning(module: __MODULE__,
+          message: "Transport #{inspect(tp_pid)} is gone; cannot create a #{tc_mod} transaction.")
+        :no_transport_available
+    end
+  end
+
+  # The transport a request should actually go out on.
+  #
+  # A resolved R-URI carries the transport pid it was resolved with, and that pid
+  # is then cached for the life of a dialog — in `state.msg.ruri`, copied onto
+  # every in-dialog request. Nothing ever asked again whether it was still alive,
+  # so a transport that died took every dialog using it with it: the next request
+  # exited on a dead pid (§14.2 (b)).
+  #
+  # A dead CONNECTIONLESS transport is re-resolved instead. That is the whole
+  # recovery story and it is nearly free: a node has one UDP socket, named by its
+  # protocol in Registry.SIPTransport, so re-selection relaunches that singleton
+  # and the dialog carries on — the far end never learns anything happened.
+  #
+  # A dead CONNECTED one is not, and deliberately: re-resolving it would open a
+  # NEW connection, which is a different flow with a different source port, not
+  # the one the peer is expecting answers on. Toward a NATed client (an inbound
+  # flow, §3.2) it cannot even be attempted — the binding is stale and the
+  # registration is what has to be redone. Same decision as R4/R5: a lost
+  # connection ends the dialogs riding it.
+  defp usable_transport(sipmsg) do
+    ruri = sipmsg.ruri
+
+    cond do
+      not SIP.Uri.has_tp_info(ruri) ->
+        add_transport_info(sipmsg)
+
+      Process.alive?(ruri.tp_pid) ->
+        sipmsg
+
+      apply(ruri.tp_module, :is_reliable, []) ->
+        Logger.warning(module: __MODULE__,
+          message: "Connected transport #{inspect(ruri.tp_module)} toward " <>
+            "#{inspect(ruri.destip)}:#{ruri.destport} is gone; its flow cannot be reopened.")
+        :no_transport_available
+
+      true ->
+        Logger.info(module: __MODULE__,
+          message: "Connectionless transport #{inspect(ruri.tp_module)} is gone; re-selecting one.")
+        add_transport_info(Map.put(sipmsg, :ruri, %SIP.Uri{ ruri | tp_pid: nil }))
     end
   end
 
@@ -114,7 +167,7 @@ alias SIP.NetUtils
             # Resolve URI and get local transport parameters
             case  SIP.Transport.Selector.select_transport(sip_uri) do
               ruri when is_map(ruri) ->
-                { :ok, local_ip, local_port } = GenServer.call(ruri.tp_pid, :getlocalipandport)
+                { :ok, local_ip, local_port } = SIP.Transport.get_local_ip_port(ruri.tp_pid)
 
                 # Add local transport params to bindings
                 bindings = bindings ++ [ local_ip: NetUtils.ip2string(local_ip), local_port: local_port ]
@@ -169,15 +222,11 @@ alias SIP.NetUtils
     # Select the correct transaction module
     tc_mod = if sipmsg.method == :INVITE, do: SIP.ICT, else: SIP.NICT
 
-    # If SIP message contains the resolved destination, just do it
-    if SIP.Uri.has_tp_info(sipmsg.ruri) do
-      transaction_start_common(tc_mod, sipmsg, timeout)
-    else
-      # Resolve R-URI
-      case add_transport_info(sipmsg) do
-        newmsg when is_req(newmsg) -> transaction_start_common(tc_mod, newmsg, timeout)
-        err -> err
-      end
+    # Resolve the R-URI when it carries no transport, and re-resolve it when the
+    # one it carries has died under us (see usable_transport/1).
+    case usable_transport(sipmsg) do
+      newmsg when is_req(newmsg) -> transaction_start_common(tc_mod, newmsg, timeout)
+      err -> err
     end
   end
 

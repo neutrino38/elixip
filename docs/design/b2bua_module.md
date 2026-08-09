@@ -1111,8 +1111,7 @@ ACK+BYE the late 2xx" cannot be tested credibly against a single shared peer.
 
 ## 11. Phasing
 
-**P1 and P2a–c are complete**, and P2d is under way (R1–R2, R4–R5 done; R3 and
-R6 left). What remains after it is media (P3) and parallel forking (P4); the
+**P1 and P2a–c are complete**, and P2d is under way (R1–R5 done; R6 left). What remains after it is media (P3) and parallel forking (P4); the
 §7.5 offer profiles depend on P3, and so does the media-server resilience
 sketched in §14.6.
 
@@ -1157,8 +1156,8 @@ One consequence to note: SRV failover now depends on `fork: :serial` rather than
 being unconditional as §3.1 first put it. `:none` means one attempt and no
 failover at all — the simpler contract, and the honest one.
 | **P2c** ✅ | dynamic targets (§3.4): the `SIP.B2bua.TargetProvider` behaviour, `%Peer{provider:}`, `b2bua_try_next/0` + the per-attempt ring timeout; `b2bua_cancel_forward/0` (§3.5) with 487 out of the default retry-on list; hunt progress events (§3.6, `notify_progress`). Extends the SERIAL hunt, so it needed nothing from P4; a complete call queue additionally needs P3 for music on hold |
-| **P2d** (R1–R2, R4–R5 ✅) | resilience hardening (§14): the dialog traps exits and converts a transaction crash into a synthetic 408 (R1 ✅); the scenario engine catches exits so teardown always runs (R2 ✅); connectionless transport re-selection + exit-safe transport calls (R3); transport-down broadcast from `terminate/2`, single `{:dialog_terminated}` (R4 ✅); transport-down during a hunt = branch failure, not dialog death (R5 ✅); B2BUA leg-death hook purging the leg and answering its pending requests (R6); the failure-injection test set (R7, ✅ for the above). §14.6 sketches the media-server failure domain (R8), which lands with P3 |
-| **P3** | `{:mediaserver, …}` mode: leg-qualified media handles, `bridge/2` callback in `MediaServer.Behaviour` + Mendooze implementation, offer/answer choreography |
+| **P2d** (R1–R5 ✅) | resilience hardening (§14): the dialog traps exits and converts a transaction crash into a synthetic 408 (R1 ✅); the scenario engine catches exits so teardown always runs (R2 ✅); connectionless transport re-selection + exit-safe transport calls (R3 ✅); transport-down broadcast from `terminate/2`, single `{:dialog_terminated}` (R4 ✅); transport-down during a hunt = branch failure, not dialog death (R5 ✅); B2BUA leg-death hook purging the leg and answering its pending requests (R6); the failure-injection test set (R7, ✅ for the above). §14.6 sketches the media-server failure domain (R8), which lands with P3 |
+| **P3** | `{:mediaserver, …}` mode: leg-qualified media handles, `bridge/2` callback in `MediaServer.Behaviour` + Mendooze implementation, offer/answer choreography; a NEW `scenarios/b2bua_media.exs` with its own test (§12 — `b2bua_basic.exs` stays pure signaling), and the media-server failure domain of §14.6 (R8) |
 | **P4** | parallel forking (branch sets in the leg dialog, §3.3: winner adoption, late-2xx ACK+BYE, best-response aggregation; q-group semantics of §3.2), trunk processes (`trunk_pid`); multi-leg generalization only if attended transfer / 3pcc demands it. `{:rtpengine, …}` is **out of scope** — deferred to the borderline work |
 
 ## 12. Documentation plan
@@ -1182,6 +1181,33 @@ Each ships as a runnable scenario with its own test, the way
 per-use-case split is what makes the media-mode difference visible: (a) and (c)
 without a media server are ten lines and relay SDP verbatim; the same cases with
 one are a different scenario, not a flag.
+
+### `b2bua_basic.exs` stays pure signaling; P3 adds `b2bua_media.exs`
+
+Stated here because it is the obvious thing to get wrong when P3 lands: the
+media mode must arrive as a **new file**, `scenarios/b2bua_media.exs`, not as an
+edit to `b2bua_basic.exs`.
+
+`b2bua_basic.exs` is the acceptance test for §9's claim — a complete B2BUA in
+~60 lines of FSM — and that claim only holds while the file is the *simplest*
+thing that relays a call. Teaching it about media handles, the offer/answer
+choreography and a bridge would cost it exactly the property it exists to
+demonstrate, and would take with it the one scenario a reader can hold in their
+head. It is also the only reference for the mode kelixip actually runs today
+(`apps/kelixip/scripts/b2bua.exs` relays SDP verbatim), so losing it loses the
+regression cover for pure-signaling relay.
+
+The two then read as a pair, which is the documentation: same call, same states,
+the difference being precisely what a media server costs. Concretely, P3 owes:
+
+- `scenarios/b2bua_media.exs` — use case (a) with `{:mediaserver, opts}`,
+  leg-qualified handles and the bridge;
+- its own test, alongside `b2bua_scenario_test.exs` rather than inside it;
+- the §14.6 clause (`:server_disconnected` → hang up both legs), which the
+  signaling scenario has no use for and the media one cannot do without.
+
+The same rule applies downstream to the (b), (c) and (d) rows above: each gains
+a `_media` sibling, never a flag.
 
 ## 13. Open questions
 
@@ -1355,7 +1381,7 @@ the safety net for invariant 2, not the nominal path (R6 keeps exits out of the
 relay helpers in the first place); with it, even an unforeseen exit ends in
 `finalize` → `release_legs` → the caller answered.
 
-**R3 — connectionless recovery, and exit-safe transport calls.** At transaction
+**R3 ✅ — connectionless recovery, and exit-safe transport calls.** At transaction
 creation, a `tp_pid` that is no longer alive is re-resolved through
 `Selector.select_transport/1` (tp_pid cleared) before giving up: for UDP the
 instance is the process-wide singleton, so re-selection relaunches it and the
@@ -1366,6 +1392,22 @@ stale. Independently, every `GenServer.call` toward a transport (`sendout_msg`,
 the timer retransmit paths, `getlocalipandport`) is wrapped `catch :exit →
 {:transporterror, state}` so a dead transport looks like a send failure — a
 path every caller already handles — never like a crash. Closes path (b).
+
+*Refined during implementation.* The re-selection rule is stated on
+`is_reliable/0`, not on "was this flow inbound": re-resolving a CONNECTED
+transport would open a new connection — a different flow with a different source
+port, not the one the peer answers on — so it is refused for all of them, which
+covers the inbound case without having to recognize it, and fails at once
+instead of after a connect timeout. The exit-safety landed on
+`SIP.Transport.send_msg/4` and `get_local_ip_port/1`, which existed and were
+unused: the raw `GenServer.call`s in `sendout_msg/2`, both timer-A retransmit
+paths and `transaction_start_common/3` now go through them. Two consequences
+worth noting: `build_contact_uri/2` returns `nil` rather than raising when the
+transport cannot say where it is bound (a dead transport must not take a
+transaction down over a header), and `send_in_dialog_request/2` gained the clause
+for a bare-atom failure it never had — `:no_transport_available` matched neither
+of its two clauses, so it raised a CaseClause inside the dialog, which R3 makes
+reachable on every in-dialog request sent over a transport that has since died.
 
 **R4 ✅ — transport-down is broadcast from `terminate/2`, once, uniformly.** The
 per-protocol broadcasts move from the orderly-close clauses into the
@@ -1434,16 +1476,15 @@ Failure injection, one test per traced path, all asserting the same two
 outcomes — *the caller receives a final response* and *no dialog or transaction
 process survives the scenario*:
 
-Delivered with R1–R2 and R4–R5: `test/dialog_resilience_test.exs` and
-`test/scenario_resilience_test.exs` (14 tests). Two of them drive a REAL TCP
+Delivered with R1–R5: `test/dialog_resilience_test.exs` and
+`test/scenario_resilience_test.exs` (17 tests). Two of them drive a REAL TCP
 transport — the announcement moved into `terminate/2`, so what must be pinned is
-that an abnormal stop announces as loudly as a clean close. The remaining row
-lands with R3.
+that an abnormal stop announces as loudly as a clean close.
 
 | Injection | Expected (with P2d) | Today |
 |---|---|---|
 | `Process.exit(leg.initial_trans, :kill)` mid-hunt ✅ | synthetic 408 → hunt advances to the next target | dialog dies silently, scenario waits |
-| kill the UDP transport, then relay a BYE | transport relaunched by re-selection, BYE sent (recovery) | scenario process crashes, teardown skipped |
+| kill the UDP transport, then relay a BYE ✅ | transport relaunched by re-selection, BYE sent (recovery) | scenario process crashes, teardown skipped |
 | TCP close under the ringing branch of a hunt ✅ | immediate branch failure → next target | unnoticed until timer B |
 | TCP close under an established leg ✅ | exactly one `{:outbound, {:dialog_terminated, _, :transport_down}}` | double notification |
 | forced exit inside a scenario state ✅ | `scenario_failure` → finalize → inbound answered 487 | scenario process dies, inbound orphaned |

@@ -7,10 +7,17 @@ defmodule SIP.Transac.Common do
   require Logger
   import SIP.Msg.Ops
 
-  @doc "Send a SIP message to the transport layer"
+  @doc """
+  Send a SIP message to the transport layer.
+
+  Through `SIP.Transport.send_msg/4`, which answers `:transporterror` rather than
+  exiting when the transport is gone: the pid held here is cached and a
+  transaction is linked to its dialog, so an exit used to kill both — silently
+  (design §14.4, R3). Every caller below already reads that code.
+  """
   @spec sendout_msg(map(), binary()) :: {:ok | :invalid_sip_msg | :transporterror, map()}
   def sendout_msg(state, sipmsgstr) when is_map(state) and is_binary(sipmsgstr) do
-    rez = GenServer.call(state.tpid, {:sendmsg, sipmsgstr, state.destip, state.destport})
+    rez = SIP.Transport.send_msg(state.tpid, sipmsgstr, state.destip, state.destport)
     {rez, state}
   end
 
