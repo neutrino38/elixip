@@ -101,11 +101,30 @@ last one takes it with it.
 Run it with **`--include skip`** as well as `MENDOOZE_URL`: the gate sets the
 tag to `false` when the variable is present, and ExUnit excludes it anyway.
 
-**Pre-existing and unrelated**: three of that suite's older tests fail on
-`assert_receive {:ms_event, pc_a, :ice_connected}` — the *offering* side of a
-server-loopback pair gets `{:media_connected, :audio}` but never the derived
-milestone, while the answering side gets both. Verified identical at the commit
-before P3 started, so it is not a P3 regression; it wants its own look.
+**A pre-existing defect the E2E uncovered, since fixed.** Three of that suite's
+older tests failed on `assert_receive {:ms_event, pc_a, :ice_connected}` — the
+*offering* side never got the derived milestone. Verified identical before P3
+started, so not a P3 regression, and not a B2BUA problem at all: it affected any
+UAC scenario waiting on `:ice_connected`.
+
+The cause is a race the design did not account for. `EndpointStartReceiving` is
+what allocates the port we advertise, so the receive plane opens **before** the
+far end's SDP arrives — and for a UAC that ordering is the normal one: we offer,
+the callee starts sending, its answer comes afterwards. But R is learned only
+from that answer, so each raw `{:media_connected, media}` was evaluated against
+an empty R, judged "not ready", and dropped; the server re-arms that event only
+on the next `StartReceiving`, so the milestone never came. Media was flowing the
+whole time.
+
+Fixed by re-running the derivation over the already-connected medias the moment
+R becomes known (`replay_connectivity/1`), with rule 2 intact — an audio packet
+that arrived early does not release a leg that expects video. Two of the three
+now pass against dev71.
+
+**Still open, and a different failure**: the WebRTC loopback E2E, where *no* raw
+connectivity event arrives on either leg. Two endpoints of one server doing DTLS
+to each other may not be something the server does; settling it needs the
+server's logs rather than ours.
 
 ### R6 as built, and the one item left out
 
