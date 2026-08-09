@@ -35,6 +35,14 @@ defmodule SIP.DialogImpl do
     # wrapped as {tag, msg} — see SIP.Dialog.start_dialog/5 and send_to_app/2.
     # nil (the default) delivers bare messages.
     tag: nil,
+    # Forking (kamailio TM model, docs/design/b2bua_module.md §3.3): the initial
+    # request may be sent to several targets as several client transactions of
+    # THIS dialog — same Call-ID, From tag and CSeq, one fresh Via branch each.
+    # `branches` maps each such transaction to the target it went to; `forking`
+    # says the hunt is on, which is what keeps the dialog alive when a branch
+    # comes back with a non-2xx final (there may be another target to try).
+    branches: %{},
+    forking: false,
     state: :initial,
     # If we should output debug logs for this dialog
     debuglog: true,
@@ -257,6 +265,36 @@ defmodule SIP.DialogImpl do
       )
 
       {:methodnotallowed, state}
+    end
+  end
+
+  # One more branch of the initial request, toward `target`. Backs
+  # `handle_call({:fork_branch, …})`; see SIP.Dialog.fork_branch/2 for the why.
+  defp start_branch(state = %SIP.DialogImpl{}, target) do
+    req = %{state.msg | ruri: target}
+
+    case SIP.Transac.start_uac_transaction(req, state.dialogtimeout) do
+      {:ok, trans_pid, _modmsg} ->
+        newstate = %SIP.DialogImpl{
+          state
+          | forking: true,
+            transactions: [trans_pid | state.transactions],
+            branches: Map.put(state.branches, trans_pid, target)
+        }
+
+        {:reply, {:ok, trans_pid}, newstate}
+
+      {code, _extra} ->
+        Logger.warning(
+          dialogpid: "#{inspect(self())}",
+          module: __MODULE__,
+          message: "Failed to start a fork branch toward #{target}: #{inspect(code)}"
+        )
+
+        {:reply, {:error, code}, state}
+
+      err ->
+        {:reply, {:error, err}, state}
     end
   end
 
@@ -655,6 +693,33 @@ defmodule SIP.DialogImpl do
     {:reply, ret, state}
   end
 
+  # Send the dialog's INITIAL request to one more target, as another branch of
+  # this dialog (RFC 3261 §16.6 / kamailio TM). The dialog-forming fields are
+  # shared verbatim — Call-ID, From tag and CSeq all come from `state.msg`, which
+  # `fix_outbound_request/3` already fixed — and only the Request-URI differs;
+  # the fresh Via branch comes free, since a client transaction mints its own.
+  #
+  # Deliberately NOT subject to the four-transaction cap of
+  # `send_in_dialog_request/2`: that cap bounds in-dialog traffic, while these are
+  # attempts at the *same* request, and a hunt down a long contact list is exactly
+  # what it must not truncate.
+  def handle_call({:fork_branch, target}, _from, state) do
+    cond do
+      state.direction != :outbound ->
+        {:reply, {:error, :not_outbound}, state}
+
+      # A dialog exists once a branch answered 2xx; there is nothing left to hunt.
+      state.state not in [:initial, :uac_challenged] ->
+        {:reply, {:error, :already_established}, state}
+
+      is_nil(state.msg) ->
+        {:reply, {:error, :no_initial_request}, state}
+
+      true ->
+        start_branch(state, target)
+    end
+  end
+
   @doc "Handle call to send out a new in-dialog request"
   def handle_call({:newreq, req}, _from, state) when is_req(req) do
     # An app-initiated OPTIONS supersedes the automatic dialog keepalive: disarm it
@@ -878,6 +943,41 @@ defmodule SIP.DialogImpl do
     end
   end
 
+  defp adopts_totag?(%SIP.DialogImpl{forking: true}, rsp), do: rsp.response in 200..299
+  defp adopts_totag?(_state, rsp), do: rsp.response < 300
+
+  # A branch answered 2xx: it IS the dialog now. Cancel whatever else is still
+  # ringing (RFC 3261 §16.7 / kamailio t_cancel_branches) and pin the winner's
+  # target onto the initial request — `send_in_dialog_request/2` reads the
+  # transport parameters off `state.msg.ruri`, so a BYE would otherwise be sent
+  # to the first target tried rather than the one that answered.
+  #
+  # A no-op on an unforked dialog, where `branches` is empty.
+  defp adopt_winning_branch(%SIP.DialogImpl{branches: b} = state, _winner) when map_size(b) == 0,
+    do: state
+
+  defp adopt_winning_branch(state, winner) do
+    losers = state.branches |> Map.keys() |> List.delete(winner)
+
+    Enum.each(losers, fn pid ->
+      Logger.debug(
+        dialogpid: "#{inspect(self())}",
+        module: __MODULE__,
+        message: "Cancelling losing fork branch #{inspect(pid)}"
+      )
+
+      SIP.Transac.cancel_uac_transaction(pid)
+    end)
+
+    msg =
+      case Map.get(state.branches, winner) do
+        %SIP.Uri{} = target -> %{state.msg | ruri: target}
+        _ -> state.msg
+      end
+
+    %SIP.DialogImpl{state | forking: false, branches: %{}, msg: msg}
+  end
+
   defp add_totag(state, totag) do
     if is_nil(state.totag) and not is_nil(totag) do
       totag =
@@ -897,7 +997,7 @@ defmodule SIP.DialogImpl do
     end
   end
 
-  defp handle_UAS_response(state, rsp, _transact_pid)
+  defp handle_UAS_response(state, rsp, transact_pid)
        when state.state in [:initial, :uac_challenged] and rsp.response in 200..202 do
     Logger.debug(
       dialogpid: "#{inspect(self())}",
@@ -913,6 +1013,7 @@ defmodule SIP.DialogImpl do
         remotetarget: Map.get(rsp, :contact),
         routeset: Map.get(rsp, :recordroute)
     }
+    |> adopt_winning_branch(transact_pid)
   end
 
   defp handle_UAS_response(state, rsp, _transact_pid)
@@ -941,6 +1042,25 @@ defmodule SIP.DialogImpl do
     )
 
     %{state | state: :uac_challenged}
+  end
+
+  # A branch of a hunt came back with a non-2xx final. That ends the BRANCH, not
+  # the dialog: there may be another target to try, and the application decides
+  # (it owns the target list and the retry policy — design §3.1). Terminating
+  # here would take the dialog down before the application, which only learns of
+  # the failure from the message we just sent it, could ask for the next branch.
+  #
+  # The application ends the hunt by closing the leg — its teardown does
+  # (SIP.Session.B2bua.release_legs/1) — or wins it with a 2xx.
+  defp handle_UAS_response(state = %SIP.DialogImpl{forking: true}, rsp, transact_pid)
+       when state.state in [:initial, :uac_challenged] and rsp.response in 300..699 do
+    Logger.info(
+      dialogpid: "#{inspect(self())}",
+      module: __MODULE__,
+      message: "fork branch rejected with #{rsp.response}; dialog kept for the next target"
+    )
+
+    %SIP.DialogImpl{state | branches: Map.delete(state.branches, transact_pid)}
   end
 
   defp handle_UAS_response(state, rsp, _transact_pid)
@@ -1021,8 +1141,20 @@ defmodule SIP.DialogImpl do
         # create a dialog (RFC 3261 §12.1), so their To-tag must be ignored.
         # Otherwise the re-sent authenticated request would carry a bogus to-tag
         # and be rejected by the proxy as an orphan in-dialog request.
+        # Which response is allowed to give the dialog its remote tag.
+        #
+        # Unforked: provisional (a 1xx with a tag — an early dialog) or 2xx, as
+        # before. A non-2xx final creates no dialog (RFC 3261 §12.1), so its tag
+        # must be ignored — otherwise a re-sent authenticated request carries a
+        # bogus to-tag and the proxy rejects it as an orphan.
+        #
+        # Forked: only a 2xx. Every branch answers with a to-tag of its own, and
+        # the single slot latches the FIRST one it is offered — so a 180 from a
+        # branch that goes on to fail would take the tag the winning 2xx needs,
+        # and every later in-dialog request would name a callee that never
+        # answered.
         state =
-          if rsp.response < 300 do
+          if adopts_totag?(state, rsp) do
             add_totag(state, totag)
           else
             state

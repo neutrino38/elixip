@@ -52,8 +52,12 @@ alias SIP.NetUtils
   end
 
   defp module_instance_name(uri) do
-    # The module is loaded: is_reliable/0 is applied on it in the default below.
-    if function_exported?(uri.tp_module, :select_instance, 1) do
+    # ensure_loaded? first: function_exported?/3 answers false for a module that
+    # has simply not been loaded yet, and in a release-less run that is exactly
+    # the state of the FIRST call — the very one that would then be misnamed,
+    # silently, while every later one got it right.
+    if Code.ensure_loaded?(uri.tp_module) and
+         function_exported?(uri.tp_module, :select_instance, 1) do
       apply(uri.tp_module, :select_instance, [ uri ])
     end
   end

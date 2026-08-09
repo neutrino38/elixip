@@ -99,22 +99,20 @@ defmodule SIP.Test.Transport.UDPMockup do
   #
   # Both carry a To tag: any response above 100 needs one, and reply_to_request/5
   # raises without it. The CANCEL as sent has no tag on its To (it copies the
-  # INVITE's), so the tag has to be supplied here — the same one for both, since
-  # they belong to the same dialog as far as the peer is concerned.
-  @cancel_totag "mockupcancel"
-
+  # INVITE's), so the tag has to be supplied here — this peer's own, the same one
+  # its other answers carry.
   defp handle_req(state, :CANCEL, sipreq) do
     if Map.has_key?(state, :req) do
       if sipreq.transid == state.req.transid do
-        siprsp = reply_to_request(sipreq, 200, "OK", [], @cancel_totag)
+        siprsp = reply_to_request(sipreq, 200, "OK", [], state.totag)
         Process.send_after(self(), {:recv, siprsp}, 100)
-        siprsp2 = reply_to_request(state.req, 487, nil, [], @cancel_totag)
+        siprsp2 = reply_to_request(state.req, 487, nil, [], state.totag)
         Process.send_after(self(), {:recv, siprsp2}, 200)
       end
 
       state
     else
-      siprsp = reply_to_request(sipreq, 481, "No such transaction", [], @cancel_totag)
+      siprsp = reply_to_request(sipreq, 481, "No such transaction", [], state.totag)
       Process.send_after(self(), {:recv, siprsp}, 100)
       state
     end
@@ -148,7 +146,7 @@ defmodule SIP.Test.Transport.UDPMockup do
 
     # Auto-reply 200 OK unless the test asked us to stay silent (dead-peer sim).
     unless Map.get(state, :drop_options, false) do
-      resp = SIP.Msg.Ops.reply_to_request(sipreq, 200, "OK", [], "as424e7930")
+      resp = SIP.Msg.Ops.reply_to_request(sipreq, 200, "OK", [], state.totag)
       Process.send_after(self(), {:recv, resp}, 50)
     end
 
@@ -206,6 +204,10 @@ defmodule SIP.Test.Transport.UDPMockup do
     else
       initial_state = %{
         t_isreliable: false,
+        # This peer's own To tag. It used to be the same literal for every
+        # instance, so two named peers answered a forked INVITE with the same
+        # tag and nothing could tell which branch a response came from.
+        totag: SIP.Msg.Ops.generate_from_or_to_tag(),
         localip: hd(ips),
         localport: 5060,
         upperlayer: nil,
@@ -321,7 +323,7 @@ defmodule SIP.Test.Transport.UDPMockup do
 
   @spec handle_cast({:simulate, 180, non_neg_integer()}, map()) :: {:noreply, map()}
   def handle_cast({:simulate, 180, after_ms}, state) do
-    siprsp = reply_to_request(state.req, 180, "Ringing", [], "as424e7930")
+    siprsp = reply_to_request(state.req, 180, "Ringing", [], state.totag)
 
     Logger.debug(
       transid: state.req.transid,
@@ -355,11 +357,11 @@ defmodule SIP.Test.Transport.UDPMockup do
           200,
           "OK",
           [body: [sdp_body], contact: "<sip:90901@212.83.152.250:5090>"],
-          "as424e7930"
+          state.totag
         )
       else
         # register case
-        reply_to_request(state.req, 200, "OK", [contact: state.req.contact], "as424e7930")
+        reply_to_request(state.req, 200, "OK", [contact: state.req.contact], state.totag)
       end
 
     Logger.debug(
@@ -382,7 +384,7 @@ defmodule SIP.Test.Transport.UDPMockup do
         "elioz.net",
         "SHA256",
         [],
-        "as424e7930"
+        state.totag
       )
 
     Logger.debug(
@@ -396,7 +398,7 @@ defmodule SIP.Test.Transport.UDPMockup do
   end
 
   def handle_cast({:simulate, resp, after_ms}, state) when resp in 400..487 do
-    siprsp = reply_to_request(state.req, resp, nil, [], "as424e7930")
+    siprsp = reply_to_request(state.req, resp, nil, [], state.totag)
 
     Logger.debug(
       transid: state.req.transid,

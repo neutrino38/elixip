@@ -277,6 +277,29 @@ defmodule SIP.Dialog do
     GenServer.call(dialog_pid, {:newreq, req})
   end
 
+  @doc """
+  Send this dialog's **initial** request to one more target, as another branch of
+  the same dialog (RFC 3261 §16.6, the kamailio TM model — design
+  docs/design/b2bua_module.md §3.3).
+
+  Call-ID, From tag and CSeq are shared with the branches already sent; only the
+  Request-URI differs, and the client transaction mints a fresh Via branch. The
+  first branch to answer 2xx becomes the dialog and the others are CANCELled;
+  until then a non-2xx final ends only that branch, so the caller can arm the
+  next target.
+
+  Returns `{:ok, transaction_pid}`, or `{:error, reason}` — notably
+  `:already_established` once a branch has won, since there is then nothing left
+  to hunt.
+
+  Who calls it: the session layer, which owns the target list and the retry
+  policy (`%SIP.B2bua.Peer{}`). This layer owns only the branch set.
+  """
+  @spec fork_branch(pid(), SIP.Uri.t()) :: {:ok, pid()} | {:error, any()}
+  def fork_branch(dialog_pid, target) when is_pid(dialog_pid) do
+    GenServer.call(dialog_pid, {:fork_branch, target})
+  end
+
   @spec challenge(pid(), map(), 401 | 407, any()) :: any()
   def challenge(dialog_pid, req, resp_code, realm) when resp_code in [401, 407] and is_req(req) do
     reply(dialog_pid, req, resp_code, nil, realm)
