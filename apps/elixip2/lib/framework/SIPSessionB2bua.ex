@@ -33,6 +33,8 @@ defmodule SIP.B2bua.Peer do
             retry_on: nil,
             outbound_proxy: nil,
             trunk_pid: nil
+
+  @callback get_next_target(pid()) :: {:ok, %SIP.Uri{}} | {:error, term()} | :no_more_targets
 end
 
 defmodule SIP.B2bua.Leg do
@@ -543,6 +545,7 @@ defmodule SIP.Session.B2bua do
   # and RFC 3261 §16.7 stops the search on it; ringing the user's other phones
   # after they pressed Decline is exactly what they asked not to happen.
   # NOT 3xx — a redirect names new targets, which is its own handling (P4).
+  # NOT 487 either, whatever the peer asks for — see @never_retry.
   @default_retry_on [400..599]
 
   # The next target to try, or nil when this response ends the hunt. Only the
@@ -601,6 +604,15 @@ defmodule SIP.Session.B2bua do
     end
   end
 
+  # Codes that never continue a hunt, whatever `retry_on` says.
+  #
+  # 487 answers an INVITE *we* terminated — a branch we cancelled, and we cancel
+  # a branch because the CALLER gave up or because a better target won. Reading
+  # it as "this device refused" makes the caller's own CANCEL ring the next
+  # agent: they hung up, and a second phone starts ringing.
+  @never_retry [487]
+
+  defp retryable?(_peer, code) when code in @never_retry, do: false
   defp retryable?(%Peer{retry_on: nil}, code), do: matches_any?(@default_retry_on, code)
   defp retryable?(%Peer{retry_on: specs}, code) when is_list(specs), do: matches_any?(specs, code)
   defp retryable?(%Peer{retry_on: %Range{} = r}, code), do: code in r

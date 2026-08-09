@@ -513,11 +513,15 @@ Terminated` — and 487 falls inside the default retry-on range (§3.1), so the
 hunt reads the caller's own CANCEL as "this device refused" and rings the next
 one. The caller hung up and a second agent starts ringing. Two things follow:
 
-- **487 leaves the default retry-on list.** A 487 answers an INVITE *we*
-  terminated; there is no case where it means "try someone else".
-- The reference scenarios gain a `{:BYE, …}` clause in `proceeding`, which they
-  lack today: a caller who hangs up *while the callee is being rung* currently
-  matches nothing there and sits in the mailbox until the state times out.
+- **487 never continues a hunt** — not by default and not when a peer asks for
+  it (`@never_retry`, delivered). A 487 answers an INVITE *we* terminated; there
+  is no case where it means "try someone else".
+- The reference scenarios have a `{:BYE, …}` clause in `proceeding` (delivered):
+  a caller who hangs up *while the callee is being rung* matched nothing there
+  and sat in the mailbox until the state timed out. Nothing is relayed — the
+  outbound INVITE has no dialog to BYE, it has an attempt to CANCEL, which the
+  §8 teardown does as the scenario ends. `b2bua_cancel_forward/0` will make that
+  explicit rather than a consequence of ending.
 
 ```elixir
 state proceeding do

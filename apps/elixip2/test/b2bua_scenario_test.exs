@@ -167,6 +167,37 @@ defmodule SIP.Test.B2bua.Scenario do
     assert_receive {:instance_done, :ok}, 10_000
   end
 
+  # Real user agents send a BYE where the RFC asks for a CANCEL. Without a clause
+  # for it in `proceeding` it matched nothing, sat in the mailbox, and the callee
+  # kept ringing until the state timed out three minutes later.
+  @tag timeout: 60_000
+  test "a caller who hangs up while the callee is being rung is answered and stops it",
+       %{scenario: module, stub: stub} do
+    invite = inbound_invite()
+    tp_pid = transport_pid()
+    :ok = GenServer.call(tp_pid, :settestapp)
+
+    {instance, ref} = start_instance(module, stub, invite)
+    send(instance, {:INVITE, invite, self(), stub})
+
+    assert_receive {:replied, 100, "Trying", _req, _fields}, 5_000
+    assert_receive {:invite_sent, _fwd}, 5_000
+    GenServer.cast(tp_pid, {:simulate, 180, 100})
+    assert_receive {:replied, 180, _reason, _req, _fields}, 5_000
+
+    # The caller hangs up mid-ring.
+    send(instance, {:BYE, in_dialog(:BYE, invite), self(), stub})
+
+    # It is answered rather than ignored…
+    assert_receive {:replied, 200, "OK", bye_req, _}, 5_000
+    assert bye_req.method == :BYE
+
+    # …and the scenario ends now, so the teardown CANCELs the attempt still
+    # ringing instead of leaving the callee's phone going.
+    assert_receive {:instance_done, :ok}, 10_000
+    assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
+  end
+
   @tag timeout: 60_000
   test "when the scenario dies mid-attempt the outbound leg is not left ringing", %{
     scenario: module,

@@ -153,6 +153,40 @@ defmodule SIP.Test.B2bua.SerialFork do
     refute B2bua.hunting?(ctx)
   end
 
+  # A 487 answers an INVITE *we* terminated — a branch cancelled because the
+  # caller gave up. Reading it as "this device refused" made the caller's own
+  # CANCEL ring the next agent: they hung up, and a second phone started ringing.
+  test "a 487 never continues the hunt, targets left or not", %{ctx: ctx} do
+    _a = peer!("srl8a")
+    _b = peer!("srl8b")
+
+    ctx = B2bua.do_create_leg(ctx, inbound_invite(), serial_peer(["srl8a", "srl8b"]), false)
+    assert_receive {:invite_sent, _first}, 2_000
+    assert B2bua.outbound_leg(ctx).untried != []
+
+    ctx = relay_final(ctx, 487)
+
+    refute_receive {:invite_sent, _second}, 300
+    refute B2bua.hunting?(ctx)
+    assert_receive {:replied, 487, _reason, _req, _fields}, 2_000
+  end
+
+  # …and not even when the peer explicitly asks for it: there is no case where
+  # hunting on a 487 is what the operator meant.
+  test "a peer cannot opt back into hunting on 487", %{ctx: ctx} do
+    _a = peer!("srl9a")
+    _b = peer!("srl9b")
+
+    peer = serial_peer(["srl9a", "srl9b"], retry_on: [487, 486])
+    ctx = B2bua.do_create_leg(ctx, inbound_invite(), peer, false)
+    assert_receive {:invite_sent, _first}, 2_000
+
+    ctx = relay_final(ctx, 487)
+
+    refute_receive {:invite_sent, _second}, 300
+    refute B2bua.hunting?(ctx)
+  end
+
   test "the retry-on list is a peer option", %{ctx: ctx} do
     _a = peer!("srl5a")
     _b = peer!("srl5b")

@@ -88,6 +88,15 @@ defmodule Kelix.B2bua do
         b2bua_forward(req)
         scenario_aborted("caller cancelled")
 
+      # A caller who hangs up while the callee is still being rung. Not what the
+      # RFC asks for (that is a CANCEL), but real user agents send it, and
+      # without this clause it matched nothing and sat in the mailbox until the
+      # state timed out. Nothing is relayed: the outbound INVITE has no dialog to
+      # BYE, it has an attempt to CANCEL, which the teardown does on the way out.
+      {:BYE, req, _trans, _dlg} ->
+        b2bua_reply(req, 200, "OK")
+        scenario_success("caller hung up before answer")
+
       {:outbound, {:dialog_terminated, _dlg, reason}} ->
         b2bua_reply(last_uas_req(), 500, "Outbound leg lost")
         scenario_failure("outbound leg died: #{inspect(reason)}")
