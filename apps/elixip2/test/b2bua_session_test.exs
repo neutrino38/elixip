@@ -165,6 +165,16 @@ defmodule SIP.Test.B2bua.Session do
     # code: with a global `:proxyuri` configured — which other suites do, in the
     # same VM — an unresolvable host is routed to that proxy and resolves fine.)
 
+    # `use_srv` on a domain that publishes no SRV must keep the URI as given —
+    # otherwise turning the flag on would break every peer that has no records,
+    # which is most of them.
+    test "use_srv on a domain with no SRV record leaves the target alone", %{ctx: ctx} do
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(use_srv: true), false)
+
+      assert ctx.lasterr == :ok
+      assert B2bua.outbound_leg(ctx).target.domain == "example.com"
+    end
+
     test "ruri: :keep preserves what the request asks for and only routes it", %{ctx: ctx} do
       req = inbound_invite()
       ctx = B2bua.do_create_leg(ctx, req, mockup_peer(ruri: :keep), false)

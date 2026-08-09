@@ -1,155 +1,257 @@
 defmodule SIP.Resolver do
   @moduledoc "DNS resolver for the SIP stack"
-alias SIP.NetUtils
+  alias SIP.NetUtils
 
   require SIP.Uri
   require Logger
 
-  # Grouper par priorité
+  # ── SRV (RFC 2782) ───────────────────────────────────────────────────────────
+  #
+  # Ordering is kept PURE and public (`order_srv/1`): it is where all the logic
+  # is, and testing it must not need a DNS server. The lookup around it does the
+  # I/O and nothing else.
+
+  @doc """
+  Every destination an SRV record set names, in the order RFC 2782 wants them
+  tried: priorities ascending, and within one priority the weighted draw applied
+  **until the group is empty** rather than once — the weight orders a group for
+  load balancing, it does not elect a single member. A caller that fails over
+  therefore has the rest of the group to try before moving to the next priority.
+
+  Takes the records as `:inet_res` returns them, `{priority, weight, port,
+  target}`, and gives back `{port, target}` in the order to try.
+
+  Pure: this is the seam that makes SRV testable without a resolver.
+  """
+  @spec order_srv([{integer(), integer(), integer(), charlist()}]) ::
+          [{integer(), String.t()}]
+  def order_srv(records) when is_list(records) do
+    records
+    |> group_by_priority()
+    |> Enum.flat_map(fn {_priority, group} -> order_group(group) end)
+    |> Enum.map(fn {_prio, _weight, port, target} -> {port, to_string(target)} end)
+  end
+
+  # Priorities ascending — the RFC's first ordering key.
   defp group_by_priority(srv_records) do
     srv_records
     |> Enum.group_by(fn {priority, _weight, _port, _target} -> priority end)
-    |> Enum.sort_by(fn {priority, _group} -> priority end) # Priorité croissante
+    |> Enum.sort_by(fn {priority, _group} -> priority end)
   end
 
-   # Sélection aléatoire pondérée parmi les enregistrements d'une même priorité
-   defp weighted_random_selection(records) do
-    total_weight = Enum.reduce(records, 0, fn {_priority, weight, _port, _target}, acc -> acc + weight end)
-
-    random_number = :rand.uniform(total_weight)
-
-    Enum.reduce_while(records, 0, fn {_priority, weight, _port, _target} = record, acc ->
-      cumulative_weight = acc + weight
-
-      if random_number <= cumulative_weight do
-        {:halt, [record]}
-      else
-        {:cont, cumulative_weight}
-      end
-    end)
+  # RFC 2782 within one priority: weight-0 records are placed FIRST in the
+  # running-sum order, which is what leaves them the small chance the algorithm
+  # gives them instead of none at all.
+  defp order_group(records) do
+    {zero, positive} = Enum.split_with(records, fn {_p, w, _po, _t} -> w == 0 end)
+    draw_by_weight(zero ++ positive, [])
   end
 
-  @doc "Perform an SIP srv resolution"
-  def resolve_srv_multiple(uri = %SIP.Uri{}, prio_idx = 0) do
+  defp draw_by_weight([], picked), do: Enum.reverse(picked)
+
+  defp draw_by_weight(records, picked) do
+    total = Enum.reduce(records, 0, fn {_p, weight, _po, _t}, sum -> sum + weight end)
+
+    # "a uniform random number between 0 and the sum" — INCLUSIVE of 0, which is
+    # how a weight-0 record can be drawn at all. `:rand.uniform/1` gives 1..n and
+    # raises outright on 0, so an all-zero group (legal, and what an operator
+    # that does not load-balance publishes) used to take the resolver down here.
+    random = :rand.uniform(total + 1) - 1
+
+    {record, rest} = take_at_running_sum(records, random)
+    draw_by_weight(rest, [record | picked])
+  end
+
+  # The first record whose running sum reaches `random`, removed from the list.
+  defp take_at_running_sum(records, random), do: take_at_running_sum(records, random, 0, [])
+
+  defp take_at_running_sum([{_p, weight, _po, _t} = record | rest], random, sum, seen) do
+    sum = sum + weight
+
+    if sum >= random do
+      {record, Enum.reverse(seen) ++ rest}
+    else
+      take_at_running_sum(rest, random, sum, [record | seen])
+    end
+  end
+
+  # Unreachable while `random` cannot exceed the total, but a list is a list:
+  # answer with what is left rather than raise.
+  defp take_at_running_sum([], _random, _sum, seen) do
+    case Enum.reverse(seen) do
+      [record | rest] -> {record, rest}
+      [] -> {nil, []}
+    end
+  end
+
+  @doc """
+  The destinations `_sip._<transport>.<domain>` names, ordered as `order_srv/1`
+  says, as URIs still carrying a NAME — resolving all of them up front would be
+  DNS traffic for hosts that may never be dialled. `:nosuchname` when the domain
+  publishes no SRV record.
+  """
+  @spec srv_targets(%SIP.Uri{}) :: {:ok, [%SIP.Uri{}]} | :nosuchname
+  def srv_targets(uri = %SIP.Uri{}) do
+    case srv_lookup(uri) do
+      [] ->
+        :nosuchname
+
+      records when is_list(records) ->
+        targets =
+          for {port, target} <- order_srv(records),
+              do: %SIP.Uri{uri | domain: target, port: port}
+
+        {:ok, targets}
+    end
+  end
+
+  defp srv_lookup(uri = %SIP.Uri{}) do
     transport_str = SIP.Uri.get_transport(uri) |> String.downcase()
     name = "_sip._" <> transport_str <> "." <> uri.domain
 
     # We need to specify a DNS server otherwise it does not work
-    nameserver = case Application.fetch_env(:elixip2, :nameserver) do
-      { :ok, { x, y, z, t }} -> { x, y, z, t }
-      :error -> {8,8,8,8}
-    end
+    nameserver =
+      case Application.fetch_env(:elixip2, :nameserver) do
+        {:ok, {x, y, z, t}} -> {x, y, z, t}
+        :error -> {8, 8, 8, 8}
+      end
 
-    case :inet_res.lookup(String.to_charlist(name), :in, :srv,  [alt_nameservers: [ { nameserver, 53} ]]) do
+    case :inet_res.lookup(String.to_charlist(name), :in, :srv,
+           alt_nameservers: [{nameserver, 53}]
+         ) do
       [] ->
         Logger.debug(module: __MODULE__, message: "SRV resolution for #{name} returns no records")
-        :nosuchname
+        []
 
       results when is_list(results) ->
-        sorted_groups = group_by_priority(results)
-
-        # Get the selected group of answers according to the specified prio index
-        { _prio, selected_group } = Enum.at(sorted_groups, prio_idx)
-        if is_list(selected_group) do
-          [ { _weigh, _prio, port, target } ] =  weighted_random_selection(selected_group)
-          resolve(%SIP.Uri{ uri | domain: to_string(target), port: port }, false)
-        else
-          nb_groups = length(sorted_groups)
-          Logger.debug(module: __MODULE__, message: "SRV resolution for #{name} returned #{nb_groups} priorities")
-          Logger.debug(module: __MODULE__, message: "but specified priority index (#{prio_idx}) is bigger than nb of priorities")
-          :nosuchname
-        end
+        results
     end
   end
 
+  @doc """
+  The `idx`-th SRV destination of `uri`, resolved to `{ip, port}`.
 
+  `idx` counts **destinations**, not priority groups: the flattened RFC 2782
+  order of `order_srv/1`, so walking it is a failover list. Past the end it
+  answers `:nosuchname` — "nothing more to try" — which is what a caller looping
+  over it needs.
+
+  (It used to be a priority-group index, and only ever answered for group 0: the
+  head read `prio_idx = 0`, a pattern matching nothing else, so every other index
+  raised. Past the end it raised too, on `Enum.at` returning nil.)
+  """
+  @spec resolve_srv_multiple(%SIP.Uri{}, non_neg_integer()) ::
+          {tuple(), integer()} | {:error, any()} | :nosuchname | :nxdomain
+  def resolve_srv_multiple(uri = %SIP.Uri{}, idx \\ 0) when is_integer(idx) and idx >= 0 do
+    with {:ok, targets} <- srv_targets(uri),
+         target when not is_nil(target) <- Enum.at(targets, idx) do
+      resolve(target, false)
+    else
+      _ -> :nosuchname
+    end
+  end
 
   def resolve(uri = %SIP.Uri{}, _usesrv) when uri.destip != nil and uri.destport != 0 do
-    { uri.destip, uri.destport }
+    {uri.destip, uri.destport}
   end
 
   def resolve(uri = %SIP.Uri{}, true) do
     case resolve_srv_multiple(uri, 0) do
       # SRV resolution successful but host returned in SRV record could not be resolved
-      {:error, err } -> {:error, err }
-
+      {:error, err} -> {:error, err}
       # SRV resolution successful and subsequent A resolution too
-      { ip, port } -> { ip, port }
-
+      {ip, port} -> {ip, port}
       # No SRV record. Try direct A / AAAA resolution
-      :nosuchname -> resolve( uri, false )
+      :nosuchname -> resolve(uri, false)
     end
   end
 
   def resolve(uri = %SIP.Uri{}, false) do
     # Try with IPV4
     case :inet.getaddr(String.to_charlist(uri.domain), :inet) do
-      { :ok, ip } -> { ip, uri.port }
-      { :error, :nxdomain } -> resolve_v6(uri) # Try with IPV6
-      { :error, err } -> {:error, err }
+      {:ok, ip} -> {ip, uri.port}
+      # Try with IPV6
+      {:error, :nxdomain} -> resolve_v6(uri)
+      {:error, err} -> {:error, err}
     end
   end
 
   defp resolve_v6(uri = %SIP.Uri{}) do
     case :inet.getaddr(String.to_charlist(uri.domain), :inet6) do
-      { :ok, ip } -> { ip, uri.port }
-      { :error, :nxdomain } -> :nxdomain
-      { :error, err } -> {:error, err }
+      {:ok, ip} -> {ip, uri.port}
+      {:error, :nxdomain} -> :nxdomain
+      {:error, err} -> {:error, err}
     end
   end
 
   def resolve_and_add_dest(uri = %SIP.Uri{}) do
-    { desturi, usesrv } = try do
-      { Application.fetch_env!(:elixip2, :proxyuri), Application.fetch_env!(:elixip2, :proxyusesrv ) }
-    rescue
-      ArgumentError ->
-        # No SIP proxy configured. Using R-URI domain
-        Logger.debug(module: __MODULE__, message: "no SIP proxy configured");
-        { uri, false }
-    end
+    {desturi, usesrv} =
+      try do
+        {Application.fetch_env!(:elixip2, :proxyuri),
+         Application.fetch_env!(:elixip2, :proxyusesrv)}
+      rescue
+        ArgumentError ->
+          # No SIP proxy configured. Using R-URI domain
+          Logger.debug(module: __MODULE__, message: "no SIP proxy configured")
+          {uri, false}
+      end
+
     transport = SIP.Uri.get_transport(desturi)
-    if transport in [ "WS", "WSS"] do
+
+    if transport in ["WS", "WSS"] do
       # We NEED to pass the name when using WSS or WS protocol
-      Logger.debug(module: __MODULE__, message: " #{desturi} uses Websocket transport. Resolution will be done by socket layer");
-      %SIP.Uri{ uri | destip: desturi.domain, destport: desturi.port, destproto: transport }
+      Logger.debug(
+        module: __MODULE__,
+        message: " #{desturi} uses Websocket transport. Resolution will be done by socket layer"
+      )
+
+      %SIP.Uri{uri | destip: desturi.domain, destport: desturi.port, destproto: transport}
     else
       # For UDP, TCP, TLS use regular DNS resolution
-      Logger.debug(module: __MODULE__, message: "resolving #{desturi} with trysrv=#{usesrv}");
+      Logger.debug(module: __MODULE__, message: "resolving #{desturi} with trysrv=#{usesrv}")
+
       case resolve(desturi, usesrv) do
-        { :error, err } ->
+        {:error, err} ->
           Logger.debug(module: __MODULE__, message: "resolution error #{err}")
           :error
 
         :nxdomain ->
           Logger.debug(module: __MODULE__, message: "resolution failed")
           :nxdomain
-        { ip, port } -> %SIP.Uri{ uri | destip: ip, destport: port, destproto: transport }
+
+        {ip, port} ->
+          %SIP.Uri{uri | destip: ip, destport: port, destproto: transport}
       end
     end
   end
 
   def get_dns_default_dns_server() do
-    dns_str = case System.get_env("OS") do
-      "Windows_NT" ->
-        getipcmd = ~c"powershell -Command \"Get-NetAdapter | Where-Object Status -eq 'Up' | ForEach-Object { Get-DnsClientServerAddress -InterfaceAlias $_.Name } | Select-Object -ExpandProperty ServerAddresses | Sort-Object -Unique
+    dns_str =
+      case System.get_env("OS") do
+        "Windows_NT" ->
+          getipcmd =
+            ~c"powershell -Command \"Get-NetAdapter | Where-Object Status -eq 'Up' | ForEach-Object { Get-DnsClientServerAddress -InterfaceAlias $_.Name } | Select-Object -ExpandProperty ServerAddresses | Sort-Object -Unique
 \""
-        :os.cmd(getipcmd) |> List.to_string() |> String.split("\r\n") |> hd()
 
-      # Assume linux
-      _ ->
-        case File.read("/etc/resolv.conf") do
-          { :ok, content } ->
-            String.split(content, "\n") |>
-            Enum.find(&String.starts_with?(&1, "nameserver")) |>
-            String.trim() |> String.split(" ") |>
-            List.last()
+          :os.cmd(getipcmd) |> List.to_string() |> String.split("\r\n") |> hd()
 
-          { :error, _code } -> nil
-        end
-    end
+        # Assume linux
+        _ ->
+          case File.read("/etc/resolv.conf") do
+            {:ok, content} ->
+              String.split(content, "\n")
+              |> Enum.find(&String.starts_with?(&1, "nameserver"))
+              |> String.trim()
+              |> String.split(" ")
+              |> List.last()
 
-    Logger.debug(module: __MODULE__, message: "DNS server that will be used: #{dns_str}");
-    { :ok, dns_addr } = NetUtils.parse_address(dns_str)
+            {:error, _code} ->
+              nil
+          end
+      end
+
+    Logger.debug(module: __MODULE__, message: "DNS server that will be used: #{dns_str}")
+    {:ok, dns_addr} = NetUtils.parse_address(dns_str)
     Application.put_env(:elixip2, :nameserver, dns_addr)
     dns_str
   end

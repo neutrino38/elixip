@@ -1111,28 +1111,40 @@ ACK+BYE the late 2xx" cannot be tested credibly against a single shared peer.
 | **P2a** ✅ | registrar-driven calling (§3.2): `Kelix.Mod.Registrar.targets/2`, q ordering, `apps/kelixip/scripts/b2bua.exs`. Dials the highest-q contact — the whole call for a single-contact AOR, and no shape change when P2b lands |
 | **P2b-1** ✅ | dialog-layer branches: `SIP.Dialog.fork_branch/2`, the branch table, the `add_totag` rework (a forked dialog adopts only a 2xx's tag), winner adoption + CANCEL of the losers, and the dialog surviving a branch failure so the next target can be armed |
 | **P2b-2** ✅ | session-layer serial hunt: `%Peer{fork: :serial}` + the `retry_on` list, the untried-target list on the leg, `b2bua_hunting?/0`, and the kelixip script hunting an AOR's contacts in q order |
-| **P2b-3** | per-peer `outbound_proxy` ✅, and a branch dying **without** a response now driving the hunt ✅ (the dialog reports a client-transaction timeout as a synthetic 408, RFC 3261 §17.1.1.2 / §8.1.3.1, which the default retry-on list covers). **Left:** failover across SRV priorities — blocked on the resolver, see below |
+| **P2b-3** ✅ | per-peer `outbound_proxy`, SRV failover (`order_srv/1` + `srv_targets/1` + `use_srv` expansion), and a branch dying **without** a response driving the hunt (the dialog reports a client-transaction timeout as a synthetic 408, RFC 3261 §17.1.1.2 / §8.1.3.1, which the default retry-on list covers). |
 
-### SRV failover is blocked on `SIP.Resolver` (found 2026-08-09)
+### SRV failover — delivered, and what it took (2026-08-09)
 
-`resolve_srv_multiple(uri, prio_idx)` cannot enumerate priorities: its head is
-`def resolve_srv_multiple(uri = %SIP.Uri{}, prio_idx = 0)`, and `prio_idx = 0`
-is a pattern that matches **only** zero — any other index raises
-`FunctionClauseError`. The body sorts the priority groups and indexes into them,
-so the intent is there; the signature forbids it. The "multiple" in the name is
-aspirational.
+`SIP.Resolver` could not enumerate SRV destinations at all, for four reasons,
+three of which were bugs in code that had never run:
 
-What the work needs, then: fix that head, and give the resolver a test seam —
-real SRV lookups are not viable in a unit test and the `:nameserver`
-application env is the only injection point today.
+- `resolve_srv_multiple(uri, prio_idx = 0)` — `prio_idx = 0` is a *pattern*
+  matching only zero, so every other index raised. The body sorted the priority
+  groups and indexed into them: the intent was written and unreachable.
+- past the end, `Enum.at` returns `nil` and the destructuring raised before the
+  `is_list` check that was there to report it — the "no more priorities" branch
+  was dead.
+- the weighted draw was applied **once** per priority group, electing one host
+  and discarding the rest. RFC 2782 uses weight to *order* a group for load
+  balancing; a failover has to walk the remainder before changing priority.
+- an all-zero-weight group reached `:rand.uniform(0)`, which raises. Weight 0 is
+  legal and is what an operator that does not load-balance publishes.
 
-The shape once it resolves: expand each URI into one target per SRV destination,
-in priority order, and hand the flattened list to the existing serial hunt.
-Nothing two-level is needed — a `%SIP.Uri{}` already carries its destination, so
-"the same URI at another address" is just another target. Note that this makes
-SRV failover depend on `fork: :serial` rather than being unconditional as §3.1
-first put it; `:none` then means one attempt and no failover at all, which is
-the simpler contract.
+The fix separates the **pure ordering** from the I/O, which is also the test
+seam that was missing: `order_srv/1` takes the records and returns the order to
+try them in, so RFC 2782 is tested without a resolver. `srv_targets/1` does the
+lookup around it and returns URIs still carrying a *name* — resolving all of
+them up front would be DNS traffic for hosts that may never be dialled.
+
+`%Peer{use_srv: true}` then expands each URI into one target per destination,
+and the existing serial hunt walks the flattened list: a `%SIP.Uri{}` carries
+its own destination, so "the same URI at another address" is just another
+target, and nothing two-level was needed. A domain publishing no SRV keeps its
+URI as given, so the flag is safe to leave on.
+
+One consequence to note: SRV failover now depends on `fork: :serial` rather than
+being unconditional as §3.1 first put it. `:none` means one attempt and no
+failover at all — the simpler contract, and the honest one.
 | **P3** | `{:mediaserver, …}` mode: leg-qualified media handles, `bridge/2` callback in `MediaServer.Behaviour` + Mendooze implementation, offer/answer choreography |
 | **P2c** | dynamic targets (§3.4): the `SIP.B2bua.TargetProvider` behaviour, `%Peer{provider:}`, `b2bua_try_next/0` + the per-attempt ring timeout; `b2bua_cancel_forward/0` (§3.5) with 487 out of the default retry-on list; hunt progress events (§3.6, `notify_progress`) ✅ delivered. Extends the SERIAL hunt, so it needs nothing from P4; a complete call queue additionally needs P3 for music on hold |
 | **P4** | parallel forking (branch sets in the leg dialog, §3.3: winner adoption, late-2xx ACK+BYE, best-response aggregation; q-group semantics of §3.2), trunk processes (`trunk_pid`); multi-leg generalization only if attended transfer / 3pcc demands it. `{:rtpengine, …}` is **out of scope** — deferred to the borderline work |

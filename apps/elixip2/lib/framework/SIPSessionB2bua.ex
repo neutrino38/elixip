@@ -513,7 +513,7 @@ defmodule SIP.Session.B2bua do
       {:ok, fwd} ->
         # The first target is dialled now; the rest are kept on the leg for a
         # serial hunt to walk (§3.1). `fork: :none` keeps them unused.
-        [target | rest] = Enum.map(peer.uris, &normalize_uri/1)
+        [target | rest] = expand_targets(peer)
         untried = if peer.fork == :serial, do: rest, else: []
 
         case apply_target(fwd, target, peer) do
@@ -642,6 +642,30 @@ defmodule SIP.Session.B2bua do
         tp_module: from.tp_module,
         tp_pid: from.tp_pid
     }
+  end
+
+  # The peer's URIs, each expanded into one target per SRV destination when
+  # `use_srv` asks for it (§3.1 case 1).
+  #
+  # Flattening is all it takes: a %SIP.Uri{} carries its own destination, so "the
+  # same URI at another address" is just another target, and the serial hunt
+  # walks the result without knowing SRV exists. Nothing two-level is needed.
+  #
+  # RFC 2782 order comes from SIP.Resolver.order_srv/1: priorities ascending,
+  # weighted draw within each. A domain that publishes no SRV keeps its URI as
+  # given, so `use_srv: true` is safe to leave on.
+  defp expand_targets(%Peer{use_srv: false} = peer),
+    do: Enum.map(peer.uris, &normalize_uri/1)
+
+  defp expand_targets(%Peer{} = peer) do
+    Enum.flat_map(peer.uris, fn uri ->
+      uri = normalize_uri(uri)
+
+      case SIP.Resolver.srv_targets(uri) do
+        {:ok, [_ | _] = targets} -> targets
+        _ -> [uri]
+      end
+    end)
   end
 
   # A target that already carries its destination (a registrar contact, §3.2) is
