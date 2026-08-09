@@ -419,6 +419,62 @@ defmodule SIP.Test.B2bua.Session do
     end
   end
 
+  # ── Calling a registered UA: the flow, not a fresh resolution ───────────────
+  describe "a target that carries the flow it registered over" do
+    # The last mile of the registrar case (design §3.2, §6.4). `targets/2` hands
+    # back contacts stamped with the connection the REGISTER came in on, and for
+    # a CONNECTED transport (TLS, TCP, WSS) that stamp is the whole point: the UA
+    # is usually behind a NAT, the Contact host is a private address, and the only
+    # way to reach it is the socket it is still holding open. Reopening is not an
+    # option — a new connection is a different flow, from a different source port,
+    # and toward a NATed client it cannot even be attempted.
+    #
+    # The registrar half is covered in kelix_modules; what is pinned here is that
+    # the B2BUA does not lose the stamp between the peer and the wire. The target
+    # below names a private address nothing could resolve, so the INVITE arriving
+    # at all is the assertion.
+    test "is dialled over that flow instead of being resolved afresh", %{ctx: ctx} do
+      # A mockup instance of its own, and its pid taken as the "registered flow".
+      flow_named =
+        %SIP.Uri{scheme: "sip:", userpart: "bob", domain: "example.com", port: 5060}
+        |> SIP.Uri.set_uri_param("unittest", "b2bua_flow")
+
+      flow_pid = SIP.Transport.Selector.select_transport(flow_named).tp_pid
+      :ok = GenServer.call(flow_pid, :settestapp)
+
+      # The contact as Kelix.Mod.Registrar.targets/2 produces it: what the device
+      # announced (a private address), plus where its REGISTER really came from
+      # and the transport process still holding that connection.
+      target = %SIP.Uri{
+        scheme: "sip:",
+        userpart: "bob",
+        domain: "10.0.0.9",
+        port: 5060,
+        destip: {10, 0, 0, 9},
+        destport: 5060,
+        destproto: "UDP",
+        tp_module: SIP.Test.Transport.UDPMockup,
+        tp_pid: flow_pid
+      }
+
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), %Peer{uris: [target]}, false)
+      assert %Leg{} = B2bua.outbound_leg(ctx)
+
+      # Arriving at all is the assertion: this instance is named by a `unittest`
+      # marker the target does not carry, and 10.0.0.9 resolves to nothing, so
+      # the stamped pid is the only thing that could have routed it here. The
+      # request itself comes back off the wire and therefore parsed, which is why
+      # nothing is asserted on its transport metadata — it has none by then.
+      assert_receive {:invite_sent, fwd}, 5_000
+      assert fwd.ruri.domain == "10.0.0.9"
+      assert fwd.method == :INVITE
+
+      # Nobody is going to answer this attempt: wind it down here rather than
+      # leaving a dialog retransmitting into the next test's run.
+      B2bua.release_legs(ctx)
+    end
+  end
+
   # ── A relayed request whose far end never answers ───────────────────────────
   describe "a request relayed onto a leg nobody answers" do
     # What the caller must NOT get is silence. Their server transaction would sit
@@ -484,6 +540,10 @@ defmodule SIP.Test.B2bua.Session do
       # in-dialog request is not a hangup.
       refute Enum.any?(B2bua.pending(ctx), fn {_t, p} -> p.method == :INFO end)
       assert %Leg{} = B2bua.outbound_leg(ctx)
+
+      # The call is established and would stay up: end it here rather than
+      # leaving a live dialog behind for the tests that follow.
+      B2bua.release_legs(ctx)
     end
   end
 
