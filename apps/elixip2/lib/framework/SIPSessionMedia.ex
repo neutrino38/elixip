@@ -32,10 +32,10 @@ defmodule SIP.Session.Media do
         end
       end
 
-      defmacro media_start_echo() do
+      defmacro media_start_echo(opts \\ []) do
         quote do
           SIP.Scenario.Monitor.note_command(:media, "media_start_echo")
-          var!(sip_ctx) = SIP.Session.Media.start_echo(var!(sip_ctx))
+          var!(sip_ctx) = SIP.Session.Media.start_echo(var!(sip_ctx), unquote(opts))
         end
       end
 
@@ -62,10 +62,10 @@ defmodule SIP.Session.Media do
         end
       end
 
-      defmacro media_stop() do
+      defmacro media_stop(opts \\ []) do
         quote do
           SIP.Scenario.Monitor.note_command(:media, "media_stop")
-          var!(sip_ctx) = SIP.Session.Media.stop_media(var!(sip_ctx))
+          var!(sip_ctx) = SIP.Session.Media.stop_media(var!(sip_ctx), unquote(opts))
         end
       end
 
@@ -75,6 +75,74 @@ defmodule SIP.Session.Media do
           var!(sip_ctx) = SIP.Session.Media.media_cleanup_ressources(var!(sip_ctx))
         end
       end
+    end
+  end
+
+  # ── Leg-scoped handles ──────────────────────────────────────────────────────
+  #
+  # A B2BUA call terminates media on the media server for BOTH of its SIP legs
+  # (design docs/design/b2bua_module.md §7), so the single-slot handles this
+  # mixin started with are no longer enough. They become leg-scoped — with the
+  # bare key kept as the `:inbound` alias, which is why nothing outside this
+  # module changes: every existing scenario, the `reply_invite_with_sdp` path,
+  # the MCU module and the suites that read `:mediapeerconnectionid` straight out
+  # of the appdata all keep addressing the leg they always addressed.
+  @default_leg :inbound
+
+  # Options this module reads itself; everything else in an `opts` list is the
+  # adapter's (`create_peer_connection/3`, `create_player/3`, …).
+  @framework_opts [:leg, :bridge_with]
+
+  defp leg_of(opts), do: Keyword.get(opts, :leg, @default_leg)
+  defp adapter_opts(opts), do: Keyword.drop(opts, @framework_opts)
+
+  defp pc_key(@default_leg), do: :mediapeerconnectionid
+  defp pc_key(leg), do: {:mediapeerconnectionid, leg}
+
+  defp action_key(@default_leg), do: :mediaactionid
+  defp action_key(leg), do: {:mediaactionid, leg}
+
+  defp action_kind_key(@default_leg), do: :mediaaction
+  defp action_kind_key(leg), do: {:mediaaction, leg}
+
+  @doc "The media-server peer connection of `leg`, or nil when it has none."
+  @spec peer_connection(%SIP.Context{}, atom()) :: term() | nil
+  def peer_connection(sip_ctx = %SIP.Context{}, leg \\ @default_leg),
+    do: SIP.Context.appdata_get(sip_ctx, pc_key(leg))
+
+  @doc """
+  The legs this context holds a peer connection for, in the order they were
+  created. Empty when no media was ever negotiated.
+
+  Kept explicitly rather than derived from the appdata keys: `media_cleanup_ressources/1`
+  has to release every leg, and a map scan would have to guess which keys are
+  media handles.
+  """
+  @spec media_legs(%SIP.Context{}) :: [atom()]
+  def media_legs(sip_ctx = %SIP.Context{}),
+    do: SIP.Context.appdata_get(sip_ctx, :medialegs) || []
+
+  defp register_leg(sip_ctx, leg) do
+    legs = media_legs(sip_ctx)
+    if leg in legs, do: sip_ctx, else: SIP.Context.appdata_set(sip_ctx, :medialegs, legs ++ [leg])
+  end
+
+  # `bridge_with: :inbound` names the OTHER leg; the adapter needs its handle.
+  # A value that is not a leg name is passed through untouched, so a caller that
+  # already holds a handle can give it directly.
+  defp resolve_bridge_with(opts, sip_ctx) do
+    case Keyword.fetch(opts, :bridge_with) do
+      {:ok, leg} when is_atom(leg) ->
+        case peer_connection(sip_ctx, leg) do
+          nil -> []
+          cnx -> [bridge_with: cnx]
+        end
+
+      {:ok, handle} ->
+        [bridge_with: handle]
+
+      :error ->
+        []
     end
   end
 
@@ -134,18 +202,23 @@ defmodule SIP.Session.Media do
   Build a local SDP offer from the connected media server.
 
   Creates the peer connection on first call and stores its handle in the
-  context appdata (`:mediapeerconnectionid`), so subsequent calls reuse it.
+  context appdata (`:mediapeerconnectionid` for the inbound leg,
+  `{:mediapeerconnectionid, leg}` otherwise), so subsequent calls reuse it.
   Returns `{updated_ctx, sdp_offer}`.
+
+  `opts` accepts `:leg` (default `:inbound`) and `:bridge_with` (the leg whose
+  media session this one joins — see `ensure_peer_connection/5`); anything else
+  is passed to the adapter when the connection is created.
   """
-  @spec get_sdp_offer(%SIP.Context{}, atom(), MediaServer.media_kind()) ::
+  @spec get_sdp_offer(%SIP.Context{}, atom(), MediaServer.media_kind(), keyword()) ::
           {%SIP.Context{}, binary()}
-  def get_sdp_offer(sip_ctx = %SIP.Context{}, webrtc_support, medias)
-      when is_atom(webrtc_support) do
+  def get_sdp_offer(sip_ctx = %SIP.Context{}, webrtc_support, medias, opts \\ [])
+      when is_atom(webrtc_support) and is_list(opts) do
     if not is_pid(sip_ctx.mediaserverpid) do
       raise "No media server connected to the session context"
     end
 
-    {sip_ctx, cnx} = ensure_peer_connection(sip_ctx, webrtc_support, medias)
+    {sip_ctx, cnx} = ensure_peer_connection(sip_ctx, leg_of(opts), webrtc_support, medias, opts)
 
     offer =
       case apply(sip_ctx.mediaservermodule, :get_local_offer, [cnx]) do
@@ -185,22 +258,34 @@ defmodule SIP.Session.Media do
 
     webrtc_support = Keyword.get(opts, :webrtc, :no)
     medias = Keyword.get(opts, :media, :audio_video)
-    {sip_ctx, cnx} = ensure_peer_connection(sip_ctx, webrtc_support, medias)
+    {sip_ctx, cnx} = ensure_peer_connection(sip_ctx, leg_of(opts), webrtc_support, medias, opts)
 
     {sip_ctx, apply(sip_ctx.mediaservermodule, :set_remote_offer, [cnx, remote_offer])}
   end
 
-  # Return {ctx, cnx}: reuse the stored peer connection, creating one (and
-  # stashing its handle) on first use. Shared by get_sdp_offer/3 (UAC) and
+  # Return {ctx, cnx}: reuse the stored peer connection of `leg`, creating one
+  # (and stashing its handle) on first use. Shared by get_sdp_offer/4 (UAC) and
   # get_sdp_answer/3 (UAS). Raises when the media server cannot create it.
-  defp ensure_peer_connection(sip_ctx = %SIP.Context{}, webrtc_support, medias) do
-    case SIP.Context.appdata_get(sip_ctx, :mediapeerconnectionid) do
+  #
+  # `bridge_with:` names the leg whose media session this one must join. It is
+  # not the same request as `bridge/3`: this one says WHERE the endpoint lives,
+  # and it can only be answered at creation time — on a Medooze server two
+  # endpoints are connectable only inside one MediaSession
+  # (docs/design/mediagw_b2bua_jsr309.md §2). Adapters with nothing to share
+  # ignore it, which is why it is safe to pass unconditionally.
+  defp ensure_peer_connection(sip_ctx = %SIP.Context{}, leg, webrtc_support, medias, opts) do
+    case SIP.Context.appdata_get(sip_ctx, pc_key(leg)) do
       nil ->
+        conn_opts =
+          [webrtc_support: webrtc_support, media: medias] ++
+            extra_conn_opts(sip_ctx) ++
+            resolve_bridge_with(opts, sip_ctx) ++ adapter_opts(opts)
+
         cnx =
           case apply(sip_ctx.mediaservermodule, :create_peer_connection, [
                  sip_ctx.mediaserverpid,
                  self(),
-                 [webrtc_support: webrtc_support, media: medias] ++ extra_conn_opts(sip_ctx)
+                 conn_opts
                ]) do
             {:ok, cnx} ->
               cnx
@@ -209,7 +294,7 @@ defmodule SIP.Session.Media do
               raise "Media server failed to create peer connection: #{inspect(reason)}"
           end
 
-        {SIP.Context.appdata_set(sip_ctx, :mediapeerconnectionid, cnx), cnx}
+        {sip_ctx |> register_leg(leg) |> SIP.Context.appdata_set(pc_key(leg), cnx), cnx}
 
       cnx ->
         {sip_ctx, cnx}
@@ -240,46 +325,60 @@ defmodule SIP.Session.Media do
   Feed a remote SDP answer to the media server peer connection.
   Stores the result (`:ok` / `{:error, _}`) in `:lasterr` and returns the context.
   """
-  @spec process_sdp_answer(%SIP.Context{}, binary()) :: %SIP.Context{}
-  def process_sdp_answer(sip_ctx = %SIP.Context{}, answer) when is_binary(answer) do
-    if not is_pid(sip_ctx.mediaserverpid) do
-      raise "No media server connected to the session context"
-    end
-
-    cnx = SIP.Context.appdata_get(sip_ctx, :mediapeerconnectionid)
-
-    if is_nil(cnx) do
-      raise "No media peer connection found in the session context"
-    end
-
+  @spec process_sdp_answer(%SIP.Context{}, binary(), keyword()) :: %SIP.Context{}
+  def process_sdp_answer(sip_ctx = %SIP.Context{}, answer, opts \\ [])
+      when is_binary(answer) and is_list(opts) do
+    cnx = peer_connection!(sip_ctx, leg_of(opts))
     rez = apply(sip_ctx.mediaservermodule, :set_remote_answer, [cnx, answer])
     SIP.Context.set(sip_ctx, :lasterr, rez)
   end
 
-  def start_echo(sip_ctx = %SIP.Context{}) do
+  # The peer connection an action must run on, or a refusal that names what is
+  # missing. One reading for every action below, which is what keeps them from
+  # drifting apart as legs multiply.
+  defp peer_connection!(sip_ctx, leg) do
     if not is_pid(sip_ctx.mediaserverpid) do
       raise "No media server connected to the session context"
     end
 
-    cnx = SIP.Context.appdata_get(sip_ctx, :mediapeerconnectionid)
-
-    if is_nil(cnx) do
-      raise "No media peer connection found in the session context"
+    case peer_connection(sip_ctx, leg) do
+      nil -> raise "No media peer connection found in the session context for leg #{leg}"
+      cnx -> cnx
     end
+  end
 
-    if not is_nil(SIP.Context.appdata_get(sip_ctx, :mediaactionid)) do
+  # An action is single-slot PER LEG: a connection plays, records or echoes, and
+  # asking for a second one on the same leg is a scenario bug rather than a
+  # request to stack them.
+  defp action_busy?(sip_ctx, leg, what) do
+    if is_nil(SIP.Context.appdata_get(sip_ctx, action_key(leg))) do
+      false
+    else
       Logger.warning(
         dialogpid: self(),
         module: __MODULE__,
-        message: "Media action already started, ignoring start_echo request"
+        message: "Media action already started on leg #{leg}, ignoring #{what} request"
       )
 
+      true
+    end
+  end
+
+  defp put_action(sip_ctx, leg, kind, handle) do
+    sip_ctx
+    |> SIP.Context.appdata_set(action_key(leg), handle)
+    |> SIP.Context.appdata_set(action_kind_key(leg), kind)
+  end
+
+  def start_echo(sip_ctx = %SIP.Context{}, opts \\ []) do
+    leg = leg_of(opts)
+    cnx = peer_connection!(sip_ctx, leg)
+
+    if action_busy?(sip_ctx, leg, "start_echo") do
       sip_ctx
     else
       {:ok, echo_pid} = apply(sip_ctx.mediaservermodule, :create_echo, [cnx])
-
-      SIP.Context.appdata_set(sip_ctx, :mediaactionid, echo_pid)
-      |> SIP.Context.appdata_set(:mediaaction, :echo)
+      put_action(sip_ctx, leg, :echo, echo_pid)
     end
   end
 
@@ -293,32 +392,18 @@ defmodule SIP.Session.Media do
   @spec start_player(%SIP.Context{}, binary(), keyword()) :: %SIP.Context{}
   def start_player(sip_ctx = %SIP.Context{}, file_path, opts \\ [])
       when is_binary(file_path) and is_list(opts) do
-    if not is_pid(sip_ctx.mediaserverpid) do
-      raise "No media server connected to the session context"
-    end
+    leg = leg_of(opts)
+    cnx = peer_connection!(sip_ctx, leg)
 
-    cnx = SIP.Context.appdata_get(sip_ctx, :mediapeerconnectionid)
-
-    if is_nil(cnx) do
-      raise "No media peer connection found in the session context"
-    end
-
-    if not is_nil(SIP.Context.appdata_get(sip_ctx, :mediaactionid)) do
-      Logger.warning(
-        dialogpid: self(),
-        module: __MODULE__,
-        message: "Media action already started, ignoring start_player request"
-      )
-
+    if action_busy?(sip_ctx, leg, "start_player") do
       sip_ctx
     else
       {:ok, player_pid} =
-        apply(sip_ctx.mediaservermodule, :create_player, [cnx, file_path, opts])
+        apply(sip_ctx.mediaservermodule, :create_player, [cnx, file_path, adapter_opts(opts)])
 
       :ok = apply(sip_ctx.mediaservermodule, :start_player, [player_pid])
 
-      SIP.Context.appdata_set(sip_ctx, :mediaactionid, player_pid)
-      |> SIP.Context.appdata_set(:mediaaction, :player)
+      put_action(sip_ctx, leg, :player, player_pid)
     end
   end
 
@@ -335,44 +420,36 @@ defmodule SIP.Session.Media do
   def start_recorder(sip_ctx = %SIP.Context{}, file_path, duration_ms, opts \\ [])
       when is_binary(file_path) and is_integer(duration_ms) and duration_ms >= 0 and
              is_list(opts) do
-    if not is_pid(sip_ctx.mediaserverpid) do
-      raise "No media server connected to the session context"
-    end
+    leg = leg_of(opts)
+    cnx = peer_connection!(sip_ctx, leg)
 
-    cnx = SIP.Context.appdata_get(sip_ctx, :mediapeerconnectionid)
-
-    if is_nil(cnx) do
-      raise "No media peer connection found in the session context"
-    end
-
-    if not is_nil(SIP.Context.appdata_get(sip_ctx, :mediaactionid)) do
-      Logger.warning(
-        dialogpid: self(),
-        module: __MODULE__,
-        message: "Media action already started, ignoring start_recorder request"
-      )
-
+    if action_busy?(sip_ctx, leg, "start_recorder") do
       sip_ctx
     else
       {:ok, rec_pid} =
-        apply(sip_ctx.mediaservermodule, :create_recorder, [cnx, file_path, duration_ms, opts])
+        apply(sip_ctx.mediaservermodule, :create_recorder, [
+          cnx,
+          file_path,
+          duration_ms,
+          adapter_opts(opts)
+        ])
 
       :ok = apply(sip_ctx.mediaservermodule, :start_recorder, [rec_pid])
 
-      SIP.Context.appdata_set(sip_ctx, :mediaactionid, rec_pid)
-      |> SIP.Context.appdata_set(:mediaaction, :recorder)
+      put_action(sip_ctx, leg, :recorder, rec_pid)
     end
   end
 
-  def stop_media(sip_ctx = %SIP.Context{}) do
+  def stop_media(sip_ctx = %SIP.Context{}, opts \\ []) do
     if not is_pid(sip_ctx.mediaserverpid) do
       raise "No media server connected to the session context"
     end
 
-    action_pid = SIP.Context.appdata_get(sip_ctx, :mediaactionid)
+    leg = leg_of(opts)
+    action_pid = SIP.Context.appdata_get(sip_ctx, action_key(leg))
 
     if not is_nil(action_pid) do
-      case SIP.Context.appdata_get(sip_ctx, :mediaaction) do
+      case SIP.Context.appdata_get(sip_ctx, action_kind_key(leg)) do
         :echo ->
           apply(sip_ctx.mediaservermodule, :stop_echo, [action_pid])
 
@@ -382,22 +459,20 @@ defmodule SIP.Session.Media do
         :recorder ->
           apply(sip_ctx.mediaservermodule, :stop_recorder, [action_pid])
 
-        _ ->
+        other ->
           Logger.warning(
             dialogpid: self(),
             module: __MODULE__,
-            message:
-              "Unknown media action #{inspect(SIP.Context.appdata_get(sip_ctx, :mediaaction))}, ignoring stop_media request"
+            message: "Unknown media action #{inspect(other)}, ignoring stop_media request"
           )
       end
 
-      SIP.Context.appdata_set(sip_ctx, :mediaactionid, nil)
-      |> SIP.Context.appdata_set(:mediaaction, nil)
+      put_action(sip_ctx, leg, nil, nil)
     else
       Logger.warning(
         dialogpid: self(),
         module: __MODULE__,
-        message: "No media action started, ignoring stop_media request"
+        message: "No media action started on leg #{leg}, ignoring stop_media request"
       )
 
       sip_ctx
@@ -416,19 +491,28 @@ defmodule SIP.Session.Media do
   """
   @spec media_cleanup_ressources(%SIP.Context{}) :: %SIP.Context{}
   def media_cleanup_ressources(sip_ctx = %SIP.Context{}) do
-    sip_ctx
-    |> cleanup_action()
-    |> cleanup_peer_connection()
+    # Every leg, not just the inbound one: a B2BUA holds two connections on one
+    # server, and releasing the server while the second is still open leaks it
+    # server-side. `:inbound` is always attempted — a context that never called
+    # media_legs-registering code can still hold the bare key (a scenario that
+    # set it by hand, the MCU module's path).
+    legs = Enum.uniq([@default_leg | media_legs(sip_ctx)])
+
+    legs
+    |> Enum.reduce(sip_ctx, fn leg, ctx ->
+      ctx |> cleanup_action(leg) |> cleanup_peer_connection(leg)
+    end)
+    |> SIP.Context.appdata_set(:medialegs, [])
     |> cleanup_media_server()
   end
 
-  defp cleanup_action(sip_ctx) do
-    action_pid = SIP.Context.appdata_get(sip_ctx, :mediaactionid)
+  defp cleanup_action(sip_ctx, leg) do
+    action_pid = SIP.Context.appdata_get(sip_ctx, action_key(leg))
 
     if is_nil(action_pid) do
       sip_ctx
     else
-      case SIP.Context.appdata_get(sip_ctx, :mediaaction) do
+      case SIP.Context.appdata_get(sip_ctx, action_kind_key(leg)) do
         :echo ->
           safe_ms_call(sip_ctx.mediaservermodule, :stop_echo, [action_pid])
 
@@ -446,19 +530,18 @@ defmodule SIP.Session.Media do
           )
       end
 
-      SIP.Context.appdata_set(sip_ctx, :mediaactionid, nil)
-      |> SIP.Context.appdata_set(:mediaaction, nil)
+      put_action(sip_ctx, leg, nil, nil)
     end
   end
 
-  defp cleanup_peer_connection(sip_ctx) do
-    cnx = SIP.Context.appdata_get(sip_ctx, :mediapeerconnectionid)
+  defp cleanup_peer_connection(sip_ctx, leg) do
+    cnx = SIP.Context.appdata_get(sip_ctx, pc_key(leg))
 
     if is_nil(cnx) do
       sip_ctx
     else
       safe_ms_call(sip_ctx.mediaservermodule, :close_peer_connection, [cnx])
-      SIP.Context.appdata_set(sip_ctx, :mediapeerconnectionid, nil)
+      SIP.Context.appdata_set(sip_ctx, pc_key(leg), nil)
     end
   end
 
