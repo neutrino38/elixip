@@ -66,13 +66,34 @@ opposite of the order the design lists them in.
 | **R2b** | `{:media_timeout, media}` and the derived `:media_lost` | yes | ✅ |
 | **R4** | the offer/answer choreography in `SIP.Session.B2bua`, the implicit bridge (R4.1) and the failure semantics (R4.2) | yes | ✅ |
 | **R5** | `scenarios/b2bua_media.exs` + its own test | yes | ✅ |
-| **R3** | `MediaServer.Mendooze.Conn`: two endpoints, cross-leg negotiation, the bridge | E2E, gated | |
+| **R3** | `MediaServer.Mendooze.Conn`: two endpoints, cross-leg negotiation, the bridge | **yes**, mostly | R3a ✅ R3b ✅ R3c ✅ *(direct attach; transcoders open)* |
 | **R6** | §14.6 — the media server as a failure domain | partly | scenario clauses ✅, framework default open |
 
-**State (2026-08-09): the framework half is done and green.** The media mode
-works end to end on `MediaServer.Mockup` — 105 tests across the B2BUA and media
-suites — and `MediaServer.Mendooze.bridge/3` refuses plainly until R3 gives it
-two endpoints in one session. What remains: R3, and the framework default of R6.
+**State (2026-08-09): P3 is delivered except the transcoder chain.** 294 tests
+across the B2BUA, media and Mendooze suites; the media mode works end to end on
+`MediaServer.Mockup`, and the Mendooze adapter builds the session, both
+endpoints and the attach against the fake JSR309 server.
+
+**R3 turned out to be CI-testable**, contrary to the row above as first written:
+`mendooze_conn_test.exs` drives a fake JSR309 server and asserts the RPC
+sequence, so the second endpoint, the attach in both directions, `useOriSeqNum`,
+the per-media policy decision and the close ordering are all covered. What still
+needs a real Medooze is only whether the server behaves as its documentation
+says.
+
+What remains:
+
+- **the transcoder chain** (`Video|AudioTranscoderCreate` + the two attach pairs
+  + `…SetCodec`). Until it exists, `:avoid` with no common codec and `:force` in
+  every case return `{:transcoding_not_implemented, media}` rather than
+  attaching endpoints that would exchange codecs neither can decode. Which also
+  means **audio is not always transcoded** the way the Java gateway does it;
+- **the framework default of R6** (§14.6's sketch: the media mixin monitoring
+  the server pid, the default cooperative shutdown, the configurable Conn
+  timeout);
+- **`b2bua_reoffer_kind/1`** (§R4.1b), without which every re-offer crosses;
+- an **E2E run against `MENDOOZE_URL`**, which is the only thing that can
+  confirm the server accepts two endpoints in one session and attaches them.
 
 Two things moved during the implementation and are worth knowing before reading
 the sections above:
