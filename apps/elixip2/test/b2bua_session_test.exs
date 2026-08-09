@@ -93,9 +93,31 @@ defmodule SIP.Test.B2bua.Session do
       assert {:b2bua, :no_target} = ctx.lasterr
     end
 
-    test "the media modes of later phases are refused explicitly", %{ctx: ctx} do
+    # `{:rtpengine, …}` keeps its atom so a scenario that one day asks for it does
+    # not change shape, and keeps refusing: it belongs to the borderline work, and
+    # accepting it would produce a call with no media path.
+    test "a media mode that is only reserved is refused explicitly", %{ctx: ctx} do
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), {:rtpengine, []})
+      assert {:b2bua, :media_mode_not_implemented, {:rtpengine, []}} = ctx.lasterr
+      assert B2bua.outbound_leg(ctx) == nil
+    end
+
+    # …whereas `{:mediaserver, …}` is understood, and fails on what is actually
+    # wrong: nothing was connected to terminate the media on.
+    test "the media mode fails on the media, not on the mode", %{ctx: ctx} do
       ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), {:mediaserver, []})
-      assert {:b2bua, :media_mode_not_implemented, {:mediaserver, []}} = ctx.lasterr
+      assert {:b2bua, :media_setup_failed, {:inbound, _reason}} = ctx.lasterr
+      assert B2bua.outbound_leg(ctx) == nil
+    end
+
+    test "a bad transcoding policy is refused before anything is dialled", %{ctx: ctx} do
+      mode = {:mediaserver, transcode: [audio: :sometimes]}
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), mode)
+
+      assert {:b2bua, :media_setup_failed, {:bad_transcoding_policy, :audio, :sometimes}} =
+               ctx.lasterr
+
+      assert B2bua.outbound_leg(ctx) == nil
     end
 
     test "Max-Forwards exhausted is refused as such (the scenario answers 483)", %{ctx: ctx} do
@@ -416,6 +438,144 @@ defmodule SIP.Test.B2bua.Session do
 
       ctx = B2bua.note_leg_event(ctx, {:outbound, {180, %{response: 180}, self(), self()}})
       assert B2bua.state(ctx) == before
+    end
+  end
+
+  # ── {:mediaserver, …}: the bodies that cross are ours ───────────────────────
+  describe "the media mode" do
+    setup %{ctx: ctx} do
+      ctx = SIP.Session.Media.use_mediaserver(ctx, MediaServer.Mockup, "sip:localhost:8080")
+
+      on_exit(fn ->
+        if is_pid(ctx.mediaserverpid) and Process.alive?(ctx.mediaserverpid) do
+          MediaServer.Mockup.disconnect(ctx.mediaserverpid, force: true)
+        end
+      end)
+
+      %{ctx: ctx}
+    end
+
+    defp media_mode do
+      {:mediaserver,
+       inbound: [webrtc: :no, media: :audio],
+       outbound: [webrtc: :no, media: :audio],
+       transcode: [audio: :avoid, video: :avoid]}
+    end
+
+    test "the INVITE we forward carries OUR offer, not the caller's", %{ctx: ctx} do
+      arm_peer!()
+      invite = inbound_invite()
+      caller_sdp = SIP.Session.extract_sdp(invite)
+
+      ctx = B2bua.do_create_leg(ctx, invite, mockup_peer(), media_mode())
+      assert ctx.lasterr == :ok
+
+      assert_receive {:invite_sent, fwd}, 5_000
+      fwd_sdp = SIP.Session.extract_sdp(fwd)
+
+      assert is_binary(fwd_sdp)
+      assert fwd_sdp != caller_sdp
+      assert fwd_sdp =~ "m=audio"
+
+      # Both endpoints exist, and in the leg-scoped slots R1 introduced.
+      assert SIP.Session.Media.media_legs(ctx) == [:inbound, :outbound]
+
+      B2bua.release_legs(ctx)
+    end
+
+    test "the caller's answer is held back until the callee answers, then relayed", %{ctx: ctx} do
+      tp_pid = arm_peer!()
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), media_mode())
+      leg = B2bua.outbound_leg(ctx)
+      dlg = leg.dialogpid
+      assert_receive {:invite_sent, _fwd}, 5_000
+
+      # Nothing was answered to the caller while the callee was being rung: the
+      # answer exists, and waits.
+      refute_receive {:replied, _code, _reason, _req, _fields}, 200
+      assert %{inbound_answer: held} = B2bua.media_plan(ctx)
+      assert is_binary(held)
+
+      GenServer.cast(tp_pid, {:simulate, 200, 100})
+      assert_receive {:outbound, {200, resp, tid, ^dlg}}, 5_000
+      callee_sdp = SIP.Session.extract_sdp(resp)
+
+      B2bua.note_event({:outbound, {200, resp, tid, self()}})
+      ctx = B2bua.do_relay_reply(ctx, resp)
+
+      # The caller gets the media server's answer — the one decided when their
+      # INVITE arrived — and never sees the callee's SDP.
+      assert_receive {:replied, 200, _reason, _req, fields}, 2_000
+      assert [%{data: relayed}] = Keyword.fetch!(fields, :body)
+      assert relayed == held
+      assert relayed != callee_sdp
+
+      # …and the two endpoints are attached, which is what makes the media flow.
+      assert %{bridged: true} = B2bua.media_plan(ctx)
+
+      B2bua.release_legs(ctx)
+    end
+
+    test "an early 18x carrying SDP is relayed without it, so the hunt stays open", %{ctx: ctx} do
+      tp_pid = arm_peer!()
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), media_mode())
+      leg = B2bua.outbound_leg(ctx)
+      dlg = leg.dialogpid
+      assert_receive {:invite_sent, _fwd}, 5_000
+
+      GenServer.cast(tp_pid, {:simulate, 180, 100})
+      assert_receive {:outbound, {180, resp, tid, ^dlg}}, 5_000
+
+      # Give it a body the framework has to decide about.
+      resp =
+        SIP.Msg.Ops.update_sip_msg(
+          resp,
+          {:body, [%{contenttype: "application/sdp", data: "v=0\r\no=- 1 1 IN IP4 1.2.3.4\r\n"}]}
+        )
+
+      B2bua.note_event({:outbound, {180, resp, tid, self()}})
+      ctx = B2bua.do_relay_reply(ctx, resp)
+
+      # Relayed, and stripped: with a media server the callee's early SDP is a
+      # media event, not an answer to relay — and relaying one would spend the
+      # caller's offer/answer on a target that has not won yet.
+      assert_receive {:replied, 180, _reason, _req, fields}, 2_000
+      assert Keyword.get(fields, :body) in [nil, []]
+
+      B2bua.release_legs(ctx)
+    end
+
+    test "a 2xx whose media cannot be bridged becomes a failed attempt, not the answer", %{
+      ctx: ctx
+    } do
+      tp_pid = arm_peer!()
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), media_mode())
+      leg = B2bua.outbound_leg(ctx)
+      dlg = leg.dialogpid
+      assert_receive {:invite_sent, _fwd}, 5_000
+
+      GenServer.cast(tp_pid, {:simulate, 200, 100})
+      assert_receive {:outbound, {200, resp, tid, ^dlg}}, 5_000
+
+      # Take the outbound endpoint away underneath: bridging can no longer work,
+      # which is what a media server refusing the pair looks like from here.
+      MediaServer.Mockup.close_peer_connection(SIP.Session.Media.peer_connection(ctx, :outbound))
+
+      B2bua.note_event({:outbound, {200, resp, tid, self()}})
+      ctx = B2bua.do_relay_reply(ctx, resp)
+
+      # The caller is told the attempt failed — with a code that says "this
+      # device did not work", so a hunt would move on rather than end the call.
+      assert_receive {:replied, 488, _reason, _req, fields}, 2_000
+      assert Keyword.get(fields, :body) in [nil, []]
+
+      # The relay itself worked, so `lasterr` says so — truthfully. WHY there was
+      # a 488 to relay is a different question, with its own reader.
+      assert ctx.lasterr == :ok
+      assert B2bua.media_error(ctx) != nil
+      refute B2bua.media_plan(ctx).bridged
+
+      B2bua.release_legs(ctx)
     end
   end
 

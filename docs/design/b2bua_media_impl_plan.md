@@ -349,9 +349,12 @@ owed, in this order:
    cannot bridge *is* "this device did not work, try the next" — which is the
    whole value of a hunt.
 
-`lasterr` is `{:b2bua, :media_bridge_failed, reason}` so a scenario that wants a
-different policy (fail the call outright, fall back to a signalling-only relay)
-has what it needs. When the hunt is exhausted the caller gets the code the
+The reason is readable through **`b2bua_media_error/0`**, not through `lasterr`
+— a distinction that only became obvious in the writing. The relay that follows
+a media failure *succeeds*: the caller gets their 488. So `lasterr`, which is the
+outcome of the last operation, says `:ok`, truthfully, and would have overwritten
+anything put there. Why the call went that way is a different question and gets a
+reader of its own. When the hunt is exhausted the caller gets the code the
 scenario chooses; the reference scenario answers **488**.
 
 **Tests** (Mockup): a mock connection can be told to refuse — an

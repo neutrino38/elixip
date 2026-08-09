@@ -98,6 +98,32 @@ defmodule SIP.B2bua.Pending do
   defstruct orig_req: nil, orig_leg: :inbound, method: nil
 end
 
+defmodule SIP.B2bua.MediaPlan do
+  @moduledoc """
+  The media plane of a `{:mediaserver, …}` call (design §7), which is
+  call-scoped and not leg-scoped: one media server connection, two endpoints.
+
+  `inbound_answer` is the caller's answer, produced the moment their offer was
+  read and held back until the callee answers — with a media server the caller's
+  answer comes from the server and never changes, which is what lets a hunt keep
+  running behind an established early dialog (§7.4).
+
+  `outbound_offer` is ours, generated once and reused by every branch: it does
+  not depend on which target is being tried.
+  """
+  defstruct opts: [],
+            policy: %{},
+            inbound_answer: nil,
+            outbound_offer: nil,
+            bridged: false,
+            # Why the media plane failed, when it did. NOT `lasterr`: a bridge
+            # that cannot be built is converted into a failed attempt and the
+            # relay that follows SUCCEEDS, so `lasterr` — the outcome of the last
+            # operation — says `:ok`, truthfully. The reason the call went that
+            # way is a different question, and this is where a scenario reads it.
+            error: nil
+end
+
 defmodule SIP.B2bua.State do
   @moduledoc """
   B2BUA bookkeeping, stored in the scenario context appdata under `:__b2bua__`.
@@ -108,7 +134,7 @@ defmodule SIP.B2bua.State do
   attempt a hunt is walking, and it stops being the right target the moment a
   re-INVITE is relayed on an established call (§6).
   """
-  defstruct legs: %{}, pending: %{}, hunt: nil, last_invite: %{}
+  defstruct legs: %{}, pending: %{}, hunt: nil, last_invite: %{}, media: nil
 end
 
 defmodule SIP.Session.B2bua do
@@ -130,7 +156,8 @@ defmodule SIP.Session.B2bua do
   """
   require Logger
 
-  alias SIP.B2bua.{Hunt, Leg, Peer, Pending, State}
+  alias SIP.B2bua.{Hunt, Leg, MediaPlan, Peer, Pending, State}
+  alias SIP.Session.Media
 
   @appdata_key :__b2bua__
   @outbound_tag :outbound
@@ -283,6 +310,46 @@ defmodule SIP.Session.B2bua do
         end
       end
 
+      @doc """
+      Wire the two legs' media together, ahead of the 2xx that would do it.
+
+      For the policies that want the callee's media through during ringing: the
+      callee answered 183 with SDP and the scenario relays its own answer to the
+      caller. Idempotent with the automatic bridge — `b2bua_forward_reply/1` on
+      the 2xx will not attach a second time.
+
+      `opts` overrides the call's transcoding policy for this bridge
+      (`[audio: :force]`).
+      """
+      defmacro b2bua_bridge(opts \\ []) do
+        quote do
+          SIP.Scenario.Monitor.note_command(:media, "b2bua_bridge")
+          var!(sip_ctx) = SIP.Session.B2bua.do_bridge_legs(var!(sip_ctx), unquote(opts))
+        end
+      end
+
+      @doc """
+      Take the media path down without ending the call: putting the caller on
+      hold to play an announcement, re-pointing a hunt at another target. Both
+      connections stay up and can be bridged again.
+      """
+      defmacro b2bua_unbridge() do
+        quote do
+          SIP.Scenario.Monitor.note_command(:media, "b2bua_unbridge")
+          var!(sip_ctx) = SIP.Session.B2bua.do_unbridge_legs(var!(sip_ctx))
+        end
+      end
+
+      @doc """
+      Why the media plane failed, or nil — for the scenario that wants its own
+      policy where the default one turned a 2xx into a failed attempt.
+      """
+      defmacro b2bua_media_error() do
+        quote do
+          SIP.Session.B2bua.media_error(var!(sip_ctx))
+        end
+      end
+
       @doc "The outbound leg (a `%SIP.B2bua.Leg{}`), or nil when none was created."
       defmacro b2bua_outbound_leg() do
         quote do
@@ -424,9 +491,10 @@ defmodule SIP.Session.B2bua do
       leg_alive?(outbound_leg(sip_ctx)) ->
         fail(sip_ctx, {:b2bua, :outbound_leg_exists})
 
-      media != false ->
-        # {:mediaserver, _} is P3 (it needs leg-qualified media handles and a
-        # bridge/2 callback in MediaServer.Behaviour), {:rtpengine, _} is P4.
+      not supported_media_mode?(media) ->
+        # `{:rtpengine, _}` stays reserved and refused: it belongs to the
+        # borderline product work, and pretending otherwise would produce a call
+        # with no media path (§7.3).
         fail(sip_ctx, {:b2bua, :media_mode_not_implemented, media})
 
       # A peer names its targets one way or the other. With a provider `uris` is
@@ -435,25 +503,154 @@ defmodule SIP.Session.B2bua do
         fail(sip_ctx, {:b2bua, :no_target})
 
       true ->
-        case provider_of(peer) do
-          nil ->
-            create_leg(sip_ctx, req, peer, media, opts)
+        # The media plane is set up BEFORE anything is dialled: the offer we
+        # forward is ours, not the caller's, and there is no point creating a leg
+        # we cannot give a body to.
+        case setup_media(sip_ctx, req, media) do
+          {:error, sip_ctx} ->
+            sip_ctx
 
-          provider ->
-            # The targets are not knowable up front: keep what creating the leg
-            # will need, and ask. The leg itself waits for a target — with a
-            # queue there may be none yet (§3.4).
-            hunt = %Hunt{
-              provider: provider,
-              call_ref: make_ref(),
-              peer: peer,
-              orig_req: req,
-              media: media,
-              opts: opts
-            }
+          {:ok, sip_ctx} ->
+            case provider_of(peer) do
+              nil ->
+                create_leg(sip_ctx, req, peer, media, opts)
 
-            sip_ctx |> put_hunt(hunt) |> ask_provider_and_arm(hunt)
+              provider ->
+                # The targets are not knowable up front: keep what creating the
+                # leg will need, and ask. The leg itself waits for a target —
+                # with a queue there may be none yet (§3.4).
+                hunt = %Hunt{
+                  provider: provider,
+                  call_ref: make_ref(),
+                  peer: peer,
+                  orig_req: req,
+                  media: media,
+                  opts: opts
+                }
+
+                sip_ctx |> put_hunt(hunt) |> ask_provider_and_arm(hunt)
+            end
         end
+    end
+  end
+
+  # ── The media plane (§7, P3) ────────────────────────────────────────────────
+
+  defp supported_media_mode?(false), do: true
+  defp supported_media_mode?({:mediaserver, opts}) when is_list(opts), do: true
+  defp supported_media_mode?(_), do: false
+
+  @doc false
+  @spec media_plan(%SIP.Context{}) :: %MediaPlan{} | nil
+  def media_plan(sip_ctx), do: state(sip_ctx).media
+
+  @doc """
+  Why the media plane failed, or nil. Backs the `b2bua_media_error` macro.
+
+  Read after `b2bua_forward_reply/1`, when the response it relayed was a 2xx
+  turned into a failed attempt: `lasterr` describes the relay, which worked, and
+  this describes the reason there was something to relay in the first place.
+  """
+  @spec media_error(%SIP.Context{}) :: term() | nil
+  def media_error(sip_ctx) do
+    case media_plan(sip_ctx) do
+      %MediaPlan{error: reason} -> reason
+      _ -> nil
+    end
+  end
+
+  defp put_media_plan(sip_ctx, plan) do
+    put_state(sip_ctx, %State{state(sip_ctx) | media: plan})
+  end
+
+  # Signalling relay: the SDP crosses verbatim and there is nothing to set up.
+  defp setup_media(sip_ctx, _req, false), do: {:ok, sip_ctx}
+
+  # `{:mediaserver, …}`: both legs terminate their media on the server, so the
+  # bodies that cross are OURS in both directions. Two steps, in this order, and
+  # neither leaves the box (§7.2):
+  #
+  #   1. read the caller's offer and answer it — but hold that answer back. The
+  #      caller is not answered until the callee is, and by then the answer is
+  #      already decided, which is exactly what makes early media and forking
+  #      compatible here and mutually exclusive without a media server (§7.4);
+  #   2. generate our offer for the outbound leg, inside the SAME media session
+  #      as the inbound endpoint (`bridge_with:`), because that is the only place
+  #      the two can later be attached.
+  defp setup_media(sip_ctx, req, {:mediaserver, opts}) do
+    inbound_opts = Keyword.get(opts, :inbound, [])
+    outbound_opts = Keyword.get(opts, :outbound, [])
+
+    with {:ok, policy} <- MediaServer.transcoding_policy(Keyword.get(opts, :transcode, [])),
+         {:ok, offer_a} <- caller_offer(req),
+         {sip_ctx, {:ok, answer_a}} <-
+           media_answer(sip_ctx, offer_a, [leg: :inbound] ++ inbound_opts),
+         {:ok, sip_ctx, offer_b} <- media_offer(sip_ctx, outbound_opts) do
+      plan = %MediaPlan{
+        opts: opts,
+        policy: policy,
+        inbound_answer: answer_a,
+        outbound_offer: offer_b
+      }
+
+      {:ok, put_media_plan(sip_ctx, plan)}
+    else
+      {sip_ctx = %SIP.Context{}, {:error, reason}} ->
+        {:error, fail(sip_ctx, {:b2bua, :media_setup_failed, {:inbound, reason}})}
+
+      {:error, sip_ctx = %SIP.Context{}, reason} ->
+        {:error, fail(sip_ctx, {:b2bua, :media_setup_failed, {:outbound, reason}})}
+
+      {:error, reason} ->
+        {:error, fail(sip_ctx, {:b2bua, :media_setup_failed, reason})}
+    end
+  end
+
+  # A delayed-offer INVITE has no media to terminate yet. Answering it means
+  # putting an offer of ours in the 200 and reading the answer from the ACK,
+  # which is a call flow of its own — refused plainly rather than half-built.
+  defp caller_offer(req) do
+    case SIP.Session.extract_sdp(req) do
+      sdp when is_binary(sdp) and sdp != "" -> {:ok, sdp}
+      _ -> {:error, :no_offer_in_invite}
+    end
+  end
+
+  defp media_answer(sip_ctx, offer, opts) do
+    Media.get_sdp_answer(sip_ctx, offer, opts)
+  rescue
+    err -> {sip_ctx, {:error, {:media_raised, Exception.message(err)}}}
+  catch
+    :exit, reason -> {sip_ctx, {:error, {:media_down, reason}}}
+  end
+
+  # Our offer for the callee. `bridge_with: :inbound` puts this endpoint in the
+  # inbound leg's media session — a placement decision, made here because it can
+  # only be made at creation time (docs/design/mediagw_b2bua_jsr309.md §2).
+  defp media_offer(sip_ctx, outbound_opts) do
+    webrtc = Keyword.get(outbound_opts, :webrtc, :no)
+    medias = Keyword.get(outbound_opts, :media, :audio_video)
+    opts = [leg: :outbound, bridge_with: :inbound] ++ outbound_opts
+
+    {sip_ctx, offer} = Media.get_sdp_offer(sip_ctx, webrtc, medias, opts)
+    {:ok, sip_ctx, offer}
+  rescue
+    err -> {:error, sip_ctx, {:media_raised, Exception.message(err)}}
+  catch
+    :exit, reason -> {:error, sip_ctx, {:media_down, reason}}
+  end
+
+  # The body every branch of this leg carries: ours, not the caller's.
+  defp apply_media_body(sip_ctx, fwd) do
+    case media_plan(sip_ctx) do
+      %MediaPlan{outbound_offer: sdp} when is_binary(sdp) ->
+        SIP.Msg.Ops.update_sip_msg(
+          fwd,
+          {:body, [%{contenttype: "application/sdp", data: sdp}]}
+        )
+
+      _ ->
+        fwd
     end
   end
 
@@ -596,6 +793,8 @@ defmodule SIP.Session.B2bua do
         fail(sip_ctx, {:b2bua, reason})
 
       {:ok, fwd} ->
+        fwd = apply_media_body(sip_ctx, fwd)
+
         # The first target is dialled now; the rest are kept on the leg for a
         # serial hunt to walk (§3.1). `fork: :none` keeps them unused.
         [target | rest] = expand_targets(peer)
@@ -883,6 +1082,10 @@ defmodule SIP.Session.B2bua do
 
     case Map.get(state.pending, tid) do
       %Pending{} = pending ->
+        # With a media server the response is not relayed as it stands: its SDP
+        # is the callee's, and what the caller must receive is ours.
+        {sip_ctx, resp} = media_step(sip_ctx, resp, tid)
+
         # A refusal from one target of a serial hunt is not the answer to the
         # call — it is the answer of one device. Try the next one instead of
         # telling the caller the call failed.
@@ -908,6 +1111,198 @@ defmodule SIP.Session.B2bua do
         )
 
         SIP.Context.set(sip_ctx, :lasterr, :ok)
+    end
+  end
+
+  # What a `{:mediaserver, …}` call does to a response before it is relayed —
+  # nothing at all in signalling mode, and nothing to any response that is not
+  # the answer to the attempt in flight.
+  defp media_step(sip_ctx, resp, tid) do
+    plan = media_plan(sip_ctx)
+
+    cond do
+      is_nil(plan) -> {sip_ctx, resp}
+      not attempt_response?(sip_ctx, tid) -> {sip_ctx, resp}
+      resp.response in 200..299 -> complete_media(sip_ctx, resp, plan, tid)
+      resp.response in 101..199 -> {sip_ctx, strip_early_sdp(resp)}
+      true -> {sip_ctx, resp}
+    end
+  end
+
+  defp attempt_response?(sip_ctx, tid) do
+    match?(%Leg{initial_trans: ^tid}, outbound_leg(sip_ctx))
+  end
+
+  # A 18x carrying the callee's SDP. Without a media server relaying it would
+  # pin the leg to that target and end the hunt (§7.4); WITH one it is not even
+  # an offer/answer event — the caller's answer comes from the media server and
+  # was decided when their INVITE arrived. So the body is dropped and the
+  # provisional relayed without it, which is what keeps the hunt open.
+  defp strip_early_sdp(resp) do
+    case SIP.Session.extract_sdp(resp) do
+      sdp when is_binary(sdp) and sdp != "" -> SIP.Msg.Ops.update_sip_msg(resp, {:body, []})
+      _ -> resp
+    end
+  end
+
+  # The callee answered: feed its answer to the outbound endpoint, attach the two
+  # endpoints, and hand the caller the answer we have been holding since their
+  # INVITE. This is the `buildBridge` moment — the first instant at which both
+  # sides of the media are known.
+  defp complete_media(sip_ctx, resp, %MediaPlan{} = plan, tid) do
+    with {:ok, answer_b} <- callee_answer(resp),
+         :ok <- ms_set_remote_answer(sip_ctx, answer_b),
+         {sip_ctx, :ok} <- attach_legs(sip_ctx, plan, []) do
+      {SIP.Context.set(sip_ctx, :lasterr, :ok), with_our_answer(resp, plan)}
+    else
+      {_sip_ctx, {:error, reason}} -> media_answer_failed(sip_ctx, resp, tid, reason)
+      {:error, reason} -> media_answer_failed(sip_ctx, resp, tid, reason)
+    end
+  end
+
+  defp callee_answer(resp) do
+    case SIP.Session.extract_sdp(resp) do
+      sdp when is_binary(sdp) and sdp != "" -> {:ok, sdp}
+      _ -> {:error, :no_answer_in_2xx}
+    end
+  end
+
+  defp ms_set_remote_answer(sip_ctx, answer) do
+    case Media.peer_connection(sip_ctx, :outbound) do
+      nil -> {:error, :no_outbound_peer_connection}
+      cnx -> apply(sip_ctx.mediaservermodule, :set_remote_answer, [cnx, answer])
+    end
+  rescue
+    err -> {:error, {:media_raised, Exception.message(err)}}
+  catch
+    :exit, reason -> {:error, {:media_down, reason}}
+  end
+
+  # `bridge/3`, done once. Returns the context so the plan can record it: a
+  # scenario that bridged early (b2bua_bridge/0..1 on a 183) must not have the
+  # 2xx attach a second time.
+  defp attach_legs(sip_ctx, %MediaPlan{bridged: true} = _plan, _overrides), do: {sip_ctx, :ok}
+
+  defp attach_legs(sip_ctx, %MediaPlan{} = plan, overrides) do
+    pc_in = Media.peer_connection(sip_ctx, :inbound)
+    pc_out = Media.peer_connection(sip_ctx, :outbound)
+
+    if is_nil(pc_in) or is_nil(pc_out) do
+      {sip_ctx, {:error, :media_legs_incomplete}}
+    else
+      opts = Keyword.merge(Map.to_list(plan.policy), overrides)
+
+      case protected_bridge(sip_ctx, pc_in, pc_out, opts) do
+        :ok -> {put_media_plan(sip_ctx, %MediaPlan{plan | bridged: true}), :ok}
+        err -> {sip_ctx, err}
+      end
+    end
+  end
+
+  defp protected_bridge(sip_ctx, pc_in, pc_out, opts) do
+    apply(sip_ctx.mediaservermodule, :bridge, [pc_in, pc_out, opts])
+  rescue
+    err -> {:error, {:media_raised, Exception.message(err)}}
+  catch
+    :exit, reason -> {:error, {:media_down, reason}}
+  end
+
+  defp with_our_answer(resp, %MediaPlan{inbound_answer: sdp}) when is_binary(sdp) do
+    SIP.Msg.Ops.update_sip_msg(resp, {:body, [%{contenttype: "application/sdp", data: sdp}]})
+  end
+
+  defp with_our_answer(resp, _plan), do: resp
+
+  # The bridge could not be built, and the callee has already answered 200: it
+  # believes the call is up. Three things are owed, in this order (§R4.2):
+  #
+  #   1. ACK its 2xx — RFC 3261 §13.2.2.4, or it retransmits into a dialog
+  #      nobody ends — and then BYE the dialog that ACK established. The
+  #      framework does this itself: it is an obligation, not a policy;
+  #   2. say what happened, in `lasterr`, so a scenario with its own policy has
+  #      something to read;
+  #   3. hand the hunt a 488 instead of the 200. Not a fabrication for its own
+  #      sake: a callee whose media we cannot bridge IS "this device did not
+  #      work, try the next", so the existing retry machinery applies unchanged,
+  #      and the caller ends up with a 488 only if nothing else answers.
+  defp media_answer_failed(sip_ctx, resp, tid, reason) do
+    Logger.warning(
+      module: __MODULE__,
+      message:
+        "b2bua: the callee answered #{resp.response} but its media cannot be bridged " <>
+          "(#{inspect(reason)}); ending that leg and treating it as a failed attempt"
+    )
+
+    end_unbridgeable_leg(sip_ctx, tid)
+
+    sip_ctx =
+      case media_plan(sip_ctx) do
+        %MediaPlan{} = plan ->
+          put_media_plan(sip_ctx, %MediaPlan{plan | error: reason, bridged: false})
+
+        _ ->
+          sip_ctx
+      end
+
+    {sip_ctx, media_failed_response(resp)}
+  end
+
+  defp end_unbridgeable_leg(sip_ctx, tid) do
+    case outbound_leg(sip_ctx) do
+      %Leg{dialogpid: dialog_pid} when is_pid(dialog_pid) ->
+        protect("ACK the 2xx of a leg we cannot bridge", fn ->
+          SIP.Dialog.ack(dialog_pid, tid)
+        end)
+
+        protect("BYE the leg we cannot bridge", fn ->
+          SIP.Dialog.new_request(dialog_pid, bye_request())
+        end)
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp media_failed_response(resp) do
+    %{resp | response: 488, reason: "Not Acceptable Here"}
+    |> SIP.Msg.Ops.update_sip_msg({:body, []})
+  end
+
+  @doc false
+  @spec do_bridge_legs(%SIP.Context{}, keyword()) :: %SIP.Context{}
+  def do_bridge_legs(sip_ctx = %SIP.Context{}, overrides \\ []) do
+    case media_plan(sip_ctx) do
+      nil ->
+        fail(sip_ctx, {:b2bua, :no_media_plan})
+
+      %MediaPlan{} = plan ->
+        case attach_legs(sip_ctx, plan, overrides) do
+          {sip_ctx, :ok} -> SIP.Context.set(sip_ctx, :lasterr, :ok)
+          {sip_ctx, {:error, reason}} -> fail(sip_ctx, {:b2bua, :media_bridge_failed, reason})
+        end
+    end
+  end
+
+  @doc false
+  @spec do_unbridge_legs(%SIP.Context{}) :: %SIP.Context{}
+  def do_unbridge_legs(sip_ctx = %SIP.Context{}) do
+    pc_in = Media.peer_connection(sip_ctx, :inbound)
+    pc_out = Media.peer_connection(sip_ctx, :outbound)
+
+    if is_nil(pc_in) or is_nil(pc_out) do
+      fail(sip_ctx, {:b2bua, :media_legs_incomplete})
+    else
+      protect("unbridge the legs", fn ->
+        apply(sip_ctx.mediaservermodule, :unbridge, [pc_in, pc_out])
+      end)
+
+      sip_ctx =
+        case media_plan(sip_ctx) do
+          %MediaPlan{} = plan -> put_media_plan(sip_ctx, %MediaPlan{plan | bridged: false})
+          _ -> sip_ctx
+        end
+
+      SIP.Context.set(sip_ctx, :lasterr, :ok)
     end
   end
 
