@@ -94,12 +94,21 @@ defmodule SIP.ICT do
 
 
       # The response matches the CANCEL req
-      siprsp.cseq == { hd(state.msg.cseq), :CANCEL } ->
+      # A CSeq is a LIST everywhere it is built ([seqno, method] —
+      # fix_outbound_request/3, the parser, `match?([_, :INVITE], rsp.cseq)`), so
+      # comparing it to a TUPLE could never match: the 200 answering our own
+      # CANCEL fell through to the clause below instead.
+      siprsp.cseq == [ hd(state.msg.cseq), :CANCEL ] ->
         new_state = handle_cancel_response(state, siprsp)
         {:noreply, new_state}
 
       true ->
-        Logger.warning([ transid: state.msg.transid, message: "Response CSeq #{siprsp.cseq} does not match transaction requests'"])
+        # inspect/1, not interpolation: a CSeq is a list, and String.Chars turns
+        # [1, :CANCEL] into an ArgumentError — raised HERE, in the transaction,
+        # which killed it and (before R1) its dialog with it, silently. The one
+        # response that reliably reached this clause was the 200 to our own
+        # CANCEL, so cancelling a branch crashed the transaction that sent it.
+        Logger.warning([ transid: state.msg.transid, message: "Response CSeq #{inspect(siprsp.cseq)} does not match transaction requests'"])
         {:noreply, state}
     end
   end

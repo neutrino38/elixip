@@ -79,6 +79,14 @@ defmodule SIP.Test.B2bua.InboundDialogStub do
     send(test_pid, {:replied, code, reason, req, fields})
     {:reply, :ok, test_pid}
   end
+
+  # A dialog also ORIGINATES: a B2BUA relays onto its inbound leg whatever comes
+  # in on the outbound one. The transaction pid handed back is this process — the
+  # correlation only ever compares it, never calls it.
+  def handle_call({:newreq, req}, _from, test_pid) do
+    send(test_pid, {:sent_on_inbound, req})
+    {:reply, {:ok, self()}, test_pid}
+  end
 end
 
 ExUnit.start(exclude: [:skip])

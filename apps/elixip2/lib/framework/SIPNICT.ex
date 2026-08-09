@@ -85,13 +85,17 @@ defmodule SIP.NICT do
 
 
       # The response matches the CANCEL req
-      siprsp.cseq == { hd(state.msg.cseq), :CANCEL } ->
+      # A CSeq is a LIST everywhere it is built ([seqno, method] —
+      # fix_outbound_request/3, the parser, `match?([_, :INVITE], rsp.cseq)`), so
+      # comparing it to a TUPLE could never match: the 200 answering our own
+      # CANCEL fell through to the clause below instead.
+      siprsp.cseq == [ hd(state.msg.cseq), :CANCEL ] ->
         new_state = handle_cancel_response(state, siprsp)
         {:noreply, new_state}
 
       true ->
         Logger.warning([ transid: state.msg.transid, module: __MODULE__,
-                       message: "Response CSeq #{siprsp.cseq} does not match transaction requests'"])
+                       message: "Response CSeq #{inspect(siprsp.cseq)} does not match transaction requests'"])
         {:noreply, state}
     end
   end

@@ -47,6 +47,14 @@ defmodule SIP.Test.B2bua.Session do
     |> SIP.Uri.set_uri_param("unittest", "b2bua_session")
   end
 
+  # Be the mockup's "test app" before anything goes out: it then tells us when it
+  # holds the INVITE, and answering before that would race it.
+  defp arm_peer! do
+    tp_pid = SIP.Transport.Selector.select_transport(peer_target()).tp_pid
+    :ok = GenServer.call(tp_pid, :settestapp)
+    tp_pid
+  end
+
   describe "current-event bookkeeping" do
     test "a tagged event names its leg and its transaction, an untagged one is inbound" do
       tid = self()
@@ -346,6 +354,112 @@ defmodule SIP.Test.B2bua.Session do
 
       ctx = B2bua.release_legs(ctx)
       assert B2bua.outbound_leg(ctx) == nil
+    end
+  end
+
+  # ── R6: a leg that dies mid-call (design §14.4) ─────────────────────────────
+  describe "note_leg_event/2 — a leg that dies" do
+    # The wait this closes: the caller's INVITE is correlated with a transaction
+    # on the outbound leg, so when that leg dies the answer it was waiting for is
+    # never coming. It used to be answered by release_legs/1 — which runs when
+    # the SCENARIO ends, not when the leg does, so a caller whose callee vanished
+    # held a ringing INVITE until then.
+    test "answers, at once, what the dead leg will never answer", %{ctx: ctx} do
+      arm_peer!()
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), false)
+      leg = B2bua.outbound_leg(ctx)
+      assert_receive {:invite_sent, _fwd}, 5_000
+      assert [{_tid, %Pending{orig_leg: :inbound}}] = B2bua.pending(ctx)
+
+      ctx =
+        B2bua.note_leg_event(ctx, {:outbound, {:dialog_terminated, leg.dialogpid, :transport_down}})
+
+      # 487, because the attempt it answers is one we terminated — not 408, which
+      # would say the callee was merely slow.
+      assert_receive {:replied, 487, _reason, _req, _fields}, 2_000
+
+      # …and the bookkeeping is gone with it: no leg, no correlation, nothing for
+      # the teardown to try again on a dead dialog.
+      assert B2bua.outbound_leg(ctx) == nil
+      assert B2bua.pending(ctx) == []
+      refute B2bua.hunting?(ctx)
+    end
+
+    # Symmetric, and it has to be: the correlation records where a request came
+    # FROM, so what a dying leg loses is everything relayed ONTO it — whichever
+    # leg that is.
+    test "the inbound leg dying loses what was relayed onto it", %{ctx: ctx, stub: stub} do
+      arm_peer!()
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), false)
+      assert_receive {:invite_sent, _fwd}, 5_000
+
+      # A request that came from the OUTBOUND leg, relayed onto the inbound one.
+      ctx = B2bua.drop_pending(ctx, B2bua.outbound_leg(ctx).initial_trans)
+      Process.put(:scenario_event_leg, :outbound)
+      ctx = B2bua.do_relay_request(ctx, %{method: :MESSAGE, ruri: peer_target()})
+      assert [{_tid, %Pending{orig_leg: :outbound}}] = B2bua.pending(ctx)
+
+      ctx = B2bua.note_leg_event(ctx, {:dialog_terminated, stub, :normal})
+
+      # Answered on the outbound leg (a MESSAGE, so 408 — no attempt to
+      # terminate), and the outbound leg itself is untouched: the inbound one is
+      # the scenario's own dialog, not ours to forget.
+      assert B2bua.pending(ctx) == []
+      assert %Leg{} = B2bua.outbound_leg(ctx)
+    end
+
+    test "an event that is not a leg death changes nothing", %{ctx: ctx} do
+      arm_peer!()
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), false)
+      assert_receive {:invite_sent, _fwd}, 5_000
+      before = B2bua.state(ctx)
+
+      ctx = B2bua.note_leg_event(ctx, {:outbound, {180, %{response: 180}, self(), self()}})
+      assert B2bua.state(ctx) == before
+    end
+  end
+
+  # ── R6: talking to a leg that is already gone ───────────────────────────────
+  describe "a dialog that dies under a relay" do
+    # Every b2bua_* primitive is a GenServer.call on a pid the leg map has held
+    # since the leg was created. leg_alive?/1 narrows the window between the check
+    # and the call; it cannot close it. The exit used to leave the scenario
+    # process — R2 catches it now, but only to END the scenario, which is the
+    # right last resort and the wrong ordinary answer: a B2BUA whose callee has
+    # just gone should get to say 480 to its caller.
+    test "relaying a request onto a dead leg sets lasterr instead of exiting", %{ctx: ctx} do
+      arm_peer!()
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), false)
+      leg = B2bua.outbound_leg(ctx)
+      assert_receive {:invite_sent, _fwd}, 5_000
+
+      GenServer.stop(leg.dialogpid)
+      refute Process.alive?(leg.dialogpid)
+
+      Process.put(:scenario_event_leg, :inbound)
+      ctx = B2bua.do_relay_request(ctx, %{method: :MESSAGE, ruri: peer_target()})
+      assert {:b2bua, :leg_dead, :MESSAGE} = ctx.lasterr
+    end
+
+    test "answering on a dead leg sets lasterr instead of exiting", %{ctx: ctx, stub: stub} do
+      GenServer.stop(stub)
+      refute Process.alive?(stub)
+
+      Process.put(:scenario_event_leg, :inbound)
+      ctx = B2bua.do_local_reply(ctx, %{method: :INVITE}, 486, "Busy Here", [])
+      assert {:b2bua, :leg_dead, :inbound} = ctx.lasterr
+    end
+
+    # The one case where a dead leg is not an error: we were asking it to hang up.
+    test "BYEing a leg that has already gone is what we wanted", %{ctx: ctx} do
+      arm_peer!()
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), false)
+      leg = B2bua.outbound_leg(ctx)
+      assert_receive {:invite_sent, _fwd}, 5_000
+
+      GenServer.stop(leg.dialogpid)
+      ctx = B2bua.do_send_bye(ctx)
+      assert ctx.lasterr == :ok
     end
   end
 end

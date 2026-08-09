@@ -326,6 +326,76 @@ defmodule SIP.Session.B2bua do
   defp current_leg, do: Process.get(:scenario_event_leg, :inbound)
   defp current_tid, do: Process.get(:scenario_event_tid)
 
+  @doc """
+  Act on a leg that has just died, before the scenario's own clause runs (design
+  §14.4, R6). Called for every `on_events` clause next to `note_event/1`.
+
+  A dialog dying is not news the scenario has to translate: whatever it decides to
+  do next, the requests that leg was going to answer will now never be answered,
+  and someone is waiting for each of them. So they are answered here, at once, on
+  the leg they came from — 487 for an INVITE whose attempt is over, 408 otherwise
+  — instead of at `release_legs/1`, which runs only when the scenario ends. A
+  caller whose B2BUA lost its callee used to hold a ringing INVITE until then.
+
+  Symmetric between the legs: when leg L dies, what is lost is every request
+  relayed ONTO it, i.e. every `%Pending{}` whose `orig_leg` is the OTHER one —
+  the correlation records where a request came from, and its answer was owed by
+  the opposite side.
+
+  What it deliberately does not do is decide the call's fate. Hanging up the
+  surviving leg, failing, or reconnecting somewhere else is policy, and policy is
+  the scenario's (§1).
+
+  Limit worth knowing: this runs when the scenario MATCHES the event. One that
+  ignores leg death entirely still falls back on the §8 teardown — later, but not
+  never.
+  """
+  @spec note_leg_event(%SIP.Context{}, term()) :: %SIP.Context{}
+  def note_leg_event(sip_ctx = %SIP.Context{}, evt) do
+    case split_tag(evt) do
+      {leg, {:dialog_terminated, _dialog_pid, reason}} -> on_leg_down(sip_ctx, leg, reason)
+      _ -> sip_ctx
+    end
+  end
+
+  def note_leg_event(sip_ctx, _evt), do: sip_ctx
+
+  defp on_leg_down(sip_ctx, dead_leg, reason) do
+    state = state(sip_ctx)
+
+    # Everything relayed onto the dead leg — its `orig_leg` is the other one.
+    orphans = Enum.filter(state.pending, fn {_tid, p} -> p.orig_leg != dead_leg end)
+
+    if orphans != [] do
+      Logger.info(
+        module: __MODULE__,
+        message:
+          "b2bua: the #{dead_leg} leg is gone (#{inspect(reason)}); answering " <>
+            "#{length(orphans)} request(s) it will never answer"
+      )
+    end
+
+    Enum.each(orphans, fn {_tid, pending} -> answer_orphan(sip_ctx, pending) end)
+
+    sip_ctx = Enum.reduce(orphans, sip_ctx, fn {tid, _p}, ctx -> drop_pending(ctx, tid) end)
+
+    if dead_leg == :inbound do
+      # The inbound leg is the scenario's own dialog, not ours to forget; the
+      # outbound one is still there and still the scenario's to wind down.
+      sip_ctx
+    else
+      # Release whatever a provider is holding for this call BEFORE forgetting the
+      # hunt — an agent reserved for a leg that no longer exists is an agent the
+      # queue believes is busy for good (§3.4). This is also what narrows open
+      # question 8: it now happens in a live scenario process, not in a teardown
+      # running inside one that is already terminating.
+      report_outcome(sip_ctx, :abandoned)
+
+      state = state(sip_ctx)
+      put_state(sip_ctx, %State{state | legs: Map.delete(state.legs, dead_leg), hunt: nil})
+    end
+  end
+
   # ── Leg creation ────────────────────────────────────────────────────────────
 
   @doc false
@@ -445,7 +515,7 @@ defmodule SIP.Session.B2bua do
         |> note_progress({:serial_attempting, uri, now()})
 
       %Leg{} = leg ->
-        case SIP.Dialog.fork_branch(leg.dialogpid, uri) do
+        case call_leg(fn -> SIP.Dialog.fork_branch(leg.dialogpid, uri) end) do
           {:ok, new_trans} ->
             sip_ctx
             |> move_correlation(leg.initial_trans, new_trans)
@@ -696,8 +766,10 @@ defmodule SIP.Session.B2bua do
   defp relay_request(sip_ctx, %{method: :ACK}, from_leg, _target_pid) do
     case correlated_invite(sip_ctx, from_leg) do
       {dialog_pid, trans_pid} when is_pid(trans_pid) ->
-        rc = SIP.Dialog.ack(dialog_pid, trans_pid)
-        SIP.Context.set(sip_ctx, :lasterr, ack_lasterr(rc))
+        case call_leg(fn -> SIP.Dialog.ack(dialog_pid, trans_pid) end) do
+          :leg_dead -> fail(sip_ctx, {:b2bua, :leg_dead, :ACK})
+          rc -> SIP.Context.set(sip_ctx, :lasterr, ack_lasterr(rc))
+        end
 
       _ ->
         Logger.warning(
@@ -715,8 +787,10 @@ defmodule SIP.Session.B2bua do
   defp relay_request(sip_ctx, %{method: :CANCEL}, from_leg, _target_pid) do
     case correlated_invite(sip_ctx, from_leg) do
       {dialog_pid, trans_pid} when is_pid(trans_pid) ->
-        rc = SIP.Dialog.cancel(dialog_pid, trans_pid)
-        SIP.Context.set(sip_ctx, :lasterr, ack_lasterr(rc))
+        case call_leg(fn -> SIP.Dialog.cancel(dialog_pid, trans_pid) end) do
+          :leg_dead -> fail(sip_ctx, {:b2bua, :leg_dead, :CANCEL})
+          rc -> SIP.Context.set(sip_ctx, :lasterr, ack_lasterr(rc))
+        end
 
       _ ->
         Logger.warning(
@@ -738,11 +812,14 @@ defmodule SIP.Session.B2bua do
         # tags, route set, remote target — fix_outbound_request/3), so what the
         # purge above contributes is dropping the hop-scoped headers and the
         # inbound leg's routing.
-        case SIP.Dialog.new_request(target_pid, fwd) do
+        case call_leg(fn -> SIP.Dialog.new_request(target_pid, fwd) end) do
           {:ok, trans_pid} ->
             sip_ctx
             |> add_pending(trans_pid, req, from_leg, req.method)
             |> SIP.Context.set(:lasterr, :ok)
+
+          :leg_dead ->
+            fail(sip_ctx, {:b2bua, :leg_dead, req.method})
 
           err ->
             fail(sip_ctx, {:b2bua, :relay_failed, req.method, err})
@@ -857,7 +934,7 @@ defmodule SIP.Session.B2bua do
     leg = outbound_leg(sip_ctx)
     [next | rest] = leg.untried
 
-    case SIP.Dialog.fork_branch(leg.dialogpid, next) do
+    case call_leg(fn -> SIP.Dialog.fork_branch(leg.dialogpid, next) end) do
       {:ok, new_trans} ->
         Logger.info(
           module: __MODULE__,
@@ -1097,12 +1174,25 @@ defmodule SIP.Session.B2bua do
         fields = SIP.Msg.Ops.forwarded_reply_fields(resp)
         fields = maybe_add_contact(fields, sip_ctx, pending, resp)
 
-        rc = SIP.Dialog.reply(dialog_pid, pending.orig_req, resp.response, resp.reason, fields)
+        rc =
+          call_leg(fn ->
+            SIP.Dialog.reply(dialog_pid, pending.orig_req, resp.response, resp.reason, fields)
+          end)
 
         # A final response closes the correlation; provisionals may be relayed
-        # again (goto loop).
-        sip_ctx = if resp.response >= 200, do: drop_pending(sip_ctx, tid), else: sip_ctx
-        SIP.Context.set(sip_ctx, :lasterr, reply_lasterr(rc))
+        # again (goto loop). The correlation is dropped either way: with the leg
+        # that owed the answer gone, keeping it would only make the teardown try
+        # again on the same dead dialog.
+        sip_ctx =
+          if resp.response >= 200 or rc == :leg_dead,
+            do: drop_pending(sip_ctx, tid),
+            else: sip_ctx
+
+        if rc == :leg_dead do
+          fail(sip_ctx, {:b2bua, :leg_dead, pending.orig_leg})
+        else
+          SIP.Context.set(sip_ctx, :lasterr, reply_lasterr(rc))
+        end
     end
   end
 
@@ -1137,8 +1227,11 @@ defmodule SIP.Session.B2bua do
     case outbound_leg(sip_ctx) do
       %Leg{} = leg ->
         if leg_alive?(leg) do
-          case SIP.Dialog.new_request(leg.dialogpid, bye_request()) do
+          case call_leg(fn -> SIP.Dialog.new_request(leg.dialogpid, bye_request()) end) do
             {:ok, _trans_pid} -> SIP.Context.set(sip_ctx, :lasterr, :ok)
+            # It died between the liveness check and the call, which is what we
+            # wanted of it anyway.
+            :leg_dead -> SIP.Context.set(sip_ctx, :lasterr, :ok)
             err -> fail(sip_ctx, {:b2bua, :bye_failed, err})
           end
         else
@@ -1163,8 +1256,15 @@ defmodule SIP.Session.B2bua do
         fail(sip_ctx, {:b2bua, :no_leg_to_reply_on, current_leg()})
 
       dialog_pid ->
-        rc = SIP.Session.reply(dialog_pid, req, code, reason, upd_fields, "b2bua_reply #{code}")
-        SIP.Context.set(sip_ctx, :lasterr, reply_lasterr(rc))
+        rc =
+          call_leg(fn ->
+            SIP.Session.reply(dialog_pid, req, code, reason, upd_fields, "b2bua_reply #{code}")
+          end)
+
+        case rc do
+          :leg_dead -> fail(sip_ctx, {:b2bua, :leg_dead, current_leg()})
+          _ -> SIP.Context.set(sip_ctx, :lasterr, reply_lasterr(rc))
+        end
     end
   end
 
@@ -1279,6 +1379,25 @@ defmodule SIP.Session.B2bua do
       callid: nil,
       contentlength: 0
     }
+  end
+
+  # Call a leg's dialog, turning its death into a value instead of an exit
+  # (design §14.4, R6).
+  #
+  # Every one of these is a `GenServer.call` on a pid the leg map has been holding
+  # since the leg was created, and a dialog can stop at any moment between the
+  # check and the call — its transport gone (R4), a transaction crashed (R1), the
+  # far end hung up. `leg_alive?/1` narrows the window; it cannot close it.
+  #
+  # The exit would leave the scenario process. R2 catches it, but only to END the
+  # scenario — which is the right last resort and the wrong ordinary answer: a
+  # B2BUA whose callee has just gone should get to say 480 to its caller, or try
+  # the next target. So it becomes `lasterr`, and the scenario decides through the
+  # ordinary `goto` contract.
+  defp call_leg(fun) do
+    fun.()
+  catch
+    :exit, _reason -> :leg_dead
   end
 
   # Teardown runs on the way out, often while the far end is already gone: a

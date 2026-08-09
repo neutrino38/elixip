@@ -322,26 +322,39 @@ alias SIP.NetUtils
 
   @doc "Get the transaction PID associated with a SIP request"
   def get_transaction_pid(req) when is_req(req) do
-    case Registry.lookup(Registry.SIP.Transac, req.transid) do
+    # Map.get, not req.transid: a request built by the application rather than
+    # parsed off the wire carries no transid at all, and `req.transid` raises a
+    # KeyError on it — inside the dialog, which then dies. The B2BUA teardown
+    # answers exactly such requests (§8, and R6's leg-death hook).
+    case Registry.lookup(Registry.SIP.Transac, Map.get(req, :transid)) do
       [ {trans_pid, _value} ] -> trans_pid
-      [] -> :invalid_transaction
+      _ -> :invalid_transaction
     end
   end
 
-  @doc "Transactionful reply to a request"
+  @doc """
+  Transactionful reply to a request.
+
+  Always answers `{code, uas_t}` — `{:invalid_transaction, nil}` when there is no
+  transaction to reply on. It used to return the bare atom on both refusal paths,
+  and every caller destructures `{ret, uas_t} = reply_req(…)`: a reply to a
+  request whose transaction is gone raised a MatchError in the DIALOG, killing it
+  (design §14). That is not a rare shape — it is what answering an orphan request
+  looks like once its transaction has timed out.
+  """
   def reply_req(req , resp_code, reason, upd_fields, totag, tr_list_filter) when is_map(req) and is_integer(resp_code) do
     case get_transaction_pid(req) do
       :invalid_transaction ->
         Logger.error(module: __MODULE__,
-                     message: "Cannot reply to #{req.method}. Req transid #{req.transid} is not associated with a real transaction" )
-        :invalid_transaction
+                     message: "Cannot reply to #{req.method}. Req transid #{inspect(Map.get(req, :transid))} is not associated with a real transaction" )
+        { :invalid_transaction, nil }
 
       uas_t ->
         if uas_t in tr_list_filter or tr_list_filter == nil do
           retcode = reply(uas_t, resp_code, reason, upd_fields, totag)
           { retcode, uas_t }
         else
-          :invalid_transaction
+          { :invalid_transaction, nil }
         end
     end
   end

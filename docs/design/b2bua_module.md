@@ -1111,7 +1111,7 @@ ACK+BYE the late 2xx" cannot be tested credibly against a single shared peer.
 
 ## 11. Phasing
 
-**P1 and P2a–c are complete**, and P2d is under way (R1–R5 done; R6 left). What remains after it is media (P3) and parallel forking (P4); the
+**P1, P2a–c and P2d (§14 resilience) are complete.** What remains after it is media (P3) and parallel forking (P4); the
 §7.5 offer profiles depend on P3, and so does the media-server resilience
 sketched in §14.6.
 
@@ -1156,7 +1156,7 @@ One consequence to note: SRV failover now depends on `fork: :serial` rather than
 being unconditional as §3.1 first put it. `:none` means one attempt and no
 failover at all — the simpler contract, and the honest one.
 | **P2c** ✅ | dynamic targets (§3.4): the `SIP.B2bua.TargetProvider` behaviour, `%Peer{provider:}`, `b2bua_try_next/0` + the per-attempt ring timeout; `b2bua_cancel_forward/0` (§3.5) with 487 out of the default retry-on list; hunt progress events (§3.6, `notify_progress`). Extends the SERIAL hunt, so it needed nothing from P4; a complete call queue additionally needs P3 for music on hold |
-| **P2d** (R1–R5 ✅) | resilience hardening (§14): the dialog traps exits and converts a transaction crash into a synthetic 408 (R1 ✅); the scenario engine catches exits so teardown always runs (R2 ✅); connectionless transport re-selection + exit-safe transport calls (R3 ✅); transport-down broadcast from `terminate/2`, single `{:dialog_terminated}` (R4 ✅); transport-down during a hunt = branch failure, not dialog death (R5 ✅); B2BUA leg-death hook purging the leg and answering its pending requests (R6); the failure-injection test set (R7, ✅ for the above). §14.6 sketches the media-server failure domain (R8), which lands with P3 |
+| **P2d** ✅ | resilience hardening (§14): the dialog traps exits and converts a transaction crash into a synthetic 408 (R1 ✅); the scenario engine catches exits so teardown always runs (R2 ✅); connectionless transport re-selection + exit-safe transport calls (R3 ✅); transport-down broadcast from `terminate/2`, single `{:dialog_terminated}` (R4 ✅); transport-down during a hunt = branch failure, not dialog death (R5 ✅); B2BUA leg-death hook purging the leg and answering its pending requests (R6 ✅); the failure-injection test set (R7, ✅ for the above). §14.6 sketches the media-server failure domain (R8), which lands with P3 |
 | **P3** | `{:mediaserver, …}` mode: leg-qualified media handles, `bridge/2` callback in `MediaServer.Behaviour` + Mendooze implementation, offer/answer choreography; a NEW `scenarios/b2bua_media.exs` with its own test (§12 — `b2bua_basic.exs` stays pure signaling), and the media-server failure domain of §14.6 (R8) |
 | **P4** | parallel forking (branch sets in the leg dialog, §3.3: winner adoption, late-2xx ACK+BYE, best-response aggregation; q-group semantics of §3.2), trunk processes (`trunk_pid`); multi-leg generalization only if attended transfer / 3pcc demands it. `{:rtpengine, …}` is **out of scope** — deferred to the borderline work |
 
@@ -1448,7 +1448,7 @@ questions. The handler then reduces over every client transaction on the dead
 flow and decides the dialog's fate once — which is why R1's `unanswered_request`
 was split into a state-returning half and the reply/stop decision.
 
-**R6 — B2BUA leg-death hook.** In the `on_events` instrumentation (next to
+**R6 ✅ — B2BUA leg-death hook.** In the `on_events` instrumentation (next to
 `auto_store`/`note_event`), a matched `{tag, {:dialog_terminated, dlg, reason}}`
 purges `state.legs[tag]` and immediately answers, on their origin leg, every
 `%Pending{}` whose response was owed *by* the dead leg — 487 for an INVITE, 408
@@ -1460,6 +1460,38 @@ question 8). Separately, the relay paths that today call a leg unguarded
 `arm_target`/`try_next_target`, the correlated ACK/CANCEL) capture
 `:exit`/`:noproc` into `lasterr = {:b2bua, :leg_dead}` — the scenario decides
 through the ordinary `goto`/lasterr contract.
+
+*Refined during implementation.* "Owed by the dead leg" is read off the
+correlation rather than guessed: a `%Pending{}` records where its request came
+FROM, and its answer was owed by the opposite side — so when leg L dies, what is
+lost is every pending whose `orig_leg` is not L. That reading is symmetric, and
+the hook applies to the inbound leg too (its death loses whatever the scenario
+relayed onto it, answered on the outbound one); only the outbound leg is also
+forgotten, the inbound one being the scenario's own dialog.
+
+**Limit, deliberate:** the hook runs when the scenario MATCHES the event, since
+that is where the instrumentation lives. A scenario that ignores leg death
+entirely still falls back on the §8 teardown — later, but not never. Consuming
+the event on the scenario's behalf was considered and rejected: the only
+plausible continuation is `goto loop`, which re-enters the state and re-runs its
+entry actions, and re-sending a request is a worse failure than answering late.
+
+Three bugs of the same family surfaced while testing it, each of which killed a
+process silently and each now fixed:
+
+- `SIP.Transac.reply_req/6` returned a bare `:invalid_transaction` on both of its
+  refusal paths, while every caller destructures `{ret, uas_t}` — so replying to
+  a request whose transaction is gone raised a MatchError **in the dialog**. That
+  is exactly what answering an orphan looks like once its transaction has timed
+  out, i.e. the §8 teardown's own job;
+- `get_transaction_pid/1` read `req.transid`, which raises on a request the
+  application built rather than parsed off the wire — again inside the dialog;
+- `SIP.ICT` / `SIP.NICT` compared a CSeq (a **list** everywhere it is built) to a
+  tuple, so the 200 answering our own CANCEL never matched its clause and fell
+  through to a log that interpolated that list — `String.Chars` on
+  `[1, :CANCEL]` raises. Cancelling a branch therefore crashed the transaction
+  that sent the CANCEL. R1 turned that crash into a reported 408, which is how it
+  became visible at all.
 
 Deliberately unchanged: server transactions stay unlinked (containment is the
 right behaviour); transports stay unsupervised in the library (kelixip may
@@ -1476,8 +1508,9 @@ Failure injection, one test per traced path, all asserting the same two
 outcomes — *the caller receives a final response* and *no dialog or transaction
 process survives the scenario*:
 
-Delivered with R1–R5: `test/dialog_resilience_test.exs` and
-`test/scenario_resilience_test.exs` (17 tests). Two of them drive a REAL TCP
+Delivered with R1–R6: `test/dialog_resilience_test.exs`,
+`test/scenario_resilience_test.exs` and the two R6 blocks of
+`test/b2bua_session_test.exs` (23 tests). Two of them drive a REAL TCP
 transport — the announcement moved into `terminate/2`, so what must be pinned is
 that an abnormal stop announces as loudly as a clean close.
 

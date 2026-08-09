@@ -445,6 +445,11 @@ defmodule SIP.Scenario do
         # compile-time: a catch-all clause ({tag, evt}) has no literal tag to
         # read off the pattern.
         SIP.Session.B2bua.note_event(unquote(evt))
+        # A leg that has just died owes answers it will never send. They are
+        # given here, before the scenario's clause runs, so the caller is
+        # answered the moment its callee goes rather than at the teardown
+        # (design docs/design/b2bua_module.md §14.4, R6).
+        var!(sip_ctx) = SIP.Session.B2bua.note_leg_event(var!(sip_ctx), unquote(evt))
         var!(sip_ctx) = SIP.Session.CallUAS.auto_store(var!(sip_ctx), unquote(evt))
         unquote(body)
       end
