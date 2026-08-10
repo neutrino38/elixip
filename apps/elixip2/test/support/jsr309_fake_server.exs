@@ -71,6 +71,66 @@ defmodule Jsr309FakeServer do
     XMLRPC.encode!(%XMLRPC.MethodResponse{param: param})
   end
 
+  @doc """
+  Blocks until the poller is really streaming on `stream`, so a chunk written next
+  cannot be lost.
+
+  `{:stream_conn, …}` says THIS server wrote the response headers. It does not say
+  the poller has read them: httpc surfaces `stream_start` only once it has, and an
+  event written into that window never reaches the sink. Every test here wrote its
+  first chunk straight after `{:stream_conn, …}`, so all of them carried the race —
+  it surfaced as `Mendooze.ServerTest` "routes events to the Conn registered under
+  their session tag" failing with only `{:jsr309_call, "EventQueueCreate", []}` in
+  the mailbox, about one full-suite pass in three, on a different member of the
+  family each time.
+
+  A fixed sleep only narrows the window. The proof has to come from the far end, so
+  register a Conn of our own, offer it an event until one comes back, and take the
+  registration away again. After that the stream is live and later chunks on it are
+  safe — including the ones a test deliberately expects to be DROPPED, where a lost
+  chunk would have made `refute_receive` pass for the wrong reason.
+  """
+  def await_streaming(server, stream, timeout_ms \\ 2_000) do
+    tag = "__sync__#{System.unique_integer([:positive])}"
+    :ok = MediaServer.Mendooze.register_conn(server, tag, self())
+    frame = event_frame([3, tag, "sync"])
+    expected = {:mendooze_event, {:player_started, tag, "sync"}}
+
+    try do
+      case offer(stream, frame, expected, System.monotonic_time(:millisecond) + timeout_ms, 1) do
+        {:ok, 1} -> drain(expected, 0)
+        {:ok, _retried} -> drain(expected, 50)
+        :timeout -> ExUnit.Assertions.flunk("the poller never started streaming")
+      end
+    after
+      MediaServer.Mendooze.unregister_conn(server, tag)
+    end
+  end
+
+  # Offers cost nothing but a duplicate event, and the retry cannot tell "lost" from
+  # "not yet delivered" — so report how many it took, and only settle when it retried.
+  defp offer(stream, frame, expected, deadline, offers) do
+    send(stream, {:chunk, frame})
+
+    receive do
+      ^expected ->
+        {:ok, offers}
+    after
+      50 ->
+        if System.monotonic_time(:millisecond) < deadline,
+          do: offer(stream, frame, expected, deadline, offers + 1),
+          else: :timeout
+    end
+  end
+
+  defp drain(expected, settle_ms) do
+    receive do
+      ^expected -> drain(expected, settle_ms)
+    after
+      settle_ms -> :ok
+    end
+  end
+
   defp default_handler("EventQueueCreate", _), do: {:ok, [7, "/events/jsr309/7"]}
   defp default_handler(_method, _params), do: {:ok, []}
 

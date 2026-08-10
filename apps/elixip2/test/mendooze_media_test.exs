@@ -27,6 +27,7 @@ defmodule Mendooze.MediaTest do
     on_exit(fn -> if Process.alive?(server), do: Mendooze.disconnect(server) end)
 
     assert_receive {:stream_conn, stream, _}, 1_000
+    Jsr309FakeServer.await_streaming(server, stream)
 
     {:ok, conn} = Mendooze.create_peer_connection(server, self(), conn_opts)
     assert_receive {:jsr309_call, "MediaSessionCreate", [sess_tag, 7]}

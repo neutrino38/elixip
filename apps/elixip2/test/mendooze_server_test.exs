@@ -68,6 +68,7 @@ defmodule Mendooze.ServerTest do
     server = connect!(fake)
 
     assert_receive {:stream_conn, conn, _}, 1_000
+    Jsr309FakeServer.await_streaming(server, conn)
 
     # this test process plays the Conn role
     assert :ok = Mendooze.register_conn(server, "cx-1", self())
@@ -81,6 +82,7 @@ defmodule Mendooze.ServerTest do
     server = connect!(fake)
 
     assert_receive {:stream_conn, conn, _}, 1_000
+    Jsr309FakeServer.await_streaming(server, conn)
 
     assert :ok = Mendooze.register_conn(server, "cx-1", self())
     :ok = Mendooze.unregister_conn(server, "cx-1")
@@ -96,6 +98,7 @@ defmodule Mendooze.ServerTest do
     server = connect!(fake)
 
     assert_receive {:stream_conn, conn, _}, 1_000
+    Jsr309FakeServer.await_streaming(server, conn)
 
     test_pid = self()
 

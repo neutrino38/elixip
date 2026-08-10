@@ -123,4 +123,39 @@ end
 Code.require_file("support/wait.exs", __DIR__)
 Code.require_file("support/listener_case.exs", __DIR__)
 
+# The SIP stack's three registries are created with `Registry.start_link/1`, so each
+# belongs to the process that called `start/0` first — which was the `setup_all` of
+# whichever test module happened to get there first. When THAT module ended, its
+# setup_all process took the registry with it, and whatever was running by then died
+# wholesale: `** (ArgumentError) unknown registry: Registry.SIP.Transac`, surfacing
+# as `:transactionfailure` on every dialog the victim tried to create. Five of the
+# six SIP.Test.B2bua.Scenario tests at once, on about one full-suite pass in eight,
+# on a different module each time — which is what made it look like several
+# unrelated flaky suites.
+#
+# The three `start/0` already answer `:already_started` as success, precisely so
+# modules can share the layers; what was missing is an owner that outlives them all.
+# This is the same shape as the fake JSR309 server in 52b6bf8: a fixture shared by
+# the whole run must not be linked to a test process.
+#
+# `SIP.Session.ConfigRegistry` is deliberately NOT started here — its `start/0`
+# answers `{:ok, pid}` / `{:error, {:already_started, _}}` and several modules match
+# on `{:ok, _}`, so pre-starting it would break them.
+_sip_stack_owner =
+  spawn(fn ->
+    :ok = SIP.Transac.start()
+    :ok = SIP.Transport.Selector.start()
+    :ok = SIP.Dialog.start()
+
+    receive do
+      :never -> :ok
+    end
+  end)
+
+Enum.each([Registry.SIP.Transac, Registry.SIPTransport, Registry.SIPDialog], fn name ->
+  Enum.reduce_while(1..500, nil, fn _, _ ->
+    if Process.whereis(name), do: {:halt, :ok}, else: (Process.sleep(10) && {:cont, nil})
+  end) == :ok || raise("#{inspect(name)} did not come up before the suite started")
+end)
+
 ExUnit.start(exclude: [:skip])

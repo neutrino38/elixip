@@ -37,6 +37,7 @@ defmodule Mendooze.ConnTest do
 
     assert_receive {:jsr309_call, "EventQueueCreate", []}, 1_000
     assert_receive {:stream_conn, stream, _}, 1_000
+    Jsr309FakeServer.await_streaming(server, stream)
     %{fake: fake, server: server, stream: stream}
   end
 
