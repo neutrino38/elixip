@@ -110,9 +110,14 @@ a=rtcp-mux
         :erlang.start_timer(1000, self(), :answer)
         answered_call_handling_process_loop(%{state | state: :ringing})
 
+      # The scripted delays below (and :noanswer in the scenario after this one) are
+      # a fixture's pacing, not a property under test: what the tests assert is the
+      # ORDER — answered, then hung up; ringing, then timed out. They were 5 s, which
+      # made two tests cost six seconds each for nothing. 1 s leaves an order of
+      # magnitude over the ~100 ms the tests need to get their ACK or CANCEL in first.
       { :timeout, _timerRef, :answer } ->
         answer_call(state)
-        :erlang.start_timer(5000, self(), :hangup)
+        :erlang.start_timer(1000, self(), :hangup)
         answered_call_handling_process_loop(%{state | state: :confirmed})
 
       { :timeout, _timerRef, :hangup } ->
@@ -170,7 +175,7 @@ a=rtcp-mux
 
       { :timeout, _timerRef, :ringing } ->
         SIP.Dialog.reply(state.dlg_id, state.req, 180, "Ringing", [])
-        :erlang.start_timer(5000, self(), :noanswer)
+        :erlang.start_timer(1000, self(), :noanswer)
         %{state | state: :ringing}
 
       { :timeout, _timerRef, :noanswer } ->
@@ -370,16 +375,13 @@ defmodule SIP.Test.Call do
     # No 100 Trying: the IST does not emit one and the scenario does not either.
     assert_receive(180, 2000, "Failed to receive 180 Ringing on time")
     assert_receive(200, 2000, "Failed to receive 200 OK on time")
-    Process.sleep(1000)
+    Process.sleep(100)
 
     #Simulate ACK sending
     _ack = simulate_remote_ack(parsed_msg, branch_id)
 
     #Wait for BYE
     assert_receive(:BYE, 6000, "Failed to receive BYE")
-
-    # Wait for BYE transaction to die out
-    Process.sleep(6000)
   end
 
   test "Simulating an answered call then hangup the call" do
@@ -392,8 +394,6 @@ defmodule SIP.Test.Call do
     _ack = simulate_remote_ack(parsed_msg, branch_id)
     Process.sleep(500)
     simulate_remote_bye(parsed_msg)
-    # Wait for BYE transaction to die out
-    Process.sleep(6000)
   end
 
   test "Simulating an call without answser" do
@@ -404,7 +404,7 @@ defmodule SIP.Test.Call do
 
     #Simulate ACK sending
     _ack = simulate_remote_ack(parsed_msg, branch_id)
-    Process.sleep(1000)
+    Process.sleep(100)
   end
 
   test "Simulating an abandonned call" do
