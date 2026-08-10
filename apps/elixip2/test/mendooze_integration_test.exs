@@ -179,6 +179,50 @@ defmodule Mendooze.IntegrationTest do
       assert :ok = Mendooze.close_peer_connection(caller)
     end
 
+    # The assertion the loopback tests cannot make on their own: `:ice_connected`
+    # is the first VALIDATED media packet, and two endpoints with nothing to send
+    # never produce one. Give one of them a media source and it becomes
+    # observable — over SRTP, which is the case that had never been exercised at
+    # all.
+    #
+    # Needs a file the media server process can open (it runs as root on dev71)
+    # AND that has an audio track:
+    #     MENDOOZE_MEDIA=/var/lib/kelixip/rec/record.mp4
+    #
+    # The track part is not a detail. `A.mp4` next to it is video-only, and with
+    # it the server says so plainly and then sends nothing:
+    #     MP4Streamer opened [A.mp4] audio:0 video:1 text:0
+    # which looks exactly like a broken media path from this side.
+    @tag timeout: 60_000
+    test "with a media source, media really flows and releases :ice_connected", %{server: server} do
+      file = System.get_env("MENDOOZE_MEDIA")
+
+      if is_nil(file) do
+        IO.puts("skipped: set MENDOOZE_MEDIA to a file the media server can open")
+      else
+        opts = [media: :audio, audio_codec: "PCMU", webrtc_support: :yes]
+
+        {:ok, pc_a} = Mendooze.create_peer_connection(server, self(), opts)
+        {:ok, offer_a} = Mendooze.get_local_offer(pc_a)
+        assert offer_a =~ "UDP/TLS/RTP/SAVPF"
+
+        {:ok, pc_b} = Mendooze.create_peer_connection(server, self(), opts)
+        {:ok, answer_b} = Mendooze.set_remote_offer(pc_b, offer_a)
+        assert :ok = Mendooze.set_remote_answer(pc_a, answer_b)
+
+        # pc_b now has something to send, so pc_a has something to validate.
+        assert {:ok, player} = Mendooze.create_player(pc_b, file, [])
+        assert :ok = Mendooze.start_player(player)
+
+        assert_receive {:ms_event, ^pc_a, {:media_connected, :audio}}, 20_000
+        assert_receive {:ms_event, ^pc_a, :ice_connected}, 20_000
+
+        assert :ok = Mendooze.stop_player(player)
+        assert :ok = Mendooze.close_peer_connection(pc_b)
+        assert :ok = Mendooze.close_peer_connection(pc_a)
+      end
+    end
+
     test "H264 audio+video loopback carries the server-negotiated fmtp", %{server: server} do
       # Delegated SDP negotiation (§8.1 of docs/design/mendooze_interface.md): the media
       # server is authoritative for the H264 fmtp (profile-level-id /
@@ -248,14 +292,13 @@ defmodule Mendooze.IntegrationTest do
       # packet — for WebRTC, a decrypted SRTP one — and neither endpoint has a
       # media source, so no SRTP media is ever produced. The plain-RTP loopback
       # above happens to produce a packet the server validates; an SRTP pair with
-      # nothing to send cannot.
+      # nothing to send cannot. Give one of them a player and it does: the
+      # MENDOOZE_MEDIA test below asserts exactly that, over SRTP.
       #
-      # Asserting connectivity here for real needs a media source on the server —
-      # a player, i.e. an .mp4 present on the media server host. dev71 has none
-      # (`find /opt/ives /var/lib -name '*.mp4'` comes back empty), which is also
-      # why the player test below skips itself. What this test CAN establish, and
-      # does, is its title: both legs negotiate a browser-shaped transport plane,
-      # and each consumes the other's.
+      # Asserting connectivity here for real needs a media source — see the
+      # `MENDOOZE_MEDIA` test below, which attaches a player and then does assert
+      # it. What THIS test establishes is its title: both legs negotiate a
+      # browser-shaped transport plane, and each consumes the other's.
 
       assert :ok = Mendooze.close_peer_connection(pc_b)
       assert :ok = Mendooze.close_peer_connection(pc_a)
