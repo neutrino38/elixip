@@ -15,6 +15,8 @@ defmodule SIP.Test.Register do
   @passwd @account.passwd
 
   setup_all do
+    SIP.Test.AppEnv.preserve_proxy()
+
     # Initialize transaction and transport layers
     :ok = SIP.Transac.start()
     :ok = SIP.Transport.Selector.start()

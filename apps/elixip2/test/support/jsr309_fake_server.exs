@@ -24,11 +24,48 @@ defmodule Jsr309FakeServer do
       :gen_tcp.listen(0, [:binary, packet: :http_bin, active: false, reuseaddr: true])
 
     {:ok, port} = :inet.port(lsock)
-    Task.start_link(fn -> accept_loop(lsock, test_pid, rpc_handler, opts) end)
-    %{url: "http://127.0.0.1:#{port}", host: "127.0.0.1", port: port, lsock: lsock}
+
+    # NOT start_link: linked to the test process, the whole fake server died the
+    # instant the test ended — while the EventPoller of any connection made
+    # against it was still running, and discovered the disappearance the only way
+    # left to it, by five refused reconnections a second apart. Multiplied by the
+    # ~100 connections this suite makes, that is minutes of background httpc
+    # churn overlapping whatever ran next, and it is what made a 1 s
+    # `assert_receive` elsewhere miss.
+    #
+    # Unlinked, the caller stops it explicitly (`stop_listening/1`) AFTER
+    # disconnecting, so the poller is asked to stop instead of finding out.
+    # …and the listen socket has to change hands with it: it was opened by the
+    # TEST process, so it closed when that process ended whatever the accept loop
+    # was linked to. That is what actually killed the fake server early — every
+    # teardown RPC of every Conn then hit a refused port.
+    {:ok, pid} =
+      Task.start(fn ->
+        receive do
+          :go -> accept_loop(lsock, test_pid, rpc_handler, opts)
+        end
+      end)
+
+    :ok = :gen_tcp.controlling_process(lsock, pid)
+    send(pid, :go)
+
+    fake = %{url: "http://127.0.0.1:#{port}", host: "127.0.0.1", port: port, lsock: lsock}
+
+    # Closed here rather than by each caller, and registered HERE on purpose:
+    # on_exit is LIFO, so anything the caller registers afterwards — its
+    # `Mendooze.disconnect` — runs first, and the server is still there to answer
+    # the teardown RPCs. Now that the socket outlives the test process, somebody
+    # has to close it, or every test leaves a listener behind for the run.
+    ExUnit.Callbacks.on_exit(fn -> stop_listening(fake) end)
+    fake
   end
 
   def stop_listening(%{lsock: lsock}), do: :gen_tcp.close(lsock)
+
+  @doc false
+  # Idempotent: `stop_listening/1` may already have been called by a test that
+  # simulates the server going away.
+  def closed?(%{lsock: lsock}), do: not is_port(lsock)
 
   def event_frame(param) do
     XMLRPC.encode!(%XMLRPC.MethodResponse{param: param})

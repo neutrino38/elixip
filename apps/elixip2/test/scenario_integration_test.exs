@@ -165,6 +165,8 @@ defmodule SIP.Test.ScenarioIntegration do
   end
 
   setup_all do
+    SIP.Test.AppEnv.preserve_proxy()
+
     :ok = SIP.Scenario.start_stack()
 
     Application.put_env(:elixip2, :proxyuri, %SIP.Uri{

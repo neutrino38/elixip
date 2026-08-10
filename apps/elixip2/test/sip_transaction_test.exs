@@ -7,6 +7,8 @@ defmodule SIP.Test.Transact do
   doctest SIP.Transac
 
   setup_all do
+    SIP.Test.AppEnv.preserve_proxy()
+
     # Initialize transaction and transport layers
     :ok = SIP.Transac.start()
     :ok = SIP.Transport.Selector.start()

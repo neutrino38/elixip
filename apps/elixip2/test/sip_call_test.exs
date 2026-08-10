@@ -270,6 +270,8 @@ defmodule SIP.Test.Call do
   @proxy Application.compile_env(:elixip2, :test_account).proxy
 
   setup_all do
+    SIP.Test.AppEnv.preserve_proxy()
+
     # Initialize transaction and transport layers
     :ok = SIP.Transac.start()
     :ok = SIP.Transport.Selector.start()
@@ -304,8 +306,13 @@ defmodule SIP.Test.Call do
     # GenServer.start fails with {:already_started, pid} for tests 2-4.
     parsed_msg = Map.put(parsed_msg, :callid, SIP.Msg.Ops.generate_branch_value())
 
-    # Add unittest param to RURI to trigger UDP mockeup transport selection
-    upd_uri = SIP.Uri.set_uri_param(parsed_msg.ruri, "unittest", "1")
+    # A mockup instance of this module's OWN. `;unittest=1` is THE shared one,
+    # and eight modules drive it: its `scenario` and its stored request are
+    # whatever the last of them left, so a 180 this module is waiting for can be
+    # routed on someone else's state. `select_instance/1` exists to name a peer
+    # per suite (it is what the three-party B2BUA test was built on); using it
+    # here costs one string.
+    upd_uri = SIP.Uri.set_uri_param(parsed_msg.ruri, "unittest", "sip_call")
     upd_uri = SIP.Uri.set_uri_param(upd_uri, "scenario", scenario)
     branch_id = SIP.Msg.Ops.generate_branch_value()
     parsed_msg = SIP.Msg.Ops.add_via(parsed_msg, { {2,2,2,2}, 5090, "UDP" }, branch_id)

@@ -89,4 +89,35 @@ defmodule SIP.Test.B2bua.InboundDialogStub do
   end
 end
 
+
+defmodule SIP.Test.AppEnv do
+  @moduledoc """
+  Save the process-global `:elixip2` application env a test module is about to
+  mutate, and put it back when the module ends.
+
+  `:proxyuri` and `:proxyusesrv` are read by the transport selector on every
+  outbound request, and six test modules write them — one deleting them to be
+  "self-contained regardless of run order", the others setting them to their own
+  proxy. None but one restored anything, so whichever module ran last decided
+  what the next one saw: `SIP.Transac` refusing with `:missingproxyconf`, or an
+  INVITE that never went out, depending on the order ExUnit happened to pick.
+
+  Call it from `setup_all` and the module's effect stops being visible to the
+  ones that follow, which is what "order-independent" actually means here.
+  """
+  def preserve(keys) when is_list(keys) do
+    saved = Enum.map(keys, &{&1, Application.get_env(:elixip2, &1)})
+
+    ExUnit.Callbacks.on_exit(fn ->
+      Enum.each(saved, fn
+        {k, nil} -> Application.delete_env(:elixip2, k)
+        {k, v} -> Application.put_env(:elixip2, k, v)
+      end)
+    end)
+  end
+
+  @doc "The proxy keys every SIP-sending module touches."
+  def preserve_proxy, do: preserve([:proxyuri, :proxyusesrv])
+end
+
 ExUnit.start(exclude: [:skip])

@@ -17,6 +17,8 @@ defmodule SIP.Test.Call2 do
   @callee "sip:90901@#{@domain}"
 
   setup_all do
+    SIP.Test.AppEnv.preserve_proxy()
+
     :ok = SIP.Transac.start()
     :ok = SIP.Transport.Selector.start()
     :ok = SIP.Dialog.start()
