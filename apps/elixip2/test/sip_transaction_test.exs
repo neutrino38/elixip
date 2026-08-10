@@ -242,7 +242,6 @@ User-Agent: Elixip 0.2.0
   end
 
   # Big transaction test
-  @tag :toto
   test "Transaction SIP client INVITE - appel reussi" do
     { :ok, uac_t, _modmsg } = SIP.Transac.start_uac_transaction_with_template(
                               create_invite_template(), [],
@@ -293,7 +292,6 @@ User-Agent: Elixip 0.2.0
 
   end
 
-  @tag :toto
   test "Transaction SIP client INVITE - appel occcupé" do
     { :ok, uac_t, _modmsg } = SIP.Transac.start_uac_transaction_with_template(
                               create_invite_template(), [],
