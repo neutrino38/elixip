@@ -701,6 +701,33 @@ A scenario **never** replies the `487` after a CANCEL itself — it is automatic
 is *not* automatic: send it with `reply_invite(100, "Trying")` if the scenario needs one (see the
 *incoming calls* section above).
 
+### Connecting calls (B2BUA)
+
+`SIP.Session.B2bua` lets one scenario drive **two** dialogs: the incoming call it was started
+for, and a second one it places itself. It is pulled in by `use SIP.Scenario`, so every call
+scenario already has the `b2bua_*` macros.
+
+The inbound leg stays the scenario's own dialog — `reply_invite*`, `last_uas_req()` and the rest
+keep their meaning — and the outbound leg's events arrive **tagged**, `{:outbound, {200, resp,
+trans, dlg}}`, so an `on_events` clause tells the two apart by shape. The relay macros are
+direction-free: they act on the *other* leg, whichever the matched event came from.
+
+```elixir
+b2bua_forward(req, peer, media)   # create the outbound leg
+b2bua_forward(req)                # relay a request onto the other leg
+b2bua_forward_reply(resp)         # relay a response back
+b2bua_reply(req, code, reason)    # answer here, relay nothing
+```
+
+`media` is `false` (the SDP crosses verbatim) or `{:mediaserver, opts}` (both legs terminate
+their media on the server, and neither side ever sees the other's SDP). Legs are wound down
+automatically when the scenario ends, whatever the exit path.
+
+**See [B2BUA.md](B2BUA.md)** for the complete macro reference, the `%SIP.B2bua.Peer{}` target
+form, the media modes, and three commented scenarios: a proxy-like direct call to a subscriber
+registered on several devices, a customer service hunting a list of numbers serially, and a
+WebRTC-to-SIP gateway.
+
 ### HTTP.Session
 
 This module lets a scenario issue outbound **HTTP** requests (e.g. to a
