@@ -393,17 +393,11 @@ kelictl module list               # every loaded module, its commands and facade
 | `slot.list` | `mcu slot.list uid=c-3f9a` |
 | `slot.update` | `mcu slot.update uid=c-3f9a slot=0 holds=vad` |
 
-**Each of these is also an HTTP endpoint** — a resource tree
-(`/modules/mcu/conferences/:uid/participants/:part_id`) plus a flat form for a client
-that cannot build URLs. The endpoints, their arguments, their JSON payloads and their
-statuses are in **[mcu-api.md](mcu-api.md)**, which is written to be enough on its own
-to implement a client.
 
 On the CLI, arguments are `name=value` tokens — path variables are ordinary named
 arguments, so the same map reaches the module either way. A value typed
 `true`/`false` is a boolean, digits an integer, and a leading `{`/`[` is JSON
 (`muted='{"audio":true}'`).
-
 
 A conference is **pinned** to the media server it was created on and never
 migrates. `kelictl module reload mcu` has no in-place reload: the module is
