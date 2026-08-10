@@ -1,55 +1,74 @@
-# mcu
+# Multi Conference Unit
 
-The **conferencing module**: it holds the conferences, allocates their DIDs, and
-drives a Medooze media server that mixes audio, video and T.140 text. An INVITE
-whose R-URI user-part matches a conference DID joins that conference; the
-conferences themselves are managed over `kelictl`, REST, or from a script.
+This module provides an audio / video / text conferencing service. Each conference
+is identified by a SIP number (DID) and is joined by calling it. It is an
+old-style MCU, mixing the picture, the audio and the text on the server.
 
-Unlike `registrar` and `auth_db`, this module is **useless without a media
-server**: installing the `.beam` is half of a working setup — see
+This module requires a medooze mediaserver up and running and configured
+in the pool. See
 [§1.1 of the guide](../../mcu_module_guide.md#11-what-must-be-true-before-a-call-can-succeed)
 for the four things that must be true before a call can succeed.
 
-> This page is the **reference** — parameters, facades, commands. The **REST API** of
-> those commands (every endpoint, its payloads, its statuses, enough to implement a
-> client) is [mcu-api.md](mcu-api.md). The narrative (running a node, writing a
-> script, debugging a call that did not work) is
-> [docs/mcu_module_guide.md](../../mcu_module_guide.md), and the *why* of every
-> decision and limitation is [docs/design/mcu_module.md](../../design/mcu_module.md).
+**Important limitation:** for now, it is not possible to mix in a single scenario
+MCU functions and regular JSR 309 media functions.
 
-## Loading
+> Please refer to the [MCU admin guide](../../mcu_module_guide.md) for more details
+> on how to write an MCU elixip script and troubleshoot it. There is also a
+> [design document](../../design/mcu_module.md) that lists design decisions and
+> limitations. The reference call script is
+> [`apps/kelixip/scripts/mcu.exs`](../../../apps/kelixip/scripts/mcu.exs).
 
-The bytecode comes from the `kelixip-mod-mcu` package (`dnf install` / `apt install`
-— the name has no underscore, so it is the same on both), and the block is what
-actually loads it.
+## Installing and activating the module
 
-The `[module.mcu]` block lives in **`config.toml`** (infrastructure, not
-domain-tied). The media servers are **not** declared here: they are the
-`[mediaserver.pool.*]` entries, the same block the point-to-point path uses.
+### Installing the `kelixip-mod-mcu` package:
+
+`dnf install kelixip-mod-mcu` / `apt install kelixip-mod-mcu`
+
+### Declaring the module in config.toml
+
+Add an `[module.mcu]` section in the `/etc/kelixip/config.toml` file.
+
+Example:
 
 ```toml
 # config.toml
 [module.mcu]
 rate             = 32000
-max_participants = 20
+max_participants = 8
 did_range        = "8000-8099"
+vad              = "full"
+layout_comp      = "2x2"
+video_size       = "hd720p"
+record_dir       = "/var/lib/kelixip/rec"    # on the media server
+image_dir        = "/var/lib/kelixip/img"    # idem
+logo_file        = "ives.png"                # every empty mosaic slot
+medias           = ["audio", "video", "text"]
+dtmf             = true
+# the collaboration channel: closed until the kinds are declared
+message_kinds    = ["hand.raised", "hand.lowered", "floor.request", "floor.grant"]
+```
 
-[mediaserver.pool.mcu1]
+Every key has a default, so an empty `[module.mcu]` block is a valid one. The full
+list is in [Module configuration reference](#module-configuration-reference) below.
+
+### Check the mediaserver availability
+
+Make sure that `/etc/kelixip/config.toml` contains at least one defined
+mediaserver in the pool:
+
+```toml
+[mediaserver.pool.ms1]
 module = "mendooze"
 url    = "http://10.0.0.12:9090"   # the media server's XML-RPC port (--http-port)
 ```
 
-```elixir
-import Kelix.Mod.Mcu, only: [admit: 2, attach: 1, leave: 2, media_config: 1]
-```
+If there is none, install and configure a mediaserver, then declare it here.
 
-A conference is **pinned** to the media server it was created on and never
-migrates. `kelictl module reload mcu` has no in-place reload: the module is
-restarted cleanly, which **drops the live conferences**.
+### Configuring a call script to handle MCU calls
 
-Routing the DIDs is a separate, per-domain decision — the module allocates DIDs,
-it never edits `domains.toml`, so the two can drift apart (`conference.create`
-warns when they have):
+The package comes with a sample script,
+[`mcu.exs`](../../../apps/kelixip/scripts/mcu.exs), installed in `script_dir`. Copy
+it and adapt it; then point a dial rule at it, in `/etc/kelixip/domains.toml`:
 
 ```toml
 # domains.toml
@@ -61,16 +80,37 @@ name = "example.com"
   script  = "mcu.exs"       # joins an existing conference, else 404
 ```
 
-## Parameters
+A second sample, [`mcu_adhoc.exs`](../../../apps/kelixip/scripts/mcu_adhoc.exs),
+*creates* the conference on the first call to a free DID instead of answering `404`.
+
+### Activating inter participant messaging
+
+The module lets the call scripts of the participants exchange messages, as
+described in a section below — advanced call scenarios use it to implement rich
+features such as _raise hand_. The message kinds exchanged must be declared in
+config.toml:
+
+```toml
+[module.mcu]
+(...)
+message_kinds    = ["hand.raised", "hand.lowered", "floor.request", "floor.grant"]
+```
+
+### Restart kelixip
+
+`sudo systemctl restart kelixip`
+
+
+## Module configuration reference
 
 Module block — `[module.mcu]` (in `config.toml`):
 
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `vad` | name or integer | `basic` | Voice activity detection: `none` / `basic` / `full` (or `0` / `1` / `2`) |
-| `rate` | integer | `32000` | Mixer sampling rate: `8000`/`16000`/`32000`/`48000`. Participants are resampled to it — not a codec constraint |
-| `medias` | list | `["audio","video","text"]` | Which `m=` sections a conference answers. An omitted media is answered **port 0** — how you turn video or text off. Codecs *inside* a media are the media server's call, not a config key |
-| `dtmf` | boolean | `true` | Propose telephone-event (RFC 4733) on audio. A stream the mixer never encodes, hence a switch and not a codec |
+| `rate` | integer | `32000` | Mixer sampling rate: `8000`/`16000`/`32000`/`48000`. Participants are resampled to it |
+| `medias` | list | `["audio","video","text"]` | Which `m=` sections a conference answers. An omitted media is answered **port 0** — this is how video or text is turned off. Which codecs are accepted inside a media is the media server's decision, not a config key |
+| `dtmf` | boolean | `true` | Propose telephone-event (RFC 4733) on audio |
 | `max_participants` | integer | `20` | Per-conference cap; reached ⇒ the next caller gets `486` |
 | `destroy_when_empty` | boolean | `false` | Destroy a conference with its last participant |
 | `auto_layout` | boolean | `true` | The mosaic follows the number of video legs |
@@ -80,14 +120,14 @@ Module block — `[module.mcu]` (in `config.toml`):
 | `video_bitrate` | integer | `1024` | kbps, also the cap on the answer's `b=AS:` |
 | `video_intra_period` | integer | `300` | Frames between intra-frames |
 | `logo_file` | string | — | Image drawn in **every empty mosaic slot**, on every conference (a bare name under `image_dir`) |
-| `record_dir` | string | — | Directory the media server writes recordings into. No default: unset means `recording.start` refuses |
-| `image_dir` | string | — | Directory the media server reads `logo_file` (and `logo=`) from. No default |
+| `record_dir` | string | — | Directory the media server writes recordings into. Unset ⇒ `recording.start` refuses |
+| `image_dir` | string | — | Directory the media server reads `logo_file` (and `logo=`) from |
 | `did_range` | string | — | Allocation pool for a `create` that omits `did` (`"8000-8099"`) |
 | `did_ranges` | table | `{}` | Per-domain override: `{ "example.com" = "8000-8199" }` |
 | `xmlrpc_timeout_ms` | integer | `10000` | Per-RPC bound towards the media server |
 | `call_timeout_ms` | integer | `5000` | Upper bound on a facade call (ms) |
 | `shutdown_grace_ms` | integer | `5000` | Grace given to conferences at module stop |
-| `rtp_timeout_ms` | integer | `10000` | RTP inactivity watchdog — **ignored** until the server-side support of P7 (limitation L1) |
+| `rtp_timeout_ms` | integer | `10000` | RTP inactivity watchdog — **ignored**: the media server does not support it yet (limitation L1) |
 | `gc_orphans` | boolean | `true` | Sweep, at start, the conferences the media server still holds and no kelixip owns |
 | `message_kinds` | list | `[]` | The message kinds the collaboration channel accepts (see below). **Empty = the channel is closed** |
 | `message_rate` | integer | `5` | Messages per second and per participant (burst: twice that) |
@@ -97,53 +137,123 @@ Module block — `[module.mcu]` (in `config.toml`):
 `vad`, `layout_comp` and `video_size` take the same names the CLI renders and the
 control commands accept — one vocabulary, wherever a value enters.
 
-**`record_dir` and `image_dir` are paths on the media server**, not on the kelixip host
-(they are the same machine in a single-box deployment and will not be in production).
-The module only ever appends a file name it has validated: a command can choose the
-name, never the directory.
+**`record_dir` and `image_dir` are paths on the mediaserver host**, not on the kelixip host.
 
 With neither `did_range` nor a `did_ranges` entry for a domain, `did` becomes
 **mandatory** on create. An explicit DID is always honoured, including one
-outside the range. Codec names are validated at boot *and* on every create: a
-name the SDP layer cannot emit is a configuration error, never a call that fails
-later. Any unknown key in the block is refused at boot.
+outside the range.
 
-**The media address is the media server's own setting**, not kelixip's: it
-reports it on every `StartReceiving` and that is what goes in the answer's `c=`
-line. Behind a NAT, `mediaserver --public-ip <ip>` is mandatory — see
-[§1.2 of the guide](../../mcu_module_guide.md#12-configuration--modulemcu-in-configtoml).
 
-## Facades
+## Using the module in an elixip script
 
-Every one of them goes through `Kelix.Module.safe_call/3`, so a wedged or absent
-service is `{:error, :down | :timeout}` — an error the script answers with, never
-a call that hangs. **Rescue anyway**: a module whose `.beam` was never installed
-raises `UndefinedFunctionError`, and an unrescued raise leaves the caller with no
-response at all.
-
-### The call path
+The MCU module is meant to be used inside an INVITE UAS scenario. The scenario
+pulls in the MCU macros and declares that it needs the module:
 
 ```elixir
-admit(domain, req) ::
-  {:ok, Conference.t(), participant}
-  | {:error, :no_such_conference | :full | :mcu_down | :down | :timeout}
+use SIP.Scenario
+use SIP.Session.CallUAS
+use Kelix.Mod.Mcu.Script     # the admit / attach / leave / mcu_* macros
+
+uas :invite
+config uses_modules: [:mcu]
 ```
 
-Resolve the DID in `req`'s R-URI under `domain`, reserve a slot, and return the
-conference plus the participant handle. It reserves; it does not join the mix.
-The verdicts map onto `404` / `486` / `503` / `500` — that mapping is the
-**script's**, not the module's.
+`uses_modules` is what makes kelixip refuse to load the script when the module is
+not installed, instead of failing on the first INVITE.
+
+The module **decides**, the script **composes the SIP response**. So the scenario
+must also define the three functions the macros delegate to:
+
+| Function | Called by | What it does |
+|---|---|---|
+| `do_admit(sip_ctx, req, dialog_pid, domain)` | `admit/2` | maps an admission refusal onto a SIP response, returns the context |
+| `do_attach(sip_ctx)` | `attach/0` | decides which failures the call survives |
+| `do_leave(sip_ctx, reason)` | `leave/1` | releases the participant |
+
+The sample script [`mcu.exs`](../../../apps/kelixip/scripts/mcu.exs) implements the
+three of them; copy it rather than write them from scratch.
+
+
+## Macros usable in a scenario
+
+These rebind the scenario context in place, like the other DSL verbs: they return
+nothing and their verdict is read from `sip_ctx.lasterr`.
+
+### admit(req, dialog_pid)
 
 ```elixir
-attach(part)              :: :ok | {:error, term}
-leave(part, reason \\ :bye) :: :ok
+admit(req, dialog_pid)     # verdict in sip_ctx.lasterr
 ```
 
-`attach/1` is what puts the leg **in the mix** (codecs, `StartSending`) and
-belongs on the ACK: no RTP leaves the mixer before the call is established.
-`leave/2` releases the slot and is **idempotent** by contract — it tolerates an
-already-removed participant, which is why the reference script calls it from
-seven places without guarding.
+Processes an INVITE request and
+- checks that the user part of the INVITE's R-URI matches an existing conference
+  SIP number,
+- reserves a seat for the participant in that conference,
+- produces a verdict on whether the participant can join the conference or not.
+
+The verdict, in `sip_ctx.lasterr`, is:
+- `:ok` — admitted. The conference and the participant handle are stored in the
+  scenario appdata, under `:mcu_conf` and `:mcu_part`, where `attach()` and
+  `leave()` read them back;
+- `{:error, :no_such_conference}` — no running conference with a DID matching the R-URI;
+- `{:error, :full}` — the conference has no room for a new participant;
+- `{:error, :mcu_down}`, `{:error, :down}`, `{:error, :timeout}` — a technical failure;
+- `:jsr309_media_already_in_use` — this SIP session already runs a JSR 309 media
+  session (the two are mutually exclusive).
+
+The good practice is:
+- to send back a `100 Trying` **before** calling `admit()`,
+- call `admit()`,
+- if the participant can be accepted, the scenario may check in a database or using
+  an external API that this conference is open, not expired and that the participant
+  has the necessary authorization. It is a good practice to send `180 Ringing` before
+  those checks,
+- if `admit()` returns an error verdict, send back a SIP response mapping it,
+  typically `404` / `486` / `503` / `500`.
+
+An admitted leg must also be told which media server to connect to, because a
+conference is pinned to the MCU it was created on:
+
+```elixir
+conf = appdata_get(:mcu_conf)
+appdata_set(:media_conn_opts, mcu_participant: appdata_get(:mcu_part), nat_latch: true)
+appdata_set(:mediaserver_instance, Kelix.Mod.Mcu.media_config(conf))
+media_connect()
+```
+
+See the [`mcu.exs`](../../../apps/kelixip/scripts/mcu.exs) sample script for more
+explanation.
+
+### attach()
+
+```elixir
+attach()                   # verdict in sip_ctx.lasterr
+```
+
+Actually puts the participant in the mix. It is called on the ACK and works on the
+participant handle `admit()` stored in the appdata.
+
+### leave(reason)
+
+```elixir
+leave(reason)              # e.g. leave(:bye)
+```
+
+Removes the participant from the conference and releases its seat. It tolerates an
+already-removed participant, so it can be called from every teardown path.
+
+### mcu_accept_messages() / mcu_send(target, kind, payload, opts)
+
+The inter participant collaboration channel — see
+[Inter participant collaboration](#inter-participant-collaboration) below.
+
+
+## Functions exported by the module
+
+Called with their full name (`Kelix.Mod.Mcu.mute(part, :audio, true)`), on the
+participant or conference handle the appdata carries.
+
+### media_config(conf)
 
 ```elixir
 media_config(conf) :: keyword    # -> appdata_set(:mediaserver_instance, …)
@@ -152,65 +262,42 @@ media_config(conf) :: keyword    # -> appdata_set(:mediaserver_instance, …)
 The adapter + URL of the MCU this conference is pinned to. A leg must reach the
 server holding the mixer, not whatever the media pool would hand out.
 
-### In-call
+### In-call functions
 
 ```elixir
 send_fpu(part)          :: :ok | {:error, term}   # ask the MCU for an intra-frame
 mute(part, media, on?)  :: :ok | {:error, term}   # media :: :audio | :video
-kick(uid, part_id)      :: :ok | {:error, :not_found | term}
+kick(uid, part_id)      :: :ok | {:error, :not_found | term} # ask one participant to get out of a conference
 ```
 
 `kick/2` asks that leg's scenario to wind down (BYE + teardown); it does not cut
 the media under a live dialog.
 
-### Talking to the other participants
+### Inter participant collaboration
 
-```elixir
-accept_messages(part)                      :: :ok | {:error, :no_such_participant}
-send_message(part, target, kind, payload, opts \\ [])
-  :: {:ok, %{delivered: n, skipped: [%{part_id: id, reason: atom}]}} | {:error, atom}
-
-# target :: :all | :others | {:part_id, 7} | {:name, "alice"}
-```
-
-A participant's script can say something to the other participants' **scripts** — a
-raised hand, a floor-control token, "I am sharing my screen". This is a signalling
-channel between scripts: it is **not** chat. Text a human reads in the call is T.140,
-which the media server already mixes for every leg that negotiated `m=text`.
-
-The module addresses and delivers; **your script decides what a received message
-becomes** (an in-dialog MESSAGE, an INFO, a state change, nothing at all) and is
-responsible for sanitising it for whatever it puts on the wire — the module checked
-the size and the type, nothing more.
-
-Two things are required before anything flows:
-
-1. the **operator** declares the vocabulary — `message_kinds` in `[module.mcu]`. It is
-   empty by default, so the channel is closed until a deployment opens it, and a `kind`
-   outside the list is refused by name;
-2. the **script** declares that it handles messages, with `mcu_accept_messages()`, and
-   then handles `{:mcu_message, envelope}` in **every** `on_events` it goes through. A
-   leg that did not declare receives nothing (it shows up as `skipped: :not_accepted`
-   in the sender's report) — which is deliberate: an `on_events` is a `receive`, and a
-   message no clause matches would sit in that leg's mailbox for the whole call.
+The call scripts of the participants can send messages to each other, which is the
+base for a _raise hand_ indication for instance. The script activates the feature
+right after participant admission:
 
 ```elixir
 # in a uas(:invite) scenario, once the leg is admitted
 mcu_accept_messages()
-
-# and wherever the call waits
-on_events do
-  {:mcu_message, %{kind: "hand.raised", from: %{display_name: who}}} ->
-    mcu_send(:others, "floor.request", who)      # or send a SIP MESSAGE, or ignore it
-    goto in_call, "hand raised"
-
-  {:mcu_message, _envelope} -> goto in_call, "message ignored"
-end
 ```
 
-The envelope is `%{msg_id, seq, from: %{part_id, display_name}, kind, payload,
-sent_at}`. It never carries the sender's AOR — `display_name`, or the user part when
-the leg set none.
+Nothing is delivered to a leg that did not call it. Then it can send messages:
+
+```elixir
+mcu_send(target, kind, payload, opts \\ [])
+# outcome in appdata_get(:mcu_last_send):
+#   {:ok, %{delivered: n, skipped: [%{part_id: id, reason: atom}]}} | {:error, atom}
+```
+
+`kind` must be one of the `message_kinds` declared in `config.toml`, and `payload`
+is a UTF-8 binary the module does not interpret. `target` can be:
+- `:all` — all participants of the conference including me!
+- `:others` — all _other_ participants
+- `{:part_id, 7}` — a participant designated by its ID
+- `{:name, "alice"}` — a participant designated by its name
 
 What the channel guarantees, and what it does not:
 
@@ -226,11 +313,32 @@ What the channel guarantees, and what it does not:
 * forwarding a message you received? Pass its `msg_id: envelope.msg_id` — the module
   refuses to fan the same id out twice, which is what stops a rebroadcast storm.
 
-There is deliberately **no operator command and no REST endpoint** to broadcast into a
-conference: sending is a participant's act, and being in the conference is the only
-permission there is.
+Outside a scenario, the same two operations are plain functions on the participant
+handle:
 
-### Conference lifecycle (from a script)
+```elixir
+accept_messages(part)                        :: :ok | {:error, :no_such_participant}
+send_message(part, target, kind, payload, opts \\ [])
+  :: {:ok, %{delivered: n, skipped: [%{part_id: id, reason: atom}]}} | {:error, atom}
+```
+
+The script handles the incoming messages as `{:mcu_message, envelope}` events, the
+envelope carrying `msg_id`, `seq`, `from`, `kind`, `payload` and `sent_at`:
+
+```elixir
+# and wherever the call waits
+on_events do
+  {:mcu_message, %{kind: "hand.raised", from: %{display_name: who}}} ->
+    mcu_send(:others, "floor.request", who)      # or send a SIP MESSAGE, or ignore it
+    goto in_call, "hand raised"
+
+  {:mcu_message, _envelope} -> goto in_call, "unsupported message ignored"
+end
+```
+
+### Conference management
+
+A scenario can create and manipulate conferences directly.
 
 ```elixir
 create_conference(domain, opts)        :: {:ok, Conference.t()} | {:error, atom | String.t()}
@@ -240,16 +348,15 @@ destroy_conference(uid, opts)          :: :ok | {:error, atom}
 conferences(domain)                    :: [Conference.t()]
 ```
 
-`ensure_conference/3` is an **atomic get-or-create**: N simultaneous callers on
-an unknown DID get one room. `owner: :caller` (the default) is the leak guard —
-if the creating instance dies before anyone joins, the module destroys the
-**empty** conference; a conference somebody joined survives its creator.
+`ensure_conference/3` is a **get-or-create**: it creates the conference or returns
+the existing one, atomically when N callers ask for the same DID simultaneously.
 
 Options are atom-keyed keyword lists validated by exactly the same code as the
 REST body, so a conference a script creates and one REST creates are
-indistinguishable. `apps/kelixip/scripts/mcu_adhoc.exs` is this in full.
+indistinguishable. The sample script
+[`mcu_adhoc.exs`](../../../apps/kelixip/scripts/mcu_adhoc.exs) is this in full.
 
-### Reads (no RPC, straight from ETS)
+### Lookup primitives
 
 ```elixir
 conference(uid)        :: {:ok, Conference.t()} | :error
@@ -257,9 +364,10 @@ lookup_did(domain, did) :: {:ok, Conference.t()} | :error
 mediaserver(name)      :: {:ok, map} | :error
 ```
 
-## Control commands
 
-Fourteen commands, declared once and served identically by both frontals. The
+## kelictl mcu commands
+
+Fourteen commands, available identically over `kelictl` and over REST. The
 authoritative list is the running node's:
 
 ```
@@ -288,13 +396,18 @@ kelictl module list               # every loaded module, its commands and facade
 **Each of these is also an HTTP endpoint** — a resource tree
 (`/modules/mcu/conferences/:uid/participants/:part_id`) plus a flat form for a client
 that cannot build URLs. The endpoints, their arguments, their JSON payloads and their
-statuses are **[mcu-api.md](mcu-api.md)**, which is written to be enough on its own to
-implement a client.
+statuses are in **[mcu-api.md](mcu-api.md)**, which is written to be enough on its own
+to implement a client.
 
 On the CLI, arguments are `name=value` tokens — path variables are ordinary named
 arguments, so the same map reaches the module either way. A value typed
 `true`/`false` is a boolean, digits an integer, and a leading `{`/`[` is JSON
 (`muted='{"audio":true}'`).
+
+
+A conference is **pinned** to the media server it was created on and never
+migrates. `kelictl module reload mcu` has no in-place reload: the module is
+restarted cleanly, which **drops the live conferences**.
 
 ### Saying it in names, not in numbers
 
@@ -388,31 +501,14 @@ Slots:
 the speaker, which is the whole point. An empty slot reads `free`; the logo is what is
 drawn in it, not something it holds.
 
-The logo **cannot be unset** on a live conference (the media server has no reset for
-it): set another one, or destroy the conference. And the server **never reports an
-unreadable image** — it answers OK whatever the picture did, so `logo` is what you
-asked for, and the mix (or the media server's `mcu.log`) is what tells you it loaded.
-Only a failure to reach the server is reported: on `conference.update` you get the
-error, on `conference.create` it is logged and the conference is created without a logo
-(a picture must not be why a conference does not exist).
+The logo **cannot be unset** on a live conference: set another one, or destroy the
+conference.
 
-Two more things worth knowing: an **unknown or read-only field is a `400`** rather than
-a silent no-op, and **an update merges** — an omitted field is left alone, never reset.
+Failures come back as a `kelictl` exit code (`2` bad argument, `3` not found,
+`4` conflict, `5` unavailable) — see
+[administration.md](../administration.md#exit-codes); the HTTP status of each command
+is in [mcu-api.md](mcu-api.md#7-statuses-and-retry-semantics).
 
-Each command declares the status of every failure it can produce, and both
-frontals answer with it: `404` for a conference or participant that does not exist,
-`409` for an exhausted DID range, a conference that is not empty or a second recording,
-`503` when the media server does not answer, `400` for a bad argument (including a DID
-already in use). `kelictl` turns the same declaration into its exit code (`3` not found,
-`4` conflict, `5` unavailable, `2` bad argument) — see
-[administration.md](../administration.md#exit-codes); the HTTP half, per command, is in
-[mcu-api.md](mcu-api.md#7-statuses-and-retry-semantics).
-
-On the CLI each of these renders as text, from the same declaration: a list is a
-table of the columns that identify a row, and `show` is one `Label: value` per
-line, with the wire integers of §3.6 spelled out (`size=hd720p`, `comp=2x2`,
-`vad=basic`) — the API and the XML-RPC keep the numbers. What it prints is what it
-accepts: the names above are the ones read back here.
 
 ```
 $ kelictl mcu conference.list domain=example.com
@@ -453,15 +549,16 @@ in its mailbox:
 ```
 
 A third one reaches a leg **only if its script asked for it** with
-`mcu_accept_messages()` (see [Talking to the other participants](#talking-to-the-other-participants)):
+`mcu_accept_messages()` (see
+[Inter participant collaboration](#inter-participant-collaboration)):
 
 ```elixir
 {:mcu_message, envelope}            # a peer's script is saying something
 ```
 
-`:fpu_requested` is answered with an INFO carrying RFC 5168
-`picture_fast_update` (`mcu.exs` does it). A kicked leg additionally receives the
-standard `{:scenario_ctl, :shutdown, :kicked}`.
+`:fpu_requested` is answered with an INFO carrying RFC 5168 `picture_fast_update`
+([`mcu.exs`](../../../apps/kelixip/scripts/mcu.exs) does it). A kicked leg
+additionally receives the standard `{:scenario_ctl, :shutdown, :kicked}`.
 
 Node-level events (`conference.created`, `participant.joined`,
 `participant.left`, `conference.recording_started` / `_stopped`,
@@ -472,38 +569,6 @@ one line per event carrying the conference `uid`, and counted in the Prometheus 
 scripts. See [§3.1 of the guide](../../mcu_module_guide.md#31-what-a-successful-join-looks-like).
 
 ## Examples
-
-```toml
-# config.toml
-[module.mcu]
-rate             = 32000
-max_participants = 8
-did_range        = "8000-8099"
-vad              = "full"
-layout_comp      = "2x2"
-video_size       = "hd720p"
-record_dir       = "/var/lib/kelixip/rec"    # on the media server
-image_dir        = "/var/lib/kelixip/img"    # idem
-logo_file        = "ives.png"                # every empty mosaic slot
-medias           = ["audio", "video", "text"]
-dtmf             = true
-# the collaboration channel: closed until the kinds are declared
-message_kinds    = ["hand.raised", "hand.lowered", "floor.request", "floor.grant"]
-
-[mediaserver.pool.mcu1]
-module = "mendooze"
-url    = "http://10.0.0.12:9090"
-```
-
-```toml
-# domains.toml
-[[domain]]
-name = "example.com"
-
-  [[domain.call]]
-  pattern = "8XXX"
-  script  = "mcu.exs"
-```
 
 ```bash
 # create a room, then dial its DID from a phone on example.com
@@ -522,26 +587,24 @@ $ watch -n1 kelictl mcu slot.list uid=c-3f9a2b10
 $ kelictl mcu recording.stop uid=c-3f9a2b10
 ```
 
-```elixir
-# the join path, in a `uas(:invite)` scenario — apps/kelixip/scripts/mcu.exs in full
-case Kelix.Mod.Mcu.admit(sip_ctx.domain, req) do
-  {:ok, conf, part} ->
-    ctx_set(:username, conf.did)                    # local identity of this leg
-    appdata_set(:mcu_part, part)
-    appdata_set(:media_conn_opts, mcu_participant: part)
-    appdata_set(:mediaserver_instance, Kelix.Mod.Mcu.media_config(conf))
-    media_connect()
-    reply_invite(180, "Ringing")
+## REST API
 
-  {:error, :no_such_conference} -> reply(404, "Not Found")
-  {:error, :full} -> reply(486, "Busy Here")
-  {:error, :mcu_down} -> reply(503, "Service Unavailable")
-  {:error, _} -> reply(500, "Server Internal Error")
-end
-```
+Every `kelictl mcu` command above is also an HTTP endpoint under `/modules/mcu`.
+The complete wire contract — endpoints, arguments, JSON payloads, object shapes,
+vocabularies and statuses — is **[mcu-api.md](mcu-api.md)**, written to be enough on
+its own to implement a client:
 
-A script that calls this module must declare it, or it is refused at load:
+| | |
+|---|---|
+| Endpoint reference | [mcu-api.md §4](mcu-api.md#4-endpoint-reference) |
+| Object shapes | [mcu-api.md §5](mcu-api.md#5-object-shapes) |
+| Vocabularies (`layout`, mosaics, sizes, VAD) | [mcu-api.md §6](mcu-api.md#6-vocabularies) |
+| Statuses and retry semantics | [mcu-api.md §7](mcu-api.md#7-statuses-and-retry-semantics) |
+| Discovery — `GET /modules/mcu` | [mcu-api.md §8](mcu-api.md#8-discovery--get-modulesmcu) |
+| A worked session | [mcu-api.md §10](mcu-api.md#10-a-worked-session) |
 
-```elixir
-config uses_modules: [:mcu]
-```
+The address, the port and the authentication of the REST frontal are core settings
+(`[control_api]` in `config.toml`) and are documented in
+[rest-api.md](../rest-api.md#enabling--authentication-boundary-concern).
+
+
