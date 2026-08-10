@@ -451,10 +451,11 @@ defmodule Kelix.Mod.RegistrarTest do
         @domain
       )
 
-      assert {:ok, %Peer{uris: [uri]}} = Registrar.targets(@domain, invite("alice"))
+      assert {:ok, %Peer{uris: [[uri]]}} = Registrar.targets(@domain, invite("alice"))
 
       # The contact itself, not a request built around it — that is what a B2BUA
-      # peer takes (design §3.2).
+      # peer takes (design §3.2). One group of one: a single contact is a rung
+      # of one, which is what makes the shape uniform.
       assert %SIP.Uri{} = uri
       assert uri.domain == "10.0.0.9"
       # …carrying the real source and the connection it registered over, which
@@ -464,13 +465,16 @@ defmodule Kelix.Mod.RegistrarTest do
       assert uri.tp_pid == flow
     end
 
-    test "one URI per live contact" do
+    # Both stated the same preference (none), so they are ONE group: RFC 3261
+    # §16.6 rings equal-q contacts together, which is a subscriber's desk phone
+    # and softphone ringing at the same time rather than one after the other.
+    test "contacts of equal q form a single group, one URI each" do
       Registrar.save(register("alice", "10.0.0.9"), @domain)
       Registrar.save(register("alice", "10.0.0.42"), @domain)
 
-      assert {:ok, %Peer{uris: uris}} = Registrar.targets(@domain, invite("alice"))
-      assert length(uris) == 2
-      assert Enum.sort(Enum.map(uris, & &1.domain)) == ["10.0.0.42", "10.0.0.9"]
+      assert {:ok, %Peer{uris: [group]}} = Registrar.targets(@domain, invite("alice"))
+      assert length(group) == 2
+      assert Enum.sort(Enum.map(group, & &1.domain)) == ["10.0.0.42", "10.0.0.9"]
     end
 
     # Registration order is deliberately the reverse of the wanted order, so a
@@ -479,7 +483,8 @@ defmodule Kelix.Mod.RegistrarTest do
       Registrar.save(register("alice", "10.0.0.9", q: 0.3, callid: "c1"), @domain)
       Registrar.save(register("alice", "10.0.0.42", q: 0.9, callid: "c2"), @domain)
 
-      assert {:ok, %Peer{uris: [first, second]}} = Registrar.targets(@domain, invite("alice"))
+      # Two preferences, two groups, tried in that order.
+      assert {:ok, %Peer{uris: [[first], [second]]}} = Registrar.targets(@domain, invite("alice"))
       assert first.domain == "10.0.0.42"
       assert second.domain == "10.0.0.9"
     end
@@ -491,14 +496,14 @@ defmodule Kelix.Mod.RegistrarTest do
       Registrar.save(register("alice", "10.0.0.9", q: 0.3, callid: "c1"), @domain)
       Registrar.save(register("alice", "10.0.0.42", callid: "c2"), @domain)
 
-      assert {:ok, %Peer{uris: [first, _]}} = Registrar.targets(@domain, invite("alice"))
+      assert {:ok, %Peer{uris: [[first] | _]}} = Registrar.targets(@domain, invite("alice"))
       assert first.domain == "10.0.0.42"
     end
 
     test "an unparsable q is read as absent, not as a failure" do
       Registrar.save(register("alice", "10.0.0.9", q: "high", callid: "c1"), @domain)
 
-      assert {:ok, %Peer{uris: [uri]}} = Registrar.targets(@domain, invite("alice"))
+      assert {:ok, %Peer{uris: [[uri]]}} = Registrar.targets(@domain, invite("alice"))
       assert uri.domain == "10.0.0.9"
     end
 
@@ -519,7 +524,7 @@ defmodule Kelix.Mod.RegistrarTest do
     test "binding-only parameters are not carried onto the dialable URI" do
       Registrar.save(register("alice", "10.0.0.9", q: 0.7), @domain)
 
-      assert {:ok, %Peer{uris: [uri]}} = Registrar.targets(@domain, invite("alice"))
+      assert {:ok, %Peer{uris: [[uri]]}} = Registrar.targets(@domain, invite("alice"))
       assert SIP.Uri.get_uri_param(uri, "q") == {:no_such_param, nil}
       assert SIP.Uri.get_uri_param(uri, "expires") == {:no_such_param, nil}
       # The address itself is untouched.
@@ -530,7 +535,7 @@ defmodule Kelix.Mod.RegistrarTest do
     test "the AOR is matched case-insensitively, like every other lookup" do
       Registrar.save(register("alice", "10.0.0.9"), @domain)
 
-      assert {:ok, %Peer{uris: [_uri]}} = Registrar.targets(@domain, invite("ALICE"))
+      assert {:ok, %Peer{uris: [[_uri]]}} = Registrar.targets(@domain, invite("ALICE"))
     end
 
     test "an AOR with no live binding is :notfound (the script answers 480)" do
@@ -545,15 +550,16 @@ defmodule Kelix.Mod.RegistrarTest do
     # The peer comes back ready to hand to b2bua_forward/3 — the script has no
     # policy left to restate. `ruri: :peer` because a registered contact is
     # reached by asking for it by name; `use_srv: false` because it already
-    # carries the flow it registered over; `:serial` because a subscriber's
-    # devices are alternatives, in the order the q said.
+    # carries the flow it registered over; `:parallel` because a subscriber's
+    # devices of equal preference ring together and the q groups are walked in
+    # order (RFC 3261 §16.6).
     test "the peer is ready to dial, with no policy left for the script to add" do
       Registrar.save(register("alice", "10.0.0.9"), @domain)
 
       assert {:ok, peer} = Registrar.targets(@domain, invite("alice"))
       assert peer.ruri == :peer
       assert peer.use_srv == false
-      assert peer.fork == :serial
+      assert peer.fork == :parallel
       assert peer.provider == nil
     end
 
@@ -572,7 +578,7 @@ defmodule Kelix.Mod.RegistrarTest do
         @domain
       )
 
-      assert {:ok, %Peer{uris: [uri]}} = Registrar.targets(@domain, invite("alice"))
+      assert {:ok, %Peer{uris: [[uri]]}} = Registrar.targets(@domain, invite("alice"))
       selected = SIP.Transport.Selector.select_transport(uri)
 
       assert selected.tp_pid == flow

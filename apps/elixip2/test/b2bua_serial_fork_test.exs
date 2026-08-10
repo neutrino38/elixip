@@ -71,7 +71,8 @@ defmodule SIP.Test.B2bua.SerialFork do
     assert first.ruri.domain == "srl1a.example.com"
 
     leg_before = B2bua.outbound_leg(ctx)
-    assert leg_before.untried == [target("srl1b")]
+    # A rung per target: a serial hunt is the degenerate parallel one (§3.2).
+    assert leg_before.untried == [[target("srl1b")]]
 
     ctx = relay_final(ctx, 486)
 

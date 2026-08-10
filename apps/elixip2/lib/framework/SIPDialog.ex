@@ -86,6 +86,14 @@ defmodule SIP.Dialog do
       declared here rather than inferred from the first `fork_branch/2`: the
       first branch goes out with the dialog, and its failure would otherwise
       have torn the dialog down before anyone could ask for a second.
+
+      A **list of targets** means the same thing and arms them as well: the rest
+      of a parallel rung, sent from inside the dialog's `init/1`. Passing them
+      here rather than calling `fork_branch/2` right after is not a shortcut —
+      a branch armed from the outside races the first branch's own response, and
+      a final arriving in between finds a rung of one and is relayed as the
+      answer while the other phones are about to ring. Each extra branch is
+      announced as `{:onnewbranch, :ok, transaction_pid}`.
   """
   @spec start_dialog(map(), integer(), :inbound | :outbound, boolean(), keyword()) ::
           {:error, any()} | {:ok, pid(), tuple()}
@@ -300,10 +308,17 @@ defmodule SIP.Dialog do
   `:already_established` once a branch has won, since there is then nothing left
   to hunt.
 
+  A **list** of targets is a parallel rung and is armed in one go, answering
+  `{:ok, [transaction_pid]}`. That atomicity is the point: branches armed one
+  call at a time race their own first response, and a final arriving in between
+  finds a rung of one and is read as the rung's answer. `{:error, reason}` comes
+  back only when not one of them could be armed.
+
   Who calls it: the session layer, which owns the target list and the retry
   policy (`%SIP.B2bua.Peer{}`). This layer owns only the branch set.
   """
-  @spec fork_branch(pid(), SIP.Uri.t()) :: {:ok, pid()} | {:error, any()}
+  @spec fork_branch(pid(), SIP.Uri.t() | [SIP.Uri.t()]) ::
+          {:ok, pid()} | {:ok, [pid()]} | {:error, any()}
   def fork_branch(dialog_pid, target) when is_pid(dialog_pid) do
     GenServer.call(dialog_pid, {:fork_branch, target})
   end

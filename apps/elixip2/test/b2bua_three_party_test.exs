@@ -46,13 +46,13 @@ defmodule SIP.Test.B2bua.ThreeParty do
 
   # Spawn one B2BUA instance and arm the dispatcher so the next inbound INVITE is
   # handed to it — the same route a `sub_fsm` child takes.
-  defp arm_b2bua(module) do
+  defp arm_b2bua(module, peer \\ @callee_uri) do
     test_pid = self()
 
     {pid, ref} =
       spawn_monitor(fn ->
         outcome =
-          SIP.Scenario.Runner.run_instance(module, config_overrides: [peer: @callee_uri])
+          SIP.Scenario.Runner.run_instance(module, config_overrides: [peer: peer])
 
         send(test_pid, {:instance_done, outcome})
       end)
@@ -63,6 +63,14 @@ defmodule SIP.Test.B2bua.ThreeParty do
 
     on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
     {pid, ref}
+  end
+
+  defp flush_mailbox do
+    receive do
+      _ -> flush_mailbox()
+    after
+      0 -> :ok
+    end
   end
 
   # Push an INVITE into the stack through the caller's transport, exactly as a
@@ -152,6 +160,66 @@ defmodule SIP.Test.B2bua.ThreeParty do
     # 486, not a code of our own invention — the caller learns the callee is busy.
     assert_receive 486, 5_000
     assert_receive {:instance_done, :ok}, 20_000
+  end
+
+  # Four parties: the caller, the B2BUA and TWO callees rung at once (§3.2). The
+  # scenario is the same file — parallel forking is a property of the peer, not
+  # of the script, which is the whole reason the leg abstraction was kept.
+  #
+  # The assertion that matters is the last one. Once a branch wins, everything
+  # keyed on "the attempt" must point at IT: the caller's ACK is relayed onto the
+  # winning client transaction, and if it went to the branch dialled first the
+  # winner would never be acknowledged and would retransmit its 200 (timer A)
+  # until the call collapsed.
+  @tag timeout: 120_000
+  test "two callees rung at once: the first to answer takes the call, and gets the ACK",
+       %{scenario: module} do
+    caller = peer("caller")
+    calleea = peer("calleea")
+    calleeb = peer("calleeb")
+
+    :ok = GenServer.call(caller.tp_pid, :settestapp)
+    :ok = GenServer.call(calleea.tp_pid, :settestapp)
+    :ok = GenServer.call(calleeb.tp_pid, :settestapp)
+
+    # The peers are named instances shared by every test in this file, and the
+    # caller side reports bare status codes: an earlier test's 200 would satisfy
+    # an assertion here. Start from an empty mailbox.
+    flush_mailbox()
+
+    rung = %SIP.B2bua.Peer{
+      uris: [
+        [
+          "sip:bob@calleea.example.com;unittest=calleea",
+          "sip:bob@calleeb.example.com;unittest=calleeb"
+        ]
+      ],
+      fork: :parallel
+    }
+
+    {_pid, _ref} = arm_b2bua(module, rung)
+    {invite, _branch} = caller_invites(caller)
+
+    assert_receive 100, 5_000
+
+    rung_domains =
+      for _ <- 1..2, into: MapSet.new() do
+        assert_receive {:invite_sent, fwd}, 5_000
+        fwd.ruri.domain
+      end
+
+    assert rung_domains == MapSet.new(["calleea.example.com", "calleeb.example.com"])
+
+    # The second device picks up. The first is CANCELled by the dialog, and the
+    # caller hears one 200 — not one per branch.
+    GenServer.cast(calleeb.tp_pid, {:simulate, 200, 100})
+    assert_receive 200, 5_000
+
+    send(caller.tp_pid, {:recv, caller_ack(invite)})
+
+    # Acknowledged: the winner stops retransmitting, so no second 200 reaches
+    # the caller.
+    refute_receive 200, 2_000
   end
 
   # The ACK of a 2xx is a transaction of its own and carries a FRESH branch

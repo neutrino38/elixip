@@ -159,7 +159,12 @@ defmodule SIP.Transac.Common do
     )
 
     cond do
-      state.state in [:sending, :proceeding] ->
+      # `:cancelling` belongs here as much as the other two, and leaving it out
+      # dropped exactly the response RFC 3261 §16.7 is about: a 2xx crossing our
+      # CANCEL. The callee picked up, we ignored their answer, and they were left
+      # in a call nobody would ever ACK or BYE. Cancelling asks; it does not
+      # decide, and the transaction is over only when a final says so.
+      state.state in [:sending, :proceeding, :cancelling] ->
         send(state.app, {:response, sip_resp, self()})
 
         Logger.debug(
@@ -236,7 +241,12 @@ defmodule SIP.Transac.Common do
   # UAC: Handle 4xx, 5xx, 6xx responses
   def handle_UAS_sip_response(state, sipmsg) when SIP.Msg.Ops.is_failure_resp(sipmsg) do
     cond do
-      state.state in [:sending, :proceeding] ->
+      # `:cancelling` included, for the response a CANCEL exists to obtain: the
+      # 487 (RFC 3261 §9.1). Without it a cancelled INVITE was never ACKed —
+      # against §17.1.1.2, which requires an ACK for every non-2xx final — and
+      # the layer above was never told the branch had ended, so a forked dialog
+      # waited on a branch that was already over and a leg leaked until timer B.
+      state.state in [:sending, :proceeding, :cancelling] ->
         # Send the message to the application layer
         send(state.app, {:response, sipmsg, self()})
 

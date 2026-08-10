@@ -52,6 +52,18 @@ defmodule SIP.DialogImpl do
     # comes back with a non-2xx final (there may be another target to try).
     branches: %{},
     forking: false,
+    # The branches we CANCELled: the losers of a fork that has already produced
+    # its answer, and whatever was still ringing when a 6xx ended the hunt. What
+    # comes back from them is ours to clean up — a 487, or a 2xx that crossed our
+    # CANCEL (RFC 3261 §16.7) — and never the application's business.
+    fork_losers: MapSet.new(),
+    # The best final response withheld while other branches of the same rung were
+    # still pending (§16.7 aggregation). `nil` while nothing has been withheld,
+    # which is the serial case: one live branch, its final surfaced as it arrives.
+    fork_best: nil,
+    # Transactions this dialog runs for ITSELF — the BYE that buries a late 2xx.
+    # Their responses are dialog-internal and never surface either.
+    internal_trans: MapSet.new(),
     state: :initial,
     # If we should output debug logs for this dialog
     debuglog: true,
@@ -309,9 +321,38 @@ defmodule SIP.DialogImpl do
     end
   end
 
+  # The rest of a PARALLEL rung (`fork: [uri, …]`), armed from inside init/1.
+  #
+  # It cannot be left to the application: between the dialog starting and the
+  # application's `fork_branch/2` call, the first branch's own response may
+  # already have arrived and been surfaced — a rung whose siblings do not exist
+  # yet is a rung whose first failure looks final. init/1 runs before any message
+  # is handled, so arming here is the only placement that closes that window.
+  #
+  # Each branch is announced, since the application correlates on transaction pids.
+  defp arm_initial_rung(state, targets) when is_list(targets) do
+    Enum.reduce(targets, state, fn target, st ->
+      case arm_branch(st, target) do
+        {{:ok, trans_pid}, st} ->
+          send_to_app(st, {:onnewbranch, :ok, trans_pid})
+          st
+
+        {{:error, reason}, st} ->
+          send_to_app(st, {:onnewbranch, :error, reason})
+          st
+      end
+    end)
+  end
+
+  defp arm_initial_rung(state, _forking), do: state
+
   # One more branch of the initial request, toward `target`. Backs
   # `handle_call({:fork_branch, …})`; see SIP.Dialog.fork_branch/2 for the why.
-  defp start_branch(state = %SIP.DialogImpl{}, target) do
+  #
+  # `fork_best` is cleared here: arming a branch opens a new rung, and the finals
+  # withheld while the previous one was running have been surfaced already (the
+  # rung ended, which is what let the application ask for this one).
+  defp arm_branch(state = %SIP.DialogImpl{}, target) do
     req = %{state.msg | ruri: target}
 
     case SIP.Transac.start_uac_transaction(req, state.dialogtimeout) do
@@ -320,11 +361,12 @@ defmodule SIP.DialogImpl do
           %SIP.DialogImpl{
             state
             | forking: true,
+              fork_best: nil,
               branches: Map.put(state.branches, trans_pid, target)
           }
           |> add_transaction(trans_pid, modmsg, uac_module(modmsg))
 
-        {:reply, {:ok, trans_pid}, newstate}
+        {{:ok, trans_pid}, newstate}
 
       {code, _extra} ->
         Logger.warning(
@@ -333,10 +375,10 @@ defmodule SIP.DialogImpl do
           message: "Failed to start a fork branch toward #{target}: #{inspect(code)}"
         )
 
-        {:reply, {:error, code}, state}
+        {{:error, code}, state}
 
       err ->
-        {:reply, {:error, err}, state}
+        {{:error, err}, state}
     end
   end
 
@@ -560,7 +602,7 @@ defmodule SIP.DialogImpl do
       tag: tag,
       # Declared up front: the first branch goes out with the dialog, so its
       # failure must not tear the dialog down when more targets are waiting.
-      forking: forking,
+      forking: forking != false,
       dialogtimeout: timeout,
       debuglog: debug,
       transactions: %{},
@@ -579,11 +621,12 @@ defmodule SIP.DialogImpl do
           send_to_app(state, {:onnewdialog, :ok, transaction_pid})
 
           branches =
-            if forking, do: %{transaction_pid => modmsg.ruri}, else: state.branches
+            if forking != false, do: %{transaction_pid => modmsg.ruri}, else: state.branches
 
           %SIP.DialogImpl{state | msg: modmsg, branches: branches}
           |> add_transaction(transaction_pid, modmsg, uac_module(modmsg))
           |> arm_expiration_timer(modmsg)
+          |> arm_initial_rung(forking)
           # This returns { :ok, newstate } as expected by init()
           |> check_closing_transaction(modmsg, transaction_pid)
 
@@ -814,6 +857,11 @@ defmodule SIP.DialogImpl do
   # `send_in_dialog_request/2`: that cap bounds in-dialog traffic, while these are
   # attempts at the *same* request, and a hunt down a long contact list is exactly
   # what it must not truncate.
+  # A LIST of targets arms them all in one call, and that atomicity is the point:
+  # a parallel rung armed one target at a time races its own first branch. A 404
+  # arriving between two arms finds an empty branch table, reads as "the last
+  # branch died", and is relayed to the caller while two more phones are about to
+  # ring. Inside one handle_call nothing can interleave.
   def handle_call({:fork_branch, target}, _from, state) do
     cond do
       state.direction != :outbound ->
@@ -826,8 +874,17 @@ defmodule SIP.DialogImpl do
       is_nil(state.msg) ->
         {:reply, {:error, :no_initial_request}, state}
 
+      is_list(target) ->
+        {results, state} = Enum.map_reduce(target, state, fn t, st -> arm_branch(st, t) end)
+
+        case Enum.split_with(results, &match?({:ok, _}, &1)) do
+          {[], [{:error, reason} | _]} -> {:reply, {:error, reason}, state}
+          {armed, _failed} -> {:reply, {:ok, Enum.map(armed, fn {:ok, pid} -> pid end)}, state}
+        end
+
       true ->
-        start_branch(state, target)
+        {ret, state} = arm_branch(state, target)
+        {:reply, ret, state}
     end
   end
 
@@ -1062,15 +1119,13 @@ defmodule SIP.DialogImpl do
   # counted by SIP.DialogImpl.KeepAlive, which tears the dialog down after
   # several, and surfacing it here would put a 408 in the application's mailbox
   # for a request it never sent.
+  # Through the same door as a response off the wire — which is what makes a
+  # branch dying on timer B an ordinary branch failure: withheld while its
+  # siblings are still ringing, aggregated with them, absorbed if it belongs to a
+  # branch we had already cancelled.
   defp notify_transaction_timeout(state, req, transact_pid, module)
        when module in [SIP.ICT, SIP.NICT] do
-    rsp = timeout_response(req)
-
-    unless KeepAlive.response?(state, rsp) do
-      send_to_app(state, {408, rsp, transact_pid, self()})
-    end
-
-    state
+    deliver_response(state, timeout_response(req), transact_pid)
   end
 
   defp notify_transaction_timeout(state, _req, _transact_pid, _module), do: state
@@ -1097,6 +1152,228 @@ defmodule SIP.DialogImpl do
   defp adopts_totag?(%SIP.DialogImpl{forking: true}, rsp), do: rsp.response in 200..299
   defp adopts_totag?(_state, rsp), do: rsp.response < 300
 
+  # ── Fork responses: what the application sees (design §3.3, RFC 3261 §16.7) ──
+
+  # The single door responses leave by. Forking decides WHAT the application is
+  # owed — a branch's own final, the whole rung's best, or nothing at all — and
+  # the keepalive filter decides whether it is told anything.
+  defp deliver_response(state, rsp, tid) do
+    {state, delivery} = fork_delivery(state, rsp, tid)
+
+    case delivery do
+      :withhold ->
+        state
+
+      {:send, out} ->
+        if KeepAlive.response?(state, rsp) do
+          # A response to our own OPTIONS keepalive is dialog-internal: the peer
+          # is alive, so reset the missed-keepalive counter and say nothing.
+          %SIP.DialogImpl{state | missedkeepalive: 0}
+        else
+          send_to_app(state, {out.response, out, tid, self()})
+          state
+        end
+    end
+  end
+
+  # An unforked dialog has no branches and falls straight through to {:send, rsp},
+  # which is what it has always done.
+  defp fork_delivery(state, rsp, tid) do
+    cond do
+      # Our own BYE burying a late 2xx: what it answers is nobody's business.
+      MapSet.member?(state.internal_trans, tid) ->
+        {state, :withhold}
+
+      MapSet.member?(state.fork_losers, tid) ->
+        late_branch_response(state, rsp, tid)
+
+      not Map.has_key?(state.branches, tid) ->
+        {state, {:send, rsp}}
+
+      # Provisionals go up from every branch as they are: a B2BUA collapses them
+      # into its single inbound dialog (§3.2), and a 180 says something true
+      # about the call even when another branch ends up winning it.
+      rsp.response < 200 ->
+        {state, {:send, rsp}}
+
+      # The winner. Cancelling the rest is `adopt_winning_branch/2`, one layer
+      # down, where the dialog also adopts the to-tag and the target.
+      rsp.response in 200..299 ->
+        {state, {:send, rsp}}
+
+      # A global refusal ends the hunt on the spot (RFC 3261 §16.7): whatever is
+      # still ringing is cancelled and the 6xx goes up as it stands.
+      rsp.response >= 600 ->
+        {cancel_losing_branches(state, tid), {:send, rsp}}
+
+      true ->
+        rest = Map.delete(state.branches, tid)
+
+        if map_size(rest) == 0 do
+          # The rung is over. With nothing withheld — the serial case, one live
+          # branch — this is that branch's own final, verbatim; otherwise the
+          # caller gets the best the rung produced.
+          {%SIP.DialogImpl{state | branches: rest, fork_best: nil},
+           {:send, best_final(state.fork_best, rsp)}}
+        else
+          {%SIP.DialogImpl{
+             state
+             | branches: rest,
+               fork_best: best_final(state.fork_best, rsp)
+           }, :withhold}
+        end
+    end
+  end
+
+  # A branch we cancelled speaking up. A provisional says nothing — it is still
+  # winding down. A non-2xx final is the 487 our CANCEL asked for. A 2xx is the
+  # race RFC 3261 §16.7 leaves to the UAC: the callee picked up as our CANCEL
+  # crossed the network, and someone owes them an ACK and a BYE. A proxy cannot
+  # do it (its caller does); a B2BUA must, and it stays invisible above.
+  defp late_branch_response(state, rsp, tid) do
+    cond do
+      rsp.response < 200 ->
+        {state, :withhold}
+
+      rsp.response in 200..299 and match?([_, :INVITE], rsp.cseq) ->
+        {state |> forget_loser(tid) |> bury_late_answer(rsp, tid), :withhold}
+
+      true ->
+        {forget_loser(state, tid), :withhold}
+    end
+  end
+
+  defp forget_loser(state, tid),
+    do: %SIP.DialogImpl{state | fork_losers: MapSet.delete(state.fork_losers, tid)}
+
+  defp bury_late_answer(state, rsp, tid) do
+    Logger.info(
+      dialogpid: "#{inspect(self())}",
+      module: __MODULE__,
+      message: "Branch #{inspect(tid)} answered #{rsp.response} after losing the fork: ACK + BYE"
+    )
+
+    protect(fn -> SIP.Transac.ack_uac_transaction(tid) end)
+    send_late_bye(state, rsp, tid)
+  end
+
+  # The BYE of a call we never told anyone about, so it is deliberately NOT a
+  # dialog: nothing above knows this callee, nothing will ever send anything else
+  # to them, and a second dialog process would only be there to be torn down. A
+  # bare client transaction, its answer swallowed.
+  defp send_late_bye(state, rsp, tid) do
+    bye = late_bye_request(state, rsp, tid)
+    state = %SIP.DialogImpl{state | cseq: state.cseq + 1}
+
+    case SIP.Transac.start_uac_transaction(bye, 15) do
+      {:ok, trans_pid, modmsg} ->
+        %SIP.DialogImpl{state | internal_trans: MapSet.put(state.internal_trans, trans_pid)}
+        |> add_transaction(trans_pid, modmsg, uac_module(modmsg))
+
+      other ->
+        Logger.warning(
+          dialogpid: "#{inspect(self())}",
+          module: __MODULE__,
+          message: "Could not BYE a late 2xx: #{inspect(other)}"
+        )
+
+        state
+    end
+  end
+
+  # Built from the INVITE we sent — same Call-ID, From and From-tag, next CSeq —
+  # and from the late answer for everything that identifies the callee: their
+  # To-tag, their Contact, their route set.
+  defp late_bye_request(state, rsp, tid) do
+    base =
+      state.msg
+      |> Map.merge(%{
+        method: :BYE,
+        ruri: late_target(state, rsp, tid),
+        to: rsp.to,
+        cseq: [state.cseq, :BYE],
+        body: [],
+        contentlength: 0
+      })
+      |> Map.delete(:contenttype)
+
+    case Map.get(rsp, :recordroute) do
+      rs when is_binary(rs) and rs != "" -> Map.put(base, :route, rs)
+      [_ | _] = rs -> Map.put(base, :route, rs)
+      _ -> Map.delete(base, :route)
+    end
+  end
+
+  # Where that BYE goes: the Contact of the late 2xx (RFC 3261 §12.1.2) reached
+  # over the flow the branch used. The Contact carries an identity and no
+  # destination; the branch's request carries the RESOLVED one, which for a
+  # registered contact behind NAT is the only address that works.
+  defp late_target(state, rsp, tid) do
+    branch_ruri =
+      case Map.get(state.transactions, tid) do
+        %{req: %{ruri: %SIP.Uri{} = ruri}} -> ruri
+        _ -> state.msg.ruri
+      end
+
+    case Map.get(rsp, :contact) do
+      %SIP.Uri{} = uri -> stamp_flow(uri, branch_ruri)
+      [%SIP.Uri{} = uri | _] -> stamp_flow(uri, branch_ruri)
+      _ -> branch_ruri
+    end
+  end
+
+  defp stamp_flow(uri, %SIP.Uri{} = flow) do
+    %SIP.Uri{
+      uri
+      | destip: flow.destip,
+        destport: flow.destport,
+        tp_module: flow.tp_module,
+        tp_pid: flow.tp_pid
+    }
+  end
+
+  # Which of two finals answers the caller better (RFC 3261 §16.7 step 6): a 6xx
+  # first — a global refusal outranks anything a single device said — then the
+  # lowest code, except among 4xx where the ones that ASK FOR SOMETHING
+  # (credentials, a media type, an extension, another address) are preferred:
+  # a caller can act on those, and cannot act on "486 Busy Here".
+  @actionable_4xx [401, 407, 415, 420, 484]
+
+  defp best_final(nil, rsp), do: rsp
+  defp best_final(rsp, nil), do: rsp
+
+  defp best_final(a, b) do
+    cond do
+      global?(a) and not global?(b) -> a
+      global?(b) and not global?(a) -> b
+      class_of(a) == 4 and class_of(b) == 4 -> best_4xx(a, b)
+      a.response <= b.response -> a
+      true -> b
+    end
+  end
+
+  defp best_4xx(a, b) do
+    cond do
+      a.response in @actionable_4xx and b.response not in @actionable_4xx -> a
+      b.response in @actionable_4xx and a.response not in @actionable_4xx -> b
+      a.response <= b.response -> a
+      true -> b
+    end
+  end
+
+  defp global?(rsp), do: rsp.response >= 600
+  defp class_of(rsp), do: div(rsp.response, 100)
+
+  # Talking to a transaction that is, by construction, in a race with us: it may
+  # already be gone, and its exit must not become the dialog's.
+  defp protect(fun) do
+    fun.()
+  catch
+    :exit, reason ->
+      Logger.debug(module: __MODULE__, message: "transaction call failed: #{inspect(reason)}")
+      :error
+  end
+
   # A branch answered 2xx: it IS the dialog now. Cancel whatever else is still
   # ringing (RFC 3261 §16.7 / kamailio t_cancel_branches) and pin the winner's
   # target onto the initial request — `send_in_dialog_request/2` reads the
@@ -1108,7 +1385,20 @@ defmodule SIP.DialogImpl do
     do: state
 
   defp adopt_winning_branch(state, winner) do
-    losers = state.branches |> Map.keys() |> List.delete(winner)
+    msg =
+      case Map.get(state.branches, winner) do
+        %SIP.Uri{} = target -> %{state.msg | ruri: target}
+        _ -> state.msg
+      end
+
+    %SIP.DialogImpl{cancel_losing_branches(state, winner) | forking: false, msg: msg}
+  end
+
+  # CANCEL every branch but `keep` and remember them: a cancelled branch still
+  # owes us a final (a 487, or the 2xx that crossed our CANCEL), and that final
+  # is ours to absorb rather than the application's to read.
+  defp cancel_losing_branches(state, keep) do
+    losers = state.branches |> Map.keys() |> List.delete(keep)
 
     Enum.each(losers, fn pid ->
       Logger.debug(
@@ -1117,16 +1407,15 @@ defmodule SIP.DialogImpl do
         message: "Cancelling losing fork branch #{inspect(pid)}"
       )
 
-      SIP.Transac.cancel_uac_transaction(pid)
+      protect(fn -> SIP.Transac.cancel_uac_transaction(pid) end)
     end)
 
-    msg =
-      case Map.get(state.branches, winner) do
-        %SIP.Uri{} = target -> %{state.msg | ruri: target}
-        _ -> state.msg
-      end
-
-    %SIP.DialogImpl{state | forking: false, branches: %{}, msg: msg}
+    %SIP.DialogImpl{
+      state
+      | branches: %{},
+        fork_best: nil,
+        fork_losers: Enum.into(losers, state.fork_losers)
+    }
   end
 
   defp add_totag(state, totag) do
@@ -1361,17 +1650,11 @@ defmodule SIP.DialogImpl do
       if Map.has_key?(state.transactions, transact_pid) do
         {_rc, totag} = SIP.Uri.get_uri_param(rsp.to, "tag")
 
-        # A response to our own OPTIONS keepalive is dialog-internal: the peer
-        # is alive, so reset the missed-keepalive counter and do NOT surface the
-        # response to the app. Any other response is forwarded as usual. In both
-        # cases the transaction is still cleaned up below.
-        state =
-          if KeepAlive.response?(state, rsp) do
-            %SIP.DialogImpl{state | missedkeepalive: 0}
-          else
-            send_to_app(state, {rsp.response, rsp, transact_pid, self()})
-            state
-          end
+        # What the application is owed, decided in one place (`deliver_response/3`):
+        # a keepalive answer is dialog-internal, and so is everything a fork
+        # withholds or absorbs. The transaction is still cleaned up below either
+        # way.
+        state = deliver_response(state, rsp, transact_pid)
 
         # Only dialog-establishing responses set the dialog's remote tag:
         # provisional (1xx with a to-tag) for early dialogs and 2xx for confirmed

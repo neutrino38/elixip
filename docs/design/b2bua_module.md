@@ -222,8 +222,13 @@ branches are URI-level and SRV failover happens per branch below TM.
     refusal (RFC 3261 §16.7), and ringing a subscriber's other phones after
     they pressed Decline is what they asked not to happen. Not 3xx either — a
     redirect names new targets, which is its own handling (P4).
-  - `:parallel` (P4): send all branches at once; first 2xx/6xx wins, pending
-    branches are CANCELled.
+  - `:parallel` (delivered): each entry of `uris` is a **rung** — a bare URI is
+    rung alone, a nested list is rung all at once. The rungs are walked in
+    order, so `:serial` is the degenerate case (every rung holds one target)
+    and the two share their machinery. The first 2xx wins its rung and the
+    losers are CANCELled; a 6xx ends the hunt on the spot; a rung all of whose
+    branches fail hands the caller the best of them (§16.7) and `retry_on`
+    decides whether the next rung is tried.
 - `trunk_pid` — reserved: attaches the peer to a trunk process that will hold
   reachability state (OPTIONS pinging, blacklisting). Ignored in v1.
 - `outbound_proxy` — the global `:proxyuri` application env is honored as
@@ -310,17 +315,18 @@ group of equal q, serial across groups in descending q. Two consequences:
   **top** (RFC 3261 §20.10: no stated preference is not last preference —
   otherwise the single-contact case would sort below anyone who asked for 0.3),
   and an unparsable one is read as absent rather than raising;
-- phasing: **P2a (delivered)** dials the highest-q contact, which is the whole
-  call for a single-contact AOR. **P2b** turns the rest of the ordered list
-  into serial branches; **P4** adds parallel forking *within* each q group
-  (first 2xx wins, losers CANCELled). Both use the branch mechanics of §3.3 —
-  the fork never creates extra legs, so the script above does not change shape
-  when they land.
+- phasing: **P2a** dialled the highest-q contact, which is the whole call for a
+  single-contact AOR. **P2b** turned the rest of the ordered list into serial
+  branches; **P4 (delivered)** groups the contacts by q and rings each group at
+  once. `targets/2` therefore returns `uris` as a list of **groups** and
+  `fork: :parallel`, and the script above did not change shape when it landed —
+  which is what the leg abstraction of §3.3 was for.
 
 When every branch fails, the B2BUA relays one final response to the caller: a
-6xx ends the hunt immediately (RFC 3261 §16.7); otherwise the serial hunt
-relays the **last** branch's final response (P2), upgraded to a best-response
-selection when parallel groups land (P4).
+6xx ends the hunt immediately (RFC 3261 §16.7); otherwise the caller gets the
+best response of the rung that just fell (§16.7 step 6). A rung of one
+degenerates to "that branch's final", which is what the serial hunt always
+relayed — one rule, not two (§3.3, as built).
 
 One genuine simplification over a forking proxy: a proxy forwards the
 branches' multiple early dialogs downstream (one 180 per to-tag) and the
@@ -374,6 +380,34 @@ the dialog:
   failures triggered the next branch instead of being surfaced);
 - serial mode is the same machinery armed lazily: next branch on failure,
   same Call-ID/from-tag/CSeq, fresh transaction.
+
+#### As built (P4, 2026-08-10)
+
+Two things the sketch above did not have, both found by writing it:
+
+- **one rule, not a parallel mode.** A non-2xx final is withheld while a
+  sibling branch is still pending, and the best of the rung (§16.7 step 6) is
+  surfaced when the last one falls. A serial hunt never has more than one live
+  branch, so its single branch is always the last and its final goes up
+  verbatim — the "serial relays the last branch's final" of §3.2 is not a
+  special case, it is this rule with a rung of one. No mode flag exists
+  anywhere below the peer;
+- **a rung is armed atomically, inside the dialog.** `fork:` on
+  `SIP.Dialog.start_dialog/5` takes the *list* of remaining targets and
+  `init/1` arms them; `fork_branch/2` takes a list for the rungs after the
+  first. Arming a rung one call at a time races its own first branch: a 404
+  arriving between two arms finds a branch table of one, reads as "the last
+  branch fell", and is relayed to the caller while the other phones are about
+  to ring. `init/1` and one `handle_call` are the only places where nothing can
+  interleave.
+
+The transaction layer did need one fix, and it was a bug rather than new
+machinery: a client transaction in `:cancelling` **dropped** every final
+response. So a cancelled INVITE was never ACKed (RFC 3261 §17.1.1.2 requires
+it for any non-2xx final), the dialog was never told the branch had ended, and
+— the case §16.7 is actually about — a 2xx crossing our CANCEL was discarded,
+leaving the callee in a call nobody would ever ACK or BYE. Cancelling asks; only
+a final decides.
 
 What this buys over one-dialog-per-target (the approach a first draft of
 this section took): the **leg abstraction survives forking** — the FSM, the
@@ -1122,8 +1156,10 @@ ACK+BYE the late 2xx" cannot be tested credibly against a single shared peer.
 
 ## 11. Phasing
 
-**P1, P2a–c, P2d (§14 resilience) and P3 (media) are complete.** What remains is
-parallel forking (P4); the §7.5 offer profiles are the other open item.
+**P1, P2a–c, P2d (§14 resilience), P3 (media) and P4 (parallel forking) are
+complete.** What remains of the design are the §7.5 offer profiles, the trunk
+processes P4 deliberately left out, and the `_media` siblings of the §12 use
+cases.
 
 P3 has two documents of its own, because §7's "a `bridge/2` callback must be
 added" turned out to understate the problem:
@@ -1176,7 +1212,7 @@ failover at all — the simpler contract, and the honest one.
 | **P2c** ✅ | dynamic targets (§3.4): the `SIP.B2bua.TargetProvider` behaviour, `%Peer{provider:}`, `b2bua_try_next/0` + the per-attempt ring timeout; `b2bua_cancel_forward/0` (§3.5) with 487 out of the default retry-on list; hunt progress events (§3.6, `notify_progress`). Extends the SERIAL hunt, so it needed nothing from P4; a complete call queue additionally needs P3 for music on hold |
 | **P2d** ✅ | resilience hardening (§14): the dialog traps exits and converts a transaction crash into a synthetic 408 (R1 ✅); the scenario engine catches exits so teardown always runs (R2 ✅); connectionless transport re-selection + exit-safe transport calls (R3 ✅); transport-down broadcast from `terminate/2`, single `{:dialog_terminated}` (R4 ✅); transport-down during a hunt = branch failure, not dialog death (R5 ✅); B2BUA leg-death hook purging the leg and answering its pending requests (R6 ✅); the failure-injection test set (R7, ✅ for the above). §14.6 sketches the media-server failure domain (R8), which lands with P3 |
 | **P3** ✅ | `{:mediaserver, …}` mode: leg-qualified media handles, `bridge/3` + `unbridge/2` in `MediaServer.Behaviour` with the Mendooze implementation (one media session, two endpoints, transcoder chains), the offer/answer choreography on the initial INVITE **and on every re-offer** (`b2bua_reoffer_kind/1` + `b2bua_reply_reoffer/1`); `scenarios/b2bua_media.exs` with its own test (§12 — `b2bua_basic.exs` stays pure signaling), and the media-server failure domain of §14.6 (R8). Breakdown and as-built notes in [b2bua_media_impl_plan.md](b2bua_media_impl_plan.md) |
-| **P4** | parallel forking (branch sets in the leg dialog, §3.3: winner adoption, late-2xx ACK+BYE, best-response aggregation; q-group semantics of §3.2), trunk processes (`trunk_pid`); multi-leg generalization only if attended transfer / 3pcc demands it. `{:rtpengine, …}` is **out of scope** — deferred to the borderline work |
+| **P4** ✅ | parallel forking: rungs in the leg dialog (§3.3 as built — withhold-and-aggregate, winner adoption on both layers, late-2xx ACK+BYE, the `:cancelling` transaction fix) and the q-group semantics of §3.2 (`Kelix.Mod.Registrar.targets/2` returns groups and `fork: :parallel`). **Not** in it: trunk processes (`trunk_pid`, still reserved and ignored — a reachability feature independent of forking, and its own phase), the multi-leg generalization (only if attended transfer / 3pcc demands it), and `{:rtpengine, …}`, deferred to the borderline work |
 
 ## 12. Documentation plan
 

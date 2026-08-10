@@ -181,14 +181,12 @@ defmodule Kelix.Mod.Registrar do
 
   Ordering is the Contact `q` parameter, highest first (RFC 3261 §20.10; absent
   means no stated preference, taken as the highest, 1.0), equal q keeping
-  registration order, and `fork: :serial` walks them in that order. A script
-  wanting another policy edits the struct it gets back (`%{peer | fork: :none}`).
-
-  **Not what kamailio does**, and not a preference: `lookup("location")` +
-  `t_relay()` rings every contact of a q group at once. Parallel forking is the
-  one B2BUA piece not built (design §3.3), and `fork: :parallel` is not a value
-  the hunt honours — it would dial the highest-q contact and never fail over,
-  which is strictly worse than `:serial`. This returns `:serial` until it exists.
+  registration order. `uris` is therefore a list of **groups** — one per q value
+  — and `fork: :parallel` rings a group all at once and walks the groups in
+  order: kamailio's `lookup("location") + t_relay()`, and what RFC 3261 §16.6
+  prescribes. A script wanting another policy edits the struct it gets back
+  (`%{peer | fork: :serial}` rings them one at a time, `:none` tries the first
+  and stops).
 
   Returns `{:ok, peer}`, or one of three atoms, each mapping to one SIP answer:
   `:notfound` (no live binding — 480), `:no_aor` (the request carries no usable
@@ -617,8 +615,13 @@ defmodule Kelix.Mod.Registrar do
             :notfound
 
           contacts ->
-            uris = contacts |> Enum.sort_by(&q_of/1, :desc) |> Enum.map(&target_uri/1)
-            {:ok, %SIP.B2bua.Peer{uris: uris, use_srv: false, ruri: :peer, fork: :serial}}
+            {:ok,
+             %SIP.B2bua.Peer{
+               uris: q_groups(contacts),
+               use_srv: false,
+               ruri: :peer,
+               fork: :parallel
+             }}
         end
 
       _no_aor ->
@@ -627,6 +630,18 @@ defmodule Kelix.Mod.Registrar do
   end
 
   defp do_targets(_state, _domain, _req), do: :no_aor
+
+  # The contacts as RFC 3261 §16.6 says to try them: one group per q value,
+  # highest first, each group a list to ring **together**. Equal q keeps
+  # registration order inside its group, which is what `Enum.group_by/2`
+  # preserves and what decides who is dialled first when the group is really a
+  # rung of one.
+  defp q_groups(contacts) do
+    contacts
+    |> Enum.group_by(&q_of/1)
+    |> Enum.sort_by(fn {q, _} -> q end, :desc)
+    |> Enum.map(fn {_q, group} -> Enum.map(group, &target_uri/1) end)
+  end
 
   # The Contact `q` (RFC 3261 §20.10): 0..1, highest preference first. Absent
   # means the device stated no preference, which ranks it top — the single-contact

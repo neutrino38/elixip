@@ -13,8 +13,14 @@ defmodule SIP.B2bua.Peer do
 
     * `use_srv`  — resolve each target through SRV (RFC 3263). SRV multiplicity
       is a failover list, always serial, whatever `fork` says.
-    * `fork`     — `:none` (v1) | `:serial` (P2) | `:parallel` (P4). Forking
-      creates branches *inside* the leg dialog, never extra legs (§3.3).
+    * `fork`     — `:none` | `:serial` | `:parallel`. Forking creates branches
+      *inside* the leg dialog, never extra legs (§3.3). `:parallel` reads each
+      entry of `uris` as a **rung**: a bare URI is rung alone, a nested list is
+      rung all at once (equal q for a registrar peer — RFC 3261 §16.6: parallel
+      within a group, serial across groups in descending q). The first 2xx wins
+      the rung and the losers are CANCELled; if a whole rung fails, `retry_on`
+      decides whether the next one is tried, and the caller is handed the best
+      response the rung produced (§16.7).
     * `ruri`     — `:peer` rewrites the forwarded R-URI to the target (kamailio
       `$ru`; mandatory to reach a registered contact), `:keep` preserves the
       original R-URI and only routes to the target (kamailio `$du`; the
@@ -69,14 +75,26 @@ end
 
 defmodule SIP.B2bua.Leg do
   @moduledoc "One call leg of a B2BUA scenario (the outbound one; see SIP.B2bua.State)."
-  # `target` is the one currently being tried and `untried` those left after it,
-  # in the order the peer gave them (for a registrar peer, descending q). A
-  # serial hunt walks that list; each attempt is a branch of the SAME dialog, so
-  # the leg — and everything keyed on it — never changes.
+  # `target` is the one currently being tried and `untried` the **rungs** left
+  # after it, in the order the peer gave them (for a registrar peer, descending
+  # q). A hunt walks that list of rungs; each attempt is a branch of the SAME
+  # dialog, so the leg — and everything keyed on it — never changes, whether a
+  # rung holds one target or five.
+  #
+  # `branches` is the rung in flight: `[{transaction_pid, target_uri}]`, dialled
+  # together. `initial_trans` is the one of them the caller's `%Pending{}` is
+  # filed under (the first dialled, until a winner replaces it) and `target` the
+  # one being spoken about — the branch that answered, once one has.
   defstruct tag: nil,
             dialogpid: nil,
             peer: nil,
             target: nil,
+            branches: [],
+            # The Request-URI of the forwarded request as first composed, kept as
+            # the template every later branch is composed from (`ruri: :keep`
+            # preserves an identity, and it lives nowhere else once the dialog
+            # has been created).
+            fwd_ruri: nil,
             untried: [],
             method: nil,
             initial_trans: nil,
@@ -950,7 +968,12 @@ defmodule SIP.Session.B2bua do
           {:ok, new_trans} ->
             sip_ctx
             |> move_correlation(leg.initial_trans, new_trans)
-            |> put_leg(@outbound_tag, %Leg{leg | target: uri, initial_trans: new_trans})
+            |> put_leg(@outbound_tag, %Leg{
+              leg
+              | target: uri,
+                initial_trans: new_trans,
+                branches: [{new_trans, uri}]
+            })
             |> put_last_invite(@outbound_tag, leg.method, new_trans)
             |> note_progress({:serial_attempting, uri, now()})
             |> SIP.Context.set(:lasterr, :ok)
@@ -1015,22 +1038,22 @@ defmodule SIP.Session.B2bua do
       {:ok, fwd} ->
         fwd = apply_media_body(sip_ctx, fwd)
 
-        # The first target is dialled now; the rest are kept on the leg for a
-        # serial hunt to walk (§3.1). `fork: :none` keeps them unused.
-        [target | rest] = expand_targets(peer)
-        untried = if peer.fork == :serial, do: rest, else: []
+        # The first RUNG is dialled now; the rest are kept on the leg for the
+        # hunt to walk (§3.1). `fork: :none` keeps them unused.
+        [[target | siblings] | rest] = expand_targets(peer)
+        untried = if peer.fork in [:serial, :parallel], do: rest, else: []
 
         case apply_target(fwd, target, peer) do
           {:error, reason} ->
             fail(sip_ctx, {:b2bua, reason})
 
           {:ok, fwd} ->
-            start_outbound_dialog(sip_ctx, req, fwd, peer, target, untried, media, opts)
+            start_outbound_dialog(sip_ctx, req, fwd, peer, target, siblings, untried, media, opts)
         end
     end
   end
 
-  defp start_outbound_dialog(sip_ctx, orig_req, fwd, peer, target, untried, media, opts) do
+  defp start_outbound_dialog(sip_ctx, orig_req, fwd, peer, target, siblings, untried, media, opts) do
     timeout = Keyword.get(opts, :timeout, Map.get(@default_timeouts, fwd.method, 60))
 
     # NOT SIP.Session.send_sip_request/3: that one routes through
@@ -1038,18 +1061,29 @@ defmodule SIP.Session.B2bua do
     #
     # `fork:` is declared here, not on the first fork_branch/2: this very request
     # is the first branch, and with more targets behind it its failure must end
-    # the branch rather than the dialog.
-    dialog_opts = [tag: @outbound_tag, fork: untried != [] or provider_of(peer) != nil]
+    # the branch rather than the dialog. The siblings of a parallel rung go the
+    # same way — armed inside the dialog's init, before any of their responses
+    # can be processed (SIP.Dialog.start_dialog/5).
+    forking = untried != [] or provider_of(peer) != nil
+    sibling_uris = Enum.map(siblings, &branch_uri(fwd, &1, peer))
+
+    dialog_opts = [
+      tag: @outbound_tag,
+      fork: if(sibling_uris == [], do: forking, else: sibling_uris)
+    ]
 
     case SIP.Dialog.start_dialog(fwd, timeout, :outbound, sip_ctx.debug, dialog_opts) do
       {:ok, dialog_pid, _dialog_id} ->
         trans_pid = await_initial_transaction()
+        sibling_tids = await_rung_branches(length(siblings))
 
         leg = %Leg{
           tag: @outbound_tag,
           dialogpid: dialog_pid,
           peer: peer,
           target: target,
+          fwd_ruri: fwd.ruri,
+          branches: [{trans_pid, target} | Enum.zip(sibling_tids, siblings)],
           untried: untried,
           method: fwd.method,
           initial_trans: trans_pid,
@@ -1060,7 +1094,7 @@ defmodule SIP.Session.B2bua do
         |> put_leg(@outbound_tag, leg)
         |> add_pending(trans_pid, orig_req, :inbound, fwd.method)
         |> put_last_invite(@outbound_tag, fwd.method, trans_pid)
-        |> note_progress({:serial_attempting, target, now()})
+        |> note_rung([target | siblings])
         |> SIP.Context.set(:lasterr, :ok)
 
       {:error, reason} ->
@@ -1088,6 +1122,60 @@ defmodule SIP.Session.B2bua do
 
         nil
     end
+  end
+
+  # The extra branches of the first rung, announced one `{:onnewbranch, …}` each
+  # by the dialog's init. Already in the mailbox by the time we ask, like
+  # `:onnewdialog` above; a branch that could not be armed answers `:error` and
+  # is dropped, since the rest of the rung is still ringing.
+  defp await_rung_branches(0), do: []
+
+  defp await_rung_branches(count) do
+    Enum.flat_map(1..count, fn _ ->
+      receive do
+        {@outbound_tag, {:onnewbranch, :ok, trans_pid}} ->
+          [trans_pid]
+
+        {@outbound_tag, {:onnewbranch, :error, reason}} ->
+          Logger.warning(
+            module: __MODULE__,
+            message: "b2bua: branch not armed: #{inspect(reason)}"
+          )
+
+          []
+      after
+        500 ->
+          Logger.warning(module: __MODULE__, message: "b2bua: a rung branch was never announced")
+          []
+      end
+    end)
+  end
+
+  # What a branch toward `target` must carry as its Request-URI. The dialog puts
+  # whatever it is handed straight into the R-URI, so the two questions of
+  # `apply_target/3` have to be answered HERE for every branch after the first —
+  # otherwise a `ruri: :keep` peer (the trunk case: route to the gateway, leave
+  # the R-URI alone) has its second branch rewritten to the gateway's URI, and a
+  # per-peer outbound proxy applies to the first target only.
+  defp branch_uri(%{ruri: _} = fwd, target, %Peer{} = peer) do
+    case apply_target(fwd, target, peer) do
+      {:ok, %{ruri: uri}} ->
+        uri
+
+      {:error, reason} ->
+        Logger.warning(
+          module: __MODULE__,
+          message: "b2bua: cannot compose a branch toward #{target} (#{inspect(reason)})"
+        )
+
+        target
+    end
+  end
+
+  # One `:serial_attempting` per target of the rung: a rung of one reads exactly
+  # as a serial hunt always did, and a group says which devices are ringing.
+  defp note_rung(sip_ctx, targets) do
+    Enum.reduce(targets, sip_ctx, &note_progress(&2, {:serial_attempting, &1, now()}))
   end
 
   # Two separate questions, answered in order: WHAT the forwarded request asks
@@ -1159,18 +1247,37 @@ defmodule SIP.Session.B2bua do
   # RFC 2782 order comes from SIP.Resolver.order_srv/1: priorities ascending,
   # weighted draw within each. A domain that publishes no SRV keeps its URI as
   # given, so `use_srv: true` is safe to leave on.
-  defp expand_targets(%Peer{use_srv: false} = peer),
-    do: Enum.map(peer.uris, &normalize_uri/1)
-
-  defp expand_targets(%Peer{} = peer) do
-    Enum.flat_map(peer.uris, fn uri ->
-      uri = normalize_uri(uri)
-
-      case SIP.Resolver.srv_targets(uri) do
-        {:ok, [_ | _] = targets} -> targets
-        _ -> [uri]
-      end
+  # The result is a list of **rungs**: a rung is dialled all at once, the rungs
+  # are walked in order.
+  #
+  # A `:parallel` peer gets one rung per entry of `uris` — a nested entry is a
+  # group to ring together (equal q for a registrar peer, RFC 3261 §16.6:
+  # parallel within a group, serial across groups in descending q).
+  defp expand_targets(%Peer{fork: :parallel} = peer) do
+    Enum.map(peer.uris, fn entry ->
+      entry |> List.wrap() |> Enum.flat_map(&srv_expand(&1, peer))
     end)
+  end
+
+  # Anything else is rungs of one, which is the flat list a serial hunt has
+  # always walked — including SRV multiplicity, which is a failover list and
+  # never a group (§3.1): the same service reached at another address is one
+  # target tried twice, and ringing both would double every call to that domain.
+  defp expand_targets(%Peer{} = peer) do
+    peer.uris
+    |> Enum.flat_map(fn entry -> entry |> List.wrap() |> Enum.flat_map(&srv_expand(&1, peer)) end)
+    |> Enum.map(&[&1])
+  end
+
+  defp srv_expand(uri, %Peer{use_srv: false}), do: [normalize_uri(uri)]
+
+  defp srv_expand(uri, %Peer{}) do
+    uri = normalize_uri(uri)
+
+    case SIP.Resolver.srv_targets(uri) do
+      {:ok, [_ | _] = targets} -> targets
+      _ -> [uri]
+    end
   end
 
   # A target that already carries its destination (a registrar contact, §3.2) is
@@ -1376,7 +1483,13 @@ defmodule SIP.Session.B2bua do
   @doc false
   @spec do_relay_reply(%SIP.Context{}, map()) :: %SIP.Context{}
   def do_relay_reply(sip_ctx = %SIP.Context{}, resp) when is_map(resp) do
-    tid = current_tid()
+    # A rung's branches are N transactions attempting ONE relayed request, so
+    # everything downstream works on the branch the correlation is filed under —
+    # and, once a branch answers 2xx, on that branch, which is the one the leg
+    # keeps (its ACK, its BYE and every later in-dialog request go to it).
+    sip_ctx = adopt_winning_branch(sip_ctx, resp, current_tid())
+    tid = pending_key(sip_ctx, current_tid())
+
     # Whatever else it is, a response carrying SDP is this leg describing itself:
     # the callee's answer to the initial INVITE, or its answer to a re-offer we
     # relayed. Either way it is what the NEXT re-offer from that leg is read
@@ -1397,8 +1510,8 @@ defmodule SIP.Session.B2bua do
           provider_hunt?(sip_ctx, resp, tid) ->
             ask_provider_next(sip_ctx, resp, pending, tid)
 
-          next_target(sip_ctx, resp, tid) ->
-            try_next_target(sip_ctx, resp, pending, tid)
+          next_rung?(sip_ctx, resp, tid) ->
+            try_next_rung(sip_ctx, resp, pending, tid)
 
           true ->
             relay_reply(sip_ctx, resp, pending, tid)
@@ -1476,6 +1589,65 @@ defmodule SIP.Session.B2bua do
 
   defp attempt_response?(sip_ctx, tid) do
     match?(%Leg{initial_trans: ^tid}, outbound_leg(sip_ctx))
+  end
+
+  # The branch a response arrived on, mapped back to the branch the caller's
+  # `%Pending{}` is filed under. One request was relayed; a rung is only several
+  # ways of asking it, and nothing downstream should have to know which one
+  # answered.
+  defp pending_key(sip_ctx, tid) do
+    case outbound_leg(sip_ctx) do
+      %Leg{initial_trans: rep, branches: branches} when is_pid(rep) ->
+        if List.keymember?(branches, tid, 0), do: rep, else: tid
+
+      _ ->
+        tid
+    end
+  end
+
+  # A branch answered 2xx: it is the leg now. The dialog has already CANCELled
+  # its siblings and adopted its to-tag (§3.3); what the session owes is to point
+  # everything keyed on "the attempt" at the branch that won — `last_invite`
+  # above all, since the ACK of that 2xx is sent on the transaction that carried
+  # it, and the rest of the rung is gone.
+  defp adopt_winning_branch(sip_ctx, resp, tid) do
+    with true <- resp.response in 200..299,
+         %Leg{initial_trans: rep, branches: branches} = leg <- outbound_leg(sip_ctx),
+         true <- rep != tid,
+         {^tid, target} <- List.keyfind(branches, tid, 0) do
+      pending = Map.get(state(sip_ctx).pending, rep)
+
+      sip_ctx
+      |> put_leg(@outbound_tag, %Leg{
+        leg
+        | target: target,
+          initial_trans: tid,
+          branches: [{tid, target}],
+          untried: []
+      })
+      |> put_last_invite(@outbound_tag, leg.method, tid)
+      |> move_pending(rep, tid, pending)
+    else
+      _ -> sip_ctx
+    end
+  end
+
+  # The branches of the rung in flight. A leg created before this field existed —
+  # or one whose branches were never announced — still has its initial
+  # transaction, which is what the single-branch code always cancelled.
+  defp live_branches(%Leg{branches: [_ | _] = branches}), do: branches
+
+  defp live_branches(%Leg{initial_trans: tid, target: target}) when is_pid(tid),
+    do: [{tid, target}]
+
+  defp live_branches(_leg), do: []
+
+  defp move_pending(sip_ctx, _from, _to, nil), do: sip_ctx
+
+  defp move_pending(sip_ctx, from, to, %Pending{} = pending) do
+    sip_ctx
+    |> drop_pending(from)
+    |> add_pending(to, pending.orig_req, pending.orig_leg, pending.method, pending.held_answer)
   end
 
   # A 18x carrying the callee's SDP. Without a media server relaying it would
@@ -1689,47 +1861,58 @@ defmodule SIP.Session.B2bua do
     |> ask_provider_and_arm(hunt(sip_ctx), &relay_reply(&1, resp, pending, tid))
   end
 
-  # The next target to try, or nil when this response ends the hunt. Only the
-  # leg's *current* initial transaction is a hunt candidate: a response to some
-  # in-dialog request relayed later has nothing to do with it.
-  defp next_target(sip_ctx, resp, tid) do
-    with %Leg{initial_trans: ^tid, untried: [next | _], peer: peer} <- outbound_leg(sip_ctx),
-         :serial <- peer.fork,
+  # Is there another rung to try, this response being the one the rung in flight
+  # produced? Only the leg's *current* attempt is a hunt candidate: a response to
+  # some in-dialog request relayed later has nothing to do with it.
+  #
+  # The dialog answers for the whole rung — it withholds every branch failure
+  # until the last one falls and surfaces the best (§16.7) — so getting here at
+  # all means the rung is over, whatever its size.
+  defp next_rung?(sip_ctx, resp, tid) do
+    with %Leg{initial_trans: ^tid, untried: [_next | _], peer: peer} <- outbound_leg(sip_ctx),
+         true <- peer.fork in [:serial, :parallel],
          true <- resp.response >= 300 and retryable?(peer, resp.response) do
-      next
+      true
     else
-      _ -> nil
+      _ -> false
     end
   end
 
-  defp try_next_target(sip_ctx, resp, %Pending{} = pending, tid) do
+  defp try_next_rung(sip_ctx, resp, %Pending{} = pending, tid) do
     leg = outbound_leg(sip_ctx)
-    [next | rest] = leg.untried
+    [rung | rest] = leg.untried
+    uris = Enum.map(rung, &branch_uri(%{ruri: leg.fwd_ruri}, &1, leg.peer))
 
-    case call_leg(fn -> SIP.Dialog.fork_branch(leg.dialogpid, next) end) do
+    case call_leg(fn -> SIP.Dialog.fork_branch(leg.dialogpid, uris) end) do
       {:ok, new_trans} ->
+        new_trans = List.wrap(new_trans)
+
         Logger.info(
           module: __MODULE__,
           message:
-            "b2bua: #{leg.target} answered #{resp.response}; trying #{next} " <>
-              "(#{length(rest)} target(s) left)"
+            "b2bua: #{leg.target} answered #{resp.response}; trying " <>
+              "#{Enum.map_join(rung, ", ", &to_string/1)} (#{length(rest)} rung(s) left)"
         )
 
         # The correlation moves with the hunt: the caller is still waiting for an
-        # answer to the SAME request, it is just a different branch that will
-        # provide it now.
+        # answer to the SAME request, it is just other branches that will provide
+        # it now. It is filed under the first of them, which is what
+        # `pending_key/2` maps the whole rung back to.
+        [rep | _] = new_trans
+
         sip_ctx
         |> drop_pending(tid)
-        |> add_pending(new_trans, pending.orig_req, pending.orig_leg, pending.method)
+        |> add_pending(rep, pending.orig_req, pending.orig_leg, pending.method)
         |> put_leg(@outbound_tag, %Leg{
           leg
-          | target: next,
+          | target: hd(rung),
+            branches: Enum.zip(new_trans, rung),
             untried: rest,
-            initial_trans: new_trans
+            initial_trans: rep
         })
-        |> put_last_invite(@outbound_tag, leg.method, new_trans)
+        |> put_last_invite(@outbound_tag, leg.method, rep)
         |> note_progress({:serial_not_reachable, leg.target, resp.response, now()})
-        |> note_progress({:serial_attempting, next, now()})
+        |> note_rung(rung)
         |> SIP.Context.set(:lasterr, :ok)
 
       {:error, reason} ->
@@ -1739,12 +1922,12 @@ defmodule SIP.Session.B2bua do
         # this from being retried on the next response.
         Logger.warning(
           module: __MODULE__,
-          message: "b2bua: cannot try #{next} (#{inspect(reason)}); relaying #{resp.response}"
+          message: "b2bua: cannot try #{hd(rung)} (#{inspect(reason)}); relaying #{resp.response}"
         )
 
         sip_ctx
         |> put_leg(@outbound_tag, %Leg{leg | untried: []})
-        |> note_progress({:serial_not_reachable, next, :transport_error, now()})
+        |> note_progress({:serial_not_reachable, hd(rung), :transport_error, now()})
         |> relay_reply(resp, pending, tid)
     end
   end
@@ -1841,9 +2024,13 @@ defmodule SIP.Session.B2bua do
     case outbound_leg(sip_ctx) do
       %Leg{} = leg ->
         if leg_alive?(leg) and Map.has_key?(state(sip_ctx).pending, leg.initial_trans) do
-          protect("cancel the attempt toward #{leg.target}", fn ->
-            SIP.Dialog.cancel(leg.dialogpid, leg.initial_trans)
-          end)
+          # Every branch of the rung, not just the one the correlation is filed
+          # under: they are all ringing a phone.
+          for {tid, target} <- live_branches(leg) do
+            protect("cancel the attempt toward #{target}", fn ->
+              SIP.Dialog.cancel(leg.dialogpid, tid)
+            end)
+          end
         end
 
       _ ->
@@ -2087,9 +2274,13 @@ defmodule SIP.Session.B2bua do
       # The initial request is still in `pending`: it never got a final answer,
       # so the leg is an attempt in progress, not a session.
       Map.has_key?(state.pending, leg.initial_trans) ->
-        protect("CANCEL leg #{inspect(leg.dialogpid)}", fn ->
-          SIP.Dialog.cancel(leg.dialogpid, leg.initial_trans)
-        end)
+        for {tid, _target} <- live_branches(leg) do
+          protect("CANCEL leg #{inspect(leg.dialogpid)}", fn ->
+            SIP.Dialog.cancel(leg.dialogpid, tid)
+          end)
+        end
+
+        :ok
 
       leg.method == :INVITE and established?(leg) ->
         protect("BYE leg #{inspect(leg.dialogpid)}", fn ->

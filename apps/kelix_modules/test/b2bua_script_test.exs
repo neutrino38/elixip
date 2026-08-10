@@ -198,6 +198,38 @@ defmodule Kelix.B2buaScriptTest do
     refute second.callid == req.callid
   end
 
+  # P4, and the whole point of the q GROUPS: two devices registered with the same
+  # preference are `lookup("location") + t_relay()` — both ring, at once, and the
+  # first to pick up gets the call (RFC 3261 §16.6). Nothing in the script says
+  # so: `targets/2` returns the groups and the peer walks them.
+  test "two devices of equal preference ring together", %{scenario: module} do
+    :ok = register_callee("10.0.0.9", peer: "par_a", callid: "reg-pa")
+    :ok = register_callee("10.0.0.42", peer: "par_b", callid: "reg-pb")
+
+    a = mockup_pid("par_a")
+    _b = mockup_pid("par_b")
+
+    {:ok, dialog} = MockDialog.start_link(self())
+    req = invite()
+    pid = spawn_b2bua(module, dialog, req)
+    send(pid, {:INVITE, req, self(), dialog})
+
+    assert_receive {:replied, 100, "Trying", _fields, _req}, 5_000
+
+    rung =
+      for _ <- 1..2, into: MapSet.new() do
+        assert_receive {:invite_sent, fwd}, 5_000
+        fwd.ruri.domain
+      end
+
+    assert rung == MapSet.new(["10.0.0.9", "10.0.0.42"])
+
+    # One of them is busy. That is not the call failing — the other is still
+    # ringing, and the caller must hear nothing at all.
+    GenServer.cast(a, {:simulate, 486, 100})
+    refute_receive {:replied, 486, _, _, _}, 800
+  end
+
   test "the script declares the module it needs, so a node without it refuses to load it",
        %{scenario: module} do
     assert module.__scenario_type__() == :uas_invite

@@ -419,7 +419,11 @@ defmodule SIP.Test.Transport.UDPMockup do
     {:noreply, state}
   end
 
-  def handle_cast({:simulate, resp, after_ms}, state) when resp in 400..487 do
+  # Every rejection code, not just 400..487: a fork test needs a 6xx (RFC 3261
+  # §16.7 stops a hunt on a global refusal), and asking for one used to match no
+  # clause at all — which kills the mockup instance rather than failing the
+  # assertion that named the problem.
+  def handle_cast({:simulate, resp, after_ms}, state) when resp in 400..699 do
     siprsp = reply_to_request(state.req, resp, nil, [], state.totag)
 
     Logger.debug(
