@@ -121,5 +121,6 @@ defmodule SIP.Test.AppEnv do
 end
 
 Code.require_file("support/wait.exs", __DIR__)
+Code.require_file("support/listener_case.exs", __DIR__)
 
 ExUnit.start(exclude: [:skip])
