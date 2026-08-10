@@ -67,7 +67,7 @@ defmodule SIP.Test.OptionsOutOfDialog do
   defp send_options(callid) do
     ruri =
       %SIP.Uri{scheme: "sip:", domain: "example.com", port: 5060}
-      |> SIP.Uri.set_uri_param("unittest", "1")
+      |> SIP.Uri.set_uri_param("unittest", "options_ood")
       |> SIP.Transport.Selector.select_transport()
 
     :ok = GenServer.call(ruri.tp_pid, :settestapp)

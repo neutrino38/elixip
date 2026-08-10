@@ -42,7 +42,7 @@ defmodule SIP.Test.Keepalive do
   defp establish_register_dialog(drop_options?) do
     ruri =
       %SIP.Uri{scheme: "sip:", domain: "example.com", port: 5060}
-      |> SIP.Uri.set_uri_param("unittest", "1")
+      |> SIP.Uri.set_uri_param("unittest", "keepalive")
       |> SIP.Transport.Selector.select_transport()
 
     tp_pid = ruri.tp_pid

@@ -118,7 +118,7 @@ defmodule SIP.Test.Register do
     assert code == :ok
 
     # Add unittest param to RURI to trigger UDP mockeup transport selection
-    upd_uri = SIP.Uri.set_uri_param(parsed_msg.ruri, "unittest", "1")
+    upd_uri = SIP.Uri.set_uri_param(parsed_msg.ruri, "unittest", "sip_register")
     parsed_msg = SIP.Msg.Ops.update_sip_msg( parsed_msg, { :ruri, upd_uri })
 
     upd_uri = SIP.Transport.Selector.select_transport(upd_uri)

@@ -67,7 +67,7 @@ defmodule SIP.Test.UASRegister do
         IO.puts("#{errmsg}\nline #{lineno}: #{line}\ncode #{code}")
       end)
 
-    upd_uri = SIP.Uri.set_uri_param(parsed.ruri, "unittest", "1")
+    upd_uri = SIP.Uri.set_uri_param(parsed.ruri, "unittest", "uas_register")
 
     parsed =
       SIP.Msg.Ops.update_sip_msg(parsed, {:ruri, upd_uri}) |> uniq_callid() |> fresh_branch()
@@ -140,7 +140,7 @@ defmodule SIP.Test.UASRegister do
 
     {:ok, msg} = File.read("test/SIP-REGISTER-LVP.txt")
     {:ok, base} = SIPMsg.parse(msg, fn _c, _m, _l, _line -> :ok end)
-    upd_uri = SIP.Uri.set_uri_param(base.ruri, "unittest", "1")
+    upd_uri = SIP.Uri.set_uri_param(base.ruri, "unittest", "uas_register")
     base = SIP.Msg.Ops.update_sip_msg(base, {:ruri, upd_uri}) |> uniq_callid()
     routed = SIP.Transport.Selector.select_transport(upd_uri)
     :ok = GenServer.call(routed.tp_pid, :settestapp)
@@ -164,7 +164,7 @@ defmodule SIP.Test.UASRegister do
 
     {:ok, msg} = File.read("test/SIP-REGISTER-LVP.txt")
     {:ok, req} = SIPMsg.parse(msg, fn _c, _m, _l, _line -> :ok end)
-    upd_uri = SIP.Uri.set_uri_param(req.ruri, "unittest", "1")
+    upd_uri = SIP.Uri.set_uri_param(req.ruri, "unittest", "uas_register")
     req = SIP.Msg.Ops.update_sip_msg(req, {:ruri, upd_uri}) |> uniq_callid()
     routed = SIP.Transport.Selector.select_transport(upd_uri)
     :ok = GenServer.call(routed.tp_pid, :settestapp)
@@ -221,7 +221,7 @@ defmodule SIP.Test.UASRegister do
 
     {:ok, msg} = File.read("test/SIP-REGISTER-LVP.txt")
     {:ok, base} = SIPMsg.parse(msg, fn _c, _m, _l, _line -> :ok end)
-    upd_uri = SIP.Uri.set_uri_param(base.ruri, "unittest", "1")
+    upd_uri = SIP.Uri.set_uri_param(base.ruri, "unittest", "uas_register")
     base = SIP.Msg.Ops.update_sip_msg(base, {:ruri, upd_uri}) |> uniq_callid() |> with_cseq(1)
     routed = SIP.Transport.Selector.select_transport(upd_uri)
     :ok = GenServer.call(routed.tp_pid, :settestapp)
@@ -263,7 +263,7 @@ defmodule SIP.Test.UASRegister do
 
     {:ok, msg} = File.read("test/SIP-REGISTER-LVP.txt")
     {:ok, base} = SIPMsg.parse(msg, fn _c, _m, _l, _line -> :ok end)
-    upd_uri = SIP.Uri.set_uri_param(base.ruri, "unittest", "1")
+    upd_uri = SIP.Uri.set_uri_param(base.ruri, "unittest", "uas_register")
     base = SIP.Msg.Ops.update_sip_msg(base, {:ruri, upd_uri}) |> uniq_callid() |> with_cseq(1)
     routed = SIP.Transport.Selector.select_transport(upd_uri)
     :ok = GenServer.call(routed.tp_pid, :settestapp)
@@ -314,7 +314,7 @@ defmodule SIP.Test.UASRegister do
 
     {:ok, msg} = File.read("test/SIP-REGISTER-LVP.txt")
     {:ok, base} = SIPMsg.parse(msg, fn _c, _m, _l, _line -> :ok end)
-    upd_uri = SIP.Uri.set_uri_param(base.ruri, "unittest", "1")
+    upd_uri = SIP.Uri.set_uri_param(base.ruri, "unittest", "uas_register")
     base = SIP.Msg.Ops.update_sip_msg(base, {:ruri, upd_uri}) |> uniq_callid()
     routed = SIP.Transport.Selector.select_transport(upd_uri)
     :ok = GenServer.call(routed.tp_pid, :settestapp)

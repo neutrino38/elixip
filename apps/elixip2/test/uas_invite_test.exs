@@ -648,7 +648,7 @@ defmodule SIP.Test.UASInvite do
 
     upd_uri =
       parsed.ruri
-      |> SIP.Uri.set_uri_param("unittest", "1")
+      |> SIP.Uri.set_uri_param("unittest", "uas_invite")
       |> SIP.Uri.set_uri_param("scenario", scenario)
 
     branch = "z9hG4bK#{System.unique_integer([:positive])}"

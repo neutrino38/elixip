@@ -377,7 +377,7 @@ User-Agent: Elixip 0.2.0
     assert code == :ok
 
     # Add unittest param to RURI to trigger UDP mockeup transport
-    upd_uri = SIP.Uri.set_uri_param(parsed_msg.ruri, "unittest", "1")
+    upd_uri = SIP.Uri.set_uri_param(parsed_msg.ruri, "unittest", "transact")
     parsed_msg = SIP.Msg.Ops.update_sip_msg( parsed_msg, { :ruri, upd_uri })
 
     # Send REGISTER
@@ -442,7 +442,7 @@ User-Agent: Elixip 0.2.0
     assert code == :ok
 
     # Add unittest param to RURI to trigger UDP mockeup transport
-    upd_uri = SIP.Uri.set_uri_param(parsed_msg.ruri, "unittest", "1")
+    upd_uri = SIP.Uri.set_uri_param(parsed_msg.ruri, "unittest", "transact")
     parsed_msg = SIP.Msg.Ops.update_sip_msg( parsed_msg, { :ruri, upd_uri })
 
     # Send REGISTER
