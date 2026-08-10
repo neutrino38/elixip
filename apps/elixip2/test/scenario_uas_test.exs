@@ -35,12 +35,35 @@ end
 
 defmodule SIP.Test.ScenarioUASFactory do
   use ExUnit.Case
+  import SIP.Test.Wait
 
+  # `Elixip.ScenarioUAS` is a named singleton, and start_link/1 links it to the test
+  # that started it — so it dies asynchronously when that test ends, and this ran
+  # into both halves of that at about one run in twelve:
+  #
+  #   * `whereis` hands back a pid already on its way out, and `GenServer.stop/1`
+  #     raises :noproc — the failure seen, and it landed on whichever test happened
+  #     to call this first, which is why it looked like several flaky tests;
+  #   * the name can still be registered when the next `start_link` runs, which
+  #     answers {:error, {:already_started, _}} and fails the match below.
+  #
+  # So: stop it if it is there, tolerate it being gone, and wait for the name to be
+  # free rather than assuming the stop already freed it.
   defp start_factory(opts) do
     case Process.whereis(Elixip.ScenarioUAS) do
-      nil -> :ok
-      pid -> GenServer.stop(pid)
+      nil ->
+        :ok
+
+      pid ->
+        try do
+          GenServer.stop(pid)
+        catch
+          :exit, _ -> :ok
+        end
     end
+
+    assert until(fn -> Process.whereis(Elixip.ScenarioUAS) == nil end, 1_000),
+           "the previous ScenarioUAS singleton never unregistered"
 
     {:ok, _} = Elixip.ScenarioUAS.start_link(opts)
     :ok
