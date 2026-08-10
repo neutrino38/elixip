@@ -1,5 +1,6 @@
 defmodule SIP.Test.Register do
   use ExUnit.Case
+  import SIP.Test.Wait
   require SIP.Dialog
   doctest SIP.Dialog
   use SIP.Session.RegisterUAC
@@ -31,24 +32,6 @@ defmodule SIP.Test.Register do
   setup do
     Application.put_env(:elixip2, :proxyuri, %SIP.Uri{ domain: @proxy, scheme: "sip:", port: 5060 })
     :ok
-  end
-
-  # Utility fonction that wait for a named process to appear
-  defp assert_appears(procname, timeout) when timeout > 0 do
-    case Process.whereis(procname) do
-      nil ->
-        # Sleep + recurtion
-        Process.sleep(10)
-        assert_appears(procname, timeout - 10)
-
-      procpid ->
-        assert is_pid(procpid)
-        procpid
-    end
-  end
-
-  defp assert_appears(_procname, timeout) when timeout <= 0 do
-    assert(false, "registrar process did not launch on time")
   end
 
   # The 200 OK to a REGISTER lists ALL active bindings of the account
@@ -83,19 +66,72 @@ defmodule SIP.Test.Register do
         end
 
         # wait for the name to be released before going on
-        wait_disappears(:test_registrar, 1_000)
+        until!(fn -> Process.whereis(:test_registrar) == nil end, 1_000)
     end
   end
 
-  defp wait_disappears(_procname, timeout) when timeout <= 0 do
-    assert(false, "process did not stop on time")
+
+  # The exchange every "Client Register using <transport>" test performs: ask for a
+  # lifetime, get challenged, authenticate, and check the 200 granted what we asked
+  # for. It was copy-pasted once per transport — four times, differing only in the
+  # proxy URI the caller sets.
+  #
+  # A macro, not a function, and that is not a style choice: `send_REGISTER` and its
+  # siblings thread the context by rebinding `var!(sip_ctx)` in the CALLER's scope
+  # (SIPSessionRegister.ex:201-226). Inside a `defp` the rebinding lands on the
+  # function's own local and is dropped on return, so the caller keeps a context that
+  # never registered anything — which is precisely how a first attempt at this broke
+  # "OPTIONS and unREGISTER": its `send_OPTIONS()` had no registration to send on and
+  # the proxy answered :methodnotallowed.
+  defmacrop register_and_authenticate(expires) do
+    quote do
+      expires = unquote(expires)
+
+      send_REGISTER(expires)
+      assert ctx_get(:lasterr) == :ok
+
+      # Each receive hands the (rebound) context back and it is assigned on, the shape
+      # the four copies used: the macros rebind inside the clause, and the clause is
+      # the only place that value can be read from.
+      var!(sip_ctx) =
+        receive do
+          {401, rsp, _trans_pid, _dialog_pid} ->
+            send_auth_REGISTER(rsp, expires)
+            var!(sip_ctx)
+        after
+          2_000 -> flunk("no 401 challenge to the REGISTER")
+        end
+
+      # send_sip_request consumes the dialog layer's {:onnewdialog, :ok, tid} and
+      # stores the initial transaction in the context.
+      assert is_pid(ctx_get(:last_uac_register_tid))
+
+      var!(sip_ctx) =
+        receive do
+          {200, rsp, _trans_pid, _dialog_pid} ->
+            assert_a_binding_expires(rsp.contact, to_string(expires))
+            var!(sip_ctx)
+
+          {resp_code, _rsp, _trans_pid, _dialog_pid} when is_integer(resp_code) ->
+            flunk("Received unexpected SIP response #{resp_code}")
+
+          other ->
+            flunk("Received unexpected msg #{inspect(other)}")
+        after
+          2_000 -> flunk("no 200 OK to the authenticated REGISTER")
+        end
+
+      var!(sip_ctx)
+    end
   end
 
-  defp wait_disappears(procname, timeout) do
-    if Process.whereis(procname) != nil do
-      Process.sleep(10)
-      wait_disappears(procname, timeout - 10)
-    end
+  defp test_context do
+    %SIP.Context{
+      username: @username,
+      authusername: @authusername,
+      displayname: @displayname,
+      domain: @domain
+    }
   end
 
   test "Inbound REGISTER" do
@@ -127,7 +163,7 @@ defmodule SIP.Test.Register do
     send(upd_uri.tp_pid, { :recv, parsed_msg})
 
     # Attendre l'apparition du processus test_registrar
-    registrar_pid = assert_appears(:test_registrar, 2000)
+    registrar_pid = until!(fn -> Process.whereis(:test_registrar) end, 2_000)
 
     send(registrar_pid, { :stop, self() })
 
@@ -157,46 +193,27 @@ defmodule SIP.Test.Register do
 
   end
 
-  @tag :live
-  test "Client Register using UDP" do
+  # The same client REGISTER over each transport the stack offers. Only the proxy URI
+  # differs — the exchange is `register_and_authenticate/2` for all of them — and it
+  # had been written out four times, ~40 lines apiece. UDP takes the setup's default,
+  # so it names no URI of its own.
+  @register_transports [
+    {"UDP", nil},
+    {"TCP", %SIP.Uri{domain: @proxy, proto: "TCP", scheme: "sip:", port: 5060}},
+    {"TLS", %SIP.Uri{domain: @proxy, proto: "TLS", scheme: "sip:", port: 5061}},
+    {"WSS", %SIP.Uri{domain: @proxy, proto: "WSS", scheme: "sip:", port: 443}}
+  ]
 
-    sip_ctx = %SIP.Context{
-      username: @username,
-      authusername: @authusername,
-      displayname: @displayname,
-      domain: @domain
-    }
+  for {transport, proxy_uri} <- @register_transports do
+    @tag :live
+    @proxy_uri proxy_uri
+    test "Client Register using #{transport}" do
+      sip_ctx = test_context()
+      ctx_set(:passwd, @passwd)
+      if @proxy_uri, do: Application.put_env(:elixip2, :proxyuri, @proxy_uri)
 
-    ctx_set :passwd, @passwd
-
-    send_REGISTER 600
-    assert ctx_get(:lasterr) == :ok
-
-
-    ^sip_ctx = receive do
-      { 401, rsp, _trans_pid, _dialog_pid } ->
-        send_auth_REGISTER(rsp, 600)
-        sip_ctx
+      register_and_authenticate(600)
     end
-
-    # send_sip_request now consumes the dialog layer's {:onnewdialog, :ok, tid}
-    # message and stores the initial transaction in the context.
-    assert is_pid(ctx_get(:last_uac_register_tid))
-    ^sip_ctx = receive do
-      { 200, rsp, _trans_pid, _dialog_pid } ->
-        # IO.puts(inspect(rsp.contact.params))
-        assert_a_binding_expires(rsp.contact, "600")
-        sip_ctx
-
-      { resp_code, _rsp, _trans_pid, _dialog_pid } when is_integer(resp_code) ->
-        assert(false, "Received unexpected SIP response #{resp_code}")
-
-      msg -> assert(false, "Received unexpected msg #{inspect(msg)}")
-
-    after
-      1_000 -> assert(false, "Did not receive 200 OK on time")
-    end
-
   end
 
   @tag :live
@@ -236,93 +253,23 @@ defmodule SIP.Test.Register do
 
   end
 
+
+  # What this adds over "Client Register using TLS" above is the rest of the
+  # registration's life: a keepalive OPTIONS in the middle, then an un-REGISTER, on a
+  # registration that really was established. The initial exchange is the shared one.
   @tag :live
-  test "Client Register using TCP" do
+  test "OPTIONS and unREGISTER on an established TLS registration" do
+    sip_ctx = test_context()
+    ctx_set(:passwd, @passwd)
 
-    sip_ctx = %SIP.Context{
-      username: @username,
-      authusername: @authusername,
-      displayname: @displayname,
-      domain: @domain
-    }
+    Application.put_env(:elixip2, :proxyuri, %SIP.Uri{
+      domain: @proxy,
+      proto: "TLS",
+      scheme: "sip:",
+      port: 5061
+    })
 
-    ctx_set :passwd, @passwd
-
-    Application.put_env(:elixip2, :proxyuri, %SIP.Uri{ domain: @proxy, proto: "TCP", scheme: "sip:", port: 5060 })
-
-    send_REGISTER 600
-    assert ctx_get(:lasterr) == :ok
-
-
-    ^sip_ctx = receive do
-      { 401, rsp, _trans_pid, _dialog_pid } ->
-        send_auth_REGISTER(rsp, 600)
-        sip_ctx
-    end
-
-    # send_sip_request now consumes the dialog layer's {:onnewdialog, :ok, tid}
-    # message and stores the initial transaction in the context.
-    assert is_pid(ctx_get(:last_uac_register_tid))
-
-    ^sip_ctx = receive do
-      { 200, rsp, _trans_pid, _dialog_pid } ->
-        # IO.puts(inspect(rsp.contact.params))
-        assert_a_binding_expires(rsp.contact, "600")
-        sip_ctx
-
-      { resp_code, _rsp, _trans_pid, _dialog_pid } when is_integer(resp_code) ->
-        assert(false, "Received unexpected SIP response #{resp_code}")
-
-      _ -> assert(false, "Received unexpected msg")
-
-    after
-      1_000 -> assert(false, "Did not receive 200 OK on time")
-    end
-
-  end
-
-  @tag :live
-  test "Client Register / OPTIONS / unREGISTER using TLS" do
-
-    sip_ctx = %SIP.Context{
-      username: @username,
-      authusername: @authusername,
-      displayname: @displayname,
-      domain: @domain
-    }
-
-    ctx_set :passwd, @passwd
-
-    Application.put_env(:elixip2, :proxyuri, %SIP.Uri{ domain: @proxy, proto: "TLS", scheme: "sip:", port: 5061 })
-
-    send_REGISTER 600
-    assert ctx_get(:lasterr) == :ok
-
-
-    ^sip_ctx = receive do
-      { 401, rsp, _trans_pid, _dialog_pid } ->
-        send_auth_REGISTER(rsp, 600)
-        sip_ctx
-    end
-
-    # send_sip_request now consumes the dialog layer's {:onnewdialog, :ok, tid}
-    # message and stores the initial transaction in the context.
-    assert is_pid(ctx_get(:last_uac_register_tid))
-
-    ^sip_ctx = receive do
-      { 200, rsp, _trans_pid, _dialog_pid } ->
-        # IO.puts(inspect(rsp.contact.params))
-        assert_a_binding_expires(rsp.contact, "600")
-        sip_ctx
-
-      { resp_code, _rsp, _trans_pid, _dialog_pid } when is_integer(resp_code) ->
-        assert(false, "Received unexpected SIP response #{resp_code}")
-
-      _ -> assert(false, "Received unexpected msg")
-
-    after
-      1_000 -> assert(false, "auth REGISTER reply was was not recieved")
-    end
+    register_and_authenticate(600)
 
     Process.sleep(1000)
 
@@ -372,49 +319,5 @@ defmodule SIP.Test.Register do
 
   end
 
-  @tag :live
-  test "Client Register using WSS" do
-
-    sip_ctx = %SIP.Context{
-      username: @username,
-      authusername: @authusername,
-      displayname: @displayname,
-      domain: @domain
-    }
-
-    ctx_set :passwd, @passwd
-
-    Application.put_env(:elixip2, :proxyuri, %SIP.Uri{ domain: @proxy, proto: "WSS", scheme: "sip:", port: 443 })
-
-    send_REGISTER 600
-    assert ctx_get(:lasterr) == :ok
-
-
-    ^sip_ctx = receive do
-      { 401, rsp, _trans_pid, _dialog_pid } ->
-        send_auth_REGISTER(rsp, 600)
-        sip_ctx
-    end
-
-    # send_sip_request now consumes the dialog layer's {:onnewdialog, :ok, tid}
-    # message and stores the initial transaction in the context.
-    assert is_pid(ctx_get(:last_uac_register_tid))
-
-    ^sip_ctx = receive do
-      { 200, rsp, _trans_pid, _dialog_pid } ->
-        # IO.puts(inspect(rsp.contact.params))
-        assert_a_binding_expires(rsp.contact, "600")
-        sip_ctx
-
-      { resp_code, _rsp, _trans_pid, _dialog_pid } when is_integer(resp_code) ->
-        assert(false, "Received unexpected SIP response #{resp_code}")
-
-      _ -> assert(false, "Received unexpected msg")
-
-    after
-      1_000 -> assert(false, "Did not receive 200 OK on time")
-    end
-
-  end
 
 end
