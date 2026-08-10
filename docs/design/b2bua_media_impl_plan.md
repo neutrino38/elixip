@@ -65,14 +65,15 @@ opposite of the order the design lists them in.
 | **R2** | `bridge/3` + `unbridge/2` in the behaviour, `MediaServer.Mockup` implementation | yes | ✅ |
 | **R2b** | `{:media_timeout, media}` and the derived `:media_lost` | yes | ✅ |
 | **R4** | the offer/answer choreography in `SIP.Session.B2bua`, the implicit bridge (R4.1) and the failure semantics (R4.2) | yes | ✅ |
+| **R4.1b** | reading a re-offer (`b2bua_reoffer_kind/1`), answering it locally (`b2bua_reply_reoffer/1`), and relaying one as OUR offer | yes | ✅ |
 | **R5** | `scenarios/b2bua_media.exs` + its own test | yes | ✅ |
 | **R3** | `MediaServer.Mendooze.Conn`: two endpoints, cross-leg negotiation, the bridge | **yes**, mostly | R3a ✅ R3b ✅ R3c ✅ *(direct attach; transcoders open)* |
 | **R6** | §14.6 — the media server as a failure domain | yes | ✅ *(`stall_ms` left alone — see below)* |
 
-**State (2026-08-09): P3 is delivered except the transcoder chain.** 294 tests
-across the B2BUA, media and Mendooze suites; the media mode works end to end on
-`MediaServer.Mockup`, and the Mendooze adapter builds the session, both
-endpoints and the attach against the fake JSR309 server.
+**State (2026-08-10): P3 is delivered.** The media mode works end to end on
+`MediaServer.Mockup`, the Mendooze adapter builds the session, both endpoints,
+the attach and the transcoder chains against the fake JSR309 server, and a
+re-offer is now read before it is relayed.
 
 **R3 turned out to be CI-testable**, contrary to the row above as first written:
 `mendooze_conn_test.exs` drives a fake JSR309 server and asserts the RPC
@@ -80,9 +81,6 @@ sequence, so the second endpoint, the attach in both directions, `useOriSeqNum`,
 the per-media policy decision and the close ordering are all covered. What still
 needs a real Medooze is only whether the server behaves as its documentation
 says.
-
-What remains: **`b2bua_reoffer_kind/1`** (§R4.1b), without which every re-offer
-crosses.
 
 ### The transcoder chain (delivered 2026-08-10)
 
@@ -179,9 +177,8 @@ the sections above:
 
 - the media failure reason is read through **`b2bua_media_error/0`**, not
   `lasterr` (see R4.2);
-- `b2bua_media.exs` still relays every re-INVITE, because `b2bua_reoffer_kind/1`
-  (R4.1b) is not built. The table in R4.1b is the target, not the current
-  behaviour.
+- R4.1b landed with two atoms the sketch below does not name and one piece of
+  work it does not mention — see "R4.1b as built".
 
 ---
 
@@ -388,6 +385,81 @@ instead of the session state is what lets the first two rows work.
 leg, being the refresher, sending our own refreshes). Detecting an offerless
 re-INVITE and answering it locally is enough to keep a session timer from
 crossing; owning the timer is a separate piece of work.
+
+#### R4.1b as built (2026-08-10)
+
+The reading is `SIP.Msg.Ops.reoffer_kind/2` — message layer, one place, next to
+the REGISTER lifetimes and the asserted identity for the same reason (CLAUDE.md).
+It borrows `MediaServer.SdpTools.parse/1` rather than growing a second SDP
+reader. `SIP.Session.B2bua.reoffer_kind/2` adds only *which* previous description
+to compare against: the last SDP that leg gave us — its offer, or its answer,
+both being that peer describing the same thing — kept per leg in `%State{}` and
+recorded wherever an SDP crosses. `SIP.Session.extract_sdp/1` now delegates to
+`SIP.Msg.Ops.sdp_body/1` for the same reason; it had been the second reading of
+"where is the SDP in this message".
+
+**Two atoms the sketch does not name.** `:no_change` — the offer says exactly
+what the previous one said, which is what a session-timer refresh *with* SDP
+looks like and is not an address change; and `:unknown` — nothing stored to
+compare against, or an SDP neither side can parse. Both matter because the
+scenario names what it absorbs and relays everything else: an unclassifiable
+re-offer must fall on the relay side, and it does.
+
+**A rule the table does not have: a narrowed codec list is a `:media_change`.**
+Our own endpoint could re-answer it alone, so the row would have said "local" —
+but with two legs bridged, the codec both sides settled on is what the direct
+attach relies on, and a peer that drops it has changed something only the far end
+can answer. Precedence is media set, then hold, then addressing: a peer that
+moves *and* goes on hold reads as `:hold`, since swallowing that would leave it
+receiving media it asked to stop.
+
+**The half this section did not spell out, and the reason it was needed.** "The
+propagated kinds are relayed with our own offer substituted the way the initial
+INVITE was (R4)" describes work that did not exist: `apply_media_body/2` was
+called from leg creation only, so in media mode a relayed re-INVITE crossed with
+the *peer's* SDP and the media server was never told. Each side would have read
+the other's SDP on every re-offer — the one thing terminating the media promises
+they never do. So `relay_request/4` now runs the same choreography one exchange
+later: the new description goes to its own endpoint, the far end is offered ours,
+the answer owed to the re-offering leg is held on the `%Pending{}` entry until
+the far end answers, and its answer is fed to its own endpoint on the way back.
+
+**`b2bua_reply_reoffer/1`** answers on this side: the media server takes the new
+description and its answer goes in the 200. An offerless re-INVITE is answered
+with an offer of ours (RFC 3261 §14.2), whose answer arrives in the ACK — so that
+ACK is **absorbed**, not relayed. That is not a nicety: relaying it would post an
+ACK on whatever INVITE transaction was last opened on the other leg, one answered
+minutes ago, which is the exact trap `last_invite` exists to avoid, reached from
+the other side. A scenario keeps its single ACK clause and the framework decides.
+
+**Refused rather than half-built**: relaying an *offerless* re-offer in media
+mode. It would mean answering it with an offer of ours while asking the far end
+for one of its own — two offer/answer exchanges we did not start, over a change
+neither peer made. `b2bua_forward/1` refuses it (`lasterr` says
+`:offerless_reoffer_not_relayable`) and answers 488 on the leg it came from,
+which is the RFC 3261 §14.1 outcome: the session stays as it was. `:no_sdp` is
+classified precisely so a scenario answers those with `b2bua_reply_reoffer/1`.
+
+**The bridge is not re-decided.** It is built once, when the callee answers, and
+a re-offer renegotiates the two endpoints without revisiting it. That is right
+for a hold or a move and wrong for the case that motivated classifying a narrowed
+codec list as `:media_change`: the two legs may no longer share the codec the
+direct attach relies on, and nothing re-runs the `:avoid` decision. A scenario
+that cares does `b2bua_unbridge()` then `b2bua_bridge()` — which is exercised
+against a real Medooze — and re-deciding it automatically is the natural next
+piece of work rather than something this one left half-done.
+
+**Verified on the mockup, not on a real server**: a second `set_remote_offer` on
+a live endpoint. `MediaServer.Mendooze.Conn` re-runs its whole offer path there —
+`StartReceiving`/`StartSending` again on the same endpoint, which is what the
+Java gateway's `processSDPOffer` does for a re-INVITE — but whether Medooze
+tolerates it is a question for the E2E, like the rest of R3.
+
+**Where a re-offer refused by the far end leaves us**: our endpoint has already
+moved to the new description when the 4xx arrives. The refusal crosses untouched
+and both sessions stay as they were per §14.1, but the media server holds a
+description that peer is no longer using until it re-offers. Worth knowing; not
+worth a rollback that would itself need an offer/answer exchange to perform.
 
 ### R4.1c — The ACK of a re-INVITE (found while exploring, fixed 2026-08-09)
 

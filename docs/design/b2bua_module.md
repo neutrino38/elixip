@@ -703,6 +703,15 @@ construction — the same FSM clause shape works in both directions.
   invite_trans_pid)`. (The inbound dialog auto-answers the CANCEL and stops —
   the scenario only has to relay and wind down; §8 covers the leg left
   behind.)
+- In `{:mediaserver, …}` mode a relayed **re-INVITE or UPDATE carrying SDP**
+  runs the §7.2 choreography one exchange later: the peer's new description
+  goes to its own endpoint, the far end is offered ours, and the answer owed
+  to the leg that re-offered is held until the far end answers. An offerless
+  re-offer is not relayable there — `b2bua_reply_reoffer/1` answers it on this
+  side (impl plan §R4.1b).
+- An **ACK for a 200 we sent ourselves** (`b2bua_reply_reoffer/1`) is absorbed
+  rather than translated: the far end never saw that INVITE, and the ACK would
+  otherwise land on an INVITE transaction answered minutes ago.
 - Failure (dead leg, method not allowed, too many transactions) lands in
   `lasterr`, as every other macro.
 
@@ -1111,9 +1120,8 @@ ACK+BYE the late 2xx" cannot be tested credibly against a single shared peer.
 
 ## 11. Phasing
 
-**P1, P2a–c and P2d (§14 resilience) are complete.** What remains after it is media (P3) and parallel forking (P4); the
-§7.5 offer profiles depend on P3, and so does the media-server resilience
-sketched in §14.6.
+**P1, P2a–c, P2d (§14 resilience) and P3 (media) are complete.** What remains is
+parallel forking (P4); the §7.5 offer profiles are the other open item.
 
 P3 has two documents of its own, because §7's "a `bridge/2` callback must be
 added" turned out to understate the problem:
@@ -1165,7 +1173,7 @@ being unconditional as §3.1 first put it. `:none` means one attempt and no
 failover at all — the simpler contract, and the honest one.
 | **P2c** ✅ | dynamic targets (§3.4): the `SIP.B2bua.TargetProvider` behaviour, `%Peer{provider:}`, `b2bua_try_next/0` + the per-attempt ring timeout; `b2bua_cancel_forward/0` (§3.5) with 487 out of the default retry-on list; hunt progress events (§3.6, `notify_progress`). Extends the SERIAL hunt, so it needed nothing from P4; a complete call queue additionally needs P3 for music on hold |
 | **P2d** ✅ | resilience hardening (§14): the dialog traps exits and converts a transaction crash into a synthetic 408 (R1 ✅); the scenario engine catches exits so teardown always runs (R2 ✅); connectionless transport re-selection + exit-safe transport calls (R3 ✅); transport-down broadcast from `terminate/2`, single `{:dialog_terminated}` (R4 ✅); transport-down during a hunt = branch failure, not dialog death (R5 ✅); B2BUA leg-death hook purging the leg and answering its pending requests (R6 ✅); the failure-injection test set (R7, ✅ for the above). §14.6 sketches the media-server failure domain (R8), which lands with P3 |
-| **P3** | `{:mediaserver, …}` mode: leg-qualified media handles, `bridge/2` callback in `MediaServer.Behaviour` + Mendooze implementation, offer/answer choreography; a NEW `scenarios/b2bua_media.exs` with its own test (§12 — `b2bua_basic.exs` stays pure signaling), and the media-server failure domain of §14.6 (R8) |
+| **P3** ✅ | `{:mediaserver, …}` mode: leg-qualified media handles, `bridge/3` + `unbridge/2` in `MediaServer.Behaviour` with the Mendooze implementation (one media session, two endpoints, transcoder chains), the offer/answer choreography on the initial INVITE **and on every re-offer** (`b2bua_reoffer_kind/1` + `b2bua_reply_reoffer/1`); `scenarios/b2bua_media.exs` with its own test (§12 — `b2bua_basic.exs` stays pure signaling), and the media-server failure domain of §14.6 (R8). Breakdown and as-built notes in [b2bua_media_impl_plan.md](b2bua_media_impl_plan.md) |
 | **P4** | parallel forking (branch sets in the leg dialog, §3.3: winner adoption, late-2xx ACK+BYE, best-response aggregation; q-group semantics of §3.2), trunk processes (`trunk_pid`); multi-leg generalization only if attended transfer / 3pcc demands it. `{:rtpengine, …}` is **out of scope** — deferred to the borderline work |
 
 ## 12. Documentation plan
