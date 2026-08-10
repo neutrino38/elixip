@@ -29,51 +29,28 @@ defmodule SIP.Test.DialogRegisterExpiry do
 
   defp contact(params), do: %SIP.Uri{userpart: "alice", domain: "10.0.0.1", params: params}
 
+  # `arm_expiration_timer/2` now reads the lifetime through
+  # `SIP.Msg.Ops.requested_expires/2` (SIPDialogImpl.ex:374), which is the framework's
+  # single reading of RFC 3261 §10.2.4 and is exhaustively covered in
+  # msg_ops_expires_test.exs — precedence per contact, the rebinding shape, the
+  # wildcard, the malformed parameter. This describe used to re-enumerate eight of
+  # those cases through the timer, two of them under the very same test name, which
+  # tested the delegation eight times over and said nothing new after the first.
+  #
+  # What is left is what the DIALOG adds on top of that reading, and nothing else:
+  #
+  #   * the number becomes an armed timer, on the Expires-header path — the one that
+  #     broke every real handset (see the moduledoc) and the reason msg_ops alone is
+  #     not enough here: it proves the value, not that anything was armed with it;
+  #   * 0 becomes a ~1 s teardown rather than 0, which is the dialog's own policy and
+  #     appears nowhere in Msg.Ops.
+  #
+  # The wire-level regression below stays whole: a captured message is not a
+  # re-derivation of the rule, it is the traffic that exposed it.
   describe "inbound REGISTER" do
     test "the Expires header sets the lifetime when the Contact carries no parameter" do
       req = register(contact: contact(%{}), expires: 600)
       assert armed_seconds(req) == 600
-    end
-
-    test "the Contact parameter wins over the Expires header" do
-      req = register(contact: contact(%{"expires" => "900"}), expires: 600)
-      assert armed_seconds(req) == 900
-    end
-
-    test "with neither, the default applies rather than an immediate teardown" do
-      assert armed_seconds(register(contact: contact(%{}))) == 3600
-    end
-
-    test "the longest-lived Contact wins when several are offered" do
-      req = register(contact: [contact(%{"expires" => "120"}), contact(%{"expires" => "800"})])
-      assert armed_seconds(req) == 800
-    end
-
-    # What a real handset does when it rebinds: ONE REGISTER carrying the old
-    # contact with ;expires=0 to drop it, and the new one (bearing a +sip.instance)
-    # whose lifetime is in the Expires header. Resolving the parameter across the
-    # whole request instead of per contact yielded 0 — the removal alone — so the
-    # dialog read a rebinding as an un-registration and tore itself down.
-    test "a rebinding (drop one contact, add another) is NOT an un-registration" do
-      req =
-        register(
-          contact: [
-            contact(%{"expires" => "0"}),
-            %SIP.Uri{
-              userpart: "alice",
-              domain: "10.0.0.2",
-              params: %{"+sip.instance" => "<urn:uuid:f81d4fae>"}
-            }
-          ],
-          expires: 600
-        )
-
-      assert armed_seconds(req) == 600
-    end
-
-    test "a contact with no parameter falls back to the header, per contact" do
-      req = register(contact: [contact(%{"expires" => "0"}), contact(%{})], expires: 300)
-      assert armed_seconds(req) == 300
     end
 
     test "an explicit 0 is an un-registration, whichever source states it" do
@@ -82,8 +59,17 @@ defmodule SIP.Test.DialogRegisterExpiry do
       assert armed_seconds(register(contact: contact(%{}), expires: 0)) == 1
     end
 
-    test "a wildcard Contact + Expires: 0 is an un-registration, not a crash" do
-      assert armed_seconds(register(contact: :*, expires: 0)) == 1
+    # Kept after measuring, not on principle. Breaking `contact_expires/3` into
+    # `header_expires || contact_expires_param(contact) || default` — the first bug
+    # CLAUDE.md lists, a rebinding handset taken for an un-registration — is caught by
+    # msg_ops_expires_test but by NOTHING else here once the precedence cases go: not
+    # by the two tests above, and not by the captured-message regression below, whose
+    # header and parameter happen to agree closely enough to survive it. Three lines
+    # to keep the dialog layer's own reading of the precedence under a test, on the
+    # one rule this tree has re-derived five times.
+    test "the Contact parameter wins over the Expires header" do
+      req = register(contact: contact(%{"expires" => "900"}), expires: 600)
+      assert armed_seconds(req) == 900
     end
   end
 
