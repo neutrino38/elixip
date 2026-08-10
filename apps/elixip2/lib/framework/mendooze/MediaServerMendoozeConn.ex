@@ -1904,6 +1904,7 @@ defmodule MediaServer.Mendooze.Conn do
         rtcp_mux: false
       }
       |> add_offer_webrtc(state, media)
+      |> add_offer_rtp_profile(state, media)
 
     case Map.get(state.accepted, media) do
       nil ->
@@ -1930,6 +1931,21 @@ defmodule MediaServer.Mendooze.Conn do
           Sdp.host_candidates(state.local_ip, Map.fetch!(state.local_ports, media), true),
         rtcp_fb: media == :video
       })
+    else
+      base
+    end
+  end
+
+  # The middle rung of the §7.5 ladder: RTP/AVPF — the feedback profile without
+  # encryption, ICE or muxing. It is what an endpoint that refuses WebRTC but
+  # does NACK/PLI/TMMBR speaks, and until P5 there was no way to offer it: the
+  # offer was binary, DTLS+ICE+SAVPF or plain AVP.
+  #
+  # WebRTC already implies SAVPF, so this is a no-op there — the two options are
+  # a ladder, not a matrix.
+  defp add_offer_rtp_profile(base, state, media) do
+    if not webrtc?(state) and rtp_profile(state) == :avpf do
+      Map.merge(base, %{protocol: "RTP/AVPF", rtcp_fb: media == :video})
     else
       base
     end
@@ -2492,6 +2508,15 @@ defmodule MediaServer.Mendooze.Conn do
   defp bandwidth_kbps(_state, _media), do: 0
 
   defp webrtc?(state), do: Keyword.get(state.opts, :webrtc_support, :no) == :yes
+
+  # Which RTP profile a NON-WebRTC offer is carried in (§7.5). `:avp` — plain
+  # RTP — is the default and what every caller got before P5.
+  defp rtp_profile(state) do
+    case Keyword.get(state.opts, :rtp_profile, :avp) do
+      :avpf -> :avpf
+      _ -> :avp
+    end
+  end
 
   defp webrtc_allowed?(state),
     do: Keyword.get(state.opts, :webrtc_support, :no) in [:yes, :if_offered]

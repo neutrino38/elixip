@@ -15,15 +15,22 @@ defmodule B2BUA.WebrtcGw do
   config(
     domains: :any,
     proxy: "sip:proxy.example.com:5060",
+    # What the callee is offered, and what to offer it next if it refuses
+    # (design §7.5): the ladder is `webrtc → avpf → avp`. `:avp` for a gateway
+    # facing phones that are known never to do WebRTC — one offer, no ladder;
+    # `:webrtc_required` for one that refuses to place the call in the clear.
+    profile: :webrtc_if_supported,
     mediaserver: %{module: :mendooze, url: "http://10.0.0.12:9090"}
   )
 
-  # The browser leg takes WebRTC, the phone leg must not. Audio transcodes only
-  # if the two do not share a codec; video is forced because a browser's VP8 and
-  # a phone's H.264 never meet.
+  # The browser leg takes WebRTC. The phone leg says nothing about transport
+  # here — the profile does, one rung at a time, and writing `webrtc:` in
+  # `outbound:` as well would fix the very thing the ladder exists to discover.
+  # Audio transcodes only if the two do not share a codec; video is forced
+  # because a browser's VP8 and a phone's H.264 never meet.
   @media {:mediaserver,
           inbound: [webrtc: :yes, media: :audio_video],
-          outbound: [webrtc: :no, media: :audio_video],
+          outbound: [media: :audio_video],
           transcode: [audio: :avoid, video: :force]}
 
   state initial_state do
@@ -43,7 +50,11 @@ defmodule B2BUA.WebrtcGw do
           uris: [req.ruri],
           # keep what the proxy asked for; only route it back to the proxy
           ruri: :keep,
-          outbound_proxy: ctx_get(:proxy)
+          outbound_proxy: ctx_get(:proxy),
+          # A phone that answers "Not Acceptable Here" is refusing the BODY, not
+          # the call: the framework offers it the next profile down, on a new
+          # INVITE to the same target, before anything else is tried.
+          profile: ctx_get(:profile)
         }
 
         b2bua_forward(req, peer, @media)
@@ -80,12 +91,22 @@ defmodule B2BUA.WebrtcGw do
 
       # A final from the phone — or a 2xx whose media could not be bridged,
       # which the framework hands over as a 488.
+      #
+      # `b2bua_hunting?/0` is what makes the offer ladder work from here: a 488
+      # relayed while a profile is left is not the end of the call, it is the
+      # framework having just re-offered the same phone something it may accept.
+      # The same question covers a hunt over several targets, which is why it is
+      # asked before anything is concluded.
       {:outbound, {code, resp, _trans, _dlg}} when code >= 300 ->
         b2bua_forward_reply(resp)
 
-        case b2bua_media_error() do
-          nil -> scenario_success("callee answered #{code}")
-          reason -> scenario_failure("call cannot be bridged: #{inspect(reason)}")
+        if b2bua_hunting?() do
+          goto(loop, "#{code}, still placing the call")
+        else
+          case b2bua_media_error() do
+            nil -> scenario_success("callee answered #{code}")
+            reason -> scenario_failure("call cannot be bridged: #{inspect(reason)}")
+          end
         end
 
       {:CANCEL, req, _trans, _dlg} ->

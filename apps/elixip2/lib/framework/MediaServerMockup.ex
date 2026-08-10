@@ -192,6 +192,10 @@ defmodule MediaServer.Mockup.Conn do
     audio_codecs: ["OPUS", "PCMU"],
     text_codecs: ["T140", "T140RED"],
     webrtc_support: :if_offered,
+    # §7.5's middle rung: `:avpf` offers RTP/AVPF (feedback profile, no
+    # encryption or ICE); `:avp` — the default — is the plain RTP offer the mock
+    # has always built.
+    rtp_profile: :avp,
     ice_delay_ms: @default_ice_delay_ms,
     echo: false,
     # The other half of a B2BUA media path: incoming packets are handed to it,
@@ -220,6 +224,7 @@ defmodule MediaServer.Mockup.Conn do
       audio_codecs: List.wrap(Keyword.get(opts, :audio_codec, ["OPUS", "PCMU"])),
       text_codecs: List.wrap(Keyword.get(opts, :text_codec, ["T140", "T140RED"])),
       webrtc_support: Keyword.get(opts, :webrtc_support, :if_offered),
+      rtp_profile: if(Keyword.get(opts, :rtp_profile) == :avpf, do: :avpf, else: :avp),
       ice_delay_ms: Keyword.get(opts, :ice_delay_ms, @default_ice_delay_ms),
       # Simulated local security material (no real DTLS/ICE stack behind it):
       # enough to build and parse plausible WebRTC SDP.
@@ -490,17 +495,24 @@ defmodule MediaServer.Mockup.Conn do
       |> maybe_bw(bandwidth_for(state, media))
       |> maybe_dtmf(media)
 
-    if webrtc? do
-      Map.merge(base, %{
-        crypto: {:dtls, :actpass, "sha-256", state.local_fingerprint},
-        ice: state.local_ice,
-        rtcp_mux: true,
-        mid: to_string(media),
-        candidates: Sdp.host_candidates(ip_str, port, true),
-        rtcp_fb: media == :video
-      })
-    else
-      base
+    cond do
+      webrtc? ->
+        Map.merge(base, %{
+          crypto: {:dtls, :actpass, "sha-256", state.local_fingerprint},
+          ice: state.local_ice,
+          rtcp_mux: true,
+          mid: to_string(media),
+          candidates: Sdp.host_candidates(ip_str, port, true),
+          rtcp_fb: media == :video
+        })
+
+      # The §7.5 middle rung: the feedback profile, nothing else. WebRTC already
+      # implies SAVPF, hence the ordering — the two are a ladder, not a matrix.
+      state.rtp_profile == :avpf ->
+        Map.merge(base, %{protocol: "RTP/AVPF", rtcp_fb: media == :video})
+
+      true ->
+        base
     end
   end
 
@@ -586,7 +598,10 @@ defmodule MediaServer.Mockup.Conn do
         rtpmaps: rtpmaps,
         fmtp: %{},
         direction: Sdp.reverse_direction(desc.direction),
-        protocol: desc.protocol
+        protocol: desc.protocol,
+        # Feedback is answered whenever the offer's profile carries it — which is
+        # every WebRTC offer, and a plain RTP/AVPF one (§7.5's middle rung) too.
+        rtcp_fb: desc.type == :video and String.ends_with?(desc.protocol, "F")
       }
       |> maybe_bw(Sdp.negotiate_bandwidth(desc.bandwidth, bandwidth_for(state, desc.type)))
 
@@ -596,8 +611,7 @@ defmodule MediaServer.Mockup.Conn do
         ice: state.local_ice,
         rtcp_mux: desc.rtcp_mux,
         mid: desc.mid,
-        candidates: Sdp.host_candidates(ip_str, port, desc.rtcp_mux),
-        rtcp_fb: desc.type == :video and String.ends_with?(desc.protocol, "F")
+        candidates: Sdp.host_candidates(ip_str, port, desc.rtcp_mux)
       })
     else
       base

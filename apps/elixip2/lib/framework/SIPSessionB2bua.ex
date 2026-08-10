@@ -31,6 +31,17 @@ defmodule SIP.B2bua.Peer do
       `uris`.
     * `retry_on` — which final responses make a `:serial` hunt move on to the
       next target: a list of codes and/or ranges, or `nil` for the default.
+    * `profile` — the media profile the outbound offer is carried in, and the
+      ladder walked when the callee refuses it (§7.5, `SIP.B2bua.Profile`):
+      `:webrtc_required` | `:webrtc_if_supported` | `:avpf_required` |
+      `:avpf_if_supported` | `:avp`. `nil` (the default) leaves the offer to the
+      `{:mediaserver, outbound: …}` options, unchanged. Only meaningful with a
+      media server: without one the offer relayed is the caller's.
+    * `fallback_on` — which final responses walk the profile ladder down a rung
+      instead of ending the attempt. `[488]` by default; some equipment says
+      `415` or `606` for the same thing, which is why it is a list. A code here
+      never ends the attempt while a rung is left — the hunt only sees it once
+      the ladder has bottomed out.
     * `notify_progress` — surface `{:outbound, {:serial_*, …}}` events as the
       hunt walks its targets (design §3.6). Off by default: a hunt is otherwise
       silent, and a scenario that did not ask should not receive framework
@@ -46,6 +57,8 @@ defmodule SIP.B2bua.Peer do
             ruri: :peer,
             provider: nil,
             retry_on: nil,
+            profile: nil,
+            fallback_on: nil,
             notify_progress: false,
             outbound_proxy: nil,
             trunk_pid: nil
@@ -103,7 +116,12 @@ defmodule SIP.B2bua.Leg do
             # `hunting?/1` from reading the attempt still being cancelled as a
             # hunt in progress.
             cancelled: false,
-            media: false
+            media: false,
+            # The offer profile the rung in flight was dialled with, and what is
+            # left under it (§7.5). Both are `nil`/`[]` unless the peer named a
+            # `profile:`, which is what keeps every pre-P5 leg identical.
+            profile: nil,
+            profiles_left: []
 end
 
 defmodule SIP.B2bua.Pending do
@@ -193,7 +211,7 @@ defmodule SIP.Session.B2bua do
   """
   require Logger
 
-  alias SIP.B2bua.{Hunt, Leg, MediaPlan, Peer, Pending, State}
+  alias SIP.B2bua.{Hunt, Leg, MediaPlan, Peer, Pending, Profile, State}
   alias SIP.Session.Media
 
   @appdata_key :__b2bua__
@@ -587,6 +605,16 @@ defmodule SIP.Session.B2bua do
       peer.uris == [] and provider_of(peer) == nil ->
         fail(sip_ctx, {:b2bua, :no_target})
 
+      not Profile.valid?(peer.profile) ->
+        fail(sip_ctx, {:b2bua, :unknown_offer_profile, peer.profile})
+
+      # An offer profile means GENERATING an offer, which only a media server
+      # does: a signalling relay forwards the caller's, and an AVP caller cannot
+      # be turned into a WebRTC one (§7.5). Refused where it was written rather
+      # than quietly ignored.
+      peer.profile != nil and media == false ->
+        fail(sip_ctx, {:b2bua, :profile_needs_media_server, peer.profile})
+
       true ->
         # What this leg said about its media, kept from the very first message:
         # it is what a re-offer from it will be read against (§R4.1b).
@@ -595,7 +623,7 @@ defmodule SIP.Session.B2bua do
         # The media plane is set up BEFORE anything is dialled: the offer we
         # forward is ours, not the caller's, and there is no point creating a leg
         # we cannot give a body to.
-        case setup_media(sip_ctx, req, media) do
+        case setup_media(sip_ctx, req, media, first_rung(peer)) do
           {:error, sip_ctx} ->
             sip_ctx
 
@@ -652,8 +680,17 @@ defmodule SIP.Session.B2bua do
     put_state(sip_ctx, %State{state(sip_ctx) | media: plan})
   end
 
+  # The profile the first offer is carried in, and `nil` when the peer named
+  # none — in which case the `outbound:` options say it, as they did before P5.
+  defp first_rung(%Peer{} = peer) do
+    case Profile.ladder(peer.profile) do
+      [rung | _] -> rung
+      [] -> nil
+    end
+  end
+
   # Signalling relay: the SDP crosses verbatim and there is nothing to set up.
-  defp setup_media(sip_ctx, _req, false), do: {:ok, sip_ctx}
+  defp setup_media(sip_ctx, _req, false, _rung), do: {:ok, sip_ctx}
 
   # `{:mediaserver, …}`: both legs terminate their media on the server, so the
   # bodies that cross are OURS in both directions. Two steps, in this order, and
@@ -666,9 +703,9 @@ defmodule SIP.Session.B2bua do
   #   2. generate our offer for the outbound leg, inside the SAME media session
   #      as the inbound endpoint (`bridge_with:`), because that is the only place
   #      the two can later be attached.
-  defp setup_media(sip_ctx, req, {:mediaserver, opts}) do
+  defp setup_media(sip_ctx, req, {:mediaserver, opts}, rung) do
     inbound_opts = Keyword.get(opts, :inbound, [])
-    outbound_opts = Keyword.get(opts, :outbound, [])
+    outbound_opts = profiled_outbound_opts(opts, rung)
 
     with {:ok, policy} <- MediaServer.transcoding_policy(Keyword.get(opts, :transcode, [])),
          {:ok, offer_a} <- caller_offer(req),
@@ -711,6 +748,17 @@ defmodule SIP.Session.B2bua do
     err -> {sip_ctx, {:error, {:media_raised, Exception.message(err)}}}
   catch
     :exit, reason -> {sip_ctx, {:error, {:media_down, reason}}}
+  end
+
+  # The outbound media options for a given rung of the ladder: the scenario's
+  # own, with the profile's on top. The scenario says WHICH medias and codecs it
+  # wants; the profile says how they are carried, and it is the one thing that
+  # changes between two attempts at the same target (§7.5). No rung — no profile
+  # named — leaves the options exactly as written.
+  defp profiled_outbound_opts(opts, nil), do: Keyword.get(opts, :outbound, [])
+
+  defp profiled_outbound_opts(opts, rung) do
+    Keyword.merge(Keyword.get(opts, :outbound, []), Profile.conn_opts(rung))
   end
 
   # Our offer for the callee. `bridge_with: :inbound` puts this endpoint in the
@@ -964,7 +1012,9 @@ defmodule SIP.Session.B2bua do
         |> note_progress({:serial_attempting, uri, now()})
 
       %Leg{} = leg ->
-        case call_leg(fn -> SIP.Dialog.fork_branch(leg.dialogpid, uri) end) do
+        {sip_ctx, fork_opts, profile, profiles_left} = restart_ladder(sip_ctx, leg)
+
+        case call_leg(fn -> SIP.Dialog.fork_branch(leg.dialogpid, uri, fork_opts) end) do
           {:ok, new_trans} ->
             sip_ctx
             |> move_correlation(leg.initial_trans, new_trans)
@@ -972,7 +1022,9 @@ defmodule SIP.Session.B2bua do
               leg
               | target: uri,
                 initial_trans: new_trans,
-                branches: [{new_trans, uri}]
+                branches: [{new_trans, uri}],
+                profile: profile,
+                profiles_left: profiles_left
             })
             |> put_last_invite(@outbound_tag, leg.method, new_trans)
             |> note_progress({:serial_attempting, uri, now()})
@@ -1064,7 +1116,14 @@ defmodule SIP.Session.B2bua do
     # the branch rather than the dialog. The siblings of a parallel rung go the
     # same way — armed inside the dialog's init, before any of their responses
     # can be processed (SIP.Dialog.start_dialog/5).
-    forking = untried != [] or provider_of(peer) != nil
+    # A ladder with a rung left counts as forking for the same reason a hunt
+    # does: this attempt's failure must end the BRANCH and not the dialog, or
+    # there is nothing left to offer the next profile on (§7.5). A `_required`
+    # profile has one rung and therefore changes nothing.
+    forking =
+      untried != [] or provider_of(peer) != nil or
+        length(Profile.ladder(peer.profile)) > 1
+
     sibling_uris = Enum.map(siblings, &branch_uri(fwd, &1, peer))
 
     dialog_opts = [
@@ -1087,7 +1146,9 @@ defmodule SIP.Session.B2bua do
           untried: untried,
           method: fwd.method,
           initial_trans: trans_pid,
-          media: media
+          media: media,
+          profile: first_rung(peer),
+          profiles_left: Enum.drop(Profile.ladder(peer.profile), 1)
         }
 
         sip_ctx
@@ -1506,15 +1567,13 @@ defmodule SIP.Session.B2bua do
         # A refusal from one target of a serial hunt is not the answer to the
         # call — it is the answer of one device. Try the next one instead of
         # telling the caller the call failed.
-        cond do
-          provider_hunt?(sip_ctx, resp, tid) ->
-            ask_provider_next(sip_ctx, resp, pending, tid)
-
-          next_rung?(sip_ctx, resp, tid) ->
-            try_next_rung(sip_ctx, resp, pending, tid)
-
-          true ->
-            relay_reply(sip_ctx, resp, pending, tid)
+        # Before the hunt: a refusal of the OFFER is not a refusal by the device,
+        # and the same targets get another profile before the next ones get
+        # anything (§7.5).
+        if fallback?(sip_ctx, resp, tid) do
+          fall_back_one_rung(sip_ctx, resp, pending, tid)
+        else
+          hunt_or_relay(sip_ctx, resp, pending, tid)
         end
 
       nil ->
@@ -1882,8 +1941,9 @@ defmodule SIP.Session.B2bua do
     leg = outbound_leg(sip_ctx)
     [rung | rest] = leg.untried
     uris = Enum.map(rung, &branch_uri(%{ruri: leg.fwd_ruri}, &1, leg.peer))
+    {sip_ctx, fork_opts, profile, profiles_left} = restart_ladder(sip_ctx, leg)
 
-    case call_leg(fn -> SIP.Dialog.fork_branch(leg.dialogpid, uris) end) do
+    case call_leg(fn -> SIP.Dialog.fork_branch(leg.dialogpid, uris, fork_opts) end) do
       {:ok, new_trans} ->
         new_trans = List.wrap(new_trans)
 
@@ -1908,7 +1968,9 @@ defmodule SIP.Session.B2bua do
           | target: hd(rung),
             branches: Enum.zip(new_trans, rung),
             untried: rest,
-            initial_trans: rep
+            initial_trans: rep,
+            profile: profile,
+            profiles_left: profiles_left
         })
         |> put_last_invite(@outbound_tag, leg.method, rep)
         |> note_progress({:serial_not_reachable, leg.target, resp.response, now()})
@@ -1929,6 +1991,181 @@ defmodule SIP.Session.B2bua do
         |> put_leg(@outbound_tag, %Leg{leg | untried: []})
         |> note_progress({:serial_not_reachable, hd(rung), :transport_error, now()})
         |> relay_reply(resp, pending, tid)
+    end
+  end
+
+  # A refusal of one target is not the answer to the call: try the next one
+  # instead of telling the caller it failed. Shared by the ordinary path and by
+  # the ladder that has run out of rungs — after which a fallback code IS an
+  # ordinary refusal and `retry_on` gets its usual say.
+  defp hunt_or_relay(sip_ctx, resp, %Pending{} = pending, tid) do
+    cond do
+      provider_hunt?(sip_ctx, resp, tid) -> ask_provider_next(sip_ctx, resp, pending, tid)
+      next_rung?(sip_ctx, resp, tid) -> try_next_rung(sip_ctx, resp, pending, tid)
+      true -> relay_reply(sip_ctx, resp, pending, tid)
+    end
+  end
+
+  # ── The offer-profile ladder (§7.5) ─────────────────────────────────────────
+
+  # "This offer, not this device": the codes that walk the ladder down instead of
+  # ending the attempt. 488 is the RFC 3261 §21.4.26 answer to a body a UAS
+  # cannot accept; `fallback_on` exists because some equipment says 415 or 606
+  # for the same thing.
+  @default_fallback_on [488]
+
+  # Does this final response send the SAME targets one profile down? Only the
+  # rung in flight can, and only while the ladder has a rung left — the dialog
+  # having already aggregated the rung's branches (§16.7), getting here means
+  # every one of them is done.
+  defp fallback?(sip_ctx, resp, tid) do
+    with %Leg{initial_trans: ^tid, cancelled: false, profiles_left: [_ | _], peer: peer} <-
+           outbound_leg(sip_ctx),
+         true <- resp.response >= 300 and fallback_code?(peer, resp.response) do
+      true
+    else
+      _ -> false
+    end
+  end
+
+  defp fallback_code?(%Peer{fallback_on: nil}, code), do: code in @default_fallback_on
+
+  defp fallback_code?(%Peer{fallback_on: specs}, code) when is_list(specs),
+    do: matches_any?(specs, code)
+
+  defp fallback_code?(%Peer{fallback_on: %Range{} = r}, code), do: code in r
+  defp fallback_code?(_peer, _code), do: false
+
+  # Re-dial the rung that just refused, one profile down. Three steps, and the
+  # first is the one that costs: a local description belongs to its endpoint, so
+  # another profile means another endpoint (§7.5, R3).
+  #
+  # The caller is not part of this. Their answer was decided when their offer was
+  # read and is still held; their leg's endpoint is untouched. What they will
+  # eventually receive says nothing about how many profiles it took.
+  defp fall_back_one_rung(sip_ctx, resp, %Pending{} = pending, tid) do
+    leg = outbound_leg(sip_ctx)
+    [profile | rest] = leg.profiles_left
+
+    case regenerate_offer(sip_ctx, profile) do
+      {:ok, sip_ctx, offer} ->
+        uris =
+          Enum.map(leg.branches, fn {_tid, target} ->
+            branch_uri(%{ruri: leg.fwd_ruri}, target, leg.peer)
+          end)
+
+        case call_leg(fn -> SIP.Dialog.fork_branch(leg.dialogpid, uris, body: offer) end) do
+          {:ok, new_trans} ->
+            new_trans = List.wrap(new_trans)
+            [rep | _] = new_trans
+
+            Logger.info(
+              module: __MODULE__,
+              message:
+                "b2bua: #{leg.target} answered #{resp.response} to a #{leg.profile} offer; " <>
+                  "re-offering #{profile} (#{length(rest)} profile(s) left)"
+            )
+
+            sip_ctx
+            |> drop_pending(tid)
+            |> add_pending(rep, pending.orig_req, pending.orig_leg, pending.method)
+            |> put_leg(@outbound_tag, %Leg{
+              leg
+              | branches: Enum.zip(new_trans, Enum.map(leg.branches, &elem(&1, 1))),
+                initial_trans: rep,
+                profile: profile,
+                profiles_left: rest
+            })
+            |> put_last_invite(@outbound_tag, leg.method, rep)
+            |> note_progress({:profile_fallback, leg.target, profile, now()})
+            |> SIP.Context.set(:lasterr, :ok)
+
+          other ->
+            abandon_ladder(sip_ctx, resp, pending, tid, leg, {:fork_branch, other})
+        end
+
+      {:error, sip_ctx, reason} ->
+        abandon_ladder(sip_ctx, resp, pending, tid, leg, reason)
+    end
+  end
+
+  # The ladder cannot be walked (the media server refused the next profile, the
+  # dialog is gone…). Clearing what is left is what makes this response an
+  # ordinary refusal again, so the hunt decides — and the caller learns
+  # something rather than waiting for an answer that will never come.
+  defp abandon_ladder(sip_ctx, resp, pending, tid, %Leg{} = leg, reason) do
+    Logger.warning(
+      module: __MODULE__,
+      message:
+        "b2bua: cannot offer the next profile (#{inspect(reason)}); #{resp.response} stands"
+    )
+
+    sip_ctx
+    |> put_leg(@outbound_tag, %Leg{leg | profiles_left: []})
+    |> hunt_or_relay(resp, pending, tid)
+  end
+
+  # What the NEXT set of targets is offered, and where the ladder stands for
+  # them. Every rung of targets starts at the top of it: a profile was refused by
+  # one device, which says nothing about the next.
+  #
+  # Without this, one desk phone answering 488 would leave the browser contact
+  # behind it an AVP offer — which it refuses too, with no rung left to recover
+  # with. A contact would be unreachable because another contact of the same AOR
+  # was tried first.
+  #
+  # Already at the top (the ordinary case: the previous rung simply did not
+  # answer) nothing is rebuilt, and the offer generated once is reused by every
+  # branch, exactly as before P5.
+  defp restart_ladder(sip_ctx, %Leg{peer: peer} = leg) do
+    case Profile.ladder(peer.profile) do
+      [] ->
+        {sip_ctx, [], nil, []}
+
+      [top | rest] when top === leg.profile ->
+        {sip_ctx, [], top, rest}
+
+      [top | rest] ->
+        case regenerate_offer(sip_ctx, top) do
+          {:ok, sip_ctx, offer} ->
+            {sip_ctx, [body: offer], top, rest}
+
+          {:error, sip_ctx, reason} ->
+            # The next targets are rung with the offer we have rather than not
+            # rung at all: a hunt that stops because the media server hiccuped
+            # would lose a call that had other places to go.
+            Logger.warning(
+              module: __MODULE__,
+              message:
+                "b2bua: cannot restart the offer ladder (#{inspect(reason)}); " <>
+                  "the next targets keep the #{inspect(leg.profile)} offer"
+            )
+
+            {sip_ctx, [], leg.profile, leg.profiles_left}
+        end
+    end
+  end
+
+  # Our offer, built again for another profile. The endpoint that carried the
+  # refused one is closed first: its ports, its DTLS material and the profile of
+  # its m= lines were fixed when it was created, and none of them can be
+  # re-negotiated in place.
+  defp regenerate_offer(sip_ctx, profile) do
+    case media_plan(sip_ctx) do
+      %MediaPlan{opts: opts} = plan ->
+        sip_ctx = Media.drop_peer_connection(sip_ctx, :outbound)
+
+        case media_offer(sip_ctx, profiled_outbound_opts(opts, profile)) do
+          {:ok, sip_ctx, offer} ->
+            plan = %MediaPlan{plan | outbound_offer: offer, bridged: false}
+            {:ok, put_media_plan(sip_ctx, plan), offer}
+
+          {:error, sip_ctx, reason} ->
+            {:error, sip_ctx, reason}
+        end
+
+      _ ->
+        {:error, sip_ctx, :no_media_plan}
     end
   end
 

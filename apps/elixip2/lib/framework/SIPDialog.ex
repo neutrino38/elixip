@@ -316,11 +316,27 @@ defmodule SIP.Dialog do
 
   Who calls it: the session layer, which owns the target list and the retry
   policy (`%SIP.B2bua.Peer{}`). This layer owns only the branch set.
+
+  ## `body:` — the same request, asked differently (§7.5)
+
+  `fork_branch(pid, targets, body: sdp)` replaces the initial request's body for
+  this branch set and **every one armed after it**, and bumps the CSeq while
+  doing so. It is what an offer-profile fallback is made of: the same targets,
+  offered another media profile because they refused the first.
+
+  The CSeq bump is not a detail. Branches share a CSeq because they are one
+  request asked of several places; two *different* bodies under one CSeq are two
+  different requests, and RFC 3261 §8.2.2.2 has a name for the second one — a
+  merged request, answered `482 Loop Detected`. The refusal we are reacting to
+  has just been ACKed, so the callee's server transaction is still alive (timer I
+  on UDP), which is precisely the window §8.2.2.2 covers.
+
+  Without `body:` nothing is re-stamped and a branch is exactly what it was.
   """
-  @spec fork_branch(pid(), SIP.Uri.t() | [SIP.Uri.t()]) ::
+  @spec fork_branch(pid(), SIP.Uri.t() | [SIP.Uri.t()], keyword()) ::
           {:ok, pid()} | {:ok, [pid()]} | {:error, any()}
-  def fork_branch(dialog_pid, target) when is_pid(dialog_pid) do
-    GenServer.call(dialog_pid, {:fork_branch, target})
+  def fork_branch(dialog_pid, target, opts \\ []) when is_pid(dialog_pid) and is_list(opts) do
+    GenServer.call(dialog_pid, {:fork_branch, target, opts})
   end
 
   @spec challenge(pid(), map(), 401 | 407, any()) :: any()

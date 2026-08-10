@@ -75,17 +75,19 @@ A binary or a `%SIP.Uri{}` is shorthand for a one-target peer. The full form:
 |---|---|---|
 | `uris` | `[]` | Ordered target list (binaries or `%SIP.Uri{}`, possibly already carrying their destination). Exclusive with `provider` |
 | `use_srv` | `false` | Resolve each target through DNS SRV (RFC 3263). SRV multiplicity is a failover list, always tried in order |
-| `fork` | `:none` | `:none` — one attempt, no failover; `:serial` — walk the list on a retryable refusal |
+| `fork` | `:none` | `:none` — one attempt, no failover; `:serial` — walk the list on a retryable refusal; `:parallel` — each entry of `uris` is a *rung*, and a nested entry is a group rung all at once |
 | `ruri` | `:peer` | `:peer` rewrites the forwarded R-URI to the target (mandatory to reach a registered contact); `:keep` preserves it and only *routes* to the target (trunk / gateway) |
 | `retry_on` | `nil` | Which finals make a serial hunt move on: a list of codes and/or ranges. Default `400..599`; `487` never retries |
 | `provider` | `nil` | `{module, server}` handing out targets one at a time instead of `uris` |
+| `profile` | `nil` | The media profile the callee is offered, and the ladder walked if it refuses. Needs a media server — see [Offer profiles](#offer-profiles) |
+| `fallback_on` | `nil` | Which finals walk that ladder down instead of ending the attempt. Default `[488]` |
 | `notify_progress` | `false` | Surface the hunt's progress as `{:outbound, …}` events |
 | `outbound_proxy` | `nil` | Per-peer next hop, winning over the global `:proxyuri` |
 
 Forking creates branches **inside** the leg's dialog, never a second leg — a hunt
 over ten devices is one outbound dialog, and nothing above it notices how many
-were tried. Parallel forking (ringing them all at once) is not available yet;
-`fork: :serial` is the working value.
+were tried. That holds for `:parallel` too: the first `2xx` wins the rung, the
+losers are CANCELled, and the caller gets one final response.
 
 ### Relaying
 
@@ -166,6 +168,35 @@ A `2xx` whose media cannot be bridged reaches the scenario as a `488`, so it
 reads as one device refusing rather than as the call failing.
 `b2bua_media_error/0` is where the reason is, since the relay that followed
 succeeded and `lasterr` truthfully says `:ok`.
+
+#### Offer profiles
+
+`inbound:` and `outbound:` say how each leg terminates its media, which works
+when you know what the far end speaks. When you do not — a gateway calling
+whatever phone the proxy points at — `%Peer{profile:}` offers one and walks a
+ladder down when the callee refuses:
+
+| profile | offered | on a refusal |
+|---|---|---|
+| `:webrtc_required` | DTLS-SRTP / RTP-SAVPF, ICE, rtcp-mux | the attempt failed |
+| `:webrtc_if_supported` | same | fall back one rung |
+| `:avpf_required` | `RTP/AVPF` | the attempt failed |
+| `:avpf_if_supported` | same | fall back one rung |
+| `:avp` | plain `RTP/AVP` | the attempt failed (nothing below) |
+| `nil` (default) | whatever `outbound:` says | never |
+
+A fallback is a **new INVITE to the same target**, on a new CSeq and carrying an
+offer built by a fresh endpoint on the media server: a local description belongs
+to the endpoint that made it, so another profile means another endpoint. The hunt
+only moves to the next *target* once the ladder has bottomed out, and each new
+target starts at the top of it again — what one phone refused says nothing about
+the next one.
+
+Two things a scenario owes for this to work: leave `webrtc:` out of `outbound:`
+(writing it there fixes what the ladder is there to discover), and ask
+`b2bua_hunting?/0` before concluding anything on a `>= 300` — a relayed 488 with
+a rung left means the call is still being placed. Both are done in
+`scenarios/webrtc-gw.exs`.
 
 The media plane is call-scoped — one server connection, two endpoints — so the
 server going away takes the **call** down, not one leg:
@@ -597,12 +628,16 @@ The callee is an ordinary SIP phone behind the same proxy and understands none o
 that. The gateway terminates the media on both sides and lets the media server
 translate between them.
 
-Two things make this scenario different from the two above:
+Three things make this scenario different from the two above:
 
-- `media` is `{:mediaserver, …}`, with `webrtc:` set differently on each leg.
-  From there the SDP bodies that cross are **ours** in both directions: the
-  browser is answered by the media server, the phone is offered by the media
-  server, and the two endpoints are attached when the phone answers;
+- `media` is `{:mediaserver, …}`, with `webrtc: :yes` on the browser leg. From
+  there the SDP bodies that cross are **ours** in both directions: the browser is
+  answered by the media server, the phone is offered by the media server, and the
+  two endpoints are attached when the phone answers;
+- the phone leg carries a `profile:` instead of a fixed `webrtc:`. What the phone
+  speaks is not known here — it is whatever the proxy pointed at — so the gateway
+  offers WebRTC, then `RTP/AVPF`, then plain `RTP/AVP`, one INVITE per rung, and
+  stops at the first the phone accepts. See [Offer profiles](#offer-profiles);
 - the call now has a media plane it can lose, which is three more clauses.
 
 The R-URI is kept and the request routed back to the proxy — the proxy decided
@@ -617,15 +652,21 @@ defmodule B2BUA.WebrtcGw do
   config(
     domains: :any,
     proxy: "sip:proxy.example.com:5060",
+    # What the phone is offered, and what to offer it next if it refuses: the
+    # ladder is `webrtc -> avpf -> avp`. `:avp` for a gateway facing phones known
+    # never to do WebRTC; `:webrtc_required` for one that refuses to place the
+    # call in the clear.
+    profile: :webrtc_if_supported,
     mediaserver: %{module: :mendooze, url: "http://10.0.0.12:9090"}
   )
 
-  # The browser leg takes WebRTC, the phone leg must not. Audio transcodes only
-  # if the two do not share a codec; video is forced because a browser's VP8 and
-  # a phone's H.264 never meet.
+  # The browser leg takes WebRTC. The phone leg says nothing about transport
+  # here — the profile does, one rung at a time. Audio transcodes only if the two
+  # do not share a codec; video is forced because a browser's VP8 and a phone's
+  # H.264 never meet.
   @media {:mediaserver,
           inbound: [webrtc: :yes, media: :audio_video],
-          outbound: [webrtc: :no, media: :audio_video],
+          outbound: [media: :audio_video],
           transcode: [audio: :avoid, video: :force]}
 
   state initial_state do
@@ -645,7 +686,11 @@ defmodule B2BUA.WebrtcGw do
           uris: [req.ruri],
           # keep what the proxy asked for; only route it back to the proxy
           ruri: :keep,
-          outbound_proxy: ctx_get(:proxy)
+          outbound_proxy: ctx_get(:proxy),
+          # A phone that answers "Not Acceptable Here" is refusing the BODY, not
+          # the call: the framework offers it the next profile down, on a new
+          # INVITE to the same target, before anything else is tried.
+          profile: ctx_get(:profile)
         }
 
         b2bua_forward(req, peer, @media)

@@ -202,6 +202,11 @@ defmodule MediaServer do
           video_bandwidth: pos_integer(),
           audio_bandwidth: pos_integer(),
           webrtc_support: :yes | :no | :if_offered | :no_avp,
+          # Which RTP profile a NON-WebRTC offer is carried in (b2bua_module.md
+          # §7.5): `:avpf` offers RTP/AVPF — the feedback profile without
+          # encryption or ICE — and `:avp` (the default) plain RTP. Ignored when
+          # `webrtc_support: :yes`, which already implies SAVPF.
+          rtp_profile: :avp | :avpf,
           # let the media server follow a symmetric NAT's mapping instead of the
           # send address the peer signalled. `:auto` (the default) leaves it to the
           # adapter, which enables it on the legs that ANSWER a remote offer —

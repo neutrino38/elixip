@@ -382,6 +382,59 @@ defmodule SIP.DialogImpl do
     end
   end
 
+  # A branch set asked with a REPLACEMENT BODY (the offer-profile fallback of
+  # b2bua_module.md §7.5): re-stamp the stored initial request, which is the
+  # template `arm_branch/2` composes every branch from, and move the CSeq on.
+  #
+  # The CSeq is what makes this more than a body swap. Branches share a CSeq
+  # because they are one request asked of several places; two different bodies
+  # under one CSeq are two different requests, and the second is a merged request
+  # under RFC 3261 §8.2.2.2 — answered 482 Loop Detected by any UAS whose server
+  # transaction is still alive, which after a just-ACKed refusal it is (timer I).
+  #
+  # `state.msg` is also what the BYE and the transport-failure paths read, so
+  # re-stamping it — rather than passing a body down to arm_branch/2 — is what
+  # keeps the dialog's idea of its own request true.
+  defp restamp_initial_request(state, opts) do
+    case Keyword.get(opts, :body) do
+      nil ->
+        state
+
+      body ->
+        [_seqno, method] = state.msg.cseq
+
+        msg =
+          state.msg
+          |> Map.put(:cseq, [state.cseq, method])
+          |> SIP.Msg.Ops.update_sip_msg({:body, normalize_body(body)})
+
+        %SIP.DialogImpl{state | msg: msg, cseq: state.cseq + 1}
+    end
+  end
+
+  # A replacement body is given as an SDP string (the ordinary case) or as the
+  # body list the message layer stores.
+  defp normalize_body(sdp) when is_binary(sdp),
+    do: [%{contenttype: "application/sdp", data: sdp}]
+
+  defp normalize_body(body) when is_list(body), do: body
+
+  defp arm_rung(state, target) do
+    cond do
+      is_list(target) ->
+        {results, state} = Enum.map_reduce(target, state, fn t, st -> arm_branch(st, t) end)
+
+        case Enum.split_with(results, &match?({:ok, _}, &1)) do
+          {[], [{:error, reason} | _]} -> {:reply, {:error, reason}, state}
+          {armed, _failed} -> {:reply, {:ok, Enum.map(armed, fn {:ok, pid} -> pid end)}, state}
+        end
+
+      true ->
+        {ret, state} = arm_branch(state, target)
+        {:reply, ret, state}
+    end
+  end
+
   # --------------------------- General expiration timer -------------------------
   def arm_expiration_timer(state = %SIP.DialogImpl{}, req) when req.method == :INVITE do
     expire =
@@ -862,7 +915,7 @@ defmodule SIP.DialogImpl do
   # arriving between two arms finds an empty branch table, reads as "the last
   # branch died", and is relayed to the caller while two more phones are about to
   # ring. Inside one handle_call nothing can interleave.
-  def handle_call({:fork_branch, target}, _from, state) do
+  def handle_call({:fork_branch, target, opts}, _from, state) do
     cond do
       state.direction != :outbound ->
         {:reply, {:error, :not_outbound}, state}
@@ -874,17 +927,8 @@ defmodule SIP.DialogImpl do
       is_nil(state.msg) ->
         {:reply, {:error, :no_initial_request}, state}
 
-      is_list(target) ->
-        {results, state} = Enum.map_reduce(target, state, fn t, st -> arm_branch(st, t) end)
-
-        case Enum.split_with(results, &match?({:ok, _}, &1)) do
-          {[], [{:error, reason} | _]} -> {:reply, {:error, reason}, state}
-          {armed, _failed} -> {:reply, {:ok, Enum.map(armed, fn {:ok, pid} -> pid end)}, state}
-        end
-
       true ->
-        {ret, state} = arm_branch(state, target)
-        {:reply, ret, state}
+        arm_rung(restamp_initial_request(state, opts), target)
     end
   end
 

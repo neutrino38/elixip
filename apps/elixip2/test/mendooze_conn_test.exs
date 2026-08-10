@@ -618,6 +618,55 @@ defmodule Mendooze.ConnTest do
     assert audio.ice == %{ufrag: ufrag, pwd: pwd}
   end
 
+  # ── The §7.5 ladder's middle rung ───────────────────────────────────────────
+
+  test "rtp_profile: :avpf offers RTP/AVPF — the feedback profile, and nothing else" do
+    %{server: server} = start_media_server()
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :audio_video,
+        webrtc_support: :no,
+        rtp_profile: :avpf
+      )
+
+    assert {:ok, offer} = Mendooze.get_local_offer(conn)
+    assert {:ok, descs} = Sdp.parse(offer)
+
+    for desc <- descs do
+      assert desc.protocol == "RTP/AVPF"
+      # No encryption, no ICE, no muxing: this rung is plain RTP that does
+      # feedback, which is the whole point of having it between WebRTC and AVP.
+      assert desc.crypto == :none
+      assert desc.ice == nil
+      refute desc.rtcp_mux
+    end
+
+    # Feedback is advertised where it means something (RFC 4585 on video).
+    assert %{rtcp_fb: fb} = Enum.find(descs, &(&1.type == :video))
+    assert fb != %{}
+  end
+
+  test "rtp_profile defaults to :avp, and WebRTC ignores it" do
+    %{server: server} = start_media_server()
+
+    {:ok, plain} = Mendooze.create_peer_connection(server, self(), media: :audio)
+    assert {:ok, offer} = Mendooze.get_local_offer(plain)
+    assert {:ok, [audio]} = Sdp.parse(offer)
+    assert audio.protocol == "RTP/AVP"
+
+    {:ok, webrtc} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :audio,
+        webrtc_support: :yes,
+        rtp_profile: :avpf
+      )
+
+    assert {:ok, offer} = Mendooze.get_local_offer(webrtc)
+    assert {:ok, [audio]} = Sdp.parse(offer)
+    assert audio.protocol == "UDP/TLS/RTP/SAVPF"
+  end
+
   test "a DTLS answer sets remote crypto and credentials before sending" do
     %{server: server} = start_media_server()
 

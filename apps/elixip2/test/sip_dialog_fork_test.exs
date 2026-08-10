@@ -208,6 +208,6 @@ defmodule SIP.Test.DialogFork do
     state = %SIP.DialogImpl{direction: :inbound}
 
     assert {:reply, {:error, :not_outbound}, ^state} =
-             SIP.DialogImpl.handle_call({:fork_branch, target("nope")}, self(), state)
+             SIP.DialogImpl.handle_call({:fork_branch, target("nope"), []}, self(), state)
   end
 end

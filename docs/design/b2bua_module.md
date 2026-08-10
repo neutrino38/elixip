@@ -980,6 +980,41 @@ forking alike. Two consequences worth naming:
   codes trigger a fallback is configurable for the same reason `retry_on` is —
   `415` and `606` carry the same meaning from some equipment.
 
+#### As built (P5, 2026-08-10)
+
+Delivered as specified above, with three amendments this section could not have
+made — two because P4 had not landed when it was written, one because the media
+plane had not. They are argued in
+[b2bua_offer_profiles_plan.md](b2bua_offer_profiles_plan.md); in short:
+
+1. **the ladder is walked by the RUNG**, not by one target. The dialog withholds
+   every branch failure until the last branch of the rung falls (§16.7), so the
+   session never sees one target's final. For the single-URI gateway peer this
+   section is written for, a rung *is* one target and the two readings coincide;
+2. **a fallback branch carries a new CSeq.** Two different bodies under one CSeq
+   are a merged request (RFC 3261 §8.2.2.2) to a UAS whose server transaction is
+   still alive — which, one ACKed 488 later, it is. `fork_branch/3` takes
+   `body:` and re-stamps the dialog's stored request, CSeq included;
+3. **another profile means another endpoint.** A local description's ports, DTLS
+   material and `m=` profiles are fixed at `create_peer_connection`; there is no
+   re-offering another profile on a live endpoint. The outbound endpoint is
+   closed and rebuilt in the same media session (`bridge_with: :inbound`).
+
+Two consequences worth naming, both found by testing rather than by reading:
+
+- a peer with a ladder **declares `fork:` to the dialog** even with one target.
+  Without it a 488 ends the dialog rather than the branch, and there is nothing
+  left to arm the next profile on. A `_required` profile has one rung and
+  therefore changes nothing;
+- **each new rung of targets restarts the ladder at the top.** Carrying the
+  descent across targets would leave a browser contact an AVP offer because a
+  desk phone tried before it refused WebRTC — and no rung left to recover with,
+  so a reachable contact becomes unreachable for being second in the list.
+
+`nil` is the default and is not a rung of the ladder: the offer is built from the
+`outbound:` options exactly as P3 built it, so every scenario written before P5
+is unchanged.
+
 ## 8. Lifecycle and automatic teardown
 
 Resources tied to the scenario are released when it ends, whatever the exit
@@ -1156,8 +1191,8 @@ ACK+BYE the late 2xx" cannot be tested credibly against a single shared peer.
 
 ## 11. Phasing
 
-**P1, P2a–c, P2d (§14 resilience), P3 (media) and P4 (parallel forking) are
-complete.** What remains of the design are the §7.5 offer profiles, the trunk
+**P1, P2a–c, P2d (§14 resilience), P3 (media), P4 (parallel forking) and P5
+(§7.5 offer profiles) are complete.** What remains of the design are the trunk
 processes P4 deliberately left out, and the `_media` siblings of the §12 use
 cases.
 
@@ -1212,6 +1247,7 @@ failover at all — the simpler contract, and the honest one.
 | **P2c** ✅ | dynamic targets (§3.4): the `SIP.B2bua.TargetProvider` behaviour, `%Peer{provider:}`, `b2bua_try_next/0` + the per-attempt ring timeout; `b2bua_cancel_forward/0` (§3.5) with 487 out of the default retry-on list; hunt progress events (§3.6, `notify_progress`). Extends the SERIAL hunt, so it needed nothing from P4; a complete call queue additionally needs P3 for music on hold |
 | **P2d** ✅ | resilience hardening (§14): the dialog traps exits and converts a transaction crash into a synthetic 408 (R1 ✅); the scenario engine catches exits so teardown always runs (R2 ✅); connectionless transport re-selection + exit-safe transport calls (R3 ✅); transport-down broadcast from `terminate/2`, single `{:dialog_terminated}` (R4 ✅); transport-down during a hunt = branch failure, not dialog death (R5 ✅); B2BUA leg-death hook purging the leg and answering its pending requests (R6 ✅); the failure-injection test set (R7, ✅ for the above). §14.6 sketches the media-server failure domain (R8), which lands with P3 |
 | **P3** ✅ | `{:mediaserver, …}` mode: leg-qualified media handles, `bridge/3` + `unbridge/2` in `MediaServer.Behaviour` with the Mendooze implementation (one media session, two endpoints, transcoder chains), the offer/answer choreography on the initial INVITE **and on every re-offer** (`b2bua_reoffer_kind/1` + `b2bua_reply_reoffer/1`); `scenarios/b2bua_media.exs` with its own test (§12 — `b2bua_basic.exs` stays pure signaling), and the media-server failure domain of §14.6 (R8). Breakdown and as-built notes in [b2bua_media_impl_plan.md](b2bua_media_impl_plan.md) |
+| **P5** ✅ | offer profiles and fallback (§7.5): `SIP.B2bua.Profile` and the `webrtc → avpf → avp` ladder, `%Peer{profile:, fallback_on:}`, the `rtp_profile: :avpf` connection option in both media adapters (the middle rung had no way to be expressed), `Media.drop_peer_connection/2` and `SIP.Dialog.fork_branch/3`'s `body:` (a new offer on a new CSeq). `scenarios/webrtc-gw.exs` gains the ladder — it is use case (a)'s WebRTC-gateway variant and was assuming plain RTP. Breakdown and as-built notes in [b2bua_offer_profiles_plan.md](b2bua_offer_profiles_plan.md) |
 | **P4** ✅ | parallel forking: rungs in the leg dialog (§3.3 as built — withhold-and-aggregate, winner adoption on both layers, late-2xx ACK+BYE, the `:cancelling` transaction fix) and the q-group semantics of §3.2 (`Kelix.Mod.Registrar.targets/2` returns groups and `fork: :parallel`). **Not** in it: trunk processes (`trunk_pid`, still reserved and ignored — a reachability feature independent of forking, and its own phase), the multi-leg generalization (only if attended transfer / 3pcc demands it), and `{:rtpengine, …}`, deferred to the borderline work |
 
 ## 12. Documentation plan

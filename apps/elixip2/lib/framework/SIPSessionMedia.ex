@@ -128,6 +128,33 @@ defmodule SIP.Session.Media do
   def media_legs(sip_ctx = %SIP.Context{}),
     do: SIP.Context.appdata_get(sip_ctx, :medialegs) || []
 
+  @doc """
+  Close `leg`'s peer connection and forget its handle, so the next
+  `get_sdp_offer/4` or `get_sdp_answer/3` creates another one.
+
+  What an offer-profile fallback is made of (design §7.5): a local description is
+  a property of the endpoint — its ports, its DTLS fingerprint, its ICE
+  credentials and the profile of every `m=` line are fixed when the connection is
+  created — so offering the same callee a *different* profile means another
+  endpoint, not another offer on this one.
+
+  Closing is best effort: an endpoint the server has already lost must not be
+  what stops us from trying the rung below. Everything else the leg owns —
+  above all the OTHER leg's connection and the media session they share — is
+  untouched.
+  """
+  @spec drop_peer_connection(%SIP.Context{}, atom()) :: %SIP.Context{}
+  def drop_peer_connection(sip_ctx = %SIP.Context{}, leg \\ @default_leg) do
+    case SIP.Context.appdata_get(sip_ctx, pc_key(leg)) do
+      nil ->
+        sip_ctx
+
+      cnx ->
+        safe_ms_call(sip_ctx.mediaservermodule, :close_peer_connection, [cnx])
+        SIP.Context.appdata_set(sip_ctx, pc_key(leg), nil)
+    end
+  end
+
   defp register_leg(sip_ctx, leg) do
     legs = media_legs(sip_ctx)
     if leg in legs, do: sip_ctx, else: SIP.Context.appdata_set(sip_ctx, :medialegs, legs ++ [leg])
@@ -588,16 +615,7 @@ defmodule SIP.Session.Media do
     end
   end
 
-  defp cleanup_peer_connection(sip_ctx, leg) do
-    cnx = SIP.Context.appdata_get(sip_ctx, pc_key(leg))
-
-    if is_nil(cnx) do
-      sip_ctx
-    else
-      safe_ms_call(sip_ctx.mediaservermodule, :close_peer_connection, [cnx])
-      SIP.Context.appdata_set(sip_ctx, pc_key(leg), nil)
-    end
-  end
+  defp cleanup_peer_connection(sip_ctx, leg), do: drop_peer_connection(sip_ctx, leg)
 
   defp cleanup_media_server(sip_ctx) do
     # The watcher goes first: releasing the server is exactly the death it exists
