@@ -2,7 +2,9 @@ Code.require_file("support/jsr309_fake_server.exs", __DIR__)
 
 defmodule Mendooze.MediaTest do
   # shares the fake-server + app-env pattern of the other mendooze files
-  use ExUnit.Case, async: false
+  # async for the same reason as mendooze_conn_test: a fake server and a Mendooze
+  # server per test, no named singleton, no application env.
+  use ExUnit.Case, async: true
 
   alias MediaServer.Mendooze
 

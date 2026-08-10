@@ -1,5 +1,5 @@
 defmodule SIP.Test.Uri do
-	use ExUnit.Case
+	use ExUnit.Case, async: true
   doctest SIP.Uri
 
   test "Parse an URI that has only a domain" do

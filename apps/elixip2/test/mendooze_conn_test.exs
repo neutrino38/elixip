@@ -2,7 +2,10 @@ Code.require_file("support/jsr309_fake_server.exs", __DIR__)
 
 defmodule Mendooze.ConnTest do
   # app env tweaks are global — keep this file synchronous
-  use ExUnit.Case, async: false
+  # async: every test builds its own fake JSR309 server and its own Mendooze
+  # GenServers; nothing here is named or shared, and no application env is touched
+  # (the poller tuning that keeps mendooze_server_test synchronous is set there).
+  use ExUnit.Case, async: true
 
   alias MediaServer.Mendooze
   alias MediaServer.Mendooze.Sdp
