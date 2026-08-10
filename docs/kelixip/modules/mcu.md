@@ -403,9 +403,9 @@ A conference is **pinned** to the media server it was created on and never
 migrates. `kelictl module reload mcu` has no in-place reload: the module is
 restarted cleanly, which **drops the live conferences**.
 
-### Saying it in names, not in numbers
+### Mosaic properties
 
-The mosaic, the video size and the VAD mode have **names**, and they are accepted
+The mosaic proeprties: the video size and the VAD mode have **names**, and they are accepted
 wherever a value enters — the CLI, a REST body, the config block, a script:
 
 ```bash
@@ -418,30 +418,19 @@ kelictl mcu conference.update uid=c-3f9a vad=full
 kelictl mcu conference.create domain=example.com video='{"size":"vga","fps":25}'
 ```
 
-`layout` takes a **mosaic**, a **size** and/or `auto`|`manual`, in **any order**,
-separated by spaces or commas. The three vocabularies are disjoint, so order
-carries no meaning:
+`layout` takes a **mosaic layout**, a **size** and/or `auto`|`manual`, in **any order**,
+separated by spaces or commas.
 
 | Group | Values |
 |---|---|
 | mosaic | `1x1` `2x2` `3x3` `3+4` `1+7` `1+5` `1+1` `pip1` `pip3` `4x4` `1+4` `2+8` |
-| size | `qcif` `cif` `vga` `pal` `hvga` `qvga` `hd720p` (`720p`) `wqvga` `xga` `wvga` |
-| mode | `auto` — the mosaic follows the video-leg count — or `manual` |
+| video size | `qcif` `cif` `vga` `pal` `hvga` `qvga` `hd720p` (`720p`) `wqvga` `xga` `wvga` |
+| mode | `auto` — the mosaic adapts to the number of participants — or `manual` the mosaic layout is fixed |
 
 Two rules:
 
-* **only what is named changes** — `layout=vga` keeps the current mosaic, like
-  every other field of a `PUT` (see below);
-* **naming a mosaic implies `manual`**, unless `auto` is in the same value. On a
-  conference in `auto`, a fixed mosaic would otherwise be undone by the next
-  arrival — a command that appeared to work and did nothing. `layout='auto 2x2'`
-  is the explicit "set it now, keep following".
-
-A typo is a `400` that prints the vocabulary, and an argument's names are in the
-online help (`kelictl mcu help conference.update`). The **wire form still works
-and stays literal** — `layout='{"comp":1,"size":6,"auto":false}'`, names allowed
-inside it (`{"comp":"2x2"}`) — so an existing REST client needs no change and a
-`PUT` body means exactly what it says.
+* **only what is named changes** — `layout=vga` keeps the current mosaic other properties intact.
+* **changing a mosaic layout switches it to `manual` mode**.
 
 ### Recording, slots and the logo
 
@@ -465,15 +454,12 @@ kelictl mcu slot.update uid=c-3f9a slot=2 holds=reset   # free, and forget the p
 kelictl mcu conference.update uid=c-3f9a logo=ives.png
 ```
 
-`file` and `logo` are **bare names**, resolved under `record_dir` / `image_dir` on the
-media server: a command chooses the name, never the directory. The extension decides
-the container (`.mp4` or `.flv`, nothing else). One recording per conference — a second
-`recording.start` is a `409`.
+`file` and `logo` are **bare names**, recorded under `record_dir` / `image_dir` on the
+mediaserver host. Absolut path are rejected. The extension decides
+the file format (`.mp4` or `.flv`, nothing else). One recording per conference — a second
+`recording.start` will be reject.
 
-Slots are **0-based**, as the media server numbers and logs them, and how many there
-are depends on the mosaic (`1x1` 1, `1+1` 2, `2x2` 4, `3x3` 9, `4x4` 16 …). Pinning a
-slot **turns the automatic layout off**: it changes the composition, and a smaller
-mosaic would drop the pin.
+Slots in a mosaic are **starting at 0**. Pinning a slot **turns the automatic layout off**.
 
 `slot.list` separates what was asked from what is:
 
