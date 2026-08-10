@@ -4,13 +4,7 @@
 # One instance is spawned per inbound INVITE. It creates a SECOND dialog toward
 # the configured peer and then relays, in both directions, until one side hangs
 # up. Media is not touched: the SDP bodies cross verbatim and the endpoints talk
-# to each other directly (`media` argument `false` — see docs/design/b2bua_module.md §7).
-#
-# What makes this readable is that the two legs are told apart *syntactically*:
-# an event of the outbound leg arrives wrapped as `{:outbound, {…}}`, an event of
-# the inbound leg arrives bare. And `b2bua_forward/1` / `b2bua_forward_reply/1`
-# are direction-free — they relay to the *other* leg, whichever that is — so the
-# symmetric states below say each rule once.
+# to each other directly (`media` argument `false`)
 #
 # Unlike kamailio's t_relay() or Asterisk's Dial(), nothing is relayed unless
 # this script says so. The catch-all clauses of `connected` are what a
@@ -24,8 +18,6 @@ defmodule B2BUA.Basic do
   uas(:invite)
 
   # `peer` is where calls go. A bare URI is shorthand for a one-target peer;
-  # `%SIP.B2bua.Peer{}` is the full form (target list, SRV, fork, R-URI policy).
-  # Override it per run with `-c FILE` or an elixipp config block.
   config(domains: :any, peer: "sip:callee@127.0.0.1:5070")
 
   # The {:INVITE, …} that created this instance is already in our mailbox.
@@ -46,8 +38,7 @@ defmodule B2BUA.Basic do
   end
 
   # The callee is being alerted. Everything it says goes back to the caller —
-  # collapsed into our single inbound dialog, so the caller sees one early
-  # dialog however many the callee's side produced.
+  # collapsed into our single inbound dialog
   state proceeding do
     on_events do
       {:outbound, {code, resp, _trans, _dlg}} when code in 101..199 ->
@@ -69,21 +60,14 @@ defmodule B2BUA.Basic do
           scenario_success("callee answered #{code}")
         end
 
-      # The caller gave up. The inbound dialog has already answered the CANCEL
-      # and 487'd its INVITE by itself; what we owe the callee is the CANCEL of
-      # the INVITE we sent it.
+      # The caller gave up.
       {:CANCEL, req, _trans, _dlg} ->
         b2bua_cancel_forward()
         b2bua_forward(req)
         scenario_aborted("caller cancelled")
 
       # A caller who hangs up while the callee is still being rung. Not what the
-      # RFC asks for (that is a CANCEL), but real user agents send it, and
-      # without this clause it matched nothing and sat in the mailbox until the
-      # state timed out — three minutes of ringing a callee nobody is waiting
-      # for. Nothing is relayed: the outbound INVITE has no dialog to BYE, it
-      # has an attempt to CANCEL — which is what b2bua_cancel_forward/0 says,
-      # rather than leaving it as a side effect of the scenario ending.
+      # RFC asks for (that is a CANCEL), but real user agents send it.
       {:BYE, req, _trans, _dlg} ->
         b2bua_cancel_forward()
         b2bua_reply(req, 200, "OK")
@@ -103,7 +87,7 @@ defmodule B2BUA.Basic do
 
   # The 200 OK is relayed; the caller's ACK confirms it end to end. Relaying the
   # ACK rather than sending our own the moment the callee answered is the
-  # deferred-ACK discipline of §6: what the callee gets is what the caller sent.
+  # deferred-ACK discipline.
   state wait_ack do
     on_events do
       {:ACK, req, _trans, _dlg} ->
@@ -169,11 +153,7 @@ defmodule B2BUA.Basic do
         goto(loop, "relayed #{m} (callee -> caller)")
 
       # The ACK of a re-INVITE's 200 — not the initial one, which `wait_ack`
-      # relayed, and not a stray: RFC 3261 §13.2.2.4 makes the ACK of a 2xx a
-      # transaction of its own, so every re-INVITE that crosses owes one back.
-      # Dropping it (which is what excluding ACK from the relay below used to do)
-      # leaves the far end retransmitting its 200 until timer H, and then tearing
-      # down a call that is up.
+      # relayed. RFC 3261 §13.2.2.4: it is a transaction of its own.
       {:ACK, req, _trans, _dlg} ->
         b2bua_forward(req)
         goto(loop, "ACK relayed (caller -> callee)")
