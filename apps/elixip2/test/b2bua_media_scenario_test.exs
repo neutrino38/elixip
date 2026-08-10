@@ -49,6 +49,39 @@ defmodule SIP.Test.B2bua.MediaScenario do
     %{invite | method: method, body: [], contentlength: 0, cseq: [2, method]}
   end
 
+  # A re-offer from the caller: same dialog, a later CSeq, an SDP of its own.
+  defp reoffer(invite, sdp, cseq) do
+    %{
+      invite
+      | method: :INVITE,
+        cseq: [cseq, :INVITE],
+        body: [%{contenttype: "application/sdp", data: sdp}]
+    }
+  end
+
+  # The caller's own offer, moved to another address and put on hold — the two
+  # re-offers §R4.1b sorts in opposite directions.
+  defp moved(sdp), do: String.replace(sdp, "c=IN IP4 192.168.24.71", "c=IN IP4 192.168.24.99")
+  defp on_hold(sdp), do: String.replace(sdp, "a=sendrecv", "a=sendonly")
+
+  # Drive the call to `connected`: INVITE relayed, callee answers, ACK crosses.
+  defp establish(module, stub, invite, name) do
+    tp_pid = transport_pid(name)
+    :ok = GenServer.call(tp_pid, :settestapp)
+    SIP.Test.Transport.UDPMockup.answer_bye(tp_pid)
+
+    {instance, ref} = start_instance(module, stub, invite, name)
+    send(instance, {:INVITE, invite, self(), stub})
+
+    assert_receive {:replied, 100, "Trying", _req, _fields}, 5_000
+    assert_receive {:invite_sent, _fwd}, 5_000
+    GenServer.cast(tp_pid, {:simulate, 200, 100})
+    assert_receive {:replied, 200, _reason, _req, _fields}, 5_000
+    send(instance, {:ACK, in_dialog(:ACK, invite), nil, stub})
+
+    {instance, ref, tp_pid}
+  end
+
   defp start_instance(module, stub, invite, name) do
     test_pid = self()
 
@@ -154,6 +187,112 @@ defmodule SIP.Test.B2bua.MediaScenario do
     # The callee is BYEd…
     assert_receive :BYE, 5_000
     # …and the scenario ends rather than holding a call with no media.
+    assert_receive {:instance_done, :ok}, 10_000
+  end
+
+  # §R4.1b. The signalling scenario relays all four kinds of re-offer because it
+  # cannot tell them apart; this one reads the offer first, and the two rows of
+  # the table that stay on this side of the B2BUA are the point of the whole
+  # exercise: our endpoint did not move, so the far end has nothing to learn.
+  @tag timeout: 60_000
+  test "a caller that only moved is answered here, and the callee never hears of it", %{
+    scenario: module,
+    stub: stub
+  } do
+    invite = inbound_invite()
+    caller_sdp = SIP.Session.extract_sdp(invite)
+    {instance, _ref, _tp_pid} = establish(module, stub, invite, :moved)
+
+    send(instance, {:INVITE, reoffer(invite, moved(caller_sdp), 3), self(), stub})
+
+    # Answered here, with the media server's answer…
+    assert_receive {:replied, 200, "OK", req, fields}, 5_000
+    assert req.cseq == [3, :INVITE]
+    assert [%{data: answer}] = Keyword.fetch!(fields, :body)
+    assert answer =~ "v=0"
+    assert Keyword.fetch!(fields, :contact).domain == "0.0.0.0"
+
+    # …and nothing crossed. This is the assertion the whole feature exists for.
+    refute_receive {:invite_sent, _fwd}, 1_000
+
+    # Its ACK confirms a 200 the callee never sent, so it must not be relayed
+    # onto the callee's INVITE transaction either — the call surviving to its
+    # BYE is what says it was not.
+    send(instance, {:ACK, %{in_dialog(:ACK, invite) | cseq: [3, :ACK]}, nil, stub})
+    send(instance, {:BYE, in_dialog(:BYE, invite), self(), stub})
+    assert_receive {:replied, 200, "OK", bye_req, _}, 5_000
+    assert bye_req.method == :BYE
+    assert_receive {:instance_done, :ok}, 10_000
+  end
+
+  # The fourth row of the table: a refresh with no offer at all. Answering it
+  # locally means putting OUR offer in the 200 (RFC 3261 §14.2) and reading the
+  # answer from the ACK — which is why a signalling B2BUA cannot do this and a
+  # media-terminating one can.
+  @tag timeout: 60_000
+  test "an offerless refresh is answered with our own offer, and its ACK stays here", %{
+    scenario: module,
+    stub: stub
+  } do
+    invite = inbound_invite()
+    caller_sdp = SIP.Session.extract_sdp(invite)
+    {instance, _ref, _tp_pid} = establish(module, stub, invite, :refresh)
+
+    send(instance, {:INVITE, %{in_dialog(:INVITE, invite) | cseq: [3, :INVITE]}, self(), stub})
+
+    assert_receive {:replied, 200, "OK", req, fields}, 5_000
+    assert req.cseq == [3, :INVITE]
+    assert [%{data: our_offer}] = Keyword.fetch!(fields, :body)
+    assert our_offer =~ "v=0"
+    refute_receive {:invite_sent, _fwd}, 1_000
+
+    # The answer comes back in the ACK, and goes to the media server rather than
+    # onto the callee's INVITE transaction.
+    ack = %{
+      in_dialog(:ACK, invite)
+      | cseq: [3, :ACK],
+        body: [%{contenttype: "application/sdp", data: caller_sdp}]
+    }
+
+    send(instance, {:ACK, ack, nil, stub})
+
+    send(instance, {:BYE, in_dialog(:BYE, invite), self(), stub})
+    assert_receive {:replied, 200, "OK", bye_req, _}, 5_000
+    assert bye_req.method == :BYE
+    assert_receive {:instance_done, :ok}, 10_000
+  end
+
+  # The other direction of the same rule — and the half that P3 did not have:
+  # a re-offer that crosses crosses as OURS, exactly like the initial INVITE.
+  @tag timeout: 60_000
+  test "a hold crosses, and both sides still see only our SDP", %{scenario: module, stub: stub} do
+    invite = inbound_invite()
+    caller_sdp = SIP.Session.extract_sdp(invite)
+    {instance, _ref, tp_pid} = establish(module, stub, invite, :hold)
+
+    held = on_hold(caller_sdp)
+    send(instance, {:INVITE, reoffer(invite, held, 3), self(), stub})
+
+    # The callee is told — it must stop sending, or play its own hold tone.
+    assert_receive {:invite_sent, fwd}, 5_000
+    fwd_sdp = SIP.Session.extract_sdp(fwd)
+    assert is_binary(fwd_sdp)
+    # …but with our offer, not the caller's.
+    assert fwd_sdp != held
+    refute fwd_sdp =~ "192.168.24.71"
+
+    # The callee accepts, and the caller is answered by the media server: the
+    # answer it has been owed since it re-offered, not the callee's.
+    GenServer.cast(tp_pid, {:simulate, 200, 100})
+    assert_receive {:replied, 200, _reason, req, fields}, 5_000
+    assert req.cseq == [3, :INVITE]
+    assert [%{data: answer}] = Keyword.fetch!(fields, :body)
+    refute answer =~ "212.83.152.250"
+
+    send(instance, {:ACK, %{in_dialog(:ACK, invite) | cseq: [3, :ACK]}, nil, stub})
+    send(instance, {:BYE, in_dialog(:BYE, invite), self(), stub})
+    assert_receive {:replied, 200, "OK", bye_req, _}, 5_000
+    assert bye_req.method == :BYE
     assert_receive {:instance_done, :ok}, 10_000
   end
 

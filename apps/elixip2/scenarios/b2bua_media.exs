@@ -18,7 +18,10 @@
 #     The scenario never touches an SDP body and never calls a bridge primitive —
 #     `b2bua_forward_reply/1` does it, at the one moment both sides are known;
 #   * three clauses that only exist because there is a media plane to lose:
-#     `:media_lost`, `:server_disconnected`, and the cleanup on the way out.
+#     `:media_lost`, `:server_disconnected`, and the cleanup on the way out;
+#   * a re-offer is read before it is relayed (`b2bua_reoffer_kind/1`). A peer
+#     that only moved is answered here, because our endpoint did not move —
+#     the one decision the signalling scenario has no way to make.
 #
 # What that buys, beyond transcoding: the caller's answer comes from the media
 # server, so it is decided once and never changes as targets change. Early media
@@ -187,20 +190,36 @@ defmodule B2BUA.Media do
       # media mode is where they stop being one rule (see b2bua_basic.exs, which
       # relays all four): with a media server a peer that merely MOVED — a new
       # c=, a new port, an ICE restart — has not changed anything the far end can
-      # see, because our endpoint did not move. Telling the far end would be
-      # noise at best.
+      # see, because our endpoint did not move. Same for a session-timer refresh,
+      # which carries no offer at all: each leg has its own timer, and we are a
+      # UA on both.
       #
-      # Reading which of the four it is needs framework support that P3 does not
-      # yet ship (`b2bua_reoffer_kind/1`, plan §R4.1b), so for now every re-offer
-      # crosses — the safe direction: propagating a change nobody needed costs a
-      # transaction, while swallowing a hold or an added media breaks the call.
+      # Everything else crosses, and the two lists are written in that order on
+      # purpose: what is absorbed is named explicitly, and anything the framework
+      # cannot classify (`:unknown`) falls through to the relay. Propagating a
+      # change nobody needed costs a transaction; swallowing a hold or an added
+      # media breaks the call.
       {m, req, _trans, _dlg} when m in [:INVITE, :UPDATE] ->
-        b2bua_forward(req)
-        goto(loop, "relayed #{m} (caller -> callee)")
+        case b2bua_reoffer_kind(req) do
+          kind when kind in [:address_change, :no_sdp, :no_change] ->
+            b2bua_reply_reoffer(req)
+            goto(loop, "#{m} answered locally (#{kind}, caller)")
+
+          kind ->
+            b2bua_forward(req)
+            goto(loop, "relayed #{m} (#{kind}, caller -> callee)")
+        end
 
       {:outbound, {m, req, _trans, _dlg}} when m in [:INVITE, :UPDATE] ->
-        b2bua_forward(req)
-        goto(loop, "relayed #{m} (callee -> caller)")
+        case b2bua_reoffer_kind(req) do
+          kind when kind in [:address_change, :no_sdp, :no_change] ->
+            b2bua_reply_reoffer(req)
+            goto(loop, "#{m} answered locally (#{kind}, callee)")
+
+          kind ->
+            b2bua_forward(req)
+            goto(loop, "relayed #{m} (#{kind}, callee -> caller)")
+        end
 
       # The ACK of a re-INVITE's 200: its own transaction (RFC 3261 §13.2.2.4).
       {:ACK, req, _trans, _dlg} ->

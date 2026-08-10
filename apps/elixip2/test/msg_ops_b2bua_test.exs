@@ -31,7 +31,16 @@ defmodule SIP.Test.MsgOpsB2bua do
     test "hop-scoped routing, previous target and credentials never cross" do
       fwd = forwarded!(parse!("SIP-INVITE-LVP.txt"))
 
-      for field <- [:via, :route, :recordroute, "Path", :contact, :proxyauthorization, :authorization, :transid] do
+      for field <- [
+            :via,
+            :route,
+            :recordroute,
+            "Path",
+            :contact,
+            :proxyauthorization,
+            :authorization,
+            :transid
+          ] do
         refute Map.has_key?(fwd, field), "#{inspect(field)} crossed the leg boundary"
       end
     end
@@ -53,7 +62,10 @@ defmodule SIP.Test.MsgOpsB2bua do
 
       # Simulate the transport stamping of an inbound request: the routing
       # fields point back at the leg the request arrived on.
-      req = %{req | ruri: %SIP.Uri{req.ruri | destip: {1, 2, 3, 4}, destport: 5060, tp_pid: self()}}
+      req = %{
+        req
+        | ruri: %SIP.Uri{req.ruri | destip: {1, 2, 3, 4}, destport: 5060, tp_pid: self()}
+      }
 
       fwd = forwarded!(req)
 
@@ -155,6 +167,87 @@ defmodule SIP.Test.MsgOpsB2bua do
       # The relayed reply belongs to the inbound leg's dialog, not the outbound's.
       assert relayed.callid == req.callid
       assert relayed.contact.userpart == "b2bua"
+    end
+  end
+
+  # The other reading a B2BUA needs from the message layer: not what crosses a
+  # leg boundary, but WHETHER a re-offer has to (design §R4.1b). The samples are
+  # built here rather than read from a file because what is under test is a
+  # *difference* between two offers, and one file cannot show a difference.
+  describe "reoffer_kind/2" do
+    @base """
+    v=0\r
+    o=- 1 1 IN IP4 10.0.0.1\r
+    s=-\r
+    c=IN IP4 10.0.0.1\r
+    t=0 0\r
+    m=audio 7000 RTP/AVP 0 8\r
+    a=rtpmap:0 PCMU/8000\r
+    a=rtpmap:8 PCMA/8000\r
+    a=sendrecv\r
+    m=video 7002 RTP/AVP 99\r
+    a=rtpmap:99 H264/90000\r
+    a=sendrecv\r
+    """
+
+    defp offer(sdp), do: %{method: :INVITE, body: [%{contenttype: "application/sdp", data: sdp}]}
+    defp kind(sdp, previous \\ @base), do: Ops.reoffer_kind(offer(sdp), previous)
+
+    test "the same offer again asks for nothing" do
+      assert kind(@base) == :no_change
+    end
+
+    test "no body at all is a session-timer refresh, not an offer" do
+      assert Ops.reoffer_kind(%{method: :INVITE, body: []}, @base) == :no_sdp
+      assert Ops.reoffer_kind(%{method: :UPDATE, body: nil}, @base) == :no_sdp
+    end
+
+    test "nothing to compare against is not a guess" do
+      assert Ops.reoffer_kind(offer(@base), nil) == :unknown
+      assert Ops.reoffer_kind(offer(@base), "") == :unknown
+      assert Ops.reoffer_kind(offer("not an sdp at all"), @base) == :unknown
+    end
+
+    test "hold and retrieve, both spellings of each" do
+      assert kind(String.replace(@base, "a=sendrecv", "a=sendonly")) == :hold
+      assert kind(String.replace(@base, "a=sendrecv", "a=inactive")) == :hold
+      # RFC 2543 hold: the address goes away rather than the direction.
+      assert kind(String.replace(@base, "c=IN IP4 10.0.0.1", "c=IN IP4 0.0.0.0")) == :hold
+
+      held = String.replace(@base, "a=sendrecv", "a=sendonly")
+      assert Ops.reoffer_kind(offer(@base), held) == :resume
+    end
+
+    test "a hold that also moves is still a hold" do
+      moved_and_held =
+        @base
+        |> String.replace("a=sendrecv", "a=sendonly")
+        |> String.replace("c=IN IP4 10.0.0.1", "c=IN IP4 10.0.0.2")
+
+      assert kind(moved_and_held) == :hold
+    end
+
+    test "the media set moving is what only the far end can answer" do
+      # withdrawn (RFC 3264 §8: port 0, the section stays)
+      assert kind(String.replace(@base, "m=video 7002", "m=video 0")) == :media_change
+      # added
+      assert kind(@base <> "m=text 7004 RTP/AVP 98\r\na=rtpmap:98 t140/1000\r\n") == :media_change
+      # a codec dropped: with two legs bridged, what they settled on is what the
+      # direct attach relies on
+      assert kind(String.replace(@base, "m=audio 7000 RTP/AVP 0 8", "m=audio 7000 RTP/AVP 0")) ==
+               :media_change
+    end
+
+    test "only the address moving is ours to absorb" do
+      assert kind(String.replace(@base, "c=IN IP4 10.0.0.1", "c=IN IP4 10.0.0.2")) ==
+               :address_change
+
+      assert kind(String.replace(@base, "m=audio 7000", "m=audio 7100")) == :address_change
+
+      # An ICE restart is a move too — new credentials, same media.
+      iced = @base <> "a=ice-ufrag:aaaa\r\na=ice-pwd:bbbb\r\n"
+      restarted = @base <> "a=ice-ufrag:cccc\r\na=ice-pwd:dddd\r\n"
+      assert Ops.reoffer_kind(offer(restarted), iced) == :address_change
     end
   end
 end

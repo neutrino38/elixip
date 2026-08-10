@@ -94,8 +94,13 @@ defmodule SIP.B2bua.Pending do
   **client transaction pid** of the forwarded request — the correlation the
   design settles on (§5): the transaction pid is known at forward time and comes
   back on every response event, so nothing has to be re-derived from the message.
+
+  `held_answer` is set on a relayed **re-offer** in media mode: the answer the
+  leg that re-offered is owed, computed the moment its offer was read and held
+  back until the far end answers — the same choreography as the initial INVITE
+  (§7.2), one exchange later.
   """
-  defstruct orig_req: nil, orig_leg: :inbound, method: nil
+  defstruct orig_req: nil, orig_leg: :inbound, method: nil, held_answer: nil
 end
 
 defmodule SIP.B2bua.MediaPlan do
@@ -133,8 +138,22 @@ defmodule SIP.B2bua.State do
   upon. It is not the same thing as `%Leg{initial_trans}` — that one is the
   attempt a hunt is walking, and it stops being the right target the moment a
   re-INVITE is relayed on an established call (§6).
+
+  `remote_sdp` is the last description each leg gave us — its offer, or its
+  answer. What `b2bua_reoffer_kind/1` compares the next one against (§R4.1b);
+  kept per leg because that is the granularity the question is asked at.
+
+  `local_ack` marks a leg whose re-INVITE **we** answered: the far end never saw
+  that INVITE, so the ACK confirming it must not be relayed onto a transaction
+  that has nothing to do with it.
   """
-  defstruct legs: %{}, pending: %{}, hunt: nil, last_invite: %{}, media: nil
+  defstruct legs: %{},
+            pending: %{},
+            hunt: nil,
+            last_invite: %{},
+            media: nil,
+            remote_sdp: %{},
+            local_ack: %{}
 end
 
 defmodule SIP.Session.B2bua do
@@ -350,6 +369,54 @@ defmodule SIP.Session.B2bua do
         end
       end
 
+      @doc """
+      What a re-INVITE or an UPDATE just received asks for, compared with the
+      last description the same leg gave us: `:hold`, `:resume`,
+      `:media_change`, `:address_change`, `:no_sdp`, `:no_change` or `:unknown`
+      (`SIP.Msg.Ops.reoffer_kind/2` — the reading itself is message layer).
+
+      What it is for: with a media server in the middle, a peer that merely
+      MOVED has changed nothing the far end can see, because our endpoint did
+      not move. The scenario writes the policy on top:
+
+          case b2bua_reoffer_kind(req) do
+            kind when kind in [:address_change, :no_sdp, :no_change] ->
+              b2bua_reply_reoffer(req)
+            _kind ->
+              b2bua_forward(req)
+          end
+
+      Relaying is the safe default: everything this does not name explicitly —
+      `:unknown` included — concerns the far end.
+      """
+      defmacro b2bua_reoffer_kind(req) do
+        quote do
+          SIP.Session.B2bua.reoffer_kind(var!(sip_ctx), unquote(req))
+        end
+      end
+
+      @doc """
+      Answer a re-offer here instead of relaying it: the media server takes the
+      new description of that leg and its answer goes back in the 200.
+
+      Needs a `{:mediaserver, …}` call — a signalling B2BUA has no media of its
+      own to answer with, and fails with `lasterr` saying so. An offerless
+      re-INVITE (a session-timer refresh) is answered with OUR offer, whose
+      answer arrives in the ACK; that ACK is absorbed too, since the far end
+      never saw the INVITE it confirms.
+
+      A media server that refuses the new description leaves the call exactly as
+      it was, and the re-offer gets a 488 (RFC 3261 §14.1).
+      """
+      defmacro b2bua_reply_reoffer(req, opts \\ []) do
+        quote do
+          SIP.Scenario.Monitor.note_command(:sip, "b2bua_reply_reoffer")
+
+          var!(sip_ctx) =
+            SIP.Session.B2bua.do_reply_reoffer(var!(sip_ctx), unquote(req), unquote(opts))
+        end
+      end
+
       @doc "The outbound leg (a `%SIP.B2bua.Leg{}`), or nil when none was created."
       defmacro b2bua_outbound_leg() do
         quote do
@@ -503,6 +570,10 @@ defmodule SIP.Session.B2bua do
         fail(sip_ctx, {:b2bua, :no_target})
 
       true ->
+        # What this leg said about its media, kept from the very first message:
+        # it is what a re-offer from it will be read against (§R4.1b).
+        sip_ctx = remember_remote_sdp(sip_ctx, current_leg(), SIP.Msg.Ops.sdp_body(req))
+
         # The media plane is set up BEFORE anything is dialled: the offer we
         # forward is ours, not the caller's, and there is no point creating a leg
         # we cannot give a body to.
@@ -651,6 +722,155 @@ defmodule SIP.Session.B2bua do
 
       _ ->
         fwd
+    end
+  end
+
+  # ── Re-offers on an established call (§R4.1b) ───────────────────────────────
+
+  @doc """
+  What a re-offer just received on the current leg asks for. Backs the
+  `b2bua_reoffer_kind` macro.
+
+  The reading is `SIP.Msg.Ops.reoffer_kind/2` — message layer, one place. All
+  this adds is *which* previous description to compare against, which is leg
+  bookkeeping and therefore ours.
+  """
+  @spec reoffer_kind(%SIP.Context{}, map()) :: SIP.Msg.Ops.reoffer_kind()
+  def reoffer_kind(sip_ctx = %SIP.Context{}, req) when is_map(req) do
+    SIP.Msg.Ops.reoffer_kind(req, remote_sdp(sip_ctx, current_leg()))
+  end
+
+  @doc "The last SDP a leg described itself with — its offer, or its answer."
+  @spec remote_sdp(%SIP.Context{}, atom()) :: binary() | nil
+  def remote_sdp(sip_ctx = %SIP.Context{}, leg), do: Map.get(state(sip_ctx).remote_sdp, leg)
+
+  defp remember_remote_sdp(sip_ctx, leg, sdp) when is_binary(sdp) and sdp != "" do
+    state = state(sip_ctx)
+    put_state(sip_ctx, %State{state | remote_sdp: Map.put(state.remote_sdp, leg, sdp)})
+  end
+
+  defp remember_remote_sdp(sip_ctx, _leg, _no_sdp), do: sip_ctx
+
+  @doc false
+  @spec do_reply_reoffer(%SIP.Context{}, map(), keyword()) :: %SIP.Context{}
+  def do_reply_reoffer(sip_ctx = %SIP.Context{}, req, opts \\ []) when is_map(req) do
+    leg = current_leg()
+
+    cond do
+      is_nil(media_plan(sip_ctx)) ->
+        # A signalling B2BUA has no media of its own: the only honest answer to a
+        # re-offer is the far end's.
+        fail(sip_ctx, {:b2bua, :no_media_to_answer_reoffer_with})
+
+      is_nil(leg_pid(sip_ctx, leg)) ->
+        fail(sip_ctx, {:b2bua, :no_leg_to_reply_on, leg})
+
+      true ->
+        case local_reoffer_body(sip_ctx, req, leg, opts) do
+          {:ok, sip_ctx, sdp} ->
+            sip_ctx
+            |> remember_remote_sdp(leg, SIP.Msg.Ops.sdp_body(req))
+            |> expect_local_ack(leg, req)
+            |> do_local_reply(req, 200, "OK", [
+              {:body, [%{contenttype: "application/sdp", data: sdp}]},
+              {:contact, local_contact(sip_ctx)}
+            ])
+
+          {:error, sip_ctx, reason} ->
+            # RFC 3261 §14.1: a re-INVITE that fails leaves the session exactly
+            # as it was. The far end never heard about this one and does not
+            # have to; the scenario reads why in `lasterr`.
+            sip_ctx
+            |> do_local_reply(req, 488, "Not Acceptable Here", [])
+            |> fail({:b2bua, :reoffer_answer_failed, reason})
+        end
+    end
+  end
+
+  # What the 200 carries. A re-offer is answered with the answer to it; an
+  # offerless re-INVITE is answered with an offer of OURS (RFC 3261 §14.2 — a 2xx
+  # to an offerless INVITE must contain one), which is precisely the thing a
+  # media-terminating B2BUA has and a signalling one does not.
+  defp local_reoffer_body(sip_ctx, req, leg, opts) do
+    leg_opts = Keyword.merge(leg_media_opts(sip_ctx, leg), opts)
+
+    case SIP.Msg.Ops.sdp_body(req) do
+      sdp when is_binary(sdp) and sdp != "" ->
+        case media_answer(sip_ctx, sdp, [leg: leg] ++ leg_opts) do
+          {sip_ctx, {:ok, answer}} -> {:ok, sip_ctx, answer}
+          {sip_ctx, {:error, reason}} -> {:error, sip_ctx, reason}
+        end
+
+      _offerless ->
+        media_offer_on(sip_ctx, leg, leg_opts)
+    end
+  end
+
+  # The per-leg media options this call was created with (`inbound:`/`outbound:`
+  # of the `{:mediaserver, …}` mode). The connection already exists by the time a
+  # re-offer arrives, so only `:webrtc` and `:media` still have anything to say —
+  # but reading them from the plan keeps one statement of how a leg terminates
+  # its media instead of a second one written here.
+  defp leg_media_opts(sip_ctx, leg) do
+    case media_plan(sip_ctx) do
+      %MediaPlan{opts: opts} -> Keyword.get(opts, plan_key(leg), [])
+      _ -> []
+    end
+  end
+
+  defp plan_key(:inbound), do: :inbound
+  defp plan_key(_outbound), do: :outbound
+
+  defp media_offer_on(sip_ctx, leg, leg_opts) do
+    webrtc = Keyword.get(leg_opts, :webrtc, :no)
+    medias = Keyword.get(leg_opts, :media, :audio_video)
+    {sip_ctx, offer} = Media.get_sdp_offer(sip_ctx, webrtc, medias, [leg: leg] ++ leg_opts)
+    {:ok, sip_ctx, offer}
+  rescue
+    err -> {:error, sip_ctx, {:media_raised, Exception.message(err)}}
+  catch
+    :exit, reason -> {:error, sip_ctx, {:media_down, reason}}
+  end
+
+  defp process_answer(sip_ctx, leg, sdp) do
+    Media.process_sdp_answer(sip_ctx, sdp, leg: leg)
+  rescue
+    err ->
+      fail(sip_ctx, {:b2bua, :reoffer_answer_failed, {:media_raised, Exception.message(err)}})
+  catch
+    :exit, reason -> fail(sip_ctx, {:b2bua, :reoffer_answer_failed, {:media_down, reason}})
+  end
+
+  # A re-INVITE answered here will be ACKed here. An UPDATE will not — RFC 3311
+  # has no ACK — so only the INVITE arms it.
+  defp expect_local_ack(sip_ctx, leg, %{method: :INVITE}) do
+    state = state(sip_ctx)
+    put_state(sip_ctx, %State{state | local_ack: Map.put(state.local_ack, leg, true)})
+  end
+
+  defp expect_local_ack(sip_ctx, _leg, _req), do: sip_ctx
+
+  defp local_ack?(sip_ctx, leg), do: Map.get(state(sip_ctx).local_ack, leg, false)
+
+  defp forget_local_ack(sip_ctx, leg) do
+    state = state(sip_ctx)
+    put_state(sip_ctx, %State{state | local_ack: Map.delete(state.local_ack, leg)})
+  end
+
+  # The ACK of a re-INVITE we answered ourselves. It confirms a 200 the far end
+  # never sent, so relaying it would post an ACK on whatever INVITE transaction
+  # was last opened on the other leg — one answered minutes ago. That is the same
+  # trap `last_invite` exists to avoid, arrived at from the other side.
+  #
+  # When our 200 carried an offer (the offerless case), this ACK carries its
+  # answer: the last thing this leg says about its media, and the media server
+  # has to hear it.
+  defp absorb_local_ack(sip_ctx, leg, req) do
+    sip_ctx = forget_local_ack(sip_ctx, leg)
+
+    case SIP.Msg.Ops.sdp_body(req) do
+      sdp when is_binary(sdp) and sdp != "" -> process_answer(sip_ctx, leg, sdp)
+      _no_answer -> SIP.Context.set(sip_ctx, :lasterr, :ok)
     end
   end
 
@@ -965,13 +1185,27 @@ defmodule SIP.Session.B2bua do
   @spec do_relay_request(%SIP.Context{}, map()) :: %SIP.Context{}
   def do_relay_request(sip_ctx = %SIP.Context{}, req) when is_map(req) do
     from_leg = current_leg()
+    sip_ctx = remember_remote_sdp(sip_ctx, from_leg, SIP.Msg.Ops.sdp_body(req))
 
-    case other_leg_pid(sip_ctx, from_leg) do
-      nil ->
-        fail(sip_ctx, {:b2bua, :no_leg_to_relay_to, from_leg})
+    cond do
+      # An ACK for a 200 WE sent (b2bua_reply_reoffer/1) confirms nothing on the
+      # other leg. It is consumed here, so a scenario keeps its one ACK clause.
+      Map.get(req, :method) == :ACK and local_ack?(sip_ctx, from_leg) ->
+        absorb_local_ack(sip_ctx, from_leg, req)
 
-      target_pid ->
-        relay_request(sip_ctx, req, from_leg, target_pid)
+      true ->
+        # Any other request from this leg supersedes an ACK we are still waiting
+        # for: without this, a peer that never acknowledged our 200 would have
+        # the NEXT relayed re-INVITE's ACK absorbed instead of relayed.
+        sip_ctx = forget_local_ack(sip_ctx, from_leg)
+
+        case other_leg_pid(sip_ctx, from_leg) do
+          nil ->
+            fail(sip_ctx, {:b2bua, :no_leg_to_relay_to, from_leg})
+
+          target_pid ->
+            relay_request(sip_ctx, req, from_leg, target_pid)
+        end
     end
   end
 
@@ -1023,24 +1257,89 @@ defmodule SIP.Session.B2bua do
         fail(sip_ctx, {:b2bua, reason})
 
       {:ok, fwd} ->
-        # The dialog layer re-addresses the request wholesale (Call-ID, CSeq,
-        # tags, route set, remote target — fix_outbound_request/3), so what the
-        # purge above contributes is dropping the hop-scoped headers and the
-        # inbound leg's routing.
-        case call_leg(fn -> SIP.Dialog.new_request(target_pid, fwd) end) do
-          {:ok, trans_pid} ->
-            sip_ctx
-            |> add_pending(trans_pid, req, from_leg, req.method)
-            |> put_last_invite(other_leg(from_leg), req.method, trans_pid)
-            |> SIP.Context.set(:lasterr, :ok)
+        case media_reoffer(sip_ctx, req, from_leg) do
+          {:pass, sip_ctx} ->
+            send_relayed(sip_ctx, req, fwd, from_leg, target_pid, nil)
 
-          :leg_dead ->
-            fail(sip_ctx, {:b2bua, :leg_dead, req.method})
+          {:ok, sip_ctx, held_answer, our_offer} ->
+            fwd = with_sdp(fwd, our_offer)
+            send_relayed(sip_ctx, req, fwd, from_leg, target_pid, held_answer)
 
-          err ->
-            fail(sip_ctx, {:b2bua, :relay_failed, req.method, err})
+          {:error, sip_ctx, reason} ->
+            refuse_reoffer(sip_ctx, req, reason)
         end
     end
+  end
+
+  defp send_relayed(sip_ctx, req, fwd, from_leg, target_pid, held_answer) do
+    # The dialog layer re-addresses the request wholesale (Call-ID, CSeq,
+    # tags, route set, remote target — fix_outbound_request/3), so what the
+    # purge above contributes is dropping the hop-scoped headers and the
+    # inbound leg's routing.
+    case call_leg(fn -> SIP.Dialog.new_request(target_pid, fwd) end) do
+      {:ok, trans_pid} ->
+        sip_ctx
+        |> add_pending(trans_pid, req, from_leg, req.method, held_answer)
+        |> put_last_invite(other_leg(from_leg), req.method, trans_pid)
+        |> SIP.Context.set(:lasterr, :ok)
+
+      :leg_dead ->
+        fail(sip_ctx, {:b2bua, :leg_dead, req.method})
+
+      err ->
+        fail(sip_ctx, {:b2bua, :relay_failed, req.method, err})
+    end
+  end
+
+  # In media mode a relayed re-offer carries OURS, exactly like the initial
+  # INVITE did (§7.2): the peer's new description goes to its own endpoint, and
+  # the far end is offered ours. Without this the two peers would read each
+  # other's SDP on every re-INVITE — the one thing terminating the media promises
+  # they never do.
+  defp media_reoffer(sip_ctx, req, from_leg) do
+    cond do
+      is_nil(media_plan(sip_ctx)) -> {:pass, sip_ctx}
+      Map.get(req, :method) not in [:INVITE, :UPDATE] -> {:pass, sip_ctx}
+      true -> media_reoffer_bodies(sip_ctx, req, from_leg)
+    end
+  end
+
+  defp media_reoffer_bodies(sip_ctx, req, from_leg) do
+    to_leg = other_leg(from_leg)
+
+    case SIP.Msg.Ops.sdp_body(req) do
+      sdp when is_binary(sdp) and sdp != "" ->
+        with {sip_ctx, {:ok, held}} <-
+               media_answer(sip_ctx, sdp, [leg: from_leg] ++ leg_media_opts(sip_ctx, from_leg)),
+             {:ok, sip_ctx, offer} <-
+               media_offer_on(sip_ctx, to_leg, leg_media_opts(sip_ctx, to_leg)) do
+          {:ok, sip_ctx, held, offer}
+        else
+          {sip_ctx = %SIP.Context{}, {:error, reason}} -> {:error, sip_ctx, reason}
+          {:error, sip_ctx = %SIP.Context{}, reason} -> {:error, sip_ctx, reason}
+        end
+
+      _offerless ->
+        # Relaying this would mean answering it with an offer of ours (RFC 3261
+        # §14.2) while asking the far end for one of its own — two offer/answer
+        # exchanges we did not start, on a change neither peer made. It is what
+        # `:no_sdp` is classified for: `b2bua_reply_reoffer/1` answers it here.
+        {:error, sip_ctx, :offerless_reoffer_not_relayable}
+    end
+  end
+
+  # The media plane could not take the re-offer, so nothing crosses and the leg
+  # that sent it is told. Same conversion as the 2xx case (R4.2): a media failure
+  # the scenario reads in `lasterr`, rather than a relay that silently did
+  # nothing and a peer left waiting for a response.
+  defp refuse_reoffer(sip_ctx, req, reason) do
+    sip_ctx
+    |> do_local_reply(req, 488, "Not Acceptable Here", [])
+    |> fail({:b2bua, :reoffer_relay_failed, reason})
+  end
+
+  defp with_sdp(msg, sdp) do
+    SIP.Msg.Ops.update_sip_msg(msg, {:body, [%{contenttype: "application/sdp", data: sdp}]})
   end
 
   # The INVITE transaction of the leg opposite `from_leg`: what an ACK or a
@@ -1078,6 +1377,11 @@ defmodule SIP.Session.B2bua do
   @spec do_relay_reply(%SIP.Context{}, map()) :: %SIP.Context{}
   def do_relay_reply(sip_ctx = %SIP.Context{}, resp) when is_map(resp) do
     tid = current_tid()
+    # Whatever else it is, a response carrying SDP is this leg describing itself:
+    # the callee's answer to the initial INVITE, or its answer to a re-offer we
+    # relayed. Either way it is what the NEXT re-offer from that leg is read
+    # against (§R4.1b).
+    sip_ctx = remember_remote_sdp(sip_ctx, current_leg(), SIP.Msg.Ops.sdp_body(resp))
     state = state(sip_ctx)
 
     case Map.get(state.pending, tid) do
@@ -1119,13 +1423,54 @@ defmodule SIP.Session.B2bua do
   # the answer to the attempt in flight.
   defp media_step(sip_ctx, resp, tid) do
     plan = media_plan(sip_ctx)
+    pending = Map.get(state(sip_ctx).pending, tid)
 
     cond do
-      is_nil(plan) -> {sip_ctx, resp}
-      not attempt_response?(sip_ctx, tid) -> {sip_ctx, resp}
-      resp.response in 200..299 -> complete_media(sip_ctx, resp, plan, tid)
-      resp.response in 101..199 -> {sip_ctx, strip_early_sdp(resp)}
-      true -> {sip_ctx, resp}
+      is_nil(plan) ->
+        {sip_ctx, resp}
+
+      match?(%Pending{held_answer: held} when is_binary(held), pending) ->
+        reoffer_step(sip_ctx, resp, pending)
+
+      not attempt_response?(sip_ctx, tid) ->
+        {sip_ctx, resp}
+
+      resp.response in 200..299 ->
+        complete_media(sip_ctx, resp, plan, tid)
+
+      resp.response in 101..199 ->
+        {sip_ctx, strip_early_sdp(resp)}
+
+      true ->
+        {sip_ctx, resp}
+    end
+  end
+
+  # The far end answered a re-offer we relayed: same choreography as the initial
+  # INVITE, one exchange later. Its answer goes to ITS endpoint, and the leg that
+  # re-offered receives the answer we have been holding since it did.
+  defp reoffer_step(sip_ctx, resp, %Pending{held_answer: held}) do
+    cond do
+      resp.response in 200..299 ->
+        sip_ctx =
+          case SIP.Msg.Ops.sdp_body(resp) do
+            sdp when is_binary(sdp) and sdp != "" -> process_answer(sip_ctx, current_leg(), sdp)
+            _no_answer -> sip_ctx
+          end
+
+        {sip_ctx, with_sdp(resp, held)}
+
+      # A provisional to a re-INVITE is not an offer/answer event any more than
+      # it was on the initial one.
+      resp.response in 101..199 ->
+        {sip_ctx, strip_early_sdp(resp)}
+
+      # Refused at the far end. RFC 3261 §14.1 leaves that session as it was and
+      # the refusal crosses untouched — our own endpoint has already moved to the
+      # new description, which is the one place the two disagree until the peer
+      # re-offers again.
+      true ->
+        {sip_ctx, resp}
     end
   end
 
@@ -1886,11 +2231,13 @@ defmodule SIP.Session.B2bua do
     put_state(sip_ctx, %State{state | legs: Map.put(state.legs, tag, leg)})
   end
 
-  defp add_pending(sip_ctx, nil, _req, _leg, _method), do: sip_ctx
+  defp add_pending(sip_ctx, trans_pid, req, leg, method, held_answer \\ nil)
 
-  defp add_pending(sip_ctx, trans_pid, req, leg, method) do
+  defp add_pending(sip_ctx, nil, _req, _leg, _method, _held), do: sip_ctx
+
+  defp add_pending(sip_ctx, trans_pid, req, leg, method, held_answer) do
     state = state(sip_ctx)
-    entry = %Pending{orig_req: req, orig_leg: leg, method: method}
+    entry = %Pending{orig_req: req, orig_leg: leg, method: method, held_answer: held_answer}
     put_state(sip_ctx, %State{state | pending: Map.put(state.pending, trans_pid, entry)})
   end
 

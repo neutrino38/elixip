@@ -175,32 +175,13 @@ defmodule SIP.Session do
 
   Shared by the UAC answer path (`CallUAC.process_sdp_resp/2`) and the UAS offer
   path (`CallUAS.do_reply_invite_with_sdp/3`).
+
+  The reading itself lives in the message layer (`SIP.Msg.Ops.sdp_body/1`), where
+  the B2BUA's re-offer classifier needs the same one; this name stays because
+  half the stack calls it.
   """
   @spec extract_sdp(map()) :: binary() | nil
-  def extract_sdp(msg) when is_map(msg) do
-    case Map.get(msg, :body) do
-      sdp when is_binary(sdp) and sdp != "" ->
-        sdp
-
-      [%{data: sdp}] ->
-        sdp
-
-      list when is_list(list) and list != [] ->
-        case Enum.find(list, fn part -> to_string(Map.get(part, :contenttype)) =~ "sdp" end) do
-          %{data: sdp} ->
-            sdp
-
-          _ ->
-            case list do
-              [%{data: sdp} | _] -> sdp
-              _ -> nil
-            end
-        end
-
-      _ ->
-        nil
-    end
-  end
+  defdelegate extract_sdp(msg), to: SIP.Msg.Ops, as: :sdp_body
 
   defmodule Options do
     @moduledoc """

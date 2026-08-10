@@ -264,6 +264,163 @@ defmodule SIP.Msg.Ops do
 
   defp presence(_other), do: nil
 
+  # ── The SDP body, and what a re-offer asks for (RFC 3264 §8, RFC 3261 §14) ───
+  #
+  # THE one place that answers "what does this offer change, given the one it
+  # replaces", for the same reason as the two sections above (CLAUDE.md, Message
+  # Layer). A B2BUA that terminates media has to decide whether a re-INVITE or an
+  # UPDATE concerns the far end at all, and that decision is a *reading* of the
+  # message. The policy built on it — which kinds cross and which are answered
+  # locally — stays the caller's (docs/design/b2bua_media_impl_plan.md §R4.1b).
+  #
+  # The SDP parser is borrowed from the media layer rather than rewritten:
+  # `MediaServer.SdpTools.parse/1` is already the stack's single reading of an
+  # SDP body, and a second one here would be the very duplication this section
+  # exists to prevent.
+
+  @doc """
+  The SDP carried by a message, or `nil` when it carries none.
+
+  Accepts every body shape the stack produces: a bare binary, a single part, or a
+  multipart list — in which case the `application/sdp` part wins, and the first
+  part is the fallback for a message whose content type is missing or misspelt.
+  """
+  @spec sdp_body(map()) :: binary() | nil
+  def sdp_body(msg) when is_map(msg) do
+    case Map.get(msg, :body) do
+      sdp when is_binary(sdp) and sdp != "" ->
+        sdp
+
+      [%{data: sdp}] ->
+        sdp
+
+      list when is_list(list) and list != [] ->
+        case Enum.find(list, fn part -> to_string(Map.get(part, :contenttype)) =~ "sdp" end) do
+          %{data: sdp} ->
+            sdp
+
+          _ ->
+            case list do
+              [%{data: sdp} | _] -> sdp
+              _ -> nil
+            end
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  @typedoc """
+  What a re-offer changes, relative to the offer it replaces:
+
+    * `:no_sdp` — no body at all (an offerless re-INVITE: a session-timer
+      refresh, or a peer asking *us* to offer);
+    * `:media_change` — the media set moved: one added, one withdrawn (port 0),
+      a type or transport changed, or a direction changed in a way that is not a
+      hold;
+    * `:hold` / `:resume` — the peer stopped, or resumed, wanting media
+      (`a=sendonly`, `a=inactive`, or the RFC 2543 `c=0.0.0.0`);
+    * `:address_change` — only where the media goes moved: `c=`, a port, an ICE
+      restart, a new DTLS fingerprint;
+    * `:no_change` — the offer says exactly what the previous one said;
+    * `:unknown` — nothing to compare against, or an SDP neither side can parse.
+
+  The two that a media-terminating B2BUA can absorb are `:address_change` and
+  `:no_sdp` (plus `:no_change`, which asks for nothing): our endpoint has not
+  moved, so the far end's media path is unchanged. Everything else — including
+  `:unknown`, deliberately — concerns the far end and has to cross.
+  """
+  @type reoffer_kind ::
+          :no_sdp | :media_change | :hold | :resume | :address_change | :no_change | :unknown
+
+  @doc """
+  Classify a re-offer against the last SDP the same peer gave us.
+
+  `previous_sdp` is that peer's previous description — its offer, or its answer:
+  both describe the same thing, which is where its media lives and what it wants
+  of it. `nil` (nothing stored yet) yields `:unknown` rather than a guess.
+
+  Precedence, when a re-offer does several things at once, is by what the far end
+  needs to know: the media set first, then hold, then addressing. A peer that
+  moves *and* goes on hold reads as `:hold` — swallowing that would leave it
+  receiving media it asked to stop.
+  """
+  @spec reoffer_kind(map(), binary() | nil) :: reoffer_kind()
+  def reoffer_kind(req, previous_sdp \\ nil) when is_map(req) do
+    case {presence(sdp_body(req)), presence(previous_sdp)} do
+      {nil, _previous} -> :no_sdp
+      {_new, nil} -> :unknown
+      {new, previous} -> compare_offers(new, previous)
+    end
+  end
+
+  defp compare_offers(new_sdp, previous_sdp) do
+    with {:ok, new} <- MediaServer.SdpTools.parse(new_sdp),
+         {:ok, previous} <- MediaServer.SdpTools.parse(previous_sdp) do
+      classify_offer(new, previous)
+    else
+      # An SDP we cannot read is not an SDP we may absorb.
+      _unparseable -> :unknown
+    end
+  end
+
+  defp classify_offer(new, previous) do
+    cond do
+      media_set(new) != media_set(previous) -> :media_change
+      held?(new) and not held?(previous) -> :hold
+      held?(previous) and not held?(new) -> :resume
+      directions(new) != directions(previous) -> :media_change
+      codecs(new) != codecs(previous) -> :media_change
+      addressing(new) != addressing(previous) -> :address_change
+      true -> :no_change
+    end
+  end
+
+  # What each m= section IS, in offer order: RFC 3264 §8 forbids reordering or
+  # dropping them, so position is identity and a disabled section (port 0) still
+  # counts — its disappearance from the active set is exactly the change to spot.
+  defp media_set(descs) do
+    for d <- descs,
+        do: {Map.get(d, :type), Map.get(d, :transport), Map.get(d, :port, 0) != 0}
+  end
+
+  # The sections that carry media right now. Everything below compares these
+  # only: a section already at port 0 says nothing about where media goes.
+  defp active(descs) do
+    Enum.filter(descs, fn d -> Map.get(d, :supported?, false) and Map.get(d, :port, 0) != 0 end)
+  end
+
+  defp directions(descs), do: for(d <- active(descs), do: Map.get(d, :direction))
+
+  # Which codecs each active media offers, as a set — a re-offer that merely
+  # reorders its preferences has not changed what it can do.
+  #
+  # A narrowed codec list counts as a media change even though our own endpoint
+  # could re-answer it alone: with two legs bridged, the codec both sides settled
+  # on is what the direct attach relies on, and a peer that drops it has changed
+  # something only the far end can answer.
+  defp codecs(descs),
+    do: for(d <- active(descs), do: d |> Map.get(:codecs, []) |> MapSet.new())
+
+  # `a=sendonly`/`a=inactive` (RFC 3264 §8.4) or the pre-RFC-3264 `c=0.0.0.0`
+  # that older phones still send. One media on hold is enough: a peer that holds
+  # its audio has put the call on hold whatever it left its video saying.
+  defp held?(descs), do: Enum.any?(active(descs), &held_media?/1)
+
+  defp held_media?(desc) do
+    Map.get(desc, :direction) in [:sendonly, :inactive] or Map.get(desc, :ip) == "0.0.0.0"
+  end
+
+  # Where the media goes and how it is protected. ICE is compared on its
+  # credentials only — a re-offer that merely adds candidates for the same ufrag
+  # is not a restart, and the media server learns them by other means.
+  defp addressing(descs) do
+    for d <- active(descs) do
+      {Map.get(d, :ip), Map.get(d, :port), Map.get(d, :ice), Map.get(d, :crypto)}
+    end
+  end
+
   @doc "Add a tomost via"
   def add_via(sipmsg, { local_ip, local_port, transport }, branch_id, additional_params \\ nil) when is_bitstring(branch_id) do
     via = build_via_addr(local_ip, local_port, transport)
