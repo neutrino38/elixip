@@ -251,50 +251,52 @@ which builds its own forwarded request (`prepare_forwarded_request`) and wants
 was factored into `target_uri/1`; `lookup/1` stays for the registrar script):
 
 ```elixir
-@doc "B2BUA-shaped lookup: the AOR's live contacts as ready-to-dial URIs,
-      sorted by descending q-value."
-@spec targets(domain :: String.t(), aor :: String.t()) ::
-        {:ok, [SIP.Uri.t()]} | :notfound | {:error, term}
-def targets(domain, aor)
+@doc "B2BUA-shaped lookup: where to call the AOR `req` asks for."
+@spec targets(domain :: String.t(), req :: map()) ::
+        {:ok, %SIP.B2bua.Peer{}} | :notfound | :no_aor | :unavailable
+def targets(domain, req)
 ```
 
-Each returned `%SIP.Uri{}` is the stored contact stamped with
+Each URI in the peer is the stored contact stamped with
 `destip`/`destport`/`destproto`/`tp_pid`/`tp_module` — exactly what
 `SIP.Transport.Selector` short-circuits on, so the forwarded INVITE reuses the
-registration flow (NAT traversal for free) and skips DNS. Because the facade
-returns plain `%SIP.Uri{}`, **the dependency direction is preserved**:
-`elixip2` never references the module — the *script* (running inside kelixip,
-where the module is loaded) performs the lookup and feeds the result to a
-peer:
+registration flow (NAT traversal for free) and skips DNS.
+
+**The dependency direction is preserved** even though the facade now returns a
+`%SIP.B2bua.Peer{}`: the struct is `elixip2`'s, and `elixip2` still never
+references the module. The *script* — running inside kelixip, where the module is
+loaded — performs the lookup and hands the result straight to `b2bua_forward/3`:
 
 ```elixir
-state initial_state do
-  on_events do
-    {:INVITE, req, _tpid, _dlg} ->
-      case Kelix.Mod.Registrar.targets(req.ruri.domain, req.ruri.userpart) do
-        {:ok, uris} ->
-          b2bua_reply(req, 100, "Trying")
-          b2bua_forward(req, %SIP.B2bua.Peer{uris: uris, use_srv: false,
-                                             fork: :serial}, false)
-          goto proceeding, "forked to #{length(uris)} contact(s)"
+state place_call do
+  req = last_uas_req()
 
-        :notfound ->
-          b2bua_reply(req, 480, "Temporarily Unavailable")
-          scenario_failure("AOR has no binding")
-
-        {:error, reason} ->
-          b2bua_reply(req, 500, "Location Service Error")
-          scenario_failure("registrar lookup: #{inspect(reason)}")
-      end
+  case Kelix.Mod.Registrar.targets(ctx_get(:domain), req) do
+    {:ok, peer}  -> b2bua_forward(req, peer, false); goto proceeding, "call forwarded"
+    :notfound    -> b2bua_reply(req, 480, "Temporarily Unavailable"); scenario_success(…)
+    :no_aor      -> b2bua_reply(req, 400, "Bad Request"); scenario_success(…)
+    :unavailable -> b2bua_reply(req, 500, "Location Service Unavailable"); scenario_failure(…)
   end
 end
 ```
 
-(`use_srv: false` — the targets are already resolved or carry a live flow.
-The default `ruri: :peer` is the right one here, and the only valid one: the
-R-URI of each branch must become the registered contact, §3.1.)
+**Signature and return shape revised (2026-08-10).** It took `(domain, aor)` and
+returned `{:ok, [uri]}`, which left every script re-deriving the AOR from the
+R-URI and re-stating the same peer policy — three derivations of "which AOR is
+this request for" existed, and two of the peer. It now takes the **request**
+(read once, `SIP.Msg.Ops.target_aor/1`) and returns the **peer**, with the policy
+a registered AOR implies already in it: `ruri: :peer` (the only valid value here —
+the R-URI of each branch must become the registered contact, §3.1), `use_srv:
+false` (the targets already carry a live flow), `fork: :serial` over the contacts
+in descending q. A script wanting another policy edits the struct.
 
-The reference script is `apps/kelixip/scripts/b2bua.exs`, tested in
+The three failures are atoms, one per SIP answer the script owes — `:notfound`
+(480), `:no_aor` (400), `:unavailable` (500, the reason logged by the module
+rather than returned). Nothing is rescued script-side: a module that faults
+raises, and the scenario runner logs it and fails the scenario.
+
+The reference scripts are `apps/kelixip/scripts/b2bua.exs` and
+`direct-call.exs`, tested in
 `apps/kelix_modules/test/b2bua_script_test.exs` — the only app where both
 halves exist.
 

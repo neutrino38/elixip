@@ -92,6 +92,50 @@ Rewrite `req` so its R-URI reaches the AOR's live contacts (one rewritten reques
 per contact, with the resolved destination + flow). Expired contacts are filtered
 out on read.
 
+### `targets/2`
+
+```elixir
+targets(domain, req) ::
+  {:ok, %SIP.B2bua.Peer{}} | :notfound | :no_aor | :unavailable
+```
+
+Where to call the AOR `req` asks for, as a peer ready to hand to
+`b2bua_forward/3`. The B2BUA-shaped counterpart of `lookup/1`: a B2BUA builds its
+own forwarded request and needs targets, not rewritten requests.
+
+The AOR is the R-URI user part of `req`, case-insensitive, in `domain` — not the
+R-URI domain, which may be an alias the store folds.
+
+The returned peer carries the policy a registered AOR implies:
+
+| Field | Value |
+|---|---|
+| `uris` | the live contacts, each stamped with its destination and registration flow, ordered by descending Contact `q` (absent `q` ranks top; equal `q` keeps registration order) |
+| `ruri` | `:peer` — a registered contact is reached by asking for it by name |
+| `use_srv` | `false` — the contacts already carry the flow they registered over |
+| `fork` | `:serial` — the devices are tried in `q` order, one after the other |
+
+A script wanting another policy edits the struct it gets back
+(`%{peer | fork: :none}`).
+
+> **`:serial`, where kamailio is parallel.** `lookup("location")` + `t_relay()`
+> rings every contact of a q group at once. Parallel forking is not built yet, and
+> `fork: :parallel` is not a value the hunt honours — it dials the highest-q
+> contact and never fails over. This returns `:serial` until it exists.
+
+Each failure is one atom, mapping to one SIP answer:
+
+| Verdict | Meaning | Typical response |
+|---|---|---|
+| `:notfound` | the AOR has no live binding | `480 Temporarily Unavailable` |
+| `:no_aor` | the request carries no usable R-URI user part | `400 Bad Request` |
+| `:unavailable` | the store or the module could not answer (the reason is logged) | `500` |
+
+Used by the reference scripts
+[`direct-call.exs`](../../../apps/kelixip/scripts/direct-call.exs) and
+[`b2bua.exs`](../../../apps/kelixip/scripts/b2bua.exs); commented in
+[B2BUA.md](../../../B2BUA.md).
+
 ### `subscribe_register_event/2`, `unsubscribe_register_event/2`
 
 ```elixir

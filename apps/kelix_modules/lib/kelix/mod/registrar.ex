@@ -157,28 +157,65 @@ defmodule Kelix.Mod.Registrar do
   def lookup(req), do: Kelix.Module.safe_call(__MODULE__, {:lookup, req})
 
   @doc """
-  The AOR's live contacts as ready-to-dial URIs, ordered by descending q-value.
+  Where to call the AOR `req` asks for, as a `%SIP.B2bua.Peer{}` ready to hand to
+  `b2bua_forward/3`.
 
   The B2BUA-shaped counterpart of `lookup/1`. `lookup/1` answers a *proxy*
   question — "rewrite this request, once per binding" — and hands back requests;
-  a B2BUA builds its own forwarded request (`SIP.Msg.Ops.prepare_forwarded_request/2`)
-  and needs **targets**. Feed the result straight to a `%SIP.B2bua.Peer{uris: …}`
-  (design docs/design/b2bua_module.md §3.2).
+  a B2BUA builds its own forwarded request
+  (`SIP.Msg.Ops.prepare_forwarded_request/2`) and needs a **peer** (design
+  docs/design/b2bua_module.md §3.2):
 
-  Each URI is the stored contact stamped with its destination and registration
-  flow — what `SIP.Transport.Selector` short-circuits on, so the call reaches a
-  NATed device over the connection it registered on and skips DNS.
+      case Kelix.Mod.Registrar.targets(ctx_get(:domain), req) do
+        {:ok, peer}  -> b2bua_forward(req, peer, false)
+        :notfound    -> b2bua_reply(req, 480, "Temporarily Unavailable")
+        :no_aor      -> b2bua_reply(req, 400, "Bad Request")
+        :unavailable -> b2bua_reply(req, 500, "Location Service Unavailable")
+      end
+
+  The peer's URIs are the live contacts, each stamped with its destination and
+  registration flow — what `SIP.Transport.Selector` short-circuits on, so the
+  call reaches a NATed device over the connection it registered on and skips
+  DNS. Hence `use_srv: false` and `ruri: :peer`: a registered contact is reached
+  by asking for it by name.
 
   Ordering is the Contact `q` parameter, highest first (RFC 3261 §20.10; absent
-  means no stated preference, taken as the highest, 1.0). Equal q keeps
-  registration order. Turning that order into serial or parallel branches is the
-  caller's policy — `%Peer{fork:}`.
+  means no stated preference, taken as the highest, 1.0), equal q keeping
+  registration order, and `fork: :serial` walks them in that order. A script
+  wanting another policy edits the struct it gets back (`%{peer | fork: :none}`).
 
-  Returns `{:ok, uris}`, `:notfound` when the AOR has no live binding (answer
-  480), or `{:error, reason}` when the store is unreachable.
+  **Not what kamailio does**, and not a preference: `lookup("location")` +
+  `t_relay()` rings every contact of a q group at once. Parallel forking is the
+  one B2BUA piece not built (design §3.3), and `fork: :parallel` is not a value
+  the hunt honours — it would dial the highest-q contact and never fail over,
+  which is strictly worse than `:serial`. This returns `:serial` until it exists.
+
+  Returns `{:ok, peer}`, or one of three atoms, each mapping to one SIP answer:
+  `:notfound` (no live binding — 480), `:no_aor` (the request carries no usable
+  R-URI user part — 400), `:unavailable` (the store or this module could not
+  answer — 500; the reason is logged here rather than returned).
   """
-  @spec targets(String.t(), String.t()) :: {:ok, [SIP.Uri.t()]} | :notfound | {:error, term}
-  def targets(domain, aor), do: Kelix.Module.safe_call(__MODULE__, {:targets, domain, aor})
+  @spec targets(String.t(), map()) ::
+          {:ok, %SIP.B2bua.Peer{}} | :notfound | :no_aor | :unavailable
+  def targets(domain, req) do
+    case Kelix.Module.safe_call(__MODULE__, {:targets, domain, req}) do
+      {:ok, _peer} = ok ->
+        ok
+
+      atom when atom in [:notfound, :no_aor] ->
+        atom
+
+      {:error, reason} ->
+        Logger.warning(
+          module: __MODULE__,
+          message:
+            "targets for #{inspect(SIP.Msg.Ops.target_aor(req))}@#{domain} " <>
+              "unavailable: #{inspect(reason)}"
+        )
+
+        :unavailable
+    end
+  end
 
   @doc """
   The shortest registration granted on `domain` (seconds).
@@ -250,8 +287,8 @@ defmodule Kelix.Mod.Registrar do
     {:reply, do_lookup(state, req), state}
   end
 
-  def handle_call({:targets, domain, aor}, _from, state) do
-    {:reply, do_targets(state, domain, aor), state}
+  def handle_call({:targets, domain, req}, _from, state) do
+    {:reply, do_targets(state, domain, req), state}
   end
 
   def handle_call({:min_expires, domain}, _from, state),
@@ -572,14 +609,24 @@ defmodule Kelix.Mod.Registrar do
 
   # ── targets (B2BUA-shaped lookup) ────────────────────────────────────────────
 
-  defp do_targets(state, domain, aor) when is_binary(domain) and is_binary(aor) do
-    case live_contacts(state, fold_alias(domain), downcase(aor)) do
-      [] -> :notfound
-      contacts -> {:ok, contacts |> Enum.sort_by(&q_of/1, :desc) |> Enum.map(&target_uri/1)}
+  defp do_targets(state, domain, req) when is_binary(domain) do
+    case SIP.Msg.Ops.target_aor(req) do
+      aor when is_binary(aor) ->
+        case live_contacts(state, fold_alias(domain), downcase(aor)) do
+          [] ->
+            :notfound
+
+          contacts ->
+            uris = contacts |> Enum.sort_by(&q_of/1, :desc) |> Enum.map(&target_uri/1)
+            {:ok, %SIP.B2bua.Peer{uris: uris, use_srv: false, ruri: :peer, fork: :serial}}
+        end
+
+      _no_aor ->
+        :no_aor
     end
   end
 
-  defp do_targets(_state, _domain, _aor), do: {:error, :no_aor}
+  defp do_targets(_state, _domain, _req), do: :no_aor
 
   # The Contact `q` (RFC 3261 §20.10): 0..1, highest preference first. Absent
   # means the device stated no preference, which ranks it top — the single-contact

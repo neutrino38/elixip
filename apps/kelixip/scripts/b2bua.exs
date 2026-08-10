@@ -10,12 +10,11 @@
 # told to hang up, can meter, and later can put media in the middle.
 #
 # Separation of concerns (§11.1): the MODULE decides where the subscriber is
-# (Kelix.Mod.Registrar.targets/2 → ready-to-dial URIs, ordered by q); the SCRIPT
+# (Kelix.Mod.Registrar.targets/2 → a ready-to-dial %SIP.B2bua.Peer{}); the SCRIPT
 # decides what SIP that means — whom to call, what to answer when nobody is
 # registered, and what crosses between the two legs.
 defmodule Kelix.B2bua do
   use SIP.Scenario
-  require Logger
 
   uas(:invite)
 
@@ -41,12 +40,16 @@ defmodule Kelix.B2bua do
     end
   end
 
-  # Where is the callee? The AOR is the R-URI user part, in the domain the router
-  # gave us — not the R-URI domain, which may be an alias the store folds.
+  # Where is the callee? In the domain the router gave us — not the R-URI domain,
+  # which may be an alias the store folds.
+  #
+  # The MODULE says where the AOR is and hands back a peer; the SCRIPT decides
+  # what SIP each outcome means. Nothing is rescued here — a module that faults
+  # raises, and the scenario runner logs it and fails the scenario.
   state place_call do
     req = last_uas_req()
 
-    case lookup_targets(req, ctx_get(:domain)) do
+    case Kelix.Mod.Registrar.targets(ctx_get(:domain), req) do
       {:ok, peer} ->
         # The highest-q contact is dialled first; if it refuses, the hunt walks
         # down the rest — as branches of this same leg, so nothing above the
@@ -55,9 +58,20 @@ defmodule Kelix.B2bua do
         b2bua_forward(req, peer, false)
         goto(proceeding, "call forwarded")
 
-      {:answer, code, reason, desc} ->
-        b2bua_reply(req, code, reason)
-        scenario_success(desc)
+      # Registered nowhere right now — the subscriber exists, the device does
+      # not answer. 480 says "try later", which is what a voicemail or a
+      # follow-me rule would branch on.
+      :notfound ->
+        b2bua_reply(req, 480, "Temporarily Unavailable")
+        scenario_success("callee is not registered")
+
+      :no_aor ->
+        b2bua_reply(req, 400, "Bad Request")
+        scenario_success("the INVITE names no AOR")
+
+      :unavailable ->
+        b2bua_reply(req, 500, "Location Service Unavailable")
+        scenario_failure("the location service could not answer")
     end
   end
 
@@ -204,49 +218,5 @@ defmodule Kelix.B2bua do
   # to do here but say why we stopped.
   on_shutdown do
     scenario_aborted("B2BUA stopped gracefully")
-  end
-
-  # ── application logic ───────────────────────────────────────────────────────
-
-  # Ask the location service where the AOR is and turn that into a peer, or into
-  # the SIP answer the caller gets instead.
-  #
-  # The rescue is the load-bearing part, as in the registrar script: a module
-  # that is not installed (UndefinedFunctionError) or that faults mid-lookup
-  # would otherwise kill this instance and leave the caller with nothing. The
-  # load-time `uses_modules` contract makes that unlikely, not impossible — a
-  # module can be unloaded while calls are running.
-  defp lookup_targets(req, domain) do
-    aor = aor_of(req)
-
-    case Kelix.Mod.Registrar.targets(domain, aor) do
-      {:ok, uris} ->
-        # Serial: a subscriber's devices are alternatives, not a group to ring
-        # together — the store already ordered them by q, i.e. by which one the
-        # subscriber wants tried first.
-        {:ok, %SIP.B2bua.Peer{uris: uris, use_srv: false, ruri: :peer, fork: :serial}}
-
-      :notfound ->
-        # Registered nowhere right now — the subscriber exists, the device does
-        # not answer. 480 says "try later", which is what a voicemail or a
-        # follow-me rule would branch on.
-        {:answer, 480, "Temporarily Unavailable", "#{aor} is not registered"}
-
-      {:error, reason} ->
-        Logger.error("b2bua: location lookup for #{aor}@#{domain} failed: #{inspect(reason)}")
-        {:answer, 500, "Location Service Unavailable", "lookup failed"}
-    end
-  rescue
-    err ->
-      Logger.error("b2bua: location lookup raised: #{Exception.message(err)}")
-      {:answer, 500, "Location Service Unavailable", "lookup raised"}
-  end
-
-  # The AOR is the R-URI user part (RFC 3261 §10.3): whom the call is *for*.
-  defp aor_of(req) do
-    case Map.get(req, :ruri) do
-      %SIP.Uri{userpart: user} when is_binary(user) -> user
-      _ -> ""
-    end
   end
 end

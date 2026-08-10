@@ -228,7 +228,6 @@ Bob wants tried first. So one leg, `fork: :serial`, and the hunt walks them.
 ```elixir
 defmodule Kelix.DirectCall do
   use SIP.Scenario
-  require Logger
 
   uas(:invite)
 
@@ -255,17 +254,30 @@ defmodule Kelix.DirectCall do
   end
 
   # Where is Bob? A state with no on_events: it decides and moves on.
+  #
+  # The MODULE says where the AOR is and hands back a peer; the SCRIPT decides
+  # what SIP each outcome means. Nothing is rescued here — a module that faults
+  # raises, and the scenario runner logs it and fails the scenario, which is more
+  # readable than an error mapped twice.
   state place_call do
     req = last_uas_req()
 
-    case where_is(req, ctx_get(:domain)) do
+    case Kelix.Mod.Registrar.targets(ctx_get(:domain), req) do
       {:ok, peer} ->
         b2bua_forward(req, peer, false)
         goto(proceeding, "call forwarded")
 
-      {:answer, code, reason} ->
-        b2bua_reply(req, code, reason)
-        scenario_success("answered #{code} locally")
+      :notfound ->
+        b2bua_reply(req, 480, "Temporarily Unavailable")
+        scenario_success("Bob is registered nowhere right now")
+
+      :no_aor ->
+        b2bua_reply(req, 400, "Bad Request")
+        scenario_success("the INVITE names no AOR")
+
+      :unavailable ->
+        b2bua_reply(req, 500, "Location Service Unavailable")
+        scenario_failure("the location service could not answer")
     end
   end
 
@@ -395,49 +407,30 @@ defmodule Kelix.DirectCall do
     scenario_aborted("B2BUA stopped gracefully")
   end
 
-  # ── application logic ───────────────────────────────────────────────────────
-
-  # The module decides WHERE Bob is; the scenario decides what SIP that means.
-  defp where_is(req, domain) do
-    aor = to_string(req.ruri.userpart)
-
-    case Kelix.Mod.Registrar.targets(domain, aor) do
-      # ready-to-dial URIs, already carrying the flow they registered over, in
-      # descending q — hence use_srv: false and ruri: :peer
-      {:ok, uris} ->
-        {:ok, %SIP.B2bua.Peer{uris: uris, use_srv: false, ruri: :peer, fork: :parallel}}
-
-      :notfound ->
-        {:answer, 480, "Temporarily Unavailable"}
-
-      {:error, reason} ->
-        Logger.error("lookup for #{aor}@#{domain} failed: #{inspect(reason)}")
-        {:answer, 500, "Registrar Unavailable"}
-    end
-  rescue
-    # A module unloaded mid-call must not kill the instance and leave Alice with
-    # nothing.
-    err ->
-      Logger.error("lookup raised: #{Exception.message(err)}")
-      {:answer, 500, "Location Service Unavailable"}
-  end
 end
 ```
 
 What is worth noticing:
 
-- **`ruri: :peer` is mandatory here.** A registered contact is reached by asking
-  for it by name; routing Alice's unchanged R-URI at the device would arrive
-  asking for the AOR, which the device does not answer to.
-- **`use_srv: false`** for the same reason: the contacts already carry the flow
-  they registered over. Resolving them again would undo that.
+- **There is no lookup helper.** `targets/2` hands back a `%SIP.B2bua.Peer{}`
+  already carrying the policy a registered AOR implies: `ruri: :peer` (a
+  registered contact is reached by asking for it *by name* — routing Alice's
+  unchanged R-URI at the device would arrive asking for the AOR, which the device
+  does not answer to), `use_srv: false` (the contacts already carry the flow they
+  registered over; resolving them again would undo it) and `fork: :serial` over
+  the devices in descending `q`. A script wanting something else edits the struct
+  it got: `%{peer | fork: :none}`.
+- **Each error atom maps to one SIP answer** — that is why there are three of
+  them rather than one `{:error, reason}`. The reason behind `:unavailable` is
+  logged by the module.
+- **Nothing is rescued.** A module that faults raises, the scenario runner logs
+  the exception and fails the scenario. Mapping it to a response *here* as well
+  would say the same thing twice, less readably.
 - **`b2bua_hunting?/0` in `proceeding`** is the whole multi-device story. Without
   it, Bob's laptop answering `486 Busy` would be relayed to Alice as the answer
   of the call while the hunt kept ringing his desk phone.
 - **`place_call` has no `on_events`.** A state may simply decide and `goto`;
   the lookup happens once, not on every event.
-- **The `rescue`** is load-bearing. The `uses_modules` contract makes a missing
-  module unlikely at load time, not impossible at call time.
 
 ## Scenario customer-service.exs
 

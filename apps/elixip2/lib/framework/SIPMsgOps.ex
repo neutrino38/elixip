@@ -264,6 +264,17 @@ defmodule SIP.Msg.Ops do
 
   defp presence(_other), do: nil
 
+  @doc """
+  The address-of-record a request is **for**: the user part of its Request-URI
+  (RFC 3261 §10.3), or `nil` when it carries none.
+
+  The counterpart of `asserted_username/1`, which answers who a request comes
+  from. Returned verbatim: the AOR is case-insensitive, but folding it is the
+  location service's rule, not the message's.
+  """
+  @spec target_aor(map()) :: String.t() | nil
+  def target_aor(msg) when is_map(msg), do: uri_userpart(Map.get(msg, :ruri))
+
   # ── The SDP body, and what a re-offer asks for (RFC 3264 §8, RFC 3261 §14) ───
   #
   # THE one place that answers "what does this offer change, given the one it
