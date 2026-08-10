@@ -103,6 +103,17 @@ defmodule Kelix.ScriptRegistryTest do
     # only a compile through this module can. The verdict is irrelevant here (the
     # scripts declare `uses_modules`, which no module satisfies in this app); the
     # warnings the compiler emits are what is being asserted on.
+    #
+    # Which is why `Kelix.Mod.*` has to be excluded, and why this test had been red
+    # since the day it was written (2026-08-02, dde2f60): it refuted EVERY "is
+    # undefined" warning, and registrar.exs legitimately calls Kelix.Mod.AuthDb and
+    # Kelix.Mod.Registrar — the loadable modules that :kelixip deliberately does not
+    # depend on, so that the core ships no SIP function. Those warnings are the
+    # design working, not a dangling reference. Everything else still fails, which is
+    # what catches the bug the test is named after; mcu.exs and mcu_adhoc.exs emit
+    # nothing at all.
+    @loadable_module ~r/\(module Kelix\.Mod\.\w+ is not available/
+
     test "the shipped reference scripts have no dangling self-reference" do
       for script <- ["registrar.exs", "mcu.exs", "mcu_adhoc.exs"] do
         path = Path.expand("../scripts/#{script}", __DIR__)
@@ -112,7 +123,14 @@ defmodule Kelix.ScriptRegistryTest do
             ScriptRegistry.compile_checked(path, 8_000 + System.unique_integer([:positive]))
           end)
 
-        refute warnings =~ "is undefined", "#{script} references a module it does not define"
+        dangling =
+          warnings
+          |> String.split("\n")
+          |> Enum.filter(&(&1 =~ "is undefined"))
+          |> Enum.reject(&(&1 =~ @loadable_module))
+
+        assert dangling == [],
+               "#{script} references a module it does not define: #{Enum.join(dangling, "\n")}"
       end
     end
 

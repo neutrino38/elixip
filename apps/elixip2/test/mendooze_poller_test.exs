@@ -160,6 +160,7 @@ defmodule Mendooze.EventPollerTest do
     start_poller(base_url)
 
     assert_receive {:stream_conn, conn, "/events/jsr309/7"}, 1_000
+    await_streaming(conn)
 
     send(conn, {:chunk, event_frame([3, "cx-1", "p-1"])})
     assert_receive {:mendooze_event, {:player_started, "cx-1", "p-1"}}, 1_000
@@ -173,6 +174,7 @@ defmodule Mendooze.EventPollerTest do
     start_poller(base_url)
 
     assert_receive {:stream_conn, conn, _}, 1_000
+    await_streaming(conn)
 
     send(conn, {:chunk, "\r\n"})
     send(conn, {:chunk, event_frame([1, "cx-1", "p-1"])})
@@ -186,6 +188,7 @@ defmodule Mendooze.EventPollerTest do
     start_poller(base_url)
 
     assert_receive {:stream_conn, conn, _}, 1_000
+    await_streaming(conn)
 
     frame = event_frame([6, "cx-1", 4, 0, 0])
     {head, tail} = String.split_at(frame, div(byte_size(frame), 2))
@@ -207,9 +210,68 @@ defmodule Mendooze.EventPollerTest do
     # the poller retries after retry_ms and the server accepts again
     # (generous timeouts: this file runs concurrently with the whole suite)
     assert_receive {:stream_conn, conn2, _}, 2_000
-    send(conn2, {:chunk, event_frame([3, "cx-2", "p-9"])})
+    await_streaming(conn2)
 
+    send(conn2, {:chunk, event_frame([3, "cx-2", "p-9"])})
     assert_receive {:mendooze_event, {:player_started, "cx-2", "p-9"}}, 2_000
+  end
+
+  # ── Stream readiness ────────────────────────────────────────────────────────
+  #
+  # `{:stream_conn, …}` says the SERVER wrote the response headers. It does NOT say
+  # the poller has parsed them: httpc surfaces `stream_start` only once it has, and
+  # an event written into that window never reaches the sink. Every test here used
+  # to write its first chunk straight after `{:stream_conn, …}`, so each carried the
+  # same race — measured at roughly one run in three hundred (a 400-iteration
+  # `--repeat-until-failure` reproduced it twice out of two, on the reconnect test
+  # and on "polls the source path"). The failing run's log is unambiguous: the
+  # poller's "event stream connected" lands AFTER the chunk was written, and the
+  # mailbox is empty at the deadline.
+  #
+  # A fixed sleep only makes it rarer. Instead, offer a sync event until one comes
+  # back: that is positive proof the poller is streaming on this connection, after
+  # which chunks on it are safe — including a frame deliberately split in two, which
+  # cannot be re-offered piecemeal.
+  @sync_param [3, "__sync__", "__sync__"]
+  @sync_event {:player_started, "__sync__", "__sync__"}
+
+  # Written as its own loop rather than through SIP.Test.Wait.until/2 because it has
+  # to report how many offers it took: only a retry can have left a duplicate in
+  # flight, and that is what decides whether the settling drain below is worth its
+  # 50 ms. On the common path the first offer lands and the drain costs nothing.
+  defp await_streaming(conn, timeout_ms \\ 2_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+
+    case offer_sync(conn, deadline, 1) do
+      {:ok, 1} -> drain_sync(0)
+      {:ok, _retried} -> drain_sync(50)
+      :timeout -> flunk("the poller never started streaming on this connection")
+    end
+  end
+
+  defp offer_sync(conn, deadline, offers) do
+    send(conn, {:chunk, event_frame(@sync_param)})
+
+    receive do
+      {:mendooze_event, @sync_event} ->
+        {:ok, offers}
+    after
+      50 ->
+        if System.monotonic_time(:millisecond) < deadline,
+          do: offer_sync(conn, deadline, offers + 1),
+          else: :timeout
+    end
+  end
+
+  # Every offer that was not lost produces its own event, and the retry cannot tell
+  # "lost" from "not yet delivered". Drain the duplicates, so a test asserting that
+  # some chunk produced NO event is not reading our handshake's leftovers.
+  defp drain_sync(settle_ms) do
+    receive do
+      {:mendooze_event, @sync_event} -> drain_sync(settle_ms)
+    after
+      settle_ms -> :ok
+    end
   end
 
   test "gives up and notifies the sink after max_failures consecutive failures" do

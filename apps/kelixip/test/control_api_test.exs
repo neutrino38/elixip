@@ -248,11 +248,30 @@ defmodule Kelix.ControlAPITest do
 
     test "POST /graceful-shutdown drains without stopping the VM" do
       Application.put_env(:kelixip, :graceful_stop, false)
-      on_exit(fn -> Application.delete_env(:kelixip, :graceful_stop) end)
+      # Same arrangement Kelix.ControlTest makes for the same verb, which this test
+      # was missing both halves of. `drain_wait_ms` defaults to 5 s, so leaving it
+      # alone left a Task asleep that woke up long after this test to call
+      # InstancePool.shutdown_all/1 on whatever was running by then; and `draining`
+      # is a global that nothing here put back, so the node stayed out of rotation
+      # for the rest of the suite and the next drain-sensitive test paid for it —
+      # Kelix.OptionsTest reading 503 where it expects 200, or ControlTest's own
+      # drain test failing on its opening `refute draining?`. Which one failed just
+      # depended on the order ExUnit picked.
+      Application.put_env(:kelixip, :drain_wait_ms, 0)
+
+      on_exit(fn ->
+        Application.delete_env(:kelixip, :graceful_stop)
+        Application.delete_env(:kelixip, :drain_wait_ms)
+        Kelix.Control.undrain()
+      end)
 
       conn = call(conn(:post, "/graceful-shutdown"))
       assert conn.status == 202
       assert body(conn)["result"] == "draining"
+
+      # the point of the verb, and asserting it is what makes the cleanup above
+      # obviously necessary rather than something to forget again
+      assert Kelix.Control.draining?()
     end
 
     test "POST /modules/:name/reload on an unconfigured module → 400" do
