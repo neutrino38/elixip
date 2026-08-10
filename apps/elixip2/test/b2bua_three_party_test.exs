@@ -92,6 +92,7 @@ defmodule SIP.Test.B2bua.ThreeParty do
 
     :ok = GenServer.call(caller.tp_pid, :settestapp)
     :ok = GenServer.call(callee.tp_pid, :settestapp)
+    SIP.Test.Transport.UDPMockup.answer_bye(callee.tp_pid)
 
     {_pid, ref} = arm_b2bua(module)
 
@@ -138,6 +139,7 @@ defmodule SIP.Test.B2bua.ThreeParty do
 
     :ok = GenServer.call(caller.tp_pid, :settestapp)
     :ok = GenServer.call(callee.tp_pid, :settestapp)
+    SIP.Test.Transport.UDPMockup.answer_bye(callee.tp_pid)
 
     {_pid, _ref} = arm_b2bua(module)
     caller_invites(caller)

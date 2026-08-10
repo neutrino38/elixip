@@ -89,6 +89,7 @@ defmodule SIP.Test.B2bua.MediaScenario do
 
     tp_pid = transport_pid(:relayed)
     :ok = GenServer.call(tp_pid, :settestapp)
+    SIP.Test.Transport.UDPMockup.answer_bye(tp_pid)
 
     {instance, ref} = start_instance(module, stub, invite, :relayed)
     send(instance, {:INVITE, invite, self(), stub})
@@ -136,6 +137,7 @@ defmodule SIP.Test.B2bua.MediaScenario do
     invite = inbound_invite()
     tp_pid = transport_pid(:server_gone)
     :ok = GenServer.call(tp_pid, :settestapp)
+    SIP.Test.Transport.UDPMockup.answer_bye(tp_pid)
 
     {instance, _ref} = start_instance(module, stub, invite, :server_gone)
     send(instance, {:INVITE, invite, self(), stub})
@@ -160,6 +162,7 @@ defmodule SIP.Test.B2bua.MediaScenario do
     invite = inbound_invite()
     tp_pid = transport_pid(:media_lost)
     :ok = GenServer.call(tp_pid, :settestapp)
+    SIP.Test.Transport.UDPMockup.answer_bye(tp_pid)
 
     {instance, _ref} = start_instance(module, stub, invite, :media_lost)
     send(instance, {:INVITE, invite, self(), stub})

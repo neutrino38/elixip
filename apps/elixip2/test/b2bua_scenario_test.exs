@@ -97,6 +97,8 @@ defmodule SIP.Test.B2bua.Scenario do
     # forwarded INVITE reaches it, which is what says the outbound leg is up.
     tp_pid = transport_pid()
     :ok = GenServer.call(tp_pid, :settestapp)
+    # the far end answers the relayed BYE, which is what really ends the scenario
+    SIP.Test.Transport.UDPMockup.answer_bye(tp_pid)
 
     {instance, ref} = start_instance(module, stub, invite)
 
@@ -159,6 +161,8 @@ defmodule SIP.Test.B2bua.Scenario do
     invite = inbound_invite()
     tp_pid = transport_pid()
     :ok = GenServer.call(tp_pid, :settestapp)
+    # the far end answers the relayed BYE, which is what really ends the scenario
+    SIP.Test.Transport.UDPMockup.answer_bye(tp_pid)
 
     {instance, _ref} = start_instance(module, stub, invite)
     send(instance, {:INVITE, invite, self(), stub})
@@ -210,6 +214,8 @@ defmodule SIP.Test.B2bua.Scenario do
     invite = inbound_invite()
     tp_pid = transport_pid()
     :ok = GenServer.call(tp_pid, :settestapp)
+    # the far end answers the relayed BYE, which is what really ends the scenario
+    SIP.Test.Transport.UDPMockup.answer_bye(tp_pid)
 
     {instance, _ref} = start_instance(module, stub, invite)
     send(instance, {:INVITE, invite, self(), stub})
@@ -233,6 +239,8 @@ defmodule SIP.Test.B2bua.Scenario do
     invite = inbound_invite()
     tp_pid = transport_pid()
     :ok = GenServer.call(tp_pid, :settestapp)
+    # the far end answers the relayed BYE, which is what really ends the scenario
+    SIP.Test.Transport.UDPMockup.answer_bye(tp_pid)
 
     {instance, ref} = start_instance(module, stub, invite)
     send(instance, {:INVITE, invite, self(), stub})
@@ -263,6 +271,8 @@ defmodule SIP.Test.B2bua.Scenario do
     invite = inbound_invite()
     tp_pid = transport_pid()
     :ok = GenServer.call(tp_pid, :settestapp)
+    # the far end answers the relayed BYE, which is what really ends the scenario
+    SIP.Test.Transport.UDPMockup.answer_bye(tp_pid)
 
     {instance, ref} = start_instance(module, stub, invite)
     send(instance, {:INVITE, invite, self(), stub})

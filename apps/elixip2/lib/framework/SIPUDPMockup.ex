@@ -70,6 +70,23 @@ defmodule SIP.Test.Transport.UDPMockup do
     GenServer.cast(t_pid, {:drop_options, drop})
   end
 
+  @doc """
+  Answer relayed BYEs with a 200, without selecting a canned call scenario.
+
+  Answering a BYE was gated on `:inboundinvite` / `:successfulcall` only. A B2BUA
+  suite drives every response itself and therefore selects no scenario, so the BYE
+  it relayed was never answered and the scenario sat in its `wait_far_bye_ok` state
+  for the full 5 s fallback ("BYE unanswered, closing anyway") before ending — four
+  tests at five seconds each, and the normal path, where the far end *does* answer,
+  went unexercised while the tests' own comments claimed it was what ended them.
+
+  Separate from the canned scenarios rather than folded into them, because those also
+  auto-answer the INVITE, which is exactly what such a suite is driving by hand.
+  """
+  def answer_bye(t_pid, answer \\ true) do
+    GenServer.cast(t_pid, {:answer_bye, answer})
+  end
+
   defp handle_req(state, :INVITE, sipreq) do
     # Tell the test the INVITE actually went out, mirroring {:options_sent, …}.
     # Without it a test cannot know *when* to simulate an answer: it would race
@@ -129,7 +146,8 @@ defmodule SIP.Test.Transport.UDPMockup do
 
     # Answering it, on the other hand, stays part of the canned call scenarios:
     # that is a response on the wire, and it ends the dialog.
-    if Map.get(state, :scenario) in [:inboundinvite, :successfulcall] do
+    if Map.get(state, :scenario) in [:inboundinvite, :successfulcall] or
+         Map.get(state, :answer_bye, false) do
       resp = SIP.Msg.Ops.reply_to_request(sipreq, 200, "OK")
       Process.send_after(self(), {:recv, resp}, 100)
       Logger.debug("UDPMockup: replied to BYE")
@@ -307,6 +325,10 @@ defmodule SIP.Test.Transport.UDPMockup do
 
   def handle_cast({:drop_options, drop}, state) do
     {:noreply, Map.put(state, :drop_options, drop)}
+  end
+
+  def handle_cast({:answer_bye, answer}, state) do
+    {:noreply, Map.put(state, :answer_bye, answer)}
   end
 
   def handle_cast({:simulate, scenario}, state) when is_atom(scenario) do
