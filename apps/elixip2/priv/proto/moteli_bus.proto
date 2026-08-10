@@ -1,0 +1,283 @@
+// MOTELI v2 — bus envelope and lifecycle messages.
+// Design: docs/design/moteli-reboot.md §3.2, §4. Target release: elixip 2.0.
+// See moteli_common.proto for the maintenance rule binding these schemas to
+// the media server's XML-RPC contract.
+//
+// AMQP mapping:
+// - ControlRequest  -> kelixip.alloc.{mcu,jsr309} (establishment verbs) or
+//                      kelixip.rpc.<instance> (everything else)
+// - ControlResponse -> the request's reply_to (direct reply-to)
+// - Event           -> exchange kelixip.events,
+//                      routing key <instance>.<plane>.<tag>
+// - Presence / Bye  -> exchange kelixip.presence (fanout)
+// Content-Type: application/x-moteli-v2+protobuf. Correlation rides AMQP
+// properties; the AMQP `type` property carries the oneof field name.
+//
+// Envelope tag ranges (append-only): 1-9 bus verbs, 10-99 MCU plane,
+// 200-299 JSR-309 plane.
+
+syntax = "proto3";
+
+package moteli.v2;
+
+import "moteli_common.proto";
+import "moteli_mcu.proto";
+import "moteli_jsr309.proto";
+
+option java_outer_classname = "MoteliBus";
+
+// --- Bus verbs ----------------------------------------------------------------
+
+message PingReq {}
+
+// Stop consuming the alloc queues (administrative drain, §4.4). Existing
+// sessions are untouched. Presence.accepting reflects the state.
+message DrainReq {}
+
+// Resume consuming the alloc queues.
+message ResumeReq {}
+
+// --- Presence (exchange kelixip.presence) ---------------------------------------
+
+message Capacity {
+  uint32 conferences = 1;
+  uint32 endpoints = 2;
+  uint32 cpu_percent = 3;
+}
+
+// Published every 5 s (message TTL 5 s). 3 missed heartbeats = down.
+message Presence {
+  string instance = 1;
+  // Captured once at process start; a change on the same instance means the
+  // server restarted and all its ids are gone (drives mark_stale, §4.6).
+  fixed64 boot_epoch = 2;
+  repeated Plane planes = 3;
+  string version = 4;
+  bool accepting = 5; // currently consuming the alloc queues?
+  Capacity capacity = 6; // informational only — never used for selection
+}
+
+// Clean shutdown: immediate removal from the pool (graceful drain).
+message Bye {
+  string instance = 1;
+  fixed64 boot_epoch = 2;
+}
+
+// --- Control envelope --------------------------------------------------------------
+
+message ControlRequest {
+  oneof body {
+    // Bus (1-9)
+    PingReq ping = 1;
+    DrainReq drain = 2;
+    ResumeReq resume = 3;
+
+    // MCU plane (10-99) — conferences
+    CreateConferenceReq create_conference = 10;
+    UpdateConferenceReq update_conference = 11;
+    DeleteConferenceReq delete_conference = 12;
+    GetConferencesReq get_conferences = 13;
+    AddConferenceTokenReq add_conference_token = 14;
+    CreateMosaicReq create_mosaic = 15;
+    SetCompositionTypeReq set_composition_type = 16;
+    SetMosaicSlotReq set_mosaic_slot = 17;
+    SetMosaicOverlayImageReq set_mosaic_overlay_image = 18;
+    ResetMosaicOverlayReq reset_mosaic_overlay = 19;
+    DeleteMosaicReq delete_mosaic = 20;
+    AddMosaicParticipantReq add_mosaic_participant = 21;
+    RemoveMosaicParticipantReq remove_mosaic_participant = 22;
+    GetMosaicPositionsReq get_mosaic_positions = 23;
+    CreateSidebarReq create_sidebar = 24;
+    DeleteSidebarReq delete_sidebar = 25;
+    AddSidebarParticipantReq add_sidebar_participant = 26;
+    RemoveSidebarParticipantReq remove_sidebar_participant = 27;
+    CreateParticipantReq create_participant = 28;
+    DeleteParticipantReq delete_participant = 29;
+    SetParticipantMosaicReq set_participant_mosaic = 30;
+    SetParticipantSidebarReq set_participant_sidebar = 31;
+    SetParticipantDisplayNameReq set_participant_display_name = 32;
+    SetParticipantImageReq set_participant_image = 33;
+    AddParticipantInputTokenReq add_participant_input_token = 34;
+    AddParticipantOutputTokenReq add_participant_output_token = 35;
+    SetMuteReq set_mute = 36;
+    SendFpuReq send_fpu = 37;
+    GetParticipantStatisticsReq get_participant_statistics = 38;
+    SetVideoCodecReq set_video_codec = 39;
+    SetAudioCodecReq set_audio_codec = 40;
+    SetTextCodecReq set_text_codec = 41;
+    SetAppCodecReq set_app_codec = 42;
+    SetRtpPropertiesReq set_rtp_properties = 43;
+    GetSupportedCodecsReq get_supported_codecs = 44;
+    IsCodecSupportedReq is_codec_supported = 45;
+    StartReceivingReq start_receiving = 46;
+    StopReceivingReq stop_receiving = 47;
+    StartRtpTimeoutReq start_rtp_timeout = 48;
+    StartSendingReq start_sending = 49;
+    StopSendingReq stop_sending = 50;
+    ConfigureParticipantMediaConnectionReq configure_participant_media_connection = 51;
+    SetLocalCryptoSdesReq set_local_crypto_sdes = 52;
+    SetRemoteCryptoSdesReq set_remote_crypto_sdes = 53;
+    GetLocalCryptoDtlsFingerprintReq get_local_crypto_dtls_fingerprint = 54;
+    SetRemoteCryptoDtlsReq set_remote_crypto_dtls = 55;
+    SetLocalStunCredentialsReq set_local_stun_credentials = 56;
+    SetRemoteStunCredentialsReq set_remote_stun_credentials = 57;
+    CreatePlayerReq create_player = 58;
+    DeletePlayerReq delete_player = 59;
+    StartPlayingReq start_playing = 60;
+    StopPlayingReq stop_playing = 61;
+    StartRecordingParticipantReq start_recording_participant = 62;
+    StopRecordingParticipantReq stop_recording_participant = 63;
+    StartRecordingBroadcasterReq start_recording_broadcaster = 64;
+    StopRecordingBroadcasterReq stop_recording_broadcaster = 65;
+    StartBroadcasterReq start_broadcaster = 66;
+    StopBroadcasterReq stop_broadcaster = 67;
+    StartPublishingReq start_publishing = 68;
+    StopPublishingReq stop_publishing = 69;
+    AcceptDocSharingRequestReq accept_doc_sharing_request = 70;
+    RefuseDocSharingRequestReq refuse_doc_sharing_request = 71;
+    StopDocSharingReq stop_doc_sharing = 72;
+    SetDocSharingMosaicReq set_doc_sharing_mosaic = 73;
+    UploadImageReq upload_image = 74;
+
+    // JSR-309 plane (200-299) — point-to-point legs
+    MediaSessionCreateReq media_session_create = 200;
+    MediaSessionDeleteReq media_session_delete = 201;
+    PlayerCreateReq player_create = 202;
+    PlayerOpenReq player_open = 203;
+    PlayerPlayReq player_play = 204;
+    PlayerSeekReq player_seek = 205;
+    PlayerStopReq player_stop = 206;
+    PlayerCloseReq player_close = 207;
+    PlayerDeleteReq player_delete = 208;
+    RecorderCreateReq recorder_create = 209;
+    RecorderRecordReq recorder_record = 210;
+    RecorderStopReq recorder_stop = 211;
+    RecorderDeleteReq recorder_delete = 212;
+    RecorderAttachToEndpointReq recorder_attach_to_endpoint = 213;
+    RecorderAttachToAudioMixerPortReq recorder_attach_to_audio_mixer_port = 214;
+    RecorderAttachToVideoMixerPortReq recorder_attach_to_video_mixer_port = 215;
+    RecorderDettachReq recorder_dettach = 216;
+    EndpointCreateReq endpoint_create = 217;
+    EndpointDeleteReq endpoint_delete = 218;
+    EndpointGetStatisticsReq endpoint_get_statistics = 219;
+    EndpointAttachToPlayerReq endpoint_attach_to_player = 220;
+    EndpointAttachToEndpointReq endpoint_attach_to_endpoint = 221;
+    EndpointAttachToAudioMixerPortReq endpoint_attach_to_audio_mixer_port = 222;
+    EndpointAttachToVideoMixerPortReq endpoint_attach_to_video_mixer_port = 223;
+    EndpointAttachToAudioTranscoderReq endpoint_attach_to_audio_transcoder = 224;
+    EndpointAttachToVideoTranscoderReq endpoint_attach_to_video_transcoder = 225;
+    EndpointDettachReq endpoint_dettach = 226;
+    EndpointSetLocalCryptoSdesReq endpoint_set_local_crypto_sdes = 227;
+    EndpointSetRemoteCryptoSdesReq endpoint_set_remote_crypto_sdes = 228;
+    EndpointSetRemoteCryptoDtlsReq endpoint_set_remote_crypto_dtls = 229;
+    EndpointGetLocalCryptoDtlsFingerprintReq endpoint_get_local_crypto_dtls_fingerprint = 230;
+    EndpointSetLocalStunCredentialsReq endpoint_set_local_stun_credentials = 231;
+    EndpointSetRemoteStunCredentialsReq endpoint_set_remote_stun_credentials = 232;
+    EndpointSetRtpPropertiesReq endpoint_set_rtp_properties = 233;
+    EndpointStartSendingReq endpoint_start_sending = 234;
+    EndpointStopSendingReq endpoint_stop_sending = 235;
+    EndpointStartReceivingReq endpoint_start_receiving = 236;
+    EndpointStopReceivingReq endpoint_stop_receiving = 237;
+    EndpointRequestUpdateReq endpoint_request_update = 238;
+    EndpointAddIceCandidateReq endpoint_add_ice_candidate = 239;
+    EndpointStartRtpTimeoutReq endpoint_start_rtp_timeout = 240;
+    AudioMixerCreateReq audio_mixer_create = 241;
+    AudioMixerDeleteReq audio_mixer_delete = 242;
+    AudioMixerPortCreateReq audio_mixer_port_create = 243;
+    AudioMixerPortSetCodecReq audio_mixer_port_set_codec = 244;
+    AudioMixerPortDeleteReq audio_mixer_port_delete = 245;
+    AudioMixerPortAttachToEndpointReq audio_mixer_port_attach_to_endpoint = 246;
+    AudioMixerPortAttachToPlayerReq audio_mixer_port_attach_to_player = 247;
+    AudioMixerPortDettachReq audio_mixer_port_dettach = 248;
+    VideoMixerCreateReq video_mixer_create = 249;
+    VideoMixerDeleteReq video_mixer_delete = 250;
+    VideoMixerPortCreateReq video_mixer_port_create = 251;
+    VideoMixerPortDeleteReq video_mixer_port_delete = 252;
+    VideoMixerPortSetCodecReq video_mixer_port_set_codec = 253;
+    VideoMixerPortAttachToEndpointReq video_mixer_port_attach_to_endpoint = 254;
+    VideoMixerPortAttachToPlayerReq video_mixer_port_attach_to_player = 255;
+    VideoMixerPortDettachReq video_mixer_port_dettach = 256;
+    VideoMixerMosaicCreateReq video_mixer_mosaic_create = 257;
+    VideoMixerMosaicDeleteReq video_mixer_mosaic_delete = 258;
+    VideoMixerMosaicSetSlotReq video_mixer_mosaic_set_slot = 259;
+    VideoMixerMosaicSetCompositionTypeReq video_mixer_mosaic_set_composition_type = 260;
+    VideoMixerMosaicSetOverlayPngReq video_mixer_mosaic_set_overlay_png = 261;
+    VideoMixerMosaicResetOverlayReq video_mixer_mosaic_reset_overlay = 262;
+    VideoMixerMosaicAddPortReq video_mixer_mosaic_add_port = 263;
+    VideoMixerMosaicRemovePortReq video_mixer_mosaic_remove_port = 264;
+    AudioTranscoderCreateReq audio_transcoder_create = 265;
+    AudioTranscoderDeleteReq audio_transcoder_delete = 266;
+    AudioTranscoderSetCodecReq audio_transcoder_set_codec = 267;
+    AudioTranscoderAttachToEndpointReq audio_transcoder_attach_to_endpoint = 268;
+    AudioTranscoderDettachReq audio_transcoder_dettach = 269;
+    VideoTranscoderCreateReq video_transcoder_create = 270;
+    VideoTranscoderDeleteReq video_transcoder_delete = 271;
+    VideoTranscoderSetCodecReq video_transcoder_set_codec = 272;
+    VideoTranscoderFpuReq video_transcoder_fpu = 273;
+    VideoTranscoderAttachToEndpointReq video_transcoder_attach_to_endpoint = 274;
+    VideoTranscoderDettachReq video_transcoder_dettach = 275;
+    GetMediaCandidatesReq get_media_candidates = 276;
+    ConfigureMediaConnectionReq configure_media_connection = 277;
+  }
+}
+
+// Void verbs answer `ok`. Verbs returning a single server-allocated id answer
+// `CreatedResp` under their own field; single-string results use StringResp.
+message ControlResponse {
+  oneof body {
+    Error error = 1;
+    Empty ok = 2;
+
+    // Bus
+    Empty pong = 3;
+
+    // MCU plane (tags mirror the request's)
+    CreatedResp create_conference = 10;
+    GetConferencesResp get_conferences = 13;
+    CreatedResp create_mosaic = 15;
+    CreatedResp set_mosaic_overlay_image = 18;
+    CreatedResp reset_mosaic_overlay = 19;
+    CreatedResp delete_mosaic = 20;
+    GetMosaicPositionsResp get_mosaic_positions = 23;
+    CreatedResp create_sidebar = 24;
+    CreatedResp delete_sidebar = 25;
+    CreatedResp create_participant = 28;
+    MediaStatsResp get_participant_statistics = 38;
+    GetSupportedCodecsResp get_supported_codecs = 44;
+    StringResp is_codec_supported = 45;
+    StartReceivingResp start_receiving = 46;
+    StringResp configure_participant_media_connection = 51;
+    StringResp get_local_crypto_dtls_fingerprint = 54;
+    CreatedResp create_player = 58;
+    CreatedResp start_broadcaster = 66;
+    CreatedResp start_publishing = 68;
+
+    // JSR-309 plane (tags mirror the request's)
+    CreatedResp media_session_create = 200;
+    CreatedResp player_create = 202;
+    CreatedResp recorder_create = 209;
+    CreatedResp endpoint_create = 217;
+    MediaStatsResp endpoint_get_statistics = 219;
+    StringResp endpoint_get_local_crypto_dtls_fingerprint = 230;
+    EndpointStartReceivingResp endpoint_start_receiving = 236;
+    CreatedResp audio_mixer_create = 241;
+    CreatedResp audio_mixer_port_create = 243;
+    CreatedResp video_mixer_create = 249;
+    CreatedResp video_mixer_port_create = 251;
+    CreatedResp video_mixer_mosaic_create = 257;
+    CreatedResp audio_transcoder_create = 265;
+    CreatedResp video_transcoder_create = 270;
+    StringResp get_media_candidates = 276;
+  }
+}
+
+// --- Async events (exchange kelixip.events) -------------------------------------------
+
+message Event {
+  string instance = 1;
+  fixed64 boot_epoch = 2;
+  oneof body {
+    McuEvent mcu = 10;
+    Jsr309Event jsr309 = 11;
+  }
+}
