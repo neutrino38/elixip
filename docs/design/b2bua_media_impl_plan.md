@@ -67,7 +67,7 @@ opposite of the order the design lists them in.
 | **R4** | the offer/answer choreography in `SIP.Session.B2bua`, the implicit bridge (R4.1) and the failure semantics (R4.2) | yes | ✅ |
 | **R4.1b** | reading a re-offer (`b2bua_reoffer_kind/1`), answering it locally (`b2bua_reply_reoffer/1`), and relaying one as OUR offer | yes | ✅ |
 | **R5** | `scenarios/b2bua_media.exs` + its own test | yes | ✅ |
-| **R3** | `MediaServer.Mendooze.Conn`: two endpoints, cross-leg negotiation, the bridge | **yes**, mostly | R3a ✅ R3b ✅ R3c ✅ *(direct attach; transcoders open)* |
+| **R3** | `MediaServer.Mendooze.Conn`: two endpoints, cross-leg negotiation, the bridge | **yes**, mostly | R3a ✅ R3b ✅ R3c ✅ *(direct attach and transcoder chains)* |
 | **R6** | §14.6 — the media server as a failure domain | yes | ✅ *(`stall_ms` left alone — see below)* |
 
 **State (2026-08-10): P3 is delivered.** The media mode works end to end on
@@ -123,7 +123,9 @@ unbridge-then-rebridge works, and releasing one leg keeps the session while the
 last one takes it with it.
 
 Run it with **`--include skip`** as well as `MENDOOZE_URL`: the gate sets the
-tag to `false` when the variable is present, and ExUnit excludes it anyway.
+tag to `false` when the variable is present, and ExUnit excludes it anyway. Add
+`MENDOOZE_MEDIA=<file the server can open>` for the player test — without it that
+one skips itself, and only 10 of the 11 run.
 
 **A pre-existing defect the E2E uncovered, since fixed.** Three of that suite's
 older tests failed on `assert_receive {:ms_event, pc_a, :ice_connected}` — the
@@ -142,13 +144,17 @@ whole time.
 
 Fixed by re-running the derivation over the already-connected medias the moment
 R becomes known (`replay_connectivity/1`), with rule 2 intact — an audio packet
-that arrived early does not release a leg that expects video. Two of the three
-now pass against dev71.
+that arrived early does not release a leg that expects video.
 
-**Still open, and a different failure**: the WebRTC loopback E2E, where *no* raw
-connectivity event arrives on either leg. Two endpoints of one server doing DTLS
-to each other may not be something the server does; settling it needs the
-server's logs rather than ours.
+**The WebRTC loopback E2E was the test being wrong** (e8cc882). No raw
+connectivity event arrived on either leg, but the server's own log shows the DTLS
+handshake completing: `:ice_connected` means *first validated media packet*, and
+two endpoints with no media source produce no SRTP to validate. The assertion was
+unobservable by construction. The test now asserts what its setup can establish —
+both legs negotiating a browser-shaped transport plane — and a separate test
+attaches a player (`MENDOOZE_MEDIA`) so that real SRTP flows and the milestone
+becomes observable, which is the only thing that exercises the DTLS-SRTP path.
+The gated suite is **11/11 green against dev71** (2026-08-10).
 
 ### R6 as built, and the one item left out
 
