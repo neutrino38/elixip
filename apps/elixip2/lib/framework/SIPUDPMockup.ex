@@ -509,8 +509,14 @@ defmodule SIP.Test.Transport.UDPMockup do
 
     case Map.get(state, :scenario) do
       :successfulcall ->
-        # We received the 180 Ringing -- simulate a 200 OK after some time
-        GenServer.cast(self(), {:simulate, 200, 4000})
+        # We received the 180 Ringing -- answer shortly after. This was 4 s of
+        # scripted ringing, and it was the whole cost of the three tests that use
+        # this scenario (both ScenarioIntegration tests at ~5.2 s each, and
+        # sip_transaction_test's "appel reussi" at ~4.4 s). None of them asserts on
+        # how long the callee rings — they assert the 100/180/200 sequence and what
+        # the stack does with it — so the delay only has to be long enough to keep
+        # the responses ordered, like the 200 ms used for the 100 and the 180.
+        GenServer.cast(self(), {:simulate, 200, 200})
 
       :noanswer ->
         GenServer.cast(self(), {:simulate, 408, 2000})
