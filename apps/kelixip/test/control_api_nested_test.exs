@@ -84,11 +84,10 @@ defmodule Kelix.ControlAPINestedTest do
     prev = Application.get_env(:kelixip, :control_api)
     Application.put_env(:kelixip, :control_api, %{auth: "none"})
 
-    Kelix.ModuleRegistry.register("nested", NestedCtl, %{})
+    Kelix.Test.Fixtures.with_module("nested", NestedCtl)
     :ok = Kelix.Control.Registry.register("nested", NestedCtl.describe_control())
 
     on_exit(fn ->
-      Kelix.ModuleRegistry.unregister("nested")
       Kelix.Control.Registry.deregister("nested")
 
       if prev,
@@ -243,7 +242,7 @@ defmodule Kelix.ControlAPINestedTest do
     end
 
     test "a pre-FW-4 single-segment command routes unchanged" do
-      Kelix.ModuleRegistry.register("legacy", NestedCtl, %{})
+      Kelix.Test.Fixtures.with_module("legacy", NestedCtl)
 
       :ok =
         Kelix.Control.Registry.register("legacy", [
@@ -251,7 +250,6 @@ defmodule Kelix.ControlAPINestedTest do
         ])
 
       on_exit(fn ->
-        Kelix.ModuleRegistry.unregister("legacy")
         Kelix.Control.Registry.deregister("legacy")
       end)
 

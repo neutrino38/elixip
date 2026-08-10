@@ -1,5 +1,6 @@
 defmodule SIP.Test.TCPListenerTest do
   use ExUnit.Case, async: false
+  import SIP.Test.Wait
 
   # ---- Setup ------------------------------------------------------------------
 
@@ -42,23 +43,23 @@ defmodule SIP.Test.TCPListenerTest do
 
   test "accepts an inbound TCP connection", %{listener: pid, port: port} do
     {:ok, socket} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, {:active, false}])
-    assert wait_until(fn -> SIP.Transport.TCPListener.connection_count(pid) == 1 end, 1_000) == :ok
+    assert until(fn -> SIP.Transport.TCPListener.connection_count(pid) == 1 end, 1_000)
     :gen_tcp.close(socket)
   end
 
   test "tracks multiple simultaneous connections", %{listener: pid, port: port} do
     {:ok, s1} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, {:active, false}])
     {:ok, s2} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, {:active, false}])
-    assert wait_until(fn -> SIP.Transport.TCPListener.connection_count(pid) == 2 end, 1_000) == :ok
+    assert until(fn -> SIP.Transport.TCPListener.connection_count(pid) == 2 end, 1_000)
     :gen_tcp.close(s1)
     :gen_tcp.close(s2)
   end
 
   test "connection removed from map on client disconnect", %{listener: pid, port: port} do
     {:ok, socket} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, {:active, false}])
-    assert wait_until(fn -> SIP.Transport.TCPListener.connection_count(pid) == 1 end, 1_000) == :ok
+    assert until(fn -> SIP.Transport.TCPListener.connection_count(pid) == 1 end, 1_000)
     :gen_tcp.close(socket)
-    assert wait_until(fn -> SIP.Transport.TCPListener.connection_count(pid) == 0 end, 1_000) == :ok
+    assert until(fn -> SIP.Transport.TCPListener.connection_count(pid) == 0 end, 1_000)
   end
 
   test "excess connections are rejected when max_connections is reached" do
@@ -74,16 +75,16 @@ defmodule SIP.Test.TCPListenerTest do
     end)
 
     {:ok, s1} = :gen_tcp.connect({127, 0, 0, 1}, limited_port, [:binary, {:active, false}])
-    assert wait_until(fn -> SIP.Transport.TCPListener.connection_count(limited) == 1 end, 1_000) == :ok
+    assert until(fn -> SIP.Transport.TCPListener.connection_count(limited) == 1 end, 1_000)
 
     # Second connection: TCP handshake succeeds but server closes the socket immediately.
     {:ok, s2} = :gen_tcp.connect({127, 0, 0, 1}, limited_port, [:binary, {:active, false}])
-    assert wait_until(fn ->
+    assert until(fn ->
       case :gen_tcp.recv(s2, 0, 100) do
         {:error, :closed} -> true
         _ -> false
       end
-    end, 2_000) == :ok
+    end, 2_000)
 
     assert SIP.Transport.TCPListener.connection_count(limited) == 1
     :gen_tcp.close(s1)
@@ -153,16 +154,6 @@ defmodule SIP.Test.TCPListenerTest do
 
       {:error, reason} ->
         flunk("TCP recv failed: #{inspect(reason)}, received so far: #{inspect(acc)}")
-    end
-  end
-
-  defp wait_until(_fun, remaining) when remaining <= 0, do: :timeout
-  defp wait_until(fun, remaining) do
-    if fun.() do
-      :ok
-    else
-      Process.sleep(20)
-      wait_until(fun, remaining - 20)
     end
   end
 end

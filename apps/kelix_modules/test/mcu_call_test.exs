@@ -349,8 +349,7 @@ defmodule Kelix.Mod.McuCallTest do
       # a script that cannot be told to wind down is refused at load (§5.3)
       assert function_exported?(ctx.scenario, :__state___shutdown__, 1)
 
-      Kelix.ModuleRegistry.register("mcu", Mcu, %{})
-      on_exit(fn -> Kelix.ModuleRegistry.unregister("mcu") end)
+      Kelix.Test.Fixtures.with_module("mcu", Mcu)
 
       # `config(uses_modules: [:mcu])` is what turns "the module is not installed"
       # from a dead instance on the first INVITE into a load-time error

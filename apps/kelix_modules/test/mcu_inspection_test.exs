@@ -9,6 +9,7 @@ defmodule Kelix.Mod.McuInspectionTest do
   `holds` name, and the calls that must *not* happen when an argument is refused.
   """
   use ExUnit.Case, async: false
+  import SIP.Test.Wait
 
   alias Kelix.Mcu.TestStub
   alias Kelix.Mod.Mcu
@@ -74,26 +75,12 @@ defmodule Kelix.Mod.McuInspectionTest do
       id: :client_mcu1
     )
 
-    wait_until(fn -> match?({:ok, %{status: :up}}, Mcu.mediaserver("mcu1")) end)
+    until!(fn -> match?({:ok, %{status: :up}}, Mcu.mediaserver("mcu1")) end)
 
     {:ok, %{uid: uid}} = Mcu.handle_control("conference.create", %{"domain" => @domain})
     # returned rather than dropped: the create-time RPCs (the logo among them) happen
     # here, and a test that asserts on them cannot use `assert_received` afterwards
     %{uid: uid, rpcs: TestStub.rpc_calls()}
-  end
-
-  defp wait_until(fun, attempts \\ 200) do
-    case fun.() do
-      truthy when truthy not in [nil, false] ->
-        truthy
-
-      _ when attempts > 0 ->
-        Process.sleep(10)
-        wait_until(fun, attempts - 1)
-
-      _ ->
-        flunk("condition never became true")
-    end
   end
 
   # A real participant, joined the way the call path does, so its row carries a
@@ -524,12 +511,12 @@ defmodule Kelix.Mod.McuInspectionTest do
 
       # the server goes away (its event stream dying is the witness) and comes back
       send(Mcu, {:mcu_event_stream_down, "mcu1"})
-      wait_until(fn -> match?({:ok, %{stale: true}}, Mcu.conference(ctx.uid)) end)
+      until!(fn -> match?({:ok, %{stale: true}}, Mcu.conference(ctx.uid)) end)
       assert {:ok, %{recording: nil}} = Mcu.conference(ctx.uid)
       TestStub.rpc_order()
 
       send(Mcu, {:mcu_client, "mcu1", client_pid(), :up, %{queue_id: 7}})
-      wait_until(fn -> match?({:ok, %{stale: false}}, Mcu.conference(ctx.uid)) end)
+      until!(fn -> match?({:ok, %{stale: false}}, Mcu.conference(ctx.uid)) end)
       rpcs = TestStub.rpc_calls()
 
       # the pin is policy, so it is put back with the conference…
@@ -570,7 +557,7 @@ defmodule Kelix.Mod.McuInspectionTest do
       id: :client_mcu1
     )
 
-    wait_until(fn -> match?({:ok, %{status: :up}}, Mcu.mediaserver("mcu1")) end)
+    until!(fn -> match?({:ok, %{status: :up}}, Mcu.mediaserver("mcu1")) end)
     {:ok, %{uid: uid}} = Mcu.handle_control("conference.create", %{"domain" => @domain})
     %{uid: uid, rpcs: TestStub.rpc_calls()}
   end

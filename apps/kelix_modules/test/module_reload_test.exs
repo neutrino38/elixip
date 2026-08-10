@@ -19,17 +19,12 @@ defmodule Kelix.ModuleReloadTest do
   @registrar Kelix.Mod.Registrar
 
   setup do
-    dir = Path.join(System.tmp_dir!(), "kelix_modreload_#{System.unique_integer([:positive])}")
-    File.mkdir_p!(dir)
-    empty = Path.join(dir, "empty.toml")
-    File.write!(empty, "")
+    %{dir: dir} = Kelix.Test.Fixtures.domains_dir()
 
     on_exit(fn ->
       _ = Supervisor.terminate_child(ModuleSupervisor, @registrar)
       _ = Supervisor.delete_child(ModuleSupervisor, @registrar)
       ModuleRegistry.unregister("registrar")
-      Kelix.Domains.reload(empty)
-      File.rm_rf(dir)
     end)
 
     %{dir: dir}

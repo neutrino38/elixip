@@ -91,23 +91,9 @@ defmodule Kelix.ControlAPITest do
     end
 
     test "GET /domains/:name serves the same view kelictl shows" do
-      path =
-        Path.join(System.tmp_dir!(), "api_domains_#{System.unique_integer([:positive])}.toml")
-
-      File.write!(
-        path,
+      Kelix.Test.Fixtures.serve_domains(
         ~s([[domain]]\nname = "api.example.com"\n\n[domain.registrar]\nscript = "r.exs"\n)
       )
-
-      assert :ok = Kelix.Domains.reload(path)
-
-      on_exit(fn ->
-        empty = path <> ".empty"
-        File.write!(empty, "")
-        Kelix.Domains.reload(empty)
-        File.rm(path)
-        File.rm(empty)
-      end)
 
       conn = call(conn(:get, "/domains/api.example.com"))
       assert conn.status == 200
@@ -183,25 +169,17 @@ defmodule Kelix.ControlAPITest do
           else: Application.delete_env(:kelixip, :domains_path)
       end)
 
-      dir = Path.join(System.tmp_dir!(), "api_reload_#{System.unique_integer([:positive])}")
-      File.mkdir_p!(dir)
-      path = Path.join(dir, "domains.toml")
+      # written but not reloaded: POST /reload-all is the subject, so it loads it
+      %{path: path} =
+        Kelix.Test.Fixtures.write_domains("""
+        [[domain]]
+        name = "apiall.example.com"
+
+        [domain.registrar]
+        script = "#{Path.join(__DIR__, "support/scripts/valid_registrar.exs")}"
+        """)
+
       Application.put_env(:kelixip, :domains_path, path)
-
-      on_exit(fn ->
-        empty = Path.join(dir, "empty.toml")
-        File.write!(empty, "")
-        Kelix.Domains.reload(empty)
-        File.rm_rf(dir)
-      end)
-
-      File.write!(path, """
-      [[domain]]
-      name = "apiall.example.com"
-
-      [domain.registrar]
-      script = "#{Path.join(__DIR__, "support/scripts/valid_registrar.exs")}"
-      """)
 
       conn = call(conn(:post, "/reload-all"))
       assert conn.status == 200
@@ -291,16 +269,13 @@ defmodule Kelix.ControlAPITest do
     end
 
     setup do
-      Kelix.ModuleRegistry.register("fake", FakeCtl, %{})
+      Kelix.Test.Fixtures.with_module("fake", FakeCtl)
 
       Kelix.Control.Registry.register("fake", [
         %{name: "ping", args: [], rest: {:post, "/ping"}, rw: :r, help: "ping"}
       ])
 
-      on_exit(fn ->
-        Kelix.ModuleRegistry.unregister("fake")
-        Kelix.Control.Registry.deregister("fake")
-      end)
+      on_exit(fn -> Kelix.Control.Registry.deregister("fake") end)
 
       :ok
     end

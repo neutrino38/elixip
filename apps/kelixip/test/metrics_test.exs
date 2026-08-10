@@ -127,13 +127,8 @@ defmodule Kelix.MetricsTest do
         def describe(), do: %{version: "1.0", exports: []}
       end
 
-      Kelix.ModuleRegistry.register("sampled", Sampled, %{})
-      Kelix.ModuleRegistry.register("silent", Silent, %{})
-
-      on_exit(fn ->
-        Kelix.ModuleRegistry.unregister("sampled")
-        Kelix.ModuleRegistry.unregister("silent")
-      end)
+      Kelix.Test.Fixtures.with_module("sampled", Sampled)
+      Kelix.Test.Fixtures.with_module("silent", Silent)
 
       forward([[:kelix, :test, :module_poll]])
       assert :ok = Poller.sample()

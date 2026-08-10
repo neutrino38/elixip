@@ -56,21 +56,10 @@ defmodule Kelix.Control.CLITest do
     end
 
     setup do
-      path = Path.join(System.tmp_dir!(), "cli_regs_#{System.unique_integer([:positive])}.toml")
-      File.write!(path, @reg_domains)
-      assert :ok = Kelix.Domains.reload(path)
-      Kelix.ModuleRegistry.register("registrar", FakeRegistrar, %{})
+      Kelix.Test.Fixtures.serve_domains(@reg_domains)
+      Kelix.Test.Fixtures.with_module("registrar", FakeRegistrar)
       Application.put_env(:kelixip, :fake_reg_expires_at, DateTime.add(DateTime.utc_now(), 340))
-
-      on_exit(fn ->
-        Application.delete_env(:kelixip, :fake_reg_expires_at)
-        Kelix.ModuleRegistry.unregister("registrar")
-        empty = path <> ".empty"
-        File.write!(empty, "")
-        Kelix.Domains.reload(empty)
-        File.rm(path)
-        File.rm(empty)
-      end)
+      on_exit(fn -> Application.delete_env(:kelixip, :fake_reg_expires_at) end)
 
       :ok
     end
@@ -159,20 +148,7 @@ defmodule Kelix.Control.CLITest do
     """
 
     setup do
-      path =
-        Path.join(System.tmp_dir!(), "cli_domains_#{System.unique_integer([:positive])}.toml")
-
-      File.write!(path, @domains_toml)
-      assert :ok = Kelix.Domains.reload(path)
-
-      on_exit(fn ->
-        empty = path <> ".empty"
-        File.write!(empty, "")
-        Kelix.Domains.reload(empty)
-        File.rm(path)
-        File.rm(empty)
-      end)
-
+      Kelix.Test.Fixtures.serve_domains(@domains_toml)
       :ok
     end
 
@@ -222,7 +198,11 @@ defmodule Kelix.Control.CLITest do
   describe "domain show — the module behind each script" do
     setup do
       mod = "KelixTest.CLIShow#{System.unique_integer([:positive])}"
-      script = Path.join(System.tmp_dir!(), "cli_show_#{System.unique_integer([:positive])}.exs")
+
+      # the script lives in the fixture's own directory, so the teardown's rm_rf
+      # takes it away with the config instead of enumerating files
+      %{dir: dir} = Kelix.Test.Fixtures.domains_dir()
+      script = Path.join(dir, "scenario.exs")
 
       File.write!(script, """
       defmodule #{mod} do
@@ -237,7 +217,7 @@ defmodule Kelix.Control.CLITest do
       end
       """)
 
-      toml = Path.join(System.tmp_dir!(), "cli_show_#{System.unique_integer([:positive])}.toml")
+      toml = Path.join(dir, "domains.toml")
 
       File.write!(toml, """
       [[domain]]
@@ -250,13 +230,6 @@ defmodule Kelix.Control.CLITest do
 
       assert :ok = Kelix.Domains.reload(toml)
       assert {:ok, _} = Kelix.ScriptRegistry.current(script)
-
-      on_exit(fn ->
-        empty = toml <> ".empty"
-        File.write!(empty, "")
-        Kelix.Domains.reload(empty)
-        Enum.each([toml, empty, script], &File.rm/1)
-      end)
 
       %{mod: mod, script: script}
     end
@@ -357,8 +330,7 @@ defmodule Kelix.Control.CLITest do
   # `kelictl reload-all` is what `systemctl reload kelixip` runs (through
   # Kelix.Control.CLI.reload_main/0), so this rendering is also what lands in the journal.
   test "reload-all reports every stage, and exits non-zero when it was rejected" do
-    dir = Path.join(System.tmp_dir!(), "cli_reload_all_#{System.unique_integer([:positive])}")
-    File.mkdir_p!(dir)
+    %{dir: dir} = Kelix.Test.Fixtures.domains_dir()
     path = Path.join(dir, "domains.toml")
     prev = Application.get_env(:kelixip, :domains_path)
     Application.put_env(:kelixip, :domains_path, path)
@@ -367,11 +339,6 @@ defmodule Kelix.Control.CLITest do
       if prev,
         do: Application.put_env(:kelixip, :domains_path, prev),
         else: Application.delete_env(:kelixip, :domains_path)
-
-      empty = Path.join(dir, "empty.toml")
-      File.write!(empty, "")
-      Kelix.Domains.reload(empty)
-      File.rm_rf(dir)
     end)
 
     File.write!(path, """
@@ -407,17 +374,15 @@ defmodule Kelix.Control.CLITest do
   # The point of the reload's script check is that the operator reads it *here*,
   # instead of on the first call routed to that domain.
   test "domain reload-all refuses a config whose script is not servable, and says which" do
-    dir = Path.join(System.tmp_dir!(), "cli_reload_#{System.unique_integer([:positive])}")
-    File.mkdir_p!(dir)
-    path = Path.join(dir, "domains.toml")
+    # written but not reloaded: the refusal is the subject, so `reload-all` loads it
+    %{path: path} =
+      Kelix.Test.Fixtures.write_domains("""
+      [[domain]]
+      name = "cli.example.com"
 
-    File.write!(path, """
-    [[domain]]
-    name = "cli.example.com"
-
-    [domain.registrar]
-    script = "#{Path.join(__DIR__, "support/scripts/no_shutdown.exs")}"
-    """)
+      [domain.registrar]
+      script = "#{Path.join(__DIR__, "support/scripts/no_shutdown.exs")}"
+      """)
 
     prev = Application.get_env(:kelixip, :domains_path)
     Application.put_env(:kelixip, :domains_path, path)
@@ -426,8 +391,6 @@ defmodule Kelix.Control.CLITest do
       if prev,
         do: Application.put_env(:kelixip, :domains_path, prev),
         else: Application.delete_env(:kelixip, :domains_path)
-
-      File.rm_rf(dir)
     end)
 
     {1, out} = run(["domain", "reload-all"])
@@ -446,12 +409,7 @@ defmodule Kelix.Control.CLITest do
   # The Kelix.Domains singleton is shared with the rest of the suite, so empty it
   # here rather than assuming the boot state survived the files before this one.
   test "domain list with no domain served" do
-    path =
-      Path.join(System.tmp_dir!(), "cli_domains_empty_#{System.unique_integer([:positive])}.toml")
-
-    File.write!(path, "")
-    on_exit(fn -> File.rm(path) end)
-    assert :ok = Kelix.Domains.reload(path)
+    Kelix.Test.Fixtures.serve_domains("")
 
     assert {0, "no domain served"} = run(["domain", "list"])
   end
@@ -580,15 +538,11 @@ defmodule Kelix.Control.CLITest do
     end
 
     setup do
-      Kelix.ModuleRegistry.register("helpmod", HelpCtl, %{})
-      Kelix.ModuleRegistry.register("silentmod", SilentCtl, %{})
+      Kelix.Test.Fixtures.with_module("helpmod", HelpCtl)
+      Kelix.Test.Fixtures.with_module("silentmod", SilentCtl)
       :ok = Kelix.Control.Registry.register("helpmod", HelpCtl.describe_control())
 
-      on_exit(fn ->
-        Kelix.ModuleRegistry.unregister("helpmod")
-        Kelix.ModuleRegistry.unregister("silentmod")
-        Kelix.Control.Registry.deregister("helpmod")
-      end)
+      on_exit(fn -> Kelix.Control.Registry.deregister("helpmod") end)
     end
 
     test "module list shows one row per loaded module, with its counts" do
@@ -781,13 +735,9 @@ defmodule Kelix.Control.CLITest do
     end
 
     setup do
-      Kelix.ModuleRegistry.register("rmod", RenderCtl, %{})
+      Kelix.Test.Fixtures.with_module("rmod", RenderCtl)
       :ok = Kelix.Control.Registry.register("rmod", RenderCtl.describe_control())
-
-      on_exit(fn ->
-        Kelix.ModuleRegistry.unregister("rmod")
-        Kelix.Control.Registry.deregister("rmod")
-      end)
+      on_exit(fn -> Kelix.Control.Registry.deregister("rmod") end)
     end
 
     test "a :table hint renders the declared columns, in order, nil as a dash" do
@@ -903,13 +853,9 @@ defmodule Kelix.Control.CLITest do
     end
 
     setup do
-      Kelix.ModuleRegistry.register("exitmod", ExitCtl, %{})
+      Kelix.Test.Fixtures.with_module("exitmod", ExitCtl)
       :ok = Kelix.Control.Registry.register("exitmod", ExitCtl.describe_control())
-
-      on_exit(fn ->
-        Kelix.ModuleRegistry.unregister("exitmod")
-        Kelix.Control.Registry.deregister("exitmod")
-      end)
+      on_exit(fn -> Kelix.Control.Registry.deregister("exitmod") end)
     end
 
     test "a declared 409 is a conflict (4), a declared 503 unavailable (5)" do

@@ -9,6 +9,7 @@ defmodule Kelix.Mod.McuMessageTest do
   `:all`. The guards of §20.5 are asserted one by one: they are the whole feature.
   """
   use ExUnit.Case, async: false
+  import SIP.Test.Wait
 
   alias Kelix.Mcu.TestStub
   alias Kelix.Mod.Mcu
@@ -63,25 +64,11 @@ defmodule Kelix.Mod.McuMessageTest do
       id: :client_mcu1
     )
 
-    wait_until(fn -> match?({:ok, %{status: :up}}, Mcu.mediaserver("mcu1")) end)
+    until!(fn -> match?({:ok, %{status: :up}}, Mcu.mediaserver("mcu1")) end)
 
     {:ok, %{uid: uid}} = Mcu.handle_control("conference.create", %{"domain" => @domain})
     _ = TestStub.rpc_order()
     %{uid: uid}
-  end
-
-  defp wait_until(fun, attempts \\ 200) do
-    case fun.() do
-      truthy when truthy not in [nil, false] ->
-        truthy
-
-      _ when attempts > 0 ->
-        Process.sleep(10)
-        wait_until(fun, attempts - 1)
-
-      _ ->
-        flunk("condition never became true")
-    end
   end
 
   # A leg whose scenario is a process of its own, forwarding everything it receives to
@@ -360,7 +347,7 @@ defmodule Kelix.Mod.McuMessageTest do
     assert [{^key, _tokens, _last}] = :ets.lookup(:kelix_mcu_bus, key)
 
     :ok = Mcu.leave(alice.part)
-    wait_until(fn -> :ets.lookup(:kelix_mcu_bus, key) == [] end)
+    until!(fn -> :ets.lookup(:kelix_mcu_bus, key) == [] end)
 
     # …and the conference's own rows go with the conference
     :ok = Mcu.leave(bob.part)

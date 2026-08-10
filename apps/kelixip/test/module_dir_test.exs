@@ -126,22 +126,13 @@ defmodule Kelix.ModuleDirTest do
     # The trap the extraction introduces: enable `registrar` but install no
     # registrar module, and the script raises on its first facade call — the request
     # goes unanswered. Boot must at least say so out loud.
-    dir = Path.join(System.tmp_dir!(), "kelix_warn_#{System.unique_integer([:positive])}")
-    File.mkdir_p!(dir)
-    path = Path.join(dir, "domains.toml")
-    empty = Path.join(dir, "empty.toml")
-    File.write!(empty, "")
-
-    File.write!(path, """
+    Kelix.Test.Fixtures.serve_domains("""
     [[domain]]
     name = "warn.example.com"
 
       [domain.registrar]
       script = "registrar.exs"
     """)
-
-    :ok = Kelix.Domains.reload(path)
-    on_exit(fn -> Kelix.Domains.reload(empty) && File.rm_rf(dir) end)
 
     log =
       ExUnit.CaptureLog.capture_log(fn ->

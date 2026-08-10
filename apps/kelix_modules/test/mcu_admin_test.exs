@@ -10,6 +10,7 @@ defmodule Kelix.Mod.McuAdminTest do
   scenario instance.
   """
   use ExUnit.Case, async: false
+  import SIP.Test.Wait
 
   alias Kelix.Mcu.TestStub
   alias Kelix.Mod.Mcu
@@ -69,27 +70,13 @@ defmodule Kelix.Mod.McuAdminTest do
       id: :client_mcu1
     )
 
-    wait_until(fn -> match?({:ok, %{status: :up}}, Mcu.mediaserver("mcu1")) end)
+    until!(fn -> match?({:ok, %{status: :up}}, Mcu.mediaserver("mcu1")) end)
 
     {:ok, %{uid: uid, did: did}} = Mcu.handle_control("conference.create", %{"domain" => @domain})
     # the GC tests read the start-up sweep off their own mailbox, so they keep it
     if Keyword.get(opts, :drain, true), do: TestStub.rpc_order()
 
     %{uid: uid, did: did}
-  end
-
-  defp wait_until(fun, attempts \\ 200) do
-    case fun.() do
-      truthy when truthy not in [nil, false] ->
-        truthy
-
-      _ when attempts > 0 ->
-        Process.sleep(10)
-        wait_until(fun, attempts - 1)
-
-      _ ->
-        flunk("condition never became true")
-    end
   end
 
   # A real participant: admitted, then attached through the adapter, so its row
@@ -403,11 +390,10 @@ defmodule Kelix.Mod.McuAdminTest do
   # conference carries a list of them, and neither may come out as an inspected term.
   describe "kelictl rendering of the participant views" do
     setup do
-      Kelix.ModuleRegistry.register("mcu", Mcu, %{})
+      Kelix.Test.Fixtures.with_module("mcu", Mcu)
       :ok = Kelix.Control.Registry.register("mcu", Mcu.describe_control())
 
       on_exit(fn ->
-        Kelix.ModuleRegistry.unregister("mcu")
         Kelix.Control.Registry.deregister("mcu")
       end)
     end
@@ -552,8 +538,7 @@ defmodule Kelix.Mod.McuAdminTest do
     end
 
     test "Kelix.Control.status/0 picks it up through the registry, naming no module", ctx do
-      Kelix.ModuleRegistry.register("mcu", Mcu, %{})
-      on_exit(fn -> Kelix.ModuleRegistry.unregister("mcu") end)
+      Kelix.Test.Fixtures.with_module("mcu", Mcu)
       _part = join(ctx.uid)
 
       assert %{"mcu" => %{conferences: 1, participants: 1}} = Kelix.Control.status().module_status
@@ -660,7 +645,7 @@ defmodule Kelix.Mod.McuAdminTest do
 
       # the event stream dying is what tells us the server restarted
       send(Mcu, {:mcu_event_stream_down, "mcu1"})
-      assert wait_until(fn -> match?({:ok, %{stale: true}}, Mcu.conference(ctx.uid)) end)
+      assert until(fn -> match?({:ok, %{stale: true}}, Mcu.conference(ctx.uid)) end)
 
       # the row and its DID survive; conf_id does not, and new calls are refused
       assert {:ok, %{did: did, conf_id: nil}} = Mcu.conference(ctx.uid)
@@ -675,7 +660,7 @@ defmodule Kelix.Mod.McuAdminTest do
       _drain = TestStub.rpc_order()
       send(Mcu, {:mcu_client, "mcu1", client_pid(), :up, %{queue_id: 7}})
 
-      assert wait_until(fn -> match?({:ok, %{stale: false}}, Mcu.conference(ctx.uid)) end)
+      assert until(fn -> match?({:ok, %{stale: false}}, Mcu.conference(ctx.uid)) end)
       assert_received {:rpc, "CreateConference", [uid, 1, 32_000, 7]}
       assert uid == ctx.uid
       # …and the DID answers again
@@ -684,11 +669,11 @@ defmodule Kelix.Mod.McuAdminTest do
 
     test "recreation happens before the orphan sweep, so it is not swept away", ctx do
       send(Mcu, {:mcu_event_stream_down, "mcu1"})
-      assert wait_until(fn -> match?({:ok, %{stale: true}}, Mcu.conference(ctx.uid)) end)
+      assert until(fn -> match?({:ok, %{stale: true}}, Mcu.conference(ctx.uid)) end)
       _drain = TestStub.rpc_order()
 
       send(Mcu, {:mcu_client, "mcu1", client_pid(), :up, %{queue_id: 7}})
-      assert wait_until(fn -> match?({:ok, %{stale: false}}, Mcu.conference(ctx.uid)) end)
+      assert until(fn -> match?({:ok, %{stale: false}}, Mcu.conference(ctx.uid)) end)
 
       order = TestStub.rpc_order()
 
@@ -765,7 +750,7 @@ defmodule Kelix.Mod.McuAdminTest do
         id: :client_mcu3
       )
 
-      assert wait_until(fn -> match?({:ok, %{status: :up}}, Mcu.mediaserver("mcu1")) end)
+      assert until(fn -> match?({:ok, %{status: :up}}, Mcu.mediaserver("mcu1")) end)
       {:ok, entry} = {:ok, %{entry | client: elem(Mcu.mediaserver("mcu1"), 1).client}}
 
       assert :ok = Mcu.gc_orphans(config, entry)

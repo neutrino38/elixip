@@ -20,16 +20,14 @@ defmodule Kelix.ControlTest do
 
   describe "module-contributed commands" do
     test "module_command/3 routes to the module's handle_control/2" do
-      Kelix.ModuleRegistry.register("fake", FakeCtl, %{})
-      on_exit(fn -> Kelix.ModuleRegistry.unregister("fake") end)
+      Kelix.Test.Fixtures.with_module("fake", FakeCtl)
 
       assert Control.module_command("fake", "ping", %{}) == {:ok, :pong}
       assert Control.module_command("fake", "nope", %{}) == {:error, :unknown_cmd}
     end
 
     test "module_command/3 on a module without a control surface" do
-      Kelix.ModuleRegistry.register("bare", BareMod, %{})
-      on_exit(fn -> Kelix.ModuleRegistry.unregister("bare") end)
+      Kelix.Test.Fixtures.with_module("bare", BareMod)
 
       assert Control.module_command("bare", "x", %{}) == {:error, :no_command_surface}
     end
@@ -49,13 +47,8 @@ defmodule Kelix.ControlTest do
     end
 
     setup do
-      Kelix.ModuleRegistry.register("reporting", Reporting, %{})
-      Kelix.ModuleRegistry.register("quiet", Quiet, %{})
-
-      on_exit(fn ->
-        Kelix.ModuleRegistry.unregister("reporting")
-        Kelix.ModuleRegistry.unregister("quiet")
-      end)
+      Kelix.Test.Fixtures.with_module("reporting", Reporting)
+      Kelix.Test.Fixtures.with_module("quiet", Quiet)
 
       :ok
     end
@@ -100,21 +93,9 @@ defmodule Kelix.ControlTest do
     """
 
     setup do
-      path =
-        Path.join(System.tmp_dir!(), "ctl_domains_#{System.unique_integer([:positive])}.toml")
-
-      File.write!(path, @domains_toml)
-      assert :ok = Kelix.Domains.reload(path)
-
-      # the singleton is shared with the rest of the suite: leave it empty again
-      on_exit(fn ->
-        empty = path <> ".empty"
-        File.write!(empty, "")
-        Kelix.Domains.reload(empty)
-        File.rm(path)
-        File.rm(empty)
-      end)
-
+      # the singleton is shared with the rest of the suite: the fixture leaves it
+      # empty again on exit
+      Kelix.Test.Fixtures.serve_domains(@domains_toml)
       :ok
     end
 
@@ -213,21 +194,10 @@ defmodule Kelix.ControlTest do
     end
 
     setup do
-      path = Path.join(System.tmp_dir!(), "ctl_regs_#{System.unique_integer([:positive])}.toml")
-      File.write!(path, @reg_domains)
-      assert :ok = Kelix.Domains.reload(path)
-      Kelix.ModuleRegistry.register("registrar", FakeRegistrar, %{})
+      Kelix.Test.Fixtures.serve_domains(@reg_domains)
+      Kelix.Test.Fixtures.with_module("registrar", FakeRegistrar)
       Application.put_env(:kelixip, :fake_reg_expires_at, DateTime.add(DateTime.utc_now(), 340))
-
-      on_exit(fn ->
-        Application.delete_env(:kelixip, :fake_reg_expires_at)
-        Kelix.ModuleRegistry.unregister("registrar")
-        empty = path <> ".empty"
-        File.write!(empty, "")
-        Kelix.Domains.reload(empty)
-        File.rm(path)
-        File.rm(empty)
-      end)
+      on_exit(fn -> Application.delete_env(:kelixip, :fake_reg_expires_at) end)
 
       :ok
     end
@@ -357,8 +327,7 @@ defmodule Kelix.ControlTest do
     end
 
     test "a module driving the server contributes its own view of it" do
-      Kelix.ModuleRegistry.register("fakemcu", FakeMcu, %{})
-      on_exit(fn -> Kelix.ModuleRegistry.unregister("fakemcu") end)
+      Kelix.Test.Fixtures.with_module("fakemcu", FakeMcu)
 
       assert {:ok, %{modules: modules}} = Control.mediaserver("mcu1")
       # the module's shape, minus what means nothing outside the node (`client`)
@@ -575,20 +544,14 @@ defmodule Kelix.ControlTest do
   # whatever the rest of the suite expects afterwards.
   defp use_domains(content) do
     prev = Application.get_env(:kelixip, :domains_path)
-    path = Path.join(System.tmp_dir!(), "reload_all_#{System.unique_integer([:positive])}.toml")
-    File.write!(path, content)
+    # written but not reloaded: reload_all/0 is the subject, so it does the loading
+    %{path: path} = Kelix.Test.Fixtures.write_domains(content)
     Application.put_env(:kelixip, :domains_path, path)
 
     on_exit(fn ->
       if prev,
         do: Application.put_env(:kelixip, :domains_path, prev),
         else: Application.delete_env(:kelixip, :domains_path)
-
-      empty = path <> ".empty"
-      File.write!(empty, "")
-      Kelix.Domains.reload(empty)
-      File.rm(empty)
-      File.rm(path)
     end)
 
     path

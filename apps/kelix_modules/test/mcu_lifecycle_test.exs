@@ -10,6 +10,7 @@ defmodule Kelix.Mod.McuLifecycleTest do
   two paths will drift.
   """
   use ExUnit.Case, async: false
+  import SIP.Test.Wait
 
   alias Kelix.Mcu.TestStub
   alias Kelix.Mod.Mcu
@@ -71,23 +72,9 @@ defmodule Kelix.Mod.McuLifecycleTest do
       id: :client_mcu1
     )
 
-    wait_until(fn -> match?({:ok, %{status: :up}}, Mcu.mediaserver("mcu1")) end)
+    until!(fn -> match?({:ok, %{status: :up}}, Mcu.mediaserver("mcu1")) end)
     _setup_rpcs = TestStub.rpc_order()
     :ok
-  end
-
-  defp wait_until(fun, attempts \\ 200) do
-    case fun.() do
-      truthy when truthy not in [nil, false] ->
-        truthy
-
-      _ when attempts > 0 ->
-        Process.sleep(10)
-        wait_until(fun, attempts - 1)
-
-      _ ->
-        flunk("condition never became true")
-    end
   end
 
   # Run `fun` in a throwaway process standing in for a scenario instance, and hand
@@ -253,7 +240,7 @@ defmodule Kelix.Mod.McuLifecycleTest do
 
       Process.exit(pid, :kill)
 
-      assert wait_until(fn -> Mcu.conference(conf.uid) == :error end)
+      assert until(fn -> Mcu.conference(conf.uid) == :error end)
       assert_receive {:rpc, "DeleteConference", [42]}, 2000
       # …and its DID is free again
       assert Mcu.lookup_did(@domain, conf.did) == :error
@@ -364,7 +351,7 @@ defmodule Kelix.Mod.McuLifecycleTest do
       {:ok, conf} = Mcu.create_conference(@domain, did: "8042", owner: :none)
 
       send(Mcu, {:mcu_event_stream_down, "mcu1"})
-      assert wait_until(fn -> match?({:ok, %{status: :down}}, Mcu.mediaserver("mcu1")) end)
+      assert until(fn -> match?({:ok, %{status: :down}}, Mcu.mediaserver("mcu1")) end)
 
       # the room exists: no RPC needed to say so
       assert {:ok, found, :existing} = Mcu.ensure_conference(@domain, "8042", owner: :none)

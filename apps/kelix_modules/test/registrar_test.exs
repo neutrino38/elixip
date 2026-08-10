@@ -266,13 +266,7 @@ defmodule Kelix.Mod.RegistrarTest do
     # domains.toml's [domain.registrar] keys were parsed and validated but read by
     # nobody: the store applied its global bounds to every domain (design §16 #8).
     setup do
-      dir = Path.join(System.tmp_dir!(), "kelix_bounds_#{System.unique_integer([:positive])}")
-      File.mkdir_p!(dir)
-      path = Path.join(dir, "domains.toml")
-      empty = Path.join(dir, "empty.toml")
-      File.write!(empty, "")
-
-      File.write!(path, """
+      Kelix.Test.Fixtures.serve_domains("""
       [[domain]]
       name = "strict.example.com"
 
@@ -288,8 +282,6 @@ defmodule Kelix.Mod.RegistrarTest do
         script = "registrar.exs"
       """)
 
-      :ok = Kelix.Domains.reload(path)
-      on_exit(fn -> Kelix.Domains.reload(empty) && File.rm_rf(dir) end)
       :ok
     end
 

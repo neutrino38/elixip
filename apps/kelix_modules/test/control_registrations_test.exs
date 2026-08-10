@@ -15,22 +15,13 @@ defmodule Kelix.ControlRegistrationsTest do
   describe "registrations + unregister" do
     setup do
       # inject a domain into the app's Domains singleton, restore to empty after
-      dir = Path.join(System.tmp_dir!(), "kelix_ctl_#{System.unique_integer([:positive])}")
-      File.mkdir_p!(dir)
-      path = Path.join(dir, "domains.toml")
-      empty = Path.join(dir, "empty.toml")
-
-      File.write!(path, """
+      Kelix.Test.Fixtures.serve_domains("""
       [[domain]]
       name = "example.com"
 
         [domain.registrar]
         script = "uas_register"
       """)
-
-      File.write!(empty, "")
-
-      :ok = Kelix.Domains.reload(path)
 
       # Start the registrar the way production does — through the ModuleSupervisor,
       # which resolves, validates, **registers it under its configured name** and
@@ -44,10 +35,7 @@ defmodule Kelix.ControlRegistrationsTest do
 
       assert %{module: Kelix.Mod.Registrar} = Kelix.ModuleRegistry.lookup("registrar")
 
-      on_exit(fn ->
-        Kelix.ModuleRegistry.unregister("registrar")
-        Kelix.Domains.reload(empty) && File.rm_rf(dir)
-      end)
+      on_exit(fn -> Kelix.ModuleRegistry.unregister("registrar") end)
 
       :ok
     end

@@ -120,4 +120,6 @@ defmodule SIP.Test.AppEnv do
   def preserve_proxy, do: preserve([:proxyuri, :proxyusesrv])
 end
 
+Code.require_file("support/wait.exs", __DIR__)
+
 ExUnit.start(exclude: [:skip])

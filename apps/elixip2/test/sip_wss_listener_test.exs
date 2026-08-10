@@ -1,5 +1,6 @@
 defmodule SIP.Test.WSSListenerTest do
   use ExUnit.Case, async: false
+  import SIP.Test.Wait
 
   @certfile "certs/certificate.pem"
   @keyfile  "certs/private_key.pem"
@@ -55,23 +56,23 @@ defmodule SIP.Test.WSSListenerTest do
 
   test "accepts an inbound WSS connection", %{listener: pid, port: port} do
     ws = Socket.Web.connect!("127.0.0.1", port, @wss_client_opts)
-    assert wait_until(fn -> SIP.Transport.WSSListener.connection_count(pid) == 1 end, 2_000) == :ok
+    assert until(fn -> SIP.Transport.WSSListener.connection_count(pid) == 1 end, 2_000)
     Socket.Web.abort(ws)
   end
 
   test "tracks multiple simultaneous WSS connections", %{listener: pid, port: port} do
     ws1 = Socket.Web.connect!("127.0.0.1", port, @wss_client_opts)
     ws2 = Socket.Web.connect!("127.0.0.1", port, @wss_client_opts)
-    assert wait_until(fn -> SIP.Transport.WSSListener.connection_count(pid) == 2 end, 2_000) == :ok
+    assert until(fn -> SIP.Transport.WSSListener.connection_count(pid) == 2 end, 2_000)
     Socket.Web.abort(ws1)
     Socket.Web.abort(ws2)
   end
 
   test "connection removed from map on client disconnect", %{listener: pid, port: port} do
     ws = Socket.Web.connect!("127.0.0.1", port, @wss_client_opts)
-    assert wait_until(fn -> SIP.Transport.WSSListener.connection_count(pid) == 1 end, 2_000) == :ok
+    assert until(fn -> SIP.Transport.WSSListener.connection_count(pid) == 1 end, 2_000)
     Socket.Web.abort(ws)
-    assert wait_until(fn -> SIP.Transport.WSSListener.connection_count(pid) == 0 end, 2_000) == :ok
+    assert until(fn -> SIP.Transport.WSSListener.connection_count(pid) == 0 end, 2_000)
   end
 
   test "excess connections are rejected when max_connections is reached" do
@@ -88,19 +89,19 @@ defmodule SIP.Test.WSSListenerTest do
     end)
 
     ws1 = Socket.Web.connect!("127.0.0.1", limited_port, @wss_client_opts)
-    assert wait_until(fn -> SIP.Transport.WSSListener.connection_count(limited) == 1 end, 2_000) == :ok
+    assert until(fn -> SIP.Transport.WSSListener.connection_count(limited) == 1 end, 2_000)
 
     # Second connection: WS upgrade succeeds (101 is sent before the limit check),
     # but the server immediately closes the socket. The client sees a closed recv.
     ws2 = Socket.Web.connect!("127.0.0.1", limited_port, @wss_client_opts)
-    assert wait_until(fn ->
+    assert until(fn ->
       case Socket.Web.recv(ws2) do
         {:error, _} -> true
         {:ok, :close} -> true
         {:ok, {:close, _, _}} -> true
         _ -> false
       end
-    end, 3_000) == :ok
+    end, 3_000)
 
     assert SIP.Transport.WSSListener.connection_count(limited) == 1
     Socket.Web.abort(ws1)
@@ -149,16 +150,6 @@ defmodule SIP.Test.WSSListenerTest do
 
       other ->
         flunk("Unexpected WSS frame: #{inspect(other)}")
-    end
-  end
-
-  defp wait_until(_fun, remaining) when remaining <= 0, do: :timeout
-  defp wait_until(fun, remaining) do
-    if fun.() do
-      :ok
-    else
-      Process.sleep(20)
-      wait_until(fun, remaining - 20)
     end
   end
 end

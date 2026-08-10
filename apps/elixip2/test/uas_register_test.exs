@@ -1,5 +1,6 @@
 defmodule SIP.Test.UASRegister do
   use ExUnit.Case
+  import SIP.Test.Wait
   require Logger
 
   # The reference UAS REGISTER scenario, compiled once from its .exs file. It is
@@ -249,7 +250,7 @@ defmodule SIP.Test.UASRegister do
     send(tp, {:recv, unreg})
     assert_receive {:uas_response, 200, %{callid: ^cid}}, 2_000
 
-    assert wait_until(fn -> Elixip.RegistrarUAS.stats().active == 0 end, 2_000) == :ok
+    assert until(fn -> Elixip.RegistrarUAS.stats().active == 0 end, 2_000)
   end
 
   test "a rebinding REGISTER refreshes the registration instead of ending it" do
@@ -300,7 +301,7 @@ defmodule SIP.Test.UASRegister do
     # …and leave nothing behind: the factory is a named singleton shared with the
     # other UAS test files, so an instance left registered here leaks into them.
     Elixip.RegistrarUAS.shutdown_all(:test_cleanup)
-    assert wait_until(fn -> Elixip.RegistrarUAS.stats().active == 0 end, 2_000) == :ok
+    assert until(fn -> Elixip.RegistrarUAS.stats().active == 0 end, 2_000)
   end
 
   # RFC 3261 §12.2.2. This is what a client sees when its registration lapsed while
@@ -383,18 +384,7 @@ defmodule SIP.Test.UASRegister do
 
     # Cooperatively shut the blocking instance down and confirm the slot frees.
     send(pid1, {:scenario_ctl, :shutdown, :test})
-    wait_until(fn -> Elixip.RegistrarUAS.stats().active == 0 end, 2_000)
+    until!(fn -> Elixip.RegistrarUAS.stats().active == 0 end, 2_000)
     assert Elixip.RegistrarUAS.stats().active == 0
-  end
-
-  defp wait_until(_fun, remaining) when remaining <= 0, do: :timeout
-
-  defp wait_until(fun, remaining) do
-    if fun.() do
-      :ok
-    else
-      Process.sleep(20)
-      wait_until(fun, remaining - 20)
-    end
   end
 end

@@ -1,5 +1,6 @@
 defmodule SIP.Test.TLSListenerTest do
   use ExUnit.Case, async: false
+  import SIP.Test.Wait
 
   @certfile "certs/certificate.pem"
   @keyfile  "certs/private_key.pem"
@@ -49,23 +50,23 @@ defmodule SIP.Test.TLSListenerTest do
 
   test "accepts an inbound TLS connection", %{listener: pid, port: port} do
     {:ok, socket} = :ssl.connect({127, 0, 0, 1}, port, @ssl_client_opts)
-    assert wait_until(fn -> SIP.Transport.TLSListener.connection_count(pid) == 1 end, 2_000) == :ok
+    assert until(fn -> SIP.Transport.TLSListener.connection_count(pid) == 1 end, 2_000)
     :ssl.close(socket)
   end
 
   test "tracks multiple simultaneous TLS connections", %{listener: pid, port: port} do
     {:ok, s1} = :ssl.connect({127, 0, 0, 1}, port, @ssl_client_opts)
     {:ok, s2} = :ssl.connect({127, 0, 0, 1}, port, @ssl_client_opts)
-    assert wait_until(fn -> SIP.Transport.TLSListener.connection_count(pid) == 2 end, 2_000) == :ok
+    assert until(fn -> SIP.Transport.TLSListener.connection_count(pid) == 2 end, 2_000)
     :ssl.close(s1)
     :ssl.close(s2)
   end
 
   test "connection removed from map on client disconnect", %{listener: pid, port: port} do
     {:ok, socket} = :ssl.connect({127, 0, 0, 1}, port, @ssl_client_opts)
-    assert wait_until(fn -> SIP.Transport.TLSListener.connection_count(pid) == 1 end, 2_000) == :ok
+    assert until(fn -> SIP.Transport.TLSListener.connection_count(pid) == 1 end, 2_000)
     :ssl.close(socket)
-    assert wait_until(fn -> SIP.Transport.TLSListener.connection_count(pid) == 0 end, 2_000) == :ok
+    assert until(fn -> SIP.Transport.TLSListener.connection_count(pid) == 0 end, 2_000)
   end
 
   test "excess connections are rejected when max_connections is reached" do
@@ -82,16 +83,16 @@ defmodule SIP.Test.TLSListenerTest do
     end)
 
     {:ok, s1} = :ssl.connect({127, 0, 0, 1}, limited_port, @ssl_client_opts)
-    assert wait_until(fn -> SIP.Transport.TLSListener.connection_count(limited) == 1 end, 2_000) == :ok
+    assert until(fn -> SIP.Transport.TLSListener.connection_count(limited) == 1 end, 2_000)
 
     # Second connection: TLS handshake succeeds but server closes the socket immediately.
     {:ok, s2} = :ssl.connect({127, 0, 0, 1}, limited_port, @ssl_client_opts)
-    assert wait_until(fn ->
+    assert until(fn ->
       case :ssl.recv(s2, 0, 200) do
         {:error, :closed} -> true
         _ -> false
       end
-    end, 3_000) == :ok
+    end, 3_000)
 
     assert SIP.Transport.TLSListener.connection_count(limited) == 1
     :ssl.close(s1)
@@ -158,16 +159,6 @@ defmodule SIP.Test.TLSListenerTest do
 
       {:error, reason} ->
         flunk("TLS recv failed: #{inspect(reason)}, received so far: #{inspect(acc)}")
-    end
-  end
-
-  defp wait_until(_fun, remaining) when remaining <= 0, do: :timeout
-  defp wait_until(fun, remaining) do
-    if fun.() do
-      :ok
-    else
-      Process.sleep(20)
-      wait_until(fun, remaining - 20)
     end
   end
 end

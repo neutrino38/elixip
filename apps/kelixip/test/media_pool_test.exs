@@ -3,6 +3,7 @@ defmodule Kelix.MediaPoolTest do
   # entry validation (design §9). The :kelixip app already runs a Kelix.MediaPool
   # singleton (empty), so we start test-owned instances under distinct names.
   use ExUnit.Case, async: false
+  import SIP.Test.Wait
 
   alias Kelix.MediaPool
 
@@ -43,16 +44,6 @@ defmodule Kelix.MediaPoolTest do
     defaults = [name: name, pool: pool, probe: probe, first_check_ms: 60_000]
     start_supervised!({MediaPool, Keyword.merge(defaults, opts)})
     name
-  end
-
-  # The probe result travels back through a Task and a cast, so an assertion on
-  # `status/1` has to give it a moment to land.
-  defp wait_until(fun, timeout \\ 1_000) do
-    cond do
-      fun.() -> true
-      timeout <= 0 -> false
-      true -> Process.sleep(10) && wait_until(fun, timeout - 10)
-    end
   end
 
   defp healthy?(mp, name),
@@ -171,7 +162,7 @@ defmodule Kelix.MediaPoolTest do
       assert {:ok, %{name: "mcu2"}} = MediaPool.checkout(mp)
 
       send(task, {:answer, true})
-      assert wait_until(fn -> healthy?(mp, "mcu1") end)
+      assert until(fn -> healthy?(mp, "mcu1") end)
     end
 
     test "an :up hint does not make an entry healthy — only the probe does" do
@@ -182,7 +173,7 @@ defmodule Kelix.MediaPoolTest do
       MediaPool.recheck("mcu1", :up, mp)
 
       # the probe still says no, so the hint changed nothing
-      refute wait_until(fn -> healthy?(mp, "mcu1") end, 200)
+      refute until(fn -> healthy?(mp, "mcu1") end, 200)
     end
 
     test "a probe already in flight when the hint lands cannot resurrect the entry" do
@@ -198,7 +189,7 @@ defmodule Kelix.MediaPoolTest do
 
       # the in-flight probe now answers "up" — a stale reading, and it is dropped
       send(task, {:answer, true})
-      refute wait_until(fn -> healthy?(mp, "mcu1") end, 200)
+      refute until(fn -> healthy?(mp, "mcu1") end, 200)
     end
 
     test "a second hint inside the debounce window does not re-probe" do

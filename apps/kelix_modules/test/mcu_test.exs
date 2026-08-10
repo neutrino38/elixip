@@ -3,6 +3,7 @@ defmodule Kelix.Mod.McuTest do
   # §5, §8.3.3), driven through `handle_control/2` — the same entry point REST and
   # kelictl use — against a recording MCU transport.
   use ExUnit.Case, async: false
+  import SIP.Test.Wait
 
   alias Kelix.Mcu.TestStub
   alias Kelix.Mod.Mcu
@@ -46,24 +47,11 @@ defmodule Kelix.Mod.McuTest do
       )
 
     # the client announces itself to the registry; wait until the entry is usable
-    wait_until(fn ->
+    until!(fn ->
       match?({:ok, %{status: :up, client: pid}} when is_pid(pid), Mcu.mediaserver("mcu1"))
     end)
 
     %{client: client}
-  end
-
-  defp wait_until(fun, attempts \\ 100) do
-    if fun.() do
-      :ok
-    else
-      if attempts == 0 do
-        flunk("condition never became true")
-      else
-        Process.sleep(10)
-        wait_until(fun, attempts - 1)
-      end
-    end
   end
 
   defp create(args \\ %{"domain" => @domain}), do: Mcu.handle_control("conference.create", args)
@@ -94,7 +82,7 @@ defmodule Kelix.Mod.McuTest do
         id: {:client, name}
       )
 
-      wait_until(fn -> match?({:ok, %{status: :up}}, Mcu.mediaserver(name)) end)
+      until!(fn -> match?({:ok, %{status: :up}}, Mcu.mediaserver(name)) end)
     end
 
     :ok
@@ -321,7 +309,7 @@ defmodule Kelix.Mod.McuTest do
         id: :client_mcu1
       )
 
-      wait_until(fn ->
+      until!(fn ->
         match?({:ok, %{client: pid}} when is_pid(pid), Mcu.mediaserver("mcu1"))
       end)
 
@@ -541,13 +529,7 @@ defmodule Kelix.Mod.McuTest do
 
   describe "dial-plan drift (§6.1)" do
     setup do
-      dir = Path.join(System.tmp_dir!(), "kelix_mcu_#{System.unique_integer([:positive])}")
-      File.mkdir_p!(dir)
-      path = Path.join(dir, "domains.toml")
-      empty = Path.join(dir, "empty.toml")
-      File.write!(empty, "")
-
-      File.write!(path, """
+      Kelix.Test.Fixtures.serve_domains("""
       [[domain]]
       name = "#{@domain}"
 
@@ -555,9 +537,6 @@ defmodule Kelix.Mod.McuTest do
         pattern = "8XXX"
         script  = "mcu.exs"
       """)
-
-      :ok = Kelix.Domains.reload(path)
-      on_exit(fn -> Kelix.Domains.reload(empty) && File.rm_rf(dir) end)
 
       start_mcu()
     end
@@ -612,7 +591,7 @@ defmodule Kelix.Mod.McuTest do
 
       send(Mcu, {:mcu_event_stream_down, "mcu1"})
 
-      wait_until(fn -> match?([%{healthy: false}], Kelix.MediaPool.status(mp)) end)
+      until!(fn -> match?([%{healthy: false}], Kelix.MediaPool.status(mp)) end)
       assert Kelix.MediaPool.checkout(mp) == {:error, :no_mcu}
     end
 
@@ -621,7 +600,7 @@ defmodule Kelix.Mod.McuTest do
       # the node's own (empty) pool must be untouched by a test-owned module
       send(Mcu, {:mcu_event_stream_down, "mcu1"})
 
-      wait_until(fn -> match?([%{healthy: false}], Kelix.MediaPool.status(mp)) end)
+      until!(fn -> match?([%{healthy: false}], Kelix.MediaPool.status(mp)) end)
       assert Kelix.MediaPool.status() == []
     end
   end
@@ -633,7 +612,7 @@ defmodule Kelix.Mod.McuTest do
       assert {:ok, %{status: :up}} = Mcu.mediaserver("mcu1")
 
       send(Mcu, {:mcu_event_stream_down, "mcu1"})
-      wait_until(fn -> match?({:ok, %{status: :down}}, Mcu.mediaserver("mcu1")) end)
+      until!(fn -> match?({:ok, %{status: :down}}, Mcu.mediaserver("mcu1")) end)
 
       assert {:error, :mcu_down} = create()
     end
@@ -650,7 +629,7 @@ defmodule Kelix.Mod.McuTest do
 
       :ok = Client.renew_queue(client, stale)
 
-      wait_until(fn -> "EventQueueCreate" in TestStub.rpc_order() end)
+      until!(fn -> "EventQueueCreate" in TestStub.rpc_order() end)
       # and it went through :down, so the owner knows the conferences it held on
       # that server are gone too
       assert {:ok, %{status: :up}} = Mcu.mediaserver("mcu1")

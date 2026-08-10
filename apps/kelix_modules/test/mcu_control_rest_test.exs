@@ -48,13 +48,12 @@ defmodule Kelix.Mod.McuControlRestTest do
 
     # the module is reachable by its configured name, and its declared commands are
     # published exactly as Kelix.ModuleSupervisor would at boot
-    Kelix.ModuleRegistry.register("mcu", Mcu, %{})
+    Kelix.Test.Fixtures.with_module("mcu", Mcu)
     :ok = Kelix.Control.Registry.register("mcu", Mcu.describe_control())
 
     wait_for_client()
 
     on_exit(fn ->
-      Kelix.ModuleRegistry.unregister("mcu")
       Kelix.Control.Registry.deregister("mcu")
 
       if prev,
