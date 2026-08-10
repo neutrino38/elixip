@@ -1,3 +1,18 @@
+kelixip (1.3.0-1) stable; urgency=medium
+
+  * Version bump to 1.3.0: the B2BUA release. A scenario can now terminate an
+    incoming call and place a second one of its own, relaying between the two.
+  * Call forwarding to a registered subscriber, serial and parallel hunting
+    over an AOR's devices, dynamic target providers and SRV failover.
+  * A media server can be put in the middle of the two legs: one media session,
+    two endpoints, transcoding on demand, and re-offers read before relay.
+  * Offer profiles: a callee refusing WebRTC is offered RTP/AVPF, then RTP/AVP.
+  * registrar: new targets/2 returning where to call an AOR, as a B2BUA peer.
+  * Resilience: a transaction timeout, a dead socket or a lost media server is
+    reported to the scenario instead of leaving it waiting.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Mon, 10 Aug 2026 12:00:00 +0200
+
 kelixip (1.2.1-1) stable; urgency=medium
 
   * Version bump to 1.2.1: the interoperability release. WebRTC calls proven

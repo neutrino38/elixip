@@ -148,9 +148,14 @@ install -d -m 0755 "$root/usr/sbin"
 ln -s ../lib/kelixip/bin/kelictl "$root/usr/sbin/kelictl"
 ln -s ../lib/kelixip/bin/kelixip "$root/usr/sbin/kelixip"
 
-# script_dir — the reference scenario scripts.
+# script_dir — the reference scenario scripts. The ones that drive a module-less
+# core stay here; the mcu scripts are unusable without kelixip-mod-mcu (every
+# conference verb they call is the module's), so build_module ships them instead.
 install -d -m 0755 "$root/usr/share/kelixip"
-install -m 0644 "$stage"/scripts/*.exs "$root/usr/share/kelixip/"
+for exs in "$stage"/scripts/*.exs; do
+  case ${exs##*/} in mcu*.exs) continue ;; esac
+  install -m 0644 "$exs" "$root/usr/share/kelixip/"
+done
 
 # Configuration. Unpacked 0640 root:root; postinst moves the group to kelixip,
 # which is the one thing dpkg cannot express (the user does not exist at unpack).
@@ -206,7 +211,7 @@ finish_package "$root" "$DEBDIR/control.in" kelixip DEPENDS="$depends, adduser, 
 # The core implements no SIP function: a deployment installs only the modules it
 # uses (a conferencing-only product installs kelixip-mod-mcu and nothing else).
 build_module() {
-  local name="$1" beam_glob="$2" tpl="$3" doc_glob="$4"
+  local name="$1" beam_glob="$2" tpl="$3" doc_glob="$4" script_glob="${5:-}"
   local mroot="$WORK/$name"
   echo "==> assembling $name"
   install -d -m 0755 "$mroot/usr/lib/kelixip/modules"
@@ -215,6 +220,13 @@ build_module() {
   # Its own document, alongside the copyright: what the docs on a host describe is
   # then what that host can actually do (the .spec's %doc for the same subpackage).
   install -m 0644 "$stage"/doc/modules/$doc_glob "$mroot/usr/share/doc/$name/"
+  # Reference scripts that only this module can run. script_dir itself belongs to
+  # the core, which the module depends on at the same version, so dropping files
+  # into it needs no directory of our own (the .spec's %files mod-mcu).
+  if [ -n "$script_glob" ]; then
+    install -d -m 0755 "$mroot/usr/share/kelixip"
+    install -m 0644 "$stage"/scripts/$script_glob "$mroot/usr/share/kelixip/"
+  fi
   finish_package "$mroot" "$tpl" "$name"
 }
 
@@ -223,7 +235,7 @@ build_module() {
 # …), and shipping only the named one installs a module whose every call fails.
 build_module kelixip-mod-registrar 'Elixir.Kelix.Mod.Registrar*.beam' "$DEBDIR/control-mod-registrar.in" 'registrar.md'
 build_module kelixip-mod-auth-db   'Elixir.Kelix.Mod.AuthDb*.beam'    "$DEBDIR/control-mod-auth-db.in"   'auth_db.md'
-build_module kelixip-mod-mcu       'Elixir.Kelix.Mod.Mcu*.beam'       "$DEBDIR/control-mod-mcu.in"       'mcu*.md'
+build_module kelixip-mod-mcu       'Elixir.Kelix.Mod.Mcu*.beam'       "$DEBDIR/control-mod-mcu.in"       'mcu*.md' 'mcu*.exs'
 
 echo "==> packages in packaging/dist:"
 ls -1 "$DIST"/*.deb

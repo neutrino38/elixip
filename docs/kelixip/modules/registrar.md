@@ -110,18 +110,18 @@ The returned peer carries the policy a registered AOR implies:
 
 | Field | Value |
 |---|---|
-| `uris` | the live contacts, each stamped with its destination and registration flow, ordered by descending Contact `q` (absent `q` ranks top; equal `q` keeps registration order) |
+| `uris` | the live contacts, each stamped with its destination and registration flow, as a list of **q groups** — one entry per Contact `q` value, in descending order (absent `q` means no stated preference, taken as the highest; equal `q` keeps registration order) |
 | `ruri` | `:peer` — a registered contact is reached by asking for it by name |
 | `use_srv` | `false` — the contacts already carry the flow they registered over |
-| `fork` | `:serial` — the devices are tried in `q` order, one after the other |
+| `fork` | `:parallel` — a group rings all at once, and the groups are walked in order |
 
-A script wanting another policy edits the struct it gets back
-(`%{peer | fork: :none}`).
+That is kamailio's `lookup("location")` + `t_relay()`, and what RFC 3261 §16.6
+prescribes: devices of equal preference ring together, and a group that all
+refuses hands the call to the next one down.
 
-> **`:serial`, where kamailio is parallel.** `lookup("location")` + `t_relay()`
-> rings every contact of a q group at once. Parallel forking is not built yet, and
-> `fork: :parallel` is not a value the hunt honours — it dials the highest-q
-> contact and never fails over. This returns `:serial` until it exists.
+A script wanting another policy edits the struct it gets back —
+`%{peer | fork: :serial}` rings the contacts one at a time, `:none` tries the
+first and stops.
 
 Each failure is one atom, mapping to one SIP answer:
 

@@ -27,7 +27,7 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.2.1
+Version:        1.3.0
 Release:        1%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
@@ -108,11 +108,12 @@ install -d -m 0755 %{buildroot}%{_sbindir}
 ln -s ../lib/kelixip/bin/kelictl %{buildroot}%{_sbindir}/kelictl
 ln -s ../lib/kelixip/bin/kelixip %{buildroot}%{_sbindir}/kelixip
 
-# script_dir — the reference scenario scripts. They all ship with the core, module
-# packages or not (registrar.exs already did): a script is reference material an
-# operator derives from, it is inert until a domains.toml rule names it, and one
-# directory that always holds the same set is easier to reason about than a
-# script_dir whose contents depend on which subpackages are installed.
+# script_dir — the reference scenario scripts. Installed here in one go; the %files
+# lists below decide which package each ends up in. A script is reference material
+# an operator derives from and is inert until a domains.toml rule names it, so the
+# ones that drive a module-less core stay with the core. The mcu scripts do not:
+# they are unusable without kelixip-mod-mcu (every conference verb they call is the
+# module's), so they travel with it — see %files mod-mcu.
 install -d -m 0755 %{buildroot}%{_datadir}/%{name}
 install -m 0644 scripts/*.exs %{buildroot}%{_datadir}/%{name}/
 
@@ -174,7 +175,11 @@ fi
 %{_unitdir}/%{name}.service
 %{_sbindir}/kelictl
 %{_sbindir}/kelixip
-%{_datadir}/%{name}
+# The core owns script_dir itself, so mod-mcu can drop its scripts in without
+# either package claiming the directory twice.
+%dir %{_datadir}/%{name}
+%{_datadir}/%{name}/*.exs
+%exclude %{_datadir}/%{name}/mcu*.exs
 %dir %attr(0755,root,root) %{kelixdir}
 %{kelixdir}/bin
 %{kelixdir}/erts-*
@@ -202,8 +207,24 @@ fi
 %files mod-mcu
 %doc doc/modules/mcu.md doc/modules/mcu_module_guide.md
 %{kelixdir}/modules/Elixir.Kelix.Mod.Mcu*.beam
+# The reference conference scripts. They call the module's verbs and nothing else
+# provides them, so a host that has them can run them.
+%{_datadir}/%{name}/mcu*.exs
 
 %changelog
+* Mon Aug 10 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.3.0-1
+- Version bump to 1.3.0: the B2BUA release. A scenario can now terminate an
+  incoming call and place a second one of its own, relaying between the two.
+- Call forwarding to a registered subscriber, serial and parallel hunting over
+  an AOR's devices, dynamic target providers and SRV failover.
+- A media server can be put in the middle of the two legs: one media session,
+  two endpoints, transcoding on demand, and re-offers read before being relayed.
+- Offer profiles: a callee refusing WebRTC is offered RTP/AVPF, then RTP/AVP,
+  before the next device is tried.
+- registrar: new targets/2 returning where to call an AOR, as a B2BUA peer.
+- Resilience: a transaction timeout, a dead socket or a lost media server is
+  reported to the scenario instead of leaving it waiting.
+
 * Sat Aug 08 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.2.1-1
 - Version bump to 1.2.1: the interoperability release. WebRTC calls proven
   with MS Edge and Chrome, and with Linphone 6.2.0 in SDES as well as DTLS.

@@ -60,7 +60,7 @@ and [§ Building the deb packages](../../BUILD.md#building-the-deb-packages-ubun
 | `/etc/kelixip/domains.toml` | Domains + dial-plan + registrar block (kept on upgrade) |
 | `/etc/kelixip/tls/` | Listener certificates (0750 `root:kelixip`) |
 | `/etc/sysconfig/kelixip` (RPM)<br>`/etc/default/kelixip` (deb) | Node name, cookie and the two TOML paths (kept on upgrade) |
-| `/usr/share/kelixip/` | Scenario scripts (`script_dir`) |
+| `/usr/share/kelixip/` | Scenario scripts (`script_dir`). The core ships the ones it can run on its own; `mcu.exs` and `mcu_adhoc.exs` come with `kelixip-mod-mcu`, since every conference verb they call is that module's |
 | `/usr/lib/kelixip/` | The release itself (embedded ERTS) |
 | `/usr/lib/kelixip/modules/` | Loadable modules (`module_dir`, **root-owned**) |
 | `/usr/sbin/kelictl` | Admin CLI (a command inside the release) |

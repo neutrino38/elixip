@@ -296,10 +296,10 @@ spec disagrees, so bump both together.
 Result:
 
 ```
-packaging/dist/kelixip-1.2.1-1.el9.x86_64.rpm               7.3M   (release + ERTS)
-packaging/dist/kelixip-mod-registrar-1.2.1-1.el9.x86_64.rpm  43K
-packaging/dist/kelixip-mod-auth_db-1.2.1-1.el9.x86_64.rpm     28K
-packaging/dist/kelixip-mod-mcu-1.2.1-1.el9.x86_64.rpm        255K
+packaging/dist/kelixip-1.3.0-1.el9.x86_64.rpm               7.3M   (release + ERTS)
+packaging/dist/kelixip-mod-registrar-1.3.0-1.el9.x86_64.rpm  43K
+packaging/dist/kelixip-mod-auth_db-1.3.0-1.el9.x86_64.rpm     28K
+packaging/dist/kelixip-mod-mcu-1.3.0-1.el9.x86_64.rpm        255K
 ```
 
 ### Build in a container instead
