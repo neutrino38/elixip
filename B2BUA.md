@@ -212,6 +212,10 @@ description leaves the call as it was and the re-offer gets a `488`.
 
 ## Scenario direct-call.exs
 
+> Ships as [`apps/kelixip/scripts/direct-call.exs`](apps/kelixip/scripts/direct-call.exs).
+> It is a kelixip script rather than an elixipp scenario: it asks the registrar
+> module where the subscriber is.
+
 Alice calls Bob; the registrar says where Bob is; the call is relayed there over
 a second dialog we own. This is kamailio's `lookup("location"); t_relay()` done
 as a B2BUA — and the difference is that we stay in the signalling path for the
@@ -222,7 +226,7 @@ to ring together, and the registrar already ordered them by `q` — by which one
 Bob wants tried first. So one leg, `fork: :serial`, and the hunt walks them.
 
 ```elixir
-defmodule DirectCall do
+defmodule Kelix.DirectCall do
   use SIP.Scenario
   require Logger
 
@@ -401,14 +405,14 @@ defmodule DirectCall do
       # ready-to-dial URIs, already carrying the flow they registered over, in
       # descending q — hence use_srv: false and ruri: :peer
       {:ok, uris} ->
-        {:ok, %SIP.B2bua.Peer{uris: uris, use_srv: false, ruri: :peer, fork: :serial}}
+        {:ok, %SIP.B2bua.Peer{uris: uris, use_srv: false, ruri: :peer, fork: :parallel}}
 
       :notfound ->
         {:answer, 480, "Temporarily Unavailable"}
 
       {:error, reason} ->
         Logger.error("lookup for #{aor}@#{domain} failed: #{inspect(reason)}")
-        {:answer, 500, "Location Service Unavailable"}
+        {:answer, 500, "Registrar Unavailable"}
     end
   rescue
     # A module unloaded mid-call must not kill the instance and leave Alice with
@@ -437,15 +441,19 @@ What is worth noticing:
 
 ## Scenario customer-service.exs
 
+> Ships as
+> [`apps/elixip2/scenarios/customer-service.exs`](apps/elixip2/scenarios/customer-service.exs).
+
 Alice calls a short number. Behind it there is no registered device but a list of
 phone numbers to try, in order, until one picks up.
 
 The scenario is the one above with two states changed: the targets are a static
 list instead of a lookup, and the ending says "nobody was reachable" rather than
-"Bob refused". Everything from `wait_ack` on is identical.
+"Bob refused". Everything from `wait_ack` on is the shape every B2BUA scenario
+shares, elided here and written out in the shipped file.
 
 ```elixir
-defmodule CustomerService do
+defmodule B2BUA.CustomerService do
   use SIP.Scenario
 
   uas(:invite)
@@ -548,8 +556,8 @@ defmodule CustomerService do
     end
   end
 
-  # wait_ack, connected, wait_far_bye_ok and on_shutdown: identical to
-  # direct-call.exs.
+  # wait_ack, connected, wait_far_bye_ok and on_shutdown: the states every B2BUA
+  # scenario shares, as in direct-call.exs above.
 end
 ```
 
@@ -589,6 +597,8 @@ What is worth noticing:
 
 ## Scenario webrtc-gw.exs
 
+> Ships as [`apps/elixip2/scenarios/webrtc-gw.exs`](apps/elixip2/scenarios/webrtc-gw.exs).
+
 A browser calls in through the proxy over WebRTC — DTLS-SRTP, ICE, `RTP/SAVPF`.
 The callee is an ordinary SIP phone behind the same proxy and understands none of
 that. The gateway terminates the media on both sides and lets the media server
@@ -606,7 +616,7 @@ The R-URI is kept and the request routed back to the proxy — the proxy decided
 whom this call is for, and the gateway does not second-guess it.
 
 ```elixir
-defmodule WebrtcGw do
+defmodule B2BUA.WebrtcGw do
   use SIP.Scenario
 
   uas(:invite)
