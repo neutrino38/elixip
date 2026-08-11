@@ -42,9 +42,10 @@ defmodule Kelix.Mod.Registrar do
   (RFC 3261).
 
   Facade (imported by the registrar script):
-    * `save/4`   — register/unregister from a REGISTER; returns the granted
-      contacts/expires (it does **not** compose the SIP response — the script
-      does, via SIP.Session.Registrar helpers, §11.1);
+    * `save/2`   — register/unregister from a REGISTER; says whether the AOR is left
+      `:registered` or `:unregistered` and hands back the granted contacts/expires
+      (it does **not** compose the SIP response — the script does, via
+      SIP.Session.Registrar helpers, §11.1);
     * `lookup/1` — rewrite a request to reach the registered UA(s);
     * `subscribe_register_event/2` / `unsubscribe_register_event/2`.
 
@@ -118,6 +119,7 @@ defmodule Kelix.Mod.Registrar do
     do: %{
       version: "1.0",
       exports: [
+        save: 2,
         save: 4,
         lookup: 1,
         targets: 2,
@@ -143,14 +145,57 @@ defmodule Kelix.Mod.Registrar do
   end
 
   @doc """
-  Register/unregister the contacts of a REGISTER `req` under `domain`. `dialog_pid`
-  is the backing dialog (stored per contact, used later for teardown); `info` is
-  arbitrary scenario data. Returns `{:ok, granted}` (contacts + expires actually
-  granted) or `{:error, {code, reason}}`.
+  Register/unregister the contacts of a REGISTER `req`.
+
+  Two calling forms:
+
+    * `save(sip_ctx, req)` — the scenario form. The served domain and the backing
+      dialog are read off the scenario context (`domain`, injected by
+      `Kelix.Router`; `dialogpid`, set when the instance was spawned), so a script
+      never carries either around: `case save(sip_ctx, req) do …`.
+    * `save(req, domain, dialog_pid, info)` — the programmatic form, for callers
+      with no scenario context (tests, seeding the store).
+
+  `dialog_pid` is stored per contact and used later for teardown; `info` is
+  arbitrary scenario data.
+
+  The verdict says **what happened to the AOR**, not merely that the store
+  accepted the request, because the two demand different things of the script: a
+  registration is answered and then waited on for its refresh, an
+  un-registration is answered and the session is over. The script that has to
+  re-derive it from `granted.expires == 0` gets it wrong on the request that
+  drops one of two bindings — that one still leaves the AOR registered.
+
+    * `{:registered, granted}`   — the AOR has live bindings;
+    * `{:unregistered, granted}` — its last binding is gone (`Expires: 0`, or the
+      `Contact: *` wildcard); `granted.contacts` is empty and `granted.expires` 0;
+    * `{:error, {code, reason}}` — 400 (no Contact / bad wildcard), 423 (too
+      brief), 403 (too many contacts);
+    * `{:error, :down | :timeout}` — the store could not answer (§8.2).
+
+  `granted` is `%{aor, contacts, expires}`: ALL the AOR's current bindings, each
+  stamped with its own remaining lifetime — what `SIP.Session.Registrar.accept_registration/3`
+  puts in the 200 OK (RFC 3261 §10.3 step 8). It does not build the response; the
+  script does (§11.1).
   """
-  @spec save(map, String.t(), pid | nil, term) :: {:ok, map} | {:error, {integer, String.t()}}
-  def save(req, domain, dialog_pid \\ nil, info \\ nil),
-    do: Kelix.Module.safe_call(__MODULE__, {:save, req, domain, dialog_pid, info})
+  @spec save(%SIP.Context{} | map, map | String.t(), pid | nil, term) ::
+          {:registered, map}
+          | {:unregistered, map}
+          | {:error, {integer, String.t()}}
+          | {:error, :down | :timeout}
+  def save(ctx_or_req, req_or_domain, dialog_pid \\ nil, info \\ nil)
+
+  def save(sip_ctx = %SIP.Context{}, req, _dialog_pid, info) when is_map(req),
+    do: save(req, sip_ctx.domain, sip_ctx.dialogpid, info)
+
+  def save(req, domain, dialog_pid, info) when is_map(req) do
+    # The store is a module, not the SIP peer: `:db` is the monitor's category for
+    # "this instance went and asked something of a backend", which is what makes
+    # `kelictl monitor` show a registrar instance doing its work rather than
+    # sitting idle between the REGISTER and the 200.
+    SIP.Scenario.Monitor.note_command(:db, "registrar_save")
+    Kelix.Module.safe_call(__MODULE__, {:save, req, domain, dialog_pid, info})
+  end
 
   @doc "Rewrite `req` to reach the AOR's registered contacts. `{:ok, [req]}` / `:notfound` / `{:error, r}`."
   @spec lookup(map) :: {:ok, [map]} | :notfound | {:error, term}
@@ -276,8 +321,11 @@ defmodule Kelix.Mod.Registrar do
   @impl true
   def handle_call({:save, req, domain, dialog_pid, info}, _from, state) do
     case do_save(state, req, domain, dialog_pid, info) do
-      {:ok, granted, state2} -> {:reply, {:ok, granted}, state2}
-      {:error, reason} -> {:reply, {:error, reason}, state}
+      {verdict, granted, state2} when verdict in [:registered, :unregistered] ->
+        {:reply, {verdict, granted}, state2}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -425,7 +473,7 @@ defmodule Kelix.Mod.Registrar do
       :ets.delete(tid, aor)
       state = demonitor_aor(state, domain, aor)
       notify(state, domain, aor, :unregistered)
-      {:ok, granted(aor, [], 0), state}
+      {:unregistered, granted(aor, [], 0), state}
     else
       # apply removes then adds, keyed by contact URI string
       kept = drop_contacts(existing, for({:remove, c} <- actions, do: binding_key(c)))
@@ -459,7 +507,7 @@ defmodule Kelix.Mod.Registrar do
         # binding (§6.3, WebRTC-critical).
         state = ensure_monitor(state, domain, aor, dialog_pid, flow_module_of(req))
         notify(state, domain, aor, :registered)
-        {:ok, granted(aor, merged, granted_expires(actions)), state}
+        {:registered, granted(aor, merged, granted_expires(actions)), state}
       end
     end
   end

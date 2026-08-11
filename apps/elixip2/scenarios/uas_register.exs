@@ -113,10 +113,12 @@ defmodule UAS.RegisterExample do
       {:scenario_ctl, :shutdown, _reason} ->
         scenario_aborted("Registrar stopped gracefully")
 
-      # Interrupted because client socket has been interrupted
-      {:dialog_terminated, _dialog_pid, reason}
-      when reason in [:tcp_closed, :tls_closed, :wss_closed] ->
-        scenario_aborted("Client socket closed")
+      # The connection this UA registered over is gone (one reason for all three
+      # connected transports since the dialog layer stopped inventing a per-protocol
+      # atom). Over UDP nothing dies and the dialog expiration timer ends us
+      # `:normal` instead — the clause below.
+      {:dialog_terminated, _dialog_pid, :transport_down} ->
+        scenario_aborted("Client connection lost")
 
       {:dialog_terminated, _dialog_pid, _reason} ->
         scenario_success("registration ended")

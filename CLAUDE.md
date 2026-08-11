@@ -287,6 +287,29 @@ config :elixip2, MediaServer.Mendooze,
   video_bandwidth_kbps: 800    # b=AS: advertised on video (answers: min with the offer)
 ```
 
+## Writing a scenario (`.exs`)
+
+**A scenario states a call flow; it does not implement one.** Its states should
+read as a sequence of DSL verbs and `case` branches over what they return. Avoid
+`defp` helpers carrying real logic — reading a header, deciding a policy,
+composing a SIP response, plumbing a module result into another module's call.
+
+A scenario that needs one is a **symptom, not a style problem**: the macros and
+facades the framework and the kelixip modules export are not right yet. Fix them
+there instead — every scenario then gets the fix, and the reading of the SIP
+message stays in the one place that owns it (see *Message Layer* above). Two
+examples from the reference registrar script, both of which used to be private
+helpers in the `.exs`:
+
+- carrying the inbound request from state to state by hand
+  (`appdata_set(:register_req, req)`) — `on_events` stores it and
+  `last_uas_req()` reads it back;
+- re-deriving "is this AOR still registered" from `granted.expires == 0` —
+  `Kelix.Mod.Registrar.save/2` answers `:registered` / `:unregistered`.
+
+The exception is a trivial one-liner with no SIP meaning (a label, a formatting
+helper). Anything else belongs in a module.
+
 ## Language & Comments Convention
 
 - Interact with the developer in **French**

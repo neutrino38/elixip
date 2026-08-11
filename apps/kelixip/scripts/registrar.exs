@@ -1,19 +1,14 @@
-# Reference kelixip registrar script (design §6, §12.4). One instance is spawned
+# Reference kelixip registrar script. One instance is spawned
 # per inbound REGISTER dialog by Kelix.Router → Kelix.InstancePool. The served
-# domain is injected into the context by the router (config override `domain:`).
-#
-# Separation of concerns (§11.1): the MODULES decide, the SCRIPT composes the SIP
-# response. Kelix.Mod.AuthDb.do_registration_auth/2 returns the auth verdict;
-# Kelix.Mod.Registrar.save/4 stores the binding and returns the granted contacts.
-# This script maps those onto SIP.Session.reply/6 (the instrumented reply):
-#
-#   {:requireauth, stale} -> 401 with a stateless-nonce challenge (Kelix.Auth)
-#   :ok                   -> save, then 200 OK echoing the granted contacts
-#   {:reject, code, msg}  -> code msg
+# domain is injected into the context (sip_ctx.domain) by the router.
+# This version sends no OPTIONS keepalive of its own: probing liveness is left to
+# the registered client (UAC). Answering the client's OPTIONS is not this script's
+# business either — an in-dialog OPTIONS is answered 200 OK by the dialog layer,
+# and an out-of-dialog one by Kelix.Options, neither of which reaches a scenario.
+
 defmodule Kelix.Registrar do
   use SIP.Scenario
   require Logger
-  import SIP.Session, only: [reply: 5, reply: 6]
 
   uas(:register)
 
@@ -26,14 +21,19 @@ defmodule Kelix.Registrar do
     goto(wait_register)
   end
 
+  # The REGISTER itself needs no carrying around: on_events stores the inbound
+  # request in the context, and last_uas_req() reads it back in any later state.
   state wait_register do
     on_events do
-      {:REGISTER, req, _trans_pid, dialog_pid} ->
-        goto(loop, process_register(req, dialog_pid, sip_ctx.domain))
+      {:REGISTER, _req, _trans_pid, _dialog_pid} ->
+        goto(process_register, "registering")
 
-      {:dialog_terminated, _dialog_pid, reason}
-      when reason in [:tcp_closed, :tls_closed, :wss_closed] ->
-        scenario_aborted("client socket closed")
+      # The connection this UA registered over is gone. Over a connected transport
+      # that IS the end of the registration: the binding names a flow nothing can
+      # reach any more. Over UDP nothing dies, and the net is the dialog's own
+      # `:registerexpire` timer, which stops it `:normal` — the clause below.
+      {:dialog_terminated, _dialog_pid, :transport_down} ->
+        scenario_aborted("client connection lost")
 
       {:dialog_terminated, _dialog_pid, _reason} ->
         scenario_success("registration ended")
@@ -43,106 +43,88 @@ defmodule Kelix.Registrar do
     end
   end
 
-  # Cooperative shutdown (§5.3): a registrar has no BYE/media to release.
-  on_shutdown do
-    scenario_aborted("Registrar stopped gracefully")
-  end
+  state process_register do
+    req = last_uas_req()
 
-  # ── application logic ───────────────────────────────────────────────────────
-  # modules decide, this composes the SIP reply. Returns a short description.
-  #
-  # The rescue is the load-bearing part: a module that is not installed
-  # (UndefinedFunctionError) or that faults mid-verdict would otherwise kill this
-  # instance, and the client would get NO response at all — worse than any error
-  # code, since it retransmits into the void. Answer 500 and let it fail loudly.
-  defp process_register(req, dialog_pid, domain) do
-    do_process_register(req, dialog_pid, domain)
-  rescue
-    e ->
-      Logger.error(
-        module: __MODULE__,
-        message: "registrar script failed: #{Exception.message(e)}"
-      )
-
-      reply(dialog_pid, req, 500, "Server Internal Error", [], "script_failed")
-      "500 Server Internal Error"
-  end
-
-  defp do_process_register(req, dialog_pid, domain) do
-    case Kelix.Mod.AuthDb.do_registration_auth(req, domain) do
+    case Kelix.Mod.AuthDb.do_registration_auth(req, sip_ctx.domain) do
       {:requireauth, stale} ->
-        # The algorithm comes from the backend: advertising MD5 while the base
-        # stores SHA-256 HA1s would challenge forever.
         params =
-          Kelix.Auth.challenge_www_authenticate(domain,
+          Kelix.Auth.challenge_www_authenticate(sip_ctx.domain,
             stale: stale,
             algorithm: Kelix.Mod.AuthDb.challenge_algorithm()
           )
 
-        reply(
-          dialog_pid,
-          req,
-          401,
-          "Unauthorized",
-          [wwwauthenticate: params],
-          if(stale, do: "401 stale", else: "401 challenge")
-        )
-
-        if stale, do: "401 stale", else: "401 Unauthorized"
+        SIP.Session.Registrar.challenge_registration(sip_ctx, req, params)
+        goto(wait_register, if(stale, do: "401 stale", else: "401 challenge"))
 
       :ok ->
-        accept_or_reject(req, dialog_pid, domain)
+        goto(save_registration, "REGISTER auth OK")
 
+      # Answer and keep waiting — never end the instance on a refused REGISTER.
+      # The dialog does NOT die with us: nothing monitors the app pid, so a dialog
+      # whose instance ended still matches the next REGISTER of that Call-ID and
+      # casts it to a dead process. The client would then get NO answer at all
+      # until the dialog's own expiration timer fires, up to an hour later. A 403
+      # is one request's verdict, not the end of the conversation — a client that
+      # fixes its credentials must be able to say so.
       {:reject, code, reason} ->
-        reply(dialog_pid, req, code, reason, [])
-        "#{code} #{reason}"
+        SIP.Session.Registrar.reject_registration(sip_ctx, req, code, reason)
+        goto(wait_register, "#{code} #{reason}")
     end
   end
 
-  defp accept_or_reject(req, dialog_pid, domain) do
-    case Kelix.Mod.Registrar.save(req, domain, dialog_pid) do
-      # RFC 3261 §10.3 step 8: enumerate ALL current bindings, each with its own
-      # remaining lifetime — `granted.contacts` already is that list (empty after
-      # an un-REGISTER, in which case the 200 carries no Contact at all).
-      {:ok, granted} ->
-        reply(
-          dialog_pid,
-          req,
-          200,
-          "OK",
-          [contact: empty_to_nil(granted.contacts), expires: granted.expires],
-          "accept_registration"
-        )
+  state save_registration do
+    req = last_uas_req()
 
-        # Name the identity this instance serves, so `kelictl monitor` says WHO is
-        # registering and not just that something is.
-        SIP.Scenario.Monitor.note_account(granted.aor)
-        "200 OK"
+    case Kelix.Mod.Registrar.save(sip_ctx, req) do
+      {:registered, granted} ->
+        SIP.Session.Registrar.accept_registration(sip_ctx, req, granted)
+        goto(wait_refresh, "200 OK")
 
-      # RFC 3261 §10.3 step 7: a 423 MUST carry Min-Expires, otherwise the client
-      # has no way to know what to ask for and simply fails.
+      {:unregistered, granted} ->
+        SIP.Session.Registrar.accept_registration(sip_ctx, req, granted)
+        scenario_success("unregistered")
+
+      # RFC 3261 §10.3 step 7: the 423 MUST carry Min-Expires, otherwise the client
+      # has no way to know what to ask for. Passing the bound as an integer is what
+      # tells reject_registration to put it there.
       {:error, {423, reason}} ->
-        min = Kelix.Mod.Registrar.min_expires(domain)
+        min = Kelix.Mod.Registrar.min_expires(sip_ctx.domain)
+        SIP.Session.Registrar.reject_registration(sip_ctx, req, 423, min)
+        goto(wait_register, "423 #{reason} (min #{min})")
 
-        reply(dialog_pid, req, 423, reason, [{"Min-Expires", to_string(min)}], "423 too brief")
-
-        "423 #{reason} (min #{min})"
-
-      # The store is down or wedged — `Kelix.Module.safe_call/3` degrades to this
+      # The store is down or wedged — Kelix.Module.safe_call/3 degrades to this
       # instead of blocking us (§8.2). 503, not 500: nothing is broken, the service
-      # is momentarily unavailable and the client should retry.
+      # is momentarily unavailable and the client should retry — and we must still
+      # be here when it does (see the 403 above).
       {:error, reason} when reason in [:down, :timeout] ->
-        Logger.error(module: __MODULE__, message: "registrar store #{reason}")
-        reply(dialog_pid, req, 503, "Service Unavailable", [], "503 store down")
-        "503 Service Unavailable"
+        Logger.error(module: __MODULE__, message: "Failed to save registration: #{reason}")
+        SIP.Session.Registrar.reject_registration(sip_ctx, req, 503, "Service Unavailable")
+        goto(wait_register, "503 store down")
 
+      # 400 (no Contact, bad wildcard) / 403 (too many contacts): one request is
+      # refused, the AOR's existing bindings are untouched, and so is this session.
       {:error, {code, reason}} ->
-        reply(dialog_pid, req, code, reason, [])
-        "#{code} #{reason}"
+        SIP.Session.Registrar.reject_registration(sip_ctx, req, code, reason)
+        goto(wait_register, "#{code} #{reason}")
     end
   end
 
-  # No binding left ⇒ no Contact header at all, rather than an empty one.
-  defp empty_to_nil([]), do: nil
-  defp empty_to_nil(contacts), do: contacts
+  state wait_refresh do
+    on_events do
+      {:REGISTER, _req, _trans_pid, _dialog_pid} ->
+        goto(process_register, "registering")
+
+      {:dialog_terminated, _dialog_pid, :transport_down} ->
+        scenario_aborted("client connection lost")
+
+      {:dialog_terminated, _dialog_pid, _reason} ->
+        scenario_success("registration ended")
+    end
+  end
+
+  # Cooperative shutdown (§5.3): a registrar has no BYE/media to release.
+  on_shutdown do
+    scenario_aborted("Registrar stopped gracefully")
+  end
 end

@@ -12,8 +12,10 @@ Unlike a proxy the server stays a user agent on both sides: it owns two dialogs,
 it can hang either of them up, it stays in the signalling path for the whole call,
 and it can meter.
 
-Nothing that existed before changes behaviour. The B2BUA is additive: a scenario
-written against 1.2.1 compiles and runs identically.
+The B2BUA is additive: a scenario written against 1.2.1 compiles and runs
+identically. One thing outside it does change contract — `Kelix.Mod.Registrar.save`
+now answers `{:registered, …}` / `{:unregistered, …}` instead of `{:ok, …}`; see
+[registrar](#registrar) below.
 
 ## Framework changes
 
@@ -130,6 +132,27 @@ written against 1.2.1 compiles and runs identically.
 - a re-INVITE is answered on its own transaction, and its ACK lands there
 - leg-crossing rules (purge/copy of what must not cross) live in `SIP.Msg.Ops`
 
+### The registrar session layer
+
+- the `SIP.Session.Registrar` verbs take the **scenario context** as their first
+  argument — `challenge_registration(sip_ctx, req, …)`,
+  `accept_registration(sip_ctx, req, granted)`,
+  `reject_registration(sip_ctx, req, code, reason)`. The dialog pid is read off the
+  context instead of being threaded through every state by hand. The previous
+  `(req, dialog_pid, …)` forms are unchanged and still work
+- `challenge_registration/3` also accepts an **already-built WWW-Authenticate
+  parameter map** as its third argument (a keyword list keeps the old meaning: let
+  the dialog layer mint the nonce). That is what an application minting its own
+  stateless nonce needs — kelixip's `Kelix.Auth.challenge_www_authenticate/2` — and
+  it had no choice but to bypass the session layer and call `reply/6` itself
+- `accept_registration(sip_ctx, req, granted)` answers straight from what a location
+  service granted (`%{aor, contacts, expires}`): every current binding with its own
+  remaining lifetime (RFC 3261 §10.3 step 8), no Contact header at all when the last
+  one is gone, and the AOR named to the monitor
+- `reject_registration/4` puts the mandatory `Min-Expires` on a 423 when it is given
+  the bound as an integer (§10.3 step 7). Composing that header was left to each
+  script, and a 423 without it tells the client nothing it can act on
+
 ### Resilience
 
 - the dialog traps exits and converts a transaction crash into a synthetic 408; the
@@ -159,6 +182,20 @@ written against 1.2.1 compiles and runs identically.
 - every branch after the first ignored the peer's `ruri: :keep` (a trunk's second
   branch was rewritten to the gateway's URI) and its `outbound_proxy`
 - `address_in_dialog/2` restores **both** identities on an outbound dialog
+- **the registrar scenarios still watched for `:tcp_closed` / `:tls_closed` /
+  `:wss_closed`**, which the dialog layer stopped sending when the three
+  per-protocol clauses became one `:transport_down` (§14.4, R4). The guard matched
+  nothing, so a client whose connection dropped fell through to the catch-all and
+  was recorded as a registration that ended normally. Both
+  [`registrar.exs`](../../apps/kelixip/scripts/registrar.exs) and
+  [`uas_register.exs`](../../apps/elixip2/scenarios/uas_register.exs) now match
+  `:transport_down`
+- **a refused REGISTER no longer ends the registrar instance.** Nothing monitors
+  the app pid, so the dialog outlives the scenario: it kept matching the next
+  REGISTER of that Call-ID and casting it to a dead process, leaving the client
+  with no answer at all until the dialog's own expiration timer fired — up to an
+  hour. 400 / 403 / 503 are answered and the instance keeps waiting; only the
+  dialog ending (un-registration, transport down, expiry) ends it
 - **mendooze: media arriving before the answer no longer loses `:ice_connected`.**
   The receive plane opens early — `EndpointStartReceiving` is what allocates the port
   we advertise — so the far end can be sending well before its SDP reaches us, which
@@ -175,6 +212,13 @@ written against 1.2.1 compiles and runs identically.
   form described above
 - like the other DSL verbs, the B2BUA macros rebind the scenario context in place:
   they return nothing and their verdict is read from `sip_ctx.lasterr`
+- **`last_uas_req()` now covers REGISTER**, not only INVITE / re-INVITE / UPDATE. A
+  registrar instance serves a succession of REGISTERs on one dialog — the
+  unauthenticated one, the digest replay, then every refresh — and each state must
+  act on the last one received. Scripts were storing it by hand
+  (`appdata_set(:register_req, req)`), and the fallback to the request that spawned
+  the instance made forgetting it silent *and* wrong: the scenario authenticated the
+  refresh but saved the contacts of the very first request
 
 ## elixipp testing tool changes
 
@@ -224,6 +268,20 @@ No change.
 
 ### registrar
 
+- **`save/2` takes the scenario context**: `save(sip_ctx, req)` reads the served
+  domain and the backing dialog off it, so a script carries neither. The
+  `save(req, domain, dialog_pid, info)` form stays for callers with no context
+- **`save` says what happened to the AOR**, not merely that the store accepted the
+  request: `{:registered, granted}` / `{:unregistered, granted}` where it used to
+  answer `{:ok, granted}`. The two demand different things of the script — a
+  registration is answered and then waited on for its refresh, an un-registration is
+  answered and the session is over — and a script re-deriving it from
+  `granted.expires == 0` gets it wrong on the request that drops one of two
+  bindings, which still leaves the AOR registered. **Breaking** for any code
+  matching `{:ok, granted}`
+- the facade reports to the monitor (`:db` command `registrar_save`), so a registrar
+  instance shows what it is doing between the REGISTER and the 200 rather than
+  sitting apparently idle
 - new **`targets/2`**: where to call the AOR a request asks for, returned as a
   `%SIP.B2bua.Peer{}` ready to hand to `b2bua_forward/3`. The B2BUA-shaped
   counterpart of `lookup/1` — a B2BUA builds its own forwarded request and needs

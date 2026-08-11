@@ -22,7 +22,7 @@ min_expires = 60
 ```
 
 ```elixir
-import Kelix.Mod.Registrar, only: [save: 4, lookup: 1]
+import Kelix.Mod.Registrar, only: [save: 2, lookup: 1]
 ```
 
 Per-domain activation and expiry bounds are a **separate** block, on each domain:
@@ -63,24 +63,41 @@ Per-domain block — `[domain.registrar]` (activates the function for a domain):
 
 ## Facades
 
-### `save/4`
+### `save/2`, `save/4`
 
 ```elixir
-save(req, domain, dialog_pid \\ nil, info \\ nil) ::
-  {:ok, granted} | {:error, {code, reason}} | {:error, :down | :timeout}
+save(sip_ctx, req)                                   # scenario form
+save(req, domain, dialog_pid \\ nil, info \\ nil)    # programmatic form
+  :: {:registered, granted}
+   | {:unregistered, granted}
+   | {:error, {code, reason}}
+   | {:error, :down | :timeout}
 ```
 
-Register or unregister the contacts of a `REGISTER` under `domain`. `dialog_pid`
-is the backing dialog (stored per contact, used for teardown); `info` is
-arbitrary scenario data. `granted` is `%{aor, contacts, expires}` — the contacts
-and expiry **actually** granted (an all-`Expires: 0` request unregisters and
-grants `0`). It does not build the `200 OK`; the script does.
+Register or unregister the contacts of a `REGISTER`. In the scenario form the
+served domain and the backing dialog are read off the scenario context
+(`sip_ctx.domain`, `sip_ctx.dialogpid`), so a script carries neither. In the
+programmatic form `dialog_pid` is the backing dialog (stored per contact, used for
+teardown) and `info` is arbitrary scenario data.
+
+The verdict says what happened to the AOR:
+
+| Verdict | Meaning |
+|---|---|
+| `{:registered, granted}` | the AOR has live bindings |
+| `{:unregistered, granted}` | its last binding is gone (`Expires: 0`, or the `Contact: *` wildcard); `granted.contacts` is empty and `granted.expires` is `0` |
+| `{:error, {code, reason}}` | `400` (no Contact / bad wildcard), `423` (too brief), `403` (too many contacts) |
+| `{:error, :down \| :timeout}` | the store could not answer |
+
+`granted` is `%{aor, contacts, expires}`: **all** the AOR's current bindings, each
+stamped with its own remaining lifetime (RFC 3261 §10.3 step 8). It does not build
+the `200 OK`; the script does, with
+`SIP.Session.Registrar.accept_registration(sip_ctx, req, granted)`.
 
 - The AOR is the `To` user-part (RFC 3261), case-insensitive.
 - The stored `received` is the **real** transport source of the REGISTER (proto,
   IP, port) — not the announced, possibly-NATed `Contact`.
-- Errors map to SIP codes: `400` (no Contact), `423` (too brief), `403` (too
-  many contacts).
+- The call is reported to the monitor as a `:db` command.
 
 ### `lookup/1`
 
@@ -180,12 +197,31 @@ name = "example.com"
 ```
 
 ```elixir
-# in the registrar scenario
-import Kelix.Mod.Registrar, only: [save: 4]
+# in the registrar scenario — see apps/kelixip/scripts/registrar.exs
+state save_registration do
+  req = last_uas_req()
 
-case save(register_req, "example.com", dialog_pid, nil) do
-  {:ok, granted} -> reply_registrar_ok(granted)         # script builds 200 OK
-  {:error, {code, reason}} -> reply(code, reason)
-  {:error, :down} -> reply(500, "Server Internal Error")
+  case Kelix.Mod.Registrar.save(sip_ctx, req) do
+    {:registered, granted} ->
+      SIP.Session.Registrar.accept_registration(sip_ctx, req, granted)
+      goto wait_refresh, "200 OK"
+
+    {:unregistered, granted} ->
+      SIP.Session.Registrar.accept_registration(sip_ctx, req, granted)
+      scenario_success("unregistered")
+
+    {:error, {423, reason}} ->
+      min = Kelix.Mod.Registrar.min_expires(sip_ctx.domain)
+      SIP.Session.Registrar.reject_registration(sip_ctx, req, 423, min)
+      goto wait_register, "423 #{reason}"
+
+    {:error, reason} when reason in [:down, :timeout] ->
+      SIP.Session.Registrar.reject_registration(sip_ctx, req, 503, "Service Unavailable")
+      scenario_failure("503 store down")
+
+    {:error, {code, reason}} ->
+      SIP.Session.Registrar.reject_registration(sip_ctx, req, code, reason)
+      scenario_failure("save() failed: #{code} #{reason}")
+  end
 end
 ```
