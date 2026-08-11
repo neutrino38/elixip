@@ -59,13 +59,8 @@ defmodule Kelix.Registrar do
 
       :ok -> goto(save_registration, "REGISTER auth OK")
 
-      # Answer and keep waiting — never end the instance on a refused REGISTER.
-      # The dialog does NOT die with us: nothing monitors the app pid, so a dialog
-      # whose instance ended still matches the next REGISTER of that Call-ID and
-      # casts it to a dead process. The client would then get NO answer at all
-      # until the dialog's own expiration timer fires, up to an hour later. A 403
-      # is one request's verdict, not the end of the conversation — a client that
-      # fixes its credentials must be able to say so.
+      # Answer and keep waiting — give a small grace window for the UA to send
+      # a correct REGISTER
       {:reject, code, reason} ->
         SIP.Session.Registrar.reject_registration(sip_ctx, req, code, reason)
         goto(wait_register, "#{code} #{reason}")
