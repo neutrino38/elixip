@@ -43,9 +43,59 @@ import Kelix.Mod.AuthDb, only: [authenticate: 3, challengeable?: 1]
 | `password_hash` | string | `"md5"` | HA1 hash: `md5` or `sha256` |
 | `identity_check` | string | `"warn"` | What to do when the digest proves one identity and the request claims another: `strict` (403), `warn` (allow + log), `off` |
 | `call_timeout_ms` | integer | `5000` | Upper bound on a DB query / facade call (ms) |
+| `pool_size` | integer | `4` | Connections kept open to the base. `1` serialises every REGISTER behind one socket |
+| `connect_timeout_ms` | integer | `5000` | Upper bound on establishing one connection |
+| `ssl_ca_cert_file` | string | — | CA that must sign the server certificate. Present ⇒ the server is **verified**; absent ⇒ encrypted but unauthenticated |
+| `ssl` | boolean | — | `true` is redundant (TLS is tried anyway); `false` asks for cleartext outright, and needs the key below to confirm it |
+| `allow_insecure_db_connection` | boolean | `false` | Accept a cleartext link when the server refuses TLS. **The only way** to end up unencrypted |
 
 The realm used for lookup and digest is the **domain's nominal name** (aliases
 fold to it).
+
+## The link to the database
+
+The module's supervised service is a **permanent connection pool**
+(`Kelix.Mod.AuthDb.Pool`, registered `Kelix.Mod.AuthDb.Conn`): `pool_size`
+connections opened once and kept open — a query never connects. DBConnection pings
+the idle ones about every second, so the server's `wait_timeout` never cuts them
+and a dead socket is noticed in seconds; a base that restarts is reconnected
+automatically with a 1 s → 30 s backoff. A base that is **down at boot does not
+abort the boot**: the pool retries in the background and every authentication
+answers `500` until it answers.
+
+### TLS first, cleartext only when the block says so
+
+TLS is **always tried first**, whether or not the block mentions it: an operator
+who configured nothing gets an encrypted link to the table holding every
+subscriber's HA1. The choice is made by **probing** — one throwaway connection and
+a `SELECT 1` — because DBConnection opens its connections asynchronously and
+retries for ever, so a pool that *started* proves nothing about TLS.
+
+| The server… | `allow_insecure_db_connection` | The pool opens |
+|---|---|---|
+| speaks TLS | anything | **TLS** |
+| refuses TLS, answers in clear | `true` | **cleartext**, logged as the downgrade it is |
+| refuses TLS, answers in clear | absent | **TLS** — nothing works, every auth answers `500`, and one log line says which key would fix it |
+| answers on neither transport | anything | **TLS** — it is unreachable, not TLS-less |
+
+That last row is the one worth stating: a base that answers nowhere must **not**
+be taken for a TLS-less one. The transport is decided once, at start, so
+downgrading on a transient outage would leave a permanent cleartext link behind.
+
+`ssl_ca_cert_file` is what turns the encrypted link into an *authenticated* one
+(`verify_peer` against that CA, hostname checked). Without it the server is
+unverified — usable against a self-signed dev server, and said out loud both in the
+logs and in `kelictl auth_db show`, so nobody mistakes it for a secure link.
+
+`ssl = false` asks for cleartext directly and goes through the **same** gate:
+without `allow_insecure_db_connection = true` the block is refused at load (and the
+module is not started). One key means one thing — cleartext implies somebody
+confirmed it, which is what makes `show` readable.
+
+The transport is negotiated at **start**, which is what a `systemctl restart
+kelixip` or a `kelictl module reload auth_db` re-does (the module has no
+`reload/2`, so its child is restarted cleanly). A base that gains or loses TLS
+while the node runs is not re-negotiated on the fly.
 
 ## Prerequisites
 
@@ -171,7 +221,48 @@ is not running and `{:error, _}` on a query error; the query is bounded by
 
 ## Control commands
 
-None yet. (Frontals: P7.)
+### `auth_db show`
+
+```
+kelictl auth_db show          [GET /modules/auth_db/db]
+```
+
+Where the subscriber-DB link points, how it is protected, and whether it answers
+**right now**:
+
+```
+$ kelictl auth_db show
+State:            up
+Host:             db.example.com
+Port:             3306
+Database:         kamailio
+Username:         kamailio
+Table:            subscriber
+Tls:              true
+Certificate:      not verified
+Transport:        TLS, server certificate NOT verified (no ssl_ca_cert_file)
+Pool size:        4
+Query timeout ms: 5000
+```
+
+| Field | Says |
+|---|---|
+| `state` | `up` / `down` — a **live** `SELECT 1`, not a flag cached at boot |
+| `error` | only when `down`: why, in one line |
+| `host` `port` `database` `username` `table` | where it points, as the running pool was opened |
+| `tls` | `true` / `false` — encrypted or not, the machine-readable answer |
+| `certificate` | `verified` (a CA was configured) / `not verified` / `-` on a cleartext link |
+| `transport` | the same thing in one line, **including why** it is what it is (a fallback that was taken names itself) |
+| `pool_size` `query_timeout_ms` | the two bounds an operator tunes |
+
+The **password is never in it** — not in the command's output, not in the map the
+REST route returns.
+
+`down` is an answer, not an error: the command exits `0` and prints the reason, so
+it stays usable exactly when the base is unreachable. It is also bounded — a pool
+that does not answer within `call_timeout_ms` is reported, never joined. The one
+thing it refuses is an argument (it takes none), which exits `2` rather than being
+silently ignored.
 
 ## Events
 

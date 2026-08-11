@@ -72,6 +72,12 @@ port = 9095
 #ha1_column    = "ha1"             # ha1 = H(user:realm:pw) | ha1b = H(user@domain:realm:pw)
 #password_hash = "md5"             # md5 | sha256 — authoritative, both ways
 #pool_size     = 4                 # 1 serialises every REGISTER
+# TLS to the base is tried FIRST, with no key to set for it. Add the CA to get the
+# server actually verified; without it the link is encrypted but unauthenticated.
+#ssl_ca_cert_file = "/etc/pki/tls/certs/db-ca.pem"
+# A base that speaks NO TLS needs this, or every authentication answers 500. Check
+# with `kelictl auth_db show`, which prints the transport it settled on.
+#allow_insecure_db_connection = true
 
 #[module.mcu]                      # dnf install kelixip-mod-mcu
 # Conferencing. Needs a [mediaserver.pool.*] entry below pointing at a reachable
