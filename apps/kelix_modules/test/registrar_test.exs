@@ -43,6 +43,24 @@ defmodule Kelix.Mod.RegistrarTest do
   defp contact_uri(user, host, q),
     do: SIP.Uri.set_uri_param(contact_uri(user, host, nil), "q", to_string(q))
 
+  # A stand-in for a REGISTER dialog. It honours the one part of the dialog
+  # contract this module uses — `SIP.Dialog.terminate/2` — by reporting it and
+  # stopping, as SIP.DialogImpl does.
+  defmodule FakeDialog do
+    use GenServer
+
+    def start(owner), do: GenServer.start(__MODULE__, owner)
+
+    @impl true
+    def init(owner), do: {:ok, owner}
+
+    @impl true
+    def handle_cast({:terminate, reason}, owner) do
+      send(owner, {:terminated, self(), reason})
+      {:stop, :normal, owner}
+    end
+  end
+
   setup do
     pid = start_supervised!({Registrar, max_contacts_per_aor: 2})
     %{pid: pid}
@@ -644,6 +662,80 @@ defmodule Kelix.Mod.RegistrarTest do
       Process.exit(dialog, :kill)
       refute_receive {:registrar, :disconnected, "dave@example.com"}, 300
       assert [_still_there] = Registrar.bindings(@domain, "dave")
+    end
+
+    # One binding, one session. Two registrar instances were found alive on
+    # 2026-08-11 for a single Linphone binding: re-enabling the account
+    # re-registers the previous Call-ID *and* opens a new one, both naming the same
+    # contact. The store kept one binding and the losing session stayed in
+    # `kelictl monitor`, claiming a registration it no longer held.
+    test "a binding re-registered by another dialog supersedes the previous session" do
+      uri = %SIP.Uri{userpart: "alice", domain: @domain}
+      Registrar.subscribe_register_event(uri, self())
+
+      {:ok, d1} = FakeDialog.start(self())
+      {:ok, d2} = FakeDialog.start(self())
+      req = register("alice", "10.0.0.9", tp_module: SIP.Transport.TCP)
+
+      assert {:registered, _} = Registrar.save(req, @domain, d1)
+      assert {:registered, _} = Registrar.save(%{req | callid: "call-2"}, @domain, d2)
+
+      assert_receive {:terminated, ^d1, :superseded}, 1000
+      refute_receive {:terminated, ^d2, _}, 200
+
+      # The survivor owns the binding, and the death we just caused must not be
+      # read as a disconnection: the AOR is still registered.
+      refute_receive {:registrar, :disconnected, _}, 300
+      assert [%Contact{dialog_pid: ^d2}] = Registrar.bindings(@domain, "alice")
+    end
+
+    # Over UDP nothing would ever notice the stale dialog — no connection to drop —
+    # so it would sit out a full registration lifetime. Hence supersession applies
+    # whatever the transport, unlike the dialog monitor.
+    test "supersession applies over UDP too" do
+      {:ok, d1} = FakeDialog.start(self())
+      {:ok, d2} = FakeDialog.start(self())
+      req = register("erin", "10.0.0.9", tp_module: SIP.Transport.UDP)
+
+      assert {:registered, _} = Registrar.save(req, @domain, d1)
+      assert {:registered, _} = Registrar.save(%{req | callid: "call-2"}, @domain, d2)
+
+      assert_receive {:terminated, ^d1, :superseded}, 1000
+    end
+
+    test "a refresh from the owning dialog supersedes nothing" do
+      {:ok, d1} = FakeDialog.start(self())
+      req = register("frank", "10.0.0.9", tp_module: SIP.Transport.TCP)
+
+      assert {:registered, _} = Registrar.save(req, @domain, d1)
+      assert {:registered, _} = Registrar.save(req, @domain, d1)
+
+      refute_receive {:terminated, _, _}, 300
+      assert [%Contact{dialog_pid: ^d1}] = Registrar.bindings(@domain, "frank")
+    end
+
+    # Two devices on one AOR: two contacts, two sessions, neither supplanting the
+    # other. Only the dialog that owned THIS contact is superseded.
+    test "a second contact for the same AOR leaves the first session alone" do
+      {:ok, d1} = FakeDialog.start(self())
+      {:ok, d2} = FakeDialog.start(self())
+
+      assert {:registered, _} =
+               Registrar.save(
+                 register("gina", "10.0.0.9", tp_module: SIP.Transport.TCP),
+                 @domain,
+                 d1
+               )
+
+      assert {:registered, _} =
+               Registrar.save(
+                 register("gina", "10.0.0.10", callid: "call-2", tp_module: SIP.Transport.TCP),
+                 @domain,
+                 d2
+               )
+
+      refute_receive {:terminated, _, _}, 300
+      assert length(Registrar.bindings(@domain, "gina")) == 2
     end
 
     test "the periodic sweep removes expired bindings + emits :expired" do

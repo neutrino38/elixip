@@ -366,6 +366,28 @@ defmodule SIP.Dialog do
   end
 
   @doc """
+  End `dialog_pid` now, stating why: its application receives the one
+  `{:dialog_terminated, dialog_pid, reason}` the contract promises, with `reason`
+  verbatim.
+
+  For the dialogs nothing else can end. A call dialog is ended by the BYE the
+  application sends through it, and a REGISTER dialog by its expiration timer or
+  by the flow under it dropping — but a REGISTER dialog the registrar has
+  *superseded* (the same binding re-registered by another Call-ID, which is what a
+  client re-enabling its account produces) is stale with no event of its own to
+  notice it. Without this it sat there for a full registration lifetime, with a
+  scenario instance still riding it.
+
+  Asynchronous on purpose: the caller is often a module holding a store (the
+  registrar), which must not block on a foreign process — and a `cast` to a dialog
+  that already died is a no-op, which is exactly the right answer here.
+  """
+  @spec terminate(pid(), atom()) :: :ok
+  def terminate(dialog_pid, reason) when is_pid(dialog_pid) and is_atom(reason) do
+    GenServer.cast(dialog_pid, {:terminate, reason})
+  end
+
+  @doc """
   Let the dialog layer send the periodic OPTIONS keepalives (NAT / connection
   liveness) on this REGISTER dialog, and tear it down after several unanswered ones.
 

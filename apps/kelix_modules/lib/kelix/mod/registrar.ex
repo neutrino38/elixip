@@ -159,6 +159,11 @@ defmodule Kelix.Mod.Registrar do
   `dialog_pid` is stored per contact and used later for teardown; `info` is
   arbitrary scenario data.
 
+  A binding belongs to one session at a time: re-registering a contact that another
+  dialog owns hands it over, and that dialog is terminated
+  (`{:dialog_terminated, _, :superseded}` → its instance ends). Nothing for the
+  script to do — but it is why saving can end a session other than its own.
+
   The verdict says **what happened to the AOR**, not merely that the store
   accepted the request, because the two demand different things of the script: a
   registration is answered and then waited on for its refresh, an
@@ -506,6 +511,7 @@ defmodule Kelix.Mod.Registrar do
         # Monitor the backing dialog so a connected-transport drop invalidates the
         # binding (§6.3, WebRTC-critical).
         state = ensure_monitor(state, domain, aor, dialog_pid, flow_module_of(req))
+        state = supersede_owners(state, domain, aor, existing, added, dialog_pid)
         notify(state, domain, aor, :registered)
         {:registered, granted(aor, merged, granted_expires(actions)), state}
       end
@@ -626,6 +632,63 @@ defmodule Kelix.Mod.Registrar do
     else
       ref = Process.monitor(pid)
       %{state | mons: Map.put(state.mons, ref, {domain, aor, pid})}
+    end
+  end
+
+  # One binding, one session. A binding is re-registered by a dialog other than the
+  # one that owns it — a different Call-ID naming the same contact — so the previous
+  # dialog owns nothing any more: it is superseded, and its registrar instance must
+  # go with it.
+  #
+  # This is what a client re-enabling its account produces (Linphone, 2026-08-11):
+  # it re-registers its previous Call-ID *and* opens a new one within the same
+  # second, both naming the same contact and the same `+sip.instance`. `upsert/2`
+  # then leaves one binding and two live sessions, the loser's being a session that
+  # claims a registration it does not hold — visible in `kelictl monitor`, and about
+  # to un-register a binding that is no longer its own.
+  #
+  # Whatever the transport, unlike the dialog *monitor* above: over UDP the previous
+  # dialog is just as stale, and nothing else there would ever notice — no
+  # connection drops, so it would sit out a full registration lifetime.
+  #
+  # Demonitored before it is told to end, so the death we cause does not come back
+  # through `handle_info({:DOWN, …})` as a `:disconnected` for an AOR that is still
+  # registered.
+  defp supersede_owners(state, domain, aor, existing, added, dialog_pid)
+       when is_pid(dialog_pid) do
+    rebound = MapSet.new(added, &binding_key(&1))
+
+    existing
+    |> Enum.filter(fn %Contact{dialog_pid: owner} = c ->
+      is_pid(owner) and owner != dialog_pid and MapSet.member?(rebound, binding_key(c))
+    end)
+    |> Enum.uniq_by(& &1.dialog_pid)
+    |> Enum.reduce(state, fn %Contact{dialog_pid: owner}, st ->
+      Logger.info(
+        module: __MODULE__,
+        message:
+          "#{aor}@#{domain}: binding re-registered by #{inspect(dialog_pid)}, " <>
+            "superseding #{inspect(owner)}"
+      )
+
+      st = demonitor_owner(st, domain, aor, owner)
+      SIP.Dialog.terminate(owner, :superseded)
+      st
+    end)
+  end
+
+  # No dialog behind this save (the programmatic form: tests, seeding the store) —
+  # nothing to hand the registration over to, so nothing is superseded either.
+  defp supersede_owners(state, _domain, _aor, _existing, _added, _dialog_pid), do: state
+
+  defp demonitor_owner(state, domain, aor, pid) do
+    case Enum.find(state.mons, fn {_ref, key} -> key == {domain, aor, pid} end) do
+      nil ->
+        state
+
+      {ref, _key} ->
+        Process.demonitor(ref, [:flush])
+        %{state | mons: Map.delete(state.mons, ref)}
     end
   end
 

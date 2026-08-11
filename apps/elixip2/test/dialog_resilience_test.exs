@@ -382,6 +382,38 @@ defmodule SIP.Test.DialogResilience do
     assert SIP.Transport.build_contact_uri(SIP.Transport.UDP, dead) == nil
   end
 
+  # ── Asked to end from the outside ───────────────────────────────────────────
+
+  # `SIP.Dialog.terminate/2` — the same two assertions as every failure above, for
+  # a dialog nothing under it is going to end. The registrar needs it for a
+  # REGISTER dialog it has superseded (the same binding re-registered under
+  # another Call-ID): stale, with no BYE, no expiry and no dropped connection to
+  # notice it. The reason must reach the application verbatim, since that is how
+  # a scenario tells this apart from a client that went away.
+  test "a dialog told to terminate says why and dies" do
+    _silent = peer!("rs7")
+    {dlg, _tid} = start_call("rs7")
+    assert_receive {:invite_sent, _req}, 2_000
+
+    :ok = SIP.Dialog.terminate(dlg, :superseded)
+
+    assert_receive {:outbound, {:dialog_terminated, ^dlg, :superseded}}, 2_000
+    assert_dies(dlg)
+  end
+
+  # The registrar casts it from inside its own GenServer, on a pid it monitors: a
+  # dialog that died between the two must not take the store down with it.
+  test "terminating a dialog that is already gone is a no-op" do
+    _silent = peer!("rs8")
+    {dlg, _tid} = start_call("rs8")
+    assert_receive {:invite_sent, _req}, 2_000
+
+    Process.exit(dlg, :kill)
+    assert_dies(dlg)
+
+    assert :ok = SIP.Dialog.terminate(dlg, :superseded)
+  end
+
   # The catch-all handle_info/2. `use GenServer` provides one, but a module that
   # defines its own clauses replaces it wholesale — so an unrecognized message
   # raised a FunctionClause and took the dialog with it. SIP.Dialog.broadcast/1

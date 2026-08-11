@@ -624,7 +624,24 @@ defmodule SIP.DialogImpl do
 
         # Send the message to the newly created app layer
         send(app_id, wrap_tag(state.tag, {req.method, req, pid, self()}))
-        {:ok, Map.put(state, :app, app_id)}
+
+        # Arm the dialog's lifetime from the request that CREATED it, exactly as
+        # `handle_cast({:sipmsg, …})` does for every later one. Only that in-dialog
+        # path used to arm it, so a REGISTER accepted on the FIRST request — the
+        # normal case for a client that pre-authenticates with a cached nonce, hence
+        # answered 200 with no 401 in between — produced a dialog with no expiration
+        # timer at all: nothing would ever expire it. Over a connected transport it
+        # lived until the connection dropped, over UDP forever, and the registrar
+        # session riding it stayed in `kelictl monitor` beside the live one.
+        #
+        # Observed on 2026-08-11 with a Linphone re-enabling its account: it
+        # re-registers its previous Call-ID (pre-authenticated → 200 at once, no
+        # timer) *and* opens a new one (401 → in-dialog 200 → timer armed), leaving
+        # two registrar sessions for one binding, the first of them immortal.
+        #
+        # `arm_expiration_timer/2` is a no-op for anything but a REGISTER, so an
+        # inbound INVITE dialog is unaffected.
+        {:ok, arm_expiration_timer(state, req) |> Map.put(:app, app_id)}
 
       # Session has not been created. Abort dialog and propagate the requested
       # SIP status. The stop reason is the 4-tuple {:reject, code, reason, totag}
@@ -1085,6 +1102,14 @@ defmodule SIP.DialogImpl do
       when is_req(msg) and msg.method == :CANCEL do
     send_to_app(state, {:CANCEL, msg, transact_pid, self()})
     {:stop, {:shutdown, :cancelled}, state}
+  end
+
+  # Asked to end from the outside (`SIP.Dialog.terminate/2`). `{:shutdown, reason}`
+  # rather than a hand-rolled notification: terminate/2 unwraps it and delivers the
+  # ONE {:dialog_terminated, _, reason} the application is owed — the same path a
+  # transport drop and a CANCEL take.
+  def handle_cast({:terminate, reason}, state) when is_atom(reason) do
+    {:stop, {:shutdown, reason}, state}
   end
 
   # An in-dialog OPTIONS is a keepalive (RFC 3261 §11): the dialog answers it

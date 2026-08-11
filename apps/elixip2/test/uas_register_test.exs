@@ -153,7 +153,14 @@ defmodule SIP.Test.UASRegister do
     authparams = %{"realm" => "example.com", "nonce" => forged, "algorithm" => "SHA256"}
 
     req =
-      SIP.Msg.Ops.add_authorization_to_req(base, authparams, :wwwauthenticate, "5430", "toto", :plain)
+      SIP.Msg.Ops.add_authorization_to_req(
+        base,
+        authparams,
+        :wwwauthenticate,
+        "5430",
+        "toto",
+        :plain
+      )
       |> fresh_branch()
 
     send(routed.tp_pid, {:recv, req})
@@ -302,6 +309,58 @@ defmodule SIP.Test.UASRegister do
     # other UAS test files, so an instance left registered here leaks into them.
     Elixip.RegistrarUAS.shutdown_all(:test_cleanup)
     assert until(fn -> Elixip.RegistrarUAS.stats().active == 0 end, 2_000)
+  end
+
+  # A REGISTER accepted on the request that CREATES the dialog — no 401 in between,
+  # which is what a client pre-authenticating with a cached nonce sends on every
+  # refresh. The dialog used to arm its expiration timer only on the *in-dialog*
+  # path, so this shape produced a dialog with no lifetime at all: immortal over a
+  # connected transport until the connection dropped, immortal outright over UDP,
+  # with its registrar session sitting in `kelictl monitor` for ever. Two of them
+  # were found alive on 2026-08-11 for a single Linphone binding.
+  #
+  # sip_dialog_register_expiry_test.exs proves what `arm_expiration_timer/2`
+  # computes; it passed throughout, because nothing called it here.
+  test "a REGISTER accepted on the very first request still arms the dialog lifetime" do
+    restart_registrar(@scenario, 5)
+
+    {:ok, msg} = File.read("test/SIP-REGISTER-LVP.txt")
+    {:ok, base} = SIPMsg.parse(msg, fn _c, _m, _l, _line -> :ok end)
+    upd_uri = SIP.Uri.set_uri_param(base.ruri, "unittest", "uas_register")
+    base = SIP.Msg.Ops.update_sip_msg(base, {:ruri, upd_uri}) |> uniq_callid() |> with_cseq(1)
+    routed = SIP.Transport.Selector.select_transport(upd_uri)
+    :ok = GenServer.call(routed.tp_pid, :settestapp)
+
+    cid = base.callid
+
+    # Lenient mode (no password): the very first REGISTER already carries an
+    # Authorization, so the scenario accepts it instead of challenging.
+    auth = %{"realm" => "example.com", "nonce" => "n0"}
+    send(routed.tp_pid, {:recv, base |> with_auth(auth) |> fresh_branch()})
+    assert_receive {:uas_response, 200, %{callid: ^cid}}, 2_000
+
+    timer = :sys.get_state(dialog_of(cid)).expirationtimer
+    assert timer != nil, "the dialog-creating REGISTER left the dialog with no lifetime"
+
+    # The full lifetime the REGISTER asked for (Expires: 1800), not the ~1 s
+    # teardown an un-registration gets.
+    assert_in_delta :erlang.read_timer(timer) / 1000, 1800, 30
+
+    Elixip.RegistrarUAS.shutdown_all(:test_cleanup)
+    assert until(fn -> Elixip.RegistrarUAS.stats().active == 0 end, 2_000)
+  end
+
+  # The dialog serving `callid`. An inbound dialog registers itself twice — under
+  # the id the initial request yields ({fromtag, callid, nil}) and under the
+  # complete one, once it has generated its To tag — so the same pid comes back
+  # twice.
+  defp dialog_of(callid) do
+    Registry.select(Registry.SIPDialog, [{{{:_, callid, :_}, :"$1", :_}, [], [:"$1"]}])
+    |> Enum.uniq()
+    |> case do
+      [pid] -> pid
+      other -> flunk("expected exactly one dialog for #{callid}, got #{inspect(other)}")
+    end
   end
 
   # RFC 3261 §12.2.2. This is what a client sees when its registration lapsed while

@@ -38,8 +38,8 @@ defmodule Kelix.Registrar do
       {:dialog_terminated, _dialog_pid, _reason} ->
         scenario_success("registration ended")
     after
-      600_000 ->
-        scenario_success("registration idle timeout")
+      5_000 ->
+        scenario_failure("registration idle timeout")
     end
   end
 
@@ -55,10 +55,9 @@ defmodule Kelix.Registrar do
           )
 
         SIP.Session.Registrar.challenge_registration(sip_ctx, req, params)
-        goto(wait_register, if(stale, do: "401 stale", else: "401 challenge"))
+        goto(wait_auth_register, if(stale, do: "401 stale", else: "401 challenge"))
 
-      :ok ->
-        goto(save_registration, "REGISTER auth OK")
+      :ok -> goto(save_registration, "REGISTER auth OK")
 
       # Answer and keep waiting — never end the instance on a refused REGISTER.
       # The dialog does NOT die with us: nothing monitors the app pid, so a dialog
@@ -70,6 +69,22 @@ defmodule Kelix.Registrar do
       {:reject, code, reason} ->
         SIP.Session.Registrar.reject_registration(sip_ctx, req, code, reason)
         goto(wait_register, "#{code} #{reason}")
+    end
+  end
+
+  state wait_auth_register do
+    on_events do
+      {:REGISTER, _req, _trans_pid, _dialog_pid} ->
+        goto(process_register, "REGISTER + auth")
+
+      {:dialog_terminated, _dialog_pid, :transport_down} ->
+        scenario_aborted("client connection lost")
+
+      {:dialog_terminated, _dialog_pid, _reason} ->
+        scenario_success("registration ended")
+    after
+      5_000 ->
+        scenario_failure("registration idle timeout")
     end
   end
 
