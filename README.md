@@ -60,7 +60,7 @@ In terms of capabilities, the emphasis will be on:
 - a **conferencing (MCU)** function via the `mcu` module and the `mcu.exs` script:
   audio + video mixing on a Medooze media server, conferences managed over REST /
   `kelictl` / from a script, plain-RTP, SDES and DTLS-SRTP + ICE-lite legs —
-  see [docs/mcu_module_guide.md](docs/mcu_module_guide.md)
+  see [docs/kelixip/modules/mcu_module_guide.md](docs/kelixip/modules/mcu_module_guide.md)
 
 
 ## Roadmap
@@ -101,7 +101,7 @@ domains, script-per-function dispatch, loadable modules (registrar, database
 auth, conferencing), a control CLI/REST API and Prometheus metrics.
 
 **👉 The operator manual lives in [docs/kelixip/README.md](docs/kelixip/README.md).**
-**👉 The conferencing module has its own guide: [docs/mcu_module_guide.md](docs/mcu_module_guide.md).**
+**👉 The conferencing module has its own guide: [docs/kelixip/modules/mcu_module_guide.md](docs/kelixip/modules/mcu_module_guide.md).**
 
 # License
 

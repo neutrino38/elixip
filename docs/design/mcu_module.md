@@ -7,7 +7,7 @@ A conferencing (MCU) function for **kelixip**, distilled from the Java
 > This document is the **why**: every decision, what was left out and on what
 > grounds. For the **how** — configuring a node, the REST/CLI surface, writing a
 > script, and reading the logs of a call that failed — see
-> [docs/mcu_module_guide.md](../mcu_module_guide.md). Delivery status is §14.
+> [docs/kelixip/modules/mcu_module_guide.md](../kelixip/modules/mcu_module_guide.md). Delivery status is §14.
 
 The deliverable is deliberately **two artefacts** — no new frontal, no new
 daemon:
@@ -2891,7 +2891,7 @@ what P6 ships is documented rather than merely installed.
 The point is not bookkeeping: a design doc that disagrees with the code is worse than
 none, because the next reader trusts it.
 
-### 18.2 A module guide — `docs/mcu_module_guide.md` (new)
+### 18.2 A module guide — `docs/kelixip/modules/mcu_module_guide.md` (new)
 
 The design doc explains *why*; nothing explains *how* to an operator or to whoever
 writes the next script. One new document, three audiences:

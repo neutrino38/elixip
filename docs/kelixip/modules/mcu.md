@@ -6,14 +6,16 @@ old-style MCU, mixing the picture, the audio and the text on the server.
 
 This module requires a medooze mediaserver up and running and configured
 in the pool. See
-[§1.1 of the guide](../../mcu_module_guide.md#11-what-must-be-true-before-a-call-can-succeed)
+[§1.1 of the guide](mcu_module_guide.md#11-what-must-be-true-before-a-call-can-succeed)
 for the four things that must be true before a call can succeed.
 
 **Important limitation:** for now, it is not possible to mix in a single scenario
 MCU functions and regular JSR 309 media functions.
 
-> Please refer to the [MCU admin guide](../../mcu_module_guide.md) for more details
-> on how to write an MCU elixip script and troubleshoot it. There is also a
+> This page is the reference: installing, configuring, the script API and the
+> commands. Running and troubleshooting a node — prerequisites, the announced media
+> address, metrics, reading the logs of a call that failed — is the
+> [operating guide](mcu_module_guide.md). There is also a
 > [design document](../../design/mcu_module.md) that lists design decisions and
 > limitations. The reference call script is
 > [`apps/kelixip/scripts/mcu.exs`](../../../apps/kelixip/scripts/mcu.exs).
@@ -127,7 +129,7 @@ Module block — `[module.mcu]` (in `config.toml`):
 | `xmlrpc_timeout_ms` | integer | `10000` | Per-RPC bound towards the media server |
 | `call_timeout_ms` | integer | `5000` | Upper bound on a facade call (ms) |
 | `shutdown_grace_ms` | integer | `5000` | Grace given to conferences at module stop |
-| `rtp_timeout_ms` | integer | `10000` | RTP inactivity watchdog — **ignored**: the media server does not support it yet (limitation L1) |
+| `rtp_timeout_ms` | integer | `10000` | RTP inactivity watchdog, armed per media at the ACK. `0` disables it. Never armed on text, disarmed on a media the peer holds; a leg goes only when **every** watched media is silent |
 | `gc_orphans` | boolean | `true` | Sweep, at start, the conferences the media server still holds and no kelixip owns |
 | `message_kinds` | list | `[]` | The message kinds the collaboration channel accepts (see below). **Empty = the channel is closed** |
 | `message_rate` | integer | `5` | Messages per second and per participant (burst: twice that) |
@@ -524,8 +526,10 @@ Two messages reach a **participant's scenario** and must be handled, or they rot
 in its mailbox:
 
 ```elixir
-{:mcu_event, :fpu_requested}        # the mixer needs a fresh intra-frame from this leg
-{:mcu_event, :server_disconnected}  # the mix is gone: BYE and leave
+{:mcu_event, :fpu_requested}          # the mixer needs a fresh intra-frame from this leg
+{:mcu_event, :server_disconnected}    # the mix is gone: BYE and leave
+{:mcu_event, :media_timeout, media}   # every watched media is silent: BYE and leave
+{:mcu_event, :media_connected, media} # first validated packet of a reception cycle
 ```
 
 A third one reaches a leg **only if its script asked for it** with
@@ -546,7 +550,7 @@ Node-level events (`conference.created`, `participant.joined`,
 one line per event carrying the conference `uid`, and counted in the Prometheus metrics
 (`kelix_mcu_calls_total{result}`, `kelix_mcu_participants{mcu,conference}`,
 `kelix_mcu_rpc_errors_total{method,reason}` …). They are not delivered to
-scripts. See [§3.1 of the guide](../../mcu_module_guide.md#31-what-a-successful-join-looks-like).
+scripts. See [§3.1 of the guide](mcu_module_guide.md#31-what-a-successful-join-looks-like).
 
 ## Examples
 

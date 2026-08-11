@@ -148,4 +148,4 @@ text an operator reads sits next to the parser that enforces it.
 - [registrar.md](registrar.md)
 - [auth_db.md](auth_db.md)
 - [mcu.md](mcu.md) — conferencing; its REST endpoints are [mcu-api.md](mcu-api.md) and
-  the narrative guide is [docs/mcu_module_guide.md](../../mcu_module_guide.md)
+  the narrative guide is [mcu_module_guide.md](mcu_module_guide.md)
