@@ -68,7 +68,11 @@ to downgrade.
 ### Dialog, transaction and message layers
 
 a **client-transaction timeout is reported to the application as a synthetic 408**
-  (RFC 3261 §17.1.1.2 / §8.1.3.1). 
+  (RFC 3261 §17.1.1.2 / §8.1.3.1).
+
+Three readings added to `SIP.Msg.Ops`: `from_username/1` / `to_username/1` (the raw
+claims, where `asserted_username/1` prefers the verified digest name) and
+`in_dialog?/1` (does the request carry a To tag).
 
 ### The registrar session layer
 
@@ -97,6 +101,12 @@ as their first argument and be more friendly to scripts.it can act on
   branch was rewritten to the gateway's URI) and its `outbound_proxy`
 - `address_in_dialog/2` restores **both** identities on an outbound dialog
 - **mendooze: media arriving before the answer no longer loses `:ice_connected`.**
+- the registrar scenarios still watched for `:tcp_closed` / `:tls_closed` /
+  `:wss_closed`, replaced by one `:transport_down`: the guard matched nothing, so a
+  dropped connection was recorded as a registration ending normally
+- **a refused REGISTER no longer ends the registrar instance.** The dialog outlives
+  the scenario and kept casting the next REGISTER to a dead process — no answer at
+  all for the client until the dialog expired, up to an hour
 
 ## Domain Specific Language changes
 
@@ -149,7 +159,18 @@ ignored with a warning** — the change is deferred, not made.
 
 ### auth_db
 
-No change.
+- **it authenticates any request, not only REGISTER**: new `authenticate/3`, same
+  verdict plus the identity the digest proved. `do_registration_auth/3` is that
+  function applied to a registration, unchanged for callers
+- new `challengeable?/1` — an initial request other than ACK, CANCEL and OPTIONS
+- new **identity check**: a valid digest proves who holds the password, not that the
+  `From` is theirs. `[module.auth_db] identity_check` = `strict` / `warn` / `off`,
+  shipped as `warn` (allow and log) so no legitimate deployment turns into a 403 on
+  upgrade
+- a refused request logs the cause (`bad_password`, `unknown_user`, `bad_realm`);
+  the wire answer stays a bare `403`
+- new `fetch_credential/3`: the secret as `{:ha1, algorithm, hex}` — the backend's
+  abstraction point ([evolution-auth-db.md](../design/evolution-auth-db.md))
 
 ### registrar
 

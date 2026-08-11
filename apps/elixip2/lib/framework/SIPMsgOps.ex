@@ -265,6 +265,57 @@ defmodule SIP.Msg.Ops do
   defp presence(_other), do: nil
 
   @doc """
+  The user part of **From**: who the sender *claims* to be, unverified.
+
+  Deliberately not `asserted_username/1`, which answers "the best name available"
+  and prefers the digest username. An authenticator needs the opposite: the raw
+  claim, so it can compare it with the name the digest actually proved and refuse
+  the mismatch. Reading `asserted_username/1` there would compare the digest
+  username with itself and always agree — an identity check that can never fail.
+  """
+  @spec from_username(map()) :: String.t() | nil
+  def from_username(msg) when is_map(msg), do: uri_userpart(Map.get(msg, :from))
+
+  @doc """
+  The user part of **To**: who the request is addressed to, which for a REGISTER is
+  the address-of-record being bound (RFC 3261 §10.2).
+
+  Beware the shape: `SIPMsg` parses `:ruri` and `:contact` into a `%SIP.Uri{}` but
+  leaves `:to` as the RAW header string, so this is not `msg.to.userpart`. Reading
+  it by hand is what produced "400 Missing To user-part" on every real REGISTER
+  once already.
+  """
+  @spec to_username(map()) :: String.t() | nil
+  def to_username(msg) when is_map(msg), do: uri_userpart(Map.get(msg, :to))
+
+  @doc """
+  Does this request belong to an **established dialog**?
+
+  The test is the To tag (RFC 3261 §12.1): only a request sent inside a dialog
+  carries one, an initial request never does. It is what separates "this
+  conversation was authenticated when it was created" from "this is someone new
+  knocking" — re-challenging mid-dialog buys nothing and breaks UAs.
+  """
+  @spec in_dialog?(map()) :: boolean()
+  def in_dialog?(msg) when is_map(msg) do
+    case to_uri(Map.get(msg, :to)) do
+      %SIP.Uri{} = uri -> match?({:ok, tag} when is_binary(tag), SIP.Uri.get_uri_param(uri, "tag"))
+      _ -> false
+    end
+  end
+
+  defp to_uri(%SIP.Uri{} = uri), do: uri
+
+  defp to_uri(value) when is_binary(value) do
+    case SIP.Uri.parse(String.trim(value)) do
+      {:ok, uri} -> uri
+      _ -> nil
+    end
+  end
+
+  defp to_uri(_other), do: nil
+
+  @doc """
   The address-of-record a request is **for**: the user part of its Request-URI
   (RFC 3261 §10.3), or `nil` when it carries none.
 
