@@ -116,7 +116,7 @@ installed as `.beam` files into `server.module_dir` and loaded per `[module.<nam
 block (design §8.3, §16.12). `apps/kelixip` does not depend on this app, which is what
 keeps them out of the release.
 
-> `mcu` (conferencing — see [docs/mcu_module_guide.md](docs/mcu_module_guide.md)) is
+> `mcu` (conferencing — see [docs/kelixip/modules/mcu_module_guide.md](docs/kelixip/modules/mcu_module_guide.md)) is
 > the one module whose `.beam` is not enough: it needs a reachable **Medooze media
 > server**, declared in `[mediaserver.pool.<name>]` (the same block the
 > point-to-point path uses — the module declares no server of its own). Installed

@@ -95,15 +95,9 @@ cp "$REPO"/docs/kelixip/*.md "$stage/doc/"
 
 # The per-module documents travel with their own module package, not with the core:
 # what a node can do depends on which subpackages are installed, and so should what
-# its documentation claims. The mcu guide goes with them for the same reason.
+# its documentation claims.
 mkdir -p "$stage/doc/modules"
 cp "$REPO"/docs/kelixip/modules/*.md "$stage/doc/modules/"
-cp "$REPO"/docs/mcu_module_guide.md "$stage/doc/modules/"
-
-# In a package the two mcu documents sit side by side in one directory, so the
-# repository-relative links between them no longer resolve. Rewrite that one pair —
-# nothing else, since the remaining links name repository paths and read as such.
-sed -i 's,(\.\./\.\./mcu_module_guide\.md,(mcu_module_guide.md,g' "$stage/doc/modules/mcu.md"
 
 tarball="$BUILD/SOURCES/kelixip-$version.tar.gz"
 ( cd "$BUILD" && tar czf "$tarball" "kelixip-$version" )
