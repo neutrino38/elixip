@@ -293,6 +293,36 @@ defmodule SIP.Session.B2bua do
       end
 
       @doc """
+      Challenge `req` on the leg the current event came from, with the digest
+      `params` the application built — a **407 Proxy Authentication Required** by
+      default, a 401 when `code` says so.
+
+      The application-composed form, and the counterpart of
+      `SIP.Session.Registrar.challenge_registration/3` for a call: the
+      authentication backend decides *that* a challenge is owed, the scenario
+      composes it (`Kelix.Auth.challenge_params/2` and its like mint the nonce,
+      `qop` and `stale`), and this verb puts it in the header the code calls for
+      (`SIP.Msg.Ops.challenge_header/1`).
+
+      407 rather than 401 as the default because that is what deployed UAs expect
+      of the server that routes their calls; a B2BUA is formally a UAS, and both
+      codes are accepted here for that reason.
+      """
+      defmacro b2bua_challenge(req, params, code \\ 407) do
+        quote do
+          SIP.Scenario.Monitor.note_command(:sip, "b2bua_challenge #{unquote(code)}")
+
+          var!(sip_ctx) =
+            SIP.Session.B2bua.do_local_challenge(
+              var!(sip_ctx),
+              unquote(req),
+              unquote(params),
+              unquote(code)
+            )
+        end
+      end
+
+      @doc """
       Hang up the outbound leg on our own initiative — not a relay: no BYE was
       received. For the policies where the B2BUA decides the call is over
       (no ACK from the caller, a session timer, an administrative hangup).
@@ -2463,6 +2493,18 @@ defmodule SIP.Session.B2bua do
           _ -> SIP.Context.set(sip_ctx, :lasterr, reply_lasterr(rc))
         end
     end
+  end
+
+  @doc false
+  @spec do_local_challenge(%SIP.Context{}, map(), map(), 401 | 407) :: %SIP.Context{}
+  def do_local_challenge(sip_ctx = %SIP.Context{}, req, params, code)
+      when code in [401, 407] and is_map(params) do
+    # A plain local reply carrying the challenge header the code calls for. The
+    # params are sent verbatim: the nonce is the application's (a stateless
+    # SIP.Auth.Nonce it will validate itself), so nothing here mints or stores one.
+    do_local_reply(sip_ctx, req, code, SIP.Msg.Ops.sip_reason(code), [
+      {SIP.Msg.Ops.challenge_header(code), params}
+    ])
   end
 
   # ── Teardown ────────────────────────────────────────────────────────────────

@@ -741,16 +741,21 @@ b2bua_forward(req, peer, media)   # create the outbound leg
 b2bua_forward(req)                # relay a request onto the other leg
 b2bua_forward_reply(resp)         # relay a response back
 b2bua_reply(req, code, reason)    # answer here, relay nothing
+b2bua_challenge(req, params)      # answer 407 (or 401) with a digest challenge
 ```
 
 `media` is `false` (the SDP crosses verbatim) or `{:mediaserver, opts}` (both legs terminate
 their media on the server, and neither side ever sees the other's SDP). Legs are wound down
 automatically when the scenario ends, whatever the exit path.
 
+`b2bua_challenge/2..3` answers the caller with a digest challenge the *application* built
+(`Kelix.Auth.challenge_params/2` in kelixip): `407` + `Proxy-Authenticate` by default — what
+deployed UAs expect of the server routing their calls — or `401` + `WWW-Authenticate`.
+
 **See [B2BUA.md](B2BUA.md)** for the complete macro reference, the `%SIP.B2bua.Peer{}` target
-form, the media modes, and three commented scenarios: a proxy-like direct call to a subscriber
-registered on several devices, a customer service hunting a list of numbers serially, and a
-WebRTC-to-SIP gateway.
+form, the media modes, and four commented scenarios: a proxy-like direct call to a subscriber
+registered on several devices, the same call with the caller authenticated, a customer service
+hunting a list of numbers serially, and a WebRTC-to-SIP gateway.
 
 ### HTTP.Session
 

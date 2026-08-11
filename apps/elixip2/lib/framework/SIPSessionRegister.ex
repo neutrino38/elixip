@@ -148,9 +148,11 @@ defmodule SIP.Session.Registrar do
   #     see SIP.DialogImpl @default_challenge_algorithm). Only raise it for a peer
   #     known to keep its clear password: an elixip UAC answers from a single HA1
   #     computed with its own `ctx.algorithm`, so a mismatch is an unavoidable 403.
-  #   * a **map** — an already-built WWW-Authenticate parameter set, sent verbatim.
-  #     That is what kelixip does: `Kelix.Auth.challenge_www_authenticate/2` mints a
-  #     *stateless* nonce of its own, so the dialog layer must not generate one.
+  #   * a **map** — an already-built digest parameter set, sent verbatim. That is
+  #     what kelixip does: `Kelix.Auth.challenge_params/2` mints a *stateless* nonce
+  #     of its own, so the dialog layer must not generate one. The same params feed
+  #     a call challenge (`b2bua_challenge/3`), which sends them as
+  #     Proxy-Authenticate — hence the header-agnostic name.
   #
   # The first argument is either the scenario context (the dialog pid is read from
   # it — a scenario never has to carry it around) or the dialog pid itself.

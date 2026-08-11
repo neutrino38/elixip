@@ -75,9 +75,24 @@ provisioning very often expect `407` for calls, and many will not retry a `401` 
 an INVITE. This is a deployment fact, not a spec question.
 
 Proposal: the **module stays neutral** (`{:requireauth, stale}`) and the **script
-composes** 401 or 407, exactly as §11.1 prescribes — the verb already exists,
-`challenge_invite(realm, code \\ 407)`, and it already defaults to 407. The backend
-only needs to read whichever header came back, which it already does.
+composes** 401 or 407, exactly as §11.1 prescribes. The backend only needs to read
+whichever header came back, which it already does.
+
+**Decided and implemented** (2026-08-11): `challenge_invite(realm, code \\ 407)`
+was the wrong verb for it — it makes the *dialog layer* mint the nonce, which loses
+`qop=auth`, `stale` and the backend's algorithm. A call script challenges with
+
+```elixir
+b2bua_challenge(req, Kelix.Auth.challenge_params(realm, stale: …, algorithm: …), 407)
+```
+
+the exact counterpart of `challenge_registration(sip_ctx, req, params)`: the
+application builds the challenge (its own stateless nonce, which it validates
+itself) and the verb puts it in the header the code calls for
+(`SIP.Msg.Ops.challenge_header/1`, one reading of 401→`WWW-Authenticate` /
+407→`Proxy-Authenticate`). `Kelix.Auth.challenge_www_authenticate/2` was renamed
+`challenge_params/2` for the same reason: the params are header-agnostic, and only
+the code decides which header carries them.
 
 ### 2.4 Which requests get challenged
 
@@ -220,7 +235,11 @@ Only to check that the shape above survives contact with it. Cx/Dx (IMS HSS):
    `do_registration_auth/3` as a thin alias;
 3. `[domain.auth].backend` + the `Kelix.Auth.authenticate(sip_ctx, req)` facade;
    reference scripts stop naming `Kelix.Mod.AuthDb`;
-4. INVITE challenge in the reference call scripts + `identity_check`;
+4. INVITE challenge in the reference call scripts + `identity_check` — **done**
+   (2026-08-11): `apps/kelixip/scripts/direct-call-with-auth.exs`, `direct-call.exs`
+   plus the three states in front of the call, and the `b2bua_challenge/3` verb
+   §2.3 describes. Steps 1 and 3 are still open, so the script still names
+   `Kelix.Mod.AuthDb`;
 5. *(later)* a second backend, which is what proves the behaviour is right —
    nothing before it does.
 

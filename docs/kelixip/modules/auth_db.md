@@ -198,33 +198,44 @@ end
 ```
 
 ```elixir
-# in a call scenario: challenge the caller before placing the second leg
-state screen_caller do
+# in a call scenario — see apps/kelixip/scripts/direct-call-with-auth.exs
+state authenticate_caller do
   req = last_uas_req()
 
-  if Kelix.Mod.AuthDb.challengeable?(req) do
-    case Kelix.Mod.AuthDb.authenticate(req, sip_ctx.domain) do
-      {:ok, identity} ->
-        appdata_set(:caller, identity.user)
-        goto place_call, "caller #{identity.user}"
+  case Kelix.Mod.AuthDb.authenticate(req, sip_ctx.domain) do
+    {:ok, identity} ->
+      SIP.Scenario.Monitor.note_account(identity.user)
+      goto place_call, "INVITE authenticated as #{identity.user}"
 
-      {:requireauth, _stale} ->
-        # 407 + Proxy-Authenticate is what UAs expect on a call. Pass the
-        # algorithm: the challenge must name the hash the base can verify, and
-        # the dialog layer otherwise advertises MD5 — against a sha256 base that
-        # re-challenges for ever.
-        challenge_invite({sip_ctx.domain, Kelix.Mod.AuthDb.challenge_algorithm()}, 407)
-        goto wait_authenticated_invite, "407 challenge"
+    # 407 + Proxy-Authenticate is what UAs expect on a call (b2bua_challenge/3
+    # defaults to it). Pass the algorithm: the challenge must name the hash the
+    # base can verify — advertising MD5 against a sha256 base re-challenges for
+    # ever. `stale` lets the client replay without prompting for a password.
+    {:requireauth, stale} ->
+      params =
+        Kelix.Auth.challenge_params(sip_ctx.domain,
+          stale: stale,
+          algorithm: Kelix.Mod.AuthDb.challenge_algorithm()
+        )
 
-      {:reject, code, reason} ->
-        reply_invite(code, reason)
-        scenario_failure("caller refused: #{code}")
-    end
-  else
-    goto place_call, "no auth required"
+      b2bua_challenge(req, params, 407)
+      goto wait_credentials, "407 challenge"
+
+    # Answered, but the instance stays: the dialog outlives it, so ending here
+    # would leave the next INVITE of that Call-ID unanswered. A 403 is one
+    # request's verdict, not the end of the conversation.
+    {:reject, code, reason} ->
+      b2bua_reply(req, code, reason)
+      goto wait_credentials, "#{code} #{reason}"
   end
 end
 ```
+
+The reference call script is
+[`apps/kelixip/scripts/direct-call-with-auth.exs`](../../../apps/kelixip/scripts/direct-call-with-auth.exs)
+(`direct-call.exs` plus the three states that authenticate the caller); it is
+covered by `apps/kelix_modules/test/direct_call_auth_script_test.exs`, which injects
+the subscriber table as a function instead of a database.
 
 See the credential-gated live test
 (`apps/kelixip/test/auth_db_live_test.exs`) for a full DB → verdict example.

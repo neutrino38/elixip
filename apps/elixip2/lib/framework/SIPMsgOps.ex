@@ -968,6 +968,19 @@ defmodule SIP.Msg.Ops do
     rsp
   end
 
+  @doc """
+  Which response header carries a digest challenge for `resp_code`: a **401**
+  answers as a UAS (`WWW-Authenticate`, RFC 3261 §22.2), a **407** as a proxy
+  (`Proxy-Authenticate`, §22.3).
+
+  The single reading of that mapping — a caller composing a challenge asks for the
+  header instead of re-deriving it from the code (`add_authorization_to_req/6` is
+  its inverse, on the request side).
+  """
+  @spec challenge_header(401 | 407) :: :wwwauthenticate | :proxyauthenticate
+  def challenge_header(401), do: :wwwauthenticate
+  def challenge_header(407), do: :proxyauthenticate
+
   @spec challenge_request(
           %{:method => atom() | false, :to => binary(), optional(any()) => any()},
           401 | 407,
@@ -984,21 +997,13 @@ defmodule SIP.Msg.Ops do
     authparams = %{ "realm" => realm, "nonce" => SIP.Auth.Nonce.generate(realm), authproc: "Digest" }
     authparams = if algorithm in [ "MD5", "SHA1", "SHA256" ], do: Map.put(authparams, "algorithm", algorithm), else: algorithm
 
-    header = case resp_code do
-      401 -> :wwwauthenticate
-      407 -> :proxyauthenticate
-    end
-    Map.put(rsp, header, authparams)
+    Map.put(rsp, challenge_header(resp_code), authparams)
   end
 
   def challenge_request(req, resp_code, "NTLM", realm, nil, upd_fields, totag) when is_atom(req.method) and resp_code in [401, 407] do
     rsp = reply_to_request(req, resp_code, sip_reason(resp_code), upd_fields, totag)
     authparams = %{ "realm" => realm, authproc: "NTLM" }
-    header = case resp_code do
-      401 -> :wwwauthenticate
-      407 -> :proxyauthenticate
-    end
-    Map.put(rsp, header, authparams)
+    Map.put(rsp, challenge_header(resp_code), authparams)
     raise "NTLM challenge not yet implemented"
   end
 

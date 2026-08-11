@@ -115,7 +115,13 @@ defmodule Kelix.ScriptRegistryTest do
     @loadable_module ~r/\(module Kelix\.Mod\.\w+ is not available/
 
     test "the shipped reference scripts have no dangling self-reference" do
-      for script <- ["registrar.exs", "mcu.exs", "mcu_adhoc.exs", "direct-call.exs"] do
+      for script <- [
+            "registrar.exs",
+            "mcu.exs",
+            "mcu_adhoc.exs",
+            "direct-call.exs",
+            "direct-call-with-auth.exs"
+          ] do
         path = Path.expand("../scripts/#{script}", __DIR__)
 
         warnings =

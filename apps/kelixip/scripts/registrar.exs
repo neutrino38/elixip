@@ -49,7 +49,7 @@ defmodule Kelix.Registrar do
     case Kelix.Mod.AuthDb.do_registration_auth(req, sip_ctx.domain) do
       {:requireauth, stale} ->
         params =
-          Kelix.Auth.challenge_www_authenticate(sip_ctx.domain,
+          Kelix.Auth.challenge_params(sip_ctx.domain,
             stale: stale,
             algorithm: Kelix.Mod.AuthDb.challenge_algorithm()
           )
