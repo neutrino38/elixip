@@ -662,7 +662,7 @@ defmodule MediaServer.Mendooze.Sdp do
   """
   @spec parse(String.t()) :: {:ok, [media_desc() | media_stub()]} | {:error, term()}
   def parse(sdp_str) do
-    case ExSDP.parse(normalize_fingerprint_hash(sdp_str)) do
+    case ExSDP.parse(sdp_str) do
       {:ok, sdp} ->
         session_ip = connection_ip(sdp.connection_data)
         session_attrs = sdp.attributes
@@ -681,18 +681,6 @@ defmodule MediaServer.Mendooze.Sdp do
       {:error, _reason} = err ->
         err
     end
-  end
-
-  # RFC 8122: the a=fingerprint hash-func names are registered lower-case, and
-  # the token is case-insensitive, but ExSDP only accepts the lower-case spelling
-  # and rejects the whole SDP otherwise. Some stacks emit it upper-case — the
-  # IVeS Glassfish gateway sends "a=fingerprint:SHA-256 …" (CryptoInfo.java) —
-  # so lower-case just the hash-func token (never the fingerprint value) before
-  # handing the SDP to ExSDP.
-  defp normalize_fingerprint_hash(sdp_str) do
-    Regex.replace(~r/^(a=fingerprint:)(\S+)/im, sdp_str, fn _whole, prefix, hash ->
-      prefix <> String.downcase(hash)
-    end)
   end
 
   # The raw `a=fmtp:<pt> <params>` values, one map per m= section, in section order.
@@ -810,7 +798,9 @@ defmodule MediaServer.Mendooze.Sdp do
 
   defp parse_media(m, session_ip, session_attrs, raw_fmtp) do
     attrs = m.attributes
-    fmt = normalize_fmt(m.fmt)
+    # every profile in @rtp_profiles is one ExSDP decodes numerically, so `fmt`
+    # is a payload-type list here
+    fmt = m.fmt
     rtpmaps = for %ExSDP.Attribute.RTPMapping{} = rm <- attrs, do: rm
     {rtp_map, codecs, dtmf_pts} = remote_rtp_map(m.type, fmt, rtpmaps)
 
@@ -972,21 +962,6 @@ defmodule MediaServer.Mendooze.Sdp do
   end
 
   defp as_bandwidth(_), do: nil
-
-  # ExSDP only converts fmt entries to integers for some protocol strings
-  # (e.g. "RTP/AVP" yes, "RTP/SAVPF" no) — normalize to integers here.
-  defp normalize_fmt(fmt) when is_list(fmt), do: fmt
-
-  defp normalize_fmt(fmt) when is_binary(fmt) do
-    fmt
-    |> String.split(" ", trim: true)
-    |> Enum.flat_map(fn s ->
-      case Integer.parse(s) do
-        {pt, ""} -> [pt]
-        _ -> []
-      end
-    end)
-  end
 
   # Map each offered payload type to a Mendooze codec code, keeping only the
   # codecs we know. Static PTs are recognized without an a=rtpmap line.
@@ -1519,10 +1494,10 @@ defmodule MediaServer.Mendooze.Sdp do
     {Enum.find_index(order, &(&1 == Integer.to_string(number))) || length(order), number}
   end
 
-  # `m=` format lists reach us in both shapes ExSDP produces: a list of integers for the
-  # profiles it decodes numerically, and the raw string for the others (`"99"`,
-  # `"103 107 109"`, `"t140"`). Same reading for both, or the order silently depends on
-  # which transport the offer named.
+  # `m=` format lists reach us as a payload-type list on RTP profiles, and as the raw
+  # string on the transports that have no RTP numbering to decode (`"t140"` over a
+  # WebSocket). Same reading for both, or the order silently depends on which transport
+  # the offer named.
   defp normalize_fmt_order(nil), do: []
   defp normalize_fmt_order(fmt) when is_binary(fmt), do: String.split(fmt, ~r/\s+/, trim: true)
   defp normalize_fmt_order(fmt) when is_list(fmt), do: Enum.map(fmt, &to_string/1)

@@ -33,7 +33,10 @@ defmodule SIPParser.MixProject do
       {:req, "~> 0.6"},
       # Fork adding active mode for WebSocket (delivers {:web, socket, data} to the owner)
       {:socket2, github: "neutrino38/elixir-socket", branch: "feat/active-ws"},
-      {:ex_sdp, "~> 1.1.1"},
+      # 1.2 parses the m= fmt list as payload types for every RTP profile and
+      # accepts the a=fingerprint hash-func token case-insensitively — both used
+      # to be worked around in MediaServer.Mendooze.Sdp.
+      {:ex_sdp, "~> 1.2"},
       # XML-RPC encode/decode for the Mendooze JSR309 control interface.
       # 1.5 is the first release accepting decimal ~> 3.0, which is required to
       # get away from the vulnerable decimal 2.x (EEF-CVE-2026-32686).
