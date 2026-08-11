@@ -30,4 +30,24 @@ for arg in "$@"; do
   ESC=$(printf '%s' "$arg" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
   if [ -z "$ARGS" ]; then ARGS="\"$ESC\""; else ARGS="$ARGS, \"$ESC\""; fi
 done
-exec "$DIR/kelixip" rpc "Kelix.Control.CLI.rpc_main([${ARGS}])"
+# `kelictl help` has to answer when the node is DOWN — that is exactly when an
+# operator reaches for it — and `rpc` cannot: it runs the CLI inside the live node.
+# So the help forms the CLI answers from its own text are run in a throw-away VM
+# (`eval`, which loads the release's code without needing the service), and
+# everything else keeps going through `rpc`.
+#
+# Only those forms. `kelictl <module> help` is rendered from the declaration of a
+# LOADED module, so it needs the live node like any other module command; an `eval`
+# would find no module loaded and no Kelix.Control running.
+MODE=rpc
+if [ $# -eq 0 ]; then MODE=eval; fi
+case "${1:-}" in
+  help | -h | --help) MODE=eval ;;
+esac
+if [ $# -eq 2 ] && [ "$2" = "help" ]; then
+  case "$1" in
+    registration | domain | mediaserver | module) MODE=eval ;;
+  esac
+fi
+
+exec "$DIR/kelixip" "$MODE" "Kelix.Control.CLI.rpc_main([${ARGS}])"

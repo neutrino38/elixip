@@ -625,6 +625,34 @@ defmodule SIPMsg do
 		end
 	end
 	@doc """
+	True when a received payload is a transport keep-alive rather than a SIP message.
+
+	The standard one is RFC 5626 §4.4.1's double-CRLF ping, defined for connected
+	transports; clients send it on UDP too (Linphone does, every 30 s), and the
+	variants seen in the wild are a single CRLF, a lone NUL byte, or padding
+	whitespace. None of them is a message, so none of them is a parse error: they
+	used to be reported three times each (`bad_first_line`, its error message, and
+	the transport's "invalid SIP message"), which buried the real errors in the
+	server log.
+
+	Deciding *whether a payload carries a message at all* is reading meaning out of
+	the wire, so it belongs here with the rest of the message interpretation and not
+	in each of the five transports. What a transport then DOES with a keep-alive is
+	its own policy: drop it silently, or answer the single-CRLF pong that RFC 5626
+	asks of a connected transport.
+
+	An empty payload counts as one: an empty datagram carries no message either, and
+	the useful reaction is the same.
+	"""
+	@spec keepalive?(binary()) :: boolean()
+	def keepalive?(payload) when is_binary(payload), do: only_ws?(payload)
+	def keepalive?(_payload), do: false
+
+	defp only_ws?(<<>>), do: true
+	defp only_ws?(<<c, rest::binary>>) when c in [?\r, ?\n, ?\s, ?\t, 0], do: only_ws?(rest)
+	defp only_ws?(_), do: false
+
+	@doc """
 	Parse a SIP message stored as a string and return it as map
 	Takes a callback that document all parsing errors. In case of
 	parsing error, the callback function is called as
