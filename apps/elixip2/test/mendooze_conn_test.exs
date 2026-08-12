@@ -406,6 +406,143 @@ defmodule Mendooze.ConnTest do
     refute_receive {:jsr309_call, "EndpointAttachToEndpoint", _}, 200
   end
 
+  # ── The send map and the cross-leg selection must agree ─────────────────────
+  #
+  # Traffic of 2026-08-12, the half that was left. The video send map was pinned to
+  # the caller's PRIMARY payload type ALONE, so the endpoint could only ever stamp
+  # one codec — while the cross-leg selection is free to pick any codec both legs
+  # carry. And the media server cannot refuse in SDP: `SetSendingCodec` fails, it
+  # keeps the previous payload type, and the stream goes out mislabelled.
+
+  # Linphone's real video offer: AV1 first, then H.264, then VP8.
+  defp av1_first_offer do
+    Sdp.build(%{
+      ip: "10.9.8.7",
+      medias: [
+        %{
+          type: :video,
+          port: 40_002,
+          rtpmaps: [
+            %{pt: 110, encoding: "AV1", clock: 90_000},
+            %{pt: 99, encoding: "H264", clock: 90_000},
+            %{pt: 107, encoding: "VP8", clock: 90_000}
+          ]
+        }
+      ]
+    })
+  end
+
+  test "the video send map carries every accepted codec, one payload type each" do
+    %{server: server} = start_media_server(&verdict_handler/2)
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :video)
+
+    assert {:ok, _answer} = Mendooze.set_remote_offer(conn, av1_first_offer())
+
+    assert_receive {:jsr309_call, "EndpointStartSending", [3, 4, 1, "10.9.8.7", 40_002, send_map]},
+                   1_000
+
+    # AV1 is the caller's preference and stays first in the answer, but H.264 and
+    # VP8 belong here too: a selection landing on either would be unstampable, and
+    # the endpoint would send it under AV1's payload type.
+    assert send_map == %{"110" => 110, "99" => 99, "107" => 107}
+  end
+
+  test "two payload types of one video codec leave only the preferred one" do
+    # The reason the map was pinned in the first place, and it must survive: two
+    # H.264 payload types differ by profile, and leaving both would let the server
+    # choose which one it stamps with — SetSendingCodec takes the first match.
+    # Filtering on the server's verdict does NOT settle it, since a server can
+    # accept both.
+    %{server: server} = start_media_server(&verdict_handler/2)
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :video)
+
+    offer =
+      Sdp.build(%{
+        ip: "10.9.8.7",
+        medias: [
+          %{
+            type: :video,
+            port: 40_002,
+            rtpmaps: [
+              %{pt: 97, encoding: "H264", clock: 90_000},
+              %{pt: 99, encoding: "H264", clock: 90_000}
+            ]
+          }
+        ]
+      })
+
+    assert {:ok, _answer} = Mendooze.set_remote_offer(conn, offer)
+
+    assert_receive {:jsr309_call, "EndpointStartSending", [3, 4, 1, "10.9.8.7", 40_002, send_map]},
+                   1_000
+
+    # One entry, and it is the payload type the caller listed first.
+    assert send_map == %{"97" => 99}
+  end
+
+  test "whatever the cross-leg selection picks, the sink leg can stamp it" do
+    # THE invariant, end to end and in the exact shape of the traffic: an AV1-first
+    # caller reaching an H.264-only callee. `:avoid` selects H.264 for both legs,
+    # so the transcoder feeding the CALLER must produce H.264 — and the caller's
+    # endpoint must hold a payload type for it. Before the fix it held 110 alone,
+    # and the caller decoded H.264 as AV1.
+    %{server: server} = start_media_server(&two_leg_verdict_handler/2)
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :video)
+    assert_receive {:jsr309_call, "MediaSessionCreate", [_tag, _q]}, 1_000
+
+    {:ok, out} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :video,
+        video_codec: ["H264"],
+        bridge_with: conn
+      )
+
+    assert {:ok, _answer} = Mendooze.set_remote_offer(conn, av1_first_offer())
+
+    assert_receive {:jsr309_call, "EndpointStartSending", [3, 4, 1, "10.9.8.7", 40_002, send_map]},
+                   1_000
+
+    {:ok, _offer} = Mendooze.get_local_offer(out)
+
+    :ok =
+      Mendooze.set_remote_answer(
+        out,
+        Sdp.build(%{
+          ip: "10.9.8.6",
+          medias: [%{type: :video, port: 40_010, codecs: ["H264"]}]
+        })
+      )
+
+    # `:avoid` reshapes the caller's answer as well — H.264 floated to the front,
+    # a permutation and not a restriction, so a caller that follows the `m=` order
+    # rather than the payload type also lands on the selected codec.
+    assert {:ok, %{inbound_answer: rebuilt}} = Mendooze.bridge(conn, out, video: :avoid)
+    assert rebuilt =~ "m=video 22002 RTP/AVP 99 110 107"
+
+    # The transcoder feeding the caller (endpoint 4 ← transcoder 30) is told which
+    # codec to produce.
+    assert_receive {:jsr309_call, "VideoTranscoderSetCodec", [3, 30, selected | _]}, 1_000
+
+    # The whole point, stated as the invariant rather than as a value: the codec the
+    # selection chose is one the sink's send map can label.
+    assert selected in Map.values(send_map),
+           "selection #{selected} is not in the sink's send map #{inspect(send_map)}"
+
+    # And here it is H.264, since that is all the callee answered.
+    assert selected == 99
+  end
+
+  # verdict_handler, but with the two-endpoint / two-transcoder id scheme: the
+  # bridge tests need endpoints 4 and 5 to be distinct.
+  defp two_leg_verdict_handler("EndpointStartReceiving", [_sess, _ep, media, rtp_map | _]) do
+    {:ok, [22_000 + 2 * media, Map.new(rtp_map, fn {pt, _code} -> {to_string(pt), ""} end)]}
+  end
+
+  defp two_leg_verdict_handler(method, params), do: two_leg_handler(method, params)
+
   # The server's fmtp verdict, which the stock handler never returns — so every
   # bridge test above exercises the legacy fallback, and NOT the branch a real
   # media server takes. Shaped like the real one: it accepts everything proposed

@@ -85,8 +85,9 @@ defmodule MediaServer.Mendooze.Conn do
   # Receive bandwidth advertised as b=AS: on the video media (kb/s)
   @default_video_bandwidth_kbps 800
 
-  # telephone-event's Medooze codec constant: a payload type never selected as a
-  # primary codec (see primary_entry/1).
+  # telephone-event's Medooze codec constant: never a codec a leg is said to
+  # "carry" — it is excluded from `peer_codecs/1`, so the cross-leg selection can
+  # never land on it, and from `one_pt_per_codec/3`.
   @dtmf_code 100
 
   # SDES suites this adapter implements, in our preference order. RFC 4568 §6.2:
@@ -1864,13 +1865,16 @@ defmodule MediaServer.Mendooze.Conn do
 
         {:ok, neg} ->
           # never send a codec the server just filtered on receive (no-op when
-          # the server did not delegate, i.e. accepted[media] is nil)
+          # the server did not delegate, i.e. accepted[media] is nil), and never
+          # leave two payload types of one video codec for the server to choose
+          # between (see one_pt_per_codec/3)
           send_map =
             Sdp.restrict_send_map(
               neg.rtp_map,
               Map.get(st.proposed_recv, desc.type, %{}),
               Map.get(st.accepted, desc.type)
             )
+            |> one_pt_per_codec(desc.type, neg)
 
           case apply_remote_media(st, desc, Map.put(neg, :send_map, send_map)) do
             {:ok, st, neg} -> {:cont, {:ok, st, Map.put(acc, desc.type, neg)}}
@@ -1958,16 +1962,40 @@ defmodule MediaServer.Mendooze.Conn do
 
   # What `EndpointStartSending` may use, in the offerer's numbering.
   #
-  # **Video: exactly one payload type**, the primary. One encoder means one
-  # profile, and leaving several H.264 payload types in the map would let the
-  # server pick which one it stamps the stream with. Audio and text keep the
-  # whole accepted set: the extra entries are the telephone-event stream the
-  # audio rides alongside. A nil verdict (legacy server) leaves the map alone.
+  # **Video: one payload type per accepted CODEC**, the peer's preferred payload
+  # type for each. Two rules meet here, and only one of them was being honoured.
+  #
+  # One PT per codec is the rule that matters to the encoder. Several H.264 payload
+  # types differ by profile, and leaving two of them in the map lets the server
+  # choose which one it stamps the stream with — `RTPSession::SetSendingCodec`
+  # takes the FIRST entry carrying the code. Deduplicating settles it, and it is
+  # the only thing that does: filtering on `accepted` does not, since a server can
+  # perfectly accept two H.264 payload types.
+  #
+  # But this used to keep the primary ALONE, which is a different rule and a wrong
+  # one: it decides at ANSWER time which single codec the leg may ever send, when
+  # that is a decision of the BRIDGE (§5, `select_codecs/4` — the codec both legs
+  # carry, which may sit anywhere in either list). Every other selection then
+  # became unstampable, and the server has no way to say so in the SDP: it stamped
+  # the stream with the primary's payload type and sent it anyway. Traffic of
+  # 2026-08-12: Linphone offers AV1(110) H264(99) VP8(107), the server accepts all
+  # three, the map is pinned to 110; the callee answers H.264 only; `:avoid` picks
+  # H.264 for both legs; the caller receives H.264 packets labelled AV1 and decodes
+  # noise. That is the ordinary AV1-caller-to-H.264-callee case, not an exotic one.
+  #
+  # The invariant this restores, and it is structural rather than sequential: the
+  # codecs of a leg's video send map are EXACTLY its `peer_codecs/1` — same source,
+  # same filter — so a selection drawn from the intersection of two legs'
+  # `peer_codecs` can always be stamped by both. No re-issued `EndpointStartSending`
+  # after the bridge, and nothing to keep in step.
+  #
+  # Audio and text keep the whole accepted set: the extra entries are the
+  # telephone-event stream the audio rides alongside, and there is no encoder
+  # ambiguity to settle. A nil verdict (legacy server) leaves the map alone.
   defp send_map(:video, %{accepted: accepted, rtp_map: rtp_map} = neg) when is_map(accepted) do
-    case primary_entry(neg) do
-      {pt, _code} -> Map.take(rtp_map, [pt])
-      nil -> Map.take(rtp_map, Map.keys(accepted))
-    end
+    rtp_map
+    |> Map.take(Map.keys(accepted))
+    |> one_pt_per_codec(:video, neg)
   end
 
   defp send_map(_media, %{accepted: accepted, rtp_map: rtp_map}) when is_map(accepted),
@@ -1975,18 +2003,29 @@ defmodule MediaServer.Mendooze.Conn do
 
   defp send_map(_media, %{rtp_map: rtp_map}), do: rtp_map
 
-  # The caller's own first choice (offer order) among what the server accepted,
-  # telephone-event excluded. The answer's rtpmap order and the payload type we
-  # send on must be the same reading of that preference (`Sdp.pt_rank/2`).
-  defp primary_entry(%{accepted: accepted} = neg) when is_map(accepted) do
-    neg.rtp_map
-    |> Map.take(Map.keys(accepted))
+  # One payload type per codec, keeping the peer's preferred one for each — the
+  # same reading of preference as `peer_codecs/1` and the answer's rtpmap order
+  # (`Sdp.pt_rank/2`), so the three cannot disagree about what "first" means.
+  #
+  # Video only, and applied on BOTH negotiation paths: an answering leg is a sink
+  # too (for the other direction), so an answerer that lists two H.264 payload
+  # types would hand the server the same choice we are removing here.
+  defp one_pt_per_codec(map, :video, neg) do
+    map
     |> Enum.reject(fn {_pt, code} -> code == @dtmf_code end)
     |> Enum.sort_by(&Sdp.pt_rank(&1, Map.get(neg, :fmt_order)))
-    |> List.first()
+    |> Enum.uniq_by(fn {_pt, code} -> code end)
+    |> Map.new()
   end
 
-  defp primary_entry(_neg), do: nil
+  defp one_pt_per_codec(map, _media, _neg), do: map
+
+  # `primary_entry/1` lived here: the caller's first accepted choice, which was
+  # what the video send map was restricted to. Nothing needs "the one codec this
+  # leg sends" any more, because no such thing exists before the bridge decides —
+  # and once it decides, the codec travels as an argument (`set_transcoder_codec/5`)
+  # rather than being re-derived. `peer_codecs/1` answers the question that remains,
+  # "everything this leg can carry, in the peer's order".
 
   # ── RTP inactivity watchdog (direction-aware) ───────────────────────────────
 
