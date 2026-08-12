@@ -12,6 +12,11 @@ defmodule Mendooze.ConnTest do
 
   @fp "AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01"
 
+  # Medooze codec codes (Sdp's own tables), for asserting what a transcoder was
+  # told to PRODUCE — the one place the cross-leg selection becomes observable.
+  @opus 98
+  @pcmu 0
+
   # Scripted RPC behaviour: ids and ports are deterministic so the tests can
   # assert on them. EndpointStartReceiving returns 22000 for audio, 22002
   # for video.
@@ -128,11 +133,16 @@ defmodule Mendooze.ConnTest do
              Mendooze.create_peer_connection(server, self(), bridge_with: conn)
   end
 
-  test "bridging attaches both directions and keeps the original sequence numbers" do
+  # `:forbid` is now the only policy that wires a plain Endpoint <-> Endpoint: it
+  # is the one that says the media may never be transcoded, so nothing else can
+  # ever produce a packet on that path — which is what makes preserving the
+  # peer's own numbering safe.
+  test "forbid attaches both directions and keeps the original sequence numbers" do
     %{server: server} = start_media_server(&two_leg_handler/2)
     {conn, out, _tag} = two_negotiated_legs(server)
 
-    assert {:ok, %{inbound_answer: _}} = Mendooze.bridge(conn, out, audio: :avoid, video: :avoid)
+    assert {:ok, %{inbound_answer: _}} =
+             Mendooze.bridge(conn, out, audio: :forbid, video: :forbid)
 
     # Both directions — a bridge is two one-way attaches, not one call.
     assert_receive {:jsr309_call, "EndpointAttachToEndpoint", [3, 4, 5, 0]}, 1_000
@@ -243,18 +253,47 @@ defmodule Mendooze.ConnTest do
     %{server: server} = start_media_server(&verdict_handler/2)
     {conn, out} = two_crossed_legs(server)
 
-    assert {:ok, %{inbound_answer: _}} = Mendooze.bridge(conn, out, audio: :avoid)
+    assert {:ok, %{inbound_answer: rebuilt}} = Mendooze.bridge(conn, out, audio: :avoid)
 
-    assert_receive {:jsr309_call, "EndpointAttachToEndpoint", [3, 4, 5, 0]}, 1_000
-    assert_receive {:jsr309_call, "EndpointAttachToEndpoint", [3, 5, 4, 0]}, 1_000
-    refute_receive {:jsr309_call, "AudioTranscoderCreate", _}, 200
+    # opus is the first codec of L that L' also carries, though the callee ranked
+    # PCMU first. ONE selection, so BOTH chains encode it — and the transcoder they
+    # sit in will bridge rather than convert for as long as that holds.
+    assert_receive {:jsr309_call, "AudioTranscoderSetCodec", [3, _tr_a, @opus, %{}]}, 1_000
+    assert_receive {:jsr309_call, "AudioTranscoderSetCodec", [3, _tr_b, @opus, %{}]}, 1_000
+
+    # `:avoid` is expressed in the ANSWER too: nothing is removed — a transcoder
+    # can convert anything the caller offered — but the codecs both legs carry come
+    # first, so the caller's natural pick is the one that needs no conversion.
+    assert rebuilt =~ "opus/48000/2"
+    assert rebuilt =~ "PCMU/8000"
+
+    # the caller numbered opus 96 and PCMU 0; the format list must now lead with 96
+    assert [_, fmt] = Regex.run(~r{m=audio \d+ RTP/AVP ([\d ]+)}, rebuilt)
+    assert ["96" | _] = String.split(fmt, " ", trim: true)
+  end
+
+  # The wiring `:avoid` now gets, and the property that goes with it: no
+  # `useOriSeqNum`. It also sets `useOriTS` and copies both numbers off the
+  # incoming packet — right while the transcoder bridges, wrong the moment its
+  # encoder produces the packet instead.
+  test ":avoid wires a transcoder and does not preserve the peer's numbering" do
+    %{server: server} = start_media_server(&verdict_handler/2)
+    {conn, out} = two_crossed_legs(server)
+
+    assert {:ok, _} = Mendooze.bridge(conn, out, audio: :avoid)
+
+    assert_receive {:jsr309_call, "AudioTranscoderCreate", [3, _tag]}, 1_000
+    refute_receive {:jsr309_call, "EndpointAttachToEndpoint", _}, 200
+
+    refute_receive {:jsr309_call, "EndpointSetRTPProperties", [_, _, _, %{"useOriSeqNum" => _}]},
+                   200
   end
 
   # The narrowing that makes a relay honest. The caller offers three codecs, the
   # callee answers one: on a relayed media the answer may only keep that one, or
   # the caller is free to switch to something the far end cannot receive — and a
   # relay has nothing to convert it with.
-  test "a relayed media answers only the codecs both legs carry" do
+  test "a relayed media (:forbid) answers only the codecs both legs carry" do
     %{server: server} = start_media_server(&verdict_handler/2)
 
     {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio)
@@ -291,7 +330,7 @@ defmodule Mendooze.ConnTest do
     pcmu = %{type: :audio, port: 40_000, codecs: ["PCMU"], dtmf: true}
     :ok = Mendooze.set_remote_answer(out, remote_answer(audio: pcmu))
 
-    assert {:ok, %{inbound_answer: rebuilt}} = Mendooze.bridge(conn, out, audio: :avoid)
+    assert {:ok, %{inbound_answer: rebuilt}} = Mendooze.bridge(conn, out, audio: :forbid)
     assert_receive {:jsr309_call, "EndpointAttachToEndpoint", [3, 4, 5, 0]}, 1_000
 
     # PCMU is the whole intersection; opus and PCMA are gone, DTMF stays
@@ -400,13 +439,17 @@ defmodule Mendooze.ConnTest do
 
     assert {:ok, %{inbound_answer: rebuilt}} = Mendooze.bridge(conn, out, audio: :avoid)
 
-    assert_receive {:jsr309_call, "EndpointAttachToEndpoint", [3, 4, 5, 0]}, 1_000
-    assert_receive {:jsr309_call, "EndpointAttachToEndpoint", [3, 5, 4, 0]}, 1_000
-    refute_receive {:jsr309_call, "AudioTranscoderCreate", _}, 200
+    # The regression, stated where it is now visible: BOTH chains encode opus. It
+    # read PCMU on the leg we offered on, because an answer of `98 0 8 101` with
+    # opus at 98 sorts as PCMU when the only tiebreak left is the payload NUMBER.
+    assert_receive {:jsr309_call, "AudioTranscoderSetCodec", [3, _tr_a, @opus, %{}]}, 1_000
+    assert_receive {:jsr309_call, "AudioTranscoderSetCodec", [3, _tr_b, @opus, %{}]}, 1_000
+    refute_receive {:jsr309_call, "AudioTranscoderSetCodec", [3, _, @pcmu, %{}]}, 200
 
-    # …and the answer is narrowed to what BOTH legs carry. The caller also offered
-    # speex — twice — which the callee never answered: on a relayed media, leaving
-    # it in would let the caller switch to a codec the far end cannot receive.
+    # Both legs carry opus, so the transcoder will spend the call bridging — and
+    # the answer keeps every codec the caller offered that the server accepted,
+    # since a transcoder can convert any of them. speex is absent for a different
+    # reason: the codec tables cannot name it, so `parse/1` dropped it long before.
     assert rebuilt =~ "opus/48000/2"
     refute rebuilt =~ "speex"
     # DTMF is not a codec choice and rides alongside whichever one wins

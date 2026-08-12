@@ -453,8 +453,8 @@ defmodule MediaServer.Mendooze.Conn do
     with {:ok, policy} <- MediaServer.transcoding_policy(opts),
          {:ok, la, lb} <- both_legs(state, a, b),
          {:ok, medias} <- bridgeable_medias(la, lb, policy) do
-      case Enum.reduce_while(medias, {:ok, state}, fn {media, how}, {:ok, st} ->
-             case wire_media(st, la, lb, media, how) do
+      case Enum.reduce_while(medias, {:ok, state}, fn {media, how, sel}, {:ok, st} ->
+             case wire_media(st, la, lb, media, how, sel) do
                {:ok, st} -> {:cont, {:ok, st}}
                err -> {:halt, err}
              end
@@ -465,10 +465,10 @@ defmodule MediaServer.Mendooze.Conn do
             cnx_tag: state.sess_tag,
             message:
               "bridged #{la.leg} <-> #{lb.leg} on " <>
-                inspect(Enum.map(medias, fn {m, how} -> {m, how} end))
+                inspect(Enum.map(medias, fn {m, how, _sel} -> {m, how} end))
           )
 
-          {:reply, bridge_reply(la, lb, medias), state}
+          {:reply, bridge_reply(la, lb, medias, policy), state}
 
         err ->
           {:reply, err, state}
@@ -661,18 +661,46 @@ defmodule MediaServer.Mendooze.Conn do
     Enum.reduce_while(common, {:ok, []}, fn media, {:ok, acc} ->
       case bridge_decision(la, lb, media, policy) do
         {:error, _} = err -> {:halt, err}
-        how -> {:cont, {:ok, acc ++ [{media, how}]}}
+        {how, sel} -> {:cont, {:ok, acc ++ [{media, how, sel}]}}
       end
     end)
   end
 
-  defp bridge_decision(_la, _lb, :text, _policy), do: :attach
+  defp bridge_decision(_la, _lb, :text, _policy), do: {:attach, nil}
 
+  # The wiring is the POLICY's, not the selection's. `:forbid` says the media may
+  # never be transcoded, so it is the only one that gets a direct
+  # `Endpoint ↔ Endpoint`; `:avoid` and `:force` both get
+  # `Endpoint ↔ Transcoder ↔ Endpoint`.
+  #
+  # Putting a transcoder in `:avoid`'s path may read backwards — its whole point is
+  # to avoid transcoding — but the transcoder is what makes "avoid" hold WITHOUT a
+  # renegotiation. It decides per incoming packet: `TryCodec` asks the sink whether
+  # it can carry the codec that just arrived and, when it can, the packet is
+  # forwarded untouched (`RTPMultiplexer::Multiplex` copies nothing —
+  # `AudioTranscoder` since always, `VideoTranscoder` since the bridging pass of
+  # 2026-08-12). So the steady state of an `:avoid` call whose legs agree is still a
+  # relay, and the day a peer switches codec mid-stream the path follows instead of
+  # breaking. A plain attach cannot: it would relay a codec the far end never
+  # accepted.
+  #
+  # `useOriSeqNum` is deliberately NOT set on that path, and this is not an
+  # oversight. It also sets `useOriTS` (`rtpsession.cpp:526-529`) and copies both
+  # numbers off the incoming packet — right while bridging, wrong the moment the
+  # encoder produces the packet instead, since an encoded frame carries no
+  # meaningful sequence of the source's. Re-stamping is safe either way:
+  # `RTPEndpoint::onRTPPacket` advances the outgoing timestamp by the incoming
+  # DELTA, so packets of one frame keep one timestamp and frame grouping survives.
+  # Only on the static attach path, where nothing else can ever produce a packet,
+  # is preserving the original numbering both safe and worth it.
   defp bridge_decision(la, lb, media, policy) do
     case select_codecs(la, lb, media, policy) do
-      {:error, _} = err -> err
-      {:ok, code, code} -> :attach
-      {:ok, _code_a, _code_b} -> :transcode
+      {:error, _} = err ->
+        err
+
+      {:ok, code_a, code_b} ->
+        how = if Map.get(policy, media, :avoid) == :forbid, do: :attach, else: :transcode
+        {how, {code_a, code_b}}
     end
   end
 
@@ -722,15 +750,15 @@ defmodule MediaServer.Mendooze.Conn do
     end
   end
 
-  defp wire_media(state, la, lb, media, :attach) do
+  defp wire_media(state, la, lb, media, :attach, _sel) do
     case attach_pair(state, la, lb, media) do
       :ok -> {:ok, put_bridge(state, media, :attach)}
       err -> err
     end
   end
 
-  defp wire_media(state, la, lb, media, :transcode) do
-    case transcode_pair(state, la, lb, media) do
+  defp wire_media(state, la, lb, media, :transcode, sel) do
+    case transcode_pair(state, la, lb, media, sel) do
       {:ok, ids} -> {:ok, put_bridge(state, media, {:transcode, ids})}
       err -> err
     end
@@ -750,9 +778,9 @@ defmodule MediaServer.Mendooze.Conn do
   # set on tr_a is therefore LA's: the transcoder produces what the leg it feeds
   # asked for. That is what makes `:force` mean something — each side is served
   # its own codec whatever the other settled on.
-  defp transcode_pair(state, la, lb, media) do
-    with {:ok, tr_a} <- build_chain(state, la, lb, media),
-         {:ok, tr_b} <- build_chain(state, lb, la, media) do
+  defp transcode_pair(state, la, lb, media, {code_a, code_b}) do
+    with {:ok, tr_a} <- build_chain(state, la, lb, media, code_a),
+         {:ok, tr_b} <- build_chain(state, lb, la, media, code_b) do
       {:ok, [tr_a, tr_b]}
     else
       {:error, reason} -> {:error, {:transcode_failed, media, reason}}
@@ -760,7 +788,7 @@ defmodule MediaServer.Mendooze.Conn do
   end
 
   # One direction: `sink ← transcoder ← source`, encoding for `sink`.
-  defp build_chain(state, sink, source, media) do
+  defp build_chain(state, sink, source, media, code) do
     kind = transcoder_kind(media)
     tag = "#{media} transcoder #{sink.leg}"
 
@@ -777,7 +805,7 @@ defmodule MediaServer.Mendooze.Conn do
              tr,
              source.endpoint_id
            ]),
-         :ok <- set_transcoder_codec(state, sink, media, tr) do
+         :ok <- set_transcoder_codec(state, sink, media, tr, code) do
       {:ok, tr}
     else
       {:error, _} = err -> err
@@ -787,26 +815,44 @@ defmodule MediaServer.Mendooze.Conn do
   # `:ok`, or the caller's answer to hand back when bridging changed what it
   # should say. Only a leg that ANSWERED an offer has one to give, which is why
   # the outbound-first call shape returns a plain `:ok`.
-  defp bridge_reply(la, lb, medias) do
-    allowed =
-      for {media, :attach} <- medias,
+  defp bridge_reply(la, lb, medias, policy) do
+    shaping =
+      for {media, how, _sel} <- medias,
           media != :text,
+          shape = shape_for(how, Map.get(policy, media, :avoid)),
+          shape != nil,
           codes = codec_intersection(la, lb, media),
           codes != [],
           into: %{},
-          do: {media, codes}
+          do: {media, {shape, codes}}
 
-    # Nothing relayed, nothing to narrow: the first pass's answer still stands, and
-    # saying so beats handing back a byte-identical rebuild.
-    if allowed == %{} do
+    # Nothing to say differently: the first pass's answer still stands, and saying
+    # so beats handing back a byte-identical rebuild.
+    if shaping == %{} do
       :ok
     else
-      case rebuilt_answer(la, allowed) do
+      case rebuilt_answer(la, shaping) do
         nil -> :ok
         answer -> {:ok, %{inbound_answer: answer}}
       end
     end
   end
+
+  # What the caller may be told, per media, once both legs are known.
+  #
+  # A RELAYED media may announce ONLY what both legs carry: anything else is a
+  # codec the relay could not honour if the caller picked it.
+  #
+  # A TRANSCODED one may announce everything the caller offered — the transcoder
+  # converts whatever arrives — so nothing is removed. Under `:avoid` the codecs
+  # both legs carry are floated to the FRONT, which is how "avoid" is expressed in
+  # SDP rather than in wiring: the caller's natural pick is then the one that needs
+  # no conversion, and the transcoder spends the call bridging. `:force` states no
+  # such preference — each leg is meant to keep the head of its own list — so its
+  # answer is left exactly as the offer ordered it.
+  defp shape_for(:attach, _mode), do: :only
+  defp shape_for(:transcode, :avoid), do: :prefer
+  defp shape_for(:transcode, _mode), do: nil
 
   # In leg A's order: it is A's answer we are restricting, and A's preference the
   # selection rule already defers to.
@@ -820,28 +866,24 @@ defmodule MediaServer.Mendooze.Conn do
   # function of the answer received on leg B"). `nil` when there is nothing to
   # rebuild — a leg we offered on, or one whose first pass never ran.
   #
-  # A RELAYED media is restricted to the intersection of the two legs' codec
-  # lists. That is what makes every codec left in the answer safe: the caller may
-  # switch to any of them mid-call, with no renegotiation, and the endpoint the
-  # packets are relayed to can carry it — `RTPMultiplexer::TryCodec` bridges only
-  # for a codec present in the sink's outgoing map, so what we announce here IS
-  # what the media server will be able to pass through. Announcing more, as the
-  # first pass does, leaves the caller free to pick a codec the callee never
-  # accepted, which a relay cannot honour.
+  # `shape_for/2` says what each media may announce; both shapes work by codec
+  # CODE, and the telephone-event payload types are never touched — DTMF is not a
+  # codec choice and rides alongside whichever one wins.
   #
-  # The order is left as the offer's own: an answer's order is a preference, and
-  # the caller's is the one the selection rule already defers to.
-  #
-  # Restriction is by codec CODE, and the telephone-event payload types are never
-  # dropped — DTMF is not a codec choice and rides alongside whichever one wins.
-  defp rebuilt_answer(leg, allowed) when is_map(allowed) do
+  # Whatever the shape, nothing is ever ADDED: an answer may only carry payload
+  # types the offer declared (RFC 3264 §6.1), because a payload-type number means
+  # nothing outside the SDP that declared it. The callee's codecs that the caller
+  # never offered are therefore unannounceable here, however well the transcoder
+  # could serve them; only the mirror set exists — the caller's codecs the callee
+  # lacks — and that is exactly what a transcoder is for.
+  defp rebuilt_answer(leg, shaping) when is_map(shaping) do
     case leg.offer_descs do
       nil ->
         nil
 
       descs ->
         negs =
-          Map.new(leg.negs, fn {media, neg} -> {media, restrict_neg(neg, allowed, media)} end)
+          Map.new(leg.negs, fn {media, neg} -> {media, restrict_neg(neg, shaping, media)} end)
 
         Sdp.build(%{
           ip: leg.local_ip,
@@ -849,17 +891,32 @@ defmodule MediaServer.Mendooze.Conn do
           medias:
             descs
             |> Enum.reject(&omit_from_answer?(&1, negs))
+            |> Enum.map(&prefer_first(&1, negs, shaping))
             |> Enum.map(&answer_or_reject(leg, negs, &1))
         })
     end
   end
 
-  defp restrict_neg(neg, allowed, media) do
-    case Map.fetch(allowed, media) do
-      :error ->
-        neg
+  # `:prefer` is expressed by reordering the OFFER's own format list, which is
+  # where `answer_codecs/2` reads the answer's order from. The codecs both legs
+  # carry come first, each group keeping the caller's relative order among itself:
+  # a permutation, never an addition or a removal.
+  defp prefer_first(desc, negs, shaping) do
+    with {:ok, {:prefer, codes}} <- Map.fetch(shaping, Map.get(desc, :type)),
+         neg when is_map(neg) <- Map.get(negs, desc.type),
+         fmt when is_list(fmt) <- Map.get(desc, :raw_fmt) do
+      {carried, rest} =
+        Enum.split_with(fmt, fn pt -> Map.get(neg.rtp_map, to_string(pt)) in codes end)
 
-      {:ok, codes} ->
+      %{desc | raw_fmt: carried ++ rest}
+    else
+      _ -> desc
+    end
+  end
+
+  defp restrict_neg(neg, shaping, media) do
+    case Map.fetch(shaping, media) do
+      {:ok, {:only, codes}} ->
         keep = fn pt ->
           code = Map.get(neg.rtp_map, pt)
           code == @dtmf_code or code in codes
@@ -873,19 +930,26 @@ defmodule MediaServer.Mendooze.Conn do
           _ ->
             %{neg | rtp_map: Map.filter(neg.rtp_map, fn {pt, _} -> keep.(pt) end)}
         end
+
+      # `:prefer` reorders, it does not restrict; nothing shaped, nothing to do
+      _ ->
+        neg
     end
   end
 
   defp transcoder_kind(:audio), do: "Audio"
   defp transcoder_kind(:video), do: "Video"
 
-  # The codec the transcoder must PRODUCE: the one its sink negotiated.
+  # The codec the transcoder must PRODUCE: the one SELECTED for its sink (§5), not
+  # merely the head of that leg's list. Under `:avoid` the selection is the codec
+  # both legs carry, which may sit anywhere in either list — encoding the head
+  # instead would produce a codec the far end did not settle on.
   #
   # Video carries a size, a frame rate, a bitrate and an intra period; audio
   # carries none of that. The codec parameters (an H.264 profile-level-id, say)
   # are NOT forwarded yet — the props map is empty, so the server picks its own
   # default. Worth knowing before trusting this with a picky H.264 endpoint.
-  defp set_transcoder_codec(state, sink, :video, tr) do
+  defp set_transcoder_codec(state, sink, :video, tr, code) do
     size = Map.fetch!(@video_sizes, Keyword.get(sink.opts, :video_size, @default_video_size))
     fps = Keyword.get(sink.opts, :video_fps, @default_video_fps)
     intra = Keyword.get(sink.opts, :video_intra_period, @default_video_intra_period)
@@ -893,7 +957,7 @@ defmodule MediaServer.Mendooze.Conn do
     args = [
       state.sess_id,
       tr,
-      Map.fetch!(sink.negotiated, :video),
+      code,
       size,
       fps,
       bandwidth_kbps(sink, :video),
@@ -907,8 +971,8 @@ defmodule MediaServer.Mendooze.Conn do
     end
   end
 
-  defp set_transcoder_codec(state, sink, :audio, tr) do
-    args = [state.sess_id, tr, Map.fetch!(sink.negotiated, :audio), %{}]
+  defp set_transcoder_codec(state, _sink, :audio, tr, code) do
+    args = [state.sess_id, tr, code, %{}]
 
     case rpc(state, "AudioTranscoderSetCodec", args) do
       {:ok, _} -> :ok

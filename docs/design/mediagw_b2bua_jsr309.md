@@ -239,14 +239,30 @@ Two bounds worth keeping in sight:
   mirror case is available, the caller's codecs the callee lacks, which is exactly
   the set a transcoder serves. Our *offer* to the callee has no such bound; we are
   the offerer there.
-- **`:avoid` still attaches rather than always inserting a bridging transcoder.**
-  Always wiring `Endpoint ↔ Transcoder ↔ Endpoint` would let the codec change
-  mid-call on a transcoded media too, and `AudioTranscoder` bridges when input and
-  output agree so it would cost almost nothing — but `VideoTranscoder` is built
-  with `Init(false)` and has no bridging path at all, so every video call would be
-  genuinely re-encoded. That wiring waits on giving the video transcoder the audio
-  one's dynamic bridging; until then `useOriSeqNum` and the bit-exact relay only
-  exist on the attach path.
+- **the wiring is the policy's, not the selection's** (landed 2026-08-12, once the
+  media server gained video bridging). `:forbid` is the only policy that gets a
+  plain `Endpoint ↔ Endpoint`; `:avoid` and `:force` both get
+  `Endpoint ↔ Transcoder ↔ Endpoint`.
+
+  Putting a transcoder in `:avoid`'s path reads backwards until you look at what a
+  JSR-309 transcoder does: it decides **per incoming packet**. `TryCodec` asks the
+  sink whether it can carry the codec that just arrived and, when it can, the
+  packet is forwarded untouched — `RTPMultiplexer::Multiplex` copies nothing. So
+  the steady state of an `:avoid` call whose legs agree is still a relay, and the
+  day a peer switches codec mid-stream the path follows instead of breaking, with
+  no renegotiation. A plain attach cannot do that: it would relay a codec the far
+  end never accepted. This is why the answer for a transcoded media may stay wide
+  (below) — the two halves are one design.
+
+  `useOriSeqNum` is deliberately absent from that path. It also sets `useOriTS`
+  (`rtpsession.cpp:526-529`) and copies both numbers off the incoming packet:
+  right while the transcoder bridges, wrong the moment its encoder produces the
+  packet instead, since an encoded frame carries no meaningful sequence of the
+  source's. Re-stamping is safe either way — `RTPEndpoint::onRTPPacket` advances
+  the outgoing timestamp by the incoming DELTA, so packets of one frame keep one
+  timestamp and frame grouping survives. Only on the static attach path, where
+  nothing else can ever produce a packet, is preserving the peer's own numbering
+  both safe and worth having.
 
 Session-level bandwidth crosses too: `b=AS`/`b=TIAS` parsed on one leg is copied
 to the other (defaulting to 512 kbit/s), and video is offered `bitrate - 64` to
@@ -436,11 +452,16 @@ L  = what the caller offered,  in the CALLER's order
 L' = what the callee answered, in the CALLEE's order
 ```
 
-| value | selection | when L ∩ L' = ∅ |
-|---|---|---|
-| `:force` | `{hd(L), hd(L')}` — each leg keeps the head of **its own** list, so each peer is served the codec IT asked for | already the selection; transcode |
-| `:avoid` *(default)* | the first codec of **L** that also appears in L', for **both** legs | fall back to `{hd(L), hd(L')}` and transcode |
-| `:forbid` | same as `:avoid` | the media is **refused** (488) |
+| value | selection | when L ∩ L' = ∅ | wiring | the caller's answer |
+|---|---|---|---|---|
+| `:force` | `{hd(L), hd(L')}` — each leg keeps the head of **its own** list, so each peer is served the codec IT asked for | already the selection | `EP ↔ TR ↔ EP` | every offered codec the server accepted, in the offer's order |
+| `:avoid` *(default)* | the first codec of **L** that also appears in L', for **both** legs | fall back to `{hd(L), hd(L')}` | `EP ↔ TR ↔ EP` | the same list, with L ∩ L' floated to the **front** |
+| `:forbid` | same as `:avoid` | the media is **refused** (488) | `EP ↔ EP` | **only** L ∩ L' |
+
+The transcoder a `:avoid` call carries is not a cost it failed to avoid: it bridges
+per packet while the legs agree (§5), and the answer's ordering is what keeps them
+agreeing — the caller's natural pick is the codec that needs no conversion. What
+`:avoid` avoids is *converting*, not *being able to*.
 
 Transcoding is not a fourth decision: it is what two *different* selections mean,
 and a direct attach is what one selection twice means. `L`'s order decides the
