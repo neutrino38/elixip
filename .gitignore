@@ -27,6 +27,9 @@ authdb.json
 /packaging/build
 /packaging/dist
 
+# Generated SBoM (build artifact, regenerated per release — see BUILD.md)
+/sbom.cdx.json
+
 # Debug logs produced by scenario runs
 uac_invite.log
 uac.log

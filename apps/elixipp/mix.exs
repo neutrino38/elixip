@@ -16,6 +16,9 @@ defmodule Elixipp.MixProject do
       deps_path: "../../deps",
       lockfile: "../../mix.lock",
       start_permanent: Mix.env() == :prod,
+      # SPDX id of the Business Source License 1.1 (see LICENSE.md). Read by
+      # `mix sbom.cyclonedx` to license this component in the SBoM.
+      package: [licenses: ["BUSL-1.1"]],
       escript: escript(),
       deps: deps()
     ]

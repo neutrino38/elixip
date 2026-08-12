@@ -54,6 +54,79 @@ Notes:
 - `:live` tests require outbound network to a real SIP proxy; exclude them where
   there is none.
 
+## SBoM (Software Bill-of-Materials)
+
+Each published release should carry a CycloneDX 1.6 SBoM — `sbom.cdx.json`,
+attached to the GitHub release as an asset. That is what the Cyber Resilience Act
+asks for: machine-readable, first-level dependencies at minimum
+(reference: BSI TR-03183-2).
+
+It is generated **by hand at release time**, not by CI. Three commands, from the
+repo root:
+
+```bash
+mix deps.get
+mix compile   # required, see below
+mix sbom.cyclonedx --output=sbom.cdx.json --format=json --schema=1.6 --pretty --force
+```
+
+Then attach the file to the release:
+
+```bash
+gh release upload v1.3.1 sbom.cdx.json --clobber
+```
+
+`sbom.cdx.json` is git-ignored: it is a build artifact, regenerated per release,
+never committed.
+
+### What you must get right
+
+- **Run it with the toolchain the packages are built with.** The SBoM records the
+  Erlang/OTP and Elixir versions the product actually runs on, read from the
+  runtime generating it — so generating it on a dev box with OTP 27 describes a
+  product nobody ships. Use the packaging toolchain
+  (`packaging/Containerfile.al9`: OTP 26 + Elixir 1.18.3-otp-26); the simplest way
+  is to run the three commands inside the build container that already produces
+  the RPM.
+- **`mix compile` is not optional.** The task reads the compiled `.app` specs to
+  resolve the OTP applications each app pulls in. Skip it and `inets`, `xmerl`
+  and `hex` are silently missing — 48 components instead of 51.
+- **Run in the default `dev` env.** `:sbom` is declared `only: :dev`, so
+  `MIX_ENV=prod mix sbom.cyclonedx` cannot even find the task. `MIX_ENV` does not
+  filter what lands in the SBoM anyway; `--only prod` does, and we deliberately
+  do not pass it — the whole dependency set is what has to be declared.
+- **One SBoM for the umbrella, no `--recurse`.** Run from the root, the task
+  already walks the four apps under `apps/` and their transitive Hex deps.
+  `--recurse` produces one SBoM *per app* instead, which is not what a release
+  asset should be.
+
+### Checking the result
+
+51 components today: the 4 umbrella apps, their Hex dependencies (direct and
+transitive), and the system ones (Erlang/OTP applications, Elixir, Hex). Every
+component must carry a `version` — TR-03183-2 makes it mandatory, and a missing
+one means the SBoM was generated the wrong way (typically from the precompiled
+`mix_sbom` binary, which refuses to report its own bundled runtime's versions).
+
+```bash
+# quick sanity check: nothing versionless, and our own apps licensed
+jq '[.components[] | select(.version == null)] | length' sbom.cdx.json          # -> 0
+jq '.components[] | select(.name=="elixip2") | .licenses' sbom.cdx.json         # -> BUSL-1.1
+```
+
+Our own components are licensed from `package: [licenses: ["BUSL-1.1"]]`,
+declared in the root `mix.exs` and in each app's — `BUSL-1.1` being the SPDX id
+of the Business Source License 1.1 (see [LICENSE.md](LICENSE.md)).
+
+> **Known deviation from the CycloneDX 1.6 schema.** Two upstream dependencies
+> declare their license on Hex as free text rather than an SPDX id — `erlsom`
+> ("GNU Lesser GPL, Version 3", pulled in by `xmlrpc`) and `elixir_uuid`
+> ("Apache 2.0", by `ex_sdp`). The `sbom` task copies the string into
+> `license.id`, which is an SPDX-constrained enum, so a strict validator reports
+> exactly those two errors. Nothing on our side fixes it — it needs an upstream
+> change in `sbom` (fall back to `license.name`) or in those two packages'
+> metadata. The rest of the document validates.
+
 ## elixipp — the test-tool escript
 
 ```bash
