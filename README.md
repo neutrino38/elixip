@@ -18,6 +18,17 @@ The framework will also provide a control interface to the
 in order to handle the media part of telecommunication over IP. A clean abstraction (Behaviour) is defined
 and other media servers could easily be interfaced as well if needed.
 
+## Background reading
+
+The reasoning behind the project is developed in three articles:
+
+- [Programmable telecoms, the way it should be](https://www.linkedin.com/pulse/programmable-telecoms-way-should-emmanuel-buu--emxoe/)
+  — why this project exists, and the history of the ideas it builds on.
+- [What a native language for telco services looks like](https://www.linkedin.com/pulse/what-native-language-telco-services-looks-like-emmanuel-buu--wujre/)
+  — why a DSL, and what it buys over a general-purpose API.
+- [Taming large state machines: Service Building Blocks](https://www.linkedin.com/pulse/taming-large-state-machines-service-building-blocks-elixip-buu--pctie/)
+  — the Service Building Blocks (SBB) model, still to come.
+
 ## The roadmap
 
 The project will provide in the long term:
@@ -60,7 +71,8 @@ In terms of capabilities, the emphasis will be on:
 - kelixip B2BUA and call processing: in progress
 
 ## Roadmap
-- DSL: Service Building Blocks concept inspired by Jain SLEE 1.1
+- DSL: [Service Building Blocks](https://www.linkedin.com/pulse/taming-large-state-machines-service-building-blocks-elixip-buu--pctie/)
+  concept inspired by Jain SLEE 1.1
 - kelixip and elixip `presence` support including some level of LoST support
 - kelixip distributed cluster tech
 - DSL: formal proof of scenario correctness
