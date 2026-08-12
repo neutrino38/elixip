@@ -1130,9 +1130,18 @@ defmodule MediaServer.Mendooze.Sdp do
 
   Returns the common codec names, whether telephone-event was retained, the
   selected telephone-event PT and its clock (`dtmf_pt`/`dtmf_clock`, nil when
-  declined), and the `rtpMap` for `EndpointStartSending` — the remote
+  declined), the `rtpMap` for `EndpointStartSending` — the remote
   payload-type numbering, since these are the PTs the remote peer expects to
-  receive.
+  receive — and `fmt_order`, the remote `m=` format list verbatim.
+
+  `fmt_order` travels because a payload-type map has no order of its own, and
+  every reader that must name ONE codec out of it (which one this leg settled on,
+  which one an answer announces first) needs the peer's stated preference. Without
+  it the only tiebreak left is the payload-type NUMBER, and a static PT always
+  beats a dynamic one: an answer of `m=audio 35767 RTP/AVP 98 0 8 101` with opus
+  at 98 reads as PCMU, because PCMU is 0. That silently inverted the B2BUA's
+  `transcode: :avoid` policy — two opus legs were declared to disagree, and a
+  PCMU encoder was created to bridge opus to itself.
   """
   @spec negotiate(media_desc(), [codec_name()], boolean()) ::
           {:ok,
@@ -1141,7 +1150,8 @@ defmodule MediaServer.Mendooze.Sdp do
              dtmf: boolean(),
              dtmf_pt: non_neg_integer() | nil,
              dtmf_clock: non_neg_integer() | nil,
-             rtp_map: rtp_map()
+             rtp_map: rtp_map(),
+             fmt_order: [0..127] | String.t()
            }}
           | {:error, :no_common_codec}
   def negotiate(desc, our_names, want_dtmf \\ true) do
@@ -1167,7 +1177,8 @@ defmodule MediaServer.Mendooze.Sdp do
          dtmf: dtmf?,
          dtmf_pt: dtmf_pt,
          dtmf_clock: dtmf_clock,
-         rtp_map: send_map
+         rtp_map: send_map,
+         fmt_order: Map.get(desc, :raw_fmt, [])
        }}
     end
   end

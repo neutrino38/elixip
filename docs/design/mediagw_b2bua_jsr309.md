@@ -208,6 +208,46 @@ that negotiates each peer connection in isolation and then tries to "join" them
 cannot express step 2 — it will transcode every call, or fail one where a
 common codec existed.
 
+**Step 2 landed 2026-08-12** in `MediaServer.Mendooze.Conn`, which is the one
+process holding both legs (§10): each leg records `peer_codecs` — every code the
+peer can carry, in the peer's own `m=` order — and `select_codecs/4` reads both
+lists at bridge time under the §11 policy. It had cost a real call: two legs that
+both carried opus were declared to disagree, because comparing two independently
+settled *heads* is not the same question as "is there a codec both peers support".
+The SDP the caller is *told* followed the same day: `bridge/3` may now answer
+`{:ok, %{inbound_answer: sdp}}`, the caller's answer rebuilt once both legs are
+known, and `attach_legs/3` puts it in the plan in place of the one held since the
+INVITE. Safe because that body is only ever emitted from `complete_media` — no
+1xx carries it — so nothing observable moved.
+
+**On a RELAYED media the rebuilt answer is restricted to the intersection of the
+two legs' codec lists.** That is what makes every codec left in it honest: the
+caller may switch between them mid-call with no renegotiation, and
+`RTPMultiplexer::TryCodec` will bridge, because it only bridges for a codec
+present in the sink endpoint's outgoing map. Announcing more — which the first
+pass has to do, knowing only one leg — leaves the caller free to pick a codec the
+callee never accepted, and a relay has nothing to convert it with.
+
+A TRANSCODED media keeps the wide answer, in the caller's order: the transcoder
+converts whatever arrives, so every offered codec stays legitimately on the table.
+
+Two bounds worth keeping in sight:
+
+- **an answer may only contain payload types from the offer** (RFC 3264 §6.1): a
+  PT number means nothing outside the SDP that declared it. So the answer can
+  never carry a codec the callee answered but the caller never offered — only the
+  mirror case is available, the caller's codecs the callee lacks, which is exactly
+  the set a transcoder serves. Our *offer* to the callee has no such bound; we are
+  the offerer there.
+- **`:avoid` still attaches rather than always inserting a bridging transcoder.**
+  Always wiring `Endpoint ↔ Transcoder ↔ Endpoint` would let the codec change
+  mid-call on a transcoded media too, and `AudioTranscoder` bridges when input and
+  output agree so it would cost almost nothing — but `VideoTranscoder` is built
+  with `Init(false)` and has no bridging path at all, so every video call would be
+  genuinely re-encoded. That wiring waits on giving the video transcoder the audio
+  one's dynamic bridging; until then `useOriSeqNum` and the bit-exact relay only
+  exist on the attach path.
+
 Session-level bandwidth crosses too: `b=AS`/`b=TIAS` parsed on one leg is copied
 to the other (defaulting to 512 kbit/s), and video is offered `bitrate - 64` to
 leave room for audio (`MediaTranscodingSession.java:684-694`).
@@ -386,13 +426,39 @@ video only when the codecs differ, text never (§3). elixip makes the first two
 because a test tool needs to rehearse a leg that must not be transcoded as much
 as one that must.
 
-Three values, same three for audio and for video:
+Three values, same three for audio and for video, and — since 2026-08-12 — the
+same *meaning* for both, which the two-column table below used to split.
 
-| value | audio | video |
+The selection is one act for both legs (§5), stated over the two peer lists:
+
+```
+L  = what the caller offered,  in the CALLER's order
+L' = what the callee answered, in the CALLEE's order
+```
+
+| value | selection | when L ∩ L' = ∅ |
 |---|---|---|
-| `:force` | **always transcode.** Each leg is answered with the **first codec of its own list**, so the answer conforms to the 200 OK whatever the other leg settled on — the Java gateway's behaviour | transcode when the two legs' **first-listed** codecs differ; direct attach when they agree |
-| `:avoid` *(default)* | pick a codec both legs support and bridge; transcode only when there is none | same |
-| `:forbid` | never transcode: when no common codec exists the call **fails** (488) | same |
+| `:force` | `{hd(L), hd(L')}` — each leg keeps the head of **its own** list, so each peer is served the codec IT asked for | already the selection; transcode |
+| `:avoid` *(default)* | the first codec of **L** that also appears in L', for **both** legs | fall back to `{hd(L), hd(L')}` and transcode |
+| `:forbid` | same as `:avoid` | the media is **refused** (488) |
+
+Transcoding is not a fourth decision: it is what two *different* selections mean,
+and a direct attach is what one selection twice means. `L`'s order decides the
+common codec because the caller's preference is the one a gateway has no business
+overruling.
+
+Two consequences worth stating, because both are deliberate deviations:
+
+- **`:force` no longer transcodes when the two heads agree.** It used to, for
+  audio, matching the Java gateway. The guarantee `:force` sells — "this leg gets
+  this codec" — is unaffected, since an attach delivers the same codec on both
+  legs. What is lost is the ability to *force a transcoder into the path* when the
+  legs already agree, which a test tool might want to rehearse; `:force` with two
+  deliberately different `audio_codec:` lists is how to get one now.
+- **`:avoid` may pick a codec that is neither leg's first choice.** With
+  `L = [opus, PCMU]` and `L' = [PCMU, opus]` it picks opus for both, though the
+  callee ranked PCMU first. Relaying the caller's preference beats honouring the
+  callee's and paying for a transcoder.
 
 In every mode, **no usable audio codec at all fails the call** — a call with no
 audio is not a call, and the alternative (a port-0 audio line and a video-only

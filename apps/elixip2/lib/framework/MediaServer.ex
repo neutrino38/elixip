@@ -209,9 +209,10 @@ defmodule MediaServer do
           rtp_profile: :avp | :avpf,
           # let the media server follow a symmetric NAT's mapping instead of the
           # send address the peer signalled. `:auto` (the default) leaves it to the
-          # adapter, which enables it on the legs that ANSWER a remote offer —
-          # the ones where the peer chose that address, and where a NATed peer
-          # therefore hands us its private one. Adapters that cannot latch ignore it.
+          # adapter, which asks for it on every leg that is not ICE — a NATed peer
+          # hands us its private address in an ANSWER just as readily as in an
+          # offer, and under ICE the address is settled by connectivity checks
+          # instead. Adapters that cannot latch ignore it.
           nat_latch: boolean() | :auto
         ]
 
@@ -337,9 +338,17 @@ defmodule MediaServer do
     `{:error, :no_common_codec}` is the expected refusal under `:forbid`.
 
     Idempotent: bridging an already-bridged pair changes nothing.
+
+    `{:ok, %{inbound_answer: sdp}}` hands back leg `a`'s answer, **rebuilt** now
+    that both legs are known: a relayed media is restricted to the codecs BOTH
+    legs carry, so every codec left in the answer is one the media server can
+    actually pass through, and the caller may switch between them mid-call with no
+    renegotiation. Callers that hold an answer produced when the offer arrived
+    must replace it with this one. A plain `:ok` means nothing changed — the
+    adapter does not rebuild, or leg `a` never answered an offer.
     """
     @callback bridge(a :: MediaServer.conn_ref(), b :: MediaServer.conn_ref(), opts :: keyword()) ::
-                :ok | {:error, term()}
+                :ok | {:ok, %{inbound_answer: String.t()}} | {:error, term()}
 
     @doc """
     Take the media path down without closing either connection — putting a call

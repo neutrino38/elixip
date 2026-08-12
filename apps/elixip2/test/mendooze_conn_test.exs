@@ -132,7 +132,7 @@ defmodule Mendooze.ConnTest do
     %{server: server} = start_media_server(&two_leg_handler/2)
     {conn, out, _tag} = two_negotiated_legs(server)
 
-    assert :ok = Mendooze.bridge(conn, out, audio: :avoid, video: :avoid)
+    assert {:ok, %{inbound_answer: _}} = Mendooze.bridge(conn, out, audio: :avoid, video: :avoid)
 
     # Both directions — a bridge is two one-way attaches, not one call.
     assert_receive {:jsr309_call, "EndpointAttachToEndpoint", [3, 4, 5, 0]}, 1_000
@@ -194,9 +194,121 @@ defmodule Mendooze.ConnTest do
 
   # :force transcodes even when the codecs AGREE — which is what it buys: each
   # leg is served the codec it asked for, whatever the other settled on.
-  test "with :force, agreeing on a codec is not a reason to relay" do
-    %{server: server} = start_media_server(&two_leg_handler/2)
-    {conn, out, _tag} = two_negotiated_legs(server)
+  # Two legs whose lists OVERLAP but whose first choices differ — the one fixture
+  # that tells `:avoid` and `:force` apart, since every other pair here agrees or
+  # disagrees on everything at once.
+  #
+  #     L  = [opus, PCMU]   the caller prefers opus
+  #     L' = [PCMU, opus]   the callee prefers PCMU
+  defp two_crossed_legs(server) do
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio)
+    assert_receive {:jsr309_call, "MediaSessionCreate", [_tag, _q]}, 1_000
+
+    {:ok, out} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :audio,
+        audio_codec: ["PCMU", "OPUS"],
+        bridge_with: conn
+      )
+
+    assert {:ok, _answer} =
+             Mendooze.set_remote_offer(conn, crossed_sdp("10.9.8.7", "96 0", "96"))
+
+    {:ok, _offer} = Mendooze.get_local_offer(out)
+    :ok = Mendooze.set_remote_answer(out, crossed_sdp("10.9.8.6", "0 98", "98"))
+
+    {conn, out}
+  end
+
+  defp crossed_sdp(ip, fmt, opus_pt) do
+    Enum.join(
+      [
+        "v=0",
+        "o=- 1 1 IN IP4 #{ip}",
+        "s=-",
+        "c=IN IP4 #{ip}",
+        "t=0 0",
+        "m=audio 40000 RTP/AVP #{fmt}",
+        "a=rtpmap:#{opus_pt} opus/48000/2",
+        ""
+      ],
+      "\r\n"
+    )
+  end
+
+  # `:avoid` walks L and takes the first codec L' also carries: opus, though the
+  # callee would have preferred PCMU. ONE selection for both legs, so a straight
+  # relay — and the caller's preference is the one that decides.
+  test ":avoid walks the caller's order to a codec both legs carry" do
+    %{server: server} = start_media_server(&verdict_handler/2)
+    {conn, out} = two_crossed_legs(server)
+
+    assert {:ok, %{inbound_answer: _}} = Mendooze.bridge(conn, out, audio: :avoid)
+
+    assert_receive {:jsr309_call, "EndpointAttachToEndpoint", [3, 4, 5, 0]}, 1_000
+    assert_receive {:jsr309_call, "EndpointAttachToEndpoint", [3, 5, 4, 0]}, 1_000
+    refute_receive {:jsr309_call, "AudioTranscoderCreate", _}, 200
+  end
+
+  # The narrowing that makes a relay honest. The caller offers three codecs, the
+  # callee answers one: on a relayed media the answer may only keep that one, or
+  # the caller is free to switch to something the far end cannot receive — and a
+  # relay has nothing to convert it with.
+  test "a relayed media answers only the codecs both legs carry" do
+    %{server: server} = start_media_server(&verdict_handler/2)
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio)
+    assert_receive {:jsr309_call, "MediaSessionCreate", [_tag, _q]}, 1_000
+
+    {:ok, out} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :audio,
+        audio_codec: ["PCMU", "OPUS", "PCMA"],
+        bridge_with: conn
+      )
+
+    offer =
+      Enum.join(
+        [
+          "v=0",
+          "o=- 1 1 IN IP4 10.9.8.7",
+          "s=-",
+          "c=IN IP4 10.9.8.7",
+          "t=0 0",
+          "m=audio 40000 RTP/AVP 96 0 8 101",
+          "a=rtpmap:96 opus/48000/2",
+          "a=rtpmap:101 telephone-event/8000",
+          ""
+        ],
+        "\r\n"
+      )
+
+    assert {:ok, first_pass} = Mendooze.set_remote_offer(conn, offer)
+    # the first pass cannot know better: it answers everything the server accepted
+    assert first_pass =~ "opus/48000/2"
+
+    {:ok, _offer} = Mendooze.get_local_offer(out)
+    pcmu = %{type: :audio, port: 40_000, codecs: ["PCMU"], dtmf: true}
+    :ok = Mendooze.set_remote_answer(out, remote_answer(audio: pcmu))
+
+    assert {:ok, %{inbound_answer: rebuilt}} = Mendooze.bridge(conn, out, audio: :avoid)
+    assert_receive {:jsr309_call, "EndpointAttachToEndpoint", [3, 4, 5, 0]}, 1_000
+
+    # PCMU is the whole intersection; opus and PCMA are gone, DTMF stays
+    assert rebuilt =~ "PCMU/8000"
+    refute rebuilt =~ "opus"
+    refute rebuilt =~ "PCMA"
+    assert rebuilt =~ "telephone-event"
+    # one m= per offered m=, still (RFC 3264 §6)
+    assert length(String.split(rebuilt, "m=audio")) == 2
+  end
+
+  # What `:force` buys: each peer stays on the codec IT put first — opus toward
+  # the caller, PCMU toward the callee — which is a transcoder, though a common
+  # codec existed and `:avoid` would have relayed.
+  test "with :force, each leg keeps the head of its own list" do
+    %{server: server} = start_media_server(&verdict_handler/2)
+    {conn, out} = two_crossed_legs(server)
 
     assert :ok = Mendooze.bridge(conn, out, audio: :force)
 
@@ -204,11 +316,108 @@ defmodule Mendooze.ConnTest do
     refute_receive {:jsr309_call, "EndpointAttachToEndpoint", _}, 200
   end
 
+  # The server's fmtp verdict, which the stock handler never returns — so every
+  # bridge test above exercises the legacy fallback, and NOT the branch a real
+  # media server takes. Shaped like the real one: it accepts everything proposed
+  # and keys the struct by payload type as a string (XML-RPC has no integer keys).
+  defp verdict_handler("EndpointStartReceiving", [_sess, _ep, media, rtp_map | _]) do
+    {:ok, [22_000 + 2 * media, Map.new(rtp_map, fn {pt, _code} -> {to_string(pt), ""} end)]}
+  end
+
+  defp verdict_handler(method, params), do: two_leg_handler(method, params)
+
+  # Linphone's real offer (traffic of 2026-08-12): opus first in the format list
+  # but on a DYNAMIC payload type, with PCMU further down the list.
+  defp linphone_offer do
+    Enum.join(
+      [
+        "v=0",
+        "o=60273198 242 2460 IN IP4 172.22.0.8",
+        "s=Talk",
+        "c=IN IP4 172.22.0.8",
+        "t=0 0",
+        "m=audio 56594 RTP/AVP 96 97 98 0 8 18 101 99 100",
+        "a=rtpmap:96 opus/48000/2",
+        "a=fmtp:96 useinbandfec=1",
+        "a=rtpmap:97 speex/16000",
+        "a=fmtp:97 vbr=on",
+        "a=rtpmap:98 speex/8000",
+        "a=fmtp:98 vbr=on",
+        "a=fmtp:18 annexb=yes",
+        "a=rtpmap:101 telephone-event/48000",
+        "a=rtpmap:99 telephone-event/16000",
+        "a=rtpmap:100 telephone-event/8000",
+        ""
+      ],
+      "\r\n"
+    )
+  end
+
+  # Linphone's real answer to our offer (same traffic). opus is FIRST, and PCMU /
+  # PCMA ride along as static payload types with no rtpmap of their own — the
+  # shape that decides which codec the leg we OFFERED on settles for.
+  defp linphone_answer do
+    Enum.join(
+      [
+        "v=0",
+        "o=50815019 1543 2543 IN IP4 172.22.0.3",
+        "s=Talk",
+        "c=IN IP4 172.22.0.3",
+        "t=0 0",
+        "m=audio 35767 RTP/AVP 98 0 8 101",
+        "a=rtpmap:98 opus/48000/2",
+        "a=fmtp:98 useinbandfec=1",
+        "a=rtpmap:101 telephone-event/8000",
+        ""
+      ],
+      "\r\n"
+    )
+  end
+
+  # Both legs carry opus; each side numbered it differently (the caller 96, our
+  # own offer 98). The codec each leg settled on is what `:avoid` compares, and it
+  # must be the CODEC each side put first — not the lowest payload type that
+  # happens to be listed. PCMU sits at 0 in both SDPs, so a numeric reading picks
+  # it every time, and the whole `:avoid` policy silently inverts.
+  test "legs that both settled on opus are relayed, whatever payload type numbered it" do
+    %{server: server} = start_media_server(&verdict_handler/2)
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio)
+    assert_receive {:jsr309_call, "MediaSessionCreate", [_tag, _q]}, 1_000
+
+    {:ok, out} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :audio,
+        audio_codec: ["OPUS", "PCMU", "PCMA"],
+        bridge_with: conn
+      )
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, linphone_offer())
+    assert answer =~ "opus/48000/2"
+
+    {:ok, _offer} = Mendooze.get_local_offer(out)
+    :ok = Mendooze.set_remote_answer(out, linphone_answer())
+
+    assert {:ok, %{inbound_answer: rebuilt}} = Mendooze.bridge(conn, out, audio: :avoid)
+
+    assert_receive {:jsr309_call, "EndpointAttachToEndpoint", [3, 4, 5, 0]}, 1_000
+    assert_receive {:jsr309_call, "EndpointAttachToEndpoint", [3, 5, 4, 0]}, 1_000
+    refute_receive {:jsr309_call, "AudioTranscoderCreate", _}, 200
+
+    # …and the answer is narrowed to what BOTH legs carry. The caller also offered
+    # speex — twice — which the callee never answered: on a relayed media, leaving
+    # it in would let the caller switch to a codec the far end cannot receive.
+    assert rebuilt =~ "opus/48000/2"
+    refute rebuilt =~ "speex"
+    # DTMF is not a codec choice and rides alongside whichever one wins
+    assert rebuilt =~ "telephone-event"
+  end
+
   # A transcoder is a session resource, not a wire: detaching the endpoints
   # leaves it running for the life of the call.
   test "unbridging a transcoded media deletes the transcoders, not just the attaches" do
-    %{server: server} = start_media_server(&two_leg_handler/2)
-    {conn, out, _tag} = two_negotiated_legs(server)
+    %{server: server} = start_media_server(&verdict_handler/2)
+    {conn, out} = two_crossed_legs(server)
     :ok = Mendooze.bridge(conn, out, audio: :force)
 
     assert :ok = Mendooze.unbridge(conn, out)
@@ -230,7 +439,7 @@ defmodule Mendooze.ConnTest do
   test "unbridge detaches both endpoints, and a bad pair is not an error" do
     %{server: server} = start_media_server(&two_leg_handler/2)
     {conn, out, _tag} = two_negotiated_legs(server)
-    :ok = Mendooze.bridge(conn, out, audio: :avoid)
+    {:ok, %{inbound_answer: _}} = Mendooze.bridge(conn, out, audio: :avoid)
 
     assert :ok = Mendooze.unbridge(conn, out)
     assert_receive {:jsr309_call, "EndpointDettach", [3, 4, 0]}, 1_000
@@ -848,12 +1057,16 @@ defmodule Mendooze.ConnTest do
     assert {:ok, _answer} = Mendooze.set_remote_offer(conn, offer)
 
     # plain RTP/AVP without mux: natLatch is the only property, so the call exists
-    # solely because we are the answerer
+    # solely to carry it
     assert_receive {:jsr309_call, "EndpointSetRTPProperties", [3, 4, 0, props]}
     assert props == %{"natLatch" => "1"}
   end
 
-  test "the answer to an offer of ours never asks for latching" do
+  # The direction is NOT a criterion, and this is the regression: a NATed callee
+  # writes its private address in an ANSWER exactly as an offerer writes it in an
+  # offer. Traffic of 2026-08-12: answer `c=IN IP4 172.22.0.3`, RTP arriving from
+  # 172.21.104.60, one-way audio for the whole call on every outgoing leg.
+  test "an answer to an offer of ours asks for latching just the same" do
     %{server: server} = start_media_server()
 
     {:ok, conn} =
@@ -862,28 +1075,52 @@ defmodule Mendooze.ConnTest do
     {:ok, _offer} = Mendooze.get_local_offer(conn)
     assert :ok = Mendooze.set_remote_answer(conn, remote_answer())
 
-    # the peer answered knowing its own NAT: its address is the one to trust
+    assert_receive {:jsr309_call, "EndpointSetRTPProperties", [3, 4, 0, %{"natLatch" => "1"}]}
     assert_receive {:jsr309_call, "EndpointStartSending", [3, 4, 0, "10.9.8.7", 40_000, _]}
-    refute_receive {:jsr309_call, "EndpointSetRTPProperties", _}, 100
   end
 
-  test "nat_latch overrides the direction it is inferred from, either way" do
+  # ICE is the one case the server cannot see: it holds the `c=` line, not the
+  # candidates, so it cannot know the address was settled by connectivity checks.
+  test "a DTLS+ICE leg never asks for latching: candidates settle the address" do
     %{server: server} = start_media_server()
 
-    # forced on for a leg that offered
-    {:ok, uac} =
+    {:ok, conn} =
       Mendooze.create_peer_connection(server, self(),
         media: :audio,
-        audio_codec: "PCMU",
-        nat_latch: true
+        audio_codec: "OPUS",
+        webrtc_support: :if_offered
       )
 
-    {:ok, _offer} = Mendooze.get_local_offer(uac)
-    assert :ok = Mendooze.set_remote_answer(uac, remote_answer())
-    assert_receive {:jsr309_call, "EndpointSetRTPProperties", [3, 4, 0, %{"natLatch" => "1"}]}
+    offer =
+      Sdp.build(%{
+        ip: "10.9.8.7",
+        medias: [
+          %{
+            type: :audio,
+            port: 40_000,
+            codecs: ["OPUS"],
+            crypto: {:dtls, :actpass, "sha-256", @fp},
+            ice: %{ufrag: "remote-uf", pwd: "remote-pwd-123456789012345"},
+            protocol: "UDP/TLS/RTP/SAVPF",
+            rtcp_mux: true
+          }
+        ]
+      })
 
-    # forced off for a leg that answers
-    {:ok, uas} = Mendooze.create_peer_connection(server, self(), media: :audio, nat_latch: false)
+    assert {:ok, _answer} = Mendooze.set_remote_offer(conn, offer)
+
+    # the properties call still happens — for rtcp-mux — which is what makes the
+    # absence of natLatch an assertion rather than a missing message
+    assert_receive {:jsr309_call, "EndpointSetRTPProperties", [3, 4, 0, props]}
+    assert Map.has_key?(props, "rtcp-mux")
+    refute Map.has_key?(props, "natLatch")
+  end
+
+  test "nat_latch overrides the inference, either way" do
+    %{server: server} = start_media_server()
+
+    # forced off on a plain leg the inference would have latched
+    {:ok, off} = Mendooze.create_peer_connection(server, self(), media: :audio, nat_latch: false)
 
     offer =
       Sdp.build(%{
@@ -891,8 +1128,35 @@ defmodule Mendooze.ConnTest do
         medias: [%{type: :audio, port: 40_000, codecs: ["PCMU"]}]
       })
 
-    assert {:ok, _answer} = Mendooze.set_remote_offer(uas, offer)
+    assert {:ok, _answer} = Mendooze.set_remote_offer(off, offer)
     refute_receive {:jsr309_call, "EndpointSetRTPProperties", _}, 100
+
+    # forced on over the ICE exclusion, for a caller that knows its topology
+    {:ok, on} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :audio,
+        audio_codec: "OPUS",
+        webrtc_support: :if_offered,
+        nat_latch: true
+      )
+
+    webrtc_offer =
+      Sdp.build(%{
+        ip: "10.9.8.7",
+        medias: [
+          %{
+            type: :audio,
+            port: 40_000,
+            codecs: ["OPUS"],
+            crypto: {:dtls, :actpass, "sha-256", @fp},
+            ice: %{ufrag: "remote-uf", pwd: "remote-pwd-123456789012345"},
+            protocol: "UDP/TLS/RTP/SAVPF"
+          }
+        ]
+      })
+
+    assert {:ok, _answer} = Mendooze.set_remote_offer(on, webrtc_offer)
+    assert_receive {:jsr309_call, "EndpointSetRTPProperties", [3, 4, 0, %{"natLatch" => "1"}]}
   end
 
   test "the answer only covers the medias present in the offer" do

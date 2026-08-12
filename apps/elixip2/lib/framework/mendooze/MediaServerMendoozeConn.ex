@@ -268,6 +268,19 @@ defmodule MediaServer.Mendooze.Conn do
       # codec itself, which is what makes `bridge/3`'s "do these two agree?"
       # exact rather than a guess.
       negotiated: %{},
+      # Every code this peer can carry, per media, in the peer's OWN preference
+      # order — `codecsPri` in the Java gateway's vocabulary
+      # (mediagw_b2bua_jsr309.md §5). The head of it is what `negotiated` holds;
+      # the tail is what makes the cross-leg selection possible at all, because
+      # "is there a codec BOTH peers support" cannot be answered from two heads.
+      peer_codecs: %{},
+      # What it takes to build this leg's answer a SECOND time, once the other
+      # leg has answered and the selection is known: every offered section (the
+      # port-0 rejections included, so the answer keeps one m= per offered m=)
+      # and the per-media negotiation the first pass produced. Only set on a leg
+      # that answered an offer — a leg we offered on has no answer to rebuild.
+      offer_descs: nil,
+      negs: %{},
       status: :init,
       connected: MapSet.new(),
       recv_medias: nil,
@@ -455,7 +468,7 @@ defmodule MediaServer.Mendooze.Conn do
                 inspect(Enum.map(medias, fn {m, how} -> {m, how} end))
           )
 
-          {:reply, :ok, state}
+          {:reply, bridge_reply(la, lb, medias), state}
 
         err ->
           {:reply, err, state}
@@ -638,9 +651,7 @@ defmodule MediaServer.Mendooze.Conn do
   end
 
   # Which medias can be connected directly, and what to do about the ones that
-  # cannot. The comparison is on the negotiated codec CODE, so it is exact: two
-  # legs "agree" when the server settled them on the same codec, whatever payload
-  # numbers their peers happened to use.
+  # cannot.
   #
   # Text is never transcoded — the Java gateway does not either, and the T.140 /
   # text-over-WebSocket gateway depends on it being a straight attach.
@@ -658,20 +669,56 @@ defmodule MediaServer.Mendooze.Conn do
   defp bridge_decision(_la, _lb, :text, _policy), do: :attach
 
   defp bridge_decision(la, lb, media, policy) do
-    mode = Map.get(policy, media, :avoid)
-    code_a = Map.get(la.negotiated, media)
-    code_b = Map.get(lb.negotiated, media)
+    case select_codecs(la, lb, media, policy) do
+      {:error, _} = err -> err
+      {:ok, code, code} -> :attach
+      {:ok, _code_a, _code_b} -> :transcode
+    end
+  end
 
-    cond do
-      # Nothing settled on this media yet: attaching would connect two endpoints
+  # The cross-leg codec selection (mediagw_b2bua_jsr309.md §5): ONE decision for
+  # both legs, not two independent ones joined afterwards. Naming the two lists as
+  # the policy does (§11):
+  #
+  #     L  = what the caller offered,  in the CALLER's order   (leg A)
+  #     L' = what the callee answered, in the CALLEE's order   (leg B)
+  #
+  #   :force  → `{hd(L), hd(L')}` — each leg keeps the head of its own list, so
+  #             each peer is served the codec IT asked for whatever the other did;
+  #   :avoid  → the first codec of L that also appears in L', for BOTH legs. L's
+  #             order decides, because the caller's preference is the one a
+  #             gateway has no business overruling. No common codec → fall back to
+  #             `{hd(L), hd(L')}`;
+  #   :forbid → the same selection, but no common codec refuses the media outright
+  #             rather than transcoding it.
+  #
+  # Transcoding is then not a decision of its own: it is simply what two different
+  # selections mean, and a direct attach is what one selection twice means. That
+  # is the whole reason this returns codes rather than `:attach | :transcode` —
+  # the old shape compared two independently-settled heads, which reads "no common
+  # codec" out of two peers that both offered opus second.
+  defp select_codecs(la, lb, media, policy) do
+    l = Map.get(la.peer_codecs, media, [])
+    lp = Map.get(lb.peer_codecs, media, [])
+
+    case {l, lp} do
+      # Nothing settled on this media yet: bridging would connect two endpoints
       # that have not agreed on anything.
-      is_nil(code_a) or is_nil(code_b) -> {:error, {:not_negotiated, media}}
-      # Always transcode, even when the codecs agree: what :force buys is that
-      # each leg is served the codec IT asked for, whatever the other settled on.
-      mode == :force -> :transcode
-      code_a == code_b -> :attach
-      mode == :forbid -> {:error, {:no_common_codec, media}}
-      true -> :transcode
+      {[], _} ->
+        {:error, {:not_negotiated, media}}
+
+      {_, []} ->
+        {:error, {:not_negotiated, media}}
+
+      {[a | _], [b | _]} ->
+        mode = Map.get(policy, media, :avoid)
+
+        case {mode, Enum.find(l, &(&1 in lp))} do
+          {:force, _} -> {:ok, a, b}
+          {_, nil} when mode == :forbid -> {:error, {:no_common_codec, media}}
+          {_, nil} -> {:ok, a, b}
+          {_, common} -> {:ok, common, common}
+        end
     end
   end
 
@@ -734,6 +781,98 @@ defmodule MediaServer.Mendooze.Conn do
       {:ok, tr}
     else
       {:error, _} = err -> err
+    end
+  end
+
+  # `:ok`, or the caller's answer to hand back when bridging changed what it
+  # should say. Only a leg that ANSWERED an offer has one to give, which is why
+  # the outbound-first call shape returns a plain `:ok`.
+  defp bridge_reply(la, lb, medias) do
+    allowed =
+      for {media, :attach} <- medias,
+          media != :text,
+          codes = codec_intersection(la, lb, media),
+          codes != [],
+          into: %{},
+          do: {media, codes}
+
+    # Nothing relayed, nothing to narrow: the first pass's answer still stands, and
+    # saying so beats handing back a byte-identical rebuild.
+    if allowed == %{} do
+      :ok
+    else
+      case rebuilt_answer(la, allowed) do
+        nil -> :ok
+        answer -> {:ok, %{inbound_answer: answer}}
+      end
+    end
+  end
+
+  # In leg A's order: it is A's answer we are restricting, and A's preference the
+  # selection rule already defers to.
+  defp codec_intersection(la, lb, media) do
+    lp = Map.get(lb.peer_codecs, media, [])
+    Enum.filter(Map.get(la.peer_codecs, media, []), &(&1 in lp))
+  end
+
+  # The caller's answer, rebuilt now that the other leg has answered and the
+  # selection is known (mediagw_b2bua_jsr309.md §5: "the answer sent on leg A is a
+  # function of the answer received on leg B"). `nil` when there is nothing to
+  # rebuild — a leg we offered on, or one whose first pass never ran.
+  #
+  # A RELAYED media is restricted to the intersection of the two legs' codec
+  # lists. That is what makes every codec left in the answer safe: the caller may
+  # switch to any of them mid-call, with no renegotiation, and the endpoint the
+  # packets are relayed to can carry it — `RTPMultiplexer::TryCodec` bridges only
+  # for a codec present in the sink's outgoing map, so what we announce here IS
+  # what the media server will be able to pass through. Announcing more, as the
+  # first pass does, leaves the caller free to pick a codec the callee never
+  # accepted, which a relay cannot honour.
+  #
+  # The order is left as the offer's own: an answer's order is a preference, and
+  # the caller's is the one the selection rule already defers to.
+  #
+  # Restriction is by codec CODE, and the telephone-event payload types are never
+  # dropped — DTMF is not a codec choice and rides alongside whichever one wins.
+  defp rebuilt_answer(leg, allowed) when is_map(allowed) do
+    case leg.offer_descs do
+      nil ->
+        nil
+
+      descs ->
+        negs =
+          Map.new(leg.negs, fn {media, neg} -> {media, restrict_neg(neg, allowed, media)} end)
+
+        Sdp.build(%{
+          ip: leg.local_ip,
+          ice_lite: match?({:dtls, _, _}, leg.local_crypto),
+          medias:
+            descs
+            |> Enum.reject(&omit_from_answer?(&1, negs))
+            |> Enum.map(&answer_or_reject(leg, negs, &1))
+        })
+    end
+  end
+
+  defp restrict_neg(neg, allowed, media) do
+    case Map.fetch(allowed, media) do
+      :error ->
+        neg
+
+      {:ok, codes} ->
+        keep = fn pt ->
+          code = Map.get(neg.rtp_map, pt)
+          code == @dtmf_code or code in codes
+        end
+
+        case Map.get(neg, :accepted) do
+          accepted when is_map(accepted) ->
+            %{neg | rtp_map: Map.filter(neg.rtp_map, fn {pt, _} -> keep.(pt) end)}
+            |> Map.put(:accepted, Map.filter(accepted, fn {pt, _} -> keep.(pt) end))
+
+          _ ->
+            %{neg | rtp_map: Map.filter(neg.rtp_map, fn {pt, _} -> keep.(pt) end)}
+        end
     end
   end
 
@@ -870,7 +1009,6 @@ defmodule MediaServer.Mendooze.Conn do
          # accepted is declined with port 0, not a call failure)
          {:ok, state, negotiated} <- open_offered_receive_plane(state, answerable),
          :ok <- ensure_negotiated(negotiated),
-         # `true`: we are answering the peer's offer — see nat_latch?/2
          {:ok, state, negotiated} <- apply_offered_medias(state, answerable, negotiated) do
       answer =
         Sdp.build(%{
@@ -894,7 +1032,7 @@ defmodule MediaServer.Mendooze.Conn do
         state
         |> note_receiving_medias(Enum.filter(answerable, &Map.has_key?(negotiated, &1.type)))
 
-      {:reply, {:ok, answer}, %{state | status: :active}}
+      {:reply, {:ok, answer}, %{state | status: :active, offer_descs: descs, negs: negotiated}}
     else
       {:error, reason} -> {:fail, reason}
     end
@@ -1642,8 +1780,7 @@ defmodule MediaServer.Mendooze.Conn do
               Map.get(st.accepted, desc.type)
             )
 
-          # `false`: we offered — see nat_latch?/2
-          case apply_remote_media(st, desc, Map.put(neg, :send_map, send_map), false) do
+          case apply_remote_media(st, desc, Map.put(neg, :send_map, send_map)) do
             {:ok, st, neg} -> {:cont, {:ok, st, Map.put(acc, desc.type, neg)}}
             {:error, _} = err -> {:halt, err}
           end
@@ -1657,7 +1794,7 @@ defmodule MediaServer.Mendooze.Conn do
     descs
     |> Enum.filter(&Map.has_key?(negotiated, &1.type))
     |> Enum.reduce_while({:ok, state, negotiated}, fn desc, {:ok, st, acc} ->
-      case apply_remote_media(st, desc, Map.fetch!(acc, desc.type), true) do
+      case apply_remote_media(st, desc, Map.fetch!(acc, desc.type)) do
         {:ok, st, neg} -> {:cont, {:ok, st, Map.put(acc, desc.type, neg)}}
         {:error, _} = err -> {:halt, err}
       end
@@ -1668,16 +1805,16 @@ defmodule MediaServer.Mendooze.Conn do
   # destination to send to (the peer connects to us), no crypto (the WebSocket's
   # own TLS carries it) and nothing for the RTP watchdog to watch — T.140 is
   # legitimately silent between keystrokes anyway.
-  defp apply_remote_media(state, %{transport: :ws}, neg, _answering_offer?),
+  defp apply_remote_media(state, %{transport: :ws}, neg),
     do: {:ok, state, neg}
 
   # Applies the §9 remote-side steps for one media: transport properties, the
   # peer's security material, StartSending, then the watchdog — armed last, once
   # the answer has been processed.
-  defp apply_remote_media(state, desc, neg, answering_offer?) do
+  defp apply_remote_media(state, desc, neg) do
     m = @media_int[desc.type]
 
-    with :ok <- set_rtp_properties(state, m, desc, answering_offer?),
+    with :ok <- set_rtp_properties(state, m, desc),
          :ok <- set_remote_crypto(state, m, desc),
          {:ok, _} <-
            rpc(state, "EndpointStartSending", [
@@ -1694,37 +1831,37 @@ defmodule MediaServer.Mendooze.Conn do
   end
 
   defp note_negotiated(state, media, neg) do
-    case primary_code(neg) do
-      nil -> state
-      code -> %{state | negotiated: Map.put(state.negotiated, media, code)}
+    case peer_codecs(neg) do
+      [] ->
+        state
+
+      [code | _] = codes ->
+        %{
+          state
+          | negotiated: Map.put(state.negotiated, media, code),
+            peer_codecs: Map.put(state.peer_codecs, media, codes)
+        }
     end
   end
 
-  # The codec this leg will actually put on the wire toward its peer, as a
-  # Medooze code. Taken from the SEND map, because that is what a direct attach
-  # relays: two legs can be connected without a transcoder exactly when they send
-  # the same thing.
+  # Every codec this peer can carry on this media, as Medooze codes, ordered by
+  # the peer's OWN `m=` format list — its stated preference, which is the only
+  # order that means anything here (a payload-type map has none, and the PT
+  # numbers are each peer's private numbering).
   #
-  # `primary_entry/1` needs the server's fmtp verdict and returns nil without it
-  # (an older server, or one that answers StartReceiving with the port alone), so
-  # the same ranking is applied to the send map when it does. Falling back rather
-  # than giving up matters: with no code recorded, `bridge/3` would refuse every
-  # call on such a server.
-  defp primary_code(neg) do
-    case primary_entry(neg) do
-      {_pt, code} ->
-        code
-
-      nil ->
-        neg
-        |> Map.get(:send_map, Map.get(neg, :rtp_map, %{}))
-        |> Enum.reject(fn {_pt, code} -> code == @dtmf_code end)
-        |> Enum.sort_by(&Sdp.pt_rank(&1, Map.get(neg, :fmt_order)))
-        |> case do
-          [{_pt, code} | _] -> code
-          [] -> nil
-        end
+  # Restricted to what the media server accepted when it gave a verdict, because
+  # a codec the server filtered on receive is not one this leg can carry however
+  # much the peer likes it. No verdict (an older server, or one that answers
+  # StartReceiving with the port alone) leaves the peer's list as it stands.
+  defp peer_codecs(neg) do
+    case Map.get(neg, :accepted) do
+      accepted when is_map(accepted) -> Map.take(neg.rtp_map, Map.keys(accepted))
+      _ -> Map.get(neg, :send_map, Map.get(neg, :rtp_map, %{}))
     end
+    |> Enum.reject(fn {_pt, code} -> code == @dtmf_code end)
+    |> Enum.sort_by(&Sdp.pt_rank(&1, Map.get(neg, :fmt_order)))
+    |> Enum.map(fn {_pt, code} -> code end)
+    |> Enum.uniq()
   end
 
   # What `EndpointStartSending` may use, in the offerer's numbering.
@@ -1791,12 +1928,12 @@ defmodule MediaServer.Mendooze.Conn do
   # single EndpointSetRTPProperties call. The "secure" hint is intentionally
   # omitted: it is a no-op once DTLS/SDES crypto is configured (server audit,
   # webrtc_sdp_design.md Q2).
-  defp set_rtp_properties(state, m, desc, answering_offer?) do
+  defp set_rtp_properties(state, m, desc) do
     props =
       %{}
       |> maybe_put(Map.get(desc, :rtcp_mux, false), "rtcp-mux", "1")
       |> Map.merge(rtcp_fb_props(desc))
-      |> maybe_put(nat_latch?(state, answering_offer?), "natLatch", "1")
+      |> maybe_put(nat_latch?(state), "natLatch", "1")
 
     if props == %{} do
       :ok
@@ -1820,21 +1957,34 @@ defmodule MediaServer.Mendooze.Conn do
   end
 
   # Symmetric-NAT latching: the server re-targets its send address *and* port to
-  # wherever the RTP is actually coming from, but only when the destination we gave
-  # it is a private (RFC1918/CGNAT/link-local) address and ICE is not in play. It
-  # is disabled server-side unless we ask for it, and we only ask on the direction
-  # where the peer picked that destination for us: when we ANSWER an offer, the
-  # send address is whatever the peer wrote in its own SDP, which for a NATed
-  # handset is its private address. On the direction we offered, the peer answered
-  # knowing its own NAT — a mismatch there is a routing fault we would be papering
-  # over, not a mapping worth following.
+  # wherever the RTP is actually coming from. Asking for it is safe because the
+  # decision of whether to act on it is the SERVER's, and it is narrow
+  # (`RTPSession::NatCorrectable`): the announced address must be private
+  # (RFC1918, CGNAT RFC6598, link-local) — on a public address a divergence is
+  # more likely legitimate asymmetric routing than a NAT to correct — and the
+  # correction is one-shot per target, the right re-opened by the next
+  # `SetRemotePort` (re-INVITE / UPDATE). All we own on this side is the one case
+  # the server cannot see: ICE, where the address is settled by candidates and
+  # STUN connectivity checks, not by the `c=` line. Latching there would fight
+  # the very mechanism that already picked the path.
   #
-  # `nat_latch: true | false` overrides the inference for a caller that knows its
-  # topology; the kelixip MCU sets it explicitly rather than relying on the fact
-  # that a conference leg happens to always answer.
-  defp nat_latch?(state, answering_offer?) do
+  # It is asked for in BOTH directions, and the direction is not a criterion. It
+  # used to be — only when we ANSWERED an offer, on the theory that a peer
+  # answering OUR offer does so knowing its own NAT, so a mismatch would be a
+  # routing fault to surface rather than a mapping to follow. Real traffic said
+  # otherwise: a multi-homed or NATed callee writes its private address in an
+  # ANSWER exactly as an offerer writes it in an offer. A Linphone handset behind
+  # a NAT answered `c=IN IP4 172.22.0.3` while its RTP arrived from
+  # 172.21.104.60; we kept sending to the announced address for the whole call,
+  # the gateway returned ICMP host-unreachable, and the callee heard nothing —
+  # one-way audio on every outgoing leg, and the caller heard fine, which is what
+  # made it look like a working call.
+  #
+  # `nat_latch: true | false` still overrides the inference for a caller that
+  # knows its topology; the kelixip MCU adapter carries its own opt-in switch.
+  defp nat_latch?(state) do
     case Keyword.get(state.opts, :nat_latch, :auto) do
-      :auto -> answering_offer?
+      :auto -> is_nil(state.local_ice)
       enabled -> enabled == true
     end
   end

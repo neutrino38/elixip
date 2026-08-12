@@ -1799,8 +1799,18 @@ defmodule SIP.Session.B2bua do
       opts = Keyword.merge(Map.to_list(plan.policy), overrides)
 
       case protected_bridge(sip_ctx, pc_in, pc_out, opts) do
-        :ok -> {put_media_plan(sip_ctx, %MediaPlan{plan | bridged: true}), :ok}
-        err -> {sip_ctx, err}
+        :ok ->
+          {put_media_plan(sip_ctx, %MediaPlan{plan | bridged: true}), :ok}
+
+        # The media server rebuilt the caller's answer now that both legs are
+        # known — a relayed media narrowed to what both can carry. It supersedes
+        # the one held since the INVITE, which is still unsent (§7.4): the caller
+        # is answered from `complete_media`, and no 1xx carries this body.
+        {:ok, %{inbound_answer: sdp}} when is_binary(sdp) ->
+          {put_media_plan(sip_ctx, %MediaPlan{plan | bridged: true, inbound_answer: sdp}), :ok}
+
+        err ->
+          {sip_ctx, err}
       end
     end
   end

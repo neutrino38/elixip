@@ -49,9 +49,17 @@ defmodule Kelix.DirectCallWithAuthAndMedia do
   # secure leg when the caller asks for one (SDES from a SIP phone, DTLS+ICE from a
   # WebRTC client) and plain RTP otherwise; `outbound: [webrtc: :no]` offers plain
   # RTP to the registered device — which is what makes this a WebRTC gateway when
-  # the two differ. Transcoding is a policy, not a fact: `:avoid` connects the two
-  # endpoints directly when they share a codec and transcodes only when they do
-  # not, `:forbid` fails the call instead, `:force` always transcodes.
+  # the two differ.
+  #
+  # Transcoding is a policy, not a fact. The codec is picked ONCE for both legs:
+  # the first codec of the caller's list that the callee also answered (§5).
+  # `:avoid` transcodes only when that intersection is empty, `:forbid` refuses the
+  # media instead, `:force` keeps each leg on the head of its own list.
+  #
+  # Video is `:forbid`: transcoding video is the expensive one — a decode, a
+  # scale and a re-encode per call — and a video leg that cannot be relayed is
+  # better refused than served at that price. Audio keeps `:avoid`, where the
+  # fallback costs little and losing the call would cost the caller everything.
   #
   # To reach a callee that is itself a WebRTC client, do not flip `outbound:` here
   # — put `profile: :webrtc_if_supported` on the peer below and let the framework
@@ -59,7 +67,7 @@ defmodule Kelix.DirectCallWithAuthAndMedia do
   @media {:mediaserver,
           inbound: [webrtc: :if_offered, media: :audio_video],
           outbound: [webrtc: :no, media: :audio_video],
-          transcode: [audio: :avoid, video: :avoid]}
+          transcode: [audio: :avoid, video: :forbid]}
 
   state initial_state do
     goto(wait_invite)
