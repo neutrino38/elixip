@@ -121,11 +121,11 @@ the sequence diagram.
 # kelixip: the application server
 
 `kelixip` is the [productized SIP server](docs/kelixip/README.md)  built on the same stack
-👉 TOML-declared domains, 
-👉 script-per-function dispatch,
-👉 [loadable modules](docs/kelixip/modules/README.md) , 
-👉 a control CLI / [REST API](docs/kelixip/rest-api.md), 
-👉 and Prometheus metrics.
+- 👉 TOML-declared domains, 
+- 👉 script-per-function dispatch,
+- 👉 [loadable modules](docs/kelixip/modules/README.md) , 
+- 👉 a control CLI / [REST API](docs/kelixip/rest-api.md), 
+- 👉 and Prometheus metrics.
 
 # License
 
