@@ -73,7 +73,13 @@ defmodule MediaServer.Mendooze.Conn do
   @role_main 0
 
   @default_audio_codecs ["OPUS", "PCMU", "PCMA"]
-  @default_video_codecs ["H264", "VP8"]
+  # AV1 belongs here: the media server carries it end to end (`AV1Decoder`,
+  # `AV1Encoder` over libsvtav1, `AV1Encoder::ResolveNegotiation` for the fmtp,
+  # `ClampToLevel` for the level bound) and `Sdp`'s codec table names it. Leaving
+  # it out of the OFFER meant a caller doing AV1 got answered AV1 on its own leg —
+  # its offer is the menu there — while the callee was offered H.264 and VP8 only,
+  # declined the video, and the call died on `{:not_negotiated, :video}`.
+  @default_video_codecs ["AV1", "H264", "VP8"]
   @default_text_codecs ["T140", "T140RED"]
 
   # Receive bandwidth advertised as b=AS: on the video media (kb/s)
@@ -660,8 +666,20 @@ defmodule MediaServer.Mendooze.Conn do
 
     Enum.reduce_while(common, {:ok, []}, fn media, {:ok, acc} ->
       case bridge_decision(la, lb, media, policy) do
-        {:error, _} = err -> {:halt, err}
-        {how, sel} -> {:cont, {:ok, acc ++ [{media, how, sel}]}}
+        # One leg carries nothing at all on this media — the peer declined it.
+        # There is no bridge to build and no policy to apply: it is simply not
+        # part of this call. Fatal only for audio, on §11's own reasoning that a
+        # call with no audio is not a call; for anything else the media is
+        # declined in the answer and the call goes on. Killing an otherwise good
+        # call over a video leg nobody offered is the worst of both.
+        {:error, {:not_negotiated, m}} when m != :audio ->
+          {:cont, {:ok, acc ++ [{m, :decline, nil}]}}
+
+        {:error, _} = err ->
+          {:halt, err}
+
+        {how, sel} ->
+          {:cont, {:ok, acc ++ [{media, how, sel}]}}
       end
     end)
   end
@@ -750,6 +768,8 @@ defmodule MediaServer.Mendooze.Conn do
     end
   end
 
+  defp wire_media(state, _la, _lb, _media, :decline, _sel), do: {:ok, state}
+
   defp wire_media(state, la, lb, media, :attach, _sel) do
     case attach_pair(state, la, lb, media) do
       :ok -> {:ok, put_bridge(state, media, :attach)}
@@ -822,7 +842,7 @@ defmodule MediaServer.Mendooze.Conn do
           shape = shape_for(how, Map.get(policy, media, :avoid)),
           shape != nil,
           codes = codec_intersection(la, lb, media),
-          codes != [],
+          shape == :decline or codes != [],
           into: %{},
           do: {media, {shape, codes}}
 
@@ -850,6 +870,7 @@ defmodule MediaServer.Mendooze.Conn do
   # no conversion, and the transcoder spends the call bridging. `:force` states no
   # such preference — each leg is meant to keep the head of its own list — so its
   # answer is left exactly as the offer ordered it.
+  defp shape_for(:decline, _mode), do: :decline
   defp shape_for(:attach, _mode), do: :only
   defp shape_for(:transcode, :avoid), do: :prefer
   defp shape_for(:transcode, _mode), do: nil
@@ -883,7 +904,14 @@ defmodule MediaServer.Mendooze.Conn do
 
       descs ->
         negs =
-          Map.new(leg.negs, fn {media, neg} -> {media, restrict_neg(neg, shaping, media)} end)
+          leg.negs
+          # a declined media leaves `negs` entirely: `answer_or_reject/3` then
+          # emits the RFC 3264 §6 port-0 rejection for it, which is how the
+          # caller learns there is no video after all
+          |> Enum.reject(fn {media, _} ->
+            match?({:ok, {:decline, _}}, Map.fetch(shaping, media))
+          end)
+          |> Map.new(fn {media, neg} -> {media, restrict_neg(neg, shaping, media)} end)
 
         Sdp.build(%{
           ip: leg.local_ip,

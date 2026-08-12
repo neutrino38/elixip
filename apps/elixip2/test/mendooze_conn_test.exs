@@ -342,6 +342,57 @@ defmodule Mendooze.ConnTest do
     assert length(String.split(rebuilt, "m=audio")) == 2
   end
 
+  # Traffic of 2026-08-12: Alice offered AV1, our outbound offer carried H.264 and
+  # VP8 only, so Bob declined the video — and the whole call died on
+  # `{:not_negotiated, :video}`, audio included, with a 488 to a caller whose
+  # audio was perfectly fine. A media one leg does not carry is not a policy
+  # failure: there is simply nothing to bridge.
+  test "a media the callee declined is declined in the answer, not fatal to the call" do
+    %{server: server} = start_media_server(&verdict_handler/2)
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio_video)
+    assert_receive {:jsr309_call, "MediaSessionCreate", [_tag, _q]}, 1_000
+
+    {:ok, out} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :audio_video,
+        audio_codec: ["OPUS"],
+        bridge_with: conn
+      )
+
+    offer =
+      Sdp.build(%{
+        ip: "10.9.8.7",
+        medias: [
+          %{type: :audio, port: 40_000, codecs: ["OPUS"], dtmf: true},
+          %{type: :video, port: 40_002, codecs: ["VP8"]}
+        ]
+      })
+
+    assert {:ok, first_pass} = Mendooze.set_remote_offer(conn, offer)
+    assert first_pass =~ "VP8/90000"
+
+    # the callee answers audio only — it wants no video at all
+    {:ok, _offer} = Mendooze.get_local_offer(out)
+
+    :ok =
+      Mendooze.set_remote_answer(
+        out,
+        remote_answer(audio: %{type: :audio, port: 40_000, codecs: ["OPUS"], dtmf: true})
+      )
+
+    # the call lives: audio is bridged…
+    assert {:ok, %{inbound_answer: rebuilt}} =
+             Mendooze.bridge(conn, out, audio: :avoid, video: :avoid)
+
+    assert_receive {:jsr309_call, "AudioTranscoderCreate", [3, _]}, 1_000
+
+    # …and the caller is TOLD there is no video, rather than left believing there is
+    assert rebuilt =~ ~r/m=video 0 /
+    refute rebuilt =~ "VP8/90000"
+    assert rebuilt =~ "opus/48000/2"
+  end
+
   # What `:force` buys: each peer stays on the codec IT put first — opus toward
   # the caller, PCMU toward the callee — which is a transcoder, though a common
   # codec existed and `:avoid` would have relayed.
