@@ -120,13 +120,18 @@ defmodule SIP.IST do
     Logger.info([ transid: state.msg.transid,  module: __MODULE__,
                     message: "SIP Request #{state.msg.method} received"])
     case process_UAS_request(state) do
-      # Request accepted by the upper layer. The IST sends NO automatic 100 Trying:
-      # deployed behind a proxy that already answers one of its own (kamailio's
-      # `sl_send_reply`), ours was a duplicate on the wire. Deviation from RFC 3261
-      # §17.2.1, which asks the server transaction for a 100 when the TU has not
-      # answered within 200 ms — a scenario that wants one calls `reply_invite(100)`,
-      # and until it answers anything, INVITE retransmissions are absorbed above.
-      { :ok, state } -> { :noreply, schedule_timer_F(state) }
+      # Request accepted by the upper layer. Arm the 100 Trying of RFC 3261 §17.2.1
+      # — sent only if the TU has still answered nothing 200 ms from now.
+      #
+      # This used to be "never send one": deployed behind a proxy that answers a 100
+      # of its own (kamailio's `sl_send_reply`), ours was a duplicate on the wire.
+      # But the condition the RFC states is what makes both deployments right. Our
+      # scripts answer 100 on the first line of their wait_invite state, far inside
+      # 200 ms, so behind kamailio the timer never fires and the duplicate does not
+      # come back. Standing alone — or with a TU that is slow for a good reason, a
+      # DID lookup on a media server, a database — it fires and quenches the INVITE
+      # retransmissions that until now arrived with nothing yet on the wire.
+      { :ok, state } -> { :noreply, state |> schedule_timer_F() |> schedule_timer_100() }
 
       # In case of failure, timerK is scheduled by internal_reply()
       { :upperlayerfailure, state } -> { :noreply, state }
@@ -139,6 +144,26 @@ defmodule SIP.IST do
   end
 
   @impl true
+  # The 100 Trying of RFC 3261 §17.2.1, due only if the TU has said nothing yet.
+  #
+  # `state.state == :trying` IS "nothing sent yet": fsm_reply/3 moves the
+  # transaction to :proceeding on the first provisional and to :confirmed on a
+  # final, so no separate flag is needed and the timer needs no cancelling — it
+  # fires into a no-op once the application has answered.
+  #
+  # `nil` as the totag, and reply_to_request/5 would drop one anyway: a 100 goes
+  # out untagged (§17.2.1 downgrades tag insertion to SHOULD NOT there).
+  def handle_info({ :timeout, _tref, :timer100 } , state)  do
+    if state.state == :trying do
+      Logger.debug([ transid: state.msg.transid,  module: __MODULE__,
+                      message: "TU silent after 200 ms: sending 100 Trying (RFC 3261 §17.2.1)"])
+      { _rc, new_state } = reply_to_UAC(state, state.msg, 100, "Trying", [], nil)
+      { :noreply, new_state }
+    else
+      { :noreply, state }
+    end
+  end
+
   # Timer F - timeout
   def handle_info({ :timeout, _tref, :timerF } , state)  do
     if state.state in [ :trying, :proceeding ] do

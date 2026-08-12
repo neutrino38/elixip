@@ -83,11 +83,12 @@ defmodule Kelix.DirectCall do
         end
 
       # Alice gave up. Two different things, and both are wanted: stop the
-      # search, and tell the device that is ringing.
+      # search, and tell the device that is ringing. Then wait: a CANCEL asks,
+      # it does not decide (RFC 3261 §16.7).
       {:CANCEL, req, _trans, _dlg} ->
         b2bua_cancel_forward()
         b2bua_forward(req)
-        scenario_aborted("caller cancelled")
+        goto(cancelling, "caller cancelled")
 
       {:BYE, req, _trans, _dlg} ->
         b2bua_cancel_forward()
@@ -101,6 +102,47 @@ defmodule Kelix.DirectCall do
       180_000 ->
         b2bua_reply(last_uas_req(), 408, "Request Timeout")
         scenario_failure("Bob never answered")
+    end
+  end
+
+  # The CANCEL has gone to Bob; his transaction is not over until a final response
+  # says so (RFC 3261 §16.7). Staying here to hear it is the whole point: end now
+  # and a device that answers a fraction of a second later is left off-hook in a
+  # call nobody is in.
+  #
+  # `SIP.DialogImpl` catches that case on its own — it is not a policy, so no
+  # script may get it wrong — and this state does not make it correct, it makes it
+  # VISIBLE: a call answered after its cancellation is a real event, and the
+  # difference between "abandoned" and "answered then hung up" is one somebody
+  # bills on.
+  state cancelling do
+    on_events do
+      # What normally comes back, and fast.
+      {:outbound, {487, _resp, _trans, _dlg}} ->
+        scenario_aborted("caller cancelled, callee confirmed")
+
+      # The race. Bob picked up before the CANCEL reached him; nobody is left to
+      # talk to, so acknowledge his answer and hang up (§13.2.2.4 then §15).
+      {:outbound, {200, _resp, _trans, _dlg}} ->
+        b2bua_send_BYE()
+        scenario_success("callee answered after the cancellation; hung up")
+
+      # Still ringing somewhere: keep listening rather than take a 180 for an end.
+      {:outbound, {code, _resp, _trans, _dlg}} when code in 100..199 ->
+        goto(loop, "provisional #{code} after cancel")
+
+      {:outbound, {code, _resp, _trans, _dlg}} when code >= 300 ->
+        scenario_aborted("caller cancelled, callee answered #{code}")
+
+      {:outbound, {:dialog_terminated, _dlg, _reason}} ->
+        scenario_aborted("caller cancelled, outbound leg gone")
+
+      {:dialog_terminated, _dlg, _reason} ->
+        scenario_aborted("caller cancelled")
+    after
+      # Bounded on purpose: past timer B the outbound transaction is over whatever
+      # we heard, and an instance held on a leg that says nothing is a slot lost.
+      32_000 -> scenario_aborted("caller cancelled, callee never concluded")
     end
   end
 

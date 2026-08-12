@@ -15,7 +15,7 @@ defmodule TestRegistrar do
 
       _ -> "300"
     end
-    SIP.Uri.set_uri_param(aor, "expires", expires)
+    SIP.Uri.set_header_param(aor, "expires", expires)
   end
 
   defp registrar_process_loop(state) do

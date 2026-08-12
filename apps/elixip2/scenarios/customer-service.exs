@@ -93,10 +93,13 @@ defmodule B2BUA.CustomerService do
           scenario_success("no agent available (#{code})")
         end
 
+      # A CANCEL asks, it does not decide (RFC 3261 §16.7): the agent being rung
+      # may still pick up, and an abandoned call is not the same event as one an
+      # agent answered a moment too late.
       {:CANCEL, req, _trans, _dlg} ->
         b2bua_cancel_forward()
         b2bua_forward(req)
-        scenario_aborted("caller cancelled")
+        goto(cancelling, "caller cancelled")
 
       {:BYE, req, _trans, _dlg} ->
         b2bua_cancel_forward()
@@ -113,8 +116,38 @@ defmodule B2BUA.CustomerService do
     end
   end
 
-  # From here on, nothing is specific to a hunt: these four are the states every
+  # From here on, nothing is specific to a hunt: these are the states every
   # B2BUA scenario shares, and they are the ones b2bua_basic.exs comments.
+
+  # The CANCEL has gone to the agent being rung; its transaction is not over
+  # until a final response says so (RFC 3261 §16.7). `SIP.DialogImpl` handles the
+  # race on its own — no script may get it wrong — and this state makes it
+  # VISIBLE, which for a queue is the point: an agent who answered an abandoned
+  # call is not an abandoned call.
+  state cancelling do
+    on_events do
+      {:outbound, {487, _resp, _trans, _dlg}} ->
+        scenario_aborted("caller abandoned, agent confirmed")
+
+      {:outbound, {200, _resp, _trans, _dlg}} ->
+        b2bua_send_BYE()
+        scenario_success("agent answered after the caller abandoned; hung up")
+
+      {:outbound, {code, _resp, _trans, _dlg}} when code in 100..199 ->
+        goto(loop, "provisional #{code} after cancel")
+
+      {:outbound, {code, _resp, _trans, _dlg}} when code >= 300 ->
+        scenario_aborted("caller abandoned, agent answered #{code}")
+
+      {:outbound, {:dialog_terminated, _dlg, _reason}} ->
+        scenario_aborted("caller abandoned, agent leg gone")
+
+      {:dialog_terminated, _dlg, _reason} ->
+        scenario_aborted("caller abandoned")
+    after
+      32_000 -> scenario_aborted("caller abandoned, agent never concluded")
+    end
+  end
 
   state wait_ack do
     on_events do

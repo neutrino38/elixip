@@ -87,6 +87,18 @@ defmodule SIP.Test.Transport.UDPMockup do
     GenServer.cast(t_pid, {:answer_bye, answer})
   end
 
+  @doc """
+  Answer the INVITE this peer has already answered and been ACKed for, once more.
+
+  What a callee does with a 2xx it has not seen acknowledged (RFC 3261 §13.3.1.4):
+  it sends it again, up to 64*T1, whatever the transport. The stack owes it another
+  ACK — from the client transaction alone, since the dialog and the application are
+  done with that INVITE — and this is how a test can ask for it.
+  """
+  def retransmit_2xx(t_pid) do
+    GenServer.cast(t_pid, :retransmit_2xx)
+  end
+
   defp handle_req(state, :INVITE, sipreq) do
     # Tell the test the INVITE actually went out, mirroring {:options_sent, …}.
     # Without it a test cannot know *when* to simulate an answer: it would race
@@ -102,10 +114,22 @@ defmodule SIP.Test.Transport.UDPMockup do
   end
 
   defp handle_req(state, :ACK, _sipreq) do
-    if Map.has_key?(state, :req) and state.req.method == INVITE do
-      Map.delete(state, :req)
-    else
-      state
+    # Observed whenever someone is listening, like the BYE below and for the same
+    # reason: a test asserting that a 2xx nobody owns still gets acknowledged has
+    # no other way to see it.
+    if state.testapppid != nil, do: send(state.testapppid, :ACK)
+
+    # The INVITE that was just acknowledged, kept aside for `retransmit_2xx/1` to
+    # answer once more — what a callee that has not seen this ACK does.
+    #
+    # It stays in `:req` as well. A `Map.delete(state, :req)` stood here, guarded by
+    # `state.req.method == INVITE` — no colon, so an alias, so never true: the
+    # branch has never run once, and every suite here has been written against a
+    # peer that keeps its request. Removing the guard would enable it for the first
+    # time, which is not this change's business.
+    case Map.get(state, :req) do
+      %{method: :INVITE} = req -> Map.put(state, :acked_req, req)
+      _ -> state
     end
   end
 
@@ -394,6 +418,26 @@ defmodule SIP.Test.Transport.UDPMockup do
 
     Process.send_after(self(), {:recv, siprsp}, after_ms)
     {:noreply, state}
+  end
+
+  # See retransmit_2xx/1. The answer is rebuilt by the clause above from the INVITE
+  # put aside when the ACK came in — same request, same To tag, so the same bytes a
+  # real callee resends. Its state is dropped: the INVITE is only lent to it for
+  # the rebuild and must not come back as the request in progress.
+  def handle_cast(:retransmit_2xx, state) do
+    case Map.get(state, :acked_req) do
+      nil ->
+        Logger.warning(
+          module: SIP.Test.Transport.UDPMockup,
+          message: "Asked to retransmit a 2xx but no INVITE has been acknowledged yet. Ignoring."
+        )
+
+        {:noreply, state}
+
+      req ->
+        {:noreply, _lent} = handle_cast({:simulate, 200, 0}, Map.put(state, :req, req))
+        {:noreply, state}
+    end
   end
 
   @spec handle_cast({:simulate, 401 | 407, non_neg_integer()}, map()) :: {:noreply, map()}

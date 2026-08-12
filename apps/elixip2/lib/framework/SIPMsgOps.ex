@@ -83,14 +83,17 @@ defmodule SIP.Msg.Ops do
   end
 
   @doc """
-  The `expires` URI parameter of a single Contact, or `nil` when it carries none.
+  The `expires` parameter of a single Contact, or `nil` when it carries none.
 
   A wildcard Contact (`:*`, §10.2.2) and an unparsed Contact have no parameter of
   their own, so they read as `nil` — the header speaks for them.
+
+  `get_header_param/2`, because `c-p-expires` is a Contact *header* parameter
+  (RFC 3261 §25.1): `<sip:x@y;expires=10>;expires=600` expires in 600 s.
   """
   @spec contact_expires_param(term()) :: non_neg_integer() | nil
   def contact_expires_param(%SIP.Uri{} = contact) do
-    case SIP.Uri.get_uri_param(contact, "expires") do
+    case SIP.Uri.get_header_param(contact, "expires") do
       {:ok, value} -> parse_expires(value, nil)
       _ -> nil
     end
@@ -670,8 +673,12 @@ defmodule SIP.Msg.Ops do
 
   @doc "Crée un message CANCEL à partir d'une requête existante"
   def cancel_request(sipmsg) when is_map(sipmsg) and is_atom(sipmsg.method) do
+    # "Max-Forwards", with the S the header actually has (§20.22, and what the
+    # parser stores): spelt "Max-Forward" the test never matched, so every CANCEL
+    # and every ACK we built went out without the header §8.1.1 makes mandatory
+    # in a request.
     cancel_filter = fn { k, _v } ->
-      k in [ :via, :to, :from, :route, "Max-Forward", :callid, :contentlength, :cseq, :method, :ruri ]
+      k in [ :via, :to, :from, :route, "Max-Forwards", :callid, :contentlength, :cseq, :method, :ruri ]
     end
     [ seqno, _method ] = sipmsg.cseq
     fieldlist = [
@@ -814,12 +821,12 @@ defmodule SIP.Msg.Ops do
   defp strip_tag(req, field) do
     case Map.get(req, field) do
       %SIP.Uri{} = uri ->
-        Map.put(req, field, %SIP.Uri{uri | params: Map.delete(uri.params, "tag")})
+        Map.put(req, field, SIP.Uri.delete_param(uri, "tag"))
 
       bin when is_binary(bin) ->
         case SIP.Uri.parse(bin) do
           {:ok, uri} ->
-            Map.put(req, field, %SIP.Uri{uri | params: Map.delete(uri.params, "tag")})
+            Map.put(req, field, SIP.Uri.delete_param(uri, "tag"))
 
           _ ->
             req
@@ -879,6 +886,31 @@ defmodule SIP.Msg.Ops do
 	end
   @reply_filter [ :via, :to, :from, :route, :recordroute, :cseq, :callid, :contentlength ]
 
+  # The To tag a response carries when the request itself named none. (When the
+  # request DID name one, §8.2.6.2 requires echoing it and this is never reached —
+  # including on a 100, which is why an in-dialog request still gets its tag back.)
+  #
+  # A 100 (Trying) goes out WITHOUT one, and that beats an explicit `totag` handed
+  # in by the caller. RFC 3261 §8.2.6.2 merely permits it — "with the exception of
+  # the 100 (Trying) response, in which a tag MAY be present" — but §17.2.1 is
+  # firmer for the response a server transaction emits: "the insertion of tags in
+  # the To header field of the response (when none was present in the request) is
+  # downgraded from MAY to SHOULD NOT". kamailio applies that to its TU-generated
+  # 100 too — an explicit `sl_reply(100, "Trying")` in kamailio.cfg adds no tag —
+  # and we follow, so the rule holds by role rather than by which layer composed
+  # the message. The reason behind the exception: a 100 is hop-by-hop (§16.7: "a
+  # stateful proxy MUST NOT forward any 100 (Trying) response"), it is emitted
+  # before anyone knows which UAS will answer, and §8.2.6.2's "same tag for all
+  # responses" excepts it precisely so the real UAS's tag may differ.
+  #
+  # Above 100 a tag is mandatory, and when we have none to hand we MINT one rather
+  # than fail: raising here killed the whole server transaction, so a caller who
+  # cancelled a call that had only ever been answered 100 got no 200 to its CANCEL
+  # at all, retransmitted, and its INVITE stayed unanswered until it timed out.
+  defp response_totag(100, _totag), do: nil
+  defp response_totag(_resp_code, totag) when is_binary(totag), do: totag
+  defp response_totag(_resp_code, _totag), do: generate_from_or_to_tag()
+
   @spec reply_to_request(
           %{:method => atom(), :to => binary(), optional(any()) => any()},
           integer(),
@@ -912,21 +944,16 @@ defmodule SIP.Msg.Ops do
     { :ok, to_uri } = SIP.Uri.parse(req.to)
     upd_map = case SIP.Uri.get_uri_param(to_uri, "tag") do
 
-      #If "to" header has no tag and tag is specified
-      { :no_such_param, nil } ->
-        if totag != nil do
-          to_uri_modified = SIP.Uri.set_uri_param(to_uri, "tag", totag)
-          Map.put(upd_map, :to, to_uri_modified)
-        else
-          if resp_code > 100 do
-            raise "Missing totag for SIP response #{resp_code} > 100"
-          else
-            fieldlist
-          end
-        end
-
+      # The request already names a To tag (an in-dialog request, a re-INVITE):
+      # a response echoes it, RFC 3261 §8.2.6.2.
       { :ok, _old_totag } ->
         upd_map
+
+      { :no_such_param, nil } ->
+        case response_totag(resp_code, totag) do
+          nil -> upd_map
+          tag -> Map.put(upd_map, :to, SIP.Uri.set_header_param(to_uri, "tag", tag))
+        end
     end
 
     rsp = req |> Map.filter(resp_filter) |> update_sip_msg(upd_map)
@@ -1009,8 +1036,9 @@ defmodule SIP.Msg.Ops do
 
   @doc "Crée un message ACK à partir d'une requête existante"
   def ack_request(sipmsg, remote_contact, routeset \\ :ignore , body \\ []) when is_map(sipmsg) and sipmsg.method in [:INVITE, :UPDATE] do
+    # "Max-Forwards" — see cancel_request/1 above for the missing S.
     ack_filter = fn { k, _v } ->
-      k in [ :to, :from, :route, "Max-Forward", :callid, :contentlength ]
+      k in [ :to, :from, :route, "Max-Forwards", :callid, :contentlength ]
     end
 
     remote_contact = if remote_contact == nil do
@@ -1052,8 +1080,15 @@ defmodule SIP.Msg.Ops do
     case SIPMsg.check_required_params(authparams, [ "nonce", "realm"]) do
       :ok ->
         algo = Map.get(authparams, "algorithm", "MD5")
+        # The digest is computed over the Request-URI *as it goes on the wire*
+        # (RFC 2617 A2 = Method ":" digest-uri-value, and RFC 3261 §22.4 has the
+        # client's `uri=` mirror the Request-URI), so it must be the same
+        # serialization the Request-Line uses — no display name, no header
+        # parameters. `to_string/1` here would digest a different string than the
+        # one sent as soon as the target came from a stored Contact.
+        { :ok, digest_uri } = SIP.Uri.serialize_ruri(req.ruri)
         autorisation_params = SIP.Auth.build_auth_response(algo, username, authparams["nonce"], authparams["realm"],
-                                                  passwd_or_hash, pwdformat, req.method, to_string(req.ruri))
+                                                  passwd_or_hash, pwdformat, req.method, digest_uri)
 
         # Increment CSeq to start a new transaction
         new_cseq = if Map.get(req, :cseq) != nil, do: hd(req.cseq) + 1, else: 1
@@ -1097,10 +1132,13 @@ defmodule SIP.Msg.Ops do
 
     case get_auth_params_and_check_nonce(req, nonce) do
       { header, authparams } when header in [ :authorization, :proxyauthorization ] ->
+        # Same serialization as the sender used (see add_authorization_to_req/6):
+        # the Request-URI form, not the header-field form.
+        { :ok, digest_uri } = SIP.Uri.serialize_ruri(req.ruri)
         response = SIP.Auth.compute_auth_response_from_pwd(
           authparams["algorithm"], authparams["username"],
           authparams["nonce"], authparams["realm"], password,
-          req.method, req.ruri )
+          req.method, digest_uri )
 
         if response == authparams["response"] do
           :ok

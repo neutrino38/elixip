@@ -40,8 +40,11 @@ defmodule Kelix.Mod.RegistrarTest do
   defp contact_uri(user, host, nil),
     do: %SIP.Uri{userpart: user, domain: host, port: 5060}
 
+  # `q` is a Contact HEADER parameter (`c-p-q`, RFC 3261 §25.1), hence
+  # set_header_param/3 — as a URI parameter it would be part of the address and
+  # ride along onto the dialable URI, which is what §16.6 forbids.
   defp contact_uri(user, host, q),
-    do: SIP.Uri.set_uri_param(contact_uri(user, host, nil), "q", to_string(q))
+    do: SIP.Uri.set_header_param(contact_uri(user, host, nil), "q", to_string(q))
 
   # A stand-in for a REGISTER dialog. It honours the one part of the dialog
   # contract this module uses — `SIP.Dialog.terminate/2` — by reporting it and
@@ -199,7 +202,7 @@ defmodule Kelix.Mod.RegistrarTest do
 
     test "on a store already holding the old contact, it swaps one for the other", ctx do
       # seed the binding the handset is about to drop
-      seeded = SIP.Uri.set_uri_param(ctx.old_contact, "expires", "180")
+      seeded = SIP.Uri.set_header_param(ctx.old_contact, "expires", "180")
       assert {:registered, _} = Registrar.save(%{ctx.req | contact: seeded}, @rebind_domain)
 
       assert [%Contact{contact: %{domain: "172.22.0.2"}}] =
@@ -223,8 +226,8 @@ defmodule Kelix.Mod.RegistrarTest do
       # The key must be the URI, not the URI plus its Contact header parameters:
       # with `;expires=` in the key, every refresh whose lifetime changed added a
       # second binding for the same contact.
-      short = SIP.Uri.set_uri_param(ctx.old_contact, "expires", "120")
-      long = SIP.Uri.set_uri_param(ctx.old_contact, "expires", "180")
+      short = SIP.Uri.set_header_param(ctx.old_contact, "expires", "120")
+      long = SIP.Uri.set_header_param(ctx.old_contact, "expires", "180")
 
       assert {:registered, _} = Registrar.save(%{ctx.req | contact: short}, @rebind_domain)
       assert {:registered, _} = Registrar.save(%{ctx.req | contact: long}, @rebind_domain)

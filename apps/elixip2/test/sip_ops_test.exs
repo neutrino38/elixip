@@ -70,6 +70,54 @@ defmodule SIP.Test.SIP.Msg.Ops do
     end
   end
 
+  # RFC 3261 §8.2.6.2 requires a To tag on every response above 100. With none to
+  # hand this used to raise, which killed the server transaction and answered
+  # NOTHING — seen on a real call: the caller cancelled an INVITE that had only
+  # ever been answered 100, the IST died composing the 200 to the CANCEL, and the
+  # caller retransmitted into silence. Mint one instead.
+  test "a response above 100 gets a To tag even when nobody supplied one", context do
+    # the fixture's To carries no tag, like a call not yet answered
+    assert {:no_such_param, nil} = SIP.Uri.get_uri_param(elem(SIP.Uri.parse(context.sipreq.to), 1), "tag")
+
+    # 487: what the cancelled INVITE is answered, on the very path that used to raise
+    siprsp = SIP.Msg.Ops.reply_to_request(context.sipreq, 487, "Request interrupted", [], nil)
+
+    assert siprsp.response == 487
+    assert {:ok, tag} = SIP.Uri.get_header_param(siprsp.to, "tag")
+    assert is_binary(tag) and tag != ""
+  end
+
+  # …with the exception the same section makes for a 100 Trying, which §17.2.1
+  # turns into a SHOULD NOT. It holds even when the caller hands one in: the rule
+  # is a property of the response code, not of who composed the message — kamailio
+  # adds no tag to an explicit `sl_reply(100, "Trying")` either, and a proxy built
+  # on this framework must behave the same without every script knowing to.
+  test "a 100 Trying never carries a To tag, even when one is supplied", context do
+    untagged = SIP.Msg.Ops.reply_to_request(context.sipreq, 100, "Trying", [], nil)
+    assert untagged.response == 100
+    assert {:no_such_param, nil} = SIP.Uri.get_uri_param(untagged.to, "tag")
+
+    supplied = SIP.Msg.Ops.reply_to_request(context.sipreq, 100, "Trying", [], "zz77998")
+    assert {:no_such_param, nil} = SIP.Uri.get_uri_param(supplied.to, "tag")
+    refute to_string(supplied.to) =~ "zz77998"
+  end
+
+  # But a request that already names a To tag is in a dialog, and §8.2.6.2 is
+  # unconditional there: "If a request contained a To tag in the request, the To
+  # header field in the response MUST equal that of the request." No exception for
+  # the 100 — the tag is the peer's, not ours to withhold.
+  test "a 100 to an in-dialog request echoes the To tag it came with", context do
+    in_dialog = %{context.sipreq | to: "<sip:90901@visioassistance.net>;tag=peer-tag"}
+
+    siprsp = SIP.Msg.Ops.reply_to_request(in_dialog, 100, "Trying", [], nil)
+    assert SIP.Uri.get_uri_param(siprsp.to, "tag") == {:ok, "peer-tag"}
+  end
+
+  test "an explicit totag is always the one used", context do
+    siprsp = SIP.Msg.Ops.reply_to_request(context.sipreq, 486, "Busy Here", [], "zz77998")
+    assert SIP.Uri.get_header_param(siprsp.to, "tag") == {:ok, "zz77998"}
+  end
+
   test "Add a single body to a SIP message" do
     body = %{ contenttype: "application/sdp", data: "blabla" }
     sipmsg = SIP.Msg.Ops.update_sip_msg(%{}, { :body, [ body ]})

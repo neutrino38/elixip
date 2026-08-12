@@ -1,6 +1,8 @@
 defmodule SIPMsg do
 	@moduledoc "SIP protocol parser and serializer"
 
+	require Logger
+
 	# Concat multi value headers in a single list
 	defp concat_multi_header_values(val1, val2) when is_list(val1) and is_list(val2) do
 		val1 ++ val2
@@ -569,30 +571,39 @@ defmodule SIPMsg do
 		end
 	end
 
-	# Parse data after the headers and add body in the SIP message map
+	# Parse data after the headers and add body in the SIP message map.
+	#
+	# `body` is what follows the blank line — parse/2 splits on "\r\n\r\n" and keeps
+	# the tail — so Content-Length is exactly its size: RFC 3261 §20.14, "the size of
+	# the message-body, in decimal number of octets". The separating CRLF is NOT part
+	# of it, and `serialize_body/1` agrees (it writes "\r\n" <> data, with
+	# Content-Length set to byte_size(data)).
+	#
+	# This used to count the separator, taking `clen - 2` bytes and calling the rest
+	# `sz + 2`. Every received body was therefore truncated by 2 octets — its final
+	# CRLF — while `:contentlength` kept the sender's value. On UDP that passed
+	# unnoticed (an SDP survives a missing last CRLF), but a B2BUA relaying the body
+	# over TCP then wrote 531 octets under a `Content-Length: 533`: the callee's
+	# depacketizer waited for two more, so the INVITE never completed and the call
+	# hung with no response at all. The two bytes finally arrived as the first two of
+	# the CANCEL that followed on the same connection — which is why the callee rang
+	# *when the caller hung up*, never saw the CANCEL, and answered into a byte
+	# stream that stayed two octets out of step for the rest of the call.
+	#
+	# Content-Length is OPTIONAL on a datagram transport (§20.14: absent, the body is
+	# "the rest of the datagram"), and Linphone 6.2 omits it on its in-dialog
+	# requests. Reading it with dot access raised a KeyError that killed the whole UDP
+	# transport process, so the ACK never reached its transaction — the call answered
+	# and then carried no media — and every BYE retransmission killed it again.
+	#
+	# A datagram that stops at the blank line leaves an EMPTY body here, not nil: that
+	# is the bodyless request (an ACK, a BYE) and it has no body at all.
 	defp add_body(parsed_msg, body) do
-		# Content-Length is OPTIONAL on a datagram transport (RFC 3261 §20.14: absent, the
-		# body is "the rest of the datagram"), and Linphone 6.2 omits it on its in-dialog
-		# requests. Reading it with dot access raised a KeyError that killed the whole UDP
-		# transport process, so the ACK never reached its transaction — the call answered and
-		# then carried no media — and every BYE retransmission killed it again.
-		#
-		# A datagram that stops at the blank line leaves an EMPTY body here, not nil: that is
-		# the bodyless request (an ACK, a BYE) and it has no body at all. The `+ 2` follows
-		# the convention below, where the sizes compared count the CRLF that separates the
-		# headers from the body.
-		clen = case Map.get(parsed_msg, :contentlength) do
-			nil ->
-				if is_nil(body) or body == "" do 0 else Kernel.byte_size(body) + 2 end
+		sz = if is_nil(body), do: 0, else: Kernel.byte_size(body)
 
+		clen = case Map.get(parsed_msg, :contentlength) do
+			nil -> sz
 			value -> value
-		end
-		sz = if is_nil(body) do
-			0
-		else
-			# Add 2 because Content-Length includes the \r\n separator
-			# between the message body and the headers
-			Kernel.byte_size(body) + 2
 		end
 
 		cond do
@@ -608,19 +619,36 @@ defmodule SIPMsg do
 				# Missing content-type header
 				{ :missing_content_type, parsed_msg, body }
 
-			clen > sz ->
-				# ANnounced content length exceeds data read
-				IO.puts("Content-Length: #{clen} > data size: #{sz}")
-				{ :bad_body_size, parsed_msg, nil }
+			true ->
+				# What we actually hold. A peer announcing more than it sent is
+				# tolerated rather than discarded (RFC 3261 §18.3 would have us drop
+				# the datagram): senders do trim the body's last CRLF, and answering
+				# nothing at all is the failure this whole reading is here to prevent.
+				# Anything beyond `clen` is not ours — on a stream transport it is the
+				# next pipelined message.
+				taken = min(clen, sz)
 
-			clen <= sz ->
-				# Multipart/mixed as defined by RFC 2046
-				mod_msg = Map.put(parsed_msg, :body,
-								  	parse_multi_part_body(
-											parsed_msg.contenttype,
-											Kernel.binary_part(body, 0, clen-2)))
+				if clen > sz do
+					Logger.warning([ module: __MODULE__,
+						message: "Content-Length #{clen} exceeds the #{sz} octets of body " <>
+							"received; taking what is there"])
+				end
 
-				rest = if clen < sz do Kernel.binary_part(body, clen-2, sz - clen) else "" end
+				# :contentlength is re-stated as the size of the body we KEPT, so the
+				# message is self-consistent whatever the sender announced. A B2BUA
+				# relaying it then puts exactly that many octets back on the wire, and
+				# the far end's depacketizer finds the end of the message where it
+				# expects to. Without this a peer's wrong Content-Length propagates
+				# and desynchronizes a TCP connection for the rest of its life.
+				mod_msg =
+					parsed_msg
+					|> Map.put(:body,
+							parse_multi_part_body(
+								parsed_msg.contenttype,
+								Kernel.binary_part(body, 0, taken)))
+					|> Map.put(:contentlength, taken)
+
+				rest = if taken < sz do Kernel.binary_part(body, taken, sz - taken) else "" end
 				{ :ok, mod_msg, rest }
 		end
 	end
@@ -705,8 +733,15 @@ defmodule SIPMsg do
 	end
 
 	# ---------------------- serialize -----------------------------------------
+	# `serialize_ruri/1`, never `serialize/1`: a Request-Line holds a Request-URI
+	# (RFC 3261 §25.1 `Request-URI = SIP-URI / SIPS-URI / absoluteURI`), never a
+	# `name-addr` and never header field parameters. Enforced here rather than
+	# trusted to the caller — a display name in the first line inserts a space and
+	# breaks the Request-Line itself, which is how a registered contact forwarded
+	# verbatim went out as `INVITE "Bob" <sip:bob@host>;+sip.instance="…" SIP/2.0`
+	# and was dropped by the callee without a single response.
 	defp serialize_first_line(req, uri) when is_atom(req) do
-		{ :ok, uri_str } = SIP.Uri.serialize(uri)
+		{ :ok, uri_str } = SIP.Uri.serialize_ruri(uri)
 		Atom.to_string(req) <> " " <> uri_str <> " SIP/2.0\r\n"
 	end
 

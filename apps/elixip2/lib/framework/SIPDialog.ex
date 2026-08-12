@@ -47,7 +47,7 @@ defmodule SIP.Dialog do
   # Create from TAG and add it the from URI
   defp get_or_create_dialog_id(req, {nil, callid, totag}) do
     fromtag = generate_from_or_to_tag()
-    req = Map.put(req, :from, SIP.Uri.set_uri_param(req.from, "tag", fromtag))
+    req = Map.put(req, :from, SIP.Uri.set_header_param(req.from, "tag", fromtag))
     get_or_create_dialog_id(req, {fromtag, callid, totag})
   end
 
@@ -287,7 +287,7 @@ defmodule SIP.Dialog do
   Send a new in-dialog request out. On success returns `{ :ok, transaction_pid }`
   where `transaction_pid` is the freshly created UAC transaction (usable to ACK or
   CANCEL the request). On failure returns the bare error code (e.g.
-  `:methodnotallowed`, `:toomanytransactons`, or a transport error code).
+  `:methodnotallowed`, `:toomanytransactions`, or a transport error code).
   """
   def new_request(dialog_pid, req) when is_pid(dialog_pid) and is_req(req) do
     GenServer.call(dialog_pid, {:newreq, req})
@@ -363,6 +363,20 @@ defmodule SIP.Dialog do
 
   def ack(dialog_pid, transac_pid) when is_pid(dialog_pid) do
     GenServer.call(dialog_pid, {:ack, transac_pid})
+  end
+
+  @doc """
+  ACK the 2xx `dialog_pid` is still holding an INVITE client transaction for, if
+  there is one. `:ok` when it did, `:none` when nothing was owed — quietly either
+  way, since "already acknowledged" is the ordinary case.
+
+  For the caller that has to end a call without knowing whether the ACK went out:
+  a BYE only ends an *established* dialog (RFC 3261 §15), and one whose 2xx the
+  far end is still retransmitting is not established as far as it is concerned.
+  """
+  @spec ack_pending_invite(pid()) :: :ok | :none
+  def ack_pending_invite(dialog_pid) when is_pid(dialog_pid) do
+    GenServer.call(dialog_pid, :ack_pending_invite)
   end
 
   @doc """

@@ -54,7 +54,7 @@ defmodule SIP.Session.Registrar do
         contact
 
       expires when expires > @max_expires ->
-        SIP.Uri.set_uri_param(contact, "expires", to_string(@max_expires))
+        SIP.Uri.set_header_param(contact, "expires", to_string(@max_expires))
 
       expires when expires < @min_expires ->
         throw({:reject, 423, "Interval Too Brief"})
@@ -116,7 +116,7 @@ defmodule SIP.Session.Registrar do
     do: Enum.map(contacts, &set_contacts_expires(&1, expires))
 
   def set_contacts_expires(%SIP.Uri{} = contact, expires),
-    do: SIP.Uri.set_uri_param(contact, "expires", to_string(expires))
+    do: SIP.Uri.set_header_param(contact, "expires", to_string(expires))
 
   defp check_register(registerreq) when is_map(registerreq) do
     original_contact = Map.get(registerreq, :contact)
@@ -338,10 +338,14 @@ defmodule SIP.Session.RegisterUAC do
   end
 
   defp register_msg(sip_ctx = %SIP.Context{}, expire) do
+    # `hparams`: `expires` is a Contact header parameter (`c-p-expires`, RFC 3261
+    # §25.1). Inside the brackets it would be part of the address, and the
+    # registrar — reading it where the RFC puts it — would see a REGISTER asking
+    # for the default lifetime instead of this one.
     contact_uri = %SIP.Uri{
       userpart: SIP.Context.get(sip_ctx, :username),
       domain: "0.0.0.0",
-      params: %{"expires" => to_string(expire)}
+      hparams: %{"expires" => to_string(expire)}
     }
 
     %{
@@ -371,7 +375,7 @@ defmodule SIP.Session.RegisterUAC do
       contact: %SIP.Uri{
         userpart: SIP.Context.get(sip_ctx, :username),
         domain: "0.0.0.0",
-        params: %{"expires" => "15"}
+        hparams: %{"expires" => "15"}
       },
       useragent: Application.get_env(:elixip2, :useragent, "Elixipp/0.1"),
       callid: nil,

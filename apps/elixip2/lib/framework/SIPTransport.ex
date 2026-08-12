@@ -484,8 +484,14 @@ defmodule SIP.Transport do
     new_contact = if not is_nil(old_contact) do
       # Transfert contact parameters if specified by the caller
       # Override transport params
+      #
+      # BOTH parameter sets: the caller's binding parameters are header parameters
+      # (`expires`, `q`, a `+sip.instance`) and live in `hparams`. Carrying only
+      # `params` would drop the `expires` that SIP.Session.Registrar puts on the
+      # Contact of a REGISTER — the registration then asks for nothing.
       old_params = Map.put(old_contact.params, "transport", new_contact.proto)
-      %SIP.Uri{ new_contact | params: old_params, userpart: old_contact.userpart, displayname: old_contact.displayname }
+      %SIP.Uri{ new_contact | params: old_params, hparams: old_contact.hparams,
+                userpart: old_contact.userpart, displayname: old_contact.displayname }
     else
       new_contact
     end

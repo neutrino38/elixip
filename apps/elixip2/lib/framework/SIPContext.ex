@@ -226,11 +226,15 @@ defmodule SIP.Context do
   end
 
   def from(context) do
+    # `hparams`: the From tag is a header field parameter (`to-param`, RFC 3261
+    # §25.1), not part of the address. In `params` it would end up inside the
+    # angle brackets, where a peer reads it as part of the URI and the dialog no
+    # longer matches.
     from_uri = %SIP.Uri{
       displayname: context.displayname,
       userpart: context.username,
       domain: context.domain,
-      params: %{"tag" => context.ftag}
+      hparams: %{"tag" => context.ftag}
     }
 
     if from_uri.userpart == nil or from_uri.domain == nil do

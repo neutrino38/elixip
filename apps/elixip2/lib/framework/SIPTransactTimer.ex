@@ -3,6 +3,7 @@ defmodule SIP.Trans.Timer do
   @timer_T1_val 500
   @timer_T2_val 4000
   @timer_T4_val 5000
+  @trying_delay_val 200
 
   defp notify_dialog_layer(state, timer, transact_module) do
     if !is_nil(state.app) do
@@ -46,6 +47,19 @@ defmodule SIP.Trans.Timer do
   end
 
   @doc """
+  Schedule the automatic 100 Trying of an INVITE server transaction.
+
+  Not one of RFC 3261's lettered timers: §17.2.1 only states the delay — the
+  server transaction "MUST generate a 100 (Trying) response unless it knows that
+  the TU will generate a provisional or final response within 200 ms". So this
+  arms the 200 ms, and the IST answers 100 only if the TU has still said nothing
+  when it fires.
+  """
+  def schedule_timer_100(state, ms \\ @trying_delay_val) do
+    schedule_generic_timer(state, :timer100, :timer100_ref, ms)
+  end
+
+  @doc """
   Schedule/reschedule the F timer and save its reference (pid) in the transaction state
   - timer F is the maixmum non INVITE transaction timeout. If it fires, the client should
   stop expecting a final answer.
@@ -76,6 +90,20 @@ defmodule SIP.Trans.Timer do
   @doc "Schedule/reschedule the K timer and save its reference (pid) in the transaction state"
    def schedule_timer_K(state, :default) do
     schedule_generic_timer(state, :timerK, :timerk, @timer_T4_val)
+  end
+
+  # Arm timer K for an INVITE client transaction that has just ACKed a 2xx.
+  #
+  # 64*T1, and on a reliable transport too. RFC 3261 §17.1.1.2 destroys the client
+  # transaction there (timer D = 0s), but §13.2.2.4 then makes the UAC *core* owe
+  # an ACK for every 2xx it receives during 64*T1 — and in this stack the
+  # serialized ACK, and the code that resends it, live in the transaction. Killing
+  # it on the ACK left the retransmitted 200 of a callee that had not seen that
+  # ACK matching nothing at all ("response not linked to any transaction"), so the
+  # callee went on retransmitting into the void and tore down a call that was up.
+  def schedule_timer_K(state, :after_ack) do
+    t1 = Application.get_env(:elixip2, :sip_timer_T1, @timer_T1_val)
+    schedule_generic_timer(state, :timerK, :timerk, 64 * t1)
   end
 
   def schedule_timer_K(state, ms) do

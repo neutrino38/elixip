@@ -760,7 +760,7 @@ defmodule Kelix.Mod.Registrar do
   # Junk is read as absent rather than raising: an unparsable q is a reason to
   # ignore the preference, not to fail the call.
   defp q_of(%Contact{contact: uri}) do
-    with {:ok, v} <- SIP.Uri.get_uri_param(uri, "q"),
+    with {:ok, v} <- SIP.Uri.get_header_param(uri, "q"),
          {q, _rest} <- Float.parse(v) do
       q
     else
@@ -772,19 +772,19 @@ defmodule Kelix.Mod.Registrar do
   # destination and flow.
   defp rewrite(req, %Contact{} = binding), do: Map.put(req, :ruri, target_uri(binding))
 
-  # Parameters of the Contact HEADER, not of the address it holds: they describe
-  # the binding (its preference, its lifetime), so they have no business on a
-  # Request-URI we then send. The parser folds header and URI parameters into one
-  # map, which is why they have to be dropped explicitly — a forwarded INVITE
-  # otherwise went out to `sip:bob@10.0.0.9;q=0.9;expires=3600`.
-  @binding_only_params ["q", "expires"]
-
   # The stored contact stamped with the destination and flow it registered over.
   # Both are what `SIP.Transport.Selector.select_transport/1` short-circuits on
   # (§6.4): a live `tp_pid`+`tp_module` sends straight over the existing
   # connection, and failing that `destip`/`destport` skip DNS.
+  #
+  # `SIP.Uri.to_request_uri/1` first: what is stored is a Contact *header* value,
+  # display name and binding parameters (`q`, `expires`, `+sip.instance`, the RFC
+  # 3840 feature tags) included, and none of that may appear on the Request-URI
+  # this becomes (RFC 3261 §16.6 item 2). The URI parameters are kept in full —
+  # §19.1.5 requires it — which is the whole reason this is one framework call
+  # and not a list of parameter names maintained here.
   defp target_uri(%Contact{contact: c} = binding) do
-    c = %SIP.Uri{c | params: Map.drop(c.params, @binding_only_params)}
+    c = SIP.Uri.to_request_uri(c)
     binding = %Contact{binding | contact: c}
 
     case binding.received do
@@ -822,15 +822,16 @@ defmodule Kelix.Mod.Registrar do
     end
   end
 
-  # Each returned contact carries its OWN remaining lifetime as an `expires` URI
-  # param, so a 200 OK enumerating several bindings is accurate per binding
-  # instead of stamping them all with the expiry of the one just refreshed.
+  # Each returned contact carries its OWN remaining lifetime as an `expires`
+  # Contact header parameter (`c-p-expires`, RFC 3261 §25.1, hence
+  # `set_header_param/3`), so a 200 OK enumerating several bindings is accurate per
+  # binding instead of stamping them all with the expiry of the one just refreshed.
   defp granted(aor, contacts, expires) do
     %{aor: aor, contacts: Enum.map(contacts, &contact_with_expires/1), expires: expires}
   end
 
   defp contact_with_expires(%Contact{contact: uri, expires_at: at}) do
-    SIP.Uri.set_uri_param(uri, "expires", to_string(remaining_seconds(at)))
+    SIP.Uri.set_header_param(uri, "expires", to_string(remaining_seconds(at)))
   end
 
   defp remaining_seconds(at), do: max(DateTime.diff(at, now(), :second), 0)
@@ -893,10 +894,12 @@ defmodule Kelix.Mod.Registrar do
     end
   end
 
-  # Contact parameters reach us quoted (`+sip.instance="<urn:uuid:…>"`); compare and
-  # store the value, not the quoting.
+  # Contact HEADER parameters (`+sip.instance`, `reg-id`, `methods` — all of them
+  # `contact-params`, hence `get_header_param/2`). They reach us quoted
+  # (`+sip.instance="<urn:uuid:…>"`), which a URI parameter could not even be:
+  # compare and store the value, not the quoting.
   defp contact_param(%SIP.Uri{} = uri, name) do
-    case SIP.Uri.get_uri_param(uri, name) do
+    case SIP.Uri.get_header_param(uri, name) do
       {:ok, value} when is_binary(value) -> String.trim(value, "\"")
       _ -> nil
     end
@@ -980,30 +983,25 @@ defmodule Kelix.Mod.Registrar do
     end
   end
 
-  # Contact **header** parameters, which `SIP.Uri.parse/1` folds into the URI's
-  # params map — in `<sip:u@h>;expires=0` everything after the `>` is a header
-  # parameter, not part of the URI. They must be excluded from binding identity:
-  # RFC 3261 §10.2.4 compares bindings by URI, so a refresh that merely changes
-  # `expires` has to REPLACE the binding rather than add a second one.
+  # Binding identity is the contact **URI**: RFC 3261 §10.2.4 compares bindings by
+  # URI, so a refresh that merely changes `expires` has to REPLACE the binding
+  # rather than add a second one. Contact *header* parameters are therefore
+  # excluded — and `SIP.Uri.serialize_ruri/1` excludes exactly them (plus the
+  # display name, which a handset is free to change without becoming a new
+  # device), so the list of names this used to maintain by hand is gone.
   #
-  # Leaving them in meant a handset that rebinds (old contact with `;expires=0`,
+  # Keeping them in meant a handset that rebinds (old contact with `;expires=0`,
   # new one alongside) never got its old contact dropped — the key differed by that
   # very parameter — so the AOR accumulated stale contacts until
   # `max_contacts_per_aor` started refusing the next registration.
   #
-  # `+`-prefixed feature tags (RFC 3840) go the same way. `+sip.instance`/`reg-id`
-  # would make a *better* binding key than the URI (RFC 5626 outbound), but that is
-  # its own feature; until then identity stays the URI, as RFC 3261 has it.
-  @contact_header_params ~w(expires q methods reg-id)
-
-  # serialize/1 always succeeds on a %SIP.Uri{}, hence the hard match.
+  # `+sip.instance`/`reg-id` would make a *better* binding key than the URI (RFC
+  # 5626 outbound), but that is its own feature; until then identity stays the URI,
+  # as RFC 3261 has it.
+  #
+  # serialize_ruri/1 always succeeds on a %SIP.Uri{}, hence the hard match.
   defp uri_key(%SIP.Uri{} = u) do
-    params =
-      u.params
-      |> Map.drop(@contact_header_params)
-      |> Map.reject(fn {k, _v} -> String.starts_with?(k, "+") end)
-
-    {:ok, s} = SIP.Uri.serialize(%SIP.Uri{u | params: params})
+    {:ok, s} = SIP.Uri.serialize_ruri(u)
     s
   end
 

@@ -123,6 +123,30 @@ defmodule SIP.Test.Transact do
     assert is_bitstring( SIP.NetUtils.get_local_ipv4() )
   end
 
+  # A reply with no extra header fields, spelt `nil` — which is how the dialog
+  # layer refuses a request when it has too many transactions open. It matched no
+  # clause of reply_to_UAC/6: the FunctionClauseError killed the server
+  # transaction, and the dialog that had called it died of the exit it got back,
+  # so ONE refused request took a whole established call down (production
+  # 2026-08-12, on a BYE). The answer must reach the wire like any other.
+  test "a reply whose extra header fields are nil is sent, not a crash" do
+    { :ok, t_pid } = GenServer.start_link(SIP.Test.Transport.UDPMockup, { {1,2,3,4}, 5080 })
+    { :ok, raw } = File.read("test/SIP-INVITE-BASIC-AUDIO.txt")
+    { :ok, req } = SIPMsg.parse(raw, fn _code, _msg, _line, _linenum -> nil end)
+
+    state = %{ state: :trying, t_isreliable: false, msg: req, app: self(),
+               tmod: SIP.Test.Transport.UDPMockup, tpid: t_pid,
+               destip: {1,2,3,4}, destport: 5080 }
+
+    assert { :ok, new_state } =
+             SIP.Transac.Common.reply_to_UAC(state, req, 503, "Service Denied", nil, "totag-503")
+
+    # Sent, and the transaction moved on rather than dying: `rspstr` is the
+    # serialized response sendout_msg/2 kept.
+    assert new_state.state in [ :confirmed, :terminated ]
+    assert new_state.rspstr =~ "SIP/2.0 503 Service Denied"
+  end
+
   defp create_sdp_body( ) do
 sdp = """
 v=0

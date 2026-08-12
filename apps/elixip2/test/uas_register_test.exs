@@ -287,7 +287,7 @@ defmodule SIP.Test.UASRegister do
     send(tp, {:recv, reg})
     assert_receive {:uas_response, 200, %{callid: ^cid}}, 2_000
 
-    old = SIP.Uri.set_uri_param(List.first(List.wrap(base.contact)), "expires", "0")
+    old = SIP.Uri.set_header_param(List.first(List.wrap(base.contact)), "expires", "0")
     {:ok, new} = SIP.Uri.parse("sip:5430@103.145.13.102:5191")
 
     rebind =

@@ -83,11 +83,13 @@ defmodule SIP.Transac.Common do
           {:reply, :transport_error, state}
       end
     else
-      Logger.warning(
-        transid: state.msg.transid,
-        module: __MODULE__,
-        message: "Cannot CANCEL transaction in #{state.state} state"
-      )
+      if state.state != :cancelling do
+        Logger.warning(
+          transid: state.msg.transid,
+          module: __MODULE__,
+          message: "Cannot CANCEL transaction in #{state.state} state"
+        )
+      end
 
       {:reply, :bad_state, state}
     end
@@ -210,12 +212,24 @@ defmodule SIP.Transac.Common do
             state
         end
 
-      # Corner case when 200 OK retransmission is still not acked by app layer.
+      # The answer again, before the application has ACKed it — the far end
+      # retransmits every T1 from the moment it answers, so this crosses every ACK
+      # that takes longer than that to come back. Absorbed, like the retransmission
+      # after the ACK below: it says nothing new, and there is nothing to resend
+      # yet. The ACK the application is about to send is what the far end is asking
+      # for.
+      #
+      # It used to go up to the application a second time. A B2BUA read it as an
+      # answer to relay, found no forwarded request to match it with ("No forwarded
+      # request correlates with the 200"), and logged a warning on every call whose
+      # ACK took more than 500 ms — while a session that DID relay it sent the
+      # caller a second 200 for an INVITE it had already answered.
       state.state == :confirmed ->
-        # TODO: Why should we resend the 200 OK to the app layer?
-        if state.msg.method == :INVITE do
-          send(state.app, {:response, sip_resp, self()})
-        end
+        Logger.debug(
+          transid: sip_resp.transid,
+          module: __MODULE__,
+          message: "Absorbing #{sip_resp.response} retransmission (ACK not sent yet)"
+        )
 
         state
 
@@ -308,64 +322,122 @@ defmodule SIP.Transac.Common do
     end
   end
 
+  @doc """
+  Send the ACK of a final response of an INVITE client transaction.
+
+  Called again for every 2xx retransmission the far end sends: RFC 3261 §13.2.2.4
+  owes one ACK per 2xx *received*, so being asked twice is the ordinary case and
+  not a state error. The ACK that went out is kept serialized (`state.ack`, set by
+  `sendout_msg/2`) and resent verbatim — §17.1.1.3 builds it from the ORIGINAL
+  request, so rebuilding it could only produce the same bytes.
+
+  And it always answers: the bare `if` this used to be returned `nil` in every
+  other state, which is not a `handle_call/3` reply — the transaction crashed on
+  it, taking with it the ACK of the retransmission that came next.
+  """
   def send_ack(state) do
-    if state.state in [:confirmed, :rejected] do
-      routeset =
-        case Map.fetch(state, :route) do
-          {:ok, routeset} -> routeset
-          :error -> nil
-        end
+    cond do
+      state.state in [:confirmed, :rejected] ->
+        build_and_send_ack(state)
 
-      remote_contact =
-        case Map.fetch(state, :remotecontact) do
-          {:ok, rcontact} -> rcontact
-          :error -> nil
-        end
+      is_binary(Map.get(state, :ack)) ->
+        Logger.debug(transid: state.msg.transid, module: __MODULE__, message: "Resending ACK")
 
-      ack_sent =
-        state.msg |> SIP.Msg.Ops.ack_request(remote_contact, routeset) |> SIPMsg.serialize()
+        {_code, state} = sendout_msg(state, state.ack)
+        {:reply, :ok, state}
 
-      Logger.debug(transid: state.msg.transid, module: __MODULE__, message: "Sending ACK")
+      true ->
+        Logger.warning(
+          transid: state.msg.transid,
+          module: __MODULE__,
+          message: "Cannot ACK a transaction in #{state.state} state"
+        )
 
-      case sendout_msg(state, ack_sent) do
-        {:ok, state} ->
-          new_state =
-            if state.t_isreliable do
+        {:reply, :bad_state, state}
+    end
+  end
+
+  defp build_and_send_ack(state) do
+    routeset =
+      case Map.fetch(state, :route) do
+        {:ok, routeset} -> routeset
+        :error -> nil
+      end
+
+    remote_contact =
+      case Map.fetch(state, :remotecontact) do
+        {:ok, rcontact} -> rcontact
+        :error -> nil
+      end
+
+    # The MAP goes to sendout_msg/2, not a string we serialized ourselves: that
+    # clause is the one that keeps the bytes in `state.ack`, and the ACK is the
+    # one request this stack has to be able to send twice (a 2xx retransmission
+    # asks for it, §13.2.2.4). Serializing here left `state.ack` nil for ever, so
+    # the two places that resend it — the retransmitted-2xx branch of
+    # handle_UAS_sip_response/2 and send_ack/1 above — could never fire.
+    ack_sent = SIP.Msg.Ops.ack_request(state.msg, remote_contact, routeset)
+
+    Logger.debug(transid: state.msg.transid, module: __MODULE__, message: "Sending ACK")
+
+    case sendout_msg(state, ack_sent) do
+      {:ok, state} ->
+        new_state =
+          cond do
+            # The ACK of a 2xx: outlive it by 64*T1 so a callee that has not seen
+            # it yet gets it again when it retransmits its answer (§13.2.2.4 —
+            # see schedule_timer_K/2). On a reliable transport too: TCP delivers
+            # the ACK, but a UAS retransmits its 2xx until it *processes* one, and
+            # the retransmission crossing our ACK is exactly what the 500 ms
+            # window around answering produces.
+            state.state == :confirmed ->
+              Logger.debug(
+                transid: state.msg.transid,
+                message: "ACK sent: #{state.state} -> terminated"
+              )
+
+              schedule_timer_K(state, :after_ack)
+              |> Map.put(:state, :terminated)
+              |> cancel_timer_D()
+
+            # The ACK of a non-2xx final (§17.1.1.3), unchanged: `:rejected` is
+            # what makes a retransmitted failure response resend this ACK.
+            state.t_isreliable ->
               Logger.debug(
                 transid: state.msg.transid,
                 message: "ACK sent: #{state.state} -> terminated"
               )
 
               schedule_timer_K(state, 0) |> Map.put(:state, :terminated) |> cancel_timer_D()
-            else
+
+            true ->
               # RFC 3261 clause 17.1.2.2 arm timer K for unreliable transport
               # We are not using timer D but timer K instead to handle responses retransmissions
               # After ACK is sent.
               Logger.debug(transid: state.msg.transid, message: "ACK sent. Arming timer_K")
               schedule_timer_K(state, :default) |> cancel_timer_D()
-            end
+          end
 
-          {:reply, :ok, new_state}
+        {:reply, :ok, new_state}
 
-        {:invalid_sip_msg, state} ->
-          Logger.error(
-            transid: state.msg.transid,
-            module: __MODULE__,
-            message: "Fail to build ACK message."
-          )
+      {:invalid_sip_msg, state} ->
+        Logger.error(
+          transid: state.msg.transid,
+          module: __MODULE__,
+          message: "Fail to build ACK message."
+        )
 
-          {:reply, :invalid_sip_msg, state}
+        {:reply, :invalid_sip_msg, state}
 
-        {code, state} ->
-          Logger.error(
-            transid: state.msg.transid,
-            module: __MODULE__,
-            message: "Fail to send ACK message #{code}"
-          )
+      {code, state} ->
+        Logger.error(
+          transid: state.msg.transid,
+          module: __MODULE__,
+          message: "Fail to send ACK message #{code}"
+        )
 
-          # Arm a timer to destroy the transaction
-          {:reply, :transport_error, state}
-      end
+        # Arm a timer to destroy the transaction
+        {:reply, :transport_error, state}
     end
   end
 
@@ -377,6 +449,11 @@ defmodule SIP.Transac.Common do
       state
     end
   end
+
+  # Keep the To tag a response went out with — but never *unset* a known one: a
+  # response that carries no tag says nothing about the transaction's identity.
+  defp remember_totag(state, nil), do: state
+  defp remember_totag(state, totag), do: Map.put(state, :totag, totag)
 
   # Internal Server Transaction Finite State Machine
   defp fsm_reply(state, resp_code, rsp) when state.state in [:trying, :proceeding] do
@@ -395,9 +472,17 @@ defmodule SIP.Transac.Common do
           end
 
         case resp_code do
-          # Transition to proceeding
+          # Transition to proceeding.
+          #
+          # `remember_totag/2`, like every branch below: a 100 Trying may carry a To
+          # tag (ours does — the dialog puts one on every response it composes) and
+          # that tag is the transaction's from then on. Dropping it left an IST whose
+          # `totag` was nil for as long as the callee said nothing, and the CANCEL
+          # that a caller tired of waiting sends is answered with `state.totag` — so
+          # the 200 to the CANCEL raised "Missing totag" and killed the transaction
+          # instead. The caller then got no answer at all to its CANCEL.
           100 ->
-            {:ok, Map.put(new_state, :state, :proceeding)}
+            {:ok, Map.put(new_state, :state, :proceeding) |> remember_totag(totag)}
 
           rc when rc in 101..199 ->
             if totag == nil do
@@ -406,7 +491,7 @@ defmodule SIP.Transac.Common do
 
             # TODO: totag is not protected here. It can be changed. Make sure that
             #       the intial value is not changed.
-            {:ok, Map.put(new_state, :state, :proceeding) |> Map.put(:totag, totag)}
+            {:ok, Map.put(new_state, :state, :proceeding) |> remember_totag(totag)}
 
           rc when rc in 200..699 ->
             # Final answer
@@ -422,7 +507,7 @@ defmodule SIP.Transac.Common do
                 st =
                   cancel_timer_F(new_state)
                   |> Map.put(:state, :confirmed)
-                  |> Map.put(:totag, totag)
+                  |> remember_totag(totag)
 
                 if state.t_isreliable do
                   schedule_timer_H(st)
@@ -512,6 +597,16 @@ defmodule SIP.Transac.Common do
         {code, state}
     end
   end
+
+  # `nil` is how part of this stack spells "no extra header fields" — the 503 a
+  # dialog answers when it has too many transactions open, among others. It matched
+  # no clause at all: the FunctionClauseError killed the server transaction, and the
+  # dialog that had called it died of the raised exit it got back. So a dialog
+  # refusing ONE request lost the whole call, both legs and the scenario with it,
+  # and the caller got no answer to the request that was refused (production,
+  # 2026-08-12: Alice's BYE).
+  def reply_to_UAC(state, sipmsg, resp_code, reason, nil, totag),
+    do: reply_to_UAC(state, sipmsg, resp_code, reason, [], totag)
 
   # Other regular cases
   def reply_to_UAC(state, sipmsg, resp_code, reason, upd_fields, totag)

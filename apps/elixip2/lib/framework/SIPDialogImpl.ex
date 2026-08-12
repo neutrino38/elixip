@@ -155,7 +155,10 @@ defmodule SIP.DialogImpl do
         uri
       end
 
-    Map.put(req, h, SIP.Uri.set_uri_param(uri, "tag", tag))
+    # A tag is a header field parameter (`to-param`, RFC 3261 §25.1), never part
+    # of the address — inside the angle brackets it would travel as a URI
+    # parameter and the far end would match no dialog.
+    Map.put(req, h, SIP.Uri.set_header_param(uri, "tag", tag))
   end
 
   # Apply fromtag, totag, callid and CSeq
@@ -307,7 +310,7 @@ defmodule SIP.DialogImpl do
           message: "Too many open transaction for this dialog. Dropping request #{req.method}"
         )
 
-        {:toomanytransactons, state}
+        {:toomanytransactions, state}
       end
     else
       # Not allowed
@@ -549,6 +552,93 @@ defmodule SIP.DialogImpl do
   defp send_to_app(state, msg) do
     if is_pid(state.app), do: send(state.app, wrap_tag(state.tag, msg))
     :ok
+  end
+
+  defp app_alive?(%SIP.DialogImpl{app: app}) when is_pid(app), do: Process.alive?(app)
+  defp app_alive?(_state), do: false
+
+  # The INVITE client transaction kept alive past its 2xx, for the ACK the
+  # application owes it (RFC 3261 §13.2.2.4). `:established` is what tells that
+  # answer from a leg still ringing — an INVITE client transaction exists in both
+  # cases, and only one of them has a 2xx to acknowledge.
+  #
+  # An INVITE client transaction that HAS been ACKed is not among these: the ACK
+  # path drops it from the map (it lives on outside the dialog, absorbing the far
+  # end's retransmissions), so "still holding one" means "still owing the ACK".
+  defp pending_invite_transaction(%SIP.DialogImpl{state: :established} = state) do
+    Enum.find_value(state.transactions, fn {pid, %{req: req, module: module}} ->
+      if client_transaction?(module) and req.method == :INVITE, do: pid
+    end)
+  end
+
+  defp pending_invite_transaction(_state), do: nil
+
+  # A 2xx to our INVITE that no application is left to ACK.
+  #
+  # The ACK of a 2xx belongs to the UAC core — the application — in a transaction
+  # of its own (RFC 3261 §13.2.2.4), which is why the caller above keeps the
+  # client transaction alive instead of closing it. With no application there, the
+  # ACK never comes: the callee retransmits its 200 until it gives up and is left
+  # in a call that nobody is in, off-hook, while the caller who asked for it has
+  # long gone.
+  #
+  # Two ways to get here, and the answer is the same for both:
+  #
+  #   * the answer crossed the cancellation. RFC 3261 §16.7 — cancelling *asks*,
+  #     it does not decide, and the transaction is over only when a final response
+  #     says so. A B2BUA scenario that ends on the CANCEL (`scenario_aborted`) is
+  #     already gone when the 2xx lands. Seen in production 2026-08-11: the callee
+  #     answered ~20 s after the caller had hung up;
+  #   * the application simply died — a crash, an instance the pool reclaimed.
+  #
+  # There is no lawful alternative to ACK-then-BYE (§15 makes the BYE the only way
+  # to end an established dialog), so the framework does it rather than leaving
+  # every scenario to remember. A scenario that wants to *observe* the race — it
+  # is a billable event — still can; this is the floor, not the ceiling (see
+  # docs/design/service-building-block.md).
+  #
+  # No waiting is involved, and that is the point: the dialog outlives its
+  # application, so it is simply here when the answer arrives.
+  defp answer_nobody_awaits(state, transact_pid) do
+    if app_alive?(state) do
+      state
+    else
+      Logger.warning(
+        dialogpid: "#{inspect(self())}",
+        module: __MODULE__,
+        message:
+          "2xx received with no application left to ACK it: acknowledging and " <>
+            "hanging up, so the far end is not left off-hook"
+      )
+
+      SIP.Transac.ack_uac_transaction(transact_pid)
+
+      # The BYE goes out on the next message rather than here: it must follow the
+      # ACK on the wire, and `send_in_dialog_request/2` starts a transaction of its
+      # own — not something to nest inside the response handling that is still
+      # unwinding.
+      send(self(), :hang_up_unowned_dialog)
+      close_transaction(state, transact_pid)
+    end
+  end
+
+  # The BYE that ends a dialog whose application is gone (see
+  # `answer_nobody_awaits/2`). Every addressing field is a placeholder:
+  # `send_in_dialog_request/2` fills in Call-ID, CSeq, both identities and their
+  # tags, the route set and the remote target.
+  defp hangup_request do
+    uri = %SIP.Uri{userpart: nil, domain: nil}
+
+    %{
+      "Max-Forwards" => "70",
+      method: :BYE,
+      ruri: uri,
+      from: uri,
+      to: uri,
+      useragent: Application.get_env(:elixip2, :useragent, "Elixipp/0.1"),
+      callid: nil,
+      contentlength: 0
+    }
   end
 
   defp wrap_tag(nil, msg), do: msg
@@ -967,6 +1057,32 @@ defmodule SIP.DialogImpl do
     {:reply, rc, state}
   end
 
+  # ACK the 2xx this dialog is still holding an INVITE client transaction for, if
+  # it is holding one. Answers `:ok` when it did, `:none` when there was nothing
+  # to acknowledge — either way without a word, because "already ACKed" is the
+  # ordinary case for every caller of this.
+  #
+  # The ACK of a 2xx is the application's (RFC 3261 §13.2.2.4), which is why the
+  # transaction is kept past the response instead of closed; this is how an
+  # application says "I am not going to send it after all, do it for me" on its
+  # way to hanging the call up. A BYE on a dialog whose 2xx was never acknowledged
+  # is not lawful — §15 ends an established dialog, and one the far end is still
+  # retransmitting its answer for is not established as far as it is concerned.
+  #
+  # `state.state == :established` is what tells a 2xx already received from a leg
+  # still ringing: an INVITE client transaction exists in both cases, and ACKing a
+  # provisional would be nonsense.
+  def handle_call(:ack_pending_invite, _from, state) do
+    case pending_invite_transaction(state) do
+      nil ->
+        {:reply, :none, state}
+
+      transact_pid ->
+        SIP.Transac.ack_uac_transaction(transact_pid)
+        {:reply, :ok, close_transaction(state, transact_pid)}
+    end
+  end
+
   def handle_call({:cancel, transact_pid}, _from, state) do
     if Map.has_key?(state.transactions, transact_pid) do
       reply = SIP.Transac.cancel_uac_transaction(transact_pid)
@@ -976,20 +1092,42 @@ defmodule SIP.DialogImpl do
     end
   end
 
-  # Handle call to send out an ACK for an INVITE request
+  # Handle call to send out an ACK for an INVITE request.
+  #
+  # The transaction is dropped from the dialog here although it goes on living for
+  # 64*T1 (SIP.Trans.Timer `:after_ack`): those are two different jobs. What the
+  # transaction stays alive for is the far end's own retransmissions — a 2xx it
+  # sends again because it has not seen this ACK is routed to it by the transaction
+  # registry, and it answers with the ACK it kept, alone, with neither this layer
+  # nor the application involved (RFC 3261 §13.2.2.4). What THIS map holds is the
+  # dialog's work in flight, and it is capped at four: leaving acknowledged
+  # transactions in it made a Linphone call that re-INVITEs five times in 30 s (its
+  # video negotiation) hit the cap and lose the fifth — dropped as "too many open
+  # transactions" on a call where nothing at all was open.
+  #
+  # So a second `{:ack, …}` for the same transaction — a caller re-ACKing a 2xx it
+  # saw twice — finds nothing here, and that is not a problem to solve: whoever
+  # needs that ACK asks for it by retransmitting its 2xx, and gets it from the
+  # transaction. It must simply not read as a failure (SIP.Session.B2bua
+  # `ack_lasterr/1`).
   def handle_call({:ack, transact_pid}, _from, state) do
     if Map.has_key?(state.transactions, transact_pid) do
       reply = SIP.Transac.ack_uac_transaction(transact_pid)
-      # The INVITE client transaction is done once it has been ACKed; drop it
-      # from the dialog so later in-dialog requests (BYE, re-INVITE…) start fresh.
       {:reply, reply, close_transaction(state, transact_pid)}
     else
-      Logger.warning(
+      # Info, not a warning: this is what an ACK the caller sent twice looks like
+      # from here, and traffic says that is once per established call — a UA that
+      # takes longer than T1 to ACK gets our 2xx again and answers it again, which
+      # is what §13.2.2.4 asks of it. A warning on every call is a warning nobody
+      # reads. The line stays because it is also the only trace of the real fault
+      # it could be — an ACK correlated onto a transaction that was never the right
+      # one — so it names both readings.
+      Logger.debug(
         dialogpid: "#{inspect(self())}",
         module: __MODULE__,
         message:
-          "Cannot ACK transaction #{inspect(transact_pid)}: not attached to the dialog " <>
-            "(already terminated?). ACK not sent."
+          "No transaction #{inspect(transact_pid)} to ACK: already acknowledged and released " <>
+            "(an ACK retransmission), or never this dialog's. Nothing sent."
       )
 
       {:reply, :nosuchtransaction, state}
@@ -1138,7 +1276,7 @@ defmodule SIP.DialogImpl do
         {:noreply, state}
 
       {:toomanytransactions, state} ->
-        SIP.Transac.reply(transact_pid, 503, "Service Denied", nil, state.totag)
+        SIP.Transac.reply(transact_pid, 503, "Service Denied", [], state.totag)
         {:noreply, state}
     end
   end
@@ -1172,7 +1310,7 @@ defmodule SIP.DialogImpl do
           message: "Too many transactions open."
         )
 
-        SIP.Transac.reply(transact_pid, 503, "Service Denied", nil, state.totag)
+        SIP.Transac.reply(transact_pid, 503, "Service Denied", [], state.totag)
         {:noreply, state}
 
       {:nonewtrans, state} ->
@@ -1713,6 +1851,13 @@ defmodule SIP.DialogImpl do
     KeepAlive.on_timeout(state)
   end
 
+  # Second half of `answer_nobody_awaits/2`: the 2xx has been ACKed, now end the
+  # call nobody is in.
+  def handle_info(:hang_up_unowned_dialog, state) do
+    {_rc, state} = send_in_dialog_request(state, hangup_request())
+    {:noreply, state}
+  end
+
   # Invoked when a dialog receives a SIP response from an UAC transaction
   def handle_info({:response, rsp, transact_pid}, state) when is_resp(rsp) do
     state =
@@ -1757,7 +1902,7 @@ defmodule SIP.DialogImpl do
           # can still ACK it (RFC 3261 §13.2.2.4); it is removed once the ACK is
           # sent. Every other final response terminates the transaction now.
           if rsp.response < 300 and match?([_, :INVITE], rsp.cseq) do
-            new_state
+            answer_nobody_awaits(new_state, transact_pid)
           else
             close_transaction(new_state, transact_pid)
           end

@@ -2454,6 +2454,14 @@ defmodule SIP.Session.B2bua do
     case outbound_leg(sip_ctx) do
       %Leg{} = leg ->
         if leg_alive?(leg) do
+          # The 2xx first, if it is still owed one. Hanging up a call the far end
+          # answered but never saw acknowledged is not lawful (RFC 3261 §15 ends an
+          # *established* dialog) and not effective: it goes on retransmitting its
+          # 200 to an INVITE it believes unanswered. `:none` is the ordinary
+          # answer — the ACK was relayed from the other leg long ago — and costs a
+          # call to a process this is about to call anyway.
+          call_leg(fn -> SIP.Dialog.ack_pending_invite(leg.dialogpid) end)
+
           case call_leg(fn -> SIP.Dialog.new_request(leg.dialogpid, bye_request()) end) do
             {:ok, _trans_pid} -> SIP.Context.set(sip_ctx, :lasterr, :ok)
             # It died between the liveness check and the call, which is what we
@@ -2781,5 +2789,26 @@ defmodule SIP.Session.B2bua do
   defp reply_lasterr(other), do: other
 
   defp ack_lasterr(:ok), do: :ok
+
+  # Cancelling something already being cancelled is not a failure: what was asked
+  # for is already happening. The transaction layer answers `:bad_state` there
+  # (SIP.Transac.Common, "Cannot CANCEL transaction in cancelling state"), and it
+  # is the ORDINARY outcome of the pair every B2BUA scenario writes —
+  # `b2bua_cancel_forward()` stops the hunt and cancels the attempt in flight,
+  # then `b2bua_forward(req)` relays the caller's own CANCEL onto the same
+  # attempt. Reporting the second as an error only became visible when scenarios
+  # stopped ending on the CANCEL and started waiting for the callee's final; the
+  # duplicate itself is as old as the pair, and harmless.
+  defp ack_lasterr(:bad_state), do: :ok
+
+  # An ACK that lands on nothing does not end a call. This layer already says so
+  # when there is no correlated INVITE at all (`relay_request/4` warns and carries
+  # on); reporting a failure when the transaction merely ended is the same
+  # situation, told two different ways. The retransmitted ACK a caller really
+  # sends is handled where it belongs — the client transaction outlives the ACK by
+  # 64*T1 and resends it (RFC 3261 §13.2.2.4) — so this is only the floor: past
+  # that window the far end has stopped asking, and a dialog log line is the right
+  # weight for it, not a hung-up call.
+  defp ack_lasterr(:nosuchtransaction), do: :ok
   defp ack_lasterr(other), do: other
 end

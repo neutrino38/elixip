@@ -414,6 +414,55 @@ defmodule SIP.Test.DialogResilience do
     assert :ok = SIP.Dialog.terminate(dlg, :superseded)
   end
 
+  # ── A 2xx that arrives after its application is gone ────────────────────────
+
+  # The ACK of a 2xx belongs to the UAC core — the application — in a transaction
+  # of its own (RFC 3261 §13.2.2.4), which is why the dialog keeps the client
+  # transaction alive after a 2xx instead of closing it. With no application left
+  # the ACK never comes, and the callee is stranded: it retransmits its 200 until
+  # it gives up, off-hook in a call nobody is in.
+  #
+  # The way to get here in production (2026-08-11): the caller cancels, the answer
+  # crosses the CANCEL on the wire — §16.7, cancelling asks, it does not decide —
+  # and the B2BUA scenario has already ended on `scenario_aborted("caller
+  # cancelled")` by the time the 200 lands. The dialog outlives its scenario, so
+  # it is still there to do the only lawful thing: ACK, then BYE (§15).
+  test "a 2xx no application is left to ACK is acknowledged and hung up" do
+    tp = peer!("orphan2xx")
+    parent = self()
+
+    # An application that places the call and then ends normally, exactly as a
+    # scenario instance does on the caller's CANCEL.
+    app =
+      spawn(fn ->
+        {:ok, dlg, _id} =
+          SIP.Dialog.start_dialog(invite_to("orphan2xx"), 60, :outbound, false, [])
+
+        send(parent, {:dialog, dlg})
+
+        receive do
+          :end_scenario -> :ok
+        end
+      end)
+
+    assert_receive {:dialog, dlg}, 2_000
+    assert_receive {:invite_sent, _req}, 2_000
+
+    ref = Process.monitor(app)
+    send(app, :end_scenario)
+    assert_receive {:DOWN, ^ref, :process, ^app, :normal}, 2_000
+
+    # The callee picks up anyway.
+    GenServer.cast(tp, {:simulate, 200, 0})
+
+    assert_receive :ACK, 2_000
+    assert_receive :BYE, 2_000
+
+    # The dialog is not linked to its application (GenServer.start, not
+    # start_link), which is what let it still be here to clean up.
+    assert Process.alive?(dlg)
+  end
+
   # The catch-all handle_info/2. `use GenServer` provides one, but a module that
   # defines its own clauses replaces it wholesale — so an unrecognized message
   # raised a FunctionClause and took the dialog with it. SIP.Dialog.broadcast/1
