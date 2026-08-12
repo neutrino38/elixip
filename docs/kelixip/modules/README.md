@@ -14,14 +14,15 @@ loads exactly the modules it needs.
 
 # List of modules
 
-| Module | Function | Package (RPM / deb) | Doc |
-|---|---|---|---|
-| `registrar` | Location service: REGISTER bindings, AOR lookup | `kelixip-mod-registrar` | [registrar.md](registrar.md) |
-| `auth_db` | Digest authentication against a subscriber database | `kelixip-mod-auth_db` / `kelixip-mod-auth-db` | [auth_db.md](auth_db.md) |
-| `mcu` | Conferencing (medooze media server) | `kelixip-mod-mcu` | [mcu.md](mcu.md), REST endpoints [mcu-api.md](mcu-api.md), scenario guide [mcu_module_guide.md](mcu_module_guide.md) |
+| Module | Elixir module | Function | Package (RPM / deb) | Doc |
+|---|---|---|---|---|
+| `registrar` | `Kelix.Mod.Registrar` | Location service: REGISTER bindings, AOR lookup | `kelixip-mod-registrar` | [registrar.md](registrar.md) |
+| `auth_db` | `Kelix.Mod.AuthDb` | Digest authentication against a subscriber database | `kelixip-mod-auth_db` / `kelixip-mod-auth-db` | [auth_db.md](auth_db.md) |
+| `mcu` | `Kelix.Mod.Mcu` | Conferencing (medooze media server) | `kelixip-mod-mcu` | [mcu.md](mcu.md), REST endpoints [mcu-api.md](mcu-api.md), scenario guide [mcu_module_guide.md](mcu_module_guide.md) |
 
 The module name is the one to use in a `[module.<name>]` block and in a script's
-`uses_modules`. [template.md](template.md) is the page layout every module doc follows.
+`uses_modules`; the Elixir module is what a script imports the facades from.
+[template.md](template.md) is the page layout every module doc follows.
 
 # Using modules
 
