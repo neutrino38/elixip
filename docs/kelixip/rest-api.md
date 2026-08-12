@@ -194,7 +194,7 @@ curl -s -X POST   -H "Authorization: Bearer $TOKEN" $BASE/graceful-shutdown
 
 Modules register their commands into `Kelix.Control.Registry` from the same
 `describe_control/0` declaration that produces their `kelictl` sub-commands (see
-[modules/README.md](modules/README.md#control-surface-kelictl--rest)). A command
+[modules/README.md](modules/README.md#module-administration-kelictl--rest-api)). A command
 declares a **path template** relative to `/modules/<name>`, so it is reachable
 both as a resource (`GET /modules/mcu/conferences/c-3f9a`) and in the flat form
 `<method> /modules/<name>/<cmd>`, for a client that cannot build URLs. Both

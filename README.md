@@ -18,6 +18,17 @@ The framework will also provide a control interface to the
 in order to handle the media part of telecommunication over IP. A clean abstraction (Behaviour) is defined
 and other media servers could easily be interfaced as well if needed.
 
+## Background reading
+
+The reasoning behind the project is developed in three articles:
+
+- [Programmable telecoms, the way it should be](https://www.linkedin.com/pulse/programmable-telecoms-way-should-emmanuel-buu--emxoe/)
+  — why this project exists, and the history of the ideas it builds on.
+- [What a native language for telco services looks like](https://www.linkedin.com/pulse/what-native-language-telco-services-looks-like-emmanuel-buu--wujre/)
+  — why a DSL, and what it buys over a general-purpose API.
+- [Taming large state machines: Service Building Blocks](https://www.linkedin.com/pulse/taming-large-state-machines-service-building-blocks-elixip-buu--pctie/)
+  — the Service Building Blocks (SBB) model, still to come.
+
 ## The roadmap
 
 The project will provide in the long term:
@@ -37,8 +48,9 @@ In terms of capabilities, the emphasis will be on:
 - Fully native Elixir SIP stack: implemented
 - Support for SIP over UDP, TCP, TLS and WSS: implemented
 - Media Control interface: implemented
-- Domain Specific Language definition: see [DSL.md](DSL.md)
+- [Domain Specific Language definition](DSL.md): first version released
 - SIP.Scenario Scripting Engine: done
+- [Back to back user agent](B2BUA.md): first release
 
 ### Testing tool: elixipp
 - Interactive command elixpp for testing tools: done
@@ -48,7 +60,7 @@ In terms of capabilities, the emphasis will be on:
 
 ### Scriptable SIP server kelixip
 
-- plus loadable `.beam` modules: done,
+- Loadable `.beam` [modules](docs/kelixip/modules/README.md): done,
 - declarative TOML config with hot-reloadable: done
 - a CLI + REST control API, and Prometheus metrics: done.
 - domains/dial-plan
@@ -60,7 +72,8 @@ In terms of capabilities, the emphasis will be on:
 - kelixip B2BUA and call processing: in progress
 
 ## Roadmap
-- DSL: Service Building Blocks concept inspired by Jain SLEE 1.1
+- DSL: [Service Building Blocks](https://www.linkedin.com/pulse/taming-large-state-machines-service-building-blocks-elixip-buu--pctie/)
+  concept inspired by Jain SLEE 1.1
 - kelixip and elixip `presence` support including some level of LoST support
 - kelixip distributed cluster tech
 - DSL: formal proof of scenario correctness
@@ -107,12 +120,12 @@ the sequence diagram.
 
 # kelixip: the application server
 
-`kelixip` is the productized SIP server built on the same stack: TOML-declared
-domains, script-per-function dispatch, loadable modules (registrar, database
-auth, conferencing), a control CLI/REST API and Prometheus metrics.
-
-**👉 The operator manual lives in [docs/kelixip/README.md](docs/kelixip/README.md).**
-**👉 The conferencing module has its own guide: [docs/kelixip/modules/mcu_module_guide.md](docs/kelixip/modules/mcu_module_guide.md).**
+`kelixip` is the [productized SIP server](docs/kelixip/README.md)  built on the same stack
+- 👉 TOML-declared domains, 
+- 👉 script-per-function dispatch,
+- 👉 [loadable modules](docs/kelixip/modules/README.md) , 
+- 👉 a control CLI / [REST API](docs/kelixip/rest-api.md), 
+- 👉 and Prometheus metrics.
 
 # License
 
