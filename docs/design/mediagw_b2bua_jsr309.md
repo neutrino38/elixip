@@ -470,11 +470,14 @@ overruling.
 
 Two consequences worth stating, because both are deliberate deviations:
 
-- **`:force` no longer transcodes when the two heads agree.** It used to, for
-  audio, matching the Java gateway. The guarantee `:force` sells — "this leg gets
-  this codec" — is unaffected, since an attach delivers the same codec on both
-  legs. What is lost is the ability to *force a transcoder into the path* when the
-  legs already agree, which a test tool might want to rehearse; `:force` with two
+- **`:force` no longer CONVERTS when the two heads agree.** It used to, for audio,
+  matching the Java gateway. Careful with the wording, which this bullet got wrong
+  until 2026-08-12: the transcoder is still in the path — the wiring is the
+  policy's, and only `:forbid` gets a plain attach — but a transcoder whose two
+  ends carry the same codec bridges per packet and converts nothing. The guarantee
+  `:force` sells, "this leg gets the codec IT asked for", is unaffected either way.
+  What is genuinely lost is the ability to force a *conversion* when the legs
+  already agree, which a test tool might want to rehearse; `:force` with two
   deliberately different `audio_codec:` lists is how to get one now.
 - **`:avoid` may pick a codec that is neither leg's first choice.** With
   `L = [opus, PCMU]` and `L' = [PCMU, opus]` it picks opus for both, though the
