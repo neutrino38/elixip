@@ -237,6 +237,32 @@ implementations are interchangeable (selected via config — see Configuration):
   in `docs/design/mendooze_interface.md`). Events arrive over a chunked HTTP long-poll.
 - `MediaServer.Mockup` — in-process stub for call-flow tests.
 
+> **What the media server knows about itself, the media server is asked.** It is
+> the source of truth for its own capabilities and its own verdicts — which codecs
+> it carries, with which `fmtp`, at which level, on which address and port. Elixip
+> drives it; it does not model it. A list in elixip describing what the server can
+> do is a copy, and a copy drifts.
+>
+> The rule already exists in one narrow form — the delegated negotiation of
+> `mcu_module.md` §16.3, "the offer is the menu and the media server arbitrates",
+> which deleted the module's codec configuration rather than demoting it. Read it
+> as the general case, not as a feature of the answer path.
+>
+> The cost of the copy is measured. `@default_video_codecs` was `["H264", "VP8"]`
+> while the server had carried AV1 for months: a caller and a callee that both did
+> AV1 were offered H.264/VP8, the callee declined the video, and the call died on a
+> 488 with perfectly good audio on both sides. One layer down, `GetSupportedCodecs`
+> — the very call that should have answered the question — is a hardcoded array of
+> eight audio codecs that does not list OPUS, the one every real call uses, and
+> answers *media not supported* for video. Three copies of one list, none of them
+> true, and the only honest one is the `switch` in the codec factory.
+>
+> So: no codec table, no capability list, no port range, no `fmtp` guess written on
+> this side of the wire when the server can be asked. When it *cannot* yet be asked
+> — the query is missing, as for capabilities today — that is a hole in the server's
+> API to be closed (`mediaserver/codec_capabilities_plan.md`), not a licence to
+> declare it here.
+
 **Conceptual mapping — medooze → Elixir:**
 ```
 medooze (Node.js)                  Elixir handle
