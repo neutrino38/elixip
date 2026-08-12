@@ -145,9 +145,16 @@ defmodule SIP.B2bua.MediaPlan do
   call-scoped and not leg-scoped: one media server connection, two endpoints.
 
   `inbound_answer` is the caller's answer, produced the moment their offer was
-  read and held back until the callee answers — with a media server the caller's
-  answer comes from the server and never changes, which is what lets a hunt keep
-  running behind an established early dialog (§7.4).
+  read and held back until the callee answers. It does not depend on WHICH target
+  answers — it comes from the media server, not from the callee — and that is what
+  lets a hunt keep running behind an established early dialog (§7.4): no 1xx ever
+  carries this body, so nothing is committed until the 2xx.
+
+  It is not immutable, though. `bridge/3` may hand back a rebuilt answer once both
+  legs are known — a relayed media narrowed to what both can carry, or its codecs
+  reordered — and that one supersedes this. It is written back here, so the field
+  must be READ from the context at the moment of answering, never captured
+  beforehand (see `complete_media/4`, where doing so cost the rebuilt answer).
 
   `outbound_offer` is ours, generated once and reused by every branch: it does
   not depend on which target is being tried.
@@ -1759,7 +1766,12 @@ defmodule SIP.Session.B2bua do
     with {:ok, answer_b} <- callee_answer(resp),
          :ok <- ms_set_remote_answer(sip_ctx, answer_b),
          {sip_ctx, :ok} <- attach_legs(sip_ctx, plan, []) do
-      {SIP.Context.set(sip_ctx, :lasterr, :ok), with_our_answer(resp, plan)}
+      # `media_plan(sip_ctx)`, NOT `plan`. `attach_legs` rebinds only `sip_ctx`;
+      # `plan` is still the struct bound as this function's parameter, so reading
+      # it here would send the answer held since the INVITE and silently discard
+      # the one the media server rebuilt now that both legs are known. The plan
+      # travels in the context precisely because it is written there.
+      {SIP.Context.set(sip_ctx, :lasterr, :ok), with_our_answer(resp, media_plan(sip_ctx))}
     else
       {_sip_ctx, {:error, reason}} -> media_answer_failed(sip_ctx, resp, tid, reason)
       {:error, reason} -> media_answer_failed(sip_ctx, resp, tid, reason)
