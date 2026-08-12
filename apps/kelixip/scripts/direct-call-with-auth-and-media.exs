@@ -53,13 +53,17 @@ defmodule Kelix.DirectCallWithAuthAndMedia do
   #
   # Transcoding is a policy, not a fact. The codec is picked ONCE for both legs:
   # the first codec of the caller's list that the callee also answered (§5).
-  # `:avoid` transcodes only when that intersection is empty, `:forbid` refuses the
-  # media instead, `:force` keeps each leg on the head of its own list.
   #
-  # Video is `:forbid`: transcoding video is the expensive one — a decode, a
-  # scale and a re-encode per call — and a video leg that cannot be relayed is
-  # better refused than served at that price. Audio keeps `:avoid`, where the
-  # fallback costs little and losing the call would cost the caller everything.
+  # `:avoid` on both. It does put a transcoder on the path — `:forbid` is the only
+  # policy that wires a bare Endpoint ↔ Endpoint — but a JSR-309 transcoder decides
+  # per incoming packet: while both legs carry the same codec it forwards untouched,
+  # and the answer floats that shared set to the front so they keep doing so. What
+  # it buys over a bare relay is the day a peer switches codec mid-stream: the path
+  # follows instead of breaking, with no renegotiation.
+  #
+  # Video could not afford this until the media server learnt to bridge video the
+  # way it bridges audio (mediaserver 8f80fed) — before that, a transcoder on the
+  # path meant a decode, a scale and a re-encode on every single call.
   #
   # To reach a callee that is itself a WebRTC client, do not flip `outbound:` here
   # — put `profile: :webrtc_if_supported` on the peer below and let the framework
@@ -67,7 +71,7 @@ defmodule Kelix.DirectCallWithAuthAndMedia do
   @media {:mediaserver,
           inbound: [webrtc: :if_offered, media: :audio_video],
           outbound: [webrtc: :no, media: :audio_video],
-          transcode: [audio: :avoid, video: :forbid]}
+          transcode: [audio: :avoid, video: :avoid]}
 
   state initial_state do
     goto(wait_invite)
