@@ -155,6 +155,32 @@ today it is a P0 skeleton (`Kelix.Application` + supervision tree).
 > a time, and fixing one never fixed the others. It now lives in
 > `SIP.Msg.Ops.requested_expires/2` & friends, with everything else delegating.
 
+> **URI parameters and header parameters are two different sets.** `%SIP.Uri{}`
+> keeps them apart — `params` for what is inside the angle brackets (RFC 3261
+> §25.1 `uri-parameters`: `transport`, `user`, `maddr`, `ttl`, `lr`…), `hparams`
+> for what follows the closing bracket (`contact-params`, `to-param`: `expires`,
+> `q`, `tag`, the RFC 3840 feature tags, `+sip.instance`). Read with
+> `get_uri_param/2` or `get_header_param/2` (each tolerant, precedence matching
+> the parameter's nature), write with `set_uri_param/3` or `set_header_param/3`
+> (each clears the name on the other side), remove with `delete_param/2`, and
+> never hand-build a `params:` map holding a header parameter.
+>
+> A Request-URI is not a header value: it is `SIP-URI / SIPS-URI / absoluteURI`,
+> so it goes out through `SIP.Uri.serialize_ruri/1` (equivalently
+> `to_request_uri/1`), which drops the display name, the header parameters and
+> `method` while keeping every URI parameter — §19.1.5 makes carrying the unknown
+> ones mandatory, so it is never an allowlist. `SIPMsg` calls it for the
+> Request-Line, and the digest computation uses the same string.
+>
+> The two sets used to share one map. Forwarding a registered Contact then
+> emitted `INVITE "Bob" <sip:bob@host>;+sip.instance="<urn:uuid:…>" SIP/2.0` —
+> a Request-Line with two tokens where one URI belongs — which the callee dropped
+> without a single response, so every call to a Linphone handset hung in
+> `proceeding` until the scenario timed out. The denylist of "parameters that are
+> really header parameters" that preceded this could not be completed: it listed
+> `q` and `expires`, and traffic brought `+sip.instance`, `+org.linphone.specs`,
+> `reg-id`, `methods`, `pub-gruu`.
+
 ### Transaction Layer (`SIP.Transac.*`, `SIP.ICT`, `SIP.IST`, `SIP.NICT`, `SIP.NIST`)
 - Implements RFC 3261 transaction state machines
 - `ICT`/`NICT` — INVITE/non-INVITE client transactions
