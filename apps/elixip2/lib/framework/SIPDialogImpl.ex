@@ -1004,7 +1004,34 @@ defmodule SIP.DialogImpl do
           raise "Unsupported response code #{resp_code}"
       end
 
-    {:reply, ret, state}
+    # The BYE we have just answered 2xx ends the dialog (RFC 3261 §15.1.2), in
+    # both directions: the far end hanging up closes the dialog exactly as our own
+    # BYE does, and `handle_UAS_response/3` only ever read the case where WE sent
+    # it. So a dialog that RECEIVED a BYE stayed `:established` — for the full
+    # 1800 s of its expiration timer, since arm_expiration_timer/2 is a no-op for
+    # a BYE — and the application was never sent {:dialog_terminated, …} at all.
+    #
+    # Two things came of that, both seen in traffic (2026-08-12, callee hangs up
+    # on direct-call-with-auth.exs): one leaked dialog process per call ended by
+    # the far end, and — because the B2BUA teardown asks the dialog whether it is
+    # still established (SIP.Session.B2bua.release_legs/1) — a second, unsolicited
+    # BYE sent to the party that had just hung up, which answered it 481.
+    if resp_code in 200..299 and is_pid(uas_t) and uas_t == state.closing_transaction do
+      Logger.info(
+        dialogpid: "#{inspect(self())}",
+        module: __MODULE__,
+        message:
+          "Dialog closed by the far end's BYE (answered #{resp_code}). " <>
+            "Final state: terminated"
+      )
+
+      # The NIST that carried the BYE is deliberately left alive by terminate/2
+      # (stop_client_transactions/1 spares server transactions): it still has to
+      # absorb the retransmissions of a BYE whose 200 has not arrived yet.
+      {:stop, :normal, ret, %SIP.DialogImpl{state | state: :terminated}}
+    else
+      {:reply, ret, state}
+    end
   end
 
   # Send the dialog's INITIAL request to one more target, as another branch of

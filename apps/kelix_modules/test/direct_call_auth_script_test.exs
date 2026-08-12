@@ -32,6 +32,15 @@ defmodule Kelix.DirectCallWithAuthScriptTest do
       {:reply, :ok, test}
     end
 
+    # A dialog also ORIGINATES: what the callee sends is relayed onto this leg.
+    # The transaction pid handed back is this process — the B2BUA correlation only
+    # ever compares it, never calls it. Without this clause the catch-all answered
+    # `:ok`, which the relay reads as a failure ({:b2bua, :relay_failed, …}).
+    def handle_call({:newreq, req}, _from, test) do
+      send(test, {:sent_on_inbound, req})
+      {:reply, {:ok, self()}, test}
+    end
+
     def handle_call(_msg, _from, test), do: {:reply, :ok, test}
     def handle_info(_msg, test), do: {:noreply, test}
   end
@@ -198,6 +207,48 @@ defmodule Kelix.DirectCallWithAuthScriptTest do
     assert_receive {:invite_sent, fwd}, 5_000
     assert fwd.ruri.userpart == @callee
     assert fwd.ruri.domain == "10.0.0.9"
+  end
+
+  # The whole call, ended by the CALLEE — the half no suite covered, and where the
+  # 481 of 2026-08-12 came from: the teardown asked the outbound leg whether it was
+  # still established, the dialog said yes although Bob had just BYEd it, and Bob
+  # was sent a second BYE he answered "481 Call/Transaction Does Not Exist".
+  test "when the callee hangs up, its BYE is relayed and answered — and it gets nothing more",
+       %{scenario: module} do
+    :ok = register_callee("10.0.0.19", "auth_bye")
+    tp = mockup_pid("auth_bye")
+
+    {:ok, dialog} = MockDialog.start_link(self())
+    pid = spawn_call(module, dialog, invite())
+    ref = Process.monitor(pid)
+    send(pid, {:INVITE, invite(), self(), dialog})
+
+    challenge = challenge_received!()
+    send(pid, {:INVITE, invite(credentials(challenge), 2), self(), dialog})
+    assert_receive {:invite_sent, _fwd}, 5_000
+
+    # Bob answers, Alice's ACK is relayed: the call is up on both legs.
+    GenServer.cast(tp, {:simulate, 200, 0})
+    assert_receive {:replied, 200, _reason, _fields, _req}, 5_000
+    send(pid, {:ACK, %{invite(nil, 2) | method: :ACK, cseq: [2, :ACK]}, nil, dialog})
+    assert_receive :ACK, 5_000
+
+    # Bob hangs up.
+    SIP.Test.Transport.UDPMockup.hangup(tp)
+
+    # His BYE crosses to Alice, in her own dialog…
+    assert_receive {:sent_on_inbound, bye}, 5_000
+    assert bye.method == :BYE
+
+    # …and the leg he closed ends there and then, which is what the instance is
+    # waiting for in `wait_far_bye_ok`. Promptly: a dialog that stays established
+    # takes the state's 5 s "BYE unanswered" timeout instead.
+    assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
+
+    # Bob, who is done, is sent nothing at all — a `:BYE` here is the teardown's,
+    # on a dialog Bob closed himself, and what he answers it is 481. Longer than
+    # the timeout above on purpose: that is when it used to go out.
+    refute_receive :BYE, 8_000
   end
 
   test "a wrong password is refused 403, and the caller may still try again",

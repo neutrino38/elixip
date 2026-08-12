@@ -99,6 +99,23 @@ defmodule SIP.Test.Transport.UDPMockup do
     GenServer.cast(t_pid, :retransmit_2xx)
   end
 
+  @doc """
+  Hang up: the BYE this peer sends when the person it stands for goes on-hook,
+  delivered inbound like a datagram off the wire.
+
+  Built from the INVITE it answered — its own identity and To tag on From, ours on
+  To, our Call-ID — so it lands on the dialog that INVITE established. `{:simulate,
+  …}` cannot express it: everything there is a *response* to a request the stack
+  sent, and a call the far end ends is the other direction.
+
+  Nothing could ask for it before, and it is the half of the call teardown nothing
+  covered: what a B2BUA owes when its CALLEE hangs up (relay the BYE, answer it,
+  and leave that leg alone afterwards).
+  """
+  def hangup(t_pid) do
+    GenServer.cast(t_pid, :hangup)
+  end
+
   defp handle_req(state, :INVITE, sipreq) do
     # Tell the test the INVITE actually went out, mirroring {:options_sent, …}.
     # Without it a test cannot know *when* to simulate an answer: it would race
@@ -438,6 +455,66 @@ defmodule SIP.Test.Transport.UDPMockup do
         {:noreply, _lent} = handle_cast({:simulate, 200, 0}, Map.put(state, :req, req))
         {:noreply, state}
     end
+  end
+
+  # See hangup/1. The INVITE it is built from is the acknowledged one when there is
+  # one — a call being hung up has been answered and confirmed — and otherwise the
+  # request in progress, so a test that skipped the ACK can still end the call.
+  def handle_cast(:hangup, state) do
+    case Map.get(state, :acked_req) || Map.get(state, :req) do
+      %{method: :INVITE} = invite ->
+        Process.send_after(self(), {:recv, far_end_bye(invite, state.totag)}, 0)
+        {:noreply, state}
+
+      _ ->
+        Logger.warning(
+          module: SIP.Test.Transport.UDPMockup,
+          message: "Asked to hang up but this peer has answered no INVITE. Ignoring."
+        )
+
+        {:noreply, state}
+    end
+  end
+
+  # The BYE that ends the call from this side (RFC 3261 §15.1.1): this peer's
+  # identity and tag on From — the To of the INVITE it answered — ours on To with
+  # the tag we put there, our Call-ID, and a fresh Via branch, since a BYE is a
+  # transaction of its own.
+  #
+  # The CSeq continues OUR numbering rather than starting a sequence of this peer's
+  # own: `SIP.DialogImpl` initialises `cseqin` to 1 instead of to "empty" (RFC 3261
+  # §12.2.2), so a first in-dialog request numbered 1 is answered 500 Out of order.
+  # This is the numbering every UA seen in traffic uses anyway.
+  defp far_end_bye(invite, totag) do
+    branch = SIP.Msg.Ops.generate_branch_value()
+    [seqno, _method] = invite.cseq
+    caller = uri!(invite.from)
+
+    %{
+      "Max-Forwards" => "70",
+      method: :BYE,
+      # A real callee sends it to our Contact; here nothing routes on the
+      # Request-URI (a request is matched to its dialog on the tags and the
+      # Call-ID), so the caller's own URI is enough and needs no parsed Contact.
+      ruri: caller,
+      from: SIP.Uri.set_header_param(uri!(invite.to), "tag", totag),
+      to: caller,
+      useragent: "UDPMockup-test",
+      callid: invite.callid,
+      transid: branch,
+      cseq: [seqno + 1, :BYE],
+      via: ["SIP/2.0/UDP 82.184.8.2:53936;branch=#{branch}"],
+      contentlength: 0
+    }
+  end
+
+  # The request this peer put aside is the parsed form of what it received, and
+  # `SIPMsg.parse/2` leaves From and To as the raw header values they arrived as.
+  defp uri!(%SIP.Uri{} = uri), do: uri
+
+  defp uri!(value) when is_binary(value) do
+    {:ok, uri} = SIP.Uri.parse(value)
+    uri
   end
 
   @spec handle_cast({:simulate, 401 | 407, non_neg_integer()}, map()) :: {:noreply, map()}
