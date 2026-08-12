@@ -170,9 +170,29 @@ The third argument of `b2bua_forward/3`:
 
 `inbound:` / `outbound:` say how each leg terminates its media — `webrtc:` takes
 `:yes`, `:no`, `:if_offered` or `:no_avp`, and this is where a gateway is
-expressed. `transcode:` is a policy per media: `:avoid` (default) connects the
-two endpoints directly when they share a codec and transcodes only when they do
-not, `:force` always transcodes, `:forbid` fails the call instead.
+expressed.
+
+`transcode:` is a policy per media, and what it selects is a **codec for both
+legs at once** — the two legs of a B2BUA cannot be negotiated independently:
+
+- **`:avoid`** *(default)* — the first codec the caller offered that the callee
+  also answered, for both legs. Same codec on both sides means packets cross
+  without being re-encoded.
+- **`:force`** — each leg keeps the head of **its own** list, so each peer is
+  served the codec **it** asked for whatever the other settled on.
+- **`:forbid`** — the same selection as `:avoid`, but no common codec **fails**
+  the media rather than converting it.
+
+Careful with two things this wording used to get wrong. `:force` does not mean
+"always convert": when the two heads happen to be the same codec, nothing is
+converted. And `:avoid` does not attach the two endpoints directly — a converter
+stays in the path and decides *per packet*, forwarding untouched while the legs
+agree, which is what lets it follow a peer that switches codec mid-stream.
+`:forbid` is the only policy that gets a direct attachment.
+
+**👉 The full rules, the use cases and the RFC index are in
+[CODEC-NEGOTIATION.md](CODEC-NEGOTIATION.md)** — including WebRTC gateways,
+real-time text, and what happens when a media is added or withdrawn mid-call.
 
 The bridge is **automatic**: `b2bua_forward_reply/1` builds it when it relays the
 `2xx`, the first moment both SDPs are known.
@@ -993,8 +1013,12 @@ What is worth noticing:
   fingerprints, ICE candidates, `RTP/SAVPF` versus `RTP/AVP`, rtcp-mux — follows
   from those two words.
 - **`transcode: [video: :force]`** because a browser and a SIP phone rarely share
-  a video codec, and `:avoid` would then have to build the chain anyway. Forcing
-  it makes the cost explicit at read time instead of at call time.
+  a video codec: each side is served the codec it asked for, and the cost is
+  explicit at read time instead of at call time. Worth knowing what it gives up —
+  when the two *do* share one (a browser and a phone that both do H.264),
+  `:avoid` would have relayed it and `:force` converts anyway. Choose `:force`
+  when you want a known codec on each leg, `:avoid` when you want the cheapest
+  path the peers allow.
 - **`ruri: :keep` + `outbound_proxy`** are two orthogonal questions: *what* the
   forwarded request asks for, and *where* it is sent. A gateway sitting beside a
   proxy answers them differently — keep the target, change the hop.

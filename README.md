@@ -38,7 +38,7 @@ The project will provide in the long term:
 - a scriptable and extensible SIP application inspired by kamailio. Called **kelixip**.
 
 In terms of capabilities, the emphasis will be on:
-- support for Total Conversation calls with any combination of audio/video/realtime text media including using the WebRTC bitstream
+- support for Total Conversation calls with any combination of audio/video/realtime text media including using the WebRTC bitstream — [how each medium's codec is chosen](CODEC-NEGOTIATION.md)
 - support for SIP over UDP, TCP, TLS and WSS
 - support for clustering and load sharing
 
@@ -51,6 +51,8 @@ In terms of capabilities, the emphasis will be on:
 - [Domain Specific Language definition](DSL.md): first version released
 - SIP.Scenario Scripting Engine: done
 - [Back to back user agent](B2BUA.md): first release
+- [Codec negotiation across two legs](CODEC-NEGOTIATION.md), with a transcoding
+  policy per media: implemented
 
 ### Testing tool: elixipp
 - Interactive command elixpp for testing tools: done
