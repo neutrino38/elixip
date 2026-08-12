@@ -120,7 +120,8 @@ defmodule Kelix.ScriptRegistryTest do
             "mcu.exs",
             "mcu_adhoc.exs",
             "direct-call.exs",
-            "direct-call-with-auth.exs"
+            "direct-call-with-auth.exs",
+            "direct-call-with-auth-and-media.exs"
           ] do
         path = Path.expand("../scripts/#{script}", __DIR__)
 
