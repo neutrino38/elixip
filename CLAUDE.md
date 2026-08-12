@@ -110,8 +110,19 @@ apps/elixip2/lib/
 │   ├── SIPScenarioMonitor.ex # in-memory store feeding the --monitor view
 │   │                         #   (SIP.Scenario.Monitor; a no-op when not started)
 │   └── ElixippScenarioUAS.ex # Elixip.ScenarioUAS — UAS instance factory (quota)
+├── built-in-scenarios/       # the scenarios COMPILED INTO the escript, run by
+│   │                         #   module name: `elixipp UAC.Register` needs no file
+│   ├── uac_invite.ex         # UAC.Invite
+│   └── uac_register.ex       # UAC.Register
 └── mix/tasks/scenario.ex     # `mix scenario` task
 ```
+
+`built-in-scenarios/` is **not** a duplicate of the top-level
+`apps/elixip2/scenarios/`: the latter holds editable `.exs` copies loaded by
+*path*, deliberately under different module names (`UAC.InviteExample`,
+`UAC.RegisterExample`) so both can coexist. Deleting the directory as redundant
+takes `elixipp UAC.Invite`, `mix scenario UAC.Register` and everything ELIXIPP.md
+promises about "no file needed" with it.
 
 The `dsl` layer builds on `framework` (a scenario `use SIP.Scenario` pulls in
 `SIP.Session.CallUAC`, `SIP.Session.Media` and `SIP.Context`). The `elixipp`

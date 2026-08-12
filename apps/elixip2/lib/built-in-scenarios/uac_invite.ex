@@ -1,10 +1,15 @@
-# Editable, file-loadable copy of the built-in UAC.Invite scenario
-# (lib/built-in-scenarios/uac_invite.ex). The module is named UAC.InviteExample so it does
-# not collide with the bundled UAC.Invite. Run it with:
-#     elixipp apps/elixip2/scenarios/uac_invite.exs
-#     mix scenario apps/elixip2/scenarios/uac_invite.exs
-# or run the bundled version by name: `elixipp UAC.Invite`.
-defmodule UAC.InviteExample do
+defmodule UAC.Invite do
+  @moduledoc """
+  Built-in outbound-call (UAC INVITE) scenario, compiled into the app and bundled
+  into the `elixipp` escript. Run it by module name, without a `.exs` file:
+
+      elixipp UAC.Invite
+      elixipp -c ives.json UAC.Invite
+      mix scenario UAC.Invite        # via the file path is also fine
+
+  The editable, file-loadable copy lives in `scenarios/uac_invite.exs` (module
+  `UAC.InviteExample`); this is the canonical bundled version.
+  """
   # use SIP.Scenario pulls in the state-machine DSL together with
   # use SIP.Session.CallUAC and use SIP.Session.Media.
   use SIP.Scenario
@@ -16,8 +21,6 @@ defmodule UAC.InviteExample do
   @domain "example.com"
   @proxy "sip.example.com"
   @passwd "changeme"
-  # @callee is NOT a module attribute here because the domain may be overridden at
-  # run time by an external config file (-c FILE). Use sip_ctx.domain at runtime.
   @callee_num "90901"
 
   # SIP identity for the scenario. The framework reads this block to build the
@@ -74,12 +77,6 @@ defmodule UAC.InviteExample do
 
       {code, _rsp, _trans_pid, _dialog_pid} when code in 400..699 ->
         scenario_failure("Call failure with code #{code}")
-
-      # The media server went away while we were still calling. There is no call
-      # to salvage — the SDP we offered names a server that no longer answers —
-      # so give up now rather than let the callee pick up on a dead media path.
-      {:ms_event, _server, :server_disconnected} ->
-        scenario_failure("media server disconnected while calling")
     after
       30_000 -> scenario_failure("Call not answered after 30s")
     end
@@ -89,17 +86,14 @@ defmodule UAC.InviteExample do
   state call_answered do
     on_events do
       {:ms_event, _conn, :ice_connected} -> goto(start_play, "media connected")
-
-      {:ms_event, _server, :server_disconnected} ->
-        goto(hangup_call, "media server disconnected")
     after
-      10_000 -> scenario_failure("No media received after 10s")
+      5_000 -> scenario_failure("No media received after 5s")
     end
   end
 
   # -------------------------------------------------------------------------------
   state start_play do
-    media_play("/home/ebuu/mediaserver/titi.mp4")
+    media_play("toto.mp4")
     goto(next)
   end
 
@@ -119,23 +113,11 @@ defmodule UAC.InviteExample do
       {:BYE, req, _trans_pid, _dialog_pid} ->
         reply_request(req, 200, "OK")
         scenario_success("BYE")
-
-      # The media plane is gone: the call is up but there is nothing left to
-      # carry it, so hang up instead of holding a silent call open. Nothing here
-      # is specific to this scenario — every media scenario owes the same clause,
-      # since `:server_disconnected` is delivered but not acted upon by the
-      # framework (design docs/design/b2bua_module.md §14.6).
-      {:ms_event, _server, :server_disconnected} ->
-        goto(hangup_call, "media server disconnected")
     end
   end
 
   # -------------------------------------------------------------------------------
   state hangup_call do
-    # Release whatever the context still holds BEFORE the BYE. This is the
-    # defensive one — it skips dead handles and swallows their errors — where
-    # media_stop/0 would call a server that may be the very thing that died.
-    media_cleanup_ressources()
     send_BYE()
 
     on_events do

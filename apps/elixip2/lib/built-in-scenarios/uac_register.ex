@@ -1,16 +1,20 @@
-# Editable, file-loadable copy of the built-in UAC.Register scenario
-# (lib/built-in-scenarios/uac_register.ex). The module is named UAC.RegisterExample so it
-# does not collide with the bundled UAC.Register. Run it with:
-#     elixipp apps/elixip2/scenarios/uac_register.exs
-#     mix scenario apps/elixip2/scenarios/uac_register.exs
-# or run the bundled version by name: `elixipp UAC.Register`.
-defmodule UAC.RegisterExample do
+defmodule UAC.Register do
+  @moduledoc """
+  Built-in REGISTER scenario, compiled into the app and bundled into the
+  `elixipp` escript. Run it by module name, without a `.exs` file:
+
+      elixipp UAC.Register
+      elixipp -c ives.json UAC.Register
+
+  The editable, file-loadable copy lives in `scenarios/uac_register.exs` (module
+  `UAC.RegisterExample`); this is the canonical bundled version.
+  """
   use SIP.Scenario
   use SIP.Session.RegisterUAC
 
   # Standard placeholder identity. Real credentials are injected at run time from
-  # an external JSON file (e.g. `elixipp -c ives.json scenarios/uac_register.exs`)
-  # which overrides this config block. See README "Paramétrage par fichier JSON".
+  # an external JSON file (e.g. `elixipp -c ives.json UAC.Register`) which
+  # overrides this config block. See README "Paramétrage par fichier JSON".
   @username "1000"
   @authusername "1000"
   @displayname "Test User"
@@ -65,11 +69,8 @@ defmodule UAC.RegisterExample do
         goto(loop, "401 Unauthorized")
 
       {200, rsp, trans_pid, _dialog_pid} ->
-        # Arms the refresh timer (:register_refresh at expire/2) and, because this
-        # scenario declared `options_keepalive: :scenario`, the keepalive timer that
-        # feeds its `keepalive` state. The dialog layer stands down — the two senders
-        # are exclusive, and asking for both is what used to put two OPTIONS on the
-        # wire per period and leave a stray response in the mailbox.
+        # Arms the refresh timer (:register_refresh at expire/2) and the OPTIONS
+        # keepalive timer (:options_keepalive) from the granted expiration.
         process_sip_reply(rsp, trans_pid)
         goto(registered, "200 OK")
 
