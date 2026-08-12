@@ -41,7 +41,10 @@ See B2BUA.md documentation.
 
 ### Media between the two legs
 
-By default, B2BUA do not process any media. See b2bua_basic.exs reference scenario.
+By default, B2BUA do not process any media. The reference scenario 
+`direct-call-with-auth.exs` has been extensively tested and debugged using
+Linphone.
+
 
 But media relay using a Mediaserver is also supported. This enables NAT traversal but also
 if requested, audio and/or video transcoding.
@@ -54,7 +57,7 @@ main uses cases:
 - on hold / off hold
 - IP address change.
 
-A reference scenario b2bua_media.exs provides a good example.
+A reference scenario direct-call.exs provides a good example.
 
 
 
@@ -207,3 +210,8 @@ refactor to put common code in helper modules.
 
 - [mediaserver 1.12.2](https://github.com/neutrino38/mediaserver/releases/tag/1.12.2)
   — unchanged since 1.2.1.
+
+## Security
+
+CycloneDX tooling has been integrated and from now on, the release will be shipped
+with its SBOM file to comply with the EU Cyber Resiliancy Act (CRA)
