@@ -1,14 +1,111 @@
 # kelixip modules
 
-A **module** extends kelixip with a stateful service (a connection pool, a
-store, a socket) **plus stateless facades** that scenario scripts import. This is
-the same idea as a Kamailio module: it has parameters, it may add control
-commands, and scripts call into it.
+A **module** is a loadable Elixir BEAM that extends kelixip and exposes new
+functions and facades to be used in kelixip scenarios written in DSL. This
+is the kelixip equivalent of kamailio modules. In details, a module can extend
+kelixip by
+
+- adding new facades / functions for scripts
+- adding new admin commands
+- adding new REST API endpoints for administration
 
 The core release ships **no** SIP function on its own — a kelixip-based product
 loads exactly the modules it needs.
 
-## Anatomy of a module
+# List of modules
+
+| Module | Function | Package (RPM / deb) | Doc |
+|---|---|---|---|
+| `registrar` | Location service: REGISTER bindings, AOR lookup | `kelixip-mod-registrar` | [registrar.md](registrar.md) |
+| `auth_db` | Digest authentication against a subscriber database | `kelixip-mod-auth_db` / `kelixip-mod-auth-db` | [auth_db.md](auth_db.md) |
+| `mcu` | Conferencing (medooze media server) | `kelixip-mod-mcu` | [mcu.md](mcu.md), REST endpoints [mcu-api.md](mcu-api.md), scenario guide [mcu_module_guide.md](mcu_module_guide.md) |
+
+The module name is the one to use in a `[module.<name>]` block and in a script's
+`uses_modules`. [template.md](template.md) is the page layout every module doc follows.
+
+# Using modules
+
+## Declaring a module
+
+A module is declared by a `[module.<name>]` section in `config.toml`.
+The `<name>` is the module's registered name. The section can contain
+module specific parameters that are system wide e.g.
+
+```toml
+# config.toml
+[module.auth_db]
+database = "kamailio"
+username = "kamailio"
+password = "…"
+```
+
+- **One exception on where the block lives**: `registrar`, whose
+  `[module.registrar]` block is in **`domains.toml`**, so it is hot-reloadable
+  along with the domains it serves. A `[module.registrar]` block placed in
+  `config.toml` is ignored.
+- **Which Elixir module implements it**: by default `<name>` maps to
+  `Kelix.Mod.<Camelize(name)>` (`auth_db` → `Kelix.Mod.AuthDb`). A third-party
+  module names it explicitly with `module = "My.Custom.Module"`.
+- **`call_timeout_ms`** (default 5000) bounds a facade call and is understood by
+  every module. All other keys are module specific — see each module's page.
+
+An invalid config block is **logged and skipped** at boot: the module does not start,
+but the server and the other modules do (never a half-applied start).
+
+## Packaging and loading of modules
+
+Kelixip modules are shipped as RPM / .deb packages — one per module, listed in
+the table above. They contain .beam files (compiled Elixir code) and documentation.
+- .beam files are stored in `/usr/lib/kelixip/modules` (`server.module_dir`)
+- doc is stored in `/usr/share/doc/<package>/`
+
+Note that at boot, kelixip loads only those module which name has been declared
+in a `[module.<name>]` block in `config.toml` (or, for `registrar`, in
+`domains.toml`).
+
+## Managing modules
+
+If a module is upgraded or its configuration changed, the command
+
+`kelictl module reload <name>` can be used to reload the module config and code.
+Upgrading is therefore install + reload: the new `.beam` is dropped into
+`module_dir` by the package, then the reload re-reads it from disk.
+
+Behavior of module reloading depends on the module. All this can be done without
+restarting kelixip and with minimal service impact.
+
+> A reload keeps the module's state as-is or restarts the service: `.beam`
+> **versioning** (OTP `code_change`-style state migration) is out of scope.
+
+The command enables discovery of modules
+
+```console
+$ kelictl module list          # loaded modules, their commands and facades
+```
+
+## Using a module from a script
+
+Import the facade and call it. The facade decides; the **script** composes the
+SIP response (§11.1):
+
+```elixir
+import Kelix.Mod.Registrar, only: [save: 4, lookup: 1]
+import Kelix.Mod.AuthDb, only: [do_registration_auth: 3]
+```
+
+A script should also **declare** its module dependencies in its `config` block:
+
+```elixir
+config uses_modules: [:registrar, :auth_db]
+```
+By doing so, the script ensures that it cannot be loaded if one of its dependency
+modules is not loaded, instead of crashing during production time.
+
+The names are the registered ones — the `<name>` of each `[module.<name>]` block,
+not the Elixir module.
+
+
+# Anatomy of a module
 
 A module has two facets:
 
@@ -22,113 +119,13 @@ facade returns `{:error, :down}`, and a call that exceeds `call_timeout_ms`
 returns `{:error, :timeout}`. A facade never raises — the instance keeps control
 of the SIP response.
 
-## Declaring a module
+## Module administration (kelictl / REST API)
 
-A module is declared by a `[module.<name>]` table. The `<name>` is the module's
-registered name.
-
-```toml
-# config.toml
-[module.auth_db]
-database = "kamailio"
-username = "kamailio"
-password = "…"
-```
-
-- **Where the block lives.** Every module is configured from **`config.toml`**,
-  with **one exception**: `registrar`, whose `[module.registrar]` block lives in
-  **`domains.toml`** so it is hot-reloadable alongside the domains it serves. A
-  `[module.registrar]` block placed in `config.toml` is ignored.
-- **Which Elixir module implements it.** By default `<name>` maps to
-  `Kelix.Mod.<Camelize(name)>` (`auth_db` → `Kelix.Mod.AuthDb`). Override with an
-  explicit `module = "My.Custom.Module"` key.
-- **Common keys.** `call_timeout_ms` (bounds a facade call; default 5000) is
-  understood by every module. All other keys are module-specific — see each
-  module's page.
-
-An invalid block is **logged and skipped** at boot: the module does not start,
-but the server and the other modules do (never a half-applied start).
-
-## Loading
-
-First-party modules are shipped as **one package each** — `kelixip-mod-registrar`,
-`kelixip-mod-auth_db`, `kelixip-mod-mcu` (and `kelixip-mod-radius_billing` when it
-exists) — which drop their bytecode into `module_dir` (`/usr/lib/kelixip/modules`,
-`server.module_dir`), plus their own page of this directory under
-`/usr/share/doc/<package>/`.
-**The server release contains none of them**: at boot it adds `module_dir` to its
-code path and loads a module only when a `[module.<name>]` block declares it.
-
-Two consequences worth knowing:
-
-- **A block is what loads the code.** A script calling `Kelix.Mod.AuthDb.…` needs
-  `[module.auth_db]` in `config.toml`, even if the facade would have worked
-  without configuration: a release does not lazily load code on first call. With
-  no block, the script raises on its first facade call and the request gets **no
-  answer at all**. Boot (and `kelictl domain reload-all`) warns when a domain enables
-  a function whose same-named module is not loaded.
-- **Installing a new version is install + reload.** Drop the new `.beam` into
-  `module_dir` and run `kelictl module reload <name>`: the code is re-read from
-  disk, the block re-validated, and the service reconfigured or restarted. No
-  server restart.
-
-From a source checkout, build and install them with:
-
-```bash
-cd apps/kelix_modules && MIX_ENV=prod mix compile
-cp _build/prod/lib/kelix_modules/ebin/Elixir.Kelix.Mod.*.beam "$MODULE_DIR"/
-```
-
-> `.beam` code-reload **versioning** (OTP `code_change`-style state migration) is
-> still out of scope — a reload keeps the service's state as-is or restarts it.
-
-## Using a module from a script
-
-Import the facade and call it. The facade decides; the **script** composes the
-SIP response (§11.1):
-
-```elixir
-import Kelix.Mod.Registrar, only: [save: 4, lookup: 1]
-import Kelix.Mod.AuthDb, only: [do_registration_auth: 3]
-```
-
-### Declare what you use
-
-A script should also **declare** the modules it calls, in its `config` block:
-
-```elixir
-config uses_modules: [:registrar, :auth_db]
-```
-
-The names are the registered ones — the `<name>` of each `[module.<name>]` block,
-not the Elixir module.
-
-kelixip then refuses to load the script when one of them is not loaded, naming the
-missing module and listing those that are. Without the declaration the dependency
-is written nowhere and cannot be guessed (a custom registrar script may legitimately
-need no `registrar` module), so the mismatch could only ever be a boot *warning* —
-and the first request to that domain would die inside the instance, answered `500`
-by the reference script's rescue at best.
-
-The declaration is **optional**: a script that declares nothing still loads, exactly
-as before. Adding it turns a runtime surprise into a load-time error.
-
-## Reloading
-
-`kelictl module reload <name>` re-reads the block: `validate_config/1` runs
-first (an invalid block is rejected, the running service untouched), then the
-module reconfigures in place if it supports it, else the child is cleanly
-restarted. The `registrar` block additionally reloads on `kelictl domain reload-all`.
-
-## Control surface (kelictl / REST)
-
-A module may contribute `kelictl <name> <cmd>` sub-commands and `/modules/<name>/…`
+A module may add `kelictl <name> <cmd>` sub-commands and `/modules/<name>/…`
 REST endpoints from a single declaration (`describe_control/0`); both frontals
 derive from it — see [administration.md](../administration.md) and
 [rest-api.md](../rest-api.md).
 
-That declaration is also readable at runtime, so what a node serves never has to
-be looked up in a module's source:
 
 ```console
 $ kelictl module list          # loaded modules, their commands and facades
@@ -141,11 +138,3 @@ An argument may carry its own `help:` (one line or several) for a value with a
 vocabulary of its own — a mosaic name, an enum, a compact syntax. It is printed
 under the command by the two `help` forms above and travels in the JSON, so the
 text an operator reads sits next to the parser that enforces it.
-
-## Reference
-
-- [template.md](template.md) — the page layout every module doc follows
-- [registrar.md](registrar.md)
-- [auth_db.md](auth_db.md)
-- [mcu.md](mcu.md) — conferencing; its REST endpoints are [mcu-api.md](mcu-api.md) and
-  the narrative guide is [mcu_module_guide.md](mcu_module_guide.md)

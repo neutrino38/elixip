@@ -351,7 +351,7 @@ prints their usage rather than "unknown module".
 Of the shipped modules, only [mcu](modules/mcu.md) contributes commands today —
 [registrar](modules/registrar.md) and [auth_db](modules/auth_db.md) contribute
 none. The mechanism is documented in
-[modules/README.md](modules/README.md#control-surface-kelictl--rest).
+[modules/README.md](modules/README.md#module-administration-kelictl--rest-api).
 
 ## Parity with REST
 
