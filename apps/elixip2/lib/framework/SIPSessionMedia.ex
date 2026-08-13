@@ -186,13 +186,33 @@ defmodule SIP.Session.Media do
   The `:module` value is either a module or one of the `:mockup` /
   `:mendooze` shorthands usable from scenario `config` blocks and external
   JSON files. Defaults to `MediaServer.Mockup`.
+
+  `module: :unavailable` is not a server but a **verdict**: whoever chose the media
+  server for this call looked and found none. It is what `Kelix.MediaPool` reports
+  through `:mediaserver_instance` when no pooled MCU is serviceable. Nothing is
+  connected, `:lasterr` is set to `{:error, :no_media_server}`, and the scenario
+  decides what to answer — a call that needs media and has none is the server's
+  fault, so a `503` rather than the `488` a codec mismatch earns.
   """
   @spec use_mediaserver(%SIP.Context{}) :: %SIP.Context{}
   def use_mediaserver(sip_ctx = %SIP.Context{}) do
     cfg = ms_config(sip_ctx) |> normalize_ms_config()
-    module = Keyword.get(cfg, :module, :mockup) |> resolve_ms_module()
-    url = Keyword.get(cfg, :url, "sip:localhost:8080")
-    use_mediaserver(sip_ctx, module, url)
+
+    case Keyword.get(cfg, :module, :mockup) do
+      :unavailable ->
+        Logger.warning(
+          module: __MODULE__,
+          message:
+            "media_connect: no media server available for this call; " <>
+              "not connecting, and NOT falling back to a stub"
+        )
+
+        SIP.Context.set(sip_ctx, :lasterr, {:error, :no_media_server})
+
+      module ->
+        url = Keyword.get(cfg, :url, "sip:localhost:8080")
+        use_mediaserver(sip_ctx, resolve_ms_module(module), url)
+    end
   end
 
   # A per-instance override (in the context appdata under `:mediaserver_instance`)
@@ -227,6 +247,7 @@ defmodule SIP.Session.Media do
         {:ok, pid} ->
           sip_ctx
           |> SIP.Context.set(:mediaserverpid, pid)
+          |> SIP.Context.set(:lasterr, :ok)
           |> watch_media_server(pid)
 
         _ ->

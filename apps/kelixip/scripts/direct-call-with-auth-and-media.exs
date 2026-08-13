@@ -177,16 +177,38 @@ defmodule Kelix.DirectCallWithAuthAndMedia do
         # The media server first: without one there is nothing to answer the
         # caller with, and the outbound INVITE has no body to carry.
         media_connect()
-        b2bua_forward(req, peer, @media)
 
-        if ctx_get(:lasterr) == :ok do
-          goto(proceeding, "call forwarded")
-        else
-          # The offer could not be terminated (no common codec, a WebRTC offer we
-          # were told not to take). That is a statement about what the caller
-          # asked for, so it is a 488 — not a 500, which would blame us.
-          b2bua_reply(req, 488, "Not Acceptable Here")
-          goto(releasing, "media setup failed: #{inspect(ctx_get(:lasterr))}")
+        case ctx_get(:lasterr) do
+          {:error, :no_media_server} ->
+            # There is no media server to be had — the pool looked and found none.
+            # That is OUR unavailability, not a problem with what the caller
+            # offered, so it is a 503 and it may carry a Retry-After: an upstream
+            # proxy can try another route, which a 488 would never let it do.
+            #
+            # This branch exists because the alternative was worse than a refusal:
+            # a missing pooled MCU used to fall back to the global `:mediaserver`
+            # config, whose default is the TEST MOCKUP. The call then signalled
+            # perfectly and carried no media at all (2026-08-13).
+            b2bua_reply(req, 503, "Service Unavailable")
+            goto(releasing, "no media server available")
+
+          :ok ->
+            b2bua_forward(req, peer, @media)
+
+            if ctx_get(:lasterr) == :ok do
+              goto(proceeding, "call forwarded")
+            else
+              # The offer could not be terminated (no common codec, a WebRTC offer
+              # we were told not to take). That is a statement about what the
+              # caller asked for, so it is a 488 — not a 500, which would blame us.
+              b2bua_reply(req, 488, "Not Acceptable Here")
+              goto(releasing, "media setup failed: #{inspect(ctx_get(:lasterr))}")
+            end
+
+          other ->
+            # media_connect() failed for a reason of its own. Ours either way.
+            b2bua_reply(req, 503, "Service Unavailable")
+            goto(releasing, "media connect failed: #{inspect(other)}")
         end
 
       :notfound ->

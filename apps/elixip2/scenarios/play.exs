@@ -37,14 +37,41 @@ defmodule UAS.Example.Call.Play do
       {:INVITE, _req, _trans, _dlg} ->
         # auto_store stashed the request; reply_invite reads it back.
         media_connect()
-        reply_invite(180, "Ringing")
-        goto(answering, "INVITE")
+
+        # Do not ring a caller we cannot serve. This scenario exists to play a
+        # file, so with no media server there is nothing to answer with and
+        # nothing to play — see the no_media_server state for why it is a 503.
+        case ctx_get(:lasterr) do
+          {:error, :no_media_server} -> goto(no_media_server, "no media server")
+          _ -> goto(ringing, "INVITE")
+        end
 
       {:scenario_ctl, :shutdown, _reason} ->
         scenario_aborted("UAS Invite stopped gracefully")
     after
       60_000 -> scenario_failure("no INVITE received")
     end
+  end
+
+  # A state of its own rather than two more lines above: the 180 is what commits
+  # us to the call, and it must come after the media server is known to exist.
+  state ringing do
+    reply_invite(180, "Ringing")
+    goto(answering)
+  end
+
+  # No media server to be had — the pool looked and found none. `503`, not the
+  # `500` a broken scenario would deserve nor a `488`: the caller's offer is fine,
+  # we are the ones missing a resource, and a 503 is what lets an upstream proxy
+  # try somewhere else.
+  #
+  # This state exists because the alternative was worse than a refusal: a missing
+  # media server used to fall back to the global `:mediaserver` config, whose
+  # default is the TEST MOCKUP. The call then answered, played nothing, and
+  # reported success (2026-08-13).
+  state no_media_server do
+    reply_invite(503, "Service Unavailable")
+    scenario_failure("no media server available")
   end
 
   # Negotiate the SDP answer with the media server and send 200 OK. On a media

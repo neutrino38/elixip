@@ -153,15 +153,69 @@ defmodule Kelix.Router do
     end
   end
 
-  # ask the pool for an MCU; nil when there is no pool or none is serviceable (the
-  # instance then falls back to the global :mediaserver config).
-  defp media_override() do
-    with pid when is_pid(pid) <- Process.whereis(Kelix.MediaPool),
-         {:ok, %{module: module, url: url}} <- Kelix.MediaPool.checkout() do
-      [module: module, url: url]
-    else
-      _ -> nil
+  # Ask the pool for an MCU. Three outcomes, and the middle one used to be lost in
+  # the other two:
+  #
+  #   * an MCU              → its module and url, for this call only
+  #   * NO POOL AT ALL      → `nil`: fall back to the global `:mediaserver` config.
+  #     That is a pool-less deployment, and the standalone `elixipp` tool, both of
+  #     which legitimately name their media server in configuration.
+  #   * a pool that has NOTHING serviceable → `[module: :unavailable]`, which
+  #     `media_connect/0` refuses to connect to.
+  #
+  # The last case returned `nil` too, so the instance fell back to the global
+  # config — which defaults to `module: :mockup`. A production server that lost its
+  # media server therefore routed real traffic to a TEST STUB: the call signalled
+  # perfectly, `Scenario … succeeded` was logged, and neither party saw or heard
+  # anything. Observed 2026-08-13, with the media server alive but wedged (its
+  # accept queue full, so probes timed out rather than being refused).
+  #
+  # A pool that answered "nothing" is information, not an absence of it. Falling
+  # back to configuration at that point overrides a live measurement with a static
+  # guess, and the guess is a stub.
+  #
+  # Public for one reason: this three-way distinction IS the fix, and the defect it
+  # replaces lived for months in wiring that no test could reach. Not part of the
+  # supported API.
+  @doc false
+  @spec media_override(GenServer.server()) :: keyword() | nil
+  def media_override(pool \\ Kelix.MediaPool) do
+    case Process.whereis(pool) do
+      nil ->
+        nil
+
+      _pid ->
+        case Kelix.MediaPool.checkout(pool) do
+          {:ok, %{module: module, url: url}} ->
+            [module: module, url: url]
+
+          {:error, reason} ->
+            # Loud on purpose: this is the whole media plane being unavailable, and
+            # the silence around it is what made the failure above take an evening
+            # to find. The pool's own health verdict is not otherwise logged, and
+            # `mediaserver.down` belongs to the MCU module, which a B2BUA call does
+            # not go through.
+            Logger.error(
+              module: __MODULE__,
+              message:
+                "no serviceable media server in the pool (#{inspect(reason)}): " <>
+                  "calls needing media will be refused. " <>
+                  "Pool status: #{inspect(safe_pool_status(pool))}"
+            )
+
+            [module: :unavailable]
+        end
     end
+  end
+
+  # Status for the log line above, defensively: a pool that is mid-restart must not
+  # turn a refusal into a crash.
+  defp safe_pool_status(pool) do
+    Kelix.MediaPool.status(pool)
+  rescue
+    _ -> :unavailable
+  catch
+    _, _ -> :unavailable
   end
 
   @doc """
