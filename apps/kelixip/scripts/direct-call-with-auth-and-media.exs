@@ -195,14 +195,24 @@ defmodule Kelix.DirectCallWithAuthAndMedia do
           :ok ->
             b2bua_forward(req, peer, @media)
 
-            if ctx_get(:lasterr) == :ok do
-              goto(proceeding, "call forwarded")
-            else
-              # The offer could not be terminated (no common codec, a WebRTC offer
-              # we were told not to take). That is a statement about what the
-              # caller asked for, so it is a 488 — not a 500, which would blame us.
-              b2bua_reply(req, 488, "Not Acceptable Here")
-              goto(releasing, "media setup failed: #{inspect(ctx_get(:lasterr))}")
+            cond do
+              ctx_get(:lasterr) == :ok ->
+                goto(proceeding, "call forwarded")
+
+              # The media server was there a moment ago and is not any more —
+              # stopped, or killed under the call. Same verdict as the branch
+              # above, for the same reason, and it is why the question is asked
+              # again here rather than only before the forward.
+              b2bua_media_unavailable?() ->
+                b2bua_reply(req, 503, "Service Unavailable")
+                goto(releasing, "media plane gone: #{inspect(ctx_get(:lasterr))}")
+
+              true ->
+                # The offer could not be terminated (no common codec, a WebRTC offer
+                # we were told not to take). That is a statement about what the
+                # caller asked for, so it is a 488 — not a 500, which would blame us.
+                b2bua_reply(req, 488, "Not Acceptable Here")
+                goto(releasing, "media setup failed: #{inspect(ctx_get(:lasterr))}")
             end
 
           other ->

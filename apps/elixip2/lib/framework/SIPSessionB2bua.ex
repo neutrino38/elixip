@@ -443,6 +443,27 @@ defmodule SIP.Session.B2bua do
       end
 
       @doc """
+      Was the media failure ours — no media plane at all — rather than a
+      statement about what the peer offered? Asked when `lasterr` says the media
+      failed, to answer the right thing:
+
+          cond do
+            ctx_get(:lasterr) == :ok -> goto(proceeding, "call forwarded")
+            b2bua_media_unavailable?() -> b2bua_reply(req, 503, "Service Unavailable")
+            true -> b2bua_reply(req, 488, "Not Acceptable Here")
+          end
+
+      A `503` is what lets an upstream proxy try another route; a `488` says the
+      caller asked for something it cannot have, and blaming the offer for our
+      own missing media server sends the call nowhere.
+      """
+      defmacro b2bua_media_unavailable?() do
+        quote do
+          SIP.Session.B2bua.media_unavailable?(var!(sip_ctx))
+        end
+      end
+
+      @doc """
       What a re-INVITE or an UPDATE just received asks for, compared with the
       last description the same leg gave us: `:hold`, `:resume`,
       `:media_change`, `:address_change`, `:no_sdp`, `:no_change` or `:unknown`
@@ -713,6 +734,38 @@ defmodule SIP.Session.B2bua do
     end
   end
 
+  @doc """
+  Was the media failure OURS — no media plane at all — rather than a statement
+  about what the peer offered? Backs the `b2bua_media_unavailable?` macro.
+
+  The distinction, and not the SIP code: a scenario answers `503` here and `488`
+  otherwise (it is free to answer something else, and only it knows what the call
+  is for), but *which of the two failures happened* is read in one place, because
+  the reasons are the framework's own vocabulary and every scenario would
+  otherwise re-derive them from a nested tuple.
+
+  True for the three ways a media plane can be absent: it was never connected
+  (`media_connect()` found none — `:no_media_server`), the adapter died under a
+  call in progress (`{:media_down, _}`, a `GenServer` exit), or the server
+  announced its own departure (`:server_disconnected`). Everything else — no
+  common codec, a WebRTC offer refused, no offer at all — is about the offer and
+  reads false.
+  """
+  @spec media_unavailable?(%SIP.Context{}) :: boolean()
+  def media_unavailable?(sip_ctx = %SIP.Context{}) do
+    no_media_plane?(sip_ctx.lasterr) or no_media_plane?(media_error(sip_ctx))
+  end
+
+  defp no_media_plane?({:b2bua, :media_setup_failed, reason}), do: no_media_plane?(reason)
+  defp no_media_plane?({:b2bua, :reoffer_answer_failed, reason}), do: no_media_plane?(reason)
+  defp no_media_plane?({:b2bua, :reoffer_relay_failed, reason}), do: no_media_plane?(reason)
+  defp no_media_plane?({leg, reason}) when leg in [:inbound, :outbound], do: no_media_plane?(reason)
+  defp no_media_plane?(:no_media_server), do: true
+  defp no_media_plane?({:error, :no_media_server}), do: true
+  defp no_media_plane?({:media_down, _reason}), do: true
+  defp no_media_plane?(:server_disconnected), do: true
+  defp no_media_plane?(_other), do: false
+
   defp put_media_plan(sip_ctx, plan) do
     put_state(sip_ctx, %State{state(sip_ctx) | media: plan})
   end
@@ -745,10 +798,17 @@ defmodule SIP.Session.B2bua do
     outbound_opts = profiled_outbound_opts(opts, rung)
 
     with {:ok, policy} <- MediaServer.transcoding_policy(Keyword.get(opts, :transcode, [])),
+         :ok <- media_plane(sip_ctx),
          {:ok, offer_a} <- caller_offer(req),
+         # The policy travels with the connection options, not only with
+         # `bridge/3`: our OFFER to the callee is shaped by it too — under
+         # `:avoid` the codecs the caller carries lead the format list, under
+         # `:forbid` they are the whole of it — and that offer is built long
+         # before there is anything to bridge.
          {sip_ctx, {:ok, answer_a}} <-
-           media_answer(sip_ctx, offer_a, [leg: :inbound] ++ inbound_opts),
-         {:ok, sip_ctx, offer_b} <- media_offer(sip_ctx, outbound_opts) do
+           media_answer(sip_ctx, offer_a, [leg: :inbound, transcode: policy] ++ inbound_opts),
+         {:ok, sip_ctx, offer_b} <-
+           media_offer(sip_ctx, [transcode: policy] ++ outbound_opts) do
       plan = %MediaPlan{
         opts: opts,
         policy: policy,
@@ -768,6 +828,17 @@ defmodule SIP.Session.B2bua do
         {:error, fail(sip_ctx, {:b2bua, :media_setup_failed, reason})}
     end
   end
+
+  # Nothing is attempted without a media plane to attempt it on. `media_connect()`
+  # may have found none — `Kelix.MediaPool` reporting `:unavailable`, see
+  # `SIP.Session.Media.use_mediaserver/1` — and the media layer answers a missing
+  # server by RAISING: rescued below, that came out as
+  # `{:media_raised, "No media server connected…"}`, a sentence no caller can
+  # match, which every scenario's else-branch then answered with a 488. The
+  # caller's offer was never at fault. Asked here, once, the answer is the same
+  # `:no_media_server` that `media_connect()` itself reports (2026-08-13).
+  defp media_plane(%SIP.Context{mediaserverpid: server}) when is_pid(server), do: :ok
+  defp media_plane(_sip_ctx), do: {:error, :no_media_server}
 
   # A delayed-offer INVITE has no media to terminate yet. Answering it means
   # putting an offer of ours in the 200 and reading the answer from the ACK,
@@ -871,6 +942,16 @@ defmodule SIP.Session.B2bua do
       true ->
         case local_reoffer_body(sip_ctx, req, leg, opts) do
           {:ok, sip_ctx, sdp} ->
+            # Answered here, so the far end never renegotiates — but THIS leg's
+            # description just changed, and the selection was taken on the old
+            # one. The answer needs nothing back (it was already shaped by what
+            # the far end carries, `set_remote_offer` does that now); what this
+            # call is for is the media server's side of it — the transcoders that
+            # must now produce what this leg settled on. An offerless re-INVITE
+            # is answered with an OFFER of ours and has changed nothing to
+            # re-select on, so it is left alone.
+            sip_ctx = rebridge_after_local_answer(sip_ctx, req, leg)
+
             sip_ctx
             |> remember_remote_sdp(leg, SIP.Msg.Ops.sdp_body(req))
             |> expect_local_ack(leg, req)
@@ -1658,7 +1739,7 @@ defmodule SIP.Session.B2bua do
   # The far end answered a re-offer we relayed: same choreography as the initial
   # INVITE, one exchange later. Its answer goes to ITS endpoint, and the leg that
   # re-offered receives the answer we have been holding since it did.
-  defp reoffer_step(sip_ctx, resp, %Pending{held_answer: held}) do
+  defp reoffer_step(sip_ctx, resp, %Pending{held_answer: held, orig_leg: from_leg}) do
     cond do
       resp.response in 200..299 ->
         sip_ctx =
@@ -1666,6 +1747,14 @@ defmodule SIP.Session.B2bua do
             sdp when is_binary(sdp) and sdp != "" -> process_answer(sip_ctx, current_leg(), sdp)
             _no_answer -> sip_ctx
           end
+
+        # Both legs are known again: the selection is re-taken and the held
+        # answer superseded by the one built against it (§2.6). Holding it was
+        # never enough on its own — the answer we were holding was decided when
+        # the re-offer ARRIVED, one exchange before the far end said what it
+        # would carry, and sending it unchanged is what answered a re-INVITE
+        # AV1-first to a peer that only ever carried VP8 (2026-08-13).
+        {sip_ctx, held} = rebridge(sip_ctx, from_leg, held)
 
         {sip_ctx, with_sdp(resp, held)}
 
@@ -1823,6 +1912,59 @@ defmodule SIP.Session.B2bua do
 
         err ->
           {sip_ctx, err}
+      end
+    end
+  end
+
+  defp rebridge_after_local_answer(sip_ctx, req, leg) do
+    case SIP.Msg.Ops.sdp_body(req) do
+      sdp when is_binary(sdp) and sdp != "" ->
+        {sip_ctx, _held} = rebridge(sip_ctx, leg, nil)
+        sip_ctx
+
+      _offerless ->
+        sip_ctx
+    end
+  end
+
+  # The cross-leg selection, taken again after a renegotiation. `bridge/3` is
+  # idempotent by contract and keeps the wiring it can, so this is not a rebuild:
+  # it is the one call that lets the media server notice that a leg now carries
+  # something else. Without it the transcoders keep producing the codec chosen at
+  # the first bridge, and SDP has no way to say so — the far end decodes the
+  # wrong codec believing it decoded the right one (§2.3).
+  #
+  # Returns the answer owed to `answered_leg`: the rebuilt one when the media
+  # server produced it, the held one otherwise. A media server that cannot
+  # re-bridge leaves the call exactly as it was — the signalling still completes,
+  # which is better than tearing down a call that is up over a preference.
+  defp rebridge(sip_ctx, answered_leg, held) do
+    plan = media_plan(sip_ctx)
+    pc_in = Media.peer_connection(sip_ctx, :inbound)
+    pc_out = Media.peer_connection(sip_ctx, :outbound)
+
+    if is_nil(plan) or is_nil(pc_in) or is_nil(pc_out) do
+      {sip_ctx, held}
+    else
+      case protected_bridge(sip_ctx, pc_in, pc_out, Map.to_list(plan.policy)) do
+        {:ok, %{answers: answers}} ->
+          {sip_ctx, Map.get(answers, answered_leg, held)}
+
+        :ok ->
+          {sip_ctx, held}
+
+        {:ok, _other} ->
+          {sip_ctx, held}
+
+        {:error, reason} ->
+          Logger.warning(
+            module: __MODULE__,
+            message:
+              "b2bua: the media could not be re-bridged after the renegotiation " <>
+                "(#{inspect(reason)}); the call keeps the previous selection"
+          )
+
+          {sip_ctx, held}
       end
     end
   end

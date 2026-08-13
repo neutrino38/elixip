@@ -272,6 +272,168 @@ defmodule Mendooze.ConnTest do
     assert ["96" | _] = String.split(fmt, " ", trim: true)
   end
 
+  # ── Renegotiation: an offer and an answer are shaped by the OTHER leg ────────
+  #
+  # Traffic of 2026-08-13, the call this whole section exists for. Alice offers
+  # VP8 alone; Bob answers AV1+VP8 and the first bridge relays VP8. Bob then
+  # re-INVITEs (camera on) offering `110 107` — and both descriptions we produced
+  # in reply put AV1 first, because neither had ever been told what the other leg
+  # carries: the offer relayed to Alice, and above all the ANSWER to Bob, sent
+  # 28 ms AFTER Alice had answered VP8-only. Bob duly sent AV1, and the media
+  # server spent the call decoding AV1 and re-encoding VP8 for two peers that
+  # both spoke VP8.
+
+  @vp8 107
+  @av1 110
+
+  # Alice: VP8 and nothing else, on HER numbering (96, as Linphone numbers it).
+  defp vp8_only_offer(port \\ 57_573) do
+    Enum.join(
+      [
+        "v=0",
+        "o=- 1 1 IN IP4 172.22.0.4",
+        "s=Talk",
+        "c=IN IP4 172.22.0.4",
+        "t=0 0",
+        "m=video #{port} RTP/AVP 96",
+        "a=rtpmap:96 VP8/90000",
+        ""
+      ],
+      "\r\n"
+    )
+  end
+
+  # Bob, in OUR numbering — he is answering (or re-offering against) our offer.
+  defp bob_video(fmt) do
+    rtpmaps =
+      fmt
+      |> String.split(" ", trim: true)
+      |> Enum.map(fn
+        "110" -> "a=rtpmap:110 AV1/90000"
+        "107" -> "a=rtpmap:107 VP8/90000"
+        "99" -> "a=rtpmap:99 H264/90000"
+      end)
+
+    Enum.join(
+      ["v=0", "o=- 1 1 IN IP4 172.22.0.2", "s=-", "c=IN IP4 172.22.0.2", "t=0 0"] ++
+        ["m=video 52052 RTP/AVP #{fmt}"] ++ rtpmaps ++ [""],
+      "\r\n"
+    )
+  end
+
+  defp video_fmt(sdp) do
+    assert [_, fmt] = Regex.run(~r{m=video \d+ RTP/AVP ([\d ]+)}, sdp)
+    String.split(fmt, " ", trim: true)
+  end
+
+  defp alice_and_bob(server, policy) do
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), [media: :video] ++ policy)
+    assert_receive {:jsr309_call, "MediaSessionCreate", [_tag, _q]}, 1_000
+
+    {:ok, out} =
+      Mendooze.create_peer_connection(
+        server,
+        self(),
+        [media: :video, bridge_with: conn] ++ policy
+      )
+
+    assert {:ok, _answer} = Mendooze.set_remote_offer(conn, vp8_only_offer())
+    {conn, out}
+  end
+
+  # The offer relayed to the callee — trame 96 of the capture, which read
+  # `m=video 55488 RTP/AVP 110 99 107` for a caller that had just said VP8 and
+  # only VP8.
+  test "our offer leads with what the other leg already carries" do
+    %{server: server} = start_media_server(&two_leg_verdict_handler/2)
+    {_conn, out} = alice_and_bob(server, transcode: [video: :avoid])
+
+    assert {:ok, offer} = Mendooze.get_local_offer(out)
+
+    # A permutation, not a restriction: AV1 and H.264 are still on the menu, so a
+    # callee that cannot do VP8 still has something to accept and the transcoder
+    # still has somewhere to go. VP8 simply leads.
+    assert ["107", "110", "99"] == video_fmt(offer)
+  end
+
+  # `:forbid` says the media may never be converted, so a codec the far end
+  # cannot carry has no business being offered: whatever the peer picks from it,
+  # a relay would have nothing to do with.
+  test "under :forbid our offer is restricted to what the other leg carries" do
+    %{server: server} = start_media_server(&two_leg_verdict_handler/2)
+    {_conn, out} = alice_and_bob(server, transcode: [video: :forbid])
+
+    assert {:ok, offer} = Mendooze.get_local_offer(out)
+    assert ["107"] == video_fmt(offer)
+  end
+
+  # `:force` states no cross-leg preference — each leg keeps the head of its own
+  # list — so it is the one policy that leaves our menu exactly as configured.
+  test "under :force our offer is the menu as configured" do
+    %{server: server} = start_media_server(&two_leg_verdict_handler/2)
+    {_conn, out} = alice_and_bob(server, transcode: [video: :force])
+
+    assert {:ok, offer} = Mendooze.get_local_offer(out)
+    assert ["110", "99", "107"] == video_fmt(offer)
+  end
+
+  # Trame 2162: the answer to Bob's re-INVITE. It went out AFTER Alice had
+  # answered VP8 only, and still led with AV1 — so Bob sent AV1.
+  test "an answer to a re-offer floats the codecs both legs carry to the front" do
+    %{server: server} = start_media_server(&two_leg_verdict_handler/2)
+    {conn, out} = alice_and_bob(server, transcode: [video: :avoid])
+
+    {:ok, _offer} = Mendooze.get_local_offer(out)
+    :ok = Mendooze.set_remote_answer(out, bob_video("110 107"))
+    assert {:ok, _} = Mendooze.bridge(conn, out, video: :avoid)
+
+    # Bob re-offers, AV1 first — his own preference, and his right to state it.
+    assert {:ok, answer} = Mendooze.set_remote_offer(out, bob_video("110 107"))
+
+    # Ours is the codec both legs carry. Nothing is removed (`:avoid` converts
+    # rather than refuses), but VP8 leads, so Bob's own reading of the answer
+    # points him at the codec that needs no conversion.
+    assert ["107", "110"] == video_fmt(answer)
+  end
+
+  # The other half of the same re-INVITE: the selection itself. Bob now carries
+  # AV1 *and* VP8 where he carried AV1 first; the transcoder feeding Alice must
+  # still produce VP8, and the one feeding Bob must be moved onto VP8 — without
+  # tearing down a media path on a call that is up.
+  test "a renegotiation re-takes the selection and re-tunes, it does not re-wire" do
+    %{server: server} = start_media_server(&two_leg_verdict_handler/2)
+    {conn, out} = alice_and_bob(server, transcode: [video: :avoid])
+
+    {:ok, _offer} = Mendooze.get_local_offer(out)
+    # Bob answers AV1 only: no common codec, so each leg keeps its own head and
+    # the two transcoders are set to different codecs.
+    :ok = Mendooze.set_remote_answer(out, bob_video("110"))
+    assert :ok = Mendooze.bridge(conn, out, video: :avoid)
+
+    assert_receive {:jsr309_call, "VideoTranscoderCreate", [3, _tag_a]}, 1_000
+    assert_receive {:jsr309_call, "VideoTranscoderCreate", [3, _tag_b]}, 1_000
+    assert_receive {:jsr309_call, "VideoTranscoderSetCodec", [3, 30, @vp8 | _]}, 1_000
+    assert_receive {:jsr309_call, "VideoTranscoderSetCodec", [3, 31, @av1 | _]}, 1_000
+
+    # Bob re-offers with VP8 too: the intersection is no longer empty and the
+    # selection moves to VP8 on BOTH legs. Re-taking it is the controller's call
+    # — `bridge/3` again, which is what `SIP.Session.B2bua` does on every
+    # renegotiation; the connection does not decide on its own when a call is
+    # settled enough to re-select.
+    assert {:ok, _answer} = Mendooze.set_remote_offer(out, bob_video("110 107"))
+    assert {:ok, _} = Mendooze.bridge(conn, out, video: :avoid)
+
+    # Alice's transcoder was already producing VP8 and is left alone; only Bob's
+    # is re-tuned. `VideoTranscoderSetCodec` restarts an encoder — re-issuing it
+    # for an unchanged codec costs a keyframe and a visible freeze.
+    assert_receive {:jsr309_call, "VideoTranscoderSetCodec", [3, 31, @vp8 | _]}, 1_000
+    refute_receive {:jsr309_call, "VideoTranscoderSetCodec", [3, 30, _ | _]}, 200
+
+    # …and nothing was rebuilt: no new transcoder, none deleted.
+    refute_receive {:jsr309_call, "VideoTranscoderCreate", _}, 200
+    refute_receive {:jsr309_call, "VideoTranscoderDelete", _}, 200
+  end
+
   # The wiring `:avoid` now gets, and the property that goes with it: no
   # `useOriSeqNum`. It also sets `useOriTS` and copies both numbers off the
   # incoming packet — right while the transcoder bridges, wrong the moment its

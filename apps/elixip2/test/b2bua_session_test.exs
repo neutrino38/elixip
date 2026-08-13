@@ -103,11 +103,31 @@ defmodule SIP.Test.B2bua.Session do
     end
 
     # …whereas `{:mediaserver, …}` is understood, and fails on what is actually
-    # wrong: nothing was connected to terminate the media on.
+    # wrong: nothing was connected to terminate the media on. Named, and not as a
+    # rescued sentence — the scenario answers a 503 to this one and a 488 to a
+    # codec mismatch, so it has to be able to tell them apart (2026-08-13).
     test "the media mode fails on the media, not on the mode", %{ctx: ctx} do
       ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), {:mediaserver, []})
-      assert {:b2bua, :media_setup_failed, {:inbound, _reason}} = ctx.lasterr
+      assert {:b2bua, :media_setup_failed, :no_media_server} = ctx.lasterr
+      assert B2bua.media_unavailable?(ctx)
       assert B2bua.outbound_leg(ctx) == nil
+    end
+
+    # A media server that dies under a call in progress: the handle is still a
+    # pid, so the setup gets as far as calling it and exits. Same verdict as
+    # having none — the caller's offer was never the problem.
+    test "a media server that went away reads as unavailable", %{ctx: ctx} do
+      for reason <- [:no_media_server, {:media_down, :noproc}, :server_disconnected] do
+        assert B2bua.media_unavailable?(%SIP.Context{
+                 ctx
+                 | lasterr: {:b2bua, :media_setup_failed, {:inbound, reason}}
+               })
+      end
+
+      refute B2bua.media_unavailable?(%SIP.Context{
+               ctx
+               | lasterr: {:b2bua, :media_setup_failed, {:inbound, :no_common_codec}}
+             })
     end
 
     test "a bad transcoding policy is refused before anything is dialled", %{ctx: ctx} do
@@ -118,6 +138,10 @@ defmodule SIP.Test.B2bua.Session do
                ctx.lasterr
 
       assert B2bua.outbound_leg(ctx) == nil
+
+      # A broken argument is reported as itself, before the media plane is even
+      # looked at — and it is not unavailability, so it never earns a 503.
+      refute B2bua.media_unavailable?(ctx)
     end
 
     test "Max-Forwards exhausted is refused as such (the scenario answers 483)", %{ctx: ctx} do

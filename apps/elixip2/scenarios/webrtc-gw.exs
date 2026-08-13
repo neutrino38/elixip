@@ -59,14 +59,23 @@ defmodule B2BUA.WebrtcGw do
 
         b2bua_forward(req, peer, @media)
 
-        if ctx_get(:lasterr) == :ok do
-          goto(proceeding, "INVITE relayed")
-        else
-          # The offer could not be terminated (no common codec, a WebRTC offer
-          # we were told not to take). That is a statement about what the caller
-          # asked for, so it is a 488 — not a 500, which would blame us.
-          b2bua_reply(req, 488, "Not Acceptable Here")
-          scenario_failure("media setup failed: #{inspect(ctx_get(:lasterr))}")
+        cond do
+          ctx_get(:lasterr) == :ok ->
+            goto(proceeding, "INVITE relayed")
+
+          # No media plane: media_connect() found no server, or the one it found
+          # is gone. Ours, not the browser's — a 503, which also leaves the proxy
+          # in front free to try another gateway.
+          b2bua_media_unavailable?() ->
+            b2bua_reply(req, 503, "Service Unavailable")
+            scenario_failure("no media server: #{inspect(ctx_get(:lasterr))}")
+
+          true ->
+            # The offer could not be terminated (no common codec, a WebRTC offer
+            # we were told not to take). That is a statement about what the caller
+            # asked for, so it is a 488 — not a 500, which would blame us.
+            b2bua_reply(req, 488, "Not Acceptable Here")
+            scenario_failure("media setup failed: #{inspect(ctx_get(:lasterr))}")
         end
     after
       60_000 -> scenario_failure("no INVITE received")

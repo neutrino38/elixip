@@ -1540,6 +1540,35 @@ defmodule MediaServer.Mendooze.Sdp do
     Map.filter(send_map, fn {_pt, code} -> MapSet.member?(codes, code) end)
   end
 
+  @doc """
+  The codec-table NAME of a Mendooze codec code (`"VP8"`, `"OPUS"`, …), or `nil`
+  for a code this table does not name — `telephone-event` included, which is
+  never a codec a leg is said to carry.
+
+  The inverse of the name → code direction `local_rtp_map/3` uses, and the one
+  thing that lets an OFFER be ordered by what the other leg carries: our offer
+  speaks in codec names (`:video_codec`, `@default_video_codecs`) while a leg's
+  `peer_codecs` speaks in codes. `code_rtpmap/2` is not that function — it
+  returns the SDP *encoding* (`"opus"` lowercase, per RFC 7587), which is what
+  goes on an `a=rtpmap` line and not what names a codec in our tables.
+  """
+  @spec codec_name(:audio | :video | :text, non_neg_integer()) :: codec_name() | nil
+  def codec_name(:audio, @dtmf_code), do: nil
+
+  def codec_name(kind, code) do
+    table =
+      case kind do
+        :audio -> @audio_codecs
+        :video -> @video_codecs
+        :text -> @text_codecs
+      end
+
+    case Enum.find(table, fn {_name, tuple} -> elem(tuple, 1) == code end) do
+      {name, _tuple} -> name
+      nil -> nil
+    end
+  end
+
   defp channels(ch) when is_integer(ch) and ch > 1, do: ch
   defp channels(_), do: nil
 
