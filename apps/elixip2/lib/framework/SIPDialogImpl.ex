@@ -253,6 +253,24 @@ defmodule SIP.DialogImpl do
 
   defp set_remote_totag(req, _state), do: req
 
+  # A dialog hangs up once. `closing_transaction` is set when a BYE goes out OR
+  # comes in (check_closing_transaction/3, both paths), so this catches every
+  # second hangup whatever its origin — the capture of 2026-08-14 shows the two
+  # that motivated it: a relayed BYE followed 48 ms later by the B2BUA teardown's
+  # own, which the callee could only 481. Callers treat :already_closing as
+  # success: what they wanted — this dialog ending — is already under way.
+  def send_in_dialog_request(state = %SIP.DialogImpl{}, req)
+      when req.method == :BYE and
+             (state.closing_transaction != nil or state.state == :terminated) do
+    Logger.debug(
+      dialogpid: "#{inspect(self())}",
+      module: __MODULE__,
+      message: "BYE not sent: the dialog is already closing"
+    )
+
+    {:already_closing, state}
+  end
+
   def send_in_dialog_request(state = %SIP.DialogImpl{}, req) do
     if req.method in state.allows do
       if map_size(state.transactions) < 4 do

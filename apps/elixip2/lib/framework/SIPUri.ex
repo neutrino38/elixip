@@ -92,6 +92,13 @@ defmodule SIP.Uri do
   # of the request to form, it is not part of the address.
   @non_ruri_params ~w(method)
 
+  # The uri-parameters RFC 3261 §19.1.1 names in the grammar. Their presence in
+  # `params` is what forces the angle brackets on a serialized header URI (see
+  # serialize/1): each of them is meaningless as a header parameter, while a name
+  # outside this list may be either — the positional parser cannot tell — and so
+  # keeps the side it was parsed on.
+  @uri_nature_params ~w(transport user method maddr ttl lr)
+
   defp parse_uri_parameters(param_list) do
     params =
       Enum.map(param_list, fn pv ->
@@ -522,33 +529,33 @@ defmodule SIP.Uri do
   Route…): URI parameters inside the angle brackets, header field parameters
   after them.
 
-  Brackets appear when there is a display name or at least one header parameter.
-  Not merely cosmetic: RFC 3261 §20 rules that in an unbracketed address every
-  semicolon-delimited parameter is a *header* parameter, so header parameters and
-  URI parameters can only coexist unambiguously with the frontier drawn. With
-  neither, the bare `addr-spec` form is kept — `sip:bob@host;tag=xyz` is what a
-  To with no URI parameter has always looked like on the wire, and it stays that.
+  Brackets appear when there is a display name, at least one header parameter,
+  or at least one parameter of *URI nature* — the RFC 3261 §19.1.1
+  `uri-parameters` the grammar itself names (#{inspect(@uri_nature_params)}).
+  Not merely cosmetic: §20 rules that in an unbracketed address every
+  semicolon-delimited parameter is a *header* parameter — so a URI parameter can
+  only exist with the frontier drawn. The capture of 2026-08-14 measured the
+  cost of forgetting that: a 200 OK whose Contact went out as
+  `sip:b2bua@host:5070;transport=tcp` was read (per the RFC, correctly) as
+  carrying a header parameter, the caller's remote target had no transport, and
+  its ACK and BYE left over UDP on a TCP dialog.
+
+  Only the §19.1.1 names force the brackets, not every entry in `params`: the
+  parser is positional, so a bare `sip:bob@host;tag=xyz` — what a To with a tag
+  has always looked like on the wire — lands its `tag` in `params`, and drawing
+  brackets around it would move the tag inside them and change its nature.
+  A parameter the grammar does not name is genuinely ambiguous in the bare form,
+  so it keeps the position it was parsed in.
 
   A Request-URI is NOT this: use `serialize_ruri/1`.
   """
   def serialize(uri = %SIP.Uri{}) do
-    # Serialize core part or the SIP URI
-    core_uri_str =
-      serialize_core_uri(
-        uri.scheme,
-        uri.userpart,
-        uri.domain,
-        uri.port
-      )
-
-    # add transport in params if needed and serialize params as string
-    params_str = fix_transport_param(uri, uri.scheme, uri.proto) |> serialize_params()
+    {addr_spec, eff_params} = serialize_addr_spec(uri)
     hparams_str = serialize_params(uri.hparams)
 
-    addr_spec = join_params(core_uri_str, params_str)
-
     uri_str =
-      if uri.displayname != nil or hparams_str != "" do
+      if uri.displayname != nil or hparams_str != "" or
+           Enum.any?(@uri_nature_params, &Map.has_key?(eff_params, &1)) do
         name_prefix =
           if uri.displayname != nil,
             do: "\"" <> URI.encode_www_form(uri.displayname) <> "\" ",
@@ -564,6 +571,24 @@ defmodule SIP.Uri do
 
   defp join_params(base, ""), do: base
   defp join_params(base, params_str), do: base <> ";" <> params_str
+
+  # The bare `addr-spec`: scheme, identity, host, port and the URI parameters,
+  # nothing else. Returned with the effective parameter map (fix_transport_param/3
+  # may have synthesized `transport` from `proto`) so serialize/1 can decide on
+  # brackets from what actually goes out.
+  defp serialize_addr_spec(uri = %SIP.Uri{}) do
+    core_uri_str =
+      serialize_core_uri(
+        uri.scheme,
+        uri.userpart,
+        uri.domain,
+        uri.port
+      )
+
+    # add transport in params if needed and serialize params as string
+    eff_params = fix_transport_param(uri, uri.scheme, uri.proto)
+    {join_params(core_uri_str, serialize_params(eff_params)), eff_params}
+  end
 
   @doc """
   The same address reduced to what may appear in a Request-URI: no display name,
@@ -590,9 +615,18 @@ defmodule SIP.Uri do
     }
   end
 
-  @doc "Serialize an URI for use as a Request-URI (see `to_request_uri/1`)."
+  @doc """
+  Serialize an URI for use as a Request-URI (see `to_request_uri/1`).
+
+  Always the bare `addr-spec` — a Request-URI is `SIP-URI / SIPS-URI /
+  absoluteURI` (RFC 3261 §25.1), never a `name-addr`, so the brackets that
+  `serialize/1` draws around a parametered header URI must not appear here.
+  """
   @spec serialize_ruri(%SIP.Uri{}) :: {:ok, binary()}
-  def serialize_ruri(uri = %SIP.Uri{}), do: uri |> to_request_uri() |> serialize()
+  def serialize_ruri(uri = %SIP.Uri{}) do
+    {addr_spec, _eff_params} = uri |> to_request_uri() |> serialize_addr_spec()
+    {:ok, addr_spec}
+  end
 
   def has_tp_info(uri = %SIP.Uri{}) do
     is_tuple(uri.destip) and uri.destport > 0 and is_pid(uri.tp_pid) and not is_nil(uri.tp_module)

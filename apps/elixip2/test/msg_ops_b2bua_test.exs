@@ -36,13 +36,26 @@ defmodule SIP.Test.MsgOpsB2bua do
             :route,
             :recordroute,
             "Path",
-            :contact,
             :proxyauthorization,
             :authorization,
             :transid
           ] do
         refute Map.has_key?(fwd, field), "#{inspect(field)} crossed the leg boundary"
       end
+    end
+
+    test "the Contact's identity crosses, its address and parameters do not" do
+      req = parse!("SIP-INVITE-LVP.txt")
+      fwd = forwarded!(req)
+
+      # The sample's Contact: <sip:33970260233@192.168.24.71:61884;transport=tcp;alias=…>
+      # The userpart says WHO — it crosses. Host, port, transport and the binding
+      # parameters are the inbound leg's own address, stamped anew by the
+      # transport layer of the OUTBOUND leg (SIP.Transport.add_contact_header/3).
+      assert fwd.contact.userpart == "33970260233"
+      assert fwd.contact.domain == "0.0.0.0"
+      assert fwd.contact.params == %{}
+      assert fwd.contact.hparams == %{}
     end
 
     test "the dialog identity is cleared, not reused: no Call-ID, no tags" do
@@ -131,14 +144,22 @@ defmodule SIP.Test.MsgOpsB2bua do
   end
 
   describe "forwarded_reply_fields/1" do
-    test "an SDP-bearing 200: the body crosses with its Content-Type, the Contact does not" do
+    test "an SDP-bearing 200: the body crosses with its Content-Type, the Contact as identity only" do
       resp = parse!("SIP-200-LVP.txt")
       fields = Ops.forwarded_reply_fields(resp)
 
       sdp = SIP.Session.extract_sdp(resp)
       assert [%{contenttype: ct, data: ^sdp}] = Keyword.fetch!(fields, :body)
       assert ct =~ "sdp"
-      refute Keyword.has_key?(fields, :contact)
+
+      # The sample's Contact: <sip:90901@212.83.152.250:5090>. The answerer's
+      # userpart crosses; its address is left for the answering leg's transport
+      # to stamp (placeholder host, no parameters of either kind).
+      contact = Keyword.fetch!(fields, :contact)
+      assert contact.userpart == "90901"
+      assert contact.domain == "0.0.0.0"
+      assert contact.params == %{}
+      assert contact.hparams == %{}
     end
 
     test "a body-less response carries nothing but the passthrough headers" do

@@ -1585,6 +1585,19 @@ defmodule SIP.Session.B2bua do
       :leg_dead ->
         fail(sip_ctx, {:b2bua, :leg_dead, req.method})
 
+      # Both ends hung up at once: the BYE this one is relaying meets a dialog
+      # already closing on the other side's own BYE. Nothing to relay — what the
+      # BYE asks for is already happening — and nothing failed either: the local
+      # 200 to the sender goes out through the ordinary path.
+      :already_closing when req.method == :BYE ->
+        Logger.info(
+          dialogpid: sip_ctx.dialogpid,
+          module: __MODULE__,
+          message: "BYE from the #{from_leg} leg not relayed: the #{other_leg(from_leg)} is already closing"
+        )
+
+        SIP.Context.set(sip_ctx, :lasterr, :ok)
+
       err ->
         fail(sip_ctx, {:b2bua, :relay_failed, req.method, err})
     end
@@ -2651,6 +2664,9 @@ defmodule SIP.Session.B2bua do
             # It died between the liveness check and the call, which is what we
             # wanted of it anyway.
             :leg_dead -> SIP.Context.set(sip_ctx, :lasterr, :ok)
+            # A BYE is already in flight on this dialog (a relayed one, or the
+            # far end's): the hangup asked for is the hangup happening.
+            :already_closing -> SIP.Context.set(sip_ctx, :lasterr, :ok)
             err -> fail(sip_ctx, {:b2bua, :bye_failed, err})
           end
         else
@@ -2754,17 +2770,22 @@ defmodule SIP.Session.B2bua do
         :ok
 
       leg.method == :INVITE and established?(leg) ->
-        # Said out loud, because this BYE is nobody's relay: it is the teardown
-        # hanging up a leg the scenario left established. Two BYEs towards the same
-        # peer — one relayed, one from here — read as a duplicate in the log unless
-        # the second one names itself.
-        Logger.info(
-          module: __MODULE__,
-          message: "teardown: BYEing the #{leg.tag} leg (#{inspect(leg.dialogpid)})"
-        )
-
+        # Said out loud AFTER the dialog agreed, because this BYE is nobody's
+        # relay: it is the teardown hanging up a leg the scenario left
+        # established. The dialog refuses it when a BYE is already in flight
+        # (:already_closing), and logging beforehand claimed a teardown BYE on
+        # every hangup the scenario had in fact already relayed (2026-08-14).
         protect("BYE leg #{inspect(leg.dialogpid)}", fn ->
-          SIP.Dialog.new_request(leg.dialogpid, bye_request())
+          case SIP.Dialog.new_request(leg.dialogpid, bye_request()) do
+            {:ok, _trans_pid} ->
+              Logger.info(
+                module: __MODULE__,
+                message: "teardown: BYEing the #{leg.tag} leg (#{inspect(leg.dialogpid)})"
+              )
+
+            _already_closing_or_error ->
+              :ok
+          end
         end)
 
       # A leg carrying anything else (MESSAGE, SUBSCRIBE…) has no teardown

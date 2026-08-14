@@ -300,8 +300,11 @@ defmodule SIP.Test.Uri do
 		assert to_string(uri) == "sip:domaine.fr"
 		uri = %SIP.Uri{ userpart: nil, domain: "djanah.com", port: 5061, scheme: "sip:", proto: "TLS" }
 		# lower-case: RFC 3261 §19.1.1 registers the transport values that way, and
-		# serialize synthesizes this one from `proto` (held upper-case internally)
-		assert to_string(uri) == "sip:djanah.com:5061;transport=tls"
+		# serialize synthesizes this one from `proto` (held upper-case internally).
+		# Bracketed: unbracketed, §20 reads `transport` as a header parameter — the
+		# 2026-08-14 capture shows a peer (correctly) ACKing a TCP dialog over UDP
+		# for exactly that.
+		assert to_string(uri) == "<sip:djanah.com:5061;transport=tls>"
 	end
 
 	test "Serialize a SIPS URI" do
@@ -320,8 +323,9 @@ defmodule SIP.Test.Uri do
 		assert to_string(uri) == "sip:toto@1.2.3.4"
 		uri = %SIP.Uri{ userpart: "toto", domain: { 1, 2, 3, 4}, port: 5070 }
 		assert to_string(uri) == "sip:toto@1.2.3.4:5070"
+		# A URI parameter forces the name-addr form: see the transport=tls case above.
 		uri = %SIP.Uri{ userpart: "toto", domain: { 1, 2, 3, 4}, port: 5070, params: %{ "transport" => "WSS"}}
-		assert to_string(uri) == "sip:toto@1.2.3.4:5070;transport=WSS"
+		assert to_string(uri) == "<sip:toto@1.2.3.4:5070;transport=WSS>"
 		uri = %SIP.Uri{ userpart: "toto", domain: { 1, 2, 3, 4}, port: 5070, scheme: "sips:" }
 		assert to_string(uri) == "sips:toto@1.2.3.4:5070"
 

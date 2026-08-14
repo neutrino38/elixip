@@ -376,7 +376,11 @@ defmodule SIP.Transac.Common do
     # asks for it, §13.2.2.4). Serializing here left `state.ack` nil for ever, so
     # the two places that resend it — the retransmitted-2xx branch of
     # handle_UAS_sip_response/2 and send_ack/1 above — could never fire.
-    ack_sent = SIP.Msg.Ops.ack_request(state.msg, remote_contact, routeset)
+    # :confirmed = a 2xx was received, and ITS ack is a transaction of its own,
+    # under a fresh branch (§13.2.2.4); :rejected keeps the INVITE's branch,
+    # that ACK belongs to the INVITE transaction (§17.1.1.3).
+    ack_sent =
+      SIP.Msg.Ops.ack_request(state.msg, remote_contact, routeset, [], state.state == :confirmed)
 
     Logger.debug(transid: state.msg.transid, module: __MODULE__, message: "Sending ACK")
 

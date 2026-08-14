@@ -702,7 +702,8 @@ defmodule SIP.Msg.Ops do
   # a message is relayed; these two functions decide *what survives* the crossing.
 
   # Fields that never cross a leg boundary: hop-scoped routing (Via, Route,
-  # Record-Route, Path), the receiving leg's target (Contact), the credentials
+  # Record-Route, Path), the receiving leg's target (Contact — though its
+  # *identity* half is carried over, see contact_identity/1), the credentials
   # presented to *us* (they answered our challenge, for our realm — the outbound
   # leg authenticates itself when challenged), and the receiving side's
   # transaction id. The dialog identity (Call-ID, tags) is cleared separately in
@@ -726,11 +727,14 @@ defmodule SIP.Msg.Ops do
   @doc """
   Prepare a request received on one B2BUA leg to be re-sent on another leg.
 
-  Strips everything hop- or dialog-scoped (see `@b2bua_dropped_fields`), clears
-  the dialog identity — `Call-ID` and the `From`/`To` tags are left for the
-  dialog layer to mint afresh — resets the R-URI routing fields (the stamped
-  `destip`/`tp_pid` point back at the leg the request came in on), replaces the
-  User-Agent and decrements `Max-Forwards`.
+  Strips everything hop- or dialog-scoped (see `@b2bua_dropped_fields`), keeps
+  the *identity* of the inbound Contact — its userpart and display name, on a
+  placeholder host the transport layer stamps with the outbound leg's own
+  address, port and transport (see `contact_identity/1`) — clears the dialog
+  identity — `Call-ID` and the `From`/`To` tags are left for the dialog layer to
+  mint afresh — resets the R-URI routing fields (the stamped `destip`/`tp_pid`
+  point back at the leg the request came in on), replaces the User-Agent and
+  decrements `Max-Forwards`.
 
   The body and every other header (identity `From`/`To`, `P-Asserted-Identity`,
   `Privacy`, custom `X-*`…) cross unchanged. Callers layer their own policy on
@@ -760,6 +764,7 @@ defmodule SIP.Msg.Ops do
         req2 =
           req
           |> Map.drop(@b2bua_dropped_fields)
+          |> put_contact_identity(Map.get(req, :contact))
           |> Map.put("Max-Forwards", max_forwards)
           |> Map.put(:callid, nil)
           |> strip_tag(:from)
@@ -774,12 +779,13 @@ defmodule SIP.Msg.Ops do
   @doc """
   What a response relayed leg-to-leg carries over: the body (normalized to the
   `[%{contenttype, data}]` part shape so its Content-Type survives
-  `update_sip_msg/2`) and the `#{inspect(@b2bua_reply_passthrough)}` headers.
-  Returned as an `upd_fields` keyword list for `SIP.Dialog.reply/5`.
+  `update_sip_msg/2`), the `#{inspect(@b2bua_reply_passthrough)}` headers, and
+  the *identity* of the answerer's Contact (see `contact_identity/1`).
 
-  The Contact is deliberately NOT copied: the relayed response must advertise
-  *our* contact on the answering leg, which the reply path adds (same rule as
-  `reply_invite_with_sdp`).
+  The Contact's address is deliberately NOT copied: the relayed response must
+  advertise *our* address on the answering leg, which the transport layer stamps
+  (`SIP.Transport.add_contact_header/3`) — it keeps the userpart carried here and
+  rewrites host, port and transport.
   """
   @spec forwarded_reply_fields(map()) :: keyword()
   def forwarded_reply_fields(resp) when is_resp(resp) do
@@ -789,8 +795,43 @@ defmodule SIP.Msg.Ops do
         parts -> [body: parts]
       end
 
+    contact_fields =
+      case contact_identity(Map.get(resp, :contact)) do
+        nil -> []
+        uri -> [contact: uri]
+      end
+
     passthrough = for h <- @b2bua_reply_passthrough, v = Map.get(resp, h), do: {h, v}
-    body_fields ++ passthrough
+    body_fields ++ contact_fields ++ passthrough
+  end
+
+  # The identity half of a Contact crossing a leg boundary: the userpart and
+  # display name say WHO answers there; the host, port and transport say WHERE,
+  # are this leg's own business, and are stamped by the transport layer
+  # (SIP.Transport.add_contact_header/3) with the address of the transport that
+  # actually carries the message. Both parameter sets are cleared: the peer's
+  # binding parameters (+sip.instance, expires, q, feature tags…) describe ITS
+  # binding on ITS side, and forwarding them as ours re-creates the two-token
+  # Request-Line bug documented in SIP.Uri. The placeholder host marks the URI
+  # as "to be stamped", same convention as the session layers' local_contact.
+  defp contact_identity(%SIP.Uri{} = contact) do
+    %SIP.Uri{
+      userpart: contact.userpart,
+      displayname: contact.displayname,
+      domain: "0.0.0.0"
+    }
+  end
+
+  # Several contacts only legally show up on messages that are not relayed
+  # leg-to-leg (REGISTER, 3xx): keep the first one's identity if it ever happens.
+  defp contact_identity([first | _]), do: contact_identity(first)
+  defp contact_identity(_), do: nil
+
+  defp put_contact_identity(req, orig_contact) do
+    case contact_identity(orig_contact) do
+      nil -> req
+      uri -> Map.put(req, :contact, uri)
+    end
   end
 
   # Current Max-Forwards, tolerant of the shapes seen in traffic: parsed integer,
@@ -884,7 +925,11 @@ defmodule SIP.Msg.Ops do
 				end
 		end
 	end
-  @reply_filter [ :via, :to, :from, :route, :recordroute, :cseq, :callid, :contentlength ]
+  # Route is NOT here: RFC 3261 Table 3 gives it no place in any response —
+  # Record-Route is what a UAS echoes (into dialog-establishing 2xx, below), the
+  # request's Route is spent once the request has been routed. Copying it gave
+  # every 200 OK we sent a Route header naming the caller's own outbound proxy.
+  @reply_filter [ :via, :to, :from, :recordroute, :cseq, :callid, :contentlength ]
 
   # The To tag a response carries when the request itself named none. (When the
   # request DID name one, §8.2.6.2 requires echoing it and this is never reached —
@@ -1034,8 +1079,19 @@ defmodule SIP.Msg.Ops do
     raise "NTLM challenge not yet implemented"
   end
 
-  @doc "Crée un message ACK à partir d'une requête existante"
-  def ack_request(sipmsg, remote_contact, routeset \\ :ignore , body \\ []) when is_map(sipmsg) and sipmsg.method in [:INVITE, :UPDATE] do
+  @doc """
+  Crée un message ACK à partir d'une requête existante.
+
+  `ack_2xx` says WHICH of the two ACKs of RFC 3261 this is, because they differ
+  by one thing: the branch. The ACK of a non-2xx final belongs to the INVITE
+  transaction and reuses its branch (§17.1.1.3); the ACK of a 2xx is a new
+  transaction the TU constructs, so it gets a branch of its own (§13.2.2.4,
+  §17.1.1.3 "The ACK for a 2xx response to an INVITE request is a separate
+  transaction"). We reused the INVITE's branch on both: a strict UAS matching
+  that ACK by branch (§17.2.3) files it under the INVITE server transaction
+  instead of handing it to the dialog — capture13 of 2026-08-14, frames 113/123.
+  """
+  def ack_request(sipmsg, remote_contact, routeset \\ :ignore , body \\ [], ack_2xx \\ false) when is_map(sipmsg) and sipmsg.method in [:INVITE, :UPDATE] do
     # "Max-Forwards" — see cancel_request/1 above for the missing S.
     ack_filter = fn { k, _v } ->
       k in [ :to, :from, :route, "Max-Forwards", :callid, :contentlength ]
@@ -1052,9 +1108,13 @@ defmodule SIP.Msg.Ops do
     # - contact is copied from the final response (provided as argument)
     # - routeset is copied too (same)
     # - cseq copy the seq number and change the method to ACK
-    # - via contains only the top most via header of the original request
+    # - via contains only the top most via header of the original request,
+    #   with a fresh branch when this ACK acknowledges a 2xx (see @doc)
     # - note the to field is copied from the message passed as argument
     #   so the to needs to be modified to contain the to of the final response
+
+    topvia = hd(sipmsg.via)
+    topvia = if ack_2xx, do: refresh_via_branch(topvia), else: topvia
 
     fieldlist = [
       {:method, :ACK},
@@ -1062,10 +1122,16 @@ defmodule SIP.Msg.Ops do
       {:route, routeset},
       {:body, body},
       {:cseq, [ seqno, :ACK ]},
-      {:via, hd(sipmsg.via)}]
+      {:via, topvia}]
 
     # Update message
     sipmsg |> Map.filter(ack_filter) |> update_sip_msg(fieldlist)
+  end
+
+  # Same Via — same sent-by, same parameters — under a new branch: what makes
+  # the 2xx ACK the separate transaction §17.1.1.3 says it is.
+  defp refresh_via_branch(via) when is_binary(via) do
+    String.replace(via, ~r/branch=[^;]+/, "branch=" <> generate_branch_value())
   end
 
   @doc "Crée une requête autentifiée à partir d'une requête non authentifiée et d'en entête auth"
