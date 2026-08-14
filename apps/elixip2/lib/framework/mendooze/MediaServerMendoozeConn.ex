@@ -21,7 +21,7 @@ defmodule MediaServer.Mendooze.Conn do
   alias MediaServer.Mendooze.{Sdp, XmlRpc}
 
   # How long a caller waits for this GenServer, as opposed to how long ONE
-  # XML-RPC request waits (`xmlrpc_timeout_ms`, default 10 s). The two-level
+  # XML-RPC request waits (`xmlrpc_timeout_ms`, default 2 s). The two-level
   # arrangement is deliberate: the inner one must fire first, so a slow server
   # makes a call RETURN an error instead of exiting. The outer one is for a Conn
   # wedged somewhere other than in an RPC.
@@ -30,7 +30,12 @@ defmodule MediaServer.Mendooze.Conn do
   # `EndpointStartReceiving` on one leg now blocks the other at the head of the
   # queue, and this timeout is counted by the CALLER — so the second leg can
   # expire having never been served. Hence configurable, and hence the floor.
-  @default_call_timeout 30_000
+  # Sized on the same reading as the XML-RPC timeout it floors (2 s): one setup
+  # sequence issues a dozen RPCs, but they fail as a chain — the first one to time
+  # out ends the `with`, so the realistic worst case is one slow RPC plus a handful
+  # of fast ones, not a dozen slow ones. Ten seconds covers that with room to
+  # spare, and it is what a scenario waits before it may act on its own.
+  @default_call_timeout 10_000
   @min_call_timeout_factor 3
 
   @default_rtp_timeout_ms 10_000

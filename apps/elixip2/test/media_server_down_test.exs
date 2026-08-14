@@ -156,9 +156,12 @@ defmodule SIP.Test.Media.ServerDown do
       assert MediaServer.Mendooze.Conn.call_timeout() >= 3 * 20_000
     end
 
-    test "defaults to 30 s with the default RPC timeout" do
+    test "defaults to 10 s with the default RPC timeout" do
       Application.put_env(:elixip2, MediaServer.Mendooze, [])
-      assert MediaServer.Mendooze.Conn.call_timeout() == 30_000
+      assert MediaServer.Mendooze.Conn.call_timeout() == 10_000
+      # …and stays clear of the floor, so the default pair is a real two-level
+      # arrangement and not the floor in disguise.
+      assert MediaServer.Mendooze.Conn.call_timeout() > 3 * MediaServer.Mendooze.XmlRpc.timeout_ms()
     end
   end
 end

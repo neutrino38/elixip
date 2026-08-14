@@ -343,7 +343,8 @@ as well as `{host, port}`, and has its own tuning block:
 
 ```elixir
 config :elixip2, MediaServer.Mendooze,
-  xmlrpc_timeout_ms: 10_000,   # per-call XML-RPC timeout
+  xmlrpc_timeout_ms: 2_000,    # per-call XML-RPC timeout (a local control RPC
+                               #   answers in ms; longer only blocks the scenario)
   rtp_timeout_ms: 10_000,      # EndpointStartRTPTimeout inactivity watchdog
   poller_retry_ms: 1_000,      # event stream reconnect delay
   poller_max_failures: 5,      # consecutive failures before :server_disconnected
