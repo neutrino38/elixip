@@ -67,7 +67,7 @@ defmodule Kelix.B2buaScriptTest do
       callid: Keyword.get(opts, :callid, "reg-#{host}")
     }
 
-    {:ok, _granted} = Registrar.save(req, @domain)
+    {:registered, _granted} = Registrar.save(req, @domain)
     :ok
   end
 

@@ -29,6 +29,26 @@ defmodule UASInviteFixture.Answer180 do
   end
 end
 
+# A TU that takes its time — a DID lookup on a media server, a database. It says
+# nothing for well over the 200 ms of RFC 3261 §17.2.1, so the server transaction
+# owes the caller a 100 Trying on its behalf.
+defmodule UASInviteFixture.Slow do
+  use SIP.Scenario
+  uas(:invite)
+  config(domain: "example.com")
+
+  state initial_state do
+    on_events do
+      {:INVITE, _req, _t, _dlg} ->
+        Process.sleep(600)
+        reply_invite(180, "Ringing")
+        scenario_success("ringing, eventually")
+    after
+      5_000 -> scenario_failure("no INVITE")
+    end
+  end
+end
+
 defmodule UASInviteFixture.Busy do
   use SIP.Scenario
   uas(:invite)
@@ -139,6 +159,7 @@ defmodule TestCallUAS do
 
   @scenarios %{
     "answer180" => UASInviteFixture.Answer180,
+    "slow" => UASInviteFixture.Slow,
     "busy" => UASInviteFixture.Busy,
     "redirect" => UASInviteFixture.Redirect,
     "challenge" => UASInviteFixture.Challenge,
@@ -566,11 +587,25 @@ defmodule SIP.Test.UASInvite do
 
   # ── End-to-end over the UDP mockup ──────────────────────────────────────────
 
-  # The IST emits no automatic 100: the 180 is the first thing on the wire.
+  # A TU that answers promptly keeps the wire to itself: the 100 of RFC 3261
+  # §17.2.1 is due only "unless [the transaction] knows that the TU will generate
+  # a provisional or final response within 200 ms", and this one does. That is
+  # what keeps us from duplicating the 100 a proxy in front already sent.
   test "reply_invite(180) reaches the wire" do
     inject_invite("answer180")
     assert_receive 180, 2_000
     refute_received 100
+  end
+
+  # …and the converse, which is the whole point of arming the timer: a TU that
+  # takes its time leaves the caller with nothing on the wire, retransmitting its
+  # INVITE into silence. The server transaction owes it a 100 (untagged, §17.2.1
+  # downgrading tag insertion to SHOULD NOT there).
+  test "a TU still silent after 200 ms gets a 100 Trying from the transaction" do
+    inject_invite("slow")
+
+    assert_receive 100, 2_000
+    assert_receive 180, 2_000
   end
 
   test "reply_invite(486) reaches the wire" do
@@ -684,7 +719,7 @@ defmodule SIP.Test.UASInvite do
 
     ack =
       SIP.Msg.Ops.ack_request(invite, %SIP.Uri{domain: "2.2.2.2", port: 5090})
-      |> Map.put(:to, SIP.Uri.set_uri_param(to, "tag", totag))
+      |> Map.put(:to, SIP.Uri.set_header_param(to, "tag", totag))
       |> rebranch()
 
     send(invite.ruri.tp_pid, {:recv, ack})

@@ -42,9 +42,10 @@ defmodule Kelix.Mod.Registrar do
   (RFC 3261).
 
   Facade (imported by the registrar script):
-    * `save/4`   — register/unregister from a REGISTER; returns the granted
-      contacts/expires (it does **not** compose the SIP response — the script
-      does, via SIP.Session.Registrar helpers, §11.1);
+    * `save/2`   — register/unregister from a REGISTER; says whether the AOR is left
+      `:registered` or `:unregistered` and hands back the granted contacts/expires
+      (it does **not** compose the SIP response — the script does, via
+      SIP.Session.Registrar helpers, §11.1);
     * `lookup/1` — rewrite a request to reach the registered UA(s);
     * `subscribe_register_event/2` / `unsubscribe_register_event/2`.
 
@@ -118,6 +119,7 @@ defmodule Kelix.Mod.Registrar do
     do: %{
       version: "1.0",
       exports: [
+        save: 2,
         save: 4,
         lookup: 1,
         targets: 2,
@@ -143,14 +145,62 @@ defmodule Kelix.Mod.Registrar do
   end
 
   @doc """
-  Register/unregister the contacts of a REGISTER `req` under `domain`. `dialog_pid`
-  is the backing dialog (stored per contact, used later for teardown); `info` is
-  arbitrary scenario data. Returns `{:ok, granted}` (contacts + expires actually
-  granted) or `{:error, {code, reason}}`.
+  Register/unregister the contacts of a REGISTER `req`.
+
+  Two calling forms:
+
+    * `save(sip_ctx, req)` — the scenario form. The served domain and the backing
+      dialog are read off the scenario context (`domain`, injected by
+      `Kelix.Router`; `dialogpid`, set when the instance was spawned), so a script
+      never carries either around: `case save(sip_ctx, req) do …`.
+    * `save(req, domain, dialog_pid, info)` — the programmatic form, for callers
+      with no scenario context (tests, seeding the store).
+
+  `dialog_pid` is stored per contact and used later for teardown; `info` is
+  arbitrary scenario data.
+
+  A binding belongs to one session at a time: re-registering a contact that another
+  dialog owns hands it over, and that dialog is terminated
+  (`{:dialog_terminated, _, :superseded}` → its instance ends). Nothing for the
+  script to do — but it is why saving can end a session other than its own.
+
+  The verdict says **what happened to the AOR**, not merely that the store
+  accepted the request, because the two demand different things of the script: a
+  registration is answered and then waited on for its refresh, an
+  un-registration is answered and the session is over. The script that has to
+  re-derive it from `granted.expires == 0` gets it wrong on the request that
+  drops one of two bindings — that one still leaves the AOR registered.
+
+    * `{:registered, granted}`   — the AOR has live bindings;
+    * `{:unregistered, granted}` — its last binding is gone (`Expires: 0`, or the
+      `Contact: *` wildcard); `granted.contacts` is empty and `granted.expires` 0;
+    * `{:error, {code, reason}}` — 400 (no Contact / bad wildcard), 423 (too
+      brief), 403 (too many contacts);
+    * `{:error, :down | :timeout}` — the store could not answer (§8.2).
+
+  `granted` is `%{aor, contacts, expires}`: ALL the AOR's current bindings, each
+  stamped with its own remaining lifetime — what `SIP.Session.Registrar.accept_registration/3`
+  puts in the 200 OK (RFC 3261 §10.3 step 8). It does not build the response; the
+  script does (§11.1).
   """
-  @spec save(map, String.t(), pid | nil, term) :: {:ok, map} | {:error, {integer, String.t()}}
-  def save(req, domain, dialog_pid \\ nil, info \\ nil),
-    do: Kelix.Module.safe_call(__MODULE__, {:save, req, domain, dialog_pid, info})
+  @spec save(%SIP.Context{} | map, map | String.t(), pid | nil, term) ::
+          {:registered, map}
+          | {:unregistered, map}
+          | {:error, {integer, String.t()}}
+          | {:error, :down | :timeout}
+  def save(ctx_or_req, req_or_domain, dialog_pid \\ nil, info \\ nil)
+
+  def save(sip_ctx = %SIP.Context{}, req, _dialog_pid, info) when is_map(req),
+    do: save(req, sip_ctx.domain, sip_ctx.dialogpid, info)
+
+  def save(req, domain, dialog_pid, info) when is_map(req) do
+    # The store is a module, not the SIP peer: `:db` is the monitor's category for
+    # "this instance went and asked something of a backend", which is what makes
+    # `kelictl monitor` show a registrar instance doing its work rather than
+    # sitting idle between the REGISTER and the 200.
+    SIP.Scenario.Monitor.note_command(:db, "registrar_save")
+    Kelix.Module.safe_call(__MODULE__, {:save, req, domain, dialog_pid, info})
+  end
 
   @doc "Rewrite `req` to reach the AOR's registered contacts. `{:ok, [req]}` / `:notfound` / `{:error, r}`."
   @spec lookup(map) :: {:ok, [map]} | :notfound | {:error, term}
@@ -276,8 +326,11 @@ defmodule Kelix.Mod.Registrar do
   @impl true
   def handle_call({:save, req, domain, dialog_pid, info}, _from, state) do
     case do_save(state, req, domain, dialog_pid, info) do
-      {:ok, granted, state2} -> {:reply, {:ok, granted}, state2}
-      {:error, reason} -> {:reply, {:error, reason}, state}
+      {verdict, granted, state2} when verdict in [:registered, :unregistered] ->
+        {:reply, {verdict, granted}, state2}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -425,7 +478,7 @@ defmodule Kelix.Mod.Registrar do
       :ets.delete(tid, aor)
       state = demonitor_aor(state, domain, aor)
       notify(state, domain, aor, :unregistered)
-      {:ok, granted(aor, [], 0), state}
+      {:unregistered, granted(aor, [], 0), state}
     else
       # apply removes then adds, keyed by contact URI string
       kept = drop_contacts(existing, for({:remove, c} <- actions, do: binding_key(c)))
@@ -458,8 +511,9 @@ defmodule Kelix.Mod.Registrar do
         # Monitor the backing dialog so a connected-transport drop invalidates the
         # binding (§6.3, WebRTC-critical).
         state = ensure_monitor(state, domain, aor, dialog_pid, flow_module_of(req))
+        state = supersede_owners(state, domain, aor, existing, added, dialog_pid)
         notify(state, domain, aor, :registered)
-        {:ok, granted(aor, merged, granted_expires(actions)), state}
+        {:registered, granted(aor, merged, granted_expires(actions)), state}
       end
     end
   end
@@ -581,6 +635,63 @@ defmodule Kelix.Mod.Registrar do
     end
   end
 
+  # One binding, one session. A binding is re-registered by a dialog other than the
+  # one that owns it — a different Call-ID naming the same contact — so the previous
+  # dialog owns nothing any more: it is superseded, and its registrar instance must
+  # go with it.
+  #
+  # This is what a client re-enabling its account produces (Linphone, 2026-08-11):
+  # it re-registers its previous Call-ID *and* opens a new one within the same
+  # second, both naming the same contact and the same `+sip.instance`. `upsert/2`
+  # then leaves one binding and two live sessions, the loser's being a session that
+  # claims a registration it does not hold — visible in `kelictl monitor`, and about
+  # to un-register a binding that is no longer its own.
+  #
+  # Whatever the transport, unlike the dialog *monitor* above: over UDP the previous
+  # dialog is just as stale, and nothing else there would ever notice — no
+  # connection drops, so it would sit out a full registration lifetime.
+  #
+  # Demonitored before it is told to end, so the death we cause does not come back
+  # through `handle_info({:DOWN, …})` as a `:disconnected` for an AOR that is still
+  # registered.
+  defp supersede_owners(state, domain, aor, existing, added, dialog_pid)
+       when is_pid(dialog_pid) do
+    rebound = MapSet.new(added, &binding_key(&1))
+
+    existing
+    |> Enum.filter(fn %Contact{dialog_pid: owner} = c ->
+      is_pid(owner) and owner != dialog_pid and MapSet.member?(rebound, binding_key(c))
+    end)
+    |> Enum.uniq_by(& &1.dialog_pid)
+    |> Enum.reduce(state, fn %Contact{dialog_pid: owner}, st ->
+      Logger.info(
+        module: __MODULE__,
+        message:
+          "#{aor}@#{domain}: binding re-registered by #{inspect(dialog_pid)}, " <>
+            "superseding #{inspect(owner)}"
+      )
+
+      st = demonitor_owner(st, domain, aor, owner)
+      SIP.Dialog.terminate(owner, :superseded)
+      st
+    end)
+  end
+
+  # No dialog behind this save (the programmatic form: tests, seeding the store) —
+  # nothing to hand the registration over to, so nothing is superseded either.
+  defp supersede_owners(state, _domain, _aor, _existing, _added, _dialog_pid), do: state
+
+  defp demonitor_owner(state, domain, aor, pid) do
+    case Enum.find(state.mons, fn {_ref, key} -> key == {domain, aor, pid} end) do
+      nil ->
+        state
+
+      {ref, _key} ->
+        Process.demonitor(ref, [:flush])
+        %{state | mons: Map.delete(state.mons, ref)}
+    end
+  end
+
   defp demonitor_aor(state, domain, aor) do
     {to_drop, kept} =
       Enum.split_with(state.mons, fn {_ref, {d, a, _pid}} -> d == domain and a == aor end)
@@ -649,7 +760,7 @@ defmodule Kelix.Mod.Registrar do
   # Junk is read as absent rather than raising: an unparsable q is a reason to
   # ignore the preference, not to fail the call.
   defp q_of(%Contact{contact: uri}) do
-    with {:ok, v} <- SIP.Uri.get_uri_param(uri, "q"),
+    with {:ok, v} <- SIP.Uri.get_header_param(uri, "q"),
          {q, _rest} <- Float.parse(v) do
       q
     else
@@ -661,19 +772,19 @@ defmodule Kelix.Mod.Registrar do
   # destination and flow.
   defp rewrite(req, %Contact{} = binding), do: Map.put(req, :ruri, target_uri(binding))
 
-  # Parameters of the Contact HEADER, not of the address it holds: they describe
-  # the binding (its preference, its lifetime), so they have no business on a
-  # Request-URI we then send. The parser folds header and URI parameters into one
-  # map, which is why they have to be dropped explicitly — a forwarded INVITE
-  # otherwise went out to `sip:bob@10.0.0.9;q=0.9;expires=3600`.
-  @binding_only_params ["q", "expires"]
-
   # The stored contact stamped with the destination and flow it registered over.
   # Both are what `SIP.Transport.Selector.select_transport/1` short-circuits on
   # (§6.4): a live `tp_pid`+`tp_module` sends straight over the existing
   # connection, and failing that `destip`/`destport` skip DNS.
+  #
+  # `SIP.Uri.to_request_uri/1` first: what is stored is a Contact *header* value,
+  # display name and binding parameters (`q`, `expires`, `+sip.instance`, the RFC
+  # 3840 feature tags) included, and none of that may appear on the Request-URI
+  # this becomes (RFC 3261 §16.6 item 2). The URI parameters are kept in full —
+  # §19.1.5 requires it — which is the whole reason this is one framework call
+  # and not a list of parameter names maintained here.
   defp target_uri(%Contact{contact: c} = binding) do
-    c = %SIP.Uri{c | params: Map.drop(c.params, @binding_only_params)}
+    c = SIP.Uri.to_request_uri(c)
     binding = %Contact{binding | contact: c}
 
     case binding.received do
@@ -711,15 +822,16 @@ defmodule Kelix.Mod.Registrar do
     end
   end
 
-  # Each returned contact carries its OWN remaining lifetime as an `expires` URI
-  # param, so a 200 OK enumerating several bindings is accurate per binding
-  # instead of stamping them all with the expiry of the one just refreshed.
+  # Each returned contact carries its OWN remaining lifetime as an `expires`
+  # Contact header parameter (`c-p-expires`, RFC 3261 §25.1, hence
+  # `set_header_param/3`), so a 200 OK enumerating several bindings is accurate per
+  # binding instead of stamping them all with the expiry of the one just refreshed.
   defp granted(aor, contacts, expires) do
     %{aor: aor, contacts: Enum.map(contacts, &contact_with_expires/1), expires: expires}
   end
 
   defp contact_with_expires(%Contact{contact: uri, expires_at: at}) do
-    SIP.Uri.set_uri_param(uri, "expires", to_string(remaining_seconds(at)))
+    SIP.Uri.set_header_param(uri, "expires", to_string(remaining_seconds(at)))
   end
 
   defp remaining_seconds(at), do: max(DateTime.diff(at, now(), :second), 0)
@@ -782,10 +894,12 @@ defmodule Kelix.Mod.Registrar do
     end
   end
 
-  # Contact parameters reach us quoted (`+sip.instance="<urn:uuid:…>"`); compare and
-  # store the value, not the quoting.
+  # Contact HEADER parameters (`+sip.instance`, `reg-id`, `methods` — all of them
+  # `contact-params`, hence `get_header_param/2`). They reach us quoted
+  # (`+sip.instance="<urn:uuid:…>"`), which a URI parameter could not even be:
+  # compare and store the value, not the quoting.
   defp contact_param(%SIP.Uri{} = uri, name) do
-    case SIP.Uri.get_uri_param(uri, name) do
+    case SIP.Uri.get_header_param(uri, name) do
       {:ok, value} when is_binary(value) -> String.trim(value, "\"")
       _ -> nil
     end
@@ -869,30 +983,25 @@ defmodule Kelix.Mod.Registrar do
     end
   end
 
-  # Contact **header** parameters, which `SIP.Uri.parse/1` folds into the URI's
-  # params map — in `<sip:u@h>;expires=0` everything after the `>` is a header
-  # parameter, not part of the URI. They must be excluded from binding identity:
-  # RFC 3261 §10.2.4 compares bindings by URI, so a refresh that merely changes
-  # `expires` has to REPLACE the binding rather than add a second one.
+  # Binding identity is the contact **URI**: RFC 3261 §10.2.4 compares bindings by
+  # URI, so a refresh that merely changes `expires` has to REPLACE the binding
+  # rather than add a second one. Contact *header* parameters are therefore
+  # excluded — and `SIP.Uri.serialize_ruri/1` excludes exactly them (plus the
+  # display name, which a handset is free to change without becoming a new
+  # device), so the list of names this used to maintain by hand is gone.
   #
-  # Leaving them in meant a handset that rebinds (old contact with `;expires=0`,
+  # Keeping them in meant a handset that rebinds (old contact with `;expires=0`,
   # new one alongside) never got its old contact dropped — the key differed by that
   # very parameter — so the AOR accumulated stale contacts until
   # `max_contacts_per_aor` started refusing the next registration.
   #
-  # `+`-prefixed feature tags (RFC 3840) go the same way. `+sip.instance`/`reg-id`
-  # would make a *better* binding key than the URI (RFC 5626 outbound), but that is
-  # its own feature; until then identity stays the URI, as RFC 3261 has it.
-  @contact_header_params ~w(expires q methods reg-id)
-
-  # serialize/1 always succeeds on a %SIP.Uri{}, hence the hard match.
+  # `+sip.instance`/`reg-id` would make a *better* binding key than the URI (RFC
+  # 5626 outbound), but that is its own feature; until then identity stays the URI,
+  # as RFC 3261 has it.
+  #
+  # serialize_ruri/1 always succeeds on a %SIP.Uri{}, hence the hard match.
   defp uri_key(%SIP.Uri{} = u) do
-    params =
-      u.params
-      |> Map.drop(@contact_header_params)
-      |> Map.reject(fn {k, _v} -> String.starts_with?(k, "+") end)
-
-    {:ok, s} = SIP.Uri.serialize(%SIP.Uri{u | params: params})
+    {:ok, s} = SIP.Uri.serialize_ruri(u)
     s
   end
 

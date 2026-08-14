@@ -41,7 +41,7 @@ defmodule Kelix.ControlRegistrationsTest do
     end
 
     test "lists a registration, shows it, then removes it" do
-      assert {:ok, _} = Kelix.Mod.Registrar.save(register("alice"), "example.com")
+      assert {:registered, _} = Kelix.Mod.Registrar.save(register("alice"), "example.com")
 
       # the cross-domain view: one entry per served domain
       assert Enum.any?(Control.registrations(), fn entry ->
@@ -64,7 +64,7 @@ defmodule Kelix.ControlRegistrationsTest do
     end
 
     test "removal is per-domain: an unserved domain removes nothing" do
-      assert {:ok, _} = Kelix.Mod.Registrar.save(register("bob"), "example.com")
+      assert {:registered, _} = Kelix.Mod.Registrar.save(register("bob"), "example.com")
 
       assert Control.unregister("ghost.example.org", "bob") == :notfound
       # …and the binding is still there

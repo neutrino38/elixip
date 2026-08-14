@@ -32,6 +32,10 @@ defmodule Kelix.Control.CLI do
 
   @default_node "kelixip@127.0.0.1"
 
+  # The detailed topics of `kelictl help <topic>` (each also reachable as
+  # `kelictl <topic> help` for the four that are core nouns).
+  @help_topics ["registration", "domain", "mediaserver", "module", "reload", "drain"]
+
   @exit_not_found 3
   @exit_conflict 4
   @exit_unavailable 5
@@ -93,6 +97,13 @@ defmodule Kelix.Control.CLI do
   @spec run([String.t()], node) :: {non_neg_integer, String.t()}
   def run(argv, target \\ resolve_node()) do
     case parse(argv) do
+      # Help is answered here, with no node call — which is what lets the
+      # `bin/kelictl` overlay route these forms through `kelixip eval` instead of
+      # `rpc` and answer on a host whose service is DOWN, exactly when an operator
+      # reaches for it. Adding a help form here means adding it there too.
+      {:help, text} ->
+        {0, text}
+
       # A module command's rendering may be declared by the module itself (the
       # `render:` hint, §8.3.6); resolving it needs the target node, so this one
       # cannot go through the pure render/2.
@@ -108,6 +119,32 @@ defmodule Kelix.Control.CLI do
   end
 
   # ── parsing (argv → {tag, Kelix.Control fun, args}) ──────────────────────────
+
+  # ── help ─────────────────────────────────────────────────────────────────────
+  #
+  # The core commands document themselves here rather than only in
+  # docs/kelixip/, because the operator asking "what does `registration remove`
+  # take" is on the box, in a shell, and the answer that reaches them is the one the
+  # binary carries. Each topic names its REST route too — the same
+  # `[GET /path]` convention a module's declared help already prints, so the two
+  # frontals are read side by side (parity is the design, §10.2).
+  defp parse([]), do: {:help, usage()}
+  defp parse(["help"]), do: {:help, usage()}
+  defp parse([flag]) when flag in ["-h", "--help"], do: {:help, usage()}
+
+  defp parse(["help", topic]) do
+    case help_topic(topic) do
+      nil -> {:error, unknown_topic(topic)}
+      text -> {:help, text}
+    end
+  end
+
+  # `<noun> help` reads better than `help <noun>` to whoever just typed the noun,
+  # and it is the form a module namespace already uses (`kelictl mcu help`). Both
+  # spellings answer the same text. These clauses must precede the `[noun | _]`
+  # usage fallbacks below, which would otherwise swallow them.
+  defp parse([topic, "help"]) when topic in ["registration", "domain", "mediaserver", "module"],
+    do: {:help, help_topic(topic)}
 
   defp parse(["status"]), do: {:ok, :status, :status, []}
   defp parse(["monitor"]), do: {:ok, :monitor, :monitor, []}
@@ -991,8 +1028,195 @@ defmodule Kelix.Control.CLI do
       <module> help [<cmd>]           the commands a module contributes, or
                                       one of them with its arguments' help
       <module> <cmd> [args…]          a module-contributed command
+      help [<topic>]                  this list, or one topic in detail
+
+    topics: #{Enum.join(@help_topics, ", ")}
+            (`kelictl help registration` = `kelictl registration help`)
     """
   end
+
+  # ── help topics ──────────────────────────────────────────────────────────────
+
+  defp unknown_topic(topic) do
+    "no help topic \"#{topic}\" — topics: #{Enum.join(@help_topics, ", ")}\n" <>
+      "(a module's own commands are `kelictl <module> help`)"
+  end
+
+  defp help_topic("registration") do
+    """
+    kelictl registration — the location service (usrloc) of the registrar module
+
+      registration list [domain]                    [GET /registrations]
+                                                    [GET /domains/<domain>/registrations]
+          Registrations, one section per served domain, or one domain only.
+      registration show <domain> <aor>              [GET /domains/<domain>/registrations/<aor>]
+          One AOR and its bindings, in detail.
+      registration remove <domain> <aor> [contact]  [DELETE /domains/<domain>/registrations/<aor>]
+          Drop every binding of the AOR, or only <contact> (?contact= over REST).
+
+    An AOR is unique only WITHIN a domain, so the domain is part of the address and
+    not a filter on it: `show` and `remove` take <domain> <aor>, and `list` groups
+    its answer per domain. With no argument, `list` prints one section per SERVED
+    domain — including the empty ones, because "served, empty" and "not served at
+    all" are what an operator is usually trying to tell apart. <domain> is resolved
+    the way inbound traffic is (name or alias, case-insensitively), so the host seen
+    on the wire is a valid argument; an unserved one answers `no such domain`.
+
+    <aor> is the user part (alice), or the full alice@example.com copied out of a log
+    — in which case its domain part must be that same domain rather than being
+    silently ignored. There is deliberately no form that removes an AOR from every
+    domain at once.
+
+    `show` prints what the registrar stored, not just the URI: `expires` both ways,
+    the transport, the RFC 5626/3840 identity the handset sent (instance, reg-id,
+    methods), and `source` — where the REGISTER actually came from, which behind a
+    NAT is NOT what the contact URI says, and the usual reason a call to a registered
+    phone never arrives. A field the handset did not send gets no line.
+
+    Full documentation: docs/kelixip/modules/registrar.md
+    """
+  end
+
+  defp help_topic("domain") do
+    """
+    kelictl domain — the served domains, their functions and their dial-plan
+
+      domain list                 [GET /domains]        served domains + counters
+      domain show <domain>        [GET /domains/<domain>]  one domain in detail
+      domain reload-all           [POST /domains/reload]   hot-reload domains.toml
+
+    Both read the LIVE domains.toml snapshot — what the router is using right now,
+    which after a rejected reload is not what is on disk (the version is in
+    `kelictl status`). `show` resolves its argument against the name AND the
+    aliases, case-insensitively.
+
+    The dial-plan is printed in file order and numbered because it is
+    first-match-wins: rule n is only tried if rules 1…n-1 did not match. `functions`
+    lists what the domain actually serves (a function block present in the TOML =
+    enabled), so an empty column means every request to that domain gets a 404.
+
+    After each script, in brackets, is the MODULE the BEAM runs for it — the
+    compiled truth next to the file name you configured, with its load version — and
+    a staleness note when the file no longer matches the loaded code
+    (`file changed since load`, `file missing`, `file unstamped`).
+
+    `domain reload-all` is all-or-nothing: the file is accepted only if it parses,
+    its patterns compile, and every script it names is servable. See `help reload`.
+
+    Full documentation: docs/kelixip/administration.md
+    """
+  end
+
+  defp help_topic("mediaserver") do
+    """
+    kelictl mediaserver — the [mediaserver.pool.*] entries of config.toml
+
+      mediaserver list                    [GET /mediaservers]
+      mediaserver show <name>             [GET /mediaservers/<name>]
+      mediaserver enable|disable <name>   [POST /mediaservers/<name>]
+
+    Listed in config order, which is the round-robin order. Two things that read
+    alike are kept apart:
+
+      enabled  the OPERATOR switch, flipped by enable|disable and by nothing else.
+               Disabling stops NEW calls and conferences landing there; what is
+               already running stays until it ends.
+      health   the pool's own probe (a connect/disconnect on the point-to-point
+               adapter's channel, every 30 s). The `modules` column is what each
+               module driving that server says about it — the mcu module holds a
+               DIFFERENT control channel to the same box, so `up` on one side and
+               `down` on the other is a real state, not a contradiction.
+
+    A server the pool does not declare is `error: :unknown` on enable/disable and
+    `no such media server` on show.
+
+    Full documentation: docs/kelixip/administration.md
+    """
+  end
+
+  defp help_topic("module") do
+    """
+    kelictl module — the loaded modules, and the commands they contribute
+
+      module list                 [GET /modules]                  loaded modules
+      module reload <name>        [POST /modules/<name>/reload]    re-apply its config
+      <module> help [<cmd>]       [GET /modules/<name>]            what it contributes
+      <module> <cmd> [args…]      (the route the command declares)
+
+    A module declares its command set once (`describe_control/0`) and both frontals
+    render that declaration, so a listing cannot drift from what the node serves:
+    ask the node, not the source. `*` marks a required argument; the bracketed route
+    is the same command over REST.
+
+    Positional args are `name=value` tokens (true/false a boolean, digits an
+    integer, a leading { or [ is JSON). QUOTE a value containing spaces —
+    name='Sales weekly', muted='{"audio":true}' — the quotes reach the module intact.
+
+    `help` is reserved on a module namespace, and so is `<module> help <cmd>`, which
+    narrows the listing to one command (a whole module's surface plus every
+    vocabulary is a screenful). `domain`, `mediaserver` and `module` are core nouns
+    and never reach a module.
+
+    Full documentation: docs/kelixip/modules/README.md
+    """
+  end
+
+  defp help_topic("reload") do
+    """
+    kelictl reload-all — apply what can be applied to a running node
+
+      reload-all                        [POST /reload-all]      everything live-applicable
+      domain reload-all                 [POST /domains/reload]  domains.toml alone
+      reload-script [--notify] <name…>  [POST /scripts/reload]  one or more scripts
+      module reload <name>              [POST /modules/<name>/reload]  one module's config
+
+    `reload-all` is what `systemctl reload kelixip` runs: domains.toml (domains,
+    dial-plan, the registrar block), the scenario scripts whose file changed, and
+    the module blocks that can change without interrupting anything.
+
+    It is ALL-OR-NOTHING on domains.toml — accepted only if it parses, its patterns
+    compile, and every script it names is servable (present in script_dir,
+    compiling, handling shutdown, and not declaring a module another script owns).
+    One offender and the reload is refused, naming the domain and the rule; the
+    running configuration stays exactly as it was. The same check runs at boot.
+
+    What a reload deliberately does NOT do:
+      config.toml   listeners, ports, media pool, control API, log target: read once
+                    at boot. Applying a change means `systemctl restart kelixip`.
+      a module that cannot be reconfigured live   reloading it means restarting it,
+                    which drops live state (mcu's conferences, registrar's
+                    registrations). It is left running and reported
+                    `CHANGED, needs a restart`, so the choice stays yours.
+
+    `--notify` is accepted but not yet active (a roadmap refinement).
+
+    Full documentation: docs/kelixip/administration.md
+    """
+  end
+
+  defp help_topic("drain") do
+    """
+    kelictl drain / undrain / graceful-shutdown — taking a node out of rotation
+
+      drain                [POST /drain]
+          Answer 503 to OPTIONS: leave the upstream rotation while still serving
+          everything already in flight.
+      undrain              [POST /undrain]
+          Back in service (OPTIONS -> 200).
+      graceful-shutdown    [POST /graceful-shutdown]
+          Drain, let upstream notice, then stop the node.
+      stop <id>            [POST /scenarios/<id>/shutdown]
+          Cooperatively shut down ONE scenario; the id is the one `monitor` prints.
+
+    Draining is a load-balancer concern, not a SIP one: it changes what the node
+    answers to the upstream's OPTIONS probe. Calls in progress are untouched — that
+    is the whole point of draining before a restart.
+
+    Full documentation: docs/kelixip/running.md
+    """
+  end
+
+  defp help_topic(_other), do: nil
 
   defp usage_module(), do: "usage: kelictl module list | module reload <name>"
 

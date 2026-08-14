@@ -2,10 +2,12 @@ defmodule Kelix.Auth do
   @moduledoc """
   Builds a digest **challenge** using the stateless `SIP.Auth.Nonce` (design §7).
 
-  The registrar script sends the returned map as an explicit `WWW-Authenticate`
-  header (`SIP.Dialog.reply(dialog_pid, req, 401, reason, wwwauthenticate: params)`)
-  — the framework then serializes it verbatim, without generating or storing a
-  stateful nonce (see the `is_binary(realm)` guard in `SIP.DialogImpl`).
+  A script sends the returned map as an explicit challenge header — the registrar
+  as `WWW-Authenticate` (`SIP.Dialog.reply(dialog_pid, req, 401, reason,
+  wwwauthenticate: params)`), a call script as `Proxy-Authenticate` through
+  `b2bua_challenge/3` — and the framework serializes it verbatim, without
+  generating or storing a stateful nonce (see the `is_binary(realm)` guard in
+  `SIP.DialogImpl`).
 
   `qop="auth"`, and `stale=true` on re-challenge of an expired/replayed nonce so
   the client replays transparently.
@@ -17,12 +19,19 @@ defmodule Kelix.Auth do
   """
 
   @doc """
-  WWW-Authenticate params for `realm`. `opts`: `:stale` (bool, default false),
-  `:algorithm` (default `"MD5"`), and `:secret`/`:now` forwarded to
-  `SIP.Auth.Nonce.generate` (tests).
+  Digest challenge params for `realm` — header-agnostic, because the params are.
+
+  A 401 carries them in `WWW-Authenticate` (a UAS answering for itself, RFC 3261
+  §22.2), a 407 in `Proxy-Authenticate` (§22.3 — what a UA expects of the server
+  routing its calls). Which one goes out is the scenario's decision, not this
+  function's: `SIP.Session.Registrar.challenge_registration/3` for a REGISTER,
+  `b2bua_challenge/3` for a call.
+
+  `opts`: `:stale` (bool, default false), `:algorithm` (default `"MD5"`), and
+  `:secret`/`:now` forwarded to `SIP.Auth.Nonce.generate` (tests).
   """
-  @spec challenge_www_authenticate(String.t(), keyword) :: map
-  def challenge_www_authenticate(realm, opts \\ []) when is_binary(realm) do
+  @spec challenge_params(String.t(), keyword) :: map
+  def challenge_params(realm, opts \\ []) when is_binary(realm) do
     nonce = SIP.Auth.Nonce.generate(realm, Keyword.take(opts, [:secret, :now]))
 
     params = %{

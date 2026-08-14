@@ -26,7 +26,10 @@ defmodule Kelix.Mod.Mcu.ConfigTest do
       refute Map.has_key?(config, :audio_codecs)
       assert config.video == %{size: 6, fps: 15, bitrate: 1024, intra_period: 300}
 
-      assert config.xmlrpc_timeout_ms == 10_000
+      # Shorter than what the caller waits (`call_timeout_ms`, 5 s): the per-RPC
+      # timeout has to fire first, or a slow server turns a call into an exit.
+      assert config.xmlrpc_timeout_ms == 2_000
+      assert config.xmlrpc_timeout_ms < config.call_timeout_ms
       assert config.gc_orphans == true
       # no range configured ⇒ `did` is mandatory on create (§8.4)
       assert config.did_range == nil

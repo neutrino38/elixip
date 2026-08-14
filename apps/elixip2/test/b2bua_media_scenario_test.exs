@@ -190,6 +190,30 @@ defmodule SIP.Test.B2bua.MediaScenario do
     assert_receive {:instance_done, :ok}, 10_000
   end
 
+  # The hangup that comes from the OTHER side, in media mode. Traffic of
+  # 2026-08-14 (Bob calling Alice, Alice hangs up): two BYEs went out towards
+  # Alice — one relayed, one from the teardown, the second answered 481 — and
+  # Bob's phone stayed off-hook. The signalling suite covers the same crossing;
+  # this one adds the media plane, which is what production runs.
+  @tag timeout: 60_000
+  test "a callee that hangs up ends the call at the CALLER, not back at itself", %{
+    scenario: module,
+    stub: stub
+  } do
+    invite = inbound_invite()
+    {_instance, _ref, tp_pid} = establish(module, stub, invite, :callee_bye)
+
+    # On the wire, so the BYE crosses its own server transaction and the outbound
+    # dialog exactly as production delivers it.
+    SIP.Test.Transport.UDPMockup.hangup(tp_pid)
+
+    # It must cross to the CALLER, on the inbound leg…
+    assert_receive {:sent_on_inbound, %{method: :BYE}}, 5_000
+
+    # …and not go back out to the callee, who is the one that just hung up.
+    refute_receive :BYE, 1_000
+  end
+
   # §R4.1b. The signalling scenario relays all four kinds of re-offer because it
   # cannot tell them apart; this one reads the offer first, and the two rows of
   # the table that stay on this side of the B2BUA are the point of the whole

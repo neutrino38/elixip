@@ -8,7 +8,7 @@ defmodule Elixipp.MixProject do
   def project do
     [
       app: :elixipp,
-      version: "1.3.0",
+      version: "1.4.0",
       elixir: "~> 1.15",
       # Umbrella: share the root _build / config / deps / lockfile
       build_path: "../../_build",
@@ -16,6 +16,9 @@ defmodule Elixipp.MixProject do
       deps_path: "../../deps",
       lockfile: "../../mix.lock",
       start_permanent: Mix.env() == :prod,
+      # SPDX id of the Business Source License 1.1 (see LICENSE.md). Read by
+      # `mix sbom.cyclonedx` to license this component in the SBoM.
+      package: [licenses: ["BUSL-1.1"]],
       escript: escript(),
       deps: deps()
     ]

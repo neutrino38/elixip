@@ -8,6 +8,7 @@ defmodule SIP.Transport do
     stream transport that does not enforce message boundaries (TCP, TLS)
     """
     require SIPMsg
+    require Logger
 
     @maxmsgsize 8000
 
@@ -44,9 +45,13 @@ defmodule SIP.Transport do
 				# This is a SIP request
 				[ _req, _sip_uri, "SIP/2.0" ] -> :ok
 
-        [ "\r\n" ] -> :ping
-
-				_ -> :error
+				_ ->
+          # The line reaching us has already lost its CRLF, so a keep-alive shows up
+          # here as an EMPTY first line — which is why the `[ "\r\n" ]` clause that
+          # used to sit here never matched, and every CRLF ping took the :error path
+          # and flushed the buffer, dropping whatever valid message was pipelined
+          # behind it. Ask the message layer instead.
+          if SIPMsg.keepalive?(line), do: :ping, else: :error
       end
     end
 
@@ -63,10 +68,10 @@ defmodule SIP.Transport do
             on_data_received(buf, "", cb_fun)
 
           :ping ->
-            # This is a SIP TCP ping
+            # A keep-alive CRLF: consume just it and keep reading what follows.
             cb_fun.(:ping, "")
             buf = %Depack{ buf | buffer: rest }
-            IO.puts("ping")
+            Logger.debug([module: __MODULE__, message: "keep-alive CRLF received, dropping"])
             on_data_received(buf, "", cb_fun)
 
           :error ->
@@ -289,6 +294,37 @@ defmodule SIP.Transport do
     transaction
     """
     def process_incoming_message(state, message, tp_name, tp_mod, socket, destip, destport) do
+      # A keep-alive is not a message and not an error: dropping it here, before the
+      # parser, is what keeps three error lines per ping out of the server log.
+      if SIPMsg.keepalive?(message) do
+        Logger.debug([module: __MODULE__, message: "#{tp_name}: keep-alive from " <>
+          "#{peer_str(destip, destport)} (#{byte_size(message)} bytes), dropping"])
+        { :noreply, state }
+      else
+        # Another protocol on our port is not a broken SIP message either: an RFC 5626
+        # §4.4.2 STUN keep-alive, an ICE probe, a scanner. We send no Binding Response,
+        # so the sender will eventually give up on this flow — hence a log line that
+        # names STUN, which is a lead, instead of blaming the SIP parser.
+        case SIP.Stun.decode(message) do
+          {:ok, stun} ->
+            Logger.debug([module: __MODULE__, message: "#{tp_name}: STUN #{SIP.Stun.describe(stun)}" <>
+              " from #{peer_str(destip, destport)}, dropping (not a STUN server)"])
+            { :noreply, state }
+
+          :error ->
+            process_sip_message(state, message, tp_name, tp_mod, socket, destip, destport)
+        end
+      end
+    end
+
+    # `destip` is an IP tuple on every transport but WSS, where the fallback value is
+    # the dialed hostname — and `ip2string/1` only takes tuples, so formatting it
+    # eagerly would raise on the very path that has no peer address to show.
+    defp peer_str(ip, port) when is_tuple(ip), do: "#{SIP.NetUtils.ip2string(ip)}:#{port}"
+    defp peer_str(ip, port) when is_binary(ip), do: "#{ip}:#{port}"
+    defp peer_str(ip, port), do: "#{inspect(ip)}:#{port}"
+
+    defp process_sip_message(state, message, tp_name, tp_mod, socket, destip, destport) do
       # One peer's odd datagram must not take down the transport that serves everyone
       # else on this socket. It did: a Linphone ACK with no Content-Length raised inside
       # the parser, this process died, the ACK never reached its transaction — so the
@@ -424,6 +460,19 @@ defmodule SIP.Transport do
          scheme: "sip:",
          proto: String.upcase(transport_str)
         }
+        # The transport, ALWAYS, and in lower case. A Contact is the address a
+        # peer sends its in-dialog requests to, and address means the three of
+        # address, port and transport: leaving the last one out says "sip:", which
+        # every UA reads as UDP (RFC 3263 §4.1) — so a dialog established over TCP
+        # got its BYE aimed at a UDP port nobody listens on.
+        #
+        # Lower case is not cosmetic either. The value is case-insensitive on
+        # paper (RFC 3261 §19.1.4) and case-sensitive in the field: we emitted
+        # `transport=TCP`, and the capture of 2026-08-14 shows the caller ACKing
+        # over UDP a dialog whose every other message was TCP — it had not
+        # recognised the value and fallen back to the default. Everyone else
+        # writes it lower case; so do we now.
+        |> SIP.Uri.set_uri_param("transport", String.downcase(transport_str))
 
       # The transport died before it could say where it is bound. There is no
       # honest Contact to build, and raising here would take the transaction —
@@ -448,8 +497,17 @@ defmodule SIP.Transport do
     new_contact = if not is_nil(old_contact) do
       # Transfert contact parameters if specified by the caller
       # Override transport params
-      old_params = Map.put(old_contact.params, "transport", new_contact.proto)
-      %SIP.Uri{ new_contact | params: old_params, userpart: old_contact.userpart, displayname: old_contact.displayname }
+      #
+      # BOTH parameter sets: the caller's binding parameters are header parameters
+      # (`expires`, `q`, a `+sip.instance`) and live in `hparams`. Carrying only
+      # `params` would drop the `expires` that SIP.Session.Registrar puts on the
+      # Contact of a REGISTER — the registration then asks for nothing.
+      %SIP.Uri{ new_contact | params: old_contact.params, hparams: old_contact.hparams,
+                userpart: old_contact.userpart, displayname: old_contact.displayname }
+      # …and the transport of the transport actually used, over whatever the
+      # caller had put there. Same value and same case as build_contact_uri/2
+      # above: one rule for the Contact we stamp, not two.
+      |> SIP.Uri.set_uri_param("transport", String.downcase(new_contact.proto))
     else
       new_contact
     end

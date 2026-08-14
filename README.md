@@ -18,18 +18,28 @@ The framework will also provide a control interface to the
 in order to handle the media part of telecommunication over IP. A clean abstraction (Behaviour) is defined
 and other media servers could easily be interfaced as well if needed.
 
+## Background reading
+
+The reasoning behind the project is developed in three articles:
+
+- [Programmable telecoms, the way it should be](https://www.linkedin.com/pulse/programmable-telecoms-way-should-emmanuel-buu--emxoe/)
+  — why this project exists, and the history of the ideas it builds on.
+- [What a native language for telco services looks like](https://www.linkedin.com/pulse/what-native-language-telco-services-looks-like-emmanuel-buu--wujre/)
+  — why a DSL, and what it buys over a general-purpose API.
+- [Taming large state machines: Service Building Blocks](https://www.linkedin.com/pulse/taming-large-state-machines-service-building-blocks-elixip-buu--pctie/)
+  — the Service Building Blocks (SBB) model, still to come.
+
 ## The roadmap
 
 The project will provide in the long term:
 
 - a testing tool called **elixipp**, similar to sipp, capable of running elixip scenarios to test other SIP servers.
 - a mini scriptable Session Border Controller, called **borderline**, using the DSL to fine-tune message handling.
-- a scriptable and extensible SIP proxy inspired by kamailio. Let's call it **kelixip** for now. If someone has a better or funnier name, let me know.
+- a scriptable and extensible SIP application inspired by kamailio. Called **kelixip**.
 
 In terms of capabilities, the emphasis will be on:
-- support for Total Conversation calls with any combination of audio/video/realtime text media
+- support for Total Conversation calls with any combination of audio/video/realtime text media including using the WebRTC bitstream — [how each medium's codec is chosen](CODEC-NEGOTIATION.md)
 - support for SIP over UDP, TCP, TLS and WSS
-- support of WebRTC bitstream and regular RTP bitstream using the Medooze Media Server
 - support for clustering and load sharing
 
 ## What is available, what is not.
@@ -38,8 +48,11 @@ In terms of capabilities, the emphasis will be on:
 - Fully native Elixir SIP stack: implemented
 - Support for SIP over UDP, TCP, TLS and WSS: implemented
 - Media Control interface: implemented
-- Domain Specific Language definition: see [DSL.md](DSL.md)
+- [Domain Specific Language definition](DSL.md): first version released
 - SIP.Scenario Scripting Engine: done
+- [Back to back user agent](B2BUA.md): first release
+- [Codec negotiation across two legs](CODEC-NEGOTIATION.md), with a transcoding
+  policy per media: implemented
 
 ### Testing tool: elixipp
 - Interactive command elixpp for testing tools: done
@@ -49,28 +62,41 @@ In terms of capabilities, the emphasis will be on:
 
 ### Scriptable SIP server kelixip
 
-**kelixip**: *basic* scope delivers:
-- plus loadable `.beam` modules,
-- declarative TOML config with hot-reloadable
-- a CLI + REST control API, and Prometheus metrics.
+- Loadable `.beam` [modules](docs/kelixip/modules/README.md): done,
+- declarative TOML config with hot-reloadable: done
+- a CLI + REST control API, and Prometheus metrics: done.
 - domains/dial-plan
 - digest auth (stateless nonce, HA1 via a `subscriber_db`  module)
 - a multi-domain **registrar** via the registrar mocule and the `registar.exs` script
 - NAT/flow for WebRTC —  a media-server pool, 
-- a **conferencing (MCU)** function via the `mcu` module and the `mcu.exs` script:
-  audio + video mixing on a Medooze media server, conferences managed over REST /
-  `kelictl` / from a script, plain-RTP, SDES and DTLS-SRTP + ICE-lite legs —
-  see [docs/kelixip/modules/mcu_module_guide.md](docs/kelixip/modules/mcu_module_guide.md)
-
+- a Total Conversation cabable **conferencing (MCU)**: done
+- MCU: hardware acceleration watchdog and delegated codec negotiation: do,e
+- kelixip B2BUA and call processing: in progress
 
 ## Roadmap
-- kelixip MCU: hardware acceleration, RTP watchdog and delegated codec negotiation
-  (P7/P8 of [the MCU design](docs/design/mcu_module.md))
-- kelixip B2BUA and call processing
+- DSL: [Service Building Blocks](https://www.linkedin.com/pulse/taming-large-state-machines-service-building-blocks-elixip-buu--pctie/)
+  concept inspired by Jain SLEE 1.1
 - kelixip and elixip `presence` support including some level of LoST support
-- kelixip distributed cluster tech: later
-- **borderline** SBC: later
+- kelixip distributed cluster tech
+- DSL: formal proof of scenario correctness
+- Total Conversation call recorder
+- Automated call captionning
+- Push notification support
 
+- **borderline** SBC: 
+  - very good integration with fail2ban
+  - liveview based management interface
+  - signed and armored configuration files
+  - signed beams modules and scenarios
+  - anti DDOS + hardened SIP and RTP application firewall.
+
+- kelixip 2.0:
+  - domain based partitions of transaction and dialog layers
+  - use of RabbitMQ as link the the mediaser
+  - Wesh Wesh Mesh network with auto discovery feature
+  - full IP V6 support
+  - XMPP support as first class citizen
+  - Matrix protocol support as first class cizizen
 
 ## The Domain Specific Language for SIP scenarios
 
@@ -96,12 +122,12 @@ the sequence diagram.
 
 # kelixip: the application server
 
-`kelixip` is the productized SIP server built on the same stack: TOML-declared
-domains, script-per-function dispatch, loadable modules (registrar, database
-auth, conferencing), a control CLI/REST API and Prometheus metrics.
-
-**👉 The operator manual lives in [docs/kelixip/README.md](docs/kelixip/README.md).**
-**👉 The conferencing module has its own guide: [docs/kelixip/modules/mcu_module_guide.md](docs/kelixip/modules/mcu_module_guide.md).**
+`kelixip` is the [productized SIP server](docs/kelixip/README.md)  built on the same stack
+- 👉 TOML-declared domains, 
+- 👉 script-per-function dispatch,
+- 👉 [loadable modules](docs/kelixip/modules/README.md) , 
+- 👉 a control CLI / [REST API](docs/kelixip/rest-api.md), 
+- 👉 and Prometheus metrics.
 
 # License
 

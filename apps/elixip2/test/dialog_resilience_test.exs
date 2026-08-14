@@ -382,6 +382,87 @@ defmodule SIP.Test.DialogResilience do
     assert SIP.Transport.build_contact_uri(SIP.Transport.UDP, dead) == nil
   end
 
+  # ── Asked to end from the outside ───────────────────────────────────────────
+
+  # `SIP.Dialog.terminate/2` — the same two assertions as every failure above, for
+  # a dialog nothing under it is going to end. The registrar needs it for a
+  # REGISTER dialog it has superseded (the same binding re-registered under
+  # another Call-ID): stale, with no BYE, no expiry and no dropped connection to
+  # notice it. The reason must reach the application verbatim, since that is how
+  # a scenario tells this apart from a client that went away.
+  test "a dialog told to terminate says why and dies" do
+    _silent = peer!("rs7")
+    {dlg, _tid} = start_call("rs7")
+    assert_receive {:invite_sent, _req}, 2_000
+
+    :ok = SIP.Dialog.terminate(dlg, :superseded)
+
+    assert_receive {:outbound, {:dialog_terminated, ^dlg, :superseded}}, 2_000
+    assert_dies(dlg)
+  end
+
+  # The registrar casts it from inside its own GenServer, on a pid it monitors: a
+  # dialog that died between the two must not take the store down with it.
+  test "terminating a dialog that is already gone is a no-op" do
+    _silent = peer!("rs8")
+    {dlg, _tid} = start_call("rs8")
+    assert_receive {:invite_sent, _req}, 2_000
+
+    Process.exit(dlg, :kill)
+    assert_dies(dlg)
+
+    assert :ok = SIP.Dialog.terminate(dlg, :superseded)
+  end
+
+  # ── A 2xx that arrives after its application is gone ────────────────────────
+
+  # The ACK of a 2xx belongs to the UAC core — the application — in a transaction
+  # of its own (RFC 3261 §13.2.2.4), which is why the dialog keeps the client
+  # transaction alive after a 2xx instead of closing it. With no application left
+  # the ACK never comes, and the callee is stranded: it retransmits its 200 until
+  # it gives up, off-hook in a call nobody is in.
+  #
+  # The way to get here in production (2026-08-11): the caller cancels, the answer
+  # crosses the CANCEL on the wire — §16.7, cancelling asks, it does not decide —
+  # and the B2BUA scenario has already ended on `scenario_aborted("caller
+  # cancelled")` by the time the 200 lands. The dialog outlives its scenario, so
+  # it is still there to do the only lawful thing: ACK, then BYE (§15).
+  test "a 2xx no application is left to ACK is acknowledged and hung up" do
+    tp = peer!("orphan2xx")
+    parent = self()
+
+    # An application that places the call and then ends normally, exactly as a
+    # scenario instance does on the caller's CANCEL.
+    app =
+      spawn(fn ->
+        {:ok, dlg, _id} =
+          SIP.Dialog.start_dialog(invite_to("orphan2xx"), 60, :outbound, false, [])
+
+        send(parent, {:dialog, dlg})
+
+        receive do
+          :end_scenario -> :ok
+        end
+      end)
+
+    assert_receive {:dialog, dlg}, 2_000
+    assert_receive {:invite_sent, _req}, 2_000
+
+    ref = Process.monitor(app)
+    send(app, :end_scenario)
+    assert_receive {:DOWN, ^ref, :process, ^app, :normal}, 2_000
+
+    # The callee picks up anyway.
+    GenServer.cast(tp, {:simulate, 200, 0})
+
+    assert_receive :ACK, 2_000
+    assert_receive :BYE, 2_000
+
+    # The dialog is not linked to its application (GenServer.start, not
+    # start_link), which is what let it still be here to clean up.
+    assert Process.alive?(dlg)
+  end
+
   # The catch-all handle_info/2. `use GenServer` provides one, but a module that
   # defines its own clauses replaces it wholesale — so an unrecognized message
   # raised a FunctionClause and took the dialog with it. SIP.Dialog.broadcast/1

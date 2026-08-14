@@ -22,7 +22,20 @@ defmodule MediaServer.Mendooze.XmlRpc do
   require Logger
 
   @jsr309_path "/jsr309"
-  @default_timeout_ms 10_000
+
+  # A JSR-309 control call is a local, in-memory operation on a server that is
+  # normally on the same host: traffic of 2026-08-14 shows every one of them
+  # answered in 2 to 10 ms, the slowest (StartSending, the transcoder creations)
+  # around 15. A budget of two seconds is therefore two ORDERS of magnitude of
+  # slack, and a server that misses it is not slow, it is in trouble.
+  #
+  # It used to be ten seconds, and the day the media server pinned its CPUs that
+  # patience became the problem: each call sat there, the scenario process blocked
+  # inside it instead of servicing its mailbox, and the BYE that would have ended
+  # the call was neither answered nor relayed — the caller retransmitted it four
+  # times into a server that was busy waiting. Failing fast hands the scenario back
+  # its own failure path, which knows how to end a call; waiting hands it nothing.
+  @default_timeout_ms 2_000
 
   @type base_url :: String.t()
   @type result :: {:ok, [term()]} | {:error, term()}

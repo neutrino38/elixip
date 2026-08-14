@@ -100,4 +100,46 @@ defmodule SIP.Test.MsgOpsIdentity do
       assert Ops.auth_username(invite(%{from: uri("sip:bob@x.com")})) == nil
     end
   end
+
+  describe "from_username/1 and to_username/1 — the raw claims" do
+    test "From is what the caller claims, digest or not" do
+      req =
+        invite(%{
+          authorization: %{"username" => "alice"},
+          from: uri("sip:bob@example.com")
+        })
+
+      # the whole point: unlike asserted_username/1, this does NOT prefer the
+      # digest — an authenticator compares the two, and a reading that returned
+      # the digest username here would compare it with itself and always agree
+      assert Ops.from_username(req) == "bob"
+      assert Ops.asserted_username(req) == "alice"
+    end
+
+    test "To is read through a RAW header string, the shape a parsed message has" do
+      assert Ops.to_username(%{method: :REGISTER, to: "<sip:Alice@example.com>;tag=x"}) ==
+               "Alice"
+
+      assert Ops.to_username(%{method: :REGISTER, to: uri("sip:alice@example.com")}) == "alice"
+      assert Ops.to_username(%{method: :REGISTER}) == nil
+    end
+  end
+
+  describe "in_dialog?/1" do
+    test "a To tag means the request belongs to an established dialog" do
+      assert Ops.in_dialog?(invite(%{to: "<sip:bob@example.com>;tag=abc123"}))
+      refute Ops.in_dialog?(invite(%{to: "<sip:bob@example.com>"}))
+    end
+
+    test "it works on a %SIP.Uri{} To as well" do
+      tagged = %SIP.Uri{userpart: "bob", domain: "example.com", params: %{"tag" => "abc"}}
+      assert Ops.in_dialog?(invite(%{to: tagged}))
+      refute Ops.in_dialog?(invite(%{to: %SIP.Uri{tagged | params: %{}}}))
+    end
+
+    test "no To at all is not in-dialog, and does not raise" do
+      refute Ops.in_dialog?(invite(%{}))
+      refute Ops.in_dialog?(invite(%{to: "junk"}))
+    end
+  end
 end

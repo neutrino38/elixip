@@ -59,14 +59,23 @@ defmodule B2BUA.WebrtcGw do
 
         b2bua_forward(req, peer, @media)
 
-        if ctx_get(:lasterr) == :ok do
-          goto(proceeding, "INVITE relayed")
-        else
-          # The offer could not be terminated (no common codec, a WebRTC offer
-          # we were told not to take). That is a statement about what the caller
-          # asked for, so it is a 488 — not a 500, which would blame us.
-          b2bua_reply(req, 488, "Not Acceptable Here")
-          scenario_failure("media setup failed: #{inspect(ctx_get(:lasterr))}")
+        cond do
+          ctx_get(:lasterr) == :ok ->
+            goto(proceeding, "INVITE relayed")
+
+          # No media plane: media_connect() found no server, or the one it found
+          # is gone. Ours, not the browser's — a 503, which also leaves the proxy
+          # in front free to try another gateway.
+          b2bua_media_unavailable?() ->
+            b2bua_reply(req, 503, "Service Unavailable")
+            scenario_failure("no media server: #{inspect(ctx_get(:lasterr))}")
+
+          true ->
+            # The offer could not be terminated (no common codec, a WebRTC offer
+            # we were told not to take). That is a statement about what the caller
+            # asked for, so it is a 488 — not a 500, which would blame us.
+            b2bua_reply(req, 488, "Not Acceptable Here")
+            scenario_failure("media setup failed: #{inspect(ctx_get(:lasterr))}")
         end
     after
       60_000 -> scenario_failure("no INVITE received")
@@ -109,10 +118,12 @@ defmodule B2BUA.WebrtcGw do
           end
         end
 
+      # A CANCEL asks, it does not decide (RFC 3261 §16.7): wait for the phone's
+      # final before releasing anything.
       {:CANCEL, req, _trans, _dlg} ->
         b2bua_cancel_forward()
         b2bua_forward(req)
-        scenario_aborted("caller cancelled")
+        goto(cancelling, "caller cancelled")
 
       # The media plane went away while we were still ringing. There is no call
       # to hang up yet — the browser gets a 500 and the teardown CANCELs the
@@ -124,6 +135,44 @@ defmodule B2BUA.WebrtcGw do
       180_000 ->
         b2bua_reply(last_uas_req(), 408, "Request Timeout")
         goto(releasing, "callee never answered")
+    end
+  end
+
+  # The CANCEL has gone to the phone; its transaction is not over until a final
+  # response says so (RFC 3261 §16.7). Ending here instead would leave a handset
+  # that answers a fraction of a second later off-hook in a call nobody is in.
+  #
+  # `SIP.DialogImpl` catches that on its own — it is not a policy, so no script
+  # may get it wrong — and this state does not make it correct, it makes it
+  # VISIBLE. Every branch leaves through `releasing`, which frees the peer
+  # connection the browser leg allocated.
+  state cancelling do
+    on_events do
+      {:outbound, {487, _resp, _trans, _dlg}} ->
+        goto(releasing, "caller cancelled, phone confirmed")
+
+      # The race. Acknowledge the answer nobody is left to take, then end it
+      # (§13.2.2.4 then §15) — and release the media on the way out.
+      {:outbound, {200, _resp, _trans, _dlg}} ->
+        b2bua_send_BYE()
+        goto(releasing, "phone answered after the cancellation; hung up")
+
+      {:outbound, {code, _resp, _trans, _dlg}} when code in 100..199 ->
+        goto(loop, "provisional #{code} after cancel")
+
+      {:outbound, {code, _resp, _trans, _dlg}} when code >= 300 ->
+        goto(releasing, "caller cancelled, phone answered #{code}")
+
+      {:outbound, {:dialog_terminated, _dlg, _reason}} ->
+        goto(releasing, "caller cancelled, outbound leg gone")
+
+      {:ms_event, _ref, :server_disconnected} ->
+        goto(releasing, "media server gone while cancelling")
+
+      {:dialog_terminated, _dlg, _reason} ->
+        goto(releasing, "caller cancelled")
+    after
+      32_000 -> goto(releasing, "caller cancelled, phone never concluded")
     end
   end
 

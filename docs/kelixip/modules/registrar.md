@@ -22,7 +22,7 @@ min_expires = 60
 ```
 
 ```elixir
-import Kelix.Mod.Registrar, only: [save: 4, lookup: 1]
+import Kelix.Mod.Registrar, only: [save: 2, lookup: 1]
 ```
 
 Per-domain activation and expiry bounds are a **separate** block, on each domain:
@@ -63,24 +63,41 @@ Per-domain block — `[domain.registrar]` (activates the function for a domain):
 
 ## Facades
 
-### `save/4`
+### `save/2`, `save/4`
 
 ```elixir
-save(req, domain, dialog_pid \\ nil, info \\ nil) ::
-  {:ok, granted} | {:error, {code, reason}} | {:error, :down | :timeout}
+save(sip_ctx, req)                                   # scenario form
+save(req, domain, dialog_pid \\ nil, info \\ nil)    # programmatic form
+  :: {:registered, granted}
+   | {:unregistered, granted}
+   | {:error, {code, reason}}
+   | {:error, :down | :timeout}
 ```
 
-Register or unregister the contacts of a `REGISTER` under `domain`. `dialog_pid`
-is the backing dialog (stored per contact, used for teardown); `info` is
-arbitrary scenario data. `granted` is `%{aor, contacts, expires}` — the contacts
-and expiry **actually** granted (an all-`Expires: 0` request unregisters and
-grants `0`). It does not build the `200 OK`; the script does.
+Register or unregister the contacts of a `REGISTER`. In the scenario form the
+served domain and the backing dialog are read off the scenario context
+(`sip_ctx.domain`, `sip_ctx.dialogpid`), so a script carries neither. In the
+programmatic form `dialog_pid` is the backing dialog (stored per contact, used for
+teardown) and `info` is arbitrary scenario data.
+
+The verdict says what happened to the AOR:
+
+| Verdict | Meaning |
+|---|---|
+| `{:registered, granted}` | the AOR has live bindings |
+| `{:unregistered, granted}` | its last binding is gone (`Expires: 0`, or the `Contact: *` wildcard); `granted.contacts` is empty and `granted.expires` is `0` |
+| `{:error, {code, reason}}` | `400` (no Contact / bad wildcard), `423` (too brief), `403` (too many contacts) |
+| `{:error, :down \| :timeout}` | the store could not answer |
+
+`granted` is `%{aor, contacts, expires}`: **all** the AOR's current bindings, each
+stamped with its own remaining lifetime (RFC 3261 §10.3 step 8). It does not build
+the `200 OK`; the script does, with
+`SIP.Session.Registrar.accept_registration(sip_ctx, req, granted)`.
 
 - The AOR is the `To` user-part (RFC 3261), case-insensitive.
 - The stored `received` is the **real** transport source of the REGISTER (proto,
   IP, port) — not the announced, possibly-NATed `Contact`.
-- Errors map to SIP codes: `400` (no Contact), `423` (too brief), `403` (too
-  many contacts).
+- The call is reported to the monitor as a `:db` command.
 
 ### `lookup/1`
 
@@ -160,9 +177,136 @@ drops (WebRTC-critical): the binding is invalidated even before its `Expires`.
 
 ## Control commands
 
-None yet. Registrations are inspected with the core commands
-`kelictl registration list [domain]` / `registration show <domain> <aor>`
-(see [administration.md](../administration.md)).
+The module itself contributes **no** `describe_control/0` command. Its store is
+inspected and edited through the **core** `registration` commands, documented here
+rather than in [administration.md](../administration.md) because what they mean is
+this module's contract: they read the very bindings `save/2` wrote, with the
+per-domain separation and the expiry rules stated above.
+
+Both frontals are listed together — one operation, two frontals, and the online
+help (`kelictl registration help`) prints the same routes next to the same
+commands.
+
+| `kelictl` | REST | R/W |
+|---|---|---|
+| `registration list` | `GET /registrations` | R |
+| `registration list <domain>` | `GET /domains/<domain>/registrations` | R |
+| `registration show <domain> <aor>` | `GET /domains/<domain>/registrations/<aor>` | R |
+| `registration remove <domain> <aor> [contact]` | `DELETE /domains/<domain>/registrations/<aor>[?contact=…]` | W |
+
+### Addressing a registration
+
+An AOR is only unique **within a domain**, so the domain is part of the address
+rather than a filter on it: `show` and `remove` take `<domain> <aor>`, `list` groups
+its answer per domain, and over REST a registration is a **sub-resource of the
+domain** (`/domains/<domain>/registrations/<aor>`), never a query parameter.
+
+With no argument, `list` prints one section per **served** domain — including the
+ones nobody is registered in, because "served, empty" and "not served at all" are
+what an operator is usually trying to tell apart. `<domain>` is resolved the way
+inbound traffic is (name **or** alias, case-insensitively), so the host seen on the
+wire is a valid argument; an unserved one is `no such domain` / `404` on the
+collection itself, which is *not* the same answer as a served domain with an empty
+`registrations` list. `GET /registrations` is the cross-domain view: one object per
+served domain, in `domains.toml` order.
+
+`<aor>` is the user-part (`alice`), or the full `alice@example.com` copied out of a
+log — in which case its domain part must be that same domain, rather than being
+silently ignored. `remove` takes an optional `contact` to drop just that binding
+instead of the whole AOR; there is deliberately no form that removes an AOR from
+every domain at once.
+
+### What a binding shows
+
+`show` prints what the registrar stored, not just the URI: `expires` both ways (the
+remaining time is the operator's question, the instant is what a log line carries),
+`source` — where the REGISTER actually came from, which behind a NAT is **not** what
+the contact URI says, and the usual reason a call to a registered phone never
+arrives — the transport it is reachable over, and the identity the handset sent
+(`instance`, `reg-id`, `methods`, RFC 5626/3840). A field the handset did not send
+gets no line at all in the CLI, and `null` in JSON.
+
+```console
+$ kelictl registration list
+example.com
+  aor    contacts  expires  bindings
+  alice  2         4m58s    sip:alice@10.0.0.9:5060, sip:alice@10.0.0.9:5062
+  bob    1         9m12s    sip:bob@10.0.0.22:5060
+
+lab.example.net
+  (no registration)
+
+$ kelictl registration list lab.example.net
+lab.example.net
+  (no registration)
+
+$ kelictl registration show example.com alice
+aor:          alice@example.com
+contacts:     2
+  1. sip:alice@10.0.0.9:5060
+     expires:   in 4m58s (2026-08-02T12:34:56Z)
+     source:    udp 203.0.113.7:45112
+     transport: udp
+     instance:  <urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6>
+     reg-id:    1
+  2. sip:alice@10.0.0.9:5062
+     expires:   in 9m40s (2026-08-02T12:39:38Z)
+     source:    tls 203.0.113.7:51044
+     transport: tls
+
+$ kelictl registration remove example.com alice
+ok
+
+$ kelictl registration show ghost.example.org alice
+no such domain
+```
+
+### The same over REST
+
+`GET /domains/<domain>/registrations` returns the domain's whole store;
+`GET /domains/<domain>/registrations/<aor>` returns one of its inner objects (or
+`404`), so the list and the detail view cannot disagree.
+
+```json
+{
+  "domain": "example.com",
+  "registrations": [
+    {
+      "domain": "example.com",
+      "aor": "alice",
+      "contacts": [
+        {
+          "uri": "sip:alice@10.0.0.9:5060",
+          "expires_at": "2026-08-02T12:34:56Z",
+          "expires_in": 298,
+          "source": "udp 203.0.113.7:45112",
+          "transport": "udp",
+          "instance": "<urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6>",
+          "reg_id": "1",
+          "methods": null
+        }
+      ]
+    }
+  ]
+}
+```
+
+```bash
+TOKEN=change-me
+BASE=http://127.0.0.1:8090
+H="Authorization: Bearer $TOKEN"
+
+curl -s -H "$H" $BASE/registrations
+curl -s -H "$H" $BASE/domains/example.com/registrations
+curl -s -H "$H" $BASE/domains/example.com/registrations/alice
+
+# drop one binding rather than the whole AOR
+curl -s -X DELETE -H "$H" \
+     "$BASE/domains/example.com/registrations/alice?contact=sip:alice@10.0.0.9:5060"
+```
+
+Authentication, the `[control_api]` block and the shared result mapping are the
+frontal's own concern, not this module's — see [rest-api.md](../rest-api.md).
 
 ## Examples
 
@@ -180,12 +324,31 @@ name = "example.com"
 ```
 
 ```elixir
-# in the registrar scenario
-import Kelix.Mod.Registrar, only: [save: 4]
+# in the registrar scenario — see apps/kelixip/scripts/registrar.exs
+state save_registration do
+  req = last_uas_req()
 
-case save(register_req, "example.com", dialog_pid, nil) do
-  {:ok, granted} -> reply_registrar_ok(granted)         # script builds 200 OK
-  {:error, {code, reason}} -> reply(code, reason)
-  {:error, :down} -> reply(500, "Server Internal Error")
+  case Kelix.Mod.Registrar.save(sip_ctx, req) do
+    {:registered, granted} ->
+      SIP.Session.Registrar.accept_registration(sip_ctx, req, granted)
+      goto wait_refresh, "200 OK"
+
+    {:unregistered, granted} ->
+      SIP.Session.Registrar.accept_registration(sip_ctx, req, granted)
+      scenario_success("unregistered")
+
+    {:error, {423, reason}} ->
+      min = Kelix.Mod.Registrar.min_expires(sip_ctx.domain)
+      SIP.Session.Registrar.reject_registration(sip_ctx, req, 423, min)
+      goto wait_register, "423 #{reason}"
+
+    {:error, reason} when reason in [:down, :timeout] ->
+      SIP.Session.Registrar.reject_registration(sip_ctx, req, 503, "Service Unavailable")
+      scenario_failure("503 store down")
+
+    {:error, {code, reason}} ->
+      SIP.Session.Registrar.reject_registration(sip_ctx, req, code, reason)
+      scenario_failure("save() failed: #{code} #{reason}")
+  end
 end
 ```

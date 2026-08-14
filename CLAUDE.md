@@ -110,8 +110,19 @@ apps/elixip2/lib/
 │   ├── SIPScenarioMonitor.ex # in-memory store feeding the --monitor view
 │   │                         #   (SIP.Scenario.Monitor; a no-op when not started)
 │   └── ElixippScenarioUAS.ex # Elixip.ScenarioUAS — UAS instance factory (quota)
+├── built-in-scenarios/       # the scenarios COMPILED INTO the escript, run by
+│   │                         #   module name: `elixipp UAC.Register` needs no file
+│   ├── uac_invite.ex         # UAC.Invite
+│   └── uac_register.ex       # UAC.Register
 └── mix/tasks/scenario.ex     # `mix scenario` task
 ```
+
+`built-in-scenarios/` is **not** a duplicate of the top-level
+`apps/elixip2/scenarios/`: the latter holds editable `.exs` copies loaded by
+*path*, deliberately under different module names (`UAC.InviteExample`,
+`UAC.RegisterExample`) so both can coexist. Deleting the directory as redundant
+takes `elixipp UAC.Invite`, `mix scenario UAC.Register` and everything ELIXIPP.md
+promises about "no file needed" with it.
 
 The `dsl` layer builds on `framework` (a scenario `use SIP.Scenario` pulls in
 `SIP.Session.CallUAC`, `SIP.Session.Media` and `SIP.Context`). The `elixipp`
@@ -154,6 +165,54 @@ today it is a P0 skeleton (`Kelix.Application` + supervision tree).
 > crashed on a valueless `;expires`. Each was found in production traffic, one at
 > a time, and fixing one never fixed the others. It now lives in
 > `SIP.Msg.Ops.requested_expires/2` & friends, with everything else delegating.
+
+> **URI parameters and header parameters are two different sets.** `%SIP.Uri{}`
+> keeps them apart — `params` for what is inside the angle brackets (RFC 3261
+> §25.1 `uri-parameters`: `transport`, `user`, `maddr`, `ttl`, `lr`…), `hparams`
+> for what follows the closing bracket (`contact-params`, `to-param`: `expires`,
+> `q`, `tag`, the RFC 3840 feature tags, `+sip.instance`). Read with
+> `get_uri_param/2` or `get_header_param/2` (each tolerant, precedence matching
+> the parameter's nature), write with `set_uri_param/3` or `set_header_param/3`
+> (each clears the name on the other side), remove with `delete_param/2`, and
+> never hand-build a `params:` map holding a header parameter.
+>
+> A Request-URI is not a header value: it is `SIP-URI / SIPS-URI / absoluteURI`,
+> so it goes out through `SIP.Uri.serialize_ruri/1` (equivalently
+> `to_request_uri/1`), which drops the display name, the header parameters and
+> `method` while keeping every URI parameter — §19.1.5 makes carrying the unknown
+> ones mandatory, so it is never an allowlist. `SIPMsg` calls it for the
+> Request-Line, and the digest computation uses the same string.
+>
+> The two sets used to share one map. Forwarding a registered Contact then
+> emitted `INVITE "Bob" <sip:bob@host>;+sip.instance="<urn:uuid:…>" SIP/2.0` —
+> a Request-Line with two tokens where one URI belongs — which the callee dropped
+> without a single response, so every call to a Linphone handset hung in
+> `proceeding` until the scenario timed out. The denylist of "parameters that are
+> really header parameters" that preceded this could not be completed: it listed
+> `q` and `expires`, and traffic brought `+sip.instance`, `+org.linphone.specs`,
+> `reg-id`, `methods`, `pub-gruu`.
+
+> **A B2BUA rewrites the Contact on both legs, unconditionally, and the rewrite
+> carries the transport that will actually carry the message.** A B2BUA is not a
+> proxy: it is a UA on each of its two legs, it adds no Via and records no route,
+> so the only thing telling a peer where to send its in-dialog requests is the
+> Contact we stamp. Front leg (towards the callee): the address, port and
+> transport of the transport we are using to reach it. Back leg (towards the
+> caller): those of the listener the caller reached us on. Never the peer's own
+> Contact forwarded through, and never a Contact left as the scenario wrote it.
+>
+> The transport is part of the address, not a decoration. `sip:host:5070` reads as
+> UDP to every UA (RFC 3263 §4.1), so a dialog established over TCP whose Contact
+> omits it gets its BYE aimed at a UDP port — the call then never hangs up, on a
+> leg that is otherwise working. And it goes out **lower case**: the value is
+> case-insensitive on paper (§19.1.4) and case-sensitive in the field. We emitted
+> `transport=TCP`; the capture of 2026-08-14 shows the caller ACKing over UDP a
+> dialog whose every other message was TCP, having failed to recognise it.
+>
+> `SIP.Transport.build_contact_uri/2` and `add_contact_header/3` are the one place
+> this is applied — every response and every forwarded request goes through them.
+> It holds for whatever a B2BUA relays next, INSTANT MESSAGING included: a MESSAGE
+> dialog answers the same question, "where does the far end send the next one".
 
 ### Transaction Layer (`SIP.Transac.*`, `SIP.ICT`, `SIP.IST`, `SIP.NICT`, `SIP.NIST`)
 - Implements RFC 3261 transaction state machines
@@ -199,6 +258,32 @@ implementations are interchangeable (selected via config — see Configuration):
   its JSR309 **XML-RPC** control interface (`apps/elixip2/lib/framework/mendooze/`; design
   in `docs/design/mendooze_interface.md`). Events arrive over a chunked HTTP long-poll.
 - `MediaServer.Mockup` — in-process stub for call-flow tests.
+
+> **What the media server knows about itself, the media server is asked.** It is
+> the source of truth for its own capabilities and its own verdicts — which codecs
+> it carries, with which `fmtp`, at which level, on which address and port. Elixip
+> drives it; it does not model it. A list in elixip describing what the server can
+> do is a copy, and a copy drifts.
+>
+> The rule already exists in one narrow form — the delegated negotiation of
+> `mcu_module.md` §16.3, "the offer is the menu and the media server arbitrates",
+> which deleted the module's codec configuration rather than demoting it. Read it
+> as the general case, not as a feature of the answer path.
+>
+> The cost of the copy is measured. `@default_video_codecs` was `["H264", "VP8"]`
+> while the server had carried AV1 for months: a caller and a callee that both did
+> AV1 were offered H.264/VP8, the callee declined the video, and the call died on a
+> 488 with perfectly good audio on both sides. One layer down, `GetSupportedCodecs`
+> — the very call that should have answered the question — is a hardcoded array of
+> eight audio codecs that does not list OPUS, the one every real call uses, and
+> answers *media not supported* for video. Three copies of one list, none of them
+> true, and the only honest one is the `switch` in the codec factory.
+>
+> So: no codec table, no capability list, no port range, no `fmtp` guess written on
+> this side of the wire when the server can be asked. When it *cannot* yet be asked
+> — the query is missing, as for capabilities today — that is a hole in the server's
+> API to be closed (`mediaserver/codec_capabilities_plan.md`), not a licence to
+> declare it here.
 
 **Conceptual mapping — medooze → Elixir:**
 ```
@@ -255,7 +340,7 @@ stop_player / stop_recorder / stop_echo
 
 Runtime config lives in `config/config.exs`:
 - Logger writes warnings to console and info+ to `elixip.log`
-- `:useragent` — the User-Agent header value (`"Elixipp-1.3"`)
+- `:useragent` — the User-Agent header value (`"Elixipp-1.4"`)
 - `:optionkeepaliveperiod` — OPTIONS keep-alive interval in seconds (15)
 
 ### Media server selection
@@ -280,12 +365,36 @@ as well as `{host, port}`, and has its own tuning block:
 
 ```elixir
 config :elixip2, MediaServer.Mendooze,
-  xmlrpc_timeout_ms: 10_000,   # per-call XML-RPC timeout
+  xmlrpc_timeout_ms: 2_000,    # per-call XML-RPC timeout (a local control RPC
+                               #   answers in ms; longer only blocks the scenario)
   rtp_timeout_ms: 10_000,      # EndpointStartRTPTimeout inactivity watchdog
   poller_retry_ms: 1_000,      # event stream reconnect delay
   poller_max_failures: 5,      # consecutive failures before :server_disconnected
   video_bandwidth_kbps: 800    # b=AS: advertised on video (answers: min with the offer)
 ```
+
+## Writing a scenario (`.exs`)
+
+**A scenario states a call flow; it does not implement one.** Its states should
+read as a sequence of DSL verbs and `case` branches over what they return. Avoid
+`defp` helpers carrying real logic — reading a header, deciding a policy,
+composing a SIP response, plumbing a module result into another module's call.
+
+A scenario that needs one is a **symptom, not a style problem**: the macros and
+facades the framework and the kelixip modules export are not right yet. Fix them
+there instead — every scenario then gets the fix, and the reading of the SIP
+message stays in the one place that owns it (see *Message Layer* above). Two
+examples from the reference registrar script, both of which used to be private
+helpers in the `.exs`:
+
+- carrying the inbound request from state to state by hand
+  (`appdata_set(:register_req, req)`) — `on_events` stores it and
+  `last_uas_req()` reads it back;
+- re-deriving "is this AOR still registered" from `granted.expires == 0` —
+  `Kelix.Mod.Registrar.save/2` answers `:registered` / `:unregistered`.
+
+The exception is a trivial one-liner with no SIP meaning (a label, a formatting
+helper). Anything else belongs in a module.
 
 ## Language & Comments Convention
 

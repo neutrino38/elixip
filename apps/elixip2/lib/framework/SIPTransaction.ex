@@ -22,6 +22,7 @@ alias SIP.NetUtils
     tB_ref: nil,
     timerk: nil,
     timerf: nil,
+    timer100_ref: nil,
     debuglog: true, # If we should output debug logs for this transaction
     upperlayer: nil
   ]

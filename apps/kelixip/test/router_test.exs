@@ -110,6 +110,48 @@ defmodule Kelix.RouterTest do
     end
   end
 
+  # The media override handed to every spawned instance. Three outcomes, and the
+  # middle one used to be indistinguishable from the third — which is the whole
+  # defect of 2026-08-13: a pool with nothing serviceable returned `nil`, the
+  # instance fell back to the global `:mediaserver` config, and its default is the
+  # TEST MOCKUP. Real traffic went to a stub; the call signalled perfectly, carried
+  # no media, and was logged as a success.
+  describe "media override (what the pool says reaches the instance)" do
+    test "no pool at all → nil, so the global :mediaserver config applies" do
+      # A name nothing is registered under: that is a pool-less deployment, and the
+      # standalone elixipp tool. Both legitimately name their media server in
+      # configuration, so the fallback stays for them — only a pool that ANSWERED
+      # "nothing" suppresses it.
+      refute Process.whereis(:router_mp_absent)
+      assert Router.media_override(:router_mp_absent) == nil
+    end
+
+    test "a pool with nothing serviceable → :unavailable, never a silent fallback" do
+      # A pool whose only entry fails its probe. `checkout/1` then says :no_mcu.
+      mp = start_pool([%{name: "mcu1", module: :mendooze, url: "http://mcu.test:9090", enabled: true}], fn _ -> false end)
+      :ok = Kelix.MediaPool.check_health(mp)
+      assert {:error, :no_mcu} = Kelix.MediaPool.checkout(mp)
+
+      # And the router must turn that into a refusal, not into nil — which is what
+      # sent real traffic to the mockup.
+      assert Router.media_override(mp) == [module: :unavailable]
+    end
+
+    test "a healthy pool → that MCU's module and url, for this call only" do
+      mp = start_pool([%{name: "mcu1", module: :mendooze, url: "http://mcu.test:9090", enabled: true}], fn _ -> true end)
+      :ok = Kelix.MediaPool.check_health(mp)
+
+      assert Router.media_override(mp) == [module: :mendooze, url: "http://mcu.test:9090"]
+    end
+  end
+
+  # start a test-owned pool with an injected probe; periodic check pushed far out
+  defp start_pool(pool, probe) do
+    name = :"router_mp_#{System.unique_integer([:positive])}"
+    start_supervised!({Kelix.MediaPool, name: name, pool: pool, probe: probe, first_check_ms: 60_000})
+    name
+  end
+
   # a domain with calls but no dial-plan match + no catch-all → 404
   test "calls with no matching rule and no catch-all → 404" do
     toml = ~s([[domain]]\nname = "d.com"\n[[domain.call]]\npattern = "9XX"\nscript = "s.exs")

@@ -54,7 +54,7 @@ defmodule SIP.Session.Registrar do
         contact
 
       expires when expires > @max_expires ->
-        SIP.Uri.set_uri_param(contact, "expires", to_string(@max_expires))
+        SIP.Uri.set_header_param(contact, "expires", to_string(@max_expires))
 
       expires when expires < @min_expires ->
         throw({:reject, 423, "Interval Too Brief"})
@@ -116,7 +116,7 @@ defmodule SIP.Session.Registrar do
     do: Enum.map(contacts, &set_contacts_expires(&1, expires))
 
   def set_contacts_expires(%SIP.Uri{} = contact, expires),
-    do: SIP.Uri.set_uri_param(contact, "expires", to_string(expires))
+    do: SIP.Uri.set_header_param(contact, "expires", to_string(expires))
 
   defp check_register(registerreq) when is_map(registerreq) do
     original_contact = Map.get(registerreq, :contact)
@@ -138,19 +138,44 @@ defmodule SIP.Session.Registrar do
     |> adjust_expires_header()
   end
 
-  def reply_options(req, dialog_pid) when req.method == :OPTIONS do
-    SIP.Session.reply(dialog_pid, req, 200, "OK", [], "reply_OPTIONS")
+  # Challenge with a 401 carrying a WWW-Authenticate digest header. Two ways to say
+  # what to challenge with, and the caller picks by the shape of the third argument:
+  #
+  #   * a **keyword list** — the dialog layer mints the nonce itself from the realm
+  #     we give it (nothing is stored: the scenario validates what comes back with
+  #     SIP.Auth.Nonce.validate/2). `:realm`, `:reason`, and `:algorithm`, which
+  #     overrides the digest algorithm the dialog layer advertises (MD5 by default —
+  #     see SIP.DialogImpl @default_challenge_algorithm). Only raise it for a peer
+  #     known to keep its clear password: an elixip UAC answers from a single HA1
+  #     computed with its own `ctx.algorithm`, so a mismatch is an unavoidable 403.
+  #   * a **map** — an already-built digest parameter set, sent verbatim. That is
+  #     what kelixip does: `Kelix.Auth.challenge_params/2` mints a *stateless* nonce
+  #     of its own, so the dialog layer must not generate one. The same params feed
+  #     a call challenge (`b2bua_challenge/3`), which sends them as
+  #     Proxy-Authenticate — hence the header-agnostic name.
+  #
+  # The first argument is either the scenario context (the dialog pid is read from
+  # it — a scenario never has to carry it around) or the dialog pid itself.
+  def challenge_registration(ctx_or_req, req_or_dialog_pid, opts \\ [])
+
+  def challenge_registration(sip_ctx = %SIP.Context{}, req, opts) when req.method == :REGISTER do
+    challenge_registration(req, sip_ctx.dialogpid, opts)
   end
 
-  # Challenge with a 401 carrying a freshly generated WWW-Authenticate digest
-  # header. For a 401, SIP.Dialog.reply/5 interprets the 5th argument as the realm
-  # and the dialog layer mints a stateless nonce for it (nothing is stored: the
-  # scenario validates what comes back with SIP.Auth.Nonce.validate/2).
-  # `:algorithm` overrides the digest algorithm the dialog layer advertises (MD5 by
-  # default — see SIP.DialogImpl @default_challenge_algorithm). Only raise it for a
-  # peer known to keep its clear password: an elixip UAC answers from a single HA1
-  # computed with its own `ctx.algorithm`, so a mismatch is an unavoidable 403.
-  def challenge_registration(req, dialog_pid, opts \\ []) when req.method == :REGISTER do
+  def challenge_registration(req, dialog_pid, params)
+      when req.method == :REGISTER and is_pid(dialog_pid) and is_map(params) do
+    SIP.Session.reply(
+      dialog_pid,
+      req,
+      401,
+      "Unauthorized",
+      [wwwauthenticate: params],
+      "challenge_registration"
+    )
+  end
+
+  def challenge_registration(req, dialog_pid, opts)
+      when req.method == :REGISTER and is_pid(dialog_pid) and is_list(opts) do
     realm = Keyword.get(opts, :realm, "example.com")
     reason = Keyword.get(opts, :reason, "Unauthorized")
 
@@ -163,10 +188,38 @@ defmodule SIP.Session.Registrar do
     SIP.Session.reply(dialog_pid, req, 401, reason, challenge, "challenge_registration")
   end
 
-  # Accept with a 200 OK echoing the Contact binding(s) with the granted
-  # expiration. Contact/Expires values are bounded by check_register/1 (min 60,
-  # max 3600, max 5 contacts); a violation becomes the matching reject response.
-  def accept_registration(req, dialog_pid, opts) when req.method == :REGISTER do
+  # Accept with a 200 OK enumerating the granted binding(s).
+  #
+  # Two forms, again picked on the shape of the arguments:
+  #
+  #   * `(sip_ctx, req, granted)` — `granted` is the `%{aor, contacts, expires}` a
+  #     location service (`Kelix.Mod.Registrar.save/2`) hands back: it already
+  #     decided which bindings survive and for how long, each contact carrying its
+  #     OWN remaining lifetime (RFC 3261 §10.3 step 8). Nothing is re-derived here;
+  #     the AOR it names becomes the monitor's account for this instance.
+  #   * `(req, dialog_pid, opts)` — no location service: echo the request's own
+  #     Contact(s), bounded by check_register/1 (min 60, max 3600, max 5 contacts);
+  #     a violation becomes the matching reject response.
+  def accept_registration(sip_ctx = %SIP.Context{}, req, %{
+        contacts: contacts,
+        expires: expires,
+        aor: aor
+      })
+      when req.method == :REGISTER do
+    SIP.Scenario.Monitor.note_account(aor)
+
+    SIP.Session.reply(
+      sip_ctx.dialogpid,
+      req,
+      200,
+      "OK",
+      [contact: empty_to_nil(contacts), expires: expires],
+      "accept_registration"
+    )
+  end
+
+  def accept_registration(req, dialog_pid, opts)
+      when req.method == :REGISTER and is_pid(dialog_pid) and is_list(opts) do
     expires = Keyword.get(opts, :expires, @granted_expires)
 
     try do
@@ -186,7 +239,34 @@ defmodule SIP.Session.Registrar do
     end
   end
 
-  def reject_registration(req, dialog_pid, code, reason) when req.method == :REGISTER do
+  # No binding left ⇒ no Contact header at all, rather than an empty one.
+  defp empty_to_nil([]), do: nil
+  defp empty_to_nil(contacts), do: contacts
+
+  # Refuse the registration. `reason` is the SIP reason phrase, EXCEPT for the 423,
+  # where an integer says "this is the shortest lifetime I grant": RFC 3261 §10.3
+  # step 7 makes `Min-Expires` mandatory there, since without it the client has no
+  # way to know what to ask for and simply gives up. Same first-argument rule as
+  # above: the context or the dialog pid.
+  def reject_registration(sip_ctx = %SIP.Context{}, req, code, reason)
+      when req.method == :REGISTER do
+    reject_registration(req, sip_ctx.dialogpid, code, reason)
+  end
+
+  def reject_registration(req, dialog_pid, 423, min_expires)
+      when req.method == :REGISTER and is_pid(dialog_pid) and is_integer(min_expires) do
+    SIP.Session.reply(
+      dialog_pid,
+      req,
+      423,
+      "Interval Too Brief",
+      [{"Min-Expires", to_string(min_expires)}],
+      "reject_reg 423"
+    )
+  end
+
+  def reject_registration(req, dialog_pid, code, reason)
+      when req.method == :REGISTER and is_pid(dialog_pid) do
     SIP.Session.reply(dialog_pid, req, code, reason, [], "reject_reg #{code}")
   end
 end
@@ -258,10 +338,14 @@ defmodule SIP.Session.RegisterUAC do
   end
 
   defp register_msg(sip_ctx = %SIP.Context{}, expire) do
+    # `hparams`: `expires` is a Contact header parameter (`c-p-expires`, RFC 3261
+    # §25.1). Inside the brackets it would be part of the address, and the
+    # registrar — reading it where the RFC puts it — would see a REGISTER asking
+    # for the default lifetime instead of this one.
     contact_uri = %SIP.Uri{
       userpart: SIP.Context.get(sip_ctx, :username),
       domain: "0.0.0.0",
-      params: %{"expires" => to_string(expire)}
+      hparams: %{"expires" => to_string(expire)}
     }
 
     %{
@@ -291,7 +375,7 @@ defmodule SIP.Session.RegisterUAC do
       contact: %SIP.Uri{
         userpart: SIP.Context.get(sip_ctx, :username),
         domain: "0.0.0.0",
-        params: %{"expires" => "15"}
+        hparams: %{"expires" => "15"}
       },
       useragent: Application.get_env(:elixip2, :useragent, "Elixipp/0.1"),
       callid: nil,

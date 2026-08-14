@@ -20,6 +20,7 @@ defmodule Kelix.Mod.AuthDbLiveTest do
   use ExUnit.Case, async: false
 
   alias Kelix.Mod.AuthDb
+  alias Kelix.Mod.AuthDb.Pool
 
   @cfg_path System.get_env("KELIX_AUTHDB_CONFIG")
 
@@ -62,6 +63,24 @@ defmodule Kelix.Mod.AuthDbLiveTest do
     start_supervised!(AuthDb.child_spec(:auth_db, cfg))
 
     %{realm: realm, user: user}
+  end
+
+  # The one thing no mock can check: that the transport `show` REPORTS is the
+  # transport the session actually got. `Ssl_cipher` is a session status variable —
+  # empty on a cleartext link — so this catches a link that claims TLS and runs in
+  # clear, and a fallback that was taken silently.
+  test "the transport show reports is the one on the wire" do
+    view = Pool.describe()
+    assert view.state == :up
+
+    {:ok, %MyXQL.Result{rows: [["Ssl_cipher", cipher]]}} =
+      MyXQL.query(Pool.conn(), "SHOW STATUS LIKE 'Ssl_cipher'")
+
+    if view.tls do
+      assert cipher != "", "show says #{inspect(view.transport)} but the session has no cipher"
+    else
+      assert cipher == "", "show says cleartext but the session is encrypted with #{cipher}"
+    end
   end
 
   test "lookup_ha1/2 returns the stored HA1 for a known subscriber", %{realm: realm, user: user} do

@@ -4,7 +4,7 @@ defmodule SIPParser.MixProject do
   def project do
     [
       app: :elixip2,
-      version: "1.3.0",
+      version: "1.4.0",
       elixir: "~> 1.15",
       # Umbrella: share the root _build / config / deps / lockfile
       build_path: "../../_build",
@@ -12,6 +12,9 @@ defmodule SIPParser.MixProject do
       deps_path: "../../deps",
       lockfile: "../../mix.lock",
       start_permanent: Mix.env() == :prod,
+      # SPDX id of the Business Source License 1.1 (see LICENSE.md). Read by
+      # `mix sbom.cyclonedx` to license this component in the SBoM.
+      package: [licenses: ["BUSL-1.1"]],
       deps: deps()
     ]
   end
@@ -33,7 +36,10 @@ defmodule SIPParser.MixProject do
       {:req, "~> 0.6"},
       # Fork adding active mode for WebSocket (delivers {:web, socket, data} to the owner)
       {:socket2, github: "neutrino38/elixir-socket", branch: "feat/active-ws"},
-      {:ex_sdp, "~> 1.1.1"},
+      # 1.2 parses the m= fmt list as payload types for every RTP profile and
+      # accepts the a=fingerprint hash-func token case-insensitively — both used
+      # to be worked around in MediaServer.Mendooze.Sdp.
+      {:ex_sdp, "~> 1.2"},
       # XML-RPC encode/decode for the Mendooze JSR309 control interface.
       # 1.5 is the first release accepting decimal ~> 3.0, which is required to
       # get away from the vulnerable decimal 2.x (EEF-CVE-2026-32686).

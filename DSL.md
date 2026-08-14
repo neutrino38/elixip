@@ -321,6 +321,28 @@ end
 See [`apps/elixip2/scenarios/uas_register.exs`](apps/elixip2/scenarios/uas_register.exs) for the full scenario,
 including the reply helpers and the `registered` state.
 
+A registrar instance serves a *succession* of REGISTERs on one dialog — the unauthenticated one, the
+digest replay, then every refresh — so a state must act on the last one received, not on the one that
+spawned the instance. `on_events` stores it and `last_uas_req()` reads it back, in this state or any
+later one; nothing has to be carried in appdata. The `SIP.Session.Registrar` verbs take the context,
+so the dialog pid is not threaded through either:
+
+```elixir
+state save_registration do
+  req = last_uas_req()
+
+  case Kelix.Mod.Registrar.save(sip_ctx, req) do
+    {:registered, granted} ->
+      SIP.Session.Registrar.accept_registration(sip_ctx, req, granted)
+      goto wait_refresh, "200 OK"
+    ...
+  end
+end
+```
+
+[`apps/kelixip/scripts/registrar.exs`](apps/kelixip/scripts/registrar.exs) is that scenario written
+against the kelixip modules, end to end.
+
 ### Server (UAS) scenarios — incoming calls
 
 A scenario can also act as a **call server (UAS)** that answers inbound `INVITE`s.
@@ -676,9 +698,11 @@ reply macros are available in every call scenario (via `SIP.Session.CallUAC`); t
 macros are opt-in with `use SIP.Session.CallUAS`. All replies go through the dialog **without checking
 its state** (so out-of-order test scenarios are possible).
 
-The inbound offer request (`INVITE` / re-`INVITE` / `UPDATE`) and its server transaction are stored
-in the context **automatically** — the `on_events` macro instruments every clause to stash the most
-recent one — so the reply macros need not be passed the request.
+The inbound request this instance is serving (`INVITE` / re-`INVITE` / `UPDATE`, and `REGISTER` for a
+registrar scenario) and its server transaction are stored in the context **automatically** — the
+`on_events` macro instruments every clause to stash the most recent one — so the reply macros need not
+be passed the request. `last_uas_req()` reads it back in any later state, which is what lets a state
+act on the request that got it there without the previous state having stashed it by hand.
 
 - `reply_invite(code, reason \\ nil, upd_fields \\ [])` — reply to the stored request with a code that
   carries **no SDP** (100 is automatic, so typically 18x / 3xx-6xx). Raises for `183` or a `2xx`
@@ -717,16 +741,21 @@ b2bua_forward(req, peer, media)   # create the outbound leg
 b2bua_forward(req)                # relay a request onto the other leg
 b2bua_forward_reply(resp)         # relay a response back
 b2bua_reply(req, code, reason)    # answer here, relay nothing
+b2bua_challenge(req, params)      # answer 407 (or 401) with a digest challenge
 ```
 
 `media` is `false` (the SDP crosses verbatim) or `{:mediaserver, opts}` (both legs terminate
 their media on the server, and neither side ever sees the other's SDP). Legs are wound down
 automatically when the scenario ends, whatever the exit path.
 
+`b2bua_challenge/2..3` answers the caller with a digest challenge the *application* built
+(`Kelix.Auth.challenge_params/2` in kelixip): `407` + `Proxy-Authenticate` by default — what
+deployed UAs expect of the server routing their calls — or `401` + `WWW-Authenticate`.
+
 **See [B2BUA.md](B2BUA.md)** for the complete macro reference, the `%SIP.B2bua.Peer{}` target
-form, the media modes, and three commented scenarios: a proxy-like direct call to a subscriber
-registered on several devices, a customer service hunting a list of numbers serially, and a
-WebRTC-to-SIP gateway.
+form, the media modes, and four commented scenarios: a proxy-like direct call to a subscriber
+registered on several devices, the same call with the caller authenticated, a customer service
+hunting a list of numbers serially, and a WebRTC-to-SIP gateway.
 
 ### HTTP.Session
 

@@ -58,22 +58,56 @@ defmodule B2BUA.Media do
     on_events do
       {:INVITE, req, _trans, _dlg} ->
         b2bua_reply(req, 100, "Trying")
-        # The media server first: without one there is nothing to answer the
-        # caller with, and the outbound INVITE has no body to carry.
-        media_connect()
-        b2bua_forward(req, ctx_get(:peer), @media)
+        goto(place_call, "INVITE received")
 
-        if ctx_get(:lasterr) == :ok do
-          goto(proceeding, "INVITE relayed")
-        else
-          # The offer could not be terminated (no common codec, a WebRTC offer we
-          # were told not to take). That is a statement about what the caller
-          # asked for, so it is a 488 — not a 500, which would blame us.
-          b2bua_reply(req, 488, "Not Acceptable Here")
-          scenario_failure("media setup failed: #{inspect(ctx_get(:lasterr))}")
-        end
+      {:dialog_terminated, _dlg, _reason} ->
+        scenario_aborted("caller vanished before the INVITE")
     after
       60_000 -> scenario_failure("no INVITE received")
+    end
+  end
+
+  # Open the outbound leg. A state with no on_events: it decides and moves on.
+  # The INVITE needs no carrying around — `on_events` stored it and
+  # `last_uas_req()` reads it back, here and in every later state.
+  state place_call do
+    req = last_uas_req()
+
+    # The media server first: without one there is nothing to answer the caller
+    # with, and the outbound INVITE has no body to carry. And its verdict is read
+    # BEFORE the forward: forwarding on a failed connect used to place a call
+    # that signalled perfectly and carried no media at all (2026-08-13).
+    media_connect()
+
+    case ctx_get(:lasterr) do
+      :ok ->
+        b2bua_forward(req, ctx_get(:peer), @media)
+
+        cond do
+          ctx_get(:lasterr) == :ok ->
+            goto(proceeding, "INVITE relayed")
+
+          # The media server was there a moment ago and is not any more —
+          # stopped, or killed under the call. OUR unavailability, so a 503 —
+          # which also lets an upstream proxy try another route, where a 488
+          # would end the call.
+          b2bua_media_unavailable?() ->
+            b2bua_reply(req, 503, "Service Unavailable")
+            goto(releasing, "media plane gone: #{inspect(ctx_get(:lasterr))}")
+
+          true ->
+            # The offer could not be terminated (no common codec, a WebRTC offer
+            # we were told not to take). That is a statement about what the
+            # caller asked for, so it is a 488 — not a 500, which would blame us.
+            b2bua_reply(req, 488, "Not Acceptable Here")
+            goto(releasing, "media setup failed: #{inspect(ctx_get(:lasterr))}")
+        end
+
+      err ->
+        # No media plane: media_connect() found no server, or could not reach
+        # the one configured. Same verdict as above, for the same reason.
+        b2bua_reply(req, 503, "Service Unavailable")
+        goto(releasing, "no media server: #{inspect(err)}")
     end
   end
 
@@ -104,20 +138,22 @@ defmodule B2BUA.Media do
           goto(loop, "#{code}, trying the next target")
         else
           case b2bua_media_error() do
-            nil -> scenario_success("callee answered #{code}")
-            reason -> scenario_failure("no target could be bridged: #{inspect(reason)}")
+            nil -> goto(releasing, "callee answered #{code}")
+            reason -> goto(releasing, "no target could be bridged: #{inspect(reason)}")
           end
         end
 
+      # A CANCEL asks, it does not decide (RFC 3261 §16.7): wait for the callee's
+      # final before releasing anything.
       {:CANCEL, req, _trans, _dlg} ->
         b2bua_cancel_forward()
         b2bua_forward(req)
-        scenario_aborted("caller cancelled")
+        goto(cancelling, "caller cancelled")
 
       {:BYE, req, _trans, _dlg} ->
         b2bua_cancel_forward()
         b2bua_reply(req, 200, "OK")
-        scenario_success("caller hung up before answer")
+        goto(releasing, "caller hung up before answer")
 
       # The media plane went away while we were still ringing. There is no call
       # to hang up yet — the caller gets a 500 and the teardown CANCELs the
@@ -133,6 +169,44 @@ defmodule B2BUA.Media do
       180_000 ->
         b2bua_reply(last_uas_req(), 408, "Request Timeout")
         goto(releasing, "callee never answered")
+    end
+  end
+
+  # The CANCEL has gone to the callee; its transaction is not over until a final
+  # response says so (RFC 3261 §16.7). Ending here instead would leave a device
+  # that answers a fraction of a second later off-hook in a call nobody is in.
+  #
+  # `SIP.DialogImpl` catches that on its own — it is not a policy, so no script
+  # may get it wrong — and this state does not make it correct, it makes it
+  # VISIBLE. Every branch leaves through `releasing`, which is what frees the
+  # media resources this scenario allocated before the caller changed its mind.
+  state cancelling do
+    on_events do
+      {:outbound, {487, _resp, _trans, _dlg}} ->
+        goto(releasing, "caller cancelled, callee confirmed")
+
+      # The race. Acknowledge the answer nobody is left to take, then end it
+      # (§13.2.2.4 then §15) — and release the media on the way out.
+      {:outbound, {200, _resp, _trans, _dlg}} ->
+        b2bua_send_BYE()
+        goto(releasing, "callee answered after the cancellation; hung up")
+
+      {:outbound, {code, _resp, _trans, _dlg}} when code in 100..199 ->
+        goto(loop, "provisional #{code} after cancel")
+
+      {:outbound, {code, _resp, _trans, _dlg}} when code >= 300 ->
+        goto(releasing, "caller cancelled, callee answered #{code}")
+
+      {:outbound, {:dialog_terminated, _dlg, _reason}} ->
+        goto(releasing, "caller cancelled, outbound leg gone")
+
+      {:ms_event, _ref, :server_disconnected} ->
+        goto(releasing, "media server gone while cancelling")
+
+      {:dialog_terminated, _dlg, _reason} ->
+        goto(releasing, "caller cancelled")
+    after
+      32_000 -> goto(releasing, "caller cancelled, callee never concluded")
     end
   end
 

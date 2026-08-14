@@ -30,11 +30,21 @@ defmodule B2BUA.Basic do
       {:INVITE, req, _trans, _dlg} ->
         # Tell the caller we are working on it, then open the outbound leg.
         b2bua_reply(req, 100, "Trying")
-        b2bua_forward(req, ctx_get(:peer), false)
-        goto(proceeding, "INVITE relayed")
+        goto(place_call, "INVITE received")
+
+      {:dialog_terminated, _dlg, _reason} ->
+        scenario_aborted("caller vanished before the INVITE")
     after
       60_000 -> scenario_failure("no INVITE received")
     end
+  end
+
+  # Open the outbound leg. A state with no on_events: it decides and moves on.
+  # The INVITE needs no carrying around — `on_events` stored it and
+  # `last_uas_req()` reads it back, here and in every later state.
+  state place_call do
+    b2bua_forward(last_uas_req(), ctx_get(:peer), false)
+    goto(proceeding, "INVITE relayed")
   end
 
   # The callee is being alerted. Everything it says goes back to the caller —
@@ -60,11 +70,11 @@ defmodule B2BUA.Basic do
           scenario_success("callee answered #{code}")
         end
 
-      # The caller gave up.
+      # The caller gave up — which asks, it does not decide (RFC 3261 §16.7).
       {:CANCEL, req, _trans, _dlg} ->
         b2bua_cancel_forward()
         b2bua_forward(req)
-        scenario_aborted("caller cancelled")
+        goto(cancelling, "caller cancelled")
 
       # A caller who hangs up while the callee is still being rung. Not what the
       # RFC asks for (that is a CANCEL), but real user agents send it.
@@ -82,6 +92,41 @@ defmodule B2BUA.Basic do
       180_000 ->
         b2bua_reply(last_uas_req(), 408, "Request Timeout")
         scenario_failure("callee never answered")
+    end
+  end
+
+  # The CANCEL has gone to the callee; its transaction is not over until a final
+  # response says so (RFC 3261 §16.7). Ending here instead would leave a device
+  # that answers a fraction of a second later off-hook in a call nobody is in.
+  #
+  # `SIP.DialogImpl` catches that on its own — it is not a policy, so no script
+  # may get it wrong — and this state does not make it correct, it makes it
+  # VISIBLE: "abandoned" and "answered, then hung up" are different outcomes.
+  state cancelling do
+    on_events do
+      # What normally comes back, and fast.
+      {:outbound, {487, _resp, _trans, _dlg}} ->
+        scenario_aborted("caller cancelled, callee confirmed")
+
+      # The race. Acknowledge the answer nobody is left to take, then end it
+      # (§13.2.2.4 then §15).
+      {:outbound, {200, _resp, _trans, _dlg}} ->
+        b2bua_send_BYE()
+        scenario_success("callee answered after the cancellation; hung up")
+
+      {:outbound, {code, _resp, _trans, _dlg}} when code in 100..199 ->
+        goto(loop, "provisional #{code} after cancel")
+
+      {:outbound, {code, _resp, _trans, _dlg}} when code >= 300 ->
+        scenario_aborted("caller cancelled, callee answered #{code}")
+
+      {:outbound, {:dialog_terminated, _dlg, _reason}} ->
+        scenario_aborted("caller cancelled, outbound leg gone")
+
+      {:dialog_terminated, _dlg, _reason} ->
+        scenario_aborted("caller cancelled")
+    after
+      32_000 -> scenario_aborted("caller cancelled, callee never concluded")
     end
   end
 

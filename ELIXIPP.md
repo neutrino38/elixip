@@ -111,7 +111,8 @@ elixipp UAC.Invite      # outbound INVITE + media
 elixipp UAC.Register    # REGISTER + keepalive + refresh + un-REGISTER
 ```
 
-Their sources are in [`apps/elixip2/lib/scenarios/`](apps/elixip2/lib/scenarios/).
+Their sources are in
+[`apps/elixip2/lib/built-in-scenarios/`](apps/elixip2/lib/built-in-scenarios/).
 The editable copies in [`apps/elixip2/scenarios/`](apps/elixip2/scenarios/) are the
 same logic under a different module name (`UAC.InviteExample`,
 `UAC.RegisterExample`), so both can coexist:

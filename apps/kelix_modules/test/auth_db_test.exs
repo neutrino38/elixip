@@ -290,4 +290,179 @@ defmodule Kelix.Mod.AuthDbTest do
              ) == :ok
     end
   end
+
+  # ── authenticating something other than a REGISTER ──────────────────────────
+
+  describe "challengeable?/1" do
+    test "an initial INVITE is challenged" do
+      assert AuthDb.challengeable?(%{method: :INVITE, to: "<sip:bob@#{@domain}>"})
+    end
+
+    test "ACK and CANCEL never are — neither can carry the answer to a challenge" do
+      refute AuthDb.challengeable?(%{method: :ACK, to: "<sip:bob@#{@domain}>"})
+      refute AuthDb.challengeable?(%{method: :CANCEL, to: "<sip:bob@#{@domain}>"})
+    end
+
+    test "OPTIONS never is — challenging a liveness probe makes this node look down" do
+      refute AuthDb.challengeable?(%{method: :OPTIONS, to: "<sip:bob@#{@domain}>"})
+    end
+
+    test "an in-dialog request is not, the dialog was authenticated when created" do
+      in_dialog = %{method: :INVITE, to: "<sip:bob@#{@domain}>;tag=abc123"}
+      refute AuthDb.challengeable?(in_dialog)
+    end
+
+    test "it reads the To tag off a %SIP.Uri{} too, not only the raw header" do
+      uri = %SIP.Uri{userpart: "bob", domain: @domain, params: %{"tag" => "abc"}}
+      refute AuthDb.challengeable?(%{method: :INVITE, to: uri})
+      assert AuthDb.challengeable?(%{method: :INVITE, to: %SIP.Uri{uri | params: %{}}})
+    end
+  end
+
+  describe "authenticate/3 on an INVITE" do
+    # The digest covers the METHOD, so a credential is not transferable between
+    # requests: this is what makes authenticating a call different from replaying
+    # the registration's Authorization header.
+    defp invite_auth(nonce, opts) do
+      method = Keyword.get(opts, :method, "INVITE")
+
+      %{
+        "username" => Keyword.get(opts, :username, @user),
+        "realm" => @domain,
+        "nonce" => nonce,
+        "uri" => @uri,
+        "response" => SIP.Auth.compute_auth_response_from_ha1("MD5", nonce, @ha1, method, @uri),
+        "algorithm" => "MD5"
+      }
+    end
+
+    defp invite(auth, opts \\ []) do
+      %{
+        method: :INVITE,
+        from: %SIP.Uri{userpart: Keyword.get(opts, :from, @user), domain: @domain},
+        to: "<sip:bob@#{@domain}>",
+        ruri: %SIP.Uri{userpart: "bob", domain: @domain},
+        authorization: auth
+      }
+    end
+
+    test "a valid digest → {:ok, identity}" do
+      req = invite(invite_auth(nonce(), []))
+
+      assert {:ok, %{user: @user, realm: @domain}} =
+               AuthDb.authenticate(req, @domain, [now: @now] ++ lookup())
+    end
+
+    test "no credentials → challenge, as for a REGISTER" do
+      assert AuthDb.authenticate(invite(nil) |> Map.delete(:authorization), @domain, lookup()) ==
+               {:requireauth, false}
+    end
+
+    test "a REGISTER's Authorization replayed on an INVITE is refused" do
+      # same nonce, same user, same everything — but hashed over REGISTER
+      req = invite(invite_auth(nonce(), method: "REGISTER"))
+
+      assert AuthDb.authenticate(req, @domain, [now: @now] ++ lookup()) ==
+               {:reject, 403, "Forbidden"}
+    end
+
+    test "Proxy-Authorization is read like Authorization (a 407 challenge)" do
+      req =
+        invite(nil)
+        |> Map.delete(:authorization)
+        |> Map.put(:proxyauthorization, invite_auth(nonce(), []))
+
+      assert {:ok, _} = AuthDb.authenticate(req, @domain, [now: @now] ++ lookup())
+    end
+  end
+
+  describe "identity check (the From is not proof of anything)" do
+    # A valid digest proves who holds the password, not that the From is theirs.
+    defp spoofed(opts) do
+      %{
+        method: :INVITE,
+        from: %SIP.Uri{userpart: "bob", domain: @domain},
+        to: "<sip:carol@#{@domain}>",
+        authorization: %{
+          "username" => @user,
+          "realm" => @domain,
+          "nonce" => Keyword.fetch!(opts, :nonce),
+          "uri" => @uri,
+          "response" =>
+            SIP.Auth.compute_auth_response_from_ha1(
+              "MD5",
+              Keyword.fetch!(opts, :nonce),
+              @ha1,
+              "INVITE",
+              @uri
+            ),
+          "algorithm" => "MD5"
+        }
+      }
+    end
+
+    test ":strict refuses alice authenticating a call From: bob" do
+      opts = [now: @now, identity_check: :strict] ++ lookup()
+
+      assert AuthDb.authenticate(spoofed(nonce: nonce()), @domain, opts) ==
+               {:reject, 403, "Forbidden"}
+    end
+
+    test ":warn lets it through (and says so), which is the shipped default" do
+      opts = [now: @now, identity_check: :warn] ++ lookup()
+      assert {:ok, %{user: @user}} = AuthDb.authenticate(spoofed(nonce: nonce()), @domain, opts)
+    end
+
+    test ":off does not even look" do
+      opts = [now: @now, identity_check: :off] ++ lookup()
+      assert {:ok, %{user: @user}} = AuthDb.authenticate(spoofed(nonce: nonce()), @domain, opts)
+    end
+
+    test "a matching From passes under :strict" do
+      req = %{spoofed(nonce: nonce()) | from: %SIP.Uri{userpart: @user, domain: @domain}}
+      opts = [now: @now, identity_check: :strict] ++ lookup()
+      assert {:ok, %{user: @user}} = AuthDb.authenticate(req, @domain, opts)
+    end
+
+    test "a REGISTER is held against its To (the AOR), not its From" do
+      req = %{
+        method: :REGISTER,
+        # the From claims someone else; only the To matters for a REGISTER
+        from: %SIP.Uri{userpart: "someone-else", domain: @domain},
+        to: "<sip:#{@user}@#{@domain}>",
+        authorization: auth(nonce())
+      }
+
+      opts = [now: @now, identity_check: :strict] ++ lookup()
+      assert AuthDb.do_registration_auth(req, @domain, opts) == :ok
+    end
+
+    test "a REGISTER binding an AOR that is not the authenticated user is refused" do
+      req = %{
+        method: :REGISTER,
+        to: "<sip:victim@#{@domain}>",
+        authorization: auth(nonce())
+      }
+
+      opts = [now: @now, identity_check: :strict] ++ lookup()
+      assert AuthDb.do_registration_auth(req, @domain, opts) == {:reject, 403, "Forbidden"}
+    end
+  end
+
+  describe "fetch_credential/3" do
+    test "returns the secret tagged with the algorithm it was salted with" do
+      assert AuthDb.fetch_credential(@user, @domain, lookup()) == {:ok, {:ha1, "MD5", @ha1}}
+    end
+
+    test "an unknown subscriber is :notfound, not an error" do
+      assert AuthDb.fetch_credential("ghost", @domain, ha1_lookup: fn _u, _r -> :notfound end) ==
+               :notfound
+    end
+
+    test "the hex is normalised — a base holding upper case still verifies" do
+      upper = [ha1_lookup: fn _u, _r -> {:ok, String.upcase(@ha1)} end]
+      assert {:ok, {:ha1, "MD5", hex}} = AuthDb.fetch_credential(@user, @domain, upper)
+      assert hex == @ha1
+    end
+  end
 end

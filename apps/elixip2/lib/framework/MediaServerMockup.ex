@@ -36,6 +36,16 @@ defmodule MediaServer.Mockup do
   def add_remote_candidate(conn, candidate),
     do: GenServer.call(conn, {:add_remote_candidate, candidate})
 
+  # Nothing to arm: the stub has no RTP to miss. It stays a call rather than a
+  # bare `:ok` so a test can assert the framework reached the media layer at the
+  # right moment — which is the whole subject of this callback (`answered?/1`).
+  @impl MediaServer.Behaviour
+  def call_answered(conn), do: GenServer.call(conn, :call_answered)
+
+  @doc "Test hook: has the framework told this leg its call was answered?"
+  @spec answered?(pid()) :: boolean()
+  def answered?(conn), do: GenServer.call(conn, :answered?)
+
   @impl MediaServer.Behaviour
   def close_peer_connection(conn) do
     GenServer.stop(conn, :normal)
@@ -60,12 +70,32 @@ defmodule MediaServer.Mockup do
       {:ok, _policy} ->
         :ok = GenServer.call(a, {:set_bridge_peer, b})
         :ok = GenServer.call(b, {:set_bridge_peer, a})
-        :ok
+
+        # The other half of the contract: leg `a`'s answer, REBUILT now that both
+        # legs are known. This mock returned a bare `:ok` for its whole life, so no
+        # call-flow test ever exercised the branch a real adapter takes — and that
+        # is where a caller silently kept the answer held since the INVITE
+        # (2026-08-12). Opt-in, so every existing test keeps its plain `:ok`.
+        case GenServer.call(a, :rebuilt_answer) do
+          sdp when is_binary(sdp) -> {:ok, %{inbound_answer: sdp}}
+          _ -> :ok
+        end
 
       {:error, _} = err ->
         err
     end
   end
+
+  @doc """
+  Test hook: make the next `bridge/3` hand back `sdp` as leg `conn`'s rebuilt
+  answer, the `{:ok, %{inbound_answer: sdp}}` form of the contract.
+
+  A real adapter rebuilds when relaying narrows or reorders the codecs the caller
+  was answered with. Nothing in the mock can decide that — it relays payloads
+  without looking at them — so the test says what the rebuild produced.
+  """
+  @spec rebuild_answer_on_bridge(pid(), String.t()) :: :ok
+  def rebuild_answer_on_bridge(conn, sdp), do: GenServer.call(conn, {:rebuild_answer, sdp})
 
   @doc """
   Test hook: play the RTP inactivity watchdog firing for `media` on `conn`.
@@ -202,12 +232,20 @@ defmodule MediaServer.Mockup.Conn do
     # and it sends them out of ITS socket toward ITS peer — the same shape a
     # real server's two endpoints have.
     bridge_peer: nil,
+    # Answer that `bridge/3` will hand back for this leg, when a test asked for
+    # one (see rebuild_answer_on_bridge/2). `nil` — the default — is the plain
+    # `:ok` this mock returned for its whole life.
+    rebuilt_answer: nil,
     # media-connectivity state, mirroring the real adapter (§4)
     recv_medias: nil,
     ice_notified: false,
     # …and its mirror for loss (see simulate_media_timeout/2)
     timed_out: MapSet.new(),
-    lost_notified: false
+    lost_notified: false,
+    # Whether the framework announced the call answered on this leg. The mock has
+    # no watchdog to arm with it; it records the moment so a call-flow test can
+    # check it happened, and happened after the ringing rather than during it.
+    answered: false
   ]
 
   @impl true
@@ -246,6 +284,16 @@ defmodule MediaServer.Mockup.Conn do
   @impl true
   def handle_call(:get_event_sink, _from, state) do
     {:reply, state.event_sink, state}
+  end
+
+  @impl true
+  def handle_call(:call_answered, _from, state) do
+    {:reply, :ok, %{state | answered: true}}
+  end
+
+  @impl true
+  def handle_call(:answered?, _from, state) do
+    {:reply, state.answered, state}
   end
 
   @impl true
@@ -297,6 +345,14 @@ defmodule MediaServer.Mockup.Conn do
   # incoming media goes. nil takes the path down again.
   def handle_call({:set_bridge_peer, peer}, _from, state) do
     {:reply, :ok, %{state | bridge_peer: peer}}
+  end
+
+  def handle_call({:rebuild_answer, sdp}, _from, state) do
+    {:reply, :ok, %{state | rebuilt_answer: sdp}}
+  end
+
+  def handle_call(:rebuilt_answer, _from, state) do
+    {:reply, state.rebuilt_answer, state}
   end
 
   # The watchdog firing for one media, and the derived loss when every media of

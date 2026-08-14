@@ -40,24 +40,45 @@ defmodule Kelix.Mod.RegistrarTest do
   defp contact_uri(user, host, nil),
     do: %SIP.Uri{userpart: user, domain: host, port: 5060}
 
+  # `q` is a Contact HEADER parameter (`c-p-q`, RFC 3261 §25.1), hence
+  # set_header_param/3 — as a URI parameter it would be part of the address and
+  # ride along onto the dialable URI, which is what §16.6 forbids.
   defp contact_uri(user, host, q),
-    do: SIP.Uri.set_uri_param(contact_uri(user, host, nil), "q", to_string(q))
+    do: SIP.Uri.set_header_param(contact_uri(user, host, nil), "q", to_string(q))
+
+  # A stand-in for a REGISTER dialog. It honours the one part of the dialog
+  # contract this module uses — `SIP.Dialog.terminate/2` — by reporting it and
+  # stopping, as SIP.DialogImpl does.
+  defmodule FakeDialog do
+    use GenServer
+
+    def start(owner), do: GenServer.start(__MODULE__, owner)
+
+    @impl true
+    def init(owner), do: {:ok, owner}
+
+    @impl true
+    def handle_cast({:terminate, reason}, owner) do
+      send(owner, {:terminated, self(), reason})
+      {:stop, :normal, owner}
+    end
+  end
 
   setup do
     pid = start_supervised!({Registrar, max_contacts_per_aor: 2})
     %{pid: pid}
   end
 
-  describe "save/4" do
+  describe "save/2,4" do
     test "registers a contact and returns the granted expires" do
-      assert {:ok, granted} = Registrar.save(register("alice", "10.0.0.9"), @domain)
+      assert {:registered, granted} = Registrar.save(register("alice", "10.0.0.9"), @domain)
       assert granted.aor == "alice"
       assert granted.expires == 3600
       assert [%Contact{}] = Registrar.bindings(@domain, "alice")
     end
 
     test "AOR is the To user-part, case-insensitive" do
-      assert {:ok, _} = Registrar.save(register("Bob", "10.0.0.9"), @domain)
+      assert {:registered, _} = Registrar.save(register("Bob", "10.0.0.9"), @domain)
       assert [%Contact{}] = Registrar.bindings(@domain, "bob")
     end
 
@@ -71,13 +92,13 @@ defmodule Kelix.Mod.RegistrarTest do
         | to: "<sip:Carol@#{@domain}>;tag=abc123"
       }
 
-      assert {:ok, granted} = Registrar.save(req, @domain)
+      assert {:registered, granted} = Registrar.save(req, @domain)
       assert granted.aor == "carol"
       assert [%Contact{}] = Registrar.bindings(@domain, "carol")
     end
 
     test "clamps a too-long expires to the max" do
-      assert {:ok, granted} =
+      assert {:registered, granted} =
                Registrar.save(register("alice", "10.0.0.9", expires: 99_999), @domain)
 
       assert granted.expires == 3600
@@ -89,35 +110,35 @@ defmodule Kelix.Mod.RegistrarTest do
     end
 
     test "a refresh of the same contact does not duplicate the binding" do
-      assert {:ok, _} = Registrar.save(register("alice", "10.0.0.9"), @domain)
-      assert {:ok, _} = Registrar.save(register("alice", "10.0.0.9"), @domain)
+      assert {:registered, _} = Registrar.save(register("alice", "10.0.0.9"), @domain)
+      assert {:registered, _} = Registrar.save(register("alice", "10.0.0.9"), @domain)
       assert [_one] = Registrar.bindings(@domain, "alice")
     end
 
     test "a second distinct contact adds a binding" do
-      assert {:ok, _} = Registrar.save(register("alice", "10.0.0.9"), @domain)
-      assert {:ok, _} = Registrar.save(register("alice", "10.0.0.42"), @domain)
+      assert {:registered, _} = Registrar.save(register("alice", "10.0.0.9"), @domain)
+      assert {:registered, _} = Registrar.save(register("alice", "10.0.0.42"), @domain)
       assert length(Registrar.bindings(@domain, "alice")) == 2
     end
 
     test "exceeding max_contacts_per_aor is rejected" do
-      assert {:ok, _} = Registrar.save(register("alice", "10.0.0.1"), @domain)
-      assert {:ok, _} = Registrar.save(register("alice", "10.0.0.2"), @domain)
+      assert {:registered, _} = Registrar.save(register("alice", "10.0.0.1"), @domain)
+      assert {:registered, _} = Registrar.save(register("alice", "10.0.0.2"), @domain)
       assert {:error, {403, _}} = Registrar.save(register("alice", "10.0.0.3"), @domain)
     end
 
     test "a wildcard Contact with Expires: 0 removes every binding" do
-      assert {:ok, _} = Registrar.save(register("alice", "10.0.0.1"), @domain)
-      assert {:ok, _} = Registrar.save(register("alice", "10.0.0.2"), @domain)
+      assert {:registered, _} = Registrar.save(register("alice", "10.0.0.1"), @domain)
+      assert {:registered, _} = Registrar.save(register("alice", "10.0.0.2"), @domain)
 
       wildcard = %{register("alice", "unused") | contact: :*, expires: 0}
-      assert {:ok, granted} = Registrar.save(wildcard, @domain)
+      assert {:unregistered, granted} = Registrar.save(wildcard, @domain)
       assert granted.expires == 0
       assert Registrar.bindings(@domain, "alice") == []
     end
 
     test "a wildcard Contact without Expires: 0 is refused, bindings untouched" do
-      assert {:ok, _} = Registrar.save(register("alice", "10.0.0.1"), @domain)
+      assert {:registered, _} = Registrar.save(register("alice", "10.0.0.1"), @domain)
       wildcard = %{register("alice", "unused") | contact: :*, expires: 3600}
       assert {:error, {400, _}} = Registrar.save(wildcard, @domain)
       assert length(Registrar.bindings(@domain, "alice")) == 1
@@ -134,16 +155,19 @@ defmodule Kelix.Mod.RegistrarTest do
     end
 
     test "unregister (expires 0) removes the AOR" do
-      assert {:ok, _} = Registrar.save(register("alice", "10.0.0.9"), @domain)
-      assert {:ok, granted} = Registrar.save(register("alice", "10.0.0.9", expires: 0), @domain)
+      assert {:registered, _} = Registrar.save(register("alice", "10.0.0.9"), @domain)
+
+      assert {:unregistered, granted} =
+               Registrar.save(register("alice", "10.0.0.9", expires: 0), @domain)
+
       assert granted.expires == 0
       assert Registrar.bindings(@domain, "alice") == []
     end
 
     test "domains are stored separately" do
-      assert {:ok, _} = Registrar.save(register("alice", "10.0.0.9"), "example.com")
+      assert {:registered, _} = Registrar.save(register("alice", "10.0.0.9"), "example.com")
 
-      assert {:ok, _} =
+      assert {:registered, _} =
                Registrar.save(
                  %{
                    register("alice", "10.0.0.9")
@@ -178,14 +202,14 @@ defmodule Kelix.Mod.RegistrarTest do
 
     test "on a store already holding the old contact, it swaps one for the other", ctx do
       # seed the binding the handset is about to drop
-      seeded = SIP.Uri.set_uri_param(ctx.old_contact, "expires", "180")
-      assert {:ok, _} = Registrar.save(%{ctx.req | contact: seeded}, @rebind_domain)
+      seeded = SIP.Uri.set_header_param(ctx.old_contact, "expires", "180")
+      assert {:registered, _} = Registrar.save(%{ctx.req | contact: seeded}, @rebind_domain)
 
       assert [%Contact{contact: %{domain: "172.22.0.2"}}] =
                Registrar.bindings(@rebind_domain, "50815019")
 
       # now the real rebinding request
-      assert {:ok, granted} = Registrar.save(ctx.req, @rebind_domain)
+      assert {:registered, granted} = Registrar.save(ctx.req, @rebind_domain)
       assert granted.expires == 180
 
       assert [%Contact{contact: %{domain: "172.21.104.60"}}] =
@@ -193,7 +217,7 @@ defmodule Kelix.Mod.RegistrarTest do
     end
 
     test "it is not read as an un-registration on an empty store", ctx do
-      assert {:ok, granted} = Registrar.save(ctx.req, @rebind_domain)
+      assert {:registered, granted} = Registrar.save(ctx.req, @rebind_domain)
       assert granted.expires == 180
       assert [%Contact{}] = Registrar.bindings(@rebind_domain, "50815019")
     end
@@ -202,16 +226,16 @@ defmodule Kelix.Mod.RegistrarTest do
       # The key must be the URI, not the URI plus its Contact header parameters:
       # with `;expires=` in the key, every refresh whose lifetime changed added a
       # second binding for the same contact.
-      short = SIP.Uri.set_uri_param(ctx.old_contact, "expires", "120")
-      long = SIP.Uri.set_uri_param(ctx.old_contact, "expires", "180")
+      short = SIP.Uri.set_header_param(ctx.old_contact, "expires", "120")
+      long = SIP.Uri.set_header_param(ctx.old_contact, "expires", "180")
 
-      assert {:ok, _} = Registrar.save(%{ctx.req | contact: short}, @rebind_domain)
-      assert {:ok, _} = Registrar.save(%{ctx.req | contact: long}, @rebind_domain)
+      assert {:registered, _} = Registrar.save(%{ctx.req | contact: short}, @rebind_domain)
+      assert {:registered, _} = Registrar.save(%{ctx.req | contact: long}, @rebind_domain)
       assert [_one] = Registrar.bindings(@rebind_domain, "50815019")
     end
 
     test "the instance and its capabilities are stored, not just the URI", ctx do
-      assert {:ok, _} = Registrar.save(ctx.req, @rebind_domain)
+      assert {:registered, _} = Registrar.save(ctx.req, @rebind_domain)
       assert [binding] = Registrar.bindings(@rebind_domain, "50815019")
 
       assert binding.instance == "<urn:uuid:5da07818-04fe-1240-45af-60189533c4e1>"
@@ -223,7 +247,7 @@ defmodule Kelix.Mod.RegistrarTest do
     # new address replaces its binding. Keying on the URI alone is why the handset
     # has to drop its old contact by hand on every network change.
     test "the same instance from a new address replaces the binding, no hand cleanup", ctx do
-      assert {:ok, _} = Registrar.save(ctx.req, @rebind_domain)
+      assert {:registered, _} = Registrar.save(ctx.req, @rebind_domain)
 
       assert [%Contact{contact: %{domain: "172.21.104.60"}}] =
                Registrar.bindings(@rebind_domain, "50815019")
@@ -235,7 +259,7 @@ defmodule Kelix.Mod.RegistrarTest do
           port: 5062
       }
 
-      assert {:ok, _} = Registrar.save(%{ctx.req | contact: moved}, @rebind_domain)
+      assert {:registered, _} = Registrar.save(%{ctx.req | contact: moved}, @rebind_domain)
 
       assert [%Contact{contact: %{domain: "192.168.7.7"}}] =
                Registrar.bindings(@rebind_domain, "50815019")
@@ -245,15 +269,15 @@ defmodule Kelix.Mod.RegistrarTest do
       other =
         SIP.Uri.set_uri_param(ctx.new_contact, "+sip.instance", ~s("<urn:uuid:deadbeef>"))
 
-      assert {:ok, _} = Registrar.save(ctx.req, @rebind_domain)
-      assert {:ok, _} = Registrar.save(%{ctx.req | contact: other}, @rebind_domain)
+      assert {:registered, _} = Registrar.save(ctx.req, @rebind_domain)
+      assert {:registered, _} = Registrar.save(%{ctx.req | contact: other}, @rebind_domain)
       assert length(Registrar.bindings(@rebind_domain, "50815019")) == 2
     end
 
     test "the AOR comes from the raw To header the parser produces", ctx do
       # SIPMsg leaves :to as a string; this is the shape that used to yield 400
       assert is_binary(ctx.req.to)
-      assert {:ok, %{aor: "50815019"}} = Registrar.save(ctx.req, @rebind_domain)
+      assert {:registered, %{aor: "50815019"}} = Registrar.save(ctx.req, @rebind_domain)
     end
   end
 
@@ -308,7 +332,7 @@ defmodule Kelix.Mod.RegistrarTest do
       end
 
       assert {:error, {423, _}} = Registrar.save(req.("strict.example.com"), "strict.example.com")
-      assert {:ok, _} = Registrar.save(req.("lax.example.com"), "lax.example.com")
+      assert {:registered, _} = Registrar.save(req.("lax.example.com"), "lax.example.com")
     end
 
     test "the domain's default_expires caps what is granted" do
@@ -317,22 +341,22 @@ defmodule Kelix.Mod.RegistrarTest do
         | to: %SIP.Uri{userpart: "alice", domain: "strict.example.com"}
       }
 
-      assert {:ok, granted} = Registrar.save(req, "strict.example.com")
+      assert {:registered, granted} = Registrar.save(req, "strict.example.com")
       assert granted.expires == 600
     end
   end
 
   describe "granted contacts (RFC 3261 §10.3-8)" do
     test "the 200 OK material lists every current binding, not just the refreshed one" do
-      assert {:ok, _} = Registrar.save(register("alice", "10.0.0.1"), @domain)
-      assert {:ok, granted} = Registrar.save(register("alice", "10.0.0.2"), @domain)
+      assert {:registered, _} = Registrar.save(register("alice", "10.0.0.1"), @domain)
+      assert {:registered, granted} = Registrar.save(register("alice", "10.0.0.2"), @domain)
 
       hosts = Enum.map(granted.contacts, & &1.domain) |> Enum.sort()
       assert hosts == ["10.0.0.1", "10.0.0.2"]
     end
 
     test "each contact carries its own remaining lifetime" do
-      assert {:ok, granted} = Registrar.save(register("alice", "10.0.0.1"), @domain)
+      assert {:registered, granted} = Registrar.save(register("alice", "10.0.0.1"), @domain)
       assert [contact] = granted.contacts
       assert {:ok, value} = SIP.Uri.get_uri_param(contact, "expires")
       # 3600 granted, allow a second of clock drift through the GenServer call
@@ -340,8 +364,11 @@ defmodule Kelix.Mod.RegistrarTest do
     end
 
     test "an un-REGISTER grants no contact at all" do
-      assert {:ok, _} = Registrar.save(register("alice", "10.0.0.1"), @domain)
-      assert {:ok, granted} = Registrar.save(register("alice", "10.0.0.1", expires: 0), @domain)
+      assert {:registered, _} = Registrar.save(register("alice", "10.0.0.1"), @domain)
+
+      assert {:unregistered, granted} =
+               Registrar.save(register("alice", "10.0.0.1", expires: 0), @domain)
+
       assert granted.contacts == []
     end
   end
@@ -638,6 +665,80 @@ defmodule Kelix.Mod.RegistrarTest do
       Process.exit(dialog, :kill)
       refute_receive {:registrar, :disconnected, "dave@example.com"}, 300
       assert [_still_there] = Registrar.bindings(@domain, "dave")
+    end
+
+    # One binding, one session. Two registrar instances were found alive on
+    # 2026-08-11 for a single Linphone binding: re-enabling the account
+    # re-registers the previous Call-ID *and* opens a new one, both naming the same
+    # contact. The store kept one binding and the losing session stayed in
+    # `kelictl monitor`, claiming a registration it no longer held.
+    test "a binding re-registered by another dialog supersedes the previous session" do
+      uri = %SIP.Uri{userpart: "alice", domain: @domain}
+      Registrar.subscribe_register_event(uri, self())
+
+      {:ok, d1} = FakeDialog.start(self())
+      {:ok, d2} = FakeDialog.start(self())
+      req = register("alice", "10.0.0.9", tp_module: SIP.Transport.TCP)
+
+      assert {:registered, _} = Registrar.save(req, @domain, d1)
+      assert {:registered, _} = Registrar.save(%{req | callid: "call-2"}, @domain, d2)
+
+      assert_receive {:terminated, ^d1, :superseded}, 1000
+      refute_receive {:terminated, ^d2, _}, 200
+
+      # The survivor owns the binding, and the death we just caused must not be
+      # read as a disconnection: the AOR is still registered.
+      refute_receive {:registrar, :disconnected, _}, 300
+      assert [%Contact{dialog_pid: ^d2}] = Registrar.bindings(@domain, "alice")
+    end
+
+    # Over UDP nothing would ever notice the stale dialog — no connection to drop —
+    # so it would sit out a full registration lifetime. Hence supersession applies
+    # whatever the transport, unlike the dialog monitor.
+    test "supersession applies over UDP too" do
+      {:ok, d1} = FakeDialog.start(self())
+      {:ok, d2} = FakeDialog.start(self())
+      req = register("erin", "10.0.0.9", tp_module: SIP.Transport.UDP)
+
+      assert {:registered, _} = Registrar.save(req, @domain, d1)
+      assert {:registered, _} = Registrar.save(%{req | callid: "call-2"}, @domain, d2)
+
+      assert_receive {:terminated, ^d1, :superseded}, 1000
+    end
+
+    test "a refresh from the owning dialog supersedes nothing" do
+      {:ok, d1} = FakeDialog.start(self())
+      req = register("frank", "10.0.0.9", tp_module: SIP.Transport.TCP)
+
+      assert {:registered, _} = Registrar.save(req, @domain, d1)
+      assert {:registered, _} = Registrar.save(req, @domain, d1)
+
+      refute_receive {:terminated, _, _}, 300
+      assert [%Contact{dialog_pid: ^d1}] = Registrar.bindings(@domain, "frank")
+    end
+
+    # Two devices on one AOR: two contacts, two sessions, neither supplanting the
+    # other. Only the dialog that owned THIS contact is superseded.
+    test "a second contact for the same AOR leaves the first session alone" do
+      {:ok, d1} = FakeDialog.start(self())
+      {:ok, d2} = FakeDialog.start(self())
+
+      assert {:registered, _} =
+               Registrar.save(
+                 register("gina", "10.0.0.9", tp_module: SIP.Transport.TCP),
+                 @domain,
+                 d1
+               )
+
+      assert {:registered, _} =
+               Registrar.save(
+                 register("gina", "10.0.0.10", callid: "call-2", tp_module: SIP.Transport.TCP),
+                 @domain,
+                 d2
+               )
+
+      refute_receive {:terminated, _, _}, 300
+      assert length(Registrar.bindings(@domain, "gina")) == 2
     end
 
     test "the periodic sweep removes expired bindings + emits :expired" do

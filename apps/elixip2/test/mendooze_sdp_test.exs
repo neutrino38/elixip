@@ -646,6 +646,34 @@ defmodule Mendooze.SdpTest do
       assert {:error, :no_common_codec} = Sdp.negotiate(offer, ["OPUS"])
     end
 
+    # A payload-type map has no order of its own. Whoever must name ONE codec out
+    # of it needs the peer's stated preference, or the only tiebreak left is the
+    # PT number — and a static PT always beats a dynamic one, so opus at 98 reads
+    # as PCMU at 0.
+    test "the remote format order travels with the negotiation" do
+      {:ok, [answer]} =
+        Sdp.parse("""
+        v=0
+        o=- 1 1 IN IP4 172.16.0.1
+        s=-
+        c=IN IP4 172.16.0.1
+        t=0 0
+        m=audio 35767 RTP/AVP 98 0 8 101
+        a=rtpmap:98 opus/48000/2
+        a=rtpmap:101 telephone-event/8000
+        """)
+
+      assert {:ok, neg} = Sdp.negotiate(answer, ["OPUS", "PCMU", "PCMA"])
+      assert neg.fmt_order == answer.raw_fmt
+
+      # opus is what this leg settled on, though PCMU carries the lower PT
+      assert [{"98", _opus} | _] =
+               Enum.sort_by(
+                 Map.drop(neg.rtp_map, ["101"]),
+                 &Sdp.pt_rank(&1, neg.fmt_order)
+               )
+    end
+
     test "text offer with red (RFC 4103) negotiates T140 + T140RED" do
       {:ok, [text]} =
         Sdp.parse("""

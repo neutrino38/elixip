@@ -209,9 +209,10 @@ defmodule MediaServer do
           rtp_profile: :avp | :avpf,
           # let the media server follow a symmetric NAT's mapping instead of the
           # send address the peer signalled. `:auto` (the default) leaves it to the
-          # adapter, which enables it on the legs that ANSWER a remote offer —
-          # the ones where the peer chose that address, and where a NATed peer
-          # therefore hands us its private one. Adapters that cannot latch ignore it.
+          # adapter, which asks for it on every leg that is not ICE — a NATed peer
+          # hands us its private address in an ANSWER just as readily as in an
+          # offer, and under ICE the address is settled by connectivity checks
+          # instead. Adapters that cannot latch ignore it.
           nat_latch: boolean() | :auto
         ]
 
@@ -319,6 +320,29 @@ defmodule MediaServer do
     @callback add_remote_candidate(conn :: pid(), candidate :: String.t()) ::
                 :ok | {:error, term()}
 
+    @doc """
+    The SIP call this connection serves has been **answered**: the peer may now
+    be expected to send RTP, and everything that watches for its absence starts
+    here — never at offer/answer time.
+
+    Negotiating an SDP says what a call *would* carry; it says nothing about when
+    the media starts. Between the two sits the ringing phase, which is silent by
+    definition and lasts as long as a human takes to pick up. An adapter that
+    arms its RTP inactivity watchdog when it processes the SDP therefore reaps
+    every call that rings longer than the timeout: traffic of 2026-08-13, an
+    INVITE answered at 22:12:15, the watchdog fired at 22:12:25 while the callee
+    was still ringing, and the 200 OK relayed at 22:12:32 was followed
+    immediately by a BYE on both legs — a perfectly good call, killed by its own
+    supervision. The same holds for an early answer (183): the callee's SDP is
+    known long before anyone picks up.
+
+    Called once per leg, by the framework, at the moment the call is up for that
+    leg (`SIP.Session.Media.call_answered/2`). Idempotent, and best-effort by
+    contract: a leg that carries media is worth more than a leg that is watched,
+    so an adapter reports a failure to arm rather than failing the call.
+    """
+    @callback call_answered(conn :: MediaServer.conn_ref()) :: :ok | {:error, term()}
+
     @callback close_peer_connection(conn :: pid()) :: :ok
 
     # ── Bridging two peer connections ───────────────────────────────────────
@@ -337,9 +361,17 @@ defmodule MediaServer do
     `{:error, :no_common_codec}` is the expected refusal under `:forbid`.
 
     Idempotent: bridging an already-bridged pair changes nothing.
+
+    `{:ok, %{inbound_answer: sdp}}` hands back leg `a`'s answer, **rebuilt** now
+    that both legs are known: a relayed media is restricted to the codecs BOTH
+    legs carry, so every codec left in the answer is one the media server can
+    actually pass through, and the caller may switch between them mid-call with no
+    renegotiation. Callers that hold an answer produced when the offer arrived
+    must replace it with this one. A plain `:ok` means nothing changed — the
+    adapter does not rebuild, or leg `a` never answered an offer.
     """
     @callback bridge(a :: MediaServer.conn_ref(), b :: MediaServer.conn_ref(), opts :: keyword()) ::
-                :ok | {:error, term()}
+                :ok | {:ok, %{inbound_answer: String.t()}} | {:error, term()}
 
     @doc """
     Take the media path down without closing either connection — putting a call

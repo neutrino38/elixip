@@ -841,6 +841,37 @@ it), deferring means the `{:ACK, …}` clause relays it. Default in the
 reference scenario: **deferred** (`b2bua_forward(req)` on the ACK event) —
 it is the truthful relay and exercises the correlation machinery.
 
+### 6.1 Challenging a caller: `b2bua_challenge/2..3`
+
+```elixir
+b2bua_challenge(req, params, code \\ 407)
+```
+
+A local reply carrying a digest challenge, on the leg the current event came
+from. `params` is the challenge the **application** built — its own stateless
+nonce plus `qop`/`stale`/`algorithm` (`Kelix.Auth.challenge_params/2`) — sent
+verbatim, so nothing here mints or stores a nonce. Which header carries it
+follows the code, through the message layer's single reading of that mapping
+(`SIP.Msg.Ops.challenge_header/1`): `401` → `WWW-Authenticate` (§22.2), `407` →
+`Proxy-Authenticate` (§22.3).
+
+Two decisions are worth stating:
+
+- **407 is the default.** A B2BUA is formally a UAS, so `401` is the letter of
+  the RFC; but a UA expects the server routing its calls to challenge as a proxy,
+  and many will not retry a `401` on an INVITE. Both codes are accepted, and the
+  scenario picks.
+- **It is not `challenge_invite/1..2`.** That verb has the *dialog layer* mint the
+  nonce, which cannot carry `qop=auth`, `stale`, or the algorithm the
+  authentication backend can actually verify. `b2bua_challenge/3` is the
+  application-composed form, and the exact counterpart of
+  `SIP.Session.Registrar.challenge_registration/3` for a call.
+
+The verdict that leads here comes from an authentication module and never
+contains a SIP message (§11.1); see
+[evolution-auth-db.md](evolution-auth-db.md) §2 and the reference script
+`apps/kelixip/scripts/direct-call-with-auth.exs`.
+
 ## 7. Media handling modes
 
 ### `false` — pure signaling B2BUA

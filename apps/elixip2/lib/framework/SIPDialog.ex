@@ -47,7 +47,7 @@ defmodule SIP.Dialog do
   # Create from TAG and add it the from URI
   defp get_or_create_dialog_id(req, {nil, callid, totag}) do
     fromtag = generate_from_or_to_tag()
-    req = Map.put(req, :from, SIP.Uri.set_uri_param(req.from, "tag", fromtag))
+    req = Map.put(req, :from, SIP.Uri.set_header_param(req.from, "tag", fromtag))
     get_or_create_dialog_id(req, {fromtag, callid, totag})
   end
 
@@ -287,7 +287,7 @@ defmodule SIP.Dialog do
   Send a new in-dialog request out. On success returns `{ :ok, transaction_pid }`
   where `transaction_pid` is the freshly created UAC transaction (usable to ACK or
   CANCEL the request). On failure returns the bare error code (e.g.
-  `:methodnotallowed`, `:toomanytransactons`, or a transport error code).
+  `:methodnotallowed`, `:toomanytransactions`, or a transport error code).
   """
   def new_request(dialog_pid, req) when is_pid(dialog_pid) and is_req(req) do
     GenServer.call(dialog_pid, {:newreq, req})
@@ -363,6 +363,42 @@ defmodule SIP.Dialog do
 
   def ack(dialog_pid, transac_pid) when is_pid(dialog_pid) do
     GenServer.call(dialog_pid, {:ack, transac_pid})
+  end
+
+  @doc """
+  ACK the 2xx `dialog_pid` is still holding an INVITE client transaction for, if
+  there is one. `:ok` when it did, `:none` when nothing was owed — quietly either
+  way, since "already acknowledged" is the ordinary case.
+
+  For the caller that has to end a call without knowing whether the ACK went out:
+  a BYE only ends an *established* dialog (RFC 3261 §15), and one whose 2xx the
+  far end is still retransmitting is not established as far as it is concerned.
+  """
+  @spec ack_pending_invite(pid()) :: :ok | :none
+  def ack_pending_invite(dialog_pid) when is_pid(dialog_pid) do
+    GenServer.call(dialog_pid, :ack_pending_invite)
+  end
+
+  @doc """
+  End `dialog_pid` now, stating why: its application receives the one
+  `{:dialog_terminated, dialog_pid, reason}` the contract promises, with `reason`
+  verbatim.
+
+  For the dialogs nothing else can end. A call dialog is ended by the BYE the
+  application sends through it, and a REGISTER dialog by its expiration timer or
+  by the flow under it dropping — but a REGISTER dialog the registrar has
+  *superseded* (the same binding re-registered by another Call-ID, which is what a
+  client re-enabling its account produces) is stale with no event of its own to
+  notice it. Without this it sat there for a full registration lifetime, with a
+  scenario instance still riding it.
+
+  Asynchronous on purpose: the caller is often a module holding a store (the
+  registrar), which must not block on a foreign process — and a `cast` to a dialog
+  that already died is a no-op, which is exactly the right answer here.
+  """
+  @spec terminate(pid(), atom()) :: :ok
+  def terminate(dialog_pid, reason) when is_pid(dialog_pid) and is_atom(reason) do
+    GenServer.cast(dialog_pid, {:terminate, reason})
   end
 
   @doc """

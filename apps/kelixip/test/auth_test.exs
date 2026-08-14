@@ -3,8 +3,8 @@ defmodule Kelix.AuthTest do
 
   @secret :binary.copy(<<0x5C>>, 32)
 
-  test "builds a WWW-Authenticate challenge with a valid stateless nonce + qop" do
-    params = Kelix.Auth.challenge_www_authenticate("example.com", secret: @secret)
+  test "builds a digest challenge with a valid stateless nonce + qop" do
+    params = Kelix.Auth.challenge_params("example.com", secret: @secret)
 
     assert params["realm"] == "example.com"
     assert params["qop"] == "auth"
@@ -16,7 +16,15 @@ defmodule Kelix.AuthTest do
   end
 
   test "stale: true adds stale=true to the challenge" do
-    params = Kelix.Auth.challenge_www_authenticate("d.com", secret: @secret, stale: true)
+    params = Kelix.Auth.challenge_params("d.com", secret: @secret, stale: true)
     assert params["stale"] == "true"
+  end
+
+  # The params say nothing about which header carries them; the code does, and that
+  # mapping has one home (401 → WWW-Authenticate for a UAS, 407 → Proxy-Authenticate
+  # for the server routing a call).
+  test "the challenge header follows the response code" do
+    assert SIP.Msg.Ops.challenge_header(401) == :wwwauthenticate
+    assert SIP.Msg.Ops.challenge_header(407) == :proxyauthenticate
   end
 end

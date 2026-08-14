@@ -56,7 +56,11 @@ defmodule SIP.Test.Uri do
 			assert parsed_uri.userpart == "simple"
 			assert parsed_uri.domain == "domain.fr"
 			assert parsed_uri.port == 5030
-			assert parsed_uri.params == %{ "rport" => true, "transport" => "TCP"}
+			# after the `>`, so header parameters — and `transport` misplaced there is
+			# still understood (get_uri_param/2 reads both sets)
+			assert parsed_uri.params == %{}
+			assert parsed_uri.hparams == %{ "rport" => true, "transport" => "TCP"}
+			assert parsed_uri.proto == "TCP"
 	end
 
   test "Parse an URI with a display name and several parameters" do
@@ -65,20 +69,20 @@ defmodule SIP.Test.Uri do
 			assert parsed_uri.userpart == "simple"
 			assert parsed_uri.domain == "domain.fr"
 			assert parsed_uri.port == 50
-			assert parsed_uri.params == %{ "rport" => true, "transport" => "TCP"}
+			assert parsed_uri.hparams == %{ "rport" => true, "transport" => "TCP"}
 			assert parsed_uri.displayname == "omé tür"
 	end
 
 	test "Parse an URI with a display name without spece" do
 		{ code, parsed_uri } = SIP.Uri.parse("\"Site%20Arras%20POLE%20EMPLOI\"<sip:+33970260233@visioassistance.net>;tag=8075639")
 		assert code == :ok
-		assert parsed_uri.params == %{ "tag" => "8075639" }
+		assert parsed_uri.hparams == %{ "tag" => "8075639" }
 	end
 
 	test "Parse a register contact URI from the proxy"  do
 		{ code, parsed_uri } = SIP.Uri.parse("<sip:172.21.93.138>;expires=3600;received=\"sip:37.71.250.86:53266\"")
 		assert code == :ok
-		assert Map.get(parsed_uri.params, "expires") == "3600"
+		assert Map.get(parsed_uri.hparams, "expires") == "3600"
 	end
 
 	test "Quoted param value containing ';' is not split (no spurious transport param)" do
@@ -86,11 +90,12 @@ defmodule SIP.Test.Uri do
 			SIP.Uri.parse("<sip:33970262546@172.22.0.3:50378>;expires=600;received=\"sip:37.71.250.86:41912;transport=TLS\"")
 
 		assert code == :ok
-		assert Map.get(parsed_uri.params, "expires") == "600"
-		assert Map.get(parsed_uri.params, "received") == "\"sip:37.71.250.86:41912;transport=TLS\""
-		# the ;transport=TLS inside the quotes must NOT become a URI param —
+		assert Map.get(parsed_uri.hparams, "expires") == "600"
+		assert Map.get(parsed_uri.hparams, "received") == "\"sip:37.71.250.86:41912;transport=TLS\""
+		# the ;transport=TLS inside the quotes must NOT become a param of either set —
 		# it would make get_transport/1 route this contact over TLS
 		refute Map.has_key?(parsed_uri.params, "transport")
+		refute Map.has_key?(parsed_uri.hparams, "transport")
 	end
 
 	test "Quoted param value containing '=' is kept intact" do
@@ -98,8 +103,8 @@ defmodule SIP.Test.Uri do
 			SIP.Uri.parse("<sip:bob@10.0.0.1>;+sip.instance=\"<urn:uuid:aa=bb==>\";expires=60")
 
 		assert code == :ok
-		assert Map.get(parsed_uri.params, "expires") == "60"
-		assert Map.get(parsed_uri.params, "+sip.instance") == "\"<urn:uuid:aa=bb==>\""
+		assert Map.get(parsed_uri.hparams, "expires") == "60"
+		assert Map.get(parsed_uri.hparams, "+sip.instance") == "\"<urn:uuid:aa=bb==>\""
 	end
 
 	test "Quoted param on a bare URI form is not split" do
@@ -120,19 +125,29 @@ defmodule SIP.Test.Uri do
 	end
 
 	# A bracketed URI carries TWO kinds of parameter: the URI ones inside the `<>`
-	# and the header ones after it. They share one `params` map, and the header set
-	# used to OVERWRITE it — so every URI parameter of a bracketed URI silently
-	# vanished on parse. Found while reading a real handset's Contact.
-	test "URI parameters inside <> survive alongside the header parameters" do
+	# and the header ones after it. They used to share one `params` map — first the
+	# header set OVERWROTE it (every URI parameter of a bracketed URI vanished on
+	# parse), then they were merged, which lost the frontier and sent a `name-addr`
+	# out as a Request-URI. Both found in a real handset's Contact.
+	test "URI parameters inside <> are kept apart from the header parameters" do
 		{ :ok, uri } = SIP.Uri.parse("<sip:alice@example.com;user=phone;transport=tcp>;expires=0")
-		assert Map.get(uri.params, "user") == "phone"
-		assert Map.get(uri.params, "transport") == "tcp"
-		assert Map.get(uri.params, "expires") == "0"
+		assert uri.params == %{ "user" => "phone", "transport" => "tcp" }
+		assert uri.hparams == %{ "expires" => "0" }
 	end
 
-	test "a header parameter wins a name collision with a URI parameter" do
+	# The precedence only decides the malformed case where one name appears on both
+	# sides, and it follows the parameter's nature: RFC 3261 §10.2.4 reads the
+	# Contact *header* parameter, so this contact expires in 600 s, not 10.
+	test "a header parameter wins a name collision for a header parameter" do
 		{ :ok, uri } = SIP.Uri.parse("<sip:alice@example.com;expires=10>;expires=600")
-		assert Map.get(uri.params, "expires") == "600"
+		assert SIP.Uri.get_header_param(uri, "expires") == { :ok, "600" }
+		assert SIP.Msg.Ops.contact_expires_param(uri) == 600
+	end
+
+	test "a URI parameter wins a name collision for a URI parameter" do
+		{ :ok, uri } = SIP.Uri.parse("<sip:alice@example.com;transport=tcp>;transport=udp")
+		assert SIP.Uri.get_uri_param(uri, "transport") == { :ok, "tcp" }
+		assert uri.proto == "TCP"
 	end
 
 	test "the loose-routing marker of a Route survives" do
@@ -155,8 +170,16 @@ defmodule SIP.Test.Uri do
 		{ :ok, uri } = SIP.Uri.parse(original)
 		{ :ok, serialized } = SIP.Uri.serialize(uri)
 
+		# each set back on its own side of the bracket (parameter order within a set
+		# follows the map, so the sides are what is asserted, not the exact string)
+		assert [inside, outside] = String.split(serialized, ">")
+		assert String.contains?(inside, "user=phone")
+		assert String.contains?(inside, "transport=tcp")
+		assert outside == ";expires=600"
+
 		{ :ok, reparsed } = SIP.Uri.parse(serialized)
 		assert reparsed.params == uri.params
+		assert reparsed.hparams == uri.hparams
 		assert reparsed.proto == "TCP"
 		assert reparsed.userpart == "alice"
 		assert reparsed.port == 5070
@@ -174,7 +197,102 @@ defmodule SIP.Test.Uri do
 
 		{ code, uristr } = SIP.Uri.serialize(uri)
 		assert code == :ok
-		assert uristr == "\"om%C3%A9+t%C3%BCr\" <sip:simple@domain.fr:50>;rport;transport=TCP"
+		# `params` are URI parameters, so they belong INSIDE the brackets: outside,
+		# RFC 3261 §20 makes them header parameters and `transport` stops describing
+		# the address
+		assert uristr == "\"om%C3%A9+t%C3%BCr\" <sip:simple@domain.fr:50;rport;transport=TCP>"
+	end
+
+	test "header parameters are serialized after the closing bracket" do
+		uri =
+			%SIP.Uri{ userpart: "bob", domain: "example.com", port: 5060 }
+			|> SIP.Uri.set_uri_param("transport", "tcp")
+			|> SIP.Uri.set_header_param("expires", "600")
+
+		assert to_string(uri) == "<sip:bob@example.com;transport=tcp>;expires=600"
+	end
+
+	# §19.1.5 again: a parameter the caller declares to be a URI parameter is one,
+	# whatever its name, and it MUST reach the Request-URI. Guessing from the name
+	# instead made `sip:…;scenario=answered_call` lose its parameter on the wire.
+	test "an unregistered URI parameter reaches the Request-URI" do
+		uri =
+			%SIP.Uri{ userpart: "bob", domain: "example.com" }
+			|> SIP.Uri.set_uri_param("scenario", "answered_call")
+
+		assert { :ok, ruri } = SIP.Uri.serialize_ruri(uri)
+		assert ruri == "sip:bob@example.com;scenario=answered_call"
+	end
+
+	# A parameter is set once. A To whose tag was parsed as a URI parameter (the
+	# unbracketed form) must not go out carrying two of them once the dialog sets
+	# its own.
+	test "setting a parameter on one side clears it on the other" do
+		{ :ok, parsed } = SIP.Uri.parse("sip:bob@example.com;tag=old")
+		assert parsed.params == %{ "tag" => "old" }
+
+		retagged = SIP.Uri.set_header_param(parsed, "tag", "new")
+		assert retagged.params == %{}
+		assert retagged.hparams == %{ "tag" => "new" }
+		assert to_string(retagged) == "<sip:bob@example.com>;tag=new"
+	end
+
+	test "an address with only header parameters keeps the bare addr-spec form" do
+		# RFC 3261 §20: with no URI parameter there is nothing to disambiguate, and
+		# this is what a To with a tag has always looked like on the wire
+		{ :ok, uri } = SIP.Uri.parse("sip:bob@example.com;tag=abc123")
+		assert to_string(uri) == "sip:bob@example.com;tag=abc123"
+	end
+
+	# The bug that hung every forwarded call: a registered Contact used verbatim as
+	# a Request-URI. `INVITE "Bob" <sip:…>;+sip.instance="<urn:uuid:…>" SIP/2.0` is
+	# not a Request-Line (§25.1 `Request-URI = SIP-URI / SIPS-URI / absoluteURI`) —
+	# the display name alone inserts a space that ends the URI — and Linphone
+	# dropped it without a single response.
+	test "serialize_ruri strips what a Request-URI may not carry" do
+		contact =
+			"\"Bob\" <sip:50815019@172.22.0.3:43038;transport=tcp>" <>
+				";+org.linphone.specs=\"conference/2.0,ephemeral/1.1\"" <>
+				";+sip.instance=\"<urn:uuid:63237b52-0e4c-48b5-a173-c15e0d164735>\";expires=3600"
+
+		{ :ok, uri } = SIP.Uri.parse(contact)
+		{ :ok, ruri } = SIP.Uri.serialize_ruri(uri)
+
+		assert ruri == "sip:50815019@172.22.0.3:43038;transport=tcp"
+		refute String.contains?(ruri, "\"")
+		refute String.contains?(ruri, "<")
+		refute String.contains?(ruri, " ")
+	end
+
+	# §19.1.5: "Unknown URI parameters MUST be placed in the message's Request-URI."
+	# So the stripping is targeted, never an allowlist of names we happen to know.
+	test "serialize_ruri keeps every URI parameter, known or not" do
+		{ :ok, uri } = SIP.Uri.parse("<sip:bob@example.com;transport=tcp;maddr=1.2.3.4;x-vendor=42>;expires=60")
+		{ :ok, ruri } = SIP.Uri.serialize_ruri(uri)
+
+		assert String.contains?(ruri, "transport=tcp")
+		assert String.contains?(ruri, "maddr=1.2.3.4")
+		assert String.contains?(ruri, "x-vendor=42")
+		refute String.contains?(ruri, "expires")
+	end
+
+	# §19.1.5: "The method parameter MUST NOT be placed in the Request-URI."
+	test "serialize_ruri drops the method parameter" do
+		{ :ok, uri } = SIP.Uri.parse("sip:bob@example.com;method=INVITE;transport=tcp")
+		{ :ok, ruri } = SIP.Uri.serialize_ruri(uri)
+
+		refute String.contains?(ruri, "method")
+		assert String.contains?(ruri, "transport=tcp")
+	end
+
+	test "serialize_ruri keeps the transport info a NATed contact is reachable over" do
+		{ :ok, uri } = SIP.Uri.parse("<sip:bob@172.22.0.3:43038;transport=tcp>;expires=60")
+		target = %SIP.Uri{ uri | destip: { 37, 71, 250, 86 }, destport: 41912, tp_pid: self() }
+		stripped = SIP.Uri.to_request_uri(target)
+
+		assert stripped.destip == { 37, 71, 250, 86 }
+		assert stripped.destport == 41912
+		assert stripped.tp_pid == self()
 	end
 
 	test "Serialize a SIP URI with a domain only with to_string " do
@@ -182,8 +300,11 @@ defmodule SIP.Test.Uri do
 		assert to_string(uri) == "sip:domaine.fr"
 		uri = %SIP.Uri{ userpart: nil, domain: "djanah.com", port: 5061, scheme: "sip:", proto: "TLS" }
 		# lower-case: RFC 3261 §19.1.1 registers the transport values that way, and
-		# serialize synthesizes this one from `proto` (held upper-case internally)
-		assert to_string(uri) == "sip:djanah.com:5061;transport=tls"
+		# serialize synthesizes this one from `proto` (held upper-case internally).
+		# Bracketed: unbracketed, §20 reads `transport` as a header parameter — the
+		# 2026-08-14 capture shows a peer (correctly) ACKing a TCP dialog over UDP
+		# for exactly that.
+		assert to_string(uri) == "<sip:djanah.com:5061;transport=tls>"
 	end
 
 	test "Serialize a SIPS URI" do
@@ -202,8 +323,9 @@ defmodule SIP.Test.Uri do
 		assert to_string(uri) == "sip:toto@1.2.3.4"
 		uri = %SIP.Uri{ userpart: "toto", domain: { 1, 2, 3, 4}, port: 5070 }
 		assert to_string(uri) == "sip:toto@1.2.3.4:5070"
+		# A URI parameter forces the name-addr form: see the transport=tls case above.
 		uri = %SIP.Uri{ userpart: "toto", domain: { 1, 2, 3, 4}, port: 5070, params: %{ "transport" => "WSS"}}
-		assert to_string(uri) == "sip:toto@1.2.3.4:5070;transport=WSS"
+		assert to_string(uri) == "<sip:toto@1.2.3.4:5070;transport=WSS>"
 		uri = %SIP.Uri{ userpart: "toto", domain: { 1, 2, 3, 4}, port: 5070, scheme: "sips:" }
 		assert to_string(uri) == "sips:toto@1.2.3.4:5070"
 
@@ -602,6 +724,31 @@ defmodule SIP.Test.Parser do
 		{code, reparsed} = SIPMsg.parse(serialized, fn _c, _m, _l, _li -> nil end)
 		assert code == :ok
 		assert reparsed.contact == :*
+	end
+
+	# The end-to-end shape of the forwarded-call bug: a registered Contact becomes
+	# the target of an outbound request, and the Request-Line must survive it. What
+	# went out instead was
+	#   INVITE "Bob" <sip:…>;+sip.instance="<urn:uuid:…>";transport=tcp SIP/2.0
+	# — two tokens where one Request-URI belongs — which Linphone dropped in
+	# silence, leaving the caller in `proceeding` until the scenario timed out.
+	test "a Contact used as the target serializes into a valid Request-Line" do
+		{:ok, parsed} = parse_register(
+			"Contact: \"Bob\" <sip:bob@172.22.0.3:43038;transport=tcp>" <>
+				";+sip.instance=\"<urn:uuid:63237b52-0e4c-48b5-a173-c15e0d164735>\";expires=3600\r\n"
+		)
+
+		req = Map.put(parsed, :ruri, parsed.contact)
+		[first_line | _] = SIPMsg.serialize(req) |> String.split("\r\n")
+
+		assert first_line == "REGISTER sip:bob@172.22.0.3:43038;transport=tcp SIP/2.0"
+
+		# and it parses back as a request, which the name-addr form did not
+		{code, reparsed} = SIPMsg.parse(SIPMsg.serialize(req), fn _c, _m, _l, _li -> nil end)
+		assert code == :ok
+		assert reparsed.ruri.userpart == "bob"
+		assert reparsed.ruri.port == 43038
+		assert reparsed.ruri.proto == "TCP"
 	end
 
 	test "Multiple contacts round-trip: serialize then re-parse preserves the list" do

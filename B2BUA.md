@@ -27,7 +27,8 @@ Nothing is relayed unless the scenario says so.
 We will consider three common use cases:
 
 - a kamailio like SIP proxy scenario `direct-call.exs` where Alice calls Bob. No media relay invovled.
-  Bob can have registered his SIP account on several devices.
+  Bob can have registered his SIP account on several devices. Its authenticated
+  variant `direct-call-with-auth.exs` challenges Alice's INVITE first.
 - A customer service: Alice calls in on a short number and the scenario `customer-service.exs` calls 
   several phone number serially.
 - a WebRTC to SIP gateway scenario `webrtc-gw.exs` that takes a WebRTC call from a proxy and resend this call
@@ -111,6 +112,24 @@ after a CANCEL is automatic; `100 Trying` is not.
 b2bua_send_BYE()   # hang the outbound leg up on our own initiative
 ```
 
+### Challenging the caller
+
+```elixir
+b2bua_challenge(req, params, code \\ 407)   # 407 + Proxy-Authenticate, or 401
+```
+
+Answers `req` on the leg it came from with a digest challenge — `params` being the
+challenge the application built (`Kelix.Auth.challenge_params/2` mints the
+stateless nonce, `qop=auth` and `stale`). The header follows the code: a `401`
+carries `WWW-Authenticate`, a `407` `Proxy-Authenticate`.
+
+`407` is the default because that is what deployed UAs expect of the server
+routing their calls — a B2BUA is formally a UAS, and many phones will not retry a
+`401` on an INVITE.
+
+The authentication backend decides *that* a challenge is owed and never composes
+a response; the scenario composes it. See `direct-call-with-auth.exs` below.
+
 ### Hunting several targets
 
 ```elixir
@@ -151,9 +170,29 @@ The third argument of `b2bua_forward/3`:
 
 `inbound:` / `outbound:` say how each leg terminates its media — `webrtc:` takes
 `:yes`, `:no`, `:if_offered` or `:no_avp`, and this is where a gateway is
-expressed. `transcode:` is a policy per media: `:avoid` (default) connects the
-two endpoints directly when they share a codec and transcodes only when they do
-not, `:force` always transcodes, `:forbid` fails the call instead.
+expressed.
+
+`transcode:` is a policy per media, and what it selects is a **codec for both
+legs at once** — the two legs of a B2BUA cannot be negotiated independently:
+
+- **`:avoid`** *(default)* — the first codec the caller offered that the callee
+  also answered, for both legs. Same codec on both sides means packets cross
+  without being re-encoded.
+- **`:force`** — each leg keeps the head of **its own** list, so each peer is
+  served the codec **it** asked for whatever the other settled on.
+- **`:forbid`** — the same selection as `:avoid`, but no common codec **fails**
+  the media rather than converting it.
+
+Careful with two things this wording used to get wrong. `:force` does not mean
+"always convert": when the two heads happen to be the same codec, nothing is
+converted. And `:avoid` does not attach the two endpoints directly — a converter
+stays in the path and decides *per packet*, forwarding untouched while the legs
+agree, which is what lets it follow a peer that switches codec mid-stream.
+`:forbid` is the only policy that gets a direct attachment.
+
+**👉 The full rules, the use cases and the RFC index are in
+[CODEC-NEGOTIATION.md](CODEC-NEGOTIATION.md)** — including WebRTC gateways,
+real-time text, and what happens when a media is added or withdrawn mid-call.
 
 The bridge is **automatic**: `b2bua_forward_reply/1` builds it when it relays the
 `2xx`, the first moment both SDPs are known.
@@ -462,6 +501,93 @@ What is worth noticing:
   of the call while the hunt kept ringing his desk phone.
 - **`place_call` has no `on_events`.** A state may simply decide and `goto`;
   the lookup happens once, not on every event.
+
+## Scenario direct-call-with-auth.exs
+
+> Ships as
+> [`apps/kelixip/scripts/direct-call-with-auth.exs`](apps/kelixip/scripts/direct-call-with-auth.exs).
+> Same call as above, with the caller's INVITE authenticated first — kamailio's
+> `proxy_authenticate(); lookup("location"); t_relay()`.
+
+Authentication is **three states in front of the call**, not a complication of the
+call: everything from `place_call` on is `direct-call.exs` unchanged.
+
+```elixir
+  config(uses_modules: [:registrar, :auth_db])
+
+  state wait_invite do
+    on_events do
+      {:INVITE, req, _trans, _dlg} ->
+        b2bua_reply(req, 100, "Trying")
+        goto(authenticate_caller, "INVITE received")
+      # … as in direct-call.exs
+    end
+  end
+
+  # Who is calling? A state with no on_events: it decides and moves on.
+  state authenticate_caller do
+    req = last_uas_req()
+
+    case Kelix.Mod.AuthDb.authenticate(req, sip_ctx.domain) do
+      {:ok, identity} ->
+        SIP.Scenario.Monitor.note_account(identity.user)
+        goto(place_call, "INVITE authenticated as #{identity.user}")
+
+      {:requireauth, stale} ->
+        params =
+          Kelix.Auth.challenge_params(sip_ctx.domain,
+            stale: stale,
+            algorithm: Kelix.Mod.AuthDb.challenge_algorithm()
+          )
+
+        b2bua_challenge(req, params, 407)
+        goto(wait_credentials, if(stale, do: "407 stale", else: "407 challenge"))
+
+      {:reject, code, reason} ->
+        b2bua_reply(req, code, reason)
+        goto(wait_credentials, "#{code} #{reason}")
+    end
+  end
+
+  # The challenged INVITE comes back with credentials, on the same dialog: same
+  # Call-ID, a new CSeq, no To tag.
+  state wait_credentials do
+    on_events do
+      {:INVITE, req, _trans, _dlg} ->
+        b2bua_reply(req, 100, "Trying")
+        goto(authenticate_caller, "INVITE re-submitted")
+
+      {:CANCEL, _req, _trans, _dlg} ->
+        scenario_aborted("caller cancelled the challenged call")
+
+      {:dialog_terminated, _dlg, _reason} ->
+        scenario_success("caller gave up on the challenge")
+    after
+      32_000 -> scenario_success("no credentials came back")
+    end
+  end
+```
+
+What is worth noticing:
+
+- **The module decides, the script composes.** `authenticate/3` answers a verdict
+  and never a SIP message; the script is what turns `{:requireauth, stale}` into a
+  `407` and `{:reject, 403, _}` into a refusal. The script, symmetrically, never
+  reads an `Authorization` header.
+- **`last_uas_req()` is the request being authenticated**, and that matters twice
+  here: it is the *last* INVITE received — the one carrying the credentials — never
+  the challenged one. Nothing is carried from state to state by hand.
+- **A `403` does not end the instance.** The dialog outlives the scenario instance,
+  so an instance that ended still matches the next INVITE of that Call-ID and casts
+  it to a dead process — the client would then get no answer at all. A refusal is
+  one request's verdict, not the end of the conversation; the `after` in
+  `wait_credentials` is what eventually ends it.
+- **The algorithm is passed to the challenge.** The stored secret was salted with
+  one hash, so the challenge must name that one (`challenge_algorithm/0`) — a
+  challenge advertising MD5 against a sha256 base re-challenges for ever.
+- **Nothing in-dialog is re-authenticated.** The dialog was authenticated when it
+  was created; challenging a re-INVITE mid-call breaks UAs and proves nothing new
+  (`Kelix.Mod.AuthDb.challengeable?/1` states the rule).
 
 ## Scenario customer-service.exs
 
@@ -887,8 +1013,12 @@ What is worth noticing:
   fingerprints, ICE candidates, `RTP/SAVPF` versus `RTP/AVP`, rtcp-mux — follows
   from those two words.
 - **`transcode: [video: :force]`** because a browser and a SIP phone rarely share
-  a video codec, and `:avoid` would then have to build the chain anyway. Forcing
-  it makes the cost explicit at read time instead of at call time.
+  a video codec: each side is served the codec it asked for, and the cost is
+  explicit at read time instead of at call time. Worth knowing what it gives up —
+  when the two *do* share one (a browser and a phone that both do H.264),
+  `:avoid` would have relayed it and `:force` converts anyway. Choose `:force`
+  when you want a known codec on each leg, `:avoid` when you want the cheapest
+  path the peers allow.
 - **`ruri: :keep` + `outbound_proxy`** are two orthogonal questions: *what* the
   forwarded request asks for, and *where* it is sent. A gateway sitting beside a
   proxy answers them differently — keep the target, change the hop.

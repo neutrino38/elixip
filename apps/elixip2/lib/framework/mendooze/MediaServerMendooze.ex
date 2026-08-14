@@ -130,6 +130,9 @@ defmodule MediaServer.Mendooze do
   def add_remote_candidate(conn, candidate), do: Conn.add_remote_candidate(conn, candidate)
 
   @impl MediaServer.Behaviour
+  def call_answered(conn), do: Conn.call_answered(conn)
+
+  @impl MediaServer.Behaviour
   @spec close_peer_connection(pid()) :: :ok
   def close_peer_connection(conn), do: Conn.close(conn)
 

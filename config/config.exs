@@ -15,7 +15,7 @@ config :logger, :file_log,
   level: :info
 
 config :elixip2,
-  useragent: "Elixipp-1.3",
+  useragent: "Elixipp-1.4",
   optionkeepaliveperiod: 15,
   # When true, an unparseable incoming SIP message is dumped verbatim (inspected,
   # so CRLF/empty frames are visible) at warning level — useful to diagnose a
@@ -44,7 +44,10 @@ config :elixip2, :mediaserver,
 
 # Mendooze JSR309 adapter tuning (used when :mediaserver selects :mendooze)
 config :elixip2, MediaServer.Mendooze,
-  xmlrpc_timeout_ms: 10_000,
+  # A control RPC to a media server on the same host answers in milliseconds;
+  # two seconds is the point past which it is not slow but broken, and waiting
+  # longer only keeps the scenario from acting on its own (see XmlRpc).
+  xmlrpc_timeout_ms: 2_000,
   rtp_timeout_ms: 10_000,
   poller_retry_ms: 1_000,
   poller_max_failures: 5

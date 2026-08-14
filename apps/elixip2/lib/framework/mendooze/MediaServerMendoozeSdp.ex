@@ -42,7 +42,12 @@ defmodule MediaServer.Mendooze.Sdp do
     "PCMU" => {0, 0, 8000, 1},
     "PCMA" => {8, 8, 8000, 1},
     "G722" => {9, 9, 8000, 1},
-    "OPUS" => {98, 98, 48_000, 2}
+    "OPUS" => {98, 98, 48_000, 2},
+    # Wideband speex only: RFC 5574 registers the ONE encoding name "speex" at
+    # 8000, 16000 and 32000 Hz, and the server factory carries only the 16 kHz
+    # variant (SPEEX16 = 117). The clock in this table is therefore part of the
+    # codec's identity, not a display default — codec_name_for_pt/3 matches it.
+    "SPEEX" => {117, 117, 16_000, 1}
   }
 
   @video_codecs %{
@@ -565,6 +570,7 @@ defmodule MediaServer.Mendooze.Sdp do
   defp sdp_encoding(name) do
     case String.upcase(name) do
       "OPUS" -> "opus"
+      "SPEEX" -> "speex"
       "T140" -> "t140"
       "T140RED" -> "red"
       other -> other
@@ -662,7 +668,7 @@ defmodule MediaServer.Mendooze.Sdp do
   """
   @spec parse(String.t()) :: {:ok, [media_desc() | media_stub()]} | {:error, term()}
   def parse(sdp_str) do
-    case ExSDP.parse(normalize_fingerprint_hash(sdp_str)) do
+    case ExSDP.parse(sdp_str) do
       {:ok, sdp} ->
         session_ip = connection_ip(sdp.connection_data)
         session_attrs = sdp.attributes
@@ -681,18 +687,6 @@ defmodule MediaServer.Mendooze.Sdp do
       {:error, _reason} = err ->
         err
     end
-  end
-
-  # RFC 8122: the a=fingerprint hash-func names are registered lower-case, and
-  # the token is case-insensitive, but ExSDP only accepts the lower-case spelling
-  # and rejects the whole SDP otherwise. Some stacks emit it upper-case — the
-  # IVeS Glassfish gateway sends "a=fingerprint:SHA-256 …" (CryptoInfo.java) —
-  # so lower-case just the hash-func token (never the fingerprint value) before
-  # handing the SDP to ExSDP.
-  defp normalize_fingerprint_hash(sdp_str) do
-    Regex.replace(~r/^(a=fingerprint:)(\S+)/im, sdp_str, fn _whole, prefix, hash ->
-      prefix <> String.downcase(hash)
-    end)
   end
 
   # The raw `a=fmtp:<pt> <params>` values, one map per m= section, in section order.
@@ -810,7 +804,9 @@ defmodule MediaServer.Mendooze.Sdp do
 
   defp parse_media(m, session_ip, session_attrs, raw_fmtp) do
     attrs = m.attributes
-    fmt = normalize_fmt(m.fmt)
+    # every profile in @rtp_profiles is one ExSDP decodes numerically, so `fmt`
+    # is a payload-type list here
+    fmt = m.fmt
     rtpmaps = for %ExSDP.Attribute.RTPMapping{} = rm <- attrs, do: rm
     {rtp_map, codecs, dtmf_pts} = remote_rtp_map(m.type, fmt, rtpmaps)
 
@@ -973,21 +969,6 @@ defmodule MediaServer.Mendooze.Sdp do
 
   defp as_bandwidth(_), do: nil
 
-  # ExSDP only converts fmt entries to integers for some protocol strings
-  # (e.g. "RTP/AVP" yes, "RTP/SAVPF" no) — normalize to integers here.
-  defp normalize_fmt(fmt) when is_list(fmt), do: fmt
-
-  defp normalize_fmt(fmt) when is_binary(fmt) do
-    fmt
-    |> String.split(" ", trim: true)
-    |> Enum.flat_map(fn s ->
-      case Integer.parse(s) do
-        {pt, ""} -> [pt]
-        _ -> []
-      end
-    end)
-  end
-
   # Map each offered payload type to a Mendooze codec code, keeping only the
   # codecs we know. Static PTs are recognized without an a=rtpmap line.
   # Telephone-event PTs are collected by clock rate (G10) — Chrome offers one
@@ -1035,13 +1016,32 @@ defmodule MediaServer.Mendooze.Sdp do
       name == "TELEPHONE-EVENT" ->
         {:dtmf, clock}
 
-      match?({:ok, _}, codec_code(type, name)) ->
+      # The encoding name alone is not the codec: RFC 5574 registers "speex"
+      # at three clock rates and the server carries only the 16 kHz one, so a
+      # known name at another clock is a codec we do NOT know — never a
+      # variant we may quietly re-rate.
+      match?({:ok, _}, codec_code(type, name)) and clock == codec_clock(type, name) ->
         {:ok, code} = codec_code(type, name)
         {:ok, name, code}
 
       true ->
         :unknown
     end
+  end
+
+  defp codec_clock(:audio, name) do
+    {_pt, _code, clock, _ch} = Map.fetch!(@audio_codecs, name)
+    clock
+  end
+
+  defp codec_clock(:video, name) do
+    {_pt, _code, clock} = Map.fetch!(@video_codecs, name)
+    clock
+  end
+
+  defp codec_clock(:text, name) do
+    {_pt, _code, clock} = Map.fetch!(@text_codecs, name)
+    clock
   end
 
   defp connection_ip(nil), do: nil
@@ -1155,9 +1155,18 @@ defmodule MediaServer.Mendooze.Sdp do
 
   Returns the common codec names, whether telephone-event was retained, the
   selected telephone-event PT and its clock (`dtmf_pt`/`dtmf_clock`, nil when
-  declined), and the `rtpMap` for `EndpointStartSending` — the remote
+  declined), the `rtpMap` for `EndpointStartSending` — the remote
   payload-type numbering, since these are the PTs the remote peer expects to
-  receive.
+  receive — and `fmt_order`, the remote `m=` format list verbatim.
+
+  `fmt_order` travels because a payload-type map has no order of its own, and
+  every reader that must name ONE codec out of it (which one this leg settled on,
+  which one an answer announces first) needs the peer's stated preference. Without
+  it the only tiebreak left is the payload-type NUMBER, and a static PT always
+  beats a dynamic one: an answer of `m=audio 35767 RTP/AVP 98 0 8 101` with opus
+  at 98 reads as PCMU, because PCMU is 0. That silently inverted the B2BUA's
+  `transcode: :avoid` policy — two opus legs were declared to disagree, and a
+  PCMU encoder was created to bridge opus to itself.
   """
   @spec negotiate(media_desc(), [codec_name()], boolean()) ::
           {:ok,
@@ -1166,7 +1175,8 @@ defmodule MediaServer.Mendooze.Sdp do
              dtmf: boolean(),
              dtmf_pt: non_neg_integer() | nil,
              dtmf_clock: non_neg_integer() | nil,
-             rtp_map: rtp_map()
+             rtp_map: rtp_map(),
+             fmt_order: [0..127] | String.t()
            }}
           | {:error, :no_common_codec}
   def negotiate(desc, our_names, want_dtmf \\ true) do
@@ -1192,7 +1202,8 @@ defmodule MediaServer.Mendooze.Sdp do
          dtmf: dtmf?,
          dtmf_pt: dtmf_pt,
          dtmf_clock: dtmf_clock,
-         rtp_map: send_map
+         rtp_map: send_map,
+         fmt_order: Map.get(desc, :raw_fmt, [])
        }}
     end
   end
@@ -1519,10 +1530,10 @@ defmodule MediaServer.Mendooze.Sdp do
     {Enum.find_index(order, &(&1 == Integer.to_string(number))) || length(order), number}
   end
 
-  # `m=` format lists reach us in both shapes ExSDP produces: a list of integers for the
-  # profiles it decodes numerically, and the raw string for the others (`"99"`,
-  # `"103 107 109"`, `"t140"`). Same reading for both, or the order silently depends on
-  # which transport the offer named.
+  # `m=` format lists reach us as a payload-type list on RTP profiles, and as the raw
+  # string on the transports that have no RTP numbering to decode (`"t140"` over a
+  # WebSocket). Same reading for both, or the order silently depends on which transport
+  # the offer named.
   defp normalize_fmt_order(nil), do: []
   defp normalize_fmt_order(fmt) when is_binary(fmt), do: String.split(fmt, ~r/\s+/, trim: true)
   defp normalize_fmt_order(fmt) when is_list(fmt), do: Enum.map(fmt, &to_string/1)
@@ -1552,6 +1563,35 @@ defmodule MediaServer.Mendooze.Sdp do
       |> MapSet.new()
 
     Map.filter(send_map, fn {_pt, code} -> MapSet.member?(codes, code) end)
+  end
+
+  @doc """
+  The codec-table NAME of a Mendooze codec code (`"VP8"`, `"OPUS"`, …), or `nil`
+  for a code this table does not name — `telephone-event` included, which is
+  never a codec a leg is said to carry.
+
+  The inverse of the name → code direction `local_rtp_map/3` uses, and the one
+  thing that lets an OFFER be ordered by what the other leg carries: our offer
+  speaks in codec names (`:video_codec`, `@default_video_codecs`) while a leg's
+  `peer_codecs` speaks in codes. `code_rtpmap/2` is not that function — it
+  returns the SDP *encoding* (`"opus"` lowercase, per RFC 7587), which is what
+  goes on an `a=rtpmap` line and not what names a codec in our tables.
+  """
+  @spec codec_name(:audio | :video | :text, non_neg_integer()) :: codec_name() | nil
+  def codec_name(:audio, @dtmf_code), do: nil
+
+  def codec_name(kind, code) do
+    table =
+      case kind do
+        :audio -> @audio_codecs
+        :video -> @video_codecs
+        :text -> @text_codecs
+      end
+
+    case Enum.find(table, fn {_name, tuple} -> elem(tuple, 1) == code end) do
+      {name, _tuple} -> name
+      nil -> nil
+    end
   end
 
   defp channels(ch) when is_integer(ch) and ch > 1, do: ch

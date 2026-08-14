@@ -276,7 +276,15 @@ defmodule SIP.Session.CallUAC do
   def process_sdp_resp(sip_ctx = %SIP.Context{}, resp) when resp.response in [200, 183] do
     case SIP.Session.extract_sdp(resp) do
       sdp_answer when is_binary(sdp_answer) ->
-        SIP.Session.Media.process_sdp_answer(sip_ctx, sdp_answer)
+        sip_ctx = SIP.Session.Media.process_sdp_answer(sip_ctx, sdp_answer)
+
+        # The callee picked up: it is sending from now on, so the media layer may
+        # start watching for silence. On a 183 it is NOT — the answer describes
+        # early media, the phone is still ringing, and a ring longer than the
+        # watchdog would otherwise be taken for a dead leg.
+        if resp.response == 200,
+          do: SIP.Session.Media.call_answered(sip_ctx),
+          else: sip_ctx
 
       _ ->
         Logger.warning(
@@ -379,18 +387,40 @@ defmodule SIP.Session.CallUAS do
   end
 
   @doc """
-  Store the inbound offer request (INVITE / re-INVITE / UPDATE) and its server
-  transaction pid in the context appdata (single slot `:last_uas_req` /
-  `:last_uas_req_tid`), so the reply macros can serve it. Also binds the dialog
-  pid into the context: a UAS scenario spawned before the dialog exists (a
-  `sub_fsm` child waiting for a call) has no other way to learn it, and the
-  reply macros target `sip_ctx.dialogpid`. No-op for any other event. Called by
-  the on_events instrumentation for every matched event.
+  Store the inbound request this UAS instance is currently serving (INVITE /
+  re-INVITE / UPDATE / REGISTER) and its server transaction pid in the context
+  appdata (single slot `:last_uas_req` / `:last_uas_req_tid`), so the reply
+  macros and `last_uas_req/0` can serve it. Also binds the dialog pid into the
+  context: a UAS scenario spawned before the dialog exists (a `sub_fsm` child
+  waiting for a call) has no other way to learn it, and the reply macros target
+  `sip_ctx.dialogpid`. No-op for any other event. Called by the on_events
+  instrumentation for every matched event.
+
+  REGISTER is stored for the same reason the others are: a registrar instance
+  serves a *succession* of REGISTERs on one dialog — the unauthenticated one, the
+  digest replay, then every refresh — and each state has to act on the last one
+  received. Leaving it out is what forced the reference script to carry the
+  request by hand (`appdata_set(:register_req, req)`), and `stored_req/1`'s
+  fallback to `:inbound_request` made that omission silent AND wrong: the
+  scenario would authenticate the refresh but save the contacts of the very first
+  request.
   """
+  @uas_stored_methods [:INVITE, :UPDATE, :REGISTER]
+
   def auto_store(sip_ctx, {m, req, trans_pid, dlg})
-      when m in [:INVITE, :UPDATE] and is_map(req) do
+      when m in @uas_stored_methods and is_map(req) and is_pid(dlg) do
     sip_ctx
     |> SIP.Context.set(:dialogpid, dlg)
+    |> SIP.Context.appdata_set(:last_uas_req, req)
+    |> SIP.Context.appdata_set(:last_uas_req_tid, trans_pid)
+  end
+
+  # Same, minus the dialog pid: it is not one (a scenario driven from a test, a
+  # dialog that is already in the context). Storing the request still matters —
+  # SIP.Context.set/3 would raise on a non-pid and take the instance down.
+  def auto_store(sip_ctx, {m, req, trans_pid, _dlg})
+      when m in @uas_stored_methods and is_map(req) do
+    sip_ctx
     |> SIP.Context.appdata_set(:last_uas_req, req)
     |> SIP.Context.appdata_set(:last_uas_req_tid, trans_pid)
   end
@@ -454,6 +484,16 @@ defmodule SIP.Session.CallUAS do
       {sip_ctx, {:ok, answer}} ->
         fields = reply_fields(sip_ctx, opts, body: answer)
         rc = SIP.Dialog.reply(sip_ctx.dialogpid, req, code, Keyword.get(opts, :reason), fields)
+
+        # A 2xx that went out is the moment the caller starts sending: the media
+        # layer is told so it can begin watching for what it does NOT receive.
+        # A 183 is not that moment — the phone is still ringing, and a 183 answer
+        # is exactly the early-media case that must not be supervised yet.
+        sip_ctx =
+          if code == 200 and reply_lasterr(rc) == :ok,
+            do: SIP.Session.Media.call_answered(sip_ctx, leg: :inbound),
+            else: sip_ctx
+
         SIP.Context.set(sip_ctx, :lasterr, reply_lasterr(rc))
 
       {sip_ctx, {:error, reason}} ->

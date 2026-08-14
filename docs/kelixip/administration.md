@@ -25,9 +25,9 @@ on Ubuntu/Debian, the same file the systemd unit reads.
 |---|---|---|
 | `kelictl status` | R | Uptime, counters, listeners, media pool, node state |
 | `kelictl monitor` | R | Scenarios in progress: id, domain, function, **script**, account, FSM state/event/command (reuses the `--monitor` view) |
-| `kelictl registration list [domain]` | R | Registrations, one list per domain (all domains, or one) |
-| `kelictl registration show <domain> <aor>` | R | One AOR and its bindings, in detail |
-| `kelictl registration remove <domain> <aor> [contact]` | W | Drop a registration |
+| `kelictl registration list [domain]` | R | Registrations, one list per domain — [registrar](modules/registrar.md#control-commands) |
+| `kelictl registration show <domain> <aor>` | R | One AOR and its bindings, in detail — *idem* |
+| `kelictl registration remove <domain> <aor> [contact]` | W | Drop a registration — *idem* |
 | `kelictl domain list` | R | Served domains, their functions and live counters |
 | `kelictl domain show <domain>` | R | One domain in detail (name **or** alias) |
 | `kelictl domain reload-all` | W | Hot-reload `domains.toml` (atomic, scripts checked) |
@@ -40,7 +40,33 @@ on Ubuntu/Debian, the same file the systemd unit reads.
 | `kelictl module list` | R | Loaded modules: version, implementation, how many commands and facades each contributes |
 | `kelictl module reload <name>` | W | Reload a module's config |
 | `kelictl log-level <lvl>` | W | Change the log level at runtime (`debug\|info\|warning\|error`) |
+| `kelictl drain` / `undrain` | W | Answer `503` / `200` to the upstream's OPTIONS probe, without touching what is in flight |
 | `kelictl graceful-shutdown` | W | Drain scenarios, then shut the node down |
+| `kelictl help [<topic>]` | — | The command list, or one topic in detail |
+
+### Online help
+
+`kelictl` documents itself, so the answer reaches the operator who is on the box
+rather than only the reader of this page:
+
+```console
+$ kelictl help                    # the command list + the topics
+$ kelictl help registration       # one topic, in detail
+$ kelictl registration help       # the same text, in the order you were typing
+$ kelictl mcu help conference.update   # a module command, from its own declaration
+```
+
+Topics: `registration`, `domain`, `mediaserver`, `module`, `reload`, `drain`. Each
+one prints its commands with **the REST route beside each** — the same
+`[GET /path]` convention a module's declared help uses, so the two frontals are
+read together. A bare `kelictl`, `-h` and `--help` all print the command list.
+
+Help is answered **from the CLI's own text, with no call into the node**, and the
+`bin/kelictl` overlay routes those forms through `kelixip eval` rather than
+`kelixip rpc` — so they answer on a host whose service is **down**, which is when an
+operator usually reaches for them. A module's own help (`kelictl <module> help`) is
+the exception by nature: it is rendered from the declaration of a module that has to
+be loaded to have one, so it needs the live node like any other module command.
 
 ### Examples
 
@@ -53,36 +79,6 @@ listeners:       udp:0.0.0.0:5060, tcp:0.0.0.0:5060
 domains version: 0
 modules:
 media pool:      (empty)
-
-$ kelictl registration list
-example.com
-  aor    contacts  expires  bindings
-  alice  2         4m58s    sip:alice@10.0.0.9:5060, sip:alice@10.0.0.9:5062
-  bob    1         9m12s    sip:bob@10.0.0.22:5060
-
-lab.example.net
-  (no registration)
-
-$ kelictl registration list lab.example.net
-lab.example.net
-  (no registration)
-
-$ kelictl registration show example.com alice
-aor:          alice@example.com
-contacts:     2
-  1. sip:alice@10.0.0.9:5060
-     expires:   in 4m58s (2026-08-02T12:34:56Z)
-     source:    udp 203.0.113.7:45112
-     transport: udp
-     instance:  <urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6>
-     reg-id:    1
-  2. sip:alice@10.0.0.9:5062
-     expires:   in 9m40s (2026-08-02T12:39:38Z)
-     source:    tls 203.0.113.7:51044
-     transport: tls
-
-$ kelictl registration remove example.com alice
-ok
 
 $ kelictl domain list
 domain           aliases     functions         calls  regs  max
@@ -142,29 +138,12 @@ inbound request asserts — its digest username, else the user part of
 `P-Asserted-Identity`, else the one in `From`. A `-` means the column has no value
 yet, not that it is unsupported.
 
-An AOR is only unique **within a domain**, so the domain is part of the address
-rather than a filter on it: `show` and `remove` take `<domain> <aor>`, and `list`
-groups its answer per domain. With no argument, `list` prints one section per
-**served** domain — including the ones nobody is registered in, because
-"served, empty" and "not served at all" are what an operator is usually trying to
-tell apart. `<domain>` is resolved the way inbound traffic is (name **or** alias,
-case-insensitively), so the host seen on the wire is a valid argument; an unserved
-one is `no such domain`, not an empty list.
+The **`registration`** commands are documented with the module whose store they
+read — how an AOR is addressed, what a binding shows, and the matching REST routes:
+**[modules/registrar.md](modules/registrar.md#control-commands)**. On the box, the
+same text is `kelictl registration help`.
 
-`<aor>` is the user-part (`alice`), or the full `alice@example.com` copied out of a
-log — in which case its domain part must be that same domain, rather than being
-silently ignored. `remove` takes an optional `contact` to drop just that binding
-instead of the whole AOR; there is deliberately no form that removes an AOR from
-every domain at once. `reload-script` reports one line per script (`<name>: ok` /
-`<name>: error: …`).
-
-`show` prints what the registrar stored, not just the URI: `expires` both ways
-(the remaining time is the question, the instant is what a log line carries),
-`source` — where the REGISTER actually came from, which behind a NAT is **not**
-what the contact URI says, and the usual reason a call to a registered phone
-never arrives — the transport it is reachable over, and the identity the handset
-sent (`instance`, `reg-id`, `methods`, RFC 5626/3840). A field the handset did
-not send gets no line rather than a dash.
+`reload-script` reports one line per script (`<name>: ok` / `<name>: error: …`).
 
 `domain list` / `domain show` read the **live** `domains.toml` snapshot — what the
 router is using right now, which after a rejected `domain reload-all` is *not* what
@@ -372,7 +351,7 @@ prints their usage rather than "unknown module".
 Of the shipped modules, only [mcu](modules/mcu.md) contributes commands today —
 [registrar](modules/registrar.md) and [auth_db](modules/auth_db.md) contribute
 none. The mechanism is documented in
-[modules/README.md](modules/README.md#control-surface-kelictl--rest).
+[modules/README.md](modules/README.md#module-administration-kelictl--rest-api).
 
 ## Parity with REST
 

@@ -66,7 +66,17 @@ defmodule Kelix.Mod.Mcu.Config do
             # Drawn in every empty mosaic slot of every conference, unless the
             # conference names its own `logo`.
             logo_file: nil,
-            xmlrpc_timeout_ms: 10_000,
+            # Two seconds, like the framework adapter (`MediaServer.Mendooze.XmlRpc`)
+            # and for the same reason: a control RPC to a media server answers in
+            # milliseconds, and one that does not is in trouble — waiting on it only
+            # keeps the script from taking its own failure path. Raise it in the
+            # `[module.mcu]` block for an MCU across a busy link.
+            #
+            # It also restores an invariant this pair had lost: the PER-RPC timeout
+            # must fire before the one the caller waits (`call_timeout_ms` below), or
+            # a slow server makes the caller EXIT where it should have received an
+            # error. At 10 s against 5 s it was the wrong way round.
+            xmlrpc_timeout_ms: 2_000,
             call_timeout_ms: 5_000,
             shutdown_grace_ms: 5_000,
             rtp_timeout_ms: 10_000,

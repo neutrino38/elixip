@@ -103,11 +103,31 @@ defmodule SIP.Test.B2bua.Session do
     end
 
     # …whereas `{:mediaserver, …}` is understood, and fails on what is actually
-    # wrong: nothing was connected to terminate the media on.
+    # wrong: nothing was connected to terminate the media on. Named, and not as a
+    # rescued sentence — the scenario answers a 503 to this one and a 488 to a
+    # codec mismatch, so it has to be able to tell them apart (2026-08-13).
     test "the media mode fails on the media, not on the mode", %{ctx: ctx} do
       ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), {:mediaserver, []})
-      assert {:b2bua, :media_setup_failed, {:inbound, _reason}} = ctx.lasterr
+      assert {:b2bua, :media_setup_failed, :no_media_server} = ctx.lasterr
+      assert B2bua.media_unavailable?(ctx)
       assert B2bua.outbound_leg(ctx) == nil
+    end
+
+    # A media server that dies under a call in progress: the handle is still a
+    # pid, so the setup gets as far as calling it and exits. Same verdict as
+    # having none — the caller's offer was never the problem.
+    test "a media server that went away reads as unavailable", %{ctx: ctx} do
+      for reason <- [:no_media_server, {:media_down, :noproc}, :server_disconnected] do
+        assert B2bua.media_unavailable?(%SIP.Context{
+                 ctx
+                 | lasterr: {:b2bua, :media_setup_failed, {:inbound, reason}}
+               })
+      end
+
+      refute B2bua.media_unavailable?(%SIP.Context{
+               ctx
+               | lasterr: {:b2bua, :media_setup_failed, {:inbound, :no_common_codec}}
+             })
     end
 
     test "a bad transcoding policy is refused before anything is dialled", %{ctx: ctx} do
@@ -118,6 +138,10 @@ defmodule SIP.Test.B2bua.Session do
                ctx.lasterr
 
       assert B2bua.outbound_leg(ctx) == nil
+
+      # A broken argument is reported as itself, before the media plane is even
+      # looked at — and it is not unavailability, so it never earns a 503.
+      refute B2bua.media_unavailable?(ctx)
     end
 
     test "Max-Forwards exhausted is refused as such (the scenario answers 483)", %{ctx: ctx} do
@@ -529,6 +553,57 @@ defmodule SIP.Test.B2bua.Session do
 
       # …and the two endpoints are attached, which is what makes the media flow.
       assert %{bridged: true} = B2bua.media_plan(ctx)
+
+      B2bua.release_legs(ctx)
+    end
+
+    # The other half of the contract, and the one that was broken: `bridge/3` may
+    # hand back leg A's answer REBUILT now that both legs are known — narrowed to
+    # what both can carry, or its codecs reordered — and the doc of the callback
+    # says a caller holding the earlier answer "must replace it with this one".
+    # `complete_media/4` read the plan from its own PARAMETER instead of from the
+    # context `attach_legs/3` had just written, so the rebuilt answer was computed,
+    # stored, and then dropped. Nothing caught it because the mock always returned
+    # a bare `:ok` (see MediaServer.Mockup.rebuild_answer_on_bridge/2).
+    test "the answer rebuilt at bridge time supersedes the one held since the INVITE",
+         %{ctx: ctx} do
+      tp_pid = arm_media_peer!()
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), media_peer(), media_mode())
+      leg = B2bua.outbound_leg(ctx)
+      dlg = leg.dialogpid
+      assert_receive {:invite_sent, _fwd}, 5_000
+
+      assert %{inbound_answer: held} = B2bua.media_plan(ctx)
+      assert is_binary(held)
+
+      # The media server narrows the caller's answer to the one codec both legs
+      # carry — a different body from the one held.
+      rebuilt =
+        "v=0\r\no=- 1 1 IN IP4 192.168.5.5\r\ns=-\r\nc=IN IP4 192.168.5.5\r\nt=0 0\r\n" <>
+          "m=audio 40000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n"
+
+      refute rebuilt == held
+
+      MediaServer.Mockup.rebuild_answer_on_bridge(
+        SIP.Session.Media.peer_connection(ctx, :inbound),
+        rebuilt
+      )
+
+      GenServer.cast(tp_pid, {:simulate, 200, 100})
+      assert_receive {:outbound, {200, resp, tid, ^dlg}}, 5_000
+
+      B2bua.note_event({:outbound, {200, resp, tid, self()}})
+      ctx = B2bua.do_relay_reply(ctx, resp)
+
+      assert_receive {:replied, 200, _reason, _req, fields}, 2_000
+      assert [%{data: relayed}] = Keyword.fetch!(fields, :body)
+
+      assert relayed == rebuilt,
+             "the caller was answered the SDP held since the INVITE, not the rebuilt one"
+
+      # …and the plan carries it too, so a scenario reading the plan sees what the
+      # caller actually got.
+      assert %{bridged: true, inbound_answer: ^rebuilt} = B2bua.media_plan(ctx)
 
       B2bua.release_legs(ctx)
     end

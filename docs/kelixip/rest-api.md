@@ -49,16 +49,16 @@ cert) with a JSON body `{"error": "…"}`.
 |---|---|---|
 | `GET /status` | R | `kelictl status` |
 | `GET /scenarios` | R | `kelictl monitor` |
-| `GET /registrations` | R | `kelictl registration list` |
+| `GET /registrations` | R | `kelictl registration list` — [registrar](modules/registrar.md#control-commands) |
 | `GET /domains` | R | `kelictl domain list` |
 | `GET /domains/<domain>` | R | `kelictl domain show` |
-| `GET /domains/<domain>/registrations` | R | `kelictl registration list <domain>` |
-| `GET /domains/<domain>/registrations/<aor>` | R | `kelictl registration show` |
+| `GET /domains/<domain>/registrations` | R | `kelictl registration list <domain>` — *idem* |
+| `GET /domains/<domain>/registrations/<aor>` | R | `kelictl registration show` — *idem* |
 | `GET /mediaservers` | R | `kelictl mediaserver list` |
 | `GET /mediaservers/<name>` | R | `kelictl mediaserver show` |
 | `GET /modules` | R | `kelictl module list` |
 | `GET /modules/<name>` | R | `kelictl <name> help` |
-| `DELETE /domains/<domain>/registrations/<aor>` | W | `kelictl registration remove` |
+| `DELETE /domains/<domain>/registrations/<aor>` | W | `kelictl registration remove` — *idem* |
 | `POST /scenarios/<id>/shutdown` | W | `kelictl stop` |
 | `POST /scripts/reload[?notify=1]` | W | `kelictl reload-script` |
 | `POST /domains/reload` | W | `kelictl domain reload-all` |
@@ -66,6 +66,7 @@ cert) with a JSON body `{"error": "…"}`.
 | `POST /modules/<name>/reload` | W | `kelictl module reload` |
 | `POST /mediaservers/<name>` | W | `kelictl mediaserver enable\|disable` |
 | `PUT /log/level` | W | `kelictl log-level` |
+| `POST /drain` / `POST /undrain` | W | `kelictl drain` / `kelictl undrain` |
 | `POST /graceful-shutdown` | W | `kelictl graceful-shutdown` |
 
 Request bodies are JSON (`Content-Type: application/json`); responses are JSON.
@@ -135,44 +136,11 @@ keeps serving) or `"unknown"` (it could not be stat'ed at load).
 }
 ```
 
-**Registrations are a sub-resource of the domain.** An AOR is only unique within a
-domain, so it is addressed as `/domains/<domain>/registrations/<aor>` — the domain
-is part of the address, not a query filter. `<domain>` is matched on the name
-**or** an alias, case-insensitively; an unserved domain is `404` on the collection
-itself, which is not the same answer as a served domain with an empty
-`registrations` list. `GET /registrations` is the cross-domain view: the array of
-these objects, one per served domain, in `domains.toml` order.
-
-```json
-{
-  "domain": "example.com",
-  "registrations": [
-    {
-      "domain": "example.com",
-      "aor": "alice",
-      "contacts": [
-        {
-          "uri": "sip:alice@10.0.0.9:5060",
-          "expires_at": "2026-08-02T12:34:56Z",
-          "expires_in": 298,
-          "source": "udp 203.0.113.7:45112",
-          "transport": "udp",
-          "instance": "<urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6>",
-          "reg_id": "1",
-          "methods": null
-        }
-      ]
-    }
-  ]
-}
-```
-
-`GET /domains/<domain>/registrations/<aor>` returns one of those inner objects (or
-`404`), so the list and the detail view cannot disagree. Each binding carries what
-the registrar stored: the expiry both ways (`expires_in` in seconds is the operator
-question, `expires_at` the instant), the `source` the REGISTER actually came from
-(behind a NAT, not what the contact URI says), the transport, and the RFC 5626/3840
-identity the handset sent. A field the handset did not send is `null`.
+**Registrations are a sub-resource of the domain** — an AOR is only unique within a
+domain, so it is addressed as `/domains/<domain>/registrations/<aor>` and never as a
+query filter. The three registration routes, their payloads and what each field of a
+binding means are documented with the module whose store they read:
+**[modules/registrar.md](modules/registrar.md#control-commands)**.
 
 `GET /mediaservers` returns the `[mediaserver.pool.*]` entries in config order
 (the round-robin order); `GET /mediaservers/<name>` returns one or `404`.
@@ -203,17 +171,14 @@ BASE=http://127.0.0.1:8090
 # read verbs
 curl -s -H "Authorization: Bearer $TOKEN" $BASE/status
 curl -s -H "Authorization: Bearer $TOKEN" $BASE/scenarios
-curl -s -H "Authorization: Bearer $TOKEN" $BASE/registrations
 curl -s -H "Authorization: Bearer $TOKEN" $BASE/domains
 curl -s -H "Authorization: Bearer $TOKEN" $BASE/domains/example.com
-curl -s -H "Authorization: Bearer $TOKEN" $BASE/domains/example.com/registrations
-curl -s -H "Authorization: Bearer $TOKEN" $BASE/domains/example.com/registrations/alice
 curl -s -H "Authorization: Bearer $TOKEN" $BASE/mediaservers
 curl -s -H "Authorization: Bearer $TOKEN" $BASE/mediaservers/mcu1
 
+# the registration routes have their own examples in modules/registrar.md
+
 # write verbs
-curl -s -X DELETE -H "Authorization: Bearer $TOKEN" \
-     "$BASE/domains/example.com/registrations/alice?contact=sip:alice@10.0.0.9:5060"
 curl -s -X POST   -H "Authorization: Bearer $TOKEN" $BASE/scenarios/42/shutdown
 curl -s -X POST   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
      -d '{"names":["uas_register"]}' "$BASE/scripts/reload?notify=1"
@@ -229,7 +194,7 @@ curl -s -X POST   -H "Authorization: Bearer $TOKEN" $BASE/graceful-shutdown
 
 Modules register their commands into `Kelix.Control.Registry` from the same
 `describe_control/0` declaration that produces their `kelictl` sub-commands (see
-[modules/README.md](modules/README.md#control-surface-kelictl--rest)). A command
+[modules/README.md](modules/README.md#module-administration-kelictl--rest-api)). A command
 declares a **path template** relative to `/modules/<name>`, so it is reachable
 both as a resource (`GET /modules/mcu/conferences/c-3f9a`) and in the flat form
 `<method> /modules/<name>/<cmd>`, for a client that cannot build URLs. Both

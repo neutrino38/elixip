@@ -900,4 +900,58 @@ defmodule Kelix.Control.CLITest do
       assert out =~ "unreachable"
     end
   end
+
+  describe "online help" do
+    # Help is the one thing that must work when the node does not: an operator
+    # reaching for `kelictl help` on a box whose service is down gets the text, not
+    # `unreachable`. So every assertion here targets a node that cannot answer.
+    defp help(argv), do: CLI.run(argv, :"ghost@127.0.0.1")
+
+    test "the bare command, `help`, `-h` and `--help` all print the command list" do
+      for argv <- [[], ["help"], ["-h"], ["--help"]] do
+        assert {0, out} = help(argv)
+        assert out =~ "usage: kelictl <command> [args]"
+        assert out =~ "registration list [domain]"
+        assert out =~ "topics: registration, domain, mediaserver, module, reload, drain"
+      end
+    end
+
+    test "a topic is reachable both as `help <topic>` and as `<topic> help`" do
+      for topic <- ["registration", "domain", "mediaserver", "module"] do
+        assert {0, out} = help(["help", topic])
+        assert {0, ^out} = help([topic, "help"])
+        assert out =~ "kelictl #{topic}"
+      end
+    end
+
+    test "the topics that are not core nouns are reachable as `help <topic>`" do
+      for topic <- ["reload", "drain"] do
+        assert {0, out} = help(["help", topic])
+        assert out =~ "kelictl"
+      end
+    end
+
+    test "each command in a topic carries its REST route, so both frontals read together" do
+      {0, out} = help(["help", "registration"])
+      assert out =~ "[GET /registrations]"
+      assert out =~ "[GET /domains/<domain>/registrations/<aor>]"
+      assert out =~ "[DELETE /domains/<domain>/registrations/<aor>]"
+      # And what the repatriated documentation says, at the place it is now read.
+      assert out =~ "unique only WITHIN a domain"
+      assert out =~ "docs/kelixip/modules/registrar.md"
+    end
+
+    test "an unknown topic is a usage error listing the real ones" do
+      assert {2, out} = help(["help", "registrations"])
+      assert out =~ "no help topic \"registrations\""
+      assert out =~ "registration, domain, mediaserver, module, reload, drain"
+    end
+
+    # `<module> help` belongs to the module namespace and still goes to the node:
+    # the reserved core nouns must not have swallowed it.
+    test "a module namespace still resolves its own help against the node" do
+      assert {1, out} = help(["mcu", "help"])
+      assert out =~ "unreachable"
+    end
+  end
 end

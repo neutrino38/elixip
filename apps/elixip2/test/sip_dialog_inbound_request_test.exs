@@ -53,8 +53,8 @@ defmodule SIP.Test.DialogInboundRequest do
     test "the tags follow the same swap: ours on From, the caller's on To" do
       req = DialogImpl.address_in_dialog(bare_bye(), inbound_dialog())
 
-      assert req.from.params["tag"] == "bob-tag"
-      assert req.to.params["tag"] == "alice-tag"
+      assert SIP.Uri.get_uri_param(req.from, "tag") == {:ok, "bob-tag"}
+      assert SIP.Uri.get_uri_param(req.to, "tag") == {:ok, "alice-tag"}
     end
 
     test "the request is routed to the caller's Contact" do
@@ -112,9 +112,9 @@ defmodule SIP.Test.DialogInboundRequest do
         )
 
       assert req.from.userpart == "alice"
-      assert req.from.params["tag"] == "alice-tag"
+      assert SIP.Uri.get_uri_param(req.from, "tag") == {:ok, "alice-tag"}
       assert req.to.userpart == "bob"
-      assert req.to.params["tag"] == "bob-tag"
+      assert SIP.Uri.get_uri_param(req.to, "tag") == {:ok, "bob-tag"}
       assert req.ruri.domain == "10.0.0.7"
     end
 
@@ -138,7 +138,7 @@ defmodule SIP.Test.DialogInboundRequest do
 
       assert req.from.userpart == "alice"
       assert req.from.domain == "example.com"
-      assert req.from.params["tag"] == "alice-tag"
+      assert SIP.Uri.get_uri_param(req.from, "tag") == {:ok, "alice-tag"}
 
       # And the result actually serializes, which is the point.
       assert {:ok, _} = SIP.Uri.serialize(req.from)

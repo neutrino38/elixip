@@ -1,5 +1,5 @@
 # Editable, file-loadable copy of the built-in UAC.Register scenario
-# (lib/scenarios/uac_register.ex). The module is named UAC.RegisterExample so it
+# (lib/built-in-scenarios/uac_register.ex). The module is named UAC.RegisterExample so it
 # does not collide with the bundled UAC.Register. Run it with:
 #     elixipp apps/elixip2/scenarios/uac_register.exs
 #     mix scenario apps/elixip2/scenarios/uac_register.exs

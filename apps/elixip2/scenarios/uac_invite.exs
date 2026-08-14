@@ -1,5 +1,5 @@
 # Editable, file-loadable copy of the built-in UAC.Invite scenario
-# (lib/scenarios/uac_invite.ex). The module is named UAC.InviteExample so it does
+# (lib/built-in-scenarios/uac_invite.ex). The module is named UAC.InviteExample so it does
 # not collide with the bundled UAC.Invite. Run it with:
 #     elixipp apps/elixip2/scenarios/uac_invite.exs
 #     mix scenario apps/elixip2/scenarios/uac_invite.exs
