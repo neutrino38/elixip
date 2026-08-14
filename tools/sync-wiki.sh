@@ -62,7 +62,7 @@ MANIFEST=(
   "docs/kelixip/modules/mcu_module_guide.md|MCU-Guide|mcu operating guide"
   "docs/kelixip/modules/template.md|Module-Template|module template"
   "docs/design/tcp_listener.md|TCP-Listener-Design|TCP Listener Design"
-  "docs/releases/RELEASE-1.3.0.md|Release-1.3.0|Release 1.3.0"
+  "docs/releases/RELEASE-1.4.0.md|Release-1.4.0|Release 1.4.0"
   "docs/releases/RELEASE-1.2.1.md|Release-1.2.1|Release 1.2.1"
   "docs/releases/RELEASE-1.2.0.md|Release-1.2.0|Release 1.2.0"
   "docs/releases/RELEASE-1.1.0.md|Release-1.1.0|Release 1.1.0"

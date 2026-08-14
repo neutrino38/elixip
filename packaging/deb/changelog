@@ -1,3 +1,17 @@
+kelixip (1.4.0-1) stable; urgency=medium
+
+  * Version bump to 1.4.0: the media relay validated in real traffic.
+    Cross-leg codec selection, per-leg codecs with real transcoding
+    (VP8 <-> H.264), AV1, bidirectional NAT latching, media watchdog
+    armed at answer.
+  * SIP correctness: URI parameters serialized in angle brackets, the
+    Contact identity carried across the B2BUA, Route no longer echoed in
+    responses, one single BYE per hangup, fresh Via branch on the ACK of
+    a 2xx.
+  * User-Agent is now Kelixip/1.4.0.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Fri, 14 Aug 2026 18:00:00 +0200
+
 kelixip (1.3.0-1) stable; urgency=medium
 
   * Version bump to 1.3.0: the B2BUA release. A scenario can now terminate an

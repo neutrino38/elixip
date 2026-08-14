@@ -1,9 +1,10 @@
-# Release 1.3.0
+# Release 1.4.0
 
-2026-08-10 — 81 commits since 1.2.1 (2026-08-08). Theme of the release: **the
-B2BUA**. A scenario can now handle an incoming call and place a second one of
-its own, then bridge the two for as long as they live — with a media
-server in the middle or not.
+2026-08-14 — 128 commits since 1.2.1 (2026-08-08); supersedes the unshipped
+1.3.0. Theme of the release: **the B2BUA**. A scenario can now handle an
+incoming call and place a second one of its own, then bridge the two for as
+long as they live — with a media server in the middle or not. The whole path is
+validated in real Linphone traffic, **audio and video transcoding included**.
 
 Unlike a proxy the server stays a user agent on both sides: it owns two dialogs,
 it can hang either of them up, it stays in the signalling path for the whole call,
@@ -59,7 +60,25 @@ main uses cases:
 
 A reference scenario direct-call.exs provides a good example.
 
+### Codec negotiation and transcoding
 
+See [CODEC-NEGOTIATION.md](../../CODEC-NEGOTIATION.md) for the full rules.
+
+- **cross-leg selection**: the codec is picked once for both legs — the first
+  codec of the caller's list the callee also answers. Transcoding is not a
+  decision, it is what two different selections mean.
+- **per-leg codec, real transcoding**: under `transcode: :avoid` the transcoder
+  bridges packet-per-packet while both legs agree and converts when they do not.
+  **Validated in traffic: a VP8-only caller talking to an H.264-only callee.**
+- the answer to the caller is rebuilt at bridge time and bounded to the
+  intersection on a relayed media.
+- **AV1** is carried in outgoing offers; H.264 `packetization-mode` absence is
+  read as "no constraint" (deliberate deviation from RFC 6184).
+- **NAT latching in both directions** — the outbound leg used to get one-way
+  media on every NATed call.
+- the media watchdog is armed **at answer**, and a media server that stops
+  answering is given up on in two seconds; with **no media server at all the
+  call is refused (503)** instead of being served by the test mockup.
 
 ### RTP profile negociation
 
@@ -76,6 +95,23 @@ a **client-transaction timeout is reported to the application as a synthetic 408
 Three readings added to `SIP.Msg.Ops`: `from_username/1` / `to_username/1` (the raw
 claims, where `asserted_username/1` prefers the verified digest name) and
 `in_dialog?/1` (does the request carry a To tag).
+
+### SIP correctness on the wire
+
+Five defects, each one measured in a capture, all confirmed fixed in traffic:
+
+- URI parameters are serialized **inside angle brackets** (an unbracketed
+  `;transport=tcp` is a header parameter per RFC 3261 §20 — the caller aimed
+  its ACK and BYE at UDP); the bare form stays for a To/From carrying only a tag.
+- the **Contact identity** (userpart, display name) crosses the B2BUA in both
+  directions; host, port and transport remain the leg's own.
+- **Route is no longer echoed into responses** (RFC 3261 gives it no place there).
+- a dialog **hangs up once**: a second BYE — relayed plus teardown — is refused
+  when one is already in flight.
+- the ACK of a 2xx gets a **fresh Via branch** (§17.1.1.3: it is its own
+  transaction); the ACK of a non-2xx keeps the INVITE's.
+
+The `User-Agent` of the kelixip server is now **`Kelixip/1.4.0`**.
 
 ### The registrar session layer
 
@@ -206,10 +242,18 @@ ignored with a warning** — the change is deferred, not made.
 Test suite was reviewed and several errors and flaky tests were corrected. Lots of
 refactor to put common code in helper modules.
 
+## Known issues
+
+- **Linphone Desktop 6.2.0/6.3.0 on Windows**: answering from the toast
+  notification breaks the call window — no hangup, no BYE, ghost call. Not a
+  kelixip bug; reported upstream as
+  [linphone-desktop#1011](https://github.com/BelledonneCommunications/linphone-desktop/issues/1011).
+
 ## Dependencies
 
-- [mediaserver 1.12.2](https://github.com/neutrino38/mediaserver/releases/tag/1.12.2)
-  — unchanged since 1.2.1.
+- [mediaserver](https://github.com/neutrino38/mediaserver) **newer than 1.12.2
+  is required** (≥ `8ecf523`): video bridge/transcode switching, AV1, RTP
+  inactivity watchdog driven from the answer, payload-type renumbering.
 
 ## Security
 

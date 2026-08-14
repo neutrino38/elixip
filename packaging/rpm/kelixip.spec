@@ -27,7 +27,7 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.3.0
+Version:        1.4.0
 Release:        1%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
@@ -212,6 +212,15 @@ fi
 %{_datadir}/%{name}/mcu*.exs
 
 %changelog
+* Fri Aug 14 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.4.0-1
+- Version bump to 1.4.0: the media relay validated in real traffic. Cross-leg
+  codec selection, per-leg codecs with real transcoding (VP8 <-> H.264), AV1,
+  bidirectional NAT latching, media watchdog armed at answer.
+- SIP correctness: URI parameters serialized in angle brackets, the Contact
+  identity carried across the B2BUA, Route no longer echoed in responses, one
+  single BYE per hangup, fresh Via branch on the ACK of a 2xx.
+- User-Agent is now Kelixip/1.4.0.
+
 * Mon Aug 10 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.3.0-1
 - Version bump to 1.3.0: the B2BUA release. A scenario can now terminate an
   incoming call and place a second one of its own, relaying between the two.
