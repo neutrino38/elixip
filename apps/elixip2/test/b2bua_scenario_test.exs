@@ -301,6 +301,49 @@ defmodule SIP.Test.B2bua.Scenario do
     assert_receive {:instance_done, :ok}, 10_000
   end
 
+  # The OTHER hangup, and the one nothing covered: the CALLEE puts the phone down.
+  # Its BYE arrives on the outbound leg — `{:outbound, {:BYE, …}}` — and what it
+  # owes is a BYE on the INBOUND one, so the caller stops talking to itself.
+  #
+  # Traffic of 2026-08-14, Bob calling Alice: Alice hung up, two BYEs went out
+  # towards Alice — one relayed, one from the teardown, the second answered 481 —
+  # and Bob's phone stayed off-hook. Every existing test hangs up from the caller's
+  # side, where relaying to "the other leg" happens to mean the outbound one.
+  @tag timeout: 60_000
+  test "a callee that hangs up ends the call at the CALLER, not back at itself", %{
+    scenario: module,
+    stub: stub
+  } do
+    invite = inbound_invite()
+    # Its own callee: this test counts what does NOT reach it.
+    peer = peer_uri("b2bua_callee_bye")
+    tp_pid = transport_pid(peer)
+    :ok = GenServer.call(tp_pid, :settestapp)
+
+    {instance, _ref} = start_instance(module, stub, invite, peer)
+    send(instance, {:INVITE, invite, self(), stub})
+
+    assert_receive {:replied, 100, "Trying", _req, _fields}, 5_000
+    assert_receive {:invite_sent, _fwd}, 5_000
+    GenServer.cast(tp_pid, {:simulate, 200, 100})
+    assert_receive {:replied, 200, _reason, _req, _fields}, 5_000
+    send(instance, {:ACK, in_dialog(:ACK, invite), nil, stub})
+
+    # The callee hangs up — on the wire, so the BYE crosses the transport, its own
+    # server transaction and the outbound dialog, and reaches the scenario exactly
+    # as production delivers it. `hangup/1` was written for this and nothing had
+    # ever called it.
+    SIP.Test.Transport.UDPMockup.hangup(tp_pid)
+
+    # The BYE must cross to the CALLER, on the inbound leg…
+    assert_receive {:sent_on_inbound, %{method: :BYE}}, 5_000
+
+    # …and NOT go back out to the callee, who is the one that just hung up. A BYE
+    # returning to it lands on a dialog it has already closed: 481, and the caller
+    # — never told anything — is left holding a dead call.
+    refute_receive :BYE, 1_000
+  end
+
   @tag timeout: 60_000
   test "a callee that refuses is relayed verbatim and ends the call", %{
     scenario: module,

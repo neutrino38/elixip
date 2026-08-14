@@ -1564,6 +1564,19 @@ defmodule SIP.Session.B2bua do
     # inbound leg's routing.
     case call_leg(fn -> SIP.Dialog.new_request(target_pid, fwd) end) do
       {:ok, trans_pid} ->
+        # WHICH WAY it went, named rather than deduced. The transaction layer logs
+        # "Sent BYE <ruri>", which says where the request landed but not which leg
+        # asked for it — and reading the direction back from a Request-URI means
+        # knowing both peers' Contacts by heart. A B2BUA relaying a hangup to the
+        # side that just hung up and one relaying it correctly produce logs that
+        # differ by one URI; this line is what tells them apart (traffic of
+        # 2026-08-14, an hour spent on exactly that question).
+        Logger.info(
+          dialogpid: sip_ctx.dialogpid,
+          module: __MODULE__,
+          message: "relayed #{req.method} from the #{from_leg} leg to the #{other_leg(from_leg)}"
+        )
+
         sip_ctx
         |> add_pending(trans_pid, req, from_leg, req.method, held_answer)
         |> put_last_invite(other_leg(from_leg), req.method, trans_pid)
@@ -2741,6 +2754,15 @@ defmodule SIP.Session.B2bua do
         :ok
 
       leg.method == :INVITE and established?(leg) ->
+        # Said out loud, because this BYE is nobody's relay: it is the teardown
+        # hanging up a leg the scenario left established. Two BYEs towards the same
+        # peer — one relayed, one from here — read as a duplicate in the log unless
+        # the second one names itself.
+        Logger.info(
+          module: __MODULE__,
+          message: "teardown: BYEing the #{leg.tag} leg (#{inspect(leg.dialogpid)})"
+        )
+
         protect("BYE leg #{inspect(leg.dialogpid)}", fn ->
           SIP.Dialog.new_request(leg.dialogpid, bye_request())
         end)
