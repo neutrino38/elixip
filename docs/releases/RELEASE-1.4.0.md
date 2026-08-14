@@ -1,64 +1,22 @@
 # Release 1.4.0
 
-2026-08-14 — 128 commits since 1.2.1 (2026-08-08); supersedes the unshipped
-1.3.0. Theme of the release: **the B2BUA**. A scenario can now handle an
-incoming call and place a second one of its own, then bridge the two for as
-long as they live — with a media server in the middle or not. The whole path is
-validated in real Linphone traffic, **audio and video transcoding included**.
-
-Unlike a proxy the server stays a user agent on both sides: it owns two dialogs,
-it can hang either of them up, it stays in the signalling path for the whole call,
-and it can meter.
-
+B2BUA has been heavily tested against Linphone 6.2.0 UA
 
 ## Framework changes
 
 ### The B2BUA feature
 
-- new **`SIP.Session.B2bua`**, pulled in by `use SIP.Scenario` — one FSM drives
-  **two** dialogs. The inbound leg stays the scenario's own dialog and everything
-  already known keeps its meaning; the outbound leg's events arrive **tagged**
-  (`{:outbound, {200, resp, trans, dlg}}`), and can be processed by the same scenario.
+- New references scenarios direct-call-with-auth.exs and direct-call-with-auth-and-media.exs
+- B2BUA call between two registered UAs is now fully operational with an without media relay
+- Media relay in bridge mode has been tested
+- Audio and video transcoding as well.
 
-The module provides functions and macro to create an outbound leg (INVITE for the moment)
-and relay requests and responses back and forth between call legs.
+Not tested:
+- text
+- SIP to WebRTC bitstream
 
-Processing request locally and answering them is also possible.
 
 See B2BUA.md documentation.
-
-### Where the second call goes
-
-- new **`%SIP.B2bua.Peer{}`** struct that enables a rich forward policy settings and
-  can contains a list of destination URIs
-
-- calls policies includes
-  - serial hunting
-  - parallel SIP forking
-  - dynamic targets
-  - SRV resolution with fail-over
-  - outbound proxy settings
-
-
-### Media between the two legs
-
-By default, B2BUA do not process any media. The reference scenario 
-`direct-call-with-auth.exs` has been extensively tested and debugged using
-Linphone.
-
-
-But media relay using a Mediaserver is also supported. This enables NAT traversal but also
-if requested, audio and/or video transcoding.
-
-B2UBA module with media also supports media change (re-INVITE / UPDATE) with three
-main uses cases:
-
-- media addition or removal for total conversation: this one is handled and scenario
-  propagate it between legs
-- on hold / off hold
-- IP address change.
-
-A reference scenario direct-call.exs provides a good example.
 
 ### Codec negotiation and transcoding
 
@@ -82,19 +40,9 @@ See [CODEC-NEGOTIATION.md](../../CODEC-NEGOTIATION.md) for the full rules.
 
 ### RTP profile negociation
 
-The B2BUA provide a mecanism to negociate beween WebRTC bitstream and regular SIP
-bitstream. An option enable the outbound leg to retry INVITEs and downgrade the RTP
-profile as follows: `webrtc → avpf → avp`. A 488 Response code is interpreted a request
-to downgrade.
+This has not been tested
 
 ### Dialog, transaction and message layers
-
-a **client-transaction timeout is reported to the application as a synthetic 408**
-  (RFC 3261 §17.1.1.2 / §8.1.3.1).
-
-Three readings added to `SIP.Msg.Ops`: `from_username/1` / `to_username/1` (the raw
-claims, where `asserted_username/1` prefers the verified digest name) and
-`in_dialog?/1` (does the request carry a To tag).
 
 ### SIP correctness on the wire
 
@@ -133,11 +81,6 @@ as their first argument and be more friendly to scripts.it can act on
 
 ## Framework corrections
 
-- **DNS SRV resolution corrected.** + `srv_targets/1` that returns a peer populated with a list of URI.
-- **a client transaction in `:cancelling` dropped every final response.** So a
-  cancelled INVITE was never ACKed (§17.1.1.2). This was corrected.
-- every branch after the first ignored the peer's `ruri: :keep` (a trunk's second
-  branch was rewritten to the gateway's URI) and its `outbound_proxy`
 - `address_in_dialog/2` restores **both** identities on an outbound dialog
 - **mendooze: media arriving before the answer no longer loses `:ice_connected`.**
 - the registrar scenarios still watched for `:tcp_closed` / `:tls_closed` /
@@ -251,7 +194,7 @@ refactor to put common code in helper modules.
 
 ## Dependencies
 
-- [mediaserver](https://github.com/neutrino38/mediaserver) **newer than 1.12.2
+- [mediaserver](https://github.com/neutrino38/mediaserver) **newer than 1.13.0
   is required** (≥ `8ecf523`): video bridge/transcode switching, AV1, RTP
   inactivity watchdog driven from the answer, payload-type renumbering.
 
