@@ -951,7 +951,7 @@ defmodule Mendooze.ConnTest do
     assert {:ok, [%{type: :audio, port: 22_000, ip: "192.168.5.5"}]} = Sdp.parse(offer)
   end
 
-  test "set_remote_answer starts sending with the remote map then arms the watchdog" do
+  test "set_remote_answer starts sending with the remote map, and arms nothing until the call is answered" do
     %{server: server, stream: stream} = start_media_server()
 
     {:ok, conn} =
@@ -965,9 +965,18 @@ defmodule Mendooze.ConnTest do
     assert_receive {:jsr309_call, "EndpointStartSending", [3, 4, 0, "10.9.8.7", 40_000, send_map]}
     assert send_map == %{"0" => 0, "101" => 100}
 
-    # watchdog armed after the answer is processed, never before
+    # NOT armed by the answer: the call is not up yet, and the ringing phase it
+    # would otherwise supervise is silent by definition
+    refute_received {:jsr309_call, "EndpointStartRTPTimeout", [3, 4, 0, _]}
+
+    # armed when — and only when — the call is answered
+    assert :ok = Mendooze.call_answered(conn)
     assert_receive {:jsr309_call, "EndpointStartRTPTimeout", [3, 4, 0, timeout]}
     assert timeout > 0
+
+    # idempotent: a second announcement changes nothing
+    assert :ok = Mendooze.call_answered(conn)
+    refute_received {:jsr309_call, "EndpointStartRTPTimeout", [3, 4, 0, _]}
 
     # :ice_connected is no longer emitted on the answer: it now reflects the
     # first validated RTP packet the server reports (EndpointConnectedEvent, 7)
@@ -1308,6 +1317,10 @@ defmodule Mendooze.ConnTest do
 
     # crypto/credentials must precede the media start
     assert_receive {:jsr309_call, "EndpointStartSending", [3, 4, 0, "10.9.8.7", 40_000, _]}
+
+    # the watchdog waits for the call to be answered (see the direction test below)
+    refute_received {:jsr309_call, "EndpointStartRTPTimeout", [3, 4, 0, _]}
+    assert :ok = Mendooze.call_answered(conn)
     assert_receive {:jsr309_call, "EndpointStartRTPTimeout", [3, 4, 0, _]}
   end
 
@@ -1419,6 +1432,9 @@ defmodule Mendooze.ConnTest do
 
     assert_receive {:jsr309_call, "EndpointStartSending", [3, 4, 0, "10.9.8.7", 40_000, send_map]}
     assert send_map == %{"0" => 0, "101" => 100}
+
+    refute_received {:jsr309_call, "EndpointStartRTPTimeout", [3, 4, 0, _]}
+    assert :ok = Mendooze.call_answered(conn)
     assert_receive {:jsr309_call, "EndpointStartRTPTimeout", [3, 4, 0, _]}
 
     # :ice_connected follows the first validated RTP packet, not the answer
@@ -2281,11 +2297,39 @@ defmodule Mendooze.ConnTest do
 
     assert {:ok, _answer} = Mendooze.set_remote_offer(conn, offer)
 
+    # nothing at all while the call is not up
+    refute_received {:jsr309_call, "EndpointStartRTPTimeout", _}
+
+    assert :ok = Mendooze.call_answered(conn)
+
     # audio: armed; video: explicitly disarmed; text: never armed at all
     assert_receive {:jsr309_call, "EndpointStartRTPTimeout", [3, 4, 0, audio_ms]}
     assert audio_ms > 0
     assert_receive {:jsr309_call, "EndpointStartRTPTimeout", [3, 4, 1, 0]}
     refute_received {:jsr309_call, "EndpointStartRTPTimeout", [3, 4, 2, _]}
+  end
+
+  test "a media the peer holds is disarmed on the spot, and re-armed on resume" do
+    %{server: server} = start_media_server()
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio_video)
+
+    assert {:ok, _answer} = Mendooze.set_remote_offer(conn, av_offer())
+    assert :ok = Mendooze.call_answered(conn)
+
+    assert_receive {:jsr309_call, "EndpointStartRTPTimeout", [3, 4, 0, ms]} when ms > 0
+    assert_receive {:jsr309_call, "EndpointStartRTPTimeout", [3, 4, 1, ms]} when ms > 0
+
+    # hold: the peer says it stops sending video. The re-offer is applied to an
+    # ANSWERED leg, so it takes effect at once — waiting for another
+    # `call_answered/1` that will never come would leave the media unwatched, and
+    # leave a held video watched.
+    assert {:ok, _answer} = Mendooze.set_remote_offer(conn, av_offer(%{video: :recvonly}))
+    assert_receive {:jsr309_call, "EndpointStartRTPTimeout", [3, 4, 1, 0]}
+
+    # resume: sending again, watched again
+    assert {:ok, _answer} = Mendooze.set_remote_offer(conn, av_offer())
+    assert_receive {:jsr309_call, "EndpointStartRTPTimeout", [3, 4, 1, ms]} when ms > 0
   end
 
   # ── Text over WebSocket (jsr309_text_over_wss.md) ───────────────────────────

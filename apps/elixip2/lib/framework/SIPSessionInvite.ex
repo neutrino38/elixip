@@ -276,7 +276,15 @@ defmodule SIP.Session.CallUAC do
   def process_sdp_resp(sip_ctx = %SIP.Context{}, resp) when resp.response in [200, 183] do
     case SIP.Session.extract_sdp(resp) do
       sdp_answer when is_binary(sdp_answer) ->
-        SIP.Session.Media.process_sdp_answer(sip_ctx, sdp_answer)
+        sip_ctx = SIP.Session.Media.process_sdp_answer(sip_ctx, sdp_answer)
+
+        # The callee picked up: it is sending from now on, so the media layer may
+        # start watching for silence. On a 183 it is NOT — the answer describes
+        # early media, the phone is still ringing, and a ring longer than the
+        # watchdog would otherwise be taken for a dead leg.
+        if resp.response == 200,
+          do: SIP.Session.Media.call_answered(sip_ctx),
+          else: sip_ctx
 
       _ ->
         Logger.warning(
@@ -476,6 +484,16 @@ defmodule SIP.Session.CallUAS do
       {sip_ctx, {:ok, answer}} ->
         fields = reply_fields(sip_ctx, opts, body: answer)
         rc = SIP.Dialog.reply(sip_ctx.dialogpid, req, code, Keyword.get(opts, :reason), fields)
+
+        # A 2xx that went out is the moment the caller starts sending: the media
+        # layer is told so it can begin watching for what it does NOT receive.
+        # A 183 is not that moment — the phone is still ringing, and a 183 answer
+        # is exactly the early-media case that must not be supervised yet.
+        sip_ctx =
+          if code == 200 and reply_lasterr(rc) == :ok,
+            do: SIP.Session.Media.call_answered(sip_ctx, leg: :inbound),
+            else: sip_ctx
+
         SIP.Context.set(sip_ctx, :lasterr, reply_lasterr(rc))
 
       {sip_ctx, {:error, reason}} ->

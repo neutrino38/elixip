@@ -435,6 +435,48 @@ defmodule SIP.Session.Media do
     SIP.Context.set(sip_ctx, :lasterr, rez)
   end
 
+  @doc """
+  Tell the media server that the call is **answered** on `opts[:leg]` (every leg
+  holding a peer connection when none is named): the peer may now be expected to
+  send, and whatever watches for its absence starts from here.
+
+  This is the framework's single statement of that moment. The media layer cannot
+  derive it — an SDP is negotiated when the INVITE arrives or when a 183 comes
+  back, both of them long before anyone picks up — so an adapter left to guess
+  starts its RTP watchdog during the ringing and hangs up the calls that ring
+  longest (traffic of 2026-08-13:
+  `MediaServer.Behaviour.call_answered/1` carries the trace).
+
+  Best-effort and idempotent: a call that is up must not fall over because its
+  supervision could not be armed. Failures are logged; `:lasterr` is left alone.
+  """
+  @spec call_answered(%SIP.Context{}, keyword()) :: %SIP.Context{}
+  def call_answered(sip_ctx = %SIP.Context{}, opts \\ []) when is_list(opts) do
+    legs =
+      case Keyword.fetch(opts, :leg) do
+        {:ok, leg} -> [leg]
+        :error -> [@default_leg | media_legs(sip_ctx)] |> Enum.uniq()
+      end
+
+    for leg <- legs, cnx = peer_connection(sip_ctx, leg) do
+      case safe_ms_call(sip_ctx.mediaservermodule, :call_answered, [cnx]) do
+        :ok ->
+          :ok
+
+        other ->
+          Logger.warning(
+            dialogpid: sip_ctx.dialogpid,
+            module: __MODULE__,
+            message:
+              "media server refused the answered notification on leg #{leg} " <>
+                "(#{inspect(other)}); this leg's media supervision is not armed"
+          )
+      end
+    end
+
+    sip_ctx
+  end
+
   # The peer connection an action must run on, or a refusal that names what is
   # missing. One reading for every action below, which is what keeps them from
   # drifting apart as legs multiply.

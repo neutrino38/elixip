@@ -36,6 +36,16 @@ defmodule MediaServer.Mockup do
   def add_remote_candidate(conn, candidate),
     do: GenServer.call(conn, {:add_remote_candidate, candidate})
 
+  # Nothing to arm: the stub has no RTP to miss. It stays a call rather than a
+  # bare `:ok` so a test can assert the framework reached the media layer at the
+  # right moment — which is the whole subject of this callback (`answered?/1`).
+  @impl MediaServer.Behaviour
+  def call_answered(conn), do: GenServer.call(conn, :call_answered)
+
+  @doc "Test hook: has the framework told this leg its call was answered?"
+  @spec answered?(pid()) :: boolean()
+  def answered?(conn), do: GenServer.call(conn, :answered?)
+
   @impl MediaServer.Behaviour
   def close_peer_connection(conn) do
     GenServer.stop(conn, :normal)
@@ -231,7 +241,11 @@ defmodule MediaServer.Mockup.Conn do
     ice_notified: false,
     # …and its mirror for loss (see simulate_media_timeout/2)
     timed_out: MapSet.new(),
-    lost_notified: false
+    lost_notified: false,
+    # Whether the framework announced the call answered on this leg. The mock has
+    # no watchdog to arm with it; it records the moment so a call-flow test can
+    # check it happened, and happened after the ringing rather than during it.
+    answered: false
   ]
 
   @impl true
@@ -270,6 +284,16 @@ defmodule MediaServer.Mockup.Conn do
   @impl true
   def handle_call(:get_event_sink, _from, state) do
     {:reply, state.event_sink, state}
+  end
+
+  @impl true
+  def handle_call(:call_answered, _from, state) do
+    {:reply, :ok, %{state | answered: true}}
+  end
+
+  @impl true
+  def handle_call(:answered?, _from, state) do
+    {:reply, state.answered, state}
   end
 
   @impl true

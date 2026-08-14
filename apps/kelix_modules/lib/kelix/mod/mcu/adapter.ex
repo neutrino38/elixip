@@ -112,6 +112,16 @@ defmodule Kelix.Mod.Mcu.Adapter do
   @impl MediaServer.Behaviour
   def add_remote_candidate(_conn, _candidate), do: :ok
 
+  @doc """
+  A no-op here: a conference leg arms its RTP watchdog at `attach/1` — its own
+  ACK-time step (§16.1), which the script drives — and that is already after the
+  ringing this callback exists to keep out of. Answering `:ok` rather than
+  arming a second time keeps the one statement of when a participant starts
+  being watched where the rest of the participant's ACK sequence lives.
+  """
+  @impl MediaServer.Behaviour
+  def call_answered(_conn), do: :ok
+
   # Outbound legs need `get_local_offer/1` + `set_remote_answer/2`; they arrive with
   # the B2BUA leg primitives (§1.2), and the DSL surfaces the error as a 500 —
   # which is the honest answer to a scenario asking a mixer to place a call.

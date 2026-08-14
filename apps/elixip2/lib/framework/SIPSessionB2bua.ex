@@ -1854,7 +1854,14 @@ defmodule SIP.Session.B2bua do
   defp complete_media(sip_ctx, resp, %MediaPlan{} = plan, tid) do
     with {:ok, answer_b} <- callee_answer(resp),
          :ok <- ms_set_remote_answer(sip_ctx, answer_b),
-         {sip_ctx, :ok} <- attach_legs(sip_ctx, plan, []) do
+         {sip_ctx, :ok} <- attach_legs(sip_ctx, plan, []),
+         # BOTH legs are up at this one instant: the callee is sending (it
+         # answered 2xx) and the caller will be as soon as the 200 this function
+         # returns reaches it. That is what the media layer needs to know before
+         # it may watch either leg for silence — the caller's leg was negotiated
+         # when its INVITE arrived, tens of seconds of ringing ago (see
+         # `MediaServer.Behaviour.call_answered/1`).
+         sip_ctx = Media.call_answered(sip_ctx) do
       # `media_plan(sip_ctx)`, NOT `plan`. `attach_legs` rebinds only `sip_ctx`;
       # `plan` is still the struct bound as this function's parameter, so reading
       # it here would send the answer held since the INVITE and silently discard

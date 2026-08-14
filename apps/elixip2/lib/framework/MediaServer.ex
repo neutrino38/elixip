@@ -320,6 +320,29 @@ defmodule MediaServer do
     @callback add_remote_candidate(conn :: pid(), candidate :: String.t()) ::
                 :ok | {:error, term()}
 
+    @doc """
+    The SIP call this connection serves has been **answered**: the peer may now
+    be expected to send RTP, and everything that watches for its absence starts
+    here — never at offer/answer time.
+
+    Negotiating an SDP says what a call *would* carry; it says nothing about when
+    the media starts. Between the two sits the ringing phase, which is silent by
+    definition and lasts as long as a human takes to pick up. An adapter that
+    arms its RTP inactivity watchdog when it processes the SDP therefore reaps
+    every call that rings longer than the timeout: traffic of 2026-08-13, an
+    INVITE answered at 22:12:15, the watchdog fired at 22:12:25 while the callee
+    was still ringing, and the 200 OK relayed at 22:12:32 was followed
+    immediately by a BYE on both legs — a perfectly good call, killed by its own
+    supervision. The same holds for an early answer (183): the callee's SDP is
+    known long before anyone picks up.
+
+    Called once per leg, by the framework, at the moment the call is up for that
+    leg (`SIP.Session.Media.call_answered/2`). Idempotent, and best-effort by
+    contract: a leg that carries media is worth more than a leg that is watched,
+    so an adapter reports a failure to arm rather than failing the call.
+    """
+    @callback call_answered(conn :: MediaServer.conn_ref()) :: :ok | {:error, term()}
+
     @callback close_peer_connection(conn :: pid()) :: :ok
 
     # ── Bridging two peer connections ───────────────────────────────────────

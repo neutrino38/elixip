@@ -172,6 +172,18 @@ defmodule MediaServer.Mendooze.Conn do
   end
 
   @doc """
+  This leg's call has been answered: arm the RTP inactivity watchdog on every
+  media the peer said it would send, and on no other (§16.1, and see
+  `MediaServer.Behaviour.call_answered/1` for why not a moment earlier).
+
+  Idempotent — a second call changes nothing.
+  """
+  def call_answered(conn) do
+    {pid, name} = ref(conn)
+    GenServer.call(pid, {:call_answered, name}, call_timeout())
+  end
+
+  @doc """
   Attach two of this session's endpoints to each other, per media, in both
   directions — the `buildBridge` moment. Both refs must name legs of the SAME
   connection: that is what "two endpoints of one MediaSession" means, and it is
@@ -293,7 +305,16 @@ defmodule MediaServer.Mendooze.Conn do
       recv_medias: nil,
       ice_notified: false,
       timed_out: MapSet.new(),
-      lost_notified: false
+      lost_notified: false,
+      # The RTP inactivity watchdog, in two halves. `watchdogs` is what the last
+      # negotiation asks for, per media (ms, `0` = disarmed because the peer said
+      # it will not send); `answered` says whether the call is up, which is the
+      # only moment any of it may be pushed to the server (`do_call_answered/1`).
+      # A renegotiation on an answered leg applies straight away — that is the
+      # hold/resume path, and it must not wait for an answer that has already
+      # happened.
+      watchdogs: %{},
+      answered: false
     }
   end
 
@@ -463,6 +484,9 @@ defmodule MediaServer.Mendooze.Conn do
 
   def handle_call({:add_remote_candidate, name, candidate}, _from, state),
     do: on_leg(state, name, &do_add_remote_candidate(&1, candidate))
+
+  def handle_call({:call_answered, name}, _from, state),
+    do: on_leg(state, name, &do_call_answered/1)
 
   def handle_call({:add_leg, name, opts}, _from, state) do
     cond do
@@ -1540,12 +1564,16 @@ defmodule MediaServer.Mendooze.Conn do
   # R: the negotiated medias the peer transmits on, normalised to our point of
   # view (§4). A text-over-WebSocket section carries no RTP leg and can never
   # produce a connectivity event, so it is excluded.
+  #
+  # "The peer transmits on it" is `peer_sends?/1` and nothing else — the SAME
+  # predicate the watchdog is armed on, which is what `maybe_notify_media_lost/2`
+  # relies on when it declares a leg dead the moment R is covered by `timed_out`.
+  # This used to read the direction here and the direction *plus* `c=0.0.0.0`
+  # there: a peer holding the legacy way (RFC 3264 §8.4) then sat in R while
+  # nothing watched it, so `:media_lost` could never be reached again — the leg
+  # stayed "alive" for the rest of the call however silent it went.
   defp receiving_medias(descs) do
-    for %{transport: t} = d <- descs,
-        t != :ws,
-        Map.get(d, :direction, :sendrecv) in [:sendrecv, :sendonly],
-        into: MapSet.new(),
-        do: d.type
+    for %{transport: t} = d <- descs, t != :ws, peer_sends?(d), into: MapSet.new(), do: d.type
   end
 
   # Called once the send plane is up for every media. With R empty no
@@ -2115,8 +2143,9 @@ defmodule MediaServer.Mendooze.Conn do
     do: {:ok, state, neg}
 
   # Applies the §9 remote-side steps for one media: transport properties, the
-  # peer's security material, StartSending, then the watchdog — armed last, once
-  # the answer has been processed.
+  # peer's security material, StartSending, then the watchdog — recorded last,
+  # once the answer has been processed, and pushed to the server only if the call
+  # is already up (`note_watchdog/2` + `apply_watchdog/2`).
   defp apply_remote_media(state, desc, neg) do
     m = @media_int[desc.type]
 
@@ -2131,7 +2160,8 @@ defmodule MediaServer.Mendooze.Conn do
              desc.port,
              neg.send_map
            ]),
-         :ok <- arm_watchdog(state, m, desc) do
+         state = note_watchdog(state, desc),
+         :ok <- apply_watchdog(state, desc.type) do
       {:ok, note_negotiated(state, desc.type, neg), neg}
     end
   end
@@ -2249,17 +2279,89 @@ defmodule MediaServer.Mendooze.Conn do
       Map.get(desc, :ip) != "0.0.0.0"
   end
 
-  # Text is never armed at all: T.140 is legitimately silent between keystrokes,
-  # so watching it would reap a leg the moment its user stops typing.
-  defp arm_watchdog(_state, _m, %{type: :text}), do: :ok
+  # What this media's watchdog must be, from the description just applied: the
+  # configured timeout when the peer will send on it, `0` — disarmed — when it
+  # will not. Recorded rather than issued: what a negotiation decides is what to
+  # watch, and WHEN to watch it is `call_answered/1`'s business.
+  #
+  # Text never enters the map at all: T.140 is legitimately silent between
+  # keystrokes, so watching it would reap a leg the moment its user stops typing.
+  defp note_watchdog(state, %{type: :text}), do: state
 
-  defp arm_watchdog(state, m, desc) do
-    timeout = if peer_sends?(desc), do: rtp_timeout_ms(), else: 0
+  defp note_watchdog(state, desc) do
+    ms = if peer_sends?(desc), do: rtp_timeout_ms(), else: 0
+    %{state | watchdogs: Map.put(state.watchdogs, desc.type, ms)}
+  end
 
-    case rpc(state, "EndpointStartRTPTimeout", [state.sess_id, state.endpoint_id, m, timeout]) do
+  # Push one media's recorded watchdog to the server, if the call is up.
+  #
+  # Before the call is answered there is nothing to watch: the peer has not been
+  # told to start sending (its 200 OK is unsent, or its own answer has not been
+  # acknowledged), and the ringing phase that sits in between is silent by
+  # definition and lasts as long as the callee takes to pick up. Arming across it
+  # reaps every call that rings longer than `rtp_timeout_ms` — see
+  # `MediaServer.Behaviour.call_answered/1` for the traffic that proved it.
+  #
+  # AFTER the call is up, a renegotiation applies immediately: hold and resume
+  # travel through exactly this path, and a resumed media left unwatched until
+  # some later answer would never be watched again.
+  defp apply_watchdog(%{answered: false}, _media), do: :ok
+
+  defp apply_watchdog(state, media) do
+    case Map.fetch(state.watchdogs, media) do
+      {:ok, ms} -> start_rtp_timeout(state, media, ms)
+      :error -> :ok
+    end
+  end
+
+  defp start_rtp_timeout(state, media, ms) do
+    case rpc(state, "EndpointStartRTPTimeout", [
+           state.sess_id,
+           state.endpoint_id,
+           @media_int[media],
+           ms
+         ]) do
       {:ok, _} -> :ok
       {:error, _} = err -> err
     end
+  end
+
+  # The call is up on this leg. Everything the negotiations recorded is pushed to
+  # the server here, and this is the first moment any of it is.
+  #
+  # Best-effort, unlike the negotiation path: the call is already established, so
+  # a server that refuses the watchdog must not take a working call down with it.
+  # The failure is logged rather than swallowed, so a fleet-wide "nothing is ever
+  # armed" cannot pass for working.
+  defp do_call_answered(%{answered: true} = state), do: {:reply, :ok, state}
+
+  defp do_call_answered(state) do
+    state = %{state | answered: true}
+
+    for {media, ms} <- state.watchdogs do
+      case start_rtp_timeout(state, media, ms) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning(
+            module: __MODULE__,
+            cnx_tag: state.sess_tag,
+            message:
+              "could not set the #{media} RTP watchdog of leg #{state.leg} to #{ms} ms " <>
+                "(#{inspect(reason)}) — a silent leg will only be caught by the " <>
+                "scenario's own timeout"
+          )
+      end
+    end
+
+    Logger.debug(
+      module: __MODULE__,
+      cnx_tag: state.sess_tag,
+      message: "call answered on leg #{state.leg}; RTP watchdogs #{inspect(state.watchdogs)}"
+    )
+
+    {:reply, :ok, state}
   end
 
   # rtcp-mux (mirrored from the peer) and the RTCP-feedback switches behind the
