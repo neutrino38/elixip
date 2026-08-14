@@ -798,12 +798,85 @@ defmodule Mendooze.ConnTest do
 
     # Both legs carry opus, so the transcoder will spend the call bridging — and
     # the answer keeps every codec the caller offered that the server accepted,
-    # since a transcoder can convert any of them. speex is absent for a different
-    # reason: the codec tables cannot name it, so `parse/1` dropped it long before.
+    # since a transcoder can convert any of them. Wideband speex (PT 97) is one
+    # of those since the codec table names it; narrowband speex/8000 (PT 98) is
+    # absent because the table's clock is part of the codec's identity and the
+    # server factory carries no 8 kHz variant — `parse/1` dropped it up front.
     assert rebuilt =~ "opus/48000/2"
-    refute rebuilt =~ "speex"
+    assert rebuilt =~ "speex/16000"
+    refute rebuilt =~ "speex/8000"
     # DTMF is not a codec choice and rides alongside whichever one wins
     assert rebuilt =~ "telephone-event"
+  end
+
+  # The callee's answer declines the audio (`m=audio 0`, RFC 3264 §6) but keeps
+  # the video. Traffic of 2026-08-14: this used to be processed as a live media —
+  # StartSending aimed at port 0, a transcoder pair bridging into the void, and a
+  # caller granted `sendrecv` audio it could never hear. The decline must
+  # propagate: nothing started on that media, no audio bridge, and the caller's
+  # rebuilt answer declining it too, while the video lives on.
+  test "an answer declining one media declines it on the other leg too" do
+    %{server: server} = start_media_server(&two_leg_handler/2)
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self())
+    assert_receive {:jsr309_call, "MediaSessionCreate", [_tag, _q]}, 1_000
+    {:ok, out} = Mendooze.create_peer_connection(server, self(), bridge_with: conn)
+
+    caller_offer =
+      Enum.join(
+        [
+          "v=0",
+          "o=60273198 242 2460 IN IP4 172.22.0.2",
+          "s=Talk",
+          "c=IN IP4 172.22.0.2",
+          "t=0 0",
+          "m=audio 57017 RTP/AVP 96 0 8 101",
+          "a=rtpmap:96 opus/48000/2",
+          "a=rtpmap:101 telephone-event/48000",
+          "m=video 57019 RTP/AVP 96",
+          "a=rtpmap:96 VP8/90000",
+          ""
+        ],
+        "\r\n"
+      )
+
+    callee_answer =
+      Enum.join(
+        [
+          "v=0",
+          "o=50815019 1543 2543 IN IP4 172.22.0.6",
+          "s=Talk",
+          "c=IN IP4 172.22.0.6",
+          "t=0 0",
+          "m=audio 0 RTP/AVP 0",
+          "a=inactive",
+          "m=video 53291 RTP/AVP 107",
+          "a=rtpmap:107 VP8/90000",
+          "a=recvonly",
+          ""
+        ],
+        "\r\n"
+      )
+
+    assert {:ok, first_answer} = Mendooze.set_remote_offer(conn, caller_offer)
+    # first pass: the other leg is unknown, so the audio is still answered live
+    assert first_answer =~ "m=audio 22000"
+
+    {:ok, _offer} = Mendooze.get_local_offer(out)
+    :ok = Mendooze.set_remote_answer(out, callee_answer)
+
+    assert {:ok, %{inbound_answer: rebuilt}} = Mendooze.bridge(conn, out, audio: :avoid)
+
+    # the caller learns its audio has no far end; its video stands
+    assert rebuilt =~ "m=audio 0 "
+    assert rebuilt =~ "m=video 22002"
+    assert rebuilt =~ "VP8/90000"
+
+    # the video is wired; the dead audio never is, and nothing was ever sent
+    # towards the declined media's port 0
+    assert_receive {:jsr309_call, "VideoTranscoderCreate", _}, 1_000
+    refute_receive {:jsr309_call, "AudioTranscoderCreate", _}, 200
+    refute_receive {:jsr309_call, "EndpointStartSending", [3, 5, 0 | _]}, 200
   end
 
   # A transcoder is a session resource, not a wire: detaching the endpoints

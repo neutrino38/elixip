@@ -77,7 +77,12 @@ defmodule MediaServer.Mendooze.Conn do
   # "main" port of any media, whatever its type (Endpoint::GetPort).
   @role_main 0
 
-  @default_audio_codecs ["OPUS", "PCMU", "PCMA"]
+  # SPEEX (wideband, the one variant the server factory carries) closes the same
+  # hole one media down: a speex-only callee offered this menu without it
+  # declined the audio outright (traffic of 2026-08-14), while the server could
+  # have transcoded it all along. This list remains a copy of the factory —
+  # the honest fix is the capability query (`codec_capabilities_plan.md`).
+  @default_audio_codecs ["OPUS", "PCMU", "PCMA", "SPEEX"]
   # AV1 belongs here: the media server carries it end to end (`AV1Decoder`,
   # `AV1Encoder` over libsvtav1, `AV1Encoder::ResolveNegotiation` for the fmtp,
   # `ClampToLevel` for the level bound) and `Sdp`'s codec table names it. Leaving
@@ -298,6 +303,13 @@ defmodule MediaServer.Mendooze.Conn do
       # the tail is what makes the cross-leg selection possible at all, because
       # "is there a codec BOTH peers support" cannot be answered from two heads.
       peer_codecs: %{},
+      # The medias this peer explicitly turned down — a port-0 m= in its answer
+      # (RFC 3264 §6) or in its re-offer (§5.1). Distinct from a media that is
+      # merely not negotiated YET: a decline is the peer's definite verdict, and
+      # `bridgeable_medias/3` propagates it to the other leg's answer instead of
+      # bridging a channel one end of which does not exist. Cleared the moment a
+      # later offer/answer re-establishes the media.
+      declined: MapSet.new(),
       # What it takes to build this leg's answer a SECOND time, once the other
       # leg has answered and the selection is known: every offered section (the
       # port-0 rejections included, so the answer keeps one m= per offered m=)
@@ -756,11 +768,21 @@ defmodule MediaServer.Mendooze.Conn do
   # Text is never transcoded — the Java gateway does not either, and the T.140 /
   # text-over-WebSocket gateway depends on it being a straight attach.
   defp bridgeable_medias(la, lb, policy) do
-    common = Enum.filter(la.medias, &(&1 in lb.medias))
+    # A media either peer explicitly declined (a port-0 answer or re-offer
+    # section — `leg.declined`) is dead on the WHOLE call, audio included: a
+    # B2BUA cannot honour a media it holds only one end of. It is not bridged,
+    # and `leg_shaping/4` turns each `:decline` entry into a port-0 section of
+    # the other leg's rebuilt answer — that propagation is what tells the
+    # caller its audio has no far end, instead of a `sendrecv` grant into the
+    # void (traffic of 2026-08-14). This is distinct from the "nothing
+    # negotiated" errors below: a decline is a definite verdict, not a hole.
+    declined = MapSet.union(la.declined, lb.declined)
+    common = Enum.filter(la.medias, &(&1 in lb.medias and &1 not in declined))
+    declines = Enum.map(declined, &{&1, :decline, nil})
 
-    Enum.reduce_while(common, {:ok, []}, fn media, {:ok, acc} ->
+    Enum.reduce_while(common, {:ok, declines}, fn media, {:ok, acc} ->
       case bridge_decision(la, lb, media, policy) do
-        # One leg carries nothing at all on this media — the peer declined it.
+        # One leg carries nothing at all on this media — nobody offered it.
         # There is no bridge to build and no policy to apply: it is simply not
         # part of this call. Fatal only for audio, on §11's own reasoning that a
         # call with no audio is not a call; for anything else the media is
@@ -923,8 +945,7 @@ defmodule MediaServer.Mendooze.Conn do
     Logger.info(
       module: __MODULE__,
       cnx_tag: state.sess_tag,
-      message:
-        "renegotiation moved #{sink.leg}'s #{media} from codec #{inspect(old)} to #{code}"
+      message: "renegotiation moved #{sink.leg}'s #{media} from codec #{inspect(old)} to #{code}"
     )
 
     set_transcoder_codec(state, sink, media, tr, code)
@@ -1321,7 +1342,16 @@ defmodule MediaServer.Mendooze.Conn do
          # media are the supported RTP sections of a configured media type. The
          # rest (unknown type, non-RTP transport, disabled media) are echoed as
          # port-0 rejections so the answer keeps one m= per offer m= (RFC 3264).
-         answerable = Enum.filter(descs, &answerable?(&1, state.medias)),
+         # A supported section offered at port 0 is the peer WITHDRAWING that
+         # media (§5.1): no receive plane is opened for it, it is echoed port-0
+         # like the rest, and the leg records the decline so `bridge/3`
+         # propagates it to the other leg instead of keeping a dead bridge.
+         {withdrawn, answerable} =
+           descs
+           |> Enum.filter(&answerable?(&1, state.medias))
+           |> Enum.split_with(&(&1.port == 0)),
+         state = Enum.reduce(withdrawn, state, &note_declined(&2, &1.type)),
+         state = Enum.reduce(answerable, state, &clear_declined(&2, &1.type)),
          :ok <- ensure_media_present(answerable),
          _ =
            Logger.info(
@@ -2100,30 +2130,48 @@ defmodule MediaServer.Mendooze.Conn do
     end
   end
 
+  # RFC 3264 §6: port 0 is the peer DECLINING this media, whatever codecs the
+  # section still lists. Treating it as live is how a callee's dead audio got
+  # StartSending aimed at port 0, a transcoder bridging into the void, and a
+  # caller answered `sendrecv` on a channel that could never carry anything
+  # (traffic of 2026-08-14). Nothing is started; the leg records the verdict
+  # for `bridgeable_medias/3` to propagate to the other leg's answer.
   defp apply_answered_medias(state, descs) do
-    Enum.reduce_while(descs, {:ok, state, %{}}, fn desc, {:ok, st, acc} ->
-      case Sdp.negotiate(desc, codecs(st, desc.type), dtmf?(st, desc.type)) do
-        {:error, :no_common_codec} ->
-          {:cont, {:ok, st, acc}}
+    Enum.reduce_while(descs, {:ok, state, %{}}, fn
+      %{port: 0} = desc, {:ok, st, acc} ->
+        Logger.info(
+          module: __MODULE__,
+          cnx_tag: st.sess_tag,
+          message: "#{desc.type} declined by the peer (port 0) on leg #{st.leg}"
+        )
 
-        {:ok, neg} ->
-          # never send a codec the server just filtered on receive (no-op when
-          # the server did not delegate, i.e. accepted[media] is nil), and never
-          # leave two payload types of one video codec for the server to choose
-          # between (see one_pt_per_codec/3)
-          send_map =
-            Sdp.restrict_send_map(
-              neg.rtp_map,
-              Map.get(st.proposed_recv, desc.type, %{}),
-              Map.get(st.accepted, desc.type)
-            )
-            |> one_pt_per_codec(desc.type, neg)
+        {:cont, {:ok, note_declined(st, desc.type), acc}}
 
-          case apply_remote_media(st, desc, Map.put(neg, :send_map, send_map)) do
-            {:ok, st, neg} -> {:cont, {:ok, st, Map.put(acc, desc.type, neg)}}
-            {:error, _} = err -> {:halt, err}
-          end
-      end
+      desc, {:ok, st, acc} ->
+        case Sdp.negotiate(desc, codecs(st, desc.type), dtmf?(st, desc.type)) do
+          {:error, :no_common_codec} ->
+            {:cont, {:ok, st, acc}}
+
+          {:ok, neg} ->
+            st = clear_declined(st, desc.type)
+
+            # never send a codec the server just filtered on receive (no-op when
+            # the server did not delegate, i.e. accepted[media] is nil), and never
+            # leave two payload types of one video codec for the server to choose
+            # between (see one_pt_per_codec/3)
+            send_map =
+              Sdp.restrict_send_map(
+                neg.rtp_map,
+                Map.get(st.proposed_recv, desc.type, %{}),
+                Map.get(st.accepted, desc.type)
+              )
+              |> one_pt_per_codec(desc.type, neg)
+
+            case apply_remote_media(st, desc, Map.put(neg, :send_map, send_map)) do
+              {:ok, st, neg} -> {:cont, {:ok, st, Map.put(acc, desc.type, neg)}}
+              {:error, _} = err -> {:halt, err}
+            end
+        end
     end)
   end
 
@@ -2170,6 +2218,21 @@ defmodule MediaServer.Mendooze.Conn do
       {:ok, note_negotiated(state, desc.type, neg), neg}
     end
   end
+
+  # A declined media carries nothing: its stale `negotiated`/`peer_codecs`
+  # entries go with it, so neither the cross-leg selection nor the answer
+  # shaping can keep serving codecs of a channel the peer has closed.
+  defp note_declined(state, media) do
+    %{
+      state
+      | declined: MapSet.put(state.declined, media),
+        negotiated: Map.delete(state.negotiated, media),
+        peer_codecs: Map.delete(state.peer_codecs, media)
+    }
+  end
+
+  defp clear_declined(state, media),
+    do: %{state | declined: MapSet.delete(state.declined, media)}
 
   defp note_negotiated(state, media, neg) do
     case peer_codecs(neg) do

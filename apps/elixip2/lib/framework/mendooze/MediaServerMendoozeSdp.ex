@@ -42,7 +42,12 @@ defmodule MediaServer.Mendooze.Sdp do
     "PCMU" => {0, 0, 8000, 1},
     "PCMA" => {8, 8, 8000, 1},
     "G722" => {9, 9, 8000, 1},
-    "OPUS" => {98, 98, 48_000, 2}
+    "OPUS" => {98, 98, 48_000, 2},
+    # Wideband speex only: RFC 5574 registers the ONE encoding name "speex" at
+    # 8000, 16000 and 32000 Hz, and the server factory carries only the 16 kHz
+    # variant (SPEEX16 = 117). The clock in this table is therefore part of the
+    # codec's identity, not a display default — codec_name_for_pt/3 matches it.
+    "SPEEX" => {117, 117, 16_000, 1}
   }
 
   @video_codecs %{
@@ -565,6 +570,7 @@ defmodule MediaServer.Mendooze.Sdp do
   defp sdp_encoding(name) do
     case String.upcase(name) do
       "OPUS" -> "opus"
+      "SPEEX" -> "speex"
       "T140" -> "t140"
       "T140RED" -> "red"
       other -> other
@@ -1010,13 +1016,32 @@ defmodule MediaServer.Mendooze.Sdp do
       name == "TELEPHONE-EVENT" ->
         {:dtmf, clock}
 
-      match?({:ok, _}, codec_code(type, name)) ->
+      # The encoding name alone is not the codec: RFC 5574 registers "speex"
+      # at three clock rates and the server carries only the 16 kHz one, so a
+      # known name at another clock is a codec we do NOT know — never a
+      # variant we may quietly re-rate.
+      match?({:ok, _}, codec_code(type, name)) and clock == codec_clock(type, name) ->
         {:ok, code} = codec_code(type, name)
         {:ok, name, code}
 
       true ->
         :unknown
     end
+  end
+
+  defp codec_clock(:audio, name) do
+    {_pt, _code, clock, _ch} = Map.fetch!(@audio_codecs, name)
+    clock
+  end
+
+  defp codec_clock(:video, name) do
+    {_pt, _code, clock} = Map.fetch!(@video_codecs, name)
+    clock
+  end
+
+  defp codec_clock(:text, name) do
+    {_pt, _code, clock} = Map.fetch!(@text_codecs, name)
+    clock
   end
 
   defp connection_ip(nil), do: nil
