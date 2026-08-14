@@ -192,6 +192,28 @@ today it is a P0 skeleton (`Kelix.Application` + supervision tree).
 > `q` and `expires`, and traffic brought `+sip.instance`, `+org.linphone.specs`,
 > `reg-id`, `methods`, `pub-gruu`.
 
+> **A B2BUA rewrites the Contact on both legs, unconditionally, and the rewrite
+> carries the transport that will actually carry the message.** A B2BUA is not a
+> proxy: it is a UA on each of its two legs, it adds no Via and records no route,
+> so the only thing telling a peer where to send its in-dialog requests is the
+> Contact we stamp. Front leg (towards the callee): the address, port and
+> transport of the transport we are using to reach it. Back leg (towards the
+> caller): those of the listener the caller reached us on. Never the peer's own
+> Contact forwarded through, and never a Contact left as the scenario wrote it.
+>
+> The transport is part of the address, not a decoration. `sip:host:5070` reads as
+> UDP to every UA (RFC 3263 §4.1), so a dialog established over TCP whose Contact
+> omits it gets its BYE aimed at a UDP port — the call then never hangs up, on a
+> leg that is otherwise working. And it goes out **lower case**: the value is
+> case-insensitive on paper (§19.1.4) and case-sensitive in the field. We emitted
+> `transport=TCP`; the capture of 2026-08-14 shows the caller ACKing over UDP a
+> dialog whose every other message was TCP, having failed to recognise it.
+>
+> `SIP.Transport.build_contact_uri/2` and `add_contact_header/3` are the one place
+> this is applied — every response and every forwarded request goes through them.
+> It holds for whatever a B2BUA relays next, INSTANT MESSAGING included: a MESSAGE
+> dialog answers the same question, "where does the far end send the next one".
+
 ### Transaction Layer (`SIP.Transac.*`, `SIP.ICT`, `SIP.IST`, `SIP.NICT`, `SIP.NIST`)
 - Implements RFC 3261 transaction state machines
 - `ICT`/`NICT` — INVITE/non-INVITE client transactions

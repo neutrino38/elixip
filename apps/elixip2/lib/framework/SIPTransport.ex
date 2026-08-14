@@ -460,6 +460,19 @@ defmodule SIP.Transport do
          scheme: "sip:",
          proto: String.upcase(transport_str)
         }
+        # The transport, ALWAYS, and in lower case. A Contact is the address a
+        # peer sends its in-dialog requests to, and address means the three of
+        # address, port and transport: leaving the last one out says "sip:", which
+        # every UA reads as UDP (RFC 3263 §4.1) — so a dialog established over TCP
+        # got its BYE aimed at a UDP port nobody listens on.
+        #
+        # Lower case is not cosmetic either. The value is case-insensitive on
+        # paper (RFC 3261 §19.1.4) and case-sensitive in the field: we emitted
+        # `transport=TCP`, and the capture of 2026-08-14 shows the caller ACKing
+        # over UDP a dialog whose every other message was TCP — it had not
+        # recognised the value and fallen back to the default. Everyone else
+        # writes it lower case; so do we now.
+        |> SIP.Uri.set_uri_param("transport", String.downcase(transport_str))
 
       # The transport died before it could say where it is bound. There is no
       # honest Contact to build, and raising here would take the transaction —
@@ -489,9 +502,12 @@ defmodule SIP.Transport do
       # (`expires`, `q`, a `+sip.instance`) and live in `hparams`. Carrying only
       # `params` would drop the `expires` that SIP.Session.Registrar puts on the
       # Contact of a REGISTER — the registration then asks for nothing.
-      old_params = Map.put(old_contact.params, "transport", new_contact.proto)
-      %SIP.Uri{ new_contact | params: old_params, hparams: old_contact.hparams,
+      %SIP.Uri{ new_contact | params: old_contact.params, hparams: old_contact.hparams,
                 userpart: old_contact.userpart, displayname: old_contact.displayname }
+      # …and the transport of the transport actually used, over whatever the
+      # caller had put there. Same value and same case as build_contact_uri/2
+      # above: one rule for the Contact we stamp, not two.
+      |> SIP.Uri.set_uri_param("transport", String.downcase(new_contact.proto))
     else
       new_contact
     end
