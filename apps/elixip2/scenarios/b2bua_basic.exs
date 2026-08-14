@@ -30,11 +30,21 @@ defmodule B2BUA.Basic do
       {:INVITE, req, _trans, _dlg} ->
         # Tell the caller we are working on it, then open the outbound leg.
         b2bua_reply(req, 100, "Trying")
-        b2bua_forward(req, ctx_get(:peer), false)
-        goto(proceeding, "INVITE relayed")
+        goto(place_call, "INVITE received")
+
+      {:dialog_terminated, _dlg, _reason} ->
+        scenario_aborted("caller vanished before the INVITE")
     after
       60_000 -> scenario_failure("no INVITE received")
     end
+  end
+
+  # Open the outbound leg. A state with no on_events: it decides and moves on.
+  # The INVITE needs no carrying around — `on_events` stored it and
+  # `last_uas_req()` reads it back, here and in every later state.
+  state place_call do
+    b2bua_forward(last_uas_req(), ctx_get(:peer), false)
+    goto(proceeding, "INVITE relayed")
   end
 
   # The callee is being alerted. Everything it says goes back to the caller —

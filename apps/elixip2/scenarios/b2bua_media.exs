@@ -58,31 +58,56 @@ defmodule B2BUA.Media do
     on_events do
       {:INVITE, req, _trans, _dlg} ->
         b2bua_reply(req, 100, "Trying")
-        # The media server first: without one there is nothing to answer the
-        # caller with, and the outbound INVITE has no body to carry.
-        media_connect()
+        goto(place_call, "INVITE received")
+
+      {:dialog_terminated, _dlg, _reason} ->
+        scenario_aborted("caller vanished before the INVITE")
+    after
+      60_000 -> scenario_failure("no INVITE received")
+    end
+  end
+
+  # Open the outbound leg. A state with no on_events: it decides and moves on.
+  # The INVITE needs no carrying around — `on_events` stored it and
+  # `last_uas_req()` reads it back, here and in every later state.
+  state place_call do
+    req = last_uas_req()
+
+    # The media server first: without one there is nothing to answer the caller
+    # with, and the outbound INVITE has no body to carry. And its verdict is read
+    # BEFORE the forward: forwarding on a failed connect used to place a call
+    # that signalled perfectly and carried no media at all (2026-08-13).
+    media_connect()
+
+    case ctx_get(:lasterr) do
+      :ok ->
         b2bua_forward(req, ctx_get(:peer), @media)
 
         cond do
           ctx_get(:lasterr) == :ok ->
             goto(proceeding, "INVITE relayed")
 
-          # No media plane: media_connect() found no server, or the one it found
-          # is gone. That is OUR unavailability and it is a 503 — which also lets
-          # an upstream proxy try another route, where a 488 would end the call.
+          # The media server was there a moment ago and is not any more —
+          # stopped, or killed under the call. OUR unavailability, so a 503 —
+          # which also lets an upstream proxy try another route, where a 488
+          # would end the call.
           b2bua_media_unavailable?() ->
             b2bua_reply(req, 503, "Service Unavailable")
-            scenario_failure("no media server: #{inspect(ctx_get(:lasterr))}")
+            goto(releasing, "media plane gone: #{inspect(ctx_get(:lasterr))}")
 
           true ->
-            # The offer could not be terminated (no common codec, a WebRTC offer we
-            # were told not to take). That is a statement about what the caller
-            # asked for, so it is a 488 — not a 500, which would blame us.
+            # The offer could not be terminated (no common codec, a WebRTC offer
+            # we were told not to take). That is a statement about what the
+            # caller asked for, so it is a 488 — not a 500, which would blame us.
             b2bua_reply(req, 488, "Not Acceptable Here")
-            scenario_failure("media setup failed: #{inspect(ctx_get(:lasterr))}")
+            goto(releasing, "media setup failed: #{inspect(ctx_get(:lasterr))}")
         end
-    after
-      60_000 -> scenario_failure("no INVITE received")
+
+      err ->
+        # No media plane: media_connect() found no server, or could not reach
+        # the one configured. Same verdict as above, for the same reason.
+        b2bua_reply(req, 503, "Service Unavailable")
+        goto(releasing, "no media server: #{inspect(err)}")
     end
   end
 
@@ -113,8 +138,8 @@ defmodule B2BUA.Media do
           goto(loop, "#{code}, trying the next target")
         else
           case b2bua_media_error() do
-            nil -> scenario_success("callee answered #{code}")
-            reason -> scenario_failure("no target could be bridged: #{inspect(reason)}")
+            nil -> goto(releasing, "callee answered #{code}")
+            reason -> goto(releasing, "no target could be bridged: #{inspect(reason)}")
           end
         end
 
@@ -128,7 +153,7 @@ defmodule B2BUA.Media do
       {:BYE, req, _trans, _dlg} ->
         b2bua_cancel_forward()
         b2bua_reply(req, 200, "OK")
-        scenario_success("caller hung up before answer")
+        goto(releasing, "caller hung up before answer")
 
       # The media plane went away while we were still ringing. There is no call
       # to hang up yet — the caller gets a 500 and the teardown CANCELs the
