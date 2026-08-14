@@ -476,6 +476,46 @@ defmodule SIP.Test.Transport.UDPMockup do
     end
   end
 
+  @spec handle_cast({:simulate, 401 | 407, non_neg_integer()}, map()) :: {:noreply, map()}
+  def handle_cast({:simulate, resp, after_ms}, state) when resp in [401, 407] do
+    siprsp =
+      SIP.Msg.Ops.challenge_request(
+        state.req,
+        resp,
+        "Digest",
+        "elioz.net",
+        "SHA256",
+        [],
+        state.totag
+      )
+
+    Logger.debug(
+      transid: state.req.transid,
+      module: SIP.Test.Transport.UDPMockup,
+      message: "Simulating a #{resp} Digest challenge after #{after_ms} ms."
+    )
+
+    Process.send_after(self(), {:recv, siprsp}, after_ms)
+    {:noreply, state}
+  end
+
+  # Every rejection code, not just 400..487: a fork test needs a 6xx (RFC 3261
+  # §16.7 stops a hunt on a global refusal), and asking for one used to match no
+  # clause at all — which kills the mockup instance rather than failing the
+  # assertion that named the problem.
+  def handle_cast({:simulate, resp, after_ms}, state) when resp in 400..699 do
+    siprsp = reply_to_request(state.req, resp, nil, [], state.totag)
+
+    Logger.debug(
+      transid: state.req.transid,
+      module: SIP.Test.Transport.UDPMockup,
+      message: "Simulating a #{resp} Answer #{after_ms} ms."
+    )
+
+    Process.send_after(self(), {:recv, siprsp}, after_ms)
+    {:noreply, state}
+  end
+
   # The BYE that ends the call from this side (RFC 3261 §15.1.1): this peer's
   # identity and tag on From — the To of the INVITE it answered — ours on To with
   # the tag we put there, our Call-ID, and a fresh Via branch, since a BYE is a
@@ -515,46 +555,6 @@ defmodule SIP.Test.Transport.UDPMockup do
   defp uri!(value) when is_binary(value) do
     {:ok, uri} = SIP.Uri.parse(value)
     uri
-  end
-
-  @spec handle_cast({:simulate, 401 | 407, non_neg_integer()}, map()) :: {:noreply, map()}
-  def handle_cast({:simulate, resp, after_ms}, state) when resp in [401, 407] do
-    siprsp =
-      SIP.Msg.Ops.challenge_request(
-        state.req,
-        resp,
-        "Digest",
-        "elioz.net",
-        "SHA256",
-        [],
-        state.totag
-      )
-
-    Logger.debug(
-      transid: state.req.transid,
-      module: SIP.Test.Transport.UDPMockup,
-      message: "Simulating a #{resp} Digest challenge after #{after_ms} ms."
-    )
-
-    Process.send_after(self(), {:recv, siprsp}, after_ms)
-    {:noreply, state}
-  end
-
-  # Every rejection code, not just 400..487: a fork test needs a 6xx (RFC 3261
-  # §16.7 stops a hunt on a global refusal), and asking for one used to match no
-  # clause at all — which kills the mockup instance rather than failing the
-  # assertion that named the problem.
-  def handle_cast({:simulate, resp, after_ms}, state) when resp in 400..699 do
-    siprsp = reply_to_request(state.req, resp, nil, [], state.totag)
-
-    Logger.debug(
-      transid: state.req.transid,
-      module: SIP.Test.Transport.UDPMockup,
-      message: "Simulating a #{resp} Answer #{after_ms} ms."
-    )
-
-    Process.send_after(self(), {:recv, siprsp}, after_ms)
-    {:noreply, state}
   end
 
   defp set_inbound_scenario(state, sipreq) when sipreq.method == :REGISTER do
