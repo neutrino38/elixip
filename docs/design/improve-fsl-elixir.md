@@ -3,8 +3,8 @@
 Status: proposal — 2026-08-15. Not yet implemented.
 
 This is a **self-contained implementation prompt** for a future session.
-The two features below were designed for FSL/TS (`fsl-typescript` project,
-`docs/specs-and-design/fsl-js-ts.md`), the TypeScript sibling of this DSL.
+The two features below were designed for FSL/TS (`finite-state-language` project,
+`spec/fsl-js-ts.md`), the TypeScript sibling of this DSL.
 The first one (`stay`) proved valuable enough during the FSL/TS design
 review to be backported here. Keeping the two languages' transition models
 aligned is an explicit goal.

@@ -2,7 +2,7 @@
 
 Status: study — 2026-08-15. No implementation yet.
 Related: `improve-fsl-elixir.md`, the FSL-TS spec
-(`fsl-typescript/docs/specs-and-design/fsl-js-ts.md`).
+(`finite-state-language/spec/fsl-js-ts.md`).
 
 ## Verdict first
 
@@ -181,7 +181,7 @@ package.
 - **Static or barely-stateful pages**: plain LiveView suffices; the bridge
   earns nothing.
 - **No-BEAM-ops teams**: this stack demands running Elixir in production;
-  for a pure-frontend team, FSL-TS + JsSIP (the fsl-typescript track) is the
+  for a pure-frontend team, FSL-TS + JsSIP (the finite-state-language track) is the
   right tool. The two tracks are complementary, not competing.
 
 ## Open questions
@@ -202,7 +202,7 @@ package.
 - **P1**: extract `elixip_liveview` (mixin + bridge + Registry/reattach +
   grace periods + tests).
 - **P2**: media hook recipe with an FSL-TS machine (joint example with the
-  fsl-typescript repo), against Mendooze mockup.
+  finite-state-language repo), against Mendooze mockup.
 - **P3**: Monitor → LiveView dashboard component.
 
 Acceptance demo for P1+P2: refresh the page mid-call; the call is still up
