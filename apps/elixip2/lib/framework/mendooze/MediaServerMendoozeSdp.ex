@@ -229,6 +229,21 @@ defmodule MediaServer.Mendooze.Sdp do
     end
   end
 
+  @doc """
+  Resolve codec names to their Mendooze codec codes, keeping the list's order.
+  Raises on an unknown name — like `local_rtp_map/3`, that is a configuration
+  error worth failing on loudly and early.
+  """
+  @spec codec_codes(:audio | :video | :text, [codec_name()]) :: [non_neg_integer()]
+  def codec_codes(kind, names) when is_list(names) do
+    Enum.map(names, fn name ->
+      case codec_code(kind, name) do
+        {:ok, code} -> code
+        :error -> raise ArgumentError, "unknown #{kind} codec #{inspect(name)}"
+      end
+    end)
+  end
+
   defp codec_pt_code(:audio, name) do
     case Map.fetch(@audio_codecs, String.upcase(name)) do
       {:ok, {pt, code, _clock, _ch}} -> {pt, code}

@@ -280,6 +280,7 @@ defmodule MediaServer.Mendooze.Conn do
       sess_tag: state.sess_tag,
       event_sink: state.event_sink,
       opts: state.opts,
+      prefer: state.prefer,
       # this leg
       leg: name,
       endpoint_id: endpoint_id,
@@ -399,6 +400,11 @@ defmodule MediaServer.Mendooze.Conn do
       event_sink: event_sink,
       base_url: base_url,
       opts: opts,
+      # The scenario's codec ranking for this connection's answers, per media
+      # (`prefer_codecs:` on create_peer_connection), resolved to codec CODES
+      # once, here — so a typo in a codec name fails the creation, not an
+      # answer mid-call. Empty map when the scenario stated nothing.
+      prefer: scenario_preference(opts),
       sess_tag: sess_tag,
       sess_id: nil,
       # The endpoint(s) this session holds — see new_leg/4. `medias` and
@@ -484,6 +490,28 @@ defmodule MediaServer.Mendooze.Conn do
       nil -> %{}
       policy when is_map(policy) -> policy
       kw when is_list(kw) -> Map.new(kw)
+    end
+  end
+
+  # `prefer_codecs:` as the connection options state it — the scenario's codec
+  # ranking for this connection's answers, per media, names as the Sdp codec
+  # tables spell them: `[video: ["H264", "VP8"], audio: ["OPUS"]]` (keyword or
+  # map). Resolved to codec codes here so that an unknown media or codec name
+  # raises at create_peer_connection time (`Sdp.codec_codes/2` raises), the
+  # moment the scenario author is looking.
+  defp scenario_preference(opts) do
+    case Keyword.get(opts, :prefer_codecs) do
+      nil ->
+        %{}
+
+      prefs when is_list(prefs) or is_map(prefs) ->
+        for {media, names} <- prefs, into: %{} do
+          if media not in [:audio, :video, :text] do
+            raise ArgumentError, "prefer_codecs: unknown media #{inspect(media)}"
+          end
+
+          {media, Sdp.codec_codes(media, names)}
+        end
     end
   end
 
@@ -1180,6 +1208,7 @@ defmodule MediaServer.Mendooze.Conn do
             descs
             |> Enum.reject(&omit_from_answer?(&1, negs))
             |> Enum.map(&prefer_first(&1, negs, shaping))
+            |> Enum.map(&scenario_prefer(&1, negs, leg))
             |> Enum.map(&answer_or_reject(leg, negs, &1))
         })
     end
@@ -1197,6 +1226,28 @@ defmodule MediaServer.Mendooze.Conn do
         Enum.split_with(fmt, fn pt -> Map.get(neg.rtp_map, to_string(pt)) in codes end)
 
       %{desc | raw_fmt: carried ++ rest}
+    else
+      _ -> desc
+    end
+  end
+
+  # The scenario's own ranking (`prefer_codecs:`), applied AFTER the cross-leg
+  # shaping: an explicit instruction from the script outranks the policy's soft
+  # float, while payload types the scenario does not mention keep whatever order
+  # the shaping (or the offer) left them in — `Enum.sort_by/2` is stable. Same
+  # contract as `prefer_first/3` otherwise: a permutation of the OFFER's own
+  # format list, never an addition or a removal — but ranked by the scenario's
+  # list rather than keeping the offer's relative order, because a preference
+  # list IS a ranking and its order is the point.
+  defp scenario_prefer(desc, negs, leg) do
+    with codes when codes != [] <- Map.get(leg.prefer, Map.get(desc, :type), []),
+         neg when is_map(neg) <- Map.get(negs, desc.type),
+         fmt when is_list(fmt) <- Map.get(desc, :raw_fmt) do
+      rank = fn pt ->
+        Enum.find_index(codes, &(&1 == Map.get(neg.rtp_map, to_string(pt)))) || length(codes)
+      end
+
+      %{desc | raw_fmt: Enum.sort_by(fmt, rank)}
     else
       _ -> desc
     end
