@@ -22,6 +22,13 @@ config :elixip2,
   # peer sending non-canonical or malformed SIP. Off by default (noisy: e.g.
   # WebSocket keep-alives would be logged).
   dump_unparsed_sip: false,
+  # WebSocket ping period, in seconds, on every WSS connection (RFC 6455 §5.5.2).
+  # A SIP-over-WSS flow is idle between two REGISTER refreshes and the boxes on the
+  # path reap it long before then — nginx and most load balancers at 60 s, a home
+  # NAT sooner. The peer's WebSocket stack answers without waking the SIP client.
+  # Three unanswered periods close the connection, so this is also how fast a
+  # half-open socket is noticed. Set to 0 to disable.
+  wss_keepalive_period: 30,
   # TLS/WSS cipher suites (charlists). Mozilla "intermediate" profile — all
   # provide PFS via ephemeral ECDHE key exchange. Override here to restrict or
   # extend the negotiable suites; if unset, the default baked into the transport

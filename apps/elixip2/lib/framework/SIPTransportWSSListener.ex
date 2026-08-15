@@ -228,6 +228,14 @@ defmodule SIP.Transport.WSSListener do
       # Compute Sec-WebSocket-Accept per RFC 6455 §4.2.2.
       accept_key = :crypto.hash(:sha, ws_key <> @ws_magic) |> Base.encode64()
 
+      # §4.1: a client MUST fail the connection if the 101 names a subprotocol it
+      # did not offer — and a browser enforces it, closing the socket the instant
+      # the handshake completes. `Sec-WebSocket-Protocol: sip` was answered
+      # unconditionally, so a client opening the socket without a subprotocol (a
+      # plain `new WebSocket(url)`) was cut off with nothing on the wire to say why.
+      offers_sip = offered_protocols(headers) |> Enum.member?("sip")
+      protocol_header = if offers_sip, do: "Sec-WebSocket-Protocol: sip\r\n", else: ""
+
       :ssl.setopts(ssl_socket, [{:packet, :raw}])
       :ssl.send(ssl_socket,
         "HTTP/1.1 101 Switching Protocols\r\n" <>
@@ -235,7 +243,7 @@ defmodule SIP.Transport.WSSListener do
         "Connection: Upgrade\r\n" <>
         "Sec-WebSocket-Accept: #{accept_key}\r\n" <>
         "Sec-WebSocket-Version: 13\r\n" <>
-        "Sec-WebSocket-Protocol: sip\r\n\r\n")
+        protocol_header <> "\r\n")
 
       ws_socket = %Socket.Web{
         socket:    ssl_socket,
@@ -243,7 +251,7 @@ defmodule SIP.Transport.WSSListener do
         path:      path,
         key:       ws_key,
         mask:      nil,     # server MUST NOT mask outgoing frames (RFC 6455 §5.1)
-        protocols: ["sip"]
+        protocols: if(offers_sip, do: ["sip"], else: [])
       }
       {:ok, ws_socket, peer_ip, peer_port}
     rescue
@@ -259,7 +267,15 @@ defmodule SIP.Transport.WSSListener do
 
       {:ok, {:http_header, _, field, _, value}} ->
         key = field |> to_string() |> String.downcase()
-        read_http_request(ssl_socket, path, Map.put(headers, key, to_string(value)))
+        # A field may be sent more than once when its value is a list (RFC 7230
+        # §3.2.2) — Sec-WebSocket-Protocol is one, and keeping only the last
+        # occurrence loses the subprotocol the client actually wanted.
+        value = case Map.get(headers, key) do
+          nil      -> to_string(value)
+          previous -> previous <> ", " <> to_string(value)
+        end
+
+        read_http_request(ssl_socket, path, Map.put(headers, key, value))
 
       {:ok, :http_eoh} ->
         {path, headers}
@@ -267,6 +283,17 @@ defmodule SIP.Transport.WSSListener do
       {:error, reason} ->
         raise "HTTP read error during WebSocket upgrade: #{inspect(reason)}"
     end
+  end
+
+  # Subprotocols the client offered, as a lower-case list. The header is a
+  # comma-separated list and may appear more than once, which the header map
+  # already folds into one value.
+  defp offered_protocols(headers) do
+    headers
+    |> Map.get("sec-websocket-protocol", "")
+    |> String.split(",")
+    |> Enum.map(&(&1 |> String.trim() |> String.downcase()))
+    |> Enum.reject(&(&1 == ""))
   end
 
   defp resolve_localip(:all), do: SIP.NetUtils.get_local_ips([:ipv4]) |> hd()

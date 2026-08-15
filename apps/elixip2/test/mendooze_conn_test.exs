@@ -356,6 +356,71 @@ defmodule Mendooze.ConnTest do
     assert ["107", "110", "99"] == video_fmt(offer)
   end
 
+  # ── prefer_codecs: the scenario's own ranking of the answer ────────────────
+
+  # The recording case (scenarios/record.exs): the caller offers AV1/H264/VP8 in
+  # its own order; the scenario wants H264 first in the answer because that is
+  # what the MP4 container records without transcoding — and the answer's order
+  # is what steers which codec the caller then sends.
+  test "prefer_codecs reranks the answer's video formats" do
+    %{server: server} = start_media_server(&verdict_handler/2)
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :video,
+        prefer_codecs: [video: ["H264"]]
+      )
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, av1_first_offer())
+
+    # A permutation, not a restriction: H264 leads, the payload types the
+    # scenario did not rank keep the offer's own order behind it.
+    assert ["99", "110", "107"] == video_fmt(answer)
+  end
+
+  test "without prefer_codecs the answer keeps the offer's order" do
+    %{server: server} = start_media_server(&verdict_handler/2)
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :video)
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, av1_first_offer())
+
+    assert ["110", "99", "107"] == video_fmt(answer)
+  end
+
+  test "prefer_codecs never adds a codec the offer lacks" do
+    %{server: server} = start_media_server(&verdict_handler/2)
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :video,
+        prefer_codecs: [video: ["H264"]]
+      )
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, vp8_only_offer())
+
+    # The caller only speaks VP8: the preference has nothing to float and the
+    # answer is exactly what it would have been without it (RFC 3264 §6.1 — an
+    # answer may only carry payload types the offer declared).
+    assert ["96"] == video_fmt(answer)
+  end
+
+  test "an unknown prefer_codecs name fails the creation, not an answer" do
+    %{server: server} = start_media_server()
+
+    assert {:error, _} =
+             Mendooze.create_peer_connection(server, self(),
+               media: :video,
+               prefer_codecs: [video: ["H265"]]
+             )
+
+    assert {:error, _} =
+             Mendooze.create_peer_connection(server, self(),
+               media: :video,
+               prefer_codecs: [application: ["H264"]]
+             )
+  end
+
   # `:forbid` says the media may never be converted, so a codec the far end
   # cannot carry has no business being offered: whatever the peer picks from it,
   # a relay would have nothing to do with.

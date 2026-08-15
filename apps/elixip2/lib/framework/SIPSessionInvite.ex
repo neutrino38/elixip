@@ -115,7 +115,18 @@ defmodule SIP.Session.CallUAC do
       # automatically (required by a 2xx to an INVITE). On media failure the
       # reply is 500 Media Server Error (overridable with `on_media_error:
       # {code, reason}`). `opts`: :reason, :contact, :webrtc, :media,
-      # :on_media_error. Common to UAC and UAS (a UAC answers a re-INVITE too).
+      # :on_media_error, :prefer_codecs. Common to UAC and UAS (a UAC answers a
+      # re-INVITE too).
+      #
+      # `prefer_codecs: [video: ["H264", "VP8"], audio: ["OPUS"]]` ranks the
+      # answer's codecs per media (a permutation of what the offer proposed,
+      # never an addition or a removal): the answerer's order is a preference
+      # statement, and it is what steers which codec the peer then sends —
+      # e.g. H264 first so a recording needs no transcoding. It is a property
+      # of the peer connection, set when it is created (the first
+      # reply_invite_with_sdp of the leg) and kept across re-INVITEs; an
+      # unknown media or codec name raises on that first reply (a configuration
+      # error, same treatment as every other peer-connection creation failure).
       defmacro reply_invite_with_sdp(code, opts \\ []) do
         quote do
           SIP.Scenario.Monitor.note_command(:sip, "reply_invite_with_sdp #{unquote(code)}")
@@ -618,7 +629,7 @@ defmodule SIP.Session.CallUAS do
   end
 
   # Only :webrtc / :media are meaningful to the media negotiation.
-  defp media_opts(opts), do: Keyword.take(opts, [:webrtc, :media])
+  defp media_opts(opts), do: Keyword.take(opts, [:webrtc, :media, :prefer_codecs])
 
   # Normalize the `bodies` argument accepted by reply_invite_with_body into a
   # value understood by update_sip_msg/2 ({:body, ...}): a raw binary, a single
