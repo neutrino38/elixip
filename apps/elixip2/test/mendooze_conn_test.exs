@@ -2295,12 +2295,18 @@ defmodule Mendooze.ConnTest do
     # the intersection of asked-for and implemented, per explicit PT
     assert answer =~ "a=rtcp-fb:99 nack"
     assert answer =~ "a=rtcp-fb:99 ccm fir"
-    # goog-remb has no server switch and is deliberately not answered
-    refute answer =~ "goog-remb"
+    # goog-remb has its own server switch since rate-control lot 2
+    assert answer =~ "a=rtcp-fb:99 goog-remb"
 
     # exactly the switches behind the answered feedback types
     assert_receive {:jsr309_call, "EndpointSetRTPProperties", [3, 4, 1, props]}
-    assert props == %{"useNACK" => "1", "useRtcpFIR" => "1", "natLatch" => "1"}
+
+    assert props == %{
+             "useNACK" => "1",
+             "useRtcpFIR" => "1",
+             "remb" => "1",
+             "natLatch" => "1"
+           }
   end
 
   # The assumed RFC 4585 §4 deviation (see answered_rtcp_fb/1): endpoints such as

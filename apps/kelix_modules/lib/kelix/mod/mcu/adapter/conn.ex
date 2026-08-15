@@ -88,14 +88,20 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # enable — but a peer that negotiated `nack pli` may send PLI *instead of* FIR
   # (Linphone does), so it must be confirmed in the answer, not dropped (the FPU flow
   # of §6.4 covers both). NOT `useNACK`: PLI is a keyframe request, not a
-  # retransmission request. `goog-remb` stays absent — `tmmbr` is the `ccm` one, and
-  # announcing congestion feedback the mixer never sends invites the peer to wait
-  # for it.
+  # retransmission request.
+  #
+  # `goog-remb` (draft-alvestrand-rmcat-remb-03) carries the same message as
+  # `ccm tmmbr` in the browsers' dialect, and until the rate-control lot 2 the mixer
+  # had no switch for it — Chrome and Firefox offer `goog-remb` and never `ccm tmmbr`,
+  # so nothing congestion-related ever left towards them. The server now has its own
+  # mode (`remb`), TMMBR wins when a peer asks for both, and neither is emitted
+  # un-negotiated (arbitrage A2): announcing it here is what turns it on.
   @supported_rtcp_fb %{
     "nack" => "useNACK",
     "nack pli" => "useRtcpFIR",
     "ccm fir" => "useRtcpFIR",
-    "ccm tmmbr" => "tmmbr"
+    "ccm tmmbr" => "tmmbr",
+    "goog-remb" => "remb"
   }
 
   @call_timeout 30_000

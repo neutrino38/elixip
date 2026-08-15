@@ -251,8 +251,10 @@ message EndpointSetRemoteStunCredentialsReq {
 
 // --- Endpoints: RTP media -------------------------------------------------------------
 
-// properties: transport keys (rtcp-mux, ssrc, tmmbr, rtpTimeout, natLatch, ...)
-// and codec keys (codec.<name>.<param>, consumed by the fmtp negotiator).
+// properties: transport keys (rtcp-mux, ssrc, tmmbr, remb, rtpTimeout, natLatch,
+// ...) and codec keys (codec.<name>.<param>, consumed by the fmtp negotiator).
+// The map is generic on purpose: a new switch such as `remb` (the browsers'
+// congestion-feedback dialect) travels here with no schema change.
 message EndpointSetRtpPropertiesReq {
   uint32 session_id = 1;
   uint32 endpoint_id = 2;

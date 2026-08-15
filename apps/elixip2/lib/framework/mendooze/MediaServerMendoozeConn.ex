@@ -115,13 +115,20 @@ defmodule MediaServer.Mendooze.Conn do
   # must be confirmed in the answer, not dropped. NOT `useNACK`: PLI is a
   # keyframe request, not a retransmission request, and switching the NACK/rtx
   # machinery on for it would enable feedback the peer never asked for.
-  # `goog-remb` stays absent (announcing congestion feedback the server never
-  # sends invites the peer to wait for it).
+  #
+  # `goog-remb` (draft-alvestrand-rmcat-remb-03) says the same thing as
+  # `ccm tmmbr` in the browsers' dialect, and it now has its own server-side
+  # mode (rate-control lot 2). It matters because Chrome and Firefox offer
+  # `goog-remb` and never `ccm tmmbr`: without it, no congestion feedback ever
+  # left towards a browser. Neither dialect is emitted un-negotiated — the
+  # property posted here is what turns it on, and TMMBR wins when a peer asks
+  # for both.
   @supported_rtcp_fb %{
     "nack" => "useNACK",
     "nack pli" => "useRtcpFIR",
     "ccm fir" => "useRtcpFIR",
-    "ccm tmmbr" => "tmmbr"
+    "ccm tmmbr" => "tmmbr",
+    "goog-remb" => "remb"
   }
 
   # Text-over-WebSocket codecs proposed to the media server: T.140 and its RFC

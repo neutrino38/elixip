@@ -1179,11 +1179,12 @@ defmodule Kelix.Mod.McuCallTest do
       assert answer =~ "a=rtcp-fb:99 nack pli"
       assert answer =~ "a=rtcp-fb:99 ccm fir"
       assert answer =~ "a=rtcp-fb:99 ccm tmmbr"
+      assert answer =~ "a=rtcp-fb:99 goog-remb"
       refute answer =~ "rtcp-fb:*"
 
       # and NOT what has no server-side switch: announcing it would promise a
       # capability nothing implements
-      refute answer =~ "goog-remb"
+      refute answer =~ "transport-cc"
     end
 
     test "what is announced is what is switched on server-side", ctx do
@@ -1195,11 +1196,14 @@ defmodule Kelix.Mod.McuCallTest do
       assert_received {:rpc, "SetRTPProperties", [42, 7, 1, codec_props, 0]}
       assert Map.has_key?(codec_props, "codec.av1.level-idx")
 
-      # video (1) carries the three switches behind the three answered types
+      # video (1) carries the switches behind the answered types. `tmmbr` and `remb`
+      # travel together when the offer asked for both — the server resolves the
+      # precedence (TMMBR wins, and its mode emits both dialects).
       assert_received {:rpc, "SetRTPProperties", [42, 7, 1, props, 0]}
       assert props["useNACK"] == "1"
       assert props["useRtcpFIR"] == "1"
       assert props["tmmbr"] == "1"
+      assert props["remb"] == "1"
 
       # audio stayed AVP, so it gets none of them
       assert_received {:rpc, "SetRTPProperties", [42, 7, 0, audio_props, 0]}

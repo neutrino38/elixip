@@ -642,8 +642,11 @@ defmodule Kelix.Mod.McuWebrtcTest do
 
       assert "a=rtcp-fb:109 nack" in video
       assert "a=rtcp-fb:109 ccm fir" in video
+      # Chrome never offers `ccm tmmbr`: `goog-remb` is the only congestion feedback
+      # it understands, and answering it is what makes the mixer emit any at all
+      # (rate-control lot 2)
+      assert "a=rtcp-fb:109 goog-remb" in video
       # offered but not implemented here (§6.3.1 rule 5), and never announced
-      refute answer =~ "goog-remb"
       refute answer =~ "transport-cc"
       # no feedback on audio, whatever the offer asked for there — there is no audio
       # feedback this mixer acts on
