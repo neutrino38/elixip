@@ -247,6 +247,30 @@ without editing the scenario — set it in `config/config.exs`, in the scenario'
 own `config` block, or in an external-JSON header (`"mediaserver"` key). See the
 Configuration section of `CLAUDE.md` and `docs/design/mendooze_interface.md`.
 
+### media_record options
+
+`media_record/3` takes a keyword list. What the real media server acts on:
+
+| Option | Default | Effect |
+|--------|---------|--------|
+| `wait_video: boolean` | `true` | Hold audio and text back until the first video I-frame, so every track of the file starts together. No effect when video is not negotiated. |
+| `echo: boolean` | `false` | Loop the received video back to the sender while recording — a raw RTP relay on the same leg, no transcoding. Off by default: a plain recording sends nothing back to the peer. |
+| `leg: atom` | `:inbound` | Which leg to record, when a B2BUA call terminates both of its legs on the media server. |
+
+`wait_video` and `echo` become the optional 5th and 6th parameters of the
+server's `RecorderRecord`; `leg` is handled here and never reaches the adapter.
+
+Turn `echo` on when the caller must see what is being recorded, off when the
+recording is the only purpose — an echo puts a second video stream on the wire
+and makes the peer answer it with its own RTCP feedback.
+
+`MediaServer.recorder_opts/0` also declares `stop_on_silence`,
+`silence_timeout_ms`, `max_record_duration_sec` and `stop_on_dtmf`. **The media
+server implements none of them.** `stop_on_silence` and `stop_on_dtmf` are
+logged as unsupported and dropped; the other two are ignored without a word. Use
+the `duration_ms` argument for a time limit — that one is enforced server-side,
+and reported by `RecorderStoppedEvent` with `reason=1`.
+
 ## transitions: the goto macro, scenario_success(), scenario_failure()
 
 The `goto` macro triggers a state machine transition. This macro takes two arguments:
