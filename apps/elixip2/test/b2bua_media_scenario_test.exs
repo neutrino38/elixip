@@ -286,6 +286,33 @@ defmodule SIP.Test.B2bua.MediaScenario do
     assert_receive {:instance_done, :ok}, 10_000
   end
 
+  # The refresh in its UPDATE form, which the media plane has nothing to do with:
+  # an offerless UPDATE is answered with a bare 200 (RFC 3311 §5.1 — no SDP either
+  # way, and no ACK to carry one), not with an offer of ours like the offerless
+  # re-INVITE above. Answering it with our offer would leave the media server
+  # holding an offer nobody will ever answer.
+  @tag timeout: 60_000
+  test "an offerless UPDATE is answered with a bare 200 and nothing crosses", %{
+    scenario: module,
+    stub: stub
+  } do
+    invite = inbound_invite()
+    {instance, _ref, _tp_pid} = establish(module, stub, invite, :update_refresh)
+
+    send(instance, {:UPDATE, %{in_dialog(:UPDATE, invite) | cseq: [3, :UPDATE]}, self(), stub})
+
+    assert_receive {:replied, 200, "OK", req, fields}, 5_000
+    assert req.method == :UPDATE
+    assert req.cseq == [3, :UPDATE]
+    assert Keyword.get(fields, :body) == nil
+    refute_receive {:invite_sent, _fwd}, 1_000
+
+    send(instance, {:BYE, in_dialog(:BYE, invite), self(), stub})
+    assert_receive {:replied, 200, "OK", bye_req, _}, 5_000
+    assert bye_req.method == :BYE
+    assert_receive {:instance_done, :ok}, 10_000
+  end
+
   # The other direction of the same rule — and the half that P3 did not have:
   # a re-offer that crosses crosses as OURS, exactly like the initial INVITE.
   @tag timeout: 60_000

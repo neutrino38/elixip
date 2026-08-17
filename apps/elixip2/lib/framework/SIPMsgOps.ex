@@ -400,6 +400,24 @@ defmodule SIP.Msg.Ops do
           :no_sdp | :media_change | :hold | :resume | :address_change | :no_change | :unknown
 
   @doc """
+  True for the one request whose 2xx carries **no SDP at all**: an UPDATE that made
+  no offer.
+
+  RFC 3311 §5.1 — "if the UPDATE did not contain an offer, the 2xx response MUST NOT
+  contain an answer" — and it may carry no offer of ours either, since an UPDATE has
+  no ACK for the answer to come back in. An offerless *re-INVITE* is the opposite
+  case (RFC 3261 §14.2: its 2xx MUST contain an offer), which is why the method is
+  part of the reading and not an afterthought.
+
+  This is what an RFC 4028 session-timer refresh looks like on the wire, so every
+  layer that answers a request meets it: a UAS scenario, and a B2BUA on each of its
+  two legs.
+  """
+  @spec offerless_update?(map()) :: boolean()
+  def offerless_update?(req) when is_map(req),
+    do: Map.get(req, :method) == :UPDATE and is_nil(sdp_body(req))
+
+  @doc """
   Classify a re-offer against the last SDP the same peer gave us.
 
   `previous_sdp` is that peer's previous description — its offer, or its answer:

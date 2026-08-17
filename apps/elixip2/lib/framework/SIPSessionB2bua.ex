@@ -495,9 +495,14 @@ defmodule SIP.Session.B2bua do
 
       Needs a `{:mediaserver, …}` call — a signalling B2BUA has no media of its
       own to answer with, and fails with `lasterr` saying so. An offerless
-      re-INVITE (a session-timer refresh) is answered with OUR offer, whose
-      answer arrives in the ACK; that ACK is absorbed too, since the far end
-      never saw the INVITE it confirms.
+      re-INVITE is answered with OUR offer, whose answer arrives in the ACK; that
+      ACK is absorbed too, since the far end never saw the INVITE it confirms.
+
+      The **one case that needs no media server**, and the ordinary shape of an
+      RFC 4028 session-timer refresh: an UPDATE that made no offer, answered with
+      a bare 200 (RFC 3311 §5.1 — no SDP either way). A signalling B2BUA can
+      absorb that one, and should: the timer is between us and that peer, on a leg
+      where we are the UA, so there is nothing in it for the far end.
 
       A media server that refuses the new description leaves the call exactly as
       it was, and the re-offer gets a 488 (RFC 3261 §14.1).
@@ -931,6 +936,14 @@ defmodule SIP.Session.B2bua do
     leg = current_leg()
 
     cond do
+      # An UPDATE that made no offer is answered with a bare 200 — no SDP either
+      # way (RFC 3311 §5.1), so no media server is involved and this works on a
+      # signalling B2BUA too. It is the RFC 4028 session-timer refresh: a timer
+      # between us and ONE peer, on a leg where we are the UA, and there is
+      # nothing in it for the other leg to answer.
+      SIP.Msg.Ops.offerless_update?(req) ->
+        do_local_reply(sip_ctx, req, 200, "OK", [{:contact, local_contact(sip_ctx)}])
+
       is_nil(media_plan(sip_ctx)) ->
         # A signalling B2BUA has no media of its own: the only honest answer to a
         # re-offer is the far end's.

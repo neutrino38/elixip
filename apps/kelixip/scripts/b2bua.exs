@@ -199,17 +199,37 @@ defmodule Kelix.B2bua do
 
       # A re-INVITE or an UPDATE. Four different things arrive under this shape —
       # hold/retrieve, a media added or withdrawn, a changed address, a session
-      # timer refresh — and with no media server all four cross: the SDP belongs
-      # to the endpoints, so each of these is a conversation between them that we
-      # only carry. scenarios/b2bua_media.exs is where the third case stops
-      # crossing, because there the peer moves and our endpoint does not.
+      # timer refresh — and with no media server the first three cross: the SDP
+      # belongs to the endpoints, so each of them is a conversation between them
+      # that we only carry. scenarios/b2bua_media.exs is where the third case
+      # stops crossing, because there the peer moves and our endpoint does not.
+      #
+      # The refresh (RFC 4028) does not cross in its UPDATE form: a session timer
+      # runs between us and ONE peer, on a leg where we are its UA, and an
+      # offerless UPDATE is answered with a bare 200 (RFC 3311 §5.1) — no media of
+      # ours needed to say it. As an offerless re-INVITE it still crosses, because
+      # that 2xx MUST carry an offer (RFC 3261 §14.2) and we have none.
       {m, req, _trans, _dlg} when m in [:INVITE, :UPDATE] ->
-        b2bua_forward(req)
-        goto(loop, "relayed #{m} (caller -> callee)")
+        case b2bua_reoffer_kind(req) do
+          :no_sdp when m == :UPDATE ->
+            b2bua_reply_reoffer(req)
+            goto(loop, "session-timer UPDATE answered locally (caller)")
+
+          _kind ->
+            b2bua_forward(req)
+            goto(loop, "relayed #{m} (caller -> callee)")
+        end
 
       {:outbound, {m, req, _trans, _dlg}} when m in [:INVITE, :UPDATE] ->
-        b2bua_forward(req)
-        goto(loop, "relayed #{m} (callee -> caller)")
+        case b2bua_reoffer_kind(req) do
+          :no_sdp when m == :UPDATE ->
+            b2bua_reply_reoffer(req)
+            goto(loop, "session-timer UPDATE answered locally (callee)")
+
+          _kind ->
+            b2bua_forward(req)
+            goto(loop, "relayed #{m} (callee -> caller)")
+        end
 
       # The ACK of a re-INVITE's 200: a transaction of its own (RFC 3261
       # §13.2.2.4), so every re-INVITE that crosses owes one back. Without this

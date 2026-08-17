@@ -266,8 +266,36 @@ defmodule Kelix.DirectCallWithAuth do
         b2bua_forward(req)
         goto(loop, "ACK relayed (callee -> caller)")
 
+      # An UPDATE that carries no offer is an RFC 4028 session-timer refresh, and
+      # it is the one in-dialog request that does NOT cross: the timer runs between
+      # us and ONE peer, on a leg where we are its UA. A bare 200 answers it
+      # (RFC 3311 §5.1) and no media of ours is needed to say so. An UPDATE that
+      # does carry an offer is a re-offer like any other and falls through to the
+      # relay below.
+      {m, req, _trans, _dlg} when m in [:INVITE, :UPDATE] ->
+        case b2bua_reoffer_kind(req) do
+          :no_sdp when m == :UPDATE ->
+            b2bua_reply_reoffer(req)
+            goto(loop, "session-timer UPDATE answered locally (caller)")
+
+          _kind ->
+            b2bua_forward(req)
+            goto(loop, "relayed #{m} (caller -> callee)")
+        end
+
+      {:outbound, {m, req, _trans, _dlg}} when m in [:INVITE, :UPDATE] ->
+        case b2bua_reoffer_kind(req) do
+          :no_sdp when m == :UPDATE ->
+            b2bua_reply_reoffer(req)
+            goto(loop, "session-timer UPDATE answered locally (callee)")
+
+          _kind ->
+            b2bua_forward(req)
+            goto(loop, "relayed #{m} (callee -> caller)")
+        end
+
       # Default relay, written out rather than assumed: everything else
-      # in-dialog (re-INVITE, UPDATE, INFO, MESSAGE, REFER…), then the responses.
+      # in-dialog (INFO, MESSAGE, REFER…), then the responses.
       # None of it is re-authenticated: the dialog was authenticated when it was
       # created, and challenging mid-call breaks UAs and proves nothing new
       # (`Kelix.Mod.AuthDb.challengeable?/1`).

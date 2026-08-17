@@ -116,6 +116,19 @@ defmodule SIP.Test.Transport.UDPMockup do
     GenServer.cast(t_pid, :hangup)
   end
 
+  @doc """
+  Refresh the session: the offerless UPDATE this peer sends on its RFC 4028 timer,
+  delivered inbound like `hangup/1` and built the same way — in the dialog the
+  INVITE established, one CSeq further on, with no body at all.
+
+  What it is for: a B2BUA must answer that refresh on the leg it came from and
+  relay nothing (each leg has a timer of its own). Only a request off the wire can
+  show that, since what must NOT happen is a request appearing on the OTHER leg.
+  """
+  def refresh_session(t_pid) do
+    GenServer.cast(t_pid, :refresh_session)
+  end
+
   defp handle_req(state, :INVITE, sipreq) do
     # Tell the test the INVITE actually went out, mirroring {:options_sent, …}.
     # Without it a test cannot know *when* to simulate an answer: it would race
@@ -460,21 +473,10 @@ defmodule SIP.Test.Transport.UDPMockup do
   # See hangup/1. The INVITE it is built from is the acknowledged one when there is
   # one — a call being hung up has been answered and confirmed — and otherwise the
   # request in progress, so a test that skipped the ACK can still end the call.
-  def handle_cast(:hangup, state) do
-    case Map.get(state, :acked_req) || Map.get(state, :req) do
-      %{method: :INVITE} = invite ->
-        Process.send_after(self(), {:recv, far_end_bye(invite, state.totag)}, 0)
-        {:noreply, state}
+  def handle_cast(:hangup, state), do: send_in_dialog(state, :BYE, "hang up")
 
-      _ ->
-        Logger.warning(
-          module: SIP.Test.Transport.UDPMockup,
-          message: "Asked to hang up but this peer has answered no INVITE. Ignoring."
-        )
-
-        {:noreply, state}
-    end
-  end
+  def handle_cast(:refresh_session, state),
+    do: send_in_dialog(state, :UPDATE, "refresh the session")
 
   @spec handle_cast({:simulate, 401 | 407, non_neg_integer()}, map()) :: {:noreply, map()}
   def handle_cast({:simulate, resp, after_ms}, state) when resp in [401, 407] do
@@ -516,23 +518,55 @@ defmodule SIP.Test.Transport.UDPMockup do
     {:noreply, state}
   end
 
-  # The BYE that ends the call from this side (RFC 3261 §15.1.1): this peer's
-  # identity and tag on From — the To of the INVITE it answered — ours on To with
-  # the tag we put there, our Call-ID, and a fresh Via branch, since a BYE is a
-  # transaction of its own.
-  #
+  # An in-dialog request this peer originates: the BYE that ends the call from its
+  # side (RFC 3261 §15.1.1), or the UPDATE that refreshes it. Its identity and tag
+  # on From — the To of the INVITE it answered — ours on To with the tag we put
+  # there, our Call-ID, and a fresh Via branch, since each is a transaction of its
+  # own.
+  defp send_in_dialog(state, method, what) do
+    case Map.get(state, :acked_req) || Map.get(state, :req) do
+      %{method: :INVITE} = invite ->
+        # Each of these is a new transaction in the same dialog, so each needs a
+        # HIGHER CSeq than the last (RFC 3261 §12.2.1.1). Reading it from the INVITE
+        # alone gave two of them the same number, and the dialog answers the second
+        # one 500 Out of order — a peer that refreshes and then hangs up would look
+        # like a B2BUA that dropped the hangup.
+        cseq = next_far_end_cseq(state, invite)
+
+        Process.send_after(
+          self(),
+          {:recv, far_end_request(invite, state.totag, method, cseq)},
+          0
+        )
+
+        {:noreply, Map.put(state, :far_end_cseq, cseq)}
+
+      _ ->
+        Logger.warning(
+          module: SIP.Test.Transport.UDPMockup,
+          message: "Asked to #{what} but this peer has answered no INVITE. Ignoring."
+        )
+
+        {:noreply, state}
+    end
+  end
+
   # The CSeq continues OUR numbering rather than starting a sequence of this peer's
   # own: `SIP.DialogImpl` initialises `cseqin` to 1 instead of to "empty" (RFC 3261
   # §12.2.2), so a first in-dialog request numbered 1 is answered 500 Out of order.
   # This is the numbering every UA seen in traffic uses anyway.
-  defp far_end_bye(invite, totag) do
-    branch = SIP.Msg.Ops.generate_branch_value()
+  defp next_far_end_cseq(state, invite) do
     [seqno, _method] = invite.cseq
+    max(Map.get(state, :far_end_cseq, seqno), seqno) + 1
+  end
+
+  defp far_end_request(invite, totag, method, cseq) do
+    branch = SIP.Msg.Ops.generate_branch_value()
     caller = uri!(invite.from)
 
     %{
       "Max-Forwards" => "70",
-      method: :BYE,
+      method: method,
       # A real callee sends it to our Contact; here nothing routes on the
       # Request-URI (a request is matched to its dialog on the tags and the
       # Call-ID), so the caller's own URI is enough and needs no parsed Contact.
@@ -542,7 +576,7 @@ defmodule SIP.Test.Transport.UDPMockup do
       useragent: "UDPMockup-test",
       callid: invite.callid,
       transid: branch,
-      cseq: [seqno + 1, :BYE],
+      cseq: [cseq, method],
       via: ["SIP/2.0/UDP 82.184.8.2:53936;branch=#{branch}"],
       contentlength: 0
     }

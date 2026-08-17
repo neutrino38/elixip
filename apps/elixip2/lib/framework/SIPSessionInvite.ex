@@ -455,7 +455,7 @@ defmodule SIP.Session.CallUAS do
       when is_integer(code) do
     req = fetch_stored_req!(sip_ctx)
 
-    if needs_sdp?(code) and not offerless_update?(req) do
+    if needs_sdp?(code) and not SIP.Msg.Ops.offerless_update?(req) do
       raise "reply_invite: code #{code} requires an SDP body; " <>
               "use reply_invite_with_sdp/reply_invite_with_body (phase 3)"
     end
@@ -494,7 +494,7 @@ defmodule SIP.Session.CallUAS do
       when code in [183, 200] and is_list(opts) do
     req = fetch_stored_req!(sip_ctx)
 
-    if offerless_update?(req) do
+    if SIP.Msg.Ops.offerless_update?(req) do
       do_reply_invite(sip_ctx, code, Keyword.get(opts, :reason), reply_fields(sip_ctx, opts, []))
     else
       reply_invite_with_negotiated_sdp(sip_ctx, req, code, opts)
@@ -665,17 +665,6 @@ defmodule SIP.Session.CallUAS do
   defp normalize_bodies(other) do
     raise "reply_invite_with_body: invalid body #{inspect(other)}; expected a binary, " <>
             "a %{contenttype, data} map, or a list of such maps"
-  end
-
-  # The one request a 2xx may answer with no SDP at all (RFC 3311 §5.1).
-  defp offerless_update?(req), do: req.method == :UPDATE and not has_sdp?(req)
-
-  defp has_sdp?(req) do
-    case Map.get(req, :body) do
-      b when is_binary(b) and b != "" -> true
-      [_ | _] -> true
-      _ -> false
-    end
   end
 
   # :ok and :ignore (final response already sent — e.g. the auto-487 after a
