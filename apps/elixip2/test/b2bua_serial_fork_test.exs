@@ -14,6 +14,9 @@ defmodule SIP.Test.B2bua.SerialFork do
   """
   use ExUnit.Case
 
+  alias SIP.Test.Peers.Manual
+  alias SIP.Test.Transport.Mockup
+
   alias SIP.B2bua.{Leg, Peer, Pending}
   alias SIP.Session.B2bua
 
@@ -39,7 +42,8 @@ defmodule SIP.Test.B2bua.SerialFork do
 
   defp peer!(name) do
     tp = SIP.Transport.Selector.select_transport(target(name)).tp_pid
-    :ok = GenServer.call(tp, :settestapp)
+    :ok = Mockup.set_peer(tp, Manual)
+    :ok = Mockup.attach_probe(tp)
     tp
   end
 
@@ -67,7 +71,7 @@ defmodule SIP.Test.B2bua.SerialFork do
 
     ctx = B2bua.do_create_leg(ctx, inbound_invite(), serial_peer(["srl1a", "srl1b"]), false)
     assert ctx.lasterr == :ok
-    assert_receive {:invite_sent, first}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, first}}, 2_000
     assert first.ruri.domain == "srl1a.example.com"
 
     leg_before = B2bua.outbound_leg(ctx)
@@ -77,7 +81,7 @@ defmodule SIP.Test.B2bua.SerialFork do
     ctx = relay_final(ctx, 486)
 
     # The next device is being tried…
-    assert_receive {:invite_sent, second}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, second}}, 2_000
     assert second.ruri.domain == "srl1b.example.com"
     assert B2bua.hunting?(ctx)
 
@@ -101,10 +105,10 @@ defmodule SIP.Test.B2bua.SerialFork do
     _b = peer!("srl2b")
 
     ctx = B2bua.do_create_leg(ctx, inbound_invite(), serial_peer(["srl2a", "srl2b"]), false)
-    assert_receive {:invite_sent, _first}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _first}}, 2_000
 
     ctx = relay_final(ctx, 486)
-    assert_receive {:invite_sent, _second}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _second}}, 2_000
     refute_receive {:replied, _, _, _, _}, 200
 
     ctx = relay_final(ctx, 480)
@@ -121,14 +125,14 @@ defmodule SIP.Test.B2bua.SerialFork do
     b = peer!("srl3b")
 
     ctx = B2bua.do_create_leg(ctx, inbound_invite(), serial_peer(["srl3a", "srl3b"]), false)
-    assert_receive {:invite_sent, _first}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _first}}, 2_000
 
     ctx = relay_final(ctx, 486)
-    assert_receive {:invite_sent, _second}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _second}}, 2_000
 
     # The second device answers for real, through the wire.
     dlg = B2bua.outbound_leg(ctx).dialogpid
-    GenServer.cast(b, {:simulate, 200, 100})
+    Manual.simulate(b, 200, 100)
     assert_receive {:outbound, {200, ok_resp, tid, ^dlg}}, 3_000
 
     B2bua.note_event({:outbound, {200, ok_resp, tid, dlg}})
@@ -145,12 +149,12 @@ defmodule SIP.Test.B2bua.SerialFork do
     _b = peer!("srl4b")
 
     ctx = B2bua.do_create_leg(ctx, inbound_invite(), serial_peer(["srl4a", "srl4b"]), false)
-    assert_receive {:invite_sent, _first}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _first}}, 2_000
 
     ctx = relay_final(ctx, 603)
 
     assert_receive {:replied, 603, _reason, _req, _fields}, 2_000
-    refute_receive {:invite_sent, _second}, 300
+    refute_receive {:sip_mockup, {:request_sent, :INVITE, _second}}, 300
     refute B2bua.hunting?(ctx)
   end
 
@@ -162,12 +166,12 @@ defmodule SIP.Test.B2bua.SerialFork do
     _b = peer!("srl8b")
 
     ctx = B2bua.do_create_leg(ctx, inbound_invite(), serial_peer(["srl8a", "srl8b"]), false)
-    assert_receive {:invite_sent, _first}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _first}}, 2_000
     assert B2bua.outbound_leg(ctx).untried != []
 
     ctx = relay_final(ctx, 487)
 
-    refute_receive {:invite_sent, _second}, 300
+    refute_receive {:sip_mockup, {:request_sent, :INVITE, _second}}, 300
     refute B2bua.hunting?(ctx)
     assert_receive {:replied, 487, _reason, _req, _fields}, 2_000
   end
@@ -180,11 +184,11 @@ defmodule SIP.Test.B2bua.SerialFork do
 
     peer = serial_peer(["srl9a", "srl9b"], retry_on: [487, 486])
     ctx = B2bua.do_create_leg(ctx, inbound_invite(), peer, false)
-    assert_receive {:invite_sent, _first}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _first}}, 2_000
 
     ctx = relay_final(ctx, 487)
 
-    refute_receive {:invite_sent, _second}, 300
+    refute_receive {:sip_mockup, {:request_sent, :INVITE, _second}}, 300
     refute B2bua.hunting?(ctx)
   end
 
@@ -195,12 +199,12 @@ defmodule SIP.Test.B2bua.SerialFork do
     # This peer only moves on when the device is busy; anything else is final.
     peer = serial_peer(["srl5a", "srl5b"], retry_on: [486])
     ctx = B2bua.do_create_leg(ctx, inbound_invite(), peer, false)
-    assert_receive {:invite_sent, _first}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _first}}, 2_000
 
     ctx = relay_final(ctx, 480)
 
     assert_receive {:replied, 480, _reason, _req, _fields}, 2_000
-    refute_receive {:invite_sent, _second}, 300
+    refute_receive {:sip_mockup, {:request_sent, :INVITE, _second}}, 300
     refute B2bua.hunting?(ctx)
   end
 
@@ -210,13 +214,13 @@ defmodule SIP.Test.B2bua.SerialFork do
 
     peer = %Peer{uris: [target("srl6a"), target("srl6b")], fork: :none}
     ctx = B2bua.do_create_leg(ctx, inbound_invite(), peer, false)
-    assert_receive {:invite_sent, _first}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _first}}, 2_000
 
     assert %Leg{untried: []} = B2bua.outbound_leg(ctx)
 
     ctx = relay_final(ctx, 486)
     assert_receive {:replied, 486, _reason, _req, _fields}, 2_000
-    refute_receive {:invite_sent, _second}, 300
+    refute_receive {:sip_mockup, {:request_sent, :INVITE, _second}}, 300
   end
 
   describe "progress events (§3.6)" do
@@ -225,9 +229,9 @@ defmodule SIP.Test.B2bua.SerialFork do
       _b = peer!("prg0b")
 
       ctx = B2bua.do_create_leg(ctx, inbound_invite(), serial_peer(["prg0a", "prg0b"]), false)
-      assert_receive {:invite_sent, _first}, 2_000
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, _first}}, 2_000
       ctx = relay_final(ctx, 486)
-      assert_receive {:invite_sent, _second}, 2_000
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, _second}}, 2_000
 
       refute_receive {:outbound, {:serial_attempting, _, _}}, 200
       refute_receive {:outbound, {:serial_not_reachable, _, _, _}}, 200
@@ -273,7 +277,7 @@ defmodule SIP.Test.B2bua.SerialFork do
       assert_receive {:outbound, {:serial_attempting, second, _}}, 2_000
 
       dlg = B2bua.outbound_leg(ctx).dialogpid
-      GenServer.cast(b, {:simulate, 200, 100})
+      Manual.simulate(b, 200, 100)
       assert_receive {:outbound, {200, ok_resp, tid, ^dlg}}, 3_000
       B2bua.note_event({:outbound, {200, ok_resp, tid, dlg}})
       ctx = B2bua.do_relay_reply(ctx, ok_resp)
@@ -308,7 +312,7 @@ defmodule SIP.Test.B2bua.SerialFork do
       _b = peer!("cxl1b")
 
       ctx = B2bua.do_create_leg(ctx, inbound_invite(), serial_peer(["cxl1a", "cxl1b"]), false)
-      assert_receive {:invite_sent, _first}, 2_000
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, _first}}, 2_000
       assert B2bua.outbound_leg(ctx).untried != []
 
       ctx = B2bua.do_cancel_forward(ctx)
@@ -319,7 +323,7 @@ defmodule SIP.Test.B2bua.SerialFork do
       # And the 487 the cancelled branch answers with does NOT restart it — the
       # very trap @never_retry closes, seen from the other side.
       ctx = relay_final(ctx, 487)
-      refute_receive {:invite_sent, _second}, 300
+      refute_receive {:sip_mockup, {:request_sent, :INVITE, _second}}, 300
       refute B2bua.hunting?(ctx)
     end
 
@@ -331,7 +335,7 @@ defmodule SIP.Test.B2bua.SerialFork do
       _a = peer!("cxl2a")
 
       ctx = B2bua.do_create_leg(ctx, inbound_invite(), serial_peer(["cxl2a"]), false)
-      assert_receive {:invite_sent, _first}, 2_000
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, _first}}, 2_000
 
       ctx = B2bua.do_cancel_forward(ctx)
       assert [{_tid, %Pending{}}] = B2bua.pending(ctx)
@@ -352,9 +356,9 @@ defmodule SIP.Test.B2bua.SerialFork do
     _b = peer!("srl7b")
 
     ctx = B2bua.do_create_leg(ctx, inbound_invite(), serial_peer(["srl7a", "srl7b"]), false)
-    assert_receive {:invite_sent, _first}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _first}}, 2_000
     ctx = relay_final(ctx, 486)
-    assert_receive {:invite_sent, _second}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _second}}, 2_000
 
     # The scenario ends while the second device is still ringing: the caller is
     # owed a final response and the device a CANCEL. The teardown reads the

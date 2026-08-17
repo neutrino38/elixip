@@ -15,6 +15,9 @@ defmodule SIP.Test.B2bua.ParallelFork do
   """
   use ExUnit.Case
 
+  alias SIP.Test.Peers.Manual
+  alias SIP.Test.Transport.Mockup
+
   alias SIP.B2bua.{Peer, Pending}
   alias SIP.Session.B2bua
 
@@ -40,7 +43,8 @@ defmodule SIP.Test.B2bua.ParallelFork do
 
   defp peer!(name) do
     tp = SIP.Transport.Selector.select_transport(target(name)).tp_pid
-    :ok = GenServer.call(tp, :settestapp)
+    :ok = Mockup.set_peer(tp, Manual)
+    :ok = Mockup.attach_probe(tp)
     tp
   end
 
@@ -58,7 +62,7 @@ defmodule SIP.Test.B2bua.ParallelFork do
 
   defp invites_sent(n) do
     for _ <- 1..n, into: %{} do
-      assert_receive {:invite_sent, req}, 2_000
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, req}}, 2_000
       {req.ruri.domain, req}
     end
   end
@@ -67,14 +71,14 @@ defmodule SIP.Test.B2bua.ParallelFork do
   # device rang" is asserted on the DOMAIN and not on the next notification to
   # turn up — which may well be the previous target saying the same thing again.
   defp assert_invite_to(domain, timeout \\ 2_000) do
-    assert_receive {:invite_sent, req}, timeout
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, req}}, timeout
     if req.ruri.domain == domain, do: req, else: assert_invite_to(domain, timeout)
   end
 
   defp refute_invite_to(domain, timeout \\ 400) do
     receive do
       {:invite_sent, %{ruri: %{domain: ^domain}}} -> flunk("#{domain} should not have been rung")
-      {:invite_sent, _other} -> refute_invite_to(domain, timeout)
+      {:sip_mockup, {:request_sent, :INVITE, _other}} -> refute_invite_to(domain, timeout)
     after
       timeout -> :ok
     end
@@ -120,12 +124,12 @@ defmodule SIP.Test.B2bua.ParallelFork do
 
     # The first device is busy while the second still rings: nothing reaches the
     # scenario, so nothing can be relayed to the caller.
-    GenServer.cast(a, {:simulate, 486, 50})
+    Manual.simulate(a, 486, 50)
     refute_receive {:outbound, {486, _, _, _}}, 500
     refute_receive {:replied, _, _, _, _}, 100
 
     # The second falls too. NOW the rung has an answer — the best of the two.
-    GenServer.cast(b, {:simulate, 404, 50})
+    Manual.simulate(b, 404, 50)
     {ctx, _tid} = relay_surfaced(ctx, 404)
 
     # …which is not relayed either: it moves the hunt to the next rung.
@@ -146,8 +150,8 @@ defmodule SIP.Test.B2bua.ParallelFork do
     ctx = B2bua.do_create_leg(ctx, inbound_invite(), parallel_peer([["par3a", "par3b"]]), false)
     _ = invites_sent(2)
 
-    GenServer.cast(a, {:simulate, 486, 50})
-    GenServer.cast(b, {:simulate, 480, 100})
+    Manual.simulate(a, 486, 50)
+    Manual.simulate(b, 480, 100)
 
     # 480 over 486 on the numbers (RFC 3261 §16.7 step 6), and one answer only.
     {ctx, _tid} = relay_surfaced(ctx, 480)
@@ -168,7 +172,7 @@ defmodule SIP.Test.B2bua.ParallelFork do
 
     first_dialled = B2bua.outbound_leg(ctx).initial_trans
 
-    GenServer.cast(b, {:simulate, 200, 50})
+    Manual.simulate(b, 200, 50)
     {ctx, tid} = relay_surfaced(ctx, 200)
 
     assert_receive {:replied, 200, _reason, _req, _fields}, 2_000
@@ -200,7 +204,7 @@ defmodule SIP.Test.B2bua.ParallelFork do
 
     # A global refusal is the user's answer, not one device's: it does not wait
     # for the sibling and it does not try the next rung.
-    GenServer.cast(a, {:simulate, 603, 50})
+    Manual.simulate(a, 603, 50)
     {ctx, _tid} = relay_surfaced(ctx, 603)
 
     assert_receive {:replied, 603, _reason, _req, _fields}, 2_000

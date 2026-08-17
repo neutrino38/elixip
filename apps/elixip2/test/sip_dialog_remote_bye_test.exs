@@ -17,6 +17,9 @@ defmodule SIP.Test.DialogRemoteBye do
   """
   use ExUnit.Case
 
+  alias SIP.Test.Peers.Manual
+  alias SIP.Test.Transport.Mockup
+
   setup_all do
     :ok = SIP.Transac.start()
     :ok = SIP.Transport.Selector.start()
@@ -35,7 +38,8 @@ defmodule SIP.Test.DialogRemoteBye do
 
   defp peer!(name) do
     tp = SIP.Transport.Selector.select_transport(target(name)).tp_pid
-    :ok = GenServer.call(tp, :settestapp)
+    :ok = Mockup.set_peer(tp, Manual)
+    :ok = Mockup.attach_probe(tp)
     tp
   end
 
@@ -63,9 +67,9 @@ defmodule SIP.Test.DialogRemoteBye do
       SIP.Dialog.start_dialog(invite_to(name), 60, :outbound, false, tag: :outbound)
 
     assert_receive {:outbound, {:onnewdialog, :ok, tid}}, 2_000
-    assert_receive {:invite_sent, _req}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _req}}, 2_000
 
-    GenServer.cast(tp, {:simulate, 200, 0})
+    Manual.simulate(tp, 200, 0)
     assert_receive {:outbound, {200, resp, ^tid, ^dlg}}, 5_000
     :ok = SIP.Dialog.ack(dlg, tid)
 
@@ -100,7 +104,7 @@ defmodule SIP.Test.DialogRemoteBye do
     {tp, dlg, resp} = established_call("remotebye1")
     ref = Process.monitor(dlg)
 
-    send(tp, {:recv, callee_bye(resp)})
+    Mockup.inject(tp, callee_bye(resp))
 
     # The BYE reaches the application on the leg it came in on.
     assert_receive {:outbound, {:BYE, bye, bye_tid, ^dlg}}, 5_000
@@ -119,7 +123,7 @@ defmodule SIP.Test.DialogRemoteBye do
   test "the far end is never asked to hang up a dialog it has just closed" do
     {tp, dlg, resp} = established_call("remotebye2")
 
-    send(tp, {:recv, callee_bye(resp)})
+    Mockup.inject(tp, callee_bye(resp))
     assert_receive {:outbound, {:BYE, bye, _tid, ^dlg}}, 5_000
     :ok = SIP.Dialog.reply(dlg, bye, 200, "OK", [])
     assert_receive {:outbound, {:dialog_terminated, ^dlg, :normal}}, 5_000
@@ -128,6 +132,6 @@ defmodule SIP.Test.DialogRemoteBye do
     # a dialog that is gone cannot answer, so nothing is sent — the 481 the
     # callee used to answer is not reachable any more.
     refute Process.alive?(dlg)
-    refute_receive :BYE, 1_000
+    refute_receive {:sip_mockup, {:request_sent, :BYE, _}}, 1_000
   end
 end

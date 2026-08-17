@@ -168,7 +168,7 @@ defmodule SIP.Test.SIP.Msg.Ops do
   test "Create an INVITE 200 OK and get the contact from the transport", context do
     :ok = SIP.Transport.Selector.start()
     uri = SIP.Transport.Selector.select_transport("sip:90901@visio5.visioassistance.net:5090;unittest=1")
-    assert uri.tp_module == SIP.Test.Transport.UDPMockup
+    assert uri.tp_module == SIP.Test.Transport.Mockup
     assert uri.destip == {1,2,3,4}
     contact = SIP.Transport.build_contact_uri(uri.tp_module,assert uri.tp_pid )
     body = %{ contenttype: "application/sdp", data: "blabla" }

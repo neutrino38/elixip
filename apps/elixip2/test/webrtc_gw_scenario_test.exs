@@ -19,6 +19,9 @@ defmodule SIP.Test.B2bua.WebrtcGwScenario do
   """
   use ExUnit.Case
 
+  alias SIP.Test.Peers.Manual
+  alias SIP.Test.Transport.Mockup
+
   @scenario Path.expand("../scenarios/webrtc-gw.exs", __DIR__)
 
   setup_all do
@@ -96,8 +99,8 @@ defmodule SIP.Test.B2bua.WebrtcGwScenario do
     browser_sdp = SIP.Session.extract_sdp(invite)
 
     tp_pid = transport_pid(:ladder)
-    :ok = GenServer.call(tp_pid, :settestapp)
-    SIP.Test.Transport.UDPMockup.answer_bye(tp_pid)
+    :ok = Mockup.set_peer(tp_pid, Manual)
+    :ok = Mockup.attach_probe(tp_pid)
 
     {instance, _ref} = start_instance(module, stub, invite, [])
     send(instance, {:INVITE, invite, self(), stub})
@@ -106,25 +109,25 @@ defmodule SIP.Test.B2bua.WebrtcGwScenario do
 
     # Rung 1: a browser-shaped offer, built by the media server — not the
     # browser's own, which the phone never sees.
-    assert_receive {:invite_sent, webrtc}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, webrtc}}, 5_000
     assert offered_protocols(webrtc) == ["UDP/TLS/RTP/SAVPF", "UDP/TLS/RTP/SAVPF"]
     assert SIP.Session.extract_sdp(webrtc) != browser_sdp
 
-    GenServer.cast(tp_pid, {:simulate, 488, 100})
+    Manual.simulate(tp_pid, 488, 100)
 
     # Rung 2: the feedback profile, on a NEW CSeq. The phone's server
     # transaction for the INVITE it just refused is still alive, and two bodies
     # under one CSeq are a merged request (RFC 3261 §8.2.2.2) — answered 482.
-    assert_receive {:invite_sent, avpf}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, avpf}}, 5_000
     assert offered_protocols(avpf) == ["RTP/AVPF", "RTP/AVPF"]
     assert hd(avpf.cseq) > hd(webrtc.cseq)
     assert avpf.callid == webrtc.callid
     assert avpf.ruri.domain == webrtc.ruri.domain
 
-    GenServer.cast(tp_pid, {:simulate, 488, 100})
+    Manual.simulate(tp_pid, 488, 100)
 
     # Rung 3, the bottom of the ladder.
-    assert_receive {:invite_sent, avp}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, avp}}, 5_000
     assert offered_protocols(avp) == ["RTP/AVP", "RTP/AVP"]
     assert hd(avp.cseq) > hd(avpf.cseq)
 
@@ -132,7 +135,7 @@ defmodule SIP.Test.B2bua.WebrtcGwScenario do
     # between the gateway and the phone.
     refute_receive {:replied, 488, _reason, _req, _fields}, 200
 
-    GenServer.cast(tp_pid, {:simulate, 200, 100})
+    Manual.simulate(tp_pid, 200, 100)
 
     assert_receive {:replied, 200, _reason, _req, fields}, 5_000
     assert [%{data: relayed}] = Keyword.fetch!(fields, :body)
@@ -151,16 +154,17 @@ defmodule SIP.Test.B2bua.WebrtcGwScenario do
     invite = inbound_invite(:required)
 
     tp_pid = transport_pid(:required)
-    :ok = GenServer.call(tp_pid, :settestapp)
+    :ok = Mockup.set_peer(tp_pid, Manual)
+    :ok = Mockup.attach_probe(tp_pid)
 
     {instance, _ref} = start_instance(module, stub, invite, profile: :webrtc_required)
     send(instance, {:INVITE, invite, self(), stub})
 
     assert_receive {:replied, 100, "Trying", _req, _fields}, 5_000
-    assert_receive {:invite_sent, webrtc}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, webrtc}}, 5_000
     assert offered_protocols(webrtc) == ["UDP/TLS/RTP/SAVPF", "UDP/TLS/RTP/SAVPF"]
 
-    GenServer.cast(tp_pid, {:simulate, 488, 100})
+    Manual.simulate(tp_pid, 488, 100)
 
     # The browser learns of it, which is what `_required` means.
     assert_receive {:replied, 488, _reason, _req, _fields}, 5_000

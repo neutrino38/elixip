@@ -15,9 +15,16 @@ defmodule SIPParser.MixProject do
       # SPDX id of the Business Source License 1.1 (see LICENSE.md). Read by
       # `mix sbom.cyclonedx` to license this component in the SBoM.
       package: [licenses: ["BUSL-1.1"]],
+      elixirc_paths: elixirc_paths(Mix.env()),
       deps: deps()
     ]
   end
+
+  # test/support holds the test-only SIP transport mockup and its peers
+  # (SIP.Test.*). Keeping them out of :dev/:prod keeps them out of the
+  # library and of the kelixip release.
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_), do: ["lib"]
 
   # Run "mix help compile.app" to learn about applications.
   def application do

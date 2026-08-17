@@ -9,6 +9,9 @@ defmodule SIP.Test.B2bua.Session do
   """
   use ExUnit.Case
 
+  alias SIP.Test.Peers.Manual
+  alias SIP.Test.Transport.Mockup
+
   alias SIP.B2bua.{Leg, Peer, Pending}
   alias SIP.Session.B2bua
 
@@ -51,7 +54,8 @@ defmodule SIP.Test.B2bua.Session do
   # holds the INVITE, and answering before that would race it.
   defp arm_peer! do
     tp_pid = SIP.Transport.Selector.select_transport(peer_target()).tp_pid
-    :ok = GenServer.call(tp_pid, :settestapp)
+    :ok = Mockup.set_peer(tp_pid, Manual)
+    :ok = Mockup.attach_probe(tp_pid)
     tp_pid
   end
 
@@ -202,13 +206,14 @@ defmodule SIP.Test.B2bua.Session do
         |> SIP.Uri.set_uri_param("unittest", "b2bua_session_gw")
 
       gw_tp = SIP.Transport.Selector.select_transport(gw).tp_pid
-      :ok = GenServer.call(gw_tp, :settestapp)
+      :ok = Mockup.set_peer(gw_tp, Manual)
+      :ok = Mockup.attach_probe(gw_tp)
 
       ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(outbound_proxy: gw), false)
       assert ctx.lasterr == :ok
 
       # It reached the GATEWAY's transport, not the target's…
-      assert_receive {:invite_sent, fwd}, 2_000
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, fwd}}, 2_000
       # …while still naming the callee it was always for.
       assert fwd.ruri.userpart == "callee"
       assert fwd.ruri.domain == "example.com"
@@ -337,7 +342,7 @@ defmodule SIP.Test.B2bua.Session do
 
       # The attempt was cancelled rather than hung up: no BYE went out (the
       # callee never answered, so there is no session to end).
-      refute_receive :BYE, 200
+      refute_receive {:sip_mockup, {:request_sent, :BYE, _}}, 200
       refute leg == nil
 
       # Bookkeeping cleared, so a second pass has nothing left to do.
@@ -350,25 +355,26 @@ defmodule SIP.Test.B2bua.Session do
       # Be the mockup's "test app" before anything goes out: it then tells us
       # when it holds the INVITE, and answering before that would race it.
       tp_pid = SIP.Transport.Selector.select_transport(peer_target()).tp_pid
-      :ok = GenServer.call(tp_pid, :settestapp)
+      :ok = Mockup.set_peer(tp_pid, Manual)
+      :ok = Mockup.attach_probe(tp_pid)
 
       ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), false)
       leg = B2bua.outbound_leg(ctx)
       dlg = leg.dialogpid
-      assert_receive {:invite_sent, _fwd}, 5_000
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
 
       # Let the callee actually answer: only a 2xx makes this a session (it is
       # what teaches the dialog its remote tag and target). The scenario would
       # relay that 200 and drop the correlation; do both here. Driven one
       # response at a time rather than through a canned scenario, so this does
       # not depend on what the shared mockup instance was last used for.
-      GenServer.cast(tp_pid, {:simulate, 200, 100})
+      Manual.simulate(tp_pid, 200, 100)
       assert_receive {:outbound, {200, _rsp, _tid, ^dlg}}, 5_000
       ctx = B2bua.drop_pending(ctx, leg.initial_trans)
 
       ctx = B2bua.release_legs(ctx)
 
-      assert_receive :BYE, 2_000
+      assert_receive {:sip_mockup, {:request_sent, :BYE, _}}, 2_000
       # No orphan answer: nobody was waiting on a relayed request.
       refute_receive {:replied, _, _, _, _}, 200
       assert B2bua.outbound_leg(ctx) == nil
@@ -387,7 +393,7 @@ defmodule SIP.Test.B2bua.Session do
 
       ctx = B2bua.release_legs(ctx)
 
-      refute_receive :BYE, 500
+      refute_receive {:sip_mockup, {:request_sent, :BYE, _}}, 500
       assert B2bua.outbound_leg(ctx) == nil
     end
 
@@ -414,7 +420,7 @@ defmodule SIP.Test.B2bua.Session do
       arm_peer!()
       ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), false)
       leg = B2bua.outbound_leg(ctx)
-      assert_receive {:invite_sent, _fwd}, 5_000
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
       assert [{_tid, %Pending{orig_leg: :inbound}}] = B2bua.pending(ctx)
 
       ctx =
@@ -437,7 +443,7 @@ defmodule SIP.Test.B2bua.Session do
     test "the inbound leg dying loses what was relayed onto it", %{ctx: ctx, stub: stub} do
       arm_peer!()
       ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), false)
-      assert_receive {:invite_sent, _fwd}, 5_000
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
 
       # A request that came from the OUTBOUND leg, relayed onto the inbound one.
       ctx = B2bua.drop_pending(ctx, B2bua.outbound_leg(ctx).initial_trans)
@@ -457,7 +463,7 @@ defmodule SIP.Test.B2bua.Session do
     test "an event that is not a leg death changes nothing", %{ctx: ctx} do
       arm_peer!()
       ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), false)
-      assert_receive {:invite_sent, _fwd}, 5_000
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
       before = B2bua.state(ctx)
 
       ctx = B2bua.note_leg_event(ctx, {:outbound, {180, %{response: 180}, self(), self()}})
@@ -490,7 +496,8 @@ defmodule SIP.Test.B2bua.Session do
 
     defp arm_media_peer! do
       tp_pid = SIP.Transport.Selector.select_transport(media_peer_target()).tp_pid
-      :ok = GenServer.call(tp_pid, :settestapp)
+      :ok = Mockup.set_peer(tp_pid, Manual)
+      :ok = Mockup.attach_probe(tp_pid)
       tp_pid
     end
 
@@ -511,7 +518,7 @@ defmodule SIP.Test.B2bua.Session do
       ctx = B2bua.do_create_leg(ctx, invite, media_peer(), media_mode())
       assert ctx.lasterr == :ok
 
-      assert_receive {:invite_sent, fwd}, 5_000
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, fwd}}, 5_000
       fwd_sdp = SIP.Session.extract_sdp(fwd)
 
       assert is_binary(fwd_sdp)
@@ -529,7 +536,7 @@ defmodule SIP.Test.B2bua.Session do
       ctx = B2bua.do_create_leg(ctx, inbound_invite(), media_peer(), media_mode())
       leg = B2bua.outbound_leg(ctx)
       dlg = leg.dialogpid
-      assert_receive {:invite_sent, _fwd}, 5_000
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
 
       # Nothing was answered to the caller while the callee was being rung: the
       # answer exists, and waits.
@@ -537,7 +544,7 @@ defmodule SIP.Test.B2bua.Session do
       assert %{inbound_answer: held} = B2bua.media_plan(ctx)
       assert is_binary(held)
 
-      GenServer.cast(tp_pid, {:simulate, 200, 100})
+      Manual.simulate(tp_pid, 200, 100)
       assert_receive {:outbound, {200, resp, tid, ^dlg}}, 5_000
       callee_sdp = SIP.Session.extract_sdp(resp)
 
@@ -571,7 +578,7 @@ defmodule SIP.Test.B2bua.Session do
       ctx = B2bua.do_create_leg(ctx, inbound_invite(), media_peer(), media_mode())
       leg = B2bua.outbound_leg(ctx)
       dlg = leg.dialogpid
-      assert_receive {:invite_sent, _fwd}, 5_000
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
 
       assert %{inbound_answer: held} = B2bua.media_plan(ctx)
       assert is_binary(held)
@@ -589,7 +596,7 @@ defmodule SIP.Test.B2bua.Session do
         rebuilt
       )
 
-      GenServer.cast(tp_pid, {:simulate, 200, 100})
+      Manual.simulate(tp_pid, 200, 100)
       assert_receive {:outbound, {200, resp, tid, ^dlg}}, 5_000
 
       B2bua.note_event({:outbound, {200, resp, tid, self()}})
@@ -613,9 +620,9 @@ defmodule SIP.Test.B2bua.Session do
       ctx = B2bua.do_create_leg(ctx, inbound_invite(), media_peer(), media_mode())
       leg = B2bua.outbound_leg(ctx)
       dlg = leg.dialogpid
-      assert_receive {:invite_sent, _fwd}, 5_000
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
 
-      GenServer.cast(tp_pid, {:simulate, 180, 100})
+      Manual.simulate(tp_pid, 180, 100)
       assert_receive {:outbound, {180, resp, tid, ^dlg}}, 5_000
 
       # Give it a body the framework has to decide about.
@@ -644,9 +651,9 @@ defmodule SIP.Test.B2bua.Session do
       ctx = B2bua.do_create_leg(ctx, inbound_invite(), media_peer(), media_mode())
       leg = B2bua.outbound_leg(ctx)
       dlg = leg.dialogpid
-      assert_receive {:invite_sent, _fwd}, 5_000
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
 
-      GenServer.cast(tp_pid, {:simulate, 200, 100})
+      Manual.simulate(tp_pid, 200, 100)
       assert_receive {:outbound, {200, resp, tid, ^dlg}}, 5_000
 
       # Take the outbound endpoint away underneath: bridging can no longer work,
@@ -692,7 +699,8 @@ defmodule SIP.Test.B2bua.Session do
         |> SIP.Uri.set_uri_param("unittest", "b2bua_flow")
 
       flow_pid = SIP.Transport.Selector.select_transport(flow_named).tp_pid
-      :ok = GenServer.call(flow_pid, :settestapp)
+      :ok = Mockup.set_peer(flow_pid, Manual)
+      :ok = Mockup.attach_probe(flow_pid)
 
       # The contact as Kelix.Mod.Registrar.targets/2 produces it: what the device
       # announced (a private address), plus where its REGISTER really came from
@@ -705,7 +713,7 @@ defmodule SIP.Test.B2bua.Session do
         destip: {10, 0, 0, 9},
         destport: 5060,
         destproto: "UDP",
-        tp_module: SIP.Test.Transport.UDPMockup,
+        tp_module: SIP.Test.Transport.Mockup,
         tp_pid: flow_pid
       }
 
@@ -717,7 +725,7 @@ defmodule SIP.Test.B2bua.Session do
       # the stamped pid is the only thing that could have routed it here. The
       # request itself comes back off the wire and therefore parsed, which is why
       # nothing is asserted on its transport metadata — it has none by then.
-      assert_receive {:invite_sent, fwd}, 5_000
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, fwd}}, 5_000
       assert fwd.ruri.domain == "10.0.0.9"
       assert fwd.method == :INVITE
 
@@ -739,12 +747,12 @@ defmodule SIP.Test.B2bua.Session do
       ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), false)
       leg = B2bua.outbound_leg(ctx)
       dlg = leg.dialogpid
-      assert_receive {:invite_sent, _fwd}, 5_000
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
 
       # The call has to be up first: only a 2xx makes the outbound leg a session,
       # and an in-dialog request needs one. The scenario would relay that 200 and
       # drop the correlation; do both here.
-      GenServer.cast(tp_pid, {:simulate, 200, 100})
+      Manual.simulate(tp_pid, 200, 100)
       assert_receive {:outbound, {200, _rsp, _tid, ^dlg}}, 5_000
       ctx = B2bua.drop_pending(ctx, leg.initial_trans)
 
@@ -811,7 +819,7 @@ defmodule SIP.Test.B2bua.Session do
       arm_peer!()
       ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), false)
       leg = B2bua.outbound_leg(ctx)
-      assert_receive {:invite_sent, _fwd}, 5_000
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
 
       GenServer.stop(leg.dialogpid)
       refute Process.alive?(leg.dialogpid)
@@ -835,7 +843,7 @@ defmodule SIP.Test.B2bua.Session do
       arm_peer!()
       ctx = B2bua.do_create_leg(ctx, inbound_invite(), mockup_peer(), false)
       leg = B2bua.outbound_leg(ctx)
-      assert_receive {:invite_sent, _fwd}, 5_000
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
 
       GenServer.stop(leg.dialogpid)
       ctx = B2bua.do_send_bye(ctx)

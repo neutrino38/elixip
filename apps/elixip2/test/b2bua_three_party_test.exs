@@ -5,7 +5,7 @@ defmodule SIP.Test.B2bua.ThreeParty do
 
   What makes it possible is that the UDP mockup now serves one process per named
   peer (`;unittest=caller` / `;unittest=callee`, see
-  `SIP.Test.Transport.UDPMockup.select_instance/1`). With the single shared
+  `SIP.Test.Transport.Mockup.select_instance/1`). With the single shared
   instance the two legs overwrote each other's current request, and an answer
   meant for the callee was built from the caller's INVITE — the two directions
   answered each other.
@@ -16,12 +16,15 @@ defmodule SIP.Test.B2bua.ThreeParty do
   outbound client transaction, and the addressing of everything the B2BUA sends
   on either side.
 
-  Reading the assertions: the caller-side mockup reports the responses it
-  receives as bare status codes (it sets `:inboundinvite` on receiving an INVITE
-  — see `set_inbound_scenario/2`); the callee-side one reports the requests it
-  receives as `{:invite_sent, req}` / `:BYE`.
+  Reading the assertions: each peer has a probe attached, so what the stack puts
+  on that leg arrives as `{:sip_mockup, {:response_sent, code, msg}}` on the
+  caller side and `{:sip_mockup, {:request_sent, method, msg}}` on the callee
+  side.
   """
   use ExUnit.Case
+
+  alias SIP.Test.Peers.Manual
+  alias SIP.Test.Transport.Mockup
 
   @callee_uri "sip:bob@callee.example.com;unittest=callee"
 
@@ -87,7 +90,7 @@ defmodule SIP.Test.B2bua.ThreeParty do
       |> Map.put(:ruri, %SIP.Uri{req.ruri | destip: {1, 2, 3, 4}, destport: 5080})
       |> SIP.Msg.Ops.add_via({{2, 2, 2, 2}, 5090, "UDP"}, branch)
 
-    send(caller_tp.tp_pid, {:recv, req})
+    Mockup.inject(caller_tp.tp_pid, req)
     {req, branch}
   end
 
@@ -98,42 +101,42 @@ defmodule SIP.Test.B2bua.ThreeParty do
     callee = peer("callee")
     refute caller.tp_pid == callee.tp_pid
 
-    :ok = GenServer.call(caller.tp_pid, :settestapp)
-    :ok = GenServer.call(callee.tp_pid, :settestapp)
-    SIP.Test.Transport.UDPMockup.answer_bye(callee.tp_pid)
+    :ok = Mockup.set_peer(caller.tp_pid, Manual)
+    :ok = Mockup.attach_probe(caller.tp_pid)
+    :ok = Mockup.set_peer(callee.tp_pid, Manual)
+    :ok = Mockup.attach_probe(callee.tp_pid)
 
     {_pid, ref} = arm_b2bua(module)
 
     {invite, branch} = caller_invites(caller)
 
     # ── The B2BUA answers the caller and calls the callee ────────────────────
-    # 100 Trying comes back on the caller's transport (a bare code: that side is
-    # in the mockup's :inboundinvite scenario).
-    assert_receive 100, 5_000
+    # 100 Trying comes back on the caller's transport.
+    assert_receive {:sip_mockup, {:response_sent, 100, _}}, 5_000
 
     # …and a *different* INVITE reaches the callee: its own dialog, none of the
     # caller's hop-scoped headers, one hop less.
-    assert_receive {:invite_sent, fwd}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, fwd}}, 5_000
     assert fwd.callid != invite.callid
     assert fwd.ruri.userpart == "bob"
     refute Map.has_key?(fwd, :recordroute)
     assert Map.get(fwd, "Max-Forwards") in [15, "15"]
 
     # ── The callee rings, then answers; both reach the caller ────────────────
-    GenServer.cast(callee.tp_pid, {:simulate, 180, 100})
-    assert_receive 180, 5_000
+    Manual.simulate(callee.tp_pid, 180, 100)
+    assert_receive {:sip_mockup, {:response_sent, 180, _}}, 5_000
 
-    GenServer.cast(callee.tp_pid, {:simulate, 200, 100})
-    assert_receive 200, 5_000
+    Manual.simulate(callee.tp_pid, 200, 100)
+    assert_receive {:sip_mockup, {:response_sent, 200, _}}, 5_000
 
     # ── The caller confirms, then hangs up ───────────────────────────────────
-    send(caller.tp_pid, {:recv, caller_ack(invite)})
-    send(caller.tp_pid, {:recv, caller_bye(invite)})
+    Mockup.inject(caller.tp_pid, caller_ack(invite))
+    Mockup.inject(caller.tp_pid, caller_bye(invite))
     _ = branch
 
     # The BYE crosses to the callee, and the caller is answered 200.
-    assert_receive :BYE, 5_000
-    assert_receive 200, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :BYE, _}}, 5_000
+    assert_receive {:sip_mockup, {:response_sent, 200, _}}, 5_000
 
     assert_receive {:instance_done, :ok}, 20_000
     assert_receive {:DOWN, ^ref, :process, _pid, _}, 5_000
@@ -145,20 +148,21 @@ defmodule SIP.Test.B2bua.ThreeParty do
     caller = peer("caller")
     callee = peer("callee")
 
-    :ok = GenServer.call(caller.tp_pid, :settestapp)
-    :ok = GenServer.call(callee.tp_pid, :settestapp)
-    SIP.Test.Transport.UDPMockup.answer_bye(callee.tp_pid)
+    :ok = Mockup.set_peer(caller.tp_pid, Manual)
+    :ok = Mockup.attach_probe(caller.tp_pid)
+    :ok = Mockup.set_peer(callee.tp_pid, Manual)
+    :ok = Mockup.attach_probe(callee.tp_pid)
 
     {_pid, _ref} = arm_b2bua(module)
     caller_invites(caller)
 
-    assert_receive 100, 5_000
-    assert_receive {:invite_sent, _fwd}, 5_000
+    assert_receive {:sip_mockup, {:response_sent, 100, _}}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
 
-    GenServer.cast(callee.tp_pid, {:simulate, 486, 100})
+    Manual.simulate(callee.tp_pid, 486, 100)
 
     # 486, not a code of our own invention — the caller learns the callee is busy.
-    assert_receive 486, 5_000
+    assert_receive {:sip_mockup, {:response_sent, 486, _}}, 5_000
     assert_receive {:instance_done, :ok}, 20_000
   end
 
@@ -178,13 +182,16 @@ defmodule SIP.Test.B2bua.ThreeParty do
     calleea = peer("calleea")
     calleeb = peer("calleeb")
 
-    :ok = GenServer.call(caller.tp_pid, :settestapp)
-    :ok = GenServer.call(calleea.tp_pid, :settestapp)
-    :ok = GenServer.call(calleeb.tp_pid, :settestapp)
+    :ok = Mockup.set_peer(caller.tp_pid, Manual)
+    :ok = Mockup.attach_probe(caller.tp_pid)
+    :ok = Mockup.set_peer(calleea.tp_pid, Manual)
+    :ok = Mockup.attach_probe(calleea.tp_pid)
+    :ok = Mockup.set_peer(calleeb.tp_pid, Manual)
+    :ok = Mockup.attach_probe(calleeb.tp_pid)
 
-    # The peers are named instances shared by every test in this file, and the
-    # caller side reports bare status codes: an earlier test's 200 would satisfy
-    # an assertion here. Start from an empty mailbox.
+    # The peers are named instances shared by every test in this file, and a probe
+    # event carries no test identity: an earlier test's 200 would satisfy an
+    # assertion here. Start from an empty mailbox.
     flush_mailbox()
 
     rung = %SIP.B2bua.Peer{
@@ -200,11 +207,11 @@ defmodule SIP.Test.B2bua.ThreeParty do
     {_pid, _ref} = arm_b2bua(module, rung)
     {invite, _branch} = caller_invites(caller)
 
-    assert_receive 100, 5_000
+    assert_receive {:sip_mockup, {:response_sent, 100, _}}, 5_000
 
     rung_domains =
       for _ <- 1..2, into: MapSet.new() do
-        assert_receive {:invite_sent, fwd}, 5_000
+        assert_receive {:sip_mockup, {:request_sent, :INVITE, fwd}}, 5_000
         fwd.ruri.domain
       end
 
@@ -212,14 +219,14 @@ defmodule SIP.Test.B2bua.ThreeParty do
 
     # The second device picks up. The first is CANCELled by the dialog, and the
     # caller hears one 200 — not one per branch.
-    GenServer.cast(calleeb.tp_pid, {:simulate, 200, 100})
-    assert_receive 200, 5_000
+    Manual.simulate(calleeb.tp_pid, 200, 100)
+    assert_receive {:sip_mockup, {:response_sent, 200, _}}, 5_000
 
-    send(caller.tp_pid, {:recv, caller_ack(invite)})
+    Mockup.inject(caller.tp_pid, caller_ack(invite))
 
     # Acknowledged: the winner stops retransmitting, so no second 200 reaches
     # the caller.
-    refute_receive 200, 2_000
+    refute_receive {:sip_mockup, {:response_sent, 200, _}}, 2_000
   end
 
   # The ACK of a 2xx is a transaction of its own and carries a FRESH branch

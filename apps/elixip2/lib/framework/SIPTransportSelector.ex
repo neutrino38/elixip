@@ -192,7 +192,7 @@ alias SIP.NetUtils
 
   # A URI aimed at the in-process test mockup. Any non-empty `unittest` value
   # counts: `unittest=1` is the shared instance every existing suite uses, and any
-  # other value names a peer of its own (see UDPMockup.select_instance/1).
+  # other value names a peer of its own (see the mockup's `select_instance/1`).
   defp unittest?(uri) do
     case SIP.Uri.get_uri_param(uri, "unittest") do
       { :ok, value } when is_binary(value) and value != "" -> true
@@ -204,12 +204,17 @@ alias SIP.NetUtils
   # find or launch the matching transport instance.
   defp select_by_destination(ruri = %SIP.Uri{}) do
     newuri_or_err = cond do
-      # Unit test: use the mockup transport
+      # Unit test: use the mockup transport. The module comes from the app env
+      # so no test code is referenced (nor shipped) from the library — the test
+      # suite sets it in test_helper.exs (SIP.Test.Transport.Mockup).
       unittest?(ruri) ->
+        t_mod = Application.get_env(:elixip2, :unittest_transport) ||
+                  raise "R-URI carries unittest=1 but :elixip2, :unittest_transport is not configured"
+
         { :ok , destaddr } = SIP.NetUtils.parse_address("1.2.3.4")
 
         %SIP.Uri{ ruri | destip: destaddr, destport: 5080, destproto: "UDPMockup",
-                 tp_module: SIP.Test.Transport.UDPMockup }
+                 tp_module: t_mod }
 
       # Level 2 — the destination is already resolved (IP + port known: a stored
       # binding's `received`, a configured next hop). Skip DNS and use it as-is.

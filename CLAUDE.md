@@ -331,8 +331,23 @@ stop_player / stop_recorder / stop_echo
 {:ms_event, server_pid, :server_disconnected}
 ```
 
-### Testing Infrastructure
-- `SIP.Test.Transport.UDPMockup` — in-process fake UDP transport
+### Testing Infrastructure (`apps/elixip2/test/support/`, compiled in :test only)
+- `SIP.Test.Transport.Mockup` — in-process fake transport; the Selector routes any
+  `;unittest=…` R-URI to it via the `:unittest_transport` app env (set in each
+  app's `test_helper.exs`). Tests drive it with `set_peer/3` (behaviour of the fake
+  remote party), `attach_probe/2` (observation), `inject/2` (inbound traffic) and
+  `tell_peer/2` (runtime command to the peer). `;unittest=1` is THE shared
+  instance; any other value (`;unittest=callee`) names an instance of its own, so
+  a B2BUA suite gets one peer per leg (`select_instance/1`)
+- `SIP.Test.Peer` — behaviour of a simulated remote peer: pure callbacks
+  returning actions (`{:inject, msg, after_ms}` / `{:notify, event}`); canned
+  peers in `SIP.Test.Peers.*` (Passive, AnsweringUAS, BusyUAS, NoAnswerUAS,
+  ChallengingUAS, RegisterOK), one module per scenario, delays as opts.
+  `SIP.Test.Peers.Manual` is the exception: the test drives it one message at a
+  time (`simulate/3`, `hangup/1`, `retransmit_2xx/1`) because a B2BUA suite
+  asserts on the request that went out before deciding how the far end answers it
+- `SIP.Test.Probe` — normalized event stream to the test process:
+  `{:sip_mockup, {:request_sent | :response_sent, …}}`
 - `MediaServer.Mockup` — stub media server for call flow tests
 - Sample SIP messages in `apps/elixip2/test/SIP-*.txt`
 
