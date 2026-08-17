@@ -311,6 +311,55 @@ defmodule SIP.Test.UASRegister do
     assert until(fn -> Elixip.RegistrarUAS.stats().active == 0 end, 2_000)
   end
 
+  # RFC 3261 §10.2 pins the Call-ID across the registrations a client sends to one
+  # registrar and requires a rising CSeq. It says nothing about the From tag, and
+  # clients do mint a fresh one on every refresh — a Trix handset does, every 120 s
+  # (seen 2026-08-17). Matched on the dialog triplet alone, which leads with that
+  # very tag, such a refresh missed the registration it was prolonging: a SECOND
+  # registrar session opened for the one binding, and the first stayed live until
+  # its transport dropped ("client connection lost" in the logs, one per refresh).
+  test "a refresh that changes its From tag prolongs the registration, it does not open a second" do
+    restart_registrar(@scenario, 5)
+
+    {:ok, msg} = File.read("test/SIP-REGISTER-LVP.txt")
+    {:ok, base} = SIPMsg.parse(msg, fn _c, _m, _l, _line -> :ok end)
+    upd_uri = SIP.Uri.set_uri_param(base.ruri, "unittest", "uas_register")
+    base = SIP.Msg.Ops.update_sip_msg(base, {:ruri, upd_uri}) |> uniq_callid() |> with_cseq(1)
+    routed = SIP.Transport.Selector.select_transport(upd_uri)
+    :ok = GenServer.call(routed.tp_pid, :settestapp)
+    tp = routed.tp_pid
+
+    auth = %{"realm" => "example.com", "nonce" => "n0"}
+    cid = base.callid
+
+    send(tp, {:recv, fresh_branch(base)})
+    assert_receive {:uas_response, 401, %{callid: ^cid}}, 2_000
+
+    reg = base |> with_auth(auth) |> with_cseq(2) |> fresh_branch()
+    send(tp, {:recv, reg})
+    assert_receive {:uas_response, 200, %{callid: ^cid}}, 2_000
+    assert until(fn -> Elixip.RegistrarUAS.stats().active == 1 end, 2_000)
+
+    # The refresh: same Call-ID and a rising CSeq, as the RFC asks — and a From
+    # tag of its own, as the RFC allows.
+    refresh =
+      base
+      |> with_from_tag("refreshed-#{System.unique_integer([:positive])}")
+      |> with_auth(auth)
+      |> with_cseq(3)
+      |> fresh_branch()
+
+    send(tp, {:recv, refresh})
+    assert_receive {:uas_response, 200, %{callid: ^cid}}, 2_000
+
+    # One session, still. Two means the refresh was taken for a new registration.
+    Process.sleep(200)
+    assert Elixip.RegistrarUAS.stats().active == 1
+
+    Elixip.RegistrarUAS.shutdown_all(:test_cleanup)
+    assert until(fn -> Elixip.RegistrarUAS.stats().active == 0 end, 2_000)
+  end
+
   # A REGISTER accepted on the request that CREATES the dialog — no 401 in between,
   # which is what a client pre-authenticating with a cached nonce sends on every
   # refresh. The dialog used to arm its expiration timer only on the *in-dialog*
@@ -405,6 +454,11 @@ defmodule SIP.Test.UASRegister do
   end
 
   defp with_cseq(req, n, method \\ :REGISTER), do: Map.put(req, :cseq, [n, method])
+
+  # The canned messages carry their From as the raw header string, so the tag is
+  # rewritten there — same shape as fresh_branch/1 above.
+  defp with_from_tag(req, tag),
+    do: Map.put(req, :from, String.replace(req.from, ~r/tag=[^;]+/, "tag=#{tag}"))
 
   # Give a message a unique Call-ID so each test uses a distinct dialog (dialogs
   # live ~600 s; without this, tests reusing the same canned message would match a

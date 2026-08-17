@@ -694,6 +694,16 @@ defmodule SIP.DialogImpl do
       Registry.register(Registry.SIPDialog, {fromtag, callid, totag}, :completedialog)
     end
 
+    # A refresh of this registration comes back with the same Call-ID but a From
+    # tag of its own, which no triplet above can match. The stable key is what
+    # keeps ONE registrar session per registration instead of one per refresh
+    # (SIP.Dialog.registration_id/1). An {:error, {:already_registered, _}} here
+    # means two REGISTERs of the same registration raced: the loser keeps its
+    # triplet and behaves as before.
+    if req.method == :REGISTER do
+      _ = Registry.register(Registry.SIPDialog, SIP.Dialog.registration_id(req), :registration)
+    end
+
     state = %SIP.DialogImpl{
       msg: req,
       direction: :inbound,
@@ -1338,7 +1348,7 @@ defmodule SIP.DialogImpl do
          {:ok, state} <- check_seqno(state, msg),
          {:ok, state} <- send_req_to_app(state, msg, transact_pid),
          {:ok, state} <- check_closing_transaction(state, msg, transact_pid) do
-      {:noreply, arm_expiration_timer(state, msg)}
+      {:noreply, arm_expiration_timer(state, msg) |> follow_flow(msg)}
     else
       {:notallowed, state} ->
         SIP.Transac.reply(transact_pid, 405, "Method not allowed", [], state.totag)
@@ -1888,6 +1898,18 @@ defmodule SIP.DialogImpl do
   end
 
   defp on_flow?(_msg, _tp_module, _ip, _port), do: false
+
+  # A REGISTER refresh may arrive over a different connection from the one that
+  # created the dialog — a WSS client that reopens its socket before refreshing
+  # is the ordinary case, not an edge one. The dialog's own flow is read off
+  # `state.msg` (on_flow?/4 above), so unless it follows the last request we
+  # accepted, the OLD connection dropping tears down a registration the client
+  # has just renewed over the new one, and the registrar drops the binding with
+  # it. Only the flow coordinates move; the rest of the initial request stays.
+  defp follow_flow(state, %{method: :REGISTER, ruri: %SIP.Uri{} = ruri}),
+    do: %SIP.DialogImpl{state | msg: Map.put(state.msg, :ruri, ruri)}
+
+  defp follow_flow(state, _msg), do: state
 
   # Handle option keepalive timers: send an OPTIONS message or tear the dialog
   # down when the peer stopped answering (see SIP.DialogImpl.KeepAlive).
