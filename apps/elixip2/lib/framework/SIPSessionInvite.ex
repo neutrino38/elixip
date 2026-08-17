@@ -455,7 +455,7 @@ defmodule SIP.Session.CallUAS do
       when is_integer(code) do
     req = fetch_stored_req!(sip_ctx)
 
-    if needs_sdp?(code) and not (req.method == :UPDATE and not has_sdp?(req)) do
+    if needs_sdp?(code) and not offerless_update?(req) do
       raise "reply_invite: code #{code} requires an SDP body; " <>
               "use reply_invite_with_sdp/reply_invite_with_body (phase 3)"
     end
@@ -481,11 +481,31 @@ defmodule SIP.Session.CallUAS do
   retrying it is pointless) while a media-server RPC failure is a `500` (our
   problem, and a retry may well work). Collapsing the two into one code tells the
   peer the wrong thing about what to do next.
+
+  An **UPDATE that carries no offer** is answered with a bare 2xx and no media
+  negotiation (RFC 3311 §5.1: "if the UPDATE did not contain an offer, the 2xx MUST
+  NOT contain an answer"). A session-timer refresh (RFC 4028 §9) is exactly that
+  request, so it reaches every scenario that stays in a call, and answering it is
+  not a decision a scenario should have to take: it branches on nothing but the
+  presence of a body. A re-INVITE with no offer is a different case — its 2xx MUST
+  carry an offer, which is the delayed offer we do not support — and still raises.
   """
   def do_reply_invite_with_sdp(sip_ctx = %SIP.Context{}, code, opts)
       when code in [183, 200] and is_list(opts) do
     req = fetch_stored_req!(sip_ctx)
 
+    if offerless_update?(req) do
+      do_reply_invite(sip_ctx, code, Keyword.get(opts, :reason), reply_fields(sip_ctx, opts, []))
+    else
+      reply_invite_with_negotiated_sdp(sip_ctx, req, code, opts)
+    end
+  end
+
+  def do_reply_invite_with_sdp(_sip_ctx, code, _opts) do
+    raise "reply_invite_with_sdp: unsupported code #{inspect(code)} (only 183 and 200)"
+  end
+
+  defp reply_invite_with_negotiated_sdp(sip_ctx, req, code, opts) do
     remote_offer =
       SIP.Session.extract_sdp(req) ||
         raise "reply_invite_with_sdp: the stored #{req.method} carries no SDP offer " <>
@@ -524,10 +544,6 @@ defmodule SIP.Session.CallUAS do
 
         SIP.Context.set(sip_ctx, :lasterr, {:media_error, reason})
     end
-  end
-
-  def do_reply_invite_with_sdp(_sip_ctx, code, _opts) do
-    raise "reply_invite_with_sdp: unsupported code #{inspect(code)} (only 183 and 200)"
   end
 
   # `on_media_error` as a per-cause function, a fixed pair, or the default 500. A
@@ -650,6 +666,9 @@ defmodule SIP.Session.CallUAS do
     raise "reply_invite_with_body: invalid body #{inspect(other)}; expected a binary, " <>
             "a %{contenttype, data} map, or a list of such maps"
   end
+
+  # The one request a 2xx may answer with no SDP at all (RFC 3311 §5.1).
+  defp offerless_update?(req), do: req.method == :UPDATE and not has_sdp?(req)
 
   defp has_sdp?(req) do
     case Map.get(req, :body) do

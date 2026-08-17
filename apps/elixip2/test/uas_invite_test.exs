@@ -431,6 +431,30 @@ defmodule SIP.Test.UASInvite do
     end
   end
 
+  # An RFC 4028 session-timer refresh is an UPDATE with no body, and it arrives in
+  # the middle of every long call — a JsSIP client sends one every 45 s. RFC 3311
+  # §5.1 answers it with a bare 2xx: there is nothing to negotiate, and the media
+  # server must not be asked. Raising here killed the scenario instance, and with it
+  # a call that was working (dev71, 2026-08-17: two calls, both dead at 45 s).
+  test "do_reply_invite_with_sdp answers an offerless UPDATE with a bare 200" do
+    {:ok, dlg} = StubDialog.start_link(self())
+
+    ctx = %SIP.Context{
+      dialogpid: dlg,
+      username: "bob",
+      mediaservermodule: FailingMedia,
+      mediaserverpid: self(),
+      appdata: %{last_uas_req: %{method: :UPDATE, body: []}}
+    }
+
+    ctx = SIP.Session.CallUAS.do_reply_invite_with_sdp(ctx, 200, media: :tc)
+    assert ctx.lasterr == :ok
+
+    assert_received {:stub_reply, 200, upd}
+    assert upd[:body] == nil
+    assert %SIP.Uri{userpart: "bob"} = upd[:contact]
+  end
+
   # ── Unit tests: reply_invite_with_body ───────────────────────────────────────
 
   test "do_reply_invite_with_body accepts a binary body" do
