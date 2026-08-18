@@ -631,6 +631,81 @@ end
 > stuck in a long synchronous state will not react until then; the controller hard-kills it past the grace
 > period.
 
+## Service building blocks (SBB)
+
+Where `spawn_fsm` starts a **second machine with legs of its own**, `sbb_fsm` calls a **subroutine on the
+legs you already hold**. The rule of thumb:
+
+> `spawn_fsm` when the other machine has state of its own; `sbb_fsm` when the sequence belongs to the state
+> you already hold.
+
+A service building block packages a sequence written once — establish a call, run a menu, collect
+credentials — behind a callable face. Calling one makes the current process enter the block's FSM: the block
+owns the event loop, on the caller's own context, dialogs and mailbox, until it hands control back.
+
+```Elixir
+defmodule SBB.Cancelling do
+  use SIP.SBB
+
+  @sbb_timeout 32_000                             # completion bound (timer B)
+  @sbb_timeout_event {:cancel, :never_concluded}  # what it returns on expiry
+
+  state initial_state do
+    on_events do
+      {:outbound, {487, _resp, _t, _d}} -> sbb_return({:cancel, :confirmed})
+      {:outbound, {200, _resp, _t, _d}} -> sbb_return({:cancel, :answered})
+    end
+  end
+end
+```
+
+and, in a scenario:
+
+```Elixir
+state cancelling do
+  sbb_fsm SBB.Cancelling
+
+  on_events do
+    {:cancel, :confirmed}        -> scenario_aborted("caller cancelled, callee confirmed")
+    {:cancel, :answered}         -> goto releasing, "callee answered after the cancellation"
+    {:cancel, :never_concluded}  -> scenario_aborted("callee never concluded")
+  end
+end
+```
+
+**Macros**
+
+- `sbb_fsm(module, opts)` — enter `module`'s FSM. Options: `timeout:` (ms, overrides the block's
+  `@sbb_timeout`), `args:` (map seeding the block's sandbox), `resume:` (`true` keeps the sandbox from a
+  previous run instead of clearing it — for a block designed to be re-entered after an interruption).
+  **Only valid in a state body**, never inside an `on_events` clause: that clause's deadline is absolute, so
+  a block called from one would burn the host's remaining timeout while it runs. Give the block its own
+  state — the compiler says so if you forget.
+- `sbb_return(event)` — end the block, posting `event` to the process and handing control back to the state
+  that called it. This, not `scenario_success`, is how a block returns.
+- `sbb_data_get(key)` / `sbb_data_set(key, value)` — the block's private sandbox. `appdata` itself is shared
+  with the host, which is the point; the sandbox is what cannot collide with a host key of the same name.
+
+**The rules that matter**
+
+- **The block sees everything the host sees.** Same process, same mailbox, same `sip_ctx` — that is what
+  separates an SBB from a sub-FSM. Its `currentstate` and `laststate` are restored on return, so `goto back`
+  inside a block cannot land in a host state.
+- **Terminals propagate.** `scenario_failure` and `scenario_aborted` written inside a block keep their
+  ordinary meaning and tear down the whole stack, host included — the `exit()` of C. Use them for what must
+  stop everything, and `sbb_return` for everything else.
+- **The returned event is not privileged.** Anything the block left unconsumed is still in the mailbox and is
+  matched first: arrival order, as always.
+- **Every branch returns.** A block branch ends on `sbb_return` or on a terminal. One that falls through
+  leaves the host waiting for an event nobody will send.
+- **Blocks compose** — a block may call a block, and a terminal thrown three deep still reaches the root.
+  They cannot run *concurrently*, though: one point of control, a stack of calls.
+- A block has **no `run/1`**: it is not a scenario, and `SIP.Scenario.Loader` will never mistake one for the
+  scenario of the `.exs` that declares it.
+
+Specification and catalogue: [docs/design/service-building-block.md](docs/design/service-building-block.md).
+Design: [docs/design/service-building-block-design.md](docs/design/service-building-block-design.md).
+
 ## The scenario context: sip_ctx
 
 All states carry a context that stores SIP configuration information but also all information

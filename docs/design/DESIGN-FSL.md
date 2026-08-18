@@ -56,6 +56,7 @@ a thousand keep-alives has the same stack depth as one that answers immediately.
 | `on_events/1` | typed `receive` |
 | `scenario_success/failure/aborted` | terminals |
 | `spawn_fsm/2`, `notify/2`, `notify_parent/1`, `on_shutdown/1` | sub-FSMs and cooperative shutdown |
+| `sbb_fsm/2`, `sbb_return/1`, `sbb_data_get/1`, `sbb_data_set/2` | service building blocks (§4bis) |
 
 ### 2.1 `config` and the context
 
@@ -315,6 +316,69 @@ scenario needs no server mode.
 
 ---
 
+## 4bis. Service building blocks
+
+A **sub-FSM** is a second process with legs of its own. A **service building
+block** is the opposite animal: `sbb_fsm module, opts` makes the *current*
+process enter `module`'s FSM, on the current scenario's context, dialogs and
+mailbox, until the block hands control back with `sbb_return event`. A
+subroutine call, not a spawn.
+
+The shape follows from invariant 2, not from preference: the dialog and media
+layers bind their events to `self()`, so a block running anywhere else could not
+receive the host's leg events at all.
+
+### 4bis.1 The engine side
+
+`loop/4` already takes the module, the state name, the context and the state
+list as arguments — nothing in it is bound to *the* scenario. A block is that
+same dispatcher, so `sbb_loop/5` differs in exactly two ways: it never calls
+`finalize/4` (the host's legs, media and children are not the block's to
+release) and it never reports an outcome to a parent FSM (its caller is a state,
+not a process).
+
+| Descriptor | Produced by | Handled by |
+|---|---|---|
+| `{:sbb_return, event, ctx}` | `sbb_return/1` | `sbb_loop/5` returns it; `loop/4` treats it as a scenario error, since there is nothing to return to |
+| `throw {:sbb_terminal, outcome, reason, type, ctx}` | a terminal inside a block | `loop/4` only — re-applied as if the host state had written it |
+| `throw {:sbb_deadline_hit, ref, ctx}` | the clause `on_events` injects into every SBB state | the `run_sbb/3` frame whose `ref` it is |
+
+Both non-local exits are `throw`, and both rely on one property of the engine:
+the `try` wrapping every state body catches **exceptions and `:exit`, never
+`:throw`**. A thrown term therefore crosses every state frame and every nested
+block. `sbb_loop/5` deliberately does not catch either, so a terminal three
+blocks deep still unwinds to the root, and a parent's deadline passes through a
+running child to the frame that armed it.
+
+### 4bis.2 The context
+
+The block gets the host's `%SIP.Context{}` as it stands — that is the whole
+point. Three things are put back on return: `currentstate` and `laststate` (so
+`goto back` inside a block cannot land in a host state), and, by construction,
+the host's `after` deadline, which does not exist yet when a state body runs.
+
+`appdata` is shared, with one reserved key per block — `{:sbb, Module}` — for
+its scratch space, read and written with `sbb_data_get/1` and `sbb_data_set/2`.
+It is **cleared on every call**, so a serial hunt entering a block target after
+target does not inherit the previous attempt; `resume: true` is the exception,
+for a block designed to be re-entered after an interruption.
+
+### 4bis.3 Two rules the compiler enforces
+
+- **`sbb_fsm` is refused inside an `on_events` clause.** That clause's deadline
+  is absolute (`SIP.Scenario.deadline/1`), so a block called from one would burn
+  the host's remaining timeout while it runs. From a state body the suspension
+  is free. Same check, and the same rationale, as `stay` outside an `on_events`;
+- **a block defines no `run/1`.** `SIP.Scenario.Loader.scenario_module?/1`
+  accepts anything exporting `run/1` and `__scenario_states__/0`, and
+  `load_file!/1` takes the first match — so a block declared above the scenario
+  in the same `.exs` would otherwise be run *as* the scenario.
+
+Specification: [service-building-block.md](service-building-block.md).
+Design: [service-building-block-design.md](service-building-block-design.md).
+
+---
+
 ## 5. Server scenarios
 
 A scenario declares itself a server with `uas :register` / `uas :invite`, which
@@ -424,8 +488,9 @@ copies loaded by path, deliberately under different module names
 
 1. A state ends with a transition macro and returns a descriptor; it never calls
    the next state (§1).
-2. One FSM, one process — because the dialog and media layers bind their events
-   to `self()` (§3.1).
+2. One FSM *stack*, one process — because the dialog and media layers bind their
+   events to `self()` (§3.1). A sub-FSM is another process with legs of its own;
+   a service building block is a nested FSM on this process's legs (§4bis).
 3. A scenario always *ends*: an exception or an exit inside a state becomes a
    failure, so teardown runs (§2.2).
 4. Teardown order is children → B2BUA legs → media → cleanup → parent (§3.3).

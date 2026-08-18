@@ -60,11 +60,10 @@ point at the SBB too, because it *is* the same `self()`.
 and a second loop consumes it:
 
 ```elixir
-defp sbb_loop(module, state_name, ctx, states) do
+defp sbb_loop(module, state_name, ctx, states, deadline_ref) do
   case apply(module, :"__state_#{state_name}", [ctx]) do
     {:sbb_return, event, ctx2} ->
-      send(self(), event)          # S2: the outcome is an event, queued like any other
-      {:returned, ctx2}
+      {event, ctx2}                # posted by run_sbb/3, so one place does it
 
     {:terminal, outcome, reason, type, ctx2} ->
       throw({:sbb_terminal, outcome, reason, type, ctx2})
@@ -323,9 +322,14 @@ rather than discovered:
 declares (`@sbb_timeout_event`, default `{:sbb_timeout, module}`) exactly as if
 the SBB had returned it, so the host has one arm to write and no special case.
 
-Implementation: the deadline is checked by `sbb_loop/4` around its `apply/3`, in
-the same absolute-time terms as `SIP.Scenario.deadline/1`. It bounds the SBB as
-a whole, not each of its states — the SBB's own `after` clauses stay its
+Implementation: `run_sbb/3` arms `Process.send_after(self(), {:sbb_deadline,
+ref}, timeout)` and `on_events` injects a clause matching it into every state of
+an SBB — the same injection that already makes every wait shutdown-aware and
+media-death-aware. A check around `apply/3` would never be reached by a block
+blocked in a `receive`, and only a clause can wake one. The clause throws
+`{:sbb_deadline_hit, ref, ctx}`; a nested block lets a parent's ref pass, so the
+frame that armed the timer is always the one that answers. It bounds the block
+as a whole, not each of its states — the block's own `after` clauses stay its
 business.
 
 This is *not* built on a general `task`-like primitive. The spec notes that
@@ -439,10 +443,15 @@ in the struct.
 
 ### 8.2 Phases
 
-1. **The mechanism, bare.** `sbb_fsm` / `sbb_return`, `sbb_loop/4`, the throw
-   path, the placement check. Tests on a toy SBB: return with an event, a
-   terminal propagating from one and from two levels down, `goto`/`stay` inside
-   an SBB, the deadline, an event the SBB ignores reaching the host afterwards.
+1. ~~**The mechanism, bare.**~~ **Done 2026-08-18.** `sbb_fsm` / `sbb_return` /
+   `sbb_data_get` / `sbb_data_set`, `use SIP.SBB`, `run_sbb/3` + `sbb_loop/5`,
+   both throw paths, the placement check. 15 tests in
+   `apps/elixip2/test/sbb_fsm_test.exs`, including the one that guards the
+   property everything rests on: the per-state `try` stays transparent to a
+   throw. Two departures from what was written above, both noted in §2.2 and
+   §6.3: `sbb_loop` takes the deadline ref as a fifth argument, and the deadline
+   is delivered by an injected `on_events` clause rather than checked around
+   `apply/3` — a block blocked in a `receive` would never have reached a check.
 2. **The context and the monitor.** Sandbox, saved slots, qualified reporting.
 3. **The `cancelling` specimen** — acceptance criterion 2. Six B2BUA scenarios,
    `releasing` exits kept (S3), queue vocabulary kept (S4), `:ms_event` arms

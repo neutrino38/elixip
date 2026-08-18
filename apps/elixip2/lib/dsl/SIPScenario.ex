@@ -65,7 +65,13 @@ defmodule SIP.Scenario do
   @spec start_stack() :: :ok
   defdelegate start_stack(), to: SIP.Scenario.Runner, as: :bootstrap_stack
 
-  defmacro __using__(_opts) do
+  defmacro __using__(opts) do
+    # `use SIP.SBB` funnels here with kind: :sbb. A service building block is the
+    # same language — same states, same on_events, same session mixins — read by
+    # `sbb_loop/4` instead of `loop/4`, so it shares this whole expansion rather
+    # than growing a parallel one. See docs/design/service-building-block-design.md.
+    kind = Keyword.get(opts, :kind, :scenario)
+
     quote do
       use SIP.Session.CallUAC
       use SIP.Session.Media
@@ -82,6 +88,11 @@ defmodule SIP.Scenario do
           spawn_fsm: 2,
           sub_fsm: 1,
           sub_fsm: 2,
+          sbb_fsm: 1,
+          sbb_fsm: 2,
+          sbb_return: 1,
+          sbb_data_get: 1,
+          sbb_data_set: 2,
           notify: 2,
           notify_parent: 1,
           goto: 1,
@@ -103,33 +114,65 @@ defmodule SIP.Scenario do
       # Default scenario kind. A server scenario overrides this with `uas :register`.
       # Read back through __scenario_type__/0.
       @scenario_type :uac
+      # :scenario or :sbb — read at compile time by `on_events` (which injects the
+      # deadline clause only into an SBB) and by `__before_compile__`.
+      @scenario_kind unquote(kind)
       @before_compile SIP.Scenario
     end
   end
 
   defmacro __before_compile__(env) do
     states = env.module |> Module.get_attribute(:scenario_states) |> Enum.reverse()
+    sbb? = Module.get_attribute(env.module, :scenario_kind) == :sbb
 
-    quote do
-      @doc false
-      def __scenario_states__, do: unquote(states)
+    common =
+      quote do
+        @doc false
+        def __scenario_states__, do: unquote(states)
 
-      @doc false
-      def __scenario_config__, do: @scenario_config
+        @doc false
+        def __scenario_config__, do: @scenario_config
 
-      @doc false
-      def __scenario_type__, do: @scenario_type
-
-      @doc """
-      Run one instance of this scenario. `start_stack?` is `true` to start the
-      SIP stack first (one-shot mode) or `false` to reuse an already-started
-      stack. Returns `:ok` on success or `{:error, reason}` on failure.
-      """
-      @spec run(boolean()) :: :ok | {:aborted, term()} | {:error, term()}
-      def run(start_stack?) when is_boolean(start_stack?) do
-        SIP.Scenario.Runner.run(__MODULE__, start_stack?)
+        @doc false
+        def __scenario_type__, do: @scenario_type
       end
-    end
+
+    kind_specific =
+      if sbb? do
+        quote do
+          @doc false
+          def __sbb__, do: true
+
+          @doc false
+          # Completion deadline (ms) for one run of this block, overridable per
+          # call site with `sbb_fsm(mod, timeout: …)`. 32 s is timer B — the
+          # bound a silent callee leaves (design §6.3).
+          def __sbb_timeout__, do: @sbb_timeout
+
+          @doc false
+          # What the block returns when that deadline expires, so the host has one
+          # arm to write and no special case.
+          def __sbb_timeout_event__, do: @sbb_timeout_event
+        end
+      else
+        # An SBB deliberately does NOT define run/1: `SIP.Scenario.Loader` picks the
+        # first module in a compiled .exs exporting run/1 and __scenario_states__/0,
+        # so an SBB declared above the scenario in the same file would otherwise be
+        # loaded and run AS the scenario (design §6.1).
+        quote do
+          @doc """
+          Run one instance of this scenario. `start_stack?` is `true` to start the
+          SIP stack first (one-shot mode) or `false` to reuse an already-started
+          stack. Returns `:ok` on success or `{:error, reason}` on failure.
+          """
+          @spec run(boolean()) :: :ok | {:aborted, term()} | {:error, term()}
+          def run(start_stack?) when is_boolean(start_stack?) do
+            SIP.Scenario.Runner.run(__MODULE__, start_stack?)
+          end
+        end
+      end
+
+    [common, kind_specific]
   end
 
   @doc """
@@ -319,6 +362,17 @@ defmodule SIP.Scenario do
     # woken — it would wait on its `after`, silently. So the mismatch is reported
     # here, where the pattern is still visible, instead of in production.
     Enum.each(do_clauses, &warn_deprecated_event(&1, __CALLER__))
+    Enum.each(do_clauses, &check_no_sbb_call!(&1, __CALLER__))
+
+    # A service building block carries a completion deadline (S7), armed by
+    # `run_sbb/3` as a timer message. Only a clause can wake a blocked `receive`,
+    # so every on_events of an SBB gets one — prepended, like the two below, so a
+    # catch-all cannot swallow it first. Scenarios get none: they are nobody's
+    # subroutine, and the message would be stale.
+    sbb_clauses =
+      if Module.get_attribute(__CALLER__.module, :scenario_kind) == :sbb,
+        do: [sbb_deadline_clause()],
+        else: []
 
     # Make every on_events cooperatively shutdown-aware: prepend a clause matching
     # the control message, unless the scenario already handles :scenario_ctl
@@ -346,7 +400,10 @@ defmodule SIP.Scenario do
     # stay-dispatch wrapper — one whose `{:stay, …}` branch the compiler would
     # rightly report as unreachable, once per scenario state.
     instrumented =
-      Enum.map(media_clauses ++ ctl_clauses, &instrument_receive_clause(&1, nil, nil)) ++
+      Enum.map(
+        sbb_clauses ++ media_clauses ++ ctl_clauses,
+        &instrument_receive_clause(&1, nil, nil)
+      ) ++
         Enum.map(do_clauses, &instrument_receive_clause(&1, wait, deadline))
 
     {timeout_ast, new_blocks} =
@@ -392,6 +449,42 @@ defmodule SIP.Scenario do
 
   def remaining_timeout(deadline),
     do: max(deadline - System.monotonic_time(:millisecond), 0)
+
+  # The injected deadline clause of an SBB state. It throws rather than returning
+  # a descriptor, because the block that armed the timer may be several frames up:
+  # a nested block lets a parent's ref pass through, and `run_sbb/3` catches only
+  # its own. `sip_ctx` travels with it so the host keeps what the block learned.
+  defp sbb_deadline_clause do
+    quote do
+      {:sbb_deadline, sbb_deadline_ref} ->
+        throw({:sbb_deadline_hit, sbb_deadline_ref, var!(sip_ctx)})
+    end
+    |> hd()
+  end
+
+  # `sbb_fsm` is only valid in a state body. An `on_events` deadline is absolute
+  # (SIP.Scenario.deadline/1), so a block called from a clause would burn the
+  # host's remaining timeout while it runs — a 30 s block under a 30 s host
+  # deadline would return into an `after` that fires at once. From a state body
+  # the suspension S7 asks for is free, because the deadline does not exist yet.
+  defp check_no_sbb_call!({:->, meta, [_head, body]}, caller) do
+    if calls_sbb_fsm?(body) do
+      raise CompileError,
+        file: caller.file,
+        line: Keyword.get(meta, :line, caller.line),
+        description:
+          "sbb_fsm is only allowed in a state body, not in an on_events clause. " <>
+            "Give the block its own state and call it there."
+    end
+  end
+
+  defp check_no_sbb_call!(_clause, _caller), do: :ok
+
+  defp calls_sbb_fsm?({:sbb_fsm, _meta, args}) when is_list(args), do: true
+  defp calls_sbb_fsm?({fun, _meta, args}), do: calls_sbb_fsm?(fun) or calls_sbb_fsm?(args)
+  defp calls_sbb_fsm?({left, right}), do: calls_sbb_fsm?(left) or calls_sbb_fsm?(right)
+  defp calls_sbb_fsm?(list) when is_list(list), do: Enum.any?(list, &calls_sbb_fsm?/1)
+  defp calls_sbb_fsm?(_other), do: false
 
   # Does this receive clause already match a {:scenario_ctl, ...} control message?
   defp ctl_clause?({:->, _meta, [head, _body]}), do: clause_event_type(head) == :control
@@ -544,6 +637,90 @@ defmodule SIP.Scenario do
           self(),
           unquote(base_dir)
         )
+    end
+  end
+
+  @doc """
+  Enter a **service building block**: the current process runs `module`'s FSM
+  until it hands control back, then execution continues on the next line of this
+  state body. Not a spawn — no second process, no second set of legs. The block
+  sees this scenario's context, dialogs and mailbox, because it *is* this
+  process (design `docs/design/service-building-block-design.md`).
+
+  Options:
+
+    * `timeout:` — completion deadline in ms, overriding the block's own
+      `@sbb_timeout`. On expiry the block returns its `@sbb_timeout_event`
+      exactly as if it had returned it itself.
+    * `args:`    — map seeding the block's private sandbox, read inside it with
+      `sbb_data_get/1`.
+    * `resume:`  — `true` keeps the sandbox from a previous run of the same
+      block instead of clearing it. For a block designed to be re-entered after
+      an interruption; the default is a clean slate, so a serial hunt calling a
+      block target after target does not inherit the previous attempt.
+
+  The block talks back through **events**, matched in the `on_events` that
+  follows:
+
+      state place_call do
+        sbb_fsm SBB.Call, args: %{dest: dest}, timeout: 60_000
+
+        on_events do
+          {:call, :connected, uri} -> goto talking, "answered by \#{uri}"
+          {:call, :rejected, code, _reason} -> goto failed, "callee said \#{code}"
+        end
+      end
+
+  Only valid in a **state body**, never inside an `on_events` clause: that
+  clause's deadline is absolute, so a block called from one would burn the
+  host's remaining timeout while it runs. Give the block its own state.
+  """
+  defmacro sbb_fsm(module, opts \\ []) do
+    quote do
+      var!(sip_ctx) =
+        SIP.Scenario.Runner.run_sbb(var!(sip_ctx), unquote(module), unquote(opts))
+    end
+  end
+
+  @doc """
+  End this service building block, posting `event` to the process and handing
+  control back to the state that called it. The host matches `event` in its own
+  `on_events`, like any other event — and **behind** anything this block left
+  unconsumed, since it goes to the back of the mailbox.
+
+  This, not `scenario_success`, is how a block returns. The three terminals keep
+  their ordinary meaning inside a block: they tear down the whole stack, host
+  included.
+
+  Every branch of an SBB ends on `sbb_return` or on a terminal; a branch that
+  falls through leaves the host waiting for an event nobody will send.
+  """
+  defmacro sbb_return(event) do
+    quote do
+      {:sbb_return, unquote(event), var!(sip_ctx)}
+    end
+  end
+
+  @doc """
+  Read a key from this block's private sandbox — `appdata` is shared with the
+  host (that is the point), but a block's scratch space is its own, so it cannot
+  collide with a host key of the same name.
+  """
+  defmacro sbb_data_get(key) do
+    quote do
+      SIP.Scenario.Runner.sbb_data_get(var!(sip_ctx), __MODULE__, unquote(key))
+    end
+  end
+
+  @doc """
+  Write a key into this block's private sandbox. Anything the block wants to
+  *hand over* goes in the event it returns, or under a documented key of the
+  shared `appdata` — not here.
+  """
+  defmacro sbb_data_set(key, value) do
+    quote do
+      var!(sip_ctx) =
+        SIP.Scenario.Runner.sbb_data_set(var!(sip_ctx), __MODULE__, unquote(key), unquote(value))
     end
   end
 
