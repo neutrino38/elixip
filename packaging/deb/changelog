@@ -1,3 +1,17 @@
+kelixip (1.4.1-1) stable; urgency=low
+
+  * The scenario language is named the Finite State Language (FSL); DSL.md
+    becomes FSL.md.
+  * FSL gains `stay` (handle an event without re-entering the state) and
+    `goto back` (return to the previous state).
+  * An `on_events` `after` is now the deadline of the whole wait: `stay` does
+    not re-arm it.
+  * Reference scripts updated: nine states removed, and `registrar.exs` loses
+    `wait_auth_register`.
+  * User-Agent is now Kelixip/1.4.1.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Tue, 18 Aug 2026 12:00:00 +0200
+
 kelixip (1.4.0-1) stable; urgency=medium
 
   * Version bump to 1.4.0: the media relay validated in real traffic.

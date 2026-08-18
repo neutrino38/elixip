@@ -87,7 +87,7 @@ garanti par les *array-of-tables* `[[…]]` — essentiel pour le dial-plan (§3
 node_name  = "kelixip@127.0.0.1"   # OTP node name (used by the CLI over RPC)
 script_dir = "/usr/share/kelixip"  # default directory for .exs scripts
 module_dir = "/usr/lib/kelixip/modules"
-user_agent = "Kelixip/1.4.0"
+user_agent = "Kelixip/1.4.1"
 max_calls  = 2000                  # server-wide cap (503 beyond); per-domain caps in domains.toml
 
 # ─── Logging ─────────────────────────────────────────────────────────────
