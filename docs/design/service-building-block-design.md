@@ -214,7 +214,14 @@ the spec); hiding its states would be a strange way to serve it.
 
 On return the host's `currentstate` is restored (§3.1) and reported, so the row
 goes back to the host's vocabulary without a transition the scenario did not
-write.
+write. A **nested** block shows the innermost one — that is where the call
+actually is; the chain of enclosing blocks is not worth a column that has to fit
+a terminal.
+
+The stack of frames the qualification reads is pushed by `run_sbb/3` and popped
+in its `after`, so a terminal or a deadline unwinding through it leaves the
+reporting as it found it: the outcome that follows is the host's, and is reported
+unqualified.
 
 This is the *cheap* half of the spec's open question on publishing a view. The
 expensive half — an SBB publishing a structured view, Trix's `CallView` — is
@@ -435,6 +442,7 @@ it.
 | `lib/dsl/SIPSBB.ex` *(new)* | `use SIP.SBB` — `SIP.Scenario`'s `__using__` / `__before_compile__` with the SBB kind flag |
 | `lib/dsl/SIPScenarioRunner.ex` | `run_sbb/3`, `sbb_loop/4`, the `throw` catch in `loop/4`, qualified `report/5` |
 | `lib/dsl/SIPScenarioLoader.ex` | skip `__sbb__/0` modules in `load_file!/1` |
+| `apps/elixipp/lib/elixipp/ElixippCLI.ex` | the state cell keeps the tail of a qualified name — the 18-char column would otherwise cut the state, which is the half that answers "where is this call" |
 | `FSL.md` | the `sbb_fsm` / `sbb_return` section, next to sub-scenarios |
 | `docs/design/DESIGN-FSL.md` | a section on SBBs under §4, and invariant 2 restated as "one FSM stack, one process" |
 
@@ -452,7 +460,17 @@ in the struct.
    §6.3: `sbb_loop` takes the deadline ref as a fifth argument, and the deadline
    is delivered by an injected `on_events` clause rather than checked around
    `apply/3` — a block blocked in a `receive` would never have reached a check.
-2. **The context and the monitor.** Sandbox, saved slots, qualified reporting.
+2. ~~**The context and the monitor.**~~ **Done 2026-08-18.** Sandbox and saved
+   slots shipped with phase 1; this phase added the qualified reporting of §4.
+   4 tests in `apps/elixip2/test/sbb_monitor_test.exs`. One thing §4 did not
+   say, and the tests found: on the way *out* of `run_sbb/3` the block is no
+   longer on the stack, so the report that restores the host's state was
+   labelling the row with the **block's** name. The row now always names the
+   scenario the process runs, read from the process dictionary — `report/5`'s
+   `module` argument is a fallback for a block driven without `run_instance/2`.
+   Plus the view end of the same thing: `elixipp --monitor`'s state column is 18
+   characters and truncated from the right, which cut `SBB.Cancelling/waiting`
+   down to the block's name and none of its state.
 3. **The `cancelling` specimen** — acceptance criterion 2. Six B2BUA scenarios,
    `releasing` exits kept (S3), queue vocabulary kept (S4), `:ms_event` arms
    kept (S5). If it does not factor cleanly here, the mechanism is wrong and
@@ -464,8 +482,7 @@ in the struct.
    first: `bridge()` is the easier of the two, and shipping it alone would
    leave the establishment states duplicated where they hurt most.
 
-Phases 1–2 are one commit's worth of engine work; 3 is where the design is
-judged.
+Phases 1–2 are the engine work; 3 is where the design is judged.
 
 ## 9. Deliberately not in this design
 

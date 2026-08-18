@@ -81,6 +81,10 @@ defmodule SIP.Scenario.Runner do
 
     if slot_id = Keyword.get(opts, :slot_id), do: Process.put(:scenario_slot_id, slot_id)
 
+    # The scenario a service building block reports under: a block's states show
+    # on this row, qualified, never under the block's own name (§4 of the design).
+    Process.put(:scenario_module, module)
+
     # External-config / programmatic overrides (highest precedence) are merged on
     # top of the scenario `config` block before building the context. Empty by
     # default, so a run without overrides behaves exactly as before.
@@ -591,6 +595,12 @@ defmodule SIP.Scenario.Runner do
     ref = make_ref()
     timer = arm_sbb_deadline(ref, timeout)
 
+    # Pushed before the first state runs and popped whatever happens to it, so a
+    # terminal or a deadline unwinding through here leaves the stack — and the
+    # reporting that reads it — as it found it.
+    push_sbb_frame(module)
+    report(module, report_account(entry_ctx), :initial_state, "enter", :scenario)
+
     {event, ctx2} =
       try do
         sbb_loop(module, :initial_state, entry_ctx, states, ref)
@@ -599,20 +609,40 @@ defmodule SIP.Scenario.Runner do
         # always the right frame that answers.
         {:sbb_deadline_hit, ^ref, ctx2} -> {module.__sbb_timeout_event__(), ctx2}
       after
+        pop_sbb_frame()
         disarm_sbb_deadline(timer, ref)
       end
 
     send(self(), event)
 
-    ctx2
-    |> SIP.Context.set(:currentstate, host_state)
-    |> SIP.Context.set(:laststate, host_laststate)
+    host_ctx =
+      ctx2
+      |> SIP.Context.set(:currentstate, host_state)
+      |> SIP.Context.set(:laststate, host_laststate)
+
+    # Back to the caller's vocabulary. Without this the row would sit on the
+    # block's last state while the host waits on the event we just posted — a
+    # state the scenario never wrote, shown as where the call is.
+    report(module, report_account(host_ctx), host_state, event, :scenario)
+
+    host_ctx
+  end
+
+  defp push_sbb_frame(module),
+    do: Process.put(:sbb_stack, [module | Process.get(:sbb_stack, [])])
+
+  defp pop_sbb_frame do
+    case Process.get(:sbb_stack, []) do
+      [_ | rest] -> Process.put(:sbb_stack, rest)
+      [] -> :ok
+    end
   end
 
   # The block's FSM loop. Same dispatch as loop/4 with two differences, and only
   # two: it never calls finalize/4 (the host's legs, media and children are not
   # the block's to release) and it never reports an outcome to a parent FSM —
-  # its caller is a state, not a process.
+  # its caller is a state, not a process. It does report every transition, on the
+  # host's row: report_label/2 qualifies the state with the block it belongs to.
   defp sbb_loop(module, state_name, ctx, states, ref) do
     fun = :"__state_#{state_name}"
 
@@ -625,22 +655,25 @@ defmodule SIP.Scenario.Runner do
       {:terminal, outcome, reason, type, ctx2} ->
         throw({:sbb_terminal, outcome, reason, type, ctx2})
 
-      {:goto, :next, desc, _type, ctx2} ->
+      {:goto, :next, desc, type, ctx2} ->
         next = next_state(state_name, states)
         log_transition(state_name, next, desc)
+        report(module, report_account(ctx2), next, desc, type)
         sbb_loop(module, next, enter(ctx2, state_name, next), states, ref)
 
-      {:goto, :loop, desc, _type, ctx2} ->
+      {:goto, :loop, desc, type, ctx2} ->
         log_transition(state_name, state_name, desc)
+        report(module, report_account(ctx2), state_name, desc, type)
         sbb_loop(module, state_name, ctx2, states, ref)
 
-      {:goto, :__back__, desc, _type, ctx2} ->
+      {:goto, :__back__, desc, type, ctx2} ->
         case ctx2.laststate do
           nil ->
             throw({:sbb_terminal, :failure, "goto back with no previous state", nil, ctx2})
 
           previous ->
             log_transition(state_name, previous, desc)
+            report(module, report_account(ctx2), previous, desc, type)
             sbb_loop(module, previous, enter(ctx2, state_name, previous), states, ref)
         end
 
@@ -651,14 +684,16 @@ defmodule SIP.Scenario.Runner do
       {:goto, :__shutdown__, desc, type, ctx2} ->
         if function_exported?(module, :__state___shutdown__, 1) do
           log_transition(state_name, :__shutdown__, desc)
+          report(module, report_account(ctx2), :__shutdown__, desc, type)
           sbb_loop(module, :__shutdown__, enter(ctx2, state_name, :__shutdown__), states, ref)
         else
           throw({:sbb_terminal, :aborted, "shutdown", type, ctx2})
         end
 
-      {:goto, target, desc, _type, ctx2} when is_atom(target) ->
+      {:goto, target, desc, type, ctx2} when is_atom(target) ->
         if target in states do
           log_transition(state_name, target, desc)
+          report(module, report_account(ctx2), target, desc, type)
           sbb_loop(module, target, enter(ctx2, state_name, target), states, ref)
         else
           reason =
@@ -771,12 +806,14 @@ defmodule SIP.Scenario.Runner do
   # future sequence diagram. No-op (and no dependency on the monitor) when
   # monitoring is off.
   defp report(module, username, state, event, event_type) do
+    {label, state} = report_label(module, state)
+
     if Process.whereis(SIP.Scenario.Monitor) do
       call_id = Process.get(:scenario_slot_id, self())
 
       SIP.Scenario.Monitor.report(
         call_id,
-        scenario_label(module),
+        label,
         username,
         state,
         event_label(event),
@@ -788,6 +825,25 @@ defmodule SIP.Scenario.Runner do
     SIP.Scenario.SequenceJournal.record_transition(state, event_label(event), event_type)
 
     :ok
+  end
+
+  # Who a report is about, and under which state name. Outside a service building
+  # block: the scenario, its own state. Inside one: still the scenario — one call,
+  # one row — but the state is qualified with the block it belongs to, so the
+  # operator reads `SBB.Call/waiting_answer` instead of a state their scenario
+  # does not declare. Nesting shows the innermost block, which is where the call
+  # actually is.
+  defp report_label(module, state) do
+    # The row always names the scenario this process runs, never a block: the
+    # block module is the one reporting, and on the way back out of run_sbb it is
+    # not even on the stack any more. `module` is a fallback for a block driven
+    # without run_instance/2 (a test calling run_sbb/3 directly).
+    scenario = scenario_label(Process.get(:scenario_module, module))
+
+    case Process.get(:sbb_stack, []) do
+      [] -> {scenario, state}
+      [block | _] -> {scenario, "#{scenario_label(block)}/#{state}"}
+    end
   end
 
   defp scenario_label(module), do: module |> Module.split() |> Enum.join(".")

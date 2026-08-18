@@ -702,6 +702,10 @@ end
   They cannot run *concurrently*, though: one point of control, a stack of calls.
 - A block has **no `run/1`**: it is not a scenario, and `SIP.Scenario.Loader` will never mistake one for the
   scenario of the `.exs` that declares it.
+- **The block shows in the live view**, on the call's own row, with its states qualified —
+  `SBB.Cancelling/initial_state` rather than a call that looks frozen for thirty seconds in the last state
+  its scenario declares. The scenario column keeps naming the scenario; nesting shows the innermost block.
+  The row returns to the host's state when the block hands control back.
 
 Specification and catalogue: [docs/design/service-building-block.md](docs/design/service-building-block.md).
 Design: [docs/design/service-building-block-design.md](docs/design/service-building-block-design.md).

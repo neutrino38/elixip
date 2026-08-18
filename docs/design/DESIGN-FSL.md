@@ -363,7 +363,23 @@ It is **cleared on every call**, so a serial hunt entering a block target after
 target does not inherit the previous attempt; `resume: true` is the exception,
 for a block designed to be re-entered after an interruption.
 
-### 4bis.3 Two rules the compiler enforces
+### 4bis.3 What the live view shows
+
+A block's states are reported on the **host's own row** — one call, one row —
+with the state qualified by the block it belongs to: `SBB.Cancelling/waiting`.
+Making the sequence visible is the layer's purpose, so hiding it while the host
+is suspended would be a strange way to serve it, and reporting the block's states
+bare would show a call in states its scenario does not declare.
+
+`run_sbb/3` pushes the block on a per-process stack and pops it in its `after`,
+so an unwinding terminal leaves the reporting as it found it; the outcome that
+follows is the host's and is reported unqualified. The row always names the
+scenario the process runs (`:scenario_module` in the process dictionary), never
+the block — on the way *out* of `run_sbb/3` the block is already off the stack,
+and the report that restores the host's state would otherwise be labelled with
+it. Nesting shows the innermost block, which is where the call actually is.
+
+### 4bis.4 Two rules the compiler enforces
 
 - **`sbb_fsm` is refused inside an `on_events` clause.** That clause's deadline
   is absolute (`SIP.Scenario.deadline/1`), so a block called from one would burn
