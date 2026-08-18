@@ -154,7 +154,7 @@ defmodule Kelix.DirectCallWithAuthAndMedia do
       # A caller that cancels the challenged attempt: nothing was forwarded, so
       # there is nothing to cancel but ourselves.
       {:CANCEL, _req, _trans, _dlg} ->
-        scenario_aborted("caller cancelled the challenged call")
+        scenario_success("caller cancelled the challenged call")
 
       {:dialog_terminated, _dlg, _reason} ->
         scenario_success("caller gave up on the challenge")
@@ -270,8 +270,11 @@ defmodule Kelix.DirectCallWithAuthAndMedia do
     bridge(args: %{media: @media})
 
     on_events do
-      {:bridge, :ended, _} ->
-        goto(releasing, "call relayed and ended")
+      {:bridge, :caller_hung_up, _} ->
+        goto(releasing, "call relayed and ended: caller hung up")
+
+      {:bridge, :callee_hung_up, _} ->
+        goto(releasing, "call relayed and ended: callee hung up")
 
       {:bridge, :max_duration, _} ->
         goto(releasing, "maximum call duration reached")

@@ -629,8 +629,10 @@ scripts already cut along is a decision of 2026-08-18, designed in
   (re-INVITE, UPDATE, ACK, INFO, MESSAGE, REFER, the responses) plus
   `wait_far_bye_ok`: protocol plumbing written out in full in every B2BUA
   script, and carrying no policy whatsoever. Namespace `:bridge`; outcomes
-  `:ended` (`%{by}`), `:max_duration` (`%{}`), and `:interrupted` (`%{message}`)
-  on `{:bridge_break, message}`, so a host can take the call back for a moment
+  `:caller_hung_up` and `:callee_hung_up` (`%{reason}`) — which side ended the
+  call is the outcome's name, not a field to look up — `:max_duration` (`%{}`),
+  `:media_lost` (`%{reason}`), and `:interrupted` (`%{message}`) on
+  `{:bridge_break, message}`, so a host can take the call back for a moment
   (play a prompt, consult a backend) and re-enter with `bridge(resume: true)`
   without ever tearing the call down. **It is the one block that is not bounded
   by a timer** (S7): a call lasts as long as it lasts, so `bridge()` declares

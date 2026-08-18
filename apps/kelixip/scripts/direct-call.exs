@@ -99,8 +99,11 @@ defmodule Kelix.DirectCall do
     bridge()
 
     on_events do
-      {:bridge, :ended, _} ->
-        scenario_success("call relayed and ended")
+      {:bridge, :caller_hung_up, _} ->
+        scenario_success("call relayed and ended: caller hung up")
+
+      {:bridge, :callee_hung_up, _} ->
+        scenario_success("call relayed and ended: callee hung up")
 
       {:bridge, :max_duration, _} ->
         scenario_success("maximum call duration reached")

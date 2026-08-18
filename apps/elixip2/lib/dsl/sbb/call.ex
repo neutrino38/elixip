@@ -328,7 +328,11 @@ defmodule SBB.Call do
     @sbb_namespace :bridge
 
     @sbb_returns [
-      ended: "the call is over — %{by: :caller | :callee, reason}",
+      caller_hung_up:
+        "the call is over and the caller ended it — %{reason}: `:bye`, " <>
+          "`:bye_unanswered` when the far end never answered it, or whatever ended " <>
+          "the dialog when it went away on its own",
+      callee_hung_up: "the call is over and the callee ended it — %{reason}, as above",
       interrupted: "a {:bridge_break, message} arrived; the call is untouched — %{message}",
       max_duration: "the call's own bound expired — %{}",
       media_lost:
@@ -360,10 +364,10 @@ defmodule SBB.Call do
           goto(wait_far_bye_ok, "callee hung up")
 
         {:dialog_terminated, _dlg, reason} ->
-          sbb_return({:bridge, :ended, %{by: :caller, reason: reason}})
+          sbb_return({:bridge, :caller_hung_up, %{reason: reason}})
 
         {:outbound, {:dialog_terminated, _dlg, reason}} ->
-          sbb_return({:bridge, :ended, %{by: :callee, reason: reason}})
+          sbb_return({:bridge, :callee_hung_up, %{reason: reason}})
 
         # The host takes the call back for a moment — a prompt, a lookup, an
         # operator. Nothing is torn down: `bridge(resume: true)` picks it up.
@@ -455,20 +459,34 @@ defmodule SBB.Call do
     state wait_far_bye_ok do
       on_events do
         {:outbound, {200, _resp, _trans, _dlg}} ->
-          sbb_return({:bridge, :ended, %{by: sbb_data_get(:ended_by), reason: :bye}})
+          goto(concluded, "far end answered the BYE")
 
         {200, _resp, _trans, _dlg} ->
-          sbb_return({:bridge, :ended, %{by: sbb_data_get(:ended_by), reason: :bye}})
+          goto(concluded, "far end answered the BYE")
 
         {:dialog_terminated, _dlg, _reason} ->
-          sbb_return({:bridge, :ended, %{by: sbb_data_get(:ended_by), reason: :bye}})
+          goto(concluded, "leg gone after the BYE")
 
         {:outbound, {:dialog_terminated, _dlg, _reason}} ->
-          sbb_return({:bridge, :ended, %{by: sbb_data_get(:ended_by), reason: :bye}})
+          goto(concluded, "leg gone after the BYE")
       after
         # The far end never answered the BYE. The call is over either way.
         5_000 ->
-          sbb_return({:bridge, :ended, %{by: sbb_data_get(:ended_by), reason: :bye_unanswered}})
+          sbb_data_set(:end_reason, :bye_unanswered)
+          goto(concluded, "BYE unanswered, closing anyway")
+      end
+    end
+
+    # Which side hung up is the outcome's NAME, not a field in it — a host reads
+    # `{:bridge, :caller_hung_up, _}` and knows, where `%{by: by}` made it look up
+    # a value. One state rather than a `case` in each of the five arms above, and
+    # both spellings written literally so `sbb_return` can check them.
+    state concluded do
+      reason = sbb_data_get(:end_reason) || :bye
+
+      case sbb_data_get(:ended_by) do
+        :callee -> sbb_return({:bridge, :callee_hung_up, %{reason: reason}})
+        _caller -> sbb_return({:bridge, :caller_hung_up, %{reason: reason}})
       end
     end
 

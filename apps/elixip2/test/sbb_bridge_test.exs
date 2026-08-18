@@ -52,8 +52,13 @@ defmodule SIP.Test.SbbBridge do
           send(appdata_get(:test_pid), {:interrupted, message})
           goto(resumed, "took the call back")
 
-        {:bridge, :ended, _} ->
-          scenario_success("ended without an interruption")
+        {:bridge, :caller_hung_up, _} ->
+          send(appdata_get(:test_pid), {:ended, "ended without an interruption: caller"})
+          scenario_success("ended without an interruption: caller")
+
+        {:bridge, :callee_hung_up, _} ->
+          send(appdata_get(:test_pid), {:ended, "ended without an interruption: callee"})
+          scenario_success("ended without an interruption: callee")
 
         {:bridge, outcome, _} ->
           scenario_failure("unexpected: #{outcome}")
@@ -64,7 +69,8 @@ defmodule SIP.Test.SbbBridge do
       bridge(resume: true)
 
       on_events do
-        {:bridge, :ended, _} -> scenario_success("ended after the resume")
+        {:bridge, :caller_hung_up, _} -> scenario_success("ended after the resume: caller")
+        {:bridge, :callee_hung_up, _} -> scenario_success("ended after the resume: callee")
         {:bridge, outcome, _} -> scenario_failure("unexpected after resume: #{outcome}")
       end
     end
@@ -134,6 +140,30 @@ defmodule SIP.Test.SbbBridge do
     assert_receive {:sip_mockup, {:request_sent, :ACK, _}}, 5_000
 
     %{instance: instance, ref: ref, invite: invite, tp: tp}
+  end
+
+  # Which side hung up is the outcome's name. A host reading
+  # `{:bridge, :caller_hung_up, _}` knows without looking anything up — and gets
+  # it wrong silently if the two are swapped, which is what these two pin.
+  test "the caller's BYE is reported as the caller hanging up", %{stub: stub} do
+    %{instance: instance, ref: ref, invite: invite} = establish(stub)
+
+    send(instance, {:BYE, in_dialog(:BYE, invite), self(), stub})
+    assert_receive {:sip_mockup, {:request_sent, :BYE, _}}, 5_000
+
+    assert_receive {:instance_done, :ok}, 10_000
+    assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
+    assert_receive {:ended, "ended without an interruption: caller"}, 1_000
+  end
+
+  test "the callee's BYE is reported as the callee hanging up", %{stub: stub} do
+    %{instance: instance, ref: ref, tp: tp} = establish(stub)
+
+    Manual.hangup(tp)
+
+    assert_receive {:instance_done, :ok}, 10_000
+    assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
+    assert_receive {:ended, "ended without an interruption: callee"}, 1_000
   end
 
   test "a break hands the call back and resume picks it up", %{stub: stub} do
