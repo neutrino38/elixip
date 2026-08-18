@@ -10,12 +10,15 @@
 > must provide and how to tell it works; the remaining design questions are
 > listed at the end of §4.
 >
-> The 2026-08-18 revision settles two things the first draft left open. An SBB
+> The 2026-08-18 revision settles three things the first draft left open. An SBB
 > is a **subroutine call, not a co-routine** — the host process enters the
 > sub-machine, which owns the event loop until `sbb_return` hands control back
-> (S1, S2); three of the six open questions fall out of that. And FSL now has
+> (S1, S2); three of the six open questions fall out of that. FSL now has
 > **one vocabulary across its two dialects**, Elixir and TypeScript, with the
-> divergences named and assigned a side to move (§4.6, S14).
+> divergences named and assigned a side to move (§4.6, S14). And the catalogue
+> gained a shape: a call is **two** blocks, `call()` and `bridge()`, and there
+> is no `hangup()` (§5.1). How all of it is built is
+> [service-building-block-design.md](service-building-block-design.md).
 
 ## 1. What the layer is for
 
@@ -411,7 +414,7 @@ no second party, no concurrency, the caller suspended until it returns.
 
 Trix's `CallMachine` is the instructive borderline case: one instance per call,
 its own `dialing / ringing / connected / hangingup` states, its own view — it
-*looks* like the flagship SBB of §5. It is not, and the giveaway is one line of
+*looks* like the flagship SBB of §5.1. It is not, and the giveaway is one line of
 its constructor: the `RTCSession` is handed to it in `args`. It **owns** its
 leg, it does not observe the parent's. That is a `spawn`, and it is right to be
 one.
@@ -501,8 +504,11 @@ The spec is met when both of these hold:
 
 1. the article's target scenario compiles and runs as written — a
    `place_call` state whose body is one `Kelixip.Mod.Call.call(...)` plus an
-   `on_events` over `{:connected, _}`, `{:rejected, _, _}`, `:cancelled` and
-   `{:dialog_terminated, _, _}` — against a real callee, cancel race included;
+   `on_events` over `{:call, :connected, _}`, `{:call, :rejected, _, _}`,
+   `{:call, :cancelled}` and `{:dialog_terminated, _, _}` — against a real
+   callee, cancel race included. The article wrote one block where §5.1 now has
+   two, so the criterion covers `bridge()` as well: the `connected` state that
+   follows collapses the same way;
 2. the `cancelling` state of §3 collapses into an SBB call in all six B2BUA
    scenarios *without* flattening their differences: `releasing` exits kept
    (S3), queue vocabulary kept (S4), `:ms_event` arms kept (S5).
@@ -538,25 +544,48 @@ reopened by accident:
 - ~~can two SBBs be armed at once~~ — no, and it needs no diagnostic: one
   point of control, a stack of calls (S1, S12).
 
-## 5. Other fragments to look for
+## 5. The catalogue
+
+### 5.1 The two flagship blocks: `call` and `bridge`
+
+A call is **two** blocks, not one. The article's `Kelixip.Mod.Call.call/1`
+covered the whole of a call's life; splitting it at the seam the six B2BUA
+scripts already cut along is a decision of 2026-08-18, designed in
+[service-building-block-design.md](service-building-block-design.md).
+
+- **`call(dest, opts)` — establishment.** Places the outbound leg, absorbs the
+  provisionals, hunts serially over the peer's targets, and owns the cancel race
+  of §3 and timer H. Returns `{:call, :connected, uri}` /
+  `{:call, :rejected, code, reason}` / `{:call, :cancelled}` /
+  `{:call, :answered_after_cancel}`. This is the one that turns the 310-line
+  Alice-calls-Bob scenario into the four-arm version;
+- **`bridge(opts)` — the established call.** The `connected` state's arms
+  (re-INVITE, UPDATE, ACK, INFO, MESSAGE, REFER, the responses) plus
+  `wait_far_bye_ok`: protocol plumbing written out in full in every B2BUA
+  script, and carrying no policy whatsoever. Returns `{:bridge, :ended, by}` /
+  `{:bridge, :max_duration}` — and `{:bridge, :interrupted, message}` on
+  `{:bridge_break, message}`, so a host can take the call back for a moment
+  (play a prompt, consult a backend) and re-enter with `bridge(resume: true)`
+  without ever tearing the call down.
+
+**There is no `hangup` block**, and the reason is structural: a CANCEL cancels
+an INVITE transaction in flight, so it belongs inside `call()`, while a BYE ends
+an established dialog, so it belongs inside `bridge()`. A block spanning both
+would have to take control in the middle of the other's sequence. Nothing is
+missing without it either — per §2, the test is whether forgetting the fragment
+can leave a phone off-hook, and `b2bua.exs` answers in its own `on_shutdown`:
+*"both legs are wound down by the automatic teardown — CANCEL what is ringing,
+BYE what is up — so there is nothing left to do here but say why we stopped."*
+
+### 5.2 Other fragments to look for
 
 Not analysed yet — listed so the SBB design has more than one specimen to fit:
 
 - the **authentication front** of `direct-call-with-auth.exs`: three states
   (`authenticate_caller` / `wait_credentials` / retry) that any scenario gating a
   request on a digest would repeat verbatim;
-- **serial hunting** over a peer's targets (`b2bua_hunting?/0` and the loop
-  around it), identical in the fork scripts;
-- **in-dialog relay**: the `connected` state's default arms (re-INVITE, UPDATE,
-  INFO, MESSAGE, REFER, plus the responses) are protocol plumbing written out in
-  full in every B2BUA script;
 - **REGISTER challenge/accept/reject**, already noted in CLAUDE.md as
   application-side and therefore duplicated per registrar script;
-- **call establishment as a whole** — the article's `Kelixip.Mod.Call.call/1`:
-  place the outbound leg, absorb provisionals, hunting, the cancel race and
-  timer H, emit `{:connected, uri}` / `{:rejected, code, reason}` /
-  `:cancelled`. This is the flagship SBB — the one that turns the 310-line
-  Alice-calls-Bob scenario into the four-arm version;
 - **generic menu / prompt-and-collect** — play the choices, collect the DTMF,
   handle retries and fat-fingered input, emit `{:choice, key}` /
   `:disconnected`. Not a B2BUA fragment at all, which is the point: it is the

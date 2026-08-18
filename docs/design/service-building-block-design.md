@@ -23,7 +23,8 @@ Five questions stand between that and code:
 | D4 | where `sbb_fsm` may be written, given that an `on_events` deadline is absolute | §5 |
 | D5 | how a module declares itself an SBB, how a `.exs` reaches its macro face, and what the loader must not confuse | §6 |
 
-§7 turns the answers into a file-by-file change list and a phase plan.
+§7 applies them to the first two blocks; §8 turns the whole into a
+file-by-file change list and a phase plan.
 
 ## 2. D1 — The mechanism: a nested loop, and a throw
 
@@ -104,7 +105,7 @@ end
 The wrapper every state body carries catches `rescue` (exceptions) and
 `:exit` — **not `:throw`**. A thrown term passes through every state frame,
 every `sbb_loop/4` frame, and arrives at the one place that must see it. No
-change is needed to make that true; it only has to stay true, which §7 records
+change is needed to make that true; it only has to stay true, which §8 records
 as a test.
 
 `loop/4` — the root, reached only from `run_instance/2` — wraps its `apply/3`:
@@ -150,7 +151,8 @@ the next line.
 The SBB receives **the host's `%SIP.Context{}` as it stands**. Not a copy, not a
 subset: `dialogpid`, `mediaserverpid`, `lasterr`, the B2BUA legs, the request
 `auto_store/2` stashed. An SBB that could not see the INVITE that is being
-served could not package a single one of the sequences §5 of the spec lists.
+served could not package a single one of the sequences the spec's catalogue
+lists.
 
 Three slots are saved on entry and restored on return, because they describe
 *which machine is where* rather than what the call is:
@@ -181,6 +183,12 @@ An SBB's scratch space cannot collide, and its output is deliberate.
 
 `args:` at the call site seeds that sandbox, mirroring `spawn_fsm`'s `args:`
 which seeds the child's appdata.
+
+**The sandbox is cleared on every call**, so an SBB entered twice starts twice
+from nothing — the serial hunt calling `call()` on target after target must not
+inherit the previous attempt's scratch. The exception is explicit:
+`sbb_fsm(module, resume: true)` keeps what is there, which is what an SBB
+designed to be re-entered after an interruption needs (§7.3).
 
 ### 3.3 State names do not collide, and never could
 
@@ -327,9 +335,95 @@ coordinates an **outside worker** whose result races a timeout, and an SBB is
 in-process code the runner already owns. Closing that gap is worth doing on its
 own merits (§8), not as a detour through this one.
 
-## 7. Change list and phases
+## 7. The first two blocks: `call` and `bridge`
 
-### 7.1 Files
+The spec's catalogue (§5.1) names these two and says what each returns. They are
+separate blocks rather than one `call()` covering a whole call, and the six
+B2BUA scenarios say why better than an argument could.
+
+### 7.1 The seam is where the scenarios already cut
+
+`connected` plus `wait_far_bye_ok` carry **no policy at all**: every arm is a
+`b2bua_forward` and a `stay`, down to the ones written out in full for the ACK
+of a re-INVITE and for the default relay of INFO / MESSAGE / NOTIFY / REFER. The
+establishment states — `place_call`, `proceeding`, `cancelling`, `wait_ack` —
+are where the decisions live: which target, which code to answer, what to bill.
+
+One block per side of that seam:
+
+| Block | Absorbs | Returns |
+|---|---|---|
+| `call(dest, opts)` | `place_call`, `proceeding`, the provisionals, the serial hunt, `cancelling`, `wait_ack` | `{:call, :connected, uri}` · `{:call, :rejected, code, reason}` · `{:call, :cancelled}` · `{:call, :answered_after_cancel}` · `{:call, :timeout}` |
+| `bridge(opts)` | `connected`, `wait_far_bye_ok` | `{:bridge, :ended, by}` · `{:bridge, :interrupted, message}` · `{:bridge, :max_duration}` |
+
+What the host keeps is what varies across the six copies, exactly as S3–S5
+require: the exit it names (`goto releasing` for the media scenarios,
+`scenario_success` for the others), its own vocabulary
+(`customer-service.exs`), and its extra arms — `{:ms_event, _, :media_lost}`,
+which is a *policy* decision (BYE both legs) and belongs to the host, not to the
+relay.
+
+### 7.2 Terminating is inside the two blocks, not beside them
+
+There is no `hangup()` block, and the reason is structural rather than economic.
+
+**CANCEL and BYE do not belong to the same phase.** A CANCEL cancels an INVITE
+transaction in flight — `cancelling` is reached from `proceeding`, an
+establishment state, so it is *inside* `call()`. A BYE ends an established
+dialog — the `{:BYE, …}` arm of `connected` plus `wait_far_bye_ok` — so it is
+*inside* `bridge()`. A block cutting across both would have to take control in
+the middle of the other's sequence: not a building block, a leak.
+
+**And nothing is missing without it.** §2 of the spec sets the test: if
+forgetting a fragment can leave a phone off-hook, the fragment carries something
+the framework should have owned. `b2bua.exs` answers it in its own
+`on_shutdown`:
+
+> both legs are wound down by the automatic teardown — CANCEL what is ringing,
+> BYE what is up — so there is nothing left to do here but say why we stopped.
+
+A `hangup()` would carry no correctness, only visibility already available in
+the two blocks' exit events. What stays with the scenario is what carries
+policy: `releasing` and its `media_cleanup_ressources()`, the reason reported,
+the billing.
+
+### 7.3 `bridge` interrupted and re-entered
+
+`bridge()` consumes `{:bridge_break, message}` and returns
+`{:bridge, :interrupted, message}`. The host does its business — play a prompt,
+consult a backend, ask an operator — and calls `bridge(resume: true)` again. The
+call is never torn down; only the relay pauses.
+
+Nothing new is needed to deliver the break: the SBB runs in the scenario's
+process, so `{:bridge_break, …}` is an ordinary message in the mailbox, sent by
+`kelictl`, by a module, by a timer. `resume: true` is the §3.2 flag that keeps
+the sandbox, so the block finds its counters where it left them.
+
+**The window is the part to be careful about.** Between two `bridge()` calls the
+call is still up, and in-dialog traffic keeps arriving. Nothing is lost — the
+mailbox holds it, and the resumed block replays it — but nothing is *answered*
+either, and the far end has protocol deadlines: an unanswered re-INVITE runs at
+timer B, an unanswered BYE gets retransmitted. So the host's work between two
+`bridge()` calls must be short, and "short" here means the scale of a prompt,
+not of a human decision. A host that needs to hold the call for longer plays
+something into it, which means it is inside the media SBBs, not between two
+calls to this one.
+
+This is the same shape of window as the one that produced the cancel race of §3
+in the spec — a scenario that stopped early, and what followed arriving with
+nobody listening. It is bounded here rather than unbounded, but it is the same
+family, and it deserves a test that sends a re-INVITE during an interruption.
+
+### 7.4 A reservation on the name
+
+`bridge` says two legs. The same block serves the `connected` state of a plain
+UAC, which has one. For a B2BUA it is the right word and that is the primary use
+case, so the name stands — recorded because the first single-leg user will feel
+it.
+
+## 8. Change list and phases
+
+### 8.1 Files
 
 | File | Change |
 |---|---|
@@ -343,7 +437,7 @@ own merits (§8), not as a detour through this one.
 `SIP.Context` is unchanged: the saved slots live in `run_sbb/3`'s own frame, not
 in the struct.
 
-### 7.2 Phases
+### 8.2 Phases
 
 1. **The mechanism, bare.** `sbb_fsm` / `sbb_return`, `sbb_loop/4`, the throw
    path, the placement check. Tests on a toy SBB: return with an event, a
@@ -356,13 +450,15 @@ in the struct.
    phases 4–5 do not start.
 4. **The macro face and the loader**, with `use SBB.Cancelling` on one scenario
    to prove the sugar.
-5. **`Kelixip.Mod.Call.call/1`** — acceptance criterion 1, the flagship SBB, and
-   the first one shipped by a loadable module (S11).
+5. **`call()` and `bridge()`** (§7) — acceptance criterion 1, the flagship
+   blocks, and the first ones shipped by a loadable module (S11). `call()`
+   first: `bridge()` is the easier of the two, and shipping it alone would
+   leave the establishment states duplicated where they hurt most.
 
 Phases 1–2 are one commit's worth of engine work; 3 is where the design is
 judged.
 
-## 8. Deliberately not in this design
+## 9. Deliberately not in this design
 
 - **a structured view published by a running SBB** (Trix's `CallView`). §4 gives
   the monitor line; a richer view waits for a consumer;
