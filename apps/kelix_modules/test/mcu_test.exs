@@ -187,7 +187,7 @@ defmodule Kelix.Mod.McuTest do
       assert conf.max_participants == 4
       assert conf.destroy_when_empty == true
       # a partial video override keeps the rest of the profile
-      assert conf.video == %{size: 6, fps: 25, bitrate: 1024, intra_period: 300}
+      assert conf.video == %{size: 6, fps: 25, bitrate: 1500, intra_period: 300}
 
       # the mosaic keeps the requested composition but NOT a canvas size of its own: the
       # canvas is the encoded picture, so it follows `video.size` (hd720p here, the

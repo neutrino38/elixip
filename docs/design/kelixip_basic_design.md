@@ -209,6 +209,7 @@ Loaded once at boot, held read-only in a GenServer. Responsibilities:
    | `log.*` | Logger backend config (syslog vs stdout) |
    | `server.max_calls` | server-wide quota gate in the Router/factory |
    | `mediaserver.pool.*` | decoded entries (§9), read by `Kelix.MediaPool` **and** by the `mcu` module — the one declaration of a media server |
+   | `mediaserver.video_bitrate` | `:elixip2/MediaServer.Mendooze[:video_bandwidth_kbps]` for the point-to-point path, and the default of the mcu module's `video_bitrate` (§9.2) |
    | `module.*` | `Kelix.ModuleSupervisor` children (§8) |
    | `control_api.*`, `metrics.*` | `Kelix.ControlAPI` / `Kelix.Metrics` |
 
@@ -1031,6 +1032,29 @@ point-to-point adapter's channel (`/jsr309`), which is not the one conferences r
 (`/mcu`) — hence two `*_mediaserver_up` metrics rather than one. A media address is
 **not** a pool key: the media server announces its own (`mediaserver --public-ip`)
 and reports it per call.
+
+### 9.2 `[mediaserver] video_bitrate` — one bitrate per node
+
+The video bitrate is a **section** key, not a pool key: it says what a video leg is
+encoded at and what caps the `b=AS:` this node answers with, and both media paths
+answer that question the same way. `Kelix.Config` defaults it to **1500 kb/s** and
+hands it to each path by the channel that path already reads:
+
+| Path | Reads |
+|---|---|
+| point-to-point / B2BUA (`MediaServer.Mendooze`) | `:elixip2/MediaServer.Mendooze[:video_bandwidth_kbps]`, pushed by `apply_app_env/1` |
+| conferences (the `mcu` module) | the default of `[module.mcu] video_bitrate`, read from `Kelix.Config` at validation time |
+
+A conference may still state a bitrate of its own — `[module.mcu] video_bitrate`
+overrides the node value, and a `conference.create` argument overrides that. What is
+gone is the state this replaces: two compiled-in defaults, 800 kb/s on one path and
+1024 on the other, neither reachable from `config.toml`. A capture then showed a
+point-to-point call answering `b=AS:800` on a link sized for far more, with no key an
+operator could set.
+
+Per media server would be the wrong granularity: the pool hands out a server per
+call, so a per-entry bitrate would make the picture quality depend on which MCU the
+round-robin landed on.
 
 ---
 

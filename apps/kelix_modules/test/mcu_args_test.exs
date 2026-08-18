@@ -88,7 +88,7 @@ defmodule Kelix.Mod.Mcu.ArgsTest do
     end
 
     test "sub_map/4 merges over the default and refuses unknown fields" do
-      default = %{size: 6, fps: 15, bitrate: 1024, intra_period: 300}
+      default = %{size: 6, fps: 15, bitrate: 1500, intra_period: 300}
 
       assert {:ok, merged} =
                Args.sub_map(%{"video" => %{"fps" => 25}}, "video", default, [

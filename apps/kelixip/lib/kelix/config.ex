@@ -8,9 +8,11 @@ defmodule Kelix.Config do
 
   It also translates the infra keys the lower framework already reads into the
   `:elixip2` application env (so those layers need no change) — today
-  `server.user_agent → :useragent`. The other sections (listeners, media pool,
-  modules, control API, metrics) are validated and **held** in the struct for the
-  phases that consume them (listeners/P?, media pool/P6, modules/P5, control/P7).
+  `server.user_agent → :useragent` and `mediaserver.video_bitrate →
+  MediaServer.Mendooze[:video_bandwidth_kbps]`. The other sections (listeners,
+  media pool, modules, control API, metrics) are validated and **held** in the
+  struct for the phases that consume them (listeners/P?, media pool/P6,
+  modules/P5, control/P7).
   """
   use GenServer
   require Logger
@@ -47,10 +49,13 @@ defmodule Kelix.Config do
           log: map,
           listen: [listener],
           mediaserver_pool: [pool_entry],
+          mediaserver_video_bitrate: pos_integer,
           modules: map,
           control_api: map,
           metrics: map
         }
+
+  @default_video_bitrate_kbps 1500
 
   defstruct node_name: "kelixip@127.0.0.1",
             script_dir: "/usr/share/kelixip",
@@ -60,6 +65,11 @@ defmodule Kelix.Config do
             log: %{target: "stdout", facility: "local0", level: "info"},
             listen: [],
             mediaserver_pool: [],
+            # The node's video encoding bitrate (kb/s): what a leg is encoded at and
+            # the cap on the `b=AS:` it is answered with. One statement for both
+            # media paths — the point-to-point adapter reads it from the app env,
+            # the mcu module takes it as the default of its own `video_bitrate`.
+            mediaserver_video_bitrate: @default_video_bitrate_kbps,
             modules: %{},
             control_api: %{},
             metrics: %{}
@@ -124,6 +134,20 @@ defmodule Kelix.Config do
   @spec apply_app_env(t) :: :ok
   def apply_app_env(%__MODULE__{} = cfg) do
     Application.put_env(:elixip2, :useragent, cfg.user_agent)
+    # `[mediaserver] video_bitrate` reaches the point-to-point media path here: the
+    # Medooze adapter reads `:video_bandwidth_kbps` off its own tuning block for
+    # every leg it encodes and answers. Merged, not replaced — the block also holds
+    # the timeouts config/config.exs sets.
+    Application.put_env(
+      :elixip2,
+      MediaServer.Mendooze,
+      Keyword.put(
+        Application.get_env(:elixip2, MediaServer.Mendooze, []),
+        :video_bandwidth_kbps,
+        cfg.mediaserver_video_bitrate
+      )
+    )
+
     # The REST frontal (Kelix.ControlAPI.Auth) reads its settings from the app
     # env so both the boot-time child-spec gating and the per-request auth check
     # share one source (and tests can override it).
@@ -214,7 +238,7 @@ defmodule Kelix.Config do
          {:ok, listen} <- parse_listeners(Map.get(map, "listen", [])),
          {:ok, control_api} <- parse_control_api(Map.get(map, "control_api")),
          {:ok, metrics} <- parse_metrics(Map.get(map, "metrics")),
-         {:ok, pool} <- parse_mediaserver(Map.get(map, "mediaserver")) do
+         {:ok, mediaserver} <- parse_mediaserver(Map.get(map, "mediaserver")) do
       {:ok,
        %__MODULE__{
          node_name: server.node_name,
@@ -224,7 +248,8 @@ defmodule Kelix.Config do
          max_calls: server.max_calls,
          log: log,
          listen: listen,
-         mediaserver_pool: pool,
+         mediaserver_pool: mediaserver.pool,
+         mediaserver_video_bitrate: mediaserver.video_bitrate,
          modules: Map.get(map, "module", %{}),
          control_api: control_api,
          metrics: metrics
@@ -372,15 +397,17 @@ defmodule Kelix.Config do
     end
   end
 
-  # ── [mediaserver.pool.*] (§9) ────────────────────────────────────────────────
+  # ── [mediaserver] + [mediaserver.pool.*] (§9) ────────────────────────────────
 
-  # The whole `[mediaserver]` section: `pool` is the only thing in it today, and a
+  # The whole `[mediaserver]` section: the pool plus the node's video bitrate. A
   # sibling key is a typo worth naming rather than ignoring.
-  defp parse_mediaserver(nil), do: {:ok, []}
+  defp parse_mediaserver(nil), do: {:ok, %{pool: [], video_bitrate: @default_video_bitrate_kbps}}
 
   defp parse_mediaserver(%{} = m) do
-    with :ok <- reject_keys(m, ~w(pool), "[mediaserver]") do
-      parse_pool(Map.get(m, "pool"))
+    with :ok <- reject_keys(m, ~w(pool video_bitrate), "[mediaserver]"),
+         {:ok, bitrate} <- opt_pos_integer(m, "video_bitrate", "[mediaserver]"),
+         {:ok, pool} <- parse_pool(Map.get(m, "pool")) do
+      {:ok, %{pool: pool, video_bitrate: bitrate || @default_video_bitrate_kbps}}
     end
   end
 

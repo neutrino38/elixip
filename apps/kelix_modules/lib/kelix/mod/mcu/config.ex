@@ -53,7 +53,11 @@ defmodule Kelix.Mod.Mcu.Config do
             # more — what the answer advertises for H.264 is what the media server
             # reported it accepted (§6.3 rule 9), and announcing a profile the encoder
             # was not configured with is the drift that key invited.
-            video: %{size: 6, fps: 15, bitrate: 1024, intra_period: 300},
+            #
+            # `bitrate` is the one value this block shares with the point-to-point
+            # path: an omitted `video_bitrate` takes `[mediaserver] video_bitrate`,
+            # the node's statement of it (`node_video_bitrate/1`).
+            video: %{size: 6, fps: 15, bitrate: 1500, intra_period: 300},
             did_range: nil,
             did_ranges: %{},
             # Recording and images (§8.3.8). Paths on the **media server's**
@@ -166,7 +170,7 @@ defmodule Kelix.Mod.Mcu.Config do
          video: %{
            size: video_size || defaults.video.size,
            fps: int(block, "video_fps", defaults.video.fps),
-           bitrate: int(block, "video_bitrate", defaults.video.bitrate),
+           bitrate: int(block, "video_bitrate", node_video_bitrate(defaults.video.bitrate)),
            intra_period: int(block, "video_intra_period", defaults.video.intra_period)
          },
          did_range: did_range,
@@ -394,6 +398,16 @@ defmodule Kelix.Mod.Mcu.Config do
   # The struct is the single statement of every default, so a `parse/1` clause that
   # needs one before building it reads it here rather than repeating the literal.
   defp defaults(), do: %__MODULE__{}
+
+  # The node's `[mediaserver] video_bitrate`, which a conference encodes at unless
+  # this block names its own. Read like `Mcu.mediaservers_from_pool/1` reads the
+  # pool — from `Kelix.Config`, guarded, since `parse/1` also runs in tests where no
+  # node config exists.
+  defp node_video_bitrate(fallback) do
+    if Process.whereis(Kelix.Config),
+      do: Kelix.Config.current().mediaserver_video_bitrate,
+      else: fallback
+  end
 
   defp int(block, key, default) do
     case Map.get(block, key) do

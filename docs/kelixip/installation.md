@@ -219,6 +219,22 @@ ssl_ca_cert_file   = ""             # with a CA the server cert is verified; wit
 
 `[module.registrar]` lives in **`domains.toml`**, not here (see below).
 
+#### `[mediaserver]` — the node's media settings
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `video_bitrate` | integer > 0 | `1500` | Video bitrate in kbps: what a video leg is encoded at, and the cap on the `b=AS:` this node answers with. The offered value wins when it is lower |
+
+One bitrate for both media paths. A point-to-point call and a conference encode
+video the same way, so the value is stated once here rather than per media server:
+every pool entry gets it, and `[module.mcu] video_bitrate` overrides it for
+conferences only.
+
+```toml
+[mediaserver]
+video_bitrate = 2500
+```
+
 #### `[mediaserver.pool.<name>]` — the media servers
 
 **The single place a media server is declared.** Point-to-point calls get one

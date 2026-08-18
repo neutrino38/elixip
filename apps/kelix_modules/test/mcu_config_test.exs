@@ -24,7 +24,7 @@ defmodule Kelix.Mod.Mcu.ConfigTest do
 
       # no codec list and no fmtp: the media server arbitrates (P8a, §16.3)
       refute Map.has_key?(config, :audio_codecs)
-      assert config.video == %{size: 6, fps: 15, bitrate: 1024, intra_period: 300}
+      assert config.video == %{size: 6, fps: 15, bitrate: 1500, intra_period: 300}
 
       # Shorter than what the caller waits (`call_timeout_ms`, 5 s): the per-RPC
       # timeout has to fire first, or a slow server turns a call into an exit.
@@ -33,6 +33,14 @@ defmodule Kelix.Mod.Mcu.ConfigTest do
       assert config.gc_orphans == true
       # no range configured ⇒ `did` is mandatory on create (§8.4)
       assert config.did_range == nil
+    end
+
+    # One bitrate per node, whichever media path carries the call: an omitted
+    # `video_bitrate` is the node's `[mediaserver] video_bitrate`, which the
+    # point-to-point adapter also encodes and answers `b=AS:` with.
+    test "video_bitrate follows the node's [mediaserver] video_bitrate" do
+      assert parse!(%{}).video.bitrate == Kelix.Config.current().mediaserver_video_bitrate
+      assert parse!(%{"video_bitrate" => 900}).video.bitrate == 900
     end
   end
 

@@ -722,7 +722,7 @@ defmodule Kelix.Mod.McuCallTest do
       # bitrate, intra period — because every leg is encoded from the same mosaic,
       # plus the H.264 profile the peer asked for: this map IS the encoder's
       # properties (`videoProperties`), and it replaces whatever SetRTPProperties set
-      assert_receive {:rpc, "SetVideoCodec", [42, 7, 99, 6, 15, 1024, 300, encoder, 0]}, 2000
+      assert_receive {:rpc, "SetVideoCodec", [42, 7, 99, 6, 15, 1500, 300, encoder, 0]}, 2000
       assert encoder == %{"h264.profile-level-id" => "42e01f"}
       assert_receive {:rpc, "AddMosaicParticipant", [42, 0, 7]}, 2000
     end
@@ -758,7 +758,7 @@ defmodule Kelix.Mod.McuCallTest do
       assert fields[:body] =~ "a=fmtp:99 profile-level-id=640028;packetization-mode=1"
 
       send(pid, {:ACK, %{method: :ACK}, nil, dialog})
-      assert_receive {:rpc, "SetVideoCodec", [42, 7, 99, 6, 15, 1024, 300, encoder, 0]}, 2000
+      assert_receive {:rpc, "SetVideoCodec", [42, 7, 99, 6, 15, 1500, 300, encoder, 0]}, 2000
 
       # the packetization mode travels with the profile, by the same channel and for the
       # same reason: it is what bounds the slices the encoder produces, and server-side it
@@ -786,7 +786,7 @@ defmodule Kelix.Mod.McuCallTest do
       refute fields[:body] =~ "42e01f"
 
       send(pid, {:ACK, %{method: :ACK}, nil, dialog})
-      assert_receive {:rpc, "SetVideoCodec", [42, 7, 99, 6, 15, 1024, 300, encoder, 0]}, 2000
+      assert_receive {:rpc, "SetVideoCodec", [42, 7, 99, 6, 15, 1500, 300, encoder, 0]}, 2000
       assert encoder == %{"h264.profile-level-id" => "4d0028"}
     end
 

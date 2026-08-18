@@ -92,8 +92,11 @@ defmodule MediaServer.Mendooze.Conn do
   @default_video_codecs ["AV1", "H264", "VP8"]
   @default_text_codecs ["T140", "T140RED"]
 
-  # Receive bandwidth advertised as b=AS: on the video media (kb/s)
-  @default_video_bandwidth_kbps 800
+  # Video bitrate (kb/s): what a transcoded leg is encoded at, and the bandwidth
+  # advertised as b=AS: on the video media. Same value as the mcu module's
+  # `video_bitrate`, both defaulting to `[mediaserver] video_bitrate` on a kelixip
+  # node — one bitrate per node, whichever media path carries the call.
+  @default_video_bandwidth_kbps 1500
 
   # telephone-event's Medooze codec constant: never a codec a leg is said to
   # "carry" — it is excluded from `peer_codecs/1`, so the cross-leg selection can

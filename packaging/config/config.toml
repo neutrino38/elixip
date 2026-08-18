@@ -104,7 +104,8 @@ port = 9095
 #layout_comp      = "2x2"           # starting mosaic when auto_layout is off
 #video_size       = "hd720p"
 #video_fps        = 15
-#video_bitrate    = 1024            # kbps, also the cap on the answer's b=AS:
+#video_bitrate    = 1500            # kbps, also the cap on the answer's b=AS:; defaults
+                                   #   to [mediaserver] video_bitrate above
 #video_intra_period = 300           # frames between intra-frames
                                    #   (the H.264 profile the answer states is the one
                                    #   the media server reported it accepted, so there
@@ -138,6 +139,15 @@ port = 9095
 #
 # No media address here: what the server announces in the SDP is its own setting
 # (`mediaserver --public-ip`, mandatory behind a NAT) and it reports it per call.
+
+#[mediaserver]
+# The node's video bitrate, in kbps: what a video leg is encoded at, and the cap on
+# the `b=AS:` this node answers with (the offered value wins when it is lower). One
+# value for both media paths — point-to-point calls and conferences — which is why it
+# is here and not per pool entry. `[module.mcu] video_bitrate` overrides it for
+# conferences only.
+#video_bitrate = 1500
+
 #[mediaserver.pool.mcu1]
 #module = "mendooze"
 #url    = "http://mcu1.example.com:8080"

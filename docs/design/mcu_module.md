@@ -391,7 +391,7 @@ are **not** forced into it: they are plain functions on `Kelix.Mod.Mcu`
   vad:         1,                # 0 none | 1 basic | 2 full
   rate:        32000,            # mixer sampling rate (default, §8.4)
   codecs:      %{audio: ["OPUS","G722","PCMA","PCMU"], video: ["H264"], text: [ "T140", "T140RED"]},
-  video:       %{size: 6, fps: 15, bitrate: 1024, intra_period: 300},  # inline profile
+  video:       %{size: 6, fps: 15, bitrate: 1500, intra_period: 300},  # inline profile
   layout:      %{comp: 1, size: 6, auto: true},                        # mosaic 0
   max_participants: 20,
   auto_accept: true,
@@ -625,7 +625,10 @@ hard cases:
    > reports.
 7. **`a=sendrecv`** is the direction for a mixed participant; a `recvonly`
    offer is answered `sendonly` and vice-versa (`reverse_direction/1`).
-8. **Bandwidth.** `b=AS:` on video is `min(offered, conference video.bitrate)`.
+8. **Bandwidth.** `b=AS:` on video is `min(offered, conference video.bitrate)`. That
+   bitrate is `[module.mcu] video_bitrate`, which defaults to the node's
+   `[mediaserver] video_bitrate` (1500 kb/s) — the same value the point-to-point path
+   encodes and answers with (`kelixip_basic_design.md` §9.2).
 9. **H.264 profile — decided by the server** (S3/P8). `profile-level-id`,
    `packetization-mode` and `level-asymmetry-allowed` are whatever the fmtp string
    `StartReceiving` returned for the H.264 payload type says they are, copied into
@@ -1754,7 +1757,7 @@ did_ranges          = { "example.com" = "8000-8199", "lab.example.com" = "9000-9
 # inline video profile
 video_size          = "hd720p"  # qcif cif vga pal hvga qvga hd720p wqvga xga wvga
 video_fps           = 15
-video_bitrate       = 1024     # kbps
+video_bitrate       = 1500     # kbps; default = [mediaserver] video_bitrate
 video_intra_period  = 300
 # timeouts
 xmlrpc_timeout_ms   = 10000

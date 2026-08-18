@@ -119,7 +119,7 @@ Module block — `[module.mcu]` (in `config.toml`):
 | `layout_comp` | name or integer | `2x2` | Starting mosaic — one of `1x1 2x2 3x3 3+4 1+7 1+5 1+1 pip1 pip3 4x4 1+4 2+8` (or its wire id) |
 | `video_size` | name or integer | `hd720p` | Encoded size — one of `qcif cif vga pal hvga qvga hd720p wqvga xga wvga` (or its wire id) |
 | `video_fps` | integer | `15` | Encoded frame rate |
-| `video_bitrate` | integer | `1024` | kbps, also the cap on the answer's `b=AS:` |
+| `video_bitrate` | integer | `[mediaserver] video_bitrate` (`1500`) | kbps, also the cap on the answer's `b=AS:`. Set it here to give conferences a bitrate of their own |
 | `video_intra_period` | integer | `300` | Frames between intra-frames |
 | `logo_file` | string | — | Image drawn in **every empty mosaic slot**, on every conference (a bare name under `image_dir`) |
 | `record_dir` | string | — | Directory the media server writes recordings into. Unset ⇒ `recording.start` refuses |
