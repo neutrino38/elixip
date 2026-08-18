@@ -261,7 +261,7 @@ end
 
   This settles what the 2026-08-12 draft left as its central open question
   ("same-process delegation vs. child process"). It was never really open:
-  invariant 2 of [DESIGN-FSL.md](DESIGN-FSL.md) — *one FSM, one process,
+  invariant 2 of [DESIGN-FSL.md](DESIGN-FSL.md#9-invariants) — *one FSM, one process,
   because the dialog and media layers bind their events to `self()`* — means an
   SBB in a process of its own **cannot receive the host's leg events at all**.
   S6 and "child process" are contradictory on the BEAM. Same-process
@@ -329,7 +329,8 @@ end
     simultaneous;
   - **the case that motivated S5 is already covered elsewhere.** The
     `{:ms_event, _ref, :server_disconnected}` arm of the media scenarios is one
-    of the two clauses **injected into every `on_events`** (DESIGN-FSL §2.5) —
+    of the two clauses **injected into every `on_events`**
+    ([DESIGN-FSL.md](DESIGN-FSL.md#25-on_events)) —
     including the SBB's own, without its author thinking about it. The exact
     pattern S5 protected is protected by injection, not by routing.
 
@@ -476,7 +477,7 @@ coverage; a concept absent from one dialect is not a divergence:
 
 - `spawn_fsm` by **file path** (`.exs` resolved next to the declaring file).
   TS machines are ESM imports; there is nothing to resolve;
-- `SIP.Scenario.CallDispatcher` (DESIGN-FSL §4.4) — handing an inbound INVITE
+- [`SIP.Scenario.CallDispatcher`](DESIGN-FSL.md#44-sipscenariocalldispatcher) — handing an inbound INVITE
   to a waiting child has no meaning in a browser;
 - `goto back` and the `stay` variants Elixip is adding, already recorded as
   deferred in the TS spec §11.4.
@@ -508,7 +509,11 @@ The spec is met when both of these hold:
 
 ### 4.8 Open questions (deliberately not answered here)
 
-Design work, to be answered in a follow-up conception document:
+Design work, answered in
+[service-building-block-design.md](service-building-block-design.md) — the
+nested `sbb_loop/4`, the terminal thrown past every state frame, the shared
+context with one reserved sandbox per SBB, and why `sbb_fsm` is rejected inside
+an `on_events` clause:
 
 - how a `.exs` scenario pulls in the macro face (`use SBB.Call` semantics,
   compile order, what `SIP.Scenario.Loader` must do);
@@ -527,7 +532,7 @@ Three questions the 2026-08-18 revision **closed**, kept here so they are not
 reopened by accident:
 
 - ~~same-process delegation vs. child process~~ — decided by invariant 2 of
-  DESIGN-FSL, not by preference (S1);
+  [DESIGN-FSL.md](DESIGN-FSL.md#9-invariants), not by preference (S1);
 - ~~what "armed" means across a host `goto`~~ — the host cannot `goto` while
   the SBB runs; there is no "armed" state (S8);
 - ~~can two SBBs be armed at once~~ — no, and it needs no diagnostic: one

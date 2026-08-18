@@ -31,7 +31,8 @@ The user-facing counterparts live at the repository root —
 | [mcu_server_evolutions.md](mcu_server_evolutions.md) | media-server increments the conferencing module waits on |
 | [evolution-auth-db.md](evolution-auth-db.md) | authenticating more than REGISTER, and a replaceable backend |
 | [kelixip-b2bua.md](kelixip-b2bua.md) | `call()` / `queue()` above the B2BUA primitives |
-| [service-building-block.md](service-building-block.md) | reusable FSM fragments |
+| [service-building-block.md](service-building-block.md) | reusable FSM fragments — the specification |
+| [service-building-block-design.md](service-building-block-design.md) | how the SBB layer is built: the nested loop, the shared context, the loader |
 | [integration-fail2ban.md](integration-fail2ban.md) | making kelixip trivially protectable |
 | [kelixip_liveview.md](kelixip_liveview.md), [liveview-adapter.md](liveview-adapter.md) | a real-time web console over kelixip |
 | [moteli-reboot.md](moteli-reboot.md) | RabbitMQ + protobuf control plane for the media servers (2.0) |
