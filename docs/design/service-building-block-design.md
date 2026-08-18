@@ -384,7 +384,9 @@ relay.
 
 ### 7.2 Terminating is inside the two blocks, not beside them
 
-There is no `hangup()` block, and the reason is structural rather than economic.
+There is no `hangup()` block. The reason was structural rather than economic, and
+the conversion of phases 3–5 has since settled it by leaving nothing for such a
+block to hold — see the count at the end of this section.
 
 **CANCEL and BYE do not belong to the same phase.** A CANCEL cancels an INVITE
 transaction in flight — `cancelling` is reached from `proceeding`, an
@@ -405,6 +407,16 @@ A `hangup()` would carry no correctness, only visibility already available in
 the two blocks' exit events. What stays with the scenario is what carries
 policy: `releasing` and its `media_cleanup_ressources()`, the reason reported,
 the billing.
+
+**Closed 2026-08-18, on the converted scripts rather than on the argument.**
+Across the three `direct-call*.exs`, the SIP teardown left outside `call()` and
+`bridge()` is *one site*: the `{:bridge, :media_lost, _}` arm of the media
+script, `b2bua_send_BYE()` and one reply — two macro calls expressing the
+decision "there is no media left, end the call". Everything else that survived
+the conversion is `media_cleanup_ressources()` (media, not SIP) and the
+`scenario_aborted` verdicts. A block needs an FSM and events to wait for;
+hanging up is one macro, and the waiting that follows it — the far end's 200 —
+is already `bridge()`'s `wait_far_bye_ok`.
 
 ### 7.3 `bridge` interrupted and re-entered
 

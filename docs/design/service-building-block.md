@@ -642,7 +642,9 @@ scripts already cut along is a decision of 2026-08-18, designed in
 Both live in `:elixip2` under one face module, `SBB.Call`, exporting `call/1`
 and `bridge/1` — see S10 and [the design's §7.5](service-building-block-design.md).
 
-**There is no `hangup` block**, and the reason is structural: a CANCEL cancels
+**There is no `hangup` block** — confirmed on the converted scripts, where the
+SIP teardown left outside the two blocks is one two-line arm. The reason is
+structural: a CANCEL cancels
 an INVITE transaction in flight, so it belongs inside `call()`, while a BYE ends
 an established dialog, so it belongs inside `bridge()`. A block spanning both
 would have to take control in the middle of the other's sequence. Nothing is
