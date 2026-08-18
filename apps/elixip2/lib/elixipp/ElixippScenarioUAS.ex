@@ -198,7 +198,7 @@ defmodule Elixip.ScenarioUAS do
 
   @impl GenServer
   # When the factory stops, cooperatively shut down every running instance
-  # (same mechanism as the DSL sub-FSM shutdown).
+  # (same mechanism as the FSL sub-FSM shutdown).
   def terminate(reason, state) do
     Enum.each(state.instances, fn {_ref, %{pid: pid}} ->
       send(pid, {:scenario_ctl, :shutdown, reason})
