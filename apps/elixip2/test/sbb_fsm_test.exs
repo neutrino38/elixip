@@ -11,8 +11,10 @@ defmodule SIP.Test.SbbFsm do
   defmodule Echo do
     use SIP.SBB
 
+    @sbb_returns [heard: "gives back what the call site put in its sandbox — %{payload}"]
+
     state initial_state do
-      sbb_return({:echo, sbb_data_get(:payload)})
+      sbb_return({:echo, :heard, %{payload: sbb_data_get(:payload)}})
     end
   end
 
@@ -21,6 +23,8 @@ defmodule SIP.Test.SbbFsm do
   defmodule TwoSteps do
     use SIP.SBB
 
+    @sbb_returns [walked: "how many states it went through — %{steps}"]
+
     state initial_state do
       sbb_data_set(:steps, 1)
       goto(second)
@@ -28,13 +32,15 @@ defmodule SIP.Test.SbbFsm do
 
     state second do
       sbb_data_set(:steps, sbb_data_get(:steps) + 1)
-      sbb_return({:walked, sbb_data_get(:steps)})
+      sbb_return({:two_steps, :walked, %{steps: sbb_data_get(:steps)}})
     end
   end
 
   # Consumes events until it has seen enough, using `stay` to re-enter its wait.
   defmodule CountTo do
     use SIP.SBB
+
+    @sbb_returns [counted: "the target was reached — %{seen}"]
 
     state initial_state do
       sbb_data_set(:seen, 0)
@@ -48,7 +54,7 @@ defmodule SIP.Test.SbbFsm do
           sbb_data_set(:seen, seen)
 
           if seen >= sbb_data_get(:target),
-            do: sbb_return({:counted, seen}),
+            do: sbb_return({:count_to, :counted, %{seen: seen}}),
             else: stay("tick #{seen}")
       end
     end
@@ -68,20 +74,25 @@ defmodule SIP.Test.SbbFsm do
   defmodule Nesting do
     use SIP.SBB
 
+    @sbb_returns [unreachable: "never sent: the block it calls ends the scenario first"]
+
     state initial_state do
       sbb_fsm(Fatal)
-      sbb_return({:nesting, :unreachable})
+      sbb_return({:nesting, :unreachable, %{}})
     end
   end
 
   defmodule NestingEcho do
     use SIP.SBB
 
+    @sbb_returns [relayed: "what the block it called returned — %{payload}"]
+
     state initial_state do
       sbb_fsm(Echo, args: %{payload: :from_inner})
 
       on_events do
-        {:echo, payload} -> sbb_return({:outer, payload})
+        {:echo, :heard, %{payload: payload}} ->
+          sbb_return({:nesting_echo, :relayed, %{payload: payload}})
       end
     end
   end
@@ -91,11 +102,11 @@ defmodule SIP.Test.SbbFsm do
     use SIP.SBB
 
     @sbb_timeout 60
-    @sbb_timeout_event {:hangs, :timed_out}
+    @sbb_returns [impossible: "the event it waits for is never sent"]
 
     state initial_state do
       on_events do
-        {:never, _} -> sbb_return({:hangs, :impossible})
+        {:never, _} -> sbb_return({:hangs, :impossible, %{}})
       end
     end
   end
@@ -109,7 +120,7 @@ defmodule SIP.Test.SbbFsm do
       sbb_fsm(Echo, args: %{payload: :hello})
 
       on_events do
-        {:echo, payload} -> scenario_success("echoed #{inspect(payload)}")
+        {:echo, :heard, %{payload: payload}} -> scenario_success("echoed #{inspect(payload)}")
       after
         1_000 -> scenario_failure("block never returned")
       end
@@ -123,7 +134,7 @@ defmodule SIP.Test.SbbFsm do
       sbb_fsm(TwoSteps)
 
       on_events do
-        {:walked, n} -> scenario_success("walked #{n}")
+        {:two_steps, :walked, %{steps: n}} -> scenario_success("walked #{n}")
       after
         1_000 -> scenario_failure("block never returned")
       end
@@ -140,7 +151,7 @@ defmodule SIP.Test.SbbFsm do
       sbb_fsm(CountTo, args: %{target: 3})
 
       on_events do
-        {:counted, n} -> scenario_success("counted #{n}")
+        {:count_to, :counted, %{seen: n}} -> scenario_success("counted #{n}")
       after
         1_000 -> scenario_failure("block never returned")
       end
@@ -172,7 +183,7 @@ defmodule SIP.Test.SbbFsm do
       sbb_fsm(NestingEcho)
 
       on_events do
-        {:outer, payload} -> scenario_success("outer got #{inspect(payload)}")
+        {:nesting_echo, :relayed, %{payload: p}} -> scenario_success("outer got #{inspect(p)}")
       after
         1_000 -> scenario_failure("nested block never returned")
       end
@@ -186,7 +197,7 @@ defmodule SIP.Test.SbbFsm do
       sbb_fsm(Hangs)
 
       on_events do
-        {:hangs, :timed_out} -> scenario_success("block bounded by its deadline")
+        {:hangs, :timeout, %{block: Hangs}} -> scenario_success("block bounded by its deadline")
       after
         1_000 -> scenario_failure("deadline never fired")
       end
@@ -205,7 +216,7 @@ defmodule SIP.Test.SbbFsm do
       on_events do
         # Arrival order: what the block ignored comes back before its own return.
         {:for_the_host, :kept} -> goto(then_the_return, "host event survived the block")
-        {:echo, _} -> scenario_failure("the block's event overtook the pending one")
+        {:echo, _, _} -> scenario_failure("the block's event overtook the pending one")
       after
         1_000 -> scenario_failure("nothing came back")
       end
@@ -213,7 +224,7 @@ defmodule SIP.Test.SbbFsm do
 
     state then_the_return do
       on_events do
-        {:echo, :done} -> scenario_success("both events, in order")
+        {:echo, :heard, %{payload: :done}} -> scenario_success("both events, in order")
       after
         1_000 -> scenario_failure("the block's own event never arrived")
       end
@@ -224,9 +235,11 @@ defmodule SIP.Test.SbbFsm do
   defmodule Accumulate do
     use SIP.SBB
 
+    @sbb_returns [counted: "how many times this block has run — %{runs}"]
+
     state initial_state do
       sbb_data_set(:runs, (sbb_data_get(:runs) || 0) + 1)
-      sbb_return({:runs, sbb_data_get(:runs)})
+      sbb_return({:accumulate, :counted, %{runs: sbb_data_get(:runs)}})
     end
   end
 
@@ -241,7 +254,7 @@ defmodule SIP.Test.SbbFsm do
 
     state collect do
       on_events do
-        {:runs, first} ->
+        {:accumulate, :counted, %{runs: first}} ->
           send(self(), {:first, first})
           goto(second_run)
       after
@@ -251,7 +264,7 @@ defmodule SIP.Test.SbbFsm do
 
     state second_run do
       on_events do
-        {:runs, second} ->
+        {:accumulate, :counted, %{runs: second}} ->
           receive do
             # Both runs must have counted 1: the second call started from an
             # empty sandbox rather than inheriting the first.
@@ -276,7 +289,7 @@ defmodule SIP.Test.SbbFsm do
 
     state again do
       on_events do
-        {:runs, _first} -> goto(resume)
+        {:accumulate, :counted, _} -> goto(resume)
       after
         1_000 -> scenario_failure("no first result")
       end
@@ -286,8 +299,11 @@ defmodule SIP.Test.SbbFsm do
       sbb_fsm(Accumulate, resume: true)
 
       on_events do
-        {:runs, 2} -> scenario_success("the resumed run found the first one's count")
-        {:runs, n} -> scenario_failure("resume lost the sandbox: counted #{n}, expected 2")
+        {:accumulate, :counted, %{runs: 2}} ->
+          scenario_success("the resumed run found the first one's count")
+
+        {:accumulate, :counted, %{runs: n}} ->
+          scenario_failure("resume lost the sandbox: counted #{n}, expected 2")
       after
         1_000 -> scenario_failure("no second result")
       end
@@ -360,7 +376,7 @@ defmodule SIP.Test.SbbFsm do
         sbb_fsm(Hangs, timeout: 30)
 
         on_events do
-          {:hangs, :timed_out} -> scenario_success("bounded")
+          {:hangs, :timeout, _} -> scenario_success("bounded")
         after
           1_000 -> scenario_failure("deadline never fired")
         end
@@ -416,11 +432,134 @@ defmodule SIP.Test.SbbFsm do
       use SIP.Scenario
 
       state initial_state do
-        sbb_return({:stray, :event})
+        sbb_return({:host_stray_return, :event, %{}})
       end
     end
 
     assert {:error, {:sbb_return_outside_sbb, :initial_state}} = run(HostStrayReturn)
+  end
+
+  # ── The return contract (spec §4.2) ─────────────────────────────────────────
+
+  defp compile!(source), do: Code.compile_string(source)
+
+  test "a return that is not {namespace, outcome, data} is a compile error" do
+    assert_raise CompileError, ~r/three elements, the last a map/, fn ->
+      compile!("""
+      defmodule SIP.Test.SbbFsm.TwoElements do
+        use SIP.SBB
+        state initial_state do
+          sbb_return({:two_elements, :done})
+        end
+      end
+      """)
+    end
+  end
+
+  test "a return under another block's namespace is a compile error" do
+    assert_raise CompileError, ~r/namespace is :wrong_ns, not :call/, fn ->
+      compile!("""
+      defmodule SIP.Test.SbbFsm.WrongNs do
+        use SIP.SBB
+        @sbb_namespace :wrong_ns
+        @sbb_returns [done: "…"]
+        state initial_state do
+          sbb_return({:call, :done, %{}})
+        end
+      end
+      """)
+    end
+  end
+
+  # The one that pays for itself: an undeclared outcome is not a crash at run
+  # time, it is a host waiting on its `after` for an event nobody sends.
+  test "an outcome the block does not declare is a compile error" do
+    assert_raise CompileError, ~r/:conected is not one of this block's declared outcomes/, fn ->
+      compile!("""
+      defmodule SIP.Test.SbbFsm.Typo do
+        use SIP.SBB
+        @sbb_namespace :typo
+        @sbb_returns [connected: "…"]
+        state initial_state do
+          sbb_return({:typo, :conected, %{}})
+        end
+      end
+      """)
+    end
+  end
+
+  # A block that declares no vocabulary is not checked on outcomes: declaring is
+  # opt-in, enforcement follows the declaration.
+  test "a block with no declared vocabulary keeps its outcomes unchecked" do
+    assert [{_mod, _bin} | _] =
+             compile!("""
+             defmodule SIP.Test.SbbFsm.Undeclared do
+               use SIP.SBB
+               state initial_state do
+                 sbb_return({:undeclared, :whatever, %{}})
+               end
+             end
+             """)
+  end
+
+  # The face module a scenario writes `use SBB.Call` for teaches the namespaces
+  # for the whole module, so a host that handles a return in a state written
+  # BEFORE the call site is classified too. This is the hook it uses.
+  test "a face module can register its blocks' namespaces for the whole scenario" do
+    defmodule Face do
+      defmacro __using__(_opts) do
+        SIP.Scenario.register_namespace(__CALLER__.module, :faced)
+        quote(do: :ok)
+      end
+    end
+
+    defmodule HostFaced do
+      use SIP.Scenario
+      use Face
+
+      # No sbb_fsm anywhere: only the face taught this module that `:faced` is a
+      # block's namespace and not a SIP method.
+      state initial_state do
+        send(self(), {:faced, :done, %{}})
+
+        on_events do
+          {:faced, :done, _} ->
+            case Process.get(:scenario_event_type) do
+              :scenario -> scenario_success("classified from the face")
+              other -> scenario_failure("classified as #{inspect(other)}")
+            end
+        after
+          500 -> scenario_failure("no event")
+        end
+      end
+    end
+
+    assert :ok = run(HostFaced)
+  end
+
+  test "the namespace defaults to the block's own name, underscored" do
+    assert Echo.__sbb_namespace__() == :echo
+  end
+
+  # A bounded block can always return :timeout, whether or not its author listed
+  # it — so the vocabulary says so, and the event follows the contract.
+  test "timeout is part of a bounded block's vocabulary, and follows the contract" do
+    assert Keyword.has_key?(Hangs.__sbb_returns__(), :timeout)
+    assert Hangs.__sbb_timeout_event__() == {:hangs, :timeout, %{block: Hangs}}
+  end
+
+  test "an unbounded block has no timeout outcome" do
+    defmodule Endless do
+      use SIP.SBB
+      @sbb_timeout :infinity
+      @sbb_returns [ended: "…"]
+
+      state initial_state do
+        sbb_return({:endless, :ended, %{}})
+      end
+    end
+
+    refute Keyword.has_key?(Endless.__sbb_returns__(), :timeout)
   end
 
   # ── The property the whole mechanism rests on ───────────────────────────────

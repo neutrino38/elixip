@@ -350,7 +350,30 @@ block. `sbb_loop/5` deliberately does not catch either, so a terminal three
 blocks deep still unwinds to the root, and a parent's deadline passes through a
 running child to the frame that armed it.
 
-### 4bis.2 The context
+### 4bis.2 The return contract
+
+A block returns `{namespace, outcome, data}` — fixed arity, last element a map,
+so a block can report one more thing without breaking a host that matches it
+(S13). The namespace and the outcomes are declared (`@sbb_namespace`,
+`@sbb_returns`) and `sbb_return/1` checks a literal return against them at
+compile time: a mistyped outcome is otherwise not an error but a silence, the
+host waiting on its `after` for an event nobody sends.
+
+The namespace is the block author's word, so `on_events` cannot classify a return
+from a table — and an unknown leading atom falls through to `:sip`, which the
+sequence diagram draws as an arrow *from the peer*. The namespaces are therefore
+**learned at macro-expansion time**: expanding `sbb_fsm(Block, …)` resolves the
+alias and records `Block.__sbb_namespace__/0` on the calling module, and a face
+module records its own from `__using__` (`SIP.Scenario.register_namespace/2`).
+`on_events` reads the list when it classifies its clauses.
+
+The list is a plain attribute written with read-modify-write, **not**
+`accumulate: true`. It is written and read during expansion, whereas a
+`Module.register_attribute` call placed in `__using__`'s quote runs later, when
+the module body is evaluated — and would clear at that point everything expansion
+had gathered.
+
+### 4bis.3 The context
 
 The block gets the host's `%SIP.Context{}` as it stands — that is the whole
 point. Three things are put back on return: `currentstate` and `laststate` (so
@@ -363,7 +386,7 @@ It is **cleared on every call**, so a serial hunt entering a block target after
 target does not inherit the previous attempt; `resume: true` is the exception,
 for a block designed to be re-entered after an interruption.
 
-### 4bis.3 What the live view shows
+### 4bis.4 What the live view shows
 
 A block's states are reported on the **host's own row** — one call, one row —
 with the state qualified by the block it belongs to: `MyApp.Cancelling/waiting`.
@@ -379,7 +402,7 @@ the block — on the way *out* of `run_sbb/3` the block is already off the stack
 and the report that restores the host's state would otherwise be labelled with
 it. Nesting shows the innermost block, which is where the call actually is.
 
-### 4bis.4 Two rules the compiler enforces
+### 4bis.5 Two rules the compiler enforces
 
 - **`sbb_fsm` is refused inside an `on_events` clause.** That clause's deadline
   is absolute (`SIP.Scenario.deadline/1`), so a block called from one would burn

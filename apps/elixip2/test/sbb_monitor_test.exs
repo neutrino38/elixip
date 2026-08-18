@@ -18,15 +18,17 @@ defmodule SIP.Test.SbbMonitor do
   defmodule Waiting do
     use SIP.SBB
 
+    @sbb_returns [released: "the test let it go — %{}", gave_up: "nobody did — %{}"]
+
     state initial_state do
       goto(holding)
     end
 
     state holding do
       on_events do
-        {:release, _} -> sbb_return({:waiting, :released})
+        {:release, _} -> sbb_return({:waiting, :released, %{}})
       after
-        3_000 -> sbb_return({:waiting, :gave_up})
+        3_000 -> sbb_return({:waiting, :gave_up, %{}})
       end
     end
   end
@@ -36,15 +38,17 @@ defmodule SIP.Test.SbbMonitor do
   defmodule Quiet do
     use SIP.SBB
 
+    @sbb_returns [done: "walked one state of its own and returned — %{}", gave_up: "— %{}"]
+
     state initial_state do
       goto(finishing)
     end
 
     state finishing do
       on_events do
-        {:let_go, _} -> sbb_return({:quiet, :done})
+        {:let_go, _} -> sbb_return({:quiet, :done, %{}})
       after
-        3_000 -> sbb_return({:quiet, :gave_up})
+        3_000 -> sbb_return({:quiet, :gave_up, %{}})
       end
     end
   end
@@ -54,11 +58,13 @@ defmodule SIP.Test.SbbMonitor do
   defmodule Immediate do
     use SIP.SBB
 
+    @sbb_returns [released: "— %{}", gave_up: "— %{}"]
+
     state initial_state do
       on_events do
-        {:release, _} -> sbb_return({:immediate, :released})
+        {:release, _} -> sbb_return({:immediate, :released, %{}})
       after
-        3_000 -> sbb_return({:immediate, :gave_up})
+        3_000 -> sbb_return({:immediate, :gave_up, %{}})
       end
     end
   end
@@ -66,13 +72,15 @@ defmodule SIP.Test.SbbMonitor do
   defmodule Outer do
     use SIP.SBB
 
+    @sbb_returns [done: "the block it called returned — %{}", timeout_of_inner: "— %{}"]
+
     state initial_state do
       sbb_fsm(Waiting)
 
       on_events do
-        {:waiting, _} -> sbb_return({:outer, :done})
+        {:waiting, _, _} -> sbb_return({:outer, :done, %{}})
       after
-        3_000 -> sbb_return({:outer, :timeout})
+        3_000 -> sbb_return({:outer, :timeout_of_inner, %{}})
       end
     end
   end
@@ -94,7 +102,7 @@ defmodule SIP.Test.SbbMonitor do
       sbb_fsm(Waiting)
 
       on_events do
-        {:waiting, _} -> scenario_success("done")
+        {:waiting, _, _} -> scenario_success("done")
       after
         3_000 -> scenario_failure("block never returned")
       end
@@ -108,7 +116,7 @@ defmodule SIP.Test.SbbMonitor do
       sbb_fsm(Immediate)
 
       on_events do
-        {:immediate, _} -> scenario_success("done")
+        {:immediate, _, _} -> scenario_success("done")
       after
         3_000 -> scenario_failure("block never returned")
       end
@@ -122,7 +130,7 @@ defmodule SIP.Test.SbbMonitor do
       sbb_fsm(Outer)
 
       on_events do
-        {:outer, _} -> scenario_success("done")
+        {:outer, _, _} -> scenario_success("done")
       after
         3_000 -> scenario_failure("block never returned")
       end
@@ -264,6 +272,24 @@ defmodule SIP.Test.SbbMonitor do
 
     send(pid, {:release, :now})
     assert :ok = await_outcome()
+  end
+
+  # A block's return is `{namespace, outcome, data}` — two leading atoms — and the
+  # namespace is the block author's word, so no table can list it. `on_events`
+  # recognises the SHAPE and types it :scenario. Without that rule an unknown
+  # leading atom falls through to :sip, and the sequence diagram draws the
+  # block's return as an arrow from the peer: an event that came from nobody,
+  # attributed to the far end.
+  test "a block's return is typed as a scenario event, not as a SIP message",
+       %{slot: slot} do
+    pid = start_scenario(HostWaiting, slot)
+
+    await_state(slot, "#{label(Waiting)}/holding")
+    send(pid, {:release, :now})
+    assert :ok = await_outcome()
+
+    row = await_state(slot, "succeeded")
+    assert row.event_type == :scenario
   end
 
   # A terminal thrown from a block unwinds every run_sbb frame: the outcome is the

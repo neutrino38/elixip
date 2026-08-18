@@ -647,13 +647,18 @@ owns the event loop, on the caller's own context, dialogs and mailbox, until it 
 defmodule MyApp.Cancelling do
   use SIP.SBB
 
-  @sbb_timeout 32_000                             # completion bound (timer B)
-  @sbb_timeout_event {:cancel, :never_concluded}  # what it returns on expiry
+  @sbb_namespace :cancel          # the first element of everything it returns
+  @sbb_returns [
+    confirmed: "the callee answered the CANCEL with a 487 — %{}",
+    answered:  "the callee picked up before the CANCEL arrived — %{code}"
+  ]
+
+  @sbb_timeout 32_000             # completion bound (timer B)
 
   state initial_state do
     on_events do
-      {:outbound, {487, _resp, _t, _d}} -> sbb_return({:cancel, :confirmed})
-      {:outbound, {200, _resp, _t, _d}} -> sbb_return({:cancel, :answered})
+      {:outbound, {487, _resp, _t, _d}} -> sbb_return({:cancel, :confirmed, %{}})
+      {:outbound, {200, _resp, _t, _d}} -> sbb_return({:cancel, :answered, %{code: 200}})
     end
   end
 end
@@ -666,12 +671,20 @@ state cancelling do
   sbb_fsm MyApp.Cancelling
 
   on_events do
-    {:cancel, :confirmed}        -> scenario_aborted("caller cancelled, callee confirmed")
-    {:cancel, :answered}         -> goto releasing, "callee answered after the cancellation"
-    {:cancel, :never_concluded}  -> scenario_aborted("callee never concluded")
+    {:cancel, :confirmed, _}  -> scenario_aborted("caller cancelled, callee confirmed")
+    {:cancel, :answered, _}   -> goto releasing, "callee answered after the cancellation"
+    {:cancel, :timeout, _}    -> scenario_aborted("callee never concluded")
   end
 end
 ```
+
+**What a block returns** is always `{namespace, outcome, data}` — the namespace it declares, an outcome
+atom, and a map. The shape is fixed so a block can learn to report one more thing without breaking the
+scenarios that match it: a new key in `data` is invisible to whoever does not read it, where a fourth tuple
+element would be a compile error everywhere. `@sbb_returns` is the vocabulary, and `sbb_return` refuses an
+outcome that is not in it — at compile time, because the alternative is a host waiting on its `after` for an
+event nobody will send. A bounded block gets `:timeout` in its vocabulary for free, and returns
+`{namespace, :timeout, %{block: module}}` on expiry.
 
 **Macros**
 
@@ -681,8 +694,8 @@ end
   **Only valid in a state body**, never inside an `on_events` clause: that clause's deadline is absolute, so
   a block called from one would burn the host's remaining timeout while it runs. Give the block its own
   state — the compiler says so if you forget.
-- `sbb_return(event)` — end the block, posting `event` to the process and handing control back to the state
-  that called it. This, not `scenario_success`, is how a block returns.
+- `sbb_return({namespace, outcome, data})` — end the block, posting the event to the process and handing
+  control back to the state that called it. This, not `scenario_success`, is how a block returns.
 - `sbb_data_get(key)` / `sbb_data_set(key, value)` — the block's private sandbox. `appdata` itself is shared
   with the host, which is the point; the sandbox is what cannot collide with a host key of the same name.
 

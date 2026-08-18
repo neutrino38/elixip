@@ -309,6 +309,57 @@ end
   try — a clean ending silently becoming an `exit()` that kills the host. With
   `sbb_return`, no verb changes meaning depending on where it is written.
 
+#### S2 — the shape of a return
+
+Every block returns **`{namespace, outcome, data}`**: the namespace it declares,
+an outcome atom, a map. Decided 2026-08-18, and the two halves are decided for
+different reasons.
+
+**The arity is fixed because S13 needs it.** The article's vocabulary was
+`{:call, :connected, uri}` next to `{:call, :rejected, code, reason}` next to
+`{:call, :cancelled}` — three arities for one block. Teaching that block to
+report one more thing then means a fourth element, which is a compile error in
+every scenario matching the old one. A key added to a map is invisible to
+whoever does not read it. That is the whole of "upgrade without touching
+scenarios", in the one place it is cheap to get right.
+
+**The namespace leads because the host reads patterns.** `{:call, :connected, _}`
+says what happened at a glance, and two blocks called from the same state are
+told apart by their first element, as everything else in `on_events` is.
+
+The cost is one thing the framework cannot do for itself: a namespace is the
+block author's word, so no table in `SIP.Scenario` can list them, and an unknown
+leading atom otherwise reads as a SIP method — which would draw a block's return
+in the sequence diagram as an arrow *from the peer*, an event that came from
+nobody, attributed to the far end. So the namespaces are **learned**: expanding
+`sbb_fsm(Block, …)` teaches the scenario the namespace that block declares, and a
+face module teaches its own in `__using__`. Both happen at macro-expansion time,
+before the `on_events` that will match the return.
+
+#### S2 — what a block declares about itself
+
+A block declares its vocabulary, and the declaration is load-bearing rather than
+documentary:
+
+```elixir
+@sbb_namespace :call
+@sbb_returns [
+  connected: "the callee answered — %{uri, code}",
+  rejected:  "a final ≥ 300 — %{code, reason}",
+  cancelled: "the caller gave up and the callee confirmed — %{}"
+]
+```
+
+- `sbb_return/1` **refuses an outcome that is not declared**, at compile time.
+  The failure it prevents is the reason: a mistyped outcome does not crash, it
+  leaves the host waiting on its `after` for an event nobody will ever send —
+  thirty seconds of silence and nothing in the log;
+- a bounded block gets `:timeout` in its vocabulary for free, and returns
+  `{namespace, :timeout, %{block: module}}`, so the deadline is an outcome like
+  any other rather than a special case the host has to know about;
+- `__sbb_returns__/0` is the machine-readable half: what a block can send is
+  available to whatever wants to show it.
+
 ### 4.2 What the specimen requires (S3–S5)
 
 - **S3 — the host names the exits.** An SBB never terminates the host on a
@@ -510,8 +561,8 @@ The spec is met when both of these hold:
 
 1. the article's target scenario compiles and runs as written — a
    `place_call` state whose body is one `SBB.Call.call(...)` plus an
-   `on_events` over `{:call, :connected, _}`, `{:call, :rejected, _, _}`,
-   `{:call, :cancelled}` and `{:dialog_terminated, _, _}` — against a real
+   `on_events` over `{:call, :connected, _}`, `{:call, :rejected, _}`,
+   `{:call, :cancelled, _}` and `{:dialog_terminated, _, _}` — against a real
    callee, cancel race included. The article wrote one block where §5.1 now has
    two, so the criterion covers `bridge()` as well: the `connected` state that
    follows collapses the same way;
@@ -568,16 +619,16 @@ scripts already cut along is a decision of 2026-08-18, designed in
 
 - **`call(dest, opts)` — establishment.** Places the outbound leg, absorbs the
   provisionals, hunts serially over the peer's targets, and owns the cancel race
-  of §3 and timer H. Returns `{:call, :connected, uri}` /
-  `{:call, :rejected, code, reason}` / `{:call, :cancelled}` /
-  `{:call, :answered_after_cancel}`. This is the one that turns the 310-line
+  of §3 and timer H. Namespace `:call`; outcomes `:connected` (`%{uri, code}`),
+  `:rejected` (`%{code, reason}`), `:cancelled` (`%{}`), `:answered_after_cancel`
+  (`%{uri}`), `:timeout` (`%{}`). This is the one that turns the 310-line
   Alice-calls-Bob scenario into the four-arm version;
 - **`bridge(opts)` — the established call.** The `connected` state's arms
   (re-INVITE, UPDATE, ACK, INFO, MESSAGE, REFER, the responses) plus
   `wait_far_bye_ok`: protocol plumbing written out in full in every B2BUA
-  script, and carrying no policy whatsoever. Returns `{:bridge, :ended, by}` /
-  `{:bridge, :max_duration}` — and `{:bridge, :interrupted, message}` on
-  `{:bridge_break, message}`, so a host can take the call back for a moment
+  script, and carrying no policy whatsoever. Namespace `:bridge`; outcomes
+  `:ended` (`%{by}`), `:max_duration` (`%{}`), and `:interrupted` (`%{message}`)
+  on `{:bridge_break, message}`, so a host can take the call back for a moment
   (play a prompt, consult a backend) and re-enter with `bridge(resume: true)`
   without ever tearing the call down. **It is the one block that is not bounded
   by a timer** (S7): a call lasts as long as it lasts, so `bridge()` declares

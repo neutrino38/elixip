@@ -272,7 +272,9 @@ An SBB is written in FSL, so it needs `state`, `on_events`, `goto`, the session
 mixins — everything `use SIP.Scenario` injects. It differs in three ways:
 
 - it gains `sbb_return/1` and loses nothing else;
-- it declares `__sbb__/0` returning `true`;
+- it declares `__sbb__/0` returning `true`, and its vocabulary alongside it —
+  `__sbb_namespace__/0`, `__sbb_returns__/0` (with `:timeout` folded in when the
+  block is bounded), `__sbb_timeout__/0`, `__sbb_timeout_event__/0`;
 - **it does not define `run/1`.**
 
 That last point is not tidiness. `SIP.Scenario.Loader.scenario_module?/1` is:
@@ -325,9 +327,11 @@ rather than discovered:
 
 `sbb_fsm(module, timeout: 30_000)`, defaulting to a module-level
 `@sbb_timeout` the SBB declares, itself defaulting to 32 s — timer B, the bound
-§3 of the spec derives. On expiry `run_sbb/3` returns the timeout event the SBB
-declares (`@sbb_timeout_event`, default `{:sbb_timeout, module}`) exactly as if
-the SBB had returned it, so the host has one arm to write and no special case.
+§3 of the spec derives. On expiry `run_sbb/3` returns
+`{namespace, :timeout, %{block: module}}` exactly as if the SBB had returned it,
+so the host has one arm to write and no special case; `@sbb_timeout_event`
+overrides it, and the default already follows the return contract rather than
+leaving each block to remember it.
 
 Implementation: `run_sbb/3` arms `Process.send_after(self(), {:sbb_deadline,
 ref}, timeout)` and `on_events` injects a clause matching it into every state of
@@ -364,8 +368,12 @@ One block per side of that seam:
 
 | Block | Absorbs | Returns |
 |---|---|---|
-| `call(dest, opts)` | `place_call`, `proceeding`, the provisionals, the serial hunt, `cancelling`, `wait_ack` | `{:call, :connected, uri}` · `{:call, :rejected, code, reason}` · `{:call, :cancelled}` · `{:call, :answered_after_cancel}` · `{:call, :timeout}` |
-| `bridge(opts)` | `connected`, `wait_far_bye_ok` | `{:bridge, :ended, by}` · `{:bridge, :interrupted, message}` · `{:bridge, :max_duration}` |
+| `call(opts)` | `place_call`, `proceeding`, the provisionals, the serial hunt, `cancelling`, `wait_ack` | `:connected` `%{uri, code}` · `:rejected` `%{code, reason}` · `:cancelled` `%{}` · `:answered_after_cancel` `%{uri}` · `:timeout` `%{}` |
+| `bridge(opts)` | `connected`, `wait_far_bye_ok` | `:ended` `%{by}` · `:interrupted` `%{message}` · `:max_duration` `%{}` |
+
+Both under the return contract of the spec (`{namespace, outcome, data}`), so the
+table lists outcomes and the keys their map carries: `call()` speaks `:call`,
+`bridge()` speaks `:bridge`.
 
 What the host keeps is what varies across the six copies, exactly as S3–S5
 require: the exit it names (`goto releasing` for the media scenarios,
@@ -438,7 +446,14 @@ Both blocks live in **`:elixip2`**, under one face module exporting both verbs:
 
 ```elixir
 defmodule SBB.Call do
-  defmacro __using__(_opts), do: quote(do: import(SBB.Call))
+  defmacro __using__(_opts) do
+    # Teach the scenario the namespaces of the blocks it is about to call, so
+    # `on_events` classifies their returns even in a state written before the
+    # call site (spec, "the shape of a return").
+    SIP.Scenario.register_namespace(__CALLER__.module, :call)
+    SIP.Scenario.register_namespace(__CALLER__.module, :bridge)
+    quote(do: import(SBB.Call))
+  end
 
   defmacro call(opts \\ []) do
     quote do: sbb_fsm(SBB.Call.Establish, unquote(opts))
@@ -450,11 +465,15 @@ defmodule SBB.Call do
 
   defmodule Establish do
     use SIP.SBB
+    @sbb_namespace :call
+    @sbb_returns [connected: "…", rejected: "…", cancelled: "…"]
     # …
   end
 
   defmodule Bridge do
     use SIP.SBB
+    @sbb_namespace :bridge
+    @sbb_returns [ended: "…", interrupted: "…", max_duration: "…"]
     @sbb_timeout :infinity
     # …
   end
@@ -602,4 +621,11 @@ difference rather than as a scenario that was always odd.
 - **an Elixir `fx.task` counterpart.** Real gap, wrong occasion — §6.3;
 - **concurrent SBBs.** One point of control, by construction (S12);
 - **an SBB owning legs of its own.** That is `spawn_fsm`, and the frontier is in
-  §4.5 of the spec.
+  §4.5 of the spec;
+- **telling a host it has not handled one of a block's outcomes.** The material
+  is now there — `__sbb_returns__/0` says what can arrive, and the `state` macro
+  sees both the `sbb_fsm` call and the sibling `on_events` — but it is the first
+  step of a much bigger idea (introspecting a scenario for missing transitions)
+  and it is deliberately not started here. If it ever is, it is a **warning**:
+  S9 says a block never carries a mandatory reaction, and letting an outcome fall
+  through to `after` can be exactly what the host means.

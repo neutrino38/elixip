@@ -150,9 +150,31 @@ defmodule SIP.Scenario do
           def __sbb_timeout__, do: @sbb_timeout
 
           @doc false
+          # The block's namespace: the first element of everything it returns.
+          def __sbb_namespace__, do: @sbb_namespace
+
+          @doc false
+          # outcome -> description. `:timeout` is added when the block is bounded,
+          # because the host can receive it whether or not the author listed it.
+          def __sbb_returns__ do
+            if @sbb_timeout == :infinity do
+              @sbb_returns
+            else
+              Keyword.put_new(
+                @sbb_returns,
+                :timeout,
+                "the block's own deadline expired before it concluded"
+              )
+            end
+          end
+
+          @doc false
           # What the block returns when that deadline expires, so the host has one
-          # arm to write and no special case.
-          def __sbb_timeout_event__, do: @sbb_timeout_event
+          # arm to write and no special case. Follows the return contract like any
+          # other outcome, which is why it has a default rather than a convention.
+          def __sbb_timeout_event__ do
+            @sbb_timeout_event || {@sbb_namespace, :timeout, %{block: __MODULE__}}
+          end
         end
       else
         # An SBB deliberately does NOT define run/1: `SIP.Scenario.Loader` picks the
@@ -364,6 +386,11 @@ defmodule SIP.Scenario do
     Enum.each(do_clauses, &warn_deprecated_event(&1, __CALLER__))
     Enum.each(do_clauses, &check_no_sbb_call!(&1, __CALLER__))
 
+    # What this module has learned about the blocks it calls (see
+    # register_sbb_namespace/2): read once, here, because the clauses below are
+    # rewritten by pure functions that have no caller to consult.
+    namespaces = Module.get_attribute(__CALLER__.module, :sbb_namespaces) || []
+
     # A service building block carries a completion deadline (S7), armed by
     # `run_sbb/3` as a timer message. Only a clause can wake a blocked `receive`,
     # so every on_events of an SBB gets one — prepended, like the two below, so a
@@ -377,7 +404,8 @@ defmodule SIP.Scenario do
     # Make every on_events cooperatively shutdown-aware: prepend a clause matching
     # the control message, unless the scenario already handles :scenario_ctl
     # itself. Prepending keeps it ahead of a possible catch-all `_ ->` clause.
-    ctl_clauses = if Enum.any?(do_clauses, &ctl_clause?/1), do: [], else: [shutdown_clause()]
+    ctl_clauses =
+      if Enum.any?(do_clauses, &ctl_clause?(&1, namespaces)), do: [], else: [shutdown_clause()]
 
     # …and media-server-death-aware, the same way and for the same reason
     # (design docs/design/DESIGN-FRAMEWORK.md#67-the-media-server-as-a-failure-domain, R8). `:server_disconnected` is
@@ -402,9 +430,9 @@ defmodule SIP.Scenario do
     instrumented =
       Enum.map(
         sbb_clauses ++ media_clauses ++ ctl_clauses,
-        &instrument_receive_clause(&1, nil, nil)
+        &instrument_receive_clause(&1, nil, nil, namespaces)
       ) ++
-        Enum.map(do_clauses, &instrument_receive_clause(&1, wait, deadline))
+        Enum.map(do_clauses, &instrument_receive_clause(&1, wait, deadline, namespaces))
 
     {timeout_ast, new_blocks} =
       case Keyword.fetch(blocks, :after) do
@@ -487,8 +515,10 @@ defmodule SIP.Scenario do
   defp calls_sbb_fsm?(_other), do: false
 
   # Does this receive clause already match a {:scenario_ctl, ...} control message?
-  defp ctl_clause?({:->, _meta, [head, _body]}), do: clause_event_type(head) == :control
-  defp ctl_clause?(_), do: false
+  defp ctl_clause?({:->, _meta, [head, _body]}, namespaces),
+    do: clause_event_type(head, namespaces) == :control
+
+  defp ctl_clause?(_clause, _namespaces), do: false
 
   # The auto-injected cooperative-shutdown clause: jump to the reserved
   # :__shutdown__ state, which the runner resolves to `on_shutdown` (if declared)
@@ -676,11 +706,59 @@ defmodule SIP.Scenario do
   host's remaining timeout while it runs. Give the block its own state.
   """
   defmacro sbb_fsm(module, opts \\ []) do
+    register_sbb_namespace(module, __CALLER__)
+
     quote do
       var!(sip_ctx) =
         SIP.Scenario.Runner.run_sbb(var!(sip_ctx), unquote(module), unquote(opts))
     end
   end
+
+  @doc false
+  # Called by a face module's `__using__` so that `use SBB.Call` teaches the
+  # scenario the namespaces of the blocks it is about to call, for the whole
+  # module rather than from this state on.
+  #
+  # Read-modify-write on a plain attribute rather than `accumulate: true`,
+  # deliberately: this list is written and read during macro EXPANSION, while a
+  # `Module.register_attribute` call sitting in `__using__`'s quote is executed
+  # later, when the module body is evaluated — and it would clear, at that point,
+  # everything expansion had gathered. The list stays a list because nothing else
+  # ever touches this attribute.
+  def register_namespace(caller_module, namespace) when is_atom(namespace) do
+    known = Module.get_attribute(caller_module, :sbb_namespaces) || []
+
+    unless namespace in known do
+      Module.put_attribute(caller_module, :sbb_namespaces, [namespace | known])
+    end
+  end
+
+  # A block's return starts with the namespace its author chose, so no table in
+  # the framework can list them: they are learned from the blocks this module
+  # actually calls. `sbb_fsm` expands before the `on_events` that handles its
+  # return — in the same state, or in a later one — so the namespace is known by
+  # the time the clause is classified. When it is not (a computed module, a block
+  # not compiled yet, a host handling the return in an EARLIER state), the clause
+  # falls back to the old reading and nothing breaks but a colour.
+  defp register_sbb_namespace(module_ast, caller) do
+    with {:ok, module} <- expand_module(module_ast, caller),
+         true <- Code.ensure_loaded?(module),
+         true <- function_exported?(module, :__sbb_namespace__, 0) do
+      register_namespace(caller.module, module.__sbb_namespace__())
+    end
+
+    :ok
+  end
+
+  defp expand_module({:__aliases__, _meta, _parts} = alias_ast, caller) do
+    case Macro.expand(alias_ast, caller) do
+      module when is_atom(module) -> {:ok, module}
+      _other -> :error
+    end
+  end
+
+  defp expand_module(module, _caller) when is_atom(module), do: {:ok, module}
+  defp expand_module(_other, _caller), do: :error
 
   @doc """
   End this service building block, posting `event` to the process and handing
@@ -696,9 +774,81 @@ defmodule SIP.Scenario do
   falls through leaves the host waiting for an event nobody will send.
   """
   defmacro sbb_return(event) do
+    check_sbb_return!(event, __CALLER__)
+
     quote do
       {:sbb_return, unquote(event), var!(sip_ctx)}
     end
+  end
+
+  # The return contract (service-building-block.md#s2--the-shape-of-a-return),
+  # checked wherever a literal makes it checkable: a block returns
+  # `{namespace, outcome, data}`, the namespace is its own, and the outcome is
+  # one it declares in `@sbb_returns`.
+  #
+  # Worth a compile error rather than a runtime one because of how this fails
+  # otherwise: a mistyped outcome is not a crash, it is a host sitting on its
+  # `after` waiting for an event nobody will ever send — a thirty-second silence
+  # with nothing in the log. A computed event is left alone; the check is on what
+  # can be read.
+  defp check_sbb_return!(event, caller) do
+    if Module.get_attribute(caller.module, :scenario_kind) == :sbb do
+      namespace = Module.get_attribute(caller.module, :sbb_namespace)
+      declared = Module.get_attribute(caller.module, :sbb_returns) || []
+      check_sbb_return_shape!(event, namespace, Keyword.keys(declared), caller)
+    end
+  end
+
+  # A three-element tuple is `{:{}, meta, elements}` in AST; a two-element one is
+  # a plain tuple. Everything else — a variable, a call, a case — is computed.
+  defp check_sbb_return_shape!({:{}, meta, [ns, outcome, _data]}, namespace, declared, caller)
+       when is_atom(ns) do
+    if ns != namespace do
+      sbb_return_error!(
+        meta,
+        caller,
+        "sbb_return: this block's namespace is #{inspect(namespace)}, not #{inspect(ns)}. " <>
+          "Every event a block returns starts with its own namespace, so a host can tell " <>
+          "two blocks apart; set @sbb_namespace if #{inspect(ns)} is the intended one."
+      )
+    end
+
+    if is_atom(outcome) and declared != [] and outcome not in declared do
+      sbb_return_error!(
+        meta,
+        caller,
+        "sbb_return: #{inspect(outcome)} is not one of this block's declared outcomes " <>
+          "(#{Enum.map_join(declared, ", ", &inspect/1)}). Add it to @sbb_returns, with a " <>
+          "line saying what it means and what its data map carries."
+      )
+    end
+  end
+
+  defp check_sbb_return_shape!({ns, outcome}, _namespace, _declared, caller) when is_atom(ns) do
+    sbb_return_error!(
+      [],
+      caller,
+      "sbb_return: a block returns {namespace, outcome, data} — three elements, the last a " <>
+        "map. Write {#{inspect(ns)}, #{Macro.to_string(outcome)}, %{}}: a fixed shape is what " <>
+        "lets a block report one more thing later without breaking the scenarios that match it."
+    )
+  end
+
+  defp check_sbb_return_shape!(event, _namespace, _declared, caller) when is_atom(event) do
+    sbb_return_error!(
+      [],
+      caller,
+      "sbb_return: a block returns {namespace, outcome, data}, not a bare #{inspect(event)}."
+    )
+  end
+
+  defp check_sbb_return_shape!(_event, _namespace, _declared, _caller), do: :ok
+
+  defp sbb_return_error!(meta, caller, description) do
+    raise CompileError,
+      file: caller.file,
+      line: Keyword.get(meta, :line, caller.line),
+      description: description
   end
 
   @doc """
@@ -807,9 +957,9 @@ defmodule SIP.Scenario do
   #   3. wrap the clause result: a `{:stay, …}` descriptor re-enters the wait
   #      closure with the context the clause produced, so appdata mutations
   #      survive; anything else is a transition and propagates to the runner.
-  defp instrument_receive_clause({:->, meta, [head, body]}, wait, deadline) do
+  defp instrument_receive_clause({:->, meta, [head, body]}, wait, deadline, namespaces) do
     # Compute the type from the ORIGINAL head, before the as-pattern rewrite.
-    type = clause_event_type(head)
+    type = clause_event_type(head, namespaces)
     evt = Macro.unique_var(:evt, __MODULE__)
 
     new_body =
@@ -964,14 +1114,27 @@ defmodule SIP.Scenario do
 
   # The clause head is a one-element list holding the pattern, optionally wrapped
   # in a `when` guard.
-  defp clause_event_type([{:when, _meta, [pattern | _guards]}]), do: pattern_event_type(pattern)
-  defp clause_event_type([pattern]), do: pattern_event_type(pattern)
-  defp clause_event_type(_), do: nil
+  defp clause_event_type([{:when, _meta, [pattern | _guards]}], ns),
+    do: pattern_event_type(pattern, ns)
+
+  defp clause_event_type([pattern], ns), do: pattern_event_type(pattern, ns)
+  defp clause_event_type(_, _ns), do: nil
 
   # Tuples with 0, 1 or 3+ elements are `{:{}, _, elems}`; 2-tuples are literal.
-  defp pattern_event_type({:{}, _meta, [first | _rest]}), do: first_element_type(first)
-  defp pattern_event_type({first, _second}), do: first_element_type(first)
-  defp pattern_event_type(_), do: nil
+  #
+  # A service building block returns `{namespace, outcome, data}`, and the
+  # namespace is the block author's word — hence `namespaces`, learned from the
+  # blocks this module calls rather than listed here. It matters beyond the
+  # colour in the monitor: a `:sip` event is drawn in the sequence diagram as an
+  # arrow FROM THE PEER, and a block's return came from nobody.
+  defp pattern_event_type({:{}, _meta, [first, _outcome, _data]}, namespaces)
+       when is_atom(first) do
+    if first in namespaces, do: :scenario, else: first_element_type(first)
+  end
+
+  defp pattern_event_type({:{}, _meta, [first | _rest]}, _ns), do: first_element_type(first)
+  defp pattern_event_type({first, _second}, _ns), do: first_element_type(first)
+  defp pattern_event_type(_, _ns), do: nil
 
   # Media events are `{:ms_event, ...}`; inter-FSM messages are `{:parent_msg,
   # ...}` / `{:child_msg, ...}` / `{:child_exit, ...}`; control messages are
