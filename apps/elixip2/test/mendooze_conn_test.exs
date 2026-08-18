@@ -666,7 +666,8 @@ defmodule Mendooze.ConnTest do
 
     assert {:ok, _answer} = Mendooze.set_remote_offer(conn, av1_first_offer())
 
-    assert_receive {:jsr309_call, "EndpointStartSending", [3, 4, 1, "10.9.8.7", 40_002, send_map]},
+    assert_receive {:jsr309_call, "EndpointStartSending",
+                    [3, 4, 1, "10.9.8.7", 40_002, send_map]},
                    1_000
 
     # AV1 is the caller's preference and stays first in the answer, but H.264 and
@@ -702,7 +703,8 @@ defmodule Mendooze.ConnTest do
 
     assert {:ok, _answer} = Mendooze.set_remote_offer(conn, offer)
 
-    assert_receive {:jsr309_call, "EndpointStartSending", [3, 4, 1, "10.9.8.7", 40_002, send_map]},
+    assert_receive {:jsr309_call, "EndpointStartSending",
+                    [3, 4, 1, "10.9.8.7", 40_002, send_map]},
                    1_000
 
     # One entry, and it is the payload type the caller listed first.
@@ -729,7 +731,8 @@ defmodule Mendooze.ConnTest do
 
     assert {:ok, _answer} = Mendooze.set_remote_offer(conn, av1_first_offer())
 
-    assert_receive {:jsr309_call, "EndpointStartSending", [3, 4, 1, "10.9.8.7", 40_002, send_map]},
+    assert_receive {:jsr309_call, "EndpointStartSending",
+                    [3, 4, 1, "10.9.8.7", 40_002, send_map]},
                    1_000
 
     {:ok, _offer} = Mendooze.get_local_offer(out)
@@ -2307,6 +2310,68 @@ defmodule Mendooze.ConnTest do
              "remb" => "1",
              "natLatch" => "1"
            }
+  end
+
+  # `[mediaserver] bitrate_feedback` narrows which dialects the answer confirms.
+  # An empty list is the OPEN-LOOP rate-control measurement (mediaserver
+  # rate_control_plan.md, lot 3): no bitrate target leaves towards the peer, so the
+  # incoming rate stops depending on what we estimate. Naming one dialect isolates
+  # one feedback path. In every case the rest of the answer is untouched — dropping
+  # the wrong attribute would silently cost the call its loss recovery.
+  for {allowed, kept, dropped} <- [
+        {[], [], ["goog-remb", "ccm tmmbr"]},
+        {[:remb], ["goog-remb"], ["ccm tmmbr"]},
+        {[:tmmbr], ["ccm tmmbr"], ["goog-remb"]},
+        {[:remb, :tmmbr], ["goog-remb", "ccm tmmbr"], []}
+      ] do
+    test "bitrate_feedback #{inspect(allowed)} answers #{inspect(kept)} and nothing else" do
+      allowed = unquote(allowed)
+      kept = unquote(kept)
+      dropped = unquote(dropped)
+
+      block = Application.get_env(:elixip2, MediaServer.Mendooze, [])
+
+      Application.put_env(
+        :elixip2,
+        MediaServer.Mendooze,
+        Keyword.put(block, :bitrate_feedback, allowed)
+      )
+
+      on_exit(fn -> Application.put_env(:elixip2, MediaServer.Mendooze, block) end)
+
+      %{server: server} = start_media_server()
+      {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :video)
+
+      offer = """
+      v=0
+      o=- 1 1 IN IP4 10.0.0.9
+      s=-
+      c=IN IP4 10.0.0.9
+      t=0 0
+      m=video 40002 RTP/AVPF 99
+      a=rtpmap:99 H264/90000
+      a=rtcp-fb:* nack
+      a=rtcp-fb:* ccm fir
+      a=rtcp-fb:* ccm tmmbr
+      a=rtcp-fb:* goog-remb
+      """
+
+      assert {:ok, answer} = Mendooze.set_remote_offer(conn, offer)
+
+      for type <- kept, do: assert(answer =~ "a=rtcp-fb:99 #{type}")
+      for type <- dropped, do: refute(answer =~ type)
+
+      # The feedback that has nothing to do with rate control is never touched.
+      assert answer =~ "a=rtcp-fb:99 nack"
+      assert answer =~ "a=rtcp-fb:99 ccm fir"
+
+      # And the server-side switches follow the same set, never the offer's.
+      assert_receive {:jsr309_call, "EndpointSetRTPProperties", [_, _, _, props]}
+      assert Map.has_key?(props, "remb") == :remb in allowed
+      assert Map.has_key?(props, "tmmbr") == :tmmbr in allowed
+      assert props["useNACK"] == "1"
+      assert props["useRtcpFIR"] == "1"
+    end
   end
 
   # The assumed RFC 4585 §4 deviation (see answered_rtcp_fb/1): endpoints such as

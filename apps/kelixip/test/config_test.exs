@@ -158,6 +158,66 @@ defmodule Kelix.ConfigTest do
     end
   end
 
+  describe "parse/1 — [mediaserver] bitrate_feedback" do
+    test "defaults to both dialects, the production value" do
+      {:ok, cfg} = Config.parse("[server]\nscript_dir = \"/tmp\"")
+      assert cfg.mediaserver_bitrate_feedback == [:remb, :tmmbr]
+
+      {:ok, cfg} = Config.parse("[mediaserver]\nvideo_bitrate = 2000")
+      assert cfg.mediaserver_bitrate_feedback == [:remb, :tmmbr]
+    end
+
+    # The four values an operator writes. Naming one dialect isolates one feedback
+    # path; `none` is the open-loop rate-control measurement.
+    test "the four documented forms decode" do
+      for {written, expected} <- [
+            {"none", []},
+            {"tmmbr", [:tmmbr]},
+            {"goog-remb", [:remb]},
+            {"goog-remb, tmmbr", [:remb, :tmmbr]}
+          ] do
+        {:ok, cfg} = Config.parse("[mediaserver]\nbitrate_feedback = \"#{written}\"")
+
+        assert cfg.mediaserver_bitrate_feedback == expected,
+               "`#{written}` decoded to #{inspect(cfg.mediaserver_bitrate_feedback)}"
+      end
+    end
+
+    # Hand-written config: order and spacing must not matter, or the operator gets
+    # a parse error for a value that says exactly what the documented one says.
+    test "order and spacing are free" do
+      {:ok, cfg} = Config.parse("[mediaserver]\nbitrate_feedback = \"tmmbr,goog-remb\"")
+      assert Enum.sort(cfg.mediaserver_bitrate_feedback) == [:remb, :tmmbr]
+    end
+
+    test "anything else is named, not ignored" do
+      assert {:error, msg} = Config.parse("[mediaserver]\nbitrate_feedback = \"remb\"")
+      assert msg =~ "[mediaserver]: `bitrate_feedback` must be"
+
+      assert {:error, msg} = Config.parse("[mediaserver]\nbitrate_feedback = \"\"")
+      assert msg =~ "[mediaserver]: `bitrate_feedback` must be"
+
+      assert {:error, msg} = Config.parse("[mediaserver]\nbitrate_feedback = false")
+      assert msg =~ "[mediaserver]: `bitrate_feedback` must be a string"
+    end
+
+    # Asking for none of one thing and some of another is a typo, not an intent.
+    test "none cannot be combined with a dialect" do
+      assert {:error, msg} = Config.parse("[mediaserver]\nbitrate_feedback = \"none, tmmbr\"")
+      assert msg =~ "cannot combine `none` with a dialect"
+    end
+
+    test "it rides the Mendooze tuning block, next to the video bitrate" do
+      {:ok, cfg} =
+        Config.parse("[mediaserver]\nbitrate_feedback = \"none\"\nvideo_bitrate = 3000")
+
+      :ok = Config.apply_app_env(cfg)
+      block = Application.get_env(:elixip2, MediaServer.Mendooze, [])
+      assert Keyword.get(block, :bitrate_feedback) == []
+      assert Keyword.get(block, :video_bandwidth_kbps) == 3000
+    end
+  end
+
   describe "parse/1 — [mediaserver] video_bitrate" do
     test "absent → 1500 kb/s, the node's default for both media paths" do
       assert {:ok, cfg} = Config.parse("")

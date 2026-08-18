@@ -134,6 +134,19 @@ defmodule MediaServer.Mendooze.Conn do
     "goog-remb" => "remb"
   }
 
+  # The two dialects that carry a bitrate target back to the sender, and the name
+  # `[mediaserver] bitrate_feedback` allows each by. Narrowing that list drops the
+  # others from the answer, which is what an OPEN-LOOP measurement needs: with
+  # nothing leaving towards the peer, the source keeps emitting at its own rate and
+  # the incoming bitrate stops depending on our estimate. It is the only
+  # configuration in which the server's recovery time measures its own estimator
+  # rather than the loop it forms with the browser's congestion control — five
+  # closed-loop sessions (mediaserver rate_control_plan.md, lot 3) could not tell
+  # the two apart. Naming one dialect isolates one path; naming none leaves the call
+  # without any congestion control from us, so production wants both.
+  @rate_control_rtcp_fb %{"goog-remb" => :remb, "ccm tmmbr" => :tmmbr}
+  @default_bitrate_feedback [:remb, :tmmbr]
+
   # Text-over-WebSocket codecs proposed to the media server: T.140 and its RFC
   # 4103 redundancy. The rtpMap is what switches redundancy on server-side
   # (`Endpoint::StartReceiving` case WS), and it is on the RTP leg facing us that
@@ -2880,8 +2893,21 @@ defmodule MediaServer.Mendooze.Conn do
   # asks for no usable feedback still gets none back.
   defp answered_rtcp_fb(desc) do
     if desc.type == :video,
-      do: requested_rtcp_fb(desc),
+      do: drop_rate_control_fb(requested_rtcp_fb(desc)),
       else: false
+  end
+
+  defp drop_rate_control_fb(types) do
+    allowed =
+      Application.get_env(:elixip2, MediaServer.Mendooze, [])
+      |> Keyword.get(:bitrate_feedback, @default_bitrate_feedback)
+
+    Enum.filter(types, fn type ->
+      case Map.fetch(@rate_control_rtcp_fb, type) do
+        {:ok, dialect} -> dialect in allowed
+        :error -> true
+      end
+    end)
   end
 
   # ── Answer-side security material ────────────────────────────────────────────
