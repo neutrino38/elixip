@@ -613,7 +613,7 @@ defmodule SIP.DialogImpl do
   # to end an established dialog), so the framework does it rather than leaving
   # every scenario to remember. A scenario that wants to *observe* the race — it
   # is a billable event — still can; this is the floor, not the ceiling (see
-  # docs/design/service-building-block.md).
+  # docs/design/DESIGN-SBB.md).
   #
   # No waiting is involved, and that is the point: the dialog outlives its
   # application, so it is simply here when the answer arrives.

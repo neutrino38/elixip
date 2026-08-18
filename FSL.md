@@ -602,7 +602,7 @@ end
 > **Renamed in 1.5.0.** These were `{:scenario_msg, from_name, payload}` — both directions, told apart by
 > `from_name` — and `{:scenario_exit, …}`. The new names say the direction, and match `parent:msg` /
 > `child:msg` / `child:exit` of the TypeScript FSL (see
-> [docs/design/service-building-block.md](docs/design/service-building-block.md), §4.6). A message cannot
+> [docs/design/DESIGN-SBB.md](docs/design/DESIGN-SBB.md), §4.6). A message cannot
 > carry a deprecated alias the way a macro can, so a scenario matching an old shape would simply never be
 > woken: `on_events` reports it as a **compile-time warning** naming the replacement.
 
@@ -744,8 +744,8 @@ meant to be **re-entered**: `{:bridge_break, message}` hands the call back untou
 `bridge(resume: true)` picks it up. Between the two, in-dialog traffic keeps arriving and nothing answers
 it: an unanswered re-INVITE runs at timer B, so that interval is the scale of a prompt, not of a decision.
 
-Specification and catalogue: [docs/design/service-building-block.md](docs/design/service-building-block.md).
-Design: [docs/design/service-building-block-design.md](docs/design/service-building-block-design.md).
+Specification and catalogue: [docs/design/DESIGN-SBB.md](docs/design/DESIGN-SBB.md).
+Design: [docs/design/DESIGN-SBB.md](docs/design/DESIGN-SBB.md).
 
 ## The scenario context: sip_ctx
 

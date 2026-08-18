@@ -162,19 +162,15 @@ outcome.
 ## 6. Authentication
 
 Digest with `qop=auth`, realm = the domain. The nonce is the framework's
-stateless one ([DESIGN-SIPSTACK.md](DESIGN-SIPSTACK.md) §6): unforgeable,
-verified by recomputation, never stored. `Kelix.NonceCache` adds the one piece
-statelessness cannot give — the `nc` counter for replay detection — as an ETS
-table with a TTL equal to the nonce's max age.
-
-`SIP.Auth.Secret` keys the nonce and is regenerated at boot, which costs one
-`stale=true` round trip after a restart and is designed to become a shared secret
-across nodes.
+stateless one ([DESIGN-SIPSTACK.md](DESIGN-SIPSTACK.md#6-authentication));
+`Kelix.NonceCache` adds the one piece statelessness cannot give — the `nc`
+counter for replay detection — as an ETS table with a TTL equal to the nonce's
+max age.
 
 Deciding **whether** to challenge and against which credential store is the
 `auth_db` module's business, invoked from the script. Which realm, which identity
-the digest is held to, and which requests are challengeable at all are
-[DESIGN-AUTH.md](DESIGN-AUTH.md).
+the digest is held to, which requests are challengeable at all, and which module
+mints, validates and keys the nonce are [DESIGN-AUTH.md](DESIGN-AUTH.md).
 
 ---
 

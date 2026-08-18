@@ -2,7 +2,7 @@
 
 ## What is built
 
-Six documents, one per layer or artifact. Each describes what is **implemented,
+Eight documents, one per layer or artifact. Each describes what is **implemented,
 tested and running**, and why it is built that way.
 
 | Document | Covers |
@@ -14,6 +14,7 @@ tested and running**, and why it is built that way.
 | [DESIGN-KELIXIP.md](DESIGN-KELIXIP.md) | the kelixip server and its module system |
 | [DESIGN-MCU.md](DESIGN-MCU.md) | the conferencing module |
 | [DESIGN-AUTH.md](DESIGN-AUTH.md) | what kelixip challenges: which realm, which identity, 401 vs 407, which requests |
+| [DESIGN-SBB.md](DESIGN-SBB.md) | service building blocks: the engine, the return contract, `call` and `bridge` |
 
 Each ends with an **Invariants** section: the short list of rules that must not
 be broken, each one traceable to an incident that cost something.
@@ -32,8 +33,7 @@ The user-facing counterparts live at the repository root —
 | [mcu_server_evolutions.md](mcu_server_evolutions.md) | media-server increments the conferencing module waits on |
 | [evolution-auth-db.md](evolution-auth-db.md) | a replaceable authentication backend (LDAP, HTTP, Diameter) |
 | [kelixip-b2bua.md](kelixip-b2bua.md) | `queue()` above the B2BUA primitives (`call()` shipped in 1.5.0) |
-| [service-building-block.md](service-building-block.md) | reusable FSM fragments — the specification |
-| [service-building-block-design.md](service-building-block-design.md) | how the SBB layer is built: the nested loop, the shared context, the loader |
+| [sbb_evolutions.md](sbb_evolutions.md) | service building blocks: the catalogue, the published view, the TypeScript side |
 | [integration-fail2ban.md](integration-fail2ban.md) | making kelixip trivially protectable |
 | [kelixip_liveview.md](kelixip_liveview.md), [liveview-adapter.md](liveview-adapter.md) | a real-time web console over kelixip |
 | [moteli-reboot.md](moteli-reboot.md) | RabbitMQ + protobuf control plane for the media servers (2.0) |

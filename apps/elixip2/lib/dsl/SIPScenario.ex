@@ -69,7 +69,7 @@ defmodule SIP.Scenario do
     # `use SIP.SBB` funnels here with kind: :sbb. A service building block is the
     # same language — same states, same on_events, same session mixins — read by
     # `sbb_loop/4` instead of `loop/4`, so it shares this whole expansion rather
-    # than growing a parallel one. See docs/design/service-building-block-design.md.
+    # than growing a parallel one. See docs/design/DESIGN-SBB.md.
     kind = Keyword.get(opts, :kind, :scenario)
 
     quote do
@@ -378,7 +378,7 @@ defmodule SIP.Scenario do
     do_clauses = Keyword.fetch!(blocks, :do)
 
     # The 1.4 inter-FSM event shapes are gone from the wire (§4.6 of
-    # docs/design/service-building-block.md: one name per concept across the two
+    # docs/design/DESIGN-SBB.md: one name per concept across the two
     # FSL dialects). A message cannot carry a deprecated alias the way a macro
     # can, and a scenario still matching the old tuple would simply never be
     # woken — it would wait on its `after`, silently. So the mismatch is reported
@@ -675,7 +675,7 @@ defmodule SIP.Scenario do
   until it hands control back, then execution continues on the next line of this
   state body. Not a spawn — no second process, no second set of legs. The block
   sees this scenario's context, dialogs and mailbox, because it *is* this
-  process (design `docs/design/service-building-block-design.md`).
+  process (design `docs/design/DESIGN-SBB.md`).
 
   Options:
 
@@ -781,7 +781,7 @@ defmodule SIP.Scenario do
     end
   end
 
-  # The return contract (service-building-block.md#s2--the-shape-of-a-return),
+  # The return contract (DESIGN-SBB.md#21-the-shape-of-a-return),
   # checked wherever a literal makes it checkable: a block returns
   # `{namespace, outcome, data}`, the namespace is its own, and the outcome is
   # one it declares in `@sbb_returns`.

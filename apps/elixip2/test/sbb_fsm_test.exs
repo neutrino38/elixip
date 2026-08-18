@@ -1,7 +1,7 @@
 defmodule SIP.Test.SbbFsm do
   use ExUnit.Case
 
-  # Phase 1 of docs/design/service-building-block-design.md: the mechanism alone,
+  # Phase 1 of docs/design/DESIGN-SBB.md: the mechanism alone,
   # on toy blocks. No SIP here — a block is an FSM run by the calling process on
   # the caller's context, and that is what these assert.
 

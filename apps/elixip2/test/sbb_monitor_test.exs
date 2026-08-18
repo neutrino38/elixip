@@ -3,7 +3,7 @@ defmodule SIP.Test.SbbMonitor do
 
   @moduledoc """
   What the live monitor shows while a service building block holds the FSM
-  (phase 2 of docs/design/service-building-block-design.md, §4).
+  (phase 2 of docs/design/DESIGN-SBB.md, §4).
 
   One call, one row: a block's states show on the host's row, qualified with the
   block they belong to, so the operator reads `SBB.Call/waiting_answer` instead of

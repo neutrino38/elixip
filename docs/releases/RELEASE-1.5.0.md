@@ -7,10 +7,8 @@ established one — ship with the framework. The reference call scripts lost
 between 36 % and 46 % of their lines.
 
 Reference: [FSL.md](../../FSL.md#service-building-blocks-sbb) to write one,
-[service-building-block.md](../design/service-building-block.md) for what the
-layer must do, [service-building-block-design.md](../design/service-building-block-design.md)
-for how it is built, [DESIGN-FSL.md](../design/DESIGN-FSL.md#4bis-service-building-blocks)
-for the engine.
+[DESIGN-SBB.md](../design/DESIGN-SBB.md) for how the layer is built, and
+[sbb_evolutions.md](../design/sbb_evolutions.md) for what is not.
 
 ## The language
 

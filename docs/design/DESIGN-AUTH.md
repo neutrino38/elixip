@@ -35,13 +35,31 @@ to authenticate a call:
 
 - the digest — `SIP.Auth.expected_response_from_ha1(algorithm, ha1, method, auth)`
   takes the method from the request;
-- the nonce — `SIP.Auth.Nonce` is stateless, HMAC'd over `(ts, rand, realm)`,
-  answering `:ok | :stale | :invalid`;
-- replay protection — `Kelix.NonceCache.check_nc/2` on the `nc` counter;
 - credential reading — `auth_header/1` accepts **both** `Authorization` and
   `Proxy-Authorization`.
 
 What is method-specific is everything *around* it: §2.
+
+### 1.1 Where the nonce lives
+
+The nonce is **not** this layer's: it is the SIP stack's stateless one, minted
+and verified by recomputation, never stored. What it is and why is
+[DESIGN-SIPSTACK.md](DESIGN-SIPSTACK.md#6-authentication); repeating it here
+would be a second copy to keep true.
+
+What belongs here is which module does what with it:
+
+| Step | Where |
+|---|---|
+| mint the challenge params, nonce included | `Kelix.Auth.challenge_params(realm, opts)` — the application, so the params carry `qop`, `stale` and the backend's algorithm |
+| put them in the right header | `b2bua_challenge/3` and `challenge_registration/3`, on the 401 or the 407 the script chose (§2.3) |
+| validate the nonce | `Kelix.Mod.AuthDb`, through `SIP.Auth.Nonce.validate/3`: `:invalid` ⇒ challenge afresh, `:stale` ⇒ challenge with `stale=true`, `:ok` ⇒ check the credentials |
+| refuse a replay | `Kelix.NonceCache.check_nc/2`, on the `nc` counter — the one thing statelessness cannot give, kept in ETS with a TTL equal to the nonce's max age |
+| key the whole thing | `SIP.Auth.Secret`, regenerated at boot |
+
+The **application mints and the application validates**: that is why
+`challenge_invite/2` was dropped (§2.3). A dialog-layer verb minting the nonce
+would put the two halves in different layers.
 
 ## 2. What actually changes when the request is an INVITE
 
@@ -134,5 +152,7 @@ place and does not need a list to be maintained per method.
 A registration refresh happens every ~30 min; a call is placed once. **OPEN:** a
 shorter `max_age` for call challenges (say 60 s vs. the registration default) costs
 nothing to a caller — the retry is immediate — and shrinks the replay window. It
-means `max_age` becomes a per-use parameter rather than a constant.
+means `max_age` becomes a per-use parameter rather than a constant. What `max_age`
+does when it expires — `:stale`, re-challenge, transparent replay — is
+[DESIGN-SIPSTACK.md](DESIGN-SIPSTACK.md#6-authentication).
 

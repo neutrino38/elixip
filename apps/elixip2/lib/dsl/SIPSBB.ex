@@ -56,8 +56,8 @@ defmodule SIP.SBB do
   block (`scenario_failure`, `scenario_aborted`) keep their ordinary meaning and
   tear down the host too.
 
-  Design: `docs/design/service-building-block-design.md`; specification and
-  catalogue: `docs/design/service-building-block.md`.
+  Design: `docs/design/DESIGN-SBB.md`; specification and
+  catalogue: `docs/design/DESIGN-SBB.md`.
   """
 
   defmacro __using__(_opts) do

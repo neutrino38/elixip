@@ -461,7 +461,7 @@ call: everything from `place_call` on is `direct-call.exs`.
 > This variant still carries the establishment states inline, where
 > `direct-call.exs` above now calls `SBB.Call`'s `call/1`. It adopts the block
 > next — see the phase plan in
-> [docs/design/service-building-block-design.md](docs/design/service-building-block-design.md).
+> [docs/design/DESIGN-SBB.md](docs/design/DESIGN-SBB.md).
 
 ```elixir
   config(uses_modules: [:registrar, :auth_db])

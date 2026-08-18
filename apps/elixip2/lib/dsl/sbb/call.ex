@@ -52,7 +52,7 @@ defmodule SBB.Call do
     # Teach the scenario that `:call` is a block's namespace, so `on_events`
     # classifies its returns as scenario events even in a state written before
     # the call site — see the return contract in
-    # docs/design/service-building-block.md#s2--the-shape-of-a-return.
+    # docs/design/DESIGN-SBB.md#21-the-shape-of-a-return.
     SIP.Scenario.register_namespace(__CALLER__.module, :call)
     SIP.Scenario.register_namespace(__CALLER__.module, :bridge)
 

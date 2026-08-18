@@ -350,8 +350,8 @@ two verbs are the paved road, not the only road.
 This section asked for **reusable FSM fragments**: a named group of states,
 parameterised, that a scenario can enter and return from, on the calling
 scenario's own dialogs. That is the **service building block** layer —
-[service-building-block.md](service-building-block.md) for what it must do,
-[service-building-block-design.md](service-building-block-design.md) for how,
+[DESIGN-SBB.md](DESIGN-SBB.md) for what it must do,
+[DESIGN-SBB.md](DESIGN-SBB.md) for how,
 [FSL.md](../../FSL.md#service-building-blocks-sbb) for how to write one.
 
 The open question was whether a fragment is a macro expanding states into the
@@ -452,8 +452,8 @@ it. Nesting shows the innermost block, which is where the call actually is.
   `load_file!/1` takes the first match — so a block declared above the scenario
   in the same `.exs` would otherwise be run *as* the scenario.
 
-Specification: [service-building-block.md](service-building-block.md).
-Design: [service-building-block-design.md](service-building-block-design.md).
+Specification: [DESIGN-SBB.md](DESIGN-SBB.md).
+Design: [DESIGN-SBB.md](DESIGN-SBB.md).
 
 ---
 

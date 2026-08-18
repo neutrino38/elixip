@@ -569,7 +569,7 @@ defmodule SIP.Scenario.Runner do
   #
   # A block is a scenario FSM run by THIS process on THIS scenario's context: a
   # subroutine call, not a spawn. Design:
-  # docs/design/service-building-block-design.md.
+  # docs/design/DESIGN-SBB.md.
 
   @doc false
   # Back the `sbb_fsm` macro. Runs `module`'s FSM to completion and returns the
