@@ -8,10 +8,10 @@ defmodule Elixipp.CLITest do
   alias Elixipp.CLI
 
   describe "the state cell" do
-    # A service building block reports `SBB.Cancelling/waiting`, which does not
+    # A service building block reports `MyApp.Cancelling/waiting`, which does not
     # fit the 18-character column. What must survive is the state name.
     test "a qualified state that overflows loses its head, not its tail" do
-      assert CLI.fit_state("SBB.Cancelling/waiting", 18) == "…ancelling/waiting"
+      assert CLI.fit_state("MyApp.Cancelling/waiting", 18) == "…ancelling/waiting"
     end
 
     test "a qualified state that fits is padded like any other cell" do

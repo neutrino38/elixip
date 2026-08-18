@@ -366,7 +366,7 @@ for a block designed to be re-entered after an interruption.
 ### 4bis.3 What the live view shows
 
 A block's states are reported on the **host's own row** — one call, one row —
-with the state qualified by the block it belongs to: `SBB.Cancelling/waiting`.
+with the state qualified by the block it belongs to: `MyApp.Cancelling/waiting`.
 Making the sequence visible is the layer's purpose, so hiding it while the host
 is suspended would be a strange way to serve it, and reporting the block's states
 bare would show a call in states its scenario does not declare.

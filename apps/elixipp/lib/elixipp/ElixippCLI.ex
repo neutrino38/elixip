@@ -1320,7 +1320,7 @@ defmodule Elixipp.CLI do
   defp color_for(:media), do: IO.ANSI.color(214)
   defp color_for(_), do: :light_blue
 
-  # A service building block reports its states qualified (`SBB.Cancelling/waiting`),
+  # A service building block reports its states qualified (`MyApp.Cancelling/waiting`),
   # so the state cell is the one place a value regularly overflows. When it does,
   # the HEAD goes rather than the tail: the state name is what says where the call
   # is, and the block stays recognisable from its last segments.

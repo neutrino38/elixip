@@ -432,6 +432,59 @@ UAC, which has one. For a B2BUA it is the right word and that is the primary use
 case, so the name stands — recorded because the first single-leg user will feel
 it.
 
+### 7.5 Where they live, and what the module layout costs
+
+Both blocks live in **`:elixip2`**, under one face module exporting both verbs:
+
+```elixir
+defmodule SBB.Call do
+  defmacro __using__(_opts), do: quote(do: import(SBB.Call))
+
+  defmacro call(opts \\ []) do
+    quote do: sbb_fsm(SBB.Call.Establish, unquote(opts))
+  end
+
+  defmacro bridge(opts \\ []) do
+    quote do: sbb_fsm(SBB.Call.Bridge, unquote(opts))
+  end
+
+  defmodule Establish do
+    use SIP.SBB
+    # …
+  end
+
+  defmodule Bridge do
+    use SIP.SBB
+    @sbb_timeout :infinity
+    # …
+  end
+end
+```
+
+A scenario writes `use SBB.Call` (or `import SBB.Call`) next to `use
+SIP.Scenario` and calls `call(args: %{dest: dest})`. Four things this shape
+gets right, three of them the kind that are found by compiling:
+
+- **the nested FSM is declared with its short name.** `defmodule SBB.Call.Call`
+  *inside* `SBB.Call` defines `SBB.Call.SBB.Call.Call` — Elixir concatenates the
+  outer name, it does not recognise the prefix. `defmodule Establish` is what
+  yields `SBB.Call.Establish`;
+- **the macro body quotes.** `defmacro call(opts), do: sbb_fsm(...)` expands
+  `sbb_fsm` inside `SBB.Call`, where there is no `sip_ctx` to rebind. The body
+  must `quote` and let the expansion land in the scenario;
+- **`sbb_fsm` takes no context argument.** It reads and rebinds `var!(sip_ctx)`
+  itself, and `var!` composes through a second macro layer — the whole FSL is
+  built this way. The face passes the block and the options, nothing else;
+- **`Establish` rather than `Call`.** `SBB.Call.Call` stutters and says nothing;
+  the two nested names then read as the two halves of a call's life. Cosmetic,
+  and the only one of the four that is a matter of taste.
+
+`bridge`'s `@sbb_timeout :infinity` is not a detail: S7 bounds a block so a leg
+that says nothing cannot hold an instance for ever, and `call()` has timer B to
+bound it with. A bridged call has no such timer — it ends when the dialog ends,
+which is what the block is listening for. `arm_sbb_deadline/2` already takes
+`:infinity` and arms nothing.
+
 ## 8. Change list and phases
 
 ### 8.1 Files
@@ -442,7 +495,7 @@ it.
 | `lib/dsl/SIPSBB.ex` *(new)* | `use SIP.SBB` — `SIP.Scenario`'s `__using__` / `__before_compile__` with the SBB kind flag |
 | `lib/dsl/SIPScenarioRunner.ex` | `run_sbb/3`, `sbb_loop/4`, the `throw` catch in `loop/4`, qualified `report/5` |
 | `lib/dsl/SIPScenarioLoader.ex` | skip `__sbb__/0` modules in `load_file!/1` |
-| `lib/dsl/sbb/*.ex` *(new)* | the base library (S10) — `SBB.Cancelling` first. In `:elixip2`, not in a kelixip module: a base block must be reachable from both a framework scenario and a server script, and compiled before either |
+| `lib/dsl/sbb/call.ex` *(new)* | the base library (S10) — the `SBB.Call` face plus its two nested FSMs (§7.5). In `:elixip2`, not in a kelixip module: `call` and `bridge` are call flow, not server policy, and both dialects want them |
 | `apps/kelixip/scripts/direct-call*.exs` | the three scripts that adopt the block (§8.3) |
 | `apps/elixipp/lib/elixipp/ElixippCLI.ex` | the state cell keeps the tail of a qualified name — the 18-char column would otherwise cut the state, which is the half that answers "where is this call" |
 | `FSL.md` | the `sbb_fsm` / `sbb_return` section, next to sub-scenarios |
@@ -471,24 +524,36 @@ in the struct.
    scenario the process runs, read from the process dictionary — `report/5`'s
    `module` argument is a fallback for a block driven without `run_instance/2`.
    Plus the view end of the same thing: `elixipp --monitor`'s state column is 18
-   characters and truncated from the right, which cut `SBB.Cancelling/waiting`
+   characters and truncated from the right, which cut `MyApp.Cancelling/waiting`
    down to the block's name and none of its state.
-3. **The `cancelling` specimen** — acceptance criterion 2. `releasing` exits
-   kept (S3), queue vocabulary kept (S4), `:ms_event` arms kept (S5). If it does
-   not factor cleanly here, the mechanism is wrong and phases 4–5 do not start.
-   Scope is decided in §8.3.
-4. **The macro face and the loader**, with `use SBB.Cancelling` on one scenario
-   to prove the sugar.
-5. **`call()` and `bridge()`** (§7) — acceptance criterion 1, the flagship
-   blocks, and the first ones shipped by a loadable module (S11). `call()`
-   first: `bridge()` is the easier of the two, and shipping it alone would
-   leave the establishment states duplicated where they hurt most.
+3. **`call()` on one script** — acceptance criteria 1 and 2 both, on
+   `direct-call.exs` alone: the smallest of the three (no auth, no media). The
+   face of §7.5, the `Establish` FSM, the loader skip, and the two CANCEL races
+   as tests (§8.3). If it does not factor cleanly here, the mechanism is wrong
+   and phases 4–5 do not start.
+4. **The other two scripts**, `direct-call-with-auth.exs` and
+   `direct-call-with-auth-and-media.exs` — where S3–S5 are actually exercised:
+   an `authenticate_caller` phase before the block, a `releasing` exit after it,
+   `:ms_event` arms the host keeps.
+5. **`bridge()`** (§7.1, §7.3) — the `connected` and `wait_far_bye_ok` states,
+   `@sbb_timeout :infinity`, and the interruption window, which owes a test that
+   sends a re-INVITE between two `bridge()` calls.
+
+**Phase 3 used to be the `cancelling` state as a block of its own**, chosen as a
+cheap specimen to validate the mechanism before the flagship. §7.2 killed that
+block without the plan noticing: a CANCEL cancels an INVITE transaction in
+flight, so it is a *branch* of establishment, and `{:call, :cancelled}` is
+already how criterion 1 spells its outcome. Shipping `SBB.Cancelling` into three
+scripts and deleting it one phase later is exactly the churn S13 exists to
+prevent. What replaces the cheap specimen is a narrow one: the real block, one
+script, the same gate.
 
 Phases 1–2 are the engine work; 3 is where the design is judged.
 
 ### 8.3 Which scenarios get blocks, and which stay raw
 
-The `cancelling` specimen exists eight times: `b2bua_basic.exs`,
+The establishment sequence — `place_call`, `proceeding`, `cancelling`,
+`wait_ack` — exists eight times: `b2bua_basic.exs`,
 `b2bua_media.exs`, `customer-service.exs` and `webrtc-gw.exs` in
 `apps/elixip2/scenarios/`, and `b2bua.exs`, `direct-call.exs`,
 `direct-call-with-auth.exs`, `direct-call-with-auth-and-media.exs` in
@@ -506,9 +571,9 @@ app:
   server's own reference material, where a shipped block being upgradable without
   touching the script (S13) is the point rather than a demonstration.
 
-`b2bua.exs` sits on the kelixip side of that line and carries the same specimen;
-converting it too is the obvious fourth, left out of phase 3's scope only because
-it was not asked for.
+`b2bua.exs` sits on the kelixip side of that line and carries the same states;
+converting it too is the obvious fourth, left out only because it was not asked
+for.
 
 **What this costs, and what phase 3 owes because of it.** The two CANCEL races —
 the callee confirming with a 487, and the callee answering after the CANCEL left
@@ -523,6 +588,12 @@ races as `b2bua_scenario_test.exs`, driven against `direct-call.exs` — the moc
 transport and the script-driving harness of `direct_call_auth_script_test.exs`
 are both already there. The block is judged by running, and the raw specimen next
 to it stays the control.
+
+That test is also what makes the two paths comparable. `B2BUA.Basic` and
+`direct-call.exs` answer the cancel race the same way; after phase 3 one answers
+it in twenty lines of FSL and the other in one `call()`. Running the same
+assertions against both is how a regression in `SBB.Call.Establish` shows up as a
+difference rather than as a scenario that was always odd.
 
 ## 9. Deliberately not in this design
 

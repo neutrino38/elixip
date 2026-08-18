@@ -4,7 +4,7 @@ defmodule SIP.SBB do
   written in FSL, that a scenario enters with `sbb_fsm/2` and that talks back
   through service-level events.
 
-      defmodule SBB.Cancelling do
+      defmodule MyApp.Cancelling do
         use SIP.SBB
 
         @sbb_timeout 32_000

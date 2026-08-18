@@ -644,7 +644,7 @@ credentials — behind a callable face. Calling one makes the current process en
 owns the event loop, on the caller's own context, dialogs and mailbox, until it hands control back.
 
 ```Elixir
-defmodule SBB.Cancelling do
+defmodule MyApp.Cancelling do
   use SIP.SBB
 
   @sbb_timeout 32_000                             # completion bound (timer B)
@@ -663,7 +663,7 @@ and, in a scenario:
 
 ```Elixir
 state cancelling do
-  sbb_fsm SBB.Cancelling
+  sbb_fsm MyApp.Cancelling
 
   on_events do
     {:cancel, :confirmed}        -> scenario_aborted("caller cancelled, callee confirmed")
@@ -703,7 +703,7 @@ end
 - A block has **no `run/1`**: it is not a scenario, and `SIP.Scenario.Loader` will never mistake one for the
   scenario of the `.exs` that declares it.
 - **The block shows in the live view**, on the call's own row, with its states qualified —
-  `SBB.Cancelling/initial_state` rather than a call that looks frozen for thirty seconds in the last state
+  `MyApp.Cancelling/initial_state` rather than a call that looks frozen for thirty seconds in the last state
   its scenario declares. The scenario column keeps naming the scenario; nesting shows the innermost block.
   The row returns to the host's state when the block hands control back.
 

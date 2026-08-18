@@ -377,11 +377,17 @@ end
 
 - **S10 — lives in the base library.** The mechanism (`sbb_fsm()` and the
   glue) belongs to `:elixip2`, available to every derived tool — elixipp
-  scenarios and kelixip scripts alike.
+  scenarios and kelixip scripts alike. **So do the blocks that are call flow
+  rather than server policy**, `call` and `bridge` first (decision of
+  2026-08-18, revising the article): they are verbs of the language, wanted by
+  both FSL dialects, and a kelixip module would put them out of reach of the
+  elixipp scenarios and of the framework's own suite — the two places they get
+  exercised.
 - **S11 — kelixip modules can export SBBs.** A loadable module
-  (`Kelix.Mod.*`) can ship SBBs (`Kelixip.Mod.Call.call/1` in the article),
-  which makes service building blocks dynamically loadable like the modules
-  themselves.
+  (`Kelix.Mod.*`) can ship SBBs, which makes service building blocks
+  dynamically loadable like the modules themselves. What belongs there is a
+  block that needs the module's own state — an mcu `conference()`, a registrar
+  lookup — not `call()`, which needs nothing but the legs the scenario holds.
 - **S12 — SBBs compose.** An SBB's FSM, being FSL code, can itself call SBBs
   — building blocks made of building blocks. Under S1 this is a plain call
   stack, so it needs no mechanism of its own. What it does cost: a `call` and a
@@ -503,14 +509,16 @@ it there in the same breath.
 The spec is met when both of these hold:
 
 1. the article's target scenario compiles and runs as written — a
-   `place_call` state whose body is one `Kelixip.Mod.Call.call(...)` plus an
+   `place_call` state whose body is one `SBB.Call.call(...)` plus an
    `on_events` over `{:call, :connected, _}`, `{:call, :rejected, _, _}`,
    `{:call, :cancelled}` and `{:dialog_terminated, _, _}` — against a real
    callee, cancel race included. The article wrote one block where §5.1 now has
    two, so the criterion covers `bridge()` as well: the `connected` state that
    follows collapses the same way;
-2. the `cancelling` state of §3 collapses into an SBB call *without* flattening
-   the differences between its copies: `releasing` exits kept (S3), queue
+2. the `cancelling` state of §3 disappears into `call()` — it is a *branch* of
+   establishment, not a block of its own (§5.1), and `{:call, :cancelled}` is
+   already how criterion 1 spells its outcome — *without* flattening the
+   differences between its copies: `releasing` exits kept (S3), queue
    vocabulary kept (S4), `:ms_event` arms kept (S5). Not every copy is converted
    — `apps/elixip2/scenarios/` deliberately stays raw FSL, so the suite keeps a
    block-free path to regress against and one worked example without the sugar;
@@ -571,7 +579,13 @@ scripts already cut along is a decision of 2026-08-18, designed in
   `{:bridge, :max_duration}` — and `{:bridge, :interrupted, message}` on
   `{:bridge_break, message}`, so a host can take the call back for a moment
   (play a prompt, consult a backend) and re-enter with `bridge(resume: true)`
-  without ever tearing the call down.
+  without ever tearing the call down. **It is the one block that is not bounded
+  by a timer** (S7): a call lasts as long as it lasts, so `bridge()` declares
+  `@sbb_timeout :infinity` and is bounded by the dialog instead — the mechanism
+  takes `:infinity` for exactly this.
+
+Both live in `:elixip2` under one face module, `SBB.Call`, exporting `call/1`
+and `bridge/1` — see S10 and [the design's §7.5](service-building-block-design.md).
 
 **There is no `hangup` block**, and the reason is structural: a CANCEL cancels
 an INVITE transaction in flight, so it belongs inside `call()`, while a BYE ends

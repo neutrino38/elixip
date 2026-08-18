@@ -304,7 +304,7 @@ issued, its current FSM state and the event that caused the last transition:
 - A **sub-FSM** (`spawn_fsm`) is indented under its parent with `└`.
 - A **service building block** (`sbb_fsm`) is not a row of its own: it runs on the
   caller's legs, so its states show on the caller's row, qualified with the block —
-  `SBB.Cancelling/waiting`. A name too long for the column loses its head rather
+  `MyApp.Cancelling/waiting`. A name too long for the column loses its head rather
   than its tail (`…ancelling/waiting`), the state being what says where the call is.
 - On a real terminal the cells are colour-coded: light green for `:sip`, orange for
   `:media`, light blue otherwise; **État** turns green on success, red on failure.
