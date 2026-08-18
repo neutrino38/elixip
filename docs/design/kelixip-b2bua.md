@@ -6,44 +6,6 @@ being built now (the B2BUA primitives of
 [DESIGN-FRAMEWORK.md](DESIGN-FRAMEWORK.md#5-b2bua), the registrar, presence) are not shaped in a
 way that forecloses it.
 
-## 1. Why a layer above the primitives
-
-The B2BUA design is deliberate about where things live: the framework offers
-low-level primitives, the scenario writes the policy, and anything expressible
-in FSL stays in FSL. That is the right split — but it means a working
-call takes a scenario with five or six states, and an ACD queue rather more.
-Asked to route a call to a subscriber, an integrator should not have to write
-the hunt loop, the early-media rule of §7.4 and the profile ladder of §7.5.
-
-So a layer above, offering the two verbs Asterisk made the vocabulary of the
-field: `call()`, the equivalent of `Dial()`, and `queue()`, the equivalent of
-`Queue()`.
-
-They are **not** a replacement for the primitives, and the primitives must stay
-usable directly — that is what makes an unusual call flow possible at all. The
-two verbs are the paved road, not the only road.
-
-## 2. What it needed from FSL — delivered in 1.5.0
-
-This section asked for **reusable FSM fragments**: a named group of states,
-parameterised, that a scenario can enter and return from, on the calling
-scenario's own dialogs. That is the **service building block** layer —
-[service-building-block.md](service-building-block.md) for what it must do,
-[service-building-block-design.md](service-building-block-design.md) for how,
-[FSL.md](../../FSL.md#service-building-blocks-sbb) for how to write one.
-
-The open question was whether a fragment is a macro expanding states into the
-caller at compile time or a runtime construct with an explicit return state. It
-is a runtime construct, and it keeps what the compile-time form was wanted for:
-the block's states are reported to the monitor and to the sequence journal,
-qualified by the block they belong to.
-
-`call()` itself is delivered as `SBB.Call.call/1`, in `:elixip2` rather than in a
-kelixip module — it is call flow rather than server policy, and both FSL dialects
-want it. `bridge/1` came with it: the established call is a block of its own.
-`queue()` stays future work, and stays kelixip's, because it takes names for the
-objects of §3.
-
 ## 3. What it needs from kelixip
 
 The verbs take *names*, not URIs — that is the whole point. Which means kelixip
@@ -73,10 +35,18 @@ invent:
 - **registration state** — is a device bound for this AOR? That is the
   registrar's (`Kelix.Mod.Registrar`), and `targets/2` already answers it;
 - **busy state** — is the agent on a call? That is presence's
-  (`SIP.Session.Presence`, and the dialog state the node already holds).
+  (`SIP.Session.Presence.SharedCallAppearece`, and the dialog state the node already holds).
+- **availabability state** - this is a state published by the client into the
+  presence server using a PUBLISH SIP message. It handles the login/logout
+  of the agent.
 
-The queue's own state is what neither of those knows: penalty, wrap-up, last
-call taken, login/logout. `Kelix.Mod.Queue` would implement the
+The queue's distribution algorithm needs to compose these three states to decide
+whether the call is to be distributed to the agent or not.
+
+The queue itself need to maintiain an internal state to handle call distribution
+policies, penalty, wrap-up, last call taken.
+
+`Kelix.Mod.Queue` would implement the
 `SIP.B2bua.TargetProvider` behaviour of DESIGN-FRAMEWORK.md and join the three
 together — which is exactly why that behaviour asks for a reservation handle and
 an attempt outcome.

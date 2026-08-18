@@ -172,7 +172,9 @@ table with a TTL equal to the nonce's max age.
 across nodes.
 
 Deciding **whether** to challenge and against which credential store is the
-`auth_db` module's business, invoked from the script.
+`auth_db` module's business, invoked from the script. Which realm, which identity
+the digest is held to, and which requests are challengeable at all are
+[DESIGN-AUTH.md](DESIGN-AUTH.md).
 
 ---
 
@@ -255,7 +257,8 @@ Its `[module.registrar]` block lives in `domains.toml` rather than
 Credential lookup against MariaDB, exposed as a facade the script calls when it
 decides to challenge. Today it authenticates REGISTER; extending it to INVITE
 and to other backends (LDAP, HTTP, Diameter) behind an `Auth` behaviour is
-designed but not built — see `docs/design/evolution-auth-db.md`.
+designed but not built — see `docs/design/evolution-auth-db.md`; what is built is
+[DESIGN-AUTH.md](DESIGN-AUTH.md).
 
 ### 8.3 `mcu` — conferencing
 

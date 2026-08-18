@@ -328,7 +328,46 @@ The shape follows from invariant 2, not from preference: the dialog and media
 layers bind their events to `self()`, so a block running anywhere else could not
 receive the host's leg events at all.
 
-### 4bis.1 The engine side
+### Why a layer above the primitives
+
+The B2BUA design is deliberate about where things live: the framework offers
+low-level primitives, the scenario writes the policy, and anything expressible
+in FSL stays in FSL. That is the right split — but it means a working
+call takes a scenario with five or six states, and an ACD queue rather more.
+Asked to route a call to a subscriber, an integrator should not have to write
+the hunt loop, the early-media rule of §7.4 and the profile ladder of §7.5.
+
+So a layer above, offering the two verbs Asterisk made the vocabulary of the
+field: `call()`, the equivalent of `Dial()`, and `queue()`, the equivalent of
+`Queue()`.
+
+They are **not** a replacement for the primitives, and the primitives must stay
+usable directly — that is what makes an unusual call flow possible at all. The
+two verbs are the paved road, not the only road.
+
+### 4bis.1 What it needed from FSL — delivered in 1.5.0
+
+This section asked for **reusable FSM fragments**: a named group of states,
+parameterised, that a scenario can enter and return from, on the calling
+scenario's own dialogs. That is the **service building block** layer —
+[service-building-block.md](service-building-block.md) for what it must do,
+[service-building-block-design.md](service-building-block-design.md) for how,
+[FSL.md](../../FSL.md#service-building-blocks-sbb) for how to write one.
+
+The open question was whether a fragment is a macro expanding states into the
+caller at compile time or a runtime construct with an explicit return state. **It
+is a runtime construct**, and it keeps what the compile-time form was wanted for:
+the block's states are reported to the monitor and to the sequence journal,
+qualified by the block they belong to.
+
+`call()` itself is delivered as `SBB.Call.call/1`, in `:elixip2` rather than in a
+kelixip module — it is call flow rather than server policy, and both FSL dialects
+want it. `bridge/1` came with it: the established call is a block of its own.
+`queue()` stays future work, and stays kelixip's, because it takes names for the
+objects of §3.
+
+
+### 4bis.2 The engine side
 
 `loop/4` already takes the module, the state name, the context and the state
 list as arguments — nothing in it is bound to *the* scenario. A block is that
@@ -350,7 +389,7 @@ block. `sbb_loop/5` deliberately does not catch either, so a terminal three
 blocks deep still unwinds to the root, and a parent's deadline passes through a
 running child to the frame that armed it.
 
-### 4bis.2 The return contract
+### 4bis.3 The return contract
 
 A block returns `{namespace, outcome, data}` — fixed arity, last element a map,
 so a block can report one more thing without breaking a host that matches it

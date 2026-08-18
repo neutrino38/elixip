@@ -1,125 +1,19 @@
-# auth_db evolution — challenging calls, and an `Auth` behaviour
+# auth_db evolution — a replaceable authentication backend
 
-**Status: discussion, nothing implemented.** Decisions marked **OPEN** are the ones
-to settle before writing code.
+**Status: discussion, nothing implemented.** Decisions marked **OPEN** are the
+ones to settle before writing code.
 
-Two things, related but separable:
+MariaDB today, LDAP / HTTP / **Diameter** tomorrow, without touching a scenario.
 
-1. **authenticate more than REGISTER** — INVITE first, then any request that starts
-   a dialog or stands alone;
-2. **make the backend replaceable** — MariaDB today, LDAP / HTTP / **Diameter**
-   tomorrow, without touching a scenario.
+The other half of this document's original subject — authenticating more than
+REGISTER — is built, and is now [DESIGN-AUTH.md](DESIGN-AUTH.md): what kelixip
+challenges, which realm and which identity it holds a caller to, and which code
+it answers with. Everything below assumes those rules and changes only where the
+verdict comes from.
 
-## 1. Where we stand
+## 1. The `Auth` behaviour
 
-`Kelix.Mod.AuthDb` is a `Kelix.Module` exporting `do_registration_auth/3` and
-`lookup_ha1/2`. It decides, it never composes a response (§11.1). The verdict is
-`:ok | {:requireauth, stale?} | {:reject, code, reason}`.
-
-What is **already method-agnostic** and needs nothing:
-
-- the digest itself — `SIP.Auth.expected_response_from_ha1(algorithm, ha1, req_method(req), auth)`
-  takes the method from the request;
-- the nonce — `SIP.Auth.Nonce` is stateless, HMAC'd over `(ts, rand, realm)`, with
-  `:ok | :stale | :invalid`. Nothing about it is REGISTER-specific;
-- replay protection — `Kelix.NonceCache.check_nc/2` on the `nc` counter;
-- credential reading — `auth_header/1` already accepts **both** `Authorization` and
-  `Proxy-Authorization`.
-
-So the function is 90 % of the way to being general. What is REGISTER-specific is
-everything *around* it, and that is where the design decisions are.
-
-## 2. What actually changes when the request is an INVITE
-
-### 2.1 Which realm
-
-- REGISTER: the realm is the domain of the **To** — the AOR being bound.
-- INVITE: the realm is the domain of the **From** — the *caller* is who we
-  authenticate. The R-URI domain may be someone else entirely (that is the point of
-  a call).
-
-Getting this wrong makes every out-of-domain call unauthenticatable, or worse,
-authenticatable against the wrong subscriber table.
-
-### 2.2 Which identity, and checking it
-
-REGISTER binds the AOR in `To`; the digest username must be that AOR (or its
-subscriber, cf. `subscriber_of/1`).
-
-INVITE is the dangerous one: **a successful digest proves who holds the password,
-not who the `From` claims to be.** Without an explicit check, Alice authenticates
-with her own credentials and places a call with `From: Bob` — identity spoofing, and
-in a billing deployment, fraud. This is the single most-often-omitted rule in SIP
-servers.
-
-Proposal: the verdict carries the **authenticated identity**, and identity checking
-is a stated policy rather than an accident:
-
-```elixir
-{:ok, %{user: "alice", realm: "example.com"}}
-```
-
-with `identity_check: :strict | :warn | :off` (default `:strict` for INVITE,
-irrelevant for REGISTER where the check is inherent). **OPEN:** `:strict` breaks
-trunk scenarios where one account legitimately asserts many `From`s. A per-domain
-or per-subscriber "may assert" list is the real answer, and is its own feature —
-`:warn` exists so the check can be turned on in observation mode first.
-
-### 2.3 401 or 407
-
-- A **UAS** answers `401` + `WWW-Authenticate` (RFC 3261 §22.2).
-- A **proxy** answers `407` + `Proxy-Authenticate` (§22.3).
-
-kelixip is a B2BUA, i.e. a UAS, so `401` is formally right — but real UAs and their
-provisioning very often expect `407` for calls, and many will not retry a `401` on
-an INVITE. This is a deployment fact, not a spec question.
-
-Proposal: the **module stays neutral** (`{:requireauth, stale}`) and the **script
-composes** 401 or 407, exactly as §11.1 prescribes. The backend only needs to read
-whichever header came back, which it already does.
-
-**Decided and implemented** (2026-08-11): `challenge_invite(realm, code \\ 407)`
-was the wrong verb for it — it makes the *dialog layer* mint the nonce, which loses
-`qop=auth`, `stale` and the backend's algorithm. A call script challenges with
-
-```elixir
-b2bua_challenge(req, Kelix.Auth.challenge_params(realm, stale: …, algorithm: …), 407)
-```
-
-the exact counterpart of `challenge_registration(sip_ctx, req, params)`: the
-application builds the challenge (its own stateless nonce, which it validates
-itself) and the verb puts it in the header the code calls for
-(`SIP.Msg.Ops.challenge_header/1`, one reading of 401→`WWW-Authenticate` /
-407→`Proxy-Authenticate`). `Kelix.Auth.challenge_www_authenticate/2` was renamed
-`challenge_params/2` for the same reason: the params are header-agnostic, and only
-the code decides which header carries them.
-
-### 2.4 Which requests get challenged
-
-| Request | Challenge? | Why |
-|---|---|---|
-| REGISTER | yes | as today |
-| initial INVITE | yes | the point of this work |
-| ACK | **never** | it has no response (§17.1.1.3) — challenging it is meaningless |
-| CANCEL | **never** | §22.1; it must be accepted for the transaction it cancels |
-| re-INVITE / UPDATE / BYE in-dialog | **no** | the dialog was authenticated when it was created; re-challenging mid-call breaks UAs and buys nothing |
-| SUBSCRIBE / REFER out of dialog | yes | dialog-creating, same treatment as INVITE |
-| MESSAGE / PUBLISH / OPTIONS | **OPEN** | not dialog-creating but abusable. OPTIONS especially: challenging it breaks liveness probing (see `Kelix.Options`), so probably never |
-
-So the rule is not "creates a dialog" but **"is an initial request other than ACK,
-CANCEL and OPTIONS"**. Worth stating that way in the spec: it is checkable in one
-place and does not need a list to be maintained per method.
-
-### 2.5 Nonce lifetime
-
-A registration refresh happens every ~30 min; a call is placed once. **OPEN:** a
-shorter `max_age` for call challenges (say 60 s vs. the registration default) costs
-nothing to a caller — the retry is immediate — and shrinks the replay window. It
-means `max_age` becomes a per-use parameter rather than a constant.
-
-## 3. The `Auth` behaviour
-
-### 3.1 Which layer to abstract
+### 1.1 Which layer to abstract
 
 Two possible contracts, and they are not equivalent:
 
@@ -162,14 +56,14 @@ day AKA lands.
 :to | :from, method, uri}` — so the backend never re-parses the SIP message. Same
 rule as the framework's message layer: one reading, in one place.
 
-### 3.2 Where the behaviour lives
+### 1.2 Where the behaviour lives
 
 In the **core** (`apps/kelixip`), not in `kelix_modules`. A module must be able to
 declare it without depending on another module, and `Kelix.Auth` (the challenge
 builder) is already core. `Kelix.Mod.AuthDb` becomes *an* implementation; a future
 `Kelix.Mod.AuthDiameter` is another.
 
-### 3.3 Selecting a backend
+### 1.3 Selecting a backend
 
 Today a scenario names the module: `Kelix.Mod.AuthDb.do_registration_auth(req, domain)`.
 That is what makes the backend unswappable — the script has the name baked in.
@@ -200,12 +94,12 @@ backend again. Either it becomes `[:auth]` (an abstract capability the preflight
 resolves through `[domain.auth]`), or the preflight checks the *bound* backend per
 domain. The second is more honest and slightly more work.
 
-### 3.4 Compatibility
+### 1.4 Compatibility
 
 `do_registration_auth/3` stays, as `authenticate/3` with `identity_from: :to` and
 the registration nonce lifetime. Existing scripts keep working unchanged.
 
-## 4. Diameter, concretely
+## 2. Diameter, concretely
 
 Only to check that the shape above survives contact with it. Cx/Dx (IMS HSS):
 
@@ -226,19 +120,20 @@ Only to check that the shape above survives contact with it. Cx/Dx (IMS HSS):
   does a slow backend need an async verdict delivered as an event? Synchronous with a
   bounded timeout is the right first answer; FSL has no shape for the other today.
 
-## 5. Proposed sequencing
+## 3. Proposed sequencing
 
 1. `Kelix.Auth.Backend` behaviour + `Kelix.Auth.Digest` generic implementation;
    `Kelix.Mod.AuthDb` reduced to `fetch_credential/2` (pure refactor, no behaviour
    change, existing tests must stay green);
-2. `authenticate/3` generalised (realm source, identity, method rule of §2.4), with
-   `do_registration_auth/3` as a thin alias;
+2. `authenticate/3` generalised — realm source, identity, the method rule, with
+   `do_registration_auth/3` as a thin alias. **Done**, and described in
+   [DESIGN-AUTH.md](DESIGN-AUTH.md);
 3. `[domain.auth].backend` + the `Kelix.Auth.authenticate(sip_ctx, req)` facade;
    reference scripts stop naming `Kelix.Mod.AuthDb`;
 4. INVITE challenge in the reference call scripts + `identity_check` — **done**
-   (2026-08-11): `apps/kelixip/scripts/direct-call-with-auth.exs`, `direct-call.exs`
-   plus the three states in front of the call, and the `b2bua_challenge/3` verb
-   §2.3 describes. Steps 1 and 3 are still open, so the script still names
+   (2026-08-11): `apps/kelixip/scripts/direct-call-with-auth.exs` and its media
+   variant, and the `b2bua_challenge/3` verb [DESIGN-AUTH.md](DESIGN-AUTH.md)
+   describes. Steps 1 and 3 are still open, so the scripts still name
    `Kelix.Mod.AuthDb`;
 5. *(later)* a second backend, which is what proves the behaviour is right —
    nothing before it does.
