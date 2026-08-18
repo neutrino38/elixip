@@ -781,49 +781,10 @@ and cause the finite state machine to dump the exception in the logs and call sc
 
 ## Under the hood of FSL
 
-Any scenario is a plain Elixir module that calls `use SIP.Scenario` (see the example
-above), saved as a `.exs` file. Each **state** of the finite state machine is
-an Elixir function.
-
-The context information is stored in a variable always named **sip_ctx** which
-is used by all macros from the SIP.Session.* modules and the MediaServer.*
-modules. The context is updated and passed as argument to all state functions.
-
-The `use SIP.Scenario` block generates a `run/0` entry point that starts the SIP stack
-(transactions, transport selector, dialog layer, config registry), builds the initial
-`%SIP.Context{}` from the `config` block and enters `initial_state`. `run/0` returns `:ok` on
-`terminal_success_state`, `{:error, reason}` on `terminal_failure_state`, and `{:aborted, reason}` when the
-scenario was wound down by a cooperative shutdown.
-
-The `state` macro defines an Elixir function which takes a `%SIP.Context` as sole
-argument.
-
-The `goto` macro
-- checks if `sip_ctx.lasterr` is set to `:ok`. If not, it calls `scenario_failure(sip_ctx.lasterr)`
-- otherwise, stores the new state name into `sip_ctx.currentstate`
-- calls the function passed as first argument, passing the sip_ctx context to the new state.
-
-If the new state argument is `next`, it determines the name of the next state to consider and
-calls `goto <nextstate>, <event>`. If the new state argument is `loop`, it calls
-`goto sip_ctx.currentstate, <event>`. If it is `back`, it calls `goto sip_ctx.laststate, <event>`,
-and fails the scenario when that slot is empty. The runner writes `sip_ctx.laststate` on every
-transition where the target differs from the current state.
-
-`on_events` compiles to a `receive` wrapped in a closure that calls itself, which is how `stay`
-re-enters the wait without leaving the state function. Its `after` timeout is turned into an
-absolute deadline when the block is entered, and each re-entry re-arms it with the remainder.
-
-When transitioning to any of the terminal states, the scenario runner checks if `sip_ctx.mediaserverpid`
-and `sip_ctx.mediaservermodule` are set. If yes, the scenario runner waits for the `:dialog_terminated`
-event for maximum 5 seconds then calls media_cleanup_ressources() to deallocate media resources.
-
-Then the scenario runner checks for the existence of a `cleanup` function and calls it with `sip_ctx`
-as argument.
-
-If the scenario spawned sub-FSMs with `spawn_fsm`, the runner first asks each live child to shut down
-cooperatively (`{:scenario_ctl, :shutdown, …}`), waits up to 5 seconds for them to terminate and hard-kills
-any straggler, then — if this scenario itself has a parent — reports its own outcome to it as
-`{:child_exit, name, outcome, reason}`.
+How the language is built — what `state`, `goto`, `on_events` and the terminals
+expand to, how the runner dispatches them, the teardown order, the sub-FSM and
+service-building-block engines, and the invariants all of it rests on — is
+[docs/design/DESIGN-FSL.md](docs/design/DESIGN-FSL.md).
 
 ## Macro helpers
 

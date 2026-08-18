@@ -7,7 +7,7 @@ which keeps only what is built and running.
 Related open designs, each with its own document:
 [`evolution-auth-db.md`](evolution-auth-db.md) (authenticating more than
 REGISTER, and a replaceable backend), [`kelixip-b2bua.md`](kelixip-b2bua.md)
-(`call()` / `queue()` above the B2BUA primitives),
+(`queue()` above the B2BUA primitives; `call()` shipped in 1.5.0),
 [`integration-fail2ban.md`](integration-fail2ban.md),
 [`kelixip_liveview.md`](kelixip_liveview.md) and
 [`liveview-adapter.md`](liveview-adapter.md) (a web admin console),

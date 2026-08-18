@@ -690,6 +690,20 @@ it in twenty lines of FSL and the other in one `call()`. Running the same
 assertions against both is how a regression in `SBB.Call.Establish` shows up as a
 difference rather than as a scenario that was always odd.
 
+### 8.4 What the two blocks did not need
+
+[kelixip-b2bua.md](kelixip-b2bua.md) §4 predicted that a `call()` verb written in
+FSL on top of the B2BUA primitives would either fit them or produce "a finding
+about the primitives". It fit: `SBB.Call` calls `b2bua_forward/4`,
+`b2bua_forward_reply/1`, `b2bua_reply/4`, `b2bua_cancel_forward/0`,
+`b2bua_hunting?/0`, `b2bua_send_BYE/0`, `b2bua_reoffer_kind/1`,
+`b2bua_reply_reoffer/2` and `b2bua_media_unavailable?/0`, and added none.
+
+That document's other open question — whether a fragment expands states into the
+caller at compile time or is a runtime construct — is answered by §2, and §4
+answers what the compile-time form was wanted for: the block's states are
+reported, qualified.
+
 ## 9. Deliberately not in this design
 
 - **a structured view published by a running SBB** (Trix's `CallView`). §4 gives

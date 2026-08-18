@@ -30,7 +30,7 @@ The user-facing counterparts live at the repository root —
 | [kelixip_roadmap.md](kelixip_roadmap.md) | presence, `Path` generation, usrloc persistence, HA, `radius_billing` |
 | [mcu_server_evolutions.md](mcu_server_evolutions.md) | media-server increments the conferencing module waits on |
 | [evolution-auth-db.md](evolution-auth-db.md) | authenticating more than REGISTER, and a replaceable backend |
-| [kelixip-b2bua.md](kelixip-b2bua.md) | `call()` / `queue()` above the B2BUA primitives |
+| [kelixip-b2bua.md](kelixip-b2bua.md) | `queue()` above the B2BUA primitives (`call()` shipped in 1.5.0) |
 | [service-building-block.md](service-building-block.md) | reusable FSM fragments — the specification |
 | [service-building-block-design.md](service-building-block-design.md) | how the SBB layer is built: the nested loop, the shared context, the loader |
 | [integration-fail2ban.md](integration-fail2ban.md) | making kelixip trivially protectable |

@@ -519,6 +519,14 @@ name with no file present; `apps/elixip2/scenarios/` holds editable `.exs`
 copies loaded by path, deliberately under different module names
 (`UAC.InviteExample`, `UAC.RegisterExample`) so both can coexist.
 
+`use SIP.Scenario` generates the `run/1` those paths call: it starts the SIP
+stack when asked (transactions, transport selector, dialog layer, config
+registry), builds the initial `%SIP.Context{}` from the `config` block and enters
+`initial_state`. It returns `:ok` on a success terminal, `{:error, reason}` on a
+failure one, and `{:aborted, reason}` when the scenario was wound down by a
+cooperative shutdown — three outcomes rather than two, so tooling can tell a
+controller-driven stop from a scenario that failed.
+
 `mix scenario` runs either form and exits `0`/`1`, so a scenario is a CI check.
 
 ---

@@ -1,7 +1,8 @@
-# kelixip call control: `call()` and `queue()` — future work
+# kelixip call control: `queue()` — future work
 
-**Status: out of scope.** Nothing here is built or committed to. This records a
-direction so the pieces being built now (the B2BUA primitives of
+**Status: partly built.** `call()` exists — see below; `queue()` and the kelixip
+objects both verbs take names from do not. This records a direction so the pieces
+being built now (the B2BUA primitives of
 [DESIGN-FRAMEWORK.md](DESIGN-FRAMEWORK.md#5-b2bua), the registrar, presence) are not shaped in a
 way that forecloses it.
 
@@ -15,45 +16,33 @@ Asked to route a call to a subscriber, an integrator should not have to write
 the hunt loop, the early-media rule of §7.4 and the profile ladder of §7.5.
 
 So a layer above, offering the two verbs Asterisk made the vocabulary of the
-field:
-
-```elixir
-Kelixip.B2bua.call(...)     # the equivalent of Dial()
-Kelixip.B2bua.queue(...)    # the equivalent of Queue()
-```
+field: `call()`, the equivalent of `Dial()`, and `queue()`, the equivalent of
+`Queue()`.
 
 They are **not** a replacement for the primitives, and the primitives must stay
 usable directly — that is what makes an unusual call flow possible at all. The
 two verbs are the paved road, not the only road.
 
-## 2. What it needs from FSL first
+## 2. What it needed from FSL — delivered in 1.5.0
 
-`call()` and `queue()` are not functions in the ordinary sense: they run a
-**finite state machine** — ringing, early media, fallback, teardown — inside the
-caller's scenario, and hand control back when the call ends. FSL has no way
-to express that today: `spawn_fsm` spawns a *separate process* with its own
-mailbox, which is the wrong shape here, because the SIP events belong to the
-calling scenario's dialogs.
+This section asked for **reusable FSM fragments**: a named group of states,
+parameterised, that a scenario can enter and return from, on the calling
+scenario's own dialogs. That is the **service building block** layer —
+[service-building-block.md](service-building-block.md) for what it must do,
+[service-building-block-design.md](service-building-block-design.md) for how,
+[FSL.md](../../FSL.md#service-building-blocks-sbb) for how to write one.
 
-So the prerequisite is **reusable FSM fragments**: a named group of states,
-parameterised, that a scenario can enter and return from, running in its own
-process and mailbox. Roughly:
+The open question was whether a fragment is a macro expanding states into the
+caller at compile time or a runtime construct with an explicit return state. It
+is a runtime construct, and it keeps what the compile-time form was wanted for:
+the block's states are reported to the monitor and to the sequence journal,
+qualified by the block they belong to.
 
-```elixir
-state route_it do
-  invoke Kelixip.B2bua.call, peer: trunk("ovh"), profile: :avp, returning: call_done
-end
-
-state call_done do
-  # the fragment left `sip_ctx` carrying its outcome
-end
-```
-
-Open: whether a fragment is a macro expanding states into the caller at compile
-time, or a runtime construct with an explicit return state. The first keeps the
-monitor and the sequence diagram honest (every state is a real state); the
-second composes better. This is the design question to settle before either
-verb is worth writing.
+`call()` itself is delivered as `SBB.Call.call/1`, in `:elixip2` rather than in a
+kelixip module — it is call flow rather than server policy, and both FSL dialects
+want it. `bridge/1` came with it: the established call is a block of its own.
+`queue()` stays future work, and stays kelixip's, because it takes names for the
+objects of §3.
 
 ## 3. What it needs from kelixip
 
@@ -109,7 +98,8 @@ The primitives keep their contract. `call()` and `queue()` are written **in**
 FSL, on top of `b2bua_forward/3`, `b2bua_try_next/0`,
 `b2bua_cancel_forward/0` and the rest — if either verb turns out to need a new
 primitive, that is a finding about the primitives, to be taken back to
-DESIGN-FRAMEWORK.md rather than worked around here.
+DESIGN-FRAMEWORK.md rather than worked around here. `call()` was written that
+way and needed none.
 
 And `elixip2` stays free of any of this: trunks, agents and queues are kelixip
 objects, reached from a script the way §3.2 reaches the registrar.
