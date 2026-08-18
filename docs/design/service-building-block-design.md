@@ -551,11 +551,31 @@ in the struct.
    compile-time check in `sbb_return/1`, the contract-shaped timeout event, and
    the namespace learning that keeps a block's return from being drawn as a SIP
    message. 7 tests added to `sbb_fsm_test.exs`, 1 to `sbb_monitor_test.exs`.
-3. **`call()` on one script** — acceptance criteria 1 and 2 both, on
-   `direct-call.exs` alone: the smallest of the three (no auth, no media). The
-   face of §7.5, the `Establish` FSM, the loader skip, and the two CANCEL races
-   as tests (§8.3). If it does not factor cleanly here, the mechanism is wrong
-   and phases 4–5 do not start.
+3. ~~**`call()` on one script.**~~ **Done 2026-08-18.** `SBB.Call` +
+   `SBB.Call.Establish` in `apps/elixip2/lib/dsl/sbb/call.ex`, the loader skip,
+   `direct-call.exs` from 230 lines to 161, and 4 tests in
+   `apps/kelix_modules/test/direct_call_script_test.exs` — the two CANCEL races
+   of `b2bua_scenario_test.exs` run against the block, plus the relay and a
+   refusal, each asserting the **verdict** rather than the instance's death.
+   Three things the design had not said:
+
+   - the block needs **two** bounds, not one: the ring timeout in `proceeding`
+     and timer H in `wait_ack` are the protocol's, and `@sbb_timeout` is only a
+     backstop over the whole sequence. S7's bound is not the protocol timer;
+   - the block **completes the transactions it owns** — the 408 on the ring
+     timeout, the 500 when the outbound leg dies, the BYE when no ACK comes. An
+     INVITE with no final response leaves a caller hanging, which is not a policy
+     anybody should be free to forget; the *verdict* is still the host's;
+   - it gained one arm the script did not have: the caller's dialog ending while
+     it rings. Without it the callee's phone keeps ringing until the ring
+     timeout — precisely the "can forgetting this leave a phone off-hook" test
+     §2 of the spec uses to decide what the framework should own. It returns
+     `{:call, :caller_gone, _}`, which the script names.
+
+   The compile-time check found one bug in itself on the way: `:timeout` is
+   folded into `__sbb_returns__/0` at run time, so a block returning it — as this
+   one does on the ring timeout — was refused. `declared_outcomes/1` now folds it
+   in the same way.
 4. **The other two scripts**, `direct-call-with-auth.exs` and
    `direct-call-with-auth-and-media.exs` — where S3–S5 are actually exercised:
    an `authenticate_caller` phase before the block, a `releasing` exit after it,

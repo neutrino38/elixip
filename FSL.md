@@ -720,6 +720,19 @@ event nobody will send. A bounded block gets `:timeout` in its vocabulary for fr
   its scenario declares. The scenario column keeps naming the scenario; nesting shows the innermost block.
   The row returns to the host's state when the block hands control back.
 
+**The blocks that ship** live in `:elixip2` next to the mechanism, so a scenario and a kelixip script reach
+them the same way:
+
+| Block | `use` | Verb | Absorbs |
+|---|---|---|---|
+| `SBB.Call` | `use SBB.Call` | `call(args: %{peer: peer})` | forwarding the INVITE, the provisionals, the serial hunt over the peer's targets, the caller giving up, the cancel race, the ACK |
+
+`call/1` answers `{:call, :connected, _}`, `:rejected`, `:cancelled`, `:answered_after_cancel`,
+`:caller_hung_up`, `:caller_gone`, `:timeout` or `:failed` — see `SBB.Call.Establish` for what each carries.
+It completes the SIP transactions it owns (a caller whose INVITE is never answered is left hanging, so the
+408 is sent from inside the block) and leaves the *verdict* to the scenario: whether a refused call is a
+success, whether a cancellation is an abort, and what to bill.
+
 Specification and catalogue: [docs/design/service-building-block.md](docs/design/service-building-block.md).
 Design: [docs/design/service-building-block-design.md](docs/design/service-building-block-design.md).
 

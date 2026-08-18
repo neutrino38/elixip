@@ -7,6 +7,7 @@
 # Commented use case in B2BUA.md, "Scenario direct-call.exs".
 defmodule Kelix.DirectCall do
   use SIP.Scenario
+  use SBB.Call
 
   uas(:invite)
 
@@ -32,19 +33,50 @@ defmodule Kelix.DirectCall do
     end
   end
 
-  # Where is Bob? A state with no on_events: it decides and moves on.
+  # Where is Bob? The MODULE says where the AOR is and hands back a peer; the
+  # SCRIPT decides what SIP each outcome means. Nothing is rescued here — a
+  # module that faults raises, and the scenario runner logs it and fails the
+  # scenario, which is more readable than an error mapped twice.
   #
-  # The MODULE says where the AOR is and hands back a peer; the SCRIPT decides
-  # what SIP each outcome means. Nothing is rescued here — a module that faults
-  # raises, and the scenario runner logs it and fails the scenario, which is more
-  # readable than an error mapped twice.
+  # `call/1` is everything between "forward this INVITE" and "the call is up or
+  # over": the provisionals, the serial hunt over Bob's devices, the caller
+  # giving up, the cancel race, the ACK. What stays here is what only this script
+  # can answer — whether an outcome is a success, a failure or an abort.
   state place_call do
     req = last_uas_req()
 
     case Kelix.Mod.Registrar.targets(ctx_get(:domain), req) do
       {:ok, peer} ->
-        b2bua_forward(req, peer, false)
-        goto(proceeding, "call forwarded")
+        call(args: %{peer: peer, request: req})
+
+        on_events do
+          {:call, :connected, _} ->
+            goto(connected, "call established")
+
+          {:call, :rejected, %{code: code}} ->
+            scenario_success("Bob answered #{code}")
+
+          # A call answered a fraction of a second after its cancellation is a
+          # real event, and the difference between "abandoned" and "answered then
+          # hung up" is one somebody bills on.
+          {:call, :cancelled, _} ->
+            scenario_aborted("caller cancelled, callee confirmed")
+
+          {:call, :answered_after_cancel, _} ->
+            scenario_success("callee answered after the cancellation; hung up")
+
+          {:call, :caller_hung_up, _} ->
+            scenario_success("caller hung up before answer")
+
+          {:call, :caller_gone, %{reason: reason}} ->
+            scenario_aborted("caller vanished while it rang: #{inspect(reason)}")
+
+          {:call, :timeout, _} ->
+            scenario_failure("Bob never answered")
+
+          {:call, :failed, %{reason: reason}} ->
+            scenario_failure("call setup failed: #{reason}")
+        end
 
       :notfound ->
         b2bua_reply(req, 480, "Temporarily Unavailable")
@@ -57,107 +89,6 @@ defmodule Kelix.DirectCall do
       :unavailable ->
         b2bua_reply(req, 500, "Location Service Unavailable")
         scenario_failure("the location service could not answer")
-    end
-  end
-
-  state proceeding do
-    on_events do
-      # Everything the device says goes back to Alice, collapsed into our single
-      # inbound dialog.
-      {:outbound, {code, resp, _trans, _dlg}} when code in 101..199 ->
-        b2bua_forward_reply(resp)
-        stay("provisional #{code}")
-
-      {:outbound, {200, resp, _trans, _dlg}} ->
-        b2bua_forward_reply(resp)
-        goto(wait_ack, "200 OK relayed")
-
-      # A refusal. If Bob has another device, the hunt is already trying it.
-      {:outbound, {code, resp, _trans, _dlg}} when code >= 300 ->
-        b2bua_forward_reply(resp)
-
-        if b2bua_hunting?() do
-          stay("#{code}, trying Bob's next device")
-        else
-          scenario_success("Bob answered #{code}")
-        end
-
-      # Alice gave up. Two different things, and both are wanted: stop the
-      # search, and tell the device that is ringing. Then wait: a CANCEL asks,
-      # it does not decide (RFC 3261 §16.7).
-      {:CANCEL, req, _trans, _dlg} ->
-        b2bua_cancel_forward()
-        b2bua_forward(req)
-        goto(cancelling, "caller cancelled")
-
-      {:BYE, req, _trans, _dlg} ->
-        b2bua_cancel_forward()
-        b2bua_reply(req, 200, "OK")
-        scenario_success("caller hung up before answer")
-
-      {:outbound, {:dialog_terminated, _dlg, reason}} ->
-        b2bua_reply(last_uas_req(), 500, "Outbound leg lost")
-        scenario_failure("outbound leg died: #{inspect(reason)}")
-    after
-      180_000 ->
-        b2bua_reply(last_uas_req(), 408, "Request Timeout")
-        scenario_failure("Bob never answered")
-    end
-  end
-
-  # The CANCEL has gone to Bob; his transaction is not over until a final response
-  # says so (RFC 3261 §16.7). Staying here to hear it is the whole point: end now
-  # and a device that answers a fraction of a second later is left off-hook in a
-  # call nobody is in.
-  #
-  # `SIP.DialogImpl` catches that case on its own — it is not a policy, so no
-  # script may get it wrong — and this state does not make it correct, it makes it
-  # VISIBLE: a call answered after its cancellation is a real event, and the
-  # difference between "abandoned" and "answered then hung up" is one somebody
-  # bills on.
-  state cancelling do
-    on_events do
-      # What normally comes back, and fast.
-      {:outbound, {487, _resp, _trans, _dlg}} ->
-        scenario_aborted("caller cancelled, callee confirmed")
-
-      # The race. Bob picked up before the CANCEL reached him; nobody is left to
-      # talk to, so acknowledge his answer and hang up (§13.2.2.4 then §15).
-      {:outbound, {200, _resp, _trans, _dlg}} ->
-        b2bua_send_BYE()
-        scenario_success("callee answered after the cancellation; hung up")
-
-      # Still ringing somewhere: keep listening rather than take a 180 for an end.
-      {:outbound, {code, _resp, _trans, _dlg}} when code in 100..199 ->
-        stay("provisional #{code} after cancel")
-
-      {:outbound, {code, _resp, _trans, _dlg}} when code >= 300 ->
-        scenario_aborted("caller cancelled, callee answered #{code}")
-
-      {:outbound, {:dialog_terminated, _dlg, _reason}} ->
-        scenario_aborted("caller cancelled, outbound leg gone")
-
-      {:dialog_terminated, _dlg, _reason} ->
-        scenario_aborted("caller cancelled")
-    after
-      # Bounded on purpose: past timer B the outbound transaction is over whatever
-      # we heard, and an instance held on a leg that says nothing is a slot lost.
-      32_000 -> scenario_aborted("caller cancelled, callee never concluded")
-    end
-  end
-
-  # Alice's ACK is relayed rather than answered here: what Bob's device gets is
-  # what Alice sent.
-  state wait_ack do
-    on_events do
-      {:ACK, req, _trans, _dlg} ->
-        b2bua_forward(req)
-        goto(connected, "ACK relayed")
-    after
-      # RFC 3261 timer H: no ACK is coming. Hang up the leg we did establish.
-      32_000 ->
-        b2bua_send_BYE()
-        scenario_failure("no ACK from the caller")
     end
   end
 

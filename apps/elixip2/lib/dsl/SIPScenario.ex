@@ -794,8 +794,25 @@ defmodule SIP.Scenario do
   defp check_sbb_return!(event, caller) do
     if Module.get_attribute(caller.module, :scenario_kind) == :sbb do
       namespace = Module.get_attribute(caller.module, :sbb_namespace)
-      declared = Module.get_attribute(caller.module, :sbb_returns) || []
-      check_sbb_return_shape!(event, namespace, Keyword.keys(declared), caller)
+      check_sbb_return_shape!(event, namespace, declared_outcomes(caller.module), caller)
+    end
+  end
+
+  # An empty list means the block declared no vocabulary, and outcomes go
+  # unchecked: declaring is opt-in, enforcement follows the declaration.
+  # `:timeout` belongs to a bounded block's vocabulary whether or not its author
+  # listed it — `__sbb_returns__/0` folds it in the same way — so a block
+  # returning it on a timeout of its own, as a ring timeout is, is not
+  # undeclared.
+  defp declared_outcomes(module) do
+    case Module.get_attribute(module, :sbb_returns) || [] do
+      [] ->
+        []
+
+      declared ->
+        if Module.get_attribute(module, :sbb_timeout) == :infinity,
+          do: Keyword.keys(declared),
+          else: Keyword.keys(declared) ++ [:timeout]
     end
   end
 

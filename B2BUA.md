@@ -295,9 +295,18 @@ Bob may be registered on several devices. They are **alternatives**, not a group
 to ring together, and the registrar already ordered them by `q` — by which one
 Bob wants tried first. So one leg, `fork: :serial`, and the hunt walks them.
 
+The establishment of the outbound leg is a **service building block**: `use
+SBB.Call` brings in `call/1`, which owns everything from forwarding the INVITE to
+the ACK that confirms the answer — including the cancel race of RFC 3261 §16.7,
+where a device picks up a fraction of a second after the caller has given up. The
+script says where to call and what each outcome means; the sequence in between is
+written once, in `:elixip2`, and shared. See
+[FSL.md](FSL.md#service-building-blocks-sbb).
+
 ```elixir
 defmodule Kelix.DirectCall do
   use SIP.Scenario
+  use SBB.Call
 
   uas(:invite)
 
@@ -323,19 +332,50 @@ defmodule Kelix.DirectCall do
     end
   end
 
-  # Where is Bob? A state with no on_events: it decides and moves on.
+  # Where is Bob? The MODULE says where the AOR is and hands back a peer; the
+  # SCRIPT decides what SIP each outcome means. Nothing is rescued here — a
+  # module that faults raises, and the scenario runner logs it and fails the
+  # scenario, which is more readable than an error mapped twice.
   #
-  # The MODULE says where the AOR is and hands back a peer; the SCRIPT decides
-  # what SIP each outcome means. Nothing is rescued here — a module that faults
-  # raises, and the scenario runner logs it and fails the scenario, which is more
-  # readable than an error mapped twice.
+  # `call/1` is everything between "forward this INVITE" and "the call is up or
+  # over": the provisionals, the serial hunt over Bob's devices, the caller
+  # giving up, the cancel race, the ACK. What stays here is what only this script
+  # can answer — whether an outcome is a success, a failure or an abort.
   state place_call do
     req = last_uas_req()
 
     case Kelix.Mod.Registrar.targets(ctx_get(:domain), req) do
       {:ok, peer} ->
-        b2bua_forward(req, peer, false)
-        goto(proceeding, "call forwarded")
+        call(args: %{peer: peer, request: req})
+
+        on_events do
+          {:call, :connected, _} ->
+            goto(connected, "call established")
+
+          {:call, :rejected, %{code: code}} ->
+            scenario_success("Bob answered #{code}")
+
+          # A call answered a fraction of a second after its cancellation is a
+          # real event, and the difference between "abandoned" and "answered then
+          # hung up" is one somebody bills on.
+          {:call, :cancelled, _} ->
+            scenario_aborted("caller cancelled, callee confirmed")
+
+          {:call, :answered_after_cancel, _} ->
+            scenario_success("callee answered after the cancellation; hung up")
+
+          {:call, :caller_hung_up, _} ->
+            scenario_success("caller hung up before answer")
+
+          {:call, :caller_gone, %{reason: reason}} ->
+            scenario_aborted("caller vanished while it rang: #{inspect(reason)}")
+
+          {:call, :timeout, _} ->
+            scenario_failure("Bob never answered")
+
+          {:call, :failed, %{reason: reason}} ->
+            scenario_failure("call setup failed: #{reason}")
+        end
 
       :notfound ->
         b2bua_reply(req, 480, "Temporarily Unavailable")
@@ -348,65 +388,6 @@ defmodule Kelix.DirectCall do
       :unavailable ->
         b2bua_reply(req, 500, "Location Service Unavailable")
         scenario_failure("the location service could not answer")
-    end
-  end
-
-  state proceeding do
-    on_events do
-      # Everything the device says goes back to Alice, collapsed into our single
-      # inbound dialog.
-      {:outbound, {code, resp, _trans, _dlg}} when code in 101..199 ->
-        b2bua_forward_reply(resp)
-        goto(loop, "provisional #{code}")
-
-      {:outbound, {200, resp, _trans, _dlg}} ->
-        b2bua_forward_reply(resp)
-        goto(wait_ack, "200 OK relayed")
-
-      # A refusal. If Bob has another device, the hunt is already trying it.
-      {:outbound, {code, resp, _trans, _dlg}} when code >= 300 ->
-        b2bua_forward_reply(resp)
-
-        if b2bua_hunting?() do
-          goto(loop, "#{code}, trying Bob's next device")
-        else
-          scenario_success("Bob answered #{code}")
-        end
-
-      # Alice gave up. Two different things, and both are wanted: stop the
-      # search, and tell the device that is ringing.
-      {:CANCEL, req, _trans, _dlg} ->
-        b2bua_cancel_forward()
-        b2bua_forward(req)
-        scenario_aborted("caller cancelled")
-
-      {:BYE, req, _trans, _dlg} ->
-        b2bua_cancel_forward()
-        b2bua_reply(req, 200, "OK")
-        scenario_success("caller hung up before answer")
-
-      {:outbound, {:dialog_terminated, _dlg, reason}} ->
-        b2bua_reply(last_uas_req(), 500, "Outbound leg lost")
-        scenario_failure("outbound leg died: #{inspect(reason)}")
-    after
-      180_000 ->
-        b2bua_reply(last_uas_req(), 408, "Request Timeout")
-        scenario_failure("Bob never answered")
-    end
-  end
-
-  # Alice's ACK is relayed rather than answered here: what Bob's device gets is
-  # what Alice sent.
-  state wait_ack do
-    on_events do
-      {:ACK, req, _trans, _dlg} ->
-        b2bua_forward(req)
-        goto(connected, "ACK relayed")
-    after
-      # RFC 3261 timer H: no ACK is coming. Hang up the leg we did establish.
-      32_000 ->
-        b2bua_send_BYE()
-        scenario_failure("no ACK from the caller")
     end
   end
 
@@ -510,7 +491,12 @@ What is worth noticing:
 > `proxy_authenticate(); lookup("location"); t_relay()`.
 
 Authentication is **three states in front of the call**, not a complication of the
-call: everything from `place_call` on is `direct-call.exs` unchanged.
+call: everything from `place_call` on is `direct-call.exs`.
+
+> This variant still carries the establishment states inline, where
+> `direct-call.exs` above now calls `SBB.Call`'s `call/1`. It adopts the block
+> next — see the phase plan in
+> [docs/design/service-building-block-design.md](docs/design/service-building-block-design.md).
 
 ```elixir
   config(uses_modules: [:registrar, :auth_db])

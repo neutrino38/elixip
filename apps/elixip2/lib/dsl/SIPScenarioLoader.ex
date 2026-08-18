@@ -48,8 +48,15 @@ defmodule SIP.Scenario.Loader do
       else: :uac
   end
 
+  # A service building block is FSL too — same states, same on_events — so the
+  # `__scenario_states__/0` half matches one. It is excluded on `__sbb__/0`
+  # rather than only on the absence of `run/1`: a block does not define run/1,
+  # which already makes this impossible, but `load_file!/1` takes the FIRST
+  # match in a file, so a block declared above the scenario would be run AS the
+  # scenario if that ever changed. Two guards for one trap, deliberately.
   defp scenario_module?(module) do
     Code.ensure_loaded?(module) and
+      not function_exported?(module, :__sbb__, 0) and
       function_exported?(module, :run, 1) and
       function_exported?(module, :__scenario_states__, 0)
   end
