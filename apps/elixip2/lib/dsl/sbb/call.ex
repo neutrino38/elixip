@@ -54,6 +54,7 @@ defmodule SBB.Call do
     # the call site — see the return contract in
     # docs/design/service-building-block.md#s2--the-shape-of-a-return.
     SIP.Scenario.register_namespace(__CALLER__.module, :call)
+    SIP.Scenario.register_namespace(__CALLER__.module, :bridge)
 
     quote do
       import SBB.Call
@@ -67,6 +68,19 @@ defmodule SBB.Call do
   defmacro call(opts \\ []) do
     quote do
       sbb_fsm(SBB.Call.Establish, unquote(opts))
+    end
+  end
+
+  @doc """
+  Relay the established call until it ends, or until something interrupts it.
+  Options are `sbb_fsm/2`'s; see `SBB.Call.Bridge` for the `args` it reads.
+
+  A host that took the call back on `{:bridge, :interrupted, _}` re-enters with
+  `bridge(resume: true)`: the call was never torn down, only the relay paused.
+  """
+  defmacro bridge(opts \\ []) do
+    quote do
+      sbb_fsm(SBB.Call.Bridge, unquote(opts))
     end
   end
 
@@ -274,6 +288,195 @@ defmodule SBB.Call do
           b2bua_send_BYE()
           sbb_return({:call, :failed, %{reason: :no_ack}})
       end
+    end
+  end
+
+  defmodule Bridge do
+    @moduledoc """
+    The FSM behind `SBB.Call.bridge/1`: the `connected` and `wait_far_bye_ok`
+    states of every B2BUA script, once.
+
+    These states carry **no policy at all** — every arm is a forward and a stay,
+    down to the ones written out in full for the ACK of a re-INVITE and for the
+    default relay of INFO / MESSAGE / NOTIFY / REFER. What policy there is sits
+    at the edges, and comes back as an outcome for the script to name.
+
+    ## What it takes
+
+    Through `args`, all optional:
+
+      * `:media` — truthy when the call goes through a media server. It changes
+        one thing, and only one: a re-INVITE that merely MOVES a peer (a new
+        `c=`, a new port, an ICE restart) or refreshes a session timer is
+        answered locally instead of being relayed, because our endpoint did not
+        move and the far end has nothing to learn. Without a media server the two
+        legs are the same offer/answer and everything crosses;
+      * `:max_duration` — the call's own bound, in ms (4 h by default).
+
+    ## Interruption
+
+    `{:bridge_break, message}` — sent by `kelictl`, by a module, by a timer —
+    ends the block with `{:bridge, :interrupted, %{message: message}}` without
+    touching the call. The host does its business and calls `bridge(resume: true)`
+    again. In between, in-dialog traffic keeps arriving and nothing answers it:
+    an unanswered re-INVITE runs at timer B and an unanswered BYE is
+    retransmitted, so that interval is the scale of a prompt, not of a decision.
+    """
+
+    use SIP.SBB
+
+    @sbb_namespace :bridge
+
+    @sbb_returns [
+      ended: "the call is over — %{by: :caller | :callee, reason}",
+      interrupted: "a {:bridge_break, message} arrived; the call is untouched — %{message}",
+      max_duration: "the call's own bound expired — %{}",
+      media_lost:
+        "the media plane is gone — %{reason: :media_lost | :server_disconnected}. Both " <>
+          "legs are still up: hanging them up is a policy, so it is the host's"
+    ]
+
+    # A call lasts as long as it lasts. S7's bound is the dialog here, not a
+    # timer: the block is listening for the end it is bounded by, and
+    # `:max_duration` below is the script's bound, not the mechanism's.
+    @sbb_timeout :infinity
+
+    @default_max_duration 14_400_000
+
+    state initial_state do
+      on_events do
+        # Either side hangs up. Both legs are told, and the leg that asked is
+        # answered, before waiting for the far end's 200.
+        {:BYE, req, _trans, _dlg} ->
+          b2bua_forward(req)
+          b2bua_reply(req, 200, "OK")
+          sbb_data_set(:ended_by, :caller)
+          goto(wait_far_bye_ok, "caller hung up")
+
+        {:outbound, {:BYE, req, _trans, _dlg}} ->
+          b2bua_forward(req)
+          b2bua_reply(req, 200, "OK")
+          sbb_data_set(:ended_by, :callee)
+          goto(wait_far_bye_ok, "callee hung up")
+
+        {:dialog_terminated, _dlg, reason} ->
+          sbb_return({:bridge, :ended, %{by: :caller, reason: reason}})
+
+        {:outbound, {:dialog_terminated, _dlg, reason}} ->
+          sbb_return({:bridge, :ended, %{by: :callee, reason: reason}})
+
+        # The host takes the call back for a moment — a prompt, a lookup, an
+        # operator. Nothing is torn down: `bridge(resume: true)` picks it up.
+        {:bridge_break, message} ->
+          sbb_return({:bridge, :interrupted, %{message: message}})
+
+        # A leg has stopped sending on EVERY media it negotiated — not one media,
+        # which is a peer turning its camera off and no reason to end anything.
+        # And the media server itself going away takes the CALL down rather than
+        # one leg, with one media session per call. Both are reported rather than
+        # acted on: hanging up both legs is a decision, and a script may have
+        # another one.
+        {:ms_event, _ref, :media_lost} ->
+          sbb_return({:bridge, :media_lost, %{reason: :media_lost}})
+
+        {:ms_event, _ref, :server_disconnected} ->
+          sbb_return({:bridge, :media_lost, %{reason: :server_disconnected}})
+
+        # One media went quiet. Worth saying, not worth hanging up for.
+        {:ms_event, _ref, {:media_timeout, media}} ->
+          stay("#{media} went silent")
+
+        # A re-INVITE or an UPDATE. Four things arrive under this shape, and the
+        # media mode is where they stop being one rule: with a media server a
+        # peer that merely MOVED has not changed anything the far end can see,
+        # because our endpoint did not move. Same for a session-timer refresh,
+        # which carries no offer at all: each leg has its own timer, and we are a
+        # UA on both.
+        #
+        # What is absorbed is named explicitly, and anything the framework cannot
+        # classify (`:unknown`) falls through to the relay. Propagating a change
+        # nobody needed costs a transaction; swallowing a hold or an added media
+        # breaks the call.
+        {m, req, _trans, _dlg} when m in [:INVITE, :UPDATE] ->
+          case absorbable_reoffer(sbb_data_get(:media), b2bua_reoffer_kind(req)) do
+            {true, kind} ->
+              b2bua_reply_reoffer(req)
+              stay("#{m} answered locally (#{kind}, caller)")
+
+            {false, kind} ->
+              b2bua_forward(req)
+              stay("relayed #{m} (#{kind}, caller -> callee)")
+          end
+
+        {:outbound, {m, req, _trans, _dlg}} when m in [:INVITE, :UPDATE] ->
+          case absorbable_reoffer(sbb_data_get(:media), b2bua_reoffer_kind(req)) do
+            {true, kind} ->
+              b2bua_reply_reoffer(req)
+              stay("#{m} answered locally (#{kind}, callee)")
+
+            {false, kind} ->
+              b2bua_forward(req)
+              stay("relayed #{m} (#{kind}, callee -> caller)")
+          end
+
+        # The ACK of a re-INVITE's 200 is a transaction of its own (RFC 3261
+        # §13.2.2.4), so every re-INVITE that crosses owes one back.
+        {:ACK, req, _trans, _dlg} ->
+          b2bua_forward(req)
+          stay("ACK relayed (caller -> callee)")
+
+        {:outbound, {:ACK, req, _trans, _dlg}} ->
+          b2bua_forward(req)
+          stay("ACK relayed (callee -> caller)")
+
+        # Default relay, written out rather than assumed: everything else
+        # in-dialog (INFO, MESSAGE, REFER…), then the responses.
+        {:outbound, {m, req, _trans, _dlg}} when is_atom(m) ->
+          b2bua_forward(req)
+          stay("relayed #{m} (callee -> caller)")
+
+        {:outbound, {code, resp, _trans, _dlg}} when is_integer(code) ->
+          b2bua_forward_reply(resp)
+          stay("relayed #{code} (callee -> caller)")
+
+        {m, req, _trans, _dlg} when is_atom(m) ->
+          b2bua_forward(req)
+          stay("relayed #{m} (caller -> callee)")
+
+        {code, resp, _trans, _dlg} when is_integer(code) ->
+          b2bua_forward_reply(resp)
+          stay("relayed #{code} (caller -> callee)")
+      after
+        sbb_data_get(:max_duration) || @default_max_duration ->
+          sbb_return({:bridge, :max_duration, %{}})
+      end
+    end
+
+    state wait_far_bye_ok do
+      on_events do
+        {:outbound, {200, _resp, _trans, _dlg}} ->
+          sbb_return({:bridge, :ended, %{by: sbb_data_get(:ended_by), reason: :bye}})
+
+        {200, _resp, _trans, _dlg} ->
+          sbb_return({:bridge, :ended, %{by: sbb_data_get(:ended_by), reason: :bye}})
+
+        {:dialog_terminated, _dlg, _reason} ->
+          sbb_return({:bridge, :ended, %{by: sbb_data_get(:ended_by), reason: :bye}})
+
+        {:outbound, {:dialog_terminated, _dlg, _reason}} ->
+          sbb_return({:bridge, :ended, %{by: sbb_data_get(:ended_by), reason: :bye}})
+      after
+        # The far end never answered the BYE. The call is over either way.
+        5_000 ->
+          sbb_return({:bridge, :ended, %{by: sbb_data_get(:ended_by), reason: :bye_unanswered}})
+      end
+    end
+
+    # Whether a re-offer can be answered locally instead of crossing. Only with a
+    # media server, and only for the three kinds that change nothing the far end
+    # can see. Returns the kind too, so the caller can say which it was.
+    defp absorbable_reoffer(media, kind) do
+      {media not in [nil, false] and kind in [:address_change, :no_sdp, :no_change], kind}
     end
   end
 end

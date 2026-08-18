@@ -92,64 +92,27 @@ defmodule Kelix.DirectCall do
     end
   end
 
+  # The call is up. `bridge/1` is the relay: every arm of the state this replaces
+  # was a forward and a stay, in-dialog traffic in both directions, down to the
+  # ACK a re-INVITE's 200 owes back. What is left here is the end of the call.
   state connected do
+    bridge()
+
     on_events do
-      {:BYE, req, _trans, _dlg} ->
-        b2bua_forward(req)
-        b2bua_reply(req, 200, "OK")
-        goto(wait_far_bye_ok, "caller hung up")
+      {:bridge, :ended, _} ->
+        scenario_success("call relayed and ended")
 
-      {:outbound, {:BYE, req, _trans, _dlg}} ->
-        b2bua_forward(req)
-        b2bua_reply(req, 200, "OK")
-        goto(wait_far_bye_ok, "callee hung up")
+      {:bridge, :max_duration, _} ->
+        scenario_failure("maximum call duration reached")
 
-      {:dialog_terminated, _dlg, reason} ->
-        scenario_success("inbound leg ended: #{inspect(reason)}")
+      # Neither can happen in this script — there is no media plane, and nothing
+      # asks for the call back — but an outcome nobody matches leaves the machine
+      # waiting on an `after` that is not there. Saying so beats hanging.
+      {:bridge, :media_lost, %{reason: reason}} ->
+        scenario_failure("media plane gone from a call that has none: #{reason}")
 
-      {:outbound, {:dialog_terminated, _dlg, reason}} ->
-        scenario_success("outbound leg ended: #{inspect(reason)}")
-
-      # The ACK of a re-INVITE's 200 is a transaction of its own (RFC 3261
-      # §13.2.2.4), so every re-INVITE that crosses owes one back.
-      {:ACK, req, _trans, _dlg} ->
-        b2bua_forward(req)
-        stay("ACK relayed (caller -> callee)")
-
-      {:outbound, {:ACK, req, _trans, _dlg}} ->
-        b2bua_forward(req)
-        stay("ACK relayed (callee -> caller)")
-
-      # Default relay, written out rather than assumed: everything else
-      # in-dialog (re-INVITE, UPDATE, INFO, MESSAGE, REFER…), then the responses.
-      {:outbound, {m, req, _trans, _dlg}} when is_atom(m) ->
-        b2bua_forward(req)
-        stay("relayed #{m} (callee -> caller)")
-
-      {:outbound, {code, resp, _trans, _dlg}} when is_integer(code) ->
-        b2bua_forward_reply(resp)
-        stay("relayed #{code} (callee -> caller)")
-
-      {m, req, _trans, _dlg} when is_atom(m) ->
-        b2bua_forward(req)
-        stay("relayed #{m} (caller -> callee)")
-
-      {code, resp, _trans, _dlg} when is_integer(code) ->
-        b2bua_forward_reply(resp)
-        stay("relayed #{code} (caller -> callee)")
-    after
-      14_400_000 -> scenario_failure("maximum call duration reached")
-    end
-  end
-
-  state wait_far_bye_ok do
-    on_events do
-      {:outbound, {200, _resp, _trans, _dlg}} -> scenario_success("call relayed and ended")
-      {200, _resp, _trans, _dlg} -> scenario_success("call relayed and ended")
-      {:dialog_terminated, _dlg, _reason} -> scenario_success("call ended")
-      {:outbound, {:dialog_terminated, _dlg, _reason}} -> scenario_success("call ended")
-    after
-      5_000 -> scenario_success("BYE unanswered, closing anyway")
+      {:bridge, :interrupted, %{message: message}} ->
+        scenario_failure("bridge interrupted with nothing to do: #{inspect(message)}")
     end
   end
 

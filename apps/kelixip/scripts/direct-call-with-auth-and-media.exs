@@ -262,123 +262,34 @@ defmodule Kelix.DirectCallWithAuthAndMedia do
     end
   end
 
+  # The call is up. `bridge/1` is the relay — every arm of the state this replaces
+  # was a forward and a stay — and `media: @media` is what tells it that a peer
+  # merely MOVING has nothing to say to the far end, because our endpoint did not
+  # move. What is left here is what the media plane makes into a decision.
   state connected do
+    bridge(args: %{media: @media})
+
     on_events do
-      {:BYE, req, _trans, _dlg} ->
-        b2bua_forward(req)
-        b2bua_reply(req, 200, "OK")
-        goto(wait_far_bye_ok, "caller hung up")
+      {:bridge, :ended, _} ->
+        goto(releasing, "call relayed and ended")
 
-      {:outbound, {:BYE, req, _trans, _dlg}} ->
-        b2bua_forward(req)
-        b2bua_reply(req, 200, "OK")
-        goto(wait_far_bye_ok, "callee hung up")
+      {:bridge, :max_duration, _} ->
+        goto(releasing, "maximum call duration reached")
 
-      {:dialog_terminated, _dlg, reason} ->
-        goto(releasing, "inbound leg ended: #{inspect(reason)}")
-
-      {:outbound, {:dialog_terminated, _dlg, reason}} ->
-        goto(releasing, "outbound leg ended: #{inspect(reason)}")
-
-      # A leg has stopped sending on EVERY media it negotiated — not one media,
-      # which is a peer turning its camera off and no reason to end anything.
-      # There is no media left to carry, so both sides are told (§14.6, R2b).
-      {:ms_event, _ref, :media_lost} ->
+      # No media left to carry — either a leg stopped sending on every media it
+      # negotiated (§14.6, R2b), or the server itself is gone, which with one
+      # media session per call takes the CALL down rather than one leg. Both
+      # sides are told, and that is a decision, which is why the block reports it
+      # instead of taking it.
+      {:bridge, :media_lost, %{reason: reason}} ->
         b2bua_send_BYE()
         b2bua_reply(last_uas_req(), 200, "OK")
-        goto(releasing, "media stopped flowing")
+        goto(releasing, "media plane gone: #{reason}")
 
-      # One media went quiet. Worth saying, not worth hanging up for.
-      {:ms_event, _ref, {:media_timeout, media}} ->
-        stay("#{media} went silent")
-
-      # The media server itself is gone. With one media session per call this takes
-      # the CALL down, not one leg — so both legs are wound down rather than one of
-      # them re-pointed somewhere.
-      {:ms_event, _ref, :server_disconnected} ->
-        b2bua_send_BYE()
-        b2bua_reply(last_uas_req(), 200, "OK")
-        goto(releasing, "media server disconnected")
-
-      # A re-INVITE or an UPDATE. Four things arrive under this shape, and the
-      # media mode is where they stop being one rule (direct-call-with-auth.exs
-      # relays all four): with a media server a peer that merely MOVED — a new
-      # c=, a new port, an ICE restart — has not changed anything the far end can
-      # see, because our endpoint did not move. Same for a session-timer refresh,
-      # which carries no offer at all: each leg has its own timer, and we are a UA
-      # on both.
-      #
-      # Everything else crosses, and the two lists are written in that order on
-      # purpose: what is absorbed is named explicitly, and anything the framework
-      # cannot classify (`:unknown`) falls through to the relay. Propagating a
-      # change nobody needed costs a transaction; swallowing a hold or an added
-      # media breaks the call.
-      #
-      # None of it is re-authenticated: the dialog was authenticated when it was
-      # created, and challenging mid-call breaks UAs and proves nothing new
-      # (`Kelix.Mod.AuthDb.challengeable?/1`).
-      {m, req, _trans, _dlg} when m in [:INVITE, :UPDATE] ->
-        case b2bua_reoffer_kind(req) do
-          kind when kind in [:address_change, :no_sdp, :no_change] ->
-            b2bua_reply_reoffer(req)
-            stay("#{m} answered locally (#{kind}, caller)")
-
-          kind ->
-            b2bua_forward(req)
-            stay("relayed #{m} (#{kind}, caller -> callee)")
-        end
-
-      {:outbound, {m, req, _trans, _dlg}} when m in [:INVITE, :UPDATE] ->
-        case b2bua_reoffer_kind(req) do
-          kind when kind in [:address_change, :no_sdp, :no_change] ->
-            b2bua_reply_reoffer(req)
-            stay("#{m} answered locally (#{kind}, callee)")
-
-          kind ->
-            b2bua_forward(req)
-            stay("relayed #{m} (#{kind}, callee -> caller)")
-        end
-
-      # The ACK of a re-INVITE's 200 is a transaction of its own (RFC 3261
-      # §13.2.2.4), so every re-INVITE that crosses owes one back.
-      {:ACK, req, _trans, _dlg} ->
-        b2bua_forward(req)
-        stay("ACK relayed (caller -> callee)")
-
-      {:outbound, {:ACK, req, _trans, _dlg}} ->
-        b2bua_forward(req)
-        stay("ACK relayed (callee -> caller)")
-
-      # Default relay, written out rather than assumed: everything else in-dialog
-      # (INFO, MESSAGE, REFER…), then the responses.
-      {:outbound, {m, req, _trans, _dlg}} when is_atom(m) ->
-        b2bua_forward(req)
-        stay("relayed #{m} (callee -> caller)")
-
-      {:outbound, {code, resp, _trans, _dlg}} when is_integer(code) ->
-        b2bua_forward_reply(resp)
-        stay("relayed #{code} (callee -> caller)")
-
-      {m, req, _trans, _dlg} when is_atom(m) ->
-        b2bua_forward(req)
-        stay("relayed #{m} (caller -> callee)")
-
-      {code, resp, _trans, _dlg} when is_integer(code) ->
-        b2bua_forward_reply(resp)
-        stay("relayed #{code} (caller -> callee)")
-    after
-      14_400_000 -> goto(releasing, "maximum call duration reached")
-    end
-  end
-
-  state wait_far_bye_ok do
-    on_events do
-      {:outbound, {200, _resp, _trans, _dlg}} -> goto(releasing, "call relayed and ended")
-      {200, _resp, _trans, _dlg} -> goto(releasing, "call relayed and ended")
-      {:dialog_terminated, _dlg, _reason} -> goto(releasing, "call ended")
-      {:outbound, {:dialog_terminated, _dlg, _reason}} -> goto(releasing, "call ended")
-    after
-      5_000 -> goto(releasing, "BYE unanswered, closing anyway")
+      # Nothing in this script asks for the call back yet. Left explicit so the
+      # day something does, the arm is where it is expected rather than missing.
+      {:bridge, :interrupted, %{message: message}} ->
+        goto(releasing, "bridge interrupted with nothing to do: #{inspect(message)}")
     end
   end
 

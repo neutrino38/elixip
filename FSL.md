@@ -726,12 +726,19 @@ them the same way:
 | Block | `use` | Verb | Absorbs |
 |---|---|---|---|
 | `SBB.Call` | `use SBB.Call` | `call(args: %{peer: peer})` | forwarding the INVITE, the provisionals, the serial hunt over the peer's targets, the caller giving up, the cancel race, the ACK |
+| `SBB.Call` | `use SBB.Call` | `bridge()` | the established call: in-dialog relay both ways, the re-INVITE/UPDATE rule, the ACK a 200 owes back, the BYE and the far end's answer |
 
 `call/1` answers `{:call, :connected, _}`, `:rejected`, `:cancelled`, `:answered_after_cancel`,
 `:caller_hung_up`, `:caller_gone`, `:timeout` or `:failed` — see `SBB.Call.Establish` for what each carries.
 It completes the SIP transactions it owns (a caller whose INVITE is never answered is left hanging, so the
 408 is sent from inside the block) and leaves the *verdict* to the scenario: whether a refused call is a
 success, whether a cancellation is an abort, and what to bill.
+
+`bridge/1` answers `{:bridge, :ended, %{by: :caller | :callee}}`, `:max_duration`, `:media_lost` or
+`:interrupted`. It is the one block with no deadline — a call lasts as long as it lasts — and the only one
+meant to be **re-entered**: `{:bridge_break, message}` hands the call back untouched, and
+`bridge(resume: true)` picks it up. Between the two, in-dialog traffic keeps arriving and nothing answers
+it: an unanswered re-INVITE runs at timer B, so that interval is the scale of a prompt, not of a decision.
 
 Specification and catalogue: [docs/design/service-building-block.md](docs/design/service-building-block.md).
 Design: [docs/design/service-building-block-design.md](docs/design/service-building-block-design.md).

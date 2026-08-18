@@ -602,9 +602,27 @@ in the struct.
      `{:call, :media_lost, _}` and `{:call, :failed, %{reason: :media_setup |
      :media_unavailable | :forward_failed}}` — after answering the caller with
      the code the media script had chosen for each (503, 488, 500).
-5. **`bridge()`** (§7.1, §7.3) — the `connected` and `wait_far_bye_ok` states,
-   `@sbb_timeout :infinity`, and the interruption window, which owes a test that
-   sends a re-INVITE between two `bridge()` calls.
+5. ~~**`bridge()`**~~ **Done 2026-08-18.** `SBB.Call.Bridge`, `@sbb_timeout
+   :infinity`, and the three scripts' `connected` + `wait_far_bye_ok` gone:
+   `direct-call.exs` 161 → 124 lines, `direct-call-with-auth.exs` 239 → 199,
+   `direct-call-with-auth-and-media.exs` 399 → 310. 2 tests in
+   `apps/elixip2/test/sbb_bridge_test.exs`, including the one this plan owed —
+   a re-INVITE crossing while the host holds the call, which the resumed block
+   picks out of the mailbox and relays. Both mutation-checked by removing the
+   `bridge(resume: true)`.
+
+   §7.1 said the host would keep its own `:ms_event` arms (S5). It cannot: an
+   event a block does not consume waits in the mailbox for a block that never
+   returns. So `bridge()` consumes them and **reports** — `{:bridge, :media_lost,
+   %{reason}}` — and the host still decides, which is what S5 was protecting.
+   Hanging up both legs is a policy and stays written in the script. The same
+   correction as `call()`'s in phase 4, and the second time the same sentence in
+   the spec turned out to mean the opposite of what it said.
+
+   One thing that is a parameter rather than a policy: with a media server, a
+   re-INVITE that merely MOVES a peer is answered locally instead of crossing,
+   because our endpoint did not move. `bridge(args: %{media: …})` selects it —
+   the plain scripts relay all four kinds, the media one absorbs three.
 
 **Phase 3 used to be the `cancelling` state as a block of its own**, chosen as a
 cheap specimen to validate the mechanism before the flagship. §7.2 killed that
