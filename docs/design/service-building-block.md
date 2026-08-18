@@ -1,14 +1,21 @@
 # Service Building Blocks — reusable FSM fragments
 
-> **Status: first specification (2026-08-12).** Started as a stub capturing the
-> problem, one worked example and the invariant. The context announced then has
-> arrived — EB's article *"Taming large state machines: Service Building Blocks
-> in Elixip"* (2026-08) — and settles the *shape* of the mechanism: an SBB is a
-> module exporting macros that launch a sub-state-machine which absorbs
-> low-level events and posts high-level ones back to the host. §4 below turns
-> that shape plus the specimen's lessons into requirements. It is a
-> **specification, not a design**: it says what the layer must provide and how
-> to tell it works; the open design questions are listed at the end of §4.
+> **Status: specification, revised 2026-08-18.** Started as a stub capturing the
+> problem, one worked example and the invariant. EB's article *"Taming large
+> state machines: Service Building Blocks in Elixip"* (2026-08) settled the
+> *shape* of the mechanism: an SBB is a module exporting macros that launch a
+> sub-state-machine which absorbs low-level events and posts high-level ones
+> back to the host. §4 turns that shape plus the specimen's lessons into
+> requirements. It is a **specification, not a design**: it says what the layer
+> must provide and how to tell it works; the remaining design questions are
+> listed at the end of §4.
+>
+> The 2026-08-18 revision settles two things the first draft left open. An SBB
+> is a **subroutine call, not a co-routine** — the host process enters the
+> sub-machine, which owns the event loop until `sbb_return` hands control back
+> (S1, S2); three of the six open questions fall out of that. And FSL now has
+> **one vocabulary across its two dialects**, Elixir and TypeScript, with the
+> divergences named and assigned a side to move (§4.6, S14).
 
 ## 1. What the layer is for
 
@@ -217,8 +224,9 @@ a limit. Without an explicit deadline, a dead leg leaks whatever is holding it.
 
 What follows is the contract the SBB layer must honour. Each requirement is
 labelled S*n* so the eventual design document can answer them one by one.
-Requirements S3–S5 are the three the `cancelling` specimen forced (§3); the
-rest come from the article and from the constraints FSL already imposes.
+Requirements S3–S5 are the three the `cancelling` specimen forced (§3); S14
+comes from keeping the two FSL dialects one language (§4.6); the rest come from
+the article and from the constraints FSL already imposes.
 
 ### 4.1 What an SBB is
 
@@ -230,64 +238,132 @@ defmodule SBB.Call do
   defmacro __using__(_opts) do
     quote do
       defmacro call(dest, call_opts \\ []) do
-        # glue that launches the SBB finite state machine
+        # expands to sbb_fsm(SBB.Call.Fsm, ...): the caller enters that FSM
       end
     end
   end
 
   defmodule SBB.Call.Fsm do
-    # the complicated FSM that establishes the call goes here,
-    # written with the same `state` / `on_events` verbs as any scenario
+    # the complicated FSM that establishes the call goes here, written with the
+    # same `state` / `on_events` verbs as any scenario. It ends its branches on
+    # sbb_return({:connected, uri}) / sbb_return({:rejected, code, reason}) —
+    # and on scenario_failure() only for what must kill the host too.
   end
 end
 ```
 
-- **S1 — callable face.** An SBB exports one or several macros. Calling one
-  inside a `state` body *arms* the SBB and returns immediately — FSL's
-  non-blocking rule holds, the host keeps its `on_events` loop. The macro
-  launches the SBB's FSM through a new `SIP.Scenario.sbb_fsm()` entry point
-  (name per the article; the design owns the signature).
-- **S2 — high-level event contract.** The SBB talks back to its host
-  exclusively through events delivered to the host's `on_events`, matched in
-  the same position as protocol events. The event vocabulary is the SBB's
-  public API: documented per SBB, meaningful at service level
+- **S1 — callable face, and it is a *subroutine call*.** An SBB exports one or
+  several macros. Calling one inside a `state` body makes the **current
+  process enter the SBB's FSM**: the sub-machine takes over the event loop and
+  handles every event of the current process until it returns. The host does
+  not keep an `on_events` loop of its own while the SBB runs — it is suspended
+  at the call site, exactly like a subroutine call in any language.
+
+  This settles what the 2026-08-12 draft left as its central open question
+  ("same-process delegation vs. child process"). It was never really open:
+  invariant 2 of [DESIGN-FSL.md](DESIGN-FSL.md) — *one FSM, one process,
+  because the dialog and media layers bind their events to `self()`* — means an
+  SBB in a process of its own **cannot receive the host's leg events at all**.
+  S6 and "child process" are contradictory on the BEAM. Same-process
+  delegation is the only shape that works, and it honours the invariant
+  instead of working around it.
+
+  The entry point is `SIP.Scenario.sbb_fsm()` (name per the article; the design
+  owns the signature). The BEAM call stack carries the SBB stack, so
+  composition (S12) is a plain nesting of calls.
+
+- **S2 — high-level event contract, and one primitive to return.** The SBB
+  talks back to its host exclusively through events. The event vocabulary is
+  the SBB's public API: documented per SBB, meaningful at service level
   (`{:connected, dest_uri}`, `{:rejected, code, reason}`, `{:choice, key}`,
-  `:disconnected`), never a raw SIP message. On completion the SBB posts its
-  outcome event to the host and its own FSM ends (`scenario_success()` in SBB
-  context ends the *SBB*, never the host).
+  `:disconnected`), never a raw SIP message.
+
+  ```elixir
+  sbb_return(event)
+  ```
+
+  posts `event` into the process mailbox, ends the sub-machine and hands
+  control back to the host state **as a `stay()`** — the host body is not
+  re-executed and its `after` deadline is not re-armed (invariant 6). The host
+  resumes its `receive` and matches the event on the next turn.
+
+  Two consequences to hold on to:
+
+  - **the final event is not privileged.** Whatever the SBB ignored is still
+    in the mailbox and gets matched first. `{:ms_event, …}` can therefore reach
+    the host before `{:connected, uri}`. That is arrival order — the same rule
+    FSL/TS states for its pending queue — and it is written here so nobody
+    rediscovers it in a debugger;
+  - **returning is mandatory.** An SBB that hands control back without posting
+    anything re-blocks the host blind. Every SBB branch ends with `sbb_return`
+    or with a propagated terminal, checked the way a scenario state is checked
+    for ending on a transition macro.
+
+  `sbb_return` exists *because* reusing `scenario_success` for the return would
+  be a trap, and a well-aimed one: the `cancelling` specimen of §3 ends five of
+  its six arms on `scenario_aborted(...)` as an entirely **normal** outcome.
+  Its author, moving that block into an SBB, would write the trap on the first
+  try — a clean ending silently becoming an `exit()` that kills the host. With
+  `sbb_return`, no verb changes meaning depending on where it is written.
 
 ### 4.2 What the specimen requires (S3–S5)
 
-- **S3 — the host names the exits.** An SBB never terminates the host, never
-  `goto`s a host state, never chooses between `scenario_success` and
-  `scenario_aborted` on the host's behalf. Every outcome is an event; the
-  host's arm decides. (The media scenarios leave through `goto(releasing, …)`;
-  a fragment that hard-codes the ending is useless to them.)
+- **S3 — the host names the exits.** An SBB never terminates the host on a
+  normal outcome, never `goto`s a host state, never chooses between
+  `scenario_success` and `scenario_aborted` on the host's behalf. Every outcome
+  is an event carried by `sbb_return`; the host's arm decides. (The media
+  scenarios leave through `goto(releasing, …)`; a fragment that hard-codes the
+  ending is useless to them.)
 - **S4 — labels are parameterised.** Every string that reaches the monitor or
   the operator through the SBB is supplied or overridable at the call site.
   (`customer-service.exs` words its outcomes in queue vocabulary; the SBB must
   not degrade what the operator reads.)
-- **S5 — unconsumed events fall through.** While an SBB is armed, events its
-  FSM does not consume reach the host's `on_events` unchanged, so the host can
-  keep arms of its own (`{:ms_event, _ref, :server_disconnected}` in the media
-  scenarios). An SBB is extensible, not sealed.
+- **S5 — unconsumed events wait, they are not lost.** The draft asked for
+  simultaneous fall-through to a host loop running alongside the SBB. The
+  subroutine model has no such loop, and it does not need one — the two
+  reasons behind the requirement are both still served:
+
+  - **the mailbox does the work by itself.** An Erlang `receive` leaves what it
+    does not match in place. An event the SBB ignores is still there when the
+    host resumes: FSL/TS's pending queue, in native form. Deferred instead of
+    simultaneous;
+  - **the case that motivated S5 is already covered elsewhere.** The
+    `{:ms_event, _ref, :server_disconnected}` arm of the media scenarios is one
+    of the two clauses **injected into every `on_events`** (DESIGN-FSL §2.5) —
+    including the SBB's own, without its author thinking about it. The exact
+    pattern S5 protected is protected by injection, not by routing.
+
+  So: events an SBB does not consume stay pending and reach the host when it
+  regains control; media death and cooperative shutdown traverse the SBB
+  through the injected clauses. An SBB is extensible, not sealed.
 
 ### 4.3 Execution constraints
 
 - **S6 — same call, same legs.** The SBB observes and acts on the *host's*
   session — its dialogs, transactions, `sip_ctx` — because the sequences it
   packages (the cancel race, the hunt, the in-dialog relay) are sequences *of
-  the host's call*. This is the load-bearing difference with the existing
-  `spawn_fsm` macro, whose child runs in its own process with its own legs
-  (see §4.5). How event delivery is routed to honour S5+S6 together is the
-  central design question — the spec only fixes the observable behaviour.
-- **S7 — bounded.** Every SBB carries a completion deadline (defaulted,
-  overridable at the call site) and emits a distinct timeout outcome event on
-  expiry. No SBB may hold an instance slot open-endedly (§3, *The bound*).
-- **S8 — abortable.** The host can leave a state while an SBB is armed
-  (`goto` on an unrelated event, cooperative shutdown, `on_shutdown`). The
-  SBB winds down without leaking its legs' obligations — which, per S9, means
-  at most losing *visibility*, never correctness.
+  the host's call*. Under S1 this costs nothing: same process, same mailbox,
+  same bindings. It remains the load-bearing difference with `spawn_fsm`,
+  whose child runs in its own process with its own legs (see §4.5).
+- **S7 — bounded, and it carries the deadline alone.** Every SBB has a
+  completion deadline (defaulted, overridable at the call site) and returns a
+  distinct timeout event on expiry. No SBB may hold an instance slot
+  open-endedly (§3, *The bound*). While an SBB runs, the **host state's `after`
+  is suspended** — the time spent inside does not count against it. Two
+  concurrent deadlines with no arbiter is the alternative, and it has no
+  correct answer.
+- **S8 — terminals propagate; there is nothing else to abort.** The host
+  cannot leave a state while an SBB runs: it does not have control. The only
+  ways out are `sbb_return`, the SBB's own timeout, or a **terminal
+  propagating**: `scenario_failure` and `scenario_aborted` written inside an
+  SBB keep exactly their ordinary meaning and tear down the whole stack, host
+  included — the `exit()` of C. Mechanically that is a `throw` caught by the
+  root runner, which is free: FSL already turns every exception into
+  `scenario_failure`.
+
+  The draft's "the host can leave a state while the SBB is armed" is therefore
+  dropped rather than answered. Cooperative shutdown is unaffected: it arrives
+  through the injected clause (S5), inside the SBB, and propagates.
 - **S9 — the §2 invariant holds.** A scenario that does not use the SBB is
   still RFC-correct: everything mandatory stays in the framework
   (`answer_nobody_awaits/2` is the model). The SBB packages visibility and
@@ -303,7 +379,10 @@ end
   which makes service building blocks dynamically loadable like the modules
   themselves.
 - **S12 — SBBs compose.** An SBB's FSM, being FSL code, can itself call SBBs
-  — building blocks made of building blocks.
+  — building blocks made of building blocks. Under S1 this is a plain call
+  stack, so it needs no mechanism of its own. What it does cost: a `call` and a
+  `menu` cannot run *concurrently*; they compose in sequence, or the `menu` is
+  called from inside the `call`.
 - **S13 — upgrade without touching scenarios.** The compatibility surface of
   an SBB is its event vocabulary (S2). Upgrading an SBB — DTMF menu grows
   voice recognition, then a chatbot, then total-conversation text — must not
@@ -317,14 +396,96 @@ end
 FSL already has `spawn_fsm/2` (spawn a *child scenario* in its own monitored
 process), `notify/2` and `notify_parent/1` (`{:scenario_msg, name, payload}`
 both ways). That is parent↔child between two full scenarios, each with its own
-legs — a callee simulator, a load generator. An SBB is a different animal on
-two counts: it works on the **host's** legs (S6), and its events land as
-first-class `on_events` patterns, not wrapped in `:scenario_msg`. Whether
-`sbb_fsm()` is built on `spawn_child` plumbing or on same-process delegation
-is a design decision, not a spec one; the spec only requires S5 and S6 to hold
-simultaneously.
+legs — a callee simulator, a load generator.
 
-### 4.6 Acceptance
+Both survive, and the frontier is sharp. It is worth stating in one line
+because nothing states it today:
+
+> **`spawn_fsm` when the other machine has legs of its own; `sbb_fsm` when the
+> sequence belongs to the legs you already hold.**
+
+`spawn_fsm` spawns an *actor*: a second party, concurrent, addressed by
+messages, outliving the state that spawned it. `sbb_fsm` calls a *subroutine*:
+no second party, no concurrency, the caller suspended until it returns.
+
+Trix's `CallMachine` is the instructive borderline case: one instance per call,
+its own `dialing / ringing / connected / hangingup` states, its own view — it
+*looks* like the flagship SBB of §5. It is not, and the giveaway is one line of
+its constructor: the `RTCSession` is handed to it in `args`. It **owns** its
+leg, it does not observe the parent's. That is a `spawn`, and it is right to be
+one.
+
+### 4.6 One vocabulary across the two dialects
+
+FSL exists twice — `:elixip2` on the BEAM, `finite-state-language` on npm
+(spec `fsl-typescript/spec/fsl-js-ts.md`) — and Trix is a real consumer of the
+second. Two implementations of one language may diverge on *mechanism*; they
+must not diverge on *names*, because a name is the only thing a reader carries
+from one dialect to the other.
+
+**S14 — one concept, one name.** A concept present in both dialects is spelled
+the same in both, modulo the casing convention of each language (`snake_case`
+vs `camelCase`) and the `fx.` namespace TS uses where Elixir has bare macros.
+Where the two spellings differ today, **the two converge — breaking and
+reimplementing on either side is acceptable**; `finite-state-language` is
+0.x with one known consumer, and Elixip carries deprecated aliases the way
+`sub_fsm` was carried into 1.5.0.
+
+| Concept | Elixir | TypeScript | Status |
+|---|---|---|---|
+| spawn a child machine | `spawn_fsm/2` | `fx.spawn` | **converged 1.5.0** — was `sub_fsm`, kept as a deprecated alias |
+| enter a sub-machine (SBB) | `sbb_fsm/2` | `fx.sbb` | new on both sides — free to fix now, expensive to fix twice |
+| return from an SBB | `sbb_return/1` | `fx.sbbReturn` | new on both sides |
+| message to a child | `notify/2` | `fx.notify` | aligned |
+| message to the parent | `notify_parent/1` | `fx.notifyParent` | aligned |
+| message received from the parent | `{:scenario_msg, :parent, p}` | `parent:msg` | **diverged — Elixir moves** to `{:parent_msg, p}` |
+| message received from a child | `{:scenario_msg, name, p}` | `child:msg` | **diverged — Elixir moves** to `{:child_msg, name, p}` |
+| a child ended | `{:scenario_exit, name, outcome, reason}` | `child:exit` | **diverged — Elixir moves** to `{:child_exit, …}` |
+| cooperative shutdown | `on_shutdown` | `onShutdown` | aligned |
+| terminals | `scenario_success` / `_failure` / `_aborted` | `success()` / `failure()` / `aborted()` | aligned (the prefix is a namespacing need Elixir has and TS does not) |
+| bounded async work | — (`Valet`, and `http_GET` built on it) | `fx.task(work, tag)` | **gap on the Elixir side**: no FSL verb, only the `Valet` implementation and one `http_GET` facade over it |
+
+Three points in that table need their reasoning recorded.
+
+**The `child:` / `parent:` move is Elixir's, not TS's.** `scenario_msg` names
+the transport and hides the direction; the direction is what every reader wants
+and what both design documents already use in prose. TS cannot move the other
+way: it dispatches on `type` alone and has no pattern matching (spec §10), so
+folding the two into one type with a `from` field would force an `if` in every
+state — a real regression. Elixir loses nothing by splitting, since it matches
+the discriminant either way. Deprecated aliases carry the old tuples.
+
+**`fx.task` has no Elixir counterpart, and that is the gap to close.**
+`Valet` is an implementation and `http_GET` is one facade over it; there is no
+FSL verb for "run this work, bounded, deliver exactly one tagged event". TS
+has it and builds `httpGet` on it. That inversion — the richer primitive on
+the younger dialect — is a candidate for the SBB design, because an SBB with a
+deadline (S7) wants exactly that machinery.
+
+**What TS is not expected to support.** Convergence is on names, not on
+coverage; a concept absent from one dialect is not a divergence:
+
+- `spawn_fsm` by **file path** (`.exs` resolved next to the declaring file).
+  TS machines are ESM imports; there is nothing to resolve;
+- `SIP.Scenario.CallDispatcher` (DESIGN-FSL §4.4) — handing an inbound INVITE
+  to a waiting child has no meaning in a browser;
+- `goto back` and the `stay` variants Elixip is adding, already recorded as
+  deferred in the TS spec §11.4.
+
+Conversely, Elixir does not get TS's **bounded, inspectable pending queue**:
+the BEAM mailbox is unbounded and opaque. Same observable contract, opposite
+behaviour under load — TS drops the oldest event with a warning at 32, Elixir
+grows memory. Already true today; SBBs make it routine, because a sub-machine
+that runs for 30 s ignoring everything outside its own sequence *is* the
+`cancelling` specimen.
+
+**Keeping it true.** The two specs live in two repositories that nothing
+synchronises — the exact failure mode §1 describes for scenarios, applied to
+the specifications themselves. Each side carries an explicit pointer to the
+other, and this table is the shared part: changing a name here means changing
+it there in the same breath.
+
+### 4.7 Acceptance
 
 The spec is met when both of these hold:
 
@@ -336,21 +497,32 @@ The spec is met when both of these hold:
    scenarios *without* flattening their differences: `releasing` exits kept
    (S3), queue vocabulary kept (S4), `:ms_event` arms kept (S5).
 
-### 4.7 Open questions (deliberately not answered here)
+### 4.8 Open questions (deliberately not answered here)
 
 Design work, to be answered in a follow-up conception document:
 
-- same-process delegation vs. child process + event routing — how S5 (fall
-  through) and S6 (same legs) are honoured together;
-- what "armed" means across a host `goto`: does the SBB survive a state
-  change, or is leaving the state the abort of S8?
-- can two SBBs be armed at once in one state (a call *and* a menu)? If not,
-  say so loudly at arm time;
 - how a `.exs` scenario pulls in the macro face (`use SBB.Call` semantics,
   compile order, what `SIP.Scenario.Loader` must do);
-- state-name and appdata-key collisions between host and SBB FSMs;
-- the exact `sbb_fsm()` signature, and whether it subsumes today's
-  `spawn_child`.
+- state-name and appdata-key collisions between host and SBB FSMs — same
+  process, so `ctx.appdata` and the monitor's `laststate` are shared and need
+  a namespace;
+- the exact `sbb_fsm()` / `sbb_return()` signatures, and how a terminal thrown
+  inside an SBB is caught and re-applied by the root runner;
+- whether the SBB deadline (S7) is built on a general `task`-like primitive,
+  the one §4.6 records as missing on the Elixir side;
+- how an SBB publishes a *view* while it runs, not only an outcome event —
+  what `--monitor` shows while the host is suspended. Trix's `CallView`
+  (republished on every significant change) is the precedent.
+
+Three questions the 2026-08-18 revision **closed**, kept here so they are not
+reopened by accident:
+
+- ~~same-process delegation vs. child process~~ — decided by invariant 2 of
+  DESIGN-FSL, not by preference (S1);
+- ~~what "armed" means across a host `goto`~~ — the host cannot `goto` while
+  the SBB runs; there is no "armed" state (S8);
+- ~~can two SBBs be armed at once~~ — no, and it needs no diagnostic: one
+  point of control, a stack of calls (S1, S12).
 
 ## 5. Other fragments to look for
 
