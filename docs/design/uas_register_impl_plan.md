@@ -21,7 +21,7 @@
 
 **Conséquence** : le cœur du protocole (challenge/auth/réponse) est déjà
 fonctionnel. Le travail neuf porte sur (a) le passage du `transaction_id`,
-(b) l'habillage DSL serveur, (c) la fabrique d'instances avec quota, (d) la CLI
+(b) l'habillage FSL serveur, (c) la fabrique d'instances avec quota, (d) la CLI
 et le mode serveur, (e) les listeners connectés, (f) scénario/tests/doc.
 
 ---
@@ -47,7 +47,7 @@ reçu est bien un pid de transaction.
 
 ---
 
-## Phase 2 — DSL : annotation de type de scénario
+## Phase 2 — FSL : annotation de type de scénario
 
 **But** : rendre un scénario introspectable comme `:uas_register`.
 

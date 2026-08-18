@@ -28,7 +28,7 @@ On va se concentrer dans un premier temps sur le registrar
 ## Scénarios de type serveur (UAS)
 
 L'idée est de proposer que le traitement de requête SIP entrante puisse être pris en charge par un
-scénario en DSL d'automate a état fini pour proposer
+scénario en FSL (langage d'automate à état fini) pour proposer
 
 - un outil de test `elixipp` capable d'attendre des requêtes et de les traiter par scénario
 - un serveur SIP scriptable qui traite les requêtes par des scénario chargés à froid ou à chaud
@@ -114,7 +114,7 @@ Trois nouveautés sont nécessaires :
 1. **Listeners** côté transport (écoute des requêtes entrantes) — §2.
 2. **Enrichissement de la couche Session** : passage du `transaction_id` à la
    callback `on_new_registration` — §3.
-3. **Côté DSL** : annotation de type de scénario + mixin serveur
+3. **Côté FSL** : annotation de type de scénario + mixin serveur
    `SIP.Session.RegisterUAS` + variante UAS de `run_instance` — §5.
 
 ## 2. Listeners
@@ -307,11 +307,11 @@ Logique de `{:new_registration, …}` :
 > pourrait l'utiliser pour un rejet immédiat (quota dépassé → `:reject` sans
 > même spawner), auquel cas le code Dialog construit lui-même la réponse.
 
-## 5. Couche DSL — scénarios UAS
+## 5. Couche FSL — scénarios UAS
 
 ### 5.1 Annotation de type de scénario
 
-Nouvelle macro DSL exposant `__scenario_type__/0`. Par défaut un scénario est
+Nouvelle macro FSL exposant `__scenario_type__/0`. Par défaut un scénario est
 `:uac` ; un scénario serveur le déclare explicitement :
 
 ```elixir
@@ -472,7 +472,7 @@ Au lancement avec un scénario de type `:uas_register` :
 | Dispatch | `lib/framework/SIPSession.ex` | `dispatch/3` REGISTER ; fix `dispach`→`dispatch` expired |
 | Dialog | `lib/framework/SIPDialogImpl.ex` | propage `transaction_id` à `dispatch/3` |
 | Listeners | `lib/framework/SIPTransport*.ex` + nouveaux `Listener`/`ListenerSupervisor` | bind paramétrable UDP ; acceptors TCP/TLS/WSS ; routage réponse via transaction |
-| DSL type | `lib/dsl/SIPScenario.ex`, `SIPScenarioLoader.ex` | macro `uas/1`, `__scenario_type__/0`, `Loader.scenario_type/1` |
+| FSL type | `lib/dsl/SIPScenario.ex`, `SIPScenarioLoader.ex` | macro `uas/1`, `__scenario_type__/0`, `Loader.scenario_type/1` |
 | Runner UAS | `lib/dsl/SIPScenarioRunner.ex` | `spawn_uas_instance/2` ; opts `:dialog_pid`/`:inbound_request` |
 | Outil | `lib/elixipp/ElixippCLI.ex`, nouveau `Elixip.RegistrarUAS` | `--listen` ; sélection mode serveur ; registrar + quota |
 | Scénario réf. | `scenarios/uas_register.exs` (`SIP.Scenario.RegisterUAS`) | exemple |

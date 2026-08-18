@@ -26,13 +26,13 @@ face**: a scenario calls one macro inside a `state`, the SBB's own FSM absorbs
 the low-level events (the provisionals, the CANCELs, the timer H of this
 world), and the scenario's `on_events` receives a handful of high-level,
 human-meaningful events — `{:connected, uri}`, `{:choice, language}`,
-`:disconnected`. It is the DSL-level answer to the duplication that
+`:disconnected`. It is the FSL-level answer to the duplication that
 `SIP.Msg.Ops` answered at the message level (CLAUDE.md, *Message Layer*), and
 the Elixip incarnation of what makes the competition's scripts short:
 Kamailio's `t_relay()` and Asterisk's `Dial()` are single calls hiding an
 entire state machine written once by people who read the RFC — SBBs in a
 trench coat. The lineage is JAIN SLEE's Service Building Blocks (JSR 240):
-the idea was right, buried under Java boilerplate; here it gets a DSL.
+the idea was right, buried under Java boilerplate; here it gets a language.
 
 ## 2. The invariant the layer must not break
 
@@ -218,11 +218,11 @@ a limit. Without an explicit deadline, a dead leg leaks whatever is holding it.
 What follows is the contract the SBB layer must honour. Each requirement is
 labelled S*n* so the eventual design document can answer them one by one.
 Requirements S3–S5 are the three the `cancelling` specimen forced (§3); the
-rest come from the article and from the constraints the DSL already imposes.
+rest come from the article and from the constraints FSL already imposes.
 
 ### 4.1 What an SBB is
 
-An SBB is an Elixir module, **written in the Elixip DSL itself**, that packages
+An SBB is an Elixir module, **written in FSL itself**, that packages
 one protocol- or service-level sequence behind a callable face:
 
 ```elixir
@@ -237,13 +237,13 @@ defmodule SBB.Call do
 
   defmodule SBB.Call.Fsm do
     # the complicated FSM that establishes the call goes here,
-    # written with the same `state` / `on_events` DSL as any scenario
+    # written with the same `state` / `on_events` verbs as any scenario
   end
 end
 ```
 
 - **S1 — callable face.** An SBB exports one or several macros. Calling one
-  inside a `state` body *arms* the SBB and returns immediately — the DSL's
+  inside a `state` body *arms* the SBB and returns immediately — FSL's
   non-blocking rule holds, the host keeps its `on_events` loop. The macro
   launches the SBB's FSM through a new `SIP.Scenario.sbb_fsm()` entry point
   (name per the article; the design owns the signature).
@@ -302,7 +302,7 @@ end
   (`Kelix.Mod.*`) can ship SBBs (`Kelixip.Mod.Call.call/1` in the article),
   which makes service building blocks dynamically loadable like the modules
   themselves.
-- **S12 — SBBs compose.** An SBB's FSM, being DSL code, can itself call SBBs
+- **S12 — SBBs compose.** An SBB's FSM, being FSL code, can itself call SBBs
   — building blocks made of building blocks.
 - **S13 — upgrade without touching scenarios.** The compatibility surface of
   an SBB is its event vocabulary (S2). Upgrading an SBB — DTMF menu grows
@@ -314,7 +314,7 @@ end
 
 ### 4.5 Relation to the existing primitives
 
-The DSL already has `sub_fsm/2` (spawn a *child scenario* in its own monitored
+FSL already has `sub_fsm/2` (spawn a *child scenario* in its own monitored
 process), `notify/2` and `notify_parent/1` (`{:scenario_msg, name, payload}`
 both ways). That is parent↔child between two full scenarios, each with its own
 legs — a callee simulator, a load generator. An SBB is a different animal on

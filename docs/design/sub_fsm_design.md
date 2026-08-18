@@ -77,7 +77,7 @@ mailbox du process FSM et filtrés (pattern-match) dans `on_events`.
   `:scenario_exit` (crash). Le parent le corrèle via le `mon_ref` stocké dans le
   handle enfant (§6.2).
 
-## 5. Nouvelle surface DSL (`SIP.Scenario`)
+## 5. Nouvelle surface FSL (`SIP.Scenario`)
 
 Toutes les macros s'étendent en de fins wrappers au-dessus de fonctions de
 `SIP.Scenario.Runner`, pour que la vraie logique soit du code testable et que

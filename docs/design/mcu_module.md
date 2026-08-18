@@ -306,7 +306,7 @@ design must work without that, and get better with it.
  │                                            │  mcu.exs    │  1 per call     │
  │                                            │ (scenario)  │                 │
  │                                            └──────┬──────┘                 │
- │                        facade calls               │  media DSL             │
+ │                        facade calls               │  media FSL             │
  │                    ┌──────────────────────────────┼───────────────┐        │
  │                    ▼                              ▼               │        │
  │        ┌────────────────────────┐      ┌──────────────────────┐   │        │
@@ -352,7 +352,7 @@ but marked `down`, conferences on it are refused with a clear error (§9.4).
 
 ### 4.2 Why the adapter is a `MediaServer.Behaviour`
 
-Because the whole media DSL then works unchanged: `media_connect()`,
+Because the whole media FSL then works unchanged: `media_connect()`,
 `reply_invite_with_sdp/2`, `media_stop()` in `mcu.exs` are the *same* macros
 `uas_invite.exs` already uses. The mapping is:
 
@@ -1934,7 +1934,7 @@ results — the HTTP concerns stay in the frontal, derived from the declaration.
 
 **No change to `MediaServer.Behaviour`.** Conference-level operations stay
 outside it (§4.2); the unsupported callbacks return `{:error, :not_supported}`,
-which the DSL already surfaces as a `500`.
+which FSL already surfaces as a `500`.
 
 ---
 
@@ -3098,7 +3098,7 @@ What a recipient's scenario receives, on the channel `{:mcu_event, …}` already
  }}
 ```
 
-The DSL sugar follows the `Kelix.Mod.Mcu.Script` scheme (the `admit`/`attach`/`leave`
+The FSL sugar follows the `Kelix.Mod.Mcu.Script` scheme (the `admit`/`attach`/`leave`
 mixin): `mcu_send(target, kind, payload)` and `mcu_accept_messages()`, rebinding
 `sip_ctx` in place.
 

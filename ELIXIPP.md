@@ -1,11 +1,11 @@
 # elixipp — the SIP testing tool
 
 > `elixipp` is the **test tool** of the Elixip project: a sipp replacement that
-> drives DSL scenarios and can control a media server to fully simulate SIP
+> drives FSL scenarios and can control a media server to fully simulate SIP
 > calls. It is one of the two artifacts built from this repo — the other is the
 > [kelixip](docs/kelixip/README.md) application server.
 >
-> * Scenario language: **[DSL.md](DSL.md)**
+> * Finite State Language: **[FSL.md](FSL.md)**
 > * Building the escript: **[BUILD.md](BUILD.md)**
 > * TLS / WSS certificates: **[TLS_WSS.md](TLS_WSS.md)**
 
@@ -313,7 +313,7 @@ pattern; `goto target, desc, type` overrides it:
 
 ```elixir
 goto call_answered, "200 OK", :sip
-goto start_play, "media connected", :media
+goto call_established, "media connected", :media
 ```
 
 ## JSON parameterisation

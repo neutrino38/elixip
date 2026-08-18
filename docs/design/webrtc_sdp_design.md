@@ -395,7 +395,7 @@ UAS answer: (same local setup, gated on the offer being DTLS)
 
 ### 2.5 The `uac_invite` WebRTC scenario (elixipp)
 
-**No DSL, Behaviour or CLI change is needed** — the plumbing is already
+**No FSL, Behaviour or CLI change is needed** — the plumbing is already
 complete end to end:
 
 ```
@@ -458,7 +458,7 @@ mux/mid, offerer PTs); the real check runs elixipp against the dev platform
 
 ### 2.6 `MediaServer.Mockup` enrichment
 
-Goal: call-flow tests (DSL scenarios, CallUAS/CallUAC) can exercise
+Goal: call-flow tests (FSL scenarios, CallUAS/CallUAC) can exercise
 WebRTC-shaped offers/answers **without a media server**, with the same
 `webrtc_support` semantics as the real adapter. In particular the Mockup is
 the **CI stand-in for the IVeS gateway** in the `uac_invite_webrtc` scenario

@@ -423,7 +423,7 @@ The gap, concretely:
    toward.
 
 Which settles the shape of the P3 primitive. A `bridge(conn_a, conn_b)` callback
-added to `MediaServer.Behaviour` is the right *interface* for the DSL — one verb,
+added to `MediaServer.Behaviour` is the right *interface* for FSL — one verb,
 media-server-agnostic, and `MediaServer.Mockup` can implement it by looping RTP
 between two mock connections. But behind it, for Mendooze, the two legs cannot
 be two independently negotiated `Conn`s: the answer to leg A depends on the offer

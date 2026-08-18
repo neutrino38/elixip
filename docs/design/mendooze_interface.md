@@ -704,10 +704,10 @@ Bottom-up, each phase compiles, is tested, and is committable on its own.
 - Verify `MediaServer.Mockup` still satisfies the behaviour (no change
   expected beyond the type union).
 
-### Phase 8 — Integration with the DSL and a real server — DONE
+### Phase 8 — Integration with FSL and a real server — DONE
 - Adapter selection is config-driven: `config :elixip2, :mediaserver,
   module: :mockup | :mendooze | Module, url: "..."`. A new zero-arg
-  `media_connect/0` DSL macro reads it via
+  `media_connect/0` FSL macro reads it via
   `SIP.Session.Media.use_mediaserver/1`; the two-arg `media_connect/2` still
   works for explicit selection. The `:mediaserver` key is a global scenario
   `config` key (routed to the app env by the runner) and an external-JSON

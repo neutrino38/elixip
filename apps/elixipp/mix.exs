@@ -35,7 +35,7 @@ defmodule Elixipp.MixProject do
 
   defp deps do
     [
-      # The shared SIP stack + DSL + media.
+      # The shared SIP stack + FSL + media.
       {:elixip2, in_umbrella: true},
       # Pure-Elixir terminal UI for the --monitor live table (escript-only).
       {:owl, "~> 0.12"}

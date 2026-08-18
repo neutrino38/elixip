@@ -215,8 +215,8 @@ Same for the action keys. The leg is an option, defaulting to `:inbound`:
 one place that decides whether an endpoint is created standalone or inside an
 existing connection.
 
-The DSL macros keep their current arity and gain an optional keyword list, so
-`media_play("f.mp4", leg: :outbound)` reads the way the rest of the DSL does.
+The FSL macros keep their current arity and gain an optional keyword list, so
+`media_play("f.mp4", leg: :outbound)` reads the way the rest of FSL does.
 
 **Tests**: extend `media_test.exs` (or the closest existing suite) with two legs
 on the Mockup — handles are distinct, cleanup releases both, and the bare key
@@ -241,7 +241,7 @@ was called.
 media session to share.
 
 The transcoding policy is validated here (`:force | :avoid | :forbid` per media,
-anything else is an error) so a scenario typo fails at the DSL rather than
+anything else is an error) so a scenario typo fails at the FSL layer rather than
 inside the adapter.
 
 **Tests**: `media_bridge_test.exs` — two mock connections, `bridge/3`, a datagram

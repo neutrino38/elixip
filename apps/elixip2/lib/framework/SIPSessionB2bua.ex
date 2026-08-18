@@ -201,7 +201,7 @@ end
 
 defmodule SIP.Session.B2bua do
   @moduledoc """
-  B2BUA primitives for the scenario DSL: create a second (outbound) call leg,
+  B2BUA primitives for FSL: create a second (outbound) call leg,
   relay requests and responses between the legs, and answer locally.
 
   Pulled in by `use SIP.Scenario`, so every scenario has the `b2bua_*` macros.

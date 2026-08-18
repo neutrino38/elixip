@@ -29,7 +29,7 @@
 defmodule Kelix.Mcu.AdhocCall do
   use SIP.Scenario
   use SIP.Session.CallUAS
-  # the admit/attach/leave DSL macros — rebind sip_ctx in place, verdict in sip_ctx.lasterr
+  # the admit/attach/leave FSL macros — rebind sip_ctx in place, verdict in sip_ctx.lasterr
   use Kelix.Mod.Mcu.Script
   require Logger
   import SIP.Session, only: [reply: 5, reply: 6]

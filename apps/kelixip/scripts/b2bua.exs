@@ -79,7 +79,7 @@ defmodule Kelix.B2bua do
     on_events do
       {:outbound, {code, resp, _trans, _dlg}} when code in 101..199 ->
         b2bua_forward_reply(resp)
-        goto(loop, "provisional #{code}")
+        stay("provisional #{code}")
 
       {:outbound, {200, resp, _trans, _dlg}} ->
         b2bua_forward_reply(resp)
@@ -91,7 +91,7 @@ defmodule Kelix.B2bua do
         b2bua_forward_reply(resp)
 
         if b2bua_hunting?() do
-          goto(loop, "#{code}, trying the next target")
+          stay("#{code}, trying the next target")
         else
           scenario_success("callee answered #{code}")
         end
@@ -148,7 +148,7 @@ defmodule Kelix.B2bua do
 
       # Still ringing somewhere: keep listening rather than take a 180 for an end.
       {:outbound, {code, _resp, _trans, _dlg}} when code in 100..199 ->
-        goto(loop, "provisional #{code} after cancel")
+        stay("provisional #{code} after cancel")
 
       {:outbound, {code, _resp, _trans, _dlg}} when code >= 300 ->
         scenario_aborted("caller cancelled, callee answered #{code}")
@@ -205,40 +205,40 @@ defmodule Kelix.B2bua do
       # crossing, because there the peer moves and our endpoint does not.
       {m, req, _trans, _dlg} when m in [:INVITE, :UPDATE] ->
         b2bua_forward(req)
-        goto(loop, "relayed #{m} (caller -> callee)")
+        stay("relayed #{m} (caller -> callee)")
 
       {:outbound, {m, req, _trans, _dlg}} when m in [:INVITE, :UPDATE] ->
         b2bua_forward(req)
-        goto(loop, "relayed #{m} (callee -> caller)")
+        stay("relayed #{m} (callee -> caller)")
 
       # The ACK of a re-INVITE's 200: a transaction of its own (RFC 3261
       # §13.2.2.4), so every re-INVITE that crosses owes one back. Without this
       # the far end retransmits its 200 until timer H and drops a live call.
       {:ACK, req, _trans, _dlg} ->
         b2bua_forward(req)
-        goto(loop, "ACK relayed (caller -> callee)")
+        stay("ACK relayed (caller -> callee)")
 
       {:outbound, {:ACK, req, _trans, _dlg}} ->
         b2bua_forward(req)
-        goto(loop, "ACK relayed (callee -> caller)")
+        stay("ACK relayed (callee -> caller)")
 
       # Default relay, written out rather than assumed: everything else in-dialog
       # (INFO, MESSAGE, NOTIFY, REFER…), then the responses.
       {:outbound, {m, req, _trans, _dlg}} when is_atom(m) ->
         b2bua_forward(req)
-        goto(loop, "relayed #{m} (callee -> caller)")
+        stay("relayed #{m} (callee -> caller)")
 
       {:outbound, {code, resp, _trans, _dlg}} when is_integer(code) ->
         b2bua_forward_reply(resp)
-        goto(loop, "relayed #{code} (callee -> caller)")
+        stay("relayed #{code} (callee -> caller)")
 
       {m, req, _trans, _dlg} when is_atom(m) ->
         b2bua_forward(req)
-        goto(loop, "relayed #{m} (caller -> callee)")
+        stay("relayed #{m} (caller -> callee)")
 
       {code, resp, _trans, _dlg} when is_integer(code) ->
         b2bua_forward_reply(resp)
-        goto(loop, "relayed #{code} (caller -> callee)")
+        stay("relayed #{code} (caller -> callee)")
     after
       14_400_000 -> scenario_failure("maximum call duration reached")
     end

@@ -224,7 +224,7 @@ Only to check that the shape above survives contact with it. Cx/Dx (IMS HSS):
   under load is where a scenario instance would hang. **OPEN:** does the verdict
   facade stay synchronous with a timeout (simple, and what every script expects), or
   does a slow backend need an async verdict delivered as an event? Synchronous with a
-  bounded timeout is the right first answer; the DSL has no shape for the other today.
+  bounded timeout is the right first answer; FSL has no shape for the other today.
 
 ## 5. Proposed sequencing
 

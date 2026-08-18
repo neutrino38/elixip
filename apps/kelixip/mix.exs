@@ -32,7 +32,7 @@ defmodule Kelixip.MixProject do
 
   defp deps do
     [
-      # The shared SIP stack + DSL + media.
+      # The shared SIP stack + FSL + media.
       {:elixip2, in_umbrella: true},
       # Declarative config parser (config.toml / domains.toml). Pure Elixir,
       # no NIF, release-safe (design §13).

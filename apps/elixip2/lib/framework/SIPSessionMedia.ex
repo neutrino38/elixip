@@ -3,7 +3,7 @@ defmodule SIP.Session.Media do
   Media helpers mixin for SIP sessions.
 
   This module provides the `media_connect`, `media_play`, `media_record`,
-  `media_start_echo`, `media_stop` and `media_cleanup_ressources` DSL macros
+  `media_start_echo`, `media_stop` and `media_cleanup_ressources` FSL macros
   (through `__using__/1`) plus the backing functions that drive the configured
   `MediaServer.Behaviour` adapter.
   """

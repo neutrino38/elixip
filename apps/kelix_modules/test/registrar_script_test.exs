@@ -122,6 +122,37 @@ defmodule Kelix.RegistrarScriptTest do
     assert [_binding] = Registrar.bindings(@domain, @user)
   end
 
+  # `goto back` in process_register: the challenge detour resumes whichever wait
+  # sent it there. Challenged on a REFRESH, the instance must come back to
+  # wait_refresh — still registered, and still serving the answer to that
+  # challenge — not to some other state the detour happened to name.
+  test "a refresh challenged with a stale nonce keeps the registration", %{scenario: module} do
+    {:ok, dialog} = MockDialog.start_link(self())
+    pid = spawn_registrar(module, dialog)
+
+    send(pid, {:REGISTER, register(), nil, dialog})
+    assert_receive {:replied, 401, _, fields, _}, 1000
+    auth = digest_auth(fields[:wwwauthenticate]["nonce"])
+    send(pid, {:REGISTER, register(authorization: auth), nil, dialog})
+    assert_receive {:replied, 200, "OK", _, _}, 1000
+
+    # A refresh whose nonce we never issued is re-challenged, not refused.
+    send(
+      pid,
+      {:REGISTER, register(authorization: digest_auth("not-a-nonce-we-issued")), nil, dialog}
+    )
+
+    assert_receive {:replied, 401, "Unauthorized", refresh_fields, _}, 1000
+    assert [_binding] = Registrar.bindings(@domain, @user)
+
+    # …and the answer to that challenge is still served: the instance resumed its
+    # refresh wait rather than dying or falling back to the first-REGISTER wait.
+    nonce = refresh_fields[:wwwauthenticate]["nonce"]
+    send(pid, {:REGISTER, register(authorization: digest_auth(nonce, "00000002")), nil, dialog})
+    assert_receive {:replied, 200, "OK", _, _}, 1000
+    assert [_binding] = Registrar.bindings(@domain, @user)
+  end
+
   test "a wrong password is rejected with 403", %{scenario: module} do
     {:ok, dialog} = MockDialog.start_link(self())
     pid = spawn_registrar(module, dialog)
