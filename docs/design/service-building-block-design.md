@@ -576,10 +576,32 @@ in the struct.
    folded into `__sbb_returns__/0` at run time, so a block returning it — as this
    one does on the ring timeout — was refused. `declared_outcomes/1` now folds it
    in the same way.
-4. **The other two scripts**, `direct-call-with-auth.exs` and
-   `direct-call-with-auth-and-media.exs` — where S3–S5 are actually exercised:
-   an `authenticate_caller` phase before the block, a `releasing` exit after it,
-   `:ms_event` arms the host keeps.
+4. ~~**The other two scripts.**~~ **Done 2026-08-18.**
+   `direct-call-with-auth.exs` 310 → 239 lines, `direct-call-with-auth-and-media.exs`
+   494 → 399. S3 is what the media one proves: the same `{:call, :cancelled, _}`
+   that `direct-call.exs` reports as an abort is a `goto releasing` there,
+   because what the media server holds has to be given back whichever way the
+   call ended. 2 tests in
+   `apps/kelix_modules/test/direct_call_media_script_test.exs`, the first
+   mutation-checked by turning that arm back into a terminal.
+
+   Two things this phase changed in the mechanism and in the block, both because
+   the media script asked questions the plain one could not:
+
+   - **a cooperative shutdown reaching a block ran no `on_shutdown` at all.**
+     `sbb_loop/5` threw a terminal where §2 of this design says the wind-down
+     continues into the host — so a graceful stop landing while a call rang
+     inside `call()` skipped `media_cleanup_ressources()` and leaked the
+     endpoints. It now throws `{:sbb_shutdown, …}`, which `run_state/3` turns
+     back into the `goto :__shutdown__` the host state would have produced;
+   - **`call()` had to grow an `:ms_event` arm and a failed-forward branch.**
+     The injected media-death clause treats a dead media server as a shutdown,
+     which from inside a block would end the scenario over a decision the host
+     has a policy for; and `b2bua_forward/4` failing left `goto` to fail the
+     scenario with the caller's INVITE unanswered. Both now report —
+     `{:call, :media_lost, _}` and `{:call, :failed, %{reason: :media_setup |
+     :media_unavailable | :forward_failed}}` — after answering the caller with
+     the code the media script had chosen for each (503, 488, 500).
 5. **`bridge()`** (§7.1, §7.3) — the `connected` and `wait_far_bye_ok` states,
    `@sbb_timeout :infinity`, and the interruption window, which owes a test that
    sends a re-INVITE between two `bridge()` calls.

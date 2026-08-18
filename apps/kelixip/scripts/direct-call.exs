@@ -72,7 +72,7 @@ defmodule Kelix.DirectCall do
             scenario_aborted("caller vanished while it rang: #{inspect(reason)}")
 
           {:call, :timeout, _} ->
-            scenario_failure("Bob never answered")
+            scenario_success("Bob never answered")
 
           {:call, :failed, %{reason: reason}} ->
             scenario_failure("call setup failed: #{reason}")

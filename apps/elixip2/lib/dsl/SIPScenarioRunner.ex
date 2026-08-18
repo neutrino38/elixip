@@ -554,7 +554,14 @@ defmodule SIP.Scenario.Runner do
     try do
       apply(module, fun, [ctx])
     catch
-      {:sbb_terminal, outcome, reason, type, ctx2} -> {:terminal, outcome, reason, type, ctx2}
+      {:sbb_terminal, outcome, reason, type, ctx2} ->
+        {:terminal, outcome, reason, type, ctx2}
+
+      # A cooperative shutdown that reached a block and found no on_shutdown
+      # there: it belongs to the scenario, so it is re-applied as the transition
+      # the host state would have made, on_shutdown and all.
+      {:sbb_shutdown, desc, type, ctx2} ->
+        {:goto, :__shutdown__, desc, type, ctx2}
     end
   end
 
@@ -679,15 +686,27 @@ defmodule SIP.Scenario.Runner do
 
       # A cooperative shutdown reached the block through the clause injected into
       # every on_events. The block's own on_shutdown runs if it has one — it may
-      # owe the far end a response — and then the wind-down continues into the
-      # host, because the request was addressed to the scenario, not to us.
+      # owe the far end a response. Otherwise the wind-down CONTINUES INTO THE
+      # HOST, because the request was addressed to the scenario, not to us: it
+      # goes out as a throw of its own, which loop/4 turns back into the `goto
+      # :__shutdown__` the host state would have produced.
+      #
+      # Ending the scenario here instead would skip the host's on_shutdown, and
+      # that block is where a script frees what the call reserved — the media
+      # endpoints of a B2BUA among them. A graceful stop during a call that is
+      # ringing inside call() would leak them.
+      #
+      # An ENCLOSING block's own on_shutdown is skipped by that throw. Left that
+      # way deliberately: no block has one today, and the machinery to run each
+      # frame's wind-down on the way out would have to answer what a frame
+      # returning from it means.
       {:goto, :__shutdown__, desc, type, ctx2} ->
         if function_exported?(module, :__state___shutdown__, 1) do
           log_transition(state_name, :__shutdown__, desc)
           report(module, report_account(ctx2), :__shutdown__, desc, type)
           sbb_loop(module, :__shutdown__, enter(ctx2, state_name, :__shutdown__), states, ref)
         else
-          throw({:sbb_terminal, :aborted, "shutdown", type, ctx2})
+          throw({:sbb_shutdown, desc, type, ctx2})
         end
 
       {:goto, target, desc, type, ctx2} when is_atom(target) ->

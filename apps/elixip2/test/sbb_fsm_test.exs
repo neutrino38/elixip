@@ -111,6 +111,19 @@ defmodule SIP.Test.SbbFsm do
     end
   end
 
+  # Waits for an event the test never sends, so a shutdown is what ends it.
+  defmodule Waiting do
+    use SIP.SBB
+
+    @sbb_returns [released: "the event it waits for arrived — %{}"]
+
+    state initial_state do
+      on_events do
+        {:release, _} -> sbb_return({:waiting, :released, %{}})
+      end
+    end
+  end
+
   # ── Hosts ───────────────────────────────────────────────────────────────────
 
   defmodule HostEcho do
@@ -437,6 +450,79 @@ defmodule SIP.Test.SbbFsm do
     end
 
     assert {:error, {:sbb_return_outside_sbb, :initial_state}} = run(HostStrayReturn)
+  end
+
+  # ── Cooperative shutdown through a block ────────────────────────────────────
+
+  # A shutdown is addressed to the SCENARIO. Reaching it while a block holds the
+  # machine must still run the host's on_shutdown: that block is where a script
+  # frees what the call reserved — for a B2BUA, the media endpoints. Ending the
+  # scenario from inside the block instead leaks them, silently, on every
+  # graceful stop that lands mid-call.
+  test "a shutdown reaching a block runs the host's on_shutdown" do
+    defmodule HostWithShutdown do
+      use SIP.Scenario
+
+      state initial_state do
+        sbb_fsm(Waiting)
+
+        on_events do
+          {:waiting, _, _} -> scenario_success("returned")
+        after
+          2_000 -> scenario_failure("block never returned")
+        end
+      end
+
+      on_shutdown do
+        # What a real script does here is release resources; asserting that it
+        # ran at all is the same thing one level up.
+        scenario_aborted("wound down by the host")
+      end
+    end
+
+    test_pid = self()
+
+    {pid, ref} =
+      spawn_monitor(fn ->
+        send(test_pid, {:outcome, SIP.Scenario.Runner.run_instance(HostWithShutdown)})
+      end)
+
+    # Give the block time to be the one waiting.
+    Process.sleep(50)
+    send(pid, {:scenario_ctl, :shutdown, :test})
+
+    assert_receive {:outcome, {:aborted, "wound down by the host"}}, 5_000
+    assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
+  end
+
+  # A host with no on_shutdown keeps the old verdict: a controller-driven stop is
+  # an abort, not a failure.
+  test "a shutdown reaching a block still aborts a host that declares none" do
+    defmodule HostNoShutdown do
+      use SIP.Scenario
+
+      state initial_state do
+        sbb_fsm(Waiting)
+
+        on_events do
+          {:waiting, _, _} -> scenario_success("returned")
+        after
+          2_000 -> scenario_failure("block never returned")
+        end
+      end
+    end
+
+    test_pid = self()
+
+    {pid, _ref} =
+      spawn_monitor(fn ->
+        send(test_pid, {:outcome, SIP.Scenario.Runner.run_instance(HostNoShutdown)})
+      end)
+
+    Process.sleep(50)
+    send(pid, {:scenario_ctl, :shutdown, :test})
+
+    assert_receive {:outcome, {:aborted, "shutdown"}}, 5_000
   end
 
   # ── The return contract (spec §4.2) ─────────────────────────────────────────

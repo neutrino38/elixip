@@ -38,6 +38,7 @@
 # `direct-call-with-auth.exs` for a signalling-only deployment.
 defmodule Kelix.DirectCallWithAuthAndMedia do
   use SIP.Scenario
+  use SBB.Call
 
   uas(:invite)
 
@@ -169,6 +170,15 @@ defmodule Kelix.DirectCallWithAuthAndMedia do
   # SCRIPT decides what SIP each outcome means. Nothing is rescued here — a module
   # that faults raises, and the scenario runner logs it and fails the scenario,
   # which is more readable than an error mapped twice.
+  #
+  # `media_connect()` stays HERE, before the block: whether this call has a media
+  # plane at all is this script's decision, and a server that cannot be reached
+  # means no call is placed. What `call/1` takes over starts at the forward.
+  #
+  # Every outcome leaves through `releasing` rather than through a terminal —
+  # what the media server holds for this call has to be given back, whichever way
+  # the call ended. That is the whole of what a media B2BUA adds here, and it is
+  # exactly the part the block does not decide.
   state place_call do
     req = last_uas_req()
 
@@ -193,26 +203,43 @@ defmodule Kelix.DirectCallWithAuthAndMedia do
             goto(releasing, "no media server available")
 
           :ok ->
-            b2bua_forward(req, peer, @media)
+            call(args: %{peer: peer, request: req, media: @media})
 
-            cond do
-              ctx_get(:lasterr) == :ok ->
-                goto(proceeding, "call forwarded")
+            on_events do
+              {:call, :connected, _} ->
+                goto(connected, "call established")
 
-              # The media server was there a moment ago and is not any more —
-              # stopped, or killed under the call. Same verdict as the branch
-              # above, for the same reason, and it is why the question is asked
-              # again here rather than only before the forward.
-              b2bua_media_unavailable?() ->
-                b2bua_reply(req, 503, "Service Unavailable")
-                goto(releasing, "media plane gone: #{inspect(ctx_get(:lasterr))}")
+              # A refusal — or a 2xx whose media could not be bridged, which the
+              # framework hands over as a 488 so it reads as one device refusing
+              # rather than as the call failing.
+              {:call, :rejected, %{code: code}} ->
+                case b2bua_media_error() do
+                  nil -> goto(releasing, "Bob answered #{code}")
+                  reason -> goto(releasing, "no device could be bridged: #{inspect(reason)}")
+                end
 
-              true ->
-                # The offer could not be terminated (no common codec, a WebRTC offer
-                # we were told not to take). That is a statement about what the
-                # caller asked for, so it is a 488 — not a 500, which would blame us.
-                b2bua_reply(req, 488, "Not Acceptable Here")
-                goto(releasing, "media setup failed: #{inspect(ctx_get(:lasterr))}")
+              {:call, :cancelled, _} ->
+                goto(releasing, "caller cancelled, callee confirmed")
+
+              {:call, :answered_after_cancel, _} ->
+                goto(releasing, "callee answered after the cancellation; hung up")
+
+              {:call, :caller_hung_up, _} ->
+                goto(releasing, "caller hung up before answer")
+
+              {:call, :caller_gone, %{reason: reason}} ->
+                goto(releasing, "caller vanished while it rang: #{inspect(reason)}")
+
+              # The media plane went away before the call was up. The block has
+              # already answered the caller when their INVITE was still pending.
+              {:call, :media_lost, _} ->
+                goto(releasing, "media server gone before answer")
+
+              {:call, :timeout, _} ->
+                goto(releasing, "Bob never answered")
+
+              {:call, :failed, %{reason: reason}} ->
+                goto(releasing, "call setup failed: #{inspect(reason)}")
             end
 
           other ->
@@ -232,128 +259,6 @@ defmodule Kelix.DirectCallWithAuthAndMedia do
       :unavailable ->
         b2bua_reply(req, 500, "Location Service Unavailable")
         scenario_failure("the location service could not answer")
-    end
-  end
-
-  state proceeding do
-    on_events do
-      # A provisional. Its SDP, if it has one, is dropped by the framework: with a
-      # media server the callee's early media is a media event, not an answer to
-      # relay — the caller's answer was decided when their INVITE arrived. That is
-      # what leaves the hunt free to walk Bob's other devices (§7.4).
-      {:outbound, {code, resp, _trans, _dlg}} when code in 101..199 ->
-        b2bua_forward_reply(resp)
-        stay("provisional #{code}")
-
-      # Bob answered: the framework feeds his answer to the outbound endpoint,
-      # attaches the two, and puts OUR answer in the 200 Alice receives. One line,
-      # and it is the same line as in direct-call-with-auth.exs.
-      {:outbound, {200, resp, _trans, _dlg}} ->
-        b2bua_forward_reply(resp)
-        goto(wait_ack, "200 OK relayed")
-
-      # A refusal — or a 2xx whose media could not be bridged, which the framework
-      # hands over as a 488 so it reads as one device refusing rather than as the
-      # call failing. If Bob has another device, the hunt is already trying it.
-      {:outbound, {code, resp, _trans, _dlg}} when code >= 300 ->
-        b2bua_forward_reply(resp)
-
-        if b2bua_hunting?() do
-          stay("#{code}, trying Bob's next device")
-        else
-          case b2bua_media_error() do
-            nil -> goto(releasing, "Bob answered #{code}")
-            reason -> goto(releasing, "no device could be bridged: #{inspect(reason)}")
-          end
-        end
-
-      # Alice gave up. Two different things, and both are wanted: stop the search,
-      # and tell the device that is ringing. Then wait: a CANCEL asks, it does not
-      # decide (RFC 3261 §16.7).
-      {:CANCEL, req, _trans, _dlg} ->
-        b2bua_cancel_forward()
-        b2bua_forward(req)
-        goto(cancelling, "caller cancelled")
-
-      {:BYE, req, _trans, _dlg} ->
-        b2bua_cancel_forward()
-        b2bua_reply(req, 200, "OK")
-        goto(releasing, "caller hung up before answer")
-
-      # The media plane went away while Bob was still ringing. There is no call to
-      # hang up yet — Alice gets a 500 and the teardown CANCELs the attempt still
-      # ringing at Bob.
-      {:ms_event, _ref, :server_disconnected} ->
-        b2bua_reply(last_uas_req(), 500, "Media Server Unavailable")
-        goto(releasing, "media server gone before answer")
-
-      {:outbound, {:dialog_terminated, _dlg, reason}} ->
-        b2bua_reply(last_uas_req(), 500, "Outbound leg lost")
-        goto(releasing, "outbound leg died: #{inspect(reason)}")
-    after
-      180_000 ->
-        b2bua_reply(last_uas_req(), 408, "Request Timeout")
-        goto(releasing, "Bob never answered")
-    end
-  end
-
-  # The CANCEL has gone to Bob; his transaction is not over until a final response
-  # says so (RFC 3261 §16.7). Staying here to hear it is the whole point: end now
-  # and a device that answers a fraction of a second later is left off-hook in a
-  # call nobody is in.
-  #
-  # `SIP.DialogImpl` catches that case on its own — it is not a policy, so no
-  # script may get it wrong — and this state does not make it correct, it makes it
-  # VISIBLE: a call answered after its cancellation is a real event, and the
-  # difference between "abandoned" and "answered then hung up" is one somebody
-  # bills on. Every branch leaves through `releasing`, which frees the media Alice
-  # reserved before she changed her mind.
-  state cancelling do
-    on_events do
-      # What normally comes back, and fast.
-      {:outbound, {487, _resp, _trans, _dlg}} ->
-        goto(releasing, "caller cancelled, callee confirmed")
-
-      # The race. Bob picked up before the CANCEL reached him; nobody is left to
-      # talk to, so acknowledge his answer and hang up (§13.2.2.4 then §15).
-      {:outbound, {200, _resp, _trans, _dlg}} ->
-        b2bua_send_BYE()
-        goto(releasing, "callee answered after the cancellation; hung up")
-
-      # Still ringing somewhere: keep listening rather than take a 180 for an end.
-      {:outbound, {code, _resp, _trans, _dlg}} when code in 100..199 ->
-        stay("provisional #{code} after cancel")
-
-      {:outbound, {code, _resp, _trans, _dlg}} when code >= 300 ->
-        goto(releasing, "caller cancelled, callee answered #{code}")
-
-      {:outbound, {:dialog_terminated, _dlg, _reason}} ->
-        goto(releasing, "caller cancelled, outbound leg gone")
-
-      {:ms_event, _ref, :server_disconnected} ->
-        goto(releasing, "media server gone while cancelling")
-
-      {:dialog_terminated, _dlg, _reason} ->
-        goto(releasing, "caller cancelled")
-    after
-      # Bounded on purpose: past timer B the outbound transaction is over whatever
-      # we heard, and an instance held on a leg that says nothing is a slot lost.
-      32_000 -> goto(releasing, "caller cancelled, callee never concluded")
-    end
-  end
-
-  # Alice's ACK is relayed rather than answered here: Bob's device gets the ACK of
-  # the offer/answer it took part in, which in media mode is ours, not Alice's.
-  state wait_ack do
-    on_events do
-      {:ACK, req, _trans, _dlg} ->
-        b2bua_forward(req)
-        goto(connected, "ACK relayed")
-    after
-      # RFC 3261 timer H: no ACK is coming. Hang up the leg we did establish.
-      32_000 ->
-        b2bua_send_BYE()
-        goto(releasing, "no ACK from the caller")
     end
   end
 

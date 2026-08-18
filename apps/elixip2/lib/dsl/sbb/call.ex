@@ -93,6 +93,10 @@ defmodule SBB.Call do
           "been acknowledged and hung up, so the call is over, not up",
       caller_hung_up: "the caller sent BYE instead of CANCEL while it rang — %{}",
       caller_gone: "the caller's dialog ended while it rang — %{reason}",
+      media_lost:
+        "the media plane went away before the call was up — %{answered}, true if " <>
+          "the caller's INVITE has been answered (500) and false if it is still " <>
+          "pending, which it is once the caller has cancelled",
       failed:
         "the establishment could not complete — %{reason}: `:outbound_leg_lost` " <>
           "or `:no_ack`. The caller has been answered or hung up as the case needs"
@@ -106,13 +110,35 @@ defmodule SBB.Call do
     @default_ring_timeout 180_000
 
     state initial_state do
-      b2bua_forward(
-        sbb_data_get(:request) || last_uas_req(),
-        sbb_data_get(:peer),
-        sbb_data_get(:media) || false
-      )
+      req = sbb_data_get(:request) || last_uas_req()
+      media = sbb_data_get(:media) || false
 
-      goto(proceeding, "call forwarded")
+      b2bua_forward(req, sbb_data_get(:peer), media)
+
+      cond do
+        ctx_get(:lasterr) == :ok ->
+          goto(proceeding, "call forwarded")
+
+        # The media server was there a moment ago and is not any more — stopped,
+        # or killed under the call. Ours, not a problem with what the caller
+        # offered, so it is a 503 and it may carry a Retry-After: an upstream
+        # proxy can try another route, which a 488 would never let it do.
+        b2bua_media_unavailable?() ->
+          b2bua_reply(req, 503, "Service Unavailable")
+          sbb_return({:call, :failed, %{reason: :media_unavailable}})
+
+        # The offer could not be terminated (no common codec, a WebRTC offer we
+        # were told not to take). That is a statement about what the caller asked
+        # for, so it is a 488 — not a 500, which would blame us.
+        media != false ->
+          b2bua_reply(req, 488, "Not Acceptable Here")
+          sbb_return({:call, :failed, %{reason: :media_setup, cause: ctx_get(:lasterr)}})
+
+        # No media in this call: whatever went wrong is ours.
+        true ->
+          b2bua_reply(req, 500, "Server Internal Error")
+          sbb_return({:call, :failed, %{reason: :forward_failed, cause: ctx_get(:lasterr)}})
+      end
     end
 
     state proceeding do
@@ -158,6 +184,18 @@ defmodule SBB.Call do
         {:dialog_terminated, _dlg, reason} ->
           b2bua_cancel_forward()
           sbb_return({:call, :caller_gone, %{reason: reason}})
+
+        # The media plane went away while the callee was still ringing. There is
+        # no call to hang up yet, so the caller is answered and the teardown
+        # CANCELs the attempt still ringing.
+        #
+        # Written out rather than left to the clause `on_events` injects into
+        # every wait: that clause treats a dead media server as a shutdown, which
+        # from inside a block would end the scenario over a decision the host may
+        # well have a policy for. Reporting it is what leaves the policy there.
+        {:ms_event, _ref, :server_disconnected} ->
+          b2bua_reply(last_uas_req(), 500, "Media Server Unavailable")
+          sbb_return({:call, :media_lost, %{answered: true}})
 
         {:outbound, {:dialog_terminated, _dlg, reason}} ->
           b2bua_reply(last_uas_req(), 500, "Outbound Leg Lost")
@@ -205,6 +243,11 @@ defmodule SBB.Call do
 
         {:outbound, {:dialog_terminated, _dlg, _reason}} ->
           sbb_return({:call, :cancelled, %{code: nil}})
+
+        # Nothing is answered here: the caller has cancelled, and their INVITE is
+        # ended by the 487 the dialog layer owes them, not by us.
+        {:ms_event, _ref, :server_disconnected} ->
+          sbb_return({:call, :media_lost, %{answered: false}})
 
         {:dialog_terminated, _dlg, _reason} ->
           sbb_return({:call, :cancelled, %{code: nil}})
