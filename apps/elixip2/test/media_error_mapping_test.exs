@@ -1,5 +1,5 @@
 defmodule SIP.Session.MediaErrorMappingTest do
-  # `on_media_error` as a per-cause function (docs/design/mcu_module.md §6.5): the
+  # `on_media_error` as a per-cause function (docs/design/DESIGN-MCU.md#5-an-inbound-call): the
   # causes are not equivalent to the caller — an unusable offer is a 488 (retrying it
   # is pointless), a media-server failure a 500 (ours, and a retry may work) — so one
   # code for both tells the peer the wrong thing about what to do next.

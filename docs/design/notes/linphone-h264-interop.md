@@ -42,7 +42,7 @@ fixed; the first two are the reason the client bug was invisible for so long.
 
 | defect | effect | fixed in |
 |---|---|---|
-| `:ice_connected` was emitted per *connection*, on the first media to latch | the player started on the audio latch while the video leg was unlatched, so the opening keyframe went to the SDP address and was lost | `docs/design/media-connectivity.md` |
+| `:ice_connected` was emitted per *connection*, on the first media to latch | the player started on the audio latch while the video leg was unlatched, so the opening keyframe went to the SDP address and was lost | `../DESIGN-FRAMEWORK.md#66-media-connectivity-when-may-a-scenario-send` |
 | `a=rtcp-fb` was answered only under an `…F` profile | Linphone offers `RTP/SAVP` while asking for `ccm fir`/`nack pli`; refusing them cost the call its keyframe-request path (it fell back to SIP INFO) | `MediaServerMendoozeConn.ex`, `mcu/adapter/conn.ex` |
 | `play.exs` waited for `:player_stopped` | an event that does not exist in the contract, so end-of-file never hung up | `apps/elixip2/scenarios/play.exs` |
 | a UAS could not originate an in-dialog request | the BYE at end of file raised, then addressed itself wrongly | `SIPDialogImpl.address_in_dialog/2` |
@@ -160,5 +160,5 @@ same ticket, clearly separated.
 - The count of `0x4` errors equals the number of keyframes received. That
   invariant held across every call and is the fastest way to confirm you are
   still looking at the same defect.
-- Related records: `docs/design/media-connectivity.md` (the latch fix and the
-  event contract), `docs/design/mcu_module.md` §6.3.1 (the `a=rtcp-fb` deviation).
+- Related records: `../DESIGN-FRAMEWORK.md#66-media-connectivity-when-may-a-scenario-send` (the latch fix and the
+  event contract), `../DESIGN-MCU.md` (the `a=rtcp-fb` deviation).

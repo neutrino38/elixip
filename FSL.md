@@ -1,7 +1,11 @@
 # The Finite State Language (FSL)
 
 FSL is a [domain specific language](https://elixir.hexdocs.pm/1.20.1/domain-specific-languages.html)
-specialized for the finite state machines that handle calls. It is not unlike ExUnit:
+specialized for the finite state machines that handle calls.
+
+> This is the **reference**: what to write in a scenario. How the language is
+> built — what the macros expand to, how the engine runs them and why — is
+> [docs/design/DESIGN-FSL.md](docs/design/DESIGN-FSL.md). It is not unlike ExUnit:
 a call or SIP scenario is an Elixir module saved as a `.exs` file.
 
 Here is a "typicall" scenario where:
@@ -244,7 +248,7 @@ The zero-arg `media_connect/0` reads `config :elixip2, :mediaserver`
 be switched between the in-process **Mockup** and the real **Mendooze** MCU
 without editing the scenario — set it in `config/config.exs`, in the scenario's
 own `config` block, or in an external-JSON header (`"mediaserver"` key). See the
-Configuration section of `CLAUDE.md` and `docs/design/mendooze_interface.md`.
+Configuration section of `CLAUDE.md` and `docs/design/DESIGN-FRAMEWORK.md#63-the-mendooze-adapter`.
 
 ## transitions: the goto macro, stay(), scenario_success(), scenario_failure()
 

@@ -1,6 +1,6 @@
 defmodule Kelix.Mod.McuAdminTest do
   @moduledoc """
-  The administrative half of the module (design `docs/design/mcu_module.md` P5):
+  The administrative half of the module (design `docs/design/DESIGN-MCU.md` P5):
   `conference.update`, the `participant.*` resources, `kelictl status`, the §11
   metrics, and the two recovery paths of §9 — an MCU that restarts (§9.2) and the
   conferences a dead kelixip left behind (§9.4).

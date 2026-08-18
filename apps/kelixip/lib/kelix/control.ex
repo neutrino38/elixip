@@ -533,7 +533,7 @@ defmodule Kelix.Control do
 
   One entry per `[module.<name>]` block that started, carrying the two surfaces a
   module exposes and neither of which was discoverable at runtime (FW-5,
-  `docs/design/mcu_module.md` §8.3.6): the **control commands** it declared into
+  `docs/design/DESIGN-MCU.md`): the **control commands** it declared into
   `Kelix.Control.Registry` (what an operator can run) and the **facade functions**
   it exports to scenario scripts (what a script can call, from `describe/0`).
 

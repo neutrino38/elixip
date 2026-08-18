@@ -1,7 +1,7 @@
 defmodule Kelix.Mod.Mcu.Adapter.Conn do
   @moduledoc """
   One conference leg: the MCU-side participant plus its media state (design
-  `docs/design/mcu_module.md` §4.1, §6.2).
+  `docs/design/DESIGN-MCU.md`).
 
   The participant is created in `init/1` and deleted in `terminate/2`, so **its MCU
   lifetime is exactly this process's lifetime** (§8.2) — that is the invariant that
@@ -49,7 +49,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # MediaProtocol: RTP
   @proto_rtp 0
   # MediaProtocol: WS — the only non-RTP transport this adapter drives, and only
-  # for text (S5, mcu_text_over_wss_impl_plan.md)
+  # for text (S5, DESIGN-MCU.md)
   @proto_ws 2
   # telephone-event's Medooze codec constant (§3.6): a payload type the mixer never
   # encodes towards anyone, so it can never be a primary codec.
@@ -1568,7 +1568,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
       message:
         "conference #{state.conf_uid}: mcu #{state.mcu} returned no media IP from " <>
           "StartReceiving — upgrade the media server (it must announce its SDP " <>
-          "address, see docs/design/mcu_module.md §16.5)"
+          "address, see docs/design/mcu_server_evolutions.md)"
     )
 
     {:error, :no_media_ip}

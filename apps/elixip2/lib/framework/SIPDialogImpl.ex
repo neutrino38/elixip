@@ -44,7 +44,7 @@ defmodule SIP.DialogImpl do
     # wrapped as {tag, msg} — see SIP.Dialog.start_dialog/5 and send_to_app/2.
     # nil (the default) delivers bare messages.
     tag: nil,
-    # Forking (kamailio TM model, docs/design/b2bua_module.md §3.3): the initial
+    # Forking (kamailio TM model, docs/design/DESIGN-FRAMEWORK.md#55-forking-the-kamailio-tm-model): the initial
     # request may be sent to several targets as several client transactions of
     # THIS dialog — same Call-ID, From tag and CSeq, one fresh Via branch each.
     # `branches` maps each such transaction to the target it went to; `forking`
@@ -404,7 +404,7 @@ defmodule SIP.DialogImpl do
   end
 
   # A branch set asked with a REPLACEMENT BODY (the offer-profile fallback of
-  # b2bua_module.md §7.5): re-stamp the stored initial request, which is the
+  # DESIGN-FRAMEWORK.md): re-stamp the stored initial request, which is the
   # template `arm_branch/2` composes every branch from, and move the CSeq on.
   #
   # The CSeq is what makes this more than a body swap. Branches share a CSeq
@@ -565,7 +565,7 @@ defmodule SIP.DialogImpl do
 
   # Deliver a message to the bound application process, wrapped in the dialog's
   # event tag when one was set at creation ({tag, msg} — how a B2BUA leg's
-  # events are told apart, design docs/design/b2bua_module.md §2). Untagged
+  # events are told apart, design docs/design/DESIGN-FRAMEWORK.md#52-telling-the-legs-apart). Untagged
   # dialogs (the default) deliver the bare message: existing apps are untouched.
   defp send_to_app(state, msg) do
     if is_pid(state.app), do: send(state.app, wrap_tag(state.tag, msg))

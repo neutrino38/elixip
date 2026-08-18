@@ -1,7 +1,7 @@
 defmodule Kelix.Mod.Mcu.Vocabulary do
   @moduledoc """
   The human names of the MCU's wire enums — mosaic layouts, video sizes, VAD modes
-  (design `docs/design/mcu_module.md` §3.6, §8.3.7) — read in **one** place.
+  (design `docs/design/DESIGN-MCU.md`) — read in **one** place.
 
   Both directions live here and everything else delegates: the CLI render labels
   (`kelictl` shows `2x2`), the accepted *input* of the control commands and of the

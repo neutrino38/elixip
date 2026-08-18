@@ -1,7 +1,7 @@
 defmodule Kelix.Mod.Mcu.Adapter do
   @moduledoc """
   The `MediaServer.Behaviour` face of the MCU module (design
-  `docs/design/mcu_module.md` §4.2).
+  `docs/design/DESIGN-MCU.md`).
 
   Being a behaviour implementation is the whole point: `media_connect()`,
   `reply_invite_with_sdp/2` and `media_cleanup_ressources()` in `mcu.exs` are the

@@ -2,7 +2,7 @@
 
 Source study of `../mediagw-b2bua` (Java, SIP Servlet + `XmlRPCJSR309Client`),
 written because elixip's B2BUA P3 (`{:mediaserver, …}` mode, see
-[b2bua_module.md](b2bua_module.md) §7) is going to do **the same thing**, and the
+[DESIGN-FRAMEWORK.md](../DESIGN-FRAMEWORK.md#5-b2bua) §7) is going to do **the same thing**, and the
 Java code is the only place where "the same thing" is written down completely.
 
 It answers the question P3 was blocked on: *how do you connect two peer
@@ -12,7 +12,7 @@ endpoints, and a per-media object that wires them together, chooses the codecs
 of both at once, and generates both SDPs. The long answer is below.
 
 The reference for what the RPCs mean stays
-[mendooze_interface.md](mendooze_interface.md); this document is about how they
+[DESIGN-FRAMEWORK.md](../DESIGN-FRAMEWORK.md#63-the-mendooze-adapter); this document is about how they
 are **composed** for a back-to-back call.
 
 ## 1. The classes, and what each one owns
@@ -364,7 +364,7 @@ idempotent through the `sending`/`receiving` flags.
 **488 on the outbound INVITE** (`tryOtherMode`, `:566-618`): a second INVITE to
 the same target with the *other* offer profile — WebRTC if the first was plain
 SIP, plain SIP if it was WebRTC. This is exactly the offer-profile fallback of
-[b2bua_module.md](b2bua_module.md) §7.5, with a two-rung ladder.
+[DESIGN-FRAMEWORK.md](../DESIGN-FRAMEWORK.md#5-b2bua) §7.5, with a two-rung ladder.
 
 **Teardown** (`delete/0`, `:942-988`): stop every bridge → `EndpointDelete` ×2 →
 `MediaSessionDelete` → `EventQueueDelete`.

@@ -2,7 +2,7 @@ defmodule Kelix.Mod.McuCallTest do
   @moduledoc """
   The call path end to end: the reference `mcu.exs` driven by a spawned scenario
   instance, the real adapter, and a recording MCU transport (design
-  `docs/design/mcu_module.md` §13, "Integration" + "Unit, mocked MCU").
+  `docs/design/DESIGN-MCU.md`, "Integration" + "Unit, mocked MCU").
 
   What it pins down is the part §2 says must be transcribed faithfully: the **RPC
   order** of an inbound call and the **answer-time / ACK-time split** — a caller that
@@ -932,7 +932,7 @@ defmodule Kelix.Mod.McuCallTest do
       assert_receive {:replied, 200, _reason, fields, _req}, 2000
 
       answer = fields[:body]
-      # S5 rule (mcu_text_over_wss_impl_plan.md §D7, 2026-08-08): a participant
+      # S5 rule (DESIGN-MCU.md, 2026-08-08): a participant
       # admitted without text gets NO m=text in the answer — not a port-0 echo,
       # which the deployed WebRTC client rejects wholesale (kMlineMismatchInAnswer).
       # A deliberate, text-scoped deviation from RFC 3264 §6.

@@ -81,7 +81,7 @@ defmodule SIP.Session.Media do
   # ── Leg-scoped handles ──────────────────────────────────────────────────────
   #
   # A B2BUA call terminates media on the media server for BOTH of its SIP legs
-  # (design docs/design/b2bua_module.md §7), so the single-slot handles this
+  # (design docs/design/DESIGN-FRAMEWORK.md#57-media-modes), so the single-slot handles this
   # mixin started with are no longer enough. They become leg-scoped — with the
   # bare key kept as the `:inbound` alias, which is why nothing outside this
   # module changes: every existing scenario, the `reply_invite_with_sdp` path,
@@ -260,7 +260,7 @@ defmodule SIP.Session.Media do
   @doc """
   Watch the media server process, so that it **dying** reaches the scenario as
   the same `:server_disconnected` it already gets when the server *disconnects*
-  (design docs/design/b2bua_module.md §14.6, R8 item 1). One event, one meaning:
+  (design docs/design/DESIGN-FRAMEWORK.md#67-the-media-server-as-a-failure-domain, R8 item 1). One event, one meaning:
   the media plane is gone.
 
   A separate watcher process rather than a monitor in the scenario: a scenario
@@ -373,7 +373,7 @@ defmodule SIP.Session.Media do
   # not the same request as `bridge/3`: this one says WHERE the endpoint lives,
   # and it can only be answered at creation time — on a Medooze server two
   # endpoints are connectable only inside one MediaSession
-  # (docs/design/mediagw_b2bua_jsr309.md §2). Adapters with nothing to share
+  # (docs/design/notes/mediagw_b2bua_jsr309.md §2). Adapters with nothing to share
   # ignore it, which is why it is safe to pass unconditionally.
   defp ensure_peer_connection(sip_ctx = %SIP.Context{}, leg, webrtc_support, medias, opts) do
     case SIP.Context.appdata_get(sip_ctx, pc_key(leg)) do

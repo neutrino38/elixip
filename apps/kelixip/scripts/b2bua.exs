@@ -4,7 +4,7 @@
 # `domain:`).
 #
 # This is the kamailio `lookup("location"); t_relay()` pattern done as a B2BUA
-# (design docs/design/b2bua_module.md §3.2): the location service says where the
+# (design docs/design/DESIGN-FRAMEWORK.md#55-forking-the-kamailio-tm-model): the location service says where the
 # AOR is, and this script relays the call there over a second dialog it owns.
 # Unlike a proxy it stays in the signalling path for the whole call, so it can be
 # told to hang up, can meter, and later can put media in the middle.

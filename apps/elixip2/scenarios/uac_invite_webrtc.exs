@@ -2,7 +2,7 @@
 # WSS, a WebRTC offer (DTLS/ICE, rtcp-mux, mid, candidates), mendooze media — and
 # play a media file once the media path is up.
 #
-# Emulates the captured IVeS web client (docs/design/webrtc_sdp_design.md §1.8/§2.5)
+# Emulates the captured IVeS web client (docs/design/DESIGN-FRAMEWORK.md#65-webrtc-sdp/§2.5)
 # against the IVeS WebRTC gateway. Run it against the dev platform with:
 #     elixipp -c ives.json scenarios/uac_invite_webrtc.exs
 #
@@ -123,7 +123,7 @@ defmodule UAC.InviteWebRTC do
 
       # The media plane died under an established call: hang up rather than hold
       # a silent call open. `:server_disconnected` is delivered to us but the
-      # framework acts on none of it (design docs/design/b2bua_module.md §14.6),
+      # framework acts on none of it (design docs/design/DESIGN-FRAMEWORK.md#67-the-media-server-as-a-failure-domain),
       # so every media scenario owes this clause.
       {:ms_event, _server, :server_disconnected} ->
         goto(hangup_call, "media server disconnected")

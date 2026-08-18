@@ -1,7 +1,7 @@
 defmodule SIP.Test.DialogFork do
   @moduledoc """
   Forking in the dialog layer (`SIP.Dialog.fork_branch/2`, design
-  docs/design/b2bua_module.md §3.3): the kamailio TM model — ONE dialog, N
+  docs/design/DESIGN-FRAMEWORK.md#55-forking-the-kamailio-tm-model): the kamailio TM model — ONE dialog, N
   branches. Each branch is the same initial request sent to another target, as
   another client transaction of the same dialog: Call-ID, From tag and CSeq
   shared, one fresh Via branch each.

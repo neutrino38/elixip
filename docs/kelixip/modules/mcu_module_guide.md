@@ -6,7 +6,7 @@ telling you, and where to look when it does not work.
 The reference — installing the module, every `[module.mcu]` key, the script macros, the
 `kelictl` commands — is [mcu.md](mcu.md), and the wire contract is
 [mcu-api.md](mcu-api.md). The decisions that shape what you see at runtime are stated
-here, where they matter; [docs/design/mcu_module.md](../../design/mcu_module.md) holds
+here, where they matter; [../../design/DESIGN-MCU.md](../../design/DESIGN-MCU.md) holds
 the long form for whoever wants it.
 
 ---

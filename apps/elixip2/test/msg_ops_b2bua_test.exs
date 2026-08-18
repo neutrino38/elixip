@@ -4,7 +4,7 @@ defmodule SIP.Test.MsgOpsB2bua do
   @moduledoc """
   The framework's single reading of "what part of a SIP message crosses a B2BUA
   leg boundary" (`SIP.Msg.Ops.prepare_forwarded_request/2` and
-  `forwarded_reply_fields/1` — design in docs/design/b2bua_module.md §1, §4-§5).
+  `forwarded_reply_fields/1` — design in docs/design/DESIGN-FRAMEWORK.md#51-layer-split-§5).
 
   The samples are real traffic (`SIP-INVITE-LVP.txt` / `SIP-200-LVP.txt`): an
   INVITE that crossed two proxies (two Via, two Record-Route, credentials, a

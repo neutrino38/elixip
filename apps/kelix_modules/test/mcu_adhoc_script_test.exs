@@ -1,6 +1,6 @@
 defmodule Kelix.Mod.McuAdhocScriptTest do
   @moduledoc """
-  The ad-hoc reference script (design `docs/design/mcu_module.md` §17.5): the first
+  The ad-hoc reference script (design `docs/design/DESIGN-MCU.md`): the first
   caller on a DID nobody booked creates the room, later callers join that same room,
   and the room goes away with its last participant — or with the call that made it, if
   nobody ever joined.

@@ -64,7 +64,7 @@ defmodule Kelix.MetricsTest do
       assert_receive {:event, [:kelix, :registrar, :event], _, %{event: :registered}}
     end
 
-    test "the conferencing helpers label their events (docs/design/mcu_module.md §11)" do
+    test "the conferencing helpers label their events (docs/design/DESIGN-MCU.md#11-observability)" do
       forward([
         [:kelix, :mcu, :call],
         [:kelix, :mcu, :rpc],

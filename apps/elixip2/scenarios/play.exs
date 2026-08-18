@@ -107,7 +107,7 @@ defmodule UAS.Example.Call.Play do
       # The server we answered with is gone: the SDP we sent names a dead media
       # path, so hang up instead of waiting out the timeout. `:server_disconnected`
       # is delivered to us but acted upon by nothing in the framework (design
-      # docs/design/b2bua_module.md §14.6) — every media scenario owes this clause.
+      # docs/design/DESIGN-FRAMEWORK.md#67-the-media-server-as-a-failure-domain) — every media scenario owes this clause.
       {:ms_event, _server, :server_disconnected} ->
         goto(hanging_up, "media server disconnected")
     after

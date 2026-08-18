@@ -1,5 +1,5 @@
 defmodule Kelix.Mod.McuTest do
-  # The conference registry and its control surface (docs/design/mcu_module.md
+  # The conference registry and its control surface (docs/design/DESIGN-MCU.md
   # §5, §8.3.3), driven through `handle_control/2` — the same entry point REST and
   # kelictl use — against a recording MCU transport.
   use ExUnit.Case, async: false

@@ -1,6 +1,6 @@
 defmodule SIP.Test.Media.ServerDown do
   @moduledoc """
-  The media server as a failure domain (design docs/design/b2bua_module.md §14.6,
+  The media server as a failure domain (design docs/design/DESIGN-FRAMEWORK.md#67-the-media-server-as-a-failure-domain,
   R8 — B2BUA P3 R6).
 
   `:server_disconnected` was delivered to every sink and acted upon by nothing.

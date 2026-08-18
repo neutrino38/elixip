@@ -7,7 +7,7 @@ read this page and you can implement a client without reading the Elixir.
 * the module itself (config keys, facades, `kelictl`, events) is [mcu.md](mcu.md);
 * the core REST frontal (`/status`, `/domains`, auth config) is
   [../rest-api.md](../rest-api.md);
-* the *why* of every decision is [../../design/mcu_module.md](../../design/mcu_module.md).
+* the *why* of every decision is [../../design/DESIGN-MCU.md](../../design/DESIGN-MCU.md).
 
 > **The running node is authoritative.** `GET /modules/mcu` publishes the same
 > declaration this page describes — command names, methods, path templates, arguments,

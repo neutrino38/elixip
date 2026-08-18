@@ -1,6 +1,6 @@
 defmodule SIP.Test.B2bua.ParallelFork do
   @moduledoc """
-  The parallel hunt (design docs/design/b2bua_module.md §3.2, §3.3, RFC 3261
+  The parallel hunt (design docs/design/DESIGN-FRAMEWORK.md#55-forking-the-kamailio-tm-model, RFC 3261
   §16.6): a `%SIP.B2bua.Peer{fork: :parallel}` reads each entry of `uris` as a
   **rung** — a bare URI rung alone, a nested list rung all at once — and walks
   the rungs in order.

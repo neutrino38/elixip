@@ -1,7 +1,7 @@
 defmodule Kelix.Mod.Mcu.Args do
   @moduledoc """
   Normalisation of a control command's arguments, whichever frontal they came from
-  (design `docs/design/mcu_module.md` §8.3.6).
+  (design `docs/design/DESIGN-MCU.md`).
 
   REST hands `handle_control/2` a decoded JSON object (merged with the path and
   query params by FW-4); `kelictl` hands it `%{"args" => ["domain=example.com", …]}`

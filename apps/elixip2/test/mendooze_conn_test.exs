@@ -1058,7 +1058,7 @@ defmodule Mendooze.ConnTest do
     assert_receive {:ms_event, ^conn, :ice_connected}
   end
 
-  # ── Media connectivity (docs/design/media-connectivity.md) ──────────────────
+  # ── Media connectivity (docs/design/DESIGN-FRAMEWORK.md#66-media-connectivity-when-may-a-scenario-send) ──────────────────
 
   # An offer the peer transmits on, media by media. `directions` overrides the
   # default :sendrecv per media type.

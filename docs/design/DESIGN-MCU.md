@@ -1,0 +1,381 @@
+# DESIGN-MCU.md — the conferencing module
+
+The as-built design of **`mcu`**, the kelixip conferencing module: a reduced MCU
+distilled from the Java `mcuGold` application server and rebuilt on the Medooze
+MCU XML-RPC API (`POST /mcu`).
+
+It is a loadable kelixip module and follows every rule of
+[DESIGN-KELIXIP.md](DESIGN-KELIXIP.md) §7 — it is separated out here only because
+it is a subsystem the size of a product. Operating it is
+[docs/kelixip/modules/mcu.md](../kelixip/modules/mcu.md) (configuration and
+commands), [mcu_module_guide.md](../kelixip/modules/mcu_module_guide.md)
+(writing a script, reading the logs of a failed call) and
+[mcu-api.md](../kelixip/modules/mcu-api.md) (the REST surface).
+
+The deliverable is deliberately **two artefacts and no new frontal**: a module
+and a script. Everything else it needs already existed.
+
+---
+
+## 1. Scope
+
+**In:** inbound call handling (an INVITE whose R-URI user-part matches a DID
+joins that conference), a REST/CLI surface to create, modify, list and destroy
+conferences, audio + video mixing on the default mosaic and sidebar with an
+optional automatic layout, **total conversation** (T.140 real-time text with RFC
+4103 redundancy), and the three transport cases a real deployment brings —
+plain RTP/AVP(F), SDES-SRTP, and DTLS-SRTP + ICE-lite — classified explicitly
+rather than falling out of per-attribute handling.
+
+**Out, and why it is safe:** conference templates and ad-hoc creation on an
+unknown DID (an unknown DID is a `404`); an admin web UI (REST and `kelictl`
+only); outbound calls (they need B2BUA legs); RTMP/Flash, recording of
+broadcasters, document sharing/BFCP, extra mosaics and sidebars, SOAP event
+listeners, a CDR engine, join-time authentication. Each was dropped against a
+reason, not by omission; the parameters that would carry them (the participant
+role, for instance) are still passed correctly, so adding one back is additive.
+
+**Non-goals worth stating:** no multi-MCU conference (a conference is pinned to
+the media server chosen at creation), no persistence (conferences live in
+memory), no admission control (reaching the DID *is* joining).
+
+---
+
+## 2. What was kept from mcuGold, and what was not
+
+The Java code is the reference for **call-flow correctness**, not for structure.
+Three things were transcribed faithfully:
+
+1. **The RPC ordering** of an inbound call. Getting it wrong yields a media
+   server that answers an error to everything and sends no RTP.
+2. **The split between answer-time and ACK-time work.** Receiving starts *before*
+   answering (the local ports are needed for the SDP); sending starts, and the
+   mixer is joined, only on the **ACK**. A caller that never ACKs never enters the
+   mix, and no RTP leaves the MCU before the call is established.
+3. **Who generates which secret.** For SDES the *controller* generates the local
+   key; for ICE the *controller* generates ufrag and password; only the DTLS
+   fingerprint comes from the server (server-wide, cacheable).
+
+What was discarded: the `Participant` god object — 3 700 lines mixing SIP dialog
+state, SDP parsing, XML-RPC and mixer policy. Here the SIP state **is the
+scenario instance**, the SDP and RPC work is the adapter, and the mixer policy is
+the module. That split is the design.
+
+---
+
+## 3. Architecture
+
+```
+ SIP ──INVITE──▶ Kelix.Router ──dial-plan──▶ InstancePool
+                                                 │ spawns
+                                                 ▼
+                                          mcu.exs  (1 per call)
+                        facade calls  ┌──────────┴─────────┐  media FSL
+                                      ▼                    ▼
+                          Kelix.Mod.Mcu            Kelix.Mod.Mcu.Adapter
+                       (GenServer + ETS)            MediaServer.Behaviour
+                       conferences, DIDs,             1 process per call
+                       participants, quota                   │
+                                │                            │
+                                ▼                            ▼
+                     Kelix.Mod.Mcu.Client            Kelix.Mod.Mcu.Sdp
+                     XML-RPC POST /mcu                (offer/answer)
+                                │
+                                ▼
+                     Kelix.Mod.Mcu.EventQueue ──── FPU, events ──▶ scenarios
+                     GET /events/mcu/<queueId>
+```
+
+| Process | Scope | Role |
+|---|---|---|
+| `Kelix.Mod.Mcu` | node | conference registry (ETS), DID index, quota, control commands |
+| `.Client` | node, one per MCU | the XML-RPC channel; serialises calls under `xmlrpc_timeout_ms` |
+| `.EventQueue` | node, one per MCU | chunked long-poll, decode, dispatch to the owning participant's scenario |
+| `.Adapter` conn | **call** | one per leg: `{conf_id, part_id, media map, crypto, ports}` |
+| `mcu.exs` | call | the SIP state machine |
+
+Supervision is **`rest_for_one`**: the registry owns the ETS tables the others
+read. The MCU list comes from the configuration at boot, not from
+`Kelix.MediaPool` — the node starts its modules *before* the pool. An MCU
+unreachable at boot does not prevent the module from starting: its client comes
+up marked `down`, and conferences on it are refused with a clear error.
+
+**The adapter implements `MediaServer.Behaviour` on purpose.** The media FSL then
+works unchanged: `media_connect()`, `reply_invite_with_sdp/2` and `media_stop()`
+in `mcu.exs` are the same macros a plain UAS scenario uses. The mapping is
+mostly direct — `create_peer_connection/3` is `CreateParticipant` in the
+conference named by the options, `set_remote_offer/2` is the whole answer-time
+sequence, `close_peer_connection/1` is stop + `DeleteParticipant`. Player,
+recorder and echo answer `{:error, :not_supported}`: the API has the RPCs, the
+perimeter does not need them.
+
+Conference-level operations have **no place in that behaviour and are not forced
+into it**: they are plain functions on the module, reached through its facade.
+
+---
+
+## 4. Data model
+
+A **conference** carries its kelixip `uid` (stable for its life, and what REST
+clients use), its `domain` and `did`, the MCU it is pinned to and the MCU-side
+`conf_id` (an implementation detail that changes if it is ever recreated), the
+mixer settings (VAD, rate), the codec sets per media, one **inline video
+profile**, the mosaic layout, the quota and the auto-destroy flag, plus its
+participants.
+
+Storage is one ETS table keyed by `uid` plus a `{domain, did} → uid` index, owned
+by the module's GenServer. **Reads go straight to ETS** — the hot path is one DID
+lookup per INVITE — while writes go through the GenServer, which is what
+serialises "create this conference" against the media server. Same pattern as the
+registrar module.
+
+A **participant** row is owned by the module, so `list`/`show` can report it and
+the quota is authoritative; the *media detail* belongs to the adapter connection,
+and the module keeps only what a human wants to see.
+
+**DID allocation.** `create` may omit the DID, in which case the module takes the
+lowest free number in the domain's configured range and returns it. An explicit
+DID is always honoured, **including one outside the range** — the range is an
+allocation pool, not an admission filter. An exhausted range is a `409`.
+Allocation runs inside the `create` call, so two concurrent creates cannot get
+the same number.
+
+Two consequences an operator meets: a DID is unique **per domain**, and the
+dial-plan pattern must cover the allocation range — a range outside the pattern
+yields conferences nobody can dial, so `create` **warns** when the DID it
+allocated matches no dial rule.
+
+---
+
+## 5. An inbound call
+
+Routing uses the existing dispatch, with no new mechanism: a dial rule points the
+conference DIDs at `mcu.exs`, `Kelix.Router` resolves domain → `calls` → script,
+and the instance is spawned with its domain injected. The script asks the module
+which conference the user part designates; an unknown DID is a `404`.
+
+```
+INVITE (offer)
+  → lookup_did             404 if unknown
+  → reserve                quota: 486 / 603
+  → 180 Ringing
+  → create_peer_connection  CreateParticipant
+  → set_remote_offer        per media, in this order:
+        SetLocalCryptoSDES / SetLocalSTUNCredentials   (secure / ICE)
+        SetRTPProperties(codec intent)                 BEFORE
+        StartReceiving  ────────────────────────────▶  recPort, ip, fmtpByPt
+        SetRemoteCryptoDTLS|SDES, SetRemoteSTUNCredentials
+        SetRTPProperties(transport: rtcp-mux, natLatch, feedback)
+  → 200 OK (answer)
+  ← ACK
+  → attach                  per media: SetCodec + StartSending
+                            AddSidebarParticipant (audio) / AddMosaicParticipant (video)
+                            SetCompositionType (if the layout is automatic)
+```
+
+The two rules of §2 are visible in that sequence: receiving is armed before the
+answer because the answer needs the ports, and nothing is sent or mixed before
+the ACK.
+
+**Joining is not authenticated.** The reference script challenges nobody, because
+the module has no business owning an auth policy the SIP layer already expresses
+three ways (an upstream trusted proxy, a digest challenge against the `auth_db`
+module, a secret in the R-URI). A deployment that wants one copies `mcu.exs`,
+inserts the challenge before the admission call and points its dial rule at the
+copy — no module change, no core change. The cost is recorded as a known
+limitation, not hidden.
+
+**Errors say what they mean.** "No codec in common" is a `488` — the offer is
+unusable and retrying is pointless — while a media-server RPC failure is a `500`,
+which is ours and may work on a retry. One code for both would tell the peer the
+wrong thing about what to do next; making that expressible required the media
+error hook to accept a function rather than a fixed pair.
+
+---
+
+## 6. Negotiation
+
+Codec arbitration is **delegated to the media server**, per the framework rule
+([DESIGN-FRAMEWORK.md](DESIGN-FRAMEWORK.md) §6.1): `StartReceiving` carries the
+peer's offer and returns the verdict — the payload types the server accepted with
+the exact `fmtp` it will use — and the answer is built from that. The module's
+codec configuration was **deleted**, not demoted: a list maintained here in
+parallel with the server's real capabilities is a copy, and a copy drifts.
+
+Two boundary cases are part of the contract: an accepted payload type with an
+**empty** fmtp is advertised with an `a=rtpmap` and no `a=fmtp`, and an
+**absent** one is not advertised at all. A server that returns no verdict (an
+older build) falls back to local construction, byte-for-byte identical to the
+previous behaviour — the rolling-upgrade path, tested as a first-class case.
+
+The three transport cases are classified explicitly and traced, and an offer
+carrying **both** `a=crypto` and `a=fingerprint` is classified DTLS. The answered
+feedback set is the **intersection** with the offer: a caller asking for nothing
+gets nothing.
+
+For H.264, the answer keeps the offer's profile, and the announced level follows
+RFC 6184 asymmetry: ours when both sides allow asymmetry, the offer's otherwise —
+the case that must keep producing today's answer for a plain SIP handset. The
+encoder is bound to the minimum of the two. An offer naming a level above our
+decoding capability is answered with our maximum, keeping the payload type and
+emitting a warning that names both levels and the participant; the log is the
+only evidence that this happened, so its absence is a test failure.
+
+---
+
+## 7. Real-time text
+
+Text is mixed by the MCU's **own text mixer**, which needs no join RPC — the
+server wires every participant into it at creation — and no layout: a text leg is
+not a mosaic tile. Dropping `text` from a conference's media list turns it off,
+and an `m=text` section is then declined with port 0.
+
+**Text over WebSocket** is shipped: a participant that cannot carry T.140 over
+RTP gets a WebSocket door instead. One RPC configures the participant's media
+connection and returns the full URL, which the adapter publishes in its answer.
+A text-less admission — or a media server that cannot host the WebSocket —
+**omits** every `m=text` section from the answer rather than echoing it at port 0.
+
+---
+
+## 8. Driving a conference from a script
+
+A conference used to be an administrative object: REST or `kelictl` created it
+and the script only ever joined one. That covers the booked-conference case and
+nothing else. Three requested flows need the script to own the conference: an
+ad-hoc room on a DID nobody booked, a room per caller built from data only the
+script has (the `From`, an `auth_db` lookup), and a room that outlives its creator
+— or does not.
+
+None of that is expressible through the control API from inside a call: the
+script would have to speak HTTP to its own node.
+
+So five functions sit on the module's facade beside the admission ones —
+`create_conference/2`, `ensure_conference/3`, `update_conference/2`,
+`destroy_conference/1`, `conferences/1` — all routed through
+`Kelix.Module.safe_call/3`, so a wedged module is an error the script answers
+with, never a hung call. They take a **keyword list with atom keys** rather than
+the string-keyed map the control commands receive: a script writes Elixir, not
+JSON. The *values* are not asymmetric — the same vocabulary parser reads both.
+
+The module still creates nothing by itself. What this widens is the exposure
+already noted: whoever reaches an ad-hoc DID can create a room, not merely join
+one.
+
+---
+
+## 9. The collaboration channel
+
+A participant's script needs to tell the *other participants' scripts* something:
+a raised hand, a floor-control token, "I am sharing my screen", "mute yourself".
+
+**This is a signalling channel, not text.** The MCU already mixes T.140 between
+the legs that negotiated it, in the media server, and that is what a Total
+Conversation client displays. This channel is invisible to the mixer and carries
+application state between scripts. Conflating them would mean re-implementing,
+badly, a mixer that already works.
+
+Two rules define it:
+
+- **the module is a bus, the script owns the wire.** The module does the
+  addressing and the fan-out — it is the only thing that knows who is in the
+  conference — and delivers to the recipient's *scenario process*. That scenario
+  decides what the message becomes: an in-dialog MESSAGE, an INFO, a state
+  change, or nothing. The module never writes on the wire and never renders
+  anything into the mix. Same principle as asking a scenario to wind down rather
+  than tearing its dialog down behind its back.
+- **membership is the permission.** The sender is identified by its own
+  participant handle and the conference is deduced from it. A script passes no
+  conference id, so it cannot address one it is not in: there is no
+  cross-conference messaging and no permission model to write, review, or get
+  wrong. The check is the one every other participant-level call already does.
+
+A leg receives nothing unless its script **declares that it accepts messages** —
+by design, and the first thing to check when a message "does not arrive".
+
+---
+
+## 10. Failure modes
+
+| Situation | Behaviour |
+|---|---|
+| **RPC failure mid-setup** | every multi-RPC sequence is written as *acquire → on error, release what was acquired*: the participant is deleted, the caller gets a `500`, the row and the quota slot are freed |
+| **MCU restart** | detected by the poller or by a transport error on an RPC. The entry is marked `down`, its conferences `stale`, every live participant's scenario is told so it can hang up. When it returns, stale conferences are **recreated** with the same `uid` and a new server id, so their DIDs work again; the calls are gone |
+| **Scenario crash** | the module monitors each participant's scenario and runs the same teardown as a clean leave. It also monitors the **creator** of a script-made conference — with a different verdict: a dead participant is always removed, a dead creator takes only an **empty** conference with it |
+| **kelixip restart** | conferences are in memory, so the media server may hold orphans. At module start, and whenever a control channel comes back, every conference the registry does not know is deleted |
+
+That last sweep keys on the **server-side id**, not on our tag, although the tag
+*is* our uid — an older server truncates it, so tag matching would match nothing,
+and the consequence would not be an under-collecting sweep but the opposite: run
+right after a restart recovery, it would delete every conference that recovery
+had just rebuilt. It also **deletes nothing** when the reply cannot be decoded
+with confidence: a misparse here destroys live conferences rather than leaking
+dead ones. This is safe because a node owns its media servers exclusively.
+
+---
+
+## 11. Observability
+
+Prometheus, through the core's emitter: conference and participant gauges per
+MCU, a call counter labelled by result (`joined`, `404`, `486`, `488`, `503`,
+`500`), RPC duration and error counters by method, a media-server up gauge, and a
+media-timeout counter — a non-zero rate on that last one is the operator's signal
+that legs are dying silently.
+
+Logs: one line per conference create/delete and per participant join/leave, a
+warning on any server-reported failure, an error on an MCU going down. **Every
+line carries the conference uid**, so a call is followable end to end.
+
+`kelictl status` gains an `mcu:` line through the generic module-status hook —
+no core change ([DESIGN-KELIXIP.md](DESIGN-KELIXIP.md) §11).
+
+**The event vocabulary is frozen, its transport is not built.** Everything the
+module observes is emitted internally as one canonical event, read today by three
+consumers (the logger, the metrics emitter, and the owning scenario). Adding
+per-conference HTTP callbacks later is a fourth consumer — a transport change,
+not a redesign.
+
+---
+
+## 12. Known limitations
+
+| # | Limitation |
+|---|---|
+| L3 | no trickle ICE |
+| L5 | conferences do not survive a kelixip restart |
+| L6 | no outbound calls (dial-out into a conference) — needs B2BUA legs |
+| L7 | a live participant's video profile is not renegotiated when the conference profile changes |
+| L8 | **anyone who can dial the DID joins**; the perimeter must be protected upstream or by a derived script |
+| L9 | event callbacks to an external UI are not delivered — only logged and metered (§11) |
+| L10 | with script-driven creation, L8 widens: reaching an ad-hoc DID creates a room |
+| L11 | the empty-slot logo cannot be unset on a live conference (no reset RPC) |
+| L12 | a recording is not resumed after a media-server restart, and the partial file is left in place — deliberate |
+| L13 | recording always captures the default mosaic and sidebar |
+| L14 | an unreadable logo is not reported: the server answers OK whatever the picture did |
+| L16 | a script that does not declare it accepts messages receives none, by design (§9) |
+| L17 | the collaboration channel has no total order across senders and no delivery receipt |
+
+**Media liveness is wired on this side and depends on the server.** The adapter
+arms an inactivity watchdog per receiving media at the ACK, and the event
+vocabulary declares `participant.media_connected` / `participant.media_timeout`
+so a consumer written today needs no change when they start arriving — but the
+emission is a media-server increment, specified in
+[docs/design/mcu_server_evolutions.md](mcu_server_evolutions.md).
+Delegated codec negotiation (§6) landed on this side: the module's codec lists
+are gone, and the old configuration keys are accepted with a warning naming
+their replacement.
+
+---
+
+## 13. Invariants
+
+1. Receiving is armed before the answer; sending and mixing wait for the ACK
+   (§2, §5).
+2. The scenario owns the SIP dialog, the adapter owns the media, the module owns
+   the roster — nothing owns two of the three (§3, §9).
+3. The media server arbitrates codecs; the module holds no codec list (§6).
+4. Reads hit ETS, writes go through the GenServer (§4).
+5. A conference is pinned to one media server and never migrates (§1, §4).
+6. Every log line carries the conference uid (§11).
+7. The orphan sweep deletes nothing it is not sure about (§10).
+8. Membership is the permission; there is no cross-conference addressing (§9).

@@ -1,7 +1,7 @@
 defmodule SIP.Test.DialogResilience do
   @moduledoc """
   What a dialog does when the layers under it fail — design
-  docs/design/b2bua_module.md §14, decisions R1 and R2.
+  docs/design/DESIGN-SIPSTACK.md#57-resilience, decisions R1 and R2.
 
   These are failure-injection tests: nothing here waits for a timer, every case
   kills a process outright. That is the point. The behaviours below all used to

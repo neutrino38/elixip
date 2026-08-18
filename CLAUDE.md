@@ -62,7 +62,7 @@ packaging/build-in-container.sh --target ubuntu   # deb likewise
 
 The repo is a **Mix umbrella** (`apps/`), split so each build artifact carries
 only its own dependencies (design in
-[docs/design/kelixip_basic_design.md](docs/design/kelixip_basic_design.md) §12.0):
+[docs/design/DESIGN-KELIXIP.md](docs/design/DESIGN-KELIXIP.md)):
 
 ```
 apps/
@@ -256,7 +256,7 @@ Elixip drives a media server through the `MediaServer.Behaviour` behaviour, so
 implementations are interchangeable (selected via config — see Configuration):
 - `MediaServer.Mendooze` — the real adapter, driving the **Mendooze MCU** over
   its JSR309 **XML-RPC** control interface (`apps/elixip2/lib/framework/mendooze/`; design
-  in `docs/design/mendooze_interface.md`). Events arrive over a chunked HTTP long-poll.
+  in `docs/design/DESIGN-FRAMEWORK.md#63-the-mendooze-adapter`). Events arrive over a chunked HTTP long-poll.
 - `MediaServer.Mockup` — in-process stub for call-flow tests.
 
 > **What the media server knows about itself, the media server is asked.** It is
@@ -266,7 +266,7 @@ implementations are interchangeable (selected via config — see Configuration):
 > do is a copy, and a copy drifts.
 >
 > The rule already exists in one narrow form — the delegated negotiation of
-> `mcu_module.md` §16.3, "the offer is the menu and the media server arbitrates",
+> `DESIGN-MCU.md`, "the offer is the menu and the media server arbitrates",
 > which deleted the module's codec configuration rather than demoting it. Read it
 > as the general case, not as a feature of the answer path.
 >

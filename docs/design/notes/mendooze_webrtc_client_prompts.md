@@ -1,6 +1,6 @@
 # Mendooze — server-side work to support a WebRTC *client* (UAC) controller
 
-Companion to `docs/design/webrtc_sdp_design.md` (§2.5, §2.7). Elixip is being
+Companion to `../DESIGN-FRAMEWORK.md#65-webrtc-sdp` (§2.5, §2.7). Elixip is being
 extended so that elixipp can place calls **as a WebRTC UAC** (browser-shaped
 offer, `setup:actpass`) toward the IVeS WebRTC gateway. In that call
 direction the mendooze endpoint driven by elixip sits on the **offerer**
@@ -218,7 +218,7 @@ sent; documented in xmlrpc_jsr309_api.md next to the existing event types.
 1. Run **P1** now — its report may downgrade P2/P3 to "already works",
    which unblocks elixip phase 4 (real-platform E2E) with no server change.
 2. **P2** (and **P3** if required) before the elixip real-platform E2E
-   (`webrtc_sdp_design.md` §2.9 phase 4) — they are its known blockers
+   (`DESIGN-FRAMEWORK.md` §2.9 phase 4) — they are its known blockers
    (Q4/Q5).
 3. **P4/P5** any time; elixip's D6 workaround and synthetic
    `:ice_connected` are their client-side counterparts to remove

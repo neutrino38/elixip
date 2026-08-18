@@ -4,7 +4,7 @@
 # kamailio's `proxy_authenticate(); lookup("location"); t_relay()`, done as a
 # media-terminated B2BUA. Read it next to `direct-call-with-auth.exs` — the
 # difference between the two files is precisely what a media server costs
-# (design docs/design/b2bua_module.md §7, §12).
+# (design docs/design/DESIGN-FRAMEWORK.md#57-media-modes).
 #
 # What changes, and nothing else does:
 #

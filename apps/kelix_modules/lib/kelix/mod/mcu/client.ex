@@ -1,6 +1,6 @@
 defmodule Kelix.Mod.Mcu.Client do
   @moduledoc """
-  One control channel to one media server (design `docs/design/mcu_module.md`
+  One control channel to one media server (design `docs/design/DESIGN-MCU.md`
   §4.1): the XML-RPC connection plus the `queueId` its events arrive on.
 
   Every RPC of §3.2-3.5 goes through `call/3`, which **serialises** them on this

@@ -214,7 +214,7 @@ defmodule Kelix.Mod.Registrar do
   question — "rewrite this request, once per binding" — and hands back requests;
   a B2BUA builds its own forwarded request
   (`SIP.Msg.Ops.prepare_forwarded_request/2`) and needs a **peer** (design
-  docs/design/b2bua_module.md §3.2):
+  docs/design/DESIGN-FRAMEWORK.md#55-forking-the-kamailio-tm-model):
 
       case Kelix.Mod.Registrar.targets(ctx_get(:domain), req) do
         {:ok, peer}  -> b2bua_forward(req, peer, false)

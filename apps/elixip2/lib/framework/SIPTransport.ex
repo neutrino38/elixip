@@ -261,7 +261,7 @@ defmodule SIP.Transport do
 
     @doc """
     Tell every dialog that this connected transport is gone, so the ones riding it
-    can act (design docs/design/b2bua_module.md §14.4, R4).
+    can act (design docs/design/DESIGN-SIPSTACK.md#57-resilience, R4).
 
     Called from a transport's `terminate/2`, not from its close handlers, and that
     placement is the decision: an orderly close announced itself while a CRASH

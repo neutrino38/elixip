@@ -336,7 +336,7 @@ defmodule SIP.Msg.Ops do
   # Layer). A B2BUA that terminates media has to decide whether a re-INVITE or an
   # UPDATE concerns the far end at all, and that decision is a *reading* of the
   # message. The policy built on it — which kinds cross and which are answered
-  # locally — stays the caller's (docs/design/b2bua_media_impl_plan.md §R4.1b).
+  # locally — stays the caller's (docs/design/DESIGN-FRAMEWORK.md#57-media-modes §R4.1b).
   #
   # The SDP parser is borrowed from the media layer rather than rewritten:
   # `MediaServer.SdpTools.parse/1` is already the stack's single reading of an
@@ -695,7 +695,7 @@ defmodule SIP.Msg.Ops do
     sipmsg
   end
 
-  # ── B2BUA forwarding (docs/design/b2bua_module.md §1, §4, §5) ─────────────────
+  # ── B2BUA forwarding (docs/design/DESIGN-FRAMEWORK.md#51-layer-split) ─────────────────
   #
   # THE one place that answers "what part of a SIP message crosses a B2BUA leg
   # boundary". The session layer (SIP.Session.B2bua) decides *whether* and *where*

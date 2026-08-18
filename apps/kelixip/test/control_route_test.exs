@@ -1,5 +1,5 @@
 defmodule Kelix.Control.RouteTest do
-  # The pure routing algebra behind FW-4 (docs/design/mcu_module.md §8.3.4).
+  # The pure routing algebra behind FW-4 (docs/design/DESIGN-KELIXIP.md#7-the-module-system).
   use ExUnit.Case, async: true
 
   alias Kelix.Control.Route

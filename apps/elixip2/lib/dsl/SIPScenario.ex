@@ -316,7 +316,7 @@ defmodule SIP.Scenario do
     ctl_clauses = if Enum.any?(do_clauses, &ctl_clause?/1), do: [], else: [shutdown_clause()]
 
     # …and media-server-death-aware, the same way and for the same reason
-    # (design docs/design/b2bua_module.md §14.6, R8). `:server_disconnected` is
+    # (design docs/design/DESIGN-FRAMEWORK.md#67-the-media-server-as-a-failure-domain, R8). `:server_disconnected` is
     # delivered to every sink and acted upon by nothing: a scenario without a
     # clause for it leaves the event in its mailbox and goes on waiting for media
     # that will never come, until its own `after` fires — if it has one.
@@ -618,7 +618,7 @@ defmodule SIP.Scenario do
         # A leg that has just died owes answers it will never send. They are
         # given here, before the scenario's clause runs, so the caller is
         # answered the moment its callee goes rather than at the teardown
-        # (design docs/design/b2bua_module.md §14.4, R6).
+        # (design docs/design/DESIGN-SIPSTACK.md#57-resilience, R6).
         var!(sip_ctx) = SIP.Session.B2bua.note_leg_event(var!(sip_ctx), unquote(evt))
         var!(sip_ctx) = SIP.Session.CallUAS.auto_store(var!(sip_ctx), unquote(evt))
         unquote(rewrite_stay(body, wait, deadline))

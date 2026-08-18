@@ -49,7 +49,7 @@ defmodule Kelix.ControlAPI do
   The flat form (`<METHOD> /modules/<name>/<command.id>`) is **kept**: every command
   id is a valid single-segment path, so a client that cannot build URLs — and every
   command written before FW-4 — still reaches the same `handle_control/2` clause
-  (design `docs/design/mcu_module.md` §8.3.5).
+  (design `docs/design/DESIGN-MCU.md`).
   """
   use Plug.Router
   require Logger

@@ -1,7 +1,7 @@
 defmodule SIP.Test.B2bua.OfferProfile do
   @moduledoc """
-  The offer-profile ladder (design docs/design/b2bua_module.md §7.5, plan
-  docs/design/b2bua_offer_profiles_plan.md): a `%SIP.B2bua.Peer{profile:}` offers
+  The offer-profile ladder (design docs/design/DESIGN-FRAMEWORK.md#58-offer-profiles, plan
+  docs/design/DESIGN-FRAMEWORK.md#58-offer-profiles): a `%SIP.B2bua.Peer{profile:}` offers
   the callee a media profile, and a callee that refuses the BODY gets the same
   call offered one profile down before anything else is tried.
 

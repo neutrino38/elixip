@@ -1,5 +1,5 @@
 defmodule Kelix.Mod.Mcu.EventQueueTest do
-  # The MCU event stream decoding (docs/design/mcu_module.md §3.7). Pure functions:
+  # The MCU event stream decoding (docs/design/DESIGN-MCU.md#3-architecture). Pure functions:
   # the wire contract is what matters here, not the HTTP plumbing around it.
   use ExUnit.Case, async: true
 

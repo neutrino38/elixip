@@ -1,6 +1,6 @@
 defmodule Kelix.Mod.Mcu.Supervisor do
   @moduledoc """
-  What `Kelix.Mod.Mcu.child_spec/2` returns (design `docs/design/mcu_module.md`
+  What `Kelix.Mod.Mcu.child_spec/2` returns (design `docs/design/DESIGN-MCU.md`
   §4.1): the conference registry plus one `{Client, EventQueue}` pair per media
   server — the `[mediaserver.pool.<name>]` entries `Kelix.Mod.Mcu`
   `mediaservers_from_pool/0` selected, passed in as `:mediaservers` so tests can

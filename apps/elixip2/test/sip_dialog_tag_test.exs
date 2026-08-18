@@ -1,7 +1,7 @@
 defmodule SIP.Test.DialogTag do
   @moduledoc """
   The dialog event tag (`SIP.Dialog.start_dialog/5` option `:tag`, design
-  docs/design/b2bua_module.md §2): a dialog created with `tag: :outbound`
+  docs/design/DESIGN-FRAMEWORK.md#52-telling-the-legs-apart): a dialog created with `tag: :outbound`
   wraps EVERY message it delivers to its application process as
   `{:outbound, msg}` — `:onnewdialog`, responses and `:dialog_terminated`
   alike — while an untagged dialog keeps delivering bare messages (the

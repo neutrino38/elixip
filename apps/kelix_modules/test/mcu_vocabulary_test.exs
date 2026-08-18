@@ -1,6 +1,6 @@
 defmodule Kelix.Mod.Mcu.VocabularyTest do
   @moduledoc """
-  The human names of the MCU's wire enums (design `docs/design/mcu_module.md` §8.3.7):
+  The human names of the MCU's wire enums (design `docs/design/DESIGN-MCU.md`):
   one table, read for the CLI labels, for the accepted input, for the config block and
   for the online help.
 

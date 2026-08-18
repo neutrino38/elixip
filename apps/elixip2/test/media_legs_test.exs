@@ -1,7 +1,7 @@
 defmodule SIP.Test.Media.Legs do
   @moduledoc """
   Leg-scoped media handles (`SIP.Session.Media`, B2BUA P3 R1 — design
-  docs/design/b2bua_media_impl_plan.md).
+  docs/design/DESIGN-FRAMEWORK.md#57-media-modes).
 
   The mixin used to be single-slot: one peer connection, one action, one call.
   A B2BUA terminates media for BOTH of its SIP legs on one server, so the

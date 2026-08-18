@@ -22,7 +22,7 @@ defmodule MediaServer.Mendooze.Sdp do
 
   Since the enriched `EndpointStartReceiving` return, the media server is
   authoritative for the accepted payload types and their fmtp parameters (see
-  `docs/design/mendooze_sdp_delegation_plan.md`). `accepted_pts/2` reduces the server
+  `docs/design/DESIGN-FRAMEWORK.md#64-delegated-negotiation`). `accepted_pts/2` reduces the server
   struct to the accepted set; `pt_rtpmap/2` / `code_rtpmap/2` resolve the SDP
   `rtpmap` fields for a payload type (the server returns fmtp only, so the
   encoding name and clock still come from the local codec tables); and the
@@ -641,7 +641,7 @@ defmodule MediaServer.Mendooze.Sdp do
   @rtp_profiles ~w(RTP/AVP RTP/AVPF RTP/SAVP RTP/SAVPF UDP/TLS/RTP/SAVP UDP/TLS/RTP/SAVPF)
 
   # Real-time text carried over a WebSocket instead of RTP (IVeS/Omnitor spec,
-  # `docs/design/jsr309_text_over_wss.md` in the media server): a browser cannot
+  # `docs/design/DESIGN-MCU.md#7-real-time-text` in the media server): a browser cannot
   # put T.140 on an RTP profile — `RTCPeerConnection` has no such media — so the
   # transport of that one `m=` section becomes a WebSocket the peer opens towards
   # the media server. The four spellings are accepted: the deployed client emits
@@ -1212,7 +1212,7 @@ defmodule MediaServer.Mendooze.Sdp do
   Propose **every** offered payload type, for a delegated negotiation.
 
   The counterpart of `negotiate/3`, and its replacement wherever the media server
-  arbitrates (`docs/design/mcu_module.md` §16.3): the offer *is* the menu, so nothing
+  arbitrates (`docs/design/DESIGN-MCU.md`): the offer *is* the menu, so nothing
   is filtered on codec identity here. `parse/1` has already dropped the payload types
   the codec tables cannot name — that table is a vocabulary, not a policy, and it is
   the one filter that necessarily stays client-side, since the server's API speaks

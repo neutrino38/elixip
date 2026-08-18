@@ -1,4 +1,4 @@
-# Reference kelixip AD-HOC conference script — design docs/design/mcu_module.md §17.5.
+# Reference kelixip AD-HOC conference script — design docs/design/DESIGN-MCU.md#8-driving-a-conference-from-a-script.
 #
 # This is `mcu.exs` with ONE clause changed: instead of requiring the DID to already
 # designate a conference, the first caller on it CREATES one (`ensure_conference/3`),

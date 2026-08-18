@@ -1,5 +1,5 @@
 defmodule Kelix.ControlAPINestedTest do
-  # FW-4: nested resource routes for module commands (docs/design/mcu_module.md
+  # FW-4: nested resource routes for module commands (docs/design/DESIGN-MCU.md
   # §8.3.4), driven through the real Plug pipeline with Plug.Test conns.
   use ExUnit.Case, async: false
   import Plug.Test

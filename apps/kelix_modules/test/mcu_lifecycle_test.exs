@@ -1,7 +1,7 @@
 defmodule Kelix.Mod.McuLifecycleTest do
   @moduledoc """
   P5b: driving a conference's lifetime from a scenario (design
-  `docs/design/mcu_module.md` §17, test plan §17.7).
+  `docs/design/DESIGN-MCU.md`, test plan §17.7).
 
   Three things are worth pinning down here, and the rest follows from P1's coverage:
   **ownership** (a creator that dies takes an empty conference with it and leaves a

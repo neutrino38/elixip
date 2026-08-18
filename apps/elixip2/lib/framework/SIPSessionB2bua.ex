@@ -1,5 +1,5 @@
 # B2BUA session layer: two call legs driven by one scenario FSM.
-# Design: docs/design/b2bua_module.md. Part of the SIP.Session namespace; see
+# Design: docs/design/DESIGN-FRAMEWORK.md#5-b2bua. Part of the SIP.Session namespace; see
 # SIPSession.ex for the common core.
 
 defmodule SIP.B2bua.Peer do
@@ -214,7 +214,7 @@ defmodule SIP.Session.B2bua do
   the leg bookkeeping the automatic teardown reads. What stays the scenario's:
   the relay **policy** — what to relay, when, and what to answer locally.
 
-  Design: docs/design/b2bua_module.md §3-§6.
+  Design: docs/design/DESIGN-FRAMEWORK.md#5-b2bua.
   """
   require Logger
 
@@ -871,7 +871,7 @@ defmodule SIP.Session.B2bua do
 
   # Our offer for the callee. `bridge_with: :inbound` puts this endpoint in the
   # inbound leg's media session — a placement decision, made here because it can
-  # only be made at creation time (docs/design/mediagw_b2bua_jsr309.md §2).
+  # only be made at creation time (docs/design/notes/mediagw_b2bua_jsr309.md §2).
   defp media_offer(sip_ctx, outbound_opts) do
     webrtc = Keyword.get(outbound_opts, :webrtc, :no)
     medias = Keyword.get(outbound_opts, :media, :audio_video)

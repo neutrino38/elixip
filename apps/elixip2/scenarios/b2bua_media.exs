@@ -3,7 +3,7 @@
 #
 # Read it next to scenarios/b2bua_basic.exs: same call, same states, and the
 # difference between the two files is precisely what a media server costs. That
-# pairing is the documentation (design docs/design/b2bua_module.md §12), which is
+# pairing is the documentation (design docs/design/DESIGN-FRAMEWORK.md#5-b2bua), which is
 # why this arrived as a NEW file rather than as a flag on the other one — the
 # basic scenario exists to show a complete B2BUA in ~60 lines of FSM, and it only
 # keeps that property while it is the simplest thing that relays a call.

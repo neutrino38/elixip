@@ -1,4 +1,4 @@
-# Reference kelixip conference (MCU) script — design docs/design/mcu_module.md §7.
+# Reference kelixip conference (MCU) script — design docs/design/DESIGN-MCU.md#5-an-inbound-call.
 # One instance is spawned per inbound INVITE by Kelix.Router → Kelix.InstancePool;
 # the served domain is injected into the context by the router (`domain:` override).
 #

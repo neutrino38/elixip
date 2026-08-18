@@ -131,6 +131,24 @@ the sequence diagram.
 - 👉 a control CLI / [REST API](docs/kelixip/rest-api.md), 
 - 👉 and Prometheus metrics.
 
+# Design documentation
+
+How it is built, and why. Six documents under [`docs/design/`](docs/design/),
+each covering what is implemented and running:
+
+| Document | Covers |
+|---|---|
+| [DESIGN-SIPSTACK.md](docs/design/DESIGN-SIPSTACK.md) | transport, message, transaction and dialog layers |
+| [DESIGN-FRAMEWORK.md](docs/design/DESIGN-FRAMEWORK.md) | session layer, mixins, B2BUA, media and the media-server adapters |
+| [DESIGN-FSL.md](docs/design/DESIGN-FSL.md) | the language, its macros and the FSM engine |
+| [DESIGN-ELIXIPP.md](docs/design/DESIGN-ELIXIPP.md) | the test tool |
+| [DESIGN-KELIXIP.md](docs/design/DESIGN-KELIXIP.md) | the application server and its module system |
+| [DESIGN-MCU.md](docs/design/DESIGN-MCU.md) | the conferencing module |
+
+The other documents in that directory are designs **not yet implemented**;
+[`docs/design/notes/`](docs/design/notes/) holds source studies and investigation
+records.
+
 # License
 
 Elixip is distributed under the **Business Source License 1.1 (BSL 1.1)**, a

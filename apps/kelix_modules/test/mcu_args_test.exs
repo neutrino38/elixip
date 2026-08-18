@@ -1,6 +1,6 @@
 defmodule Kelix.Mod.Mcu.ArgsTest do
   # Arg normalisation: the same command must see the same map from REST and from
-  # kelictl (docs/design/mcu_module.md §8.3.6).
+  # kelictl (docs/design/DESIGN-KELIXIP.md#7-the-module-system).
   use ExUnit.Case, async: true
 
   alias Kelix.Mod.Mcu.Args

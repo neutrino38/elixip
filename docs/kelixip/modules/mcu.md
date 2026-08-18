@@ -16,7 +16,7 @@ MCU functions and regular JSR 309 media functions.
 > commands. Running and troubleshooting a node — prerequisites, the announced media
 > address, metrics, reading the logs of a call that failed — is the
 > [operating guide](mcu_module_guide.md). There is also a
-> [design document](../../design/mcu_module.md) that lists design decisions and
+> [design document](../../design/DESIGN-MCU.md) that lists design decisions and
 > limitations. The reference call script is
 > [`apps/kelixip/scripts/mcu.exs`](../../../apps/kelixip/scripts/mcu.exs).
 

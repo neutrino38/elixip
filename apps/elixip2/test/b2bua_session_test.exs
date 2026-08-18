@@ -1,7 +1,6 @@
 defmodule SIP.Test.B2bua.Session do
   @moduledoc """
-  The B2BUA session layer (`SIP.Session.B2bua`, design docs/design/b2bua_module.md
-  §3-§6): creating the outbound leg, correlating a relayed request with the
+  The B2BUA session layer (`SIP.Session.B2bua`, design docs/design/DESIGN-FRAMEWORK.md#5-b2bua): creating the outbound leg, correlating a relayed request with the
   response that comes back, and answering locally on the right leg.
 
   The outbound leg is driven through the in-process UDP mockup transport; the

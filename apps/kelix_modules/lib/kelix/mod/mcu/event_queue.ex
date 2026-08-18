@@ -1,6 +1,6 @@
 defmodule Kelix.Mod.Mcu.EventQueue do
   @moduledoc """
-  The MCU event stream of one media server (design `docs/design/mcu_module.md`
+  The MCU event stream of one media server (design `docs/design/DESIGN-MCU.md`
   §3.7): a chunked HTTP long-poll on `GET /events/mcu/<queueId>`, decoded and
   dispatched to the module, which routes each event to the owning participant.
 

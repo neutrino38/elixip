@@ -4,7 +4,7 @@ defmodule Elixipp.MixProject do
   # The elixipp test tool (a sipp-like SIP scenario runner). Standalone escript
   # built on the shared :elixip2 SIP stack. Kept as a distinct umbrella app so
   # the escript carries only its own deps (owl) and never the kelixip server
-  # deps (design docs/design/kelixip_basic_design.md §12.0).
+  # deps (design docs/design/DESIGN-KELIXIP.md#1-the-shape-of-the-product).
   def project do
     [
       app: :elixipp,

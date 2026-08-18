@@ -116,7 +116,7 @@ defmodule UAC.InviteExample do
       # carry it, so hang up instead of holding a silent call open. Nothing here
       # is specific to this scenario — every media scenario owes the same clause,
       # since `:server_disconnected` is delivered but not acted upon by the
-      # framework (design docs/design/b2bua_module.md §14.6).
+      # framework (design docs/design/DESIGN-FRAMEWORK.md#67-the-media-server-as-a-failure-domain).
       {:ms_event, _server, :server_disconnected} ->
         goto(hangup_call, "media server disconnected")
     end

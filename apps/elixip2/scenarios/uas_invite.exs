@@ -74,7 +74,7 @@ defmodule UAS.InviteExample do
       # over and there is nothing left to carry the call, so hang up rather than
       # hold a silent one open. `:server_disconnected` is delivered to us but
       # acted upon by nothing in the framework (design
-      # docs/design/b2bua_module.md §14.6) — every media scenario owes this
+      # docs/design/DESIGN-FRAMEWORK.md#67-the-media-server-as-a-failure-domain) — every media scenario owes this
       # clause, and a UAS more than most: it is the side left holding the call.
       {:ms_event, _server, :server_disconnected} ->
         send_BYE()

@@ -1,12 +1,12 @@
 defmodule SIP.Test.Media.Bridge do
   @moduledoc """
   `bridge/3` and `unbridge/2` (B2BUA P3 R2 — design
-  docs/design/b2bua_media_impl_plan.md §0).
+  docs/design/DESIGN-FRAMEWORK.md#57-media-modes).
 
   The verb FSL needs is one call taking two peer connections. What it means
   underneath is not: on a real server the two legs are two endpoints of one
   media session, attached per media once BOTH have negotiated
-  (docs/design/mediagw_b2bua_jsr309.md §3). `MediaServer.Mockup` implements it as
+  (docs/design/notes/mediagw_b2bua_jsr309.md §3). `MediaServer.Mockup` implements it as
   an actual media path rather than a recorded call, so what these tests assert is
   a datagram coming out of the other leg.
   """

@@ -58,7 +58,7 @@ No change.
   RabbitMQ + protobuf replacing both XML-RPC control planes (design and schemas
   only).
 - new `docs/design/liveview-adapter.md`: Phoenix LiveView adapter design study.
-- `docs/design/improve-fsl-elixir.md`: the `stay` / `goto back` design, implemented
+- `../design/DESIGN-FSL.md#2-the-language-surface`: the `stay` / `goto back` design, implemented
   in this release.
 
 ## Test suite

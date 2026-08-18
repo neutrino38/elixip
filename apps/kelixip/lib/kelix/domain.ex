@@ -1,7 +1,7 @@
 defmodule Kelix.Domain do
   @moduledoc """
   One served SIP domain and the functions enabled on it
-  (design `docs/design/kelixip_basic_design.md` §3.2).
+  (design `docs/design/DESIGN-KELIXIP.md`).
 
   A function block present = enabled. `registrar` / `presence` carry the function
   script + tuning; `dial_plan` is the ordered `calls` rule list (empty if `calls`

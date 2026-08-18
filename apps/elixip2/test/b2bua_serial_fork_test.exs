@@ -1,6 +1,6 @@
 defmodule SIP.Test.B2bua.SerialFork do
   @moduledoc """
-  The serial hunt (design docs/design/b2bua_module.md §3.1, §3.3): a
+  The serial hunt (design docs/design/DESIGN-FRAMEWORK.md#54-the-peer): a
   `%SIP.B2bua.Peer{fork: :serial}` walks its target list, and a device that
   refuses sends the call on to the next one instead of ending it.
 

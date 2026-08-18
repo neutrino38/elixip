@@ -1,6 +1,6 @@
 defmodule SIP.Test.DialogParallelFork do
   @moduledoc """
-  Parallel forking in the dialog layer (design docs/design/b2bua_module.md §3.3,
+  Parallel forking in the dialog layer (design docs/design/DESIGN-FRAMEWORK.md#55-forking-the-kamailio-tm-model,
   RFC 3261 §16.6/§16.7): one dialog, a **rung** of branches ringing at once.
 
   What serial forking never had to answer, and this does: N branches produce N

@@ -1,5 +1,5 @@
 defmodule SIP.Session.MediaConnOptsTest do
-  # FW-1 (docs/design/mcu_module.md §10): a scenario must be able to pass an adapter
+  # FW-1 (docs/design/DESIGN-KELIXIP.md#7-the-module-system): a scenario must be able to pass an adapter
   # the context of *this* call — which conference this leg joins, say — without the
   # media macros knowing what it means. The extras travel in the context appdata
   # (`:media_conn_opts`) and are merged into create_peer_connection/3's opts.

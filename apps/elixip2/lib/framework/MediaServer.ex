@@ -64,7 +64,7 @@ defmodule MediaServer do
   @typedoc """
   Asynchronous events delivered to the `event_sink` pid as `{:ms_event, ref, event}`.
 
-  Media connectivity comes in two events (`docs/design/media-connectivity.md`).
+  Media connectivity comes in two events (`docs/design/DESIGN-FRAMEWORK.md#66-media-connectivity-when-may-a-scenario-send`).
 
   `{:media_connected, media}` is the raw per-media fact: the server validated the
   first incoming packet of that media. Under SRTP/DTLS a successful decrypt
@@ -147,7 +147,7 @@ defmodule MediaServer do
   A single-leg connection is a bare `pid()` — what every adapter returned before
   B2BUA media existed, and what `MediaServer.Mockup` still returns. A connection
   carrying **two endpoints** (the B2BUA case: one media session per call, one
-  endpoint per SIP leg — `docs/design/mediagw_b2bua_jsr309.md` §2) hands out one
+  endpoint per SIP leg — `docs/design/notes/mediagw_b2bua_jsr309.md` §2) hands out one
   handle per leg, sharing the process that owns the session.
 
   Callers never inspect it: it is created by `create_peer_connection/3` and
@@ -202,7 +202,7 @@ defmodule MediaServer do
           video_bandwidth: pos_integer(),
           audio_bandwidth: pos_integer(),
           webrtc_support: :yes | :no | :if_offered | :no_avp,
-          # Which RTP profile a NON-WebRTC offer is carried in (b2bua_module.md
+          # Which RTP profile a NON-WebRTC offer is carried in (DESIGN-FRAMEWORK.md
           # §7.5): `:avpf` offers RTP/AVPF — the feedback profile without
           # encryption or ICE — and `:avp` (the default) plain RTP. Ignored when
           # `webrtc_support: :yes`, which already implies SAVPF.

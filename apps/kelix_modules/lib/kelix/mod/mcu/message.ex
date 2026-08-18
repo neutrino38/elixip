@@ -1,7 +1,7 @@
 defmodule Kelix.Mod.Mcu.Message do
   @moduledoc """
   The collaboration channel between the participants' scripts (design
-  `docs/design/mcu_module.md` §20).
+  `docs/design/DESIGN-MCU.md`).
 
   A participant's script says something to its peers' scripts — a raised hand, a
   floor-control token, "I am sharing my screen". This module is the **bus**: it

@@ -34,7 +34,7 @@ defmodule Kelix.Metrics.Emit do
     :telemetry.execute([:kelix, :registrar, :event], %{count: 1}, %{domain: domain, event: event})
   end
 
-  # ── conferencing (mcu module, design docs/design/mcu_module.md §11) ───────────
+  # ── conferencing (mcu module, design docs/design/DESIGN-MCU.md#11-observability) ───────────
   #
   # The helpers live here, with the registrar's, for the reason the moduledoc gives:
   # event names and metadata shapes must stay in lockstep with the definitions in

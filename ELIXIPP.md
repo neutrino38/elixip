@@ -197,8 +197,8 @@ dialling a TLS or WSS proxy works with nothing but the URI. Connection caps defa
 to 100 per protocol (`:tcp_max_connections`, `:tls_max_connections`,
 `:wss_max_connections` in `config/config.exs`).
 
-Internals, if you need them: [docs/design/tls_listener.md](docs/design/tls_listener.md),
-[docs/design/wss_listener.md](docs/design/wss_listener.md).
+Internals, if you need them: [docs/design/DESIGN-SIPSTACK.md#34-listeners](docs/design/DESIGN-SIPSTACK.md#34-listeners),
+[docs/design/DESIGN-SIPSTACK.md#34-listeners](docs/design/DESIGN-SIPSTACK.md#34-listeners).
 
 ### Testing kelixip with elixipp
 

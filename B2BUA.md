@@ -36,7 +36,7 @@ We will consider three common use cases:
 
 > The FSL reference is [FSL.md](FSL.md). The design document, which answers *why*
 > rather than *how to use*, is
-> [docs/design/b2bua_module.md](docs/design/b2bua_module.md). Two reference
+> [docs/design/DESIGN-FRAMEWORK.md#5-b2bua](docs/design/DESIGN-FRAMEWORK.md#5-b2bua). Two reference
 > scenarios ship with elixip and are worth reading as a pair — same call, same
 > states, and the difference between the files is what a media server costs:
 > [`b2bua_basic.exs`](apps/elixip2/scenarios/b2bua_basic.exs) and

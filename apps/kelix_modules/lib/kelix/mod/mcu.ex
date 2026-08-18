@@ -1,7 +1,7 @@
 defmodule Kelix.Mod.Mcu do
   @moduledoc """
   The conferencing (MCU) module — conference registry and control surface
-  (design `docs/design/mcu_module.md` §5, §8).
+  (design `docs/design/DESIGN-MCU.md`).
 
   Delivered as a loadable `Kelix.Module`: `validate_config/1`, `child_spec/2`,
   `describe/0`, plus the REST + CLI commands of §8.3.3 declared once in

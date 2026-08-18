@@ -1,7 +1,7 @@
 # Elixip ↔ Phoenix LiveView adapter — design study
 
 Status: study — 2026-08-15. No implementation yet.
-Related: `improve-fsl-elixir.md`, the FSL-TS spec
+Related: `DESIGN-FSL.md`, the FSL-TS spec
 (`finite-state-language/spec/fsl-js-ts.md`).
 
 ## Verdict first

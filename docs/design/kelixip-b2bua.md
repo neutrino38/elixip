@@ -2,7 +2,7 @@
 
 **Status: out of scope.** Nothing here is built or committed to. This records a
 direction so the pieces being built now (the B2BUA primitives of
-[b2bua_module.md](b2bua_module.md), the registrar, presence) are not shaped in a
+[DESIGN-FRAMEWORK.md](DESIGN-FRAMEWORK.md#5-b2bua), the registrar, presence) are not shaped in a
 way that forecloses it.
 
 ## 1. Why a layer above the primitives
@@ -73,7 +73,7 @@ transport, with which identity.
   already sends and counts keepalives (`SIP.DialogImpl.KeepAlive`); the missing
   part is a trunk-level *state* (up / down / degraded) other things can read;
 - that state is what `%SIP.B2bua.Peer{trunk_pid:}` was reserved for
-  (b2bua_module.md §3.1) — a hunt should skip a trunk known to be down rather
+  (DESIGN-FRAMEWORK.md) — a hunt should skip a trunk known to be down rather
   than time out against it.
 
 ### 3.2 Queue agents
@@ -88,7 +88,7 @@ invent:
 
 The queue's own state is what neither of those knows: penalty, wrap-up, last
 call taken, login/logout. `Kelix.Mod.Queue` would implement the
-`SIP.B2bua.TargetProvider` behaviour of b2bua_module.md §3.4 and join the three
+`SIP.B2bua.TargetProvider` behaviour of DESIGN-FRAMEWORK.md and join the three
 together — which is exactly why that behaviour asks for a reservation handle and
 an attempt outcome.
 
@@ -97,7 +97,7 @@ an attempt outcome.
 The target is Asterisk's `queue_log`: one line per queue event (ENTERQUEUE,
 CONNECT, COMPLETECALLER, ABANDON, RINGNOANSWER…), which every wallboard and
 reporting tool in the field knows how to read. The hunt progress events of
-b2bua_module.md §3.6 exist to make it derivable — `:serial_attempting`,
+DESIGN-FRAMEWORK.md exist to make it derivable — `:serial_attempting`,
 `:serial_not_reachable` with its cause, `:serial_connected`, `:serial_waiting` —
 so the mapping is a small module and not an instrumentation project. Worth
 checking the mapping is total before §3.6 is implemented, since a missing event
@@ -109,7 +109,7 @@ The primitives keep their contract. `call()` and `queue()` are written **in**
 FSL, on top of `b2bua_forward/3`, `b2bua_try_next/0`,
 `b2bua_cancel_forward/0` and the rest — if either verb turns out to need a new
 primitive, that is a finding about the primitives, to be taken back to
-b2bua_module.md rather than worked around here.
+DESIGN-FRAMEWORK.md rather than worked around here.
 
 And `elixip2` stays free of any of this: trunks, agents and queues are kelixip
 objects, reached from a script the way §3.2 reaches the registrar.

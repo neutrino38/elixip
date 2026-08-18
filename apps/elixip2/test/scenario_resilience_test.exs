@@ -1,6 +1,6 @@
 defmodule SIP.Test.ScenarioResilience do
   @moduledoc """
-  The scenario engine's safety net — design docs/design/b2bua_module.md §14,
+  The scenario engine's safety net — design docs/design/DESIGN-SIPSTACK.md#57-resilience,
   decision R2.
 
   Every SIP primitive a state can call is a `GenServer.call` toward a dialog. A

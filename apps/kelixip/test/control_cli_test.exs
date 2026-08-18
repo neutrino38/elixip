@@ -488,7 +488,7 @@ defmodule Kelix.Control.CLITest do
     assert out =~ "error:"
   end
 
-  # FW-5 (docs/design/mcu_module.md §8.3.6): the last CLI/REST parity gap was
+  # FW-5 (docs/design/DESIGN-KELIXIP.md#7-the-module-system): the last CLI/REST parity gap was
   # discovery — a module's command set existed only in its source. Both listings are
   # rendered from `describe_control/0` + `describe/0`, so a module gets its usage
   # without writing one.
