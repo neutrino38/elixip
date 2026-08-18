@@ -142,7 +142,7 @@ defmodule Kelix.InstancePool do
   end
 
   # outcome notification from the instance finalizer (slot already freed by :DOWN)
-  def handle_info({:scenario_exit, _name, outcome, _reason}, state) do
+  def handle_info({:child_exit, _name, outcome, _reason}, state) do
     key =
       case outcome do
         :success -> :succeeded

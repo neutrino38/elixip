@@ -545,9 +545,9 @@ end
 
 state wait do
   on_events do
-    {:scenario_msg, :callee, :ready}        -> goto talking, "callee ready"
-    {:scenario_exit, :callee, :success, _r} -> scenario_success("done")
-    {:scenario_exit, :callee, :failure, r}  -> scenario_failure("callee failed: #{r}")
+    {:child_msg, :callee, :ready}        -> goto talking, "callee ready"
+    {:child_exit, :callee, :success, _r} -> scenario_success("done")
+    {:child_exit, :callee, :failure, r}  -> scenario_failure("callee failed: #{r}")
   after
     30_000 -> scenario_failure("timeout")
   end
@@ -568,7 +568,7 @@ end
 
 state waiting do
   on_events do
-    {:scenario_msg, :parent, :start_media} -> goto answer, "parent asked"
+    {:parent_msg, :start_media} -> goto answer, "parent asked"
   after
     30_000 -> scenario_failure("no order")
   end
@@ -584,19 +584,27 @@ end
   messages it sends back. `args:` (optional) is merged into the child context appdata (read it with
   `appdata_get/1`). The child handle is kept in the parent context, so it survives across states.
 - `notify(child_name, payload)` — send an application message to a named child. The child receives it as
-  `{:scenario_msg, :parent, payload}`.
+  `{:parent_msg, payload}`.
 - `notify_parent(payload)` — send an application message to the parent. The parent receives it as
-  `{:scenario_msg, <our name>, payload}` (the name the parent assigned with `as:`). It is a **no-op when the
+  `{:child_msg, <our name>, payload}` (the name the parent assigned with `as:`). It is a **no-op when the
   scenario has no parent**, so the very same scenario can also be run standalone (`mix scenario`, single
   `elixipp` run).
 
 **Messages** (matched in `on_events`)
 
 ```Elixir
-{:scenario_msg, from_name, payload}            # application message between FSMs
-{:scenario_exit, child_name, outcome, reason}  # a child terminated (outcome :: :success | :failure | :aborted)
-{:scenario_ctl, :shutdown, reason}             # cooperative shutdown request (see below)
+{:parent_msg, payload}                       # application message, parent -> child
+{:child_msg, child_name, payload}            # application message, child -> parent
+{:child_exit, child_name, outcome, reason}   # a child terminated (outcome :: :success | :failure | :aborted)
+{:scenario_ctl, :shutdown, reason}           # cooperative shutdown request (see below)
 ```
+
+> **Renamed in 1.5.0.** These were `{:scenario_msg, from_name, payload}` — both directions, told apart by
+> `from_name` — and `{:scenario_exit, …}`. The new names say the direction, and match `parent:msg` /
+> `child:msg` / `child:exit` of the TypeScript FSL (see
+> [docs/design/service-building-block.md](docs/design/service-building-block.md), §4.6). A message cannot
+> carry a deprecated alias the way a macro can, so a scenario matching an old shape would simply never be
+> woken: `on_events` reports it as a **compile-time warning** naming the replacement.
 
 Sub-FSMs nest freely: a child may itself spawn children. When a scenario terminates, it asks each of its
 live children to shut down (cooperatively, then hard-kills any straggler after 5 s) before reporting its own
@@ -699,7 +707,7 @@ as argument.
 If the scenario spawned sub-FSMs with `spawn_fsm`, the runner first asks each live child to shut down
 cooperatively (`{:scenario_ctl, :shutdown, …}`), waits up to 5 seconds for them to terminate and hard-kills
 any straggler, then — if this scenario itself has a parent — reports its own outcome to it as
-`{:scenario_exit, name, outcome, reason}`.
+`{:child_exit, name, outcome, reason}`.
 
 ## Macro helpers
 

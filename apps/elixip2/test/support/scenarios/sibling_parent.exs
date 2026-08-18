@@ -13,7 +13,7 @@ defmodule SpawnFsmFixture.SiblingParent do
 
   state waiting do
     on_events do
-      {:scenario_msg, :child, :child_ran} -> scenario_success("child ran")
+      {:child_msg, :child, :child_ran} -> scenario_success("child ran")
     after
       2_000 -> scenario_failure("child never reported")
     end

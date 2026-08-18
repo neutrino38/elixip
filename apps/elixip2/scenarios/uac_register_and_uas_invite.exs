@@ -89,8 +89,8 @@ defmodule UAC.RegisterThenWaitForCall do
     on_events do
       :register_refresh -> goto(refresh, "REGISTER refresh")
       {:scenario_ctl, :shutdown, _reason } -> scenario_aborted("UAC stopped gracefully")
-      {:scenario_exit, :invite_uas, :success, _r} -> goto(unregistering, "call complete")
-      {:scenario_exit, :invite_uas, :failure, _r} -> goto(unregistering, "call failure")
+      {:child_exit, :invite_uas, :success, _r} -> goto(unregistering, "call complete")
+      {:child_exit, :invite_uas, :failure, _r} -> goto(unregistering, "call failure")
     after
       (@registration_expire + 5) * 1000 ->
         scenario_failure("No timer fired in registered state")
@@ -125,10 +125,10 @@ defmodule UAC.RegisterThenWaitForCall do
         {errcode, _rsp, _trans_pid, _dialog_pid} when errcode in 300..399 ->
           scenario_failure("Unexpected REGISTER redirect #{errcode}")
 
-        {:scenario_exit, :invite_uas, :success, _r} ->
+        {:child_exit, :invite_uas, :success, _r} ->
           goto(unregistering, "call complete")
 
-        {:scenario_exit, :invite_uas, :failure, _r} ->
+        {:child_exit, :invite_uas, :failure, _r} ->
           goto(unregistering, "call failure")
       after
         5_000 ->

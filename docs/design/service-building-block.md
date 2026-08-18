@@ -394,9 +394,9 @@ end
 ### 4.5 Relation to the existing primitives
 
 FSL already has `spawn_fsm/2` (spawn a *child scenario* in its own monitored
-process), `notify/2` and `notify_parent/1` (`{:scenario_msg, name, payload}`
-both ways). That is parent↔child between two full scenarios, each with its own
-legs — a callee simulator, a load generator.
+process), `notify/2` and `notify_parent/1` (`{:parent_msg, …}` /
+`{:child_msg, …}`). That is parent↔child between two full scenarios, each with
+its own legs — a callee simulator, a load generator.
 
 Both survive, and the frontier is sharp. It is worth stating in one line
 because nothing states it today:
@@ -418,7 +418,8 @@ one.
 ### 4.6 One vocabulary across the two dialects
 
 FSL exists twice — `:elixip2` on the BEAM, `finite-state-language` on npm
-(spec `fsl-typescript/spec/fsl-js-ts.md`) — and Trix is a real consumer of the
+(spec `fsl-typescript/spec/fsl-js-ts.md`, whose §8.4 reserves the SBB names on
+that side and §11.5 records this rule) — and Trix is a real consumer of the
 second. Two implementations of one language may diverge on *mechanism*; they
 must not diverge on *names*, because a name is the only thing a reader carries
 from one dialect to the other.
@@ -438,22 +439,30 @@ reimplementing on either side is acceptable**; `finite-state-language` is
 | return from an SBB | `sbb_return/1` | `fx.sbbReturn` | new on both sides |
 | message to a child | `notify/2` | `fx.notify` | aligned |
 | message to the parent | `notify_parent/1` | `fx.notifyParent` | aligned |
-| message received from the parent | `{:scenario_msg, :parent, p}` | `parent:msg` | **diverged — Elixir moves** to `{:parent_msg, p}` |
-| message received from a child | `{:scenario_msg, name, p}` | `child:msg` | **diverged — Elixir moves** to `{:child_msg, name, p}` |
-| a child ended | `{:scenario_exit, name, outcome, reason}` | `child:exit` | **diverged — Elixir moves** to `{:child_exit, …}` |
+| message received from the parent | `{:parent_msg, p}` | `parent:msg` | **converged 1.5.0** — was `{:scenario_msg, :parent, p}` |
+| message received from a child | `{:child_msg, name, p}` | `child:msg` | **converged 1.5.0** — was `{:scenario_msg, name, p}` |
+| a child ended | `{:child_exit, name, outcome, reason}` | `child:exit` | **converged 1.5.0** — was `{:scenario_exit, …}` |
 | cooperative shutdown | `on_shutdown` | `onShutdown` | aligned |
 | terminals | `scenario_success` / `_failure` / `_aborted` | `success()` / `failure()` / `aborted()` | aligned (the prefix is a namespacing need Elixir has and TS does not) |
 | bounded async work | — (`Valet`, and `http_GET` built on it) | `fx.task(work, tag)` | **gap on the Elixir side**: no FSL verb, only the `Valet` implementation and one `http_GET` facade over it |
 
 Three points in that table need their reasoning recorded.
 
-**The `child:` / `parent:` move is Elixir's, not TS's.** `scenario_msg` names
+**The `child:` / `parent:` move was Elixir's, not TS's.** `scenario_msg` names
 the transport and hides the direction; the direction is what every reader wants
 and what both design documents already use in prose. TS cannot move the other
 way: it dispatches on `type` alone and has no pattern matching (spec §10), so
 folding the two into one type with a `from` field would force an `if` in every
 state — a real regression. Elixir loses nothing by splitting, since it matches
-the discriminant either way. Deprecated aliases carry the old tuples.
+the discriminant either way.
+
+Done in 1.5.0, and it is the one entry in the table that could **not** be
+carried by a deprecated alias: an alias works for a macro, which is read at
+compile time, and not for a message, which is matched at run time. A scenario
+left on `{:scenario_msg, …}` would not fail — it would never be woken, and
+would wait on its `after` without a word. So `on_events` reports the old shapes
+as a **compile-time warning** naming the replacement, which is where the
+mismatch is still visible.
 
 **`fx.task` has no Elixir counterpart, and that is the gap to close.**
 `Valet` is an implementation and `http_GET` is one facade over it; there is no

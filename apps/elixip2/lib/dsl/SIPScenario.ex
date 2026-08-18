@@ -312,6 +312,14 @@ defmodule SIP.Scenario do
   defmacro on_events(blocks) do
     do_clauses = Keyword.fetch!(blocks, :do)
 
+    # The 1.4 inter-FSM event shapes are gone from the wire (§4.6 of
+    # docs/design/service-building-block.md: one name per concept across the two
+    # FSL dialects). A message cannot carry a deprecated alias the way a macro
+    # can, and a scenario still matching the old tuple would simply never be
+    # woken — it would wait on its `after`, silently. So the mismatch is reported
+    # here, where the pattern is still visible, instead of in production.
+    Enum.each(do_clauses, &warn_deprecated_event(&1, __CALLER__))
+
     # Make every on_events cooperatively shutdown-aware: prepend a clause matching
     # the control message, unless the scenario already handles :scenario_ctl
     # itself. Prepending keeps it ahead of a possible catch-all `_ ->` clause.
@@ -541,7 +549,7 @@ defmodule SIP.Scenario do
 
   @doc """
   Send an application message to a named child sub-FSM. The child receives it as
-  `{:scenario_msg, :parent, payload}`. Unknown name → logged and ignored.
+  `{:parent_msg, payload}`. Unknown name → logged and ignored.
   """
   defmacro notify(child_name, payload) do
     quote do
@@ -551,8 +559,9 @@ defmodule SIP.Scenario do
 
   @doc """
   Send an application message to the parent FSM. The parent receives it as
-  `{:scenario_msg, <our name>, payload}`. No-op when this scenario has no parent
-  (so the same scenario also runs standalone).
+  `{:child_msg, <our name>, payload}` — the name the parent assigned with `as:`,
+  so it matches a stable literal in every state. No-op when this scenario has no
+  parent (so the same scenario also runs standalone).
   """
   defmacro notify_parent(payload) do
     quote do
@@ -735,6 +744,47 @@ defmodule SIP.Scenario do
   defp bind_event_var([pattern], evt), do: [{:=, [], [pattern, evt]}]
   defp bind_event_var(other, _evt), do: other
 
+  # Compile-time check for the 1.4 spellings of the inter-FSM messages, renamed in
+  # 1.5.0. `{:scenario_msg, :parent, p}` -> `{:parent_msg, p}` (one element
+  # shorter: the sender was always `:parent`), `{:scenario_msg, name, p}` ->
+  # `{:child_msg, name, p}`, `{:scenario_exit, …}` -> `{:child_exit, …}`.
+  defp warn_deprecated_event({:->, meta, [head, _body]}, caller) do
+    case head |> clause_pattern() |> pattern_first_element() do
+      :scenario_msg ->
+        deprecation_warning(
+          "{:scenario_msg, …} is no longer sent. Match {:parent_msg, payload} for a " <>
+            "message from the parent, {:child_msg, name, payload} for one from a child",
+          meta,
+          caller
+        )
+
+      :scenario_exit ->
+        deprecation_warning(
+          "{:scenario_exit, …} is no longer sent. Match " <>
+            "{:child_exit, name, outcome, reason}",
+          meta,
+          caller
+        )
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp warn_deprecated_event(_clause, _caller), do: :ok
+
+  defp deprecation_warning(message, meta, caller) do
+    IO.warn(message, file: caller.file, line: Keyword.get(meta, :line, caller.line))
+  end
+
+  defp clause_pattern([{:when, _meta, [pattern | _guards]}]), do: pattern
+  defp clause_pattern([pattern]), do: pattern
+  defp clause_pattern(_), do: nil
+
+  defp pattern_first_element({:{}, _meta, [first | _rest]}), do: first
+  defp pattern_first_element({first, _second}), do: first
+  defp pattern_first_element(_), do: nil
+
   # The clause head is a one-element list holding the pattern, optionally wrapped
   # in a `when` guard.
   defp clause_event_type([{:when, _meta, [pattern | _guards]}]), do: pattern_event_type(pattern)
@@ -746,11 +796,17 @@ defmodule SIP.Scenario do
   defp pattern_event_type({first, _second}), do: first_element_type(first)
   defp pattern_event_type(_), do: nil
 
-  # Media events are `{:ms_event, ...}`; inter-FSM messages are `{:scenario_msg,
-  # ...}` / `{:scenario_exit, ...}`; control messages are `{:scenario_ctl, ...}`;
-  # SIP requests/responses are tuples whose first element is a method atom, a
-  # status code integer, or a bound variable.
+  # Media events are `{:ms_event, ...}`; inter-FSM messages are `{:parent_msg,
+  # ...}` / `{:child_msg, ...}` / `{:child_exit, ...}`; control messages are
+  # `{:scenario_ctl, ...}`; SIP requests/responses are tuples whose first element
+  # is a method atom, a status code integer, or a bound variable.
   defp first_element_type(:ms_event), do: :media
+  defp first_element_type(:parent_msg), do: :scenario
+  defp first_element_type(:child_msg), do: :scenario
+  defp first_element_type(:child_exit), do: :scenario
+  # The 1.4 spellings. Nothing sends them any more; they are still typed here so
+  # that a scenario matching one is classified — and warned about — rather than
+  # read as a SIP method (see deprecated_event_tag/1).
   defp first_element_type(:scenario_msg), do: :scenario
   defp first_element_type(:scenario_exit), do: :scenario
   defp first_element_type(:scenario_ctl), do: :control

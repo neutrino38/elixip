@@ -163,7 +163,7 @@ defmodule SIP.Context do
   end
 
   # Set the parent FSM PID (nil means this scenario has no parent and runs
-  # standalone, so notify_parent / scenario_exit become no-ops).
+  # standalone, so notify_parent / child_exit become no-ops).
   def set(context, :parent_pid, nil) do
     Map.put(context, :parent_pid, nil)
   end

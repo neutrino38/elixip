@@ -273,6 +273,7 @@ Decisions, all deliberate:
 | cleanup when the parent ends | cooperative shutdown message, then a hard kill after a 5 s grace period |
 | nesting | a full tree: a child may spawn its own children |
 | scope of the shutdown protocol | **generalized** — the same control message any controller uses, including elixipp's graceful stop |
+| the event names | `{:parent_msg, …}` / `{:child_msg, …}` / `{:child_exit, …}` since 1.5.0, matching `parent:msg` / `child:msg` / `child:exit` of the TypeScript FSL. They were one `{:scenario_msg, from, …}` for both directions: that names the transport and hides the direction, and TS cannot fold the two into one type because it dispatches on the type alone. A message takes no deprecated alias, so `on_events` warns at compile time when a scenario matches an old shape |
 | the name | `spawn_fsm`, after `fx.spawn` of the TypeScript FSL — one name per concept across the two dialects. Spelled `sub_fsm` up to 1.4.1; the old macro is kept as a deprecated alias sharing the same expansion, because `.exs` scenarios are loaded at run time and a rename would break them in the field, not at compile time |
 
 ### 4.2 The message protocol
@@ -282,9 +283,10 @@ Three families, all plain `send/2` into the FSM's mailbox and matched in
 
 | Message | Direction | Meaning |
 |---|---|---|
-| `{:scenario_msg, from_name, payload}` | FSM ↔ FSM | application message. Parent→child always uses the fixed name `:parent`; child→parent uses the name the parent assigned at spawn (`as:`), so the parent matches a stable literal in every state |
+| `{:parent_msg, payload}` | parent → child | application message downwards. The sender was always `:parent`, so the name is dropped from the tuple and put in the tag |
+| `{:child_msg, name, payload}` | child → parent | application message upwards, tagged with the name the parent assigned at spawn (`as:`), so the parent matches a stable literal in every state |
 | `{:scenario_ctl, :shutdown, reason}` | controller → FSM | cooperative stop. The 3-tuple envelope leaves room for future verbs without changing shape |
-| `{:scenario_exit, name, outcome, reason}` | FSM → parent | how the child ended |
+| `{:child_exit, name, outcome, reason}` | child → parent | how the child ended |
 | `{:DOWN, ref, :process, pid, reason}` | OTP → parent | safety net when the child died without reporting |
 
 ### 4.3 Cooperative shutdown
@@ -329,7 +331,7 @@ instance needs:
 |---|---|
 | `:dialog_pid` | seeds `ctx.dialogpid`, so the reply macros target that dialog |
 | `:inbound_request` | the request that created the instance, also in the mailbox |
-| `:parent_pid` | the factory, which gets `{:scenario_exit, …}` and releases its quota slot |
+| `:parent_pid` | the factory, which gets `{:child_exit, …}` and releases its quota slot |
 | `:config_overrides` | the external-JSON overrides (§6) |
 
 `spawn_uas_instance/2` wraps `run_instance/2` in a `spawn_monitor`, which is what

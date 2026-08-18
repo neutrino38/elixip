@@ -331,7 +331,7 @@ defmodule SIP.Scenario.Runner do
   @spec notify_child(%SIP.Context{}, atom(), term()) :: :ok
   def notify_child(ctx, name, payload) do
     case ctx.appdata |> Map.get(:__children__, %{}) |> Map.get(name) do
-      %SIP.Scenario.Child{pid: pid} -> send(pid, {:scenario_msg, :parent, payload})
+      %SIP.Scenario.Child{pid: pid} -> send(pid, {:parent_msg, payload})
       nil -> Logger.warning("notify/2: unknown child #{inspect(name)}")
     end
 
@@ -346,7 +346,7 @@ defmodule SIP.Scenario.Runner do
   def notify_parent(ctx, payload) do
     case ctx.parent_pid do
       nil -> :ok
-      pid -> send(pid, {:scenario_msg, Map.get(ctx.appdata, :__self_name__), payload})
+      pid -> send(pid, {:child_msg, Map.get(ctx.appdata, :__self_name__), payload})
     end
 
     :ok
@@ -680,12 +680,12 @@ defmodule SIP.Scenario.Runner do
     end
   end
 
-  # Tell our parent (if any) how we terminated, so it can match {:scenario_exit,
+  # Tell our parent (if any) how we terminated, so it can match {:child_exit,
   # name, outcome, reason} in its on_events.
   defp notify_parent_exit(ctx, outcome, reason) do
     case ctx.parent_pid do
       nil -> :ok
-      pid -> send(pid, {:scenario_exit, Map.get(ctx.appdata, :__self_name__), outcome, reason})
+      pid -> send(pid, {:child_exit, Map.get(ctx.appdata, :__self_name__), outcome, reason})
     end
 
     :ok
