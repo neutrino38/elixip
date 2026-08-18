@@ -16,6 +16,9 @@ defmodule SIP.Test.DialogFork do
   """
   use ExUnit.Case
 
+  alias SIP.Test.Peers.Manual
+  alias SIP.Test.Transport.Mockup
+
   setup_all do
     :ok = SIP.Transac.start()
     :ok = SIP.Transport.Selector.start()
@@ -35,7 +38,8 @@ defmodule SIP.Test.DialogFork do
   # instance up again could race a restart and hand back a different process.
   defp peer!(name) do
     tp = SIP.Transport.Selector.select_transport(target(name)).tp_pid
-    :ok = GenServer.call(tp, :settestapp)
+    :ok = Mockup.set_peer(tp, Manual)
+    :ok = Mockup.attach_probe(tp)
     tp
   end
 
@@ -65,12 +69,12 @@ defmodule SIP.Test.DialogFork do
     _b = peer!("fk1b")
 
     {dlg, tid1} = start_call("fk1a")
-    assert_receive {:invite_sent, first}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, first}}, 2_000
 
     assert {:ok, tid2} = SIP.Dialog.fork_branch(dlg, target("fk1b"))
     refute tid2 == tid1
 
-    assert_receive {:invite_sent, second}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, second}}, 2_000
 
     # Same request, another target: what a fork IS (RFC 3261 §16.6).
     assert second.callid == first.callid
@@ -89,13 +93,13 @@ defmodule SIP.Test.DialogFork do
     _b = peer!("fk2b")
 
     {dlg, _tid1} = start_call("fk2a")
-    assert_receive {:invite_sent, _first}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _first}}, 2_000
 
     assert {:ok, _tid2} = SIP.Dialog.fork_branch(dlg, target("fk2b"))
-    assert_receive {:invite_sent, _second}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _second}}, 2_000
 
     # The first target refuses.
-    GenServer.cast(a, {:simulate, 486, 100})
+    Manual.simulate(a, 486, 100)
     assert_receive {:outbound, {486, _rsp, _tid, ^dlg}}, 3_000
 
     # The dialog is still alive to try the next one. Before forking, a non-2xx
@@ -111,11 +115,11 @@ defmodule SIP.Test.DialogFork do
     b = peer!("fk3b")
 
     {dlg, _tid1} = start_call("fk3a")
-    assert_receive {:invite_sent, _first}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _first}}, 2_000
     assert {:ok, _tid2} = SIP.Dialog.fork_branch(dlg, target("fk3b"))
-    assert_receive {:invite_sent, _second}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _second}}, 2_000
 
-    GenServer.cast(b, {:simulate, 200, 100})
+    Manual.simulate(b, 200, 100)
     assert_receive {:outbound, {200, _rsp, _tid, ^dlg}}, 3_000
 
     # The dialog now has the winner's remote tag, so it is addressable.
@@ -135,12 +139,12 @@ defmodule SIP.Test.DialogFork do
     b = peer!("fk4b")
 
     {dlg, _tid1} = start_call("fk4a")
-    assert_receive {:invite_sent, _first}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _first}}, 2_000
     assert {:ok, _tid2} = SIP.Dialog.fork_branch(dlg, target("fk4b"))
-    assert_receive {:invite_sent, _second}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _second}}, 2_000
 
     # fk4a rings — its 180 carries a to-tag of its own.
-    GenServer.cast(a, {:simulate, 180, 50})
+    Manual.simulate(a, 180, 50)
     assert_receive {:outbound, {180, ringing, _t, ^dlg}}, 3_000
     {:ok, ringing_tag} = SIP.Uri.get_uri_param(ringing.to, "tag")
 
@@ -149,7 +153,7 @@ defmodule SIP.Test.DialogFork do
     assert is_nil(totag_after_180)
 
     # fk4b answers; its tag is the one that sticks.
-    GenServer.cast(b, {:simulate, 200, 100})
+    Manual.simulate(b, 200, 100)
     assert_receive {:outbound, {200, ok, _t2, ^dlg}}, 3_000
     {:ok, winner_tag} = SIP.Uri.get_uri_param(ok.to, "tag")
 
@@ -162,9 +166,9 @@ defmodule SIP.Test.DialogFork do
     a = peer!("fk5")
 
     {dlg, _tid} = start_call("fk5")
-    assert_receive {:invite_sent, _req}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _req}}, 2_000
 
-    GenServer.cast(a, {:simulate, 180, 50})
+    Manual.simulate(a, 180, 50)
     assert_receive {:outbound, {180, ringing, _t, ^dlg}}, 3_000
     {:ok, early_tag} = SIP.Uri.get_uri_param(ringing.to, "tag")
 

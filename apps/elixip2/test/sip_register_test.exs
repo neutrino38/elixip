@@ -160,7 +160,7 @@ defmodule SIP.Test.Register do
     upd_uri = SIP.Transport.Selector.select_transport(upd_uri)
 
     # Simulate a received REGISTER by UDP mockeup transport
-    send(upd_uri.tp_pid, { :recv, parsed_msg})
+    SIP.Test.Transport.Mockup.inject(upd_uri.tp_pid, parsed_msg)
 
     # Attendre l'apparition du processus test_registrar
     registrar_pid = until!(fn -> Process.whereis(:test_registrar) end, 2_000)

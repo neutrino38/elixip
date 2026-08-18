@@ -15,6 +15,9 @@ defmodule SIP.Test.B2bua.Scenario do
   """
   use ExUnit.Case
 
+  alias SIP.Test.Peers.Manual
+  alias SIP.Test.Transport.Mockup
+
   @scenario Path.expand("../scenarios/b2bua_basic.exs", __DIR__)
 
   setup_all do
@@ -35,13 +38,12 @@ defmodule SIP.Test.B2bua.Scenario do
 
   # A mockup peer of this suite's OWN — not the shared `unittest=1` instance every
   # other suite drives. Sharing it meant another suite's retransmitted INVITEs
-  # landed in this test's mailbox as {:invite_sent, …}, ahead of the answer it was
-  # waiting for.
+  # landed in this test's mailbox ahead of the answer it was waiting for.
   #
   # A test that counts what reaches the callee takes the argument and gets an
-  # instance of its own: the mockup reports a request going out as a bare atom
-  # (`:ACK`, `:BYE`), so one left behind by the test before it is
-  # indistinguishable from the one being asserted on.
+  # instance of its own: a probe event carries no test identity, so an ACK or a
+  # BYE left behind by the test before it is indistinguishable from the one
+  # being asserted on.
   defp peer_uri(tag \\ "b2bua_scenario") do
     %SIP.Uri{scheme: "sip:", userpart: "callee", domain: "example.com", port: 5060}
     |> SIP.Uri.set_uri_param("unittest", tag)
@@ -101,9 +103,9 @@ defmodule SIP.Test.B2bua.Scenario do
     # Watch the callee side from the start: the mockup tells us when the
     # forwarded INVITE reaches it, which is what says the outbound leg is up.
     tp_pid = transport_pid()
-    :ok = GenServer.call(tp_pid, :settestapp)
+    :ok = Mockup.set_peer(tp_pid, Manual)
+    :ok = Mockup.attach_probe(tp_pid)
     # the far end answers the relayed BYE, which is what really ends the scenario
-    SIP.Test.Transport.UDPMockup.answer_bye(tp_pid)
 
     {instance, ref} = start_instance(module, stub, invite)
 
@@ -116,7 +118,7 @@ defmodule SIP.Test.B2bua.Scenario do
     # 2. The INVITE reached the callee, carrying a dialog identity of its own
     #    and none of the inbound leg's hop-scoped headers (the §4 rules, here on
     #    a request that really crossed the stack).
-    assert_receive {:invite_sent, fwd}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, fwd}}, 5_000
     assert fwd.callid != invite.callid
     refute Map.has_key?(fwd, :recordroute)
     refute Map.has_key?(fwd, :proxyauthorization)
@@ -124,13 +126,13 @@ defmodule SIP.Test.B2bua.Scenario do
     assert fwd.body == invite.body
 
     # 3. The callee rings, and that reaches the caller in OUR inbound dialog.
-    GenServer.cast(tp_pid, {:simulate, 180, 100})
+    Manual.simulate(tp_pid, 180, 100)
     assert_receive {:replied, 180, _reason, relayed_req, _fields}, 5_000
     assert relayed_req.callid == invite.callid
 
     # 4. The callee answers. The relayed 200 carries the callee's SDP and our
     #    own Contact (the callee's stayed behind — RFC 3261 §12.1.1).
-    GenServer.cast(tp_pid, {:simulate, 200, 100})
+    Manual.simulate(tp_pid, 200, 100)
     assert_receive {:replied, 200, _reason, _req, fields}, 5_000
     assert [%{data: sdp}] = Keyword.fetch!(fields, :body)
     assert sdp =~ "v=0"
@@ -145,7 +147,7 @@ defmodule SIP.Test.B2bua.Scenario do
     send(instance, {:BYE, in_dialog(:BYE, invite), self(), stub})
     assert_receive {:replied, 200, "OK", bye_req, _}, 5_000
     assert bye_req.method == :BYE
-    assert_receive :BYE, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :BYE, _}}, 5_000
 
     # 7. The far end's 200 to the relayed BYE ends the scenario successfully.
     assert_receive {:instance_done, :ok}, 10_000
@@ -170,30 +172,30 @@ defmodule SIP.Test.B2bua.Scenario do
     # Its own callee, so the `:ACK` counted below is this test's (see peer_uri/1).
     peer = peer_uri("b2bua_2xx_retrans")
     tp_pid = transport_pid(peer)
-    :ok = GenServer.call(tp_pid, :settestapp)
-    SIP.Test.Transport.UDPMockup.answer_bye(tp_pid)
+    :ok = Mockup.set_peer(tp_pid, Manual)
+    :ok = Mockup.attach_probe(tp_pid)
 
     {instance, _ref} = start_instance(module, stub, invite, peer)
     send(instance, {:INVITE, invite, self(), stub})
 
     assert_receive {:replied, 100, "Trying", _req, _fields}, 5_000
-    assert_receive {:invite_sent, _fwd}, 5_000
-    GenServer.cast(tp_pid, {:simulate, 200, 100})
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
+    Manual.simulate(tp_pid, 200, 100)
     assert_receive {:replied, 200, _reason, _req, _fields}, 5_000
 
     # It answers again while our ACK is still on its way — the T1 retransmission
     # every callee starts the moment it answers. Nothing can be resent yet, so it
     # is absorbed where it lands.
-    GenServer.cast(tp_pid, {:simulate, 200, 0})
+    Manual.simulate(tp_pid, 200, 0)
 
     # The caller ACKs, and the callee gets it.
     send(instance, {:ACK, in_dialog(:ACK, invite), nil, stub})
-    assert_receive :ACK, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :ACK, _}}, 5_000
 
     # It answers again after the ACK too — that one had not reached it either —
     # and this time there is something to resend.
-    SIP.Test.Transport.UDPMockup.retransmit_2xx(tp_pid)
-    assert_receive :ACK, 5_000
+    Manual.retransmit_2xx(tp_pid)
+    assert_receive {:sip_mockup, {:request_sent, :ACK, _}}, 5_000
 
     # …while the caller heard nothing of any of it: a retransmission is not a new
     # answer, so no 200 was relayed a second time on the inbound leg.
@@ -204,7 +206,7 @@ defmodule SIP.Test.B2bua.Scenario do
     send(instance, {:BYE, in_dialog(:BYE, invite), self(), stub})
     assert_receive {:replied, 200, "OK", bye_req, _}, 5_000
     assert bye_req.method == :BYE
-    assert_receive :BYE, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :BYE, _}}, 5_000
     assert_receive {:instance_done, :ok}, 10_000
   end
 
@@ -221,15 +223,15 @@ defmodule SIP.Test.B2bua.Scenario do
   test "a caller that ACKs twice does not lose its call", %{scenario: module, stub: stub} do
     invite = inbound_invite()
     tp_pid = transport_pid()
-    :ok = GenServer.call(tp_pid, :settestapp)
-    SIP.Test.Transport.UDPMockup.answer_bye(tp_pid)
+    :ok = Mockup.set_peer(tp_pid, Manual)
+    :ok = Mockup.attach_probe(tp_pid)
 
     {instance, _ref} = start_instance(module, stub, invite)
     send(instance, {:INVITE, invite, self(), stub})
 
     assert_receive {:replied, 100, "Trying", _req, _fields}, 5_000
-    assert_receive {:invite_sent, _fwd}, 5_000
-    GenServer.cast(tp_pid, {:simulate, 200, 100})
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
+    Manual.simulate(tp_pid, 200, 100)
     assert_receive {:replied, 200, _reason, _req, _fields}, 5_000
 
     ack = in_dialog(:ACK, invite)
@@ -255,16 +257,16 @@ defmodule SIP.Test.B2bua.Scenario do
   } do
     invite = inbound_invite()
     tp_pid = transport_pid()
-    :ok = GenServer.call(tp_pid, :settestapp)
+    :ok = Mockup.set_peer(tp_pid, Manual)
+    :ok = Mockup.attach_probe(tp_pid)
     # the far end answers the relayed BYE, which is what really ends the scenario
-    SIP.Test.Transport.UDPMockup.answer_bye(tp_pid)
 
     {instance, _ref} = start_instance(module, stub, invite)
     send(instance, {:INVITE, invite, self(), stub})
 
     assert_receive {:replied, 100, "Trying", _req, _fields}, 5_000
-    assert_receive {:invite_sent, _fwd}, 5_000
-    GenServer.cast(tp_pid, {:simulate, 200, 100})
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
+    Manual.simulate(tp_pid, 200, 100)
     assert_receive {:replied, 200, _reason, _req, _fields}, 5_000
 
     # The call is up: the initial ACK crosses (wait_ack) and lands on the initial
@@ -276,7 +278,7 @@ defmodule SIP.Test.B2bua.Scenario do
     reinvite = %{in_dialog(:INVITE, invite) | cseq: [3, :INVITE], body: invite.body}
     send(instance, {:INVITE, reinvite, self(), stub})
 
-    assert_receive {:invite_sent, fwd_reinvite}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, fwd_reinvite}}, 5_000
     assert fwd_reinvite.method == :INVITE
     # Same dialog on the callee's side, a later CSeq: a re-INVITE, not a new call.
     assert fwd_reinvite.callid != invite.callid
@@ -284,7 +286,7 @@ defmodule SIP.Test.B2bua.Scenario do
     assert cseq_num > 1
 
     # The callee accepts, and that 200 goes back to the caller on the re-INVITE.
-    GenServer.cast(tp_pid, {:simulate, 200, 100})
+    Manual.simulate(tp_pid, 200, 100)
     assert_receive {:replied, 200, _reason, answered_req, _fields}, 5_000
     assert answered_req.cseq == [3, :INVITE]
 
@@ -318,14 +320,15 @@ defmodule SIP.Test.B2bua.Scenario do
     # Its own callee: this test counts what does NOT reach it.
     peer = peer_uri("b2bua_callee_bye")
     tp_pid = transport_pid(peer)
-    :ok = GenServer.call(tp_pid, :settestapp)
+    :ok = Mockup.set_peer(tp_pid, Manual)
+    :ok = Mockup.attach_probe(tp_pid)
 
     {instance, _ref} = start_instance(module, stub, invite, peer)
     send(instance, {:INVITE, invite, self(), stub})
 
     assert_receive {:replied, 100, "Trying", _req, _fields}, 5_000
-    assert_receive {:invite_sent, _fwd}, 5_000
-    GenServer.cast(tp_pid, {:simulate, 200, 100})
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
+    Manual.simulate(tp_pid, 200, 100)
     assert_receive {:replied, 200, _reason, _req, _fields}, 5_000
     send(instance, {:ACK, in_dialog(:ACK, invite), nil, stub})
 
@@ -333,7 +336,7 @@ defmodule SIP.Test.B2bua.Scenario do
     # server transaction and the outbound dialog, and reaches the scenario exactly
     # as production delivers it. `hangup/1` was written for this and nothing had
     # ever called it.
-    SIP.Test.Transport.UDPMockup.hangup(tp_pid)
+    Manual.hangup(tp_pid)
 
     # The BYE must cross to the CALLER, on the inbound leg…
     assert_receive {:sent_on_inbound, %{method: :BYE}}, 5_000
@@ -341,7 +344,7 @@ defmodule SIP.Test.B2bua.Scenario do
     # …and NOT go back out to the callee, who is the one that just hung up. A BYE
     # returning to it lands on a dialog it has already closed: 481, and the caller
     # — never told anything — is left holding a dead call.
-    refute_receive :BYE, 1_000
+    refute_receive {:sip_mockup, {:request_sent, :BYE, _}}, 1_000
   end
 
   @tag timeout: 60_000
@@ -351,16 +354,16 @@ defmodule SIP.Test.B2bua.Scenario do
   } do
     invite = inbound_invite()
     tp_pid = transport_pid()
-    :ok = GenServer.call(tp_pid, :settestapp)
+    :ok = Mockup.set_peer(tp_pid, Manual)
+    :ok = Mockup.attach_probe(tp_pid)
     # the far end answers the relayed BYE, which is what really ends the scenario
-    SIP.Test.Transport.UDPMockup.answer_bye(tp_pid)
 
     {instance, _ref} = start_instance(module, stub, invite)
     send(instance, {:INVITE, invite, self(), stub})
 
     assert_receive {:replied, 100, "Trying", _req, _fields}, 5_000
-    assert_receive {:invite_sent, _fwd}, 5_000
-    GenServer.cast(tp_pid, {:simulate, 486, 100})
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
+    Manual.simulate(tp_pid, 486, 100)
 
     # The refusal reaches the caller with its own code, not a code of our own
     # invention, and the scenario stops.
@@ -376,16 +379,16 @@ defmodule SIP.Test.B2bua.Scenario do
        %{scenario: module, stub: stub} do
     invite = inbound_invite()
     tp_pid = transport_pid()
-    :ok = GenServer.call(tp_pid, :settestapp)
+    :ok = Mockup.set_peer(tp_pid, Manual)
+    :ok = Mockup.attach_probe(tp_pid)
     # the far end answers the relayed BYE, which is what really ends the scenario
-    SIP.Test.Transport.UDPMockup.answer_bye(tp_pid)
 
     {instance, ref} = start_instance(module, stub, invite)
     send(instance, {:INVITE, invite, self(), stub})
 
     assert_receive {:replied, 100, "Trying", _req, _fields}, 5_000
-    assert_receive {:invite_sent, _fwd}, 5_000
-    GenServer.cast(tp_pid, {:simulate, 180, 100})
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
+    Manual.simulate(tp_pid, 180, 100)
     assert_receive {:replied, 180, _reason, _req, _fields}, 5_000
 
     # The caller hangs up mid-ring.
@@ -411,13 +414,14 @@ defmodule SIP.Test.B2bua.Scenario do
   } do
     invite = inbound_invite()
     tp_pid = transport_pid()
-    :ok = GenServer.call(tp_pid, :settestapp)
+    :ok = Mockup.set_peer(tp_pid, Manual)
+    :ok = Mockup.attach_probe(tp_pid)
 
     {instance, ref} = start_instance(module, stub, invite)
     send(instance, {:INVITE, invite, self(), stub})
     assert_receive {:replied, 100, "Trying", _req, _fields}, 5_000
-    assert_receive {:invite_sent, _fwd}, 5_000
-    GenServer.cast(tp_pid, {:simulate, 180, 100})
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
+    Manual.simulate(tp_pid, 180, 100)
     assert_receive {:replied, 180, _reason, _req, _fields}, 5_000
 
     # The caller gives up. The mockup answers the relayed CANCEL the way a UA
@@ -443,24 +447,24 @@ defmodule SIP.Test.B2bua.Scenario do
   } do
     invite = inbound_invite()
     tp_pid = transport_pid()
-    :ok = GenServer.call(tp_pid, :settestapp)
-    SIP.Test.Transport.UDPMockup.answer_bye(tp_pid)
+    :ok = Mockup.set_peer(tp_pid, Manual)
+    :ok = Mockup.attach_probe(tp_pid)
 
     {instance, ref} = start_instance(module, stub, invite)
     send(instance, {:INVITE, invite, self(), stub})
     assert_receive {:replied, 100, "Trying", _req, _fields}, 5_000
-    assert_receive {:invite_sent, _fwd}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
 
     # The caller gives up…
     send(instance, {:CANCEL, in_dialog(:CANCEL, invite), self(), stub})
 
     # …and the callee answers anyway, ahead of the 487 the mockup schedules for
     # the CANCEL: the answer crossed the cancellation.
-    GenServer.cast(tp_pid, {:simulate, 200, 0})
+    Manual.simulate(tp_pid, 200, 0)
 
     # Both, in this order, and neither is optional.
-    assert_receive :ACK, 5_000
-    assert_receive :BYE, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :ACK, _}}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :BYE, _}}, 5_000
 
     assert_receive {:instance_done, :ok}, 10_000
     assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
@@ -473,15 +477,15 @@ defmodule SIP.Test.B2bua.Scenario do
   } do
     invite = inbound_invite()
     tp_pid = transport_pid()
-    :ok = GenServer.call(tp_pid, :settestapp)
+    :ok = Mockup.set_peer(tp_pid, Manual)
+    :ok = Mockup.attach_probe(tp_pid)
     # the far end answers the relayed BYE, which is what really ends the scenario
-    SIP.Test.Transport.UDPMockup.answer_bye(tp_pid)
 
     {instance, ref} = start_instance(module, stub, invite)
     send(instance, {:INVITE, invite, self(), stub})
     assert_receive {:replied, 100, "Trying", _req, _fields}, 5_000
-    assert_receive {:invite_sent, _fwd}, 5_000
-    GenServer.cast(tp_pid, {:simulate, 180, 100})
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
+    Manual.simulate(tp_pid, 180, 100)
     assert_receive {:replied, 180, _reason, _req, _fields}, 5_000
 
     # A controller stops the scenario while the callee is still ringing. The

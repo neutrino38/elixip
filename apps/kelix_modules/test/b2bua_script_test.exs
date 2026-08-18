@@ -15,6 +15,9 @@ defmodule Kelix.B2buaScriptTest do
   """
   use ExUnit.Case, async: false
 
+  alias SIP.Test.Peers.Manual
+  alias SIP.Test.Transport.Mockup
+
   alias Kelix.Mod.Registrar
   @domain "example.com"
   @callee "bob"
@@ -103,7 +106,8 @@ defmodule Kelix.B2buaScriptTest do
 
   defp mockup_pid(peer \\ "1") do
     tp = SIP.Transport.Selector.select_transport(contact("10.0.0.9", peer)).tp_pid
-    :ok = GenServer.call(tp, :settestapp)
+    :ok = Mockup.set_peer(tp, Manual)
+    :ok = Mockup.attach_probe(tp)
     tp
   end
 
@@ -122,13 +126,13 @@ defmodule Kelix.B2buaScriptTest do
     assert_receive {:replied, 100, "Trying", _fields, _req}, 5_000
 
     # …and the call goes out to the registered contact, in a dialog of its own.
-    assert_receive {:invite_sent, fwd}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, fwd}}, 5_000
     assert fwd.ruri.userpart == @callee
     assert fwd.ruri.domain == "10.0.0.9"
     assert fwd.callid != req.callid
 
     # The callee answers; the caller gets that answer.
-    GenServer.cast(tp_pid, {:simulate, 200, 100})
+    Manual.simulate(tp_pid, 200, 100)
     assert_receive {:replied, 200, _reason, _fields, _req}, 5_000
   end
 
@@ -144,7 +148,7 @@ defmodule Kelix.B2buaScriptTest do
     send(pid, {:INVITE, req, self(), dialog})
 
     assert_receive {:replied, 100, "Trying", _fields, _req}, 5_000
-    assert_receive {:invite_sent, fwd}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, fwd}}, 5_000
     assert fwd.ruri.domain == "10.0.0.42"
   end
 
@@ -159,7 +163,7 @@ defmodule Kelix.B2buaScriptTest do
 
     assert_receive {:replied, 100, "Trying", _fields, _req}, 5_000
     assert_receive {:replied, 480, "Temporarily Unavailable", _fields, _req}, 5_000
-    refute_receive {:invite_sent, _fwd}, 500
+    refute_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 500
   end
 
   # P2a + P2b together, and the payoff of both: a subscriber with two devices
@@ -181,14 +185,14 @@ defmodule Kelix.B2buaScriptTest do
     assert_receive {:replied, 100, "Trying", _fields, _req}, 5_000
 
     # The q=0.9 device is tried first…
-    assert_receive {:invite_sent, first}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, first}}, 5_000
     assert first.ruri.domain == "10.0.0.9"
 
     # …it is busy, so the other one is tried. The caller is told nothing yet:
     # one device saying no is not the call failing.
-    GenServer.cast(a, {:simulate, 486, 100})
+    Manual.simulate(a, 486, 100)
 
-    assert_receive {:invite_sent, second}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, second}}, 5_000
     assert second.ruri.domain == "10.0.0.42"
     refute_receive {:replied, 486, _, _, _}, 300
 
@@ -218,7 +222,7 @@ defmodule Kelix.B2buaScriptTest do
 
     rung =
       for _ <- 1..2, into: MapSet.new() do
-        assert_receive {:invite_sent, fwd}, 5_000
+        assert_receive {:sip_mockup, {:request_sent, :INVITE, fwd}}, 5_000
         fwd.ruri.domain
       end
 
@@ -226,7 +230,7 @@ defmodule Kelix.B2buaScriptTest do
 
     # One of them is busy. That is not the call failing — the other is still
     # ringing, and the caller must hear nothing at all.
-    GenServer.cast(a, {:simulate, 486, 100})
+    Manual.simulate(a, 486, 100)
     refute_receive {:replied, 486, _, _, _}, 800
   end
 

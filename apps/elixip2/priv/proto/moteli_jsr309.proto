@@ -1,0 +1,650 @@
+// MOTELI v2 — JSR-309 plane (point-to-point legs): the /jsr309 XML-RPC
+// contract on the bus. Source of truth: mediaserver xmlrpc_jsr309_api.md
+// (§6 method reference). Any change to that API MUST update this file in the
+// same change set (see moteli_common.proto header). Target: elixip 2.0.
+//
+// Differences vs XML-RPC, by design (docs/design/moteli-reboot.md):
+// - EventQueueCreate/EventQueueDelete do not exist on the bus: events flow
+//   through the kelixip.events exchange, keyed by session tag.
+// - MediaSessionCreate loses its queueId parameter (same reason).
+// - rtp_map: key = payload type (decimal string), value = codec id (int32,
+//   tables in moteli_common.proto).
+
+syntax = "proto3";
+
+package moteli.v2;
+
+import "moteli_common.proto";
+
+option java_outer_classname = "MoteliJsr309";
+
+// --- Media sessions -----------------------------------------------------------
+
+message MediaSessionCreateReq {
+  // Returned in every event as session_tag.
+  string tag = 1;
+  // Controller-chosen id for alloc-queue redelivery detection (§4.2).
+  string establishment_id = 2;
+}
+// -> CreatedResp (session_id)
+
+message MediaSessionDeleteReq {
+  uint32 session_id = 1;
+}
+
+// --- Players --------------------------------------------------------------------
+
+message PlayerCreateReq {
+  uint32 session_id = 1;
+  string name = 2; // returned in events as player tag
+}
+// -> CreatedResp (player_id)
+
+message PlayerOpenReq {
+  uint32 session_id = 1;
+  uint32 player_id = 2;
+  string filename = 3;
+}
+
+message PlayerPlayReq {
+  uint32 session_id = 1;
+  uint32 player_id = 2;
+}
+
+message PlayerSeekReq {
+  uint32 session_id = 1;
+  uint32 player_id = 2;
+  uint32 time_ms = 3;
+}
+
+message PlayerStopReq {
+  uint32 session_id = 1;
+  uint32 player_id = 2;
+}
+
+message PlayerCloseReq {
+  uint32 session_id = 1;
+  uint32 player_id = 2;
+}
+
+message PlayerDeleteReq {
+  uint32 session_id = 1;
+  uint32 player_id = 2;
+}
+
+// --- Recorders -------------------------------------------------------------------
+
+message RecorderCreateReq {
+  uint32 session_id = 1;
+  string name = 2; // returned in events as recorder tag
+}
+// -> CreatedResp (recorder_id)
+
+message RecorderRecordReq {
+  uint32 session_id = 1;
+  uint32 recorder_id = 2;
+  string filename = 3;
+  uint32 max_duration_ms = 4; // 0 = unlimited
+  optional bool wait_video = 5; // default true; server forces false without a negotiated video source
+  optional bool echo_video = 6; // default false; requires prior EndpointStartSending(video)
+}
+
+message RecorderStopReq {
+  uint32 session_id = 1;
+  uint32 recorder_id = 2;
+}
+
+message RecorderDeleteReq {
+  uint32 session_id = 1;
+  uint32 recorder_id = 2;
+}
+
+message RecorderAttachToEndpointReq {
+  uint32 session_id = 1;
+  uint32 recorder_id = 2;
+  uint32 endpoint_id = 3;
+  MediaType media = 4;
+}
+
+message RecorderAttachToAudioMixerPortReq {
+  uint32 session_id = 1;
+  uint32 recorder_id = 2;
+  uint32 mixer_id = 3;
+  uint32 port_id = 4;
+}
+
+message RecorderAttachToVideoMixerPortReq {
+  uint32 session_id = 1;
+  uint32 recorder_id = 2;
+  uint32 mixer_id = 3;
+  uint32 port_id = 4;
+}
+
+message RecorderDettachReq {
+  uint32 session_id = 1;
+  uint32 recorder_id = 2;
+  MediaType media = 3;
+}
+
+// --- Endpoints: lifecycle and attaches ---------------------------------------------
+
+message EndpointCreateReq {
+  uint32 session_id = 1;
+  string name = 2;
+  bool audio_supported = 3;
+  bool video_supported = 4;
+  bool text_supported = 5;
+}
+// -> CreatedResp (endpoint_id)
+
+message EndpointDeleteReq {
+  uint32 session_id = 1;
+  uint32 endpoint_id = 2;
+}
+
+message EndpointGetStatisticsReq {
+  uint32 session_id = 1;
+  uint32 endpoint_id = 2;
+}
+// -> MediaStatsResp (all 12 fields)
+
+message EndpointAttachToPlayerReq {
+  uint32 session_id = 1;
+  uint32 endpoint_id = 2;
+  uint32 player_id = 3;
+  MediaType media = 4;
+}
+
+message EndpointAttachToEndpointReq {
+  uint32 session_id = 1;
+  uint32 endpoint_id = 2;
+  uint32 source_id = 3; // source endpoint whose `media` is routed to endpoint_id
+  MediaType media = 4;
+}
+
+message EndpointAttachToAudioMixerPortReq {
+  uint32 session_id = 1;
+  uint32 endpoint_id = 2;
+  uint32 mixer_id = 3;
+  uint32 port_id = 4;
+}
+
+message EndpointAttachToVideoMixerPortReq {
+  uint32 session_id = 1;
+  uint32 endpoint_id = 2;
+  uint32 mixer_id = 3;
+  uint32 port_id = 4;
+}
+
+message EndpointAttachToAudioTranscoderReq {
+  uint32 session_id = 1;
+  uint32 endpoint_id = 2;
+  uint32 transcoder_id = 3;
+}
+
+message EndpointAttachToVideoTranscoderReq {
+  uint32 session_id = 1;
+  uint32 endpoint_id = 2;
+  uint32 transcoder_id = 3;
+}
+
+message EndpointDettachReq {
+  uint32 session_id = 1;
+  uint32 endpoint_id = 2;
+  MediaType media = 3;
+}
+
+// --- Endpoints: security (SRTP / DTLS / ICE-STUN) -----------------------------------
+// Setting SDES or DTLS crypto arms SRTP by itself; the legacy "secure" RTP
+// property is a no-op.
+
+message EndpointSetLocalCryptoSdesReq {
+  uint32 session_id = 1;
+  uint32 endpoint_id = 2;
+  MediaType media = 3;
+  string suite = 4; // e.g. AES_CM_128_HMAC_SHA1_80
+  string key = 5;   // base64 key from the SDP
+}
+
+message EndpointSetRemoteCryptoSdesReq {
+  uint32 session_id = 1;
+  uint32 endpoint_id = 2;
+  MediaType media = 3;
+  string suite = 4;
+  string key = 5;
+}
+
+// setup = the PEER's role from the remote SDP; the server derives the
+// inverse local role (RFC 5763). Both orders vs StartSending are supported.
+message EndpointSetRemoteCryptoDtlsReq {
+  uint32 session_id = 1;
+  uint32 endpoint_id = 2;
+  MediaType media = 3;
+  string setup = 4; // active | passive | actpass
+  string hash = 5;
+  string fingerprint = 6;
+}
+
+// Global DTLS certificate service — no session scope.
+message EndpointGetLocalCryptoDtlsFingerprintReq {
+  string hash = 1; // "sha-1" | "sha-256"
+}
+// -> StringResp (fingerprint)
+
+message EndpointSetLocalStunCredentialsReq {
+  uint32 session_id = 1;
+  uint32 endpoint_id = 2;
+  MediaType media = 3;
+  string username = 4;
+  string pwd = 5;
+}
+
+// Once remote credentials are set AND a send destination is known, the
+// endpoint emits aggressive-nomination STUN binding requests (ICE-lite peers).
+message EndpointSetRemoteStunCredentialsReq {
+  uint32 session_id = 1;
+  uint32 endpoint_id = 2;
+  MediaType media = 3;
+  string username = 4;
+  string pwd = 5;
+}
+
+// --- Endpoints: RTP media -------------------------------------------------------------
+
+// properties: transport keys (rtcp-mux, ssrc, tmmbr, rtpTimeout, natLatch, ...)
+// and codec keys (codec.<name>.<param>, consumed by the fmtp negotiator).
+message EndpointSetRtpPropertiesReq {
+  uint32 session_id = 1;
+  uint32 endpoint_id = 2;
+  MediaType media = 3;
+  map<string, string> properties = 4;
+}
+
+message EndpointStartSendingReq {
+  uint32 session_id = 1;
+  uint32 endpoint_id = 2;
+  MediaType media = 3;
+  string send_ip = 4;
+  uint32 send_port = 5;
+  map<string, int32> rtp_map = 6;
+}
+
+message EndpointStopSendingReq {
+  uint32 session_id = 1;
+  uint32 endpoint_id = 2;
+  MediaType media = 3;
+}
+
+message EndpointStartReceivingReq {
+  uint32 session_id = 1;
+  uint32 endpoint_id = 2;
+  MediaType media = 3;
+  map<string, int32> rtp_map = 4;
+  optional SdpOffer offer = 5;
+}
+
+message EndpointStartReceivingResp {
+  uint32 recv_port = 1;
+  // Negotiation verdict, per payload type: key present = PT accepted (value =
+  // fmtp body alone, "" when the codec has none); key absent = PT filtered.
+  // The server is authoritative; the controller rebuilds m-line and a=fmtp
+  // from this map.
+  map<string, string> fmtp_by_pt = 2;
+}
+
+message EndpointStopReceivingReq {
+  uint32 session_id = 1;
+  uint32 endpoint_id = 2;
+  MediaType media = 3;
+}
+
+// Forces an update / key frame (FIR) toward this media.
+message EndpointRequestUpdateReq {
+  uint32 session_id = 1;
+  uint32 endpoint_id = 2;
+  MediaType media = 3;
+}
+
+// Trickle ICE level 1: only the RTP(1)/UDP host|srflx component is retained.
+message EndpointAddIceCandidateReq {
+  uint32 session_id = 1;
+  uint32 endpoint_id = 2;
+  MediaType media = 3;
+  string candidate = 4; // SDP candidate: line, prefix optional
+}
+
+// timeout_ms > 0 arms the inactivity watchdog, 0 disarms it. Do not arm on
+// MEDIA_TEXT while recording (T.140 is silent between keystrokes).
+message EndpointStartRtpTimeoutReq {
+  uint32 session_id = 1;
+  uint32 endpoint_id = 2;
+  MediaType media = 3;
+  uint32 timeout_ms = 4;
+}
+
+// --- Audio mixers ----------------------------------------------------------------------
+
+message AudioMixerCreateReq {
+  uint32 session_id = 1;
+  string name = 2;
+}
+// -> CreatedResp (mixer_id)
+
+message AudioMixerDeleteReq {
+  uint32 session_id = 1;
+  uint32 mixer_id = 2;
+}
+
+message AudioMixerPortCreateReq {
+  uint32 session_id = 1;
+  uint32 mixer_id = 2;
+  string name = 3;
+}
+// -> CreatedResp (port_id)
+
+message AudioMixerPortSetCodecReq {
+  uint32 session_id = 1;
+  uint32 mixer_id = 2;
+  uint32 port_id = 3;
+  int32 codec = 4; // AudioCodec table
+}
+
+message AudioMixerPortDeleteReq {
+  uint32 session_id = 1;
+  uint32 mixer_id = 2;
+  uint32 port_id = 3;
+}
+
+message AudioMixerPortAttachToEndpointReq {
+  uint32 session_id = 1;
+  uint32 mixer_id = 2;
+  uint32 port_id = 3;
+  uint32 endpoint_id = 4;
+}
+
+message AudioMixerPortAttachToPlayerReq {
+  uint32 session_id = 1;
+  uint32 mixer_id = 2;
+  uint32 port_id = 3;
+  uint32 player_id = 4;
+}
+
+message AudioMixerPortDettachReq {
+  uint32 session_id = 1;
+  uint32 mixer_id = 2;
+  uint32 port_id = 3;
+}
+
+// --- Video mixers and mosaics -------------------------------------------------------------
+
+message VideoMixerCreateReq {
+  uint32 session_id = 1;
+  string name = 2;
+}
+// -> CreatedResp (mixer_id)
+
+message VideoMixerDeleteReq {
+  uint32 session_id = 1;
+  uint32 mixer_id = 2;
+}
+
+message VideoMixerPortCreateReq {
+  uint32 session_id = 1;
+  uint32 mixer_id = 2;
+  string name = 3;
+  uint32 mosaic_id = 4;
+}
+// -> CreatedResp (port_id)
+
+message VideoMixerPortDeleteReq {
+  uint32 session_id = 1;
+  uint32 mixer_id = 2;
+  uint32 port_id = 3;
+}
+
+message VideoMixerPortSetCodecReq {
+  uint32 session_id = 1;
+  uint32 mixer_id = 2;
+  uint32 port_id = 3;
+  int32 codec = 4; // VideoCodec table
+  VideoSize size = 5;
+  uint32 fps = 6;
+  uint32 bitrate = 7; // bits/s
+  uint32 intra_period = 8;
+}
+
+message VideoMixerPortAttachToEndpointReq {
+  uint32 session_id = 1;
+  uint32 mixer_id = 2;
+  uint32 port_id = 3;
+  uint32 endpoint_id = 4;
+}
+
+message VideoMixerPortAttachToPlayerReq {
+  uint32 session_id = 1;
+  uint32 mixer_id = 2;
+  uint32 port_id = 3;
+  uint32 player_id = 4;
+}
+
+message VideoMixerPortDettachReq {
+  uint32 session_id = 1;
+  uint32 mixer_id = 2;
+  uint32 port_id = 3;
+}
+
+message VideoMixerMosaicCreateReq {
+  uint32 session_id = 1;
+  uint32 mixer_id = 2;
+  MosaicType comp = 3;
+  VideoSize size = 4;
+}
+// -> CreatedResp (mosaic_id)
+
+message VideoMixerMosaicDeleteReq {
+  uint32 session_id = 1;
+  uint32 mixer_id = 2;
+  uint32 mosaic_id = 3;
+}
+
+message VideoMixerMosaicSetSlotReq {
+  uint32 session_id = 1;
+  uint32 mixer_id = 2;
+  uint32 mosaic_id = 3;
+  uint32 num = 4;
+  sint32 port_id = 5; // video port, or slot-special value
+}
+
+message VideoMixerMosaicSetCompositionTypeReq {
+  uint32 session_id = 1;
+  uint32 mixer_id = 2;
+  uint32 mosaic_id = 3;
+  MosaicType comp = 4;
+  VideoSize size = 5;
+}
+
+message VideoMixerMosaicSetOverlayPngReq {
+  uint32 session_id = 1;
+  uint32 mixer_id = 2;
+  uint32 mosaic_id = 3;
+  string overlay_path = 4; // server-side PNG path
+}
+
+message VideoMixerMosaicResetOverlayReq {
+  uint32 session_id = 1;
+  uint32 mixer_id = 2;
+  uint32 mosaic_id = 3;
+}
+
+message VideoMixerMosaicAddPortReq {
+  uint32 session_id = 1;
+  uint32 mixer_id = 2;
+  uint32 mosaic_id = 3;
+  uint32 port_id = 4;
+}
+
+message VideoMixerMosaicRemovePortReq {
+  uint32 session_id = 1;
+  uint32 mixer_id = 2;
+  uint32 mosaic_id = 3;
+  uint32 port_id = 4;
+}
+
+// --- Audio transcoders -----------------------------------------------------------------------
+
+message AudioTranscoderCreateReq {
+  uint32 session_id = 1;
+  string name = 2;
+}
+// -> CreatedResp (transcoder_id)
+
+message AudioTranscoderDeleteReq {
+  uint32 session_id = 1;
+  uint32 transcoder_id = 2;
+}
+
+message AudioTranscoderSetCodecReq {
+  uint32 session_id = 1;
+  uint32 transcoder_id = 2;
+  int32 codec = 3; // AudioCodec table
+  map<string, string> properties = 4;
+}
+
+message AudioTranscoderAttachToEndpointReq {
+  uint32 session_id = 1;
+  uint32 transcoder_id = 2;
+  uint32 endpoint_id = 3;
+}
+
+message AudioTranscoderDettachReq {
+  uint32 session_id = 1;
+  uint32 transcoder_id = 2;
+}
+
+// --- Video transcoders ------------------------------------------------------------------------
+
+message VideoTranscoderCreateReq {
+  uint32 session_id = 1;
+  string name = 2;
+}
+// -> CreatedResp (transcoder_id)
+
+message VideoTranscoderDeleteReq {
+  uint32 session_id = 1;
+  uint32 transcoder_id = 2;
+}
+
+message VideoTranscoderSetCodecReq {
+  uint32 session_id = 1;
+  uint32 transcoder_id = 2;
+  int32 codec = 3; // VideoCodec table
+  VideoSize size = 4;
+  uint32 fps = 5;
+  uint32 bitrate = 6; // bits/s
+  uint32 intra_period = 7;
+  map<string, string> properties = 8;
+}
+
+// Fast Picture Update — typically in response to an ExternalFirRequested event.
+message VideoTranscoderFpuReq {
+  uint32 session_id = 1;
+  uint32 transcoder_id = 2;
+}
+
+message VideoTranscoderAttachToEndpointReq {
+  uint32 session_id = 1;
+  uint32 transcoder_id = 2;
+  uint32 endpoint_id = 3;
+}
+
+message VideoTranscoderDettachReq {
+  uint32 session_id = 1;
+  uint32 transcoder_id = 2;
+}
+
+// --- Generic media connections (WebRTC / ICE / WS) ----------------------------------------------
+
+// Returns "<proto>://<ip>:<port>" — the real receive port for that media
+// (same value as EndpointStartReceiving), valid even before StartReceiving.
+message GetMediaCandidatesReq {
+  uint32 session_id = 1;
+  uint32 endpoint_id = 2;
+  MediaProtocol protocol = 3;
+  MediaType media = 4;
+}
+// -> StringResp (candidate URL)
+
+message ConfigureMediaConnectionReq {
+  uint32 session_id = 1;
+  uint32 endpoint_id = 2;
+  MediaType media = 3;
+  MediaRole role = 4;
+  MediaProtocol protocol = 5;
+  string token = 6;
+  string expected_payload = 7;
+}
+
+// --- Events (published on kelixip.events, routing key <instance>.jsr309.<session tag>) ----------
+// Wire event codes stay append-only server-side (1 player EOF, 2 external FIR,
+// 3 player started, 4 recorder started, 5 recorder stopped, 6 endpoint
+// disconnected, 7 endpoint connected).
+// TODO(P3): confirm the exact per-event payload fields against the server's
+// event serializer when porting the event sink; tags below follow the
+// long-poll tuples consumed by MediaServer.Mendooze.EventPoller today.
+
+enum RecorderStopReason {
+  REC_STOP_CALLER = 0;   // RecorderStop was called
+  REC_STOP_DURATION = 1; // max_duration_ms elapsed
+  REC_STOP_SILENCE = 2;
+  REC_STOP_DTMF = 3;
+}
+
+message Jsr309PlayerEndOfFile {
+  string session_tag = 1;
+  string player_tag = 2;
+}
+
+message Jsr309ExternalFirRequested {
+  string session_tag = 1;
+  string endpoint_name = 2;
+}
+
+message Jsr309PlayerStarted {
+  string session_tag = 1;
+  string player_tag = 2;
+}
+
+message Jsr309RecorderStarted {
+  string session_tag = 1;
+  string recorder_tag = 2;
+}
+
+message Jsr309RecorderStopped {
+  string session_tag = 1;
+  string recorder_tag = 2;
+  RecorderStopReason reason = 3;
+}
+
+message Jsr309EndpointDisconnected {
+  string session_tag = 1;
+  string endpoint_name = 2;
+  MediaType media = 3;
+}
+
+message Jsr309EndpointConnected {
+  string session_tag = 1;
+  string endpoint_name = 2;
+  MediaType media = 3;
+}
+
+message Jsr309Event {
+  oneof body {
+    Jsr309PlayerEndOfFile player_end_of_file = 1;
+    Jsr309ExternalFirRequested external_fir_requested = 2;
+    Jsr309PlayerStarted player_started = 3;
+    Jsr309RecorderStarted recorder_started = 4;
+    Jsr309RecorderStopped recorder_stopped = 5;
+    Jsr309EndpointDisconnected endpoint_disconnected = 6;
+    Jsr309EndpointConnected endpoint_connected = 7;
+  }
+}

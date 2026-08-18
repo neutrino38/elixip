@@ -23,6 +23,9 @@ defmodule SIP.Test.B2bua.OfferProfile do
   """
   use ExUnit.Case
 
+  alias SIP.Test.Peers.Manual
+  alias SIP.Test.Transport.Mockup
+
   alias SIP.B2bua.{Leg, Peer}
   alias SIP.Session.B2bua
 
@@ -56,9 +59,9 @@ defmodule SIP.Test.B2bua.OfferProfile do
     %{ctx: ctx}
   end
 
-  # One mockup peer per test: the mockup announces a hangup as the bare atom
-  # `:BYE`, so a teardown still in flight from another test lands in whichever
-  # one is running (CLAUDE.md's standing warning about the shared instance).
+  # One mockup peer per test: a probe event carries no test identity, so a
+  # teardown still in flight from another test lands in whichever one is running
+  # (CLAUDE.md's standing warning about the shared instance).
   defp target(name) do
     %SIP.Uri{scheme: "sip:", userpart: "callee", domain: "#{name}.example.com", port: 5060}
     |> SIP.Uri.set_uri_param("unittest", "profile_#{name}")
@@ -66,7 +69,8 @@ defmodule SIP.Test.B2bua.OfferProfile do
 
   defp arm!(name) do
     tp = SIP.Transport.Selector.select_transport(target(name)).tp_pid
-    :ok = GenServer.call(tp, :settestapp)
+    :ok = Mockup.set_peer(tp, Manual)
+    :ok = Mockup.attach_probe(tp)
     tp
   end
 
@@ -108,14 +112,14 @@ defmodule SIP.Test.B2bua.OfferProfile do
 
   defp cseq(invite), do: invite.cseq |> hd()
 
-  # "Nothing else was offered" cannot be `refute_receive {:invite_sent, _}`: the
+  # "Nothing else was offered" cannot be a `refute_receive` on a sent INVITE: the
   # client transaction of an INVITE nobody answered retransmits on timer A, and
   # the mockup announces every send. What must not arrive is a DIFFERENT request
   # — another rung of the ladder carries another CSeq, which is exactly what
   # makes it distinguishable from a retransmission here too.
   defp refute_new_offer(previous, timeout \\ 500) do
     receive do
-      {:invite_sent, req} ->
+      {:sip_mockup, {:request_sent, :INVITE, req}} ->
         assert cseq(req) == cseq(previous), "a new offer went out (CSeq #{cseq(req)})"
         refute_new_offer(previous, timeout)
     after
@@ -136,7 +140,7 @@ defmodule SIP.Test.B2bua.OfferProfile do
 
     assert ctx.lasterr == :ok
 
-    assert_receive {:invite_sent, webrtc}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, webrtc}}, 5_000
     assert offered_protocols(webrtc) == ["UDP/TLS/RTP/SAVPF"]
 
     leg = B2bua.outbound_leg(ctx)
@@ -145,7 +149,7 @@ defmodule SIP.Test.B2bua.OfferProfile do
     # "Not Acceptable Here": the body, not the device.
     ctx = relay_final(ctx, 488)
 
-    assert_receive {:invite_sent, avpf}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, avpf}}, 5_000
     assert offered_protocols(avpf) == ["RTP/AVPF"]
     assert cseq(avpf) == cseq(webrtc) + 1
     # Same call, same leg, same target — only the offer changed.
@@ -158,7 +162,7 @@ defmodule SIP.Test.B2bua.OfferProfile do
 
     ctx = relay_final(ctx, 488)
 
-    assert_receive {:invite_sent, avp}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, avp}}, 5_000
     assert offered_protocols(avp) == ["RTP/AVP"]
     assert cseq(avp) == cseq(avpf) + 1
     assert %Leg{profile: :avp, profiles_left: []} = B2bua.outbound_leg(ctx)
@@ -166,7 +170,7 @@ defmodule SIP.Test.B2bua.OfferProfile do
 
     # The bottom rung is accepted, and what the caller finally gets is the answer
     # decided when their own INVITE arrived — one profile ago, twice over.
-    GenServer.cast(tp, {:simulate, 200, 100})
+    Manual.simulate(tp, 200, 100)
     assert_receive {:outbound, {200, resp, tid, _dlg}}, 5_000
     B2bua.note_event({:outbound, {200, resp, tid, self()}})
     ctx = B2bua.do_relay_reply(ctx, resp)
@@ -189,7 +193,7 @@ defmodule SIP.Test.B2bua.OfferProfile do
         media_mode()
       )
 
-    assert_receive {:invite_sent, offer}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, offer}}, 5_000
     assert offered_protocols(offer) == ["UDP/TLS/RTP/SAVPF"]
     assert %Leg{profile: :webrtc, profiles_left: []} = B2bua.outbound_leg(ctx)
 
@@ -209,12 +213,12 @@ defmodule SIP.Test.B2bua.OfferProfile do
     peer = peer("lad3", profile: :avpf_if_supported, fallback_on: [415, 488])
     ctx = B2bua.do_create_leg(ctx, inbound_invite(), peer, media_mode())
 
-    assert_receive {:invite_sent, avpf}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, avpf}}, 5_000
     assert offered_protocols(avpf) == ["RTP/AVPF"]
 
     ctx = relay_final(ctx, 415)
 
-    assert_receive {:invite_sent, avp}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, avp}}, 5_000
     assert offered_protocols(avp) == ["RTP/AVP"]
     assert cseq(avp) == cseq(avpf) + 1
     refute_receive {:replied, 415, _reason, _req, _fields}, 200
@@ -230,13 +234,13 @@ defmodule SIP.Test.B2bua.OfferProfile do
     peer = peer(["lad4a", "lad4b"], profile: :avpf_if_supported, fork: :serial)
     ctx = B2bua.do_create_leg(ctx, inbound_invite(), peer, media_mode())
 
-    assert_receive {:invite_sent, first}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, first}}, 5_000
     assert first.ruri.domain == "lad4a.example.com"
     assert offered_protocols(first) == ["RTP/AVPF"]
 
     ctx = relay_final(ctx, 488)
 
-    assert_receive {:invite_sent, second}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, second}}, 5_000
     assert second.ruri.domain == "lad4a.example.com"
     assert offered_protocols(second) == ["RTP/AVP"]
 
@@ -244,7 +248,7 @@ defmodule SIP.Test.B2bua.OfferProfile do
     # gets its usual say.
     ctx = relay_final(ctx, 488)
 
-    assert_receive {:invite_sent, third}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, third}}, 5_000
     assert third.ruri.domain == "lad4b.example.com"
 
     # …and the second device is offered the TOP of the ladder again: what the
@@ -268,7 +272,7 @@ defmodule SIP.Test.B2bua.OfferProfile do
 
     assert ctx.lasterr == {:b2bua, :profile_needs_media_server, :webrtc_if_supported}
     assert B2bua.outbound_leg(ctx) == nil
-    refute_receive {:invite_sent, _fwd}, 200
+    refute_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 200
   end
 
   test "an unknown profile is refused where it was written", %{ctx: ctx} do
@@ -290,7 +294,7 @@ defmodule SIP.Test.B2bua.OfferProfile do
 
     ctx = B2bua.do_create_leg(ctx, inbound_invite(), peer("lad7", []), media)
 
-    assert_receive {:invite_sent, offer}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, offer}}, 5_000
     assert offered_protocols(offer) == ["UDP/TLS/RTP/SAVPF"]
     assert %Leg{profile: nil, profiles_left: []} = B2bua.outbound_leg(ctx)
 

@@ -1208,7 +1208,7 @@ INVITE.
 The fix revives a hook that already existed and was never called: a transport
 module may export **`select_instance/1`** and name the instance a URI gets;
 the historical rule (one per connection when reliable, one per protocol
-otherwise) is the fallback. `UDPMockup` implements it on the `unittest`
+otherwise) is the fallback. `SIP.Test.Transport.Mockup` implements it on the `unittest`
 parameter — `;unittest=1` stays THE shared instance every existing suite uses,
 and any other value (`;unittest=callee`) names a peer of its own.
 

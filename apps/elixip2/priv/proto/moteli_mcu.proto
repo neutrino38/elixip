@@ -1,0 +1,559 @@
+// MOTELI v2 — MCU plane (conferences): the /mcu XML-RPC contract on the bus.
+// Source of truth: mediaserver MCU-API.md (§6 method reference). Any change
+// to that API MUST update this file in the same change set (see
+// moteli_common.proto header). Target release: elixip 2.0.
+//
+// Differences vs XML-RPC, by design (docs/design/moteli-reboot.md):
+// - EventQueueCreate/EventQueueDelete do not exist on the bus: events flow
+//   through the kelixip.events exchange, keyed by conference tag.
+// - CreateConference loses its queueId parameter (same reason).
+// - XML-RPC overload-by-arity becomes optional fields with the old defaults.
+// - POST /upload/mcu/app/<tag> becomes the UploadImage verb.
+// - rtp_map: key = payload type (decimal string), value = codec id (int32,
+//   tables in moteli_common.proto).
+
+syntax = "proto3";
+
+package moteli.v2;
+
+import "moteli_common.proto";
+
+option java_outer_classname = "MoteliMcu";
+
+// --- Conferences -----------------------------------------------------------
+
+message CreateConferenceReq {
+  string tag = 1;
+  VadMode vad = 2;
+  uint32 audio_rate = 3; // Hz; 0 = server default (16000)
+  // Controller-chosen id, echoed on retry after alloc-queue redelivery so a
+  // server can detect an establishment it already answered (§4.2).
+  string establishment_id = 4;
+}
+// -> CreatedResp (conf_id)
+
+message UpdateConferenceReq {
+  uint32 conf_id = 1;
+  optional VadMode vad = 2; // absent = unchanged
+  optional uint32 audio_rate = 3; // parsed by the server, currently ignored
+}
+
+message DeleteConferenceReq {
+  uint32 conf_id = 1;
+}
+
+message GetConferencesReq {}
+
+message ConferenceInfo {
+  uint32 conf_id = 1;
+  string tag = 2;
+  uint32 num_participants = 3;
+}
+
+message GetConferencesResp {
+  repeated ConferenceInfo conferences = 1;
+}
+
+message AddConferenceTokenReq {
+  uint32 conf_id = 1;
+  string token = 2;
+}
+
+// --- Mosaics ----------------------------------------------------------------
+
+message CreateMosaicReq {
+  uint32 conf_id = 1;
+  MosaicType comp = 2;
+  VideoSize size = 3;
+}
+// -> CreatedResp (mosaic_id)
+
+message SetCompositionTypeReq {
+  uint32 conf_id = 1;
+  uint32 mosaic_id = 2;
+  MosaicType comp = 3;
+  VideoSize size = 4;
+}
+
+message SetMosaicSlotReq {
+  uint32 conf_id = 1;
+  uint32 mosaic_id = 2;
+  uint32 num = 3; // slot index
+  // >0 partId, 0 free, -1 locked, -2 VAD-driven, -3 reset
+  sint32 id = 4;
+}
+
+message SetMosaicOverlayImageReq {
+  uint32 conf_id = 1;
+  uint32 mosaic_id = 2;
+  string filename = 3;
+}
+// -> CreatedResp (mosaic_id)
+
+message ResetMosaicOverlayReq {
+  uint32 conf_id = 1;
+  uint32 mosaic_id = 2;
+}
+// -> CreatedResp (mosaic_id)
+
+message DeleteMosaicReq {
+  uint32 conf_id = 1;
+  uint32 mosaic_id = 2;
+}
+// -> CreatedResp (mosaic_id)
+
+message AddMosaicParticipantReq {
+  uint32 conf_id = 1;
+  uint32 mosaic_id = 2;
+  uint32 part_id = 3;
+}
+
+message RemoveMosaicParticipantReq {
+  uint32 conf_id = 1;
+  uint32 mosaic_id = 2;
+  uint32 part_id = 3;
+}
+
+message GetMosaicPositionsReq {
+  uint32 conf_id = 1;
+  uint32 mosaic_id = 2;
+}
+
+message GetMosaicPositionsResp {
+  repeated sint32 positions = 1; // occupancy per slot (partId / specials)
+}
+
+// --- Sidebars ----------------------------------------------------------------
+
+message CreateSidebarReq {
+  uint32 conf_id = 1;
+}
+// -> CreatedResp (sidebar_id)
+
+message DeleteSidebarReq {
+  uint32 conf_id = 1;
+  uint32 sidebar_id = 2;
+}
+// -> CreatedResp (sidebar_id)
+
+message AddSidebarParticipantReq {
+  uint32 conf_id = 1;
+  uint32 sidebar_id = 2;
+  uint32 part_id = 3;
+}
+
+message RemoveSidebarParticipantReq {
+  uint32 conf_id = 1;
+  uint32 sidebar_id = 2;
+  uint32 part_id = 3;
+}
+
+// --- Participants -------------------------------------------------------------
+
+message CreateParticipantReq {
+  uint32 conf_id = 1;
+  string name = 2;
+  ParticipantType type = 3;
+  uint32 mosaic_id = 4;
+  uint32 sidebar_id = 5;
+}
+// -> CreatedResp (part_id)
+
+message DeleteParticipantReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+}
+
+message SetParticipantMosaicReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+  uint32 mosaic_id = 3;
+}
+
+message SetParticipantSidebarReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+  uint32 sidebar_id = 3;
+}
+
+message SetParticipantDisplayNameReq {
+  uint32 conf_id = 1;
+  uint32 mosaic_id = 2;
+  uint32 part_id = 3;
+  string name = 4;
+  uint32 script_code = 5;
+}
+
+// Covers both XML-RPC aliases SetParticipantBackground and
+// SetParticipantOrMosaicImage (same server handler).
+message SetParticipantImageReq {
+  uint32 conf_id = 1;
+  uint32 mosaic_id = 2;
+  uint32 part_id = 3;
+  string filename = 4;
+  uint32 image_role = 5; // 0 background, 1 overlay
+}
+
+message AddParticipantInputTokenReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+  string token = 3;
+}
+
+message AddParticipantOutputTokenReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+  string token = 3;
+}
+
+message SetMuteReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+  MediaType media = 3;
+  bool muted = 4;
+}
+
+message SendFpuReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+}
+
+message GetParticipantStatisticsReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+}
+// -> MediaStatsResp (fields 1-8 filled)
+
+// --- Codecs --------------------------------------------------------------------
+
+message SetVideoCodecReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+  int32 codec = 3; // VideoCodec table
+  VideoSize mode = 4;
+  uint32 fps = 5;
+  uint32 bitrate = 6; // bits/s
+  uint32 intra_period = 7;
+  // Replaces the stream property map; the only channel reaching the encoder
+  // (h264.profile-level-id, h264.packetization-mode — explicit "0" forces the
+  // software encoder).
+  map<string, string> properties = 8;
+  MediaRole role = 9;
+}
+
+message SetAudioCodecReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+  int32 codec = 3; // AudioCodec table
+  map<string, string> properties = 4;
+}
+
+message SetTextCodecReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+  int32 codec = 3; // TextCodec table
+}
+
+message SetAppCodecReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+  int32 codec = 3; // AppCodec table
+}
+
+// Must precede StartReceiving. Supports "natLatch": "1" (one-shot symmetric
+// NAT re-targeting, ignored under ICE).
+message SetRtpPropertiesReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+  MediaType media = 3;
+  map<string, string> properties = 4;
+  MediaRole role = 5;
+}
+
+message GetSupportedCodecsReq {
+  MediaType media = 1; // only MEDIA_AUDIO implemented server-side today
+}
+
+message CodecInfo {
+  int32 codec = 1;
+  string name = 2;
+}
+
+message GetSupportedCodecsResp {
+  repeated CodecInfo codecs = 1;
+}
+
+message IsCodecSupportedReq {
+  MediaType media = 1;
+  int32 codec = 2;
+}
+// -> StringResp (codec name)
+
+// --- RTP media -------------------------------------------------------------------
+
+message StartReceivingReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+  MediaType media = 3;
+  map<string, int32> rtp_map = 4; // PT (string) -> codec id
+  MediaRole role = 5;
+  MediaProtocol proto = 6;
+  optional SdpOffer offer = 7;
+}
+
+message StartReceivingResp {
+  uint32 recv_port = 1;
+  string ip = 2;
+  // Negotiation verdict, per payload type: key present = PT accepted (value =
+  // fmtp body alone, "" when the codec has none); key absent = PT filtered.
+  map<string, string> fmtp_by_pt = 3;
+}
+
+message StopReceivingReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+  MediaType media = 3;
+  MediaRole role = 4;
+}
+
+// timeout_ms > 0 arms the inactivity watchdog, 0 disarms it.
+message StartRtpTimeoutReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+  MediaType media = 3;
+  uint32 timeout_ms = 4;
+  MediaRole role = 5;
+}
+
+// send_ip "0.0.0.0" authorizes NAT latching for this leg.
+message StartSendingReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+  MediaType media = 3;
+  string send_ip = 4;
+  uint32 send_port = 5;
+  map<string, int32> rtp_map = 6;
+  MediaRole role = 7;
+}
+
+message StopSendingReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+  MediaType media = 3;
+  MediaRole role = 4;
+}
+
+// Text-over-WebSocket leg (media = MEDIA_TEXT, proto = PROTO_WS only).
+// Replaces StartReceiving/StartSending/SetTextCodec for that leg.
+message ConfigureParticipantMediaConnectionReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+  MediaType media = 3;
+  MediaProtocol proto = 4;
+  string token = 5;
+}
+// -> StringResp (ws:// or wss:// URL — scheme chosen by the server)
+
+// --- Security ------------------------------------------------------------------
+
+message SetLocalCryptoSdesReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+  MediaType media = 3;
+  string suite = 4;
+  string key = 5;
+  MediaRole role = 6;
+}
+
+message SetRemoteCryptoSdesReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+  MediaType media = 3;
+  string suite = 4;
+  string key = 5;
+  MediaRole role = 6;
+  uint32 key_rank = 7;
+}
+
+// Global DTLS certificate service — no conference scope.
+message GetLocalCryptoDtlsFingerprintReq {
+  string hash = 1; // "sha-1" | "sha-256"
+}
+// -> StringResp (fingerprint)
+
+message SetRemoteCryptoDtlsReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+  MediaType media = 3;
+  MediaRole role = 4;
+  string setup = 5; // peer's SDP setup: active | passive | actpass
+  string hash = 6;
+  string fingerprint = 7;
+}
+
+message SetLocalStunCredentialsReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+  MediaType media = 3;
+  string username = 4;
+  string pwd = 5;
+  MediaRole role = 6;
+}
+
+message SetRemoteStunCredentialsReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+  MediaType media = 3;
+  string username = 4;
+  string pwd = 5;
+  MediaRole role = 6;
+}
+
+// --- Players ---------------------------------------------------------------------
+
+message CreatePlayerReq {
+  uint32 conf_id = 1;
+  uint32 private_id = 2;
+  string name = 3;
+}
+// -> CreatedResp (player_id)
+
+message DeletePlayerReq {
+  uint32 conf_id = 1;
+  uint32 player_id = 2;
+}
+
+message StartPlayingReq {
+  uint32 conf_id = 1;
+  uint32 player_id = 2;
+  string filename = 3;
+  bool loop = 4;
+}
+
+message StopPlayingReq {
+  uint32 conf_id = 1;
+  uint32 player_id = 2;
+}
+
+// --- Recording ----------------------------------------------------------------------
+
+message StartRecordingParticipantReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+  string filename = 3;
+}
+
+message StopRecordingParticipantReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+}
+
+message StartRecordingBroadcasterReq {
+  uint32 conf_id = 1;
+  string filename = 2;
+  uint32 mosaic_id = 3;
+  uint32 sidebar_id = 4;
+}
+
+message StopRecordingBroadcasterReq {
+  uint32 conf_id = 1;
+}
+
+// --- Broadcast / RTMP -----------------------------------------------------------------
+
+message StartBroadcasterReq {
+  uint32 conf_id = 1;
+  uint32 mosaic_id = 2;
+  uint32 sidebar_id = 3;
+}
+// -> CreatedResp (port)
+
+message StopBroadcasterReq {
+  uint32 conf_id = 1;
+}
+
+message StartPublishingReq {
+  uint32 conf_id = 1;
+  string server = 2;
+  uint32 port = 3;
+  string app = 4;
+  string stream = 5;
+}
+// -> CreatedResp (publishing id)
+
+message StopPublishingReq {
+  uint32 conf_id = 1;
+  uint32 publishing_id = 2;
+}
+
+// --- BFCP document sharing ----------------------------------------------------------------
+
+message AcceptDocSharingRequestReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+}
+
+message RefuseDocSharingRequestReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+}
+
+message StopDocSharingReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+}
+
+message SetDocSharingMosaicReq {
+  uint32 conf_id = 1;
+  uint32 mosaic_id = 2;
+}
+
+// --- Image upload (replaces POST /upload/mcu/app/<tag>) --------------------------------------
+
+message UploadImageReq {
+  string conference_tag = 1;
+  string filename = 2;
+  bytes data = 3;
+}
+
+// --- Events (published on kelixip.events, routing key <instance>.mcu.<conf tag>) --------------
+
+message McuParticipantRequestFpu {
+  uint32 conf_id = 1;
+  string conf_tag = 2;
+  uint32 part_id = 3;
+}
+
+message McuParticipantRequestDocSharing {
+  uint32 conf_id = 1;
+  string conf_tag = 2;
+  uint32 part_id = 3;
+  string status = 4; // ACTIVE | WAITING_ACCEPT | NONE | FAILED
+}
+
+message McuParticipantMediaTimeout {
+  uint32 conf_id = 1;
+  string conf_tag = 2;
+  uint32 part_id = 3;
+  MediaType media = 4;
+  MediaRole role = 5;
+}
+
+message McuParticipantMediaConnected {
+  uint32 conf_id = 1;
+  string conf_tag = 2;
+  uint32 part_id = 3;
+  MediaType media = 4;
+  MediaRole role = 5;
+}
+
+// Wire event codes stay append-only server-side (1 FPU, 2 doc sharing,
+// 3 media timeout, 4 media connected); unknown oneof branches are ignored.
+message McuEvent {
+  oneof body {
+    McuParticipantRequestFpu request_fpu = 1;
+    McuParticipantRequestDocSharing request_doc_sharing = 2;
+    McuParticipantMediaTimeout media_timeout = 3;
+    McuParticipantMediaConnected media_connected = 4;
+  }
+}

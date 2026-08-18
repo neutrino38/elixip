@@ -12,6 +12,9 @@ defmodule Kelix.DirectCallWithAuthScriptTest do
   """
   use ExUnit.Case, async: false
 
+  alias SIP.Test.Peers.Manual
+  alias SIP.Test.Transport.Mockup
+
   alias Kelix.Mod.Registrar
 
   @domain "example.com"
@@ -93,7 +96,8 @@ defmodule Kelix.DirectCallWithAuthScriptTest do
 
   defp mockup_pid(peer \\ "auth1") do
     tp = SIP.Transport.Selector.select_transport(contact("10.0.0.9", peer)).tp_pid
-    :ok = GenServer.call(tp, :settestapp)
+    :ok = Mockup.set_peer(tp, Manual)
+    :ok = Mockup.attach_probe(tp)
     tp
   end
 
@@ -186,7 +190,7 @@ defmodule Kelix.DirectCallWithAuthScriptTest do
     refute Map.has_key?(challenge, "stale")
 
     # Nothing is relayed on the strength of an unauthenticated INVITE.
-    refute_receive {:invite_sent, _fwd}, 500
+    refute_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 500
   end
 
   test "the INVITE that comes back with a valid digest is relayed to the registered contact",
@@ -204,7 +208,7 @@ defmodule Kelix.DirectCallWithAuthScriptTest do
     authenticated = invite(credentials(challenge), 2)
     send(pid, {:INVITE, authenticated, self(), dialog})
 
-    assert_receive {:invite_sent, fwd}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, fwd}}, 5_000
     assert fwd.ruri.userpart == @callee
     assert fwd.ruri.domain == "10.0.0.9"
   end
@@ -225,16 +229,16 @@ defmodule Kelix.DirectCallWithAuthScriptTest do
 
     challenge = challenge_received!()
     send(pid, {:INVITE, invite(credentials(challenge), 2), self(), dialog})
-    assert_receive {:invite_sent, _fwd}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
 
     # Bob answers, Alice's ACK is relayed: the call is up on both legs.
-    GenServer.cast(tp, {:simulate, 200, 0})
+    Manual.simulate(tp, 200, 0)
     assert_receive {:replied, 200, _reason, _fields, _req}, 5_000
     send(pid, {:ACK, %{invite(nil, 2) | method: :ACK, cseq: [2, :ACK]}, nil, dialog})
-    assert_receive :ACK, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :ACK, _}}, 5_000
 
     # Bob hangs up.
-    SIP.Test.Transport.UDPMockup.hangup(tp)
+    Manual.hangup(tp)
 
     # His BYE crosses to Alice, in her own dialog…
     assert_receive {:sent_on_inbound, bye}, 5_000
@@ -248,7 +252,7 @@ defmodule Kelix.DirectCallWithAuthScriptTest do
     # Bob, who is done, is sent nothing at all — a `:BYE` here is the teardown's,
     # on a dialog Bob closed himself, and what he answers it is 481. Longer than
     # the timeout above on purpose: that is when it used to go out.
-    refute_receive :BYE, 8_000
+    refute_receive {:sip_mockup, {:request_sent, :BYE, _}}, 8_000
   end
 
   test "a wrong password is refused 403, and the caller may still try again",
@@ -266,13 +270,13 @@ defmodule Kelix.DirectCallWithAuthScriptTest do
     send(pid, {:INVITE, invite(wrong, 2), self(), dialog})
 
     assert_receive {:replied, 403, "Forbidden", _fields, _req}, 5_000
-    refute_receive {:invite_sent, _fwd}, 500
+    refute_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 500
 
     # The instance is still there — a client that fixes its credentials gets its
     # call, instead of the silence a dead instance would answer with.
     good = credentials(challenge, nc: "00000002")
     send(pid, {:INVITE, invite(good, 3), self(), dialog})
-    assert_receive {:invite_sent, fwd}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, fwd}}, 5_000
     assert fwd.ruri.domain == "10.0.0.9"
   end
 
@@ -289,7 +293,7 @@ defmodule Kelix.DirectCallWithAuthScriptTest do
     send(pid, {:INVITE, invite(credentials(challenge, username: "mallory"), 2), self(), dialog})
 
     assert_receive {:replied, 403, "Forbidden", _fields, _req}, 5_000
-    refute_receive {:invite_sent, _fwd}, 500
+    refute_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 500
   end
 
   test "the script declares both modules it needs", %{scenario: module} do

@@ -1,0 +1,185 @@
+// MOTELI v2 — shared types for the kelixip <-> media-server control bus.
+// Design: docs/design/moteli-reboot.md. Target release: elixip 2.0.
+//
+// MAINTENANCE RULE: these .proto files mirror the media server's XML-RPC
+// contract (mediaserver MCU-API.md and xmlrpc_jsr309_api.md). ANY change to
+// the XML-RPC API MUST update these schemas in the same change set, so the
+// 2.0 bus protocol never lags the HTTP one.
+//
+// Conventions:
+// - proto3; `optional` marks fields whose absence is meaningful.
+// - Correlation and reply routing live in AMQP properties (correlation_id,
+//   reply_to, message_id, type), never in these bodies.
+// - Codec ids are int32 carrying the media server's wire values (tables
+//   below), NOT proto enums: the codec vocabulary is append-only server-side
+//   and must not require a schema change. Structural enums (media type,
+//   protocol, role, mosaic, size, VAD) are proto enums whose numeric values
+//   ARE the wire values.
+// - Object ids (conference, session, endpoint, ...) are uint32, allocated by
+//   the server. Failure is reported through Error, never through negative or
+//   zero ids (the XML-RPC "negative id" rule does not exist on the bus).
+
+syntax = "proto3";
+
+package moteli.v2;
+
+option java_outer_classname = "MoteliCommon";
+
+// ---------------------------------------------------------------------------
+// Structural enums (values = media server wire values)
+// ---------------------------------------------------------------------------
+
+// MediaFrame::Type
+enum MediaType {
+  MEDIA_AUDIO = 0;
+  MEDIA_VIDEO = 1;
+  MEDIA_TEXT = 2;
+  MEDIA_APPLICATION = 3;
+}
+
+// MediaFrame::MediaProtocol
+enum MediaProtocol {
+  PROTO_RTP = 0;
+  PROTO_RTMP = 1;
+  PROTO_WS = 2;
+  PROTO_TCP = 3;
+  PROTO_UDP = 4;
+}
+
+// MediaFrame::MediaRole
+enum MediaRole {
+  ROLE_VIDEO_MAIN = 0;
+  ROLE_VIDEO_SLIDES = 1;
+}
+
+// Participant::Type (MCU plane)
+enum ParticipantType {
+  PART_RTP = 0;
+  PART_RTMP = 1;
+}
+
+// VideoMixer::VADMode
+enum VadMode {
+  VAD_NONE = 0;
+  VAD_BASIC = 1;
+  VAD_FULL = 2;
+}
+
+// Mosaic::Type
+enum MosaicType {
+  MOSAIC_1X1 = 0;
+  MOSAIC_2X2 = 1;
+  MOSAIC_3X3 = 2;
+  MOSAIC_3P4 = 3;
+  MOSAIC_1P7 = 4;
+  MOSAIC_1P5 = 5;
+  MOSAIC_1P1 = 6;
+  MOSAIC_PIP1 = 7;
+  MOSAIC_PIP3 = 8;
+  MOSAIC_4X4 = 9;
+  MOSAIC_1P4 = 10;
+  MOSAIC_2P8 = 11;
+}
+
+// Resolution index (the `size` / `mode` parameter — an index into the
+// server's predefined resolution table, not pixels).
+enum VideoSize {
+  SIZE_QCIF = 0;     // 176x144
+  SIZE_CIF = 1;      // 352x288
+  SIZE_VGA = 2;      // 640x480
+  SIZE_PAL = 3;      // 768x576
+  SIZE_HVGA = 4;     // 480x320
+  SIZE_QVGA = 5;     // 320x240
+  SIZE_HD720P = 6;   // 1280x720
+  SIZE_WQVGA = 7;    // 400x240
+  SIZE_W448P = 8;    // 768x448
+  SIZE_SD448P = 9;   // 576x448
+  SIZE_W288P = 10;   // 512x288
+  SIZE_W576 = 11;    // 1024x576
+  SIZE_FOURCIF = 12; // 704x576
+  SIZE_FOURSIF = 13; // 704x576
+  SIZE_XGA = 14;     // 1024x768
+  SIZE_WVGA = 15;    // 800x480
+  SIZE_DCIF = 16;    // 528x384
+  SIZE_W144P = 17;   // 256x144
+}
+
+// Control planes (Presence.planes)
+enum Plane {
+  PLANE_UNSPECIFIED = 0;
+  PLANE_MCU = 1;
+  PLANE_JSR309 = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Codec id tables (int32 values used in codec fields and rtp_map values)
+// ---------------------------------------------------------------------------
+// AudioCodec::Type: PCMU=0 GSM=3 PCMA=8 G722=9 AAC=97 OPUS=98 SLIN=99
+//   TELEPHONE_EVENT=100 SPEEX16=117 AMR=118 G7221=119 AMRWB=120 NELLY8=130
+//   NELLY11=131
+// VideoCodec::Type: H263_1996=34 H264=99 SORENSON=100 H263_1998=103 MPEG4=104
+//   VP6=106 VP8=107 ULPFEC=108 RED=109 AV1=110
+// TextCodec::Type:  T140RED=105 T140=106
+// AppCodec::Type:   BFCP=150
+
+// ---------------------------------------------------------------------------
+// Shared messages
+// ---------------------------------------------------------------------------
+
+message Empty {}
+
+message Error {
+  enum ErrCode {
+    ERR_UNSPECIFIED = 0;
+    ERR_INVALID_MESSAGE = 400;
+    ERR_OBJ_NOT_FOUND = 404;
+    ERR_NOT_ENOUGH_RESOURCE = 500;
+    ERR_PROCESSING = 501;
+    ERR_INVALID_PARAMETER = 502;
+    ERR_OVER_CAPACITY = 503;
+    ERR_RESOURCE_IN_USE = 504;
+    ERR_BAD_OBJECT_STATE = 505;
+    ERR_NOT_SUPPORTED = 506;
+  }
+  ErrCode code = 1;
+  string message = 2;
+}
+
+// Generic single-id creation result (the oneof field name in ControlResponse
+// says which kind of id it is).
+message CreatedResp {
+  uint32 id = 1;
+}
+
+// Generic single-string result (fingerprint, candidate URL, codec name, ...).
+message StringResp {
+  string value = 1;
+}
+
+// SDP offer attributes that an rtp_map cannot carry. Keys are the OFFER's
+// payload types (as decimal strings), values are the fmtp parameters alone —
+// exactly what follows "a=fmtp:<pt> ", without prefix or PT number.
+message SdpOffer {
+  map<string, string> fmtp = 1;
+}
+
+// Per-media statistics. The MCU plane fills fields 1-8 only; the JSR-309
+// plane (EndpointGetStatistics) fills all 12.
+message MediaStats {
+  string media = 1; // "audio" | "video" | "text"
+  bool is_receiving = 2;
+  bool is_sending = 3;
+  uint64 lost_recv_packets = 4;
+  uint64 num_recv_packets = 5;
+  uint64 num_send_packets = 6;
+  uint64 total_recv_bytes = 7;
+  uint64 total_send_bytes = 8;
+  uint64 bw_out = 9;
+  uint64 bw_in = 10;
+  int32 sending_codec = 11;
+  int32 receiving_codec = 12;
+}
+
+message MediaStatsResp {
+  repeated MediaStats stats = 1;
+}

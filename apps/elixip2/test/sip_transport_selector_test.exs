@@ -121,7 +121,7 @@ defmodule SIP.Test.TransportSelector do
         )
 
       refute_flow_used(selected, pid)
-      assert selected.tp_module == SIP.Test.Transport.UDPMockup
+      assert selected.tp_module == SIP.Test.Transport.Mockup
     end
   end
 
