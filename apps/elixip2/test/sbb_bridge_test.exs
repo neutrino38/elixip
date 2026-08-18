@@ -76,6 +76,62 @@ defmodule SIP.Test.SbbBridge do
     end
   end
 
+  # The same relay, opting to keep the caller when the callee goes away. What it
+  # does with the leg it keeps is a prompt in real life; here it answers the
+  # caller's own BYE, which is the proof that the leg is still there.
+  defmodule Surviving do
+    use SIP.Scenario
+    use SBB.Call
+
+    uas(:invite)
+
+    config(peer: "sip:callee@example.com:5060;unittest=sbb_bridge_keep")
+
+    state initial_state do
+      on_events do
+        {:INVITE, req, _trans, _dlg} ->
+          b2bua_reply(req, 100, "Trying")
+          goto(place_call, "INVITE received")
+      after
+        5_000 -> scenario_failure("no INVITE")
+      end
+    end
+
+    state place_call do
+      call(args: %{peer: ctx_get(:peer)})
+
+      on_events do
+        {:call, :connected, _} -> goto(bridging, "call established")
+        {:call, outcome, _} -> scenario_failure("not established: #{outcome}")
+      end
+    end
+
+    state bridging do
+      bridge(args: %{on_callee_hangup: :keep_caller})
+
+      on_events do
+        {:bridge, :callee_left, %{reason: reason}} ->
+          send(appdata_get(:test_pid), {:callee_left, reason})
+          goto(alone_with_caller, "callee left, caller kept")
+
+        {:bridge, outcome, _} ->
+          scenario_failure("unexpected: #{outcome}")
+      end
+    end
+
+    # The caller's dialog is still up: events keep arriving on it, and a reply
+    # still goes out on it.
+    state alone_with_caller do
+      on_events do
+        {:BYE, req, _trans, _dlg} ->
+          b2bua_reply(req, 200, "OK")
+          scenario_success("caller hung up after the callee left")
+      after
+        5_000 -> scenario_failure("nothing more came from the caller")
+      end
+    end
+  end
+
   setup_all do
     :ok = SIP.Transac.start()
     :ok = SIP.Transport.Selector.start()
@@ -91,9 +147,9 @@ defmodule SIP.Test.SbbBridge do
     %{stub: stub}
   end
 
-  defp peer_uri do
+  defp peer_uri(tag \\ "sbb_bridge") do
     %SIP.Uri{scheme: "sip:", userpart: "callee", domain: "example.com", port: 5060}
-    |> SIP.Uri.set_uri_param("unittest", "sbb_bridge")
+    |> SIP.Uri.set_uri_param("unittest", tag)
   end
 
   defp inbound_invite do
@@ -106,15 +162,15 @@ defmodule SIP.Test.SbbBridge do
     %{invite | method: method, body: [], contentlength: 0, cseq: [2, method]}
   end
 
-  defp start_instance(stub, invite) do
+  defp start_instance(stub, invite, module \\ Interruptible, tag \\ "sbb_bridge") do
     test_pid = self()
 
     spawn_monitor(fn ->
       outcome =
-        SIP.Scenario.Runner.run_instance(Interruptible,
+        SIP.Scenario.Runner.run_instance(module,
           dialog_pid: stub,
           inbound_request: invite,
-          config_overrides: [peer: peer_uri(), test_pid: test_pid]
+          config_overrides: [peer: peer_uri(tag), test_pid: test_pid]
         )
 
       send(test_pid, {:instance_done, outcome})
@@ -123,13 +179,13 @@ defmodule SIP.Test.SbbBridge do
 
   # Establish the call: INVITE forwarded, answered, ACKed. Returns the INVITE so
   # in-dialog requests can be built from it.
-  defp establish(stub) do
+  defp establish(stub, module \\ Interruptible, tag \\ "sbb_bridge") do
     invite = inbound_invite()
-    tp = SIP.Transport.Selector.select_transport(peer_uri()).tp_pid
+    tp = SIP.Transport.Selector.select_transport(peer_uri(tag)).tp_pid
     :ok = Mockup.set_peer(tp, Manual)
     :ok = Mockup.attach_probe(tp)
 
-    {instance, ref} = start_instance(stub, invite)
+    {instance, ref} = start_instance(stub, invite, module, tag)
     send(instance, {:INVITE, invite, self(), stub})
 
     assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
@@ -164,6 +220,31 @@ defmodule SIP.Test.SbbBridge do
     assert_receive {:instance_done, :ok}, 10_000
     assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
     assert_receive {:ended, "ended without an interruption: callee"}, 1_000
+  end
+
+  # ── Keeping the caller when the callee goes away ────────────────────────────
+
+  # A relay hangs up both sides; a service does not have to. With
+  # `on_callee_hangup: :keep_caller` the callee's BYE is answered and NOT relayed
+  # — relaying it is what would end the caller's dialog — and the script gets the
+  # call back with one leg still up.
+  test "the callee's BYE does not reach the caller when the caller is kept",
+       %{stub: stub} do
+    %{instance: instance, ref: ref, invite: invite, tp: tp} =
+      establish(stub, Surviving, "sbb_bridge_keep")
+
+    Manual.hangup(tp)
+    assert_receive {:callee_left, :bye}, 5_000
+
+    # The one thing the option is about: the caller was not told.
+    refute_receive {:sent_on_inbound, %{method: :BYE}}, 500
+
+    # And the leg it kept still works, in both directions.
+    send(instance, {:BYE, in_dialog(:BYE, invite), self(), stub})
+    assert_receive {:replied, 200, _reason, _req, _fields}, 5_000
+
+    assert_receive {:instance_done, :ok}, 10_000
+    assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
   end
 
   test "a break hands the call back and resume picks it up", %{stub: stub} do

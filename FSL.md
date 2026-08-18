@@ -736,7 +736,10 @@ success, whether a cancellation is an abort, and what to bill.
 
 `bridge/1` answers `{:bridge, :caller_hung_up, _}` or `{:bridge, :callee_hung_up, _}` — which side ended
 the call is the outcome's **name**, not a field a host has to look up — plus `:max_duration`, `:media_lost`
-and `:interrupted`. It is the one block with no deadline — a call lasts as long as it lasts — and the only one
+and `:interrupted` — plus `:callee_left`, which only a host that asked for it ever sees:
+`bridge(args: %{on_callee_hangup: :keep_caller})` answers the callee and hands the call back with the
+**caller's leg still up**, instead of relaying the BYE that would end it. That is how a relay becomes a
+service: play a prompt, offer a redirect, place another call and bridge again. It is the one block with no deadline — a call lasts as long as it lasts — and the only one
 meant to be **re-entered**: `{:bridge_break, message}` hands the call back untouched, and
 `bridge(resume: true)` picks it up. Between the two, in-dialog traffic keeps arriving and nothing answers
 it: an unanswered re-INVITE runs at timer B, so that interval is the scale of a prompt, not of a decision.

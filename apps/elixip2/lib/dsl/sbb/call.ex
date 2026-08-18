@@ -305,6 +305,14 @@ defmodule SBB.Call do
 
     Through `args`, all optional:
 
+      * `:on_callee_hangup` — `:hang_up` (default) ends the call when the callee
+        goes away, which is what a relay does. `:keep_caller` answers the callee
+        and hands the call back with the CALLER'S LEG STILL UP, so the script can
+        do something with it: play a prompt, offer a redirect, place another call
+        and bridge again. The BYE is then never relayed — relaying it is what
+        tears the caller's dialog down — and the outcome is `:callee_left`
+        instead of `:callee_hung_up`, so a script cannot opt in and go on
+        treating it as the end of the call by accident;
       * `:media` — truthy when the call goes through a media server. It changes
         one thing, and only one: a re-INVITE that merely MOVES a peer (a new
         `c=`, a new port, an ICE restart) or refreshes a session timer is
@@ -333,6 +341,11 @@ defmodule SBB.Call do
           "`:bye_unanswered` when the far end never answered it, or whatever ended " <>
           "the dialog when it went away on its own",
       callee_hung_up: "the call is over and the callee ended it — %{reason}, as above",
+      callee_left:
+        "the callee went away and `on_callee_hangup: :keep_caller` kept the " <>
+          "caller — %{reason}. The call is NOT over: the caller's leg is up, " <>
+          "answered, and waiting for whatever the script does next. Only ever " <>
+          "returned to a script that asked for it",
       interrupted: "a {:bridge_break, message} arrived; the call is untouched — %{message}",
       max_duration: "the call's own bound expired — %{}",
       media_lost:
@@ -357,17 +370,31 @@ defmodule SBB.Call do
           sbb_data_set(:ended_by, :caller)
           goto(wait_far_bye_ok, "caller hung up")
 
+        # The callee hangs up. Its BYE is answered either way — a BYE nobody
+        # answers is retransmitted — but relaying it is what ends the caller's
+        # dialog, so that is the one thing the option withholds.
         {:outbound, {:BYE, req, _trans, _dlg}} ->
-          b2bua_forward(req)
-          b2bua_reply(req, 200, "OK")
-          sbb_data_set(:ended_by, :callee)
-          goto(wait_far_bye_ok, "callee hung up")
+          if sbb_data_get(:on_callee_hangup) == :keep_caller do
+            b2bua_reply(req, 200, "OK")
+            sbb_return({:bridge, :callee_left, %{reason: :bye}})
+          else
+            b2bua_forward(req)
+            b2bua_reply(req, 200, "OK")
+            sbb_data_set(:ended_by, :callee)
+            goto(wait_far_bye_ok, "callee hung up")
+          end
 
         {:dialog_terminated, _dlg, reason} ->
           sbb_return({:bridge, :caller_hung_up, %{reason: reason}})
 
+        # The callee's leg went away without a BYE. Nothing to answer, and the
+        # same question about the caller's.
         {:outbound, {:dialog_terminated, _dlg, reason}} ->
-          sbb_return({:bridge, :callee_hung_up, %{reason: reason}})
+          if sbb_data_get(:on_callee_hangup) == :keep_caller do
+            sbb_return({:bridge, :callee_left, %{reason: reason}})
+          else
+            sbb_return({:bridge, :callee_hung_up, %{reason: reason}})
+          end
 
         # The host takes the call back for a moment — a prompt, a lookup, an
         # operator. Nothing is torn down: `bridge(resume: true)` picks it up.

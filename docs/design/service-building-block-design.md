@@ -369,7 +369,7 @@ One block per side of that seam:
 | Block | Absorbs | Returns |
 |---|---|---|
 | `call(opts)` | `place_call`, `proceeding`, the provisionals, the serial hunt, `cancelling`, `wait_ack` | `:connected` `%{uri, code}` · `:rejected` `%{code, reason}` · `:cancelled` `%{}` · `:answered_after_cancel` `%{uri}` · `:timeout` `%{}` |
-| `bridge(opts)` | `connected`, `wait_far_bye_ok` | `:caller_hung_up` `%{reason}` · `:callee_hung_up` `%{reason}` · `:interrupted` `%{message}` · `:max_duration` `%{}` · `:media_lost` `%{reason}` |
+| `bridge(opts)` | `connected`, `wait_far_bye_ok` | `:caller_hung_up` `%{reason}` · `:callee_hung_up` `%{reason}` · `:callee_left` `%{reason}` · `:interrupted` `%{message}` · `:max_duration` `%{}` · `:media_lost` `%{reason}` |
 
 Both under the return contract of the spec (`{namespace, outcome, data}`), so the
 table lists outcomes and the keys their map carries: `call()` speaks `:call`,
