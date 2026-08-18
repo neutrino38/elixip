@@ -1,13 +1,13 @@
 # Fixture: a scenario that pulls in a sub-scenario by bare file name. The file lives
 # next to this one, and nowhere near the directory the suite runs from — so this only
-# loads if `sub_fsm` resolves the path against the declaring file (include semantics).
-defmodule SubFsmFixture.SiblingParent do
+# loads if `spawn_fsm` resolves the path against the declaring file (include semantics).
+defmodule SpawnFsmFixture.SiblingParent do
   use SIP.Scenario
 
   config(username: "parent", domain: "example.com")
 
   state initial_state do
-    sub_fsm("sibling_child.exs", as: :child)
+    spawn_fsm("sibling_child.exs", as: :child)
     goto(waiting)
   end
 

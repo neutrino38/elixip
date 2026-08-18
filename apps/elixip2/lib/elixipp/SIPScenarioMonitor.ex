@@ -4,7 +4,7 @@ defmodule SIP.Scenario.Monitor do
   by the `elixipp --monitor` live view.
 
   One entry per call, keyed by the scenario slot id (an integer for a CLI slot,
-  `{parent_slot, name}` for a `sub_fsm` child, the scenario process pid
+  `{parent_slot, name}` for a `spawn_fsm` child, the scenario process pid
   otherwise). Each entry holds the scenario name, the last command sent (e.g.
   `send_INVITE`), the current FSM state and the event that triggered the last
   transition. A sub-FSM gets its own row, displayed right below its parent.

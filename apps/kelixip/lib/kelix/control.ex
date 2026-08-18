@@ -63,7 +63,7 @@ defmodule Kelix.Control do
       Reading the FSM state is the whole point of an FSL-driven server; without it
       the formalism is invisible from the outside.
 
-  Rows the pool does not know about (a `sub_fsm` child, keyed `{id, name}`) are not
+  Rows the pool does not know about (a `spawn_fsm` child, keyed `{id, name}`) are not
   surfaced: the server spawns none today (`:uas_register` is not supported as a
   sub-FSM). A missing monitor row degrades to empty FSM columns, never an error.
   """

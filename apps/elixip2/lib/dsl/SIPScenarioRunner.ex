@@ -202,8 +202,8 @@ defmodule SIP.Scenario.Runner do
     end
   end
 
-  # ── Sub-FSM (sub_fsm) support ─────────────────────────────────────────────
-  # These functions back the `sub_fsm` / `notify` / `notify_parent` macros of
+  # ── Sub-FSM (spawn_fsm) support ─────────────────────────────────────────────
+  # These functions back the `spawn_fsm` / `notify` / `notify_parent` macros of
   # SIP.Scenario. They run in the parent (resp. child) FSM process, the one that
   # owns the SIP/media mailbox, so the spawn_monitor link and the message sends
   # all originate from the right process.
@@ -245,8 +245,8 @@ defmodule SIP.Scenario.Runner do
     |> SIP.Scenario.Loader.load_file!()
   end
 
-  # `sub_fsm "child.exs"` names a file next to the scenario that declares it (the
-  # `include` rule, see the sub_fsm macro). The path as given is still honoured when
+  # `spawn_fsm "child.exs"` names a file next to the scenario that declares it (the
+  # `include` rule, see the spawn_fsm macro). The path as given is still honoured when
   # it resolves — a scenario referring to a file elsewhere keeps working — and which
   # one was used is logged, so a run never silently loads a file the reader did not
   # expect.
@@ -259,13 +259,13 @@ defmodule SIP.Scenario.Runner do
 
       File.regular?(sibling) ->
         if Path.expand(sibling) != Path.expand(target) do
-          Logger.info("sub_fsm #{inspect(target)} resolved next to its parent: #{sibling}")
+          Logger.info("spawn_fsm #{inspect(target)} resolved next to its parent: #{sibling}")
         end
 
         sibling
 
       File.regular?(target) ->
-        Logger.info("sub_fsm #{inspect(target)} not found next to its parent, using #{target}")
+        Logger.info("spawn_fsm #{inspect(target)} not found next to its parent, using #{target}")
         target
 
       true ->
@@ -292,7 +292,7 @@ defmodule SIP.Scenario.Runner do
 
       other ->
         Logger.warning(
-          "sub_fsm: call processing module #{inspect(other)} already configured; " <>
+          "spawn_fsm: call processing module #{inspect(other)} already configured; " <>
             "the :uas_invite child will not receive inbound INVITEs through the dispatcher"
         )
     end
@@ -301,7 +301,7 @@ defmodule SIP.Scenario.Runner do
   end
 
   defp setup_uas_child(type, _pid) when type in [:uas_register] do
-    Logger.warning("sub_fsm: scenario type #{inspect(type)} is not supported as a sub-FSM yet")
+    Logger.warning("spawn_fsm: scenario type #{inspect(type)} is not supported as a sub-FSM yet")
   end
 
   defp setup_uas_child(_type, _pid), do: :ok
@@ -320,7 +320,7 @@ defmodule SIP.Scenario.Runner do
   def spawn_uas_instance(target, opts \\ []) do
     # No declaring scenario here: the target comes from the operator (elixipp's
     # command line), so it is taken as given — cwd-relative, like any path a user
-    # types. Only `sub_fsm` resolves relative to the file that declares it.
+    # types. Only `spawn_fsm` resolves relative to the file that declares it.
     module = resolve_target(target, nil)
     spawn_monitor(fn -> run_instance(module, opts) end)
   end

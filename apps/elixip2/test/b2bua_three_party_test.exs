@@ -48,7 +48,7 @@ defmodule SIP.Test.B2bua.ThreeParty do
   end
 
   # Spawn one B2BUA instance and arm the dispatcher so the next inbound INVITE is
-  # handed to it — the same route a `sub_fsm` child takes.
+  # handed to it — the same route a `spawn_fsm` child takes.
   defp arm_b2bua(module, peer \\ @callee_uri) do
     test_pid = self()
 

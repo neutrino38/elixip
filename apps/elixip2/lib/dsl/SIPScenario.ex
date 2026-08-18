@@ -78,6 +78,8 @@ defmodule SIP.Scenario do
           state: 2,
           on_events: 1,
           on_shutdown: 1,
+          spawn_fsm: 1,
+          spawn_fsm: 2,
           sub_fsm: 1,
           sub_fsm: 2,
           notify: 2,
@@ -482,6 +484,10 @@ defmodule SIP.Scenario do
   PID and a local name so the two can exchange messages with `notify/2` /
   `notify_parent/1`.
 
+  Named after `fx.spawn` of the TypeScript FSL, which spawns a child machine on
+  the same contract (`finite-state-language`, spec §8.1) — the two dialects keep
+  one name per concept.
+
   `target` is either a compiled scenario module or a path to a `.exs` scenario
   file. Options:
 
@@ -493,20 +499,33 @@ defmodule SIP.Scenario do
   across states; the macro rebinds `sip_ctx` like `ctx_set`.
 
       state initial_state do
-        sub_fsm UAS.AutoAnswer, as: :callee, args: %{play: "ring.wav"}
+        spawn_fsm UAS.AutoAnswer, as: :callee, args: %{play: "ring.wav"}
         goto calling
       end
   """
+  defmacro spawn_fsm(target, opts \\ []) do
+    spawn_fsm_ast(target, opts, __CALLER__.file)
+  end
+
+  @doc """
+  Deprecated spelling of `spawn_fsm/2`, kept so scenarios written before 1.5.0
+  keep loading. Same semantics, including the path resolution.
+  """
+  @deprecated "Use spawn_fsm/2 instead"
   defmacro sub_fsm(target, opts \\ []) do
-    # A relative sub-scenario path is resolved against the directory of the file that
-    # declares it — `include` semantics, like PHP's, not "relative to wherever the
-    # tester happened to run from". `__CALLER__.file` is that file, known here at
-    # expansion time; expanding it now pins the directory the same way `__DIR__` does.
-    #
-    # Resolving against the cwd is what broke uac_register_and_uas_invite.exs, whose
-    # `sub_fsm "scenarios/uas_invite.exs"` died with a bare "exception!" for anyone
-    # not standing in apps/elixip2.
-    base_dir = Path.expand(Path.dirname(__CALLER__.file))
+    spawn_fsm_ast(target, opts, __CALLER__.file)
+  end
+
+  # A relative sub-scenario path is resolved against the directory of the file that
+  # declares it — `include` semantics, like PHP's, not "relative to wherever the
+  # tester happened to run from". `caller_file` is that file, known here at
+  # expansion time; expanding it now pins the directory the same way `__DIR__` does.
+  #
+  # Resolving against the cwd is what broke uac_register_and_uas_invite.exs, whose
+  # `spawn_fsm "scenarios/uas_invite.exs"` died with a bare "exception!" for anyone
+  # not standing in apps/elixip2.
+  defp spawn_fsm_ast(target, opts, caller_file) do
+    base_dir = Path.expand(Path.dirname(caller_file))
 
     quote do
       var!(sip_ctx) =

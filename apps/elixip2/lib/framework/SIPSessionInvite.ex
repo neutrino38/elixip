@@ -391,7 +391,7 @@ defmodule SIP.Session.CallUAS do
   re-INVITE / UPDATE / REGISTER) and its server transaction pid in the context
   appdata (single slot `:last_uas_req` / `:last_uas_req_tid`), so the reply
   macros and `last_uas_req/0` can serve it. Also binds the dialog pid into the
-  context: a UAS scenario spawned before the dialog exists (a `sub_fsm` child
+  context: a UAS scenario spawned before the dialog exists (a `spawn_fsm` child
   waiting for a call) has no other way to learn it, and the reply macros target
   `sip_ctx.dialogpid`. No-op for any other event. Called by the on_events
   instrumentation for every matched event.

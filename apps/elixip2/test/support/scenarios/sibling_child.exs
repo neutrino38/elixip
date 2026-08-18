@@ -1,7 +1,7 @@
-# Fixture: the sub-scenario that sibling_parent.exs pulls in with `sub_fsm`. It sits
+# Fixture: the sub-scenario that sibling_parent.exs pulls in with `spawn_fsm`. It sits
 # next to its parent and NOT in the directory the test suite runs from, which is what
 # makes the resolution rule (relative to the declaring file, include-style) observable.
-defmodule SubFsmFixture.SiblingChild do
+defmodule SpawnFsmFixture.SiblingChild do
   use SIP.Scenario
 
   config(username: "child", domain: "example.com")

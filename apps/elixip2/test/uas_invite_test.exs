@@ -265,7 +265,7 @@ defmodule SIP.Test.UASInvite do
 
     assert SIP.Context.appdata_get(ctx, :last_uas_req) == req
     assert SIP.Context.appdata_get(ctx, :last_uas_req_tid) == self()
-    # A sub_fsm child is spawned before the dialog exists: the event is its only
+    # A spawn_fsm child is spawned before the dialog exists: the event is its only
     # way to learn the dialog pid the reply macros must target.
     assert ctx.dialogpid == dlg
   end

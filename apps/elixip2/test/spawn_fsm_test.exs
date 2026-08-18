@@ -1,4 +1,4 @@
-defmodule SIP.Test.SubFsm do
+defmodule SIP.Test.SpawnFsm do
   use ExUnit.Case
 
   # ── Scenario fixtures ───────────────────────────────────────────────────────
@@ -31,7 +31,7 @@ defmodule SIP.Test.SubFsm do
     config(username: "alice", domain: "example.com")
 
     state initial_state do
-      sub_fsm(Child, as: :callee)
+      spawn_fsm(Child, as: :callee)
       goto(waiting)
     end
 
@@ -103,7 +103,7 @@ defmodule SIP.Test.SubFsm do
   end
 
   # A UAS call scenario child: waits for the inbound INVITE routed to it by the
-  # call dispatcher installed by sub_fsm.
+  # call dispatcher installed by spawn_fsm.
   defmodule UasChild do
     use SIP.Scenario
 
@@ -125,14 +125,14 @@ defmodule SIP.Test.SubFsm do
     assert Parent.run(false) == :ok
   end
 
-  # `sub_fsm "child.exs"` names a file next to the scenario that declares it —
+  # `spawn_fsm "child.exs"` names a file next to the scenario that declares it —
   # include semantics, so a scenario is self-contained wherever it is run from.
   # Resolving against the current directory instead is what made
   # scenarios/uac_register_and_uas_invite.exs die with a bare "exception!" for anyone
   # who did not happen to be standing in apps/elixip2. The fixture pair lives in
   # test/support/scenarios/, which is NOT the suite's working directory: a
   # cwd-relative resolution cannot find the child.
-  test "a sub_fsm path is resolved next to the file that declares it" do
+  test "a spawn_fsm path is resolved next to the file that declares it" do
     parent = SIP.Scenario.Loader.load_file!("test/support/scenarios/sibling_parent.exs")
     assert SIP.Scenario.Runner.run_instance(parent) == :ok
   end
@@ -144,7 +144,7 @@ defmodule SIP.Test.SubFsm do
       config(username: "m", domain: "example.com")
 
       state initial_state do
-        sub_fsm("no_such_child.exs", as: :ghost)
+        spawn_fsm("no_such_child.exs", as: :ghost)
         goto(loop)
       end
     end
@@ -196,13 +196,13 @@ defmodule SIP.Test.SubFsm do
     assert_receive {:result, {:aborted, "custom wind-down"}}, 1_000
   end
 
-  test "sub_fsm requires an :as name" do
+  test "spawn_fsm requires an :as name" do
     assert_raise KeyError, fn ->
       SIP.Scenario.Runner.spawn_child(%SIP.Context{}, Child, [], self())
     end
   end
 
-  describe "sub_fsm of a :uas_invite scenario" do
+  describe "spawn_fsm of a :uas_invite scenario" do
     # The ConfigRegistry is a global Agent shared across test modules: save and
     # restore the call processing module so these tests neither depend on nor
     # disturb the others.

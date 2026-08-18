@@ -1323,7 +1323,7 @@ defmodule Elixipp.CLI do
   defp resolve_module(arg) do
     if String.ends_with?(arg, ".exs") do
       # The path is the tester's: taken as given, relative to the current directory.
-      # (A `sub_fsm` inside a scenario is the one exception — it names a file next to
+      # (A `spawn_fsm` inside a scenario is the one exception — it names a file next to
       # the scenario that declares it.)
       unless File.exists?(arg),
         do: abort("Scénario introuvable : #{Path.expand(arg)}", 2)
@@ -1494,7 +1494,7 @@ defmodule Elixipp.CLI do
       L'argument est soit un chemin vers un fichier .exs, soit le nom d'un
       scénario intégré (compilé dans l'exécutable) : UAC.Invite, UAC.Register.
       Les scénarios intégrés ne nécessitent aucun fichier sur la machine.
-      Dans un scénario, un sous-scénario (sub_fsm "autre.exs") est cherché à
+      Dans un scénario, un sous-scénario (spawn_fsm "autre.exs") est cherché à
       côté du fichier qui le déclare, pas dans le répertoire courant.
 
     TOUCHES (mode live)
