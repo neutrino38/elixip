@@ -64,20 +64,20 @@ defmodule B2BUA.CustomerService do
       # notify_progress: true — the hunt says which number it is on. Useful to
       # log, to meter, or to feed a supervision screen.
       {:outbound, {:serial_attempting, uri, _at}} ->
-        goto(loop, "calling #{uri}")
+        stay("calling #{uri}")
 
       {:outbound, {:serial_not_reachable, uri, code, _at}} ->
-        goto(loop, "#{uri} did not take it (#{inspect(code)})")
+        stay("#{uri} did not take it (#{inspect(code)})")
 
       {:outbound, {:serial_exhausted, _at}} ->
-        goto(loop, "no agent left to try")
+        stay("no agent left to try")
 
       # 18x from an agent: relayed, but Alice already heard our 180. Relaying a
       # 183 with SDP would pin the call to that agent, which the hunt has not
       # decided yet.
       {:outbound, {code, resp, _trans, _dlg}} when code in 101..199 ->
         b2bua_forward_reply(resp)
-        goto(loop, "provisional #{code}")
+        stay("provisional #{code}")
 
       {:outbound, {200, resp, _trans, _dlg}} ->
         b2bua_forward_reply(resp)
@@ -87,7 +87,7 @@ defmodule B2BUA.CustomerService do
         b2bua_forward_reply(resp)
 
         if b2bua_hunting?() do
-          goto(loop, "#{code}, next agent")
+          stay("#{code}, next agent")
         else
           # The list is exhausted: this final IS the answer of the call.
           scenario_success("no agent available (#{code})")
@@ -134,7 +134,7 @@ defmodule B2BUA.CustomerService do
         scenario_success("agent answered after the caller abandoned; hung up")
 
       {:outbound, {code, _resp, _trans, _dlg}} when code in 100..199 ->
-        goto(loop, "provisional #{code} after cancel")
+        stay("provisional #{code} after cancel")
 
       {:outbound, {code, _resp, _trans, _dlg}} when code >= 300 ->
         scenario_aborted("caller abandoned, agent answered #{code}")
@@ -181,27 +181,27 @@ defmodule B2BUA.CustomerService do
 
       {:ACK, req, _trans, _dlg} ->
         b2bua_forward(req)
-        goto(loop, "ACK relayed (caller -> agent)")
+        stay("ACK relayed (caller -> agent)")
 
       {:outbound, {:ACK, req, _trans, _dlg}} ->
         b2bua_forward(req)
-        goto(loop, "ACK relayed (agent -> caller)")
+        stay("ACK relayed (agent -> caller)")
 
       {:outbound, {m, req, _trans, _dlg}} when is_atom(m) ->
         b2bua_forward(req)
-        goto(loop, "relayed #{m} (agent -> caller)")
+        stay("relayed #{m} (agent -> caller)")
 
       {:outbound, {code, resp, _trans, _dlg}} when is_integer(code) ->
         b2bua_forward_reply(resp)
-        goto(loop, "relayed #{code} (agent -> caller)")
+        stay("relayed #{code} (agent -> caller)")
 
       {m, req, _trans, _dlg} when is_atom(m) ->
         b2bua_forward(req)
-        goto(loop, "relayed #{m} (caller -> agent)")
+        stay("relayed #{m} (caller -> agent)")
 
       {code, resp, _trans, _dlg} when is_integer(code) ->
         b2bua_forward_reply(resp)
-        goto(loop, "relayed #{code} (caller -> agent)")
+        stay("relayed #{code} (caller -> agent)")
     after
       14_400_000 -> scenario_failure("maximum call duration reached")
     end

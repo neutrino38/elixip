@@ -34,6 +34,7 @@ defmodule SIP.Context do
             mediaservermodule: nil,
             mediaserverpid: nil,
             currentstate: nil,
+            laststate: nil,
             appdata: %{}
 
   defmacro __using__(_opts) do
@@ -107,8 +108,8 @@ defmodule SIP.Context do
     Map.get(context, prop)
   end
 
-  # FSM bookkeeping fields driven by the scenario DSL (goto / scenario_failure).
-  def get(context, prop) when prop in [:currentstate, :errorreason] do
+  # FSM bookkeeping fields driven by FSL (goto / scenario_failure).
+  def get(context, prop) when prop in [:currentstate, :laststate, :errorreason] do
     Map.get(context, prop)
   end
 
@@ -211,9 +212,16 @@ defmodule SIP.Context do
     Map.put(ctx, :lasterr, value)
   end
 
-  # Current FSM state name, written by the `goto` macro of the scenario DSL.
+  # Current FSM state name, written by the `goto` macro of FSL.
   def set(ctx, :currentstate, value) when is_atom(value) do
     Map.put(ctx, :currentstate, value)
+  end
+
+  # State the FSM was in before entering `currentstate`, written by the runner and
+  # read back by `goto back`. Re-entering a state (`goto loop`, `stay`) leaves it
+  # untouched.
+  def set(ctx, :laststate, value) when is_atom(value) do
+    Map.put(ctx, :laststate, value)
   end
 
   # Human-readable failure reason, written by `scenario_failure/1`.

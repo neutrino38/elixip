@@ -55,7 +55,11 @@ defmodule Kelix.Registrar do
           )
 
         SIP.Session.Registrar.challenge_registration(sip_ctx, req, params)
-        goto(wait_auth_register, if(stale, do: "401 stale", else: "401 challenge"))
+        # `back`, not a named state: this detour serves both the first REGISTER and
+        # a refresh, and each caller resumes its own wait — with its own idle
+        # timeout, which for a session already registered is the dialog's
+        # :registerexpire rather than a fresh 5 s.
+        goto(back, if(stale, do: "401 stale", else: "401 challenge"))
 
       :ok -> goto(save_registration, "REGISTER auth OK")
 
@@ -64,22 +68,6 @@ defmodule Kelix.Registrar do
       {:reject, code, reason} ->
         SIP.Session.Registrar.reject_registration(sip_ctx, req, code, reason)
         goto(wait_register, "#{code} #{reason}")
-    end
-  end
-
-  state wait_auth_register do
-    on_events do
-      {:REGISTER, _req, _trans_pid, _dialog_pid} ->
-        goto(process_register, "REGISTER + auth")
-
-      {:dialog_terminated, _dialog_pid, :transport_down} ->
-        scenario_aborted("client connection lost")
-
-      {:dialog_terminated, _dialog_pid, _reason} ->
-        scenario_success("registration ended")
-    after
-      5_000 ->
-        scenario_failure("registration idle timeout")
     end
   end
 
