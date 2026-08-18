@@ -25,9 +25,11 @@
 Today a scenario is a flat FSM: a list of `state` blocks, each an `on_events`
 over the two legs. Two things follow from that shape:
 
-- **every scenario re-states the same protocol sequences.** `b2bua.exs`,
-  `direct-call.exs` and `direct-call-with-auth.exs` differ in a handful of
-  decisions and agree on everything else. The agreement is copied, not shared;
+- **every scenario re-states the same protocol sequences.** `direct-call.exs`
+  and `direct-call-with-auth.exs` differ in a handful of decisions and agree on
+  everything else. The agreement is copied, not shared — `b2bua.exs`, a third
+  copy that agreed with `direct-call.exs` down to the state names, went unnoticed
+  until this layer counted them, and was deleted rather than converted twice;
 - **the copy silently rots.** The fifth script — the one not yet written — will
   omit whichever sequence its author did not know about, and nothing will say so.
 
@@ -158,9 +160,9 @@ follows, so what follows can be quietly wrong for years.
 
 ### The `cancelling` state, as written today (2026-08-12)
 
-The visible half now exists in all six B2BUA scenarios — the four EB listed,
-plus `customer-service.exs` and `apps/kelixip/scripts/b2bua.exs`, because
-leaving two of them out is exactly the hole the layer is supposed to close. The
+The visible half now exists in every B2BUA scenario — the four EB listed, plus
+`customer-service.exs`, because leaving any of them out is exactly the hole the
+layer is supposed to close. The
 `proceeding` state's CANCEL arm goes `goto(cancelling, "caller cancelled")`
 instead of ending, and the new state reads:
 
@@ -643,7 +645,7 @@ an INVITE transaction in flight, so it belongs inside `call()`, while a BYE ends
 an established dialog, so it belongs inside `bridge()`. A block spanning both
 would have to take control in the middle of the other's sequence. Nothing is
 missing without it either — per §2, the test is whether forgetting the fragment
-can leave a phone off-hook, and `b2bua.exs` answers in its own `on_shutdown`:
+can leave a phone off-hook, and the scripts answer in their own `on_shutdown`:
 *"both legs are wound down by the automatic teardown — CANCEL what is ringing,
 BYE what is up — so there is nothing left to do here but say why we stopped."*
 

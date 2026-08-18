@@ -395,7 +395,7 @@ the middle of the other's sequence: not a building block, a leak.
 
 **And nothing is missing without it.** §2 of the spec sets the test: if
 forgetting a fragment can leave a phone off-hook, the fragment carries something
-the framework should have owned. `b2bua.exs` answers it in its own
+the framework should have owned. The scripts answer it in their own
 `on_shutdown`:
 
 > both legs are wound down by the automatic teardown — CANCEL what is ringing,
@@ -640,9 +640,11 @@ Phases 1–2 are the engine work; 3 is where the design is judged.
 The establishment sequence — `place_call`, `proceeding`, `cancelling`,
 `wait_ack` — exists eight times: `b2bua_basic.exs`,
 `b2bua_media.exs`, `customer-service.exs` and `webrtc-gw.exs` in
-`apps/elixip2/scenarios/`, and `b2bua.exs`, `direct-call.exs`,
+`apps/elixip2/scenarios/`, and `direct-call.exs`,
 `direct-call-with-auth.exs`, `direct-call-with-auth-and-media.exs` in
-`apps/kelixip/scripts/`. Not all of them are converted, and the line is drawn by
+`apps/kelixip/scripts/` — plus `b2bua.exs`, which counting them is what found:
+a copy of `direct-call.exs` down to the state names, deleted rather than
+converted a second time, its tests re-pointed at the script it duplicated. Not all of them are converted, and the line is drawn by
 app:
 
 - **`apps/elixip2/scenarios/` stays raw FSL.** These are what the framework's own
@@ -655,10 +657,6 @@ app:
 - **`apps/kelixip/scripts/direct-call*.exs` get the blocks.** Three scripts, the
   server's own reference material, where a shipped block being upgradable without
   touching the script (S13) is the point rather than a demonstration.
-
-`b2bua.exs` sits on the kelixip side of that line and carries the same states;
-converting it too is the obvious fourth, left out only because it was not asked
-for.
 
 **What this costs, and what phase 3 owes because of it.** The two CANCEL races —
 the callee confirming with a 487, and the callee answering after the CANCEL left

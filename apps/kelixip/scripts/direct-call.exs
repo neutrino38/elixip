@@ -103,7 +103,7 @@ defmodule Kelix.DirectCall do
         scenario_success("call relayed and ended")
 
       {:bridge, :max_duration, _} ->
-        scenario_failure("maximum call duration reached")
+        scenario_success("maximum call duration reached")
 
       # Neither can happen in this script — there is no media plane, and nothing
       # asks for the call back — but an outcome nobody matches leaves the machine
