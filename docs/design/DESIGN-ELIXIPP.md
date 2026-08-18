@@ -95,7 +95,7 @@ header and its **first** account are shared by every instance.
 
 `SIP.Scenario.Monitor` is an in-memory registry of the instances currently
 running: one row per call, keyed by the CLI slot id — or by `{parent_slot, name}`
-for a `sub_fsm` child, so a sub-FSM appears as its own row right under its
+for a `spawn_fsm` child, so a sub-FSM appears as its own row right under its
 parent. Each row holds the scenario name, the account, the last command sent, the
 current FSM state and the event that caused the last transition.
 

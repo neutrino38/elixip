@@ -105,7 +105,7 @@ Elixip provides the **Finite State Language (FSL)**, a
 [domain specific language](https://elixir.hexdocs.pm/1.20.1/domain-specific-languages.html)
 to describe SIP / call scenarios as finite state machines, written as `.exs` files. It covers the `config`
 block, the `state` / `on_events` / `goto` / `stay` finite-state-machine model, the scenario context (`sip_ctx`),
-sub-scenarios (`sub_fsm`) and cooperative shutdown, exception handling, how the engine works under the hood,
+sub-scenarios (`spawn_fsm`) and cooperative shutdown, exception handling, how the engine works under the hood,
 and the `SIP.Session.*` macro helpers — for both **client (UAC)** scenarios and **server (UAS)** scenarios
 (a REGISTER registrar, or a call server that answers incoming `INVITE`s with the `reply_invite*` macros).
 

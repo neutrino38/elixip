@@ -31,7 +31,7 @@ two verbs are the paved road, not the only road.
 `call()` and `queue()` are not functions in the ordinary sense: they run a
 **finite state machine** — ringing, early media, fallback, teardown — inside the
 caller's scenario, and hand control back when the call ends. FSL has no way
-to express that today: `sub_fsm` spawns a *separate process* with its own
+to express that today: `spawn_fsm` spawns a *separate process* with its own
 mailbox, which is the wrong shape here, because the SIP events belong to the
 calling scenario's dialogs.
 

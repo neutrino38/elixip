@@ -278,7 +278,7 @@ end
   session — its dialogs, transactions, `sip_ctx` — because the sequences it
   packages (the cancel race, the hunt, the in-dialog relay) are sequences *of
   the host's call*. This is the load-bearing difference with the existing
-  `sub_fsm` macro, whose child runs in its own process with its own legs
+  `spawn_fsm` macro, whose child runs in its own process with its own legs
   (see §4.5). How event delivery is routed to honour S5+S6 together is the
   central design question — the spec only fixes the observable behaviour.
 - **S7 — bounded.** Every SBB carries a completion deadline (defaulted,
@@ -314,7 +314,7 @@ end
 
 ### 4.5 Relation to the existing primitives
 
-FSL already has `sub_fsm/2` (spawn a *child scenario* in its own monitored
+FSL already has `spawn_fsm/2` (spawn a *child scenario* in its own monitored
 process), `notify/2` and `notify_parent/1` (`{:scenario_msg, name, payload}`
 both ways). That is parent↔child between two full scenarios, each with its own
 legs — a callee simulator, a load generator. An SBB is a different animal on

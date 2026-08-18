@@ -55,7 +55,7 @@ a thousand keep-alives has the same stack depth as one that answers immediately.
 | `stay/0..2` | consume an event, keep waiting |
 | `on_events/1` | typed `receive` |
 | `scenario_success/failure/aborted` | terminals |
-| `sub_fsm/2`, `notify/2`, `notify_parent/1`, `on_shutdown/1` | sub-FSMs and cooperative shutdown |
+| `spawn_fsm/2`, `notify/2`, `notify_parent/1`, `on_shutdown/1` | sub-FSMs and cooperative shutdown |
 
 ### 2.1 `config` and the context
 
@@ -255,13 +255,13 @@ being over, and ignoring it stalled the teardown for the full five seconds.
 
 ### 4.1 The shape
 
-`sub_fsm target, as: :name, args: %{…}` spawns another scenario as a **separate
+`spawn_fsm target, as: :name, args: %{…}` spawns another scenario as a **separate
 monitored process** and stores a `%SIP.Scenario.Child{name, pid, ref, module}`
 handle in `ctx.appdata[:__children__]`, so it survives across states. `target` is
 a compiled module or a path to an `.exs` file — resolved against the directory
 of the file that *declares* it (include semantics), not against the current
 working directory. Resolving against the cwd is what made
-`sub_fsm "scenarios/uas_invite.exs"` die with a bare "exception!" for anyone not
+`spawn_fsm "scenarios/uas_invite.exs"` die with a bare "exception!" for anyone not
 standing in `apps/elixip2`.
 
 Decisions, all deliberate:
@@ -273,6 +273,7 @@ Decisions, all deliberate:
 | cleanup when the parent ends | cooperative shutdown message, then a hard kill after a 5 s grace period |
 | nesting | a full tree: a child may spawn its own children |
 | scope of the shutdown protocol | **generalized** — the same control message any controller uses, including elixipp's graceful stop |
+| the name | `spawn_fsm`, after `fx.spawn` of the TypeScript FSL — one name per concept across the two dialects. Spelled `sub_fsm` up to 1.4.1; the old macro is kept as a deprecated alias sharing the same expansion, because `.exs` scenarios are loaded at run time and a rename would break them in the field, not at compile time |
 
 ### 4.2 The message protocol
 
@@ -306,7 +307,7 @@ handles one call; with none waiting the INVITE gets `486 Busy Here`.
 
 Unlike elixipp's `Elixip.ScenarioUAS` factory (see
 [DESIGN-ELIXIPP.md](DESIGN-ELIXIPP.md)), it spawns nothing per call: the parent
-scenario controls the lifecycle by re-spawning a `sub_fsm` when it wants to take
+scenario controls the lifecycle by spawning another child when it wants to take
 another call. That is what keeps the FSL layer self-contained — a two-party test
 scenario needs no server mode.
 

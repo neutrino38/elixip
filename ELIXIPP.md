@@ -100,7 +100,7 @@ Copy the binary anywhere (`cp elixipp ~/.local/bin/`). Same exit codes as
 
 The scenario argument is **either a path to a `.exs` file, or the name of a built-in
 module**. A path is yours: it is taken as given, relative to the current directory.
-Inside a scenario, a sub-scenario (`sub_fsm "other.exs"`) is looked up next to the
+Inside a scenario, a sub-scenario (`spawn_fsm "other.exs"`) is looked up next to the
 file that declares it — so a scenario and its children stay a self-contained unit
 wherever you run them from.
 
@@ -124,7 +124,7 @@ same logic under a different module name (`UAC.InviteExample`,
 | `uac_invite_webrtc.exs` | the same over WebRTC SDP |
 | `uas_register.exs` | **registrar**: challenges, verifies, accepts/refreshes/un-registers |
 | `uas_invite.exs` | **call server**: answers inbound INVITEs |
-| `uac_register_and_uas_invite.exs` | registers, then waits for an inbound call (uses `sub_fsm`) |
+| `uac_register_and_uas_invite.exs` | registers, then waits for an inbound call (uses `spawn_fsm`) |
 | `smoke.exs` | no SIP traffic; checks the tool itself end to end |
 | `http_get_example.exs` | an HTTP call from a scenario |
 
@@ -301,7 +301,7 @@ issued, its current FSM state and the event that caused the last transition:
 
 - **Compte** is the account in use — set from the scenario config, or learned from
   the REGISTER once a server scenario has authenticated it.
-- A **sub-FSM** (`sub_fsm`) is indented under its parent with `└`.
+- A **sub-FSM** (`spawn_fsm`) is indented under its parent with `└`.
 - On a real terminal the cells are colour-coded: light green for `:sip`, orange for
   `:media`, light blue otherwise; **État** turns green on success, red on failure.
   Colours are emitted only on a TTY.

@@ -534,7 +534,7 @@ messages.
 state initial_state do
   # Load + start a child scenario, give it the local name :callee.
   # `target` is a scenario module or a path to a .exs scenario file.
-  sub_fsm UAS.AutoAnswer, as: :callee, args: %{play: "ring.wav"}
+  spawn_fsm UAS.AutoAnswer, as: :callee, args: %{play: "ring.wav"}
   goto calling
 end
 
@@ -577,8 +577,10 @@ end
 
 **Macros**
 
-- `sub_fsm(target, as: name, args: map)` — spawn `target` (a compiled scenario module or a `.exs` file path)
-  as a monitored child. `as:` is required: it is the local name used to address the child and to tag the
+- `spawn_fsm(target, as: name, args: map)` — spawn `target` (a compiled scenario module or a `.exs` file path)
+  as a monitored child. Named after `fx.spawn` of the TypeScript FSL, which spawns a child machine on the same
+  contract, so the two dialects keep one name per concept. It was called `sub_fsm` up to 1.4.1; that spelling
+  still works and is deprecated. `as:` is required: it is the local name used to address the child and to tag the
   messages it sends back. `args:` (optional) is merged into the child context appdata (read it with
   `appdata_get/1`). The child handle is kept in the parent context, so it survives across states.
 - `notify(child_name, payload)` — send an application message to a named child. The child receives it as
@@ -694,7 +696,7 @@ event for maximum 5 seconds then calls media_cleanup_ressources() to deallocate 
 Then the scenario runner checks for the existence of a `cleanup` function and calls it with `sip_ctx`
 as argument.
 
-If the scenario spawned sub-FSMs with `sub_fsm`, the runner first asks each live child to shut down
+If the scenario spawned sub-FSMs with `spawn_fsm`, the runner first asks each live child to shut down
 cooperatively (`{:scenario_ctl, :shutdown, …}`), waits up to 5 seconds for them to terminate and hard-kills
 any straggler, then — if this scenario itself has a parent — reports its own outcome to it as
 `{:scenario_exit, name, outcome, reason}`.
