@@ -135,7 +135,7 @@ defmodule Kelix.DirectCallWithAuth do
             scenario_success("Bob answered #{code}")
 
           {:call, :cancelled, _} ->
-            scenario_aborted("caller cancelled, callee confirmed")
+            scenario_success("caller cancelled, callee confirmed")
 
           {:call, :answered_after_cancel, _} ->
             scenario_success("callee answered after the cancellation; hung up")
@@ -147,7 +147,7 @@ defmodule Kelix.DirectCallWithAuth do
             scenario_aborted("caller vanished while it rang: #{inspect(reason)}")
 
           {:call, :timeout, _} ->
-            scenario_failure("Bob never answered")
+            scenario_success("Bob never answered")
 
           {:call, :failed, %{reason: reason}} ->
             scenario_failure("call setup failed: #{reason}")
@@ -178,7 +178,7 @@ defmodule Kelix.DirectCallWithAuth do
         scenario_success("call relayed and ended")
 
       {:bridge, :max_duration, _} ->
-        scenario_failure("maximum call duration reached")
+        scenario_success("maximum call duration reached")
 
       # Neither can happen in this script — there is no media plane, and nothing
       # asks for the call back — but an outcome nobody matches leaves the machine

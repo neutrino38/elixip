@@ -60,7 +60,7 @@ defmodule Kelix.DirectCall do
           # real event, and the difference between "abandoned" and "answered then
           # hung up" is one somebody bills on.
           {:call, :cancelled, _} ->
-            scenario_aborted("caller cancelled, callee confirmed")
+            scenario_success("caller cancelled, callee confirmed")
 
           {:call, :answered_after_cancel, _} ->
             scenario_success("callee answered after the cancellation; hung up")

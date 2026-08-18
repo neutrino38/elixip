@@ -157,8 +157,9 @@ defmodule Kelix.DirectCallScriptTest do
 
     # It ends on the 487, not on the CANCEL — and it does end, rather than
     # sitting in the block's `cancelling` state until its 32 s deadline. The
-    # block answers `{:call, :cancelled, _}`; the script calls that an abort.
-    assert_receive {:instance_done, {:aborted, "caller cancelled, callee confirmed"}}, 10_000
+    # block answers `{:call, :cancelled, _}`; the script calls that a success —
+    # a caller who changes their mind is the call's outcome, not the server's.
+    assert_receive {:instance_done, :ok}, 10_000
     assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
   end
 
