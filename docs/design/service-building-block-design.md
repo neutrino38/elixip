@@ -545,6 +545,12 @@ in the struct.
    Plus the view end of the same thing: `elixipp --monitor`'s state column is 18
    characters and truncated from the right, which cut `MyApp.Cancelling/waiting`
    down to the block's name and none of its state.
+2bis. ~~**The return contract.**~~ **Done 2026-08-18**, between phases 2 and 3
+   because the first real block is what would otherwise have set it by accident:
+   `{namespace, outcome, data}`, `@sbb_namespace` / `@sbb_returns`, the
+   compile-time check in `sbb_return/1`, the contract-shaped timeout event, and
+   the namespace learning that keeps a block's return from being drawn as a SIP
+   message. 7 tests added to `sbb_fsm_test.exs`, 1 to `sbb_monitor_test.exs`.
 3. **`call()` on one script** — acceptance criteria 1 and 2 both, on
    `direct-call.exs` alone: the smallest of the three (no auth, no media). The
    face of §7.5, the `Establish` FSM, the loader skip, and the two CANCEL races
