@@ -509,9 +509,14 @@ The spec is met when both of these hold:
    callee, cancel race included. The article wrote one block where §5.1 now has
    two, so the criterion covers `bridge()` as well: the `connected` state that
    follows collapses the same way;
-2. the `cancelling` state of §3 collapses into an SBB call in all six B2BUA
-   scenarios *without* flattening their differences: `releasing` exits kept
-   (S3), queue vocabulary kept (S4), `:ms_event` arms kept (S5).
+2. the `cancelling` state of §3 collapses into an SBB call *without* flattening
+   the differences between its copies: `releasing` exits kept (S3), queue
+   vocabulary kept (S4), `:ms_event` arms kept (S5). Not every copy is converted
+   — `apps/elixip2/scenarios/` deliberately stays raw FSL, so the suite keeps a
+   block-free path to regress against and one worked example without the sugar;
+   the criterion is met on the kelixip scripts, and the conversion carries the
+   CANCEL test those scripts do not have yet. Scope and rationale:
+   [service-building-block-design.md §8.3](service-building-block-design.md).
 
 ### 4.8 Open questions (deliberately not answered here)
 

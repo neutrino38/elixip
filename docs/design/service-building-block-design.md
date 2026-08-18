@@ -442,6 +442,8 @@ it.
 | `lib/dsl/SIPSBB.ex` *(new)* | `use SIP.SBB` — `SIP.Scenario`'s `__using__` / `__before_compile__` with the SBB kind flag |
 | `lib/dsl/SIPScenarioRunner.ex` | `run_sbb/3`, `sbb_loop/4`, the `throw` catch in `loop/4`, qualified `report/5` |
 | `lib/dsl/SIPScenarioLoader.ex` | skip `__sbb__/0` modules in `load_file!/1` |
+| `lib/dsl/sbb/*.ex` *(new)* | the base library (S10) — `SBB.Cancelling` first. In `:elixip2`, not in a kelixip module: a base block must be reachable from both a framework scenario and a server script, and compiled before either |
+| `apps/kelixip/scripts/direct-call*.exs` | the three scripts that adopt the block (§8.3) |
 | `apps/elixipp/lib/elixipp/ElixippCLI.ex` | the state cell keeps the tail of a qualified name — the 18-char column would otherwise cut the state, which is the half that answers "where is this call" |
 | `FSL.md` | the `sbb_fsm` / `sbb_return` section, next to sub-scenarios |
 | `docs/design/DESIGN-FSL.md` | a section on SBBs under §4, and invariant 2 restated as "one FSM stack, one process" |
@@ -471,10 +473,10 @@ in the struct.
    Plus the view end of the same thing: `elixipp --monitor`'s state column is 18
    characters and truncated from the right, which cut `SBB.Cancelling/waiting`
    down to the block's name and none of its state.
-3. **The `cancelling` specimen** — acceptance criterion 2. Six B2BUA scenarios,
-   `releasing` exits kept (S3), queue vocabulary kept (S4), `:ms_event` arms
-   kept (S5). If it does not factor cleanly here, the mechanism is wrong and
-   phases 4–5 do not start.
+3. **The `cancelling` specimen** — acceptance criterion 2. `releasing` exits
+   kept (S3), queue vocabulary kept (S4), `:ms_event` arms kept (S5). If it does
+   not factor cleanly here, the mechanism is wrong and phases 4–5 do not start.
+   Scope is decided in §8.3.
 4. **The macro face and the loader**, with `use SBB.Cancelling` on one scenario
    to prove the sugar.
 5. **`call()` and `bridge()`** (§7) — acceptance criterion 1, the flagship
@@ -483,6 +485,44 @@ in the struct.
    leave the establishment states duplicated where they hurt most.
 
 Phases 1–2 are the engine work; 3 is where the design is judged.
+
+### 8.3 Which scenarios get blocks, and which stay raw
+
+The `cancelling` specimen exists eight times: `b2bua_basic.exs`,
+`b2bua_media.exs`, `customer-service.exs` and `webrtc-gw.exs` in
+`apps/elixip2/scenarios/`, and `b2bua.exs`, `direct-call.exs`,
+`direct-call-with-auth.exs`, `direct-call-with-auth-and-media.exs` in
+`apps/kelixip/scripts/`. Not all of them are converted, and the line is drawn by
+app:
+
+- **`apps/elixip2/scenarios/` stays raw FSL.** These are what the framework's own
+  suite drives (`b2bua_scenario_test.exs`, `b2bua_media_scenario_test.exs`,
+  `webrtc_gw_scenario_test.exs`), and they are the worked examples FSL.md points
+  at. Keeping them block-free keeps a regression net over the path that has no
+  blocks in it: if `sbb_loop/5` breaks, the raw path must go on passing, or the
+  suite can no longer tell a broken mechanism from a broken scenario. It also
+  keeps one readable specimen of what the FSL does without the sugar;
+- **`apps/kelixip/scripts/direct-call*.exs` get the blocks.** Three scripts, the
+  server's own reference material, where a shipped block being upgradable without
+  touching the script (S13) is the point rather than a demonstration.
+
+`b2bua.exs` sits on the kelixip side of that line and carries the same specimen;
+converting it too is the obvious fourth, left out of phase 3's scope only because
+it was not asked for.
+
+**What this costs, and what phase 3 owes because of it.** The two CANCEL races —
+the callee confirming with a 487, and the callee answering after the CANCEL left
+— are tested exactly once in the repo, in `b2bua_scenario_test.exs`, on
+`B2BUA.Basic`: the scenario that stays raw. The `direct-call*` scripts have no
+CANCEL test at all (`direct_call_auth_script_test.exs` covers the digest gate and
+the relay). So the conversion would land the block where nothing runs it, and
+"does it factor cleanly" would be answered by reading.
+
+Phase 3 therefore ships **its own test on the converted script**: the same two
+races as `b2bua_scenario_test.exs`, driven against `direct-call.exs` — the mockup
+transport and the script-driving harness of `direct_call_auth_script_test.exs`
+are both already there. The block is judged by running, and the raw specimen next
+to it stays the control.
 
 ## 9. Deliberately not in this design
 
