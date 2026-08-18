@@ -3,7 +3,7 @@
 # the served domain is injected into the context by the router (`domain:` override).
 #
 # Separation of concerns, as in registrar.exs (§11.1): the MODULE decides, the
-# SCRIPT composes the SIP response. The `admit` DSL macro (Kelix.Mod.Mcu.Script,
+# SCRIPT composes the SIP response. The `admit` FSL macro (Kelix.Mod.Mcu.Script,
 # backed by the context-aware Kelix.Mod.Mcu.admit/4 through do_admit/4 below)
 # resolves the DID, reserves the slot and stores the participant handle in the
 # appdata (:mcu_conf / :mcu_part); its verdict comes back in sip_ctx.lasterr,
@@ -37,7 +37,7 @@
 defmodule Kelix.Mcu.Call do
   use SIP.Scenario
   use SIP.Session.CallUAS
-  # the admit/attach/leave DSL macros — rebind sip_ctx in place, verdict in sip_ctx.lasterr
+  # the admit/attach/leave FSL macros — rebind sip_ctx in place, verdict in sip_ctx.lasterr
   use Kelix.Mod.Mcu.Script
   require Logger
   import SIP.Session, only: [reply: 5, reply: 6]

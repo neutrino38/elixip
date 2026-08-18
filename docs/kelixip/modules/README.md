@@ -1,7 +1,7 @@
 # kelixip modules
 
 A **module** is a loadable Elixir BEAM that extends kelixip and exposes new
-functions and facades to be used in kelixip scenarios written in DSL. This
+functions and facades to be used in kelixip scenarios written in FSL. This
 is the kelixip equivalent of kamailio modules. In details, a module can extend
 kelixip by
 

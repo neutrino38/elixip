@@ -381,7 +381,7 @@ defmodule Kelix.ControlTest do
       assert row.pid == pid
 
       # …joined with the FSM view: which state the scenario sits in, and on what
-      # event. Reading that is the point of a DSL-driven server.
+      # event. Reading that is the point of an FSL-driven server.
       assert row.state == "initial_state"
       assert row.scenario != ""
 

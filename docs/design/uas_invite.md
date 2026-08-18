@@ -69,11 +69,11 @@ Faut-il un module SIP.Session.CallReqInDialog qui rassemblent les macros commune
 
 # Ce que je te demande de faire
 
-En tant que lead dev versé en Elixir, en DSL et avec un parfaite connaissance du protocole SIP du devra
+En tant que lead dev versé en Elixir, en FSL et avec un parfaite connaissance du protocole SIP du devra
 
 - créer dans ce document, une spec pour le module SIP.Session.CallUAS et peut être un module commun
 - explorer les restrictions et la faisabilité
-- proposer une extention du DSL à l'instar du module Registrar pour configurer le modile
+- proposer une extention du FSL à l'instar du module Registrar pour configurer le modile
 - créer une conception logiciel en me proposant les choix techniques structurants dans ce doc. N'hésite pas à interagir avec moi pour faire valider ces choix
 - plus tard, me proposer une conception logicielle pour cette spec + conception.
 - exprime-toi en français.
@@ -83,7 +83,7 @@ En tant que lead dev versé en Elixir, en DSL et avec un parfaite connaissance d
 # Spécification & conception détaillée (2026-07-12)
 
 > Cette partie répond à la demande ci-dessus. Elle s'appuie sur l'architecture
-> existante (Transaction → Dialog → Session → DSL) et sur le travail Registrar
+> existante (Transaction → Dialog → Session → FSL) et sur le travail Registrar
 > (`docs/design/uas_scenario_design.md`, `scenarios/uas_register.exs`,
 > `Elixip.RegistrarUAS`). Les choix structurants ont été validés le 2026-07-12.
 
@@ -276,7 +276,7 @@ reçus (remplace les appels directs à `SIP.Dialog.reply/5` qu'on voit dans
 sont pas stockées dans le contexte (seul le couple INVITE/UPDATE l'est), et la
 clause `on_events` l'a déjà sous la main.
 
-## 5. Extension DSL + elixipp
+## 5. Extension FSL + elixipp
 
 ### 5.1 Annotation et configuration du scénario
 
@@ -298,7 +298,7 @@ defmodule UAS.InviteExample do
 end
 ```
 
-- `uas :invite` réutilise la macro `uas/1` existante — **zéro changement DSL**.
+- `uas :invite` réutilise la macro `uas/1` existante — **zéro changement FSL**.
 - `domains:` est une clé du bloc `config`, lue par la fabrique (§5.2) via les
   `:scenario_overrides` — même canal que `password` côté Registrar. Défaut si
   absente : `:any` (catchall).
@@ -397,7 +397,7 @@ end
 | Dialog | `SIPDialogImpl.ex` | remontée ACK/CANCEL à l'app (§2.4) ; `allows(:INVITE)` + `:NOTIFY`, `:OPTIONS` |
 | Média | `SIPSessionMedia.ex` | `get_sdp_answer/2` (peer connection partagée avec `get_sdp_offer`) |
 | Message | `SIPMsgOps.ex`, `SIPMsg.ex` | sérialisation multipart (phase dédiée, §2.2) |
-| DSL | `SIPScenario.ex` | instrumentation as-pattern + `auto_store` dans `on_events` |
+| FSL | `SIPScenario.ex` | instrumentation as-pattern + `auto_store` dans `on_events` |
 | Outil | `ElixippCLI.ex`, `ElixippRegistrarUAS.ex` → `ElixippScenarioUAS.ex` | fabrique généralisée (double behaviour, contrôle `domains`/604) ; mode serveur `:uas_invite` |
 | Scénario réf. | `scenarios/uas_invite.exs` | exemple §5.3 |
 | Tests | `test/uas_invite_test.exs` | sur le modèle de `uas_register_test.exs` (UDP mockup + Mockup média) |

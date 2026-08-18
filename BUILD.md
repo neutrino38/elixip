@@ -4,7 +4,7 @@ This repository is a **Mix umbrella** with four apps under `apps/`:
 
 | App | Kind | Artifact | Depends on |
 |-----|------|----------|------------|
-| `elixip2` | library | — (shared SIP stack + DSL + media) | — |
+| `elixip2` | library | — (shared SIP stack + FSL + media) | — |
 | `elixipp` | test tool | **escript** `elixipp` | `elixip2` |
 | `kelixip` | SIP server | **OTP release** `kelixip` (+ `kelictl`) | `elixip2` |
 | `kelix_modules` | loadable modules | **`.beam` files** for `module_dir` | `kelixip` |

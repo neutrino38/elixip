@@ -7,7 +7,7 @@ defmodule Kelixip.MixProject do
   def project do
     [
       app: :kelixip,
-      version: "1.4.0",
+      version: "1.4.1",
       elixir: "~> 1.15",
       # Umbrella: share the root _build / config / deps / lockfile
       build_path: "../../_build",
@@ -32,7 +32,7 @@ defmodule Kelixip.MixProject do
 
   defp deps do
     [
-      # The shared SIP stack + DSL + media.
+      # The shared SIP stack + FSL + media.
       {:elixip2, in_umbrella: true},
       # Declarative config parser (config.toml / domains.toml). Pure Elixir,
       # no NIF, release-safe (design §13).
@@ -56,7 +56,7 @@ defmodule Kelixip.MixProject do
   defp releases do
     [
       kelixip: [
-        version: "1.4.0",
+        version: "1.4.1",
         applications: [kelixip: :permanent],
         include_executables_for: [:unix]
       ]

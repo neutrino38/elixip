@@ -143,7 +143,7 @@ defmodule Kelix.DirectCallWithAuth do
       # inbound dialog.
       {:outbound, {code, resp, _trans, _dlg}} when code in 101..199 ->
         b2bua_forward_reply(resp)
-        goto(loop, "provisional #{code}")
+        stay("provisional #{code}")
 
       {:outbound, {200, resp, _trans, _dlg}} ->
         b2bua_forward_reply(resp)
@@ -154,7 +154,7 @@ defmodule Kelix.DirectCallWithAuth do
         b2bua_forward_reply(resp)
 
         if b2bua_hunting?() do
-          goto(loop, "#{code}, trying Bob's next device")
+          stay("#{code}, trying Bob's next device")
         else
           scenario_success("Bob answered #{code}")
         end
@@ -206,7 +206,7 @@ defmodule Kelix.DirectCallWithAuth do
 
       # Still ringing somewhere: keep listening rather than take a 180 for an end.
       {:outbound, {code, _resp, _trans, _dlg}} when code in 100..199 ->
-        goto(loop, "provisional #{code} after cancel")
+        stay("provisional #{code} after cancel")
 
       {:outbound, {code, _resp, _trans, _dlg}} when code >= 300 ->
         scenario_aborted("caller cancelled, callee answered #{code}")
@@ -260,11 +260,11 @@ defmodule Kelix.DirectCallWithAuth do
       # §13.2.2.4), so every re-INVITE that crosses owes one back.
       {:ACK, req, _trans, _dlg} ->
         b2bua_forward(req)
-        goto(loop, "ACK relayed (caller -> callee)")
+        stay("ACK relayed (caller -> callee)")
 
       {:outbound, {:ACK, req, _trans, _dlg}} ->
         b2bua_forward(req)
-        goto(loop, "ACK relayed (callee -> caller)")
+        stay("ACK relayed (callee -> caller)")
 
       # Default relay, written out rather than assumed: everything else
       # in-dialog (re-INVITE, UPDATE, INFO, MESSAGE, REFER…), then the responses.
@@ -273,19 +273,19 @@ defmodule Kelix.DirectCallWithAuth do
       # (`Kelix.Mod.AuthDb.challengeable?/1`).
       {:outbound, {m, req, _trans, _dlg}} when is_atom(m) ->
         b2bua_forward(req)
-        goto(loop, "relayed #{m} (callee -> caller)")
+        stay("relayed #{m} (callee -> caller)")
 
       {:outbound, {code, resp, _trans, _dlg}} when is_integer(code) ->
         b2bua_forward_reply(resp)
-        goto(loop, "relayed #{code} (callee -> caller)")
+        stay("relayed #{code} (callee -> caller)")
 
       {m, req, _trans, _dlg} when is_atom(m) ->
         b2bua_forward(req)
-        goto(loop, "relayed #{m} (caller -> callee)")
+        stay("relayed #{m} (caller -> callee)")
 
       {code, resp, _trans, _dlg} when is_integer(code) ->
         b2bua_forward_reply(resp)
-        goto(loop, "relayed #{code} (caller -> callee)")
+        stay("relayed #{code} (caller -> callee)")
     after
       14_400_000 -> scenario_failure("maximum call duration reached")
     end

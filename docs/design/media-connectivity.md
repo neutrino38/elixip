@@ -139,7 +139,7 @@ produces no `:ice_connected`, by design.
 
 **It is the scenario's job** to bound the wait, with an `after` clause in the
 `on_events` block that waits for it. `apps/elixip2/scenarios/play.exs` already
-does (`wait_media`, `after 15_000 -> scenario_failure(...)`); the others must be
+does (`answering`, `after 15_000 -> scenario_failure(...)`); the others must be
 audited — see §7.
 
 This is a behaviour change worth stating plainly: a video call whose video leg

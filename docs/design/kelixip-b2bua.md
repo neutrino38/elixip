@@ -9,7 +9,7 @@ way that forecloses it.
 
 The B2BUA design is deliberate about where things live: the framework offers
 low-level primitives, the scenario writes the policy, and anything expressible
-in the DSL stays in the DSL. That is the right split — but it means a working
+in FSL stays in FSL. That is the right split — but it means a working
 call takes a scenario with five or six states, and an ACD queue rather more.
 Asked to route a call to a subscriber, an integrator should not have to write
 the hunt loop, the early-media rule of §7.4 and the profile ladder of §7.5.
@@ -26,11 +26,11 @@ They are **not** a replacement for the primitives, and the primitives must stay
 usable directly — that is what makes an unusual call flow possible at all. The
 two verbs are the paved road, not the only road.
 
-## 2. What it needs from the DSL first
+## 2. What it needs from FSL first
 
 `call()` and `queue()` are not functions in the ordinary sense: they run a
 **finite state machine** — ringing, early media, fallback, teardown — inside the
-caller's scenario, and hand control back when the call ends. The DSL has no way
+caller's scenario, and hand control back when the call ends. FSL has no way
 to express that today: `sub_fsm` spawns a *separate process* with its own
 mailbox, which is the wrong shape here, because the SIP events belong to the
 calling scenario's dialogs.
@@ -106,7 +106,7 @@ is cheap to add now and awkward later.
 ## 4. What this does NOT change
 
 The primitives keep their contract. `call()` and `queue()` are written **in**
-the DSL, on top of `b2bua_forward/3`, `b2bua_try_next/0`,
+FSL, on top of `b2bua_forward/3`, `b2bua_try_next/0`,
 `b2bua_cancel_forward/0` and the rest — if either verb turns out to need a new
 primitive, that is a finding about the primitives, to be taken back to
 b2bua_module.md rather than worked around here.

@@ -8,7 +8,7 @@ defmodule Elixipp.MixProject do
   def project do
     [
       app: :elixipp,
-      version: "1.4.0",
+      version: "1.4.1",
       elixir: "~> 1.15",
       # Umbrella: share the root _build / config / deps / lockfile
       build_path: "../../_build",
@@ -35,7 +35,7 @@ defmodule Elixipp.MixProject do
 
   defp deps do
     [
-      # The shared SIP stack + DSL + media.
+      # The shared SIP stack + FSL + media.
       {:elixip2, in_umbrella: true},
       # Pure-Elixir terminal UI for the --monitor live table (escript-only).
       {:owl, "~> 0.12"}

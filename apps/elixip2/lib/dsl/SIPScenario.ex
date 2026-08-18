@@ -1,9 +1,10 @@
 defmodule SIP.Scenario do
   @moduledoc """
-  DSL to describe SIP / call scenarios as finite state machines, à la ExUnit.
+  The Finite State Language (FSL): describes SIP / call scenarios as finite state
+  machines, à la ExUnit.
 
   A scenario is a plain Elixir module saved as an `.exs` file that does
-  `use SIP.Scenario`. This pulls in the state-machine DSL together with
+  `use SIP.Scenario`. This pulls in FSL together with
   `SIP.Session.CallUAC` and `SIP.Session.Media`, so the call and media helper
   macros are available inside the states.
 
@@ -48,9 +49,12 @@ defmodule SIP.Scenario do
   descriptor consumed by `SIP.Scenario.Runner`. See that module for the loop.
 
   `goto next` moves to the next declared state, `goto loop` re-enters the
-  current one, and `goto some_state` jumps to a named state. Before
-  transitioning, `goto` checks `sip_ctx.lasterr`: any value other than `:ok`
-  aborts the scenario as a failure.
+  current one, `goto back` returns to the state entered before this one, and
+  `goto some_state` jumps to a named state. Before transitioning, `goto` checks
+  `sip_ctx.lasterr`: any value other than `:ok` aborts the scenario as a failure.
+
+  Inside an `on_events` clause, `stay` consumes the event and keeps waiting on
+  the same `on_events` without re-running the state body.
   """
 
   @doc """
@@ -81,6 +85,9 @@ defmodule SIP.Scenario do
           goto: 1,
           goto: 2,
           goto: 3,
+          stay: 0,
+          stay: 1,
+          stay: 2,
           scenario_success: 0,
           scenario_success: 1,
           scenario_failure: 0,
@@ -156,6 +163,7 @@ defmodule SIP.Scenario do
   defmacro state(name_ast, do: body) do
     name = state_atom(name_ast)
     fname = :"__state_#{name}"
+    check_stay_placement!(body, "state #{name}")
 
     quote do
       require Logger
@@ -201,7 +209,8 @@ defmodule SIP.Scenario do
 
   @doc """
   Transition to another state. `target` may be a state name, `next` (the next
-  declared state) or `loop` (re-enter the current state). `desc` is an optional
+  declared state), `loop` (re-enter the current state) or `back` (return to the
+  state the FSM was in before entering this one). `desc` is an optional
   short description of the triggering event, used for logging and shown in the
   monitor. `type` optionally categorizes that event (`:sip`, `:media`, `:timer`,
   `:http`, `:db`, …) — recorded by the monitor to drive the future sequence
@@ -214,10 +223,16 @@ defmodule SIP.Scenario do
       goto call_answered, "200 OK", :sip
       goto start_play, "media connected", :media
 
+  `back` reads `sip_ctx.laststate`, a single slot the runner writes on every
+  transition that actually changes state — `goto loop` and `stay` leave it
+  alone. It is one slot, not a stack: two consecutive `goto back` toggle between
+  two states. Using it with no previous state (from `initial_state`) aborts the
+  scenario as a failure.
+
   Aborts the scenario as a failure if `sip_ctx.lasterr` is not `:ok`.
   """
   defmacro goto(target_ast, desc \\ nil, type \\ nil) do
-    target = state_atom(target_ast)
+    target = target_ast |> state_atom() |> pseudo_target()
 
     quote do
       if var!(sip_ctx).lasterr == :ok do
@@ -235,11 +250,50 @@ defmodule SIP.Scenario do
   end
 
   @doc """
+  Consume the matched event and keep waiting on the **same** `on_events`, without
+  re-entering the state: the state body is not re-executed, so its side effects
+  (sending a request, arming a timer, allocating media) are not replayed. This is
+  what `goto loop` cannot do.
+
+      state call_established do
+        on_events do
+          {:MESSAGE, req, trans, _dlg} ->
+            reply_request(req, trans, 200, "OK")
+            stay "in-dialog MESSAGE"
+
+          {:BYE, _req, _trans, _dlg} ->
+            goto hangup, "BYE"
+        end
+      end
+
+  `desc` and `type` behave as in `goto/3`: the transition is logged as
+  `(state) -> (state)` and reported to `SIP.Scenario.Monitor`, so a scenario whose
+  whole activity is `stay` never looks frozen in the live view. Like `goto`, it
+  aborts the scenario as a failure when `sip_ctx.lasterr` is not `:ok`.
+
+  The enclosing `after` timeout is **not** re-armed: it is the deadline of the
+  state, computed once when the `on_events` is entered, and a `stay` re-enters
+  the wait with the time that is left. `stay` is only meaningful inside an
+  `on_events` clause; anywhere else the scenario stops as a failure.
+  """
+  defmacro stay(desc \\ nil, type \\ nil) do
+    quote do
+      if var!(sip_ctx).lasterr == :ok do
+        event_type = unquote(type) || Process.get(:scenario_event_type)
+        {:stay, unquote(desc), event_type, var!(sip_ctx)}
+      else
+        {:terminal, :failure, var!(sip_ctx).lasterr, Process.get(:scenario_event_type),
+         var!(sip_ctx)}
+      end
+    end
+  end
+
+  @doc """
   Like Elixir's `receive`, but each clause records the *type* of the matched
   event so the trailing `goto` is automatically categorized (no need to pass the
   type explicitly). The type is inferred from the clause pattern: `{:ms_event,
   …}` → `:media`, any other SIP tuple (`{100, …}`, `{:BYE, …}`, `{code, …}`) →
-  `:sip`. The optional `after` clause is left untouched.
+  `:sip`.
 
       on_events do
         {200, rsp, trans, _dlg} -> process_invite_reply(rsp, trans); goto answered, "200 OK"
@@ -247,6 +301,11 @@ defmodule SIP.Scenario do
       after
         30_000 -> scenario_failure("timeout")
       end
+
+  A clause ending with `stay/2` re-enters this same wait instead of leaving the
+  state. The `after` clause is therefore the deadline of the whole wait, not of
+  one event: its expression is evaluated once, when the block is entered, and a
+  `stay` comes back with the time that is left.
   """
   defmacro on_events(blocks) do
     do_clauses = Keyword.fetch!(blocks, :do)
@@ -254,10 +313,7 @@ defmodule SIP.Scenario do
     # Make every on_events cooperatively shutdown-aware: prepend a clause matching
     # the control message, unless the scenario already handles :scenario_ctl
     # itself. Prepending keeps it ahead of a possible catch-all `_ ->` clause.
-    do_clauses =
-      if Enum.any?(do_clauses, &ctl_clause?/1),
-        do: do_clauses,
-        else: [shutdown_clause() | do_clauses]
+    ctl_clauses = if Enum.any?(do_clauses, &ctl_clause?/1), do: [], else: [shutdown_clause()]
 
     # …and media-server-death-aware, the same way and for the same reason
     # (design docs/design/b2bua_module.md §14.6, R8). `:server_disconnected` is
@@ -267,21 +323,65 @@ defmodule SIP.Scenario do
     #
     # Injected only when the scenario handles no media death itself, so a policy
     # that wants control keeps it — the rule `on_events` clauses already follow.
-    do_clauses =
-      if Enum.any?(do_clauses, &handles_media_down?/1),
-        do: do_clauses,
-        else: [media_down_clause() | do_clauses]
+    media_clauses =
+      if Enum.any?(do_clauses, &handles_media_down?/1), do: [], else: [media_down_clause()]
 
-    instrumented = Enum.map(do_clauses, &instrument_receive_clause/1)
+    # `stay` re-enters the wait, so the receive lives inside a closure that calls
+    # itself. Hygienic unique vars: a state body may hold several on_events, and
+    # nested ones must not capture each other's closure or deadline.
+    wait = Macro.unique_var(:fsl_wait, __MODULE__)
+    deadline = Macro.unique_var(:fsl_deadline, __MODULE__)
 
-    new_blocks =
+    # The injected clauses leave the state by construction, so they get no
+    # stay-dispatch wrapper — one whose `{:stay, …}` branch the compiler would
+    # rightly report as unreachable, once per scenario state.
+    instrumented =
+      Enum.map(media_clauses ++ ctl_clauses, &instrument_receive_clause(&1, nil, nil)) ++
+        Enum.map(do_clauses, &instrument_receive_clause(&1, wait, deadline))
+
+    {timeout_ast, new_blocks} =
       case Keyword.fetch(blocks, :after) do
-        {:ok, after_clauses} -> [do: instrumented, after: after_clauses]
-        :error -> [do: instrumented]
+        {:ok, [{:->, meta, [[timeout], after_body]}]} ->
+          # The timeout is a deadline for the state, not for each event: it is
+          # turned into an absolute one on entry and re-armed with what remains,
+          # so a stream of consumed events cannot keep the wait alive forever.
+          remaining = quote(do: SIP.Scenario.remaining_timeout(unquote(deadline)))
+          {timeout, [do: instrumented, after: [{:->, meta, [[remaining], after_body]}]]}
+
+        {:ok, after_clauses} ->
+          {:infinity, [do: instrumented, after: after_clauses]}
+
+        :error ->
+          {:infinity, [do: instrumented]}
       end
 
-    {:receive, [], [new_blocks]}
+    receive_ast = {:receive, [], [new_blocks]}
+
+    quote do
+      unquote(wait) = fn unquote(wait), var!(sip_ctx), unquote(deadline) ->
+        _ = var!(sip_ctx)
+        unquote(receive_ast)
+      end
+
+      unquote(wait).(
+        unquote(wait),
+        var!(sip_ctx),
+        SIP.Scenario.deadline(unquote(timeout_ast))
+      )
+    end
   end
+
+  @doc false
+  # Absolute deadline for an `on_events` wait, so `stay` can re-enter it without
+  # granting a fresh timeout.
+  def deadline(:infinity), do: :infinity
+  def deadline(ms) when is_integer(ms), do: System.monotonic_time(:millisecond) + ms
+
+  @doc false
+  def remaining_timeout(:infinity), do: :infinity
+
+  def remaining_timeout(deadline),
+    do: max(deadline - System.monotonic_time(:millisecond), 0)
 
   # Does this receive clause already match a {:scenario_ctl, ...} control message?
   defp ctl_clause?({:->, _meta, [head, _body]}), do: clause_event_type(head) == :control
@@ -454,6 +554,8 @@ defmodule SIP.Scenario do
       end
   """
   defmacro on_shutdown(do: body) do
+    check_stay_placement!(body, "on_shutdown block")
+
     quote do
       require Logger
 
@@ -479,6 +581,12 @@ defmodule SIP.Scenario do
   defp state_atom({name, _meta, context}) when is_atom(name) and is_atom(context), do: name
   defp state_atom(name) when is_atom(name), do: name
 
+  # `back` is a pseudo-target like `next` and `loop`, resolved by the runner from
+  # `sip_ctx.laststate`. Renamed so it cannot collide with a state actually named
+  # `back` — `next` and `loop` reserve their name the same way.
+  defp pseudo_target(:back), do: :__back__
+  defp pseudo_target(other), do: other
+
   # ── on_events event-type inference (compile time) ─────────────────────────
 
   # Instrument a receive clause with two compile-time additions:
@@ -491,7 +599,10 @@ defmodule SIP.Scenario do
   #      can reply without re-passing the request. auto_store is a fully-qualified
   #      runtime call (not an import): it works in every scenario — including a
   #      UAC receiving a re-INVITE — and is a no-op for non-offer events.
-  defp instrument_receive_clause({:->, meta, [head, body]}) do
+  #   3. wrap the clause result: a `{:stay, …}` descriptor re-enters the wait
+  #      closure with the context the clause produced, so appdata mutations
+  #      survive; anything else is a transition and propagates to the runner.
+  defp instrument_receive_clause({:->, meta, [head, body]}, wait, deadline) do
     # Compute the type from the ORIGINAL head, before the as-pattern rewrite.
     type = clause_event_type(head)
     evt = Macro.unique_var(:evt, __MODULE__)
@@ -510,10 +621,90 @@ defmodule SIP.Scenario do
         # (design docs/design/b2bua_module.md §14.4, R6).
         var!(sip_ctx) = SIP.Session.B2bua.note_leg_event(var!(sip_ctx), unquote(evt))
         var!(sip_ctx) = SIP.Session.CallUAS.auto_store(var!(sip_ctx), unquote(evt))
-        unquote(body)
+        unquote(rewrite_stay(body, wait, deadline))
       end
 
     {:->, meta, [bind_event_var(head, evt), new_body]}
+  end
+
+  # Turn every `stay` written in this clause into a call back into the wait
+  # closure. Done on the AST rather than on the clause *result* (a `case` telling
+  # a `{:stay, …}` descriptor from a `{:goto, …}` one): the compiler knows the
+  # exact type each clause returns, so in the — normal — case where no clause
+  # stays, that `case` carries a branch it can prove dead, and it says so once per
+  # state of every scenario.
+  #
+  # Recursion stops at a nested `on_events` / `receive`: a `stay` in there belongs
+  # to that wait, not to this one. The `after` body is never walked, for the same
+  # reason in reverse — the deadline has expired, there is nothing to go back to.
+
+  # No closure to go back to (auto-injected clause): the body IS the transition.
+  defp rewrite_stay(body, nil, nil), do: body
+
+  defp rewrite_stay({:on_events, _meta, _args} = node, _wait, _deadline), do: node
+  defp rewrite_stay({:receive, _meta, _args} = node, _wait, _deadline), do: node
+
+  defp rewrite_stay({:stay, _meta, args}, wait, deadline) when is_list(args),
+    do: stay_ast(args, wait, deadline)
+
+  # `stay` alone on a line parses as a variable, not as a zero-arity call.
+  defp rewrite_stay({:stay, _meta, ctx}, wait, deadline) when is_atom(ctx),
+    do: stay_ast([], wait, deadline)
+
+  defp rewrite_stay({fun, meta, args}, wait, deadline),
+    do: {rewrite_stay(fun, wait, deadline), meta, rewrite_stay(args, wait, deadline)}
+
+  defp rewrite_stay({left, right}, wait, deadline),
+    do: {rewrite_stay(left, wait, deadline), rewrite_stay(right, wait, deadline)}
+
+  defp rewrite_stay(list, wait, deadline) when is_list(list),
+    do: Enum.map(list, &rewrite_stay(&1, wait, deadline))
+
+  defp rewrite_stay(other, _wait, _deadline), do: other
+
+  # `stay` re-enters an `on_events` wait, so outside one there is nothing to
+  # re-enter. Refuse it at compile time, where the scenario writer can still see
+  # which state is at fault — the runner would otherwise only fail the run.
+  # Everything an `on_events` owns is pruned, its `after` body included: it is
+  # that macro's business, and a `stay` left there fails at runtime.
+  defp check_stay_placement!(body, where) do
+    if stay?(body) do
+      raise CompileError,
+        description:
+          "stay is only allowed in an on_events clause, and #{where} uses it outside one. " <>
+            "Use goto loop to re-enter the state."
+    end
+  end
+
+  defp stay?({:on_events, _meta, _args}), do: false
+  defp stay?({:stay, _meta, args}) when is_list(args), do: true
+  defp stay?({:stay, _meta, ctx}) when is_atom(ctx), do: true
+  defp stay?({fun, _meta, args}), do: stay?(fun) or stay?(args)
+  defp stay?({left, right}), do: stay?(left) or stay?(right)
+  defp stay?(list) when is_list(list), do: Enum.any?(list, &stay?/1)
+  defp stay?(_other), do: false
+
+  defp stay_ast(args, wait, deadline) do
+    desc = Enum.at(args, 0)
+    type = Enum.at(args, 1)
+
+    quote do
+      if var!(sip_ctx).lasterr == :ok do
+        unquote(wait).(
+          unquote(wait),
+          SIP.Scenario.Runner.note_stay(
+            __MODULE__,
+            var!(sip_ctx),
+            unquote(desc),
+            unquote(type) || Process.get(:scenario_event_type)
+          ),
+          unquote(deadline)
+        )
+      else
+        {:terminal, :failure, var!(sip_ctx).lasterr, Process.get(:scenario_event_type),
+         var!(sip_ctx)}
+      end
+    end
   end
 
   # Wrap the clause pattern in an as-pattern binding it to `evt`, keeping any

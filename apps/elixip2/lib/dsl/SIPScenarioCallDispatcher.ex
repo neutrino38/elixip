@@ -12,7 +12,7 @@ defmodule SIP.Scenario.CallDispatcher do
   popped, a child is never reused. With no child waiting, the INVITE is
   rejected `486 Busy Here`.
 
-  This keeps the DSL layer self-contained: unlike `Elixip.ScenarioUAS` (the
+  This keeps the FSL layer self-contained: unlike `Elixip.ScenarioUAS` (the
   elixipp server-mode factory), no new instance is spawned per call — the
   parent scenario controls the lifecycle by re-spawning a `sub_fsm` when it
   wants to accept another call.

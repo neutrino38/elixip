@@ -10,7 +10,7 @@ defmodule UAC.Invite do
   The editable, file-loadable copy lives in `scenarios/uac_invite.exs` (module
   `UAC.InviteExample`); this is the canonical bundled version.
   """
-  # use SIP.Scenario pulls in the state-machine DSL together with
+  # use SIP.Scenario pulls in FSL together with
   # use SIP.Session.CallUAC and use SIP.Session.Media.
   use SIP.Scenario
 
@@ -49,27 +49,23 @@ defmodule UAC.Invite do
   # -------------------------------------------------------------------------------
   state calling do
     send_INVITE("sip:#{@callee_num}@#{sip_ctx.domain}", :mediaserver, timeout: 90, webrtc: :no)
-    goto(call_progress)
-  end
 
-  # -------------------------------------------------------------------------------
-  state call_progress do
     # on_events infers the event type from each clause (here :sip), so the
     # monitor colors the transitions without an explicit type on goto.
     on_events do
       {100, _rsp, _trans_pid, _dialog_pid} ->
-        goto(loop, "100 Trying")
+        stay("100 Trying")
 
       {407, rsp, _trans_pid, _dialog_pid} ->
         send_auth_INVITE(rsp, "sip:#{@callee_num}@#{sip_ctx.domain}", :mediaserver, timeout: 90)
-        goto(loop, "407 Proxy Auth Required")
+        stay("407 Proxy Auth Required")
 
       {180, _rsp, _trans_pid, _dialog_pid} ->
-        goto(loop, "180 Ringing")
+        stay("180 Ringing")
 
       {183, rsp_183, trans_pid, _dialog_pid} ->
         process_invite_reply(rsp_183, trans_pid)
-        goto(loop, "183 Session Progress")
+        stay("183 Session Progress")
 
       {200, rsp_200, trans_pid, _dialog_pid} ->
         process_invite_reply(rsp_200, trans_pid)
@@ -85,30 +81,26 @@ defmodule UAC.Invite do
   # -------------------------------------------------------------------------------
   state call_answered do
     on_events do
-      {:ms_event, _conn, :ice_connected} -> goto(start_play, "media connected")
+      {:ms_event, _conn, :ice_connected} -> goto(call_established, "media connected")
     after
       5_000 -> scenario_failure("No media received after 5s")
     end
   end
 
   # -------------------------------------------------------------------------------
-  state start_play do
-    media_play("toto.mp4")
-    goto(next)
-  end
-
-  # -------------------------------------------------------------------------------
   state call_established do
+    media_play("toto.mp4")
+
     on_events do
       {:ms_event, _player, :player_started} ->
-        goto(loop, "toto.mp4: start")
+        stay("toto.mp4: start")
 
       {:ms_event, _player, :player_ended} ->
         goto(hangup_call, "toto.mp4: EOF")
 
       {:MESSAGE, req, _trans_pid, _dialog_pid} ->
         reply_request(req, 200, "OK")
-        goto(loop, "MESSAGE")
+        stay("MESSAGE")
 
       {:BYE, req, _trans_pid, _dialog_pid} ->
         reply_request(req, 200, "OK")

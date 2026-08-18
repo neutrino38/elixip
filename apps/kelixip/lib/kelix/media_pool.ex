@@ -8,7 +8,7 @@ defmodule Kelix.MediaPool do
   Each entry wraps a `MediaServer.Behaviour` adapter (`:mockup` / `:mendooze` /
   a module) by its config URL — the pool itself holds no connection, it only
   **selects**. `Kelix.Router` injects the selected `%{module, url}` into the spawned
-  instance as a per-instance `:mediaserver_instance` override, so the DSL
+  instance as a per-instance `:mediaserver_instance` override, so FSL
   `media_connect/0` connects to a pool-chosen server transparently.
 
   Entries come from `Kelix.Config.current().mediaserver_pool`, already **decoded and

@@ -2,7 +2,8 @@
 
 **Elixip is a personal project to write a multipurpose SIP application layer.**
 
-It provides a [Domain Specific Language](https://elixir.hexdocs.pm/1.20.1/domain-specific-languages.html)
+It provides the **Finite State Language (FSL)**, a
+[domain specific language](https://elixir.hexdocs.pm/1.20.1/domain-specific-languages.html)
 specialized to describe call scenarios. It is vaguely inspired by the K language developed by the N-SOFT
 company as part of their Rekoll product. The scenario itself is an .exs file and takes advantage of the
 Elixir syntax to provide a finite state machine (FSM) programming model. This is to me the most explicit
@@ -25,7 +26,7 @@ The reasoning behind the project is developed in three articles:
 - [Programmable telecoms, the way it should be](https://www.linkedin.com/pulse/programmable-telecoms-way-should-emmanuel-buu--emxoe/)
   — why this project exists, and the history of the ideas it builds on.
 - [What a native language for telco services looks like](https://www.linkedin.com/pulse/what-native-language-telco-services-looks-like-emmanuel-buu--wujre/)
-  — why a DSL, and what it buys over a general-purpose API.
+  — why a dedicated language, and what it buys over a general-purpose API.
 - [Taming large state machines: Service Building Blocks](https://www.linkedin.com/pulse/taming-large-state-machines-service-building-blocks-elixip-buu--pctie/)
   — the Service Building Blocks (SBB) model, still to come.
 
@@ -34,7 +35,7 @@ The reasoning behind the project is developed in three articles:
 The project will provide in the long term:
 
 - a testing tool called **elixipp**, similar to sipp, capable of running elixip scenarios to test other SIP servers.
-- a mini scriptable Session Border Controller, called **borderline**, using the DSL to fine-tune message handling.
+- a mini scriptable Session Border Controller, called **borderline**, using FSL to fine-tune message handling.
 - a scriptable and extensible SIP application inspired by kamailio. Called **kelixip**.
 
 In terms of capabilities, the emphasis will be on:
@@ -48,7 +49,7 @@ In terms of capabilities, the emphasis will be on:
 - Fully native Elixir SIP stack: implemented
 - Support for SIP over UDP, TCP, TLS and WSS: implemented
 - Media Control interface: implemented
-- [Domain Specific Language definition](DSL.md): first version released
+- [Finite State Language definition](FSL.md): first version released
 - SIP.Scenario Scripting Engine: done
 - [Back to back user agent](B2BUA.md): first release
 - [Codec negotiation across two legs](CODEC-NEGOTIATION.md), with a transcoding
@@ -74,11 +75,11 @@ In terms of capabilities, the emphasis will be on:
 - kelixip B2BUA and call processing: in progress
 
 ## Roadmap
-- DSL: [Service Building Blocks](https://www.linkedin.com/pulse/taming-large-state-machines-service-building-blocks-elixip-buu--pctie/)
+- FSL: [Service Building Blocks](https://www.linkedin.com/pulse/taming-large-state-machines-service-building-blocks-elixip-buu--pctie/)
   concept inspired by Jain SLEE 1.1
 - kelixip and elixip `presence` support including some level of LoST support
 - kelixip distributed cluster tech
-- DSL: formal proof of scenario correctness
+- FSL: formal proof of scenario correctness
 - Total Conversation call recorder
 - Automated call captionning
 - Push notification support
@@ -98,20 +99,21 @@ In terms of capabilities, the emphasis will be on:
   - XMPP support as first class citizen
   - Matrix protocol support as first class cizizen
 
-## The Domain Specific Language for SIP scenarios
+## The Finite State Language
 
-Elixip provides a [Domain Specific Language](https://elixir.hexdocs.pm/1.20.1/domain-specific-languages.html)
+Elixip provides the **Finite State Language (FSL)**, a
+[domain specific language](https://elixir.hexdocs.pm/1.20.1/domain-specific-languages.html)
 to describe SIP / call scenarios as finite state machines, written as `.exs` files. It covers the `config`
-block, the `state` / `on_events` / `goto` finite-state-machine model, the scenario context (`sip_ctx`),
+block, the `state` / `on_events` / `goto` / `stay` finite-state-machine model, the scenario context (`sip_ctx`),
 sub-scenarios (`sub_fsm`) and cooperative shutdown, exception handling, how the engine works under the hood,
 and the `SIP.Session.*` macro helpers — for both **client (UAC)** scenarios and **server (UAS)** scenarios
 (a REGISTER registrar, or a call server that answers incoming `INVITE`s with the `reply_invite*` macros).
 
-**👉 The full DSL reference now lives in [DSL.md](DSL.md).**
+**👉 The full FSL reference lives in [FSL.md](FSL.md).**
 
 # elixipp: the testing tool
 
-`elixipp` is the test tool of the project: a sipp replacement that runs DSL
+`elixipp` is the test tool of the project: a sipp replacement that runs FSL
 scenarios as a client (UAC) or a server (UAS), and can drive a media server to
 fully simulate SIP calls. It covers running scenarios from `mix` or as a
 standalone escript, the built-in scenarios, the command-line options, the live

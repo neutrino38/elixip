@@ -1,7 +1,8 @@
-# The Domain Specific Language for SIP scenarios
+# The Finite State Language (FSL)
 
-This library defines a new [Domain Specific Language](https://elixir.hexdocs.pm/1.20.1/domain-specific-languages.html)
-specialized for call and SIP related finite state machines. It is not unlike ExUnit. Call or SIP scenarios would be defined as .exs files.
+FSL is a [domain specific language](https://elixir.hexdocs.pm/1.20.1/domain-specific-languages.html)
+specialized for the finite state machines that handle calls. It is not unlike ExUnit:
+a call or SIP scenario is an Elixir module saved as a `.exs` file.
 
 Here is a "typicall" scenario where:
 
@@ -12,7 +13,7 @@ Here is a "typicall" scenario where:
 ```Elixir
 defmodule UAC.Invite do
 
-  # use SIP.Scenario pulls in the state-machine DSL together with
+  # use SIP.Scenario pulls in FSL together with
   # use SIP.Session.CallUAC and use SIP.Session.Media.
   use SIP.Scenario
   @domain "mydomain.com"
@@ -34,22 +35,19 @@ defmodule UAC.Invite do
 # -------------------------------------------------------------------------------
   state calling do
     send_INVITE(@callee, :mediaserver, timeout: 90, webrtc: :no)
-    goto call_progress
-  end
-# -------------------------------------------------------------------------------
-  state call_progress do
+
     on_events do
-      {100, _rsp, _trans_pid, _dialog_pid} -> goto loop, "100 Trying"
+      {100, _rsp, _trans_pid, _dialog_pid} -> stay "100 Trying"
 
       {407, rsp, _trans_pid, _dialog_pid} ->
         send_auth_INVITE(rsp, @callee, :mediaserver, timeout: 90)
-        goto loop, "407 Proxy Auth Required"
+        stay "407 Proxy Auth Required"
 
-      {180, _rsp, _trans_pid, _dialog_pid} -> goto loop, "180 Ringing"
+      {180, _rsp, _trans_pid, _dialog_pid} -> stay "180 Ringing"
 
       {183, rsp_183, trans_pid, _dialog_pid} ->
         process_invite_reply(rsp_183, trans_pid)
-        goto loop, "183 Session Progress"
+        stay "183 Session Progress"
 
       {200, rsp_200, trans_pid, _dialog_pid} ->
         process_invite_reply(rsp_200, trans_pid)
@@ -64,26 +62,23 @@ defmodule UAC.Invite do
 # -------------------------------------------------------------------------------
   state call_answered do
     on_events do
-      {:ms_event, _conn, :ice_connected} -> goto start_play, "media connected"
+      {:ms_event, _conn, :ice_connected} -> goto call_established, "media connected"
     after
       5_000 -> scenario_failure("No media received after 5s")
     end
   end
 # -------------------------------------------------------------------------------
-  state start_play do
-    media_play("toto.mp4")
-    goto next
-  end
-# -------------------------------------------------------------------------------
   state call_established do
+    media_play("toto.mp4")
+
     on_events do
-      {:ms_event, _player, :player_started} -> goto loop, "toto.mp4: start"
+      {:ms_event, _player, :player_started} -> stay "toto.mp4: start"
 
       {:ms_event, _player, :player_ended} -> goto hangup_call, "toto.mp4: EOF"
 
       {:MESSAGE, req, _trans_pid, _dialog_pid} ->
         reply_request(req, 200, "OK")
-        goto loop, "MESSAGE"
+        stay "MESSAGE"
 
       {:BYE, req, _trans_pid, _dialog_pid} ->
         reply_request(req, 200, "OK")
@@ -144,6 +139,10 @@ the other SIP tuples → `:sip`) and attaches it to the following `goto`. This i
 purely for display / the future sequence diagram (see the monitor section); the
 plain `receive` form also works, it just leaves events untyped. An explicit type
 on `goto` (`goto state, "desc", :media`) always wins.
+
+A clause may also end with `stay` instead of a `goto`: the event is consumed and the
+same `on_events` waits again, without re-running the state body. See **transitions**
+below. `stay` works in `on_events` only, not in a plain `receive`.
 
 By convention, **initial_state** is the first state executed when the FSM starts.
 Such a state MUST be declared. Consider it as the main() function in the C language.
@@ -247,20 +246,117 @@ without editing the scenario — set it in `config/config.exs`, in the scenario'
 own `config` block, or in an external-JSON header (`"mediaserver"` key). See the
 Configuration section of `CLAUDE.md` and `docs/design/mendooze_interface.md`.
 
-## transitions: the goto macro, scenario_success(), scenario_failure()
+## transitions: the goto macro, stay(), scenario_success(), scenario_failure()
 
 The `goto` macro triggers a state machine transition. This macro takes two arguments:
 - the next state name
 - a short description of the event triggering the transition (optional).
 
-Using `goto next` triggers a transition to the **next state** declared in the scenario. `goto loop`
-causes the finite state machine to reenter the same state.
+Three state names are reserved and resolved by the runner instead of naming a declared state:
+
+| Target | Effect |
+|--------|--------|
+| `goto next` | the **next state** declared in the scenario |
+| `goto loop` | re-enter the same state, running its body again |
+| `goto back` | return to the state the FSM was in **before** it entered this one |
 
 The `goto` macro will:
 - check that ctx_get(:lasterr) is `:ok`. If not, abort the scenario using `scenario_failure()`,
 - store the name of the target state as an atom in `sip_ctx.currentstate`,
 - if the logger is set to debug, log the transition as "RCV event: (old state) -> (new state)",
 - transition to the target state, calling it with the modified sip_ctx (handled by the runner, not a direct recursive call). goto must be the last expression of a state body or of an `on_events` / `receive` clause.
+
+### goto back
+
+`goto back` lets a *detour* state — fetch something over HTTP, show a confirmation, answer a
+challenge — return to whoever entered it, so several states can share it without it hardcoding
+a return target.
+
+```Elixir
+state ask_confirmation do
+  http_GET(:confirm, "https://api.example.com/confirm")
+  on_events do
+    {:confirm, {:ok, _rsp}} -> goto back, "confirmed"
+    {:confirm, {:error, _r}} -> scenario_failure("confirmation failed")
+  end
+end
+```
+
+The runner keeps **one slot**, `sip_ctx.laststate`, written on every transition that actually
+changes state. `goto loop`, an explicit `goto <current state>` and `stay` leave it alone: re-entering
+a state is not "coming from" it.
+
+One slot is not a stack. Two consecutive `goto back` therefore toggle between two states
+(A → B, `back` → A, `back` → B). A detour that itself detours does **not** come home; write the
+return target explicitly in that case.
+
+`goto back` from `initial_state`, or from any state reached without a previous one, stops the
+scenario as a failure with the reason `"goto back with no previous state"`.
+
+### stay
+
+`stay` consumes the matched event and goes back to waiting on the **same** `on_events`. The state
+body is *not* re-executed, so its side effects — sending a request, arming a timer, allocating
+media — are not replayed. This is what `goto loop` cannot do.
+
+```Elixir
+state call_established do
+  media_start_echo()
+
+  on_events do
+    # answered and forgotten: we are still in the call
+    {:MESSAGE, req, trans, _dlg} ->
+      reply_request(req, trans, 200, "OK")
+      stay "in-dialog MESSAGE"
+
+    {:OPTIONS, req, trans, _dlg} ->
+      reply_request(req, trans, 200, "OK")
+      stay "keepalive"
+
+    # this one ends the call
+    {:BYE, _req, _trans, _dlg} ->
+      goto hangup, "BYE"
+  end
+end
+```
+
+`stay` takes the same optional arguments as `goto`: a description and an event type. The transition is
+logged as `(state) -> (state)` and reported to `SIP.Scenario.Monitor`, so a scenario whose whole
+activity is `stay` never looks frozen in `--monitor` / `kelictl monitor`. Like `goto`, it aborts the
+scenario as a failure when `sip_ctx.lasterr` is not `:ok`.
+
+**The `after` deadline is not re-armed.** The timeout of an `on_events` is the deadline of the *wait*,
+not of each event: its expression is evaluated once, when the block is entered, and a `stay` comes
+back with the time that is left. A stream of consumed events can therefore never keep a state alive
+past its timeout.
+
+`stay` is only meaningful inside an `on_events` clause. Writing it anywhere else in a state body — a
+plain `receive`, an `after` body, straight-line code — is refused at compile time, or stops the
+scenario as a failure if the compiler could not see it.
+
+### Choosing between `goto loop` and `stay`
+
+Both keep the FSM in the same state, and the choice says which of two things you mean:
+
+| | `goto loop` | `stay` |
+|---|---|---|
+| the state body | runs again | does not run |
+| the `after` deadline | re-armed from zero | keeps counting |
+
+So `goto loop` reads *restart this state*, and `stay` reads *I handled that one, carry on waiting*.
+Pick by the meaning of the timeout:
+
+- an **idle** timeout — « this call has gone quiet », « this leg stopped sending » — must be re-armed
+  by every event, so its clauses use `goto loop`. That is what `in_call` / `in_conference` do in
+  `mcu.exs`, `play.exs` and `record.exs`.
+- a **budget** — « answered within 30 s », « maximum call duration », « the whole hunt » — must not be,
+  so its clauses use `stay`. That is what `calling`, `proceeding` and `connected` do in the reference
+  scenarios.
+
+A state that acts on entry — sends a request, arms a timer, allocates media — and then waits, needs
+`stay` for anything it consumes without leaving: `goto loop` would replay that entry action. Before
+`stay` existed those states had to be split in two, one to act and one to wait; that split is no
+longer a reason to write two states.
 
 The `scenario_success("reason")` macro must be used to terminate the scenario as successful and transition to the **terminal_success_state**.
 It will log the state before the transition to the final state as an INFO log.
@@ -530,6 +626,8 @@ that need to be passed around states. The main ones are:
 - `sip_ctx.dialogpid` - PID of the SIP dialog associated with this specific instance of scenario
 - `sip_ctx.lasterr` - atom that describes the last error condition detected by the code executed in the state.
 - `sip_ctx.errorreason` - a string that describes the detailed reason of errors.
+- `sip_ctx.currentstate` - name of the state being executed. Owned by the runner.
+- `sip_ctx.laststate` - name of the state entered before this one, what `goto back` returns to. Owned by the runner.
 
 Except for `sip_ctx.debug`, all other sip_ctx struct members should NOT be modified manually by the scenario.
 Their semantic and usage may change as this framework evolves.
@@ -551,7 +649,7 @@ someinfo = appdata_get(:myproperty)
 All uncaught exceptions that are raised in the Elixir code are treated and failure
 and cause the finite state machine to dump the exception in the logs and call scenario_failure()
 
-## Under the hood of the SIP scenario DSL
+## Under the hood of FSL
 
 Any scenario is a plain Elixir module that calls `use SIP.Scenario` (see the example
 above), saved as a `.exs` file. Each **state** of the finite state machine is
@@ -577,7 +675,13 @@ The `goto` macro
 
 If the new state argument is `next`, it determines the name of the next state to consider and
 calls `goto <nextstate>, <event>`. If the new state argument is `loop`, it calls
-`goto sip_ctx.currentstate, <event>`.
+`goto sip_ctx.currentstate, <event>`. If it is `back`, it calls `goto sip_ctx.laststate, <event>`,
+and fails the scenario when that slot is empty. The runner writes `sip_ctx.laststate` on every
+transition where the target differs from the current state.
+
+`on_events` compiles to a `receive` wrapped in a closure that calls itself, which is how `stay`
+re-enters the wait without leaving the state function. Its `after` timeout is turned into an
+absolute deadline when the block is entered, and each re-entry re-arms it with the remainder.
 
 When transitioning to any of the terminal states, the scenario runner checks if `sip_ctx.mediaserverpid`
 and `sip_ctx.mediaservermodule` are set. If yes, the scenario runner waits for the `:dialog_terminated`

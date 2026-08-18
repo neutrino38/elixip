@@ -33,7 +33,7 @@ binding, not an adapter package — see "Media plane" below.
   `spawn_uas_instance/2`).
 - Bridging the two is *literally* message passing, and the scenario side
   already has the exact pattern: the **sub-FSM protocol**
-  (`{:scenario_msg, from, payload}` / `notify` / `notify_parent`, DSL.md
+  (`{:scenario_msg, from, payload}` / `notify` / `notify_parent`, FSL.md
   §Sub-scenarios). To a scenario, a LiveView is a parent-like peer.
 
 What this buys that no JS stack can offer:

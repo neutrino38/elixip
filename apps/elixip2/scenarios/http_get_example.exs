@@ -54,14 +54,10 @@ defmodule HTTP.GetExample do
   # -------------------------------------------------------------------------------
   state calling do
     send_INVITE("sip:90901@#{sip_ctx.domain}", :mediaserver, timeout: 90, webrtc: :no)
-    goto(call_progress)
-  end
 
-  # -------------------------------------------------------------------------------
-  state call_progress do
     on_events do
       {code, _rsp, _trans_pid, _dialog_pid} when code in 100..199 ->
-        goto(loop, "provisional #{code}")
+        stay("provisional #{code}")
 
       {200, rsp_200, trans_pid, _dialog_pid} ->
         process_invite_reply(rsp_200, trans_pid)

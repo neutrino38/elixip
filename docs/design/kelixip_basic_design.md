@@ -41,7 +41,7 @@ does not reimplement it):
 | Transports | `SIP.Transport.{UDP,TCP,TLS,WSS}` + `{TCP,TLS,WSS}Listener`, `Depack`, `Selector` |
 | Transaction | `SIP.Transac` (ICT/IST/NICT/NIST), `SIP.Trans.Timer` |
 | Dialog | `SIP.Dialog` / `SIP.DialogImpl`, `Registry.SIPDialog` |
-| Session/DSL | `SIP.Scenario` + `SIP.Scenario.Runner`, `SIP.Session.*`, cooperative shutdown |
+| Session/FSL | `SIP.Scenario` + `SIP.Scenario.Runner`, `SIP.Session.*`, cooperative shutdown |
 | UAS factory | `Elixip.ScenarioUAS` (quota 503, domain 604), `spawn_uas_instance/2` |
 | Auth primitives | `SIP.Auth` (digest, HA1), `SIP.Msg.Ops.check_authrequest/3` |
 | Media | `MediaServer.Behaviour`, `Mendooze`, `Mockup` |
@@ -396,7 +396,7 @@ A GenServer owning the mapping *script path → loaded versions*:
   `{:scenario_ctl, :reloaded, version}` to in-flight instances of that script.
   This is a **new verb on the existing `:scenario_ctl` channel** — a long-lived
   `calls` script can choose to finish and recycle onto the new version; a
-  registrar ignores it. The DSL auto-injects a no-op clause for `:reloaded`
+  registrar ignores it. FSL auto-injects a no-op clause for `:reloaded`
   (like it does for `:shutdown`) so scripts that don't handle it are unaffected.
 - `reload_domains` — atomic `domains.toml` reload (§3.2). Validates every
   referenced script through `ScriptRegistry.validate/1` (contract check) as part of
@@ -441,7 +441,7 @@ cleanly. A registrar can satisfy it in one line
 media release there. Applied uniformly to registrar/presence/calls, at boot
 **and** at every reload.
 
-This is a pure check on already-existing DSL constructs — no DSL change needed.
+This is a pure check on already-existing FSL constructs — no FSL change needed.
 
 ---
 
@@ -1009,7 +1009,7 @@ Supervised GenServer over the `[mediaserver.pool.*]` entries:
 
 Each pool entry wraps an existing `MediaServer.Mendooze` adapter instance
 (reusing all of `lib/framework/mendooze/`). The Router injects the *selected* MCU
-handle into the spawned instance's config (`mediaserver` override), so the DSL
+handle into the spawned instance's config (`mediaserver` override), so FSL
 `media_connect/0` macro connects to a pool-chosen server transparently. Metrics:
 active sessions per MCU, MCU up/down (§11).
 
@@ -1285,7 +1285,7 @@ its own dependencies and the singular-`escript:` limitation disappears:
 ```
 mix.exs                     # umbrella root (aggregate only)
 apps/
-  elixip/        # shared SIP stack + DSL + media = LIBRARY
+  elixip/        # shared SIP stack + FSL + media = LIBRARY
                  #   deps: jason, req, socket2, ex_sdp, xmlrpc, logger_file_backend
   elixipp/       # test tool → escript `elixipp`; depends on :elixip; + owl
   kelixip/       # server → release `kelixip` (+ `kelictl`); depends on :elixip;
@@ -1307,12 +1307,12 @@ cd apps/kelixip && MIX_ENV=prod mix release kelixip  # -> release + bin/kelixip 
 ```
 
 > Migration note: this is a one-time refactor moving today's `lib/` into
-> `apps/elixip/lib` (framework + DSL) and `apps/elixipp/lib` (the `Elixipp.CLI`
+> `apps/elixip/lib` (framework + FSL) and `apps/elixipp/lib` (the `Elixipp.CLI`
 > tool), and creating `apps/kelixip`. It is prerequisite work for P0 (§15) — the
 > `elixipp` escript and `mix test` must keep working throughout.
 
 > **Implementation status (P0, 2026-07-26 — DONE).** The 3-app umbrella exists:
-> `apps/elixip2` (library: framework + DSL + media + the test suite),
+> `apps/elixip2` (library: framework + FSL + media + the test suite),
 > `apps/elixipp` (the `elixipp` escript + `owl`), `apps/kelixip`
 > (`Kelix.Application` + supervision tree + the `mix release kelixip` release,
 > boots empty). The shared-library app keeps the name **`:elixip2`** (not renamed
@@ -1405,7 +1405,7 @@ hand-rolled UDP client (no heavy dep).
 Flagged in the spec as **"à faire"**:
 
 0. **Umbrella restructure (prerequisite, §12.0).** Move today's single `:elixip2`
-   app into an umbrella: `apps/elixip` (framework + DSL, library), `apps/elixipp`
+   app into an umbrella: `apps/elixip` (framework + FSL, library), `apps/elixipp`
    (the `Elixipp.CLI` escript), `apps/kelixip` (server release + `kelictl`). Split
    deps accordingly. The `elixipp` escript, `mix scenario` and `mix test` must
    keep working throughout. This lands before P0.

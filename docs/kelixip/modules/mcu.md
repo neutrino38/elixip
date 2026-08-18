@@ -178,7 +178,7 @@ three of them; copy it rather than write them from scratch.
 
 ## Macros usable in a scenario
 
-These rebind the scenario context in place, like the other DSL verbs: they return
+These rebind the scenario context in place, like the other FSL verbs: they return
 nothing and their verdict is read from `sip_ctx.lasterr`.
 
 ### admit(req, dialog_pid)

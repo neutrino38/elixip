@@ -11,7 +11,8 @@ defmodule SIP.Scenario.Runner do
     * `{:terminal, :failure, r, ctx}`  — scenario failed
 
   `target` is either an explicit state name, the atom `:next` (the next state
-  declared in the module) or `:loop` (re-enter the current state). The runner
+  declared in the module), `:loop` (re-enter the current state) or `:__back__`
+  (the state entered before this one, read from `ctx.laststate`). The runner
   resolves those, logs the transition and calls the next state function — this
   is the "handled by the runner, not a direct recursive call" contract from the
   README, which keeps the call stack flat across an arbitrary number of
@@ -439,12 +440,32 @@ defmodule SIP.Scenario.Runner do
         next = next_state(state_name, states)
         log_transition(state_name, next, desc)
         report(module, report_account(ctx2), next, desc, type)
-        loop(module, next, SIP.Context.set(ctx2, :currentstate, next), states)
+        loop(module, next, enter(ctx2, state_name, next), states)
 
       {:goto, :loop, desc, type, ctx2} ->
         log_transition(state_name, state_name, desc)
         report(module, report_account(ctx2), state_name, desc, type)
         loop(module, state_name, ctx2, states)
+
+      # `goto back`: return to whatever state we came from. One slot, no stack —
+      # so two consecutive `goto back` toggle between two states.
+      {:goto, :__back__, desc, type, ctx2} ->
+        case ctx2.laststate do
+          nil ->
+            reason = "goto back with no previous state"
+
+            Logger.error(
+              "Scenario #{inspect(module)} in state #{inspect(state_name)}: #{reason}."
+            )
+
+            report(module, report_account(ctx2), :failed, reason, type)
+            finalize(module, ctx2, :failure, reason)
+
+          previous ->
+            log_transition(state_name, previous, desc)
+            report(module, report_account(ctx2), previous, desc, type)
+            loop(module, previous, enter(ctx2, state_name, previous), states)
+        end
 
       # Cooperative shutdown: the auto-injected on_events clause (or an explicit
       # one) jumped to the reserved :__shutdown__ state. If the scenario declared
@@ -454,7 +475,7 @@ defmodule SIP.Scenario.Runner do
         if function_exported?(module, :__state___shutdown__, 1) do
           log_transition(state_name, :__shutdown__, desc)
           report(module, report_account(ctx2), :__shutdown__, desc, type)
-          loop(module, :__shutdown__, SIP.Context.set(ctx2, :currentstate, :__shutdown__), states)
+          loop(module, :__shutdown__, enter(ctx2, state_name, :__shutdown__), states)
         else
           report(module, report_account(ctx2), :aborted, desc, type)
           finalize(module, ctx2, :aborted, "shutdown")
@@ -464,13 +485,22 @@ defmodule SIP.Scenario.Runner do
         if target in states do
           log_transition(state_name, target, desc)
           report(module, report_account(ctx2), target, desc, type)
-          loop(module, target, SIP.Context.set(ctx2, :currentstate, target), states)
+          loop(module, target, enter(ctx2, state_name, target), states)
         else
           reason = "jumped from state #{inspect(state_name)} to unknown state #{inspect(target)}"
           Logger.error("Scenario #{inspect(module)} #{reason}.")
           report(module, report_account(ctx2), :failed, "unknown state #{target}", type)
           finalize(module, ctx2, :failure, {:unknown_state, target})
         end
+
+      # A `stay` that reached the runner was written outside an `on_events` clause
+      # (a plain `receive`, an `after` body, a bare state body): there is no wait
+      # to go back to, so it is a scenario error, not a transition.
+      {:stay, _desc, type, ctx2} ->
+        reason = "stay used outside an on_events clause"
+        Logger.error("Scenario #{inspect(module)} in state #{inspect(state_name)}: #{reason}.")
+        report(module, report_account(ctx2), :failed, reason, type)
+        finalize(module, ctx2, :failure, {:stay_outside_on_events, state_name})
 
       {:terminal, :success, reason, type, ctx2} ->
         report(module, report_account(ctx2), :succeeded, reason, type)
@@ -496,6 +526,24 @@ defmodule SIP.Scenario.Runner do
         report(module, report_account(ctx), :failed, "invalid transition", nil)
         finalize(module, ctx, :failure, {:invalid_transition, state_name})
     end
+  end
+
+  # Enter `target`, coming from `from`. The `laststate` slot `goto back` reads is
+  # only written when the state actually changes: re-entering a state (`goto
+  # loop`, an explicit self-goto, `stay`) is not "coming from" it.
+  defp enter(ctx, from, target) do
+    ctx = SIP.Context.set(ctx, :currentstate, target)
+    if target == from, do: ctx, else: SIP.Context.set(ctx, :laststate, from)
+  end
+
+  @doc false
+  # Log and report a `stay`: the FSM did not move, but it did act on an event, so
+  # the live view must show it rather than a scenario that looks frozen. Called
+  # by the `on_events` expansion, which then re-enters its own wait.
+  def note_stay(module, ctx, desc, type) do
+    log_transition(ctx.currentstate, ctx.currentstate, desc)
+    report(module, report_account(ctx), ctx.currentstate, desc, type)
+    ctx
   end
 
   # Resolve `goto next`: the state declared right after `state_name`.

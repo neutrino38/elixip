@@ -60,7 +60,7 @@ defmodule Kelix.Control do
       (`kelictl stop <id>`) takes, and no other command exposes it.
     * `SIP.Scenario.Monitor` — **where each FSM is**: current `state`, the `event`
       that got it there, the last `command` it issued, and the `account` it serves.
-      Reading the FSM state is the whole point of a DSL-driven server; without it
+      Reading the FSM state is the whole point of an FSL-driven server; without it
       the formalism is invisible from the outside.
 
   Rows the pool does not know about (a `sub_fsm` child, keyed `{id, name}`) are not

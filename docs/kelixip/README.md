@@ -1,7 +1,7 @@
 # kelixip — User Manual
 
 kelixip is a scriptable SIP application server built on the Elixip SIP stack. It
-serves one or more SIP domains, each routed to DSL scenario scripts, with
+serves one or more SIP domains, each routed to FSL scenario scripts, with
 loadable **modules** (registrar, database auth, …) plugged in Kamailio-style.
 
 > This is the **operator/user** manual.

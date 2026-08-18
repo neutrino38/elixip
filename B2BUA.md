@@ -34,7 +34,7 @@ We will consider three common use cases:
 - a WebRTC to SIP gateway scenario `webrtc-gw.exs` that takes a WebRTC call from a proxy and resend this call
   to the proxy using a mediaserver to translate the bitstream.
 
-> The DSL reference is [DSL.md](DSL.md). The design document, which answers *why*
+> The FSL reference is [FSL.md](FSL.md). The design document, which answers *why*
 > rather than *how to use*, is
 > [docs/design/b2bua_module.md](docs/design/b2bua_module.md). Two reference
 > scenarios ship with elixip and are worth reading as a pair — same call, same
@@ -47,7 +47,7 @@ We will consider three common use cases:
 `use SIP.Scenario` pulls them in — there is nothing to opt into. A B2BUA is an
 incoming-call scenario, so it declares `uas(:invite)`.
 
-Like the other DSL verbs they rebind the scenario context in place: they return
+Like the other FSL verbs they rebind the scenario context in place: they return
 nothing, and their verdict is read from `sip_ctx.lasterr` (`:ok`, or a
 `{:b2bua, …}` tuple naming what failed).
 

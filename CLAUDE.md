@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Elixip is a SIP (Session Initiation Protocol) application server and test tool written in Elixir. The long-term goal is to build a DSL-based scripting tool for testing WebRTC call scenarios, using SIP over WSS/UDP/TCP for signaling and medooze media server for RTP media.
+Elixip is a SIP (Session Initiation Protocol) application server and test tool written in Elixir. The long-term goal is to build a scripting tool, driven by the Finite State Language (FSL), for testing WebRTC call scenarios, using SIP over WSS/UDP/TCP for signaling and medooze media server for RTP media.
 
 ## Commands
 
@@ -66,7 +66,7 @@ only its own dependencies (design in
 
 ```
 apps/
-├── elixip2/       # shared SIP stack + DSL + media = LIBRARY (app :elixip2)
+├── elixip2/       # shared SIP stack + FSL + media = LIBRARY (app :elixip2)
 │                  #   all the framework/dsl/session code + the test suite
 ├── elixipp/       # the standalone test tool (escript `elixipp`) — depends on :elixip2
 │   └── lib/elixipp/ElixippCLI.ex   # CLI entry point + live --monitor rendering (owl)
@@ -102,8 +102,8 @@ organizational:
 apps/elixip2/lib/
 ├── framework/   # the reusable SIP stack (transport → message → transaction →
 │                #   dialog → session/context → media). See the layers below.
-├── dsl/         # the scenario DSL and its FSM engine (namespace SIP.Scenario)
-│   ├── SIPScenario.ex        # DSL macros: state, goto, config, on_events, …
+├── dsl/         # the Finite State Language and its FSM engine (namespace SIP.Scenario)
+│   ├── SIPScenario.ex        # FSL macros: state, goto, stay, config, on_events, …
 │   ├── SIPScenarioRunner.ex  # FSM execution engine
 │   └── SIPScenarioLoader.ex  # loads scenario .exs files / modules
 ├── elixipp/     # scenario-engine support shared with the tool (stays in :elixip2)
@@ -126,7 +126,7 @@ promises about "no file needed" with it.
 
 The `dsl` layer builds on `framework` (a scenario `use SIP.Scenario` pulls in
 `SIP.Session.CallUAC`, `SIP.Session.Media` and `SIP.Context`). The `elixipp`
-tool (`apps/elixipp`) drives the DSL engine; the DSL itself runs fine without the
+tool (`apps/elixipp`) drives the FSL engine; FSL itself runs fine without the
 tool. `kelixip` (`apps/kelixip`) is the productized server — see its design doc;
 today it is a P0 skeleton (`Kelix.Application` + supervision tree).
 
@@ -360,7 +360,7 @@ Runtime config lives in `config/config.exs`:
 
 ### Media server selection
 
-The media adapter used by the config-driven `media_connect/0` DSL macro is
+The media adapter used by the config-driven `media_connect/0` FSL macro is
 selected by the `:mediaserver` key:
 
 ```elixir
@@ -391,7 +391,7 @@ config :elixip2, MediaServer.Mendooze,
 ## Writing a scenario (`.exs`)
 
 **A scenario states a call flow; it does not implement one.** Its states should
-read as a sequence of DSL verbs and `case` branches over what they return. Avoid
+read as a sequence of FSL verbs and `case` branches over what they return. Avoid
 `defp` helpers carrying real logic — reading a header, deciding a policy,
 composing a SIP response, plumbing a module result into another module's call.
 

@@ -595,7 +595,7 @@ end
 `reply_invite` est commun (re-INVITE/UPDATE côté UAC comme côté UAS) ; les deux
 autres sont des réponses purement serveur.
 
-## 2.3 Câblage DSL — `reply_invite` global, redirect/challenge opt-in
+## 2.3 Câblage FSL — `reply_invite` global, redirect/challenge opt-in
 
 Deux niveaux d'exposition (décisions user 2026-07-12) :
 
@@ -848,7 +848,7 @@ Helpers privés : `in_dialog_request/3` (squelette method/URIs/UA — construit 
 et `bye_message/1` ; l'arité 0 reste couverte par `send_BYE(body \\ nil)` de
 CallInDialog (aucun scénario/test à changer — `send_BYE()` marche toujours).
 
-**Migration DSL** : les scénarios de référence `lib/scenarios/uac_invite.ex` et
+**Migration FSL** : les scénarios de référence `lib/scenarios/uac_invite.ex` et
 `scenarios/uac_invite.exs` remplacent les `SIP.Dialog.reply(dialog_pid, req, …)`
 directs (MESSAGE/BYE) par `reply_request(req, 200, "OK")`.
 

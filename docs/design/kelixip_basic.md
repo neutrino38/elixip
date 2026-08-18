@@ -9,7 +9,7 @@
 ## 1. Kelixip en quelques mots
 
 Kelixip est un serveur d'application SIP scriptable. Il s'inspire de **Kamailio**
-et **OpenSIPS**. Les scénarios de kelixip sont écrits dans le DSL elixip
+et **OpenSIPS**. Les scénarios de kelixip sont écrits en FSL
 (`SIP.Scenario`) et exécutés par le moteur FSM déjà présent dans elixip.
 
 Kelixip est packagé comme un **service systemd** (release OTP) et se pilote via
@@ -48,19 +48,19 @@ Il n'y a donc **pas** de script de routage global à la Kamailio.
 
 Principe de conception assumé : **le dispatch (quel domaine, quelle fonction,
 quel script) est de la configuration déclarative ; la logique (ce que fait
-l'appel) est du DSL.** Le DSL ne contient **aucun routage**.
+l'appel) est du FSL.** Le FSL ne contient **aucun routage**.
 
 | Couche | Question | Où |
 |---|---|---|
 | **Dispatch** | domaine ? fonction activée ? pattern → script ? | config (`domains.toml`) |
-| **Logique d'appel** | que fait l'appel une fois le script choisi ? | DSL |
-| **Décision sur données runtime** | routage selon BDD, heure, droits… | DSL, **dans le script choisi** (logique d'appel, pas dispatch) |
+| **Logique d'appel** | que fait l'appel une fois le script choisi ? | FSL |
+| **Décision sur données runtime** | routage selon BDD, heure, droits… | FSL, **dans le script choisi** (logique d'appel, pas dispatch) |
 
 Conséquences : le dial-plan est de la **donnée** (éditable par l'exploitant ou
-l'API de contrôle, rechargeable à chaud sans risque) ; le DSL reste un FSM
+l'API de contrôle, rechargeable à chaud sans risque) ; le FSL reste un FSM
 par-appel ; et un routage dépendant de données runtime (numéro porté, heure…) se
 fait naturellement **en Elixir dans le script sélectionné**, sans mini-langage
-de routage dans le DSL. Ce dispatch prolonge le mécanisme existant d'elixip
+de routage dans le FSL. Ce dispatch prolonge le mécanisme existant d'elixip
 (type de scénario `__scenario_type__/0`, détection par le runner), étendu au
 domaine et au dial-plan.
 
@@ -87,7 +87,7 @@ garanti par les *array-of-tables* `[[…]]` — essentiel pour le dial-plan (§3
 node_name  = "kelixip@127.0.0.1"   # OTP node name (used by the CLI over RPC)
 script_dir = "/usr/share/kelixip"  # default directory for .exs scripts
 module_dir = "/usr/lib/kelixip/modules"
-user_agent = "Kelixip/1.4.0"
+user_agent = "Kelixip/1.4.1"
 max_calls  = 2000                  # server-wide cap (503 beyond); per-domain caps in domains.toml
 
 # ─── Logging ─────────────────────────────────────────────────────────────
@@ -256,7 +256,7 @@ Chaque fonction d'un domaine (`domains.toml`) référence son script par un chem
 **relatif à `script_dir`**. Un même script peut être partagé par plusieurs
 domaines (ex. `registrar-common.exs`).
 
-> **À faire (migration DSL).** Les scénarios UAS INVITE actuels
+> **À faire (migration FSL).** Les scénarios UAS INVITE actuels
 > (`scenarios/uas_invite.exs`, conception `docs/design/uas_invite.md`) embarquent leur
 > propre configuration de domaine. Avec le dispatch déclaratif de kelixip
 > (§2.2), cette config de domaine doit **sortir des scénarios** : le domaine et
@@ -854,7 +854,7 @@ aux évènements du dialogue (§12.2) ; le script en est notifié via
 
 Kelixip peut servir de base à un produit plus complexe. Exemple : **borderline**
 sera bâti sur base elixip/kelixip. Les points d'extension sont les **modules**
-(§5) et les **scripts** DSL (§4).
+(§5) et les **scripts** FSL (§4).
 
 ## 14. Statut & roadmap
 

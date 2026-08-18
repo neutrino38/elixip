@@ -89,7 +89,7 @@ defmodule B2BUA.WebrtcGw do
       # to relay — the browser's answer was decided when its INVITE arrived.
       {:outbound, {code, resp, _trans, _dlg}} when code in 101..199 ->
         b2bua_forward_reply(resp)
-        goto(loop, "provisional #{code}")
+        stay("provisional #{code}")
 
       # The phone answered: the framework feeds its answer to the outbound
       # endpoint, attaches the two, and puts OUR answer in the 200 the browser
@@ -110,7 +110,7 @@ defmodule B2BUA.WebrtcGw do
         b2bua_forward_reply(resp)
 
         if b2bua_hunting?() do
-          goto(loop, "#{code}, still placing the call")
+          stay("#{code}, still placing the call")
         else
           case b2bua_media_error() do
             nil -> scenario_success("callee answered #{code}")
@@ -158,7 +158,7 @@ defmodule B2BUA.WebrtcGw do
         goto(releasing, "phone answered after the cancellation; hung up")
 
       {:outbound, {code, _resp, _trans, _dlg}} when code in 100..199 ->
-        goto(loop, "provisional #{code} after cancel")
+        stay("provisional #{code} after cancel")
 
       {:outbound, {code, _resp, _trans, _dlg}} when code >= 300 ->
         goto(releasing, "caller cancelled, phone answered #{code}")
@@ -207,28 +207,28 @@ defmodule B2BUA.WebrtcGw do
         case b2bua_reoffer_kind(req) do
           kind when kind in [:address_change, :no_sdp, :no_change] ->
             b2bua_reply_reoffer(req)
-            goto(loop, "#{m} answered locally (#{kind})")
+            stay("#{m} answered locally (#{kind})")
 
           kind ->
             b2bua_forward(req)
-            goto(loop, "relayed #{m} (#{kind})")
+            stay("relayed #{m} (#{kind})")
         end
 
       {:outbound, {m, req, _trans, _dlg}} when m in [:INVITE, :UPDATE] ->
         case b2bua_reoffer_kind(req) do
           kind when kind in [:address_change, :no_sdp, :no_change] ->
             b2bua_reply_reoffer(req)
-            goto(loop, "#{m} answered locally (#{kind})")
+            stay("#{m} answered locally (#{kind})")
 
           kind ->
             b2bua_forward(req)
-            goto(loop, "relayed #{m} (#{kind})")
+            stay("relayed #{m} (#{kind})")
         end
 
       # One media went quiet. Worth saying, not worth hanging up for — a browser
       # that turned its camera off is still on the call.
       {:ms_event, _ref, {:media_timeout, media}} ->
-        goto(loop, "#{media} went silent")
+        stay("#{media} went silent")
 
       # Every negotiated media is silent: there is nothing left to carry.
       {:ms_event, _ref, :media_lost} ->
@@ -251,27 +251,27 @@ defmodule B2BUA.WebrtcGw do
 
       {:ACK, req, _trans, _dlg} ->
         b2bua_forward(req)
-        goto(loop, "ACK relayed (caller -> callee)")
+        stay("ACK relayed (caller -> callee)")
 
       {:outbound, {:ACK, req, _trans, _dlg}} ->
         b2bua_forward(req)
-        goto(loop, "ACK relayed (callee -> caller)")
+        stay("ACK relayed (callee -> caller)")
 
       {:outbound, {m, req, _trans, _dlg}} when is_atom(m) ->
         b2bua_forward(req)
-        goto(loop, "relayed #{m} (callee -> caller)")
+        stay("relayed #{m} (callee -> caller)")
 
       {:outbound, {code, resp, _trans, _dlg}} when is_integer(code) ->
         b2bua_forward_reply(resp)
-        goto(loop, "relayed #{code} (callee -> caller)")
+        stay("relayed #{code} (callee -> caller)")
 
       {m, req, _trans, _dlg} when is_atom(m) ->
         b2bua_forward(req)
-        goto(loop, "relayed #{m} (caller -> callee)")
+        stay("relayed #{m} (caller -> callee)")
 
       {code, resp, _trans, _dlg} when is_integer(code) ->
         b2bua_forward_reply(resp)
-        goto(loop, "relayed #{code} (caller -> callee)")
+        stay("relayed #{code} (caller -> callee)")
     after
       14_400_000 -> goto(releasing, "maximum call duration reached")
     end

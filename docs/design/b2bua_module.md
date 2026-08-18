@@ -1,8 +1,8 @@
-# B2BUA primitives — DSL extension (design)
+# B2BUA primitives — FSL extension (design)
 
 A B2BUA (back-to-back user agent) capability is essential for what comes next:
 it unlocks useful functions for the `borderline` and `kelixip` products. The
-goal of this document is a **formalism that fits the existing DSL** — a B2BUA
+goal of this document is a **formalism that fits the existing FSL** — a B2BUA
 is written as a plain scenario FSM, with two call legs feeding events into the
 same `on_events` mailbox.
 
@@ -48,14 +48,14 @@ one place — CLAUDE.md, Message Layer):
 | `SIP.Msg.Ops` (message) | `prepare_forwarded_request/2` — strip the hop-scoped headers off a request before it is re-sent on the other leg; `forwarded_reply_fields/1` — what to copy from a response relayed leg-to-leg |
 | `SIP.DialogImpl` (dialog) | per-dialog **event tag** (§2); everything it already does: CSeq, tags, Call-ID, route set, remote target |
 | `SIP.Session.B2bua` (session) | leg bookkeeping, request↔response correlation (§5), the `b2bua_*` macros, automatic teardown (§8) |
-| the scenario (DSL) | the relay policy, as FSM states |
+| the scenario (FSL) | the relay policy, as FSM states |
 
 ## 2. Telling the legs apart: dialog event tags
 
 Both dialogs deliver their events to the same scenario process, with the same
 tuple shapes (`{method, req, trans_pid, dialog_pid}` / `{code, resp,
 trans_pid, dialog_pid}` / `{:dialog_terminated, pid, reason}`). Discriminating
-on `dialog_pid` in guards is possible but unreadable; the DSL needs a literal
+on `dialog_pid` in guards is possible but unreadable; FSL needs a literal
 to pattern-match on.
 
 **Decision: the dialog layer learns an optional `tag`.** A dialog created with
