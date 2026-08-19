@@ -400,15 +400,32 @@ scenario and every block, so nothing has to be added for a block to use it.
 
 Two things do have to be added.
 
-**A challenge verb that is not B2BUA-shaped.** `b2bua_challenge/3` is the only
-way to compose a challenge today, and it is `do_local_reply` plus
-`SIP.Msg.Ops.challenge_header/1`. The same three lines belong on the UAS side:
-**`challenge_invite(params, code \\ 407)` in `SIP.Session.Invite`**, next to
-`reply_invite`, backed by the same `SIP.Msg.Ops.challenge_header/1`. It stays in
-`:elixip2` even though the block that calls it does not — challenging an INVITE
-is SIP, and a scenario that authenticates against something other than auth_db
-needs the verb just as much. `b2bua_challenge/3` stays as it is: scripts use it,
-and it is the right verb when a challenge has to go out on a named leg.
+**A challenge verb that carries the backend's params.** `challenge_invite/2`
+already exists in `SIP.Session.CallUAS` — but only in one shape, a **realm**,
+which it hands to `SIP.Dialog.challenge/4` for the dialog layer to mint a nonce
+from. That is enough for "ask for credentials in this realm" and not enough
+here: `stale` and the `algorithm` the stored secret was hashed with are the
+backend's to decide, and neither survives being re-derived one layer down. A
+client whose nonce merely aged needs `stale` to replay without asking its user
+for a password again.
+
+So the verb takes a **second form** rather than a second name:
+`challenge_invite(params, code \\ 407)` sends the map the application composed,
+verbatim, into the header the code calls for
+(`SIP.Msg.Ops.challenge_header/1`). One macro, two clauses on
+`do_challenge_invite/3`, dispatching on binary vs. map. It stays in `:elixip2`
+even though the block that calls it does not — challenging an INVITE is SIP, and
+a scenario authenticating against something other than auth_db needs it just as
+much.
+
+`b2bua_challenge/3` stays as it is: scripts use it, and it is the right verb when
+a challenge must go out on a *named leg*.
+
+One consequence for the block: `challenge_invite` lives in
+`SIP.Session.CallUAS`, which `use SIP.Scenario` does **not** pull in — unlike
+`reply_invite`, which comes from `SIP.Session.CallUAC` and is therefore
+everywhere. The block declares `use SIP.Session.CallUAS` alongside `use SIP.SBB`,
+the way every server scenario already does.
 
 **A dead dialog must not kill the block, and the fix goes in the framework.**
 `b2bua_reply` wraps its call in `call_leg/1` — four lines, `catch :exit, _ ->
