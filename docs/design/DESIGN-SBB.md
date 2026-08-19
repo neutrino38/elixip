@@ -584,6 +584,12 @@ schema — and the two live in separate files for that reason. What the shared n
 buys is that a script depending on a module gets its verbs from the name it
 already depends on, not that either half may lean on the other.
 
+#### The first instance
+
+`Kelix.Mod.AuthDb.SBB.Authenticate` is the block this pattern was written from:
+the challenge cycle every script gating a request on a digest was copying. Its
+design, and what it answers, is [DESIGN-AUTH.md](DESIGN-AUTH.md#3-the-authentication-block).
+
 #### Packaging
 
 `kelix_modules` beams are installed into `server.module_dir`, one package per
