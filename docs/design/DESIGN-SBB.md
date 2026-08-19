@@ -475,6 +475,125 @@ coordinates an **outside worker** whose result races a timeout, and an SBB is
 in-process code the runner already owns. Closing that gap is worth doing on its
 own merits, not as a detour through this one.
 
+### 7.4 A kelixip module publishes its blocks
+
+`call` and `bridge` are framework blocks: they sequence SIP, they need nothing
+but the legs the scenario already holds, and they live in `:elixip2` next to the
+verbs they are made of. Most of the catalogue is not like that. A block that
+authenticates needs a subscriber table; one that queues a call needs an ACD's
+state; one that admits a leg to a conference needs the MCU. Each of those lives
+in a kelixip module, and so does the block.
+
+> **A kelixip module publishes two kinds of thing: functions a script calls for a
+> decision, and blocks a script enters for a sequence.**
+
+The decision half is what the module doc already describes —
+`Kelix.Mod.AuthDb.authenticate/3` returns a verdict, `Kelix.Mod.Registrar.targets/2`
+returns a peer. The sequence half is the block, and it belongs to the same module
+because **a block goes where the thing it sequences lives**.
+
+#### Names
+
+```
+Kelix.Mod.AuthDb                      # the module: decisions
+Kelix.Mod.AuthDb.SBB                  # the face: __using__ and one macro per verb
+Kelix.Mod.AuthDb.SBB.Authenticate     # the FSM behind authenticate/1
+```
+
+One file per block (`lib/kelix/mod/auth_db/sbb/authenticate.ex`), so the file
+carries the name of the module it defines. A module publishing several blocks
+adds sub-modules, never a level: `Kelix.Mod.Registrar.SBB.Queue`,
+`Kelix.Mod.Mcu.SBB.Admit`. This is `SBB.Call.Establish` and `SBB.Call.Bridge`
+applied outside `:elixip2`, not a second convention.
+
+**The leaf is the verb, and never `Impl`.** A generic leaf costs more than it
+looks: `use SIP.SBB` derives `@sbb_namespace` from the last name segment, so an
+`Impl` leaf makes the default `:impl` for every block of every module. A default
+that is always wrong is one nobody ever reads, which means it will eventually be
+left un-overridden — and the failure is invisible: the block sends
+`{:impl, :authenticated, …}`, the host waits on its `after` for `{:auth, …}`, and
+nothing in the log says why. That is the silence §2.2 refuses at compile time for
+an undeclared *outcome*; the namespace must not become the hole it slips through.
+With the verb as the leaf the default is plausible, and overriding it —
+`@sbb_namespace :auth`, because `{:auth, :authenticated, …}` reads better than
+`{:authenticate, :authenticated, …}` — is a deliberate act.
+
+**The namespace follows the verb a scenario writes, never the module path.**
+`Kelix.Mod.AuthDb.SBB.Authenticate` speaks `:auth`, the same way `SBB.Call.Establish`
+speaks `:call`: what a host pattern-matches is the vocabulary of the service, not
+the address of the code.
+
+#### The call site
+
+The face's `__using__` aliases the **module**, not `SBB`:
+
+```elixir
+use Kelix.Mod.AuthDb        # alias Kelix.Mod.AuthDb, and the SBB macros
+
+state authenticate_caller do
+  AuthDb.SBB.authenticate()
+
+  on_events do
+    {:auth, :authenticated, %{user: user}} -> goto(place_call)
+    ...
+  end
+end
+```
+
+Aliasing `SBB` itself does not work and the failure is immediate rather than
+subtle: two modules aliasing the same `SBB` collide, the second `use` wins, and a
+script using both loses one of its verbs. That is not a corner case —
+`direct-call-with-auth.exs` declares `uses_modules: [:registrar, :auth_db]` and
+would be the first to hit it.
+
+The prefix earns its place by naming **which module** provides the verb, which is
+what a reader wants to know; `SBB.` would only repeat what the shape already says.
+Publishing the macro on the module itself (`AuthDb.authenticate()`) is the shorter
+form and is a trap: `Kelix.Mod.AuthDb.authenticate/3` is the *decision*, and two
+`AuthDb.authenticate` told apart by arity alone — one function, one macro, one
+returning a verdict and one entering an FSM — is a collision of meaning that
+compiles.
+
+#### Why not keep the block in the library and inject the module
+
+The tempting alternative is a framework block taking its collaborator as an
+argument, `authenticate(args: %{backend: Kelix.Mod.AuthDb})`. It does not hold up:
+
+- **it is rarely one collaborator.** A block that authenticates also *composes a
+  challenge*, whose nonce comes from `Kelix.Auth`, in a third application again.
+  Either the injection list grows, or one collaborator's contract grows a
+  responsibility it does not own — packaging bleeding into an interface;
+- **`call/1` is not the precedent it looks like.** It takes `peer:`, a **value**
+  the registrar produced once, and never calls the registrar again. A block that
+  re-decides on each attempt needs the *provider*, not a result. Injecting a value
+  and injecting a collaborator are different moves;
+- **an injected module is checked by nothing.** `sbb_return/1` refuses an
+  undeclared outcome at compile time and the script preflight refuses a missing
+  `uses_modules`; a module in `args` is duck typing that fails on the first
+  request, in the part of a flow where a failure means a request goes unanswered.
+
+Owned by the module, the block is compiled against it and breaks at compile time
+when a signature moves.
+
+#### What this does not blur
+
+Living in the module's namespace does not merge the two halves. The module
+decides; the block composes SIP from the decision. A block calls `authenticate/3`
+the way any caller would — it opens no connection, builds no query, and knows no
+schema — and the two live in separate files for that reason. What the shared name
+buys is that a script depending on a module gets its verbs from the name it
+already depends on, not that either half may lean on the other.
+
+#### Packaging
+
+`kelix_modules` beams are installed into `server.module_dir`, one package per
+module, so a block ships with its module: the block and the backend it cannot
+work without are installed together, or neither is. `Kelix.ModuleSupervisor` puts
+`module_dir` on the code path *before* `Kelix.ScriptPreflight` compiles the
+scripts, so a `use Kelix.Mod.<Name>` at the top of a `.exs` resolves — which is
+worth a test rather than an assumption, because a `use` is resolved when the
+script is compiled where a function call is resolved when it runs.
+
 ## 8. The two blocks that ship: `call` and `bridge`
 
 They are separate blocks rather than one `call()` covering a whole call, and the
