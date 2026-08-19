@@ -87,8 +87,8 @@ sinon, ne rien poser.
 Un booléen `[mediaserver] transport_cc` dans `config.toml`, **défaut `false`**,
 calqué trait pour trait sur `bitrate_feedback` (le motif vient d'être posé) :
 `Kelix.Config` → bloc app env `MediaServer.Mendooze` → lecture dans mendooze.
-Le défaut passera à `true` quand la recette du §6 aura validé le comportement
-du pair — pas avant, la décision se consigne dans ce document.
+Le défaut passera à `true` quand le lot 4 du mediaserver sera livré et que la
+recette du §6 sera passée — pas avant, la décision se consigne dans ce document.
 
 ### 3.4 Points d'ancrage dans ce dépôt
 
@@ -121,29 +121,37 @@ du pair — pas avant, la décision se consigne dans ce document.
   côté mediaserver d'abord.
 - **Pas de renumérotation d'id, pas de direction extmap asymétrique.**
 
-## 5. Le piège de séquencement (à lire avant de coder)
+## 5. Ce que la négociation engage (à lire avant d'ouvrir le bouton)
 
 Négocier `transport-cc` a **deux effets à la fois**, et un seul des deux est
 servi aujourd'hui :
 
 1. Le pair envoie des rapports fmt 15 sur **nos** paquets sortants → consommés
-   par le mediaserver (lot 6, prêt). C'est le but.
+   par le mediaserver (son lot 6, prêt). C'est le but.
 2. Le pair pose l'extension sur **ses** paquets et attend des rapports fmt 15
-   de notre part → le mediaserver n'en émet pas encore (son lot 4). Le BWE
-   émetteur du navigateur retombe alors sur ses rapports de perte RR et sur le
-   REMB/TMMBR que nous émettons toujours (rate-control lot 2) — c'est-à-dire
-   le régime actuel. **Hypothèse à VÉRIFIER à la recette**, pas à croire sur
-   parole : si le débit du navigateur vers nous s'effondre ou plafonne au
-   démarrage une fois le bouton actif, c'est ce mécanisme-là qu'il faut
-   regarder en premier.
+   de notre part → le mediaserver n'en émet pas encore (son lot 4).
 
-Effet de bord attendu et voulu : dès que nos paquets portent l'extension, le
-navigateur **cesse d'émettre du REMB** pour notre flux (son contrôleur de
-réception change de barreau — un mécanisme par paquet, pas par renégociation).
-La consigne côté mediaserver compose les deux sources par `min()`, donc rien à
-faire — mais ne pas s'étonner de voir les REMB entrants disparaître des logs.
+Le second effet n'est pas une gêne, c'est un arrêt. Mesuré le 2026-08-19, Chrome
+en conférence, bouton actif : le débit vidéo du navigateur vers nous tombe de 177
+à 30 kb/s en huit secondes, ×0,8 par seconde, puis reste plat — image
+inutilisable. Le REMB du mediaserver autorise pourtant 1,5 fois ce que Chrome
+envoie, donc il ne contraint rien : la décision vient du navigateur seul. Un pair
+privé de rapports lit notre silence comme un RTT infini et recule jusqu'à son
+plancher. Mécanisme et références au code témoin :
+`mediaserver/rate_control_plan.md`, lot 4.
 
-C'est précisément pour ces deux points que le bouton naît à `false`.
+La négociation ne se coupe pas en deux : l'`a=rtcp-fb transport-cc` de la ligne
+média engage les deux sens. Il n'existe pas de réglage côté contrôleur qui
+consomme le feedback du pair sans lui devoir le sien.
+
+**Le bouton reste donc à `false` jusqu'à la livraison du lot 4 du mediaserver.**
+
+Effet de bord attendu et voulu, une fois le bouton ouvrable : dès que nos paquets
+portent l'extension, le navigateur **cesse d'émettre du REMB** pour notre flux
+(son contrôleur de réception change de barreau — un mécanisme par paquet, pas par
+renégociation). La consigne côté mediaserver compose les deux sources par
+`min()`, donc rien à faire — mais ne pas s'étonner de voir les REMB entrants
+disparaître des logs.
 
 ## 6. Tests et recette
 
@@ -158,22 +166,57 @@ contrôleurs) :
 - côté offre : extmap id 3 présent si bouton actif, propriété posée seulement
   si l'answer le reprend.
 
-**Recette live** (appel Chrome ↔ mediaserver, bouton actif sur dev, mcu avec `-d`) :
+**Recette live** (appel Chrome ↔ mediaserver, bouton actif sur dev, mcu avec
+`-d`). Elle exige le lot 4 du mediaserver : sans lui, le §5 dit ce qui se passe,
+et l'appel n'est pas exploitable.
 1. `grep -a 'Unknown RTP property' /var/log/mcu.log` → ne doit rien rendre de
    nouveau.
 2. `grep -a 'BWE-TX: estimation' /var/log/mcu.log` → des lignes avec
    `stream=<nom de la patte>` et une cible qui bouge : la boucle est fermée.
 3. pcap : nos paquets RTP portent l'extension one-byte (`0xBEDE`) avec l'id
    négocié ; le RTCP entrant porte des paquets PT=205 FMT=15.
-4. `chrome://webrtc-internals` côté navigateur : vérifier l'hypothèse du §5 —
-   le débit d'émission du navigateur vers nous reste gouverné (par nos
-   REMB/TMMBR) et ne s'effondre pas.
+4. `chrome://webrtc-internals` côté navigateur : le débit d'émission vers nous
+   monte et suit le lien, sans le recul de 20 % par seconde décrit au §5.
 5. La séance de mesure complète (netem sur le lien sortant du mediaserver,
    critères chiffrés) est décrite côté mediaserver :
    `mediaserver/mcu/tests/tools/README.md`, patte `tx:<stream>` de
    `bwe_report.py`.
 
-## 7. Références
+## 7. Ce qui est livré
+
+La moitié contrôleur est implémentée. Le bouton reste à `false` : la recette du §6
+n'a pas encore tourné, et c'est elle qui autorise le changement de défaut.
+
+**Où vit la décision.** Une seule lecture, dans la couche SDP partagée
+(`MediaServer.Mendooze.Sdp`, re-exportée par `MediaServer.SdpTools`) :
+
+| fonction | ce qu'elle répond |
+|---|---|
+| `transport_cc_extmap/1` | l'extension à confirmer sur cette media, ou `nil` — bouton, vidéo, direction |
+| `transport_cc_offer/1` | l'extension à offrir sur cette media (id 3), ou `nil` |
+| `transport_cc_uri/0` | l'URI : valeur de l'`a=extmap` et clé de la propriété |
+| `transport_cc_fb/0` | l'attribut `a=rtcp-fb` apparié |
+
+`transport_cc_extmap/1` sert les trois usages : ce que l'answer confirme, ce que
+l'answer du pair a repris, et l'id posé dans la propriété. Les deux contrôleurs
+l'appellent, donc ils ne peuvent pas négocier deux choses différentes. C'est aussi
+pour ça que le bouton se lit là et non dans chaque contrôleur : le module MCU passe
+par `SdpTools` et ne nomme jamais le bloc de l'autre adaptateur.
+
+**Les deux lignes sont indépendantes.** L'`a=extmap` se reprend parce que l'offre le
+déclare ; le `transport-cc` des `a=rtcp-fb` se reprend parce que l'offre le demande.
+La propriété suit l'extmap. Une offre qui demande le message de feedback sans
+déclarer l'extension n'obtient rien : elle réclamerait des rapports sur un numéro de
+séquence que personne n'écrit.
+
+**Ce que le mediaserver reçoit.** `answered_rtcp_fb/1` porte `transport-cc` pour
+l'answer, et `rtcp_fb_props/1` l'écarte : sa propriété est une clé URI valuée par
+l'id, pas un commutateur à `"1"`. `transport_cc_props/1` la pose.
+
+**Le module MCU n'offre jamais** : une jambe de conférence ne fait que répondre. Le
+§3.2 ne concerne donc que l'adaptateur point à point.
+
+## 8. Références
 
 - `mediaserver/sender_bwe_plan.md` — conception du lot 6, décision D6
   (négociation) ; son lot 4 décrit le générateur fmt 15 à venir.
