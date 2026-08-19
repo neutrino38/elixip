@@ -220,6 +220,49 @@ The stored HA1 for `username`@`realm`. Returns `{:error, :down}` when the DB poo
 is not running and `{:error, _}` on a query error; the query is bounded by
 `call_timeout_ms`.
 
+## Service building blocks
+
+### `SBB.authenticate/1`
+
+```elixir
+use Kelix.Mod.AuthDb          # alias + the blocks this module publishes
+
+AuthDb.SBB.authenticate(opts \\ [])
+```
+
+Runs the whole challenge cycle on the request the scenario is serving —
+challenge, wait for the credentials, verify them, challenge again — and answers
+one event. Written in a state of its own, with an `on_events` matching the
+outcomes:
+
+| Outcome | Data | Meaning |
+|---|---|---|
+| `{:auth, :authenticated, …}` | `%{user, realm}` | The digest checked out |
+| `{:auth, :cancelled, …}` | `%{}` | The caller CANCELled the challenged request |
+| `{:auth, :caller_gone, …}` | `%{reason}` | The dialog ended while waiting for credentials |
+| `{:auth, :timeout, …}` | `%{block}` | No credentials came back before the block's deadline |
+| `{:auth, :refused, …}` | `%{code, reason, attempts}` | `max_attempts` rejected attempts were answered |
+
+`args`:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `:realm` | `sip_ctx.domain` | The realm to require |
+| `:code` | `407` | `407` (Proxy-Authenticate) or `401` (WWW-Authenticate) |
+| `:max_attempts` | `3` | Rejected attempts to answer before `:refused`; `:infinity` to answer within the deadline only |
+
+Options of `sbb_fsm/2` are accepted too — `timeout:` overrides the block's own
+32 s deadline.
+
+A rejected attempt is answered and the block keeps waiting: a `403` is one
+request's verdict, and a client that fixes its credentials is served. The
+identity proved is recorded in the session context, so the leg the scenario
+places next carries `P-Asserted-Identity: <sip:user@realm>` — unless the request
+asks for `Privacy: id`, which asserts nothing.
+
+The facades stay available: a scenario needing another policy calls
+`authenticate/3` and composes its own responses.
+
 ## Control commands
 
 ### `auth_db show`
@@ -292,42 +335,33 @@ end
 ```elixir
 # in a call scenario — see apps/kelixip/scripts/direct-call-with-auth.exs
 state authenticate_caller do
-  req = last_uas_req()
+  AuthDb.SBB.authenticate()
 
-  case Kelix.Mod.AuthDb.authenticate(req, sip_ctx.domain) do
-    {:ok, identity} ->
-      SIP.Scenario.Monitor.note_account(identity.user)
-      goto place_call, "INVITE authenticated as #{identity.user}"
+  on_events do
+    {:auth, :authenticated, %{user: user}} ->
+      goto place_call, "INVITE authenticated as #{user}"
 
-    # 407 + Proxy-Authenticate is what UAs expect on a call (b2bua_challenge/3
-    # defaults to it). Pass the algorithm: the challenge must name the hash the
-    # base can verify — advertising MD5 against a sha256 base re-challenges for
-    # ever. `stale` lets the client replay without prompting for a password.
-    {:requireauth, stale} ->
-      params =
-        Kelix.Auth.challenge_params(sip_ctx.domain,
-          stale: stale,
-          algorithm: Kelix.Mod.AuthDb.challenge_algorithm()
-        )
+    {:auth, :cancelled, _} ->
+      scenario_success("caller cancelled the challenged call")
 
-      b2bua_challenge(req, params, 407)
-      goto wait_credentials, "407 challenge"
+    {:auth, :caller_gone, %{reason: reason}} ->
+      scenario_success("caller gave up: #{inspect(reason)}")
 
-    # Answered, but the instance stays: the dialog outlives it, so ending here
-    # would leave the next INVITE of that Call-ID unanswered. A 403 is one
-    # request's verdict, not the end of the conversation.
-    {:reject, code, reason} ->
-      b2bua_reply(req, code, reason)
-      goto wait_credentials, "#{code} #{reason}"
+    {:auth, :timeout, _} ->
+      scenario_success("no credentials came back")
+
+    {:auth, :refused, %{attempts: attempts}} ->
+      scenario_success("gave up after #{attempts} refused attempts")
   end
 end
 ```
 
 The reference call script is
 [`apps/kelixip/scripts/direct-call-with-auth.exs`](../../../apps/kelixip/scripts/direct-call-with-auth.exs)
-(`direct-call.exs` plus the three states that authenticate the caller); it is
-covered by `apps/kelix_modules/test/direct_call_auth_script_test.exs`, which injects
-the subscriber table as a function instead of a database.
+(`direct-call.exs` plus one state that authenticates the caller); it is covered
+by `apps/kelix_modules/test/direct_call_auth_script_test.exs`, and the block
+itself by `apps/kelix_modules/test/auth_sbb_test.exs` — both inject the
+subscriber table as a function instead of a database.
 
 See the credential-gated live test
 (`apps/kelixip/test/auth_db_live_test.exs`) for a full DB → verdict example.
