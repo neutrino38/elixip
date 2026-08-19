@@ -698,6 +698,10 @@ event nobody will send. A bounded block gets `:timeout` in its vocabulary for fr
   control back to the state that called it. This, not `scenario_success`, is how a block returns.
 - `sbb_data_get(key)` / `sbb_data_set(key, value)` — the block's private sandbox. `appdata` itself is shared
   with the host, which is the point; the sandbox is what cannot collide with a host key of the same name.
+- `sbb_cleanup do … end` — what the block releases when it is left **without** returning: a terminal, a
+  cooperative shutdown, an enclosing block's deadline. It does not run on `sbb_return`, which is a branch the
+  block wrote and where it already released what it had to. The body sees `sip_ctx` and returns one; nested
+  blocks release innermost first.
 
 **The rules that matter**
 
@@ -711,6 +715,8 @@ event nobody will send. A bounded block gets `:timeout` in its vocabulary for fr
   matched first: arrival order, as always.
 - **Every branch returns.** A block branch ends on `sbb_return` or on a terminal. One that falls through
   leaves the host waiting for an event nobody will send.
+- **Leaving without returning is not leaking.** Whatever way a block is torn out of — a terminal, a
+  shutdown, an outer deadline — its `sbb_cleanup` runs first, innermost block first.
 - **Blocks compose** — a block may call a block, and a terminal thrown three deep still reaches the root.
   They cannot run *concurrently*, though: one point of control, a stack of calls.
 - A block has **no `run/1`**: it is not a scenario, and `SIP.Scenario.Loader` will never mistake one for the

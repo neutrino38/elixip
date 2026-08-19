@@ -91,6 +91,7 @@ defmodule SIP.Scenario do
           sbb_fsm: 1,
           sbb_fsm: 2,
           sbb_return: 1,
+          sbb_cleanup: 1,
           sbb_data_get: 1,
           sbb_data_set: 2,
           notify: 2,
@@ -175,6 +176,7 @@ defmodule SIP.Scenario do
           def __sbb_timeout_event__ do
             @sbb_timeout_event || {@sbb_namespace, :timeout, %{block: __MODULE__}}
           end
+
         end
       else
         # An SBB deliberately does NOT define run/1: `SIP.Scenario.Loader` picks the
@@ -943,6 +945,52 @@ defmodule SIP.Scenario do
             Logger.error(Exception.format(:error, e, __STACKTRACE__))
             scenario_failure("exception!")
         end
+      end
+    end
+  end
+
+  @doc """
+  Declare what a **service building block** releases when it is left without
+  returning — by a terminal, by a cooperative shutdown, or by an enclosing
+  block's deadline.
+
+  It does **not** run on `sbb_return/1`: an ordinary ending is a branch the
+  block wrote itself, and whatever it had to release it released there. What
+  this block covers is the other way out, the one no branch of the block chose:
+
+      defmodule SBB.Announce do
+        use SIP.SBB
+
+        @sbb_namespace :announce
+        @sbb_returns [played: "the file reached its end — %{}"]
+
+        sbb_cleanup do
+          # the host is going away and this block reserved a player
+          media_stop_playback()
+          sip_ctx
+        end
+
+        # ...
+      end
+
+  The body sees `sip_ctx` and must return a `%SIP.Context{}` — the one the
+  unwinding carries on with, so a cleanup may annotate the context the terminal
+  is about to finalize. Anything else is ignored and the context passes through
+  unchanged, and an exception is logged rather than restarting the unwinding
+  that is already in progress.
+
+  Blocks unwind innermost first, so a nested block releases what it reserved
+  before the block that called it does. This is the counterpart of `cleanup` in
+  the TypeScript dialect (`finite-state-language`, spec §8.4).
+  """
+  defmacro sbb_cleanup(do: body) do
+    quote do
+      require Logger
+
+      @doc false
+      def __sbb_cleanup__(var!(sip_ctx)) do
+        _ = var!(sip_ctx)
+        unquote(body)
       end
     end
   end

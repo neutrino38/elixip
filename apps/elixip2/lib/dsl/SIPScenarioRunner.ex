@@ -613,8 +613,18 @@ defmodule SIP.Scenario.Runner do
         sbb_loop(module, :initial_state, entry_ctx, states, ref)
       catch
         # Our own deadline fired. A deeper block lets the throw pass, so it is
-        # always the right frame that answers.
-        {:sbb_deadline_hit, ^ref, ctx2} -> {module.__sbb_timeout_event__(), ctx2}
+        # always the right frame that answers. This is an ordinary ending — the
+        # block returns its timeout event — so `sbb_cleanup` does not run.
+        {:sbb_deadline_hit, ^ref, ctx2} ->
+          {module.__sbb_timeout_event__(), ctx2}
+
+        # Every other non-local exit leaves this block *without* returning from
+        # it: a terminal, a cooperative shutdown, or an enclosing block's
+        # deadline. The block releases what it reserved before the throw carries
+        # on unwinding, which is what makes nested blocks release innermost
+        # first (design §4.4).
+        thrown ->
+          throw(sbb_unwind_cleanup(module, thrown))
       after
         pop_sbb_frame()
         disarm_sbb_deadline(timer, ref)
@@ -633,6 +643,39 @@ defmodule SIP.Scenario.Runner do
     report(module, report_account(host_ctx), host_state, event, :scenario)
 
     host_ctx
+  end
+
+  # Run a block's `sbb_cleanup` on the context the throw is carrying, and hand
+  # the term back so it can go on unwinding. Only the shapes the DSL throws
+  # carry a context; anything else passes through untouched.
+  defp sbb_unwind_cleanup(module, {:sbb_terminal, outcome, reason, type, ctx}),
+    do: {:sbb_terminal, outcome, reason, type, sbb_cleanup(module, ctx)}
+
+  defp sbb_unwind_cleanup(module, {:sbb_shutdown, desc, type, ctx}),
+    do: {:sbb_shutdown, desc, type, sbb_cleanup(module, ctx)}
+
+  defp sbb_unwind_cleanup(module, {:sbb_deadline_hit, other_ref, ctx}),
+    do: {:sbb_deadline_hit, other_ref, sbb_cleanup(module, ctx)}
+
+  defp sbb_unwind_cleanup(_module, thrown), do: thrown
+
+  defp sbb_cleanup(module, ctx) do
+    if function_exported?(module, :__sbb_cleanup__, 1) do
+      try do
+        case module.__sbb_cleanup__(ctx) do
+          %SIP.Context{} = ctx2 -> ctx2
+          _other -> ctx
+        end
+      rescue
+        e ->
+          # We are already unwinding: a throwing cleanup must not restart it.
+          Logger.error("Exception in sbb_cleanup of #{inspect(module)}")
+          Logger.error(Exception.format(:error, e, __STACKTRACE__))
+          ctx
+      end
+    else
+      ctx
+    end
   end
 
   defp push_sbb_frame(module),

@@ -124,6 +124,43 @@ defmodule SIP.Test.SbbFsm do
     end
   end
 
+  # Blocks that record what they released, so the order of unwinding is visible.
+  # `sbb_cleanup` runs when a block is left WITHOUT returning; an ordinary
+  # `sbb_return` is a branch the block wrote, and releases what it must there.
+  defmodule CleansUp do
+    use SIP.SBB
+
+    @sbb_returns [done: "returned normally, so no cleanup ran — %{}"]
+
+    sbb_cleanup do
+      send(:sbb_cleanup_watcher, {:released, :inner})
+      sip_ctx
+    end
+
+    state initial_state do
+      on_events do
+        {:return_now, _} -> sbb_return({:cleans_up, :done, %{}})
+        {:die, _} -> scenario_failure("the block was told to stop everything")
+      end
+    end
+  end
+
+  defmodule CleansUpOuter do
+    use SIP.SBB
+
+    @sbb_returns [unreachable: "the inner block ends the scenario first"]
+
+    sbb_cleanup do
+      send(:sbb_cleanup_watcher, {:released, :outer})
+      sip_ctx
+    end
+
+    state initial_state do
+      sbb_fsm(CleansUp)
+      sbb_return({:cleans_up_outer, :unreachable, %{}})
+    end
+  end
+
   # ── Hosts ───────────────────────────────────────────────────────────────────
 
   defmodule HostEcho do
@@ -323,6 +360,41 @@ defmodule SIP.Test.SbbFsm do
     end
   end
 
+  defmodule HostCleanupOnTerminal do
+    use SIP.Scenario
+
+    state initial_state do
+      send(self(), {:die, :now})
+      sbb_fsm(CleansUp)
+      scenario_success("the block should never have let us get here")
+    end
+  end
+
+  defmodule HostCleanupOnReturn do
+    use SIP.Scenario
+
+    state initial_state do
+      send(self(), {:return_now, :please})
+      sbb_fsm(CleansUp)
+
+      on_events do
+        {:cleans_up, :done, _} -> scenario_success("returned")
+      after
+        1_000 -> scenario_failure("block never returned")
+      end
+    end
+  end
+
+  defmodule HostCleanupNested do
+    use SIP.Scenario
+
+    state initial_state do
+      send(self(), {:die, :now})
+      sbb_fsm(CleansUpOuter)
+      scenario_success("the nested block should never have let us get here")
+    end
+  end
+
   # ── Harness ─────────────────────────────────────────────────────────────────
 
   defp run(module) do
@@ -413,6 +485,39 @@ defmodule SIP.Test.SbbFsm do
 
   test "resume: true keeps the sandbox across calls" do
     assert :ok = run(HostSandboxResumed)
+  end
+
+  # ── sbb_cleanup ─────────────────────────────────────────────────────────────
+
+  # The scenario runs in a process of its own, so a cleanup reaches the test
+  # through a registered name rather than through `self()`.
+  defp as_watcher(fun) do
+    Process.register(self(), :sbb_cleanup_watcher)
+    fun.()
+  after
+    Process.unregister(:sbb_cleanup_watcher)
+  end
+
+  test "a terminal inside a block runs that block's sbb_cleanup" do
+    as_watcher(fn ->
+      assert {:error, "the block was told to stop everything"} = run(HostCleanupOnTerminal)
+      assert_received {:released, :inner}
+    end)
+  end
+
+  test "an ordinary sbb_return does not run sbb_cleanup" do
+    as_watcher(fn ->
+      assert :ok = run(HostCleanupOnReturn)
+      refute_received {:released, :inner}
+    end)
+  end
+
+  test "nested blocks release innermost first" do
+    as_watcher(fn ->
+      assert {:error, "the block was told to stop everything"} = run(HostCleanupNested)
+      assert_received {:released, :inner}
+      assert_received {:released, :outer}
+    end)
   end
 
   # ── Misuse ──────────────────────────────────────────────────────────────────

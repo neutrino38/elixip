@@ -1,8 +1,9 @@
 # Service building blocks
 
-**Status: implemented, 1.5.0.** A service building block is a reusable FSM
-fragment: a scenario enters it, the block runs on the scenario's own process,
-context, dialogs and mailbox, and hands control back by posting one event.
+**Status: implemented, 1.5.0; converged with FSL/TS in 1.5.1.** A service
+building block is a reusable FSM fragment: a scenario enters it, the block runs
+on the scenario's own process, context, dialogs and mailbox, and hands control
+back by posting one event.
 
 The user-facing reference is [FSL.md](../../FSL.md#service-building-blocks-sbb);
 what remains to build is [sbb_evolutions.md](sbb_evolutions.md). This document is
@@ -314,6 +315,39 @@ from nothing — the serial hunt calling `call()` on target after target must no
 inherit the previous attempt's scratch. The exception is explicit:
 `sbb_fsm(module, resume: true)` keeps what is there, which is what an SBB
 designed to be re-entered after an interruption needs (§8.3).
+
+### 4.2b What a block releases when it is torn out: `sbb_cleanup`
+
+`sbb_return` is a branch the block wrote: whatever it reserved, it releases on
+that branch, where the author can see both. Every *other* way out of a block is
+one no branch of it chose — a terminal written three states down, a cooperative
+shutdown addressed to the scenario, an enclosing block's deadline expiring — and
+those unwind through the block without giving it a line to run.
+
+So a block may declare `sbb_cleanup do … end`, run on exactly those exits and
+never on `sbb_return`. Three things make it behave the way the rest of the layer
+does:
+
+- **it runs before the throw carries on.** `run_sbb/3` catches every thrown term
+  that is not its own deadline, runs the cleanup on the context the term
+  carries, and re-throws the term with the context the cleanup returned. Nested
+  blocks therefore release **innermost first**, each frame taking its turn as
+  the unwinding passes through it;
+- **it may annotate the context.** The body returns a `%SIP.Context{}` — the one
+  the terminal is about to finalize — so a cleanup can record why it released
+  what it released. Anything else is ignored and the context passes through;
+- **it cannot restart the unwinding.** An exception inside a cleanup is logged
+  and swallowed: we are already on the way out, and a cleanup that throws would
+  replace the terminal the scenario is carrying with its own accident.
+
+This is the one piece of the layer where the TypeScript dialect was ahead:
+`SbbDef.cleanup` shipped in `finite-state-language` 0.1.3 with these semantics,
+and §10 records the convergence going that way rather than the other.
+
+`@sbb_timeout` expiring is deliberately **not** one of the exits that runs it:
+the block returns `{namespace, :timeout, %{block: module}}`, which is an
+ordinary return, and §7.3 is explicit that the deadline is an outcome like any
+other rather than a special case.
 
 ### 4.3 State names do not collide, and never could
 
@@ -781,12 +815,30 @@ because nothing states it today:
 messages, outliving the state that spawned it. `sbb_fsm` calls a *subroutine*:
 no second party, no concurrency, the caller suspended until it returns.
 
-Trix's `CallMachine` is the instructive borderline case: one instance per call,
-its own `dialing / ringing / connected / hangingup` states, its own view — it
-*looks* like the `call()` of §8. It is not, and the giveaway is one line of
-its constructor: the `RTCSession` is handed to it in `args`. It **owns** its
-leg, it does not observe the parent's. That is a `spawn`, and it is right to be
-one.
+Trix's `CallMachine` was the instructive borderline case, and it was read
+wrongly here until 2026-08-19. The argument recorded was: it takes its
+`RTCSession` in `args`, so it **owns** its leg rather than observing its
+parent's, so it is a `spawn`.
+
+That argument does not survive looking at what the parent had to build around
+it. `PhoneMachine` kept a `CallView` mirror of the child's context, refreshed by
+a `notifyParent` after every significant change; the child replayed every UI
+command the parent forwarded it; and the parent read `ctx.call.connectedAt`,
+`ctx.call.endedBy` and `ctx.call.media` out of that mirror to write one line of
+call history. Two contexts, kept in step by hand — which is the shape a
+*subroutine* takes when it has been written as an actor.
+
+The `RTCSession` is not the discriminator. What the parent hands the child in
+`args` it could equally hand a block in `args`; what settles it is whether the
+two machines have **separate lives**. Trix's do not: the phone is in `in_call`
+for exactly as long as the call is up, and it has nothing else to do meanwhile.
+That is a subroutine call, and Trix 0.2 writes it as one — `CallBlock`, entered
+from `in_call`, writing the call's outcome into the phone's own context and
+handing back `{:call, :ended | :failed | :missed, …}`.
+
+A `spawn` remains right where the two lives really are separate: a callee
+simulator answering while the caller keeps dialling, a load generator. The
+discriminator is concurrency, not ownership of a handle.
 
 ## 10. One vocabulary across the two dialects
 
@@ -797,13 +849,24 @@ the second. Two implementations of one language may diverge on *mechanism*; they
 must not diverge on *names*, because a name is the only thing a reader carries
 from one dialect to the other.
 
-**One concept, one name.** A concept present in both dialects is spelled
-the same in both, modulo the casing convention of each language (`snake_case`
-vs `camelCase`) and the `fx.` namespace TS uses where Elixir has bare macros.
-Where the two spellings differ today, **the two converge — breaking and
-reimplementing on either side is acceptable**; `finite-state-language` is
-0.x with one known consumer, and Elixip carries deprecated aliases the way
-`sub_fsm` was carried into 1.5.0.
+**One concept, one name — and, since 2026-08-19, one contract.** A concept
+present in both dialects is spelled the same in both, modulo the casing
+convention of each language (`snake_case` vs `camelCase`) and the `fx.`
+namespace TS uses where Elixir has bare macros. Where the two spellings differ
+today, **the two converge — breaking and reimplementing on either side is
+acceptable**; `finite-state-language` is 0.x with one known consumer, and
+Elixip carries deprecated aliases the way `sub_fsm` was carried into 1.5.0.
+
+Names were the cheap half, and stopping there would have been a poor trade: two
+dialects agreeing on `sbb_fsm` / `fx.sbb` while one fixed
+`{namespace, outcome, data}` and the other let a block return any event it liked
+still make a reader relearn the layer on crossing over. So the 2026-08-19 pass
+converged the *contract*: the return shape, the declared vocabulary, the
+block-level bound and `resume:` moved to TS (`finite-state-language` 0.2.0, a
+deliberate breaking release), and the per-block `cleanup` moved here (§4.2b,
+1.5.1). What is left different is left different **for a reason each side can
+state**, and those reasons are in the last three rows of the table below and in
+"what TS is not expected to support".
 
 | Concept | Elixir | TypeScript | Status |
 |---|---|---|---|
@@ -818,6 +881,14 @@ reimplementing on either side is acceptable**; `finite-state-language` is
 | cooperative shutdown | `on_shutdown` | `onShutdown` | aligned |
 | terminals | `scenario_success` / `_failure` / `_aborted` | `success()` / `failure()` / `aborted()` | aligned (the prefix is a namespacing need Elixir has and TS does not) |
 | bounded async work | — (`Valet`, and `http_GET` built on it) | `fx.task(work, tag)` | **gap on the Elixir side**: no FSL verb, only the `Valet` implementation and one `http_GET` facade over it |
+| what a block returns | `{namespace, outcome, data}` | `{ type: "namespace:outcome", data }` | **converged 2026-08-19** — one contract, spelled for a dialect that dispatches on `type`; `finite-state-language` 0.2.0 |
+| a block's namespace | `@sbb_namespace` | `namespace:` | **converged 0.2.0** — was convention only on the TS side |
+| a block's vocabulary | `@sbb_returns`, `__sbb_returns__/0` | `returns:`, `block.returns` | **converged 0.2.0** — TS additionally requires it exhaustive over the return union |
+| ending a block | `sbb_return({ns, outcome, data})` | `fx.sbbReturn(outcome, data)` | aligned — TS composes the event from the declared namespace |
+| the block's own bound | `@sbb_timeout`, 32 s by default, `:infinity` to opt out | `timeout: { delay }`, required, `"infinity"` to opt out | **converged 0.2.0** on the shape; the *default* differs on purpose — timer B is a bound a browser does not have |
+| the deadline as an outcome | `:timeout` folded into the vocabulary for free | `timeout.then` optional; without it, `{ns}:timeout` | **converged 0.2.0** — TS refuses at define time a bounded block that declares neither |
+| re-entering a block | `sbb_fsm(mod, resume: true)` | `fx.sbb(block, { resume: true })` | **converged 0.2.0** — was missing on the TS side |
+| what a block releases | `sbb_cleanup do … end` | `cleanup: (ctx, data) => …` | **converged 2026-08-19** — this one moved the *other* way: TS had it, Elixir 1.5.1 gained it |
 
 Three points in that table need their reasoning recorded.
 
@@ -860,6 +931,22 @@ behaviour under load — TS drops the oldest event with a warning at 32, Elixir
 grows memory. Already true today; SBBs make it routine, because a sub-machine
 that runs for 30 s ignoring everything outside its own sequence *is* the
 `cancelling` specimen.
+
+**Where the two are still allowed to differ.** Three, and each has a cause in
+the runtime rather than in the design:
+
+- **the bound's default.** Elixir defaults `@sbb_timeout` to 32 s because timer
+  B is a real bound of the protocol it serves. A browser block has no such
+  number, so TS makes `timeout` required and has no default at all. Inventing
+  one there would be a default that is always either wrong or invisible;
+- **where the call may appear.** `sbb_fsm` is refused inside an `on_events`
+  clause (§6) because Elixir's deadline is absolute; TS's is relative, so
+  `fx.sbb` is allowed from an `enter`, a handler and an `after.then` alike;
+- **the queue under load.** TS's pending queue is bounded and inspectable and
+  drops the oldest with a warning at 32; the BEAM mailbox is unbounded and
+  opaque. Same observable contract, opposite behaviour when a block ignores
+  everything for thirty seconds — which, as noted below, is exactly what the
+  `cancelling` specimen does.
 
 **Keeping it true.** The two specs live in two repositories that nothing
 synchronises — the exact failure mode §1 describes for scenarios, applied to
@@ -904,7 +991,13 @@ it there in the same breath.
 8. **A cooperative shutdown reaching a block runs the host's `on_shutdown`.**
    Ending the scenario from inside the block instead skips the block where a
    script frees what the call reserved, and leaks it.
-9. **An attribute read during macro expansion is written during macro
+9. **`sbb_cleanup` runs on every way out of a block except returning from
+   it.** A terminal, a shutdown and an enclosing block's deadline unwind
+   through a block without giving any of its branches a line to run, so what
+   it reserved would leak; `sbb_return` is a branch it wrote, and releases
+   there. Nested blocks release innermost first, and a throwing cleanup is
+   logged rather than allowed to replace the terminal being carried.
+10. **An attribute read during macro expansion is written during macro
    expansion.** The namespaces `on_events` classifies with are gathered while
    `sbb_fsm` and the face modules expand; a `Module.register_attribute` call
    sitting in a `__using__` quote runs later, when the module body is evaluated,
