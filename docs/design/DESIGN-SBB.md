@@ -666,9 +666,9 @@ one.
 ## 10. One vocabulary across the two dialects
 
 FSL exists twice — `:elixip2` on the BEAM, `finite-state-language` on npm
-(spec `fsl-typescript/spec/fsl-js-ts.md`, which reserves the block names on
-that side and records this rule) — and Trix is a real consumer of the
-second. Two implementations of one language may diverge on *mechanism*; they
+(spec `fsl-typescript/spec/fsl-js-ts.md` §8.4, which now implements the block
+names it had reserved, and records this rule) — and Trix is a real consumer of
+the second. Two implementations of one language may diverge on *mechanism*; they
 must not diverge on *names*, because a name is the only thing a reader carries
 from one dialect to the other.
 
@@ -683,8 +683,8 @@ reimplementing on either side is acceptable**; `finite-state-language` is
 | Concept | Elixir | TypeScript | Status |
 |---|---|---|---|
 | spawn a child machine | `spawn_fsm/2` | `fx.spawn` | **converged 1.5.0** — was `sub_fsm`, kept as a deprecated alias |
-| enter a sub-machine (SBB) | `sbb_fsm/2` | `fx.sbb` | new on both sides — free to fix now, expensive to fix twice |
-| return from an SBB | `sbb_return/1` | `fx.sbbReturn` | new on both sides |
+| enter a sub-machine (SBB) | `sbb_fsm/2` | `fx.sbb` | **implemented on both sides** — Elixir 1.5.0, `finite-state-language` 0.1.3 |
+| return from an SBB | `sbb_return/1` | `fx.sbbReturn` | **implemented on both sides** |
 | message to a child | `notify/2` | `fx.notify` | aligned |
 | message to the parent | `notify_parent/1` | `fx.notifyParent` | aligned |
 | message received from the parent | `{:parent_msg, p}` | `parent:msg` | **converged 1.5.0** — was `{:scenario_msg, :parent, p}` |

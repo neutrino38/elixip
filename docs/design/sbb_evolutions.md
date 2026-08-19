@@ -47,13 +47,20 @@ packaging and are still copied per script:
 `queue()` — the ACD verb — is a block too, but what it needs first is the kelixip
 objects it takes names for: [kelixip-b2bua.md](kelixip-b2bua.md).
 
-## 4. The TypeScript side
+## 4. The TypeScript side — done
 
-`fx.sbb` and `fx.sbbReturn` are **reserved, not implemented** in the TypeScript
-dialect (`fsl-typescript/spec/fsl-js-ts.md`). The names and the return contract
-are agreed on both sides; the mechanism is not written. Nothing in the Elixir
-implementation depends on it — the two dialects share a vocabulary, not a
-runtime.
+`fx.sbb` and `fx.sbbReturn` shipped in `finite-state-language` 0.1.3
+(`fsl-typescript/spec/fsl-js-ts.md` §8.4), so this is no longer open. Five
+points the reserved contract had left unsaid were settled there, and §8.4 now
+carries them: the context is shared while the scratch space is not, the host's
+deadline is armed afresh rather than resumed, `fx.sbb` is the last thing a
+state body does, `state` stays the host's while a block runs, and the two
+compile-time checks TypeScript gets for free — the host must provide what a
+block requires, and must have a clause for what it can return.
+
+The last one is worth carrying back: it is §5 of this document, obtained at no
+cost on the other dialect because assignability answers it. Elixir cannot get
+it the same way, but the failure it prevents is the same one.
 
 ## 5. Telling a host it has not handled an outcome
 
