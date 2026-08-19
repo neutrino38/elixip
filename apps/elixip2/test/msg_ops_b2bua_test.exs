@@ -91,7 +91,7 @@ defmodule SIP.Test.MsgOpsB2bua do
   end
 
   describe "prepare_forwarded_request/2 — what crosses" do
-    test "body, identity headers and unknown headers pass through unchanged" do
+    test "body, the From identity and unknown headers pass through unchanged" do
       req = parse!("SIP-INVITE-LVP.txt")
       fwd = forwarded!(req)
 
@@ -103,9 +103,15 @@ defmodule SIP.Test.MsgOpsB2bua do
       {:ok, orig_from} = SIP.Uri.parse(req.from)
       assert fwd.from.userpart == orig_from.userpart
       assert fwd.from.domain == orig_from.domain
-      assert Map.get(fwd, "P-Asserted-Identity") == Map.get(req, "P-Asserted-Identity")
       assert Map.get(fwd, "X-Account-Code") == Map.get(req, "X-Account-Code")
       assert fwd.method == :INVITE
+
+      # P-Asserted-Identity used to be asserted here, beside From, as one more
+      # "identity header that crosses unchanged" — and this sample carries a
+      # real one. That is precisely the laundering RFC 3325 §5 forbids: relaying
+      # a peer's claim signs it with our name. It now has a describe of its own,
+      # and what crosses is only what we asserted ourselves.
+      refute Map.has_key?(fwd, "P-Asserted-Identity")
     end
 
     test "the User-Agent is ours, not the caller's" do
@@ -269,6 +275,112 @@ defmodule SIP.Test.MsgOpsB2bua do
       iced = @base <> "a=ice-ufrag:aaaa\r\na=ice-pwd:bbbb\r\n"
       restarted = @base <> "a=ice-ufrag:cccc\r\na=ice-pwd:dddd\r\n"
       assert Ops.reoffer_kind(offer(restarted), iced) == :address_change
+    end
+  end
+
+  describe "prepare_forwarded_request/2 — P-Asserted-Identity (RFC 3325)" do
+    # A claim by a peer we do not trust, relayed as-is, becomes an assertion
+    # signed by this node. It crossed unchanged until the denylist grew a rule
+    # of its own for it.
+    test "an inbound assertion never crosses, with nothing authenticated" do
+      req =
+        parse!("SIP-INVITE-LVP.txt")
+        |> Map.put("P-Asserted-Identity", "<sip:boss@example.com>")
+
+      refute Map.has_key?(forwarded!(req), "P-Asserted-Identity")
+    end
+
+    test "it does not survive under another spelling either" do
+      # A header the parser has no atom for keeps the peer's own spelling as its
+      # map key, so a case-sensitive delete would leave this one standing.
+      req =
+        parse!("SIP-INVITE-LVP.txt")
+        |> Map.put("p-asserted-identity", "<sip:boss@example.com>")
+
+      fwd = forwarded!(req)
+
+      refute Enum.any?(fwd, fn
+               {k, _} when is_binary(k) -> String.downcase(k) == "p-asserted-identity"
+               _ -> false
+             end)
+    end
+
+    test "ours is asserted from the identity a verdict proved" do
+      uri = %SIP.Uri{scheme: "sip:", userpart: "alice", domain: "example.com"}
+      fwd = forwarded!(parse!("SIP-INVITE-LVP.txt"), asserted_identity: uri)
+
+      assert Map.get(fwd, "P-Asserted-Identity") == "<sip:alice@example.com>"
+    end
+
+    test "ours replaces the peer's, rather than joining it" do
+      req =
+        parse!("SIP-INVITE-LVP.txt")
+        |> Map.put("P-Asserted-Identity", "<sip:boss@example.com>")
+
+      uri = %SIP.Uri{scheme: "sip:", userpart: "alice", domain: "example.com"}
+      fwd = forwarded!(req, asserted_identity: uri)
+
+      assert Map.get(fwd, "P-Asserted-Identity") == "<sip:alice@example.com>"
+    end
+
+    test "nothing is asserted when nothing was proved" do
+      refute Map.has_key?(forwarded!(parse!("SIP-INVITE-LVP.txt")), "P-Asserted-Identity")
+    end
+
+    # RFC 3325 §7: a B2BUA forwarding to an arbitrary registered contact leaves
+    # the trust domain, so a caller asking to be anonymous must stay anonymous.
+    test "Privacy: id withholds the assertion" do
+      uri = %SIP.Uri{scheme: "sip:", userpart: "alice", domain: "example.com"}
+
+      req = parse!("SIP-INVITE-LVP.txt") |> Map.put("Privacy", "id")
+      refute Map.has_key?(forwarded!(req, asserted_identity: uri), "P-Asserted-Identity")
+
+      # …and it is one value of a list, not the whole header (RFC 3323 §4.2)
+      req = parse!("SIP-INVITE-LVP.txt") |> Map.put("Privacy", "user;id")
+      refute Map.has_key?(forwarded!(req, asserted_identity: uri), "P-Asserted-Identity")
+    end
+
+    test "another privacy value does not withhold it" do
+      uri = %SIP.Uri{scheme: "sip:", userpart: "alice", domain: "example.com"}
+      req = parse!("SIP-INVITE-LVP.txt") |> Map.put("Privacy", "session")
+
+      assert Map.get(forwarded!(req, asserted_identity: uri), "P-Asserted-Identity") ==
+               "<sip:alice@example.com>"
+    end
+  end
+
+  describe "SIP.Context.assert_identity/2" do
+    test "turns a verdict into the URI to assert, once" do
+      ctx = SIP.Context.assert_identity(%SIP.Context{}, %{user: "alice", realm: "example.com"})
+
+      assert ctx.asserted_identity == %SIP.Uri{
+               scheme: "sip:",
+               userpart: "alice",
+               domain: "example.com"
+             }
+    end
+
+    test "falls back to the context domain as the realm" do
+      ctx =
+        %SIP.Context{domain: "example.com"}
+        |> SIP.Context.assert_identity(%{user: "alice"})
+
+      assert ctx.asserted_identity.domain == "example.com"
+    end
+
+    test "nil clears it, so a scenario can withdraw an assertion" do
+      ctx =
+        %SIP.Context{}
+        |> SIP.Context.assert_identity(%{user: "alice", realm: "example.com"})
+        |> SIP.Context.assert_identity(nil)
+
+      assert ctx.asserted_identity == nil
+    end
+
+    test "refuses a verdict it cannot turn into an identity" do
+      assert_raise ArgumentError, fn ->
+        SIP.Context.assert_identity(%SIP.Context{}, %{realm: "example.com"})
+      end
     end
   end
 end

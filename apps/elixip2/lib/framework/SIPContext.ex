@@ -35,6 +35,7 @@ defmodule SIP.Context do
             mediaserverpid: nil,
             currentstate: nil,
             laststate: nil,
+            asserted_identity: nil,
             appdata: %{}
 
   defmacro __using__(_opts) do
@@ -95,6 +96,15 @@ defmodule SIP.Context do
             SIP.Context.to(var!(sip_ctx), unquote(userpart))
           end
         end
+
+        # Record the identity an authentication verdict proved for this
+        # session's peer. See SIP.Context.assert_identity/2.
+        defmacro assert_identity(identity) do
+          quote do
+            var!(sip_ctx) =
+              SIP.Context.assert_identity(var!(sip_ctx), unquote(identity))
+          end
+        end
       end
     end
   end
@@ -111,6 +121,11 @@ defmodule SIP.Context do
   # FSM bookkeeping fields driven by FSL (goto / scenario_failure).
   def get(context, prop) when prop in [:currentstate, :laststate, :errorreason] do
     Map.get(context, prop)
+  end
+
+  # The proved identity of this session's peer (see assert_identity/2).
+  def get(context, :asserted_identity) do
+    Map.get(context, :asserted_identity)
   end
 
   def get(context, prop) when is_atom(prop) do
@@ -229,8 +244,75 @@ defmodule SIP.Context do
     Map.put(ctx, :errorreason, value)
   end
 
+  # The identity an authentication verdict proved, as the URI to assert. Written
+  # through assert_identity/2 rather than here in the ordinary case.
+  def set(ctx, :asserted_identity, nil) do
+    Map.put(ctx, :asserted_identity, nil)
+  end
+
+  def set(ctx, :asserted_identity, %SIP.Uri{} = uri) do
+    Map.put(ctx, :asserted_identity, uri)
+  end
+
   def set(_context, prop, _value) when is_atom(prop) do
     raise "Unsupported context property #{prop}"
+  end
+
+  @doc """
+  Record the identity an authentication verdict proved for this session's peer,
+  as the URI a `P-Asserted-Identity` will carry (RFC 3325).
+
+  `identity` is the map an authentication backend answers `{:ok, identity}` with
+  — `%{user: "alice", realm: "example.com"}`. The backend decides *who*; turning
+  that into a URI is the message layer's business and happens here, once, so that
+  no two places compose `sip:user@realm` and end up composing it differently.
+
+      case Kelix.Mod.AuthDb.authenticate(req, sip_ctx.domain) do
+        {:ok, identity} -> assert_identity(identity)
+        ...
+      end
+
+  Two things follow from where the result is stored.
+
+  **The field answers two questions with one bit.** `nil` means no authentication
+  happened, so nothing is asserted; set means the digest proved this identity and
+  it is the one to put on the wire. `SIP.Msg.Ops.prepare_forwarded_request/2` needs
+  nothing else — no separate flag saying whether a backend ran.
+
+  **It is the context and not the request** because a B2BUA hunt re-prepares the
+  *original* request for every target it tries: an identity written onto the
+  stored request would survive the first target and vanish on the second.
+
+  The display name is deliberately left empty. The verdict has none, and the only
+  one available is the `From`'s — what the caller *claims*. Copying it into a
+  header whose meaning is "this was verified" would lend it a guarantee it does
+  not have; if one is ever wanted it comes from the subscriber table, through the
+  verdict, never from the message.
+  """
+  @spec assert_identity(%SIP.Context{}, map() | %SIP.Uri{} | nil) :: %SIP.Context{}
+  def assert_identity(context = %SIP.Context{}, nil) do
+    Map.put(context, :asserted_identity, nil)
+  end
+
+  def assert_identity(context = %SIP.Context{}, %SIP.Uri{} = uri) do
+    Map.put(context, :asserted_identity, uri)
+  end
+
+  def assert_identity(context = %SIP.Context{}, identity) when is_map(identity) do
+    user = Map.get(identity, :user) || Map.get(identity, "user")
+    realm = Map.get(identity, :realm) || Map.get(identity, "realm") || context.domain
+
+    if is_nil(user) or is_nil(realm) do
+      raise ArgumentError,
+            "assert_identity: need a user and a realm, got #{inspect(identity)}" <>
+              " (context domain: #{inspect(context.domain)})"
+    end
+
+    Map.put(context, :asserted_identity, %SIP.Uri{
+      scheme: "sip:",
+      userpart: to_string(user),
+      domain: to_string(realm)
+    })
   end
 
   def from(context) do

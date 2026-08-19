@@ -724,6 +724,10 @@ defmodule SIP.Msg.Ops do
   # Response headers copied verbatim when a reply is relayed leg-to-leg.
   @b2bua_reply_passthrough ["Reason", "Warning", "Retry-After"]
 
+  # Matched case-insensitively: a header with no atom of its own keeps the
+  # spelling the peer used (see strip_asserted_identity/1).
+  @pai_header_lc "p-asserted-identity"
+
   @doc """
   Prepare a request received on one B2BUA leg to be re-sent on another leg.
 
@@ -736,15 +740,33 @@ defmodule SIP.Msg.Ops do
   point back at the leg the request came in on), replaces the User-Agent and
   decrements `Max-Forwards`.
 
-  The body and every other header (identity `From`/`To`, `P-Asserted-Identity`,
-  `Privacy`, custom `X-*`…) cross unchanged. Callers layer their own policy on
-  top; they do not re-read the message.
+  The body and every other header (identity `From`/`To`, custom `X-*`…) cross
+  unchanged. Callers layer their own policy on top; they do not re-read the
+  message.
+
+  **`P-Asserted-Identity` is the exception, and it is a security rule.** An
+  inbound one is a *claim* by a peer we do not trust; relaying it would launder
+  it into an assertion signed by this node (RFC 3325 §5). So it is always
+  dropped, and the only one that can leave is the one this function writes from
+  `:asserted_identity` — the identity an authentication verdict proved
+  (`SIP.Context.assert_identity/2`). Dropping and re-adding live in the same
+  place on purpose: neither can be done without the other, so no call site can
+  forward a foreign assertion by forgetting an option.
+
+  A request asking for `Privacy: id` (RFC 3325 §7) gets no assertion at all: a
+  B2BUA forwarding to an arbitrary registered contact leaves the trust domain,
+  and asserting the identity of a caller who asked to be anonymous is a privacy
+  breach with a specification saying so.
 
   Returns `{:ok, req}`, or `{:error, :too_many_hops}` when `Max-Forwards` is
   exhausted (RFC 3261 §16.6 — answer 483).
 
-  Options: `:useragent` overrides the User-Agent stamped on the forwarded
-  request (defaults to the `:elixip2 :useragent` application env).
+  Options:
+
+    * `:useragent` — overrides the User-Agent stamped on the forwarded request
+      (defaults to the `:elixip2 :useragent` application env);
+    * `:asserted_identity` — the `%SIP.Uri{}` to assert, normally
+      `sip_ctx.asserted_identity`. `nil` (the default) asserts nothing.
   """
   @spec prepare_forwarded_request(map(), keyword()) ::
           {:ok, map()} | {:error, :too_many_hops}
@@ -764,6 +786,8 @@ defmodule SIP.Msg.Ops do
         req2 =
           req
           |> Map.drop(@b2bua_dropped_fields)
+          |> strip_asserted_identity()
+          |> put_asserted_identity(Keyword.get(opts, :asserted_identity))
           |> put_contact_identity(Map.get(req, :contact))
           |> Map.put("Max-Forwards", max_forwards)
           |> Map.put(:callid, nil)
@@ -774,6 +798,72 @@ defmodule SIP.Msg.Ops do
 
         {:ok, req2}
     end
+  end
+
+  @doc """
+  Remove every `P-Asserted-Identity` from a message (RFC 3325 §5).
+
+  Case-insensitive, because a header this layer has no atom for keeps whatever
+  spelling the peer used as its map key: `Map.delete/2` on one spelling would
+  leave `p-asserted-identity` sitting there.
+  """
+  @spec strip_asserted_identity(map()) :: map()
+  def strip_asserted_identity(msg) when is_map(msg) do
+    msg
+    |> Enum.filter(fn
+      {key, _value} when is_binary(key) -> String.downcase(key) == @pai_header_lc
+      _other -> false
+    end)
+    |> Enum.reduce(msg, fn {key, _}, acc -> Map.delete(acc, key) end)
+  end
+
+  @doc """
+  True when a message asks for its identity to be withheld outside the trust
+  domain — `Privacy: id`, RFC 3325 §7.
+
+  The header carries a `;`-separated list of privacy values (RFC 3323 §4.2), so
+  `Privacy: id;user` counts as much as a bare `id`.
+  """
+  @spec privacy_id?(map()) :: boolean()
+  def privacy_id?(msg) when is_map(msg) do
+    msg
+    |> Enum.find_value(fn
+      {key, value} when is_binary(key) ->
+        if String.downcase(key) == "privacy", do: value
+
+      _other ->
+        nil
+    end)
+    |> List.wrap()
+    |> Enum.any?(fn
+      value when is_binary(value) ->
+        value
+        |> String.split(";")
+        |> Enum.any?(&(String.trim(&1) |> String.downcase() == "id"))
+
+      _other ->
+        false
+    end)
+  end
+
+  # Assert an identity on a request being forwarded. Nothing to assert, or a
+  # caller asking for privacy, means no header at all.
+  defp put_asserted_identity(req, nil), do: req
+
+  defp put_asserted_identity(req, %SIP.Uri{} = uri) do
+    if privacy_id?(req) do
+      req
+    else
+      Map.put(req, "P-Asserted-Identity", asserted_identity_value(uri))
+    end
+  end
+
+  # RFC 3325 §9.1 takes a name-addr or a bare addr-spec; the bracketed form is
+  # what the examples use and what a display name would force anyway, so it is
+  # the one written. `serialize/1` already brackets whatever needs it.
+  defp asserted_identity_value(%SIP.Uri{} = uri) do
+    {:ok, value} = SIP.Uri.serialize(uri)
+    if String.contains?(value, "<"), do: value, else: "<" <> value <> ">"
   end
 
   @doc """

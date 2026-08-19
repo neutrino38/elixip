@@ -1201,7 +1201,7 @@ defmodule SIP.Session.B2bua do
   end
 
   defp create_leg(sip_ctx, req, peer, media, opts) do
-    case SIP.Msg.Ops.prepare_forwarded_request(req, opts) do
+    case prepare_forward(sip_ctx, req, opts) do
       {:error, reason} ->
         fail(sip_ctx, {:b2bua, reason})
 
@@ -1538,7 +1538,7 @@ defmodule SIP.Session.B2bua do
   end
 
   defp relay_request(sip_ctx, req, from_leg, target_pid) do
-    case SIP.Msg.Ops.prepare_forwarded_request(req) do
+    case prepare_forward(sip_ctx, req) do
       {:error, reason} ->
         fail(sip_ctx, {:b2bua, reason})
 
@@ -2959,6 +2959,54 @@ defmodule SIP.Session.B2bua do
 
   # The dialog pid of a named leg: the inbound leg is the scenario's own dialog,
   # every other one lives in the leg map.
+  # Every request leaving this B2BUA is prepared through here, so the identity
+  # we assert is attached in one place. It is needed on both paths: the initial
+  # INVITE and each target of a hunt go through create_leg/5, and the in-dialog
+  # relay goes through relay_request/4 — a re-INVITE forwarded without the
+  # header would make the caller's identity flicker mid-call.
+  #
+  # The warning is the one hole this design leaves. Dropping and re-adding
+  # P-Asserted-Identity happen in the same function, so no *foreign* assertion
+  # can ever leave; nothing guarantees that OURS does, if a future call site
+  # reaches prepare_forwarded_request/2 without coming through here. Loud rather
+  # than silent.
+  defp prepare_forward(sip_ctx, req, opts \\ []) do
+    opts =
+      case sip_ctx.asserted_identity do
+        nil -> opts
+        %SIP.Uri{} = uri -> Keyword.put_new(opts, :asserted_identity, uri)
+      end
+
+    case SIP.Msg.Ops.prepare_forwarded_request(req, opts) do
+      {:ok, fwd} = ok ->
+        warn_missing_assertion(sip_ctx, req, fwd)
+        ok
+
+      other ->
+        other
+    end
+  end
+
+  # The identity was proved and the request going out does not carry it, for a
+  # reason that is not the caller's privacy. Not fatal — the call is fine, only
+  # anonymous downstream — but it means a forward path bypassed the option, and
+  # that is invisible in a capture unless somebody says it.
+  defp warn_missing_assertion(sip_ctx, orig_req, fwd) do
+    with %SIP.Uri{} <- sip_ctx.asserted_identity,
+         false <- SIP.Msg.Ops.privacy_id?(orig_req),
+         nil <- Map.get(fwd, "P-Asserted-Identity") do
+      Logger.warning(
+        module: __MODULE__,
+        message:
+          "forwarded #{fwd.method} carries no P-Asserted-Identity although one " <>
+            "was asserted for this session: a forward path is not going through " <>
+            "prepare_forward/3"
+      )
+    end
+
+    :ok
+  end
+
   defp leg_pid(sip_ctx, :inbound), do: sip_ctx.dialogpid
 
   defp leg_pid(sip_ctx, tag) do

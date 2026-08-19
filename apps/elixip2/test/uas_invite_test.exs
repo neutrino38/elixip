@@ -99,6 +99,37 @@ defmodule UASInviteFixture.Challenge do
   end
 end
 
+# The other form of the same verb: the application composed the params, because
+# `stale` and the algorithm are the authentication backend's to decide and
+# neither survives being re-derived by the dialog layer.
+defmodule UASInviteFixture.ChallengeParams do
+  use SIP.Scenario
+  use SIP.Session.CallUAS
+  uas(:invite)
+  config(domain: "example.com")
+
+  state initial_state do
+    on_events do
+      {:INVITE, _req, _t, _dlg} ->
+        challenge_invite(
+          %{
+            "realm" => "example.com",
+            "nonce" => "abc123",
+            "algorithm" => "SHA-256",
+            "qop" => "auth",
+            "stale" => "true",
+            :authproc => "Digest"
+          },
+          407
+        )
+
+        scenario_success("challenged with params")
+    after
+      5_000 -> scenario_failure("no INVITE")
+    end
+  end
+end
+
 # Phase 3: connect the (config-driven, mockup) media server, then answer the
 # inbound INVITE with a media-negotiated 200 OK + SDP. reply_invite_with_sdp is
 # available through SIP.Scenario (-> CallUAC), like reply_invite.
@@ -163,6 +194,7 @@ defmodule TestCallUAS do
     "busy" => UASInviteFixture.Busy,
     "redirect" => UASInviteFixture.Redirect,
     "challenge" => UASInviteFixture.Challenge,
+    "challengeparams" => UASInviteFixture.ChallengeParams,
     "answersdp" => UASInviteFixture.AnswerSdp,
     "answersdpack" => UASInviteFixture.AnswerSdpAwaitAck
   }
@@ -625,6 +657,23 @@ defmodule SIP.Test.UASInvite do
   test "challenge_invite(401) reaches the wire" do
     invite = inject_invite("challenge")
     assert_receive {:sip_mockup, {:response_sent, 401, _}}, 2_000
+    ack_final(invite)
+  end
+
+  # The params the application composed must reach the wire verbatim: `stale`
+  # is what lets a client whose nonce merely aged replay without asking its user
+  # for a password again, and the algorithm names the hash the stored secret was
+  # made with. Re-deriving either here would lose both.
+  test "challenge_invite(params, 407) carries them into Proxy-Authenticate" do
+    invite = inject_invite("challengeparams")
+    assert_receive {:sip_mockup, {:response_sent, 407, resp}}, 2_000
+
+    params = Map.get(resp, :proxyauthenticate)
+    assert params["nonce"] == "abc123"
+    assert params["stale"] == "true"
+    assert params["algorithm"] == "SHA-256"
+    assert params["realm"] == "example.com"
+
     ack_final(invite)
   end
 

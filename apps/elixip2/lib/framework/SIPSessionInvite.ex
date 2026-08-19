@@ -371,14 +371,16 @@ defmodule SIP.Session.CallUAS do
 
       # 401/407 digest challenge of the inbound INVITE. Reuses the dialog layer's
       # nonce generation / storage (SIP.Dialog.challenge/4).
-      defmacro challenge_invite(realm, code \\ 407) do
+      # `challenge` is either a realm (the dialog mints the nonce) or the digest
+      # params the application composed — see do_challenge_invite/3.
+      defmacro challenge_invite(challenge, code \\ 407) do
         quote do
           SIP.Scenario.Monitor.note_command(:sip, "challenge_invite #{unquote(code)}")
 
           var!(sip_ctx) =
             SIP.Session.CallUAS.do_challenge_invite(
               var!(sip_ctx),
-              unquote(realm),
+              unquote(challenge),
               unquote(code)
             )
         end
@@ -449,8 +451,22 @@ defmodule SIP.Session.CallUAS do
               "use reply_invite_with_sdp/reply_invite_with_body (phase 3)"
     end
 
-    rc = SIP.Dialog.reply(sip_ctx.dialogpid, req, code, reason, upd_fields)
-    SIP.Context.set(sip_ctx, :lasterr, reply_lasterr(rc))
+    SIP.Context.set(sip_ctx, :lasterr, reply_lasterr(reply_to(sip_ctx, req, code, reason, upd_fields)))
+  end
+
+  # Replying on a dialog that has already died is ordinary traffic — a caller
+  # that gave up between its request and our answer — and must not become a
+  # scenario failure. Without this the bare GenServer.call exits, the per-state
+  # `try` catches it, and a caller hanging up reads as "the scenario crashed".
+  #
+  # `:dialogterminated` is the atom SIP.Session.send_sip_request/3 already sets
+  # for the sending side; replying is the same event on the other half of the
+  # transaction. `:leg_dead` stays B2BUA vocabulary, for a *leg* — a scenario
+  # holding one dialog has no legs.
+  defp reply_to(sip_ctx, req, code, reason, upd_fields) do
+    SIP.Dialog.reply(sip_ctx.dialogpid, req, code, reason, upd_fields)
+  catch
+    :exit, _reason -> :dialogterminated
   end
 
   @doc """
@@ -570,9 +586,40 @@ defmodule SIP.Session.CallUAS do
     SIP.Context.set(sip_ctx, :lasterr, reply_lasterr(rc))
   end
 
-  @doc "401/407 digest challenge (reuses the dialog nonce machinery)."
+  @doc """
+  Challenge the stored INVITE / re-INVITE — 401 or 407. Backs `challenge_invite`.
+
+  Two forms, and the difference is *who mints the nonce*:
+
+    * **a realm** (a binary) — the dialog layer composes the whole challenge
+      (`SIP.Dialog.challenge/4`). Enough for a scenario whose policy is "ask for
+      credentials in this realm";
+    * **digest params** (a map) — the application composed them, and they are
+      sent verbatim. This is what an authentication backend needs: `stale` (so a
+      client whose nonce merely aged replays without asking its user for a
+      password again) and the `algorithm` the stored secret was hashed with are
+      the backend's to decide, and neither survives being re-derived here.
+      `Kelix.Auth.challenge_params/2` and its like mint them; this verb only puts
+      them in the header the code calls for (`SIP.Msg.Ops.challenge_header/1`).
+
+  The second form is the counterpart of `SIP.Session.B2bua.do_local_challenge/4`
+  for a scenario that is not a B2BUA — an MCU, a plain UAS — which answers on its
+  own dialog rather than on a named leg. 407 by default in both: a UA expects the
+  server that routes its calls to challenge as a proxy, and many will not retry a
+  401 on an INVITE, while a scenario that really is the registrar of the AOR
+  wants the 401.
+  """
+  @spec do_challenge_invite(%SIP.Context{}, String.t() | map(), 401 | 407) ::
+          %SIP.Context{}
+  def do_challenge_invite(sip_ctx = %SIP.Context{}, params, code)
+      when code in [401, 407] and is_map(params) do
+    do_reply_invite(sip_ctx, code, SIP.Msg.Ops.sip_reason(code), [
+      {SIP.Msg.Ops.challenge_header(code), params}
+    ])
+  end
+
   def do_challenge_invite(sip_ctx = %SIP.Context{}, realm, code)
-      when code in [401, 407] do
+      when code in [401, 407] and is_binary(realm) do
     req = fetch_stored_req!(sip_ctx)
     rc = SIP.Dialog.challenge(sip_ctx.dialogpid, req, code, realm)
     SIP.Context.set(sip_ctx, :lasterr, reply_lasterr(rc))
