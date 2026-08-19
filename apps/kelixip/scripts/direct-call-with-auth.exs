@@ -5,15 +5,17 @@
 # `proxy_authenticate(); lookup("location"); t_relay()`, done as a B2BUA.
 #
 # Separation of concerns (§11.1): `Kelix.Mod.AuthDb` DECIDES — challenge, accept or
-# refuse, and who the digest proved the sender to be — and this SCRIPT composes the
-# SIP that each verdict means. The module never builds a response, and the script
-# never reads an Authorization header.
+# refuse, and who the digest proved the sender to be — and the block it publishes
+# (`AuthDb.SBB.authenticate/1`) composes the SIP that each verdict means. The
+# module never builds a response, and this script never reads an Authorization
+# header nor writes a 407: it names what each OUTCOME means for this call flow.
 #
 # Everything from `place_call` on is `direct-call.exs` unchanged: authentication is
-# three states in front of the call, not a complication of the call.
+# one state in front of the call, not a complication of the call.
 defmodule Kelix.DirectCallWithAuth do
   use SIP.Scenario
   use SBB.Call
+  use Kelix.Mod.AuthDb
 
   uas(:invite)
 
@@ -39,76 +41,36 @@ defmodule Kelix.DirectCallWithAuth do
     end
   end
 
-  # Who is calling? A state with no on_events: it decides and moves on.
+  # Who is calling? One verb: the block challenges, waits for the credentials,
+  # verifies them and challenges again, and this script says what each outcome
+  # means. What used to be here — 407 rather than 401, `stale`, "answer a refusal
+  # and keep waiting", the 32 s a challenge is worth — was never about this call
+  # flow, and was already copied verbatim into the media variant.
   #
-  # The INVITE needs no carrying around — `on_events` stored it and
-  # `last_uas_req()` reads it back, here and in every later state, which matters
-  # doubly now: the request authenticated is the *last* one received, i.e. the one
-  # carrying the credentials, never the challenged one.
-  #
-  # `sip_ctx.domain` is the realm to require. For an INVITE that is the *caller's*
-  # domain and not the R-URI's — calling out of the domain is the point of a call —
-  # and for a node serving one domain the two coincide (see
-  # `Kelix.Mod.AuthDb.authenticate/3`).
+  # The identity the digest proves is recorded in the context, so the leg placed
+  # next asserts it (`P-Asserted-Identity`); nothing here has to carry it.
   state authenticate_caller do
-    req = last_uas_req()
+    AuthDb.SBB.authenticate()
 
-    case Kelix.Mod.AuthDb.authenticate(req, sip_ctx.domain) do
-      # The digest proved `identity.user`, and the identity check has already had
-      # its say about the From asserting someone else (auth_db `identity_check`).
-      # Noting it is what makes the caller of a metered call knowable.
-      {:ok, identity} ->
-        SIP.Scenario.Monitor.note_account(identity.user)
-        goto(place_call, "INVITE authenticated as #{identity.user}")
-
-      # 407 rather than 401: we are formally a UAS, but a UA expects the server
-      # that routes its calls to challenge as a proxy, and many will not retry a
-      # 401 on an INVITE. `stale` tells the client its nonce merely aged, so it
-      # replays without asking the user for a password again.
-      {:requireauth, stale} ->
-        params =
-          Kelix.Auth.challenge_params(sip_ctx.domain,
-            stale: stale,
-            algorithm: Kelix.Mod.AuthDb.challenge_algorithm()
-          )
-
-        b2bua_challenge(req, params, 407)
-        goto(wait_credentials, if(stale, do: "407 stale", else: "407 challenge"))
-
-      # Answer and keep waiting — never end the instance on a refused INVITE. The
-      # dialog does NOT die with us: nothing monitors the app pid, so a dialog
-      # whose instance ended still matches the next INVITE of that Call-ID and
-      # casts it to a dead process. The client would then get NO answer at all
-      # until the dialog expires. A 403 is one request's verdict, not the end of
-      # the conversation — a client that fixes its credentials must be able to say
-      # so, and it is the same reasoning as the registrar's.
-      {:reject, code, reason} ->
-        b2bua_reply(req, code, reason)
-        goto(wait_credentials, "#{code} #{reason}")
-    end
-  end
-
-  # The challenged INVITE comes back with credentials, on the same dialog: same
-  # Call-ID, a new CSeq, no To tag. Its ACK never reaches us — the server
-  # transaction absorbs the ACK of a non-2xx (RFC 3261 §17.2.1).
-  state wait_credentials do
     on_events do
-      {:INVITE, req, _trans, _dlg} ->
-        b2bua_reply(req, 100, "Trying")
-        goto(authenticate_caller, "INVITE re-submitted")
+      {:auth, :authenticated, %{user: user}} ->
+        goto(place_call, "INVITE authenticated as #{user}")
 
       # A caller that cancels the challenged attempt: nothing was forwarded, so
-      # there is nothing to cancel but ourselves.
-      {:CANCEL, _req, _trans, _dlg} ->
+      # there was nothing to cancel but ourselves.
+      {:auth, :cancelled, _} ->
         scenario_success("caller cancelled the challenged call")
 
-      {:dialog_terminated, _dlg, _reason} ->
-        scenario_success("caller gave up on the challenge")
-    after
+      {:auth, :caller_gone, %{reason: reason}} ->
+        scenario_success("caller gave up on the challenge: #{inspect(reason)}")
+
       # A UA replays a challenge within a second. This is the scanner, and the
-      # phone whose password is wrong: end the instance rather than hold a slot
-      # for it.
-      32_000 -> scenario_success("no credentials came back")
+      # phone whose password is wrong: end the instance rather than hold a slot.
+      {:auth, :timeout, _} ->
+        scenario_success("no credentials came back")
+
+      {:auth, :refused, %{attempts: attempts}} ->
+        scenario_success("gave up on this sender after #{attempts} refused attempts")
     end
   end
 
@@ -118,8 +80,8 @@ defmodule Kelix.DirectCallWithAuth do
   # which is more readable than an error mapped twice.
   #
   # From here on this script IS direct-call.exs: the same `call/1`, the same arms.
-  # Authentication was three states in front of the call, not a complication of
-  # it, and that reads better now that the call itself is one line.
+  # Authentication is one state in front of the call, not a complication of it,
+  # and the two read alike now that each is one verb and its outcomes.
   state place_call do
     req = last_uas_req()
 

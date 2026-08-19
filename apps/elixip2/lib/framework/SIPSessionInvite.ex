@@ -451,7 +451,11 @@ defmodule SIP.Session.CallUAS do
               "use reply_invite_with_sdp/reply_invite_with_body (phase 3)"
     end
 
-    SIP.Context.set(sip_ctx, :lasterr, reply_lasterr(reply_to(sip_ctx, req, code, reason, upd_fields)))
+    SIP.Context.set(
+      sip_ctx,
+      :lasterr,
+      reply_lasterr(reply_to(sip_ctx, req, code, reason, upd_fields))
+    )
   end
 
   # Replying on a dialog that has already died is ordinary traffic — a caller
