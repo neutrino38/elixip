@@ -1,7 +1,7 @@
 defmodule Kelix.AuthSbbTest do
   @moduledoc """
   `Kelix.Mod.AuthDb.SBB.authenticate/1` — the challenge cycle as a service
-  building block (design docs/design/evolution-auth-db.md §4).
+  building block (design docs/design/DESIGN-AUTH.md §3).
 
   Tested here rather than in `:elixip2` for the reason the block lives here: it
   needs a verdict, and the verdict needs a subscriber table. The table is

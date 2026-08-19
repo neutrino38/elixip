@@ -3,7 +3,7 @@ defmodule SIP.Test.ChallengeInvite do
 
   @moduledoc """
   `challenge_invite/2` and the dead-dialog protection of `do_reply_invite/4`
-  (design docs/design/evolution-auth-db.md §4.5).
+  (design docs/design/DESIGN-AUTH.md §3.4).
   """
 
   alias SIP.Session.CallUAS
