@@ -51,6 +51,7 @@ defmodule Kelix.Config do
           mediaserver_pool: [pool_entry],
           mediaserver_video_bitrate: pos_integer,
           mediaserver_bitrate_feedback: [:remb | :tmmbr],
+          mediaserver_transport_cc: boolean,
           modules: map,
           control_api: map,
           metrics: map
@@ -86,6 +87,15 @@ defmodule Kelix.Config do
             # paths. Empty leaves the call with no congestion control from us at all,
             # so production wants both.
             mediaserver_bitrate_feedback: @default_bitrate_feedback,
+            # Whether the SDP negotiates transport-wide congestion control on video
+            # (RFC 8285 extmap + `a=rtcp-fb transport-cc`), which is what feeds the
+            # media server's SENDER-side bandwidth estimator. Off by default, and the
+            # default moves only once the recipe of
+            # `docs/design/kelixip-transport-wide-cc.md` §6 has run: the server does
+            # not yet emit fmt 15 reports for what it RECEIVES, so a peer that
+            # negotiates the extension gets nothing back for its own outgoing stream
+            # and falls back on RR losses plus the REMB/TMMBR we keep sending.
+            mediaserver_transport_cc: false,
             modules: %{},
             control_api: %{},
             metrics: %{}
@@ -155,13 +165,16 @@ defmodule Kelix.Config do
     # every leg it encodes and answers. Merged, not replaced — the block also holds
     # the timeouts config/config.exs sets.
     # `[mediaserver] bitrate_feedback` rides the same block: the adapter reads it
-    # when it decides which rtcp-fb types the answer confirms.
+    # when it decides which rtcp-fb types the answer confirms. So does
+    # `transport_cc` — read by the shared SDP layer, so both the point-to-point
+    # adapter and the mcu module negotiate the same thing.
     Application.put_env(
       :elixip2,
       MediaServer.Mendooze,
       Application.get_env(:elixip2, MediaServer.Mendooze, [])
       |> Keyword.put(:video_bandwidth_kbps, cfg.mediaserver_video_bitrate)
       |> Keyword.put(:bitrate_feedback, cfg.mediaserver_bitrate_feedback)
+      |> Keyword.put(:transport_cc, cfg.mediaserver_transport_cc)
     )
 
     # The REST frontal (Kelix.ControlAPI.Auth) reads its settings from the app
@@ -267,6 +280,7 @@ defmodule Kelix.Config do
          mediaserver_pool: mediaserver.pool,
          mediaserver_video_bitrate: mediaserver.video_bitrate,
          mediaserver_bitrate_feedback: mediaserver.bitrate_feedback,
+         mediaserver_transport_cc: mediaserver.transport_cc,
          modules: Map.get(map, "module", %{}),
          control_api: control_api,
          metrics: metrics
@@ -416,28 +430,34 @@ defmodule Kelix.Config do
 
   # ── [mediaserver] + [mediaserver.pool.*] (§9) ────────────────────────────────
 
-  # The whole `[mediaserver]` section: the pool plus the node's video bitrate. A
-  # sibling key is a typo worth naming rather than ignoring.
+  # The whole `[mediaserver]` section: the pool plus the node's media policy — video
+  # bitrate, which bitrate-feedback dialects the answer confirms, and whether
+  # transport-wide congestion control is negotiated. A sibling key is a typo worth
+  # naming rather than ignoring.
   defp parse_mediaserver(nil),
     do:
       {:ok,
        %{
          pool: [],
          video_bitrate: @default_video_bitrate_kbps,
-         bitrate_feedback: @default_bitrate_feedback
+         bitrate_feedback: @default_bitrate_feedback,
+         transport_cc: false
        }}
 
   defp parse_mediaserver(%{} = m) do
-    with :ok <- reject_keys(m, ~w(pool video_bitrate bitrate_feedback), "[mediaserver]"),
+    with :ok <-
+           reject_keys(m, ~w(pool video_bitrate bitrate_feedback transport_cc), "[mediaserver]"),
          {:ok, bitrate} <- opt_pos_integer(m, "video_bitrate", "[mediaserver]"),
          {:ok, feedback} <-
            parse_bitrate_feedback(Map.get(m, "bitrate_feedback")),
+         {:ok, transport_cc} <- opt_bool(m, "transport_cc", false, "[mediaserver]"),
          {:ok, pool} <- parse_pool(Map.get(m, "pool")) do
       {:ok,
        %{
          pool: pool,
          video_bitrate: bitrate || @default_video_bitrate_kbps,
-         bitrate_feedback: feedback
+         bitrate_feedback: feedback,
+         transport_cc: transport_cc
        }}
     end
   end

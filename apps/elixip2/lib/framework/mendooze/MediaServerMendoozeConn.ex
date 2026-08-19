@@ -126,6 +126,12 @@ defmodule MediaServer.Mendooze.Conn do
   # left towards a browser. Neither dialect is emitted un-negotiated — the
   # property posted here is what turns it on, and TMMBR wins when a peer asks
   # for both.
+  #
+  # `transport-cc` is deliberately ABSENT: the attribute alone switches nothing on. Its
+  # server-side property is keyed by the RTP header extension's URI and valued with the
+  # negotiated extmap id (`transport_cc_props/1`), so it cannot ride this
+  # attribute-to-switch table. It is still confirmed in the answer
+  # (`answered_transport_cc_fb/1`).
   @supported_rtcp_fb %{
     "nack" => "useNACK",
     "nack pli" => "useRtcpFIR",
@@ -2518,6 +2524,7 @@ defmodule MediaServer.Mendooze.Conn do
       %{}
       |> maybe_put(Map.get(desc, :rtcp_mux, false), "rtcp-mux", "1")
       |> Map.merge(rtcp_fb_props(desc))
+      |> Map.merge(transport_cc_props(desc))
       |> maybe_put(nat_latch?(state), "natLatch", "1")
 
     if props == %{} do
@@ -2531,13 +2538,29 @@ defmodule MediaServer.Mendooze.Conn do
   end
 
   # The server-side switch for each feedback type we answered, and nothing else.
+  # `transport-cc` is dropped here rather than looked up: it is confirmed in the answer
+  # but switched on by the extmap property below, whose value is an id and not "1".
   defp rtcp_fb_props(desc) do
     case answered_rtcp_fb(desc) do
       types when is_list(types) ->
-        Map.new(types, fn type -> {Map.fetch!(@supported_rtcp_fb, type), "1"} end)
+        types
+        |> Enum.reject(&(&1 == Sdp.transport_cc_fb()))
+        |> Map.new(fn type -> {Map.fetch!(@supported_rtcp_fb, type), "1"} end)
 
       _ ->
         %{}
+    end
+  end
+
+  # The transport-wide-cc extension, keyed by its URI and valued with the NEGOTIATED
+  # id: that is what makes the server write a transport-wide sequence number on every
+  # outgoing packet of this leg, pair the incoming fmt 15 reports with its own send
+  # history and feed its sender-side estimator. `desc` is the peer's offer when we
+  # answer and the peer's answer when we offer, so one reading covers both.
+  defp transport_cc_props(desc) do
+    case Sdp.transport_cc_extmap(desc) do
+      %{id: id} -> %{Sdp.transport_cc_uri() => Integer.to_string(id)}
+      nil -> %{}
     end
   end
 
@@ -2664,7 +2687,11 @@ defmodule MediaServer.Mendooze.Conn do
         mid: to_string(media),
         candidates:
           Sdp.host_candidates(state.local_ip, Map.fetch!(state.local_ports, media), true),
-        rtcp_fb: media == :video
+        rtcp_fb: media == :video,
+        # transport-wide-cc, when configured: the builder pairs it with its
+        # `a=rtcp-fb:<pt> transport-cc` lines. The property is posted only if the
+        # peer's answer takes it (`transport_cc_props/1`).
+        extmaps: List.wrap(Sdp.transport_cc_offer(media))
       })
     else
       base
@@ -2784,6 +2811,9 @@ defmodule MediaServer.Mendooze.Conn do
       acfg: accepted_capneg(desc),
       # the feedback types actually agreed, per video PT — never the offerer form
       rtcp_fb: answered_rtcp_fb(desc),
+      # RFC 8285 §5: the extension is confirmed with the offer's OWN id, never
+      # renumbered. Empty unless transport-wide-cc is negotiated on this media.
+      extmaps: List.wrap(Sdp.transport_cc_extmap(desc)),
       # the offer's a=mid, echoed verbatim on EVERY answered section (JSEP
       # §5.3.1), not only the DTLS ones: a SIP peer that names its sections
       # would otherwise get an anonymous answer
@@ -2870,11 +2900,17 @@ defmodule MediaServer.Mendooze.Conn do
   # The feedback the offer asks for on this media, wildcard included:
   # `a=rtcp-fb:*` (parsed as payload type -1) applies to every format.
   defp requested_rtcp_fb(desc) do
+    Enum.filter(offered_rtcp_fb(desc), &Map.has_key?(@supported_rtcp_fb, &1))
+  end
+
+  # The same list before that filter. `transport-cc` has no entry in
+  # @supported_rtcp_fb — its server-side switch comes from the extmap, not from this
+  # attribute — so confirming it needs the unfiltered reading.
+  defp offered_rtcp_fb(desc) do
     Map.get(desc, :rtcp_fb, %{})
     |> Map.values()
     |> List.flatten()
     |> Enum.uniq()
-    |> Enum.filter(&Map.has_key?(@supported_rtcp_fb, &1))
   end
 
   # What the answer advertises: the INTERSECTION of what the offer asked for
@@ -2893,8 +2929,19 @@ defmodule MediaServer.Mendooze.Conn do
   # asks for no usable feedback still gets none back.
   defp answered_rtcp_fb(desc) do
     if desc.type == :video,
-      do: drop_rate_control_fb(requested_rtcp_fb(desc)),
+      do: drop_rate_control_fb(requested_rtcp_fb(desc)) ++ answered_transport_cc_fb(desc),
       else: false
+  end
+
+  # `transport-cc` is confirmed only when BOTH halves of the mechanism are there: the
+  # peer asked for the feedback message, and the extension it reports on is one we
+  # negotiate (`Sdp.transport_cc_extmap/1` — video, the switch on, a usable direction).
+  # Appended rather than filtered in, because @supported_rtcp_fb maps an attribute to
+  # the server switch that implements it and this one has none.
+  defp answered_transport_cc_fb(desc) do
+    if Sdp.transport_cc_extmap(desc) && Sdp.transport_cc_fb() in offered_rtcp_fb(desc),
+      do: [Sdp.transport_cc_fb()],
+      else: []
   end
 
   defp drop_rate_control_fb(types) do

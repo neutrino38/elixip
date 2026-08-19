@@ -2374,6 +2374,228 @@ defmodule Mendooze.ConnTest do
     end
   end
 
+  # ── transport-wide congestion control (docs/design/kelixip-transport-wide-cc.md) ──
+  #
+  # The extension the media server writes a transport-wide sequence number into, so the
+  # peer's fmt 15 reports can feed its SENDER-side bandwidth estimator. Off by default:
+  # the server does not report arrivals for what it RECEIVES yet (§5).
+
+  @transport_cc_uri "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01"
+
+  defp with_transport_cc(value) do
+    block = Application.get_env(:elixip2, MediaServer.Mendooze, [])
+    Application.put_env(:elixip2, MediaServer.Mendooze, Keyword.put(block, :transport_cc, value))
+    on_exit(fn -> Application.put_env(:elixip2, MediaServer.Mendooze, block) end)
+  end
+
+  # `extmap` is what the offer declares on its video m= line, verbatim; nil means the
+  # offer carries none at all.
+  defp twcc_offer(extmap) do
+    Enum.join(
+      [
+        "v=0",
+        "o=- 1 1 IN IP4 10.0.0.9",
+        "s=-",
+        "c=IN IP4 10.0.0.9",
+        "t=0 0",
+        "m=video 40002 RTP/AVPF 99",
+        "a=rtpmap:99 H264/90000",
+        "a=rtcp-fb:* nack",
+        "a=rtcp-fb:* ccm fir",
+        "a=rtcp-fb:* goog-remb",
+        "a=rtcp-fb:* transport-cc"
+      ] ++ List.wrap(extmap) ++ [""],
+      "\r\n"
+    )
+  end
+
+  defp answer_video_offer(offer) do
+    %{server: server} = start_media_server()
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :video)
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, offer)
+    assert_receive {:jsr309_call, "EndpointSetRTPProperties", [3, 4, 1, props]}
+    %{answer: answer, props: props}
+  end
+
+  test "an offered transport-cc extmap is answered with the same id and armed on the leg" do
+    with_transport_cc(true)
+
+    %{answer: answer, props: props} =
+      answer_video_offer(twcc_offer("a=extmap:3 #{@transport_cc_uri}"))
+
+    # RFC 8285 §5: the answer states the offer's own id, never one of ours
+    assert answer =~ "a=extmap:3 #{@transport_cc_uri}"
+    # ...and confirms the feedback message that reports on it, per explicit PT
+    assert answer =~ "a=rtcp-fb:99 transport-cc"
+
+    # The server-side switch is the extmap property, keyed by URI and valued with the
+    # negotiated id — not a "1" like the rtcp-fb switches next to it.
+    assert props[@transport_cc_uri] == "3"
+    assert props["useNACK"] == "1"
+    assert props["remb"] == "1"
+  end
+
+  test "an id the offerer chose freely is the id we answer and arm" do
+    with_transport_cc(true)
+
+    %{answer: answer, props: props} =
+      answer_video_offer(twcc_offer("a=extmap:7 #{@transport_cc_uri}"))
+
+    assert answer =~ "a=extmap:7 #{@transport_cc_uri}"
+    assert props[@transport_cc_uri] == "7"
+  end
+
+  test "the switch off leaves the offer unanswered on both lines and unarmed" do
+    with_transport_cc(false)
+
+    %{answer: answer, props: props} =
+      answer_video_offer(twcc_offer("a=extmap:3 #{@transport_cc_uri}"))
+
+    refute answer =~ "a=extmap"
+    refute answer =~ "transport-cc"
+    refute Map.has_key?(props, @transport_cc_uri)
+
+    # and nothing else about the answer moved
+    assert answer =~ "a=rtcp-fb:99 nack"
+    assert props["useNACK"] == "1"
+  end
+
+  test "an offer without the extmap gets nothing back, switch on" do
+    with_transport_cc(true)
+
+    %{answer: answer, props: props} = answer_video_offer(twcc_offer(nil))
+
+    # the offer asks for the feedback message, but nothing writes the sequence number
+    # it would report on: confirming it would promise reports on nothing
+    refute answer =~ "a=extmap"
+    refute answer =~ "transport-cc"
+    refute Map.has_key?(props, @transport_cc_uri)
+  end
+
+  test "an asymmetric extmap direction is left alone (v1 perimeter)" do
+    with_transport_cc(true)
+
+    %{answer: answer, props: props} =
+      answer_video_offer(twcc_offer("a=extmap:7/sendonly #{@transport_cc_uri}"))
+
+    refute answer =~ "a=extmap"
+    refute answer =~ "transport-cc"
+    refute Map.has_key?(props, @transport_cc_uri)
+  end
+
+  test "sendrecv is not an asymmetric direction and is answered" do
+    with_transport_cc(true)
+
+    %{answer: answer, props: props} =
+      answer_video_offer(twcc_offer("a=extmap:4/sendrecv #{@transport_cc_uri}"))
+
+    assert answer =~ "a=extmap:4/sendrecv #{@transport_cc_uri}"
+    assert props[@transport_cc_uri] == "4"
+  end
+
+  test "the audio m= line never carries the extension (no sender estimator behind it)" do
+    with_transport_cc(true)
+    %{server: server} = start_media_server()
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio_video)
+
+    offer =
+      Enum.join(
+        [
+          "v=0",
+          "o=- 1 1 IN IP4 10.0.0.9",
+          "s=-",
+          "c=IN IP4 10.0.0.9",
+          "t=0 0",
+          "m=audio 40000 RTP/AVPF 0",
+          "a=rtpmap:0 PCMU/8000",
+          "a=rtcp-fb:* transport-cc",
+          "a=extmap:3 #{@transport_cc_uri}",
+          "m=video 40002 RTP/AVPF 99",
+          "a=rtpmap:99 H264/90000",
+          "a=rtcp-fb:* transport-cc",
+          "a=extmap:3 #{@transport_cc_uri}",
+          ""
+        ],
+        "\r\n"
+      )
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, offer)
+
+    [audio_section, video_section] = String.split(answer, "m=video", parts: 2)
+    refute audio_section =~ "a=extmap"
+    refute audio_section =~ "transport-cc"
+    assert video_section =~ "a=extmap:3"
+
+    assert_receive {:jsr309_call, "EndpointSetRTPProperties", [3, 4, 0, audio_props]}
+    refute Map.has_key?(audio_props, @transport_cc_uri)
+    assert_receive {:jsr309_call, "EndpointSetRTPProperties", [3, 4, 1, video_props]}
+    assert video_props[@transport_cc_uri] == "3"
+  end
+
+  test "we OFFER the extension with its feedback message, and arm it once the answer takes it" do
+    with_transport_cc(true)
+    %{server: server} = start_media_server()
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :video,
+        video_codec: "H264",
+        webrtc_support: :yes
+      )
+
+    assert {:ok, offer} = Mendooze.get_local_offer(conn)
+
+    # id 3: nothing else offers an extmap today, so there is nothing to collide with
+    assert offer =~ "a=extmap:3 #{@transport_cc_uri}"
+    assert offer =~ "a=rtcp-fb:99 transport-cc"
+
+    assert :ok =
+             Mendooze.set_remote_answer(conn, twcc_offer("a=extmap:3 #{@transport_cc_uri}"))
+
+    assert_receive {:jsr309_call, "EndpointSetRTPProperties", [3, 4, 1, props]}
+    assert props[@transport_cc_uri] == "3"
+  end
+
+  test "an answer that drops the extension arms nothing, and the offer is unchanged otherwise" do
+    with_transport_cc(true)
+    %{server: server} = start_media_server()
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :video,
+        video_codec: "H264",
+        webrtc_support: :yes
+      )
+
+    assert {:ok, offer} = Mendooze.get_local_offer(conn)
+    assert offer =~ "a=extmap:3 #{@transport_cc_uri}"
+
+    assert :ok = Mendooze.set_remote_answer(conn, twcc_offer(nil))
+
+    assert_receive {:jsr309_call, "EndpointSetRTPProperties", [3, 4, 1, props]}
+    refute Map.has_key?(props, @transport_cc_uri)
+  end
+
+  test "the switch off offers neither the extension nor its feedback message" do
+    with_transport_cc(false)
+    %{server: server} = start_media_server()
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :video,
+        video_codec: "H264",
+        webrtc_support: :yes
+      )
+
+    assert {:ok, offer} = Mendooze.get_local_offer(conn)
+
+    refute offer =~ "a=extmap"
+    refute offer =~ "transport-cc"
+    # the rest of the offered feedback is untouched
+    assert offer =~ "a=rtcp-fb:99 nack"
+    assert offer =~ "a=rtcp-fb:99 goog-remb"
+  end
+
   # The assumed RFC 4585 §4 deviation (see answered_rtcp_fb/1): endpoints such as
   # Linphone keep a plain RTP/AVP or RTP/SAVP profile while listing a=rtcp-fb, and
   # drive their NACK/FIR off the answer's attributes, not its profile string. The

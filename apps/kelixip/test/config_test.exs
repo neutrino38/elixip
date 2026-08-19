@@ -208,6 +208,12 @@ defmodule Kelix.ConfigTest do
     end
 
     test "it rides the Mendooze tuning block, next to the video bitrate" do
+      # restored on exit: the block is global, and the video bitrate pushed here
+      # otherwise outlives the test and fails whichever later test reads the node's
+      # boot default out of it
+      before = Application.get_env(:elixip2, MediaServer.Mendooze, [])
+      on_exit(fn -> Application.put_env(:elixip2, MediaServer.Mendooze, before) end)
+
       {:ok, cfg} =
         Config.parse("[mediaserver]\nbitrate_feedback = \"none\"\nvideo_bitrate = 3000")
 
@@ -215,6 +221,46 @@ defmodule Kelix.ConfigTest do
       block = Application.get_env(:elixip2, MediaServer.Mendooze, [])
       assert Keyword.get(block, :bitrate_feedback) == []
       assert Keyword.get(block, :video_bandwidth_kbps) == 3000
+    end
+  end
+
+  describe "parse/1 — [mediaserver] transport_cc" do
+    # Transport-wide congestion control is what feeds the media server's sender-side
+    # bandwidth estimator (docs/design/kelixip-transport-wide-cc.md). It is off until
+    # the recipe of §6 has run: the server does not yet report arrivals for what it
+    # RECEIVES, so a peer that negotiates the extension gets nothing back for its own
+    # outgoing stream.
+    test "absent → off, on every path" do
+      {:ok, cfg} = Config.parse("")
+      refute cfg.mediaserver_transport_cc
+
+      {:ok, cfg} = Config.parse("[mediaserver]\nvideo_bitrate = 2000")
+      refute cfg.mediaserver_transport_cc
+    end
+
+    test "stated either way, and anything but a boolean is named" do
+      {:ok, cfg} = Config.parse("[mediaserver]\ntransport_cc = true")
+      assert cfg.mediaserver_transport_cc
+
+      {:ok, cfg} = Config.parse("[mediaserver]\ntransport_cc = false")
+      refute cfg.mediaserver_transport_cc
+
+      assert {:error, msg} = Config.parse("[mediaserver]\ntransport_cc = \"yes\"")
+      assert msg =~ "[mediaserver]: `transport_cc` must be a boolean"
+    end
+
+    # The shared SDP layer reads it from there, so the point-to-point adapter and the
+    # mcu module negotiate the same thing — one of the two left behind is a call path
+    # silently without sender-side rate control.
+    test "it rides the Mendooze tuning block" do
+      # restored on exit: the block is global, and a test that reads the node's boot
+      # defaults out of it runs in this same file
+      block = Application.get_env(:elixip2, MediaServer.Mendooze, [])
+      on_exit(fn -> Application.put_env(:elixip2, MediaServer.Mendooze, block) end)
+
+      {:ok, cfg} = Config.parse("[mediaserver]\ntransport_cc = true")
+      :ok = Config.apply_app_env(cfg)
+      assert Keyword.get(Application.get_env(:elixip2, MediaServer.Mendooze, []), :transport_cc)
     end
   end
 

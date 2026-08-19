@@ -69,6 +69,28 @@ defmodule MediaServer.Mendooze.Sdp do
   @dtmf_code 100
   @dtmf_tones "0-16"
 
+  # ── transport-wide congestion control ───────────────────────────────────────
+  # draft-holmer-rmcat-transport-wide-cc-extensions-01: an RTP header extension
+  # carrying a per-transport sequence number, and the RTCP RTPFB fmt 15 message a
+  # peer reports arrival times with. Negotiating it is what feeds the media
+  # server's SENDER-side bandwidth estimator, which then drives the encoder from
+  # what the network really absorbs rather than from what the receiver asks for.
+  #
+  # The URI is the extmap value AND the media server's property key
+  # (`RTPSession::SetProperties`, symmetric with abs-send-time), which is why it is
+  # stated once here and read from both.
+  @transport_cc_uri "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01"
+  @transport_cc_fb "transport-cc"
+
+  # The id we OFFER. No other extension is offered today, so there is nothing to
+  # collide with; an answerer may not renumber it (RFC 8285 §5).
+  @transport_cc_offer_id 3
+
+  # The feedback types an OFFER of ours proposes per video payload type.
+  # `transport-cc` joins them only when the extension it reports on is offered too
+  # (`offered_rtcp_fb/1`).
+  @offered_rtcp_fb ["nack", "ccm fir", "goog-remb"]
+
   @type codec_name :: String.t()
   @type rtp_map :: %{String.t() => integer()}
 
@@ -109,6 +131,10 @@ defmodule MediaServer.Mendooze.Sdp do
   and `raw_fmt` so the answerer can emit a port-0 rejection (RFC 3264 §6).
   `raw_fmt` is the offered format list verbatim, echoed back in that rejection.
 
+  `extmaps` holds the section's `a=extmap` lines (RFC 8285) as parsed structs, in
+  offer order. Only media-level lines are collected — every WebRTC peer declares its
+  extensions per `m=` section, and an extension we do not confirm is simply not used.
+
   `fmtp` holds the offered `a=fmtp` lines as **parsed** `ExSDP.Attribute.FMTP`
   structs, keyed by payload type (string). Each consumer picks the parameters it
   actually honours rather than echoing the line wholesale: for H.264,
@@ -136,6 +162,7 @@ defmodule MediaServer.Mendooze.Sdp do
           ice: nil | %{ufrag: String.t(), pwd: String.t()},
           mid: String.t() | nil,
           rtcp_fb: %{optional(integer()) => [String.t()]},
+          extmaps: [ExSDP.Attribute.Extmap.t()],
           capneg: nil | %{config: integer(), tcap: integer(), protocol: String.t()},
           candidates: [String.t()]
         }
@@ -201,6 +228,7 @@ defmodule MediaServer.Mendooze.Sdp do
           optional(:mid) => String.t() | nil,
           optional(:candidates) => [candidate()],
           optional(:rtcp_fb) => boolean() | [String.t()],
+          optional(:extmaps) => [ExSDP.Attribute.Extmap.t()],
           optional(:acfg) => nil | %{config: integer(), tcap: integer()},
           optional(:reject_fmt) => [0..127] | String.t()
         }
@@ -403,12 +431,13 @@ defmodule MediaServer.Mendooze.Sdp do
   end
 
   # WebRTC transport-plane attributes shared by both codec-section branches:
-  # a=mid (mirrored), a=candidate lines, and per-video-PT a=rtcp-fb.
+  # a=mid (mirrored), a=candidate lines, a=extmap and per-video-PT a=rtcp-fb.
   defp add_transport_plane(m, mspec, video_pts) do
     m
     |> add_mid(Map.get(mspec, :mid))
     |> add_candidates(Map.get(mspec, :candidates, []))
-    |> add_rtcp_fb(Map.get(mspec, :rtcp_fb, false), video_pts)
+    |> add_extmaps(Map.get(mspec, :extmaps, []))
+    |> add_rtcp_fb(offered_rtcp_fb(mspec), video_pts)
     |> add_acfg(Map.get(mspec, :acfg))
   end
 
@@ -452,28 +481,39 @@ defmodule MediaServer.Mendooze.Sdp do
     end)
   end
 
-  # a=rtcp-fb: three feedback types per video payload type (nack, ccm fir,
-  # goog-remb). Emitted verbatim as generic attributes so the wording matches
-  # the browser-validated Java gateway exactly.
+  # a=extmap (RFC 8285), verbatim: an answer states the offer's own id and an offer
+  # states ours. The caller decides which extensions belong here — the builder adds
+  # none of its own.
+  defp add_extmaps(m, extmaps) do
+    Enum.reduce(extmaps, m, fn ext, acc -> ExSDP.add_attribute(acc, ext) end)
+  end
+
+  # `rtcp_fb: true` is the OFFERER's form: we propose the feedback we are willing to do
+  # and the answerer picks, so there is no set to intersect. Resolved to the concrete
+  # list here rather than inside add_rtcp_fb/3 because `transport-cc` rides with the
+  # extension it reports on: asking for it without offering the extmap asks the peer
+  # for reports on a sequence number nothing writes. A list is passed through — that
+  # is the ANSWERER's form, already the agreed set.
+  defp offered_rtcp_fb(mspec) do
+    case Map.get(mspec, :rtcp_fb, false) do
+      true -> @offered_rtcp_fb ++ transport_cc_fb_of(Map.get(mspec, :extmaps, []))
+      answered -> answered
+    end
+  end
+
+  defp transport_cc_fb_of(extmaps) do
+    if Enum.any?(extmaps, &(&1.uri == @transport_cc_uri)), do: [@transport_cc_fb], else: []
+  end
+
+  # a=rtcp-fb, one line per video payload type and per agreed type, emitted verbatim as
+  # generic attributes so the wording matches the browser-validated Java gateway
+  # exactly. Explicit payload types rather than the `*` wildcard the offer may have
+  # used: verbose on purpose — a wildcard answer leaves what we accepted ambiguous, and
+  # this is the attribute a peer reads to decide whether to bother sending NACKs.
   defp add_rtcp_fb(m, false, _pts), do: m
   defp add_rtcp_fb(m, _fb, []), do: m
   defp add_rtcp_fb(m, [], _pts), do: m
 
-  # `true` keeps the OFFERER's behaviour: we propose the feedback we are willing to
-  # do, and the answerer picks. Unchanged, because an offer has no set to intersect.
-  defp add_rtcp_fb(m, true, pts) do
-    Enum.reduce(pts, m, fn pt, acc ->
-      acc
-      |> ExSDP.add_attribute({"rtcp-fb", "#{pt} nack"})
-      |> ExSDP.add_attribute({"rtcp-fb", "#{pt} ccm fir"})
-      |> ExSDP.add_attribute({"rtcp-fb", "#{pt} goog-remb"})
-    end)
-  end
-
-  # A LIST is the ANSWERER's form: exactly the feedback types agreed, emitted per
-  # explicit payload type rather than with the `*` wildcard the offer may have used.
-  # Verbose on purpose — a wildcard answer leaves what we accepted ambiguous, and this
-  # is the attribute a peer reads to decide whether to bother sending NACKs.
   defp add_rtcp_fb(m, types, pts) when is_list(types) do
     for pt <- pts, type <- types, reduce: m do
       acc -> ExSDP.add_attribute(acc, {"rtcp-fb", "#{pt} #{type}"})
@@ -799,6 +839,7 @@ defmodule MediaServer.Mendooze.Sdp do
       sdes_offers: [],
       ice: nil,
       rtcp_fb: %{},
+      extmaps: [],
       capneg: nil,
       candidates: []
     }
@@ -850,6 +891,7 @@ defmodule MediaServer.Mendooze.Sdp do
       ice: find_ice(attrs) || find_ice(session_attrs),
       mid: find_mid(attrs),
       rtcp_fb: parse_rtcp_fb(attrs),
+      extmaps: parse_extmaps(attrs),
       capneg: find_capneg(attrs, session_attrs),
       candidates: raw_candidates(attrs)
     }
@@ -966,6 +1008,11 @@ defmodule MediaServer.Mendooze.Sdp do
         key = if pt == :all, do: -1, else: pt
         Map.update(acc, key, [fb_to_string(fb)], &(&1 ++ [fb_to_string(fb)]))
     end
+  end
+
+  # a=extmap lines of this section (RFC 8285), as ExSDP structs, in offer order.
+  defp parse_extmaps(attrs) do
+    for %ExSDP.Attribute.Extmap{} = ext <- attrs, do: ext
   end
 
   defp fb_to_string(:nack), do: "nack"
@@ -1311,6 +1358,75 @@ defmodule MediaServer.Mendooze.Sdp do
   def reverse_direction(:sendonly), do: :recvonly
   def reverse_direction(:recvonly), do: :sendonly
   def reverse_direction(dir), do: dir
+
+  # ── transport-wide congestion control (negotiation) ─────────────────────────
+
+  @doc """
+  The transport-wide-cc extension to confirm on this media, or `nil`.
+
+  Answers three questions at once, so that the SDP answer, the offer and the media
+  server property can never disagree about them:
+
+    * is `[mediaserver] transport_cc` on? It is off by default — the media server
+      does not yet emit fmt 15 reports for what it *receives*, so a peer that
+      negotiates the extension gets nothing back on its own outgoing stream and
+      falls back on the RR losses and our REMB/TMMBR (design
+      `docs/design/kelixip-transport-wide-cc.md` §5);
+    * is this a **video** media? Only the video sender has an estimator behind it;
+    * did the peer declare the extension with a direction we can use? `sendrecv`
+      or none. An asymmetric direction is left alone (v1 perimeter).
+
+  Called with a remote OFFER it says what our answer confirms; called with a remote
+  ANSWER it says whether the peer took what we offered. Either way the id is the
+  peer's own — RFC 8285 §5 forbids renumbering in an answer.
+  """
+  @spec transport_cc_extmap(media_desc() | media_stub()) :: ExSDP.Attribute.Extmap.t() | nil
+  def transport_cc_extmap(desc) do
+    if transport_cc?() and Map.get(desc, :type) == :video do
+      Enum.find(Map.get(desc, :extmaps, []), fn ext ->
+        ext.uri == @transport_cc_uri and ext.direction in [nil, :sendrecv]
+      end)
+    end
+  end
+
+  @doc """
+  The transport-wide-cc extension to OFFER on this media, or `nil` — video only,
+  and only when `[mediaserver] transport_cc` is on.
+  """
+  @spec transport_cc_offer(:audio | :video | :text) :: ExSDP.Attribute.Extmap.t() | nil
+  def transport_cc_offer(:video) do
+    if transport_cc?(),
+      do: %ExSDP.Attribute.Extmap{id: @transport_cc_offer_id, uri: @transport_cc_uri}
+  end
+
+  def transport_cc_offer(_media), do: nil
+
+  @doc """
+  The extension's URI: the `a=extmap` value, and the media server property key that
+  arms the extension on our outgoing packets (`EndpointSetRTPProperties` /
+  `SetRTPProperties`). Its value there is the negotiated id, not `"1"`.
+  """
+  @spec transport_cc_uri() :: String.t()
+  def transport_cc_uri(), do: @transport_cc_uri
+
+  @doc """
+  The `a=rtcp-fb` type paired with the extension: what authorises the peer to send
+  us fmt 15 reports. It has no server-side switch of its own — the extmap property
+  is what turns the mechanism on.
+  """
+  @spec transport_cc_fb() :: String.t()
+  def transport_cc_fb(), do: @transport_cc_fb
+
+  # `[mediaserver] transport_cc`, riding the Mendooze tuning block like
+  # `bitrate_feedback` (`Kelix.Config.apply_app_env/1`). Read here rather than in each
+  # controller so the JSR-309 adapter and the MCU adapter cannot end up negotiating
+  # different things — one of the two silently without sender-side rate control is
+  # exactly the failure the `remb` property produced. The MCU adapter reaches it
+  # through `MediaServer.SdpTools`, so it never names the other adapter's block.
+  defp transport_cc?() do
+    Application.get_env(:elixip2, MediaServer.Mendooze, [])
+    |> Keyword.get(:transport_cc, false)
+  end
 
   # ── ICE host candidates ─────────────────────────────────────────────────────
 

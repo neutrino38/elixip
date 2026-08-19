@@ -101,4 +101,25 @@ defmodule MediaServer.SdpTools do
   encode. See `MediaServer.Mendooze.Sdp.av1_level_idx/3`.
   """
   defdelegate av1_level_idx(width, height, fps), to: Sdp
+
+  @doc """
+  The transport-wide-cc extension to confirm on this media, or `nil`.
+
+  One reading of the switch, the media type and the peer's `a=extmap` for every
+  adapter, so two controllers cannot negotiate different things. See
+  `MediaServer.Mendooze.Sdp.transport_cc_extmap/1`.
+  """
+  defdelegate transport_cc_extmap(desc), to: Sdp
+
+  @doc """
+  The extension's URI: the `a=extmap` value, and the media server property key whose
+  value is the negotiated id. See `MediaServer.Mendooze.Sdp.transport_cc_uri/0`.
+  """
+  defdelegate transport_cc_uri(), to: Sdp
+
+  @doc """
+  The `a=rtcp-fb` type paired with the extension. See
+  `MediaServer.Mendooze.Sdp.transport_cc_fb/0`.
+  """
+  defdelegate transport_cc_fb(), to: Sdp
 end

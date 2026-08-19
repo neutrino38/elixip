@@ -196,7 +196,8 @@ defmodule Kelix.Mod.McuWebrtcTest do
       {Client,
        name: "mcu1",
        base_url: "http://127.0.0.1:18080",
-       transport: TestStub.transport(self(), Map.merge(%{"StartReceiving" => verdict}, ws_override)),
+       transport:
+         TestStub.transport(self(), Map.merge(%{"StartReceiving" => verdict}, ws_override)),
        register: {Mcu, "mcu1"},
        reconnect_ms: 0},
       id: :client_mcu1
@@ -646,11 +647,119 @@ defmodule Kelix.Mod.McuWebrtcTest do
       # it understands, and answering it is what makes the mixer emit any at all
       # (rate-control lot 2)
       assert "a=rtcp-fb:109 goog-remb" in video
-      # offered but not implemented here (§6.3.1 rule 5), and never announced
+      # `transport-cc` needs `[mediaserver] transport_cc`, off by default — see the
+      # "transport-wide congestion control" describe block below
       refute answer =~ "transport-cc"
       # no feedback on audio, whatever the offer asked for there — there is no audio
       # feedback this mixer acts on
       refute Enum.any?(audio, &String.starts_with?(&1, "a=rtcp-fb"))
+    end
+  end
+
+  # ── transport-wide congestion control ─────────────────────────────────────────
+  #
+  # The half of the mediaserver's sender-side bandwidth estimator that lives here
+  # (design `docs/design/kelixip-transport-wide-cc.md`). The captured Chrome offer
+  # carries `a=extmap:3 <URI>` on its video section and `transport-cc` on every video
+  # PT, so this is the real negotiation and not a hand-written one.
+  #
+  # This mixer only ever ANSWERS: there is no offer side to cover here.
+  describe "transport-wide congestion control" do
+    @transport_cc_uri "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01"
+
+    defp with_transport_cc(value) do
+      block = Application.get_env(:elixip2, MediaServer.Mendooze, [])
+
+      Application.put_env(
+        :elixip2,
+        MediaServer.Mendooze,
+        Keyword.put(block, :transport_cc, value)
+      )
+
+      on_exit(fn -> Application.put_env(:elixip2, MediaServer.Mendooze, block) end)
+    end
+
+    # Two SetRTPProperties land per media: our local codec capability first (§16.3.4
+    # (a)), the transport switches second. Drained and merged — the keys of the two
+    # never collide, and asserting on a fixed position would only be asserting the
+    # order of the pair.
+    defp rtp_props(media) do
+      receive do
+        {:rpc, "SetRTPProperties", [42, 7, ^media, props, 0]} ->
+          Map.merge(props, rtp_props(media))
+      after
+        0 -> %{}
+      end
+    end
+
+    test "the switch on: same extmap id in the answer, feedback confirmed, leg armed",
+         ctx do
+      with_transport_cc(true)
+      answer = answer_for(ctx.did, @chrome_offer)
+      [audio, video] = sections(answer)
+
+      # RFC 8285 §5: the browser's own id, never renumbered
+      assert "a=extmap:3 #{@transport_cc_uri}" in video
+      assert "a=rtcp-fb:109 transport-cc" in video
+
+      # video only — there is no sender-side estimator behind an audio stream
+      refute Enum.any?(audio, &String.starts_with?(&1, "a=extmap"))
+      refute Enum.any?(audio, &(&1 =~ "transport-cc"))
+
+      # the switch is the extmap property: keyed by URI, valued with the negotiated id
+      props = rtp_props(1)
+      assert props[@transport_cc_uri] == "3"
+      # and the rtcp-fb switches next to it are untouched
+      assert props["useNACK"] == "1"
+      assert props["remb"] == "1"
+
+      refute Map.has_key?(rtp_props(0), @transport_cc_uri)
+    end
+
+    test "the switch off: nothing answered, nothing armed", ctx do
+      with_transport_cc(false)
+      answer = answer_for(ctx.did, @chrome_offer)
+      [_audio, video] = sections(answer)
+
+      refute answer =~ "a=extmap"
+      refute answer =~ "transport-cc"
+
+      # the rest of the answered feedback is untouched
+      assert "a=rtcp-fb:109 nack" in video
+      assert "a=rtcp-fb:109 goog-remb" in video
+
+      refute Map.has_key?(rtp_props(1), @transport_cc_uri)
+    end
+
+    test "an offer without the extension gets nothing back, switch on", ctx do
+      with_transport_cc(true)
+      # the feedback message stays offered: without the extension it would report on a
+      # sequence number nothing writes
+      offer = String.replace(@chrome_offer, ~r/a=extmap:3 [^\r\n]*\r?\n/, "")
+      answer = answer_for(ctx.did, offer)
+
+      refute answer =~ "a=extmap"
+      refute answer =~ "transport-cc"
+
+      refute Map.has_key?(rtp_props(1), @transport_cc_uri)
+    end
+
+    test "an asymmetric extmap direction is left alone (v1 perimeter)", ctx do
+      with_transport_cc(true)
+
+      offer =
+        String.replace(
+          @chrome_offer,
+          "a=extmap:3 #{@transport_cc_uri}",
+          "a=extmap:7/sendonly #{@transport_cc_uri}"
+        )
+
+      answer = answer_for(ctx.did, offer)
+
+      refute answer =~ "a=extmap"
+      refute answer =~ "transport-cc"
+
+      refute Map.has_key?(rtp_props(1), @transport_cc_uri)
     end
   end
 

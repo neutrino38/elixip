@@ -148,6 +148,15 @@ port = 9095
 # conferences only.
 #video_bitrate = 1500
 
+# Negotiate transport-wide congestion control on video (RFC 8285 `a=extmap` +
+# `a=rtcp-fb transport-cc`). It is what lets the media server measure what the network
+# really absorbs towards each peer and drive its encoder from that, instead of only
+# from what the peer asks for. Off by default: the server does not yet report arrivals
+# for the streams it RECEIVES, so a peer that negotiates the extension gets nothing
+# back for its own outgoing stream and keeps using our REMB/TMMBR — no worse than
+# today, but unmeasured. One value for both media paths.
+#transport_cc = false
+
 #[mediaserver.pool.mcu1]
 #module = "mendooze"
 #url    = "http://mcu1.example.com:8080"

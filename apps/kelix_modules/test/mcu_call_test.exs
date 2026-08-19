@@ -1182,8 +1182,8 @@ defmodule Kelix.Mod.McuCallTest do
       assert answer =~ "a=rtcp-fb:99 goog-remb"
       refute answer =~ "rtcp-fb:*"
 
-      # and NOT what has no server-side switch: announcing it would promise a
-      # capability nothing implements
+      # and NOT `transport-cc`: it needs `[mediaserver] transport_cc`, off by default
+      # (mcu_webrtc_test.exs covers the negotiation, both ways)
       refute answer =~ "transport-cc"
     end
 

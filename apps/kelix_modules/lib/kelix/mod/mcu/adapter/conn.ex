@@ -96,6 +96,12 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # so nothing congestion-related ever left towards them. The server now has its own
   # mode (`remb`), TMMBR wins when a peer asks for both, and neither is emitted
   # un-negotiated (arbitrage A2): announcing it here is what turns it on.
+  #
+  # `transport-cc` is deliberately ABSENT: the attribute alone switches nothing on. Its
+  # server-side property is keyed by the RTP header extension's URI and valued with the
+  # negotiated extmap id (`transport_cc_props/1`), so it cannot ride this
+  # attribute-to-switch table. It is still confirmed in the answer
+  # (`answered_transport_cc_fb/1`).
   @supported_rtcp_fb %{
     "nack" => "useNACK",
     "nack pli" => "useRtcpFIR",
@@ -819,6 +825,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
       # what the old `avpf?(desc)` pair did — tells the peer it has a capability
       # nothing implements.
       |> Map.merge(rtcp_fb_props(desc))
+      |> Map.merge(transport_cc_props(desc))
       |> put_if(state.nat_latch, "natLatch", "1")
       |> merge_video_props(state, desc)
 
@@ -839,13 +846,28 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   defp put_if(map, false, _key, _value), do: map
 
   # The server-side switch for each feedback type we answered, and nothing else.
+  # `transport-cc` is dropped here rather than looked up: it is confirmed in the answer
+  # but switched on by the extmap property below, whose value is an id and not "1".
   defp rtcp_fb_props(desc) do
     case answered_rtcp_fb(desc) do
       types when is_list(types) ->
-        Map.new(types, fn type -> {Map.fetch!(@supported_rtcp_fb, type), "1"} end)
+        types
+        |> Enum.reject(&(&1 == Sdp.transport_cc_fb()))
+        |> Map.new(fn type -> {Map.fetch!(@supported_rtcp_fb, type), "1"} end)
 
       _ ->
         %{}
+    end
+  end
+
+  # The transport-wide-cc extension, keyed by its URI and valued with the NEGOTIATED
+  # id: that is what makes the server write a transport-wide sequence number on every
+  # packet it sends this participant, pair the incoming fmt 15 reports with its own
+  # send history and feed its sender-side bandwidth estimator.
+  defp transport_cc_props(desc) do
+    case Sdp.transport_cc_extmap(desc) do
+      %{id: id} -> %{Sdp.transport_cc_uri() => Integer.to_string(id)}
+      nil -> %{}
     end
   end
 
@@ -1315,6 +1337,9 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
       rtcp_mux: Map.get(desc, :rtcp_mux, false),
       # the feedback types actually agreed, per video PT (§6.3.1 rule 3)
       rtcp_fb: answered_rtcp_fb(desc),
+      # RFC 8285 §5: the extension is confirmed with the offer's OWN id, never
+      # renumbered. Empty unless transport-wide-cc is negotiated on this media.
+      extmaps: List.wrap(Sdp.transport_cc_extmap(desc)),
       crypto: answer_crypto(state, desc),
       crypto_tag: answer_crypto_tag(state, desc),
       ice: state.local_ice,
@@ -1413,13 +1438,17 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # The feedback the offer asks for on this media, wildcard included: `a=rtcp-fb:*`
   # (parsed as payload type -1) applies to every format of the section.
   defp requested_rtcp_fb(desc) do
-    fb = Map.get(desc, :rtcp_fb, %{})
+    Enum.filter(offered_rtcp_fb(desc), &Map.has_key?(@supported_rtcp_fb, &1))
+  end
 
-    fb
+  # The same list before that filter. `transport-cc` has no entry in
+  # @supported_rtcp_fb — its server-side switch comes from the extmap, not from this
+  # attribute — so confirming it needs the unfiltered reading.
+  defp offered_rtcp_fb(desc) do
+    Map.get(desc, :rtcp_fb, %{})
     |> Map.values()
     |> List.flatten()
     |> Enum.uniq()
-    |> Enum.filter(&Map.has_key?(@supported_rtcp_fb, &1))
   end
 
   # What the answer advertises: the INTERSECTION of what the offer asked for with what
@@ -1437,8 +1466,19 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # same set. A caller that asks for nothing gets nothing back.
   defp answered_rtcp_fb(desc) do
     if desc.type == :video,
-      do: requested_rtcp_fb(desc),
+      do: requested_rtcp_fb(desc) ++ answered_transport_cc_fb(desc),
       else: false
+  end
+
+  # `transport-cc` is confirmed only when BOTH halves of the mechanism are there: the
+  # caller asked for the feedback message, and the extension it reports on is one we
+  # negotiate (`Sdp.transport_cc_extmap/1` — video, `[mediaserver] transport_cc` on, a
+  # usable direction). Appended rather than filtered in, because @supported_rtcp_fb
+  # maps an attribute to the server switch that implements it and this one has none.
+  defp answered_transport_cc_fb(desc) do
+    if Sdp.transport_cc_extmap(desc) && Sdp.transport_cc_fb() in offered_rtcp_fb(desc),
+      do: [Sdp.transport_cc_fb()],
+      else: []
   end
 
   # Our side of the security handshake, as the answer states it: the server's
