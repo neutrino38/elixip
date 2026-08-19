@@ -87,8 +87,8 @@ sinon, ne rien poser.
 Un booléen `[mediaserver] transport_cc` dans `config.toml`, **défaut `false`**,
 calqué trait pour trait sur `bitrate_feedback` (le motif vient d'être posé) :
 `Kelix.Config` → bloc app env `MediaServer.Mendooze` → lecture dans mendooze.
-Le défaut passera à `true` quand le lot 4 du mediaserver sera livré et que la
-recette du §6 sera passée — pas avant, la décision se consigne dans ce document.
+Le défaut passera à `true` quand la recette du §6 sera passée — pas avant, la
+décision se consigne dans ce document.
 
 ### 3.4 Points d'ancrage dans ce dépôt
 
@@ -129,22 +129,21 @@ servi aujourd'hui :
 1. Le pair envoie des rapports fmt 15 sur **nos** paquets sortants → consommés
    par le mediaserver (son lot 6, prêt). C'est le but.
 2. Le pair pose l'extension sur **ses** paquets et attend des rapports fmt 15
-   de notre part → le mediaserver n'en émet pas encore (son lot 4).
+   de notre part → le mediaserver les émet (son lot 4).
 
-Le second effet n'est pas une gêne, c'est un arrêt. Mesuré le 2026-08-19, Chrome
-en conférence, bouton actif : le débit vidéo du navigateur vers nous tombe de 177
-à 30 kb/s en huit secondes, ×0,8 par seconde, puis reste plat — image
-inutilisable. Le REMB du mediaserver autorise pourtant 1,5 fois ce que Chrome
-envoie, donc il ne contraint rien : la décision vient du navigateur seul. Un pair
-privé de rapports lit notre silence comme un RTT infini et recule jusqu'à son
-plancher. Mécanisme et références au code témoin :
+Les deux moitiés sont indivisibles, et le prix de l'oubli est mesuré : un pair
+privé de nos rapports lit notre silence comme un RTT infini et recule de 20 % par
+seconde jusqu'à son plancher — 177 à 30 kb/s en huit secondes, Chrome en
+conférence, le 2026-08-19. Le REMB du mediaserver autorisait alors 1,5 fois ce
+que Chrome envoyait, donc il ne contraignait rien : la décision venait du
+navigateur seul. Mécanisme et références au code témoin :
 `mediaserver/rate_control_plan.md`, lot 4.
 
-La négociation ne se coupe pas en deux : l'`a=rtcp-fb transport-cc` de la ligne
-média engage les deux sens. Il n'existe pas de réglage côté contrôleur qui
-consomme le feedback du pair sans lui devoir le sien.
+C'est pour cela que l'`a=rtcp-fb transport-cc` de la ligne média engage les deux
+sens d'un coup : il n'existe pas de réglage côté contrôleur qui consomme le
+feedback du pair sans lui devoir le sien.
 
-**Le bouton reste donc à `false` jusqu'à la livraison du lot 4 du mediaserver.**
+**Le bouton reste à `false` jusqu'à la recette du §6**, qui éprouve les deux sens.
 
 Effet de bord attendu et voulu, une fois le bouton ouvrable : dès que nos paquets
 portent l'extension, le navigateur **cesse d'émettre du REMB** pour notre flux
@@ -167,17 +166,22 @@ contrôleurs) :
   si l'answer le reprend.
 
 **Recette live** (appel Chrome ↔ mediaserver, bouton actif sur dev, mcu avec
-`-d`). Elle exige le lot 4 du mediaserver : sans lui, le §5 dit ce qui se passe,
-et l'appel n'est pas exploitable.
+`-d`). Elle éprouve les deux sens : nos rapports vers le pair, et les siens vers
+nous.
 1. `grep -a 'Unknown RTP property' /var/log/mcu.log` → ne doit rien rendre de
    nouveau.
 2. `grep -a 'BWE-TX: estimation' /var/log/mcu.log` → des lignes avec
    `stream=<nom de la patte>` et une cible qui bouge : la boucle est fermée.
 3. pcap : nos paquets RTP portent l'extension one-byte (`0xBEDE`) avec l'id
-   négocié ; le RTCP entrant porte des paquets PT=205 FMT=15.
+   négocié — l'en-tête RTP reste en clair sous SRTP. Le RTCP, lui, est chiffré :
+   ni nos rapports ni ceux du pair ne se lisent au pcap, ce sont les traces du
+   mediaserver qui en font foi (points 2 et 5).
 4. `chrome://webrtc-internals` côté navigateur : le débit d'émission vers nous
-   monte et suit le lien, sans le recul de 20 % par seconde décrit au §5.
-5. La séance de mesure complète (netem sur le lien sortant du mediaserver,
+   monte et suit le lien, sans le recul de 20 % par seconde décrit au §5. C'est
+   le contrôle qui prouve que nos rapports lui parviennent et lui servent.
+5. Côté mediaserver, `grep -a 'transport-cc feedback started' /var/log/mcu.log`
+   nomme la patte sur laquelle nos rapports partent.
+6. La séance de mesure complète (netem sur le lien sortant du mediaserver,
    critères chiffrés) est décrite côté mediaserver :
    `mediaserver/mcu/tests/tools/README.md`, patte `tx:<stream>` de
    `bwe_report.py`.
