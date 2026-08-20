@@ -116,7 +116,7 @@ defmodule Kelix.Metrics do
     ] ++ mcu_metrics()
   end
 
-  # Conferencing (the `mcu` module, docs/design/mcu_module.md §11). Defined here
+  # Conferencing (the `mcu` module, docs/design/DESIGN-MCU.md#11-observability). Defined here
   # rather than in the module for the same reason the registrar's are: a loadable
   # module cannot carry half of an event-name contract, and the reporter needs every
   # definition at start — long before a module is loaded.

@@ -3,10 +3,10 @@ defmodule Kelix.Mod.Mcu.Script do
   MCU helpers mixin for the MCU scenario scripts (`mcu.exs`, `mcu_adhoc.exs`
   and their copies).
 
-  This module provides the `admit`, `attach` and `leave` DSL macros (through
+  This module provides the `admit`, `attach` and `leave` FSL macros (through
   `__using__/1`), following the `SIP.Session.Media` scheme: the expansion
   rebinds the scenario's `sip_ctx` variable in place, so the state code reads
-  like the other DSL verbs — no visible `sip_ctx =` — and only tests
+  like the other FSL verbs — no visible `sip_ctx =` — and only tests
   `sip_ctx.lasterr` afterwards.
   """
 

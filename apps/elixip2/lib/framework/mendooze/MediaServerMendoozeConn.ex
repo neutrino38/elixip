@@ -173,7 +173,7 @@ defmodule MediaServer.Mendooze.Conn do
   This is what `create_peer_connection(server, sink, bridge_with: <ref>)` routes
   to. The B2BUA's outbound leg is not a second connection: two endpoints can only
   be attached to each other inside one `MediaSession`
-  (docs/design/mediagw_b2bua_jsr309.md §2), so the placement has to be decided
+  (docs/design/notes/mediagw_b2bua_jsr309.md §2), so the placement has to be decided
   when the endpoint is created and cannot be repaired later by `bridge/3`.
 
   `opts` are the new leg's OWN — codecs, `:media`, `:webrtc_support`, bandwidth.
@@ -290,7 +290,7 @@ defmodule MediaServer.Mendooze.Conn do
   #
   # A B2BUA call is ONE MediaSession holding TWO Endpoints, because
   # `EndpointAttachToEndpoint` takes a single session id and two endpoints are
-  # connectable only inside one session (docs/design/mediagw_b2bua_jsr309.md §2).
+  # connectable only inside one session (docs/design/notes/mediagw_b2bua_jsr309.md §2).
   # So this process owns the session and one *leg* per SIP leg.
   #
   # A leg is a plain map carrying its own endpoint state AND a copy of the
@@ -609,7 +609,7 @@ defmodule MediaServer.Mendooze.Conn do
     end
   end
 
-  # ── The bridge (docs/design/mediagw_b2bua_jsr309.md §3) ─────────────────────
+  # ── The bridge (docs/design/notes/mediagw_b2bua_jsr309.md §3) ─────────────────────
 
   # Called once when both legs have first answered, and AGAIN after every
   # renegotiation — a re-INVITE changes what a leg carries, so the cross-leg
@@ -1548,7 +1548,7 @@ defmodule MediaServer.Mendooze.Conn do
   # type 7). A decrypted SRTP packet means ICE + DTLS completed (WebRTC case); a
   # plain RTP packet is simply the first media packet. The server re-arms it on
   # each StartReceiving, so the raw event repeats on renegotiation while
-  # :ice_connected stays one-shot — docs/design/media-connectivity.md §3, §5.
+  # :ice_connected stays one-shot — docs/design/DESIGN-FRAMEWORK.md#66-media-connectivity-when-may-a-scenario-send.
   defp handle_server_event({:endpoint_connected, _tag, ep, media}, state) do
     on_endpoint_event(state, ep, fn l, handle ->
       Logger.info(module: __MODULE__, session: l.sess_tag, message: "media connected on #{media}")
@@ -1623,7 +1623,7 @@ defmodule MediaServer.Mendooze.Conn do
     {:noreply, state}
   end
 
-  # The derivation rule of docs/design/media-connectivity.md §4, on the media
+  # The derivation rule of docs/design/DESIGN-FRAMEWORK.md#66-media-connectivity-when-may-a-scenario-send, on the media
   # that just connected. R (`recv_medias`) is the set of medias the peer
   # transmits on; rule 1 (R empty) never reaches here since no event can arrive.
   defp maybe_notify_ice_connected(%{ice_notified: true} = state, _media, _handle), do: state
@@ -2518,7 +2518,7 @@ defmodule MediaServer.Mendooze.Conn do
   # tells the peer it has a capability nothing implements) are merged into a
   # single EndpointSetRTPProperties call. The "secure" hint is intentionally
   # omitted: it is a no-op once DTLS/SDES crypto is configured (server audit,
-  # webrtc_sdp_design.md Q2).
+  # DESIGN-FRAMEWORK.md Q2).
   defp set_rtp_properties(state, m, desc) do
     props =
       %{}

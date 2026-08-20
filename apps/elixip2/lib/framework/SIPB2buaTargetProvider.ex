@@ -8,7 +8,7 @@ defmodule SIP.B2bua.TargetProvider do
   since, who just logged in, whose wrap-up expired. So a peer may name a
   provider instead, and the hunt asks it each time it needs a target.
 
-  Design: docs/design/b2bua_module.md §3.4.
+  Design: docs/design/DESIGN-FRAMEWORK.md#55-forking-the-kamailio-tm-model.
 
       %SIP.B2bua.Peer{provider: {Kelix.Mod.Queue, queue_pid}, fork: :serial}
       %SIP.B2bua.Peer{provider: Kelix.Mod.Queue}   # server registered under its own name

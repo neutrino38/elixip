@@ -1,7 +1,7 @@
 defmodule Kelix.Mod.Mcu.Store do
   @moduledoc """
-  The persistent conference **definitions** on disk (design `docs/design/mcu_module.md`
-  §9.5).
+  The persistent conference **definitions** on disk (design `docs/design/DESIGN-MCU.md`
+  §4.1).
 
   One JSON file, read once at module start and rewritten whole every time a definition
   changes. What it holds is a definition and never a runtime state: `conf_id`,

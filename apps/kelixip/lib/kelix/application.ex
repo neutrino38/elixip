@@ -1,6 +1,6 @@
 defmodule Kelix.Application do
   @moduledoc """
-  OTP entry point of the kelixip server (design `docs/design/kelixip_basic_design.md` §2).
+  OTP entry point of the kelixip server (design `docs/design/DESIGN-KELIXIP.md`).
 
   It boots the root supervision tree in the order §2.1 prescribes: infra config,
   then the shared SIP stack registries + the `ConfigRegistry` — which the
@@ -59,7 +59,7 @@ defmodule Kelix.Application do
       # Kelix.Mod.AuthDb calls into both on every challenge.
       SIP.Auth.Secret,
       Kelix.NonceCache,
-      # FSM observability: the store the DSL runner reports every state transition
+      # FSM observability: the store the FSL runner reports every state transition
       # to, and the `SIP.Session.*` / `SIP.Dialog.reply` instrumentation its
       # commands. It backs `kelictl monitor` — without it the runner's reporting
       # helpers are no-ops and the whole FSM formalism is invisible from outside.

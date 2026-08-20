@@ -34,9 +34,9 @@ We will consider three common use cases:
 - a WebRTC to SIP gateway scenario `webrtc-gw.exs` that takes a WebRTC call from a proxy and resend this call
   to the proxy using a mediaserver to translate the bitstream.
 
-> The DSL reference is [DSL.md](DSL.md). The design document, which answers *why*
+> The FSL reference is [FSL.md](FSL.md). The design document, which answers *why*
 > rather than *how to use*, is
-> [docs/design/b2bua_module.md](docs/design/b2bua_module.md). Two reference
+> [docs/design/DESIGN-FRAMEWORK.md#5-b2bua](docs/design/DESIGN-FRAMEWORK.md#5-b2bua). Two reference
 > scenarios ship with elixip and are worth reading as a pair — same call, same
 > states, and the difference between the files is what a media server costs:
 > [`b2bua_basic.exs`](apps/elixip2/scenarios/b2bua_basic.exs) and
@@ -47,7 +47,7 @@ We will consider three common use cases:
 `use SIP.Scenario` pulls them in — there is nothing to opt into. A B2BUA is an
 incoming-call scenario, so it declares `uas(:invite)`.
 
-Like the other DSL verbs they rebind the scenario context in place: they return
+Like the other FSL verbs they rebind the scenario context in place: they return
 nothing, and their verdict is read from `sip_ctx.lasterr` (`:ok`, or a
 `{:b2bua, …}` tuple naming what failed).
 
@@ -295,9 +295,18 @@ Bob may be registered on several devices. They are **alternatives**, not a group
 to ring together, and the registrar already ordered them by `q` — by which one
 Bob wants tried first. So one leg, `fork: :serial`, and the hunt walks them.
 
+The establishment of the outbound leg is a **service building block**: `use
+SBB.Call` brings in `call/1`, which owns everything from forwarding the INVITE to
+the ACK that confirms the answer — including the cancel race of RFC 3261 §16.7,
+where a device picks up a fraction of a second after the caller has given up. The
+script says where to call and what each outcome means; the sequence in between is
+written once, in `:elixip2`, and shared. See
+[FSL.md](FSL.md#service-building-blocks-sbb).
+
 ```elixir
 defmodule Kelix.DirectCall do
   use SIP.Scenario
+  use SBB.Call
 
   uas(:invite)
 
@@ -323,19 +332,50 @@ defmodule Kelix.DirectCall do
     end
   end
 
-  # Where is Bob? A state with no on_events: it decides and moves on.
+  # Where is Bob? The MODULE says where the AOR is and hands back a peer; the
+  # SCRIPT decides what SIP each outcome means. Nothing is rescued here — a
+  # module that faults raises, and the scenario runner logs it and fails the
+  # scenario, which is more readable than an error mapped twice.
   #
-  # The MODULE says where the AOR is and hands back a peer; the SCRIPT decides
-  # what SIP each outcome means. Nothing is rescued here — a module that faults
-  # raises, and the scenario runner logs it and fails the scenario, which is more
-  # readable than an error mapped twice.
+  # `call/1` is everything between "forward this INVITE" and "the call is up or
+  # over": the provisionals, the serial hunt over Bob's devices, the caller
+  # giving up, the cancel race, the ACK. What stays here is what only this script
+  # can answer — whether an outcome is a success, a failure or an abort.
   state place_call do
     req = last_uas_req()
 
     case Kelix.Mod.Registrar.targets(ctx_get(:domain), req) do
       {:ok, peer} ->
-        b2bua_forward(req, peer, false)
-        goto(proceeding, "call forwarded")
+        call(args: %{peer: peer, request: req})
+
+        on_events do
+          {:call, :connected, _} ->
+            goto(connected, "call established")
+
+          {:call, :rejected, %{code: code}} ->
+            scenario_success("Bob answered #{code}")
+
+          # A call answered a fraction of a second after its cancellation is a
+          # real event, and the difference between "abandoned" and "answered then
+          # hung up" is one somebody bills on.
+          {:call, :cancelled, _} ->
+            scenario_success("caller cancelled, callee confirmed")
+
+          {:call, :answered_after_cancel, _} ->
+            scenario_success("callee answered after the cancellation; hung up")
+
+          {:call, :caller_hung_up, _} ->
+            scenario_success("caller hung up before answer")
+
+          {:call, :caller_gone, %{reason: reason}} ->
+            scenario_aborted("caller vanished while it rang: #{inspect(reason)}")
+
+          {:call, :timeout, _} ->
+            scenario_success("Bob never answered")
+
+          {:call, :failed, %{reason: reason}} ->
+            scenario_failure("call setup failed: #{reason}")
+        end
 
       :notfound ->
         b2bua_reply(req, 480, "Temporarily Unavailable")
@@ -351,123 +391,30 @@ defmodule Kelix.DirectCall do
     end
   end
 
-  state proceeding do
-    on_events do
-      # Everything the device says goes back to Alice, collapsed into our single
-      # inbound dialog.
-      {:outbound, {code, resp, _trans, _dlg}} when code in 101..199 ->
-        b2bua_forward_reply(resp)
-        goto(loop, "provisional #{code}")
-
-      {:outbound, {200, resp, _trans, _dlg}} ->
-        b2bua_forward_reply(resp)
-        goto(wait_ack, "200 OK relayed")
-
-      # A refusal. If Bob has another device, the hunt is already trying it.
-      {:outbound, {code, resp, _trans, _dlg}} when code >= 300 ->
-        b2bua_forward_reply(resp)
-
-        if b2bua_hunting?() do
-          goto(loop, "#{code}, trying Bob's next device")
-        else
-          scenario_success("Bob answered #{code}")
-        end
-
-      # Alice gave up. Two different things, and both are wanted: stop the
-      # search, and tell the device that is ringing.
-      {:CANCEL, req, _trans, _dlg} ->
-        b2bua_cancel_forward()
-        b2bua_forward(req)
-        scenario_aborted("caller cancelled")
-
-      {:BYE, req, _trans, _dlg} ->
-        b2bua_cancel_forward()
-        b2bua_reply(req, 200, "OK")
-        scenario_success("caller hung up before answer")
-
-      {:outbound, {:dialog_terminated, _dlg, reason}} ->
-        b2bua_reply(last_uas_req(), 500, "Outbound leg lost")
-        scenario_failure("outbound leg died: #{inspect(reason)}")
-    after
-      180_000 ->
-        b2bua_reply(last_uas_req(), 408, "Request Timeout")
-        scenario_failure("Bob never answered")
-    end
-  end
-
-  # Alice's ACK is relayed rather than answered here: what Bob's device gets is
-  # what Alice sent.
-  state wait_ack do
-    on_events do
-      {:ACK, req, _trans, _dlg} ->
-        b2bua_forward(req)
-        goto(connected, "ACK relayed")
-    after
-      # RFC 3261 timer H: no ACK is coming. Hang up the leg we did establish.
-      32_000 ->
-        b2bua_send_BYE()
-        scenario_failure("no ACK from the caller")
-    end
-  end
-
+  # The call is up. `bridge/1` is the relay: every arm of the state this replaces
+  # was a forward and a stay, in-dialog traffic in both directions, down to the
+  # ACK a re-INVITE's 200 owes back. What is left here is the end of the call.
   state connected do
+    bridge()
+
     on_events do
-      {:BYE, req, _trans, _dlg} ->
-        b2bua_forward(req)
-        b2bua_reply(req, 200, "OK")
-        goto(wait_far_bye_ok, "caller hung up")
+      {:bridge, :caller_hung_up, _} ->
+        scenario_success("call relayed and ended: caller hung up")
 
-      {:outbound, {:BYE, req, _trans, _dlg}} ->
-        b2bua_forward(req)
-        b2bua_reply(req, 200, "OK")
-        goto(wait_far_bye_ok, "callee hung up")
+      {:bridge, :callee_hung_up, _} ->
+        scenario_success("call relayed and ended: callee hung up")
 
-      {:dialog_terminated, _dlg, reason} ->
-        scenario_success("inbound leg ended: #{inspect(reason)}")
+      {:bridge, :max_duration, _} ->
+        scenario_success("maximum call duration reached")
 
-      {:outbound, {:dialog_terminated, _dlg, reason}} ->
-        scenario_success("outbound leg ended: #{inspect(reason)}")
+      # Neither can happen in this script — there is no media plane, and nothing
+      # asks for the call back — but an outcome nobody matches leaves the machine
+      # waiting on an `after` that is not there. Saying so beats hanging.
+      {:bridge, :media_lost, %{reason: reason}} ->
+        scenario_failure("media plane gone from a call that has none: #{reason}")
 
-      # The ACK of a re-INVITE's 200 is a transaction of its own (RFC 3261
-      # §13.2.2.4), so every re-INVITE that crosses owes one back.
-      {:ACK, req, _trans, _dlg} ->
-        b2bua_forward(req)
-        goto(loop, "ACK relayed (caller -> callee)")
-
-      {:outbound, {:ACK, req, _trans, _dlg}} ->
-        b2bua_forward(req)
-        goto(loop, "ACK relayed (callee -> caller)")
-
-      # Default relay, written out rather than assumed: everything else
-      # in-dialog (re-INVITE, UPDATE, INFO, MESSAGE, REFER…), then the responses.
-      {:outbound, {m, req, _trans, _dlg}} when is_atom(m) ->
-        b2bua_forward(req)
-        goto(loop, "relayed #{m} (callee -> caller)")
-
-      {:outbound, {code, resp, _trans, _dlg}} when is_integer(code) ->
-        b2bua_forward_reply(resp)
-        goto(loop, "relayed #{code} (callee -> caller)")
-
-      {m, req, _trans, _dlg} when is_atom(m) ->
-        b2bua_forward(req)
-        goto(loop, "relayed #{m} (caller -> callee)")
-
-      {code, resp, _trans, _dlg} when is_integer(code) ->
-        b2bua_forward_reply(resp)
-        goto(loop, "relayed #{code} (caller -> callee)")
-    after
-      14_400_000 -> scenario_failure("maximum call duration reached")
-    end
-  end
-
-  state wait_far_bye_ok do
-    on_events do
-      {:outbound, {200, _resp, _trans, _dlg}} -> scenario_success("call relayed and ended")
-      {200, _resp, _trans, _dlg} -> scenario_success("call relayed and ended")
-      {:dialog_terminated, _dlg, _reason} -> scenario_success("call ended")
-      {:outbound, {:dialog_terminated, _dlg, _reason}} -> scenario_success("call ended")
-    after
-      5_000 -> scenario_success("BYE unanswered, closing anyway")
+      {:bridge, :interrupted, %{message: message}} ->
+        scenario_failure("bridge interrupted with nothing to do: #{inspect(message)}")
     end
   end
 
@@ -476,7 +423,6 @@ defmodule Kelix.DirectCall do
     # to do here but say why we stopped.
     scenario_aborted("B2BUA stopped gracefully")
   end
-
 end
 ```
 
@@ -510,7 +456,12 @@ What is worth noticing:
 > `proxy_authenticate(); lookup("location"); t_relay()`.
 
 Authentication is **three states in front of the call**, not a complication of the
-call: everything from `place_call` on is `direct-call.exs` unchanged.
+call: everything from `place_call` on is `direct-call.exs`.
+
+> This variant still carries the establishment states inline, where
+> `direct-call.exs` above now calls `SBB.Call`'s `call/1`. It adopts the block
+> next — see the phase plan in
+> [docs/design/DESIGN-SBB.md](docs/design/DESIGN-SBB.md).
 
 ```elixir
   config(uses_modules: [:registrar, :auth_db])

@@ -4,7 +4,7 @@ defmodule SIP.Test.ReferenceScenarios do
   @moduledoc """
   Every scenario shipped in `scenarios/` still loads.
 
-  The reference scenarios are documentation that runs — DSL.md and B2BUA.md quote
+  The reference scenarios are documentation that runs — FSL.md and B2BUA.md quote
   them, and a reader copies them. A macro that changes shape breaks all of them at
   once, and the suites that drive one scenario each would only catch the ones they
   drive. This catches the rest, at the only moment where the cost is a compile.

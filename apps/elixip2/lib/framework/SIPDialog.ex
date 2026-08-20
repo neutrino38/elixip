@@ -120,7 +120,7 @@ defmodule SIP.Dialog do
       dialog delivers to its application process is wrapped as `{tag, msg}` —
       requests, responses, `:onnewdialog` and `:dialog_terminated` alike. This
       is how a B2BUA scenario tells its outbound leg's events apart from the
-      inbound ones (design docs/design/b2bua_module.md §2). Default `nil`:
+      inbound ones (design docs/design/DESIGN-FRAMEWORK.md#52-telling-the-legs-apart). Default `nil`:
       bare messages, the historical behaviour.
 
     * `:fork` — `true` when this request is the first branch of a hunt with more
@@ -349,7 +349,7 @@ defmodule SIP.Dialog do
   @doc """
   Send this dialog's **initial** request to one more target, as another branch of
   the same dialog (RFC 3261 §16.6, the kamailio TM model — design
-  docs/design/b2bua_module.md §3.3).
+  docs/design/DESIGN-FRAMEWORK.md#55-forking-the-kamailio-tm-model).
 
   Call-ID, From tag and CSeq are shared with the branches already sent; only the
   Request-URI differs, and the client transaction mints a fresh Via branch. The

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Elixip is a SIP (Session Initiation Protocol) application server and test tool written in Elixir. The long-term goal is to build a DSL-based scripting tool for testing WebRTC call scenarios, using SIP over WSS/UDP/TCP for signaling and medooze media server for RTP media.
+Elixip is a SIP (Session Initiation Protocol) application server and test tool written in Elixir. The long-term goal is to build a scripting tool, driven by the Finite State Language (FSL), for testing WebRTC call scenarios, using SIP over WSS/UDP/TCP for signaling and medooze media server for RTP media.
 
 ## Commands
 
@@ -62,11 +62,11 @@ packaging/build-in-container.sh --target ubuntu   # deb likewise
 
 The repo is a **Mix umbrella** (`apps/`), split so each build artifact carries
 only its own dependencies (design in
-[docs/design/kelixip_basic_design.md](docs/design/kelixip_basic_design.md) §12.0):
+[docs/design/DESIGN-KELIXIP.md](docs/design/DESIGN-KELIXIP.md)):
 
 ```
 apps/
-├── elixip2/       # shared SIP stack + DSL + media = LIBRARY (app :elixip2)
+├── elixip2/       # shared SIP stack + FSL + media = LIBRARY (app :elixip2)
 │                  #   all the framework/dsl/session code + the test suite
 ├── elixipp/       # the standalone test tool (escript `elixipp`) — depends on :elixip2
 │   └── lib/elixipp/ElixippCLI.ex   # CLI entry point + live --monitor rendering (owl)
@@ -102,8 +102,8 @@ organizational:
 apps/elixip2/lib/
 ├── framework/   # the reusable SIP stack (transport → message → transaction →
 │                #   dialog → session/context → media). See the layers below.
-├── dsl/         # the scenario DSL and its FSM engine (namespace SIP.Scenario)
-│   ├── SIPScenario.ex        # DSL macros: state, goto, config, on_events, …
+├── dsl/         # the Finite State Language and its FSM engine (namespace SIP.Scenario)
+│   ├── SIPScenario.ex        # FSL macros: state, goto, stay, config, on_events, …
 │   ├── SIPScenarioRunner.ex  # FSM execution engine
 │   └── SIPScenarioLoader.ex  # loads scenario .exs files / modules
 ├── elixipp/     # scenario-engine support shared with the tool (stays in :elixip2)
@@ -126,7 +126,7 @@ promises about "no file needed" with it.
 
 The `dsl` layer builds on `framework` (a scenario `use SIP.Scenario` pulls in
 `SIP.Session.CallUAC`, `SIP.Session.Media` and `SIP.Context`). The `elixipp`
-tool (`apps/elixipp`) drives the DSL engine; the DSL itself runs fine without the
+tool (`apps/elixipp`) drives the FSL engine; FSL itself runs fine without the
 tool. `kelixip` (`apps/kelixip`) is the productized server — see its design doc;
 today it is a P0 skeleton (`Kelix.Application` + supervision tree).
 
@@ -256,7 +256,7 @@ Elixip drives a media server through the `MediaServer.Behaviour` behaviour, so
 implementations are interchangeable (selected via config — see Configuration):
 - `MediaServer.Mendooze` — the real adapter, driving the **Mendooze MCU** over
   its JSR309 **XML-RPC** control interface (`apps/elixip2/lib/framework/mendooze/`; design
-  in `docs/design/mendooze_interface.md`). Events arrive over a chunked HTTP long-poll.
+  in `docs/design/DESIGN-FRAMEWORK.md#63-the-mendooze-adapter`). Events arrive over a chunked HTTP long-poll.
 - `MediaServer.Mockup` — in-process stub for call-flow tests.
 
 > **What the media server knows about itself, the media server is asked.** It is
@@ -266,7 +266,7 @@ implementations are interchangeable (selected via config — see Configuration):
 > do is a copy, and a copy drifts.
 >
 > The rule already exists in one narrow form — the delegated negotiation of
-> `mcu_module.md` §16.3, "the offer is the menu and the media server arbitrates",
+> `DESIGN-MCU.md`, "the offer is the menu and the media server arbitrates",
 > which deleted the module's codec configuration rather than demoting it. Read it
 > as the general case, not as a feature of the answer path.
 >
@@ -331,8 +331,23 @@ stop_player / stop_recorder / stop_echo
 {:ms_event, server_pid, :server_disconnected}
 ```
 
-### Testing Infrastructure
-- `SIP.Test.Transport.UDPMockup` — in-process fake UDP transport
+### Testing Infrastructure (`apps/elixip2/test/support/`, compiled in :test only)
+- `SIP.Test.Transport.Mockup` — in-process fake transport; the Selector routes any
+  `;unittest=…` R-URI to it via the `:unittest_transport` app env (set in each
+  app's `test_helper.exs`). Tests drive it with `set_peer/3` (behaviour of the fake
+  remote party), `attach_probe/2` (observation), `inject/2` (inbound traffic) and
+  `tell_peer/2` (runtime command to the peer). `;unittest=1` is THE shared
+  instance; any other value (`;unittest=callee`) names an instance of its own, so
+  a B2BUA suite gets one peer per leg (`select_instance/1`)
+- `SIP.Test.Peer` — behaviour of a simulated remote peer: pure callbacks
+  returning actions (`{:inject, msg, after_ms}` / `{:notify, event}`); canned
+  peers in `SIP.Test.Peers.*` (Passive, AnsweringUAS, BusyUAS, NoAnswerUAS,
+  ChallengingUAS, RegisterOK), one module per scenario, delays as opts.
+  `SIP.Test.Peers.Manual` is the exception: the test drives it one message at a
+  time (`simulate/3`, `hangup/1`, `retransmit_2xx/1`) because a B2BUA suite
+  asserts on the request that went out before deciding how the far end answers it
+- `SIP.Test.Probe` — normalized event stream to the test process:
+  `{:sip_mockup, {:request_sent | :response_sent, …}}`
 - `MediaServer.Mockup` — stub media server for call flow tests
 - Sample SIP messages in `apps/elixip2/test/SIP-*.txt`
 
@@ -340,12 +355,12 @@ stop_player / stop_recorder / stop_echo
 
 Runtime config lives in `config/config.exs`:
 - Logger writes warnings to console and info+ to `elixip.log`
-- `:useragent` — the User-Agent header value (`"Elixipp-1.4"`)
+- `:useragent` — the User-Agent header value (`"Elixipp-1.5.0"`)
 - `:optionkeepaliveperiod` — OPTIONS keep-alive interval in seconds (15)
 
 ### Media server selection
 
-The media adapter used by the config-driven `media_connect/0` DSL macro is
+The media adapter used by the config-driven `media_connect/0` FSL macro is
 selected by the `:mediaserver` key:
 
 ```elixir
@@ -381,7 +396,7 @@ config :elixip2, MediaServer.Mendooze,
 ## Writing a scenario (`.exs`)
 
 **A scenario states a call flow; it does not implement one.** Its states should
-read as a sequence of DSL verbs and `case` branches over what they return. Avoid
+read as a sequence of FSL verbs and `case` branches over what they return. Avoid
 `defp` helpers carrying real logic — reading a header, deciding a policy,
 composing a SIP response, plumbing a module result into another module's call.
 

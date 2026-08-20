@@ -11,6 +11,9 @@ defmodule SIP.Test.B2bua.MediaScenario do
   """
   use ExUnit.Case
 
+  alias SIP.Test.Peers.Manual
+  alias SIP.Test.Transport.Mockup
+
   @scenario Path.expand("../scenarios/b2bua_media.exs", __DIR__)
 
   setup_all do
@@ -29,11 +32,11 @@ defmodule SIP.Test.B2bua.MediaScenario do
     %{stub: stub}
   end
 
-  # One mockup instance PER TEST. The mockup announces a hangup as the bare atom
-  # `:BYE`, which carries no identity, so a teardown BYE still in flight from
-  # another test of this module lands in whichever test is running — and
-  # `refute_receive :BYE` then fails on someone else's call. Draining cannot fix
-  # that (the arrival is not ordered against the drain); a peer of one's own can.
+  # One mockup instance PER TEST. A probe event carries no test identity, so a
+  # teardown BYE still in flight from another test of this module lands in
+  # whichever test is running — and the `refute_receive` on a BYE then fails on
+  # someone else's call. Draining cannot fix that (the arrival is not ordered
+  # against the drain); a peer of one's own can.
   defp peer_uri(name) do
     %SIP.Uri{scheme: "sip:", userpart: "callee", domain: "example.com", port: 5060}
     |> SIP.Uri.set_uri_param("unittest", "b2bua_media_#{name}")
@@ -67,15 +70,15 @@ defmodule SIP.Test.B2bua.MediaScenario do
   # Drive the call to `connected`: INVITE relayed, callee answers, ACK crosses.
   defp establish(module, stub, invite, name) do
     tp_pid = transport_pid(name)
-    :ok = GenServer.call(tp_pid, :settestapp)
-    SIP.Test.Transport.UDPMockup.answer_bye(tp_pid)
+    :ok = Mockup.set_peer(tp_pid, Manual)
+    :ok = Mockup.attach_probe(tp_pid)
 
     {instance, ref} = start_instance(module, stub, invite, name)
     send(instance, {:INVITE, invite, self(), stub})
 
     assert_receive {:replied, 100, "Trying", _req, _fields}, 5_000
-    assert_receive {:invite_sent, _fwd}, 5_000
-    GenServer.cast(tp_pid, {:simulate, 200, 100})
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
+    Manual.simulate(tp_pid, 200, 100)
     assert_receive {:replied, 200, _reason, _req, _fields}, 5_000
     send(instance, {:ACK, in_dialog(:ACK, invite), nil, stub})
 
@@ -121,8 +124,8 @@ defmodule SIP.Test.B2bua.MediaScenario do
     assert is_binary(caller_sdp)
 
     tp_pid = transport_pid(:relayed)
-    :ok = GenServer.call(tp_pid, :settestapp)
-    SIP.Test.Transport.UDPMockup.answer_bye(tp_pid)
+    :ok = Mockup.set_peer(tp_pid, Manual)
+    :ok = Mockup.attach_probe(tp_pid)
 
     {instance, ref} = start_instance(module, stub, invite, :relayed)
     send(instance, {:INVITE, invite, self(), stub})
@@ -131,19 +134,19 @@ defmodule SIP.Test.B2bua.MediaScenario do
 
     # 1. The callee is offered OUR media, not the caller's. This is the whole
     #    difference from b2bua_basic.exs, where the body crossed verbatim.
-    assert_receive {:invite_sent, fwd}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, fwd}}, 5_000
     fwd_sdp = SIP.Session.extract_sdp(fwd)
     assert is_binary(fwd_sdp)
     assert fwd_sdp != caller_sdp
 
     # 2. The callee rings. Nothing of its SDP reaches the caller — and the
     #    scenario is still free to hunt, which relaying a 183 would have ended.
-    GenServer.cast(tp_pid, {:simulate, 180, 100})
+    Manual.simulate(tp_pid, 180, 100)
     assert_receive {:replied, 180, _reason, _req, prov_fields}, 5_000
     assert Keyword.get(prov_fields, :body) in [nil, []]
 
     # 3. The callee answers, and the caller gets the MEDIA SERVER's answer.
-    GenServer.cast(tp_pid, {:simulate, 200, 100})
+    Manual.simulate(tp_pid, 200, 100)
     assert_receive {:replied, 200, _reason, _req, fields}, 5_000
     assert [%{data: answer}] = Keyword.fetch!(fields, :body)
     assert answer =~ "v=0"
@@ -169,15 +172,15 @@ defmodule SIP.Test.B2bua.MediaScenario do
   test "the media server going away hangs up both legs", %{scenario: module, stub: stub} do
     invite = inbound_invite()
     tp_pid = transport_pid(:server_gone)
-    :ok = GenServer.call(tp_pid, :settestapp)
-    SIP.Test.Transport.UDPMockup.answer_bye(tp_pid)
+    :ok = Mockup.set_peer(tp_pid, Manual)
+    :ok = Mockup.attach_probe(tp_pid)
 
     {instance, _ref} = start_instance(module, stub, invite, :server_gone)
     send(instance, {:INVITE, invite, self(), stub})
 
     assert_receive {:replied, 100, "Trying", _req, _fields}, 5_000
-    assert_receive {:invite_sent, _fwd}, 5_000
-    GenServer.cast(tp_pid, {:simulate, 200, 100})
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
+    Manual.simulate(tp_pid, 200, 100)
     assert_receive {:replied, 200, _reason, _req, _fields}, 5_000
     send(instance, {:ACK, in_dialog(:ACK, invite), nil, stub})
 
@@ -185,7 +188,7 @@ defmodule SIP.Test.B2bua.MediaScenario do
     send(instance, {:ms_event, self(), :server_disconnected})
 
     # The callee is BYEd…
-    assert_receive :BYE, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :BYE, _}}, 5_000
     # …and the scenario ends rather than holding a call with no media.
     assert_receive {:instance_done, :ok}, 10_000
   end
@@ -205,13 +208,13 @@ defmodule SIP.Test.B2bua.MediaScenario do
 
     # On the wire, so the BYE crosses its own server transaction and the outbound
     # dialog exactly as production delivers it.
-    SIP.Test.Transport.UDPMockup.hangup(tp_pid)
+    Manual.hangup(tp_pid)
 
     # It must cross to the CALLER, on the inbound leg…
     assert_receive {:sent_on_inbound, %{method: :BYE}}, 5_000
 
     # …and not go back out to the callee, who is the one that just hung up.
-    refute_receive :BYE, 1_000
+    refute_receive {:sip_mockup, {:request_sent, :BYE, _}}, 1_000
   end
 
   # §R4.1b. The signalling scenario relays all four kinds of re-offer because it
@@ -237,7 +240,7 @@ defmodule SIP.Test.B2bua.MediaScenario do
     assert Keyword.fetch!(fields, :contact).domain == "0.0.0.0"
 
     # …and nothing crossed. This is the assertion the whole feature exists for.
-    refute_receive {:invite_sent, _fwd}, 1_000
+    refute_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 1_000
 
     # Its ACK confirms a 200 the callee never sent, so it must not be relayed
     # onto the callee's INVITE transaction either — the call surviving to its
@@ -268,7 +271,7 @@ defmodule SIP.Test.B2bua.MediaScenario do
     assert req.cseq == [3, :INVITE]
     assert [%{data: our_offer}] = Keyword.fetch!(fields, :body)
     assert our_offer =~ "v=0"
-    refute_receive {:invite_sent, _fwd}, 1_000
+    refute_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 1_000
 
     # The answer comes back in the ACK, and goes to the media server rather than
     # onto the callee's INVITE transaction.
@@ -325,7 +328,7 @@ defmodule SIP.Test.B2bua.MediaScenario do
     send(instance, {:INVITE, reoffer(invite, held, 3), self(), stub})
 
     # The callee is told — it must stop sending, or play its own hold tone.
-    assert_receive {:invite_sent, fwd}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, fwd}}, 5_000
     fwd_sdp = SIP.Session.extract_sdp(fwd)
     assert is_binary(fwd_sdp)
     # …but with our offer, not the caller's.
@@ -334,7 +337,7 @@ defmodule SIP.Test.B2bua.MediaScenario do
 
     # The callee accepts, and the caller is answered by the media server: the
     # answer it has been owed since it re-offered, not the callee's.
-    GenServer.cast(tp_pid, {:simulate, 200, 100})
+    Manual.simulate(tp_pid, 200, 100)
     assert_receive {:replied, 200, _reason, req, fields}, 5_000
     assert req.cseq == [3, :INVITE]
     assert [%{data: answer}] = Keyword.fetch!(fields, :body)
@@ -351,25 +354,25 @@ defmodule SIP.Test.B2bua.MediaScenario do
   test "one media going silent is not a hangup, every media is", %{scenario: module, stub: stub} do
     invite = inbound_invite()
     tp_pid = transport_pid(:media_lost)
-    :ok = GenServer.call(tp_pid, :settestapp)
-    SIP.Test.Transport.UDPMockup.answer_bye(tp_pid)
+    :ok = Mockup.set_peer(tp_pid, Manual)
+    :ok = Mockup.attach_probe(tp_pid)
 
     {instance, _ref} = start_instance(module, stub, invite, :media_lost)
     send(instance, {:INVITE, invite, self(), stub})
 
     assert_receive {:replied, 100, "Trying", _req, _fields}, 5_000
-    assert_receive {:invite_sent, _fwd}, 5_000
-    GenServer.cast(tp_pid, {:simulate, 200, 100})
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
+    Manual.simulate(tp_pid, 200, 100)
     assert_receive {:replied, 200, _reason, _req, _fields}, 5_000
     send(instance, {:ACK, in_dialog(:ACK, invite), nil, stub})
 
     # A peer that turned its camera off is still on the call.
     send(instance, {:ms_event, self(), {:media_timeout, :video}})
-    refute_receive :BYE, 1_000
+    refute_receive {:sip_mockup, {:request_sent, :BYE, _}}, 1_000
 
     # Every media of R gone is a call with nothing left to carry.
     send(instance, {:ms_event, self(), :media_lost})
-    assert_receive :BYE, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :BYE, _}}, 5_000
     assert_receive {:instance_done, :ok}, 10_000
   end
 end

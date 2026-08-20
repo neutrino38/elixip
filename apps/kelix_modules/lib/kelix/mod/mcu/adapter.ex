@@ -1,7 +1,7 @@
 defmodule Kelix.Mod.Mcu.Adapter do
   @moduledoc """
   The `MediaServer.Behaviour` face of the MCU module (design
-  `docs/design/mcu_module.md` §4.2).
+  `docs/design/DESIGN-MCU.md`).
 
   Being a behaviour implementation is the whole point: `media_connect()`,
   `reply_invite_with_sdp/2` and `media_cleanup_ressources()` in `mcu.exs` are the
@@ -123,7 +123,7 @@ defmodule Kelix.Mod.Mcu.Adapter do
   def call_answered(_conn), do: :ok
 
   # Outbound legs need `get_local_offer/1` + `set_remote_answer/2`; they arrive with
-  # the B2BUA leg primitives (§1.2), and the DSL surfaces the error as a 500 —
+  # the B2BUA leg primitives (§1.2), and FSL surfaces the error as a 500 —
   # which is the honest answer to a scenario asking a mixer to place a call.
   @impl MediaServer.Behaviour
   def get_local_offer(_conn), do: {:error, :not_supported}

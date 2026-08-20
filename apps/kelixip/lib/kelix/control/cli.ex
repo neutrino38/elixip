@@ -27,7 +27,7 @@ defmodule Kelix.Control.CLI do
   `3`/`4`/`5` come from the failing command's **own declaration** (`errors:` in its
   `describe_control/0` entry, read through `Kelix.Control.Route.error_status/2`), so
   the class an operator scripts against is the same one the REST frontal answers with
-  — FW-5, `docs/design/mcu_module.md` §8.3.6.
+  — FW-5, `docs/design/DESIGN-MCU.md`.
   """
 
   @default_node "kelixip@127.0.0.1"
@@ -208,7 +208,7 @@ defmodule Kelix.Control.CLI do
   end
 
   # `<module> help` is answered by the CLI from Kelix.Control.Registry (FW-5,
-  # `docs/design/mcu_module.md` §8.3.6): a module declares its command set once and
+  # `docs/design/DESIGN-MCU.md`): a module declares its command set once and
   # gets its usage for free — nothing to write, nothing to keep in sync. `help` is
   # therefore reserved on a module namespace; a module that declares a command of
   # that name keeps it reachable over REST.

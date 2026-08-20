@@ -181,8 +181,8 @@ defmodule Elixip.ScenarioUAS do
 
   # Lifecycle notification from the instance finalizer; the :DOWN message already
   # frees the slot, so this only updates the outcome counters.
-  def handle_info({:scenario_exit, _name, outcome, reason}, state) do
-    Logger.debug("ScenarioUAS: scenario_exit #{inspect(outcome)} (#{inspect(reason)})")
+  def handle_info({:child_exit, _name, outcome, reason}, state) do
+    Logger.debug("ScenarioUAS: child_exit #{inspect(outcome)} (#{inspect(reason)})")
 
     state =
       case outcome do
@@ -198,7 +198,7 @@ defmodule Elixip.ScenarioUAS do
 
   @impl GenServer
   # When the factory stops, cooperatively shut down every running instance
-  # (same mechanism as the DSL sub-FSM shutdown).
+  # (same mechanism as the FSL sub-FSM shutdown).
   def terminate(reason, state) do
     Enum.each(state.instances, fn {_ref, %{pid: pid}} ->
       send(pid, {:scenario_ctl, :shutdown, reason})

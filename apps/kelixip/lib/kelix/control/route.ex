@@ -1,7 +1,7 @@
 defmodule Kelix.Control.Route do
   @moduledoc """
   Pure routing algebra for the module-contributed control commands (design
-  `docs/design/mcu_module.md` §8.3.4, FW-4).
+  `docs/design/DESIGN-MCU.md`, FW-4).
 
   A command declares `rest: {method | [method], path_template}` where the template
   is relative to `/modules/<name>` and may contain `:param` segments. This module

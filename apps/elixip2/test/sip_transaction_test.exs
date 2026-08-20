@@ -6,6 +6,9 @@ defmodule SIP.Test.Transact do
   require SIP.Transac
   doctest SIP.Transac
 
+  alias SIP.Test.Transport.Mockup
+  alias SIP.Test.Peers
+
   setup_all do
     SIP.Test.AppEnv.preserve_proxy()
 
@@ -24,11 +27,11 @@ defmodule SIP.Test.Transact do
 
   test "Arms timer A and check that it fires" do
     # Start fake transport layer
-    { :ok, t_pid } = GenServer.start_link(SIP.Test.Transport.UDPMockup, { {1,2,3,4}, 5080 })
+    { :ok, t_pid } = GenServer.start_link(Mockup, { {1,2,3,4}, 5080 })
     { code, msg } = File.read("test/SIP-INVITE-BASIC-AUDIO.txt")
     assert code == :ok
     state = %{ state: :sending, t_isreliable: false, msgstr: msg,
-               tmod: SIP.Test.Transport.UDPMockup, tpid: t_pid, destip: {1,2,3,4}, destport: 5080 }
+               tmod: Mockup, tpid: t_pid, destip: {1,2,3,4}, destport: 5080 }
     state = SIP.Trans.Timer.schedule_timer_A(state)
     state = receive do
       { :timerA, ms } ->
@@ -87,7 +90,7 @@ defmodule SIP.Test.Transact do
     assert code == :ok
 
     state = %{ state: :proceeding, t_isreliable: false, msgstr: msg,
-               msg: parsed_msg, tmod: SIP.Test.Transport.UDPMockup, app: self() }
+               msg: parsed_msg, tmod: Mockup, app: self() }
     state = SIP.Trans.Timer.schedule_timer_B(state, 200)
     receive do
       { :timeout, _tref, timer } ->
@@ -130,12 +133,12 @@ defmodule SIP.Test.Transact do
   # so ONE refused request took a whole established call down (production
   # 2026-08-12, on a BYE). The answer must reach the wire like any other.
   test "a reply whose extra header fields are nil is sent, not a crash" do
-    { :ok, t_pid } = GenServer.start_link(SIP.Test.Transport.UDPMockup, { {1,2,3,4}, 5080 })
+    { :ok, t_pid } = GenServer.start_link(SIP.Test.Transport.Mockup, { {1,2,3,4}, 5080 })
     { :ok, raw } = File.read("test/SIP-INVITE-BASIC-AUDIO.txt")
     { :ok, req } = SIPMsg.parse(raw, fn _code, _msg, _line, _linenum -> nil end)
 
     state = %{ state: :trying, t_isreliable: false, msg: req, app: self(),
-               tmod: SIP.Test.Transport.UDPMockup, tpid: t_pid,
+               tmod: SIP.Test.Transport.Mockup, tpid: t_pid,
                destip: {1,2,3,4}, destport: 5080 }
 
     assert { :ok, new_state } =
@@ -234,7 +237,7 @@ User-Agent: Elixip 0.2.0
 
   test "Selectionne le transport mockup" do
     newuri = SIP.Transport.Selector.select_transport("sip:90901@visio5.visioassistance.net:5090;unittest=1")
-    assert newuri.tp_module == SIP.Test.Transport.UDPMockup
+    assert newuri.tp_module == Mockup
     assert newuri.destip == {1,2,3,4}
     assert newuri.destport == 5080
   end
@@ -267,6 +270,10 @@ User-Agent: Elixip 0.2.0
 
   # Big transaction test
   test "Transaction SIP client INVITE - appel reussi" do
+    # Install the answering peer before the INVITE is sent.
+    t_pid = Mockup.instance!()
+    :ok = Mockup.set_peer(t_pid, Peers.AnsweringUAS)
+
     { :ok, uac_t, _modmsg } = SIP.Transac.start_uac_transaction_with_template(
                               create_invite_template(), [],
                               fn code, errmsg, lineno, line ->
@@ -276,9 +283,6 @@ User-Agent: Elixip 0.2.0
                                 end,
                                 %{ desturi: "sip:1.2.3.4:5060;unittest=1", usesrv: false, ringtimeout: 90 }
       )
-
-    { _t_mod, t_pid } = GenServer.call(uac_t, :gettransport)
-    SIP.Test.Transport.UDPMockup.simulate_successful_answer(t_pid)
 
     # Expect a 180 ringing after 200 mss
     receive do
@@ -317,7 +321,10 @@ User-Agent: Elixip 0.2.0
   end
 
   test "Transaction SIP client INVITE - appel occcupé" do
-    { :ok, uac_t, _modmsg } = SIP.Transac.start_uac_transaction_with_template(
+    t_pid = Mockup.instance!()
+    :ok = Mockup.set_peer(t_pid, Peers.BusyUAS)
+
+    { :ok, _uac_t, _modmsg } = SIP.Transac.start_uac_transaction_with_template(
                               create_invite_template(), [],
                               fn code, errmsg, lineno, line ->
                                 IO.puts("\n" <> errmsg)
@@ -326,9 +333,6 @@ User-Agent: Elixip 0.2.0
                                 end,
                                 %{ desturi: "sip:1.2.3.4:5060;unittest=1", usesrv: false, ringtimeout: 90 }
       )
-
-    { _t_mod, t_pid } = GenServer.call(uac_t, :gettransport)
-    SIP.Test.Transport.UDPMockup.simulate_busy_answer(t_pid)
 
    # Expect a 180 ringing after 200 mss
    receive do
@@ -366,6 +370,10 @@ User-Agent: Elixip 0.2.0
   end
 
   test "Transaction SIP client INVITE - proxy ne répond pas" do
+    # The shared mockup instance may still hold an answering peer installed by
+    # another test: silence it so timer B actually fires.
+    :ok = Mockup.set_peer(Mockup.instance!(), Peers.Passive)
+
     { :ok, uac_t, _modmsg } = SIP.Transac.start_uac_transaction_with_template(
                               create_invite_template(), [],
                               fn code, errmsg, lineno, line ->
@@ -402,11 +410,11 @@ User-Agent: Elixip 0.2.0
     upd_uri = SIP.Uri.set_uri_param(parsed_msg.ruri, "unittest", "transact")
     parsed_msg = SIP.Msg.Ops.update_sip_msg( parsed_msg, { :ruri, upd_uri })
 
-    # Send REGISTER
-    { :ok, uac_t, _modmsg } = SIP.Transac.start_uac_transaction(parsed_msg, 30)
+    # The peer challenges the bare REGISTER and accepts the authenticated one.
+    :ok = Mockup.set_peer(Mockup.instance!("sip:1.2.3.4;unittest=transact"), Peers.ChallengingUAS)
 
-    { _t_mod, t_pid } = GenServer.call(uac_t, :gettransport)
-    SIP.Test.Transport.UDPMockup.simulate_challenge(t_pid)
+    # Send REGISTER
+    { :ok, _uac_t, _modmsg } = SIP.Transac.start_uac_transaction(parsed_msg, 30)
 
     receive do
       {:response, resp, _transact_pid} ->
@@ -417,10 +425,6 @@ User-Agent: Elixip 0.2.0
 
         # send authenticated register
         { :ok, _uac_t, _modmsg } = SIP.Transac.start_uac_transaction(auth_req, 30)
-
-        # Simulate successful registration
-        SIP.Test.Transport.UDPMockup.simulate_successful_register(t_pid)
-
 
       bla ->
         IO.puts("TEST: Received #{bla}")
@@ -466,6 +470,9 @@ User-Agent: Elixip 0.2.0
     # Add unittest param to RURI to trigger UDP mockeup transport
     upd_uri = SIP.Uri.set_uri_param(parsed_msg.ruri, "unittest", "transact")
     parsed_msg = SIP.Msg.Ops.update_sip_msg( parsed_msg, { :ruri, upd_uri })
+
+    # A peer that answers nothing, so timer F actually fires.
+    :ok = Mockup.set_peer(Mockup.instance!("sip:1.2.3.4;unittest=transact"), Peers.Passive)
 
     # Send REGISTER
     { :ok, _uac_t, _modmsg } = SIP.Transac.start_uac_transaction(parsed_msg, 30)

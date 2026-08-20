@@ -1,7 +1,7 @@
 defmodule Kelix.Mod.McuWebrtcTest do
   @moduledoc """
-  The answer a **browser** gets from a conference leg (design `docs/design/mcu_module.md`
-  §6.3 rules 3-6 and 11, `docs/design/webrtc_sdp_design.md` §1.2).
+  The answer a **browser** gets from a conference leg (design `docs/design/DESIGN-MCU.md`
+  §6.3 rules 3-6 and 11, `docs/design/DESIGN-FRAMEWORK.md#65-webrtc-sdp`).
 
   `mcu_secure_test.exs` covers the security plane attribute by attribute on offers this
   suite writes itself. This one starts from the real thing instead — the captured Chrome

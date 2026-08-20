@@ -266,8 +266,11 @@ defmodule Elixipp.CLI do
 
     :ok =
       case kind do
-        :uas_register -> SIP.Session.ConfigRegistry.set_registration_processing_module(Elixip.ScenarioUAS)
-        :uas_invite -> SIP.Session.ConfigRegistry.set_call_processing_module(Elixip.ScenarioUAS)
+        :uas_register ->
+          SIP.Session.ConfigRegistry.set_registration_processing_module(Elixip.ScenarioUAS)
+
+        :uas_invite ->
+          SIP.Session.ConfigRegistry.set_call_processing_module(Elixip.ScenarioUAS)
       end
 
     started = start_listeners(listeners)
@@ -399,11 +402,20 @@ defmodule Elixipp.CLI do
 
       Owl.LiveScreen.add_block(:display,
         state: {0, :none},
-        render: fn {scroll, shutdown} -> render_server_block(scroll, shutdown, module, limit, started) end
+        render: fn {scroll, shutdown} ->
+          render_server_block(scroll, shutdown, module, limit, started)
+        end
       )
 
       start_input_reader(self())
-      server_monitor_loop(%{scroll_offset: 0, raw?: raw?, shutdown: :none, module: module, max_run: max_run})
+
+      server_monitor_loop(%{
+        scroll_offset: 0,
+        raw?: raw?,
+        shutdown: :none,
+        module: module,
+        max_run: max_run
+      })
     else
       print_server_header(module, kind, limit, started)
       server_loop(module, max_run)
@@ -603,7 +615,10 @@ defmodule Elixipp.CLI do
         {parse_proto(proto), parse_addr(addr), parse_port(port)}
 
       _ ->
-        abort("--listen invalide : #{inspect(spec)} (attendu proto, proto:port ou proto:addr:port)", 2)
+        abort(
+          "--listen invalide : #{inspect(spec)} (attendu proto, proto:port ou proto:addr:port)",
+          2
+        )
     end
   end
 
@@ -676,8 +691,11 @@ defmodule Elixipp.CLI do
   # abort when none can be found.
   defp random_free_port(sock_proto) do
     case SIP.NetUtils.pick_free_port(sock_proto) do
-      {:ok, port} -> port
-      {:error, :nofreeport} -> abort("Impossible de trouver un port #{sock_proto} local libre (>= 5000)", 2)
+      {:ok, port} ->
+        port
+
+      {:error, :nofreeport} ->
+        abort("Impossible de trouver un port #{sock_proto} local libre (>= 5000)", 2)
     end
   end
 
@@ -1285,8 +1303,8 @@ defmodule Elixipp.CLI do
 
   defp cell(call, :state, width, true) do
     case state_color(call[:state]) do
-      nil -> fit(call[:state], width)
-      color -> Owl.Data.tag(fit(call[:state], width), color)
+      nil -> fit_state(call[:state], width)
+      color -> Owl.Data.tag(fit_state(call[:state], width), color)
     end
   end
 
@@ -1301,6 +1319,23 @@ defmodule Elixipp.CLI do
   defp color_for(:sip), do: :light_green
   defp color_for(:media), do: IO.ANSI.color(214)
   defp color_for(_), do: :light_blue
+
+  # A service building block reports its states qualified (`MyApp.Cancelling/waiting`),
+  # so the state cell is the one place a value regularly overflows. When it does,
+  # the HEAD goes rather than the tail: the state name is what says where the call
+  # is, and the block stays recognisable from its last segments.
+  @doc false
+  # Public for the test: the arithmetic is one character away from cutting the
+  # state name it exists to preserve.
+  def fit_state(value, width) do
+    s = to_string(value)
+
+    if String.contains?(s, "/") and String.length(s) > width do
+      "…" <> String.slice(s, -(width - 1)..-1//1)
+    else
+      fit(s, width)
+    end
+  end
 
   defp fit(value, width) do
     s = to_string(value)
@@ -1323,7 +1358,7 @@ defmodule Elixipp.CLI do
   defp resolve_module(arg) do
     if String.ends_with?(arg, ".exs") do
       # The path is the tester's: taken as given, relative to the current directory.
-      # (A `sub_fsm` inside a scenario is the one exception — it names a file next to
+      # (A `spawn_fsm` inside a scenario is the one exception — it names a file next to
       # the scenario that declares it.)
       unless File.exists?(arg),
         do: abort("Scénario introuvable : #{Path.expand(arg)}", 2)
@@ -1494,7 +1529,7 @@ defmodule Elixipp.CLI do
       L'argument est soit un chemin vers un fichier .exs, soit le nom d'un
       scénario intégré (compilé dans l'exécutable) : UAC.Invite, UAC.Register.
       Les scénarios intégrés ne nécessitent aucun fichier sur la machine.
-      Dans un scénario, un sous-scénario (sub_fsm "autre.exs") est cherché à
+      Dans un scénario, un sous-scénario (spawn_fsm "autre.exs") est cherché à
       côté du fichier qui le déclare, pas dans le répertoire courant.
 
     TOUCHES (mode live)

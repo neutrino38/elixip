@@ -1,8 +1,8 @@
 # HTTP client session layer for SIP scenarios.
 #
 # Part of the scenario helper family (same philosophy as the SIP.Session.*
-# mixins): a small DSL macro that operates on the implicit `sip_ctx` and never
-# blocks the scenario. See DSL.md ("SIP.Session.HTTP / http_GET") for the
+# mixins): a small FSL macro that operates on the implicit `sip_ctx` and never
+# blocks the scenario. See FSL.md ("SIP.Session.HTTP / http_GET") for the
 # scenario-side contract.
 
 defmodule HTTP.Session do
@@ -10,7 +10,7 @@ defmodule HTTP.Session do
   HTTP helpers mixin for SIP scenarios — issue outbound HTTP requests from a
   scenario state without ever blocking the finite-state machine.
 
-  `use HTTP.Session` brings in the `http_GET/3` DSL macro. Like the other
+  `use HTTP.Session` brings in the `http_GET/3` FSL macro. Like the other
   `SIP.Session.*` macros it operates on the implicit `sip_ctx`, sets
   `sip_ctx.lasterr` to `:ok` and returns the updated context (so a `goto` placed
   right after it works), but the HTTP *result* is delivered asynchronously, later,
@@ -104,7 +104,7 @@ defmodule HTTP.Session do
   calling process is never blocked. The result is delivered to the **caller** as
   a single `{tag, result}` message (`Valet` captures `self()`).
 
-  `req_opts` is forwarded to `Req.get/2` — normally empty from the DSL macro,
+  `req_opts` is forwarded to `Req.get/2` — normally empty from the FSL macro,
   but used by the tests to inject a `Req.Test` stub / a fake `:adapter`.
   """
   @spec get_async(binary(), pos_integer(), term(), keyword()) :: pid()

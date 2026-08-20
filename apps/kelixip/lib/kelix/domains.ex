@@ -1,7 +1,7 @@
 defmodule Kelix.Domains do
   @moduledoc """
   Holds the current `domains.toml` snapshot and swaps it **atomically** on reload
-  (design `docs/design/kelixip_basic_design.md` §3.2, §9.2).
+  (design `docs/design/DESIGN-KELIXIP.md`).
 
   The whole file is parsed and validated into a fresh `%Kelix.Domains{}` *off to
   the side* — including compiling every dial-plan pattern and, on the operator's

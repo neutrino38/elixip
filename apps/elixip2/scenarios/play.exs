@@ -74,32 +74,26 @@ defmodule UAS.Example.Call.Play do
     scenario_failure("no media server available")
   end
 
-  # Negotiate the SDP answer with the media server and send 200 OK. On a media
-  # failure this replies 500 and sets lasterr, so the goto below aborts.
+  # Negotiate the SDP answer with the media server and send 200 OK, then wait for
+  # media connectivity before starting playback: :ice_connected fires on the
+  # server's first validated RTP packet (plain RTP included), i.e. once the NAT
+  # latch is done — starting the player earlier sends the opening keyframe to the
+  # (possibly unreachable) SDP address. ACK and :ice_connected arrive in either
+  # order; the ACK `stay`s, so the SDP is not renegotiated with the media server
+  # and the already-ACKed transaction is not re-answered.
   #
-  # Sending the 200 and waiting for the events are two DISTINCT states on
-  # purpose: the wait state loops on ACK (goto loop re-runs the whole state
-  # body, not just its on_events), and re-entering a state that starts with
-  # reply_invite_with_sdp would renegotiate the SDP with the media server and
-  # re-reply on the already-ACKed transaction.
+  # On a media failure reply_invite_with_sdp replies 500 and sets lasterr, so the
+  # first transition out of here aborts.
   state answering do
     reply_invite_with_sdp(200, [media: :tc, webrtc: :if_offered])
-    goto(wait_media)
-  end
 
-  # Wait for media connectivity before starting playback: :ice_connected fires
-  # on the server's first validated RTP packet (plain RTP included), i.e. once
-  # the NAT latch is done — starting the player earlier sends the opening
-  # keyframe to the (possibly unreachable) SDP address. ACK and :ice_connected
-  # arrive in either order; ACK just loops here (safe: no entry action).
-  state wait_media do
     on_events do
       {:CANCEL, _req, _trans, _dlg} ->
         scenario_success("caller cancelled")
 
       # ACK of our 2xx (nothing to reply); confirms the call is established.
       {:ACK, _req, _trans, _dlg} ->
-        goto(loop, "ACK")
+        stay("ACK")
 
       # We have media connectivity
       {:ms_event, _conn, :ice_connected} ->
@@ -113,7 +107,7 @@ defmodule UAS.Example.Call.Play do
       # The server we answered with is gone: the SDP we sent names a dead media
       # path, so hang up instead of waiting out the timeout. `:server_disconnected`
       # is delivered to us but acted upon by nothing in the framework (design
-      # docs/design/b2bua_module.md §14.6) — every media scenario owes this clause.
+      # docs/design/DESIGN-FRAMEWORK.md#67-the-media-server-as-a-failure-domain) — every media scenario owes this clause.
       {:ms_event, _server, :server_disconnected} ->
         goto(hanging_up, "media server disconnected")
     after

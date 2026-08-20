@@ -2,7 +2,7 @@
 # WSS, a WebRTC offer (DTLS/ICE, rtcp-mux, mid, candidates), mendooze media — and
 # play a media file once the media path is up.
 #
-# Emulates the captured IVeS web client (docs/design/webrtc_sdp_design.md §1.8/§2.5)
+# Emulates the captured IVeS web client (docs/design/DESIGN-FRAMEWORK.md#65-webrtc-sdp/§2.5)
 # against the IVeS WebRTC gateway. Run it against the dev platform with:
 #     elixipp -c ives.json scenarios/uac_invite_webrtc.exs
 #
@@ -49,14 +49,10 @@ defmodule UAC.InviteWebRTC do
     # webrtc: :yes makes the media layer build a browser-shaped WebRTC offer
     # (UDP/TLS/RTP/SAVPF, setup:actpass, ice, rtcp-mux, mid, candidates).
     send_INVITE("sip:#{@callee_num}@#{sip_ctx.domain}", :mediaserver, timeout: 90, webrtc: :yes, media: [ :audio, :video ])
-    goto(call_progress)
-  end
 
-  # -------------------------------------------------------------------------------
-  state call_progress do
     on_events do
       {100, _rsp, _trans_pid, _dialog_pid} ->
-        goto(loop, "100 Trying")
+        stay("100 Trying")
 
       # The captured flow authenticates twice: kamailio answers 407 (proxy) and
       # the gateway answers 401 (with qop="auth"). send_auth_INVITE handles both
@@ -68,14 +64,14 @@ defmodule UAC.InviteWebRTC do
           media: [ :audio, :video ]
         )
 
-        goto(loop, "#{code} Authentication Required")
+        stay("#{code} Authentication Required")
 
       {180, _rsp, _trans_pid, _dialog_pid} ->
-        goto(loop, "180 Ringing")
+        stay("180 Ringing")
 
       {183, rsp_183, trans_pid, _dialog_pid} ->
         process_invite_reply(rsp_183, trans_pid)
-        goto(loop, "183 Session Progress")
+        stay("183 Session Progress")
 
       {200, rsp_200, trans_pid, _dialog_pid} ->
         process_invite_reply(rsp_200, trans_pid)
@@ -93,7 +89,7 @@ defmodule UAC.InviteWebRTC do
     on_events do
       # ICE/DTLS came up (real EndpointConnectedEvent on mendooze, simulated on
       # the Mockup): the media path is ready.
-      {:ms_event, _conn, :ice_connected} -> goto(start_play, "media connected")
+      {:ms_event, _conn, :ice_connected} -> goto(call_established, "media connected")
 
       # Media negotiation/setup failed (bad remote SDP, no common codec, a
       # control RPC error…). Trace the cause and hang up instead of waiting for
@@ -111,16 +107,12 @@ defmodule UAC.InviteWebRTC do
   end
 
   # -------------------------------------------------------------------------------
-  state start_play do
-    media_play("/home/ebuu/mediaserver/titi.mp4")
-    goto(next)
-  end
-
-  # -------------------------------------------------------------------------------
   state call_established do
+    media_play("/home/ebuu/mediaserver/titi.mp4")
+
     on_events do
       {:ms_event, _player, :player_started} ->
-        goto(loop, "media: start")
+        stay("media: start")
 
       {:ms_event, _player, :player_ended} ->
         goto(hangup_call, "media: EOF")
@@ -131,7 +123,7 @@ defmodule UAC.InviteWebRTC do
 
       # The media plane died under an established call: hang up rather than hold
       # a silent call open. `:server_disconnected` is delivered to us but the
-      # framework acts on none of it (design docs/design/b2bua_module.md §14.6),
+      # framework acts on none of it (design docs/design/DESIGN-FRAMEWORK.md#67-the-media-server-as-a-failure-domain),
       # so every media scenario owes this clause.
       {:ms_event, _server, :server_disconnected} ->
         goto(hangup_call, "media server disconnected")
@@ -152,15 +144,16 @@ defmodule UAC.InviteWebRTC do
       4_000 -> scenario_failure("No 200 OK received for BYE")
     end
   end
+
   # -------------------------------------------------------------------------------
   state no_media_hangup do
     media_cleanup_ressources()
     send_BYE()
+
     on_events do
       {200, _bye_rsp, _trans_pid, _dialog_pid} -> scenario_failure("rcv_media timed out")
     after
       4_000 -> scenario_failure("No 200 OK received for BYE")
     end
   end
-
 end

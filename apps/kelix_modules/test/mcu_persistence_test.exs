@@ -1,6 +1,6 @@
 defmodule Kelix.Mod.McuPersistenceTest do
   @moduledoc """
-  The conference definitions on disk (design `docs/design/mcu_module.md` §9.5).
+  The conference definitions on disk (design `docs/design/DESIGN-MCU.md` §4.1).
 
   What matters here is not the file format but the two invariants around it: what a
   restart brings back (a **room**, never a call — and never an ad-hoc room), and what a

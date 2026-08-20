@@ -1,7 +1,7 @@
 defmodule Kelix.Mod.Mcu do
   @moduledoc """
   The conferencing (MCU) module — conference registry and control surface
-  (design `docs/design/mcu_module.md` §5, §8).
+  (design `docs/design/DESIGN-MCU.md`).
 
   Delivered as a loadable `Kelix.Module`: `validate_config/1`, `child_spec/2`,
   `describe/0`, plus the REST + CLI commands of §8.3.3 declared once in
@@ -766,7 +766,7 @@ defmodule Kelix.Mod.Mcu do
   rest of the call — which on a conference leg is hours. Declaring is what turns that
   leak into a `skipped: :not_accepted` line in the sender's report.
 
-  The `mcu_accept_messages()` DSL macro is how a script says it; call it once, in the
+  The `mcu_accept_messages()` FSL macro is how a script says it; call it once, in the
   state where the leg is admitted.
   """
   @spec accept_messages(SIP.Context.t() | Conference.participant()) ::
@@ -822,7 +822,7 @@ defmodule Kelix.Mod.Mcu do
         ) :: SIP.Context.t() | {:ok, Message.report()} | {:error, atom}
   def send_message(part_or_ctx, target, kind, payload, opts \\ [])
 
-  # The context-aware form the `mcu_send` DSL macro expands to. The outcome goes to
+  # The context-aware form the `mcu_send` FSL macro expands to. The outcome goes to
   # **appdata, not to `lasterr`**: a `goto` aborts the scenario on any `lasterr` other
   # than `:ok`, and a rate-limited "hand raised" must never end a call. A script that
   # cares reads `appdata_get(:mcu_last_send)`.

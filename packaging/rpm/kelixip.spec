@@ -1,4 +1,4 @@
-# kelixip.spec — Alma Linux 9 (design docs/design/kelixip_basic_design.md §12.1, §15 P10).
+# kelixip.spec — Alma Linux 9 (design docs/design/DESIGN-KELIXIP.md §12).
 #
 # The payload is PRE-BUILT: Source0 is the staged tarball produced by
 # packaging/stage.sh (an assembled `mix release` tree with embedded ERTS, plus the
@@ -27,7 +27,7 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.4.0
+Version:        1.5.0
 Release:        1%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
@@ -212,6 +212,32 @@ fi
 %{_datadir}/%{name}/mcu*.exs
 
 %changelog
+* Tue Aug 18 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.0-1
+- Service building blocks: an FSL scenario can enter a reusable sub-machine on its
+  own legs and return from it with one event (sbb_fsm, sbb_return, use SIP.SBB).
+- SBB.Call ships the first two: call/1 establishes the outbound leg — provisionals,
+  serial hunt, the cancel race, the ACK — and bridge/1 relays the established call.
+  The reference scripts lost the states they copied: direct-call.exs 230 -> 124
+  lines, with auth 310 -> 199, with media 494 -> 310.
+- bridge/1 can keep the caller when the callee hangs up
+  (on_callee_hangup: :keep_caller), which is what turns a relay into a service.
+- BREAKING: sub_fsm is renamed spawn_fsm, and the inter-FSM messages are renamed
+  after their direction: {:parent_msg, ...}, {:child_msg, ...}, {:child_exit, ...}.
+  The macro keeps a deprecated alias; the MESSAGES do not, and a scenario still
+  matching the old shapes is warned about at compile time.
+- b2bua.exs is deleted: it was a copy of direct-call.exs.
+- User-Agent is now Kelixip/1.5.0.
+* Tue Aug 18 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.4.1-1
+- The scenario language is named the Finite State Language (FSL); DSL.md becomes
+  FSL.md.
+- FSL gains `stay` (handle an event without re-entering the state) and `goto back`
+  (return to the previous state).
+- An `on_events` `after` is now the deadline of the whole wait: `stay` does not
+  re-arm it.
+- Reference scripts updated: nine states removed, and registrar.exs loses
+  wait_auth_register.
+- User-Agent is now Kelixip/1.4.1.
+
 * Fri Aug 14 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.4.0-1
 - Version bump to 1.4.0: the media relay validated in real traffic. Cross-leg
   codec selection, per-leg codecs with real transcoding (VP8 <-> H.264), AV1,

@@ -138,7 +138,7 @@ Unknown keys are rejected too — a typo must not silently fall back to a defaul
 | `node_name` | string | `kelixip@127.0.0.1` | Erlang node name (`kelictl` reaches the node with it) |
 | `script_dir` | string | `/usr/share/kelixip` | Where scenario scripts are resolved from |
 | `module_dir` | string | `/usr/lib/kelixip/modules` | Where module `.beam` files are loaded from |
-| `user_agent` | string | `Kelixip/1.4.0` | `User-Agent` / `Server` header value |
+| `user_agent` | string | `Kelixip/1.5.0` | `User-Agent` / `Server` header value |
 | `max_calls` | int > 0 | *unlimited* | Node-wide concurrent-instance cap; beyond it, new requests get `503` |
 
 #### `[log]`

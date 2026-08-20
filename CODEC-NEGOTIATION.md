@@ -158,7 +158,7 @@ is a browser, its WebSocket transport.
 
 This is what makes **total conversation** work: audio, video and real-time text
 in one session, [ITU-T F.703](https://www.itu.int/rec/T-REC-F.703), the service
-[kelixip](docs/design/mcu_module.md) exists to serve. The three medias negotiate
+[kelixip](docs/design/DESIGN-MCU.md) exists to serve. The three medias negotiate
 side by side under the same rules, with text exempt from the conversion policy.
 See [annex D](#annex-d--real-time-text-and-total-conversation).
 
@@ -401,7 +401,7 @@ real answer — possibly rebuilt (principle 4) — goes out with the `200`.
 ### Annex A — The policies, exactly
 
 The authoritative statement is
-[docs/design/mediagw_b2bua_jsr309.md §11](docs/design/mediagw_b2bua_jsr309.md);
+[docs/design/notes/mediagw_b2bua_jsr309.md §11](docs/design/notes/mediagw_b2bua_jsr309.md);
 §5 covers the cross-leg selection. Reproduced here for reference:
 
 | value | selection | when `L ∩ L' = ∅` | wiring | the caller's answer |
@@ -475,7 +475,7 @@ rules of their own, per codec.
   declare for that PT (§8.2.2), so a payload type whose profile the server would
   change is dropped from the answer rather than misdeclared. On
   `packetization-mode`: **absence is not a constraint** — see
-  [docs/design/linphone-h264-interop.md](docs/design/linphone-h264-interop.md).
+  [docs/design/notes/linphone-h264-interop.md](docs/design/notes/linphone-h264-interop.md).
 - **AV1** (AOMedia RTP payload format) — `profile`, `level-idx` and `tier` are
   **asymmetric**: each side declares its own *decoding* capability, so an answer
   is never a reflection of the offer. The emission side is normative — the encoded
@@ -523,10 +523,10 @@ Negotiation rules specific to text:
    to serve.
 4. **A browser carries it over WebSocket**, not RTP — the section is transported
    differently while remaining the same T.140 stream. Design:
-   [docs/design/mcu_text_over_wss_impl_plan.md](docs/design/mcu_text_over_wss_impl_plan.md).
+   [docs/design/DESIGN-MCU.md#7-real-time-text](docs/design/DESIGN-MCU.md#7-real-time-text).
 
 For a conference, text is *mixed* like audio is: see
-[docs/design/mcu_module.md](docs/design/mcu_module.md).
+[docs/design/DESIGN-MCU.md](docs/design/DESIGN-MCU.md).
 
 ### Annex E — Where this lives in the code
 
@@ -543,12 +543,12 @@ For a conference, text is *mixed* like audio is: see
 | the behaviour contract | `MediaServer.Behaviour` | `bridge/3` |
 
 Design documents:
-[mediagw_b2bua_jsr309.md](docs/design/mediagw_b2bua_jsr309.md) (§5 cross-leg,
+[mediagw_b2bua_jsr309.md](docs/design/notes/mediagw_b2bua_jsr309.md) (§5 cross-leg,
 §11 policies),
-[mcu_module.md](docs/design/mcu_module.md) (conference legs, total conversation),
-[webrtc_sdp_design.md](docs/design/webrtc_sdp_design.md),
-[b2bua_module.md](docs/design/b2bua_module.md),
-[media-connectivity.md](docs/design/media-connectivity.md).
+[DESIGN-MCU.md](docs/design/DESIGN-MCU.md) (conference legs, total conversation),
+[WebRTC SDP](docs/design/DESIGN-FRAMEWORK.md#65-webrtc-sdp),
+[the B2BUA primitives](docs/design/DESIGN-FRAMEWORK.md#5-b2bua),
+[media connectivity](docs/design/DESIGN-FRAMEWORK.md#66-media-connectivity-when-may-a-scenario-send).
 
 ### Annex F — RFC and standards index
 

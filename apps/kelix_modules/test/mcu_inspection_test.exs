@@ -1,6 +1,6 @@
 defmodule Kelix.Mod.McuInspectionTest do
   @moduledoc """
-  The inspection surface of design `docs/design/mcu_module.md` §8.3.8 (P9): the mix
+  The inspection surface of design `docs/design/DESIGN-MCU.md` (P9): the mix
   recording, the mosaic slot map and the empty-slot logo — what makes the media-server
   tests 5, 6 and 7 runnable from `kelictl` alone.
 

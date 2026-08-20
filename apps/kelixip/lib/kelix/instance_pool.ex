@@ -122,7 +122,7 @@ defmodule Kelix.InstancePool do
 
       {inst, instances} ->
         ScriptRegistry.checkin(inst.script, inst.version)
-        # Free the FSM monitor row (and those of any sub_fsm children) — otherwise
+        # Free the FSM monitor row (and those of any spawn_fsm children) — otherwise
         # a busy registrar accumulates one row per registration, forever.
         SIP.Scenario.Monitor.clear(inst.id)
 
@@ -142,7 +142,7 @@ defmodule Kelix.InstancePool do
   end
 
   # outcome notification from the instance finalizer (slot already freed by :DOWN)
-  def handle_info({:scenario_exit, _name, outcome, _reason}, state) do
+  def handle_info({:child_exit, _name, outcome, _reason}, state) do
     key =
       case outcome do
         :success -> :succeeded
@@ -183,7 +183,7 @@ defmodule Kelix.InstancePool do
             inbound_request: req,
             config_overrides: overrides,
             # Key the FSM monitor row on OUR id rather than the instance pid, so
-            # `Kelix.Control.monitor/0` can join the two views — and so a `sub_fsm`
+            # `Kelix.Control.monitor/0` can join the two views — and so a `spawn_fsm`
             # child sorts right under its parent ({id, name}).
             slot_id: id
           )

@@ -1,7 +1,7 @@
 defmodule SIP.Test.DialogTag do
   @moduledoc """
   The dialog event tag (`SIP.Dialog.start_dialog/5` option `:tag`, design
-  docs/design/b2bua_module.md §2): a dialog created with `tag: :outbound`
+  docs/design/DESIGN-FRAMEWORK.md#52-telling-the-legs-apart): a dialog created with `tag: :outbound`
   wraps EVERY message it delivers to its application process as
   `{:outbound, msg}` — `:onnewdialog`, responses and `:dialog_terminated`
   alike — while an untagged dialog keeps delivering bare messages (the
@@ -15,7 +15,8 @@ defmodule SIP.Test.DialogTag do
   use ExUnit.Case
   require SIP.Dialog
 
-  alias SIP.Test.Transport.UDPMockup
+  alias SIP.Test.Peers.Manual
+  alias SIP.Test.Transport.Mockup
 
   setup_all do
     :ok = SIP.Transac.start()
@@ -32,7 +33,7 @@ defmodule SIP.Test.DialogTag do
       |> SIP.Uri.set_uri_param("unittest", "dialog_tag")
       |> SIP.Transport.Selector.select_transport()
 
-    :ok = GenServer.call(ruri.tp_pid, :settestapp)
+    :ok = Mockup.set_peer(ruri.tp_pid, Manual)
 
     aor = %SIP.Uri{scheme: "sip:", userpart: "alice", domain: "example.com"}
 
@@ -61,7 +62,7 @@ defmodule SIP.Test.DialogTag do
     assert is_pid(tid)
 
     # Final response: wrapped too.
-    UDPMockup.simulate_successful_register(tp_pid)
+    Manual.simulate(tp_pid, 200, 200)
     assert_receive {:outbound, {200, rsp, _tid, ^dlg_pid}}, 1_000
     assert rsp.response == 200
 
@@ -81,7 +82,7 @@ defmodule SIP.Test.DialogTag do
     {:ok, dlg_pid, _dlg_id} = SIP.Dialog.start_dialog(register, 600, :outbound, false)
 
     assert_receive {:onnewdialog, :ok, _tid}, 1_000
-    UDPMockup.simulate_successful_register(tp_pid)
+    Manual.simulate(tp_pid, 200, 200)
     assert_receive {200, _rsp, _tid, ^dlg_pid}, 1_000
   end
 end

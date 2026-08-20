@@ -99,6 +99,37 @@ defmodule UASInviteFixture.Challenge do
   end
 end
 
+# The other form of the same verb: the application composed the params, because
+# `stale` and the algorithm are the authentication backend's to decide and
+# neither survives being re-derived by the dialog layer.
+defmodule UASInviteFixture.ChallengeParams do
+  use SIP.Scenario
+  use SIP.Session.CallUAS
+  uas(:invite)
+  config(domain: "example.com")
+
+  state initial_state do
+    on_events do
+      {:INVITE, _req, _t, _dlg} ->
+        challenge_invite(
+          %{
+            "realm" => "example.com",
+            "nonce" => "abc123",
+            "algorithm" => "SHA-256",
+            "qop" => "auth",
+            "stale" => "true",
+            :authproc => "Digest"
+          },
+          407
+        )
+
+        scenario_success("challenged with params")
+    after
+      5_000 -> scenario_failure("no INVITE")
+    end
+  end
+end
+
 # Phase 3: connect the (config-driven, mockup) media server, then answer the
 # inbound INVITE with a media-negotiated 200 OK + SDP. reply_invite_with_sdp is
 # available through SIP.Scenario (-> CallUAC), like reply_invite.
@@ -163,6 +194,7 @@ defmodule TestCallUAS do
     "busy" => UASInviteFixture.Busy,
     "redirect" => UASInviteFixture.Redirect,
     "challenge" => UASInviteFixture.Challenge,
+    "challengeparams" => UASInviteFixture.ChallengeParams,
     "answersdp" => UASInviteFixture.AnswerSdp,
     "answersdpack" => UASInviteFixture.AnswerSdpAwaitAck
   }
@@ -230,6 +262,8 @@ end
 
 defmodule SIP.Test.UASInvite do
   use ExUnit.Case
+
+  alias SIP.Test.Transport.Mockup
   require Logger
 
   @sdp_body [%{contenttype: "application/sdp", data: "v=0\r\no=- 1 1 IN IP4 1.2.3.4\r\n"}]
@@ -263,7 +297,7 @@ defmodule SIP.Test.UASInvite do
 
     assert SIP.Context.appdata_get(ctx, :last_uas_req) == req
     assert SIP.Context.appdata_get(ctx, :last_uas_req_tid) == self()
-    # A sub_fsm child is spawned before the dialog exists: the event is its only
+    # A spawn_fsm child is spawned before the dialog exists: the event is its only
     # way to learn the dialog pid the reply macros must target.
     assert ctx.dialogpid == dlg
   end
@@ -617,8 +651,8 @@ defmodule SIP.Test.UASInvite do
   # what keeps us from duplicating the 100 a proxy in front already sent.
   test "reply_invite(180) reaches the wire" do
     inject_invite("answer180")
-    assert_receive 180, 2_000
-    refute_received 100
+    assert_receive {:sip_mockup, {:response_sent, 180, _}}, 2_000
+    refute_received {:sip_mockup, {:response_sent, 100, _}}
   end
 
   # …and the converse, which is the whole point of arming the timer: a TU that
@@ -628,31 +662,48 @@ defmodule SIP.Test.UASInvite do
   test "a TU still silent after 200 ms gets a 100 Trying from the transaction" do
     inject_invite("slow")
 
-    assert_receive 100, 2_000
-    assert_receive 180, 2_000
+    assert_receive {:sip_mockup, {:response_sent, 100, _}}, 2_000
+    assert_receive {:sip_mockup, {:response_sent, 180, _}}, 2_000
   end
 
   test "reply_invite(486) reaches the wire" do
     invite = inject_invite("busy")
-    assert_receive 486, 2_000
+    assert_receive {:sip_mockup, {:response_sent, 486, _}}, 2_000
     ack_final(invite)
   end
 
   test "redirect_invite(302) reaches the wire" do
     invite = inject_invite("redirect")
-    assert_receive 302, 2_000
+    assert_receive {:sip_mockup, {:response_sent, 302, _}}, 2_000
     ack_final(invite)
   end
 
   test "challenge_invite(401) reaches the wire" do
     invite = inject_invite("challenge")
-    assert_receive 401, 2_000
+    assert_receive {:sip_mockup, {:response_sent, 401, _}}, 2_000
+    ack_final(invite)
+  end
+
+  # The params the application composed must reach the wire verbatim: `stale`
+  # is what lets a client whose nonce merely aged replay without asking its user
+  # for a password again, and the algorithm names the hash the stored secret was
+  # made with. Re-deriving either here would lose both.
+  test "challenge_invite(params, 407) carries them into Proxy-Authenticate" do
+    invite = inject_invite("challengeparams")
+    assert_receive {:sip_mockup, {:response_sent, 407, resp}}, 2_000
+
+    params = Map.get(resp, :proxyauthenticate)
+    assert params["nonce"] == "abc123"
+    assert params["stale"] == "true"
+    assert params["algorithm"] == "SHA-256"
+    assert params["realm"] == "example.com"
+
     ack_final(invite)
   end
 
   test "reply_invite_with_sdp(200) reaches the wire" do
     invite = inject_invite("answersdp")
-    assert_receive 200, 3_000
+    assert_receive {:sip_mockup, {:response_sent, 200, _}}, 3_000
     # ACK it: an unacked 2xx leaves an IST resending it for 32 s, into the tests
     # that follow (they share this mockup transport, hence this test process).
     ack_2xx(invite)
@@ -667,10 +718,10 @@ defmodule SIP.Test.UASInvite do
   # 180 can only come from the retransmission handler.
   test "an INVITE retransmission gets the last response resent" do
     invite = inject_invite("answer180")
-    assert_receive 180, 2_000
+    assert_receive {:sip_mockup, {:response_sent, 180, _}}, 2_000
 
-    send(invite.ruri.tp_pid, {:recv, invite})
-    assert_receive 180, 2_000
+    SIP.Test.Transport.Mockup.inject(invite.ruri.tp_pid, invite)
+    assert_receive {:sip_mockup, {:response_sent, 180, _}}, 2_000
   end
 
   # The ACK of a 2xx is a transaction of its own (RFC 3261 §17.1.1.3): it carries a
@@ -680,12 +731,12 @@ defmodule SIP.Test.UASInvite do
   # established call (seen against a real UA behind Kamailio).
   test "the ACK of a 2xx (own branch) stops the 200 OK retransmissions" do
     invite = inject_invite("answersdpack")
-    assert_receive 200, 3_000
+    assert_receive {:sip_mockup, {:response_sent, 200, _}}, 3_000
 
     ack_2xx(invite)
 
     # Timer A fires first at T1 = 500 ms; anything resent lands here as another 200.
-    refute_receive 200, 1_500
+    refute_receive {:sip_mockup, {:response_sent, 200, _}}, 1_500
     # ...and the silence is the fix, not a collapsed call: the dialog is still up.
     assert is_binary(dialog_totag(invite.callid))
   end
@@ -716,8 +767,8 @@ defmodule SIP.Test.UASInvite do
     routed = SIP.Transport.Selector.select_transport(upd_uri)
     parsed = SIP.Msg.Ops.update_sip_msg(parsed, {:ruri, routed})
 
-    :ok = GenServer.call(routed.tp_pid, :settestapp)
-    send(routed.tp_pid, {:recv, parsed})
+    :ok = SIP.Test.Transport.Mockup.attach_probe(routed.tp_pid)
+    SIP.Test.Transport.Mockup.inject(routed.tp_pid, parsed)
     parsed
   end
 
@@ -728,7 +779,7 @@ defmodule SIP.Test.UASInvite do
       SIP.Msg.Ops.ack_request(invite, %SIP.Uri{domain: "2.2.2.2", port: 5090})
       |> Map.put(:transid, invite.transid)
 
-    send(invite.ruri.tp_pid, {:recv, ack})
+    SIP.Test.Transport.Mockup.inject(invite.ruri.tp_pid, ack)
     :ok
   end
 
@@ -746,7 +797,7 @@ defmodule SIP.Test.UASInvite do
       |> Map.put(:to, SIP.Uri.set_header_param(to, "tag", totag))
       |> rebranch()
 
-    send(invite.ruri.tp_pid, {:recv, ack})
+    SIP.Test.Transport.Mockup.inject(invite.ruri.tp_pid, ack)
     :ok
   end
 

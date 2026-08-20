@@ -391,7 +391,7 @@ defmodule MediaServer.Mockup.Conn do
   end
 
   # One simulated connectivity event per media of R, in negotiation order, then
-  # the derived :ice_connected — the rule of docs/design/media-connectivity.md §4.
+  # the derived :ice_connected — the rule of docs/design/DESIGN-FRAMEWORK.md#66-media-connectivity-when-may-a-scenario-send.
   @impl true
   def handle_info({:notify_media_connected, media}, state) do
     send(state.event_sink, {:ms_event, self(), {:media_connected, media}})

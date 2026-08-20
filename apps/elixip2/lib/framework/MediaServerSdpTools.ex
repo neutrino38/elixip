@@ -10,7 +10,7 @@ defmodule MediaServer.SdpTools do
   MediaServer.Mendooze.Sdp` there would claim a dependency on the *other* API.
 
   So this is a rename with no move and no behaviour change (design
-  `docs/design/mcu_module.md` §6.3): new adapters use this name, the JSR-309 one
+  `docs/design/DESIGN-MCU.md`): new adapters use this name, the JSR-309 one
   keeps calling its own module directly, and the codec tables stay in one place.
 
   The **delegated negotiation** helpers are re-exported too since P8a: the MCU API now

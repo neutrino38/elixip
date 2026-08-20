@@ -148,10 +148,9 @@ Each failure is one atom, mapping to one SIP answer:
 | `:no_aor` | the request carries no usable R-URI user part | `400 Bad Request` |
 | `:unavailable` | the store or the module could not answer (the reason is logged) | `500` |
 
-Used by the reference scripts
-[`direct-call.exs`](../../../apps/kelixip/scripts/direct-call.exs) and
-[`b2bua.exs`](../../../apps/kelixip/scripts/b2bua.exs); commented in
-[B2BUA.md](../../../B2BUA.md).
+Used by the reference script
+[`direct-call.exs`](../../../apps/kelixip/scripts/direct-call.exs) and its
+authenticated variants; commented in [B2BUA.md](../../../B2BUA.md).
 
 ### `subscribe_register_event/2`, `unsubscribe_register_event/2`
 

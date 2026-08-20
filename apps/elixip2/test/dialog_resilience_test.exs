@@ -1,7 +1,7 @@
 defmodule SIP.Test.DialogResilience do
   @moduledoc """
   What a dialog does when the layers under it fail — design
-  docs/design/b2bua_module.md §14, decisions R1 and R2.
+  docs/design/DESIGN-SIPSTACK.md#57-resilience, decisions R1 and R2.
 
   These are failure-injection tests: nothing here waits for a timer, every case
   kills a process outright. That is the point. The behaviours below all used to
@@ -13,6 +13,9 @@ defmodule SIP.Test.DialogResilience do
   the whole B2BUA teardown is built on.
   """
   use ExUnit.Case
+
+  alias SIP.Test.Peers.Manual
+  alias SIP.Test.Transport.Mockup
 
   setup_all do
     :ok = SIP.Transac.start()
@@ -32,7 +35,8 @@ defmodule SIP.Test.DialogResilience do
   # with the calling process registered as its test app.
   defp peer!(name) do
     tp = SIP.Transport.Selector.select_transport(target(name)).tp_pid
-    :ok = GenServer.call(tp, :settestapp)
+    :ok = Mockup.set_peer(tp, Manual)
+    :ok = Mockup.attach_probe(tp)
     tp
   end
 
@@ -75,7 +79,7 @@ defmodule SIP.Test.DialogResilience do
   test "a client transaction that crashes is reported to the application as a 408" do
     _silent = peer!("rs1")
     {dlg, tid} = start_call("rs1")
-    assert_receive {:invite_sent, _req}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _req}}, 2_000
 
     Process.exit(tid, :kill)
 
@@ -95,7 +99,7 @@ defmodule SIP.Test.DialogResilience do
     _b = peer!("rs2b")
 
     {dlg, tid1} = start_call("rs2a", tag: :outbound, fork: true)
-    assert_receive {:invite_sent, _first}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _first}}, 2_000
 
     Process.exit(tid1, :kill)
     assert_receive {:outbound, {408, _rsp, ^tid1, ^dlg}}, 2_000
@@ -113,7 +117,7 @@ defmodule SIP.Test.DialogResilience do
   test "an unforked initial request that dies takes its dialog with it, and says so" do
     _silent = peer!("rs3")
     {dlg, tid} = start_call("rs3")
-    assert_receive {:invite_sent, _req}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _req}}, 2_000
 
     Process.exit(tid, :kill)
 
@@ -135,9 +139,9 @@ defmodule SIP.Test.DialogResilience do
   test "a BYE that goes unanswered ends the dialog and the application is told" do
     peer = peer!("rs4")
     {dlg, _tid} = start_call("rs4")
-    assert_receive {:invite_sent, _req}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _req}}, 2_000
 
-    GenServer.cast(peer, {:simulate, 200, 50})
+    Manual.simulate(peer, 200, 50)
     assert_receive {:outbound, {200, _ok, _t, ^dlg}}, 3_000
 
     bye = %{
@@ -167,7 +171,7 @@ defmodule SIP.Test.DialogResilience do
   test "a dialog takes its client transactions down with it" do
     _silent = peer!("rs5")
     {dlg, tid} = start_call("rs5")
-    assert_receive {:invite_sent, _req}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _req}}, 2_000
     assert Process.alive?(tid)
 
     :ok = GenServer.stop(dlg, :normal)
@@ -181,7 +185,7 @@ defmodule SIP.Test.DialogResilience do
   # matter here: what is under test is what a dialog does with the message, and
   # the rule that only connected transports SEND it lives in the transports.
   defp transport_down(dlg) do
-    send(dlg, {:transport_down, SIP.Test.Transport.UDPMockup, {1, 2, 3, 4}, 5080})
+    send(dlg, {:transport_down, SIP.Test.Transport.Mockup, {1, 2, 3, 4}, 5080})
   end
 
   # One notification, not two. The old per-protocol clauses sent
@@ -191,9 +195,9 @@ defmodule SIP.Test.DialogResilience do
   test "a transport going down terminates the dialog riding it, exactly once" do
     peer = peer!("rs7")
     {dlg, _tid} = start_call("rs7")
-    assert_receive {:invite_sent, _req}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _req}}, 2_000
 
-    GenServer.cast(peer, {:simulate, 200, 50})
+    Manual.simulate(peer, 200, 50)
     assert_receive {:outbound, {200, _ok, _t, ^dlg}}, 3_000
 
     transport_down(dlg)
@@ -209,7 +213,7 @@ defmodule SIP.Test.DialogResilience do
   test "a dialog on another flow ignores it" do
     _peer = peer!("rs8")
     {dlg, _tid} = start_call("rs8")
-    assert_receive {:invite_sent, _req}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _req}}, 2_000
 
     send(dlg, {:transport_down, SIP.Transport.TCP, {9, 9, 9, 9}, 5060})
 
@@ -227,7 +231,7 @@ defmodule SIP.Test.DialogResilience do
     _b = peer!("rs9b")
 
     {dlg, tid1} = start_call("rs9a", tag: :outbound, fork: true)
-    assert_receive {:invite_sent, _first}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _first}}, 2_000
 
     transport_down(dlg)
 
@@ -304,9 +308,9 @@ defmodule SIP.Test.DialogResilience do
   test "a connectionless transport that dies is re-selected, and the call goes on" do
     peer = peer!("rs10")
     {dlg, _tid} = start_call("rs10")
-    assert_receive {:invite_sent, _req}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _req}}, 2_000
 
-    GenServer.cast(peer, {:simulate, 200, 50})
+    Manual.simulate(peer, 200, 50)
     assert_receive {:outbound, {200, _ok, _t, ^dlg}}, 3_000
 
     Process.exit(peer, :kill)
@@ -393,7 +397,7 @@ defmodule SIP.Test.DialogResilience do
   test "a dialog told to terminate says why and dies" do
     _silent = peer!("rs7")
     {dlg, _tid} = start_call("rs7")
-    assert_receive {:invite_sent, _req}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _req}}, 2_000
 
     :ok = SIP.Dialog.terminate(dlg, :superseded)
 
@@ -406,7 +410,7 @@ defmodule SIP.Test.DialogResilience do
   test "terminating a dialog that is already gone is a no-op" do
     _silent = peer!("rs8")
     {dlg, _tid} = start_call("rs8")
-    assert_receive {:invite_sent, _req}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _req}}, 2_000
 
     Process.exit(dlg, :kill)
     assert_dies(dlg)
@@ -446,17 +450,17 @@ defmodule SIP.Test.DialogResilience do
       end)
 
     assert_receive {:dialog, dlg}, 2_000
-    assert_receive {:invite_sent, _req}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _req}}, 2_000
 
     ref = Process.monitor(app)
     send(app, :end_scenario)
     assert_receive {:DOWN, ^ref, :process, ^app, :normal}, 2_000
 
     # The callee picks up anyway.
-    GenServer.cast(tp, {:simulate, 200, 0})
+    Manual.simulate(tp, 200, 0)
 
-    assert_receive :ACK, 2_000
-    assert_receive :BYE, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :ACK, _}}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :BYE, _}}, 2_000
 
     # The dialog is not linked to its application (GenServer.start, not
     # start_link), which is what let it still be here to clean up.
@@ -471,7 +475,7 @@ defmodule SIP.Test.DialogResilience do
   test "a message the dialog does not recognize does not kill it" do
     _silent = peer!("rs6")
     {dlg, _tid} = start_call("rs6")
-    assert_receive {:invite_sent, _req}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _req}}, 2_000
 
     send(dlg, {:some_future_broadcast, :with, "arguments"})
 

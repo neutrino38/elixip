@@ -1,7 +1,7 @@
 defmodule Kelix.Mod.McuControlRestTest do
   @moduledoc """
   The MCU control surface as a **client** meets it: the real `Kelix.ControlAPI`
-  routing the real `Kelix.Mod.Mcu` declarations (docs/design/mcu_module.md §8.3.3
+  routing the real `Kelix.Mod.Mcu` declarations (docs/design/DESIGN-KELIXIP.md#7-the-module-system
   + FW-4).
 
   It lives with the module because it needs both halves — the core frontal and the

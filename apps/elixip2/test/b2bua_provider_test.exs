@@ -55,6 +55,9 @@ defmodule SIP.Test.B2bua.Provider do
   """
   use ExUnit.Case
 
+  alias SIP.Test.Peers.Manual
+  alias SIP.Test.Transport.Mockup
+
   alias SIP.B2bua.{Hunt, Leg, Peer}
   alias SIP.Session.B2bua
   alias SIP.Test.B2bua.FakeQueue
@@ -81,7 +84,8 @@ defmodule SIP.Test.B2bua.Provider do
 
   defp peer!(name) do
     tp = SIP.Transport.Selector.select_transport(target(name)).tp_pid
-    :ok = GenServer.call(tp, :settestapp)
+    :ok = Mockup.set_peer(tp, Manual)
+    :ok = Mockup.attach_probe(tp)
     tp
   end
 
@@ -111,7 +115,7 @@ defmodule SIP.Test.B2bua.Provider do
     ctx = B2bua.do_create_leg(ctx, inbound_invite(), peer, false)
 
     assert ctx.lasterr == :ok
-    assert_receive {:invite_sent, fwd}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, fwd}}, 2_000
     assert fwd.ruri.domain == "prv1a.example.com"
     assert %Leg{} = B2bua.outbound_leg(ctx)
 
@@ -132,7 +136,7 @@ defmodule SIP.Test.B2bua.Provider do
 
     assert ctx.lasterr == :ok
     assert B2bua.outbound_leg(ctx) == nil
-    refute_receive {:invite_sent, _}, 300
+    refute_receive {:sip_mockup, {:request_sent, :INVITE, _}}, 300
     refute_receive {:replied, _, _, _, _}, 200
 
     # …and the search is very much on, though nothing is ringing.
@@ -141,7 +145,7 @@ defmodule SIP.Test.B2bua.Provider do
 
     # An agent frees up: the same call, now dialled.
     ctx = B2bua.do_try_next(ctx)
-    assert_receive {:invite_sent, fwd}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, fwd}}, 2_000
     assert fwd.ruri.domain == "prv2a.example.com"
     refute match?(%Hunt{waiting: true}, B2bua.hunt(ctx))
   end
@@ -152,12 +156,12 @@ defmodule SIP.Test.B2bua.Provider do
     {peer, q} = queue_peer([{:ok, target("prv3a")}, {:ok, target("prv3b")}])
 
     ctx = B2bua.do_create_leg(ctx, inbound_invite(), peer, false)
-    assert_receive {:invite_sent, first}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, first}}, 2_000
     leg_before = B2bua.outbound_leg(ctx)
 
     ctx = relay_final(ctx, 486)
 
-    assert_receive {:invite_sent, second}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, second}}, 2_000
     assert first.ruri.domain == "prv3a.example.com"
     assert second.ruri.domain == "prv3b.example.com"
     refute_receive {:replied, 486, _, _, _}, 200
@@ -179,7 +183,7 @@ defmodule SIP.Test.B2bua.Provider do
     {peer, _q} = queue_peer([{:ok, target("prv4a")}])
 
     ctx = B2bua.do_create_leg(ctx, inbound_invite(), peer, false)
-    assert_receive {:invite_sent, _first}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _first}}, 2_000
 
     ctx = relay_final(ctx, 480)
 
@@ -194,12 +198,12 @@ defmodule SIP.Test.B2bua.Provider do
     {peer, q} = queue_peer([{:ok, target("prv5a")}, {:ok, target("prv5b")}])
 
     ctx = B2bua.do_create_leg(ctx, inbound_invite(), peer, false)
-    assert_receive {:invite_sent, _first}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _first}}, 2_000
 
     # A ring timeout fires: this agent has had long enough.
     ctx = B2bua.do_try_next(ctx)
 
-    assert_receive {:invite_sent, second}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, second}}, 2_000
     assert second.ruri.domain == "prv5b.example.com"
     assert [{:no_answer, rung}] = FakeQueue.outcomes(q)
     assert rung.domain == "prv5a.example.com"
@@ -233,7 +237,7 @@ defmodule SIP.Test.B2bua.Provider do
       {peer, q} = queue_peer([{:ok, target("prv7a")}])
 
       ctx = B2bua.do_create_leg(ctx, inbound_invite(), peer, false)
-      assert_receive {:invite_sent, _}, 2_000
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, _}}, 2_000
 
       ctx = B2bua.release_legs(ctx)
 

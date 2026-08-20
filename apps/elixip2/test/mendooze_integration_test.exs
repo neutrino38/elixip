@@ -224,7 +224,7 @@ defmodule Mendooze.IntegrationTest do
     end
 
     test "H264 audio+video loopback carries the server-negotiated fmtp", %{server: server} do
-      # Delegated SDP negotiation (§8.1 of docs/design/mendooze_interface.md): the media
+      # Delegated SDP negotiation (§8.1 of docs/design/DESIGN-FRAMEWORK.md#63-the-mendooze-adapter): the media
       # server is authoritative for the H264 fmtp (profile-level-id /
       # packetization-mode). This asserts the fmtp reaches both the offer and the
       # answer, i.e. the enriched EndpointStartReceiving return is threaded
@@ -253,7 +253,7 @@ defmodule Mendooze.IntegrationTest do
     end
 
     test "WebRTC-shaped offer/answer loopback (both legs webrtc)", %{server: server} do
-      # Phase 4 (webrtc_sdp_design.md §2.8 test 9): both endpoints negotiate the
+      # Phase 4 (DESIGN-FRAMEWORK.md test 9): both endpoints negotiate the
       # WebRTC transport plane. pc_a offers setup:actpass; pc_b answers, so one
       # side runs DTLS as client and the other as server — the split the server
       # side (branch feat/webrtc-improvement) had to support.

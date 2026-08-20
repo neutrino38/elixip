@@ -13,7 +13,7 @@ defmodule Kelix.Control.Registry do
   Held in a supervised `Agent`; reads tolerate it being absent.
 
   Registration is also where a **conflicting command set is refused** (FW-4,
-  `docs/design/mcu_module.md` §8.3.4): two commands whose path templates no request
+  `docs/design/DESIGN-MCU.md`): two commands whose path templates no request
   could tell apart would make dispatch depend on iteration order, so the module's
   whole surface is rejected here instead — a declaration bug, caught once at start,
   rather than a request-time coin flip.

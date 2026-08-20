@@ -1,7 +1,7 @@
 defmodule Kelix.Mod.McuSecureTest do
   @moduledoc """
   The security plane of a conference leg: SDES-SRTP and DTLS-SRTP + ICE-lite
-  (design `docs/design/mcu_module.md` §2 point 3, §3.5, §6.3 rules 3-6).
+  (design `docs/design/DESIGN-MCU.md` point 3, §3.5, §6.3 rules 3-6).
 
   Driven through the adapter directly rather than through `mcu.exs`: what matters
   here is **which secret comes from where** and **in what order it is pushed**, and

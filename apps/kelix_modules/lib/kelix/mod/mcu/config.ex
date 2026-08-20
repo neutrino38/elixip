@@ -1,6 +1,6 @@
 defmodule Kelix.Mod.Mcu.Config do
   @moduledoc """
-  The validated `[module.mcu]` block (design `docs/design/mcu_module.md` §8.4).
+  The validated `[module.mcu]` block (design `docs/design/DESIGN-MCU.md`).
 
   `parse/1` is the single reading of the TOML block: it is what
   `Kelix.Mod.Mcu.validate_config/1` runs (so a typo is a boot-time config error,

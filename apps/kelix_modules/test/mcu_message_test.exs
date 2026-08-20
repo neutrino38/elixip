@@ -1,6 +1,6 @@
 defmodule Kelix.Mod.McuMessageTest do
   @moduledoc """
-  The collaboration channel of design `docs/design/mcu_module.md` §20 (P10): a
+  The collaboration channel of design `docs/design/DESIGN-MCU.md` (P10): a
   participant's script addressing its peers' scripts.
 
   Every leg here is admitted by **its own process**, because that process is what the

@@ -1,7 +1,7 @@
 defmodule Kelix.DialPlan do
   @moduledoc """
   Asterisk-style extension pattern compiler for the `calls` dial-plan
-  (design `docs/design/kelixip_basic_design.md` §3.3).
+  (design `docs/design/DESIGN-KELIXIP.md`).
 
   A pattern is compiled **once** (at config load) into a matcher closure that
   tests a Request-URI user-part. First-match-wins is applied by the caller over

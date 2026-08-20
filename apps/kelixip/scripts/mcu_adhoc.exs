@@ -1,4 +1,4 @@
-# Reference kelixip AD-HOC conference script — design docs/design/mcu_module.md §17.5.
+# Reference kelixip AD-HOC conference script — design docs/design/DESIGN-MCU.md#8-driving-a-conference-from-a-script.
 #
 # This is `mcu.exs` with ONE clause changed: instead of requiring the DID to already
 # designate a conference, the first caller on it CREATES one (`ensure_conference/3`),
@@ -29,7 +29,7 @@
 defmodule Kelix.Mcu.AdhocCall do
   use SIP.Scenario
   use SIP.Session.CallUAS
-  # the admit/attach/leave DSL macros — rebind sip_ctx in place, verdict in sip_ctx.lasterr
+  # the admit/attach/leave FSL macros — rebind sip_ctx in place, verdict in sip_ctx.lasterr
   use Kelix.Mod.Mcu.Script
   require Logger
   import SIP.Session, only: [reply: 5, reply: 6]

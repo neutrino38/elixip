@@ -1,5 +1,8 @@
 defmodule SIP.Test.UASRegister do
   use ExUnit.Case
+
+  alias SIP.Test.Peers.Manual
+  alias SIP.Test.Transport.Mockup
   import SIP.Test.Wait
   require Logger
 
@@ -75,9 +78,11 @@ defmodule SIP.Test.UASRegister do
 
     routed = SIP.Transport.Selector.select_transport(upd_uri)
 
-    # Route UAS responses back to this test process.
-    :ok = GenServer.call(routed.tp_pid, :settestapp)
-    send(routed.tp_pid, {:recv, parsed})
+    # Route UAS responses back to this test process, and make sure no peer
+    # installed by another test file is left driving the shared instance.
+    :ok = SIP.Test.Transport.Mockup.attach_probe(routed.tp_pid)
+    :ok = SIP.Test.Transport.Mockup.set_peer(routed.tp_pid, SIP.Test.Peers.Passive)
+    SIP.Test.Transport.Mockup.inject(routed.tp_pid, parsed)
     parsed.callid
   end
 
@@ -118,7 +123,7 @@ defmodule SIP.Test.UASRegister do
     # SIP-REGISTER-LVP.txt carries no Authorization header.
     cid = inject_register("test/SIP-REGISTER-LVP.txt")
 
-    assert_receive {:uas_response, 401, %{callid: ^cid}}, 2_000
+    assert_receive {:sip_mockup, {:response_sent, 401, %{callid: ^cid}}}, 2_000
   end
 
   test "REGISTER with credentials for a stale nonce / foreign realm is rejected" do
@@ -128,7 +133,7 @@ defmodule SIP.Test.UASRegister do
     # by us (and whose realm is not example.com): the strict checks refuse it.
     cid = inject_register("test/SIP-REGISTER-AUTH.txt")
 
-    assert_receive {:uas_response, 403, %{callid: ^cid}}, 2_000
+    assert_receive {:sip_mockup, {:response_sent, 403, %{callid: ^cid}}}, 2_000
   end
 
   test "a forged nonce is rejected even with a valid digest and the right realm" do
@@ -144,7 +149,7 @@ defmodule SIP.Test.UASRegister do
     upd_uri = SIP.Uri.set_uri_param(base.ruri, "unittest", "uas_register")
     base = SIP.Msg.Ops.update_sip_msg(base, {:ruri, upd_uri}) |> uniq_callid()
     routed = SIP.Transport.Selector.select_transport(upd_uri)
-    :ok = GenServer.call(routed.tp_pid, :settestapp)
+    :ok = SIP.Test.Transport.Mockup.attach_probe(routed.tp_pid)
     cid = base.callid
 
     # right length (ts+rand+mac), wrong MAC
@@ -163,8 +168,8 @@ defmodule SIP.Test.UASRegister do
       )
       |> fresh_branch()
 
-    send(routed.tp_pid, {:recv, req})
-    assert_receive {:uas_response, 403, %{callid: ^cid}}, 2_000
+    SIP.Test.Transport.Mockup.inject(routed.tp_pid, req)
+    assert_receive {:sip_mockup, {:response_sent, 403, %{callid: ^cid}}}, 2_000
   end
 
   test "authenticated REGISTER (real challenge/response) is accepted with 200" do
@@ -175,7 +180,7 @@ defmodule SIP.Test.UASRegister do
     upd_uri = SIP.Uri.set_uri_param(req.ruri, "unittest", "uas_register")
     req = SIP.Msg.Ops.update_sip_msg(req, {:ruri, upd_uri}) |> uniq_callid()
     routed = SIP.Transport.Selector.select_transport(upd_uri)
-    :ok = GenServer.call(routed.tp_pid, :settestapp)
+    :ok = SIP.Test.Transport.Mockup.attach_probe(routed.tp_pid)
     tp = routed.tp_pid
 
     cid = req.callid
@@ -183,8 +188,8 @@ defmodule SIP.Test.UASRegister do
     # 1. Unauthenticated REGISTER → 401 with a nonce we issued for our realm.
     #    Fresh Via branch so we never collide with a lingering transaction from
     #    another test that reused this canned message's branch.
-    send(tp, {:recv, fresh_branch(req)})
-    assert_receive {:uas_response, 401, %{callid: ^cid} = resp401}, 2_000
+    SIP.Test.Transport.Mockup.inject(tp, fresh_branch(req))
+    assert_receive {:sip_mockup, {:response_sent, 401, %{callid: ^cid} = resp401}}, 2_000
     nonce = resp401.wwwauthenticate["nonce"]
     assert is_binary(nonce)
 
@@ -218,8 +223,8 @@ defmodule SIP.Test.UASRegister do
 
     req2 = Map.put(req2, :via, [newtop | rest])
 
-    send(tp, {:recv, req2})
-    assert_receive {:uas_response, 200, %{callid: ^cid}}, 2_000
+    SIP.Test.Transport.Mockup.inject(tp, req2)
+    assert_receive {:sip_mockup, {:response_sent, 200, %{callid: ^cid}}}, 2_000
   end
 
   test "registered dialog answers OPTIONS keepalives and handles un-REGISTER" do
@@ -232,30 +237,30 @@ defmodule SIP.Test.UASRegister do
     upd_uri = SIP.Uri.set_uri_param(base.ruri, "unittest", "uas_register")
     base = SIP.Msg.Ops.update_sip_msg(base, {:ruri, upd_uri}) |> uniq_callid() |> with_cseq(1)
     routed = SIP.Transport.Selector.select_transport(upd_uri)
-    :ok = GenServer.call(routed.tp_pid, :settestapp)
+    :ok = SIP.Test.Transport.Mockup.attach_probe(routed.tp_pid)
     tp = routed.tp_pid
 
     auth = %{"realm" => "example.com", "nonce" => "n0"}
     cid = base.callid
 
     # 1. REGISTER (no auth) → challenged.
-    send(tp, {:recv, fresh_branch(base)})
-    assert_receive {:uas_response, 401, %{callid: ^cid}}, 2_000
+    SIP.Test.Transport.Mockup.inject(tp, fresh_branch(base))
+    assert_receive {:sip_mockup, {:response_sent, 401, %{callid: ^cid}}}, 2_000
 
     # 2. REGISTER (authenticated) → accepted, dialog now "registered".
     reg = base |> with_auth(auth) |> with_cseq(2) |> fresh_branch()
-    send(tp, {:recv, reg})
-    assert_receive {:uas_response, 200, %{callid: ^cid}}, 2_000
+    SIP.Test.Transport.Mockup.inject(tp, reg)
+    assert_receive {:sip_mockup, {:response_sent, 200, %{callid: ^cid}}}, 2_000
 
     # 3. In-dialog OPTIONS keepalive → 200 OK.
     opt = base |> Map.put(:method, :OPTIONS) |> with_cseq(3, :OPTIONS) |> fresh_branch()
-    send(tp, {:recv, opt})
-    assert_receive {:uas_response, 200, %{callid: ^cid}}, 2_000
+    SIP.Test.Transport.Mockup.inject(tp, opt)
+    assert_receive {:sip_mockup, {:response_sent, 200, %{callid: ^cid}}}, 2_000
 
     # 4. In-dialog un-REGISTER (Expires 0) → 200 OK and the instance ends.
     unreg = base |> Map.put(:expires, 0) |> with_auth(auth) |> with_cseq(4) |> fresh_branch()
-    send(tp, {:recv, unreg})
-    assert_receive {:uas_response, 200, %{callid: ^cid}}, 2_000
+    SIP.Test.Transport.Mockup.inject(tp, unreg)
+    assert_receive {:sip_mockup, {:response_sent, 200, %{callid: ^cid}}}, 2_000
 
     assert until(fn -> Elixip.RegistrarUAS.stats().active == 0 end, 2_000)
   end
@@ -274,18 +279,18 @@ defmodule SIP.Test.UASRegister do
     upd_uri = SIP.Uri.set_uri_param(base.ruri, "unittest", "uas_register")
     base = SIP.Msg.Ops.update_sip_msg(base, {:ruri, upd_uri}) |> uniq_callid() |> with_cseq(1)
     routed = SIP.Transport.Selector.select_transport(upd_uri)
-    :ok = GenServer.call(routed.tp_pid, :settestapp)
+    :ok = SIP.Test.Transport.Mockup.attach_probe(routed.tp_pid)
     tp = routed.tp_pid
 
     auth = %{"realm" => "example.com", "nonce" => "n0"}
     cid = base.callid
 
-    send(tp, {:recv, fresh_branch(base)})
-    assert_receive {:uas_response, 401, %{callid: ^cid}}, 2_000
+    SIP.Test.Transport.Mockup.inject(tp, fresh_branch(base))
+    assert_receive {:sip_mockup, {:response_sent, 401, %{callid: ^cid}}}, 2_000
 
     reg = base |> with_auth(auth) |> with_cseq(2) |> fresh_branch()
-    send(tp, {:recv, reg})
-    assert_receive {:uas_response, 200, %{callid: ^cid}}, 2_000
+    SIP.Test.Transport.Mockup.inject(tp, reg)
+    assert_receive {:sip_mockup, {:response_sent, 200, %{callid: ^cid}}}, 2_000
 
     old = SIP.Uri.set_header_param(List.first(List.wrap(base.contact)), "expires", "0")
     {:ok, new} = SIP.Uri.parse("sip:5430@103.145.13.102:5191")
@@ -298,8 +303,8 @@ defmodule SIP.Test.UASRegister do
       |> with_cseq(3)
       |> fresh_branch()
 
-    send(tp, {:recv, rebind})
-    assert_receive {:uas_response, 200, %{callid: ^cid}}, 2_000
+    SIP.Test.Transport.Mockup.inject(tp, rebind)
+    assert_receive {:sip_mockup, {:response_sent, 200, %{callid: ^cid}}}, 2_000
 
     # Still registered: the instance must not have taken this for a goodbye.
     Process.sleep(200)
@@ -326,18 +331,18 @@ defmodule SIP.Test.UASRegister do
     upd_uri = SIP.Uri.set_uri_param(base.ruri, "unittest", "uas_register")
     base = SIP.Msg.Ops.update_sip_msg(base, {:ruri, upd_uri}) |> uniq_callid() |> with_cseq(1)
     routed = SIP.Transport.Selector.select_transport(upd_uri)
-    :ok = GenServer.call(routed.tp_pid, :settestapp)
+    :ok = SIP.Test.Transport.Mockup.attach_probe(routed.tp_pid)
     tp = routed.tp_pid
 
     auth = %{"realm" => "example.com", "nonce" => "n0"}
     cid = base.callid
 
-    send(tp, {:recv, fresh_branch(base)})
-    assert_receive {:uas_response, 401, %{callid: ^cid}}, 2_000
+    SIP.Test.Transport.Mockup.inject(tp, fresh_branch(base))
+    assert_receive {:sip_mockup, {:response_sent, 401, %{callid: ^cid}}}, 2_000
 
     reg = base |> with_auth(auth) |> with_cseq(2) |> fresh_branch()
-    send(tp, {:recv, reg})
-    assert_receive {:uas_response, 200, %{callid: ^cid}}, 2_000
+    SIP.Test.Transport.Mockup.inject(tp, reg)
+    assert_receive {:sip_mockup, {:response_sent, 200, %{callid: ^cid}}}, 2_000
     assert until(fn -> Elixip.RegistrarUAS.stats().active == 1 end, 2_000)
 
     # The refresh: same Call-ID and a rising CSeq, as the RFC asks — and a From
@@ -349,8 +354,8 @@ defmodule SIP.Test.UASRegister do
       |> with_cseq(3)
       |> fresh_branch()
 
-    send(tp, {:recv, refresh})
-    assert_receive {:uas_response, 200, %{callid: ^cid}}, 2_000
+    SIP.Test.Transport.Mockup.inject(tp, refresh)
+    assert_receive {:sip_mockup, {:response_sent, 200, %{callid: ^cid}}}, 2_000
 
     # One session, still. Two means the refresh was taken for a new registration.
     Process.sleep(200)
@@ -378,15 +383,16 @@ defmodule SIP.Test.UASRegister do
     upd_uri = SIP.Uri.set_uri_param(base.ruri, "unittest", "uas_register")
     base = SIP.Msg.Ops.update_sip_msg(base, {:ruri, upd_uri}) |> uniq_callid() |> with_cseq(1)
     routed = SIP.Transport.Selector.select_transport(upd_uri)
-    :ok = GenServer.call(routed.tp_pid, :settestapp)
+    :ok = Mockup.set_peer(routed.tp_pid, Manual)
+    :ok = Mockup.attach_probe(routed.tp_pid)
 
     cid = base.callid
 
     # Lenient mode (no password): the very first REGISTER already carries an
     # Authorization, so the scenario accepts it instead of challenging.
     auth = %{"realm" => "example.com", "nonce" => "n0"}
-    send(routed.tp_pid, {:recv, base |> with_auth(auth) |> fresh_branch()})
-    assert_receive {:uas_response, 200, %{callid: ^cid}}, 2_000
+    Mockup.inject(routed.tp_pid, base |> with_auth(auth) |> fresh_branch())
+    assert_receive {:sip_mockup, {:response_sent, 200, %{callid: ^cid}}}, 2_000
 
     timer = :sys.get_state(dialog_of(cid)).expirationtimer
     assert timer != nil, "the dialog-creating REGISTER left the dialog with no lifetime"
@@ -426,7 +432,7 @@ defmodule SIP.Test.UASRegister do
     upd_uri = SIP.Uri.set_uri_param(base.ruri, "unittest", "uas_register")
     base = SIP.Msg.Ops.update_sip_msg(base, {:ruri, upd_uri}) |> uniq_callid()
     routed = SIP.Transport.Selector.select_transport(upd_uri)
-    :ok = GenServer.call(routed.tp_pid, :settestapp)
+    :ok = SIP.Test.Transport.Mockup.attach_probe(routed.tp_pid)
 
     cid = base.callid
 
@@ -439,8 +445,8 @@ defmodule SIP.Test.UASRegister do
       |> with_cseq(9, :OPTIONS)
       |> fresh_branch()
 
-    send(routed.tp_pid, {:recv, orphan})
-    assert_receive {:uas_response, 481, %{callid: ^cid}}, 2_000
+    SIP.Test.Transport.Mockup.inject(routed.tp_pid, orphan)
+    assert_receive {:sip_mockup, {:response_sent, 481, %{callid: ^cid}}}, 2_000
   end
 
   # Replace the topmost Via branch so each injected message is a new transaction.

@@ -1,13 +1,13 @@
 defmodule Kelixip.MixProject do
   use Mix.Project
 
-  # The kelixip server application (design docs/design/kelixip_basic_design.md).
+  # The kelixip server application (design docs/design/DESIGN-KELIXIP.md).
   # Built on the shared :elixip2 SIP stack. Delivered as an OTP release
   # (`mix release kelixip`); the `kelictl` control CLI ships inside that release.
   def project do
     [
       app: :kelixip,
-      version: "1.4.0",
+      version: "1.5.0",
       elixir: "~> 1.15",
       # Umbrella: share the root _build / config / deps / lockfile
       build_path: "../../_build",
@@ -32,7 +32,7 @@ defmodule Kelixip.MixProject do
 
   defp deps do
     [
-      # The shared SIP stack + DSL + media.
+      # The shared SIP stack + FSL + media.
       {:elixip2, in_umbrella: true},
       # Declarative config parser (config.toml / domains.toml). Pure Elixir,
       # no NIF, release-safe (design §13).
@@ -56,7 +56,7 @@ defmodule Kelixip.MixProject do
   defp releases do
     [
       kelixip: [
-        version: "1.4.0",
+        version: "1.5.0",
         applications: [kelixip: :permanent],
         include_executables_for: [:unix]
       ]

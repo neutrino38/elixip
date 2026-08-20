@@ -1,5 +1,5 @@
 defmodule Kelix.Mod.Mcu.ConfigTest do
-  # The [module.mcu] block (docs/design/mcu_module.md §8.4). Validation is where a
+  # The [module.mcu] block (docs/design/DESIGN-MCU.md#3-architecture). Validation is where a
   # typo must die: the alternative is a conference that quietly runs on a default.
   use ExUnit.Case, async: true
 

@@ -3,7 +3,7 @@
 #
 # Read it next to scenarios/b2bua_basic.exs: same call, same states, and the
 # difference between the two files is precisely what a media server costs. That
-# pairing is the documentation (design docs/design/b2bua_module.md §12), which is
+# pairing is the documentation (design docs/design/DESIGN-FRAMEWORK.md#5-b2bua), which is
 # why this arrived as a NEW file rather than as a flag on the other one — the
 # basic scenario exists to show a complete B2BUA in ~60 lines of FSM, and it only
 # keeps that property while it is the simplest thing that relays a call.
@@ -119,7 +119,7 @@ defmodule B2BUA.Media do
       # That is what leaves the hunt free to move on.
       {:outbound, {code, resp, _trans, _dlg}} when code in 101..199 ->
         b2bua_forward_reply(resp)
-        goto(loop, "provisional #{code}")
+        stay("provisional #{code}")
 
       # The callee answered: the framework feeds its answer to the outbound
       # endpoint, attaches the two, and puts OUR answer in the 200 the caller
@@ -135,7 +135,7 @@ defmodule B2BUA.Media do
         b2bua_forward_reply(resp)
 
         if b2bua_hunting?() do
-          goto(loop, "#{code}, trying the next target")
+          stay("#{code}, trying the next target")
         else
           case b2bua_media_error() do
             nil -> goto(releasing, "callee answered #{code}")
@@ -192,7 +192,7 @@ defmodule B2BUA.Media do
         goto(releasing, "callee answered after the cancellation; hung up")
 
       {:outbound, {code, _resp, _trans, _dlg}} when code in 100..199 ->
-        goto(loop, "provisional #{code} after cancel")
+        stay("provisional #{code} after cancel")
 
       {:outbound, {code, _resp, _trans, _dlg}} when code >= 300 ->
         goto(releasing, "caller cancelled, callee answered #{code}")
@@ -250,7 +250,7 @@ defmodule B2BUA.Media do
 
       # One media went quiet. Worth saying, not worth hanging up for.
       {:ms_event, _ref, {:media_timeout, media}} ->
-        goto(loop, "#{media} went silent")
+        stay("#{media} went silent")
 
       # The media server itself is gone. With one media session per call this
       # takes the CALL down, not one leg — so both legs are wound down rather
@@ -277,48 +277,48 @@ defmodule B2BUA.Media do
         case b2bua_reoffer_kind(req) do
           kind when kind in [:address_change, :no_sdp, :no_change] ->
             b2bua_reply_reoffer(req)
-            goto(loop, "#{m} answered locally (#{kind}, caller)")
+            stay("#{m} answered locally (#{kind}, caller)")
 
           kind ->
             b2bua_forward(req)
-            goto(loop, "relayed #{m} (#{kind}, caller -> callee)")
+            stay("relayed #{m} (#{kind}, caller -> callee)")
         end
 
       {:outbound, {m, req, _trans, _dlg}} when m in [:INVITE, :UPDATE] ->
         case b2bua_reoffer_kind(req) do
           kind when kind in [:address_change, :no_sdp, :no_change] ->
             b2bua_reply_reoffer(req)
-            goto(loop, "#{m} answered locally (#{kind}, callee)")
+            stay("#{m} answered locally (#{kind}, callee)")
 
           kind ->
             b2bua_forward(req)
-            goto(loop, "relayed #{m} (#{kind}, callee -> caller)")
+            stay("relayed #{m} (#{kind}, callee -> caller)")
         end
 
       # The ACK of a re-INVITE's 200: its own transaction (RFC 3261 §13.2.2.4).
       {:ACK, req, _trans, _dlg} ->
         b2bua_forward(req)
-        goto(loop, "ACK relayed (caller -> callee)")
+        stay("ACK relayed (caller -> callee)")
 
       {:outbound, {:ACK, req, _trans, _dlg}} ->
         b2bua_forward(req)
-        goto(loop, "ACK relayed (callee -> caller)")
+        stay("ACK relayed (callee -> caller)")
 
       {:outbound, {m, req, _trans, _dlg}} when is_atom(m) ->
         b2bua_forward(req)
-        goto(loop, "relayed #{m} (callee -> caller)")
+        stay("relayed #{m} (callee -> caller)")
 
       {:outbound, {code, resp, _trans, _dlg}} when is_integer(code) ->
         b2bua_forward_reply(resp)
-        goto(loop, "relayed #{code} (callee -> caller)")
+        stay("relayed #{code} (callee -> caller)")
 
       {m, req, _trans, _dlg} when is_atom(m) ->
         b2bua_forward(req)
-        goto(loop, "relayed #{m} (caller -> callee)")
+        stay("relayed #{m} (caller -> callee)")
 
       {code, resp, _trans, _dlg} when is_integer(code) ->
         b2bua_forward_reply(resp)
-        goto(loop, "relayed #{code} (caller -> callee)")
+        stay("relayed #{code} (caller -> callee)")
     after
       14_400_000 -> goto(releasing, "maximum call duration reached")
     end

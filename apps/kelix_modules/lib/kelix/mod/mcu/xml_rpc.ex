@@ -1,7 +1,7 @@
 defmodule Kelix.Mod.Mcu.XmlRpc do
   @moduledoc """
   XML-RPC transport for the Medooze **MCU** control interface
-  (`POST /mcu`, design `docs/design/mcu_module.md` §3.1).
+  (`POST /mcu`, design `docs/design/DESIGN-MCU.md`).
 
   A different endpoint from the JSR-309 one driven by `MediaServer.Mendooze`
   (`/jsr309`): the two are disjoint object models on the same daemon, so this is a

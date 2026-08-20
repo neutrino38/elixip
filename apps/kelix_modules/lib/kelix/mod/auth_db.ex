@@ -32,6 +32,40 @@ defmodule Kelix.Mod.AuthDb do
 
   alias Kelix.Mod.AuthDb.Pool
 
+  @doc """
+  Take this module's verbs into a scenario: the alias, and the service building
+  blocks it publishes (`Kelix.Mod.AuthDb.SBB`).
+
+      use Kelix.Mod.AuthDb
+
+      state authenticate_caller do
+        AuthDb.SBB.authenticate()
+        ...
+      end
+
+  The alias is on the **module**, not on `SBB`: two modules publishing blocks
+  would both want the bare `SBB`, and the second `use` would win — a script using
+  `registrar` and `auth_db` together is the ordinary case, not a corner one. The
+  prefix a reader wants is which module provides the verb anyway.
+
+  This does not replace `config(uses_modules: [:auth_db])`, which checks a
+  different thing: the `use` says the **code** is installed (it does not compile
+  otherwise), the declaration says a **configured instance** exists. A `.beam` in
+  `module_dir` with no `[module.auth_db]` block passes the first and fails the
+  second, which is exactly the case the preflight is there to catch.
+  """
+  defmacro __using__(_opts) do
+    # Teach the scenario that `:auth` is a block namespace, so `on_events`
+    # classifies the block's returns as scenario events even in a state written
+    # before the call site — see docs/design/DESIGN-SBB.md#21-the-shape-of-a-return.
+    SIP.Scenario.register_namespace(__CALLER__.module, :auth)
+
+    quote do
+      alias Kelix.Mod.AuthDb
+      require Kelix.Mod.AuthDb.SBB
+    end
+  end
+
   @typedoc """
   The secret an authentication needs, as the backend holds it.
 

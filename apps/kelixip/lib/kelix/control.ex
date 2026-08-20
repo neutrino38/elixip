@@ -60,10 +60,10 @@ defmodule Kelix.Control do
       (`kelictl stop <id>`) takes, and no other command exposes it.
     * `SIP.Scenario.Monitor` — **where each FSM is**: current `state`, the `event`
       that got it there, the last `command` it issued, and the `account` it serves.
-      Reading the FSM state is the whole point of a DSL-driven server; without it
+      Reading the FSM state is the whole point of an FSL-driven server; without it
       the formalism is invisible from the outside.
 
-  Rows the pool does not know about (a `sub_fsm` child, keyed `{id, name}`) are not
+  Rows the pool does not know about (a `spawn_fsm` child, keyed `{id, name}`) are not
   surfaced: the server spawns none today (`:uas_register` is not supported as a
   sub-FSM). A missing monitor row degrades to empty FSM columns, never an error.
   """
@@ -533,7 +533,7 @@ defmodule Kelix.Control do
 
   One entry per `[module.<name>]` block that started, carrying the two surfaces a
   module exposes and neither of which was discoverable at runtime (FW-5,
-  `docs/design/mcu_module.md` §8.3.6): the **control commands** it declared into
+  `docs/design/DESIGN-MCU.md`): the **control commands** it declared into
   `Kelix.Control.Registry` (what an operator can run) and the **facade functions**
   it exports to scenario scripts (what a script can call, from `describe/0`).
 

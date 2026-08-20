@@ -4,11 +4,11 @@ defmodule Elixipp.MixProject do
   # The elixipp test tool (a sipp-like SIP scenario runner). Standalone escript
   # built on the shared :elixip2 SIP stack. Kept as a distinct umbrella app so
   # the escript carries only its own deps (owl) and never the kelixip server
-  # deps (design docs/design/kelixip_basic_design.md §12.0).
+  # deps (design docs/design/DESIGN-KELIXIP.md#1-the-shape-of-the-product).
   def project do
     [
       app: :elixipp,
-      version: "1.4.0",
+      version: "1.5.0",
       elixir: "~> 1.15",
       # Umbrella: share the root _build / config / deps / lockfile
       build_path: "../../_build",
@@ -35,7 +35,7 @@ defmodule Elixipp.MixProject do
 
   defp deps do
     [
-      # The shared SIP stack + DSL + media.
+      # The shared SIP stack + FSL + media.
       {:elixip2, in_umbrella: true},
       # Pure-Elixir terminal UI for the --monitor live table (escript-only).
       {:owl, "~> 0.12"}

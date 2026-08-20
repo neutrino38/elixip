@@ -9,7 +9,6 @@ defmodule UAC.RegisterThenWaitForCall do
   use SIP.Scenario
   use SIP.Session.RegisterUAC
 
-
   # Standard placeholder identity. Real credentials are injected at run time from an
   # external JSON file (`elixipp -c accounts.json …`), which overrides this config
   # block. See ELIXIPP.md, "JSON parameterisation".
@@ -39,21 +38,25 @@ defmodule UAC.RegisterThenWaitForCall do
   state initial_state do
     # Count the refreshes so the test tears the registration down after one.
     appdata_set(:refreshes, 0)
-    send_REGISTER(@registration_expire)
-    goto next
+    goto(next)
   end
 
   # ---------------------------------------------------------------------------
-  # Initial registration: waiting for answers
+  # Initial registration: send, then wait. A 100 or a 401 `stay`s, so the REGISTER
+  # is not re-sent — the resend the challenge needs is the explicit
+  # send_auth_REGISTER below. `stay` also keeps the 5 s deadline of the whole
+  # registration, which `goto loop` would re-arm on every 100 Trying.
 
   state registering do
+    send_REGISTER(@registration_expire)
+
     on_events do
       {100, _rsp, _trans_pid, _dialog_pid} ->
-        goto(loop, "100 Trying")
+        stay("100 Trying")
 
       {401, rsp, _trans_pid, _dialog_pid} ->
         send_auth_REGISTER(rsp, @registration_expire)
-        goto(loop, "401 Unauthorized")
+        stay("401 Unauthorized")
 
       {200, rsp, trans_pid, _dialog_pid} ->
         # Arms the refresh timer (:register_refresh at expire/2) and starts the
@@ -65,7 +68,7 @@ defmodule UAC.RegisterThenWaitForCall do
         process_sip_reply(rsp, trans_pid)
         # Named as a sibling: a sub-scenario path is resolved against the directory of
         # the file that declares it (include semantics), not against the tester's cwd.
-        sub_fsm "uas_invite.exs", as: :invite_uas
+        spawn_fsm "uas_invite.exs", as: :invite_uas
         goto(registered, "200 OK")
 
       {errcode, _rsp, _trans_pid, _dialog_pid} when errcode in 400..699 ->
@@ -86,8 +89,8 @@ defmodule UAC.RegisterThenWaitForCall do
     on_events do
       :register_refresh -> goto(refresh, "REGISTER refresh")
       {:scenario_ctl, :shutdown, _reason } -> scenario_aborted("UAC stopped gracefully")
-      {:scenario_exit, :invite_uas, :success, _r} -> goto unregistering, "call complete"
-      {:scenario_exit, :invite_uas, :failure, _r} -> goto unregistering, "call failure"
+      {:child_exit, :invite_uas, :success, _r} -> goto(unregistering, "call complete")
+      {:child_exit, :invite_uas, :failure, _r} -> goto(unregistering, "call failure")
     after
       (@registration_expire + 5) * 1000 ->
         scenario_failure("No timer fired in registered state")
@@ -102,53 +105,49 @@ defmodule UAC.RegisterThenWaitForCall do
     else
       appdata_set(:refreshes, appdata_get(:refreshes) + 1)
       send_REGISTER(@registration_expire)
-      goto(wait_refresh)
-    end
-  end
 
-  state wait_refresh do
-    on_events do
-      {100, _rsp, _trans_pid, _dialog_pid} ->
-        goto(loop, "100 Trying")
+      on_events do
+        {100, _rsp, _trans_pid, _dialog_pid} ->
+          stay("100 Trying")
 
-      {401, rsp, _trans_pid, _dialog_pid} ->
-        send_auth_REGISTER(rsp, @registration_expire)
-        goto(loop, "401 Unauthorized")
+        {401, rsp, _trans_pid, _dialog_pid} ->
+          send_auth_REGISTER(rsp, @registration_expire)
+          stay("401 Unauthorized")
 
-      {200, rsp, trans_pid, _dialog_pid} ->
-        # Re-arm both the refresh and the keepalive timers.
-        process_sip_reply(rsp, trans_pid)
-        goto(registered, "REGISTER refreshed")
+        {200, rsp, trans_pid, _dialog_pid} ->
+          # Re-arm both the refresh and the keepalive timers.
+          process_sip_reply(rsp, trans_pid)
+          goto(registered, "REGISTER refreshed")
 
-      {errcode, _rsp, _trans_pid, _dialog_pid} when errcode in 400..699 ->
-        scenario_failure("REGISTER refresh failed with #{errcode}")
+        {errcode, _rsp, _trans_pid, _dialog_pid} when errcode in 400..699 ->
+          scenario_failure("REGISTER refresh failed with #{errcode}")
 
-      {errcode, _rsp, _trans_pid, _dialog_pid} when errcode in 300..399 ->
-        scenario_failure("Unexpected REGISTER redirect #{errcode}")
+        {errcode, _rsp, _trans_pid, _dialog_pid} when errcode in 300..399 ->
+          scenario_failure("Unexpected REGISTER redirect #{errcode}")
 
-      {:scenario_exit, :invite_uas, :success, _r} -> goto unregistering, "call complete"
+        {:child_exit, :invite_uas, :success, _r} ->
+          goto(unregistering, "call complete")
 
-      {:scenario_exit, :invite_uas, :failure, _r} -> goto unregistering, "call failure"
-    after
-      5_000 ->
-        scenario_failure("REGISTER refresh timeout")
+        {:child_exit, :invite_uas, :failure, _r} ->
+          goto(unregistering, "call failure")
+      after
+        5_000 ->
+          scenario_failure("REGISTER refresh timeout")
+      end
     end
   end
 
   # ---------------------------------------------------------------------------
   state unregistering do
     send_REGISTER(0)
-    goto(wait_unregister)
-  end
 
-  state wait_unregister do
     on_events do
       {100, _rsp, _trans_pid, _dialog_pid} ->
-        goto(loop, "100 Trying")
+        stay("100 Trying")
 
       {401, rsp, _trans_pid, _dialog_pid} ->
         send_auth_REGISTER(rsp, 0)
-        goto(loop, "401 Unauthorized")
+        stay("401 Unauthorized")
 
       {200, rsp, trans_pid, _dialog_pid} ->
         # expire == 0: process_sip_reply cancels the keepalive timer.

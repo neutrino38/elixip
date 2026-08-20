@@ -49,24 +49,20 @@ defmodule UAC.Register do
   end
 
   # ---------------------------------------------------------------------------
-  # Initial registration. The send and the wait live in two separate states:
-  # `goto loop` re-enters the *waiting* state (which never sends), so a 401 / 100
-  # does not trigger a fresh unauthenticated REGISTER. Re-sending here would
-  # re-challenge and pile transactions up on the dialog. Same split as in
-  # uac_invite.exs (calling -> call_progress).
+  # Initial registration: send, then wait. A 100 or a 401 `stay`s, so the REGISTER
+  # is not re-sent — the resend the challenge needs is the explicit
+  # send_auth_REGISTER below. `stay` also keeps the 5 s deadline of the whole
+  # registration, which `goto loop` would re-arm on every 100 Trying.
   state registering do
     send_REGISTER(@registration_expire)
-    goto(wait_register)
-  end
 
-  state wait_register do
     on_events do
       {100, _rsp, _trans_pid, _dialog_pid} ->
-        goto(loop, "100 Trying")
+        stay("100 Trying")
 
       {401, rsp, _trans_pid, _dialog_pid} ->
         send_auth_REGISTER(rsp, @registration_expire)
-        goto(loop, "401 Unauthorized")
+        stay("401 Unauthorized")
 
       {200, rsp, trans_pid, _dialog_pid} ->
         # Arms the refresh timer (:register_refresh at expire/2) and the OPTIONS
@@ -117,7 +113,9 @@ defmodule UAC.Register do
         if SIP.Msg.Ops.is_response_for?(:OPTIONS, rsp) do
           scenario_failure("OPTIONS failed with #{errcode}")
         else
-          goto(loop, "#{errcode} for another request, ignored")
+          # `stay`, not `goto loop`: re-entering this state runs send_OPTIONS()
+          # again, so "ignored" used to put a second OPTIONS on the wire.
+          stay("#{errcode} for another request, ignored")
         end
     after
       5_000 ->
@@ -133,49 +131,43 @@ defmodule UAC.Register do
     else
       appdata_set(:refreshes, appdata_get(:refreshes) + 1)
       send_REGISTER(@registration_expire)
-      goto(wait_refresh)
-    end
-  end
 
-  state wait_refresh do
-    on_events do
-      {100, _rsp, _trans_pid, _dialog_pid} ->
-        goto(loop, "100 Trying")
+      on_events do
+        {100, _rsp, _trans_pid, _dialog_pid} ->
+          stay("100 Trying")
 
-      {401, rsp, _trans_pid, _dialog_pid} ->
-        send_auth_REGISTER(rsp, @registration_expire)
-        goto(loop, "401 Unauthorized")
+        {401, rsp, _trans_pid, _dialog_pid} ->
+          send_auth_REGISTER(rsp, @registration_expire)
+          stay("401 Unauthorized")
 
-      {200, rsp, trans_pid, _dialog_pid} ->
-        # Re-arm both the refresh and the keepalive timers.
-        process_sip_reply(rsp, trans_pid)
-        goto(registered, "REGISTER refreshed")
+        {200, rsp, trans_pid, _dialog_pid} ->
+          # Re-arm both the refresh and the keepalive timers.
+          process_sip_reply(rsp, trans_pid)
+          goto(registered, "REGISTER refreshed")
 
-      {errcode, _rsp, _trans_pid, _dialog_pid} when errcode in 400..699 ->
-        scenario_failure("REGISTER refresh failed with #{errcode}")
+        {errcode, _rsp, _trans_pid, _dialog_pid} when errcode in 400..699 ->
+          scenario_failure("REGISTER refresh failed with #{errcode}")
 
-      {errcode, _rsp, _trans_pid, _dialog_pid} when errcode in 300..399 ->
-        scenario_failure("Unexpected REGISTER redirect #{errcode}")
-    after
-      5_000 ->
-        scenario_failure("REGISTER refresh timeout")
+        {errcode, _rsp, _trans_pid, _dialog_pid} when errcode in 300..399 ->
+          scenario_failure("Unexpected REGISTER redirect #{errcode}")
+      after
+        5_000 ->
+          scenario_failure("REGISTER refresh timeout")
+      end
     end
   end
 
   # ---------------------------------------------------------------------------
   state unregistering do
     send_REGISTER(0)
-    goto(wait_unregister)
-  end
 
-  state wait_unregister do
     on_events do
       {100, _rsp, _trans_pid, _dialog_pid} ->
-        goto(loop, "100 Trying")
+        stay("100 Trying")
 
       {401, rsp, _trans_pid, _dialog_pid} ->
         send_auth_REGISTER(rsp, 0)
-        goto(loop, "401 Unauthorized")
+        stay("401 Unauthorized")
 
       {200, rsp, trans_pid, _dialog_pid} ->
         # expire == 0: process_sip_reply cancels the keepalive timer.

@@ -1,6 +1,6 @@
 defmodule SIP.Test.DialogParallelFork do
   @moduledoc """
-  Parallel forking in the dialog layer (design docs/design/b2bua_module.md §3.3,
+  Parallel forking in the dialog layer (design docs/design/DESIGN-FRAMEWORK.md#55-forking-the-kamailio-tm-model,
   RFC 3261 §16.6/§16.7): one dialog, a **rung** of branches ringing at once.
 
   What serial forking never had to answer, and this does: N branches produce N
@@ -14,6 +14,9 @@ defmodule SIP.Test.DialogParallelFork do
   name), so no test inherits another's current request, canned scenario or BYE.
   """
   use ExUnit.Case
+
+  alias SIP.Test.Peers.Manual
+  alias SIP.Test.Transport.Mockup
 
   setup_all do
     :ok = SIP.Transac.start()
@@ -31,7 +34,8 @@ defmodule SIP.Test.DialogParallelFork do
 
   defp peer!(name) do
     tp = SIP.Transport.Selector.select_transport(target(name)).tp_pid
-    :ok = GenServer.call(tp, :settestapp)
+    :ok = Mockup.set_peer(tp, Manual)
+    :ok = Mockup.attach_probe(tp)
     tp
   end
 
@@ -66,7 +70,7 @@ defmodule SIP.Test.DialogParallelFork do
   # in one burst and nothing orders the notifications.
   defp collect_invites(n) do
     for _ <- 1..n, into: %{} do
-      assert_receive {:invite_sent, req}, 2_000
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, req}}, 2_000
       {req.ruri.domain, req}
     end
   end
@@ -109,11 +113,11 @@ defmodule SIP.Test.DialogParallelFork do
 
     # One device is busy. The caller must NOT hear it: the other is still ringing,
     # and a 486 relayed now is a call ended while a phone is in someone's hand.
-    GenServer.cast(a, {:simulate, 486, 50})
+    Manual.simulate(a, 486, 50)
     refute_receive {:outbound, {486, _, _, _}}, 500
 
     # The rung is over when the last one falls, and only then.
-    GenServer.cast(b, {:simulate, 404, 50})
+    Manual.simulate(b, 404, 50)
     assert_receive {:outbound, {code, _rsp, _tid, ^dlg}}, 3_000
 
     # 404 over 486: the lowest code of the rung (RFC 3261 §16.7 step 6).
@@ -127,8 +131,8 @@ defmodule SIP.Test.DialogParallelFork do
     {dlg, _tid} = start_rung("pf3a", ["pf3b"])
     _ = collect_invites(2)
 
-    GenServer.cast(a, {:simulate, 486, 50})
-    GenServer.cast(b, {:simulate, 407, 100})
+    Manual.simulate(a, 486, 50)
+    Manual.simulate(b, 407, 100)
 
     # 407 loses on the numbers and wins on the rule: "authenticate" is something
     # a caller can do, "busy here" is not.
@@ -144,7 +148,7 @@ defmodule SIP.Test.DialogParallelFork do
 
     # A global refusal is not one device's opinion (RFC 3261 §16.7): it goes up
     # immediately, without waiting for the sibling and without aggregation.
-    GenServer.cast(a, {:simulate, 603, 50})
+    Manual.simulate(a, 603, 50)
     assert_receive {:outbound, {603, _rsp, _tid, ^dlg}}, 3_000
 
     # The sibling was CANCELled: it is only forgotten once its 487 comes back, so
@@ -162,7 +166,7 @@ defmodule SIP.Test.DialogParallelFork do
     {dlg, _tid} = start_rung("pf5a", ["pf5b"])
     _ = collect_invites(2)
 
-    GenServer.cast(b, {:simulate, 200, 50})
+    Manual.simulate(b, 200, 50)
     assert_receive {:outbound, {200, rsp, _tid, ^dlg}}, 3_000
 
     # The winner's tag is the dialog's (a 18x from a loser must never have taken
@@ -185,7 +189,7 @@ defmodule SIP.Test.DialogParallelFork do
     {dlg, _tid} = start_rung("pf6a", ["pf6b"])
     invites = collect_invites(2)
 
-    GenServer.cast(b, {:simulate, 200, 50})
+    Manual.simulate(b, 200, 50)
     assert_receive {:outbound, {200, _rsp, _tid, ^dlg}}, 3_000
 
     # The loser answers before the CANCEL reaches it. Injected rather than
@@ -210,7 +214,7 @@ defmodule SIP.Test.DialogParallelFork do
     SIP.Transac.process_sip_message(SIPMsg.serialize(late))
 
     # That callee is hung up on — the BYE goes out on the branch's own flow.
-    assert_receive :BYE, 3_000
+    assert_receive {:sip_mockup, {:request_sent, :BYE, _}}, 3_000
 
     # And the application heard exactly one 200: the winner's.
     refute_receive {:outbound, {200, _, _, _}}, 500
@@ -220,12 +224,12 @@ defmodule SIP.Test.DialogParallelFork do
     a = peer!("pf7a")
 
     {dlg, _tid} = start_rung("pf7a", [])
-    assert_receive {:invite_sent, _req}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _req}}, 2_000
 
     # No sibling to wait for, nothing withheld, no aggregation: the caller gets
     # the very response the branch gave, and the dialog stays up for the next
     # target the application may arm.
-    GenServer.cast(a, {:simulate, 486, 50})
+    Manual.simulate(a, 486, 50)
     assert_receive {:outbound, {486, _rsp, _tid, ^dlg}}, 3_000
     assert Process.alive?(dlg)
   end

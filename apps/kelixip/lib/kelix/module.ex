@@ -1,6 +1,6 @@
 defmodule Kelix.Module do
   @moduledoc """
-  The loadable-module contract (design `docs/design/kelixip_basic_design.md` §8, spec §5).
+  The loadable-module contract (design `docs/design/DESIGN-KELIXIP.md`, spec §5).
 
   A module is a **stateful OTP service** (a connection pool, a store …) **plus
   stateless facades** imported by scripts. `Kelix.ModuleSupervisor` starts one
@@ -31,7 +31,7 @@ defmodule Kelix.Module do
   (`"/conferences/:uid/participants"`). A method list is what lets one declaration
   answer both `PUT` and `PATCH`. Path params are merged into the args map handed to
   `handle_control/2`, so a command receives `%{"uid" => …}` identically from REST
-  and from `kelictl` (design `docs/design/mcu_module.md` §8.3.4, FW-4).
+  and from `kelictl` (design `docs/design/DESIGN-MCU.md`, FW-4).
 
   The three optional keys let the REST frontal **derive** its HTTP concerns from
   the declaration, so `handle_control/2` keeps returning plain domain results and

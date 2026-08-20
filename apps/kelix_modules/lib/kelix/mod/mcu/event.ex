@@ -1,7 +1,7 @@
 defmodule Kelix.Mod.Mcu.Event do
   @moduledoc """
   The module's **canonical event vocabulary** (design
-  `docs/design/mcu_module.md` §11.1), frozen now so that adding a transport later
+  `docs/design/DESIGN-MCU.md`), frozen now so that adding a transport later
   (per-conference HTTP callbacks) is a transport change and not a redesign.
 
   Everything the module observes is emitted here exactly once, and the consumers

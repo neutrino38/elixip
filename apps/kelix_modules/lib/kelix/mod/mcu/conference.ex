@@ -1,6 +1,6 @@
 defmodule Kelix.Mod.Mcu.Conference do
   @moduledoc """
-  One conference (design `docs/design/mcu_module.md` §5.1).
+  One conference (design `docs/design/DESIGN-MCU.md`).
 
   `uid` is the identity kelixip and its REST clients use, and it is also the MCU
   `tag` — which is how an event coming back up the stream is mapped to a

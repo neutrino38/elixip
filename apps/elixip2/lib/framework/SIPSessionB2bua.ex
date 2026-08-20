@@ -1,5 +1,5 @@
 # B2BUA session layer: two call legs driven by one scenario FSM.
-# Design: docs/design/b2bua_module.md. Part of the SIP.Session namespace; see
+# Design: docs/design/DESIGN-FRAMEWORK.md#5-b2bua. Part of the SIP.Session namespace; see
 # SIPSession.ex for the common core.
 
 defmodule SIP.B2bua.Peer do
@@ -201,7 +201,7 @@ end
 
 defmodule SIP.Session.B2bua do
   @moduledoc """
-  B2BUA primitives for the scenario DSL: create a second (outbound) call leg,
+  B2BUA primitives for FSL: create a second (outbound) call leg,
   relay requests and responses between the legs, and answer locally.
 
   Pulled in by `use SIP.Scenario`, so every scenario has the `b2bua_*` macros.
@@ -214,7 +214,7 @@ defmodule SIP.Session.B2bua do
   the leg bookkeeping the automatic teardown reads. What stays the scenario's:
   the relay **policy** — what to relay, when, and what to answer locally.
 
-  Design: docs/design/b2bua_module.md §3-§6.
+  Design: docs/design/DESIGN-FRAMEWORK.md#5-b2bua.
   """
   require Logger
 
@@ -876,7 +876,7 @@ defmodule SIP.Session.B2bua do
 
   # Our offer for the callee. `bridge_with: :inbound` puts this endpoint in the
   # inbound leg's media session — a placement decision, made here because it can
-  # only be made at creation time (docs/design/mediagw_b2bua_jsr309.md §2).
+  # only be made at creation time (docs/design/notes/mediagw_b2bua_jsr309.md §2).
   defp media_offer(sip_ctx, outbound_opts) do
     webrtc = Keyword.get(outbound_opts, :webrtc, :no)
     medias = Keyword.get(outbound_opts, :media, :audio_video)
@@ -1214,7 +1214,7 @@ defmodule SIP.Session.B2bua do
   end
 
   defp create_leg(sip_ctx, req, peer, media, opts) do
-    case SIP.Msg.Ops.prepare_forwarded_request(req, opts) do
+    case prepare_forward(sip_ctx, req, opts) do
       {:error, reason} ->
         fail(sip_ctx, {:b2bua, reason})
 
@@ -1551,7 +1551,7 @@ defmodule SIP.Session.B2bua do
   end
 
   defp relay_request(sip_ctx, req, from_leg, target_pid) do
-    case SIP.Msg.Ops.prepare_forwarded_request(req) do
+    case prepare_forward(sip_ctx, req) do
       {:error, reason} ->
         fail(sip_ctx, {:b2bua, reason})
 
@@ -2972,6 +2972,54 @@ defmodule SIP.Session.B2bua do
 
   # The dialog pid of a named leg: the inbound leg is the scenario's own dialog,
   # every other one lives in the leg map.
+  # Every request leaving this B2BUA is prepared through here, so the identity
+  # we assert is attached in one place. It is needed on both paths: the initial
+  # INVITE and each target of a hunt go through create_leg/5, and the in-dialog
+  # relay goes through relay_request/4 — a re-INVITE forwarded without the
+  # header would make the caller's identity flicker mid-call.
+  #
+  # The warning is the one hole this design leaves. Dropping and re-adding
+  # P-Asserted-Identity happen in the same function, so no *foreign* assertion
+  # can ever leave; nothing guarantees that OURS does, if a future call site
+  # reaches prepare_forwarded_request/2 without coming through here. Loud rather
+  # than silent.
+  defp prepare_forward(sip_ctx, req, opts \\ []) do
+    opts =
+      case sip_ctx.asserted_identity do
+        nil -> opts
+        %SIP.Uri{} = uri -> Keyword.put_new(opts, :asserted_identity, uri)
+      end
+
+    case SIP.Msg.Ops.prepare_forwarded_request(req, opts) do
+      {:ok, fwd} = ok ->
+        warn_missing_assertion(sip_ctx, req, fwd)
+        ok
+
+      other ->
+        other
+    end
+  end
+
+  # The identity was proved and the request going out does not carry it, for a
+  # reason that is not the caller's privacy. Not fatal — the call is fine, only
+  # anonymous downstream — but it means a forward path bypassed the option, and
+  # that is invisible in a capture unless somebody says it.
+  defp warn_missing_assertion(sip_ctx, orig_req, fwd) do
+    with %SIP.Uri{} <- sip_ctx.asserted_identity,
+         false <- SIP.Msg.Ops.privacy_id?(orig_req),
+         nil <- Map.get(fwd, "P-Asserted-Identity") do
+      Logger.warning(
+        module: __MODULE__,
+        message:
+          "forwarded #{fwd.method} carries no P-Asserted-Identity although one " <>
+            "was asserted for this session: a forward path is not going through " <>
+            "prepare_forward/3"
+      )
+    end
+
+    :ok
+  end
+
   defp leg_pid(sip_ctx, :inbound), do: sip_ctx.dialogpid
 
   defp leg_pid(sip_ctx, tag) do
