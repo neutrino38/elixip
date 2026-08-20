@@ -124,6 +124,7 @@ Module block — `[module.mcu]` (in `config.toml`):
 | `video_intra_period` | integer | `300` | Frames between intra-frames |
 | `preferred_video_codec` | name | — | The video codec the answers state **first**, hence what the mixer encodes towards a leg that offered it: `H264` / `VP8` / `AV1`, or `none`. It reorders, it never adds — a codec the caller did not offer, or one the media server refused, is logged and ignored |
 | `logo_file` | string | — | Image drawn in **every empty mosaic slot**, on every conference (a bare name under `image_dir`) |
+| `conference_file` | string | — | File holding the conference **definitions**, on **this** host. Set it and the rooms come back after a restart (see below). Unset ⇒ no persistence |
 | `record_dir` | string | — | Directory the media server writes recordings into. Unset ⇒ `recording.start` refuses |
 | `image_dir` | string | — | Directory the media server reads `logo_file` (and `logo=`) from |
 | `did_range` | string | — | Allocation pool for a `create` that omits `did` (`"8000-8099"`) |
@@ -478,6 +479,38 @@ VGA mosaic encoded in HD720p stretches every tile. So the two always match:
 
 A new profile applies to the participants that **join next**. A participant already
 in the conference keeps the profile it negotiated.
+
+### Rooms that survive a restart
+
+```toml
+[module.mcu]
+conference_file = "/var/lib/kelixip/conferences.json"
+```
+
+With that key set, every conference created through REST or `kelictl` is written to
+that file and **recreated at the next start** — same `uid`, same DID, same profile.
+The calls are not: a restart ends them, and the file holds rooms, not conversations.
+So a restored conference shows up empty, and `stale` until its media server's control
+channel is up.
+
+A conference a **script** created for one call is deliberately *not* persisted: it was
+made to serve that call. A script that wants a standing room asks for one explicitly
+(`owner: :none`), and `conference.show` tells the two apart with `Persistent`.
+
+The file is JSON, rewritten whole whenever a definition changes, and readable — you can
+pre-declare a room in it before starting the node, using the same names the CLI takes:
+
+```json
+{"version": 1, "conferences": [
+  {"uid": "c-standing", "domain": "example.com", "did": "8500", "name": "Salle Nord",
+   "mcu": "mcu1", "vad": "full", "video": {"size": "hd720p"},
+   "preferred_video_codec": "H264", "layout": {"comp": "2x2", "auto": true}}
+]}
+```
+
+Two failure rules worth knowing: a file kelixip cannot parse is **left untouched** and
+persistence is off for that run (the log says so — fix the file and restart, nothing is
+overwritten meanwhile), and a single malformed entry costs only its own room.
 
 ### Recording, slots and the logo
 

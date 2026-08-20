@@ -68,6 +68,12 @@ defmodule Kelix.Mod.Mcu.Conference do
             layout: %{comp: 1, size: 6, auto: true},
             max_participants: 20,
             destroy_when_empty: false,
+            # Whether this definition outlives the node (§9.5): `owner: :none` rooms —
+            # every REST/CLI create, and the scripts that ask for one — are written to
+            # the definition file and recreated at the next start. An `owner: :caller`
+            # room is not: it was made for one call, and resurrecting it at every boot
+            # is a room nobody asked for.
+            persistent: false,
             created_at: nil,
             # Set when the MCU holding this conference went away (§9.2): the row and
             # its DID survive, `conf_id` does not, and the conference is recreated
@@ -157,6 +163,7 @@ defmodule Kelix.Mod.Mcu.Conference do
       layout: conf.layout,
       max_participants: conf.max_participants,
       destroy_when_empty: conf.destroy_when_empty,
+      persistent: conf.persistent,
       created_at: conf.created_at,
       stale: conf.stale,
       logo: conf.logo,

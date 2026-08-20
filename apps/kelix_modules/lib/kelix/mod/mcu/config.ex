@@ -79,6 +79,12 @@ defmodule Kelix.Mod.Mcu.Config do
             # recording at a time, so an unset key is a clear refusal instead.
             record_dir: nil,
             image_dir: nil,
+            # Where the conference DEFINITIONS are kept, so a restart brings the rooms
+            # back (§9.5). On **this** host, unlike `record_dir` and `image_dir`. No
+            # default, for the same reason those two have none: a path guessed for a
+            # deployment we cannot see would fail one write at a time. Unset means no
+            # persistence at all, stated once at start — never a silent half-feature.
+            conference_file: nil,
             # Drawn in every empty mosaic slot of every conference, unless the
             # conference names its own `logo`.
             logo_file: nil,
@@ -120,7 +126,7 @@ defmodule Kelix.Mod.Mcu.Config do
                video_intra_period xmlrpc_timeout_ms call_timeout_ms shutdown_grace_ms
                rtp_timeout_ms message_rate message_max_bytes message_queue_max)
   @bool_keys ~w(dtmf destroy_when_empty auto_layout gc_orphans)
-  @string_keys ~w(record_dir image_dir logo_file)
+  @string_keys ~w(record_dir image_dir logo_file conference_file)
 
   # The keys P8a retired, with what replaces each. Accepted for one release and
   # ignored with a warning (§8.4): they sit in the config file of every node this
@@ -142,7 +148,7 @@ defmodule Kelix.Mod.Mcu.Config do
            did_ranges video_size video_fps video_bitrate video_intra_period
            preferred_video_codec
            xmlrpc_timeout_ms shutdown_grace_ms rtp_timeout_ms gc_orphans
-           record_dir image_dir logo_file
+           record_dir image_dir logo_file conference_file
            message_rate message_max_bytes message_queue_max message_kinds) ++
           Map.keys(@retired_keys)
 
@@ -199,6 +205,7 @@ defmodule Kelix.Mod.Mcu.Config do
          record_dir: str(block, "record_dir", defaults.record_dir),
          image_dir: str(block, "image_dir", defaults.image_dir),
          logo_file: str(block, "logo_file", defaults.logo_file),
+         conference_file: str(block, "conference_file", defaults.conference_file),
          message_rate: int(block, "message_rate", defaults.message_rate),
          message_max_bytes: int(block, "message_max_bytes", defaults.message_max_bytes),
          message_queue_max: int(block, "message_queue_max", defaults.message_queue_max),

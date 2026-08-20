@@ -115,6 +115,11 @@ port = 9095
 # payload type the caller offered AND the media server accepted, and nothing else. A
 # miss is logged per leg, naming which of the two dropped it.
 #preferred_video_codec = "H264"
+# The conference DEFINITIONS, on THIS host (§9.5). Set it and the rooms created through
+# REST/kelictl come back after a restart — the calls do not, a restart ends them. Unset:
+# no persistence at all, stated once at start. A file kelixip cannot parse is left
+# untouched and persistence stays off for that run.
+#conference_file  = "/var/lib/kelixip/conferences.json"
 # Paths on the MEDIA SERVER's filesystem, not on this host (the same box in a
 # single-machine deployment, and not in production). The module only ever appends a
 # file name it validated; a command chooses the name, never the directory. Unset

@@ -1826,6 +1826,10 @@ shutdown_grace_ms   = 5000
 # server-side `StartRTPTimeout` of §16.1 ships (P7); 0 disables it. Never applied
 # to text (T.140 is legitimately silent between keystrokes).
 rtp_timeout_ms      = 10000
+# The conference DEFINITIONS (§9.5), on THIS host. Rooms created through REST/CLI (and
+# the scripts that ask for `owner: :none`) are written here and recreated at the next
+# start. Unset: no persistence, said once at start.
+conference_file     = "/var/lib/kelixip/conferences.json"
 # Recording + images (§8.3.8, P9). Paths on the MEDIA SERVER's filesystem: the module
 # only ever appends a basename it validated, never a path a client sent.
 record_dir          = "/var/lib/kelixip/rec"
@@ -1955,8 +1959,10 @@ conference with it. This is the safety net that makes the
 
 ### 9.4 kelixip restart
 
-Conferences are in memory only, so after a restart the MCU may hold orphan
-conferences. At module start — and again whenever a control channel comes back up —
+The **calls** are gone with the node: dialogs, transactions and scenarios were in
+memory. The **definitions** come back when `conference_file` is set (§9.5); without
+it, nothing does, and the MCU may hold orphan conferences either way. At module
+start — and again whenever a control channel comes back up —
 `GetConferences` is called on that MCU and every conference **whose id our registry
 does not hold** is deleted: a garbage collection pass.
 
@@ -1970,6 +1976,51 @@ conferences rather than leaking dead ones. This is safe because a kelixip node
 owns its MCUs exclusively; if that ever stops being true, gate the pass behind
 a `gc_orphans = true` config key (recommended default: `true`, with the key
 present from day one).
+
+### 9.5 Conference definitions across a restart
+
+A conference has two halves, and only one of them can survive the node: the
+**definition** (`domain`, `did`, `name`, `vad`, `rate`, `medias`, `dtmf`, `video`,
+`preferred_video_codec`, `layout`, `logo`, the pinned `slots`, `max_participants`,
+`destroy_when_empty`, and the `mcu` it is pinned to) and the **runtime** (`conf_id`,
+`participants`, `stale`, `recording`). `Kelix.Mod.Mcu.Store` writes the first one and
+cannot write the second: its encoder names the fields it emits, one by one, so a field
+added to the struct stays out of the file until someone decides otherwise.
+
+**One JSON file**, `[module.mcu] conference_file`, rewritten whole on every change to a
+definition and read once at module start. Not `:mnesia`: its schema is bound to the
+node name an `/etc/default/kelixip` edit can change, the module is hot-loadable and
+would own tables across its own reloads, and the data set fits in a page. Not TOML
+either — the `toml` dependency only reads. A whole-file rewrite rather than a delta,
+because the file *is* the set of persistent rooms and a set written in one move cannot
+half-apply; atomically, through a sibling `.tmp` and a rename.
+
+**Only rooms somebody declared.** `owner: :none` — every REST/CLI create, and the
+scripts that ask for one — is written. An `owner: :caller` conference (§17.3) is not: it
+was made for one call, so bringing it back at every boot would be a room nobody asked
+for, and a conference per call would mean a file write per call. A mosaic the automatic
+layout moved on its own is not written either: it is derived from the roster and
+recomputed as legs join.
+
+**Restoring reuses the recovery of §9.2 rather than duplicating creation.** A row read
+from the file is inserted `stale`, with no `conf_id`, before anything can allocate a DID
+or sweep a media server — so `recreate_stale/2` gives it its MCU-side existence when
+its control channel comes up, exactly as after a media server restart, and the §9.4
+sweep already runs after that. There is no second code path that creates a conference,
+and a DID cannot be handed twice.
+
+**Failure has a direction: never destroy the operator's file.** A file that does not
+parse — or that announces a version this node does not know — disables persistence for
+the run and is left untouched; restoring nothing is recoverable, overwriting is not. A
+single malformed *row* costs only its own room, named in the log, because one bad entry
+must not cost every room. A failed write is logged and the command still succeeds: a
+conference that exists is worth more than a file that is up to date.
+
+**Values may be written by hand.** `"vad": "full"`, `"video": {"size": "hd720p"}`,
+`"layout": {"comp": "3x3"}` are read by the same `Vocabulary` functions that accept an
+operator's input at the control surface, so an entry means here exactly what it means
+there — and pre-provisioning a room by editing the file is a supported thing to do,
+knowing kelixip rewrites the file on the next change.
 
 ---
 
