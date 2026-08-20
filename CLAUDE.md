@@ -355,7 +355,7 @@ stop_player / stop_recorder / stop_echo
 
 Runtime config lives in `config/config.exs`:
 - Logger writes warnings to console and info+ to `elixip.log`
-- `:useragent` — the User-Agent header value (`"Elixipp-1.5.0"`)
+- `:useragent` — the User-Agent header value (`"Elixipp-1.5.1"`)
 - `:optionkeepaliveperiod` — OPTIONS keep-alive interval in seconds (15)
 
 ### Media server selection

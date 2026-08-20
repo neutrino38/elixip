@@ -60,6 +60,7 @@ MANIFEST=(
   "docs/kelixip/modules/mcu-api.md|MCU-API|mcu REST API"
   "docs/kelixip/modules/mcu_module_guide.md|MCU-Guide|mcu operating guide"
   "docs/kelixip/modules/template.md|Module-Template|module template"
+  "docs/releases/RELEASE-1.5.1.md|Release-1.5.1|Release 1.5.1"
   "docs/releases/RELEASE-1.5.0.md|Release-1.5.0|Release 1.5.0"
   "docs/releases/RELEASE-1.4.1.md|Release-1.4.1|Release 1.4.1"
   "docs/releases/RELEASE-1.4.0.md|Release-1.4.0|Release 1.4.0"

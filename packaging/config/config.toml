@@ -14,7 +14,7 @@
 node_name  = "kelixip@127.0.0.1"
 script_dir = "/usr/share/kelixip"
 module_dir = "/usr/lib/kelixip/modules"
-# user_agent = "Kelixip/1.5.0"
+# user_agent = "Kelixip/1.5.1"
 # max_calls  = 1000          # node-wide concurrent-instance cap; 503 beyond it
 
 [log]
@@ -157,6 +157,14 @@ port = 9095
 # is here and not per pool entry. `[module.mcu] video_bitrate` overrides it for
 # conferences only.
 #video_bitrate = 1500
+
+# Which RTCP bitrate-feedback dialects this node may ANSWER on video: a
+# comma-separated list of `goog-remb` and `tmmbr`, or `none`. Both by default. It only
+# ever narrows: a dialect the offer did not ask for is never advertised, and every
+# dialect answered has its server-side switch. Narrow it when a peer misbehaves on one
+# of them; `none` leaves the peer no way to ask for less, so the encoder keeps sending
+# at the negotiated bitrate whatever the network does.
+#bitrate_feedback = "goog-remb, tmmbr"
 
 # Negotiate transport-wide congestion control on video (RFC 8285 `a=extmap` +
 # `a=rtcp-fb transport-cc`). It is what lets the media server measure what the network
