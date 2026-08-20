@@ -1009,8 +1009,9 @@ defmodule Kelix.Mcu.Call do
         case Kelix.Mod.Mcu.admit(sip_ctx.domain, req) do
           {:ok, conf, part} ->
             appdata_set(:mcu_part, part)
-            # tells the media layer which conference this leg joins (§10, FW-1)
-            appdata_set(:media_conn_opts, conference: conf.uid, participant: part.name)
+            # the context-aware admit/4 the reference script uses also WIRES the leg
+            # (`:username`, `:media_conn_opts` with the participant, `:mediaserver_instance`
+            # — §10 FW-1): none of that is a call-flow decision, so no script states it
             media_connect()
             reply_invite(180, "Ringing")
             goto(answering)

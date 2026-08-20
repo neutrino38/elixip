@@ -498,7 +498,8 @@ defmodule Kelix.Mod.Mcu do
 
     * `:ok` — admitted; the conference and the participant handle are stored in
       the context appdata under `:mcu_conf` and `:mcu_part` (where the
-      context-aware `attach/1` and `leave/2` read them back);
+      context-aware `attach/1` and `leave/2` read them back), **and the leg is
+      wired**: see below;
     * `{:error, reason}` — `admit/3`'s verdicts, for the script to map onto a
       SIP response;
     * `#{inspect(@jsr309_error)}` — an MCU call and a JSR309 media session are
@@ -506,6 +507,28 @@ defmodule Kelix.Mod.Mcu do
       JSR309 peer connection, so the call is refused without touching the
       conference and an error is logged. A pending `goto` aborts the scenario
       on any non-`:ok` value.
+
+  ## What "wired" means, and why it is not the script's job
+
+  An admitted leg needs three things set before `media_connect/0`, none of which is a
+  call-flow decision — they follow from *what a conference leg is*, so they are settled
+  here rather than copied into every script (`CLAUDE.md`: a scenario states a call flow,
+  it does not implement one):
+
+    * `:username` is the conference's DID. It is the local identity of this leg, hence
+      what an in-dialog request we originate puts in From/To — without it `send_BYE()`
+      has no URI to build.
+    * `:media_conn_opts` carries `mcu_participant:` (which conference this leg joins,
+      forwarded to `create_peer_connection/3` by the media macros) and
+      `nat_latch: true` — a conference leg always *answers* an offer, so the address we
+      are told to send to is the one the caller wrote down: its private one, for every
+      handset behind a NAT.
+    * `:mediaserver_instance` is `media_config/1`. A conference is pinned to its MCU
+      (§1.3), so the leg must reach the server holding the mixer and not whatever the
+      media pool would hand out.
+
+  A script that needs other connection options sets `:media_conn_opts` again after
+  `admit` — the last write wins.
   """
   @spec admit(%SIP.Context{}, String.t(), map, keyword) :: %SIP.Context{}
   def admit(sip_ctx = %SIP.Context{}, domain, req, opts) do
@@ -516,6 +539,12 @@ defmodule Kelix.Mod.Mcu do
             sip_ctx
             |> SIP.Context.appdata_set(:mcu_conf, conf)
             |> SIP.Context.appdata_set(:mcu_part, part)
+            |> SIP.Context.set(:username, conf.did)
+            |> SIP.Context.appdata_set(:media_conn_opts,
+              mcu_participant: part,
+              nat_latch: true
+            )
+            |> SIP.Context.appdata_set(:mediaserver_instance, media_config(conf))
 
           {:error, _reason} = err ->
             SIP.Context.set(sip_ctx, :lasterr, err)

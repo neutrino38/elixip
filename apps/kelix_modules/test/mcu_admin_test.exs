@@ -901,6 +901,47 @@ defmodule Kelix.Mod.McuAdminTest do
     end
   end
 
+  # ── what an admitted leg comes back with ──────────────────────────────────────
+  # The plumbing that follows from *being* a conference leg belongs to the facade, not
+  # to every script's copy of it (CLAUDE.md: a scenario states a call flow).
+
+  describe "admit/4 wires the leg" do
+    test "local identity, connection options and the pinned media server", ctx do
+      {:ok, conf} = Mcu.conference(ctx.uid)
+      sip_ctx = Mcu.admit(%SIP.Context{}, @domain, invite(conf.did))
+
+      assert sip_ctx.lasterr == :ok
+      part = SIP.Context.appdata_get(sip_ctx, :mcu_part)
+
+      # what an in-dialog request we originate puts in From/To — send_BYE() has no
+      # URI to build without it
+      assert sip_ctx.username == conf.did
+
+      # which conference the leg joins, and the latch a leg that ANSWERS an offer
+      # needs against a caller that wrote down its private address
+      assert SIP.Context.appdata_get(sip_ctx, :media_conn_opts) == [
+               mcu_participant: part,
+               nat_latch: true
+             ]
+
+      # the conference is pinned to its MCU: the leg must reach that server
+      assert SIP.Context.appdata_get(sip_ctx, :mediaserver_instance) ==
+               Mcu.media_config(conf)
+
+      Mcu.leave(sip_ctx, :bye)
+    end
+
+    test "a refused admit wires nothing", ctx do
+      _ = ctx
+      sip_ctx = Mcu.admit(%SIP.Context{}, @domain, invite("9999"))
+
+      assert sip_ctx.lasterr == {:error, :no_such_conference}
+      assert sip_ctx.username == nil
+      assert SIP.Context.appdata_get(sip_ctx, :media_conn_opts) == nil
+      assert SIP.Context.appdata_get(sip_ctx, :mediaserver_instance) == nil
+    end
+  end
+
   # ── JSR309 mutual exclusion (context-aware facade) ────────────────────────────
   # MCU and JSR309 calls are mutually exclusive on one SIP session: the
   # context-aware admit/attach/leave answer through `sip_ctx.lasterr` only, and

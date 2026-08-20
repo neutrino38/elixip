@@ -216,15 +216,17 @@ The good practice is:
 - if `admit()` returns an error verdict, send back a SIP response mapping it,
   typically `404` / `486` / `503` / `500`.
 
-An admitted leg must also be told which media server to connect to, because a
-conference is pinned to the MCU it was created on:
+`admit()` also **wires the leg**, so a script goes straight to `media_connect()`:
 
-```elixir
-conf = appdata_get(:mcu_conf)
-appdata_set(:media_conn_opts, mcu_participant: appdata_get(:mcu_part), nat_latch: true)
-appdata_set(:mediaserver_instance, Kelix.Mod.Mcu.media_config(conf))
-media_connect()
-```
+| It sets | To | Because |
+|---|---|---|
+| `:username` | the conference's DID | the local identity of the leg — what an in-dialog request we originate puts in From/To, and what `send_BYE()` builds its URI from |
+| `:media_conn_opts` | `mcu_participant:` + `nat_latch: true` | which conference the leg joins, and the fact that a leg which *answers* an offer must latch onto where the media really comes from (every handset behind a NAT writes its private address) |
+| `:mediaserver_instance` | `media_config(conf)` | a conference is pinned to the MCU it was created on: the leg must reach the server holding the mixer, not whatever the media pool would hand out |
+
+None of that is a call-flow decision, so no script has to state it. A script that
+needs other connection options sets `:media_conn_opts` again after `admit()` — the
+last write wins.
 
 See the [`mcu.exs`](../../../apps/kelixip/scripts/mcu.exs) sample script for more
 explanation.
