@@ -392,7 +392,9 @@ are **not** forced into it: they are plain functions on `Kelix.Mod.Mcu`
   rate:        32000,            # mixer sampling rate (default, §8.4)
   codecs:      %{audio: ["OPUS","G722","PCMA","PCMU"], video: ["H264"], text: [ "T140", "T140RED"]},
   video:       %{size: 6, fps: 30, bitrate: 1500, intra_period: 300},  # inline profile
+                                 #   `size` goes away with S6 (§16.7); `fps` is a maximum
   layout:      %{comp: 1, size: 6, auto: true},   # mosaic 0; `size` = `video.size`
+                                 #   the two are one value, and S6 keeps only this one
   max_participants: 20,
   auto_accept: true,
   destroy_when_empty: false,
@@ -2064,7 +2066,7 @@ observations the script has no use for.
 | L4 | Codec arbitration is done by kelixip, not the media server, so an fmtp subtlety the MCU dislikes surfaces as one-way media rather than a negotiation failure. Narrowed 2026-08-01: the H.264 profile is now stated in every answer and imposed on the encoder (§6.3 rule 9), so the two at least agree — but it is still kelixip that decides, from a codec list an operator maintains in parallel with the server's real capabilities | G1 | **P8** (§16.3), which deletes the list rather than syncing it |
 | L5 | Conferences do not survive a kelixip restart | §1.3 | not planned (§15.1) |
 | L6 | No outbound calls (dial-out into a conference) | needs B2BUA legs | not planned (§15.1) |
-| L7 | A live participant's video profile is not renegotiated when the conference profile changes | §8.3 |
+| L7 | A live participant's video profile is not renegotiated when the conference profile changes, and every leg is encoded at the same size and frame rate | §8.3 | **S6** (§16.7), which makes both a consequence of the rate controller instead of a setting |
 | L8 | **Anyone who can dial the DID joins the conference.** No PIN, no digest challenge in the reference script; the perimeter must be protected upstream (trusted proxy, ACL) or by a derived script | §6.1.1 |
 | L9 | Event callbacks to an external UI are not delivered — only logged/metered. The vocabulary is frozen (§11.1), the transport is not built | §1.2 |
 | L10 | With **P5b**, a script may create conferences, so the perimeter protection L8 recommends stops being merely prudent: whoever reaches an ad-hoc DID can create a room, not just join one. The module still creates nothing by itself (§17.4) | §17 |
@@ -2113,8 +2115,9 @@ Status as of 2026-08-03: **P0′ through P6 are implemented**, each verified aga
 the live media server as well as against the recording stub. **S4 (§16.5) shipped
 out of order**, on the server *and* in the module, because it removes a whole class
 of configuration failure rather than adding a feature; **P10 (§20) shipped**; **P9 (§8.3.8) and TC shipped**
-likewise. What remains is **P7 and P8**, both gated on the server-side work of §16,
-and the deliberately-deferred items of §15.1.
+likewise, as did **P7**, **P8a** and **P8c**. What remains is **P8b**, which needs no
+server change, **S6** (§16.7), which is server work with a small subtraction on this
+side, and the deliberately-deferred items of §15.1.
 
 | Phase | Status | Content | Done when |
 |---|---|---|---|
@@ -2130,6 +2133,7 @@ and the deliberately-deferred items of §15.1.
 | **P7** | ✔ | **Server-side (Mendooze), §16.1-16.2**: `StartRTPTimeout` RPC + MCU event types `3` and `4`, wired `RTPSession::Listener` → `RTPParticipant` → `MultiConf` → `MCU` event queue; kelixip arms per media at the ACK (never on text), ANDs the timeouts (§16.1) and routes both events to the operator view and the scenario | unplugging a phone's network mid-call frees its slot and its mosaic tile within `rtp_timeout_ms`, a leg that answered and never sent media is reaped, and a *single* dead media no longer kills a working call — **L1 lifted**. **L2 only partly**: event `4` reaches the scenario as `{:mcu_event, :media_connected, media}`, not yet as the behaviour's `{:ms_event, conn, :ice_connected}` — that mapping needs the conn ref, which the module does not hold, and the mosaic-join-on-real-video it would enable is not done |
 | **P8a** | ✔ | **Delegated negotiation — the plumbing, §16.3.1-16.3.3**: `StartReceiving` takes the offer's fmtp and returns `(recPort, announcedIp, fmtpByPt)`; the server calls the negotiator and installs the **filtered** map; `SetRTPProperties` splits around it (decision 8); kelixip deletes its local arbitration and its four codec config keys, classifies and traces the three transport cases of §6.3.1, and answers `a=rtcp-fb` as an intersection | the accepted payload types and their fmtp come from the server, verbatim — **most of L4 lifted**; a plain-RTP, an SDES and a WebRTC leg are each identifiable from one log line; mcuGold and a pre-S3 kelixip on the same server are unaffected. Ships without P8c thanks to the fallback |
 | **P8c** | ✔ | **Remote-fmtp ingestion, §16.3.4 (b)** (server phase 5, mediaserver 1.12.1): `CodecNegotiator::Negotiate` stops ignoring `remoteFmtp`; `H264Encoder::GetFmtpParams` implements RFC 6184 §8.2.2 (profile kept, level per `level-asymmetry-allowed`, that parameter emitted); `effectiveProps` bound to `min(ours, the peer's)` and applied to the encoder; `CODECS.md` documents the new key | a caller that allows level asymmetry is answered our real decoding capability and receives a stream bounded by *its* declared level — **L4 fully lifted**, and a plain SIP handset's answer is unchanged byte-for-byte |
+| **S6** |  | **Server-side (Mendooze), §16.7**: the encoding size is derived from the leg's bitrate and recomputed — aspect ratio preserved, resizer inserted in the videopipe — when the send-side estimate drops; `fps` becomes a maximum the controller may lower to `max(fps − 10, 5)`. kelixip drops `video.size` and keeps `fps`/`bitrate`/`intra_period` as the policy ceiling | a congested leg falls back to fewer pixels instead of worse ones without a single command being typed, the two names for one geometry collapse to the canvas — **L7 lifted** on the geometry and cadence axis |
 | **P8b** |  | **JSR-309 answerer alignment** (§19.3, C2-C4): the point-to-point path adopts the answerer rule of §6.3.1 — mirror the offered profile, intersect `a=rtcp-fb`, send `useRtcpFIR`, drop `goog-remb` — through the shared helpers in `MediaServer.SdpTools`. **kelixip-only, no server change.** Gated on P8 being implemented *and tested* against real callers | an `RTP/AVPF` offer is answered `RTP/AVPF` on both paths, the feedback answered is the feedback asked for, and every announced type has its server-side switch — one rule, one implementation, two adapters |
 | **P9** | ✔ | **The inspection surface** (§8.3.8): `recording.start\|show\|stop`, `slot.list\|update`, the `logo` field and its `[module.mcu]` defaults | media-server tests 5, 6 and 7 are runnable from `kelictl` alone: a `record.mp4` to look at, a slot map that shows the VAD reshuffle, and a logo in the empty slots |
 | **TC** | ✔ | **Total conversation** (§1.1 point 4): T.140 + RFC 4103 redundancy on the conference leg — `@supported_medias` gains `:text`, `SetTextCodec` at ACK time, the `red` fmtp in the answer, and the reference scripts ask for `media: :tc` | a terminal offering `m=text` with `red`+`t140` is answered on both, `SetTextCodec` carries `T140RED`, and the three medias flow on one leg |
@@ -2206,7 +2210,7 @@ they are specified in §16 and scheduled as P7/P8.
 
 ---
 
-## 16. Server-side evolutions (Mendooze) — P7 & P8
+## 16. Server-side evolutions (Mendooze) — P7, P8 and beyond
 
 §3 documents the MCU API **as it is today**; this section specifies the changes
 to make to the media server (`../mediaserver`, the Mendooze fork) so that the MCU
@@ -2759,6 +2763,80 @@ section we cannot configure must be **omitted** rather than declined with port 0
 
 Not scheduled: it only becomes worth doing when a WebRTC participant needs chat
 *in a conference*, which no requirement asks for today.
+
+---
+
+### 16.7 S6 — the encoded geometry is a consequence of the bitrate, not a setting
+
+Decided 2026-08-20. **A leg's encoding size is not something anyone configures: it
+is what the bitrate that leg can actually carry allows.** Encoding 720p at 300 kb/s
+is a bad trade — the right answer is fewer pixels, not worse ones — and nobody
+outside the rate controller knows when that moment arrives. So the size stops being
+a knob and becomes an output of the regulation loop, which lifts **L7** on the
+geometry axis without adding a single argument to the control surface.
+
+**All of it runs in the media server.** kelixip does not see the send-side bandwidth
+estimate, and deriving a resolution from an estimate we do not observe is the exact
+coupling `CLAUDE.md` forbids — what the media server knows about itself, the media
+server is asked. This is also why the answer is *not* a per-participant `size` field
+on `conference.update`: a field would have to be set by someone who cannot know when
+to change it.
+
+What the server does:
+
+1. **At leg setup**, derive the encoding size from the requested bitrate — the one
+   `SetVideoCodec` carries, itself already bounded by the offer's `b=AS`.
+2. **When the send-side estimate forces the bitrate down**, recompute the size and
+   reconfigure the encoder by inserting a resizer into the videopipe. The new size
+   **preserves the aspect ratio**, which is free by construction when it derives
+   from scaling the canvas rather than from picking another entry in the medooze
+   size enum — where `hd720p` is the only 16:9 and every step down distorts.
+   `VideoRescaler::Letterbox` (landed 2026-08-06) stays as the safety net; it is no
+   longer the nominal path.
+3. **Frame rate follows the same logic, within bounds.** The configured `fps` is a
+   **maximum**. The controller may lower it to `max(fps − 10, 5)` and no further:
+   below that, cadence stops being the useful knob and resolution takes over. A
+   conference at the default 30 can therefore be regulated down to 20 fps; one
+   configured at 12 hits the floor of 5.
+
+What this removes from kelixip: **`video.size` disappears** — from the `Conference`
+struct (§5.1), from `conference.create` / `conference.update`, from the
+`[module.mcu]` key `video_size` (§8.4) and from the rendering. The one geometry that
+remains configured is the **canvas**, `layout.size`, which `SetCompositionType`
+already carries; it is the only one that stays conference-level once each leg
+encodes at its own size. Migration through `Config.retired_keys/0` and
+`drop_retired/2`, like the codec keys P8a retired: accepted one release with a
+warning naming the replacement, refused after.
+
+What kelixip keeps: `fps` as the **maximum** described above, `bitrate` as the
+initial target, and `intra_period`. The setting stays operator-facing because the
+ceiling is a policy — how much of a node's uplink one conference may claim — and
+policy is the half kelixip owns.
+
+Three things this cleans up on the way:
+
+- `align_sizes/4`, `sized_by/2` and their "canvas size ignored" warning cease to
+  exist, along with the precedence rule they encode. They only ever arbitrated a
+  conflict between two names for one number;
+- the standing incoherence between `answer_bandwidth/2`, which announces
+  `min(offered b=AS, conference bitrate)`, and `SetVideoCodec`, which receives the
+  conference bitrate unconditionally: the announced value becomes the regulator's
+  initial ceiling, so what we promise is what we send;
+- `videopipe.cpp:214`, still on `Rescale(…, false)` for the point-to-point path,
+  moves to `Letterbox` — scheduled with P8b (§19.3) rather than on its own.
+
+Open before implementation, all server-side:
+
+- the **CPU/VAAPI budget** of N encoders at N geometries, which is the reason the
+  single profile was attractive in the first place;
+- **reconfiguring without a keyframe storm**: a resizer inserted mid-stream forces
+  an IDR, and N legs re-sizing on the same congestion event must not all emit one
+  at once;
+- the interaction with the **H.264 level we announce** (§6.3 rule 9). A level bounds
+  resolution × frame rate, so regulating *downwards* is always legal, but the
+  announced level must remain the ceiling the encoder is bound by;
+- whether `SetVideoCodec` keeps its `size` argument for compatibility with mcuGold,
+  as `SetCompositionType` kept its own under S4.
 
 ---
 
