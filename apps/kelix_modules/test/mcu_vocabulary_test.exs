@@ -144,6 +144,54 @@ defmodule Kelix.Mod.Mcu.VocabularyTest do
     end
   end
 
+  describe "the short video form" do
+    test "a size, a frame rate, a bitrate and an intra period, in any order" do
+      assert {:ok, %{"size" => 2, "fps" => 30, "bitrate" => 1024}} =
+               Vocabulary.video("vga 30fps 1024k")
+
+      assert {:ok, %{"size" => 2, "fps" => 30, "bitrate" => 1024}} =
+               Vocabulary.video("1024kbps,30FPS,VGA")
+
+      assert {:ok, %{"fps" => 25, "intra_period" => 300}} = Vocabulary.video("25fps intra=300")
+    end
+
+    test "only what is named travels, so the rest of the profile survives the merge" do
+      assert {:ok, %{"size" => 6}} = Vocabulary.video("720p")
+      assert {:ok, fields} = Vocabulary.video("30fps")
+      assert fields == %{"fps" => 30}
+    end
+
+    test "an unknown token names itself and prints the shapes" do
+      assert {:error, msg} = Vocabulary.video("vga 30")
+      assert msg =~ ~s(video: unknown "30")
+      assert msg =~ "sizes: qcif cif vga"
+      assert msg =~ "frame rate: <n>fps"
+      assert msg =~ "bitrate: <n>k"
+      assert msg =~ "intra period: intra=<n>"
+    end
+
+    test "two tokens of the same group is a refusal, not a last-one-wins" do
+      assert {:error, msg} = Vocabulary.video("25fps 30fps")
+      assert msg =~ ~s("25fps" and "30fps" both set the frame rate)
+
+      assert {:error, msg} = Vocabulary.video("vga cif")
+      assert msg =~ "both set the size"
+    end
+
+    test "a bare number is ambiguous and says so, with both ways out" do
+      assert {:error, msg} = Vocabulary.video(6)
+      assert msg =~ "6 alone is ambiguous"
+      assert msg =~ "vga 30fps 1024k"
+      assert msg =~ ~s({"size":6})
+    end
+
+    test "an empty value is a refusal that prints the syntax" do
+      assert {:error, msg} = Vocabulary.video("  ")
+      assert msg =~ "video: nothing given"
+      assert msg =~ "<n>fps"
+    end
+  end
+
   describe "video/2" do
     test "size takes a name; the other fields are untouched" do
       assert {:ok, %{"size" => 2, "fps" => 25}} =
@@ -181,6 +229,11 @@ defmodule Kelix.Mod.Mcu.VocabularyTest do
       assert help =~ "auto"
       assert help =~ "manual"
       assert Enum.join(Vocabulary.vad_help(), " ") =~ "none | basic | full"
+
+      video = Enum.join(Vocabulary.video_help(), "\n")
+      for name <- Vocabulary.sizes(), do: assert(video =~ name)
+      assert video =~ "<n>fps"
+      assert video =~ "intra=<n>"
     end
   end
 end

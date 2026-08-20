@@ -57,7 +57,7 @@ defmodule Kelix.Mod.Mcu.Config do
             # `bitrate` is the one value this block shares with the point-to-point
             # path: an omitted `video_bitrate` takes `[mediaserver] video_bitrate`,
             # the node's statement of it (`node_video_bitrate/1`).
-            video: %{size: 6, fps: 15, bitrate: 1500, intra_period: 300},
+            video: %{size: 6, fps: 30, bitrate: 1500, intra_period: 300},
             did_range: nil,
             did_ranges: %{},
             # Recording and images (§8.3.8). Paths on the **media server's**

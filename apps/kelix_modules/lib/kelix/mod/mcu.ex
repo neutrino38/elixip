@@ -2508,7 +2508,7 @@ defmodule Kelix.Mod.Mcu do
              :size,
              :auto
            ]) do
-      layout = align_canvas(layout, video, spec.domain, spec.layout != nil)
+      {video, layout} = align_sizes(video, layout, sized_by(spec.video, spec.layout), spec.domain)
 
       {:ok,
        %Conference{
@@ -2649,7 +2649,8 @@ defmodule Kelix.Mod.Mcu do
     %Conference{conf | slots: kept}
   end
 
-  # The mosaic canvas **is** the encoded picture, so its size is not a knob of its own.
+  # The mosaic canvas **is** the encoded picture, so `layout.size` and `video.size` are
+  # one value: whichever side names it, both end up on it.
   #
   # Composing at one geometry and encoding at another means scaling between the two, and
   # the media server does that without preserving the aspect ratio
@@ -2658,14 +2659,12 @@ defmodule Kelix.Mod.Mcu do
   # on a Linphone call whose 4:3 camera came out at 16:9 — see D1 of the media server's
   # `mosaic_aspect_ratio_plan.md`.
   #
-  # So the canvas follows `video.size`, and a caller that asked for another one is told
-  # rather than silently obeyed: the value it sent would have described the composition
-  # and not the picture, which is exactly the confusion that produced the bug.
-  defp align_canvas(layout, video, context, asked?) do
-    # On n'avertit que si l'appelant a demandé une toile dans CET appel : quand il
-    # redimensionne l'encodeur sans parler de la disposition, la toile suit sans bruit —
-    # c'est le comportement voulu, pas une demande ignorée.
-    if asked? and layout.size != video.size do
+  # Naming both, differently, is that same confusion spelled out, so the encoded size
+  # wins and the caller is told rather than silently obeyed.
+  defp align_sizes(video, layout, :layout, _context), do: {%{video | size: layout.size}, layout}
+
+  defp align_sizes(video, layout, :both, context) do
+    if layout.size != video.size do
       Logger.warning(
         module: __MODULE__,
         message:
@@ -2675,8 +2674,23 @@ defmodule Kelix.Mod.Mcu do
       )
     end
 
-    %{layout | size: video.size}
+    {video, %{layout | size: video.size}}
   end
+
+  defp align_sizes(video, layout, :video, _context), do: {video, %{layout | size: video.size}}
+
+  # Which side of a create/update named a size, read off the arguments as they arrived:
+  # after the merge over the current values there is no telling "asked for" from "kept".
+  # Nobody named one — the two are already equal — and the encoded size leads.
+  defp sized_by(video_arg, layout_arg) do
+    case {named_size?(video_arg), named_size?(layout_arg)} do
+      {true, true} -> :both
+      {false, true} -> :layout
+      _ -> :video
+    end
+  end
+
+  defp named_size?(arg), do: is_map(arg) and Map.has_key?(arg, "size")
 
   # The operator-facing name of a video size id (`6` -> `"hd720p"`), read off the same
   # vocabulary the CLI renders: a log that says `2` when the command said `vga` is a log
@@ -2714,7 +2728,8 @@ defmodule Kelix.Mod.Mcu do
          {:ok, mcu} <- update_target(conf),
          {:ok, conf, video} <- merged_video(state, conf, changes),
          {:ok, conf, layout} <- merged_layout(state, conf, changes),
-         layout = align_canvas(layout, video, conf.uid, Map.has_key?(changes, :layout)),
+         sized_by = sized_by(Map.get(changes, :video), Map.get(changes, :layout)),
+         {video, layout} = align_sizes(video, layout, sized_by, conf.uid),
          :ok <- push_mixer_changes(mcu, conf, changes, video, layout),
          :ok <- maybe_set_logo(state, mcu, conf, changes) do
       updated = %Conference{
@@ -2780,10 +2795,10 @@ defmodule Kelix.Mod.Mcu do
   defp push_mixer_changes(mcu, conf, changes, video, layout) do
     vad_rate? = Map.has_key?(changes, :vad) or Map.has_key?(changes, :rate)
 
-    # La toile suit la taille encodée (`align_canvas/3`), donc changer `video.size`
-    # déplace la mosaïque : il faut repousser la composition même quand l'appelant n'a
-    # pas touché à `layout`, ou la toile resterait à l'ancienne géométrie et le composite
-    # repartirait à l'échelle — le défaut que cet alignement supprime.
+    # La toile et la taille encodée sont une seule valeur (`align_sizes/4`), donc changer
+    # `video.size` déplace la mosaïque : il faut repousser la composition même quand
+    # l'appelant n'a pas touché à `layout`, ou la toile resterait à l'ancienne géométrie
+    # et le composite repartirait à l'échelle — le défaut que cet alignement supprime.
     compose? = Map.has_key?(changes, :layout) or video.size != conf.video.size
 
     with :ok <- maybe_update_conference(mcu, conf, changes, vad_rate?),

@@ -117,8 +117,8 @@ Module block — `[module.mcu]` (in `config.toml`):
 | `destroy_when_empty` | boolean | `false` | Destroy a conference with its last participant |
 | `auto_layout` | boolean | `true` | The mosaic follows the number of video legs |
 | `layout_comp` | name or integer | `2x2` | Starting mosaic — one of `1x1 2x2 3x3 3+4 1+7 1+5 1+1 pip1 pip3 4x4 1+4 2+8` (or its wire id) |
-| `video_size` | name or integer | `hd720p` | Encoded size — one of `qcif cif vga pal hvga qvga hd720p wqvga xga wvga` (or its wire id) |
-| `video_fps` | integer | `15` | Encoded frame rate |
+| `video_size` | name or integer | `hd720p` | Encoded size — one of `qcif cif vga pal hvga qvga hd720p wqvga xga wvga` (or its wire id). Also the size of the mosaic canvas: the two are one picture |
+| `video_fps` | integer | `30` | Encoded frame rate |
 | `video_bitrate` | integer | `[mediaserver] video_bitrate` (`1500`) | kbps, also the cap on the answer's `b=AS:`. Set it here to give conferences a bitrate of their own |
 | `video_intra_period` | integer | `300` | Frames between intra-frames |
 | `logo_file` | string | — | Image drawn in **every empty mosaic slot**, on every conference (a bare name under `image_dir`) |
@@ -414,10 +414,10 @@ wherever a value enters — the CLI, a REST body, the config block, a script:
 kelictl mcu conference.update uid=c-3f9a layout='2x2 hd720p'   # mosaic + size
 kelictl mcu conference.update uid=c-3f9a layout=auto,vga       # commas: no quoting
 kelictl mcu conference.update uid=c-3f9a layout=1+1            # mosaic alone
-kelictl mcu conference.update uid=c-3f9a layout=cif            # size alone
+kelictl mcu conference.update uid=c-3f9a layout=cif            # size alone (encoder too)
 kelictl mcu conference.update uid=c-3f9a layout=manual         # stop following
 kelictl mcu conference.update uid=c-3f9a vad=full
-kelictl mcu conference.create domain=example.com video='{"size":"vga","fps":25}'
+kelictl mcu conference.create domain=example.com layout='2x2 vga' video=30fps
 ```
 
 `layout` takes a **mosaic layout**, a **size** and/or `auto`|`manual`, in **any order**,
@@ -433,6 +433,36 @@ Two rules:
 
 * **only what is named changes** — `layout=vga` keeps the current mosaic other properties intact.
 * **changing a mosaic layout switches it to `manual` mode**.
+
+### The encoder profile
+
+`video` takes the same kind of value: tokens in any order, spaces or commas, and only
+what is named changes.
+
+```bash
+kelictl mcu conference.update uid=c-3f9a video='vga 30fps 1024k'
+kelictl mcu conference.update uid=c-3f9a video=25fps,intra=300
+kelictl mcu conference.update uid=c-3f9a video='{"fps":25}'   # the wire form still works
+```
+
+| Field | Token | Default |
+|---|---|---|
+| size | a size name (`vga`, `hd720p`, `720p`) | `[module.mcu] video_size` |
+| frame rate | `<n>fps` | `30` |
+| bitrate | `<n>k` (kbit/s) | `[module.mcu] video_bitrate` |
+| intra period | `intra=<n>` (frames) | `300` |
+
+**The mosaic size and the encoded size are one value.** The canvas *is* the picture
+the mixer encodes. Composing at one geometry and encoding at another means rescaling
+between the two, and the media server does that without keeping the aspect ratio — a
+VGA mosaic encoded in HD720p stretches every tile. So the two always match:
+
+* `layout='2x2 vga'` composes **and** encodes in VGA;
+* `video=hd720p` moves the canvas to HD720p;
+* name both with different sizes and the **encoded** one wins; the log says so.
+
+A new profile applies to the participants that **join next**. A participant already
+in the conference keeps the profile it negotiated.
 
 ### Recording, slots and the logo
 

@@ -59,7 +59,7 @@ defmodule Kelix.Mod.Mcu.Conference do
             # `[module.mcu] rtp_timeout_ms`; 0 disables it. Lives on the conference so
             # the adapter reads it off the leg it is setting up, like `video`.
             rtp_timeout_ms: 10_000,
-            video: %{size: 6, fps: 15, bitrate: 1500, intra_period: 300},
+            video: %{size: 6, fps: 30, bitrate: 1500, intra_period: 300},
             layout: %{comp: 1, size: 6, auto: true},
             max_participants: 20,
             destroy_when_empty: false,

@@ -103,7 +103,7 @@ port = 9095
 #auto_layout      = true            # the mosaic follows the number of video legs
 #layout_comp      = "2x2"           # starting mosaic when auto_layout is off
 #video_size       = "hd720p"
-#video_fps        = 15
+#video_fps        = 30
 #video_bitrate    = 1500            # kbps, also the cap on the answer's b=AS:; defaults
                                    #   to [mediaserver] video_bitrate above
 #video_intra_period = 300           # frames between intra-frames

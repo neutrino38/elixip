@@ -24,7 +24,7 @@ defmodule Kelix.Mod.Mcu.ConfigTest do
 
       # no codec list and no fmtp: the media server arbitrates (P8a, §16.3)
       refute Map.has_key?(config, :audio_codecs)
-      assert config.video == %{size: 6, fps: 15, bitrate: 1500, intra_period: 300}
+      assert config.video == %{size: 6, fps: 30, bitrate: 1500, intra_period: 300}
 
       # Shorter than what the caller waits (`call_timeout_ms`, 5 s): the per-RPC
       # timeout has to fire first, or a slow server turns a call into an exit.

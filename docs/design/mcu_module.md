@@ -391,8 +391,8 @@ are **not** forced into it: they are plain functions on `Kelix.Mod.Mcu`
   vad:         1,                # 0 none | 1 basic | 2 full
   rate:        32000,            # mixer sampling rate (default, §8.4)
   codecs:      %{audio: ["OPUS","G722","PCMA","PCMU"], video: ["H264"], text: [ "T140", "T140RED"]},
-  video:       %{size: 6, fps: 15, bitrate: 1500, intra_period: 300},  # inline profile
-  layout:      %{comp: 1, size: 6, auto: true},                        # mosaic 0
+  video:       %{size: 6, fps: 30, bitrate: 1500, intra_period: 300},  # inline profile
+  layout:      %{comp: 1, size: 6, auto: true},   # mosaic 0; `size` = `video.size`
   max_participants: 20,
   auto_accept: true,
   destroy_when_empty: false,
@@ -1436,6 +1436,45 @@ Four decisions, each of which could have gone the other way:
 A refusal carries the vocabulary (`layout: unknown "2+2" — mosaics: 1x1 2x2 …`),
 because the moment of the typo is the moment the list is wanted.
 
+**The short `video` form.** The encoder profile takes the same grammar — tokens
+separated by spaces or commas, in any order, only what is named changes — with one
+token shape per field so the four vocabularies stay disjoint:
+
+| Field | Token |
+|---|---|
+| size | a size name (`vga`, `hd720p`, `720p`) |
+| frame rate | `<n>fps` |
+| bitrate | `<n>k` or `<n>kbps`, in kbit/s |
+| intra period | `intra=<n>`, in frames |
+
+```
+video='vga 30fps 1024k'    video=hd720p    video=25fps,intra=300
+```
+
+The intra period is the one named token: a frame count has no unit anybody writes,
+and inventing one would have been a suffix only this parser knows. The wire form
+stays literal here too (`video='{"fps":30}'`).
+
+**One size, named from either side.** `layout.size` and `video.size` are the same
+picture: the mosaic canvas *is* what the encoder encodes. Composing at one geometry
+and encoding at another means rescaling between the two, and the media server does
+that without preserving the aspect ratio (`PipeVideoInput`/`VideoRescaler`, no
+letterbox) — a VGA canvas encoded as HD720p widens every tile by 33 %. Found
+2026-08-06 on a Linphone call whose 4:3 camera came out at 16:9 (D1 of the media
+server's `mosaic_aspect_ratio_plan.md`).
+
+So the two are held equal, on create and on update alike, and whichever side names
+a size carries the other with it:
+
+* `layout='2x2 vga'` composes **and** encodes in VGA;
+* `video='hd720p'` moves the canvas to HD720p, which is why an encoder resize
+  re-issues `SetCompositionType`;
+* naming both, differently, is that same confusion spelled out: the **encoded** size
+  wins and the canvas size is reported ignored.
+
+The profile still applies to the participants that join next, not to the ones
+already encoding (§8.3, L7) — a resize does not renegotiate a live leg.
+
 **The online help.** A command's arguments already travelled to both frontals
 (`Kelix.Control.module_commands/0`); an argument may now also declare its own
 `help:` — one line or several — printed under the command by
@@ -1756,7 +1795,7 @@ did_range           = "8000-8099"
 did_ranges          = { "example.com" = "8000-8199", "lab.example.com" = "9000-9099" }
 # inline video profile
 video_size          = "hd720p"  # qcif cif vga pal hvga qvga hd720p wqvga xga wvga
-video_fps           = 15
+video_fps           = 30
 video_bitrate       = 1500     # kbps; default = [mediaserver] video_bitrate
 video_intra_period  = 300
 # timeouts
@@ -2047,7 +2086,7 @@ observations the script has no use for.
 | Unit, events | the §11.1 invariants: exactly one `participant.left` per participant on each teardown path, no `ringing` for a rejected call |
 | Unit, core (FW-4, `apps/kelixip/test/`) | template resolution most-literal-first, ambiguous templates refused **at registration**, path params merged into args, `path < query < body` precedence, `:path_conflict` ⇒ 400, method list (`PUT` **and** `PATCH` on one declaration), method mismatch ⇒ 405 + `Allow`, no template ⇒ 404, declared `status`/`location`/`errors` → `201` + `Location` + `409`, and two **regression tests**: every pre-existing single-segment command still routes, and the flat form of a nested command still dispatches to the same clause (§8.3.5) |
 | Unit, REST surface | each command of §8.3.3 reachable at its declared method+path **and** at its flat form; a `PUT` with an omitted field leaves that field untouched; a `PUT` carrying a server-owned field ⇒ 400; reserved paths (`mosaics`, `mixers`, `listeners`) answer 404 |
-| Unit, the vocabulary (§8.3.7) | every label round-trips to the id it was rendered from, so the CLI cannot print a name the parser refuses; the short `layout` form in both token orders and both separators; a size alone leaves the mosaic and its `auto` flag; naming a mosaic implies `manual` unless `auto` is in the same value; two tokens of one group, an unknown token, a bare number and an empty value are each a refusal that names the vocabulary; the wire form stays literal; `[module.mcu]` accepts `vad`/`layout_comp`/`video_size` by name and `0` is not mistaken for absent |
+| Unit, the vocabulary (§8.3.7) | every label round-trips to the id it was rendered from, so the CLI cannot print a name the parser refuses; the short `layout` form in both token orders and both separators; a size alone leaves the mosaic and its `auto` flag; naming a mosaic implies `manual` unless `auto` is in the same value; two tokens of one group, an unknown token, a bare number and an empty value are each a refusal that names the vocabulary; the wire form stays literal; the short `video` form reads a size, `<n>fps`, `<n>k` and `intra=<n>` in any order and refuses a bare number; a size named by the mosaic alone moves the encoder and vice versa, and two sizes that disagree leave the encoded one and a warning; `[module.mcu]` accepts `vad`/`layout_comp`/`video_size` by name and `0` is not mistaken for absent |
 | Unit, mocked MCU | a `Kelix.Mod.Mcu.Client` stub asserting the **exact RPC order** of §6.2 — this is the regression net for the ordering rule of §2 |
 | Integration | `mcu.exs` driven by the existing scenario test harness with the mocked client: 404 on unknown DID, 486 when full, 488 with no common codec, full join/leave, ACK-less caller (no mixer join), CANCEL before answer, scenario crash ⇒ participant reaped |
 | Integration, two legs | two `elixipp` UAC scenarios joining the same conference against a **real** mediaserver, tagged `:live`, asserting `GetParticipantStatistics` shows RTP in both directions |
