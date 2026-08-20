@@ -13,12 +13,13 @@
 # absolute URLs into the repository. A link resolving to nothing at all is a dead
 # link in the source and aborts the run.
 #
-# Design docs under docs/design/ are deliberately NOT published; tcp_listener.md
-# is the one exception, already on the wiki since 2026-06-25.
+# Design docs under docs/design/ are deliberately NOT published: they are written
+# for whoever changes the code, and they move with it. The wiki carries the
+# user-facing documentation only.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-WIKI_URL="git@github.com:neutrino38/elixip.wiki.git"
+WIKI_URL="${WIKI_URL:-git@github.com:neutrino38/elixip.wiki.git}"
 BLOB="https://github.com/neutrino38/elixip/blob/master"
 TREE="https://github.com/neutrino38/elixip/tree/master"
 
@@ -49,6 +50,7 @@ MANIFEST=(
   "ELIXIPP.md|Elixipp|elixipp"
   "TLS_WSS.md|TLS-and-WSS|TLS and WSS"
   "B2BUA.md|B2BUA|B2BUA"
+  "CODEC-NEGOTIATION.md|Codec-Negotiation|Codec negotiation"
   "docs/kelixip/README.md|Kelixip|kelixip manual"
   "docs/kelixip/installation.md|Kelixip-Installation|Installation"
   "docs/kelixip/running.md|Kelixip-Running|Running"
@@ -61,9 +63,10 @@ MANIFEST=(
   "docs/kelixip/modules/mcu-api.md|MCU-API|mcu REST API"
   "docs/kelixip/modules/mcu_module_guide.md|MCU-Guide|mcu operating guide"
   "docs/kelixip/modules/template.md|Module-Template|module template"
-  "docs/design/tcp_listener.md|TCP-Listener-Design|TCP Listener Design"
+  "docs/releases/RELEASE-1.5.0.md|Release-1.5.0|Release 1.5.0"
   "docs/releases/RELEASE-1.4.1.md|Release-1.4.1|Release 1.4.1"
   "docs/releases/RELEASE-1.4.0.md|Release-1.4.0|Release 1.4.0"
+  "docs/releases/RELEASE-1.3.0.md|Release-1.3.0|Release 1.3.0"
   "docs/releases/RELEASE-1.2.1.md|Release-1.2.1|Release 1.2.1"
   "docs/releases/RELEASE-1.2.0.md|Release-1.2.0|Release 1.2.0"
   "docs/releases/RELEASE-1.1.0.md|Release-1.1.0|Release 1.1.0"
@@ -72,6 +75,16 @@ MANIFEST=(
 )
 
 # Generated, not copied: Releases.md (index) and _Sidebar.md.
+
+# ------------------------------------------------------------- retired pages
+# A page that was published and whose source is gone — renamed, folded into a
+# design doc — is not deleted: the wiki has no redirects and links to it survive
+# on the web. It is replaced by a one-line pointer to where the content went.
+# page | title | body
+RETIRED=(
+  "DSL|The DSL is now the FSL|The Elixip DSL was renamed the **Finite State Language**. Its documentation lives in [FSL](FSL)."
+  "TCP-Listener-Design|Folded into the SIP stack design|The listener design is now section 3.4 of [docs/design/DESIGN-SIPSTACK.md](https://github.com/neutrino38/elixip/blob/master/docs/design/DESIGN-SIPSTACK.md#34-listeners), with the other two listeners. Design documents are not published on the wiki."
+)
 
 declare -A PAGE_OF LABEL_OF
 for entry in "${MANIFEST[@]}"; do
@@ -254,7 +267,9 @@ if [ "$DRY_RUN" -eq 0 ]; then
       para="$(awk 'NR==1 {next} !seen && !NF {next} NF {seen=1; printf "%s ", $0; next} seen {exit}' "$REPO/$src")"
       date="${para%% *}"
       theme="$(printf '%s' "$para" \
-        | sed 's/^[^ ]* — //; s/^[0-9]* commits since [0-9.]* ([0-9-]*)\. *//; s/^Theme of the release: *//' \
+        | sed 's/^[^ ]* — //; s/^[0-9]* commits since [0-9.]* ([0-9-]*)\. *//' \
+        | sed 's/^Theme\( of the release\)\?: *//' \
+        | sed 's/\[\([^]]*\)\]([^)]*)/\1/g' \
         | sed 's/[*_`]//g' \
         | cut -c1-110 | sed 's/ [^ ]*$/…/')"
       echo "- [${page#Release-}]($page) — $date — $theme"
@@ -290,14 +305,14 @@ if [ "$DRY_RUN" -eq 0 ]; then
 
 **Call processing**
 - [B2BUA](B2BUA)
-
-**Transport**
-- [TCP Listener Design](TCP-Listener-Design)
+- [Codec negotiation](Codec-Negotiation)
 
 **Releases**
 - [All releases](Releases)
+- [1.5.0](Release-1.5.0)
 - [1.4.1](Release-1.4.1)
 - [1.4.0](Release-1.4.0)
+- [1.3.0](Release-1.3.0)
 - [1.2.1](Release-1.2.1)
 - [1.2.0](Release-1.2.0)
 - [1.1.0](Release-1.1.0)
@@ -306,6 +321,12 @@ if [ "$DRY_RUN" -eq 0 ]; then
 - [License (BSL 1.1)](License)
 - [Licence — version française](License-FR)
 EOF
+
+  echo "==> ${#RETIRED[@]} retired page(s)"
+  for entry in "${RETIRED[@]}"; do
+    IFS='|' read -r r_page r_title r_body <<< "$entry"
+    printf '# %s\n\n%s\n' "$r_title" "$r_body" > "$WIKI_DIR/$r_page.md"
+  done
 fi
 
 if [ "$DRY_RUN" -eq 1 ]; then

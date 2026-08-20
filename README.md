@@ -133,7 +133,7 @@ the sequence diagram.
 
 # Design documentation
 
-How it is built, and why. Six documents under [`docs/design/`](docs/design/),
+How it is built, and why. Eight documents under [`docs/design/`](docs/design/),
 each covering what is implemented and running:
 
 | Document | Covers |
@@ -144,6 +144,8 @@ each covering what is implemented and running:
 | [DESIGN-ELIXIPP.md](docs/design/DESIGN-ELIXIPP.md) | the test tool |
 | [DESIGN-KELIXIP.md](docs/design/DESIGN-KELIXIP.md) | the application server and its module system |
 | [DESIGN-MCU.md](docs/design/DESIGN-MCU.md) | the conferencing module |
+| [DESIGN-AUTH.md](docs/design/DESIGN-AUTH.md) | what kelixip challenges: which realm, which identity, 401 vs 407, which requests |
+| [DESIGN-SBB.md](docs/design/DESIGN-SBB.md) | service building blocks: the engine, the return contract, `call` and `bridge` |
 
 The other documents in that directory are designs **not yet implemented**;
 [`docs/design/notes/`](docs/design/notes/) holds source studies and investigation
