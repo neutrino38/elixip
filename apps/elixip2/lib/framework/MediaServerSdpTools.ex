@@ -48,6 +48,18 @@ defmodule MediaServer.SdpTools do
   @doc "Rank a payload type against the offer's format list (its preference order)."
   defdelegate pt_rank(pt, fmt_order), to: Sdp
 
+  @doc "Rank an accepted entry with a preferred codec code first, the offer's order inside."
+  defdelegate preferred_rank(entry, fmt_order, prefer), to: Sdp
+
+  @doc "The codec-table name of a Mendooze codec code, or `nil` for one it does not name."
+  defdelegate codec_name(kind, code), to: Sdp
+
+  @doc "The Mendooze code of a codec name, or `:error` for a name the tables do not carry."
+  defdelegate codec_code(kind, name), to: Sdp
+
+  @doc "The codec names of one media, as the tables spell them — a vocabulary, not a capability."
+  defdelegate codec_names(kind), to: Sdp
+
   @doc "Local ICE host candidates for one media."
   defdelegate host_candidates(ip, port, rtcp_mux?), to: Sdp
 

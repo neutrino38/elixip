@@ -140,6 +140,37 @@ defmodule Kelix.Mod.McuAdminTest do
       assert_received {:rpc, "UpdateConference", [42, 1, 8000]}
     end
 
+    # A preference applies to the legs that join next, like the rest of the video
+    # profile: it is stated in an answer, and this conference's answers are already out.
+    test "preferred_video_codec is set, changed and cleared, without touching the mixer",
+         ctx do
+      assert {:ok, %{changed: [:preferred_video_codec]}} =
+               Mcu.handle_control("conference.update", %{
+                 "uid" => ctx.uid,
+                 "preferred_video_codec" => "h264"
+               })
+
+      assert {:ok, %{preferred_video_codec: "H264"}} = Mcu.conference(ctx.uid)
+
+      assert {:ok, _} =
+               Mcu.handle_control("conference.update", %{
+                 "uid" => ctx.uid,
+                 "preferred_video_codec" => "none"
+               })
+
+      assert {:ok, %{preferred_video_codec: nil}} = Mcu.conference(ctx.uid)
+      # nothing to tell the media server: the preference is answered, not configured
+      assert TestStub.rpc_order() == []
+
+      assert {:error, msg} =
+               Mcu.handle_control("conference.update", %{
+                 "uid" => ctx.uid,
+                 "preferred_video_codec" => "h265"
+               })
+
+      assert msg =~ ~s(unknown "h265")
+    end
+
     test "layout goes to SetCompositionType and is merged, not replaced", ctx do
       assert {:ok, _} =
                Mcu.handle_control("conference.update", %{
@@ -444,8 +475,9 @@ defmodule Kelix.Mod.McuAdminTest do
              """
 
       # the media detail of a leg belongs to participant.show, so the roster keeps to
-      # the declared columns
-      refute out =~ "codec"
+      # the declared columns (the conference's own `preferred_video_codec` is a
+      # conference field and is shown, hence matching the detail's `codec=` shape)
+      refute out =~ "codec="
     end
 
     test "participant.show blocks out the negotiated medias and the statistics", ctx do

@@ -60,6 +60,11 @@ defmodule Kelix.Mod.Mcu.Conference do
             # the adapter reads it off the leg it is setting up, like `video`.
             rtp_timeout_ms: 10_000,
             video: %{size: 6, fps: 30, bitrate: 1500, intra_period: 300},
+            # The video codec this conference states FIRST in its answers (`nil`: the
+            # caller's own order decides). A preference, not a codec list: it can only move
+            # a payload type the caller offered and the media server accepted, and the leg
+            # it moves is the one the mixer encodes.
+            preferred_video_codec: nil,
             layout: %{comp: 1, size: 6, auto: true},
             max_participants: 20,
             destroy_when_empty: false,
@@ -148,6 +153,7 @@ defmodule Kelix.Mod.Mcu.Conference do
       medias: conf.medias,
       dtmf: conf.dtmf,
       video: conf.video,
+      preferred_video_codec: conf.preferred_video_codec,
       layout: conf.layout,
       max_participants: conf.max_participants,
       destroy_when_empty: conf.destroy_when_empty,

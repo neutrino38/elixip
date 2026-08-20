@@ -175,6 +175,7 @@ defmodule Kelix.Mod.McuTest do
                  "max_participants" => 4,
                  "destroy_when_empty" => true,
                  "video" => %{"fps" => 25},
+                 "preferred_video_codec" => "vp8",
                  "layout" => %{"comp" => 6, "size" => 2}
                })
 
@@ -190,6 +191,8 @@ defmodule Kelix.Mod.McuTest do
       # mosaic asked for, since this `video` named none: the canvas and the encoded
       # picture are one size, and whichever side names it, both end up on it
       assert conf.video == %{size: 2, fps: 25, bitrate: 1500, intra_period: 300}
+      # a preference, kept as the codec tables spell it (the answers state it first)
+      assert conf.preferred_video_codec == "VP8"
 
       assert conf.layout == %{comp: 6, size: 2, auto: true}
       assert_received {:rpc, "CreateConference", [^uid, 2, 16_000, 7]}

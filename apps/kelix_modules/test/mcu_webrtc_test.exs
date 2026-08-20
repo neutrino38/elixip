@@ -153,6 +153,20 @@ defmodule Kelix.Mod.McuWebrtcTest do
     {:ok, [port_for(params), @media_ip, accepted]}
   end
 
+  # A verdict that accepts everything proposed and echoes each payload type's **own**
+  # offered fmtp back. The conformant shape (§6.3 rule 12 drops nothing from it), and
+  # the only one where several video codecs survive together — a verdict leaving one
+  # payload type standing has no order left to state, so it cannot show a preference.
+  defp echo_verdict(params) do
+    proposed = Enum.at(params, 3)
+    offered_fmtp = params |> Enum.at(6) |> Map.get("fmtp", %{})
+
+    accepted =
+      Map.new(proposed, fn {pt, code} -> {pt, Map.get(offered_fmtp, pt) || audio_fmtp(code)} end)
+
+    {:ok, [port_for(params), @media_ip, accepted]}
+  end
+
   defp port_for(params) do
     case Enum.at(params, 2) do
       0 -> @audio_port
@@ -168,6 +182,7 @@ defmodule Kelix.Mod.McuWebrtcTest do
         :per_pt -> &per_pt_verdict/1
         :linphone -> &linphone_verdict/1
         :unanswerable -> &unanswerable_verdict/1
+        :echo -> &echo_verdict/1
         _ -> &verdict/1
       end
 
@@ -595,6 +610,98 @@ defmodule Kelix.Mod.McuWebrtcTest do
       assert summary.audio.codec == "OPUS"
       assert_received {:rpc, "SetAudioCodec", [_conf, _part, 98]}
     end
+  end
+
+  describe "the conference's preferred video codec" do
+    # The offer lists six H.264 payload types first and VP8 last (`109 115 103 107 39
+    # 117 96`), so the caller's own order would give H.264. A conference that prefers
+    # VP8 answers VP8 first — and, the SDP order and the encoded codec being one
+    # statement, that is what the mixer is told to encode.
+    @tag verdict: :echo
+    test "is answered first and encoded, though the browser offered it last", ctx do
+      did = conference_preferring("vp8")
+      conn = leg(did)
+
+      assert {:ok, answer} = Adapter.set_remote_offer(conn, @chrome_offer)
+      assert {:ok, summary} = Adapter.attach(conn)
+
+      [_audio, video] = sections(answer)
+      assert hd(video) == "m=video #{@video_port} UDP/TLS/RTP/SAVPF 96 109 115 103 107 39 117"
+
+      # 107 = VideoCodec::VP8 (§3.6) — and the stream goes out on PT 96, the payload
+      # type the answer put first, not on one of the H.264 ones
+      assert summary.video.codec == "VP8"
+
+      calls = TestStub.rpc_calls()
+
+      assert Enum.any?(calls, fn
+               {"SetVideoCodec", [_c, _p, 107, _size, _fps, _br, _intra, _props, _role]} -> true
+               _ -> false
+             end)
+
+      assert Enum.any?(calls, fn
+               {"StartSending", [_c, _p, 1, _ip, _port, %{"96" => 107}, _role]} -> true
+               _ -> false
+             end)
+
+      # the file-wide conference has no preference: the same offer keeps H.264
+      other = leg(ctx.did)
+      assert {:ok, plain} = Adapter.set_remote_offer(other, @chrome_offer)
+      [_audio, plain_video] = sections(plain)
+
+      assert hd(plain_video) ==
+               "m=video #{@video_port} UDP/TLS/RTP/SAVPF 109 115 103 107 39 117 96"
+    end
+
+    # A preference is not a capability: it can only move a payload type that is in the
+    # offer AND in the server's verdict. Both misses are LOGGED, naming which side
+    # dropped it — an operator who states a codec and does not get it must be able to
+    # tell the two apart, which is what the retired codec lists could never say.
+    @tag verdict: :echo
+    test "a codec the offer does not carry changes nothing, and says why", _ctx do
+      did = conference_preferring("av1")
+      conn = leg(did)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, answer} = Adapter.set_remote_offer(conn, @chrome_offer)
+          send(self(), {:answer, answer})
+        end)
+
+      assert_received {:answer, answer}
+      [_audio, video] = sections(answer)
+      assert hd(video) == "m=video #{@video_port} UDP/TLS/RTP/SAVPF 109 115 103 107 39 117 96"
+      assert log =~ "preferred codec AV1 not applied — the offer does not carry it"
+    end
+
+    test "a codec the media server did not accept changes nothing, and says which side", _ctx do
+      # the default verdict accepts one video payload type, 109 (H.264): VP8 is proposed
+      # and refused, which is the other half of the same trace
+      did = conference_preferring("vp8")
+      conn = leg(did)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, answer} = Adapter.set_remote_offer(conn, @chrome_offer)
+          send(self(), {:answer, answer})
+        end)
+
+      assert_received {:answer, answer}
+      [_audio, video] = sections(answer)
+      assert hd(video) == "m=video #{@video_port} UDP/TLS/RTP/SAVPF 109"
+      assert log =~ "preferred codec VP8 not applied — the media server did not accept it"
+    end
+  end
+
+  defp conference_preferring(codec) do
+    {:ok, %{did: did}} =
+      Mcu.handle_control("conference.create", %{
+        "domain" => @domain,
+        "medias" => ["audio", "video"],
+        "preferred_video_codec" => codec
+      })
+
+    did
   end
 
   describe "the transport plane a browser reads" do

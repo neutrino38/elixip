@@ -667,7 +667,11 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
                 accepted: accepted,
                 # drives the receive watchdog (§16.1): a media the peer says it will not
                 # send must not be watched, or a hold hangs up the call
-                peer_sends: peer_sends?(desc)
+                peer_sends: peer_sends?(desc),
+                # the conference's own preference, which is the ONE thing that outranks
+                # the caller's order below: it moves this codec first in the answer and
+                # makes it what the mixer encodes (§6.3 rule 1)
+                preferred_codec: preferred_code(state, conf, media, rtp_map, accepted)
               })
 
             {
@@ -683,6 +687,44 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
           end
         end
     end
+  end
+
+  # The conference's preferred video codec as a Medooze code, and `nil` as soon as this
+  # leg cannot honour it. Dropped preferences are LOGGED, naming which side dropped it:
+  # an operator who states a codec and watches it not happen must be able to tell "the
+  # caller never offered it" from "the media server refused it" — the absence of that
+  # answer is why the codec lists were removed rather than kept as preferences (§8.4).
+  defp preferred_code(state, conf, :video, rtp_map, accepted) do
+    with name when is_binary(name) <- Map.get(conf, :preferred_video_codec),
+         {:ok, code} <- Sdp.codec_code(:video, name) do
+      negotiated = if is_map(accepted), do: Map.take(rtp_map, Map.keys(accepted)), else: rtp_map
+
+      cond do
+        code in Map.values(negotiated) ->
+          code
+
+        code in Map.values(rtp_map) ->
+          log_preference_dropped(state, name, "the media server did not accept it")
+
+        true ->
+          log_preference_dropped(state, name, "the offer does not carry it")
+      end
+    else
+      _ -> nil
+    end
+  end
+
+  defp preferred_code(_state, _conf, _media, _rtp_map, _accepted), do: nil
+
+  defp log_preference_dropped(state, name, reason) do
+    Logger.info(
+      module: __MODULE__,
+      message:
+        "conf=#{state.conf_id} part=#{state.part_id} video: preferred codec #{name} " <>
+          "not applied — #{reason}; the answer keeps the caller's own order"
+    )
+
+    nil
   end
 
   # What WE can decode, in the codecs' own vocabulary — the input side of the
@@ -1172,9 +1214,10 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
 
   # The Medooze constant of a codec name, read off the shared codec tables (a
   # one-entry rtpMap is the table lookup those tables expose).
-  # The one accepted payload type the mixer encodes towards this leg: the caller's own
-  # first choice (offer order) among what the server accepted, telephone-event excluded
-  # — that is a stream the mixer never encodes towards anyone.
+  # The one accepted payload type the mixer encodes towards this leg: the conference's
+  # preferred codec when this leg carries it, else the caller's own first choice (offer
+  # order), among what the server accepted — telephone-event excluded, that being a
+  # stream the mixer never encodes towards anyone.
   #
   # It has to be **one payload type and not one codec**, because a peer may offer the
   # same codec under several payload types with different parameters: the profile we
@@ -1184,7 +1227,9 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     neg.rtp_map
     |> Map.take(Map.keys(accepted))
     |> Enum.reject(fn {_pt, code} -> code == @dtmf_code end)
-    |> Enum.sort_by(&Sdp.pt_rank(&1, Map.get(neg, :fmt_order)))
+    |> Enum.sort_by(
+      &Sdp.preferred_rank(&1, Map.get(neg, :fmt_order), Map.get(neg, :preferred_codec))
+    )
     |> List.first()
   end
 
@@ -1201,11 +1246,19 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     end
   end
 
+  # Legacy (pre-P8a server, no verdict): the codec list `propose_all/2` built, in the
+  # offer's order. The preference is applied here TOO and not only in the answer — the
+  # SDP order and the encoded codec are one statement, and honouring it on one side only
+  # would announce a codec the mixer is not producing.
   defp primary_code(media, neg) do
-    case neg.codecs do
-      [name | _] -> media |> Sdp.local_rtp_map([name], false) |> Map.values() |> List.first()
-      [] -> nil
-    end
+    codes =
+      Enum.map(neg.codecs, fn name ->
+        media |> Sdp.local_rtp_map([name], false) |> Map.values() |> List.first()
+      end)
+
+    prefer = Map.get(neg, :preferred_codec)
+
+    if is_integer(prefer) and prefer in codes, do: prefer, else: List.first(codes)
   end
 
   # Audio joins the default **sidebar** (what the MCU API calls a sidebar is what
@@ -1711,12 +1764,22 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     Map.new(state.negotiated, fn {media, neg} ->
       {media,
        %{
-         codec: List.first(neg.codecs),
+         codec: summary_codec(media, neg),
          rec_port: neg.rec_port,
          send: neg.remote,
          dtmf: Map.get(neg, :dtmf, false)
        }}
     end)
+  end
+
+  # What the mixer ENCODES towards this leg, and not the first codec we proposed: the
+  # two part company as soon as the server's verdict or the conference's preference
+  # moved the choice, and this map is what `participant.show` reports.
+  defp summary_codec(media, neg) do
+    case primary_code(media, neg) do
+      nil -> List.first(neg.codecs)
+      code -> Sdp.codec_name(media, code) || List.first(neg.codecs)
+    end
   end
 
   defp media_int(media), do: Map.fetch!(@media_int, media)

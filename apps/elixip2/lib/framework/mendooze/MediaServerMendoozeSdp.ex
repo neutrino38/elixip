@@ -293,26 +293,50 @@ defmodule MediaServer.Mendooze.Sdp do
     end
   end
 
-  defp codec_code(:audio, name) do
+  @doc """
+  The Mendooze code of a codec **name**, case-insensitively, or `:error` for a name
+  these tables do not carry.
+
+  The non-raising half of the name → code direction `codec_codes/2` uses, and the
+  inverse of `codec_name/2`. A name an operator *states as a preference* is not a
+  configuration error to raise on: it is a name to validate and to report on.
+  """
+  @spec codec_code(:audio | :video | :text, String.t()) :: {:ok, non_neg_integer()} | :error
+  def codec_code(kind, name)
+
+  def codec_code(:audio, name) do
     case Map.fetch(@audio_codecs, String.upcase(name)) do
       {:ok, {_pt, code, _clock, _ch}} -> {:ok, code}
       :error -> :error
     end
   end
 
-  defp codec_code(:video, name) do
+  def codec_code(:video, name) do
     case Map.fetch(@video_codecs, String.upcase(name)) do
       {:ok, {_pt, code, _clock}} -> {:ok, code}
       :error -> :error
     end
   end
 
-  defp codec_code(:text, name) do
+  def codec_code(:text, name) do
     case Map.fetch(@text_codecs, String.upcase(name)) do
       {:ok, {_pt, code, _clock}} -> {:ok, code}
       :error -> :error
     end
   end
+
+  @doc """
+  The codec names of one media, as these tables spell them.
+
+  What a caller may *name* — validating an operator's choice, and printing the
+  vocabulary in a help text. It is not a capability list: a name this side can turn
+  into a code says nothing about what the media server carries, which stays the
+  server's own answer to give (design `docs/design/mcu_module.md` §16.3).
+  """
+  @spec codec_names(:audio | :video | :text) :: [codec_name()]
+  def codec_names(:audio), do: @audio_codecs |> Map.keys() |> Enum.sort()
+  def codec_names(:video), do: @video_codecs |> Map.keys() |> Enum.sort()
+  def codec_names(:text), do: @text_codecs |> Map.keys() |> Enum.sort()
 
   # ── SDP construction ────────────────────────────────────────────────────────
 
@@ -1608,6 +1632,12 @@ defmodule MediaServer.Mendooze.Sdp do
   order falls back to ascending payload type, which is not a preference at all: a
   browser offering `111 9 0` (OPUS first) would be answered `0 9 111` and would then
   send G.711 to a conference that could have had OPUS.
+
+  **`preferred_codec`** is the one thing that overrides that order: a Mendooze codec
+  code the *caller of this function* prefers, moved first among the entries carrying
+  it, the offer's order deciding everything else. It states a preference the mixer
+  does have — an operator's, per conference — and it can only move a payload type
+  already in `rtp_map`, so nothing is announced that the offer did not propose.
   """
   # Callers pass either a full negotiate/3 result (Mockup) or just the keys used
   # here (MendoozeConn, the MCU adapter), hence the open map.
@@ -1616,6 +1646,7 @@ defmodule MediaServer.Mendooze.Sdp do
           optional(:dtmf_clock) => non_neg_integer() | nil,
           optional(:dtmf_pts) => %{optional(non_neg_integer()) => non_neg_integer()},
           optional(:fmt_order) => [non_neg_integer() | String.t()],
+          optional(:preferred_codec) => non_neg_integer() | nil,
           optional(atom()) => any()
         }) :: [rtpmap_entry()]
   def answer_rtpmaps(media, %{rtp_map: send_map} = neg) do
@@ -1625,7 +1656,7 @@ defmodule MediaServer.Mendooze.Sdp do
     fallback_clock = Map.get(neg, :dtmf_clock) || 8000
 
     send_map
-    |> Enum.sort_by(&pt_rank(&1, Map.get(neg, :fmt_order)))
+    |> Enum.sort_by(&preferred_rank(&1, Map.get(neg, :fmt_order), Map.get(neg, :preferred_codec)))
     |> Enum.flat_map(fn {pt_str, code} ->
       pt = String.to_integer(pt_str)
 
@@ -1659,6 +1690,29 @@ defmodule MediaServer.Mendooze.Sdp do
     number = if is_integer(pt), do: pt, else: String.to_integer(pt)
     order = normalize_fmt_order(fmt_order)
     {Enum.find_index(order, &(&1 == Integer.to_string(number))) || length(order), number}
+  end
+
+  @doc """
+  Rank an accepted `{payload type, codec code}` entry with a **preferred codec** first
+  and the offer's own order (`pt_rank/2`) inside each group.
+
+  `prefer` is a Mendooze codec code, or `nil` for no preference — which makes this
+  exactly `pt_rank/2`. A preference can only *move* an entry the offer proposed and
+  the media server accepted: nothing is added, so a codec the caller never offered is
+  never answered.
+
+  Exported for the same reason as `pt_rank/2`: the answer's `rtpmap` order and the
+  primary codec the mixer is told to encode must be one reading, or the SDP names one
+  codec and the wire carries another.
+  """
+  @spec preferred_rank(
+          {String.t() | non_neg_integer(), non_neg_integer()},
+          [term()] | nil,
+          non_neg_integer() | nil
+        ) :: {0 | 1, {non_neg_integer(), non_neg_integer()}}
+  def preferred_rank({_pt, code} = entry, fmt_order, prefer) do
+    rank = pt_rank(entry, fmt_order)
+    if is_integer(prefer) and code == prefer, do: {0, rank}, else: {1, rank}
   end
 
   # `m=` format lists reach us as a payload-type list on RTP profiles, and as the raw

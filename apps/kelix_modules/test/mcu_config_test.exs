@@ -44,6 +44,30 @@ defmodule Kelix.Mod.Mcu.ConfigTest do
     end
   end
 
+  describe "preferred_video_codec (§8.4)" do
+    test "no preference by default — the caller's order decides" do
+      assert parse!(%{}).preferred_video_codec == nil
+    end
+
+    test "a name is accepted case-insensitively and stored as the codec tables spell it" do
+      assert parse!(%{"preferred_video_codec" => "h264"}).preferred_video_codec == "H264"
+      assert parse!(%{"preferred_video_codec" => "VP8"}).preferred_video_codec == "VP8"
+      assert parse!(%{"preferred_video_codec" => "av1"}).preferred_video_codec == "AV1"
+    end
+
+    test "`none` is a preference refused, not a name to resolve" do
+      assert parse!(%{"preferred_video_codec" => "none"}).preferred_video_codec == nil
+    end
+
+    # A codec name nothing can turn into a payload type would sit in the config doing
+    # nothing at all, which is the failure mode the retired lists were removed for.
+    test "an unknown codec is a boot-time error naming the vocabulary" do
+      assert {:error, message} = Config.parse(%{"preferred_video_codec" => "h265"})
+      assert message =~ "preferred_video_codec"
+      assert message =~ "H264"
+    end
+  end
+
   describe "the enum keys take a name (§8.3.7)" do
     test "vad, layout_comp and video_size accept what the CLI renders" do
       config = parse!(%{"vad" => "full", "layout_comp" => "2x2", "video_size" => "vga"})

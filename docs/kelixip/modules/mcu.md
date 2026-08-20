@@ -41,6 +41,7 @@ did_range        = "8000-8099"
 vad              = "full"
 layout_comp      = "2x2"
 video_size       = "hd720p"
+preferred_video_codec = "H264"               # stated first in the answers
 record_dir       = "/var/lib/kelixip/rec"    # on the media server
 image_dir        = "/var/lib/kelixip/img"    # idem
 logo_file        = "ives.png"                # every empty mosaic slot
@@ -121,6 +122,7 @@ Module block — `[module.mcu]` (in `config.toml`):
 | `video_fps` | integer | `30` | Encoded frame rate |
 | `video_bitrate` | integer | `[mediaserver] video_bitrate` (`1500`) | kbps, also the cap on the answer's `b=AS:`. Set it here to give conferences a bitrate of their own |
 | `video_intra_period` | integer | `300` | Frames between intra-frames |
+| `preferred_video_codec` | name | — | The video codec the answers state **first**, hence what the mixer encodes towards a leg that offered it: `H264` / `VP8` / `AV1`, or `none`. It reorders, it never adds — a codec the caller did not offer, or one the media server refused, is logged and ignored |
 | `logo_file` | string | — | Image drawn in **every empty mosaic slot**, on every conference (a bare name under `image_dir`) |
 | `record_dir` | string | — | Directory the media server writes recordings into. Unset ⇒ `recording.start` refuses |
 | `image_dir` | string | — | Directory the media server reads `logo_file` (and `logo=`) from |
@@ -451,6 +453,19 @@ kelictl mcu conference.update uid=c-3f9a video='{"fps":25}'   # the wire form st
 | frame rate | `<n>fps` | `30` |
 | bitrate | `<n>k` (kbit/s) | `[module.mcu] video_bitrate` |
 | intra period | `intra=<n>` (frames) | `300` |
+
+The codec is **not** part of that profile — it is a field of its own, because it is a
+preference and not a setting:
+
+```bash
+kelictl mcu conference.update uid=c-3f9a preferred_video_codec=vp8
+kelictl mcu conference.update uid=c-3f9a preferred_video_codec=none   # no preference
+```
+
+The answer states that codec first, and the mixer encodes it — but only when the
+caller offered it **and** the media server accepted it. Anything else keeps the
+caller's own order, and the leg's log says which of the two dropped the preference.
+Which codecs exist at all is the media server's answer to give, never a config key.
 
 **The mosaic size and the encoded size are one value.** The canvas *is* the picture
 the mixer encodes. Composing at one geometry and encoding at another means rescaling

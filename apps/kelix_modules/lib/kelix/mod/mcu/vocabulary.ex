@@ -46,6 +46,7 @@ defmodule Kelix.Mod.Mcu.Vocabulary do
   """
 
   alias Kelix.Mod.Mcu.Args
+  alias MediaServer.SdpTools, as: Sdp
 
   # §3.6, in wire order: the id is what `SetCompositionType` takes, the name is what
   # an operator says.
@@ -301,6 +302,48 @@ defmodule Kelix.Mod.Mcu.Vocabulary do
   # not a table: `Args.sub_map/4` owns that message, and says it about the same field
   def video(value, _key), do: {:ok, value}
 
+  @doc """
+  Decode a `preferred_video_codec` value: the codec name an answer puts first, or
+  `nil` for no preference.
+
+  Case-insensitive, and `"none"` (equivalently `"any"`) is what **clears** a
+  preference — an update merges the fields it is given, so removing one needs a value
+  to say it with.
+
+  The names come from the framework's codec tables (`MediaServer.SdpTools.codec_names/1`)
+  and the canonical spelling is theirs: a list here would be the second reading this
+  module exists to prevent. Recognising a name is **not** claiming the media server
+  carries it — that stays the server's answer to give (§16.3), and a preference it does
+  not accept is logged and dropped at answer time.
+  """
+  @spec video_codec(term, String.t()) :: {:ok, String.t() | nil} | {:error, String.t()}
+  def video_codec(value, key \\ "preferred_video_codec")
+
+  def video_codec(nil, _key), do: {:ok, nil}
+
+  def video_codec(value, key) when is_binary(value) do
+    case value |> String.trim() |> String.downcase() do
+      name when name in ["", "none", "any"] ->
+        {:ok, nil}
+
+      name ->
+        case Enum.find(video_codec_names(), &(String.downcase(&1) == name)) do
+          nil -> {:error, ~s(#{key}: unknown "#{value}" — #{video_codec_vocabulary()})}
+          canonical -> {:ok, canonical}
+        end
+    end
+  end
+
+  def video_codec(value, key),
+    do: {:error, ~s(#{key} must be a codec name like "h264", or "none", got #{inspect(value)})}
+
+  @doc "The video codec names an operator may write, as the codec tables spell them."
+  @spec video_codec_names() :: [String.t()]
+  def video_codec_names(), do: Sdp.codec_names(:video)
+
+  defp video_codec_vocabulary(),
+    do: "one of " <> Enum.join(video_codec_names(), " ") <> " (case-insensitive), or none"
+
   defp resolve_field(map, name, resolver) do
     case Map.fetch(map, name) do
       :error -> {:ok, map}
@@ -507,6 +550,17 @@ defmodule Kelix.Mod.Mcu.Vocabulary do
       ~s(e.g. video='vga 30fps 1024k' | video=hd720p | video=25fps,intra=300),
       ~s(the wire form is still accepted, literally: video='{"size":"vga","fps":30}'),
       "applies to the participants that join next, not to the ones already encoding"
+    ]
+  end
+
+  @doc "The `preferred_video_codec` argument's help."
+  @spec video_codec_help() :: [String.t()]
+  def video_codec_help() do
+    [
+      "the video codec the answer states first: " <> video_codec_vocabulary(),
+      "honoured only when the caller offered it and the media server accepted it",
+      "it reorders the answer, it never adds a codec — and it is what the mixer encodes",
+      "none = no preference: the caller's own order decides (RFC 3264 §6.1)"
     ]
   end
 

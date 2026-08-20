@@ -23,6 +23,12 @@ defmodule Kelix.Mod.Mcu.Config do
   *accepted* for one release, ignored with a warning naming the replacement, because
   an RPM-installed node has them in `/etc/kelixip/config.toml` and refusing them
   outright turns an upgrade into a node that will not boot (§8.4).
+
+  What **is** here is `preferred_video_codec`: one name, a preference and not a list. It
+  reorders an answer among the payload types the caller offered *and* the media server
+  accepted — it never adds one, so it states no capability — and the leg's log says which
+  of the two dropped it when it is not honoured. That last part is what the retired lists
+  could not do, and the reason they were removed rather than demoted to "preferences".
   """
 
   require Logger
@@ -58,6 +64,12 @@ defmodule Kelix.Mod.Mcu.Config do
             # path: an omitted `video_bitrate` takes `[mediaserver] video_bitrate`,
             # the node's statement of it (`node_video_bitrate/1`).
             video: %{size: 6, fps: 30, bitrate: 1500, intra_period: 300},
+            # The video codec every conference states FIRST in its answers, copied into
+            # each one at create time. Not a codec list and not a capability: it can only
+            # move a payload type the caller offered and the media server accepted, and it
+            # is the codec the mixer then encodes towards that leg. `nil` — the default —
+            # leaves the caller's own order deciding (RFC 3264 §6.1).
+            preferred_video_codec: nil,
             did_range: nil,
             did_ranges: %{},
             # Recording and images (§8.3.8). Paths on the **media server's**
@@ -128,6 +140,7 @@ defmodule Kelix.Mod.Mcu.Config do
   @keys ~w(module call_timeout_ms vad rate medias dtmf
            max_participants destroy_when_empty auto_layout layout_comp did_range
            did_ranges video_size video_fps video_bitrate video_intra_period
+           preferred_video_codec
            xmlrpc_timeout_ms shutdown_grace_ms rtp_timeout_ms gc_orphans
            record_dir image_dir logo_file
            message_rate message_max_bytes message_queue_max message_kinds) ++
@@ -150,6 +163,8 @@ defmodule Kelix.Mod.Mcu.Config do
          {:ok, layout_comp} <- Vocabulary.comp(Map.get(block, "layout_comp"), "layout_comp"),
          {:ok, video_size} <- Vocabulary.size(Map.get(block, "video_size"), "video_size"),
          {:ok, medias} <- medias(block),
+         {:ok, preferred_video_codec} <-
+           Vocabulary.video_codec(Map.get(block, "preferred_video_codec")),
          {:ok, message_kinds} <- message_kinds(block),
          {:ok, did_range} <- did_range(block, "did_range"),
          {:ok, did_ranges} <- did_ranges(block) do
@@ -173,6 +188,7 @@ defmodule Kelix.Mod.Mcu.Config do
            bitrate: int(block, "video_bitrate", node_video_bitrate(defaults.video.bitrate)),
            intra_period: int(block, "video_intra_period", defaults.video.intra_period)
          },
+         preferred_video_codec: preferred_video_codec,
          did_range: did_range,
          did_ranges: did_ranges,
          xmlrpc_timeout_ms: int(block, "xmlrpc_timeout_ms", defaults.xmlrpc_timeout_ms),

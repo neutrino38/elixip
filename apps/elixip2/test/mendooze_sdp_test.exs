@@ -799,12 +799,59 @@ defmodule Mendooze.SdpTest do
       assert Enum.map(Sdp.answer_rtpmaps(:audio, neg), & &1.pt) == [111, 8]
     end
 
+    test "`preferred_codec` moves that codec first, whatever the offer's order says" do
+      # H.264 offered second (VP8 first): a conference that prefers H.264 answers it first
+      neg = %{rtp_map: %{"96" => 107, "97" => 99}, fmt_order: [96, 97], preferred_codec: 99}
+
+      assert Enum.map(Sdp.answer_rtpmaps(:video, neg), & &1.pt) == [97, 96]
+
+      # the offer's order still decides everything the preference does not name
+      neg = Map.put(neg, :rtp_map, %{"96" => 107, "97" => 99, "98" => 110})
+
+      assert Enum.map(Sdp.answer_rtpmaps(:video, %{neg | fmt_order: [98, 96, 97]}), & &1.pt) ==
+               [97, 98, 96]
+    end
+
+    test "`preferred_codec` adds nothing: a codec the offer did not carry stays absent" do
+      neg = %{rtp_map: %{"96" => 107}, fmt_order: [96], preferred_codec: 99}
+      assert Enum.map(Sdp.answer_rtpmaps(:video, neg), & &1.pt) == [96]
+    end
+
+    test "every PT carrying the preferred codec is promoted, in the offer's own order" do
+      # the same codec under two payload types (different fmtp): both move up, and their
+      # relative order stays the caller's
+      neg = %{
+        rtp_map: %{"96" => 107, "97" => 99, "98" => 99},
+        fmt_order: [96, 98, 97],
+        preferred_codec: 99
+      }
+
+      assert Enum.map(Sdp.answer_rtpmaps(:video, neg), & &1.pt) == [98, 97, 96]
+    end
+
     test "a PT absent from `dtmf_pts` still falls back to the negotiated clock" do
       neg = %{rtp_map: %{"101" => 100}, dtmf_clock: 16_000, dtmf_pts: %{8000 => 126}}
 
       assert Sdp.answer_rtpmaps(:audio, neg) == [
                %{pt: 101, encoding: "telephone-event", clock: 16_000, channels: nil}
              ]
+    end
+  end
+
+  # ── codec_code/2 and codec_names/1 ──────────────────────────────────────────
+
+  describe "codec_code/2 and codec_names/1" do
+    test "resolve a name case-insensitively, and refuse an unknown one" do
+      assert Sdp.codec_code(:video, "h264") == {:ok, 99}
+      assert Sdp.codec_code(:video, "AV1") == {:ok, 110}
+      assert Sdp.codec_code(:audio, "opus") == {:ok, 98}
+      assert Sdp.codec_code(:video, "h265") == :error
+    end
+
+    test "name the codecs of one media, and only that media" do
+      assert Sdp.codec_names(:video) == ["AV1", "H264", "VP8"]
+      assert "OPUS" in Sdp.codec_names(:audio)
+      refute "OPUS" in Sdp.codec_names(:video)
     end
   end
 

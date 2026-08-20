@@ -101,10 +101,11 @@ defmodule Kelix.Mod.Mcu do
   # working for one release without them deciding anything (§16.3, the media server
   # arbitrates codecs).
   @create_args ~w(domain name did mcu vad rate medias dtmf
-                  video layout logo max_participants destroy_when_empty)
-
-  @update_args ~w(uid name vad rate medias dtmf layout video logo max_participants
+                  video preferred_video_codec layout logo max_participants
                   destroy_when_empty)
+
+  @update_args ~w(uid name vad rate medias dtmf layout video preferred_video_codec logo
+                  max_participants destroy_when_empty)
 
   # Fields a client may read but never send (§8.3.3). Named as read-only rather than
   # merely unknown: an operator who tries to move `conf_id` or `did` deserves to be
@@ -326,12 +327,14 @@ defmodule Kelix.Mod.Mcu do
   Create a conference from a scenario (§17.2).
 
   `opts` is a keyword list with atom keys — `name:`, `did:`, `mcu:`, `vad:`, `rate:`,
-  `medias:`, `dtmf:`, `video:`, `layout:`, `logo:`, `max_participants:`,
-  `destroy_when_empty:`, `owner:` — validated by exactly the same code as the REST body
+  `medias:`, `dtmf:`, `video:`, `preferred_video_codec:`, `layout:`, `logo:`,
+  `max_participants:`, `destroy_when_empty:`, `owner:` — validated by exactly the same code as the REST body
   of `conference.create`, so the two produce indistinguishable conferences (§17.2).
   There is no codec list: the media server arbitrates codecs (§16.3), and the retired
   `audio_codecs:` / `video_codecs:` / `text_codecs:` / `video_fmtp:` are accepted and
-  ignored with a warning for one release.
+  ignored with a warning for one release. `preferred_video_codec:` is not one of them
+  coming back: it names **one** codec to state first in this conference's answers, and
+  only among the payload types the caller offered and the media server accepted.
 
   ## Ownership
 
@@ -894,6 +897,11 @@ defmodule Kelix.Mod.Mcu do
           %{name: "medias", required: false, help: "audio, video and/or text"},
           %{name: "dtmf", required: false, help: "propose telephone-event (default true)"},
           %{name: "video", required: false, help: Vocabulary.video_help()},
+          %{
+            name: "preferred_video_codec",
+            required: false,
+            help: Vocabulary.video_codec_help()
+          },
           %{name: "layout", required: false, help: Vocabulary.layout_help()},
           %{name: "logo", required: false, help: Vocabulary.logo_help()},
           %{name: "max_participants", required: false},
@@ -921,7 +929,7 @@ defmodule Kelix.Mod.Mcu do
         render: %{
           kind: :detail,
           fields:
-            ~w(name domain did uid mcu conf_id stale created_at max_participants destroy_when_empty vad rate medias dtmf video layout logo recording participants),
+            ~w(name domain did uid mcu conf_id stale created_at max_participants destroy_when_empty vad rate medias dtmf video preferred_video_codec layout logo recording participants),
           labels: @conference_labels,
           # the roster, not the media detail of each leg — that is `participant.show`
           nested: %{"participants" => %{columns: ~w(part_id name from state joined_at)}}
@@ -942,6 +950,11 @@ defmodule Kelix.Mod.Mcu do
           %{name: "rate", required: false},
           %{name: "layout", required: false, help: Vocabulary.layout_help()},
           %{name: "video", required: false, help: Vocabulary.video_help()},
+          %{
+            name: "preferred_video_codec",
+            required: false,
+            help: Vocabulary.video_codec_help()
+          },
           %{name: "logo", required: false, help: Vocabulary.logo_help()},
           %{name: "max_participants", required: false},
           %{name: "destroy_when_empty", required: false}
@@ -1349,6 +1362,7 @@ defmodule Kelix.Mod.Mcu do
         # only the registry holds — so they are decoded here (names → wire ids, the
         # short layout form → fields) and travel as a partial map
         {"video", &Vocabulary.video(Map.get(&1, "video"))},
+        {"preferred_video_codec", &Vocabulary.video_codec(Map.get(&1, "preferred_video_codec"))},
         {"layout", &Vocabulary.layout(Map.get(&1, "layout"))},
         {"logo", &optional_logo(&1)}
       ],
@@ -1407,6 +1421,7 @@ defmodule Kelix.Mod.Mcu do
          # merge over the configured defaults happens in the registry, but the
          # *reading* of what was asked for belongs here, before anything is created
          {:ok, video} <- Vocabulary.video(Map.get(args, "video")),
+         {:ok, preferred_video_codec} <- preferred_video_codec(args),
          {:ok, layout} <- Vocabulary.layout(Map.get(args, "layout")),
          {:ok, logo} <- optional_logo(args),
          # P8a: which m= sections this conference answers. The policy the codec lists
@@ -1427,11 +1442,23 @@ defmodule Kelix.Mod.Mcu do
          # TELEPHONE-EVENT entry out of a codec list: that list is ignored now.
          dtmf: dtmf_arg,
          video: video,
+         preferred_video_codec: preferred_video_codec,
          layout: layout,
          logo: logo,
          max_participants: max_participants,
          destroy_when_empty: destroy_when_empty
        }}
+    end
+  end
+
+  # `:default` when the argument is absent, so "not given" stays distinguishable from
+  # an explicit `preferred_video_codec=none` — the first takes the node's configured
+  # preference, the second refuses it for this conference.
+  defp preferred_video_codec(args) do
+    if Map.has_key?(args, "preferred_video_codec") do
+      Vocabulary.video_codec(Map.get(args, "preferred_video_codec"))
+    else
+      {:ok, :default}
     end
   end
 
@@ -2526,6 +2553,11 @@ defmodule Kelix.Mod.Mcu do
          rtp_timeout_ms: config.rtp_timeout_ms,
          medias: spec_medias(spec) || config.medias,
          video: video,
+         preferred_video_codec:
+           case spec.preferred_video_codec do
+             :default -> config.preferred_video_codec
+             asked -> asked
+           end,
          layout: layout,
          max_participants: spec.max_participants || config.max_participants,
          destroy_when_empty:
@@ -2738,6 +2770,8 @@ defmodule Kelix.Mod.Mcu do
           vad: Map.get(changes, :vad, conf.vad),
           rate: Map.get(changes, :rate, conf.rate),
           video: video,
+          preferred_video_codec:
+            Map.get(changes, :preferred_video_codec, conf.preferred_video_codec),
           layout: layout,
           logo: Map.get(changes, :logo, conf.logo),
           max_participants: Map.get(changes, :max_participants, conf.max_participants),

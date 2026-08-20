@@ -110,6 +110,11 @@ port = 9095
                                    #   (the H.264 profile the answer states is the one
                                    #   the media server reported it accepted, so there
                                    #   is no fmtp key to set here)
+# The video codec the answers state FIRST, hence what the mixer encodes towards a leg
+# that offered it: H264 | VP8 | AV1 | none. A preference, not a codec list — it moves a
+# payload type the caller offered AND the media server accepted, and nothing else. A
+# miss is logged per leg, naming which of the two dropped it.
+#preferred_video_codec = "H264"
 # Paths on the MEDIA SERVER's filesystem, not on this host (the same box in a
 # single-machine deployment, and not in production). The module only ever appends a
 # file name it validated; a command chooses the name, never the directory. Unset

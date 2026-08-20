@@ -208,6 +208,38 @@ defmodule Kelix.Mod.Mcu.VocabularyTest do
     end
   end
 
+  describe "video_codec/2" do
+    test "a name is canonicalised, whatever case it was written in" do
+      assert Vocabulary.video_codec("h264") == {:ok, "H264"}
+      assert Vocabulary.video_codec("VP8") == {:ok, "VP8"}
+      assert Vocabulary.video_codec(" av1 ") == {:ok, "AV1"}
+    end
+
+    test "`none` and `any` say *no* preference, which is how one is cleared" do
+      assert Vocabulary.video_codec("none") == {:ok, nil}
+      assert Vocabulary.video_codec("any") == {:ok, nil}
+      assert Vocabulary.video_codec(nil) == {:ok, nil}
+    end
+
+    test "an unknown name is refused with the vocabulary" do
+      assert {:error, msg} = Vocabulary.video_codec("h265")
+      assert msg =~ ~s(unknown "h265")
+      assert msg =~ "H264"
+
+      assert {:error, msg} = Vocabulary.video_codec(99)
+      assert msg =~ "must be a codec name"
+    end
+
+    # The names are the framework codec tables', not a second list kept here.
+    test "the vocabulary is the codec tables'" do
+      assert Vocabulary.video_codec_names() == MediaServer.SdpTools.codec_names(:video)
+
+      for name <- Vocabulary.video_codec_names() do
+        assert Vocabulary.video_codec(String.downcase(name)) == {:ok, name}
+      end
+    end
+  end
+
   describe "the tables the rest of the module reads" do
     test "the CLI labels are the reverse of what the parser accepts" do
       assert Vocabulary.mosaic_names()["1"] == "2x2"

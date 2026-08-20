@@ -390,9 +390,11 @@ are **not** forced into it: they are plain functions on `Kelix.Mod.Mcu`
   conf_id:     42,               # MCU-side integer id
   vad:         1,                # 0 none | 1 basic | 2 full
   rate:        32000,            # mixer sampling rate (default, §8.4)
-  codecs:      %{audio: ["OPUS","G722","PCMA","PCMU"], video: ["H264"], text: [ "T140", "T140RED"]},
+  medias:      [:audio, :video, :text],   # which m= sections it answers at all (§8.4)
   video:       %{size: 6, fps: 30, bitrate: 1500, intra_period: 300},  # inline profile
                                  #   `size` goes away with S6 (§16.7); `fps` is a maximum
+  preferred_video_codec: "H264", # stated FIRST in the answers, nil for no preference:
+                                 #   a preference, not a codec list (§8.4)
   layout:      %{comp: 1, size: 6, auto: true},   # mosaic 0; `size` = `video.size`
                                  #   the two are one value, and S6 keeps only this one
   max_participants: 20,
@@ -837,6 +839,15 @@ Two answerer details that are not rules of their own but have bitten once each:
   Ascending payload type, which is what sorting the accepted map gives, is not a
   preference at all: a browser offering `111 9 0` (OPUS first) was answered `0 9 111`
   and then sent G.711 to a conference that could have had OPUS.
+
+  The **one** preference a mixer does have is the conference's
+  `preferred_video_codec` (§8.4): the payload types carrying that codec move to the
+  front, the offer's order deciding everything else and their own order among
+  themselves. It reorders and never adds — a codec the caller did not offer, or one
+  the media server's verdict left out, cannot be moved anywhere — so it states no
+  capability. Both misses are logged per leg, naming which of the two dropped it,
+  and both sides of the one reading follow it: `answer_rtpmaps/2` for the SDP and
+  `primary_entry/1` for the encoder.
 - **ICE credentials use the `ice-char` alphabet** (`ALPHA / DIGIT / "+" / "/"`, RFC
   8839 §5.4) — hex, as the field-proven gateway emits. Base64**url** produces `-`
   and `_`, outside that grammar: browsers do not check, strict SDP parsers do, and
@@ -934,6 +945,7 @@ verdict, but these remain kelixip's, and it is worth being explicit about why:
 | Owned by kelixip | Why it cannot be the server's |
 |---|---|
 | Which `m=` sections are answered at all (`medias`, §8.4) | a deployment policy — audio-only conferences are a product decision, not a codec capability |
+| The order of the answer, and the conference's `preferred_video_codec` (§8.4) | the answerer states the preference (RFC 3264 §6.1), and the server's verdict is a *set* — it says what it accepts, never in which order. The preference can only move what that set already holds |
 | Codec **name → Medooze constant** mapping | the server's API speaks integer codec ids; something must turn `H264` into `99`. An offered codec absent from that table cannot even be proposed, and is logged — this is the one residual local filter, and it is a vocabulary, not a policy |
 | The RTP profile, ICE, DTLS role resolution, `c=` line assembly, direction, `b=AS:` | SDP-level answerer duties; the server has no view of the SDP |
 | The `a=rtcp-fb` intersection and its `SetRTPProperties` counterparts | RFC 4585 semantics, and the server has no feedback-capability query to delegate to |
@@ -1800,6 +1812,12 @@ video_size          = "hd720p"  # qcif cif vga pal hvga qvga hd720p wqvga xga wv
 video_fps           = 30
 video_bitrate       = 1500     # kbps; default = [mediaserver] video_bitrate
 video_intra_period  = 300
+# The video codec every conference of this node states FIRST in its answers, hence what
+# the mixer encodes towards a leg that offered it. A preference, not a codec list: it
+# moves a payload type the caller offered AND the media server accepted, and nothing
+# else — a miss is logged per leg, naming which of the two dropped it. Unset (or
+# "none"): the caller's own order decides.
+preferred_video_codec = "H264"   # H264 VP8 AV1 | none
 # timeouts
 xmlrpc_timeout_ms   = 10000
 call_timeout_ms     = 5000     # facade bound (Kelix.Module.safe_call)
@@ -1825,6 +1843,13 @@ arbitrating codecs there is nothing for them to mean, and keeping them as
 watch the server ignore it, and have no way to tell whether the list or the mixer
 was at fault. `Config.validate_codecs/2` goes with them, and with it the codec
 vocabulary the module maintained in parallel with the server's.
+
+What answers that objection, and is therefore allowed, is `preferred_video_codec`
+(§6.3): **one** codec name, an *order* rather than a set, applied to the payload types
+the offer proposed and the verdict accepted — and logged per leg when it applies to
+none of them, naming which of the two dropped it. The operator gets the answer the
+lists could not give: "the caller never offered it" or "the media server refused it".
+It states no capability, filters nothing, and cannot make a call fail.
 
 Three consequences that need a home rather than a silent drop:
 
