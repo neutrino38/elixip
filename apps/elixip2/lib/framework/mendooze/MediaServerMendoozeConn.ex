@@ -2682,15 +2682,14 @@ defmodule MediaServer.Mendooze.Conn do
     end
   end
 
-  # WebRTC offer transport plane (§2.4). rtcp-mux is always offered (G5), mid is
-  # our media name (mirrored back by the peer), candidates are host-only with the
-  # receive port (D6), and rtcp-fb is advertised per video PT. No a=ice-lite in
-  # offers (D7): we emulate a browser-shaped offer.
+  # WebRTC offer transport plane (§2.4). rtcp-mux is always offered (G5),
+  # candidates are host-only with the receive port (D6), and rtcp-fb is advertised
+  # per video PT. No a=ice-lite in offers (D7): we emulate a browser-shaped offer.
   defp add_offer_webrtc(base, state, media) do
     if webrtc?(state) do
       Map.merge(base, %{
         rtcp_mux: true,
-        mid: to_string(media),
+        mid: offer_mid(state, media),
         candidates:
           Sdp.host_candidates(state.local_ip, Map.fetch!(state.local_ports, media), true),
         rtcp_fb: media == :video,
@@ -2701,6 +2700,19 @@ defmodule MediaServer.Mendooze.Conn do
       })
     else
       base
+    end
+  end
+
+  # A section's mid does not change once it is negotiated (RFC 8843 §6.3.2, JSEP
+  # §5.2.1). On a leg where we ANSWERED, the mid is the peer's — echoed verbatim
+  # in that answer — so a re-offer has to name it again rather than the media name
+  # we would have invented: libwebrtc associates transceivers BY mid, and a
+  # section arriving under a new one is not the section it already has. Our own
+  # name is for the offer nobody has answered yet.
+  defp offer_mid(state, media) do
+    case Enum.find(state.offer_descs || [], &(&1.type == media)) do
+      %{mid: mid} when is_binary(mid) -> mid
+      _ -> to_string(media)
     end
   end
 

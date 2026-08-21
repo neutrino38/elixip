@@ -1423,11 +1423,15 @@ defmodule Mendooze.ConnTest do
 
     for desc <- descs do
       assert desc.rtcp_mux
-      assert desc.mid == to_string(desc.type)
       assert desc.candidates != []
       assert match?({:dtls, _, _, _}, desc.crypto)
       assert desc.protocol == "UDP/TLS/RTP/SAVPF"
     end
+
+    # The mids are the ones the session already has, not the media names we
+    # would have invented: a section's mid does not change once negotiated, and
+    # libwebrtc matches transceivers by it.
+    assert Enum.map(descs, & &1.mid) == ["0", "1"]
 
     # And the DTLS+ICE association is kept: a re-offer that mints fresh ICE
     # credentials is an ICE restart nothing asked for.
