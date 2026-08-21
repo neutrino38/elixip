@@ -238,6 +238,11 @@ defmodule Kelix.DirectCallMediaScriptTest do
     assert is_binary(forwarded) and forwarded != ""
     refute forwarded =~ "192.168.1.50"
 
+    # And carried in the top rung of the peer's profile ladder: the registered
+    # device is offered DTLS-SRTP over ICE first, whatever the caller offered us.
+    assert forwarded =~ "RTP/SAVPF"
+    assert forwarded =~ "a=fingerprint:"
+
     Manual.simulate(tp, 200, 50)
     assert_receive {:replied, 200, _reason, _f, _r}, 5_000
 
@@ -246,6 +251,46 @@ defmodule Kelix.DirectCallMediaScriptTest do
 
     # Out of the block and in `connected`: a BYE from the caller now ends it, and
     # it too goes out through a release.
+    send(instance, {:BYE, in_dialog(:BYE, req), self(), dialog})
+    assert_receive {:instance_done, :ok}, 10_000
+    assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
+  end
+
+  # ── The callee's offer profile: one ladder, walked by the framework ─────────
+
+  # A phone that cannot do WebRTC says "not this body" and is offered the next
+  # rung on a new INVITE to the same target, without the caller hearing anything
+  # about it. `415` rather than `488` on purpose: the script widens `fallback_on`
+  # because that is what equipment in the field answers.
+  test "a callee refusing the WebRTC offer is re-offered the next rung",
+       %{scenario: module} do
+    :ok = register_callee("dcm-ladder")
+    tp = mockup_pid("dcm-ladder")
+    {:ok, dialog} = MockDialog.start_link(self())
+
+    {instance, ref, req} = authenticated_call(module, dialog, "call-media-ladder")
+
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, first}}, 5_000
+    assert SIP.Msg.Ops.sdp_body(first) =~ "RTP/SAVPF"
+
+    Manual.simulate(tp, 415, 50)
+
+    # The middle rung: the feedback profile, no DTLS and no ICE.
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, second}}, 5_000
+    offer = SIP.Msg.Ops.sdp_body(second)
+    assert offer =~ "RTP/AVPF"
+    refute offer =~ "a=fingerprint:"
+
+    # The caller has heard nothing of the refusal: their first final response is
+    # the answer to the call.
+    refute_received {:replied, 415, _reason, _f, _r}
+
+    Manual.simulate(tp, 200, 50)
+    assert_receive {:replied, 200, _reason, _f, _r}, 5_000
+
+    send(instance, {:ACK, in_dialog(:ACK, req), self(), dialog})
+    assert_receive {:sip_mockup, {:request_sent, :ACK, _}}, 5_000
+
     send(instance, {:BYE, in_dialog(:BYE, req), self(), dialog})
     assert_receive {:instance_done, :ok}, 10_000
     assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000

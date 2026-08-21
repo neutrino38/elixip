@@ -52,9 +52,13 @@ defmodule Kelix.DirectCallWithAuthAndMedia do
 
   # How each leg terminates its media. `inbound: [webrtc: :if_offered]` takes a
   # secure leg when the caller asks for one (SDES from a SIP phone, DTLS+ICE from a
-  # WebRTC client) and plain RTP otherwise; `outbound: [webrtc: :no]` offers plain
-  # RTP to the registered device — which is what makes this a WebRTC gateway when
-  # the two differ.
+  # WebRTC client) and plain RTP otherwise.
+  #
+  # `outbound:` names the medias and says NOTHING about the portage: what the
+  # registered device is offered is the peer's `profile:` in `place_call`, one rung
+  # at a time. `webrtc: :if_offered` would be meaningless here — that value reads
+  # an offer, and this leg is the one we write — and `webrtc: :no` would decide in
+  # advance the very thing the ladder exists to discover.
   #
   # Transcoding is a policy, not a fact. The codec is picked ONCE for both legs:
   # the first codec of the caller's list that the callee also answered (§5).
@@ -69,14 +73,22 @@ defmodule Kelix.DirectCallWithAuthAndMedia do
   # Video could not afford this until the media server learnt to bridge video the
   # way it bridges audio (mediaserver 8f80fed) — before that, a transcoder on the
   # path meant a decode, a scale and a re-encode on every single call.
-  #
-  # To reach a callee that is itself a WebRTC client, do not flip `outbound:` here
-  # — put `profile: :webrtc_if_supported` on the peer below and let the framework
-  # walk the webrtc → avpf → avp ladder on a 488 (§7.5).
   @media {:mediaserver,
           inbound: [webrtc: :if_offered, media: :audio_video],
-          outbound: [webrtc: :no, media: :audio_video],
+          outbound: [media: :audio_video],
           transcode: [audio: :avoid, video: :avoid]}
+
+  # What the registered device is offered, and what to offer it next when it
+  # refuses the BODY (§7.5): the ladder is `webrtc → avpf → avp`, a new INVITE to
+  # the same target per rung. A browser registered over WSS answers the first one;
+  # a phone that cannot walks down to the plain RTP it would have been offered
+  # outright, at the price of one extra transaction per rung.
+  #
+  # `fallback_on` widens the default `[488]`: equipment in the field says `415` or
+  # `606` for "not this body". A code absent from this list ends the attempt with
+  # the ladder still full, which is the failure this option exists to avoid.
+  @callee_profile :webrtc_if_supported
+  @callee_fallback_on [415, 488, 606]
 
   state initial_state do
     goto(wait_invite)
@@ -166,6 +178,7 @@ defmodule Kelix.DirectCallWithAuthAndMedia do
             goto(releasing, "no media server available")
 
           :ok ->
+            peer = %{peer | profile: @callee_profile, fallback_on: @callee_fallback_on}
             call(args: %{peer: peer, request: req, media: @media})
 
             on_events do
