@@ -31,6 +31,7 @@ The user-facing counterparts live at the repository root —
 |---|---|
 | [kelixip_roadmap.md](kelixip_roadmap.md) | presence, `Path` generation, usrloc persistence, HA, `radius_billing` |
 | [mcu_server_evolutions.md](mcu_server_evolutions.md) | media-server increments the conferencing module waits on |
+| [mcu_module_evolutions.md](mcu_module_evolutions.md) | conferencing module increments on this side of the wire, starting with the `conference()` block |
 | [evolution-auth-db.md](evolution-auth-db.md) | a replaceable authentication backend (LDAP, HTTP, Diameter) |
 | [kelixip-b2bua.md](kelixip-b2bua.md) | `queue()` above the B2BUA primitives (`call()` shipped in 1.5.0) |
 | [sbb_evolutions.md](sbb_evolutions.md) | service building blocks: the catalogue, the published view, the TypeScript side |

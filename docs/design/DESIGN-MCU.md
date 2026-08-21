@@ -435,6 +435,11 @@ Delegated codec negotiation (§6) landed on this side: the module's codec lists
 are gone, and the old configuration keys are accepted with a warning naming
 their replacement.
 
+**What this side still owes its scripts** is
+[docs/design/mcu_module_evolutions.md](mcu_module_evolutions.md), starting with
+the `conference()` service building block: the three states every conference
+script copies, moved into the module that owns them.
+
 ---
 
 ## 13. Invariants

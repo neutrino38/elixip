@@ -38,6 +38,10 @@ packaging and are still copied per script:
   the rules such a block would enforce;
 - **REGISTER challenge / accept / reject**, application-side by design and
   therefore duplicated per registrar script;
+- the **conference leg** of `mcu.exs` and `mcu_adhoc.exs`: `in_call`,
+  `in_conference` and `hanging_up`, already copied and already drifted apart.
+  Owned by the MCU module, specified in
+  [mcu_module_evolutions.md](mcu_module_evolutions.md);
 - **generic menu / prompt-and-collect** — play the choices, collect the DTMF,
   handle retries and fat-fingered input, answer `{:menu, :choice, %{key: key}}`
   or `{:menu, :disconnected, _}`. Not a B2BUA fragment at all, which is the

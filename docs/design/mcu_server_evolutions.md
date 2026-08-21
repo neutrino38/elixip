@@ -10,6 +10,9 @@ receiving media, and the event vocabulary already declares
 `participant.media_connected` / `participant.media_timeout`, so a consumer
 written today needs no change when the server starts emitting them.
 
+The controller side has a backlog of its own:
+[`mcu_module_evolutions.md`](mcu_module_evolutions.md).
+
 ## What is left
 
 Changes to make in the media server (`../mediaserver`, the Mendooze fork) so the
