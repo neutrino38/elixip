@@ -924,6 +924,37 @@ defmodule SIP.DialogImpl do
 
   defp await_ack(state, _req, _resp_code, _uas_t), do: state
 
+  # An inbound dialog is established by the 2xx WE send to the request that
+  # created it — the mirror of handle_UAS_response/3 doing it on receipt of a 2xx
+  # on the outbound side. Nothing else ever set it, so an inbound dialog stayed
+  # `:initial` for its whole life: `pending_invite_transaction/1` found no 2xx to
+  # ACK on that leg, and every non-2xx final to a request we later sent INTO the
+  # dialog read as "the initial request was rejected" and tore the dialog down.
+  # The capture of 2026-08-21 shows the cost: a browser answering 488 to a
+  # relayed re-offer killed the caller's dialog, so the B2BUA saw its caller hang
+  # up, BYEd the callee, and answered 481 to the caller's own UPDATE and BYE.
+  #
+  # The CSeq pair tells the creating request from one received later — matched in
+  # the head, so a request carrying none takes the fallback clause instead of
+  # raising: send_in_dialog_request/2 keeps `msg` as the request that created the
+  # dialog, and an inbound dialog never replaces it.
+  defp establish_inbound(
+         state = %SIP.DialogImpl{direction: :inbound, state: :initial, msg: %{cseq: cseq}},
+         %{cseq: cseq},
+         resp_code
+       )
+       when resp_code in 200..299 do
+    Logger.debug(
+      dialogpid: "#{inspect(self())}",
+      module: __MODULE__,
+      message: "Inbound dialog established"
+    )
+
+    %SIP.DialogImpl{state | state: :established}
+  end
+
+  defp establish_inbound(state, _req, _resp_code), do: state
+
   # Counterpart of await_ack/4: the ACK arrived, so release the IST. Cast once —
   # the transaction ignores the ACK retransmissions that follow, and it may
   # already have died on timer H.
@@ -1027,6 +1058,7 @@ defmodule SIP.DialogImpl do
           add_totag(state, nil)
           |> close_transaction(uas_t)
           |> await_ack(req, resp_code, uas_t)
+          |> establish_inbound(req, resp_code)
 
         _ ->
           raise "Unsupported response code #{resp_code}"
@@ -1765,7 +1797,14 @@ defmodule SIP.DialogImpl do
     %SIP.DialogImpl{state | branches: Map.delete(state.branches, transact_pid)}
   end
 
-  defp handle_UAS_response(state, rsp, _transact_pid)
+  # The request that created the dialog was refused, so there is no dialog. Only
+  # an OUTBOUND dialog can hear that: an inbound one was created by a request we
+  # ANSWER, never one we send, so no response reaching this function can be about
+  # its creation — it is about something we sent INTO it, and that ends the
+  # transaction alone (§14.1: after a refused re-INVITE the session is exactly
+  # what it was). Read the other way round, as it was, a browser's 488 to a
+  # relayed re-offer terminated the caller's dialog mid-call.
+  defp handle_UAS_response(state = %SIP.DialogImpl{direction: :outbound}, rsp, _transact_pid)
        when state.state in [:initial, :uac_challenged] and rsp.response in 400..699 do
     Logger.info(
       dialogpid: "#{inspect(self())}",
@@ -1794,17 +1833,34 @@ defmodule SIP.DialogImpl do
 
   defp handle_UAS_response(state = %SIP.DialogImpl{}, rsp, transact_pid)
        when state.state == :established do
-    if transact_pid == state.closing_transaction and rsp.response not in [401, 407] do
-      # The closing transaction has been completed. Kill the dialog
-      Logger.debug(
-        dialogpid: "#{inspect(self())}",
-        module: __MODULE__,
-        message: "Final dialog transaction completed by final anwswer #{rsp.response}"
-      )
+    cond do
+      transact_pid == state.closing_transaction and rsp.response not in [401, 407] ->
+        # The closing transaction has been completed. Kill the dialog
+        Logger.debug(
+          dialogpid: "#{inspect(self())}",
+          module: __MODULE__,
+          message: "Final dialog transaction completed by final anwswer #{rsp.response}"
+        )
 
-      %{state | state: :terminated}
-    else
-      state
+        %{state | state: :terminated}
+
+      rsp.response == 481 ->
+        # RFC 3261 §12.2.1.2: whatever the request was, the far end has just said
+        # it knows no such dialog. Ours cannot outlive that, and this is the one
+        # reading of a non-2xx that is not a policy — hence here rather than in
+        # each caller. A TIMEOUT is deliberately not treated the same way: the
+        # keepalive counter (SIP.DialogImpl.KeepAlive) and the transport watch own
+        # that question, and one lost packet is not a dialog that ended.
+        Logger.info(
+          dialogpid: "#{inspect(self())}",
+          module: __MODULE__,
+          message: "far end knows no such dialog (481 to #{inspect(rsp.cseq)})"
+        )
+
+        %{state | state: :terminated}
+
+      true ->
+        state
     end
   end
 
