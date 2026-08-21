@@ -128,6 +128,11 @@ install -m 0644 sysconfig/kelixip %{buildroot}%{_sysconfdir}/sysconfig/%{name}
 
 install -D -m 0644 systemd/kelixip.service %{buildroot}%{_unitdir}/%{name}.service
 
+# Shell completion for kelictl. Inert without the bash-completion package, hence no
+# dependency on it: the file is data, loaded by basename when the operator types.
+install -D -m 0644 completion/kelictl \
+    %{buildroot}%{_datadir}/bash-completion/completions/kelictl
+
 # Mutable state (future usrloc persistence, operator-installed scripts) and the log
 # directory used when stdout is redirected. The unit also declares them, so a
 # tmpfs-only deployment still gets them.
@@ -175,6 +180,12 @@ fi
 %{_unitdir}/%{name}.service
 %{_sbindir}/kelictl
 %{_sbindir}/kelixip
+# The two completion directories are owned here as well as by the bash-completion
+# package, which we do not require: shared ownership is legal, an unowned directory
+# left behind by an erase is not.
+%dir %{_datadir}/bash-completion
+%dir %{_datadir}/bash-completion/completions
+%{_datadir}/bash-completion/completions/kelictl
 # The core owns script_dir itself, so mod-mcu can drop its scripts in without
 # either package claiming the directory twice.
 %dir %{_datadir}/%{name}

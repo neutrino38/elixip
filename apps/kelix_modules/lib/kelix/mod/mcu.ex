@@ -857,7 +857,8 @@ defmodule Kelix.Mod.Mcu do
   media pool would hand out: it must reach the server holding the mixer.
   """
   @spec media_config(Conference.t()) :: keyword
-  def media_config(%Conference{mcu: mcu}), do: [module: Adapter, url: "mcu://" <> mcu]
+  def media_config(%Conference{mcu: mcu}),
+    do: [name: mcu, module: Adapter, url: "mcu://" <> mcu]
 
   @doc "The live row of `part` (it carries the MCU-side id and the adapter connection)."
   @spec participant(Conference.participant()) :: {:ok, Conference.participant()} | :error

@@ -447,6 +447,13 @@ defmodule Kelix.Control.CLITest do
     assert out =~ "script"
     assert out =~ "waiter.exs"
     assert out =~ "900012345"
+
+    # And the three call-shape columns, which this instance has nothing to put in:
+    # a registrar negotiates no media, connects to no media server and dials
+    # nobody. They carry a standing value rather than a dash — "does not apply"
+    # is an answer, "no value yet" is not the same one.
+    assert out =~ ~r/medias\s+mediaserver\s+outbound/
+    assert out =~ ~r/n\/a\s+none\s+n\/a/
   end
 
   test "stop with a non-integer id → error, exit 2" do
@@ -952,6 +959,148 @@ defmodule Kelix.Control.CLITest do
     test "a module namespace still resolves its own help against the node" do
       assert {1, out} = help(["mcu", "help"])
       assert out =~ "unreachable"
+    end
+  end
+
+  describe "shell completion" do
+    defmodule CompRegistrar do
+      @uri %SIP.Uri{scheme: "sip:", userpart: "alice", domain: "10.0.0.9", port: 5062}
+
+      def all("cli.comp.example.com"),
+        do: %{"alice" => [%{contact: @uri, expires_at: DateTime.utc_now()}], "bob" => []}
+
+      def all(_domain), do: %{}
+    end
+
+    defp words(argv, target \\ node()) do
+      assert {0, out} = CLI.run(["complete" | argv], target)
+      String.split(out, "\n", trim: true)
+    end
+
+    # A served config with a loaded call script: `reload-script` completes the names
+    # the registry actually holds, which no fixture-free setup would have.
+    setup do
+      %{dir: dir} = Kelix.Test.Fixtures.domains_dir()
+      script = Path.join(dir, "completion.exs")
+
+      File.write!(script, """
+      defmodule KelixTest.Completion#{System.unique_integer([:positive])} do
+        use SIP.Scenario
+        uas :invite
+        state initial_state do
+          scenario_success("ok")
+        end
+        on_shutdown do
+          scenario_aborted("shutdown")
+        end
+      end
+      """)
+
+      toml = Path.join(dir, "domains.toml")
+
+      File.write!(toml, """
+      [[domain]]
+      name = "cli.comp.example.com"
+
+      [[domain.call]]
+      pattern = "1XXX"
+      script = "#{script}"
+
+      [[domain]]
+      name = "cli.other.example.net"
+      """)
+
+      assert :ok = Kelix.Domains.reload(toml)
+
+      Kelix.Test.Fixtures.with_module("registrar", CompRegistrar)
+      Kelix.Test.Fixtures.with_module("compmod", Kelix.Control.CLITest.HelpCtl)
+
+      :ok =
+        Kelix.Control.Registry.register(
+          "compmod",
+          Kelix.Control.CLITest.HelpCtl.describe_control()
+        )
+
+      on_exit(fn -> Kelix.Control.Registry.deregister("compmod") end)
+
+      %{script: script}
+    end
+
+    test "the first word offers the core commands and the loaded modules" do
+      candidates = words([""])
+
+      assert "status" in candidates
+      assert "reload-script" in candidates
+      assert "graceful-shutdown" in candidates
+      # what no shipped script could know
+      assert "compmod" in candidates
+      # not an operator verb: the hook is not part of the surface it completes
+      refute "complete" in candidates
+    end
+
+    test "a prefix filters, and an empty answer is empty — never an error" do
+      assert words(["rel"]) == ["reload-all", "reload-script"]
+      assert words(["zzz"]) == []
+    end
+
+    test "a core noun offers its sub-commands, its object names, then its AORs" do
+      assert words(["registration", ""]) == ["help", "list", "remove", "show"]
+
+      assert words(["registration", "show", "cli."]) ==
+               ["cli.comp.example.com", "cli.other.example.net"]
+
+      # the AORs of the domain already typed, not of the whole location service
+      assert words(["registration", "show", "cli.comp.example.com", ""]) == ["alice", "bob"]
+      assert words(["registration", "show", "cli.other.example.net", ""]) == []
+    end
+
+    test "a mistyped core noun completes nothing, and is never taken for a module" do
+      assert words(["domain", "shwo", ""]) == []
+    end
+
+    # Membership, not equality: the registry keeps what earlier tests loaded, and a
+    # script stays reloadable after its rule is gone.
+    test "reload-script offers the configured scripts and its flag", %{script: script} do
+      candidates = words(["reload-script", ""])
+
+      # configured by the served domains.toml and never called: the registry does not
+      # hold it yet, and it is reloadable all the same
+      assert script in candidates
+      assert "--notify" in candidates
+
+      # every word after the verb is another script name, so the flag stays offered
+      assert words(["reload-script", script, "--n"]) == ["--notify"]
+    end
+
+    test "log-level offers the vocabulary Kelix.Control validates against" do
+      assert words(["log-level", ""]) == Kelix.Control.log_levels()
+    end
+
+    test "a module namespace offers its declared commands, then their arguments" do
+      assert words(["compmod", ""]) == ["conference.create", "conference.update", "help"]
+      assert words(["compmod", "help", "conference.c"]) == ["conference.create"]
+
+      assert words(["compmod", "conference.create", ""]) ==
+               ["domain=", "layout=", "name=", "vad="]
+
+      # an argument already given is not offered twice
+      assert words(["compmod", "conference.create", "domain=x", ""]) ==
+               ["layout=", "name=", "vad="]
+
+      # the value of an argument is the module's vocabulary, not ours to guess
+      assert words(["compmod", "conference.create", "layout="]) == []
+    end
+
+    # The shell reads stdout as a word list: there is no way to show it an error, so
+    # an unreachable node must answer with the static half and exit 0.
+    test "a node that does not answer still completes the static tree" do
+      candidates = words([""], :"ghost@127.0.0.1")
+
+      assert "status" in candidates
+      refute "compmod" in candidates
+
+      assert words(["registration", ""], :"ghost@127.0.0.1") == ["help", "list", "remove", "show"]
+      assert words(["registration", "show", ""], :"ghost@127.0.0.1") == []
     end
   end
 end

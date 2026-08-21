@@ -28,9 +28,16 @@ defmodule SIP.Scenario.Monitor do
           command_type: command_type(),
           state: String.t(),
           event: String.t(),
-          event_type: command_type()
+          event_type: command_type(),
+          medias: String.t(),
+          mediaserver: String.t(),
+          outbound: String.t()
         }
 
+  # The three call-shape columns default to a *value*, not to an empty string: a
+  # call that negotiated no media, connects to no media server and dials nobody is
+  # the ordinary case (a registrar), and "n/a" says so where a blank cell would
+  # read as "not measured".
   @empty %{
     scenario: "",
     account: "",
@@ -38,8 +45,14 @@ defmodule SIP.Scenario.Monitor do
     command_type: nil,
     state: "",
     event: "",
-    event_type: nil
+    event_type: nil,
+    medias: "n/a",
+    mediaserver: "none",
+    outbound: "n/a"
   }
+
+  # Display letter of each negotiated media, in the order they are rendered.
+  @media_letters [audio: "A", video: "V", text: "T"]
 
   # ── Public API ──────────────────────────────────────────────────────────────
 
@@ -86,6 +99,67 @@ defmodule SIP.Scenario.Monitor do
     if Process.whereis(__MODULE__) do
       slot_id = Process.get(:scenario_slot_id, self())
       GenServer.cast(__MODULE__, {:account, slot_id, to_string(username)})
+    end
+
+    :ok
+  end
+
+  @doc """
+  Record the media the call has just negotiated: the `kinds` of the answer the two
+  ends settled on, as `SIP.Msg.Ops.media_kinds/1` reads them. Rendered
+  `A` / `AV` / `AVT`, and `none` for an answer that carried none of the three.
+
+  Called by the framework wherever an answer is built, received or relayed, so a
+  scenario has nothing to say about it. No-op if the monitor is not running.
+  """
+  @spec note_medias([:audio | :video | :text]) :: :ok
+  def note_medias(kinds) when is_list(kinds) do
+    put(:medias, media_label(kinds))
+  end
+
+  @doc """
+  Record the media server this call is connected to, by the name it is declared
+  under (`[mediaserver.pool.<name>]`). No-op if the monitor is not running.
+  """
+  @spec note_mediaserver(String.t()) :: :ok
+  def note_mediaserver(name) do
+    put(:mediaserver, to_string(name))
+  end
+
+  @doc """
+  Record the destination of the outbound leg: the target being dialled, and then
+  the one that answered — a serial hunt walks several, and the column names the
+  one the call is currently about. No-op if the monitor is not running.
+  """
+  @spec note_outbound(String.t() | %SIP.Uri{}) :: :ok
+  def note_outbound(uri) do
+    put(:outbound, uri_label(uri))
+  end
+
+  defp media_label(kinds) do
+    case Enum.map_join(@media_letters, "", fn {kind, letter} ->
+           if kind in kinds, do: letter, else: ""
+         end) do
+      "" -> "none"
+      label -> label
+    end
+  end
+
+  # The destination as an operator dialled it: the URI without its display name,
+  # its header parameters or its `method` — `SIP.Uri.serialize_ruri/1` is the one
+  # reading of "this URI as a request target" (see the URI-parameters rule in
+  # CLAUDE.md).
+  defp uri_label(%SIP.Uri{} = uri) do
+    {:ok, label} = SIP.Uri.serialize_ruri(uri)
+    label
+  end
+
+  defp uri_label(uri), do: to_string(uri)
+
+  defp put(key, value) do
+    if Process.whereis(__MODULE__) do
+      slot_id = Process.get(:scenario_slot_id, self())
+      GenServer.cast(__MODULE__, {:put, slot_id, key, value})
     end
 
     :ok
@@ -181,6 +255,11 @@ defmodule SIP.Scenario.Monitor do
   end
 
   @impl true
+  def handle_cast({:put, call_id, key, value}, st) do
+    update(st, call_id, %{key => value})
+  end
+
+  @impl true
   def handle_cast({:command, call_id, type, command}, st) do
     update(st, call_id, %{command: command, command_type: type})
   end
@@ -193,7 +272,18 @@ defmodule SIP.Scenario.Monitor do
       |> Enum.sort_by(& &1.idx)
       |> Enum.map(fn entry ->
         entry
-        |> Map.take([:scenario, :account, :command, :command_type, :state, :event, :event_type])
+        |> Map.take([
+          :scenario,
+          :account,
+          :command,
+          :command_type,
+          :state,
+          :event,
+          :event_type,
+          :medias,
+          :mediaserver,
+          :outbound
+        ])
         |> Map.put(:depth, length(entry.idx) - 1)
         |> Map.put(:slot, entry.slot)
       end)

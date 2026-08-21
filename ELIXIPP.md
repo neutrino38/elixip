@@ -286,21 +286,39 @@ Keys, in live mode:
 ## Live monitor (`--monitor`)
 
 One row per running instance — the account it uses, the last high-level command it
-issued, its current FSM state and the event that caused the last transition:
+issued, its current FSM state, the event that caused the last transition, and what
+shape the call is: the media it negotiated, the media server carrying them and the
+destination it was placed to.
 
 ```
-╭────────────────┬────────────────┬────────────────┬──────────────────┬────────────────────────────╮
-│Scénario        │Compte          │Commande        │État              │Événement                   │
-├────────────────┼────────────────┼────────────────┼──────────────────┼────────────────────────────┤
-│UAC.Register    │33970262546     │send_REGISTER   │registered        │200 OK                      │
-│UAC.Invite      │1001            │media_play      │call_established  │toto.mp4: start             │
-│  └ callee      │1001            │reply_invite    │answered          │INVITE                      │
-╰────────────────┴────────────────┴────────────────┴──────────────────┴────────────────────────────╯
+╭────────────────┬────────────────┬────────────────┬──────────────────┬────────────────────────────┬──────┬────────────┬──────────────────────╮
+│Scénario        │Compte          │Commande        │État              │Événement                   │Médias│Serveur     │Destination           │
+├────────────────┼────────────────┼────────────────┼──────────────────┼────────────────────────────┼──────┼────────────┼──────────────────────┤
+│UAC.Register    │33970262546     │send_REGISTER   │registered        │200 OK                      │n/a   │none        │n/a                   │
+│UAC.Invite      │1001            │media_play      │call_established  │toto.mp4: start             │AV    │mcu1        │n/a                   │
+│  └ callee      │1001            │reply_invite    │answered          │INVITE                      │A     │mcu1        │n/a                   │
+╰────────────────┴────────────────┴────────────────┴──────────────────┴────────────────────────────┴──────┴────────────┴──────────────────────╯
   Actifs: 3/5  |  Succès: 41  |  Interrompus: 0  |  Échecs: 2  |  Total: 44/100  [q: arrêt propre | Ctrl+D: immédiat]
 ```
 
+The table is about 143 columns wide. A narrower terminal wraps it; the `↑` / `↓`
+keys scroll rows, not columns.
+
 - **Compte** is the account in use — set from the scenario config, or learned from
   the REGISTER once a server scenario has authenticated it.
+- **Médias** is what the two ends settled on, read off the SDP answer: `A`, `AV`,
+  `AVT`, any combination of the three, `none` when the answer declined every media,
+  and `n/a` for a call that has negotiated nothing. Nothing in a scenario reports
+  it — the framework reads it wherever an answer is built, received or relayed.
+- **Serveur** is the media server this call is connected to, by the name it is
+  declared under (`[mediaserver.pool.<name>]` on a kelixip node). A server named
+  nowhere — the two-argument `media_connect(module, url)`, the global
+  `:mediaserver` config — is shown by its url. `none` when the call has no media
+  plane at all.
+- **Destination** is where a B2BUA call was placed: the target being dialled, and
+  the one that answered once one has. A serial hunt walks several devices and the
+  column names the one the call is about, not the list. `n/a` for anything that is
+  not a B2BUA call.
 - A **sub-FSM** (`spawn_fsm`) is indented under its parent with `└`.
 - A **service building block** (`sbb_fsm`) is not a row of its own: it runs on the
   caller's legs, so its states show on the caller's row, qualified with the block —

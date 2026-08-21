@@ -1712,7 +1712,9 @@ defmodule SIP.Session.B2bua do
     # the callee's answer to the initial INVITE, or its answer to a re-offer we
     # relayed. Either way it is what the NEXT re-offer from that leg is read
     # against (§R4.1b).
-    sip_ctx = remember_remote_sdp(sip_ctx, current_leg(), SIP.Msg.Ops.sdp_body(resp))
+    sdp = SIP.Msg.Ops.sdp_body(resp)
+    sip_ctx = remember_remote_sdp(sip_ctx, current_leg(), sdp)
+    note_relayed_medias(sip_ctx, resp, sdp)
     state = state(sip_ctx)
 
     case Map.get(state.pending, tid) do
@@ -1745,6 +1747,19 @@ defmodule SIP.Session.B2bua do
 
         SIP.Context.set(sip_ctx, :lasterr, :ok)
     end
+  end
+
+  # The monitor's `medias` column for a SIGNALLING relay, which negotiates nothing
+  # of its own: what the two ends settled on is the answer that just crossed. With a
+  # media server both answers are ours, and each is noted where it is built
+  # (`SIP.Session.Media`) — reading the callee's here would show the caller media it
+  # never sees.
+  defp note_relayed_medias(sip_ctx, resp, sdp) do
+    if is_nil(media_plan(sip_ctx)) and resp.response in 200..299 and is_binary(sdp) do
+      SIP.Scenario.Monitor.note_medias(SIP.Msg.Ops.media_kinds(sdp))
+    end
+
+    :ok
   end
 
   # What a `{:mediaserver, …}` call does to a response before it is relayed —
@@ -2932,9 +2947,20 @@ defmodule SIP.Session.B2bua do
   end
 
   defp put_leg(sip_ctx, tag, leg) do
+    note_destination(tag, leg)
     state = state(sip_ctx)
     put_state(sip_ctx, %State{state | legs: Map.put(state.legs, tag, leg)})
   end
+
+  # The monitor's `outbound` column: where this call is being placed. `%Leg{target}`
+  # is the whole answer and this is the one place it is written — the first target
+  # dialled, each next one a serial hunt walks, and the branch that answered 2xx
+  # (`adopt_winning_branch/3` reduces the rung to it). A leg being torn down carries
+  # no target and must not blank the destination the call ended on.
+  defp note_destination(@outbound_tag, %Leg{target: target}) when not is_nil(target),
+    do: SIP.Scenario.Monitor.note_outbound(target)
+
+  defp note_destination(_tag, _leg), do: :ok
 
   defp add_pending(sip_ctx, trans_pid, req, leg, method, held_answer \\ nil)
 

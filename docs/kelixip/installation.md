@@ -65,6 +65,7 @@ and [§ Building the deb packages](../../BUILD.md#building-the-deb-packages-ubun
 | `/usr/lib/kelixip/modules/` | Loadable modules (`module_dir`, **root-owned**) |
 | `/usr/sbin/kelictl` | Admin CLI (a command inside the release) |
 | `/usr/sbin/kelixip` | The release's own control script (`start`, `rpc`, …) |
+| `/usr/share/bash-completion/completions/kelictl` | Shell completion for the CLI ([administration](administration.md#shell-completion)); inert without the `bash-completion` package |
 | `/var/lib/kelixip/`, `/var/log/kelixip/` | Mutable state; logs when stdout is redirected |
 
 `module_dir` is root-owned and **not writable by the service** on purpose: loading

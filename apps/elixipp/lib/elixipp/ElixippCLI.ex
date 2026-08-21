@@ -70,12 +70,20 @@ defmodule Elixipp.CLI do
   @default_server_limit 50
 
   # Table columns: {header, monitor_key, fixed_cell_width}
+  #
+  # The last three say what SHAPE the call is — the media it negotiated, the media
+  # server carrying them, the destination it was placed to — and each holds a
+  # standing value ("n/a", "none") rather than a blank when it does not apply, so a
+  # registrar row reads as "no media, ever" and not as "not measured yet".
   @columns [
     {"Scénario", :scenario, 16},
     {"Compte", :account, 16},
     {"Commande", :command, 16},
     {"État", :state, 18},
-    {"Événement", :event, 28}
+    {"Événement", :event, 28},
+    {"Médias", :medias, 6},
+    {"Serveur", :mediaserver, 12},
+    {"Destination", :outbound, 22}
   ]
 
   # Rows to reserve for the counter line, border, and status bar.

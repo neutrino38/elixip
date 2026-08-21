@@ -443,6 +443,33 @@ defmodule SIP.Msg.Ops do
     end
   end
 
+  @doc """
+  The media a description carries: `[:audio, :video, :text]`, in that order,
+  whichever of them the SDP holds an `m=` section for with a port other than 0.
+
+  Read on an **answer**, this is what the two ends settled on: a section the
+  answerer declined is a `m=… 0 …` line (RFC 3264 §6), and a section neither side
+  named is not there at all. Any other media type — `application`, and the sections
+  this stack cannot answer — is absent from the result: the question asked here is
+  which of the three streams a human calls a call, which is also why `supported?`
+  plays no part. A relayed section we would not terminate ourselves still carries
+  the callee's media.
+
+  `[]` for a description that carries none of the three, and for one that cannot be
+  parsed: a caller reads "nothing negotiated" out of both.
+  """
+  @spec media_kinds(binary() | nil) :: [:audio | :video | :text]
+  def media_kinds(sdp) do
+    case presence(sdp) && MediaServer.SdpTools.parse(sdp) do
+      {:ok, descs} ->
+        present = for d <- descs, Map.get(d, :port, 0) != 0, do: Map.get(d, :type)
+        Enum.filter([:audio, :video, :text], &(&1 in present))
+
+      _no_readable_sdp ->
+        []
+    end
+  end
+
   defp compare_offers(new_sdp, previous_sdp) do
     with {:ok, new} <- MediaServer.SdpTools.parse(new_sdp),
          {:ok, previous} <- MediaServer.SdpTools.parse(previous_sdp) do

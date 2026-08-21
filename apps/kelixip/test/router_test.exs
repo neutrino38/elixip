@@ -137,11 +137,14 @@ defmodule Kelix.RouterTest do
       assert Router.media_override(mp) == [module: :unavailable]
     end
 
-    test "a healthy pool → that MCU's module and url, for this call only" do
+    # `name:` rides along with the module and the url: it is what `kelictl monitor`
+    # shows in its `mediaserver` column, and an operator reading it next to
+    # `kelictl mediaserver list` needs the same word on both sides.
+    test "a healthy pool → that MCU's name, module and url, for this call only" do
       mp = start_pool([%{name: "mcu1", module: :mendooze, url: "http://mcu.test:9090", enabled: true}], fn _ -> true end)
       :ok = Kelix.MediaPool.check_health(mp)
 
-      assert Router.media_override(mp) == [module: :mendooze, url: "http://mcu.test:9090"]
+      assert Router.media_override(mp) == [name: "mcu1", module: :mendooze, url: "http://mcu.test:9090"]
     end
   end
 
