@@ -1701,6 +1701,7 @@ defmodule Mendooze.ConnTest do
 
   # ICE is the one case the server cannot see: it holds the `c=` line, not the
   # candidates, so it cannot know the address was settled by connectivity checks.
+  # Both sides have to be doing it — see the next test for the half that is not.
   test "a DTLS+ICE leg never asks for latching: candidates settle the address" do
     %{server: server} = start_media_server()
 
@@ -1734,6 +1735,50 @@ defmodule Mendooze.ConnTest do
     assert_receive {:jsr309_call, "EndpointSetRTPProperties", [3, 4, 0, props]}
     assert Map.has_key?(props, "rtcp-mux")
     refute Map.has_key?(props, "natLatch")
+  end
+
+  # ADVERSE — offering ICE is not practising it. We advertise candidates on every
+  # leg that carries DTLS; a SIP endpoint answers with a fingerprint and no ICE at
+  # all. ICE is then running on neither side: the server drops every inbound check
+  # for want of a remote password, so nothing will ever settle the address, and
+  # standing aside leaves the leg aimed at whatever the `c=` line claimed.
+  # Traffic of 2026-08-21: Bob (Linphone) answered `c=IN IP4 172.22.0.5` — a docker
+  # interface of his own host — while his RTP arrived from 172.21.104.60, and he
+  # received nothing at all for the whole call, audio and video, in a call whose
+  # DTLS handshake had succeeded on both media.
+  test "a leg whose peer answered without ICE asks for latching after all" do
+    %{server: server} = start_media_server()
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :audio,
+        audio_codec: "PCMU",
+        webrtc_support: :yes
+      )
+
+    assert {:ok, _offer} = Mendooze.get_local_offer(conn)
+    assert_receive {:jsr309_call, "EndpointSetLocalSTUNCredentials", [3, 4, 0, _uf, _pwd]}
+
+    # a plain SIP endpoint: DTLS because we offered SAVPF, no ICE whatsoever
+    answer =
+      Sdp.build(%{
+        ip: "172.22.0.5",
+        medias: [
+          %{
+            type: :audio,
+            port: 43_022,
+            codecs: ["PCMU"],
+            crypto: {:dtls, :active, "sha-256", @fp},
+            protocol: "UDP/TLS/RTP/SAVPF",
+            rtcp_mux: true
+          }
+        ]
+      })
+
+    assert :ok = Mendooze.set_remote_answer(conn, answer)
+
+    assert_receive {:jsr309_call, "EndpointSetRTPProperties", [3, 4, 0, props]}
+    assert props["natLatch"] == "1"
   end
 
   test "nat_latch overrides the inference, either way" do

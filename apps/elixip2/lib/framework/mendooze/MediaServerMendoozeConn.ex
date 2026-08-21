@@ -2531,7 +2531,7 @@ defmodule MediaServer.Mendooze.Conn do
       |> maybe_put(Map.get(desc, :rtcp_mux, false), "rtcp-mux", "1")
       |> Map.merge(rtcp_fb_props(desc))
       |> Map.merge(transport_cc_props(desc))
-      |> maybe_put(nat_latch?(state), "natLatch", "1")
+      |> maybe_put(nat_latch?(state, desc), "natLatch", "1")
 
     if props == %{} do
       :ok
@@ -2582,6 +2582,18 @@ defmodule MediaServer.Mendooze.Conn do
   # STUN connectivity checks, not by the `c=` line. Latching there would fight
   # the very mechanism that already picked the path.
   #
+  # ICE is in play only when BOTH sides do it, which is why the criterion is the
+  # same pair that gates `EndpointSetRemoteSTUNCredentials` below. Offering ICE is
+  # not practising it: a leg where we advertised candidates and the peer answered
+  # without any has no ICE at all — the server drops every inbound check for want
+  # of a remote password ("No iceRemotePwd defined yet"), so nothing will ever
+  # settle the address. Read off `local_ice` alone, we stood aside for a mechanism
+  # that was never running: the call of 2026-08-21, Alice (WebRTC) to Bob
+  # (Linphone), where Bob answered `c=IN IP4 172.22.0.5` — a docker interface of
+  # his own host — while his RTP arrived from 172.21.104.60. The DTLS handshake
+  # completed on both media, which is what made it look like a media problem, and
+  # Bob did not receive one RTP packet for the whole call.
+  #
   # It is asked for in BOTH directions, and the direction is not a criterion. It
   # used to be — only when we ANSWERED an offer, on the theory that a peer
   # answering OUR offer does so knowing its own NAT, so a mismatch would be a
@@ -2596,9 +2608,9 @@ defmodule MediaServer.Mendooze.Conn do
   #
   # `nat_latch: true | false` still overrides the inference for a caller that
   # knows its topology; the kelixip MCU adapter carries its own opt-in switch.
-  defp nat_latch?(state) do
+  defp nat_latch?(state, desc) do
     case Keyword.get(state.opts, :nat_latch, :auto) do
-      :auto -> is_nil(state.local_ice)
+      :auto -> is_nil(state.local_ice) or is_nil(desc.ice)
       enabled -> enabled == true
     end
   end
@@ -3388,8 +3400,10 @@ defmodule MediaServer.Mendooze.Conn do
   # candidates in what we write on it? Its own resolved transport answers, not the
   # option: `:if_offered` — the value a B2BUA gives its inbound leg — is settled by
   # the offer we answered, and setup_dtls_ice/1 records that decision in
-  # `local_ice`, which is also how nat_latch?/1 and answer_candidates/2 already
-  # read the question. Both SDP paths set it before any section is built.
+  # `local_ice`, which is also how answer_candidates/2 already reads the question.
+  # Both SDP paths set it before any section is built. `nat_latch?/2` asks a
+  # narrower one — whether ICE is actually RUNNING — so it weighs the peer's
+  # `desc.ice` too.
   #
   # Read off the option instead, an `:if_offered` leg ANSWERED a browser's offer
   # with all three and then RE-OFFERED without any of them. Chrome refuses that

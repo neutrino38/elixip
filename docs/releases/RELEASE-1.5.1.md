@@ -75,6 +75,30 @@ Design: [DESIGN-MCU.md](../design/DESIGN-MCU.md#41-what-survives-the-node).
   and not built — it is server-side work (S6 of
   [mcu_server_evolutions.md](../design/mcu_server_evolutions.md)).
 
+## Media fixes
+
+- **A leg that offers ICE to a peer answering without it now latches onto the
+  NAT.** ICE is in play only when both sides do it. We advertise candidates on
+  every leg carrying DTLS; an ordinary SIP endpoint answers with a fingerprint and
+  no ICE, and the leg then has no ICE at all — the media server drops every
+  inbound connectivity check for want of a remote password, so nothing settles the
+  send address. Standing aside left the leg aimed at whatever the `c=` line
+  claimed. A Linphone handset answering `c=IN IP4 172.22.0.5` — a docker interface
+  of its own host — while its RTP arrived from another address received nothing at
+  all, audio and video, for the whole call, on a call whose DTLS handshake had
+  succeeded on both media.
+- The fix has two halves and needs both: the server's own veto also read our
+  credentials where it should read the peer's, so it requires a mediaserver newer
+  than 1.12.3.
+- **A renegotiation no longer drops the media on a WebRTC leg.** On such a leg the
+  send address is the pair ICE validated, not the `c=` line — and we re-issue
+  `StartSending` with the original `c=` at every renegotiation, which used to
+  overwrite it. The peer only showed its real address again at its next STUN check:
+  0.9 s of dead audio *and* video every time, measured on the 2026-08-21 call when
+  the callee turned its camera on. Server-side fix, in the same mediaserver, and it
+  needs no change here. A peer that genuinely moves restarts ICE, which hands the
+  address back to us.
+
 ## Signalling fixes
 
 - **An offerless UPDATE no longer ends the call.** It is the RFC 4028
