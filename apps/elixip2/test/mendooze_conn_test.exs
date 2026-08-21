@@ -1370,6 +1370,72 @@ defmodule Mendooze.ConnTest do
     assert audio.ice == %{ufrag: ufrag, pwd: pwd}
   end
 
+  # A leg admitted as `:if_offered` is as WebRTC as a `:yes` one once a browser's
+  # offer has settled it, and what it writes NEXT has to say so. It answered with
+  # rtcp-mux, an a=mid per section and host candidates, then RE-OFFERED — a B2BUA
+  # relaying the callee turning its camera on — with none of the three, because
+  # the offer path read the option where the answer path read the leg. Chrome
+  # refuses that SDP outright (rtcpMuxPolicy is "require", a unified-plan section
+  # needs its mid): the 488 of 2026-08-21 killed a call that was working.
+  test "a re-offer on an `:if_offered` leg that answered WebRTC is still WebRTC" do
+    %{server: server} = start_media_server()
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :audio_video,
+        webrtc_support: :if_offered
+      )
+
+    offer =
+      Sdp.build(%{
+        ip: "10.9.8.7",
+        medias: [
+          %{
+            type: :audio,
+            port: 40_000,
+            codecs: ["OPUS"],
+            crypto: {:dtls, :actpass, "sha-256", @fp},
+            ice: %{ufrag: "remote-uf", pwd: "remote-pwd-123456789012345"},
+            protocol: "UDP/TLS/RTP/SAVPF",
+            rtcp_mux: true,
+            mid: "0"
+          },
+          %{
+            type: :video,
+            port: 40_002,
+            codecs: ["VP8"],
+            crypto: {:dtls, :actpass, "sha-256", @fp},
+            ice: %{ufrag: "remote-uf", pwd: "remote-pwd-123456789012345"},
+            protocol: "UDP/TLS/RTP/SAVPF",
+            rtcp_mux: true,
+            mid: "1"
+          }
+        ]
+      })
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, offer)
+    assert {:ok, answered} = Sdp.parse(answer)
+    assert Enum.all?(answered, & &1.rtcp_mux)
+
+    assert {:ok, reoffer} = Mendooze.get_local_offer(conn)
+    assert {:ok, descs} = Sdp.parse(reoffer)
+    assert length(descs) == 2
+
+    for desc <- descs do
+      assert desc.rtcp_mux
+      assert desc.mid == to_string(desc.type)
+      assert desc.candidates != []
+      assert match?({:dtls, _, _, _}, desc.crypto)
+      assert desc.protocol == "UDP/TLS/RTP/SAVPF"
+    end
+
+    # And the DTLS+ICE association is kept: a re-offer that mints fresh ICE
+    # credentials is an ICE restart nothing asked for.
+    for {before, after_} <- Enum.zip(answered, descs) do
+      assert after_.ice == before.ice
+    end
+  end
+
   # ── The §7.5 ladder's middle rung ───────────────────────────────────────────
 
   test "rtp_profile: :avpf offers RTP/AVPF — the feedback profile, and nothing else" do

@@ -1771,12 +1771,18 @@ defmodule MediaServer.Mendooze.Conn do
 
   # ── Local side: security and receiving ──────────────────────────────────────
 
-  # UAC: local security material derives from conn_opts only.
+  # UAC: local security material derives from conn_opts only — `:if_offered` is
+  # not a decision here, it reads an offer, and this is the side that writes one.
+  #
+  # A leg that already has its DTLS+ICE material keeps it: this runs again on
+  # every re-offer, and minting fresh ICE credentials mid-call is an ICE restart
+  # — connectivity checks re-run and the media stalls while they do — asked for
+  # by nothing but the fact that we are speaking again.
   defp setup_local_security(state) do
-    if webrtc?(state) do
-      setup_dtls_ice(state)
-    else
-      {:ok, state}
+    cond do
+      not is_nil(state.local_ice) -> {:ok, state}
+      Keyword.get(state.opts, :webrtc_support, :no) == :yes -> setup_dtls_ice(state)
+      true -> {:ok, state}
     end
   end
 
@@ -3366,7 +3372,19 @@ defmodule MediaServer.Mendooze.Conn do
 
   defp bandwidth_kbps(_state, _media), do: 0
 
-  defp webrtc?(state), do: Keyword.get(state.opts, :webrtc_support, :no) == :yes
+  # Does this leg CARRY WebRTC — hence rtcp-mux, an a=mid per section and host
+  # candidates in what we write on it? Its own resolved transport answers, not the
+  # option: `:if_offered` — the value a B2BUA gives its inbound leg — is settled by
+  # the offer we answered, and setup_dtls_ice/1 records that decision in
+  # `local_ice`, which is also how nat_latch?/1 and answer_candidates/2 already
+  # read the question. Both SDP paths set it before any section is built.
+  #
+  # Read off the option instead, an `:if_offered` leg ANSWERED a browser's offer
+  # with all three and then RE-OFFERED without any of them. Chrome refuses that
+  # SDP outright — rtcpMuxPolicy is "require" and a unified-plan section needs its
+  # mid — which is the 488 of 2026-08-21: the callee turned its camera on, the
+  # relayed re-offer was refused, and the call died on a leg that was working.
+  defp webrtc?(state), do: not is_nil(state.local_ice)
 
   # Which RTP profile a NON-WebRTC offer is carried in (§7.5). `:avp` — plain
   # RTP — is the default and what every caller got before P5.
