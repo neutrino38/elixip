@@ -37,10 +37,11 @@
 defmodule Kelix.Mcu.Call do
   use SIP.Scenario
   use SIP.Session.CallUAS
-  # the admit/attach/leave FSL macros — rebind sip_ctx in place, verdict in sip_ctx.lasterr
-  use Kelix.Mod.Mcu.Script
+  # the module's verbs: the admit/leave FSL macros (they rebind sip_ctx in place and
+  # leave their verdict in sip_ctx.lasterr) and the Mcu.SBB blocks
+  use Kelix.Mod.Mcu
   require Logger
-  import SIP.Session, only: [reply: 5, reply: 6]
+  import SIP.Session, only: [reply: 6]
 
   uas(:invite)
 
@@ -118,257 +119,92 @@ defmodule Kelix.Mcu.Call do
         scenario_success("media refused: #{code} (#{inspect(reason)})")
 
       _ ->
-        goto(in_call)
+        goto(in_conference)
     end
   end
 
-  state in_call do
-    on_events do
-      # The ACK is what puts the participant in the mix: a caller that never ACKs
-      # never enters it, and no RTP leaves the MCU before that (§2, point 2). Once
-      # in, move to in_conference: the caller re-sends this ACK for every 200 the
-      # transaction layer retransmits (RFC 3261 §13.2.2.4), and those copies must
-      # not re-run the ACK-time sequence.
-      {:ACK, _req, _trans, _dlg} ->
-        attach()
-        goto(in_conference, "ACK: in the mix")
-
-      # Re-INVITE / UPDATE: renegotiate on the same participant.
-      {:INVITE, _req, _trans, _dlg} ->
-        reply_invite_with_sdp(200,
-          media: :tc,
-          webrtc: :if_offered,
-          on_media_error: &__MODULE__.media_error/1
-        )
-
-        goto(loop, "re-INVITE")
-
-      {:UPDATE, _req, _trans, _dlg} ->
-        reply_invite_with_sdp(200,
-          media: :tc,
-          webrtc: :if_offered,
-          on_media_error: &__MODULE__.media_error/1
-        )
-
-        goto(loop, "UPDATE")
-
-      # An INFO carrying media_control+xml is the peer asking for an intra-frame from
-      # what the mixer sends it (a decoder that lost sync). §6.4: answer 200 either
-      # way — an INFO we do not understand is still a request we must not leave
-      # unanswered — and ask the MCU for the frame when it is that.
-      {:INFO, req, _trans, dialog_pid} ->
-        reply(dialog_pid, req, 200, "OK", [])
-        goto(loop, request_fpu(sip_ctx, req))
-
-      {:BYE, req, _trans, dialog_pid} ->
-        reply(dialog_pid, req, 200, "OK", [])
-        media_cleanup_ressources()
-        leave(:bye)
-        scenario_success("BYE")
-
-      # The caller cancelled around the answer: the IST already sent 487, only the
-      # teardown is ours.
-      {:CANCEL, _req, _trans, _dlg} ->
-        media_cleanup_ressources()
-        leave(:cancel)
-        scenario_success("cancelled")
-
-      # The media server went away (§9.2): the mix is gone, so the call is too.
-      {:mcu_event, :server_disconnected} ->
-        media_cleanup_ressources()
-        leave(:mcu_lost)
-        send_BYE()
-        goto(hanging_up, "mcu lost")
-
-      # The same fact, reported by the other route. The module relays
-      # :server_disconnected because it watches the server on behalf of every
-      # leg; this one is what our OWN media connection reports — media_connect/0
-      # makes this process the event sink, so both reach us and neither is
-      # guaranteed to be first. Whichever arrives tears the call down; the other
-      # then lands in a state that ignores it.
-      {:ms_event, _server, :server_disconnected} ->
-        media_cleanup_ressources()
-        leave(:mcu_lost)
-        send_BYE()
-        goto(hanging_up, "media server disconnected")
-
-      # The mixer needs a fresh intra-frame from this leg (a new tile started, or a
-      # decoder lost sync): ask for one the way RFC 5168 has it (§6.4).
-      {:mcu_event, :fpu_requested} ->
-        send_INFO(__MODULE__.picture_fast_update(),
-          contenttype: "application/media_control+xml"
-        )
-
-        goto(loop, "FPU requested")
-
-      # P7/S1 (§16.1): every media of this leg has gone silent — the module only sends
-      # this once the AND is satisfied, so one dead media does not get us here. Same
-      # teardown as losing the media server: the call is over, it just has not been
-      # hung up yet.
-      {:mcu_event, :media_timeout, media} ->
-        media_cleanup_ressources()
-        leave(:media_timeout)
-        send_BYE()
-        goto(hanging_up, "media timeout on #{media}")
-
-      # P7/S2: real media is flowing. An observation for the operator view, already
-      # emitted by the module — nothing for the call to do.
-      {:mcu_event, :media_connected, _media} ->
-        goto(loop, "media connected")
-
-      {:mcu_event, _event} ->
-        goto(loop, "mcu event")
-
-      {:mcu_event, _event, _arg} ->
-        goto(loop, "mcu event")
-
-      {:dialog_terminated, _dlg, _reason} ->
-        media_cleanup_ressources()
-        leave(:bye)
-        scenario_success("dialog ended")
-
-      {:scenario_ctl, :shutdown, _reason} ->
-        send_BYE()
-        goto(hanging_up, "shutdown")
-    after
-      # G3: with no RTP watchdog on the MCU API, this is the only protection against
-      # a leg that stops sending. P7 makes it the last resort behind the watchdog.
-      7_200_000 ->
-        send_BYE()
-        goto(hanging_up, "idle timeout")
-    end
-  end
-
-  # The steady state, split from in_call so only the FIRST ACK runs the ACK-time
-  # sequence. Retransmitted ACKs are a normal fact of UDP life — each one used to
-  # re-run attach/1 and re-emit participant.joined per retransmission.
+  # The leg's whole life in the mix, as one block (Kelix.Mod.Mcu.SBB.Conference):
+  # the ACK that puts the participant in the mix, the retransmissions that must not
+  # re-run it, the RFC 5168 frame requests both ways, the teardowns, and the idle
+  # backstop. What is left here is what a deployment actually decides — how to
+  # answer a renegotiation, what to do with a peer's message, and what each ending
+  # is worth.
   state in_conference do
+    Mcu.SBB.conference()
+
     on_events do
-      # the retransmission itself: this leg is already in the mix
-      {:ACK, _req, _trans, _dlg} ->
-        goto(loop, "ACK retransmitted; already in the mix")
-
-      # Re-INVITE: renegotiate on the same participant. Answering rewinds the
-      # adapter to answered, and the re-INVITE's own ACK must re-run the ACK-time
-      # sequence on the changed medias — wait for it back in in_call.
-      {:INVITE, _req, _trans, _dlg} ->
+      # The block hands the request back UNANSWERED, because answering it is a
+      # policy: a deployment may refuse an added media, cap a resolution, or answer
+      # with a different media set than it accepted at the start. Answer it the way
+      # this one wants — the request is in the context, so this reads like the 200
+      # in `answering` — then go back into the mix. `goto(loop, …)` re-runs this
+      # body, which calls the block again: that is the whole re-entry mechanism.
+      {:conference, :renegotiation, %{method: method}} ->
         reply_invite_with_sdp(200,
           media: :tc,
           webrtc: :if_offered,
           on_media_error: &__MODULE__.media_error/1
         )
 
-        goto(in_call, "re-INVITE")
+        goto(loop, "#{method} renegotiated")
 
-      # UPDATE renegotiates too but carries no ACK (RFC 3311): its 200 concludes
-      # the offer/answer, so the ACK-time sequence runs right away.
-      {:UPDATE, _req, _trans, _dlg} ->
-        reply_invite_with_sdp(200,
-          media: :tc,
-          webrtc: :if_offered,
-          on_media_error: &__MODULE__.media_error/1
-        )
+      # A peer's script said something (§20.5). Only a leg that called
+      # `mcu_accept_messages()` ever gets one; this reference script logs it and
+      # goes back into the mix. Answer it, forward it as a SIP MESSAGE, raise a
+      # hand — that is what a copy changes.
+      {:conference, :message, %{envelope: envelope}} ->
+        Logger.info(module: __MODULE__, message: "#{envelope.kind} from #{envelope.from.part_id}")
 
-        attach()
-        goto(loop, "UPDATE: renegotiated")
+        goto(loop, "collaboration message")
 
-      # From here on, exactly what in_call handles.
-      {:INFO, req, _trans, dialog_pid} ->
-        reply(dialog_pid, req, 200, "OK", [])
-        goto(loop, request_fpu(sip_ctx, req))
+      # From here on the leg is out: the media connection is released and the
+      # participant removed, with the reason the outcome names. Nothing to free —
+      # only the verdict to name, which is the script's business.
+      {:conference, :caller_hung_up, %{reason: reason}} ->
+        scenario_success("BYE (#{inspect(reason)})")
 
-      {:BYE, req, _trans, dialog_pid} ->
-        reply(dialog_pid, req, 200, "OK", [])
-        media_cleanup_ressources()
-        leave(:bye)
-        scenario_success("BYE")
-
-      {:CANCEL, _req, _trans, _dlg} ->
-        media_cleanup_ressources()
-        leave(:cancel)
+      {:conference, :cancelled, _} ->
         scenario_success("cancelled")
 
-      {:mcu_event, :server_disconnected} ->
-        media_cleanup_ressources()
-        leave(:mcu_lost)
-        send_BYE()
-        goto(hanging_up, "mcu lost")
+      {:conference, :mcu_lost, _} ->
+        scenario_success("mcu lost")
 
-      # The same fact, reported by the other route. The module relays
-      # :server_disconnected because it watches the server on behalf of every
-      # leg; this one is what our OWN media connection reports — media_connect/0
-      # makes this process the event sink, so both reach us and neither is
-      # guaranteed to be first. Whichever arrives tears the call down; the other
-      # then lands in a state that ignores it.
-      {:ms_event, _server, :server_disconnected} ->
-        media_cleanup_ressources()
-        leave(:mcu_lost)
-        send_BYE()
-        goto(hanging_up, "media server disconnected")
+      {:conference, :media_timeout, %{media: media}} ->
+        scenario_success("media timeout on #{media}")
 
-      {:mcu_event, :fpu_requested} ->
-        send_INFO(__MODULE__.picture_fast_update(),
-          contenttype: "application/media_control+xml"
-        )
+      # The mix refused this leg at ACK time: an established call that never got
+      # into the conference is a failure, not a call that ended.
+      {:conference, :attach_refused, %{reason: reason}} ->
+        scenario_failure("not mixed: #{inspect(reason)}")
 
-        goto(loop, "FPU requested")
-
-      # P7/S1 (§16.1): every media of this leg has gone silent — the module only sends
-      # this once the AND is satisfied, so one dead media does not get us here. Same
-      # teardown as losing the media server: the call is over, it just has not been
-      # hung up yet.
-      {:mcu_event, :media_timeout, media} ->
-        media_cleanup_ressources()
-        leave(:media_timeout)
-        send_BYE()
-        goto(hanging_up, "media timeout on #{media}")
-
-      # P7/S2: real media is flowing. An observation for the operator view, already
-      # emitted by the module — nothing for the call to do.
-      {:mcu_event, :media_connected, _media} ->
-        goto(loop, "media connected")
-
-      {:mcu_event, _event} ->
-        goto(loop, "mcu event")
-
-      {:mcu_event, _event, _arg} ->
-        goto(loop, "mcu event")
-
-      {:dialog_terminated, _dlg, _reason} ->
-        media_cleanup_ressources()
-        leave(:bye)
-        scenario_success("dialog ended")
-
-      {:scenario_ctl, :shutdown, _reason} ->
-        send_BYE()
-        goto(hanging_up, "shutdown")
-    after
-      # G3 again: the idle backstop must keep running once in the mix.
-      7_200_000 ->
-        send_BYE()
-        goto(hanging_up, "idle timeout")
+      {:conference, :idle_timeout, _} ->
+        scenario_failure("idle timeout")
     end
   end
 
-  state hanging_up do
+  # A kick (`kelictl mcu participant kick`), a drain and a node shutdown are three
+  # ways to stop a leg from outside, and they all arrive here — including the one
+  # that reaches the block, which unwinds it and re-applies the shutdown as the
+  # transition this state would have written. One path, one verdict.
+  on_shutdown do
+    send_BYE()
+
     on_events do
       {200, _rsp, _trans, _dlg} ->
         media_cleanup_ressources()
         leave(:bye)
-        scenario_success("clean shutdown")
+        scenario_aborted("MCU call stopped gracefully")
+
+      # We are already leaving; a media plane that dies now changes nothing, and
+      # consuming it is what stops it being read as a second shutdown.
+      {:ms_event, _server, _event} ->
+        stay("media event while stopping")
     after
       10_000 ->
         media_cleanup_ressources()
         leave(:bye)
-        scenario_failure("BYE not answered")
+        scenario_aborted("stopped, BYE unanswered")
     end
-  end
-
-  on_shutdown do
-    send_BYE()
-    media_cleanup_ressources()
-    leave(:bye)
-    scenario_aborted("MCU call stopped gracefully")
   end
 
   # ── application logic ───────────────────────────────────────────────────────
@@ -425,83 +261,6 @@ defmodule Kelix.Mcu.Call do
   def media_error(:secure_not_supported), do: {488, "Not Acceptable Here"}
   def media_error({:bad_offer, _reason}), do: {400, "Bad Request"}
   def media_error(_reason), do: {500, "Server Internal Error"}
-
-  # Backs the `attach` macro (Kelix.Mod.Mcu.Script). ACK time: codecs,
-  # StartSending, mixer join. A transient failure here leaves an established call
-  # whose leg is not in the mix; it is logged and the call kept (lasterr reset to
-  # :ok), because the caller can hear the problem and hang up, and tearing a
-  # confirmed dialog down on a transient RPC error is worse.
-  defp do_attach(sip_ctx) do
-    sip_ctx = Kelix.Mod.Mcu.attach(sip_ctx)
-
-    case sip_ctx.lasterr do
-      :ok ->
-        sip_ctx
-
-      # MCU and JSR309 are mutually exclusive: the module refused the leg (and
-      # logged why); the refusal stays in lasterr, so the goto that follows
-      # aborts the scenario
-      :jsr309_media_already_in_use ->
-        sip_ctx
-
-      {:error, reason} ->
-        Logger.error(module: __MODULE__, message: "attach failed: #{inspect(reason)}")
-        SIP.Context.set(sip_ctx, :lasterr, :ok)
-    end
-  rescue
-    e ->
-      Logger.error(module: __MODULE__, message: "attach raised: #{Exception.message(e)}")
-      SIP.Context.set(sip_ctx, :lasterr, :ok)
-  end
-
-  @doc false
-  # RFC 5168: the one-primitive body every video UA understands as "send me a new
-  # intra-frame now". Kept whole rather than assembled, because this exact wording is
-  # what interoperates.
-  def picture_fast_update() do
-    """
-    <?xml version="1.0" encoding="utf-8" ?>\
-    <media_control><vc_primitive><to_encoder><picture_fast_update/>\
-    </to_encoder></vc_primitive></media_control>
-    """
-  end
-
-  # The other direction: the peer asks, the MCU obliges (`SendFPU`). A non-video
-  # conference or an unknown INFO is not an error — it is simply not a request for a
-  # frame.
-  defp request_fpu(sip_ctx, req) do
-    if media_control?(req) do
-      case Kelix.Mod.Mcu.send_fpu(SIP.Context.appdata_get(sip_ctx, :mcu_part)) do
-        :ok ->
-          "INFO: FPU"
-
-        {:error, reason} ->
-          Logger.warning(module: __MODULE__, message: "SendFPU failed: #{inspect(reason)}")
-          "INFO: FPU failed"
-      end
-    else
-      "INFO"
-    end
-  rescue
-    e ->
-      Logger.warning(module: __MODULE__, message: "SendFPU raised: #{Exception.message(e)}")
-      "INFO"
-  end
-
-  # Content-Type is what identifies it; the body is only checked for the primitive so
-  # a media_control message asking for something else is not taken for an FPU.
-  defp media_control?(req) do
-    String.contains?(to_string(Map.get(req, :contenttype)), "media_control") and
-      String.contains?(body_of(req), "picture_fast_update")
-  end
-
-  defp body_of(req) do
-    case Map.get(req, :body) do
-      body when is_binary(body) -> body
-      [%{data: body} | _] when is_binary(body) -> body
-      _ -> ""
-    end
-  end
 
   # Backs the `leave` macro (Kelix.Mod.Mcu.Script). Idempotent teardown, called
   # from seven places: `leave/2` tolerates an already-removed participant by
