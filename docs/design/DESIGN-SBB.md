@@ -6,8 +6,15 @@ context, dialogs and mailbox, and hands control back by posting one event.
 
 The user-facing reference is [FSL.md](../../FSL.md#service-building-blocks-sbb);
 what remains to build is [sbb_evolutions.md](sbb_evolutions.md). This document is
-the design of record — what the layer is, how the engine runs it, what a block
-must declare, and the two blocks that ship.
+the design of record for the layer — what it is, how the engine runs it, what a
+block must declare — and for the two blocks that live in `:elixip2`, `call()` and
+`bridge()`.
+
+A block owned by a kelixip module is designed with that module, not here (§7.4):
+`AuthDb.SBB.authenticate()` in [DESIGN-AUTH.md](DESIGN-AUTH.md#3-the-authentication-block),
+`Mcu.SBB.conference()` in [DESIGN-MCU.md](DESIGN-MCU.md#51-the-legs-life-in-the-mix-as-a-block).
+The catalogue of all four is in [sbb_evolutions.md](sbb_evolutions.md#3-the-rest-of-the-catalogue),
+next to what is still copied per script.
 
 ## 1. What the layer is for
 
