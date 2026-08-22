@@ -470,6 +470,62 @@ defmodule SIP.Msg.Ops do
     end
   end
 
+  @doc """
+  True for a request carrying the RFC 5168 picture-fast-update primitive: the one
+  body a video UA sends to ask the far end's encoder for a fresh intra-frame,
+  because its decoder lost sync.
+
+  Both halves are read, and either alone is wrong. The content type is what
+  identifies the body (`application/media_control+xml`); the primitive is what
+  says which request it carries, so a `media_control` message asking for
+  something else is not a request for a frame. A multipart body is searched part
+  by part, since the content type may sit on the part rather than on the message.
+
+  Any video leg meets this question — a conference leg, a B2BUA relaying INFO —
+  so the reading lives here and the policy built on it (ask the media server for
+  the frame, or answer 200 and do nothing else) stays with the caller.
+  """
+  @spec picture_fast_update?(map()) :: boolean()
+  def picture_fast_update?(msg) when is_map(msg) do
+    case Map.get(msg, :body) do
+      body when is_binary(body) ->
+        media_control?(Map.get(msg, :contenttype)) and fpu_primitive?(body)
+
+      parts when is_list(parts) ->
+        Enum.any?(parts, fn part ->
+          (media_control?(Map.get(part, :contenttype)) or
+             media_control?(Map.get(msg, :contenttype))) and fpu_primitive?(Map.get(part, :data))
+        end)
+
+      _no_body ->
+        false
+    end
+  end
+
+  defp media_control?(contenttype), do: String.contains?(to_string(contenttype), "media_control")
+
+  defp fpu_primitive?(body),
+    do: is_binary(body) and String.contains?(body, "picture_fast_update")
+
+  @doc """
+  The RFC 5168 picture-fast-update body, and the content type it goes out as:
+  `{body, "application/media_control+xml"}`.
+
+  Kept whole rather than assembled, because this exact wording is what
+  interoperates. It sits next to `picture_fast_update?/1`, which reads it back,
+  so one place owns the primitive in both directions.
+  """
+  @spec picture_fast_update() :: {binary(), binary()}
+  def picture_fast_update do
+    body = """
+    <?xml version="1.0" encoding="utf-8" ?>\
+    <media_control><vc_primitive><to_encoder><picture_fast_update/>\
+    </to_encoder></vc_primitive></media_control>
+    """
+
+    {body, "application/media_control+xml"}
+  end
+
   defp compare_offers(new_sdp, previous_sdp) do
     with {:ok, new} <- MediaServer.SdpTools.parse(new_sdp),
          {:ok, previous} <- MediaServer.SdpTools.parse(previous_sdp) do
