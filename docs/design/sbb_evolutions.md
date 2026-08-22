@@ -29,8 +29,11 @@ what makes it a gap.
 
 ## 3. The rest of the catalogue
 
-`call()` and `bridge()` ship. These are the sequences that were listed as worth
-packaging and are still copied per script:
+`call()` and `bridge()` ship in `:elixip2`, and `Mcu.SBB.conference()` — a
+conference leg's whole life in the mix — ships with the module that owns it
+([DESIGN-MCU.md](DESIGN-MCU.md#51-the-legs-life-in-the-mix-as-a-block)). These
+are the sequences that were listed as worth packaging and are still copied per
+script:
 
 - the **authentication front** of `direct-call-with-auth.exs`: three states
   (`authenticate_caller` / `wait_credentials` / retry) that any scenario gating a
@@ -38,10 +41,6 @@ packaging and are still copied per script:
   the rules such a block would enforce;
 - **REGISTER challenge / accept / reject**, application-side by design and
   therefore duplicated per registrar script;
-- the **conference leg** of `mcu.exs` and `mcu_adhoc.exs`: `in_call`,
-  `in_conference` and `hanging_up`, already copied and already drifted apart.
-  Owned by the MCU module, specified in
-  [mcu_module_evolutions.md](mcu_module_evolutions.md);
 - **generic menu / prompt-and-collect** — play the choices, collect the DTMF,
   handle retries and fat-fingered input, answer `{:menu, :choice, %{key: key}}`
   or `{:menu, :disconnected, _}`. Not a B2BUA fragment at all, which is the

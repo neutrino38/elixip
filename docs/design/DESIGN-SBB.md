@@ -502,9 +502,9 @@ Kelix.Mod.AuthDb.SBB.Authenticate     # the FSM behind authenticate/1
 
 One file per block (`lib/kelix/mod/auth_db/sbb/authenticate.ex`), so the file
 carries the name of the module it defines. A module publishing several blocks
-adds sub-modules, never a level: `Kelix.Mod.Registrar.SBB.Queue`,
-`Kelix.Mod.Mcu.SBB.Admit`. This is `SBB.Call.Establish` and `SBB.Call.Bridge`
-applied outside `:elixip2`, not a second convention.
+adds sub-modules, never a level: `Kelix.Mod.Mcu.SBB.Conference`,
+`Kelix.Mod.Registrar.SBB.Queue`. This is `SBB.Call.Establish` and
+`SBB.Call.Bridge` applied outside `:elixip2`, not a second convention.
 
 **The leaf is the verb, and never `Impl`.** A generic leaf costs more than it
 looks: `use SIP.SBB` derives `@sbb_namespace` from the last name segment, so an

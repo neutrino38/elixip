@@ -247,6 +247,134 @@ which is ours and may work on a retry. One code for both would tell the peer the
 wrong thing about what to do next; making that expressible required the media
 error hook to accept a function rather than a fixed pair.
 
+### 5.1 The leg's life in the mix, as a block
+
+Everything after the `200` is one service building block,
+`Kelix.Mod.Mcu.SBB.Conference`, called `Mcu.SBB.conference()`
+([DESIGN-SBB.md](DESIGN-SBB.md#74-a-kelixip-module-publishes-its-blocks): a
+kelixip module publishes functions a script calls for a *decision*, and blocks a
+script enters for a *sequence*). A script enters it where it would have written
+`goto(in_call)`, and the three states that used to follow — `in_call`,
+`in_conference`, `hanging_up` — are gone from the scripts.
+
+They were worth removing because they carried **no conference policy at all**.
+They carried SIP: which ACK is the first one, that an INFO is answered whether or
+not it is an RFC 5168 request, that a BYE is answered before the slot is
+released, that our own BYE is followed by a wait for its 200, that a leg gone
+silent is a leg to hang up. And being a copy, the second script had already lost
+three clauses of it — `on_events` compiles to a `receive` and nothing injects a
+catch-all, so a media event the ad-hoc script had never been taught about matched
+no clause and stayed in the mailbox for the whole call. A leg whose media died
+held its slot until the 2 h backstop, and nothing reported it. That is
+[DESIGN-SBB.md](DESIGN-SBB.md) §1 in one file pair.
+
+**The seam is the answer.** The block never composes a response to an offer,
+which is why it takes no `media:` and no `webrtc:` argument: the `200`, its media
+set, its secure mode and its error mapping are the deployment's, and they stay in
+the script's `answering` state. What the block owns is the sequence between that
+answer and whatever ends the leg.
+
+**One argument**, and the BYE's own 10 s wait is not one — it has a single caller
+and a single right value. `:idle_timeout`, 2 h, is the G3 backstop against a leg
+that goes silent; every event the block consumes re-arms it, so it is *idle* and
+not a maximum call duration. The name differs from `bridge`'s `:max_duration` on
+purpose: same shape, opposite meaning.
+
+**Two families of outcome**, and the difference is what state the leg is left in.
+The first hands the call back **whole** — nothing answered, nothing released — so
+the script acts and re-enters with `goto(loop, …)`:
+
+| Outcome | Data | What happened |
+|---|---|---|
+| `:renegotiation` | `%{method: :INVITE \| :UPDATE, req, transaction, dialog}` | a re-INVITE or an UPDATE arrived, **unanswered** |
+| `:message` | `%{envelope}` | a peer's script said something (§9) |
+
+The second means the leg is out: the media connection is released and
+`Kelix.Mod.Mcu.leave/2` has run with the reason named, in that order. The script
+names the verdict; it frees nothing.
+
+| Outcome | Data | What happened |
+|---|---|---|
+| `:caller_hung_up` | `%{reason: :bye \| term}` | a BYE, answered; or the dialog went away on its own |
+| `:cancelled` | `%{}` | a CANCEL around the answer — the IST sent the 487, the teardown was ours |
+| `:mcu_lost` | `%{via: :mcu_event \| :ms_event, bye_answered}` | the media server went away; our BYE is out |
+| `:media_timeout` | `%{media, bye_answered}` | every media of this leg went silent (§10, P7/S1); our BYE is out |
+| `:idle_timeout` | `%{bye_answered}` | the G3 backstop fired; our BYE is out |
+| `:attach_refused` | `%{reason}` | the mix refused the leg at ACK time (`:jsr309_media_already_in_use`) |
+
+`bye_answered: false` is a **key rather than an outcome**: whether a hang-up was
+acknowledged is a detail of an ending, not a different ending. And there is no
+`:timeout` — `@sbb_timeout :infinity`, because a conference leg lasts as long as
+its dialog and `:idle_timeout` is the bound.
+
+**A renegotiation comes back unanswered, because answering it is a policy.** A
+deployment may refuse an added media, cap a resolution, or answer with a
+different media set than it accepted at the start. The request travels **inside
+the outcome** rather than being re-posted: `sbb_return/1` posts one event and
+ends the block, so a `send(self(), {:INVITE, …})` on top of it would leave two
+events — the host would match its own `{:INVITE, …}` clause first, re-enter the
+block, and the block would then find `{:conference, :renegotiation, …}` in its
+own mailbox with no clause for it. That is the drift above, rebuilt on purpose.
+Most arms never read `req`: the block matched the request in an `on_events` of
+its own, which is what stores it in the shared context, so the script's
+`reply_invite_with_sdp/2` finds it without being given it.
+
+**Re-entry is correct without the host saying anything.** The leg's phase lives
+in the *shared* `appdata` under `:mcu_leg_phase`, never in the block's sandbox —
+a sandbox is cleared on every entry, so a block keyed on it would re-run the
+ACK-time sequence each time the host came back, and every collaboration message
+would re-attach the leg.
+
+| Value | Meaning on entry | Set when |
+|---|---|---|
+| absent / `:awaiting_ack` | the next ACK is the first one: **attach** | the script answered a 200 and entered; a re-INVITE was handed back |
+| `:attach_pending` | **attach now**, before waiting for anything | an UPDATE was handed back (RFC 3311 §5.1: its 200 concludes the offer/answer, no ACK follows) |
+| `:in_mix` | an ACK is a retransmission: ignore it | the leg attached |
+
+A `resume:` flag would have done the same job and could be forgotten, which is
+why the phase is read rather than declared. Two consequences are accepted rather
+than engineered around. A script that **refuses** a re-INVITE (488) leaves the
+phase at `:awaiting_ack`; no ACK ever comes — the server transaction absorbs the
+ACK of a non-2xx (RFC 3261 §17.2.1) — so nothing re-attaches and the leg keeps
+the media it had, which is what a refusal means. A script that refuses an
+**UPDATE** costs one redundant `attach`, since the block cannot see which code
+the script chose; `attach` re-applies the codecs the leg already has.
+
+**The window** is `bridge`'s ([DESIGN-SBB.md](DESIGN-SBB.md#83-bridge-interrupted-and-re-entered)):
+between two entries the call is up and nothing answers it. For a message that is
+a log line. For a renegotiation the script owes a response inside timer B, so
+that arm answers first and does its bookkeeping after.
+
+**Nothing is left in the mailbox.** Both event families get a floor below the
+clauses that carry a policy, so an event the block was never taught about
+re-arms the idle deadline instead of accumulating — the failure above, closed by
+construction rather than by remembering. The same rule is why a second
+`:server_disconnected` is consumed while we hang up: both routes fire for one
+dead server, and the clause `on_events` would otherwise inject turns the second
+into a shutdown, losing the outcome the teardown exists to report.
+
+**One trap the block inherited and now holds once.** `Kelix.Mod.Mcu.attach/1`
+leaves its verdict in `lasterr`, and `goto` aborts the scenario as a failure on
+anything but `:ok` — so a transient RPC failure plus a `goto` on the next line
+kills a call the reference policy says to keep. The policy: a transient failure
+is logged and the call **kept**, because the caller can hear the problem and hang
+up, and tearing down a confirmed dialog on an RPC hiccup is worse. Only the
+JSR309 mutual exclusion ends the leg, through `:attach_refused`.
+
+**A cooperative shutdown leaves the block and reaches the script.** The block
+declares no `{:scenario_ctl, :shutdown, _}` clause and needs none: the injected
+clause jumps to `:__shutdown__`, the block has no `on_shutdown`, so the engine
+throws and the root re-applies it as the transition the host state would have
+written. The script's `on_shutdown` runs with the block unwound — which is where
+the graceful ending now lives whole, including the wait for the BYE's 200. One
+behaviour changed with it, and it is a fix: a kick, a drain and a node shutdown
+are three ways to stop a leg from outside, and the scripts counted the first two
+as `:success` and the third as `:aborted`. They are one path with one verdict.
+
+`play.exs` and `record.exs` carry an `in_call` / `in_conference` pair of the same
+shape. They are JSR-309 media scripts, not conference legs: this block does not
+cover them, and no attempt is made to generalise it into one that would.
+
 ---
 
 ## 6. Negotiation
@@ -424,6 +552,7 @@ not a redesign.
 | L14 | an unreadable logo is not reported: the server answers OK whatever the picture did |
 | L16 | a script that does not declare it accepts messages receives none, by design (§9) |
 | L17 | the collaboration channel has no total order across senders and no delivery receipt |
+| L18 | a leg stopped from outside always leaves with `:bye`: `shutdown_clause/0` drops the reason on its way to `on_shutdown`, so a kick, a drain and a node shutdown are indistinguishable there. One line in the framework would carry it, and a kicked leg could then `leave(:kick)` (§5.1) |
 
 **Media liveness is wired on this side and depends on the server.** The adapter
 arms an inactivity watchdog per receiving media at the ACK, and the event
@@ -435,10 +564,9 @@ Delegated codec negotiation (§6) landed on this side: the module's codec lists
 are gone, and the old configuration keys are accepted with a warning naming
 their replacement.
 
-**What this side still owes its scripts** is
-[docs/design/mcu_module_evolutions.md](mcu_module_evolutions.md), starting with
-the `conference()` service building block: the three states every conference
-script copies, moved into the module that owns them.
+**What this side owes its scripts is delivered**: the three states every
+conference script used to copy are the `Mcu.SBB.conference()` block, in the
+module that owns them (§5.1).
 
 ---
 
@@ -456,3 +584,7 @@ script copies, moved into the module that owns them.
 6. Every log line carries the conference uid (§11).
 7. The orphan sweep deletes nothing it is not sure about (§10).
 8. Membership is the permission; there is no cross-conference addressing (§9).
+9. A leg's life in the mix is the block's, and there is one copy of it. A script
+   states the answer, the renegotiation policy and the verdicts; it holds no
+   loop, frees nothing the block released, and reads the leg's phase from the
+   shared `appdata` rather than declaring it (§5.1).

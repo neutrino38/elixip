@@ -10,9 +10,6 @@ receiving media, and the event vocabulary already declares
 `participant.media_connected` / `participant.media_timeout`, so a consumer
 written today needs no change when the server starts emitting them.
 
-The controller side has a backlog of its own:
-[`mcu_module_evolutions.md`](mcu_module_evolutions.md).
-
 ## What is left
 
 Changes to make in the media server (`../mediaserver`, the Mendooze fork) so the
@@ -116,10 +113,10 @@ value. An **empty** watched set (a timeout reaching a leg whose ACK was never
 processed) satisfies the AND on the first event, deliberately: one dead media is then
 all the evidence there will ever be.
 
-`mcu.exs` gains `{:mcu_event, :media_timeout, media}` → BYE + `leave(:media_timeout)`,
-in **both** the `in_call` and `in_conference` states, plus a 3-tuple catch-all — its
-existing catch-all only matched 2-tuples, so these messages would have gone
-unhandled. New event `participant.media_timeout` in the §11.1 vocabulary (already
+The controller side is wired: `{:mcu_event, :media_timeout, media}` → BYE +
+`leave(:media_timeout)` → `{:conference, :media_timeout, …}` lives in the
+`Mcu.SBB.conference()` block, so it is handled once for every conference script
+rather than per state per script. New event `participant.media_timeout` in the §11.1 vocabulary (already
 declared), and `silent` is exposable in `participant.show` so an operator sees *which*
 media died rather than a boolean.
 

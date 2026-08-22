@@ -157,7 +157,7 @@ pulls in the MCU macros and declares that it needs the module:
 ```elixir
 use SIP.Scenario
 use SIP.Session.CallUAS
-use Kelix.Mod.Mcu.Script     # the admit / attach / leave / mcu_* macros
+use Kelix.Mod.Mcu           # the admit / leave / mcu_* macros, and Mcu.SBB
 
 uas :invite
 config uses_modules: [:mcu]
@@ -166,17 +166,24 @@ config uses_modules: [:mcu]
 `uses_modules` is what makes kelixip refuse to load the script when the module is
 not installed, instead of failing on the first INVITE.
 
+The module publishes two kinds of thing, and the difference is worth holding on
+to: **functions and macros a script calls for a decision**, and **blocks a script
+enters for a sequence**. `admit()` is a decision — it answers "may this leg
+join", and the script turns that answer into a SIP response.
+`Mcu.SBB.conference()` is a sequence — it holds the leg for the whole call and
+comes back when something happens the script has a policy for.
+
 The module **decides**, the script **composes the SIP response**. So the scenario
-must also define the three functions the macros delegate to:
+must also define the functions the macros delegate to:
 
 | Function | Called by | What it does |
 |---|---|---|
 | `do_admit(sip_ctx, req, dialog_pid, domain)` | `admit/2` | maps an admission refusal onto a SIP response, returns the context |
-| `do_attach(sip_ctx)` | `attach/0` | decides which failures the call survives |
 | `do_leave(sip_ctx, reason)` | `leave/1` | releases the participant |
+| `do_attach(sip_ctx)` | `attach/0` | decides which failures the call survives — only needed by a script that attaches by hand instead of taking `Mcu.SBB.conference()` |
 
-The sample script [`mcu.exs`](../../../apps/kelixip/scripts/mcu.exs) implements the
-three of them; copy it rather than write them from scratch.
+The sample script [`mcu.exs`](../../../apps/kelixip/scripts/mcu.exs) implements
+them; copy it rather than write them from scratch.
 
 
 ## Macros usable in a scenario
@@ -240,6 +247,10 @@ attach()                   # verdict in sip_ctx.lasterr
 Actually puts the participant in the mix. It is called on the ACK and works on the
 participant handle `admit()` stored in the appdata.
 
+A script that takes `Mcu.SBB.conference()` never calls this: the block owns the
+ACK-time sequence, including the retransmitted ACKs that must not re-run it. The
+macro stays for a script that holds the leg by hand.
+
 ### leave(reason)
 
 ```elixir
@@ -253,6 +264,97 @@ already-removed participant, so it can be called from every teardown path.
 
 The inter participant collaboration channel — see
 [Inter participant collaboration](#inter-participant-collaboration) below.
+
+
+## Blocks usable in a scenario
+
+### Mcu.SBB.conference(opts)
+
+The leg's whole life in the mix, as one service building block. A scenario enters
+it once the call is answered, and it runs on the scenario's own process, dialog
+and mailbox until something happens the script has a policy for.
+
+```elixir
+state in_conference do
+  Mcu.SBB.conference()
+
+  on_events do
+    # the call is whole: answer, then go back into the mix
+    {:conference, :renegotiation, %{method: method}} ->
+      reply_invite_with_sdp(200, media: :tc, webrtc: :if_offered)
+      goto loop, "#{method} renegotiated"
+
+    {:conference, :message, %{envelope: envelope}} ->
+      Logger.info("#{envelope.kind} from #{envelope.from.part_id}")
+      goto loop, "collaboration message"
+
+    # the leg is out: released and removed, only the verdict is yours to name
+    {:conference, :caller_hung_up, %{reason: reason}} -> scenario_success("BYE")
+    {:conference, :cancelled, _}                     -> scenario_success("cancelled")
+    {:conference, :mcu_lost, _}                      -> scenario_success("mcu lost")
+    {:conference, :media_timeout, %{media: media}}   -> scenario_success("silent #{media}")
+    {:conference, :attach_refused, %{reason: r}}     -> scenario_failure("not mixed")
+    {:conference, :idle_timeout, _}                  -> scenario_failure("idle timeout")
+  end
+end
+```
+
+What the block absorbs is the SIP a conference leg owes whatever the deployment:
+the ACK that puts the participant in the mix and the retransmitted copies that
+must not re-run it, an INFO answered `200` whether or not it asks for a video
+frame, the RFC 5168 frame requests in both directions, a BYE answered before the
+slot is released, our own BYE followed by a wait for its `200`, and a leg gone
+silent hung up.
+
+What it leaves you is what a deployment actually decides. **It never composes a
+response to an offer** — that is why it takes no `media:` and no `webrtc:`: your
+`answering` state states the `200`, and a renegotiation comes back for you to
+answer the same way, or refuse.
+
+**Options** — one, through `args`:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `:idle_timeout` | `7_200_000` | the backstop against a leg that stops sending, in ms. **Idle**, not a budget: every event the block consumes re-arms it, so it is not a maximum call duration |
+
+**What it answers.** Two families, and the difference is what state the leg is
+left in. These two hand the call back **whole** — nothing answered, nothing
+released — so you act and re-enter with `goto loop`:
+
+| Outcome | Data |
+|---|---|
+| `:renegotiation` | `%{method: :INVITE \| :UPDATE, req, transaction, dialog}` — **unanswered** |
+| `:message` | `%{envelope}` — a peer's script said something |
+
+These mean the leg is out: the media connection is released and the participant
+removed, with the reason named. You name the verdict; you free nothing.
+
+| Outcome | Data |
+|---|---|
+| `:caller_hung_up` | `%{reason: :bye \| term}` — a BYE, answered, or the dialog went away |
+| `:cancelled` | `%{}` — a CANCEL around the answer |
+| `:mcu_lost` | `%{via: :mcu_event \| :ms_event, bye_answered: boolean}` |
+| `:media_timeout` | `%{media, bye_answered: boolean}` |
+| `:idle_timeout` | `%{bye_answered: boolean}` |
+| `:attach_refused` | `%{reason}` — the mix refused the leg at ACK time |
+
+**Answer the renegotiation first, then do your bookkeeping.** Between two entries
+the call is up and nothing answers it, and the far end has protocol deadlines: an
+unanswered re-INVITE runs at timer B. Coming back in needs no flag — the block
+reads where the leg is from the appdata, so a re-INVITE's own ACK re-attaches and
+an UPDATE (which has no ACK, RFC 3311) re-attaches on re-entry, while a
+collaboration message re-attaches nothing.
+
+Refusing a renegotiation with a `488` is supported and does the right thing: no
+ACK follows a non-2xx, so nothing re-attaches and the leg keeps the media it had.
+
+**`goto loop` is what re-enters the block** — it re-runs the state body, which
+calls `conference()` again. Use `goto loop` rather than `stay` in these arms: only
+re-running the body re-arms the idle deadline.
+
+A script keeping the old hand-written loop still works — `attach()` and `leave()`
+are still there. It is on its own for the drift, which is what the block exists
+to stop.
 
 
 ## Functions exported by the module
@@ -332,16 +434,23 @@ send_message(part, target, kind, payload, opts \\ [])
 The script handles the incoming messages as `{:mcu_message, envelope}` events, the
 envelope carrying `msg_id`, `seq`, `from`, `kind`, `payload` and `sent_at`:
 
-```elixir
-# and wherever the call waits
-on_events do
-  {:mcu_message, %{kind: "hand.raised", from: %{display_name: who}}} ->
-    mcu_send(:others, "floor.request", who)      # or send a SIP MESSAGE, or ignore it
-    goto in_call, "hand raised"
+A leg held by `Mcu.SBB.conference()` gets its messages as a block outcome: the
+block hands the envelope back and the call is untouched, so the arm acts and
+re-enters.
 
-  {:mcu_message, _envelope} -> goto in_call, "unsupported message ignored"
+```elixir
+on_events do
+  {:conference, :message, %{envelope: %{kind: "hand.raised", from: %{display_name: who}}}} ->
+    mcu_send(:others, "floor.request", who)      # or send a SIP MESSAGE, or ignore it
+    goto loop, "hand raised"
+
+  {:conference, :message, _} -> goto loop, "unsupported message ignored"
 end
 ```
+
+A script holding the leg by hand matches the raw `{:mcu_message, envelope}` in
+every `on_events` the call goes through — a message no clause matches sits in the
+mailbox for the whole call.
 
 ### Conference management
 
