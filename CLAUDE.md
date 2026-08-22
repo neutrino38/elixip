@@ -420,3 +420,9 @@ helper). Anything else belongs in a module.
 
 - Interact with the developer in **French**
 - Write all code comments, commit messages, and documentation in **English**
+- **`docs/design/DESIGN-*.md` are English, and that is settled.** The IVèS house
+  rule puts documentation in French; these design documents are the exception,
+  ruled on 2026-08-22. They are one cross-referencing corpus written in English —
+  a French section inside `DESIGN-MCU.md` would read worse than either convention
+  applied whole, and the choice is not re-litigated per edit. Revising one of
+  them means writing English, whatever the surrounding conversation is in.
