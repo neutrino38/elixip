@@ -29,18 +29,24 @@ what makes it a gap.
 
 ## 3. The rest of the catalogue
 
-`call()` and `bridge()` ship in `:elixip2`, and `Mcu.SBB.conference()` — a
-conference leg's whole life in the mix — ships with the module that owns it
-([DESIGN-MCU.md](DESIGN-MCU.md#51-the-legs-life-in-the-mix-as-a-block)). These
-are the sequences that were listed as worth packaging and are still copied per
-script:
+Four blocks ship. `call()` and `bridge()` live in `:elixip2`, next to the verbs
+they are made of; the other two live in the kelixip module that owns the thing
+they sequence, which is the §7.4 rule of [DESIGN-SBB.md](DESIGN-SBB.md#74-a-kelixip-module-publishes-its-blocks)
+in practice:
 
-- the **authentication front** of `direct-call-with-auth.exs`: three states
-  (`authenticate_caller` / `wait_credentials` / retry) that any scenario gating a
-  request on a digest repeats verbatim. See [DESIGN-AUTH.md](DESIGN-AUTH.md) for
-  the rules such a block would enforce;
+| Block | Where | Design |
+|---|---|---|
+| `call()`, `bridge()` | `:elixip2` | [DESIGN-SBB.md](DESIGN-SBB.md#8-the-two-blocks-that-ship-call-and-bridge) |
+| `AuthDb.SBB.authenticate()` | `auth_db` | [DESIGN-AUTH.md](DESIGN-AUTH.md#3-the-authentication-block) |
+| `Mcu.SBB.conference()` | `mcu` | [DESIGN-MCU.md](DESIGN-MCU.md#51-the-legs-life-in-the-mix-as-a-block) |
+
+These are the sequences that were listed as worth packaging and are still copied
+per script:
+
 - **REGISTER challenge / accept / reject**, application-side by design and
-  therefore duplicated per registrar script;
+  therefore duplicated per registrar script. `registrar.exs` composes the
+  challenge itself, so the digest sequence exists twice on the node — once behind
+  `authenticate()` for requests, once by hand for registrations;
 - **generic menu / prompt-and-collect** — play the choices, collect the DTMF,
   handle retries and fat-fingered input, answer `{:menu, :choice, %{key: key}}`
   or `{:menu, :disconnected, _}`. Not a B2BUA fragment at all, which is the
