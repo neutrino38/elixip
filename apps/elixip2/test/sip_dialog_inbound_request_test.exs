@@ -144,4 +144,122 @@ defmodule SIP.Test.DialogInboundRequest do
       assert {:ok, _} = SIP.Uri.serialize(req.from)
     end
   end
+
+  describe "the fate of a request we sent into an inbound dialog" do
+    # The dialog as it is once we have answered the caller: `state: :established`
+    # is what the 2xx we sent put there, and the re-INVITE we then sent the caller
+    # is the transaction the responses below answer.
+    defp calling_back(dialog_state) do
+      %DialogImpl{
+        inbound_dialog()
+        | state: dialog_state,
+          app: self(),
+          transactions: %{self() => %{req: re_invite(), module: SIP.ICT}}
+      }
+    end
+
+    defp re_invite, do: Map.merge(inbound_invite(), %{cseq: [2, :INVITE]})
+
+    defp final(code) do
+      %{
+        method: false,
+        response: code,
+        to: %SIP.Uri{userpart: "bob", domain: "example.com", params: %{"tag" => "bob-tag"}},
+        cseq: [2, :INVITE]
+      }
+    end
+
+    # What puts `:established` there. Nothing else ever could: an inbound dialog
+    # is created by a request we ANSWER, and handle_UAS_response/3 — which
+    # establishes the outbound side on receipt of a 2xx — only ever reads
+    # responses we RECEIVE. So the state stayed `:initial` for the dialog's whole
+    # life, which is what made a refused re-offer look like a refused INVITE.
+    @tag :capture_log
+    test "the 2xx we send to the request that created the dialog establishes it" do
+      creating = Map.merge(inbound_invite(), %{cseq: [1, :INVITE]})
+      state = %DialogImpl{inbound_dialog() | msg: creating, state: :initial}
+
+      assert {:reply, _rc, state} =
+               DialogImpl.handle_call({:replyreq, creating, 200, "OK", []}, {self(), nil}, state)
+
+      assert state.state == :established
+    end
+
+    # A 2xx to anything else does not: a re-INVITE from the caller, an OPTIONS,
+    # the CANCEL of a call still ringing — all of them are answered 2xx on a
+    # dialog whose creating request has not been.
+    @tag :capture_log
+    test "a 2xx to any later request does not" do
+      state = %DialogImpl{
+        inbound_dialog()
+        | msg: Map.merge(inbound_invite(), %{cseq: [1, :INVITE]}),
+          state: :initial
+      }
+
+      assert {:reply, _rc, state} =
+               DialogImpl.handle_call(
+                 {:replyreq, re_invite(), 200, "OK", []},
+                 {self(), nil},
+                 state
+               )
+
+      assert state.state == :initial
+    end
+
+    # The one this suite exists for. A B2BUA relaying the callee's "camera on"
+    # re-offer onto the caller's leg gets a 488 from a browser that cannot use it.
+    # RFC 3261 §14.1: the session then stays exactly as it was — the re-offer
+    # failed, the call did not. Read as an initial-request rejection instead, it
+    # killed the caller's dialog: the B2BUA saw its caller hang up, BYEd the
+    # callee, and answered 481 to the caller's own UPDATE and BYE (2026-08-21).
+    test "a 488 refusing our re-offer ends the transaction and nothing else" do
+      assert {:noreply, state} =
+               DialogImpl.handle_info({:response, final(488), self()}, calling_back(:established))
+
+      assert state.state == :established
+      assert_receive {488, _rsp, _tid, _dlg}
+    end
+
+    # Same request, before we ever answered the caller — an UPDATE inside an early
+    # dialog (RFC 3311). The reading is the same one, and it is the DIRECTION that
+    # settles it: an inbound dialog was created by a request we answer, never one
+    # we send, so no response arriving here can be about its creation.
+    test "and the same holds before the dialog is established" do
+      assert {:noreply, state} =
+               DialogImpl.handle_info({:response, final(488), self()}, calling_back(:initial))
+
+      assert state.state == :initial
+    end
+
+    # The exception, and the only non-2xx that is not a matter of policy: the far
+    # end says it knows no such dialog (RFC 3261 §12.2.1.2). Ours cannot outlive
+    # that, so the dialog stops and the application is told.
+    test "a 481 says the dialog is gone at the far end, so it ends here too" do
+      assert {:stop, :normal, state} =
+               DialogImpl.handle_info({:response, final(481), self()}, calling_back(:established))
+
+      assert state.state == :terminated
+    end
+  end
+
+  describe "an outbound dialog still dies with its initial request" do
+    test "a 488 to the INVITE that would have created it terminates it" do
+      state = %DialogImpl{
+        outbound_dialog()
+        | state: :initial,
+          app: self(),
+          transactions: %{self() => %{req: outbound_dialog().msg, module: SIP.ICT}}
+      }
+
+      rsp = %{
+        method: false,
+        response: 488,
+        to: %SIP.Uri{userpart: "bob", domain: "example.com", params: %{"tag" => "bob-tag"}},
+        cseq: [1, :INVITE]
+      }
+
+      assert {:stop, :normal, state} = DialogImpl.handle_info({:response, rsp, self()}, state)
+      assert state.state == :terminated
+    end
+  end
 end

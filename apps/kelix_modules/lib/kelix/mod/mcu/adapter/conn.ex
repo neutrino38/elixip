@@ -88,14 +88,26 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # enable — but a peer that negotiated `nack pli` may send PLI *instead of* FIR
   # (Linphone does), so it must be confirmed in the answer, not dropped (the FPU flow
   # of §6.4 covers both). NOT `useNACK`: PLI is a keyframe request, not a
-  # retransmission request. `goog-remb` stays absent — `tmmbr` is the `ccm` one, and
-  # announcing congestion feedback the mixer never sends invites the peer to wait
-  # for it.
+  # retransmission request.
+  #
+  # `goog-remb` (draft-alvestrand-rmcat-remb-03) carries the same message as
+  # `ccm tmmbr` in the browsers' dialect, and until the rate-control lot 2 the mixer
+  # had no switch for it — Chrome and Firefox offer `goog-remb` and never `ccm tmmbr`,
+  # so nothing congestion-related ever left towards them. The server now has its own
+  # mode (`remb`), TMMBR wins when a peer asks for both, and neither is emitted
+  # un-negotiated (arbitrage A2): announcing it here is what turns it on.
+  #
+  # `transport-cc` is deliberately ABSENT: the attribute alone switches nothing on. Its
+  # server-side property is keyed by the RTP header extension's URI and valued with the
+  # negotiated extmap id (`transport_cc_props/1`), so it cannot ride this
+  # attribute-to-switch table. It is still confirmed in the answer
+  # (`answered_transport_cc_fb/1`).
   @supported_rtcp_fb %{
     "nack" => "useNACK",
     "nack pli" => "useRtcpFIR",
     "ccm fir" => "useRtcpFIR",
-    "ccm tmmbr" => "tmmbr"
+    "ccm tmmbr" => "tmmbr",
+    "goog-remb" => "remb"
   }
 
   @call_timeout 30_000
@@ -655,7 +667,11 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
                 accepted: accepted,
                 # drives the receive watchdog (§16.1): a media the peer says it will not
                 # send must not be watched, or a hold hangs up the call
-                peer_sends: peer_sends?(desc)
+                peer_sends: peer_sends?(desc),
+                # the conference's own preference, which is the ONE thing that outranks
+                # the caller's order below: it moves this codec first in the answer and
+                # makes it what the mixer encodes (§6.3 rule 1)
+                preferred_codec: preferred_code(state, conf, media, rtp_map, accepted)
               })
 
             {
@@ -671,6 +687,44 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
           end
         end
     end
+  end
+
+  # The conference's preferred video codec as a Medooze code, and `nil` as soon as this
+  # leg cannot honour it. Dropped preferences are LOGGED, naming which side dropped it:
+  # an operator who states a codec and watches it not happen must be able to tell "the
+  # caller never offered it" from "the media server refused it" — the absence of that
+  # answer is why the codec lists were removed rather than kept as preferences (§8.4).
+  defp preferred_code(state, conf, :video, rtp_map, accepted) do
+    with name when is_binary(name) <- Map.get(conf, :preferred_video_codec),
+         {:ok, code} <- Sdp.codec_code(:video, name) do
+      negotiated = if is_map(accepted), do: Map.take(rtp_map, Map.keys(accepted)), else: rtp_map
+
+      cond do
+        code in Map.values(negotiated) ->
+          code
+
+        code in Map.values(rtp_map) ->
+          log_preference_dropped(state, name, "the media server did not accept it")
+
+        true ->
+          log_preference_dropped(state, name, "the offer does not carry it")
+      end
+    else
+      _ -> nil
+    end
+  end
+
+  defp preferred_code(_state, _conf, _media, _rtp_map, _accepted), do: nil
+
+  defp log_preference_dropped(state, name, reason) do
+    Logger.info(
+      module: __MODULE__,
+      message:
+        "conf=#{state.conf_id} part=#{state.part_id} video: preferred codec #{name} " <>
+          "not applied — #{reason}; the answer keeps the caller's own order"
+    )
+
+    nil
   end
 
   # What WE can decode, in the codecs' own vocabulary — the input side of the
@@ -813,6 +867,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
       # what the old `avpf?(desc)` pair did — tells the peer it has a capability
       # nothing implements.
       |> Map.merge(rtcp_fb_props(desc))
+      |> Map.merge(transport_cc_props(desc))
       |> put_if(state.nat_latch, "natLatch", "1")
       |> merge_video_props(state, desc)
 
@@ -833,13 +888,28 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   defp put_if(map, false, _key, _value), do: map
 
   # The server-side switch for each feedback type we answered, and nothing else.
+  # `transport-cc` is dropped here rather than looked up: it is confirmed in the answer
+  # but switched on by the extmap property below, whose value is an id and not "1".
   defp rtcp_fb_props(desc) do
     case answered_rtcp_fb(desc) do
       types when is_list(types) ->
-        Map.new(types, fn type -> {Map.fetch!(@supported_rtcp_fb, type), "1"} end)
+        types
+        |> Enum.reject(&(&1 == Sdp.transport_cc_fb()))
+        |> Map.new(fn type -> {Map.fetch!(@supported_rtcp_fb, type), "1"} end)
 
       _ ->
         %{}
+    end
+  end
+
+  # The transport-wide-cc extension, keyed by its URI and valued with the NEGOTIATED
+  # id: that is what makes the server write a transport-wide sequence number on every
+  # packet it sends this participant, pair the incoming fmt 15 reports with its own
+  # send history and feed its sender-side bandwidth estimator.
+  defp transport_cc_props(desc) do
+    case Sdp.transport_cc_extmap(desc) do
+      %{id: id} -> %{Sdp.transport_cc_uri() => Integer.to_string(id)}
+      nil -> %{}
     end
   end
 
@@ -1144,9 +1214,10 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
 
   # The Medooze constant of a codec name, read off the shared codec tables (a
   # one-entry rtpMap is the table lookup those tables expose).
-  # The one accepted payload type the mixer encodes towards this leg: the caller's own
-  # first choice (offer order) among what the server accepted, telephone-event excluded
-  # — that is a stream the mixer never encodes towards anyone.
+  # The one accepted payload type the mixer encodes towards this leg: the conference's
+  # preferred codec when this leg carries it, else the caller's own first choice (offer
+  # order), among what the server accepted — telephone-event excluded, that being a
+  # stream the mixer never encodes towards anyone.
   #
   # It has to be **one payload type and not one codec**, because a peer may offer the
   # same codec under several payload types with different parameters: the profile we
@@ -1156,7 +1227,9 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     neg.rtp_map
     |> Map.take(Map.keys(accepted))
     |> Enum.reject(fn {_pt, code} -> code == @dtmf_code end)
-    |> Enum.sort_by(&Sdp.pt_rank(&1, Map.get(neg, :fmt_order)))
+    |> Enum.sort_by(
+      &Sdp.preferred_rank(&1, Map.get(neg, :fmt_order), Map.get(neg, :preferred_codec))
+    )
     |> List.first()
   end
 
@@ -1173,11 +1246,19 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     end
   end
 
+  # Legacy (pre-P8a server, no verdict): the codec list `propose_all/2` built, in the
+  # offer's order. The preference is applied here TOO and not only in the answer — the
+  # SDP order and the encoded codec are one statement, and honouring it on one side only
+  # would announce a codec the mixer is not producing.
   defp primary_code(media, neg) do
-    case neg.codecs do
-      [name | _] -> media |> Sdp.local_rtp_map([name], false) |> Map.values() |> List.first()
-      [] -> nil
-    end
+    codes =
+      Enum.map(neg.codecs, fn name ->
+        media |> Sdp.local_rtp_map([name], false) |> Map.values() |> List.first()
+      end)
+
+    prefer = Map.get(neg, :preferred_codec)
+
+    if is_integer(prefer) and prefer in codes, do: prefer, else: List.first(codes)
   end
 
   # Audio joins the default **sidebar** (what the MCU API calls a sidebar is what
@@ -1309,6 +1390,9 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
       rtcp_mux: Map.get(desc, :rtcp_mux, false),
       # the feedback types actually agreed, per video PT (§6.3.1 rule 3)
       rtcp_fb: answered_rtcp_fb(desc),
+      # RFC 8285 §5: the extension is confirmed with the offer's OWN id, never
+      # renumbered. Empty unless transport-wide-cc is negotiated on this media.
+      extmaps: List.wrap(Sdp.transport_cc_extmap(desc)),
       crypto: answer_crypto(state, desc),
       crypto_tag: answer_crypto_tag(state, desc),
       ice: state.local_ice,
@@ -1407,13 +1491,17 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # The feedback the offer asks for on this media, wildcard included: `a=rtcp-fb:*`
   # (parsed as payload type -1) applies to every format of the section.
   defp requested_rtcp_fb(desc) do
-    fb = Map.get(desc, :rtcp_fb, %{})
+    Enum.filter(offered_rtcp_fb(desc), &Map.has_key?(@supported_rtcp_fb, &1))
+  end
 
-    fb
+  # The same list before that filter. `transport-cc` has no entry in
+  # @supported_rtcp_fb — its server-side switch comes from the extmap, not from this
+  # attribute — so confirming it needs the unfiltered reading.
+  defp offered_rtcp_fb(desc) do
+    Map.get(desc, :rtcp_fb, %{})
     |> Map.values()
     |> List.flatten()
     |> Enum.uniq()
-    |> Enum.filter(&Map.has_key?(@supported_rtcp_fb, &1))
   end
 
   # What the answer advertises: the INTERSECTION of what the offer asked for with what
@@ -1431,8 +1519,19 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # same set. A caller that asks for nothing gets nothing back.
   defp answered_rtcp_fb(desc) do
     if desc.type == :video,
-      do: requested_rtcp_fb(desc),
+      do: requested_rtcp_fb(desc) ++ answered_transport_cc_fb(desc),
       else: false
+  end
+
+  # `transport-cc` is confirmed only when BOTH halves of the mechanism are there: the
+  # caller asked for the feedback message, and the extension it reports on is one we
+  # negotiate (`Sdp.transport_cc_extmap/1` — video, `[mediaserver] transport_cc` on, a
+  # usable direction). Appended rather than filtered in, because @supported_rtcp_fb
+  # maps an attribute to the server switch that implements it and this one has none.
+  defp answered_transport_cc_fb(desc) do
+    if Sdp.transport_cc_extmap(desc) && Sdp.transport_cc_fb() in offered_rtcp_fb(desc),
+      do: [Sdp.transport_cc_fb()],
+      else: []
   end
 
   # Our side of the security handshake, as the answer states it: the server's
@@ -1665,12 +1764,22 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     Map.new(state.negotiated, fn {media, neg} ->
       {media,
        %{
-         codec: List.first(neg.codecs),
+         codec: summary_codec(media, neg),
          rec_port: neg.rec_port,
          send: neg.remote,
          dtmf: Map.get(neg, :dtmf, false)
        }}
     end)
+  end
+
+  # What the mixer ENCODES towards this leg, and not the first codec we proposed: the
+  # two part company as soon as the server's verdict or the conference's preference
+  # moved the choice, and this map is what `participant.show` reports.
+  defp summary_codec(media, neg) do
+    case primary_code(media, neg) do
+      nil -> List.first(neg.codecs)
+      code -> Sdp.codec_name(media, code) || List.first(neg.codecs)
+    end
   end
 
   defp media_int(media), do: Map.fetch!(@media_int, media)

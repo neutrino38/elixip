@@ -162,17 +162,15 @@ outcome.
 ## 6. Authentication
 
 Digest with `qop=auth`, realm = the domain. The nonce is the framework's
-stateless one ([DESIGN-SIPSTACK.md](DESIGN-SIPSTACK.md) §6): unforgeable,
-verified by recomputation, never stored. `Kelix.NonceCache` adds the one piece
-statelessness cannot give — the `nc` counter for replay detection — as an ETS
-table with a TTL equal to the nonce's max age.
-
-`SIP.Auth.Secret` keys the nonce and is regenerated at boot, which costs one
-`stale=true` round trip after a restart and is designed to become a shared secret
-across nodes.
+stateless one ([DESIGN-SIPSTACK.md](DESIGN-SIPSTACK.md#6-authentication));
+`Kelix.NonceCache` adds the one piece statelessness cannot give — the `nc`
+counter for replay detection — as an ETS table with a TTL equal to the nonce's
+max age.
 
 Deciding **whether** to challenge and against which credential store is the
-`auth_db` module's business, invoked from the script.
+`auth_db` module's business, invoked from the script. Which realm, which identity
+the digest is held to, which requests are challengeable at all, and which module
+mints, validates and keys the nonce are [DESIGN-AUTH.md](DESIGN-AUTH.md).
 
 ---
 
@@ -255,7 +253,8 @@ Its `[module.registrar]` block lives in `domains.toml` rather than
 Credential lookup against MariaDB, exposed as a facade the script calls when it
 decides to challenge. Today it authenticates REGISTER; extending it to INVITE
 and to other backends (LDAP, HTTP, Diameter) behind an `Auth` behaviour is
-designed but not built — see `docs/design/evolution-auth-db.md`.
+designed but not built — see `docs/design/evolution-auth-db.md`; what is built is
+[DESIGN-AUTH.md](DESIGN-AUTH.md).
 
 ### 8.3 `mcu` — conferencing
 
@@ -281,6 +280,17 @@ a media-server upgrade a routine operation.
 
 The pool hands a script its server through the injected context override (§4), so
 a script never names one.
+
+**`[mediaserver] video_bitrate` is a section key, not a pool key.** It says what a
+video leg is encoded at, and it caps the `b=AS:` this node answers with. Both media
+paths read that one node value: the point-to-point adapter through
+`:elixip2/MediaServer.Mendooze[:video_bandwidth_kbps]`, conferences as the default of
+the `mcu` module's `video_bitrate`. A conference may still state its own, and a
+`conference.create` argument overrides that.
+
+Per media server would be the wrong granularity: the pool hands out a server per
+call, so a per-entry bitrate would make picture quality depend on which MCU the
+round-robin landed on.
 
 ---
 

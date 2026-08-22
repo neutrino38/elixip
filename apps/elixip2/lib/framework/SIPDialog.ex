@@ -32,6 +32,49 @@ defmodule SIP.Dialog do
     {fromtag, req.callid, totag}
   end
 
+  @doc """
+  The key a REGISTER refresh can be recognised on, beside the dialog triplet.
+
+  RFC 3261 §10.2 asks a UA to reuse its Call-ID across the registrations it sends
+  to one registrar, and to raise its CSeq. It asks nothing of the From tag, and
+  clients do mint a fresh one every time. So the triplet cannot match a refresh:
+  the tag it leads with is exactly the part that varies. Without this key each
+  refresh started a SECOND registrar session for the same binding, and the first
+  one stayed live until its transport dropped ("client connection lost").
+
+  The AOR is in the key because §10.2 also lets one client register several
+  addresses of record under a single Call-ID: on the Call-ID alone, a second
+  account's refresh would land in the first account's session.
+  """
+  @spec registration_id(map()) :: {:registration, binary(), binary()}
+  def registration_id(req) do
+    {:registration, req.callid, aor_of(req.to)}
+  end
+
+  # A header URI reaches this layer either parsed or still as the raw string it
+  # arrived as, depending on how far the message got — `get_uri_param/2` takes
+  # both for that reason, and so must this. An unparsable To keeps its raw form:
+  # it is stable, which is all a registry key needs, and a To that malformed has
+  # already been through the parser.
+  defp aor_of(to) when is_binary(to) do
+    case SIP.Uri.parse(to) do
+      {:ok, uri} -> aor_of(uri)
+      _ -> to
+    end
+  end
+
+  defp aor_of(%SIP.Uri{} = to) do
+    {:ok, aor} = to |> SIP.Uri.delete_param("tag") |> SIP.Uri.serialize_ruri()
+    aor
+  end
+
+  # Only a REGISTER carries a registration key; anything else falls through to
+  # the ordinary "no matching dialog" path.
+  defp registration_lookup(%{method: :REGISTER} = req),
+    do: Registry.lookup(Registry.SIPDialog, registration_id(req))
+
+  defp registration_lookup(_req), do: []
+
   defp get_or_create_dialog_id(req) do
     get_or_create_dialog_id(req, get_dialog_id(req))
   end
@@ -199,8 +242,18 @@ defmodule SIP.Dialog do
 
             {:answered, code, reason, fields}
 
+          # A REGISTER no triplet matched may still refresh a registration we
+          # already hold (see registration_id/1). It belongs to that dialog: the
+          # registrar session waiting on it is the one that owns the binding.
           true ->
-            start_new_dialog_for(req2, dialog_id, debug)
+            case registration_lookup(req2) do
+              [{dialog_pid, _value} | _] ->
+                GenServer.cast(dialog_pid, {:sipmsg, req2, transact_id})
+                {:ok, dialog_pid, dialog_id}
+
+              [] ->
+                start_new_dialog_for(req2, dialog_id, debug)
+            end
         end
 
       # Found a matching dialog.Forward the SIP msg to it

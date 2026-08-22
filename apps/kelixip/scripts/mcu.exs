@@ -62,23 +62,10 @@ defmodule Kelix.Mcu.Call do
 
         case sip_ctx.lasterr do
           :ok ->
-            # admit/4 stored the conference and the participant handle in the appdata
+            # admit/4 stored the conference and wired the leg: local identity, the
+            # connection options the media macros forward, and the MCU this
+            # conference is pinned to
             conf = SIP.Context.appdata_get(sip_ctx, :mcu_conf)
-            part = SIP.Context.appdata_get(sip_ctx, :mcu_part)
-
-            # The local identity of this leg is the conference itself: it is what an
-            # in-dialog request we originate (the BYE below) puts in From/To, and
-            # without it `send_BYE()` has no URI to build.
-            ctx_set(:username, conf.did)
-            # FW-1: tells the adapter which conference this leg joins. The media
-            # macros forward it to create_peer_connection/3 without having to know
-            # what it means. `nat_latch` rides along: a conference leg always answers
-            # the caller's offer, so the address we are told to send to is the one the
-            # caller wrote down — its private one, for every handset behind a NAT.
-            appdata_set(:media_conn_opts, mcu_participant: part, nat_latch: true)
-            # A conference is pinned to its MCU (§1.3): the leg must reach the server
-            # holding the mixer, not whatever the media pool would hand out.
-            appdata_set(:mediaserver_instance, Kelix.Mod.Mcu.media_config(conf))
 
             media_connect()
             reply_invite(180, "Ringing")

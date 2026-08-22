@@ -65,6 +65,7 @@ and [§ Building the deb packages](../../BUILD.md#building-the-deb-packages-ubun
 | `/usr/lib/kelixip/modules/` | Loadable modules (`module_dir`, **root-owned**) |
 | `/usr/sbin/kelictl` | Admin CLI (a command inside the release) |
 | `/usr/sbin/kelixip` | The release's own control script (`start`, `rpc`, …) |
+| `/usr/share/bash-completion/completions/kelictl` | Shell completion for the CLI ([administration](administration.md#shell-completion)); inert without the `bash-completion` package |
 | `/var/lib/kelixip/`, `/var/log/kelixip/` | Mutable state; logs when stdout is redirected |
 
 `module_dir` is root-owned and **not writable by the service** on purpose: loading
@@ -138,7 +139,7 @@ Unknown keys are rejected too — a typo must not silently fall back to a defaul
 | `node_name` | string | `kelixip@127.0.0.1` | Erlang node name (`kelictl` reaches the node with it) |
 | `script_dir` | string | `/usr/share/kelixip` | Where scenario scripts are resolved from |
 | `module_dir` | string | `/usr/lib/kelixip/modules` | Where module `.beam` files are loaded from |
-| `user_agent` | string | `Kelixip/1.4.1` | `User-Agent` / `Server` header value |
+| `user_agent` | string | `Kelixip/1.5.0` | `User-Agent` / `Server` header value |
 | `max_calls` | int > 0 | *unlimited* | Node-wide concurrent-instance cap; beyond it, new requests get `503` |
 
 #### `[log]`
@@ -218,6 +219,22 @@ ssl_ca_cert_file   = ""             # with a CA the server cert is verified; wit
 > else is re-challenged.
 
 `[module.registrar]` lives in **`domains.toml`**, not here (see below).
+
+#### `[mediaserver]` — the node's media settings
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `video_bitrate` | integer > 0 | `1500` | Video bitrate in kbps: what a video leg is encoded at, and the cap on the `b=AS:` this node answers with. The offered value wins when it is lower |
+
+One bitrate for both media paths. A point-to-point call and a conference encode
+video the same way, so the value is stated once here rather than per media server:
+every pool entry gets it, and `[module.mcu] video_bitrate` overrides it for
+conferences only.
+
+```toml
+[mediaserver]
+video_bitrate = 2500
+```
 
 #### `[mediaserver.pool.<name>]` — the media servers
 

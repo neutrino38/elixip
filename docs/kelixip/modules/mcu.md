@@ -41,6 +41,7 @@ did_range        = "8000-8099"
 vad              = "full"
 layout_comp      = "2x2"
 video_size       = "hd720p"
+preferred_video_codec = "H264"               # stated first in the answers
 record_dir       = "/var/lib/kelixip/rec"    # on the media server
 image_dir        = "/var/lib/kelixip/img"    # idem
 logo_file        = "ives.png"                # every empty mosaic slot
@@ -117,11 +118,13 @@ Module block — `[module.mcu]` (in `config.toml`):
 | `destroy_when_empty` | boolean | `false` | Destroy a conference with its last participant |
 | `auto_layout` | boolean | `true` | The mosaic follows the number of video legs |
 | `layout_comp` | name or integer | `2x2` | Starting mosaic — one of `1x1 2x2 3x3 3+4 1+7 1+5 1+1 pip1 pip3 4x4 1+4 2+8` (or its wire id) |
-| `video_size` | name or integer | `hd720p` | Encoded size — one of `qcif cif vga pal hvga qvga hd720p wqvga xga wvga` (or its wire id) |
-| `video_fps` | integer | `15` | Encoded frame rate |
-| `video_bitrate` | integer | `1024` | kbps, also the cap on the answer's `b=AS:` |
+| `video_size` | name or integer | `hd720p` | Encoded size — one of `qcif cif vga pal hvga qvga hd720p wqvga xga wvga` (or its wire id). Also the size of the mosaic canvas: the two are one picture |
+| `video_fps` | integer | `30` | Encoded frame rate |
+| `video_bitrate` | integer | `[mediaserver] video_bitrate` (`1500`) | kbps, also the cap on the answer's `b=AS:`. Set it here to give conferences a bitrate of their own |
 | `video_intra_period` | integer | `300` | Frames between intra-frames |
+| `preferred_video_codec` | name | — | The video codec the answers state **first**, hence what the mixer encodes towards a leg that offered it: `H264` / `VP8` / `AV1`, or `none`. It reorders, it never adds — a codec the caller did not offer, or one the media server refused, is logged and ignored |
 | `logo_file` | string | — | Image drawn in **every empty mosaic slot**, on every conference (a bare name under `image_dir`) |
+| `conference_file` | string | — | File holding the conference **definitions**, on **this** host. Set it and the rooms come back after a restart (see below). Unset ⇒ no persistence |
 | `record_dir` | string | — | Directory the media server writes recordings into. Unset ⇒ `recording.start` refuses |
 | `image_dir` | string | — | Directory the media server reads `logo_file` (and `logo=`) from |
 | `did_range` | string | — | Allocation pool for a `create` that omits `did` (`"8000-8099"`) |
@@ -213,15 +216,17 @@ The good practice is:
 - if `admit()` returns an error verdict, send back a SIP response mapping it,
   typically `404` / `486` / `503` / `500`.
 
-An admitted leg must also be told which media server to connect to, because a
-conference is pinned to the MCU it was created on:
+`admit()` also **wires the leg**, so a script goes straight to `media_connect()`:
 
-```elixir
-conf = appdata_get(:mcu_conf)
-appdata_set(:media_conn_opts, mcu_participant: appdata_get(:mcu_part), nat_latch: true)
-appdata_set(:mediaserver_instance, Kelix.Mod.Mcu.media_config(conf))
-media_connect()
-```
+| It sets | To | Because |
+|---|---|---|
+| `:username` | the conference's DID | the local identity of the leg — what an in-dialog request we originate puts in From/To, and what `send_BYE()` builds its URI from |
+| `:media_conn_opts` | `mcu_participant:` + `nat_latch: true` | which conference the leg joins, and the fact that a leg which *answers* an offer must latch onto where the media really comes from (every handset behind a NAT writes its private address) |
+| `:mediaserver_instance` | `media_config(conf)` | a conference is pinned to the MCU it was created on: the leg must reach the server holding the mixer, not whatever the media pool would hand out |
+
+None of that is a call-flow decision, so no script has to state it. A script that
+needs other connection options sets `:media_conn_opts` again after `admit()` — the
+last write wins.
 
 See the [`mcu.exs`](../../../apps/kelixip/scripts/mcu.exs) sample script for more
 explanation.
@@ -414,10 +419,10 @@ wherever a value enters — the CLI, a REST body, the config block, a script:
 kelictl mcu conference.update uid=c-3f9a layout='2x2 hd720p'   # mosaic + size
 kelictl mcu conference.update uid=c-3f9a layout=auto,vga       # commas: no quoting
 kelictl mcu conference.update uid=c-3f9a layout=1+1            # mosaic alone
-kelictl mcu conference.update uid=c-3f9a layout=cif            # size alone
+kelictl mcu conference.update uid=c-3f9a layout=cif            # size alone (encoder too)
 kelictl mcu conference.update uid=c-3f9a layout=manual         # stop following
 kelictl mcu conference.update uid=c-3f9a vad=full
-kelictl mcu conference.create domain=example.com video='{"size":"vga","fps":25}'
+kelictl mcu conference.create domain=example.com layout='2x2 vga' video=30fps
 ```
 
 `layout` takes a **mosaic layout**, a **size** and/or `auto`|`manual`, in **any order**,
@@ -433,6 +438,81 @@ Two rules:
 
 * **only what is named changes** — `layout=vga` keeps the current mosaic other properties intact.
 * **changing a mosaic layout switches it to `manual` mode**.
+
+### The encoder profile
+
+`video` takes the same kind of value: tokens in any order, spaces or commas, and only
+what is named changes.
+
+```bash
+kelictl mcu conference.update uid=c-3f9a video='vga 30fps 1024k'
+kelictl mcu conference.update uid=c-3f9a video=25fps,intra=300
+kelictl mcu conference.update uid=c-3f9a video='{"fps":25}'   # the wire form still works
+```
+
+| Field | Token | Default |
+|---|---|---|
+| size | a size name (`vga`, `hd720p`, `720p`) | `[module.mcu] video_size` |
+| frame rate | `<n>fps` | `30` |
+| bitrate | `<n>k` (kbit/s) | `[module.mcu] video_bitrate` |
+| intra period | `intra=<n>` (frames) | `300` |
+
+The codec is **not** part of that profile — it is a field of its own, because it is a
+preference and not a setting:
+
+```bash
+kelictl mcu conference.update uid=c-3f9a preferred_video_codec=vp8
+kelictl mcu conference.update uid=c-3f9a preferred_video_codec=none   # no preference
+```
+
+The answer states that codec first, and the mixer encodes it — but only when the
+caller offered it **and** the media server accepted it. Anything else keeps the
+caller's own order, and the leg's log says which of the two dropped the preference.
+Which codecs exist at all is the media server's answer to give, never a config key.
+
+**The mosaic size and the encoded size are one value.** The canvas *is* the picture
+the mixer encodes. Composing at one geometry and encoding at another means rescaling
+between the two, and the media server does that without keeping the aspect ratio — a
+VGA mosaic encoded in HD720p stretches every tile. So the two always match:
+
+* `layout='2x2 vga'` composes **and** encodes in VGA;
+* `video=hd720p` moves the canvas to HD720p;
+* name both with different sizes and the **encoded** one wins; the log says so.
+
+A new profile applies to the participants that **join next**. A participant already
+in the conference keeps the profile it negotiated.
+
+### Rooms that survive a restart
+
+```toml
+[module.mcu]
+conference_file = "/var/lib/kelixip/conferences.json"
+```
+
+With that key set, every conference created through REST or `kelictl` is written to
+that file and **recreated at the next start** — same `uid`, same DID, same profile.
+The calls are not: a restart ends them, and the file holds rooms, not conversations.
+So a restored conference shows up empty, and `stale` until its media server's control
+channel is up.
+
+A conference a **script** created for one call is deliberately *not* persisted: it was
+made to serve that call. A script that wants a standing room asks for one explicitly
+(`owner: :none`), and `conference.show` tells the two apart with `Persistent`.
+
+The file is JSON, rewritten whole whenever a definition changes, and readable — you can
+pre-declare a room in it before starting the node, using the same names the CLI takes:
+
+```json
+{"version": 1, "conferences": [
+  {"uid": "c-standing", "domain": "example.com", "did": "8500", "name": "Salle Nord",
+   "mcu": "mcu1", "vad": "full", "video": {"size": "hd720p"},
+   "preferred_video_codec": "H264", "layout": {"comp": "2x2", "auto": true}}
+]}
+```
+
+Two failure rules worth knowing: a file kelixip cannot parse is **left untouched** and
+persistence is off for that run (the log says so — fix the file and restart, nothing is
+overwritten meanwhile), and a single malformed entry costs only its own room.
 
 ### Recording, slots and the logo
 

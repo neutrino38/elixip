@@ -181,21 +181,38 @@ defmodule B2BUA.Basic do
       #     the far end must offer or drop it too, and only it can;
       #   * a changed address (c=, port, an ICE restart) — the far end sends
       #     there from now on, and nothing here can forward on its behalf;
-      #   * a session-timer refresh (RFC 4028), usually with no SDP at all. This
-      #     one *could* be answered locally, and a B2BUA with media does exactly
-      #     that — but a 200 to an offerless re-INVITE must carry an offer of our
-      #     own (RFC 3261 §14.2), and a signaling B2BUA has no media to offer.
+      #   * a session-timer refresh (RFC 4028), with no SDP at all — the one that
+      #     does NOT cross, in its UPDATE form. A session timer runs between us
+      #     and ONE peer, on a leg where we are that peer's UA, and an offerless
+      #     UPDATE is answered with a bare 200 (RFC 3311 §5.1): no media of ours
+      #     is needed to say it, and there is nothing in it for the far end.
+      #     Refreshed as an offerless re-INVITE it still crosses, because its 2xx
+      #     MUST carry an offer (RFC 3261 §14.2) and a signaling B2BUA has none.
       #
       # The third case is precisely where scenarios/b2bua_media.exs diverges:
       # with a media server the peer moved but our endpoint did not, so the far
       # end must NOT be disturbed and the re-offer is answered locally.
       {m, req, _trans, _dlg} when m in [:INVITE, :UPDATE] ->
-        b2bua_forward(req)
-        stay("relayed #{m} (caller -> callee)")
+        case b2bua_reoffer_kind(req) do
+          :no_sdp when m == :UPDATE ->
+            b2bua_reply_reoffer(req)
+            stay("session-timer UPDATE answered locally (caller)")
+
+          _kind ->
+            b2bua_forward(req)
+            stay("relayed #{m} (caller -> callee)")
+        end
 
       {:outbound, {m, req, _trans, _dlg}} when m in [:INVITE, :UPDATE] ->
-        b2bua_forward(req)
-        stay("relayed #{m} (callee -> caller)")
+        case b2bua_reoffer_kind(req) do
+          :no_sdp when m == :UPDATE ->
+            b2bua_reply_reoffer(req)
+            stay("session-timer UPDATE answered locally (callee)")
+
+          _kind ->
+            b2bua_forward(req)
+            stay("relayed #{m} (callee -> caller)")
+        end
 
       # The ACK of a re-INVITE's 200 — not the initial one, which `wait_ack`
       # relayed. RFC 3261 §13.2.2.4: it is a transaction of its own.

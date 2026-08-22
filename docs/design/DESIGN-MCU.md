@@ -36,8 +36,9 @@ reason, not by omission; the parameters that would carry them (the participant
 role, for instance) are still passed correctly, so adding one back is additive.
 
 **Non-goals worth stating:** no multi-MCU conference (a conference is pinned to
-the media server chosen at creation), no persistence (conferences live in
-memory), no admission control (reaching the DID *is* joining).
+the media server chosen at creation), no admission control (reaching the DID *is*
+joining). Persistence is deliberately partial: a declared room comes back after a
+restart, the calls in it do not (§4.1).
 
 ---
 
@@ -119,9 +120,10 @@ into it**: they are plain functions on the module, reached through its facade.
 A **conference** carries its kelixip `uid` (stable for its life, and what REST
 clients use), its `domain` and `did`, the MCU it is pinned to and the MCU-side
 `conf_id` (an implementation detail that changes if it is ever recreated), the
-mixer settings (VAD, rate), the codec sets per media, one **inline video
-profile**, the mosaic layout, the quota and the auto-destroy flag, plus its
-participants.
+mixer settings (VAD, rate), which `m=` sections it answers at all (`medias` — the
+codecs inside them are the server's call, §6), the video codec it states first in
+its answers, one **inline video profile**, the mosaic layout, the quota and the
+auto-destroy flag, plus its participants.
 
 Storage is one ETS table keyed by `uid` plus a `{domain, did} → uid` index, owned
 by the module's GenServer. **Reads go straight to ETS** — the hot path is one DID
@@ -144,6 +146,47 @@ Two consequences an operator meets: a DID is unique **per domain**, and the
 dial-plan pattern must cover the allocation range — a range outside the pattern
 yields conferences nobody can dial, so `create` **warns** when the DID it
 allocated matches no dial rule.
+
+### 4.1 What survives the node
+
+A conference has two halves, and only one can outlive the node: the **definition**
+— what somebody declared, from the domain and DID down to the video profile, the
+pinned slots and the MCU it is pinned to — and the **runtime**, which is the
+MCU-side `conf_id`, the participants, the `stale` flag and a running recording.
+
+`Kelix.Mod.Mcu.Store` writes the definition to one JSON file,
+`[module.mcu] conference_file`, rewritten whole on every change and read once at
+module start. It cannot write the runtime half: its encoder names the fields it
+emits, one by one, so a field added to the struct stays out of the file until
+someone decides it belongs there. JSON because the `toml` dependency only reads and
+an operator must be able to read what a node will bring back; not `:mnesia`, whose
+schema binds to a node name an `/etc/default/kelixip` edit can change, for a data
+set that fits in a page in a module that is hot-loadable. The write is atomic — a
+sibling `.tmp` and a rename — so a node killed mid-save loses the last change and
+never the file. No `conference_file`, no persistence, said once at start.
+
+**Only rooms somebody declared are written**: every REST/CLI create, and the scripts
+that ask for `owner: :none`. A room made for one call (`owner: :caller`) is not —
+bringing it back at every boot would be a room nobody asked for, and a conference
+per call would mean a file write per call.
+
+**Restoring reuses the media-server recovery of §10 rather than duplicating
+creation.** A row read from the file is inserted `stale`, with no `conf_id`, so the
+path that already rebuilds a conference after an MCU restart is what gives it its
+server-side existence when the control channel comes up. One code path creates a
+conference, and a DID cannot be handed out twice.
+
+**Failure has a direction: never destroy the operator's file.** A file that does not
+parse disables persistence for the run and is left untouched — restoring nothing is
+recoverable, overwriting is not. A single malformed *row* costs only its own room,
+named in the log. A failed write is logged and the command still succeeds: a
+conference that exists is worth more than a file that is up to date.
+
+**Values may be written by hand.** `"vad": "full"`, `"video": {"size": "hd720p"}`
+are read by the same vocabulary functions that accept an operator's input at the
+control surface, so an entry means here exactly what it means there.
+Pre-provisioning a room by editing the file is a supported thing to do, knowing
+kelixip rewrites the file on the next change.
 
 ---
 
@@ -176,6 +219,19 @@ INVITE (offer)
 The two rules of §2 are visible in that sequence: receiving is armed before the
 answer because the answer needs the ports, and nothing is sent or mixed before
 the ACK.
+
+**The admission call wires the leg.** `admit/4` — the context-aware form the
+reference scripts use — settles the three things an admitted conference leg needs
+before `media_connect/0`, none of which is a call-flow decision: the local identity
+(the conference DID, which is what an in-dialog request we originate puts in From
+and To, and without which `send_BYE()` has no URI to build), the connection options
+(which conference this leg joins, and `nat_latch`, because a conference leg always
+*answers* an offer, so the address it is told to send to is the private one the
+caller wrote down), and the media server (a conference is pinned to its MCU, so the
+leg must reach the server holding the mixer rather than whatever the pool hands
+out). A script that copied that plumbing was stating what a conference leg *is*,
+not what its call flow does. A script needing other connection options sets them
+after `admit`; the last write wins.
 
 **Joining is not authenticated.** The reference script challenges nobody, because
 the module has no business owning an auth policy the SIP layer already expresses
@@ -212,6 +268,20 @@ The three transport cases are classified explicitly and traced, and an offer
 carrying **both** `a=crypto` and `a=fingerprint` is classified DTLS. The answered
 feedback set is the **intersection** with the offer: a caller asking for nothing
 gets nothing.
+
+**One preference, and it is an order rather than a set.** A conference may name the
+video codec it states **first** in its answers (`preferred_video_codec`, defaulting
+to the node's). It reorders and never adds: a codec the caller did not offer, or one
+the server's verdict left out, cannot be moved anywhere — so it states no
+capability, filters nothing, and cannot make a call fail. Both misses are logged per
+leg, naming which of the two dropped it, which is the answer a codec list could
+never give: "the caller never offered it", or "the media server refused it". One
+reading serves both sides of the preference — the order of the answer's rtpmaps, and
+the payload type the mixer encodes towards that leg.
+
+This does not contradict the delegation above: the answerer owns the *preference*
+(RFC 3264 §6.1), and the server's verdict is a **set** — it says what it accepts,
+never in which order.
 
 For H.264, the answer keeps the offer's profile, and the announced level follows
 RFC 6184 asymmetry: ours when both sides allow asymmetry, the offer's otherwise —
@@ -302,7 +372,7 @@ by design, and the first thing to check when a message "does not arrive".
 | **RPC failure mid-setup** | every multi-RPC sequence is written as *acquire → on error, release what was acquired*: the participant is deleted, the caller gets a `500`, the row and the quota slot are freed |
 | **MCU restart** | detected by the poller or by a transport error on an RPC. The entry is marked `down`, its conferences `stale`, every live participant's scenario is told so it can hang up. When it returns, stale conferences are **recreated** with the same `uid` and a new server id, so their DIDs work again; the calls are gone |
 | **Scenario crash** | the module monitors each participant's scenario and runs the same teardown as a clean leave. It also monitors the **creator** of a script-made conference — with a different verdict: a dead participant is always removed, a dead creator takes only an **empty** conference with it |
-| **kelixip restart** | conferences are in memory, so the media server may hold orphans. At module start, and whenever a control channel comes back, every conference the registry does not know is deleted |
+| **kelixip restart** | the calls go with the node; the declared definitions come back from `conference_file` (§4.1), inserted `stale` and rebuilt by the recovery path above. Either way the media server may hold orphans: at module start, and whenever a control channel comes back, every conference the registry does not know is deleted |
 
 That last sweep keys on the **server-side id**, not on our tag, although the tag
 *is* our uid — an older server truncates it, so tag matching would match nothing,
@@ -342,9 +412,9 @@ not a redesign.
 | # | Limitation |
 |---|---|
 | L3 | no trickle ICE |
-| L5 | conferences do not survive a kelixip restart |
+| L5 | a conference's **calls** do not survive a kelixip restart; its definition does, when `conference_file` is set (§4.1) |
 | L6 | no outbound calls (dial-out into a conference) — needs B2BUA legs |
-| L7 | a live participant's video profile is not renegotiated when the conference profile changes |
+| L7 | a live participant's video profile is not renegotiated when the conference profile changes, and every leg is encoded at the same size and frame rate — **S6** of [mcu_server_evolutions.md](mcu_server_evolutions.md) makes both a consequence of the server's rate control instead of a setting |
 | L8 | **anyone who can dial the DID joins**; the perimeter must be protected upstream or by a derived script |
 | L9 | event callbacks to an external UI are not delivered — only logged and metered (§11) |
 | L10 | with script-driven creation, L8 widens: reaching an ad-hoc DID creates a room |
@@ -365,6 +435,11 @@ Delegated codec negotiation (§6) landed on this side: the module's codec lists
 are gone, and the old configuration keys are accepted with a warning naming
 their replacement.
 
+**What this side still owes its scripts** is
+[docs/design/mcu_module_evolutions.md](mcu_module_evolutions.md), starting with
+the `conference()` service building block: the three states every conference
+script copies, moved into the module that owns them.
+
 ---
 
 ## 13. Invariants
@@ -373,7 +448,9 @@ their replacement.
    (§2, §5).
 2. The scenario owns the SIP dialog, the adapter owns the media, the module owns
    the roster — nothing owns two of the three (§3, §9).
-3. The media server arbitrates codecs; the module holds no codec list (§6).
+3. The media server arbitrates codecs; the module holds no codec list. A
+   conference states at most one video codec *preference*, which can only reorder
+   what the server accepted (§6).
 4. Reads hit ETS, writes go through the GenServer (§4).
 5. A conference is pinned to one media server and never migrates (§1, §4).
 6. Every log line carries the conference uid (§11).

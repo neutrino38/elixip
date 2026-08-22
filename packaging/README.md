@@ -67,6 +67,7 @@ the first line of `deb/changelog` for the deb. Bump all three.
 | `systemd/kelixip.service` | the unit — unprivileged, `ExecStop` drains, hardened |
 | `sysconfig/kelixip` | the environment file: node name, cookie, TOML paths |
 | `config/config.toml`, `config/domains.toml` | the shipped defaults, kept on upgrade |
+| `completion/kelictl` | the CLI's bash completion, installed under `/usr/share/bash-completion/completions/` by both packages |
 | `stage.sh`, `build-rpm.sh`, `build-deb.sh` | the builds |
 | `build-in-container.sh`, `Containerfile.al9`, `Containerfile.ubuntu` | the containerised builds |
 | `build/`, `dist/` | outputs, git-ignored |

@@ -1,7 +1,7 @@
 defmodule SIP.Scenario.CallDispatcher do
   @moduledoc """
   Minimal call processing module routing inbound INVITEs to UAS scenarios
-  spawned as sub-FSMs (`sub_fsm` on a `:uas_invite` scenario).
+  spawned as sub-FSMs (`spawn_fsm` on a `:uas_invite` scenario).
 
   `SIP.Scenario.Runner.spawn_child/4` registers each waiting child here and
   installs this module as the call processing module of
@@ -14,7 +14,7 @@ defmodule SIP.Scenario.CallDispatcher do
 
   This keeps the FSL layer self-contained: unlike `Elixip.ScenarioUAS` (the
   elixipp server-mode factory), no new instance is spawned per call — the
-  parent scenario controls the lifecycle by re-spawning a `sub_fsm` when it
+  parent scenario controls the lifecycle by re-spawning a `spawn_fsm` when it
   wants to accept another call.
   """
   @behaviour SIP.Session.Call

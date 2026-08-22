@@ -10,12 +10,16 @@ receiving media, and the event vocabulary already declares
 `participant.media_connected` / `participant.media_timeout`, so a consumer
 written today needs no change when the server starts emitting them.
 
+The controller side has a backlog of its own:
+[`mcu_module_evolutions.md`](mcu_module_evolutions.md).
+
 ## What is left
 
 Changes to make in the media server (`../mediaserver`, the Mendooze fork) so the
 MCU API reaches feature parity with JSR-309 on the point that still hurts: **no
 media watchdog** (S1). The "media established" notification (S2) falls out of the
-same wiring, for free.
+same wiring, for free. **S6** is separate and larger: it makes a leg's encoded
+geometry an output of the rate controller instead of a setting.
 
 The other items of the original plan have landed: **S3** delegated codec
 negotiation, **S4** the server announcing its own address, **S5** text over
@@ -140,6 +144,71 @@ arrives** rather than at ACK time (materially better for WebRTC legs, and it is
 what mcuGold approximates with its `onMediaChanged` heuristic), and reporting a
 `participant.media_connected` event for the operator view.
 
+## S6 — the encoded geometry is a consequence of the bitrate, not a setting
+
+**A leg's encoding size is not something anyone configures: it is what the bitrate
+that leg can actually carry allows.** Encoding 720p at 300 kb/s is a bad trade — the
+right answer is fewer pixels, not worse ones — and nobody outside the rate
+controller knows when that moment arrives. So the size stops being a knob and
+becomes an output of the regulation loop, which lifts **L7** on the geometry axis
+without adding one argument to the control surface.
+
+**All of it runs in the media server.** kelixip does not see the send-side bandwidth
+estimate, and deriving a resolution from an estimate we do not observe is the exact
+coupling `CLAUDE.md` forbids: what the media server knows about itself, the media
+server is asked. It is also why the answer is *not* a per-participant `size` field on
+`conference.update` — a field would have to be set by someone who cannot know when to
+change it.
+
+What the server does:
+
+1. **At leg setup**, derive the encoding size from the requested bitrate — the one
+   `SetVideoCodec` carries, itself already bounded by the offer's `b=AS`.
+2. **When the send-side estimate forces the bitrate down**, recompute the size and
+   reconfigure the encoder by inserting a resizer into the videopipe. The new size
+   **preserves the aspect ratio**, which is free by construction when it derives from
+   scaling the canvas rather than from picking another entry in the medooze size enum
+   — where `hd720p` is the only 16:9 and every step down distorts.
+   `VideoRescaler::Letterbox` stays as the safety net; it is no longer the nominal
+   path.
+3. **Frame rate follows the same logic, within bounds.** The configured `fps` is a
+   **maximum**. The controller may lower it to `max(fps − 10, 5)` and no further:
+   below that, cadence stops being the useful knob and resolution takes over. A
+   conference at the default 30 can be regulated down to 20 fps; one configured at 12
+   hits the floor of 5.
+
+**What this removes from kelixip.** `video.size` disappears — from the `Conference`
+struct, from `conference.create` / `conference.update`, from the `[module.mcu]` key
+`video_size` and from the rendering. The one geometry that stays configured is the
+**canvas**, `layout.size`, which `SetCompositionType` already carries: it is the only
+one that remains conference-level once each leg encodes at its own size. Migration
+through `Config.retired_keys/0`, like the codec keys P8a retired — accepted one
+release with a warning naming the replacement, refused after. `align_sizes/4`,
+`sized_by/2` and their "canvas size ignored" warning go with it; they only ever
+arbitrated a conflict between two names for one number.
+
+**What kelixip keeps:** `fps` as the maximum described above, `bitrate` as the
+initial target, and `intra_period`. Those stay operator-facing because the ceiling is
+a policy — how much of a node's uplink one conference may claim — and policy is the
+half kelixip owns.
+
+It also settles a standing incoherence: `answer_bandwidth/2` announces
+`min(offered b=AS, conference bitrate)` while `SetVideoCodec` receives the conference
+bitrate unconditionally. The announced value becomes the regulator's initial ceiling,
+so what we promise is what we send.
+
+Open before implementation, all server-side:
+
+- the **CPU/VAAPI budget** of N encoders at N geometries, which is the reason the
+  single profile was attractive in the first place;
+- **reconfiguring without a keyframe storm**: a resizer inserted mid-stream forces an
+  IDR, and N legs resizing on the same congestion event must not all emit one at once;
+- the interaction with the **H.264 level we announce**. A level bounds resolution ×
+  frame rate, so regulating *downwards* is always legal, but the announced level must
+  remain the ceiling the encoder is bound by;
+- whether `SetVideoCodec` keeps its `size` argument for compatibility with mcuGold, as
+  `SetCompositionType` kept its own under S4.
+
 ## Sequencing and risk
 
 | | P7 (S1 + S2) | P8a (S3 plumbing) | P8c (ingestion) | S4 (done) |
@@ -149,6 +218,9 @@ what mcuGold approximates with its `onMediaChanged` heuristic), and reporting a
 | kelixip change | arm/disarm + 2 event handlers | **deletes** local arbitration and 4 config keys; adds the offer struct, the property split, the transport-case trace and the `a=rtcp-fb` intersection | none | reads the address, deletes two config keys |
 | Closes | L1, L2 | most of L4 | the rest of L4 | G2 |
 | Risk if skipped | dead legs occupy the mix for hours | silent one-way media on exotic fmtp | media that connects and never arrives behind NAT |
+
+S6 is not in that table: it is the only item here that is not additive on the
+kelixip side, and it is sequenced after P7/P8 for that reason.
 
 P7 first: it is smaller, purely additive on both sides, and fixes an operational
 hazard rather than an interop refinement. Both are independent of P0′-P6 and of

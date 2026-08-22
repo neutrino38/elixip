@@ -66,12 +66,34 @@ defmodule SIP.Test.Peers.Manual do
     Mockup.tell_peer(t_pid, :hangup)
   end
 
+  @doc """
+  Refresh the session: the offerless UPDATE this peer sends on its RFC 4028 timer,
+  delivered inbound like `hangup/1` and built the same way — in the dialog the
+  INVITE established, one CSeq further on, with no body at all.
+
+  What it is for: a B2BUA must answer that refresh on the leg it came from and
+  relay nothing, since each leg has a timer of its own. Only a request off the wire
+  can show that, because what must NOT happen is a request appearing on the OTHER
+  leg.
+  """
+  @spec refresh_session(pid()) :: :ok
+  def refresh_session(t_pid) do
+    Mockup.tell_peer(t_pid, :refresh_session)
+  end
+
   # ── Peer callbacks ──────────────────────────────────────────────────────────
 
   @impl true
   def init(opts) do
-    Map.merge(%{req: nil, acked_req: nil, totag: SIP.Msg.Ops.generate_from_or_to_tag()},
-      Map.new(opts))
+    Map.merge(
+      %{
+        req: nil,
+        acked_req: nil,
+        far_end_cseq: nil,
+        totag: SIP.Msg.Ops.generate_from_or_to_tag()
+      },
+      Map.new(opts)
+    )
   end
 
   @impl true
@@ -142,20 +164,10 @@ defmodule SIP.Test.Peers.Manual do
     {[answer(state.acked_req, 200, state.totag, 0)], state}
   end
 
-  def on_command(:hangup, state) do
-    case state.acked_req || state.req do
-      %{method: :INVITE} = invite ->
-        {[{:inject, far_end_bye(invite, state.totag), 0}], state}
+  def on_command(:hangup, state), do: send_in_dialog(state, :BYE, "hang up")
 
-      _ ->
-        Logger.warning(
-          module: __MODULE__,
-          message: "Asked to hang up but this peer has answered no INVITE. Ignoring."
-        )
-
-        {[], state}
-    end
-  end
+  def on_command(:refresh_session, state),
+    do: send_in_dialog(state, :UPDATE, "refresh the session")
 
   # ── Internals ───────────────────────────────────────────────────────────────
 
@@ -181,23 +193,50 @@ defmodule SIP.Test.Peers.Manual do
 
   defp answer(req, code, totag, after_ms), do: reply_as(totag, req, code, nil, [], after_ms)
 
-  # The BYE that ends the call from this side (RFC 3261 §15.1.1): this peer's
-  # identity and tag on From — the To of the INVITE it answered — ours on To with
-  # the tag we put there, our Call-ID, and a fresh Via branch, since a BYE is a
-  # transaction of its own.
+  # An in-dialog request this peer originates: the BYE that ends the call from its
+  # side (RFC 3261 §15.1.1), or the UPDATE that refreshes it.
+  defp send_in_dialog(state, method, what) do
+    case state.acked_req || state.req do
+      %{method: :INVITE} = invite ->
+        # Each of these opens a new transaction in the same dialog, so each needs a
+        # HIGHER CSeq than the last (RFC 3261 §12.2.1.1). Read from the INVITE
+        # alone, two of them got the same number and the dialog answered the second
+        # 500 Out of order — a peer that refreshes and then hangs up then looks
+        # like a B2BUA that dropped the hangup.
+        cseq = next_far_end_cseq(state, invite)
+        req = far_end_request(invite, state.totag, method, cseq)
+        {[{:inject, req, 0}], %{state | far_end_cseq: cseq}}
+
+      _ ->
+        Logger.warning(
+          module: __MODULE__,
+          message: "Asked to #{what} but this peer has answered no INVITE. Ignoring."
+        )
+
+        {[], state}
+    end
+  end
+
+  defp next_far_end_cseq(state, invite) do
+    [seqno, _method] = invite.cseq
+    max(state.far_end_cseq || seqno, seqno) + 1
+  end
+
+  # This peer's identity and tag on From — the To of the INVITE it answered — ours
+  # on To with the tag we put there, our Call-ID, and a fresh Via branch, since
+  # each such request is a transaction of its own.
   #
   # The CSeq continues OUR numbering rather than starting a sequence of this peer's
   # own: `SIP.DialogImpl` initialises `cseqin` to 1 instead of to "empty" (RFC 3261
   # §12.2.2), so a first in-dialog request numbered 1 is answered 500 Out of order.
   # This is the numbering every UA seen in traffic uses anyway.
-  defp far_end_bye(invite, totag) do
+  defp far_end_request(invite, totag, method, cseq) do
     branch = SIP.Msg.Ops.generate_branch_value()
-    [seqno, _method] = invite.cseq
     caller = uri!(invite.from)
 
     %{
       "Max-Forwards" => "70",
-      method: :BYE,
+      method: method,
       # A real callee sends it to our Contact; here nothing routes on the
       # Request-URI (a request is matched to its dialog on the tags and the
       # Call-ID), so the caller's own URI is enough and needs no parsed Contact.
@@ -207,7 +246,7 @@ defmodule SIP.Test.Peers.Manual do
       useragent: "Mockup-test",
       callid: invite.callid,
       transid: branch,
-      cseq: [seqno + 1, :BYE],
+      cseq: [cseq, method],
       via: ["SIP/2.0/UDP 82.184.8.2:53936;branch=#{branch}"],
       contentlength: 0
     }

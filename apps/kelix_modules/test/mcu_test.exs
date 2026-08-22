@@ -175,6 +175,7 @@ defmodule Kelix.Mod.McuTest do
                  "max_participants" => 4,
                  "destroy_when_empty" => true,
                  "video" => %{"fps" => 25},
+                 "preferred_video_codec" => "vp8",
                  "layout" => %{"comp" => 6, "size" => 2}
                })
 
@@ -186,35 +187,53 @@ defmodule Kelix.Mod.McuTest do
       assert conf.dtmf == false
       assert conf.max_participants == 4
       assert conf.destroy_when_empty == true
-      # a partial video override keeps the rest of the profile
-      assert conf.video == %{size: 6, fps: 25, bitrate: 1024, intra_period: 300}
+      # a partial video override keeps the rest of the profile — and takes the size the
+      # mosaic asked for, since this `video` named none: the canvas and the encoded
+      # picture are one size, and whichever side names it, both end up on it
+      assert conf.video == %{size: 2, fps: 25, bitrate: 1500, intra_period: 300}
+      # a preference, kept as the codec tables spell it (the answers state it first)
+      assert conf.preferred_video_codec == "VP8"
 
-      # the mosaic keeps the requested composition but NOT a canvas size of its own: the
-      # canvas is the encoded picture, so it follows `video.size` (hd720p here, the
-      # configured default this create did not override)
-      assert conf.layout == %{comp: 6, size: 6, auto: true}
+      assert conf.layout == %{comp: 6, size: 2, auto: true}
       assert_received {:rpc, "CreateConference", [^uid, 2, 16_000, 7]}
-      assert_received {:rpc, "SetCompositionType", [42, 0, 6, 6]}
+      assert_received {:rpc, "SetCompositionType", [42, 0, 6, 2]}
     end
 
     test "the human forms create the same conference (§8.3.7)" do
-      assert {:ok, %{uid: uid}} =
-               create(%{
-                 "domain" => @domain,
-                 "vad" => "full",
-                 "video" => %{"size" => "vga"},
-                 "layout" => "1+1,720p"
-               })
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, %{uid: uid}} =
+                   create(%{
+                     "domain" => @domain,
+                     "vad" => "full",
+                     "video" => %{"size" => "vga"},
+                     "layout" => "1+1,720p"
+                   })
+
+          assert {:ok, conf} = Mcu.conference(uid)
+          assert conf.vad == 2
+          assert conf.video.size == 2
+          # `1+1` implies manual: an operator who names a mosaic at create time means it
+          assert conf.layout == %{comp: 6, size: 2, auto: false}
+          assert_received {:rpc, "CreateConference", [^uid, 2, 32_000, 7]}
+          assert_received {:rpc, "SetCompositionType", [42, 0, 6, 2]}
+        end)
+
+      # two sizes named in the same create, and they disagree: the encoded one wins and
+      # the other is reported — composing and encoding at two geometries is what
+      # stretched the mosaic on 2026-08-06
+      assert log =~ "mosaic canvas size hd720p ignored"
+      assert log =~ "ENCODED size vga"
+    end
+
+    test "a size named by the mosaic alone moves the encoder with it" do
+      assert {:ok, %{uid: uid}} = create(%{"domain" => @domain, "layout" => "2x2 vga"})
 
       assert {:ok, conf} = Mcu.conference(uid)
-      assert conf.vad == 2
-      assert conf.video.size == 2
-      # `1+1` implies manual: an operator who names a mosaic at create time means it.
-      # `720p` in the layout is a canvas size, so it is dropped for `video.size` (vga
-      # here) — composing and encoding at two geometries is what stretched the mosaic.
-      assert conf.layout == %{comp: 6, size: 2, auto: false}
-      assert_received {:rpc, "CreateConference", [^uid, 2, 32_000, 7]}
-      assert_received {:rpc, "SetCompositionType", [42, 0, 6, 2]}
+      assert conf.layout == %{comp: 1, size: 2, auto: false}
+      # the configured profile keeps its frame rate and its bitrate, and follows the size
+      assert conf.video == %{size: 2, fps: 30, bitrate: 1500, intra_period: 300}
+      assert_received {:rpc, "SetCompositionType", [42, 0, 1, 2]}
     end
 
     test "an unknown or badly typed argument is refused, and nothing is created" do

@@ -59,10 +59,21 @@ defmodule Kelix.Mod.Mcu.Conference do
             # `[module.mcu] rtp_timeout_ms`; 0 disables it. Lives on the conference so
             # the adapter reads it off the leg it is setting up, like `video`.
             rtp_timeout_ms: 10_000,
-            video: %{size: 6, fps: 15, bitrate: 1024, intra_period: 300},
+            video: %{size: 6, fps: 30, bitrate: 1500, intra_period: 300},
+            # The video codec this conference states FIRST in its answers (`nil`: the
+            # caller's own order decides). A preference, not a codec list: it can only move
+            # a payload type the caller offered and the media server accepted, and the leg
+            # it moves is the one the mixer encodes.
+            preferred_video_codec: nil,
             layout: %{comp: 1, size: 6, auto: true},
             max_participants: 20,
             destroy_when_empty: false,
+            # Whether this definition outlives the node (§9.5): `owner: :none` rooms —
+            # every REST/CLI create, and the scripts that ask for one — are written to
+            # the definition file and recreated at the next start. An `owner: :caller`
+            # room is not: it was made for one call, and resurrecting it at every boot
+            # is a room nobody asked for.
+            persistent: false,
             created_at: nil,
             # Set when the MCU holding this conference went away (§9.2): the row and
             # its DID survive, `conf_id` does not, and the conference is recreated
@@ -148,9 +159,11 @@ defmodule Kelix.Mod.Mcu.Conference do
       medias: conf.medias,
       dtmf: conf.dtmf,
       video: conf.video,
+      preferred_video_codec: conf.preferred_video_codec,
       layout: conf.layout,
       max_participants: conf.max_participants,
       destroy_when_empty: conf.destroy_when_empty,
+      persistent: conf.persistent,
       created_at: conf.created_at,
       stale: conf.stale,
       logo: conf.logo,

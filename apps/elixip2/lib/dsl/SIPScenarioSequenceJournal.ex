@@ -20,8 +20,13 @@ defmodule SIP.Scenario.SequenceJournal do
   @typedoc "A recorded event, in chronological order once read back via `events/0`."
   @type event ::
           %{kind: :command, type: atom(), name: String.t()}
-          | %{kind: :transition, to: atom(), event: String.t(), type: atom() | nil}
-          | %{kind: :terminal, outcome: :succeeded | :failed, reason: String.t(), type: atom() | nil}
+          | %{kind: :transition, to: atom() | String.t(), event: String.t(), type: atom() | nil}
+          | %{
+              kind: :terminal,
+              outcome: :succeeded | :failed,
+              reason: String.t(),
+              type: atom() | nil
+            }
 
   @type meta :: %{scenario: String.t(), pid: String.t(), config: keyword()}
 

@@ -14,7 +14,7 @@
 node_name  = "kelixip@127.0.0.1"
 script_dir = "/usr/share/kelixip"
 module_dir = "/usr/lib/kelixip/modules"
-# user_agent = "Kelixip/1.4.1"
+# user_agent = "Kelixip/1.5.1"
 # max_calls  = 1000          # node-wide concurrent-instance cap; 503 beyond it
 
 [log]
@@ -103,12 +103,23 @@ port = 9095
 #auto_layout      = true            # the mosaic follows the number of video legs
 #layout_comp      = "2x2"           # starting mosaic when auto_layout is off
 #video_size       = "hd720p"
-#video_fps        = 15
-#video_bitrate    = 1024            # kbps, also the cap on the answer's b=AS:
+#video_fps        = 30
+#video_bitrate    = 1500            # kbps, also the cap on the answer's b=AS:; defaults
+                                   #   to [mediaserver] video_bitrate above
 #video_intra_period = 300           # frames between intra-frames
                                    #   (the H.264 profile the answer states is the one
                                    #   the media server reported it accepted, so there
                                    #   is no fmtp key to set here)
+# The video codec the answers state FIRST, hence what the mixer encodes towards a leg
+# that offered it: H264 | VP8 | AV1 | none. A preference, not a codec list — it moves a
+# payload type the caller offered AND the media server accepted, and nothing else. A
+# miss is logged per leg, naming which of the two dropped it.
+#preferred_video_codec = "H264"
+# The conference DEFINITIONS, on THIS host (§9.5). Set it and the rooms created through
+# REST/kelictl come back after a restart — the calls do not, a restart ends them. Unset:
+# no persistence at all, stated once at start. A file kelixip cannot parse is left
+# untouched and persistence stays off for that run.
+#conference_file  = "/var/lib/kelixip/conferences.json"
 # Paths on the MEDIA SERVER's filesystem, not on this host (the same box in a
 # single-machine deployment, and not in production). The module only ever appends a
 # file name it validated; a command chooses the name, never the directory. Unset
@@ -138,6 +149,32 @@ port = 9095
 #
 # No media address here: what the server announces in the SDP is its own setting
 # (`mediaserver --public-ip`, mandatory behind a NAT) and it reports it per call.
+
+#[mediaserver]
+# The node's video bitrate, in kbps: what a video leg is encoded at, and the cap on
+# the `b=AS:` this node answers with (the offered value wins when it is lower). One
+# value for both media paths — point-to-point calls and conferences — which is why it
+# is here and not per pool entry. `[module.mcu] video_bitrate` overrides it for
+# conferences only.
+#video_bitrate = 1500
+
+# Which RTCP bitrate-feedback dialects this node may ANSWER on video: a
+# comma-separated list of `goog-remb` and `tmmbr`, or `none`. Both by default. It only
+# ever narrows: a dialect the offer did not ask for is never advertised, and every
+# dialect answered has its server-side switch. Narrow it when a peer misbehaves on one
+# of them; `none` leaves the peer no way to ask for less, so the encoder keeps sending
+# at the negotiated bitrate whatever the network does.
+#bitrate_feedback = "goog-remb, tmmbr"
+
+# Negotiate transport-wide congestion control on video (RFC 8285 `a=extmap` +
+# `a=rtcp-fb transport-cc`). It is what lets the media server measure what the network
+# really absorbs towards each peer and drive its encoder from that, instead of only
+# from what the peer asks for. Off by default: the server does not yet report arrivals
+# for the streams it RECEIVES, so a peer that negotiates the extension gets nothing
+# back for its own outgoing stream and keeps using our REMB/TMMBR — no worse than
+# today, but unmeasured. One value for both media paths.
+#transport_cc = false
+
 #[mediaserver.pool.mcu1]
 #module = "mendooze"
 #url    = "http://mcu1.example.com:8080"

@@ -495,9 +495,14 @@ defmodule SIP.Session.B2bua do
 
       Needs a `{:mediaserver, …}` call — a signalling B2BUA has no media of its
       own to answer with, and fails with `lasterr` saying so. An offerless
-      re-INVITE (a session-timer refresh) is answered with OUR offer, whose
-      answer arrives in the ACK; that ACK is absorbed too, since the far end
-      never saw the INVITE it confirms.
+      re-INVITE is answered with OUR offer, whose answer arrives in the ACK; that
+      ACK is absorbed too, since the far end never saw the INVITE it confirms.
+
+      The **one case that needs no media server**, and the ordinary shape of an
+      RFC 4028 session-timer refresh: an UPDATE that made no offer, answered with
+      a bare 200 (RFC 3311 §5.1 — no SDP either way). A signalling B2BUA can
+      absorb that one, and should: the timer is between us and that peer, on a leg
+      where we are the UA, so there is nothing in it for the far end.
 
       A media server that refuses the new description leaves the call exactly as
       it was, and the re-offer gets a 488 (RFC 3261 §14.1).
@@ -931,6 +936,14 @@ defmodule SIP.Session.B2bua do
     leg = current_leg()
 
     cond do
+      # An UPDATE that made no offer is answered with a bare 200 — no SDP either
+      # way (RFC 3311 §5.1), so no media server is involved and this works on a
+      # signalling B2BUA too. It is the RFC 4028 session-timer refresh: a timer
+      # between us and ONE peer, on a leg where we are the UA, and there is
+      # nothing in it for the other leg to answer.
+      SIP.Msg.Ops.offerless_update?(req) ->
+        do_local_reply(sip_ctx, req, 200, "OK", [{:contact, local_contact(sip_ctx)}])
+
       is_nil(media_plan(sip_ctx)) ->
         # A signalling B2BUA has no media of its own: the only honest answer to a
         # re-offer is the far end's.
@@ -1201,7 +1214,7 @@ defmodule SIP.Session.B2bua do
   end
 
   defp create_leg(sip_ctx, req, peer, media, opts) do
-    case SIP.Msg.Ops.prepare_forwarded_request(req, opts) do
+    case prepare_forward(sip_ctx, req, opts) do
       {:error, reason} ->
         fail(sip_ctx, {:b2bua, reason})
 
@@ -1538,7 +1551,7 @@ defmodule SIP.Session.B2bua do
   end
 
   defp relay_request(sip_ctx, req, from_leg, target_pid) do
-    case SIP.Msg.Ops.prepare_forwarded_request(req) do
+    case prepare_forward(sip_ctx, req) do
       {:error, reason} ->
         fail(sip_ctx, {:b2bua, reason})
 
@@ -1699,7 +1712,9 @@ defmodule SIP.Session.B2bua do
     # the callee's answer to the initial INVITE, or its answer to a re-offer we
     # relayed. Either way it is what the NEXT re-offer from that leg is read
     # against (§R4.1b).
-    sip_ctx = remember_remote_sdp(sip_ctx, current_leg(), SIP.Msg.Ops.sdp_body(resp))
+    sdp = SIP.Msg.Ops.sdp_body(resp)
+    sip_ctx = remember_remote_sdp(sip_ctx, current_leg(), sdp)
+    note_relayed_medias(sip_ctx, resp, sdp)
     state = state(sip_ctx)
 
     case Map.get(state.pending, tid) do
@@ -1732,6 +1747,19 @@ defmodule SIP.Session.B2bua do
 
         SIP.Context.set(sip_ctx, :lasterr, :ok)
     end
+  end
+
+  # The monitor's `medias` column for a SIGNALLING relay, which negotiates nothing
+  # of its own: what the two ends settled on is the answer that just crossed. With a
+  # media server both answers are ours, and each is noted where it is built
+  # (`SIP.Session.Media`) — reading the callee's here would show the caller media it
+  # never sees.
+  defp note_relayed_medias(sip_ctx, resp, sdp) do
+    if is_nil(media_plan(sip_ctx)) and resp.response in 200..299 and is_binary(sdp) do
+      SIP.Scenario.Monitor.note_medias(SIP.Msg.Ops.media_kinds(sdp))
+    end
+
+    :ok
   end
 
   # What a `{:mediaserver, …}` call does to a response before it is relayed —
@@ -2919,9 +2947,20 @@ defmodule SIP.Session.B2bua do
   end
 
   defp put_leg(sip_ctx, tag, leg) do
+    note_destination(tag, leg)
     state = state(sip_ctx)
     put_state(sip_ctx, %State{state | legs: Map.put(state.legs, tag, leg)})
   end
+
+  # The monitor's `outbound` column: where this call is being placed. `%Leg{target}`
+  # is the whole answer and this is the one place it is written — the first target
+  # dialled, each next one a serial hunt walks, and the branch that answered 2xx
+  # (`adopt_winning_branch/3` reduces the rung to it). A leg being torn down carries
+  # no target and must not blank the destination the call ended on.
+  defp note_destination(@outbound_tag, %Leg{target: target}) when not is_nil(target),
+    do: SIP.Scenario.Monitor.note_outbound(target)
+
+  defp note_destination(_tag, _leg), do: :ok
 
   defp add_pending(sip_ctx, trans_pid, req, leg, method, held_answer \\ nil)
 
@@ -2959,6 +2998,54 @@ defmodule SIP.Session.B2bua do
 
   # The dialog pid of a named leg: the inbound leg is the scenario's own dialog,
   # every other one lives in the leg map.
+  # Every request leaving this B2BUA is prepared through here, so the identity
+  # we assert is attached in one place. It is needed on both paths: the initial
+  # INVITE and each target of a hunt go through create_leg/5, and the in-dialog
+  # relay goes through relay_request/4 — a re-INVITE forwarded without the
+  # header would make the caller's identity flicker mid-call.
+  #
+  # The warning is the one hole this design leaves. Dropping and re-adding
+  # P-Asserted-Identity happen in the same function, so no *foreign* assertion
+  # can ever leave; nothing guarantees that OURS does, if a future call site
+  # reaches prepare_forwarded_request/2 without coming through here. Loud rather
+  # than silent.
+  defp prepare_forward(sip_ctx, req, opts \\ []) do
+    opts =
+      case sip_ctx.asserted_identity do
+        nil -> opts
+        %SIP.Uri{} = uri -> Keyword.put_new(opts, :asserted_identity, uri)
+      end
+
+    case SIP.Msg.Ops.prepare_forwarded_request(req, opts) do
+      {:ok, fwd} = ok ->
+        warn_missing_assertion(sip_ctx, req, fwd)
+        ok
+
+      other ->
+        other
+    end
+  end
+
+  # The identity was proved and the request going out does not carry it, for a
+  # reason that is not the caller's privacy. Not fatal — the call is fine, only
+  # anonymous downstream — but it means a forward path bypassed the option, and
+  # that is invisible in a capture unless somebody says it.
+  defp warn_missing_assertion(sip_ctx, orig_req, fwd) do
+    with %SIP.Uri{} <- sip_ctx.asserted_identity,
+         false <- SIP.Msg.Ops.privacy_id?(orig_req),
+         nil <- Map.get(fwd, "P-Asserted-Identity") do
+      Logger.warning(
+        module: __MODULE__,
+        message:
+          "forwarded #{fwd.method} carries no P-Asserted-Identity although one " <>
+            "was asserted for this session: a forward path is not going through " <>
+            "prepare_forward/3"
+      )
+    end
+
+    :ok
+  end
+
   defp leg_pid(sip_ctx, :inbound), do: sip_ctx.dialogpid
 
   defp leg_pid(sip_ctx, tag) do

@@ -100,7 +100,7 @@ Copy the binary anywhere (`cp elixipp ~/.local/bin/`). Same exit codes as
 
 The scenario argument is **either a path to a `.exs` file, or the name of a built-in
 module**. A path is yours: it is taken as given, relative to the current directory.
-Inside a scenario, a sub-scenario (`sub_fsm "other.exs"`) is looked up next to the
+Inside a scenario, a sub-scenario (`spawn_fsm "other.exs"`) is looked up next to the
 file that declares it — so a scenario and its children stay a self-contained unit
 wherever you run them from.
 
@@ -124,7 +124,7 @@ same logic under a different module name (`UAC.InviteExample`,
 | `uac_invite_webrtc.exs` | the same over WebRTC SDP |
 | `uas_register.exs` | **registrar**: challenges, verifies, accepts/refreshes/un-registers |
 | `uas_invite.exs` | **call server**: answers inbound INVITEs |
-| `uac_register_and_uas_invite.exs` | registers, then waits for an inbound call (uses `sub_fsm`) |
+| `uac_register_and_uas_invite.exs` | registers, then waits for an inbound call (uses `spawn_fsm`) |
 | `smoke.exs` | no SIP traffic; checks the tool itself end to end |
 | `http_get_example.exs` | an HTTP call from a scenario |
 
@@ -286,22 +286,44 @@ Keys, in live mode:
 ## Live monitor (`--monitor`)
 
 One row per running instance — the account it uses, the last high-level command it
-issued, its current FSM state and the event that caused the last transition:
+issued, its current FSM state, the event that caused the last transition, and what
+shape the call is: the media it negotiated, the media server carrying them and the
+destination it was placed to.
 
 ```
-╭────────────────┬────────────────┬────────────────┬──────────────────┬────────────────────────────╮
-│Scénario        │Compte          │Commande        │État              │Événement                   │
-├────────────────┼────────────────┼────────────────┼──────────────────┼────────────────────────────┤
-│UAC.Register    │33970262546     │send_REGISTER   │registered        │200 OK                      │
-│UAC.Invite      │1001            │media_play      │call_established  │toto.mp4: start             │
-│  └ callee      │1001            │reply_invite    │answered          │INVITE                      │
-╰────────────────┴────────────────┴────────────────┴──────────────────┴────────────────────────────╯
+╭────────────────┬────────────────┬────────────────┬──────────────────┬────────────────────────────┬──────┬────────────┬──────────────────────╮
+│Scénario        │Compte          │Commande        │État              │Événement                   │Médias│Serveur     │Destination           │
+├────────────────┼────────────────┼────────────────┼──────────────────┼────────────────────────────┼──────┼────────────┼──────────────────────┤
+│UAC.Register    │33970262546     │send_REGISTER   │registered        │200 OK                      │n/a   │none        │n/a                   │
+│UAC.Invite      │1001            │media_play      │call_established  │toto.mp4: start             │AV    │mcu1        │n/a                   │
+│  └ callee      │1001            │reply_invite    │answered          │INVITE                      │A     │mcu1        │n/a                   │
+╰────────────────┴────────────────┴────────────────┴──────────────────┴────────────────────────────┴──────┴────────────┴──────────────────────╯
   Actifs: 3/5  |  Succès: 41  |  Interrompus: 0  |  Échecs: 2  |  Total: 44/100  [q: arrêt propre | Ctrl+D: immédiat]
 ```
 
+The table is about 143 columns wide. A narrower terminal wraps it; the `↑` / `↓`
+keys scroll rows, not columns.
+
 - **Compte** is the account in use — set from the scenario config, or learned from
   the REGISTER once a server scenario has authenticated it.
-- A **sub-FSM** (`sub_fsm`) is indented under its parent with `└`.
+- **Médias** is what the two ends settled on, read off the SDP answer: `A`, `AV`,
+  `AVT`, any combination of the three, `none` when the answer declined every media,
+  and `n/a` for a call that has negotiated nothing. Nothing in a scenario reports
+  it — the framework reads it wherever an answer is built, received or relayed.
+- **Serveur** is the media server this call is connected to, by the name it is
+  declared under (`[mediaserver.pool.<name>]` on a kelixip node). A server named
+  nowhere — the two-argument `media_connect(module, url)`, the global
+  `:mediaserver` config — is shown by its url. `none` when the call has no media
+  plane at all.
+- **Destination** is where a B2BUA call was placed: the target being dialled, and
+  the one that answered once one has. A serial hunt walks several devices and the
+  column names the one the call is about, not the list. `n/a` for anything that is
+  not a B2BUA call.
+- A **sub-FSM** (`spawn_fsm`) is indented under its parent with `└`.
+- A **service building block** (`sbb_fsm`) is not a row of its own: it runs on the
+  caller's legs, so its states show on the caller's row, qualified with the block —
+  `MyApp.Cancelling/waiting`. A name too long for the column loses its head rather
+  than its tail (`…ancelling/waiting`), the state being what says where the call is.
 - On a real terminal the cells are colour-coded: light green for `:sip`, orange for
   `:media`, light blue otherwise; **État** turns green on success, red on failure.
   Colours are emitted only on a TTY.

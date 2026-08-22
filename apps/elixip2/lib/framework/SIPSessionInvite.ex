@@ -115,7 +115,18 @@ defmodule SIP.Session.CallUAC do
       # automatically (required by a 2xx to an INVITE). On media failure the
       # reply is 500 Media Server Error (overridable with `on_media_error:
       # {code, reason}`). `opts`: :reason, :contact, :webrtc, :media,
-      # :on_media_error. Common to UAC and UAS (a UAC answers a re-INVITE too).
+      # :on_media_error, :prefer_codecs. Common to UAC and UAS (a UAC answers a
+      # re-INVITE too).
+      #
+      # `prefer_codecs: [video: ["H264", "VP8"], audio: ["OPUS"]]` ranks the
+      # answer's codecs per media (a permutation of what the offer proposed,
+      # never an addition or a removal): the answerer's order is a preference
+      # statement, and it is what steers which codec the peer then sends —
+      # e.g. H264 first so a recording needs no transcoding. It is a property
+      # of the peer connection, set when it is created (the first
+      # reply_invite_with_sdp of the leg) and kept across re-INVITEs; an
+      # unknown media or codec name raises on that first reply (a configuration
+      # error, same treatment as every other peer-connection creation failure).
       defmacro reply_invite_with_sdp(code, opts \\ []) do
         quote do
           SIP.Scenario.Monitor.note_command(:sip, "reply_invite_with_sdp #{unquote(code)}")
@@ -371,14 +382,16 @@ defmodule SIP.Session.CallUAS do
 
       # 401/407 digest challenge of the inbound INVITE. Reuses the dialog layer's
       # nonce generation / storage (SIP.Dialog.challenge/4).
-      defmacro challenge_invite(realm, code \\ 407) do
+      # `challenge` is either a realm (the dialog mints the nonce) or the digest
+      # params the application composed — see do_challenge_invite/3.
+      defmacro challenge_invite(challenge, code \\ 407) do
         quote do
           SIP.Scenario.Monitor.note_command(:sip, "challenge_invite #{unquote(code)}")
 
           var!(sip_ctx) =
             SIP.Session.CallUAS.do_challenge_invite(
               var!(sip_ctx),
-              unquote(realm),
+              unquote(challenge),
               unquote(code)
             )
         end
@@ -391,7 +404,7 @@ defmodule SIP.Session.CallUAS do
   re-INVITE / UPDATE / REGISTER) and its server transaction pid in the context
   appdata (single slot `:last_uas_req` / `:last_uas_req_tid`), so the reply
   macros and `last_uas_req/0` can serve it. Also binds the dialog pid into the
-  context: a UAS scenario spawned before the dialog exists (a `sub_fsm` child
+  context: a UAS scenario spawned before the dialog exists (a `spawn_fsm` child
   waiting for a call) has no other way to learn it, and the reply macros target
   `sip_ctx.dialogpid`. No-op for any other event. Called by the on_events
   instrumentation for every matched event.
@@ -444,13 +457,31 @@ defmodule SIP.Session.CallUAS do
       when is_integer(code) do
     req = fetch_stored_req!(sip_ctx)
 
-    if needs_sdp?(code) and not (req.method == :UPDATE and not has_sdp?(req)) do
+    if needs_sdp?(code) and not SIP.Msg.Ops.offerless_update?(req) do
       raise "reply_invite: code #{code} requires an SDP body; " <>
               "use reply_invite_with_sdp/reply_invite_with_body (phase 3)"
     end
 
-    rc = SIP.Dialog.reply(sip_ctx.dialogpid, req, code, reason, upd_fields)
-    SIP.Context.set(sip_ctx, :lasterr, reply_lasterr(rc))
+    SIP.Context.set(
+      sip_ctx,
+      :lasterr,
+      reply_lasterr(reply_to(sip_ctx, req, code, reason, upd_fields))
+    )
+  end
+
+  # Replying on a dialog that has already died is ordinary traffic — a caller
+  # that gave up between its request and our answer — and must not become a
+  # scenario failure. Without this the bare GenServer.call exits, the per-state
+  # `try` catches it, and a caller hanging up reads as "the scenario crashed".
+  #
+  # `:dialogterminated` is the atom SIP.Session.send_sip_request/3 already sets
+  # for the sending side; replying is the same event on the other half of the
+  # transaction. `:leg_dead` stays B2BUA vocabulary, for a *leg* — a scenario
+  # holding one dialog has no legs.
+  defp reply_to(sip_ctx, req, code, reason, upd_fields) do
+    SIP.Dialog.reply(sip_ctx.dialogpid, req, code, reason, upd_fields)
+  catch
+    :exit, _reason -> :dialogterminated
   end
 
   @doc """
@@ -470,11 +501,31 @@ defmodule SIP.Session.CallUAS do
   retrying it is pointless) while a media-server RPC failure is a `500` (our
   problem, and a retry may well work). Collapsing the two into one code tells the
   peer the wrong thing about what to do next.
+
+  An **UPDATE that carries no offer** is answered with a bare 2xx and no media
+  negotiation (RFC 3311 §5.1: "if the UPDATE did not contain an offer, the 2xx MUST
+  NOT contain an answer"). A session-timer refresh (RFC 4028 §9) is exactly that
+  request, so it reaches every scenario that stays in a call, and answering it is
+  not a decision a scenario should have to take: it branches on nothing but the
+  presence of a body. A re-INVITE with no offer is a different case — its 2xx MUST
+  carry an offer, which is the delayed offer we do not support — and still raises.
   """
   def do_reply_invite_with_sdp(sip_ctx = %SIP.Context{}, code, opts)
       when code in [183, 200] and is_list(opts) do
     req = fetch_stored_req!(sip_ctx)
 
+    if SIP.Msg.Ops.offerless_update?(req) do
+      do_reply_invite(sip_ctx, code, Keyword.get(opts, :reason), reply_fields(sip_ctx, opts, []))
+    else
+      reply_invite_with_negotiated_sdp(sip_ctx, req, code, opts)
+    end
+  end
+
+  def do_reply_invite_with_sdp(_sip_ctx, code, _opts) do
+    raise "reply_invite_with_sdp: unsupported code #{inspect(code)} (only 183 and 200)"
+  end
+
+  defp reply_invite_with_negotiated_sdp(sip_ctx, req, code, opts) do
     remote_offer =
       SIP.Session.extract_sdp(req) ||
         raise "reply_invite_with_sdp: the stored #{req.method} carries no SDP offer " <>
@@ -513,10 +564,6 @@ defmodule SIP.Session.CallUAS do
 
         SIP.Context.set(sip_ctx, :lasterr, {:media_error, reason})
     end
-  end
-
-  def do_reply_invite_with_sdp(_sip_ctx, code, _opts) do
-    raise "reply_invite_with_sdp: unsupported code #{inspect(code)} (only 183 and 200)"
   end
 
   # `on_media_error` as a per-cause function, a fixed pair, or the default 500. A
@@ -570,9 +617,40 @@ defmodule SIP.Session.CallUAS do
     SIP.Context.set(sip_ctx, :lasterr, reply_lasterr(rc))
   end
 
-  @doc "401/407 digest challenge (reuses the dialog nonce machinery)."
+  @doc """
+  Challenge the stored INVITE / re-INVITE — 401 or 407. Backs `challenge_invite`.
+
+  Two forms, and the difference is *who mints the nonce*:
+
+    * **a realm** (a binary) — the dialog layer composes the whole challenge
+      (`SIP.Dialog.challenge/4`). Enough for a scenario whose policy is "ask for
+      credentials in this realm";
+    * **digest params** (a map) — the application composed them, and they are
+      sent verbatim. This is what an authentication backend needs: `stale` (so a
+      client whose nonce merely aged replays without asking its user for a
+      password again) and the `algorithm` the stored secret was hashed with are
+      the backend's to decide, and neither survives being re-derived here.
+      `Kelix.Auth.challenge_params/2` and its like mint them; this verb only puts
+      them in the header the code calls for (`SIP.Msg.Ops.challenge_header/1`).
+
+  The second form is the counterpart of `SIP.Session.B2bua.do_local_challenge/4`
+  for a scenario that is not a B2BUA — an MCU, a plain UAS — which answers on its
+  own dialog rather than on a named leg. 407 by default in both: a UA expects the
+  server that routes its calls to challenge as a proxy, and many will not retry a
+  401 on an INVITE, while a scenario that really is the registrar of the AOR
+  wants the 401.
+  """
+  @spec do_challenge_invite(%SIP.Context{}, String.t() | map(), 401 | 407) ::
+          %SIP.Context{}
+  def do_challenge_invite(sip_ctx = %SIP.Context{}, params, code)
+      when code in [401, 407] and is_map(params) do
+    do_reply_invite(sip_ctx, code, SIP.Msg.Ops.sip_reason(code), [
+      {SIP.Msg.Ops.challenge_header(code), params}
+    ])
+  end
+
   def do_challenge_invite(sip_ctx = %SIP.Context{}, realm, code)
-      when code in [401, 407] do
+      when code in [401, 407] and is_binary(realm) do
     req = fetch_stored_req!(sip_ctx)
     rc = SIP.Dialog.challenge(sip_ctx.dialogpid, req, code, realm)
     SIP.Context.set(sip_ctx, :lasterr, reply_lasterr(rc))
@@ -618,7 +696,7 @@ defmodule SIP.Session.CallUAS do
   end
 
   # Only :webrtc / :media are meaningful to the media negotiation.
-  defp media_opts(opts), do: Keyword.take(opts, [:webrtc, :media])
+  defp media_opts(opts), do: Keyword.take(opts, [:webrtc, :media, :prefer_codecs])
 
   # Normalize the `bodies` argument accepted by reply_invite_with_body into a
   # value understood by update_sip_msg/2 ({:body, ...}): a raw binary, a single
@@ -638,14 +716,6 @@ defmodule SIP.Session.CallUAS do
   defp normalize_bodies(other) do
     raise "reply_invite_with_body: invalid body #{inspect(other)}; expected a binary, " <>
             "a %{contenttype, data} map, or a list of such maps"
-  end
-
-  defp has_sdp?(req) do
-    case Map.get(req, :body) do
-      b when is_binary(b) and b != "" -> true
-      [_ | _] -> true
-      _ -> false
-    end
   end
 
   # :ok and :ignore (final response already sent — e.g. the auto-487 after a

@@ -140,6 +140,37 @@ defmodule Kelix.Mod.McuAdminTest do
       assert_received {:rpc, "UpdateConference", [42, 1, 8000]}
     end
 
+    # A preference applies to the legs that join next, like the rest of the video
+    # profile: it is stated in an answer, and this conference's answers are already out.
+    test "preferred_video_codec is set, changed and cleared, without touching the mixer",
+         ctx do
+      assert {:ok, %{changed: [:preferred_video_codec]}} =
+               Mcu.handle_control("conference.update", %{
+                 "uid" => ctx.uid,
+                 "preferred_video_codec" => "h264"
+               })
+
+      assert {:ok, %{preferred_video_codec: "H264"}} = Mcu.conference(ctx.uid)
+
+      assert {:ok, _} =
+               Mcu.handle_control("conference.update", %{
+                 "uid" => ctx.uid,
+                 "preferred_video_codec" => "none"
+               })
+
+      assert {:ok, %{preferred_video_codec: nil}} = Mcu.conference(ctx.uid)
+      # nothing to tell the media server: the preference is answered, not configured
+      assert TestStub.rpc_order() == []
+
+      assert {:error, msg} =
+               Mcu.handle_control("conference.update", %{
+                 "uid" => ctx.uid,
+                 "preferred_video_codec" => "h265"
+               })
+
+      assert msg =~ ~s(unknown "h265")
+    end
+
     test "layout goes to SetCompositionType and is merged, not replaced", ctx do
       assert {:ok, _} =
                Mcu.handle_control("conference.update", %{
@@ -153,44 +184,55 @@ defmodule Kelix.Mod.McuAdminTest do
     end
 
     test "the short layout form is the same update, in names (§8.3.7)", ctx do
-      log =
-        ExUnit.CaptureLog.capture_log(fn ->
-          assert {:ok, %{changed: [:layout]}} =
-                   Mcu.handle_control("conference.update", %{
-                     "uid" => ctx.uid,
-                     "layout" => "3x3 vga"
-                   })
-        end)
+      assert {:ok, %{changed: [:layout]}} =
+               Mcu.handle_control("conference.update", %{
+                 "uid" => ctx.uid,
+                 "layout" => "3x3 vga"
+               })
 
-      # the mosaic moves; the canvas SIZE does not, because the canvas is the encoded
-      # picture (`align_canvas/3`) and this conference encodes hd720p
-      assert_received {:rpc, "SetCompositionType", [42, 0, 2, 6]}
-      assert log =~ "mosaic canvas size vga ignored"
-      assert log =~ "ENCODED size hd720p"
+      # the mosaic moves, and so does the size — of the canvas AND of the encoder, which
+      # are one picture: this conference encoded hd720p and now encodes vga
+      assert_received {:rpc, "SetCompositionType", [42, 0, 2, 2]}
 
       # naming a mosaic left `auto`, so the next arrival cannot undo the operator's
       # choice — the reason the short form implies what the wire form does not
-      assert {:ok, %{layout: %{comp: 2, size: 6, auto: false}}} = Mcu.conference(ctx.uid)
+      assert {:ok, conf} = Mcu.conference(ctx.uid)
+      assert conf.layout == %{comp: 2, size: 2, auto: false}
+      assert conf.video.size == 2
     end
 
-    # A canvas of its own is what produced the stretched mosaic of 2026-08-06: composing
-    # at one geometry and encoding at another means rescaling between the two, which the
-    # media server does without preserving the aspect ratio. So a size in `layout` is
-    # reported and dropped; `video.size` is the one that moves the picture.
-    test "a canvas size alone changes nothing, and `auto` alone keeps the rest", ctx do
-      log =
-        ExUnit.CaptureLog.capture_log(fn ->
-          assert {:ok, _} =
-                   Mcu.handle_control("conference.update", %{"uid" => ctx.uid, "layout" => "cif"})
-        end)
+    # Composing at one geometry and encoding at another is what produced the stretched
+    # mosaic of 2026-08-06: the media server rescales between the two without preserving
+    # the aspect ratio. So the two sizes are one value, named from either side.
+    test "a size named by the mosaic alone moves the encoder, and `auto` alone keeps the rest",
+         ctx do
+      assert {:ok, _} =
+               Mcu.handle_control("conference.update", %{"uid" => ctx.uid, "layout" => "cif"})
 
-      assert log =~ "mosaic canvas size cif ignored"
-      assert {:ok, %{layout: %{comp: 1, size: 6, auto: true}}} = Mcu.conference(ctx.uid)
+      assert {:ok, conf} = Mcu.conference(ctx.uid)
+      assert conf.layout == %{comp: 1, size: 1, auto: true}
+      assert conf.video.size == 1
 
       assert {:ok, _} =
                Mcu.handle_control("conference.update", %{"uid" => ctx.uid, "layout" => "manual"})
 
-      assert {:ok, %{layout: %{comp: 1, size: 6, auto: false}}} = Mcu.conference(ctx.uid)
+      assert {:ok, %{layout: %{comp: 1, size: 1, auto: false}}} = Mcu.conference(ctx.uid)
+    end
+
+    test "two sizes that disagree: the encoded one wins and the other is reported", ctx do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, _} =
+                   Mcu.handle_control("conference.update", %{
+                     "uid" => ctx.uid,
+                     "layout" => "3x3 vga",
+                     "video" => "hd720p"
+                   })
+        end)
+
+      assert log =~ "mosaic canvas size vga ignored"
+      assert log =~ "ENCODED size hd720p"
+      assert {:ok, %{layout: %{comp: 2, size: 6}, video: %{size: 6}}} = Mcu.conference(ctx.uid)
     end
 
     # The other half of the same rule: moving the ENCODED size moves the canvas, even
@@ -235,9 +277,32 @@ defmodule Kelix.Mod.McuAdminTest do
 
       assert {:ok, conf} = Mcu.conference(ctx.uid)
 
-      assert conf.video == %{size: 6, fps: 15, bitrate: 2048, intra_period: 300}
+      assert conf.video == %{size: 6, fps: 30, bitrate: 2048, intra_period: 300}
 
       assert conf.max_participants == 2
+      assert TestStub.rpc_order() == []
+    end
+
+    test "the short video form is the same update, in names (§8.3.7)", ctx do
+      assert {:ok, %{changed: [:video]}} =
+               Mcu.handle_control("conference.update", %{
+                 "uid" => ctx.uid,
+                 "video" => "vga 30fps 1024k"
+               })
+
+      assert {:ok, conf} = Mcu.conference(ctx.uid)
+      assert conf.video == %{size: 2, fps: 30, bitrate: 1024, intra_period: 300}
+      # the encoded size moved, so the canvas has to be re-issued at the new geometry
+      assert conf.layout.size == 2
+      assert_received {:rpc, "SetCompositionType", [42, 0, 1, 2]}
+    end
+
+    test "a mistyped video is a refusal that prints the shapes", ctx do
+      assert {:error, msg} =
+               Mcu.handle_control("conference.update", %{"uid" => ctx.uid, "video" => "vga 30"})
+
+      assert msg =~ ~s(video: unknown "30")
+      assert msg =~ "<n>fps"
       assert TestStub.rpc_order() == []
     end
 
@@ -410,8 +475,9 @@ defmodule Kelix.Mod.McuAdminTest do
              """
 
       # the media detail of a leg belongs to participant.show, so the roster keeps to
-      # the declared columns
-      refute out =~ "codec"
+      # the declared columns (the conference's own `preferred_video_codec` is a
+      # conference field and is shown, hence matching the detail's `codec=` shape)
+      refute out =~ "codec="
     end
 
     test "participant.show blocks out the negotiated medias and the statistics", ctx do
@@ -832,6 +898,47 @@ defmodule Kelix.Mod.McuAdminTest do
     test "anything else is refused before the registry is asked", ctx do
       {:ok, conf} = Mcu.conference(ctx.uid)
       assert {:error, :bad_displayname} = Mcu.admit(@domain, invite(conf.did), displayname: 42)
+    end
+  end
+
+  # ── what an admitted leg comes back with ──────────────────────────────────────
+  # The plumbing that follows from *being* a conference leg belongs to the facade, not
+  # to every script's copy of it (CLAUDE.md: a scenario states a call flow).
+
+  describe "admit/4 wires the leg" do
+    test "local identity, connection options and the pinned media server", ctx do
+      {:ok, conf} = Mcu.conference(ctx.uid)
+      sip_ctx = Mcu.admit(%SIP.Context{}, @domain, invite(conf.did))
+
+      assert sip_ctx.lasterr == :ok
+      part = SIP.Context.appdata_get(sip_ctx, :mcu_part)
+
+      # what an in-dialog request we originate puts in From/To — send_BYE() has no
+      # URI to build without it
+      assert sip_ctx.username == conf.did
+
+      # which conference the leg joins, and the latch a leg that ANSWERS an offer
+      # needs against a caller that wrote down its private address
+      assert SIP.Context.appdata_get(sip_ctx, :media_conn_opts) == [
+               mcu_participant: part,
+               nat_latch: true
+             ]
+
+      # the conference is pinned to its MCU: the leg must reach that server
+      assert SIP.Context.appdata_get(sip_ctx, :mediaserver_instance) ==
+               Mcu.media_config(conf)
+
+      Mcu.leave(sip_ctx, :bye)
+    end
+
+    test "a refused admit wires nothing", ctx do
+      _ = ctx
+      sip_ctx = Mcu.admit(%SIP.Context{}, @domain, invite("9999"))
+
+      assert sip_ctx.lasterr == {:error, :no_such_conference}
+      assert sip_ctx.username == nil
+      assert SIP.Context.appdata_get(sip_ctx, :media_conn_opts) == nil
+      assert SIP.Context.appdata_get(sip_ctx, :mediaserver_instance) == nil
     end
   end
 

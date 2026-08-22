@@ -64,7 +64,17 @@ defmodule UAS.Example.Call.Record do
   state answering do
     # Negotiate the SDP answer with the media server and send 200 OK. On a media
     # failure this replies 500 and sets lasterr, so the goto below aborts.
-    reply_invite_with_sdp(200, [media: :tc, webrtc: :if_offered])
+    #
+    # prefer_codecs: this scenario RECORDS, and the MP4 container only carries
+    # H.264 video (VP8 has no ISO-BMFF binding — a VP8 call records audio only).
+    # Ranking H264 first in the answer steers the caller to send it, so the
+    # recording needs no transcoding. A permutation of the caller's own offer:
+    # a caller without H264 is answered exactly as before.
+    reply_invite_with_sdp(200,
+      media: :tc,
+      webrtc: :if_offered,
+      prefer_codecs: [video: ["H264"]]
+    )
     # media_start_echo()
     # wait_video: start all tracks on the first video I-frame; echo: loop the
     # received video back to the caller while recording.

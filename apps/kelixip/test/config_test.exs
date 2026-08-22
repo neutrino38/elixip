@@ -158,6 +158,163 @@ defmodule Kelix.ConfigTest do
     end
   end
 
+  describe "parse/1 — [mediaserver] bitrate_feedback" do
+    test "defaults to both dialects, the production value" do
+      {:ok, cfg} = Config.parse("[server]\nscript_dir = \"/tmp\"")
+      assert cfg.mediaserver_bitrate_feedback == [:remb, :tmmbr]
+
+      {:ok, cfg} = Config.parse("[mediaserver]\nvideo_bitrate = 2000")
+      assert cfg.mediaserver_bitrate_feedback == [:remb, :tmmbr]
+    end
+
+    # The four values an operator writes. Naming one dialect isolates one feedback
+    # path; `none` is the open-loop rate-control measurement.
+    test "the four documented forms decode" do
+      for {written, expected} <- [
+            {"none", []},
+            {"tmmbr", [:tmmbr]},
+            {"goog-remb", [:remb]},
+            {"goog-remb, tmmbr", [:remb, :tmmbr]}
+          ] do
+        {:ok, cfg} = Config.parse("[mediaserver]\nbitrate_feedback = \"#{written}\"")
+
+        assert cfg.mediaserver_bitrate_feedback == expected,
+               "`#{written}` decoded to #{inspect(cfg.mediaserver_bitrate_feedback)}"
+      end
+    end
+
+    # Hand-written config: order and spacing must not matter, or the operator gets
+    # a parse error for a value that says exactly what the documented one says.
+    test "order and spacing are free" do
+      {:ok, cfg} = Config.parse("[mediaserver]\nbitrate_feedback = \"tmmbr,goog-remb\"")
+      assert Enum.sort(cfg.mediaserver_bitrate_feedback) == [:remb, :tmmbr]
+    end
+
+    test "anything else is named, not ignored" do
+      assert {:error, msg} = Config.parse("[mediaserver]\nbitrate_feedback = \"remb\"")
+      assert msg =~ "[mediaserver]: `bitrate_feedback` must be"
+
+      assert {:error, msg} = Config.parse("[mediaserver]\nbitrate_feedback = \"\"")
+      assert msg =~ "[mediaserver]: `bitrate_feedback` must be"
+
+      assert {:error, msg} = Config.parse("[mediaserver]\nbitrate_feedback = false")
+      assert msg =~ "[mediaserver]: `bitrate_feedback` must be a string"
+    end
+
+    # Asking for none of one thing and some of another is a typo, not an intent.
+    test "none cannot be combined with a dialect" do
+      assert {:error, msg} = Config.parse("[mediaserver]\nbitrate_feedback = \"none, tmmbr\"")
+      assert msg =~ "cannot combine `none` with a dialect"
+    end
+
+    test "it rides the Mendooze tuning block, next to the video bitrate" do
+      # restored on exit: the block is global, and the video bitrate pushed here
+      # otherwise outlives the test and fails whichever later test reads the node's
+      # boot default out of it
+      before = Application.get_env(:elixip2, MediaServer.Mendooze, [])
+      on_exit(fn -> Application.put_env(:elixip2, MediaServer.Mendooze, before) end)
+
+      {:ok, cfg} =
+        Config.parse("[mediaserver]\nbitrate_feedback = \"none\"\nvideo_bitrate = 3000")
+
+      :ok = Config.apply_app_env(cfg)
+      block = Application.get_env(:elixip2, MediaServer.Mendooze, [])
+      assert Keyword.get(block, :bitrate_feedback) == []
+      assert Keyword.get(block, :video_bandwidth_kbps) == 3000
+    end
+  end
+
+  describe "parse/1 — [mediaserver] transport_cc" do
+    # Transport-wide congestion control is what feeds the media server's sender-side
+    # bandwidth estimator (docs/design/kelixip-transport-wide-cc.md). It is off until
+    # the recipe of §6 has run: the server does not yet report arrivals for what it
+    # RECEIVES, so a peer that negotiates the extension gets nothing back for its own
+    # outgoing stream.
+    test "absent → off, on every path" do
+      {:ok, cfg} = Config.parse("")
+      refute cfg.mediaserver_transport_cc
+
+      {:ok, cfg} = Config.parse("[mediaserver]\nvideo_bitrate = 2000")
+      refute cfg.mediaserver_transport_cc
+    end
+
+    test "stated either way, and anything but a boolean is named" do
+      {:ok, cfg} = Config.parse("[mediaserver]\ntransport_cc = true")
+      assert cfg.mediaserver_transport_cc
+
+      {:ok, cfg} = Config.parse("[mediaserver]\ntransport_cc = false")
+      refute cfg.mediaserver_transport_cc
+
+      assert {:error, msg} = Config.parse("[mediaserver]\ntransport_cc = \"yes\"")
+      assert msg =~ "[mediaserver]: `transport_cc` must be a boolean"
+    end
+
+    # The shared SDP layer reads it from there, so the point-to-point adapter and the
+    # mcu module negotiate the same thing — one of the two left behind is a call path
+    # silently without sender-side rate control.
+    test "it rides the Mendooze tuning block" do
+      # restored on exit: the block is global, and a test that reads the node's boot
+      # defaults out of it runs in this same file
+      block = Application.get_env(:elixip2, MediaServer.Mendooze, [])
+      on_exit(fn -> Application.put_env(:elixip2, MediaServer.Mendooze, block) end)
+
+      {:ok, cfg} = Config.parse("[mediaserver]\ntransport_cc = true")
+      :ok = Config.apply_app_env(cfg)
+      assert Keyword.get(Application.get_env(:elixip2, MediaServer.Mendooze, []), :transport_cc)
+    end
+  end
+
+  describe "parse/1 — [mediaserver] video_bitrate" do
+    test "absent → 1500 kb/s, the node's default for both media paths" do
+      assert {:ok, cfg} = Config.parse("")
+      assert cfg.mediaserver_video_bitrate == 1500
+
+      assert {:ok, cfg} =
+               Config.parse("[mediaserver.pool.mcu1]\nmodule = \"mockup\"\nurl = \"u\"")
+
+      assert cfg.mediaserver_video_bitrate == 1500
+    end
+
+    test "honoured when given, alongside the pool" do
+      toml = """
+      [mediaserver]
+      video_bitrate = 2500
+
+      [mediaserver.pool.mcu1]
+      module = "mendooze"
+      url    = "http://10.0.0.1:8080"
+      """
+
+      assert {:ok, cfg} = Config.parse(toml)
+      assert cfg.mediaserver_video_bitrate == 2500
+      assert [%{name: "mcu1"}] = cfg.mediaserver_pool
+    end
+
+    test "a non-positive value aborts the boot" do
+      assert {:error, msg} = Config.parse("[mediaserver]\nvideo_bitrate = 0")
+      assert msg =~ "[mediaserver]: `video_bitrate` must be a positive integer"
+
+      assert {:error, msg} = Config.parse("[mediaserver]\nvideo_bitrate = \"800\"")
+      assert msg =~ "[mediaserver]: `video_bitrate` must be a positive integer"
+    end
+
+    # The point-to-point path reads the bitrate off the Medooze adapter's tuning
+    # block, so pushing it must not drop the timeouts config/config.exs put there.
+    test "apply_app_env merges it into the Medooze block without losing its timeouts" do
+      prev = Application.get_env(:elixip2, MediaServer.Mendooze)
+      on_exit(fn -> Application.put_env(:elixip2, MediaServer.Mendooze, prev) end)
+
+      Application.put_env(:elixip2, MediaServer.Mendooze, xmlrpc_timeout_ms: 2_000)
+
+      {:ok, cfg} = Config.parse("[mediaserver]\nvideo_bitrate = 3000")
+      assert :ok = Config.apply_app_env(cfg)
+
+      block = Application.get_env(:elixip2, MediaServer.Mendooze)
+      assert Keyword.get(block, :video_bandwidth_kbps) == 3000
+      assert Keyword.get(block, :xmlrpc_timeout_ms) == 2_000
+    end
+  end
+
   describe "parse/1 — [control_api]" do
     test "absent → disabled" do
       assert {:ok, cfg} = Config.parse("")
@@ -233,7 +390,7 @@ defmodule Kelix.ConfigTest do
   test "defaults when sections are absent" do
     assert {:ok, cfg} = Config.parse("")
     assert cfg.node_name == "kelixip@127.0.0.1"
-    assert cfg.user_agent == "Kelixip/1.4.1"
+    assert cfg.user_agent == "Kelixip/1.5.1"
     assert cfg.log.target == "stdout"
     assert cfg.listen == []
   end
@@ -337,6 +494,11 @@ defmodule Kelix.ConfigTest do
       cfg = Config.current()
       assert cfg.node_name == "kelixip@127.0.0.1"
       assert cfg.listen == []
+      assert cfg.mediaserver_video_bitrate == 1500
+
+      # Pushed at boot, not only by an explicit [mediaserver] block: the media path
+      # must never fall back to the adapter's own compiled-in value.
+      assert Application.get_env(:elixip2, MediaServer.Mendooze)[:video_bandwidth_kbps] == 1500
     end
   end
 end

@@ -483,8 +483,21 @@ config :elixip2, MediaServer.Mendooze,
   rtp_timeout_ms: 10_000,    # inactivity watchdog
   poller_retry_ms: 1_000,
   poller_max_failures: 5,
-  video_bandwidth_kbps: 800  # b=AS advertised on video (an answer takes the min with the offer)
+  video_bandwidth_kbps: 1500,      # what a video leg is encoded at, and the b=AS advertised
+                                   #   (an answer takes the min with the offer)
+  bitrate_feedback: [:remb, :tmmbr],  # which RTCP bitrate-feedback forms may be answered
+  transport_cc: false              # transport-wide-cc on WebRTC video legs, off by default
 ```
+
+`video_bandwidth_kbps` is one value per node, and on a kelixip node it comes from
+`[mediaserver] video_bitrate` — the same key that defaults the mcu module's
+([DESIGN-KELIXIP.md](DESIGN-KELIXIP.md) §9). `bitrate_feedback` narrows what is
+answered and never widens it: a form absent from the offer is never advertised, and
+each answered form has its server-side switch. `transport_cc` negotiates the
+transport-wide congestion-control header extension and its `a=rtcp-fb`, which is what
+feeds the media server's send-side bandwidth estimator; the negotiation contract is
+recorded in
+[notes/kelixip-transport-wide-cc.md](notes/kelixip-transport-wide-cc.md).
 
 The `:mediaserver` key is overridable **per scenario** (a `config` block key) and
 **per run** (an external-JSON header key); the runner routes it to the

@@ -69,6 +69,28 @@ defmodule MediaServer.Mendooze.Sdp do
   @dtmf_code 100
   @dtmf_tones "0-16"
 
+  # ── transport-wide congestion control ───────────────────────────────────────
+  # draft-holmer-rmcat-transport-wide-cc-extensions-01: an RTP header extension
+  # carrying a per-transport sequence number, and the RTCP RTPFB fmt 15 message a
+  # peer reports arrival times with. Negotiating it is what feeds the media
+  # server's SENDER-side bandwidth estimator, which then drives the encoder from
+  # what the network really absorbs rather than from what the receiver asks for.
+  #
+  # The URI is the extmap value AND the media server's property key
+  # (`RTPSession::SetProperties`, symmetric with abs-send-time), which is why it is
+  # stated once here and read from both.
+  @transport_cc_uri "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01"
+  @transport_cc_fb "transport-cc"
+
+  # The id we OFFER. No other extension is offered today, so there is nothing to
+  # collide with; an answerer may not renumber it (RFC 8285 §5).
+  @transport_cc_offer_id 3
+
+  # The feedback types an OFFER of ours proposes per video payload type.
+  # `transport-cc` joins them only when the extension it reports on is offered too
+  # (`offered_rtcp_fb/1`).
+  @offered_rtcp_fb ["nack", "ccm fir", "goog-remb"]
+
   @type codec_name :: String.t()
   @type rtp_map :: %{String.t() => integer()}
 
@@ -109,6 +131,10 @@ defmodule MediaServer.Mendooze.Sdp do
   and `raw_fmt` so the answerer can emit a port-0 rejection (RFC 3264 §6).
   `raw_fmt` is the offered format list verbatim, echoed back in that rejection.
 
+  `extmaps` holds the section's `a=extmap` lines (RFC 8285) as parsed structs, in
+  offer order. Only media-level lines are collected — every WebRTC peer declares its
+  extensions per `m=` section, and an extension we do not confirm is simply not used.
+
   `fmtp` holds the offered `a=fmtp` lines as **parsed** `ExSDP.Attribute.FMTP`
   structs, keyed by payload type (string). Each consumer picks the parameters it
   actually honours rather than echoing the line wholesale: for H.264,
@@ -136,6 +162,7 @@ defmodule MediaServer.Mendooze.Sdp do
           ice: nil | %{ufrag: String.t(), pwd: String.t()},
           mid: String.t() | nil,
           rtcp_fb: %{optional(integer()) => [String.t()]},
+          extmaps: [ExSDP.Attribute.Extmap.t()],
           capneg: nil | %{config: integer(), tcap: integer(), protocol: String.t()},
           candidates: [String.t()]
         }
@@ -201,6 +228,7 @@ defmodule MediaServer.Mendooze.Sdp do
           optional(:mid) => String.t() | nil,
           optional(:candidates) => [candidate()],
           optional(:rtcp_fb) => boolean() | [String.t()],
+          optional(:extmaps) => [ExSDP.Attribute.Extmap.t()],
           optional(:acfg) => nil | %{config: integer(), tcap: integer()},
           optional(:reject_fmt) => [0..127] | String.t()
         }
@@ -229,6 +257,21 @@ defmodule MediaServer.Mendooze.Sdp do
     end
   end
 
+  @doc """
+  Resolve codec names to their Mendooze codec codes, keeping the list's order.
+  Raises on an unknown name — like `local_rtp_map/3`, that is a configuration
+  error worth failing on loudly and early.
+  """
+  @spec codec_codes(:audio | :video | :text, [codec_name()]) :: [non_neg_integer()]
+  def codec_codes(kind, names) when is_list(names) do
+    Enum.map(names, fn name ->
+      case codec_code(kind, name) do
+        {:ok, code} -> code
+        :error -> raise ArgumentError, "unknown #{kind} codec #{inspect(name)}"
+      end
+    end)
+  end
+
   defp codec_pt_code(:audio, name) do
     case Map.fetch(@audio_codecs, String.upcase(name)) do
       {:ok, {pt, code, _clock, _ch}} -> {pt, code}
@@ -250,26 +293,50 @@ defmodule MediaServer.Mendooze.Sdp do
     end
   end
 
-  defp codec_code(:audio, name) do
+  @doc """
+  The Mendooze code of a codec **name**, case-insensitively, or `:error` for a name
+  these tables do not carry.
+
+  The non-raising half of the name → code direction `codec_codes/2` uses, and the
+  inverse of `codec_name/2`. A name an operator *states as a preference* is not a
+  configuration error to raise on: it is a name to validate and to report on.
+  """
+  @spec codec_code(:audio | :video | :text, String.t()) :: {:ok, non_neg_integer()} | :error
+  def codec_code(kind, name)
+
+  def codec_code(:audio, name) do
     case Map.fetch(@audio_codecs, String.upcase(name)) do
       {:ok, {_pt, code, _clock, _ch}} -> {:ok, code}
       :error -> :error
     end
   end
 
-  defp codec_code(:video, name) do
+  def codec_code(:video, name) do
     case Map.fetch(@video_codecs, String.upcase(name)) do
       {:ok, {_pt, code, _clock}} -> {:ok, code}
       :error -> :error
     end
   end
 
-  defp codec_code(:text, name) do
+  def codec_code(:text, name) do
     case Map.fetch(@text_codecs, String.upcase(name)) do
       {:ok, {_pt, code, _clock}} -> {:ok, code}
       :error -> :error
     end
   end
+
+  @doc """
+  The codec names of one media, as these tables spell them.
+
+  What a caller may *name* — validating an operator's choice, and printing the
+  vocabulary in a help text. It is not a capability list: a name this side can turn
+  into a code says nothing about what the media server carries, which stays the
+  server's own answer to give (design `docs/design/DESIGN-MCU.md` §6).
+  """
+  @spec codec_names(:audio | :video | :text) :: [codec_name()]
+  def codec_names(:audio), do: @audio_codecs |> Map.keys() |> Enum.sort()
+  def codec_names(:video), do: @video_codecs |> Map.keys() |> Enum.sort()
+  def codec_names(:text), do: @text_codecs |> Map.keys() |> Enum.sort()
 
   # ── SDP construction ────────────────────────────────────────────────────────
 
@@ -388,12 +455,13 @@ defmodule MediaServer.Mendooze.Sdp do
   end
 
   # WebRTC transport-plane attributes shared by both codec-section branches:
-  # a=mid (mirrored), a=candidate lines, and per-video-PT a=rtcp-fb.
+  # a=mid (mirrored), a=candidate lines, a=extmap and per-video-PT a=rtcp-fb.
   defp add_transport_plane(m, mspec, video_pts) do
     m
     |> add_mid(Map.get(mspec, :mid))
     |> add_candidates(Map.get(mspec, :candidates, []))
-    |> add_rtcp_fb(Map.get(mspec, :rtcp_fb, false), video_pts)
+    |> add_extmaps(Map.get(mspec, :extmaps, []))
+    |> add_rtcp_fb(offered_rtcp_fb(mspec), video_pts)
     |> add_acfg(Map.get(mspec, :acfg))
   end
 
@@ -437,28 +505,39 @@ defmodule MediaServer.Mendooze.Sdp do
     end)
   end
 
-  # a=rtcp-fb: three feedback types per video payload type (nack, ccm fir,
-  # goog-remb). Emitted verbatim as generic attributes so the wording matches
-  # the browser-validated Java gateway exactly.
+  # a=extmap (RFC 8285), verbatim: an answer states the offer's own id and an offer
+  # states ours. The caller decides which extensions belong here — the builder adds
+  # none of its own.
+  defp add_extmaps(m, extmaps) do
+    Enum.reduce(extmaps, m, fn ext, acc -> ExSDP.add_attribute(acc, ext) end)
+  end
+
+  # `rtcp_fb: true` is the OFFERER's form: we propose the feedback we are willing to do
+  # and the answerer picks, so there is no set to intersect. Resolved to the concrete
+  # list here rather than inside add_rtcp_fb/3 because `transport-cc` rides with the
+  # extension it reports on: asking for it without offering the extmap asks the peer
+  # for reports on a sequence number nothing writes. A list is passed through — that
+  # is the ANSWERER's form, already the agreed set.
+  defp offered_rtcp_fb(mspec) do
+    case Map.get(mspec, :rtcp_fb, false) do
+      true -> @offered_rtcp_fb ++ transport_cc_fb_of(Map.get(mspec, :extmaps, []))
+      answered -> answered
+    end
+  end
+
+  defp transport_cc_fb_of(extmaps) do
+    if Enum.any?(extmaps, &(&1.uri == @transport_cc_uri)), do: [@transport_cc_fb], else: []
+  end
+
+  # a=rtcp-fb, one line per video payload type and per agreed type, emitted verbatim as
+  # generic attributes so the wording matches the browser-validated Java gateway
+  # exactly. Explicit payload types rather than the `*` wildcard the offer may have
+  # used: verbose on purpose — a wildcard answer leaves what we accepted ambiguous, and
+  # this is the attribute a peer reads to decide whether to bother sending NACKs.
   defp add_rtcp_fb(m, false, _pts), do: m
   defp add_rtcp_fb(m, _fb, []), do: m
   defp add_rtcp_fb(m, [], _pts), do: m
 
-  # `true` keeps the OFFERER's behaviour: we propose the feedback we are willing to
-  # do, and the answerer picks. Unchanged, because an offer has no set to intersect.
-  defp add_rtcp_fb(m, true, pts) do
-    Enum.reduce(pts, m, fn pt, acc ->
-      acc
-      |> ExSDP.add_attribute({"rtcp-fb", "#{pt} nack"})
-      |> ExSDP.add_attribute({"rtcp-fb", "#{pt} ccm fir"})
-      |> ExSDP.add_attribute({"rtcp-fb", "#{pt} goog-remb"})
-    end)
-  end
-
-  # A LIST is the ANSWERER's form: exactly the feedback types agreed, emitted per
-  # explicit payload type rather than with the `*` wildcard the offer may have used.
-  # Verbose on purpose — a wildcard answer leaves what we accepted ambiguous, and this
-  # is the attribute a peer reads to decide whether to bother sending NACKs.
   defp add_rtcp_fb(m, types, pts) when is_list(types) do
     for pt <- pts, type <- types, reduce: m do
       acc -> ExSDP.add_attribute(acc, {"rtcp-fb", "#{pt} #{type}"})
@@ -784,6 +863,7 @@ defmodule MediaServer.Mendooze.Sdp do
       sdes_offers: [],
       ice: nil,
       rtcp_fb: %{},
+      extmaps: [],
       capneg: nil,
       candidates: []
     }
@@ -835,6 +915,7 @@ defmodule MediaServer.Mendooze.Sdp do
       ice: find_ice(attrs) || find_ice(session_attrs),
       mid: find_mid(attrs),
       rtcp_fb: parse_rtcp_fb(attrs),
+      extmaps: parse_extmaps(attrs),
       capneg: find_capneg(attrs, session_attrs),
       candidates: raw_candidates(attrs)
     }
@@ -951,6 +1032,11 @@ defmodule MediaServer.Mendooze.Sdp do
         key = if pt == :all, do: -1, else: pt
         Map.update(acc, key, [fb_to_string(fb)], &(&1 ++ [fb_to_string(fb)]))
     end
+  end
+
+  # a=extmap lines of this section (RFC 8285), as ExSDP structs, in offer order.
+  defp parse_extmaps(attrs) do
+    for %ExSDP.Attribute.Extmap{} = ext <- attrs, do: ext
   end
 
   defp fb_to_string(:nack), do: "nack"
@@ -1297,6 +1383,75 @@ defmodule MediaServer.Mendooze.Sdp do
   def reverse_direction(:recvonly), do: :sendonly
   def reverse_direction(dir), do: dir
 
+  # ── transport-wide congestion control (negotiation) ─────────────────────────
+
+  @doc """
+  The transport-wide-cc extension to confirm on this media, or `nil`.
+
+  Answers three questions at once, so that the SDP answer, the offer and the media
+  server property can never disagree about them:
+
+    * is `[mediaserver] transport_cc` on? It is off by default — the media server
+      does not yet emit fmt 15 reports for what it *receives*, so a peer that
+      negotiates the extension gets nothing back on its own outgoing stream and
+      falls back on the RR losses and our REMB/TMMBR (design
+      `docs/design/kelixip-transport-wide-cc.md` §5);
+    * is this a **video** media? Only the video sender has an estimator behind it;
+    * did the peer declare the extension with a direction we can use? `sendrecv`
+      or none. An asymmetric direction is left alone (v1 perimeter).
+
+  Called with a remote OFFER it says what our answer confirms; called with a remote
+  ANSWER it says whether the peer took what we offered. Either way the id is the
+  peer's own — RFC 8285 §5 forbids renumbering in an answer.
+  """
+  @spec transport_cc_extmap(media_desc() | media_stub()) :: ExSDP.Attribute.Extmap.t() | nil
+  def transport_cc_extmap(desc) do
+    if transport_cc?() and Map.get(desc, :type) == :video do
+      Enum.find(Map.get(desc, :extmaps, []), fn ext ->
+        ext.uri == @transport_cc_uri and ext.direction in [nil, :sendrecv]
+      end)
+    end
+  end
+
+  @doc """
+  The transport-wide-cc extension to OFFER on this media, or `nil` — video only,
+  and only when `[mediaserver] transport_cc` is on.
+  """
+  @spec transport_cc_offer(:audio | :video | :text) :: ExSDP.Attribute.Extmap.t() | nil
+  def transport_cc_offer(:video) do
+    if transport_cc?(),
+      do: %ExSDP.Attribute.Extmap{id: @transport_cc_offer_id, uri: @transport_cc_uri}
+  end
+
+  def transport_cc_offer(_media), do: nil
+
+  @doc """
+  The extension's URI: the `a=extmap` value, and the media server property key that
+  arms the extension on our outgoing packets (`EndpointSetRTPProperties` /
+  `SetRTPProperties`). Its value there is the negotiated id, not `"1"`.
+  """
+  @spec transport_cc_uri() :: String.t()
+  def transport_cc_uri(), do: @transport_cc_uri
+
+  @doc """
+  The `a=rtcp-fb` type paired with the extension: what authorises the peer to send
+  us fmt 15 reports. It has no server-side switch of its own — the extmap property
+  is what turns the mechanism on.
+  """
+  @spec transport_cc_fb() :: String.t()
+  def transport_cc_fb(), do: @transport_cc_fb
+
+  # `[mediaserver] transport_cc`, riding the Mendooze tuning block like
+  # `bitrate_feedback` (`Kelix.Config.apply_app_env/1`). Read here rather than in each
+  # controller so the JSR-309 adapter and the MCU adapter cannot end up negotiating
+  # different things — one of the two silently without sender-side rate control is
+  # exactly the failure the `remb` property produced. The MCU adapter reaches it
+  # through `MediaServer.SdpTools`, so it never names the other adapter's block.
+  defp transport_cc?() do
+    Application.get_env(:elixip2, MediaServer.Mendooze, [])
+    |> Keyword.get(:transport_cc, false)
+  end
+
   # ── ICE host candidates ─────────────────────────────────────────────────────
 
   @doc """
@@ -1477,6 +1632,12 @@ defmodule MediaServer.Mendooze.Sdp do
   order falls back to ascending payload type, which is not a preference at all: a
   browser offering `111 9 0` (OPUS first) would be answered `0 9 111` and would then
   send G.711 to a conference that could have had OPUS.
+
+  **`preferred_codec`** is the one thing that overrides that order: a Mendooze codec
+  code the *caller of this function* prefers, moved first among the entries carrying
+  it, the offer's order deciding everything else. It states a preference the mixer
+  does have — an operator's, per conference — and it can only move a payload type
+  already in `rtp_map`, so nothing is announced that the offer did not propose.
   """
   # Callers pass either a full negotiate/3 result (Mockup) or just the keys used
   # here (MendoozeConn, the MCU adapter), hence the open map.
@@ -1485,6 +1646,7 @@ defmodule MediaServer.Mendooze.Sdp do
           optional(:dtmf_clock) => non_neg_integer() | nil,
           optional(:dtmf_pts) => %{optional(non_neg_integer()) => non_neg_integer()},
           optional(:fmt_order) => [non_neg_integer() | String.t()],
+          optional(:preferred_codec) => non_neg_integer() | nil,
           optional(atom()) => any()
         }) :: [rtpmap_entry()]
   def answer_rtpmaps(media, %{rtp_map: send_map} = neg) do
@@ -1494,7 +1656,7 @@ defmodule MediaServer.Mendooze.Sdp do
     fallback_clock = Map.get(neg, :dtmf_clock) || 8000
 
     send_map
-    |> Enum.sort_by(&pt_rank(&1, Map.get(neg, :fmt_order)))
+    |> Enum.sort_by(&preferred_rank(&1, Map.get(neg, :fmt_order), Map.get(neg, :preferred_codec)))
     |> Enum.flat_map(fn {pt_str, code} ->
       pt = String.to_integer(pt_str)
 
@@ -1528,6 +1690,29 @@ defmodule MediaServer.Mendooze.Sdp do
     number = if is_integer(pt), do: pt, else: String.to_integer(pt)
     order = normalize_fmt_order(fmt_order)
     {Enum.find_index(order, &(&1 == Integer.to_string(number))) || length(order), number}
+  end
+
+  @doc """
+  Rank an accepted `{payload type, codec code}` entry with a **preferred codec** first
+  and the offer's own order (`pt_rank/2`) inside each group.
+
+  `prefer` is a Mendooze codec code, or `nil` for no preference — which makes this
+  exactly `pt_rank/2`. A preference can only *move* an entry the offer proposed and
+  the media server accepted: nothing is added, so a codec the caller never offered is
+  never answered.
+
+  Exported for the same reason as `pt_rank/2`: the answer's `rtpmap` order and the
+  primary codec the mixer is told to encode must be one reading, or the SDP names one
+  codec and the wire carries another.
+  """
+  @spec preferred_rank(
+          {String.t() | non_neg_integer(), non_neg_integer()},
+          [term()] | nil,
+          non_neg_integer() | nil
+        ) :: {0 | 1, {non_neg_integer(), non_neg_integer()}}
+  def preferred_rank({_pt, code} = entry, fmt_order, prefer) do
+    rank = pt_rank(entry, fmt_order)
+    if is_integer(prefer) and code == prefer, do: {0, rank}, else: {1, rank}
   end
 
   # `m=` format lists reach us as a payload-type list on RTP profiles, and as the raw
@@ -1729,6 +1914,48 @@ defmodule MediaServer.Mendooze.Sdp do
       # not H.264, or the offer stated no profile-level-id for this PT
       _ -> nil
     end
+  end
+
+  @doc """
+  The H.264 packetization mode this peer can RECEIVE, or `nil` when it offers no
+  H.264 at all.
+
+  Absence means **0** here — RFC 6184 §8.1, single NAL unit mode, no FU-A and no
+  STAP-A. That is the opposite reading from `conformant_pts/3`, and deliberately
+  so, because the two answer different questions:
+
+  * `conformant_pts/3` asks *may our answer name this payload type?* An absent
+    mode has nothing to contradict, so it is no constraint. Reading it as 0 there
+    made the mode "differ" from the server's 1 and dropped H.264 from Linphone
+    calls entirely;
+  * this asks *what can the peer actually depacketize?* A peer that never claimed
+    mode 1 cannot be assumed to reassemble fragments. Reading absence as 1 here
+    is what let a fragmented browser stream be relayed to Linphone for a whole
+    call, its decoder answering `dsNoParamSets` on a stream delivered intact.
+
+  The maximum across the peer's H.264 payload types, because we choose which one
+  to send on: a browser enumerates (profile, mode) pairs under several PTs, and
+  offering one in mode 1 is offering to receive mode 1.
+  """
+  @spec h264_receive_mode(media_desc() | map()) :: 0 | 1 | nil
+  def h264_receive_mode(%{type: :video} = desc) do
+    rtp_map = Map.get(desc, :rtp_map, %{})
+
+    Map.get(desc, :fmtp, %{})
+    |> Enum.filter(fn {pt, _} -> h264_pt?(rtp_map, pt) end)
+    |> Enum.map(fn {_pt, fmtp} -> Map.get(fmtp, :packetization_mode) || 0 end)
+    |> case do
+      [] -> if h264_offered?(rtp_map), do: 0, else: nil
+      modes -> Enum.max(modes)
+    end
+  end
+
+  def h264_receive_mode(_desc), do: nil
+
+  # H.264 present in the rtpmap but with no fmtp at all: it is still an H.264 the
+  # peer can receive, in mode 0.
+  defp h264_offered?(rtp_map) do
+    Enum.any?(Map.keys(rtp_map), &h264_pt?(rtp_map, &1))
   end
 
   defp h264_pt?(rtp_map, pt) do

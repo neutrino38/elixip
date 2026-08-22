@@ -250,6 +250,30 @@ without editing the scenario — set it in `config/config.exs`, in the scenario'
 own `config` block, or in an external-JSON header (`"mediaserver"` key). See the
 Configuration section of `CLAUDE.md` and `docs/design/DESIGN-FRAMEWORK.md#63-the-mendooze-adapter`.
 
+### media_record options
+
+`media_record/3` takes a keyword list. What the real media server acts on:
+
+| Option | Default | Effect |
+|--------|---------|--------|
+| `wait_video: boolean` | `true` | Hold audio and text back until the first video I-frame, so every track of the file starts together. No effect when video is not negotiated. |
+| `echo: boolean` | `false` | Loop the received video back to the sender while recording — a raw RTP relay on the same leg, no transcoding. Off by default: a plain recording sends nothing back to the peer. |
+| `leg: atom` | `:inbound` | Which leg to record, when a B2BUA call terminates both of its legs on the media server. |
+
+`wait_video` and `echo` become the optional 5th and 6th parameters of the
+server's `RecorderRecord`; `leg` is handled here and never reaches the adapter.
+
+Turn `echo` on when the caller must see what is being recorded, off when the
+recording is the only purpose — an echo puts a second video stream on the wire
+and makes the peer answer it with its own RTCP feedback.
+
+`MediaServer.recorder_opts/0` also declares `stop_on_silence`,
+`silence_timeout_ms`, `max_record_duration_sec` and `stop_on_dtmf`. **The media
+server implements none of them.** `stop_on_silence` and `stop_on_dtmf` are
+logged as unsupported and dropped; the other two are ignored without a word. Use
+the `duration_ms` argument for a time limit — that one is enforced server-side,
+and reported by `RecorderStoppedEvent` with `reason=1`.
+
 ## transitions: the goto macro, stay(), scenario_success(), scenario_failure()
 
 The `goto` macro triggers a state machine transition. This macro takes two arguments:
@@ -534,7 +558,7 @@ messages.
 state initial_state do
   # Load + start a child scenario, give it the local name :callee.
   # `target` is a scenario module or a path to a .exs scenario file.
-  sub_fsm UAS.AutoAnswer, as: :callee, args: %{play: "ring.wav"}
+  spawn_fsm UAS.AutoAnswer, as: :callee, args: %{play: "ring.wav"}
   goto calling
 end
 
@@ -545,9 +569,9 @@ end
 
 state wait do
   on_events do
-    {:scenario_msg, :callee, :ready}        -> goto talking, "callee ready"
-    {:scenario_exit, :callee, :success, _r} -> scenario_success("done")
-    {:scenario_exit, :callee, :failure, r}  -> scenario_failure("callee failed: #{r}")
+    {:child_msg, :callee, :ready}        -> goto talking, "callee ready"
+    {:child_exit, :callee, :success, _r} -> scenario_success("done")
+    {:child_exit, :callee, :failure, r}  -> scenario_failure("callee failed: #{r}")
   after
     30_000 -> scenario_failure("timeout")
   end
@@ -568,7 +592,7 @@ end
 
 state waiting do
   on_events do
-    {:scenario_msg, :parent, :start_media} -> goto answer, "parent asked"
+    {:parent_msg, :start_media} -> goto answer, "parent asked"
   after
     30_000 -> scenario_failure("no order")
   end
@@ -577,24 +601,34 @@ end
 
 **Macros**
 
-- `sub_fsm(target, as: name, args: map)` — spawn `target` (a compiled scenario module or a `.exs` file path)
-  as a monitored child. `as:` is required: it is the local name used to address the child and to tag the
+- `spawn_fsm(target, as: name, args: map)` — spawn `target` (a compiled scenario module or a `.exs` file path)
+  as a monitored child. Named after `fx.spawn` of the TypeScript FSL, which spawns a child machine on the same
+  contract, so the two dialects keep one name per concept. It was called `sub_fsm` up to 1.4.1; that spelling
+  still works and is deprecated. `as:` is required: it is the local name used to address the child and to tag the
   messages it sends back. `args:` (optional) is merged into the child context appdata (read it with
   `appdata_get/1`). The child handle is kept in the parent context, so it survives across states.
 - `notify(child_name, payload)` — send an application message to a named child. The child receives it as
-  `{:scenario_msg, :parent, payload}`.
+  `{:parent_msg, payload}`.
 - `notify_parent(payload)` — send an application message to the parent. The parent receives it as
-  `{:scenario_msg, <our name>, payload}` (the name the parent assigned with `as:`). It is a **no-op when the
+  `{:child_msg, <our name>, payload}` (the name the parent assigned with `as:`). It is a **no-op when the
   scenario has no parent**, so the very same scenario can also be run standalone (`mix scenario`, single
   `elixipp` run).
 
 **Messages** (matched in `on_events`)
 
 ```Elixir
-{:scenario_msg, from_name, payload}            # application message between FSMs
-{:scenario_exit, child_name, outcome, reason}  # a child terminated (outcome :: :success | :failure | :aborted)
-{:scenario_ctl, :shutdown, reason}             # cooperative shutdown request (see below)
+{:parent_msg, payload}                       # application message, parent -> child
+{:child_msg, child_name, payload}            # application message, child -> parent
+{:child_exit, child_name, outcome, reason}   # a child terminated (outcome :: :success | :failure | :aborted)
+{:scenario_ctl, :shutdown, reason}           # cooperative shutdown request (see below)
 ```
+
+> **Renamed in 1.5.0.** These were `{:scenario_msg, from_name, payload}` — both directions, told apart by
+> `from_name` — and `{:scenario_exit, …}`. The new names say the direction, and match `parent:msg` /
+> `child:msg` / `child:exit` of the TypeScript FSL (see
+> [docs/design/DESIGN-SBB.md](docs/design/DESIGN-SBB.md), §4.6). A message cannot
+> carry a deprecated alias the way a macro can, so a scenario matching an old shape would simply never be
+> woken: `on_events` reports it as a **compile-time warning** naming the replacement.
 
 Sub-FSMs nest freely: a child may itself spawn children. When a scenario terminates, it asks each of its
 live children to shut down (cooperatively, then hard-kills any straggler after 5 s) before reporting its own
@@ -620,6 +654,122 @@ end
 > Note: a shutdown request is only acted upon the next time the scenario reaches an `on_events`. A scenario
 > stuck in a long synchronous state will not react until then; the controller hard-kills it past the grace
 > period.
+
+## Service building blocks (SBB)
+
+Where `spawn_fsm` starts a **second machine with legs of its own**, `sbb_fsm` calls a **subroutine on the
+legs you already hold**. The rule of thumb:
+
+> `spawn_fsm` when the other machine has state of its own; `sbb_fsm` when the sequence belongs to the state
+> you already hold.
+
+A service building block packages a sequence written once — establish a call, run a menu, collect
+credentials — behind a callable face. Calling one makes the current process enter the block's FSM: the block
+owns the event loop, on the caller's own context, dialogs and mailbox, until it hands control back.
+
+```Elixir
+defmodule MyApp.Cancelling do
+  use SIP.SBB
+
+  @sbb_namespace :cancel          # the first element of everything it returns
+  @sbb_returns [
+    confirmed: "the callee answered the CANCEL with a 487 — %{}",
+    answered:  "the callee picked up before the CANCEL arrived — %{code}"
+  ]
+
+  @sbb_timeout 32_000             # completion bound (timer B)
+
+  state initial_state do
+    on_events do
+      {:outbound, {487, _resp, _t, _d}} -> sbb_return({:cancel, :confirmed, %{}})
+      {:outbound, {200, _resp, _t, _d}} -> sbb_return({:cancel, :answered, %{code: 200}})
+    end
+  end
+end
+```
+
+and, in a scenario:
+
+```Elixir
+state cancelling do
+  sbb_fsm MyApp.Cancelling
+
+  on_events do
+    {:cancel, :confirmed, _}  -> scenario_aborted("caller cancelled, callee confirmed")
+    {:cancel, :answered, _}   -> goto releasing, "callee answered after the cancellation"
+    {:cancel, :timeout, _}    -> scenario_aborted("callee never concluded")
+  end
+end
+```
+
+**What a block returns** is always `{namespace, outcome, data}` — the namespace it declares, an outcome
+atom, and a map. The shape is fixed so a block can learn to report one more thing without breaking the
+scenarios that match it: a new key in `data` is invisible to whoever does not read it, where a fourth tuple
+element would be a compile error everywhere. `@sbb_returns` is the vocabulary, and `sbb_return` refuses an
+outcome that is not in it — at compile time, because the alternative is a host waiting on its `after` for an
+event nobody will send. A bounded block gets `:timeout` in its vocabulary for free, and returns
+`{namespace, :timeout, %{block: module}}` on expiry.
+
+**Macros**
+
+- `sbb_fsm(module, opts)` — enter `module`'s FSM. Options: `timeout:` (ms, overrides the block's
+  `@sbb_timeout`), `args:` (map seeding the block's sandbox), `resume:` (`true` keeps the sandbox from a
+  previous run instead of clearing it — for a block designed to be re-entered after an interruption).
+  **Only valid in a state body**, never inside an `on_events` clause: that clause's deadline is absolute, so
+  a block called from one would burn the host's remaining timeout while it runs. Give the block its own
+  state — the compiler says so if you forget.
+- `sbb_return({namespace, outcome, data})` — end the block, posting the event to the process and handing
+  control back to the state that called it. This, not `scenario_success`, is how a block returns.
+- `sbb_data_get(key)` / `sbb_data_set(key, value)` — the block's private sandbox. `appdata` itself is shared
+  with the host, which is the point; the sandbox is what cannot collide with a host key of the same name.
+
+**The rules that matter**
+
+- **The block sees everything the host sees.** Same process, same mailbox, same `sip_ctx` — that is what
+  separates an SBB from a sub-FSM. Its `currentstate` and `laststate` are restored on return, so `goto back`
+  inside a block cannot land in a host state.
+- **Terminals propagate.** `scenario_failure` and `scenario_aborted` written inside a block keep their
+  ordinary meaning and tear down the whole stack, host included — the `exit()` of C. Use them for what must
+  stop everything, and `sbb_return` for everything else.
+- **The returned event is not privileged.** Anything the block left unconsumed is still in the mailbox and is
+  matched first: arrival order, as always.
+- **Every branch returns.** A block branch ends on `sbb_return` or on a terminal. One that falls through
+  leaves the host waiting for an event nobody will send.
+- **Blocks compose** — a block may call a block, and a terminal thrown three deep still reaches the root.
+  They cannot run *concurrently*, though: one point of control, a stack of calls.
+- A block has **no `run/1`**: it is not a scenario, and `SIP.Scenario.Loader` will never mistake one for the
+  scenario of the `.exs` that declares it.
+- **The block shows in the live view**, on the call's own row, with its states qualified —
+  `MyApp.Cancelling/initial_state` rather than a call that looks frozen for thirty seconds in the last state
+  its scenario declares. The scenario column keeps naming the scenario; nesting shows the innermost block.
+  The row returns to the host's state when the block hands control back.
+
+**The blocks that ship** live in `:elixip2` next to the mechanism, so a scenario and a kelixip script reach
+them the same way:
+
+| Block | `use` | Verb | Absorbs |
+|---|---|---|---|
+| `SBB.Call` | `use SBB.Call` | `call(args: %{peer: peer})` | forwarding the INVITE, the provisionals, the serial hunt over the peer's targets, the caller giving up, the cancel race, the ACK |
+| `SBB.Call` | `use SBB.Call` | `bridge()` | the established call: in-dialog relay both ways, the re-INVITE/UPDATE rule, the ACK a 200 owes back, the BYE and the far end's answer |
+
+`call/1` answers `{:call, :connected, _}`, `:rejected`, `:cancelled`, `:answered_after_cancel`,
+`:caller_hung_up`, `:caller_gone`, `:timeout` or `:failed` — see `SBB.Call.Establish` for what each carries.
+It completes the SIP transactions it owns (a caller whose INVITE is never answered is left hanging, so the
+408 is sent from inside the block) and leaves the *verdict* to the scenario: whether a refused call is a
+success, whether a cancellation is an abort, and what to bill.
+
+`bridge/1` answers `{:bridge, :caller_hung_up, _}` or `{:bridge, :callee_hung_up, _}` — which side ended
+the call is the outcome's **name**, not a field a host has to look up — plus `:max_duration`, `:media_lost`
+and `:interrupted` — plus `:callee_left`, which only a host that asked for it ever sees:
+`bridge(args: %{on_callee_hangup: :keep_caller})` answers the callee and hands the call back with the
+**caller's leg still up**, instead of relaying the BYE that would end it. That is how a relay becomes a
+service: play a prompt, offer a redirect, place another call and bridge again. It is the one block with no deadline — a call lasts as long as it lasts — and the only one
+meant to be **re-entered**: `{:bridge_break, message}` hands the call back untouched, and
+`bridge(resume: true)` picks it up. Between the two, in-dialog traffic keeps arriving and nothing answers
+it: an unanswered re-INVITE runs at timer B, so that interval is the scale of a prompt, not of a decision.
+
+Specification and catalogue: [docs/design/DESIGN-SBB.md](docs/design/DESIGN-SBB.md).
+Design: [docs/design/DESIGN-SBB.md](docs/design/DESIGN-SBB.md).
 
 ## The scenario context: sip_ctx
 
@@ -655,49 +805,10 @@ and cause the finite state machine to dump the exception in the logs and call sc
 
 ## Under the hood of FSL
 
-Any scenario is a plain Elixir module that calls `use SIP.Scenario` (see the example
-above), saved as a `.exs` file. Each **state** of the finite state machine is
-an Elixir function.
-
-The context information is stored in a variable always named **sip_ctx** which
-is used by all macros from the SIP.Session.* modules and the MediaServer.*
-modules. The context is updated and passed as argument to all state functions.
-
-The `use SIP.Scenario` block generates a `run/0` entry point that starts the SIP stack
-(transactions, transport selector, dialog layer, config registry), builds the initial
-`%SIP.Context{}` from the `config` block and enters `initial_state`. `run/0` returns `:ok` on
-`terminal_success_state`, `{:error, reason}` on `terminal_failure_state`, and `{:aborted, reason}` when the
-scenario was wound down by a cooperative shutdown.
-
-The `state` macro defines an Elixir function which takes a `%SIP.Context` as sole
-argument.
-
-The `goto` macro
-- checks if `sip_ctx.lasterr` is set to `:ok`. If not, it calls `scenario_failure(sip_ctx.lasterr)`
-- otherwise, stores the new state name into `sip_ctx.currentstate`
-- calls the function passed as first argument, passing the sip_ctx context to the new state.
-
-If the new state argument is `next`, it determines the name of the next state to consider and
-calls `goto <nextstate>, <event>`. If the new state argument is `loop`, it calls
-`goto sip_ctx.currentstate, <event>`. If it is `back`, it calls `goto sip_ctx.laststate, <event>`,
-and fails the scenario when that slot is empty. The runner writes `sip_ctx.laststate` on every
-transition where the target differs from the current state.
-
-`on_events` compiles to a `receive` wrapped in a closure that calls itself, which is how `stay`
-re-enters the wait without leaving the state function. Its `after` timeout is turned into an
-absolute deadline when the block is entered, and each re-entry re-arms it with the remainder.
-
-When transitioning to any of the terminal states, the scenario runner checks if `sip_ctx.mediaserverpid`
-and `sip_ctx.mediaservermodule` are set. If yes, the scenario runner waits for the `:dialog_terminated`
-event for maximum 5 seconds then calls media_cleanup_ressources() to deallocate media resources.
-
-Then the scenario runner checks for the existence of a `cleanup` function and calls it with `sip_ctx`
-as argument.
-
-If the scenario spawned sub-FSMs with `sub_fsm`, the runner first asks each live child to shut down
-cooperatively (`{:scenario_ctl, :shutdown, …}`), waits up to 5 seconds for them to terminate and hard-kills
-any straggler, then — if this scenario itself has a parent — reports its own outcome to it as
-`{:scenario_exit, name, outcome, reason}`.
+How the language is built — what `state`, `goto`, `on_events` and the terminals
+expand to, how the runner dispatches them, the teardown order, the sub-FSM and
+service-building-block engines, and the invariants all of it rests on — is
+[docs/design/DESIGN-FSL.md](docs/design/DESIGN-FSL.md).
 
 ## Macro helpers
 

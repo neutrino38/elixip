@@ -8,9 +8,11 @@ defmodule Kelix.Config do
 
   It also translates the infra keys the lower framework already reads into the
   `:elixip2` application env (so those layers need no change) — today
-  `server.user_agent → :useragent`. The other sections (listeners, media pool,
-  modules, control API, metrics) are validated and **held** in the struct for the
-  phases that consume them (listeners/P?, media pool/P6, modules/P5, control/P7).
+  `server.user_agent → :useragent` and `mediaserver.video_bitrate →
+  MediaServer.Mendooze[:video_bandwidth_kbps]`. The other sections (listeners,
+  media pool, modules, control API, metrics) are validated and **held** in the
+  struct for the phases that consume them (listeners/P?, media pool/P6,
+  modules/P5, control/P7).
   """
   use GenServer
   require Logger
@@ -47,19 +49,53 @@ defmodule Kelix.Config do
           log: map,
           listen: [listener],
           mediaserver_pool: [pool_entry],
+          mediaserver_video_bitrate: pos_integer,
+          mediaserver_bitrate_feedback: [:remb | :tmmbr],
+          mediaserver_transport_cc: boolean,
           modules: map,
           control_api: map,
           metrics: map
         }
 
+  @default_video_bitrate_kbps 1500
+  # The bitrate-feedback dialects the answer may confirm, as `[mediaserver]
+  # bitrate_feedback` names them: "none", "tmmbr", "goog-remb" or both, in any
+  # order. What a peer never offered is still never answered — this only narrows.
+  @bitrate_feedback_dialects %{"tmmbr" => :tmmbr, "goog-remb" => :remb}
+  @default_bitrate_feedback [:remb, :tmmbr]
+
   defstruct node_name: "kelixip@127.0.0.1",
             script_dir: "/usr/share/kelixip",
             module_dir: "/usr/lib/kelixip/modules",
-            user_agent: "Kelixip/1.4.1",
+            user_agent: "Kelixip/1.5.1",
             max_calls: nil,
             log: %{target: "stdout", facility: "local0", level: "info"},
             listen: [],
             mediaserver_pool: [],
+            # The node's video encoding bitrate (kb/s): what a leg is encoded at and
+            # the cap on the `b=AS:` it is answered with. One statement for both
+            # media paths — the point-to-point adapter reads it from the app env,
+            # the mcu module takes it as the default of its own `video_bitrate`.
+            mediaserver_video_bitrate: @default_video_bitrate_kbps,
+            # Which bitrate-feedback dialects the answer may confirm. Narrowing the
+            # list is what an OPEN-LOOP rate-control measurement needs: with nothing
+            # leaving towards the peer, the source keeps emitting at its own rate and
+            # the incoming bitrate stops depending on what the media server
+            # estimates — the only setting under which its recovery time measures its
+            # own estimator instead of the loop it forms with the browser's
+            # congestion control. Naming a single dialect isolates one of the two
+            # paths. Empty leaves the call with no congestion control from us at all,
+            # so production wants both.
+            mediaserver_bitrate_feedback: @default_bitrate_feedback,
+            # Whether the SDP negotiates transport-wide congestion control on video
+            # (RFC 8285 extmap + `a=rtcp-fb transport-cc`), which is what feeds the
+            # media server's SENDER-side bandwidth estimator. Off by default, and the
+            # default moves only once the recipe of
+            # `docs/design/kelixip-transport-wide-cc.md` §6 has run: the server does
+            # not yet emit fmt 15 reports for what it RECEIVES, so a peer that
+            # negotiates the extension gets nothing back for its own outgoing stream
+            # and falls back on RR losses plus the REMB/TMMBR we keep sending.
+            mediaserver_transport_cc: false,
             modules: %{},
             control_api: %{},
             metrics: %{}
@@ -124,6 +160,23 @@ defmodule Kelix.Config do
   @spec apply_app_env(t) :: :ok
   def apply_app_env(%__MODULE__{} = cfg) do
     Application.put_env(:elixip2, :useragent, cfg.user_agent)
+    # `[mediaserver] video_bitrate` reaches the point-to-point media path here: the
+    # Medooze adapter reads `:video_bandwidth_kbps` off its own tuning block for
+    # every leg it encodes and answers. Merged, not replaced — the block also holds
+    # the timeouts config/config.exs sets.
+    # `[mediaserver] bitrate_feedback` rides the same block: the adapter reads it
+    # when it decides which rtcp-fb types the answer confirms. So does
+    # `transport_cc` — read by the shared SDP layer, so both the point-to-point
+    # adapter and the mcu module negotiate the same thing.
+    Application.put_env(
+      :elixip2,
+      MediaServer.Mendooze,
+      Application.get_env(:elixip2, MediaServer.Mendooze, [])
+      |> Keyword.put(:video_bandwidth_kbps, cfg.mediaserver_video_bitrate)
+      |> Keyword.put(:bitrate_feedback, cfg.mediaserver_bitrate_feedback)
+      |> Keyword.put(:transport_cc, cfg.mediaserver_transport_cc)
+    )
+
     # The REST frontal (Kelix.ControlAPI.Auth) reads its settings from the app
     # env so both the boot-time child-spec gating and the per-request auth check
     # share one source (and tests can override it).
@@ -214,7 +267,7 @@ defmodule Kelix.Config do
          {:ok, listen} <- parse_listeners(Map.get(map, "listen", [])),
          {:ok, control_api} <- parse_control_api(Map.get(map, "control_api")),
          {:ok, metrics} <- parse_metrics(Map.get(map, "metrics")),
-         {:ok, pool} <- parse_mediaserver(Map.get(map, "mediaserver")) do
+         {:ok, mediaserver} <- parse_mediaserver(Map.get(map, "mediaserver")) do
       {:ok,
        %__MODULE__{
          node_name: server.node_name,
@@ -224,7 +277,10 @@ defmodule Kelix.Config do
          max_calls: server.max_calls,
          log: log,
          listen: listen,
-         mediaserver_pool: pool,
+         mediaserver_pool: mediaserver.pool,
+         mediaserver_video_bitrate: mediaserver.video_bitrate,
+         mediaserver_bitrate_feedback: mediaserver.bitrate_feedback,
+         mediaserver_transport_cc: mediaserver.transport_cc,
          modules: Map.get(map, "module", %{}),
          control_api: control_api,
          metrics: metrics
@@ -372,19 +428,76 @@ defmodule Kelix.Config do
     end
   end
 
-  # ── [mediaserver.pool.*] (§9) ────────────────────────────────────────────────
+  # ── [mediaserver] + [mediaserver.pool.*] (§9) ────────────────────────────────
 
-  # The whole `[mediaserver]` section: `pool` is the only thing in it today, and a
-  # sibling key is a typo worth naming rather than ignoring.
-  defp parse_mediaserver(nil), do: {:ok, []}
+  # The whole `[mediaserver]` section: the pool plus the node's media policy — video
+  # bitrate, which bitrate-feedback dialects the answer confirms, and whether
+  # transport-wide congestion control is negotiated. A sibling key is a typo worth
+  # naming rather than ignoring.
+  defp parse_mediaserver(nil),
+    do:
+      {:ok,
+       %{
+         pool: [],
+         video_bitrate: @default_video_bitrate_kbps,
+         bitrate_feedback: @default_bitrate_feedback,
+         transport_cc: false
+       }}
 
   defp parse_mediaserver(%{} = m) do
-    with :ok <- reject_keys(m, ~w(pool), "[mediaserver]") do
-      parse_pool(Map.get(m, "pool"))
+    with :ok <-
+           reject_keys(m, ~w(pool video_bitrate bitrate_feedback transport_cc), "[mediaserver]"),
+         {:ok, bitrate} <- opt_pos_integer(m, "video_bitrate", "[mediaserver]"),
+         {:ok, feedback} <-
+           parse_bitrate_feedback(Map.get(m, "bitrate_feedback")),
+         {:ok, transport_cc} <- opt_bool(m, "transport_cc", false, "[mediaserver]"),
+         {:ok, pool} <- parse_pool(Map.get(m, "pool")) do
+      {:ok,
+       %{
+         pool: pool,
+         video_bitrate: bitrate || @default_video_bitrate_kbps,
+         bitrate_feedback: feedback,
+         transport_cc: transport_cc
+       }}
     end
   end
 
   defp parse_mediaserver(_), do: {:error, "[mediaserver] must be a table"}
+
+  # "none" | "tmmbr" | "goog-remb" | "goog-remb, tmmbr" — a comma-separated list,
+  # order and spacing free because this is hand-written config. "none" says the list
+  # is empty and cannot be combined with a dialect: asking for none of one thing and
+  # some of another is a typo, not an intent.
+  defp parse_bitrate_feedback(nil), do: {:ok, @default_bitrate_feedback}
+
+  defp parse_bitrate_feedback(v) when is_binary(v) do
+    names = v |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
+
+    cond do
+      names == [] ->
+        {:error, bitrate_feedback_error()}
+
+      "none" in names and names != ["none"] ->
+        {:error, "[mediaserver]: `bitrate_feedback` cannot combine `none` with a dialect"}
+
+      names == ["none"] ->
+        {:ok, []}
+
+      Enum.all?(names, &Map.has_key?(@bitrate_feedback_dialects, &1)) ->
+        {:ok, names |> Enum.map(&@bitrate_feedback_dialects[&1]) |> Enum.uniq()}
+
+      true ->
+        {:error, bitrate_feedback_error()}
+    end
+  end
+
+  defp parse_bitrate_feedback(_),
+    do: {:error, "[mediaserver]: `bitrate_feedback` must be a string"}
+
+  defp bitrate_feedback_error do
+    "[mediaserver]: `bitrate_feedback` must be `none` or a comma-separated list of " <>
+      Enum.join(Map.keys(@bitrate_feedback_dialects), ", ")
+  end
 
   defp parse_pool(nil), do: {:ok, []}
 

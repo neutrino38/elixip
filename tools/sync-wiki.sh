@@ -13,8 +13,7 @@
 # absolute URLs into the repository. A link resolving to nothing at all is a dead
 # link in the source and aborts the run.
 #
-# Design docs under docs/design/ are deliberately NOT published; tcp_listener.md
-# is the one exception, already on the wiki since 2026-06-25.
+# Design docs under docs/design/ are deliberately NOT published.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -61,7 +60,8 @@ MANIFEST=(
   "docs/kelixip/modules/mcu-api.md|MCU-API|mcu REST API"
   "docs/kelixip/modules/mcu_module_guide.md|MCU-Guide|mcu operating guide"
   "docs/kelixip/modules/template.md|Module-Template|module template"
-  "docs/design/tcp_listener.md|TCP-Listener-Design|TCP Listener Design"
+  "docs/releases/RELEASE-1.5.1.md|Release-1.5.1|Release 1.5.1"
+  "docs/releases/RELEASE-1.5.0.md|Release-1.5.0|Release 1.5.0"
   "docs/releases/RELEASE-1.4.1.md|Release-1.4.1|Release 1.4.1"
   "docs/releases/RELEASE-1.4.0.md|Release-1.4.0|Release 1.4.0"
   "docs/releases/RELEASE-1.2.1.md|Release-1.2.1|Release 1.2.1"

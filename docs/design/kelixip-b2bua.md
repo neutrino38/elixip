@@ -1,59 +1,10 @@
-# kelixip call control: `call()` and `queue()` — future work
+# kelixip call control: `queue()` — future work
 
-**Status: out of scope.** Nothing here is built or committed to. This records a
-direction so the pieces being built now (the B2BUA primitives of
+**Status: partly built.** `call()` exists — see below; `queue()` and the kelixip
+objects both verbs take names from do not. This records a direction so the pieces
+being built now (the B2BUA primitives of
 [DESIGN-FRAMEWORK.md](DESIGN-FRAMEWORK.md#5-b2bua), the registrar, presence) are not shaped in a
 way that forecloses it.
-
-## 1. Why a layer above the primitives
-
-The B2BUA design is deliberate about where things live: the framework offers
-low-level primitives, the scenario writes the policy, and anything expressible
-in FSL stays in FSL. That is the right split — but it means a working
-call takes a scenario with five or six states, and an ACD queue rather more.
-Asked to route a call to a subscriber, an integrator should not have to write
-the hunt loop, the early-media rule of §7.4 and the profile ladder of §7.5.
-
-So a layer above, offering the two verbs Asterisk made the vocabulary of the
-field:
-
-```elixir
-Kelixip.B2bua.call(...)     # the equivalent of Dial()
-Kelixip.B2bua.queue(...)    # the equivalent of Queue()
-```
-
-They are **not** a replacement for the primitives, and the primitives must stay
-usable directly — that is what makes an unusual call flow possible at all. The
-two verbs are the paved road, not the only road.
-
-## 2. What it needs from FSL first
-
-`call()` and `queue()` are not functions in the ordinary sense: they run a
-**finite state machine** — ringing, early media, fallback, teardown — inside the
-caller's scenario, and hand control back when the call ends. FSL has no way
-to express that today: `sub_fsm` spawns a *separate process* with its own
-mailbox, which is the wrong shape here, because the SIP events belong to the
-calling scenario's dialogs.
-
-So the prerequisite is **reusable FSM fragments**: a named group of states,
-parameterised, that a scenario can enter and return from, running in its own
-process and mailbox. Roughly:
-
-```elixir
-state route_it do
-  invoke Kelixip.B2bua.call, peer: trunk("ovh"), profile: :avp, returning: call_done
-end
-
-state call_done do
-  # the fragment left `sip_ctx` carrying its outcome
-end
-```
-
-Open: whether a fragment is a macro expanding states into the caller at compile
-time, or a runtime construct with an explicit return state. The first keeps the
-monitor and the sequence diagram honest (every state is a real state); the
-second composes better. This is the design question to settle before either
-verb is worth writing.
 
 ## 3. What it needs from kelixip
 
@@ -84,10 +35,18 @@ invent:
 - **registration state** — is a device bound for this AOR? That is the
   registrar's (`Kelix.Mod.Registrar`), and `targets/2` already answers it;
 - **busy state** — is the agent on a call? That is presence's
-  (`SIP.Session.Presence`, and the dialog state the node already holds).
+  (`SIP.Session.Presence.SharedCallAppearece`, and the dialog state the node already holds).
+- **availabability state** - this is a state published by the client into the
+  presence server using a PUBLISH SIP message. It handles the login/logout
+  of the agent.
 
-The queue's own state is what neither of those knows: penalty, wrap-up, last
-call taken, login/logout. `Kelix.Mod.Queue` would implement the
+The queue's distribution algorithm needs to compose these three states to decide
+whether the call is to be distributed to the agent or not.
+
+The queue itself need to maintiain an internal state to handle call distribution
+policies, penalty, wrap-up, last call taken.
+
+`Kelix.Mod.Queue` would implement the
 `SIP.B2bua.TargetProvider` behaviour of DESIGN-FRAMEWORK.md and join the three
 together — which is exactly why that behaviour asks for a reservation handle and
 an attempt outcome.
@@ -109,7 +68,8 @@ The primitives keep their contract. `call()` and `queue()` are written **in**
 FSL, on top of `b2bua_forward/3`, `b2bua_try_next/0`,
 `b2bua_cancel_forward/0` and the rest — if either verb turns out to need a new
 primitive, that is a finding about the primitives, to be taken back to
-DESIGN-FRAMEWORK.md rather than worked around here.
+DESIGN-FRAMEWORK.md rather than worked around here. `call()` was written that
+way and needed none.
 
 And `elixip2` stays free of any of this: trunks, agents and queues are kelixip
 objects, reached from a script the way §3.2 reaches the registrar.

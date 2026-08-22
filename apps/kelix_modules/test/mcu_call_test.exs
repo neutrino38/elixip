@@ -722,7 +722,7 @@ defmodule Kelix.Mod.McuCallTest do
       # bitrate, intra period — because every leg is encoded from the same mosaic,
       # plus the H.264 profile the peer asked for: this map IS the encoder's
       # properties (`videoProperties`), and it replaces whatever SetRTPProperties set
-      assert_receive {:rpc, "SetVideoCodec", [42, 7, 99, 6, 15, 1024, 300, encoder, 0]}, 2000
+      assert_receive {:rpc, "SetVideoCodec", [42, 7, 99, 6, 30, 1500, 300, encoder, 0]}, 2000
       assert encoder == %{"h264.profile-level-id" => "42e01f"}
       assert_receive {:rpc, "AddMosaicParticipant", [42, 0, 7]}, 2000
     end
@@ -758,7 +758,7 @@ defmodule Kelix.Mod.McuCallTest do
       assert fields[:body] =~ "a=fmtp:99 profile-level-id=640028;packetization-mode=1"
 
       send(pid, {:ACK, %{method: :ACK}, nil, dialog})
-      assert_receive {:rpc, "SetVideoCodec", [42, 7, 99, 6, 15, 1024, 300, encoder, 0]}, 2000
+      assert_receive {:rpc, "SetVideoCodec", [42, 7, 99, 6, 30, 1500, 300, encoder, 0]}, 2000
 
       # the packetization mode travels with the profile, by the same channel and for the
       # same reason: it is what bounds the slices the encoder produces, and server-side it
@@ -786,7 +786,7 @@ defmodule Kelix.Mod.McuCallTest do
       refute fields[:body] =~ "42e01f"
 
       send(pid, {:ACK, %{method: :ACK}, nil, dialog})
-      assert_receive {:rpc, "SetVideoCodec", [42, 7, 99, 6, 15, 1024, 300, encoder, 0]}, 2000
+      assert_receive {:rpc, "SetVideoCodec", [42, 7, 99, 6, 30, 1500, 300, encoder, 0]}, 2000
       assert encoder == %{"h264.profile-level-id" => "4d0028"}
     end
 
@@ -1179,11 +1179,12 @@ defmodule Kelix.Mod.McuCallTest do
       assert answer =~ "a=rtcp-fb:99 nack pli"
       assert answer =~ "a=rtcp-fb:99 ccm fir"
       assert answer =~ "a=rtcp-fb:99 ccm tmmbr"
+      assert answer =~ "a=rtcp-fb:99 goog-remb"
       refute answer =~ "rtcp-fb:*"
 
-      # and NOT what has no server-side switch: announcing it would promise a
-      # capability nothing implements
-      refute answer =~ "goog-remb"
+      # and NOT `transport-cc`: it needs `[mediaserver] transport_cc`, off by default
+      # (mcu_webrtc_test.exs covers the negotiation, both ways)
+      refute answer =~ "transport-cc"
     end
 
     test "what is announced is what is switched on server-side", ctx do
@@ -1195,11 +1196,14 @@ defmodule Kelix.Mod.McuCallTest do
       assert_received {:rpc, "SetRTPProperties", [42, 7, 1, codec_props, 0]}
       assert Map.has_key?(codec_props, "codec.av1.level-idx")
 
-      # video (1) carries the three switches behind the three answered types
+      # video (1) carries the switches behind the answered types. `tmmbr` and `remb`
+      # travel together when the offer asked for both — the server resolves the
+      # precedence (TMMBR wins, and its mode emits both dialects).
       assert_received {:rpc, "SetRTPProperties", [42, 7, 1, props, 0]}
       assert props["useNACK"] == "1"
       assert props["useRtcpFIR"] == "1"
       assert props["tmmbr"] == "1"
+      assert props["remb"] == "1"
 
       # audio stayed AVP, so it gets none of them
       assert_received {:rpc, "SetRTPProperties", [42, 7, 0, audio_props, 0]}

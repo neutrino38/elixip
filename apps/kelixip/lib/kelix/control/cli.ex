@@ -13,6 +13,10 @@ defmodule Kelix.Control.CLI do
   prints the text and halts. Dispatch is local when the target is this node (so
   tests need no distribution) and `:rpc.call` otherwise.
 
+  One verb is not an operator command: `complete <words…> <prefix>` is the hook the
+  shell completion calls (`packaging/completion/kelictl`), and answers a word list on
+  stdout. It is absent from `usage/0` for that reason.
+
   ## Exit codes
 
   | Code | Means |
@@ -113,6 +117,14 @@ defmodule Kelix.Control.CLI do
       {:ok, tag, fun, args} ->
         render(tag, call(target, fun, args))
 
+      # Completion cannot fail: the shell reads stdout as a word list, so an
+      # unreachable node, a registry that is not running (the `eval` fallback of
+      # bin/kelictl) and an unknown context all answer the same way — the words we
+      # know for sure, exit 0. Hence its own branch rather than a render/2 clause,
+      # which the generic {:error, _} ones above it would have swallowed.
+      {:complete, source, prefix, static} ->
+        {0, completion_output(source, prefix, static, target)}
+
       {:error, msg} ->
         {2, msg}
     end
@@ -207,6 +219,21 @@ defmodule Kelix.Control.CLI do
       else: {:ok, :map, :reload_script, [names, notify?]}
   end
 
+  # The shell completion hook (`packaging/completion/kelictl`). It passes the words
+  # already typed and, always last, the prefix being completed — empty when the
+  # cursor follows a space, which is what tells "complete the third word" from
+  # "complete the second one". Candidates come back one per line; see the section
+  # below for what answers each context.
+  #
+  # This clause precedes the module dispatch, so `complete` is a reserved first word
+  # — a module of that name keeps its commands over REST.
+  defp parse(["complete" | words]) do
+    case Enum.split(words, -1) do
+      {context, [prefix]} -> complete(context, prefix)
+      {[], []} -> complete([], "")
+    end
+  end
+
   # `<module> help` is answered by the CLI from Kelix.Control.Registry (FW-5,
   # `docs/design/DESIGN-MCU.md`): a module declares its command set once and
   # gets its usage for free — nothing to write, nothing to keep in sync. `help` is
@@ -226,6 +253,150 @@ defmodule Kelix.Control.CLI do
   defp parse(_), do: {:error, usage()}
 
   defp pop_flag(args, flag), do: {flag in args, Enum.reject(args, &(&1 == flag))}
+
+  # ── completion candidates ────────────────────────────────────────────────────
+  #
+  # One clause per context, each returning `{:complete, source, prefix, static}`:
+  # `static` is what this file knows on its own, `source` is the
+  # `{Kelix.Control fun, args, what to read out of the result}` that only the live
+  # node can answer, or `nil`. The word list an operator gets is therefore the tree
+  # `parse/1` dispatches PLUS what the node holds — the commands each loaded module
+  # declares, the served domains, the pool entries, the AORs. A shipped shell script
+  # could know none of that, and a second copy of the static half would be free to
+  # drift from this one.
+  #
+  # No clause here reaches the node: `completion_output/4` does, and tolerates its
+  # absence. A vocabulary `Kelix.Control` validates against is a pure function and is
+  # read locally, so it stays the same one list.
+
+  @completion_commands [
+    "status",
+    "monitor",
+    "registration",
+    "domain",
+    "mediaserver",
+    "module",
+    "log-level",
+    "stop",
+    "reload-all",
+    "reload-script",
+    "drain",
+    "undrain",
+    "graceful-shutdown",
+    "help"
+  ]
+
+  # The sub-commands of each core noun — the nouns that never reach the module
+  # dispatch. `help` is one of them: it is the form that answers with the service
+  # down, which is when an operator reaches for it.
+  @completion_verbs %{
+    "registration" => ["list", "show", "remove", "help"],
+    "domain" => ["list", "show", "reload-all", "help"],
+    "mediaserver" => ["list", "show", "enable", "disable", "help"],
+    "module" => ["list", "reload", "help"]
+  }
+
+  defp complete([], prefix),
+    do: {:complete, {:module_commands, [], :module_names}, prefix, @completion_commands}
+
+  defp complete(["help"], prefix), do: {:complete, nil, prefix, @help_topics}
+
+  defp complete(["log-level"], prefix),
+    do: {:complete, nil, prefix, Kelix.Control.log_levels()}
+
+  defp complete(["stop"], prefix), do: {:complete, {:monitor, [], :instance_ids}, prefix, []}
+
+  # Every word after `reload-script` is another script name, and `--notify` is
+  # accepted anywhere among them (`pop_flag/2` does not care where), so the context
+  # length says nothing here.
+  defp complete(["reload-script" | _typed], prefix),
+    do: {:complete, {:script_names, [], :strings}, prefix, ["--notify"]}
+
+  defp complete(["registration", verb], prefix) when verb in ["list", "show", "remove"],
+    do: {:complete, {:domains, [], :named_rows}, prefix, []}
+
+  # An AOR is unique only within its domain, so the domain already typed is what is
+  # asked — not the whole location service.
+  defp complete(["registration", verb, domain], prefix) when verb in ["show", "remove"],
+    do: {:complete, {:registrations, [domain], :aors}, prefix, []}
+
+  defp complete(["domain", "show"], prefix),
+    do: {:complete, {:domains, [], :named_rows}, prefix, []}
+
+  defp complete(["mediaserver", verb], prefix) when verb in ["show", "enable", "disable"],
+    do: {:complete, {:mediaservers, [], :named_rows}, prefix, []}
+
+  defp complete(["module", "reload"], prefix),
+    do: {:complete, {:module_commands, [], :module_names}, prefix, []}
+
+  defp complete([noun], prefix) when is_map_key(@completion_verbs, noun),
+    do: {:complete, nil, prefix, @completion_verbs[noun]}
+
+  # A core noun whose argument is already complete, or mistyped: no word to offer,
+  # and above all not the module dispatch below — `domain` is not a module.
+  defp complete([noun | _rest], prefix) when is_map_key(@completion_verbs, noun),
+    do: {:complete, nil, prefix, []}
+
+  defp complete([module], prefix),
+    do: {:complete, {:module_commands, [module], :command_names}, prefix, ["help"]}
+
+  defp complete([module, "help"], prefix),
+    do: {:complete, {:module_commands, [module], :command_names}, prefix, []}
+
+  # A module command takes `name=value` arguments, so the names it declares are the
+  # candidates, minus the ones already typed. A prefix that holds an `=` is a VALUE:
+  # its vocabulary is the module's business (`kelictl <module> help <cmd>` prints
+  # it), and guessing here would offer the wrong half of the pair.
+  defp complete([module, cmd | typed], prefix) do
+    if String.contains?(prefix, "=") do
+      {:complete, nil, prefix, []}
+    else
+      given = for arg <- typed, [name, _value] <- [String.split(arg, "=", parts: 2)], do: name
+      {:complete, {:module_commands, [module], {:arg_names, cmd, given}}, prefix, []}
+    end
+  end
+
+  defp completion_output(source, prefix, static, target) do
+    (static ++ dynamic_candidates(source, target))
+    |> Enum.filter(&String.starts_with?(&1, prefix))
+    |> Enum.uniq()
+    |> Enum.sort()
+    |> Enum.join("\n")
+  end
+
+  defp dynamic_candidates(nil, _target), do: []
+
+  defp dynamic_candidates({fun, args, kind}, target) do
+    completion_names(kind, call(target, fun, args))
+  catch
+    # call/3 rescues exceptions; a control layer that is not running EXITS instead
+    # (a GenServer call to a dead name), which is exactly the `eval` fallback case.
+    _, _ -> []
+  end
+
+  defp completion_names(:module_names, modules) when is_map(modules), do: Map.keys(modules)
+
+  defp completion_names(:command_names, {:ok, %{commands: commands}}),
+    do: Enum.map(commands, & &1.name)
+
+  defp completion_names({:arg_names, cmd, given}, {:ok, %{commands: commands}}) do
+    case Enum.find(commands, &(&1.name == cmd)) do
+      %{args: args} -> for a <- args, a.name not in given, do: a.name <> "="
+      _ -> []
+    end
+  end
+
+  defp completion_names(:named_rows, rows) when is_list(rows), do: Enum.map(rows, & &1.name)
+  defp completion_names(:strings, names) when is_list(names), do: names
+
+  defp completion_names(:instance_ids, rows) when is_list(rows),
+    do: Enum.map(rows, &to_string(&1.id))
+
+  defp completion_names(:aors, {:ok, %{registrations: rows}}), do: Enum.map(rows, & &1.aor)
+
+  # An unreachable node, an unknown domain, an unknown module: no candidate, no
+  # error. The shell has no way to show one.
+  defp completion_names(_kind, _other), do: []
 
   # ── dispatch (local when targeting this node, else RPC) ──────────────────────
 
@@ -282,7 +453,19 @@ defmodule Kelix.Control.CLI do
   defp render(:monitor, rows) when is_list(rows) do
     {0,
      table(
-       ["id", "domain", "function", "script", "account", "state", "event", "command"],
+       [
+         "id",
+         "domain",
+         "function",
+         "script",
+         "account",
+         "state",
+         "event",
+         "command",
+         "medias",
+         "mediaserver",
+         "outbound"
+       ],
        rows,
        &[
          to_string(&1.id),
@@ -295,7 +478,12 @@ defmodule Kelix.Control.CLI do
          dash(&1.account),
          dash(&1.state),
          dash(&1.event),
-         dash(&1.command)
+         dash(&1.command),
+         # These three never dash: they carry "n/a" / "none" of their own, which
+         # says "does not apply here" where a dash says "no value yet".
+         dash(&1.medias),
+         dash(&1.mediaserver),
+         dash(&1.outbound)
        ]
      )}
   end

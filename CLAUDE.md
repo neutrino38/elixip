@@ -355,7 +355,7 @@ stop_player / stop_recorder / stop_echo
 
 Runtime config lives in `config/config.exs`:
 - Logger writes warnings to console and info+ to `elixip.log`
-- `:useragent` — the User-Agent header value (`"Elixipp-1.4"`)
+- `:useragent` — the User-Agent header value (`"Elixipp-1.5.1"`)
 - `:optionkeepaliveperiod` — OPTIONS keep-alive interval in seconds (15)
 
 ### Media server selection
@@ -385,7 +385,12 @@ config :elixip2, MediaServer.Mendooze,
   rtp_timeout_ms: 10_000,      # EndpointStartRTPTimeout inactivity watchdog
   poller_retry_ms: 1_000,      # event stream reconnect delay
   poller_max_failures: 5,      # consecutive failures before :server_disconnected
-  video_bandwidth_kbps: 800    # b=AS: advertised on video (answers: min with the offer)
+  video_bandwidth_kbps: 1500   # video bitrate: what a leg is encoded at, and the
+                               #   b=AS: advertised (answers: min with the offer).
+                               #   On a kelixip node this comes from
+                               #   `[mediaserver] video_bitrate` in config.toml,
+                               #   which also defaults the mcu module's
+                               #   `video_bitrate` — one bitrate per node.
 ```
 
 ## Writing a scenario (`.exs`)

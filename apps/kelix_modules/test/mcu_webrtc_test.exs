@@ -153,6 +153,20 @@ defmodule Kelix.Mod.McuWebrtcTest do
     {:ok, [port_for(params), @media_ip, accepted]}
   end
 
+  # A verdict that accepts everything proposed and echoes each payload type's **own**
+  # offered fmtp back. The conformant shape (§6.3 rule 12 drops nothing from it), and
+  # the only one where several video codecs survive together — a verdict leaving one
+  # payload type standing has no order left to state, so it cannot show a preference.
+  defp echo_verdict(params) do
+    proposed = Enum.at(params, 3)
+    offered_fmtp = params |> Enum.at(6) |> Map.get("fmtp", %{})
+
+    accepted =
+      Map.new(proposed, fn {pt, code} -> {pt, Map.get(offered_fmtp, pt) || audio_fmtp(code)} end)
+
+    {:ok, [port_for(params), @media_ip, accepted]}
+  end
+
   defp port_for(params) do
     case Enum.at(params, 2) do
       0 -> @audio_port
@@ -168,6 +182,7 @@ defmodule Kelix.Mod.McuWebrtcTest do
         :per_pt -> &per_pt_verdict/1
         :linphone -> &linphone_verdict/1
         :unanswerable -> &unanswerable_verdict/1
+        :echo -> &echo_verdict/1
         _ -> &verdict/1
       end
 
@@ -196,7 +211,8 @@ defmodule Kelix.Mod.McuWebrtcTest do
       {Client,
        name: "mcu1",
        base_url: "http://127.0.0.1:18080",
-       transport: TestStub.transport(self(), Map.merge(%{"StartReceiving" => verdict}, ws_override)),
+       transport:
+         TestStub.transport(self(), Map.merge(%{"StartReceiving" => verdict}, ws_override)),
        register: {Mcu, "mcu1"},
        reconnect_ms: 0},
       id: :client_mcu1
@@ -596,6 +612,98 @@ defmodule Kelix.Mod.McuWebrtcTest do
     end
   end
 
+  describe "the conference's preferred video codec" do
+    # The offer lists six H.264 payload types first and VP8 last (`109 115 103 107 39
+    # 117 96`), so the caller's own order would give H.264. A conference that prefers
+    # VP8 answers VP8 first — and, the SDP order and the encoded codec being one
+    # statement, that is what the mixer is told to encode.
+    @tag verdict: :echo
+    test "is answered first and encoded, though the browser offered it last", ctx do
+      did = conference_preferring("vp8")
+      conn = leg(did)
+
+      assert {:ok, answer} = Adapter.set_remote_offer(conn, @chrome_offer)
+      assert {:ok, summary} = Adapter.attach(conn)
+
+      [_audio, video] = sections(answer)
+      assert hd(video) == "m=video #{@video_port} UDP/TLS/RTP/SAVPF 96 109 115 103 107 39 117"
+
+      # 107 = VideoCodec::VP8 (§3.6) — and the stream goes out on PT 96, the payload
+      # type the answer put first, not on one of the H.264 ones
+      assert summary.video.codec == "VP8"
+
+      calls = TestStub.rpc_calls()
+
+      assert Enum.any?(calls, fn
+               {"SetVideoCodec", [_c, _p, 107, _size, _fps, _br, _intra, _props, _role]} -> true
+               _ -> false
+             end)
+
+      assert Enum.any?(calls, fn
+               {"StartSending", [_c, _p, 1, _ip, _port, %{"96" => 107}, _role]} -> true
+               _ -> false
+             end)
+
+      # the file-wide conference has no preference: the same offer keeps H.264
+      other = leg(ctx.did)
+      assert {:ok, plain} = Adapter.set_remote_offer(other, @chrome_offer)
+      [_audio, plain_video] = sections(plain)
+
+      assert hd(plain_video) ==
+               "m=video #{@video_port} UDP/TLS/RTP/SAVPF 109 115 103 107 39 117 96"
+    end
+
+    # A preference is not a capability: it can only move a payload type that is in the
+    # offer AND in the server's verdict. Both misses are LOGGED, naming which side
+    # dropped it — an operator who states a codec and does not get it must be able to
+    # tell the two apart, which is what the retired codec lists could never say.
+    @tag verdict: :echo
+    test "a codec the offer does not carry changes nothing, and says why", _ctx do
+      did = conference_preferring("av1")
+      conn = leg(did)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, answer} = Adapter.set_remote_offer(conn, @chrome_offer)
+          send(self(), {:answer, answer})
+        end)
+
+      assert_received {:answer, answer}
+      [_audio, video] = sections(answer)
+      assert hd(video) == "m=video #{@video_port} UDP/TLS/RTP/SAVPF 109 115 103 107 39 117 96"
+      assert log =~ "preferred codec AV1 not applied — the offer does not carry it"
+    end
+
+    test "a codec the media server did not accept changes nothing, and says which side", _ctx do
+      # the default verdict accepts one video payload type, 109 (H.264): VP8 is proposed
+      # and refused, which is the other half of the same trace
+      did = conference_preferring("vp8")
+      conn = leg(did)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, answer} = Adapter.set_remote_offer(conn, @chrome_offer)
+          send(self(), {:answer, answer})
+        end)
+
+      assert_received {:answer, answer}
+      [_audio, video] = sections(answer)
+      assert hd(video) == "m=video #{@video_port} UDP/TLS/RTP/SAVPF 109"
+      assert log =~ "preferred codec VP8 not applied — the media server did not accept it"
+    end
+  end
+
+  defp conference_preferring(codec) do
+    {:ok, %{did: did}} =
+      Mcu.handle_control("conference.create", %{
+        "domain" => @domain,
+        "medias" => ["audio", "video"],
+        "preferred_video_codec" => codec
+      })
+
+    did
+  end
+
   describe "the transport plane a browser reads" do
     test "ICE credentials stay inside the ice-char grammar (RFC 8839 §5.4)", ctx do
       answer = answer_for(ctx.did, @chrome_offer)
@@ -642,12 +750,123 @@ defmodule Kelix.Mod.McuWebrtcTest do
 
       assert "a=rtcp-fb:109 nack" in video
       assert "a=rtcp-fb:109 ccm fir" in video
-      # offered but not implemented here (§6.3.1 rule 5), and never announced
-      refute answer =~ "goog-remb"
+      # Chrome never offers `ccm tmmbr`: `goog-remb` is the only congestion feedback
+      # it understands, and answering it is what makes the mixer emit any at all
+      # (rate-control lot 2)
+      assert "a=rtcp-fb:109 goog-remb" in video
+      # `transport-cc` needs `[mediaserver] transport_cc`, off by default — see the
+      # "transport-wide congestion control" describe block below
       refute answer =~ "transport-cc"
       # no feedback on audio, whatever the offer asked for there — there is no audio
       # feedback this mixer acts on
       refute Enum.any?(audio, &String.starts_with?(&1, "a=rtcp-fb"))
+    end
+  end
+
+  # ── transport-wide congestion control ─────────────────────────────────────────
+  #
+  # The half of the mediaserver's sender-side bandwidth estimator that lives here
+  # (design `docs/design/kelixip-transport-wide-cc.md`). The captured Chrome offer
+  # carries `a=extmap:3 <URI>` on its video section and `transport-cc` on every video
+  # PT, so this is the real negotiation and not a hand-written one.
+  #
+  # This mixer only ever ANSWERS: there is no offer side to cover here.
+  describe "transport-wide congestion control" do
+    @transport_cc_uri "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01"
+
+    defp with_transport_cc(value) do
+      block = Application.get_env(:elixip2, MediaServer.Mendooze, [])
+
+      Application.put_env(
+        :elixip2,
+        MediaServer.Mendooze,
+        Keyword.put(block, :transport_cc, value)
+      )
+
+      on_exit(fn -> Application.put_env(:elixip2, MediaServer.Mendooze, block) end)
+    end
+
+    # Two SetRTPProperties land per media: our local codec capability first (§16.3.4
+    # (a)), the transport switches second. Drained and merged — the keys of the two
+    # never collide, and asserting on a fixed position would only be asserting the
+    # order of the pair.
+    defp rtp_props(media) do
+      receive do
+        {:rpc, "SetRTPProperties", [42, 7, ^media, props, 0]} ->
+          Map.merge(props, rtp_props(media))
+      after
+        0 -> %{}
+      end
+    end
+
+    test "the switch on: same extmap id in the answer, feedback confirmed, leg armed",
+         ctx do
+      with_transport_cc(true)
+      answer = answer_for(ctx.did, @chrome_offer)
+      [audio, video] = sections(answer)
+
+      # RFC 8285 §5: the browser's own id, never renumbered
+      assert "a=extmap:3 #{@transport_cc_uri}" in video
+      assert "a=rtcp-fb:109 transport-cc" in video
+
+      # video only — there is no sender-side estimator behind an audio stream
+      refute Enum.any?(audio, &String.starts_with?(&1, "a=extmap"))
+      refute Enum.any?(audio, &(&1 =~ "transport-cc"))
+
+      # the switch is the extmap property: keyed by URI, valued with the negotiated id
+      props = rtp_props(1)
+      assert props[@transport_cc_uri] == "3"
+      # and the rtcp-fb switches next to it are untouched
+      assert props["useNACK"] == "1"
+      assert props["remb"] == "1"
+
+      refute Map.has_key?(rtp_props(0), @transport_cc_uri)
+    end
+
+    test "the switch off: nothing answered, nothing armed", ctx do
+      with_transport_cc(false)
+      answer = answer_for(ctx.did, @chrome_offer)
+      [_audio, video] = sections(answer)
+
+      refute answer =~ "a=extmap"
+      refute answer =~ "transport-cc"
+
+      # the rest of the answered feedback is untouched
+      assert "a=rtcp-fb:109 nack" in video
+      assert "a=rtcp-fb:109 goog-remb" in video
+
+      refute Map.has_key?(rtp_props(1), @transport_cc_uri)
+    end
+
+    test "an offer without the extension gets nothing back, switch on", ctx do
+      with_transport_cc(true)
+      # the feedback message stays offered: without the extension it would report on a
+      # sequence number nothing writes
+      offer = String.replace(@chrome_offer, ~r/a=extmap:3 [^\r\n]*\r?\n/, "")
+      answer = answer_for(ctx.did, offer)
+
+      refute answer =~ "a=extmap"
+      refute answer =~ "transport-cc"
+
+      refute Map.has_key?(rtp_props(1), @transport_cc_uri)
+    end
+
+    test "an asymmetric extmap direction is left alone (v1 perimeter)", ctx do
+      with_transport_cc(true)
+
+      offer =
+        String.replace(
+          @chrome_offer,
+          "a=extmap:3 #{@transport_cc_uri}",
+          "a=extmap:7/sendonly #{@transport_cc_uri}"
+        )
+
+      answer = answer_for(ctx.did, offer)
+
+      refute answer =~ "a=extmap"
+      refute answer =~ "transport-cc"
+
+      refute Map.has_key?(rtp_props(1), @transport_cc_uri)
     end
   end
 

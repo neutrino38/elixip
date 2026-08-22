@@ -1,0 +1,56 @@
+# bash completion for kelictl, the kelixip admin CLI. Installed as
+# /usr/share/bash-completion/completions/kelictl; `source` it to try it from a
+# checkout.
+#
+# It knows not one command name. `kelictl complete <words…> <prefix>` answers with
+# the candidates, one per line: the command tree lives in Kelix.Control.CLI, and the
+# live node adds what only it knows — the commands each loaded module declares, the
+# served domains, the media-server pool entries, the AORs of a domain. A word list
+# copied into this file would drift from the binary the day a module gains a command.
+#
+# Each TAB costs one short-lived VM (~0.5 s against a live node). Nothing is cached:
+# the only answer worth caching is the first word's, and its module names are exactly
+# the part that goes stale when a module is loaded or reloaded.
+
+_kelictl() {
+  local cur words cword
+
+  if declare -F _init_completion >/dev/null 2>&1; then
+    # `-n =:` keeps `name=value` and `sip:bob@host` as ONE word: the CLI is handed
+    # the argument it will actually parse, and `=` leads to a value instead of
+    # starting a new word.
+    _init_completion -n =: || return
+  else
+    words=("${COMP_WORDS[@]}")
+    cword=$COMP_CWORD
+    cur=${COMP_WORDS[COMP_CWORD]}
+  fi
+
+  # The prefix goes last, always, even empty: it is how the CLI tells "complete the
+  # third word" from "complete the second one".
+  local candidates
+  candidates=$("${words[0]}" complete "${words[@]:1:cword-1}" "$cur" 2>/dev/null) || return
+  [ -n "$candidates" ] || return
+
+  # A node still running the PREVIOUS release knows no `complete` verb and answers
+  # with its usage text — kelictl runs the CLI inside the live node, so an upgraded
+  # package is not upgraded code until the service restarts. A candidate is one shell
+  # word: a line holding whitespace is that answer, not a word list, and the whole
+  # answer is dropped rather than half-shown.
+  local line reply=()
+  while IFS= read -r line; do
+    case $line in
+      "" | *[[:space:]]*) return ;;
+    esac
+    reply+=("$line")
+  done <<< "$candidates"
+
+  COMPREPLY=("${reply[@]}")
+
+  # `name=` is half an argument: its value follows with no space in between.
+  if [ ${#COMPREPLY[@]} -eq 1 ] && [ "${COMPREPLY[0]%=}" != "${COMPREPLY[0]}" ]; then
+    compopt -o nospace
+  fi
+}
+
+complete -F _kelictl kelictl

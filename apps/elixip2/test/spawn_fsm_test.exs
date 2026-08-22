@@ -1,4 +1,4 @@
-defmodule SIP.Test.SubFsm do
+defmodule SIP.Test.SpawnFsm do
   use ExUnit.Case
 
   # ── Scenario fixtures ───────────────────────────────────────────────────────
@@ -16,7 +16,7 @@ defmodule SIP.Test.SubFsm do
 
     state waiting do
       on_events do
-        {:scenario_msg, :parent, :go} -> scenario_success("went")
+        {:parent_msg, :go} -> scenario_success("went")
       after
         2_000 -> scenario_failure("no go received")
       end
@@ -31,13 +31,13 @@ defmodule SIP.Test.SubFsm do
     config(username: "alice", domain: "example.com")
 
     state initial_state do
-      sub_fsm(Child, as: :callee)
+      spawn_fsm(Child, as: :callee)
       goto(waiting)
     end
 
     state waiting do
       on_events do
-        {:scenario_msg, :callee, :ready} ->
+        {:child_msg, :callee, :ready} ->
           notify(:callee, :go)
           goto(finishing)
       after
@@ -47,7 +47,7 @@ defmodule SIP.Test.SubFsm do
 
     state finishing do
       on_events do
-        {:scenario_exit, :callee, :success, _reason} -> scenario_success("child done")
+        {:child_exit, :callee, :success, _reason} -> scenario_success("child done")
       after
         2_000 -> scenario_failure("child never exited")
       end
@@ -103,7 +103,7 @@ defmodule SIP.Test.SubFsm do
   end
 
   # A UAS call scenario child: waits for the inbound INVITE routed to it by the
-  # call dispatcher installed by sub_fsm.
+  # call dispatcher installed by spawn_fsm.
   defmodule UasChild do
     use SIP.Scenario
 
@@ -125,14 +125,14 @@ defmodule SIP.Test.SubFsm do
     assert Parent.run(false) == :ok
   end
 
-  # `sub_fsm "child.exs"` names a file next to the scenario that declares it —
+  # `spawn_fsm "child.exs"` names a file next to the scenario that declares it —
   # include semantics, so a scenario is self-contained wherever it is run from.
   # Resolving against the current directory instead is what made
   # scenarios/uac_register_and_uas_invite.exs die with a bare "exception!" for anyone
   # who did not happen to be standing in apps/elixip2. The fixture pair lives in
   # test/support/scenarios/, which is NOT the suite's working directory: a
   # cwd-relative resolution cannot find the child.
-  test "a sub_fsm path is resolved next to the file that declares it" do
+  test "a spawn_fsm path is resolved next to the file that declares it" do
     parent = SIP.Scenario.Loader.load_file!("test/support/scenarios/sibling_parent.exs")
     assert SIP.Scenario.Runner.run_instance(parent) == :ok
   end
@@ -144,7 +144,7 @@ defmodule SIP.Test.SubFsm do
       config(username: "m", domain: "example.com")
 
       state initial_state do
-        sub_fsm("no_such_child.exs", as: :ghost)
+        spawn_fsm("no_such_child.exs", as: :ghost)
         goto(loop)
       end
     end
@@ -173,7 +173,7 @@ defmodule SIP.Test.SubFsm do
     Process.sleep(50)
     send(pid, {:scenario_ctl, :shutdown, :test})
 
-    assert_receive {:scenario_exit, :child, :aborted, "shutdown"}, 1_000
+    assert_receive {:child_exit, :child, :aborted, "shutdown"}, 1_000
     assert_receive {:result, {:aborted, "shutdown"}}, 1_000
     assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
   end
@@ -192,17 +192,67 @@ defmodule SIP.Test.SubFsm do
     Process.sleep(50)
     send(pid, {:scenario_ctl, :shutdown, :test})
 
-    assert_receive {:scenario_exit, :child, :aborted, "custom wind-down"}, 1_000
+    assert_receive {:child_exit, :child, :aborted, "custom wind-down"}, 1_000
     assert_receive {:result, {:aborted, "custom wind-down"}}, 1_000
   end
 
-  test "sub_fsm requires an :as name" do
+  # The 1.4 inter-FSM event shapes cannot be aliased the way `sub_fsm` was: a
+  # scenario still matching one would never be woken, and would wait on its
+  # `after` without a word. The compile-time warning is that safety net, so it
+  # gets a test of its own.
+  describe "deprecated inter-FSM event shapes" do
+    defp compile_warnings(source) do
+      ExUnit.CaptureIO.capture_io(:stderr, fn -> Code.compile_string(source) end)
+    end
+
+    defp scenario_matching(pattern) do
+      """
+      defmodule :"#{:erlang.unique_integer([:positive])}" do
+        use SIP.Scenario
+        state initial_state do
+          on_events do
+            #{pattern} -> scenario_success("ok")
+          end
+        end
+      end
+      """
+    end
+
+    test "matching {:scenario_msg, …} warns and names both replacements" do
+      warnings = compile_warnings(scenario_matching("{:scenario_msg, :parent, :go}"))
+
+      assert warnings =~ "{:scenario_msg, …} is no longer sent"
+      assert warnings =~ "{:parent_msg, payload}"
+      assert warnings =~ "{:child_msg, name, payload}"
+    end
+
+    test "matching {:scenario_exit, …} warns, guard or no guard" do
+      assert compile_warnings(scenario_matching("{:scenario_exit, :callee, o, _r}")) =~
+               "{:child_exit, name, outcome, reason}"
+
+      assert compile_warnings(
+               scenario_matching("{:scenario_exit, :callee, o, _r} when o == :success")
+             ) =~ "{:child_exit, name, outcome, reason}"
+    end
+
+    test "the current shapes warn about nothing" do
+      for pattern <- [
+            "{:parent_msg, :go}",
+            "{:child_msg, :callee, :ready}",
+            "{:child_exit, n, o, r}"
+          ] do
+        refute compile_warnings(scenario_matching(pattern)) =~ "no longer sent"
+      end
+    end
+  end
+
+  test "spawn_fsm requires an :as name" do
     assert_raise KeyError, fn ->
       SIP.Scenario.Runner.spawn_child(%SIP.Context{}, Child, [], self())
     end
   end
 
-  describe "sub_fsm of a :uas_invite scenario" do
+  describe "spawn_fsm of a :uas_invite scenario" do
     # The ConfigRegistry is a global Agent shared across test modules: save and
     # restore the call processing module so these tests neither depend on nor
     # disturb the others.
@@ -232,7 +282,7 @@ defmodule SIP.Test.SubFsm do
       # Deliver the INVITE (as the dialog layer would after :accept) so the
       # child runs to completion.
       send(child_pid, {:INVITE, %{method: :INVITE, body: []}, self(), self()})
-      assert_receive {:scenario_exit, :callee, :success, _}, 1_000
+      assert_receive {:child_exit, :callee, :success, _}, 1_000
     end
 
     test "does not override an already configured call processing module" do
@@ -245,7 +295,7 @@ defmodule SIP.Test.SubFsm do
 
           # Wind the child down so it does not sit in its 5s INVITE wait.
           send(child_pid, {:scenario_ctl, :shutdown, :test})
-          assert_receive {:scenario_exit, :callee, :aborted, _}, 1_000
+          assert_receive {:child_exit, :callee, :aborted, _}, 1_000
         end)
 
       assert log =~ "already configured"

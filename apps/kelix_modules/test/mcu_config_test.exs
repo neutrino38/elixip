@@ -24,7 +24,7 @@ defmodule Kelix.Mod.Mcu.ConfigTest do
 
       # no codec list and no fmtp: the media server arbitrates (P8a, §16.3)
       refute Map.has_key?(config, :audio_codecs)
-      assert config.video == %{size: 6, fps: 15, bitrate: 1024, intra_period: 300}
+      assert config.video == %{size: 6, fps: 30, bitrate: 1500, intra_period: 300}
 
       # Shorter than what the caller waits (`call_timeout_ms`, 5 s): the per-RPC
       # timeout has to fire first, or a slow server turns a call into an exit.
@@ -33,6 +33,38 @@ defmodule Kelix.Mod.Mcu.ConfigTest do
       assert config.gc_orphans == true
       # no range configured ⇒ `did` is mandatory on create (§8.4)
       assert config.did_range == nil
+    end
+
+    # One bitrate per node, whichever media path carries the call: an omitted
+    # `video_bitrate` is the node's `[mediaserver] video_bitrate`, which the
+    # point-to-point adapter also encodes and answers `b=AS:` with.
+    test "video_bitrate follows the node's [mediaserver] video_bitrate" do
+      assert parse!(%{}).video.bitrate == Kelix.Config.current().mediaserver_video_bitrate
+      assert parse!(%{"video_bitrate" => 900}).video.bitrate == 900
+    end
+  end
+
+  describe "preferred_video_codec (§8.4)" do
+    test "no preference by default — the caller's order decides" do
+      assert parse!(%{}).preferred_video_codec == nil
+    end
+
+    test "a name is accepted case-insensitively and stored as the codec tables spell it" do
+      assert parse!(%{"preferred_video_codec" => "h264"}).preferred_video_codec == "H264"
+      assert parse!(%{"preferred_video_codec" => "VP8"}).preferred_video_codec == "VP8"
+      assert parse!(%{"preferred_video_codec" => "av1"}).preferred_video_codec == "AV1"
+    end
+
+    test "`none` is a preference refused, not a name to resolve" do
+      assert parse!(%{"preferred_video_codec" => "none"}).preferred_video_codec == nil
+    end
+
+    # A codec name nothing can turn into a payload type would sit in the config doing
+    # nothing at all, which is the failure mode the retired lists were removed for.
+    test "an unknown codec is a boot-time error naming the vocabulary" do
+      assert {:error, message} = Config.parse(%{"preferred_video_codec" => "h265"})
+      assert message =~ "preferred_video_codec"
+      assert message =~ "H264"
     end
   end
 

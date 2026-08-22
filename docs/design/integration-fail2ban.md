@@ -25,9 +25,11 @@ Point 4 is where SIP servers usually get this wrong — see §3.
 | Need | State |
 |---|---|
 | Source IP available | **Yes.** The transport stamps `req.ruri.destip` / `destport` / `destproto` on every inbound request — this is what `Kelix.Mod.Registrar` stores as `received` |
-| Auth failure logged | **No.** `Kelix.Mod.AuthDb.check_credentials/5` returns `{:reject, 403, "Forbidden"}` silently. Nothing is logged, anywhere, on a bad password |
+| Auth failure logged | **Partly.** `Kelix.Mod.AuthDb` logs one warning naming the cause — `INVITE refused (bad_password): digest mismatch for "alice"@example.com` — but **without the source IP**, which is the one field a jail needs. Not a parseable line, and only for requests that reach `auth_db` |
 | A log sink an operator can point a jail at | **Partly.** `Kelix.Log.Syslog` is an RFC 3164 sink with a configurable facility (`[log] target = "syslog"`, `facility = …`); stdout is always live and captured by systemd |
 | Failure counters | `Kelix.Metrics.Emit.dispatch_rejected/3` counts rejections per domain/function/code — useful for alerting, useless to fail2ban (no IP) |
+
+| Attempts counted per dialog | **Partly.** `Kelix.Mod.AuthDb.SBB.authenticate/1` (design [DESIGN-AUTH.md](DESIGN-AUTH.md) §3) gives up after `max_attempts` rejected attempts, default 3, and answers `{:auth, :refused, %{attempts: n}}`. That bounds the work one unauthenticated dialog can extract; it is **not** a detection channel — see below |
 
 So the work is almost entirely **"emit the line"**. That is the good news.
 
@@ -79,6 +81,15 @@ Three candidates:
 (design §8.3): answering a liveness ping is not a SIP *function*, and neither is
 telling the infrastructure that someone is knocking. A server whose brute-force
 visibility depends on which optional package is installed is a trap.
+
+**The authentication SBB does not change this, and it is worth saying because it
+looks like it should.** `Kelix.Mod.AuthDb.SBB.authenticate/1` now runs the
+challenge cycle for the reference scripts and counts rejected attempts, so it is
+the one place that knows "this dialog failed three times". Emitting from there is
+still option (b) in disguise: a script that writes its own authentication states —
+which the block deliberately keeps possible — would emit nothing, and so would
+every scenario authenticating against a future non-`auth_db` backend. Its
+`{:auth, :refused, …}` outcome exists to bound work, not to raise an alarm.
 
 **OPEN:** (c) needs the verdict cause, which only the auth backend knows. Two ways:
 carry it back in the rejection (`{:reject, 403, "Forbidden", reason: :bad_password}`
@@ -188,3 +199,8 @@ This is what makes the integration "easy", more than the code does:
 5. *(later)* `kelictl acl` and the in-process ACL.
 
 Steps 1–3 are one focused piece of work and deliver the whole stated goal.
+
+Nothing here waits on the authentication SBB, and the SBB does not wait on this:
+[DESIGN-AUTH.md](DESIGN-AUTH.md) §3 shipped without step 2, and this document's
+step 1 — the reason code on the verdict — is the only place the two touch. Doing
+them in either order works.

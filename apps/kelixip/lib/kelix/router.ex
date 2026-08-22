@@ -186,8 +186,12 @@ defmodule Kelix.Router do
 
       _pid ->
         case Kelix.MediaPool.checkout(pool) do
-          {:ok, %{module: module, url: url}} ->
-            [module: module, url: url]
+          {:ok, %{name: name, module: module, url: url}} ->
+            # `name:` is inert for `media_connect/0` — it reads `:module` and `:url` —
+            # and it is what the monitor's `mediaserver` column shows: an operator
+            # reading `kelictl monitor` next to `kelictl mediaserver list` needs the
+            # same word in both, not a url on one side and a name on the other.
+            [name: name, module: module, url: url]
 
           {:error, reason} ->
             # Loud on purpose: this is the whole media plane being unavailable, and

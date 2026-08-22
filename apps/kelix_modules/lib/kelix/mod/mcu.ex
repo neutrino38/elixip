@@ -47,7 +47,8 @@ defmodule Kelix.Mod.Mcu do
   require Logger
 
   alias Kelix.Metrics.Emit
-  alias Kelix.Mod.Mcu.{Adapter, Args, Client, Conference, Config, Event, Message, Vocabulary}
+  alias Kelix.Mod.Mcu.{Adapter, Args, Client, Conference, Config, Event, Message, Store}
+  alias Kelix.Mod.Mcu.Vocabulary
   alias Kelix.Mod.Mcu.Supervisor, as: McuSupervisor
 
   @conf_table :kelix_mcu_conferences
@@ -101,10 +102,11 @@ defmodule Kelix.Mod.Mcu do
   # working for one release without them deciding anything (§16.3, the media server
   # arbitrates codecs).
   @create_args ~w(domain name did mcu vad rate medias dtmf
-                  video layout logo max_participants destroy_when_empty)
-
-  @update_args ~w(uid name vad rate medias dtmf layout video logo max_participants
+                  video preferred_video_codec layout logo max_participants
                   destroy_when_empty)
+
+  @update_args ~w(uid name vad rate medias dtmf layout video preferred_video_codec logo
+                  max_participants destroy_when_empty)
 
   # Fields a client may read but never send (§8.3.3). Named as read-only rather than
   # merely unknown: an operator who tries to move `conf_id` or `did` deserves to be
@@ -326,12 +328,14 @@ defmodule Kelix.Mod.Mcu do
   Create a conference from a scenario (§17.2).
 
   `opts` is a keyword list with atom keys — `name:`, `did:`, `mcu:`, `vad:`, `rate:`,
-  `medias:`, `dtmf:`, `video:`, `layout:`, `logo:`, `max_participants:`,
-  `destroy_when_empty:`, `owner:` — validated by exactly the same code as the REST body
+  `medias:`, `dtmf:`, `video:`, `preferred_video_codec:`, `layout:`, `logo:`,
+  `max_participants:`, `destroy_when_empty:`, `owner:` — validated by exactly the same code as the REST body
   of `conference.create`, so the two produce indistinguishable conferences (§17.2).
   There is no codec list: the media server arbitrates codecs (§16.3), and the retired
   `audio_codecs:` / `video_codecs:` / `text_codecs:` / `video_fmtp:` are accepted and
-  ignored with a warning for one release.
+  ignored with a warning for one release. `preferred_video_codec:` is not one of them
+  coming back: it names **one** codec to state first in this conference's answers, and
+  only among the payload types the caller offered and the media server accepted.
 
   ## Ownership
 
@@ -494,7 +498,8 @@ defmodule Kelix.Mod.Mcu do
 
     * `:ok` — admitted; the conference and the participant handle are stored in
       the context appdata under `:mcu_conf` and `:mcu_part` (where the
-      context-aware `attach/1` and `leave/2` read them back);
+      context-aware `attach/1` and `leave/2` read them back), **and the leg is
+      wired**: see below;
     * `{:error, reason}` — `admit/3`'s verdicts, for the script to map onto a
       SIP response;
     * `#{inspect(@jsr309_error)}` — an MCU call and a JSR309 media session are
@@ -502,6 +507,28 @@ defmodule Kelix.Mod.Mcu do
       JSR309 peer connection, so the call is refused without touching the
       conference and an error is logged. A pending `goto` aborts the scenario
       on any non-`:ok` value.
+
+  ## What "wired" means, and why it is not the script's job
+
+  An admitted leg needs three things set before `media_connect/0`, none of which is a
+  call-flow decision — they follow from *what a conference leg is*, so they are settled
+  here rather than copied into every script (`CLAUDE.md`: a scenario states a call flow,
+  it does not implement one):
+
+    * `:username` is the conference's DID. It is the local identity of this leg, hence
+      what an in-dialog request we originate puts in From/To — without it `send_BYE()`
+      has no URI to build.
+    * `:media_conn_opts` carries `mcu_participant:` (which conference this leg joins,
+      forwarded to `create_peer_connection/3` by the media macros) and
+      `nat_latch: true` — a conference leg always *answers* an offer, so the address we
+      are told to send to is the one the caller wrote down: its private one, for every
+      handset behind a NAT.
+    * `:mediaserver_instance` is `media_config/1`. A conference is pinned to its MCU
+      (§1.3), so the leg must reach the server holding the mixer and not whatever the
+      media pool would hand out.
+
+  A script that needs other connection options sets `:media_conn_opts` again after
+  `admit` — the last write wins.
   """
   @spec admit(%SIP.Context{}, String.t(), map, keyword) :: %SIP.Context{}
   def admit(sip_ctx = %SIP.Context{}, domain, req, opts) do
@@ -512,6 +539,12 @@ defmodule Kelix.Mod.Mcu do
             sip_ctx
             |> SIP.Context.appdata_set(:mcu_conf, conf)
             |> SIP.Context.appdata_set(:mcu_part, part)
+            |> SIP.Context.set(:username, conf.did)
+            |> SIP.Context.appdata_set(:media_conn_opts,
+              mcu_participant: part,
+              nat_latch: true
+            )
+            |> SIP.Context.appdata_set(:mediaserver_instance, media_config(conf))
 
           {:error, _reason} = err ->
             SIP.Context.set(sip_ctx, :lasterr, err)
@@ -824,7 +857,8 @@ defmodule Kelix.Mod.Mcu do
   media pool would hand out: it must reach the server holding the mixer.
   """
   @spec media_config(Conference.t()) :: keyword
-  def media_config(%Conference{mcu: mcu}), do: [module: Adapter, url: "mcu://" <> mcu]
+  def media_config(%Conference{mcu: mcu}),
+    do: [name: mcu, module: Adapter, url: "mcu://" <> mcu]
 
   @doc "The live row of `part` (it carries the MCU-side id and the adapter connection)."
   @spec participant(Conference.participant()) :: {:ok, Conference.participant()} | :error
@@ -894,6 +928,11 @@ defmodule Kelix.Mod.Mcu do
           %{name: "medias", required: false, help: "audio, video and/or text"},
           %{name: "dtmf", required: false, help: "propose telephone-event (default true)"},
           %{name: "video", required: false, help: Vocabulary.video_help()},
+          %{
+            name: "preferred_video_codec",
+            required: false,
+            help: Vocabulary.video_codec_help()
+          },
           %{name: "layout", required: false, help: Vocabulary.layout_help()},
           %{name: "logo", required: false, help: Vocabulary.logo_help()},
           %{name: "max_participants", required: false},
@@ -921,7 +960,7 @@ defmodule Kelix.Mod.Mcu do
         render: %{
           kind: :detail,
           fields:
-            ~w(name domain did uid mcu conf_id stale created_at max_participants destroy_when_empty vad rate medias dtmf video layout logo recording participants),
+            ~w(name domain did uid mcu conf_id stale persistent created_at max_participants destroy_when_empty vad rate medias dtmf video preferred_video_codec layout logo recording participants),
           labels: @conference_labels,
           # the roster, not the media detail of each leg — that is `participant.show`
           nested: %{"participants" => %{columns: ~w(part_id name from state joined_at)}}
@@ -942,6 +981,11 @@ defmodule Kelix.Mod.Mcu do
           %{name: "rate", required: false},
           %{name: "layout", required: false, help: Vocabulary.layout_help()},
           %{name: "video", required: false, help: Vocabulary.video_help()},
+          %{
+            name: "preferred_video_codec",
+            required: false,
+            help: Vocabulary.video_codec_help()
+          },
           %{name: "logo", required: false, help: Vocabulary.logo_help()},
           %{name: "max_participants", required: false},
           %{name: "destroy_when_empty", required: false}
@@ -1349,6 +1393,7 @@ defmodule Kelix.Mod.Mcu do
         # only the registry holds — so they are decoded here (names → wire ids, the
         # short layout form → fields) and travel as a partial map
         {"video", &Vocabulary.video(Map.get(&1, "video"))},
+        {"preferred_video_codec", &Vocabulary.video_codec(Map.get(&1, "preferred_video_codec"))},
         {"layout", &Vocabulary.layout(Map.get(&1, "layout"))},
         {"logo", &optional_logo(&1)}
       ],
@@ -1407,6 +1452,7 @@ defmodule Kelix.Mod.Mcu do
          # merge over the configured defaults happens in the registry, but the
          # *reading* of what was asked for belongs here, before anything is created
          {:ok, video} <- Vocabulary.video(Map.get(args, "video")),
+         {:ok, preferred_video_codec} <- preferred_video_codec(args),
          {:ok, layout} <- Vocabulary.layout(Map.get(args, "layout")),
          {:ok, logo} <- optional_logo(args),
          # P8a: which m= sections this conference answers. The policy the codec lists
@@ -1427,11 +1473,23 @@ defmodule Kelix.Mod.Mcu do
          # TELEPHONE-EVENT entry out of a codec list: that list is ignored now.
          dtmf: dtmf_arg,
          video: video,
+         preferred_video_codec: preferred_video_codec,
          layout: layout,
          logo: logo,
          max_participants: max_participants,
          destroy_when_empty: destroy_when_empty
        }}
+    end
+  end
+
+  # `:default` when the argument is absent, so "not given" stays distinguishable from
+  # an explicit `preferred_video_codec=none` — the first takes the node's configured
+  # preference, the second refuses it for this conference.
+  defp preferred_video_codec(args) do
+    if Map.has_key?(args, "preferred_video_codec") do
+      Vocabulary.video_codec(Map.get(args, "preferred_video_codec"))
+    else
+      {:ok, :default}
     end
   end
 
@@ -1481,6 +1539,11 @@ defmodule Kelix.Mod.Mcu do
       )
     end
 
+    # §9.5: before a DID can be allocated and before a media server is swept. A
+    # restored room owns its DID again from this line on, and `recreate_stale/2` gives
+    # it a `conf_id` when its control channel comes up.
+    store = restore(config)
+
     Logger.info(
       module: __MODULE__,
       message:
@@ -1491,6 +1554,10 @@ defmodule Kelix.Mod.Mcu do
     {:ok,
      %{
        config: config,
+       # the definition file, or nil when there is none to write — either because no
+       # `conference_file` is configured or because the one configured could not be
+       # read, which must never be answered by overwriting it (§9.5)
+       store: store,
        module_name: Keyword.get(opts, :module_name, "mcu"),
        # round-robin cursor over the pool, for a create that names no mcu (§8.4).
        # Held here because creates are serialised through this process anyway.
@@ -1511,7 +1578,7 @@ defmodule Kelix.Mod.Mcu do
   # `from` is the creating instance: with `owner: :caller` its death reaps an empty
   # conference (§17.3), the same way a participant's scenario reaps its row (§9.3).
   def handle_call({:create, spec, owner}, {caller, _tag}, state) do
-    case do_create(state, spec) do
+    case do_create(state, spec, owner) do
       {:ok, conf, warning, state} ->
         {:reply, {:ok, conf, warning}, own_conference(state, conf.uid, owner, caller)}
 
@@ -1529,7 +1596,7 @@ defmodule Kelix.Mod.Mcu do
         {:reply, {:ok, conf, :existing, nil}, state}
 
       :error ->
-        case do_create(state, spec) do
+        case do_create(state, spec, owner) do
           {:ok, conf, warning, state} ->
             {:reply, {:ok, conf, :created, warning},
              own_conference(state, conf.uid, owner, caller)}
@@ -1600,8 +1667,12 @@ defmodule Kelix.Mod.Mcu do
     {:reply, do_record_stop(uid), state}
   end
 
+  # A pin is policy, not a runtime state (§8.3.8): it is replayed on a conference the
+  # media server had to have recreated, so a restart must not be what forgets it.
   def handle_call({:slot, uid, slot, holds}, _from, state) do
-    {:reply, do_slot(uid, slot, holds), state}
+    reply = do_slot(uid, slot, holds)
+    with {:ok, _} <- reply, {:ok, conf} <- conference(uid), do: persist(state, conf)
+    {:reply, reply, state}
   end
 
   # the configured defaults, for the phases that build on them
@@ -2219,6 +2290,102 @@ defmodule Kelix.Mod.Mcu do
     end
   end
 
+  # ── conference definitions on disk (§9.5) ────────────────────────────────────
+
+  # Read the definition file into the registry. Returns the path to write to, or `nil`
+  # when there is nothing to write: no `conference_file`, or one that could not be read
+  # — answering an unreadable file by overwriting it with an empty set is how an
+  # operator loses every room to a stray byte.
+  #
+  # Restored rows are `stale` with no `conf_id`, so `recreate_stale/2` is what gives a
+  # room its MCU-side existence, here as after a media server restart: one code path,
+  # and the §9.4 sweep already runs after it.
+  defp restore(%Config{conference_file: nil}), do: nil
+
+  defp restore(%Config{conference_file: path}) do
+    case Store.load(path) do
+      {:ok, confs} ->
+        restored = Enum.count(confs, &restore_conference/1)
+
+        Logger.info(
+          module: __MODULE__,
+          message:
+            "conference definitions: #{restored} restored from #{path}" <>
+              if(restored > 0, do: ", waiting for their media server", else: "")
+        )
+
+        path
+
+      {:error, reason} ->
+        Logger.error(
+          module: __MODULE__,
+          message:
+            "#{path} could not be read (#{inspect(reason)}): its conferences are NOT " <>
+              "restored and the file is left untouched — fix it and restart"
+        )
+
+        nil
+    end
+  end
+
+  # A hand-edited file can hold the same room twice. The second entry is refused rather
+  # than allowed to shadow the first: two rows on one DID would make which conference a
+  # call reaches depend on insertion order.
+  defp restore_conference(%Conference{} = conf) do
+    cond do
+      :ets.member(@conf_table, conf.uid) ->
+        Logger.error(
+          module: __MODULE__,
+          message: "conference #{conf.uid} appears twice in the definition file; second ignored"
+        )
+
+        false
+
+      :ets.member(@did_table, {conf.domain, conf.did}) ->
+        Logger.error(
+          module: __MODULE__,
+          message:
+            "conference #{conf.uid}: DID #{conf.did} on #{conf.domain} is already taken by " <>
+              "another definition; not restored"
+        )
+
+        false
+
+      true ->
+        :ets.insert(@conf_table, {conf.uid, conf})
+        :ets.insert(@did_table, {{conf.domain, conf.did}, conf.uid})
+        true
+    end
+  end
+
+  # Rewrite the whole file after a definition changed — the file *is* the set of
+  # persistent rooms, and a set written in one move cannot half-apply.
+  #
+  # Never fatal: a conference that exists is worth more than a file that is up to date,
+  # so a failed write is logged with its path and the command still succeeds. And an
+  # ad-hoc room changes nothing on disk, so a conference per call is not a write per
+  # call — nor is a mosaic the automatic layout moved on its own (`follow_auto_layout/1`),
+  # which is derived from the roster and recomputed as legs join.
+  defp persist(state, %Conference{persistent: false}), do: state
+  defp persist(%{store: nil} = state, _conf), do: state
+
+  defp persist(%{store: path} = state, _conf) do
+    case Store.save(path, Enum.filter(conferences(), & &1.persistent)) do
+      :ok ->
+        state
+
+      {:error, reason} ->
+        Logger.error(
+          module: __MODULE__,
+          message:
+            "could not write the conference definitions to #{path} (#{inspect(reason)}): " <>
+              "the conferences are live, but a restart will not bring them back"
+        )
+
+        state
+    end
+  end
+
   # `(i id, s name, i numPart)` per §3.2 — as an array, or as a struct on a server
   # that names its fields. Anything else is skipped rather than guessed at.
   defp decode_conference_row([id, tag | _rest]) when is_integer(id) and is_binary(tag),
@@ -2387,13 +2554,17 @@ defmodule Kelix.Mod.Mcu do
 
   # ── create ───────────────────────────────────────────────────────────────────
 
-  defp do_create(state, spec) do
+  defp do_create(state, spec, owner) do
     config = state.config
 
     with {:ok, mcu, state} <- pick_mcu(state, spec.mcu),
          {:ok, did, allocated?} <- pick_did(config, spec.domain, spec.did),
          {:ok, conf} <- build_conference(config, spec, mcu, did),
          {:ok, conf} <- create_on_mcu(config, mcu, conf) do
+      # §9.5: `owner: :none` is a room somebody declared — it goes to the definition
+      # file and comes back at the next start. An `owner: :caller` room was made for
+      # one call, and bringing it back every boot is a room nobody asked for.
+      conf = %Conference{conf | persistent: owner == :none}
       :ets.insert(@conf_table, {conf.uid, conf})
       :ets.insert(@did_table, {{conf.domain, conf.did}, conf.uid})
 
@@ -2410,7 +2581,7 @@ defmodule Kelix.Mod.Mcu do
       # of decision 2). A DID no dial rule matches is a conference nobody can dial,
       # so the drift is reported rather than left silent. The conference itself is
       # returned, so a script gets the object and a REST client its rendering.
-      {:ok, conf, dial_plan_warning(conf), state}
+      {:ok, conf, dial_plan_warning(conf), persist(state, conf)}
     end
   end
 
@@ -2508,7 +2679,7 @@ defmodule Kelix.Mod.Mcu do
              :size,
              :auto
            ]) do
-      layout = align_canvas(layout, video, spec.domain, spec.layout != nil)
+      {video, layout} = align_sizes(video, layout, sized_by(spec.video, spec.layout), spec.domain)
 
       {:ok,
        %Conference{
@@ -2526,6 +2697,11 @@ defmodule Kelix.Mod.Mcu do
          rtp_timeout_ms: config.rtp_timeout_ms,
          medias: spec_medias(spec) || config.medias,
          video: video,
+         preferred_video_codec:
+           case spec.preferred_video_codec do
+             :default -> config.preferred_video_codec
+             asked -> asked
+           end,
          layout: layout,
          max_participants: spec.max_participants || config.max_participants,
          destroy_when_empty:
@@ -2649,7 +2825,8 @@ defmodule Kelix.Mod.Mcu do
     %Conference{conf | slots: kept}
   end
 
-  # The mosaic canvas **is** the encoded picture, so its size is not a knob of its own.
+  # The mosaic canvas **is** the encoded picture, so `layout.size` and `video.size` are
+  # one value: whichever side names it, both end up on it.
   #
   # Composing at one geometry and encoding at another means scaling between the two, and
   # the media server does that without preserving the aspect ratio
@@ -2658,14 +2835,12 @@ defmodule Kelix.Mod.Mcu do
   # on a Linphone call whose 4:3 camera came out at 16:9 — see D1 of the media server's
   # `mosaic_aspect_ratio_plan.md`.
   #
-  # So the canvas follows `video.size`, and a caller that asked for another one is told
-  # rather than silently obeyed: the value it sent would have described the composition
-  # and not the picture, which is exactly the confusion that produced the bug.
-  defp align_canvas(layout, video, context, asked?) do
-    # On n'avertit que si l'appelant a demandé une toile dans CET appel : quand il
-    # redimensionne l'encodeur sans parler de la disposition, la toile suit sans bruit —
-    # c'est le comportement voulu, pas une demande ignorée.
-    if asked? and layout.size != video.size do
+  # Naming both, differently, is that same confusion spelled out, so the encoded size
+  # wins and the caller is told rather than silently obeyed.
+  defp align_sizes(video, layout, :layout, _context), do: {%{video | size: layout.size}, layout}
+
+  defp align_sizes(video, layout, :both, context) do
+    if layout.size != video.size do
       Logger.warning(
         module: __MODULE__,
         message:
@@ -2675,8 +2850,23 @@ defmodule Kelix.Mod.Mcu do
       )
     end
 
-    %{layout | size: video.size}
+    {video, %{layout | size: video.size}}
   end
+
+  defp align_sizes(video, layout, :video, _context), do: {video, %{layout | size: video.size}}
+
+  # Which side of a create/update named a size, read off the arguments as they arrived:
+  # after the merge over the current values there is no telling "asked for" from "kept".
+  # Nobody named one — the two are already equal — and the encoded size leads.
+  defp sized_by(video_arg, layout_arg) do
+    case {named_size?(video_arg), named_size?(layout_arg)} do
+      {true, true} -> :both
+      {false, true} -> :layout
+      _ -> :video
+    end
+  end
+
+  defp named_size?(arg), do: is_map(arg) and Map.has_key?(arg, "size")
 
   # The operator-facing name of a video size id (`6` -> `"hd720p"`), read off the same
   # vocabulary the CLI renders: a log that says `2` when the command said `vga` is a log
@@ -2714,7 +2904,8 @@ defmodule Kelix.Mod.Mcu do
          {:ok, mcu} <- update_target(conf),
          {:ok, conf, video} <- merged_video(state, conf, changes),
          {:ok, conf, layout} <- merged_layout(state, conf, changes),
-         layout = align_canvas(layout, video, conf.uid, Map.has_key?(changes, :layout)),
+         sized_by = sized_by(Map.get(changes, :video), Map.get(changes, :layout)),
+         {video, layout} = align_sizes(video, layout, sized_by, conf.uid),
          :ok <- push_mixer_changes(mcu, conf, changes, video, layout),
          :ok <- maybe_set_logo(state, mcu, conf, changes) do
       updated = %Conference{
@@ -2723,6 +2914,8 @@ defmodule Kelix.Mod.Mcu do
           vad: Map.get(changes, :vad, conf.vad),
           rate: Map.get(changes, :rate, conf.rate),
           video: video,
+          preferred_video_codec:
+            Map.get(changes, :preferred_video_codec, conf.preferred_video_codec),
           layout: layout,
           logo: Map.get(changes, :logo, conf.logo),
           max_participants: Map.get(changes, :max_participants, conf.max_participants),
@@ -2730,6 +2923,7 @@ defmodule Kelix.Mod.Mcu do
       }
 
       :ets.insert(@conf_table, {uid, updated})
+      persist(state, updated)
       changed = changes |> Map.keys() |> Enum.sort()
       Event.emit(:"conference.updated", uid, %{changed: changed})
 
@@ -2780,10 +2974,10 @@ defmodule Kelix.Mod.Mcu do
   defp push_mixer_changes(mcu, conf, changes, video, layout) do
     vad_rate? = Map.has_key?(changes, :vad) or Map.has_key?(changes, :rate)
 
-    # La toile suit la taille encodée (`align_canvas/3`), donc changer `video.size`
-    # déplace la mosaïque : il faut repousser la composition même quand l'appelant n'a
-    # pas touché à `layout`, ou la toile resterait à l'ancienne géométrie et le composite
-    # repartirait à l'échelle — le défaut que cet alignement supprime.
+    # La toile et la taille encodée sont une seule valeur (`align_sizes/4`), donc changer
+    # `video.size` déplace la mosaïque : il faut repousser la composition même quand
+    # l'appelant n'a pas touché à `layout`, ou la toile resterait à l'ancienne géométrie
+    # et le composite repartirait à l'échelle — le défaut que cet alignement supprime.
     compose? = Map.has_key?(changes, :layout) or video.size != conf.video.size
 
     with :ok <- maybe_update_conference(mcu, conf, changes, vad_rate?),
@@ -3186,6 +3380,7 @@ defmodule Kelix.Mod.Mcu do
     :ets.delete(@conf_table, conf.uid)
     # the sequence, the seen-ids and any surviving bucket (§20.6)
     Message.forget_conference(conf.uid)
+    persist(state, conf)
     disown_conference(state, conf.uid)
   end
 

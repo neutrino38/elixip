@@ -39,6 +39,21 @@ done
 # Only those forms. `kelictl <module> help` is rendered from the declaration of a
 # LOADED module, so it needs the live node like any other module command; an `eval`
 # would find no module loaded and no Kelix.Control running.
+
+# `kelictl complete <words…> <prefix>` is the shell hook of the completion script
+# (/usr/share/bash-completion/completions/kelictl), not an operator command. It is
+# the one form that tries BOTH: `rpc` first, because the modules' commands and the
+# object names it offers are the live node's, then `eval` when the node did not
+# answer, which still completes the static command tree on a box whose service is
+# down. The shell reads stdout as a word list and has no way to show an error, so
+# stderr is dropped and the exit status is always 0.
+if [ "${1:-}" = "complete" ]; then
+  EXPR="Kelix.Control.CLI.rpc_main([${ARGS}])"
+  "$DIR/kelixip" rpc "$EXPR" 2>/dev/null && exit 0
+  "$DIR/kelixip" eval "$EXPR" 2>/dev/null
+  exit 0
+fi
+
 MODE=rpc
 if [ $# -eq 0 ]; then MODE=eval; fi
 case "${1:-}" in

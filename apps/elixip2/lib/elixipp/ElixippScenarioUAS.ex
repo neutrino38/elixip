@@ -181,8 +181,8 @@ defmodule Elixip.ScenarioUAS do
 
   # Lifecycle notification from the instance finalizer; the :DOWN message already
   # frees the slot, so this only updates the outcome counters.
-  def handle_info({:scenario_exit, _name, outcome, reason}, state) do
-    Logger.debug("ScenarioUAS: scenario_exit #{inspect(outcome)} (#{inspect(reason)})")
+  def handle_info({:child_exit, _name, outcome, reason}, state) do
+    Logger.debug("ScenarioUAS: child_exit #{inspect(outcome)} (#{inspect(reason)})")
 
     state =
       case outcome do

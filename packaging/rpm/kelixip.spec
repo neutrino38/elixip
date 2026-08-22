@@ -1,4 +1,4 @@
-# kelixip.spec — Alma Linux 9 (design docs/design/kelixip_basic_design.md §12.1, §15 P10).
+# kelixip.spec — Alma Linux 9 (design docs/design/DESIGN-KELIXIP.md §12).
 #
 # The payload is PRE-BUILT: Source0 is the staged tarball produced by
 # packaging/stage.sh (an assembled `mix release` tree with embedded ERTS, plus the
@@ -27,8 +27,8 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.4.1
-Release:        1%{?dist}
+Version:        1.5.1
+Release:        2%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://www.ives.fr/
@@ -128,6 +128,11 @@ install -m 0644 sysconfig/kelixip %{buildroot}%{_sysconfdir}/sysconfig/%{name}
 
 install -D -m 0644 systemd/kelixip.service %{buildroot}%{_unitdir}/%{name}.service
 
+# Shell completion for kelictl. Inert without the bash-completion package, hence no
+# dependency on it: the file is data, loaded by basename when the operator types.
+install -D -m 0644 completion/kelictl \
+    %{buildroot}%{_datadir}/bash-completion/completions/kelictl
+
 # Mutable state (future usrloc persistence, operator-installed scripts) and the log
 # directory used when stdout is redirected. The unit also declares them, so a
 # tmpfs-only deployment still gets them.
@@ -175,6 +180,12 @@ fi
 %{_unitdir}/%{name}.service
 %{_sbindir}/kelictl
 %{_sbindir}/kelixip
+# The two completion directories are owned here as well as by the bash-completion
+# package, which we do not require: shared ownership is legal, an unowned directory
+# left behind by an erase is not.
+%dir %{_datadir}/bash-completion
+%dir %{_datadir}/bash-completion/completions
+%{_datadir}/bash-completion/completions/kelictl
 # The core owns script_dir itself, so mod-mcu can drop its scripts in without
 # either package claiming the directory twice.
 %dir %{_datadir}/%{name}
@@ -212,6 +223,45 @@ fi
 %{_datadir}/%{name}/mcu*.exs
 
 %changelog
+* Thu Aug 20 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.1-1
+- mcu: the conference DEFINITIONS survive a node restart, in one JSON file named by
+  [module.mcu] conference_file. Only rooms somebody declared are written; a restored
+  room is rebuilt by the same path that recovers one after a media-server restart.
+  A file that does not parse disables persistence rather than being overwritten.
+- mcu: a conference may name the video codec it states FIRST in its answers
+  (preferred_video_codec). A preference and not a codec list: it moves a payload type
+  the caller offered AND the media server accepted, and a miss is logged per leg
+  naming which of the two dropped it.
+- mcu: admit() wires the leg it admits — local identity, connection options and the
+  media server the conference is pinned to — so no script states that plumbing.
+- FIX: an offerless UPDATE (the RFC 4028 session-timer refresh) is answered with a
+  bare 200 on the leg it arrived on instead of ending the call. Clients refresh every
+  45 s, so this cost long calls.
+- FIX: a REGISTER refresh arriving on a new connection prolongs its registration
+  instead of opening a second registrar session.
+- FIX: WSS ping/pong keep-alive, so an idle WebSocket is not dropped in the middle.
+- [mediaserver] video_bitrate is one key per node for both media paths, replacing two
+  compiled-in defaults (800 and 1024 kb/s) no operator could reach. bitrate_feedback
+  narrows which RTCP bitrate-feedback dialects are answered; transport_cc negotiates
+  transport-wide congestion control, off by default.
+- BREAKING: conference video defaults change — video_fps 15 -> 30, video_bitrate
+  1024 -> 1500 kb/s. The mosaic canvas and the encoded size are held equal.
+- User-Agent is now Kelixip/1.5.1.
+* Tue Aug 18 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.0-1
+- Service building blocks: an FSL scenario can enter a reusable sub-machine on its
+  own legs and return from it with one event (sbb_fsm, sbb_return, use SIP.SBB).
+- SBB.Call ships the first two: call/1 establishes the outbound leg — provisionals,
+  serial hunt, the cancel race, the ACK — and bridge/1 relays the established call.
+  The reference scripts lost the states they copied: direct-call.exs 230 -> 124
+  lines, with auth 310 -> 199, with media 494 -> 310.
+- bridge/1 can keep the caller when the callee hangs up
+  (on_callee_hangup: :keep_caller), which is what turns a relay into a service.
+- BREAKING: sub_fsm is renamed spawn_fsm, and the inter-FSM messages are renamed
+  after their direction: {:parent_msg, ...}, {:child_msg, ...}, {:child_exit, ...}.
+  The macro keeps a deprecated alias; the MESSAGES do not, and a scenario still
+  matching the old shapes is warned about at compile time.
+- b2bua.exs is deleted: it was a copy of direct-call.exs.
+- User-Agent is now Kelixip/1.5.0.
 * Tue Aug 18 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.4.1-1
 - The scenario language is named the Finite State Language (FSL); DSL.md becomes
   FSL.md.

@@ -1,7 +1,15 @@
-defmodule Kelix.B2buaScriptTest do
+defmodule Kelix.DirectCallLookupTest do
   @moduledoc """
-  The registrar-driven B2BUA (`apps/kelixip/scripts/b2bua.exs`, design §3.2):
-  a call placed to whatever contact the location service says the AOR has.
+  The **lookup** half of the reference call script
+  (`apps/kelixip/scripts/direct-call.exs`): a call placed to whatever contact the
+  location service says the AOR has, and the serial hunt over the ones it holds.
+
+  `direct_call_script_test.exs` covers the other half — the CANCEL races and what
+  the script names each of `call/1`'s outcomes. These two suites were written
+  against two scripts that turned out to be the same script twice: this one
+  drove `b2bua.exs`, a copy of `direct-call.exs` down to the state names, which
+  was deleted rather than converted a second time. Its tests were the half of it
+  worth keeping.
 
   This is the seam the umbrella is arranged around — `elixip2` never references
   the module; the *script*, which runs where the module is loaded, does the
@@ -43,7 +51,9 @@ defmodule Kelix.B2buaScriptTest do
 
     %{
       scenario:
-        SIP.Scenario.Loader.load_file!(Path.expand("../../kelixip/scripts/b2bua.exs", __DIR__))
+        SIP.Scenario.Loader.load_file!(
+          Path.expand("../../kelixip/scripts/direct-call.exs", __DIR__)
+        )
     }
   end
 

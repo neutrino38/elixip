@@ -5,13 +5,15 @@ when they were consolidated into [`DESIGN-KELIXIP.md`](DESIGN-KELIXIP.md),
 which keeps only what is built and running.
 
 Related open designs, each with its own document:
-[`evolution-auth-db.md`](evolution-auth-db.md) (authenticating more than
-REGISTER, and a replaceable backend), [`kelixip-b2bua.md`](kelixip-b2bua.md)
-(`call()` / `queue()` above the B2BUA primitives),
+[`evolution-auth-db.md`](evolution-auth-db.md) (replaceable backend) is to be implemented — the
+authentication it would sit under is [`DESIGN-AUTH.md`](DESIGN-AUTH.md) — 
+[`kelixip-b2bua.md`](kelixip-b2bua.md)
+(`queue()` above the B2BUA primitives; `call()` shipped in 1.5.0),
 [`integration-fail2ban.md`](integration-fail2ban.md),
 [`kelixip_liveview.md`](kelixip_liveview.md) and
 [`liveview-adapter.md`](liveview-adapter.md) (a web admin console),
 [`mcu_server_evolutions.md`](mcu_server_evolutions.md) (media-server increments
+[`moteli-reboot.md`](mcu_server_evolutions.md) (replacing XML-RPC communication by an RabbitMQ message bus)
 for the conferencing module).
 
 ## Open items

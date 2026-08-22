@@ -211,7 +211,10 @@ defmodule SIP.Session.Media do
 
       module ->
         url = Keyword.get(cfg, :url, "sip:localhost:8080")
-        use_mediaserver(sip_ctx, resolve_ms_module(module), url)
+
+        sip_ctx
+        |> SIP.Context.appdata_set(:mediaservername, Keyword.get(cfg, :name))
+        |> use_mediaserver(resolve_ms_module(module), url)
     end
   end
 
@@ -245,6 +248,16 @@ defmodule SIP.Session.Media do
     sip_ctx =
       case rez do
         {:ok, pid} ->
+          # The monitor names the server by the name it is DECLARED under
+          # (`[mediaserver.pool.<name>]`), which the pool passes down in the
+          # per-call override. A media server named nowhere — the two-argument
+          # `media_connect(module, url)`, the global `:mediaserver` config of the
+          # standalone tool — is shown by its url: still an answer to "which one",
+          # and the only one there is.
+          SIP.Scenario.Monitor.note_mediaserver(
+            SIP.Context.appdata_get(sip_ctx, :mediaservername) || url
+          )
+
           sip_ctx
           |> SIP.Context.set(:mediaserverpid, pid)
           |> SIP.Context.set(:lasterr, :ok)
@@ -362,8 +375,21 @@ defmodule SIP.Session.Media do
     medias = Keyword.get(opts, :media, :audio_video)
     {sip_ctx, cnx} = ensure_peer_connection(sip_ctx, leg_of(opts), webrtc_support, medias, opts)
 
-    {sip_ctx, apply(sip_ctx.mediaservermodule, :set_remote_offer, [cnx, remote_offer])}
+    {sip_ctx,
+     note_negotiated(apply(sip_ctx.mediaservermodule, :set_remote_offer, [cnx, remote_offer]))}
   end
+
+  # The monitor's `medias` column, from the one place each side of a negotiation
+  # concludes: the answer we just built (here) and the answer we were just given
+  # (`process_sdp_answer/3`). Reading it off the answer is what makes it true of
+  # every adapter — Mockup, Mendooze and the MCU all answer with an SDP, and none
+  # of them is asked what it put in it.
+  defp note_negotiated({:ok, answer} = rez) when is_binary(answer) do
+    SIP.Scenario.Monitor.note_medias(SIP.Msg.Ops.media_kinds(answer))
+    rez
+  end
+
+  defp note_negotiated(rez), do: rez
 
   # Return {ctx, cnx}: reuse the stored peer connection of `leg`, creating one
   # (and stashing its handle) on first use. Shared by get_sdp_offer/4 (UAC) and
@@ -432,6 +458,7 @@ defmodule SIP.Session.Media do
       when is_binary(answer) and is_list(opts) do
     cnx = peer_connection!(sip_ctx, leg_of(opts))
     rez = apply(sip_ctx.mediaservermodule, :set_remote_answer, [cnx, answer])
+    if rez == :ok, do: SIP.Scenario.Monitor.note_medias(SIP.Msg.Ops.media_kinds(answer))
     SIP.Context.set(sip_ctx, :lasterr, rez)
   end
 

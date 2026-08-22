@@ -24,7 +24,7 @@ on Ubuntu/Debian, the same file the systemd unit reads.
 | Command | R/W | Does |
 |---|---|---|
 | `kelictl status` | R | Uptime, counters, listeners, media pool, node state |
-| `kelictl monitor` | R | Scenarios in progress: id, domain, function, **script**, account, FSM state/event/command (reuses the `--monitor` view) |
+| `kelictl monitor` | R | Scenarios in progress: id, domain, function, **script**, account, FSM state/event/command, negotiated medias, media server, outbound destination (reuses the `--monitor` view) |
 | `kelictl registration list [domain]` | R | Registrations, one list per domain — [registrar](modules/registrar.md#control-commands) |
 | `kelictl registration show <domain> <aor>` | R | One AOR and its bindings, in detail — *idem* |
 | `kelictl registration remove <domain> <aor> [contact]` | W | Drop a registration — *idem* |
@@ -68,6 +68,38 @@ operator usually reaches for them. A module's own help (`kelictl <module> help`)
 the exception by nature: it is rendered from the declaration of a module that has to
 be loaded to have one, so it needs the live node like any other module command.
 
+### Shell completion
+
+The package installs a bash completion for `kelictl` in
+`/usr/share/bash-completion/completions/kelictl`. It is picked up in any new shell
+where the `bash-completion` package is present, and completes:
+
+```console
+$ kelictl reg<TAB>                          registration
+$ kelictl registration <TAB>                help  list  remove  show
+$ kelictl registration show <TAB>           the served domains
+$ kelictl registration show acme.tld <TAB>  the AORs registered in acme.tld
+$ kelictl mcu <TAB>                         the commands the mcu module declares
+$ kelictl mcu conference.create <TAB>       domain=  name=  layout=  …
+$ kelictl stop <TAB>                        the ids of the scenarios in progress
+```
+
+The script holds **no** command name: it calls `kelictl complete <words…>`, which
+answers from the same command tree the CLI dispatches, plus what only the live node
+knows — the commands each loaded module declares, the served domains, the pool
+entries, the AORs, the scripts. A module gains a command and its completion follows,
+with nothing to install.
+
+Each `TAB` costs one short-lived VM, about half a second on a live node. Nothing is
+cached: the first word is the only answer worth caching, and its module names are
+exactly the half that goes stale when a module is loaded or reloaded.
+
+When the node does not answer, completion falls back to the static half of the tree
+— the core commands and their sub-commands — so it still helps on a box whose
+service is down. And right after a **package upgrade**, before `systemctl restart
+kelixip`, completion answers nothing at all: `kelictl` runs the CLI *inside* the
+live node, which is still running the previous release.
+
 ### Examples
 
 ```console
@@ -101,9 +133,9 @@ $ kelictl domain show ghost.example.org
 no such domain
 
 $ kelictl monitor
-id  domain       function   script         account       state       event     command
-3   example.com  calls      play.exs       +33970260233  in_call     ACK       media_play
-4   example.com  registrar  registrar.exs  alice         registered  REGISTER  reply 200
+id  domain       function   script         account       state       event     command     medias  mediaserver  outbound
+3   example.com  calls      play.exs       +33970260233  in_call     ACK       media_play  AV      mcu1         sip:bob@10.0.0.5:5062
+4   example.com  registrar  registrar.exs  alice         registered  REGISTER  reply 200   n/a     none         n/a
 
 $ kelictl mediaserver list
 server  adapter   url                  enabled  health  modules
@@ -137,6 +169,16 @@ the conference it joined), and until it does, the framework shows the identity t
 inbound request asserts — its digest username, else the user part of
 `P-Asserted-Identity`, else the one in `From`. A `-` means the column has no value
 yet, not that it is unsupported.
+
+The last three columns say what **shape** the call is. `medias` is what the two ends
+settled on, read off the SDP answer: `A`, `AV`, `AVT`, any combination of the three,
+`none` when the answer declined every media. `mediaserver` is the server carrying
+them, by the name it is declared under in `[mediaserver.pool.<name>]` — the same word
+`kelictl mediaserver list` prints. `outbound` is where a B2BUA call was placed: the
+target being dialled, then the one that answered; a serial hunt walks several devices
+and the column names the one the call is about, not the list. These three read `n/a`
+or `none` rather than `-`: a registrar negotiates no media, connects to no media
+server and dials nobody, and that is an answer rather than a missing value.
 
 The **`registration`** commands are documented with the module whose store they
 read — how an AOR is addressed, what a binding shows, and the matching REST routes:

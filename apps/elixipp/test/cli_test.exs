@@ -7,6 +7,23 @@ defmodule Elixipp.CLITest do
 
   alias Elixipp.CLI
 
+  describe "the state cell" do
+    # A service building block reports `MyApp.Cancelling/waiting`, which does not
+    # fit the 18-character column. What must survive is the state name.
+    test "a qualified state that overflows loses its head, not its tail" do
+      assert CLI.fit_state("MyApp.Cancelling/waiting", 18) == "…ancelling/waiting"
+    end
+
+    test "a qualified state that fits is padded like any other cell" do
+      assert CLI.fit_state("SBB.Call/ringing", 18) == "SBB.Call/ringing  "
+    end
+
+    # An ordinary state name has no head to spare: it keeps the existing rule.
+    test "an unqualified state still truncates from the tail" do
+      assert CLI.fit_state("waiting_for_the_far_end", 18) == "waiting_for_the_f…"
+    end
+  end
+
   describe "--log-sequence" do
     test "rejects --log-sequence with several simultaneous calls" do
       assert {:error, _} = CLI.validate_log_sequence([log_sequence: true], 2)

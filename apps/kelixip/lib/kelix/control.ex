@@ -61,9 +61,11 @@ defmodule Kelix.Control do
     * `SIP.Scenario.Monitor` — **where each FSM is**: current `state`, the `event`
       that got it there, the last `command` it issued, and the `account` it serves.
       Reading the FSM state is the whole point of an FSL-driven server; without it
-      the formalism is invisible from the outside.
+      the formalism is invisible from the outside. It also carries what SHAPE the
+      call is: the `medias` it negotiated, the `mediaserver` carrying them and the
+      `outbound` destination it was placed to.
 
-  Rows the pool does not know about (a `sub_fsm` child, keyed `{id, name}`) are not
+  Rows the pool does not know about (a `spawn_fsm` child, keyed `{id, name}`) are not
   surfaced: the server spawns none today (`:uas_register` is not supported as a
   sub-FSM). A missing monitor row degrades to empty FSM columns, never an error.
   """
@@ -76,12 +78,35 @@ defmodule Kelix.Control do
     end
   end
 
-  @empty_fsm %{scenario: "", state: "", event: "", command: "", account: ""}
+  # The three call-shape fields default to a value and not to a blank: a scenario
+  # that negotiated no media, connects to no media server and dials nobody is the
+  # ordinary case, and "n/a" says so where an empty cell reads as "not measured".
+  # Same defaults as `SIP.Scenario.Monitor`, for the row it has nothing on.
+  @empty_fsm %{
+    scenario: "",
+    state: "",
+    event: "",
+    command: "",
+    account: "",
+    medias: "n/a",
+    mediaserver: "none",
+    outbound: "n/a"
+  }
+
+  @fsm_keys [
+    :scenario,
+    :state,
+    :event,
+    :command,
+    :account,
+    :medias,
+    :mediaserver,
+    :outbound
+  ]
 
   defp fsm_fields(nil), do: @empty_fsm
 
-  defp fsm_fields(entry),
-    do: Map.merge(@empty_fsm, Map.take(entry, [:scenario, :state, :event, :command, :account]))
+  defp fsm_fields(entry), do: Map.merge(@empty_fsm, Map.take(entry, @fsm_keys))
 
   @doc """
   Every served domain and its registrations (`kelictl registration list`), in
@@ -455,6 +480,39 @@ defmodule Kelix.Control do
       nil -> {:error, :invalid_level}
       lvl -> Kelix.Config.set_level(lvl)
     end
+  end
+
+  @doc """
+  The level names `set_log_level/1` accepts, sorted.
+
+  Read by `kelictl`'s shell completion: the vocabulary of a value belongs to
+  whoever validates it, and a second list in the CLI would be free to disagree
+  with this one.
+  """
+  @spec log_levels() :: [String.t()]
+  def log_levels(), do: @log_levels |> Map.keys() |> Enum.sort()
+
+  @doc """
+  Every scenario script this node can be asked to reload, by name, sorted.
+
+  The vocabulary of `kelictl reload-script <name…>`, and what its shell completion
+  offers. The served configuration refers to some (`Kelix.Domains.script_refs/1` —
+  the one place that enumerates them) and the registry holds others; the two sets
+  overlap without either containing the other. A `domains.toml` reload only
+  *validates* the scripts it names — the registry holds one from the first call that
+  routes to it — so a configured script that has never been called is reloadable and
+  absent from the registry, and a script whose rule was just removed is still loaded
+  and still reloadable.
+
+  Names only: which module a script compiled to, and whether the file has moved
+  since, are `domain show`'s business.
+  """
+  @spec script_names() :: [String.t()]
+  def script_names() do
+    configured =
+      safe(fn -> Enum.map(Kelix.Domains.script_refs(current_domains()), &elem(&1, 0)) end, [])
+
+    (configured ++ Map.keys(loaded_scripts())) |> Enum.uniq() |> Enum.sort()
   end
 
   # ── drain ─────────────────────────────────────────────────────────────────────

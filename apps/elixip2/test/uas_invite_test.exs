@@ -99,6 +99,37 @@ defmodule UASInviteFixture.Challenge do
   end
 end
 
+# The other form of the same verb: the application composed the params, because
+# `stale` and the algorithm are the authentication backend's to decide and
+# neither survives being re-derived by the dialog layer.
+defmodule UASInviteFixture.ChallengeParams do
+  use SIP.Scenario
+  use SIP.Session.CallUAS
+  uas(:invite)
+  config(domain: "example.com")
+
+  state initial_state do
+    on_events do
+      {:INVITE, _req, _t, _dlg} ->
+        challenge_invite(
+          %{
+            "realm" => "example.com",
+            "nonce" => "abc123",
+            "algorithm" => "SHA-256",
+            "qop" => "auth",
+            "stale" => "true",
+            :authproc => "Digest"
+          },
+          407
+        )
+
+        scenario_success("challenged with params")
+    after
+      5_000 -> scenario_failure("no INVITE")
+    end
+  end
+end
+
 # Phase 3: connect the (config-driven, mockup) media server, then answer the
 # inbound INVITE with a media-negotiated 200 OK + SDP. reply_invite_with_sdp is
 # available through SIP.Scenario (-> CallUAC), like reply_invite.
@@ -163,6 +194,7 @@ defmodule TestCallUAS do
     "busy" => UASInviteFixture.Busy,
     "redirect" => UASInviteFixture.Redirect,
     "challenge" => UASInviteFixture.Challenge,
+    "challengeparams" => UASInviteFixture.ChallengeParams,
     "answersdp" => UASInviteFixture.AnswerSdp,
     "answersdpack" => UASInviteFixture.AnswerSdpAwaitAck
   }
@@ -265,7 +297,7 @@ defmodule SIP.Test.UASInvite do
 
     assert SIP.Context.appdata_get(ctx, :last_uas_req) == req
     assert SIP.Context.appdata_get(ctx, :last_uas_req_tid) == self()
-    # A sub_fsm child is spawned before the dialog exists: the event is its only
+    # A spawn_fsm child is spawned before the dialog exists: the event is its only
     # way to learn the dialog pid the reply macros must target.
     assert ctx.dialogpid == dlg
   end
@@ -431,6 +463,30 @@ defmodule SIP.Test.UASInvite do
     assert_raise RuntimeError, ~r/no SDP offer/, fn ->
       SIP.Session.CallUAS.do_reply_invite_with_sdp(ctx, 200, [])
     end
+  end
+
+  # An RFC 4028 session-timer refresh is an UPDATE with no body, and it arrives in
+  # the middle of every long call — a JsSIP client sends one every 45 s. RFC 3311
+  # §5.1 answers it with a bare 2xx: there is nothing to negotiate, and the media
+  # server must not be asked. Raising here killed the scenario instance, and with it
+  # a call that was working (dev71, 2026-08-17: two calls, both dead at 45 s).
+  test "do_reply_invite_with_sdp answers an offerless UPDATE with a bare 200" do
+    {:ok, dlg} = StubDialog.start_link(self())
+
+    ctx = %SIP.Context{
+      dialogpid: dlg,
+      username: "bob",
+      mediaservermodule: FailingMedia,
+      mediaserverpid: self(),
+      appdata: %{last_uas_req: %{method: :UPDATE, body: []}}
+    }
+
+    ctx = SIP.Session.CallUAS.do_reply_invite_with_sdp(ctx, 200, media: :tc)
+    assert ctx.lasterr == :ok
+
+    assert_received {:stub_reply, 200, upd}
+    assert upd[:body] == nil
+    assert %SIP.Uri{userpart: "bob"} = upd[:contact]
   end
 
   # ── Unit tests: reply_invite_with_body ───────────────────────────────────────
@@ -625,6 +681,23 @@ defmodule SIP.Test.UASInvite do
   test "challenge_invite(401) reaches the wire" do
     invite = inject_invite("challenge")
     assert_receive {:sip_mockup, {:response_sent, 401, _}}, 2_000
+    ack_final(invite)
+  end
+
+  # The params the application composed must reach the wire verbatim: `stale`
+  # is what lets a client whose nonce merely aged replay without asking its user
+  # for a password again, and the algorithm names the hash the stored secret was
+  # made with. Re-deriving either here would lose both.
+  test "challenge_invite(params, 407) carries them into Proxy-Authenticate" do
+    invite = inject_invite("challengeparams")
+    assert_receive {:sip_mockup, {:response_sent, 407, resp}}, 2_000
+
+    params = Map.get(resp, :proxyauthenticate)
+    assert params["nonce"] == "abc123"
+    assert params["stale"] == "true"
+    assert params["algorithm"] == "SHA-256"
+    assert params["realm"] == "example.com"
+
     ack_final(invite)
   end
 

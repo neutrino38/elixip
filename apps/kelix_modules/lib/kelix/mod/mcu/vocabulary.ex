@@ -31,9 +31,22 @@ defmodule Kelix.Mod.Mcu.Vocabulary do
   The wire form keeps working and stays **literal** — `layout='{"comp":1}'` sets
   the mosaic and nothing else — so a REST client's `PUT` body means exactly what it
   says. Names are accepted there too (`layout='{"comp":"2x2"}'`).
+
+  ## The short `video` form (§8.3.7)
+
+  Same grammar, on the encoder profile: tokens separated by spaces or commas, in any
+  order, and one shape per field so the four vocabularies stay disjoint.
+
+      video='vga 30fps 1024k'   video=hd720p   video=25fps,intra=300
+
+  A size is a name (the `layout` vocabulary), a frame rate is `<n>fps`, a bitrate is
+  `<n>k` in kbit/s, and an intra period is `intra=<n>` — a frame count nobody writes
+  a unit for. Only what is named changes, and the wire form stays literal here too
+  (`video='{"fps":30}'`).
   """
 
   alias Kelix.Mod.Mcu.Args
+  alias MediaServer.SdpTools, as: Sdp
 
   # §3.6, in wire order: the id is what `SetCompositionType` takes, the name is what
   # an operator says.
@@ -223,9 +236,13 @@ defmodule Kelix.Mod.Mcu.Vocabulary do
   def layout(nil, _key), do: {:ok, nil}
 
   def layout(value, key) when is_binary(value) do
-    case String.split(value, ~r/[\s,]+/, trim: true) do
-      [] -> {:error, "#{key}: nothing given — #{layout_syntax()}"}
-      tokens -> from_tokens(tokens, key)
+    case tokens(value) do
+      [] ->
+        {:error, "#{key}: nothing given — #{layout_syntax()}"}
+
+      tokens ->
+        with {:ok, fields} <- from_tokens(tokens, key, &classify_layout/1, layout_vocabulary()),
+             do: {:ok, imply_manual(fields)}
     end
   end
 
@@ -249,13 +266,24 @@ defmodule Kelix.Mod.Mcu.Vocabulary do
 
   @doc """
   Decode a `video` argument: the encoder profile, whose `size` shares the size
-  vocabulary. The other fields are plain integers and stay for `Args.sub_map/4` to
-  check — this pass only turns names into ids.
+  vocabulary.
+
+  Accepts the short form (`"vga 30fps 1024k"`) and the wire form (`%{"fps" => 30}`,
+  atom keys included), like `layout/2`. In the wire form the other fields are plain
+  integers and stay for `Args.sub_map/4` to check — that pass only turns names into
+  ids.
   """
   @spec video(term, String.t()) :: {:ok, map | nil} | {:error, String.t()}
   def video(value, key \\ "video")
 
   def video(nil, _key), do: {:ok, nil}
+
+  def video(value, key) when is_binary(value) do
+    case tokens(value) do
+      [] -> {:error, "#{key}: nothing given — #{video_syntax()}"}
+      tokens -> from_tokens(tokens, key, &classify_video/1, video_vocabulary())
+    end
+  end
 
   def video(value, key) when is_map(value) do
     map = Args.stringify_keys(value)
@@ -265,8 +293,56 @@ defmodule Kelix.Mod.Mcu.Vocabulary do
     end
   end
 
+  def video(value, key) when is_integer(value) do
+    {:error,
+     ~s(#{key}: #{value} alone is ambiguous — a size, a frame rate and a bitrate are all ) <>
+       ~s(numbered; write #{key}='vga 30fps 1024k' or #{key}='{"size":#{value}}')}
+  end
+
   # not a table: `Args.sub_map/4` owns that message, and says it about the same field
   def video(value, _key), do: {:ok, value}
+
+  @doc """
+  Decode a `preferred_video_codec` value: the codec name an answer puts first, or
+  `nil` for no preference.
+
+  Case-insensitive, and `"none"` (equivalently `"any"`) is what **clears** a
+  preference — an update merges the fields it is given, so removing one needs a value
+  to say it with.
+
+  The names come from the framework's codec tables (`MediaServer.SdpTools.codec_names/1`)
+  and the canonical spelling is theirs: a list here would be the second reading this
+  module exists to prevent. Recognising a name is **not** claiming the media server
+  carries it — that stays the server's answer to give (§16.3), and a preference it does
+  not accept is logged and dropped at answer time.
+  """
+  @spec video_codec(term, String.t()) :: {:ok, String.t() | nil} | {:error, String.t()}
+  def video_codec(value, key \\ "preferred_video_codec")
+
+  def video_codec(nil, _key), do: {:ok, nil}
+
+  def video_codec(value, key) when is_binary(value) do
+    case value |> String.trim() |> String.downcase() do
+      name when name in ["", "none", "any"] ->
+        {:ok, nil}
+
+      name ->
+        case Enum.find(video_codec_names(), &(String.downcase(&1) == name)) do
+          nil -> {:error, ~s(#{key}: unknown "#{value}" — #{video_codec_vocabulary()})}
+          canonical -> {:ok, canonical}
+        end
+    end
+  end
+
+  def video_codec(value, key),
+    do: {:error, ~s(#{key} must be a codec name like "h264", or "none", got #{inspect(value)})}
+
+  @doc "The video codec names an operator may write, as the codec tables spell them."
+  @spec video_codec_names() :: [String.t()]
+  def video_codec_names(), do: Sdp.codec_names(:video)
+
+  defp video_codec_vocabulary(),
+    do: "one of " <> Enum.join(video_codec_names(), " ") <> " (case-insensitive), or none"
 
   defp resolve_field(map, name, resolver) do
     case Map.fetch(map, name) do
@@ -275,12 +351,12 @@ defmodule Kelix.Mod.Mcu.Vocabulary do
     end
   end
 
-  defp from_tokens(tokens, key) do
+  defp tokens(value), do: String.split(value, ~r/[\s,]+/, trim: true)
+
+  defp from_tokens(tokens, key, classify, vocabulary) do
     tokens
     |> Enum.reduce_while({:ok, {%{}, %{}}}, fn token, {:ok, {fields, seen}} ->
-      name = String.downcase(token)
-
-      case classify(name) do
+      case classify.(String.downcase(token)) do
         {field, value} ->
           case Map.fetch(seen, field) do
             {:ok, first} ->
@@ -295,16 +371,37 @@ defmodule Kelix.Mod.Mcu.Vocabulary do
         :unknown ->
           # the whole vocabulary, at the moment it is needed: an operator who typed
           # `2+2` wants the mosaic list, not a pointer to the online help
-          {:halt, {:error, ~s(#{key}: unknown "#{token}" — #{layout_vocabulary()})}}
+          {:halt, {:error, ~s(#{key}: unknown "#{token}" — #{vocabulary})}}
       end
     end)
     |> case do
-      {:ok, {fields, _seen}} -> {:ok, imply_manual(fields)}
+      {:ok, {fields, _seen}} -> {:ok, fields}
       {:error, _message} = err -> err
     end
   end
 
-  defp classify(name) do
+  @fps_token ~r/^(\d+)fps$/
+  @bitrate_token ~r/^(\d+)k(?:bps)?$/
+  @intra_token ~r/^intra=(\d+)$/
+
+  defp classify_video(name) do
+    cond do
+      id = find_id(@sizes, unalias(name)) -> {"size", id}
+      n = number(@fps_token, name) -> {"fps", n}
+      n = number(@bitrate_token, name) -> {"bitrate", n}
+      n = number(@intra_token, name) -> {"intra_period", n}
+      true -> :unknown
+    end
+  end
+
+  defp number(regex, name) do
+    case Regex.run(regex, name) do
+      [_token, digits] -> String.to_integer(digits)
+      nil -> nil
+    end
+  end
+
+  defp classify_layout(name) do
     name = unalias(name)
 
     cond do
@@ -325,6 +422,9 @@ defmodule Kelix.Mod.Mcu.Vocabulary do
   defp group("comp"), do: "mosaic"
   defp group("size"), do: "size"
   defp group("auto"), do: "mode"
+  defp group("fps"), do: "frame rate"
+  defp group("bitrate"), do: "bitrate"
+  defp group("intra_period"), do: "intra period"
 
   # Why the short form implies what the wire form does not: `layout=2x2` on a
   # conference in `auto` would be overwritten by `follow_auto_layout/1` the next time
@@ -443,9 +543,24 @@ defmodule Kelix.Mod.Mcu.Vocabulary do
   @spec video_help() :: [String.t()]
   def video_help() do
     [
-      ~s(encoder profile: video='{"size":"vga","fps":25,"bitrate":1024,"intra_period":300}'),
-      "size: " <> Enum.join(sizes(), " ") <> "  (or its wire id)",
+      "encoder profile: " <> video_syntax(),
+      "size:   " <> Enum.join(sizes(), " ") <> "  (720p = hd720p)",
+      "only what is named changes — video=30fps keeps the size and the bitrate",
+      "naming a size moves the mosaic canvas with it: the canvas IS the encoded picture",
+      ~s(e.g. video='vga 30fps 1024k' | video=hd720p | video=25fps,intra=300),
+      ~s(the wire form is still accepted, literally: video='{"size":"vga","fps":30}'),
       "applies to the participants that join next, not to the ones already encoding"
+    ]
+  end
+
+  @doc "The `preferred_video_codec` argument's help."
+  @spec video_codec_help() :: [String.t()]
+  def video_codec_help() do
+    [
+      "the video codec the answer states first: " <> video_codec_vocabulary(),
+      "honoured only when the caller offered it and the media server accepted it",
+      "it reorders the answer, it never adds a codec — and it is what the mixer encodes",
+      "none = no preference: the caller's own order decides (RFC 3264 §6.1)"
     ]
   end
 
@@ -504,5 +619,14 @@ defmodule Kelix.Mod.Mcu.Vocabulary do
     "mosaics: " <>
       Enum.join(mosaics(), " ") <>
       "; sizes: " <> Enum.join(sizes(), " ") <> "; modes: auto manual"
+  end
+
+  defp video_syntax(),
+    do: "a size, <n>fps, <n>k and/or intra=<n>, in any order, spaces or commas"
+
+  defp video_vocabulary() do
+    "sizes: " <>
+      Enum.join(sizes(), " ") <>
+      "; frame rate: <n>fps; bitrate: <n>k (kbit/s); intra period: intra=<n>"
   end
 end

@@ -92,8 +92,11 @@ defmodule MediaServer.Mendooze.Conn do
   @default_video_codecs ["AV1", "H264", "VP8"]
   @default_text_codecs ["T140", "T140RED"]
 
-  # Receive bandwidth advertised as b=AS: on the video media (kb/s)
-  @default_video_bandwidth_kbps 800
+  # Video bitrate (kb/s): what a transcoded leg is encoded at, and the bandwidth
+  # advertised as b=AS: on the video media. Same value as the mcu module's
+  # `video_bitrate`, both defaulting to `[mediaserver] video_bitrate` on a kelixip
+  # node — one bitrate per node, whichever media path carries the call.
+  @default_video_bandwidth_kbps 1500
 
   # telephone-event's Medooze codec constant: never a codec a leg is said to
   # "carry" — it is excluded from `peer_codecs/1`, so the cross-leg selection can
@@ -115,14 +118,40 @@ defmodule MediaServer.Mendooze.Conn do
   # must be confirmed in the answer, not dropped. NOT `useNACK`: PLI is a
   # keyframe request, not a retransmission request, and switching the NACK/rtx
   # machinery on for it would enable feedback the peer never asked for.
-  # `goog-remb` stays absent (announcing congestion feedback the server never
-  # sends invites the peer to wait for it).
+  #
+  # `goog-remb` (draft-alvestrand-rmcat-remb-03) says the same thing as
+  # `ccm tmmbr` in the browsers' dialect, and it now has its own server-side
+  # mode (rate-control lot 2). It matters because Chrome and Firefox offer
+  # `goog-remb` and never `ccm tmmbr`: without it, no congestion feedback ever
+  # left towards a browser. Neither dialect is emitted un-negotiated — the
+  # property posted here is what turns it on, and TMMBR wins when a peer asks
+  # for both.
+  #
+  # `transport-cc` is deliberately ABSENT: the attribute alone switches nothing on. Its
+  # server-side property is keyed by the RTP header extension's URI and valued with the
+  # negotiated extmap id (`transport_cc_props/1`), so it cannot ride this
+  # attribute-to-switch table. It is still confirmed in the answer
+  # (`answered_transport_cc_fb/1`).
   @supported_rtcp_fb %{
     "nack" => "useNACK",
     "nack pli" => "useRtcpFIR",
     "ccm fir" => "useRtcpFIR",
-    "ccm tmmbr" => "tmmbr"
+    "ccm tmmbr" => "tmmbr",
+    "goog-remb" => "remb"
   }
+
+  # The two dialects that carry a bitrate target back to the sender, and the name
+  # `[mediaserver] bitrate_feedback` allows each by. Narrowing that list drops the
+  # others from the answer, which is what an OPEN-LOOP measurement needs: with
+  # nothing leaving towards the peer, the source keeps emitting at its own rate and
+  # the incoming bitrate stops depending on our estimate. It is the only
+  # configuration in which the server's recovery time measures its own estimator
+  # rather than the loop it forms with the browser's congestion control — five
+  # closed-loop sessions (mediaserver rate_control_plan.md, lot 3) could not tell
+  # the two apart. Naming one dialect isolates one path; naming none leaves the call
+  # without any congestion control from us, so production wants both.
+  @rate_control_rtcp_fb %{"goog-remb" => :remb, "ccm tmmbr" => :tmmbr}
+  @default_bitrate_feedback [:remb, :tmmbr]
 
   # Text-over-WebSocket codecs proposed to the media server: T.140 and its RFC
   # 4103 redundancy. The rtpMap is what switches redundancy on server-side
@@ -280,6 +309,7 @@ defmodule MediaServer.Mendooze.Conn do
       sess_tag: state.sess_tag,
       event_sink: state.event_sink,
       opts: state.opts,
+      prefer: state.prefer,
       # this leg
       leg: name,
       endpoint_id: endpoint_id,
@@ -303,6 +333,12 @@ defmodule MediaServer.Mendooze.Conn do
       # the tail is what makes the cross-leg selection possible at all, because
       # "is there a codec BOTH peers support" cannot be answered from two heads.
       peer_codecs: %{},
+      # Le mode de mise en paquets H.264 que ce pair sait RECEVOIR, par média
+      # (`Sdp.h264_receive_mode/1`, absence = 0 au sens de la RFC 6184 §8.1).
+      # Lu par la sélection croisée : deux pattes en H.264 ne se relaient que si
+      # elles s'accordent dessus, sinon ce qui sort de l'une est indépaquetisable
+      # par l'autre.
+      peer_h264_mode: %{},
       # The medias this peer explicitly turned down — a port-0 m= in its answer
       # (RFC 3264 §6) or in its re-offer (§5.1). Distinct from a media that is
       # merely not negotiated YET: a decline is the peer's definite verdict, and
@@ -399,6 +435,11 @@ defmodule MediaServer.Mendooze.Conn do
       event_sink: event_sink,
       base_url: base_url,
       opts: opts,
+      # The scenario's codec ranking for this connection's answers, per media
+      # (`prefer_codecs:` on create_peer_connection), resolved to codec CODES
+      # once, here — so a typo in a codec name fails the creation, not an
+      # answer mid-call. Empty map when the scenario stated nothing.
+      prefer: scenario_preference(opts),
       sess_tag: sess_tag,
       sess_id: nil,
       # The endpoint(s) this session holds — see new_leg/4. `medias` and
@@ -484,6 +525,28 @@ defmodule MediaServer.Mendooze.Conn do
       nil -> %{}
       policy when is_map(policy) -> policy
       kw when is_list(kw) -> Map.new(kw)
+    end
+  end
+
+  # `prefer_codecs:` as the connection options state it — the scenario's codec
+  # ranking for this connection's answers, per media, names as the Sdp codec
+  # tables spell them: `[video: ["H264", "VP8"], audio: ["OPUS"]]` (keyword or
+  # map). Resolved to codec codes here so that an unknown media or codec name
+  # raises at create_peer_connection time (`Sdp.codec_codes/2` raises), the
+  # moment the scenario author is looking.
+  defp scenario_preference(opts) do
+    case Keyword.get(opts, :prefer_codecs) do
+      nil ->
+        %{}
+
+      prefs when is_list(prefs) or is_map(prefs) ->
+        for {media, names} <- prefs, into: %{} do
+          if media not in [:audio, :video, :text] do
+            raise ArgumentError, "prefer_codecs: unknown media #{inspect(media)}"
+          end
+
+          {media, Sdp.codec_codes(media, names)}
+        end
     end
   end
 
@@ -875,12 +938,66 @@ defmodule MediaServer.Mendooze.Conn do
       {[a | _], [b | _]} ->
         mode = Map.get(policy, media, :avoid)
 
-        case {mode, Enum.find(l, &(&1 in lp))} do
+        case {mode, Enum.find(l, &relayable?(&1, la, lb, media))} do
           {:force, _} -> {:ok, a, b}
           {_, nil} when mode == :forbid -> {:error, {:no_common_codec, media}}
           {_, nil} -> {:ok, a, b}
           {_, common} -> {:ok, common, common}
         end
+    end
+  end
+
+  # Is this codec one the two legs can RELAY to each other — not merely one they
+  # both name? For every codec but H.264 the two questions are the same. H.264's
+  # payload-type identity includes its `packetization-mode` (RFC 6184 §8.2.2), and
+  # in relay mode nothing converts it: what leaves one leg is the packetization the
+  # OTHER peer negotiated with us, handed over untouched.
+  #
+  # Traffic of 2026-08-21. Linphone offered `a=fmtp:99 profile-level-id=42801F`
+  # with no packetization-mode — single NAL unit mode, no FU-A, no STAP-A. Chrome
+  # had negotiated mode 1 with us and was fragmenting at 1170 bytes. Both legs
+  # said "H264", so the bridge relayed, and Linphone's decoder answered
+  # `dsNoParamSets` for the whole call on a stream the capture proves was
+  # delivered byte for byte. Transcoding was always available and never chosen,
+  # because "a codec both legs carry" was read off the codec NAME alone.
+  #
+  # Equality rather than "the sink can receive at least what the source sends":
+  # one selection serves BOTH directions, so the weaker end decides either way.
+  defp relayable?(code, la, lb, media) do
+    code in Map.get(lb.peer_codecs, media, []) and h264_modes_agree?(code, la, lb, media)
+  end
+
+  defp h264_modes_agree?(code, la, lb, media) do
+    if Sdp.codec_name(media, code) == "H264" do
+      mine = Map.get(la.peer_h264_mode, media)
+      theirs = Map.get(lb.peer_h264_mode, media)
+
+      if mine == theirs do
+        true
+      else
+        Logger.warning(
+          module: __MODULE__,
+          session: la.sess_tag,
+          message:
+            "H264 bridge refused because of incompatible packetization mode " <>
+              "(#{la.leg} receives pm=#{mine}, #{lb.leg} receives pm=#{theirs}) — " <>
+              "transcoding instead"
+        )
+
+        false
+      end
+    else
+      true
+    end
+  end
+
+  # Nothing to remember when the peer offers no H.264 on this media: leaving the
+  # key absent would make two such legs "agree" on nil, which is exactly right —
+  # they never reach h264_modes_agree?/4 anyway, H264 not being in their lists.
+  defp note_h264_mode(state, desc) do
+    case Sdp.h264_receive_mode(desc) do
+      nil -> state
+      pm -> %{state | peer_h264_mode: Map.put(state.peer_h264_mode, desc.type, pm)}
     end
   end
 
@@ -1180,6 +1297,7 @@ defmodule MediaServer.Mendooze.Conn do
             descs
             |> Enum.reject(&omit_from_answer?(&1, negs))
             |> Enum.map(&prefer_first(&1, negs, shaping))
+            |> Enum.map(&scenario_prefer(&1, negs, leg))
             |> Enum.map(&answer_or_reject(leg, negs, &1))
         })
     end
@@ -1197,6 +1315,28 @@ defmodule MediaServer.Mendooze.Conn do
         Enum.split_with(fmt, fn pt -> Map.get(neg.rtp_map, to_string(pt)) in codes end)
 
       %{desc | raw_fmt: carried ++ rest}
+    else
+      _ -> desc
+    end
+  end
+
+  # The scenario's own ranking (`prefer_codecs:`), applied AFTER the cross-leg
+  # shaping: an explicit instruction from the script outranks the policy's soft
+  # float, while payload types the scenario does not mention keep whatever order
+  # the shaping (or the offer) left them in — `Enum.sort_by/2` is stable. Same
+  # contract as `prefer_first/3` otherwise: a permutation of the OFFER's own
+  # format list, never an addition or a removal — but ranked by the scenario's
+  # list rather than keeping the offer's relative order, because a preference
+  # list IS a ranking and its order is the point.
+  defp scenario_prefer(desc, negs, leg) do
+    with codes when codes != [] <- Map.get(leg.prefer, Map.get(desc, :type), []),
+         neg when is_map(neg) <- Map.get(negs, desc.type),
+         fmt when is_list(fmt) <- Map.get(desc, :raw_fmt) do
+      rank = fn pt ->
+        Enum.find_index(codes, &(&1 == Map.get(neg.rtp_map, to_string(pt)))) || length(codes)
+      end
+
+      %{desc | raw_fmt: Enum.sort_by(fmt, rank)}
     else
       _ -> desc
     end
@@ -1691,12 +1831,18 @@ defmodule MediaServer.Mendooze.Conn do
 
   # ── Local side: security and receiving ──────────────────────────────────────
 
-  # UAC: local security material derives from conn_opts only.
+  # UAC: local security material derives from conn_opts only — `:if_offered` is
+  # not a decision here, it reads an offer, and this is the side that writes one.
+  #
+  # A leg that already has its DTLS+ICE material keeps it: this runs again on
+  # every re-offer, and minting fresh ICE credentials mid-call is an ICE restart
+  # — connectivity checks re-run and the media stalls while they do — asked for
+  # by nothing but the fact that we are speaking again.
   defp setup_local_security(state) do
-    if webrtc?(state) do
-      setup_dtls_ice(state)
-    else
-      {:ok, state}
+    cond do
+      not is_nil(state.local_ice) -> {:ok, state}
+      Keyword.get(state.opts, :webrtc_support, :no) == :yes -> setup_dtls_ice(state)
+      true -> {:ok, state}
     end
   end
 
@@ -2215,7 +2361,7 @@ defmodule MediaServer.Mendooze.Conn do
            ]),
          state = note_watchdog(state, desc),
          :ok <- apply_watchdog(state, desc.type) do
-      {:ok, note_negotiated(state, desc.type, neg), neg}
+      {:ok, note_negotiated(state, desc.type, neg) |> note_h264_mode(desc), neg}
     end
   end
 
@@ -2444,7 +2590,8 @@ defmodule MediaServer.Mendooze.Conn do
       %{}
       |> maybe_put(Map.get(desc, :rtcp_mux, false), "rtcp-mux", "1")
       |> Map.merge(rtcp_fb_props(desc))
-      |> maybe_put(nat_latch?(state), "natLatch", "1")
+      |> Map.merge(transport_cc_props(desc))
+      |> maybe_put(nat_latch?(state, desc), "natLatch", "1")
 
     if props == %{} do
       :ok
@@ -2457,13 +2604,29 @@ defmodule MediaServer.Mendooze.Conn do
   end
 
   # The server-side switch for each feedback type we answered, and nothing else.
+  # `transport-cc` is dropped here rather than looked up: it is confirmed in the answer
+  # but switched on by the extmap property below, whose value is an id and not "1".
   defp rtcp_fb_props(desc) do
     case answered_rtcp_fb(desc) do
       types when is_list(types) ->
-        Map.new(types, fn type -> {Map.fetch!(@supported_rtcp_fb, type), "1"} end)
+        types
+        |> Enum.reject(&(&1 == Sdp.transport_cc_fb()))
+        |> Map.new(fn type -> {Map.fetch!(@supported_rtcp_fb, type), "1"} end)
 
       _ ->
         %{}
+    end
+  end
+
+  # The transport-wide-cc extension, keyed by its URI and valued with the NEGOTIATED
+  # id: that is what makes the server write a transport-wide sequence number on every
+  # outgoing packet of this leg, pair the incoming fmt 15 reports with its own send
+  # history and feed its sender-side estimator. `desc` is the peer's offer when we
+  # answer and the peer's answer when we offer, so one reading covers both.
+  defp transport_cc_props(desc) do
+    case Sdp.transport_cc_extmap(desc) do
+      %{id: id} -> %{Sdp.transport_cc_uri() => Integer.to_string(id)}
+      nil -> %{}
     end
   end
 
@@ -2479,6 +2642,18 @@ defmodule MediaServer.Mendooze.Conn do
   # STUN connectivity checks, not by the `c=` line. Latching there would fight
   # the very mechanism that already picked the path.
   #
+  # ICE is in play only when BOTH sides do it, which is why the criterion is the
+  # same pair that gates `EndpointSetRemoteSTUNCredentials` below. Offering ICE is
+  # not practising it: a leg where we advertised candidates and the peer answered
+  # without any has no ICE at all — the server drops every inbound check for want
+  # of a remote password ("No iceRemotePwd defined yet"), so nothing will ever
+  # settle the address. Read off `local_ice` alone, we stood aside for a mechanism
+  # that was never running: the call of 2026-08-21, Alice (WebRTC) to Bob
+  # (Linphone), where Bob answered `c=IN IP4 172.22.0.5` — a docker interface of
+  # his own host — while his RTP arrived from 172.21.104.60. The DTLS handshake
+  # completed on both media, which is what made it look like a media problem, and
+  # Bob did not receive one RTP packet for the whole call.
+  #
   # It is asked for in BOTH directions, and the direction is not a criterion. It
   # used to be — only when we ANSWERED an offer, on the theory that a peer
   # answering OUR offer does so knowing its own NAT, so a mismatch would be a
@@ -2493,9 +2668,9 @@ defmodule MediaServer.Mendooze.Conn do
   #
   # `nat_latch: true | false` still overrides the inference for a caller that
   # knows its topology; the kelixip MCU adapter carries its own opt-in switch.
-  defp nat_latch?(state) do
+  defp nat_latch?(state, desc) do
     case Keyword.get(state.opts, :nat_latch, :auto) do
-      :auto -> is_nil(state.local_ice)
+      :auto -> is_nil(state.local_ice) or is_nil(desc.ice)
       enabled -> enabled == true
     end
   end
@@ -2579,21 +2754,37 @@ defmodule MediaServer.Mendooze.Conn do
     end
   end
 
-  # WebRTC offer transport plane (§2.4). rtcp-mux is always offered (G5), mid is
-  # our media name (mirrored back by the peer), candidates are host-only with the
-  # receive port (D6), and rtcp-fb is advertised per video PT. No a=ice-lite in
-  # offers (D7): we emulate a browser-shaped offer.
+  # WebRTC offer transport plane (§2.4). rtcp-mux is always offered (G5),
+  # candidates are host-only with the receive port (D6), and rtcp-fb is advertised
+  # per video PT. No a=ice-lite in offers (D7): we emulate a browser-shaped offer.
   defp add_offer_webrtc(base, state, media) do
     if webrtc?(state) do
       Map.merge(base, %{
         rtcp_mux: true,
-        mid: to_string(media),
+        mid: offer_mid(state, media),
         candidates:
           Sdp.host_candidates(state.local_ip, Map.fetch!(state.local_ports, media), true),
-        rtcp_fb: media == :video
+        rtcp_fb: media == :video,
+        # transport-wide-cc, when configured: the builder pairs it with its
+        # `a=rtcp-fb:<pt> transport-cc` lines. The property is posted only if the
+        # peer's answer takes it (`transport_cc_props/1`).
+        extmaps: List.wrap(Sdp.transport_cc_offer(media))
       })
     else
       base
+    end
+  end
+
+  # A section's mid does not change once it is negotiated (RFC 8843 §6.3.2, JSEP
+  # §5.2.1). On a leg where we ANSWERED, the mid is the peer's — echoed verbatim
+  # in that answer — so a re-offer has to name it again rather than the media name
+  # we would have invented: libwebrtc associates transceivers BY mid, and a
+  # section arriving under a new one is not the section it already has. Our own
+  # name is for the offer nobody has answered yet.
+  defp offer_mid(state, media) do
+    case Enum.find(state.offer_descs || [], &(&1.type == media)) do
+      %{mid: mid} when is_binary(mid) -> mid
+      _ -> to_string(media)
     end
   end
 
@@ -2710,6 +2901,9 @@ defmodule MediaServer.Mendooze.Conn do
       acfg: accepted_capneg(desc),
       # the feedback types actually agreed, per video PT — never the offerer form
       rtcp_fb: answered_rtcp_fb(desc),
+      # RFC 8285 §5: the extension is confirmed with the offer's OWN id, never
+      # renumbered. Empty unless transport-wide-cc is negotiated on this media.
+      extmaps: List.wrap(Sdp.transport_cc_extmap(desc)),
       # the offer's a=mid, echoed verbatim on EVERY answered section (JSEP
       # §5.3.1), not only the DTLS ones: a SIP peer that names its sections
       # would otherwise get an anonymous answer
@@ -2796,11 +2990,17 @@ defmodule MediaServer.Mendooze.Conn do
   # The feedback the offer asks for on this media, wildcard included:
   # `a=rtcp-fb:*` (parsed as payload type -1) applies to every format.
   defp requested_rtcp_fb(desc) do
+    Enum.filter(offered_rtcp_fb(desc), &Map.has_key?(@supported_rtcp_fb, &1))
+  end
+
+  # The same list before that filter. `transport-cc` has no entry in
+  # @supported_rtcp_fb — its server-side switch comes from the extmap, not from this
+  # attribute — so confirming it needs the unfiltered reading.
+  defp offered_rtcp_fb(desc) do
     Map.get(desc, :rtcp_fb, %{})
     |> Map.values()
     |> List.flatten()
     |> Enum.uniq()
-    |> Enum.filter(&Map.has_key?(@supported_rtcp_fb, &1))
   end
 
   # What the answer advertises: the INTERSECTION of what the offer asked for
@@ -2819,8 +3019,32 @@ defmodule MediaServer.Mendooze.Conn do
   # asks for no usable feedback still gets none back.
   defp answered_rtcp_fb(desc) do
     if desc.type == :video,
-      do: requested_rtcp_fb(desc),
+      do: drop_rate_control_fb(requested_rtcp_fb(desc)) ++ answered_transport_cc_fb(desc),
       else: false
+  end
+
+  # `transport-cc` is confirmed only when BOTH halves of the mechanism are there: the
+  # peer asked for the feedback message, and the extension it reports on is one we
+  # negotiate (`Sdp.transport_cc_extmap/1` — video, the switch on, a usable direction).
+  # Appended rather than filtered in, because @supported_rtcp_fb maps an attribute to
+  # the server switch that implements it and this one has none.
+  defp answered_transport_cc_fb(desc) do
+    if Sdp.transport_cc_extmap(desc) && Sdp.transport_cc_fb() in offered_rtcp_fb(desc),
+      do: [Sdp.transport_cc_fb()],
+      else: []
+  end
+
+  defp drop_rate_control_fb(types) do
+    allowed =
+      Application.get_env(:elixip2, MediaServer.Mendooze, [])
+      |> Keyword.get(:bitrate_feedback, @default_bitrate_feedback)
+
+    Enum.filter(types, fn type ->
+      case Map.fetch(@rate_control_rtcp_fb, type) do
+        {:ok, dialect} -> dialect in allowed
+        :error -> true
+      end
+    end)
   end
 
   # ── Answer-side security material ────────────────────────────────────────────
@@ -3232,7 +3456,21 @@ defmodule MediaServer.Mendooze.Conn do
 
   defp bandwidth_kbps(_state, _media), do: 0
 
-  defp webrtc?(state), do: Keyword.get(state.opts, :webrtc_support, :no) == :yes
+  # Does this leg CARRY WebRTC — hence rtcp-mux, an a=mid per section and host
+  # candidates in what we write on it? Its own resolved transport answers, not the
+  # option: `:if_offered` — the value a B2BUA gives its inbound leg — is settled by
+  # the offer we answered, and setup_dtls_ice/1 records that decision in
+  # `local_ice`, which is also how answer_candidates/2 already reads the question.
+  # Both SDP paths set it before any section is built. `nat_latch?/2` asks a
+  # narrower one — whether ICE is actually RUNNING — so it weighs the peer's
+  # `desc.ice` too.
+  #
+  # Read off the option instead, an `:if_offered` leg ANSWERED a browser's offer
+  # with all three and then RE-OFFERED without any of them. Chrome refuses that
+  # SDP outright — rtcpMuxPolicy is "require" and a unified-plan section needs its
+  # mid — which is the 488 of 2026-08-21: the callee turned its camera on, the
+  # relayed re-offer was refused, and the call died on a leg that was working.
+  defp webrtc?(state), do: not is_nil(state.local_ice)
 
   # Which RTP profile a NON-WebRTC offer is carried in (§7.5). `:avp` — plain
   # RTP — is the default and what every caller got before P5.

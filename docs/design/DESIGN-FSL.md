@@ -55,7 +55,8 @@ a thousand keep-alives has the same stack depth as one that answers immediately.
 | `stay/0..2` | consume an event, keep waiting |
 | `on_events/1` | typed `receive` |
 | `scenario_success/failure/aborted` | terminals |
-| `sub_fsm/2`, `notify/2`, `notify_parent/1`, `on_shutdown/1` | sub-FSMs and cooperative shutdown |
+| `spawn_fsm/2`, `notify/2`, `notify_parent/1`, `on_shutdown/1` | sub-FSMs and cooperative shutdown |
+| `sbb_fsm/2`, `sbb_return/1`, `sbb_data_get/1`, `sbb_data_set/2` | service building blocks (§4bis) |
 
 ### 2.1 `config` and the context
 
@@ -255,13 +256,13 @@ being over, and ignoring it stalled the teardown for the full five seconds.
 
 ### 4.1 The shape
 
-`sub_fsm target, as: :name, args: %{…}` spawns another scenario as a **separate
+`spawn_fsm target, as: :name, args: %{…}` spawns another scenario as a **separate
 monitored process** and stores a `%SIP.Scenario.Child{name, pid, ref, module}`
 handle in `ctx.appdata[:__children__]`, so it survives across states. `target` is
 a compiled module or a path to an `.exs` file — resolved against the directory
 of the file that *declares* it (include semantics), not against the current
 working directory. Resolving against the cwd is what made
-`sub_fsm "scenarios/uas_invite.exs"` die with a bare "exception!" for anyone not
+`spawn_fsm "scenarios/uas_invite.exs"` die with a bare "exception!" for anyone not
 standing in `apps/elixip2`.
 
 Decisions, all deliberate:
@@ -273,6 +274,8 @@ Decisions, all deliberate:
 | cleanup when the parent ends | cooperative shutdown message, then a hard kill after a 5 s grace period |
 | nesting | a full tree: a child may spawn its own children |
 | scope of the shutdown protocol | **generalized** — the same control message any controller uses, including elixipp's graceful stop |
+| the event names | `{:parent_msg, …}` / `{:child_msg, …}` / `{:child_exit, …}` since 1.5.0, matching `parent:msg` / `child:msg` / `child:exit` of the TypeScript FSL. They were one `{:scenario_msg, from, …}` for both directions: that names the transport and hides the direction, and TS cannot fold the two into one type because it dispatches on the type alone. A message takes no deprecated alias, so `on_events` warns at compile time when a scenario matches an old shape |
+| the name | `spawn_fsm`, after `fx.spawn` of the TypeScript FSL — one name per concept across the two dialects. Spelled `sub_fsm` up to 1.4.1; the old macro is kept as a deprecated alias sharing the same expansion, because `.exs` scenarios are loaded at run time and a rename would break them in the field, not at compile time |
 
 ### 4.2 The message protocol
 
@@ -281,9 +284,10 @@ Three families, all plain `send/2` into the FSM's mailbox and matched in
 
 | Message | Direction | Meaning |
 |---|---|---|
-| `{:scenario_msg, from_name, payload}` | FSM ↔ FSM | application message. Parent→child always uses the fixed name `:parent`; child→parent uses the name the parent assigned at spawn (`as:`), so the parent matches a stable literal in every state |
+| `{:parent_msg, payload}` | parent → child | application message downwards. The sender was always `:parent`, so the name is dropped from the tuple and put in the tag |
+| `{:child_msg, name, payload}` | child → parent | application message upwards, tagged with the name the parent assigned at spawn (`as:`), so the parent matches a stable literal in every state |
 | `{:scenario_ctl, :shutdown, reason}` | controller → FSM | cooperative stop. The 3-tuple envelope leaves room for future verbs without changing shape |
-| `{:scenario_exit, name, outcome, reason}` | FSM → parent | how the child ended |
+| `{:child_exit, name, outcome, reason}` | child → parent | how the child ended |
 | `{:DOWN, ref, :process, pid, reason}` | OTP → parent | safety net when the child died without reporting |
 
 ### 4.3 Cooperative shutdown
@@ -306,9 +310,150 @@ handles one call; with none waiting the INVITE gets `486 Busy Here`.
 
 Unlike elixipp's `Elixip.ScenarioUAS` factory (see
 [DESIGN-ELIXIPP.md](DESIGN-ELIXIPP.md)), it spawns nothing per call: the parent
-scenario controls the lifecycle by re-spawning a `sub_fsm` when it wants to take
+scenario controls the lifecycle by spawning another child when it wants to take
 another call. That is what keeps the FSL layer self-contained — a two-party test
 scenario needs no server mode.
+
+---
+
+## 4bis. Service building blocks
+
+A **sub-FSM** is a second process with legs of its own. A **service building
+block** is the opposite animal: `sbb_fsm module, opts` makes the *current*
+process enter `module`'s FSM, on the current scenario's context, dialogs and
+mailbox, until the block hands control back with `sbb_return event`. A
+subroutine call, not a spawn.
+
+The shape follows from invariant 2, not from preference: the dialog and media
+layers bind their events to `self()`, so a block running anywhere else could not
+receive the host's leg events at all.
+
+### Why a layer above the primitives
+
+The B2BUA design is deliberate about where things live: the framework offers
+low-level primitives, the scenario writes the policy, and anything expressible
+in FSL stays in FSL. That is the right split — but it means a working
+call takes a scenario with five or six states, and an ACD queue rather more.
+Asked to route a call to a subscriber, an integrator should not have to write
+the hunt loop, the early-media rule of §7.4 and the profile ladder of §7.5.
+
+So a layer above, offering the two verbs Asterisk made the vocabulary of the
+field: `call()`, the equivalent of `Dial()`, and `queue()`, the equivalent of
+`Queue()`.
+
+They are **not** a replacement for the primitives, and the primitives must stay
+usable directly — that is what makes an unusual call flow possible at all. The
+two verbs are the paved road, not the only road.
+
+### 4bis.1 What it needed from FSL — delivered in 1.5.0
+
+This section asked for **reusable FSM fragments**: a named group of states,
+parameterised, that a scenario can enter and return from, on the calling
+scenario's own dialogs. That is the **service building block** layer —
+[DESIGN-SBB.md](DESIGN-SBB.md) for what it must do,
+[DESIGN-SBB.md](DESIGN-SBB.md) for how,
+[FSL.md](../../FSL.md#service-building-blocks-sbb) for how to write one.
+
+The open question was whether a fragment is a macro expanding states into the
+caller at compile time or a runtime construct with an explicit return state. **It
+is a runtime construct**, and it keeps what the compile-time form was wanted for:
+the block's states are reported to the monitor and to the sequence journal,
+qualified by the block they belong to.
+
+`call()` itself is delivered as `SBB.Call.call/1`, in `:elixip2` rather than in a
+kelixip module — it is call flow rather than server policy, and both FSL dialects
+want it. `bridge/1` came with it: the established call is a block of its own.
+`queue()` stays future work, and stays kelixip's, because it takes names for the
+objects of §3.
+
+
+### 4bis.2 The engine side
+
+`loop/4` already takes the module, the state name, the context and the state
+list as arguments — nothing in it is bound to *the* scenario. A block is that
+same dispatcher, so `sbb_loop/5` differs in exactly two ways: it never calls
+`finalize/4` (the host's legs, media and children are not the block's to
+release) and it never reports an outcome to a parent FSM (its caller is a state,
+not a process).
+
+| Descriptor | Produced by | Handled by |
+|---|---|---|
+| `{:sbb_return, event, ctx}` | `sbb_return/1` | `sbb_loop/5` returns it; `loop/4` treats it as a scenario error, since there is nothing to return to |
+| `throw {:sbb_terminal, outcome, reason, type, ctx}` | a terminal inside a block | `loop/4` only — re-applied as if the host state had written it |
+| `throw {:sbb_deadline_hit, ref, ctx}` | the clause `on_events` injects into every SBB state | the `run_sbb/3` frame whose `ref` it is |
+
+Both non-local exits are `throw`, and both rely on one property of the engine:
+the `try` wrapping every state body catches **exceptions and `:exit`, never
+`:throw`**. A thrown term therefore crosses every state frame and every nested
+block. `sbb_loop/5` deliberately does not catch either, so a terminal three
+blocks deep still unwinds to the root, and a parent's deadline passes through a
+running child to the frame that armed it.
+
+### 4bis.3 The return contract
+
+A block returns `{namespace, outcome, data}` — fixed arity, last element a map,
+so a block can report one more thing without breaking a host that matches it
+(S13). The namespace and the outcomes are declared (`@sbb_namespace`,
+`@sbb_returns`) and `sbb_return/1` checks a literal return against them at
+compile time: a mistyped outcome is otherwise not an error but a silence, the
+host waiting on its `after` for an event nobody sends.
+
+The namespace is the block author's word, so `on_events` cannot classify a return
+from a table — and an unknown leading atom falls through to `:sip`, which the
+sequence diagram draws as an arrow *from the peer*. The namespaces are therefore
+**learned at macro-expansion time**: expanding `sbb_fsm(Block, …)` resolves the
+alias and records `Block.__sbb_namespace__/0` on the calling module, and a face
+module records its own from `__using__` (`SIP.Scenario.register_namespace/2`).
+`on_events` reads the list when it classifies its clauses.
+
+The list is a plain attribute written with read-modify-write, **not**
+`accumulate: true`. It is written and read during expansion, whereas a
+`Module.register_attribute` call placed in `__using__`'s quote runs later, when
+the module body is evaluated — and would clear at that point everything expansion
+had gathered.
+
+### 4bis.3 The context
+
+The block gets the host's `%SIP.Context{}` as it stands — that is the whole
+point. Three things are put back on return: `currentstate` and `laststate` (so
+`goto back` inside a block cannot land in a host state), and, by construction,
+the host's `after` deadline, which does not exist yet when a state body runs.
+
+`appdata` is shared, with one reserved key per block — `{:sbb, Module}` — for
+its scratch space, read and written with `sbb_data_get/1` and `sbb_data_set/2`.
+It is **cleared on every call**, so a serial hunt entering a block target after
+target does not inherit the previous attempt; `resume: true` is the exception,
+for a block designed to be re-entered after an interruption.
+
+### 4bis.4 What the live view shows
+
+A block's states are reported on the **host's own row** — one call, one row —
+with the state qualified by the block it belongs to: `MyApp.Cancelling/waiting`.
+Making the sequence visible is the layer's purpose, so hiding it while the host
+is suspended would be a strange way to serve it, and reporting the block's states
+bare would show a call in states its scenario does not declare.
+
+`run_sbb/3` pushes the block on a per-process stack and pops it in its `after`,
+so an unwinding terminal leaves the reporting as it found it; the outcome that
+follows is the host's and is reported unqualified. The row always names the
+scenario the process runs (`:scenario_module` in the process dictionary), never
+the block — on the way *out* of `run_sbb/3` the block is already off the stack,
+and the report that restores the host's state would otherwise be labelled with
+it. Nesting shows the innermost block, which is where the call actually is.
+
+### 4bis.5 Two rules the compiler enforces
+
+- **`sbb_fsm` is refused inside an `on_events` clause.** That clause's deadline
+  is absolute (`SIP.Scenario.deadline/1`), so a block called from one would burn
+  the host's remaining timeout while it runs. From a state body the suspension
+  is free. Same check, and the same rationale, as `stay` outside an `on_events`;
+- **a block defines no `run/1`.** `SIP.Scenario.Loader.scenario_module?/1`
+  accepts anything exporting `run/1` and `__scenario_states__/0`, and
+  `load_file!/1` takes the first match — so a block declared above the scenario
+  in the same `.exs` would otherwise be run *as* the scenario.
+
+Specification: [DESIGN-SBB.md](DESIGN-SBB.md).
+Design: [DESIGN-SBB.md](DESIGN-SBB.md).
 
 ---
 
@@ -328,7 +473,7 @@ instance needs:
 |---|---|
 | `:dialog_pid` | seeds `ctx.dialogpid`, so the reply macros target that dialog |
 | `:inbound_request` | the request that created the instance, also in the mailbox |
-| `:parent_pid` | the factory, which gets `{:scenario_exit, …}` and releases its quota slot |
+| `:parent_pid` | the factory, which gets `{:child_exit, …}` and releases its quota slot |
 | `:config_overrides` | the external-JSON overrides (§6) |
 
 `spawn_uas_instance/2` wraps `run_instance/2` in a `spawn_monitor`, which is what
@@ -413,6 +558,14 @@ name with no file present; `apps/elixip2/scenarios/` holds editable `.exs`
 copies loaded by path, deliberately under different module names
 (`UAC.InviteExample`, `UAC.RegisterExample`) so both can coexist.
 
+`use SIP.Scenario` generates the `run/1` those paths call: it starts the SIP
+stack when asked (transactions, transport selector, dialog layer, config
+registry), builds the initial `%SIP.Context{}` from the `config` block and enters
+`initial_state`. It returns `:ok` on a success terminal, `{:error, reason}` on a
+failure one, and `{:aborted, reason}` when the scenario was wound down by a
+cooperative shutdown — three outcomes rather than two, so tooling can tell a
+controller-driven stop from a scenario that failed.
+
 `mix scenario` runs either form and exits `0`/`1`, so a scenario is a CI check.
 
 ---
@@ -421,8 +574,9 @@ copies loaded by path, deliberately under different module names
 
 1. A state ends with a transition macro and returns a descriptor; it never calls
    the next state (§1).
-2. One FSM, one process — because the dialog and media layers bind their events
-   to `self()` (§3.1).
+2. One FSM *stack*, one process — because the dialog and media layers bind their
+   events to `self()` (§3.1). A sub-FSM is another process with legs of its own;
+   a service building block is a nested FSM on this process's legs (§4bis).
 3. A scenario always *ends*: an exception or an exit inside a state becomes a
    failure, so teardown runs (§2.2).
 4. Teardown order is children → B2BUA legs → media → cleanup → parent (§3.3).

@@ -23,6 +23,12 @@ defmodule Kelix.Mod.Mcu.Config do
   *accepted* for one release, ignored with a warning naming the replacement, because
   an RPM-installed node has them in `/etc/kelixip/config.toml` and refusing them
   outright turns an upgrade into a node that will not boot (§8.4).
+
+  What **is** here is `preferred_video_codec`: one name, a preference and not a list. It
+  reorders an answer among the payload types the caller offered *and* the media server
+  accepted — it never adds one, so it states no capability — and the leg's log says which
+  of the two dropped it when it is not honoured. That last part is what the retired lists
+  could not do, and the reason they were removed rather than demoted to "preferences".
   """
 
   require Logger
@@ -53,7 +59,17 @@ defmodule Kelix.Mod.Mcu.Config do
             # more — what the answer advertises for H.264 is what the media server
             # reported it accepted (§6.3 rule 9), and announcing a profile the encoder
             # was not configured with is the drift that key invited.
-            video: %{size: 6, fps: 15, bitrate: 1024, intra_period: 300},
+            #
+            # `bitrate` is the one value this block shares with the point-to-point
+            # path: an omitted `video_bitrate` takes `[mediaserver] video_bitrate`,
+            # the node's statement of it (`node_video_bitrate/1`).
+            video: %{size: 6, fps: 30, bitrate: 1500, intra_period: 300},
+            # The video codec every conference states FIRST in its answers, copied into
+            # each one at create time. Not a codec list and not a capability: it can only
+            # move a payload type the caller offered and the media server accepted, and it
+            # is the codec the mixer then encodes towards that leg. `nil` — the default —
+            # leaves the caller's own order deciding (RFC 3264 §6.1).
+            preferred_video_codec: nil,
             did_range: nil,
             did_ranges: %{},
             # Recording and images (§8.3.8). Paths on the **media server's**
@@ -63,6 +79,12 @@ defmodule Kelix.Mod.Mcu.Config do
             # recording at a time, so an unset key is a clear refusal instead.
             record_dir: nil,
             image_dir: nil,
+            # Where the conference DEFINITIONS are kept, so a restart brings the rooms
+            # back (§9.5). On **this** host, unlike `record_dir` and `image_dir`. No
+            # default, for the same reason those two have none: a path guessed for a
+            # deployment we cannot see would fail one write at a time. Unset means no
+            # persistence at all, stated once at start — never a silent half-feature.
+            conference_file: nil,
             # Drawn in every empty mosaic slot of every conference, unless the
             # conference names its own `logo`.
             logo_file: nil,
@@ -104,7 +126,7 @@ defmodule Kelix.Mod.Mcu.Config do
                video_intra_period xmlrpc_timeout_ms call_timeout_ms shutdown_grace_ms
                rtp_timeout_ms message_rate message_max_bytes message_queue_max)
   @bool_keys ~w(dtmf destroy_when_empty auto_layout gc_orphans)
-  @string_keys ~w(record_dir image_dir logo_file)
+  @string_keys ~w(record_dir image_dir logo_file conference_file)
 
   # The keys P8a retired, with what replaces each. Accepted for one release and
   # ignored with a warning (§8.4): they sit in the config file of every node this
@@ -124,8 +146,9 @@ defmodule Kelix.Mod.Mcu.Config do
   @keys ~w(module call_timeout_ms vad rate medias dtmf
            max_participants destroy_when_empty auto_layout layout_comp did_range
            did_ranges video_size video_fps video_bitrate video_intra_period
+           preferred_video_codec
            xmlrpc_timeout_ms shutdown_grace_ms rtp_timeout_ms gc_orphans
-           record_dir image_dir logo_file
+           record_dir image_dir logo_file conference_file
            message_rate message_max_bytes message_queue_max message_kinds) ++
           Map.keys(@retired_keys)
 
@@ -146,6 +169,8 @@ defmodule Kelix.Mod.Mcu.Config do
          {:ok, layout_comp} <- Vocabulary.comp(Map.get(block, "layout_comp"), "layout_comp"),
          {:ok, video_size} <- Vocabulary.size(Map.get(block, "video_size"), "video_size"),
          {:ok, medias} <- medias(block),
+         {:ok, preferred_video_codec} <-
+           Vocabulary.video_codec(Map.get(block, "preferred_video_codec")),
          {:ok, message_kinds} <- message_kinds(block),
          {:ok, did_range} <- did_range(block, "did_range"),
          {:ok, did_ranges} <- did_ranges(block) do
@@ -166,9 +191,10 @@ defmodule Kelix.Mod.Mcu.Config do
          video: %{
            size: video_size || defaults.video.size,
            fps: int(block, "video_fps", defaults.video.fps),
-           bitrate: int(block, "video_bitrate", defaults.video.bitrate),
+           bitrate: int(block, "video_bitrate", node_video_bitrate(defaults.video.bitrate)),
            intra_period: int(block, "video_intra_period", defaults.video.intra_period)
          },
+         preferred_video_codec: preferred_video_codec,
          did_range: did_range,
          did_ranges: did_ranges,
          xmlrpc_timeout_ms: int(block, "xmlrpc_timeout_ms", defaults.xmlrpc_timeout_ms),
@@ -179,6 +205,7 @@ defmodule Kelix.Mod.Mcu.Config do
          record_dir: str(block, "record_dir", defaults.record_dir),
          image_dir: str(block, "image_dir", defaults.image_dir),
          logo_file: str(block, "logo_file", defaults.logo_file),
+         conference_file: str(block, "conference_file", defaults.conference_file),
          message_rate: int(block, "message_rate", defaults.message_rate),
          message_max_bytes: int(block, "message_max_bytes", defaults.message_max_bytes),
          message_queue_max: int(block, "message_queue_max", defaults.message_queue_max),
@@ -394,6 +421,16 @@ defmodule Kelix.Mod.Mcu.Config do
   # The struct is the single statement of every default, so a `parse/1` clause that
   # needs one before building it reads it here rather than repeating the literal.
   defp defaults(), do: %__MODULE__{}
+
+  # The node's `[mediaserver] video_bitrate`, which a conference encodes at unless
+  # this block names its own. Read like `Mcu.mediaservers_from_pool/1` reads the
+  # pool — from `Kelix.Config`, guarded, since `parse/1` also runs in tests where no
+  # node config exists.
+  defp node_video_bitrate(fallback) do
+    if Process.whereis(Kelix.Config),
+      do: Kelix.Config.current().mediaserver_video_bitrate,
+      else: fallback
+  end
 
   defp int(block, key, default) do
     case Map.get(block, key) do

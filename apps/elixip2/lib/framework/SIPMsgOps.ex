@@ -1,24 +1,24 @@
 defmodule SIP.Msg.Ops do
-	@moduledoc "Operations on SIP messages"
+  @moduledoc "Operations on SIP messages"
 
   require SIP.Auth
 
-  defp build_via_addr( local_ip , 5060, "UDP" ) do
+  defp build_via_addr(local_ip, 5060, "UDP") do
     local_ip = if is_tuple(local_ip), do: SIP.NetUtils.ip2string(local_ip), else: local_ip
     "SIP/2.0/UDP " <> local_ip
   end
 
-  defp build_via_addr( local_ip , 5060, "TCP" ) do
+  defp build_via_addr(local_ip, 5060, "TCP") do
     local_ip = if is_tuple(local_ip), do: SIP.NetUtils.ip2string(local_ip), else: local_ip
     "SIP/2.0/TCP " <> local_ip
   end
 
-  defp build_via_addr( local_ip , 5061, "TLS" ) do
+  defp build_via_addr(local_ip, 5061, "TLS") do
     local_ip = if is_tuple(local_ip), do: SIP.NetUtils.ip2string(local_ip), else: local_ip
     "SIP/2.0/TLS " <> local_ip
   end
 
-  defp build_via_addr( local_ip , local_port, transport ) when is_integer(local_port) do
+  defp build_via_addr(local_ip, local_port, transport) when is_integer(local_port) do
     if local_port < 1000 or local_port > 65535 do
       # Un port non privilegié UDP ou TCP est compris entre 1000 et 65535
       raise "Invalid port #{local_port} for via header"
@@ -29,7 +29,9 @@ defmodule SIP.Msg.Ops do
     end
 
     local_ip = if is_tuple(local_ip), do: SIP.NetUtils.ip2string(local_ip), else: local_ip
-    "SIP/2.0/" <> String.upcase(transport) <> " " <> local_ip <> ":" <> Integer.to_string(local_port)
+
+    "SIP/2.0/" <>
+      String.upcase(transport) <> " " <> local_ip <> ":" <> Integer.to_string(local_port)
   end
 
   defguard is_req(msg) when is_map(msg) and is_atom(msg.method)
@@ -302,8 +304,11 @@ defmodule SIP.Msg.Ops do
   @spec in_dialog?(map()) :: boolean()
   def in_dialog?(msg) when is_map(msg) do
     case to_uri(Map.get(msg, :to)) do
-      %SIP.Uri{} = uri -> match?({:ok, tag} when is_binary(tag), SIP.Uri.get_uri_param(uri, "tag"))
-      _ -> false
+      %SIP.Uri{} = uri ->
+        match?({:ok, tag} when is_binary(tag), SIP.Uri.get_uri_param(uri, "tag"))
+
+      _ ->
+        false
     end
   end
 
@@ -400,6 +405,24 @@ defmodule SIP.Msg.Ops do
           :no_sdp | :media_change | :hold | :resume | :address_change | :no_change | :unknown
 
   @doc """
+  True for the one request whose 2xx carries **no SDP at all**: an UPDATE that made
+  no offer.
+
+  RFC 3311 §5.1 — "if the UPDATE did not contain an offer, the 2xx response MUST NOT
+  contain an answer" — and it may carry no offer of ours either, since an UPDATE has
+  no ACK for the answer to come back in. An offerless *re-INVITE* is the opposite
+  case (RFC 3261 §14.2: its 2xx MUST contain an offer), which is why the method is
+  part of the reading and not an afterthought.
+
+  This is what an RFC 4028 session-timer refresh looks like on the wire, so every
+  layer that answers a request meets it: a UAS scenario, and a B2BUA on each of its
+  two legs.
+  """
+  @spec offerless_update?(map()) :: boolean()
+  def offerless_update?(req) when is_map(req),
+    do: Map.get(req, :method) == :UPDATE and is_nil(sdp_body(req))
+
+  @doc """
   Classify a re-offer against the last SDP the same peer gave us.
 
   `previous_sdp` is that peer's previous description — its offer, or its answer:
@@ -417,6 +440,33 @@ defmodule SIP.Msg.Ops do
       {nil, _previous} -> :no_sdp
       {_new, nil} -> :unknown
       {new, previous} -> compare_offers(new, previous)
+    end
+  end
+
+  @doc """
+  The media a description carries: `[:audio, :video, :text]`, in that order,
+  whichever of them the SDP holds an `m=` section for with a port other than 0.
+
+  Read on an **answer**, this is what the two ends settled on: a section the
+  answerer declined is a `m=… 0 …` line (RFC 3264 §6), and a section neither side
+  named is not there at all. Any other media type — `application`, and the sections
+  this stack cannot answer — is absent from the result: the question asked here is
+  which of the three streams a human calls a call, which is also why `supported?`
+  plays no part. A relayed section we would not terminate ourselves still carries
+  the callee's media.
+
+  `[]` for a description that carries none of the three, and for one that cannot be
+  parsed: a caller reads "nothing negotiated" out of both.
+  """
+  @spec media_kinds(binary() | nil) :: [:audio | :video | :text]
+  def media_kinds(sdp) do
+    case presence(sdp) && MediaServer.SdpTools.parse(sdp) do
+      {:ok, descs} ->
+        present = for d <- descs, Map.get(d, :port, 0) != 0, do: Map.get(d, :type)
+        Enum.filter([:audio, :video, :text], &(&1 in present))
+
+      _no_readable_sdp ->
+        []
     end
   end
 
@@ -487,19 +537,27 @@ defmodule SIP.Msg.Ops do
   end
 
   @doc "Add a tomost via"
-  def add_via(sipmsg, { local_ip, local_port, transport }, branch_id, additional_params \\ nil) when is_bitstring(branch_id) do
+  def add_via(sipmsg, {local_ip, local_port, transport}, branch_id, additional_params \\ nil)
+      when is_bitstring(branch_id) do
     via = build_via_addr(local_ip, local_port, transport)
-    via = cond do
-      is_bitstring(additional_params) -> via <> additional_params <> ";branch=" <> branch_id
-      additional_params == nil -> via <> ";branch=" <> branch_id
-      #To do add, list of tuples and maps
-    end
 
-    newvia = case Map.get(sipmsg, :via) do
-      nil -> [ via ]
-      oldvia when is_list(oldvia) -> [ via | oldvia ]
-      _ -> raise "Invalid via header"
-    end
+    via =
+      cond do
+        is_bitstring(additional_params) ->
+          via <> additional_params <> ";branch=" <> branch_id
+
+        additional_params == nil ->
+          via <> ";branch=" <> branch_id
+          # To do add, list of tuples and maps
+      end
+
+    newvia =
+      case Map.get(sipmsg, :via) do
+        nil -> [via]
+        oldvia when is_list(oldvia) -> [via | oldvia]
+        _ -> raise "Invalid via header"
+      end
+
     # Add the new via header as the head of the list and change the transaction id
     Map.put(sipmsg, :via, newvia) |> Map.put(:transid, branch_id)
   end
@@ -582,21 +640,19 @@ defmodule SIP.Msg.Ops do
     end
   end
 
-
   @doc "Génère une valeur aléatoire pour le paramètre branch"
   def generate_branch_value() do
     # Génère une chaîne aléatoire de 20 caractères en ajoutant le numéro aléatoire
-    random_branch = :crypto.strong_rand_bytes(10) |> Base.encode16
+    random_branch = :crypto.strong_rand_bytes(10) |> Base.encode16()
     branch_value = String.replace(random_branch, ~r/[^a-f0-9]/, "")
 
     # Assurez-vous que la chaîne commence par "z9hG4bK" comme requis par RFC 3261
     "z9hG4bK" <> branch_value
   end
 
-
   @doc "Génère une valeur aléatoire pour le paramètre fromtag ou totag"
   def generate_from_or_to_tag() do
-    random_branch = :crypto.strong_rand_bytes(10) |> Base.encode16
+    random_branch = :crypto.strong_rand_bytes(10) |> Base.encode16()
     String.replace(random_branch, ~r/[^a-f0-9]/, "")
   end
 
@@ -608,50 +664,56 @@ defmodule SIP.Msg.Ops do
   @doc "Met a jour ou ajout des champs dans un message SIP"
   def update_sip_msg(sipmsg, fields) when is_list(fields) do
     Enum.reduce(fields, sipmsg, fn {header, value}, acc ->
-      update_sip_msg(acc, { header, value})
+      update_sip_msg(acc, {header, value})
     end)
   end
 
   def update_sip_msg(sipmsg, fields) when is_map(fields) do
     Enum.reduce(fields, sipmsg, fn {header, value}, acc ->
-      update_sip_msg(acc, { header, value})
+      update_sip_msg(acc, {header, value})
     end)
   end
 
   # Ignore update
-  def update_sip_msg(sipmsg, { _header, :ignore }) do
+  def update_sip_msg(sipmsg, {_header, :ignore}) do
     sipmsg
   end
 
   # Remove update
-  def update_sip_msg(sipmsg, { header, nil }) do
+  def update_sip_msg(sipmsg, {header, nil}) do
     Map.delete(sipmsg, header)
   end
 
   # Specific case for contact
-  def update_sip_msg(sipmsg, { :contact, value }) when is_bitstring(value) do
-    { :ok, contact_uri } = SIP.Uri.parse(value)
+  def update_sip_msg(sipmsg, {:contact, value}) when is_bitstring(value) do
+    {:ok, contact_uri} = SIP.Uri.parse(value)
     sipmsg |> Map.put(:contact, contact_uri)
   end
 
   # Specific case for body
-  def update_sip_msg(sipmsg, { :body, [] } ) do
+  def update_sip_msg(sipmsg, {:body, []}) do
     sipmsg |> Map.put(:body, []) |> Map.put(:contentlength, 0)
   end
 
-  def update_sip_msg(sipmsg, { :body, [ %{ contenttype: ctype, data: body_data } ] } ) do
-    sipmsg |> Map.put(:body, [%{ contenttype: ctype, data: body_data }]) |> Map.put(:contenttype, ctype) |> Map.put(:contentlength, Kernel.byte_size(body_data))
+  def update_sip_msg(sipmsg, {:body, [%{contenttype: ctype, data: body_data}]}) do
+    sipmsg
+    |> Map.put(:body, [%{contenttype: ctype, data: body_data}])
+    |> Map.put(:contenttype, ctype)
+    |> Map.put(:contentlength, Kernel.byte_size(body_data))
   end
 
-  def update_sip_msg(sipmsg, { :body, body_data } ) when is_binary(body_data) do
-    sipmsg |> Map.put(:body,  body_data) |>  Map.put(:contentlength, Kernel.byte_size(body_data)) |> Map.put(:contenttype, "application/sdp")
+  def update_sip_msg(sipmsg, {:body, body_data}) when is_binary(body_data) do
+    sipmsg
+    |> Map.put(:body, body_data)
+    |> Map.put(:contentlength, Kernel.byte_size(body_data))
+    |> Map.put(:contenttype, "application/sdp")
   end
 
   # Multipart/mixed body (RFC 2046): a list of two or more sub-bodies. Generate a
   # boundary, stamp it on every part, set the top-level Content-Type and compute
   # the Content-Length from the serialized body octets. Each part must be a
   # `%{contenttype: ct, data: bin}` map (extra keys are preserved).
-  def update_sip_msg(sipmsg, { :body, parts }) when is_list(parts) do
+  def update_sip_msg(sipmsg, {:body, parts}) when is_list(parts) do
     if not Enum.all?(parts, &match?(%{contenttype: _, data: _}, &1)) do
       raise "Multipart body parts must be %{contenttype: ..., data: ...} maps, got #{inspect(parts)}"
     end
@@ -666,8 +728,7 @@ defmodule SIP.Msg.Ops do
     |> Map.put(:contentlength, Kernel.byte_size(body_octets))
   end
 
-
-  def update_sip_msg(sipmsg, { header, value }) do
+  def update_sip_msg(sipmsg, {header, value}) do
     sipmsg |> Map.put(header, value)
   end
 
@@ -677,15 +738,29 @@ defmodule SIP.Msg.Ops do
     # parser stores): spelt "Max-Forward" the test never matched, so every CANCEL
     # and every ACK we built went out without the header §8.1.1 makes mandatory
     # in a request.
-    cancel_filter = fn { k, _v } ->
-      k in [ :via, :to, :from, :route, "Max-Forwards", :callid, :contentlength, :cseq, :method, :ruri ]
+    cancel_filter = fn {k, _v} ->
+      k in [
+        :via,
+        :to,
+        :from,
+        :route,
+        "Max-Forwards",
+        :callid,
+        :contentlength,
+        :cseq,
+        :method,
+        :ruri
+      ]
     end
-    [ seqno, _method ] = sipmsg.cseq
+
+    [seqno, _method] = sipmsg.cseq
+
     fieldlist = [
       {:method, :CANCEL},
       {:contentlength, 0},
-      {:cseq, [ seqno, :CANCEL]},
-      {:body, []}]
+      {:cseq, [seqno, :CANCEL]},
+      {:body, []}
+    ]
 
     sipmsg |> update_sip_msg(fieldlist) |> Map.filter(cancel_filter)
   end
@@ -724,6 +799,10 @@ defmodule SIP.Msg.Ops do
   # Response headers copied verbatim when a reply is relayed leg-to-leg.
   @b2bua_reply_passthrough ["Reason", "Warning", "Retry-After"]
 
+  # Matched case-insensitively: a header with no atom of its own keeps the
+  # spelling the peer used (see strip_asserted_identity/1).
+  @pai_header_lc "p-asserted-identity"
+
   @doc """
   Prepare a request received on one B2BUA leg to be re-sent on another leg.
 
@@ -736,15 +815,33 @@ defmodule SIP.Msg.Ops do
   point back at the leg the request came in on), replaces the User-Agent and
   decrements `Max-Forwards`.
 
-  The body and every other header (identity `From`/`To`, `P-Asserted-Identity`,
-  `Privacy`, custom `X-*`…) cross unchanged. Callers layer their own policy on
-  top; they do not re-read the message.
+  The body and every other header (identity `From`/`To`, custom `X-*`…) cross
+  unchanged. Callers layer their own policy on top; they do not re-read the
+  message.
+
+  **`P-Asserted-Identity` is the exception, and it is a security rule.** An
+  inbound one is a *claim* by a peer we do not trust; relaying it would launder
+  it into an assertion signed by this node (RFC 3325 §5). So it is always
+  dropped, and the only one that can leave is the one this function writes from
+  `:asserted_identity` — the identity an authentication verdict proved
+  (`SIP.Context.assert_identity/2`). Dropping and re-adding live in the same
+  place on purpose: neither can be done without the other, so no call site can
+  forward a foreign assertion by forgetting an option.
+
+  A request asking for `Privacy: id` (RFC 3325 §7) gets no assertion at all: a
+  B2BUA forwarding to an arbitrary registered contact leaves the trust domain,
+  and asserting the identity of a caller who asked to be anonymous is a privacy
+  breach with a specification saying so.
 
   Returns `{:ok, req}`, or `{:error, :too_many_hops}` when `Max-Forwards` is
   exhausted (RFC 3261 §16.6 — answer 483).
 
-  Options: `:useragent` overrides the User-Agent stamped on the forwarded
-  request (defaults to the `:elixip2 :useragent` application env).
+  Options:
+
+    * `:useragent` — overrides the User-Agent stamped on the forwarded request
+      (defaults to the `:elixip2 :useragent` application env);
+    * `:asserted_identity` — the `%SIP.Uri{}` to assert, normally
+      `sip_ctx.asserted_identity`. `nil` (the default) asserts nothing.
   """
   @spec prepare_forwarded_request(map(), keyword()) ::
           {:ok, map()} | {:error, :too_many_hops}
@@ -764,6 +861,8 @@ defmodule SIP.Msg.Ops do
         req2 =
           req
           |> Map.drop(@b2bua_dropped_fields)
+          |> strip_asserted_identity()
+          |> put_asserted_identity(Keyword.get(opts, :asserted_identity))
           |> put_contact_identity(Map.get(req, :contact))
           |> Map.put("Max-Forwards", max_forwards)
           |> Map.put(:callid, nil)
@@ -774,6 +873,72 @@ defmodule SIP.Msg.Ops do
 
         {:ok, req2}
     end
+  end
+
+  @doc """
+  Remove every `P-Asserted-Identity` from a message (RFC 3325 §5).
+
+  Case-insensitive, because a header this layer has no atom for keeps whatever
+  spelling the peer used as its map key: `Map.delete/2` on one spelling would
+  leave `p-asserted-identity` sitting there.
+  """
+  @spec strip_asserted_identity(map()) :: map()
+  def strip_asserted_identity(msg) when is_map(msg) do
+    msg
+    |> Enum.filter(fn
+      {key, _value} when is_binary(key) -> String.downcase(key) == @pai_header_lc
+      _other -> false
+    end)
+    |> Enum.reduce(msg, fn {key, _}, acc -> Map.delete(acc, key) end)
+  end
+
+  @doc """
+  True when a message asks for its identity to be withheld outside the trust
+  domain — `Privacy: id`, RFC 3325 §7.
+
+  The header carries a `;`-separated list of privacy values (RFC 3323 §4.2), so
+  `Privacy: id;user` counts as much as a bare `id`.
+  """
+  @spec privacy_id?(map()) :: boolean()
+  def privacy_id?(msg) when is_map(msg) do
+    msg
+    |> Enum.find_value(fn
+      {key, value} when is_binary(key) ->
+        if String.downcase(key) == "privacy", do: value
+
+      _other ->
+        nil
+    end)
+    |> List.wrap()
+    |> Enum.any?(fn
+      value when is_binary(value) ->
+        value
+        |> String.split(";")
+        |> Enum.any?(&(String.trim(&1) |> String.downcase() == "id"))
+
+      _other ->
+        false
+    end)
+  end
+
+  # Assert an identity on a request being forwarded. Nothing to assert, or a
+  # caller asking for privacy, means no header at all.
+  defp put_asserted_identity(req, nil), do: req
+
+  defp put_asserted_identity(req, %SIP.Uri{} = uri) do
+    if privacy_id?(req) do
+      req
+    else
+      Map.put(req, "P-Asserted-Identity", asserted_identity_value(uri))
+    end
+  end
+
+  # RFC 3325 §9.1 takes a name-addr or a bare addr-spec; the bracketed form is
+  # what the examples use and what a display name would force anyway, so it is
+  # the one written. `serialize/1` already brackets whatever needs it.
+  defp asserted_identity_value(%SIP.Uri{} = uri) do
+    {:ok, value} = SIP.Uri.serialize(uri)
+    if String.contains?(value, "<"), do: value, else: "<" <> value <> ">"
   end
 
   @doc """
@@ -900,36 +1065,41 @@ defmodule SIP.Msg.Ops do
   defp normalize_forwarded_body(parts, _ct) when is_list(parts), do: parts
 
   def add_transaction_id(msg) do
-		cond do
-			Map.has_key?(msg, :via) == false ->
-				# No via header
-				{ :ok, Map.put(msg, :transid, nil) }
+    cond do
+      Map.has_key?(msg, :via) == false ->
+        # No via header
+        {:ok, Map.put(msg, :transid, nil)}
 
-			is_nil(msg.via) or msg.via == [] ->
-				# Empty Via header
-				{ :ok, Map.put(msg, :transid, nil) }
+      is_nil(msg.via) or msg.via == [] ->
+        # Empty Via header
+        {:ok, Map.put(msg, :transid, nil)}
 
-			length(msg.via) >= 1 ->
-				# Get topmost via and branch parameter
-				[ _transport, topmost_via ] = String.split(Enum.at(msg.via, 0), " ", parts: 2)
+      length(msg.via) >= 1 ->
+        # Get topmost via and branch parameter
+        [_transport, topmost_via] = String.split(Enum.at(msg.via, 0), " ", parts: 2)
 
-				case SIP.Uri.get_uri_param("sip:" <> topmost_via, "branch") do
-					{ :ok, branch } ->
+        case SIP.Uri.get_uri_param("sip:" <> topmost_via, "branch") do
+          {:ok, branch} ->
             if String.starts_with?(branch, "z9hG4bK") do
               Map.put(msg, :transid, branch)
             else
               raise("Invalid SIP message. branch ID does not start with z9hG4bK")
             end
-					{ :no_such_param, nil } -> raise("Invalid SIP message. No branch parameter in the topmost Via")
-					{ _code, _parsed_via } -> raise("Invalid SIP message. Failed to parse Via header")
-				end
-		end
-	end
+
+          {:no_such_param, nil} ->
+            raise("Invalid SIP message. No branch parameter in the topmost Via")
+
+          {_code, _parsed_via} ->
+            raise("Invalid SIP message. Failed to parse Via header")
+        end
+    end
+  end
+
   # Route is NOT here: RFC 3261 Table 3 gives it no place in any response —
   # Record-Route is what a UAS echoes (into dialog-establishing 2xx, below), the
   # request's Route is spent once the request has been routed. Copying it gave
   # every 200 OK we sent a Route header naming the caller's own outbound proxy.
-  @reply_filter [ :via, :to, :from, :recordroute, :cseq, :callid, :contentlength ]
+  @reply_filter [:via, :to, :from, :recordroute, :cseq, :callid, :contentlength]
 
   # The To tag a response carries when the request itself named none. (When the
   # request DID name one, §8.2.6.2 requires echoing it and this is never reached —
@@ -964,42 +1134,46 @@ defmodule SIP.Msg.Ops do
           binary() | nil
         ) :: any()
   @doc "Build a SIP reply given a SIP request"
-  def reply_to_request(req, resp_code, reason, upd_fields \\ [], totag \\ nil) when is_atom(req.method) and resp_code in 100..699 do
-    resp_filter = fn { k, _v } ->
+  def reply_to_request(req, resp_code, reason, upd_fields \\ [], totag \\ nil)
+      when is_atom(req.method) and resp_code in 100..699 do
+    resp_filter = fn {k, _v} ->
       k in @reply_filter
     end
 
-    reason = if is_nil(reason) do
-      sip_reason(resp_code)
-    else
-      reason
-    end
+    reason =
+      if is_nil(reason) do
+        sip_reason(resp_code)
+      else
+        reason
+      end
 
     fieldlist = %{
       method: false,
       reason: reason,
       response: resp_code,
-      body: []}
+      body: []
+    }
 
     # Merge upd_fields and fieldlist. The content of upd_fields take priority. Remove fields that are compted
     # automatically
     upd_map = Map.merge(fieldlist, Map.new(upd_fields)) |> Map.delete(:contentlength)
 
     # If totag is missing add it
-    { :ok, to_uri } = SIP.Uri.parse(req.to)
-    upd_map = case SIP.Uri.get_uri_param(to_uri, "tag") do
+    {:ok, to_uri} = SIP.Uri.parse(req.to)
 
-      # The request already names a To tag (an in-dialog request, a re-INVITE):
-      # a response echoes it, RFC 3261 §8.2.6.2.
-      { :ok, _old_totag } ->
-        upd_map
+    upd_map =
+      case SIP.Uri.get_uri_param(to_uri, "tag") do
+        # The request already names a To tag (an in-dialog request, a re-INVITE):
+        # a response echoes it, RFC 3261 §8.2.6.2.
+        {:ok, _old_totag} ->
+          upd_map
 
-      { :no_such_param, nil } ->
-        case response_totag(resp_code, totag) do
-          nil -> upd_map
-          tag -> Map.put(upd_map, :to, SIP.Uri.set_header_param(to_uri, "tag", tag))
-        end
-    end
+        {:no_such_param, nil} ->
+          case response_totag(resp_code, totag) do
+            nil -> upd_map
+            tag -> Map.put(upd_map, :to, SIP.Uri.set_header_param(to_uri, "tag", tag))
+          end
+      end
 
     rsp = req |> Map.filter(resp_filter) |> update_sip_msg(upd_map)
 
@@ -1008,22 +1182,24 @@ defmodule SIP.Msg.Ops do
     # must not carry it (reliable 1xx / 100rel is not supported).
     rsp = if resp_code in 100..199, do: Map.delete(rsp, :recordroute), else: rsp
 
-    rsp = if Map.has_key?(req, :transid) do
-      Map.put(rsp, :transid, req.transid )
-    else
-      add_transaction_id(rsp)
-    end
+    rsp =
+      if Map.has_key?(req, :transid) do
+        Map.put(rsp, :transid, req.transid)
+      else
+        add_transaction_id(rsp)
+      end
 
     # Specific case for 200 OK and 183 Session Progress for invite
     if req.method == :INVITE and resp_code in [183, 200] do
       case Map.fetch(rsp, :body) do
-        {:ok, [] } -> raise "183 or 200 OK response cannot have an empty body"
-        {:ok, _ } -> nil
+        {:ok, []} -> raise "183 or 200 OK response cannot have an empty body"
+        {:ok, _} -> nil
         :error -> raise "183 or 200 OK need to be provided with an SDP body"
       end
     end
 
     contact = Map.get(rsp, :contact)
+
     if contact == nil do
       if resp_code in 300..303 and contact == nil do
         raise "#{resp_code} response needs to be provided with a contact field"
@@ -1033,10 +1209,11 @@ defmodule SIP.Msg.Ops do
       # enumerate the *current* bindings, and after an un-REGISTER (`Expires: 0`, or
       # the `Contact: *` wildcard) there are none — a Contact-less 200 is then the
       # correct answer, not a programming error.
-      if resp_code in 200..202 and req.method in [ :INVITE, :UPDATE ] do
+      if resp_code in 200..202 and req.method in [:INVITE, :UPDATE] do
         raise "#{resp_code} response to #{req.method} needs to be provided with a contact field"
       end
     end
+
     rsp
   end
 
@@ -1060,21 +1237,39 @@ defmodule SIP.Msg.Ops do
           binary()
         ) :: map()
   @doc "Create a 401 or a 407 response and compute the challenge"
-  def challenge_request(req, resp_code, authproc, realm, algorithm \\ nil, upd_fields \\ [], totag \\ nil)
+  def challenge_request(
+        req,
+        resp_code,
+        authproc,
+        realm,
+        algorithm \\ nil,
+        upd_fields \\ [],
+        totag \\ nil
+      )
 
-  def challenge_request(req, resp_code, "Digest", realm, algorithm, upd_fields, totag) when is_atom(req.method) and resp_code in [401, 407] do
+  def challenge_request(req, resp_code, "Digest", realm, algorithm, upd_fields, totag)
+      when is_atom(req.method) and resp_code in [401, 407] do
     rsp = reply_to_request(req, resp_code, sip_reason(resp_code), upd_fields, totag)
     # Stateless nonce, keyed by the server secret and bound to this realm: nothing
     # to store, and a nonce minted for another realm cannot be replayed here.
-    authparams = %{ "realm" => realm, "nonce" => SIP.Auth.Nonce.generate(realm), authproc: "Digest" }
-    authparams = if algorithm in [ "MD5", "SHA1", "SHA256" ], do: Map.put(authparams, "algorithm", algorithm), else: algorithm
+    authparams = %{
+      "realm" => realm,
+      "nonce" => SIP.Auth.Nonce.generate(realm),
+      authproc: "Digest"
+    }
+
+    authparams =
+      if algorithm in ["MD5", "SHA1", "SHA256"],
+        do: Map.put(authparams, "algorithm", algorithm),
+        else: algorithm
 
     Map.put(rsp, challenge_header(resp_code), authparams)
   end
 
-  def challenge_request(req, resp_code, "NTLM", realm, nil, upd_fields, totag) when is_atom(req.method) and resp_code in [401, 407] do
+  def challenge_request(req, resp_code, "NTLM", realm, nil, upd_fields, totag)
+      when is_atom(req.method) and resp_code in [401, 407] do
     rsp = reply_to_request(req, resp_code, sip_reason(resp_code), upd_fields, totag)
-    authparams = %{ "realm" => realm, authproc: "NTLM" }
+    authparams = %{"realm" => realm, authproc: "NTLM"}
     Map.put(rsp, challenge_header(resp_code), authparams)
     raise "NTLM challenge not yet implemented"
   end
@@ -1091,19 +1286,21 @@ defmodule SIP.Msg.Ops do
   that ACK by branch (§17.2.3) files it under the INVITE server transaction
   instead of handing it to the dialog — capture13 of 2026-08-14, frames 113/123.
   """
-  def ack_request(sipmsg, remote_contact, routeset \\ :ignore , body \\ [], ack_2xx \\ false) when is_map(sipmsg) and sipmsg.method in [:INVITE, :UPDATE] do
+  def ack_request(sipmsg, remote_contact, routeset \\ :ignore, body \\ [], ack_2xx \\ false)
+      when is_map(sipmsg) and sipmsg.method in [:INVITE, :UPDATE] do
     # "Max-Forwards" — see cancel_request/1 above for the missing S.
-    ack_filter = fn { k, _v } ->
-      k in [ :to, :from, :route, "Max-Forwards", :callid, :contentlength ]
+    ack_filter = fn {k, _v} ->
+      k in [:to, :from, :route, "Max-Forwards", :callid, :contentlength]
     end
 
-    remote_contact = if remote_contact == nil do
-      sipmsg.ruri
-    else
-      remote_contact
-    end
+    remote_contact =
+      if remote_contact == nil do
+        sipmsg.ruri
+      else
+        remote_contact
+      end
 
-    [ seqno, _method ] = sipmsg.cseq
+    [seqno, _method] = sipmsg.cseq
     # build ACK according to RFC 3261 section 17.1.1.3
     # - contact is copied from the final response (provided as argument)
     # - routeset is copied too (same)
@@ -1121,8 +1318,9 @@ defmodule SIP.Msg.Ops do
       {:ruri, remote_contact},
       {:route, routeset},
       {:body, body},
-      {:cseq, [ seqno, :ACK ]},
-      {:via, topvia}]
+      {:cseq, [seqno, :ACK]},
+      {:via, topvia}
+    ]
 
     # Update message
     sipmsg |> Map.filter(ack_filter) |> update_sip_msg(fieldlist)
@@ -1135,15 +1333,16 @@ defmodule SIP.Msg.Ops do
   end
 
   @doc "Crée une requête autentifiée à partir d'une requête non authentifiée et d'en entête auth"
-  def add_authorization_to_req(req, authparams, autheader, username, passwd_or_hash, pwdformat) when is_atom(req.method) do
+  def add_authorization_to_req(req, authparams, autheader, username, passwd_or_hash, pwdformat)
+      when is_atom(req.method) do
+    header2 =
+      case autheader do
+        :wwwauthenticate -> :authorization
+        :proxyauthenticate -> :proxyauthorization
+        _ -> raise "Invalid authentication header #{autheader}"
+      end
 
-    header2 = case autheader do
-      :wwwauthenticate -> :authorization
-      :proxyauthenticate -> :proxyauthorization
-      _ ->  raise "Invalid authentication header #{autheader}"
-    end
-
-    case SIPMsg.check_required_params(authparams, [ "nonce", "realm"]) do
+    case SIPMsg.check_required_params(authparams, ["nonce", "realm"]) do
       :ok ->
         algo = Map.get(authparams, "algorithm", "MD5")
         # The digest is computed over the Request-URI *as it goes on the wire*
@@ -1152,42 +1351,58 @@ defmodule SIP.Msg.Ops do
         # serialization the Request-Line uses — no display name, no header
         # parameters. `to_string/1` here would digest a different string than the
         # one sent as soon as the target came from a stored Contact.
-        { :ok, digest_uri } = SIP.Uri.serialize_ruri(req.ruri)
-        autorisation_params = SIP.Auth.build_auth_response(algo, username, authparams["nonce"], authparams["realm"],
-                                                  passwd_or_hash, pwdformat, req.method, digest_uri)
+        {:ok, digest_uri} = SIP.Uri.serialize_ruri(req.ruri)
+
+        autorisation_params =
+          SIP.Auth.build_auth_response(
+            algo,
+            username,
+            authparams["nonce"],
+            authparams["realm"],
+            passwd_or_hash,
+            pwdformat,
+            req.method,
+            digest_uri
+          )
 
         # Increment CSeq to start a new transaction
         new_cseq = if Map.get(req, :cseq) != nil, do: hd(req.cseq) + 1, else: 1
 
         # Build new request (delete auth header, add autorization header and overwrite CSeq)
-        upd_map = %{ header2 => autorisation_params, autheader => nil, cseq: [ new_cseq, req.method ]}
+        upd_map = %{
+          header2 => autorisation_params,
+          autheader => nil,
+          cseq: [new_cseq, req.method]
+        }
+
         update_sip_msg(req, upd_map)
 
-      { :ko, mparam } ->
+      {:ko, mparam} ->
         raise "Invalid autentication params. Missing #{mparam} parameter"
     end
   end
 
-  defp check_nonce({ header, authparams}, nonce) do
+  defp check_nonce({header, authparams}, nonce) do
     if !is_nil(nonce) and authparams["nonce"] != nonce do
-      { :nonce_mismatch, authparams }
+      {:nonce_mismatch, authparams}
     else
       # Skip nonce check
-      { header, authparams }
+      {header, authparams}
     end
   end
 
   defp get_auth_params_and_check_nonce(req, nonce) do
     cond do
-      Map.has_key?(req, :authorization)
-        -> { :authorization, Map.get(req, :authorization) } |> check_nonce(nonce)
-      Map.has_key?(req, :proxyauthorization)
-        -> { :proxyauthorization, Map.get(req, :proxyauthorization) } |> check_nonce(nonce)
-      true -> { :no_auth_header, nil }
+      Map.has_key?(req, :authorization) ->
+        {:authorization, Map.get(req, :authorization)} |> check_nonce(nonce)
+
+      Map.has_key?(req, :proxyauthorization) ->
+        {:proxyauthorization, Map.get(req, :proxyauthorization)} |> check_nonce(nonce)
+
+      true ->
+        {:no_auth_header, nil}
     end
   end
-
-
 
   @doc """
   Check authenticated request- check that auth header is valid
@@ -1195,16 +1410,22 @@ defmodule SIP.Msg.Ops do
   nonce: nonce that was sent in the challenge response
   """
   def check_authrequest(req, password, nonce \\ nil) when is_req(req) do
-
     case get_auth_params_and_check_nonce(req, nonce) do
-      { header, authparams } when header in [ :authorization, :proxyauthorization ] ->
+      {header, authparams} when header in [:authorization, :proxyauthorization] ->
         # Same serialization as the sender used (see add_authorization_to_req/6):
         # the Request-URI form, not the header-field form.
-        { :ok, digest_uri } = SIP.Uri.serialize_ruri(req.ruri)
-        response = SIP.Auth.compute_auth_response_from_pwd(
-          authparams["algorithm"], authparams["username"],
-          authparams["nonce"], authparams["realm"], password,
-          req.method, digest_uri )
+        {:ok, digest_uri} = SIP.Uri.serialize_ruri(req.ruri)
+
+        response =
+          SIP.Auth.compute_auth_response_from_pwd(
+            authparams["algorithm"],
+            authparams["username"],
+            authparams["nonce"],
+            authparams["realm"],
+            password,
+            req.method,
+            digest_uri
+          )
 
         if response == authparams["response"] do
           :ok
@@ -1212,16 +1433,18 @@ defmodule SIP.Msg.Ops do
           :invalid_password
         end
 
-      { header, nil } -> header
+      {header, nil} ->
+        header
 
-      { :nonce_mismatch, _authparams } -> :nonce_mismatch
+      {:nonce_mismatch, _authparams} ->
+        :nonce_mismatch
     end
   end
 
   def is_response_for?(req_type, rsp) when is_req(req_type) and is_resp(rsp) do
     # A parsed CSeq header is stored as a [seqno, method] list (see SIPMsg).
     case Map.get(rsp, :cseq) do
-      [ _seqno, method ] -> method == req_type.method
+      [_seqno, method] -> method == req_type.method
       _ -> false
     end
   end

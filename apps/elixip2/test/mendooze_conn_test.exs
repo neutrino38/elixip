@@ -285,6 +285,7 @@ defmodule Mendooze.ConnTest do
 
   @vp8 107
   @av1 110
+  @h264 99
 
   # Alice: VP8 and nothing else, on HER numbering (96, as Linphone numbers it).
   defp vp8_only_offer(port \\ 57_573) do
@@ -321,6 +322,66 @@ defmodule Mendooze.ConnTest do
     )
   end
 
+  # Alice : H.264 en tete AVEC son mode, puis VP8. Deux codecs, pour que l'exclusion
+  # de H.264 de « ce que les deux portent » soit OBSERVABLE — avec un seul codec par
+  # patte, le repli `{hd(L), hd(L')}` redonne H.264 des deux cotes et le test ne
+  # prouverait rien.
+  defp alice_h264_offer(pm) do
+    Enum.join(
+      [
+        "v=0",
+        "o=- 1 1 IN IP4 172.22.0.4",
+        "s=Talk",
+        "c=IN IP4 172.22.0.4",
+        "t=0 0",
+        "m=video 57573 RTP/AVP 96 97",
+        "a=rtpmap:96 H264/90000",
+        "a=fmtp:96 profile-level-id=42001f;packetization-mode=#{pm}",
+        "a=rtpmap:97 VP8/90000",
+        ""
+      ],
+      "\r\n"
+    )
+  end
+
+  # Bob, dans NOTRE numerotation. `pm: nil` = aucun packetization-mode annonce, ce
+  # que fait Linphone 6.2 — donc mode 0 au sens de la RFC 6184 §8.1.
+  defp bob_h264(pm) do
+    fmtp =
+      case pm do
+        nil -> ["a=fmtp:99 profile-level-id=42801f"]
+        n -> ["a=fmtp:99 profile-level-id=42801f;packetization-mode=#{n}"]
+      end
+
+    Enum.join(
+      ["v=0", "o=- 1 1 IN IP4 172.22.0.2", "s=-", "c=IN IP4 172.22.0.2", "t=0 0"] ++
+        ["m=video 52052 RTP/AVP 99 107", "a=rtpmap:99 H264/90000"] ++
+        fmtp ++ ["a=rtpmap:107 VP8/90000", ""],
+      "\r\n"
+    )
+  end
+
+  # Sans verdict serveur : `conformant_pts/3` ne s'applique pas, et le double n'a
+  # pas a inventer un fmtp conforme. Ces tests portent sur la SELECTION croisee,
+  # pas sur le verdict — les melanger testerait deux choses a la fois.
+  defp h264_legs(server, alice_pm) do
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(), media: :video, transcode: [video: :avoid])
+
+    assert_receive {:jsr309_call, "MediaSessionCreate", [_tag, _q]}, 1_000
+
+    {:ok, out} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :video,
+        bridge_with: conn,
+        transcode: [video: :avoid]
+      )
+
+    assert {:ok, _answer} = Mendooze.set_remote_offer(conn, alice_h264_offer(alice_pm))
+    {:ok, _offer} = Mendooze.get_local_offer(out)
+    {conn, out}
+  end
+
   defp video_fmt(sdp) do
     assert [_, fmt] = Regex.run(~r{m=video \d+ RTP/AVP ([\d ]+)}, sdp)
     String.split(fmt, " ", trim: true)
@@ -354,6 +415,115 @@ defmodule Mendooze.ConnTest do
     # callee that cannot do VP8 still has something to accept and the transcoder
     # still has somewhere to go. VP8 simply leads.
     assert ["107", "110", "99"] == video_fmt(offer)
+  end
+
+
+  # ── packetization-mode : le mode fait partie de l'identite du codec ─────────
+
+  # Le mode de mise en paquets fait partie de l'identite d'un PT H.264
+  # (RFC 6184 §8.2.2), et en relais rien ne le convertit : ce qui sort d'une patte
+  # est la mise en paquets que l'AUTRE pair a negociee avec nous, remise telle
+  # quelle. Deux pattes qui disent « H264 » ne se relaient donc pas pour autant.
+  #
+  # Trafic du 2026-08-21 : Linphone offrait `a=fmtp:99 profile-level-id=42801F`
+  # sans mode — du NAL simple, ni FU-A ni STAP-A — et Chrome fragmentait a
+  # 1170 octets. Les deux disaient « H264 », le pont relayait, et le decodeur de
+  # Linphone repondait `dsNoParamSets` pendant tout l'appel sur un flux que la
+  # capture prouve livre a l'octet pres. Le transcodage etait disponible et n'a
+  # jamais ete choisi, parce que « un codec que les deux portent » se lisait sur
+  # le seul NOM du codec.
+  test "H264 n'est pas un codec commun quand les modes de mise en paquets divergent" do
+    %{server: server} = start_media_server(&two_leg_handler/2)
+    {conn, out} = h264_legs(server, 1)
+
+    # Bob n'annonce aucun mode : il ne sait recevoir que du NAL simple.
+    :ok = Mendooze.set_remote_answer(out, bob_h264(nil))
+    assert {:ok, _} = Mendooze.bridge(conn, out, video: :avoid)
+
+    # H.264 est ecarte de « ce que les deux portent », donc la selection tombe sur
+    # VP8 — que les deux portent VRAIMENT. C'est le bon resultat : on relaie du VP8
+    # au lieu de relayer un H.264 que Bob ne saurait pas depaquetiser.
+    assert_receive {:jsr309_call, "VideoTranscoderSetCodec", [3, 30, @vp8 | _]}, 1_000
+    assert_receive {:jsr309_call, "VideoTranscoderSetCodec", [3, 31, @vp8 | _]}, 1_000
+  end
+
+  # Le controle positif, sans lequel le test negatif ne prouverait rien : quand les
+  # deux pattes s'accordent sur le mode, H.264 redevient un codec commun et c'est
+  # lui qui est choisi, en tete des deux listes.
+  test "H264 reste un codec commun quand les deux pattes annoncent le meme mode" do
+    %{server: server} = start_media_server(&two_leg_handler/2)
+    {conn, out} = h264_legs(server, 1)
+
+    :ok = Mendooze.set_remote_answer(out, bob_h264(1))
+    assert {:ok, _} = Mendooze.bridge(conn, out, video: :avoid)
+
+    assert_receive {:jsr309_call, "VideoTranscoderSetCodec", [3, 30, @h264 | _]}, 1_000
+    assert_receive {:jsr309_call, "VideoTranscoderSetCodec", [3, 31, @h264 | _]}, 1_000
+  end
+
+  # ── prefer_codecs: the scenario's own ranking of the answer ────────────────
+
+  # The recording case (scenarios/record.exs): the caller offers AV1/H264/VP8 in
+  # its own order; the scenario wants H264 first in the answer because that is
+  # what the MP4 container records without transcoding — and the answer's order
+  # is what steers which codec the caller then sends.
+  test "prefer_codecs reranks the answer's video formats" do
+    %{server: server} = start_media_server(&verdict_handler/2)
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :video,
+        prefer_codecs: [video: ["H264"]]
+      )
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, av1_first_offer())
+
+    # A permutation, not a restriction: H264 leads, the payload types the
+    # scenario did not rank keep the offer's own order behind it.
+    assert ["99", "110", "107"] == video_fmt(answer)
+  end
+
+  test "without prefer_codecs the answer keeps the offer's order" do
+    %{server: server} = start_media_server(&verdict_handler/2)
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :video)
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, av1_first_offer())
+
+    assert ["110", "99", "107"] == video_fmt(answer)
+  end
+
+  test "prefer_codecs never adds a codec the offer lacks" do
+    %{server: server} = start_media_server(&verdict_handler/2)
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :video,
+        prefer_codecs: [video: ["H264"]]
+      )
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, vp8_only_offer())
+
+    # The caller only speaks VP8: the preference has nothing to float and the
+    # answer is exactly what it would have been without it (RFC 3264 §6.1 — an
+    # answer may only carry payload types the offer declared).
+    assert ["96"] == video_fmt(answer)
+  end
+
+  test "an unknown prefer_codecs name fails the creation, not an answer" do
+    %{server: server} = start_media_server()
+
+    assert {:error, _} =
+             Mendooze.create_peer_connection(server, self(),
+               media: :video,
+               prefer_codecs: [video: ["H265"]]
+             )
+
+    assert {:error, _} =
+             Mendooze.create_peer_connection(server, self(),
+               media: :video,
+               prefer_codecs: [application: ["H264"]]
+             )
   end
 
   # `:forbid` says the media may never be converted, so a codec the far end
@@ -601,7 +771,8 @@ defmodule Mendooze.ConnTest do
 
     assert {:ok, _answer} = Mendooze.set_remote_offer(conn, av1_first_offer())
 
-    assert_receive {:jsr309_call, "EndpointStartSending", [3, 4, 1, "10.9.8.7", 40_002, send_map]},
+    assert_receive {:jsr309_call, "EndpointStartSending",
+                    [3, 4, 1, "10.9.8.7", 40_002, send_map]},
                    1_000
 
     # AV1 is the caller's preference and stays first in the answer, but H.264 and
@@ -637,7 +808,8 @@ defmodule Mendooze.ConnTest do
 
     assert {:ok, _answer} = Mendooze.set_remote_offer(conn, offer)
 
-    assert_receive {:jsr309_call, "EndpointStartSending", [3, 4, 1, "10.9.8.7", 40_002, send_map]},
+    assert_receive {:jsr309_call, "EndpointStartSending",
+                    [3, 4, 1, "10.9.8.7", 40_002, send_map]},
                    1_000
 
     # One entry, and it is the payload type the caller listed first.
@@ -664,7 +836,8 @@ defmodule Mendooze.ConnTest do
 
     assert {:ok, _answer} = Mendooze.set_remote_offer(conn, av1_first_offer())
 
-    assert_receive {:jsr309_call, "EndpointStartSending", [3, 4, 1, "10.9.8.7", 40_002, send_map]},
+    assert_receive {:jsr309_call, "EndpointStartSending",
+                    [3, 4, 1, "10.9.8.7", 40_002, send_map]},
                    1_000
 
     {:ok, _offer} = Mendooze.get_local_offer(out)
@@ -1302,6 +1475,76 @@ defmodule Mendooze.ConnTest do
     assert audio.ice == %{ufrag: ufrag, pwd: pwd}
   end
 
+  # A leg admitted as `:if_offered` is as WebRTC as a `:yes` one once a browser's
+  # offer has settled it, and what it writes NEXT has to say so. It answered with
+  # rtcp-mux, an a=mid per section and host candidates, then RE-OFFERED — a B2BUA
+  # relaying the callee turning its camera on — with none of the three, because
+  # the offer path read the option where the answer path read the leg. Chrome
+  # refuses that SDP outright (rtcpMuxPolicy is "require", a unified-plan section
+  # needs its mid): the 488 of 2026-08-21 killed a call that was working.
+  test "a re-offer on an `:if_offered` leg that answered WebRTC is still WebRTC" do
+    %{server: server} = start_media_server()
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :audio_video,
+        webrtc_support: :if_offered
+      )
+
+    offer =
+      Sdp.build(%{
+        ip: "10.9.8.7",
+        medias: [
+          %{
+            type: :audio,
+            port: 40_000,
+            codecs: ["OPUS"],
+            crypto: {:dtls, :actpass, "sha-256", @fp},
+            ice: %{ufrag: "remote-uf", pwd: "remote-pwd-123456789012345"},
+            protocol: "UDP/TLS/RTP/SAVPF",
+            rtcp_mux: true,
+            mid: "0"
+          },
+          %{
+            type: :video,
+            port: 40_002,
+            codecs: ["VP8"],
+            crypto: {:dtls, :actpass, "sha-256", @fp},
+            ice: %{ufrag: "remote-uf", pwd: "remote-pwd-123456789012345"},
+            protocol: "UDP/TLS/RTP/SAVPF",
+            rtcp_mux: true,
+            mid: "1"
+          }
+        ]
+      })
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, offer)
+    assert {:ok, answered} = Sdp.parse(answer)
+    assert Enum.all?(answered, & &1.rtcp_mux)
+
+    assert {:ok, reoffer} = Mendooze.get_local_offer(conn)
+    assert {:ok, descs} = Sdp.parse(reoffer)
+    assert length(descs) == 2
+
+    for desc <- descs do
+      assert desc.rtcp_mux
+      assert desc.candidates != []
+      assert match?({:dtls, _, _, _}, desc.crypto)
+      assert desc.protocol == "UDP/TLS/RTP/SAVPF"
+    end
+
+    # The mids are the ones the session already has, not the media names we
+    # would have invented: a section's mid does not change once negotiated, and
+    # libwebrtc matches transceivers by it.
+    assert Enum.map(descs, & &1.mid) == ["0", "1"]
+
+    # And the DTLS+ICE association is kept: a re-offer that mints fresh ICE
+    # credentials is an ICE restart nothing asked for.
+    for {before, after_} <- Enum.zip(answered, descs) do
+      assert after_.ice == before.ice
+    end
+  end
+
   # ── The §7.5 ladder's middle rung ───────────────────────────────────────────
 
   test "rtp_profile: :avpf offers RTP/AVPF — the feedback profile, and nothing else" do
@@ -1563,6 +1806,7 @@ defmodule Mendooze.ConnTest do
 
   # ICE is the one case the server cannot see: it holds the `c=` line, not the
   # candidates, so it cannot know the address was settled by connectivity checks.
+  # Both sides have to be doing it — see the next test for the half that is not.
   test "a DTLS+ICE leg never asks for latching: candidates settle the address" do
     %{server: server} = start_media_server()
 
@@ -1596,6 +1840,50 @@ defmodule Mendooze.ConnTest do
     assert_receive {:jsr309_call, "EndpointSetRTPProperties", [3, 4, 0, props]}
     assert Map.has_key?(props, "rtcp-mux")
     refute Map.has_key?(props, "natLatch")
+  end
+
+  # ADVERSE — offering ICE is not practising it. We advertise candidates on every
+  # leg that carries DTLS; a SIP endpoint answers with a fingerprint and no ICE at
+  # all. ICE is then running on neither side: the server drops every inbound check
+  # for want of a remote password, so nothing will ever settle the address, and
+  # standing aside leaves the leg aimed at whatever the `c=` line claimed.
+  # Traffic of 2026-08-21: Bob (Linphone) answered `c=IN IP4 172.22.0.5` — a docker
+  # interface of his own host — while his RTP arrived from 172.21.104.60, and he
+  # received nothing at all for the whole call, audio and video, in a call whose
+  # DTLS handshake had succeeded on both media.
+  test "a leg whose peer answered without ICE asks for latching after all" do
+    %{server: server} = start_media_server()
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :audio,
+        audio_codec: "PCMU",
+        webrtc_support: :yes
+      )
+
+    assert {:ok, _offer} = Mendooze.get_local_offer(conn)
+    assert_receive {:jsr309_call, "EndpointSetLocalSTUNCredentials", [3, 4, 0, _uf, _pwd]}
+
+    # a plain SIP endpoint: DTLS because we offered SAVPF, no ICE whatsoever
+    answer =
+      Sdp.build(%{
+        ip: "172.22.0.5",
+        medias: [
+          %{
+            type: :audio,
+            port: 43_022,
+            codecs: ["PCMU"],
+            crypto: {:dtls, :active, "sha-256", @fp},
+            protocol: "UDP/TLS/RTP/SAVPF",
+            rtcp_mux: true
+          }
+        ]
+      })
+
+    assert :ok = Mendooze.set_remote_answer(conn, answer)
+
+    assert_receive {:jsr309_call, "EndpointSetRTPProperties", [3, 4, 0, props]}
+    assert props["natLatch"] == "1"
   end
 
   test "nat_latch overrides the inference, either way" do
@@ -2230,12 +2518,302 @@ defmodule Mendooze.ConnTest do
     # the intersection of asked-for and implemented, per explicit PT
     assert answer =~ "a=rtcp-fb:99 nack"
     assert answer =~ "a=rtcp-fb:99 ccm fir"
-    # goog-remb has no server switch and is deliberately not answered
-    refute answer =~ "goog-remb"
+    # goog-remb has its own server switch since rate-control lot 2
+    assert answer =~ "a=rtcp-fb:99 goog-remb"
 
     # exactly the switches behind the answered feedback types
     assert_receive {:jsr309_call, "EndpointSetRTPProperties", [3, 4, 1, props]}
-    assert props == %{"useNACK" => "1", "useRtcpFIR" => "1", "natLatch" => "1"}
+
+    assert props == %{
+             "useNACK" => "1",
+             "useRtcpFIR" => "1",
+             "remb" => "1",
+             "natLatch" => "1"
+           }
+  end
+
+  # `[mediaserver] bitrate_feedback` narrows which dialects the answer confirms.
+  # An empty list is the OPEN-LOOP rate-control measurement (mediaserver
+  # rate_control_plan.md, lot 3): no bitrate target leaves towards the peer, so the
+  # incoming rate stops depending on what we estimate. Naming one dialect isolates
+  # one feedback path. In every case the rest of the answer is untouched — dropping
+  # the wrong attribute would silently cost the call its loss recovery.
+  for {allowed, kept, dropped} <- [
+        {[], [], ["goog-remb", "ccm tmmbr"]},
+        {[:remb], ["goog-remb"], ["ccm tmmbr"]},
+        {[:tmmbr], ["ccm tmmbr"], ["goog-remb"]},
+        {[:remb, :tmmbr], ["goog-remb", "ccm tmmbr"], []}
+      ] do
+    test "bitrate_feedback #{inspect(allowed)} answers #{inspect(kept)} and nothing else" do
+      allowed = unquote(allowed)
+      kept = unquote(kept)
+      dropped = unquote(dropped)
+
+      block = Application.get_env(:elixip2, MediaServer.Mendooze, [])
+
+      Application.put_env(
+        :elixip2,
+        MediaServer.Mendooze,
+        Keyword.put(block, :bitrate_feedback, allowed)
+      )
+
+      on_exit(fn -> Application.put_env(:elixip2, MediaServer.Mendooze, block) end)
+
+      %{server: server} = start_media_server()
+      {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :video)
+
+      offer = """
+      v=0
+      o=- 1 1 IN IP4 10.0.0.9
+      s=-
+      c=IN IP4 10.0.0.9
+      t=0 0
+      m=video 40002 RTP/AVPF 99
+      a=rtpmap:99 H264/90000
+      a=rtcp-fb:* nack
+      a=rtcp-fb:* ccm fir
+      a=rtcp-fb:* ccm tmmbr
+      a=rtcp-fb:* goog-remb
+      """
+
+      assert {:ok, answer} = Mendooze.set_remote_offer(conn, offer)
+
+      for type <- kept, do: assert(answer =~ "a=rtcp-fb:99 #{type}")
+      for type <- dropped, do: refute(answer =~ type)
+
+      # The feedback that has nothing to do with rate control is never touched.
+      assert answer =~ "a=rtcp-fb:99 nack"
+      assert answer =~ "a=rtcp-fb:99 ccm fir"
+
+      # And the server-side switches follow the same set, never the offer's.
+      assert_receive {:jsr309_call, "EndpointSetRTPProperties", [_, _, _, props]}
+      assert Map.has_key?(props, "remb") == :remb in allowed
+      assert Map.has_key?(props, "tmmbr") == :tmmbr in allowed
+      assert props["useNACK"] == "1"
+      assert props["useRtcpFIR"] == "1"
+    end
+  end
+
+  # ── transport-wide congestion control (docs/design/kelixip-transport-wide-cc.md) ──
+  #
+  # The extension the media server writes a transport-wide sequence number into, so the
+  # peer's fmt 15 reports can feed its SENDER-side bandwidth estimator. Off by default:
+  # the server does not report arrivals for what it RECEIVES yet (§5).
+
+  @transport_cc_uri "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01"
+
+  defp with_transport_cc(value) do
+    block = Application.get_env(:elixip2, MediaServer.Mendooze, [])
+    Application.put_env(:elixip2, MediaServer.Mendooze, Keyword.put(block, :transport_cc, value))
+    on_exit(fn -> Application.put_env(:elixip2, MediaServer.Mendooze, block) end)
+  end
+
+  # `extmap` is what the offer declares on its video m= line, verbatim; nil means the
+  # offer carries none at all.
+  defp twcc_offer(extmap) do
+    Enum.join(
+      [
+        "v=0",
+        "o=- 1 1 IN IP4 10.0.0.9",
+        "s=-",
+        "c=IN IP4 10.0.0.9",
+        "t=0 0",
+        "m=video 40002 RTP/AVPF 99",
+        "a=rtpmap:99 H264/90000",
+        "a=rtcp-fb:* nack",
+        "a=rtcp-fb:* ccm fir",
+        "a=rtcp-fb:* goog-remb",
+        "a=rtcp-fb:* transport-cc"
+      ] ++ List.wrap(extmap) ++ [""],
+      "\r\n"
+    )
+  end
+
+  defp answer_video_offer(offer) do
+    %{server: server} = start_media_server()
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :video)
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, offer)
+    assert_receive {:jsr309_call, "EndpointSetRTPProperties", [3, 4, 1, props]}
+    %{answer: answer, props: props}
+  end
+
+  test "an offered transport-cc extmap is answered with the same id and armed on the leg" do
+    with_transport_cc(true)
+
+    %{answer: answer, props: props} =
+      answer_video_offer(twcc_offer("a=extmap:3 #{@transport_cc_uri}"))
+
+    # RFC 8285 §5: the answer states the offer's own id, never one of ours
+    assert answer =~ "a=extmap:3 #{@transport_cc_uri}"
+    # ...and confirms the feedback message that reports on it, per explicit PT
+    assert answer =~ "a=rtcp-fb:99 transport-cc"
+
+    # The server-side switch is the extmap property, keyed by URI and valued with the
+    # negotiated id — not a "1" like the rtcp-fb switches next to it.
+    assert props[@transport_cc_uri] == "3"
+    assert props["useNACK"] == "1"
+    assert props["remb"] == "1"
+  end
+
+  test "an id the offerer chose freely is the id we answer and arm" do
+    with_transport_cc(true)
+
+    %{answer: answer, props: props} =
+      answer_video_offer(twcc_offer("a=extmap:7 #{@transport_cc_uri}"))
+
+    assert answer =~ "a=extmap:7 #{@transport_cc_uri}"
+    assert props[@transport_cc_uri] == "7"
+  end
+
+  test "the switch off leaves the offer unanswered on both lines and unarmed" do
+    with_transport_cc(false)
+
+    %{answer: answer, props: props} =
+      answer_video_offer(twcc_offer("a=extmap:3 #{@transport_cc_uri}"))
+
+    refute answer =~ "a=extmap"
+    refute answer =~ "transport-cc"
+    refute Map.has_key?(props, @transport_cc_uri)
+
+    # and nothing else about the answer moved
+    assert answer =~ "a=rtcp-fb:99 nack"
+    assert props["useNACK"] == "1"
+  end
+
+  test "an offer without the extmap gets nothing back, switch on" do
+    with_transport_cc(true)
+
+    %{answer: answer, props: props} = answer_video_offer(twcc_offer(nil))
+
+    # the offer asks for the feedback message, but nothing writes the sequence number
+    # it would report on: confirming it would promise reports on nothing
+    refute answer =~ "a=extmap"
+    refute answer =~ "transport-cc"
+    refute Map.has_key?(props, @transport_cc_uri)
+  end
+
+  test "an asymmetric extmap direction is left alone (v1 perimeter)" do
+    with_transport_cc(true)
+
+    %{answer: answer, props: props} =
+      answer_video_offer(twcc_offer("a=extmap:7/sendonly #{@transport_cc_uri}"))
+
+    refute answer =~ "a=extmap"
+    refute answer =~ "transport-cc"
+    refute Map.has_key?(props, @transport_cc_uri)
+  end
+
+  test "sendrecv is not an asymmetric direction and is answered" do
+    with_transport_cc(true)
+
+    %{answer: answer, props: props} =
+      answer_video_offer(twcc_offer("a=extmap:4/sendrecv #{@transport_cc_uri}"))
+
+    assert answer =~ "a=extmap:4/sendrecv #{@transport_cc_uri}"
+    assert props[@transport_cc_uri] == "4"
+  end
+
+  test "the audio m= line never carries the extension (no sender estimator behind it)" do
+    with_transport_cc(true)
+    %{server: server} = start_media_server()
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio_video)
+
+    offer =
+      Enum.join(
+        [
+          "v=0",
+          "o=- 1 1 IN IP4 10.0.0.9",
+          "s=-",
+          "c=IN IP4 10.0.0.9",
+          "t=0 0",
+          "m=audio 40000 RTP/AVPF 0",
+          "a=rtpmap:0 PCMU/8000",
+          "a=rtcp-fb:* transport-cc",
+          "a=extmap:3 #{@transport_cc_uri}",
+          "m=video 40002 RTP/AVPF 99",
+          "a=rtpmap:99 H264/90000",
+          "a=rtcp-fb:* transport-cc",
+          "a=extmap:3 #{@transport_cc_uri}",
+          ""
+        ],
+        "\r\n"
+      )
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, offer)
+
+    [audio_section, video_section] = String.split(answer, "m=video", parts: 2)
+    refute audio_section =~ "a=extmap"
+    refute audio_section =~ "transport-cc"
+    assert video_section =~ "a=extmap:3"
+
+    assert_receive {:jsr309_call, "EndpointSetRTPProperties", [3, 4, 0, audio_props]}
+    refute Map.has_key?(audio_props, @transport_cc_uri)
+    assert_receive {:jsr309_call, "EndpointSetRTPProperties", [3, 4, 1, video_props]}
+    assert video_props[@transport_cc_uri] == "3"
+  end
+
+  test "we OFFER the extension with its feedback message, and arm it once the answer takes it" do
+    with_transport_cc(true)
+    %{server: server} = start_media_server()
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :video,
+        video_codec: "H264",
+        webrtc_support: :yes
+      )
+
+    assert {:ok, offer} = Mendooze.get_local_offer(conn)
+
+    # id 3: nothing else offers an extmap today, so there is nothing to collide with
+    assert offer =~ "a=extmap:3 #{@transport_cc_uri}"
+    assert offer =~ "a=rtcp-fb:99 transport-cc"
+
+    assert :ok =
+             Mendooze.set_remote_answer(conn, twcc_offer("a=extmap:3 #{@transport_cc_uri}"))
+
+    assert_receive {:jsr309_call, "EndpointSetRTPProperties", [3, 4, 1, props]}
+    assert props[@transport_cc_uri] == "3"
+  end
+
+  test "an answer that drops the extension arms nothing, and the offer is unchanged otherwise" do
+    with_transport_cc(true)
+    %{server: server} = start_media_server()
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :video,
+        video_codec: "H264",
+        webrtc_support: :yes
+      )
+
+    assert {:ok, offer} = Mendooze.get_local_offer(conn)
+    assert offer =~ "a=extmap:3 #{@transport_cc_uri}"
+
+    assert :ok = Mendooze.set_remote_answer(conn, twcc_offer(nil))
+
+    assert_receive {:jsr309_call, "EndpointSetRTPProperties", [3, 4, 1, props]}
+    refute Map.has_key?(props, @transport_cc_uri)
+  end
+
+  test "the switch off offers neither the extension nor its feedback message" do
+    with_transport_cc(false)
+    %{server: server} = start_media_server()
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :video,
+        video_codec: "H264",
+        webrtc_support: :yes
+      )
+
+    assert {:ok, offer} = Mendooze.get_local_offer(conn)
+
+    refute offer =~ "a=extmap"
+    refute offer =~ "transport-cc"
+    # the rest of the offered feedback is untouched
+    assert offer =~ "a=rtcp-fb:99 nack"
+    assert offer =~ "a=rtcp-fb:99 goog-remb"
   end
 
   # The assumed RFC 4585 §4 deviation (see answered_rtcp_fb/1): endpoints such as

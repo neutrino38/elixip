@@ -136,7 +136,7 @@ defmodule Kelix.Mod.McuLifecycleTest do
       assert conf.rate == 16_000
       assert conf.medias == [:audio, :video]
       # a nested atom-keyed map is levelled and merged, like its JSON counterpart
-      assert conf.video == %{size: 6, fps: 25, bitrate: 1024, intra_period: 300}
+      assert conf.video == %{size: 6, fps: 25, bitrate: 1500, intra_period: 300}
 
       assert conf.layout == %{comp: 6, size: 6, auto: true}
       assert conf.max_participants == 4

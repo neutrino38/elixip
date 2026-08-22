@@ -303,6 +303,94 @@ defmodule SIP.Test.B2bua.Scenario do
     assert_receive {:instance_done, :ok}, 10_000
   end
 
+  # The one in-dialog request that does NOT cross, on a B2BUA with no media at all:
+  # an offerless UPDATE, i.e. an RFC 4028 session-timer refresh. A session timer runs
+  # between us and ONE peer — we are its UA on that leg — so the far end has nothing
+  # to answer, and RFC 3311 §5.1 lets us say 200 with no SDP, which a signalling
+  # B2BUA can do without a media server.
+  #
+  # Relayed instead, the refresh reaches a callee that answers on its own timer and
+  # the caller waits on a transaction we opened for nothing. Raised instead (what
+  # reply_invite_with_sdp did until 2026-08-17), it takes the call down.
+  @tag timeout: 60_000
+  test "an offerless UPDATE from the caller is answered here and does not cross", %{
+    scenario: module,
+    stub: stub
+  } do
+    invite = inbound_invite()
+    peer = peer_uri("b2bua_caller_refresh")
+    tp_pid = transport_pid(peer)
+    :ok = Mockup.set_peer(tp_pid, Manual)
+    :ok = Mockup.attach_probe(tp_pid)
+
+    {instance, _ref} = start_instance(module, stub, invite, peer)
+    send(instance, {:INVITE, invite, self(), stub})
+
+    assert_receive {:replied, 100, "Trying", _req, _fields}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
+    Manual.simulate(tp_pid, 200, 100)
+    assert_receive {:replied, 200, _reason, _req, _fields}, 5_000
+    send(instance, {:ACK, in_dialog(:ACK, invite), nil, stub})
+
+    update = %{in_dialog(:UPDATE, invite) | cseq: [3, :UPDATE]}
+    send(instance, {:UPDATE, update, self(), stub})
+
+    # Answered here, with no SDP either way.
+    assert_receive {:replied, 200, "OK", answered, fields}, 5_000
+    assert answered.method == :UPDATE
+    assert answered.cseq == [3, :UPDATE]
+    assert Keyword.get(fields, :body) == nil
+    assert Keyword.fetch!(fields, :contact).domain == "0.0.0.0"
+
+    # And no re-offer went to the callee. Its probe reports every request it is
+    # sent, so a refresh relayed — as an UPDATE or rebuilt as a re-INVITE — shows
+    # up here. The methods are named: the initial ACK legitimately crossed and is
+    # in this mailbox already.
+    refute_receive {:sip_mockup, {:request_sent, :UPDATE, _fwd}}, 1_000
+    refute_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 1_000
+
+    # The call is still up: it hangs up normally afterwards.
+    send(instance, {:BYE, in_dialog(:BYE, invite), self(), stub})
+    assert_receive {:replied, 200, "OK", bye_req, _}, 5_000
+    assert bye_req.method == :BYE
+    assert_receive {:instance_done, :ok}, 10_000
+  end
+
+  # The same rule seen from the other side — the half a caller-side test cannot
+  # show. The callee refreshes on ITS timer, over the wire, and what must not
+  # happen is a request appearing on the inbound leg.
+  @tag timeout: 60_000
+  test "an offerless UPDATE from the callee is answered on its own leg and does not cross", %{
+    scenario: module,
+    stub: stub
+  } do
+    invite = inbound_invite()
+    peer = peer_uri("b2bua_callee_refresh")
+    tp_pid = transport_pid(peer)
+    :ok = Mockup.set_peer(tp_pid, Manual)
+    :ok = Mockup.attach_probe(tp_pid)
+
+    {instance, _ref} = start_instance(module, stub, invite, peer)
+    send(instance, {:INVITE, invite, self(), stub})
+
+    assert_receive {:replied, 100, "Trying", _req, _fields}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
+    Manual.simulate(tp_pid, 200, 100)
+    assert_receive {:replied, 200, _reason, _req, _fields}, 5_000
+    send(instance, {:ACK, in_dialog(:ACK, invite), nil, stub})
+
+    Manual.refresh_session(tp_pid)
+
+    # Nothing reaches the caller: not the UPDATE, and not a re-INVITE built from it.
+    refute_receive {:sent_on_inbound, _req}, 2_000
+
+    # The call is still up — the scenario answered the refresh and stayed in `loop`
+    # rather than failing on it, and the callee's hangup still ends the call at the
+    # caller.
+    Manual.hangup(tp_pid)
+    assert_receive {:sent_on_inbound, %{method: :BYE}}, 5_000
+  end
+
   # The OTHER hangup, and the one nothing covered: the CALLEE puts the phone down.
   # Its BYE arrives on the outbound leg — `{:outbound, {:BYE, …}}` — and what it
   # owes is a BYE on the INBOUND one, so the caller stops talking to itself.

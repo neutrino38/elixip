@@ -24,6 +24,11 @@ defmodule Kelix.Mod.Mcu.Script do
       # returns the updated context. The verdict lands in `sip_ctx.lasterr`
       # (see `Kelix.Mod.Mcu.admit/4`), on which a pending `goto` also aborts by
       # itself.
+      #
+      # An admitted leg comes back WIRED — `:username`, `:media_conn_opts` and
+      # `:mediaserver_instance` are set — so a script calls `media_connect()`
+      # next and states none of it. `Kelix.Mod.Mcu.admit/4` says why each one
+      # follows from what a conference leg is.
       defmacro admit(req, dialog_pid) do
         quote do
           SIP.Scenario.Monitor.note_command(:media, "mcu_admit")

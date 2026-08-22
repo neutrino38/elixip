@@ -48,6 +48,18 @@ defmodule MediaServer.SdpTools do
   @doc "Rank a payload type against the offer's format list (its preference order)."
   defdelegate pt_rank(pt, fmt_order), to: Sdp
 
+  @doc "Rank an accepted entry with a preferred codec code first, the offer's order inside."
+  defdelegate preferred_rank(entry, fmt_order, prefer), to: Sdp
+
+  @doc "The codec-table name of a Mendooze codec code, or `nil` for one it does not name."
+  defdelegate codec_name(kind, code), to: Sdp
+
+  @doc "The Mendooze code of a codec name, or `:error` for a name the tables do not carry."
+  defdelegate codec_code(kind, name), to: Sdp
+
+  @doc "The codec names of one media, as the tables spell them — a vocabulary, not a capability."
+  defdelegate codec_names(kind), to: Sdp
+
   @doc "Local ICE host candidates for one media."
   defdelegate host_candidates(ip, port, rtcp_mux?), to: Sdp
 
@@ -101,4 +113,25 @@ defmodule MediaServer.SdpTools do
   encode. See `MediaServer.Mendooze.Sdp.av1_level_idx/3`.
   """
   defdelegate av1_level_idx(width, height, fps), to: Sdp
+
+  @doc """
+  The transport-wide-cc extension to confirm on this media, or `nil`.
+
+  One reading of the switch, the media type and the peer's `a=extmap` for every
+  adapter, so two controllers cannot negotiate different things. See
+  `MediaServer.Mendooze.Sdp.transport_cc_extmap/1`.
+  """
+  defdelegate transport_cc_extmap(desc), to: Sdp
+
+  @doc """
+  The extension's URI: the `a=extmap` value, and the media server property key whose
+  value is the negotiated id. See `MediaServer.Mendooze.Sdp.transport_cc_uri/0`.
+  """
+  defdelegate transport_cc_uri(), to: Sdp
+
+  @doc """
+  The `a=rtcp-fb` type paired with the extension. See
+  `MediaServer.Mendooze.Sdp.transport_cc_fb/0`.
+  """
+  defdelegate transport_cc_fb(), to: Sdp
 end
