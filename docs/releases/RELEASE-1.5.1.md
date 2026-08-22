@@ -88,3 +88,8 @@ For more details refert to [DESIGN-MCU.md](../design/DESIGN-MCU.md#41-what-survi
 
 - `conference_file` wants a writable directory for the `kelixip` user; the
   shipped example is `/var/lib/kelixip/conferences.json`.
+
+## Dependencies
+
+- [Medooze mediaserver](https://github.com/neutrino38/mediaserver) **1.13.0
+  is required**
