@@ -1,7 +1,7 @@
-# Packaging kelixip (design §12.1, §15 P10)
+# Packaging kelixip / elixipp (design §12.1, §15 P10)
 
-Produces four packages — RPM for Alma Linux 9, deb for Ubuntu/Debian — from one
-`mix release`:
+Produces five packages — RPM for Alma Linux 9, deb for Ubuntu/Debian (elixipp:
+RPM only so far) — from one `mix release` plus one `mix escript.build`:
 
 | Package (RPM / deb) | Contents |
 |---|---|
@@ -9,6 +9,7 @@ Produces four packages — RPM for Alma Linux 9, deb for Ubuntu/Debian — from 
 | `kelixip-mod-registrar` | `Kelix.Mod.Registrar` bytecode, dropped into `module_dir` |
 | `kelixip-mod-auth_db` / `kelixip-mod-auth-db` | `Kelix.Mod.AuthDb` bytecode, dropped into `module_dir` |
 | `kelixip-mod-mcu` | `Kelix.Mod.Mcu` bytecode — the conference mixer, which also needs a reachable media server |
+| `elixipp` | the test-tool escript (`/usr/bin/elixipp`) + `ELIXIPP.md`/`FSL.md` |
 
 Each module package carries **its own document** under `/usr/share/doc/<package>/`,
 so what the docs on a host describe is what that host can actually do.
@@ -18,19 +19,25 @@ The core ships **no SIP function**: a deployment installs only the modules it us
 [../docs/kelixip/installation.md](../docs/kelixip/installation.md) for the admin
 side — this file is about producing the artifacts.
 
+`elixipp` is unrelated to that split: it is the standalone test tool, one escript,
+installed on whatever host runs test scenarios — never on a kelixip node.
+
 ## Build
 
 ```bash
-# RPM, on an Alma Linux 9 host:
-packaging/build-rpm.sh                              # -> packaging/dist/*.rpm
+# kelixip RPM, on an Alma Linux 9 host:
+packaging/build-rpm.sh                              # -> packaging/dist/kelixip*.rpm
 
-# deb, on the Ubuntu/Debian release you are targeting:
+# kelixip deb, on the Ubuntu/Debian release you are targeting:
 packaging/build-deb.sh                              # -> packaging/dist/*.deb
 
-# Anywhere else (needs podman or docker):
+# kelixip, anywhere else (needs podman or docker):
 packaging/build-in-container.sh                     # RPM, almalinux:9
 packaging/build-in-container.sh --target ubuntu     # deb, ubuntu:24.04
 packaging/build-in-container.sh --target ubuntu --os-version 22.04
+
+# elixipp RPM — pure BEAM bytecode, no target-OS requirement:
+packaging/build-rpm-elixipp.sh                      # -> packaging/dist/elixipp*.rpm
 ```
 
 ➡️ **[../BUILD.md § Building the RPM packages](../BUILD.md#building-the-rpm-packages-alma-linux-9)**
@@ -38,8 +45,8 @@ and **[§ Building the deb packages](../BUILD.md#building-the-deb-packages-ubunt
 are the full guides: how to set up each build host (Erlang, Elixir, `rpmbuild` /
 `dpkg-dev`), what comes out, and how to install and verify it.
 
-Both paths run `packaging/stage.sh` first, which assembles the release + the module
-`.beam` into `packaging/build/kelixip-<version>/` **and** the tarball
+Both kelixip paths run `packaging/stage.sh` first, which assembles the release + the
+module `.beam` into `packaging/build/kelixip-<version>/` **and** the tarball
 `packaging/build/SOURCES/kelixip-<version>.tar.gz` — `rpmbuild` consumes the tarball
 (its `Source0`), `build-deb.sh` the tree. One staging step, one payload, two package
 formats. The version comes from `apps/kelixip/mix.exs` and each build **fails loudly**
@@ -55,6 +62,13 @@ the first line of `deb/changelog` for the deb. Bump all three.
 > 24.04+). One package per target release. Why, and the Erlang/Elixir source options,
 > in [../docs/design/DESIGN-KELIXIP.md#12-packaging](../docs/design/DESIGN-KELIXIP.md#12-packaging).
 
+`elixipp` has its own `packaging/stage-elixipp.sh`, independent of the kelixip
+staging above: it runs `mix escript.build` and stages the resulting escript (pure
+BEAM bytecode, no embedded ERTS) into `packaging/build/elixipp-<version>/` and
+`packaging/build/SOURCES/elixipp-<version>.tar.gz`. No target-OS constraint applies
+— the version still comes from `apps/elixipp/mix.exs` and must match
+`rpm/elixipp.spec`'s `Version:`, checked the same way.
+
 ## Files here
 
 | Path | Role |
@@ -68,8 +82,10 @@ the first line of `deb/changelog` for the deb. Bump all three.
 | `sysconfig/kelixip` | the environment file: node name, cookie, TOML paths |
 | `config/config.toml`, `config/domains.toml` | the shipped defaults, kept on upgrade |
 | `completion/kelictl` | the CLI's bash completion, installed under `/usr/share/bash-completion/completions/` by both packages |
-| `stage.sh`, `build-rpm.sh`, `build-deb.sh` | the builds |
-| `build-in-container.sh`, `Containerfile.al9`, `Containerfile.ubuntu` | the containerised builds |
+| `stage.sh`, `build-rpm.sh`, `build-deb.sh` | the kelixip builds |
+| `build-in-container.sh`, `Containerfile.al9`, `Containerfile.ubuntu` | the containerised kelixip builds |
+| `rpm/elixipp.spec` | the elixipp spec: one file, one package, no subpackages |
+| `stage-elixipp.sh`, `build-rpm-elixipp.sh` | the elixipp build |
 | `build/`, `dist/` | outputs, git-ignored |
 
 `sysconfig/kelixip` is the single source for the environment file: the RPM installs
@@ -106,3 +122,5 @@ RPM's `%systemd_post` and the deb's `postinst` both stop at enabling.
   (`mix test --exclude live`), not from the staged payload.
 - No repository metadata (`createrepo` / `reprepro`) and no signing: the artifacts are
   loose files today.
+- **No elixipp deb, no container build.** Only `build-rpm-elixipp.sh` exists; nothing
+  under `build-in-container.sh` builds it yet.
