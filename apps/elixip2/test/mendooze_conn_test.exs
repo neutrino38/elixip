@@ -285,6 +285,7 @@ defmodule Mendooze.ConnTest do
 
   @vp8 107
   @av1 110
+  @h264 99
 
   # Alice: VP8 and nothing else, on HER numbering (96, as Linphone numbers it).
   defp vp8_only_offer(port \\ 57_573) do
@@ -321,6 +322,66 @@ defmodule Mendooze.ConnTest do
     )
   end
 
+  # Alice : H.264 en tete AVEC son mode, puis VP8. Deux codecs, pour que l'exclusion
+  # de H.264 de « ce que les deux portent » soit OBSERVABLE — avec un seul codec par
+  # patte, le repli `{hd(L), hd(L')}` redonne H.264 des deux cotes et le test ne
+  # prouverait rien.
+  defp alice_h264_offer(pm) do
+    Enum.join(
+      [
+        "v=0",
+        "o=- 1 1 IN IP4 172.22.0.4",
+        "s=Talk",
+        "c=IN IP4 172.22.0.4",
+        "t=0 0",
+        "m=video 57573 RTP/AVP 96 97",
+        "a=rtpmap:96 H264/90000",
+        "a=fmtp:96 profile-level-id=42001f;packetization-mode=#{pm}",
+        "a=rtpmap:97 VP8/90000",
+        ""
+      ],
+      "\r\n"
+    )
+  end
+
+  # Bob, dans NOTRE numerotation. `pm: nil` = aucun packetization-mode annonce, ce
+  # que fait Linphone 6.2 — donc mode 0 au sens de la RFC 6184 §8.1.
+  defp bob_h264(pm) do
+    fmtp =
+      case pm do
+        nil -> ["a=fmtp:99 profile-level-id=42801f"]
+        n -> ["a=fmtp:99 profile-level-id=42801f;packetization-mode=#{n}"]
+      end
+
+    Enum.join(
+      ["v=0", "o=- 1 1 IN IP4 172.22.0.2", "s=-", "c=IN IP4 172.22.0.2", "t=0 0"] ++
+        ["m=video 52052 RTP/AVP 99 107", "a=rtpmap:99 H264/90000"] ++
+        fmtp ++ ["a=rtpmap:107 VP8/90000", ""],
+      "\r\n"
+    )
+  end
+
+  # Sans verdict serveur : `conformant_pts/3` ne s'applique pas, et le double n'a
+  # pas a inventer un fmtp conforme. Ces tests portent sur la SELECTION croisee,
+  # pas sur le verdict — les melanger testerait deux choses a la fois.
+  defp h264_legs(server, alice_pm) do
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(), media: :video, transcode: [video: :avoid])
+
+    assert_receive {:jsr309_call, "MediaSessionCreate", [_tag, _q]}, 1_000
+
+    {:ok, out} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :video,
+        bridge_with: conn,
+        transcode: [video: :avoid]
+      )
+
+    assert {:ok, _answer} = Mendooze.set_remote_offer(conn, alice_h264_offer(alice_pm))
+    {:ok, _offer} = Mendooze.get_local_offer(out)
+    {conn, out}
+  end
+
   defp video_fmt(sdp) do
     assert [_, fmt] = Regex.run(~r{m=video \d+ RTP/AVP ([\d ]+)}, sdp)
     String.split(fmt, " ", trim: true)
@@ -354,6 +415,50 @@ defmodule Mendooze.ConnTest do
     # callee that cannot do VP8 still has something to accept and the transcoder
     # still has somewhere to go. VP8 simply leads.
     assert ["107", "110", "99"] == video_fmt(offer)
+  end
+
+
+  # ── packetization-mode : le mode fait partie de l'identite du codec ─────────
+
+  # Le mode de mise en paquets fait partie de l'identite d'un PT H.264
+  # (RFC 6184 §8.2.2), et en relais rien ne le convertit : ce qui sort d'une patte
+  # est la mise en paquets que l'AUTRE pair a negociee avec nous, remise telle
+  # quelle. Deux pattes qui disent « H264 » ne se relaient donc pas pour autant.
+  #
+  # Trafic du 2026-08-21 : Linphone offrait `a=fmtp:99 profile-level-id=42801F`
+  # sans mode — du NAL simple, ni FU-A ni STAP-A — et Chrome fragmentait a
+  # 1170 octets. Les deux disaient « H264 », le pont relayait, et le decodeur de
+  # Linphone repondait `dsNoParamSets` pendant tout l'appel sur un flux que la
+  # capture prouve livre a l'octet pres. Le transcodage etait disponible et n'a
+  # jamais ete choisi, parce que « un codec que les deux portent » se lisait sur
+  # le seul NOM du codec.
+  test "H264 n'est pas un codec commun quand les modes de mise en paquets divergent" do
+    %{server: server} = start_media_server(&two_leg_handler/2)
+    {conn, out} = h264_legs(server, 1)
+
+    # Bob n'annonce aucun mode : il ne sait recevoir que du NAL simple.
+    :ok = Mendooze.set_remote_answer(out, bob_h264(nil))
+    assert {:ok, _} = Mendooze.bridge(conn, out, video: :avoid)
+
+    # H.264 est ecarte de « ce que les deux portent », donc la selection tombe sur
+    # VP8 — que les deux portent VRAIMENT. C'est le bon resultat : on relaie du VP8
+    # au lieu de relayer un H.264 que Bob ne saurait pas depaquetiser.
+    assert_receive {:jsr309_call, "VideoTranscoderSetCodec", [3, 30, @vp8 | _]}, 1_000
+    assert_receive {:jsr309_call, "VideoTranscoderSetCodec", [3, 31, @vp8 | _]}, 1_000
+  end
+
+  # Le controle positif, sans lequel le test negatif ne prouverait rien : quand les
+  # deux pattes s'accordent sur le mode, H.264 redevient un codec commun et c'est
+  # lui qui est choisi, en tete des deux listes.
+  test "H264 reste un codec commun quand les deux pattes annoncent le meme mode" do
+    %{server: server} = start_media_server(&two_leg_handler/2)
+    {conn, out} = h264_legs(server, 1)
+
+    :ok = Mendooze.set_remote_answer(out, bob_h264(1))
+    assert {:ok, _} = Mendooze.bridge(conn, out, video: :avoid)
+
+    assert_receive {:jsr309_call, "VideoTranscoderSetCodec", [3, 30, @h264 | _]}, 1_000
+    assert_receive {:jsr309_call, "VideoTranscoderSetCodec", [3, 31, @h264 | _]}, 1_000
   end
 
   # ── prefer_codecs: the scenario's own ranking of the answer ────────────────

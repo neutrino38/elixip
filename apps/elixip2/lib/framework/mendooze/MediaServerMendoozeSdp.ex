@@ -1916,6 +1916,48 @@ defmodule MediaServer.Mendooze.Sdp do
     end
   end
 
+  @doc """
+  The H.264 packetization mode this peer can RECEIVE, or `nil` when it offers no
+  H.264 at all.
+
+  Absence means **0** here — RFC 6184 §8.1, single NAL unit mode, no FU-A and no
+  STAP-A. That is the opposite reading from `conformant_pts/3`, and deliberately
+  so, because the two answer different questions:
+
+  * `conformant_pts/3` asks *may our answer name this payload type?* An absent
+    mode has nothing to contradict, so it is no constraint. Reading it as 0 there
+    made the mode "differ" from the server's 1 and dropped H.264 from Linphone
+    calls entirely;
+  * this asks *what can the peer actually depacketize?* A peer that never claimed
+    mode 1 cannot be assumed to reassemble fragments. Reading absence as 1 here
+    is what let a fragmented browser stream be relayed to Linphone for a whole
+    call, its decoder answering `dsNoParamSets` on a stream delivered intact.
+
+  The maximum across the peer's H.264 payload types, because we choose which one
+  to send on: a browser enumerates (profile, mode) pairs under several PTs, and
+  offering one in mode 1 is offering to receive mode 1.
+  """
+  @spec h264_receive_mode(media_desc() | map()) :: 0 | 1 | nil
+  def h264_receive_mode(%{type: :video} = desc) do
+    rtp_map = Map.get(desc, :rtp_map, %{})
+
+    Map.get(desc, :fmtp, %{})
+    |> Enum.filter(fn {pt, _} -> h264_pt?(rtp_map, pt) end)
+    |> Enum.map(fn {_pt, fmtp} -> Map.get(fmtp, :packetization_mode) || 0 end)
+    |> case do
+      [] -> if h264_offered?(rtp_map), do: 0, else: nil
+      modes -> Enum.max(modes)
+    end
+  end
+
+  def h264_receive_mode(_desc), do: nil
+
+  # H.264 present in the rtpmap but with no fmtp at all: it is still an H.264 the
+  # peer can receive, in mode 0.
+  defp h264_offered?(rtp_map) do
+    Enum.any?(Map.keys(rtp_map), &h264_pt?(rtp_map, &1))
+  end
+
   defp h264_pt?(rtp_map, pt) do
     case code_rtpmap(:video, Map.get(rtp_map, pt)) do
       {"H264", _clock, _ch} -> true

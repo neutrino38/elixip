@@ -333,6 +333,12 @@ defmodule MediaServer.Mendooze.Conn do
       # the tail is what makes the cross-leg selection possible at all, because
       # "is there a codec BOTH peers support" cannot be answered from two heads.
       peer_codecs: %{},
+      # Le mode de mise en paquets H.264 que ce pair sait RECEVOIR, par média
+      # (`Sdp.h264_receive_mode/1`, absence = 0 au sens de la RFC 6184 §8.1).
+      # Lu par la sélection croisée : deux pattes en H.264 ne se relaient que si
+      # elles s'accordent dessus, sinon ce qui sort de l'une est indépaquetisable
+      # par l'autre.
+      peer_h264_mode: %{},
       # The medias this peer explicitly turned down — a port-0 m= in its answer
       # (RFC 3264 §6) or in its re-offer (§5.1). Distinct from a media that is
       # merely not negotiated YET: a decline is the peer's definite verdict, and
@@ -932,12 +938,66 @@ defmodule MediaServer.Mendooze.Conn do
       {[a | _], [b | _]} ->
         mode = Map.get(policy, media, :avoid)
 
-        case {mode, Enum.find(l, &(&1 in lp))} do
+        case {mode, Enum.find(l, &relayable?(&1, la, lb, media))} do
           {:force, _} -> {:ok, a, b}
           {_, nil} when mode == :forbid -> {:error, {:no_common_codec, media}}
           {_, nil} -> {:ok, a, b}
           {_, common} -> {:ok, common, common}
         end
+    end
+  end
+
+  # Is this codec one the two legs can RELAY to each other — not merely one they
+  # both name? For every codec but H.264 the two questions are the same. H.264's
+  # payload-type identity includes its `packetization-mode` (RFC 6184 §8.2.2), and
+  # in relay mode nothing converts it: what leaves one leg is the packetization the
+  # OTHER peer negotiated with us, handed over untouched.
+  #
+  # Traffic of 2026-08-21. Linphone offered `a=fmtp:99 profile-level-id=42801F`
+  # with no packetization-mode — single NAL unit mode, no FU-A, no STAP-A. Chrome
+  # had negotiated mode 1 with us and was fragmenting at 1170 bytes. Both legs
+  # said "H264", so the bridge relayed, and Linphone's decoder answered
+  # `dsNoParamSets` for the whole call on a stream the capture proves was
+  # delivered byte for byte. Transcoding was always available and never chosen,
+  # because "a codec both legs carry" was read off the codec NAME alone.
+  #
+  # Equality rather than "the sink can receive at least what the source sends":
+  # one selection serves BOTH directions, so the weaker end decides either way.
+  defp relayable?(code, la, lb, media) do
+    code in Map.get(lb.peer_codecs, media, []) and h264_modes_agree?(code, la, lb, media)
+  end
+
+  defp h264_modes_agree?(code, la, lb, media) do
+    if Sdp.codec_name(media, code) == "H264" do
+      mine = Map.get(la.peer_h264_mode, media)
+      theirs = Map.get(lb.peer_h264_mode, media)
+
+      if mine == theirs do
+        true
+      else
+        Logger.warning(
+          module: __MODULE__,
+          session: la.sess_tag,
+          message:
+            "H264 bridge refused because of incompatible packetization mode " <>
+              "(#{la.leg} receives pm=#{mine}, #{lb.leg} receives pm=#{theirs}) — " <>
+              "transcoding instead"
+        )
+
+        false
+      end
+    else
+      true
+    end
+  end
+
+  # Nothing to remember when the peer offers no H.264 on this media: leaving the
+  # key absent would make two such legs "agree" on nil, which is exactly right —
+  # they never reach h264_modes_agree?/4 anyway, H264 not being in their lists.
+  defp note_h264_mode(state, desc) do
+    case Sdp.h264_receive_mode(desc) do
+      nil -> state
+      pm -> %{state | peer_h264_mode: Map.put(state.peer_h264_mode, desc.type, pm)}
     end
   end
 
@@ -2301,7 +2361,7 @@ defmodule MediaServer.Mendooze.Conn do
            ]),
          state = note_watchdog(state, desc),
          :ok <- apply_watchdog(state, desc.type) do
-      {:ok, note_negotiated(state, desc.type, neg), neg}
+      {:ok, note_negotiated(state, desc.type, neg) |> note_h264_mode(desc), neg}
     end
   end
 
