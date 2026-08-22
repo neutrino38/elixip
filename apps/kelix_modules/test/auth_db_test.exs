@@ -240,6 +240,17 @@ defmodule Kelix.Mod.AuthDbTest do
       assert {:error, _} = AuthDb.validate_config(Map.put(@valid, "pool_size", "many"))
       assert {:error, _} = AuthDb.validate_config(Map.put(@valid, "ssl", "yes"))
     end
+
+    test "accepts mysql and postgres as the driver, defaults to unset (mysql)" do
+      assert AuthDb.validate_config(@valid) == :ok
+      assert AuthDb.validate_config(Map.put(@valid, "driver", "mysql")) == :ok
+      assert AuthDb.validate_config(Map.put(@valid, "driver", "postgres")) == :ok
+    end
+
+    test "rejects a driver that is neither mysql nor postgres" do
+      assert {:error, reason} = AuthDb.validate_config(Map.put(@valid, "driver", "oracle"))
+      assert reason =~ "driver must be one of"
+    end
   end
 
   describe "qop=auth + nc anti-replay" do

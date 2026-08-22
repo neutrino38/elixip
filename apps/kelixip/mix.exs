@@ -37,8 +37,10 @@ defmodule Kelixip.MixProject do
       # Declarative config parser (config.toml / domains.toml). Pure Elixir,
       # no NIF, release-safe (design §13).
       {:toml, "~> 0.7"},
-      # MariaDB/MySQL driver for the auth_db module (subscriber table HA1 lookup).
+      # SQL drivers for the auth_db module (subscriber table HA1 lookup); which one
+      # opens the pool is the block's `driver` key (default MariaDB/MySQL).
       {:myxql, "~> 0.7"},
+      {:postgrex, "~> 0.19"},
       # REST control API (design §10.3): a Plug.Router served by Bandit. Pure
       # Elixir, release-safe. Kept out of the elixipp escript (server-only).
       {:plug, "~> 1.16"},

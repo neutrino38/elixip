@@ -96,6 +96,31 @@ defmodule Kelix.Mod.AuthDbPoolTest do
     end
   end
 
+  describe "driver/1, driver_module/1 — the SQL driver behind the pool" do
+    test "defaults to mysql when the block says nothing" do
+      assert Pool.driver(@block) == :mysql
+      assert Pool.driver_module(:mysql) == MyXQL
+    end
+
+    test "postgres is resolved from the block's driver key" do
+      assert Pool.driver(Map.put(@block, "driver", "postgres")) == :postgres
+      assert Pool.driver_module(:postgres) == Postgrex
+    end
+
+    test "the default port follows the driver, unless one is configured" do
+      no_port = Map.delete(@block, "port")
+
+      assert {_verdict, _opts} = Pool.negotiate(no_port, accepting())
+      assert Pool.descriptor(no_port, :tls_unverified).port == 3306
+
+      pg = Map.put(no_port, "driver", "postgres")
+      assert Pool.descriptor(pg, :tls_unverified).port == 5432
+
+      # an explicit port always wins, on either driver
+      assert Pool.descriptor(Map.put(pg, "port", 6543), :tls_unverified).port == 6543
+    end
+  end
+
   describe "validate_config/1 — one gate to a cleartext link" do
     test "accepts the key" do
       assert AuthDb.validate_config(allowing_insecure()) == :ok
@@ -131,6 +156,7 @@ defmodule Kelix.Mod.AuthDbPoolTest do
       assert d.database == "kamailio"
       assert d.username == "kamailio"
       assert d.table == "os_subscriber"
+      assert d.driver == :mysql
       assert d.tls == true
       assert d.certificate == "verified"
       assert d.transport == "TLS, server certificate verified"

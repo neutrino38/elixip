@@ -1,7 +1,7 @@
 # auth_db
 
-Digest **authentication** backed by a MariaDB/MySQL `subscriber` table
-(Kamailio-style). It reads the stored **HA1** for a user and returns an
+Digest **authentication** backed by a `subscriber` table (Kamailio-style), in
+MariaDB/MySQL or in PostgreSQL. It reads the stored **HA1** for a user and returns an
 authentication **verdict**; it never composes the SIP response — the script maps
 the verdict onto a `401`/`407` challenge, an accept, or a `403`.
 
@@ -31,8 +31,9 @@ import Kelix.Mod.AuthDb, only: [authenticate: 3, challengeable?: 1]
 
 | Key | Type | Default | Description |
 |---|---|---|---|
+| `driver` | string | `"mysql"` | SQL driver: `mysql` (MariaDB/MySQL) or `postgres` (PostgreSQL) |
 | `host` | string | `"127.0.0.1"` | Database host |
-| `port` | integer | `3306` | Database port |
+| `port` | integer | `3306` (`5432` for `postgres`) | Database port |
 | `database` | string | **required** | Schema holding the subscriber table |
 | `username` | string | **required** | DB user |
 | `password` | string | — | DB password |
@@ -282,6 +283,7 @@ Port:             3306
 Database:         kamailio
 Username:         kamailio
 Table:            subscriber
+Driver:           mysql
 Tls:              true
 Certificate:      not verified
 Transport:        TLS, server certificate NOT verified (no ssl_ca_cert_file)
@@ -293,7 +295,7 @@ Query timeout ms: 5000
 |---|---|
 | `state` | `up` / `down` — a **live** `SELECT 1`, not a flag cached at boot |
 | `error` | only when `down`: why, in one line |
-| `host` `port` `database` `username` `table` | where it points, as the running pool was opened |
+| `host` `port` `database` `username` `table` `driver` | where it points, as the running pool was opened |
 | `tls` | `true` / `false` — encrypted or not, the machine-readable answer |
 | `certificate` | `verified` (a CA was configured) / `not verified` / `-` on a cleartext link |
 | `transport` | the same thing in one line, **including why** it is what it is (a fallback that was taken names itself) |
@@ -321,6 +323,16 @@ database = "kamailio"
 username = "kamailio"
 password = "s3cret"
 password_hash = "md5"
+```
+
+```toml
+# config.toml — the subscriber table lives in PostgreSQL instead
+[module.auth_db]
+driver   = "postgres"
+host     = "db.example.com"
+database = "kamailio"
+username = "kamailio"
+password = "s3cret"
 ```
 
 ```elixir
