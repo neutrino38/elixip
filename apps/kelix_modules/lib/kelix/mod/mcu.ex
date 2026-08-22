@@ -46,6 +46,31 @@ defmodule Kelix.Mod.Mcu do
   @behaviour Kelix.Module
   require Logger
 
+  @doc """
+  Take this module's verbs into a scenario: the `admit` / `attach` / `leave` FSL
+  macros of `Kelix.Mod.Mcu.Script`, and the blocks of `Kelix.Mod.Mcu.SBB`.
+
+      use Kelix.Mod.Mcu          # Mcu.admit/2, Mcu.SBB.conference/1, and the rest
+      config(uses_modules: [:mcu])
+
+  Must come after a session mixin bringing in `use SIP.Context`
+  (`SIP.Session.CallUAS`), which the script macros rebind `sip_ctx` through.
+  """
+  defmacro __using__(_opts) do
+    # Teach the scenario that `:conference` is a block namespace, so `on_events`
+    # classifies the block's returns as scenario events even in a state written
+    # before the call site — see docs/design/DESIGN-SBB.md#21-the-shape-of-a-return.
+    # Done here rather than in the quote: the list is read during macro expansion,
+    # and an attribute written from the quote would be evaluated later and clear it.
+    SIP.Scenario.register_namespace(__CALLER__.module, :conference)
+
+    quote do
+      alias Kelix.Mod.Mcu
+      require Kelix.Mod.Mcu.SBB
+      use Kelix.Mod.Mcu.Script
+    end
+  end
+
   alias Kelix.Metrics.Emit
   alias Kelix.Mod.Mcu.{Adapter, Args, Client, Conference, Config, Event, Message, Store}
   alias Kelix.Mod.Mcu.Vocabulary
