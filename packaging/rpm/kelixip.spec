@@ -28,7 +28,7 @@
 
 Name:           kelixip
 Version:        1.5.1
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://www.ives.fr/
