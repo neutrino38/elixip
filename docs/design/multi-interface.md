@@ -90,59 +90,46 @@ et 5, la médiation interne/externe à l'étape 6.
 Deux chantiers restent hors de cette suite, parce qu'ils n'en sont pas des
 prérequis : un client STUN (étape 6) et le transport `ws` en clair.
 
-### Étape 1 — Couche message : lire et écrire un `IPv6reference`
+### Étape 1 — Couche message : lire et écrire un `IPv6reference` — livrée
 
-Aujourd'hui kelixip ne peut ni lire ni écrire une adresse IPv6 dans un message
-SIP. Trois mesures, pas trois déductions :
-
-| Ce qu'on lui donne | Ce qu'il fait |
-|---|---|
-| un message dont le Via porte `[2001:db8::1]:5060` | `SIPMsg.parse/2` **lève une exception** |
-| `SIP.Uri.parse("sip:bob@[2001:db8::1]:5060")` | lève la même exception |
-| un Contact dont l'adresse locale est `{0,0,0,0,0,0,0,1}` | rend `sip:::1` |
-
-Tout part de deux fonctions, et le reste en découle (RFC 3261 §19.1.1
+Le nœud lit et écrit une adresse IPv6 dans un message SIP (RFC 3261 §19.1.1
 `IPv6reference`, §20.42 `sent-by`).
 
-**Lecture — `SIP.Uri.parse_core_uri/2`.** Le `host[:port]` est découpé sur tous
-les `:`. Reconnaître d'abord la forme `[…]`, garder l'intérieur comme domaine,
-ne chercher un port qu'après le `]`. Le garde-fou de domaine
-`^[a-zA-Z0-9\-\.]+$` accepte la forme littérale.
+**Écriture — un seul endroit.** `SIP.NetUtils.sip_host/1` rend la production
+`host` de la §25.1 : un littéral IPv6 sort entre crochets, une adresse IPv4, un
+nom d'hôte ou un littéral déjà entre crochets sortent inchangés. Elle accepte
+un tuple comme une chaîne, parce qu'une adresse locale arrive en tuple
+(`SIP.Transport.build_contact_uri/2`) et une adresse relue en chaîne.
+`SIP.Uri.serialize_addr_spec/1` et `SIP.Msg.Ops.build_via_addr/3` l'appellent
+tous les deux. La conversion tuple → chaîne était recopiée cinq fois ; c'est
+cette recopie qui ferait diverger les crochets.
 
-**Lecture — l'exception.** La même fonction **lève** au lieu de rendre un atome
-d'erreur comme ses clauses voisines (`:invalid_sip_uri_port`,
-`:invalid_sip_domain`) : le `case` sur le découpage n'a pas de clause de repli.
-Et rien ne rattrape l'exception sur le chemin entrant
-(`SIP.Transport.do_process_incoming_message/7` →
-`SIP.Transac.process_sip_message/3` → `SIPMsg.parse/2`), donc une URI mal formée
-**tue l'instance de transport** : une connexion TCP/TLS/WSS qui tombe, ou la
-seule socket UDP du nœud. Ce défaut ne dépend pas de l'IPv6 — n'importe quel
-hôte à deux `:`, une coquille, un scanner. Deux corrections : le parseur ne lève
-jamais sur une entrée mal formée, l'atome d'erreur et le callback de parsing
-étant son canal ; et la frontière d'entrée se protège quand même, parce qu'un
-transport ne meurt pas sur ce qu'écrit un pair.
+**Lecture.** `SIP.Uri.parse_host_port/1` reconnaît d'abord la forme `[…]`, garde
+l'intérieur comme domaine et ne cherche un port qu'après le `]`. Le domaine est
+donc stocké sans crochets, et `sip_host/1` les remet à la sérialisation. Un
+littéral IPv6 sans ses crochets est refusé : il n'est pas une URI SIP.
 
-**Écriture — `SIP.Uri.serialize_core_uri/4`** (la clause `is_tuple(host)`) **et
-`SIP.Msg.Ops.build_via_addr/3`** (quatre clauses). Un littéral IPv6 sort entre
-crochets, et le port se colle après le `]`. La conversion tuple → chaîne est
-aujourd'hui recopiée cinq fois : elle passe par **un seul** utilitaire de rendu,
-appelé des deux côtés. C'est cette recopie qui ferait diverger les crochets.
+**Le parseur ne lève jamais sur une entrée mal formée.** Son canal d'erreur est
+l'atome (`:invalid_sip_domain`, `:invalid_sip_uri_port`,
+`:invalid_sip_uri_general`) et le callback de parsing. Le découpage du
+`host:port` et celui du `user@host` ont chacun une clause de repli : n'importe
+quel hôte à deux `:` ou une seconde `@` — une coquille, un scanner — arrivait
+sur un `case` sans clause. La frontière entrante se protège de son côté :
+`SIP.Transport.ImplHelpers.process_sip_message/7` entoure le traitement d'un
+`try/rescue`, donc un pair ne tue pas le transport qui sert tout le monde — une
+connexion TCP/TLS/WSS, ou la seule socket UDP du nœud.
 
-**Identifiant de zone** (`fe80::1%eth0`, RFC 6874) : refusé. Une adresse
-link-local dans un Via ou un Contact ne se joint pas depuis un autre lien ;
-l'accepter donnerait l'illusion du contraire.
+**Identifiant de zone** (`fe80::1%eth0`, RFC 6874) : refusé, et refusé
+explicitement, parce que `:inet.parse_address/1` accepte la zone et la jette en
+silence. Une adresse link-local dans un Via ou un Contact ne se joint pas depuis
+un autre lien ; l'accepter donnerait l'illusion du contraire.
 
-Ce qui devient juste sans travail supplémentaire, une fois ces deux fonctions
-justes : l'extraction de la branche du Via (`SIPMsg` réinjecte le `sent-by` dans
-le parseur d'URI), le Contact (`SIP.Transport.build_contact_uri/2` met l'adresse
-locale dans `domain`), le Record-Route, la Request-URI
-(`SIP.Uri.serialize_ruri/1` passe par la même fonction) et le calcul du digest,
-qui emploie la même chaîne.
+Ce qui est juste par voie de conséquence, sans code propre : l'extraction de la
+branche du Via (`SIPMsg` réinjecte le `sent-by` dans le parseur d'URI), le
+Contact, le Record-Route, la Request-URI (`SIP.Uri.serialize_ruri/1` passe par la
+même fonction) et le calcul du digest, qui emploie la même chaîne.
 
-Tests unitaires : aller-retour parse puis serialize sur `sip:[2001:db8::1]`,
-`sip:bob@[2001:db8::1]:5070`, `<sip:bob@[::1]>;tag=x`, un Via
-`SIP/2.0/TCP [2001:db8::1]:5070;branch=z9hG4bK…`, le refus d'un identifiant de
-zone, et le refus **sans exception** d'un hôte mal formé.
+Tests : `apps/elixip2/test/sip_ipv6_message_test.exs`.
 
 Aucun listener n'est touché.
 
