@@ -27,11 +27,11 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.5.1
-Release:        2%{?dist}
+Version:        1.5.2
+Release:        1%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
-URL:            https://www.ives.fr/
+URL:            https://github.com/neutrino38/elixip
 Source0:        %{name}-%{version}.tar.gz
 ExclusiveArch:  x86_64 aarch64
 
