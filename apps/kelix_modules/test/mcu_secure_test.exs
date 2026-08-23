@@ -61,12 +61,14 @@ defmodule Kelix.Mod.McuSecureTest do
     setup = Keyword.get(opts, :setup, "actpass")
     ice = Keyword.get(opts, :ice, true)
     mux = Keyword.get(opts, :rtcp_mux, true)
+    ufrag = Keyword.get(opts, :ufrag, "abcd")
+    pwd = Keyword.get(opts, :pwd, "0123456789abcdef")
 
     offer(
       protocol: "UDP/TLS/RTP/SAVPF",
       crypto: ["a=fingerprint:sha-256 AA:BB:CC:DD", "a=setup:#{setup}"],
       extra:
-        if(ice, do: ["a=ice-ufrag:abcd", "a=ice-pwd:0123456789abcdef"], else: []) ++
+        if(ice, do: ["a=ice-ufrag:#{ufrag}", "a=ice-pwd:#{pwd}"], else: []) ++
           if(mux, do: ["a=rtcp-mux"], else: [])
     )
   end
@@ -320,6 +322,32 @@ defmodule Kelix.Mod.McuSecureTest do
       # the peer's, verbatim
       assert_received {:rpc, "SetRemoteSTUNCredentials",
                        [42, 7, 0, "abcd", "0123456789abcdef", 0]}
+    end
+
+    test "a renegotiation keeps our credentials: answering again is not an ICE restart",
+         ctx do
+      {conn, _part} = leg(ctx.did)
+      assert {:ok, first} = Adapter.set_remote_offer(conn, dtls_offer())
+      assert [ufrag] = Regex.run(~r/a=ice-ufrag:(\S+)/, first, capture: :all_but_first)
+      assert [pwd] = Regex.run(~r/a=ice-pwd:(\S+)/, first, capture: :all_but_first)
+      _first_rpcs = TestStub.rpc_order()
+
+      # the hold re-INVITE of the 2026-08-23 capture: the handset restarts ICE on its
+      # own side and drops its candidates. Ours are fixed host candidates, so there is
+      # nothing on this side to restart — and a third ufrag in one dialog is what left
+      # the handset unable to send its resume.
+      assert {:ok, second} =
+               Adapter.set_remote_offer(conn, dtls_offer(ufrag: "efgh", pwd: "fedcba9876543210"))
+
+      assert second =~ "a=ice-ufrag:#{ufrag}"
+      assert second =~ "a=ice-pwd:#{pwd}"
+
+      # the peer's restart IS honoured — that half is its business, not ours
+      assert_received {:rpc, "SetRemoteSTUNCredentials",
+                       [42, 7, 0, "efgh", "fedcba9876543210", 0]}
+
+      # …drains what is left, so it comes after the assertion above
+      refute "SetLocalSTUNCredentials" in TestStub.rpc_order()
     end
 
     test "an offer with a fingerprint but no ICE gets DTLS and no ICE lines", ctx do
