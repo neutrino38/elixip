@@ -387,6 +387,21 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
 
   # One credential pair for the whole leg, pushed per media: that is what an offerer
   # expects to find in every m= section of our answer.
+  #
+  # A leg that already has its pair keeps it. This runs on every offer, and minting
+  # fresh credentials mid-call **is** an ICE restart (RFC 8445 §9.1.1.1): the peer
+  # must re-run connectivity checks, asked for by nothing but the fact that we are
+  # answering again. Our candidates are fixed host candidates that never change, so
+  # there is never anything on this side to restart. The peer's own credentials are
+  # a different question, and `set_remote_security/3` pushes them on every offer —
+  # so a restart the peer really asks for is still honoured.
+  #
+  # The capture of 2026-08-23 (09:22:36 → 09:22:58) is what this costs: three answers
+  # in one dialog carried three ufrags, and the third answered a Linphone hold. The
+  # handset never sent the resume — the re-INVITE simply never left it — and the user
+  # hung up on a call frozen in pause.
+  defp setup_ice(%{local_ice: %{}} = state, _descs), do: {:ok, state}
+
   defp setup_ice(state, descs) do
     if Enum.any?(descs, &(&1.ice != nil)) and webrtc_allowed?(state) do
       ice = %{ufrag: random_token(8), pwd: random_token(24)}
