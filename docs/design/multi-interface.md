@@ -40,25 +40,208 @@ nat = "yes" # Signifie que l'on doit utiliser un serveur stun pour trouver sont 
 network = <specification du réseau interne> # toute IP qui vient de ce réseau est considéré comme interne. Le réseau doit contenir addr sinon c'est une IP qui vient de l'extérieur et on doit répondre avec des SDP publique
 ```
 
+### Décisions sur les clés
+
+Le parseur refuse toute clé inconnue dans un `[[listen]]`
+(`Kelix.Config.parse_listener/1`) : chaque clé ajoutée est donc strictement
+additive et aucune configuration existante ne casse. En contrepartie, tout ajout
+met à jour `docs/kelixip/installation.md` et `packaging/config/config.toml` dans
+le même lot.
+
+- **`addr`** ne change pas de forme : `Kelix.Config` valide déjà l'adresse par
+  `:inet.parse_address/1`, donc une IPv6 y passe. Une adresse explicite est ce
+  qui donne un profil réseau au listener (étape 5) ; un listener wildcard
+  (`0.0.0.0`, `::`) prend le profil par défaut du nœud.
+- **`tag`** n'a qu'une valeur utile : `"internal"`. Le côté public est le défaut
+  déduit de l'absence de clé. `"public"` reste accepté sans effet. Introduit à
+  l'étape 5.
+- **`network`** ne vit pas dans le bloc. Écrite par listener, la liste de
+  préfixes se recopie autant de fois qu'il y a de listeners et deux listeners
+  peuvent se contredire. Et ce n'est pas `addr` qui décide qu'un correspondant
+  est interne, c'est **l'adresse du correspondant**. La liste est donc un énoncé
+  de topologie du nœud : une section `[network]` avec `internal = ["10.0.0.0/8",
+  "fd00::/8", …]`, introduite à l'étape 6.
+- **`nat`** est remplacée par **`advertise = "<ip>"`**, l'adresse à publier dans
+  la signalisation. Le besoin est un NAT 1:1 : l'exploitant connaît cette
+  adresse, une EIP AWS ne bouge pas. Une découverte par STUN ajoute une
+  dépendance réseau au démarrage et un mode de panne pour aucune information de
+  plus. Le mediaserver fait le même choix avec `--public-ip`. Introduite à
+  l'étape 6.
+- **`proto = "ws"`** demande un transport et un listener qui n'existent pas :
+  seul le WSS, entrant comme sortant, est implémenté, plus le `ws` sortant.
+  C'est un chantier propre, hors des sept étapes, légitime derrière un nginx qui
+  termine TLS.
+- **`application_layer`** n'est pas livrée tant qu'elle ne fait rien. Sa
+  validation (« vérifier que l'`application_layer` et le `proto` sont
+  compatibles ») suppose la conception multiprotocole, hors périmètre. Une clé
+  parsée et ignorée devient une clé que l'exploitant renseigne, puis accuse.
+
 ## API XMLRPC de Medooze
 
 Le mediaserver Medooze 1.13.0 a été modifié pour supporter IP V6 et la désignation du type de réseau
 Voici la doc de l'API https://github.com/neutrino38/mediaserver/blob/master/design/xmlrpc_jsr309_api.md
 
-## Phase d'implémentation
+## Étapes d'implémentation
 
-### Phase 1
+Sept étapes. Les deux premières ne touchent aucun listener. Le besoin « réseau
+public IPv6 » est satisfait à l'étape 3, la médiation IPv4↔IPv6 aux étapes 4
+et 5, la médiation interne/externe à l'étape 6.
 
-Support d'IP V6 dans kelixip. Pas de modif des blocs [[listen]]
+Deux chantiers restent hors de cette suite, parce qu'ils n'en sont pas des
+prérequis : un client STUN (étape 6) et le transport `ws` en clair.
 
-### Phase 2
+### Étape 1 — Couche message : lire et écrire un `IPv6reference`
 
-Support mixte IP V6 et IP V4 sur deux listener. Appel IPV4 vers IPV6. Pas de modif des blocs [[listen]]
+Aujourd'hui kelixip ne peut ni lire ni écrire une adresse IPv6 dans un message
+SIP. Trois mesures, pas trois déductions :
 
-### Phase 3
+| Ce qu'on lui donne | Ce qu'il fait |
+|---|---|
+| un message dont le Via porte `[2001:db8::1]:5060` | `SIPMsg.parse/2` **lève une exception** |
+| `SIP.Uri.parse("sip:bob@[2001:db8::1]:5060")` | lève la même exception |
+| un Contact dont l'adresse locale est `{0,0,0,0,0,0,0,1}` | rend `sip:::1` |
+
+Tout part de deux fonctions, et le reste en découle (RFC 3261 §19.1.1
+`IPv6reference`, §20.42 `sent-by`).
+
+**Lecture — `SIP.Uri.parse_core_uri/2`.** Le `host[:port]` est découpé sur tous
+les `:`. Reconnaître d'abord la forme `[…]`, garder l'intérieur comme domaine,
+ne chercher un port qu'après le `]`. Le garde-fou de domaine
+`^[a-zA-Z0-9\-\.]+$` accepte la forme littérale.
+
+**Lecture — l'exception.** La même fonction **lève** au lieu de rendre un atome
+d'erreur comme ses clauses voisines (`:invalid_sip_uri_port`,
+`:invalid_sip_domain`) : le `case` sur le découpage n'a pas de clause de repli.
+Et rien ne rattrape l'exception sur le chemin entrant
+(`SIP.Transport.do_process_incoming_message/7` →
+`SIP.Transac.process_sip_message/3` → `SIPMsg.parse/2`), donc une URI mal formée
+**tue l'instance de transport** : une connexion TCP/TLS/WSS qui tombe, ou la
+seule socket UDP du nœud. Ce défaut ne dépend pas de l'IPv6 — n'importe quel
+hôte à deux `:`, une coquille, un scanner. Deux corrections : le parseur ne lève
+jamais sur une entrée mal formée, l'atome d'erreur et le callback de parsing
+étant son canal ; et la frontière d'entrée se protège quand même, parce qu'un
+transport ne meurt pas sur ce qu'écrit un pair.
+
+**Écriture — `SIP.Uri.serialize_core_uri/4`** (la clause `is_tuple(host)`) **et
+`SIP.Msg.Ops.build_via_addr/3`** (quatre clauses). Un littéral IPv6 sort entre
+crochets, et le port se colle après le `]`. La conversion tuple → chaîne est
+aujourd'hui recopiée cinq fois : elle passe par **un seul** utilitaire de rendu,
+appelé des deux côtés. C'est cette recopie qui ferait diverger les crochets.
+
+**Identifiant de zone** (`fe80::1%eth0`, RFC 6874) : refusé. Une adresse
+link-local dans un Via ou un Contact ne se joint pas depuis un autre lien ;
+l'accepter donnerait l'illusion du contraire.
+
+Ce qui devient juste sans travail supplémentaire, une fois ces deux fonctions
+justes : l'extraction de la branche du Via (`SIPMsg` réinjecte le `sent-by` dans
+le parseur d'URI), le Contact (`SIP.Transport.build_contact_uri/2` met l'adresse
+locale dans `domain`), le Record-Route, la Request-URI
+(`SIP.Uri.serialize_ruri/1` passe par la même fonction) et le calcul du digest,
+qui emploie la même chaîne.
+
+Tests unitaires : aller-retour parse puis serialize sur `sip:[2001:db8::1]`,
+`sip:bob@[2001:db8::1]:5070`, `<sip:bob@[::1]>;tag=x`, un Via
+`SIP/2.0/TCP [2001:db8::1]:5070;branch=z9hG4bK…`, le refus d'un identifiant de
+zone, et le refus **sans exception** d'un hôte mal formé.
+
+Aucun listener n'est touché.
+
+### Étape 2 — Couche adresse : choisir une adresse locale
+
+`SIP.NetUtils.get_local_ips/1` classe par famille mais **ne filtre pas la
+portée**. Sur une machine de développement, `get_local_ips([:ipv6])` ne rend
+souvent qu'une `fe80::` : annoncée dans un Contact, elle ne se joint pas. Le
+filtre existe déjà, recopié dans `MediaServer.Mockup` (`link_local_ipv6?/1`) :
+il remonte dans `NetUtils`, qui devient l'unique endroit où une portée se
+reconnaît — link-local, loopback, ULA. La reconnaissance des ULA sert de nouveau
+à l'étape 6.
+
+L'ordre du retour met les IPv6 en tête d'une liste mixte : tout appelant qui
+fait `hd/1` prend une adresse au hasard de l'énumération des interfaces. Les
+appelants demandent donc une famille, et une seule ; `hd/1` ne décide plus.
+
+Quatre sites figent la famille et deviennent paramétrables :
+`SIP.Transport.UDP` (avec son `# TODO support for IPV6`, et un
+`{:stop, :networkdown}` qui empêche le démarrage sur un hôte sans IPv4),
+`TCPListener`, `TLSListener`, `WSSListener`. Le transport mockup des tests fige
+la même famille : une suite IPv6 en a besoin.
+
+Le test `:running` de `get_local_ips/1` est mort :
+`:up in flaglist and :running in flaglist not in flaglist` se lit
+`(:running in flaglist) not in flaglist`, toujours vrai. Une interface UP mais
+pas RUNNING est retenue. À corriger ici, sinon la sélection d'adresse hérite du
+défaut.
+
+Aucun listener n'est touché.
+
+### Étape 3 — Un listener IPv6 explicite
+
+Une jambe, une famille, pas de dual-stack. Les blocs `[[listen]]` ne changent
+pas : `addr` accepte déjà une IPv6.
+
+OTP 26 déduit la famille de l'option `{:ip, tuple}` : `:gen_tcp.listen/2`,
+`:gen_udp.open/2` et `:ssl.listen/2` acceptent une adresse IPv6 sans `:inet6`
+(mesuré). Un listener TCP, TLS ou WSS dont `addr` nomme une IPv6 lie donc déjà
+correctement sa socket — ce qui manque est en amont (étape 1) et en aval
+(étape 2).
+
+**UDP est l'exception.** `SIP.Transport.UDP` ouvre sa socket par
+`Socket.UDP.open(port, mode: :active)`, qui ignore l'adresse de bind et ouvre en
+IPv4. Passer la famille et l'adresse à l'ouverture est le seul travail de bind
+de cette étape.
+
+**Résolution.** `SIP.Resolver.resolve/2` tente A, puis AAAA seulement sur
+`:nxdomain` : sur un nom dual-stack, A gagne toujours, et sur un nœud IPv6-only
+la jambe sortante part vers une adresse v4 injoignable. La règle de cette
+étape : la famille demandée découle de celle de l'adresse locale du nœud. Et
+`srv_lookup/1` n'accepte un serveur DNS que sous forme de tuple à quatre
+éléments, avec `{8,8,8,8}` en dur par défaut : un nœud IPv6-only ne résout aucun
+SRV. Accepter un tuple à huit éléments, et prendre le résolveur du système par
+défaut.
+
+**Ce qui est déjà juste, à ne pas refaire.** ExSDP déduit la famille du tuple :
+`MediaServer.Mendooze.Sdp.build/1` avec une adresse v6 rend `o=` et `c=` en
+`IN IP6` (mesuré). `Sdp.parse_media_candidate/1` lit `rtp://[::1]:22000` et rend
+l'hôte sans crochets. `Sdp.ws_url_attribute/1` conserve les crochets, ce qu'une
+URL WebSocket exige. `SIP.NetUtils.ip2string/1` et `parse_address/1` sont
+agnostiques.
+
+**Recette.** Une machine de développement ne porte souvent aucune IPv6 globale
+ni ULA, seulement une `fe80::` : un essai de bout en bout demande `::1` ou une
+ULA (`fd00::/8`) ajoutée sur une interface, et un port qu'aucun autre serveur
+SIP local ne tient. Critère de sortie : un REGISTER puis un appel de bout en
+bout entre deux UA IPv6 à travers kelixip, avec un Contact et un Via relus par
+le pair, et le média relayé annoncé en `IN IP6`.
+
+### Étape 4 — Wildcard et dual-stack
+
+La marche la plus haute.
+
+`bind_addr(:all)` vaut `{0, 0, 0, 0}` dans les trois listeners, et
+`resolve_localip(:all)` prend la première IPv4 : un listener sans `addr`
+n'entend pas l'IPv6. `:all` cesse d'être une adresse IPv4.
+
+**La socket UDP unique devient une socket par famille.** `Socket.UDP.open/2`
+ignore l'adresse de bind, et `Kelix.Listener.Supervisor.drop_extra_udp/1` ignore
+déjà tout bloc `udp` surnuméraire avec un avertissement : deux familles en UDP
+demandent deux sockets, et le choix de la socket sortante devient une décision
+du `SIP.Transport.Selector`.
+
+Deux sockets distinctes plutôt qu'une socket v6 dual-stack : les adresses
+mappées `::ffff:a.b.c.d` polluent tout ce qui écrit une adresse dans un message,
+et le code écrit `:inet.ntoa/1` partout.
+
+Conséquence à assumer : **un appel IPv4↔IPv6 impose le relais média**. Il n'y a
+pas de passe-plat SDP possible entre deux familles.
+
+C'est aussi ici qu'un profil réseau devient distinguable par jambe en UDP
+(étape 5).
+
+### Étape 5 — Profils réseau du média
 
 Annoncer dans le SDP l'adresse du bon côté du réseau, en posant le paramètre
-`profile` de JSR309 (`xmlrpc_jsr309_api.md` §6.7 bis et §6.7 ter).
+`profile` de JSR309 (`xmlrpc_jsr309_api.md` §6.7 bis et §6.7 ter). Prérequis de
+tout appel IPv4↔IPv6 relayé : à faire avec l'étape 4, pas après.
 
 Le mediaserver porte jusqu'à quatre adresses — `publicv4`, `publicv6`,
 `internalv4`, `internalv6` — déclarées par `--public-ip` et `--internal-ip`.
@@ -85,10 +268,8 @@ la R-URI de la requête entrante — donc la règle vaut dans les deux sens, ent
 comme sortant, sans plomberie nouvelle.
 
 - TCP, TLS, WSS : une adresse locale par connexion, donc un profil par jambe.
-- UDP : une seule socket par nœud, liée à toutes les interfaces, donc **un seul
-  profil UDP pour tout le nœud** — celui du bloc `udp`. C'est cohérent avec la
-  limite déjà en place : les blocs `udp` surnuméraires sont ignorés. Lever cette
-  limite est le travail de la phase 2.
+- UDP : une seule socket par nœud tant que l'étape 4 n'est pas faite, donc **un
+  seul profil UDP pour tout le nœud** — celui du bloc `udp`.
 
 #### Le mediaserver est interrogé, jamais recopié
 
@@ -112,7 +293,8 @@ mauvaise interface sans que rien ne le signale.
 Le profil voyage avec le serveur choisi dans `:mediaserver_instance`
 (`%{module, url, profile}`), et l'adaptateur le passe en dernier paramètre de
 `EndpointStartReceiving` et `EndpointStartSending` — le même sur les deux, posé
-avant que le port ne soit publié. Trois pièges du contrat :
+avant que le port ne soit publié. L'adaptateur ne passe aujourd'hui aucun profil
+et n'appelle jamais `GetNetworkProfiles`. Trois pièges du contrat :
 
 - le paramètre est positionnel et sixième sur `EndpointStartReceiving`, donc
   `offer` doit être envoyé même vide ;
@@ -125,21 +307,22 @@ avant que le port ne soit publié. Trois pièges du contrat :
 #### Deux jambes, un seul serveur
 
 Un B2BUA relaie à l'intérieur d'une seule session. Si les deux jambes n'ont pas
-le même profil — la médiation IPv4↔IPv6 de la phase 2 — le serveur retenu doit
+le même profil — la médiation IPv4↔IPv6 de l'étape 4 — le serveur retenu doit
 porter les deux. Le serveur est aujourd'hui choisi au routage, avant que la
 cible sortante ne soit connue : la contrainte posée au `checkout` est donc celle
 de la jambe entrante, et la jambe sortante vérifie le serveur déjà retenu. Son
 profil manque : l'appel échoue en 503.
 
-#### Hors périmètre de cette phase
+#### Hors périmètre de cette étape
 
 - **La MCU.** Le module ouvre ses propres canaux de contrôle vers les serveurs
   du pool et ne passe pas par `checkout/1` : les conférences gardent le profil
   par défaut. Conséquence assumée : une conférence atteinte depuis un listener
   `internal` annonce l'adresse publique.
-- **La classification d'un correspondant par son adresse** (`network`). En phase
-  3 c'est le listener qui décide, pas le pair. Une jambe sortante hérite du côté
-  de la jambe entrante, et sa famille de l'adresse résolue de la cible.
+- **La classification d'un correspondant par son adresse.** Ici c'est le
+  listener qui décide, pas le pair. Une jambe sortante hérite du côté de la
+  jambe entrante, et sa famille de l'adresse résolue de la cible. Le reste est
+  l'étape 6.
 
 #### Effet d'exploitation à connaître
 
@@ -154,12 +337,38 @@ Deux jambes d'une même session peuvent-elles porter deux profils différents ? 
 contrat serveur dit « un profil par jambe » ; il ne dit pas si deux profils
 coexistent dans une session. C'est exactement le cas de la médiation IPv4↔IPv6.
 
-### Phase 4
+### Étape 6 — `[network]` et `advertise`
 
-Support interface unique nattée avec une IP interne nattée sur une IP externe
-(cas VM AWS). Autodétection par STUN.
+Les besoins « médiation interne/externe » et « IP interne nattée 1:1 ». C'est
+ici qu'un correspondant se classe par son adresse, et qu'un appel qui
+**traverse** d'un côté à l'autre devient possible.
 
-### Phase 5
+- **`[network] internal = [<préfixes>]`**, au niveau du nœud. Toute adresse de
+  ces préfixes est interne ; le reste est externe. La reconnaissance des portées
+  de l'étape 2 sert de base.
+- **`advertise = "<ip>"`** par listener : l'adresse publiée dans la
+  signalisation quand elle diffère de l'adresse liée. C'est le cas de la VM
+  nattée 1:1, où l'exploitant connaît l'adresse publique.
+- La table de l'étape 5 gagne son second axe : le côté ne vient plus seulement
+  du listener de la jambe entrante, mais de la classification du correspondant.
+  Le `checkout` du pool gagne alors à se déplacer après la résolution de la
+  cible, les deux profils étant connus ensemble.
+- **Un client STUN n'existe pas.** `SIP.Stun` sait uniquement reconnaître et
+  décoder l'en-tête d'un message entrant ; son moduledoc énumère ce qui manque
+  (attributs, XOR-MAPPED-ADDRESS, encodage, MESSAGE-INTEGRITY), et son seul
+  appelant est un `Logger.debug`. Une découverte automatique de l'adresse
+  publique demande donc d'écrire un client complet, retransmissions comprises
+  (RFC 5389 §7.2.1). C'est un chantier facultatif, et `advertise` statique le
+  rend rarement nécessaire.
 
-Support procédure mTLS
-https://www.cloudflare.com/fr-fr/learning/access-management/what-is-mutual-tls/
+### Étape 7 — mTLS
+
+Le listener TLS ne passe ni `verify` ni `cacertfile` : ajouter `verify_peer`,
+`fail_if_no_peer_cert` et le CA par listener est petit.
+
+Le vrai trou est de l'autre côté. La jambe **sortante** se connecte avec
+`verify: false`. Un mTLS servi par un client qui ne vérifie rien est un
+théâtre : la vérification du certificat sur la jambe sortante précède le mTLS,
+et elle n'attend pas cette étape pour valoir la peine.
+
+Voir <https://www.cloudflare.com/fr-fr/learning/access-management/what-is-mutual-tls/>.
