@@ -56,10 +56,13 @@ defmodule SIP.Transport.WSSListener do
   # ---- GenServer callbacks --------------------------------------------------
 
   # Accept an optional keyword list as third element for overrides in tests
-  # (:max_connections, :certfile, :keyfile).
+  # (:max_connections, :certfile, :keyfile). :family (:ipv4 | :ipv6) picks the
+  # family of the address advertised in Via/Contact when addr is :all; with an
+  # explicit addr the family comes from the address.
   @impl true
   def init({addr, port, opts}) do
-    localip  = resolve_localip(addr)
+    family   = SIP.NetUtils.address_family(addr) || Keyword.get(opts, :family, :ipv4)
+    localip  = resolve_localip(addr, family)
     max_conn = Keyword.get(opts, :max_connections,
       Application.get_env(:elixip2, :wss_max_connections, @default_max_connections))
     certfile = Keyword.get(opts, :certfile,
@@ -76,7 +79,7 @@ defmodule SIP.Transport.WSSListener do
       {:versions, [:"tlsv1.2", :"tlsv1.3"]}
     ]
 
-    case :ssl.listen(port, ssl_opts) do
+    case localip && :ssl.listen(port, ssl_opts) do
       {:ok, listen_socket} ->
         {:ok, {_, actual_port}} = :ssl.sockname(listen_socket)
         listener_pid = self()
@@ -92,6 +95,11 @@ defmodule SIP.Transport.WSSListener do
           connections:     %{}
         }
         {:ok, state}
+
+      nil ->
+        Logger.error([module: __MODULE__,
+                      message: "No local #{family} address to advertise. Check your network configuration"])
+        {:stop, :networkdown}
 
       {:error, reason} ->
         Logger.error([module: __MODULE__,
@@ -296,8 +304,10 @@ defmodule SIP.Transport.WSSListener do
     |> Enum.reject(&(&1 == ""))
   end
 
-  defp resolve_localip(:all), do: SIP.NetUtils.get_local_ips([:ipv4]) |> hd()
-  defp resolve_localip(ip), do: ip
+  # nil when the host carries no address of the requested family: the listener
+  # would then have nothing to write in a Via or a Contact.
+  defp resolve_localip(:all, family), do: SIP.NetUtils.get_local_ips([family]) |> List.first()
+  defp resolve_localip(ip, _family), do: ip
 
   defp find_connection(connections, dest_ip, dest_port) do
     connections

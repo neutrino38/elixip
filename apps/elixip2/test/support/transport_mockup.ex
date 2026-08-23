@@ -121,11 +121,16 @@ defmodule SIP.Test.Transport.Mockup do
 
   @impl true
   def init({_dest_ip, _dest_port}) do
-    case SIP.NetUtils.get_local_ips([:ipv4]) do
+    # The family is configurable so an IPv6 suite can drive this transport; on a
+    # host that carries no address of that family, fall back to loopback rather
+    # than refuse to start — a mockup never puts its address on a wire.
+    family = Application.get_env(:elixip2, :mockup_local_family, :ipv4)
+
+    case SIP.NetUtils.get_local_ips([family, :loopback]) do
       [] ->
         Logger.error(
           module: __MODULE__,
-          message: "Could not find any valid IP V4 address. Check your network connection"
+          message: "Could not find any local #{family} address. Check your network connection"
         )
 
         {:stop, :networkdown}

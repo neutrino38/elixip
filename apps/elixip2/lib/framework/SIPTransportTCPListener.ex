@@ -46,16 +46,19 @@ defmodule SIP.Transport.TCPListener do
   # ---- GenServer callbacks --------------------------------------------------
 
   # Accept an optional keyword list as third element so tests can override
-  # :max_connections without touching the application environment.
+  # :max_connections without touching the application environment. :family
+  # (:ipv4 | :ipv6) picks the family of the address advertised in Via/Contact
+  # when addr is :all; with an explicit addr the family comes from the address.
   @impl true
   def init({addr, port, opts}) do
-    localip = resolve_localip(addr)
+    family = SIP.NetUtils.address_family(addr) || Keyword.get(opts, :family, :ipv4)
+    localip = resolve_localip(addr, family)
     max_conn = Keyword.get(opts, :max_connections,
       Application.get_env(:elixip2, :tcp_max_connections, @default_max_connections))
     bind_addr = if addr == :all, do: {0, 0, 0, 0}, else: addr
 
-    case :gen_tcp.listen(port, [:binary, {:packet, :raw}, {:active, false},
-                                {:reuseaddr, true}, {:ip, bind_addr}]) do
+    case localip && :gen_tcp.listen(port, [:binary, {:packet, :raw}, {:active, false},
+                                          {:reuseaddr, true}, {:ip, bind_addr}]) do
       {:ok, listen_socket} ->
         {:ok, actual_port} = :inet.port(listen_socket)
         listener_pid = self()
@@ -71,6 +74,11 @@ defmodule SIP.Transport.TCPListener do
           connections:     %{}
         }
         {:ok, state}
+
+      nil ->
+        Logger.error([module: __MODULE__,
+                      message: "No local #{family} address to advertise. Check your network configuration"])
+        {:stop, :networkdown}
 
       {:error, reason} ->
         Logger.error([module: __MODULE__,
@@ -177,8 +185,10 @@ defmodule SIP.Transport.TCPListener do
     end
   end
 
-  defp resolve_localip(:all), do: SIP.NetUtils.get_local_ips([:ipv4]) |> hd()
-  defp resolve_localip(ip), do: ip
+  # nil when the host carries no address of the requested family: the listener
+  # would then have nothing to write in a Via or a Contact.
+  defp resolve_localip(:all, family), do: SIP.NetUtils.get_local_ips([family]) |> List.first()
+  defp resolve_localip(ip, _family), do: ip
 
   defp find_connection(connections, dest_ip, dest_port) do
     connections

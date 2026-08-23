@@ -197,7 +197,6 @@ end
 defmodule MediaServer.Mockup.Conn do
   use GenServer
   require Logger
-  import Bitwise, only: [band: 2]
 
   alias MediaServer.Mendooze.Sdp
 
@@ -508,28 +507,14 @@ defmodule MediaServer.Mockup.Conn do
 
   # Pick the first routable local address: prefer IPv4, fall back to IPv6 when
   # the host has no IPv4 interface, and finally loopback when neither exists
-  # (e.g. isolated CI environments).
+  # (e.g. isolated CI environments). get_local_ips/1 already leaves out the
+  # scopes an SDP c= line must not carry.
   defp local_media_ip do
-    case SIP.NetUtils.get_local_ips([:ipv4]) do
-      [ip | _] ->
-        ip
-
-      _ ->
-        # Skip link-local IPv6 (fe80::/10): it is not routable without a zone
-        # id and useless to advertise in SDP. Prefer a global address.
-        ipv6 = SIP.NetUtils.get_local_ips([:ipv6])
-
-        case Enum.find(ipv6, &(not link_local_ipv6?(&1))) || List.first(ipv6) do
-          nil -> {127, 0, 0, 1}
-          ip -> ip
-        end
+    case SIP.NetUtils.get_local_ips([:ipv4]) ++ SIP.NetUtils.get_local_ips([:ipv6]) do
+      [ip | _] -> ip
+      [] -> {127, 0, 0, 1}
     end
   end
-
-  # fe80::/10 — the top 10 bits are 1111 1110 10, i.e. first group masked with
-  # 0xffc0 equals 0xfe80.
-  defp link_local_ipv6?({g1, _, _, _, _, _, _, _}), do: band(g1, 0xFFC0) == 0xFE80
-  defp link_local_ipv6?(_), do: false
 
   # Build the local OFFER, reusing MediaServer.Mendooze.Sdp (the pure SDP layer).
   # WebRTC transport plane (DTLS/ICE/mux/mid/candidates/rtcp-fb) iff

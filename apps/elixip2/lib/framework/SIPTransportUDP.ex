@@ -14,47 +14,59 @@ defmodule SIP.Transport.UDP do
   @impl true
   def init({_dest_ip, _dest_port}) do
     try do
-      # TODO support for IPV6
-      ips = SIP.NetUtils.get_local_ips([:ipv4])
+      # Local bind port and advertised local IP are configurable via the
+      # application env (set by elixipp's --listen / --local-port options), so
+      # two instances can coexist on one host (e.g. a UAS on 5060 and a UAC on
+      # 5070 for a loopback test). Defaults preserve the historical behaviour
+      # (bind 5060, advertise the first local IPv4). The socket binds all
+      # interfaces; :udp_local_addr only sets the IP advertised in Via/Contact.
+      #
+      # The family comes from the configured address when there is one, else from
+      # :udp_family. Deriving it is what lets this transport start on a host that
+      # carries no IPv4 at all; the socket itself stays IPv4 until step 3 of
+      # docs/design/multi-interface.md.
+      port = Application.get_env(:elixip2, :udp_local_port, @default_local_port)
+      configured_ip = Application.get_env(:elixip2, :udp_local_addr)
 
-      if ips == [] do
-        Logger.error(
-          module: SIP.Test.Transport.UDP,
-          message: "Could not find any valid IP V4 address. Check your network connection"
-        )
+      family =
+        SIP.NetUtils.address_family(configured_ip) ||
+          Application.get_env(:elixip2, :udp_family, :ipv4)
 
-        {:stop, :networkdown}
-      else
-        # Local bind port and advertised local IP are configurable via the
-        # application env (set by elixipp's --listen / --local-port options), so
-        # two instances can coexist on one host (e.g. a UAS on 5060 and a UAC on
-        # 5070 for a loopback test). Defaults preserve the historical behaviour
-        # (bind 5060, advertise the first local IPv4). The socket binds all
-        # interfaces; :udp_local_addr only sets the IP advertised in Via/Contact.
-        port = Application.get_env(:elixip2, :udp_local_port, @default_local_port)
-        localip = Application.get_env(:elixip2, :udp_local_addr) || hd(ips)
+      ips = SIP.NetUtils.get_local_ips([family])
 
-        initial_state = %{
-          t_isreliable: false,
-          localip: localip,
-          localips: ips,
-          localport: port,
-          upperlayer: nil
-        }
+      case configured_ip || List.first(ips) do
+        nil ->
+          Logger.error(
+            module: __MODULE__,
+            message:
+              "Could not find any local #{family} address to advertise. " <>
+                "Check your network connection."
+          )
 
-        case Socket.UDP.open(port, mode: :active) do
-          {:ok, socket} ->
-            :ok = Socket.UDP.process(socket, self())
-            {:ok, Map.put(initial_state, :socket, socket)}
+          {:stop, :networkdown}
 
-          {:error, err} ->
-            Logger.error(
-              module: __MODULE__,
-              message: "Failed to bind UDP socket on port #{port}: #{bind_error(err)}"
-            )
+        localip ->
+          initial_state = %{
+            t_isreliable: false,
+            localip: localip,
+            localips: ips,
+            localport: port,
+            upperlayer: nil
+          }
 
-            {:stop, err}
-        end
+          case Socket.UDP.open(port, mode: :active) do
+            {:ok, socket} ->
+              :ok = Socket.UDP.process(socket, self())
+              {:ok, Map.put(initial_state, :socket, socket)}
+
+            {:error, err} ->
+              Logger.error(
+                module: __MODULE__,
+                message: "Failed to bind UDP socket on port #{port}: #{bind_error(err)}"
+              )
+
+              {:stop, err}
+          end
       end
     rescue
       err in RuntimeError ->
