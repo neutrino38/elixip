@@ -9,11 +9,11 @@
 #   rpmbuild -bb --define "_topdir <dir>" packaging/rpm/elixipp.spec
 
 Name:           elixipp
-Version:        1.5.1
+Version:        1.5.2
 Release:        1%{?dist}
 Summary:        SIP scenario test tool driven by the Finite State Language
 License:        BUSL-1.1
-URL:            https://www.ives.fr/
+URL:            https://github.com/neutrino38/elixip
 Source0:        %{name}-%{version}.tar.gz
 BuildArch:      noarch
 
