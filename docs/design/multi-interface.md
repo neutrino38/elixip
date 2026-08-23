@@ -133,33 +133,43 @@ Tests : `apps/elixip2/test/sip_ipv6_message_test.exs`.
 
 Aucun listener n'est touché.
 
-### Étape 2 — Couche adresse : choisir une adresse locale
+### Étape 2 — Couche adresse : choisir une adresse locale — livrée
 
-`SIP.NetUtils.get_local_ips/1` classe par famille mais **ne filtre pas la
-portée**. Sur une machine de développement, `get_local_ips([:ipv6])` ne rend
-souvent qu'une `fe80::` : annoncée dans un Contact, elle ne se joint pas. Le
-filtre existe déjà, recopié dans `MediaServer.Mockup` (`link_local_ipv6?/1`) :
-il remonte dans `NetUtils`, qui devient l'unique endroit où une portée se
-reconnaît — link-local, loopback, ULA. La reconnaissance des ULA sert de nouveau
-à l'étape 6.
+Le nœud choisit une adresse locale annonçable, dans une famille qu'il demande.
 
-L'ordre du retour met les IPv6 en tête d'une liste mixte : tout appelant qui
-fait `hd/1` prend une adresse au hasard de l'énumération des interfaces. Les
-appelants demandent donc une famille, et une seule ; `hd/1` ne décide plus.
+**La portée se reconnaît en un seul endroit.** `SIP.NetUtils.address_scope/1`
+rend `:loopback`, `:link_local`, `:private` ou `:global`, pour les deux
+familles : RFC 1918 et les ULA de la RFC 4193 (`fc00::/7`) se lisent tous les
+deux `:private`. `MediaServer.Mockup` portait sa propre copie du test
+`fe80::/10` ; elle a disparu. La reconnaissance des adresses `:private` sert de
+nouveau à l'étape 6.
 
-Quatre sites figent la famille et deviennent paramétrables :
-`SIP.Transport.UDP` (avec son `# TODO support for IPV6`, et un
-`{:stop, :networkdown}` qui empêche le démarrage sur un hôte sans IPv4),
-`TCPListener`, `TLSListener`, `WSSListener`. Le transport mockup des tests fige
-la même famille : une suite IPv6 en a besoin.
+**`get_local_ips/1` filtre la portée.** Les adresses `:global` et `:private`
+sortent toujours ; `:loopback` et `:link_local` ne sortent que si l'appelant les
+nomme. Une `fe80::` ne s'annonce pas : elle demande un identifiant de zone
+qu'aucun pair ne peut employer.
 
-Le test `:running` de `get_local_ips/1` est mort :
-`:up in flaglist and :running in flaglist not in flaglist` se lit
-`(:running in flaglist) not in flaglist`, toujours vrai. Une interface UP mais
-pas RUNNING est retenue. À corriger ici, sinon la sélection d'adresse hérite du
-défaut.
+**L'ordre du retour rend `hd/1` défendable** : IPv6 avant IPv4, et dans une
+famille `:global` avant `:private` avant `:link_local` avant `:loopback`.
+Demander aucune famille rend une liste vide. La famille d'une adresse locale est
+une décision, pas un effet de l'ordre d'énumération des interfaces.
 
-Aucun listener n'est touché.
+**La famille est un paramètre sur les cinq sites qui la figeaient.**
+`SIP.Transport.UDP` la lit sur `:udp_local_addr` quand cette adresse est posée,
+sinon sur `:udp_family` (`:ipv4` par défaut) : il démarre donc sur un hôte sans
+IPv4, et n'échoue en `:networkdown` que s'il n'a réellement rien à annoncer. Les
+trois listeners (`TCPListener`, `TLSListener`, `WSSListener`) la lisent sur
+`addr` quand elle est explicite, sinon sur l'option `:family` ; sans adresse à
+annoncer ils s'arrêtent sur un message clair au lieu de lever sur une liste
+vide. Le transport mockup des tests lit `:mockup_local_family`.
+
+**Le filtre `:running` était mort** : `:up in flaglist and :running in flaglist
+not in flaglist` se lit `(:running in flaglist) not in flaglist`, toujours vrai,
+donc une interface UP mais pas RUNNING était retenue.
+
+Tests : `apps/elixip2/test/netutils_test.exs`.
+
+Aucune socket de listener ne change de famille : c'est l'étape 3.
 
 ### Étape 3 — Un listener IPv6 explicite
 
