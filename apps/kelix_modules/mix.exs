@@ -17,7 +17,7 @@ defmodule KelixModules.MixProject do
   def project do
     [
       app: :kelix_modules,
-      version: "1.5.1",
+      version: "1.5.2",
       elixir: "~> 1.15",
       build_path: "../../_build",
       config_path: "../../config/config.exs",
