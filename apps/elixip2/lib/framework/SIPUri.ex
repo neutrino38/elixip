@@ -428,10 +428,6 @@ defmodule SIP.Uri do
     end
   end
 
-  defp serialize_core_uri(scheme, user, host, port) when is_tuple(host) do
-    serialize_core_uri(scheme, user, SIP.NetUtils.ip2string(host), port)
-  end
-
   defp serialize_core_uri("sips:", nil, host, 5061) do
     "sips:" <> host
   end
@@ -577,11 +573,15 @@ defmodule SIP.Uri do
   # may have synthesized `transport` from `proto`) so serialize/1 can decide on
   # brackets from what actually goes out.
   defp serialize_addr_spec(uri = %SIP.Uri{}) do
+    # `domain` holds either what a peer wrote (an IPv6 literal, brackets stripped
+    # by the parser) or a local address as a tuple (build_contact_uri/2). Both
+    # become the §25.1 `host` production here, so the clauses below only ever
+    # append `:port` to something a peer can split again.
     core_uri_str =
       serialize_core_uri(
         uri.scheme,
         uri.userpart,
-        uri.domain,
+        SIP.NetUtils.sip_host(uri.domain),
         uri.port
       )
 

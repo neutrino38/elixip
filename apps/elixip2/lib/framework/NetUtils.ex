@@ -224,6 +224,36 @@ defmodule SIP.NetUtils do
     end
   end
 
+  @doc """
+  Render an address as the RFC 3261 §25.1 `host` production: an IPv6 literal
+  comes out as an `IPv6reference`, inside square brackets; anything else — an
+  IPv4 address, a hostname, an already bracketed literal — comes out unchanged.
+
+  The single rendering point for every address that becomes message text: a URI
+  host (`SIP.Uri`) and a Via `sent-by` (`SIP.Msg.Ops`). Both used to carry their
+  own copy of the tuple-to-string conversion, five in all, and a port appended
+  to a bare `2001:db8::1` is a `host:port` no peer can split.
+  """
+  @spec sip_host(tuple() | binary()) :: binary()
+  def sip_host(ipaddr) when is_tuple(ipaddr) and tuple_size(ipaddr) == 8 do
+    "[" <> ip2string(ipaddr) <> "]"
+  end
+
+  def sip_host(ipaddr) when is_tuple(ipaddr), do: ip2string(ipaddr)
+
+  def sip_host("[" <> _rest = host), do: host
+
+  # Only an IPv6 literal can hold a colon: neither a hostname nor an IPv4 address
+  # does, so the colon is what tells this apart without parsing every host name
+  # that goes out.
+  def sip_host(host) when is_binary(host) do
+    if String.contains?(host, ":") and match?({:ok, _addr}, parse_address(host)) do
+      "[" <> host <> "]"
+    else
+      host
+    end
+  end
+
   @spec parse_address(binary()) ::
           {:error, :einval}
           | {:ok,
