@@ -135,8 +135,13 @@ defmodule SIP.Uri do
   end
 
   # parse domain, user@domain, user@domain:port
-
-  defp parse_core_uri(scheme, core_uri_str) do
+  #
+  # Returns a %SIP.Uri{} or an error atom. NEVER an exception: the caller of the
+  # caller is SIPMsg.parse/2 on the inbound path, and an exception there used to
+  # kill the transport instance — one TCP/TLS/WSS connection, or the node's only
+  # UDP socket — over one peer's typo. The error atom and the parse-error
+  # callback are the only channels this parser has.
+  defp parse_core_uri(core_uri_str) do
     case String.split(core_uri_str, "@") do
       [user, domainport] ->
         # `*`, not `+`, on the tail: a one-character user part is legal (RFC 3261
@@ -145,39 +150,74 @@ defmodule SIP.Uri do
         # URI that does not parse discards the whole message — a REGISTER from
         # extension "1" was answered by nothing at all.
         if String.match?(user, ~r/^[a-zA-Z0-9\+][a-zA-Z0-9\-\._]*$/) do
-          tmpuri = parse_core_uri(scheme, domainport)
-
-          if is_map(tmpuri) do
-            Map.put(tmpuri, :userpart, user)
-          else
-            tmpuri
+          case parse_host_port(domainport) do
+            uri when is_map(uri) -> Map.put(uri, :userpart, user)
+            err -> err
           end
         else
           nil
         end
 
       [domainport] ->
-        case String.split(domainport, ":") do
-          [domain, port] ->
-            if String.match?(port, ~r/^[0-9]+$/) do
-              tmpuri = parse_core_uri(scheme, domain)
+        parse_host_port(domainport)
 
-              if is_map(tmpuri) do
-                Map.put(tmpuri, :port, String.to_integer(port))
-              else
-                tmpuri
-              end
-            else
-              :invalid_sip_uri_port
-            end
+      _more_than_one_at ->
+        :invalid_sip_uri_general
+    end
+  end
 
-          [domain] ->
-            if String.match?(domain, ~r/^[a-zA-Z0-9\-\.]+$/) do
-              %SIP.Uri{domain: domain}
-            else
-              :invalid_sip_domain
-            end
-        end
+  # host [ ":" port ] — RFC 3261 §19.1.1. An IPv6 literal is a bracketed
+  # `IPv6reference`, so the brackets are recognized first and a port is looked
+  # for only after the closing one. Splitting the whole thing on ":" is what
+  # made `sip:bob@[2001:db8::1]:5060` unreadable.
+  defp parse_host_port("[" <> rest) do
+    case String.split(rest, "]", parts: 2) do
+      [literal, ""] -> parse_ipv6_reference(literal)
+      [literal, ":" <> port] -> add_port(parse_ipv6_reference(literal), port)
+      [_literal, _junk] -> :invalid_sip_uri_port
+      [_unterminated] -> :invalid_sip_domain
+    end
+  end
+
+  defp parse_host_port(hostport) do
+    case String.split(hostport, ":") do
+      [host] -> parse_hostname(host)
+      [host, port] -> add_port(parse_hostname(host), port)
+      # An IPv6 literal stripped of its brackets, or a mangled host. Refused,
+      # and refused with an atom: this used to be an unmatched `case` clause.
+      _too_many_colons -> :invalid_sip_domain
+    end
+  end
+
+  # A zone identifier (RFC 6874, `fe80::1%eth0`) is refused, and refused
+  # explicitly: :inet.parse_address/1 accepts one and silently drops the zone.
+  # A link-local address in a Via or a Contact cannot be reached from another
+  # link, so keeping it would advertise the opposite of what holds.
+  defp parse_ipv6_reference(literal) do
+    with false <- String.contains?(literal, "%"),
+         {:ok, addr} <- SIP.NetUtils.parse_address(literal),
+         8 <- tuple_size(addr) do
+      %SIP.Uri{domain: literal}
+    else
+      _ -> :invalid_sip_domain
+    end
+  end
+
+  defp parse_hostname(host) do
+    if String.match?(host, ~r/^[a-zA-Z0-9\-\.]+$/) do
+      %SIP.Uri{domain: host}
+    else
+      :invalid_sip_domain
+    end
+  end
+
+  defp add_port(err, _port) when is_atom(err), do: err
+
+  defp add_port(uri, port) do
+    if String.match?(port, ~r/^[0-9]+$/) do
+      Map.put(uri, :port, String.to_integer(port))
+    else
+      :invalid_sip_uri_port
     end
   end
 
@@ -199,7 +239,7 @@ defmodule SIP.Uri do
         parts = split_params(part2)
 
         # parse core URI
-        case parse_core_uri(proto, Enum.at(parts, 0)) do
+        case parse_core_uri(Enum.at(parts, 0)) do
           err when is_atom(err) ->
             {err, Map.new()}
 
