@@ -126,83 +126,89 @@ defmodule SIP.NetUtils do
 #    netmask: {255, 255, 255, 0},
 #    hwaddr: [240, 158, 74, 220, 237, 58]
 #  ]
-#
-#  Extract all IP addresses recursively and return them as a list
-#  Apply a filter
 
-  defp get_if_addrs_from_ifinfos(ifinfolist, iplist, filters) when is_list(ifinfolist) do
-    # If a single filter is passed as arg, refomat it as a list
-    filters = if is_list(filters) do
-      filters
-    else
-      [ filters ]
-    end
+  @doc """
+  The family of an IP address tuple: `:ipv4`, `:ipv6`, or `nil` for anything
+  else — a `:all` wildcard, a hostname, `nil` itself.
 
-    # Find the first address in the list
-    new_iplist = case List.keyfind(ifinfolist, :addr, 0) do
-      { :addr, { 127, 0, 0, 1 } } ->
-        if :ipv4 in filters and :loopback in filters do
-          [ { 127, 0, 0, 1 } | iplist ]
-        else
-          iplist
-        end
+  A caller that has an address does not configure its family: it reads it here.
+  """
+  @spec address_family(term()) :: :ipv4 | :ipv6 | nil
+  def address_family({_, _, _, _}), do: :ipv4
+  def address_family({_, _, _, _, _, _, _, _}), do: :ipv6
+  def address_family(_), do: nil
 
-      { :addr, { a, b, c, d } } ->
-        if :ipv4 in filters do
-          [ { a, b, c, d } | iplist ]
-        else
-          iplist
-        end
+  @doc """
+  The scope of an IP address: `:loopback`, `:link_local`, `:private` or
+  `:global`.
 
-      { :addr, {0, 0, 0, 0, 0, 0, 0, 1} }  ->
-        if :ipv6 in filters and :loopback in filters do
-          [ {0, 0, 0, 0, 0, 0, 0, 1} | iplist ]
-        else
-          iplist
-        end
+  This is the single place a scope is recognised. `:private` reads RFC 1918 for
+  IPv4 and RFC 4193 unique local addresses (`fc00::/7`) for IPv6: reachable
+  inside one site, not from outside it.
 
-      { :addr, { a, b, c, d, e, f, g, h } } ->
-        if :ipv6 in filters do
-          [ { a, b, c, d, e, f, g, h } | iplist ]
-        else
-          iplist
-        end
+  The distinction is not cosmetic. A link-local address does not come back: it
+  needs a zone identifier no peer can use, so writing one in a Contact, a Via
+  or an SDP `c=` line advertises an address nothing can reach. On a development
+  machine `fe80::` is often the only IPv6 address an interface carries, which is
+  exactly when a naive selection picks it.
+  """
+  @spec address_scope(tuple()) :: :loopback | :link_local | :private | :global | nil
+  def address_scope({127, _, _, _}), do: :loopback
+  def address_scope({169, 254, _, _}), do: :link_local
+  def address_scope({10, _, _, _}), do: :private
+  def address_scope({172, b2, _, _}) when b2 >= 16 and b2 <= 31, do: :private
+  def address_scope({192, 168, _, _}), do: :private
+  def address_scope({_, _, _, _}), do: :global
 
-      nil -> nil
+  def address_scope({0, 0, 0, 0, 0, 0, 0, 1}), do: :loopback
+  # fe80::/10 — the top ten bits are 1111 1110 10
+  def address_scope({g1, _, _, _, _, _, _, _}) when band(g1, 0xFFC0) == 0xFE80,
+    do: :link_local
 
-      _ -> iplist
+  # fc00::/7, of which RFC 4193 defines fd00::/8
+  def address_scope({g1, _, _, _, _, _, _, _}) when band(g1, 0xFE00) == 0xFC00,
+    do: :private
 
-    end
+  def address_scope({_, _, _, _, _, _, _, _}), do: :global
+  def address_scope(_), do: nil
 
-    if is_nil(new_iplist) do
-      # No more addresses in the list
-      iplist
-    else
-      # Process the rest recursively
-      get_if_addrs_from_ifinfos(
-        List.keydelete( ifinfolist, :addr, 0),
-        new_iplist, filters)
-    end
-  end
+  # IPv6 before IPv4, and a routable address before a restricted one, so that
+  # `hd/1` on the result is a defensible choice rather than the order in which
+  # the OS happens to enumerate its interfaces.
+  @family_rank %{ipv6: 0, ipv4: 1}
+  @scope_rank %{global: 0, private: 1, link_local: 2, loopback: 3}
 
-  @doc "Get local IP addresses excluding loopback"
+  @doc """
+  Local IP addresses of the requested families, most advertisable first.
+
+  `filters` names the families to return — `:ipv4`, `:ipv6`, or both — and
+  admits the scopes that are excluded by default: `:loopback` and
+  `:link_local`. Global and private addresses are always returned. Asking for
+  no family returns an empty list.
+
+  Callers ask for **one** family. A mixed list makes `hd/1` pick whichever
+  family the interface enumeration happened to yield first, and the family of
+  a local address is a decision — a listener's, a transport's — not an
+  accident.
+  """
+  @spec get_local_ips([:ipv4 | :ipv6 | :loopback | :link_local] | atom()) :: [tuple()]
   def get_local_ips(filters) do
-    { :ok, iflist } = :inet.getifaddrs()
+    filters = if is_list(filters), do: filters, else: [filters]
+    families = Enum.filter([:ipv6, :ipv4], &(&1 in filters))
+    scopes = [:global, :private] ++ Enum.filter([:link_local, :loopback], &(&1 in filters))
 
-    #Filter the interface list to include only up and running interfaces
-    iflist = Enum.filter( iflist, fn { _ifname, ifinfolist } ->
+    {:ok, iflist} = :inet.getifaddrs()
+
+    iflist
+    |> Enum.filter(fn {_ifname, ifinfolist} ->
       case List.keyfind(ifinfolist, :flags, 0) do
-        { :flags, flaglist } ->
-          :up in flaglist and :running in flaglist not in flaglist
-
-        nil ->
-          false
+        {:flags, flaglist} -> :up in flaglist and :running in flaglist
+        nil -> false
       end
     end)
-
-    Enum.reduce(iflist, [], fn { _ifname, ifinfolist }, acc ->
-      Enum.concat(acc, get_if_addrs_from_ifinfos(ifinfolist, [], filters))
-    end)
+    |> Enum.flat_map(fn {_ifname, ifinfolist} -> for {:addr, addr} <- ifinfolist, do: addr end)
+    |> Enum.filter(&(address_family(&1) in families and address_scope(&1) in scopes))
+    |> Enum.sort_by(&{@family_rank[address_family(&1)], @scope_rank[address_scope(&1)]})
   end
 
   def get_local_ipv4() do
