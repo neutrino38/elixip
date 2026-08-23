@@ -19,6 +19,20 @@ while [ -h "$SELF" ]; do
 done
 DIR="$(cd "$(dirname "$SELF")" && pwd)"
 
+# The cookie is the credential (see below), and the release's own script reads it
+# with a bare `cat` under `set -e`: an operator who may not read it gets
+# "Permission denied" from cat and nothing else — even for `kelictl version`. No
+# other file of the release needs a privilege, so this is the whole gate. An
+# ABSENT cookie is a different fault (a broken install) and is left to speak for
+# itself.
+COOKIE_FILE="$(dirname "$DIR")/releases/COOKIE"
+if [ -z "${RELEASE_COOKIE-}" ] && [ -e "$COOKIE_FILE" ] && [ ! -r "$COOKIE_FILE" ]; then
+  echo "kelictl: cannot read $COOKIE_FILE, the credential this node authenticates with." >&2
+  echo "kelictl: run it as root, or join the kelixip group -- usermod -aG kelixip <user>," >&2
+  echo "kelictl: then open a new session. Group membership grants full control of the node." >&2
+  exit 1
+fi
+
 # Forward argv as an Elixir **list**, one element per argument, quoted and escaped.
 #
 # It used to be joined into one string ("$*") for the CLI to re-split, and that lost

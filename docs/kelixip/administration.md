@@ -19,6 +19,25 @@ on Ubuntu/Debian, the same file the systemd unit reads.
 > and the CLI both read that file), but nothing yet derives the VM node name from
 > the TOML at boot.
 
+**Root is not required.** `kelictl` writes nothing, and everything it reads in the
+release is world-readable — except one file: `releases/COOKIE`, 0640 `root:kelixip`.
+That single permission is the whole gate. An operator runs the CLI either as root or
+as a member of the `kelixip` group:
+
+```bash
+usermod -aG kelixip alice     # then open a new session
+```
+
+`/usr/sbin` is in every user's PATH on Alma Linux 9, so the command resolves without a
+full path. A cookie that exists and cannot be read is reported by name, with what to
+do about it — the release's own script would only say `cat: Permission denied`.
+
+> **What the group grants.** The cookie is an Erlang distribution credential, not a
+> read-only token: whoever holds it can run any code on the node, as the `kelixip`
+> user. Adding someone to the group makes them a full operator of that server. To
+> delegate less, expose the [REST control API](rest-api.md) with its own token and
+> keep the group for the people who already administer the node.
+
 ## Core commands
 
 | Command | R/W | Does |

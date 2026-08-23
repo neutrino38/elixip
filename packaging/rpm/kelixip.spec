@@ -28,7 +28,7 @@
 
 Name:           kelixip
 Version:        1.5.2
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -38,6 +38,12 @@ ExclusiveArch:  x86_64 aarch64
 BuildRequires:  systemd-rpm-macros
 Requires(pre):  shadow-utils
 %{?systemd_requires}
+# SELinux file contexts, set in %post. Hard requirements, not conditional: Alma 9
+# is Enforcing out of the box, and without the labelling the service does not
+# start at all (see %post) — a soft dependency would turn that into a silent
+# failure at the first install on a minimal host.
+Requires(post):   policycoreutils, policycoreutils-python-utils
+Requires(postun): policycoreutils-python-utils
 
 %description
 kelixip is a SIP application server: declarative per-domain dispatch (config.toml
@@ -151,6 +157,19 @@ getent passwd kelixip >/dev/null || \
 exit 0
 
 %post
+# SELinux: make the launchers a domain entry point.
+#
+# The release lives under %{_prefix}/lib, so every file in it is labelled `lib_t`,
+# which entry-points no domain: systemd (`init_t`) execs bin/kelixip and the BEAM
+# stays in `init_t`, where the Erlang distribution's own listen socket is denied
+# (`Protocol 'inet_tcp': register/listen error: eacces`, and the node exits). Only
+# the two `bin` directories are relabelled: `bin_t` is what `init_t` transitions to
+# `unconfined_service_t` from. The ERTS shared objects must stay `lib_t`.
+for _re in "%{kelixdir}/bin(/.*)?" "%{kelixdir}/erts-[^/]+/bin(/.*)?"; do
+    semanage fcontext -a -t bin_t "$_re" 2>/dev/null || semanage fcontext -m -t bin_t "$_re" || :
+done
+restorecon -R %{kelixdir}/bin %{kelixdir}/erts-*/bin || :
+
 # Per-host distribution cookie: the credential kelictl authenticates with. Kept
 # across upgrades; readable by the service and by root only.
 if [ ! -s %{kelixdir}/releases/COOKIE ]; then
@@ -168,6 +187,9 @@ fi
 %systemd_postun_with_restart %{name}.service
 if [ $1 -eq 0 ]; then
     rm -f %{kelixdir}/releases/COOKIE
+    for _re in "%{kelixdir}/bin(/.*)?" "%{kelixdir}/erts-[^/]+/bin(/.*)?"; do
+        semanage fcontext -d "$_re" 2>/dev/null || :
+    done
 fi
 
 %files

@@ -103,6 +103,45 @@ changing `RELEASE_NODE` in one place is enough.
 > post-install script generates `/usr/lib/kelixip/releases/COOKIE` from `/dev/urandom`
 > (0640 `root:kelixip`), keeps it across upgrades and removes it on erase.
 
+### SELinux (Alma Linux)
+
+Alma Linux 9 runs SELinux **Enforcing**, and the release lives under `/usr/lib`,
+where every file is labelled `lib_t`. That label is the entry point of no domain:
+systemd execs `bin/kelixip` and the BEAM stays in systemd's own `init_t` domain,
+where the Erlang distribution may not bind its listen socket. The node then exits
+during boot:
+
+```
+Protocol 'inet_tcp': register/listen error: eacces
+```
+
+The post-install script labels the two launcher directories `bin_t`, which is what
+`init_t` transitions to `unconfined_service_t` from (it needs
+`policycoreutils-python-utils`, a package dependency):
+
+```bash
+semanage fcontext -a -t bin_t "/usr/lib/kelixip/bin(/.*)?"
+semanage fcontext -a -t bin_t "/usr/lib/kelixip/erts-[^/]+/bin(/.*)?"
+restorecon -R /usr/lib/kelixip/bin /usr/lib/kelixip/erts-*/bin
+```
+
+Those two directories only — the ERTS shared objects stay `lib_t`. Check the domain
+the service actually got:
+
+```bash
+ps -eZ | grep beam.smp        # expect unconfined_service_t
+```
+
+`unconfined_service_t` is unrestricted, so **nothing else needs an SELinux rule**:
+what the service may read and write is decided by the POSIX modes of the layout
+table above — the scenario scripts (0644), the logs and the state directory (0750
+`kelixip:kelixip`), the TOML files and the environment file (`root:kelixip`, group
+readable), the cookie (0640 `root:kelixip`). `kelictl` needs no rule of its own
+(see [administration](administration.md#administration-with-kelictl)).
+
+A host that is `Permissive` or has SELinux disabled needs none of this. The
+labelling is applied anyway, and costs nothing.
+
 ### Upgrades
 
 `config.toml`, `domains.toml` and the environment file are **kept**: your version
@@ -175,6 +214,11 @@ key   = "/etc/pki/kelixip/privkey.pem"
 
 > A listener that cannot bind (port busy, unreadable cert) **aborts the boot** —
 > a half-deaf server is worse than a failed start.
+>
+> The service reads `cert` and `key` as the unprivileged `kelixip` user, so a key
+> installed 0600 `root:root` aborts that boot. Give the group the read right:
+> `chown root:kelixip key.pem && chmod 0640 key.pem`. `/etc/kelixip/tls/` is
+> already 0750 `root:kelixip` for that purpose.
 >
 > UDP is **one socket per node** (the framework's single bidirectional UDP
 > transport): extra `udp` entries are ignored with a warning, and `addr` only
