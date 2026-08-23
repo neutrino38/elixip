@@ -680,9 +680,12 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
                 fmt_order: Map.get(desc, :raw_fmt, []),
                 # the server's verdict, or nil on a pre-P8a server
                 accepted: accepted,
-                # drives the receive watchdog (§16.1): a media the peer says it will not
-                # send must not be watched, or a hold hangs up the call
-                peer_sends: peer_sends?(desc),
+                # drives the receive watchdog (§16.1): a media we have no business
+                # expecting RTP on must not be watched, or a hold hangs up the call.
+                # The offered direction is kept alongside, because the NEXT offer reads
+                # it to tell a hold from a one-way source.
+                direction: Map.get(desc, :direction, :sendrecv),
+                expect_rtp: expect_rtp?(state, desc),
                 # the conference's own preference, which is the ONE thing that outranks
                 # the caller's order below: it moves this codec first in the answer and
                 # makes it what the mixer encodes (§6.3 rule 1)
@@ -1012,21 +1015,37 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # contract with the media server (§2 point 1) that a test pins down.
   # ── RTP inactivity watchdog (§16.1, P7) ──────────────────────────────────────
 
-  # Whether the PEER will send RTP to us on this media — the only thing a *receive*
-  # watchdog can observe, and a narrower question than "is this call on hold".
+  # Whether RTP is owed to us on this media — the only thing a *receive* watchdog can
+  # honestly alarm on.
   #
-  # A caller holding with `a=sendonly` keeps sending (music on hold), so its RTP never
-  # stops and the watchdog must stay armed. What actually starves our reception is the
-  # peer declaring it will not send — `a=recvonly`, `a=inactive` — or blackholing the
-  # media with `c=0.0.0.0` (RFC 3264 §8.4, the legacy hold every old handset uses).
-  defp peer_sends?(desc) do
-    Map.get(desc, :direction, :sendrecv) not in [:recvonly, :inactive] and
+  # Three ways it is not. The peer declares it will not send (`a=recvonly`,
+  # `a=inactive`); it blackholes the media with `c=0.0.0.0` (RFC 3264 §8.4, the legacy
+  # hold every old handset uses); or it puts us **on hold**.
+  #
+  # A hold is a transition, not a direction. `a=sendonly` alone does not name one:
+  # offered from the start it is a one-way source pushing into the conference, and that
+  # is the case the watchdog protects best — a feed that dies is exactly what nothing
+  # else would catch. The same `sendonly` arriving on a media we had established
+  # `sendrecv` is a hold, and there silence is the expected state: RFC 3264 lets the
+  # holder send music, and Linphone 6.2 sends nothing at all. Watching it reaps a
+  # perfectly healthy held call after `rtp_timeout_ms` — 10 s, an ordinary consultation
+  # transfer — and on an audio-only leg that is the ONLY watched media, so the call
+  # dies (`Kelix.Mod.Mcu.SBB.Conference`, P7/S1).
+  #
+  # A held leg that then really dies is `idle_timeout`'s business (the G3 backstop), and
+  # a peer that dies while silent is signalling's — RFC 4028, which we do not offer yet.
+  defp expect_rtp?(state, desc) do
+    direction = Map.get(desc, :direction, :sendrecv)
+    was = get_in(state.negotiated, [desc.type, :direction])
+
+    direction not in [:recvonly, :inactive] and
+      not (direction == :sendonly and was == :sendrecv) and
       Map.get(desc, :ip) != "0.0.0.0"
   end
 
-  # Applies the watchdog to what the offer just said, per media: armed when the peer
-  # will send, **disarmed when it will not**. Without the disarming half, a hold
-  # longer than `rtp_timeout_ms` reads as a dead leg and hangs up a working call —
+  # Applies the watchdog to what the offer just said, per media: armed when RTP is owed
+  # to us, **disarmed when it is not** (`expect_rtp?/2`). Without the disarming half, a
+  # hold longer than `rtp_timeout_ms` reads as a dead leg and hangs up a working call —
   # ten seconds being an ordinary consultation transfer.
   #
   # Text is never armed at all: T.140 is legitimately silent between keystrokes, so
@@ -1039,7 +1058,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # cannot pass for working.
   defp apply_rtp_timeouts(%{rtp_timeout_ms: ms} = state) when is_integer(ms) and ms > 0 do
     for {media, neg} <- state.negotiated, media != :text do
-      timeout = if Map.get(neg, :peer_sends, true), do: ms, else: 0
+      timeout = if Map.get(neg, :expect_rtp, true), do: ms, else: 0
 
       case rpc(state, "StartRTPTimeout", [
              state.conf_id,
