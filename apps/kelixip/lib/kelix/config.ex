@@ -389,6 +389,7 @@ defmodule Kelix.Config do
     with :ok <- reject_keys(l, ~w(proto addr port cert key), "[[listen]]"),
          {:ok, proto} <- req_proto(l),
          {:ok, addr} <- opt_ip(l, "addr", "0.0.0.0", "[[listen]]"),
+         :ok <- reject_unspecified_ipv6(addr),
          {:ok, port} <- req_pos_integer(l, "port", "[[listen]]"),
          {:ok, cert, key} <- listener_certs(l, proto) do
       {:ok, %{proto: proto, addr: addr, port: port, cert: cert, key: key}}
@@ -396,6 +397,23 @@ defmodule Kelix.Config do
   end
 
   defp parse_listener(_), do: {:error, "each [[listen]] must be a table"}
+
+  # An explicit `addr` is what gives a listener its family. The IPv4 wildcard has
+  # a meaning without one — every interface, IPv4 — while the IPv6 wildcard would
+  # have to say which family it carries, and nothing decides that yet (step 4 of
+  # docs/design/multi-interface.md). Refuse it instead of binding a socket that
+  # advertises an address no peer can call back.
+  defp reject_unspecified_ipv6(addr) do
+    case :inet.parse_address(String.to_charlist(addr)) do
+      {:ok, {0, 0, 0, 0, 0, 0, 0, 0}} ->
+        {:error,
+         "[[listen]]: `addr` cannot be the IPv6 wildcard (#{addr}); name an explicit " <>
+           "IPv6 address"}
+
+      _ ->
+        :ok
+    end
+  end
 
   defp req_proto(l) do
     case Map.get(l, "proto") do

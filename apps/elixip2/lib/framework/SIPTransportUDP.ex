@@ -14,23 +14,20 @@ defmodule SIP.Transport.UDP do
   @impl true
   def init({_dest_ip, _dest_port}) do
     try do
-      # Local bind port and advertised local IP are configurable via the
-      # application env (set by elixipp's --listen / --local-port options), so
-      # two instances can coexist on one host (e.g. a UAS on 5060 and a UAC on
-      # 5070 for a loopback test). Defaults preserve the historical behaviour
-      # (bind 5060, advertise the first local IPv4). The socket binds all
-      # interfaces; :udp_local_addr only sets the IP advertised in Via/Contact.
+      # Local bind port and address are configurable via the application env (set
+      # by elixipp's --listen / --local-port options and by kelixip's [[listen]]
+      # block), so two instances can coexist on one host (e.g. a UAS on 5060 and
+      # a UAC on 5070 for a loopback test). :udp_local_addr binds the socket AND
+      # is the address advertised in Via/Contact; without it the socket binds
+      # every interface of the family and advertises the first local address.
       #
-      # The family comes from the configured address when there is one, else from
-      # :udp_family. Deriving it is what lets this transport start on a host that
-      # carries no IPv4 at all; the socket itself stays IPv4 until step 3 of
-      # docs/design/multi-interface.md.
+      # The family is the node's — `SIP.NetUtils.preferred_family/0` — so the socket
+      # and the resolver that picks the destination cannot disagree. It is passed
+      # to the socket, which is what lets this transport carry IPv6 on a host that
+      # has no IPv4 at all.
       port = Application.get_env(:elixip2, :udp_local_port, @default_local_port)
       configured_ip = Application.get_env(:elixip2, :udp_local_addr)
-
-      family =
-        SIP.NetUtils.address_family(configured_ip) ||
-          Application.get_env(:elixip2, :udp_family, :ipv4)
+      family = SIP.NetUtils.preferred_family()
 
       ips = SIP.NetUtils.get_local_ips([family])
 
@@ -54,7 +51,7 @@ defmodule SIP.Transport.UDP do
             upperlayer: nil
           }
 
-          case Socket.UDP.open(port, mode: :active) do
+          case :gen_udp.open(port, open_options(configured_ip, family)) do
             {:ok, socket} ->
               :ok = Socket.UDP.process(socket, self())
               {:ok, Map.put(initial_state, :socket, socket)}
@@ -76,15 +73,33 @@ defmodule SIP.Transport.UDP do
     end
   end
 
+  # Opened through `:gen_udp` rather than `Socket.UDP.open/2`: that wrapper
+  # translates a fixed option vocabulary and silently drops what is not in it —
+  # the bind address unless it is nested under `:local`, and the family always —
+  # so a `[[listen]]` block naming an IPv6 address opened an IPv4 socket on every
+  # interface. `:ipv6_v6only` keeps a wildcard v6 socket from also accepting IPv4
+  # as `::ffff:` mapped addresses, which every place that writes an address into
+  # a SIP message would then carry.
+  defp open_options(bind_ip, family) do
+    [:binary, {:active, true}] ++ family_options(family) ++ bind_options(bind_ip)
+  end
+
+  defp family_options(:ipv6), do: [:inet6, {:ipv6_v6only, true}]
+  defp family_options(_family), do: [:inet]
+
+  defp bind_options(nil), do: []
+  defp bind_options(bind_ip), do: [{:ip, bind_ip}]
+
   # A bind failure aborts the boot, so the log line is the operator's whole
   # diagnosis: spell the posix reason out instead of leaving a bare atom, and for
-  # the overwhelmingly common one say what to look for. The socket binds EVERY
-  # interface (`:udp_local_addr` only sets the IP advertised in Via/Contact), so it
-  # collides with another process even when that one bound a single address.
+  # the overwhelmingly common one say what to look for. Without `:udp_local_addr`
+  # the socket binds EVERY interface, so it collides with another process even
+  # when that one bound a single address.
   defp bind_error(:eaddrinuse) do
     ":eaddrinuse (address already in use) — another process holds this UDP port. " <>
-      "Note this socket binds every interface, so it also collides with a process " <>
-      "bound to one specific address on that port (check `ss -ulnp`)."
+      "Without a configured local address this socket binds every interface, so it " <>
+      "also collides with a process bound to one specific address on that port " <>
+      "(check `ss -ulnp`)."
   end
 
   defp bind_error(reason) when is_atom(reason) do

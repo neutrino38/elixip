@@ -429,6 +429,24 @@ defmodule Kelix.ConfigTest do
       assert msg =~ "must be an IP address"
     end
 
+    test "an explicit IPv6 listener address is accepted" do
+      assert {:ok, cfg} =
+               Config.parse(~s([[listen]]\nproto = "udp"\nport = 5060\naddr = "2001:db8::1"))
+
+      assert [%{addr: "2001:db8::1"}] = cfg.listen
+    end
+
+    # A wildcard IPv6 listener would have to say which family it carries, and
+    # nothing decides that yet (multi-interface step 4).
+    test "the IPv6 wildcard is rejected, in every spelling" do
+      for addr <- ["::", "0:0:0:0:0:0:0:0"] do
+        assert {:error, msg} =
+                 Config.parse(~s([[listen]]\nproto = "udp"\nport = 5060\naddr = "#{addr}"))
+
+        assert msg =~ "IPv6 wildcard"
+      end
+    end
+
     test "cert on a udp listener is rejected" do
       assert {:error, msg} =
                Config.parse(~s([[listen]]\nproto = "udp"\nport = 5060\ncert = "x"\nkey = "y"))

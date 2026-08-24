@@ -194,7 +194,7 @@ Unknown keys are rejected too — a typo must not silently fall back to a defaul
 | Key | Type | Required | Meaning |
 |---|---|---|---|
 | `proto` | `udp` \| `tcp` \| `tls` \| `wss` | **yes** | Transport |
-| `addr` | IP address | no (`0.0.0.0`) | Bind address; must parse as an IP |
+| `addr` | IP address | no (`0.0.0.0`) | Bind address, IPv4 or IPv6; it gives the listener its family. `0.0.0.0` binds every IPv4 interface; the IPv6 wildcard (`::`) is refused |
 | `port` | int > 0 | **yes** | Bind port |
 | `cert` / `key` | path | **yes for `tls`/`wss`** | Per-listener PEM cert and key. **Forbidden** on `udp`/`tcp` |
 
@@ -221,8 +221,23 @@ key   = "/etc/pki/kelixip/privkey.pem"
 > already 0750 `root:kelixip` for that purpose.
 >
 > UDP is **one socket per node** (the framework's single bidirectional UDP
-> transport): extra `udp` entries are ignored with a warning, and `addr` only
-> sets the IP advertised in Via/Contact — the socket itself listens everywhere.
+> transport): extra `udp` entries are ignored with a warning. An explicit `addr`
+> binds that address and is the one advertised in Via/Contact; `0.0.0.0` listens
+> on every IPv4 interface and advertises the first local IPv4 address.
+>
+> An IPv6 listener names an explicit address:
+>
+> ```toml
+> [[listen]]
+> proto = "udp"
+> addr  = "2001:db8::1"
+> port  = 5060
+> ```
+>
+> One family per node for now, and it is the `udp` block that states it: an
+> outbound leg resolves a name in the family of that block's `addr`. So an IPv6
+> node names an IPv6 address there, and a node whose only IPv6 listener is tcp,
+> tls or wss still dials IPv4 first.
 
 #### `[module.<name>]` — loadable modules
 
