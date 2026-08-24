@@ -456,6 +456,62 @@ defmodule Kelix.Control.CLITest do
     assert out =~ ~r/n\/a\s+none\s+n\/a/
   end
 
+  # `continuous` swaps the one-shot snapshot for `Kelix.Control.subscribe_monitor/1`'s
+  # push feed (docs/design/kelixip_liveview.md): capture_io with `""` as stdin makes
+  # `IO.read/2` answer `:eof` immediately, standing in for an operator's Ctrl+D.
+  describe "monitor continuous" do
+    test "prints the live header and the snapshot, then stops on stdin EOF" do
+      out =
+        ExUnit.CaptureIO.capture_io("", fn ->
+          send(self(), {:ran, run(["monitor", "continuous"])})
+        end)
+
+      assert_received {:ran, {0, "monitor stopped"}}
+      assert out =~ "kelictl monitor — live, Ctrl+D to stop"
+      assert out =~ "no scenario in progress"
+    end
+
+    # Sent to our own mailbox before `run/2` is even called, so it is queued ahead
+    # of the reader's `{:monitor_stdin, :eof}` (sent by a process that does not
+    # exist yet) — no timing race, `receive` serves its mailbox in arrival order.
+    test "an upsert pushed before EOF is drawn before the loop stops" do
+      row = %{
+        id: 42,
+        domain: "live.example.com",
+        function: :calls,
+        script: "x.exs",
+        account: "bob",
+        state: "in_call",
+        event: "INVITE",
+        command: "-",
+        medias: "AV",
+        mediaserver: "mcu1",
+        outbound: "sip:x@1.2.3.4"
+      }
+
+      send(self(), {:kelix_monitor, {:upsert, row}})
+
+      out =
+        ExUnit.CaptureIO.capture_io("", fn ->
+          send(self(), {:ran, run(["monitor", "continuous"])})
+        end)
+
+      assert_received {:ran, {0, "monitor stopped"}}
+      assert out =~ "live.example.com"
+      assert out =~ "in_call"
+    end
+
+    test "monitor completes to continuous" do
+      assert {0, out} = run(["complete", "monitor", ""])
+      assert String.split(out, "\n", trim: true) == ["continuous"]
+    end
+
+    test "usage lists it" do
+      {0, out} = run(["help"])
+      assert out =~ "monitor continuous"
+    end
+  end
+
   test "stop with a non-integer id → error, exit 2" do
     {2, out} = run(["stop", "abc"])
     assert out =~ "must be an integer"
