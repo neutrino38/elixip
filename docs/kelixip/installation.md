@@ -308,7 +308,7 @@ load is a node that answers `503` to every call.
 | Key | Type | Meaning |
 |---|---|---|
 | `module` | string, required | Adapter: `mendooze`, `mockup`, or a `MediaServer.Behaviour` module. Only `mendooze` entries are usable for conferences |
-| `url` | string, required | Passed to the adapter's `connect/1`, e.g. `http://mcu1:8080` |
+| `url` | string, required | Passed to the adapter's `connect/1`, e.g. `http://mcu1:8080`. An IPv6 address goes **in brackets**: `http://[fd00::12]:8080` |
 | `enabled` | bool (default `true`) | Toggle without a restart (`kelictl mediaserver enable\|disable <name>`; `kelictl mediaserver list` shows the pool). Disabling stops **new** calls and conferences landing there; live ones stay |
 
 > No media address here. The address a media server announces in the SDP (`c=`
@@ -316,6 +316,24 @@ load is a node that answers `503` to every call.
 > **mandatory behind a NAT** — and it reports it to kelixip on each
 > `StartReceiving`. A media server too old to report it gets its calls refused
 > with `500` rather than answered with a guessed address.
+
+**IPv6.** Two facts about the media server, both of which bite at boot rather
+than during a call:
+
+- a server whose only public address is IPv6 needs `--default-profile publicv6`.
+  The historical default is `publicv4`, and a default profile that is
+  unavailable makes the media server refuse to start — deliberately, with the
+  reason on stdout;
+- `--internal-ip` restricts the XML-RPC control interface to the internal
+  address, so the `url` above must then name that address rather than a public
+  one or a loopback. With both an internal v4 and an internal v6, that interface
+  listens on the **v4** one.
+
+Without `--internal-ip` the control interface answers both families on one
+socket, so nothing needs configuring for a v4 and a v6 controller to reach the
+same server. A conference then asks for the profile matching each caller's own
+family, per leg, and a call whose family the server does not carry is refused
+rather than answered with an unreachable address.
 
 ```toml
 [mediaserver.pool.mcu1]

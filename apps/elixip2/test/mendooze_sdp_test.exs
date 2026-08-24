@@ -608,6 +608,52 @@ defmodule Mendooze.SdpTest do
     end
   end
 
+  # ── blackholed?/1 and peer_family/1 ─────────────────────────────────────────
+
+  describe "blackholed?/1" do
+    test "the wildcard of either family" do
+      assert Sdp.blackholed?(%{ip: "0.0.0.0"})
+      assert Sdp.blackholed?(%{ip: "::"})
+    end
+
+    test "a real address, an absent one and a hostname are not" do
+      refute Sdp.blackholed?(%{ip: "192.0.2.7"})
+      refute Sdp.blackholed?(%{ip: "2001:db8::7"})
+      refute Sdp.blackholed?(%{ip: nil})
+      refute Sdp.blackholed?(%{})
+    end
+  end
+
+  describe "peer_family/1" do
+    test "the c= address decides" do
+      assert Sdp.peer_family(%{ip: "192.0.2.7"}) == :ipv4
+      assert Sdp.peer_family(%{ip: "2001:db8::7"}) == :ipv6
+      assert Sdp.peer_family(%{ip: "fd00::1"}) == :ipv6
+    end
+
+    test "a blackholed c= falls back to the first readable candidate" do
+      # what a browser offers: c=IN IP4 0.0.0.0 and the real addresses in a=candidate
+      desc = %{
+        ip: "0.0.0.0",
+        candidates: [
+          "1 1 udp 2130706431 2001:db8::7 30000 typ host",
+          "2 1 udp 2130706430 192.0.2.7 30001 typ host"
+        ]
+      }
+
+      assert Sdp.peer_family(desc) == :ipv6
+
+      assert Sdp.peer_family(%{desc | candidates: ["1 1 udp 1 192.0.2.7 30000 typ host"]}) ==
+               :ipv4
+    end
+
+    test "nothing readable answers nil" do
+      assert Sdp.peer_family(%{ip: "::", candidates: []}) == nil
+      assert Sdp.peer_family(%{ip: "0.0.0.0", candidates: ["garbage"]}) == nil
+      assert Sdp.peer_family(%{ip: "mcu.example.com"}) == nil
+    end
+  end
+
   # ── negotiate/3 ─────────────────────────────────────────────────────────────
 
   describe "negotiate/3" do

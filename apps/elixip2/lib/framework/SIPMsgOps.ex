@@ -574,13 +574,13 @@ defmodule SIP.Msg.Ops do
   defp codecs(descs),
     do: for(d <- active(descs), do: d |> Map.get(:codecs, []) |> MapSet.new())
 
-  # `a=sendonly`/`a=inactive` (RFC 3264 §8.4) or the pre-RFC-3264 `c=0.0.0.0`
-  # that older phones still send. One media on hold is enough: a peer that holds
-  # its audio has put the call on hold whatever it left its video saying.
+  # `a=sendonly`/`a=inactive` (RFC 3264 §8.4) or the pre-RFC-3264 blackhole that
+  # older phones still send. One media on hold is enough: a peer that holds its
+  # audio has put the call on hold whatever it left its video saying.
   defp held?(descs), do: Enum.any?(active(descs), &held_media?/1)
 
   defp held_media?(desc) do
-    Map.get(desc, :direction) in [:sendonly, :inactive] or Map.get(desc, :ip) == "0.0.0.0"
+    Map.get(desc, :direction) in [:sendonly, :inactive] or MediaServer.SdpTools.blackholed?(desc)
   end
 
   # Where the media goes and how it is protected. ICE is compared on its

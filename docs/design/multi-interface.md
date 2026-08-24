@@ -253,6 +253,81 @@ Deux points du critère restent ouverts, et aucun ne tient au code de cette éta
   WSS enregistré, dont l'hôte est résolu par la couche socket. `resolve/2` n'a
   donc pas été traversé. L'exercer demande une cible nommée en UDP, TCP ou TLS.
 
+### Étape 3 bis — IPv6 du module MCU — livrée
+
+Une conférence est joignable en IPv6, sur un nœud d'une seule famille. Hors des
+sept étapes : le module MCU ouvre ses propres canaux de contrôle et ne passe pas
+par `Kelix.MediaPool.checkout/1`, donc rien de l'étape 5 ne le couvre.
+
+**Le canal de contrôle ne joignait aucune IPv6.** `:httpc` a l'option `ipfamily`
+à `:inet` par défaut : une `url` de pool nommant un littéral IPv6 échouait en
+`{:failed_connect, …, :nxdomain}` avant qu'un octet ne sorte du nœud, le nom
+entre crochets partant vers un `:gen_tcp.connect/3` en IPv4 seule. L'option se
+pose par profil `:httpc`, donc le module a désormais le sien
+(`Kelix.Mod.Mcu.XmlRpc.profile_options/0`, en `:inet6fb4`) plutôt que de modifier
+le profil par défaut du nœud depuis un module chargeable. Le long-poll
+d'événements lit les mêmes options : même serveur, même question.
+
+Côté serveur il n'y avait rien à faire : le mediaserver crée sa socket d'écoute
+lui-même en `AF_INET6` avec `IPV6_V6ONLY=0` (`mcu/src/xmlrpcserver.cpp`) — une
+socket pour les deux familles — parce que le `ServerCreate()` d'Abyss ouvrait un
+`AF_INET`. `/mcu` et `/events/mcu` sont servis par ce serveur. À savoir :
+`--internal-ip` restreint cette écoute au réseau interne, et si les deux profils
+internes existent, **l'IPv4 l'emporte**.
+
+**Le profil d'adressage est demandé, jambe par jambe.** `StartReceiving` et
+`StartSending` portent un paramètre `profile` facultatif en fin de liste (API MCU
+§6.7 bis), et `GetNetworkProfiles` (§6.7) dit ce que le serveur porte vraiment.
+Les deux existent et sont implémentés côté serveur ; kelixip ne les employait pas,
+donc toute jambe obtenait le profil par défaut du serveur — `publicv4` sauf
+`--default-profile`. Un appelant IPv6 recevait donc une adresse IPv4 et aucun
+média. Le détail de la règle est dans
+[DESIGN-MCU.md](DESIGN-MCU.md#61-the-address-a-leg-announces) ; l'essentiel :
+
+- la famille se lit dans **l'offre** — le `c=` de la média, ou la première
+  candidate ICE quand l'offre met un trou noir, ce que fait un navigateur. Pas la
+  famille du nœud : elle serait juste pour une jambe et fausse pour l'autre sur la
+  topologie même qui justifie tout ceci ;
+- le profil se fixe **une fois** par jambe, comme le serveur l'exige, et une
+  renégociation réemploie celui de la jambe ;
+- un profil indisponible **fait échouer l'appel**. Jamais de repli : il enverrait
+  le média par la mauvaise interface sans que rien ne le dise ;
+- un serveur qui ignore la notion est appelé exactement comme avant, sans
+  paramètre — le même chemin de montée de version que le verdict codec.
+
+Seuls les profils publics sont demandés. Le côté du réseau est l'étape 6.
+
+**Le trou noir IPv6 se lit enfin.** `c=IN IP6 ::` (RFC 6157 §4) est la mise en
+attente historique d'un pair IPv6, et trois copies de cette lecture ne
+connaissaient que `0.0.0.0` — donc une pause de plus de dix secondes lisait comme
+une patte morte et raccrochait un appel sain. La lecture est maintenant unique
+(`MediaServer.SdpTools.blackholed?/1`), et les trois appelants y délèguent : le
+chien de garde du module MCU, celui de l'adaptateur JSR-309, et la détection de
+mise en attente du B2BUA.
+
+**Une faute XML-RPC n'est plus une perte de transport.** Le client marquait le
+serveur média `down` sur toute erreur autre qu'applicative, faute comprise. Un
+serveur qui répond « méthode inconnue » à `GetNetworkProfiles` à chaque connexion
+aurait donc battu indéfiniment.
+
+Tests : `apps/kelix_modules/test/mcu_ipv6_test.exs` (le canal sur `::1` avec un
+vrai socket, la découverte des profils, le profil des deux familles, le refus
+franc, le serveur ancien, la pause `::`) et `blackholed?/1` / `peer_family/1` dans
+`apps/elixip2/test/mendooze_sdp_test.exs`.
+
+**Trou connu, côté serveur.** Le texte temps réel sur WebSocket ne marche pas en
+IPv6 : le mediaserver construit l'URL qu'il rend en `scheme://host:port` sans
+crochets (`multiconf.cpp`), donc une adresse annoncée IPv6 donne
+`ws://fd00::1:9090/…`, qui se relit hôte `fd00`, port 80. L'audio et la vidéo ne
+sont pas touchés.
+
+**Recette.** Un nœud IPv6 avec un `[mediaserver.pool.*]` dont l'`url` nomme une
+adresse IPv6, et un serveur média démarré avec une adresse publique v6
+(`--default-profile publicv6` est alors obligatoire : le défaut historique
+`publicv4` indisponible refuse le démarrage). Critère de sortie : deux clients
+IPv6 dans la même conférence, audio et vidéo relayés, `c=IN IP6` dans les deux
+réponses, et le journal du canal listant `publicv6` comme profil disponible.
+
 ### Étape 4 — Wildcard et dual-stack
 
 La marche la plus haute.
@@ -355,10 +430,11 @@ profil manque : l'appel échoue en 503.
 
 #### Hors périmètre de cette étape
 
-- **La MCU.** Le module ouvre ses propres canaux de contrôle vers les serveurs
-  du pool et ne passe pas par `checkout/1` : les conférences gardent le profil
-  par défaut. Conséquence assumée : une conférence atteinte depuis un listener
-  `internal` annonce l'adresse publique.
+- **La MCU.** Le module ouvre ses propres canaux de contrôle vers les serveurs du
+  pool et ne passe pas par `checkout/1` : il pose son profil lui-même, par jambe,
+  depuis la famille de l'offre (étape 3 bis). Ce qui reste dehors est le côté du
+  réseau : une conférence atteinte depuis un listener `internal` annonce
+  l'adresse publique.
 - **La classification d'un correspondant par son adresse.** Ici c'est le
   listener qui décide, pas le pair. Une jambe sortante hérite du côté de la
   jambe entrante, et sa famille de l'adresse résolue de la cible. Le reste est

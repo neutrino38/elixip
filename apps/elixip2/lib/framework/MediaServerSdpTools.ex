@@ -69,6 +69,18 @@ defmodule MediaServer.SdpTools do
   @doc "The direction an answer must declare for an offered direction (RFC 3264 §6.1)."
   defdelegate reverse_direction(direction), to: Sdp
 
+  @doc """
+  Whether a media descriptor blackholes its media (`c=` at `0.0.0.0` or `::`).
+  See `MediaServer.Mendooze.Sdp.blackholed?/1`.
+  """
+  defdelegate blackholed?(desc), to: Sdp
+
+  @doc """
+  The address family the peer will receive a media on, or `nil`. See
+  `MediaServer.Mendooze.Sdp.peer_family/1`.
+  """
+  defdelegate peer_family(desc), to: Sdp
+
   @doc "SDP `rtpmap` fields for a Medooze codec constant."
   defdelegate code_rtpmap(media, code), to: Sdp
 
