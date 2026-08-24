@@ -44,6 +44,7 @@ do about it — the release's own script would only say `cat: Permission denied`
 |---|---|---|
 | `kelictl status` | R | Uptime, counters, listeners, media pool, node state |
 | `kelictl monitor` | R | Scenarios in progress: id, domain, function, **script**, account, FSM state/event/command, negotiated medias, media server, outbound destination (reuses the `--monitor` view) |
+| `kelictl monitor continuous` | R | Same view, redrawn live as scenarios appear, change state or end — no polling. Runs until stdin closes (Ctrl+D) |
 | `kelictl registration list [domain]` | R | Registrations, one list per domain — [registrar](modules/registrar.md#control-commands) |
 | `kelictl registration show <domain> <aor>` | R | One AOR and its bindings, in detail — *idem* |
 | `kelictl registration remove <domain> <aor> [contact]` | W | Drop a registration — *idem* |
