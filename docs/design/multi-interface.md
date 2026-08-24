@@ -48,10 +48,12 @@ additive et aucune configuration existante ne casse. En contrepartie, tout ajout
 met à jour `docs/kelixip/installation.md` et `packaging/config/config.toml` dans
 le même lot.
 
-- **`addr`** ne change pas de forme : `Kelix.Config` valide déjà l'adresse par
-  `:inet.parse_address/1`, donc une IPv6 y passe. Une adresse explicite est ce
-  qui donne un profil réseau au listener (étape 5) ; un listener wildcard
-  (`0.0.0.0`, `::`) prend le profil par défaut du nœud.
+- **`addr`** ne change pas de forme : `Kelix.Config` valide l'adresse par
+  `:inet.parse_address/1`, donc une IPv6 y passe. C'est elle qui donne sa
+  famille au listener, et c'est elle qui lui donnera son profil réseau
+  (étape 5) ; un listener wildcard prend le profil par défaut du nœud. Seul le
+  wildcard IPv4 (`0.0.0.0`) est accepté : `::` devrait dire quelle famille il
+  porte, et c'est l'étape 4 qui le décide.
 - **`tag`** n'a qu'une valeur utile : `"internal"`. Le côté public est le défaut
   déduit de l'absence de clé. `"public"` reste accepté sans effet. Introduit à
   l'étape 5.
@@ -171,30 +173,46 @@ Tests : `apps/elixip2/test/netutils_test.exs`.
 
 Aucune socket de listener ne change de famille : c'est l'étape 3.
 
-### Étape 3 — Un listener IPv6 explicite
+### Étape 3 — Un listener IPv6 explicite — livrée
 
 Une jambe, une famille, pas de dual-stack. Les blocs `[[listen]]` ne changent
-pas : `addr` accepte déjà une IPv6.
+pas : `addr` accepte une IPv6, et c'est cette adresse qui donne sa famille au
+listener.
 
 OTP 26 déduit la famille de l'option `{:ip, tuple}` : `:gen_tcp.listen/2`,
 `:gen_udp.open/2` et `:ssl.listen/2` acceptent une adresse IPv6 sans `:inet6`
 (mesuré). Un listener TCP, TLS ou WSS dont `addr` nomme une IPv6 lie donc déjà
-correctement sa socket — ce qui manque est en amont (étape 1) et en aval
-(étape 2).
+correctement sa socket.
 
-**UDP est l'exception.** `SIP.Transport.UDP` ouvre sa socket par
-`Socket.UDP.open(port, mode: :active)`, qui ignore l'adresse de bind et ouvre en
-IPv4. Passer la famille et l'adresse à l'ouverture est le seul travail de bind
-de cette étape.
+**UDP est l'exception.** `SIP.Transport.UDP` ouvre sa socket directement par
+`:gen_udp.open/2`, avec la famille, l'adresse et `:ipv6_v6only`, et non par
+`Socket.UDP.open/2` : ce wrapper traduit un vocabulaire d'options fixe et jette
+en silence ce qui n'y figure pas — l'adresse de bind si elle n'est pas imbriquée
+sous `:local`, et la famille toujours. `:udp_local_addr` lie la socket **en
+plus** de fournir l'adresse annoncée, comme le fait chaque listener TCP, TLS
+et WSS.
 
-**Résolution.** `SIP.Resolver.resolve/2` tente A, puis AAAA seulement sur
-`:nxdomain` : sur un nom dual-stack, A gagne toujours, et sur un nœud IPv6-only
-la jambe sortante part vers une adresse v4 injoignable. La règle de cette
-étape : la famille demandée découle de celle de l'adresse locale du nœud. Et
-`srv_lookup/1` n'accepte un serveur DNS que sous forme de tuple à quatre
-éléments, avec `{8,8,8,8}` en dur par défaut : un nœud IPv6-only ne résout aucun
-SRV. Accepter un tuple à huit éléments, et prendre le résolveur du système par
-défaut.
+**Le wildcard IPv6 est refusé.** `addr = "::"` devrait dire quelle famille il
+porte, et rien ne le décide avant l'étape 4. `Kelix.Config` le rejette avec un
+message clair, dans toutes ses écritures.
+
+**Une seule décision de famille.** `SIP.NetUtils.preferred_family/0` rend la
+famille du nœud : celle de `:udp_local_addr` quand une adresse est configurée,
+sinon `:udp_family`, IPv4 par défaut. La socket UDP et le résolveur la lisent
+tous les deux au même endroit, parce qu'ils ne peuvent pas diverger sans casser
+l'émission : une socket IPv4 et une destination AAAA n'envoient rien du tout,
+le datagramme échouant sur `:eafnosupport`. La famille ne se devine donc jamais
+depuis ce que la machine porte — un nœud IPv6 est un nœud dont le listener
+nomme une adresse IPv6.
+
+**Résolution.** `SIP.Resolver.resolve/2` demande d'abord l'enregistrement de la
+famille du nœud et ne tente l'autre que sur `:nxdomain` : un nœud IPv6 ne part
+pas vers une adresse v4 sans route. `srv_lookup/1` accepte un serveur DNS en
+tuple à huit éléments et, sans clé `:nameserver`, prend le résolveur du système
+— un `{8,8,8,8}` en dur, un nœud sans IPv4 ne le joint pas.
+`get_dns_default_dns_server/0` laisse `:nameserver` vide plutôt que d'échouer
+quand `/etc/resolv.conf` ne se lit pas ou porte une adresse à identifiant de
+zone.
 
 **Ce qui est déjà juste, à ne pas refaire.** ExSDP déduit la famille du tuple :
 `MediaServer.Mendooze.Sdp.build/1` avec une adresse v6 rend `o=` et `c=` en
@@ -202,6 +220,15 @@ défaut.
 l'hôte sans crochets. `Sdp.ws_url_attribute/1` conserve les crochets, ce qu'une
 URL WebSocket exige. `SIP.NetUtils.ip2string/1` et `parse_address/1` sont
 agnostiques.
+
+**Trou connu, refermé à l'étape 4.** La famille du nœud sort du bloc `udp`. Un
+nœud dont le seul listener IPv6 est TCP, TLS ou WSS lit donc encore `:ipv4` :
+ses résolutions sortantes retombent sur AAAA au lieu de le demander d'abord.
+Rien ne casse — le repli répond — mais l'ordre est faux tant qu'une famille par
+jambe n'existe pas.
+
+Tests : `apps/elixip2/test/sip_ipv6_transport_test.exs`, et le refus du wildcard
+dans `apps/kelixip/test/config_test.exs`.
 
 **Recette.** Une machine de développement ne porte souvent aucune IPv6 globale
 ni ULA, seulement une `fe80::` : un essai de bout en bout demande `::1` ou une

@@ -186,10 +186,10 @@ defmodule SIP.NetUtils do
   `:link_local`. Global and private addresses are always returned. Asking for
   no family returns an empty list.
 
-  Callers ask for **one** family. A mixed list makes `hd/1` pick whichever
-  family the interface enumeration happened to yield first, and the family of
-  a local address is a decision — a listener's, a transport's — not an
-  accident.
+  The result is ordered, never enumeration-dependent, so `hd/1` on it is a
+  decision: IPv6 before IPv4, and within a family a routable address before a
+  restricted one. A caller that has already decided its family asks for that one
+  only; `preferred_family/0` is the caller that has not.
   """
   @spec get_local_ips([:ipv4 | :ipv6 | :loopback | :link_local] | atom()) :: [tuple()]
   def get_local_ips(filters) do
@@ -209,6 +209,31 @@ defmodule SIP.NetUtils do
     |> Enum.flat_map(fn {_ifname, ifinfolist} -> for {:addr, addr} <- ifinfolist, do: addr end)
     |> Enum.filter(&(address_family(&1) in families and address_scope(&1) in scopes))
     |> Enum.sort_by(&{@family_rank[address_family(&1)], @scope_rank[address_scope(&1)]})
+  end
+
+  @doc """
+  The address family this node binds and dials — `:ipv6` or `:ipv4`.
+
+  The configured local address answers it: `:udp_local_addr` is the address the
+  operator gave the node, so its family is the node's. Without one it is
+  `:udp_family`, which defaults to `:ipv4`.
+
+  It is read in **one** place so the socket and the resolver cannot disagree.
+  They could: a node that binds an IPv4 socket and resolves a name to an AAAA
+  record sends nothing at all, the datagram failing on `:eafnosupport`. The
+  family is therefore never guessed from what the host happens to carry — an
+  IPv6 node is a node whose listener names an IPv6 address.
+
+  The answer is **node-wide**, which is what step 3 of
+  docs/design/multi-interface.md assumes: one leg, one family. Deciding a family
+  per leg is step 4. Until then a node whose only IPv6 listener is TCP, TLS or
+  WSS still reads `:ipv4` here, and its outbound name resolutions fall back to
+  AAAA rather than ask for it first.
+  """
+  @spec preferred_family() :: :ipv4 | :ipv6
+  def preferred_family() do
+    address_family(Application.get_env(:elixip2, :udp_local_addr)) ||
+      Application.get_env(:elixip2, :udp_family, :ipv4)
   end
 
   def get_local_ipv4() do
