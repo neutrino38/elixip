@@ -76,6 +76,22 @@ defmodule Kelix.Mod.Mcu.Client do
   def queue_id(client), do: info(client).queue_id
 
   @doc """
+  The addressing profiles this server carries, read from it at connection time
+  (`GetNetworkProfiles`, §6.7).
+
+  `%{"publicv6" => %{available: true, announced: "2001:db8::12", default: false}, …}`,
+  or `:unsupported` for a media server whose API predates the call — which is
+  what makes a leg fall back to sending no profile at all, i.e. to the server's
+  own default. `:unknown` while the channel is down.
+
+  Asked, never configured: a profile list written on this side is a copy, and a
+  copy drifts (§6.7, and the codec precedent it cites).
+  """
+  @spec network_profiles(t) :: %{String.t() => map} | :unsupported | :unknown
+  def network_profiles(client),
+    do: GenServer.call(client, :network_profiles, @call_timeout_ms)
+
+  @doc """
   Report that `stale_id` is gone from the server, so a fresh queue gets created.
 
   The event poller is the only witness: a restarted media server answers control
@@ -113,15 +129,19 @@ defmodule Kelix.Mod.Mcu.Client do
       reconnect_ms: Keyword.get(opts, :reconnect_ms, @reconnect_ms),
       queue_id: nil,
       status: :down,
+      # what the server says it can announce, read once per (re)connection —
+      # never configured on this side (§6.7)
+      network_profiles: :unknown,
       # health transitions are only pushed once the registry knows this channel
       # exists: before that, `announce/1` carries both the pid and the status
       announced?: false,
       fingerprints: %{}
     }
 
-    # The synchronous RPCs run on httpc's default profile: raise its per-host
-    # session pool so concurrent legs don't queue behind the default of 2.
-    if is_nil(state.transport), do: :httpc.set_options(max_sessions: 100)
+    # The synchronous RPCs run on this module's own httpc profile: it raises the
+    # per-host session pool so concurrent legs don't queue behind the default of
+    # 2, and it is where the address family is decided.
+    if is_nil(state.transport), do: XmlRpc.ensure_profile()
 
     {:ok, connect(state), {:continue, :announce}}
   end
@@ -139,6 +159,10 @@ defmodule Kelix.Mod.Mcu.Client do
   @impl true
   def handle_call(:info, _from, state) do
     {:reply, Map.take(state, [:name, :base_url, :queue_id, :status]), state}
+  end
+
+  def handle_call(:network_profiles, _from, state) do
+    {:reply, state.network_profiles, state}
   end
 
   def handle_call({:rpc, method, params}, _from, state) do
@@ -224,7 +248,9 @@ defmodule Kelix.Mod.Mcu.Client do
           message: "mcu #{state.name} up (#{state.base_url}), event queue #{queue_id}"
         )
 
-        mark(%{state | queue_id: queue_id}, :up)
+        %{state | queue_id: queue_id}
+        |> mark(:up)
+        |> read_network_profiles()
 
       {{:ok, other}, state} ->
         Logger.error(
@@ -232,7 +258,7 @@ defmodule Kelix.Mod.Mcu.Client do
           message: "mcu #{state.name}: unexpected EventQueueCreate return #{inspect(other)}"
         )
 
-        schedule_reconnect(mark(%{state | queue_id: nil}, :down))
+        schedule_reconnect(mark(%{state | queue_id: nil, network_profiles: :unknown}, :down))
 
       {{:error, reason}, state} ->
         Logger.error(
@@ -240,9 +266,80 @@ defmodule Kelix.Mod.Mcu.Client do
           message: "mcu #{state.name} unreachable (#{state.base_url}): #{inspect(reason)}"
         )
 
-        schedule_reconnect(mark(%{state | queue_id: nil}, :down))
+        schedule_reconnect(mark(%{state | queue_id: nil, network_profiles: :unknown}, :down))
     end
   end
+
+  # Read once per connection, and re-read on every reconnection: a media server
+  # that comes back with other addresses (a new `--internal-ip`, an added v6) is
+  # described by its own answer, not by what we remember of it.
+  defp read_network_profiles(state) do
+    case rpc(state, "GetNetworkProfiles", []) do
+      {{:ok, profiles}, state} ->
+        case Map.new(Enum.flat_map(profiles, &decode_profile/1)) do
+          empty when empty == %{} -> unknown_profiles(state, "the answer names no profile")
+          decoded -> %{state | network_profiles: decoded} |> log_profiles()
+        end
+
+      # The server answered, and does not know the method: its API predates §6.7.
+      {{:error, {kind, _}}, state} when kind in [:mcu_error, :unexpected_response] ->
+        unknown_profiles(state, "method not supported")
+
+      {{:error, {:xmlrpc_fault, _code, _msg}}, state} ->
+        unknown_profiles(state, "method not supported")
+
+      # Unreachable: `rpc/3` has already marked the channel down and scheduled a
+      # reconnection, which is what will read the profiles.
+      {{:error, _reason}, state} ->
+        state
+    end
+  end
+
+  # No profile knowledge means a leg carries no profile, which is exactly the
+  # behaviour of a controller that never heard of them: the server applies its own
+  # default. Stated in the log, because it also means a two-address server is being
+  # driven through one address only.
+  defp unknown_profiles(state, why) do
+    Logger.info(
+      module: __MODULE__,
+      message:
+        "mcu #{state.name}: no addressing profiles (#{why}) — legs will use the " <>
+          "server's default"
+    )
+
+    %{state | network_profiles: :unsupported}
+  end
+
+  defp log_profiles(state) do
+    available =
+      state.network_profiles
+      |> Enum.filter(fn {_name, p} -> p.available end)
+      |> Enum.map_join(", ", fn {name, p} ->
+        "#{name}=#{p.announced}#{if p.default, do: " (default)", else: ""}"
+      end)
+
+    Logger.info(
+      module: __MODULE__,
+      message:
+        "mcu #{state.name}: addressing profiles " <>
+          if(available == "", do: "none available", else: available)
+    )
+
+    state
+  end
+
+  defp decode_profile(%{"name" => name} = p) when is_binary(name) and name != "" do
+    [
+      {name,
+       %{
+         available: Map.get(p, "available", false) == true,
+         announced: Map.get(p, "announced", ""),
+         default: Map.get(p, "default", false) == true
+       }}
+    ]
+  end
+
+  defp decode_profile(_other), do: []
 
   defp schedule_reconnect(state) do
     if state.reconnect_ms > 0, do: Process.send_after(self(), :reconnect, state.reconnect_ms)
@@ -296,6 +393,20 @@ defmodule Kelix.Mod.Mcu.Client do
       {:error, {:mcu_error, msg}} = err ->
         Logger.warning(module: __MODULE__, message: "mcu #{state.name}: #{method}: #{msg}")
         Kelix.Metrics.Emit.mcu_rpc_error(method, :mcu_error)
+        {err, state}
+
+      # A fault is an answer: the server read our parameters and refused them, or
+      # does not know the method at all. The channel stands — flipping it down here
+      # would take a whole media server out of service over one bad call, and on a
+      # method it answers a fault to at every connection (`GetNetworkProfiles` on an
+      # older binary) it would flap for ever.
+      {:error, {:xmlrpc_fault, code, msg}} = err ->
+        Logger.warning(
+          module: __MODULE__,
+          message: "mcu #{state.name}: #{method}: fault #{code} #{msg}"
+        )
+
+        Kelix.Metrics.Emit.mcu_rpc_error(method, :xmlrpc_fault)
         {err, state}
 
       {:error, reason} = err ->

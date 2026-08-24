@@ -214,6 +214,11 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
          # the first `StartReceiving` (§16.5). Server-wide, hence one value for the
          # whole leg rather than one per m= line.
          media_ip: nil,
+         # what the server told this channel it can announce (§6.7), and the profile
+         # this leg asked for — fixed on its first `StartReceiving`, then repeated
+         # verbatim on every other RPC that carries one
+         network_profiles: Client.network_profiles(client),
+         address_profile: nil,
          # per media: %{codec:, rec_port:, send: {ip, port}, rtp_map:, dtmf_clock:}
          negotiated: %{},
          receiving: [],
@@ -630,16 +635,9 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
         # negotiate against an empty map and announce the server's defaults.
         push_local_codec_props(state, m, media)
 
-        with {:ok, [rec_port | returned]} <-
-               rpc(state, "StartReceiving", [
-                 state.conf_id,
-                 state.part_id,
-                 m,
-                 rtp_map,
-                 @role_main,
-                 @proto_rtp,
-                 offer
-               ]),
+        with {:ok, state, profile} <- leg_profile(state, desc),
+             {:ok, [rec_port | returned]} <-
+               rpc(state, "StartReceiving", start_receiving_args(state, m, rtp_map, offer, profile)),
              {:ok, ip} <- announced_ip(state, returned),
              :ok <- set_remote_security(state, m, desc),
              :ok <- set_rtp_properties(state, m, desc) do
@@ -1019,8 +1017,8 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # honestly alarm on.
   #
   # Three ways it is not. The peer declares it will not send (`a=recvonly`,
-  # `a=inactive`); it blackholes the media with `c=0.0.0.0` (RFC 3264 §8.4, the legacy
-  # hold every old handset uses); or it puts us **on hold**.
+  # `a=inactive`); it blackholes the media (RFC 3264 §8.4, the legacy hold every old
+  # handset uses); or it puts us **on hold**.
   #
   # A hold is a transition, not a direction. `a=sendonly` alone does not name one:
   # offered from the start it is a one-way source pushing into the conference, and that
@@ -1040,7 +1038,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
 
     direction not in [:recvonly, :inactive] and
       not (direction == :sendonly and was == :sendrecv) and
-      Map.get(desc, :ip) != "0.0.0.0"
+      not Sdp.blackholed?(desc)
   end
 
   # Applies the watchdog to what the offer just said, per media: armed when RTP is owed
@@ -1107,27 +1105,97 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
 
   defp start_sending(state, media, neg) do
     {ip, port} = neg.remote
-    m = media_int(media)
 
     with :ok <- set_codec(state, media, neg),
          :ok <-
-           void_rpc(state, "StartSending", [
-             state.conf_id,
-             state.part_id,
-             m,
-             ip,
-             port,
-             # P8a: we send on exactly the payload types the ANSWER announced, which on
-             # this path is the accepted set — both maps being in the offerer's own
-             # numbering (§6.3 rule 1), the restriction is per payload type and not per
-             # codec. Sending on a PT the answer left out is a stream the peer discards:
-             # it happens as soon as one codec is offered under several payload types and
-             # only some of them survive (rule 12). A nil verdict leaves the map alone.
-             send_map(media, neg),
-             @role_main
-           ]) do
+           void_rpc(state, "StartSending", start_sending_args(state, media, ip, port, neg)) do
       {:ok, %{state | sending: [media | state.sending]}}
     end
+  end
+
+  # The addressing profile this leg asks the media server for (API §6.7 bis), decided
+  # ONCE — on its first `StartReceiving` — and then repeated verbatim: the server
+  # fixes the profile per leg, because in symmetric RTP the socket is the same in
+  # both directions, and it refuses a second, different one rather than rebind a
+  # media under a port it has already published.
+  #
+  # **It is the peer's own media address that decides the family**, read from the
+  # offer (`Sdp.peer_family/1`). Not the node's configured family: that one says what
+  # this node listens on, and on a node bridging two families it would be right for
+  # one leg and wrong for the other. A media server carrying both addresses answers a
+  # v4 caller in `IN IP4` and a v6 caller in `IN IP6` from one conference, which is
+  # the whole point of asking.
+  #
+  # Three cases where no profile is asked for at all, each leaving the server on its
+  # own default — exactly what a controller that never heard of profiles obtains:
+  #
+  #  * the server does not carry the notion (`:unsupported`, an older binary);
+  #  * the offer does not name an address of either family (a media blackholed from
+  #    the start, no candidate to read) — there is no media to place;
+  #  * this leg already fixed its profile, which is then reused rather than re-derived.
+  #
+  # A profile the server declares **unavailable** fails the leg. No fallback: the
+  # fallback would send the media out of the wrong interface, and nothing would say so
+  # until the peer noticed the silence (§6.7 bis).
+  defp leg_profile(%{address_profile: profile} = state, _desc) when is_binary(profile),
+    do: {:ok, state, profile}
+
+  defp leg_profile(%{network_profiles: profiles} = state, _desc) when not is_map(profiles),
+    do: {:ok, state, nil}
+
+  defp leg_profile(state, desc) do
+    case Sdp.peer_family(desc) do
+      nil ->
+        {:ok, state, nil}
+
+      family ->
+        name = profile_name(family)
+
+        if get_in(state.network_profiles, [name, :available]) do
+          {:ok, %{state | address_profile: name}, name}
+        else
+          {:error, {:profile_unavailable, name}}
+        end
+    end
+  end
+
+  # Only the public side, and it is not an omission: which side of the network a
+  # correspondent sits on is step 6 of docs/design/multi-interface.md, where a node
+  # learns to classify an address. A conference reached from an `internal` listener
+  # therefore announces the public address, as it does today.
+  defp profile_name(:ipv6), do: "publicv6"
+  defp profile_name(:ipv4), do: "publicv4"
+
+  # `profile` is positional and LAST in both calls (§6.7 bis), and omitted when
+  # this leg has none to ask for: the RPC is then byte-for-byte the one a
+  # controller that never heard of profiles makes.
+  defp start_receiving_args(state, m, rtp_map, offer, nil),
+    do: [state.conf_id, state.part_id, m, rtp_map, @role_main, @proto_rtp, offer]
+
+  defp start_receiving_args(state, m, rtp_map, offer, profile),
+    do: start_receiving_args(state, m, rtp_map, offer, nil) ++ [profile]
+
+  defp start_sending_args(state, media, ip, port, neg) do
+    args = [
+      state.conf_id,
+      state.part_id,
+      media_int(media),
+      ip,
+      port,
+      # P8a: we send on exactly the payload types the ANSWER announced, which on this
+      # path is the accepted set — both maps being in the offerer's own numbering
+      # (§6.3 rule 1), the restriction is per payload type and not per codec. Sending
+      # on a PT the answer left out is a stream the peer discards: it happens as soon
+      # as one codec is offered under several payload types and only some of them
+      # survive (rule 12). A nil verdict leaves the map alone.
+      send_map(media, neg),
+      @role_main
+    ]
+
+    # The same profile as the receive side, because the socket is the same in both
+    # directions: the server takes a second, different one as an error rather than
+    # rebinding the media under a port it has already published.
+    if state.address_profile, do: args ++ [state.address_profile], else: args
   end
 
   # What `StartSending` may use, in the offerer's numbering.

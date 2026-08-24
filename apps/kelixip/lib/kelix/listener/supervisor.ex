@@ -128,7 +128,7 @@ defmodule Kelix.Listener.Supervisor do
       {:error, reason} = err ->
         IO.puts(
           :stderr,
-          "kelixip: cannot bind the #{proto} listener on #{addr}:#{port}: #{inspect(reason)}"
+          "kelixip: cannot bind the #{proto} listener on #{SIP.NetUtils.sip_host(addr)}:#{port}: #{inspect(reason)}"
         )
 
         err

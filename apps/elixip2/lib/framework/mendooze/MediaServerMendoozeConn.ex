@@ -2487,10 +2487,10 @@ defmodule MediaServer.Mendooze.Conn do
   # *receive* watchdog can observe. A caller holding with `a=sendonly` keeps
   # sending (music on hold), so it stays armed; what starves our reception is the
   # peer declaring it will not send — `a=recvonly`, `a=inactive` — or blackholing
-  # the media with `c=0.0.0.0` (RFC 3264 §8.4, the legacy hold).
+  # the media (RFC 3264 §8.4, the legacy hold).
   defp peer_sends?(desc) do
     Map.get(desc, :direction, :sendrecv) not in [:recvonly, :inactive] and
-      Map.get(desc, :ip) != "0.0.0.0"
+      not Sdp.blackholed?(desc)
   end
 
   # What this media's watchdog must be, from the description just applied: the

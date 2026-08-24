@@ -419,6 +419,41 @@ decoding capability is answered with our maximum, keeping the payload type and
 emitting a warning that names both levels and the participant; the log is the
 only evidence that this happened, so its absence is a test failure.
 
+### 6.1 The address a leg announces
+
+A leg's `c=` line is the address the **media server** reported on its first
+`StartReceiving`, and it never was a value held here. What the module chooses is
+which of the server's addresses that is: an addressing profile, asked for as the
+last parameter of `StartReceiving` and `StartSending` (MCU API §6.7 bis). A server
+carries up to four — `publicv4`, `publicv6`, `internalv4`, `internalv6` — and
+`GetNetworkProfiles` is asked at every connection what it really has. No profile
+list is written on this side, for the same reason no codec list is (§6).
+
+**The family comes from the peer, not from the node.** It is read off the offer:
+the media's `c=` address, or the first readable `a=candidate` when the offer
+blackholes it, which is what a browser does. A node-wide setting would be right
+for one leg and wrong for the other on the very topology this exists for — one
+conference answering an IPv4 caller in `IN IP4` and an IPv6 caller in `IN IP6`.
+
+Three rules hold the rest:
+
+- **decided once per leg.** Symmetric RTP means one socket in both directions, so
+  the server fixes the profile at the first `Start*` and refuses a second,
+  different one rather than rebind a media under a port it has already published.
+  A renegotiation — a hold spelled `c=IN IP6 ::` names no family — reuses what the
+  leg fixed;
+- **no fallback.** A family the server declares unavailable fails the call. The
+  fallback would answer 200 with an address the caller cannot reach: no media,
+  nothing logged, and the peer left to discover it;
+- **a server that does not carry the notion is called exactly as before.** No
+  `GetNetworkProfiles`, no profile parameter, the server's own default — the same
+  rolling-upgrade path the codec verdict has.
+
+Only the public profiles are asked for. Which side of the network a correspondent
+sits on is step 6 of [multi-interface.md](multi-interface.md), where a node learns
+to classify an address; until then a conference reached through an `internal`
+listener announces the public address.
+
 ---
 
 ## 7. Real-time text
@@ -553,6 +588,7 @@ not a redesign.
 | L16 | a script that does not declare it accepts messages receives none, by design (§9) |
 | L17 | the collaboration channel has no total order across senders and no delivery receipt |
 | L18 | a leg stopped from outside always leaves with `:bye`: `shutdown_clause/0` drops the reason on its way to `on_shutdown`, so a kick, a drain and a node shutdown are indistinguishable there. One line in the framework would carry it, and a kicked leg could then `leave(:kick)` (§5.1) |
+| L19 | **text over WebSocket has no IPv6 form.** The media server builds the URL it returns as `scheme://host:port`, with no brackets (`multiconf.cpp`): an IPv6 announced address yields `ws://fd00::1:9090/…`, which parses as host `fd00`, port 80. The section is answered with a URL nothing can dial. Audio and video are unaffected, and the fix belongs to the server |
 
 **Media liveness is wired on this side and depends on the server.** The adapter
 arms an inactivity watchdog per receiving media at the ACK, and the event
@@ -584,7 +620,9 @@ module that owns them (§5.1).
 6. Every log line carries the conference uid (§11).
 7. The orphan sweep deletes nothing it is not sure about (§10).
 8. Membership is the permission; there is no cross-conference addressing (§9).
-9. A leg's life in the mix is the block's, and there is one copy of it. A script
+9. The family of a leg's media address comes from the offer, and its addressing
+   profile is fixed once and never fallen back from (§6.1).
+10. A leg's life in the mix is the block's, and there is one copy of it. A script
    states the answer, the renegotiation policy and the verdicts; it holds no
    loop, frees nothing the block released, and reads the leg's phase from the
    shared `appdata` rather than declaring it (§5.1).

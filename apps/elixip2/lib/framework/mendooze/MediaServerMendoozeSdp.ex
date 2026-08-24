@@ -1383,6 +1383,56 @@ defmodule MediaServer.Mendooze.Sdp do
   def reverse_direction(:recvonly), do: :sendonly
   def reverse_direction(dir), do: dir
 
+  # ── Peer addressing ─────────────────────────────────────────────────────────
+
+  @doc """
+  Whether a media descriptor blackholes its media: the wildcard address of
+  either family, `0.0.0.0` or `::` (RFC 3264 §8.4, the legacy hold every old
+  handset still sends; RFC 6157 §4 for the IPv6 spelling).
+
+  One reading, because it had three, all of them IPv4-only. An IPv6 peer holding
+  its media therefore read as a live one, and the receive watchdog reaped the
+  call ten seconds into an ordinary consultation transfer.
+  """
+  @spec blackholed?(map()) :: boolean()
+  def blackholed?(desc), do: Map.get(desc, :ip) in ["0.0.0.0", "::"]
+
+  @doc """
+  The address family the peer will receive this media on, or `nil` when the offer
+  does not say.
+
+  The `c=` address answers when it is a real one. A WebRTC offer blackholes it
+  (`c=IN IP4 0.0.0.0`) and names its addresses in `a=candidate` instead, so the
+  first readable candidate answers next — the family of a leg is a property of
+  the offer, never of the machine reading it.
+  """
+  @spec peer_family(map()) :: :ipv4 | :ipv6 | nil
+  def peer_family(desc) do
+    if blackholed?(desc) do
+      desc |> Map.get(:candidates, []) |> Enum.find_value(&candidate_family/1)
+    else
+      string_family(Map.get(desc, :ip))
+    end
+  end
+
+  # RFC 5245 §15.1: the connection-address is the 5th field of the candidate
+  # value, and it is never bracketed.
+  defp candidate_family(value) do
+    case String.split(value, " ") do
+      [_foundation, _component, _proto, _priority, address | _] -> string_family(address)
+      _ -> nil
+    end
+  end
+
+  defp string_family(address) when is_binary(address) do
+    case SIP.NetUtils.parse_address(address) do
+      {:ok, ip} -> SIP.NetUtils.address_family(ip)
+      {:error, _} -> nil
+    end
+  end
+
+  defp string_family(_), do: nil
+
   # ── transport-wide congestion control (negotiation) ─────────────────────────
 
   @doc """
