@@ -54,6 +54,16 @@ defmodule SIP.Transport.UDP do
           case :gen_udp.open(port, open_options(configured_ip, family)) do
             {:ok, socket} ->
               :ok = Socket.UDP.process(socket, self())
+
+              # Say so, like the three connection-oriented listeners do. This one
+              # is the node's only UDP socket and it announces the address every
+              # Via and Contact will carry, so an operator reading the boot log
+              # must be able to see which address and which family it took.
+              Logger.info(
+                module: __MODULE__,
+                message: "UDP transport bound on #{SIP.NetUtils.sip_host(localip)}:#{port}"
+              )
+
               {:ok, Map.put(initial_state, :socket, socket)}
 
             {:error, err} ->

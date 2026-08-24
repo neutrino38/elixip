@@ -81,7 +81,7 @@ defmodule SIP.Transport.TLSListener do
         listener_pid = self()
         Task.start_link(fn -> accept_loop(listen_socket, listener_pid) end)
         Logger.info([module: __MODULE__,
-                     message: "TLS listener started on #{SIP.NetUtils.ip2string(localip)}:#{actual_port}"])
+                     message: "TLS listener started on #{SIP.NetUtils.sip_host(localip)}:#{actual_port}"])
         state = %{
           localip:         localip,
           localport:       actual_port,

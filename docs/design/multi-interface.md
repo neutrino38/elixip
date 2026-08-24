@@ -237,6 +237,22 @@ SIP local ne tient. Critère de sortie : un REGISTER puis un appel de bout en
 bout entre deux UA IPv6 à travers kelixip, avec un Contact et un Via relus par
 le pair, et le média relayé annoncé en `IN IP6`.
 
+**Validé en trafic le 2026-08-24** sur `wesh-controleur1`, un nœud dont les trois
+listeners — `udp` 5060, `tls` 5061, `wss` 8443 — nomment la même adresse IPv6
+publique. La socket UDP se lie bien en `udp6` sur cette adresse. Deux comptes
+s'enregistrent, et un appel entre eux traverse le B2BUA : 407 sur l'INVITE,
+INVITE sortant, 180, 200. Les deux pattes portent le SDP l'une de l'autre sans
+serveur média.
+
+Deux points du critère restent ouverts, et aucun ne tient au code de cette étape :
+
+- **Le média relayé.** Le pool `[mediaserver.pool.*]` du nœud est vide, donc tout
+  appel demandant du média est refusé et le `IN IP6` du SDP relayé n'est pas
+  exercé.
+- **La résolution par famille.** La patte sortante de l'essai vise un Contact
+  WSS enregistré, dont l'hôte est résolu par la couche socket. `resolve/2` n'a
+  donc pas été traversé. L'exercer demande une cible nommée en UDP, TCP ou TLS.
+
 ### Étape 4 — Wildcard et dual-stack
 
 La marche la plus haute.
