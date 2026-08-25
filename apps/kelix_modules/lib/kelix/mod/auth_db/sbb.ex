@@ -52,7 +52,8 @@ defmodule Kelix.Mod.AuthDb.SBB do
   Authenticate the sender of the request being served, and hand back what the
   digest proved.
 
-  Options are `sbb_fsm/2`'s, plus these `args`:
+  Options are `sbb_fsm/2`'s, plus these, named plainly at the call site —
+  `authenticate(realm: "example.com")` — or under `args:`:
 
     * `:realm` — the realm to require, defaulting to `sip_ctx.domain`. For an
       INVITE that is the *caller's* domain and not the R-URI's; a node serving

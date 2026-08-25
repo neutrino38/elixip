@@ -83,6 +83,8 @@ defmodule Kelix.Mod.Mcu.SBB.Conference do
 
   # `:conference` is the leaf's own default, so there is no `@sbb_namespace` line:
   # the namespace follows the verb a scenario writes (`Mcu.SBB.conference()`).
+  @sbb_args [:idle_timeout]
+
   @sbb_returns [
     renegotiation:
       "a re-INVITE or an UPDATE arrived and is **unanswered** — " <>

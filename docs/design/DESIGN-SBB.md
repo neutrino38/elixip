@@ -316,6 +316,14 @@ An SBB's scratch space cannot collide, and its output is deliberate.
 `args:` at the call site seeds that sandbox, mirroring `spawn_fsm`'s `args:`
 which seeds the child's appdata.
 
+An SBB **declares the keys it reads** in `@sbb_args`, and a call site names them
+plainly next to `timeout:` and `resume:` — `authenticate(realm: "example.com")`,
+`call(peer: peer)` — which `run_sbb/3` folds into the sandbox. A key no SBB
+declares raises. Without that declaration the mechanism had no way to tell an
+`args` key from a typo, so an option written plainly was dropped in silence: an
+`authenticate(realm: …)` answered with a challenge for the served domain, which
+a client with credentials for another realm cannot use.
+
 **The sandbox is cleared on every call**, so an SBB entered twice starts twice
 from nothing — the serial hunt calling `call()` on target after target must not
 inherit the previous attempt's scratch. The exception is explicit:

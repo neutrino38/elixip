@@ -54,6 +54,8 @@ defmodule Kelix.Mod.AuthDb.SBB.Authenticate do
 
   @sbb_namespace :auth
 
+  @sbb_args [:realm, :code, :max_attempts]
+
   @sbb_returns [
     authenticated:
       "the digest checked out and the identity check had its say — %{user, realm}. " <>

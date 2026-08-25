@@ -59,7 +59,8 @@ defmodule Kelix.AuthSbbTest do
 
     state authenticate_caller do
       AuthDb.SBB.authenticate(
-        args: %{max_attempts: ctx_get(:max_attempts)},
+        realm: ctx_get(:realm),
+        max_attempts: ctx_get(:max_attempts),
         timeout: ctx_get(:sbb_timeout) || 32_000
       )
 
@@ -193,6 +194,14 @@ defmodule Kelix.AuthSbbTest do
       assert challenge["qop"] == "auth"
       assert SIP.Auth.Nonce.validate(challenge["nonce"], @domain) == :ok
       refute Map.has_key?(challenge, "stale")
+    end
+
+    test "the :realm option is what is challenged, not the served domain" do
+      start_gate(realm: "weshwesh.eu")
+      challenge = challenge_received!()
+
+      assert challenge["realm"] == "weshwesh.eu"
+      assert SIP.Auth.Nonce.validate(challenge["nonce"], "weshwesh.eu") == :ok
     end
 
     test "credentials that check out end the block, and record the identity" do

@@ -63,7 +63,8 @@ defmodule SBB.Call do
 
   @doc """
   Establish the outbound leg and relay it to the caller until the call is up or
-  over. Options are `sbb_fsm/2`'s; see the module doc for the `args` it reads.
+  over. Options are `sbb_fsm/2`'s, plus the block's own `args` named plainly at
+  the call site — `call(peer: peer)`; see the module doc for what it reads.
   """
   defmacro call(opts \\ []) do
     quote do
@@ -73,7 +74,8 @@ defmodule SBB.Call do
 
   @doc """
   Relay the established call until it ends, or until something interrupts it.
-  Options are `sbb_fsm/2`'s; see `SBB.Call.Bridge` for the `args` it reads.
+  Options are `sbb_fsm/2`'s, plus the block's own `args` named plainly at the
+  call site; see `SBB.Call.Bridge` for what it reads.
 
   A host that took the call back on `{:bridge, :interrupted, _}` re-enters with
   `bridge(resume: true)`: the call was never torn down, only the relay paused.
@@ -93,6 +95,8 @@ defmodule SBB.Call do
     use SIP.SBB
 
     @sbb_namespace :call
+
+    @sbb_args [:peer, :request, :media, :ring_timeout]
 
     @sbb_returns [
       connected: "the callee answered and the caller ACKed — %{}",
@@ -334,6 +338,8 @@ defmodule SBB.Call do
     use SIP.SBB
 
     @sbb_namespace :bridge
+
+    @sbb_args [:media, :on_callee_hangup, :max_duration]
 
     @sbb_returns [
       caller_hung_up:

@@ -55,7 +55,8 @@ defmodule Kelix.Mod.Mcu.SBB do
   and its error mapping stay with the script — which is why it takes no `media:`
   and no `webrtc:`.
 
-  Options are `sbb_fsm/2`'s, plus one `args` key:
+  Options are `sbb_fsm/2`'s, plus one key named plainly at the call site or
+  under `args:`:
 
     * `:idle_timeout` — the G3 backstop against a leg that goes silent, in ms
       (2 h by default). **Idle**, not a budget: every event the block consumes
