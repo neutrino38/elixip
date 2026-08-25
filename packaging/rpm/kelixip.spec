@@ -28,7 +28,7 @@
 
 Name:           kelixip
 Version:        1.5.2
-Release:        3%{?dist}
+Release:        5%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip

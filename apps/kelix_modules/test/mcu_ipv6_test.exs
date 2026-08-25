@@ -60,6 +60,18 @@ defmodule Kelix.Mod.McuIPv6Test do
                       p -> p
                     end)
 
+  # And with no IPv4 one: the node of the 2026-08-25 traffic.
+  @profiles_v6_only Enum.map(@profiles_both, fn
+                      %{"name" => "publicv4"} = p ->
+                        %{p | "available" => false, "default" => false}
+
+                      %{"name" => "publicv6"} = p ->
+                        %{p | "default" => true}
+
+                      p ->
+                        p
+                    end)
+
   # An IPv6 SIP phone: one address, in the family it will receive media on.
   @offer_v6 """
   v=0\r
@@ -77,6 +89,25 @@ defmodule Kelix.Mod.McuIPv6Test do
   # The same leg putting the call on hold, IPv6 style: RFC 6157 §4 spells the
   # legacy blackhole `::`, and nothing about it says "this media died".
   @offer_v6_hold String.replace(@offer_v6, "c=IN IP6 2001:db8:1::50", "c=IN IP6 ::")
+
+  # A browser reaching an IPv6 node, and the reason this reading exists: JsSIP over
+  # WSS, ICE, and a `c=` holding the default candidate Chrome elected — a private
+  # VPN address — while the public IPv6 it will also answer on is one line further
+  # down. Traffic of 2026-08-25, on a media server carrying IPv6 only.
+  @offer_webrtc_dual """
+  v=0\r
+  o=- 1 1 IN IP4 127.0.0.1\r
+  s=-\r
+  t=0 0\r
+  m=audio 50780 RTP/AVP 8\r
+  c=IN IP4 172.22.0.8\r
+  a=candidate:451689884 1 udp 2122260223 172.22.0.8 50780 typ host\r
+  a=candidate:3162618633 1 udp 2122197247 2001:db8:1::a8 40625 typ host\r
+  a=ice-ufrag:Tut0\r
+  a=ice-pwd:oAOZNr1cF0JZIyrgliyFU02O\r
+  a=rtpmap:8 PCMA/8000\r
+  a=sendrecv\r
+  """
 
   @offer_v4 """
   v=0\r
@@ -113,6 +144,17 @@ defmodule Kelix.Mod.McuIPv6Test do
 
     def handle_cast(_msg, test), do: {:noreply, test}
     def handle_info(_msg, test), do: {:noreply, test}
+  end
+
+  defmodule MockTransport do
+    @moduledoc "A transport instance that only knows where it is bound."
+    use GenServer
+
+    def start_link(local_ip), do: GenServer.start_link(__MODULE__, local_ip)
+    def init(local_ip), do: {:ok, local_ip}
+
+    def handle_call(:getlocalipandport, _from, local_ip),
+      do: {:reply, {:ok, local_ip, 5060}, local_ip}
   end
 
   setup_all do
@@ -167,10 +209,10 @@ defmodule Kelix.Mod.McuIPv6Test do
     end
   end
 
-  defp invite(did, sdp) do
+  defp invite(did, sdp, local_ip \\ nil) do
     %{
       method: :INVITE,
-      ruri: %SIP.Uri{userpart: did, domain: @domain},
+      ruri: %SIP.Uri{userpart: did, domain: @domain, tp_pid: local_transport(local_ip)},
       from: %SIP.Uri{userpart: "alice", domain: "phone.example.com"},
       to: %SIP.Uri{userpart: did, domain: @domain},
       callid: "call-#{System.unique_integer([:positive])}",
@@ -178,6 +220,15 @@ defmodule Kelix.Mod.McuIPv6Test do
       body: sdp,
       contenttype: "application/sdp"
     }
+  end
+
+  # What the transport layer stamps on an inbound request: the instance the call
+  # arrived on, hence the local address FW-1 reads and passes to the adapter.
+  defp local_transport(nil), do: nil
+
+  defp local_transport(local_ip) do
+    {:ok, pid} = start_supervised({MockTransport, local_ip}, id: {:tp, local_ip})
+    pid
   end
 
   defp start_call(scenario, req) do
@@ -316,6 +367,59 @@ defmodule Kelix.Mod.McuIPv6Test do
                        [_conf, _part, _media, _map, _role, _proto, _offer, "publicv4"]}
     end
 
+    @tag profiles: @profiles_v6_only
+    test "a browser offering both families takes the one the server carries", ctx do
+      # The `c=` alone reads IPv4, which this server does not carry — and the offer
+      # names an IPv6 candidate it does. Refusing here answered 500 to every WebRTC
+      # caller of an IPv6-only conference (traffic of 2026-08-25).
+      {_pid, _dialog} = start_call(ctx.scenario, invite(ctx.did, @offer_webrtc_dual))
+      assert_receive {:replied, 200, _reason, fields, _req}, 2000
+
+      assert_received {:rpc, "StartReceiving",
+                       [_conf, _part, _media, _map, _role, _proto, _offer, "publicv6"]}
+
+      assert fields[:body] =~ "c=IN IP6 #{@media_ip_v6}"
+    end
+
+    test "the local address the call arrived on decides among the offered families", ctx do
+      # Both families offered, both carried by the server: the offer states no
+      # preference we can trust — its `c=` holds whichever candidate the browser
+      # elected — while the address it reached us on is a route it demonstrably has.
+      {_pid, _dialog} =
+        start_call(
+          ctx.scenario,
+          invite(ctx.did, @offer_webrtc_dual, {0x2001, 0xDB8, 0, 0, 0, 0, 0, 0x12})
+        )
+
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+
+      assert_received {:rpc, "StartReceiving",
+                       [_conf, _part, _media, _map, _role, _proto, _offer, "publicv6"]}
+    end
+
+    @tag media_ip: "203.0.113.12"
+    test "and it is the local address, not a family we favour", ctx do
+      {_pid, _dialog} =
+        start_call(ctx.scenario, invite(ctx.did, @offer_webrtc_dual, {203, 0, 113, 12}))
+
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+
+      assert_received {:rpc, "StartReceiving",
+                       [_conf, _part, _media, _map, _role, _proto, _offer, "publicv4"]}
+    end
+
+    @tag profiles: @profiles_v6_only
+    test "a local address whose family the offer never named is not announced", ctx do
+      # An IPv6 listener, and a caller offering IPv4 only. The preference is the
+      # local address, but the permission is the offer: announcing IPv6 here would
+      # be media sent to a peer that gave no IPv6 address to send it to.
+      {_pid, _dialog} =
+        start_call(ctx.scenario, invite(ctx.did, @offer_v4, {0x2001, 0xDB8, 0, 0, 0, 0, 0, 0x12}))
+
+      assert_receive {:replied, 500, _reason, _fields, _req}, 2000
+      refute_received {:rpc, "StartReceiving", _params}
+    end
+
     @tag profiles: @profiles_v4_only
     test "a family the server does not carry refuses the call, never falls back", ctx do
       {_pid, _dialog} = start_call(ctx.scenario, invite(ctx.did, @offer_v6))
@@ -334,7 +438,8 @@ defmodule Kelix.Mod.McuIPv6Test do
       assert_receive {:replied, 200, _reason, _fields, _req}, 2000
 
       # seven parameters, the call a controller that never heard of profiles makes
-      assert_received {:rpc, "StartReceiving", [_conf, _part, _media, _map, _role, _proto, _offer]}
+      assert_received {:rpc, "StartReceiving",
+                       [_conf, _part, _media, _map, _role, _proto, _offer]}
     end
   end
 

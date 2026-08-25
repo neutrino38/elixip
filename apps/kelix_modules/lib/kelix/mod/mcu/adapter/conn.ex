@@ -219,6 +219,11 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
          # verbatim on every other RPC that carries one
          network_profiles: Client.network_profiles(client),
          address_profile: nil,
+         # the profile of the LOCAL address this caller reached us on (FW-1
+         # `local_ip:`), which is the preference among the families its offer names
+         # — see `leg_profile/2`. nil on a leg we placed ourselves: it had no
+         # transport when it was created.
+         local_profile: local_profile(opts),
          # per media: %{codec:, rec_port:, send: {ip, port}, rtp_map:, dtmf_clock:}
          negotiated: %{},
          receiving: [],
@@ -227,6 +232,19 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
        }}
     else
       {:error, reason} -> {:stop, reason}
+    end
+  end
+
+  # The family of the local address is all a profile can be derived from today,
+  # and it is derived rather than configured: an address states its family, and
+  # `[[listen]]` states no profile yet. Which SIDE of the network a listener sits
+  # on — the `internal` profiles — is step 6 of
+  # docs/design/multi-interface.md, and until it lands every leg announces a
+  # public address (see `profile_name/1`).
+  defp local_profile(opts) do
+    case SIP.NetUtils.address_family(Keyword.get(opts, :local_ip)) do
+      nil -> nil
+      family -> profile_name(family)
     end
   end
 
@@ -1119,12 +1137,32 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # both directions, and it refuses a second, different one rather than rebind a
   # media under a port it has already published.
   #
-  # **It is the peer's own media address that decides the family**, read from the
-  # offer (`Sdp.peer_family/1`). Not the node's configured family: that one says what
-  # this node listens on, and on a node bridging two families it would be right for
-  # one leg and wrong for the other. A media server carrying both addresses answers a
-  # v4 caller in `IN IP4` and a v6 caller in `IN IP6` from one conference, which is
-  # the whole point of asking.
+  # **The node's configured family decides nothing**: it says what this node listens
+  # on as a whole, and on a node bridging two families it would be right for one leg
+  # and wrong for the other. A media server carrying both addresses answers a v4
+  # caller in `IN IP4` and a v6 caller in `IN IP6` from one conference, which is the
+  # whole point of asking. Three parties do decide, each asked only what it alone
+  # knows:
+  #
+  #  * **the offer** says which families the peer can receive media on — the
+  #    permission. It names one or two: a browser under ICE names both, its `c=`
+  #    holding the default candidate it elected (a private VPN or LAN address as
+  #    often as not) and its `a=candidate` lines naming the rest, public IPv6
+  #    included. Reading the `c=` alone refused a whole conference on a v6-only node
+  #    whose caller was offering v6 one line further down;
+  #  * **the local address this call arrived on** (`local_profile`) says which of
+  #    our interfaces this peer has a route to — the preference inside that
+  #    permission, and the one thing the offer cannot say. It only ever REORDERS
+  #    what the offer allows: announcing the family of our listener to a peer that
+  #    never offered it would be media sent nowhere;
+  #  * **the media server** says which profiles it carries (§6.7) — the
+  #    availability.
+  #
+  # Nothing outside that intersection is served, and an empty one **fails the leg**:
+  # a fallback would answer 200 with an address the caller cannot reach, and nothing
+  # would say so until the peer noticed the silence (§6.7 bis). Choosing among the
+  # families the peer itself published is not that fallback — ICE only ever pairs
+  # candidates of one family, and a non-ICE offer names exactly one.
   #
   # Three cases where no profile is asked for at all, each leaving the server on its
   # own default — exactly what a controller that never heard of profiles obtains:
@@ -1133,10 +1171,6 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   #  * the offer does not name an address of either family (a media blackholed from
   #    the start, no candidate to read) — there is no media to place;
   #  * this leg already fixed its profile, which is then reused rather than re-derived.
-  #
-  # A profile the server declares **unavailable** fails the leg. No fallback: the
-  # fallback would send the media out of the wrong interface, and nothing would say so
-  # until the peer noticed the silence (§6.7 bis).
   defp leg_profile(%{address_profile: profile} = state, _desc) when is_binary(profile),
     do: {:ok, state, profile}
 
@@ -1144,19 +1178,23 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     do: {:ok, state, nil}
 
   defp leg_profile(state, desc) do
-    case Sdp.peer_family(desc) do
-      nil ->
+    case Enum.map(Sdp.peer_families(desc), &profile_name/1) do
+      [] ->
         {:ok, state, nil}
 
-      family ->
-        name = profile_name(family)
-
-        if get_in(state.network_profiles, [name, :available]) do
-          {:ok, %{state | address_profile: name}, name}
-        else
-          {:error, {:profile_unavailable, name}}
+      offered ->
+        case Enum.find(
+               prefer_local(state, offered),
+               &get_in(state.network_profiles, [&1, :available])
+             ) do
+          nil -> {:error, {:profile_unavailable, Enum.join(offered, ", ")}}
+          name -> {:ok, %{state | address_profile: name}, name}
         end
     end
+  end
+
+  defp prefer_local(%{local_profile: local}, offered) do
+    if local in offered, do: Enum.uniq([local | offered]), else: offered
   end
 
   # Only the public side, and it is not an omission: which side of the network a

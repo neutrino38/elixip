@@ -1398,21 +1398,33 @@ defmodule MediaServer.Mendooze.Sdp do
   def blackholed?(desc), do: Map.get(desc, :ip) in ["0.0.0.0", "::"]
 
   @doc """
-  The address family the peer will receive this media on, or `nil` when the offer
-  does not say.
+  The address families the peer can receive this media on, in the order the offer
+  states them — `[]` when it names none.
 
-  The `c=` address answers when it is a real one. A WebRTC offer blackholes it
-  (`c=IN IP4 0.0.0.0`) and names its addresses in `a=candidate` instead, so the
-  first readable candidate answers next — the family of a leg is a property of
-  the offer, never of the machine reading it.
+  The family of a leg is a property of the offer, never of the machine reading
+  it. An offer states it in **two** places, and both are read: the `c=` address
+  when it is a real one, then every `a=candidate`, in their own order.
+
+  Reading the `c=` alone is enough only without ICE. Under ICE the `c=` carries
+  the **default candidate** (RFC 8839 §5.1) — one address the peer picked for a
+  non-ICE answerer, and a browser picks it by its own candidate priority: an
+  offer whose `c=` is a private `172.22.0.8` also names a public IPv6 candidate,
+  and both are addresses it will answer on. A blackholed `c=` (`0.0.0.0` / `::`)
+  names nothing and leaves the candidates to answer alone.
+
+  Which of these families can be served is the caller's decision; this says only
+  what the peer offered.
   """
-  @spec peer_family(map()) :: :ipv4 | :ipv6 | nil
-  def peer_family(desc) do
-    if blackholed?(desc) do
-      desc |> Map.get(:candidates, []) |> Enum.find_value(&candidate_family/1)
-    else
-      string_family(Map.get(desc, :ip))
-    end
+  @spec peer_families(map()) :: [:ipv4 | :ipv6]
+  def peer_families(desc) do
+    connection_family = if blackholed?(desc), do: nil, else: string_family(Map.get(desc, :ip))
+
+    desc
+    |> Map.get(:candidates, [])
+    |> Enum.map(&candidate_family/1)
+    |> List.insert_at(0, connection_family)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
   end
 
   # RFC 5245 §15.1: the connection-address is the 5th field of the candidate

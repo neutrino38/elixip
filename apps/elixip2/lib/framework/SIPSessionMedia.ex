@@ -406,6 +406,7 @@ defmodule SIP.Session.Media do
       nil ->
         conn_opts =
           [webrtc_support: webrtc_support, media: medias] ++
+            local_address_opts(sip_ctx, leg) ++
             extra_conn_opts(sip_ctx) ++
             resolve_bridge_with(opts, sip_ctx) ++ adapter_opts(opts)
 
@@ -428,6 +429,35 @@ defmodule SIP.Session.Media do
         {sip_ctx, cnx}
     end
   end
+
+  # `local_ip:` — the address of OURS that this peer reached, as an
+  # `:inet.ip_address()` tuple. It is the same address
+  # `SIP.Transport.build_contact_uri/2` writes into this leg's Contact, and it is
+  # there for the same reason: of the addresses this node holds, it is one this
+  # peer demonstrably has a route to. An adapter that must place media on an
+  # interface has no other honest source for it — the node's configuration
+  # describes every interface at once, and on a node bridging two of them that is
+  # right for one leg and wrong for the other.
+  #
+  # Only the leg we ANSWER has it, and only it: the inbound request carries the
+  # transport it arrived on (`ruri.tp_pid`, stamped by
+  # `SIP.Transport.do_process_incoming_message/7`). A leg this node PLACES has no
+  # transport until its request goes out — and on a B2BUA it faces the other side of
+  # the network entirely, so lending it the inbound address would be worse than
+  # saying nothing. The option is then absent rather than guessed, and every adapter
+  # reads it with `Keyword.get/3`.
+  defp local_address_opts(sip_ctx, @default_leg) do
+    with %{ruri: %SIP.Uri{tp_pid: tp_pid}} when is_pid(tp_pid) <-
+           SIP.Context.appdata_get(sip_ctx, :last_uas_req) ||
+             SIP.Context.appdata_get(sip_ctx, :inbound_request),
+         {:ok, local_ip, _local_port} <- SIP.Transport.get_local_ip_port(tp_pid) do
+      [local_ip: local_ip]
+    else
+      _ -> []
+    end
+  end
+
+  defp local_address_opts(_sip_ctx, _leg), do: []
 
   @doc """
   Per-call options a scenario adds to `create_peer_connection/3`, read from the

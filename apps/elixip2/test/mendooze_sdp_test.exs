@@ -608,7 +608,7 @@ defmodule Mendooze.SdpTest do
     end
   end
 
-  # ── blackholed?/1 and peer_family/1 ─────────────────────────────────────────
+  # ── blackholed?/1 and peer_families/1 ───────────────────────────────────────
 
   describe "blackholed?/1" do
     test "the wildcard of either family" do
@@ -624,15 +624,27 @@ defmodule Mendooze.SdpTest do
     end
   end
 
-  describe "peer_family/1" do
-    test "the c= address decides" do
-      assert Sdp.peer_family(%{ip: "192.0.2.7"}) == :ipv4
-      assert Sdp.peer_family(%{ip: "2001:db8::7"}) == :ipv6
-      assert Sdp.peer_family(%{ip: "fd00::1"}) == :ipv6
+  describe "peer_families/1" do
+    test "the c= address comes first" do
+      assert Sdp.peer_families(%{ip: "192.0.2.7"}) == [:ipv4]
+      assert Sdp.peer_families(%{ip: "2001:db8::7"}) == [:ipv6]
+      assert Sdp.peer_families(%{ip: "fd00::1"}) == [:ipv6]
     end
 
-    test "a blackholed c= falls back to the first readable candidate" do
-      # what a browser offers: c=IN IP4 0.0.0.0 and the real addresses in a=candidate
+    test "the candidates are read too, real c= or not" do
+      # A Chrome offer over IPv6: the `c=` holds the default candidate it elected —
+      # a private VPN address — and the public IPv6 it will also answer on is one
+      # line further down. Reading the `c=` alone refused the call.
+      assert Sdp.peer_families(%{
+               ip: "172.22.0.8",
+               candidates: [
+                 "451689884 1 udp 2122260223 172.22.0.8 50780 typ host",
+                 "3162618633 1 udp 2122197247 2a01:db8::a8 40625 typ host"
+               ]
+             }) == [:ipv4, :ipv6]
+    end
+
+    test "a blackholed c= leaves the candidates to answer, in their own order" do
       desc = %{
         ip: "0.0.0.0",
         candidates: [
@@ -641,16 +653,16 @@ defmodule Mendooze.SdpTest do
         ]
       }
 
-      assert Sdp.peer_family(desc) == :ipv6
+      assert Sdp.peer_families(desc) == [:ipv6, :ipv4]
 
-      assert Sdp.peer_family(%{desc | candidates: ["1 1 udp 1 192.0.2.7 30000 typ host"]}) ==
-               :ipv4
+      assert Sdp.peer_families(%{desc | candidates: ["1 1 udp 1 192.0.2.7 30000 typ host"]}) ==
+               [:ipv4]
     end
 
-    test "nothing readable answers nil" do
-      assert Sdp.peer_family(%{ip: "::", candidates: []}) == nil
-      assert Sdp.peer_family(%{ip: "0.0.0.0", candidates: ["garbage"]}) == nil
-      assert Sdp.peer_family(%{ip: "mcu.example.com"}) == nil
+    test "nothing readable answers an empty list" do
+      assert Sdp.peer_families(%{ip: "::", candidates: []}) == []
+      assert Sdp.peer_families(%{ip: "0.0.0.0", candidates: ["garbage"]}) == []
+      assert Sdp.peer_families(%{ip: "mcu.example.com"}) == []
     end
   end
 

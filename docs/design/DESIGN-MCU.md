@@ -429,11 +429,26 @@ carries up to four — `publicv4`, `publicv6`, `internalv4`, `internalv6` — an
 `GetNetworkProfiles` is asked at every connection what it really has. No profile
 list is written on this side, for the same reason no codec list is (§6).
 
-**The family comes from the peer, not from the node.** It is read off the offer:
-the media's `c=` address, or the first readable `a=candidate` when the offer
-blackholes it, which is what a browser does. A node-wide setting would be right
-for one leg and wrong for the other on the very topology this exists for — one
-conference answering an IPv4 caller in `IN IP4` and an IPv6 caller in `IN IP6`.
+**Three parties decide, and each is asked only what it alone knows.**
+
+- **the offer** says which families the peer can receive media on — the
+  permission. Both places it states them are read: the media's `c=` address, and
+  every `a=candidate`. The `c=` alone is enough only without ICE; under ICE it
+  carries the **default candidate** the peer elected (RFC 8839 §5.1), which for a
+  browser is a private VPN or LAN address as often as not, while the public
+  address it will equally answer on is one `a=candidate` further down;
+- **the local address the call arrived on** says which of our interfaces this peer
+  has a route to — the preference *inside* that permission. It is the same address
+  this leg's Contact carries, and the framework passes it to every adapter
+  (`local_ip:`). It only ever reorders what the offer allows: announcing the
+  family of our listener to a peer that never offered it would be media sent
+  nowhere;
+- **the media server** says which profiles it carries (`GetNetworkProfiles`) — the
+  availability.
+
+A node-wide setting is none of the three: it would be right for one leg and wrong
+for the other on the very topology this exists for — one conference answering an
+IPv4 caller in `IN IP4` and an IPv6 caller in `IN IP6`.
 
 Three rules hold the rest:
 
@@ -442,9 +457,11 @@ Three rules hold the rest:
   different one rather than rebind a media under a port it has already published.
   A renegotiation — a hold spelled `c=IN IP6 ::` names no family — reuses what the
   leg fixed;
-- **no fallback.** A family the server declares unavailable fails the call. The
-  fallback would answer 200 with an address the caller cannot reach: no media,
-  nothing logged, and the peer left to discover it;
+- **no fallback.** Nothing outside the intersection of the three is served, and an
+  empty intersection fails the call. The fallback would answer 200 with an address
+  the caller cannot reach: no media, nothing logged, and the peer left to discover
+  it. Choosing among the families the peer itself published is not that fallback —
+  ICE only ever pairs candidates of one family, and a non-ICE offer names one;
 - **a server that does not carry the notion is called exactly as before.** No
   `GetNetworkProfiles`, no profile parameter, the server's own default — the same
   rolling-upgrade path the codec verdict has.

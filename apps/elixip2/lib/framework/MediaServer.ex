@@ -213,7 +213,13 @@ defmodule MediaServer do
           # hands us its private address in an ANSWER just as readily as in an
           # offer, and under ICE the address is settled by connectivity checks
           # instead. Adapters that cannot latch ignore it.
-          nat_latch: boolean() | :auto
+          nat_latch: boolean() | :auto,
+          # The address of OURS this peer reached, set by the framework on a leg we
+          # ANSWER (`SIP.Session.Media`, from the transport the request arrived on) —
+          # the same address this leg's Contact carries. An adapter that must place
+          # media on one of several interfaces reads it; the others ignore it. Absent
+          # on an outbound leg, which has no transport when it is created.
+          local_ip: :inet.ip_address()
         ]
 
   @type player_opts :: [

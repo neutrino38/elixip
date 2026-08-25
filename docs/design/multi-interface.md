@@ -284,18 +284,31 @@ donc toute jambe obtenait le profil par défaut du serveur — `publicv4` sauf
 média. Le détail de la règle est dans
 [DESIGN-MCU.md](DESIGN-MCU.md#61-the-address-a-leg-announces) ; l'essentiel :
 
-- la famille se lit dans **l'offre** — le `c=` de la média, ou la première
-  candidate ICE quand l'offre met un trou noir, ce que fait un navigateur. Pas la
-  famille du nœud : elle serait juste pour une jambe et fausse pour l'autre sur la
-  topologie même qui justifie tout ceci ;
+- **l'offre** dit les familles où le pair peut recevoir : c'est la permission. Ses
+  deux endroits sont lus, le `c=` de la média **et** chaque `a=candidate`. Le `c=`
+  seul suffit hors ICE ; sous ICE il porte la candidate par défaut que le pair a
+  élue (RFC 8839 §5.1), souvent une adresse privée de VPN ou de LAN, alors que
+  l'adresse publique où il répondrait aussi est une ligne plus bas ;
+- **l'adresse locale par laquelle l'appel est arrivé** dit laquelle de nos
+  interfaces ce pair sait joindre : c'est la préférence, à l'intérieur de la
+  permission. C'est l'adresse que porte déjà le Contact de la jambe, et le
+  framework la passe à tout adaptateur (`local_ip:`). Elle ne fait que réordonner
+  ce que l'offre autorise : annoncer la famille de notre listener à un pair qui ne
+  l'a pas offerte, c'est du média envoyé nulle part ;
+- **le serveur média** dit les profils qu'il porte (`GetNetworkProfiles`) : c'est
+  la disponibilité. La famille du nœud, elle, ne décide rien — elle serait juste
+  pour une jambe et fausse pour l'autre sur la topologie même qui justifie tout
+  ceci ;
 - le profil se fixe **une fois** par jambe, comme le serveur l'exige, et une
   renégociation réemploie celui de la jambe ;
-- un profil indisponible **fait échouer l'appel**. Jamais de repli : il enverrait
+- une intersection vide **fait échouer l'appel**. Jamais de repli : il enverrait
   le média par la mauvaise interface sans que rien ne le dise ;
 - un serveur qui ignore la notion est appelé exactement comme avant, sans
   paramètre — le même chemin de montée de version que le verdict codec.
 
-Seuls les profils publics sont demandés. Le côté du réseau est l'étape 6.
+Seuls les profils publics sont demandés. Le côté du réseau est l'étape 6 : la
+famille se déduit de l'adresse locale, le `tag` d'un `[[listen]]` n'est pas encore
+lu.
 
 **Le trou noir IPv6 se lit enfin.** `c=IN IP6 ::` (RFC 6157 §4) est la mise en
 attente historique d'un pair IPv6, et trois copies de cette lecture ne
@@ -311,8 +324,9 @@ serveur qui répond « méthode inconnue » à `GetNetworkProfiles` à chaque co
 aurait donc battu indéfiniment.
 
 Tests : `apps/kelix_modules/test/mcu_ipv6_test.exs` (le canal sur `::1` avec un
-vrai socket, la découverte des profils, le profil des deux familles, le refus
-franc, le serveur ancien, la pause `::`) et `blackholed?/1` / `peer_family/1` dans
+vrai socket, la découverte des profils, le profil des deux familles, le navigateur
+qui offre les deux, l'adresse locale qui tranche, le refus franc, le serveur
+ancien, la pause `::`) et `blackholed?/1` / `peer_families/1` dans
 `apps/elixip2/test/mendooze_sdp_test.exs`.
 
 **Trou connu, côté serveur.** Le texte temps réel sur WebSocket ne marche pas en

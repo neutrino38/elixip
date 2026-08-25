@@ -76,10 +76,10 @@ defmodule MediaServer.SdpTools do
   defdelegate blackholed?(desc), to: Sdp
 
   @doc """
-  The address family the peer will receive a media on, or `nil`. See
-  `MediaServer.Mendooze.Sdp.peer_family/1`.
+  The address families the peer can receive a media on, offer order. See
+  `MediaServer.Mendooze.Sdp.peer_families/1`.
   """
-  defdelegate peer_family(desc), to: Sdp
+  defdelegate peer_families(desc), to: Sdp
 
   @doc "SDP `rtpmap` fields for a Medooze codec constant."
   defdelegate code_rtpmap(media, code), to: Sdp
