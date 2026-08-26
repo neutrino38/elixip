@@ -11,13 +11,19 @@ defmodule SIP.Transport.TCPListener do
   `GenServer.call(listener, {:spawn_connection, socket})` synchronously to have
   the Listener create the TCP GenServer and register the connection. The Listener
   returns the TCP pid; the Task then transfers ownership
-  (`:gen_tcp.controlling_process/2`) and tells the TCP process to activate itself
+  (`Socket.TCP.process/2`) and tells the TCP process to activate itself
   (`:activate_socket` cast). Only the socket owner may transfer ownership, so this
   sequence must stay in the Task.
+
+  The WSS listener runs the same sequence, but its activation starts a reader
+  process because WebSocket frames have to be parsed. A TCP socket in active mode
+  delivers `{:tcp, socket, data}` to its owner itself, so there is nothing to
+  spawn and nothing to monitor here.
   """
   use GenServer
   require Logger
   require SIP.Transport.ImplHelpers
+  require Socket.TCP
 
   @transport_str "tcp"
   def transport_str, do: @transport_str
@@ -57,10 +63,14 @@ defmodule SIP.Transport.TCPListener do
       Application.get_env(:elixip2, :tcp_max_connections, @default_max_connections))
     bind_addr = if addr == :all, do: {0, 0, 0, 0}, else: addr
 
-    case localip && :gen_tcp.listen(port, [:binary, {:packet, :raw}, {:active, false},
-                                          {:reuseaddr, true}, {:ip, bind_addr}]) do
+    # Socket.TCP.listen/2 binds passive and with SO_REUSEADDR on its own; the
+    # accept Task activates each connection later, once its owner is set. No
+    # `version:` — the bind address carries its family, and stating both lets them
+    # disagree: `:all` still binds 0.0.0.0, so a v6 listener on it would exit
+    # :badarg out of `init/1` instead of the IPv4 socket it silently gets today.
+    case localip && Socket.TCP.listen(port, packet: :raw, local: [address: bind_addr]) do
       {:ok, listen_socket} ->
-        {:ok, actual_port} = :inet.port(listen_socket)
+        {_bound_ip, actual_port} = Socket.local!(listen_socket)
         listener_pid = self()
         Task.start_link(fn -> accept_loop(listen_socket, listener_pid) end)
         Logger.info([module: __MODULE__,
@@ -119,10 +129,10 @@ defmodule SIP.Transport.TCPListener do
     if map_size(state.connections) >= state.max_connections do
       Logger.warning([module: __MODULE__,
         message: "TCP connection limit (#{state.max_connections}) reached — rejecting inbound connection"])
-      :gen_tcp.close(client_socket)
+      Socket.close(client_socket)
       {:reply, :rejected, state}
     else
-      {:ok, {peer_ip, peer_port}} = :inet.peername(client_socket)
+      {:ok, {peer_ip, peer_port}} = Socket.remote(client_socket)
 
       case GenServer.start_link(SIP.Transport.TCP,
              {:inbound, client_socket, state.localip, state.localport, peer_ip, peer_port}) do
@@ -140,7 +150,7 @@ defmodule SIP.Transport.TCPListener do
         {:error, reason} ->
           Logger.error([module: __MODULE__,
             message: "Failed to start TCP connection handler: #{inspect(reason)}"])
-          :gen_tcp.close(client_socket)
+          Socket.close(client_socket)
           {:reply, :rejected, state}
       end
     end
@@ -154,7 +164,7 @@ defmodule SIP.Transport.TCPListener do
 
   @impl true
   def terminate(_reason, state) do
-    :gen_tcp.close(state.socket)
+    Socket.close(state.socket)
   end
 
   # ---- Private helpers ------------------------------------------------------
@@ -162,12 +172,12 @@ defmodule SIP.Transport.TCPListener do
   # The accept loop runs in a Task linked to the Listener. It owns each accepted
   # socket and is therefore the only process that may call controlling_process.
   defp accept_loop(listen_socket, listener_pid) do
-    case :gen_tcp.accept(listen_socket) do
+    case Socket.TCP.accept(listen_socket) do
       {:ok, client_socket} ->
         case GenServer.call(listener_pid, {:spawn_connection, client_socket}) do
           {:ok, conn_pid} ->
             # Transfer ownership: Task → TCP GenServer (valid because Task owns it).
-            :gen_tcp.controlling_process(client_socket, conn_pid)
+            Socket.TCP.process(client_socket, conn_pid)
             # Ask the TCP process to activate its socket now that it owns it.
             GenServer.cast(conn_pid, :activate_socket)
 

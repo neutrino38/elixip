@@ -73,7 +73,7 @@ defmodule SIP.Transport.TCP do
   def handle_call({:sendmsg, msgstr, _destip, _dest_port}, _from, state) do
     destipstr = SIP.NetUtils.ip2string(state.destip)
     Logger.debug("TCP: Message sent to #{destipstr}:#{state.destport} ---->\r\n" <> msgstr <> "\r\n-----------------")
-    case tcp_send(state.socket, msgstr) do
+    case Socket.Stream.send(state.socket, msgstr) do
       :ok -> {:reply, :ok, state}
       {:error, reason} ->
         Logger.debug([module: __MODULE__, message: "failed to send message. Error: #{reason}"])
@@ -87,7 +87,7 @@ defmodule SIP.Transport.TCP do
   # Only meaningful for inbound connections; outbound sockets are already active.
   @impl true
   def handle_cast(:activate_socket, state) do
-    :inet.setopts(state.socket, [{:active, true}])
+    Socket.TCP.options(state.socket, mode: :active)
     {:noreply, state}
   end
 
@@ -117,14 +117,7 @@ defmodule SIP.Transport.TCP do
     SIP.Transport.ImplHelpers.notify_transport_down(__MODULE__, state)
 
     if not is_nil(state.socket) do
-      tcp_close(state.socket)
+      Socket.close(state.socket)
     end
   end
-
-  # Raw :gen_tcp port for inbound connections; Socket.Stream struct for outbound.
-  defp tcp_send(socket, data) when is_port(socket), do: :gen_tcp.send(socket, data)
-  defp tcp_send(socket, data), do: Socket.Stream.send(socket, data)
-
-  defp tcp_close(socket) when is_port(socket), do: :gen_tcp.close(socket)
-  defp tcp_close(socket), do: Socket.close(socket)
 end
