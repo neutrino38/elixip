@@ -61,7 +61,7 @@ defmodule SIP.Transport.TCPListener do
     localip = resolve_localip(addr, family)
     max_conn = Keyword.get(opts, :max_connections,
       Application.get_env(:elixip2, :tcp_max_connections, @default_max_connections))
-    bind_addr = if addr == :all, do: {0, 0, 0, 0}, else: addr
+    bind_addr = wildcard_of(addr, family)
 
     # Socket.TCP.listen/2 binds passive and with SO_REUSEADDR on its own; the
     # accept Task activates each connection later, once its owner is set. No
@@ -194,6 +194,13 @@ defmodule SIP.Transport.TCPListener do
         accept_loop(listen_socket, listener_pid)
     end
   end
+
+  # `:all` is every interface **of this listener's family**. It was the IPv4
+  # wildcard whatever the family, so a listener told :ipv6 resolved an IPv6
+  # address for its Via and its Contact and then bound an IPv4 socket.
+  defp wildcard_of(:all, :ipv6), do: {0, 0, 0, 0, 0, 0, 0, 0}
+  defp wildcard_of(:all, _family), do: {0, 0, 0, 0}
+  defp wildcard_of(addr, _family), do: addr
 
   # nil when the host carries no address of the requested family: the listener
   # would then have nothing to write in a Via or a Contact.

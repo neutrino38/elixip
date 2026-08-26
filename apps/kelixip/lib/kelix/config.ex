@@ -19,7 +19,7 @@ defmodule Kelix.Config do
 
   @type listener :: %{
           proto: :udp | :tcp | :tls | :wss,
-          addr: String.t(),
+          addr: String.t() | nil,
           port: pos_integer,
           cert: String.t() | nil,
           key: String.t() | nil
@@ -388,8 +388,7 @@ defmodule Kelix.Config do
   defp parse_listener(%{} = l) do
     with :ok <- reject_keys(l, ~w(proto addr port cert key), "[[listen]]"),
          {:ok, proto} <- req_proto(l),
-         {:ok, addr} <- opt_ip(l, "addr", "0.0.0.0", "[[listen]]"),
-         :ok <- reject_unspecified_ipv6(addr),
+         {:ok, addr} <- opt_bind_addr(l),
          {:ok, port} <- req_pos_integer(l, "port", "[[listen]]"),
          {:ok, cert, key} <- listener_certs(l, proto) do
       {:ok, %{proto: proto, addr: addr, port: port, cert: cert, key: key}}
@@ -398,20 +397,26 @@ defmodule Kelix.Config do
 
   defp parse_listener(_), do: {:error, "each [[listen]] must be a table"}
 
-  # An explicit `addr` is what gives a listener its family. The IPv4 wildcard has
-  # a meaning without one — every interface, IPv4 — while the IPv6 wildcard would
-  # have to say which family it carries, and nothing decides that yet (step 4 of
-  # docs/design/multi-interface.md). Refuse it instead of binding a socket that
-  # advertises an address no peer can call back.
-  defp reject_unspecified_ipv6(addr) do
-    case :inet.parse_address(String.to_charlist(addr)) do
-      {:ok, {0, 0, 0, 0, 0, 0, 0, 0}} ->
-        {:error,
-         "[[listen]]: `addr` cannot be the IPv6 wildcard (#{addr}); name an explicit " <>
-           "IPv6 address"}
+  # `addr` states a family, and a wildcard states one too: "0.0.0.0" is every
+  # IPv4 interface, "::" every IPv6 one. **Absent** is the only spelling that
+  # names no family — it is `nil` here, and the listener supervisor expands it
+  # into one socket per family the host carries.
+  #
+  # nil rather than a default of "0.0.0.0": that string is an IPv4 address, and
+  # an operator who writes it is asking for IPv4. Only silence can mean both.
+  defp opt_bind_addr(l) do
+    case Map.get(l, "addr") do
+      nil ->
+        {:ok, nil}
 
-      _ ->
-        :ok
+      addr when is_binary(addr) ->
+        case :inet.parse_address(String.to_charlist(addr)) do
+          {:ok, _ip} -> {:ok, addr}
+          {:error, _} -> {:error, "[[listen]]: `addr` must be an IP address, got #{inspect(addr)}"}
+        end
+
+      other ->
+        {:error, "[[listen]]: `addr` must be a string, got #{inspect(other)}"}
     end
   end
 
@@ -591,15 +596,6 @@ defmodule Kelix.Config do
 
   # A bind address, validated here so a typo fails the boot with a clear message
   # rather than crashing Kelix.Listener.Supervisor when it converts it.
-  defp opt_ip(map, key, default, ctx) do
-    with {:ok, addr} <- opt_string(map, key, default, ctx) do
-      case :inet.parse_address(String.to_charlist(addr)) do
-        {:ok, _ip} -> {:ok, addr}
-        {:error, _} -> {:error, "#{ctx}: `#{key}` must be an IP address, got #{inspect(addr)}"}
-      end
-    end
-  end
-
   defp opt_enum(map, key, allowed, default, ctx) do
     case Map.get(map, key) do
       nil ->

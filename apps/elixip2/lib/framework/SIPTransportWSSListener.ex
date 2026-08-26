@@ -73,7 +73,7 @@ defmodule SIP.Transport.WSSListener do
       Application.get_env(:elixip2, :tls_certfile, @default_certfile))
     keyfile  = Keyword.get(opts, :keyfile,
       Application.get_env(:elixip2, :tls_keyfile, @default_keyfile))
-    bind_addr = if addr == :all, do: {0, 0, 0, 0}, else: addr
+    bind_addr = wildcard_of(addr, family)
 
     # listen/2 binds passive and with SO_REUSEADDR on its own. No `version:`: the
     # bind address carries its family, and `:all` still binds 0.0.0.0 (see
@@ -318,6 +318,13 @@ defmodule SIP.Transport.WSSListener do
     |> Enum.map(&(&1 |> String.trim() |> String.downcase()))
     |> Enum.reject(&(&1 == ""))
   end
+
+  # `:all` is every interface **of this listener's family**. It was the IPv4
+  # wildcard whatever the family, so a listener told :ipv6 resolved an IPv6
+  # address for its Via and its Contact and then bound an IPv4 socket.
+  defp wildcard_of(:all, :ipv6), do: {0, 0, 0, 0, 0, 0, 0, 0}
+  defp wildcard_of(:all, _family), do: {0, 0, 0, 0}
+  defp wildcard_of(addr, _family), do: addr
 
   # nil when the host carries no address of the requested family: the listener
   # would then have nothing to write in a Via or a Contact.
