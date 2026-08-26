@@ -111,6 +111,27 @@ defmodule SIP.Test.IPv6Transport do
     assert eventually(fn -> SIP.Transport.TCPListener.connection_count(pid) == 0 end)
   end
 
+  # ── The TLS listener ─────────────────────────────────────────────────────────
+
+  test "the TLS listener binds the family and the address it was given" do
+    opts = [certfile: "certs/certificate.pem", keyfile: "certs/private_key.pem"]
+    {:ok, pid} = GenServer.start(SIP.Transport.TLSListener, {@loopback_v6, 0, opts})
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+    assert {:ok, @loopback_v6, port} = GenServer.call(pid, :getlocalipandport)
+    assert {@loopback_v6, ^port} = Socket.local!(:sys.get_state(pid).socket)
+
+    # And it handshakes over that family: a v6 client reaches it and is counted.
+    {:ok, client} =
+      :ssl.connect(@loopback_v6, port,
+        [:binary, {:active, false}, verify: :verify_none, versions: [:"tlsv1.2"]])
+
+    assert eventually(fn -> SIP.Transport.TLSListener.connection_count(pid) == 1 end)
+
+    :ssl.close(client)
+    assert eventually(fn -> SIP.Transport.TLSListener.connection_count(pid) == 0 end)
+  end
+
   defp eventually(check, attempts \\ 40) do
     cond do
       check.() -> true
