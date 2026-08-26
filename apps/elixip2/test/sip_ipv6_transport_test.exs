@@ -132,6 +132,28 @@ defmodule SIP.Test.IPv6Transport do
     assert eventually(fn -> SIP.Transport.TLSListener.connection_count(pid) == 0 end)
   end
 
+  # ── The WSS listener ─────────────────────────────────────────────────────────
+
+  test "the WSS listener binds the family and the address it was given" do
+    opts = [certfile: "certs/certificate.pem", keyfile: "certs/private_key.pem"]
+    {:ok, pid} = GenServer.start(SIP.Transport.WSSListener, {@loopback_v6, 0, opts})
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+    assert {:ok, @loopback_v6, port} = GenServer.call(pid, :getlocalipandport)
+    assert {@loopback_v6, ^port} = Socket.local!(:sys.get_state(pid).socket)
+
+    # And it upgrades over that family: a v6 client completes TLS then the
+    # WebSocket handshake, and is counted.
+    client =
+      Socket.Web.connect!("[::1]", port,
+        secure: true, verify: false, versions: [:"tlsv1.2"], protocol: ["sip"])
+
+    assert eventually(fn -> SIP.Transport.WSSListener.connection_count(pid) == 1 end)
+
+    Socket.Web.close(client)
+    assert eventually(fn -> SIP.Transport.WSSListener.connection_count(pid) == 0 end)
+  end
+
   defp eventually(check, attempts \\ 40) do
     cond do
       check.() -> true
