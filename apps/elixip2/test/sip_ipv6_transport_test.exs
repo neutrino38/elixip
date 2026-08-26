@@ -94,4 +94,28 @@ defmodule SIP.Test.IPv6Transport do
     contact = SIP.Transport.build_contact_uri(SIP.Transport.UDP, pid)
     assert SIP.Uri.serialize(contact) == {:ok, "<sip:[::1]:#{port};transport=udp>"}
   end
+  # ── The TCP listener ─────────────────────────────────────────────────────────
+
+  test "the TCP listener binds the family and the address it was given" do
+    {:ok, pid} = GenServer.start(SIP.Transport.TCPListener, {@loopback_v6, 0, []})
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+    assert {:ok, @loopback_v6, port} = GenServer.call(pid, :getlocalipandport)
+    assert {@loopback_v6, ^port} = Socket.local!(:sys.get_state(pid).socket)
+
+    # And it accepts over that family: a v6 client reaches it and is counted.
+    client = Socket.TCP.connect!("[::1]", port, timeout: 2_000)
+    assert eventually(fn -> SIP.Transport.TCPListener.connection_count(pid) == 1 end)
+
+    Socket.close(client)
+    assert eventually(fn -> SIP.Transport.TCPListener.connection_count(pid) == 0 end)
+  end
+
+  defp eventually(check, attempts \\ 40) do
+    cond do
+      check.() -> true
+      attempts == 0 -> false
+      true -> Process.sleep(25) && eventually(check, attempts - 1)
+    end
+  end
 end
