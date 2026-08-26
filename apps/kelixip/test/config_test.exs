@@ -56,7 +56,9 @@ defmodule Kelix.ConfigTest do
 
     test "listeners with per-listener certs", %{cfg: cfg} do
       assert [udp, tls] = cfg.listen
-      assert udp == %{proto: :udp, addr: "0.0.0.0", port: 5060, cert: nil, key: nil}
+      # no `addr` in the fixture: nil, which the listener supervisor expands into
+      # one socket per family the host carries
+      assert udp == %{proto: :udp, addr: nil, port: 5060, cert: nil, key: nil}
       assert tls.proto == :tls and tls.port == 5061
       assert tls.cert == "/etc/kelixip/tls/fullchain.pem"
       assert tls.key == "/etc/kelixip/tls/privkey.pem"
@@ -436,15 +438,27 @@ defmodule Kelix.ConfigTest do
       assert [%{addr: "2001:db8::1"}] = cfg.listen
     end
 
-    # A wildcard IPv6 listener would have to say which family it carries, and
-    # nothing decides that yet (multi-interface step 4).
-    test "the IPv6 wildcard is rejected, in every spelling" do
-      for addr <- ["::", "0:0:0:0:0:0:0:0"] do
-        assert {:error, msg} =
+    # A wildcard states a family like any other address: "::" is every IPv6
+    # interface, "0.0.0.0" every IPv4 one. Only an ABSENT addr names no family.
+    test "a wildcard is an address, and keeps its family" do
+      for addr <- ["::", "0:0:0:0:0:0:0:0", "0.0.0.0"] do
+        assert {:ok, cfg} =
                  Config.parse(~s([[listen]]\nproto = "udp"\nport = 5060\naddr = "#{addr}"))
 
-        assert msg =~ "IPv6 wildcard"
+        assert [%{addr: ^addr}] = cfg.listen
       end
+    end
+
+    test "an absent addr is nil — the only spelling that names no family" do
+      assert {:ok, cfg} = Config.parse(~s([[listen]]\nproto = "udp"\nport = 5060))
+      assert [%{addr: nil}] = cfg.listen
+    end
+
+    test "a non-address addr is still refused" do
+      assert {:error, msg} =
+               Config.parse(~s([[listen]]\nproto = "udp"\nport = 5060\naddr = "nope"))
+
+      assert msg =~ "must be an IP address"
     end
 
     test "cert on a udp listener is rejected" do

@@ -198,6 +198,27 @@ defmodule SIP.Test.IPv6Transport do
     assert {:ok, @loopback_v6, ^port} = GenServer.call(pid, :getlocalipandport)
   end
 
+  # ── The wildcard follows the family ──────────────────────────────────────────
+
+  test "a TCP listener told :all binds the wildcard of ITS family" do
+    {:ok, pid} = GenServer.start(SIP.Transport.TCPListener, {:all, 0, [family: :ipv4]})
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+    assert {{0, 0, 0, 0}, _port} = Socket.local!(:sys.get_state(pid).socket)
+  end
+
+  # The IPv6 arm of the rule above needs a host carrying an advertisable IPv6
+  # address: a listener has to write one into its Via and its Contact, so on a
+  # v4-only host it stops :networkdown before it binds anything. Exercised on the
+  # dual-stack machine, not here.
+  @tag :skip
+  test "a TCP listener told :all and :ipv6 binds ::" do
+    {:ok, pid} = GenServer.start(SIP.Transport.TCPListener, {:all, 0, [family: :ipv6]})
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+    assert {{0, 0, 0, 0, 0, 0, 0, 0}, _port} = Socket.local!(:sys.get_state(pid).socket)
+  end
+
   defp eventually(check, attempts \\ 40) do
     cond do
       check.() -> true

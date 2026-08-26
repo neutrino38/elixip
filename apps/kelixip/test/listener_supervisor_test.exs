@@ -82,6 +82,34 @@ defmodule Kelix.Listener.SupervisorTest do
     assert [{:udp, "127.0.0.1", ^p1}] = Enum.map(Supervisor.which_children(pid), &elem(&1, 0))
   end
 
+
+  describe "an entry with no addr binds every family the host carries" do
+    # Host-dependent by nature, so the assertion is the RULE, not a fixed list:
+    # one child per family the host has an advertisable address of. On a v4-only
+    # host that is exactly one, and nothing changes from before step 4.
+    defp host_families do
+      Enum.filter([:ipv4, :ipv6], &(SIP.NetUtils.get_local_ips([&1]) != []))
+    end
+
+    test "one tcp child per family, each on the wildcard of its own family" do
+      port = free_port(:tcp)
+      pid = start_supervised!({LSup, listen: [entry(:tcp, port, %{addr: nil})]})
+
+      bound = Enum.map(LSup.status(pid), & &1.addr) |> Enum.sort()
+      expected = Enum.map(host_families(), &%{ipv4: "0.0.0.0", ipv6: "::"}[&1]) |> Enum.sort()
+
+      assert bound == expected
+      assert Enum.all?(Supervisor.which_children(pid), fn {_id, p, _, _} -> is_pid(p) end)
+    end
+
+    test "an explicit 0.0.0.0 stays IPv4 only — it is an IPv4 address" do
+      port = free_port(:tcp)
+      pid = start_supervised!({LSup, listen: [entry(:tcp, port, %{addr: "0.0.0.0"})]})
+
+      assert [%{addr: "0.0.0.0"}] = LSup.status(pid)
+    end
+  end
+
   test "tls carries its own cert/key (per-listener certs, §3.1)" do
     # The framework default is the relative "certs/certificate.pem", which does not
     # exist from this app's directory — so binding here proves the per-listener
