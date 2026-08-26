@@ -214,21 +214,21 @@ defmodule SIP.NetUtils do
   @doc """
   The address family this node binds and dials — `:ipv6` or `:ipv4`.
 
-  The configured local address answers it: `:udp_local_addr` is the address the
-  operator gave the node, so its family is the node's. Without one it is
-  `:udp_family`, which defaults to `:ipv4`.
+  The node's **primary** UDP socket answers it: `:udp_local_addr` is the address
+  of the first `udp` listener, so its family is the node's. Without one it is
+  `:udp_family`, which the listener supervisor sets from a wildcard entry and
+  which defaults to `:ipv4`.
 
-  It is read in **one** place so the socket and the resolver cannot disagree.
-  They could: a node that binds an IPv4 socket and resolves a name to an AAAA
-  record sends nothing at all, the datagram failing on `:eafnosupport`. The
-  family is therefore never guessed from what the host happens to carry — an
-  IPv6 node is a node whose listener names an IPv6 address.
+  This orders the two queries of a name resolution — which record is asked for
+  first — and nothing else. It does not decide what a datagram may leave by: a
+  node binds one UDP socket per family (step 4 of
+  docs/design/multi-interface.md), and `SIP.Transport.Selector` picks between
+  them on the family of the **resolved destination**, not on this. So a name
+  that only has an AAAA record is reached from a node whose primary socket is
+  IPv4; the order cost one extra query, not the call.
 
-  The answer is **node-wide**, which is what step 3 of
-  docs/design/multi-interface.md assumes: one leg, one family. Deciding a family
-  per leg is step 4. Until then a node whose only IPv6 listener is TCP, TLS or
-  WSS still reads `:ipv4` here, and its outbound name resolutions fall back to
-  AAAA rather than ask for it first.
+  A destination that is still a host name when a transport instance has to be
+  named has no address to read, and falls back here.
   """
   @spec preferred_family() :: :ipv4 | :ipv6
   def preferred_family() do

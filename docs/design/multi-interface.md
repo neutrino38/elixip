@@ -347,29 +347,65 @@ adresse IPv6, et un serveur média démarré avec une adresse publique v6
 IPv6 dans la même conférence, audio et vidéo relayés, `c=IN IP6` dans les deux
 réponses, et le journal du canal listant `publicv6` comme profil disponible.
 
-### Étape 4 — Wildcard et dual-stack
+### Étape 4 — Wildcard et dual-stack — livrée
 
-La marche la plus haute.
+Un nœud entend et parle les deux familles en même temps.
 
-`bind_addr(:all)` vaut `{0, 0, 0, 0}` dans les trois listeners, et
-`resolve_localip(:all)` prend la première IPv4 : un listener sans `addr`
-n'entend pas l'IPv6. `:all` cesse d'être une adresse IPv4.
+#### Trois écritures de `addr`, une seule ne nomme pas de famille
 
-**La socket UDP unique devient une socket par famille.** `Socket.UDP.open/2`
-ignore l'adresse de bind, et `Kelix.Listener.Supervisor.drop_extra_udp/1` ignore
-déjà tout bloc `udp` surnuméraire avec un avertissement : deux familles en UDP
-demandent deux sockets, et le choix de la socket sortante devient une décision
-du `SIP.Transport.Selector`.
+```toml
+addr = "0.0.0.0"   # toutes les interfaces IPv4
+addr = "::"        # toutes les interfaces IPv6
+                   # absent : toutes les interfaces des deux familles
+```
 
-Deux sockets distinctes plutôt qu'une socket v6 dual-stack : les adresses
-mappées `::ffff:a.b.c.d` polluent tout ce qui écrit une adresse dans un message,
-et le code écrit `:inet.ntoa/1` partout.
+Un `addr` absent vaut `nil`, pas `"0.0.0.0"` : cette chaîne **est** une adresse
+IPv4, et l'exploitant qui l'écrit demande de l'IPv4. Seul le silence peut vouloir
+dire les deux. `Kelix.Listener.Supervisor` déplie alors le bloc en un enfant par
+famille, et `status/0` rend le wildcard que chaque enfant a réellement lié, pas
+la ligne de config.
 
-Conséquence à assumer : **un appel IPv4↔IPv6 impose le relais média**. Il n'y a
-pas de passe-plat SDP possible entre deux familles.
+Uniquement les familles dont l'hôte porte une adresse annonçable. Un listener
+écrit une adresse locale dans son Via et son Contact : lier une famille que
+l'hôte n'a pas s'arrête en `:networkdown` et fait échouer le démarrage — ce qui,
+sur un hôte v4 seul, serait toute config ne nommant pas d'adresse. Là, rien ne
+change.
 
-C'est aussi ici qu'un profil réseau devient distinguable par jambe en UDP
-(étape 5).
+#### Une socket UDP par famille
+
+Un datagramme ne sort que par une socket de la famille de sa destination ;
+l'autre répond `:eafnosupport`. Le nom d'instance d'un transport non fiable porte
+donc la famille — `"UDP_ipv4"`, `"UDP_ipv6"` — et
+`SIP.Transport.Selector.unreliable_instance_name/2` est le seul endroit qui
+l'écrit, pour que le listener qui enregistre et le sélecteur qui cherche ne
+puissent pas diverger. La famille se lit sur l'adresse de destination résolue.
+
+Deux sockets distinctes plutôt qu'une socket v6 dual-stack. Deux raisons, pas
+une : les adresses mappées `::ffff:a.b.c.d` polluent tout ce qui écrit une
+adresse dans un message, et surtout une socket v6 dual-stack **prend aussi le
+port v4**, donc la seconde liaison de la paire revient en `:eaddrinuse`. C'est
+`ipv6_v6only` qui rend le port partagé possible.
+
+`SIP.Transport.UDP.init/1` accepte une forme de liaison explicite,
+`{:bind, ip, port, opts}`, en plus de celle que lance le sélecteur,
+`{dest_ip, dest_port}`, dont il ne lit que la famille. Le superviseur garde un
+enfant `udp` par famille ; deux blocs d'une même famille se disputeraient un nom
+d'instance, donc le second est ignoré avec un avertissement.
+
+#### Ce que l'étape ne fait pas
+
+- **`elixipp`** n'a pas de syntaxe d'adresse dans `--listen` et reste sur le
+  wildcard IPv4.
+- **L'ordre des requêtes DNS** reste celui de la socket UDP primaire
+  (`SIP.NetUtils.preferred_family/0`, alimentée par le premier bloc `udp`). Les
+  deux familles étant liées, cet ordre coûte au pire une requête de plus, plus un
+  échec.
+
+#### Conséquence à assumer
+
+**Un appel IPv4↔IPv6 impose le relais média.** Il n'y a pas de passe-plat SDP
+possible entre deux familles. C'est aussi ici qu'un profil réseau devient
+distinguable par jambe en UDP (étape 5).
 
 ### Étape 5 — Profils réseau du média
 

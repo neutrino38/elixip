@@ -219,6 +219,27 @@ defmodule SIP.Test.IPv6Transport do
     assert {{0, 0, 0, 0, 0, 0, 0, 0}, _port} = Socket.local!(:sys.get_state(pid).socket)
   end
 
+  test "a socket refuses the other family, which is why there are two" do
+    {:ok, port} = SIP.NetUtils.pick_free_port(:udp)
+
+    {:ok, v4} = GenServer.start(SIP.Transport.UDP, {:bind, @loopback_v4, port, [family: :ipv4]})
+    {:ok, v6} = GenServer.start(SIP.Transport.UDP, {:bind, @loopback_v6, port, [family: :ipv6]})
+    on_exit(fn -> for p <- [v4, v6], Process.alive?(p), do: GenServer.stop(p) end)
+
+    msg = "OPTIONS sip:probe@unit.test SIP/2.0\r\n\r\n"
+
+    # Each socket reaches its own family...
+    assert :ok = GenServer.call(v4, {:sendmsg, msg, @loopback_v4, port})
+    assert :ok = GenServer.call(v6, {:sendmsg, msg, @loopback_v6, port})
+
+    # ...and only its own. This is the whole reason a node binds two: the kernel
+    # answers :eafnosupport, so a single socket could never carry both. It holds
+    # in both directions, `v6only` leaving the v6 socket no mapped-address
+    # fallback to the v4 world.
+    assert :transporterror = GenServer.call(v4, {:sendmsg, msg, @loopback_v6, port})
+    assert :transporterror = GenServer.call(v6, {:sendmsg, msg, @loopback_v4, port})
+  end
+
   defp eventually(check, attempts \\ 40) do
     cond do
       check.() -> true
