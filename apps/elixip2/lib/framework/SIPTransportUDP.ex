@@ -51,7 +51,7 @@ defmodule SIP.Transport.UDP do
             upperlayer: nil
           }
 
-          case :gen_udp.open(port, open_options(configured_ip, family)) do
+          case Socket.UDP.open(port, open_options(configured_ip, family)) do
             {:ok, socket} ->
               :ok = Socket.UDP.process(socket, self())
 
@@ -83,22 +83,18 @@ defmodule SIP.Transport.UDP do
     end
   end
 
-  # Opened through `:gen_udp` rather than `Socket.UDP.open/2`: that wrapper
-  # translates a fixed option vocabulary and silently drops what is not in it —
-  # the bind address unless it is nested under `:local`, and the family always —
-  # so a `[[listen]]` block naming an IPv6 address opened an IPv4 socket on every
-  # interface. `:ipv6_v6only` keeps a wildcard v6 socket from also accepting IPv4
-  # as `::ffff:` mapped addresses, which every place that writes an address into
-  # a SIP message would then carry.
+  # `v6only` keeps a wildcard v6 socket from also accepting IPv4 as `::ffff:`
+  # mapped addresses, which every place that writes an address into a SIP message
+  # would then carry.
   defp open_options(bind_ip, family) do
-    [:binary, {:active, true}] ++ family_options(family) ++ bind_options(bind_ip)
+    [as: :binary, mode: :active] ++ family_options(family) ++ bind_options(bind_ip)
   end
 
-  defp family_options(:ipv6), do: [:inet6, {:ipv6_v6only, true}]
-  defp family_options(_family), do: [:inet]
+  defp family_options(:ipv6), do: [version: 6, v6only: true]
+  defp family_options(_family), do: [version: 4]
 
   defp bind_options(nil), do: []
-  defp bind_options(bind_ip), do: [{:ip, bind_ip}]
+  defp bind_options(bind_ip), do: [local: [address: bind_ip]]
 
   # A bind failure aborts the boot, so the log line is the operator's whole
   # diagnosis: spell the posix reason out instead of leaving a bare atom, and for
