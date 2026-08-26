@@ -29,13 +29,23 @@ defmodule SIP.Test.TransportSelector do
     def init(_), do: {:ok, nil}
   end
 
-  # A launchable fake: reliable, so its registry instance name is
-  # "UDP_<ip>:<port>" — never the bare "UDP" the node's real socket uses. It binds
+  # A launchable fake: reliable, so its registry instance name carries the peer,
+  # "UDP_<ip>:<port>" — never a name the node's real sockets use. It binds
   # nothing, so level 2 can be tested without touching a port.
   defmodule FakeDest do
     use GenServer
     def transport_str, do: "udp"
     def is_reliable, do: true
+    @impl true
+    def init(_), do: {:ok, nil}
+  end
+
+  # An unreliable launchable fake, under a protocol name of its own so its
+  # instances cannot collide with the node's real UDP sockets.
+  defmodule FakeDatagram do
+    use GenServer
+    def transport_str, do: "udpfake"
+    def is_reliable, do: false
     @impl true
     def init(_), do: {:ok, nil}
   end
@@ -151,6 +161,40 @@ defmodule SIP.Test.TransportSelector do
       # falls through to resolution, which does NOT keep destip as given
       result = Selector.select_transport(uri(destip: {10, 0, 0, 9}, tp_module: FakeDest))
       refute match?(%SIP.Uri{destip: {10, 0, 0, 9}}, result)
+    end
+  end
+  describe "an unreliable transport has one instance per family" do
+    test "the name carries the family, and the two do not collide" do
+      assert Selector.unreliable_instance_name("UDP", :ipv4) == "UDP_ipv4"
+      assert Selector.unreliable_instance_name("UDP", :ipv6) == "UDP_ipv6"
+      refute Selector.unreliable_instance_name("UDP", :ipv4) ==
+               Selector.unreliable_instance_name("UDP", :ipv6)
+    end
+
+    test "two destinations of different families get two instances" do
+      v4 = uri(destip: {192, 0, 2, 1}, destport: 5060,
+               destproto: "UDPFAKE", tp_module: FakeDatagram)
+      v6 = uri(destip: {0x2001, 0xdb8, 0, 0, 0, 0, 0, 1}, destport: 5060,
+               destproto: "UDPFAKE", tp_module: FakeDatagram)
+
+      assert %SIP.Uri{tp_pid: pid4} = Selector.select_transport(v4)
+      assert %SIP.Uri{tp_pid: pid6} = Selector.select_transport(v6)
+
+      assert is_pid(pid4) and is_pid(pid6)
+
+      # The whole point: a v6 datagram must not be handed the v4 socket, which
+      # would answer :eafnosupport.
+      refute pid4 == pid6
+    end
+
+    test "a second destination of the same family reuses its instance" do
+      one = uri(destip: {192, 0, 2, 8}, destport: 5060,
+                destproto: "UDPFAKE2", tp_module: FakeDatagram)
+      two = uri(destip: {192, 0, 2, 9}, destport: 5062,
+                destproto: "UDPFAKE2", tp_module: FakeDatagram)
+
+      assert %SIP.Uri{tp_pid: pid} = Selector.select_transport(one)
+      assert %SIP.Uri{tp_pid: ^pid} = Selector.select_transport(two)
     end
   end
 end

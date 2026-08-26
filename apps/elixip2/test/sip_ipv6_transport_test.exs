@@ -154,6 +154,50 @@ defmodule SIP.Test.IPv6Transport do
     assert eventually(fn -> SIP.Transport.WSSListener.connection_count(pid) == 0 end)
   end
 
+  # ── Two UDP sockets, one per family ──────────────────────────────────────────
+
+  test "a node binds one UDP socket per family, on the same port" do
+    {:ok, port} = SIP.NetUtils.pick_free_port(:udp)
+
+    sockets =
+      for {family, addr} <- [ipv4: @loopback_v4, ipv6: @loopback_v6] do
+        {:ok, pid} = GenServer.start(SIP.Transport.UDP, {:bind, addr, port, [family: family]})
+        on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+        assert {:ok, ^addr, ^port} = GenServer.call(pid, :getlocalipandport)
+        assert {:ok, {^addr, ^port}} = :inet.sockname(:sys.get_state(pid).socket)
+
+        {family, pid}
+      end
+
+    # Two live sockets, distinct processes: the v6 one is not the v4 one wearing
+    # a mapped address. `v6only` is what makes the shared port possible at all —
+    # a dual-stack v6 wildcard claims the v4 port and the second bind fails.
+    assert [{:ipv4, pid4}, {:ipv6, pid6}] = sockets
+    refute pid4 == pid6
+
+    # And each announces its own family in a Contact.
+    assert SIP.Uri.serialize(SIP.Transport.build_contact_uri(SIP.Transport.UDP, pid4)) ==
+             {:ok, "<sip:127.0.0.1:#{port};transport=udp>"}
+
+    assert SIP.Uri.serialize(SIP.Transport.build_contact_uri(SIP.Transport.UDP, pid6)) ==
+             {:ok, "<sip:[::1]:#{port};transport=udp>"}
+  end
+
+  test "an explicit bind ignores the app env, so two sockets can differ" do
+    {:ok, port} = SIP.NetUtils.pick_free_port(:udp)
+    # The env names a v4 address; the explicit bind is v6 and must win.
+    Application.put_env(:elixip2, :udp_local_addr, @loopback_v4)
+    Application.put_env(:elixip2, :udp_local_port, port + 1)
+
+    {:ok, pid} =
+      GenServer.start(SIP.Transport.UDP, {:bind, @loopback_v6, port, [family: :ipv6]})
+
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+    assert {:ok, @loopback_v6, ^port} = GenServer.call(pid, :getlocalipandport)
+  end
+
   defp eventually(check, attempts \\ 40) do
     cond do
       check.() -> true

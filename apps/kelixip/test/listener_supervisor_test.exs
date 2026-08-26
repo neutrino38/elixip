@@ -46,15 +46,35 @@ defmodule Kelix.Listener.SupervisorTest do
     port = free_port(:udp)
     start_supervised!({LSup, listen: [entry(:udp, port)]})
 
-    # the app env the UDP transport binds from was set from the entry
+    # the app env names the node's primary udp socket (preferred_family/0 reads it)
     assert Application.get_env(:elixip2, :udp_local_port) == port
-    # registered as "UDP" ⇒ SIP.Transport.Selector reuses this socket outbound
-    # instead of trying to bind the same port a second time
-    assert [{pid, _}] = Registry.lookup(Registry.SIPTransport, "UDP")
+
+    # registered under the name the selector looks up ⇒ an outbound datagram of
+    # that family reuses this socket instead of binding the same port again
+    name = SIP.Transport.Selector.unreliable_instance_name("UDP", :ipv4)
+    assert [{pid, _}] = Registry.lookup(Registry.SIPTransport, name)
     assert Process.alive?(pid)
   end
 
-  test "several udp entries: only the first is kept (one socket per node)" do
+  test "a udp entry per family: both are kept, on the same port" do
+    port = free_port(:udp)
+
+    pid =
+      start_supervised!(
+        {LSup, listen: [entry(:udp, port), entry(:udp, port, %{addr: "::1"})]}
+      )
+
+    assert [{:udp, "127.0.0.1", ^port}, {:udp, "::1", ^port}] =
+             Enum.map(Supervisor.which_children(pid), &elem(&1, 0)) |> Enum.sort()
+
+    for family <- [:ipv4, :ipv6] do
+      name = SIP.Transport.Selector.unreliable_instance_name("UDP", family)
+      assert [{p, _}] = Registry.lookup(Registry.SIPTransport, name), "no #{family} socket"
+      assert Process.alive?(p)
+    end
+  end
+
+  test "two udp entries of the SAME family: only the first is kept" do
     p1 = free_port(:udp)
     p2 = free_port(:udp)
     pid = start_supervised!({LSup, listen: [entry(:udp, p1), entry(:udp, p2)]})
