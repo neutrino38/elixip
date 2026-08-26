@@ -48,6 +48,9 @@ defmodule MediaServer.SdpTools do
   @doc "Rank a payload type against the offer's format list (its preference order)."
   defdelegate pt_rank(pt, fmt_order), to: Sdp
 
+  @doc "See `MediaServer.Mendooze.Sdp.fmt_order/2`."
+  defdelegate fmt_order(desc, opts), to: Sdp
+
   @doc "Rank an accepted entry with a preferred codec code first, the offer's order inside."
   defdelegate preferred_rank(entry, fmt_order, prefer), to: Sdp
 

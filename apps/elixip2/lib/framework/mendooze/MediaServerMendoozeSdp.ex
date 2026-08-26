@@ -1289,7 +1289,7 @@ defmodule MediaServer.Mendooze.Sdp do
          dtmf_pt: dtmf_pt,
          dtmf_clock: dtmf_clock,
          rtp_map: send_map,
-         fmt_order: Map.get(desc, :raw_fmt, [])
+         fmt_order: fmt_order(desc)
        }}
     end
   end
@@ -1734,6 +1734,84 @@ defmodule MediaServer.Mendooze.Sdp do
           end
       end
     end)
+  end
+
+  @doc """
+  The format order an answer to this media reasons with — the offer's own `m=`
+  format list (`raw_fmt`), with the **H.264** payload types re-ranked among
+  themselves. Every other payload type keeps its place, so the codec that comes
+  first never changes, only which H.264 payload type stands for the codec. The
+  offer's order decides inside each group.
+
+  Always: a packetization-mode 1 payload type before a mode 0 one. Sending in
+  mode 1 when the peer offers it is always safe and never a loss — a mode-1
+  receiver decodes single NAL units too, whereas mode 0 forbids FU-A, bounds every
+  slice to the RTP payload and forces the software encoder server-side (RFC 6184
+  §8.1). A peer that lists its mode 0 payload type first states a preference it
+  gains nothing from, at our expense. A payload type with no `packetization-mode`
+  is read as 0, as `h264_receive_mode/1` reads it: the question is what the peer
+  can depacketize.
+
+  With `prefer_h264_profile: true`, and after the mode: Main, then High, then
+  Baseline. This is for a leg whose stream **we encode** — a mixer — where a peer
+  that decodes Main is better served by it at equal bitrate; High adds little over
+  Main at a conference's resolution and bitrate and costs the encoder more, so it
+  ranks behind. A leg that relays another peer's stream has no say in its profile
+  and must not ask.
+
+  One reading for the answer's rtpmap order, the payload type sent on and the
+  codec the encoder is configured with — the three take `fmt_order` from here.
+  """
+  @spec fmt_order(map(), keyword()) :: [String.t()] | [non_neg_integer()] | String.t()
+  def fmt_order(desc, opts \\ [])
+
+  def fmt_order(%{type: :video} = desc, opts) do
+    order = normalize_fmt_order(Map.get(desc, :raw_fmt, []))
+    rtp_map = Map.get(desc, :rtp_map, %{})
+    fmtp = Map.get(desc, :fmtp, %{})
+    profile? = Keyword.get(opts, :prefer_h264_profile, false)
+
+    h264 =
+      order
+      |> Enum.filter(&h264_pt?(rtp_map, &1))
+      |> Enum.sort_by(fn pt ->
+        mode_rank = if h264_mode(fmtp, pt) == 1, do: 0, else: 1
+        profile_rank = if profile?, do: h264_profile_rank(fmtp, pt), else: 0
+        {mode_rank, profile_rank}
+      end)
+
+    {reordered, []} =
+      Enum.map_reduce(order, h264, fn pt, acc ->
+        if h264_pt?(rtp_map, pt), do: {hd(acc), tl(acc)}, else: {pt, acc}
+      end)
+
+    reordered
+  end
+
+  def fmt_order(desc, _opts), do: Map.get(desc, :raw_fmt, [])
+
+  defp h264_mode(fmtp, pt) do
+    case Map.get(fmtp, pt) do
+      %{packetization_mode: mode} when is_integer(mode) -> mode
+      _ -> 0
+    end
+  end
+
+  # profile_idc is the first byte of profile-level-id (RFC 6184 §8.1): 77 Main,
+  # 100 High, 66 Baseline — Constrained Baseline included. An absent or unknown
+  # profile is read as Baseline, the profile every decoder has.
+  defp h264_profile_rank(fmtp, pt) do
+    case Map.get(fmtp, pt) do
+      %{profile_level_id: plid} when is_integer(plid) ->
+        case Bitwise.bsr(plid, 16) do
+          77 -> 0
+          100 -> 1
+          _ -> 2
+        end
+
+      _ ->
+        2
+    end
   end
 
   @doc """

@@ -411,6 +411,30 @@ This does not contradict the delegation above: the answerer owns the *preference
 (RFC 3264 §6.1), and the server's verdict is a **set** — it says what it accepts,
 never in which order.
 
+**Among the H.264 payload types, the order is ours.** A browser offers the same
+codec under six or seven payload types, one per (profile, packetization-mode) pair,
+and the verdict accepts them all; the payload type we send on, and configure the
+encoder with, is the first of them in the answer's order. That order re-ranks the
+H.264 slots only — every other codec keeps its place — by two keys, the offer's
+order deciding inside each group (`Sdp.fmt_order/2`, one reading for the rtpmap
+order, the payload type sent on and the encoder properties):
+
+1. packetization-mode 1 before mode 0, for every leg. A mode-1 receiver decodes
+   single NAL units too, whereas mode 0 forbids FU-A, bounds every slice to the RTP
+   payload and forces the software encoder (RFC 6184 §8.1): preferring it costs the
+   peer nothing and the mixer a great deal. A payload type stating no mode is read
+   as 0 — the question is what the peer can depacketize;
+2. Main, then High, then Baseline, for a **conference** leg only. The mixer encodes
+   the stream, so the profile is ours to choose among what the peer decodes, and a
+   peer that lists Main decodes it. High is not a real-time concern — it adds 8×8
+   transforms and quantisation matrices, nothing latency-bound — but at a
+   conference's resolution and bitrate it gains little over Main and costs the
+   encoder more, so it ranks behind. The JSR309 adapter relays another peer's
+   stream and does not ask for this key.
+
+The answer still advertises every accepted payload type with its own parameters;
+only the `m=` order and the payload type carrying the stream follow this ranking.
+
 For H.264, the answer keeps the offer's profile, and the announced level follows
 RFC 6184 asymmetry: ours when both sides allow asymmetry, the offer's otherwise —
 the case that must keep producing today's answer for a plain SIP handset. The

@@ -2178,7 +2178,7 @@ defmodule MediaServer.Mendooze.Conn do
               # the offer's own format order, kept for the places that must agree
               # about the caller's preference: the answer's rtpmap order and the
               # payload type we send on
-              |> Map.put(:fmt_order, Map.get(desc, :raw_fmt, []))
+              |> Map.put(:fmt_order, Sdp.fmt_order(desc))
               |> Map.put(:dtmf_pts, Map.get(desc, :dtmf_pts, %{}))
 
             {:ok, st, Map.put(neg, :send_map, send_map(media, neg))}
@@ -2233,7 +2233,7 @@ defmodule MediaServer.Mendooze.Conn do
 
     props =
       rtp_map
-      |> Enum.sort_by(&Sdp.pt_rank(&1, Map.get(desc, :raw_fmt, [])))
+      |> Enum.sort_by(&Sdp.pt_rank(&1, Sdp.fmt_order(desc)))
       |> Enum.reduce(%{}, fn {pt, code}, acc ->
         with true <- code != @dtmf_code,
              params when is_binary(params) and params != "" <- Map.get(fmtp_raw, pt),
@@ -2932,7 +2932,7 @@ defmodule MediaServer.Mendooze.Conn do
         # order IS a preference statement, and a gateway has none of its own.
         %{neg | rtp_map: accepted_map}
         |> Map.put(:dtmf_pts, Map.get(desc, :dtmf_pts, %{}))
-        |> Map.put(:fmt_order, Map.get(desc, :raw_fmt, []))
+        |> Map.put(:fmt_order, Sdp.fmt_order(desc))
       )
 
     fmtp = for {pt, params} <- accepted, params != "", into: %{}, do: {pt, params}
@@ -2949,7 +2949,7 @@ defmodule MediaServer.Mendooze.Conn do
         desc.type,
         neg
         |> Map.put(:dtmf_pts, Map.get(desc, :dtmf_pts, %{}))
-        |> Map.put(:fmt_order, Map.get(desc, :raw_fmt, []))
+        |> Map.put(:fmt_order, Sdp.fmt_order(desc))
       )
 
     fmtp =

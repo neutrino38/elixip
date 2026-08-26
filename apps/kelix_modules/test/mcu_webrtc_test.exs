@@ -561,8 +561,10 @@ defmodule Kelix.Mod.McuWebrtcTest do
       assert_received {:answer, answer}
       [_audio, video] = sections(answer)
 
-      # all seven payload types are announced, each with ITS OWN profile/mode pair
-      assert hd(video) == "m=video #{@video_port} UDP/TLS/RTP/SAVPF 103 107 109 115 39 117 119"
+      # all seven payload types are announced, each with ITS OWN profile/mode pair — the
+      # H.264 slots re-ranked for a mixer (§6): mode 1 first, then Main, High,
+      # Baseline, the caller's order inside each group
+      assert hd(video) == "m=video #{@video_port} UDP/TLS/RTP/SAVPF 117 119 103 109 39 107 115"
 
       assert "a=fmtp:103 profile-level-id=42001f;packetization-mode=1;level-asymmetry-allowed=1" in video
 
@@ -572,17 +574,17 @@ defmodule Kelix.Mod.McuWebrtcTest do
 
       calls = TestStub.rpc_calls()
 
-      # but the stream goes out on ONE payload type — the caller's first choice (103) —
-      # and the encoder is configured with THAT payload type's profile, not another's
+      # but the stream goes out on ONE payload type — the first of that ranking (117,
+      # Main, mode 1) — and the encoder is configured with THAT payload type's profile
       assert Enum.any?(calls, fn
-               {"StartSending", [_c, _p, 1, _ip, _port, %{"103" => 99}, 0]} -> true
+               {"StartSending", [_c, _p, 1, _ip, _port, %{"117" => 99}, 0]} -> true
                _ -> false
              end)
 
       assert Enum.any?(calls, fn
                {"SetVideoCodec", [_c, _p, 99, _s, _f, _b, _i, props, 0]} ->
                  props == %{
-                   "h264.profile-level-id" => "42001f",
+                   "h264.profile-level-id" => "4d001f",
                    "h264.packetization-mode" => "1"
                  }
 
@@ -626,7 +628,7 @@ defmodule Kelix.Mod.McuWebrtcTest do
       assert {:ok, summary} = Adapter.attach(conn)
 
       [_audio, video] = sections(answer)
-      assert hd(video) == "m=video #{@video_port} UDP/TLS/RTP/SAVPF 96 109 115 103 107 39 117"
+      assert hd(video) == "m=video #{@video_port} UDP/TLS/RTP/SAVPF 96 117 109 103 39 115 107"
 
       # 107 = VideoCodec::VP8 (§3.6) — and the stream goes out on PT 96, the payload
       # type the answer put first, not on one of the H.264 ones
@@ -650,7 +652,7 @@ defmodule Kelix.Mod.McuWebrtcTest do
       [_audio, plain_video] = sections(plain)
 
       assert hd(plain_video) ==
-               "m=video #{@video_port} UDP/TLS/RTP/SAVPF 109 115 103 107 39 117 96"
+               "m=video #{@video_port} UDP/TLS/RTP/SAVPF 117 109 103 39 115 107 96"
     end
 
     # A preference is not a capability: it can only move a payload type that is in the
@@ -670,7 +672,7 @@ defmodule Kelix.Mod.McuWebrtcTest do
 
       assert_received {:answer, answer}
       [_audio, video] = sections(answer)
-      assert hd(video) == "m=video #{@video_port} UDP/TLS/RTP/SAVPF 109 115 103 107 39 117 96"
+      assert hd(video) == "m=video #{@video_port} UDP/TLS/RTP/SAVPF 117 109 103 39 115 107 96"
       assert log =~ "preferred codec AV1 not applied — the offer does not carry it"
     end
 

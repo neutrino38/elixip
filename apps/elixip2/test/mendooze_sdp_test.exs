@@ -732,6 +732,47 @@ defmodule Mendooze.SdpTest do
                )
     end
 
+    test "`fmt_order/2` ranks H.264 mode 1 first, then Main, High, Baseline only on request" do
+      assert {:ok, [video]} =
+               Sdp.parse("""
+               v=0
+               o=- 1 1 IN IP4 172.16.0.1
+               s=-
+               c=IN IP4 172.16.0.1
+               t=0 0
+               m=video 40000 UDP/TLS/RTP/SAVPF 96 104 102 39 116 119 45
+               a=rtpmap:96 VP8/90000
+               a=rtpmap:104 H264/90000
+               a=fmtp:104 level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42001f
+               a=rtpmap:102 H264/90000
+               a=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f
+               a=rtpmap:39 H264/90000
+               a=fmtp:39 level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=4d001f
+               a=rtpmap:116 H264/90000
+               a=fmtp:116 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f
+               a=rtpmap:119 H264/90000
+               a=fmtp:119 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=64001f
+               a=rtpmap:45 AV1/90000
+               """)
+
+      # VP8 and AV1 keep their places: only the H.264 slots are re-ranked, mode 1
+      # first, the offer's order inside each group
+      assert Sdp.fmt_order(video) == ["96", "102", "116", "119", "104", "39", "45"]
+      # then Main, High, Baseline — still after the mode
+      assert Sdp.fmt_order(video, prefer_h264_profile: true) ==
+               ["96", "116", "119", "102", "39", "104", "45"]
+
+      # a payload type map without H.264 is the offer's list, untouched
+      assert Sdp.fmt_order(%{type: :video, raw_fmt: [96, 45], rtp_map: %{"96" => 107}}) == [
+               "96",
+               "45"
+             ]
+    end
+
+    test "`fmt_order/2` on audio is the offer's own list" do
+      assert Sdp.fmt_order(%{type: :audio, raw_fmt: [111, 9, 0]}) == [111, 9, 0]
+    end
+
     test "text offer with red (RFC 4103) negotiates T140 + T140RED" do
       {:ok, [text]} =
         Sdp.parse("""

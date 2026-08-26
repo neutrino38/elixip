@@ -54,6 +54,10 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # telephone-event's Medooze codec constant (§3.6): a payload type the mixer never
   # encodes towards anyone, so it can never be a primary codec.
   @dtmf_code 100
+  # A conference leg is a stream the mixer ENCODES, so the H.264 profile is ours to
+  # pick among what the peer offered (§6): Main over Baseline. The JSR309 adapter,
+  # which relays another peer's stream, does not set this.
+  @fmt_order_opts [prefer_h264_profile: true]
   # RTP participant (1 is RTMP, unused)
   @participant_rtp 0
   # the default mosaic and the default sidebar (decision 6b)
@@ -693,7 +697,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
                 # the offer's own format order, kept for the three places that must
                 # agree about the caller's preference: the answer's rtpmap order, the
                 # payload type we send on, and the codec the mixer encodes (§6.3 rule 1)
-                fmt_order: Map.get(desc, :raw_fmt, []),
+                fmt_order: Sdp.fmt_order(desc, @fmt_order_opts),
                 # the server's verdict, or nil on a pre-P8a server
                 accepted: accepted,
                 # drives the receive watchdog (§16.1): a media we have no business
@@ -1572,7 +1576,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
         |> Map.put(:dtmf_pts, Map.get(desc, :dtmf_pts, %{}))
         # the caller's own preference order (§6.3 rule 1): in an answer the order IS a
         # preference statement, and a mixer has none of its own to make
-        |> Map.put(:fmt_order, Map.get(desc, :raw_fmt, []))
+        |> Map.put(:fmt_order, Sdp.fmt_order(desc, @fmt_order_opts))
       )
 
     fmtp = for {pt, params} <- accepted, params != "", into: %{}, do: {pt, params}
@@ -1588,7 +1592,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
         desc.type,
         neg
         |> Map.put(:dtmf_pts, Map.get(desc, :dtmf_pts, %{}))
-        |> Map.put(:fmt_order, Map.get(desc, :raw_fmt, []))
+        |> Map.put(:fmt_order, Sdp.fmt_order(desc, @fmt_order_opts))
       )
 
     fmtp =
