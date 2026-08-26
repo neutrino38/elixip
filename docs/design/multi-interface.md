@@ -18,6 +18,11 @@ Par ordre de priorité
 - médiation entre un réseau interne et un réseau externe
 - kelixip dans un réseau interne avec une IP interne nattée 1 - 1 avec une ip publique. Des utilisateurs dans le réseau interne et des utilisateurs dans le réseau externe. Ecriture automatique du SDP selon la destination. Equivalent du internal_network asterisk et du public IP
 
+Une session porte un profil réseau **par jambe**, et les deux peuvent différer.
+C'est l'objectif, pas un cas limite : à terme, toutes les combinaisons de famille
+(IPv4, IPv6) et de côté (interne, publique) doivent pouvoir se rencontrer dans un
+même appel.
+
 ## Fonction future (pas à implémenter) : kelixip multiprotocole
 
 - Pile XMPP et Pile Matrix intégrées à l'intérieur de kelixp (comme module ?)
@@ -411,16 +416,17 @@ contraint rien.
 
 #### La sélection du serveur média porte le profil
 
-`Kelix.MediaPool.checkout/1` reçoit le profil demandé et ne retient que les
-entrées `enabled`, saines **et** portant ce profil ; le round-robin reste
-inchangé parmi les éligibles. Aucun serveur éligible fait échouer l'appel (503).
-Jamais de repli sur un autre profil : un repli enverrait le média par la
-mauvaise interface sans que rien ne le signale.
+`Kelix.MediaPool.checkout/1` reçoit les profils demandés — un par jambe, donc
+souvent deux — et ne retient que les entrées `enabled`, saines **et** portant
+**tous** ces profils ; le round-robin reste inchangé parmi les éligibles. Sans
+serveur éligible, l'appel échoue en 503. Jamais de repli sur un autre profil : un
+repli enverrait le média par la mauvaise interface sans que rien ne le signale.
 
 #### Le profil est posé sur la jambe
 
-Le profil voyage avec le serveur choisi dans `:mediaserver_instance`
-(`%{module, url, profile}`), et l'adaptateur le passe en dernier paramètre de
+Le serveur choisi voyage dans `:mediaserver_instance` (`%{module, url}`) et le
+profil s'attache à la jambe, pas à la session : les deux jambes partagent le
+serveur et non le profil. L'adaptateur le passe en dernier paramètre de
 `EndpointStartReceiving` et `EndpointStartSending` — le même sur les deux, posé
 avant que le port ne soit publié. L'adaptateur ne passe aujourd'hui aucun profil
 et n'appelle jamais `GetNetworkProfiles`. Trois pièges du contrat :
@@ -433,14 +439,18 @@ et n'appelle jamais `GetNetworkProfiles`. Trois pièges du contrat :
   `EndpointStartReceiving`. À réordonner : sinon l'URL publiée porte l'adresse
   du profil par défaut.
 
-#### Deux jambes, un seul serveur
+#### Deux jambes, deux profils, un seul serveur
 
-Un B2BUA relaie à l'intérieur d'une seule session. Si les deux jambes n'ont pas
-le même profil — la médiation IPv4↔IPv6 de l'étape 4 — le serveur retenu doit
-porter les deux. Le serveur est aujourd'hui choisi au routage, avant que la
-cible sortante ne soit connue : la contrainte posée au `checkout` est donc celle
-de la jambe entrante, et la jambe sortante vérifie le serveur déjà retenu. Son
-profil manque : l'appel échoue en 503.
+Un B2BUA relaie à l'intérieur d'une seule session, et ses deux jambes portent
+chacune leur profil. La médiation IPv4↔IPv6 est ce cas même : jambe entrante en
+v6, jambe sortante en v4. Le serveur retenu doit donc porter les deux profils.
+
+Cela déplace le `checkout` du pool. Le serveur est choisi au routage, avant que
+la cible sortante ne soit connue ; il faut qu'il le soit après la résolution de
+la cible, quand les deux profils sont connus ensemble. Choisir sur la seule jambe
+entrante puis vérifier la sortante ne marche pas : le serveur est déjà retenu, et
+un pool où un autre serveur aurait convenu rend un 503 alors qu'un appel était
+possible.
 
 #### Hors périmètre de cette étape
 
@@ -461,12 +471,6 @@ plus que sur l'adresse interne : la loopback cesse d'être une porte d'entrée, 
 l'`url` des entrées `[mediaserver.pool.*]` doit viser l'adresse interne. Avec
 une adresse interne v4 et une v6, l'API n'écoute qu'en IPv4.
 
-#### À trancher avant de coder
-
-Deux jambes d'une même session peuvent-elles porter deux profils différents ? Le
-contrat serveur dit « un profil par jambe » ; il ne dit pas si deux profils
-coexistent dans une session. C'est exactement le cas de la médiation IPv4↔IPv6.
-
 ### Étape 6 — `[network]` et `advertise`
 
 Les besoins « médiation interne/externe » et « IP interne nattée 1:1 ». C'est
@@ -479,10 +483,10 @@ ici qu'un correspondant se classe par son adresse, et qu'un appel qui
 - **`advertise = "<ip>"`** par listener : l'adresse publiée dans la
   signalisation quand elle diffère de l'adresse liée. C'est le cas de la VM
   nattée 1:1, où l'exploitant connaît l'adresse publique.
-- La table de l'étape 5 gagne son second axe : le côté ne vient plus seulement
-  du listener de la jambe entrante, mais de la classification du correspondant.
-  Le `checkout` du pool gagne alors à se déplacer après la résolution de la
-  cible, les deux profils étant connus ensemble.
+- La table de l'étape 5 gagne son second axe : le côté d'une jambe ne vient plus
+  seulement de son listener, mais aussi de la classification du correspondant. Le
+  `checkout` du pool reçoit déjà les deux profils depuis l'étape 5 ; ici c'est ce
+  que vaut chaque profil qui change, pas le moment où il est connu.
 - **Un client STUN n'existe pas.** `SIP.Stun` sait uniquement reconnaître et
   décoder l'en-tête d'un message entrant ; son moduledoc énumère ce qui manque
   (attributs, XOR-MAPPED-ADDRESS, encodage, MESSAGE-INTEGRITY), et son seul
