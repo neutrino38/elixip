@@ -14,13 +14,18 @@ defmodule SIP.Transport.TLSListener do
   The accept Task owns each accepted socket and performs the TLS handshake.
   It calls `GenServer.call(listener, {:spawn_connection, ssl_socket})` to have the
   Listener create the TLS GenServer and register the connection. The Listener returns
-  the TLS pid; the Task then transfers ownership (`:ssl.controlling_process/2`) and
+  the TLS pid; the Task then transfers ownership (`Socket.SSL.process/2`) and
   tells the TLS process to activate its socket (`:activate_socket` cast). Only the
   socket owner may transfer ownership, so this sequence must stay in the Task.
+
+  Taking the connection and handshaking it stay two steps — `Socket.SSL.accept/2`
+  puts them under one timeout, and the two waits are not the same: waiting for a
+  client is unbounded, a handshake must not be.
   """
   use GenServer
   require Logger
   require SIP.Transport.ImplHelpers
+  require Socket.SSL
 
   @transport_str "tls"
   def transport_str, do: @transport_str
@@ -67,17 +72,20 @@ defmodule SIP.Transport.TLSListener do
       Application.get_env(:elixip2, :tls_keyfile, @default_keyfile))
     bind_addr = if addr == :all, do: {0, 0, 0, 0}, else: addr
 
+    # listen/2 binds passive and with SO_REUSEADDR on its own. No `version:`: the
+    # bind address carries its family, and `:all` still binds 0.0.0.0 (see
+    # SIP.Transport.TCPListener, and step 4 of docs/design/multi-interface.md).
     ssl_opts = [
-      :binary, {:packet, :raw}, {:active, false}, {:reuseaddr, true},
-      {:ip, bind_addr},
-      {:certfile, to_charlist(certfile)},
-      {:keyfile,  to_charlist(keyfile)},
-      {:versions, [:"tlsv1.2", :"tlsv1.3"]}
+      packet: :raw,
+      local: [address: bind_addr],
+      cert: [path: certfile],
+      key: [path: keyfile],
+      versions: [:"tlsv1.2", :"tlsv1.3"]
     ]
 
-    case localip && :ssl.listen(port, ssl_opts) do
+    case localip && Socket.SSL.listen(port, ssl_opts) do
       {:ok, listen_socket} ->
-        {:ok, {_, actual_port}} = :ssl.sockname(listen_socket)
+        {_bound_ip, actual_port} = Socket.local!(listen_socket)
         listener_pid = self()
         Task.start_link(fn -> accept_loop(listen_socket, listener_pid) end)
         Logger.info([module: __MODULE__,
@@ -135,10 +143,10 @@ defmodule SIP.Transport.TLSListener do
     if map_size(state.connections) >= state.max_connections do
       Logger.warning([module: __MODULE__,
         message: "TLS connection limit (#{state.max_connections}) reached — rejecting inbound connection"])
-      :ssl.close(ssl_socket)
+      Socket.close(ssl_socket)
       {:reply, :rejected, state}
     else
-      {:ok, {peer_ip, peer_port}} = :ssl.peername(ssl_socket)
+      {:ok, {peer_ip, peer_port}} = Socket.remote(ssl_socket)
 
       case GenServer.start_link(SIP.Transport.TLS,
              {:inbound, ssl_socket, state.localip, state.localport, peer_ip, peer_port}) do
@@ -156,7 +164,7 @@ defmodule SIP.Transport.TLSListener do
         {:error, reason} ->
           Logger.error([module: __MODULE__,
             message: "Failed to start TLS connection handler: #{inspect(reason)}"])
-          :ssl.close(ssl_socket)
+          Socket.close(ssl_socket)
           {:reply, :rejected, state}
       end
     end
@@ -170,7 +178,7 @@ defmodule SIP.Transport.TLSListener do
 
   @impl true
   def terminate(_reason, state) do
-    :ssl.close(state.socket)
+    Socket.close(state.socket)
   end
 
   # ---- Private helpers ------------------------------------------------------
@@ -178,14 +186,14 @@ defmodule SIP.Transport.TLSListener do
   # The accept loop runs in a Task linked to the Listener. It owns each accepted
   # socket, performs the TLS handshake, then delegates to the Listener.
   defp accept_loop(listen_socket, listener_pid) do
-    case :ssl.transport_accept(listen_socket) do
+    case Socket.SSL.transport_accept(listen_socket) do
       {:ok, tls_transport_socket} ->
-        case :ssl.handshake(tls_transport_socket, @handshake_timeout) do
+        case Socket.SSL.handshake(tls_transport_socket, timeout: @handshake_timeout) do
           {:ok, ssl_socket} ->
             case GenServer.call(listener_pid, {:spawn_connection, ssl_socket}) do
               {:ok, conn_pid} ->
                 # Transfer ownership: Task → TLS GenServer.
-                :ssl.controlling_process(ssl_socket, conn_pid)
+                Socket.SSL.process(ssl_socket, conn_pid)
                 # Ask the TLS process to activate its socket now that it owns it.
                 GenServer.cast(conn_pid, :activate_socket)
 
