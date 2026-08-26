@@ -33,12 +33,25 @@ alias SIP.NetUtils
     end
   end
 
+  @doc """
+  The `Registry.SIPTransport` key an unreliable transport is registered under:
+  one instance per protocol **and family**.
+
+  A node binds one UDP socket per family (step 4 of
+  docs/design/multi-interface.md), and a datagram leaves only through the socket
+  of its destination's family — the other answers `:eafnosupport`. The name is
+  built here so the listener that registers an instance and the selector that
+  looks one up cannot disagree.
+  """
+  @spec unreliable_instance_name(binary(), :ipv4 | :ipv6) :: binary()
+  def unreliable_instance_name(proto, family) when is_binary(proto) and family in [:ipv4, :ipv6],
+    do: proto <> "_" <> Atom.to_string(family)
+
   # How many processes of a transport module exist, and which one a URI gets.
   #
-  # The default is the historical rule: one instance per connection for a reliable
-  # transport (TCP/TLS/WSS — the name carries the peer), one per protocol for an
-  # unreliable one (a node has a single UDP socket, which is also what the kelixip
-  # listener config enforces).
+  # The default is: one instance per connection for a reliable transport
+  # (TCP/TLS/WSS — the name carries the peer), one per protocol AND FAMILY for an
+  # unreliable one.
   #
   # A module may override it by exporting `select_instance/1`: given the resolved
   # URI it returns the instance name it wants, or nil to keep the default. That is
@@ -66,8 +79,15 @@ alias SIP.NetUtils
     if apply(uri.tp_module, :is_reliable, []) do
       uri.destproto <> "_" <> destip <> ":" <> Integer.to_string(uri.destport)
     else
-      uri.destproto
+      unreliable_instance_name(uri.destproto, dest_family(uri))
     end
+  end
+
+  # The family a datagram to this URI must leave by, read off the resolved
+  # address. `preferred_family/0` answers only when there is none to read — a
+  # destination still named by a host name, which the mockup transport does.
+  defp dest_family(uri) do
+    NetUtils.address_family(uri.destip) || NetUtils.preferred_family()
   end
 
   defp find_or_launch_transport(uri = %SIP.Uri{}) do
