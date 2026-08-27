@@ -71,6 +71,11 @@ defmodule Kelix.Config do
             max_calls: nil,
             log: %{target: "stdout", facility: "local0", level: "info"},
             listen: [],
+            # The OUTBOUND TLS/WSS leg's policy: whether the certificate a peer we
+            # DIAL presents is checked, and against which authority. Node-wide,
+            # because it is about who we are willing to talk to, not about one
+            # socket. `[[listen]] cert`/`key` is the inbound side and stays there.
+            tls: %{verify: true, ca: nil},
             mediaserver_pool: [],
             # The node's video encoding bitrate (kb/s): what a leg is encoded at and
             # the cap on the `b=AS:` it is answered with. One statement for both
@@ -160,6 +165,15 @@ defmodule Kelix.Config do
   @spec apply_app_env(t) :: :ok
   def apply_app_env(%__MODULE__{} = cfg) do
     Application.put_env(:elixip2, :useragent, cfg.user_agent)
+    # `[tls]` reaches the outbound leg here: SIP.Transport.ImplHelpers reads both
+    # keys when it dials a TLS or WSS peer.
+    Application.put_env(:elixip2, :tls_verify, cfg.tls.verify)
+
+    case cfg.tls.ca do
+      nil -> Application.delete_env(:elixip2, :tls_cacertfile)
+      path -> Application.put_env(:elixip2, :tls_cacertfile, path)
+    end
+
     # `[mediaserver] video_bitrate` reaches the point-to-point media path here: the
     # Medooze adapter reads `:video_bandwidth_kbps` off its own tuning block for
     # every leg it encodes and answers. Merged, not replaced — the block also holds
@@ -259,7 +273,7 @@ defmodule Kelix.Config do
          :ok <-
            reject_keys(
              map,
-             ~w(server log listen mediaserver module control_api metrics),
+             ~w(server log listen mediaserver module control_api metrics tls),
              "config"
            ),
          {:ok, server} <- parse_server(Map.get(map, "server", %{})),
@@ -267,6 +281,7 @@ defmodule Kelix.Config do
          {:ok, listen} <- parse_listeners(Map.get(map, "listen", [])),
          {:ok, control_api} <- parse_control_api(Map.get(map, "control_api")),
          {:ok, metrics} <- parse_metrics(Map.get(map, "metrics")),
+         {:ok, tls} <- parse_tls(Map.get(map, "tls")),
          {:ok, mediaserver} <- parse_mediaserver(Map.get(map, "mediaserver")) do
       {:ok,
        %__MODULE__{
@@ -283,7 +298,8 @@ defmodule Kelix.Config do
          mediaserver_transport_cc: mediaserver.transport_cc,
          modules: Map.get(map, "module", %{}),
          control_api: control_api,
-         metrics: metrics
+         metrics: metrics,
+         tls: tls
        }}
     end
   end
@@ -378,6 +394,39 @@ defmodule Kelix.Config do
   end
 
   defp parse_metrics(_), do: {:error, "[metrics] must be a table"}
+
+  # Absent means the defaults, and the default is to check: an outbound leg that
+  # verifies nothing makes any mutual TLS above it theatre, and it was `verify:
+  # false` in the code with a comment saying it was to keep an example simple.
+  defp parse_tls(nil), do: {:ok, %__MODULE__{}.tls}
+
+  defp parse_tls(%{} = t) do
+    with :ok <- reject_keys(t, ~w(verify ca), "[tls]"),
+         {:ok, verify} <- opt_bool(t, "verify", true, "[tls]"),
+         {:ok, ca} <- opt_readable_file(t, "ca", "[tls]") do
+      {:ok, %{verify: verify, ca: ca}}
+    end
+  end
+
+  defp parse_tls(_), do: {:error, "[tls] must be a table"}
+
+  # A CA that cannot be read is a configuration error, not a runtime surprise: the
+  # alternative is every outbound TLS leg failing at handshake time with an alert
+  # that says nothing about the path being wrong.
+  defp opt_readable_file(map, key, ctx) do
+    case Map.get(map, key) do
+      nil ->
+        {:ok, nil}
+
+      path when is_binary(path) ->
+        if File.regular?(path),
+          do: {:ok, path},
+          else: {:error, "#{ctx}: `#{key}` is not a readable file: #{path}"}
+
+      other ->
+        {:error, "#{ctx}: `#{key}` must be a string, got #{inspect(other)}"}
+    end
+  end
 
   defp parse_listeners(list) when is_list(list) do
     reduce_while_ok(list, &parse_listener/1)

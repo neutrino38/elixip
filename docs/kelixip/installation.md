@@ -371,6 +371,29 @@ scrape it.
 | `addr` | IP | `127.0.0.1` |
 | `port` | 1..65535 | `9095` |
 
+#### `[tls]` — la jambe sortante
+
+S'applique aux connexions TLS et WSS que le nœud **compose**, jamais à celles
+qu'il reçoit : le côté entrant, ce sont les `cert` et `key` d'un `[[listen]]`.
+
+| Clé | Type | Défaut | |
+|---|---|---|---|
+| `verify` | bool | `true` | Vérifie le certificat du pair appelé |
+| `ca` | chemin | — | N'accorde sa confiance qu'à cette autorité ; absente, le magasin public est utilisé |
+
+Le nom vérifié est le **domaine SIP** de l'URI appelée (RFC 5922 §7.2), pas
+l'adresse que le DNS a rendue. Une cible désignée par adresse nue n'a donc pas de
+nom à vérifier : son certificat doit porter cette adresse dans un SAN
+`iPAddress`, ce que presque aucun certificat SIP ne fait.
+
+`verify = false` existe pour un laboratoire dont le proxy porte un certificat
+auto-signé. Ne le laissez pas en production : un serveur qui exige un certificat
+client alors que son propre client n'en vérifie aucun ne protège rien.
+
+Une `ca` illisible fait échouer le démarrage. C'est voulu : sinon chaque appel
+sortant échoue à la poignée de main, avec une alerte TLS qui ne dit rien du
+chemin erroné.
+
 ### domains.toml
 
 #### `[[domain]]` — one entry per served domain

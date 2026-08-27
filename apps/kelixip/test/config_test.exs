@@ -533,4 +533,59 @@ defmodule Kelix.ConfigTest do
       assert Application.get_env(:elixip2, MediaServer.Mendooze)[:video_bandwidth_kbps] == 1500
     end
   end
+  describe "[tls] — the outbound leg's policy" do
+    test "absent means the certificate of a peer we dial IS checked" do
+      assert {:ok, cfg} = Config.parse("")
+      assert cfg.tls == %{verify: true, ca: nil}
+    end
+
+    test "verify = false is the escape hatch, and it is explicit" do
+      assert {:ok, cfg} = Config.parse(~s([tls]\nverify = false))
+      assert cfg.tls.verify == false
+    end
+
+    test "a ca that cannot be read is refused at parse time" do
+      assert {:error, msg} = Config.parse(~s([tls]\nca = "/no/such/ca.pem"))
+      assert msg =~ "not a readable file"
+    end
+
+    test "a readable ca is kept" do
+      path = Path.expand("../../elixip2/certs/certificate.pem", __DIR__)
+      assert {:ok, cfg} = Config.parse(~s([tls]\nca = "#{path}"))
+      assert cfg.tls.ca == path
+    end
+
+    test "an unknown key is refused, like everywhere else" do
+      assert {:error, msg} = Config.parse(~s([tls]\nverfy = true))
+      assert msg =~ "[tls]"
+    end
+
+    # The repository rule for a new key is that the parser, the installation guide
+    # and the shipped config move in one lot. This is the half a test can hold: the
+    # file we ship still parses against the parser we ship.
+    test "the config.toml shipped in packaging/ still parses whole" do
+      path = Path.expand("../../../packaging/config/config.toml", __DIR__)
+      assert {:ok, content} = File.read(path)
+      assert {:ok, cfg} = Config.parse(content)
+      assert cfg.tls.verify == true
+    end
+
+    test "apply_app_env/1 is what the outbound leg actually reads" do
+      previous = Application.fetch_env(:elixip2, :tls_verify)
+      on_exit(fn ->
+        case previous do
+          {:ok, v} -> Application.put_env(:elixip2, :tls_verify, v)
+          :error -> Application.delete_env(:elixip2, :tls_verify)
+        end
+
+        Application.delete_env(:elixip2, :tls_cacertfile)
+      end)
+
+      {:ok, cfg} = Config.parse(~s([tls]\nverify = false))
+      :ok = Config.apply_app_env(cfg)
+
+      assert Application.get_env(:elixip2, :tls_verify) == false
+      refute Application.get_env(:elixip2, :tls_cacertfile)
+    end
+  end
 end
