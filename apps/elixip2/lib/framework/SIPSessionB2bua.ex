@@ -1418,14 +1418,24 @@ defmodule SIP.Session.B2bua do
   end
 
   # Copy the routing of `from` onto `uri`, leaving what the URI *says* alone.
-  defp stamp_destination(%SIP.Uri{} = uri, %SIP.Uri{} = from) do
+  # Public for the same reason as `resolve_and_mark/1`: it is the ONE place the
+  # resolved-routing cluster is copied from one URI to another, and the mark being
+  # part of that cluster is the whole design. Not part of the supported API.
+  @doc false
+  @spec stamp_destination(%SIP.Uri{}, %SIP.Uri{}) :: %SIP.Uri{}
+  def stamp_destination(%SIP.Uri{} = uri, %SIP.Uri{} = from) do
     %SIP.Uri{
       uri
       | destip: from.destip,
         destport: from.destport,
         destproto: from.destproto,
         tp_module: from.tp_module,
-        tp_pid: from.tp_pid
+        tp_pid: from.tp_pid,
+        # The side travels with the routing it belongs to. `:keep` is the trunk
+        # case — the R-URI stays what the caller asked for and only the routing is
+        # taken from the target — and an interconnect is exactly a trunk, so
+        # dropping the mark here would lose it on the leg that needs it most.
+        net_side: from.net_side
     }
   end
 
@@ -1447,7 +1457,7 @@ defmodule SIP.Session.B2bua do
   # parallel within a group, serial across groups in descending q).
   defp expand_targets(%Peer{fork: :parallel} = peer) do
     Enum.map(peer.uris, fn entry ->
-      entry |> List.wrap() |> Enum.flat_map(&srv_expand(&1, peer))
+      entry |> List.wrap() |> Enum.flat_map(&srv_expand(&1, peer)) |> Enum.map(&resolve_and_mark/1)
     end)
   end
 
@@ -1458,7 +1468,7 @@ defmodule SIP.Session.B2bua do
   defp expand_targets(%Peer{} = peer) do
     peer.uris
     |> Enum.flat_map(fn entry -> entry |> List.wrap() |> Enum.flat_map(&srv_expand(&1, peer)) end)
-    |> Enum.map(&[&1])
+    |> Enum.map(&[resolve_and_mark(&1)])
   end
 
   defp srv_expand(uri, %Peer{use_srv: false}), do: [normalize_uri(uri)]
@@ -1471,6 +1481,45 @@ defmodule SIP.Session.B2bua do
       _ -> [uri]
     end
   end
+
+  # Phase 1 of step 5 (docs/design/multi-interface.md): give every target its
+  # address BEFORE any of them is attempted, and mark which side of this node's
+  # network it sits on. The media server a leg is placed on follows from that
+  # mark, and one server serves the whole session, so the marks of all the targets
+  # have to be known together — not discovered one attempt at a time.
+  #
+  # **Not through `SIP.Transport.Selector.select_transport/1`.** That function does
+  # not resolve, it LAUNCHES the transport: on TCP, TLS or WSS it opens the
+  # connection. Running it over a whole fork list would connect to every target,
+  # including the ones never tried. `SIP.Resolver` only asks DNS, and the
+  # transport stays launched lazily, at the attempt.
+  #
+  # A target that cannot be resolved is left exactly as it was, unmarked: it then
+  # fails at its own turn, with the message it has always failed with. This pass
+  # adds what it can and changes nothing else.
+  #
+  # Public for one reason, like `Kelix.Router.media_override/1`: it is where the
+  # mark is decided, a whole session's media placement follows from it, and the
+  # hunt around it cannot be driven from a test without a peer to answer. Not part
+  # of the supported API.
+  @doc false
+  @spec resolve_and_mark(%SIP.Uri{} | term()) :: %SIP.Uri{} | term()
+  def resolve_and_mark(%SIP.Uri{} = uri) do
+    case SIP.Resolver.resolve(uri, false) do
+      {destip, destport} when is_tuple(destip) ->
+        %SIP.Uri{
+          uri
+          | destip: destip,
+            destport: if(destport in [nil, 0], do: uri.destport, else: destport),
+            net_side: SIP.NetUtils.net_side(destip)
+        }
+
+      _ ->
+        uri
+    end
+  end
+
+  def resolve_and_mark(other), do: other
 
   # A target that already carries its destination (a registrar contact, §3.2) is
   # taken as is — that is the whole point of storing the registration flow.
