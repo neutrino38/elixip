@@ -58,7 +58,8 @@ defmodule Kelix.MediaPool do
           module: atom,
           url: String.t(),
           enabled: boolean,
-          healthy: boolean
+          healthy: boolean,
+          profiles: %{String.t() => map} | :unknown
         }
   @type choice :: %{name: String.t(), module: atom, url: String.t()}
 
@@ -287,28 +288,62 @@ defmodule Kelix.MediaPool do
 
   defp now_ms(), do: System.monotonic_time(:millisecond)
 
-  defp probe_all(entries, probe),
-    do: Enum.map(entries, fn e -> %{e | healthy: probe.(e)} end)
+  defp probe_all(entries, probe) do
+    Enum.map(entries, fn e ->
+      {healthy, profiles} = probe_result(probe.(e))
+      %{e | healthy: healthy, profiles: keep_known(profiles, e.profiles)}
+    end)
+  end
 
   defp health_map(entries, probe),
     do: Map.new(entries, fn e -> {e.name, probe.(e)} end)
 
+  # A probe answers health. The default one also brings back what the server said
+  # about ITSELF while it had the connection open, since it opens one anyway; an
+  # injected probe (the tests, and anything that only means up/down) keeps
+  # answering a plain boolean.
+  defp probe_result(healthy) when is_boolean(healthy), do: {healthy, :unknown}
+  defp probe_result({healthy, profiles}) when is_boolean(healthy), do: {healthy, profiles}
+
+  # A probe that could not ask does not erase what the last one learnt: an
+  # unreachable media server is unhealthy, not suddenly address-less.
+  defp keep_known(:unknown, previous), do: previous
+  defp keep_known(profiles, _previous), do: profiles
+
   # default probe: connect then immediately disconnect (design §9 — reuse connect/1).
+  #
+  # The addressing profiles come back with it, so the pool re-reads them every
+  # cycle: a media server restarted with other addresses (a new `--internal-ip`, an
+  # added v6) describes itself, and nothing on this side has to be told
+  # (docs/design/multi-interface.md, step 5).
   defp default_probe(%{module: module, url: url}) do
     mod = resolve_module_atom(module)
 
     case probe_connect(mod, url) do
       {:ok, pid} ->
+        profiles = read_profiles(mod, pid)
         try_disconnect(mod, pid)
-        true
+        {true, profiles}
 
       _ ->
-        false
+        {false, :unknown}
     end
   rescue
-    _ -> false
+    _ -> {false, :unknown}
   catch
-    _, _ -> false
+    _, _ -> {false, :unknown}
+  end
+
+  # Only an adapter that knows the call answers it; the mockup and any older one
+  # simply have nothing to say.
+  defp read_profiles(mod, pid) do
+    if Code.ensure_loaded?(mod) and function_exported?(mod, :network_profiles, 1),
+      do: apply(mod, :network_profiles, [pid]),
+      else: :unknown
+  rescue
+    _ -> :unknown
+  catch
+    _, _ -> :unknown
   end
 
   # Tell the adapter this connection is only a keepalive probe, so it can log its
@@ -335,9 +370,10 @@ defmodule Kelix.MediaPool do
   end
 
   # The decoded entries carry no health: add it here, optimistic until the first
-  # probe lands, so a boot cannot start by refusing every call.
+  # probe lands, so a boot cannot start by refusing every call. Profiles start
+  # `:unknown` for the same reason — nothing has asked yet.
   defp health_fields(entries) when is_list(entries),
-    do: Enum.map(entries, &Map.put(&1, :healthy, true))
+    do: Enum.map(entries, &(&1 |> Map.put(:healthy, true) |> Map.put(:profiles, :unknown)))
 
   defp health_fields(_), do: []
 

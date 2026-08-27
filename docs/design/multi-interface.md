@@ -56,9 +56,9 @@ le même lot.
 - **`addr`** ne change pas de forme : `Kelix.Config` valide l'adresse par
   `:inet.parse_address/1`, donc une IPv6 y passe. C'est elle qui donne sa
   famille au listener, et c'est elle qui lui donnera son profil réseau
-  (étape 5) ; un listener wildcard prend le profil par défaut du nœud. Seul le
-  wildcard IPv4 (`0.0.0.0`) est accepté : `::` devrait dire quelle famille il
-  porte, et c'est l'étape 4 qui le décide.
+  (étape 5) ; un listener wildcard prend le profil par défaut du nœud. Les deux
+  wildcards sont acceptés et portent chacun leur famille (`0.0.0.0`, `::`) ;
+  `addr` absent est la seule écriture qui n'en nomme aucune (étape 4).
 - **`tag`** n'a qu'une valeur utile : `"internal"`. Le côté public est le défaut
   déduit de l'absence de clé. `"public"` reste accepté sans effet. Introduit à
   l'étape 5.
@@ -407,11 +407,22 @@ d'instance, donc le second est ignoré avec un avertissement.
 possible entre deux familles. C'est aussi ici qu'un profil réseau devient
 distinguable par jambe en UDP (étape 5).
 
-### Étape 5 — Profils réseau du média
+### Étape 5 — Profils réseau du média — partiellement livrée
 
 Annoncer dans le SDP l'adresse du bon côté du réseau, en posant le paramètre
 `profile` de JSR309 (`xmlrpc_jsr309_api.md` §6.7 bis et §6.7 ter). Prérequis de
-tout appel IPv4↔IPv6 relayé : à faire avec l'étape 4, pas après.
+tout appel IPv4↔IPv6 relayé.
+
+**Livré** : l'adaptateur `MediaServer.Mendooze` interroge le serveur
+(`GetNetworkProfiles`) à la connexion, chaque jambe dérive son profil et le pose
+sur `EndpointStartReceiving` (6e) et `EndpointStartSending` (7e), la voie
+texte/WS est réordonnée, et le pool relit les profils de chaque serveur à chaque
+sonde de santé.
+
+**Non livré** : `Kelix.MediaPool.checkout/1` ne prend pas encore de contrainte de
+profil, et il a toujours lieu au routage. Voir « Deux jambes, deux profils, un
+seul serveur » plus bas — c'est le seul morceau restant, et il demande de
+décider *où* la cible sortante devient connue.
 
 Le mediaserver porte jusqu'à quatre adresses — `publicv4`, `publicv6`,
 `internalv4`, `internalv6` — déclarées par `--public-ip` et `--internal-ip`.
@@ -452,11 +463,19 @@ contraint rien.
 
 #### La sélection du serveur média porte le profil
 
-`Kelix.MediaPool.checkout/1` reçoit les profils demandés — un par jambe, donc
-souvent deux — et ne retient que les entrées `enabled`, saines **et** portant
+La sonde de santé du pool ouvre déjà une connexion toutes les 30 s : elle en
+rapporte les profils, que `status/0` expose par entrée. Une sonde qui n'a pas pu
+demander n'efface pas ce que la précédente avait appris — un serveur injoignable
+est en panne, pas devenu sans adresse.
+
+`Kelix.MediaPool.checkout/1` recevra les profils demandés — un par jambe, donc
+souvent deux — et ne retiendra que les entrées `enabled`, saines **et** portant
 **tous** ces profils ; le round-robin reste inchangé parmi les éligibles. Sans
 serveur éligible, l'appel échoue en 503. Jamais de repli sur un autre profil : un
 repli enverrait le média par la mauvaise interface sans que rien ne le signale.
+Une entrée dont les profils sont inconnus ne satisfait aucune contrainte : on ne
+lui demande donc jamais de profil, et elle reste éligible aux appels qui n'en
+demandent pas.
 
 #### Le profil est posé sur la jambe
 
@@ -481,12 +500,19 @@ Un B2BUA relaie à l'intérieur d'une seule session, et ses deux jambes portent
 chacune leur profil. La médiation IPv4↔IPv6 est ce cas même : jambe entrante en
 v6, jambe sortante en v4. Le serveur retenu doit donc porter les deux profils.
 
-Cela déplace le `checkout` du pool. Le serveur est choisi au routage, avant que
-la cible sortante ne soit connue ; il faut qu'il le soit après la résolution de
-la cible, quand les deux profils sont connus ensemble. Choisir sur la seule jambe
+Cela déplace le `checkout` du pool, et c'est le morceau qui reste. Le serveur est
+choisi au routage — `Kelix.Router.overrides_for/1` le pose en `mediaserver_instance`
+dans l'appdata de l'instance, avant même que le script démarre. Il faut qu'il le
+soit quand les deux profils sont connus ensemble. Choisir sur la seule jambe
 entrante puis vérifier la sortante ne marche pas : le serveur est déjà retenu, et
 un pool où un autre serveur aurait convenu rend un 503 alors qu'un appel était
 possible.
+
+**À trancher** : où la cible sortante devient-elle connue ? Le plan de numérotation
+est déroulé *dans le script*, donc ni le routeur ni `media_connect/0` ne la
+connaissent au moment où ils s'exécutent aujourd'hui. Déplacer le `checkout`
+demande de dire lequel des trois porte la décision, et c'est un changement du
+contrat routeur↔scénario, pas un détail d'implémentation.
 
 #### Hors périmètre de cette étape
 

@@ -254,4 +254,64 @@ defmodule Kelix.MediaPoolTest do
       assert Enum.all?(MediaPool.status(mp), &match?(%{url: "http://10.0.0." <> _}, &1))
     end
   end
+  describe "what each media server carries, asked rather than configured" do
+    test "the probe brings the profiles back, and status/0 shows them" do
+      profiles = %{
+        "publicv4" => %{available: true, announced: "203.0.113.9", bind: "", default: true},
+        "publicv6" => %{available: true, announced: "2001:db8::12", bind: "", default: false}
+      }
+
+      {:ok, mp} =
+        MediaPool.start_link(
+          name: :mp_profiles,
+          pool: [%{name: "mcu1", module: :mockup, url: "u", enabled: true}],
+          probe: fn _e -> {true, profiles} end,
+          first_check_ms: 10_000
+        )
+
+      # Nothing has asked yet.
+      assert [%{profiles: :unknown}] = MediaPool.status(mp)
+
+      :ok = MediaPool.check_health(mp)
+      assert [%{name: "mcu1", healthy: true, profiles: ^profiles}] = MediaPool.status(mp)
+    end
+
+    test "a probe that could not ask does not erase what the last one learnt" do
+      profiles = %{"publicv6" => %{available: true, announced: "2001:db8::12"}}
+      answer = :counters.new(1, [])
+
+      probe = fn _e ->
+        if :counters.get(answer, 1) == 0, do: {true, profiles}, else: false
+      end
+
+      {:ok, mp} =
+        MediaPool.start_link(
+          name: :mp_profiles_keep,
+          pool: [%{name: "mcu1", module: :mockup, url: "u", enabled: true}],
+          probe: probe,
+          first_check_ms: 10_000
+        )
+
+      :ok = MediaPool.check_health(mp)
+      assert [%{healthy: true, profiles: ^profiles}] = MediaPool.status(mp)
+
+      # The server goes away: unhealthy, but not suddenly address-less.
+      :counters.add(answer, 1, 1)
+      :ok = MediaPool.check_health(mp)
+      assert [%{healthy: false, profiles: ^profiles}] = MediaPool.status(mp)
+    end
+
+    test "a probe that only says up/down keeps working" do
+      {:ok, mp} =
+        MediaPool.start_link(
+          name: :mp_profiles_bool,
+          pool: [%{name: "mcu1", module: :mockup, url: "u", enabled: true}],
+          probe: fn _e -> true end,
+          first_check_ms: 10_000
+        )
+
+      :ok = MediaPool.check_health(mp)
+      assert [%{healthy: true, profiles: :unknown}] = MediaPool.status(mp)
+    end
+  end
 end
