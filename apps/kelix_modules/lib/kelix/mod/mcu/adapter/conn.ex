@@ -48,9 +48,13 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   @role_main 0
   # MediaProtocol: RTP
   @proto_rtp 0
-  # MediaProtocol: WS — the only non-RTP transport this adapter drives, and only
+  # MediaProtocol: WS — the first non-RTP transport this adapter drove, and only
   # for text (S5, DESIGN-MCU.md)
   @proto_ws 2
+  # MediaProtocol: SCTP — real-time text inside the caller's own
+  # `RTCPeerConnection`, on a WebRTC data channel (RFC 8865). Text again, and the
+  # only other non-RTP transport.
+  @proto_sctp 5
   # telephone-event's Medooze codec constant (§3.6): a payload type the mixer never
   # encodes towards anyone, so it can never be a primary codec.
   @dtmf_code 100
@@ -546,7 +550,10 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # advertises), then the transport properties. Nothing is sent yet.
   defp open_receive_plane(state, conf, descs) do
     descs
-    |> Enum.filter(&(answerable?(&1, state.medias) or ws_answerable?(&1, state.medias)))
+    |> Enum.filter(
+      &(answerable?(&1, state.medias) or ws_answerable?(&1, state.medias) or
+          dc_answerable?(&1, state.medias))
+    )
     |> Enum.reduce_while({:ok, state, %{}}, fn desc, {:ok, st, acc} ->
       cond do
         # the verdict map is keyed by media type: an offer carrying TWO text
@@ -583,8 +590,9 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
       # WebSocket: the section is omitted, the call stands.
       Logger.warning(
         module: __MODULE__,
-        message: "conference #{state.conf_uid}: peer offered a=setup:passive on its " <>
-          "WS text section; omitting it (nobody would connect)"
+        message:
+          "conference #{state.conf_uid}: peer offered a=setup:passive on its " <>
+            "WS text section; omitting it (nobody would connect)"
       )
 
       :skip
@@ -622,12 +630,98 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
           # is omitted from the answer, audio/video stand (plan §D7)
           Logger.warning(
             module: __MODULE__,
-            message: "conference #{state.conf_uid}: ConfigureParticipantMediaConnection " <>
-              "failed (#{inspect(reason)}); the WS text section is omitted, the call stands"
+            message:
+              "conference #{state.conf_uid}: ConfigureParticipantMediaConnection " <>
+                "failed (#{inspect(reason)}); the WS text section is omitted, the call stands"
           )
 
           :skip
       end
+    end
+  end
+
+  # ── the data channel text leg (RFC 8865) ─────────────────────────────────────
+  #
+  # The other answer to the same problem as the WebSocket above, and the shape is
+  # opposite: the WebSocket is a second connection beside the call, with its own
+  # port, its own URL and a token to guard it; a data channel is INSIDE the
+  # caller's `RTCPeerConnection`. Same ICE, same DTLS, same port as any other leg
+  # — only what travels inside changes. So there is nothing to sign here, and
+  # this leg is configured like an RTP one: the transport plane is real.
+  #
+  # Two RPCs of its own, then the ordinary sequence:
+  #
+  #   ConfigureParticipantMediaConnection(TEXT, SCTP)  switch the text plane
+  #   SetupParticipantDataChannel(TEXT, peer sctp-port) -> ours, to publish
+  #   StartReceiving(TEXT, %{})                         the port for the m= line
+  #   SetRemoteCryptoDTLS + SetRemoteSTUNCredentials    as any DTLS/ICE leg
+  #
+  # No rtpMap: no payload type travels inside a data channel. No RED either —
+  # SCTP is reliable, so RFC 8865 has no redundancy, and the mixer produces it
+  # for the RTP legs that asked for it.
+  defp open_receive(state, _conf, %{transport: :sctp} = desc) do
+    m = media_int(desc.type)
+
+    with {:ok, _} <-
+           rpc(state, "ConfigureParticipantMediaConnection", [
+             state.conf_id,
+             state.part_id,
+             m,
+             @proto_sctp,
+             ""
+           ]),
+         {:ok, [sctp_port, max_message_size | _]} <-
+           rpc(state, "SetupParticipantDataChannel", [
+             state.conf_id,
+             state.part_id,
+             m,
+             Map.get(desc, :sctp_port, 5000)
+           ]),
+         {:ok, state, profile} <- leg_profile(state, desc),
+         {:ok, [rec_port | returned]} <-
+           rpc(state, "StartReceiving", start_receiving_args(state, m, %{}, %{}, profile)),
+         {:ok, ip} <- announced_ip(state, returned),
+         :ok <- set_remote_security(state, m, desc) do
+      {:ok, %{state | receiving: [desc.type | state.receiving], media_ip: ip},
+       %{
+         transport: :sctp,
+         rec_port: rec_port,
+         remote: {desc.ip, desc.port},
+         # what the answer publishes, and it comes from the SERVER: the port it
+         # binds SCTP on and the largest message it accepts. Neither is a
+         # constant written on this side.
+         sctp_port: sctp_port,
+         max_message_size: max_message_size,
+         # RFC 8864: the channel the peer declared, if it declared one. Echoed as
+         # such; `nil` means it opens the channel in band with DCEP, and the media
+         # server picks it out by its `t140` subprotocol.
+         dcmap: Map.get(desc, :dcmap),
+         direction: Map.get(desc, :direction, :sendrecv),
+         # text is never watched: T.140 is legitimately silent between keystrokes
+         expect_rtp: false,
+         rtp_map: %{},
+         send_map: %{},
+         codecs: ["T140"],
+         dtmf: false
+       }}
+    else
+      # An older media server (the methods do not exist), one that answered
+      # something else than the three values `SetupParticipantDataChannel`
+      # promises, or a leg it could not place: the text is lost, not the call. The
+      # section is DECLINED with port 0 — never omitted, see `omit_from_answer?/3`.
+      #
+      # The catch-all is not decoration: an unmatched `with` clause raises, and a
+      # media server that predates this API answers `{:ok, []}` to a method it
+      # does not know nothing about.
+      other ->
+        Logger.warning(
+          module: __MODULE__,
+          message:
+            "conference #{state.conf_uid}: the data channel text leg failed " <>
+              "(#{inspect(other)}); the section is declined, the call stands"
+        )
+
+        :skip
     end
   end
 
@@ -661,7 +755,11 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
 
         with {:ok, state, profile} <- leg_profile(state, desc),
              {:ok, [rec_port | returned]} <-
-               rpc(state, "StartReceiving", start_receiving_args(state, m, rtp_map, offer, profile)),
+               rpc(
+                 state,
+                 "StartReceiving",
+                 start_receiving_args(state, m, rtp_map, offer, profile)
+               ),
              {:ok, ip} <- announced_ip(state, returned),
              :ok <- set_remote_security(state, m, desc),
              :ok <- set_rtp_properties(state, m, desc) do
@@ -1114,6 +1212,11 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     # a WS text leg has no send plane of ours: the media server owns the
     # WebSocket, and the server refuses StartSending(TEXT) after the switch
     # anyway (S5). SetTextCodec is skipped with it — no payload type exists.
+    #
+    # A DATA CHANNEL leg is not in that case and must NOT be rejected here: its
+    # StartSending is what posts the destination, and without it neither ICE nor
+    # the DTLS handshake has anywhere to go. Only its codec call is skipped
+    # (`set_codec/3`).
     |> Enum.reject(&(Map.fetch!(state.negotiated, &1) |> Map.get(:transport) == :ws))
     |> Enum.reduce_while({:ok, state}, fn media, {:ok, st} ->
       case start_sending(st, media, Map.fetch!(st.negotiated, media)) do
@@ -1315,6 +1418,11 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # no profile to impose (no size, no rate, no bitrate), which is why this clause is
   # the short one. `T140RED` is a codec here, not a modifier — the redundancy is the
   # server's to produce once it is told to use it.
+  # A data channel carries no payload type, so there is no codec to set. The
+  # StartSending that follows still matters: it is what gives the leg its
+  # destination, and thus what lets ICE and the DTLS handshake reach the peer.
+  defp set_codec(_state, :text, %{transport: :sctp}), do: :ok
+
   defp set_codec(state, :text, neg) do
     case primary_code(:text, neg) do
       nil ->
@@ -1462,8 +1570,30 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
           mid: Map.get(desc, :mid)
         }
 
-      # a second text section when the first (WS) took the verdict: port 0
-      {:rtp, %{transport: :ws}} ->
+      # A data channel section: real media, so a real answer — the port the server
+      # bound, its own SCTP parameters, and the transport plane of any DTLS/ICE
+      # leg. The `m=` line goes back to saying `application` (`sdp_type`), which
+      # is the one place the medium and the line disagree.
+      {:sctp, %{transport: :sctp} = neg} ->
+        %{
+          data_channel: %{
+            sctp_port: neg.sctp_port,
+            max_message_size: neg.max_message_size,
+            dcmap: neg.dcmap
+          },
+          type: Map.get(desc, :sdp_type, :application),
+          port: neg.rec_port,
+          # mirror the offered spelling (RFC 8841 defines two)
+          protocol: desc.protocol,
+          direction: Sdp.reverse_direction(desc.direction),
+          crypto: answer_crypto(state, desc),
+          ice: state.local_ice,
+          mid: Map.get(desc, :mid),
+          candidates: answer_candidates(state, desc, neg)
+        }
+
+      # a second text section when another transport took the verdict: port 0
+      {_, %{transport: other}} when other in [:ws, :sctp] ->
         reject_spec(desc)
 
       {_, nil} ->
@@ -1497,6 +1627,15 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # section we DO serve but could not negotiate (text admitted, no common codec).
   defp omit_from_answer?(state, negotiated, desc) do
     cond do
+      # A data channel section is REAL media in the browser's eyes, and it counts
+      # in the `m=` line tally libwebrtc checks against its own offer: it is
+      # DECLINED with port 0, never omitted — including on a text-less admission.
+      # The omission below exists for one deployed client that injects and strips
+      # its own WebSocket section; nothing of the sort applies here, and omitting
+      # this one would make the answer one section short of the offer.
+      dc_text_section?(desc) ->
+        false
+
       desc.type == :text and :text not in state.medias ->
         true
 
@@ -1516,7 +1655,11 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # a browser's data-channel section is declined here, and it must still be named.
   defp reject_spec(desc) do
     %{
-      type: desc.type,
+      # The `m=` line says what the OFFER said. A data channel section is the
+      # call's text and its descriptor says so, but its line reads `application`:
+      # a rejection that renamed it would not be the section the browser offered,
+      # and libwebrtc matches answer sections to its own by that name.
+      type: Map.get(desc, :sdp_type, desc.type),
       protocol: Map.get(desc, :protocol, "RTP/AVP"),
       reject_fmt: Map.get(desc, :raw_fmt, []),
       mid: Map.get(desc, :mid)
@@ -1864,6 +2007,16 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     Map.get(desc, :transport, :rtp) == :ws and
       Map.get(desc, :supported?, false) and desc.type in medias
   end
+
+  # A text-over-data-channel section we can serve. Same test, third transport:
+  # the parsed descriptor already says `type: :text` — the `m=` line reads
+  # `application`, the medium it carries is the call's text.
+  defp dc_answerable?(desc, medias) do
+    dc_text_section?(desc) and
+      Map.get(desc, :supported?, false) and desc.type in medias
+  end
+
+  defp dc_text_section?(desc), do: Map.get(desc, :transport, :rtp) == :sctp
 
   # One token per (re)configuration, UUID-shaped, hex from a CSPRNG — same
   # scheme as the JSR-309 adapter. It travels in the SDP and gates the

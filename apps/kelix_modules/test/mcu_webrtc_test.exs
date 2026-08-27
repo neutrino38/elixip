@@ -188,6 +188,41 @@ defmodule Kelix.Mod.McuWebrtcTest do
 
     # S5: the WS text door, in its two failure shades. The default (stub) answers
     # a ws:// URL echoing the token.
+    # The data channel text door (RFC 8865): the switch answers the protocol name
+    # instead of a URL — there is nothing to sign — and the setup call answers the
+    # server's own SCTP parameters, which the answer publishes.
+    dc_override =
+      case context[:dc] do
+        :ok ->
+          %{
+            "ConfigureParticipantMediaConnection" => fn [_c, _p, _m, proto, _t] ->
+              if proto == 5, do: {:ok, ["sctp"]}, else: {:error, :rpc_error}
+            end,
+            "SetupParticipantDataChannel" => {:ok, [5000, 65_536, -1]}
+          }
+
+        # a media server that predates the data channel API: the methods answer
+        # nothing useful, and an unmatched `with` clause would RAISE
+        :unsupported ->
+          %{
+            "ConfigureParticipantMediaConnection" => fn [_c, _p, _m, proto, _t] ->
+              if proto == 5, do: {:error, :method_not_found}, else: {:ok, ["ws://x/y"]}
+            end
+          }
+
+        # the switch works, the setup call does not exist yet: same outcome
+        :no_setup ->
+          %{
+            "ConfigureParticipantMediaConnection" => fn [_c, _p, _m, _proto, _t] ->
+              {:ok, ["sctp"]}
+            end,
+            "SetupParticipantDataChannel" => {:ok, []}
+          }
+
+        _ ->
+          %{}
+      end
+
     ws_override =
       case context[:ws] do
         :wss ->
@@ -212,7 +247,10 @@ defmodule Kelix.Mod.McuWebrtcTest do
        name: "mcu1",
        base_url: "http://127.0.0.1:18080",
        transport:
-         TestStub.transport(self(), Map.merge(%{"StartReceiving" => verdict}, ws_override)),
+         TestStub.transport(
+           self(),
+           %{"StartReceiving" => verdict} |> Map.merge(ws_override) |> Map.merge(dc_override)
+         ),
        register: {Mcu, "mcu1"},
        reconnect_ms: 0},
       id: :client_mcu1
@@ -962,6 +1000,160 @@ defmodule Kelix.Mod.McuWebrtcTest do
       assert [audio, _video] = sections(answer)
       assert hd(audio) =~ "m=audio #{@audio_port} "
       assert log =~ "the WS text section is omitted, the call stands"
+    end
+  end
+
+  describe "text over a WebRTC data channel for a conference participant (RFC 8865)" do
+    # The other answer to the same problem as the WebSocket above, and the
+    # opposite shape: no URL, no token, no second connection — the text rides
+    # inside the caller's own `RTCPeerConnection`, so the section is real media
+    # with a real transport plane.
+    setup do
+      {:ok, %{did: did}} =
+        Mcu.handle_control("conference.create", %{
+          "domain" => @domain,
+          "name" => "with text",
+          "medias" => ["audio", "video", "text"]
+        })
+
+      _setup_rpcs = TestStub.rpc_order()
+      %{dc_did: did}
+    end
+
+    # The browser offer, with its data channel and WITHOUT the Elioz-injected
+    # WebSocket text section: an offer carrying both would get the first one
+    # answered and the other declined, which is a different test.
+    defp dc_offer_of(base) do
+      base
+      |> String.split(~r/\r?\n/, trim: true)
+      |> Enum.reduce({[], false}, fn
+        "m=text" <> _, {acc, _} -> {acc, true}
+        "m=" <> _ = line, {acc, _} -> {[line | acc], false}
+        _line, {acc, true} -> {acc, true}
+        line, {acc, false} -> {[line | acc], false}
+      end)
+      |> elem(0)
+      |> Enum.reverse()
+      |> Enum.join("\r\n")
+      |> Kernel.<>("\r\n" <> @datachannel_section)
+    end
+
+    @tag dc: :ok
+    test "the data channel is answered as m=application, with the server's own parameters",
+         ctx do
+      answer = answer_for(ctx.dc_did, dc_offer_of(@chrome_offer))
+
+      [_audio, _video, dc] = sections(answer)
+
+      # the m= line goes back to saying `application`: the medium is the call's
+      # text, the line is the browser's section
+      assert hd(dc) == "m=application #{@text_port} UDP/DTLS/SCTP webrtc-datachannel"
+      # what the SERVER told us, never a constant written here
+      assert "a=sctp-port:5000" in dc
+      assert "a=max-message-size:65536" in dc
+      assert "a=mid:2" in dc
+
+      # a real transport plane, like any DTLS/ICE leg
+      assert Enum.any?(dc, &String.starts_with?(&1, "a=fingerprint:sha-256 "))
+      assert "a=setup:passive" in dc
+      assert Enum.any?(dc, &String.starts_with?(&1, "a=ice-ufrag:"))
+
+      # and nothing RTP-shaped: no payload type travels inside a data channel
+      refute Enum.any?(dc, &(&1 =~ "rtpmap" or &1 =~ "fmtp" or &1 =~ "rtcp-mux"))
+    end
+
+    @tag dc: :ok
+    test "the two data channel RPCs run, then the ordinary receive and send planes", ctx do
+      conn = leg(ctx.dc_did)
+      assert {:ok, _answer} = Adapter.set_remote_offer(conn, dc_offer_of(@chrome_offer))
+      # the send plane opens at ACK time (§6.2), like any other leg's
+      assert {:ok, _summary} = Adapter.attach(conn)
+
+      calls = TestStub.rpc_calls()
+
+      # the switch: media TEXT(2) on protocol SCTP(5), and NO token — there is no
+      # URL to guard
+      assert {_, [42, 7, 2, 5, ""]} =
+               Enum.find(calls, &match?({"ConfigureParticipantMediaConnection", _}, &1))
+
+      # then the peer's own sctp-port goes up, and ours comes back
+      assert {_, [42, 7, 2, 5000]} =
+               Enum.find(calls, &match?({"SetupParticipantDataChannel", _}, &1))
+
+      # unlike the WebSocket leg, this one DOES open a receive plane — and with an
+      # empty rtpMap, since no payload type travels in a data channel
+      assert {_, [42, 7, 2, rtp_map | _]} =
+               Enum.find(calls, &match?({"StartReceiving", [_, _, 2 | _]}, &1))
+
+      assert rtp_map == %{}
+
+      # and it DOES send: that is what posts the destination, and without it
+      # neither ICE nor the DTLS handshake has anywhere to go
+      assert Enum.any?(calls, &match?({"StartSending", [_, _, 2 | _]}, &1))
+      # no codec on it, though: there is none to set
+      refute Enum.any?(calls, &match?({"SetTextCodec", _}, &1))
+    end
+
+    @tag dc: :ok
+    test "the peer's own sctp-port is what we send up, not the default", ctx do
+      offer =
+        @chrome_offer
+        |> dc_offer_of()
+        |> String.replace("a=sctp-port:5000", "a=sctp-port:5001")
+
+      _answer = answer_for(ctx.dc_did, offer)
+
+      assert {_, [42, 7, 2, 5001]} =
+               Enum.find(
+                 TestStub.rpc_calls(),
+                 &match?({"SetupParticipantDataChannel", _}, &1)
+               )
+    end
+
+    @tag dc: :unsupported
+    test "a media server that predates the data channel API loses the text, not the call",
+         ctx do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          send(self(), {:answer, answer_for(ctx.dc_did, dc_offer_of(@chrome_offer))})
+        end)
+
+      assert_received {:answer, answer}
+
+      # DECLINED with port 0, never omitted: the section is in the browser's own
+      # offer, and libwebrtc counts the answer's m= lines against it
+      [_audio, _video, dc] = sections(answer)
+      assert hd(dc) == "m=application 0 UDP/DTLS/SCTP webrtc-datachannel"
+      assert "a=mid:2" in dc
+      assert log =~ "the data channel text leg failed"
+    end
+
+    @tag dc: :no_setup
+    test "a server whose setup call answers nothing declines the section instead of raising",
+         ctx do
+      # the `with` chain must not blow up on an unexpected shape: a method a server
+      # does not know answers `{:ok, []}`
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          send(self(), {:answer, answer_for(ctx.dc_did, dc_offer_of(@chrome_offer))})
+        end)
+
+      assert_received {:answer, answer}
+      assert [_audio, _video, dc] = sections(answer)
+      assert hd(dc) == "m=application 0 UDP/DTLS/SCTP webrtc-datachannel"
+      assert log =~ "the data channel text leg failed"
+    end
+
+    @tag dc: :ok
+    test "a text-less conference declines the section, it never omits it", ctx do
+      # the file-wide conference has no text. Omitting an m= line the browser
+      # offered would leave the answer one section short, and libwebrtc rejects
+      # the whole answer over that — which is exactly why the WebSocket omission
+      # must not be applied here.
+      answer = answer_for(ctx.did, dc_offer_of(@chrome_offer))
+
+      assert [_audio, _video, dc] = sections(answer)
+      assert hd(dc) == "m=application 0 UDP/DTLS/SCTP webrtc-datachannel"
     end
   end
 end
