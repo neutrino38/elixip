@@ -131,7 +131,14 @@ defmodule SIP.B2bua.Leg do
             # left under it (§7.5). Both are `nil`/`[]` unless the peer named a
             # `profile:`, which is what keeps every pre-P5 leg identical.
             profile: nil,
-            profiles_left: []
+            profiles_left: [],
+            # The media server ADDRESSING profile the endpoint serving the rung in
+            # flight was created on (`MediaServer.profile_name/2`), or nil when the
+            # leg asked for none. A hunt that walks from a v4 target to a v6 one
+            # needs another endpoint: the address in the offer's `c=` line was
+            # fixed when the endpoint was created and cannot be renegotiated in
+            # place, exactly like the offer profile above.
+            addr_profile: nil
 end
 
 defmodule SIP.B2bua.Pending do
@@ -928,57 +935,69 @@ defmodule SIP.Session.B2bua do
   # wants; the profile says how they are carried, and it is the one thing that
   # changes between two attempts at the same target (§7.5). No rung — no profile
   # named — leaves the options exactly as written.
-  # The addressing profile the outbound leg's media must be placed on: the
-  # target's, because it is the callee's interface that decides which of ours the
-  # media leaves by. `local_ip:` cannot answer it — a leg we place has no address
-  # the peer reached — so without this the leg asks for nothing and the media
-  # server applies its own default, which on a two-address server is wrong for
-  # every v6 or internal callee.
+  # The addressing profile the outbound leg's media is placed on for its FIRST
+  # rung: the target's, because it is the callee's interface that decides which of
+  # ours the media leaves by. `local_ip:` cannot answer it — a leg we place has no
+  # address the peer reached — so without this the leg asks for nothing and the
+  # media server applies its own default, which on a two-address server is wrong
+  # for every v6 or internal callee.
   #
-  # Targets that disagree take the FIRST one's profile, and say so. One endpoint is
-  # created per leg, before the hunt walks anything, so serving both would mean one
-  # endpoint per profile — named as remaining work in
-  # docs/design/multi-interface.md rather than guessed at here. `checkout/2` has
-  # already made sure one server carries them all, so the endpoint that exists is
-  # on the right server; only its announced address may be the other one's.
+  # Only the first rung: a hunt that walks to a rung of another profile rebuilds
+  # the endpoint there (`restart_ladder/3`), so each rung is served on its own.
+  # The addressing profile a RUNG is dialled on: the first of its targets that
+  # states one.
+  defp rung_profile(rung) when is_list(rung) do
+    rung |> Enum.map(&uri_profile/1) |> Enum.find(&(not is_nil(&1)))
+  end
+
+  defp rung_profile(_rung), do: nil
+
+  defp uri_profile(%SIP.Uri{destip: ip, net_side: side})
+       when is_tuple(ip) and not is_nil(side),
+       do: MediaServer.profile_name(SIP.NetUtils.address_family(ip), side)
+
+  defp uri_profile(_uri), do: nil
+
   defp target_profile_opts(%Peer{} = peer) do
-    case target_profiles(peer) do
-      [] ->
-        []
-
-      [{family, side}] ->
-        [address_profile: MediaServer.profile_name(family, side)]
-
-      [{family, side} | _] = several ->
-        Logger.warning(
-          module: __MODULE__,
-          message:
-            "this peer's targets need #{inspect(several)}: the outbound leg is placed " <>
-              "on #{MediaServer.profile_name(family, side)}, the first of them — a leg " <>
-              "carries one profile, and one endpoint per profile is not implemented"
-        )
-
-        [address_profile: MediaServer.profile_name(family, side)]
+    case first_target_rung(peer) do
+      nil -> []
+      rung -> rung |> warn_if_mixed() |> profile_opt()
     end
   end
 
   defp target_profile_opts(_peer), do: []
 
-  # In the order the hunt will walk them, so "the first" means the first tried.
-  defp target_profiles(%Peer{resolved: rungs}) when is_list(rungs) do
-    rungs
-    |> List.flatten()
-    |> Enum.flat_map(fn
-      %SIP.Uri{destip: ip, net_side: side} when is_tuple(ip) and not is_nil(side) ->
-        [{SIP.NetUtils.address_family(ip), side}]
+  defp profile_opt(nil), do: []
+  defp profile_opt(name), do: [address_profile: name]
 
-      _ ->
-        []
-    end)
-    |> Enum.uniq()
+  defp first_target_rung(%Peer{resolved: [rung | _]}), do: rung
+  defp first_target_rung(_peer), do: nil
+
+  # A rung is ONE body: `SIP.Dialog.fork_branch/3` takes a single one however many
+  # branches it dials, so two branches of a rung cannot carry two `c=` lines. A
+  # rung whose targets sit on different profiles is therefore rung on the first of
+  # them — a property of forking, not something left to implement. Different rungs
+  # ARE served on their own, which is what the hunt rebuilds for.
+  defp warn_if_mixed(rung) do
+    case rung |> Enum.map(&uri_profile/1) |> Enum.reject(&is_nil/1) |> Enum.uniq() do
+      [] ->
+        nil
+
+      [only] ->
+        only
+
+      [first | _] = several ->
+        Logger.warning(
+          module: __MODULE__,
+          message:
+            "this rung is rung in parallel towards #{Enum.join(several, " and ")}: one " <>
+              "offer goes to all its branches, so it announces #{first}. Put targets of " <>
+              "different interfaces in different rungs to serve each on its own"
+        )
+
+        first
+    end
   end
-
-  defp target_profiles(_peer), do: []
 
   defp profiled_outbound_opts(opts, nil), do: Keyword.get(opts, :outbound, [])
 
@@ -1255,7 +1274,10 @@ defmodule SIP.Session.B2bua do
         |> note_progress({:serial_attempting, uri, now()})
 
       %Leg{} = leg ->
-        {sip_ctx, fork_opts, profile, profiles_left} = restart_ladder(sip_ctx, leg)
+        # A provider hands out one target at a time, so it is a rung of one — and
+        # its addressing profile applies exactly as a static rung's does.
+        {sip_ctx, fork_opts, profile, profiles_left, addr_profile} =
+          restart_ladder(sip_ctx, leg, [uri])
 
         case call_leg(fn -> SIP.Dialog.fork_branch(leg.dialogpid, uri, fork_opts) end) do
           {:ok, new_trans} ->
@@ -1267,7 +1289,8 @@ defmodule SIP.Session.B2bua do
                 initial_trans: new_trans,
                 branches: [{new_trans, uri}],
                 profile: profile,
-                profiles_left: profiles_left
+                profiles_left: profiles_left,
+                addr_profile: addr_profile
             })
             |> put_last_invite(@outbound_tag, leg.method, new_trans)
             |> note_progress({:serial_attempting, uri, now()})
@@ -1391,7 +1414,8 @@ defmodule SIP.Session.B2bua do
           initial_trans: trans_pid,
           media: media,
           profile: first_rung(peer),
-          profiles_left: Enum.drop(Profile.ladder(peer.profile), 1)
+          profiles_left: Enum.drop(Profile.ladder(peer.profile), 1),
+          addr_profile: rung_profile([target | siblings])
         }
 
         sip_ctx
@@ -2487,7 +2511,9 @@ defmodule SIP.Session.B2bua do
     leg = outbound_leg(sip_ctx)
     [rung | rest] = leg.untried
     uris = Enum.map(rung, &branch_uri(%{ruri: leg.fwd_ruri}, &1, leg.peer))
-    {sip_ctx, fork_opts, profile, profiles_left} = restart_ladder(sip_ctx, leg)
+
+    {sip_ctx, fork_opts, profile, profiles_left, addr_profile} =
+      restart_ladder(sip_ctx, leg, rung)
 
     case call_leg(fn -> SIP.Dialog.fork_branch(leg.dialogpid, uris, fork_opts) end) do
       {:ok, new_trans} ->
@@ -2516,7 +2542,8 @@ defmodule SIP.Session.B2bua do
             untried: rest,
             initial_trans: rep,
             profile: profile,
-            profiles_left: profiles_left
+            profiles_left: profiles_left,
+            addr_profile: addr_profile
         })
         |> put_last_invite(@outbound_tag, leg.method, rep)
         |> note_progress({:serial_not_reachable, leg.target, resp.response, now()})
@@ -2593,7 +2620,10 @@ defmodule SIP.Session.B2bua do
     leg = outbound_leg(sip_ctx)
     [profile | rest] = leg.profiles_left
 
-    case regenerate_offer(sip_ctx, profile) do
+    # The same targets, one offer profile down: the addressing profile is untouched,
+    # because where the media leaves by has nothing to do with which body the
+    # callee refused.
+    case regenerate_offer(sip_ctx, profile, leg.addr_profile) do
       {:ok, sip_ctx, offer} ->
         uris =
           Enum.map(leg.branches, fn {_tid, target} ->
@@ -2663,31 +2693,63 @@ defmodule SIP.Session.B2bua do
   # Already at the top (the ordinary case: the previous rung simply did not
   # answer) nothing is rebuilt, and the offer generated once is reused by every
   # branch, exactly as before P5.
-  defp restart_ladder(sip_ctx, %Leg{peer: peer} = leg) do
+  # Two reasons to rebuild the offer before ringing the next rung, and both close
+  # the endpoint that served the last one:
+  #
+  #  * the OFFER ladder restarts — the refused body walks back to the top for a
+  #    new target (§7.5);
+  #  * the next rung sits on another ADDRESSING profile — a hunt that walks from a
+  #    v4 target to a v6 one has to announce the media server's v6 address, and the
+  #    `c=` line was fixed when the endpoint was created.
+  #
+  # Either way the work is the same: drop the endpoint, build another. Which is why
+  # this is one function and not two.
+  defp restart_ladder(sip_ctx, %Leg{peer: peer} = leg, rung) do
+    addr = rung_profile(rung)
+    addr_changed? = addr != leg.addr_profile
+
     case Profile.ladder(peer.profile) do
-      [] ->
-        {sip_ctx, [], nil, []}
+      [] when not addr_changed? ->
+        {sip_ctx, [], nil, [], leg.addr_profile}
 
-      [top | rest] when top === leg.profile ->
-        {sip_ctx, [], top, rest}
+      [top | rest] when top === leg.profile and not addr_changed? ->
+        {sip_ctx, [], top, rest, leg.addr_profile}
 
-      [top | rest] ->
-        case regenerate_offer(sip_ctx, top) do
+      ladder ->
+        {top, rest} =
+          case ladder do
+            [] -> {leg.profile, leg.profiles_left}
+            [t | r] -> {t, r}
+          end
+
+        case regenerate_offer(sip_ctx, top, addr) do
           {:ok, sip_ctx, offer} ->
-            {sip_ctx, [body: offer], top, rest}
+            if addr_changed? do
+              Logger.info(
+                module: __MODULE__,
+                message:
+                  "b2bua: the next rung sits on #{inspect(addr)} where the last was on " <>
+                    "#{inspect(leg.addr_profile)}; the media endpoint was rebuilt there"
+              )
+            end
+
+            {sip_ctx, [body: offer], top, rest, addr}
 
           {:error, sip_ctx, reason} ->
             # The next targets are rung with the offer we have rather than not
             # rung at all: a hunt that stops because the media server hiccuped
-            # would lose a call that had other places to go.
+            # would lose a call that had other places to go. When it is the
+            # ADDRESS that could not be rebuilt, the offer announces the previous
+            # profile's — media the callee may not reach, which is still better
+            # than a call that goes nowhere, and it is said out loud.
             Logger.warning(
               module: __MODULE__,
               message:
-                "b2bua: cannot restart the offer ladder (#{inspect(reason)}); " <>
-                  "the next targets keep the #{inspect(leg.profile)} offer"
+                "b2bua: cannot rebuild the offer (#{inspect(reason)}); the next targets " <>
+                  "keep the #{inspect(leg.profile)} offer on #{inspect(leg.addr_profile)}"
             )
 
-            {sip_ctx, [], leg.profile, leg.profiles_left}
+            {sip_ctx, [], leg.profile, leg.profiles_left, leg.addr_profile}
         end
     end
   end
@@ -2696,12 +2758,16 @@ defmodule SIP.Session.B2bua do
   # refused one is closed first: its ports, its DTLS material and the profile of
   # its m= lines were fixed when it was created, and none of them can be
   # re-negotiated in place.
-  defp regenerate_offer(sip_ctx, profile) do
+  defp regenerate_offer(sip_ctx, profile, addr_profile) do
     case media_plan(sip_ctx) do
       %MediaPlan{opts: opts} = plan ->
         sip_ctx = Media.drop_peer_connection(sip_ctx, :outbound)
 
-        case media_offer(sip_ctx, profiled_outbound_opts(opts, profile)) do
+        outbound_opts =
+          profiled_outbound_opts(opts, profile) ++
+            if(is_binary(addr_profile), do: [address_profile: addr_profile], else: [])
+
+        case media_offer(sip_ctx, outbound_opts) do
           {:ok, sip_ctx, offer} ->
             plan = %MediaPlan{plan | outbound_offer: offer, bridged: false}
             {:ok, put_media_plan(sip_ctx, plan), offer}

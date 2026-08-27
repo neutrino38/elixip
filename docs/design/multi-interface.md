@@ -95,7 +95,8 @@ Voici la doc de l'API https://github.com/neutrino38/mediaserver/blob/master/desi
 
 Sept étapes. Les deux premières ne touchent aucun listener. Le besoin « réseau
 public IPv6 » est satisfait à l'étape 3, la médiation IPv4↔IPv6 aux étapes 4
-et 5, la médiation interne/externe à l'étape 6.
+et 5, la médiation interne/externe à l'étape 6 — dont la classification par
+préfixe est déjà là, l'étape 5 en ayant besoin.
 
 Deux chantiers restent hors de cette suite, parce qu'ils n'en sont pas des
 prérequis : un client STUN (étape 6) et le transport `ws` en clair.
@@ -410,7 +411,7 @@ d'instance, donc le second est ignoré avec un avertissement.
 possible entre deux familles. C'est aussi ici qu'un profil réseau devient
 distinguable par jambe en UDP (étape 5).
 
-### Étape 5 — Profils réseau du média — partiellement livrée
+### Étape 5 — Profils réseau du média — livrée
 
 Annoncer dans le SDP l'adresse du bon côté du réseau, en posant le paramètre
 `profile` de JSR309 (`xmlrpc_jsr309_api.md` §6.7 bis et §6.7 ter). Prérequis de
@@ -427,8 +428,8 @@ d'essayer (`b2bua_resolve/1`), marque chaque cible de son côté de réseau, et
 `media_connect/0` demande alors au pool un serveur portant tous les profils en
 jeu. Détail sous « Deux jambes, deux profils, un seul serveur » plus bas.
 
-**Non livré** : un endpoint par profil quand une même liste de cibles en mélange
-plusieurs. Voir « Une jambe porte un profil » plus bas.
+Y compris un endpoint par profil quand une chasse en traverse plusieurs. Voir
+« Une jambe porte un profil » plus bas.
 
 Le mediaserver porte jusqu'à quatre adresses — `publicv4`, `publicv6`,
 `internalv4`, `internalv6` — déclarées par `--public-ip` et `--internal-ip`.
@@ -671,16 +672,32 @@ pourraient dériver.
 Sans elle, la jambe sortante ne demandait rien et le serveur appliquait son défaut
 — faux pour tout callee v6 ou interne dès que le serveur porte deux adresses.
 
-**Cibles de profils différents : la première l'emporte, et c'est dit.** Un endpoint
-est créé par jambe, avant que la chasse ne parcoure quoi que ce soit, donc servir
-les deux demanderait un endpoint par profil. Le `checkout` a déjà garanti qu'un
-seul serveur les porte tous, donc l'endpoint existant est sur le bon serveur ;
-seule son adresse annoncée peut être celle de l'autre profil.
+##### Un endpoint par profil, au fil de la chasse
 
-**Reste à faire** : ouvrir un endpoint par profil et éteindre celui dont la mise en
-relation échoue. Le point de départ est `setup_media/5`, appelé une fois avec le
-premier barreau de l'échelle média ; il faudrait qu'il le soit par profil de cible,
-et que la chasse sache lequel de ses endpoints sert le rung qu'elle tente.
+L'adresse de la ligne `c=` est figée à la création de l'endpoint : elle ne se
+renégocie pas en place. Une chasse qui quitte une cible v4 pour une v6 a donc
+besoin d'un **autre** endpoint — exactement comme le redémarrage de l'échelle
+d'offres, qui ferme et reconstruit déjà (`regenerate_offer/3`). Les deux passent
+par le même mécanisme, et c'est pourquoi c'est une seule fonction :
+`restart_ladder/3` reconstruit quand l'échelle repart **ou** quand le rung suivant
+change de profil d'adressage.
+
+Un endpoint **au fil de la chasse** plutôt que tous d'avance, puis les perdants
+supprimés : moins de ressources serveur, aucun chemin de suppression à se
+tromper, et cela se compose avec le redémarrage d'échelle déjà là. La `%Leg{}`
+retient le profil sur lequel son endpoint a été construit (`addr_profile`), ce qui
+rend la décision lisible et testable.
+
+Un rung qui échoue à se reconstruire garde l'offre précédente et le dit : une
+chasse qui s'arrête parce que le serveur média a hoqueté perdrait un appel qui
+avait d'autres endroits où aller.
+
+**Un rung est une offre.** `SIP.Dialog.fork_branch/3` prend un seul corps pour
+autant de branches qu'il compose, donc deux branches d'un même rung ne peuvent pas
+porter deux lignes `c=`. Un rung dont les cibles diffèrent est donc composé sur la
+première, avec un avertissement qui dit quoi faire : mettre les cibles d'interfaces
+différentes dans des **rungs** différents, et chacune est alors servie sur la
+sienne. C'est une propriété du forking, pas une limite d'implémentation.
 
 ##### La couture, parce que le framework ne peut pas appeler le pool
 
