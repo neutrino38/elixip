@@ -310,12 +310,23 @@ defmodule MediaServer.Mendooze.Conn do
       event_sink: state.event_sink,
       opts: state.opts,
       prefer: state.prefer,
+      network_profiles: state.network_profiles,
       # this leg
       leg: name,
       endpoint_id: endpoint_id,
       medias: medias,
       local_ports: %{},
+      # The media server's announced address for this leg — NOT ours. Filled from
+      # what EndpointStartReceiving and GetMediaCandidates answer.
       local_ip: nil,
+      # The profile of the address of OURS this peer reached (`local_ip:` on
+      # create_peer_connection), which is this leg's own: two legs of a gateway
+      # call face two sides of the network. nil on a leg we placed, which had no
+      # transport when it was created.
+      sip_profile: sip_profile(state.opts),
+      # The profile asked of the media server, fixed on this leg's first
+      # StartReceiving and repeated verbatim afterwards.
+      address_profile: nil,
       local_crypto: :none,
       local_ice: nil,
       local_sdes: %{},
@@ -426,7 +437,8 @@ defmodule MediaServer.Mendooze.Conn do
 
   @impl true
   def init({server, event_sink, opts}) do
-    %{base_url: base_url, queue_id: queue_id} = Mendooze.rpc_info(server)
+    %{base_url: base_url, queue_id: queue_id, network_profiles: network_profiles} =
+      Mendooze.rpc_info(server)
     sess_tag = "cx-#{:erlang.unique_integer([:positive, :monotonic])}"
     medias = medias_from_opts(opts)
 
@@ -435,6 +447,10 @@ defmodule MediaServer.Mendooze.Conn do
       event_sink: event_sink,
       base_url: base_url,
       opts: opts,
+      # What the media server says it can announce (§6.7 ter), read once when the
+      # connection was made. `:unsupported` on a server whose API predates it, and
+      # then no leg asks for a profile at all.
+      network_profiles: network_profiles,
       # The scenario's codec ranking for this connection's answers, per media
       # (`prefer_codecs:` on create_peer_connection), resolved to codec CODES
       # once, here — so a typo in a codec name fails the creation, not an
@@ -1942,13 +1958,14 @@ defmodule MediaServer.Mendooze.Conn do
     Enum.reduce_while(state.medias, {:ok, state}, fn media, {:ok, st} ->
       rtp_map = Sdp.local_rtp_map(media, offer_codecs(st, media, cross), dtmf?(st, media))
 
-      with {:ok, [port | rest]} <-
-             rpc(st, "EndpointStartReceiving", [
-               st.sess_id,
-               st.endpoint_id,
-               @media_int[media],
-               rtp_map
-             ]),
+      # No peer SDP yet on this leg: its side of the network is all that speaks.
+      with {:ok, st, profile} <- leg_profile(st, nil),
+           {:ok, [port | rest]} <-
+             rpc(
+               st,
+               "EndpointStartReceiving",
+               start_receiving_args(st, @media_int[media], rtp_map, nil, profile)
+             ),
            {:ok, [candidate | _]} <-
              rpc(st, "GetMediaCandidates", [
                st.sess_id,
@@ -2036,19 +2053,20 @@ defmodule MediaServer.Mendooze.Conn do
                token,
                "t140"
              ]),
+           # StartReceiving FIRST: it is the call that carries the addressing
+           # profile, and the server applies it there. Asking for the candidates
+           # before it would publish a URL bearing the DEFAULT profile's address
+           # (§6.7 bis, "poser le profil avant de publier le port").
+           {:ok, state, profile} <- leg_profile(state, nil),
+           {:ok, [port | _rest]} <-
+             rpc(state, "EndpointStartReceiving",
+               start_receiving_args(state, m, rtp_map, nil, profile)),
            {:ok, candidates} when candidates != [] <-
              rpc(state, "GetMediaCandidates", [
                state.sess_id,
                state.endpoint_id,
                @proto_ws,
                m
-             ]),
-           {:ok, [port | _rest]} <-
-             rpc(state, "EndpointStartReceiving", [
-               state.sess_id,
-               state.endpoint_id,
-               m,
-               rtp_map
              ]) do
         # `<base>/jsr309/<sessionId>/<token>` — the path the server's WebSocket
         # handler parses, and the token is the only thing tying that URL to this
@@ -2117,7 +2135,8 @@ defmodule MediaServer.Mendooze.Conn do
         # codec properties when it runs)
         relay_offered_fmtp(state, m, desc, rtp_map)
 
-        with {:ok, [port | rest]} <- start_receiving_offered(state, m, desc, rtp_map),
+        with {:ok, state, profile} <- leg_profile(state, desc),
+             {:ok, [port | rest]} <- start_receiving_offered(state, m, desc, rtp_map, profile),
              {:ok, [candidate | _]} <-
                rpc(state, "GetMediaCandidates", [
                  state.sess_id,
@@ -2196,29 +2215,140 @@ defmodule MediaServer.Mendooze.Conn do
   # parameter faults on the extra argument, so the legacy 4-parameter form is
   # retried once — the codec.* relay (relay_offered_fmtp/4) already handed that
   # server the fmtp per codec, its own best granularity.
-  defp start_receiving_offered(state, m, desc, rtp_map) do
+  #
+  # That retry is for the offer struct ALONE. A leg carrying an addressing profile
+  # never falls back (§6.7 bis): the older form would place its media on the
+  # server's default interface, and answer 200 with an address the peer may have
+  # no route to, with nothing to say so. A profile is only ever asked of a server
+  # that answered GetNetworkProfiles, so the case is unreachable rather than
+  # merely refused — and it stays written down.
+  defp start_receiving_offered(state, m, desc, rtp_map, profile) do
     offer_fmtp = Map.take(Map.get(desc, :fmtp_raw, %{}), Map.keys(rtp_map))
-    args = [state.sess_id, state.endpoint_id, m, rtp_map]
+    args = start_receiving_args(state, m, rtp_map, offer_fmtp, profile)
 
-    if offer_fmtp == %{} do
-      rpc(state, "EndpointStartReceiving", args)
-    else
-      case rpc(state, "EndpointStartReceiving", args ++ [%{"fmtp" => offer_fmtp}]) do
-        {:ok, _} = ok ->
-          ok
+    cond do
+      not is_nil(profile) or offer_fmtp == %{} ->
+        rpc(state, "EndpointStartReceiving", args)
 
-        {:error, reason} ->
-          Logger.warning(
-            module: __MODULE__,
-            cnx_tag: state.sess_tag,
-            message:
-              "EndpointStartReceiving with the offer struct failed (#{inspect(reason)}); " <>
-                "retrying the legacy form — media server predates the offer parameter"
-          )
+      true ->
+        case rpc(state, "EndpointStartReceiving", args) do
+          {:ok, _} = ok ->
+            ok
 
-          rpc(state, "EndpointStartReceiving", args)
-      end
+          {:error, reason} ->
+            Logger.warning(
+              module: __MODULE__,
+              cnx_tag: state.sess_tag,
+              message:
+                "EndpointStartReceiving with the offer struct failed (#{inspect(reason)}); " <>
+                  "retrying the legacy form — media server predates the offer parameter"
+            )
+
+            rpc(state, "EndpointStartReceiving", [state.sess_id, state.endpoint_id, m, rtp_map])
+        end
     end
+  end
+
+  # The addressing profile this leg asks the media server for (§6.7 bis), decided
+  # ONCE — on its first StartReceiving — and then repeated verbatim: the server
+  # fixes it per leg, because in symmetric RTP the socket is the same in both
+  # directions, and it refuses a second, different one rather than rebind a media
+  # under a port it has already published.
+  #
+  # **The node's configured family decides nothing.** It describes every interface
+  # at once, and on a B2BUA bridging two of them it is right for one leg and wrong
+  # for the other — a session carrying two different profiles is the objective of
+  # docs/design/multi-interface.md, not an edge case. Three parties decide, each
+  # asked only what it alone knows:
+  #
+  #  * **the peer's offer**, when there is one, says which families it can receive
+  #    media on — the permission. Under ICE the `c=` holds only the default
+  #    candidate the peer elected, often a private address, and the `a=candidate`
+  #    lines name the rest; `Sdp.peer_families/1` reads both;
+  #  * **the address of ours this peer reached** (`sip_profile`) says which of our
+  #    interfaces it demonstrably has a route to — the preference. It only ever
+  #    REORDERS what the offer allows, since announcing a family the peer never
+  #    offered would be media sent nowhere. On the leg we OFFER first there is no
+  #    peer SDP yet, and it is the only thing that speaks;
+  #  * **the media server** says which profiles it carries (§6.7 ter) — the
+  #    availability.
+  #
+  # Nothing outside that intersection is served, and an empty one FAILS the leg: a
+  # fallback would place the media on the wrong interface and answer 200 with an
+  # address the peer cannot reach, with nothing to say so until the silence.
+  #
+  # Three cases ask for no profile at all, each leaving the server on its own
+  # default — exactly what a controller that never heard of profiles obtains: a
+  # server that does not carry the notion, an offer naming no address of either
+  # family, and a leg on which nothing states a side.
+  defp leg_profile(%{address_profile: profile} = leg, _desc) when is_binary(profile),
+    do: {:ok, leg, profile}
+
+  defp leg_profile(%{network_profiles: profiles} = leg, _desc) when not is_map(profiles),
+    do: {:ok, leg, nil}
+
+  defp leg_profile(leg, desc) do
+    case profile_candidates(leg, desc) do
+      [] ->
+        {:ok, leg, nil}
+
+      candidates ->
+        case Enum.find(candidates, &get_in(leg.network_profiles, [&1, :available])) do
+          nil -> {:error, {:profile_unavailable, Enum.join(candidates, ", ")}}
+          name -> {:ok, %{leg | address_profile: name}, name}
+        end
+    end
+  end
+
+  # No peer SDP — the leg we offer on — so our own side is all there is to go on.
+  defp profile_candidates(%{sip_profile: local}, nil), do: List.wrap(local)
+
+  defp profile_candidates(%{sip_profile: local}, desc) do
+    case Enum.map(Sdp.peer_families(desc), &profile_name/1) do
+      [] -> []
+      offered -> if local in offered, do: Enum.uniq([local | offered]), else: offered
+    end
+  end
+
+  # Only the public side, and it is not an omission: which side of the network a
+  # correspondent sits on is step 6 of docs/design/multi-interface.md, where a node
+  # learns to classify an address. Until then a leg reached through an `internal`
+  # listener announces the public address, as it does today.
+  defp profile_name(:ipv6), do: "publicv6"
+  defp profile_name(:ipv4), do: "publicv4"
+
+  defp sip_profile(opts) do
+    case SIP.NetUtils.address_family(Keyword.get(opts, :local_ip)) do
+      nil -> nil
+      family -> profile_name(family)
+    end
+  end
+
+  # `profile` is positional and SIXTH (xmlrpc_jsr309_api.md §6.7 bis), so `offer`
+  # has to be sent to reach it — an empty struct when the offer states no fmtp.
+  # With no profile to ask for, the call is byte-for-byte the one a controller
+  # that never heard of profiles makes.
+  # `profile` is positional and SEVENTH on EndpointStartSending, and it must be the
+  # one StartReceiving already fixed for this leg: in symmetric RTP the socket is
+  # the same in both directions, and the server refuses a second, different one
+  # (§6.7 bis). Repeating it is a no-op, which is why it is read rather than
+  # re-derived.
+  defp start_sending_args(leg, m, ip, port, send_map) do
+    base = [leg.sess_id, leg.endpoint_id, m, ip, port, send_map]
+
+    case leg.address_profile do
+      nil -> base
+      profile -> base ++ [profile]
+    end
+  end
+
+  defp start_receiving_args(leg, m, rtp_map, offer_fmtp, nil) do
+    base = [leg.sess_id, leg.endpoint_id, m, rtp_map]
+    if offer_fmtp in [nil, %{}], do: base, else: base ++ [%{"fmtp" => offer_fmtp}]
+  end
+
+  defp start_receiving_args(leg, m, rtp_map, offer_fmtp, profile) do
+    [leg.sess_id, leg.endpoint_id, m, rtp_map, %{"fmtp" => offer_fmtp || %{}}, profile]
   end
 
   # The `codec.<name>.fmtp` channel — per CODEC, the coarser of the two relays —
@@ -2351,14 +2481,11 @@ defmodule MediaServer.Mendooze.Conn do
     with :ok <- set_rtp_properties(state, m, desc),
          :ok <- set_remote_crypto(state, m, desc),
          {:ok, _} <-
-           rpc(state, "EndpointStartSending", [
-             state.sess_id,
-             state.endpoint_id,
-             m,
-             desc.ip,
-             desc.port,
-             neg.send_map
-           ]),
+           rpc(
+             state,
+             "EndpointStartSending",
+             start_sending_args(state, m, desc.ip, desc.port, neg.send_map)
+           ),
          state = note_watchdog(state, desc),
          :ok <- apply_watchdog(state, desc.type) do
       {:ok, note_negotiated(state, desc.type, neg) |> note_h264_mode(desc), neg}
