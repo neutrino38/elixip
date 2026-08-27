@@ -786,13 +786,18 @@ du pair serait une régression.
 Reste le cas inverse à décrire : un pair public qui atteint un listener interne.
 Il suppose un routage qui l'a laissé entrer, et c'est une topologie à énoncer avant
 de coder une règle pour elle.
-- **Un client STUN n'existe pas.** `SIP.Stun` sait uniquement reconnaître et
-  décoder l'en-tête d'un message entrant ; son moduledoc énumère ce qui manque
-  (attributs, XOR-MAPPED-ADDRESS, encodage, MESSAGE-INTEGRITY), et son seul
-  appelant est un `Logger.debug`. Une découverte automatique de l'adresse
-  publique demande donc d'écrire un client complet, retransmissions comprises
-  (RFC 5389 §7.2.1). C'est un chantier facultatif, et `advertise` statique le
-  rend rarement nécessaire.
+
+#### Pas de client STUN — hors périmètre
+
+`SIP.Stun` sait uniquement reconnaître et décoder l'en-tête d'un message entrant ;
+son moduledoc énumère ce qui manque (attributs, XOR-MAPPED-ADDRESS, encodage,
+MESSAGE-INTEGRITY), et son seul appelant est un `Logger.debug`. Une découverte
+automatique de l'adresse publique demande donc d'écrire un client complet,
+retransmissions comprises (RFC 5389 §7.2.1).
+
+C'est un chantier facultatif, et `advertise` le rend rarement nécessaire : il
+ajouterait une dépendance réseau au démarrage et un mode de panne pour la même
+information. Le mediaserver fait le même choix avec `--public-ip`.
 
 ### Étape 7 — mTLS
 
