@@ -165,6 +165,18 @@ defmodule Kelix.Config do
   # ── infra -> :elixip2 app env ────────────────────────────────────────────────
 
   @doc false
+  @spec advertise_map(t) :: %{:inet.ip_address() => :inet.ip_address()}
+  def advertise_map(%__MODULE__{} = cfg) do
+    for %{addr: addr, advertise: adv} <- cfg.listen,
+        is_binary(addr) and is_binary(adv),
+        {:ok, bound} = SIP.NetUtils.parse_address(addr),
+        {:ok, alias_ip} = SIP.NetUtils.parse_address(adv),
+        into: %{} do
+      {bound, alias_ip}
+    end
+  end
+
+  @doc false
   @spec internal_networks(t) :: [{:inet.ip_address(), non_neg_integer()}]
   def internal_networks(%__MODULE__{} = cfg) do
     cfg.listen
@@ -197,6 +209,11 @@ defmodule Kelix.Config do
     # profiles. It cannot reach Kelix.MediaPool — a kelixip surface — so the
     # selection is declared here and called back into.
     Application.put_env(:elixip2, :mediaserver_selector, {Kelix.Router, :media_for_profiles})
+
+    # Which of our addresses to publish to a peer outside, per bound address: the
+    # `advertise` of a `[[listen]]` block. Read by `SIP.Transport.publish_ip/2`,
+    # the one place the substitution happens.
+    Application.put_env(:elixip2, :advertise_map, advertise_map(cfg))
 
     # Which addresses this node calls internal, from its `internal` listeners:
     # their own `networks` when stated, else the subnet the interface bearing
@@ -516,7 +533,8 @@ defmodule Kelix.Config do
         {:ok, nil}
 
       text when is_binary(text) ->
-        with {:ok, ip} <- SIP.NetUtils.parse_address(text),
+        with :ok <- advertise_needs_an_address(addr),
+             {:ok, ip} <- SIP.NetUtils.parse_address(text),
              :ok <- advertise_family_matches(ip, addr) do
           {:ok, text}
         else
@@ -532,10 +550,33 @@ defmodule Kelix.Config do
     end
   end
 
-  # A wildcard or absent `addr` states its family too (`0.0.0.0`, `::`, or both
-  # when absent), so an advertised address is checked against whichever the
-  # listener will actually bind. Absent means both families, and the advertised
-  # address then names the one it belongs to — nothing to contradict.
+  # `advertise` names the public face of ONE address, so that address has to be
+  # named too. A wildcard listener spans every interface of its family and each
+  # could have its own alias — or none — so which one is aliased is undefined;
+  # and the substitution is keyed on the address a transport reports being bound
+  # to, which for a wildcard listener is whichever local address it resolved, never
+  # `0.0.0.0`. The mapping could therefore never be found. Refuse it rather than
+  # accept a key nothing will ever match.
+  #
+  # No hardship: an operator behind a 1:1 NAT knows the private address of the
+  # interface that is natted — it is the one they gave the router.
+  defp advertise_needs_an_address(nil) do
+    {:error,
+     "[[listen]]: `advertise` needs an explicit `addr` — it names the public face of " <>
+       "one address, and a listener without one spans every interface of its family"}
+  end
+
+  defp advertise_needs_an_address(addr) do
+    case SIP.NetUtils.parse_address(addr) do
+      {:ok, {0, 0, 0, 0}} -> advertise_needs_an_address(nil)
+      {:ok, {0, 0, 0, 0, 0, 0, 0, 0}} -> advertise_needs_an_address(nil)
+      _ -> :ok
+    end
+  end
+
+  # A wildcard `addr` states its family too, so an advertised address is checked
+  # against whichever the listener will actually bind. `nil` — absent — is refused
+  # above before reaching here.
   defp advertise_family_matches(_ip, nil), do: :ok
 
   defp advertise_family_matches(ip, addr) do

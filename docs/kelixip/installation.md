@@ -199,7 +199,7 @@ Unknown keys are rejected too — a typo must not silently fall back to a defaul
 | `cert` / `key` | path | **yes for `tls`/`wss`** | Per-listener PEM cert and key. **Forbidden** on `udp`/`tcp` |
 | `tag` | `public` \| `internal` | non (`public`) | De quel côté du réseau ce listener se trouve |
 | `networks` | liste de CIDR | non | Les réseaux qui définissent ce côté. Présente, elle **remplace** la détection automatique |
-| `advertise` | IP | non | L'adresse **publiée** quand elle diffère de l'adresse liée (NAT 1:1). Même famille que `addr` |
+| `advertise` | IP | non | La **face publique** de `addr` (NAT 1:1). Même famille, et `addr` explicite exigée |
 
 ```toml
 [[listen]]
@@ -406,7 +406,7 @@ tag      = "internal"
 Toute adresse qui n'entre dans aucun de ces réseaux est `public`. Un nœud sans
 listener `internal` n'a qu'un côté, et c'est le public.
 
-##### `advertise` — une IP nattée 1:1
+##### `advertise` — une interface à deux faces (NAT 1:1)
 
 Une VM lie une adresse privée et se joint à une adresse publique. L'exploitant
 connaît cette adresse — une EIP AWS ne bouge pas — et rien sur la machine ne peut
@@ -418,15 +418,46 @@ proto     = "udp"
 addr      = "10.0.0.5"
 port      = 5060
 advertise = "203.0.113.9"
+tag       = "internal"      # 10.0.0.0/8 devient le réseau interne
 ```
 
-La socket lie toujours `addr` ; c'est l'adresse **annoncée** qui change. Tout ce
-qui écrit une adresse dans un message suit donc : le `sent-by` d'un Via, un
-Contact, et l'adresse que la couche média lit comme celle que ce pair a atteinte.
+**Ce n'est pas une substitution plate.** La même interface sert les deux côtés :
+une UA dans le réseau privé et une UA sur Internet arrivent sur la même socket,
+puisque le NAT a réécrit la destination. Chacune doit donc voir la face qu'elle
+peut joindre :
 
-Sa famille doit être celle de `addr`, et le démarrage échoue sinon : un Via et un
-Contact portant l'autre famille nomment une adresse qu'aucun pair de ce listener
-ne peut rappeler, et la panne ressemblerait à un problème de routage.
+| le pair est… | ce qu'il reçoit dans le Via, le Contact et le SDP |
+|---|---|
+| `public` (hors des réseaux internes) | `203.0.113.9` |
+| `internal` | `10.0.0.5` |
+| d'adresse inconnue | `203.0.113.9` — un nœud natté sert surtout l'extérieur |
+
+Le côté d'un pair se lit sur **son** adresse, contre les réseaux déclarés par les
+listeners `internal` (voir `tag` ci-dessus). Sans réseau interne déclaré, tout
+pair est public et `advertise` se comporte comme une substitution simple.
+
+La socket lie toujours `addr`, et le transport continue de rapporter l'adresse
+qu'il lie réellement : la substitution a lieu au moment de **publier**.
+
+Contraintes, toutes deux refusées au démarrage :
+
+- **`addr` explicite exigée.** `advertise` nomme la face publique d'**une**
+  adresse ; un listener wildcard couvre toutes les interfaces de sa famille et la
+  substitution n'aurait aucune clé à laquelle s'accrocher.
+- **Même famille que `addr`.** Un Via et un Contact portant l'autre famille
+  nomment une adresse qu'aucun pair de ce listener ne peut rappeler, et la panne
+  ressemblerait à un problème de routage.
+
+Le média, lui, n'est pas substitué par kelixip : c'est le mediaserver qui le fait,
+depuis ses propres profils. Pour cette topologie :
+
+```
+OPTIONS="--public-ip 10.0.0.5 --nat 203.0.113.9 --internal-ip 10.0.0.5"
+```
+
+> ⚠️ Dès qu'un `--internal-ip` est donné, l'API de contrôle XML-RPC du mediaserver
+> ne répond plus que sur l'adresse interne. Les entrées `[mediaserver.pool.*]`
+> doivent viser `10.0.0.5`, plus la loopback.
 
 Pas de découverte par STUN. Elle ajouterait une dépendance réseau au démarrage et
 un mode de panne, pour aucune information de plus que cette clé — et le

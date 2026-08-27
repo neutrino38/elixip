@@ -32,12 +32,7 @@ defmodule SIP.Transport.UDP do
       SIP.NetUtils.address_family(bind_ip) || Keyword.get(opts, :family) ||
         SIP.NetUtils.preferred_family()
 
-    open_socket(
-      if(bind_ip == :all, do: nil, else: bind_ip),
-      port,
-      family,
-      Keyword.get(opts, :advertise)
-    )
+    open_socket(if(bind_ip == :all, do: nil, else: bind_ip), port, family)
   end
 
   def init({dest_ip, dest_port, _domain}), do: init({dest_ip, dest_port})
@@ -61,16 +56,11 @@ defmodule SIP.Transport.UDP do
     open_socket(bind_ip, port, family)
   end
 
-  # `advertise` is the address this socket PUBLISHES when it is not the one it
-  # binds — a 1:1 NAT, where the host holds a private address and peers reach a
-  # public one. It changes `localip`, which is what Via and Contact are built from
-  # and what the media layer reads as the address a peer reached, and nothing else:
-  # the socket still binds `bind_ip`.
-  defp open_socket(bind_ip, port, family, advertise \\ nil) do
+  defp open_socket(bind_ip, port, family) do
     try do
       ips = SIP.NetUtils.get_local_ips([family])
 
-      case advertise || bind_ip || List.first(ips) do
+      case bind_ip || List.first(ips) do
         nil ->
           Logger.error(
             module: __MODULE__,

@@ -145,48 +145,94 @@ defmodule SIP.Test.NetSide do
       assert SIP.Uri.serialize(marked) == SIP.Uri.serialize(uri)
     end
   end
-  describe "advertise — the address a listener publishes" do
-    test "a TCP listener publishes the advertised address, and binds the other" do
-      # The 1:1 NAT case: the socket binds what the host holds, and everything
-      # that writes an address into a message carries what peers can reach.
-      {:ok, pid} =
-        GenServer.start(
-          SIP.Transport.TCPListener,
-          {{127, 0, 0, 1}, 0, [advertise: {203, 0, 113, 9}]}
-        )
+  describe "advertise — which face a peer sees" do
+    @bound {10, 0, 0, 5}
+    @alias {203, 0, 113, 9}
 
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+    setup do
+      previous_map = Application.fetch_env(:elixip2, :advertise_map)
 
-      # Published…
-      assert {:ok, {203, 0, 113, 9}, port} = GenServer.call(pid, :getlocalipandport)
-      # …and bound: still the address the host actually has.
-      assert {{127, 0, 0, 1}, ^port} = Socket.local!(:sys.get_state(pid).socket)
+      on_exit(fn ->
+        case previous_map do
+          {:ok, v} -> Application.put_env(:elixip2, :advertise_map, v)
+          :error -> Application.delete_env(:elixip2, :advertise_map)
+        end
+      end)
+
+      # One interface: bound private, reached publicly through a 1:1 NAT, and 10/8
+      # is the internal network.
+      Application.put_env(:elixip2, :advertise_map, %{@bound => @alias})
+      Application.put_env(:elixip2, :internal_networks, [{{10, 0, 0, 0}, 8}])
+      :ok
     end
 
-    test "a Contact carries the advertised address" do
-      {:ok, port} = SIP.NetUtils.pick_free_port(:udp)
-
-      {:ok, pid} =
-        GenServer.start(
-          SIP.Transport.UDP,
-          {:bind, {127, 0, 0, 1}, port, [family: :ipv4, advertise: {203, 0, 113, 9}]}
-        )
-
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
-
-      assert {:ok, {203, 0, 113, 9}, ^port} = GenServer.call(pid, :getlocalipandport)
-      assert {:ok, {{127, 0, 0, 1}, ^port}} = :inet.sockname(:sys.get_state(pid).socket)
-
-      # What the peer reads back, which is the whole point.
-      assert SIP.Uri.serialize(SIP.Transport.build_contact_uri(SIP.Transport.UDP, pid)) ==
-               {:ok, "<sip:203.0.113.9:#{port};transport=udp>"}
+    test "a peer outside sees the alias, a peer inside sees the bound address" do
+      assert SIP.Transport.publish_ip(@bound, {198, 51, 100, 7}) == @alias
+      assert SIP.Transport.publish_ip(@bound, {10, 0, 0, 42}) == @bound
     end
 
-    test "without it, nothing changes" do
+    test "an unknown peer sees the alias: a NATed node serves mostly outside" do
+      # The private address would break every outside peer, which is the whole
+      # population of such a deployment.
+      assert SIP.Transport.publish_ip(@bound, nil) == @alias
+    end
+
+    test "an address with no alias declared is published as it is" do
+      assert SIP.Transport.publish_ip({192, 0, 2, 8}, {198, 51, 100, 7}) == {192, 0, 2, 8}
+    end
+
+    test "no advertise anywhere changes nothing at all" do
+      Application.put_env(:elixip2, :advertise_map, %{})
+
+      assert SIP.Transport.publish_ip(@bound, {198, 51, 100, 7}) == @bound
+      assert SIP.Transport.publish_ip(@bound, {10, 0, 0, 42}) == @bound
+    end
+
+    test "the transport still answers the address it is REALLY bound to" do
+      # The substitution does not live there: the media layer reads this to choose
+      # an interface, and a comparison against a real socket has to hold.
       {:ok, pid} = GenServer.start(SIP.Transport.TCPListener, {{127, 0, 0, 1}, 0, []})
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
 
-      assert {:ok, {127, 0, 0, 1}, _port} = GenServer.call(pid, :getlocalipandport)
+      assert {:ok, {127, 0, 0, 1}, port} = GenServer.call(pid, :getlocalipandport)
+      assert {{127, 0, 0, 1}, ^port} = Socket.local!(:sys.get_state(pid).socket)
+    end
+
+    test "the Contact carries the face the peer can reach" do
+      {:ok, port} = SIP.NetUtils.pick_free_port(:udp)
+
+      {:ok, pid} =
+        GenServer.start(SIP.Transport.UDP, {:bind, {127, 0, 0, 1}, port, [family: :ipv4]})
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+      # Declare the loopback as the bound face of the alias, so this socket has two.
+      Application.put_env(:elixip2, :advertise_map, %{{127, 0, 0, 1} => @alias})
+
+      outside = SIP.Transport.build_contact_uri(SIP.Transport.UDP, pid, {198, 51, 100, 7})
+      inside = SIP.Transport.build_contact_uri(SIP.Transport.UDP, pid, {10, 0, 0, 42})
+
+      assert SIP.Uri.serialize(outside) ==
+               {:ok, "<sip:203.0.113.9:#{port};transport=udp>"}
+
+      assert SIP.Uri.serialize(inside) ==
+               {:ok, "<sip:127.0.0.1:#{port};transport=udp>"}
+    end
+
+    test "local_ip_for_peer/2 answers the same thing, with the port" do
+      {:ok, port} = SIP.NetUtils.pick_free_port(:udp)
+
+      {:ok, pid} =
+        GenServer.start(SIP.Transport.UDP, {:bind, {127, 0, 0, 1}, port, [family: :ipv4]})
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+      Application.put_env(:elixip2, :advertise_map, %{{127, 0, 0, 1} => @alias})
+
+      assert {:ok, @alias, ^port} =
+               SIP.Transport.local_ip_for_peer(pid, {198, 51, 100, 7})
+
+      assert {:ok, {127, 0, 0, 1}, ^port} =
+               SIP.Transport.local_ip_for_peer(pid, {10, 0, 0, 42})
     end
   end
 end

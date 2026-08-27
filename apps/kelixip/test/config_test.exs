@@ -700,22 +700,46 @@ defmodule Kelix.ConfigTest do
       assert {:error, msg} = listener(~s(addr = "10.0.0.5"\nadvertise = "2001:db8::9"))
       assert msg =~ "call back"
 
-      assert {:error, msg} = listener(~s(addr = "::1"\nadvertise = "203.0.113.9"))
+      assert {:error, msg} = listener(~s(addr = "fd00::5"\nadvertise = "203.0.113.9"))
       assert msg =~ "call back"
     end
 
-    test "the same family passes, wildcards included" do
-      assert {:ok, _} = listener(~s(addr = "0.0.0.0"\nadvertise = "203.0.113.9"))
-      assert {:ok, _} = listener(~s(addr = "::"\nadvertise = "2001:db8::9"))
+    test "an explicit address of the same family passes, in both families" do
+      assert {:ok, _} = listener(~s(addr = "10.0.0.5"\nadvertise = "203.0.113.9"))
+      assert {:ok, _} = listener(~s(addr = "fd00::5"\nadvertise = "2001:db8::9"))
     end
 
-    test "an absent addr contradicts nothing: it is both families" do
-      assert {:ok, cfg} = listener(~s(advertise = "203.0.113.9"))
-      assert [%{advertise: "203.0.113.9"}] = cfg.listen
+    test "apply_app_env/1 is what publish_ip/2 actually reads" do
+      previous = Application.fetch_env(:elixip2, :advertise_map)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, v} -> Application.put_env(:elixip2, :advertise_map, v)
+          :error -> Application.delete_env(:elixip2, :advertise_map)
+        end
+      end)
+
+      {:ok, cfg} = listener(~s(addr = "10.0.0.5"\nadvertise = "203.0.113.9"))
+      assert Config.advertise_map(cfg) == %{{10, 0, 0, 5} => {203, 0, 113, 9}}
+
+      :ok = Config.apply_app_env(cfg)
+      assert SIP.Transport.publish_ip({10, 0, 0, 5}, nil) == {203, 0, 113, 9}
+    end
+
+    test "a wildcard or absent addr is refused: nothing to key the alias on" do
+      # The substitution is keyed on the address a transport reports being bound
+      # to, and a wildcard listener reports whichever local address it resolved,
+      # never "0.0.0.0". The mapping could never be found, so the configuration is
+      # refused instead of being accepted and silently inert.
+      assert {:error, msg} = listener(~s(advertise = "203.0.113.9"))
+      assert msg =~ "needs an explicit `addr`"
+
+      assert {:error, _} = listener(~s(addr = "0.0.0.0"\nadvertise = "203.0.113.9"))
+      assert {:error, _} = listener(~s(addr = "::"\nadvertise = "2001:db8::9"))
     end
 
     test "a non-address is refused" do
-      assert {:error, msg} = listener(~s(advertise = "nope"))
+      assert {:error, msg} = listener(~s(addr = "10.0.0.5"\nadvertise = "nope"))
       assert msg =~ "`advertise`"
     end
   end

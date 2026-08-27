@@ -63,7 +63,11 @@ alias SIP.NetUtils
     # have been cached minutes ago, and an exit here happens inside the DIALOG
     # process (it is the dialog that opens transactions), where it propagated to
     # the scenario's own call and skipped its entire teardown — §14.2 (b).
-    case SIP.Transport.get_local_ip_port(tp_pid) do
+    # The Via's sent-by is where this transaction's responses come back to, so it
+    # is published towards the peer like a Contact is: on a 1:1 NAT the address a
+    # peer outside must answer to is not the one we are bound to. The peer is the
+    # resolved destination of the request we are about to send.
+    case SIP.Transport.local_ip_for_peer(tp_pid, sipmsg.ruri.destip) do
       { :ok, local_ip, local_port } ->
         local_ip_str = SIP.NetUtils.ip2string(local_ip)
 

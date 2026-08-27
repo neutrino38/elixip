@@ -59,14 +59,18 @@ port  = 5060
 #tag      = "internal"
 #networks = ["10.20.0.0/24"]
 
-# `advertise` : l'adresse publiée quand elle diffère de l'adresse liée — une VM
-# nattée 1:1 lie du privé et se joint en public. Même famille que `addr`. La
-# socket lie toujours `addr` ; seuls le Via, le Contact et le SDP changent.
+# `advertise` : la face PUBLIQUE de `addr` — une VM nattée 1:1 lie du privé et se
+# joint en public. Ce n'est pas une substitution plate : la même interface sert les
+# deux côtés, donc un pair public reçoit `advertise` et un pair interne reçoit
+# `addr`, dans le Via, le Contact et le SDP. Le côté d'un pair se lit sur SON
+# adresse, contre les réseaux des listeners `internal`.
+# `addr` explicite exigée (rien à quoi accrocher l'alias sinon), même famille.
 #[[listen]]
 #proto     = "udp"
 #addr      = "10.0.0.5"
 #port      = 5060
 #advertise = "203.0.113.9"
+#tag       = "internal"
 
 [tls]
 verify = false

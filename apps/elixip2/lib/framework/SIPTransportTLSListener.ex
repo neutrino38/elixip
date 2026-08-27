@@ -63,7 +63,7 @@ defmodule SIP.Transport.TLSListener do
   @impl true
   def init({addr, port, opts}) do
     family   = SIP.NetUtils.address_family(addr) || Keyword.get(opts, :family, :ipv4)
-    localip = advertised_ip(opts) || resolve_localip(addr, family)
+    localip = resolve_localip(addr, family)
     max_conn = Keyword.get(opts, :max_connections,
       Application.get_env(:elixip2, :tls_max_connections, @default_max_connections))
     certfile = Keyword.get(opts, :certfile,
@@ -213,22 +213,6 @@ defmodule SIP.Transport.TLSListener do
       {:error, reason} ->
         Logger.warning([module: __MODULE__, message: "TLS accept error: #{inspect(reason)}"])
         accept_loop(listen_socket, listener_pid)
-    end
-  end
-
-  # The address this listener PUBLISHES, when it is not the one it binds. A VM
-  # behind a 1:1 NAT binds a private address and is reached at a public one; the
-  # operator knows that address (an AWS EIP does not move), and nothing on the
-  # host can derive it.
-  #
-  # It replaces the advertised address only — `bind_addr` is untouched — so
-  # everything that writes an address into a message follows: `localip` is what
-  # `get_local_ip_port/1` answers, which is what a Via `sent-by` and a Contact are
-  # built from, and what the media layer reads as the address this peer reached.
-  defp advertised_ip(opts) do
-    case Keyword.get(opts, :advertise) do
-      ip when is_tuple(ip) -> ip
-      _ -> nil
     end
   end
 

@@ -540,9 +540,77 @@ defmodule SIP.Transport do
 
   @doc "Create a local contact URI associated with a given transport instance"
   @spec build_contact_uri(module(), pid()) :: %SIP.Uri{ domain: binary(), port: integer(), scheme: binary() } | nil
-  def build_contact_uri(tmod, tid) do
+  def build_contact_uri(tmod, tid), do: build_contact_uri(tmod, tid, nil)
+
+  @doc """
+  The address to publish towards `peer_ip`, given the address we are bound to.
+
+  One interface can have two faces: a 1:1 NAT gives a host a private address and
+  peers outside reach a public one. `advertise` on a `[[listen]]` block names that
+  public alias, and this is where it is applied — **not** in the transport, which
+  must keep answering the address it is really bound to (the media layer reads it
+  to choose an interface, and a comparison against a real socket has to hold).
+
+  Which face a peer sees follows from which side it sits on:
+
+    * `:public` — the alias, when one was declared for this bound address;
+    * `:internal` — the bound address itself. A peer inside reaches it directly,
+      and handing it the public alias would send its in-dialog requests through
+      the NAT and back, when the router hairpins at all.
+
+  A peer whose address is unknown gets the alias, which is what a flat
+  substitution would have done: a NATed deployment serves mostly outside peers,
+  and the private address would break them.
+  """
+  @spec publish_ip(:inet.ip_address() | binary(), :inet.ip_address() | nil) ::
+          :inet.ip_address() | binary()
+  def publish_ip(bound, peer_ip) when is_tuple(bound) do
+    case Application.get_env(:elixip2, :advertise_map, %{}) do
+      map when map == %{} ->
+        bound
+
+      map ->
+        case Map.fetch(map, bound) do
+          {:ok, alias_ip} -> if internal_peer?(peer_ip), do: bound, else: alias_ip
+          :error -> bound
+        end
+    end
+  end
+
+  # WSS answers a dialled hostname rather than a tuple on some paths; there is
+  # nothing to substitute for a name.
+  def publish_ip(bound, _peer_ip), do: bound
+
+  defp internal_peer?(peer_ip) when is_tuple(peer_ip),
+    do: SIP.NetUtils.net_side(peer_ip) == :internal
+
+  defp internal_peer?(_peer_ip), do: false
+
+  @doc """
+  The address and port to publish towards `peer_ip` on the transport `tid`.
+  """
+  @spec local_ip_for_peer(pid(), :inet.ip_address() | nil) ::
+          {:ok, :inet.ip_address() | binary(), integer()} | any()
+  def local_ip_for_peer(tid, peer_ip) do
     case get_local_ip_port(tid) do
-      { :ok, localip, localport } ->
+      {:ok, bound, port} -> {:ok, publish_ip(bound, peer_ip), port}
+      err -> err
+    end
+  end
+
+  @doc """
+  The Contact to publish towards `peer_ip`.
+
+  Same as `build_contact_uri/2` except for the address: `publish_ip/2` decides
+  which of ours this peer can reach. Pass the peer whenever it is known — a
+  Contact aimed at an address the peer has no route to is a dialog whose BYE
+  never arrives.
+  """
+  @spec build_contact_uri(module(), pid(), :inet.ip_address() | nil) :: %SIP.Uri{} | nil
+  def build_contact_uri(tmod, tid, peer_ip) do
+    case get_local_ip_port(tid) do
+      { :ok, bound, localport } ->
+        localip = publish_ip(bound, peer_ip)
         transport_str = apply(tmod, :transport_str, [])
         %SIP.Uri{
          domain: localip,
@@ -573,12 +641,20 @@ defmodule SIP.Transport do
 
   # Add /fix contact header to a SIP message given the transport
   def add_contact_header(tmod, tid, msg) when is_pid(tid) and is_map(msg) do
-    add_contact_header(build_contact_uri(tmod, tid), msg)
+    add_contact_header(build_contact_uri(tmod, tid, peer_of(msg)), msg)
   end
 
   # No local address to advertise: leave the message as it stands rather than
   # stamp a Contact we cannot fill in. The send that follows will fail on its own,
   # through the error path, which is where a dead transport belongs.
+  # Who this message is going to, when the message itself says. An outbound
+  # REQUEST carries its resolved destination in the R-URI; a RESPONSE goes back to
+  # where its request came from, which the transport stamped into that same field
+  # when it received it. Both are the same field, which is why one clause covers
+  # them. `nil` when nothing says, and the alias is then published.
+  defp peer_of(%{ruri: %SIP.Uri{destip: ip}}) when is_tuple(ip), do: ip
+  defp peer_of(_msg), do: nil
+
   defp add_contact_header(nil, msg), do: msg
 
   defp add_contact_header(new_contact, msg) do

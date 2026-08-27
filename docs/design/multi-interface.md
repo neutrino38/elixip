@@ -734,23 +734,51 @@ une adresse interne v4 et une v6, l'API n'écoute qu'en IPv4.
 
 Les besoins « médiation interne/externe » et « IP interne nattée 1:1 ».
 
-#### `advertise` — livrée
+#### `advertise` — livrée : une interface à deux faces
 
-`advertise = "<ip>"` par listener : l'adresse publiée dans la signalisation quand
-elle diffère de l'adresse liée. C'est la VM nattée 1:1, où l'exploitant connaît
-l'adresse publique — une EIP AWS ne bouge pas — et où rien sur la machine ne peut
-la déduire.
+`advertise = "<ip>"` par listener nomme la **face publique** de `addr`. C'est la VM
+nattée 1:1, où l'exploitant connaît l'adresse publique — une EIP AWS ne bouge pas —
+et où rien sur la machine ne peut la déduire.
 
-La socket lie toujours `addr` ; seule l'adresse **annoncée** change. Tout ce qui
-écrit une adresse dans un message suit donc, parce que tout part du même endroit :
-`localip`, ce que `SIP.Transport.get_local_ip_port/1` répond, dont sont construits
-le `sent-by` d'un Via et un Contact, et que la couche média lit comme l'adresse
-que ce pair a atteinte. `bind_addr` et `localip` étaient déjà deux champs
-distincts dans les trois listeners : c'est ce qui a rendu l'ajout local.
+**Ce n'est pas une substitution plate**, et c'est le point qui a demandé deux
+essais. La même interface sert les deux côtés : une UA privée et une UA publique
+arrivent sur la même socket, le NAT ayant réécrit la destination. Chacune doit
+voir la face qu'elle peut joindre.
 
-Sa famille doit être celle de `addr`, et la configuration est refusée sinon : un
-Via et un Contact portant l'autre famille nomment une adresse qu'aucun pair de ce
-listener ne peut rappeler, et la panne ressemblerait à un problème de routage.
+| le pair est… | ce qu'il reçoit |
+|---|---|
+| `public` | l'alias |
+| `internal` | l'adresse liée |
+| inconnu | l'alias — un nœud natté sert surtout l'extérieur |
+
+**La substitution ne vit pas dans le transport.** Il continue de rapporter
+l'adresse qu'il **lie réellement** : la couche média la lit pour choisir une
+interface, et une comparaison contre une vraie socket doit tenir. Elle a lieu au
+moment de **publier**, en un seul endroit — `SIP.Transport.publish_ip/2` —, depuis
+une table de nœud `:advertise_map` (`adresse liée => alias`) écrite par
+`Kelix.Config.apply_app_env/1`.
+
+Trois en-têtes la traversent, chacun avec le pair qu'il connaît déjà :
+
+- **Contact** — `build_contact_uri/3`. Le pair vient de `ruri.destip` : la
+  destination résolue pour une requête sortante, la source estampillée par le
+  transport pour une réponse. **Le même champ**, d'où une seule clause.
+- **Via** — `transaction_start_common`. Le `sent-by` est là où reviennent les
+  réponses de cette transaction, donc il se publie comme un Contact.
+- **Route et Record-Route** — **rien à faire.** elixip les *lit* (route set d'une
+  réponse pour bâtir l'ACK, `Path` d'un REGISTER) et n'en écrit jamais : un B2BUA
+  est un UA sur chaque patte, il n'ajoute pas de Via de proxy et n'enregistre pas
+  de route. Aucune adresse à nous n'y figure. Vérifié plutôt que supposé.
+
+Deux contraintes, refusées au démarrage :
+
+- **`addr` explicite exigée.** `advertise` nomme la face d'**une** adresse ; un
+  listener wildcard couvre toutes les interfaces de sa famille, et la substitution
+  est indexée sur l'adresse que le transport rapporte lier — jamais `0.0.0.0`. La
+  clé ne serait jamais trouvée, donc la configuration est refusée plutôt
+  qu'acceptée et silencieusement inerte.
+- **Même famille que `addr`** : un Via et un Contact de l'autre famille nomment une
+  adresse qu'aucun pair de ce listener ne peut rappeler.
 
 #### `[network] internal` — non retenue
 
@@ -809,11 +837,8 @@ lie rien : le bind a lieu par session RTP, chacune avec son couple de ports.
 contrôle XML-RPC ne répond plus que sur l'adresse interne. Les entrées
 `[mediaserver.pool.*]` doivent viser `10.0.0.5`, plus la loopback.
 
-**Reste à faire** : le Contact et le Via. Un BYE de l'UA publique visant
-`10.0.0.5` n'arriverait nulle part. Le Contact est estampillé dans la couche
-transaction (`SIPNICT`, `SIPICT`, `SIPTransactionCommon`) depuis `{t_mod, t_pid}`
-seul ; en UDP une socket sert plusieurs pairs, donc l'adresse du pair doit y
-descendre. Trois sites d'appel.
+Le Contact et le Via portent la même discrimination — voir « `advertise` » plus
+haut. Un BYE de l'UA publique visant `10.0.0.5` n'arriverait nulle part.
 
 #### Pas de client STUN — hors périmètre
 
