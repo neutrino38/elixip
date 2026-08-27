@@ -263,6 +263,22 @@ defmodule MediaServer do
           # encryption or ICE — and `:avp` (the default) plain RTP. Ignored when
           # `webrtc_support: :yes`, which already implies SAVPF.
           rtp_profile: :avp | :avpf,
+          # Which transport the TEXT medium is OFFERED on, when we make the offer
+          # (docs/design/DESIGN-FRAMEWORK.md §6.5, and the media server's
+          # docs/conception/T140-DC/SPEC.md):
+          #
+          #  * `:data_channel` — `m=application … UDP/DTLS/SCTP webrtc-datachannel`
+          #    (RFC 8865), inside our own DTLS and ICE. **The default on a WebRTC
+          #    leg**, and the only thing a browser can receive: `RTCPeerConnection`
+          #    has no `m=text` on an RTP profile;
+          #  * `:rtp` — `m=text` with T.140 and the RFC 4103 redundancy. The
+          #    default off WebRTC, and what a SIP Total Conversation endpoint
+          #    speaks. Asking for a data channel there is logged and falls back
+          #    here: a data channel needs DTLS.
+          #
+          # A WebSocket is never offered — it is a door we open when a peer asks
+          # for one. Nothing to set for that case, and this option does not name it.
+          text_transport: :data_channel | :rtp,
           # let the media server follow a symmetric NAT's mapping instead of the
           # send address the peer signalled. `:auto` (the default) leaves it to the
           # adapter, which asks for it on every leg that is not ICE — a NATed peer

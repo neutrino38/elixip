@@ -73,6 +73,14 @@ defmodule MediaServer.Mendooze.Conn do
   @proto_rtp 0
   # MediaFrame::MediaProtocol WS — the transport of a text-over-WebSocket media
   @proto_ws 2
+  # MediaFrame::MediaProtocol SCTP — a WebRTC data channel (RFC 8865). Text
+  # again, and the other non-RTP transport this adapter drives: the WebSocket is
+  # a second connection beside the call, a data channel is inside it.
+  @proto_sctp 5
+  # The `a=sctp-port` we ask the server to assume for a peer that has not told us
+  # one — which is every OFFER we make. 0 makes the server keep the RFC 8841
+  # default (5000), the port every browser uses.
+  @sctp_port_unknown 0
   # MediaRole::VIDEO_MAIN. For a text media this is not a mistake: it is the
   # "main" port of any media, whatever its type (Endpoint::GetPort).
   @role_main 0
@@ -316,6 +324,10 @@ defmodule MediaServer.Mendooze.Conn do
       endpoint_id: endpoint_id,
       medias: medias,
       local_ports: %{},
+      # The SCTP parameters of every media carried by a data channel, as the
+      # media server answered them: what the SDP publishes, offer or answer
+      # alike. The presence of a key IS "this medium is on a data channel".
+      data_channels: %{},
       # The media server's announced address for this leg — NOT ours. Filled from
       # what EndpointStartReceiving and GetMediaCandidates answer.
       local_ip: nil,
@@ -439,6 +451,7 @@ defmodule MediaServer.Mendooze.Conn do
   def init({server, event_sink, opts}) do
     %{base_url: base_url, queue_id: queue_id, network_profiles: network_profiles} =
       Mendooze.rpc_info(server)
+
     sess_tag = "cx-#{:erlang.unique_integer([:positive, :monotonic])}"
     medias = medias_from_opts(opts)
 
@@ -1764,7 +1777,16 @@ defmodule MediaServer.Mendooze.Conn do
   # nothing watched it, so `:media_lost` could never be reached again — the leg
   # stayed "alive" for the rest of the call however silent it went.
   defp receiving_medias(descs) do
-    for %{transport: t} = d <- descs, t != :ws, peer_sends?(d), into: MapSet.new(), do: d.type
+    for %{transport: t} = d <- descs,
+        # Neither non-RTP transport belongs in R. A WebSocket has no RTP leg at
+        # all; a data channel HAS one — same ICE, same DTLS — but no RTP ever
+        # arrives on it, so the server's "first packet received" event never
+        # fires and a data channel left in R would keep the leg waiting for a
+        # connectivity event that cannot come.
+        t not in [:ws, :sctp],
+        peer_sends?(d),
+        into: MapSet.new(),
+        do: d.type
   end
 
   # Called once the send plane is up for every media. With R empty no
@@ -1956,41 +1978,74 @@ defmodule MediaServer.Mendooze.Conn do
 
   defp start_receiving_all(state, cross) do
     Enum.reduce_while(state.medias, {:ok, state}, fn media, {:ok, st} ->
-      rtp_map = Sdp.local_rtp_map(media, offer_codecs(st, media, cross), dtmf?(st, media))
-
-      # No peer SDP yet on this leg: its side of the network is all that speaks.
-      with {:ok, st, profile} <- leg_profile(st, nil),
-           {:ok, [port | rest]} <-
-             rpc(
-               st,
-               "EndpointStartReceiving",
-               start_receiving_args(st, @media_int[media], rtp_map, nil, profile)
-             ),
-           {:ok, [candidate | _]} <-
-             rpc(st, "GetMediaCandidates", [
-               st.sess_id,
-               st.endpoint_id,
-               @proto_rtp,
-               @media_int[media]
-             ]),
-           {:ok, ip, _cport} <- Sdp.parse_media_candidate(candidate) do
-        # returnVal[1] (when present) is the fmtp-per-payload-type struct the
-        # server accepted; nil on an older server → codec-table fallback.
-        accepted = Sdp.accepted_pts(rtp_map, List.first(rest))
-
-        {:cont,
-         {:ok,
-          %{
-            st
-            | local_ports: Map.put(st.local_ports, media, port),
-              local_ip: ip,
-              proposed_recv: Map.put(st.proposed_recv, media, rtp_map),
-              accepted: Map.put(st.accepted, media, accepted)
-          }}}
+      if media == :text and offer_text_transport(st) == :data_channel do
+        start_receiving_data_channel(st, media)
       else
-        {:error, _} = err -> {:halt, err}
+        start_receiving_rtp(st, media, cross)
       end
     end)
+  end
+
+  # The TEXT medium offered on a data channel: the same plane as the answering
+  # side opens, with no peer sctp-port to relay — nobody has told us one yet.
+  #
+  # A failure here is NOT the loss of the call: the medium is dropped from the
+  # offer and the rest stands, exactly as a text-over-WebSocket configuration
+  # failure does. A leg that cannot carry text still carries audio and video.
+  defp start_receiving_data_channel(state, media) do
+    case open_data_channel_plane(state, media, @sctp_port_unknown) do
+      {:ok, state, _dc} ->
+        {:cont, {:ok, state}}
+
+      {:error, reason} ->
+        Logger.warning(
+          module: __MODULE__,
+          cnx_tag: state.sess_tag,
+          message:
+            "could not offer text over a data channel (#{inspect(reason)}); " <>
+              "the medium is left out of the offer"
+        )
+
+        {:cont, {:ok, %{state | medias: List.delete(state.medias, media)}}}
+    end
+  end
+
+  defp start_receiving_rtp(state, media, cross) do
+    st = state
+    rtp_map = Sdp.local_rtp_map(media, offer_codecs(st, media, cross), dtmf?(st, media))
+
+    # No peer SDP yet on this leg: its side of the network is all that speaks.
+    with {:ok, st, profile} <- leg_profile(st, nil),
+         {:ok, [port | rest]} <-
+           rpc(
+             st,
+             "EndpointStartReceiving",
+             start_receiving_args(st, @media_int[media], rtp_map, nil, profile)
+           ),
+         {:ok, [candidate | _]} <-
+           rpc(st, "GetMediaCandidates", [
+             st.sess_id,
+             st.endpoint_id,
+             @proto_rtp,
+             @media_int[media]
+           ]),
+         {:ok, ip, _cport} <- Sdp.parse_media_candidate(candidate) do
+      # returnVal[1] (when present) is the fmtp-per-payload-type struct the
+      # server accepted; nil on an older server → codec-table fallback.
+      accepted = Sdp.accepted_pts(rtp_map, List.first(rest))
+
+      {:cont,
+       {:ok,
+        %{
+          st
+          | local_ports: Map.put(st.local_ports, media, port),
+            local_ip: ip,
+            proposed_recv: Map.put(st.proposed_recv, media, rtp_map),
+            accepted: Map.put(st.accepted, media, accepted)
+        }}}
+    else
+      {:error, _} = err -> {:halt, err}
+    end
   end
 
   # ── UAS receive plane: delegated negotiation (the offer is the menu) ────────
@@ -2007,6 +2062,86 @@ defmodule MediaServer.Mendooze.Conn do
         {:error, _} = err -> {:halt, err}
       end
     end)
+  end
+
+  # ── the data channel text leg (RFC 8865) ─────────────────────────────────────
+  #
+  # The other answer to the same problem as the WebSocket above, and the opposite
+  # shape: a WebSocket is a second connection beside the call, with its own port,
+  # its own URL and a token to guard it; a data channel is INSIDE the peer's
+  # `RTCPeerConnection` — same ICE, same DTLS, same port as any other leg, and
+  # only what travels inside changes. So there is nothing to sign, and this plane
+  # is opened like an RTP one.
+  #
+  # Four RPCs, and this order matters: the port must be a data channel one before
+  # its SCTP parameters mean anything, and `EndpointStartReceiving` must run
+  # before `GetMediaCandidates` because it is the call that carries the
+  # addressing profile (§6.7 bis).
+  #
+  # Shared by both directions — `remote_sctp_port` is the peer's when we answer,
+  # `@sctp_port_unknown` when we offer and nobody has told us yet.
+  defp open_data_channel_plane(state, media, remote_sctp_port) do
+    m = @media_int[media]
+
+    with {:ok, _} <-
+           rpc(state, "ConfigureMediaConnection", [
+             state.sess_id,
+             state.endpoint_id,
+             m,
+             @role_main,
+             @proto_sctp,
+             "",
+             "t140"
+           ]),
+         {:ok, [sctp_port, max_message_size | _]} <-
+           rpc(state, "SetupDataChannel", [
+             state.sess_id,
+             state.endpoint_id,
+             m,
+             remote_sctp_port
+           ]),
+         {:ok, state, profile} <- leg_profile(state, nil),
+         # No rtpMap: no payload type travels inside a data channel.
+         {:ok, [port | _rest]} <-
+           rpc(
+             state,
+             "EndpointStartReceiving",
+             start_receiving_args(state, m, %{}, nil, profile)
+           ),
+         {:ok, candidates} when candidates != [] <-
+           rpc(state, "GetMediaCandidates", [
+             state.sess_id,
+             state.endpoint_id,
+             @proto_sctp,
+             m
+           ]),
+         {:ok, ip, _cport} <-
+           Sdp.parse_media_candidate(candidates |> List.last() |> to_string()) do
+      dc = %{sctp_port: sctp_port, max_message_size: max_message_size}
+
+      Logger.info(
+        module: __MODULE__,
+        cnx_tag: state.sess_tag,
+        message:
+          "#{media} on a data channel: our sctp-port #{sctp_port}, " <>
+            "max-message-size #{max_message_size}, udp port #{port}"
+      )
+
+      {:ok,
+       %{
+         state
+         | local_ports: Map.put(state.local_ports, media, port),
+           data_channels: Map.put(state.data_channels, media, dc),
+           local_ip: state.local_ip || ip
+       }, dc}
+    else
+      # An older media server (the methods do not exist), one that answered
+      # something else than the two values SetupDataChannel promises, or a leg it
+      # could not place. The catch-all is not decoration: an unmatched `with`
+      # clause raises, and a server that does not know a method answers `{:ok, []}`.
+      other ->
+        {:error, other}
+    end
   end
 
   # Delegated negotiation (the MCU adapter's P8a, transposed): no local codec
@@ -2059,8 +2194,11 @@ defmodule MediaServer.Mendooze.Conn do
            # (§6.7 bis, "poser le profil avant de publier le port").
            {:ok, state, profile} <- leg_profile(state, nil),
            {:ok, [port | _rest]} <-
-             rpc(state, "EndpointStartReceiving",
-               start_receiving_args(state, m, rtp_map, nil, profile)),
+             rpc(
+               state,
+               "EndpointStartReceiving",
+               start_receiving_args(state, m, rtp_map, nil, profile)
+             ),
            {:ok, candidates} when candidates != [] <-
              rpc(state, "GetMediaCandidates", [
                state.sess_id,
@@ -2117,6 +2255,42 @@ defmodule MediaServer.Mendooze.Conn do
 
           {:skip, state}
       end
+    end
+  end
+
+  defp open_offered_receive(state, %{transport: :sctp} = desc) do
+    media = desc.type
+
+    case open_data_channel_plane(state, media, Map.get(desc, :sctp_port, @sctp_port_unknown)) do
+      {:ok, state, dc} ->
+        {:ok, state,
+         %{
+           transport: :sctp,
+           sctp_port: dc.sctp_port,
+           max_message_size: dc.max_message_size,
+           # RFC 8864: the channel the peer declared, if it declared one. Echoed
+           # as such; `nil` means it opens the channel in band with DCEP, and the
+           # media server picks it out by its `t140` subprotocol.
+           dcmap: Map.get(desc, :dcmap),
+           rtp_map: %{},
+           send_map: %{},
+           codecs: ["T140"],
+           dtmf: false
+         }}
+
+      {:error, reason} ->
+        # The text is lost, not the call. Unlike the WebSocket case the section is
+        # DECLINED with port 0 and never omitted: it is in the peer's real offer,
+        # and libwebrtc counts the answer's m= lines against its own.
+        Logger.warning(
+          module: __MODULE__,
+          cnx_tag: state.sess_tag,
+          message:
+            "could not configure text over a data channel (#{inspect(reason)}); " <>
+              "the section is declined, the call stands"
+        )
+
+        {:skip, state}
     end
   end
 
@@ -2490,6 +2664,12 @@ defmodule MediaServer.Mendooze.Conn do
   # legitimately silent between keystrokes anyway.
   defp apply_remote_media(state, %{transport: :ws}, neg),
     do: {:ok, state, neg}
+
+  # A data channel leg is NOT in that case, and goes through the ordinary clause
+  # below on purpose: its StartSending is what posts the destination, and without
+  # it neither ICE nor the DTLS handshake has anywhere to go. Its send map is
+  # empty — no payload type travels inside a data channel — and the watchdog is
+  # the application's to arm, which it never does on text.
 
   # Applies the §9 remote-side steps for one media: transport properties, the
   # peer's security material, StartSending, then the watchdog — recorded last,
@@ -2876,6 +3056,46 @@ defmodule MediaServer.Mendooze.Conn do
   # ── SDP spec builders ───────────────────────────────────────────────────────
 
   defp offer_media_spec(state, media, cross) do
+    if Map.has_key?(state.data_channels, media) do
+      dc_offer_media_spec(state, media)
+    else
+      rtp_offer_media_spec(state, media, cross)
+    end
+  end
+
+  # The TEXT medium offered on a data channel (RFC 8865). Real media, so a real
+  # transport plane — our fingerprint, `a=setup:actpass` as in any offer of ours,
+  # our ICE credentials and our host candidates — and the SCTP parameters the
+  # media server answered.
+  #
+  # NO `a=dcmap` (RFC 8864), deliberately: declaring the channel in the SDP is
+  # what tells a peer NOT to open it in band, and our media server binds its text
+  # channel on the DCEP `OPEN` (SPEC §13.4). Announcing a channel we would then
+  # never see opened is the one way to make this section fail silently. A plain
+  # `createDataChannel("t140", {protocol: "t140"})` is what the peer has to do,
+  # and it is also what a browser does by default.
+  defp dc_offer_media_spec(state, media) do
+    dc = Map.fetch!(state.data_channels, media)
+    port = Map.fetch!(state.local_ports, media)
+
+    %{
+      data_channel: %{
+        sctp_port: dc.sctp_port,
+        max_message_size: dc.max_message_size,
+        dcmap: nil
+      },
+      type: :application,
+      port: port,
+      protocol: "UDP/DTLS/SCTP",
+      direction: :sendrecv,
+      crypto: local_crypto_spec(state, :actpass),
+      ice: state.local_ice,
+      mid: offer_mid(state, media),
+      candidates: Sdp.host_candidates(state.local_ip, port, true)
+    }
+  end
+
+  defp rtp_offer_media_spec(state, media, cross) do
     base =
       %{
         type: media,
@@ -2961,6 +3181,12 @@ defmodule MediaServer.Mendooze.Conn do
       match?(%{transport: :ws}, desc) and Map.has_key?(negotiated, desc.type) ->
         ws_answer_spec(state, desc)
 
+      # A configured data channel section is real media: the port the server
+      # bound, its own SCTP parameters, and the transport plane of any DTLS/ICE
+      # leg. Tested before `answerable?/2`, which such a section also satisfies.
+      match?(%{transport: :sctp}, desc) and Map.has_key?(negotiated, desc.type) ->
+        dc_answer_spec(state, negotiated, desc)
+
       answerable?(desc, state.medias) and Map.has_key?(negotiated, desc.type) ->
         answer_media_spec(state, negotiated, desc)
 
@@ -2986,6 +3212,37 @@ defmodule MediaServer.Mendooze.Conn do
       setup: :passive,
       direction: Sdp.reverse_direction(desc.direction),
       mid: Map.get(desc, :mid)
+    }
+  end
+
+  # The answer to a data channel offer (RFC 8841). The `m=` line goes back to
+  # saying `application` — the medium this section carries is the call's text, and
+  # `sdp_type` is the one place the two disagree — and it carries a real transport
+  # plane: our fingerprint, our setup role, our ICE credentials.
+  #
+  # `a=sctp-port` and `a=max-message-size` are the SERVER's, never a constant
+  # written here. No `a=dcmap` is echoed even when the peer sent one: announcing
+  # the channel in the SDP is what tells a peer NOT to open it in band with DCEP,
+  # and the media server binds its text channel on the DCEP `OPEN` (SPEC §13.4).
+  defp dc_answer_spec(state, negotiated, desc) do
+    neg = Map.fetch!(negotiated, desc.type)
+
+    %{
+      data_channel: %{
+        sctp_port: neg.sctp_port,
+        max_message_size: neg.max_message_size,
+        dcmap: nil
+      },
+      type: Map.get(desc, :sdp_type, :application),
+      port: Map.fetch!(state.local_ports, desc.type),
+      # mirror the offered spelling (RFC 8841 defines two)
+      protocol: desc.protocol,
+      direction: Sdp.reverse_direction(desc.direction),
+      crypto: answer_crypto(state, desc),
+      ice: state.local_ice,
+      mid: Map.get(desc, :mid),
+      candidates:
+        Sdp.host_candidates(state.local_ip, Map.fetch!(state.local_ports, desc.type), true)
     }
   end
 
@@ -3015,7 +3272,11 @@ defmodule MediaServer.Mendooze.Conn do
   # peer knows *which* of its sections we turned down.
   defp reject_media_spec(desc) do
     %{
-      type: desc.type,
+      # The `m=` line says what the OFFER said. A data channel section is the
+      # call's text and its descriptor says so, but its line reads `application`:
+      # a rejection that renamed it would not be the section the peer offered,
+      # and libwebrtc matches answer sections to its own by that name.
+      type: Map.get(desc, :sdp_type, desc.type),
       protocol: desc.protocol,
       reject_fmt: desc.raw_fmt,
       mid: Map.get(desc, :mid)
@@ -3618,6 +3879,61 @@ defmodule MediaServer.Mendooze.Conn do
   # mid — which is the 488 of 2026-08-21: the callee turned its camera on, the
   # relayed re-offer was refused, and the call died on a leg that was working.
   defp webrtc?(state), do: not is_nil(state.local_ice)
+
+  @doc false
+  # The transport the TEXT medium is OFFERED on, when this leg makes the offer.
+  # (`:text_transport` in the leg's opts.)
+  #
+  #  * `:data_channel` — inside our own DTLS and ICE, as
+  #    `m=application … UDP/DTLS/SCTP webrtc-datachannel` (RFC 8865). **The
+  #    default on a WebRTC leg**, and the only thing a browser can actually
+  #    receive: `RTCPeerConnection` has no `m=text` on an RTP profile;
+  #  * `:rtp` — `m=text` with T.140 and the RFC 4103 redundancy. The default off
+  #    WebRTC, and what a SIP Total Conversation endpoint speaks.
+  #
+  # A WebSocket is never OFFERED. It is a door we open when a peer asks for one
+  # (its own `m=text TCP/WS` section, answered with our URL); offering one would
+  # publish an address nobody asked for, and no client is built to look for it in
+  # an offer.
+  #
+  # A data channel needs DTLS. Asking for one off a WebRTC leg is a configuration
+  # mistake, not a wish to honour silently: it is logged and the offer falls back
+  # to RTP, which is the only thing that leg can carry.
+  defp offer_text_transport(state) do
+    case Keyword.get(state.opts, :text_transport, :default) do
+      :default ->
+        if webrtc?(state), do: :data_channel, else: :rtp
+
+      :data_channel ->
+        if webrtc?(state) do
+          :data_channel
+        else
+          Logger.warning(
+            module: __MODULE__,
+            cnx_tag: state.sess_tag,
+            message:
+              "text_transport: :data_channel asked for on a leg without DTLS/ICE; " <>
+                "a data channel cannot exist there — offering T.140 over RTP instead"
+          )
+
+          :rtp
+        end
+
+      :rtp ->
+        :rtp
+
+      other ->
+        Logger.warning(
+          module: __MODULE__,
+          cnx_tag: state.sess_tag,
+          message:
+            "unknown text_transport #{inspect(other)}; expected :data_channel or :rtp — " <>
+              "offering T.140 over RTP"
+        )
+
+        :rtp
+    end
+  end
 
   # Which RTP profile a NON-WebRTC offer is carried in (§7.5). `:avp` — plain
   # RTP — is the default and what every caller got before P5.
