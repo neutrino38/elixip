@@ -24,6 +24,80 @@ defmodule Mendooze.ServerTest do
     server
   end
 
+
+  describe "addressing profiles are asked for, never configured" do
+    defp profiles_handler(profiles) do
+      fn
+        "EventQueueCreate", _ -> {:ok, [7, "/events/jsr309/7"]}
+        "GetNetworkProfiles", _ -> {:ok, profiles}
+        _, _ -> {:ok, []}
+      end
+    end
+
+    defp profile(name, opts \\ []) do
+      %{
+        "name" => name,
+        "available" => Keyword.get(opts, :available, false),
+        "announced" => Keyword.get(opts, :announced, ""),
+        "bind" => Keyword.get(opts, :bind, ""),
+        "default" => Keyword.get(opts, :default, false)
+      }
+    end
+
+    test "the four profiles are read at connect and kept as the server states them" do
+      fake =
+        Jsr309FakeServer.start(
+          self(),
+          profiles_handler([
+            profile("publicv4", available: true, announced: "203.0.113.9", bind: "", default: true),
+            profile("publicv6", available: true, announced: "2001:db8::12", bind: "2001:db8::12"),
+            profile("internalv4", available: true, announced: "10.0.0.4", bind: "10.0.0.4"),
+            profile("internalv6")
+          ])
+        )
+
+      server = connect!(fake)
+      assert_receive {:jsr309_call, "GetNetworkProfiles", []}, 1_000
+
+      profiles = Mendooze.network_profiles(server)
+
+      assert %{
+               "publicv4" => %{available: true, announced: "203.0.113.9", default: true},
+               "publicv6" => %{available: true, announced: "2001:db8::12", bind: "2001:db8::12"},
+               "internalv4" => %{available: true, announced: "10.0.0.4"},
+               "internalv6" => %{available: false, announced: "", default: false}
+             } = profiles
+
+      # A profile the server does not carry is reported, not omitted: the caller
+      # has to be able to tell "not available" from "not answered".
+      assert map_size(profiles) == 4
+    end
+
+    test "a server that does not know the method is :unsupported, not an error" do
+      fake =
+        Jsr309FakeServer.start(self(), fn
+          "EventQueueCreate", _ -> {:ok, [7, "/events/jsr309/7"]}
+          "GetNetworkProfiles", _ -> {:error, "unknown method"}
+          _, _ -> {:ok, []}
+        end)
+
+      server = connect!(fake)
+      assert_receive {:jsr309_call, "GetNetworkProfiles", []}, 1_000
+
+      # Connected all the same: a leg then carries no profile, which is exactly
+      # what a controller that never heard of them does.
+      assert Process.alive?(server)
+      assert Mendooze.network_profiles(server) == :unsupported
+    end
+
+    test "an answer naming no profile is :unsupported too" do
+      fake = Jsr309FakeServer.start(self(), profiles_handler([]))
+      server = connect!(fake)
+
+      assert Mendooze.network_profiles(server) == :unsupported
+    end
+  end
+
   test "connect creates the event queue and polls the returned source path" do
     fake = Jsr309FakeServer.start(self())
     server = connect!(fake)

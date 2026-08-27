@@ -189,8 +189,24 @@ defmodule MediaServer.Mendooze do
     do: GenServer.cast(server, {:unregister_conn, sess_tag})
 
   @doc false
-  # RPC coordinates for Conn processes: %{base_url: ..., queue_id: ...}
+  # RPC coordinates for Conn processes:
+  # %{base_url: ..., queue_id: ..., network_profiles: ...}
   def rpc_info(server), do: GenServer.call(server, :rpc_info)
+
+  @doc """
+  The addressing profiles this media server carries, read from it when the
+  connection was made (`GetNetworkProfiles`, xmlrpc_jsr309_api.md §6.7 ter).
+
+  `%{"publicv6" => %{available: true, announced: "2001:db8::12", bind: "",
+  default: false}, …}` — the four profiles, available or not — or `:unsupported`
+  for a server whose API predates the call.
+
+  Asked, never configured. A profile list written on this side is a copy of what
+  the server knows about itself, and a copy drifts; the same rule already deleted
+  the MCU module's codec configuration.
+  """
+  @spec network_profiles(pid()) :: %{String.t() => map()} | :unsupported
+  def network_profiles(server), do: rpc_info(server).network_profiles
 
   # ── GenServer callbacks ─────────────────────────────────────────────────────
 
@@ -228,6 +244,11 @@ defmodule MediaServer.Mendooze do
            source_path: source_path,
            poller: poller,
            purpose: purpose,
+           # What the server says it can announce, read once here. The pool's
+           # keepalive probe opens and closes a connection every 30 s, so this
+           # re-reads itself: a media server restarted with other addresses is
+           # described by its own answer, never by what we remember of it.
+           network_profiles: read_network_profiles(base_url, purpose),
            # sess_tag => %{pid: conn_pid, sink: event_sink_pid}
            conns: %{}
          }}
@@ -249,6 +270,66 @@ defmodule MediaServer.Mendooze do
 
   defp log_connected(_purpose, base_url, queue_id),
     do: Logger.info("Mendooze: connected to #{base_url}, event queue #{queue_id}")
+
+  # The four profiles, keyed by name. `:unsupported` covers every way a server can
+  # fail to answer — an older binary faults on the unknown method, an unreachable
+  # one has already failed EventQueueCreate above — and it means exactly what a
+  # controller that never heard of profiles obtains: every leg goes out with no
+  # profile, and the server applies its own default.
+  defp read_network_profiles(base_url, purpose) do
+    case XmlRpc.call(base_url, "GetNetworkProfiles") do
+      {:ok, profiles} when is_list(profiles) ->
+        case Map.new(Enum.flat_map(profiles, &decode_profile/1)) do
+          empty when empty == %{} -> unsupported(purpose, base_url, "the answer names no profile")
+          decoded -> log_profiles(purpose, base_url, decoded)
+        end
+
+      {:ok, _other} ->
+        unsupported(purpose, base_url, "the answer is not a list of profiles")
+
+      {:error, reason} ->
+        unsupported(purpose, base_url, "#{inspect(reason)}")
+    end
+  end
+
+  defp decode_profile(%{"name" => name} = p) when is_binary(name) do
+    [
+      {name,
+       %{
+         available: p["available"] == true,
+         announced: to_string(p["announced"] || ""),
+         bind: to_string(p["bind"] || ""),
+         default: p["default"] == true
+       }}
+    ]
+  end
+
+  defp decode_profile(_), do: []
+
+  # Said out loud: it also means a server carrying two addresses is about to be
+  # driven through one of them only.
+  defp unsupported(:health_check, _base_url, _why), do: :unsupported
+
+  defp unsupported(_purpose, base_url, why) do
+    Logger.info(
+      "Mendooze: #{base_url} states no addressing profiles (#{why}) — " <>
+        "legs will use the server's default"
+    )
+
+    :unsupported
+  end
+
+  defp log_profiles(:health_check, _base_url, decoded), do: decoded
+
+  defp log_profiles(_purpose, base_url, decoded) do
+    available =
+      decoded
+      |> Enum.filter(fn {_n, p} -> p.available end)
+      |> Enum.map_join(", ", fn {n, p} -> "#{n}=#{p.announced}#{if p.default, do: " (default)"}" end)
+
+    Logger.info("Mendooze: #{base_url} announces #{if available == "", do: "no profile", else: available}")
+    decoded
+  end
 
   # Older servers return only [queueId]; the documented fallback path applies.
   defp source_path(_queue_id, [path | _]) when is_binary(path), do: path
@@ -292,7 +373,12 @@ defmodule MediaServer.Mendooze do
   end
 
   def handle_call(:rpc_info, _from, state) do
-    {:reply, %{base_url: state.base_url, queue_id: state.queue_id}, state}
+    {:reply,
+     %{
+       base_url: state.base_url,
+       queue_id: state.queue_id,
+       network_profiles: state.network_profiles
+     }, state}
   end
 
   @impl true
