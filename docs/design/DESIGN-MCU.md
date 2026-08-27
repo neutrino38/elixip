@@ -510,6 +510,48 @@ connection and returns the full URL, which the adapter publishes in its answer.
 A text-less admission — or a media server that cannot host the WebSocket —
 **omits** every `m=text` section from the answer rather than echoing it at port 0.
 
+**Text over a WebRTC data channel** (RFC 8865) is the other answer to the same
+problem, and the opposite shape. The WebSocket is a second connection beside the
+call, with its own port, its own URL and a token to guard it; a data channel is
+*inside* the caller's `RTCPeerConnection` — same ICE, same DTLS, same port as any
+other leg, and only what travels inside changes. So there is nothing to sign, and
+that leg is configured like an RTP one:
+
+```
+ConfigureParticipantMediaConnection(TEXT, SCTP)   switch the text plane
+SetupParticipantDataChannel(TEXT, peer sctp-port) -> ours, to publish
+StartReceiving(TEXT, %{})                         the port for the m= line
+SetRemoteCryptoDTLS + SetRemoteSTUNCredentials    as any DTLS/ICE leg
+StartSending(TEXT, ip, port, %{})                 at ACK time, like the rest
+```
+
+Three things follow, and each is a place where the WebSocket rule does **not**
+transpose:
+
+- **the `m=` line says `application`, the medium is the call's text.** The parsed
+  descriptor carries `type: :text` so everything that walks a media list keeps
+  working, and `sdp_type: :application` so the answer writes the browser's own
+  section name back. A rejection uses that name too.
+- **the section is declined with port 0, never omitted** — including on a
+  text-less admission, and including when the media server cannot serve it. It is
+  in the browser's real offer, and libwebrtc counts the answer's `m=` lines
+  against its own; an omission would leave the answer one section short.
+- **no `a=rtpmap`, no `a=fmtp`, no redundancy.** No payload type travels inside a
+  data channel, and SCTP being reliable, RFC 8865 has no RED — the mixer still
+  produces it for the RTP legs that negotiated it.
+
+`a=sctp-port` and `a=max-message-size` come from the media server, never from a
+constant on this side: same rule as the announced address, and the reason
+`SetupParticipantDataChannel` exists at all. A peer that declares its channels
+with `a=dcmap` (RFC 8864) gets one back; a browser doing a plain
+`createDataChannel` declares none, opens the channel in band with DCEP, and the
+media server picks it out by its `t140` subprotocol.
+
+**No `a=group:BUNDLE`**, here or anywhere: the media server gives each leg its own
+5-tuple. A browser left at its default `bundlePolicy` is served; one forced to
+`max-bundle` is not, and that is the media server's limitation, not this
+section's.
+
 ---
 
 ## 8. Driving a conference from a script
