@@ -417,7 +417,6 @@ defmodule Mendooze.ConnTest do
     assert ["107", "110", "99"] == video_fmt(offer)
   end
 
-
   # ── packetization-mode : le mode fait partie de l'identite du codec ─────────
 
   # Le mode de mise en paquets fait partie de l'identite d'un PT H.264
@@ -3095,5 +3094,226 @@ defmodule Mendooze.ConnTest do
     assert {:ok, answer} = Mendooze.set_remote_offer(conn, @elioz_offer)
     refute answer =~ "m=text"
     assert answer =~ "m=audio 22000"
+  end
+
+  # ── Text over a WebRTC data channel (RFC 8865) ──────────────────────────────
+
+  # What a browser offers when its page opens a data channel: the section is real
+  # media, with its own ICE, its own DTLS and its own sctp-port.
+  @dc_offer """
+  v=0
+  o=- 3 1 IN IP4 10.9.8.7
+  s=-
+  c=IN IP4 10.9.8.7
+  t=0 0
+  m=audio 40000 RTP/AVP 0
+  a=rtpmap:0 PCMU/8000
+  m=application 9 UDP/DTLS/SCTP webrtc-datachannel
+  a=mid:1
+  a=ice-ufrag:cccc
+  a=ice-pwd:dddddddddddddddddddddd
+  a=fingerprint:sha-256 #{@fp}
+  a=setup:actpass
+  a=sctp-port:5000
+  a=max-message-size:262144
+  """
+
+  defp dc_handler() do
+    fn
+      "SetupDataChannel", [_, _, 2, _] -> {:ok, [5000, 65_536, -1]}
+      "GetMediaCandidates", [_, _, 5, 2] -> {:ok, ["sctp://192.168.5.5:22004"]}
+      m, p -> rpc_handler(m, p)
+    end
+  end
+
+  test "a data channel text offer is configured and answered as m=application" do
+    %{server: server} = start_media_server(dc_handler())
+
+    # a data channel offer IS a WebRTC offer: it carries a DTLS fingerprint
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(),
+        media: [:audio, :text],
+        webrtc_support: :if_offered
+      )
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, @dc_offer)
+
+    # the port becomes a data channel one, with NO token — there is no URL to sign
+    assert_receive {:jsr309_call, "ConfigureMediaConnection", [3, 4, 2, 0, 5, "", "t140"]}
+    # then the peer's own sctp-port goes up, and ours comes back
+    assert_receive {:jsr309_call, "SetupDataChannel", [3, 4, 2, 5000]}
+    # the receive plane opens with an EMPTY rtpMap: no payload type travels inside
+    assert_receive {:jsr309_call, "EndpointStartReceiving", [3, 4, 2, rtp_map | _]}
+    assert rtp_map == %{}
+
+    # and unlike a WebSocket leg it DOES send: that is what posts the destination,
+    # and without it neither ICE nor the DTLS handshake has anywhere to go
+    assert_receive {:jsr309_call, "EndpointStartSending", [3, 4, 2 | _]}
+    # the peer's fingerprint is pushed like on any DTLS leg
+    assert_receive {:jsr309_call, "EndpointSetRemoteCryptoDTLS", [3, 4, 2 | _]}
+
+    # the answer says m=application again — the medium is the call's text, the
+    # line is the browser's section — with the SERVER's own SCTP parameters
+    assert answer =~ "m=application 22004 UDP/DTLS/SCTP webrtc-datachannel"
+    assert answer =~ "a=sctp-port:5000"
+    assert answer =~ "a=max-message-size:65536"
+    assert answer =~ "a=mid:1"
+    assert answer =~ "a=setup:passive"
+    # nothing RTP-shaped on it, and no BUNDLE anywhere
+    refute answer =~ "a=rtpmap:106"
+    refute answer =~ "a=group:BUNDLE"
+    # the audio leg is unaffected
+    assert answer =~ "m=audio 22000 RTP/AVP 0"
+  end
+
+  test "a media server that predates the data channel API declines the section, port 0" do
+    handler = fn
+      "SetupDataChannel", _ -> {:error, "method not found"}
+      m, p -> dc_handler().(m, p)
+    end
+
+    %{server: server} = start_media_server(handler)
+    # a data channel offer IS a WebRTC offer: it carries a DTLS fingerprint
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(),
+        media: [:audio, :text],
+        webrtc_support: :if_offered
+      )
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, @dc_offer)
+
+    # DECLINED, never omitted: the section is in the browser's real offer and
+    # libwebrtc counts the answer's m= lines against its own
+    assert answer =~ "m=application 0 UDP/DTLS/SCTP webrtc-datachannel"
+    assert answer =~ "a=mid:1"
+    assert answer =~ "m=audio 22000"
+  end
+
+  test "a server answering nothing to SetupDataChannel declines instead of raising" do
+    # a method a server does not know answers {:ok, []}, and an unmatched `with`
+    # clause would blow up the leg
+    handler = fn
+      "SetupDataChannel", _ -> {:ok, []}
+      m, p -> dc_handler().(m, p)
+    end
+
+    %{server: server} = start_media_server(handler)
+    # a data channel offer IS a WebRTC offer: it carries a DTLS fingerprint
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(),
+        media: [:audio, :text],
+        webrtc_support: :if_offered
+      )
+
+    assert {:ok, answer} = Mendooze.set_remote_offer(conn, @dc_offer)
+    assert answer =~ "m=application 0 UDP/DTLS/SCTP webrtc-datachannel"
+  end
+
+  # ── The OUTBOUND choice: which transport our own offer puts the text on ──────
+
+  test "a WebRTC leg offers its text on a data channel, by default" do
+    %{server: server} = start_media_server(dc_handler())
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(), media: :text, webrtc_support: :yes)
+
+    assert {:ok, offer} = Mendooze.get_local_offer(conn)
+
+    # the default, without anyone asking: it is the only thing a browser can
+    # receive — RTCPeerConnection has no m=text on an RTP profile
+    assert offer =~ "m=application 22004 UDP/DTLS/SCTP webrtc-datachannel"
+    assert offer =~ "a=sctp-port:5000"
+    assert offer =~ "a=max-message-size:65536"
+    # a real transport plane, and a=setup:actpass as in any offer of ours
+    assert offer =~ "a=setup:actpass"
+    assert offer =~ "a=fingerprint:sha-256 "
+    assert offer =~ "a=ice-ufrag:"
+
+    # NO m=text, and no dcmap: announcing the channel in the SDP is what tells a
+    # peer not to open it in band, and the media server binds on the DCEP OPEN
+    refute offer =~ "m=text"
+    refute offer =~ "a=dcmap"
+
+    assert_receive {:jsr309_call, "ConfigureMediaConnection", [3, 4, 2, 0, 5, "", "t140"]}
+    # nothing to relay of a peer that has not spoken yet: 0 leaves the server on
+    # the RFC 8841 default
+    assert_receive {:jsr309_call, "SetupDataChannel", [3, 4, 2, 0]}
+  end
+
+  test "text_transport: :rtp offers m=text with T.140 instead" do
+    %{server: server} = start_media_server(dc_handler())
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(),
+        media: :text,
+        webrtc_support: :yes,
+        text_transport: :rtp
+      )
+
+    assert {:ok, offer} = Mendooze.get_local_offer(conn)
+
+    assert offer =~ "m=text 22004 "
+    assert offer =~ "t140"
+    refute offer =~ "m=application"
+    refute_received {:jsr309_call, "SetupDataChannel", _}
+  end
+
+  test "a leg without DTLS offers m=text: a data channel could not exist there" do
+    %{server: server} = start_media_server(dc_handler())
+
+    # no webrtc_support: no ICE, no DTLS
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :text)
+
+    assert {:ok, offer} = Mendooze.get_local_offer(conn)
+
+    assert offer =~ "m=text 22004 "
+    refute offer =~ "m=application"
+    refute_received {:jsr309_call, "SetupDataChannel", _}
+  end
+
+  test "asking for a data channel off WebRTC is logged and falls back to RTP" do
+    %{server: server} = start_media_server(dc_handler())
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(), media: :text, text_transport: :data_channel)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:ok, offer} = Mendooze.get_local_offer(conn)
+        send(self(), {:offer, offer})
+      end)
+
+    assert_received {:offer, offer}
+    assert offer =~ "m=text 22004 "
+    refute offer =~ "m=application"
+    assert log =~ "a data channel cannot exist there"
+  end
+
+  test "a data channel we could not open leaves the medium out of the offer, not the call" do
+    handler = fn
+      "SetupDataChannel", _ -> {:error, "nope"}
+      m, p -> dc_handler().(m, p)
+    end
+
+    %{server: server} = start_media_server(handler)
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(),
+        media: [:audio, :text],
+        webrtc_support: :yes
+      )
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:ok, offer} = Mendooze.get_local_offer(conn)
+        send(self(), {:offer, offer})
+      end)
+
+    assert_received {:offer, offer}
+    # the text is gone, the audio stands
+    refute offer =~ "m=application"
+    refute offer =~ "m=text"
+    assert offer =~ "m=audio 22000"
+    assert log =~ "the medium is left out of the offer"
   end
 end
