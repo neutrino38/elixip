@@ -82,6 +82,19 @@ defmodule SIP.Uri do
             tp_module: nil,
             # transport PID
             tp_pid: nil,
+            # Which side of this node's network the RESOLVED destination sits on:
+            # `:internal` | `:public` | nil when nothing has classified it.
+            #
+            # Part of the resolved-routing cluster above, not of the URI's textual
+            # identity — `serialize/1` builds the wire form from named fields, so
+            # this never reaches a message.
+            #
+            # The FAMILY is deliberately absent: it is read off `destip`, by
+            # `SIP.NetUtils.address_family/1`, which is the single reader
+            # everywhere else. Two sources for one fact is the motif this stack
+            # keeps paying for. Only the side is stored, because only the side
+            # depends on the node's topology rather than on the address.
+            net_side: nil,
             # URI parameters: inside the <>
             params: %{},
             # header field parameters: after the >

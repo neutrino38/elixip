@@ -194,9 +194,11 @@ Unknown keys are rejected too — a typo must not silently fall back to a defaul
 | Key | Type | Required | Meaning |
 |---|---|---|---|
 | `proto` | `udp` \| `tcp` \| `tls` \| `wss` | **yes** | Transport |
-| `addr` | IP address | no (`0.0.0.0`) | Bind address, IPv4 or IPv6; it gives the listener its family. `0.0.0.0` binds every IPv4 interface; the IPv6 wildcard (`::`) is refused |
+| `addr` | IP address | non | Adresse liée, IPv4 ou IPv6 ; elle donne sa famille au listener. `0.0.0.0` = toutes les interfaces IPv4, `::` = toutes les IPv6. **Absente** = les deux familles, une socket chacune |
 | `port` | int > 0 | **yes** | Bind port |
 | `cert` / `key` | path | **yes for `tls`/`wss`** | Per-listener PEM cert and key. **Forbidden** on `udp`/`tcp` |
+| `tag` | `public` \| `internal` | non (`public`) | De quel côté du réseau ce listener se trouve |
+| `networks` | liste de CIDR | non | Les réseaux qui définissent ce côté. Présente, elle **remplace** la détection automatique |
 
 ```toml
 [[listen]]
@@ -220,10 +222,10 @@ key   = "/etc/pki/kelixip/privkey.pem"
 > `chown root:kelixip key.pem && chmod 0640 key.pem`. `/etc/kelixip/tls/` is
 > already 0750 `root:kelixip` for that purpose.
 >
-> UDP is **one socket per node** (the framework's single bidirectional UDP
-> transport): extra `udp` entries are ignored with a warning. An explicit `addr`
-> binds that address and is the one advertised in Via/Contact; `0.0.0.0` listens
-> on every IPv4 interface and advertises the first local IPv4 address.
+> UDP est **une socket par famille** : un datagramme ne sort que par une socket
+> de la famille de sa destination. Une seconde entrée `udp` d'une famille déjà
+> liée est ignorée avec un avertissement. Une `addr` explicite lie cette adresse
+> et c'est elle qui est annoncée dans Via et Contact and advertises the first local IPv4 address.
 >
 > An IPv6 listener names an explicit address:
 >
@@ -370,6 +372,38 @@ scrape it.
 | `enabled` | bool | `true` |
 | `addr` | IP | `127.0.0.1` |
 | `port` | 1..65535 | `9095` |
+
+##### `tag` et `networks` — le côté du réseau
+
+Sert à deux choses : annoncer la bonne adresse média selon le côté où se trouve
+le correspondant, et savoir de quel côté il est.
+
+Un listener `internal` **définit** le réseau interne. Par défaut, par le
+sous-réseau de l'interface qui porte son `addr` : `:inet.getifaddrs/0` rend le
+masque à côté de l'adresse, donc rien à lire dans la table de routage, et aucune
+passerelle par défaut à écarter — elle n'y figure pas.
+
+`networks` force cette détection et la **remplace**. Deux cas l'exigent :
+
+- un réseau interne joint par un routeur, donc attaché à aucune interface ;
+- une interface qui porte un /16 alors que l'interne est un /24. Une détection
+  qu'on ne peut que compléter est une détection qu'on ne peut pas corriger.
+
+Un listener `internal` **sans** `addr` ni `networks` est refusé : il se trouve sur
+tous les sous-réseaux, donc il n'en définit aucun, et l'interpréter comme « tout
+est interne » viderait silencieusement le côté public.
+
+```toml
+[[listen]]
+proto    = "udp"
+addr     = "10.20.0.5"
+port     = 5060
+tag      = "internal"
+#networks = ["10.20.0.0/24", "10.30.0.0/24"]
+```
+
+Toute adresse qui n'entre dans aucun de ces réseaux est `public`. Un nœud sans
+listener `internal` n'a qu'un côté, et c'est le public.
 
 #### `[tls]` — la jambe sortante
 

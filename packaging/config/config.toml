@@ -47,6 +47,18 @@ port  = 5060
 # temps que le côté entrant : un serveur qui exige un certificat client alors que
 # son propre client n'en vérifie aucun ne protège rien.
 # Le nom contrôlé est le domaine SIP de l'URI (RFC 5922), pas l'adresse résolue.
+# Un listener `tag = "internal"` définit le réseau interne : par défaut le
+# sous-réseau de l'interface qui porte son `addr`, ou la liste `networks` quand
+# elle est donnée — elle remplace la détection, elle ne s'y ajoute pas. Toute
+# adresse hors de ces réseaux est publique. Sans listener interne, le nœud n'a
+# qu'un côté.
+#[[listen]]
+#proto    = "udp"
+#addr     = "10.20.0.5"
+#port     = 5060
+#tag      = "internal"
+#networks = ["10.20.0.0/24"]
+
 [tls]
 verify = false
 #verify = true

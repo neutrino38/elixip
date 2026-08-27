@@ -58,7 +58,16 @@ defmodule Kelix.ConfigTest do
       assert [udp, tls] = cfg.listen
       # no `addr` in the fixture: nil, which the listener supervisor expands into
       # one socket per family the host carries
-      assert udp == %{proto: :udp, addr: nil, port: 5060, cert: nil, key: nil}
+      assert udp ==
+               %{
+                 proto: :udp,
+                 addr: nil,
+                 port: 5060,
+                 cert: nil,
+                 key: nil,
+                 tag: :public,
+                 networks: []
+               }
       assert tls.proto == :tls and tls.port == 5061
       assert tls.cert == "/etc/kelixip/tls/fullchain.pem"
       assert tls.key == "/etc/kelixip/tls/privkey.pem"
@@ -586,6 +595,89 @@ defmodule Kelix.ConfigTest do
 
       assert Application.get_env(:elixip2, :tls_verify) == true
       refute Application.get_env(:elixip2, :tls_cacertfile)
+    end
+  end
+  describe "[[listen]] tag and networks — which side a listener sits on" do
+    defp listener(extra) do
+      Config.parse(~s([[listen]]\nproto = "udp"\nport = 5060\n#{extra}))
+    end
+
+    test "public by default, read off the absence of the key" do
+      assert {:ok, cfg} = listener("")
+      assert [%{tag: :public, networks: []}] = cfg.listen
+    end
+
+    test "\"public\" is accepted and does nothing" do
+      assert {:ok, cfg} = listener(~s(tag = "public"))
+      assert [%{tag: :public}] = cfg.listen
+    end
+
+    test "an internal listener naming an address takes its subnet from the interface" do
+      assert {:ok, cfg} = listener(~s(addr = "127.0.0.1"\ntag = "internal"))
+      assert [%{tag: :internal, networks: []}] = cfg.listen
+
+      # No `networks` stated, so the prefix is the interface's — whatever this
+      # host's loopback netmask says, which in IPv4 is a /8.
+      assert Config.internal_networks(cfg) == [{{127, 0, 0, 0}, 8}]
+    end
+
+    test "stated networks REPLACE the detection rather than adding to it" do
+      assert {:ok, cfg} =
+               listener(~s(addr = "127.0.0.1"\ntag = "internal"\nnetworks = ["10.0.0.0/8", "fd00::/8"]))
+
+      assert Config.internal_networks(cfg) ==
+               [{{10, 0, 0, 0}, 8}, {{0xFD00, 0, 0, 0, 0, 0, 0, 0}, 8}]
+
+      # 127.0.0.0/8 would have been detected, and is deliberately absent.
+      refute {{127, 0, 0, 0}, 8} in Config.internal_networks(cfg)
+    end
+
+    test "a wildcard internal listener is refused: it defines no network" do
+      # It sits on every subnet, so taking it to mean "everything is internal"
+      # would silently make the public side empty.
+      assert {:error, msg} = listener(~s(tag = "internal"))
+      assert msg =~ "defines none"
+    end
+
+    test "a wildcard internal listener stating its networks is fine" do
+      assert {:ok, cfg} = listener(~s(tag = "internal"\nnetworks = ["10.0.0.0/8"]))
+      assert Config.internal_networks(cfg) == [{{10, 0, 0, 0}, 8}]
+    end
+
+    test "a public listener contributes nothing, whatever it sits on" do
+      assert {:ok, cfg} = listener(~s(addr = "127.0.0.1"))
+      assert Config.internal_networks(cfg) == []
+    end
+
+    test "bad values are refused with the key named" do
+      assert {:error, msg} = listener(~s(tag = "inside"))
+      assert msg =~ "`tag`"
+
+      assert {:error, msg} = listener(~s(tag = "internal"\nnetworks = ["10.0.0.0"]))
+      assert msg =~ "not a CIDR"
+
+      assert {:error, msg} = listener(~s(tag = "internal"\nnetworks = ["10.0.0.0/33"]))
+      assert msg =~ "not a CIDR"
+
+      assert {:error, msg} = listener(~s(tag = "internal"\nnetworks = "10.0.0.0/8"))
+      assert msg =~ "`networks`"
+    end
+
+    test "apply_app_env/1 is what the classifier actually reads" do
+      previous = Application.fetch_env(:elixip2, :internal_networks)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, v} -> Application.put_env(:elixip2, :internal_networks, v)
+          :error -> Application.delete_env(:elixip2, :internal_networks)
+        end
+      end)
+
+      {:ok, cfg} = listener(~s(tag = "internal"\nnetworks = ["10.0.0.0/8"]))
+      :ok = Config.apply_app_env(cfg)
+
+      assert SIP.NetUtils.net_side({10, 1, 2, 3}) == :internal
+      assert SIP.NetUtils.net_side({8, 8, 8, 8}) == :public
     end
   end
 end

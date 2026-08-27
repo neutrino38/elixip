@@ -22,7 +22,9 @@ defmodule Kelix.Config do
           addr: String.t() | nil,
           port: pos_integer,
           cert: String.t() | nil,
-          key: String.t() | nil
+          key: String.t() | nil,
+          tag: :public | :internal,
+          networks: [{:inet.ip_address(), non_neg_integer()}]
         }
 
   @typedoc """
@@ -161,10 +163,41 @@ defmodule Kelix.Config do
 
   # ── infra -> :elixip2 app env ────────────────────────────────────────────────
 
+  @doc false
+  @spec internal_networks(t) :: [{:inet.ip_address(), non_neg_integer()}]
+  def internal_networks(%__MODULE__{} = cfg) do
+    cfg.listen
+    |> Enum.filter(&(&1.tag == :internal))
+    |> Enum.flat_map(fn
+      %{networks: [_ | _] = stated} -> stated
+      %{addr: addr} when is_binary(addr) -> attached(addr)
+      _ -> []
+    end)
+    |> Enum.uniq()
+  end
+
+  # The subnet an interface states around this address. nil when no interface
+  # carries it — a listener that cannot bind aborts the boot anyway, and until it
+  # tries this is not the place to say so.
+  defp attached(addr) do
+    with {:ok, ip} <- SIP.NetUtils.parse_address(addr),
+         {_network, _length} = prefix <- SIP.NetUtils.attached_prefix(ip) do
+      [prefix]
+    else
+      _ -> []
+    end
+  end
+
   @doc "Push the framework-facing infra keys into the :elixip2 application env."
   @spec apply_app_env(t) :: :ok
   def apply_app_env(%__MODULE__{} = cfg) do
     Application.put_env(:elixip2, :useragent, cfg.user_agent)
+    # Which addresses this node calls internal, from its `internal` listeners:
+    # their own `networks` when stated, else the subnet the interface bearing
+    # their address is attached to. Read by `SIP.NetUtils.net_side/1`, the one
+    # place a correspondent is classified.
+    Application.put_env(:elixip2, :internal_networks, internal_networks(cfg))
+
     # `[tls]` reaches the outbound leg here: SIP.Transport.ImplHelpers reads both
     # keys when it dials a TLS or WSS peer.
     Application.put_env(:elixip2, :tls_verify, cfg.tls.verify)
@@ -438,16 +471,80 @@ defmodule Kelix.Config do
   defp parse_listeners(_), do: {:error, "`listen` must be an array of tables ([[listen]])"}
 
   defp parse_listener(%{} = l) do
-    with :ok <- reject_keys(l, ~w(proto addr port cert key), "[[listen]]"),
+    with :ok <- reject_keys(l, ~w(proto addr port cert key tag networks), "[[listen]]"),
          {:ok, proto} <- req_proto(l),
          {:ok, addr} <- opt_bind_addr(l),
          {:ok, port} <- req_pos_integer(l, "port", "[[listen]]"),
-         {:ok, cert, key} <- listener_certs(l, proto) do
-      {:ok, %{proto: proto, addr: addr, port: port, cert: cert, key: key}}
+         {:ok, cert, key} <- listener_certs(l, proto),
+         {:ok, tag} <- opt_listener_tag(l),
+         {:ok, networks} <- opt_listener_networks(l),
+         :ok <- internal_defines_its_network(tag, addr, networks) do
+      {:ok,
+       %{
+         proto: proto,
+         addr: addr,
+         port: port,
+         cert: cert,
+         key: key,
+         tag: tag,
+         networks: networks
+       }}
     end
   end
 
   defp parse_listener(_), do: {:error, "each [[listen]] must be a table"}
+
+  # `tag` has one useful value. The public side is the default, read off the
+  # absence of the key; `"public"` is accepted and does nothing, so a
+  # configuration that states it stays valid.
+  defp opt_listener_tag(l) do
+    case Map.get(l, "tag") do
+      nil -> {:ok, :public}
+      "public" -> {:ok, :public}
+      "internal" -> {:ok, :internal}
+      other -> {:error, "[[listen]]: `tag` must be \"public\" or \"internal\", got #{inspect(other)}"}
+    end
+  end
+
+  # The networks this listener's side is made of, as CIDR strings. Present, it
+  # **replaces** what would have been detected from the interface — it does not
+  # add to it. A detection that can only be widened cannot be corrected, and an
+  # interface carrying a /16 where the internal network is a /24 would leave the
+  # operator no way to narrow.
+  defp opt_listener_networks(l) do
+    case Map.get(l, "networks") do
+      nil ->
+        {:ok, []}
+
+      list when is_list(list) ->
+        reduce_while_ok(list, fn
+          text when is_binary(text) ->
+            case SIP.NetUtils.parse_prefix(text) do
+              {:ok, prefix} -> {:ok, prefix}
+              {:error, _} -> {:error, "[[listen]]: `networks` entry is not a CIDR: #{text}"}
+            end
+
+          other ->
+            {:error, "[[listen]]: `networks` entries must be strings, got #{inspect(other)}"}
+        end)
+
+      other ->
+        {:error, "[[listen]]: `networks` must be an array of CIDR strings, got #{inspect(other)}"}
+    end
+  end
+
+  # An internal listener DEFINES the internal network, by the subnet it sits on.
+  # A wildcard one sits on every subnet, so it defines nothing — and taking that
+  # to mean "everything is internal" would silently make the public side empty.
+  # Name an address, or name the networks.
+  defp internal_defines_its_network(:internal, nil, []) do
+    {:error,
+     "[[listen]]: an `internal` listener needs an explicit `addr` (its subnet is then " <>
+       "read from the interface) or an explicit `networks`; a wildcard listener sits on " <>
+       "every subnet and so defines none"}
+  end
+
+  defp internal_defines_its_network(_tag, _addr, _networks), do: :ok
 
   # `addr` states a family, and a wildcard states one too: "0.0.0.0" is every
   # IPv4 interface, "::" every IPv6 one. **Absent** is the only spelling that

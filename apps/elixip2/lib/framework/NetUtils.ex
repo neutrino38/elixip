@@ -172,6 +172,141 @@ defmodule SIP.NetUtils do
   def address_scope({_, _, _, _, _, _, _, _}), do: :global
   def address_scope(_), do: nil
 
+  @doc """
+  Parse a CIDR prefix — `"10.0.0.0/8"`, `"fd00::/8"` — into
+  `{address, prefix_length}`.
+
+  Here because this module is the one place that reads an address out of text
+  (`parse_address/1`), and a CIDR is an address form. A length longer than the
+  family holds is refused rather than clamped: it is a typo, and clamping would
+  silently widen a network an operator meant to narrow.
+  """
+  @spec parse_prefix(String.t()) ::
+          {:ok, {:inet.ip_address(), non_neg_integer()}} | {:error, atom()}
+  def parse_prefix(text) when is_binary(text) do
+    with [addr_str, len_str] <- String.split(text, "/", parts: 2),
+         {:ok, address} <- parse_address(addr_str),
+         {length, ""} <- Integer.parse(len_str),
+         true <- length >= 0 and length <= tuple_size(address) * bit_width(address) do
+      {:ok, {address, length}}
+    else
+      _ -> {:error, :badprefix}
+    end
+  end
+
+  def parse_prefix(_text), do: {:error, :badprefix}
+
+  defp bit_width(address) when tuple_size(address) == 4, do: 8
+  defp bit_width(_address), do: 16
+
+  @doc """
+  Which side of this node's network an address sits on: `:internal` or `:public`.
+
+  The node's own topology answers it, never the address itself:
+  `address_scope/1` reads what the RFCs say about a prefix, which is a different
+  question — a site can route RFC 1918 space it does not consider internal, and
+  an internal network can be globally addressed IPv6.
+
+  The internal prefixes come from `:elixip2, :internal_networks`, a list of
+  `{address, prefix_length}`. Empty, or unset, makes every address `:public`,
+  which is a node that has not been told it has two sides.
+
+  A single place, so a correspondent cannot be internal to one part of the node
+  and public to another.
+  """
+  @spec net_side(:inet.ip_address() | any()) :: :internal | :public
+  def net_side(address) when is_tuple(address) do
+    prefixes = Application.get_env(:elixip2, :internal_networks, [])
+
+    if Enum.any?(prefixes, &in_prefix?(address, &1)), do: :internal, else: :public
+  end
+
+  def net_side(_address), do: :public
+
+  @doc """
+  Whether `address` falls inside `{prefix, length}`, both of the same family.
+
+  A prefix of another family never matches: `::ffff:` mapped forms are refused
+  everywhere in this stack (see `SIP.Transport.UDP`), so an IPv4 address is not
+  inside an IPv6 prefix and the reverse is not either.
+  """
+  @spec in_prefix?(:inet.ip_address(), {:inet.ip_address(), non_neg_integer()}) :: boolean()
+  def in_prefix?(address, {prefix, length})
+      when tuple_size(address) == tuple_size(prefix) and length >= 0 do
+    width = if tuple_size(address) == 4, do: 8, else: 16
+
+    if length > tuple_size(address) * width do
+      false
+    else
+      leading_bits(address, width, length) == leading_bits(prefix, width, length)
+    end
+  end
+
+  def in_prefix?(_address, _prefix), do: false
+
+  # The first `length` bits of an address, as one integer. Comparing integers is
+  # what makes a prefix of any length work without a mask per family.
+  defp leading_bits(address, width, length) do
+    address
+    |> Tuple.to_list()
+    |> Enum.reduce(0, fn group, acc -> acc * (1 <<< width) + group end)
+    |> bsr(tuple_size(address) * width - length)
+  end
+
+  @doc """
+  The prefix an address sits in, read from the interface that carries it:
+  `{network_address, prefix_length}`, or `nil` when no interface has it.
+
+  `:inet.getifaddrs/0` returns the netmask beside the address, for both families,
+  so the directly attached subnet follows from it — no routing table to read, and
+  no default gateway to discard, since a gateway never appears in that list.
+  """
+  @spec attached_prefix(:inet.ip_address()) ::
+          {:inet.ip_address(), non_neg_integer()} | nil
+  def attached_prefix(address) when is_tuple(address) do
+    {:ok, iflist} = :inet.getifaddrs()
+
+    iflist
+    |> Enum.flat_map(fn {_name, info} -> pair_up(info) end)
+    |> Enum.find_value(fn
+      {^address, netmask} when tuple_size(netmask) == tuple_size(address) ->
+        {mask_address(address, netmask), mask_length(netmask)}
+
+      _ ->
+        nil
+    end)
+  end
+
+  # getifaddrs returns a flat list where each :addr is followed by its :netmask,
+  # and one interface holds several pairs (v4 and v6, or several addresses).
+  defp pair_up(info) do
+    info
+    |> Enum.filter(fn {k, _v} -> k in [:addr, :netmask] end)
+    |> Enum.chunk_every(2)
+    |> Enum.flat_map(fn
+      [{:addr, a}, {:netmask, m}] -> [{a, m}]
+      _ -> []
+    end)
+  end
+
+  defp mask_address(address, netmask) do
+    Enum.zip(Tuple.to_list(address), Tuple.to_list(netmask))
+    |> Enum.map(fn {group, mask} -> band(group, mask) end)
+    |> List.to_tuple()
+  end
+
+  # A netmask is contiguous by construction on every interface Linux reports, so
+  # counting its set bits is its length.
+  defp mask_length(netmask) do
+    width = if tuple_size(netmask) == 4, do: 8, else: 16
+
+    netmask
+    |> Tuple.to_list()
+    |> Enum.map(fn group -> group |> Integer.digits(2) |> Enum.count(&(&1 == 1)) end)
+    |> Enum.sum()
+    |> min(tuple_size(netmask) * width)
+  end
+
   # IPv6 before IPv4, and a routable address before a restricted one, so that
   # `hd/1` on the result is a defensible choice rather than the order in which
   # the OS happens to enumerate its interfaces.
