@@ -222,10 +222,43 @@ defmodule SIP.Session.Media do
   # wins over the global `:mediaserver` app env. This lets a server like kelixip
   # pick a pool MCU *per call* without racing on the shared app env — the standalone
   # tool, which sets no such override, keeps its global-config behaviour unchanged.
+  #
+  # A call whose targets have been resolved (`b2bua_resolve/1`) asks for a server
+  # carrying their addressing profiles instead, through the selector the host
+  # declared. The framework cannot reach `Kelix.MediaPool` itself — it is a
+  # kelixip surface — so the selection is injected the way the unit-test transport
+  # is: `{module, function}` under `:mediaserver_selector`, called with the
+  # `{family, side}` pairs and answering the same keyword list the override
+  # carries. Absent, or nothing resolved, and the override decides as before.
   defp ms_config(sip_ctx) do
-    case SIP.Context.appdata_get(sip_ctx, :mediaserver_instance) do
-      nil -> Application.get_env(:elixip2, :mediaserver, [])
-      override -> override
+    case constrained_config(sip_ctx) do
+      nil ->
+        case SIP.Context.appdata_get(sip_ctx, :mediaserver_instance) do
+          nil -> Application.get_env(:elixip2, :mediaserver, [])
+          override -> override
+        end
+
+      cfg ->
+        cfg
+    end
+  end
+
+  defp constrained_config(sip_ctx) do
+    with {module, fun} <- Application.get_env(:elixip2, :mediaserver_selector),
+         [_ | _] = profiles <- SIP.Session.B2bua.resolved_profiles(sip_ctx),
+         true <- Code.ensure_loaded?(module) and function_exported?(module, fun, 1) do
+      cfg = apply(module, fun, [profiles])
+
+      Logger.debug(
+        module: __MODULE__,
+        message:
+          "media_connect: asked for a server carrying #{inspect(profiles)}, got " <>
+            inspect(Keyword.get(cfg, :name) || Keyword.get(cfg, :module))
+      )
+
+      cfg
+    else
+      _ -> nil
     end
   end
 

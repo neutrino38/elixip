@@ -314,4 +314,87 @@ defmodule Kelix.MediaPoolTest do
       assert [%{healthy: true, profiles: :unknown}] = MediaPool.status(mp)
     end
   end
+  describe "checkout with a profile constraint" do
+    defp pool_with(profiles_by_name) do
+      entries =
+        for {name, _} <- profiles_by_name,
+            do: %{name: name, module: :mockup, url: "u-#{name}", enabled: true}
+
+      {:ok, mp} =
+        MediaPool.start_link(
+          name: :"mp_constraint_#{:erlang.unique_integer([:positive])}",
+          pool: entries,
+          probe: fn e -> {true, Map.fetch!(Map.new(profiles_by_name), e.name)} end,
+          first_check_ms: 10_000
+        )
+
+      :ok = MediaPool.check_health(mp)
+      mp
+    end
+
+    defp carries(names) do
+      Map.new(names, fn n -> {n, %{available: true, announced: "x", bind: "", default: false}} end)
+    end
+
+    test "no constraint keeps the round-robin it always had" do
+      mp = pool_with([{"a", carries(["publicv4"])}, {"b", carries(["publicv6"])}])
+
+      assert {:ok, %{name: "a"}} = MediaPool.checkout(mp)
+      assert {:ok, %{name: "b"}} = MediaPool.checkout(mp)
+    end
+
+    test "only a server carrying the profile is returned" do
+      mp = pool_with([{"a", carries(["publicv4"])}, {"b", carries(["publicv6"])}])
+
+      assert {:ok, %{name: "b"}} = MediaPool.checkout(mp, [{:ipv6, :public}])
+      assert {:ok, %{name: "b"}} = MediaPool.checkout(mp, [{:ipv6, :public}])
+      assert {:ok, %{name: "a"}} = MediaPool.checkout(mp, [{:ipv4, :public}])
+    end
+
+    test "two profiles need ONE server carrying both" do
+      # A media session lives on one server, so an IPv4↔IPv6 call needs a server
+      # that announces both — not one of each.
+      mp =
+        pool_with([
+          {"v4only", carries(["publicv4"])},
+          {"both", carries(["publicv4", "publicv6"])}
+        ])
+
+      assert {:ok, %{name: "both"}} =
+               MediaPool.checkout(mp, [{:ipv4, :public}, {:ipv6, :public}])
+    end
+
+    test "no server carrying it fails the call rather than picking another" do
+      # A fallback would put the media on the wrong interface with nothing to say
+      # so, and the caller could not retry elsewhere.
+      mp = pool_with([{"a", carries(["publicv4"])}])
+
+      assert MediaPool.checkout(mp, [{:ipv6, :public}]) == {:error, :no_mcu}
+      assert MediaPool.checkout(mp, [{:ipv4, :internal}]) == {:error, :no_mcu}
+    end
+
+    test "an entry whose profiles are unknown satisfies no constraint" do
+      {:ok, mp} =
+        MediaPool.start_link(
+          name: :mp_constraint_unknown,
+          pool: [%{name: "old", module: :mockup, url: "u", enabled: true}],
+          probe: fn _e -> true end,
+          first_check_ms: 10_000
+        )
+
+      :ok = MediaPool.check_health(mp)
+
+      # Still serves the calls that ask for nothing — every call on a node never
+      # told it has two sides.
+      assert {:ok, %{name: "old"}} = MediaPool.checkout(mp)
+      assert MediaPool.checkout(mp, [{:ipv4, :public}]) == {:error, :no_mcu}
+    end
+
+    test "an unhealthy server carrying the profile is still out" do
+      mp = pool_with([{"a", carries(["publicv4"])}])
+      :ok = MediaPool.toggle("a", false, mp)
+
+      assert MediaPool.checkout(mp, [{:ipv4, :public}]) == {:error, :no_mcu}
+    end
+  end
 end

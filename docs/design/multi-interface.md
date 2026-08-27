@@ -422,11 +422,14 @@ sur `EndpointStartReceiving` (6e) et `EndpointStartSending` (7e), la voie
 texte/WS est réordonnée, et le pool relit les profils de chaque serveur à chaque
 sonde de santé.
 
-**Non livré, et c'est un gros morceau** : la médiation elle-même. Le profil de la
-jambe sortante se déduit de sa cible résolue, donc le B2BUA doit résoudre son Peer
-**avant** d'essayer, marquer chaque URI de son profil, et seulement alors choisir
-un serveur média qui les porte tous. Trois phases, détaillées sous « Deux jambes,
-deux profils, un seul serveur » plus bas.
+**Livré aussi** : les trois phases de la médiation. Le B2BUA résout son Peer avant
+d'essayer (`b2bua_resolve/1`), marque chaque cible de son côté de réseau, et
+`media_connect/0` demande alors au pool un serveur portant tous les profils en
+jeu. Détail sous « Deux jambes, deux profils, un seul serveur » plus bas.
+
+**Non livré** : un endpoint par profil quand une même liste de cibles en mélange
+plusieurs. Le `checkout` garantit qu'un seul serveur les porte tous ; ouvrir deux
+endpoints et éteindre celui qui échoue reste à faire.
 
 Le mediaserver porte jusqu'à quatre adresses — `publicv4`, `publicv6`,
 `internalv4`, `internalv6` — déclarées par `--public-ip` et `--internal-ip`.
@@ -622,40 +625,52 @@ Deux cas particuliers, et ils sont la raison d'être de la phase :
   repli sur un autre profil : il enverrait le média par la mauvaise interface sans
   que rien ne le signale.
 
-##### Ce que la phase 3 ne résout pas encore, et l'ordre qui l'en empêche
+##### L'ordre qu'un script énonce
 
-Livré de la phase 3 : les deux adaptateurs nomment le profil complet — famille
-croisée avec côté —, le côté venant de l'adresse locale que le pair a atteinte.
-Une jambe atteinte par un listener `internal` annonce donc l'adresse interne du
-serveur média.
+Le serveur média était choisi avant que la cible existe — `media_connect()` à la
+ligne 47 de `webrtc-gw.exs`, `b2bua_forward` à la 60. Cet ordre portait sa propre
+raison : sans serveur média il n'y a rien pour répondre à l'appelant, et l'INVITE
+sortant n'a pas de corps à porter. On ne pouvait donc pas à la fois répondre avant
+de forwarder **et** choisir le serveur en connaissant la cible.
 
-Reste le choix du serveur. `Kelix.MediaPool.checkout/1` ne prend pas de
-contrainte de profil, et il a lieu au routage. Le déplacer bute sur un ordre
-d'appel, pas sur une difficulté d'implémentation :
+Un verbe résout la contradiction en séparant les deux :
 
+```elixir
+b2bua_resolve(peer)                                  # où va l'appel
+media_connect()                                      # puis qui le porte
+b2bua_forward(req, b2bua_resolved_peer(), @media)
 ```
-media_connect()            # ligne 47 de webrtc-gw.exs — le serveur est choisi ICI
-b2bua_forward(req, peer)   # ligne 60 — le Peer, donc les profils des cibles, existe ICI
-```
 
-Et cet ordre porte une raison : sans serveur média il n'y a rien pour répondre à
-l'appelant, et l'INVITE sortant n'a pas de corps à porter. On ne peut donc pas à
-la fois répondre à l'appelant avant de forwarder **et** choisir le serveur en
-connaissant la cible sortante. L'un des deux doit céder.
+`b2bua_resolve/1` fait la phase 1 et la phase 2 : chaque cible reçoit son adresse
+et son `net_side`, avant que quoi que ce soit soit tenté. `media_connect/0` lit
+alors `resolved_profiles/1` et demande au pool un serveur portant **tous** ces
+profils.
 
-**À trancher.** Deux issues, et elles ne coûtent pas la même chose :
+**Le verbe n'est jamais obligatoire**, et c'est ce qui rend le changement additif.
+`b2bua_forward/4` face à un Peer non résolu :
 
-- **Résoudre le Peer avant `media_connect`.** Un verbe FSL de plus — le script
-  énonce son Peer, le fait résoudre, puis connecte le média. Petit et explicite,
-  mais chaque script B2BUA change.
-- **Choisir sur la jambe entrante, vérifier sur la sortante.** Rien ne change dans
-  les scripts. Mais un pool où un autre serveur aurait convenu rend un 503 : le
-  serveur est déjà retenu quand la cible apparaît, et les deux jambes doivent
-  vivre dans une seule `MediaSession`.
+| Le Peer… | ce qui se passe |
+|---|---|
+| est résolu | ses rungs servent, rien n'est résolu deux fois |
+| ne l'est pas, mais les **mêmes** cibles l'ont été | cette résolution est adoptée |
+| ne l'est pas, et rien ne l'a été | résolu à la tentative, comme avant le verbe |
+| ne l'est pas, et d'**autres** cibles l'ont été | résolu à la tentative, **avec un avertissement** |
 
-La première est la seule qui tienne la promesse « toutes les combinaisons ». La
-seconde marche pour un nœud dont tous les serveurs média portent les mêmes
-profils, ce qui est le déploiement courant.
+Le dernier cas est le seul piège : le serveur média a été choisi pour un appel qui
+part ailleurs. Il est dit à voix haute plutôt que débogué comme du média qui
+arrive sur la mauvaise interface.
+
+##### La couture, parce que le framework ne peut pas appeler le pool
+
+`Kelix.MediaPool` est une surface kelixip et `media_connect/0` est du framework.
+La sélection est donc **injectée** — `:elixip2, :mediaserver_selector` vaut
+`{module, fonction}`, appelée avec les paires `{famille, côté}` —, comme l'est le
+transport de test unitaire. Absente, ou rien de résolu, et le choix se fait comme
+avant.
+
+Et le croisement famille × côté → nom du profil serveur est écrit **une** fois,
+dans `MediaServer.profile_name/2`. Trois copies d'un tableau de quatre entrées,
+c'est ainsi que la liste de codecs est devenue fausse.
 
 #### Hors périmètre de cette étape
 

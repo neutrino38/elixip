@@ -148,6 +148,26 @@ defmodule SIP.Test.B2buaTargetMarking do
       assert out.lasterr == :no_target_resolved
     end
 
+    test "every shape b2bua_forward accepts is accepted here" do
+      Application.put_env(:elixip2, :internal_networks, [{{127, 0, 0, 0}, 8}])
+
+      for shape <- [
+            "sip:bob@localhost:5070",
+            uri("sip:bob@localhost:5070"),
+            [uri("sip:bob@localhost:5070")]
+          ] do
+        out = B2bua.do_resolve_peer(ctx(), shape)
+        assert out.lasterr == :ok, "refused #{inspect(shape)}"
+        assert %Peer{resolved: [[%SIP.Uri{net_side: :internal}]]} =
+                 SIP.Context.appdata_get(out, :resolved_peer)
+      end
+    end
+
+    test "no peer, and a peer that is not one, are stated rather than raised" do
+      assert B2bua.do_resolve_peer(ctx(), nil).lasterr == {:b2bua, :no_target}
+      assert B2bua.do_resolve_peer(ctx(), 42).lasterr == {:b2bua, :bad_peer, 42}
+    end
+
     test "resolving twice is idempotent" do
       peer = %Peer{uris: [uri("sip:bob@localhost:5070")]}
       once = B2bua.do_resolve_peer(ctx(), peer)

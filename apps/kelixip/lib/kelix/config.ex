@@ -192,6 +192,11 @@ defmodule Kelix.Config do
   @spec apply_app_env(t) :: :ok
   def apply_app_env(%__MODULE__{} = cfg) do
     Application.put_env(:elixip2, :useragent, cfg.user_agent)
+    # How the framework asks for a media server carrying a call's addressing
+    # profiles. It cannot reach Kelix.MediaPool — a kelixip surface — so the
+    # selection is declared here and called back into.
+    Application.put_env(:elixip2, :mediaserver_selector, {Kelix.Router, :media_for_profiles})
+
     # Which addresses this node calls internal, from its `internal` listeners:
     # their own `networks` when stated, else the subnet the interface bearing
     # their address is attached to. Read by `SIP.NetUtils.net_side/1`, the one

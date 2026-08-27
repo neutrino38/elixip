@@ -37,6 +37,7 @@ defmodule Kelix.MediaPool do
   `:up` hint only earns a probe.
   """
   use GenServer
+  require Logger
 
   # The probe is a real connection (event queue + event poller) opened and closed
   # again on every cycle, so keep it rare on a server that answers: 30 s.
@@ -69,9 +70,24 @@ defmodule Kelix.MediaPool do
   def start_link(opts \\ []),
     do: GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
 
-  @doc "Pick the next enabled + healthy MCU (round-robin). `{:ok, choice}` / `{:error, :no_mcu}`."
-  @spec checkout(GenServer.server()) :: {:ok, choice} | {:error, :no_mcu}
-  def checkout(server \\ __MODULE__), do: GenServer.call(server, :checkout)
+  @doc """
+  Pick the next enabled + healthy MCU (round-robin).
+  `{:ok, choice}` / `{:error, :no_mcu}`.
+
+  `profiles` narrows it to servers carrying **every** addressing profile the call
+  needs, as `{family, side}` pairs — one per leg, so often two, and a media
+  session lives on one server. No eligible entry fails the call rather than
+  falling back on another profile: a fallback would put the media on the wrong
+  interface with nothing to say so.
+
+  An entry whose profiles are unknown satisfies no constraint. It stays eligible
+  to the calls that ask for none, which is every call on a node that was never
+  told it has two sides.
+  """
+  @spec checkout(GenServer.server(), [{:ipv4 | :ipv6, :internal | :public}]) ::
+          {:ok, choice} | {:error, :no_mcu}
+  def checkout(server \\ __MODULE__, profiles \\ []),
+    do: GenServer.call(server, {:checkout, profiles})
 
   @doc "Enable/disable a pool entry at runtime (no restart). `:ok` / `{:error, :unknown}`."
   @spec toggle(String.t(), boolean, GenServer.server()) :: :ok | {:error, :unknown}
@@ -140,17 +156,28 @@ defmodule Kelix.MediaPool do
   end
 
   @impl true
-  def handle_call(:checkout, _from, %{entries: entries} = state) do
+  def handle_call({:checkout, profiles}, _from, %{entries: entries} = state) do
     n = length(entries)
+    required = Enum.map(profiles, fn {family, side} -> MediaServer.profile_name(family, side) end)
 
     with true <- n > 0,
-         idx when is_integer(idx) <- next_index(entries, state.cursor, n) do
+         idx when is_integer(idx) <- next_index(entries, state.cursor, n, required) do
       e = Enum.at(entries, idx)
 
       {:reply, {:ok, %{name: e.name, module: e.module, url: e.url}},
        %{state | cursor: rem(idx + 1, n)}}
     else
-      _ -> {:reply, {:error, :no_mcu}, state}
+      _ ->
+        if required != [] do
+          Logger.warning(
+            module: __MODULE__,
+            message:
+              "no media server carries #{Enum.join(required, " + ")}: this call needs " <>
+                "an interface none of them announces"
+          )
+        end
+
+        {:reply, {:error, :no_mcu}, state}
     end
   end
 
@@ -210,12 +237,23 @@ defmodule Kelix.MediaPool do
   # ── selection ────────────────────────────────────────────────────────────────
 
   # first serviceable (enabled + healthy) index scanning from the cursor, or nil
-  defp next_index(entries, cursor, n) do
+  defp next_index(entries, cursor, n, required) do
     Enum.find(for(i <- 0..(n - 1), do: rem(cursor + i, n)), fn i ->
       e = Enum.at(entries, i)
-      e.enabled and e.healthy
+      e.enabled and e.healthy and carries?(e, required)
     end)
   end
+
+  # Every required profile, available on that server. An entry whose profiles are
+  # unknown carries nothing as far as anyone can tell — so it satisfies no
+  # constraint, and asking it for one would fail at the leg's first
+  # StartReceiving instead of here.
+  defp carries?(_entry, []), do: true
+
+  defp carries?(%{profiles: profiles}, required) when is_map(profiles),
+    do: Enum.all?(required, &(get_in(profiles, [&1, :available]) == true))
+
+  defp carries?(_entry, _required), do: false
 
   defp set_enabled(entries, name, on?),
     do: Enum.map(entries, fn e -> if e.name == name, do: %{e | enabled: on?}, else: e end)

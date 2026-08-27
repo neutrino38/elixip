@@ -1601,7 +1601,24 @@ defmodule SIP.Session.B2bua do
   Idempotent: a peer already resolved is returned unchanged, so a block that
   resolves defensively costs nothing after a scenario that already did.
   """
-  @spec do_resolve_peer(%SIP.Context{}, %Peer{}) :: %SIP.Context{}
+  @spec do_resolve_peer(%SIP.Context{}, %Peer{} | binary() | %SIP.Uri{} | list()) ::
+          %SIP.Context{}
+  # Every shape `b2bua_forward/4` accepts, since the two verbs take the same peer:
+  # a `%Peer{}`, a bare URI as shorthand for a one-target peer, or a list of them.
+  # Anything else is stated rather than raised from inside the resolution.
+  def do_resolve_peer(sip_ctx = %SIP.Context{}, peer) when not is_struct(peer, Peer) do
+    case peer do
+      p when is_binary(p) or is_struct(p, SIP.Uri) or is_list(p) ->
+        do_resolve_peer(sip_ctx, normalize_peer(p))
+
+      nil ->
+        SIP.Context.set(sip_ctx, :lasterr, {:b2bua, :no_target})
+
+      other ->
+        SIP.Context.set(sip_ctx, :lasterr, {:b2bua, :bad_peer, other})
+    end
+  end
+
   def do_resolve_peer(sip_ctx = %SIP.Context{}, %Peer{resolved: rungs} = peer)
       when is_list(rungs) do
     sip_ctx |> SIP.Context.appdata_set(:resolved_peer, peer) |> SIP.Context.set(:lasterr, :ok)
