@@ -239,16 +239,17 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     end
   end
 
-  # The family of the local address is all a profile can be derived from today,
-  # and it is derived rather than configured: an address states its family, and
-  # `[[listen]]` states no profile yet. Which SIDE of the network a listener sits
-  # on — the `internal` profiles — is step 6 of
-  # docs/design/multi-interface.md, and until it lands every leg announces a
-  # public address (see `profile_name/1`).
+  # The local address of this leg states both halves of its profile, and neither is
+  # configured: the address states its family, and `SIP.NetUtils.net_side/1` states
+  # which side of the node's network it sits on, from the `internal` listeners'
+  # networks. A leg we placed ourselves has no local address, so it has no profile
+  # of its own to prefer.
   defp local_profile(opts) do
-    case SIP.NetUtils.address_family(Keyword.get(opts, :local_ip)) do
+    local_ip = Keyword.get(opts, :local_ip)
+
+    case SIP.NetUtils.address_family(local_ip) do
       nil -> nil
-      family -> profile_name(family)
+      family -> profile_name(family, SIP.NetUtils.net_side(local_ip))
     end
   end
 
@@ -1182,7 +1183,7 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     do: {:ok, state, nil}
 
   defp leg_profile(state, desc) do
-    case Enum.map(Sdp.peer_families(desc), &profile_name/1) do
+    case Enum.map(Sdp.peer_families(desc), &profile_name(&1, side_of(state))) do
       [] ->
         {:ok, state, nil}
 
@@ -1197,16 +1198,27 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     end
   end
 
+  # The side every candidate of this leg carries: the one its local address sits
+  # on. `local_profile` already holds the pair, so read it back rather than
+  # deriving the side a second time.
+  defp side_of(%{local_profile: local}) when is_binary(local) do
+    if String.starts_with?(local, "internal"), do: :internal, else: :public
+  end
+
+  defp side_of(_state), do: :public
+
   defp prefer_local(%{local_profile: local}, offered) do
     if local in offered, do: Enum.uniq([local | offered]), else: offered
   end
 
-  # Only the public side, and it is not an omission: which side of the network a
-  # correspondent sits on is step 6 of docs/design/multi-interface.md, where a node
-  # learns to classify an address. A conference reached from an `internal` listener
-  # therefore announces the public address, as it does today.
-  defp profile_name(:ipv6), do: "publicv6"
-  defp profile_name(:ipv4), do: "publicv4"
+  # The server's four profile names (§6.7 bis) are exactly a family crossed with a
+  # side, so the two halves name one. The side is the LOCAL address's — ours, the
+  # one this peer reached — because an offer says which families a peer can
+  # receive on and nothing about which side of our network it sits on.
+  defp profile_name(:ipv6, :internal), do: "internalv6"
+  defp profile_name(:ipv4, :internal), do: "internalv4"
+  defp profile_name(:ipv6, _side), do: "publicv6"
+  defp profile_name(:ipv4, _side), do: "publicv4"
 
   # `profile` is positional and LAST in both calls (§6.7 bis), and omitted when
   # this leg has none to ask for: the RPC is then byte-for-byte the one a

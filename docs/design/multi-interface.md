@@ -622,20 +622,48 @@ Deux cas particuliers, et ils sont la raison d'être de la phase :
   repli sur un autre profil : il enverrait le média par la mauvaise interface sans
   que rien ne le signale.
 
-##### Ce que la phase 3 ne résout pas encore
+##### Ce que la phase 3 ne résout pas encore, et l'ordre qui l'en empêche
 
-Le pool sait ce que chaque serveur porte, mais `checkout/1` ne prend pas encore
-de contrainte, et `Kelix.Router.overrides_for/1` pose toujours le serveur au
-routage. Tant que les phases 1 et 2 n'existent pas, une contrainte de profil
-n'aurait aucun appelant.
+Livré de la phase 3 : les deux adaptateurs nomment le profil complet — famille
+croisée avec côté —, le côté venant de l'adresse locale que le pair a atteinte.
+Une jambe atteinte par un listener `internal` annonce donc l'adresse interne du
+serveur média.
+
+Reste le choix du serveur. `Kelix.MediaPool.checkout/1` ne prend pas de
+contrainte de profil, et il a lieu au routage. Le déplacer bute sur un ordre
+d'appel, pas sur une difficulté d'implémentation :
+
+```
+media_connect()            # ligne 47 de webrtc-gw.exs — le serveur est choisi ICI
+b2bua_forward(req, peer)   # ligne 60 — le Peer, donc les profils des cibles, existe ICI
+```
+
+Et cet ordre porte une raison : sans serveur média il n'y a rien pour répondre à
+l'appelant, et l'INVITE sortant n'a pas de corps à porter. On ne peut donc pas à
+la fois répondre à l'appelant avant de forwarder **et** choisir le serveur en
+connaissant la cible sortante. L'un des deux doit céder.
+
+**À trancher.** Deux issues, et elles ne coûtent pas la même chose :
+
+- **Résoudre le Peer avant `media_connect`.** Un verbe FSL de plus — le script
+  énonce son Peer, le fait résoudre, puis connecte le média. Petit et explicite,
+  mais chaque script B2BUA change.
+- **Choisir sur la jambe entrante, vérifier sur la sortante.** Rien ne change dans
+  les scripts. Mais un pool où un autre serveur aurait convenu rend un 503 : le
+  serveur est déjà retenu quand la cible apparaît, et les deux jambes doivent
+  vivre dans une seule `MediaSession`.
+
+La première est la seule qui tienne la promesse « toutes les combinaisons ». La
+seconde marche pour un nœud dont tous les serveurs média portent les mêmes
+profils, ce qui est le déploiement courant.
 
 #### Hors périmètre de cette étape
 
 - **La MCU.** Le module ouvre ses propres canaux de contrôle vers les serveurs du
-  pool et ne passe pas par `checkout/1` : il pose son profil lui-même, par jambe,
-  depuis la famille de l'offre (étape 3 bis). Ce qui reste dehors est le côté du
-  réseau : une conférence atteinte depuis un listener `internal` annonce
-  l'adresse publique.
+  pool et ne passe pas par `checkout/1` : il pose son profil lui-même, par jambe.
+  Le côté vient de l'adresse locale que le pair a atteinte, la famille de son
+  offre — donc une conférence atteinte depuis un listener `internal` annonce
+  l'adresse interne.
 - **La classification d'un correspondant par son adresse.** Ici c'est le
   listener qui décide, pas le pair. Une jambe sortante hérite du côté de la
   jambe entrante, et sa famille de l'adresse résolue de la cible. Le reste est

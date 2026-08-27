@@ -151,4 +151,57 @@ defmodule Mendooze.NetworkProfileTest do
       refute_receive {:jsr309_call, "EndpointStartReceiving", _}, 200
     end
   end
+  describe "the side comes from the local address this peer reached" do
+    setup do
+      previous = Application.fetch_env(:elixip2, :internal_networks)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, v} -> Application.put_env(:elixip2, :internal_networks, v)
+          :error -> Application.delete_env(:elixip2, :internal_networks)
+        end
+      end)
+
+      :ok
+    end
+
+    # A server carrying all four, so the choice is never forced by availability.
+    defp four_profiles do
+      [
+        profile("publicv4", true, "203.0.113.9"),
+        profile("publicv6", true, "2001:db8::12"),
+        profile("internalv4", true, "10.0.0.4"),
+        profile("internalv6", true, "fd00::4")
+      ]
+    end
+
+    test "a peer that reached our internal address is placed on internalv4" do
+      Application.put_env(:elixip2, :internal_networks, [{{10, 0, 0, 0}, 8}])
+
+      conn = start_conn(four_profiles(), media: :audio, local_ip: {10, 20, 30, 40})
+      {:ok, _answer} = Mendooze.set_remote_offer(conn, offer("10.20.30.99"))
+
+      assert [3, 4, 0, _rtp_map, %{"fmtp" => _}, "internalv4"] = await_start_receiving()
+    end
+
+    test "the same peer is public once no listener declares that network" do
+      Application.delete_env(:elixip2, :internal_networks)
+
+      conn = start_conn(four_profiles(), media: :audio, local_ip: {10, 20, 30, 40})
+      {:ok, _answer} = Mendooze.set_remote_offer(conn, offer("10.20.30.99"))
+
+      assert [3, 4, 0, _rtp_map, %{"fmtp" => _}, "publicv4"] = await_start_receiving()
+    end
+
+    test "the side is ours, the family is the peer's" do
+      # An internal listener reached by a v6 peer: the side comes from our address,
+      # the family from the offer. Neither half decides the other.
+      Application.put_env(:elixip2, :internal_networks, [{{10, 0, 0, 0}, 8}])
+
+      conn = start_conn(four_profiles(), media: :audio, local_ip: {10, 20, 30, 40})
+      {:ok, _answer} = Mendooze.set_remote_offer(conn, offer("2001:db8:aa::5"))
+
+      assert [3, 4, 0, _rtp_map, %{"fmtp" => _}, "internalv6"] = await_start_receiving()
+    end
+  end
 end

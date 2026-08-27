@@ -2303,26 +2303,42 @@ defmodule MediaServer.Mendooze.Conn do
   # No peer SDP — the leg we offer on — so our own side is all there is to go on.
   defp profile_candidates(%{sip_profile: local}, nil), do: List.wrap(local)
 
-  defp profile_candidates(%{sip_profile: local}, desc) do
-    case Enum.map(Sdp.peer_families(desc), &profile_name/1) do
+  defp profile_candidates(%{sip_profile: local} = leg, desc) do
+    case Enum.map(Sdp.peer_families(desc), &profile_name(&1, leg_side(leg))) do
       [] -> []
       offered -> if local in offered, do: Enum.uniq([local | offered]), else: offered
     end
   end
 
-  # Only the public side, and it is not an omission: which side of the network a
-  # correspondent sits on is step 6 of docs/design/multi-interface.md, where a node
-  # learns to classify an address. Until then a leg reached through an `internal`
-  # listener announces the public address, as it does today.
-  defp profile_name(:ipv6), do: "publicv6"
-  defp profile_name(:ipv4), do: "publicv4"
+  # The server's four profile names (§6.7 bis) are exactly a family crossed with a
+  # side, so the two halves name one. The side is the LOCAL address's — ours, the
+  # one this peer reached — because an offer says which families a peer can
+  # receive media on and nothing about which side of our network it sits on.
+  defp profile_name(:ipv6, :internal), do: "internalv6"
+  defp profile_name(:ipv4, :internal), do: "internalv4"
+  defp profile_name(:ipv6, _side), do: "publicv6"
+  defp profile_name(:ipv4, _side), do: "publicv4"
 
+  # Both halves come from the local address of this leg, and neither is
+  # configured: the address states its family, and `SIP.NetUtils.net_side/1`
+  # states its side from the `internal` listeners' networks. A leg we placed
+  # ourselves has no local address, so it states no side to prefer.
   defp sip_profile(opts) do
-    case SIP.NetUtils.address_family(Keyword.get(opts, :local_ip)) do
+    local_ip = Keyword.get(opts, :local_ip)
+
+    case SIP.NetUtils.address_family(local_ip) do
       nil -> nil
-      family -> profile_name(family)
+      family -> profile_name(family, SIP.NetUtils.net_side(local_ip))
     end
   end
+
+  # The side every candidate of this leg carries. `sip_profile` already holds the
+  # pair, so read it back rather than deriving the side a second time.
+  defp leg_side(%{sip_profile: local}) when is_binary(local) do
+    if String.starts_with?(local, "internal"), do: :internal, else: :public
+  end
+
+  defp leg_side(_leg), do: :public
 
   # `profile` is positional and SIXTH (xmlrpc_jsr309_api.md §6.7 bis), so `offer`
   # has to be sent to reach it — an empty struct when the offer states no fmtp.
