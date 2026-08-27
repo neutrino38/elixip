@@ -534,14 +534,14 @@ defmodule Kelix.ConfigTest do
     end
   end
   describe "[tls] — the outbound leg's policy" do
-    test "absent means the certificate of a peer we dial IS checked" do
+    test "absent means no check: verifying a peer is an interconnect decision" do
       assert {:ok, cfg} = Config.parse("")
-      assert cfg.tls == %{verify: true, ca: nil}
+      assert cfg.tls == %{verify: false, ca: nil}
     end
 
-    test "verify = false is the escape hatch, and it is explicit" do
-      assert {:ok, cfg} = Config.parse(~s([tls]\nverify = false))
-      assert cfg.tls.verify == false
+    test "verify = true is the deliberate act, and it is explicit" do
+      assert {:ok, cfg} = Config.parse(~s([tls]\nverify = true))
+      assert cfg.tls.verify == true
     end
 
     test "a ca that cannot be read is refused at parse time" do
@@ -567,7 +567,7 @@ defmodule Kelix.ConfigTest do
       path = Path.expand("../../../packaging/config/config.toml", __DIR__)
       assert {:ok, content} = File.read(path)
       assert {:ok, cfg} = Config.parse(content)
-      assert cfg.tls.verify == true
+      assert cfg.tls.verify == false
     end
 
     test "apply_app_env/1 is what the outbound leg actually reads" do
@@ -581,10 +581,10 @@ defmodule Kelix.ConfigTest do
         Application.delete_env(:elixip2, :tls_cacertfile)
       end)
 
-      {:ok, cfg} = Config.parse(~s([tls]\nverify = false))
+      {:ok, cfg} = Config.parse(~s([tls]\nverify = true))
       :ok = Config.apply_app_env(cfg)
 
-      assert Application.get_env(:elixip2, :tls_verify) == false
+      assert Application.get_env(:elixip2, :tls_verify) == true
       refute Application.get_env(:elixip2, :tls_cacertfile)
     end
   end

@@ -29,8 +29,16 @@ defmodule SIP.Test.TLSOutboundVerify do
   defp restore(key, :error), do: Application.delete_env(:elixip2, key)
 
   describe "what the leg asks :ssl for" do
-    test "verification is on by default, against the DOMAIN the URI named" do
+    test "no check unless asked for: verifying a peer is an interconnect decision" do
       Application.delete_env(:elixip2, :tls_verify)
+
+      opts = ImplHelpers.peer_verification_options(%{destdomain: "proxy.example.com"})
+
+      assert opts == [verify: false]
+    end
+
+    test "turned on, the name matched is the DOMAIN the URI named" do
+      Application.put_env(:elixip2, :tls_verify, true)
 
       opts = ImplHelpers.peer_verification_options(%{destdomain: "proxy.example.com"})
 
@@ -41,7 +49,7 @@ defmodule SIP.Test.TLSOutboundVerify do
     end
 
     test "a leg aimed at a bare address states no name" do
-      Application.delete_env(:elixip2, :tls_verify)
+      Application.put_env(:elixip2, :tls_verify, true)
 
       opts = ImplHelpers.peer_verification_options(%{destdomain: nil})
 
@@ -50,20 +58,12 @@ defmodule SIP.Test.TLSOutboundVerify do
     end
 
     test "a configured authority is the only one trusted" do
-      Application.delete_env(:elixip2, :tls_verify)
+      Application.put_env(:elixip2, :tls_verify, true)
       Application.put_env(:elixip2, :tls_cacertfile, "/etc/pki/proxy-ca.pem")
 
       opts = ImplHelpers.peer_verification_options(%{destdomain: "proxy.example.com"})
 
       assert opts[:authorities] == [path: "/etc/pki/proxy-ca.pem"]
-    end
-
-    test "turning the check off says nothing else" do
-      Application.put_env(:elixip2, :tls_verify, false)
-
-      opts = ImplHelpers.peer_verification_options(%{destdomain: "proxy.example.com"})
-
-      assert opts == [verify: false]
     end
   end
 
@@ -101,7 +101,7 @@ defmodule SIP.Test.TLSOutboundVerify do
     end
 
     test "an unverifiable certificate is refused, and it is the certificate" do
-      Application.delete_env(:elixip2, :tls_verify)
+      Application.put_env(:elixip2, :tls_verify, true)
       Application.delete_env(:elixip2, :tls_cacertfile)
       port = tls_server()
 
@@ -120,8 +120,8 @@ defmodule SIP.Test.TLSOutboundVerify do
       assert alert in [:bad_certificate, :unknown_ca, :handshake_failure]
     end
 
-    test "and accepted once the check is turned off" do
-      Application.put_env(:elixip2, :tls_verify, false)
+    test "and accepted by default, where nothing asked for the check" do
+      Application.delete_env(:elixip2, :tls_verify)
       port = tls_server()
 
       assert {:ok, pid} =

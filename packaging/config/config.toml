@@ -41,15 +41,16 @@ port  = 5060
 #cert  = "/etc/kelixip/tls/fullchain.pem"
 #key   = "/etc/kelixip/tls/privkey.pem"
 
-# TLS/WSS sortant : le certificat du pair appelé est vérifié. Le nom contrôlé est
-# le domaine SIP de l'URI (RFC 5922), pas l'adresse résolue. `ca` restreint la
-# confiance à cette seule autorité ; absente, le magasin public sert.
-# `verify = false` est pour un laboratoire dont le proxy est auto-signé : un
-# serveur qui exige un certificat client alors que son client n'en vérifie aucun
-# ne protège rien.
+# TLS/WSS sortant. Par défaut le certificat du pair appelé n'est pas vérifié :
+# le faire suppose une autorité convenue avec lui, donc un accord d'interconnexion.
+# Passez `verify` à true en même temps que vous nommez `ca`, et faites-le en même
+# temps que le côté entrant : un serveur qui exige un certificat client alors que
+# son propre client n'en vérifie aucun ne protège rien.
+# Le nom contrôlé est le domaine SIP de l'URI (RFC 5922), pas l'adresse résolue.
 [tls]
-verify = true
-#ca = "/etc/kelixip/tls/proxy-ca.pem"
+verify = false
+#verify = true
+#ca = "/etc/kelixip/tls/interco-ca.pem"
 
 # Prometheus /metrics + /health. No auth — keep it on loopback and let a local
 # Prometheus scrape it. Remove the block to disable it entirely.

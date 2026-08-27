@@ -75,7 +75,7 @@ defmodule Kelix.Config do
             # DIAL presents is checked, and against which authority. Node-wide,
             # because it is about who we are willing to talk to, not about one
             # socket. `[[listen]] cert`/`key` is the inbound side and stays there.
-            tls: %{verify: true, ca: nil},
+            tls: %{verify: false, ca: nil},
             mediaserver_pool: [],
             # The node's video encoding bitrate (kb/s): what a leg is encoded at and
             # the cap on the `b=AS:` it is answered with. One statement for both
@@ -395,14 +395,17 @@ defmodule Kelix.Config do
 
   defp parse_metrics(_), do: {:error, "[metrics] must be a table"}
 
-  # Absent means the defaults, and the default is to check: an outbound leg that
-  # verifies nothing makes any mutual TLS above it theatre, and it was `verify:
-  # false` in the code with a comment saying it was to keep an example simple.
+  # Absent means no checking. Verifying a peer presumes an authority both sides
+  # agreed on, which is an interconnect decision and not something a node takes on
+  # its own — turning it on is the same deliberate act as putting a client
+  # certificate on the wire. It is nonetheless the half that gives the other its
+  # worth: a listener demanding a client certificate while this side checks nothing
+  # is theatre.
   defp parse_tls(nil), do: {:ok, %__MODULE__{}.tls}
 
   defp parse_tls(%{} = t) do
     with :ok <- reject_keys(t, ~w(verify ca), "[tls]"),
-         {:ok, verify} <- opt_bool(t, "verify", true, "[tls]"),
+         {:ok, verify} <- opt_bool(t, "verify", false, "[tls]"),
          {:ok, ca} <- opt_readable_file(t, "ca", "[tls]") do
       {:ok, %{verify: verify, ca: ca}}
     end

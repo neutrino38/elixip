@@ -378,17 +378,21 @@ qu'il reçoit : le côté entrant, ce sont les `cert` et `key` d'un `[[listen]]`
 
 | Clé | Type | Défaut | |
 |---|---|---|---|
-| `verify` | bool | `true` | Vérifie le certificat du pair appelé |
+| `verify` | bool | `false` | Vérifie le certificat du pair appelé |
 | `ca` | chemin | — | N'accorde sa confiance qu'à cette autorité ; absente, le magasin public est utilisé |
+
+Vérifier un pair suppose une autorité que les deux côtés ont acceptée : c'est un
+accord d'interconnexion, pas un réglage de socket. `verify` est donc à activer
+sciemment, au même titre que la pose d'un certificat client.
+
+**Activez-le en même temps que le côté entrant.** Un serveur qui exige un
+certificat client alors que son propre client sortant n'en vérifie aucun ne
+protège rien : la garantie mutuelle vaut ce que vaut la direction la plus faible.
 
 Le nom vérifié est le **domaine SIP** de l'URI appelée (RFC 5922 §7.2), pas
 l'adresse que le DNS a rendue. Une cible désignée par adresse nue n'a donc pas de
 nom à vérifier : son certificat doit porter cette adresse dans un SAN
 `iPAddress`, ce que presque aucun certificat SIP ne fait.
-
-`verify = false` existe pour un laboratoire dont le proxy porte un certificat
-auto-signé. Ne le laissez pas en production : un serveur qui exige un certificat
-client alors que son propre client n'en vérifie aucun ne protège rien.
 
 Une `ca` illisible fait échouer le démarrage. C'est voulu : sinon chaque appel
 sortant échoue à la poignée de main, avec une alerte TLS qui ne dit rien du

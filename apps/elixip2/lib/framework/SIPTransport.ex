@@ -196,15 +196,16 @@ defmodule SIP.Transport do
     @doc false
     # Whether this leg checks the certificate the peer presents, and against what.
     #
-    # It used to be `verify: false`, with a comment saying it was to keep an example
-    # simple — never a decision, and it made every outbound TLS and WSS leg accept
-    # any certificate from anyone able to answer on the address. A server that
-    # demands a client certificate while its own client verifies nothing is theatre:
-    # the mutual half is worth exactly as much as the half underneath it, and this
-    # one does not wait for mTLS to be worth having.
+    # **Off unless asked for.** Verifying a peer is an interconnect agreement, not a
+    # socket setting: it presumes a named authority both sides accepted, and a node
+    # cannot decide on its own that yesterday's working link should stop carrying
+    # calls. `:tls_verify` is therefore opt-in, and turning it on is the same
+    # deliberate act as putting a client certificate on the wire.
     #
-    # `verify: true` is also socket2's own default for a client, so what follows is
-    # the library's behaviour restored rather than a policy invented here.
+    # It is nonetheless the half that gives the other one its worth. A listener
+    # demanding a client certificate while its own outbound leg verifies nothing is
+    # theatre: the mutual guarantee is worth exactly what the weaker direction is
+    # worth. Whoever turns on `verify: :required` for inbound turns this on too.
     #
     # **The name checked is the SIP domain, never the address.** RFC 5922 §7.2 is
     # explicit: the identity in the certificate is the domain the URI named, and a
@@ -213,20 +214,19 @@ defmodule SIP.Transport do
     # to the address we dialled, which needs an iPAddress SAN almost no SIP
     # certificate carries.
     #
-    # Two keys, and both are escape hatches an operator can reach for a reason:
+    # Two keys:
     #
-    #  * `:tls_cacertfile` — the authority to trust. Absent, the public bundle is
-    #    trusted (socket2's default). Naming one trusts **only** it.
-    #  * `:tls_verify` — `false` turns the check off. For a lab whose proxy carries
-    #    a self-signed certificate, and it says so in the log rather than being
-    #    silent about it.
+    #  * `:tls_verify` — `true` checks the peer's certificate.
+    #  * `:tls_cacertfile` — the authority to trust, which is normally the point of
+    #    an interconnect. Naming one trusts **only** it; absent, the public bundle
+    #    is trusted (socket2's default).
     def peer_verification_options(state) do
-      case Application.get_env(:elixip2, :tls_verify, true) do
-        false ->
-          [verify: false]
+      case Application.get_env(:elixip2, :tls_verify, false) do
+        true ->
+          [verify: true] ++ authorities_option() ++ server_name_option(state)
 
         _ ->
-          [verify: true] ++ authorities_option() ++ server_name_option(state)
+          [verify: false]
       end
     end
 
@@ -251,8 +251,7 @@ defmodule SIP.Transport do
             module: __MODULE__,
             message:
               "outbound TLS with no domain to verify against: the certificate will " <>
-                "have to carry the address in an iPAddress SAN, or set " <>
-                ":elixip2, :tls_verify to false"
+                "have to carry the address in an iPAddress SAN"
           ])
 
           []
@@ -264,13 +263,12 @@ defmodule SIP.Transport do
     #
     # `Socket.Error` keeps only its message, not the reason, so the cause cannot be
     # matched on — and sniffing prose for "certificate" would be a guess. So this
-    # claims only what is true: verification was on, and here are the two keys that
+    # claims only what is true: verification is on, and here are the two keys that
     # decide it. Silent when it is off, where the certificate cannot be the cause.
     def connect_failure_hint() do
-      if Application.get_env(:elixip2, :tls_verify, true) do
-        " (the peer's certificate is checked: trust its authority with " <>
-          ":elixip2, :tls_cacertfile, or set :elixip2, :tls_verify to false to stop " <>
-          "checking — an outbound leg that checks nothing makes any mTLS above it theatre)"
+      if Application.get_env(:elixip2, :tls_verify, false) do
+        " (the peer's certificate is checked because :elixip2, :tls_verify is on: " <>
+          "trust its authority with :elixip2, :tls_cacertfile, or turn the check off)"
       else
         ""
       end
