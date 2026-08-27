@@ -61,7 +61,10 @@ le même lot.
   `addr` absent est la seule écriture qui n'en nomme aucune (étape 4).
 - **`tag`** n'a qu'une valeur utile : `"internal"`. Le côté public est le défaut
   déduit de l'absence de clé. `"public"` reste accepté sans effet. Introduit à
-  l'étape 5.
+  l'étape 5. Un listener `internal` porte aussi le ou les sous-réseaux qui le
+  définissent : auto-détectés depuis le masque de son interface
+  (`:inet.getifaddrs/0`), et énonçables par une clé pour un réseau interne joint
+  par un routeur, qui n'est attaché à aucune interface.
 - **`network`** ne vit pas dans le bloc. Écrite par listener, la liste de
   préfixes se recopie autant de fois qu'il y a de listeners et deux listeners
   peuvent se contredire. Et ce n'est pas `addr` qui décide qu'un correspondant
@@ -419,10 +422,11 @@ sur `EndpointStartReceiving` (6e) et `EndpointStartSending` (7e), la voie
 texte/WS est réordonnée, et le pool relit les profils de chaque serveur à chaque
 sonde de santé.
 
-**Non livré** : `Kelix.MediaPool.checkout/1` ne prend pas encore de contrainte de
-profil, et il a toujours lieu au routage. Voir « Deux jambes, deux profils, un
-seul serveur » plus bas — c'est le seul morceau restant, et il demande de
-décider *où* la cible sortante devient connue.
+**Non livré, et c'est un gros morceau** : la médiation elle-même. Le profil de la
+jambe sortante se déduit de sa cible résolue, donc le B2BUA doit résoudre son Peer
+**avant** d'essayer, marquer chaque URI de son profil, et seulement alors choisir
+un serveur média qui les porte tous. Trois phases, détaillées sous « Deux jambes,
+deux profils, un seul serveur » plus bas.
 
 Le mediaserver porte jusqu'à quatre adresses — `publicv4`, `publicv6`,
 `internalv4`, `internalv6` — déclarées par `--public-ip` et `--internal-ip`.
@@ -500,19 +504,130 @@ Un B2BUA relaie à l'intérieur d'une seule session, et ses deux jambes portent
 chacune leur profil. La médiation IPv4↔IPv6 est ce cas même : jambe entrante en
 v6, jambe sortante en v4. Le serveur retenu doit donc porter les deux profils.
 
-Cela déplace le `checkout` du pool, et c'est le morceau qui reste. Le serveur est
-choisi au routage — `Kelix.Router.overrides_for/1` le pose en `mediaserver_instance`
-dans l'appdata de l'instance, avant même que le script démarre. Il faut qu'il le
-soit quand les deux profils sont connus ensemble. Choisir sur la seule jambe
-entrante puis vérifier la sortante ne marche pas : le serveur est déjà retenu, et
-un pool où un autre serveur aurait convenu rend un 503 alors qu'un appel était
-possible.
+Le serveur est aujourd'hui choisi au routage — `Kelix.Router.overrides_for/1` le
+pose en `mediaserver_instance` dans l'appdata de l'instance, avant même que le
+script démarre. Il faut qu'il le soit quand les deux profils sont connus
+ensemble. Or le profil de la jambe sortante se déduit de sa **cible résolue**, et
+la cible d'un `b2bua_forward/3` n'est pas une adresse : c'est une liste d'URI, que
+le B2BUA résout aujourd'hui **au moment de la tentative**, une par une
+(`apply_ruri_policy/3`, et seulement pour `ruri: :keep`).
 
-**À trancher** : où la cible sortante devient-elle connue ? Le plan de numérotation
-est déroulé *dans le script*, donc ni le routeur ni `media_connect/0` ne la
-connaissent au moment où ils s'exécutent aujourd'hui. Déplacer le `checkout`
-demande de dire lequel des trois porte la décision, et c'est un changement du
-contrat routeur↔scénario, pas un détail d'implémentation.
+C'est donc le B2BUA, pas le routeur ni `media_connect/0`, qui porte la décision.
+Il le fait en trois phases.
+
+##### Phase 1 — résoudre le Peer avant d'essayer quoi que ce soit
+
+`b2bua_forward/3` reçoit un `%SIP.B2bua.Peer{}`. Avant toute tentative, chaque
+URI de `uris` est résolue : `destip`, `destport`, et le `tp_pid` quand un flux
+existe déjà. `%SIP.Uri{}` porte déjà ces champs et `SIP.Uri.has_tp_info/1` sait
+reconnaître une URI déjà résolue — une contact de registrar l'est.
+
+**La résolution de cette phase n'est pas `SIP.Transport.Selector.select_transport/1`.**
+Le sélecteur ne résout pas, il *lance* le transport : sur TCP, TLS ou WSS il
+ouvre la connexion. Résoudre toute la liste avec lui ouvrirait une connexion vers
+chaque cible d'un fork, y compris celles qui ne seront jamais essayées. Cette
+phase s'arrête donc à `SIP.Resolver`, qui ne fait que du DNS ; le transport reste
+lancé paresseusement, à la tentative.
+
+##### Phase 2 — marquer chaque URI résolue de son profil réseau
+
+La famille se lit sur l'adresse résolue. Le côté du réseau se lit sur son
+appartenance :
+
+- chaque listener `tag = "internal"` porte un ou plusieurs **sous-réseaux** ;
+- une adresse de destination qui tombe dans l'un d'eux est `internal`, le reste
+  est `public`.
+
+Le sous-réseau est **auto-détecté par défaut**, et `:inet.getifaddrs/0` suffit :
+il rend le masque à côté de l'adresse, en IPv4 comme en IPv6. Le sous-réseau
+directement attaché à l'interface du listener s'en déduit sans lire la table de
+routage — et la question d'écarter une passerelle par défaut ne se pose pas,
+puisqu'une passerelle n'apparaît pas dans cette liste.
+
+**L'auto-détection se force.** Une clé de listener énonce la liste des réseaux, et
+quand elle est présente elle **remplace** ce qui aurait été détecté ; elle ne s'y
+ajoute pas. Deux raisons, et la seconde suffit : un réseau interne joint par un
+routeur n'est attaché à aucune interface et ne serait jamais détecté ; et une
+détection qu'on ne peut que compléter est une détection qu'on ne peut pas
+corriger — sur une machine dont l'interface porte un /16 alors que l'interne est
+un /24, l'exploitant n'aurait aucun moyen de restreindre.
+
+###### Le marquage : un champ `net_side` sur `%SIP.Uri{}`
+
+Le résultat s'attache à l'URI résolue, dans **un** champ nouveau :
+
+```elixir
+net_side: :public | :internal | nil
+```
+
+Quatre décisions, dans l'ordre où elles se prennent.
+
+**Il ne stocke que le côté, pas la famille.** La famille se lit déjà sur
+`destip`, et `SIP.NetUtils.address_family/1` est le seul lecteur partout ailleurs
+— le nommage d'instance du sélecteur, le transport UDP, le `local_profile/1` du
+module MCU. La stocker ici en ferait une seconde source du même fait, et ce dépôt
+a la cicatrice de ce motif : trois copies de la liste de codecs, cinq
+redérivations de la durée de vie d'un REGISTER. Seule la moitié non déductible est
+retenue, et le côté l'est : il dépend de la topologie du nœud, pas de l'adresse.
+
+**Il ne porte pas le nom du profil serveur.** `"publicv4"` est du vocabulaire
+JSR309 (§6.7 bis) ; l'écrire dans `%SIP.Uri{}` ferait dépendre la couche SIP du
+nommage du serveur média. La traduction existe déjà au bon endroit, `profile_name/1`
+dans les adaptateurs, contre le code qui parle au serveur. L'URI énonce un fait
+de réseau ; l'adaptateur le traduit dans le mot du serveur.
+
+**Il vit à côté de `destip`, `destport` et `tp_pid`.** Ces champs sont déjà la
+grappe « routage résolu » et ne font déjà pas partie de l'identité textuelle de
+l'URI. `serialize/1` construit la forme filaire depuis des champs nommés — scheme,
+userpart, domain, port, params, hparams — donc un champ nouveau ne peut pas fuir
+dans un message. Vérifié, pas supposé.
+
+**Son défaut est `nil`, « non classé ».** Deux endroits seulement comparent un
+`%SIP.Uri{}` entier dans les suites, tous deux contre un littéral de structure :
+les deux côtés prennent le défaut, donc l'ajout ne casse rien.
+
+Et pas `profile` : le nom est déjà pris sur `%SIP.B2bua.Peer{}`, où il désigne
+l'échelle média (`:webrtc_required`, `:avp`, …), et `address_profile` est le mot
+des adaptateurs pour le nom côté serveur. `net_side` dit ce qu'il contient et ne
+se confond avec aucun des deux.
+
+###### Qui classe
+
+La classification a besoin des sous-réseaux internes du nœud, qui sont de la
+configuration kelixip et non une donnée du framework. Elle arrive donc comme une
+clé d'app env, écrite par `Kelix.Config.apply_app_env/1` et lue par **une** seule
+fonction du framework — le motif de `:udp_local_addr`. Conséquence à assumer :
+une part du `[network]` de l'étape 6 remonte ici, parce que la phase 2 ne peut pas
+s'en passer. L'étape 6 garde ce qui lui reste en propre, `advertise`.
+
+##### Phase 3 — choisir un serveur média qui porte les profils demandés
+
+À la sortie de la phase 2, le Peer porte une liste d'URI résolues **et**
+marquées. `Kelix.MediaPool.checkout/1` reçoit alors les profils demandés — celui
+de la jambe entrante et ceux des cibles — et ne retient que les entrées
+`enabled`, saines et portant **tous** ces profils. La sonde de santé du pool
+connaît déjà les profils de chaque serveur (§6.7 ter) : elle les relit à chaque
+cycle.
+
+Deux cas particuliers, et ils sont la raison d'être de la phase :
+
+- **des URI de profils différents dans la même liste.** On ouvre **un endpoint
+  par profil**, et on supprime celui dont la mise en relation échoue. Cela suit
+  le contrat serveur plutôt que de le contourner : le profil se fixe une fois par
+  jambe (§6.7 bis), donc deux profils demandent deux endpoints, et
+  `EndpointAttachToEndpoint` les veut dans une seule `MediaSession` — donc sur un
+  seul serveur, ce que la contrainte du `checkout` garantit.
+- **aucun serveur ne porte le profil d'une URI.** On éteint cette branche et on
+  passe à l'URI suivante. Quand il n'en reste plus, l'appel échoue. Jamais de
+  repli sur un autre profil : il enverrait le média par la mauvaise interface sans
+  que rien ne le signale.
+
+##### Ce que la phase 3 ne résout pas encore
+
+Le pool sait ce que chaque serveur porte, mais `checkout/1` ne prend pas encore
+de contrainte, et `Kelix.Router.overrides_for/1` pose toujours le serveur au
+routage. Tant que les phases 1 et 2 n'existent pas, une contrainte de profil
+n'aurait aucun appelant.
 
 #### Hors périmètre de cette étape
 
