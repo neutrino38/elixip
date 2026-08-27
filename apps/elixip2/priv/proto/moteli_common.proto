@@ -44,6 +44,9 @@ enum MediaProtocol {
   PROTO_WS = 2;
   PROTO_TCP = 3;
   PROTO_UDP = 4;
+  // SCTP over DTLS: a WebRTC data channel (RFC 8841). The leg stays
+  // ICE + DTLS + UDP — only what travels inside it changes.
+  PROTO_SCTP = 5;
 }
 
 // MediaFrame::MediaRole
