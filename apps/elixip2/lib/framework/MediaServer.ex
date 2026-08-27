@@ -61,6 +61,24 @@ defmodule MediaServer do
             "(expected :audio | :video | :text | :audio_video | :tc, or a list of these)"
   end
 
+  @doc """
+  The media server's addressing profile for a family and a side of the network:
+  `"publicv4"`, `"publicv6"`, `"internalv4"`, `"internalv6"`.
+
+  The server carries up to four addresses and names them exactly this way
+  (`xmlrpc_jsr309_api.md` §6.7 bis): a family crossed with a side. Written **once**
+  here rather than in each adapter and again in whatever selects a server — three
+  copies of a four-entry table is how the codec list went wrong.
+
+  A side of `nil` reads as public: it is the side of a node that has not been told
+  it has two.
+  """
+  @spec profile_name(:ipv4 | :ipv6, :internal | :public | nil) :: String.t()
+  def profile_name(:ipv6, :internal), do: "internalv6"
+  def profile_name(:ipv4, :internal), do: "internalv4"
+  def profile_name(:ipv6, _side), do: "publicv6"
+  def profile_name(:ipv4, _side), do: "publicv4"
+
   @typedoc """
   Asynchronous events delivered to the `event_sink` pid as `{:ms_event, ref, event}`.
 

@@ -109,4 +109,54 @@ defmodule SIP.Test.B2buaTargetMarking do
       assert stamped.net_side == nil
     end
   end
+  describe "b2bua_resolve/1 and what an unresolved peer means" do
+    alias SIP.B2bua.Peer
+
+    defp ctx, do: %SIP.Context{}
+
+    test "resolving fills the rungs and marks them" do
+      Application.put_env(:elixip2, :internal_networks, [{{127, 0, 0, 0}, 8}])
+
+      peer = %Peer{uris: [uri("sip:bob@localhost:5070")]}
+      out = B2bua.do_resolve_peer(ctx(), peer)
+
+      assert out.lasterr == :ok
+      assert %Peer{resolved: [[target]]} = SIP.Context.appdata_get(out, :resolved_peer)
+      assert target.destip == {127, 0, 0, 1}
+      assert target.net_side == :internal
+    end
+
+    test "the profiles a resolved peer needs, deduplicated" do
+      Application.put_env(:elixip2, :internal_networks, [{{127, 0, 0, 0}, 8}])
+
+      peer = %Peer{uris: [uri("sip:a@localhost:5070"), uri("sip:b@localhost:5071")]}
+      out = B2bua.do_resolve_peer(ctx(), peer)
+
+      # Both targets land on loopback, so one profile — a media server carrying
+      # internalv4 serves them both.
+      assert B2bua.resolved_profiles(out) == [{:ipv4, :internal}]
+    end
+
+    test "a context that resolved nothing constrains nothing" do
+      assert B2bua.resolved_profiles(ctx()) == []
+    end
+
+    test "no target resolvable is a routing failure, said as one" do
+      peer = %Peer{uris: [uri("sip:bob@no-such-host.invalid:5070")]}
+      out = B2bua.do_resolve_peer(ctx(), peer)
+
+      assert out.lasterr == :no_target_resolved
+    end
+
+    test "resolving twice is idempotent" do
+      peer = %Peer{uris: [uri("sip:bob@localhost:5070")]}
+      once = B2bua.do_resolve_peer(ctx(), peer)
+      resolved = SIP.Context.appdata_get(once, :resolved_peer)
+
+      twice = B2bua.do_resolve_peer(once, resolved)
+
+      assert SIP.Context.appdata_get(twice, :resolved_peer) == resolved
+      assert twice.lasterr == :ok
+    end
+  end
 end

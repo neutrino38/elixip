@@ -1211,14 +1211,10 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
     if local in offered, do: Enum.uniq([local | offered]), else: offered
   end
 
-  # The server's four profile names (§6.7 bis) are exactly a family crossed with a
-  # side, so the two halves name one. The side is the LOCAL address's — ours, the
-  # one this peer reached — because an offer says which families a peer can
-  # receive on and nothing about which side of our network it sits on.
-  defp profile_name(:ipv6, :internal), do: "internalv6"
-  defp profile_name(:ipv4, :internal), do: "internalv4"
-  defp profile_name(:ipv6, _side), do: "publicv6"
-  defp profile_name(:ipv4, _side), do: "publicv4"
+  # The side is the LOCAL address's — ours, the one this peer reached — because an
+  # offer says which families a peer can receive on and nothing about which side of
+  # our network it sits on. The name itself is `MediaServer`'s to spell.
+  defp profile_name(family, side), do: MediaServer.profile_name(family, side)
 
   # `profile` is positional and LAST in both calls (§6.7 bis), and omitted when
   # this leg has none to ask for: the RPC is then byte-for-byte the one a

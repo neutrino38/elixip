@@ -61,7 +61,17 @@ defmodule SIP.B2bua.Peer do
             fallback_on: nil,
             notify_progress: false,
             outbound_proxy: nil,
-            trunk_pid: nil
+            trunk_pid: nil,
+            # The rungs this peer's `uris` expand to, each target already carrying
+            # its address and its `net_side` — what `b2bua_resolve/1` produced.
+            # `nil` means "not resolved yet", and the forward path then resolves as
+            # it always has, at the attempt.
+            #
+            # It exists so the media server can be chosen knowing where the call is
+            # actually going: the profiles of the outbound targets are readable from
+            # here BEFORE any leg is created (step 5 of
+            # docs/design/multi-interface.md).
+            resolved: nil
 end
 
 defmodule SIP.B2bua.Hunt do
@@ -231,6 +241,56 @@ defmodule SIP.Session.B2bua do
   defmacro __using__(_opts) do
     quote do
       use SIP.Context
+
+      @doc """
+      Resolve every target of `peer` — address and side of the network — before
+      any of them is attempted, and before the media server is chosen.
+
+      Call it **before** `media_connect/0`, and hand `b2bua_resolved_peer/0` to
+      `b2bua_forward/4` afterwards:
+
+          b2bua_resolve(peer)
+          media_connect()
+          b2bua_forward(req, b2bua_resolved_peer(), @media)
+
+      That order is what lets the media server be chosen knowing where the call is
+      going. The outbound leg's addressing profile follows from its target, and one
+      media server serves the whole session, so the profiles of every target have to
+      be known together — a server picked before the target is a server that may
+      not carry the interface the call needs (step 5 of
+      docs/design/multi-interface.md).
+
+      `ctx_get(:lasterr)` is `:ok`, or `:no_target_resolved` when not one target
+      could be resolved — a routing failure to answer rather than to discover as a
+      timeout.
+
+      **This verb is never mandatory.** `b2bua_forward/4` handed a peer that was
+      not resolved resolves it at the attempt, exactly as it did before the verb
+      existed; the only thing lost is the constrained selection of the media
+      server. And handed the *original* peer after this verb resolved the same
+      targets, it adopts that resolution rather than redoing it — passing
+      `b2bua_resolved_peer/0` is clearer, not load-bearing. Only forwarding to
+      targets nobody resolved, while something else was resolved, is warned about:
+      the media server was then chosen for a call going elsewhere.
+      """
+      defmacro b2bua_resolve(peer) do
+        quote do
+          SIP.Scenario.Monitor.note_command(:sip, "b2bua_resolve")
+
+          var!(sip_ctx) = SIP.Session.B2bua.do_resolve_peer(var!(sip_ctx), unquote(peer))
+        end
+      end
+
+      @doc """
+      The peer `b2bua_resolve/1` resolved, to hand to `b2bua_forward/4`.
+
+      `nil` before anything was resolved.
+      """
+      defmacro b2bua_resolved_peer() do
+        quote do
+          SIP.Context.appdata_get(var!(sip_ctx), :resolved_peer)
+        end
+      end
 
       @doc """
       Create the outbound leg: forward `req` to `peer`, attaching the resulting
@@ -648,7 +708,7 @@ defmodule SIP.Session.B2bua do
   @doc false
   @spec do_create_leg(%SIP.Context{}, map(), term(), term(), keyword()) :: %SIP.Context{}
   def do_create_leg(sip_ctx = %SIP.Context{}, req, peer, media, opts \\ []) do
-    peer = normalize_peer(peer)
+    peer = peer |> normalize_peer() |> reuse_resolution(sip_ctx)
 
     cond do
       not dialog_forming?(req) ->
@@ -1455,6 +1515,8 @@ defmodule SIP.Session.B2bua do
   # A `:parallel` peer gets one rung per entry of `uris` — a nested entry is a
   # group to ring together (equal q for a registrar peer, RFC 3261 §16.6:
   # parallel within a group, serial across groups in descending q).
+  defp expand_targets(%Peer{resolved: rungs}) when is_list(rungs), do: rungs
+
   defp expand_targets(%Peer{fork: :parallel} = peer) do
     Enum.map(peer.uris, fn entry ->
       entry |> List.wrap() |> Enum.flat_map(&srv_expand(&1, peer)) |> Enum.map(&resolve_and_mark/1)
@@ -1479,6 +1541,117 @@ defmodule SIP.Session.B2bua do
     case SIP.Resolver.srv_targets(uri) do
       {:ok, [_ | _] = targets} -> targets
       _ -> [uri]
+    end
+  end
+
+  # What `b2bua_forward/4` does with a peer that was NOT resolved, stated rather
+  # than left to whichever branch happens to run.
+  #
+  #  * already resolved — its rungs are used, and nothing is resolved twice.
+  #  * not resolved, but `b2bua_resolve/1` resolved the SAME targets — the
+  #    resolution is adopted. A scenario that resolved and then passed its
+  #    original peer meant the same call, and taking its word costs nothing:
+  #    without this the targets would be resolved a second time and the media
+  #    server, already chosen from the first resolution, might not match.
+  #  * not resolved, and nothing resolved anything — resolved at the attempt,
+  #    exactly as before this verb existed. `b2bua_resolve/1` is never mandatory;
+  #    skipping it costs only the constrained selection of the media server.
+  #  * not resolved, and something resolved OTHER targets — resolved at the
+  #    attempt, with a warning. The media server was chosen for a call going
+  #    somewhere else, and that is worth saying out loud rather than debugging as
+  #    media that arrives on the wrong interface.
+  defp reuse_resolution(%Peer{resolved: rungs} = peer, _sip_ctx) when is_list(rungs), do: peer
+
+  defp reuse_resolution(%Peer{} = peer, sip_ctx) do
+    case SIP.Context.appdata_get(sip_ctx, :resolved_peer) do
+      %Peer{resolved: rungs, uris: uris} when is_list(rungs) and uris == peer.uris ->
+        %Peer{peer | resolved: rungs}
+
+      %Peer{uris: other} ->
+        Logger.warning(
+          module: __MODULE__,
+          message:
+            "forwarding to targets that were not the ones resolved: the media server " <>
+              "was selected for #{inspect(other)} and this leg goes to " <>
+              "#{inspect(peer.uris)} — pass b2bua_resolved_peer() to b2bua_forward/4"
+        )
+
+        peer
+
+      _ ->
+        peer
+    end
+  end
+
+  @doc """
+  Resolve every target of `peer` and mark which side of this node's network it
+  sits on, before any of them is attempted.
+
+  Returns the context with the resolved peer stored under the appdata key
+  `:resolved_peer`, and `lasterr` set to `:ok`, or to `:no_target_resolved` when
+  not one target could be resolved — which is a routing failure a scenario should
+  answer, not discover as a timeout.
+
+  A scenario calls this **before** `media_connect/0`, and hands the resolved peer
+  to `b2bua_forward/4` afterwards. That order is what lets the media server be
+  chosen knowing where the call is going: the outbound leg's addressing profile
+  follows from its target, and one media server serves the whole session, so the
+  profiles of every target have to be known together.
+
+  Idempotent: a peer already resolved is returned unchanged, so a block that
+  resolves defensively costs nothing after a scenario that already did.
+  """
+  @spec do_resolve_peer(%SIP.Context{}, %Peer{}) :: %SIP.Context{}
+  def do_resolve_peer(sip_ctx = %SIP.Context{}, %Peer{resolved: rungs} = peer)
+      when is_list(rungs) do
+    sip_ctx |> SIP.Context.appdata_set(:resolved_peer, peer) |> SIP.Context.set(:lasterr, :ok)
+  end
+
+  def do_resolve_peer(sip_ctx = %SIP.Context{}, %Peer{} = peer) do
+    rungs = expand_targets(peer)
+    resolved = %Peer{peer | resolved: rungs}
+
+    if Enum.any?(List.flatten(rungs), &match?(%SIP.Uri{destip: ip} when is_tuple(ip), &1)) do
+      sip_ctx
+      |> SIP.Context.appdata_set(:resolved_peer, resolved)
+      |> SIP.Context.set(:lasterr, :ok)
+    else
+      Logger.warning(
+        module: __MODULE__,
+        message: "no target of this peer could be resolved: #{inspect(peer.uris)}"
+      )
+
+      sip_ctx
+      |> SIP.Context.appdata_set(:resolved_peer, resolved)
+      |> SIP.Context.set(:lasterr, :no_target_resolved)
+    end
+  end
+
+  @doc """
+  The addressing sides and families every resolved target of `sip_ctx` needs, as
+  `{family, side}` pairs without repetition.
+
+  What `media_connect/0` constrains the media server pool with. Empty when
+  nothing has been resolved, which is a node that has not been told where the
+  call is going and gets the selection it always got.
+  """
+  @spec resolved_profiles(%SIP.Context{}) :: [{:ipv4 | :ipv6, :internal | :public}]
+  def resolved_profiles(sip_ctx = %SIP.Context{}) do
+    case SIP.Context.appdata_get(sip_ctx, :resolved_peer) do
+      %Peer{resolved: rungs} when is_list(rungs) ->
+        rungs
+        |> List.flatten()
+        |> Enum.flat_map(fn
+          %SIP.Uri{destip: ip, net_side: side} when is_tuple(ip) and not is_nil(side) ->
+            [{SIP.NetUtils.address_family(ip), side}]
+
+          _ ->
+            []
+        end)
+        |> Enum.uniq()
+
+      _ ->
+        []
     end
   end
 

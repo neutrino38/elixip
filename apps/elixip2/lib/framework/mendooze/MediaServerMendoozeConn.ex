@@ -2310,14 +2310,10 @@ defmodule MediaServer.Mendooze.Conn do
     end
   end
 
-  # The server's four profile names (§6.7 bis) are exactly a family crossed with a
-  # side, so the two halves name one. The side is the LOCAL address's — ours, the
-  # one this peer reached — because an offer says which families a peer can
-  # receive media on and nothing about which side of our network it sits on.
-  defp profile_name(:ipv6, :internal), do: "internalv6"
-  defp profile_name(:ipv4, :internal), do: "internalv4"
-  defp profile_name(:ipv6, _side), do: "publicv6"
-  defp profile_name(:ipv4, _side), do: "publicv4"
+  # The side is the LOCAL address's — ours, the one this peer reached — because an
+  # offer says which families a peer can receive media on and nothing about which
+  # side of our network it sits on. The name itself is `MediaServer`'s to spell.
+  defp profile_name(family, side), do: MediaServer.profile_name(family, side)
 
   # Both halves come from the local address of this leg, and neither is
   # configured: the address states its family, and `SIP.NetUtils.net_side/1`
