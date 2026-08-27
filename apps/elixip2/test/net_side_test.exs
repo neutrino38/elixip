@@ -145,4 +145,48 @@ defmodule SIP.Test.NetSide do
       assert SIP.Uri.serialize(marked) == SIP.Uri.serialize(uri)
     end
   end
+  describe "advertise — the address a listener publishes" do
+    test "a TCP listener publishes the advertised address, and binds the other" do
+      # The 1:1 NAT case: the socket binds what the host holds, and everything
+      # that writes an address into a message carries what peers can reach.
+      {:ok, pid} =
+        GenServer.start(
+          SIP.Transport.TCPListener,
+          {{127, 0, 0, 1}, 0, [advertise: {203, 0, 113, 9}]}
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+      # Published…
+      assert {:ok, {203, 0, 113, 9}, port} = GenServer.call(pid, :getlocalipandport)
+      # …and bound: still the address the host actually has.
+      assert {{127, 0, 0, 1}, ^port} = Socket.local!(:sys.get_state(pid).socket)
+    end
+
+    test "a Contact carries the advertised address" do
+      {:ok, port} = SIP.NetUtils.pick_free_port(:udp)
+
+      {:ok, pid} =
+        GenServer.start(
+          SIP.Transport.UDP,
+          {:bind, {127, 0, 0, 1}, port, [family: :ipv4, advertise: {203, 0, 113, 9}]}
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+      assert {:ok, {203, 0, 113, 9}, ^port} = GenServer.call(pid, :getlocalipandport)
+      assert {:ok, {{127, 0, 0, 1}, ^port}} = :inet.sockname(:sys.get_state(pid).socket)
+
+      # What the peer reads back, which is the whole point.
+      assert SIP.Uri.serialize(SIP.Transport.build_contact_uri(SIP.Transport.UDP, pid)) ==
+               {:ok, "<sip:203.0.113.9:#{port};transport=udp>"}
+    end
+
+    test "without it, nothing changes" do
+      {:ok, pid} = GenServer.start(SIP.Transport.TCPListener, {{127, 0, 0, 1}, 0, []})
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+      assert {:ok, {127, 0, 0, 1}, _port} = GenServer.call(pid, :getlocalipandport)
+    end
+  end
 end

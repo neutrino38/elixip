@@ -24,7 +24,8 @@ defmodule Kelix.Config do
           cert: String.t() | nil,
           key: String.t() | nil,
           tag: :public | :internal,
-          networks: [{:inet.ip_address(), non_neg_integer()}]
+          networks: [{:inet.ip_address(), non_neg_integer()}],
+          advertise: String.t() | nil
         }
 
   @typedoc """
@@ -476,14 +477,15 @@ defmodule Kelix.Config do
   defp parse_listeners(_), do: {:error, "`listen` must be an array of tables ([[listen]])"}
 
   defp parse_listener(%{} = l) do
-    with :ok <- reject_keys(l, ~w(proto addr port cert key tag networks), "[[listen]]"),
+    with :ok <- reject_keys(l, ~w(proto addr port cert key tag networks advertise), "[[listen]]"),
          {:ok, proto} <- req_proto(l),
          {:ok, addr} <- opt_bind_addr(l),
          {:ok, port} <- req_pos_integer(l, "port", "[[listen]]"),
          {:ok, cert, key} <- listener_certs(l, proto),
          {:ok, tag} <- opt_listener_tag(l),
          {:ok, networks} <- opt_listener_networks(l),
-         :ok <- internal_defines_its_network(tag, addr, networks) do
+         :ok <- internal_defines_its_network(tag, addr, networks),
+         {:ok, advertise} <- opt_advertise(l, addr) do
       {:ok,
        %{
          proto: proto,
@@ -492,12 +494,62 @@ defmodule Kelix.Config do
          cert: cert,
          key: key,
          tag: tag,
-         networks: networks
+         networks: networks,
+         advertise: advertise
        }}
     end
   end
 
   defp parse_listener(_), do: {:error, "each [[listen]] must be a table"}
+
+  # The address this listener PUBLISHES, when it is not the one it binds: a VM
+  # behind a 1:1 NAT binds a private address and is reached at a public one. The
+  # operator knows it — an AWS EIP does not move — and nothing on the host can
+  # derive it, which is why it is stated rather than discovered.
+  #
+  # Its family must be the listener's. A Via `sent-by` and a Contact carrying the
+  # other family would name an address no peer of this listener can call back, and
+  # the failure would look like a routing problem rather than a typo.
+  defp opt_advertise(l, addr) do
+    case Map.get(l, "advertise") do
+      nil ->
+        {:ok, nil}
+
+      text when is_binary(text) ->
+        with {:ok, ip} <- SIP.NetUtils.parse_address(text),
+             :ok <- advertise_family_matches(ip, addr) do
+          {:ok, text}
+        else
+          {:error, :einval} ->
+            {:error, "[[listen]]: `advertise` must be an IP address, got #{inspect(text)}"}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+
+      other ->
+        {:error, "[[listen]]: `advertise` must be a string, got #{inspect(other)}"}
+    end
+  end
+
+  # A wildcard or absent `addr` states its family too (`0.0.0.0`, `::`, or both
+  # when absent), so an advertised address is checked against whichever the
+  # listener will actually bind. Absent means both families, and the advertised
+  # address then names the one it belongs to — nothing to contradict.
+  defp advertise_family_matches(_ip, nil), do: :ok
+
+  defp advertise_family_matches(ip, addr) do
+    with {:ok, bound} <- SIP.NetUtils.parse_address(addr) do
+      if SIP.NetUtils.address_family(ip) == SIP.NetUtils.address_family(bound) do
+        :ok
+      else
+        {:error,
+         "[[listen]]: `advertise` is #{SIP.NetUtils.address_family(ip)} while `addr` is " <>
+           "#{SIP.NetUtils.address_family(bound)}; a Via and a Contact carrying the other " <>
+           "family name an address no peer of this listener can call back"}
+      end
+    end
+  end
 
   # `tag` has one useful value. The public side is the default, read off the
   # absence of the key; `"public"` is accepted and does nothing, so a

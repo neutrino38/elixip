@@ -127,7 +127,7 @@ defmodule Kelix.Listener.Supervisor do
            {GenServer, :start_link,
             [
               SIP.Transport.UDP,
-              {:bind, bind_addr(l), port, [family: family_of(l)]},
+              {:bind, bind_addr(l), port, [family: family_of(l)] ++ advertise_opt(l)},
               [name: {:via, Registry, {Registry.SIPTransport, name}}]
             ]}
          ]},
@@ -184,10 +184,22 @@ defmodule Kelix.Listener.Supervisor do
 
   # tls/wss carry their own cert/key (design §3.1); Kelix.Config guarantees both
   # are present for those protocols and absent for udp/tcp.
-  defp listener_opts(%{cert: cert, key: key}) when is_binary(cert) and is_binary(key),
-    do: [certfile: cert, keyfile: key]
+  defp listener_opts(%{cert: cert, key: key} = l) when is_binary(cert) and is_binary(key),
+    do: [certfile: cert, keyfile: key] ++ advertise_opt(l)
 
-  defp listener_opts(_l), do: []
+  defp listener_opts(l), do: advertise_opt(l)
+
+  # The address to publish instead of the bound one (a 1:1 NAT). Parsed here rather
+  # than carried as text: the listeners write it into a Via and a Contact, and both
+  # want a tuple.
+  defp advertise_opt(%{advertise: text}) when is_binary(text) do
+    case SIP.NetUtils.parse_address(text) do
+      {:ok, ip} -> [advertise: ip]
+      _ -> []
+    end
+  end
+
+  defp advertise_opt(_l), do: []
 
   # A wildcard means "every interface of this family" — the listeners spell that
   # `:all` and resolve a local IP themselves for Via/Contact, from the `:family`

@@ -66,7 +66,8 @@ defmodule Kelix.ConfigTest do
                  cert: nil,
                  key: nil,
                  tag: :public,
-                 networks: []
+                 networks: [],
+                 advertise: nil
                }
       assert tls.proto == :tls and tls.port == 5061
       assert tls.cert == "/etc/kelixip/tls/fullchain.pem"
@@ -678,6 +679,44 @@ defmodule Kelix.ConfigTest do
 
       assert SIP.NetUtils.net_side({10, 1, 2, 3}) == :internal
       assert SIP.NetUtils.net_side({8, 8, 8, 8}) == :public
+    end
+  end
+  describe "[[listen]] advertise — the address published instead of the bound one" do
+    test "absent by default" do
+      assert {:ok, cfg} = listener("")
+      assert [%{advertise: nil}] = cfg.listen
+    end
+
+    test "a 1:1 NAT: bind private, publish public" do
+      assert {:ok, cfg} =
+               listener(~s(addr = "10.0.0.5"\nadvertise = "203.0.113.9"))
+
+      assert [%{addr: "10.0.0.5", advertise: "203.0.113.9"}] = cfg.listen
+    end
+
+    test "the other family is refused, with the reason" do
+      # A Via and a Contact carrying the other family name an address no peer of
+      # this listener can call back, and it would look like a routing problem.
+      assert {:error, msg} = listener(~s(addr = "10.0.0.5"\nadvertise = "2001:db8::9"))
+      assert msg =~ "call back"
+
+      assert {:error, msg} = listener(~s(addr = "::1"\nadvertise = "203.0.113.9"))
+      assert msg =~ "call back"
+    end
+
+    test "the same family passes, wildcards included" do
+      assert {:ok, _} = listener(~s(addr = "0.0.0.0"\nadvertise = "203.0.113.9"))
+      assert {:ok, _} = listener(~s(addr = "::"\nadvertise = "2001:db8::9"))
+    end
+
+    test "an absent addr contradicts nothing: it is both families" do
+      assert {:ok, cfg} = listener(~s(advertise = "203.0.113.9"))
+      assert [%{advertise: "203.0.113.9"}] = cfg.listen
+    end
+
+    test "a non-address is refused" do
+      assert {:error, msg} = listener(~s(advertise = "nope"))
+      assert msg =~ "`advertise`"
     end
   end
 end

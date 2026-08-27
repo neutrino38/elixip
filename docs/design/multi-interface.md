@@ -730,22 +730,62 @@ plus que sur l'adresse interne : la loopback cesse d'être une porte d'entrée, 
 l'`url` des entrées `[mediaserver.pool.*]` doit viser l'adresse interne. Avec
 une adresse interne v4 et une v6, l'API n'écoute qu'en IPv4.
 
-### Étape 6 — `[network]` et `advertise`
+### Étape 6 — `advertise`
 
-Les besoins « médiation interne/externe » et « IP interne nattée 1:1 ». C'est
-ici qu'un correspondant se classe par son adresse, et qu'un appel qui
-**traverse** d'un côté à l'autre devient possible.
+Les besoins « médiation interne/externe » et « IP interne nattée 1:1 ».
 
-- **`[network] internal = [<préfixes>]`**, au niveau du nœud. Toute adresse de
-  ces préfixes est interne ; le reste est externe. La reconnaissance des portées
-  de l'étape 2 sert de base.
-- **`advertise = "<ip>"`** par listener : l'adresse publiée dans la
-  signalisation quand elle diffère de l'adresse liée. C'est le cas de la VM
-  nattée 1:1, où l'exploitant connaît l'adresse publique.
-- La table de l'étape 5 gagne son second axe : le côté d'une jambe ne vient plus
-  seulement de son listener, mais aussi de la classification du correspondant. Le
-  `checkout` du pool reçoit déjà les deux profils depuis l'étape 5 ; ici c'est ce
-  que vaut chaque profil qui change, pas le moment où il est connu.
+#### `advertise` — livrée
+
+`advertise = "<ip>"` par listener : l'adresse publiée dans la signalisation quand
+elle diffère de l'adresse liée. C'est la VM nattée 1:1, où l'exploitant connaît
+l'adresse publique — une EIP AWS ne bouge pas — et où rien sur la machine ne peut
+la déduire.
+
+La socket lie toujours `addr` ; seule l'adresse **annoncée** change. Tout ce qui
+écrit une adresse dans un message suit donc, parce que tout part du même endroit :
+`localip`, ce que `SIP.Transport.get_local_ip_port/1` répond, dont sont construits
+le `sent-by` d'un Via et un Contact, et que la couche média lit comme l'adresse
+que ce pair a atteinte. `bind_addr` et `localip` étaient déjà deux champs
+distincts dans les trois listeners : c'est ce qui a rendu l'ajout local.
+
+Sa famille doit être celle de `addr`, et la configuration est refusée sinon : un
+Via et un Contact portant l'autre famille nomment une adresse qu'aucun pair de ce
+listener ne peut rappeler, et la panne ressemblerait à un problème de routage.
+
+#### `[network] internal` — non retenue
+
+La classification par préfixe est livrée depuis l'étape 5, mais **par listener** :
+`tag = "internal"` et son `networks` optionnel, le nœud prenant l'union.
+
+Cette étape prévoyait une section `[network]` au niveau du nœud, contre l'écriture
+par listener, avec deux objections : la liste se recopierait autant de fois qu'il
+y a de listeners, et deux listeners pourraient se contredire. Aucune ne tient sur
+ce qui a été livré — la détection automatique fait qu'il n'y a rien à recopier, et
+l'union ne peut pas se contredire.
+
+Ajouter `[network]` maintenant donnerait deux façons d'énoncer la même chose, donc
+une question de préséance à trancher et à documenter, pour zéro capacité de plus.
+Un nœud sans listener `internal` n'a d'ailleurs pas de côté interne à annoncer :
+la clé n'aurait rien à décrire.
+
+#### Le second axe — à trancher
+
+L'étape prévoyait que le côté d'une jambe vienne aussi de la classification du
+**correspondant**, et pas seulement de son listener. C'est fait pour la jambe
+sortante — `net_side` de la cible résolue —, pas pour l'entrante, dont le côté
+vient de l'adresse locale que le pair a atteinte.
+
+Les deux répondent à des questions différentes, et c'est pourquoi je ne tranche
+pas seul : le listener dit **par quelle interface ce pair a un chemin jusqu'à
+nous**, ce qui est une vérité de routage ; l'adresse du pair dit **de quel côté il
+se trouve**. Ils divergent quand un pair d'un préfixe interne atteint le listener
+public — auquel cas le média doit sortir par le public, puisque c'est là que le
+pair a un chemin. Le listener a donc raison sur ce cas, et changer pour l'adresse
+du pair serait une régression.
+
+Reste le cas inverse à décrire : un pair public qui atteint un listener interne.
+Il suppose un routage qui l'a laissé entrer, et c'est une topologie à énoncer avant
+de coder une règle pour elle.
 - **Un client STUN n'existe pas.** `SIP.Stun` sait uniquement reconnaître et
   décoder l'en-tête d'un message entrant ; son moduledoc énumère ce qui manque
   (attributs, XOR-MAPPED-ADDRESS, encodage, MESSAGE-INTEGRITY), et son seul

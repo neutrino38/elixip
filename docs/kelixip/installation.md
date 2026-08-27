@@ -199,6 +199,7 @@ Unknown keys are rejected too — a typo must not silently fall back to a defaul
 | `cert` / `key` | path | **yes for `tls`/`wss`** | Per-listener PEM cert and key. **Forbidden** on `udp`/`tcp` |
 | `tag` | `public` \| `internal` | non (`public`) | De quel côté du réseau ce listener se trouve |
 | `networks` | liste de CIDR | non | Les réseaux qui définissent ce côté. Présente, elle **remplace** la détection automatique |
+| `advertise` | IP | non | L'adresse **publiée** quand elle diffère de l'adresse liée (NAT 1:1). Même famille que `addr` |
 
 ```toml
 [[listen]]
@@ -404,6 +405,32 @@ tag      = "internal"
 
 Toute adresse qui n'entre dans aucun de ces réseaux est `public`. Un nœud sans
 listener `internal` n'a qu'un côté, et c'est le public.
+
+##### `advertise` — une IP nattée 1:1
+
+Une VM lie une adresse privée et se joint à une adresse publique. L'exploitant
+connaît cette adresse — une EIP AWS ne bouge pas — et rien sur la machine ne peut
+la déduire, d'où une clé plutôt qu'une découverte.
+
+```toml
+[[listen]]
+proto     = "udp"
+addr      = "10.0.0.5"
+port      = 5060
+advertise = "203.0.113.9"
+```
+
+La socket lie toujours `addr` ; c'est l'adresse **annoncée** qui change. Tout ce
+qui écrit une adresse dans un message suit donc : le `sent-by` d'un Via, un
+Contact, et l'adresse que la couche média lit comme celle que ce pair a atteinte.
+
+Sa famille doit être celle de `addr`, et le démarrage échoue sinon : un Via et un
+Contact portant l'autre famille nomment une adresse qu'aucun pair de ce listener
+ne peut rappeler, et la panne ressemblerait à un problème de routage.
+
+Pas de découverte par STUN. Elle ajouterait une dépendance réseau au démarrage et
+un mode de panne, pour aucune information de plus que cette clé — et le
+mediaserver fait le même choix avec `--public-ip`.
 
 #### `[tls]` — la jambe sortante
 
