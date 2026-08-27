@@ -430,6 +430,38 @@ Three details that each cost a real call:
 - **`telephone-event` follows the primary codec's clock**, selected per clock
   rate rather than assumed at 8000.
 
+#### Real-time text on a WebRTC leg
+
+A browser cannot carry T.140 on an RTP profile — `RTCPeerConnection` has no
+`m=text`. There are two ways round it, and the adapter drives both:
+
+- a **WebSocket** beside the call, which the peer asks for with its own
+  `m=text … TCP/WS t140` section and we answer with a URL. We never offer one:
+  it is a door, opened when someone knocks;
+- a **WebRTC data channel** (RFC 8865): `m=application … UDP/DTLS/SCTP
+  webrtc-datachannel`, inside the leg's own DTLS and ICE. It is answered when
+  offered, **and it is what our own offers carry by default on a WebRTC leg** —
+  `text_transport: :data_channel | :rtp` in the leg's options, defaulting to the
+  data channel with DTLS and to RTP without.
+
+Three things that are NOT symmetric with the WebSocket case, each of them a call
+that would have failed:
+
+- **a data channel section is declined with port 0, never omitted.** It is in the
+  browser's real offer, and libwebrtc counts the answer's `m=` lines against its
+  own. The WebSocket omission exists for one deployed client that injects and
+  strips its own section;
+- **the `m=` line says `application`, the medium is the call's text.** The parsed
+  descriptor carries both, and a rejection uses the offered name — renaming it
+  loses the section the peer offered;
+- **no `a=dcmap`** (RFC 8864) in our offers or answers: declaring the channel in
+  the SDP is what tells a peer *not* to open it in band, and the media server
+  binds its text channel on the DCEP `OPEN`.
+
+`a=sctp-port` and `a=max-message-size` come from the media server
+(`SetupDataChannel`), never from a constant on this side — the same rule as the
+announced address.
+
 ### 6.6 Media connectivity — when may a scenario send?
 
 `:ice_connected` used to mean "some media flowed", and that is not the same
