@@ -153,13 +153,12 @@ defmodule SIP.Transport do
     def connect(state, transport, timeout \\ 10000) do
       ssl_options =
         [
-          verify: false, # Désactive la vérification du certificat pour simplifier l'exemple
           versions: [:"tlsv1.2"], # Spécifie la version de TLS à utiliser
           # Cipher suites are configurable via :elixip2/:tls_ciphers; @tls_ciphers is the default.
           ciphers: Application.get_env(:elixip2, :tls_ciphers, @tls_ciphers),
           timeout: timeout,
           mode: :active
-        ] ++ client_cert_options()
+        ] ++ client_cert_options() ++ peer_verification_options(state)
 
       sock = case transport do
         :tcp ->
@@ -192,6 +191,89 @@ defmodule SIP.Transport do
 
       # Return the local IP and port inside the state map.
       Map.put(state, :localip, local_ip) |> Map.put(:localport, local_port) |> Map.put(:socket, sock)
+    end
+
+    @doc false
+    # Whether this leg checks the certificate the peer presents, and against what.
+    #
+    # It used to be `verify: false`, with a comment saying it was to keep an example
+    # simple — never a decision, and it made every outbound TLS and WSS leg accept
+    # any certificate from anyone able to answer on the address. A server that
+    # demands a client certificate while its own client verifies nothing is theatre:
+    # the mutual half is worth exactly as much as the half underneath it, and this
+    # one does not wait for mTLS to be worth having.
+    #
+    # `verify: true` is also socket2's own default for a client, so what follows is
+    # the library's behaviour restored rather than a policy invented here.
+    #
+    # **The name checked is the SIP domain, never the address.** RFC 5922 §7.2 is
+    # explicit: the identity in the certificate is the domain the URI named, and a
+    # SIP proxy is reached at an address that DNS chose. Passing the domain as SNI
+    # is what makes the check both correct and possible — without it OTP falls back
+    # to the address we dialled, which needs an iPAddress SAN almost no SIP
+    # certificate carries.
+    #
+    # Two keys, and both are escape hatches an operator can reach for a reason:
+    #
+    #  * `:tls_cacertfile` — the authority to trust. Absent, the public bundle is
+    #    trusted (socket2's default). Naming one trusts **only** it.
+    #  * `:tls_verify` — `false` turns the check off. For a lab whose proxy carries
+    #    a self-signed certificate, and it says so in the log rather than being
+    #    silent about it.
+    def peer_verification_options(state) do
+      case Application.get_env(:elixip2, :tls_verify, true) do
+        false ->
+          [verify: false]
+
+        _ ->
+          [verify: true] ++ authorities_option() ++ server_name_option(state)
+      end
+    end
+
+    defp authorities_option() do
+      case Application.get_env(:elixip2, :tls_cacertfile) do
+        path when is_binary(path) -> [authorities: [path: path]]
+        _ -> []
+      end
+    end
+
+    # No domain — a leg aimed at a bare address — leaves the reference identity to
+    # OTP, which then matches against that address. Said out loud: it is the case
+    # that needs an iPAddress SAN, and the one an operator will otherwise diagnose
+    # as "TLS is broken".
+    defp server_name_option(state) do
+      case Map.get(state, :destdomain) do
+        domain when is_binary(domain) and domain != "" ->
+          [server_name: domain]
+
+        _ ->
+          Logger.debug([
+            module: __MODULE__,
+            message:
+              "outbound TLS with no domain to verify against: the certificate will " <>
+                "have to carry the address in an iPAddress SAN, or set " <>
+                ":elixip2, :tls_verify to false"
+          ])
+
+          []
+      end
+    end
+
+    @doc false
+    # What to add to a failed outbound TLS/WSS connection's log line.
+    #
+    # `Socket.Error` keeps only its message, not the reason, so the cause cannot be
+    # matched on — and sniffing prose for "certificate" would be a guess. So this
+    # claims only what is true: verification was on, and here are the two keys that
+    # decide it. Silent when it is off, where the certificate cannot be the cause.
+    def connect_failure_hint() do
+      if Application.get_env(:elixip2, :tls_verify, true) do
+        " (the peer's certificate is checked: trust its authority with " <>
+          ":elixip2, :tls_cacertfile, or set :elixip2, :tls_verify to false to stop " <>
+          "checking — an outbound leg that checks nothing makes any mTLS above it theatre)"
+      else
+        ""
+      end
     end
 
     # Certificate a TLS/WSS *client* presents. It needs none unless the peer asks for

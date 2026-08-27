@@ -17,9 +17,12 @@ defmodule SIP.Transport.TLS do
 
   # Outbound connection — opens the TLS socket via Socket.SSL.
   @impl true
-  def init({dest_ip, dest_port}) do
+  def init({dest_ip, dest_port}), do: init({dest_ip, dest_port, nil})
+
+  def init({dest_ip, dest_port, domain}) do
     initial_state = %{t_isreliable: true,
       upperlayer: nil, destip: dest_ip, destport: dest_port,
+      destdomain: domain,
       buffer: %SIP.Transport.Depack{}}
 
     try do
@@ -29,7 +32,8 @@ defmodule SIP.Transport.TLS do
       err in Socket.Error ->
         dest_ip_str = if is_tuple(dest_ip), do: NetUtils.ip2string(dest_ip), else: dest_ip
         Logger.info([module: __MODULE__, dest: "#{dest_ip_str}:#{dest_port}",
-                     message: "Failed to connect socket: #{err.message}"])
+                     message: "Failed to connect socket: #{err.message}" <>
+                       SIP.Transport.ImplHelpers.connect_failure_hint()])
         {:stop, :cnxerror}
     end
   end

@@ -17,7 +17,9 @@ defmodule SIP.Transport.TCP do
 
   # Outbound connection — opens the socket.
   @impl true
-  def init({dest_ip, dest_port}) do
+  def init({dest_ip, dest_port}), do: init({dest_ip, dest_port, nil})
+
+  def init({dest_ip, dest_port, _domain}) do
     initial_state = %{t_isreliable: true,
       upperlayer: nil, destip: dest_ip, destport: dest_port,
       buffer: %SIP.Transport.Depack{}}

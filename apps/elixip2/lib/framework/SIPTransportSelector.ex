@@ -99,9 +99,15 @@ alias SIP.NetUtils
       message: "Looking for transport instance #{instance_name} for dest #{destip}:#{uri.destport}"])
     case Registry.lookup(Registry.SIPTransport, instance_name) do
       [] ->
-        # No such instance. Start a new transport
+        # No such instance. Start a new transport.
+        #
+        # The third element is the DOMAIN the URI named, not a duplicate of the
+        # address: a TLS leg has to verify a certificate against the name it was
+        # asked for (RFC 5922 §7.2 — the SIP domain, never the address it resolved
+        # to), and the resolution has already happened by here. Transports that do
+        # not verify anything ignore it.
         name = { :via, Registry, {Registry.SIPTransport, instance_name}}
-        case GenServer.start(uri.tp_module, { uri.destip, uri.destport } , name: name) do
+        case GenServer.start(uri.tp_module, { uri.destip, uri.destport, uri.domain } , name: name) do
           { :ok, t_pid } ->
             Logger.debug("Started transport #{inspect(uri.tp_module)} process with PID #{inspect(t_pid)}")
             { :ok, %SIP.Uri{ uri | tp_pid: t_pid } }
@@ -145,7 +151,7 @@ alias SIP.NetUtils
         else
           Logger.warning("Found transport process with PID #{inspect(t_pid)} but it is dead.")
           name = { :via, Registry, {Registry.SIPTransport, instance_name}}
-          { :ok, t_pid} = GenServer.start(uri.tp_module, { uri.destip, uri.destport } , name: name)
+          { :ok, t_pid} = GenServer.start(uri.tp_module, { uri.destip, uri.destport, uri.domain } , name: name)
           Logger.debug("Started transport #{inspect(uri.tp_module)} process with PID #{inspect(t_pid)}")
           { :ok, %SIP.Uri{ uri | tp_pid: t_pid } }
         end

@@ -35,6 +35,8 @@ defmodule SIP.Transport.UDP do
     open_socket(if(bind_ip == :all, do: nil, else: bind_ip), port, family)
   end
 
+  def init({dest_ip, dest_port, _domain}), do: init({dest_ip, dest_port})
+
   def init({dest_ip, _dest_port}) do
     # Local bind port and address are configurable via the application env (set
     # by elixipp's --listen / --local-port options and by kelixip's [[listen]]
