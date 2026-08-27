@@ -79,6 +79,44 @@ defmodule MediaServer do
   def profile_name(:ipv6, _side), do: "publicv6"
   def profile_name(:ipv4, _side), do: "publicv4"
 
+  @doc """
+  The addressing profile a leg we ANSWER asks for, from its connection options,
+  or `nil` when they say nothing about where it is.
+
+  The two halves come from two different places, and neither is configured:
+
+    * the **family** from `local_ip`, the address of ours this peer reached. That
+      is a routing truth — of the addresses this node holds, it is one the peer
+      demonstrably has a route to.
+    * the **side** from `peer_ip`, the address the peer sent FROM, classified
+      against this node's internal networks. `local_ip` cannot answer it: behind a
+      1:1 NAT one interface has two faces, the NAT rewrites the destination, and
+      an inside peer and an outside peer arrive on the same private address. Our
+      own address then discriminates nothing.
+
+  Without `peer_ip` — a leg we placed, a transport that reported no peer — the
+  side falls back to `local_ip`'s, which is what it was before a peer address was
+  carried at all.
+
+  Written once here because three callers need it: the two adapters and whatever
+  constrains a media server pool.
+  """
+  @spec leg_profile_name(keyword()) :: String.t() | nil
+  def leg_profile_name(opts) do
+    local_ip = Keyword.get(opts, :local_ip)
+
+    case address_family_of(local_ip) do
+      nil ->
+        nil
+
+      family ->
+        side_source = Keyword.get(opts, :peer_ip) || local_ip
+        profile_name(family, SIP.NetUtils.net_side(side_source))
+    end
+  end
+
+  defp address_family_of(ip), do: SIP.NetUtils.address_family(ip)
+
   @typedoc """
   Asynchronous events delivered to the `event_sink` pid as `{:ms_event, ref, event}`.
 
@@ -238,6 +276,13 @@ defmodule MediaServer do
           # media on one of several interfaces reads it; the others ignore it. Absent
           # on an outbound leg, which has no transport when it is created.
           local_ip: :inet.ip_address(),
+          # The source address the inbound request came FROM, set by the framework
+          # on a leg we ANSWER. It is what says which SIDE of the network this peer
+          # sits on — `local_ip` cannot, because behind a 1:1 NAT one interface has
+          # two faces and both an inside and an outside peer arrive on the same
+          # private address. Absent on an outbound leg, whose side comes from its
+          # target instead (`address_profile:` below).
+          peer_ip: :inet.ip_address(),
           # The media server's addressing profile this leg's media must be placed
           # on — `MediaServer.profile_name/2`'s output. Set by the framework on a
           # leg we PLACE, where `local_ip` says nothing: we have no address the

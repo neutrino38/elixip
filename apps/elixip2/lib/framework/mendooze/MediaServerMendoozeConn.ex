@@ -2332,12 +2332,7 @@ defmodule MediaServer.Mendooze.Conn do
         stated
 
       _ ->
-        local_ip = Keyword.get(opts, :local_ip)
-
-        case SIP.NetUtils.address_family(local_ip) do
-          nil -> nil
-          family -> profile_name(family, SIP.NetUtils.net_side(local_ip))
-        end
+        MediaServer.leg_profile_name(opts)
     end
   end
 

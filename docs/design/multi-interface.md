@@ -768,24 +768,52 @@ une question de préséance à trancher et à documenter, pour zéro capacité d
 Un nœud sans listener `internal` n'a d'ailleurs pas de côté interne à annoncer :
 la clé n'aurait rien à décrire.
 
-#### Le second axe — à trancher
+#### Le second axe — livré : le côté vient du pair
 
-L'étape prévoyait que le côté d'une jambe vienne aussi de la classification du
-**correspondant**, et pas seulement de son listener. C'est fait pour la jambe
-sortante — `net_side` de la cible résolue —, pas pour l'entrante, dont le côté
-vient de l'adresse locale que le pair a atteinte.
+Le cas qui l'a tranché : **une seule interface**, privée, nattée 1:1 avec une
+publique, une UA dans le réseau privé et une UA sur Internet. Les deux atteignent
+la **même socket** — le NAT a réécrit la destination — donc `local_ip` vaut
+`10.0.0.5` pour les deux. Notre adresse ne discrimine rien : elle n'est pas
+fausse, elle est **muette**. L'adresse source du pair est la seule preuve qui
+reste.
 
-Les deux répondent à des questions différentes, et c'est pourquoi je ne tranche
-pas seul : le listener dit **par quelle interface ce pair a un chemin jusqu'à
-nous**, ce qui est une vérité de routage ; l'adresse du pair dit **de quel côté il
-se trouve**. Ils divergent quand un pair d'un préfixe interne atteint le listener
-public — auquel cas le média doit sortir par le public, puisque c'est là que le
-pair a un chemin. Le listener a donc raison sur ce cas, et changer pour l'adresse
-du pair serait une régression.
+Le profil se scinde donc en deux moitiés, chacune avec sa source, et
+`MediaServer.leg_profile_name/1` les assemble en un seul endroit :
 
-Reste le cas inverse à décrire : un pair public qui atteint un listener interne.
-Il suppose un routage qui l'a laissé entrer, et c'est une topologie à énoncer avant
-de coder une règle pour elle.
+| moitié | source | pourquoi |
+|---|---|---|
+| famille | `local_ip` | vérité de routage : le pair a atteint cette adresse |
+| côté | `peer_ip` | seule preuve du côté quand une interface a deux faces |
+
+`peer_ip` est l'adresse source de la requête entrante, que le transport a déjà
+estampillée dans `ruri.destip` en la recevant — lue dans la même structure que
+`tp_pid`, donc elle ne peut pas en dériver. Sans elle — une jambe qu'on place, un
+transport sans pair — le côté retombe sur `local_ip`, ce dont il était déduit
+avant.
+
+**`advertise` ne suffisait pas pour ce cas** : c'est une substitution plate, elle
+donnerait l'adresse publique aux deux UA. Elle reste juste pour un nœud dont
+l'interface ne sert **que** des pairs extérieurs.
+
+Et la substitution SDP n'est pas écrite ici : le mediaserver la fait. Chaque
+profil porte deux adresses, liée et annoncée, et il accepte la **même adresse
+liée** dans `publicv4` et `internalv4` — vérifié par deux tests ajoutés à sa
+suite (`test_addressprofiles.cpp`, 551 tests verts), pas par lecture. La table ne
+lie rien : le bind a lieu par session RTP, chacune avec son couple de ports.
+
+```
+--public-ip 10.0.0.5 --nat 203.0.113.9 --internal-ip 10.0.0.5
+```
+
+**Conséquence d'exploitation** : dès qu'un `--internal-ip` est donné, l'API de
+contrôle XML-RPC ne répond plus que sur l'adresse interne. Les entrées
+`[mediaserver.pool.*]` doivent viser `10.0.0.5`, plus la loopback.
+
+**Reste à faire** : le Contact et le Via. Un BYE de l'UA publique visant
+`10.0.0.5` n'arriverait nulle part. Le Contact est estampillé dans la couche
+transaction (`SIPNICT`, `SIPICT`, `SIPTransactionCommon`) depuis `{t_mod, t_pid}`
+seul ; en UDP une socket sert plusieurs pairs, donc l'adresse du pair doit y
+descendre. Trois sites d'appel.
 
 #### Pas de client STUN — hors périmètre
 

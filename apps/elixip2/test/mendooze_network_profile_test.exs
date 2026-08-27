@@ -46,6 +46,16 @@ defmodule Mendooze.NetworkProfileTest do
     ]
   end
 
+  # A server carrying all four, so no choice is ever forced by availability.
+  defp four_profiles do
+    [
+      profile("publicv4", true, "203.0.113.9"),
+      profile("publicv6", true, "2001:db8::12"),
+      profile("internalv4", true, "10.0.0.4"),
+      profile("internalv6", true, "fd00::4")
+    ]
+  end
+
   defp handler(profiles) do
     fn
       "EventQueueCreate", _ -> {:ok, [7, "/events/jsr309/7"]}
@@ -179,6 +189,81 @@ defmodule Mendooze.NetworkProfileTest do
     end
   end
 
+  describe "one interface, two faces: a 1:1 NAT serving both sides" do
+    setup do
+      previous = Application.fetch_env(:elixip2, :internal_networks)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, v} -> Application.put_env(:elixip2, :internal_networks, v)
+          :error -> Application.delete_env(:elixip2, :internal_networks)
+        end
+      end)
+
+      # The node binds 10.0.0.5, NAT'd 1:1 to a public address, and 10/8 is its
+      # internal network. Both UAs reach the SAME socket: the NAT rewrote the
+      # destination, so `local_ip` is 10.0.0.5 for both and discriminates nothing.
+      Application.put_env(:elixip2, :internal_networks, [{{10, 0, 0, 0}, 8}])
+      :ok
+    end
+
+    @bound {10, 0, 0, 5}
+
+    test "the UA on the internet is placed on publicv4" do
+      conn =
+        start_conn(four_profiles(),
+          media: :audio,
+          local_ip: @bound,
+          peer_ip: {198, 51, 100, 7}
+        )
+
+      {:ok, _answer} = Mendooze.set_remote_offer(conn, offer("198.51.100.7"))
+
+      # The media server then announces its public alias in the `c=` line.
+      assert [3, 4, 0, _rtp_map, %{"fmtp" => _}, "publicv4"] = await_start_receiving()
+    end
+
+    test "the UA in the private network is placed on internalv4" do
+      conn =
+        start_conn(four_profiles(),
+          media: :audio,
+          local_ip: @bound,
+          peer_ip: {10, 0, 0, 42}
+        )
+
+      {:ok, _answer} = Mendooze.set_remote_offer(conn, offer("10.0.0.42"))
+
+      # Same socket, same local_ip, other side — and the private address is kept.
+      assert [3, 4, 0, _rtp_map, %{"fmtp" => _}, "internalv4"] = await_start_receiving()
+    end
+
+    test "without the peer's address the local one decides, as before" do
+      # A transport that reported no peer, or a leg we placed: the fallback is what
+      # the side was derived from before a peer address was carried at all.
+      conn = start_conn(four_profiles(), media: :audio, local_ip: @bound)
+      {:ok, _answer} = Mendooze.set_remote_offer(conn, offer("198.51.100.7"))
+
+      assert [3, 4, 0, _rtp_map, %{"fmtp" => _}, "internalv4"] = await_start_receiving()
+    end
+
+    test "the family still comes from OUR address, the side from the peer's" do
+      # A v6 peer on a v6 listener of the internal network: neither half decides
+      # the other.
+      Application.put_env(:elixip2, :internal_networks, [{{0xFD00, 0, 0, 0, 0, 0, 0, 0}, 8}])
+
+      conn =
+        start_conn(four_profiles(),
+          media: :audio,
+          local_ip: {0xFD00, 0, 0, 0, 0, 0, 0, 5},
+          peer_ip: {0xFD00, 0, 0, 0, 0, 0, 0, 42}
+        )
+
+      {:ok, _answer} = Mendooze.set_remote_offer(conn, offer("fd00::42"))
+
+      assert [3, 4, 0, _rtp_map, %{"fmtp" => _}, "internalv6"] = await_start_receiving()
+    end
+  end
+
   describe "the side comes from the local address this peer reached" do
     setup do
       previous = Application.fetch_env(:elixip2, :internal_networks)
@@ -191,16 +276,6 @@ defmodule Mendooze.NetworkProfileTest do
       end)
 
       :ok
-    end
-
-    # A server carrying all four, so the choice is never forced by availability.
-    defp four_profiles do
-      [
-        profile("publicv4", true, "203.0.113.9"),
-        profile("publicv6", true, "2001:db8::12"),
-        profile("internalv4", true, "10.0.0.4"),
-        profile("internalv6", true, "fd00::4")
-      ]
     end
 
     test "a peer that reached our internal address is placed on internalv4" do

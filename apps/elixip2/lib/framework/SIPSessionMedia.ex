@@ -484,13 +484,31 @@ defmodule SIP.Session.Media do
            SIP.Context.appdata_get(sip_ctx, :last_uas_req) ||
              SIP.Context.appdata_get(sip_ctx, :inbound_request),
          {:ok, local_ip, _local_port} <- SIP.Transport.get_local_ip_port(tp_pid) do
-      [local_ip: local_ip]
+      [local_ip: local_ip] ++ peer_ip_opt(sip_ctx)
     else
       _ -> []
     end
   end
 
   defp local_address_opts(_sip_ctx, _leg), do: []
+
+  # `peer_ip:` — the source address the inbound request came FROM, which the
+  # transport stamped into the R-URI's `destip` when it received it
+  # (`SIP.Transport.do_process_incoming_message/7`). Read from the same struct as
+  # `tp_pid` above, so it costs nothing and cannot drift from it.
+  #
+  # It is what says which SIDE of the network this peer sits on, and `local_ip`
+  # cannot: behind a 1:1 NAT one interface has two faces, the NAT rewrites the
+  # destination, and both an inside and an outside peer arrive on the same private
+  # address. Our own address then discriminates nothing — it is not wrong, it is
+  # silent — and the peer's is the only remaining evidence.
+  defp peer_ip_opt(sip_ctx) do
+    case SIP.Context.appdata_get(sip_ctx, :last_uas_req) ||
+           SIP.Context.appdata_get(sip_ctx, :inbound_request) do
+      %{ruri: %SIP.Uri{destip: ip}} when is_tuple(ip) -> [peer_ip: ip]
+      _ -> []
+    end
+  end
 
   @doc """
   Per-call options a scenario adds to `create_peer_connection/3`, read from the
