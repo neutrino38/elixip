@@ -1618,4 +1618,169 @@ defmodule Mendooze.SdpTest do
       assert desc.mid == "2"
     end
   end
+
+  describe "text over a WebRTC data channel (RFC 8865)" do
+    defp dc_offer(extra \\ "") do
+      """
+      v=0
+      o=- 1 1 IN IP4 10.9.8.7
+      s=call
+      c=IN IP4 10.9.8.7
+      t=0 0
+      m=application 9 UDP/DTLS/SCTP webrtc-datachannel
+      a=mid:1
+      a=ice-ufrag:cccc
+      a=ice-pwd:dddddddddddddddddddddd
+      a=fingerprint:sha-256 11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00
+      a=setup:actpass
+      a=sctp-port:5000
+      a=max-message-size:262144
+      #{extra}
+      """
+    end
+
+    test "a data channel section is the call's TEXT plane, whatever its m= line says" do
+      assert {:ok, [desc]} = Sdp.parse(dc_offer())
+
+      assert desc.supported?
+      assert desc.transport == :sctp
+      # the inversion to know: the m= line says application, the medium is text
+      assert desc.type == :text
+      assert desc.sdp_type == :application
+      assert desc.protocol == "UDP/DTLS/SCTP"
+      assert desc.raw_fmt == "webrtc-datachannel"
+      assert desc.port == 9
+      assert desc.sctp_port == 5000
+      assert desc.max_message_size == 262_144
+    end
+
+    test "it is real media, so its transport plane is read like any other leg's" do
+      assert {:ok, [desc]} = Sdp.parse(dc_offer())
+
+      assert {:dtls, :actpass, "sha-256", fp} = desc.crypto
+      assert String.starts_with?(fp, "11:22:33")
+      assert desc.ice == %{ufrag: "cccc", pwd: "dddddddddddddddddddddd"}
+      assert desc.mid == "1"
+      assert desc.setup == :actpass
+      # and nothing RTP-shaped: no payload type travels inside a data channel
+      assert desc.rtp_map == %{}
+      assert desc.codecs == ["T140"]
+      refute desc.rtcp_mux
+    end
+
+    test "both RFC 8841 spellings are recognised" do
+      for proto <- ["UDP/DTLS/SCTP", "TCP/DTLS/SCTP"] do
+        offer = String.replace(dc_offer(), "UDP/DTLS/SCTP", proto)
+        assert {:ok, [desc]} = Sdp.parse(offer)
+        assert desc.supported?, "#{proto} was not supported"
+        assert desc.protocol == proto
+      end
+    end
+
+    test "a missing a=sctp-port reads as 5000, what every browser uses" do
+      offer = dc_offer() |> String.replace("a=sctp-port:5000\n", "")
+      assert {:ok, [desc]} = Sdp.parse(offer)
+      assert desc.sctp_port == 5000
+      assert desc.max_message_size == 262_144
+    end
+
+    # RFC 8864: a peer MAY declare its channels in the SDP. A browser doing a plain
+    # createDataChannel declares nothing and opens them in band with DCEP, which is
+    # the case the media server is built around.
+    test "a channel declared with a=dcmap is read, subprotocol included" do
+      offer = dc_offer(~s(a=dcmap:0 label="chat";subprotocol="t140";ordered=true))
+      assert {:ok, [desc]} = Sdp.parse(offer)
+
+      assert desc.dcmap == %{stream: 0, label: "chat", subprotocol: "t140"}
+    end
+
+    test "the t140 channel is picked out of several declared ones" do
+      offer =
+        dc_offer(
+          ~s(a=dcmap:0 label="telemetry";subprotocol="app-x";ordered=true) <>
+            "\n" <> ~s(a=dcmap:2 label="text";subprotocol="t140";ordered=true)
+        )
+
+      assert {:ok, [desc]} = Sdp.parse(offer)
+      assert desc.dcmap.stream == 2
+      assert desc.dcmap.subprotocol == "t140"
+    end
+
+    test "no dcmap at all means DCEP in band, not a missing channel" do
+      assert {:ok, [desc]} = Sdp.parse(dc_offer())
+      assert desc.dcmap == nil
+      # the section stands: it is the media server that picks the t140 channel by
+      # its subprotocol when the peer opens it
+      assert desc.supported?
+    end
+
+    test "a section that is not a WebRTC data channel stays an unsupported stub" do
+      offer = String.replace(dc_offer(), "webrtc-datachannel", "bfcp")
+      assert {:ok, [desc]} = Sdp.parse(offer)
+      refute desc.supported?
+      assert desc.transport == :unsupported
+      # the mid survives: JSEP wants every answer section named, rejected ones too
+      assert desc.mid == "1"
+    end
+
+    test "the built answer says m=application again, and publishes the server's own parameters" do
+      sdp_str =
+        Sdp.build(%{
+          ip: "192.168.5.5",
+          medias: [
+            %{
+              data_channel: %{sctp_port: 5000, max_message_size: 65_536, dcmap: nil},
+              port: 40_000,
+              protocol: "UDP/DTLS/SCTP",
+              crypto: {:dtls, :passive, "sha-256", "AA:BB:CC"},
+              ice: %{ufrag: "loc", pwd: "locpwd"},
+              direction: :sendrecv,
+              mid: "1"
+            }
+          ]
+        })
+
+      assert sdp_str =~ "m=application 40000 UDP/DTLS/SCTP webrtc-datachannel"
+      assert sdp_str =~ "a=sctp-port:5000"
+      assert sdp_str =~ "a=max-message-size:65536"
+      assert sdp_str =~ "a=fingerprint:sha-256 AA:BB:CC"
+      assert sdp_str =~ "a=setup:passive"
+      assert sdp_str =~ "a=ice-ufrag:loc"
+      assert sdp_str =~ "a=mid:1"
+
+      # nothing RTP-shaped, and above all no BUNDLE: the media server gives each
+      # leg its own 5-tuple
+      refute sdp_str =~ "a=rtpmap"
+      refute sdp_str =~ "a=fmtp"
+      refute sdp_str =~ "a=rtcp-mux"
+      refute sdp_str =~ "a=group:BUNDLE"
+
+      # and it round-trips
+      assert {:ok, [desc]} = Sdp.parse(sdp_str)
+      assert desc.transport == :sctp
+      assert desc.sctp_port == 5000
+      assert desc.max_message_size == 65_536
+    end
+
+    test "a dcmap is echoed only to a peer that declared one" do
+      built = fn dcmap ->
+        Sdp.build(%{
+          ip: "192.168.5.5",
+          medias: [
+            %{
+              data_channel: %{sctp_port: 5000, max_message_size: 65_536, dcmap: dcmap},
+              port: 40_000,
+              protocol: "UDP/DTLS/SCTP",
+              crypto: :none
+            }
+          ]
+        })
+      end
+
+      refute built.(nil) =~ "a=dcmap"
+
+      answer = built.(%{stream: 2, label: "text", subprotocol: "t140"})
+      assert answer =~ ~s(a=dcmap:2 label="text";subprotocol="t140";ordered=true)
+    end
+  end
 end

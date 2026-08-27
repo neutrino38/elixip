@@ -338,6 +338,38 @@ defmodule MediaServer.Mendooze.Sdp do
   def codec_names(:video), do: @video_codecs |> Map.keys() |> Enum.sort()
   def codec_names(:text), do: @text_codecs |> Map.keys() |> Enum.sort()
 
+  # Real-time text carried over a WebRTC **data channel** (RFC 8865), the other
+  # answer to the same problem: a browser cannot put T.140 on an RTP profile, so
+  # either it opens a WebSocket beside the call (above) or it carries the text
+  # inside the `RTCPeerConnection` itself. The second needs no URL and no token —
+  # same ICE, same DTLS, same port as any other leg; only what travels inside
+  # changes. Design in the media server:
+  # `docs/conception/T140-DC/SPEC.md`.
+  #
+  # RFC 8841 defines both spellings; browsers offer the UDP one. The answer
+  # mirrors whichever was offered.
+  @dc_protocols ~w(UDP/DTLS/SCTP TCP/DTLS/SCTP)
+
+  # The only format a WebRTC data channel section ever names (RFC 8841 §5.1).
+  @dc_fmt "webrtc-datachannel"
+
+  # The `a=sctp-port` a peer that omits the line is assumed to use. RFC 8841 makes
+  # the attribute mandatory, but a missing one is not worth losing a call over:
+  # every browser uses 5000.
+  @dc_default_sctp_port 5000
+
+  # The subprotocol RFC 8865 gives a T.140 channel. Read from `a=dcmap` when the
+  # peer declares its channels in the SDP (RFC 8864); absent when it opens them
+  # in band with DCEP, which is what a plain `createDataChannel` does.
+  @t140_subprotocol "t140"
+
+  @doc """
+  The SCTP-over-DTLS transports a data channel may be offered over (RFC 8841).
+  Exposed so an adapter can recognise such a section without re-listing them.
+  """
+  @spec dc_protocols() :: [String.t()]
+  def dc_protocols(), do: @dc_protocols
+
   # ── SDP construction ────────────────────────────────────────────────────────
 
   @doc """
@@ -411,6 +443,43 @@ defmodule MediaServer.Mendooze.Sdp do
     |> add_mid(Map.get(mspec, :mid))
   end
 
+  # A WebRTC data channel section (RFC 8841). Unlike the WebSocket one this is real
+  # media: it keeps the port the media server bound, and it carries its own
+  # transport plane — fingerprint, setup role, ICE credentials, candidates.
+  #
+  # `a=sctp-port` and `a=max-message-size` come from the media server (its
+  # `SetupDataChannel` / `SetupParticipantDataChannel` answer), never from a
+  # constant written on this side: what the server knows of itself is the server's
+  # to tell.
+  #
+  # No rtpmap, no fmtp, no rtcp-mux — nothing of the sort travels inside a data
+  # channel. `a=dcmap` is echoed only when the peer declared its channels that way
+  # (RFC 8864); a peer that opens them in band with DCEP gets none back.
+  #
+  # NO `a=group:BUNDLE` either, here or anywhere else in this module: the media
+  # server gives each leg its own 5-tuple. A browser left at its default
+  # `bundlePolicy` ("balanced") gathers candidates per `m=` section and is served
+  # by such an answer; one forced to `max-bundle` is not, and that is a known
+  # limitation of the media server, not of this section.
+  defp build_media(%{data_channel: dc, port: port, protocol: protocol} = mspec) do
+    %ExSDP.Media{
+      type: :application,
+      port: port,
+      protocol: protocol,
+      fmt: @dc_fmt
+    }
+    |> ExSDP.add_attribute(
+      {"sctp-port", to_string(Map.get(dc, :sctp_port, @dc_default_sctp_port))}
+    )
+    |> maybe_add_attribute("max-message-size", Map.get(dc, :max_message_size))
+    |> maybe_add_dcmap(Map.get(dc, :dcmap))
+    |> ExSDP.add_attribute(Map.get(mspec, :direction, :sendrecv))
+    |> add_crypto(Map.get(mspec, :crypto, :none))
+    |> add_ice(Map.get(mspec, :ice))
+    |> add_mid(Map.get(mspec, :mid))
+    |> add_candidates(Map.get(mspec, :candidates, []))
+  end
+
   # Server-driven codec section: emit the accepted rtpmap entries and the fmtp
   # strings returned by the media server verbatim.
   defp build_media(%{type: type, port: port, rtpmaps: rtpmaps} = mspec) do
@@ -470,6 +539,23 @@ defmodule MediaServer.Mendooze.Sdp do
 
   defp maybe_add_ws_url(m, _attribute, nil), do: m
   defp maybe_add_ws_url(m, attribute, url), do: ExSDP.add_attribute(m, {attribute, url})
+
+  defp maybe_add_attribute(m, _name, nil), do: m
+  defp maybe_add_attribute(m, name, value), do: ExSDP.add_attribute(m, {name, to_string(value)})
+
+  # RFC 8864 §5: the channel we answer with, on the stream the peer named, with the
+  # subprotocol RFC 8865 gives real-time text. Emitted only in reply to a peer that
+  # declared its channels in the SDP.
+  defp maybe_add_dcmap(m, nil), do: m
+
+  defp maybe_add_dcmap(m, %{stream: stream} = dcmap) do
+    label = Map.get(dcmap, :label, @t140_subprotocol)
+
+    ExSDP.add_attribute(
+      m,
+      {"dcmap", "#{stream} label=\"#{label}\";subprotocol=\"#{@t140_subprotocol}\";ordered=true"}
+    )
+  end
 
   @doc """
   Split a WebSocket URL into the SDP attribute **name** and the **value** to
@@ -796,6 +882,9 @@ defmodule MediaServer.Mendooze.Sdp do
       m.type == :text and m.protocol in @ws_text_protocols and ws_text_fmt?(m.fmt) ->
         parse_ws_text(m, session_ip, session_attrs)
 
+      m.type == :application and m.protocol in @dc_protocols and dc_fmt?(m.fmt) ->
+        parse_data_channel(m, session_ip, session_attrs)
+
       true ->
         %{
           supported?: false,
@@ -874,6 +963,131 @@ defmodule MediaServer.Mendooze.Sdp do
   # the form the historical Java gateway emitted because its client re-prefixed
   # the scheme itself). Returns the value verbatim; interpreting it is the
   # caller's business.
+  defp dc_fmt?(fmt) when is_binary(fmt), do: String.downcase(String.trim(fmt)) == @dc_fmt
+  defp dc_fmt?(_fmt), do: false
+
+  # A data channel section, as a media_desc an answerer can act on.
+  #
+  # THE ONE INVERSION TO KNOW: the `m=` line says `application`, but the medium
+  # this section carries is the call's **text**, and that is what `:type` holds.
+  # Everything that walks a media list — media selection, the text-mixer wiring,
+  # the media server's `media=TEXT` parameter — then keeps working unchanged, and
+  # only the answer needs to know it must write `m=application` again. That is
+  # what `:sdp_type` is for.
+  #
+  # Unlike the WebSocket case this section is real media, not signalling: it has
+  # its own ICE, its own DTLS and the port the media server binds. So the
+  # transport fields are the true ones, and only the RTP-shaped ones are neutral —
+  # there is no payload type inside a data channel, and no redundancy either
+  # (SCTP is reliable, RFC 8865 says so).
+  defp parse_data_channel(m, session_ip, session_attrs) do
+    attrs = m.attributes
+
+    %{
+      supported?: true,
+      transport: :sctp,
+      type: :text,
+      sdp_type: :application,
+      ip: connection_ip(m.connection_data) || session_ip,
+      port: m.port,
+      protocol: m.protocol,
+      raw_fmt: m.fmt,
+      # the peer's own SCTP port, and the largest message it will accept
+      sctp_port: find_dc_int(attrs, "sctp-port") || @dc_default_sctp_port,
+      max_message_size: find_dc_int(attrs, "max-message-size"),
+      # RFC 8864: the channels the peer declares in its SDP, if any. `nil` means
+      # it will open them in band with DCEP — the ordinary browser case, and the
+      # one the media server is built around.
+      dcmap: find_dcmap(attrs),
+      setup: find_setup(attrs) || find_setup(session_attrs) || :actpass,
+      crypto: find_crypto(attrs, session_attrs),
+      ice: find_ice(attrs) || find_ice(session_attrs),
+      direction: find_direction(attrs) || find_direction(session_attrs) || :sendrecv,
+      mid: find_mid(attrs),
+      candidates: raw_candidates(attrs),
+      # neutral RTP fields — see above
+      rtp_map: %{},
+      codecs: ["T140"],
+      fmtp: %{},
+      fmtp_raw: %{},
+      dtmf_pts: %{},
+      rtcp_mux: false,
+      bandwidth: as_bandwidth(m.bandwidth),
+      sdes_offers: [],
+      rtcp_fb: %{},
+      extmaps: [],
+      capneg: nil
+    }
+  end
+
+  defp find_dc_int(attrs, name) do
+    Enum.find_value(attrs, fn
+      {^name, value} ->
+        case Integer.parse(to_string(value)) do
+          {int, _rest} when int >= 0 -> int
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end)
+  end
+
+  # `a=dcmap:<stream> label="…";subprotocol="…";ordered=true;…` (RFC 8864 §5).
+  # Only the stream, the label and the subprotocol are read: the reliability
+  # parameters describe a channel we do not open, and RFC 8865 asks for the
+  # default anyway (reliable and ordered).
+  #
+  # The FIRST channel whose subprotocol — or, failing that, whose label — names
+  # `t140` is the text one. A peer that declares only channels of its own
+  # (a game, a file transfer) gets `nil`, and the section is then not our text
+  # plane: see `text_plane?/1`.
+  defp find_dcmap(attrs) do
+    attrs
+    |> Enum.flat_map(fn
+      {"dcmap", value} -> [parse_dcmap_value(to_string(value))]
+      _ -> []
+    end)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.find(&(&1.subprotocol == @t140_subprotocol or &1.label == @t140_subprotocol))
+  end
+
+  defp parse_dcmap_value(value) do
+    case String.split(value, ~r/\s+/, parts: 2, trim: true) do
+      [stream | rest] ->
+        case Integer.parse(stream) do
+          {id, _} ->
+            params = rest |> List.first("") |> parse_dcmap_params()
+
+            %{
+              stream: id,
+              label: Map.get(params, "label", ""),
+              subprotocol: Map.get(params, "subprotocol", "")
+            }
+
+          :error ->
+            nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp parse_dcmap_params(params) do
+    params
+    |> String.split(";", trim: true)
+    |> Enum.reduce(%{}, fn part, acc ->
+      case String.split(part, "=", parts: 2) do
+        [key, value] ->
+          Map.put(acc, String.trim(key), value |> String.trim() |> String.trim("\""))
+
+        _ ->
+          acc
+      end
+    end)
+  end
+
   defp find_ws_url(attrs) do
     Enum.find_value(attrs, fn
       {"ws", v} -> v
