@@ -245,11 +245,17 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # networks. A leg we placed ourselves has no local address, so it has no profile
   # of its own to prefer.
   defp local_profile(opts) do
-    local_ip = Keyword.get(opts, :local_ip)
+    case Keyword.get(opts, :address_profile) do
+      stated when is_binary(stated) ->
+        stated
 
-    case SIP.NetUtils.address_family(local_ip) do
-      nil -> nil
-      family -> profile_name(family, SIP.NetUtils.net_side(local_ip))
+      _ ->
+        local_ip = Keyword.get(opts, :local_ip)
+
+        case SIP.NetUtils.address_family(local_ip) do
+          nil -> nil
+          family -> profile_name(family, SIP.NetUtils.net_side(local_ip))
+        end
     end
   end
 

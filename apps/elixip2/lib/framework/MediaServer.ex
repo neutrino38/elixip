@@ -237,7 +237,17 @@ defmodule MediaServer do
           # the same address this leg's Contact carries. An adapter that must place
           # media on one of several interfaces reads it; the others ignore it. Absent
           # on an outbound leg, which has no transport when it is created.
-          local_ip: :inet.ip_address()
+          local_ip: :inet.ip_address(),
+          # The media server's addressing profile this leg's media must be placed
+          # on — `MediaServer.profile_name/2`'s output. Set by the framework on a
+          # leg we PLACE, where `local_ip` says nothing: we have no address the
+          # callee reached, only the address we are about to reach it at, and it is
+          # the callee's interface that decides which of ours the media leaves by.
+          #
+          # An adapter that reads it prefers it over anything it could derive.
+          # Absent, and the leg derives what it can — which for an outbound leg is
+          # nothing, so the media server applies its own default.
+          address_profile: String.t()
         ]
 
   @type player_opts :: [

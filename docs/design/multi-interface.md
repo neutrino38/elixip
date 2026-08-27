@@ -428,8 +428,7 @@ d'essayer (`b2bua_resolve/1`), marque chaque cible de son côté de réseau, et
 jeu. Détail sous « Deux jambes, deux profils, un seul serveur » plus bas.
 
 **Non livré** : un endpoint par profil quand une même liste de cibles en mélange
-plusieurs. Le `checkout` garantit qu'un seul serveur les porte tous ; ouvrir deux
-endpoints et éteindre celui qui échoue reste à faire.
+plusieurs. Voir « Une jambe porte un profil » plus bas.
 
 Le mediaserver porte jusqu'à quatre adresses — `publicv4`, `publicv6`,
 `internalv4`, `internalv6` — déclarées par `--public-ip` et `--internal-ip`.
@@ -659,6 +658,29 @@ profils.
 Le dernier cas est le seul piège : le serveur média a été choisi pour un appel qui
 part ailleurs. Il est dit à voix haute plutôt que débogué comme du média qui
 arrive sur la mauvaise interface.
+
+##### Une jambe porte un profil, et c'est celui de sa cible
+
+Une jambe que le nœud **place** n'a pas d'adresse locale : `local_ip:` dit laquelle
+des nôtres un pair a atteinte, et il n'y en a pas encore. Ce qui décide est
+l'interface du **callee** — c'est elle qui fixe par laquelle des nôtres le média
+sort. Le framework la connaît depuis la cible résolue et la passe en option de
+connexion, `address_profile:`, que les deux adaptateurs préfèrent à tout ce qu'ils
+pourraient dériver.
+
+Sans elle, la jambe sortante ne demandait rien et le serveur appliquait son défaut
+— faux pour tout callee v6 ou interne dès que le serveur porte deux adresses.
+
+**Cibles de profils différents : la première l'emporte, et c'est dit.** Un endpoint
+est créé par jambe, avant que la chasse ne parcoure quoi que ce soit, donc servir
+les deux demanderait un endpoint par profil. Le `checkout` a déjà garanti qu'un
+seul serveur les porte tous, donc l'endpoint existant est sur le bon serveur ;
+seule son adresse annoncée peut être celle de l'autre profil.
+
+**Reste à faire** : ouvrir un endpoint par profil et éteindre celui dont la mise en
+relation échoue. Le point de départ est `setup_media/5`, appelé une fois avec le
+premier barreau de l'échelle média ; il faudrait qu'il le soit par profil de cible,
+et que la chasse sache lequel de ses endpoints sert le rung qu'elle tente.
 
 ##### La couture, parce que le framework ne peut pas appeler le pool
 

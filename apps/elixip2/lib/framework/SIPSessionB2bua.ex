@@ -746,7 +746,7 @@ defmodule SIP.Session.B2bua do
         # The media plane is set up BEFORE anything is dialled: the offer we
         # forward is ours, not the caller's, and there is no point creating a leg
         # we cannot give a body to.
-        case setup_media(sip_ctx, req, media, first_rung(peer)) do
+        case setup_media(sip_ctx, req, media, first_rung(peer), peer) do
           {:error, sip_ctx} ->
             sip_ctx
 
@@ -845,7 +845,7 @@ defmodule SIP.Session.B2bua do
   end
 
   # Signalling relay: the SDP crosses verbatim and there is nothing to set up.
-  defp setup_media(sip_ctx, _req, false, _rung), do: {:ok, sip_ctx}
+  defp setup_media(sip_ctx, _req, false, _rung, _peer), do: {:ok, sip_ctx}
 
   # `{:mediaserver, …}`: both legs terminate their media on the server, so the
   # bodies that cross are OURS in both directions. Two steps, in this order, and
@@ -858,9 +858,9 @@ defmodule SIP.Session.B2bua do
   #   2. generate our offer for the outbound leg, inside the SAME media session
   #      as the inbound endpoint (`bridge_with:`), because that is the only place
   #      the two can later be attached.
-  defp setup_media(sip_ctx, req, {:mediaserver, opts}, rung) do
+  defp setup_media(sip_ctx, req, {:mediaserver, opts}, rung, peer) do
     inbound_opts = Keyword.get(opts, :inbound, [])
-    outbound_opts = profiled_outbound_opts(opts, rung)
+    outbound_opts = profiled_outbound_opts(opts, rung) ++ target_profile_opts(peer)
 
     with {:ok, policy} <- MediaServer.transcoding_policy(Keyword.get(opts, :transcode, [])),
          :ok <- media_plane(sip_ctx),
@@ -928,6 +928,58 @@ defmodule SIP.Session.B2bua do
   # wants; the profile says how they are carried, and it is the one thing that
   # changes between two attempts at the same target (§7.5). No rung — no profile
   # named — leaves the options exactly as written.
+  # The addressing profile the outbound leg's media must be placed on: the
+  # target's, because it is the callee's interface that decides which of ours the
+  # media leaves by. `local_ip:` cannot answer it — a leg we place has no address
+  # the peer reached — so without this the leg asks for nothing and the media
+  # server applies its own default, which on a two-address server is wrong for
+  # every v6 or internal callee.
+  #
+  # Targets that disagree take the FIRST one's profile, and say so. One endpoint is
+  # created per leg, before the hunt walks anything, so serving both would mean one
+  # endpoint per profile — named as remaining work in
+  # docs/design/multi-interface.md rather than guessed at here. `checkout/2` has
+  # already made sure one server carries them all, so the endpoint that exists is
+  # on the right server; only its announced address may be the other one's.
+  defp target_profile_opts(%Peer{} = peer) do
+    case target_profiles(peer) do
+      [] ->
+        []
+
+      [{family, side}] ->
+        [address_profile: MediaServer.profile_name(family, side)]
+
+      [{family, side} | _] = several ->
+        Logger.warning(
+          module: __MODULE__,
+          message:
+            "this peer's targets need #{inspect(several)}: the outbound leg is placed " <>
+              "on #{MediaServer.profile_name(family, side)}, the first of them — a leg " <>
+              "carries one profile, and one endpoint per profile is not implemented"
+        )
+
+        [address_profile: MediaServer.profile_name(family, side)]
+    end
+  end
+
+  defp target_profile_opts(_peer), do: []
+
+  # In the order the hunt will walk them, so "the first" means the first tried.
+  defp target_profiles(%Peer{resolved: rungs}) when is_list(rungs) do
+    rungs
+    |> List.flatten()
+    |> Enum.flat_map(fn
+      %SIP.Uri{destip: ip, net_side: side} when is_tuple(ip) and not is_nil(side) ->
+        [{SIP.NetUtils.address_family(ip), side}]
+
+      _ ->
+        []
+    end)
+    |> Enum.uniq()
+  end
+
+  defp target_profiles(_peer), do: []
+
   defp profiled_outbound_opts(opts, nil), do: Keyword.get(opts, :outbound, [])
 
   defp profiled_outbound_opts(opts, rung) do

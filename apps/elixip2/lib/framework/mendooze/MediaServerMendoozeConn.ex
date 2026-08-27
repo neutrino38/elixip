@@ -2300,7 +2300,9 @@ defmodule MediaServer.Mendooze.Conn do
     end
   end
 
-  # No peer SDP — the leg we offer on — so our own side is all there is to go on.
+  # No peer SDP — the leg we offer on — so what this leg states about itself is all
+  # there is to go on. For a leg we placed that is `address_profile:`, the target's
+  # own profile, which is exactly the interface the callee can reach us on.
   defp profile_candidates(%{sip_profile: local}, nil), do: List.wrap(local)
 
   defp profile_candidates(%{sip_profile: local} = leg, desc) do
@@ -2315,16 +2317,27 @@ defmodule MediaServer.Mendooze.Conn do
   # side of our network it sits on. The name itself is `MediaServer`'s to spell.
   defp profile_name(family, side), do: MediaServer.profile_name(family, side)
 
-  # Both halves come from the local address of this leg, and neither is
-  # configured: the address states its family, and `SIP.NetUtils.net_side/1`
-  # states its side from the `internal` listeners' networks. A leg we placed
-  # ourselves has no local address, so it states no side to prefer.
+  # On a leg we ANSWER, both halves come from the local address this peer reached,
+  # and neither is configured: the address states its family, and
+  # `SIP.NetUtils.net_side/1` states its side from the `internal` listeners'
+  # networks.
+  #
+  # On a leg we PLACE there is no such address, and `address_profile:` carries the
+  # answer instead — the profile of the target we are about to reach, which the
+  # framework knows and this connection does not. It wins when present: a stated
+  # profile is never worse than a derived one.
   defp sip_profile(opts) do
-    local_ip = Keyword.get(opts, :local_ip)
+    case Keyword.get(opts, :address_profile) do
+      stated when is_binary(stated) ->
+        stated
 
-    case SIP.NetUtils.address_family(local_ip) do
-      nil -> nil
-      family -> profile_name(family, SIP.NetUtils.net_side(local_ip))
+      _ ->
+        local_ip = Keyword.get(opts, :local_ip)
+
+        case SIP.NetUtils.address_family(local_ip) do
+          nil -> nil
+          family -> profile_name(family, SIP.NetUtils.net_side(local_ip))
+        end
     end
   end
 

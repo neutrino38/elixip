@@ -27,20 +27,20 @@ defmodule Mendooze.NetworkProfileTest do
     }
   end
 
-  # A dual-stack server: both public profiles, neither internal one.
-  defp both_families do
+  defp v4_only do
     [
       profile("publicv4", true, "203.0.113.9"),
-      profile("publicv6", true, "2001:db8::12"),
+      profile("publicv6", false, ""),
       profile("internalv4", false, ""),
       profile("internalv6", false, "")
     ]
   end
 
-  defp v4_only do
+  # A dual-stack server: both public profiles, neither internal one.
+  defp both_families do
     [
       profile("publicv4", true, "203.0.113.9"),
-      profile("publicv6", false, ""),
+      profile("publicv6", true, "2001:db8::12"),
       profile("internalv4", false, ""),
       profile("internalv6", false, "")
     ]
@@ -151,6 +151,34 @@ defmodule Mendooze.NetworkProfileTest do
       refute_receive {:jsr309_call, "EndpointStartReceiving", _}, 200
     end
   end
+  describe "a leg we place takes the profile of the target it is placed to" do
+    test "address_profile: wins, because an outbound leg has no local address" do
+      # `local_ip:` says which of ours a peer reached; a leg we place has none.
+      # What decides is the callee's interface, which the framework states.
+      conn =
+        start_conn(both_families(), media: :audio, address_profile: "publicv6")
+
+      {:ok, _offer} = Mendooze.get_local_offer(conn)
+
+      assert [3, 4, 0, _rtp_map, %{"fmtp" => _}, "publicv6"] = await_start_receiving()
+    end
+
+    test "a stated profile beats a derivable one" do
+      # Both are present, which happens to no real leg, but the precedence has to
+      # be stated rather than depend on which clause runs first.
+      conn =
+        start_conn(both_families(),
+          media: :audio,
+          local_ip: {192, 0, 2, 7},
+          address_profile: "publicv6"
+        )
+
+      {:ok, _offer} = Mendooze.get_local_offer(conn)
+
+      assert [3, 4, 0, _rtp_map, %{"fmtp" => _}, "publicv6"] = await_start_receiving()
+    end
+  end
+
   describe "the side comes from the local address this peer reached" do
     setup do
       previous = Application.fetch_env(:elixip2, :internal_networks)

@@ -168,6 +168,18 @@ defmodule SIP.Test.B2buaTargetMarking do
       assert B2bua.do_resolve_peer(ctx(), 42).lasterr == {:b2bua, :bad_peer, 42}
     end
 
+    test "the profiles the outbound leg will need, in the order the hunt walks them" do
+      Application.put_env(:elixip2, :internal_networks, [{{127, 0, 0, 0}, 8}])
+
+      peer = %Peer{uris: [uri("sip:a@localhost:5070")]}
+      out = B2bua.do_resolve_peer(ctx(), peer)
+
+      # What target_profile_opts/1 turns into `address_profile:` for the leg, and
+      # what checkout/2 is constrained with. Same list, one source.
+      assert B2bua.resolved_profiles(out) == [{:ipv4, :internal}]
+      assert MediaServer.profile_name(:ipv4, :internal) == "internalv4"
+    end
+
     test "resolving twice is idempotent" do
       peer = %Peer{uris: [uri("sip:bob@localhost:5070")]}
       once = B2bua.do_resolve_peer(ctx(), peer)
