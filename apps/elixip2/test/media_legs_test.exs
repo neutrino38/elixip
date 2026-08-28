@@ -107,6 +107,73 @@ defmodule SIP.Test.Media.Legs do
     end
   end
 
+  # One recorder per leg is what records a call rather than half of it: attached
+  # to an endpoint, a recorder writes what that endpoint RECEIVES, so the inbound
+  # one holds what the caller sent and the outbound one what the callee sent.
+  describe "recording both legs" do
+    setup %{ctx: ctx} do
+      {ctx, _} = Media.get_sdp_offer(ctx, :no, :tc)
+      {ctx, _} = Media.get_sdp_offer(ctx, :no, :tc, leg: :outbound)
+      %{ctx: ctx}
+    end
+
+    test "each leg records to its own file", %{ctx: ctx} do
+      ctx =
+        ctx
+        |> Media.start_recorder("/rec/in.mp4", 0)
+        |> Media.start_recorder("/rec/out.mp4", 0, leg: :outbound)
+
+      assert {:recorder, rec_in} = Media.media_action(ctx)
+      assert {:recorder, rec_out} = Media.media_action(ctx, :outbound)
+      assert rec_in != rec_out
+
+      assert_receive {:ms_event, ^rec_in, :recorder_started}, 1_000
+      assert_receive {:ms_event, ^rec_out, :recorder_started}, 1_000
+    end
+
+    # The whole point of the reverse lookup: both recorders report through the
+    # same event shape, and only the handle says which file just closed.
+    test "an event names the leg it came from", %{ctx: ctx} do
+      ctx =
+        ctx
+        |> Media.start_recorder("/rec/in.mp4", 0)
+        |> Media.start_recorder("/rec/out.mp4", 0, leg: :outbound)
+
+      {:recorder, rec_in} = Media.media_action(ctx)
+      {:recorder, rec_out} = Media.media_action(ctx, :outbound)
+
+      assert Media.media_leg_of(ctx, rec_in) == :inbound
+      assert Media.media_leg_of(ctx, rec_out) == :outbound
+
+      # A peer connection resolves too: `:media_lost` and `:media_timeout` name
+      # a connection, and a two-leg call has to say which one went quiet.
+      assert Media.media_leg_of(ctx, Media.peer_connection(ctx, :outbound)) == :outbound
+      assert Media.media_leg_of(ctx, self()) == nil
+    end
+
+    test "leg: :all stops every recorder, so both files are closed", %{ctx: ctx} do
+      ctx =
+        ctx
+        |> Media.start_recorder("/rec/in.mp4", 0)
+        |> Media.start_recorder("/rec/out.mp4", 0, leg: :outbound)
+
+      {:recorder, rec_in} = Media.media_action(ctx)
+      {:recorder, rec_out} = Media.media_action(ctx, :outbound)
+
+      ctx = Media.stop_media(ctx, leg: :all)
+
+      assert_receive {:ms_event, ^rec_in, {:recorder_stopped, :caller}}, 1_000
+      assert_receive {:ms_event, ^rec_out, {:recorder_stopped, :caller}}, 1_000
+
+      assert Media.media_action(ctx) == nil
+      assert Media.media_action(ctx, :outbound) == nil
+    end
+
+    test "leg: :all on a call that started nothing is a no-op, not a crash", %{ctx: ctx} do
+      assert Media.stop_media(ctx, leg: :all) == ctx
+    end
+  end
+
   describe "teardown" do
     test "releases every leg, not just the inbound one", %{ctx: ctx} do
       {ctx, _} = Media.get_sdp_offer(ctx, :no, :audio)

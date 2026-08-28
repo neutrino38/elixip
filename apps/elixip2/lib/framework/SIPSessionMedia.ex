@@ -69,6 +69,13 @@ defmodule SIP.Session.Media do
         end
       end
 
+      # Which leg a media handle belongs to. A reader, so no monitor command.
+      defmacro media_leg_of(handle) do
+        quote do
+          SIP.Session.Media.media_leg_of(var!(sip_ctx), unquote(handle))
+        end
+      end
+
       defmacro media_cleanup_ressources() do
         quote do
           SIP.Scenario.Monitor.note_command(:media, "media_cleanup_ressources")
@@ -115,6 +122,46 @@ defmodule SIP.Session.Media do
   @spec peer_connection(%SIP.Context{}, atom()) :: term() | nil
   def peer_connection(sip_ctx = %SIP.Context{}, leg \\ @default_leg),
     do: SIP.Context.appdata_get(sip_ctx, pc_key(leg))
+
+  @doc """
+  The media action running on `leg` as `{kind, handle}` — `kind` being
+  `:player`, `:recorder` or `:echo` — or nil when that leg's slot is free.
+
+  What a scenario reads to address the action it started rather than digging the
+  handle out of the appdata: two recorders in one call (one per leg) is the case
+  that makes the difference, since their events are told apart by their handles
+  and nothing else.
+  """
+  @spec media_action(%SIP.Context{}, atom()) :: {atom(), term()} | nil
+  def media_action(sip_ctx = %SIP.Context{}, leg \\ @default_leg) do
+    case SIP.Context.appdata_get(sip_ctx, action_key(leg)) do
+      nil -> nil
+      handle -> {SIP.Context.appdata_get(sip_ctx, action_kind_key(leg)), handle}
+    end
+  end
+
+  @doc """
+  The leg a media handle belongs to, or nil when this context does not hold it.
+
+  `handle` is anything a `{:ms_event, handle, _}` carries: an action handle
+  (player, recorder, echo) or a peer connection. This is the only way a scenario
+  can read a media event that names a resource without knowing which side of the
+  call it came from — a B2BUA recording both legs gets two `:recorder_stopped`
+  events and has to say which file just closed.
+  """
+  @spec media_leg_of(%SIP.Context{}, term()) :: atom() | nil
+  def media_leg_of(%SIP.Context{}, nil), do: nil
+
+  def media_leg_of(sip_ctx = %SIP.Context{}, handle) do
+    Enum.find(all_legs(sip_ctx), fn leg ->
+      SIP.Context.appdata_get(sip_ctx, action_key(leg)) == handle or
+        peer_connection(sip_ctx, leg) == handle
+    end)
+  end
+
+  # Every leg this context may hold a handle for. `:inbound` is always in:
+  # a context that never registered a leg can still carry the bare keys.
+  defp all_legs(sip_ctx), do: Enum.uniq([@default_leg | media_legs(sip_ctx)])
 
   @doc """
   The legs this context holds a peer connection for, in the order they were
@@ -563,7 +610,7 @@ defmodule SIP.Session.Media do
     legs =
       case Keyword.fetch(opts, :leg) do
         {:ok, leg} -> [leg]
-        :error -> [@default_leg | media_legs(sip_ctx)] |> Enum.uniq()
+        :error -> all_legs(sip_ctx)
       end
 
     for leg <- legs, cnx = peer_connection(sip_ctx, leg) do
@@ -692,12 +739,43 @@ defmodule SIP.Session.Media do
     end
   end
 
+  @doc """
+  Stop the media action of `leg` (`leg: :inbound` by default), or of every leg
+  at once with `leg: :all`.
+
+  `:all` is what a call recording both of its legs ends with: each recorder has
+  to be stopped for the media server to close its file, and a scenario that
+  stops one of the two leaves the other file without its index.
+  """
+  @spec stop_media(%SIP.Context{}, keyword()) :: %SIP.Context{}
   def stop_media(sip_ctx = %SIP.Context{}, opts \\ []) do
     if not is_pid(sip_ctx.mediaserverpid) do
       raise "No media server connected to the session context"
     end
 
-    leg = leg_of(opts)
+    case leg_of(opts) do
+      :all -> stop_every_leg(sip_ctx)
+      leg -> stop_one_leg(sip_ctx, leg)
+    end
+  end
+
+  defp stop_every_leg(sip_ctx) do
+    busy = Enum.filter(all_legs(sip_ctx), &SIP.Context.appdata_get(sip_ctx, action_key(&1)))
+
+    if busy == [] do
+      Logger.warning(
+        dialogpid: self(),
+        module: __MODULE__,
+        message: "No media action started on any leg, ignoring stop_media request"
+      )
+
+      sip_ctx
+    else
+      Enum.reduce(busy, sip_ctx, &stop_one_leg(&2, &1))
+    end
+  end
+
+  defp stop_one_leg(sip_ctx, leg) do
     action_pid = SIP.Context.appdata_get(sip_ctx, action_key(leg))
 
     if not is_nil(action_pid) do
@@ -748,9 +826,7 @@ defmodule SIP.Session.Media do
     # server-side. `:inbound` is always attempted — a context that never called
     # media_legs-registering code can still hold the bare key (a scenario that
     # set it by hand, the MCU module's path).
-    legs = Enum.uniq([@default_leg | media_legs(sip_ctx)])
-
-    legs
+    all_legs(sip_ctx)
     |> Enum.reduce(sip_ctx, fn leg, ctx ->
       ctx |> cleanup_action(leg) |> cleanup_peer_connection(leg)
     end)

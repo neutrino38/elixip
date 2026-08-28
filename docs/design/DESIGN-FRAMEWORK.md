@@ -536,6 +536,34 @@ The `:mediaserver` key is overridable **per scenario** (a `config` block key) an
 application env. A scenario may still hardcode an adapter with the two-argument
 `media_connect(module, url)`, which is what a test does.
 
+### 6.9 Recording a two-leg call
+
+A recorder is attached to an endpoint and writes what that endpoint **receives**.
+That single fact settles the shape of call recording:
+
+* **two recorders, two files.** The inbound one holds what the caller sent, the
+  outbound one what the callee sent; one recorder records half a conversation.
+  A single file holding both sides would need a mixer port to record from, which
+  is a conference, not a B2BUA (§5.7 — one session, one endpoint per leg);
+* **each records the medias of its own leg.** The three medias of a Total
+  Conversation call are recorded only if both legs were negotiated with the
+  three. Attaching, and detaching on the way out, follow the leg — not the
+  connection, whose media list is the inbound leg's;
+* **the media action slot is per leg** (§5.7), so the two recorders coexist and
+  a second action on either leg is refused rather than stacked.
+
+Both recorders report through one event shape, so a scenario reads the leg from
+the handle (`media_leg_of/1`) rather than from the event. And stopping is not
+optional: closing the file is what writes an MP4 index, so `media_stop(leg: :all)`
+and the automatic teardown both stop every leg's action before closing anything.
+
+Two limits are the media server's, not ours. The MP4 container carries H.264, so
+a call that settles on VP8 or AV1 records audio and text and no video — steering
+the negotiation for the recorder's sake is a deployment choice, not a framework
+one (§6.1: the server is asked, never modelled). And `echoVideo` must stay off on
+a relayed leg: it is what a caller recording a message expects to see, and what
+the far end of a call must never receive.
+
 ---
 
 ## 7. Invariants
@@ -555,3 +583,5 @@ application env. A scenario may still hardcode an adapter with the two-argument
    (§6.6).
 9. Teardown order: legs before media, resources before the connection, the
    connection before the server (§5.9, §6.2).
+10. A media resource follows the leg it was attached to, never the connection —
+    two legs do not carry the same medias, nor the same endpoint (§6.9).

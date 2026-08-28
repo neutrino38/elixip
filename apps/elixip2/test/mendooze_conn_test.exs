@@ -133,6 +133,83 @@ defmodule Mendooze.ConnTest do
              Mendooze.create_peer_connection(server, self(), bridge_with: conn)
   end
 
+  # ── One recorder per leg ────────────────────────────────────────────────────
+  #
+  # A recorder is attached to an endpoint and writes what that endpoint RECEIVES,
+  # so recording a whole call takes two of them: the inbound one holds what the
+  # caller sent, the outbound one what the callee sent. Both are entries of the
+  # same MediaSession, and each attaches the medias of ITS leg.
+
+  # Recorder ids per creation order, so the assertions can tell the two apart.
+  defp recorder_handler("RecorderCreate", [_sess, "r-0"]), do: {:ok, [10]}
+  defp recorder_handler("RecorderCreate", [_sess, "r-1"]), do: {:ok, [11]}
+  defp recorder_handler(method, params), do: two_leg_handler(method, params)
+
+  test "one recorder per leg, each attached to the three medias of its own leg" do
+    %{server: server} = start_media_server(&recorder_handler/2)
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :tc)
+    assert_receive {:jsr309_call, "MediaSessionCreate", [_tag, _q]}, 1_000
+    {:ok, out} = Mendooze.create_peer_connection(server, self(), media: :tc, bridge_with: conn)
+
+    assert {:ok, rec_in} = Mendooze.create_recorder(conn, "/rec/in.mp4", 0, [])
+    assert {:ok, rec_out} = Mendooze.create_recorder(out, "/rec/out.mp4", 0, [])
+    assert rec_in != rec_out
+
+    # Two Recorders in the SAME session (3), never a second session.
+    assert_receive {:jsr309_call, "RecorderCreate", [3, "r-0"]}, 1_000
+    assert_receive {:jsr309_call, "RecorderCreate", [3, "r-1"]}, 1_000
+    refute_receive {:jsr309_call, "MediaSessionCreate", _}, 200
+
+    # Audio (0), video (1) and text (2) — the three medias of a Total
+    # Conversation call — each on the endpoint of its own leg (4 and 5).
+    for media <- [0, 1, 2] do
+      assert_receive {:jsr309_call, "RecorderAttachToEndpoint", [3, 10, 4, ^media]}, 1_000
+      assert_receive {:jsr309_call, "RecorderAttachToEndpoint", [3, 11, 5, ^media]}, 1_000
+    end
+
+    assert :ok = Mendooze.start_recorder(rec_in)
+    assert :ok = Mendooze.start_recorder(rec_out)
+    assert_receive {:jsr309_call, "RecorderRecord", [3, 10, "/rec/in.mp4", 0, 1, 0]}, 1_000
+    assert_receive {:jsr309_call, "RecorderRecord", [3, 11, "/rec/out.mp4", 0, 1, 0]}, 1_000
+  end
+
+  # Two legs of a gateway call do not carry the same medias. What a recorder
+  # detaches is what it attached — its own leg's list, not the connection's.
+  test "stopping a recorder detaches the medias of its own leg" do
+    %{server: server} = start_media_server(&recorder_handler/2)
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :audio)
+
+    {:ok, out} =
+      Mendooze.create_peer_connection(server, self(), media: :tc, bridge_with: conn)
+
+    {:ok, rec_out} = Mendooze.create_recorder(out, "/rec/out.mp4", 0, [])
+    assert :ok = Mendooze.stop_recorder(rec_out)
+
+    assert_receive {:jsr309_call, "RecorderStop", [3, 10]}, 1_000
+
+    for media <- [0, 1, 2] do
+      assert_receive {:jsr309_call, "RecorderDettach", [3, 10, ^media]}, 1_000
+    end
+
+    assert_receive {:jsr309_call, "RecorderDelete", [3, 10]}, 1_000
+  end
+
+  # The connection is the other leg too: a sub-resource asked for on a leg that
+  # is gone must be refused, never crash the session both legs share.
+  test "a recorder on a leg that does not exist is refused, and the call survives" do
+    %{server: server} = start_media_server(&recorder_handler/2)
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: :tc)
+
+    assert {:error, {:no_such_leg, :outbound}} =
+             Mendooze.create_recorder({conn, :outbound}, "/rec/out.mp4", 0, [])
+
+    assert Process.alive?(conn)
+    assert {:ok, _} = Mendooze.create_recorder(conn, "/rec/in.mp4", 0, [])
+  end
+
   # `:forbid` is now the only policy that wires a plain Endpoint <-> Endpoint: it
   # is the one that says the media may never be transcoded, so nothing else can
   # ever produce a packet on that path — which is what makes preserving the

@@ -156,7 +156,12 @@ defmodule MediaServer.Mockup do
 
   @impl MediaServer.Behaviour
   def stop_recorder(recorder) do
+    # The call first, so the `{:recorder_stopped, :caller}` event is in the
+    # sink's mailbox before the process goes; then the process, like the player
+    # and the echo. A recorder left running outlived every call that started one,
+    # and a call recording both of its legs leaked two of them.
     GenServer.call(recorder, :stop)
+    GenServer.stop(recorder, :normal)
     :ok
   end
 

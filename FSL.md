@@ -240,7 +240,8 @@ not to collide with other events matched in the same `on_events`.
 | `media_play(file, opts \\ [])` | Play a media file to the peer |
 | `media_record(file, duration_ms, opts \\ [])` | Record the peer's media to a file |
 | `media_start_echo()` | Loop the peer's media back to it |
-| `media_stop()` | Stop the running player / recorder / echo |
+| `media_stop(opts \\ [])` | Stop the running player / recorder / echo |
+| `media_leg_of(handle)` | Which leg a media handle carried by an `{:ms_event, …}` belongs to |
 | `media_cleanup_ressources()` | Release media resources at end of call |
 
 The zero-arg `media_connect/0` reads `config :elixip2, :mediaserver`
@@ -266,6 +267,43 @@ server's `RecorderRecord`; `leg` is handled here and never reaches the adapter.
 Turn `echo` on when the caller must see what is being recorded, off when the
 recording is the only purpose — an echo puts a second video stream on the wire
 and makes the peer answer it with its own RTCP feedback.
+
+### recording both legs of a B2BUA call
+
+A recorder is attached to an endpoint and writes what that endpoint
+**receives**, so recording a whole call takes two of them — one per leg:
+
+```elixir
+media_record("/rec/#{id}-caller.mp4", 0, wait_video: false)
+media_record("/rec/#{id}-callee.mp4", 0, leg: :outbound, wait_video: false)
+```
+
+The inbound recording holds what the caller sent, the outbound one what the
+callee sent. Nothing mixes the two: a single file holding both sides is a
+conference (a mixer port), not a B2BUA.
+
+Each recorder writes the medias **its own leg carries**, so the three medias of
+a Total Conversation call are recorded only if both legs were negotiated with
+the three — `media: :tc` on each leg of the `{:mediaserver, …}` tuple.
+
+Both recorders report through the same event shape, and only the handle says
+which file an event is about:
+
+```elixir
+{:ms_event, rec, {:recorder_stopped, reason}} ->
+  stay("#{media_leg_of(rec)} recording stopped (#{reason})")
+```
+
+`media_leg_of/1` resolves a peer connection too, which is what lets a two-leg
+scenario read `:media_lost` and `{:media_timeout, media}`.
+
+An action slot is per leg: one player, recorder or echo at a time on each leg,
+and a second request on a busy leg is refused with a warning. `media_stop()`
+stops one leg — `:inbound` by default, `leg: :outbound` for the other — and
+`media_stop(leg: :all)` stops every leg at once. Stopping matters: closing the
+file is what writes an MP4 index, and a recording left running is unplayable.
+`media_cleanup_ressources()` already stops every leg on the way out, so a
+scenario that records until the call ends needs no explicit stop.
 
 `MediaServer.recorder_opts/0` also declares `stop_on_silence`,
 `silence_timeout_ms`, `max_record_duration_sec` and `stop_on_dtmf`. **The media

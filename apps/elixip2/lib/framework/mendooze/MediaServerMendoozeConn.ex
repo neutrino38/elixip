@@ -718,9 +718,9 @@ defmodule MediaServer.Mendooze.Conn do
   def handle_call({:create_player, name, file_path, opts}, _from, state) do
     tag = "p-#{state.res_seq}"
     state = %{state | res_seq: state.res_seq + 1}
-    l = leg(state, name)
 
-    with {:ok, player_id} <- create(state, "PlayerCreate", [state.sess_id, tag]),
+    with {:ok, l} <- one_leg(state, name),
+         {:ok, player_id} <- create(state, "PlayerCreate", [state.sess_id, tag]),
          :ok <- cleanup_on_error(state, player_id, attach_player_all(l, player_id)),
          {:ok, _} <-
            cleanup_on_error(
@@ -768,10 +768,10 @@ defmodule MediaServer.Mendooze.Conn do
     warn_unsupported_recorder_opts(opts, state)
     tag = "r-#{state.res_seq}"
     state = %{state | res_seq: state.res_seq + 1}
-    l = leg(state, name)
 
-    with {:ok, recorder_id} <- create(state, "RecorderCreate", [state.sess_id, tag]),
-         :ok <- attach_recorder_all(l, recorder_id) do
+    with {:ok, l} <- one_leg(state, name),
+         {:ok, recorder_id} <- create(state, "RecorderCreate", [state.sess_id, tag]),
+         :ok <- delete_recorder_on_error(state, recorder_id, attach_recorder_all(l, recorder_id)) do
       ref = make_ref()
 
       recorders =
@@ -784,6 +784,14 @@ defmodule MediaServer.Mendooze.Conn do
           stopping: false,
           leg: name
         })
+
+      Logger.info(
+        module: __MODULE__,
+        cnx_tag: state.sess_tag,
+        message:
+          "created Recorder #{recorder_id} on leg #{name} for #{file_path}, " <>
+            "media #{inspect(l.medias)}"
+      )
 
       {:reply, {:ok, {self(), :recorder, ref}}, %{state | recorders: recorders}}
     else
@@ -804,7 +812,9 @@ defmodule MediaServer.Mendooze.Conn do
   # ── Echo (server doc §4.16: the endpoint is attached to itself) ────────────
 
   def handle_call({:create_echo, name}, _from, %{echo: nil} = state) do
-    case attach_endpoint_to_itself(leg(state, name)) do
+    attached = with {:ok, l} <- one_leg(state, name), do: attach_endpoint_to_itself(l)
+
+    case attached do
       :ok ->
         ref = make_ref()
         send(state.event_sink, {:ms_event, {self(), :echo, ref}, :echo_started})
@@ -844,6 +854,17 @@ defmodule MediaServer.Mendooze.Conn do
     end)
 
     %{state | bridges: %{}, selection: %{}, bridge_legs: nil}
+  end
+
+  # The leg a sub-resource is asked for. A player, a recorder or an echo names
+  # the leg it attaches to, and a name that is not there any more — the leg was
+  # closed under the scenario — must be a refusal: reading `nil.medias` instead
+  # would crash the connection, and the connection is the OTHER leg too.
+  defp one_leg(state, name) do
+    case leg(state, name) do
+      nil -> {:error, {:no_such_leg, name}}
+      l -> {:ok, l}
+    end
   end
 
   defp both_legs(state, a, b) do
@@ -3607,7 +3628,14 @@ defmodule MediaServer.Mendooze.Conn do
 
   defp do_player_cmd(:stop, ref, player, state) do
     rpc(state, "PlayerStop", [state.sess_id, player.player_id])
-    detach_all(state)
+    # The player's OWN leg: `detach_all/1` names an endpoint, and the connection
+    # carries the inbound one, so detaching from `state` here unwired the caller
+    # while stopping an announcement played to the callee.
+    case one_leg(state, player.leg) do
+      {:ok, l} -> detach_all(l)
+      {:error, _} -> :ok
+    end
+
     rpc(state, "PlayerClose", [state.sess_id, player.player_id])
     rpc(state, "PlayerDelete", [state.sess_id, player.player_id])
     {:reply, :ok, %{state | players: Map.delete(state.players, ref)}}
@@ -3636,7 +3664,11 @@ defmodule MediaServer.Mendooze.Conn do
   defp do_recorder_cmd(:stop, ref, recorder, state) do
     rpc(state, "RecorderStop", [state.sess_id, recorder.recorder_id])
 
-    Enum.each(state.medias, fn media ->
+    # Detach exactly what was attached: the medias of the recorder's OWN leg.
+    # `state.medias` is the inbound leg's list, and two legs of a gateway call
+    # do not carry the same medias — a text leg recorded against an audio-only
+    # `state.medias` kept its text source attached after the file was closed.
+    Enum.each(recorder_medias(state, recorder), fn media ->
       rpc(state, "RecorderDettach", [state.sess_id, recorder.recorder_id, @media_int[media]])
     end)
 
@@ -3652,6 +3684,16 @@ defmodule MediaServer.Mendooze.Conn do
     each_media_rpc(state, fn m ->
       {"EndpointAttachToPlayer", [state.sess_id, state.endpoint_id, player_id, m]}
     end)
+  end
+
+  # What a recorder is attached to, which is what stopping it must detach. Falls
+  # back to the connection list only if the leg is already gone, where detaching
+  # too much is harmless and detaching nothing would not be.
+  defp recorder_medias(state, recorder) do
+    case one_leg(state, recorder.leg) do
+      {:ok, l} -> l.medias
+      {:error, _} -> state.medias
+    end
   end
 
   defp attach_recorder_all(state, recorder_id) do
@@ -3698,6 +3740,16 @@ defmodule MediaServer.Mendooze.Conn do
 
   defp cleanup_on_error(state, player_id, {:error, _} = err) do
     rpc(state, "PlayerDelete", [state.sess_id, player_id])
+    err
+  end
+
+  # The same for a recorder whose attach failed halfway: without this the
+  # server keeps a Recorder nothing holds a handle to, and a call recording
+  # both of its legs leaks one per failed attempt.
+  defp delete_recorder_on_error(_state, _recorder_id, :ok), do: :ok
+
+  defp delete_recorder_on_error(state, recorder_id, {:error, _} = err) do
+    rpc(state, "RecorderDelete", [state.sess_id, recorder_id])
     err
   end
 
