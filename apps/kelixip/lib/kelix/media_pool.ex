@@ -60,7 +60,8 @@ defmodule Kelix.MediaPool do
           url: String.t(),
           enabled: boolean,
           healthy: boolean,
-          profiles: %{String.t() => map} | :unknown
+          profiles: %{String.t() => map} | :unknown,
+          server_status: map | :unknown
         }
   @type choice :: %{name: String.t(), module: atom, url: String.t()}
 
@@ -94,7 +95,15 @@ defmodule Kelix.MediaPool do
   def toggle(name, on?, server \\ __MODULE__) when is_boolean(on?),
     do: GenServer.call(server, {:toggle, name, on?})
 
-  @doc "Pool state for status/CLI: one map per entry (name/module/url/enabled/healthy)."
+  @doc """
+  Pool state for status/CLI: one map per entry
+  (name/module/url/enabled/healthy/profiles/server_status).
+
+  `server_status` is what the media server answered about itself on its
+  `/status/general` endpoint — version, real codec capabilities, encryption,
+  addressing, load — or `:unknown` on a server that does not describe itself.
+  Read on the same probe cycle as `profiles`, so it ages the same way.
+  """
   @spec status(GenServer.server()) :: [entry]
   def status(server \\ __MODULE__), do: GenServer.call(server, :status)
 
@@ -225,11 +234,7 @@ defmodule Kelix.MediaPool do
   # whole path exists to prevent.
   def handle_cast({:health_results, seq, results}, state) do
     entries =
-      Enum.map(state.entries, fn e ->
-        if Map.get(state.hinted_seq, e.name, 0) <= seq,
-          do: %{e | healthy: Map.get(results, e.name, e.healthy)},
-          else: e
-      end)
+      absorb(state.entries, results, &(Map.get(state.hinted_seq, &1.name, 0) <= seq))
 
     {:noreply, %{state | entries: entries}}
   end
@@ -326,27 +331,54 @@ defmodule Kelix.MediaPool do
 
   defp now_ms(), do: System.monotonic_time(:millisecond)
 
-  defp probe_all(entries, probe) do
-    Enum.map(entries, fn e ->
-      {healthy, profiles} = probe_result(probe.(e))
-      %{e | healthy: healthy, profiles: keep_known(profiles, e.profiles)}
-    end)
-  end
+  defp probe_all(entries, probe), do: absorb(entries, health_map(entries, probe))
 
+  # Raw probe answers, NORMALIZED once, keyed by entry name. Both the synchronous
+  # refresh and the periodic cast go through here, and that is the point: the
+  # periodic path used to store the probe's raw return straight into `healthy`, so
+  # with the default probe (which answers a tuple) a *dead* server was recorded as
+  # `{false, :unknown}` — truthy — and stayed in the rotation, while `interval_for`
+  # had no clause for a tuple at all. One normalization, one absorber, both paths.
   defp health_map(entries, probe),
-    do: Map.new(entries, fn e -> {e.name, probe.(e)} end)
+    do: Map.new(entries, fn e -> {e.name, probe_result(probe.(e))} end)
 
   # A probe answers health. The default one also brings back what the server said
   # about ITSELF while it had the connection open, since it opens one anyway; an
   # injected probe (the tests, and anything that only means up/down) keeps
   # answering a plain boolean.
-  defp probe_result(healthy) when is_boolean(healthy), do: {healthy, :unknown}
-  defp probe_result({healthy, profiles}) when is_boolean(healthy), do: {healthy, profiles}
+  defp probe_result(healthy) when is_boolean(healthy), do: {healthy, :unknown, :unknown}
+
+  defp probe_result({healthy, profiles}) when is_boolean(healthy),
+    do: {healthy, profiles, :unknown}
+
+  defp probe_result({healthy, profiles, status}) when is_boolean(healthy),
+    do: {healthy, profiles, status}
+
+  # Fold normalized facts into the entries. `accept?` filters per entry, which is
+  # how the periodic cast drops results overtaken by a hint (see handle_cast).
+  # An entry with no result, or a refused one, is left exactly as it was.
+  defp absorb(entries, results, accept? \\ fn _e -> true end) do
+    Enum.map(entries, fn e ->
+      case {accept?.(e), Map.fetch(results, e.name)} do
+        {true, {:ok, {healthy, profiles, status}}} ->
+          %{
+            e
+            | healthy: healthy,
+              profiles: keep_known(profiles, e.profiles),
+              server_status: keep_known(status, e.server_status)
+          }
+
+        _ ->
+          e
+      end
+    end)
+  end
 
   # A probe that could not ask does not erase what the last one learnt: an
-  # unreachable media server is unhealthy, not suddenly address-less.
+  # unreachable media server is unhealthy, not suddenly address-less or
+  # version-less.
   defp keep_known(:unknown, previous), do: previous
-  defp keep_known(profiles, _previous), do: profiles
+  defp keep_known(fact, _previous), do: fact
 
   # default probe: connect then immediately disconnect (design §9 — reuse connect/1).
   #
@@ -359,24 +391,26 @@ defmodule Kelix.MediaPool do
 
     case probe_connect(mod, url) do
       {:ok, pid} ->
-        profiles = read_profiles(mod, pid)
+        facts = {true, read_fact(mod, pid, :network_profiles), read_fact(mod, pid, :server_status)}
         try_disconnect(mod, pid)
-        {true, profiles}
+        facts
 
       _ ->
-        {false, :unknown}
+        {false, :unknown, :unknown}
     end
   rescue
-    _ -> {false, :unknown}
+    _ -> {false, :unknown, :unknown}
   catch
-    _, _ -> {false, :unknown}
+    _, _ -> {false, :unknown, :unknown}
   end
 
   # Only an adapter that knows the call answers it; the mockup and any older one
-  # simply have nothing to say.
-  defp read_profiles(mod, pid) do
-    if Code.ensure_loaded?(mod) and function_exported?(mod, :network_profiles, 1),
-      do: apply(mod, :network_profiles, [pid]),
+  # simply have nothing to say. Same shape for the addressing profiles
+  # (`GetNetworkProfiles`) and for the server's self-description
+  # (`GET /status/general`): asked, never configured.
+  defp read_fact(mod, pid, fun) do
+    if Code.ensure_loaded?(mod) and function_exported?(mod, fun, 1),
+      do: apply(mod, fun, [pid]),
       else: :unknown
   rescue
     _ -> :unknown
@@ -408,10 +442,18 @@ defmodule Kelix.MediaPool do
   end
 
   # The decoded entries carry no health: add it here, optimistic until the first
-  # probe lands, so a boot cannot start by refusing every call. Profiles start
-  # `:unknown` for the same reason — nothing has asked yet.
-  defp health_fields(entries) when is_list(entries),
-    do: Enum.map(entries, &(&1 |> Map.put(:healthy, true) |> Map.put(:profiles, :unknown)))
+  # probe lands, so a boot cannot start by refusing every call. Profiles and the
+  # server's self-description start `:unknown` for the same reason — nothing has
+  # asked yet, and claiming otherwise would be inventing facts.
+  defp health_fields(entries) when is_list(entries) do
+    Enum.map(
+      entries,
+      &(&1
+        |> Map.put(:healthy, true)
+        |> Map.put(:profiles, :unknown)
+        |> Map.put(:server_status, :unknown))
+    )
+  end
 
   defp health_fields(_), do: []
 

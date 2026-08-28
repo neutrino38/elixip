@@ -98,6 +98,85 @@ defmodule Mendooze.ServerTest do
     end
   end
 
+  describe "the media server's self-description is asked for, never configured" do
+    @status %{
+      "server" => %{"product" => "mediaserver", "version" => "1.14.0", "uptimeSecs" => 42},
+      "capabilities" => %{
+        "audio" => %{"decode" => ["OPUS", "PCMU"], "encode" => ["OPUS", "PCMU"]},
+        "video" => %{"decode" => ["H264", "VP6"], "encode" => ["H264"]},
+        "text" => %{"rfc4103" => true, "rfc8865" => true, "websocket" => true}
+      },
+      "security" => %{"modes" => ["none", "sdes-srtp", "dtls-srtp"]},
+      "load" => %{"conferences" => 0}
+    }
+
+    # Mirrors profiles_handler/1: only EventQueueCreate has to answer for real.
+    defp status_handler do
+      fn
+        "EventQueueCreate", _ -> {:ok, [7, "/events/jsr309/7"]}
+        _, _ -> {:ok, []}
+      end
+    end
+
+    test "the body is read at connect and kept exactly as the server stated it" do
+      fake = Jsr309FakeServer.start(self(), status_handler(), status: @status)
+      server = connect!(fake)
+
+      assert_receive {:status_get, "/status/general"}, 1_000
+
+      # Verbatim. Reshaping it here would be a copy of what the server knows about
+      # itself, and a copy drifts — the whole reason this is asked for.
+      assert Mendooze.server_status(server) == @status
+    end
+
+    test "both codec directions come back, and they are NOT the same list" do
+      fake = Jsr309FakeServer.start(self(), status_handler(), status: @status)
+      server = connect!(fake)
+
+      caps = Mendooze.server_status(server)["capabilities"]
+
+      # VP6 decodes and never encodes. A caller reading one list for both
+      # directions would offer the server a stream it cannot produce.
+      assert "VP6" in caps["video"]["decode"]
+      refute "VP6" in caps["video"]["encode"]
+    end
+
+    test "a server without the endpoint is :unsupported, and still connects" do
+      # No `status:` option: the fake answers 404, like an older binary.
+      fake = Jsr309FakeServer.start(self())
+      server = connect!(fake)
+
+      assert_receive {:status_get, "/status/general"}, 1_000
+      assert Process.alive?(server)
+      assert Mendooze.server_status(server) == :unsupported
+    end
+
+    test "a body that is not JSON is :unsupported, not a crash" do
+      fake =
+        Jsr309FakeServer.start(self(), status_handler(),
+          status: {:raw, "<html>System is running</html>"}
+        )
+
+      server = connect!(fake)
+
+      # What the endpoint answered BEFORE it spoke JSON. It must not take the
+      # connection down with it.
+      assert Process.alive?(server)
+      assert Mendooze.server_status(server) == :unsupported
+    end
+
+    test "a JSON body that is not an object is :unsupported" do
+      fake =
+        Jsr309FakeServer.start(self(), status_handler(),
+          status: {:raw, "[1,2,3]"}
+        )
+
+      server = connect!(fake)
+
+      assert Mendooze.server_status(server) == :unsupported
+    end
+  end
+
   test "connect creates the event queue and polls the returned source path" do
     fake = Jsr309FakeServer.start(self())
     server = connect!(fake)

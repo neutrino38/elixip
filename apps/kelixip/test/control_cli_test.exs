@@ -280,9 +280,11 @@ defmodule Kelix.Control.CLITest do
     test "mediaserver list renders one row per pool entry" do
       {0, out} = run(["mediaserver", "list"])
 
-      assert out =~ ~r/server\s+adapter\s+url\s+enabled\s+health\s+modules/
-      assert out =~ ~r|mcu1\s+mockup\s+http://10\.0\.0\.1:8080\s+on\s+up|
-      assert out =~ ~r|mcu2\s+mendooze\s+http://10\.0\.0\.2:8080\s+on\s+down|
+      assert out =~ ~r/server\s+adapter\s+url\s+version\s+enabled\s+health\s+modules/
+      # `version` is what the SERVER answered on /status/general. The mockup
+      # answers nothing, so it reads "-" — never a value invented on this side.
+      assert out =~ ~r|mcu1\s+mockup\s+http://10\.0\.0\.1:8080\s+-\s+on\s+up|
+      assert out =~ ~r|mcu2\s+mendooze\s+http://10\.0\.0\.2:8080\s+-\s+on\s+down|
     end
 
     test "mediaserver show renders the entry and names whose health it is" do
@@ -293,16 +295,129 @@ defmodule Kelix.Control.CLITest do
       assert out =~ "url:          http://10.0.0.1:8080"
       assert out =~ "enabled:      on"
       assert out =~ "health:       up (pool probe)"
+      # The mockup describes nothing: say so, rather than render empty fields
+      # that would read as "this server has no codecs".
+      assert out =~ "server:       unknown (this media server does not describe itself)"
     end
 
     test "mediaserver enable / disable flips the entry, and `list` shows it" do
       assert {0, "ok"} = run(["mediaserver", "disable", "mcu1"])
       assert {0, out} = run(["mediaserver", "list"])
-      assert out =~ ~r/mcu1\s+mockup\s+\S+\s+off\s+up/
+      assert out =~ ~r/mcu1\s+mockup\s+\S+\s+-\s+off\s+up/
 
       assert {0, "ok"} = run(["mediaserver", "enable", "mcu1"])
       assert {0, out} = run(["mediaserver", "list"])
-      assert out =~ ~r/mcu1\s+mockup\s+\S+\s+on\s+up/
+      assert out =~ ~r/mcu1\s+mockup\s+\S+\s+-\s+on\s+up/
+    end
+
+    test "mediaserver show renders what the server answered about itself" do
+      # A media server that DOES describe itself. The body is shaped exactly as
+      # /status/general answers it (string keys), so this test breaks if the CLI
+      # starts reinterpreting the payload instead of rendering it.
+      status = %{
+        "server" => %{
+          "version" => "1.14.0",
+          "hostname" => "mcu-01",
+          "pid" => 4711,
+          "uptimeSecs" => 3661,
+          "ffmpeg" => "5.1.10"
+        },
+        "capabilities" => %{
+          "audio" => %{"decode" => ["OPUS", "PCMU"], "encode" => ["OPUS", "PCMU"]},
+          # The asymmetry that motivates two lines per medium: VP6 decodes and
+          # never encodes.
+          "video" => %{"decode" => ["H264", "VP6"], "encode" => ["H264"]},
+          "text" => %{
+            "rfc4103" => true,
+            "rfc4103Redundancy" => true,
+            "rfc8865" => true,
+            "websocket" => true
+          },
+          "hardware" => %{"vaapi" => false},
+          "bfcp" => true
+        },
+        "security" => %{
+          "modes" => ["none", "sdes-srtp", "dtls-srtp"],
+          "sdesSuites" => ["AES_CM_128_HMAC_SHA1_80"],
+          "dtls" => %{
+            "available" => true,
+            "srtpSuite" => "AES_CM_128_HMAC_SHA1_80",
+            "fingerprintSha256" => "03:E9:E1"
+          }
+        },
+        "network" => %{
+          "defaultProfile" => "publicv4",
+          "profiles" => [
+            %{
+              "name" => "publicv4",
+              "available" => true,
+              "bindAddress" => "",
+              "announcedAddress" => "203.0.113.9"
+            },
+            %{"name" => "publicv6", "available" => false}
+          ],
+          "rtpPortRange" => %{"min" => 49_152, "max" => 65_535},
+          "websocketUrl" => "ws://203.0.113.9:19090",
+          "eventQueueExpiresSecs" => 60
+        },
+        "load" => %{"conferences" => 1, "participants" => 3, "mediaSessions" => 2}
+      }
+
+      restart_pool_with_status(status)
+
+      {0, out} = run(["mediaserver", "show", "mcu1"])
+
+      assert out =~ "server:       mediaserver 1.14.0, up 1h1m1s (mcu-01, pid 4711)"
+      assert out =~ "ffmpeg:       5.1.10"
+      # The two directions, two lines, and NOT the same content.
+      assert out =~ "video decode: H264 VP6"
+      assert out =~ "video encode: H264"
+      assert out =~ "hardware:     VAAPI no"
+      assert out =~ "text:         rfc4103 yes (redundancy yes), rfc8865 yes, websocket yes"
+      assert out =~ "bfcp:         yes"
+      assert out =~ "encryption:   none, sdes-srtp, dtls-srtp"
+      assert out =~ "dtls:         AES_CM_128_HMAC_SHA1_80, fingerprint SHA-256 03:E9:E1"
+      # An empty bind is "every interface", not a missing value.
+      assert out =~
+               ~r/publicv4\s+bind \* \(every interface\)\s+announced 203\.0\.113\.9\s+\(default\)/
+
+      assert out =~ ~r/publicv6\s+unavailable/
+      assert out =~ "rtp ports:    49152-65535"
+      assert out =~ "websocket:    ws://203.0.113.9:19090"
+      assert out =~ "event queues: 60 s without long-poll = destroyed"
+      assert out =~ "load:         conferences 1, participants 3, media sessions 2"
+
+      {0, list} = run(["mediaserver", "list"])
+      assert list =~ ~r/mcu1\s+mockup\s+\S+\s+1\.14\.0/
+    end
+
+    test "a server answering a partial body renders what it has, and dashes the rest" do
+      # Half a body is what an older or a future media server can legitimately
+      # answer. It must not crash the CLI, and must not invent the missing halves.
+      restart_pool_with_status(%{"server" => %{"version" => "9.9.9"}})
+
+      {0, out} = run(["mediaserver", "show", "mcu1"])
+
+      assert out =~ "server:       mediaserver 9.9.9"
+      assert out =~ "ffmpeg:       -"
+      assert out =~ "audio decode: -"
+      assert out =~ "hardware:     VAAPI -"
+      assert out =~ "dtls:         unavailable (no readable certificate on the server)"
+      assert out =~ "rtp ports:    -"
+      # No profile block at all rather than an empty header.
+      refute out =~ "profiles:"
+    end
+
+    defp restart_pool_with_status(status) do
+      stop_supervised!(Kelix.MediaPool)
+
+      probe = fn e ->
+        {e.name == "mcu1", :unknown, if(e.name == "mcu1", do: status, else: :unknown)}
+      end
+
+      start_supervised!({Kelix.MediaPool, pool: @pool, probe: probe, first_check_ms: 60_000})
+
+      :ok = Kelix.MediaPool.check_health()
     end
 
     test "mediaserver show / disable on an unknown server → exit 1" do

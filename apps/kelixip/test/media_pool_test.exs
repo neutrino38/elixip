@@ -311,7 +311,109 @@ defmodule Kelix.MediaPoolTest do
         )
 
       :ok = MediaPool.check_health(mp)
-      assert [%{healthy: true, profiles: :unknown}] = MediaPool.status(mp)
+      assert [%{healthy: true, profiles: :unknown, server_status: :unknown}] = MediaPool.status(mp)
+    end
+
+    test "the probe brings the server's self-description back too" do
+      status = %{
+        "server" => %{"version" => "1.14.0", "uptimeSecs" => 42},
+        "capabilities" => %{"video" => %{"decode" => ["H264", "VP6"], "encode" => ["H264"]}}
+      }
+
+      {:ok, mp} =
+        MediaPool.start_link(
+          name: :mp_status,
+          pool: [%{name: "mcu1", module: :mockup, url: "u", enabled: true}],
+          probe: fn _e -> {true, :unknown, status} end,
+          first_check_ms: 10_000
+        )
+
+      # Nothing has asked yet — and the pool must not pretend it knows a version.
+      assert [%{server_status: :unknown}] = MediaPool.status(mp)
+
+      :ok = MediaPool.check_health(mp)
+      assert [%{name: "mcu1", healthy: true, server_status: ^status}] = MediaPool.status(mp)
+    end
+
+    test "an unreachable server keeps its last self-description, like its profiles" do
+      status = %{"server" => %{"version" => "1.14.0"}}
+      answer = :counters.new(1, [])
+
+      probe = fn _e ->
+        if :counters.get(answer, 1) == 0, do: {true, :unknown, status}, else: false
+      end
+
+      {:ok, mp} =
+        MediaPool.start_link(
+          name: :mp_status_keep,
+          pool: [%{name: "mcu1", module: :mockup, url: "u", enabled: true}],
+          probe: probe,
+          first_check_ms: 10_000
+        )
+
+      :ok = MediaPool.check_health(mp)
+      assert [%{healthy: true, server_status: ^status}] = MediaPool.status(mp)
+
+      :counters.add(answer, 1, 1)
+      :ok = MediaPool.check_health(mp)
+      assert [%{healthy: false, server_status: ^status}] = MediaPool.status(mp)
+    end
+  end
+
+  # Regression guard. The periodic path used to store the probe's RAW return
+  # straight into `healthy`, while only the synchronous refresh normalized it. With
+  # the default probe — which answers a tuple — a DEAD media server was recorded as
+  # `{false, :unknown}`, which is truthy: it stayed in the rotation and `list`
+  # showed it up. `interval_for/2`, which matches on `healthy: true` / `false`, had
+  # no clause for a tuple at all.
+  describe "the periodic probe records the same facts as the synchronous one" do
+    defp tuple_probe_pool(name, verdict) do
+      {:ok, mp} =
+        MediaPool.start_link(
+          name: name,
+          pool: [%{name: "mcu1", module: :mockup, url: "u", enabled: true}],
+          # The shape the DEFAULT probe answers.
+          probe: fn _e -> verdict end,
+          first_check_ms: 20,
+          health_interval_ms: 20,
+          down_interval_ms: 20
+        )
+
+      mp
+    end
+
+    test "a tuple-answering probe on the periodic path yields a boolean health" do
+      mp = tuple_probe_pool(:mp_periodic_down, {false, :unknown, :unknown})
+
+      assert until(fn -> match?([%{healthy: false}], MediaPool.status(mp)) end)
+
+      assert [%{healthy: false}] = MediaPool.status(mp)
+      # And the entry really is out of the rotation, which is the whole point.
+      assert MediaPool.checkout(mp) == {:error, :no_mcu}
+    end
+
+    test "the periodic path also refreshes profiles and the self-description" do
+      profiles = %{"publicv4" => %{available: true, announced: "203.0.113.9"}}
+      status = %{"server" => %{"version" => "1.14.0"}}
+
+      mp = tuple_probe_pool(:mp_periodic_facts, {true, profiles, status})
+
+      assert until(fn -> match?([%{profiles: ^profiles}], MediaPool.status(mp)) end)
+
+      assert [%{healthy: true, profiles: ^profiles, server_status: ^status}] =
+               MediaPool.status(mp)
+    end
+
+    test "the pool survives the tick that follows a tuple-answering probe" do
+      # interval_for/2 reads `healthy` on the NEXT tick to pick its interval: a
+      # tuple there crashed the GenServer, taking every media server with it.
+      mp = tuple_probe_pool(:mp_periodic_survives, {true, :unknown, :unknown})
+
+      assert until(fn -> match?([%{healthy: true}], MediaPool.status(mp)) end)
+      Process.sleep(120)
+
+      assert Process.alive?(Process.whereis(:mp_periodic_survives))
+      assert [%{healthy: true}] = MediaPool.status(mp)
     end
   end
   describe "checkout with a profile constraint" do

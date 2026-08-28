@@ -53,7 +53,7 @@ do about it — the release's own script would only say `cat: Permission denied`
 | `kelictl domain reload-all` | W | Hot-reload `domains.toml` (atomic, scripts checked) |
 | `kelictl reload-all` | W | Reload everything that can be applied live: `domains.toml`, the scenario scripts, the module configs. What `systemctl reload` runs |
 | `kelictl mediaserver list` | R | The media-server pool: adapter, URL, switch, health |
-| `kelictl mediaserver show <name>` | R | One media server in detail |
+| `kelictl mediaserver show <name>` | R | One media server in detail, including what it says about itself |
 | `kelictl mediaserver enable\|disable <name>` | W | Take a media server in/out of the pool |
 | `kelictl stop <id>` | W | Cooperatively shut down one scenario (id from `monitor`) |
 | `kelictl reload-script [--notify] <name…>` | W | Reload scenario script(s) |
@@ -158,9 +158,9 @@ id  domain       function   script         account       state       event     c
 4   example.com  registrar  registrar.exs  alice         registered  REGISTER  reply 200   n/a     none         n/a
 
 $ kelictl mediaserver list
-server  adapter   url                  enabled  health  modules
-mcu1    mendooze  http://10.0.0.1:8080  on       up      mcu=up
-mcu2    mendooze  http://10.0.0.2:8080  on       down    mcu=down
+server  adapter   url                   version  enabled  health  modules
+mcu1    mendooze  http://10.0.0.1:8080  1.14.0   on       up      mcu=up
+mcu2    mendooze  http://10.0.0.2:8080  -        on       down    mcu=down
 
 $ kelictl mediaserver show mcu1
 media server: mcu1
@@ -168,6 +168,28 @@ adapter:      mendooze
 url:          http://10.0.0.1:8080
 enabled:      on
 health:       up (pool probe)
+
+server:       mediaserver 1.14.0, up 3h12m5s (mcu-01, pid 4711)
+ffmpeg:       5.1.10
+audio decode: OPUS PCMU PCMA G722 AAC AMR-WB AMR SPEEX16 GSM
+audio encode: OPUS PCMU PCMA G722 AAC AMR-WB AMR SPEEX16 GSM
+video decode: H264 VP8 AV1 H263_1998 MPEG4 SORENSON VP6
+video encode: H264 VP8 AV1 H263_1998 MPEG4 SORENSON
+hardware:     VAAPI yes
+text:         rfc4103 yes (redundancy yes), rfc8865 yes, websocket yes
+bfcp:         yes
+encryption:   none, sdes-srtp, dtls-srtp
+sdes suites:  AES_CM_128_HMAC_SHA1_80 AES_CM_128_HMAC_SHA1_32
+dtls:         AES_CM_128_HMAC_SHA1_80, fingerprint SHA-256 03:E9:E1:…
+profiles:
+  publicv4    bind * (every interface)  announced 203.0.113.9  (default)
+  publicv6    bind 2001:db8::12         announced 2001:db8::12
+  internalv4  unavailable
+  internalv6  unavailable
+rtp ports:    49152-65535
+websocket:    wss://mcu-01.example.com:9090
+event queues: 60 s without long-poll = destroyed
+load:         conferences 2, participants 7, media sessions 3
 mcu:          name mcu1, queue_id q-42, status up, url http://10.0.0.1:8080
 
 $ kelictl mediaserver disable mcu1
@@ -233,6 +255,39 @@ round-robin order. Two things that read alike are kept apart there:
 
 A server the pool does not declare is `error: :unknown` on `enable`/`disable` and
 `no such media server` on `show`.
+
+#### What the media server says about itself
+
+Everything below the blank line in `mediaserver show` — and the `version` column
+of `mediaserver list` — is **the media server's own answer**, read from its
+`GET /status/general` endpoint on the same 30 s probe cycle as the addressing
+profiles. Nothing there is configured on this side.
+
+That is the whole point. A controller that cannot **ask** what a media server can
+do ends up **declaring** it, and that copy drifts: kelixip once offered H.264 and
+VP8 while the server had carried AV1 for months, and an AV1 ↔ AV1 call died on a
+488 with perfect audio at both ends.
+
+Read it with two things in mind:
+
+* **`video decode` and `video encode` are not the same list**, and neither are
+  the audio ones. `decode` is what the server can **receive**, `encode` what it
+  can **emit**. VP6 is the standing example: it arrives in RTMP streams and no
+  encoder for it exists anywhere. A call that needs the server to *produce* a
+  codec must find it in the `encode` line.
+* **A profile carries two addresses.** `bind` is the interface the socket takes,
+  `announced` is what the peer sees in the SDP. They differ behind NAT, and that
+  gap is why the table exists. `bind * (every interface)` is not a missing value:
+  it is the nominal case of an announced address that lives on the router.
+
+`server: unknown (this media server does not describe itself)` means the endpoint
+answered 404 or something other than JSON — an older binary, or the `mockup`
+adapter. Selection and health are unaffected; only this description is missing,
+and the node says so rather than filling the fields with guesses. The same is
+true field by field: a `-` is "the server did not state it".
+
+The reference for the endpoint itself — every field, and what each one commits
+to — is the mediaserver repository, `docs/reference/status-http.md`.
 
 ### Reloading a running node
 

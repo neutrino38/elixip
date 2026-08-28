@@ -285,8 +285,18 @@ defmodule Kelix.Control do
   end
 
   # The configured entry (name/adapter/url), the operator switch (`enabled`), the
-  # pool's own probe (`healthy`) and what each module driving media servers says
-  # about this one.
+  # pool's own probe (`healthy`), what the SERVER says about itself (`server`),
+  # and what each module driving media servers says about this one.
+  #
+  # `server` is the decoded `/status/general` body, exactly as the media server
+  # answered it — version, real codec capabilities per direction, encryption,
+  # addressing profiles, load. `:unknown` on a server that does not describe
+  # itself. It is deliberately NOT reshaped here: a controller-side rewriting of
+  # a capability list is a copy, and a copy drifts.
+  #
+  # The addressing profiles are read from that body and from nowhere else, even
+  # though the pool keeps its own copy for selection: showing two separately
+  # cached readings of one table would let the view contradict itself.
   defp describe_mediaserver(entry, modules) do
     %{
       name: entry.name,
@@ -294,6 +304,7 @@ defmodule Kelix.Control do
       url: entry.url,
       enabled: entry.enabled,
       healthy: Map.get(entry, :healthy, true),
+      server: Map.get(entry, :server_status, :unknown),
       modules: module_mediaserver_views(modules, entry.name)
     }
   end
