@@ -28,7 +28,11 @@
 
 Name:           kelixip
 Version:        1.5.2
-Release:        6%{?dist}
+# Counts the builds of this Version, and must be bumped for each one that leaves this
+# machine: rpm identifies a package by its NEVRA, so installing over an
+# already-installed one is a no-op — the host keeps the older payload while rpm -q
+# reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
+Release:        7%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -245,6 +249,62 @@ fi
 %{_datadir}/%{name}/mcu*.exs
 
 %changelog
+* Sun Sep 06 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.2-7
+- Packaging: Release 6 was built more than once with different payloads, so dnf took
+  the second install for a package it already had and kept the first — a node ran a
+  controller without the T.140 data channel while rpm reported the version that has
+  it. Hence this 7, and the rule written next to Release:.
+- Packaging: the release tree is rebuilt from scratch, so a package carries one
+  elixip2 and one releases/<version> instead of every version ever built here.
+
+* Sun Sep 06 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.2-1
+- Multi-interface: a node speaks IPv4 and IPv6 at once, on an internal side and a
+  public side. Three new [[listen]] keys, all optional: tag (internal / public) and
+  networks say which side a listener sits on, advertise names the public face of addr
+  for a 1:1 NAT. addr accepts an IPv6 address, and absent it binds both families,
+  one socket each.
+- Multi-interface: UDP is one socket per family and the selector picks by
+  destination. A second udp entry of a family already bound is ignored with a warning.
+- Multi-interface: advertise is not a flat substitution — a public peer gets the
+  alias, an internal peer the bound address, in the Via, the Contact and the SDP.
+  addr must be explicit and of the same family, or the boot is refused.
+- Multi-interface: each media leg is placed on the media server's addressing profile
+  matching its own side, and the B2BUA resolves and marks every target before asking
+  the pool for a server carrying all the profiles in play.
+- mcu: an IPv6-only conference interoperates with Chrome. A call whose family the
+  media server does not carry is refused rather than answered with an unreachable
+  address.
+- mcu: Mcu.SBB.conference() publishes a conference leg's whole life as a service
+  building block — the ACK sequence and its retransmissions, INFO, the RFC 5168
+  frame requests, the BYE ordering, and a silent leg hung up.
+- mcu: real-time text on a WebRTC data channel (RFC 8865), for a conference leg as
+  well as a B2BUA leg. It is what our own offers carry by default on a WebRTC leg,
+  a browser having no m=text.
+- FIX: mcu hold and resume — a hold is a sendrecv -> sendonly transition, so a hold
+  longer than 10 s no longer kills an audio-only leg through the RTP watchdog.
+- FIX: mcu no longer restarts ICE on every renegotiation, which kept a peer from
+  leaving a hold.
+- FIX: H.264 selection prefers the main profile and packetization mode 1 when the
+  caller advertises several.
+- SECURITY: the outbound TLS and WSS legs verify the certificate they are offered.
+  New [tls] section, verify off by default — verifying supposes an authority agreed
+  with the peer. The name checked is the SIP domain of the URI, never the resolved
+  address (RFC 5922).
+- auth_db: PostgreSQL as a second driver of the subscriber table
+  (driver = "postgres"). mysql remains the default.
+- FIX: SBB.authenticate(realm: "...") uses the option passed instead of ignoring it;
+  the entry options of every service building block now reach the block.
+- kelictl mediaserver show displays what the media server answers about itself
+  (GET /status/general): version, real codec capabilities, text transports,
+  encryption, addressing profiles, load. mediaserver list gains a version column.
+  Asked, never declared.
+- kelictl monitor continuous: the monitor view redrawn live, without polling.
+- A B2BUA call can be recorded on both legs at once (media_record(leg: :outbound)),
+  one file per leg.
+- SELinux on Alma Linux 9: the post-install labels the launcher directories bin_t,
+  without which the node exited at boot on "register/listen error: eacces".
+- Medooze mediaserver 1.14.0 is required.
+- User-Agent is now Kelixip/1.5.2.
 * Thu Aug 20 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.1-1
 - mcu: the conference DEFINITIONS survive a node restart, in one JSON file named by
   [module.mcu] conference_file. Only rooms somebody declared are written; a restored

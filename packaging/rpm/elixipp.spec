@@ -46,5 +46,15 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 %{_bindir}/elixipp
 
 %changelog
+* Sun Sep 06 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.2-1
+- Multi-interface: a scenario reads and writes IPv6 addresses in SIP messages, and
+  a UAC leg binds the family of the address it dials.
+- The outbound TLS and WSS legs verify the certificate they are offered when
+  :tls_verify is on; the name checked is the SIP domain of the URI (RFC 5922).
+- Real-time text on a WebRTC data channel (RFC 8865), offered by default on a
+  WebRTC leg; text_transport: :rtp asks for m=text instead.
+- A B2BUA call can be recorded on both legs at once (media_record(leg: :outbound)),
+  one file per leg; media_leg_of/1 says which leg an :ms_event belongs to.
+- User-Agent is now Elixipp-1.5.2.
 * Sat Aug 22 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.1-1
 - First packaged release of the elixipp escript.

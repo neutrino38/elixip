@@ -53,6 +53,13 @@ formats. The version comes from `apps/kelixip/mix.exs` and each build **fails lo
 if its own metadata disagrees with it — `rpm/kelixip.spec`'s `Version:` for the RPM,
 the first line of `deb/changelog` for the deb. Bump all three.
 
+The **Release** is a separate question, and nothing computes it: `rpm/kelixip.spec`'s
+`Release:` and the revision in `deb/changelog` are bumped by hand, for every build that
+leaves the machine. Two payloads must never share one NEVRA — rpm identifies a package
+by it, so `dnf install` over an already-installed NEVRA reports "already installed" and
+the host quietly keeps the older payload. The version-change procedure is in the root
+`CLAUDE.md`.
+
 > **Build on the target OS.** The release embeds ERTS, which is **native code**
 > dynamically linked to the build host's glibc/OpenSSL/ncurses — assemble it on
 > Debian and it fails to load on AL9, and vice-versa. The `.spec`, the deb control

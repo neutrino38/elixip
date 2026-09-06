@@ -194,12 +194,12 @@ Unknown keys are rejected too — a typo must not silently fall back to a defaul
 | Key | Type | Required | Meaning |
 |---|---|---|---|
 | `proto` | `udp` \| `tcp` \| `tls` \| `wss` | **yes** | Transport |
-| `addr` | IP address | non | Adresse liée, IPv4 ou IPv6 ; elle donne sa famille au listener. `0.0.0.0` = toutes les interfaces IPv4, `::` = toutes les IPv6. **Absente** = les deux familles, une socket chacune |
+| `addr` | IP address | no | Bound address, IPv4 or IPv6; it is what gives the listener its family. `0.0.0.0` = every IPv4 interface, `::` = every IPv6 one. **Absent** = both families, one socket each |
 | `port` | int > 0 | **yes** | Bind port |
 | `cert` / `key` | path | **yes for `tls`/`wss`** | Per-listener PEM cert and key. **Forbidden** on `udp`/`tcp` |
-| `tag` | `public` \| `internal` | non (`public`) | De quel côté du réseau ce listener se trouve |
-| `networks` | liste de CIDR | non | Les réseaux qui définissent ce côté. Présente, elle **remplace** la détection automatique |
-| `advertise` | IP | non | La **face publique** de `addr` (NAT 1:1). Même famille, et `addr` explicite exigée |
+| `tag` | `public` \| `internal` | no (`public`) | Which side of the network this listener sits on |
+| `networks` | list of CIDRs | no | The networks that define that side. When present it **replaces** the automatic detection |
+| `advertise` | IP | no | The **public face** of `addr` (1:1 NAT). Same family, and an explicit `addr` is required |
 
 ```toml
 [[listen]]
@@ -223,10 +223,11 @@ key   = "/etc/pki/kelixip/privkey.pem"
 > `chown root:kelixip key.pem && chmod 0640 key.pem`. `/etc/kelixip/tls/` is
 > already 0750 `root:kelixip` for that purpose.
 >
-> UDP est **une socket par famille** : un datagramme ne sort que par une socket
-> de la famille de sa destination. Une seconde entrée `udp` d'une famille déjà
-> liée est ignorée avec un avertissement. Une `addr` explicite lie cette adresse
-> et c'est elle qui est annoncée dans Via et Contact and advertises the first local IPv4 address.
+> UDP is **one socket per family**: a datagram only leaves through a socket of
+> its destination's family. A second `udp` entry of a family already bound is
+> ignored with a warning. An explicit `addr` binds that address and is what is
+> advertised in the Via and the Contact; without one the socket binds every
+> interface of that family and advertises the first local address it finds.
 >
 > An IPv6 listener names an explicit address:
 >
@@ -374,25 +375,25 @@ scrape it.
 | `addr` | IP | `127.0.0.1` |
 | `port` | 1..65535 | `9095` |
 
-##### `tag` et `networks` — le côté du réseau
+##### `tag` and `networks` — the side of the network
 
-Sert à deux choses : annoncer la bonne adresse média selon le côté où se trouve
-le correspondant, et savoir de quel côté il est.
+Two uses: announcing the right media address for the side the correspondent is
+on, and knowing which side that is.
 
-Un listener `internal` **définit** le réseau interne. Par défaut, par le
-sous-réseau de l'interface qui porte son `addr` : `:inet.getifaddrs/0` rend le
-masque à côté de l'adresse, donc rien à lire dans la table de routage, et aucune
-passerelle par défaut à écarter — elle n'y figure pas.
+An `internal` listener **defines** the internal network. By default, by the
+subnet of the interface carrying its `addr`: `:inet.getifaddrs/0` returns the
+mask next to the address, so there is nothing to read in the routing table and no
+default gateway to set aside — it does not appear there.
 
-`networks` force cette détection et la **remplace**. Deux cas l'exigent :
+`networks` overrides that detection and **replaces** it. Two cases need it:
 
-- un réseau interne joint par un routeur, donc attaché à aucune interface ;
-- une interface qui porte un /16 alors que l'interne est un /24. Une détection
-  qu'on ne peut que compléter est une détection qu'on ne peut pas corriger.
+- an internal network reached through a router, so attached to no interface;
+- an interface carrying a /16 while the internal network is a /24. A detection
+  you can only add to is a detection you cannot correct.
 
-Un listener `internal` **sans** `addr` ni `networks` est refusé : il se trouve sur
-tous les sous-réseaux, donc il n'en définit aucun, et l'interpréter comme « tout
-est interne » viderait silencieusement le côté public.
+An `internal` listener with **neither** `addr` nor `networks` is refused: it sits
+on every subnet, so it defines none, and reading it as "everything is internal"
+would silently empty the public side.
 
 ```toml
 [[listen]]
@@ -403,14 +404,14 @@ tag      = "internal"
 #networks = ["10.20.0.0/24", "10.30.0.0/24"]
 ```
 
-Toute adresse qui n'entre dans aucun de ces réseaux est `public`. Un nœud sans
-listener `internal` n'a qu'un côté, et c'est le public.
+Any address falling in none of those networks is `public`. A node with no
+`internal` listener has one side, and it is the public one.
 
-##### `advertise` — une interface à deux faces (NAT 1:1)
+##### `advertise` — one interface, two faces (1:1 NAT)
 
-Une VM lie une adresse privée et se joint à une adresse publique. L'exploitant
-connaît cette adresse — une EIP AWS ne bouge pas — et rien sur la machine ne peut
-la déduire, d'où une clé plutôt qu'une découverte.
+A VM binds a private address and is reached at a public one. The operator knows
+that address — an AWS EIP does not move — and nothing on the machine can derive
+it, hence a key rather than a discovery.
 
 ```toml
 [[listen]]
@@ -418,77 +419,76 @@ proto     = "udp"
 addr      = "10.0.0.5"
 port      = 5060
 advertise = "203.0.113.9"
-tag       = "internal"      # 10.0.0.0/8 devient le réseau interne
+tag       = "internal"      # 10.0.0.0/8 becomes the internal network
 ```
 
-**Ce n'est pas une substitution plate.** La même interface sert les deux côtés :
-une UA dans le réseau privé et une UA sur Internet arrivent sur la même socket,
-puisque le NAT a réécrit la destination. Chacune doit donc voir la face qu'elle
-peut joindre :
+**This is not a flat substitution.** The same interface serves both sides: a UA
+on the private network and a UA on the Internet arrive on the same socket, since
+the NAT rewrote the destination. Each must therefore see the face it can reach:
 
-| le pair est… | ce qu'il reçoit dans le Via, le Contact et le SDP |
+| the peer is… | what it receives in the Via, the Contact and the SDP |
 |---|---|
-| `public` (hors des réseaux internes) | `203.0.113.9` |
+| `public` (outside the internal networks) | `203.0.113.9` |
 | `internal` | `10.0.0.5` |
-| d'adresse inconnue | `203.0.113.9` — un nœud natté sert surtout l'extérieur |
+| of an unknown address | `203.0.113.9` — a NATed node serves mostly the outside |
 
-Le côté d'un pair se lit sur **son** adresse, contre les réseaux déclarés par les
-listeners `internal` (voir `tag` ci-dessus). Sans réseau interne déclaré, tout
-pair est public et `advertise` se comporte comme une substitution simple.
+A peer's side is read off **its** address, against the networks declared by the
+`internal` listeners (see `tag` above). With no internal network declared, every
+peer is public and `advertise` behaves as a plain substitution.
 
-La socket lie toujours `addr`, et le transport continue de rapporter l'adresse
-qu'il lie réellement : la substitution a lieu au moment de **publier**.
+The socket still binds `addr`, and the transport keeps reporting the address it
+really binds: the substitution happens at **publication** time.
 
-Contraintes, toutes deux refusées au démarrage :
+Constraints, both refused at boot:
 
-- **`addr` explicite exigée.** `advertise` nomme la face publique d'**une**
-  adresse ; un listener wildcard couvre toutes les interfaces de sa famille et la
-  substitution n'aurait aucune clé à laquelle s'accrocher.
-- **Même famille que `addr`.** Un Via et un Contact portant l'autre famille
-  nomment une adresse qu'aucun pair de ce listener ne peut rappeler, et la panne
-  ressemblerait à un problème de routage.
+- **an explicit `addr` is required.** `advertise` names the public face of **one**
+  address; a wildcard listener covers every interface of its family and the
+  substitution would have no key to hang on.
+- **the same family as `addr`.** A Via and a Contact carrying the other family
+  name an address no peer of that listener can call back, and the failure would
+  look like a routing problem.
 
-Le média, lui, n'est pas substitué par kelixip : c'est le mediaserver qui le fait,
-depuis ses propres profils. Pour cette topologie :
+The media itself is not substituted by kelixip: the mediaserver does it, from its
+own profiles. For this topology:
 
 ```
 OPTIONS="--public-ip 10.0.0.5 --nat 203.0.113.9 --internal-ip 10.0.0.5"
 ```
 
-> ⚠️ Dès qu'un `--internal-ip` est donné, l'API de contrôle XML-RPC du mediaserver
-> ne répond plus que sur l'adresse interne. Les entrées `[mediaserver.pool.*]`
-> doivent viser `10.0.0.5`, plus la loopback.
+> ⚠️ As soon as an `--internal-ip` is given, the mediaserver's XML-RPC control API
+> only answers on the internal address. The `[mediaserver.pool.*]` entries must
+> then aim at `10.0.0.5`, not at the loopback.
 
-Pas de découverte par STUN. Elle ajouterait une dépendance réseau au démarrage et
-un mode de panne, pour aucune information de plus que cette clé — et le
-mediaserver fait le même choix avec `--public-ip`.
+No STUN discovery. It would add a network dependency at boot and a failure mode,
+for no information this key does not already carry — and the mediaserver made the
+same choice with `--public-ip`.
 
-#### `[tls]` — la jambe sortante
+#### `[tls]` — the outbound leg
 
-S'applique aux connexions TLS et WSS que le nœud **compose**, jamais à celles
-qu'il reçoit : le côté entrant, ce sont les `cert` et `key` d'un `[[listen]]`.
+Applies to the TLS and WSS connections the node **dials**, never to the ones it
+receives: the inbound side is the `cert` and `key` of a `[[listen]]`.
 
-| Clé | Type | Défaut | |
+| Key | Type | Default | |
 |---|---|---|---|
-| `verify` | bool | `false` | Vérifie le certificat du pair appelé |
-| `ca` | chemin | — | N'accorde sa confiance qu'à cette autorité ; absente, le magasin public est utilisé |
+| `verify` | bool | `false` | Verify the called peer's certificate |
+| `ca` | path | — | Trust this authority only; absent, the public store is used |
 
-Vérifier un pair suppose une autorité que les deux côtés ont acceptée : c'est un
-accord d'interconnexion, pas un réglage de socket. `verify` est donc à activer
-sciemment, au même titre que la pose d'un certificat client.
+Verifying a peer supposes an authority both sides have accepted: that is an
+interconnection agreement, not a socket setting. `verify` is therefore turned on
+knowingly, exactly as a client certificate is installed knowingly.
 
-**Activez-le en même temps que le côté entrant.** Un serveur qui exige un
-certificat client alors que son propre client sortant n'en vérifie aucun ne
-protège rien : la garantie mutuelle vaut ce que vaut la direction la plus faible.
+**Turn it on at the same time as the inbound side.** A server demanding a client
+certificate while its own outbound client verifies none protects nothing: the
+mutual guarantee is worth what its weakest direction is worth.
 
-Le nom vérifié est le **domaine SIP** de l'URI appelée (RFC 5922 §7.2), pas
-l'adresse que le DNS a rendue. Une cible désignée par adresse nue n'a donc pas de
-nom à vérifier : son certificat doit porter cette adresse dans un SAN
-`iPAddress`, ce que presque aucun certificat SIP ne fait.
+The name verified is the **SIP domain** of the called URI (RFC 5922 §7.2), not
+the address DNS returned. A target named by a bare address therefore has no name
+to verify: its certificate must carry that address in an `iPAddress` SAN, which
+almost no SIP certificate does.
 
-Une `ca` illisible fait échouer le démarrage. C'est voulu : sinon chaque appel
-sortant échoue à la poignée de main, avec une alerte TLS qui ne dit rien du
-chemin erroné.
+A `ca` that cannot be read fails the boot. That is deliberate: otherwise every
+outbound call fails at the handshake, with a TLS alert saying nothing about the
+wrong path.
 
 ### domains.toml
 

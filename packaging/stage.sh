@@ -53,8 +53,15 @@ if ! grep -qE "^(ID|ID_LIKE)=.*($os_family)" /etc/os-release; then
 fi
 
 # 1) The release, with its embedded ERTS.
+#
+#    The output tree is removed first. `--overwrite` overwrites the files this run
+#    produces; it never removes the ones it no longer produces, so every past
+#    version's `lib/elixip2-<v>` and `releases/<v>` survived and shipped — nine of
+#    them by 1.5.2. Only the version in `releases/start_erl.data` is ever loaded, so
+#    the rest is dead weight that makes "which code runs on this host" unanswerable.
 echo "==> mix release kelixip"
 ( cd "$REPO" && mix deps.get )
+rm -rf "$REPO/_build/prod/rel/kelixip"
 ( cd "$REPO/apps/kelixip" && MIX_ENV=prod mix release kelixip --overwrite --quiet )
 
 # 2) The loadable modules. Deliberately NOT a dependency of :kelixip, so nothing

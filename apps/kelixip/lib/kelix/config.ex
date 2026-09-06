@@ -70,7 +70,7 @@ defmodule Kelix.Config do
   defstruct node_name: "kelixip@127.0.0.1",
             script_dir: "/usr/share/kelixip",
             module_dir: "/usr/lib/kelixip/modules",
-            user_agent: "Kelixip/1.5.1",
+            user_agent: "Kelixip/1.5.2",
             max_calls: nil,
             log: %{target: "stdout", facility: "local0", level: "info"},
             listen: [],
