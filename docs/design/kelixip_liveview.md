@@ -1,8 +1,10 @@
 # kelixip admin web UI — architecture note
 
-Status: **exploratory** (2026-07-26, push mechanism decided 2026-08-21). Captures
-the locked decisions for a real-time web admin UI over kelixip. No code yet on
-the kelixip side.
+Status: **exploratory** (2026-07-26, push mechanism decided 2026-08-21, domain
+counters push decided 2026-09-07). Captures the locked decisions for a
+real-time web admin UI over kelixip. `Kelix.Control.subscribe_monitor/1` and
+`subscribe_domain_counters/1` are implemented; the rest of this note is still
+ahead of the code.
 
 The app is **kelescope** (`github.com/neutrino38/kelescope`, separate repo). It
 implements this note; its own Phase 1 (monitor + stop) plan lives in
@@ -80,6 +82,35 @@ the pattern already in the codebase:
   as the call's return value, then row-level `send/2` updates as they happen —
   no polling on the kelescope side.
 
+### Domain counters push (decided 2026-09-07)
+
+kelescope's domain list (`domains/0`'s `active_calls` / `registrations`) had no
+push counterpart: a domain's counters only changed on the next manual refresh.
+Same subscriber-list-plus-`send/2` mechanism as scenario monitoring, split
+across the two surfaces that actually hold each count:
+
+- **Active calls** — `Kelix.InstancePool` already keeps `per_domain` (§4.2). It
+  gained its own `counter_subs: MapSet(pid)` (kept apart from `monitor_subs`: a
+  subscriber may want one push without the other) plus
+  `subscribe_domain_counters/1` / `unsubscribe_domain_counters/1`. Every
+  `accept/4` and every instance's `:DOWN` now also `send/2`s
+  `{:kelix_domain_counter, domain, :active_calls, count}`.
+- **Registrations** — `Kelix.Mod.Registrar` gained the same `count_subs` plus
+  the same two functions, on the model of `subscribe_register_event/2`, but
+  subscribing to every domain at once rather than one AOR: kelescope's domain
+  list wants all of them live, and a per-AOR subscription for every AOR of
+  every domain would be the wrong granularity to manage. `notify/4` (already
+  called on every registered/unregistered/expired/disconnected transition)
+  additionally `send/2`s `{:kelix_domain_counter, domain, :registrations,
+  count}`, the count read off the domain's own ETS table size — cheap, and
+  exactly what `Kelix.Control.domain/1` counts.
+- **Exposed through `Kelix.Control`**, as one call: `subscribe_domain_counters/1`
+  subscribes to both (the registrar half through `Kelix.ModuleRegistry.facade/4`,
+  a no-op when the module is not loaded — no domain ever registers, so nothing
+  is missed) and returns the current snapshot (`domains/0`'s shape); the pid
+  then receives `{:kelix_domain_counter, domain, :active_calls | :registrations,
+  count}` per counter change. `unsubscribe_domain_counters/1` stops both.
+
 ## Security caveat (the one real risk)
 
 Erlang distribution = **full trust between nodes** (shared cookie; RPC can call
@@ -95,8 +126,9 @@ anything). A compromised web node ⇒ full access to the SIP node. Therefore:
 
 `kelescope`, separate repo and release, clustered with kelixip like `kelictl`;
 reads/actions via `Kelix.Control` RPC; **live updates via a subscriber list +
-`send/2`** on `SIP.Scenario.Monitor` / `Kelix.InstancePool`, exposed through
-new `Kelix.Control.subscribe_monitor/1` (to be added — no code yet); REST (P8)
+`send/2`** on `SIP.Scenario.Monitor` / `Kelix.InstancePool` (scenarios,
+`subscribe_monitor/1`) and on `Kelix.InstancePool` / `Kelix.Mod.Registrar`
+(domain counters, `subscribe_domain_counters/1`) — both implemented; REST (P8)
 reserved for external clients; cluster only over a trusted network / TLS
 distribution.
 

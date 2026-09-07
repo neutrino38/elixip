@@ -102,6 +102,33 @@ defmodule Kelix.Control do
   def unsubscribe_monitor(pid), do: Kelix.InstancePool.unsubscribe_monitor(pid)
 
   @doc """
+  Subscribe `pid` to domain counter changes as they happen (kelescope's live
+  domain list, `docs/design/kelixip_liveview.md`) — the active-calls half from
+  `Kelix.InstancePool`, the registrations half from the registrar module (a
+  no-op when it is not loaded: no domain ever registers, so nothing is missed).
+  Returns the current snapshot (`domains/0`'s shape); `pid` then receives
+  `{:kelix_domain_counter, domain, :active_calls | :registrations, count}` per
+  counter change, no polling needed.
+  """
+  @spec subscribe_domain_counters(pid()) :: [map]
+  def subscribe_domain_counters(pid) do
+    Kelix.InstancePool.subscribe_domain_counters(pid)
+    registrar_facade(:subscribe_domain_counters, [pid])
+    domains()
+  end
+
+  @doc "Stop a subscription started by `subscribe_domain_counters/1`."
+  @spec unsubscribe_domain_counters(pid()) :: :ok
+  def unsubscribe_domain_counters(pid) do
+    Kelix.InstancePool.unsubscribe_domain_counters(pid)
+    registrar_facade(:unsubscribe_domain_counters, [pid])
+    :ok
+  end
+
+  defp registrar_facade(fun, args),
+    do: safe(fn -> Kelix.ModuleRegistry.facade("registrar", fun, args, :ok) end, :ok)
+
+  @doc """
   Every served domain and its registrations (`kelictl registration list`), in
   `domains.toml` order.
 

@@ -433,6 +433,31 @@ defmodule Kelix.ControlTest do
       refute_receive {:kelix_monitor, _}, 200
     end
 
+    # kelescope's live domain list (docs/design/kelixip_liveview.md): an
+    # instance appearing/ending must push that domain's active-calls count,
+    # with no polling. The registrations half lives in the registrar module
+    # (apps/kelix_modules/test/registrar_test.exs) — nothing here to load it.
+    test "subscribe_domain_counters/1 pushes active-calls changes as instances come and go" do
+      on_exit(fn -> Control.unsubscribe_domain_counters(self()) end)
+
+      assert snapshot = Control.subscribe_domain_counters(self())
+      assert is_list(snapshot)
+
+      pid = spawn_watched("counters.test")
+      assert_receive {:kelix_domain_counter, "counters.test", :active_calls, 1}, 1000
+
+      send(pid, {:scenario_ctl, :shutdown, :test})
+      assert_receive {:kelix_domain_counter, "counters.test", :active_calls, 0}, 1000
+    end
+
+    test "unsubscribe_domain_counters/1 stops the pushes" do
+      Control.subscribe_domain_counters(self())
+      assert Control.unsubscribe_domain_counters(self()) == :ok
+
+      spawn_watched("unsub-counters.test")
+      refute_receive {:kelix_domain_counter, _, _, _}, 200
+    end
+
     # Regression: `log-level debug` answered :ok while nothing showed up in the
     # console or elixip.log. Setting the primary level alone leaves every sink on
     # its own compiled-in level (console at :warning, the file backend at :info),

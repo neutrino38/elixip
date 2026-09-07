@@ -47,7 +47,12 @@ defmodule Kelix.Mod.Registrar do
       (it does **not** compose the SIP response — the script does, via
       SIP.Session.Registrar helpers, §11.1);
     * `lookup/1` — rewrite a request to reach the registered UA(s);
-    * `subscribe_register_event/2` / `unsubscribe_register_event/2`.
+    * `subscribe_register_event/2` / `unsubscribe_register_event/2`;
+    * `subscribe_domain_counters/1` / `unsubscribe_domain_counters/1` — the
+      registrations half of `Kelix.Control.subscribe_domain_counters/1`
+      (`docs/design/kelixip_liveview.md`): every AOR change on any domain pushes
+      that domain's live count, `{:kelix_domain_counter, domain, :registrations,
+      count}`, rather than the caller polling `all/1`.
 
   Delivered as a loadable `Kelix.Module` (P5): `validate_config/1`, `child_spec/2`
   and `describe/0` below; the facades route through `Kelix.Module.safe_call/3` so
@@ -67,12 +72,17 @@ defmodule Kelix.Mod.Registrar do
   @sweep_ms 30_000
 
   # state:
-  #   tables   %{domain => :ets.tid}          per-domain AOR store (aor => [Contact])
-  #   subs     %{"aor@domain" => MapSet(pid)} register-event subscribers
-  #   mons     %{monitor_ref => {domain, aor, dialog_pid}}  connected-flow monitors
+  #   tables       %{domain => :ets.tid}          per-domain AOR store (aor => [Contact])
+  #   subs         %{"aor@domain" => MapSet(pid)} register-event subscribers
+  #   mons         %{monitor_ref => {domain, aor, dialog_pid}}  connected-flow monitors
+  #   count_subs   MapSet(pid) subscribed via `subscribe_domain_counters/1`
+  #   count_mons   monitor_ref => subscriber pid, dropped on death without an
+  #                explicit `unsubscribe_domain_counters/1`
   defstruct tables: %{},
             subs: %{},
             mons: %{},
+            count_subs: MapSet.new(),
+            count_mons: %{},
             max_contacts: @default_max_contacts,
             min_expires: @min_expires,
             default_expires: @default_expires,
@@ -124,7 +134,9 @@ defmodule Kelix.Mod.Registrar do
         lookup: 1,
         targets: 2,
         subscribe_register_event: 2,
-        unsubscribe_register_event: 2
+        unsubscribe_register_event: 2,
+        subscribe_domain_counters: 1,
+        unsubscribe_domain_counters: 1
       ]
     }
 
@@ -299,6 +311,22 @@ defmodule Kelix.Mod.Registrar do
     do: Kelix.Module.safe_call(__MODULE__, {:unsubscribe, uri, pid})
 
   @doc """
+  Subscribe `pid` to every domain's registration-count changes — the
+  registrations half of `Kelix.Control.subscribe_domain_counters/1`. `pid`
+  gets `{:kelix_domain_counter, domain, :registrations, count}` each time an
+  AOR registers, unregisters, expires or is dropped on any domain; monitored,
+  so a dead/disconnected subscriber is dropped on its own.
+  """
+  @spec subscribe_domain_counters(pid) :: :ok
+  def subscribe_domain_counters(pid),
+    do: Kelix.Module.safe_call(__MODULE__, {:subscribe_counters, pid})
+
+  @doc "Stop a subscription started by `subscribe_domain_counters/1`."
+  @spec unsubscribe_domain_counters(pid) :: :ok
+  def unsubscribe_domain_counters(pid),
+    do: Kelix.Module.safe_call(__MODULE__, {:unsubscribe_counters, pid})
+
+  @doc """
   Administratively remove an AOR's binding(s) (`kelictl registration remove`). `contact`
   is a specific contact-URI string, or `:all` to drop the whole AOR. Returns `:ok`,
   `:notfound`, or a facade error (`{:error, :down | :timeout}`).
@@ -374,6 +402,26 @@ defmodule Kelix.Mod.Registrar do
     key = aor_key(uri)
     subs = Map.update(state.subs, key, MapSet.new(), &MapSet.delete(&1, pid))
     {:reply, :ok, %{state | subs: subs}}
+  end
+
+  def handle_call({:subscribe_counters, pid}, _from, state) do
+    if MapSet.member?(state.count_subs, pid) do
+      {:reply, :ok, state}
+    else
+      ref = Process.monitor(pid)
+
+      state = %{
+        state
+        | count_subs: MapSet.put(state.count_subs, pid),
+          count_mons: Map.put(state.count_mons, ref, pid)
+      }
+
+      {:reply, :ok, state}
+    end
+  end
+
+  def handle_call({:unsubscribe_counters, pid}, _from, state) do
+    {:reply, :ok, drop_count_sub(state, pid)}
   end
 
   def handle_call({:remove, domain, aor, which}, _from, state) do
@@ -569,7 +617,7 @@ defmodule Kelix.Mod.Registrar do
   def handle_info({:DOWN, ref, :process, dead_pid, _reason}, state) do
     case Map.pop(state.mons, ref) do
       {nil, _} ->
-        {:noreply, state}
+        {:noreply, drop_count_sub_by_ref(state, ref)}
 
       {{domain, aor, _pid}, mons} ->
         tid = Map.get(state.tables, domain)
@@ -916,9 +964,55 @@ defmodule Kelix.Mod.Registrar do
       send(pid, {:registrar, event, key})
     end
 
+    # registered/unregistered/expired/disconnected all can change how many AORs
+    # this domain has live — every entry left in its table has a live contact
+    # (emptied entries are deleted, see apply_actions/remove_from/sweep_domain),
+    # so the table's own size is the same count `Control.domain/1` shows.
+    broadcast_count(state, domain)
+
     # observability (§11): registrar lifecycle counter, per domain
     Kelix.Metrics.Emit.registrar_event(domain, event)
     :ok
+  end
+
+  defp broadcast_count(state, domain) do
+    count =
+      case Map.get(state.tables, domain) do
+        nil -> 0
+        tid -> :ets.info(tid, :size)
+      end
+
+    for pid <- state.count_subs do
+      send(pid, {:kelix_domain_counter, domain, :registrations, count})
+    end
+
+    :ok
+  end
+
+  defp drop_count_sub(state, pid) do
+    case Enum.find(state.count_mons, fn {_ref, p} -> p == pid end) do
+      nil ->
+        state
+
+      {ref, _pid} ->
+        Process.demonitor(ref, [:flush])
+
+        %{
+          state
+          | count_subs: MapSet.delete(state.count_subs, pid),
+            count_mons: Map.delete(state.count_mons, ref)
+        }
+    end
+  end
+
+  defp drop_count_sub_by_ref(state, ref) do
+    case Map.pop(state.count_mons, ref) do
+      {nil, _} ->
+        state
+
+      {pid, mons} ->
+        %{state | count_mons: mons, count_subs: MapSet.delete(state.count_subs, pid)}
+    end
   end
 
   # ── request field helpers ────────────────────────────────────────────────────
