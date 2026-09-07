@@ -869,12 +869,16 @@ defmodule Kelix.Mod.McuAdminTest do
       assert {"SetParticipantDisplayName", [conf.conf_id, -1, row.part_id, "Alice W", 0]} in TestStub.rpc_calls()
     end
 
-    test "`:auto` falls back to the From URI's user part", ctx do
+    # The fallback is the user part, NEVER the whole URI: same rule as the message
+    # envelope (§20.5 G-9, `message.ex`), and it matters more now — the text mixer
+    # writes this name in front of every turn, to every participant.
+    test "`:auto` falls back to the From URI's user part, never the AOR", ctx do
       from = %SIP.Uri{userpart: "alice", domain: "phone.example.com"}
       {_conf, part} = join_with(ctx.uid, from, displayname: :auto)
 
       {:ok, row} = Mcu.participant(part)
       assert row.display_name == "alice"
+      refute row.display_name =~ "@"
     end
 
     test "a literal string is sent as given", ctx do
@@ -886,9 +890,22 @@ defmodule Kelix.Mod.McuAdminTest do
       assert {"SetParticipantDisplayName", [conf.conf_id, -1, row.part_id, "Salle 4", 0]} in TestStub.rpc_calls()
     end
 
-    test "no option means no banner RPC at all", ctx do
-      from = %SIP.Uri{userpart: "alice", domain: "phone.example.com"}
-      {_conf, part} = join_with(ctx.uid, from, [])
+    test "no option means `:auto`, so the name is sent anyway", ctx do
+      from = %SIP.Uri{displayname: "Alice W", userpart: "alice", domain: "phone.example.com"}
+      {conf, part} = join_with(ctx.uid, from, [])
+
+      {:ok, row} = Mcu.participant(part)
+      assert row.display_name == "Alice W"
+
+      assert {"SetParticipantDisplayName", [conf.conf_id, -1, row.part_id, "Alice W", 0]} in TestStub.rpc_calls()
+    end
+
+    # The opt-out is explicit, and it is not the absence of the option. The leg then
+    # keeps the name `CreateParticipant` posed — the From URI — in front of its text
+    # turns, and shows no video banner.
+    test "`nil` means no name RPC at all", ctx do
+      from = %SIP.Uri{displayname: "Alice W", userpart: "alice", domain: "phone.example.com"}
+      {_conf, part} = join_with(ctx.uid, from, displayname: nil)
 
       {:ok, row} = Mcu.participant(part)
       assert row.display_name == nil

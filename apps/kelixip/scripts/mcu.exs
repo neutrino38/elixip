@@ -218,9 +218,10 @@ defmodule Kelix.Mcu.Call do
   # refusal — this composes the SIP reply for the error verdicts and returns the
   # updated context; the state code tests `sip_ctx.lasterr`.
   defp do_admit(sip_ctx, req, dialog_pid, domain) do
-    # `displayname: :auto` overlays the caller's name on its tile — the From
-    # header's display name, else the From URI's user part. Replace with a string
-    # (or drop the option) in a copy that wants its own naming policy.
+    # `displayname: :auto` names the caller on its video tile AND in front of each
+    # of its text turns — the From header's display name, else the From URI's user
+    # part. It is the default; written out here because a copy that wants its own
+    # naming policy replaces it with a string, or with `nil` for no name at all.
     sip_ctx = Kelix.Mod.Mcu.admit(sip_ctx, domain, req, displayname: :auto)
 
     case sip_ctx.lasterr do

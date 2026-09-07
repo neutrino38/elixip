@@ -391,12 +391,21 @@ defmodule Kelix.Mod.Mcu.Adapter.Conn do
   # All of it goes in **before** `StartReceiving`: the receive plane must be keyed
   # before it opens, or the first packets arrive on a session that cannot decrypt
   # them.
+  # ICE and DTLS cover every leg of the peer's `RTCPeerConnection`, the data
+  # channel included: its section is not RTP, but it shares the same ICE, the same
+  # DTLS and the same port. SDES does not — no SRTP key travels in a data channel.
+  #
+  # Filtering all three on `answerable?/2` alone left the data channel leg without
+  # OUR ice-pwd: the media server then answered its binding requests unsigned, the
+  # browser discarded every one of them, and no ClientHello ever came (call of
+  # 2026-09-07, 15 s of checks then give up). The WebSocket stays out: no ICE at all.
   defp setup_local_security(state, descs) do
-    answerable = Enum.filter(descs, &answerable?(&1, state.medias))
+    rtp = Enum.filter(descs, &answerable?(&1, state.medias))
+    keyed = rtp ++ Enum.filter(descs, &dc_answerable?(&1, state.medias))
 
-    with {:ok, state} <- setup_dtls(state, answerable),
-         {:ok, state} <- setup_ice(state, answerable) do
-      setup_sdes(state, answerable)
+    with {:ok, state} <- setup_dtls(state, keyed),
+         {:ok, state} <- setup_ice(state, keyed) do
+      setup_sdes(state, rtp)
     end
   end
 

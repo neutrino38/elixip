@@ -45,11 +45,19 @@ defmodule Kelix.Mod.McuWebrtcTest do
   # verdict guard was needed.
   @electron_offer File.read!(Path.expand("fixtures/SDP-webrtc-electron-offer.txt", __DIR__))
 
-  # What Chrome adds to that offer when the page also opens a data channel: a media
-  # type this MCU has nothing to answer with, carrying a mid of its own.
+  # What Chrome adds to that offer when the page also opens a data channel, carrying
+  # a mid of its own. ICE, fingerprint and setup are REPEATED here, with the same
+  # values as the offer's other sections: that is what a browser sends, and this
+  # section is a leg of the same `RTCPeerConnection`. Without them the fixture could
+  # not exercise the ICE path of a data channel leg at all — which is how the
+  # missing `SetLocalSTUNCredentials` of 2026-09-07 went unnoticed.
   @datachannel_section "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" <>
                          "c=IN IP4 0.0.0.0\r\n" <>
                          "a=mid:2\r\n" <>
+                         "a=ice-ufrag:mx0p\r\n" <>
+                         "a=ice-pwd:xstrY7K5+U2iAZlJGRPUzyq8\r\n" <>
+                         "a=fingerprint:sha-256 C6:8E:44:42:79:01:0C:E9:BF:75:AD:27:04:B8:D8:6B:CC:0B:13:F9:4C:8A:5F:4F:29:ED:C2:74:68:67:54:09\r\n" <>
+                         "a=setup:actpass\r\n" <>
                          "a=sctp-port:5000\r\n"
 
   # The fmtp a media server that arbitrated the offer returns for the payload types it
@@ -1092,6 +1100,17 @@ defmodule Kelix.Mod.McuWebrtcTest do
       assert Enum.any?(calls, &match?({"StartSending", [_, _, 2 | _]}, &1))
       # no codec on it, though: there is none to set
       refute Enum.any?(calls, &match?({"SetTextCodec", _}, &1))
+
+      # BOTH ICE passwords, on THIS media. The peer's alone is what the call of
+      # 2026-09-07 had: the server then answered the browser's binding requests
+      # without MESSAGE-INTEGRITY, the browser discarded every one of them, and no
+      # ClientHello ever came. This test listed the whole RPC sequence and asserted
+      # neither, which is why the suite stayed green through it.
+      assert {_, [42, 7, 2, _ufrag, _pwd, 0]} =
+               Enum.find(calls, &match?({"SetLocalSTUNCredentials", [_, _, 2 | _]}, &1))
+
+      assert {_, [42, 7, 2, _, _, 0]} =
+               Enum.find(calls, &match?({"SetRemoteSTUNCredentials", [_, _, 2 | _]}, &1))
     end
 
     @tag dc: :ok

@@ -493,12 +493,17 @@ defmodule Kelix.Mod.Mcu do
 
   Options:
 
-    * `:displayname` — overlay a name banner on this leg's tile
-      (`SetParticipantDisplayName`). Either the string to show, or `:auto`, which
-      takes the INVITE From header's display name and falls back to the From URI's
-      user part. Resolved here (only this call still holds the request), stored on
-      the row, and sent at `attach/1` time — the MCU-side participant does not
-      exist yet during admit. Anything else is `{:error, :bad_displayname}`.
+    * `:displayname` — the name this leg shows to the others. It drives TWO
+      renderings, both from the one `SetParticipantDisplayName` call: the banner
+      on its video tile, and the label the text mixer writes in front of each of
+      its turns (`[Alice W] bonjour`). **Defaults to `:auto`**, which takes the
+      INVITE From header's display name and falls back to the From URI's user
+      part — never the AOR, same rule as the message envelope (§20.5 G-9).
+      A literal string is sent as given; `nil` or `""` sends nothing at all, and
+      the text label then stays the From URI that `CreateParticipant` posed.
+      Resolved here (only this call still holds the request), stored on the row,
+      and sent at `attach/1` time — the MCU-side participant does not exist yet
+      during admit. Anything else is `{:error, :bad_displayname}`.
   """
   @spec admit(String.t(), map, keyword) ::
           {:ok, Conference.t(), Conference.participant()}
@@ -507,7 +512,7 @@ defmodule Kelix.Mod.Mcu do
   def admit(domain, req, opts \\ [])
 
   def admit(domain, req, opts) when is_binary(domain) and is_map(req) and is_list(opts) do
-    with {:ok, display_name} <- requested_displayname(Keyword.get(opts, :displayname), req) do
+    with {:ok, display_name} <- requested_displayname(Keyword.get(opts, :displayname, :auto), req) do
       Kelix.Module.safe_call(__MODULE__, {:admit, domain, req, display_name},
         timeout: @facade_timeout_ms
       )
@@ -630,12 +635,14 @@ defmodule Kelix.Mod.Mcu do
     end
   end
 
-  # The banner of admit/3's `:displayname` option, sent from the calling scenario
+  # The name of admit/3's `:displayname` option, sent from the calling scenario
   # like the rest of attach — the MCU-side participant exists from
   # `create_peer_connection/3` onwards, which `SetParticipantDisplayName` requires
-  # (MCU-API.md §6.5). Cosmetic by contract: a refusal (unsupported script, missing
-  # font — `mcu.log` has the detail) is logged and must not keep the leg out of the
-  # mix, so this always answers `:ok`.
+  # (MCU-API.md §6.5). One call, two renderings on the server: the video banner and
+  # the text mixer's turn label. Cosmetic by contract: a refusal (unsupported
+  # script, missing font — `mcu.log` has the detail) is logged and must not keep the
+  # leg out of the mix, so this always answers `:ok`. The text label survives such a
+  # refusal anyway: it falls back to the name `CreateParticipant` posed.
   defp set_display_name(%{display_name: name, part_id: part_id} = row)
        when is_binary(name) and is_integer(part_id) do
     result =
@@ -1970,8 +1977,8 @@ defmodule Kelix.Mod.Mcu do
     end
   end
 
-  # Resolve admit/3's `:displayname` option into what the banner will show — or nil
-  # for no banner at all, which is also what an empty string means (the RPC's
+  # Resolve admit/3's `:displayname` option into the name the others will see — or
+  # nil for no name at all, which is also what an empty string means (the RPC's
   # "clear" form has nothing to clear at admit time).
   defp requested_displayname(nil, _req), do: {:ok, nil}
   defp requested_displayname("", _req), do: {:ok, nil}
