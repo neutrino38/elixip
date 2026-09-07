@@ -401,6 +401,38 @@ defmodule Kelix.ControlTest do
       assert row.command == ""
     end
 
+    # kelescope's live monitor (docs/design/kelixip_liveview.md): a scenario
+    # appearing, changing state and ending must reach the subscriber as
+    # `{:kelix_monitor, {:upsert | :remove, _}}`, with no polling.
+    test "subscribe_monitor/1 returns the snapshot, then pushes appearance/state/removal" do
+      on_exit(fn -> Control.unsubscribe_monitor(self()) end)
+
+      assert snapshot = Control.subscribe_monitor(self())
+      assert is_list(snapshot)
+
+      pid = spawn_watched("sub.test")
+
+      # the instance shows up before its first FSM report (empty FSM columns)
+      assert_receive {:kelix_monitor, {:upsert, %{domain: "sub.test", id: id} = row}}, 1000
+      assert row.function == :registrar
+      assert row.pid == pid
+      assert row.state == ""
+
+      # …then the FSM row lands, joined onto the same id
+      assert_receive {:kelix_monitor, {:upsert, %{id: ^id, state: "initial_state"}}}, 1000
+
+      assert Control.shutdown_scenario(id) == :ok
+      assert_receive {:kelix_monitor, {:remove, ^id}}, 1000
+    end
+
+    test "unsubscribe_monitor/1 stops the pushes" do
+      Control.subscribe_monitor(self())
+      assert Control.unsubscribe_monitor(self()) == :ok
+
+      spawn_watched("unsub.test")
+      refute_receive {:kelix_monitor, _}, 200
+    end
+
     # Regression: `log-level debug` answered :ok while nothing showed up in the
     # console or elixip.log. Setting the primary level alone leaves every sink on
     # its own compiled-in level (console at :warning, the file backend at :info),

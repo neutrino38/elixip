@@ -23,3 +23,13 @@ default = fn fhs -> if config_env() == :prod, do: fhs, else: nil end
 config :kelixip,
   config_path: System.get_env("KELIXIP_CONFIG", default.("/etc/kelixip/config.toml")),
   domains_path: System.get_env("KELIXIP_DOMAINS", default.("/etc/kelixip/domains.toml"))
+
+# The release's log sinks are the ones `[log] target` names: stdout, which systemd
+# captures, plus syslog on demand. The umbrella config also adds a file backend for
+# the elixipp tool, whose path is *relative* (`elixip.log`, next to wherever the tool
+# was run from) — and the service's working directory is `/`, which it may not write.
+# In the release that sink could only ever fail to open, so it is not installed;
+# `[log] level` reaches the console sink either way (`Kelix.Config.set_level/1`).
+if config_env() == :prod do
+  config :logger, backends: [:console]
+end

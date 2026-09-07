@@ -56,6 +56,37 @@ packaging/build-in-container.sh --target ubuntu   # deb likewise
 > they all pass when run in isolation. The `:live` tests need outbound network.
 > So the meaningful bar is "green in isolation", not a perfect full-suite run.
 
+## Changing the version
+
+One version number, written in several places, and no place derives another. Change
+them in the same commit:
+
+- **the manifests** — `apps/*/mix.exs`, all four. `apps/kelixip/mix.exs` says it
+  **twice**: the project, and the `releases:` block;
+- **the User-Agent**, which tracks the version — `config/config.exs`'s `:useragent`
+  (`Elixipp-<version>`) and `Kelix.Config`'s `user_agent` default
+  (`Kelixip/<version>`), the latter asserted in `apps/kelixip/test/config_test.exs`
+  and quoted in `packaging/config/config.toml`;
+- **the packages** — `Version:` in `packaging/rpm/kelixip.spec` and
+  `packaging/rpm/elixipp.spec`, with `Release:` **back to 1** in both, plus a
+  `packaging/deb/changelog` entry at revision `-1`.
+
+`Release` counts the builds of ONE version. Back to 1 when the version changes, +1 for
+every rebuild that leaves this machine. Nothing computes it, and nothing checks it.
+
+That last rule is not bookkeeping. rpm identifies a package by its NEVRA, so `dnf
+install` of a package whose NEVRA is already installed answers "already installed" and
+keeps the OLDER payload — the node then runs code that `rpm -q` says it does not have.
+Release 6 of 1.5.2 was built twice with different payloads: the second install was a
+silent no-op, and a production MCU answered `m=application 0` to every WebRTC text
+offer because its controller predated the T.140 data channel. Found on 2026-09-06.
+`dnf reinstall` is what replaces a NEVRA in place; `install` and `upgrade` will not.
+
+`stage.sh` and `build-deb.sh` refuse to build when `rpm/kelixip.spec` or
+`deb/changelog` disagrees with `apps/kelixip/mix.exs`; `stage-elixipp.sh` does the same
+for `rpm/elixipp.spec` against `apps/elixipp/mix.exs`. Nothing else in this list is
+checked by anything.
+
 ## Architecture
 
 ### Umbrella layout (4 apps)
@@ -355,7 +386,7 @@ stop_player / stop_recorder / stop_echo
 
 Runtime config lives in `config/config.exs`:
 - Logger writes warnings to console and info+ to `elixip.log`
-- `:useragent` — the User-Agent header value (`"Elixipp-1.5.1"`)
+- `:useragent` — the User-Agent header value (`"Elixipp-1.5.2"`)
 - `:optionkeepaliveperiod` — OPTIONS keep-alive interval in seconds (15)
 
 ### Media server selection
@@ -420,3 +451,9 @@ helper). Anything else belongs in a module.
 
 - Interact with the developer in **French**
 - Write all code comments, commit messages, and documentation in **English**
+- **`docs/design/DESIGN-*.md` are English, and that is settled.** The IVèS house
+  rule puts documentation in French; these design documents are the exception,
+  ruled on 2026-08-22. They are one cross-referencing corpus written in English —
+  a French section inside `DESIGN-MCU.md` would read worse than either convention
+  applied whole, and the choice is not re-litigated per edit. Revising one of
+  them means writing English, whatever the surrounding conversation is in.

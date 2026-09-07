@@ -46,20 +46,68 @@ defmodule Kelix.Listener.SupervisorTest do
     port = free_port(:udp)
     start_supervised!({LSup, listen: [entry(:udp, port)]})
 
-    # the app env the UDP transport binds from was set from the entry
+    # the app env names the node's primary udp socket (preferred_family/0 reads it)
     assert Application.get_env(:elixip2, :udp_local_port) == port
-    # registered as "UDP" ⇒ SIP.Transport.Selector reuses this socket outbound
-    # instead of trying to bind the same port a second time
-    assert [{pid, _}] = Registry.lookup(Registry.SIPTransport, "UDP")
+
+    # registered under the name the selector looks up ⇒ an outbound datagram of
+    # that family reuses this socket instead of binding the same port again
+    name = SIP.Transport.Selector.unreliable_instance_name("UDP", :ipv4)
+    assert [{pid, _}] = Registry.lookup(Registry.SIPTransport, name)
     assert Process.alive?(pid)
   end
 
-  test "several udp entries: only the first is kept (one socket per node)" do
+  test "a udp entry per family: both are kept, on the same port" do
+    port = free_port(:udp)
+
+    pid =
+      start_supervised!(
+        {LSup, listen: [entry(:udp, port), entry(:udp, port, %{addr: "::1"})]}
+      )
+
+    assert [{:udp, "127.0.0.1", ^port}, {:udp, "::1", ^port}] =
+             Enum.map(Supervisor.which_children(pid), &elem(&1, 0)) |> Enum.sort()
+
+    for family <- [:ipv4, :ipv6] do
+      name = SIP.Transport.Selector.unreliable_instance_name("UDP", family)
+      assert [{p, _}] = Registry.lookup(Registry.SIPTransport, name), "no #{family} socket"
+      assert Process.alive?(p)
+    end
+  end
+
+  test "two udp entries of the SAME family: only the first is kept" do
     p1 = free_port(:udp)
     p2 = free_port(:udp)
     pid = start_supervised!({LSup, listen: [entry(:udp, p1), entry(:udp, p2)]})
 
     assert [{:udp, "127.0.0.1", ^p1}] = Enum.map(Supervisor.which_children(pid), &elem(&1, 0))
+  end
+
+
+  describe "an entry with no addr binds every family the host carries" do
+    # Host-dependent by nature, so the assertion is the RULE, not a fixed list:
+    # one child per family the host has an advertisable address of. On a v4-only
+    # host that is exactly one, and nothing changes from before step 4.
+    defp host_families do
+      Enum.filter([:ipv4, :ipv6], &(SIP.NetUtils.get_local_ips([&1]) != []))
+    end
+
+    test "one tcp child per family, each on the wildcard of its own family" do
+      port = free_port(:tcp)
+      pid = start_supervised!({LSup, listen: [entry(:tcp, port, %{addr: nil})]})
+
+      bound = Enum.map(LSup.status(pid), & &1.addr) |> Enum.sort()
+      expected = Enum.map(host_families(), &%{ipv4: "0.0.0.0", ipv6: "::"}[&1]) |> Enum.sort()
+
+      assert bound == expected
+      assert Enum.all?(Supervisor.which_children(pid), fn {_id, p, _, _} -> is_pid(p) end)
+    end
+
+    test "an explicit 0.0.0.0 stays IPv4 only — it is an IPv4 address" do
+      port = free_port(:tcp)
+      pid = start_supervised!({LSup, listen: [entry(:tcp, port, %{addr: "0.0.0.0"})]})
+
+      assert [%{addr: "0.0.0.0"}] = LSup.status(pid)
+    end
   end
 
   test "tls carries its own cert/key (per-listener certs, §3.1)" do

@@ -246,7 +246,7 @@ came in on (§18.2.2) without any lookup. This is also what makes replies to a
 
 | | Reliable | Reassembly | Listener | Notes |
 |---|---|---|---|---|
-| UDP | no | — | shared socket | binds every interface; `:udp_local_addr` only sets the IP advertised in Via/Contact; `:udp_local_port` (default 5060). A bind failure aborts the boot, so the log spells the posix reason out |
+| UDP | no | — | shared socket | binds `:udp_local_addr`, or every interface of the node's family when it is unset; `:udp_local_port` (default 5060). Opened straight through `:gen_udp` so the family and the address reach the socket. A bind failure aborts the boot, so the log spells the posix reason out |
 | TCP | yes | `Depack` | `TCPListener` | one process per connection |
 | TLS | yes | `Depack` | `TLSListener` | mirrors TCP; `:ssl` API, `:sslsocket` cases in the helpers; per-listener `:tls_certfile` / `:tls_keyfile` |
 | WSS | yes | none | `WSSListener` | TLS accept + WebSocket upgrade, then `Socket.Web.active/2` |
@@ -330,7 +330,8 @@ gone and `notify_transport_down/2` broadcasts it to the dialogs once, from
 | Key | Default | Effect |
 |---|---|---|
 | `:udp_local_port` | 5060 | UDP bind port |
-| `:udp_local_addr` | first local IPv4 | IP advertised in Via/Contact (does **not** restrict the bind) |
+| `:udp_local_addr` | first local address of the node's family | the address the socket binds AND the one advertised in Via/Contact |
+| `:udp_family` | `:ipv4` | the node's family when `:udp_local_addr` is unset. Read through `SIP.NetUtils.preferred_family/0`, which the resolver reads too |
 | `:tcp_max_connections` / `:tls_max_connections` / `:wss_max_connections` | 100 | accepted connections per listener |
 | `:tls_certfile` / `:tls_keyfile` | see `TLS_WSS.md` | listener certificate, overridable per listener |
 | `:sip_timer_T1` | 500 ms | base of timers B, F, H |

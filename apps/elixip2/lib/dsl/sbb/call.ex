@@ -30,7 +30,19 @@ defmodule SBB.Call do
   Through `args`, all optional but `:peer`:
 
     * `:peer` — where to send the INVITE, as `Kelix.Mod.Registrar.targets/2` and
-      the other providers return it: one target or a list to hunt serially;
+      the other providers return it: one target or a list to hunt serially. **With
+      a media server**, resolve it before connecting the media and pass what
+      `b2bua_resolved_peer/0` gives back:
+
+          b2bua_resolve(peer)
+          media_connect()
+          sbb_call(peer: b2bua_resolved_peer(), media: @media)
+
+      The block resolves an unresolved peer itself, so nothing breaks without
+      that; what is lost is the choice of a media server carrying an interface
+      the callee can reach, which only the resolved target names (step 5 of
+      `docs/design/multi-interface.md`). The order matters, not the verb: the
+      media server is chosen inside `media_connect/0`;
     * `:request` — the INVITE to forward, defaulting to `last_uas_req()`, which
       is what a UAS instance always has;
     * `:media` — passed through to `b2bua_forward/4` (`false` by default);
@@ -63,7 +75,8 @@ defmodule SBB.Call do
 
   @doc """
   Establish the outbound leg and relay it to the caller until the call is up or
-  over. Options are `sbb_fsm/2`'s; see the module doc for the `args` it reads.
+  over. Options are `sbb_fsm/2`'s, plus the block's own `args` named plainly at
+  the call site — `call(peer: peer)`; see the module doc for what it reads.
   """
   defmacro call(opts \\ []) do
     quote do
@@ -73,7 +86,8 @@ defmodule SBB.Call do
 
   @doc """
   Relay the established call until it ends, or until something interrupts it.
-  Options are `sbb_fsm/2`'s; see `SBB.Call.Bridge` for the `args` it reads.
+  Options are `sbb_fsm/2`'s, plus the block's own `args` named plainly at the
+  call site; see `SBB.Call.Bridge` for what it reads.
 
   A host that took the call back on `{:bridge, :interrupted, _}` re-enters with
   `bridge(resume: true)`: the call was never torn down, only the relay paused.
@@ -93,6 +107,8 @@ defmodule SBB.Call do
     use SIP.SBB
 
     @sbb_namespace :call
+
+    @sbb_args [:peer, :request, :media, :ring_timeout]
 
     @sbb_returns [
       connected: "the callee answered and the caller ACKed — %{}",
@@ -127,7 +143,14 @@ defmodule SBB.Call do
       req = sbb_data_get(:request) || last_uas_req()
       media = sbb_data_get(:media) || false
 
-      b2bua_forward(req, sbb_data_get(:peer), media)
+      # Idempotent: a peer the scenario already resolved is returned unchanged, so
+      # this costs nothing after the recommended order and covers the scenario
+      # that skipped it. It cannot recover the media server's choice, which was
+      # made in `media_connect/0` before this block ran — only the caller can put
+      # those two in the right order.
+      b2bua_resolve(sbb_data_get(:peer))
+
+      b2bua_forward(req, b2bua_resolved_peer(), media)
 
       cond do
         ctx_get(:lasterr) == :ok ->
@@ -334,6 +357,8 @@ defmodule SBB.Call do
     use SIP.SBB
 
     @sbb_namespace :bridge
+
+    @sbb_args [:media, :on_callee_hangup, :max_duration]
 
     @sbb_returns [
       caller_hung_up:

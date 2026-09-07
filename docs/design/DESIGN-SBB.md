@@ -6,8 +6,15 @@ context, dialogs and mailbox, and hands control back by posting one event.
 
 The user-facing reference is [FSL.md](../../FSL.md#service-building-blocks-sbb);
 what remains to build is [sbb_evolutions.md](sbb_evolutions.md). This document is
-the design of record — what the layer is, how the engine runs it, what a block
-must declare, and the two blocks that ship.
+the design of record for the layer — what it is, how the engine runs it, what a
+block must declare — and for the two blocks that live in `:elixip2`, `call()` and
+`bridge()`.
+
+A block owned by a kelixip module is designed with that module, not here (§7.4):
+`AuthDb.SBB.authenticate()` in [DESIGN-AUTH.md](DESIGN-AUTH.md#3-the-authentication-block),
+`Mcu.SBB.conference()` in [DESIGN-MCU.md](DESIGN-MCU.md#51-the-legs-life-in-the-mix-as-a-block).
+The catalogue of all four is in [sbb_evolutions.md](sbb_evolutions.md#3-the-rest-of-the-catalogue),
+next to what is still copied per script.
 
 ## 1. What the layer is for
 
@@ -309,6 +316,14 @@ An SBB's scratch space cannot collide, and its output is deliberate.
 `args:` at the call site seeds that sandbox, mirroring `spawn_fsm`'s `args:`
 which seeds the child's appdata.
 
+An SBB **declares the keys it reads** in `@sbb_args`, and a call site names them
+plainly next to `timeout:` and `resume:` — `authenticate(realm: "example.com")`,
+`call(peer: peer)` — which `run_sbb/3` folds into the sandbox. A key no SBB
+declares raises. Without that declaration the mechanism had no way to tell an
+`args` key from a typo, so an option written plainly was dropped in silence: an
+`authenticate(realm: …)` answered with a challenge for the served domain, which
+a client with credentials for another realm cannot use.
+
 **The sandbox is cleared on every call**, so an SBB entered twice starts twice
 from nothing — the serial hunt calling `call()` on target after target must not
 inherit the previous attempt's scratch. The exception is explicit:
@@ -502,9 +517,9 @@ Kelix.Mod.AuthDb.SBB.Authenticate     # the FSM behind authenticate/1
 
 One file per block (`lib/kelix/mod/auth_db/sbb/authenticate.ex`), so the file
 carries the name of the module it defines. A module publishing several blocks
-adds sub-modules, never a level: `Kelix.Mod.Registrar.SBB.Queue`,
-`Kelix.Mod.Mcu.SBB.Admit`. This is `SBB.Call.Establish` and `SBB.Call.Bridge`
-applied outside `:elixip2`, not a second convention.
+adds sub-modules, never a level: `Kelix.Mod.Mcu.SBB.Conference`,
+`Kelix.Mod.Registrar.SBB.Queue`. This is `SBB.Call.Establish` and
+`SBB.Call.Bridge` applied outside `:elixip2`, not a second convention.
 
 **The leaf is the verb, and never `Impl`.** A generic leaf costs more than it
 looks: `use SIP.SBB` derives `@sbb_namespace` from the last name segment, so an

@@ -30,11 +30,46 @@ defmodule Kelix.Mod.Mcu.XmlRpc do
 
   @mcu_path "/mcu"
   @default_timeout_ms 10_000
+  # A profile of our own rather than httpc's default one, because the family
+  # option below is set per profile and would otherwise be a node-wide change
+  # made from inside a loadable module.
+  @httpc_profile :kelix_mcu_rpc
 
   @type result :: {:ok, [term()]} | {:error, term()}
 
   @doc """
-  Invoke an MCU method. `base_url` is e.g. `"http://10.0.0.12:8080"`.
+  The options every MCU `:httpc` profile carries — this one and the event
+  queue's long-poll profile.
+
+  `ipfamily` is the reason this is stated once. It defaults to `:inet`, so a
+  `base_url` naming an IPv6 literal fails on `{:failed_connect, …, :nxdomain}`
+  before a single byte leaves the node: httpc hands the bracketed host to
+  `:gen_tcp.connect/3` with an IPv4-only family. `:inet6fb4` tries IPv6 then
+  falls back to IPv4, which serves an address literal of either family and a
+  hostname that resolves to both (measured).
+
+  The mediaserver's control interface listens on one dual-family socket
+  (`mcu/src/xmlrpcserver.cpp`), so what remains to be chosen is on this side.
+  """
+  @spec profile_options() :: keyword()
+  def profile_options(), do: [max_sessions: 100, ipfamily: :inet6fb4]
+
+  @doc """
+  Start this module's `:httpc` profile, or re-apply its options if it is up.
+
+  Called by `Kelix.Mod.Mcu.Client` before its first RPC: a profile that is not
+  started makes `:httpc.request/5` exit.
+  """
+  @spec ensure_profile() :: :ok
+  def ensure_profile() do
+    :inets.start(:httpc, [{:profile, @httpc_profile}])
+    :httpc.set_options(profile_options(), @httpc_profile)
+  end
+
+  @doc """
+  Invoke an MCU method. `base_url` is e.g. `"http://10.0.0.12:8080"`, or
+  `"http://[fd00::12]:8080"` for a server reached over IPv6 — an address literal
+  goes in brackets, as any HTTP URL (RFC 3986 §3.2.2).
 
   Parameters are positional and must follow the order documented in §3.2-3.5.
   Maps encode as XML-RPC structs (`rtpMap`, `SetRTPProperties` props).
@@ -48,7 +83,13 @@ defmodule Kelix.Mod.Mcu.XmlRpc do
     url = String.to_charlist(base_url <> @mcu_path)
     http_opts = [timeout: timeout, connect_timeout: timeout]
 
-    case :httpc.request(:post, {url, [], ~c"text/xml", body}, http_opts, body_format: :binary) do
+    case :httpc.request(
+           :post,
+           {url, [], ~c"text/xml", body},
+           http_opts,
+           [body_format: :binary],
+           @httpc_profile
+         ) do
       {:ok, {{_, 200, _}, _headers, resp_body}} ->
         decode_envelope(resp_body, method)
 

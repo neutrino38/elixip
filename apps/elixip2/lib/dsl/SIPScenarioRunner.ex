@@ -587,6 +587,8 @@ defmodule SIP.Scenario.Runner do
       raise "Service building block #{inspect(module)} must declare an initial_state"
     end
 
+    opts = normalize_sbb_opts(module, opts)
+
     # The host's position is restored on return: the block moves through states of
     # its own, and `goto back` inside it must not be able to land in a host state.
     host_state = ctx.currentstate
@@ -732,6 +734,36 @@ defmodule SIP.Scenario.Runner do
 
         Logger.error(reason)
         throw({:sbb_terminal, :failure, reason, nil, ctx})
+    end
+  end
+
+  # Options the mechanism owns. Anything else at the call site names one of the
+  # block's own `args`, which is how a script writes them — `authenticate(realm:
+  # "example.com")` rather than `args: %{realm: "example.com"}`. A key the block
+  # does not declare in `@sbb_args` raises here: it used to become a sandbox
+  # entry nobody read, so a realm passed to the auth block was answered with the
+  # served domain and the mistake showed up as a challenge on the wire.
+  @sbb_control_opts [:args, :timeout, :resume]
+
+  defp normalize_sbb_opts(module, opts) do
+    {control, named} = Keyword.split(opts, @sbb_control_opts)
+
+    case Keyword.keys(named) -- module.__sbb_args__() do
+      [] ->
+        args = Map.merge(Keyword.get(control, :args, %{}), Map.new(named))
+        Keyword.put(control, :args, args)
+
+      unknown ->
+        declared =
+          case module.__sbb_args__() do
+            [] -> "no args of its own"
+            args -> Enum.map_join(args, ", ", &inspect/1)
+          end
+
+        raise ArgumentError,
+              "#{inspect(module)} takes no #{Enum.map_join(unknown, ", ", &inspect/1)} " <>
+                "at the call site: it reads #{declared}, besides " <>
+                "#{Enum.map_join(@sbb_control_opts, ", ", &inspect/1)}."
     end
   end
 

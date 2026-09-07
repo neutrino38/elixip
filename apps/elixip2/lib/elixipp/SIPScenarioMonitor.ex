@@ -16,6 +16,14 @@ defmodule SIP.Scenario.Monitor do
 
   Designed to hold several concurrent calls — today a single instance, tomorrow
   the SIPP-like parallel mode.
+
+  A pid can also `subscribe/1` to be told of changes as they happen instead of
+  polling `calls/0` — `{:sip_scenario_monitor, {:updated, slot, row}}` after
+  every reported change, `{:sip_scenario_monitor, {:cleared, slot}}` when a slot
+  (and any sub-FSM children) is cleared. On the model of
+  `Kelix.Mod.Registrar.subscribe_register_event/2`; `Kelix.InstancePool` is the
+  one subscriber today, joining these with its own rows for
+  `Kelix.Control.subscribe_monitor/1`.
   """
   use GenServer
 
@@ -211,10 +219,29 @@ defmodule SIP.Scenario.Monitor do
     :ok
   end
 
+  @doc "Subscribe `pid` to call changes (see the moduledoc for the message shapes)."
+  @spec subscribe(pid()) :: :ok
+  def subscribe(pid), do: GenServer.call(__MODULE__, {:subscribe, pid})
+
+  @spec unsubscribe(pid()) :: :ok
+  def unsubscribe(pid), do: GenServer.call(__MODULE__, {:unsubscribe, pid})
+
   # ── Server ──────────────────────────────────────────────────────────────────
 
   @impl true
-  def init(:ok), do: {:ok, %{calls: %{}, seq: 0}}
+  def init(:ok), do: {:ok, %{calls: %{}, seq: 0, subs: MapSet.new()}}
+
+  @impl true
+  def handle_call({:subscribe, pid}, _from, st),
+    do: {:reply, :ok, %{st | subs: MapSet.put(st.subs, pid)}}
+
+  def handle_call({:unsubscribe, pid}, _from, st),
+    do: {:reply, :ok, %{st | subs: MapSet.delete(st.subs, pid)}}
+
+  def handle_call(:calls, _from, st) do
+    rows = st.calls |> Map.values() |> Enum.sort_by(& &1.idx) |> Enum.map(&row/1)
+    {:reply, rows, st}
+  end
 
   @impl true
   def handle_cast({:report, call_id, scenario, username, state, event, event_type}, st) do
@@ -246,6 +273,7 @@ defmodule SIP.Scenario.Monitor do
       |> Enum.reject(fn {call_id, _entry} -> root_slot(call_id) == slot_id end)
       |> Map.new()
 
+    notify(st, {:cleared, slot_id})
     {:noreply, %{st | calls: calls}}
   end
 
@@ -264,31 +292,24 @@ defmodule SIP.Scenario.Monitor do
     update(st, call_id, %{command: command, command_type: type})
   end
 
-  @impl true
-  def handle_call(:calls, _from, st) do
-    rows =
-      st.calls
-      |> Map.values()
-      |> Enum.sort_by(& &1.idx)
-      |> Enum.map(fn entry ->
-        entry
-        |> Map.take([
-          :scenario,
-          :account,
-          :command,
-          :command_type,
-          :state,
-          :event,
-          :event_type,
-          :medias,
-          :mediaserver,
-          :outbound
-        ])
-        |> Map.put(:depth, length(entry.idx) - 1)
-        |> Map.put(:slot, entry.slot)
-      end)
-
-    {:reply, rows, st}
+  # The public shape of one entry (see `calls/0`): the display columns plus
+  # `:depth` (tree nesting) and `:slot` (the key it was reported under).
+  defp row(entry) do
+    entry
+    |> Map.take([
+      :scenario,
+      :account,
+      :command,
+      :command_type,
+      :state,
+      :event,
+      :event_type,
+      :medias,
+      :mediaserver,
+      :outbound
+    ])
+    |> Map.put(:depth, length(entry.idx) - 1)
+    |> Map.put(:slot, entry.slot)
   end
 
   # Merge `fields` into the entry for `call_id`, creating it (with a monotonic
@@ -304,7 +325,14 @@ defmodule SIP.Scenario.Monitor do
       end
 
     entry = Map.merge(base, fields)
-    {:noreply, %{st | calls: Map.put(st.calls, call_id, entry), seq: seq}}
+    st = %{st | calls: Map.put(st.calls, call_id, entry), seq: seq}
+    notify(st, {:updated, call_id, row(entry)})
+    {:noreply, st}
+  end
+
+  defp notify(st, msg) do
+    for pid <- st.subs, do: send(pid, {:sip_scenario_monitor, msg})
+    :ok
   end
 
   # Display index of a new entry, as a path so rows sort in tree order: a CLI

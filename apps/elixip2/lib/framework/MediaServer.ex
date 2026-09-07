@@ -61,6 +61,62 @@ defmodule MediaServer do
             "(expected :audio | :video | :text | :audio_video | :tc, or a list of these)"
   end
 
+  @doc """
+  The media server's addressing profile for a family and a side of the network:
+  `"publicv4"`, `"publicv6"`, `"internalv4"`, `"internalv6"`.
+
+  The server carries up to four addresses and names them exactly this way
+  (`xmlrpc_jsr309_api.md` §6.7 bis): a family crossed with a side. Written **once**
+  here rather than in each adapter and again in whatever selects a server — three
+  copies of a four-entry table is how the codec list went wrong.
+
+  A side of `nil` reads as public: it is the side of a node that has not been told
+  it has two.
+  """
+  @spec profile_name(:ipv4 | :ipv6, :internal | :public | nil) :: String.t()
+  def profile_name(:ipv6, :internal), do: "internalv6"
+  def profile_name(:ipv4, :internal), do: "internalv4"
+  def profile_name(:ipv6, _side), do: "publicv6"
+  def profile_name(:ipv4, _side), do: "publicv4"
+
+  @doc """
+  The addressing profile a leg we ANSWER asks for, from its connection options,
+  or `nil` when they say nothing about where it is.
+
+  The two halves come from two different places, and neither is configured:
+
+    * the **family** from `local_ip`, the address of ours this peer reached. That
+      is a routing truth — of the addresses this node holds, it is one the peer
+      demonstrably has a route to.
+    * the **side** from `peer_ip`, the address the peer sent FROM, classified
+      against this node's internal networks. `local_ip` cannot answer it: behind a
+      1:1 NAT one interface has two faces, the NAT rewrites the destination, and
+      an inside peer and an outside peer arrive on the same private address. Our
+      own address then discriminates nothing.
+
+  Without `peer_ip` — a leg we placed, a transport that reported no peer — the
+  side falls back to `local_ip`'s, which is what it was before a peer address was
+  carried at all.
+
+  Written once here because three callers need it: the two adapters and whatever
+  constrains a media server pool.
+  """
+  @spec leg_profile_name(keyword()) :: String.t() | nil
+  def leg_profile_name(opts) do
+    local_ip = Keyword.get(opts, :local_ip)
+
+    case address_family_of(local_ip) do
+      nil ->
+        nil
+
+      family ->
+        side_source = Keyword.get(opts, :peer_ip) || local_ip
+        profile_name(family, SIP.NetUtils.net_side(side_source))
+    end
+  end
+
+  defp address_family_of(ip), do: SIP.NetUtils.address_family(ip)
+
   @typedoc """
   Asynchronous events delivered to the `event_sink` pid as `{:ms_event, ref, event}`.
 
@@ -207,13 +263,52 @@ defmodule MediaServer do
           # encryption or ICE — and `:avp` (the default) plain RTP. Ignored when
           # `webrtc_support: :yes`, which already implies SAVPF.
           rtp_profile: :avp | :avpf,
+          # Which transport the TEXT medium is OFFERED on, when we make the offer
+          # (docs/design/DESIGN-FRAMEWORK.md §6.5, and the media server's
+          # docs/conception/T140-DC/SPEC.md):
+          #
+          #  * `:data_channel` — `m=application … UDP/DTLS/SCTP webrtc-datachannel`
+          #    (RFC 8865), inside our own DTLS and ICE. **The default on a WebRTC
+          #    leg**, and the only thing a browser can receive: `RTCPeerConnection`
+          #    has no `m=text` on an RTP profile;
+          #  * `:rtp` — `m=text` with T.140 and the RFC 4103 redundancy. The
+          #    default off WebRTC, and what a SIP Total Conversation endpoint
+          #    speaks. Asking for a data channel there is logged and falls back
+          #    here: a data channel needs DTLS.
+          #
+          # A WebSocket is never offered — it is a door we open when a peer asks
+          # for one. Nothing to set for that case, and this option does not name it.
+          text_transport: :data_channel | :rtp,
           # let the media server follow a symmetric NAT's mapping instead of the
           # send address the peer signalled. `:auto` (the default) leaves it to the
           # adapter, which asks for it on every leg that is not ICE — a NATed peer
           # hands us its private address in an ANSWER just as readily as in an
           # offer, and under ICE the address is settled by connectivity checks
           # instead. Adapters that cannot latch ignore it.
-          nat_latch: boolean() | :auto
+          nat_latch: boolean() | :auto,
+          # The address of OURS this peer reached, set by the framework on a leg we
+          # ANSWER (`SIP.Session.Media`, from the transport the request arrived on) —
+          # the same address this leg's Contact carries. An adapter that must place
+          # media on one of several interfaces reads it; the others ignore it. Absent
+          # on an outbound leg, which has no transport when it is created.
+          local_ip: :inet.ip_address(),
+          # The source address the inbound request came FROM, set by the framework
+          # on a leg we ANSWER. It is what says which SIDE of the network this peer
+          # sits on — `local_ip` cannot, because behind a 1:1 NAT one interface has
+          # two faces and both an inside and an outside peer arrive on the same
+          # private address. Absent on an outbound leg, whose side comes from its
+          # target instead (`address_profile:` below).
+          peer_ip: :inet.ip_address(),
+          # The media server's addressing profile this leg's media must be placed
+          # on — `MediaServer.profile_name/2`'s output. Set by the framework on a
+          # leg we PLACE, where `local_ip` says nothing: we have no address the
+          # callee reached, only the address we are about to reach it at, and it is
+          # the callee's interface that decides which of ours the media leaves by.
+          #
+          # An adapter that reads it prefers it over anything it could derive.
+          # Absent, and the leg derives what it can — which for an outbound leg is
+          # nothing, so the media server applies its own default.
+          address_profile: String.t()
         ]
 
   @type player_opts :: [

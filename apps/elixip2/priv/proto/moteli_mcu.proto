@@ -343,8 +343,17 @@ message StopSendingReq {
   MediaRole role = 4;
 }
 
-// Text-over-WebSocket leg (media = MEDIA_TEXT, proto = PROTO_WS only).
-// Replaces StartReceiving/StartSending/SetTextCodec for that leg.
+// Switch a participant's text plane off RTP (media = MEDIA_TEXT).
+//
+// PROTO_WS: a WebSocket beside the call. `token` guards the URL the server
+// returns, and this call replaces StartReceiving/StartSending/SetTextCodec for
+// that leg entirely.
+//
+// PROTO_SCTP: a WebRTC data channel INSIDE the caller's RTCPeerConnection
+// (RFC 8865). No token — there is no URL to sign — and the answer is just the
+// protocol name: the leg keeps its port, its ICE and its DTLS, so it is
+// configured like an RTP one (StartReceiving, StartSending, the crypto calls).
+// The parameters to publish come from SetupParticipantDataChannel.
 message ConfigureParticipantMediaConnectionReq {
   uint32 conf_id = 1;
   uint32 part_id = 2;
@@ -352,7 +361,29 @@ message ConfigureParticipantMediaConnectionReq {
   MediaProtocol proto = 4;
   string token = 5;
 }
-// -> StringResp (ws:// or wss:// URL — scheme chosen by the server)
+// -> StringResp (ws:// or wss:// URL for PROTO_WS, "sctp" for PROTO_SCTP)
+
+// The SCTP parameters of a participant's data channel text leg. The controller
+// sends the PEER's a=sctp-port and gets ours back, which it publishes in its
+// answer: what the server knows of itself is the server's to tell.
+//
+// Call it AFTER ConfigureParticipantMediaConnection with PROTO_SCTP.
+message SetupParticipantDataChannelReq {
+  uint32 conf_id = 1;
+  uint32 part_id = 2;
+  MediaType media = 3;
+  // the peer's own a=sctp-port; 0 means the RFC 8841 default (5000)
+  uint32 remote_sctp_port = 4;
+}
+
+message SetupDataChannelResp {
+  // our a=sctp-port and a=max-message-size, to publish in the answer
+  uint32 sctp_port = 1;
+  uint32 max_message_size = 2;
+  // the SCTP stream the t140 channel took, or -1 while it is not open. Only
+  // useful to a controller that emits a=dcmap (RFC 8864).
+  int32 stream_id = 3;
+}
 
 // --- Security ------------------------------------------------------------------
 

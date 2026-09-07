@@ -190,9 +190,48 @@ stays in the path and decides *per packet*, forwarding untouched while the legs
 agree, which is what lets it follow a peer that switches codec mid-stream.
 `:forbid` is the only policy that gets a direct attachment.
 
+`transcode:` is the only lever that can fail a media. Two others steer which
+codec is used without ever failing anything, and **each one belongs on a named
+line of the tuple** — they are not interchangeable:
+
+- **`video_codec:` / `audio_codec:` / `text_codec:` are active on `outbound:`.**
+  That is the leg we OFFER on, and there the list is a **hard bound**: nothing
+  outside it is ever offered to the callee, whatever `transcode:` then does to
+  the order.
+
+  ```
+  outbound: [video_codec: ["H264"]]  ->  m=video 22002 RTP/AVP 99
+  outbound: []           (default)   ->  m=video 22002 RTP/AVP 110 99 107
+  ```
+
+  The callee cannot pick AV1 or VP8: it never saw them. The same list is then
+  what we read the callee's answer against.
+
+- **`prefer_codecs:` is active on `inbound:`.** That is the leg we ANSWER on,
+  and there we may only reorder: `prefer_codecs: [video: ["H264"]]` moves H.264
+  to the head of the answer the caller reads, which is what a well-behaved
+  caller then sends.
+
+```elixir
+@media {:mediaserver,
+        inbound:  [webrtc: :if_offered, media: :tc,
+                   prefer_codecs: [video: ["H264"]]],
+        outbound: [webrtc: :no, media: :tc,
+                   video_codec: ["H264"]],
+        transcode: [audio: :avoid, video: :avoid]}
+```
+
+Misplacing one is silent: neither warns. `video_codec:` on `inbound:` does
+nothing — where the caller offers and we answer, the offer is the menu and the
+media server arbitrates. So a scenario that must be *sure* of the codec on the
+**inbound** leg has only `transcode: [video: :forbid]`; on the **outbound** leg,
+`video_codec:` is that certainty.
+
 **👉 The full rules, the use cases and the RFC index are in
-[CODEC-NEGOTIATION.md](CODEC-NEGOTIATION.md)** — including WebRTC gateways,
-real-time text, and what happens when a media is added or withdrawn mid-call.
+[CODEC-NEGOTIATION.md](CODEC-NEGOTIATION.md)** — including
+[what a scenario may state](CODEC-NEGOTIATION.md#8-a-scenario-states-a-preference-not-a-capability),
+WebRTC gateways, real-time text, and what happens when a media is added or
+withdrawn mid-call.
 
 The bridge is **automatic**: `b2bua_forward_reply/1` builds it when it relays the
 `2xx`, the first moment both SDPs are known.

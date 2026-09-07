@@ -42,10 +42,6 @@ defmodule B2BUA.WebrtcGw do
       {:INVITE, req, _trans, _dlg} ->
         b2bua_reply(req, 100, "Trying")
 
-        # The media server first: without one there is nothing to answer the
-        # browser with, and the outbound INVITE has no body to carry.
-        media_connect()
-
         peer = %SIP.B2bua.Peer{
           uris: [req.ruri],
           # keep what the proxy asked for; only route it back to the proxy
@@ -57,7 +53,16 @@ defmodule B2BUA.WebrtcGw do
           profile: ctx_get(:profile)
         }
 
-        b2bua_forward(req, peer, @media)
+        # Where the call goes, before which media server carries it: the outbound
+        # leg's media has to leave by an interface the callee can reach, and only
+        # the resolved target says which that is.
+        b2bua_resolve(peer)
+
+        # Then the media server: without one there is nothing to answer the
+        # browser with, and the outbound INVITE has no body to carry.
+        media_connect()
+
+        b2bua_forward(req, b2bua_resolved_peer(), @media)
 
         cond do
           ctx_get(:lasterr) == :ok ->

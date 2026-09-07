@@ -37,6 +37,7 @@ defmodule Kelix.MediaPool do
   `:up` hint only earns a probe.
   """
   use GenServer
+  require Logger
 
   # The probe is a real connection (event queue + event poller) opened and closed
   # again on every cycle, so keep it rare on a server that answers: 30 s.
@@ -58,7 +59,9 @@ defmodule Kelix.MediaPool do
           module: atom,
           url: String.t(),
           enabled: boolean,
-          healthy: boolean
+          healthy: boolean,
+          profiles: %{String.t() => map} | :unknown,
+          server_status: map | :unknown
         }
   @type choice :: %{name: String.t(), module: atom, url: String.t()}
 
@@ -68,16 +71,39 @@ defmodule Kelix.MediaPool do
   def start_link(opts \\ []),
     do: GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
 
-  @doc "Pick the next enabled + healthy MCU (round-robin). `{:ok, choice}` / `{:error, :no_mcu}`."
-  @spec checkout(GenServer.server()) :: {:ok, choice} | {:error, :no_mcu}
-  def checkout(server \\ __MODULE__), do: GenServer.call(server, :checkout)
+  @doc """
+  Pick the next enabled + healthy MCU (round-robin).
+  `{:ok, choice}` / `{:error, :no_mcu}`.
+
+  `profiles` narrows it to servers carrying **every** addressing profile the call
+  needs, as `{family, side}` pairs — one per leg, so often two, and a media
+  session lives on one server. No eligible entry fails the call rather than
+  falling back on another profile: a fallback would put the media on the wrong
+  interface with nothing to say so.
+
+  An entry whose profiles are unknown satisfies no constraint. It stays eligible
+  to the calls that ask for none, which is every call on a node that was never
+  told it has two sides.
+  """
+  @spec checkout(GenServer.server(), [{:ipv4 | :ipv6, :internal | :public}]) ::
+          {:ok, choice} | {:error, :no_mcu}
+  def checkout(server \\ __MODULE__, profiles \\ []),
+    do: GenServer.call(server, {:checkout, profiles})
 
   @doc "Enable/disable a pool entry at runtime (no restart). `:ok` / `{:error, :unknown}`."
   @spec toggle(String.t(), boolean, GenServer.server()) :: :ok | {:error, :unknown}
   def toggle(name, on?, server \\ __MODULE__) when is_boolean(on?),
     do: GenServer.call(server, {:toggle, name, on?})
 
-  @doc "Pool state for status/CLI: one map per entry (name/module/url/enabled/healthy)."
+  @doc """
+  Pool state for status/CLI: one map per entry
+  (name/module/url/enabled/healthy/profiles/server_status).
+
+  `server_status` is what the media server answered about itself on its
+  `/status/general` endpoint — version, real codec capabilities, encryption,
+  addressing, load — or `:unknown` on a server that does not describe itself.
+  Read on the same probe cycle as `profiles`, so it ages the same way.
+  """
   @spec status(GenServer.server()) :: [entry]
   def status(server \\ __MODULE__), do: GenServer.call(server, :status)
 
@@ -139,17 +165,28 @@ defmodule Kelix.MediaPool do
   end
 
   @impl true
-  def handle_call(:checkout, _from, %{entries: entries} = state) do
+  def handle_call({:checkout, profiles}, _from, %{entries: entries} = state) do
     n = length(entries)
+    required = Enum.map(profiles, fn {family, side} -> MediaServer.profile_name(family, side) end)
 
     with true <- n > 0,
-         idx when is_integer(idx) <- next_index(entries, state.cursor, n) do
+         idx when is_integer(idx) <- next_index(entries, state.cursor, n, required) do
       e = Enum.at(entries, idx)
 
       {:reply, {:ok, %{name: e.name, module: e.module, url: e.url}},
        %{state | cursor: rem(idx + 1, n)}}
     else
-      _ -> {:reply, {:error, :no_mcu}, state}
+      _ ->
+        if required != [] do
+          Logger.warning(
+            module: __MODULE__,
+            message:
+              "no media server carries #{Enum.join(required, " + ")}: this call needs " <>
+                "an interface none of them announces"
+          )
+        end
+
+        {:reply, {:error, :no_mcu}, state}
     end
   end
 
@@ -197,11 +234,7 @@ defmodule Kelix.MediaPool do
   # whole path exists to prevent.
   def handle_cast({:health_results, seq, results}, state) do
     entries =
-      Enum.map(state.entries, fn e ->
-        if Map.get(state.hinted_seq, e.name, 0) <= seq,
-          do: %{e | healthy: Map.get(results, e.name, e.healthy)},
-          else: e
-      end)
+      absorb(state.entries, results, &(Map.get(state.hinted_seq, &1.name, 0) <= seq))
 
     {:noreply, %{state | entries: entries}}
   end
@@ -209,12 +242,23 @@ defmodule Kelix.MediaPool do
   # ── selection ────────────────────────────────────────────────────────────────
 
   # first serviceable (enabled + healthy) index scanning from the cursor, or nil
-  defp next_index(entries, cursor, n) do
+  defp next_index(entries, cursor, n, required) do
     Enum.find(for(i <- 0..(n - 1), do: rem(cursor + i, n)), fn i ->
       e = Enum.at(entries, i)
-      e.enabled and e.healthy
+      e.enabled and e.healthy and carries?(e, required)
     end)
   end
+
+  # Every required profile, available on that server. An entry whose profiles are
+  # unknown carries nothing as far as anyone can tell — so it satisfies no
+  # constraint, and asking it for one would fail at the leg's first
+  # StartReceiving instead of here.
+  defp carries?(_entry, []), do: true
+
+  defp carries?(%{profiles: profiles}, required) when is_map(profiles),
+    do: Enum.all?(required, &(get_in(profiles, [&1, :available]) == true))
+
+  defp carries?(_entry, _required), do: false
 
   defp set_enabled(entries, name, on?),
     do: Enum.map(entries, fn e -> if e.name == name, do: %{e | enabled: on?}, else: e end)
@@ -287,28 +331,91 @@ defmodule Kelix.MediaPool do
 
   defp now_ms(), do: System.monotonic_time(:millisecond)
 
-  defp probe_all(entries, probe),
-    do: Enum.map(entries, fn e -> %{e | healthy: probe.(e)} end)
+  defp probe_all(entries, probe), do: absorb(entries, health_map(entries, probe))
 
+  # Raw probe answers, NORMALIZED once, keyed by entry name. Both the synchronous
+  # refresh and the periodic cast go through here, and that is the point: the
+  # periodic path used to store the probe's raw return straight into `healthy`, so
+  # with the default probe (which answers a tuple) a *dead* server was recorded as
+  # `{false, :unknown}` — truthy — and stayed in the rotation, while `interval_for`
+  # had no clause for a tuple at all. One normalization, one absorber, both paths.
   defp health_map(entries, probe),
-    do: Map.new(entries, fn e -> {e.name, probe.(e)} end)
+    do: Map.new(entries, fn e -> {e.name, probe_result(probe.(e))} end)
+
+  # A probe answers health. The default one also brings back what the server said
+  # about ITSELF while it had the connection open, since it opens one anyway; an
+  # injected probe (the tests, and anything that only means up/down) keeps
+  # answering a plain boolean.
+  defp probe_result(healthy) when is_boolean(healthy), do: {healthy, :unknown, :unknown}
+
+  defp probe_result({healthy, profiles}) when is_boolean(healthy),
+    do: {healthy, profiles, :unknown}
+
+  defp probe_result({healthy, profiles, status}) when is_boolean(healthy),
+    do: {healthy, profiles, status}
+
+  # Fold normalized facts into the entries. `accept?` filters per entry, which is
+  # how the periodic cast drops results overtaken by a hint (see handle_cast).
+  # An entry with no result, or a refused one, is left exactly as it was.
+  defp absorb(entries, results, accept? \\ fn _e -> true end) do
+    Enum.map(entries, fn e ->
+      case {accept?.(e), Map.fetch(results, e.name)} do
+        {true, {:ok, {healthy, profiles, status}}} ->
+          %{
+            e
+            | healthy: healthy,
+              profiles: keep_known(profiles, e.profiles),
+              server_status: keep_known(status, e.server_status)
+          }
+
+        _ ->
+          e
+      end
+    end)
+  end
+
+  # A probe that could not ask does not erase what the last one learnt: an
+  # unreachable media server is unhealthy, not suddenly address-less or
+  # version-less.
+  defp keep_known(:unknown, previous), do: previous
+  defp keep_known(fact, _previous), do: fact
 
   # default probe: connect then immediately disconnect (design §9 — reuse connect/1).
+  #
+  # The addressing profiles come back with it, so the pool re-reads them every
+  # cycle: a media server restarted with other addresses (a new `--internal-ip`, an
+  # added v6) describes itself, and nothing on this side has to be told
+  # (docs/design/multi-interface.md, step 5).
   defp default_probe(%{module: module, url: url}) do
     mod = resolve_module_atom(module)
 
     case probe_connect(mod, url) do
       {:ok, pid} ->
+        facts = {true, read_fact(mod, pid, :network_profiles), read_fact(mod, pid, :server_status)}
         try_disconnect(mod, pid)
-        true
+        facts
 
       _ ->
-        false
+        {false, :unknown, :unknown}
     end
   rescue
-    _ -> false
+    _ -> {false, :unknown, :unknown}
   catch
-    _, _ -> false
+    _, _ -> {false, :unknown, :unknown}
+  end
+
+  # Only an adapter that knows the call answers it; the mockup and any older one
+  # simply have nothing to say. Same shape for the addressing profiles
+  # (`GetNetworkProfiles`) and for the server's self-description
+  # (`GET /status/general`): asked, never configured.
+  defp read_fact(mod, pid, fun) do
+    if Code.ensure_loaded?(mod) and function_exported?(mod, fun, 1),
+      do: apply(mod, fun, [pid]),
+      else: :unknown
+  rescue
+    _ -> :unknown
+  catch
+    _, _ -> :unknown
   end
 
   # Tell the adapter this connection is only a keepalive probe, so it can log its
@@ -335,9 +442,18 @@ defmodule Kelix.MediaPool do
   end
 
   # The decoded entries carry no health: add it here, optimistic until the first
-  # probe lands, so a boot cannot start by refusing every call.
-  defp health_fields(entries) when is_list(entries),
-    do: Enum.map(entries, &Map.put(&1, :healthy, true))
+  # probe lands, so a boot cannot start by refusing every call. Profiles and the
+  # server's self-description start `:unknown` for the same reason — nothing has
+  # asked yet, and claiming otherwise would be inventing facts.
+  defp health_fields(entries) when is_list(entries) do
+    Enum.map(
+      entries,
+      &(&1
+        |> Map.put(:healthy, true)
+        |> Map.put(:profiles, :unknown)
+        |> Map.put(:server_status, :unknown))
+    )
+  end
 
   defp health_fields(_), do: []
 

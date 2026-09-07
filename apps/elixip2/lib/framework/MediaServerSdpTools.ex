@@ -48,6 +48,9 @@ defmodule MediaServer.SdpTools do
   @doc "Rank a payload type against the offer's format list (its preference order)."
   defdelegate pt_rank(pt, fmt_order), to: Sdp
 
+  @doc "See `MediaServer.Mendooze.Sdp.fmt_order/2`."
+  defdelegate fmt_order(desc, opts), to: Sdp
+
   @doc "Rank an accepted entry with a preferred codec code first, the offer's order inside."
   defdelegate preferred_rank(entry, fmt_order, prefer), to: Sdp
 
@@ -68,6 +71,18 @@ defmodule MediaServer.SdpTools do
 
   @doc "The direction an answer must declare for an offered direction (RFC 3264 §6.1)."
   defdelegate reverse_direction(direction), to: Sdp
+
+  @doc """
+  Whether a media descriptor blackholes its media (`c=` at `0.0.0.0` or `::`).
+  See `MediaServer.Mendooze.Sdp.blackholed?/1`.
+  """
+  defdelegate blackholed?(desc), to: Sdp
+
+  @doc """
+  The address families the peer can receive a media on, offer order. See
+  `MediaServer.Mendooze.Sdp.peer_families/1`.
+  """
+  defdelegate peer_families(desc), to: Sdp
 
   @doc "SDP `rtpmap` fields for a Medooze codec constant."
   defdelegate code_rtpmap(media, code), to: Sdp

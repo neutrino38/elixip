@@ -17,9 +17,12 @@ defmodule SIP.Transport.TLS do
 
   # Outbound connection — opens the TLS socket via Socket.SSL.
   @impl true
-  def init({dest_ip, dest_port}) do
+  def init({dest_ip, dest_port}), do: init({dest_ip, dest_port, nil})
+
+  def init({dest_ip, dest_port, domain}) do
     initial_state = %{t_isreliable: true,
       upperlayer: nil, destip: dest_ip, destport: dest_port,
+      destdomain: domain,
       buffer: %SIP.Transport.Depack{}}
 
     try do
@@ -29,7 +32,8 @@ defmodule SIP.Transport.TLS do
       err in Socket.Error ->
         dest_ip_str = if is_tuple(dest_ip), do: NetUtils.ip2string(dest_ip), else: dest_ip
         Logger.info([module: __MODULE__, dest: "#{dest_ip_str}:#{dest_port}",
-                     message: "Failed to connect socket: #{err.message}"])
+                     message: "Failed to connect socket: #{err.message}" <>
+                       SIP.Transport.ImplHelpers.connect_failure_hint()])
         {:stop, :cnxerror}
     end
   end
@@ -72,7 +76,7 @@ defmodule SIP.Transport.TLS do
   def handle_call({:sendmsg, msgstr, _destip, _dest_port}, _from, state) do
     destipstr = SIP.NetUtils.ip2string(state.destip)
     Logger.debug("TLS: Message sent to #{destipstr}:#{state.destport} ---->\r\n" <> msgstr <> "\r\n-----------------")
-    case tls_send(state.socket, msgstr) do
+    case Socket.Stream.send(state.socket, msgstr) do
       :ok -> {:reply, :ok, state}
       {:error, reason} ->
         Logger.debug("TLS: failed to send message. Error: #{reason}")
@@ -84,11 +88,11 @@ defmodule SIP.Transport.TLS do
   # Only meaningful for inbound connections; outbound sockets are already active.
   @impl true
   def handle_cast(:activate_socket, state) do
-    :ssl.setopts(state.socket, [{:active, true}])
+    Socket.SSL.options(state.socket, mode: :active)
     {:noreply, state}
   end
 
-  # Handle data reception (both outbound Socket.SSL and inbound raw :ssl).
+  # Handle data reception.
   @impl true
   def handle_info({:ssl, socket, data}, state) do
     buf = SIP.Transport.Depack.on_data_received(state.buffer, data,
@@ -113,14 +117,7 @@ defmodule SIP.Transport.TLS do
     SIP.Transport.ImplHelpers.notify_transport_down(__MODULE__, state)
 
     if not is_nil(state.socket) do
-      tls_close(state.socket)
+      Socket.close(state.socket)
     end
   end
-
-  # Duality: inbound sockets are raw :sslsocket tuples; outbound are Socket.SSL structs.
-  defp tls_send({:sslsocket, _, _} = s, data), do: :ssl.send(s, data)
-  defp tls_send(s, data), do: Socket.Stream.send(s, data)
-
-  defp tls_close({:sslsocket, _, _} = s), do: :ssl.close(s)
-  defp tls_close(s), do: Socket.close(s)
 end

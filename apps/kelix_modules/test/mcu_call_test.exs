@@ -1119,7 +1119,11 @@ defmodule Kelix.Mod.McuCallTest do
       assert_received {:rpc, "StartRTPTimeout", [_conf, _part, 1, 0, _role]}
     end
 
-    test "a hold the peer keeps sending on leaves it armed", ctx do
+    # A hold is a transition, not a direction. RFC 3264 lets the holder send music, so
+    # `a=sendonly` promises RTP — and Linphone 6.2 sends none at all (capture of
+    # 2026-08-22, 22:59:41: audio reaped 12 s into a hold). On an audio-only leg that is
+    # the only watched media, so the AND fires and the call is hung up.
+    test "a media that was sendrecv and turns sendonly is a hold: disarmed", ctx do
       {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_video))
       assert_receive {:replied, 200, _reason, _fields, _req}, 2000
       send(pid, {:ACK, %{method: :ACK}, nil, dialog})
@@ -1128,7 +1132,22 @@ defmodule Kelix.Mod.McuCallTest do
       TestStub.rpc_order()
       assert {:ok, _answer} = Conn.set_remote_offer(part.conn, @offer_hold_sendonly)
 
-      assert_received {:rpc, "StartRTPTimeout", [_conf, _part, 0, ms, _role]} when ms > 0
+      assert_received {:rpc, "StartRTPTimeout", [_conf, _part, 0, 0, _role]}
+      assert_received {:rpc, "StartRTPTimeout", [_conf, _part, 1, 0, _role]}
+    end
+
+    # …and the other half of the rule, which is what keeps the watchdog worth having:
+    # `a=sendonly` offered from the start is not a hold, it is a one-way source pushing
+    # into the conference. A feed that dies is exactly what nothing else would catch.
+    test "a leg that offers sendonly from the start is a source: armed", ctx do
+      {pid, dialog} = start_call(ctx.scenario, invite(ctx.did, sdp: @offer_hold_sendonly))
+      assert_receive {:replied, 200, _reason, _fields, _req}, 2000
+
+      TestStub.rpc_order()
+      send(pid, {:ACK, %{method: :ACK}, nil, dialog})
+      assert_receive {:rpc, "AddSidebarParticipant", _params}, 2000
+
+      assert_receive {:rpc, "StartRTPTimeout", [_conf, _part, 0, ms, _role]} when ms > 0, 2000
       refute_received {:rpc, "StartRTPTimeout", [_conf, _part, _media, 0, _role]}
     end
 

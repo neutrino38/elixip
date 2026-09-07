@@ -109,16 +109,7 @@ defmodule SIP.Resolver do
     transport_str = SIP.Uri.get_transport(uri) |> String.downcase()
     name = "_sip._" <> transport_str <> "." <> uri.domain
 
-    # We need to specify a DNS server otherwise it does not work
-    nameserver =
-      case Application.fetch_env(:elixip2, :nameserver) do
-        {:ok, {x, y, z, t}} -> {x, y, z, t}
-        :error -> {8, 8, 8, 8}
-      end
-
-    case :inet_res.lookup(String.to_charlist(name), :in, :srv,
-           alt_nameservers: [{nameserver, 53}]
-         ) do
+    case :inet_res.lookup(String.to_charlist(name), :in, :srv, nameserver_options()) do
       [] ->
         Logger.debug(module: __MODULE__, message: "SRV resolution for #{name} returns no records")
         []
@@ -166,21 +157,43 @@ defmodule SIP.Resolver do
     end
   end
 
+  # The family this node can source from is asked for FIRST, and the other one
+  # only when that record does not exist. Asking for A unconditionally sent an
+  # IPv6-only node towards an IPv4 address it has no route to, on every
+  # dual-stack name. `:nxdomain` — the bare atom, as callers match it — means
+  # neither family answered.
   def resolve(uri = %SIP.Uri{}, false) do
-    # Try with IPV4
-    case :inet.getaddr(String.to_charlist(uri.domain), :inet) do
+    [first, second] = family_order(NetUtils.preferred_family())
+
+    case getaddr(uri, first) do
+      :nxdomain -> getaddr(uri, second)
+      result -> result
+    end
+  end
+
+  defp family_order(:ipv6), do: [:inet6, :inet]
+  defp family_order(_family), do: [:inet, :inet6]
+
+  defp getaddr(uri = %SIP.Uri{}, family) do
+    case :inet.getaddr(String.to_charlist(uri.domain), family) do
       {:ok, ip} -> {ip, uri.port}
-      # Try with IPV6
-      {:error, :nxdomain} -> resolve_v6(uri)
+      {:error, :nxdomain} -> :nxdomain
       {:error, err} -> {:error, err}
     end
   end
 
-  defp resolve_v6(uri = %SIP.Uri{}) do
-    case :inet.getaddr(String.to_charlist(uri.domain), :inet6) do
-      {:ok, ip} -> {ip, uri.port}
-      {:error, :nxdomain} -> :nxdomain
-      {:error, err} -> {:error, err}
+  # The system resolver by default: `:inet_res` reads /etc/resolv.conf, so an
+  # IPv6-only node reaches its DNS server over IPv6 without being told to. The
+  # `:nameserver` key overrides it — `get_dns_default_dns_server/0` sets it — and
+  # it takes an IPv6 server too. It used to be forced to 8.8.8.8, which a node
+  # with no IPv4 route cannot reach at all.
+  defp nameserver_options() do
+    case Application.fetch_env(:elixip2, :nameserver) do
+      {:ok, ip} when is_tuple(ip) and (tuple_size(ip) == 4 or tuple_size(ip) == 8) ->
+        [alt_nameservers: [{ip, 53}]]
+
+      _ ->
+        []
     end
   end
 
@@ -225,34 +238,54 @@ defmodule SIP.Resolver do
     end
   end
 
+  @doc """
+  Read the first nameserver the host is configured with into `:nameserver`, and
+  give back the address as a string (`nil` when there is none to read).
+
+  An unreadable or unparseable one leaves `:nameserver` unset, so `:inet_res`
+  falls back on the system resolver instead of the node failing to boot. It used
+  to be a bare match: a resolv.conf with no `nameserver` line, or one carrying a
+  zone identifier (`fe80::1%eth0`, which `SIP.NetUtils.parse_address/1` refuses),
+  crashed the boot of a node whose DNS was otherwise fine.
+  """
+  @spec get_dns_default_dns_server() :: binary() | nil
   def get_dns_default_dns_server() do
     dns_str =
       case System.get_env("OS") do
-        "Windows_NT" ->
-          getipcmd =
-            ~c"powershell -Command \"Get-NetAdapter | Where-Object Status -eq 'Up' | ForEach-Object { Get-DnsClientServerAddress -InterfaceAlias $_.Name } | Select-Object -ExpandProperty ServerAddresses | Sort-Object -Unique
-\""
-
-          :os.cmd(getipcmd) |> List.to_string() |> String.split("\r\n") |> hd()
-
-        # Assume linux
-        _ ->
-          case File.read("/etc/resolv.conf") do
-            {:ok, content} ->
-              String.split(content, "\n")
-              |> Enum.find(&String.starts_with?(&1, "nameserver"))
-              |> String.trim()
-              |> String.split(" ")
-              |> List.last()
-
-            {:error, _code} ->
-              nil
-          end
+        "Windows_NT" -> windows_dns_server()
+        _ -> linux_dns_server()
       end
 
-    Logger.debug(module: __MODULE__, message: "DNS server that will be used: #{dns_str}")
-    {:ok, dns_addr} = NetUtils.parse_address(dns_str)
-    Application.put_env(:elixip2, :nameserver, dns_addr)
+    case dns_str && NetUtils.parse_address(dns_str) do
+      {:ok, dns_addr} ->
+        Logger.debug(module: __MODULE__, message: "DNS server that will be used: #{dns_str}")
+        Application.put_env(:elixip2, :nameserver, dns_addr)
+
+      _ ->
+        Logger.notice(
+          module: __MODULE__,
+          message: "no usable nameserver found (#{inspect(dns_str)}); using the system resolver"
+        )
+    end
+
     dns_str
+  end
+
+  defp windows_dns_server() do
+    getipcmd =
+      ~c"powershell -Command \"Get-NetAdapter | Where-Object Status -eq 'Up' | ForEach-Object { Get-DnsClientServerAddress -InterfaceAlias $_.Name } | Select-Object -ExpandProperty ServerAddresses | Sort-Object -Unique
+\""
+
+    :os.cmd(getipcmd) |> List.to_string() |> String.split("\r\n") |> hd()
+  end
+
+  defp linux_dns_server() do
+    with {:ok, content} <- File.read("/etc/resolv.conf"),
+         line when is_binary(line) <-
+           content |> String.split("\n") |> Enum.find(&String.starts_with?(&1, "nameserver")) do
+      line |> String.trim() |> String.split(" ") |> List.last()
+    else
+      _ -> nil
+    end
   end
 end

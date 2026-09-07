@@ -1,8 +1,10 @@
 defmodule Kelix.Mod.AuthDb do
   @moduledoc """
-  Digest authentication backed by a MariaDB/MySQL `subscriber` table
-  (design §7.4, §12.3). It **decides**, it never composes a SIP response
-  (§11.1): the verdict is what the script maps onto a 401, a 407 or a 403.
+  Digest authentication backed by a `subscriber` table (design §7.4, §12.3), in
+  MariaDB/MySQL or in PostgreSQL — `driver` in `[module.auth_db]` picks which
+  (default `mysql`; see `Kelix.Mod.AuthDb.Pool`). It **decides**, it never
+  composes a SIP response (§11.1): the verdict is what the script maps onto a
+  401, a 407 or a 403.
 
   The secret is stored as **HA1** (`H(user:realm:password)`); the hash `H` is
   `password_hash = "md5" | "sha256"` (default `md5`). The realm is the domain's
@@ -96,10 +98,13 @@ defmodule Kelix.Mod.AuthDb do
 
   # Every key a [module.auth_db] block may carry. `module` is the generic
   # module-resolution key handled by Kelix.ModuleSupervisor.
-  @config_keys ~w(module host port database username password table ha1_column
+  @config_keys ~w(module driver host port database username password table ha1_column
                   user_column domain_column password_hash identity_check
                   call_timeout_ms pool_size connect_timeout_ms ssl ssl_ca_cert_file
                   allow_insecure_db_connection)
+
+  # Which SQL driver opens the pool — see Kelix.Mod.AuthDb.Pool.
+  @drivers ~w(mysql postgres)
 
   # What to do when the digest proves one identity and the request claims another
   # (see check_identity/3). `warn` is the default on purpose: `strict` is the safe
@@ -130,6 +135,7 @@ defmodule Kelix.Mod.AuthDb do
     with :ok <- reject_unknown_keys(config),
          {:ok, _} <- req_string(config, "database"),
          {:ok, _} <- req_string(config, "username"),
+         :ok <- driver_ok(config),
          :ok <- hash_ok(config),
          :ok <- identity_check_ok(config),
          :ok <- identifiers_ok(config),
@@ -172,7 +178,7 @@ defmodule Kelix.Mod.AuthDb do
         args: [],
         render: %{
           kind: :detail,
-          fields: ~w(state host port database username table tls certificate transport
+          fields: ~w(state host port database username table driver tls certificate transport
                      pool_size query_timeout_ms error)
         },
         help: "The subscriber-DB link: does it answer, where does it point, is it encrypted"
@@ -210,6 +216,14 @@ defmodule Kelix.Mod.AuthDb do
     case Map.get(config, key) do
       v when is_binary(v) and v != "" -> {:ok, v}
       _ -> {:error, "#{key} is required (non-empty string)"}
+    end
+  end
+
+  defp driver_ok(config) do
+    case Map.get(config, "driver") do
+      nil -> :ok
+      d when d in @drivers -> :ok
+      _ -> {:error, "driver must be one of #{Enum.join(@drivers, "|")}"}
     end
   end
 
@@ -304,6 +318,7 @@ defmodule Kelix.Mod.AuthDb do
       domain_column: config["domain_column"] || "domain",
       password_hash: config["password_hash"] || "md5",
       identity_check: config["identity_check"] || @default_identity_check,
+      driver: Pool.driver(config),
       call_timeout_ms: config["call_timeout_ms"] || Kelix.Module.default_call_timeout_ms()
     }
   end
@@ -317,7 +332,8 @@ defmodule Kelix.Mod.AuthDb do
     user_column: "username",
     domain_column: "domain",
     password_hash: "md5",
-    identity_check: @default_identity_check
+    identity_check: @default_identity_check,
+    driver: :mysql
   }
 
   # Anything but a map (unset, or explicitly set to nil) means "not configured".
@@ -371,20 +387,29 @@ defmodule Kelix.Mod.AuthDb do
     if Process.whereis(conn) == nil do
       {:error, :down}
     else
+      driver = Map.get(c, :driver, :mysql)
+
       sql =
-        "SELECT #{c.ha1_column} FROM #{c.table} WHERE #{c.user_column} = ? AND #{c.domain_column} = ? LIMIT 1"
+        "SELECT #{c.ha1_column} FROM #{c.table} WHERE #{c.user_column} = #{placeholder(driver, 1)} " <>
+          "AND #{c.domain_column} = #{placeholder(driver, 2)} LIMIT 1"
 
       timeout = Map.get(c, :call_timeout_ms, Kelix.Module.default_call_timeout_ms())
 
-      case MyXQL.query(conn, sql, [username, realm], timeout: timeout) do
-        {:ok, %MyXQL.Result{rows: [[ha1]]}} -> {:ok, ha1}
-        {:ok, %MyXQL.Result{rows: []}} -> :notfound
+      case Pool.driver_module(driver).query(conn, sql, [username, realm], timeout: timeout) do
+        {:ok, %{rows: [[ha1]]}} -> {:ok, ha1}
+        {:ok, %{rows: []}} -> :notfound
         {:error, reason} -> {:error, reason}
       end
     end
   rescue
     e -> {:error, e}
   end
+
+  # MySQL binds positionally with `?`; PostgreSQL wants the parameter's own
+  # number (`$1`, `$2`, …) — a table/column name is interpolated either way
+  # (identifiers_ok/1 already refused anything that is not a plain identifier).
+  defp placeholder(:postgres, index), do: "$#{index}"
+  defp placeholder(_mysql, _index), do: "?"
 
   @doc """
   The secret for `username`@`realm`, in the shape the authentication needs.

@@ -10,7 +10,8 @@
 #
 # What changes, and nothing else does:
 #
-#   * `media_connect()` before the call is forwarded;
+#   * `b2bua_resolve()` then `media_connect()` before the call is forwarded — in
+#     that order, so the media server is chosen knowing where the call goes;
 #   * the media argument of `b2bua_forward/3` is `{:mediaserver, …}` instead of
 #     `false`. From there the SDP bodies that cross are OURS in both directions:
 #     the caller is answered by the media server, the callee is offered by the
@@ -73,7 +74,12 @@ defmodule B2BUA.Media do
   state place_call do
     req = last_uas_req()
 
-    # The media server first: without one there is nothing to answer the caller
+    # Where the call goes, before which media server carries it: the outbound
+    # leg's media has to leave by an interface the callee can reach, and only the
+    # resolved target says which that is.
+    b2bua_resolve(ctx_get(:peer))
+
+    # Then the media server: without one there is nothing to answer the caller
     # with, and the outbound INVITE has no body to carry. And its verdict is read
     # BEFORE the forward: forwarding on a failed connect used to place a call
     # that signalled perfectly and carried no media at all (2026-08-13).
@@ -81,7 +87,7 @@ defmodule B2BUA.Media do
 
     case ctx_get(:lasterr) do
       :ok ->
-        b2bua_forward(req, ctx_get(:peer), @media)
+        b2bua_forward(req, b2bua_resolved_peer(), @media)
 
         cond do
           ctx_get(:lasterr) == :ok ->

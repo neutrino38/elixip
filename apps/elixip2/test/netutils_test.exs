@@ -71,6 +71,66 @@ defmodule SIP.Test.NetUtils do
     assert {127, 0, 0, 1} in ips
   end
 
+  test "read the family of an address" do
+    assert SIP.NetUtils.address_family({192, 168, 0, 1}) == :ipv4
+    assert SIP.NetUtils.address_family({0, 0, 0, 0, 0, 0, 0, 1}) == :ipv6
+    assert SIP.NetUtils.address_family(:all) == nil
+    assert SIP.NetUtils.address_family(nil) == nil
+  end
+
+  test "read the scope of an address" do
+    assert SIP.NetUtils.address_scope({127, 0, 0, 1}) == :loopback
+    assert SIP.NetUtils.address_scope({169, 254, 3, 4}) == :link_local
+    assert SIP.NetUtils.address_scope({10, 1, 2, 3}) == :private
+    assert SIP.NetUtils.address_scope({172, 21, 105, 71}) == :private
+    assert SIP.NetUtils.address_scope({172, 32, 0, 1}) == :global
+    assert SIP.NetUtils.address_scope({192, 168, 1, 1}) == :private
+    assert SIP.NetUtils.address_scope({8, 8, 8, 8}) == :global
+
+    assert SIP.NetUtils.address_scope({0, 0, 0, 0, 0, 0, 0, 1}) == :loopback
+    # fe80::1 and febf::1 are both inside fe80::/10
+    assert SIP.NetUtils.address_scope({0xFE80, 0, 0, 0, 0, 0, 0, 1}) == :link_local
+    assert SIP.NetUtils.address_scope({0xFEBF, 0, 0, 0, 0, 0, 0, 1}) == :link_local
+    # fd00::/8 is the defined half of fc00::/7
+    assert SIP.NetUtils.address_scope({0xFD00, 0, 0, 0, 0, 0, 0, 1}) == :private
+    assert SIP.NetUtils.address_scope({0xFC00, 0, 0, 0, 0, 0, 0, 1}) == :private
+    assert SIP.NetUtils.address_scope({0x2001, 0xDB8, 0, 0, 0, 0, 0, 1}) == :global
+  end
+
+  test "get_local_ips leaves out the scopes that were not asked for" do
+    # A link-local address is never advertisable: it must not come back unless
+    # the caller explicitly asks for that scope.
+    assert Enum.all?(SIP.NetUtils.get_local_ips([:ipv4, :ipv6]), fn ip ->
+             SIP.NetUtils.address_scope(ip) in [:global, :private]
+           end)
+
+    with_ll = SIP.NetUtils.get_local_ips([:ipv6, :link_local, :loopback])
+    assert Enum.all?(with_ll, &(SIP.NetUtils.address_family(&1) == :ipv6))
+    assert {0, 0, 0, 0, 0, 0, 0, 1} in with_ll
+  end
+
+  test "get_local_ips asks for a family, and returns nothing without one" do
+    assert SIP.NetUtils.get_local_ips([:loopback]) == []
+    assert Enum.all?(SIP.NetUtils.get_local_ips([:ipv4, :loopback]),
+             &(SIP.NetUtils.address_family(&1) == :ipv4))
+  end
+
+  test "get_local_ips puts the most advertisable address first" do
+    # IPv6 before IPv4, and within a family a routable address before a
+    # restricted one, so hd/1 is a defensible choice.
+    ips = SIP.NetUtils.get_local_ips([:ipv4, :ipv6, :link_local, :loopback])
+
+    ranks =
+      Enum.map(ips, fn ip ->
+        family = if SIP.NetUtils.address_family(ip) == :ipv6, do: 0, else: 1
+        scope = Enum.find_index([:global, :private, :link_local, :loopback],
+                  &(&1 == SIP.NetUtils.address_scope(ip)))
+        {family, scope}
+      end)
+
+    assert ranks == Enum.sort(ranks)
+  end
+
 
   # This one needs a real Wi-Fi interface, which build machines and servers
   # generally do not have. Probe for one at compile time and skip when there is

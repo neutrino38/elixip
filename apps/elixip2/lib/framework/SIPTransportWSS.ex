@@ -31,9 +31,12 @@ defmodule SIP.Transport.WSS do
   def is_reliable, do: true
 
   @impl true
-  def init({ dest_ip, dest_port}) do
+  def init({ dest_ip, dest_port}), do: init({ dest_ip, dest_port, nil})
+
+  def init({ dest_ip, dest_port, domain}) do
     initial_state = %{ t_isreliable: true,
-      upperlayer: nil, destip: dest_ip, destport: dest_port }
+      upperlayer: nil, destip: dest_ip, destport: dest_port,
+      destdomain: domain }
 
     try do
       state = SIP.Transport.ImplHelpers.connect(initial_state, :wss)
@@ -45,7 +48,8 @@ defmodule SIP.Transport.WSS do
       err in Socket.Error ->
         dest_ip = if is_tuple(dest_ip) do NetUtils.ip2string(dest_ip) else dest_ip end
         Logger.info([ module: __MODULE__, dest: "#{dest_ip}:#{dest_port}",
-                       message: "Failed to connect socket: #{err.message} "])
+                       message: "Failed to connect socket: #{err.message}" <>
+                         SIP.Transport.ImplHelpers.connect_failure_hint()])
         Logger.debug( Exception.format_stacktrace(__STACKTRACE__))
         { :stop, :cnxerror }
 

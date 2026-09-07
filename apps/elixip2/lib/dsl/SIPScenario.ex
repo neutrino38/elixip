@@ -154,6 +154,11 @@ defmodule SIP.Scenario do
           def __sbb_namespace__, do: @sbb_namespace
 
           @doc false
+          # The `args` keys a call site may name plainly, next to `timeout:` and
+          # `resume:`. `run_sbb/3` folds them into the sandbox and refuses the rest.
+          def __sbb_args__, do: @sbb_args
+
+          @doc false
           # outcome -> description. `:timeout` is added when the block is bounded,
           # because the host can receive it whether or not the author listed it.
           def __sbb_returns__ do
@@ -683,7 +688,9 @@ defmodule SIP.Scenario do
       `@sbb_timeout`. On expiry the block returns its `@sbb_timeout_event`
       exactly as if it had returned it itself.
     * `args:`    — map seeding the block's private sandbox, read inside it with
-      `sbb_data_get/1`.
+      `sbb_data_get/1`. Each key the block declares in `@sbb_args` may also be
+      written plainly at the call site — `authenticate(realm: "example.com")` —
+      which is what a face publishes; a key no block declares raises.
     * `resume:`  — `true` keeps the sandbox from a previous run of the same
       block instead of clearing it. For a block designed to be re-entered after
       an interruption; the default is a clean slate, so a serial hunt calling a

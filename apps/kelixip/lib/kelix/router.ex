@@ -177,15 +177,33 @@ defmodule Kelix.Router do
   # Public for one reason: this three-way distinction IS the fix, and the defect it
   # replaces lived for months in wiring that no test could reach. Not part of the
   # supported API.
+  @doc """
+  A media server carrying every addressing profile this call needs, as
+  `media_connect/0` asks for it once `b2bua_resolve/1` has resolved the targets
+  (step 5 of docs/design/multi-interface.md).
+
+  Declared to the framework as `:elixip2, :mediaserver_selector` — the framework
+  cannot reach `Kelix.MediaPool`, which is a kelixip surface, so the selection is
+  injected rather than called.
+
+  Same three outcomes as `media_override/1`, and the middle one matters more
+  here: a pool with no server carrying the needed interface answers
+  `module: :unavailable`, and the call is refused instead of placing its media
+  where the peer cannot reach it.
+  """
+  @spec media_for_profiles([{:ipv4 | :ipv6, :internal | :public}]) :: keyword()
+  def media_for_profiles(profiles), do: media_override(Kelix.MediaPool, profiles)
+
   @doc false
-  @spec media_override(GenServer.server()) :: keyword() | nil
-  def media_override(pool \\ Kelix.MediaPool) do
+  @spec media_override(GenServer.server(), [{:ipv4 | :ipv6, :internal | :public}]) ::
+          keyword() | nil
+  def media_override(pool \\ Kelix.MediaPool, profiles \\ []) do
     case Process.whereis(pool) do
       nil ->
         nil
 
       _pid ->
-        case Kelix.MediaPool.checkout(pool) do
+        case Kelix.MediaPool.checkout(pool, profiles) do
           {:ok, %{name: name, module: module, url: url}} ->
             # `name:` is inert for `media_connect/0` — it reads `:module` and `:url` —
             # and it is what the monitor's `mediaserver` column shows: an operator

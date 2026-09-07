@@ -153,13 +153,12 @@ defmodule SIP.Transport do
     def connect(state, transport, timeout \\ 10000) do
       ssl_options =
         [
-          verify: false, # Désactive la vérification du certificat pour simplifier l'exemple
           versions: [:"tlsv1.2"], # Spécifie la version de TLS à utiliser
           # Cipher suites are configurable via :elixip2/:tls_ciphers; @tls_ciphers is the default.
           ciphers: Application.get_env(:elixip2, :tls_ciphers, @tls_ciphers),
           timeout: timeout,
           mode: :active
-        ] ++ client_cert_options()
+        ] ++ client_cert_options() ++ peer_verification_options(state)
 
       sock = case transport do
         :tcp ->
@@ -192,6 +191,87 @@ defmodule SIP.Transport do
 
       # Return the local IP and port inside the state map.
       Map.put(state, :localip, local_ip) |> Map.put(:localport, local_port) |> Map.put(:socket, sock)
+    end
+
+    @doc false
+    # Whether this leg checks the certificate the peer presents, and against what.
+    #
+    # **Off unless asked for.** Verifying a peer is an interconnect agreement, not a
+    # socket setting: it presumes a named authority both sides accepted, and a node
+    # cannot decide on its own that yesterday's working link should stop carrying
+    # calls. `:tls_verify` is therefore opt-in, and turning it on is the same
+    # deliberate act as putting a client certificate on the wire.
+    #
+    # It is nonetheless the half that gives the other one its worth. A listener
+    # demanding a client certificate while its own outbound leg verifies nothing is
+    # theatre: the mutual guarantee is worth exactly what the weaker direction is
+    # worth. Whoever turns on `verify: :required` for inbound turns this on too.
+    #
+    # **The name checked is the SIP domain, never the address.** RFC 5922 §7.2 is
+    # explicit: the identity in the certificate is the domain the URI named, and a
+    # SIP proxy is reached at an address that DNS chose. Passing the domain as SNI
+    # is what makes the check both correct and possible — without it OTP falls back
+    # to the address we dialled, which needs an iPAddress SAN almost no SIP
+    # certificate carries.
+    #
+    # Two keys:
+    #
+    #  * `:tls_verify` — `true` checks the peer's certificate.
+    #  * `:tls_cacertfile` — the authority to trust, which is normally the point of
+    #    an interconnect. Naming one trusts **only** it; absent, the public bundle
+    #    is trusted (socket2's default).
+    def peer_verification_options(state) do
+      case Application.get_env(:elixip2, :tls_verify, false) do
+        true ->
+          [verify: true] ++ authorities_option() ++ server_name_option(state)
+
+        _ ->
+          [verify: false]
+      end
+    end
+
+    defp authorities_option() do
+      case Application.get_env(:elixip2, :tls_cacertfile) do
+        path when is_binary(path) -> [authorities: [path: path]]
+        _ -> []
+      end
+    end
+
+    # No domain — a leg aimed at a bare address — leaves the reference identity to
+    # OTP, which then matches against that address. Said out loud: it is the case
+    # that needs an iPAddress SAN, and the one an operator will otherwise diagnose
+    # as "TLS is broken".
+    defp server_name_option(state) do
+      case Map.get(state, :destdomain) do
+        domain when is_binary(domain) and domain != "" ->
+          [server_name: domain]
+
+        _ ->
+          Logger.debug([
+            module: __MODULE__,
+            message:
+              "outbound TLS with no domain to verify against: the certificate will " <>
+                "have to carry the address in an iPAddress SAN"
+          ])
+
+          []
+      end
+    end
+
+    @doc false
+    # What to add to a failed outbound TLS/WSS connection's log line.
+    #
+    # `Socket.Error` keeps only its message, not the reason, so the cause cannot be
+    # matched on — and sniffing prose for "certificate" would be a guess. So this
+    # claims only what is true: verification is on, and here are the two keys that
+    # decide it. Silent when it is off, where the certificate cannot be the cause.
+    def connect_failure_hint() do
+      if Application.get_env(:elixip2, :tls_verify, false) do
+        " (the peer's certificate is checked because :elixip2, :tls_verify is on: " <>
+          "trust its authority with :elixip2, :tls_cacertfile, or turn the check off)"
+      else
+        ""
+      end
     end
 
     # Certificate a TLS/WSS *client* presents. It needs none unless the peer asks for
@@ -460,9 +540,77 @@ defmodule SIP.Transport do
 
   @doc "Create a local contact URI associated with a given transport instance"
   @spec build_contact_uri(module(), pid()) :: %SIP.Uri{ domain: binary(), port: integer(), scheme: binary() } | nil
-  def build_contact_uri(tmod, tid) do
+  def build_contact_uri(tmod, tid), do: build_contact_uri(tmod, tid, nil)
+
+  @doc """
+  The address to publish towards `peer_ip`, given the address we are bound to.
+
+  One interface can have two faces: a 1:1 NAT gives a host a private address and
+  peers outside reach a public one. `advertise` on a `[[listen]]` block names that
+  public alias, and this is where it is applied — **not** in the transport, which
+  must keep answering the address it is really bound to (the media layer reads it
+  to choose an interface, and a comparison against a real socket has to hold).
+
+  Which face a peer sees follows from which side it sits on:
+
+    * `:public` — the alias, when one was declared for this bound address;
+    * `:internal` — the bound address itself. A peer inside reaches it directly,
+      and handing it the public alias would send its in-dialog requests through
+      the NAT and back, when the router hairpins at all.
+
+  A peer whose address is unknown gets the alias, which is what a flat
+  substitution would have done: a NATed deployment serves mostly outside peers,
+  and the private address would break them.
+  """
+  @spec publish_ip(:inet.ip_address() | binary(), :inet.ip_address() | nil) ::
+          :inet.ip_address() | binary()
+  def publish_ip(bound, peer_ip) when is_tuple(bound) do
+    case Application.get_env(:elixip2, :advertise_map, %{}) do
+      map when map == %{} ->
+        bound
+
+      map ->
+        case Map.fetch(map, bound) do
+          {:ok, alias_ip} -> if internal_peer?(peer_ip), do: bound, else: alias_ip
+          :error -> bound
+        end
+    end
+  end
+
+  # WSS answers a dialled hostname rather than a tuple on some paths; there is
+  # nothing to substitute for a name.
+  def publish_ip(bound, _peer_ip), do: bound
+
+  defp internal_peer?(peer_ip) when is_tuple(peer_ip),
+    do: SIP.NetUtils.net_side(peer_ip) == :internal
+
+  defp internal_peer?(_peer_ip), do: false
+
+  @doc """
+  The address and port to publish towards `peer_ip` on the transport `tid`.
+  """
+  @spec local_ip_for_peer(pid(), :inet.ip_address() | nil) ::
+          {:ok, :inet.ip_address() | binary(), integer()} | any()
+  def local_ip_for_peer(tid, peer_ip) do
     case get_local_ip_port(tid) do
-      { :ok, localip, localport } ->
+      {:ok, bound, port} -> {:ok, publish_ip(bound, peer_ip), port}
+      err -> err
+    end
+  end
+
+  @doc """
+  The Contact to publish towards `peer_ip`.
+
+  Same as `build_contact_uri/2` except for the address: `publish_ip/2` decides
+  which of ours this peer can reach. Pass the peer whenever it is known — a
+  Contact aimed at an address the peer has no route to is a dialog whose BYE
+  never arrives.
+  """
+  @spec build_contact_uri(module(), pid(), :inet.ip_address() | nil) :: %SIP.Uri{} | nil
+  def build_contact_uri(tmod, tid, peer_ip) do
+    case get_local_ip_port(tid) do
+      { :ok, bound, localport } ->
+        localip = publish_ip(bound, peer_ip)
         transport_str = apply(tmod, :transport_str, [])
         %SIP.Uri{
          domain: localip,
@@ -493,12 +641,20 @@ defmodule SIP.Transport do
 
   # Add /fix contact header to a SIP message given the transport
   def add_contact_header(tmod, tid, msg) when is_pid(tid) and is_map(msg) do
-    add_contact_header(build_contact_uri(tmod, tid), msg)
+    add_contact_header(build_contact_uri(tmod, tid, peer_of(msg)), msg)
   end
 
   # No local address to advertise: leave the message as it stands rather than
   # stamp a Contact we cannot fill in. The send that follows will fail on its own,
   # through the error path, which is where a dead transport belongs.
+  # Who this message is going to, when the message itself says. An outbound
+  # REQUEST carries its resolved destination in the R-URI; a RESPONSE goes back to
+  # where its request came from, which the transport stamped into that same field
+  # when it received it. Both are the same field, which is why one clause covers
+  # them. `nil` when nothing says, and the alias is then published.
+  defp peer_of(%{ruri: %SIP.Uri{destip: ip}}) when is_tuple(ip), do: ip
+  defp peer_of(_msg), do: nil
+
   defp add_contact_header(nil, msg), do: msg
 
   defp add_contact_header(new_contact, msg) do

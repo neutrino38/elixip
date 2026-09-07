@@ -114,6 +114,11 @@ defmodule Kelix.Control.CLI do
       {:ok, {:module, module, cmd}, fun, args} ->
         render_module(module, cmd, call(target, fun, args), target)
 
+      # `monitor continuous` does not fit the one-shot render/2 pipeline: it stays
+      # open, printing a frame per push, and only returns once stdin closes.
+      {:ok, :monitor_continuous, _fun, []} ->
+        monitor_continuous(target)
+
       {:ok, tag, fun, args} ->
         render(tag, call(target, fun, args))
 
@@ -160,6 +165,7 @@ defmodule Kelix.Control.CLI do
 
   defp parse(["status"]), do: {:ok, :status, :status, []}
   defp parse(["monitor"]), do: {:ok, :monitor, :monitor, []}
+  defp parse(["monitor", "continuous"]), do: {:ok, :monitor_continuous, :subscribe_monitor, []}
   defp parse(["registration", "list"]), do: {:ok, :regs, :registrations, []}
   defp parse(["registration", "list", domain]), do: {:ok, :reg_domain, :registrations, [domain]}
 
@@ -305,6 +311,7 @@ defmodule Kelix.Control.CLI do
     do: {:complete, nil, prefix, Kelix.Control.log_levels()}
 
   defp complete(["stop"], prefix), do: {:complete, {:monitor, [], :instance_ids}, prefix, []}
+  defp complete(["monitor"], prefix), do: {:complete, nil, prefix, ["continuous"]}
 
   # Every word after `reload-script` is another script name, and `--notify` is
   # accepted anywhere among them (`pop_flag/2` does not care where), so the context
@@ -542,12 +549,15 @@ defmodule Kelix.Control.CLI do
   defp render(:mediaservers, rows) when is_list(rows) do
     {0,
      table(
-       ["server", "adapter", "url", "enabled", "health", "modules"],
+       ["server", "adapter", "url", "version", "enabled", "health", "modules"],
        rows,
        &[
          &1.name,
          to_string(&1.module),
          &1.url,
+         # What the server ANSWERED, never what config.toml says: a pool whose
+         # entries run different builds is exactly what this column is for.
+         dash(row_fact(&1, ["server", "version"])),
          if(&1.enabled, do: "on", else: "off"),
          if(&1.healthy, do: "up", else: "down"),
          format_module_views(&1.modules)
@@ -565,7 +575,8 @@ defmodule Kelix.Control.CLI do
         # Named for what it is: this is the pool's own probe of the adapter channel,
         # not the health a conference rides — the module lines below carry that one.
         "health:       #{if m.healthy, do: "up", else: "down"} (pool probe)"
-      ] ++ module_view_lines(m.modules)
+      ] ++ mediaserver_status_lines(Map.get(m, :server, :unknown)) ++
+        module_view_lines(m.modules)
 
     {0, Enum.join(lines, "\n")}
   end
@@ -627,6 +638,65 @@ defmodule Kelix.Control.CLI do
   defp render(:ok, :ok), do: {0, "ok"}
   defp render(:ok, :notfound), do: {1, "not found"}
   defp render(_tag, other), do: {0, fmt(other)}
+
+  # ── monitor continuous (live push display) ────────────────────────────────────
+  #
+  # `kelictl monitor` is a snapshot; `continuous` stays open and redraws as
+  # scenarios appear, change state or end — fed by `Kelix.Control.subscribe_monitor/1`
+  # (docs/design/kelixip_liveview.md), not by polling. It runs inside the live node
+  # exactly like every other command (design §10.2), so `self()` here already is
+  # the right subscriber pid whether that node is local or, one day, remote.
+  #
+  # It ends on stdin EOF (Ctrl+D) rather than a signal: Ctrl+C kills the local
+  # `kelixip rpc` pipe outright, with no chance to unsubscribe or print a final
+  # line — closing stdin is the one way to leave this loop from the keyboard.
+  defp monitor_continuous(target) do
+    case call(target, :subscribe_monitor, [self()]) do
+      {:error, reason} ->
+        {@exit_unavailable, "error: #{inspect(reason)}"}
+
+      rows when is_list(rows) ->
+        parent = self()
+        spawn_link(fn -> watch_stdin(parent) end)
+        rows_by_id = Map.new(rows, &{&1.id, &1})
+        draw_monitor(rows_by_id)
+        monitor_continuous_loop(target, rows_by_id)
+    end
+  end
+
+  defp monitor_continuous_loop(target, rows_by_id) do
+    receive do
+      {:kelix_monitor, {:upsert, row}} ->
+        rows_by_id = Map.put(rows_by_id, row.id, row)
+        draw_monitor(rows_by_id)
+        monitor_continuous_loop(target, rows_by_id)
+
+      {:kelix_monitor, {:remove, id}} ->
+        rows_by_id = Map.delete(rows_by_id, id)
+        draw_monitor(rows_by_id)
+        monitor_continuous_loop(target, rows_by_id)
+
+      {:monitor_stdin, :eof} ->
+        call(target, :unsubscribe_monitor, [self()])
+        {0, "monitor stopped"}
+    end
+  end
+
+  # A blocking read cannot be raced against the `receive` above, so it runs in its
+  # own process and EOF arrives as a message like every other push does.
+  defp watch_stdin(parent) do
+    case IO.read(:stdio, :line) do
+      line when is_binary(line) -> watch_stdin(parent)
+      _eof_or_error -> send(parent, {:monitor_stdin, :eof})
+    end
+  end
+
+  defp draw_monitor(rows_by_id) do
+    rows = rows_by_id |> Map.values() |> Enum.sort_by(& &1.id)
+    {_code, text} = render(:monitor, rows)
+    clear = if IO.ANSI.enabled?(), do: IO.ANSI.clear() <> IO.ANSI.home(), else: ""
+    IO.write(clear <> "kelictl monitor — live, Ctrl+D to stop\n\n" <> text <> "\n")
+  end
 
   # ── reload-all rendering ──────────────────────────────────────────────────────
 
@@ -1157,6 +1227,156 @@ defmodule Kelix.Control.CLI do
     end)
   end
 
+  # ── the media server's self-description (GET /status/general) ───────────────
+  #
+  # Rendered from the decoded body as the server answered it. Nothing here
+  # reinterprets a capability: a controller-side rewriting of a codec list is a
+  # copy, and a copy drifts.
+
+  defp mediaserver_status_lines(:unknown),
+    do: ["", "server:       unknown (this media server does not describe itself)"]
+
+  defp mediaserver_status_lines(status) when is_map(status) do
+    [
+      "",
+      "server:       " <> server_identity(status),
+      "ffmpeg:       " <> dash(server_fact(status, ["server", "ffmpeg"]))
+    ] ++
+      codec_lines(status) ++
+      [
+        "hardware:     VAAPI " <> yes_no(server_fact(status, ["capabilities", "hardware", "vaapi"])),
+        "text:         " <> text_transports(status),
+        "bfcp:         " <> yes_no(server_fact(status, ["capabilities", "bfcp"])),
+        "encryption:   " <> names(server_fact(status, ["security", "modes"]), ", "),
+        "sdes suites:  " <> names(server_fact(status, ["security", "sdesSuites"]), " "),
+        "dtls:         " <> dtls_line(status)
+      ] ++
+      profile_lines(status) ++
+      [
+        "rtp ports:    " <> rtp_ports(status),
+        "websocket:    " <> dash(server_fact(status, ["network", "websocketUrl"])),
+        "event queues: " <> event_queues(status),
+        "load:         " <> load_line(status)
+      ]
+  end
+
+  defp mediaserver_status_lines(_), do: []
+
+  defp server_identity(status) do
+    version = server_fact(status, ["server", "version"])
+    host = server_fact(status, ["server", "hostname"])
+    pid = server_fact(status, ["server", "pid"])
+    secs = server_fact(status, ["server", "uptimeSecs"])
+
+    up = if is_integer(secs), do: ", up #{format_uptime(secs * 1000)}", else: ""
+    who = Enum.reject([host, pid && "pid #{pid}"], &(&1 in [nil, ""]))
+
+    "mediaserver #{dash(version)}#{up}" <>
+      if(who == [], do: "", else: " (#{Enum.join(who, ", ")})")
+  end
+
+  # The two directions on two lines each, never merged. They are NOT the same
+  # list: the server decodes codecs it cannot encode (VP6), so a controller
+  # reading only one of them ends up asking for a stream the server cannot make.
+  defp codec_lines(status) do
+    for media <- ["audio", "video"], direction <- ["decode", "encode"] do
+      String.pad_trailing("#{media} #{direction}:", 14) <>
+        names(server_fact(status, ["capabilities", media, direction]), " ")
+    end
+  end
+
+  defp text_transports(status) do
+    t = server_fact(status, ["capabilities", "text"]) || %{}
+
+    "rfc4103 #{yes_no(t["rfc4103"])} (redundancy #{yes_no(t["rfc4103Redundancy"])}), " <>
+      "rfc8865 #{yes_no(t["rfc8865"])}, websocket #{yes_no(t["websocket"])}"
+  end
+
+  defp dtls_line(status) do
+    d = server_fact(status, ["security", "dtls"]) || %{}
+
+    if d["available"] == true do
+      suite = dash(d["srtpSuite"])
+      fp = d["fingerprintSha256"]
+
+      suite <> if(fp in [nil, ""], do: "", else: ", fingerprint SHA-256 #{fp}")
+    else
+      "unavailable (no readable certificate on the server)"
+    end
+  end
+
+  # One line per profile, the name aligned. Two ADDRESSES per profile, because
+  # they differ behind NAT and that gap is the whole reason the table exists. An
+  # empty bind is not a hole: it is "every interface".
+  defp profile_lines(status) do
+    case server_fact(status, ["network", "profiles"]) do
+      [_ | _] = profiles ->
+        default = server_fact(status, ["network", "defaultProfile"])
+
+        ["profiles:"] ++
+          for p <- profiles do
+            mark = if p["name"] == default, do: "  (default)", else: ""
+
+            "  " <>
+              String.pad_trailing(to_string(p["name"]), 12) <>
+              if p["available"] == true do
+                "bind #{blank_is_any(p["bindAddress"])}  announced #{dash(p["announcedAddress"])}#{mark}"
+              else
+                "unavailable"
+              end
+          end
+
+      _ ->
+        []
+    end
+  end
+
+  defp rtp_ports(status) do
+    case server_fact(status, ["network", "rtpPortRange"]) do
+      %{"min" => min, "max" => max} -> "#{min}-#{max}"
+      _ -> "-"
+    end
+  end
+
+  # The controller's own liveness contract: its long-poll on the event queue is
+  # what keeps its conferences and JSR-309 sessions alive.
+  defp event_queues(status) do
+    case server_fact(status, ["network", "eventQueueExpiresSecs"]) do
+      secs when is_integer(secs) and secs > 0 -> "#{secs} s without long-poll = destroyed"
+      0 -> "expiry disarmed"
+      _ -> "-"
+    end
+  end
+
+  defp load_line(status) do
+    l = server_fact(status, ["load"]) || %{}
+
+    # Label first, like format_summary/1 elsewhere here — and it sidesteps
+    # "1 conferences".
+    "conferences #{dash(l["conferences"])}, participants #{dash(l["participants"])}, " <>
+      "media sessions #{dash(l["mediaSessions"])}"
+  end
+
+  # One reader for the whole decoded body, so an absent key is "-" everywhere
+  # rather than a crash on one server and a blank on another. `:unknown` (a server
+  # that does not describe itself) reads exactly like a missing key.
+  defp server_fact(status, path) when is_map(status), do: get_in(status, path)
+  defp server_fact(_status, _path), do: nil
+
+  # Same reader, from a row of `mediaserver list` (which carries the body under
+  # `:server`). Kept distinct so neither shape is matched by accident.
+  defp row_fact(row, path), do: server_fact(Map.get(row, :server, :unknown), path)
+
+  defp names(list, sep) when is_list(list) and list != [], do: Enum.join(list, sep)
+  defp names(_, _), do: "-"
+
+  defp yes_no(true), do: "yes"
+  defp yes_no(false), do: "no"
+  defp yes_no(_), do: "-"
+
+  defp blank_is_any(addr) when addr in [nil, ""], do: "* (every interface)"
+  defp blank_is_any(addr), do: to_string(addr)
+
   defp format_uptime(ms) do
     s = div(ms, 1000)
     "#{div(s, 3600)}h#{rem(div(s, 60), 60)}m#{rem(s, 60)}s"
@@ -1190,6 +1410,7 @@ defmodule Kelix.Control.CLI do
 
       status                          uptime, counters, pool, node state
       monitor                         scenarios in progress
+      monitor continuous              same, redrawn live until Ctrl+D
       registration list [domain]      registrations, per domain
       registration show <domain> <aor>  one AOR and its bindings, in detail
       registration remove <domain> <aor> [contact]  drop a registration

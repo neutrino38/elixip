@@ -162,6 +162,68 @@ in one session, [ITU-T F.703](https://www.itu.int/rec/T-REC-F.703), the service
 side by side under the same rules, with text exempt from the conversion policy.
 See [annex D](#annex-d--real-time-text-and-total-conversation).
 
+### 8. A scenario states a preference, not a capability
+
+Three levers, and each one acts at a different point of the flow. They are
+declared on the media tuple a scenario hands to `b2bua_forward/3` — or on
+`reply_invite_with_sdp/2` for a plain UAS, which only ever answers and therefore
+reads `prefer_codecs:` alone.
+
+| lever | active on | what it does |
+|---|---|---|
+| `transcode: [video: …]` | the media tuple | the policy of §5 — the only lever that can fail a media |
+| `video_codec:` / `audio_codec:` / `text_codec:` | **`outbound:`** — a leg we OFFER on | a **hard bound** on the menu we offer, and the list we read its answer against |
+| `prefer_codecs: [video: […]]` | **`inbound:`** — a leg we ANSWER on | the order of our answer — a permutation, never a filter |
+
+```elixir
+@media {:mediaserver,
+        inbound:  [webrtc: :if_offered, media: :tc,
+                   prefer_codecs: [video: ["H264"]]],
+        outbound: [webrtc: :no, media: :tc,
+                   video_codec: ["H264"]],
+        transcode: [audio: :avoid, video: :avoid]}
+```
+
+**`video_codec:` is the one lever that truly restricts, and it does so on
+`outbound:`.** Nothing outside the list is ever offered — `transcode:` reorders
+the menu afterwards and may drop from it, never add to it:
+
+```
+outbound: [video_codec: ["H264"]]  ->  m=video 22002 RTP/AVP 99
+                                       a=rtpmap:99 H264/90000
+outbound: []           (default)   ->  m=video 22002 RTP/AVP 110 99 107
+                                       AV1 + H264 + VP8
+```
+
+The callee cannot settle on AV1 or VP8: they were never offered. The default
+menu is `["AV1", "H264", "VP8"]` for video, `["OPUS", "PCMU", "PCMA", "SPEEX"]`
+for audio, `["T140", "T140RED"]` for text.
+
+An unknown codec or media name in `prefer_codecs:` fails
+`create_peer_connection` — at the moment the author is looking, not on an answer
+mid-call.
+
+**The asymmetry is principle 1, not an oversight.** Where we OFFER, the menu is
+ours to write: nothing is being intersected, we are stating what we propose.
+Where we ANSWER, the offer is the menu and the media server arbitrates — so a
+codec list of ours would be a copy of the server's capabilities, and a copy
+drifts. `prefer_codecs:` therefore reorders and cannot remove: it steers the
+peer's choice without ever claiming what the server can do.
+
+Two consequences worth knowing before writing a scenario:
+
+- **A preference is a request, not a guarantee.** The answer's order is what a
+  well-behaved offerer reads to pick what it sends ([§2](#2-order-means-preference-and-it-is-the-peers-order)),
+  but nothing forces it. A scenario that must be *sure* of the codec on a leg it
+  answers has only `transcode: [video: :forbid]`, which restricts to what the
+  other leg carries — and fails the media rather than converting.
+- **`video_codec:` acts on `outbound:` only.** It is read where we are the
+  offerer — to build the offer, and to read the peer's answer to it. On
+  `inbound:`, where the caller's INVITE carries the offer and we produce the
+  answer, it is accepted, stored, and never consulted: an answer to an
+  AV1/H.264/VP8 offer still carries the three. There is no warning today; only
+  the emitted SDP shows it.
+
 ---
 
 ## Part 2 — Use cases
@@ -538,6 +600,9 @@ For a conference, text is *mixed* like audio is: see
 | the outgoing map | `MediaServer.Mendooze.Conn` | `send_map/2`, `one_pt_per_codec/3` |
 | answer / port-0 rejection | `MediaServer.Mendooze.Conn` | `answer_or_reject/3` |
 | preference order | `MediaServer.Mendooze.Sdp` | `pt_rank/2` |
+| the offered menu (§8) | `MediaServer.Mendooze.Conn` | `offer_codecs/3`, `codecs/2` |
+| the scenario's ranking (§8) | `MediaServer.Mendooze.Conn` | `scenario_preference/1`, `scenario_prefer/3` |
+| answering someone else's offer | `MediaServer.Mendooze.Sdp` | `propose_all/2` |
 | the held and rebuilt answer | `SIP.Session.B2bua` | `attach_legs/3`, `complete_media/4` |
 | profile rungs | `SIP.B2bua.Profile` | `ladder/1`, `conn_opts/1` |
 | the behaviour contract | `MediaServer.Behaviour` | `bridge/3` |

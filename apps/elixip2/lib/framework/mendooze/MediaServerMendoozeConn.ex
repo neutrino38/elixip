@@ -73,6 +73,14 @@ defmodule MediaServer.Mendooze.Conn do
   @proto_rtp 0
   # MediaFrame::MediaProtocol WS — the transport of a text-over-WebSocket media
   @proto_ws 2
+  # MediaFrame::MediaProtocol SCTP — a WebRTC data channel (RFC 8865). Text
+  # again, and the other non-RTP transport this adapter drives: the WebSocket is
+  # a second connection beside the call, a data channel is inside it.
+  @proto_sctp 5
+  # The `a=sctp-port` we ask the server to assume for a peer that has not told us
+  # one — which is every OFFER we make. 0 makes the server keep the RFC 8841
+  # default (5000), the port every browser uses.
+  @sctp_port_unknown 0
   # MediaRole::VIDEO_MAIN. For a text media this is not a mistake: it is the
   # "main" port of any media, whatever its type (Endpoint::GetPort).
   @role_main 0
@@ -310,12 +318,27 @@ defmodule MediaServer.Mendooze.Conn do
       event_sink: state.event_sink,
       opts: state.opts,
       prefer: state.prefer,
+      network_profiles: state.network_profiles,
       # this leg
       leg: name,
       endpoint_id: endpoint_id,
       medias: medias,
       local_ports: %{},
+      # The SCTP parameters of every media carried by a data channel, as the
+      # media server answered them: what the SDP publishes, offer or answer
+      # alike. The presence of a key IS "this medium is on a data channel".
+      data_channels: %{},
+      # The media server's announced address for this leg — NOT ours. Filled from
+      # what EndpointStartReceiving and GetMediaCandidates answer.
       local_ip: nil,
+      # The profile of the address of OURS this peer reached (`local_ip:` on
+      # create_peer_connection), which is this leg's own: two legs of a gateway
+      # call face two sides of the network. nil on a leg we placed, which had no
+      # transport when it was created.
+      sip_profile: sip_profile(state.opts),
+      # The profile asked of the media server, fixed on this leg's first
+      # StartReceiving and repeated verbatim afterwards.
+      address_profile: nil,
       local_crypto: :none,
       local_ice: nil,
       local_sdes: %{},
@@ -426,7 +449,9 @@ defmodule MediaServer.Mendooze.Conn do
 
   @impl true
   def init({server, event_sink, opts}) do
-    %{base_url: base_url, queue_id: queue_id} = Mendooze.rpc_info(server)
+    %{base_url: base_url, queue_id: queue_id, network_profiles: network_profiles} =
+      Mendooze.rpc_info(server)
+
     sess_tag = "cx-#{:erlang.unique_integer([:positive, :monotonic])}"
     medias = medias_from_opts(opts)
 
@@ -435,6 +460,10 @@ defmodule MediaServer.Mendooze.Conn do
       event_sink: event_sink,
       base_url: base_url,
       opts: opts,
+      # What the media server says it can announce (§6.7 ter), read once when the
+      # connection was made. `:unsupported` on a server whose API predates it, and
+      # then no leg asks for a profile at all.
+      network_profiles: network_profiles,
       # The scenario's codec ranking for this connection's answers, per media
       # (`prefer_codecs:` on create_peer_connection), resolved to codec CODES
       # once, here — so a typo in a codec name fails the creation, not an
@@ -689,9 +718,9 @@ defmodule MediaServer.Mendooze.Conn do
   def handle_call({:create_player, name, file_path, opts}, _from, state) do
     tag = "p-#{state.res_seq}"
     state = %{state | res_seq: state.res_seq + 1}
-    l = leg(state, name)
 
-    with {:ok, player_id} <- create(state, "PlayerCreate", [state.sess_id, tag]),
+    with {:ok, l} <- one_leg(state, name),
+         {:ok, player_id} <- create(state, "PlayerCreate", [state.sess_id, tag]),
          :ok <- cleanup_on_error(state, player_id, attach_player_all(l, player_id)),
          {:ok, _} <-
            cleanup_on_error(
@@ -739,10 +768,10 @@ defmodule MediaServer.Mendooze.Conn do
     warn_unsupported_recorder_opts(opts, state)
     tag = "r-#{state.res_seq}"
     state = %{state | res_seq: state.res_seq + 1}
-    l = leg(state, name)
 
-    with {:ok, recorder_id} <- create(state, "RecorderCreate", [state.sess_id, tag]),
-         :ok <- attach_recorder_all(l, recorder_id) do
+    with {:ok, l} <- one_leg(state, name),
+         {:ok, recorder_id} <- create(state, "RecorderCreate", [state.sess_id, tag]),
+         :ok <- delete_recorder_on_error(state, recorder_id, attach_recorder_all(l, recorder_id)) do
       ref = make_ref()
 
       recorders =
@@ -755,6 +784,14 @@ defmodule MediaServer.Mendooze.Conn do
           stopping: false,
           leg: name
         })
+
+      Logger.info(
+        module: __MODULE__,
+        cnx_tag: state.sess_tag,
+        message:
+          "created Recorder #{recorder_id} on leg #{name} for #{file_path}, " <>
+            "media #{inspect(l.medias)}"
+      )
 
       {:reply, {:ok, {self(), :recorder, ref}}, %{state | recorders: recorders}}
     else
@@ -775,7 +812,9 @@ defmodule MediaServer.Mendooze.Conn do
   # ── Echo (server doc §4.16: the endpoint is attached to itself) ────────────
 
   def handle_call({:create_echo, name}, _from, %{echo: nil} = state) do
-    case attach_endpoint_to_itself(leg(state, name)) do
+    attached = with {:ok, l} <- one_leg(state, name), do: attach_endpoint_to_itself(l)
+
+    case attached do
       :ok ->
         ref = make_ref()
         send(state.event_sink, {:ms_event, {self(), :echo, ref}, :echo_started})
@@ -815,6 +854,17 @@ defmodule MediaServer.Mendooze.Conn do
     end)
 
     %{state | bridges: %{}, selection: %{}, bridge_legs: nil}
+  end
+
+  # The leg a sub-resource is asked for. A player, a recorder or an echo names
+  # the leg it attaches to, and a name that is not there any more — the leg was
+  # closed under the scenario — must be a refusal: reading `nil.medias` instead
+  # would crash the connection, and the connection is the OTHER leg too.
+  defp one_leg(state, name) do
+    case leg(state, name) do
+      nil -> {:error, {:no_such_leg, name}}
+      l -> {:ok, l}
+    end
   end
 
   defp both_legs(state, a, b) do
@@ -1748,7 +1798,16 @@ defmodule MediaServer.Mendooze.Conn do
   # nothing watched it, so `:media_lost` could never be reached again — the leg
   # stayed "alive" for the rest of the call however silent it went.
   defp receiving_medias(descs) do
-    for %{transport: t} = d <- descs, t != :ws, peer_sends?(d), into: MapSet.new(), do: d.type
+    for %{transport: t} = d <- descs,
+        # Neither non-RTP transport belongs in R. A WebSocket has no RTP leg at
+        # all; a data channel HAS one — same ICE, same DTLS — but no RTP ever
+        # arrives on it, so the server's "first packet received" event never
+        # fires and a data channel left in R would keep the leg waiting for a
+        # connectivity event that cannot come.
+        t not in [:ws, :sctp],
+        peer_sends?(d),
+        into: MapSet.new(),
+        do: d.type
   end
 
   # Called once the send plane is up for every media. With R empty no
@@ -1940,40 +1999,74 @@ defmodule MediaServer.Mendooze.Conn do
 
   defp start_receiving_all(state, cross) do
     Enum.reduce_while(state.medias, {:ok, state}, fn media, {:ok, st} ->
-      rtp_map = Sdp.local_rtp_map(media, offer_codecs(st, media, cross), dtmf?(st, media))
-
-      with {:ok, [port | rest]} <-
-             rpc(st, "EndpointStartReceiving", [
-               st.sess_id,
-               st.endpoint_id,
-               @media_int[media],
-               rtp_map
-             ]),
-           {:ok, [candidate | _]} <-
-             rpc(st, "GetMediaCandidates", [
-               st.sess_id,
-               st.endpoint_id,
-               @proto_rtp,
-               @media_int[media]
-             ]),
-           {:ok, ip, _cport} <- Sdp.parse_media_candidate(candidate) do
-        # returnVal[1] (when present) is the fmtp-per-payload-type struct the
-        # server accepted; nil on an older server → codec-table fallback.
-        accepted = Sdp.accepted_pts(rtp_map, List.first(rest))
-
-        {:cont,
-         {:ok,
-          %{
-            st
-            | local_ports: Map.put(st.local_ports, media, port),
-              local_ip: ip,
-              proposed_recv: Map.put(st.proposed_recv, media, rtp_map),
-              accepted: Map.put(st.accepted, media, accepted)
-          }}}
+      if media == :text and offer_text_transport(st) == :data_channel do
+        start_receiving_data_channel(st, media)
       else
-        {:error, _} = err -> {:halt, err}
+        start_receiving_rtp(st, media, cross)
       end
     end)
+  end
+
+  # The TEXT medium offered on a data channel: the same plane as the answering
+  # side opens, with no peer sctp-port to relay — nobody has told us one yet.
+  #
+  # A failure here is NOT the loss of the call: the medium is dropped from the
+  # offer and the rest stands, exactly as a text-over-WebSocket configuration
+  # failure does. A leg that cannot carry text still carries audio and video.
+  defp start_receiving_data_channel(state, media) do
+    case open_data_channel_plane(state, media, @sctp_port_unknown) do
+      {:ok, state, _dc} ->
+        {:cont, {:ok, state}}
+
+      {:error, reason} ->
+        Logger.warning(
+          module: __MODULE__,
+          cnx_tag: state.sess_tag,
+          message:
+            "could not offer text over a data channel (#{inspect(reason)}); " <>
+              "the medium is left out of the offer"
+        )
+
+        {:cont, {:ok, %{state | medias: List.delete(state.medias, media)}}}
+    end
+  end
+
+  defp start_receiving_rtp(state, media, cross) do
+    st = state
+    rtp_map = Sdp.local_rtp_map(media, offer_codecs(st, media, cross), dtmf?(st, media))
+
+    # No peer SDP yet on this leg: its side of the network is all that speaks.
+    with {:ok, st, profile} <- leg_profile(st, nil),
+         {:ok, [port | rest]} <-
+           rpc(
+             st,
+             "EndpointStartReceiving",
+             start_receiving_args(st, @media_int[media], rtp_map, nil, profile)
+           ),
+         {:ok, [candidate | _]} <-
+           rpc(st, "GetMediaCandidates", [
+             st.sess_id,
+             st.endpoint_id,
+             @proto_rtp,
+             @media_int[media]
+           ]),
+         {:ok, ip, _cport} <- Sdp.parse_media_candidate(candidate) do
+      # returnVal[1] (when present) is the fmtp-per-payload-type struct the
+      # server accepted; nil on an older server → codec-table fallback.
+      accepted = Sdp.accepted_pts(rtp_map, List.first(rest))
+
+      {:cont,
+       {:ok,
+        %{
+          st
+          | local_ports: Map.put(st.local_ports, media, port),
+            local_ip: ip,
+            proposed_recv: Map.put(st.proposed_recv, media, rtp_map),
+            accepted: Map.put(st.accepted, media, accepted)
+        }}}
+    else
+      {:error, _} = err -> {:halt, err}
+    end
   end
 
   # ── UAS receive plane: delegated negotiation (the offer is the menu) ────────
@@ -1990,6 +2083,86 @@ defmodule MediaServer.Mendooze.Conn do
         {:error, _} = err -> {:halt, err}
       end
     end)
+  end
+
+  # ── the data channel text leg (RFC 8865) ─────────────────────────────────────
+  #
+  # The other answer to the same problem as the WebSocket above, and the opposite
+  # shape: a WebSocket is a second connection beside the call, with its own port,
+  # its own URL and a token to guard it; a data channel is INSIDE the peer's
+  # `RTCPeerConnection` — same ICE, same DTLS, same port as any other leg, and
+  # only what travels inside changes. So there is nothing to sign, and this plane
+  # is opened like an RTP one.
+  #
+  # Four RPCs, and this order matters: the port must be a data channel one before
+  # its SCTP parameters mean anything, and `EndpointStartReceiving` must run
+  # before `GetMediaCandidates` because it is the call that carries the
+  # addressing profile (§6.7 bis).
+  #
+  # Shared by both directions — `remote_sctp_port` is the peer's when we answer,
+  # `@sctp_port_unknown` when we offer and nobody has told us yet.
+  defp open_data_channel_plane(state, media, remote_sctp_port) do
+    m = @media_int[media]
+
+    with {:ok, _} <-
+           rpc(state, "ConfigureMediaConnection", [
+             state.sess_id,
+             state.endpoint_id,
+             m,
+             @role_main,
+             @proto_sctp,
+             "",
+             "t140"
+           ]),
+         {:ok, [sctp_port, max_message_size | _]} <-
+           rpc(state, "SetupDataChannel", [
+             state.sess_id,
+             state.endpoint_id,
+             m,
+             remote_sctp_port
+           ]),
+         {:ok, state, profile} <- leg_profile(state, nil),
+         # No rtpMap: no payload type travels inside a data channel.
+         {:ok, [port | _rest]} <-
+           rpc(
+             state,
+             "EndpointStartReceiving",
+             start_receiving_args(state, m, %{}, nil, profile)
+           ),
+         {:ok, candidates} when candidates != [] <-
+           rpc(state, "GetMediaCandidates", [
+             state.sess_id,
+             state.endpoint_id,
+             @proto_sctp,
+             m
+           ]),
+         {:ok, ip, _cport} <-
+           Sdp.parse_media_candidate(candidates |> List.last() |> to_string()) do
+      dc = %{sctp_port: sctp_port, max_message_size: max_message_size}
+
+      Logger.info(
+        module: __MODULE__,
+        cnx_tag: state.sess_tag,
+        message:
+          "#{media} on a data channel: our sctp-port #{sctp_port}, " <>
+            "max-message-size #{max_message_size}, udp port #{port}"
+      )
+
+      {:ok,
+       %{
+         state
+         | local_ports: Map.put(state.local_ports, media, port),
+           data_channels: Map.put(state.data_channels, media, dc),
+           local_ip: state.local_ip || ip
+       }, dc}
+    else
+      # An older media server (the methods do not exist), one that answered
+      # something else than the two values SetupDataChannel promises, or a leg it
+      # could not place. The catch-all is not decoration: an unmatched `with`
+      # clause raises, and a server that does not know a method answers `{:ok, []}`.
+      other ->
+        {:error, other}
+    end
   end
 
   # Delegated negotiation (the MCU adapter's P8a, transposed): no local codec
@@ -2036,19 +2209,23 @@ defmodule MediaServer.Mendooze.Conn do
                token,
                "t140"
              ]),
+           # StartReceiving FIRST: it is the call that carries the addressing
+           # profile, and the server applies it there. Asking for the candidates
+           # before it would publish a URL bearing the DEFAULT profile's address
+           # (§6.7 bis, "poser le profil avant de publier le port").
+           {:ok, state, profile} <- leg_profile(state, nil),
+           {:ok, [port | _rest]} <-
+             rpc(
+               state,
+               "EndpointStartReceiving",
+               start_receiving_args(state, m, rtp_map, nil, profile)
+             ),
            {:ok, candidates} when candidates != [] <-
              rpc(state, "GetMediaCandidates", [
                state.sess_id,
                state.endpoint_id,
                @proto_ws,
                m
-             ]),
-           {:ok, [port | _rest]} <-
-             rpc(state, "EndpointStartReceiving", [
-               state.sess_id,
-               state.endpoint_id,
-               m,
-               rtp_map
              ]) do
         # `<base>/jsr309/<sessionId>/<token>` — the path the server's WebSocket
         # handler parses, and the token is the only thing tying that URL to this
@@ -2102,6 +2279,42 @@ defmodule MediaServer.Mendooze.Conn do
     end
   end
 
+  defp open_offered_receive(state, %{transport: :sctp} = desc) do
+    media = desc.type
+
+    case open_data_channel_plane(state, media, Map.get(desc, :sctp_port, @sctp_port_unknown)) do
+      {:ok, state, dc} ->
+        {:ok, state,
+         %{
+           transport: :sctp,
+           sctp_port: dc.sctp_port,
+           max_message_size: dc.max_message_size,
+           # RFC 8864: the channel the peer declared, if it declared one. Echoed
+           # as such; `nil` means it opens the channel in band with DCEP, and the
+           # media server picks it out by its `t140` subprotocol.
+           dcmap: Map.get(desc, :dcmap),
+           rtp_map: %{},
+           send_map: %{},
+           codecs: ["T140"],
+           dtmf: false
+         }}
+
+      {:error, reason} ->
+        # The text is lost, not the call. Unlike the WebSocket case the section is
+        # DECLINED with port 0 and never omitted: it is in the peer's real offer,
+        # and libwebrtc counts the answer's m= lines against its own.
+        Logger.warning(
+          module: __MODULE__,
+          cnx_tag: state.sess_tag,
+          message:
+            "could not configure text over a data channel (#{inspect(reason)}); " <>
+              "the section is declined, the call stands"
+        )
+
+        {:skip, state}
+    end
+  end
+
   defp open_offered_receive(state, desc) do
     media = desc.type
     m = @media_int[media]
@@ -2117,7 +2330,8 @@ defmodule MediaServer.Mendooze.Conn do
         # codec properties when it runs)
         relay_offered_fmtp(state, m, desc, rtp_map)
 
-        with {:ok, [port | rest]} <- start_receiving_offered(state, m, desc, rtp_map),
+        with {:ok, state, profile} <- leg_profile(state, desc),
+             {:ok, [port | rest]} <- start_receiving_offered(state, m, desc, rtp_map, profile),
              {:ok, [candidate | _]} <-
                rpc(state, "GetMediaCandidates", [
                  state.sess_id,
@@ -2178,7 +2392,7 @@ defmodule MediaServer.Mendooze.Conn do
               # the offer's own format order, kept for the places that must agree
               # about the caller's preference: the answer's rtpmap order and the
               # payload type we send on
-              |> Map.put(:fmt_order, Map.get(desc, :raw_fmt, []))
+              |> Map.put(:fmt_order, Sdp.fmt_order(desc))
               |> Map.put(:dtmf_pts, Map.get(desc, :dtmf_pts, %{}))
 
             {:ok, st, Map.put(neg, :send_map, send_map(media, neg))}
@@ -2196,29 +2410,160 @@ defmodule MediaServer.Mendooze.Conn do
   # parameter faults on the extra argument, so the legacy 4-parameter form is
   # retried once — the codec.* relay (relay_offered_fmtp/4) already handed that
   # server the fmtp per codec, its own best granularity.
-  defp start_receiving_offered(state, m, desc, rtp_map) do
+  #
+  # That retry is for the offer struct ALONE. A leg carrying an addressing profile
+  # never falls back (§6.7 bis): the older form would place its media on the
+  # server's default interface, and answer 200 with an address the peer may have
+  # no route to, with nothing to say so. A profile is only ever asked of a server
+  # that answered GetNetworkProfiles, so the case is unreachable rather than
+  # merely refused — and it stays written down.
+  defp start_receiving_offered(state, m, desc, rtp_map, profile) do
     offer_fmtp = Map.take(Map.get(desc, :fmtp_raw, %{}), Map.keys(rtp_map))
-    args = [state.sess_id, state.endpoint_id, m, rtp_map]
+    args = start_receiving_args(state, m, rtp_map, offer_fmtp, profile)
 
-    if offer_fmtp == %{} do
-      rpc(state, "EndpointStartReceiving", args)
-    else
-      case rpc(state, "EndpointStartReceiving", args ++ [%{"fmtp" => offer_fmtp}]) do
-        {:ok, _} = ok ->
-          ok
+    cond do
+      not is_nil(profile) or offer_fmtp == %{} ->
+        rpc(state, "EndpointStartReceiving", args)
 
-        {:error, reason} ->
-          Logger.warning(
-            module: __MODULE__,
-            cnx_tag: state.sess_tag,
-            message:
-              "EndpointStartReceiving with the offer struct failed (#{inspect(reason)}); " <>
-                "retrying the legacy form — media server predates the offer parameter"
-          )
+      true ->
+        case rpc(state, "EndpointStartReceiving", args) do
+          {:ok, _} = ok ->
+            ok
 
-          rpc(state, "EndpointStartReceiving", args)
-      end
+          {:error, reason} ->
+            Logger.warning(
+              module: __MODULE__,
+              cnx_tag: state.sess_tag,
+              message:
+                "EndpointStartReceiving with the offer struct failed (#{inspect(reason)}); " <>
+                  "retrying the legacy form — media server predates the offer parameter"
+            )
+
+            rpc(state, "EndpointStartReceiving", [state.sess_id, state.endpoint_id, m, rtp_map])
+        end
     end
+  end
+
+  # The addressing profile this leg asks the media server for (§6.7 bis), decided
+  # ONCE — on its first StartReceiving — and then repeated verbatim: the server
+  # fixes it per leg, because in symmetric RTP the socket is the same in both
+  # directions, and it refuses a second, different one rather than rebind a media
+  # under a port it has already published.
+  #
+  # **The node's configured family decides nothing.** It describes every interface
+  # at once, and on a B2BUA bridging two of them it is right for one leg and wrong
+  # for the other — a session carrying two different profiles is the objective of
+  # docs/design/multi-interface.md, not an edge case. Three parties decide, each
+  # asked only what it alone knows:
+  #
+  #  * **the peer's offer**, when there is one, says which families it can receive
+  #    media on — the permission. Under ICE the `c=` holds only the default
+  #    candidate the peer elected, often a private address, and the `a=candidate`
+  #    lines name the rest; `Sdp.peer_families/1` reads both;
+  #  * **the address of ours this peer reached** (`sip_profile`) says which of our
+  #    interfaces it demonstrably has a route to — the preference. It only ever
+  #    REORDERS what the offer allows, since announcing a family the peer never
+  #    offered would be media sent nowhere. On the leg we OFFER first there is no
+  #    peer SDP yet, and it is the only thing that speaks;
+  #  * **the media server** says which profiles it carries (§6.7 ter) — the
+  #    availability.
+  #
+  # Nothing outside that intersection is served, and an empty one FAILS the leg: a
+  # fallback would place the media on the wrong interface and answer 200 with an
+  # address the peer cannot reach, with nothing to say so until the silence.
+  #
+  # Three cases ask for no profile at all, each leaving the server on its own
+  # default — exactly what a controller that never heard of profiles obtains: a
+  # server that does not carry the notion, an offer naming no address of either
+  # family, and a leg on which nothing states a side.
+  defp leg_profile(%{address_profile: profile} = leg, _desc) when is_binary(profile),
+    do: {:ok, leg, profile}
+
+  defp leg_profile(%{network_profiles: profiles} = leg, _desc) when not is_map(profiles),
+    do: {:ok, leg, nil}
+
+  defp leg_profile(leg, desc) do
+    case profile_candidates(leg, desc) do
+      [] ->
+        {:ok, leg, nil}
+
+      candidates ->
+        case Enum.find(candidates, &get_in(leg.network_profiles, [&1, :available])) do
+          nil -> {:error, {:profile_unavailable, Enum.join(candidates, ", ")}}
+          name -> {:ok, %{leg | address_profile: name}, name}
+        end
+    end
+  end
+
+  # No peer SDP — the leg we offer on — so what this leg states about itself is all
+  # there is to go on. For a leg we placed that is `address_profile:`, the target's
+  # own profile, which is exactly the interface the callee can reach us on.
+  defp profile_candidates(%{sip_profile: local}, nil), do: List.wrap(local)
+
+  defp profile_candidates(%{sip_profile: local} = leg, desc) do
+    case Enum.map(Sdp.peer_families(desc), &profile_name(&1, leg_side(leg))) do
+      [] -> []
+      offered -> if local in offered, do: Enum.uniq([local | offered]), else: offered
+    end
+  end
+
+  # The side is the LOCAL address's — ours, the one this peer reached — because an
+  # offer says which families a peer can receive media on and nothing about which
+  # side of our network it sits on. The name itself is `MediaServer`'s to spell.
+  defp profile_name(family, side), do: MediaServer.profile_name(family, side)
+
+  # On a leg we ANSWER, both halves come from the local address this peer reached,
+  # and neither is configured: the address states its family, and
+  # `SIP.NetUtils.net_side/1` states its side from the `internal` listeners'
+  # networks.
+  #
+  # On a leg we PLACE there is no such address, and `address_profile:` carries the
+  # answer instead — the profile of the target we are about to reach, which the
+  # framework knows and this connection does not. It wins when present: a stated
+  # profile is never worse than a derived one.
+  defp sip_profile(opts) do
+    case Keyword.get(opts, :address_profile) do
+      stated when is_binary(stated) ->
+        stated
+
+      _ ->
+        MediaServer.leg_profile_name(opts)
+    end
+  end
+
+  # The side every candidate of this leg carries. `sip_profile` already holds the
+  # pair, so read it back rather than deriving the side a second time.
+  defp leg_side(%{sip_profile: local}) when is_binary(local) do
+    if String.starts_with?(local, "internal"), do: :internal, else: :public
+  end
+
+  defp leg_side(_leg), do: :public
+
+  # `profile` is positional and SIXTH (xmlrpc_jsr309_api.md §6.7 bis), so `offer`
+  # has to be sent to reach it — an empty struct when the offer states no fmtp.
+  # With no profile to ask for, the call is byte-for-byte the one a controller
+  # that never heard of profiles makes.
+  # `profile` is positional and SEVENTH on EndpointStartSending, and it must be the
+  # one StartReceiving already fixed for this leg: in symmetric RTP the socket is
+  # the same in both directions, and the server refuses a second, different one
+  # (§6.7 bis). Repeating it is a no-op, which is why it is read rather than
+  # re-derived.
+  defp start_sending_args(leg, m, ip, port, send_map) do
+    base = [leg.sess_id, leg.endpoint_id, m, ip, port, send_map]
+
+    case leg.address_profile do
+      nil -> base
+      profile -> base ++ [profile]
+    end
+  end
+
+  defp start_receiving_args(leg, m, rtp_map, offer_fmtp, nil) do
+    base = [leg.sess_id, leg.endpoint_id, m, rtp_map]
+    if offer_fmtp in [nil, %{}], do: base, else: base ++ [%{"fmtp" => offer_fmtp}]
+  end
+
+  defp start_receiving_args(leg, m, rtp_map, offer_fmtp, profile) do
+    [leg.sess_id, leg.endpoint_id, m, rtp_map, %{"fmtp" => offer_fmtp || %{}}, profile]
   end
 
   # The `codec.<name>.fmtp` channel — per CODEC, the coarser of the two relays —
@@ -2233,7 +2578,7 @@ defmodule MediaServer.Mendooze.Conn do
 
     props =
       rtp_map
-      |> Enum.sort_by(&Sdp.pt_rank(&1, Map.get(desc, :raw_fmt, [])))
+      |> Enum.sort_by(&Sdp.pt_rank(&1, Sdp.fmt_order(desc)))
       |> Enum.reduce(%{}, fn {pt, code}, acc ->
         with true <- code != @dtmf_code,
              params when is_binary(params) and params != "" <- Map.get(fmtp_raw, pt),
@@ -2341,6 +2686,12 @@ defmodule MediaServer.Mendooze.Conn do
   defp apply_remote_media(state, %{transport: :ws}, neg),
     do: {:ok, state, neg}
 
+  # A data channel leg is NOT in that case, and goes through the ordinary clause
+  # below on purpose: its StartSending is what posts the destination, and without
+  # it neither ICE nor the DTLS handshake has anywhere to go. Its send map is
+  # empty — no payload type travels inside a data channel — and the watchdog is
+  # the application's to arm, which it never does on text.
+
   # Applies the §9 remote-side steps for one media: transport properties, the
   # peer's security material, StartSending, then the watchdog — recorded last,
   # once the answer has been processed, and pushed to the server only if the call
@@ -2351,14 +2702,11 @@ defmodule MediaServer.Mendooze.Conn do
     with :ok <- set_rtp_properties(state, m, desc),
          :ok <- set_remote_crypto(state, m, desc),
          {:ok, _} <-
-           rpc(state, "EndpointStartSending", [
-             state.sess_id,
-             state.endpoint_id,
-             m,
-             desc.ip,
-             desc.port,
-             neg.send_map
-           ]),
+           rpc(
+             state,
+             "EndpointStartSending",
+             start_sending_args(state, m, desc.ip, desc.port, neg.send_map)
+           ),
          state = note_watchdog(state, desc),
          :ok <- apply_watchdog(state, desc.type) do
       {:ok, note_negotiated(state, desc.type, neg) |> note_h264_mode(desc), neg}
@@ -2487,10 +2835,10 @@ defmodule MediaServer.Mendooze.Conn do
   # *receive* watchdog can observe. A caller holding with `a=sendonly` keeps
   # sending (music on hold), so it stays armed; what starves our reception is the
   # peer declaring it will not send — `a=recvonly`, `a=inactive` — or blackholing
-  # the media with `c=0.0.0.0` (RFC 3264 §8.4, the legacy hold).
+  # the media (RFC 3264 §8.4, the legacy hold).
   defp peer_sends?(desc) do
     Map.get(desc, :direction, :sendrecv) not in [:recvonly, :inactive] and
-      Map.get(desc, :ip) != "0.0.0.0"
+      not Sdp.blackholed?(desc)
   end
 
   # What this media's watchdog must be, from the description just applied: the
@@ -2729,6 +3077,46 @@ defmodule MediaServer.Mendooze.Conn do
   # ── SDP spec builders ───────────────────────────────────────────────────────
 
   defp offer_media_spec(state, media, cross) do
+    if Map.has_key?(state.data_channels, media) do
+      dc_offer_media_spec(state, media)
+    else
+      rtp_offer_media_spec(state, media, cross)
+    end
+  end
+
+  # The TEXT medium offered on a data channel (RFC 8865). Real media, so a real
+  # transport plane — our fingerprint, `a=setup:actpass` as in any offer of ours,
+  # our ICE credentials and our host candidates — and the SCTP parameters the
+  # media server answered.
+  #
+  # NO `a=dcmap` (RFC 8864), deliberately: declaring the channel in the SDP is
+  # what tells a peer NOT to open it in band, and our media server binds its text
+  # channel on the DCEP `OPEN` (SPEC §13.4). Announcing a channel we would then
+  # never see opened is the one way to make this section fail silently. A plain
+  # `createDataChannel("t140", {protocol: "t140"})` is what the peer has to do,
+  # and it is also what a browser does by default.
+  defp dc_offer_media_spec(state, media) do
+    dc = Map.fetch!(state.data_channels, media)
+    port = Map.fetch!(state.local_ports, media)
+
+    %{
+      data_channel: %{
+        sctp_port: dc.sctp_port,
+        max_message_size: dc.max_message_size,
+        dcmap: nil
+      },
+      type: :application,
+      port: port,
+      protocol: "UDP/DTLS/SCTP",
+      direction: :sendrecv,
+      crypto: local_crypto_spec(state, :actpass),
+      ice: state.local_ice,
+      mid: offer_mid(state, media),
+      candidates: Sdp.host_candidates(state.local_ip, port, true)
+    }
+  end
+
+  defp rtp_offer_media_spec(state, media, cross) do
     base =
       %{
         type: media,
@@ -2814,6 +3202,12 @@ defmodule MediaServer.Mendooze.Conn do
       match?(%{transport: :ws}, desc) and Map.has_key?(negotiated, desc.type) ->
         ws_answer_spec(state, desc)
 
+      # A configured data channel section is real media: the port the server
+      # bound, its own SCTP parameters, and the transport plane of any DTLS/ICE
+      # leg. Tested before `answerable?/2`, which such a section also satisfies.
+      match?(%{transport: :sctp}, desc) and Map.has_key?(negotiated, desc.type) ->
+        dc_answer_spec(state, negotiated, desc)
+
       answerable?(desc, state.medias) and Map.has_key?(negotiated, desc.type) ->
         answer_media_spec(state, negotiated, desc)
 
@@ -2839,6 +3233,37 @@ defmodule MediaServer.Mendooze.Conn do
       setup: :passive,
       direction: Sdp.reverse_direction(desc.direction),
       mid: Map.get(desc, :mid)
+    }
+  end
+
+  # The answer to a data channel offer (RFC 8841). The `m=` line goes back to
+  # saying `application` — the medium this section carries is the call's text, and
+  # `sdp_type` is the one place the two disagree — and it carries a real transport
+  # plane: our fingerprint, our setup role, our ICE credentials.
+  #
+  # `a=sctp-port` and `a=max-message-size` are the SERVER's, never a constant
+  # written here. No `a=dcmap` is echoed even when the peer sent one: announcing
+  # the channel in the SDP is what tells a peer NOT to open it in band with DCEP,
+  # and the media server binds its text channel on the DCEP `OPEN` (SPEC §13.4).
+  defp dc_answer_spec(state, negotiated, desc) do
+    neg = Map.fetch!(negotiated, desc.type)
+
+    %{
+      data_channel: %{
+        sctp_port: neg.sctp_port,
+        max_message_size: neg.max_message_size,
+        dcmap: nil
+      },
+      type: Map.get(desc, :sdp_type, :application),
+      port: Map.fetch!(state.local_ports, desc.type),
+      # mirror the offered spelling (RFC 8841 defines two)
+      protocol: desc.protocol,
+      direction: Sdp.reverse_direction(desc.direction),
+      crypto: answer_crypto(state, desc),
+      ice: state.local_ice,
+      mid: Map.get(desc, :mid),
+      candidates:
+        Sdp.host_candidates(state.local_ip, Map.fetch!(state.local_ports, desc.type), true)
     }
   end
 
@@ -2868,7 +3293,11 @@ defmodule MediaServer.Mendooze.Conn do
   # peer knows *which* of its sections we turned down.
   defp reject_media_spec(desc) do
     %{
-      type: desc.type,
+      # The `m=` line says what the OFFER said. A data channel section is the
+      # call's text and its descriptor says so, but its line reads `application`:
+      # a rejection that renamed it would not be the section the peer offered,
+      # and libwebrtc matches answer sections to its own by that name.
+      type: Map.get(desc, :sdp_type, desc.type),
       protocol: desc.protocol,
       reject_fmt: desc.raw_fmt,
       mid: Map.get(desc, :mid)
@@ -2932,7 +3361,7 @@ defmodule MediaServer.Mendooze.Conn do
         # order IS a preference statement, and a gateway has none of its own.
         %{neg | rtp_map: accepted_map}
         |> Map.put(:dtmf_pts, Map.get(desc, :dtmf_pts, %{}))
-        |> Map.put(:fmt_order, Map.get(desc, :raw_fmt, []))
+        |> Map.put(:fmt_order, Sdp.fmt_order(desc))
       )
 
     fmtp = for {pt, params} <- accepted, params != "", into: %{}, do: {pt, params}
@@ -2949,7 +3378,7 @@ defmodule MediaServer.Mendooze.Conn do
         desc.type,
         neg
         |> Map.put(:dtmf_pts, Map.get(desc, :dtmf_pts, %{}))
-        |> Map.put(:fmt_order, Map.get(desc, :raw_fmt, []))
+        |> Map.put(:fmt_order, Sdp.fmt_order(desc))
       )
 
     fmtp =
@@ -3199,7 +3628,14 @@ defmodule MediaServer.Mendooze.Conn do
 
   defp do_player_cmd(:stop, ref, player, state) do
     rpc(state, "PlayerStop", [state.sess_id, player.player_id])
-    detach_all(state)
+    # The player's OWN leg: `detach_all/1` names an endpoint, and the connection
+    # carries the inbound one, so detaching from `state` here unwired the caller
+    # while stopping an announcement played to the callee.
+    case one_leg(state, player.leg) do
+      {:ok, l} -> detach_all(l)
+      {:error, _} -> :ok
+    end
+
     rpc(state, "PlayerClose", [state.sess_id, player.player_id])
     rpc(state, "PlayerDelete", [state.sess_id, player.player_id])
     {:reply, :ok, %{state | players: Map.delete(state.players, ref)}}
@@ -3228,7 +3664,11 @@ defmodule MediaServer.Mendooze.Conn do
   defp do_recorder_cmd(:stop, ref, recorder, state) do
     rpc(state, "RecorderStop", [state.sess_id, recorder.recorder_id])
 
-    Enum.each(state.medias, fn media ->
+    # Detach exactly what was attached: the medias of the recorder's OWN leg.
+    # `state.medias` is the inbound leg's list, and two legs of a gateway call
+    # do not carry the same medias — a text leg recorded against an audio-only
+    # `state.medias` kept its text source attached after the file was closed.
+    Enum.each(recorder_medias(state, recorder), fn media ->
       rpc(state, "RecorderDettach", [state.sess_id, recorder.recorder_id, @media_int[media]])
     end)
 
@@ -3244,6 +3684,16 @@ defmodule MediaServer.Mendooze.Conn do
     each_media_rpc(state, fn m ->
       {"EndpointAttachToPlayer", [state.sess_id, state.endpoint_id, player_id, m]}
     end)
+  end
+
+  # What a recorder is attached to, which is what stopping it must detach. Falls
+  # back to the connection list only if the leg is already gone, where detaching
+  # too much is harmless and detaching nothing would not be.
+  defp recorder_medias(state, recorder) do
+    case one_leg(state, recorder.leg) do
+      {:ok, l} -> l.medias
+      {:error, _} -> state.medias
+    end
   end
 
   defp attach_recorder_all(state, recorder_id) do
@@ -3290,6 +3740,16 @@ defmodule MediaServer.Mendooze.Conn do
 
   defp cleanup_on_error(state, player_id, {:error, _} = err) do
     rpc(state, "PlayerDelete", [state.sess_id, player_id])
+    err
+  end
+
+  # The same for a recorder whose attach failed halfway: without this the
+  # server keeps a Recorder nothing holds a handle to, and a call recording
+  # both of its legs leaks one per failed attempt.
+  defp delete_recorder_on_error(_state, _recorder_id, :ok), do: :ok
+
+  defp delete_recorder_on_error(state, recorder_id, {:error, _} = err) do
+    rpc(state, "RecorderDelete", [state.sess_id, recorder_id])
     err
   end
 
@@ -3471,6 +3931,61 @@ defmodule MediaServer.Mendooze.Conn do
   # mid — which is the 488 of 2026-08-21: the callee turned its camera on, the
   # relayed re-offer was refused, and the call died on a leg that was working.
   defp webrtc?(state), do: not is_nil(state.local_ice)
+
+  @doc false
+  # The transport the TEXT medium is OFFERED on, when this leg makes the offer.
+  # (`:text_transport` in the leg's opts.)
+  #
+  #  * `:data_channel` — inside our own DTLS and ICE, as
+  #    `m=application … UDP/DTLS/SCTP webrtc-datachannel` (RFC 8865). **The
+  #    default on a WebRTC leg**, and the only thing a browser can actually
+  #    receive: `RTCPeerConnection` has no `m=text` on an RTP profile;
+  #  * `:rtp` — `m=text` with T.140 and the RFC 4103 redundancy. The default off
+  #    WebRTC, and what a SIP Total Conversation endpoint speaks.
+  #
+  # A WebSocket is never OFFERED. It is a door we open when a peer asks for one
+  # (its own `m=text TCP/WS` section, answered with our URL); offering one would
+  # publish an address nobody asked for, and no client is built to look for it in
+  # an offer.
+  #
+  # A data channel needs DTLS. Asking for one off a WebRTC leg is a configuration
+  # mistake, not a wish to honour silently: it is logged and the offer falls back
+  # to RTP, which is the only thing that leg can carry.
+  defp offer_text_transport(state) do
+    case Keyword.get(state.opts, :text_transport, :default) do
+      :default ->
+        if webrtc?(state), do: :data_channel, else: :rtp
+
+      :data_channel ->
+        if webrtc?(state) do
+          :data_channel
+        else
+          Logger.warning(
+            module: __MODULE__,
+            cnx_tag: state.sess_tag,
+            message:
+              "text_transport: :data_channel asked for on a leg without DTLS/ICE; " <>
+                "a data channel cannot exist there — offering T.140 over RTP instead"
+          )
+
+          :rtp
+        end
+
+      :rtp ->
+        :rtp
+
+      other ->
+        Logger.warning(
+          module: __MODULE__,
+          cnx_tag: state.sess_tag,
+          message:
+            "unknown text_transport #{inspect(other)}; expected :data_channel or :rtp — " <>
+              "offering T.140 over RTP"
+        )
+
+        :rtp
+    end
+  end
 
   # Which RTP profile a NON-WebRTC offer is carried in (§7.5). `:avp` — plain
   # RTP — is the default and what every caller got before P5.

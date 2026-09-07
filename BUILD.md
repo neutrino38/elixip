@@ -375,6 +375,13 @@ packaging/dist/kelixip-mod-auth_db-1.3.0-1.el9.x86_64.rpm     28K
 packaging/dist/kelixip-mod-mcu-1.3.0-1.el9.x86_64.rpm        255K
 ```
 
+The `-1` above is the **Release**, and it comes from `packaging/rpm/kelixip.spec`
+unchanged — bump it for every build that leaves this machine. Two builds of one version
+must never share a Release: rpm identifies a package by its NEVRA, so installing over an
+already-installed one is a no-op that leaves the older payload in place while `rpm -q`
+reports the version you expected. When a NEVRA does have to be replaced in place,
+`dnf reinstall ./kelixip-*.rpm` is the way; plain `install` will not do it.
+
 ### Build in a container instead
 
 No AL9 host, or a reproducible CI build:

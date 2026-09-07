@@ -151,6 +151,18 @@ pool's `healthy` are two different healths of the same box (see
 [administration](administration.md)). A module contributes its own shape; the
 core adds nothing to it.
 
+`server` is the media server's own answer on its `GET /status/general` endpoint,
+passed through **verbatim** — version, real codec capabilities, text transports,
+encryption, addressing profiles, load. `"unknown"` on a server that does not
+describe itself. Two warnings for whoever consumes it:
+
+* `capabilities.video.decode` and `capabilities.video.encode` are different
+  lists (the server decodes codecs it cannot encode), so read the one matching
+  the direction you need;
+* the body is the media server's schema, not ours. It is not reshaped here, on
+  purpose: rewriting it would make this a copy, and a copy drifts. The field
+  reference is the mediaserver repository, `docs/reference/status-http.md`.
+
 ```json
 {
   "name": "mcu1",

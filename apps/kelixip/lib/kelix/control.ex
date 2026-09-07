@@ -74,39 +74,32 @@ defmodule Kelix.Control do
     fsm = safe(fn -> Map.new(SIP.Scenario.Monitor.calls(), &{&1.slot, &1}) end, %{})
 
     for row <- safe(fn -> Kelix.InstancePool.list() end, []) do
-      Map.merge(row, fsm_fields(Map.get(fsm, row.id)))
+      Kelix.InstancePool.join_row(row, Map.get(fsm, row.id))
     end
   end
 
-  # The three call-shape fields default to a value and not to a blank: a scenario
-  # that negotiated no media, connects to no media server and dials nobody is the
-  # ordinary case, and "n/a" says so where an empty cell reads as "not measured".
-  # Same defaults as `SIP.Scenario.Monitor`, for the row it has nothing on.
-  @empty_fsm %{
-    scenario: "",
-    state: "",
-    event: "",
-    command: "",
-    account: "",
-    medias: "n/a",
-    mediaserver: "none",
-    outbound: "n/a"
-  }
+  @doc """
+  Subscribe `pid` to scenario changes as they happen (kelescope's live monitor —
+  `docs/design/kelixip_liveview.md`), on the model of
+  `Kelix.Mod.Registrar.subscribe_register_event/2`. Returns the current snapshot
+  (`monitor/0`'s shape); `pid` then receives `{:kelix_monitor, {:upsert, row}}`
+  (rows in that same shape) as a scenario appears or its FSM state/event/command/
+  account/media changes, and `{:kelix_monitor, {:remove, id}}` when it ends — no
+  polling needed.
 
-  @fsm_keys [
-    :scenario,
-    :state,
-    :event,
-    :command,
-    :account,
-    :medias,
-    :mediaserver,
-    :outbound
-  ]
+  `pid` can be a pid on another node (a clustered kelescope): `send/2` crosses
+  nodes transparently once they share a cookie, and losing that connection is
+  what drops the subscription (`Kelix.InstancePool` monitors `pid`).
+  """
+  @spec subscribe_monitor(pid()) :: [map]
+  def subscribe_monitor(pid) do
+    Kelix.InstancePool.subscribe_monitor(pid)
+    monitor()
+  end
 
-  defp fsm_fields(nil), do: @empty_fsm
-
-  defp fsm_fields(entry), do: Map.merge(@empty_fsm, Map.take(entry, @fsm_keys))
+  @doc "Stop a subscription started by `subscribe_monitor/1`."
+  @spec unsubscribe_monitor(pid()) :: :ok
+  def unsubscribe_monitor(pid), do: Kelix.InstancePool.unsubscribe_monitor(pid)
 
   @doc """
   Every served domain and its registrations (`kelictl registration list`), in
@@ -292,8 +285,18 @@ defmodule Kelix.Control do
   end
 
   # The configured entry (name/adapter/url), the operator switch (`enabled`), the
-  # pool's own probe (`healthy`) and what each module driving media servers says
-  # about this one.
+  # pool's own probe (`healthy`), what the SERVER says about itself (`server`),
+  # and what each module driving media servers says about this one.
+  #
+  # `server` is the decoded `/status/general` body, exactly as the media server
+  # answered it — version, real codec capabilities per direction, encryption,
+  # addressing profiles, load. `:unknown` on a server that does not describe
+  # itself. It is deliberately NOT reshaped here: a controller-side rewriting of
+  # a capability list is a copy, and a copy drifts.
+  #
+  # The addressing profiles are read from that body and from nowhere else, even
+  # though the pool keeps its own copy for selection: showing two separately
+  # cached readings of one table would let the view contradict itself.
   defp describe_mediaserver(entry, modules) do
     %{
       name: entry.name,
@@ -301,6 +304,7 @@ defmodule Kelix.Control do
       url: entry.url,
       enabled: entry.enabled,
       healthy: Map.get(entry, :healthy, true),
+      server: Map.get(entry, :server_status, :unknown),
       modules: module_mediaserver_views(modules, entry.name)
     }
   end

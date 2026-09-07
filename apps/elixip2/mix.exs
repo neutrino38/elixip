@@ -4,7 +4,7 @@ defmodule SIPParser.MixProject do
   def project do
     [
       app: :elixip2,
-      version: "1.5.1",
+      version: "1.5.2",
       elixir: "~> 1.15",
       # Umbrella: share the root _build / config / deps / lockfile
       build_path: "../../_build",
@@ -41,8 +41,12 @@ defmodule SIPParser.MixProject do
       # HTTP client for the HTTP.Session scenario mixin (http_GET). Req 0.6 is
       # the current line; it brings Finch/NimblePool for connection pooling.
       {:req, "~> 0.6"},
-      # Fork adding active mode for WebSocket (delivers {:web, socket, data} to the owner)
-      {:socket2, github: "neutrino38/elixir-socket", branch: "feat/active-ws"},
+      # Our fork's master. It carries what upstream lacks and we depend on: active
+      # mode for WebSocket (delivers {:web, socket, data} to the owner), IPv6 —
+      # address literals, IPv6reference parsing, the UDP v6only option —, a
+      # transport_accept a server can bound its handshake with, and the options
+      # mutual TLS needs on both ends.
+      {:socket2, github: "neutrino38/elixir-socket", branch: "master"},
       # 1.2 parses the m= fmt list as payload types for every RTP profile and
       # accepts the a=fingerprint hash-func token case-insensitively — both used
       # to be worked around in MediaServer.Mendooze.Sdp.

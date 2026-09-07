@@ -103,6 +103,45 @@ changing `RELEASE_NODE` in one place is enough.
 > post-install script generates `/usr/lib/kelixip/releases/COOKIE` from `/dev/urandom`
 > (0640 `root:kelixip`), keeps it across upgrades and removes it on erase.
 
+### SELinux (Alma Linux)
+
+Alma Linux 9 runs SELinux **Enforcing**, and the release lives under `/usr/lib`,
+where every file is labelled `lib_t`. That label is the entry point of no domain:
+systemd execs `bin/kelixip` and the BEAM stays in systemd's own `init_t` domain,
+where the Erlang distribution may not bind its listen socket. The node then exits
+during boot:
+
+```
+Protocol 'inet_tcp': register/listen error: eacces
+```
+
+The post-install script labels the two launcher directories `bin_t`, which is what
+`init_t` transitions to `unconfined_service_t` from (it needs
+`policycoreutils-python-utils`, a package dependency):
+
+```bash
+semanage fcontext -a -t bin_t "/usr/lib/kelixip/bin(/.*)?"
+semanage fcontext -a -t bin_t "/usr/lib/kelixip/erts-[^/]+/bin(/.*)?"
+restorecon -R /usr/lib/kelixip/bin /usr/lib/kelixip/erts-*/bin
+```
+
+Those two directories only — the ERTS shared objects stay `lib_t`. Check the domain
+the service actually got:
+
+```bash
+ps -eZ | grep beam.smp        # expect unconfined_service_t
+```
+
+`unconfined_service_t` is unrestricted, so **nothing else needs an SELinux rule**:
+what the service may read and write is decided by the POSIX modes of the layout
+table above — the scenario scripts (0644), the logs and the state directory (0750
+`kelixip:kelixip`), the TOML files and the environment file (`root:kelixip`, group
+readable), the cookie (0640 `root:kelixip`). `kelictl` needs no rule of its own
+(see [administration](administration.md#administration-with-kelictl)).
+
+A host that is `Permissive` or has SELinux disabled needs none of this. The
+labelling is applied anyway, and costs nothing.
+
 ### Upgrades
 
 `config.toml`, `domains.toml` and the environment file are **kept**: your version
@@ -155,9 +194,12 @@ Unknown keys are rejected too — a typo must not silently fall back to a defaul
 | Key | Type | Required | Meaning |
 |---|---|---|---|
 | `proto` | `udp` \| `tcp` \| `tls` \| `wss` | **yes** | Transport |
-| `addr` | IP address | no (`0.0.0.0`) | Bind address; must parse as an IP |
+| `addr` | IP address | no | Bound address, IPv4 or IPv6; it is what gives the listener its family. `0.0.0.0` = every IPv4 interface, `::` = every IPv6 one. **Absent** = both families, one socket each |
 | `port` | int > 0 | **yes** | Bind port |
 | `cert` / `key` | path | **yes for `tls`/`wss`** | Per-listener PEM cert and key. **Forbidden** on `udp`/`tcp` |
+| `tag` | `public` \| `internal` | no (`public`) | Which side of the network this listener sits on |
+| `networks` | list of CIDRs | no | The networks that define that side. When present it **replaces** the automatic detection |
+| `advertise` | IP | no | The **public face** of `addr` (1:1 NAT). Same family, and an explicit `addr` is required |
 
 ```toml
 [[listen]]
@@ -176,9 +218,30 @@ key   = "/etc/pki/kelixip/privkey.pem"
 > A listener that cannot bind (port busy, unreadable cert) **aborts the boot** —
 > a half-deaf server is worse than a failed start.
 >
-> UDP is **one socket per node** (the framework's single bidirectional UDP
-> transport): extra `udp` entries are ignored with a warning, and `addr` only
-> sets the IP advertised in Via/Contact — the socket itself listens everywhere.
+> The service reads `cert` and `key` as the unprivileged `kelixip` user, so a key
+> installed 0600 `root:root` aborts that boot. Give the group the read right:
+> `chown root:kelixip key.pem && chmod 0640 key.pem`. `/etc/kelixip/tls/` is
+> already 0750 `root:kelixip` for that purpose.
+>
+> UDP is **one socket per family**: a datagram only leaves through a socket of
+> its destination's family. A second `udp` entry of a family already bound is
+> ignored with a warning. An explicit `addr` binds that address and is what is
+> advertised in the Via and the Contact; without one the socket binds every
+> interface of that family and advertises the first local address it finds.
+>
+> An IPv6 listener names an explicit address:
+>
+> ```toml
+> [[listen]]
+> proto = "udp"
+> addr  = "2001:db8::1"
+> port  = 5060
+> ```
+>
+> One family per node for now, and it is the `udp` block that states it: an
+> outbound leg resolves a name in the family of that block's `addr`. So an IPv6
+> node names an IPv6 address there, and a node whose only IPv6 listener is tcp,
+> tls or wss still dials IPv4 first.
 
 #### `[module.<name>]` — loadable modules
 
@@ -249,7 +312,7 @@ load is a node that answers `503` to every call.
 | Key | Type | Meaning |
 |---|---|---|
 | `module` | string, required | Adapter: `mendooze`, `mockup`, or a `MediaServer.Behaviour` module. Only `mendooze` entries are usable for conferences |
-| `url` | string, required | Passed to the adapter's `connect/1`, e.g. `http://mcu1:8080` |
+| `url` | string, required | Passed to the adapter's `connect/1`, e.g. `http://mcu1:8080`. An IPv6 address goes **in brackets**: `http://[fd00::12]:8080` |
 | `enabled` | bool (default `true`) | Toggle without a restart (`kelictl mediaserver enable\|disable <name>`; `kelictl mediaserver list` shows the pool). Disabling stops **new** calls and conferences landing there; live ones stay |
 
 > No media address here. The address a media server announces in the SDP (`c=`
@@ -257,6 +320,24 @@ load is a node that answers `503` to every call.
 > **mandatory behind a NAT** — and it reports it to kelixip on each
 > `StartReceiving`. A media server too old to report it gets its calls refused
 > with `500` rather than answered with a guessed address.
+
+**IPv6.** Two facts about the media server, both of which bite at boot rather
+than during a call:
+
+- a server whose only public address is IPv6 needs `--default-profile publicv6`.
+  The historical default is `publicv4`, and a default profile that is
+  unavailable makes the media server refuse to start — deliberately, with the
+  reason on stdout;
+- `--internal-ip` restricts the XML-RPC control interface to the internal
+  address, so the `url` above must then name that address rather than a public
+  one or a loopback. With both an internal v4 and an internal v6, that interface
+  listens on the **v4** one.
+
+Without `--internal-ip` the control interface answers both families on one
+socket, so nothing needs configuring for a v4 and a v6 controller to reach the
+same server. A conference then asks for the profile matching each caller's own
+family, per leg, and a call whose family the server does not carry is refused
+rather than answered with an unreachable address.
 
 ```toml
 [mediaserver.pool.mcu1]
@@ -293,6 +374,121 @@ scrape it.
 | `enabled` | bool | `true` |
 | `addr` | IP | `127.0.0.1` |
 | `port` | 1..65535 | `9095` |
+
+##### `tag` and `networks` — the side of the network
+
+Two uses: announcing the right media address for the side the correspondent is
+on, and knowing which side that is.
+
+An `internal` listener **defines** the internal network. By default, by the
+subnet of the interface carrying its `addr`: `:inet.getifaddrs/0` returns the
+mask next to the address, so there is nothing to read in the routing table and no
+default gateway to set aside — it does not appear there.
+
+`networks` overrides that detection and **replaces** it. Two cases need it:
+
+- an internal network reached through a router, so attached to no interface;
+- an interface carrying a /16 while the internal network is a /24. A detection
+  you can only add to is a detection you cannot correct.
+
+An `internal` listener with **neither** `addr` nor `networks` is refused: it sits
+on every subnet, so it defines none, and reading it as "everything is internal"
+would silently empty the public side.
+
+```toml
+[[listen]]
+proto    = "udp"
+addr     = "10.20.0.5"
+port     = 5060
+tag      = "internal"
+#networks = ["10.20.0.0/24", "10.30.0.0/24"]
+```
+
+Any address falling in none of those networks is `public`. A node with no
+`internal` listener has one side, and it is the public one.
+
+##### `advertise` — one interface, two faces (1:1 NAT)
+
+A VM binds a private address and is reached at a public one. The operator knows
+that address — an AWS EIP does not move — and nothing on the machine can derive
+it, hence a key rather than a discovery.
+
+```toml
+[[listen]]
+proto     = "udp"
+addr      = "10.0.0.5"
+port      = 5060
+advertise = "203.0.113.9"
+tag       = "internal"      # 10.0.0.0/8 becomes the internal network
+```
+
+**This is not a flat substitution.** The same interface serves both sides: a UA
+on the private network and a UA on the Internet arrive on the same socket, since
+the NAT rewrote the destination. Each must therefore see the face it can reach:
+
+| the peer is… | what it receives in the Via, the Contact and the SDP |
+|---|---|
+| `public` (outside the internal networks) | `203.0.113.9` |
+| `internal` | `10.0.0.5` |
+| of an unknown address | `203.0.113.9` — a NATed node serves mostly the outside |
+
+A peer's side is read off **its** address, against the networks declared by the
+`internal` listeners (see `tag` above). With no internal network declared, every
+peer is public and `advertise` behaves as a plain substitution.
+
+The socket still binds `addr`, and the transport keeps reporting the address it
+really binds: the substitution happens at **publication** time.
+
+Constraints, both refused at boot:
+
+- **an explicit `addr` is required.** `advertise` names the public face of **one**
+  address; a wildcard listener covers every interface of its family and the
+  substitution would have no key to hang on.
+- **the same family as `addr`.** A Via and a Contact carrying the other family
+  name an address no peer of that listener can call back, and the failure would
+  look like a routing problem.
+
+The media itself is not substituted by kelixip: the mediaserver does it, from its
+own profiles. For this topology:
+
+```
+OPTIONS="--public-ip 10.0.0.5 --nat 203.0.113.9 --internal-ip 10.0.0.5"
+```
+
+> ⚠️ As soon as an `--internal-ip` is given, the mediaserver's XML-RPC control API
+> only answers on the internal address. The `[mediaserver.pool.*]` entries must
+> then aim at `10.0.0.5`, not at the loopback.
+
+No STUN discovery. It would add a network dependency at boot and a failure mode,
+for no information this key does not already carry — and the mediaserver made the
+same choice with `--public-ip`.
+
+#### `[tls]` — the outbound leg
+
+Applies to the TLS and WSS connections the node **dials**, never to the ones it
+receives: the inbound side is the `cert` and `key` of a `[[listen]]`.
+
+| Key | Type | Default | |
+|---|---|---|---|
+| `verify` | bool | `false` | Verify the called peer's certificate |
+| `ca` | path | — | Trust this authority only; absent, the public store is used |
+
+Verifying a peer supposes an authority both sides have accepted: that is an
+interconnection agreement, not a socket setting. `verify` is therefore turned on
+knowingly, exactly as a client certificate is installed knowingly.
+
+**Turn it on at the same time as the inbound side.** A server demanding a client
+certificate while its own outbound client verifies none protects nothing: the
+mutual guarantee is worth what its weakest direction is worth.
+
+The name verified is the **SIP domain** of the called URI (RFC 5922 §7.2), not
+the address DNS returned. A target named by a bare address therefore has no name
+to verify: its certificate must carry that address in an `iPAddress` SAN, which
+almost no SIP certificate does.
+
+A `ca` that cannot be read fails the boot. That is deliberate: otherwise every
+outbound call fails at the handshake, with a TLS alert saying nothing about the
+wrong path.
 
 ### domains.toml
 

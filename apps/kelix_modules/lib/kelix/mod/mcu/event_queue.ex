@@ -28,14 +28,16 @@ defmodule Kelix.Mod.Mcu.EventQueue do
   use GenServer
   require Logger
 
-  alias Kelix.Mod.Mcu.Client
+  alias Kelix.Mod.Mcu.{Client, XmlRpc}
 
   @default_retry_ms 1_000
   @default_max_failures 5
   # three missed keep-alive cycles: the connection is dead, not quiet
   @default_stall_ms 90_000
   # A dedicated :httpc profile: the long-poll holds its connection for the whole
-  # session and would otherwise serialise every control RPC behind it.
+  # session and would otherwise serialise every control RPC behind it. Its
+  # options come from `XmlRpc.profile_options/0` — same server, same address
+  # family question, one answer.
   @httpc_profile :kelix_mcu_event_queue
 
   @type event ::
@@ -260,13 +262,8 @@ defmodule Kelix.Mod.Mcu.EventQueue do
   defp cancel(%{request: ref}), do: :httpc.cancel_request(ref, @httpc_profile)
 
   defp ensure_profile() do
-    case :inets.start(:httpc, [{:profile, @httpc_profile}]) do
-      {:ok, _pid} ->
-        :httpc.set_options([max_sessions: 100, max_keep_alive_length: 0], @httpc_profile)
-
-      {:error, {:already_started, _pid}} ->
-        :ok
-    end
+    :inets.start(:httpc, [{:profile, @httpc_profile}])
+    :httpc.set_options([max_keep_alive_length: 0] ++ XmlRpc.profile_options(), @httpc_profile)
   end
 
   defp dispatch(frame, state) do

@@ -1,10 +1,12 @@
 # kelixip admin web UI — architecture note
 
-Status: **exploratory** (2026-07-26). Captures the two locked decisions from an
-early design discussion for a real-time web admin UI over kelixip. No code yet.
+Status: **exploratory** (2026-07-26, push mechanism decided 2026-08-21). Captures
+the locked decisions for a real-time web admin UI over kelixip. No code yet on
+the kelixip side.
 
-> **App name is TBD.** This note uses the placeholder **`kelixweb`** for the app /
-> release; pick the real name before scaffolding and update this doc.
+The app is **kelescope** (`github.com/neutrino38/kelescope`, separate repo). It
+implements this note; its own Phase 1 (monitor + stop) plan lives in
+`docs/conception/phase1-monitoring/SPEC.md` in that repo.
 
 ## Goal
 
@@ -15,14 +17,13 @@ with **live updates** (no manual refresh). Phoenix LiveView is the intended stac
 
 ## Decision 1 — a separate app, not integrated into kelixip
 
-The UI is a **standalone Phoenix app** (its own OTP release, its own deps),
-**not** compiled into the kelixip SIP server. Preferably a new umbrella app
-(`apps/kelixweb`) to share the monorepo tooling, but with its **own release** and
+The UI is a **standalone Phoenix app** (its own OTP release, its own deps, its
+own repo — `kelescope`), **not** compiled into the kelixip SIP server and
 **not** depending on `:elixip2` — it talks to kelixip over the network/cluster,
 never in-process.
 
-Rationale (consistent with the umbrella philosophy, §12.0 — each artifact carries
-only its own deps):
+Rationale (same "each artifact carries only its own deps" doctrine as the
+umbrella, §12.0, applied across a repo boundary instead of an app boundary):
 
 - **Deps** — Phoenix/LiveView pulls a large tree (phoenix, plug, esbuild,
   tailwind, websock). It must not bloat the lean SIP server release.
@@ -32,7 +33,7 @@ only its own deps):
 - **Attack surface** — the UI is network-exposed; keeping it off the SIP node
   reduces the signaling plane's exposure.
 
-## Decision 2 — real-time over Erlang distribution + PubSub, REST for outsiders
+## Decision 2 — real-time over Erlang distribution, REST for outsiders
 
 Because the UI is itself a BEAM node, **cluster it with kelixip** (same cookie —
 the mechanism `kelictl` already uses; `rel/env.sh.eex` already starts kelixip
@@ -47,17 +48,37 @@ distributed). Then:
   clients** (scripts, third-party dashboards, other languages); the LiveView
   barely needs it.
 
-### Primitives to build on
+### Push mechanism (decided 2026-08-21): subscriber list + `send/2`, no new dependency
+
+Elixip has no Phoenix dependency today (checked: no `phoenix*` in `mix.lock`,
+see `liveview-adapter.md`) and must stay that way. A distributed
+`Phoenix.PubSub`, considered earlier for this event surface, would break that
+doctrine for a single current consumer (kelescope's dashboard). Instead, reuse
+the pattern already in the codebase:
 
 - `Kelix.Mod.Registrar.subscribe_register_event/2` → `{:registrar, event,
-  "aor@domain"}` (a pid subscribes to registration changes) — already exists.
-- `SIP.Scenario.Monitor` — the scenarios-in-progress store already feeding
-  `--monitor` / `kelictl monitor`.
-- **P9 (observability)** telemetry is the natural consolidated event source
-  (registrations, call attempts/answers, MCU up/down, counters). A small
-  distributed **`Phoenix.PubSub`** over those telemetry events, which the LiveView
-  `subscribe`s to, is the clean push path. *(This event/PubSub surface does not
-  exist yet — it is the main thing to add on the kelixip side for this UI.)*
+  "aor@domain"}` (a pid subscribes to registration changes; state `subs: %{key
+  => MapSet(pid)}`, notified by plain `send/2`) — the pattern to copy.
+- `SIP.Scenario.Monitor` (`apps/elixip2/lib/elixipp/SIPScenarioMonitor.ex`) is
+  the scenarios-in-progress store already feeding `--monitor` / `kelictl
+  monitor`, via `calls/0` (pull-only today). Scenarios already push their state
+  into it in real time (`SIPScenarioRunner.ex`'s `report/5`, `note_stay/4`,
+  `note_command/2`, `note_account/1`, all `GenServer.cast`) — the push stops
+  dead at `SIP.Scenario.Monitor`'s boundary; nothing relays it further.
+- **What to add**: a subscriber list (`subs: MapSet(pid)`) in
+  `SIP.Scenario.Monitor`'s state, plus `subscribe/1` / `unsubscribe/1`. After
+  each successful `update/3` (state/event/command changed) and each `clear/1`
+  (scenario ended), `send/2` the changed row (or the clear) to every
+  subscriber — a remote pid works transparently once nodes are clustered.
+  `Kelix.InstancePool` needs the same treatment for a scenario's *appearance*
+  (`accept/4`) so a new row can show up before its first FSM report.
+- **Expose it through `Kelix.Control`**, not directly: add
+  `Kelix.Control.subscribe_monitor/1` (and `unsubscribe_monitor/1`) as the
+  sanctioned entry point, consistent with the doctrine that `kelictl` and the
+  REST API only ever talk to `Kelix.Control` (`control.ex`, module doc). The
+  subscribing pid gets the current full snapshot (equivalent to `monitor/0`)
+  as the call's return value, then row-level `send/2` updates as they happen —
+  no polling on the kelescope side.
 
 ## Security caveat (the one real risk)
 
@@ -72,14 +93,14 @@ anything). A compromised web node ⇒ full access to the SIP node. Therefore:
 
 ## Summary
 
-`apps/kelixweb` (name TBD), separate release, clustered with kelixip like
-`kelictl`; reads/actions via `Kelix.Control` RPC; **live updates via a PubSub
-event stream** (to be added, telemetry-sourced with P9); REST (P8) reserved for
-external clients; cluster only over a trusted network / TLS distribution.
+`kelescope`, separate repo and release, clustered with kelixip like `kelictl`;
+reads/actions via `Kelix.Control` RPC; **live updates via a subscriber list +
+`send/2`** on `SIP.Scenario.Monitor` / `Kelix.InstancePool`, exposed through
+new `Kelix.Control.subscribe_monitor/1` (to be added — no code yet); REST (P8)
+reserved for external clients; cluster only over a trusted network / TLS
+distribution.
 
 ## Open questions
 
-- App name (placeholder `kelixweb`).
-- Shape of the kelixip-side event/PubSub surface (couple it to P9 telemetry?).
 - AuthN/Z for the UI itself (operators) — distinct from the node-trust question.
 - Does the UI ever need to be reachable without clustering (→ REST + streaming)?

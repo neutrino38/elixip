@@ -11,12 +11,12 @@ defmodule Kelix.Listener.Supervisor do
 
   Per protocol:
 
-    * `udp` — the bidirectional `SIP.Transport.UDP` instance. It binds the port
-      read from the `:elixip2` app env (`:udp_local_port` / `:udp_local_addr`),
-      which this supervisor sets from the entry before starting the child. It is
-      registered in `Registry.SIPTransport` under `"UDP"`, i.e. **the name
-      `SIP.Transport.Selector` looks up for outbound UDP**, so outbound requests
-      reuse this socket instead of trying to bind the same port a second time.
+    * `udp` — the bidirectional `SIP.Transport.UDP` instance, which binds the
+      entry's own address and port. It is registered in `Registry.SIPTransport`
+      under `SIP.Transport.Selector.unreliable_instance_name/2`, i.e. **the name
+      the selector looks up for an outbound datagram of that family**, so
+      outbound requests reuse this socket instead of trying to bind the same port
+      a second time.
     * `tcp` / `tls` / `wss` — the matching `SIP.Transport.*Listener`, which binds
       the socket and spawns one transport process per accepted connection.
       `tls`/`wss` receive their **per-listener** cert/key (design §3.1) as
@@ -27,13 +27,21 @@ defmodule Kelix.Listener.Supervisor do
   fail fast, like an invalid config, so systemd reports a failed start rather than
   a half-deaf server.
 
-  **One UDP socket per node** for now: the framework binds a single UDP port
-  (`:udp_local_port`), so extra `udp` entries are logged and skipped.
+  **One UDP socket per family**: a datagram leaves only through a socket of its
+  destination's family, and the two share a port (step 4 of
+  docs/design/multi-interface.md). A second `udp` entry of a family already bound
+  is logged and skipped.
+
+  The `:elixip2` app env keys `:udp_local_port` / `:udp_local_addr` still name the
+  node's **primary** UDP socket — the first `udp` entry. Nothing binds from them
+  any more; they answer `SIP.NetUtils.preferred_family/0`, which orders the two
+  DNS queries of a name resolution. Both families being bound, that order now
+  costs at most one extra query rather than a failure.
   """
   use Supervisor
   require Logger
 
-  @udp_registry_key "UDP"
+  @udp_proto "UDP"
 
   @type listener :: Kelix.Config.listener()
 
@@ -66,16 +74,47 @@ defmodule Kelix.Listener.Supervisor do
 
   @spec child_specs([listener]) :: [Supervisor.child_spec()]
   defp child_specs(listeners) do
+    listeners = Enum.flat_map(listeners, &expand_families/1)
+    configure_udp_env(listeners)
+
     listeners
     |> drop_extra_udp()
     |> Enum.map(&child_spec_for/1)
   end
 
+  # A `[[listen]]` entry stating no `addr` is every interface of every family the
+  # host carries, which is one socket each: two families cannot share one, and a
+  # dual-stack v6 socket would hand out `::ffff:` mapped addresses (step 4 of
+  # docs/design/multi-interface.md).
+  #
+  # Only families the host actually carries an advertisable address of. A listener
+  # has to write a local address into its Via and its Contact, so binding a family
+  # the host has none of would abort the boot — and on a v4-only host that is every
+  # config that does not name an address.
+  defp expand_families(%{addr: nil} = l) do
+    case Enum.filter([:ipv4, :ipv6], &(SIP.NetUtils.get_local_ips([&1]) != [])) do
+      [] ->
+        Logger.warning(
+          module: __MODULE__,
+          message:
+            "#{l.proto}:#{l.port} states no addr and the host carries no advertisable " <>
+              "address of either family; binding IPv4 and letting it fail"
+        )
+
+        [%{l | addr: "0.0.0.0"}]
+
+      families ->
+        Enum.map(families, &%{l | addr: wildcard(&1)})
+    end
+  end
+
+  defp expand_families(l), do: [l]
+
+  defp wildcard(:ipv6), do: "::"
+  defp wildcard(:ipv4), do: "0.0.0.0"
+
   defp child_spec_for(%{proto: :udp, addr: addr, port: port} = l) do
-    # The UDP transport reads its bind port/addr from the app env (it is also the
-    # outbound transport, so the socket is shared). Set them before it starts.
-    Application.put_env(:elixip2, :udp_local_port, port)
-    if bind_addr(l) != :all, do: Application.put_env(:elixip2, :udp_local_addr, bind_addr(l))
+    name = SIP.Transport.Selector.unreliable_instance_name(@udp_proto, family_of(l))
 
     %{
       id: {:udp, addr, port},
@@ -88,8 +127,8 @@ defmodule Kelix.Listener.Supervisor do
            {GenServer, :start_link,
             [
               SIP.Transport.UDP,
-              {bind_addr(l), port},
-              [name: {:via, Registry, {Registry.SIPTransport, @udp_registry_key}}]
+              {:bind, bind_addr(l), port, [family: family_of(l)] ++ advertise_opt(l)},
+              [name: {:via, Registry, {Registry.SIPTransport, name}}]
             ]}
          ]},
       type: :worker,
@@ -106,7 +145,8 @@ defmodule Kelix.Listener.Supervisor do
            proto,
            addr,
            port,
-           {listener_module(proto), :start_link, [{bind_addr(l), port, listener_opts(l)}]}
+           {listener_module(proto), :start_link,
+            [{bind_addr(l), port, [{:family, family_of(l)} | listener_opts(l)]}]}
          ]},
       type: :worker,
       restart: :permanent
@@ -128,7 +168,7 @@ defmodule Kelix.Listener.Supervisor do
       {:error, reason} = err ->
         IO.puts(
           :stderr,
-          "kelixip: cannot bind the #{proto} listener on #{addr}:#{port}: #{inspect(reason)}"
+          "kelixip: cannot bind the #{proto} listener on #{SIP.NetUtils.sip_host(addr)}:#{port}: #{inspect(reason)}"
         )
 
         err
@@ -144,38 +184,82 @@ defmodule Kelix.Listener.Supervisor do
 
   # tls/wss carry their own cert/key (design §3.1); Kelix.Config guarantees both
   # are present for those protocols and absent for udp/tcp.
-  defp listener_opts(%{cert: cert, key: key}) when is_binary(cert) and is_binary(key),
-    do: [certfile: cert, keyfile: key]
+  defp listener_opts(%{cert: cert, key: key} = l) when is_binary(cert) and is_binary(key),
+    do: [certfile: cert, keyfile: key] ++ advertise_opt(l)
 
-  defp listener_opts(_l), do: []
+  defp listener_opts(l), do: advertise_opt(l)
 
-  # "0.0.0.0" (the default) means "every interface" — the listeners spell that
-  # `:all`, and then resolve a local IP themselves for Via/Contact.
+  # The address to publish instead of the bound one (a 1:1 NAT). Parsed here rather
+  # than carried as text: the listeners write it into a Via and a Contact, and both
+  # want a tuple.
+  defp advertise_opt(%{advertise: text}) when is_binary(text) do
+    case SIP.NetUtils.parse_address(text) do
+      {:ok, ip} -> [advertise: ip]
+      _ -> []
+    end
+  end
+
+  defp advertise_opt(_l), do: []
+
+  # A wildcard means "every interface of this family" — the listeners spell that
+  # `:all` and resolve a local IP themselves for Via/Contact, from the `:family`
+  # opt. Every entry has a concrete addr by now: expand_families/1 ran.
   defp bind_addr(%{addr: "0.0.0.0"}), do: :all
+  defp bind_addr(%{addr: "::"}), do: :all
 
   defp bind_addr(%{addr: addr}) do
     {:ok, ip} = :inet.parse_address(String.to_charlist(addr))
     ip
   end
 
-  # One UDP socket per node (framework limitation): keep the first udp entry.
+  # The family an entry binds, from its addr — a wildcard states one too.
+  defp family_of(%{addr: "::"}), do: :ipv6
+  defp family_of(%{addr: "0.0.0.0"}), do: :ipv4
+
+  defp family_of(%{addr: addr}) do
+    {:ok, ip} = :inet.parse_address(String.to_charlist(addr))
+    SIP.NetUtils.address_family(ip)
+  end
+
+  # The app env names the node's PRIMARY udp socket — the first entry, in config
+  # order. Only preferred_family/0 reads it now; the sockets bind from their own
+  # entry.
+  defp configure_udp_env(listeners) do
+    case Enum.find(listeners, &(&1.proto == :udp)) do
+      nil ->
+        :ok
+
+      %{port: port} = first ->
+        Application.put_env(:elixip2, :udp_local_port, port)
+
+        case bind_addr(first) do
+          :all -> Application.put_env(:elixip2, :udp_family, family_of(first))
+          ip -> Application.put_env(:elixip2, :udp_local_addr, ip)
+        end
+    end
+  end
+
+  # One UDP socket per family: two entries of the same family would claim one
+  # registry name, and the second would abort the boot on {:already_started, _}.
+  # Keep the first of each, and say which were dropped.
   defp drop_extra_udp(listeners) do
     {udp, others} = Enum.split_with(listeners, &(&1.proto == :udp))
+    kept = Enum.uniq_by(udp, &family_of/1)
 
-    case udp do
-      [_first | [_ | _] = extra] ->
+    case udp -- kept do
+      [] ->
+        :ok
+
+      extra ->
         Logger.warning(
           module: __MODULE__,
           message:
-            "only one udp listener is supported (one socket per node); ignoring " <>
-              Enum.map_join(extra, ", ", &"udp:#{&1.addr}:#{&1.port}")
+            "one udp listener per family; ignoring " <>
+              Enum.map_join(extra, ", ", &"udp:#{&1.addr}:#{&1.port} (#{family_of(&1)})")
         )
-
-      _ ->
-        :ok
     end
 
-    Enum.take(udp, 1) ++ others
+    kept ++ others
   end
 
   defp listen_from_config() do

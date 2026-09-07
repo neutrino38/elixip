@@ -56,7 +56,19 @@ defmodule Kelix.ConfigTest do
 
     test "listeners with per-listener certs", %{cfg: cfg} do
       assert [udp, tls] = cfg.listen
-      assert udp == %{proto: :udp, addr: "0.0.0.0", port: 5060, cert: nil, key: nil}
+      # no `addr` in the fixture: nil, which the listener supervisor expands into
+      # one socket per family the host carries
+      assert udp ==
+               %{
+                 proto: :udp,
+                 addr: nil,
+                 port: 5060,
+                 cert: nil,
+                 key: nil,
+                 tag: :public,
+                 networks: [],
+                 advertise: nil
+               }
       assert tls.proto == :tls and tls.port == 5061
       assert tls.cert == "/etc/kelixip/tls/fullchain.pem"
       assert tls.key == "/etc/kelixip/tls/privkey.pem"
@@ -390,7 +402,7 @@ defmodule Kelix.ConfigTest do
   test "defaults when sections are absent" do
     assert {:ok, cfg} = Config.parse("")
     assert cfg.node_name == "kelixip@127.0.0.1"
-    assert cfg.user_agent == "Kelixip/1.5.1"
+    assert cfg.user_agent == "Kelixip/1.5.2"
     assert cfg.log.target == "stdout"
     assert cfg.listen == []
   end
@@ -425,6 +437,36 @@ defmodule Kelix.ConfigTest do
     test "listener addr must be an IP address" do
       assert {:error, msg} =
                Config.parse(~s([[listen]]\nproto = "udp"\nport = 5060\naddr = "sip.example.com"))
+
+      assert msg =~ "must be an IP address"
+    end
+
+    test "an explicit IPv6 listener address is accepted" do
+      assert {:ok, cfg} =
+               Config.parse(~s([[listen]]\nproto = "udp"\nport = 5060\naddr = "2001:db8::1"))
+
+      assert [%{addr: "2001:db8::1"}] = cfg.listen
+    end
+
+    # A wildcard states a family like any other address: "::" is every IPv6
+    # interface, "0.0.0.0" every IPv4 one. Only an ABSENT addr names no family.
+    test "a wildcard is an address, and keeps its family" do
+      for addr <- ["::", "0:0:0:0:0:0:0:0", "0.0.0.0"] do
+        assert {:ok, cfg} =
+                 Config.parse(~s([[listen]]\nproto = "udp"\nport = 5060\naddr = "#{addr}"))
+
+        assert [%{addr: ^addr}] = cfg.listen
+      end
+    end
+
+    test "an absent addr is nil — the only spelling that names no family" do
+      assert {:ok, cfg} = Config.parse(~s([[listen]]\nproto = "udp"\nport = 5060))
+      assert [%{addr: nil}] = cfg.listen
+    end
+
+    test "a non-address addr is still refused" do
+      assert {:error, msg} =
+               Config.parse(~s([[listen]]\nproto = "udp"\nport = 5060\naddr = "nope"))
 
       assert msg =~ "must be an IP address"
     end
@@ -499,6 +541,206 @@ defmodule Kelix.ConfigTest do
       # Pushed at boot, not only by an explicit [mediaserver] block: the media path
       # must never fall back to the adapter's own compiled-in value.
       assert Application.get_env(:elixip2, MediaServer.Mendooze)[:video_bandwidth_kbps] == 1500
+    end
+  end
+  describe "[tls] — the outbound leg's policy" do
+    test "absent means no check: verifying a peer is an interconnect decision" do
+      assert {:ok, cfg} = Config.parse("")
+      assert cfg.tls == %{verify: false, ca: nil}
+    end
+
+    test "verify = true is the deliberate act, and it is explicit" do
+      assert {:ok, cfg} = Config.parse(~s([tls]\nverify = true))
+      assert cfg.tls.verify == true
+    end
+
+    test "a ca that cannot be read is refused at parse time" do
+      assert {:error, msg} = Config.parse(~s([tls]\nca = "/no/such/ca.pem"))
+      assert msg =~ "not a readable file"
+    end
+
+    test "a readable ca is kept" do
+      path = Path.expand("../../elixip2/certs/certificate.pem", __DIR__)
+      assert {:ok, cfg} = Config.parse(~s([tls]\nca = "#{path}"))
+      assert cfg.tls.ca == path
+    end
+
+    test "an unknown key is refused, like everywhere else" do
+      assert {:error, msg} = Config.parse(~s([tls]\nverfy = true))
+      assert msg =~ "[tls]"
+    end
+
+    # The repository rule for a new key is that the parser, the installation guide
+    # and the shipped config move in one lot. This is the half a test can hold: the
+    # file we ship still parses against the parser we ship.
+    test "the config.toml shipped in packaging/ still parses whole" do
+      path = Path.expand("../../../packaging/config/config.toml", __DIR__)
+      assert {:ok, content} = File.read(path)
+      assert {:ok, cfg} = Config.parse(content)
+      assert cfg.tls.verify == false
+    end
+
+    test "apply_app_env/1 is what the outbound leg actually reads" do
+      previous = Application.fetch_env(:elixip2, :tls_verify)
+      on_exit(fn ->
+        case previous do
+          {:ok, v} -> Application.put_env(:elixip2, :tls_verify, v)
+          :error -> Application.delete_env(:elixip2, :tls_verify)
+        end
+
+        Application.delete_env(:elixip2, :tls_cacertfile)
+      end)
+
+      {:ok, cfg} = Config.parse(~s([tls]\nverify = true))
+      :ok = Config.apply_app_env(cfg)
+
+      assert Application.get_env(:elixip2, :tls_verify) == true
+      refute Application.get_env(:elixip2, :tls_cacertfile)
+    end
+  end
+  describe "[[listen]] tag and networks — which side a listener sits on" do
+    defp listener(extra) do
+      Config.parse(~s([[listen]]\nproto = "udp"\nport = 5060\n#{extra}))
+    end
+
+    test "public by default, read off the absence of the key" do
+      assert {:ok, cfg} = listener("")
+      assert [%{tag: :public, networks: []}] = cfg.listen
+    end
+
+    test "\"public\" is accepted and does nothing" do
+      assert {:ok, cfg} = listener(~s(tag = "public"))
+      assert [%{tag: :public}] = cfg.listen
+    end
+
+    test "an internal listener naming an address takes its subnet from the interface" do
+      assert {:ok, cfg} = listener(~s(addr = "127.0.0.1"\ntag = "internal"))
+      assert [%{tag: :internal, networks: []}] = cfg.listen
+
+      # No `networks` stated, so the prefix is the interface's — whatever this
+      # host's loopback netmask says, which in IPv4 is a /8.
+      assert Config.internal_networks(cfg) == [{{127, 0, 0, 0}, 8}]
+    end
+
+    test "stated networks REPLACE the detection rather than adding to it" do
+      assert {:ok, cfg} =
+               listener(~s(addr = "127.0.0.1"\ntag = "internal"\nnetworks = ["10.0.0.0/8", "fd00::/8"]))
+
+      assert Config.internal_networks(cfg) ==
+               [{{10, 0, 0, 0}, 8}, {{0xFD00, 0, 0, 0, 0, 0, 0, 0}, 8}]
+
+      # 127.0.0.0/8 would have been detected, and is deliberately absent.
+      refute {{127, 0, 0, 0}, 8} in Config.internal_networks(cfg)
+    end
+
+    test "a wildcard internal listener is refused: it defines no network" do
+      # It sits on every subnet, so taking it to mean "everything is internal"
+      # would silently make the public side empty.
+      assert {:error, msg} = listener(~s(tag = "internal"))
+      assert msg =~ "defines none"
+    end
+
+    test "a wildcard internal listener stating its networks is fine" do
+      assert {:ok, cfg} = listener(~s(tag = "internal"\nnetworks = ["10.0.0.0/8"]))
+      assert Config.internal_networks(cfg) == [{{10, 0, 0, 0}, 8}]
+    end
+
+    test "a public listener contributes nothing, whatever it sits on" do
+      assert {:ok, cfg} = listener(~s(addr = "127.0.0.1"))
+      assert Config.internal_networks(cfg) == []
+    end
+
+    test "bad values are refused with the key named" do
+      assert {:error, msg} = listener(~s(tag = "inside"))
+      assert msg =~ "`tag`"
+
+      assert {:error, msg} = listener(~s(tag = "internal"\nnetworks = ["10.0.0.0"]))
+      assert msg =~ "not a CIDR"
+
+      assert {:error, msg} = listener(~s(tag = "internal"\nnetworks = ["10.0.0.0/33"]))
+      assert msg =~ "not a CIDR"
+
+      assert {:error, msg} = listener(~s(tag = "internal"\nnetworks = "10.0.0.0/8"))
+      assert msg =~ "`networks`"
+    end
+
+    test "apply_app_env/1 is what the classifier actually reads" do
+      previous = Application.fetch_env(:elixip2, :internal_networks)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, v} -> Application.put_env(:elixip2, :internal_networks, v)
+          :error -> Application.delete_env(:elixip2, :internal_networks)
+        end
+      end)
+
+      {:ok, cfg} = listener(~s(tag = "internal"\nnetworks = ["10.0.0.0/8"]))
+      :ok = Config.apply_app_env(cfg)
+
+      assert SIP.NetUtils.net_side({10, 1, 2, 3}) == :internal
+      assert SIP.NetUtils.net_side({8, 8, 8, 8}) == :public
+    end
+  end
+  describe "[[listen]] advertise — the address published instead of the bound one" do
+    test "absent by default" do
+      assert {:ok, cfg} = listener("")
+      assert [%{advertise: nil}] = cfg.listen
+    end
+
+    test "a 1:1 NAT: bind private, publish public" do
+      assert {:ok, cfg} =
+               listener(~s(addr = "10.0.0.5"\nadvertise = "203.0.113.9"))
+
+      assert [%{addr: "10.0.0.5", advertise: "203.0.113.9"}] = cfg.listen
+    end
+
+    test "the other family is refused, with the reason" do
+      # A Via and a Contact carrying the other family name an address no peer of
+      # this listener can call back, and it would look like a routing problem.
+      assert {:error, msg} = listener(~s(addr = "10.0.0.5"\nadvertise = "2001:db8::9"))
+      assert msg =~ "call back"
+
+      assert {:error, msg} = listener(~s(addr = "fd00::5"\nadvertise = "203.0.113.9"))
+      assert msg =~ "call back"
+    end
+
+    test "an explicit address of the same family passes, in both families" do
+      assert {:ok, _} = listener(~s(addr = "10.0.0.5"\nadvertise = "203.0.113.9"))
+      assert {:ok, _} = listener(~s(addr = "fd00::5"\nadvertise = "2001:db8::9"))
+    end
+
+    test "apply_app_env/1 is what publish_ip/2 actually reads" do
+      previous = Application.fetch_env(:elixip2, :advertise_map)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, v} -> Application.put_env(:elixip2, :advertise_map, v)
+          :error -> Application.delete_env(:elixip2, :advertise_map)
+        end
+      end)
+
+      {:ok, cfg} = listener(~s(addr = "10.0.0.5"\nadvertise = "203.0.113.9"))
+      assert Config.advertise_map(cfg) == %{{10, 0, 0, 5} => {203, 0, 113, 9}}
+
+      :ok = Config.apply_app_env(cfg)
+      assert SIP.Transport.publish_ip({10, 0, 0, 5}, nil) == {203, 0, 113, 9}
+    end
+
+    test "a wildcard or absent addr is refused: nothing to key the alias on" do
+      # The substitution is keyed on the address a transport reports being bound
+      # to, and a wildcard listener reports whichever local address it resolved,
+      # never "0.0.0.0". The mapping could never be found, so the configuration is
+      # refused instead of being accepted and silently inert.
+      assert {:error, msg} = listener(~s(advertise = "203.0.113.9"))
+      assert msg =~ "needs an explicit `addr`"
+
+      assert {:error, _} = listener(~s(addr = "0.0.0.0"\nadvertise = "203.0.113.9"))
+      assert {:error, _} = listener(~s(addr = "::"\nadvertise = "2001:db8::9"))
+    end
+
+    test "a non-address is refused" do
+      assert {:error, msg} = listener(~s(addr = "10.0.0.5"\nadvertise = "nope"))
+      assert msg =~ "`advertise`"
     end
   end
 end

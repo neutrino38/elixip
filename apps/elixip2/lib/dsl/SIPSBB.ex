@@ -43,6 +43,14 @@ defmodule SIP.SBB do
   for free and `{namespace, :timeout, %{block: module}}` is what the host
   receives on expiry, unless `@sbb_timeout_event` says otherwise.
 
+  ## What a block takes
+
+  `@sbb_args` declares the keys a caller may seed the sandbox with, and it is no
+  more decoration than `@sbb_returns`: a call site names them plainly —
+  `authenticate(realm: "example.com")`, `call(peer: peer)` — and a key no block
+  declares raises instead of becoming a sandbox entry nobody reads. `args: %{…}`
+  is the same thing spelled as a map, and both may be mixed.
+
   A block is the same language as a scenario — same `state`, same `on_events`,
   same session macros — with two differences:
 
@@ -80,6 +88,13 @@ defmodule SIP.SBB do
       # Outcome -> what it means. Declaring it is what lets sbb_return/1 reject a
       # typo at compile time, and what a host can be told it has not handled.
       @sbb_returns []
+
+      # The `args` keys a caller may name at the call site, read inside the block
+      # with `sbb_data_get/1`. Declaring them is what lets `sbb_fsm/2` accept them
+      # written plainly — `authenticate(realm: "example.com")` — and refuse a key
+      # the block does not read. Keys the block only writes for itself
+      # (`sbb_data_set/2`) are scratch and do not belong here.
+      @sbb_args []
 
       # Overrides the `{namespace, :timeout, %{block: module}}` the mechanism
       # sends on expiry. Rarely needed: the default already follows the contract.

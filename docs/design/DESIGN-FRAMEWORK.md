@@ -430,6 +430,38 @@ Three details that each cost a real call:
 - **`telephone-event` follows the primary codec's clock**, selected per clock
   rate rather than assumed at 8000.
 
+#### Real-time text on a WebRTC leg
+
+A browser cannot carry T.140 on an RTP profile — `RTCPeerConnection` has no
+`m=text`. There are two ways round it, and the adapter drives both:
+
+- a **WebSocket** beside the call, which the peer asks for with its own
+  `m=text … TCP/WS t140` section and we answer with a URL. We never offer one:
+  it is a door, opened when someone knocks;
+- a **WebRTC data channel** (RFC 8865): `m=application … UDP/DTLS/SCTP
+  webrtc-datachannel`, inside the leg's own DTLS and ICE. It is answered when
+  offered, **and it is what our own offers carry by default on a WebRTC leg** —
+  `text_transport: :data_channel | :rtp` in the leg's options, defaulting to the
+  data channel with DTLS and to RTP without.
+
+Three things that are NOT symmetric with the WebSocket case, each of them a call
+that would have failed:
+
+- **a data channel section is declined with port 0, never omitted.** It is in the
+  browser's real offer, and libwebrtc counts the answer's `m=` lines against its
+  own. The WebSocket omission exists for one deployed client that injects and
+  strips its own section;
+- **the `m=` line says `application`, the medium is the call's text.** The parsed
+  descriptor carries both, and a rejection uses the offered name — renaming it
+  loses the section the peer offered;
+- **no `a=dcmap`** (RFC 8864) in our offers or answers: declaring the channel in
+  the SDP is what tells a peer *not* to open it in band, and the media server
+  binds its text channel on the DCEP `OPEN`.
+
+`a=sctp-port` and `a=max-message-size` come from the media server
+(`SetupDataChannel`), never from a constant on this side — the same rule as the
+announced address.
+
 ### 6.6 Media connectivity — when may a scenario send?
 
 `:ice_connected` used to mean "some media flowed", and that is not the same
@@ -504,6 +536,34 @@ The `:mediaserver` key is overridable **per scenario** (a `config` block key) an
 application env. A scenario may still hardcode an adapter with the two-argument
 `media_connect(module, url)`, which is what a test does.
 
+### 6.9 Recording a two-leg call
+
+A recorder is attached to an endpoint and writes what that endpoint **receives**.
+That single fact settles the shape of call recording:
+
+* **two recorders, two files.** The inbound one holds what the caller sent, the
+  outbound one what the callee sent; one recorder records half a conversation.
+  A single file holding both sides would need a mixer port to record from, which
+  is a conference, not a B2BUA (§5.7 — one session, one endpoint per leg);
+* **each records the medias of its own leg.** The three medias of a Total
+  Conversation call are recorded only if both legs were negotiated with the
+  three. Attaching, and detaching on the way out, follow the leg — not the
+  connection, whose media list is the inbound leg's;
+* **the media action slot is per leg** (§5.7), so the two recorders coexist and
+  a second action on either leg is refused rather than stacked.
+
+Both recorders report through one event shape, so a scenario reads the leg from
+the handle (`media_leg_of/1`) rather than from the event. And stopping is not
+optional: closing the file is what writes an MP4 index, so `media_stop(leg: :all)`
+and the automatic teardown both stop every leg's action before closing anything.
+
+Two limits are the media server's, not ours. The MP4 container carries H.264, so
+a call that settles on VP8 or AV1 records audio and text and no video — steering
+the negotiation for the recorder's sake is a deployment choice, not a framework
+one (§6.1: the server is asked, never modelled). And `echoVideo` must stay off on
+a relayed leg: it is what a caller recording a message expects to see, and what
+the far end of a call must never receive.
+
 ---
 
 ## 7. Invariants
@@ -523,3 +583,5 @@ application env. A scenario may still hardcode an adapter with the two-argument
    (§6.6).
 9. Teardown order: legs before media, resources before the connection, the
    connection before the server (§5.9, §6.2).
+10. A media resource follows the leg it was attached to, never the connection —
+    two legs do not carry the same medias, nor the same endpoint (§6.9).

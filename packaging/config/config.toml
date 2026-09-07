@@ -14,7 +14,7 @@
 node_name  = "kelixip@127.0.0.1"
 script_dir = "/usr/share/kelixip"
 module_dir = "/usr/lib/kelixip/modules"
-# user_agent = "Kelixip/1.5.1"
+# user_agent = "Kelixip/1.5.2"
 # max_calls  = 1000          # node-wide concurrent-instance cap; 503 beyond it
 
 [log]
@@ -40,6 +40,42 @@ port  = 5060
 #port  = 8443
 #cert  = "/etc/kelixip/tls/fullchain.pem"
 #key   = "/etc/kelixip/tls/privkey.pem"
+
+# TLS/WSS sortant. Par défaut le certificat du pair appelé n'est pas vérifié :
+# le faire suppose une autorité convenue avec lui, donc un accord d'interconnexion.
+# Passez `verify` à true en même temps que vous nommez `ca`, et faites-le en même
+# temps que le côté entrant : un serveur qui exige un certificat client alors que
+# son propre client n'en vérifie aucun ne protège rien.
+# Le nom contrôlé est le domaine SIP de l'URI (RFC 5922), pas l'adresse résolue.
+# Un listener `tag = "internal"` définit le réseau interne : par défaut le
+# sous-réseau de l'interface qui porte son `addr`, ou la liste `networks` quand
+# elle est donnée — elle remplace la détection, elle ne s'y ajoute pas. Toute
+# adresse hors de ces réseaux est publique. Sans listener interne, le nœud n'a
+# qu'un côté.
+#[[listen]]
+#proto    = "udp"
+#addr     = "10.20.0.5"
+#port     = 5060
+#tag      = "internal"
+#networks = ["10.20.0.0/24"]
+
+# `advertise` : la face PUBLIQUE de `addr` — une VM nattée 1:1 lie du privé et se
+# joint en public. Ce n'est pas une substitution plate : la même interface sert les
+# deux côtés, donc un pair public reçoit `advertise` et un pair interne reçoit
+# `addr`, dans le Via, le Contact et le SDP. Le côté d'un pair se lit sur SON
+# adresse, contre les réseaux des listeners `internal`.
+# `addr` explicite exigée (rien à quoi accrocher l'alias sinon), même famille.
+#[[listen]]
+#proto     = "udp"
+#addr      = "10.0.0.5"
+#port      = 5060
+#advertise = "203.0.113.9"
+#tag       = "internal"
+
+[tls]
+verify = false
+#verify = true
+#ca = "/etc/kelixip/tls/interco-ca.pem"
 
 # Prometheus /metrics + /health. No auth — keep it on loopback and let a local
 # Prometheus scrape it. Remove the block to disable it entirely.

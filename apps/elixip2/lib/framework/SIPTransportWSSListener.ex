@@ -17,11 +17,15 @@ defmodule SIP.Transport.WSSListener do
   register the connection. The Listener returns the WSS pid; the Task then sends an
   :activate_socket cast which starts the Socket.Web reader process inside the WSS
   GenServer. This is different from TLS where ownership is transferred via
-  :ssl.controlling_process; here the reader uses passive :ssl.recv so the controlling
+  Socket.SSL.process; here the reader uses passive :ssl.recv so the controlling
   process attribute is not relevant for data delivery.
+
+  The WebSocket upgrade below is the one part still written against :ssl — see
+  do_ws_upgrade/1 for why.
   """
   use GenServer
   require Logger
+  require Socket.SSL
 
   @transport_str "wss"
   def transport_str, do: @transport_str
@@ -56,33 +60,39 @@ defmodule SIP.Transport.WSSListener do
   # ---- GenServer callbacks --------------------------------------------------
 
   # Accept an optional keyword list as third element for overrides in tests
-  # (:max_connections, :certfile, :keyfile).
+  # (:max_connections, :certfile, :keyfile). :family (:ipv4 | :ipv6) picks the
+  # family of the address advertised in Via/Contact when addr is :all; with an
+  # explicit addr the family comes from the address.
   @impl true
   def init({addr, port, opts}) do
-    localip  = resolve_localip(addr)
+    family   = SIP.NetUtils.address_family(addr) || Keyword.get(opts, :family, :ipv4)
+    localip = resolve_localip(addr, family)
     max_conn = Keyword.get(opts, :max_connections,
       Application.get_env(:elixip2, :wss_max_connections, @default_max_connections))
     certfile = Keyword.get(opts, :certfile,
       Application.get_env(:elixip2, :tls_certfile, @default_certfile))
     keyfile  = Keyword.get(opts, :keyfile,
       Application.get_env(:elixip2, :tls_keyfile, @default_keyfile))
-    bind_addr = if addr == :all, do: {0, 0, 0, 0}, else: addr
+    bind_addr = wildcard_of(addr, family)
 
+    # listen/2 binds passive and with SO_REUSEADDR on its own. No `version:`: the
+    # bind address carries its family, and `:all` still binds 0.0.0.0 (see
+    # SIP.Transport.TCPListener, and step 4 of docs/design/multi-interface.md).
     ssl_opts = [
-      :binary, {:packet, :raw}, {:active, false}, {:reuseaddr, true},
-      {:ip, bind_addr},
-      {:certfile, to_charlist(certfile)},
-      {:keyfile,  to_charlist(keyfile)},
-      {:versions, [:"tlsv1.2", :"tlsv1.3"]}
+      packet: :raw,
+      local: [address: bind_addr],
+      cert: [path: certfile],
+      key: [path: keyfile],
+      versions: [:"tlsv1.2", :"tlsv1.3"]
     ]
 
-    case :ssl.listen(port, ssl_opts) do
+    case localip && Socket.SSL.listen(port, ssl_opts) do
       {:ok, listen_socket} ->
-        {:ok, {_, actual_port}} = :ssl.sockname(listen_socket)
+        {_bound_ip, actual_port} = Socket.local!(listen_socket)
         listener_pid = self()
         Task.start_link(fn -> accept_loop(listen_socket, listener_pid) end)
         Logger.info([module: __MODULE__,
-                     message: "WSS listener started on #{SIP.NetUtils.ip2string(localip)}:#{actual_port}"])
+                     message: "WSS listener started on #{SIP.NetUtils.sip_host(localip)}:#{actual_port}"])
         state = %{
           localip:         localip,
           localport:       actual_port,
@@ -92,6 +102,11 @@ defmodule SIP.Transport.WSSListener do
           connections:     %{}
         }
         {:ok, state}
+
+      nil ->
+        Logger.error([module: __MODULE__,
+                      message: "No local #{family} address to advertise. Check your network configuration"])
+        {:stop, :networkdown}
 
       {:error, reason} ->
         Logger.error([module: __MODULE__,
@@ -164,7 +179,7 @@ defmodule SIP.Transport.WSSListener do
 
   @impl true
   def terminate(_reason, state) do
-    :ssl.close(state.socket)
+    Socket.close(state.socket)
   end
 
   # ---- Private helpers ------------------------------------------------------
@@ -173,9 +188,9 @@ defmodule SIP.Transport.WSSListener do
   # connection it performs the TLS handshake, then the WebSocket HTTP upgrade,
   # then delegates connection ownership to the Listener GenServer.
   defp accept_loop(listen_socket, listener_pid) do
-    case :ssl.transport_accept(listen_socket) do
+    case Socket.SSL.transport_accept(listen_socket) do
       {:ok, tls_transport_socket} ->
-        case :ssl.handshake(tls_transport_socket, @handshake_timeout) do
+        case Socket.SSL.handshake(tls_transport_socket, timeout: @handshake_timeout) do
           {:ok, ssl_socket} ->
             case do_ws_upgrade(ssl_socket) do
               {:ok, ws_socket, peer_ip, peer_port} ->
@@ -190,7 +205,7 @@ defmodule SIP.Transport.WSSListener do
               {:error, reason} ->
                 Logger.warning([module: __MODULE__,
                   message: "WSS WebSocket upgrade failed: #{inspect(reason)}"])
-                :ssl.close(ssl_socket)
+                Socket.close(ssl_socket)
             end
 
           {:error, reason} ->
@@ -209,8 +224,16 @@ defmodule SIP.Transport.WSSListener do
   end
 
   # Performs the HTTP WebSocket upgrade handshake on an already-TLS-connected socket.
-  # Uses :ssl directly (not Socket.Web.accept!) because the TLS handshake was already
-  # completed by :ssl.handshake above; Socket.Web.accept! would try to redo it.
+  #
+  # The one part of this listener still written against :ssl rather than socket2,
+  # for two reasons. `Socket.Web.accept!/2` reaches for the LISTENING socket to get
+  # a client, so it would redo the TLS handshake that Socket.SSL.handshake above has
+  # already done. And its handshake drops three things this one gets right, each
+  # from real traffic: it keeps only the last occurrence of a repeated header
+  # (RFC 7230 §3.2.2), it answers Sec-WebSocket-Protocol whether or not the client
+  # offered one (§4.1 — a browser then closes the socket on the 101), and it
+  # compares the Upgrade token case-sensitively. Reusing it means fixing it there
+  # first.
   defp do_ws_upgrade(ssl_socket) do
     try do
       {:ok, {peer_ip, peer_port}} = :ssl.peername(ssl_socket)
@@ -296,8 +319,17 @@ defmodule SIP.Transport.WSSListener do
     |> Enum.reject(&(&1 == ""))
   end
 
-  defp resolve_localip(:all), do: SIP.NetUtils.get_local_ips([:ipv4]) |> hd()
-  defp resolve_localip(ip), do: ip
+  # `:all` is every interface **of this listener's family**. It was the IPv4
+  # wildcard whatever the family, so a listener told :ipv6 resolved an IPv6
+  # address for its Via and its Contact and then bound an IPv4 socket.
+  defp wildcard_of(:all, :ipv6), do: {0, 0, 0, 0, 0, 0, 0, 0}
+  defp wildcard_of(:all, _family), do: {0, 0, 0, 0}
+  defp wildcard_of(addr, _family), do: addr
+
+  # nil when the host carries no address of the requested family: the listener
+  # would then have nothing to write in a Via or a Contact.
+  defp resolve_localip(:all, family), do: SIP.NetUtils.get_local_ips([family]) |> List.first()
+  defp resolve_localip(ip, _family), do: ip
 
   defp find_connection(connections, dest_ip, dest_port) do
     connections
@@ -308,6 +340,6 @@ defmodule SIP.Transport.WSSListener do
   end
 
   # Closes the underlying SSL socket of a %Socket.Web{} struct.
-  defp ws_abort(%Socket.Web{socket: ssl_socket}), do: :ssl.close(ssl_socket)
+  defp ws_abort(%Socket.Web{socket: ssl_socket}), do: Socket.close(ssl_socket)
   defp ws_abort(_), do: :ok
 end

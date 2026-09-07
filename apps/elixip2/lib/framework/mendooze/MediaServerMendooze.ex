@@ -25,6 +25,10 @@ defmodule MediaServer.Mendooze do
 
   alias MediaServer.Mendooze.{Conn, EventPoller, XmlRpc}
 
+  # The media server's self-description, on the same host and port as the XML-RPC
+  # control interface (XmlRpc's @jsr309_path is its sibling).
+  @status_path "/status/general"
+
   # ── MediaServer.Behaviour subset ────────────────────────────────────────────
 
   @doc """
@@ -189,8 +193,51 @@ defmodule MediaServer.Mendooze do
     do: GenServer.cast(server, {:unregister_conn, sess_tag})
 
   @doc false
-  # RPC coordinates for Conn processes: %{base_url: ..., queue_id: ...}
+  # RPC coordinates for Conn processes:
+  # %{base_url: ..., queue_id: ..., network_profiles: ...}
   def rpc_info(server), do: GenServer.call(server, :rpc_info)
+
+  @doc """
+  The addressing profiles this media server carries, read from it when the
+  connection was made (`GetNetworkProfiles`, xmlrpc_jsr309_api.md §6.7 ter).
+
+  `%{"publicv6" => %{available: true, announced: "2001:db8::12", bind: "",
+  default: false}, …}` — the four profiles, available or not — or `:unsupported`
+  for a server whose API predates the call.
+
+  Asked, never configured. A profile list written on this side is a copy of what
+  the server knows about itself, and a copy drifts; the same rule already deleted
+  the MCU module's codec configuration.
+  """
+  @spec network_profiles(pid()) :: %{String.t() => map()} | :unsupported
+  def network_profiles(server), do: rpc_info(server).network_profiles
+
+  @doc """
+  Everything this media server says about itself, read from it when the
+  connection was made (`GET /status/general`, mediaserver
+  `docs/reference/status-http.md`).
+
+  The decoded JSON body, keys as strings:
+
+      %{"server" => %{"version" => "1.14.0", "uptimeSecs" => 274_353, ...},
+        "capabilities" => %{"audio" => %{"decode" => [...], "encode" => [...]},
+                            "video" => %{...},
+                            "text" => %{"rfc4103" => true, "rfc8865" => true, ...},
+                            "hardware" => %{"vaapi" => false}},
+        "security" => %{"modes" => ["none", "sdes-srtp", "dtls-srtp"], ...},
+        "network" => %{"profiles" => [...], "rtpPortRange" => %{...}, ...},
+        "load" => %{"conferences" => 1, ...}}
+
+  `:unsupported` for a server whose binary predates the endpoint, or that
+  answered something other than a JSON object.
+
+  Same rule as `network_profiles/1`: asked, never configured. In particular
+  `capabilities.video.encode` and `capabilities.video.decode` are **different
+  lists** — the server decodes codecs it cannot encode — and the offer we build
+  must read the one matching its direction.
+  """
+  @spec server_status(pid()) :: map() | :unsupported
+  def server_status(server), do: rpc_info(server).server_status
 
   # ── GenServer callbacks ─────────────────────────────────────────────────────
 
@@ -228,6 +275,15 @@ defmodule MediaServer.Mendooze do
            source_path: source_path,
            poller: poller,
            purpose: purpose,
+           # What the server says it can announce, read once here. The pool's
+           # keepalive probe opens and closes a connection every 30 s, so this
+           # re-reads itself: a media server restarted with other addresses is
+           # described by its own answer, never by what we remember of it.
+           network_profiles: read_network_profiles(base_url, purpose),
+           # Same read-every-probe discipline as network_profiles above, and for
+           # the same reason: a media server upgraded to another codec set is
+           # described by its own answer, never by what we remember of it.
+           server_status: read_server_status(base_url, purpose),
            # sess_tag => %{pid: conn_pid, sink: event_sink_pid}
            conns: %{}
          }}
@@ -249,6 +305,135 @@ defmodule MediaServer.Mendooze do
 
   defp log_connected(_purpose, base_url, queue_id),
     do: Logger.info("Mendooze: connected to #{base_url}, event queue #{queue_id}")
+
+  # The four profiles, keyed by name. `:unsupported` covers every way a server can
+  # fail to answer — an older binary faults on the unknown method, an unreachable
+  # one has already failed EventQueueCreate above — and it means exactly what a
+  # controller that never heard of profiles obtains: every leg goes out with no
+  # profile, and the server applies its own default.
+  defp read_network_profiles(base_url, purpose) do
+    case XmlRpc.call(base_url, "GetNetworkProfiles") do
+      {:ok, profiles} when is_list(profiles) ->
+        case Map.new(Enum.flat_map(profiles, &decode_profile/1)) do
+          empty when empty == %{} -> unsupported(purpose, base_url, "the answer names no profile")
+          decoded -> log_profiles(purpose, base_url, decoded)
+        end
+
+      {:ok, _other} ->
+        unsupported(purpose, base_url, "the answer is not a list of profiles")
+
+      {:error, reason} ->
+        unsupported(purpose, base_url, "#{inspect(reason)}")
+    end
+  end
+
+  defp decode_profile(%{"name" => name} = p) when is_binary(name) do
+    [
+      {name,
+       %{
+         available: p["available"] == true,
+         announced: to_string(p["announced"] || ""),
+         bind: to_string(p["bind"] || ""),
+         default: p["default"] == true
+       }}
+    ]
+  end
+
+  defp decode_profile(_), do: []
+
+  # Said out loud: it also means a server carrying two addresses is about to be
+  # driven through one of them only.
+  defp unsupported(:health_check, _base_url, _why), do: :unsupported
+
+  defp unsupported(_purpose, base_url, why) do
+    Logger.info(
+      "Mendooze: #{base_url} states no addressing profiles (#{why}) — " <>
+        "legs will use the server's default"
+    )
+
+    :unsupported
+  end
+
+  defp log_profiles(:health_check, _base_url, decoded), do: decoded
+
+  defp log_profiles(_purpose, base_url, decoded) do
+    available =
+      decoded
+      |> Enum.filter(fn {_n, p} -> p.available end)
+      |> Enum.map_join(", ", fn {n, p} -> "#{n}=#{p.announced}#{if p.default, do: " (default)"}" end)
+
+    Logger.info("Mendooze: #{base_url} announces #{if available == "", do: "no profile", else: available}")
+    decoded
+  end
+
+  # `GET /status/general` — the media server's own description of itself. Not
+  # XML-RPC: the endpoint is plain HTTP + JSON, on the same host and port as the
+  # control interface (mediaserver docs/reference/status-http.md).
+  #
+  # `Accept: application/json` is explicit rather than left to the default: the
+  # endpoint also serves a human-readable text rendering, and which one it picks
+  # without the header is a rule we should not depend on.
+  #
+  # Every failure collapses to `:unsupported` — an older binary answers 404, an
+  # unreachable one has already failed EventQueueCreate above — and it means what
+  # a controller that never heard of the endpoint obtains: nothing is known, and
+  # nothing on this side may pretend otherwise.
+  defp read_server_status(base_url, purpose) do
+    url = String.to_charlist(base_url <> @status_path)
+    timeout = status_timeout()
+    http_opts = [timeout: timeout, connect_timeout: timeout]
+    headers = [{~c"accept", ~c"application/json"}]
+
+    case :httpc.request(:get, {url, headers}, http_opts, body_format: :binary) do
+      {:ok, {{_, 200, _}, _headers, body}} ->
+        decode_server_status(body, purpose, base_url)
+
+      {:ok, {{_, status, _}, _headers, _body}} ->
+        unsupported_status(purpose, base_url, "HTTP #{status}")
+
+      {:error, reason} ->
+        unsupported_status(purpose, base_url, "#{inspect(reason)}")
+    end
+  end
+
+  defp decode_server_status(body, purpose, base_url) do
+    case Jason.decode(body) do
+      {:ok, %{} = status} -> log_status(purpose, base_url, status)
+      {:ok, _other} -> unsupported_status(purpose, base_url, "the answer is not a JSON object")
+      {:error, reason} -> unsupported_status(purpose, base_url, "#{inspect(reason)}")
+    end
+  end
+
+  defp unsupported_status(:health_check, _base_url, _why), do: :unsupported
+
+  defp unsupported_status(_purpose, base_url, why) do
+    Logger.info(
+      "Mendooze: #{base_url} does not describe itself (#{why}) — " <>
+        "its version and capabilities stay unknown to this node"
+    )
+
+    :unsupported
+  end
+
+  defp log_status(:health_check, _base_url, status), do: status
+
+  defp log_status(_purpose, base_url, status) do
+    version = get_in(status, ["server", "version"]) || "?"
+    audio = get_in(status, ["capabilities", "audio", "encode"]) || []
+    video = get_in(status, ["capabilities", "video", "encode"]) || []
+
+    Logger.info(
+      "Mendooze: #{base_url} is mediaserver #{version}, can emit " <>
+        "audio [#{Enum.join(audio, " ")}] video [#{Enum.join(video, " ")}]"
+    )
+
+    status
+  end
+
+  defp status_timeout do
+    Application.get_env(:elixip2, __MODULE__, [])
+    |> Keyword.get(:status_timeout_ms, 5_000)
+  end
 
   # Older servers return only [queueId]; the documented fallback path applies.
   defp source_path(_queue_id, [path | _]) when is_binary(path), do: path
@@ -292,7 +477,13 @@ defmodule MediaServer.Mendooze do
   end
 
   def handle_call(:rpc_info, _from, state) do
-    {:reply, %{base_url: state.base_url, queue_id: state.queue_id}, state}
+    {:reply,
+     %{
+       base_url: state.base_url,
+       queue_id: state.queue_id,
+       network_profiles: state.network_profiles,
+       server_status: state.server_status
+     }, state}
   end
 
   @impl true

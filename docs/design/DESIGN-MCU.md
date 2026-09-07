@@ -247,6 +247,134 @@ which is ours and may work on a retry. One code for both would tell the peer the
 wrong thing about what to do next; making that expressible required the media
 error hook to accept a function rather than a fixed pair.
 
+### 5.1 The leg's life in the mix, as a block
+
+Everything after the `200` is one service building block,
+`Kelix.Mod.Mcu.SBB.Conference`, called `Mcu.SBB.conference()`
+([DESIGN-SBB.md](DESIGN-SBB.md#74-a-kelixip-module-publishes-its-blocks): a
+kelixip module publishes functions a script calls for a *decision*, and blocks a
+script enters for a *sequence*). A script enters it where it would have written
+`goto(in_call)`, and the three states that used to follow — `in_call`,
+`in_conference`, `hanging_up` — are gone from the scripts.
+
+They were worth removing because they carried **no conference policy at all**.
+They carried SIP: which ACK is the first one, that an INFO is answered whether or
+not it is an RFC 5168 request, that a BYE is answered before the slot is
+released, that our own BYE is followed by a wait for its 200, that a leg gone
+silent is a leg to hang up. And being a copy, the second script had already lost
+three clauses of it — `on_events` compiles to a `receive` and nothing injects a
+catch-all, so a media event the ad-hoc script had never been taught about matched
+no clause and stayed in the mailbox for the whole call. A leg whose media died
+held its slot until the 2 h backstop, and nothing reported it. That is
+[DESIGN-SBB.md](DESIGN-SBB.md) §1 in one file pair.
+
+**The seam is the answer.** The block never composes a response to an offer,
+which is why it takes no `media:` and no `webrtc:` argument: the `200`, its media
+set, its secure mode and its error mapping are the deployment's, and they stay in
+the script's `answering` state. What the block owns is the sequence between that
+answer and whatever ends the leg.
+
+**One argument**, and the BYE's own 10 s wait is not one — it has a single caller
+and a single right value. `:idle_timeout`, 2 h, is the G3 backstop against a leg
+that goes silent; every event the block consumes re-arms it, so it is *idle* and
+not a maximum call duration. The name differs from `bridge`'s `:max_duration` on
+purpose: same shape, opposite meaning.
+
+**Two families of outcome**, and the difference is what state the leg is left in.
+The first hands the call back **whole** — nothing answered, nothing released — so
+the script acts and re-enters with `goto(loop, …)`:
+
+| Outcome | Data | What happened |
+|---|---|---|
+| `:renegotiation` | `%{method: :INVITE \| :UPDATE, req, transaction, dialog}` | a re-INVITE or an UPDATE arrived, **unanswered** |
+| `:message` | `%{envelope}` | a peer's script said something (§9) |
+
+The second means the leg is out: the media connection is released and
+`Kelix.Mod.Mcu.leave/2` has run with the reason named, in that order. The script
+names the verdict; it frees nothing.
+
+| Outcome | Data | What happened |
+|---|---|---|
+| `:caller_hung_up` | `%{reason: :bye \| term}` | a BYE, answered; or the dialog went away on its own |
+| `:cancelled` | `%{}` | a CANCEL around the answer — the IST sent the 487, the teardown was ours |
+| `:mcu_lost` | `%{via: :mcu_event \| :ms_event, bye_answered}` | the media server went away; our BYE is out |
+| `:media_timeout` | `%{media, bye_answered}` | every media of this leg went silent (§10, P7/S1); our BYE is out |
+| `:idle_timeout` | `%{bye_answered}` | the G3 backstop fired; our BYE is out |
+| `:attach_refused` | `%{reason}` | the mix refused the leg at ACK time (`:jsr309_media_already_in_use`) |
+
+`bye_answered: false` is a **key rather than an outcome**: whether a hang-up was
+acknowledged is a detail of an ending, not a different ending. And there is no
+`:timeout` — `@sbb_timeout :infinity`, because a conference leg lasts as long as
+its dialog and `:idle_timeout` is the bound.
+
+**A renegotiation comes back unanswered, because answering it is a policy.** A
+deployment may refuse an added media, cap a resolution, or answer with a
+different media set than it accepted at the start. The request travels **inside
+the outcome** rather than being re-posted: `sbb_return/1` posts one event and
+ends the block, so a `send(self(), {:INVITE, …})` on top of it would leave two
+events — the host would match its own `{:INVITE, …}` clause first, re-enter the
+block, and the block would then find `{:conference, :renegotiation, …}` in its
+own mailbox with no clause for it. That is the drift above, rebuilt on purpose.
+Most arms never read `req`: the block matched the request in an `on_events` of
+its own, which is what stores it in the shared context, so the script's
+`reply_invite_with_sdp/2` finds it without being given it.
+
+**Re-entry is correct without the host saying anything.** The leg's phase lives
+in the *shared* `appdata` under `:mcu_leg_phase`, never in the block's sandbox —
+a sandbox is cleared on every entry, so a block keyed on it would re-run the
+ACK-time sequence each time the host came back, and every collaboration message
+would re-attach the leg.
+
+| Value | Meaning on entry | Set when |
+|---|---|---|
+| absent / `:awaiting_ack` | the next ACK is the first one: **attach** | the script answered a 200 and entered; a re-INVITE was handed back |
+| `:attach_pending` | **attach now**, before waiting for anything | an UPDATE was handed back (RFC 3311 §5.1: its 200 concludes the offer/answer, no ACK follows) |
+| `:in_mix` | an ACK is a retransmission: ignore it | the leg attached |
+
+A `resume:` flag would have done the same job and could be forgotten, which is
+why the phase is read rather than declared. Two consequences are accepted rather
+than engineered around. A script that **refuses** a re-INVITE (488) leaves the
+phase at `:awaiting_ack`; no ACK ever comes — the server transaction absorbs the
+ACK of a non-2xx (RFC 3261 §17.2.1) — so nothing re-attaches and the leg keeps
+the media it had, which is what a refusal means. A script that refuses an
+**UPDATE** costs one redundant `attach`, since the block cannot see which code
+the script chose; `attach` re-applies the codecs the leg already has.
+
+**The window** is `bridge`'s ([DESIGN-SBB.md](DESIGN-SBB.md#83-bridge-interrupted-and-re-entered)):
+between two entries the call is up and nothing answers it. For a message that is
+a log line. For a renegotiation the script owes a response inside timer B, so
+that arm answers first and does its bookkeeping after.
+
+**Nothing is left in the mailbox.** Both event families get a floor below the
+clauses that carry a policy, so an event the block was never taught about
+re-arms the idle deadline instead of accumulating — the failure above, closed by
+construction rather than by remembering. The same rule is why a second
+`:server_disconnected` is consumed while we hang up: both routes fire for one
+dead server, and the clause `on_events` would otherwise inject turns the second
+into a shutdown, losing the outcome the teardown exists to report.
+
+**One trap the block inherited and now holds once.** `Kelix.Mod.Mcu.attach/1`
+leaves its verdict in `lasterr`, and `goto` aborts the scenario as a failure on
+anything but `:ok` — so a transient RPC failure plus a `goto` on the next line
+kills a call the reference policy says to keep. The policy: a transient failure
+is logged and the call **kept**, because the caller can hear the problem and hang
+up, and tearing down a confirmed dialog on an RPC hiccup is worse. Only the
+JSR309 mutual exclusion ends the leg, through `:attach_refused`.
+
+**A cooperative shutdown leaves the block and reaches the script.** The block
+declares no `{:scenario_ctl, :shutdown, _}` clause and needs none: the injected
+clause jumps to `:__shutdown__`, the block has no `on_shutdown`, so the engine
+throws and the root re-applies it as the transition the host state would have
+written. The script's `on_shutdown` runs with the block unwound — which is where
+the graceful ending now lives whole, including the wait for the BYE's 200. One
+behaviour changed with it, and it is a fix: a kick, a drain and a node shutdown
+are three ways to stop a leg from outside, and the scripts counted the first two
+as `:success` and the third as `:aborted`. They are one path with one verdict.
+
+`play.exs` and `record.exs` carry an `in_call` / `in_conference` pair of the same
+shape. They are JSR-309 media scripts, not conference legs: this block does not
+cover them, and no attempt is made to generalise it into one that would.
+
 ---
 
 ## 6. Negotiation
@@ -283,6 +411,30 @@ This does not contradict the delegation above: the answerer owns the *preference
 (RFC 3264 §6.1), and the server's verdict is a **set** — it says what it accepts,
 never in which order.
 
+**Among the H.264 payload types, the order is ours.** A browser offers the same
+codec under six or seven payload types, one per (profile, packetization-mode) pair,
+and the verdict accepts them all; the payload type we send on, and configure the
+encoder with, is the first of them in the answer's order. That order re-ranks the
+H.264 slots only — every other codec keeps its place — by two keys, the offer's
+order deciding inside each group (`Sdp.fmt_order/2`, one reading for the rtpmap
+order, the payload type sent on and the encoder properties):
+
+1. packetization-mode 1 before mode 0, for every leg. A mode-1 receiver decodes
+   single NAL units too, whereas mode 0 forbids FU-A, bounds every slice to the RTP
+   payload and forces the software encoder (RFC 6184 §8.1): preferring it costs the
+   peer nothing and the mixer a great deal. A payload type stating no mode is read
+   as 0 — the question is what the peer can depacketize;
+2. Main, then High, then Baseline, for a **conference** leg only. The mixer encodes
+   the stream, so the profile is ours to choose among what the peer decodes, and a
+   peer that lists Main decodes it. High is not a real-time concern — it adds 8×8
+   transforms and quantisation matrices, nothing latency-bound — but at a
+   conference's resolution and bitrate it gains little over Main and costs the
+   encoder more, so it ranks behind. The JSR309 adapter relays another peer's
+   stream and does not ask for this key.
+
+The answer still advertises every accepted payload type with its own parameters;
+only the `m=` order and the payload type carrying the stream follow this ranking.
+
 For H.264, the answer keeps the offer's profile, and the announced level follows
 RFC 6184 asymmetry: ours when both sides allow asymmetry, the offer's otherwise —
 the case that must keep producing today's answer for a plain SIP handset. The
@@ -290,6 +442,58 @@ encoder is bound to the minimum of the two. An offer naming a level above our
 decoding capability is answered with our maximum, keeping the payload type and
 emitting a warning that names both levels and the participant; the log is the
 only evidence that this happened, so its absence is a test failure.
+
+### 6.1 The address a leg announces
+
+A leg's `c=` line is the address the **media server** reported on its first
+`StartReceiving`, and it never was a value held here. What the module chooses is
+which of the server's addresses that is: an addressing profile, asked for as the
+last parameter of `StartReceiving` and `StartSending` (MCU API §6.7 bis). A server
+carries up to four — `publicv4`, `publicv6`, `internalv4`, `internalv6` — and
+`GetNetworkProfiles` is asked at every connection what it really has. No profile
+list is written on this side, for the same reason no codec list is (§6).
+
+**Three parties decide, and each is asked only what it alone knows.**
+
+- **the offer** says which families the peer can receive media on — the
+  permission. Both places it states them are read: the media's `c=` address, and
+  every `a=candidate`. The `c=` alone is enough only without ICE; under ICE it
+  carries the **default candidate** the peer elected (RFC 8839 §5.1), which for a
+  browser is a private VPN or LAN address as often as not, while the public
+  address it will equally answer on is one `a=candidate` further down;
+- **the local address the call arrived on** says which of our interfaces this peer
+  has a route to — the preference *inside* that permission. It is the same address
+  this leg's Contact carries, and the framework passes it to every adapter
+  (`local_ip:`). It only ever reorders what the offer allows: announcing the
+  family of our listener to a peer that never offered it would be media sent
+  nowhere;
+- **the media server** says which profiles it carries (`GetNetworkProfiles`) — the
+  availability.
+
+A node-wide setting is none of the three: it would be right for one leg and wrong
+for the other on the very topology this exists for — one conference answering an
+IPv4 caller in `IN IP4` and an IPv6 caller in `IN IP6`.
+
+Three rules hold the rest:
+
+- **decided once per leg.** Symmetric RTP means one socket in both directions, so
+  the server fixes the profile at the first `Start*` and refuses a second,
+  different one rather than rebind a media under a port it has already published.
+  A renegotiation — a hold spelled `c=IN IP6 ::` names no family — reuses what the
+  leg fixed;
+- **no fallback.** Nothing outside the intersection of the three is served, and an
+  empty intersection fails the call. The fallback would answer 200 with an address
+  the caller cannot reach: no media, nothing logged, and the peer left to discover
+  it. Choosing among the families the peer itself published is not that fallback —
+  ICE only ever pairs candidates of one family, and a non-ICE offer names one;
+- **a server that does not carry the notion is called exactly as before.** No
+  `GetNetworkProfiles`, no profile parameter, the server's own default — the same
+  rolling-upgrade path the codec verdict has.
+
+Only the public profiles are asked for. Which side of the network a correspondent
+sits on is step 6 of [multi-interface.md](multi-interface.md), where a node learns
+to classify an address; until then a conference reached through an `internal`
+listener announces the public address.
 
 ---
 
@@ -305,6 +509,48 @@ RTP gets a WebSocket door instead. One RPC configures the participant's media
 connection and returns the full URL, which the adapter publishes in its answer.
 A text-less admission — or a media server that cannot host the WebSocket —
 **omits** every `m=text` section from the answer rather than echoing it at port 0.
+
+**Text over a WebRTC data channel** (RFC 8865) is the other answer to the same
+problem, and the opposite shape. The WebSocket is a second connection beside the
+call, with its own port, its own URL and a token to guard it; a data channel is
+*inside* the caller's `RTCPeerConnection` — same ICE, same DTLS, same port as any
+other leg, and only what travels inside changes. So there is nothing to sign, and
+that leg is configured like an RTP one:
+
+```
+ConfigureParticipantMediaConnection(TEXT, SCTP)   switch the text plane
+SetupParticipantDataChannel(TEXT, peer sctp-port) -> ours, to publish
+StartReceiving(TEXT, %{})                         the port for the m= line
+SetRemoteCryptoDTLS + SetRemoteSTUNCredentials    as any DTLS/ICE leg
+StartSending(TEXT, ip, port, %{})                 at ACK time, like the rest
+```
+
+Three things follow, and each is a place where the WebSocket rule does **not**
+transpose:
+
+- **the `m=` line says `application`, the medium is the call's text.** The parsed
+  descriptor carries `type: :text` so everything that walks a media list keeps
+  working, and `sdp_type: :application` so the answer writes the browser's own
+  section name back. A rejection uses that name too.
+- **the section is declined with port 0, never omitted** — including on a
+  text-less admission, and including when the media server cannot serve it. It is
+  in the browser's real offer, and libwebrtc counts the answer's `m=` lines
+  against its own; an omission would leave the answer one section short.
+- **no `a=rtpmap`, no `a=fmtp`, no redundancy.** No payload type travels inside a
+  data channel, and SCTP being reliable, RFC 8865 has no RED — the mixer still
+  produces it for the RTP legs that negotiated it.
+
+`a=sctp-port` and `a=max-message-size` come from the media server, never from a
+constant on this side: same rule as the announced address, and the reason
+`SetupParticipantDataChannel` exists at all. A peer that declares its channels
+with `a=dcmap` (RFC 8864) gets one back; a browser doing a plain
+`createDataChannel` declares none, opens the channel in band with DCEP, and the
+media server picks it out by its `t140` subprotocol.
+
+**No `a=group:BUNDLE`**, here or anywhere: the media server gives each leg its own
+5-tuple. A browser left at its default `bundlePolicy` is served; one forced to
+`max-bundle` is not, and that is the media server's limitation, not this
+section's.
 
 ---
 
@@ -424,6 +670,8 @@ not a redesign.
 | L14 | an unreadable logo is not reported: the server answers OK whatever the picture did |
 | L16 | a script that does not declare it accepts messages receives none, by design (§9) |
 | L17 | the collaboration channel has no total order across senders and no delivery receipt |
+| L18 | a leg stopped from outside always leaves with `:bye`: `shutdown_clause/0` drops the reason on its way to `on_shutdown`, so a kick, a drain and a node shutdown are indistinguishable there. One line in the framework would carry it, and a kicked leg could then `leave(:kick)` (§5.1) |
+| L19 | **text over WebSocket has no IPv6 form.** The media server builds the URL it returns as `scheme://host:port`, with no brackets (`multiconf.cpp`): an IPv6 announced address yields `ws://fd00::1:9090/…`, which parses as host `fd00`, port 80. The section is answered with a URL nothing can dial. Audio and video are unaffected, and the fix belongs to the server |
 
 **Media liveness is wired on this side and depends on the server.** The adapter
 arms an inactivity watchdog per receiving media at the ACK, and the event
@@ -435,10 +683,9 @@ Delegated codec negotiation (§6) landed on this side: the module's codec lists
 are gone, and the old configuration keys are accepted with a warning naming
 their replacement.
 
-**What this side still owes its scripts** is
-[docs/design/mcu_module_evolutions.md](mcu_module_evolutions.md), starting with
-the `conference()` service building block: the three states every conference
-script copies, moved into the module that owns them.
+**What this side owes its scripts is delivered**: the three states every
+conference script used to copy are the `Mcu.SBB.conference()` block, in the
+module that owns them (§5.1).
 
 ---
 
@@ -456,3 +703,9 @@ script copies, moved into the module that owns them.
 6. Every log line carries the conference uid (§11).
 7. The orphan sweep deletes nothing it is not sure about (§10).
 8. Membership is the permission; there is no cross-conference addressing (§9).
+9. The family of a leg's media address comes from the offer, and its addressing
+   profile is fixed once and never fallen back from (§6.1).
+10. A leg's life in the mix is the block's, and there is one copy of it. A script
+   states the answer, the renegotiation policy and the verdicts; it holds no
+   loop, frees nothing the block released, and reads the leg's phase from the
+   shared `appdata` rather than declaring it (§5.1).

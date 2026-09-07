@@ -11,12 +11,16 @@ defmodule Jsr309FakeServer do
   - `GET <path>` — starts a chunked event stream, notifies the test with
     `{:stream_conn, conn_pid, path}`; the connection then obeys
     `{:chunk, data}`, `:finish` and `:abort` messages
+  - `GET /status/general` — the media server's self-description; answers 404 by
+    default, or the `status:` option encoded as JSON, and notifies
+    `{:status_get, path}`
 
   `stop_listening/1` closes the listen socket to simulate a dead server
   (established streams stay up until aborted).
 
   Option `stream_status: 404` answers every stream GET with the server's
   "queue not found" reply instead, and notifies `{:stream_404, path}`.
+  Option `status:` is a map (encoded to JSON) or `{:raw, body}`.
   """
 
   def start(test_pid, rpc_handler \\ &default_handler/2, opts \\ []) do
@@ -166,6 +170,17 @@ defmodule Jsr309FakeServer do
         :gen_tcp.send(sock, rpc_response(handler.(method, params)))
         :gen_tcp.close(sock)
 
+      # The media server's self-description. A distinct branch on purpose: it is a
+      # plain request/response GET, and letting the stream branch below answer it
+      # opened a chunked stream nobody ever finished — every connect then paid the
+      # status read's full timeout, and a test refuting stream 404s saw this path.
+      {:ok, {:http_request, :GET, {:abs_path, "/status/general"}, _}} ->
+        read_headers(sock, 0)
+        :ok = :inet.setopts(sock, packet: :raw)
+        send(test_pid, {:status_get, "/status/general"})
+        :gen_tcp.send(sock, status_response(Keyword.get(opts, :status)))
+        :gen_tcp.close(sock)
+
       {:ok, {:http_request, :GET, {:abs_path, path}, _}} ->
         read_headers(sock, 0)
         :ok = :inet.setopts(sock, packet: :raw)
@@ -193,6 +208,22 @@ defmodule Jsr309FakeServer do
       {:error, _} ->
         :ok
     end
+  end
+
+  # No `status:` option => the endpoint does not exist, which is what an older
+  # media server answers. Tests that care pass `status: %{...}` (encoded to JSON)
+  # or `status: {:raw, body}` to exercise a malformed answer.
+  defp status_response(nil) do
+    "HTTP/1.1 404 Not Found\r\ncontent-type: text/html\r\n" <>
+      "content-length: 9\r\nconnection: close\r\n\r\nNot found"
+  end
+
+  defp status_response({:raw, body}), do: status_ok(body)
+  defp status_response(status) when is_map(status), do: status_ok(Jason.encode!(status))
+
+  defp status_ok(body) do
+    "HTTP/1.1 200 OK\r\ncontent-type: application/json; charset=utf-8\r\n" <>
+      "content-length: #{byte_size(body)}\r\nconnection: close\r\n\r\n" <> body
   end
 
   defp read_headers(sock, content_length) do

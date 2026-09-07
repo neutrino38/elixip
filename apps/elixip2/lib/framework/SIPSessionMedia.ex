@@ -69,6 +69,13 @@ defmodule SIP.Session.Media do
         end
       end
 
+      # Which leg a media handle belongs to. A reader, so no monitor command.
+      defmacro media_leg_of(handle) do
+        quote do
+          SIP.Session.Media.media_leg_of(var!(sip_ctx), unquote(handle))
+        end
+      end
+
       defmacro media_cleanup_ressources() do
         quote do
           SIP.Scenario.Monitor.note_command(:media, "media_cleanup_ressources")
@@ -115,6 +122,46 @@ defmodule SIP.Session.Media do
   @spec peer_connection(%SIP.Context{}, atom()) :: term() | nil
   def peer_connection(sip_ctx = %SIP.Context{}, leg \\ @default_leg),
     do: SIP.Context.appdata_get(sip_ctx, pc_key(leg))
+
+  @doc """
+  The media action running on `leg` as `{kind, handle}` — `kind` being
+  `:player`, `:recorder` or `:echo` — or nil when that leg's slot is free.
+
+  What a scenario reads to address the action it started rather than digging the
+  handle out of the appdata: two recorders in one call (one per leg) is the case
+  that makes the difference, since their events are told apart by their handles
+  and nothing else.
+  """
+  @spec media_action(%SIP.Context{}, atom()) :: {atom(), term()} | nil
+  def media_action(sip_ctx = %SIP.Context{}, leg \\ @default_leg) do
+    case SIP.Context.appdata_get(sip_ctx, action_key(leg)) do
+      nil -> nil
+      handle -> {SIP.Context.appdata_get(sip_ctx, action_kind_key(leg)), handle}
+    end
+  end
+
+  @doc """
+  The leg a media handle belongs to, or nil when this context does not hold it.
+
+  `handle` is anything a `{:ms_event, handle, _}` carries: an action handle
+  (player, recorder, echo) or a peer connection. This is the only way a scenario
+  can read a media event that names a resource without knowing which side of the
+  call it came from — a B2BUA recording both legs gets two `:recorder_stopped`
+  events and has to say which file just closed.
+  """
+  @spec media_leg_of(%SIP.Context{}, term()) :: atom() | nil
+  def media_leg_of(%SIP.Context{}, nil), do: nil
+
+  def media_leg_of(sip_ctx = %SIP.Context{}, handle) do
+    Enum.find(all_legs(sip_ctx), fn leg ->
+      SIP.Context.appdata_get(sip_ctx, action_key(leg)) == handle or
+        peer_connection(sip_ctx, leg) == handle
+    end)
+  end
+
+  # Every leg this context may hold a handle for. `:inbound` is always in:
+  # a context that never registered a leg can still carry the bare keys.
+  defp all_legs(sip_ctx), do: Enum.uniq([@default_leg | media_legs(sip_ctx)])
 
   @doc """
   The legs this context holds a peer connection for, in the order they were
@@ -222,10 +269,43 @@ defmodule SIP.Session.Media do
   # wins over the global `:mediaserver` app env. This lets a server like kelixip
   # pick a pool MCU *per call* without racing on the shared app env — the standalone
   # tool, which sets no such override, keeps its global-config behaviour unchanged.
+  #
+  # A call whose targets have been resolved (`b2bua_resolve/1`) asks for a server
+  # carrying their addressing profiles instead, through the selector the host
+  # declared. The framework cannot reach `Kelix.MediaPool` itself — it is a
+  # kelixip surface — so the selection is injected the way the unit-test transport
+  # is: `{module, function}` under `:mediaserver_selector`, called with the
+  # `{family, side}` pairs and answering the same keyword list the override
+  # carries. Absent, or nothing resolved, and the override decides as before.
   defp ms_config(sip_ctx) do
-    case SIP.Context.appdata_get(sip_ctx, :mediaserver_instance) do
-      nil -> Application.get_env(:elixip2, :mediaserver, [])
-      override -> override
+    case constrained_config(sip_ctx) do
+      nil ->
+        case SIP.Context.appdata_get(sip_ctx, :mediaserver_instance) do
+          nil -> Application.get_env(:elixip2, :mediaserver, [])
+          override -> override
+        end
+
+      cfg ->
+        cfg
+    end
+  end
+
+  defp constrained_config(sip_ctx) do
+    with {module, fun} <- Application.get_env(:elixip2, :mediaserver_selector),
+         [_ | _] = profiles <- SIP.Session.B2bua.resolved_profiles(sip_ctx),
+         true <- Code.ensure_loaded?(module) and function_exported?(module, fun, 1) do
+      cfg = apply(module, fun, [profiles])
+
+      Logger.debug(
+        module: __MODULE__,
+        message:
+          "media_connect: asked for a server carrying #{inspect(profiles)}, got " <>
+            inspect(Keyword.get(cfg, :name) || Keyword.get(cfg, :module))
+      )
+
+      cfg
+    else
+      _ -> nil
     end
   end
 
@@ -406,6 +486,7 @@ defmodule SIP.Session.Media do
       nil ->
         conn_opts =
           [webrtc_support: webrtc_support, media: medias] ++
+            local_address_opts(sip_ctx, leg) ++
             extra_conn_opts(sip_ctx) ++
             resolve_bridge_with(opts, sip_ctx) ++ adapter_opts(opts)
 
@@ -426,6 +507,53 @@ defmodule SIP.Session.Media do
 
       cnx ->
         {sip_ctx, cnx}
+    end
+  end
+
+  # `local_ip:` — the address of OURS that this peer reached, as an
+  # `:inet.ip_address()` tuple. It is the same address
+  # `SIP.Transport.build_contact_uri/2` writes into this leg's Contact, and it is
+  # there for the same reason: of the addresses this node holds, it is one this
+  # peer demonstrably has a route to. An adapter that must place media on an
+  # interface has no other honest source for it — the node's configuration
+  # describes every interface at once, and on a node bridging two of them that is
+  # right for one leg and wrong for the other.
+  #
+  # Only the leg we ANSWER has it, and only it: the inbound request carries the
+  # transport it arrived on (`ruri.tp_pid`, stamped by
+  # `SIP.Transport.do_process_incoming_message/7`). A leg this node PLACES has no
+  # transport until its request goes out — and on a B2BUA it faces the other side of
+  # the network entirely, so lending it the inbound address would be worse than
+  # saying nothing. The option is then absent rather than guessed, and every adapter
+  # reads it with `Keyword.get/3`.
+  defp local_address_opts(sip_ctx, @default_leg) do
+    with %{ruri: %SIP.Uri{tp_pid: tp_pid}} when is_pid(tp_pid) <-
+           SIP.Context.appdata_get(sip_ctx, :last_uas_req) ||
+             SIP.Context.appdata_get(sip_ctx, :inbound_request),
+         {:ok, local_ip, _local_port} <- SIP.Transport.get_local_ip_port(tp_pid) do
+      [local_ip: local_ip] ++ peer_ip_opt(sip_ctx)
+    else
+      _ -> []
+    end
+  end
+
+  defp local_address_opts(_sip_ctx, _leg), do: []
+
+  # `peer_ip:` — the source address the inbound request came FROM, which the
+  # transport stamped into the R-URI's `destip` when it received it
+  # (`SIP.Transport.do_process_incoming_message/7`). Read from the same struct as
+  # `tp_pid` above, so it costs nothing and cannot drift from it.
+  #
+  # It is what says which SIDE of the network this peer sits on, and `local_ip`
+  # cannot: behind a 1:1 NAT one interface has two faces, the NAT rewrites the
+  # destination, and both an inside and an outside peer arrive on the same private
+  # address. Our own address then discriminates nothing — it is not wrong, it is
+  # silent — and the peer's is the only remaining evidence.
+  defp peer_ip_opt(sip_ctx) do
+    case SIP.Context.appdata_get(sip_ctx, :last_uas_req) ||
+           SIP.Context.appdata_get(sip_ctx, :inbound_request) do
+      %{ruri: %SIP.Uri{destip: ip}} when is_tuple(ip) -> [peer_ip: ip]
+      _ -> []
     end
   end
 
@@ -482,7 +610,7 @@ defmodule SIP.Session.Media do
     legs =
       case Keyword.fetch(opts, :leg) do
         {:ok, leg} -> [leg]
-        :error -> [@default_leg | media_legs(sip_ctx)] |> Enum.uniq()
+        :error -> all_legs(sip_ctx)
       end
 
     for leg <- legs, cnx = peer_connection(sip_ctx, leg) do
@@ -611,12 +739,43 @@ defmodule SIP.Session.Media do
     end
   end
 
+  @doc """
+  Stop the media action of `leg` (`leg: :inbound` by default), or of every leg
+  at once with `leg: :all`.
+
+  `:all` is what a call recording both of its legs ends with: each recorder has
+  to be stopped for the media server to close its file, and a scenario that
+  stops one of the two leaves the other file without its index.
+  """
+  @spec stop_media(%SIP.Context{}, keyword()) :: %SIP.Context{}
   def stop_media(sip_ctx = %SIP.Context{}, opts \\ []) do
     if not is_pid(sip_ctx.mediaserverpid) do
       raise "No media server connected to the session context"
     end
 
-    leg = leg_of(opts)
+    case leg_of(opts) do
+      :all -> stop_every_leg(sip_ctx)
+      leg -> stop_one_leg(sip_ctx, leg)
+    end
+  end
+
+  defp stop_every_leg(sip_ctx) do
+    busy = Enum.filter(all_legs(sip_ctx), &SIP.Context.appdata_get(sip_ctx, action_key(&1)))
+
+    if busy == [] do
+      Logger.warning(
+        dialogpid: self(),
+        module: __MODULE__,
+        message: "No media action started on any leg, ignoring stop_media request"
+      )
+
+      sip_ctx
+    else
+      Enum.reduce(busy, sip_ctx, &stop_one_leg(&2, &1))
+    end
+  end
+
+  defp stop_one_leg(sip_ctx, leg) do
     action_pid = SIP.Context.appdata_get(sip_ctx, action_key(leg))
 
     if not is_nil(action_pid) do
@@ -667,9 +826,7 @@ defmodule SIP.Session.Media do
     # server-side. `:inbound` is always attempted — a context that never called
     # media_legs-registering code can still hold the bare key (a scenario that
     # set it by hand, the MCU module's path).
-    legs = Enum.uniq([@default_leg | media_legs(sip_ctx)])
-
-    legs
+    all_legs(sip_ctx)
     |> Enum.reduce(sip_ctx, fn leg, ctx ->
       ctx |> cleanup_action(leg) |> cleanup_peer_connection(leg)
     end)

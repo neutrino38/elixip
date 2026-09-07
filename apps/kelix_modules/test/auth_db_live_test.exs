@@ -1,7 +1,8 @@
 defmodule Kelix.Mod.AuthDbLiveTest do
-  # Live counterpart to auth_db_test.exs: exercises the REAL MyXQL query
+  # Live counterpart to auth_db_test.exs: exercises the REAL driver query
   # (lookup_ha1/2) and the full verdict chain against an actual Kamailio-style
-  # `subscriber` table.
+  # `subscriber` table — in MariaDB/MySQL or PostgreSQL, per the config's
+  # "driver" key (default mysql, same as the module's).
   #
   # Credentials are NEVER committed: they live in an external JSON file pointed
   # to by KELIX_AUTHDB_CONFIG. Absent that env var (or file), the whole module
@@ -66,21 +67,36 @@ defmodule Kelix.Mod.AuthDbLiveTest do
   end
 
   # The one thing no mock can check: that the transport `show` REPORTS is the
-  # transport the session actually got. `Ssl_cipher` is a session status variable —
-  # empty on a cleartext link — so this catches a link that claims TLS and runs in
-  # clear, and a fallback that was taken silently.
+  # transport the session actually got. The cipher is empty/null on a cleartext
+  # link — so this catches a link that claims TLS and runs in clear, and a
+  # fallback that was taken silently.
   test "the transport show reports is the one on the wire" do
     view = Pool.describe()
     assert view.state == :up
 
+    cipher = session_cipher(view.driver)
+
+    if view.tls do
+      assert cipher not in [nil, ""],
+             "show says #{inspect(view.transport)} but the session has no cipher"
+    else
+      assert cipher in [nil, ""],
+             "show says cleartext but the session is encrypted with #{cipher}"
+    end
+  end
+
+  defp session_cipher(:mysql) do
     {:ok, %MyXQL.Result{rows: [["Ssl_cipher", cipher]]}} =
       MyXQL.query(Pool.conn(), "SHOW STATUS LIKE 'Ssl_cipher'")
 
-    if view.tls do
-      assert cipher != "", "show says #{inspect(view.transport)} but the session has no cipher"
-    else
-      assert cipher == "", "show says cleartext but the session is encrypted with #{cipher}"
-    end
+    cipher
+  end
+
+  defp session_cipher(:postgres) do
+    {:ok, %Postgrex.Result{rows: [[cipher]]}} =
+      Postgrex.query(Pool.conn(), "SELECT cipher FROM pg_stat_ssl WHERE pid = pg_backend_pid()", [])
+
+    cipher
   end
 
   test "lookup_ha1/2 returns the stored HA1 for a known subscriber", %{realm: realm, user: user} do

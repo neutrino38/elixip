@@ -3,10 +3,22 @@ defmodule Kelix.Mod.AuthDb.Pool do
   The subscriber-DB link of `Kelix.Mod.AuthDb`: how it is opened, on which
   transport, and what `kelictl auth_db show` reports about it.
 
-  The link is a **permanent MyXQL/DBConnection pool**, registered as
+  The link is a **permanent MyXQL or Postgrex `DBConnection` pool**, registered as
   `Kelix.Mod.AuthDb.Conn` and supervised by `Kelix.ModuleSupervisor`. Its
   `pool_size` connections are opened once, kept open (DBConnection pings the idle
   ones), and re-established with backoff — a query never connects.
+
+  ## Which driver
+
+  `driver` in `[module.auth_db]` selects the subscriber DB: `"mysql"` (default,
+  MariaDB/MySQL, `MyXQL`) or `"postgres"` (PostgreSQL, `Postgrex`) — `driver/1`
+  reads the block, `driver_module/1` resolves it to the module. Both drivers take
+  the same connection options (`hostname`, `port`, `database`, `username`,
+  `password`, `connect_timeout`, and the merged `ssl:` keyword form below), so
+  everything from here down is written once and dispatches on the resolved
+  module rather than branching on the driver directly. Only the default port
+  (`3306` / `5432`) and the SQL placeholder syntax (`?` vs `$1` — see
+  `Kelix.Mod.AuthDb.lookup_ha1/2`) differ.
 
   ## TLS first, cleartext only when the block says so
 
@@ -49,7 +61,8 @@ defmodule Kelix.Mod.AuthDb.Pool do
 
   @default_pool_size 4
   @default_connect_timeout_ms 5_000
-  @default_port 3306
+  @default_port_mysql 3306
+  @default_port_postgres 5432
 
   # The probe's own query bound. Deliberately shorter than `call_timeout_ms`: this
   # is a `SELECT 1` on a fresh connection, and it runs on the boot path.
@@ -66,27 +79,44 @@ defmodule Kelix.Mod.AuthDb.Pool do
   @spec conn() :: atom
   def conn(), do: @conn
 
+  @doc "Which SQL driver `[module.auth_db]` asks for: `:mysql` (default) or `:postgres`."
+  @spec driver(map) :: :mysql | :postgres
+  def driver(config) do
+    case Map.get(config, "driver") do
+      "postgres" -> :postgres
+      _ -> :mysql
+    end
+  end
+
+  @doc "The driver module `driver/1`'s result resolves to."
+  @spec driver_module(:mysql | :postgres) :: module
+  def driver_module(:mysql), do: MyXQL
+  def driver_module(:postgres), do: Postgrex
+
   @doc """
   Negotiate the transport, publish the descriptor `show` reads, and start the pool.
 
-  This is `Kelix.Mod.AuthDb.child_spec/2`'s start MFA. It returns whatever
-  `MyXQL.start_link/1` returns — including `{:ok, pid}` when the database is
-  unreachable, which is deliberate: a base that is down must not abort the node's
-  boot, it must make authentication answer 500 until it comes back.
+  This is `Kelix.Mod.AuthDb.child_spec/2`'s start MFA. It returns whatever the
+  resolved driver's `start_link/1` returns — including `{:ok, pid}` when the
+  database is unreachable, which is deliberate: a base that is down must not
+  abort the node's boot, it must make authentication answer 500 until it comes
+  back.
   """
   @spec start_link(map) :: {:ok, pid} | {:error, term}
   def start_link(config) do
     {verdict, transport_opts} = negotiate(config)
     publish(config, verdict)
 
-    MyXQL.start_link([name: @conn, pool_size: pool_size(config)] ++ opts(config, transport_opts))
+    driver_module(driver(config)).start_link(
+      [name: @conn, pool_size: pool_size(config)] ++ opts(config, transport_opts)
+    )
   end
 
   @doc """
-  Which transport to open the pool on, as `{verdict, myxql_opts}` (see the
+  Which transport to open the pool on, as `{verdict, driver_opts}` (see the
   moduledoc for the decision procedure).
 
-  `opts[:probe]` replaces the live probe with `fn config, myxql_opts -> :ok |
+  `opts[:probe]` replaces the live probe with `fn config, driver_opts -> :ok |
   {:error, reason} end` — the same injection idiom as `authenticate/3`'s
   `:ha1_lookup`, and what lets every branch of the decision be tested without a
   server that refuses TLS on demand.
@@ -189,22 +219,22 @@ defmodule Kelix.Mod.AuthDb.Pool do
   end
 
   defp do_probe(config, transport_opts) do
-    case MyXQL.start_link([pool_size: 1] ++ opts(config, transport_opts)) do
+    driver = driver(config)
+    mod = driver_module(driver)
+
+    case mod.start_link([pool_size: 1] ++ opts(config, transport_opts)) do
       {:ok, pool} ->
-        case MyXQL.query(pool, "SELECT 1", [], timeout: @probe_query_timeout_ms) do
+        case mod.query(pool, "SELECT 1", [], timeout: @probe_query_timeout_ms) do
           {:ok, _result} ->
             :ok
 
-          # A server ERROR packet came back, so the TRANSPORT worked: bad
+          # The server answered with its OWN error, so the TRANSPORT worked: bad
           # credentials or a missing database is not something another transport
           # would fix, and probing cleartext for it would downgrade the link over a
           # password typo. The pool stays as it is; the reason reaches the operator
           # through `show` and the 500s.
-          {:error, %MyXQL.Error{mysql: mysql}} when is_map(mysql) ->
-            :ok
-
           {:error, reason} ->
-            {:error, reason}
+            if server_answered?(driver, reason), do: :ok, else: {:error, reason}
         end
 
       {:error, reason} ->
@@ -213,6 +243,10 @@ defmodule Kelix.Mod.AuthDb.Pool do
   rescue
     e -> {:error, e}
   end
+
+  defp server_answered?(:mysql, %MyXQL.Error{mysql: mysql}), do: is_map(mysql)
+  defp server_answered?(:postgres, %Postgrex.Error{postgres: pg}), do: is_map(pg)
+  defp server_answered?(_driver, _reason), do: false
 
   defp probe_bound(config), do: connect_timeout(config) + @probe_query_timeout_ms + 2_000
 
@@ -261,6 +295,7 @@ defmodule Kelix.Mod.AuthDb.Pool do
       database: config["database"],
       username: config["username"],
       table: config["table"] || "subscriber",
+      driver: driver(config),
       tls: tls?(verdict),
       certificate: certificate(verdict),
       transport: transport_text(verdict),
@@ -298,7 +333,7 @@ defmodule Kelix.Mod.AuthDb.Pool do
       # blocks until the pool answers). `show` is the command an operator runs when
       # things are stuck, so it must answer "down, and here is why" rather than join
       # whatever is stuck.
-      case bounded(fn -> query(timeout) end, timeout + 500) do
+      case bounded(fn -> query(descriptor.driver, timeout) end, timeout + 500) do
         {:ok, {:ok, _result}} -> %{state: :up}
         {:ok, {:error, reason}} -> %{state: :down, error: reason_text(reason)}
         {:exit, reason} -> %{state: :down, error: reason_text(reason)}
@@ -307,8 +342,8 @@ defmodule Kelix.Mod.AuthDb.Pool do
     end
   end
 
-  defp query(timeout) do
-    MyXQL.query(@conn, "SELECT 1", [], timeout: timeout)
+  defp query(driver, timeout) do
+    driver_module(driver).query(@conn, "SELECT 1", [], timeout: timeout)
   rescue
     e -> {:error, e}
   end
@@ -329,7 +364,7 @@ defmodule Kelix.Mod.AuthDb.Pool do
 
   defp transport_text(:cleartext_configured), do: "cleartext — configured (ssl = false)"
 
-  # ── MyXQL options ────────────────────────────────────────────────────────────
+  # ── driver options (MyXQL and Postgrex agree on all of this) ────────────────
 
   defp opts(config, transport_opts) do
     [
@@ -342,11 +377,11 @@ defmodule Kelix.Mod.AuthDb.Pool do
     ] ++ transport_opts
   end
 
-  # TLS options in MyXQL's CURRENT spelling: a keyword list under `:ssl`. The old
-  # `ssl: true` + `ssl_opts:` pair logs a deprecation warning on every connect, and
-  # a bare `ssl: true` raises a MatchError inside MyXQL 0.8.2 — so the list form is
-  # the only one to use. MyXQL merges `verify_peer` + the https hostname match under
-  # it, and what we pass wins.
+  # TLS options in MyXQL's and Postgrex's CURRENT shared spelling: a keyword list
+  # under `:ssl`. MyXQL's old `ssl: true` + `ssl_opts:` pair logs a deprecation
+  # warning on every connect, and a bare `ssl: true` raises a MatchError inside
+  # MyXQL 0.8.2 — so the list form is the only one to use. Both drivers merge
+  # `verify_peer` + the hostname match under it, and what we pass wins.
   defp tls_opts(config) do
     case config["ssl_ca_cert_file"] do
       path when is_binary(path) and path != "" ->
@@ -379,7 +414,15 @@ defmodule Kelix.Mod.AuthDb.Pool do
   def insecure_allowed?(config), do: Map.get(config, "allow_insecure_db_connection") == true
 
   defp host(config), do: config["host"] || "127.0.0.1"
-  defp port(config), do: config["port"] || @default_port
+
+  defp port(config) do
+    config["port"] ||
+      case driver(config) do
+        :mysql -> @default_port_mysql
+        :postgres -> @default_port_postgres
+      end
+  end
+
   defp pool_size(config), do: config["pool_size"] || @default_pool_size
   defp connect_timeout(config), do: config["connect_timeout_ms"] || @default_connect_timeout_ms
 

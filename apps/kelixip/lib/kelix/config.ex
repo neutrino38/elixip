@@ -19,10 +19,13 @@ defmodule Kelix.Config do
 
   @type listener :: %{
           proto: :udp | :tcp | :tls | :wss,
-          addr: String.t(),
+          addr: String.t() | nil,
           port: pos_integer,
           cert: String.t() | nil,
-          key: String.t() | nil
+          key: String.t() | nil,
+          tag: :public | :internal,
+          networks: [{:inet.ip_address(), non_neg_integer()}],
+          advertise: String.t() | nil
         }
 
   @typedoc """
@@ -67,10 +70,15 @@ defmodule Kelix.Config do
   defstruct node_name: "kelixip@127.0.0.1",
             script_dir: "/usr/share/kelixip",
             module_dir: "/usr/lib/kelixip/modules",
-            user_agent: "Kelixip/1.5.1",
+            user_agent: "Kelixip/1.5.2",
             max_calls: nil,
             log: %{target: "stdout", facility: "local0", level: "info"},
             listen: [],
+            # The OUTBOUND TLS/WSS leg's policy: whether the certificate a peer we
+            # DIAL presents is checked, and against which authority. Node-wide,
+            # because it is about who we are willing to talk to, not about one
+            # socket. `[[listen]] cert`/`key` is the inbound side and stays there.
+            tls: %{verify: false, ca: nil},
             mediaserver_pool: [],
             # The node's video encoding bitrate (kb/s): what a leg is encoded at and
             # the cap on the `b=AS:` it is answered with. One statement for both
@@ -156,10 +164,72 @@ defmodule Kelix.Config do
 
   # ── infra -> :elixip2 app env ────────────────────────────────────────────────
 
+  @doc false
+  @spec advertise_map(t) :: %{:inet.ip_address() => :inet.ip_address()}
+  def advertise_map(%__MODULE__{} = cfg) do
+    for %{addr: addr, advertise: adv} <- cfg.listen,
+        is_binary(addr) and is_binary(adv),
+        {:ok, bound} = SIP.NetUtils.parse_address(addr),
+        {:ok, alias_ip} = SIP.NetUtils.parse_address(adv),
+        into: %{} do
+      {bound, alias_ip}
+    end
+  end
+
+  @doc false
+  @spec internal_networks(t) :: [{:inet.ip_address(), non_neg_integer()}]
+  def internal_networks(%__MODULE__{} = cfg) do
+    cfg.listen
+    |> Enum.filter(&(&1.tag == :internal))
+    |> Enum.flat_map(fn
+      %{networks: [_ | _] = stated} -> stated
+      %{addr: addr} when is_binary(addr) -> attached(addr)
+      _ -> []
+    end)
+    |> Enum.uniq()
+  end
+
+  # The subnet an interface states around this address. nil when no interface
+  # carries it — a listener that cannot bind aborts the boot anyway, and until it
+  # tries this is not the place to say so.
+  defp attached(addr) do
+    with {:ok, ip} <- SIP.NetUtils.parse_address(addr),
+         {_network, _length} = prefix <- SIP.NetUtils.attached_prefix(ip) do
+      [prefix]
+    else
+      _ -> []
+    end
+  end
+
   @doc "Push the framework-facing infra keys into the :elixip2 application env."
   @spec apply_app_env(t) :: :ok
   def apply_app_env(%__MODULE__{} = cfg) do
     Application.put_env(:elixip2, :useragent, cfg.user_agent)
+    # How the framework asks for a media server carrying a call's addressing
+    # profiles. It cannot reach Kelix.MediaPool — a kelixip surface — so the
+    # selection is declared here and called back into.
+    Application.put_env(:elixip2, :mediaserver_selector, {Kelix.Router, :media_for_profiles})
+
+    # Which of our addresses to publish to a peer outside, per bound address: the
+    # `advertise` of a `[[listen]]` block. Read by `SIP.Transport.publish_ip/2`,
+    # the one place the substitution happens.
+    Application.put_env(:elixip2, :advertise_map, advertise_map(cfg))
+
+    # Which addresses this node calls internal, from its `internal` listeners:
+    # their own `networks` when stated, else the subnet the interface bearing
+    # their address is attached to. Read by `SIP.NetUtils.net_side/1`, the one
+    # place a correspondent is classified.
+    Application.put_env(:elixip2, :internal_networks, internal_networks(cfg))
+
+    # `[tls]` reaches the outbound leg here: SIP.Transport.ImplHelpers reads both
+    # keys when it dials a TLS or WSS peer.
+    Application.put_env(:elixip2, :tls_verify, cfg.tls.verify)
+
+    case cfg.tls.ca do
+      nil -> Application.delete_env(:elixip2, :tls_cacertfile)
+      path -> Application.put_env(:elixip2, :tls_cacertfile, path)
+    end
+
     # `[mediaserver] video_bitrate` reaches the point-to-point media path here: the
     # Medooze adapter reads `:video_bandwidth_kbps` off its own tuning block for
     # every leg it encodes and answers. Merged, not replaced — the block also holds
@@ -259,7 +329,7 @@ defmodule Kelix.Config do
          :ok <-
            reject_keys(
              map,
-             ~w(server log listen mediaserver module control_api metrics),
+             ~w(server log listen mediaserver module control_api metrics tls),
              "config"
            ),
          {:ok, server} <- parse_server(Map.get(map, "server", %{})),
@@ -267,6 +337,7 @@ defmodule Kelix.Config do
          {:ok, listen} <- parse_listeners(Map.get(map, "listen", [])),
          {:ok, control_api} <- parse_control_api(Map.get(map, "control_api")),
          {:ok, metrics} <- parse_metrics(Map.get(map, "metrics")),
+         {:ok, tls} <- parse_tls(Map.get(map, "tls")),
          {:ok, mediaserver} <- parse_mediaserver(Map.get(map, "mediaserver")) do
       {:ok,
        %__MODULE__{
@@ -283,7 +354,8 @@ defmodule Kelix.Config do
          mediaserver_transport_cc: mediaserver.transport_cc,
          modules: Map.get(map, "module", %{}),
          control_api: control_api,
-         metrics: metrics
+         metrics: metrics,
+         tls: tls
        }}
     end
   end
@@ -379,6 +451,42 @@ defmodule Kelix.Config do
 
   defp parse_metrics(_), do: {:error, "[metrics] must be a table"}
 
+  # Absent means no checking. Verifying a peer presumes an authority both sides
+  # agreed on, which is an interconnect decision and not something a node takes on
+  # its own — turning it on is the same deliberate act as putting a client
+  # certificate on the wire. It is nonetheless the half that gives the other its
+  # worth: a listener demanding a client certificate while this side checks nothing
+  # is theatre.
+  defp parse_tls(nil), do: {:ok, %__MODULE__{}.tls}
+
+  defp parse_tls(%{} = t) do
+    with :ok <- reject_keys(t, ~w(verify ca), "[tls]"),
+         {:ok, verify} <- opt_bool(t, "verify", false, "[tls]"),
+         {:ok, ca} <- opt_readable_file(t, "ca", "[tls]") do
+      {:ok, %{verify: verify, ca: ca}}
+    end
+  end
+
+  defp parse_tls(_), do: {:error, "[tls] must be a table"}
+
+  # A CA that cannot be read is a configuration error, not a runtime surprise: the
+  # alternative is every outbound TLS leg failing at handshake time with an alert
+  # that says nothing about the path being wrong.
+  defp opt_readable_file(map, key, ctx) do
+    case Map.get(map, key) do
+      nil ->
+        {:ok, nil}
+
+      path when is_binary(path) ->
+        if File.regular?(path),
+          do: {:ok, path},
+          else: {:error, "#{ctx}: `#{key}` is not a readable file: #{path}"}
+
+      other ->
+        {:error, "#{ctx}: `#{key}` must be a string, got #{inspect(other)}"}
+    end
+  end
+
   defp parse_listeners(list) when is_list(list) do
     reduce_while_ok(list, &parse_listener/1)
   end
@@ -386,16 +494,178 @@ defmodule Kelix.Config do
   defp parse_listeners(_), do: {:error, "`listen` must be an array of tables ([[listen]])"}
 
   defp parse_listener(%{} = l) do
-    with :ok <- reject_keys(l, ~w(proto addr port cert key), "[[listen]]"),
+    with :ok <- reject_keys(l, ~w(proto addr port cert key tag networks advertise), "[[listen]]"),
          {:ok, proto} <- req_proto(l),
-         {:ok, addr} <- opt_ip(l, "addr", "0.0.0.0", "[[listen]]"),
+         {:ok, addr} <- opt_bind_addr(l),
          {:ok, port} <- req_pos_integer(l, "port", "[[listen]]"),
-         {:ok, cert, key} <- listener_certs(l, proto) do
-      {:ok, %{proto: proto, addr: addr, port: port, cert: cert, key: key}}
+         {:ok, cert, key} <- listener_certs(l, proto),
+         {:ok, tag} <- opt_listener_tag(l),
+         {:ok, networks} <- opt_listener_networks(l),
+         :ok <- internal_defines_its_network(tag, addr, networks),
+         {:ok, advertise} <- opt_advertise(l, addr) do
+      {:ok,
+       %{
+         proto: proto,
+         addr: addr,
+         port: port,
+         cert: cert,
+         key: key,
+         tag: tag,
+         networks: networks,
+         advertise: advertise
+       }}
     end
   end
 
   defp parse_listener(_), do: {:error, "each [[listen]] must be a table"}
+
+  # The address this listener PUBLISHES, when it is not the one it binds: a VM
+  # behind a 1:1 NAT binds a private address and is reached at a public one. The
+  # operator knows it — an AWS EIP does not move — and nothing on the host can
+  # derive it, which is why it is stated rather than discovered.
+  #
+  # Its family must be the listener's. A Via `sent-by` and a Contact carrying the
+  # other family would name an address no peer of this listener can call back, and
+  # the failure would look like a routing problem rather than a typo.
+  defp opt_advertise(l, addr) do
+    case Map.get(l, "advertise") do
+      nil ->
+        {:ok, nil}
+
+      text when is_binary(text) ->
+        with :ok <- advertise_needs_an_address(addr),
+             {:ok, ip} <- SIP.NetUtils.parse_address(text),
+             :ok <- advertise_family_matches(ip, addr) do
+          {:ok, text}
+        else
+          {:error, :einval} ->
+            {:error, "[[listen]]: `advertise` must be an IP address, got #{inspect(text)}"}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+
+      other ->
+        {:error, "[[listen]]: `advertise` must be a string, got #{inspect(other)}"}
+    end
+  end
+
+  # `advertise` names the public face of ONE address, so that address has to be
+  # named too. A wildcard listener spans every interface of its family and each
+  # could have its own alias — or none — so which one is aliased is undefined;
+  # and the substitution is keyed on the address a transport reports being bound
+  # to, which for a wildcard listener is whichever local address it resolved, never
+  # `0.0.0.0`. The mapping could therefore never be found. Refuse it rather than
+  # accept a key nothing will ever match.
+  #
+  # No hardship: an operator behind a 1:1 NAT knows the private address of the
+  # interface that is natted — it is the one they gave the router.
+  defp advertise_needs_an_address(nil) do
+    {:error,
+     "[[listen]]: `advertise` needs an explicit `addr` — it names the public face of " <>
+       "one address, and a listener without one spans every interface of its family"}
+  end
+
+  defp advertise_needs_an_address(addr) do
+    case SIP.NetUtils.parse_address(addr) do
+      {:ok, {0, 0, 0, 0}} -> advertise_needs_an_address(nil)
+      {:ok, {0, 0, 0, 0, 0, 0, 0, 0}} -> advertise_needs_an_address(nil)
+      _ -> :ok
+    end
+  end
+
+  # A wildcard `addr` states its family too, so an advertised address is checked
+  # against whichever the listener will actually bind. `nil` — absent — is refused
+  # above before reaching here.
+  defp advertise_family_matches(_ip, nil), do: :ok
+
+  defp advertise_family_matches(ip, addr) do
+    with {:ok, bound} <- SIP.NetUtils.parse_address(addr) do
+      if SIP.NetUtils.address_family(ip) == SIP.NetUtils.address_family(bound) do
+        :ok
+      else
+        {:error,
+         "[[listen]]: `advertise` is #{SIP.NetUtils.address_family(ip)} while `addr` is " <>
+           "#{SIP.NetUtils.address_family(bound)}; a Via and a Contact carrying the other " <>
+           "family name an address no peer of this listener can call back"}
+      end
+    end
+  end
+
+  # `tag` has one useful value. The public side is the default, read off the
+  # absence of the key; `"public"` is accepted and does nothing, so a
+  # configuration that states it stays valid.
+  defp opt_listener_tag(l) do
+    case Map.get(l, "tag") do
+      nil -> {:ok, :public}
+      "public" -> {:ok, :public}
+      "internal" -> {:ok, :internal}
+      other -> {:error, "[[listen]]: `tag` must be \"public\" or \"internal\", got #{inspect(other)}"}
+    end
+  end
+
+  # The networks this listener's side is made of, as CIDR strings. Present, it
+  # **replaces** what would have been detected from the interface — it does not
+  # add to it. A detection that can only be widened cannot be corrected, and an
+  # interface carrying a /16 where the internal network is a /24 would leave the
+  # operator no way to narrow.
+  defp opt_listener_networks(l) do
+    case Map.get(l, "networks") do
+      nil ->
+        {:ok, []}
+
+      list when is_list(list) ->
+        reduce_while_ok(list, fn
+          text when is_binary(text) ->
+            case SIP.NetUtils.parse_prefix(text) do
+              {:ok, prefix} -> {:ok, prefix}
+              {:error, _} -> {:error, "[[listen]]: `networks` entry is not a CIDR: #{text}"}
+            end
+
+          other ->
+            {:error, "[[listen]]: `networks` entries must be strings, got #{inspect(other)}"}
+        end)
+
+      other ->
+        {:error, "[[listen]]: `networks` must be an array of CIDR strings, got #{inspect(other)}"}
+    end
+  end
+
+  # An internal listener DEFINES the internal network, by the subnet it sits on.
+  # A wildcard one sits on every subnet, so it defines nothing — and taking that
+  # to mean "everything is internal" would silently make the public side empty.
+  # Name an address, or name the networks.
+  defp internal_defines_its_network(:internal, nil, []) do
+    {:error,
+     "[[listen]]: an `internal` listener needs an explicit `addr` (its subnet is then " <>
+       "read from the interface) or an explicit `networks`; a wildcard listener sits on " <>
+       "every subnet and so defines none"}
+  end
+
+  defp internal_defines_its_network(_tag, _addr, _networks), do: :ok
+
+  # `addr` states a family, and a wildcard states one too: "0.0.0.0" is every
+  # IPv4 interface, "::" every IPv6 one. **Absent** is the only spelling that
+  # names no family — it is `nil` here, and the listener supervisor expands it
+  # into one socket per family the host carries.
+  #
+  # nil rather than a default of "0.0.0.0": that string is an IPv4 address, and
+  # an operator who writes it is asking for IPv4. Only silence can mean both.
+  defp opt_bind_addr(l) do
+    case Map.get(l, "addr") do
+      nil ->
+        {:ok, nil}
+
+      addr when is_binary(addr) ->
+        case :inet.parse_address(String.to_charlist(addr)) do
+          {:ok, _ip} -> {:ok, addr}
+          {:error, _} -> {:error, "[[listen]]: `addr` must be an IP address, got #{inspect(addr)}"}
+        end
+
+      other ->
+        {:error, "[[listen]]: `addr` must be a string, got #{inspect(other)}"}
+    end
+  end
 
   defp req_proto(l) do
     case Map.get(l, "proto") do
@@ -573,15 +843,6 @@ defmodule Kelix.Config do
 
   # A bind address, validated here so a typo fails the boot with a clear message
   # rather than crashing Kelix.Listener.Supervisor when it converts it.
-  defp opt_ip(map, key, default, ctx) do
-    with {:ok, addr} <- opt_string(map, key, default, ctx) do
-      case :inet.parse_address(String.to_charlist(addr)) do
-        {:ok, _ip} -> {:ok, addr}
-        {:error, _} -> {:error, "#{ctx}: `#{key}` must be an IP address, got #{inspect(addr)}"}
-      end
-    end
-  end
-
   defp opt_enum(map, key, allowed, default, ctx) do
     case Map.get(map, key) do
       nil ->

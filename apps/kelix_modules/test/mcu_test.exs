@@ -111,9 +111,9 @@ defmodule Kelix.Mod.McuTest do
     end
 
     test "the RPC order is CreateConference then SetCompositionType" do
-      # drain what the channel coming up did: create its event queue, then sweep the
-      # server's orphan conferences (§9.4)
-      assert ["EventQueueCreate", "GetConferences"] = TestStub.rpc_order()
+      # drain what the channel coming up did: create its event queue, read the
+      # server's addressing profiles (§6.7), then sweep its orphan conferences (§9.4)
+      assert ["EventQueueCreate", "GetNetworkProfiles", "GetConferences"] = TestStub.rpc_order()
 
       assert {:ok, _} = create()
       assert ["CreateConference", "SetCompositionType"] = TestStub.rpc_order()
@@ -291,6 +291,7 @@ defmodule Kelix.Mod.McuTest do
 
       assert TestStub.rpc_order() == [
                "EventQueueCreate",
+               "GetNetworkProfiles",
                "GetConferences",
                "CreateConference",
                "SetCompositionType",
