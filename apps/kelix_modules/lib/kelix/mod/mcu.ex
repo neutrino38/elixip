@@ -968,7 +968,8 @@ defmodule Kelix.Mod.Mcu do
           %{name: "layout", required: false, help: Vocabulary.layout_help()},
           %{name: "logo", required: false, help: Vocabulary.logo_help()},
           %{name: "max_participants", required: false},
-          %{name: "destroy_when_empty", required: false}
+          %{name: "destroy_when_empty", required: false},
+          %{name: "admin", required: false, help: "operator identity, traced in this node's logs"}
         ],
         help: "Create a conference (allocates a DID when none is given)"
       },
@@ -1029,7 +1030,11 @@ defmodule Kelix.Mod.Mcu do
         rest: {:delete, "/conferences/:uid"},
         errors: %{not_found: 404, not_empty: 409, mcu_down: 503, rpc_error: 502},
         rw: :w,
-        args: [%{name: "uid", required: true}, %{name: "force", required: false}],
+        args: [
+          %{name: "uid", required: true},
+          %{name: "force", required: false},
+          %{name: "admin", required: false, help: "operator identity, traced in this node's logs"}
+        ],
         help: "Destroy a conference (`force` disconnects the participants first)"
       },
       %{
@@ -1154,16 +1159,30 @@ defmodule Kelix.Mod.Mcu do
       {:error, :bad_request}
   end
 
+  # `admin` identifies who asked for it — kelescope confirms this action and
+  # requires a name before sending it (`docs/design/kelixip_liveview.md`), traced
+  # here rather than added to `@create_args` (it is not a conference field).
   defp do_control("conference.create", args) do
+    {admin, args} = Map.pop(args, "admin")
     args = drop_retired(args, "conference.create")
 
-    with :ok <- Args.reject_unknown(args, @create_args),
-         {:ok, spec} <- create_spec(args),
-         # `owner: :none`: a REST caller has no instance to own the conference — its
-         # "caller" is the HTTP request process, which dies as the response is sent
-         {:ok, conf, warning} <- call({:create, spec, :none}) do
-      {:ok, create_reply(conf, warning)}
-    end
+    result =
+      with :ok <- Args.reject_unknown(args, @create_args),
+           {:ok, spec} <- create_spec(args),
+           # `owner: :none`: a REST caller has no instance to own the conference — its
+           # "caller" is the HTTP request process, which dies as the response is sent
+           {:ok, conf, warning} <- call({:create, spec, :none}) do
+        {:ok, create_reply(conf, warning)}
+      end
+
+    Logger.info(
+      module: __MODULE__,
+      message:
+        "conference.create domain=#{Map.get(args, "domain")} by admin=#{admin || "unknown"}: " <>
+          "#{inspect(result)}"
+    )
+
+    result
   end
 
   defp do_control("conference.list", args) do
@@ -1194,12 +1213,25 @@ defmodule Kelix.Mod.Mcu do
     end
   end
 
+  # Same `admin` tracing as `conference.create` above.
   defp do_control("conference.delete", args) do
-    with :ok <- Args.reject_unknown(args, ~w(uid force)),
-         {:ok, uid} <- Args.required_string(args, "uid"),
-         {:ok, force} <- Args.bool(args, "force", false) do
-      call({:delete, uid, force})
-    end
+    {admin, args} = Map.pop(args, "admin")
+
+    result =
+      with :ok <- Args.reject_unknown(args, ~w(uid force)),
+           {:ok, uid} <- Args.required_string(args, "uid"),
+           {:ok, force} <- Args.bool(args, "force", false) do
+        call({:delete, uid, force})
+      end
+
+    Logger.info(
+      module: __MODULE__,
+      message:
+        "conference.delete uid=#{Map.get(args, "uid")} by admin=#{admin || "unknown"}: " <>
+          "#{inspect(result)}"
+    )
+
+    result
   end
 
   # §8.3.3: a partial merge. Omitted fields are left untouched — a PUT here never
