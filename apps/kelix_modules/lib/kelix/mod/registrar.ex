@@ -52,7 +52,10 @@ defmodule Kelix.Mod.Registrar do
       registrations half of `Kelix.Control.subscribe_domain_counters/1`
       (`docs/design/kelixip_liveview.md`): every AOR change on any domain pushes
       that domain's live count, `{:kelix_domain_counter, domain, :registrations,
-      count}`, rather than the caller polling `all/1`.
+      count}`, rather than the caller polling `all/1`;
+    * `subscribe_registrations/2` / `unsubscribe_registrations/2` — same idea, one
+      domain at a time and the full AOR detail rather than a count (kelescope's
+      live registrations panel, `docs/design/kelixip_liveview.md`).
 
   Delivered as a loadable `Kelix.Module` (P5): `validate_config/1`, `child_spec/2`
   and `describe/0` below; the facades route through `Kelix.Module.safe_call/3` so
@@ -78,11 +81,16 @@ defmodule Kelix.Mod.Registrar do
   #   count_subs   MapSet(pid) subscribed via `subscribe_domain_counters/1`
   #   count_mons   monitor_ref => subscriber pid, dropped on death without an
   #                explicit `unsubscribe_domain_counters/1`
+  #   detail_subs  %{domain => MapSet(pid)} subscribed via `subscribe_registrations/2`
+  #   detail_mons  monitor_ref => {domain, pid}, dropped on death without an
+  #                explicit `unsubscribe_registrations/2`
   defstruct tables: %{},
             subs: %{},
             mons: %{},
             count_subs: MapSet.new(),
             count_mons: %{},
+            detail_subs: %{},
+            detail_mons: %{},
             max_contacts: @default_max_contacts,
             min_expires: @min_expires,
             default_expires: @default_expires,
@@ -136,7 +144,9 @@ defmodule Kelix.Mod.Registrar do
         subscribe_register_event: 2,
         unsubscribe_register_event: 2,
         subscribe_domain_counters: 1,
-        unsubscribe_domain_counters: 1
+        unsubscribe_domain_counters: 1,
+        subscribe_registrations: 2,
+        unsubscribe_registrations: 2
       ]
     }
 
@@ -327,6 +337,23 @@ defmodule Kelix.Mod.Registrar do
     do: Kelix.Module.safe_call(__MODULE__, {:unsubscribe_counters, pid})
 
   @doc """
+  Subscribe `pid` to `domain`'s registration detail — the registrations half of
+  `Kelix.Control.subscribe_registrations/2` (`docs/design/kelixip_liveview.md`).
+  `pid` gets `{:kelix_registrations, domain, {:upsert, %{domain, aor, contacts}}}`
+  each time an AOR gains or keeps a live contact, and `{:kelix_registrations,
+  domain, {:remove, aor}}` when its last one goes; monitored, so a
+  dead/disconnected subscriber is dropped on its own.
+  """
+  @spec subscribe_registrations(String.t(), pid) :: :ok
+  def subscribe_registrations(domain, pid),
+    do: Kelix.Module.safe_call(__MODULE__, {:subscribe_detail, domain, pid})
+
+  @doc "Stop a subscription started by `subscribe_registrations/2`."
+  @spec unsubscribe_registrations(String.t(), pid) :: :ok
+  def unsubscribe_registrations(domain, pid),
+    do: Kelix.Module.safe_call(__MODULE__, {:unsubscribe_detail, domain, pid})
+
+  @doc """
   Administratively remove an AOR's binding(s) (`kelictl registration remove`). `contact`
   is a specific contact-URI string, or `:all` to drop the whole AOR. Returns `:ok`,
   `:notfound`, or a facade error (`{:error, :down | :timeout}`).
@@ -422,6 +449,29 @@ defmodule Kelix.Mod.Registrar do
 
   def handle_call({:unsubscribe_counters, pid}, _from, state) do
     {:reply, :ok, drop_count_sub(state, pid)}
+  end
+
+  def handle_call({:subscribe_detail, domain, pid}, _from, state) do
+    already? = MapSet.member?(Map.get(state.detail_subs, domain, MapSet.new()), pid)
+
+    if already? do
+      {:reply, :ok, state}
+    else
+      ref = Process.monitor(pid)
+
+      state = %{
+        state
+        | detail_subs:
+            Map.update(state.detail_subs, domain, MapSet.new([pid]), &MapSet.put(&1, pid)),
+          detail_mons: Map.put(state.detail_mons, ref, {domain, pid})
+      }
+
+      {:reply, :ok, state}
+    end
+  end
+
+  def handle_call({:unsubscribe_detail, domain, pid}, _from, state) do
+    {:reply, :ok, drop_detail_sub(state, domain, pid)}
   end
 
   def handle_call({:remove, domain, aor, which}, _from, state) do
@@ -617,7 +667,7 @@ defmodule Kelix.Mod.Registrar do
   def handle_info({:DOWN, ref, :process, dead_pid, _reason}, state) do
     case Map.pop(state.mons, ref) do
       {nil, _} ->
-        {:noreply, drop_count_sub_by_ref(state, ref)}
+        {:noreply, state |> drop_count_sub_by_ref(ref) |> drop_detail_sub_by_ref(ref)}
 
       {{domain, aor, _pid}, mons} ->
         tid = Map.get(state.tables, domain)
@@ -969,6 +1019,7 @@ defmodule Kelix.Mod.Registrar do
     # (emptied entries are deleted, see apply_actions/remove_from/sweep_domain),
     # so the table's own size is the same count `Control.domain/1` shows.
     broadcast_count(state, domain)
+    broadcast_detail(state, domain, aor)
 
     # observability (§11): registrar lifecycle counter, per domain
     Kelix.Metrics.Emit.registrar_event(domain, event)
@@ -988,6 +1039,69 @@ defmodule Kelix.Mod.Registrar do
 
     :ok
   end
+
+  # Skips the render entirely when nobody asked for this domain's detail — the
+  # registrar's hot path (every REGISTER), so a domain nobody is watching must
+  # cost nothing beyond the `count_subs` push above.
+  defp broadcast_detail(state, domain, aor) do
+    case Map.get(state.detail_subs, domain, MapSet.new()) do
+      subs when map_size(subs) == 0 ->
+        :ok
+
+      subs ->
+        msg =
+          case live_contacts(state, domain, aor) do
+            [] -> {:remove, aor}
+            contacts -> {:upsert, render_registration(domain, aor, contacts)}
+          end
+
+        for pid <- subs, do: send(pid, {:kelix_registrations, domain, msg})
+        :ok
+    end
+  end
+
+  # Rendered the same shape `Kelix.Control.registration_row/3` builds — kept
+  # separate rather than shared: the core cannot reference this module's struct
+  # at compile time (§16.12, CLAUDE.md), so it renders through `Map.get`
+  # structurally instead, and this side owns `%Contact{}` directly.
+  defp render_registration(domain, aor, contacts),
+    do: %{domain: domain, aor: aor, contacts: Enum.map(contacts, &render_contact/1)}
+
+  defp render_contact(%Contact{contact: uri} = c) do
+    %{
+      uri: uri_string(uri),
+      expires_in: remaining_seconds(c.expires_at),
+      source: source_string(c.received),
+      transport: transport_string(c.flow_module),
+      instance: c.instance,
+      reg_id: c.reg_id,
+      methods: c.methods
+    }
+  end
+
+  defp uri_string(%SIP.Uri{} = uri) do
+    case SIP.Uri.serialize(uri) do
+      {:ok, s} -> s
+      _ -> inspect(uri)
+    end
+  end
+
+  defp source_string({proto, ip, port}) when is_tuple(ip) do
+    case :inet.ntoa(ip) do
+      {:error, _} -> nil
+      addr -> "#{proto} #{addr}:#{port}"
+    end
+  end
+
+  defp source_string(_received), do: nil
+
+  defp transport_string(module) when is_atom(module) and not is_nil(module) do
+    if Code.ensure_loaded?(module) and function_exported?(module, :transport_str, 0),
+      do: module.transport_str(),
+      else: nil
+  end
+
+  defp transport_string(_module), do: nil
 
   defp drop_count_sub(state, pid) do
     case Enum.find(state.count_mons, fn {_ref, p} -> p == pid end) do
@@ -1012,6 +1126,38 @@ defmodule Kelix.Mod.Registrar do
 
       {pid, mons} ->
         %{state | count_mons: mons, count_subs: MapSet.delete(state.count_subs, pid)}
+    end
+  end
+
+  defp drop_detail_sub(state, domain, pid) do
+    case Enum.find(state.detail_mons, fn {_ref, key} -> key == {domain, pid} end) do
+      nil ->
+        state
+
+      {ref, _key} ->
+        Process.demonitor(ref, [:flush])
+
+        %{
+          state
+          | detail_subs:
+              Map.update(state.detail_subs, domain, MapSet.new(), &MapSet.delete(&1, pid)),
+            detail_mons: Map.delete(state.detail_mons, ref)
+        }
+    end
+  end
+
+  defp drop_detail_sub_by_ref(state, ref) do
+    case Map.pop(state.detail_mons, ref) do
+      {nil, _} ->
+        state
+
+      {{domain, pid}, mons} ->
+        %{
+          state
+          | detail_mons: mons,
+            detail_subs:
+              Map.update(state.detail_subs, domain, MapSet.new(), &MapSet.delete(&1, pid))
+        }
     end
   end
 

@@ -4,6 +4,8 @@ defmodule Kelix.ControlTest do
   # are live singletons — empty at boot.
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias Kelix.Control
 
   # a valid registrar script that stays alive until told to shut down
@@ -552,6 +554,30 @@ defmodule Kelix.ControlTest do
 
     test "shutdown_scenario/1 on an unknown id" do
       assert Control.shutdown_scenario(999_999) == {:error, :not_found}
+    end
+
+    # kelescope confirms this action and requires an admin name before sending it
+    # (`docs/design/kelixip_liveview.md`) — traced here, not merely returned.
+    test "shutdown_scenario/2 traces the admin name in this node's own logs" do
+      spawn_watched("stop-admin.test")
+      assert row = await_state("stop-admin.test")
+
+      log =
+        capture_log(fn ->
+          assert Control.shutdown_scenario(row.id, "jdoe") == :ok
+        end)
+
+      assert log =~ "shutdown_scenario #{row.id} by admin=jdoe: :ok"
+    end
+
+    test "shutdown_scenario/2 traces an unknown id too" do
+      log =
+        capture_log(fn ->
+          assert Control.shutdown_scenario(999_999, "jdoe") == {:error, :not_found}
+        end)
+
+      assert log =~ "by admin=jdoe"
+      assert log =~ ":not_found"
     end
 
     test "mediaserver_toggle/2 on an unknown MCU" do

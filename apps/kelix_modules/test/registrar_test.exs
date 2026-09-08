@@ -661,6 +661,41 @@ defmodule Kelix.Mod.RegistrarTest do
     end
   end
 
+  describe "subscribe_registrations/2" do
+    # kelescope's live registrations panel (docs/design/kelixip_liveview.md): every
+    # AOR change on a domain must push its full detail, not just a count — the
+    # registrations half of `Kelix.Control.subscribe_registrations/2`.
+    test "pushes the AOR's detail on register, then :remove on its last unregister" do
+      assert :ok = Registrar.subscribe_registrations(@domain, self())
+
+      Registrar.save(register("alice", "10.0.0.9"), @domain)
+
+      assert_receive {:kelix_registrations, @domain,
+                      {:upsert, %{domain: @domain, aor: "alice", contacts: [contact]}}}
+
+      assert contact.uri == "sip:alice@10.0.0.9"
+      assert contact.source == "UDP 1.2.3.4:5060"
+
+      Registrar.save(register("alice", "10.0.0.9", expires: 0), @domain)
+      assert_receive {:kelix_registrations, @domain, {:remove, "alice"}}
+    end
+
+    test "is scoped to the subscribed domain only" do
+      Registrar.subscribe_registrations(@domain, self())
+
+      Registrar.save(register("carol", "10.0.0.9"), "other.example.net")
+      refute_receive {:kelix_registrations, "other.example.net", _}, 100
+    end
+
+    test "unsubscribe_registrations/2 stops the pushes" do
+      Registrar.subscribe_registrations(@domain, self())
+      assert :ok = Registrar.unsubscribe_registrations(@domain, self())
+
+      Registrar.save(register("dave", "10.0.0.9"), @domain)
+      refute_receive {:kelix_registrations, _, _}, 100
+    end
+  end
+
   describe "auto-invalidation" do
     test "a dropped connected flow (dead dialog) invalidates the binding + emits :disconnected" do
       uri = %SIP.Uri{userpart: "alice", domain: @domain}

@@ -129,6 +129,34 @@ defmodule Kelix.Control do
     do: safe(fn -> Kelix.ModuleRegistry.facade("registrar", fun, args, :ok) end, :ok)
 
   @doc """
+  Subscribe `pid` to one domain's registration detail as it changes (kelescope's
+  live registrations panel, `docs/design/kelixip_liveview.md`) — a no-op when the
+  registrar module is not loaded: no domain ever registers, so nothing is missed.
+  `domain` is matched the way inbound traffic is — name and aliases,
+  case-insensitively. Returns the same `%{domain, registrations}` entry
+  `registrations/1` returns; `pid` then receives `{:kelix_registrations, domain,
+  {:upsert, %{domain, aor, contacts}}}` (`domain` the canonical name) each time an
+  AOR gains or keeps a live contact, and `{:kelix_registrations, domain, {:remove,
+  aor}}` when its last one goes — no polling needed.
+  """
+  @spec subscribe_registrations(pid(), String.t()) :: {:ok, map} | {:error, :not_found}
+  def subscribe_registrations(pid, domain) when is_binary(domain) do
+    with {:ok, name} <- resolve_domain(domain) do
+      registrar_facade(:subscribe_registrations, [name, pid])
+      {:ok, domain_registrations(name)}
+    end
+  end
+
+  @doc "Stop a subscription started by `subscribe_registrations/2`."
+  @spec unsubscribe_registrations(pid(), String.t()) :: :ok
+  def unsubscribe_registrations(pid, domain) when is_binary(domain) do
+    case resolve_domain(domain) do
+      {:ok, name} -> registrar_facade(:unsubscribe_registrations, [name, pid])
+      {:error, _} -> :ok
+    end
+  end
+
+  @doc """
   Every served domain and its registrations (`kelictl registration list`), in
   `domains.toml` order.
 
@@ -390,9 +418,48 @@ defmodule Kelix.Control do
     end
   end
 
+  @doc """
+  Same as `unregister/3`, but `admin` identifies who asked for it — kelescope
+  confirms this action and requires a name before sending it
+  (`docs/design/kelixip_liveview.md`), traced here in this node's own logs
+  rather than merely returned to the caller.
+  """
+  @spec unregister(String.t(), String.t(), String.t() | :all, String.t() | nil) ::
+          :ok | :notfound
+  def unregister(domain, aor, contact, admin) do
+    result = unregister(domain, aor, contact)
+
+    Logger.info(
+      module: __MODULE__,
+      message:
+        "unregister #{domain}/#{aor} contact=#{inspect(contact)} " <>
+          "by admin=#{admin || "unknown"}: #{inspect(result)}"
+    )
+
+    result
+  end
+
   @doc "Cooperatively shut down one scenario by id (`kelictl stop <id>`)."
   @spec shutdown_scenario(pos_integer) :: :ok | {:error, :not_found}
   def shutdown_scenario(id) when is_integer(id), do: Kelix.InstancePool.shutdown(id)
+
+  @doc """
+  Same as `shutdown_scenario/1`, but `admin` identifies who asked for it —
+  kelescope confirms this action and requires a name before sending it
+  (`docs/design/kelixip_liveview.md`), traced here in this node's own logs
+  rather than merely returned to the caller.
+  """
+  @spec shutdown_scenario(pos_integer, String.t() | nil) :: :ok | {:error, :not_found}
+  def shutdown_scenario(id, admin) when is_integer(id) do
+    result = shutdown_scenario(id)
+
+    Logger.info(
+      module: __MODULE__,
+      message: "shutdown_scenario #{id} by admin=#{admin || "unknown"}: #{inspect(result)}"
+    )
+
+    result
+  end
 
   @doc """
   Reload one or more scenario scripts by name (`kelictl reload-script <name…>`).
