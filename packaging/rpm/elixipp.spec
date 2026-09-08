@@ -9,7 +9,7 @@
 #   rpmbuild -bb --define "_topdir <dir>" packaging/rpm/elixipp.spec
 
 Name:           elixipp
-Version:        1.5.2
+Version:        1.5.3
 Release:        1%{?dist}
 Summary:        SIP scenario test tool driven by the Finite State Language
 License:        BUSL-1.1
@@ -46,6 +46,9 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 %{_bindir}/elixipp
 
 %changelog
+* Tue Sep 08 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.3-1
+- The escript follows the umbrella version; nothing changed in the tool itself.
+- User-Agent is now Elixipp-1.5.3.
 * Sun Sep 06 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.2-1
 - Multi-interface: a scenario reads and writes IPv6 addresses in SIP messages, and
   a UAC leg binds the family of the address it dials.

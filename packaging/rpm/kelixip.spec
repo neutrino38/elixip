@@ -27,12 +27,12 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.5.2
+Version:        1.5.3
 # Counts the builds of this Version, and must be bumped for each one that leaves this
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        8%{?dist}
+Release:        1%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -249,6 +249,16 @@ fi
 %{_datadir}/%{name}/mcu*.exs
 
 %changelog
+* Tue Sep 08 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.3-1
+- Registrations are observable live: Kelix.Control.registrations/0,
+  registrations/1 and registration/2 read the registrar's bindings per domain, and
+  subscribe_registrations/2 pushes every change of a domain as it happens. What
+  kelescope displays, it is told; it does not poll.
+- registrar: a binding taken, renewed or dropped is published as an event, so a
+  supervision view and the node agree without either re-deriving the REGISTER.
+- mcu: a conference and its legs publish the same kind of events, for the same view.
+- User-Agent is now Kelixip/1.5.3.
+
 * Sun Sep 06 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.2-7
 - Packaging: Release 6 was built more than once with different payloads, so dnf took
   the second install for a package it already had and kept the first — a node ran a

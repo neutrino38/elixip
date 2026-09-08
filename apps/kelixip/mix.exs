@@ -7,7 +7,7 @@ defmodule Kelixip.MixProject do
   def project do
     [
       app: :kelixip,
-      version: "1.5.2",
+      version: "1.5.3",
       elixir: "~> 1.15",
       # Umbrella: share the root _build / config / deps / lockfile
       build_path: "../../_build",
@@ -58,7 +58,7 @@ defmodule Kelixip.MixProject do
   defp releases do
     [
       kelixip: [
-        version: "1.5.2",
+        version: "1.5.3",
         applications: [kelixip: :permanent],
         include_executables_for: [:unix]
       ]
