@@ -100,6 +100,16 @@ defmodule SIP.Transport.TLS do
         case what do
           :ping -> nil
           :msg -> SIP.Transport.ImplHelpers.process_incoming_message(state, msg, "TLS", __MODULE__, socket, state.destip, state.destport)
+
+          # The depacketizer refused to frame further: answer what we can out of
+          # the header block it hands up, then take this connection down. It has
+          # deliberately not read the octets Content-Length announced, so nothing
+          # further along this stream is a message boundary any more.
+          :too_large ->
+            SIP.Transport.ImplHelpers.refuse_and_close(state, 513, msg, "TLS", state.destip, state.destport)
+
+          :bad_frame ->
+            SIP.Transport.ImplHelpers.refuse_and_close(state, 400, msg, "TLS", state.destip, state.destport)
         end
       end)
     {:noreply, %{state | buffer: buf}}

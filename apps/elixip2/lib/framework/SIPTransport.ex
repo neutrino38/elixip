@@ -17,20 +17,30 @@ defmodule SIP.Transport do
       clen: 0
     ]
 
-    # If no header was found stop the recurtion and return 0
+    # Content-Length as the depacketizer must read it: a non-negative integer, or
+    # nothing it can frame on. This is FRAMING, not interpretation — there is no
+    # message yet to ask the message layer about — and it has to agree with SIPMsg
+    # octet for octet, which the round-trip test in sip_depack_test.exs pins.
+    #
+    # It used to destructure the split of every header line and `String.to_integer`
+    # the value, so a line with no ": " and a non-numeric value each raised out of
+    # the transport's own callback and killed the connection with no answer. And a
+    # NEGATIVE value went through, where `String.split_at/2` counts from the END —
+    # `split_at("abcdefgh", -5)` is `{"abc", "defgh"}` — so the body was framed
+    # truncated and its tail re-read as the next message.
     defp parse_and_get_clen([]) do
-      0
+      { :ok, 0 }
     end
 
-    # Parse the first line and if this is Content-Legnth return the value
-    # Use recursion to parse all the lines
-    defp parse_and_get_clen(lines) do
-      [ first_line | rest ] = lines
-      [ header, val ] = String.split(first_line, ": ", parts: 2)
-      if header == "Content-Length" do
-        String.to_integer(val)
-      else
-        parse_and_get_clen(rest)
+    defp parse_and_get_clen([ line | rest ]) do
+      case String.split(line, ": ", parts: 2) do
+        [ "Content-Length", val ] ->
+          case Integer.parse(String.trim(val)) do
+            { clen, "" } when clen >= 0 -> { :ok, clen }
+            _ -> :invalid
+          end
+
+        _ -> parse_and_get_clen(rest)
       end
     end
 
@@ -53,6 +63,30 @@ defmodule SIP.Transport do
       end
     end
 
+
+    @doc """
+    Feed received octets to the depacketizer and frame whatever messages they
+    complete, through `cb_fun`:
+
+      * `cb_fun.(:msg, message)`      — one complete SIP message;
+      * `cb_fun.(:ping, "")`          — a CRLF keep-alive (RFC 5626 §4.4.1);
+      * `cb_fun.(:too_large, hdrs)`   — refused, answer **513** then CLOSE;
+      * `cb_fun.(:bad_frame, hdrs)`   — unframeable, answer **400** then CLOSE.
+
+    On both refusals `hdrs` is the complete header block when there is one — a SIP
+    message without a body, so it parses, and a response can be built from it — or
+    `""` when the peer had not even finished its headers. The returned struct is
+    then in state `:refused` and frames nothing more: the connection is on its way
+    down, and the bytes still arriving on it are not a message.
+
+    Closing is not a severity judgement, it is the only in-sync option left. The
+    depacketizer refuses precisely by NOT reading the octets Content-Length
+    announced, so there is no point further down the stream where it could pick up
+    again. A message that framed correctly and is merely too big for the parser is
+    the other case entirely: the transport answers 513 and KEEPS the connection,
+    because the stream is still in step and every other dialog riding it is fine.
+    """
+    def on_data_received(buf = %Depack{ state: :refused }, _data, _cb_fun), do: buf
 
     def on_data_received(buf = %Depack{}, data, cb_fun) when is_binary(data) and is_function(cb_fun) and buf.state == :wait_for_msg do
       # IO.puts("waiting for mesg")
@@ -78,7 +112,10 @@ defmodule SIP.Transport do
             %Depack{ buf | buffer: "", clen: 0 }
         end
       else
-        buf
+        # Not one CRLF yet, so not even a first line — and nothing to answer with.
+        # A peer that never sends one would otherwise be accumulated for as long as
+        # it keeps writing: this is the state where a plain flood lands.
+        refuse_if_past_bound(buf, "", cb_fun)
       end
     end
 
@@ -91,31 +128,45 @@ defmodule SIP.Transport do
         # Remove first line
         [ _first_line | header_lines ] = String.split(headers, "\r\n")
 
-        clen = parse_and_get_clen(header_lines)
-        if clen == 0 do
-          # This SIP message has no body. Pass it to the transaction layer
-          # IO.puts("Message complete !")
-          cb_fun.(:msg, headers)
+        case parse_and_get_clen(header_lines) do
+          { :ok, 0 } ->
+            # This SIP message has no body. Pass it to the transaction layer
+            # IO.puts("Message complete !")
+            cb_fun.(:msg, headers)
 
-          # Reset the buffer
-          buf = %Depack{ buf | state: :wait_for_msg, buffer: "", clen: 0 }
-          # Handle the rest
-          on_data_received(buf, rest, cb_fun)
-        else
-          buf = %Depack{ buf | state: :reading_body, buffer: headers, clen: clen, body: "" }
-          on_data_received(buf, rest, cb_fun)
+            # Reset the buffer
+            buf = %Depack{ buf | state: :wait_for_msg, buffer: "", clen: 0 }
+            # Handle the rest
+            on_data_received(buf, rest, cb_fun)
+
+          { :ok, clen } ->
+            # The bound is applied to the length the peer DECLARES, the moment the
+            # header block ends and before one body octet is buffered. That is what
+            # turns an announced gigabyte into 450 bytes of work — and it is also
+            # what bounds :reading_body, which then needs no check of its own:
+            # `body` is only kept while it is SHORTER than `clen`, and `clen` cannot
+            # exceed the bound past this point. Checking the accumulated body
+            # against the bound instead would refuse wrongly, since a single read
+            # legitimately carries the next pipelined messages too.
+            if clen > SIPMsg.max_message_size() do
+              refuse(buf, :too_large, headers, cb_fun, "Content-Length: #{clen} announced")
+            else
+              buf = %Depack{ buf | state: :reading_body, buffer: headers, clen: clen, body: "" }
+              on_data_received(buf, rest, cb_fun)
+            end
+
+          :invalid ->
+            # No usable Content-Length: the end of this message is unknowable, so
+            # every octet after it would be read at the wrong offset. 400, not 513
+            # — the message is malformed, not oversized.
+            refuse(buf, :bad_frame, headers, cb_fun, "no usable Content-Length")
         end
       else
-        # The bound is checked on a header block that has NOT ended yet — the only
-        # thing this state can bound, since Content-Length is unknown before the
-        # blank line. It used to be checked on the whole accumulated buffer, so a
-        # 13 kB message arriving in one read tripped it on its BODY and raised out
-        # of the transport's own callback: the TCP connection died instead of the
-        # parser refusing the message with a 513.
-        if Kernel.byte_size(buf.buffer) > SIPMsg.max_message_size() do
-          raise "SIP message headers exceed the #{SIPMsg.max_message_size()} byte limit"
-        end
-        buf
+        # A header block that has not ended yet is the only thing this state can
+        # bound, Content-Length being unknown before the blank line. It used to be
+        # checked on the whole accumulated buffer, so a 13 kB message arriving in
+        # one read tripped it on its BODY.
+        refuse_if_past_bound(buf, "", cb_fun)
       end
     end
 
@@ -129,6 +180,27 @@ defmodule SIP.Transport do
       else
         %Depack{ buf | body: accumulated }
       end
+    end
+
+    # Accumulation is bounded in the two states that cannot know where the message
+    # ends yet. Neither has a complete header block, so neither can be answered:
+    # the peer gets the close and nothing else.
+    defp refuse_if_past_bound(buf, headers, cb_fun) do
+      if Kernel.byte_size(buf.buffer) > SIPMsg.max_message_size() do
+        refuse(buf, :too_large, headers, cb_fun,
+          "#{Kernel.byte_size(buf.buffer)} bytes buffered with no message boundary")
+      else
+        buf
+      end
+    end
+
+    defp refuse(buf, what, headers, cb_fun, detail) do
+      Logger.warning([module: __MODULE__, message: "#{what}: #{detail} (bound " <>
+        "#{SIPMsg.max_message_size()} bytes) — refusing to frame further, the " <>
+        "connection goes down"])
+
+      cb_fun.(what, headers)
+      %Depack{ buf | state: :refused, buffer: "", body: "", clen: 0 }
     end
   end
 
@@ -501,45 +573,137 @@ defmodule SIP.Transport do
       end
     end
 
-    # A request past `SIPMsg.max_message_size/0` is REFUSED, not dropped: RFC 3261
+    # A message past `SIPMsg.max_message_size/0` is REFUSED, not dropped: RFC 3261
     # §21.4.11 defines 513 for exactly this and §8.2.1 requires an answer. Silence
     # is indistinguishable from a network outage at the far end, which then waits
     # out its Timer B — the screen-share re-INVITE of 2026-09-08 died that way, and
     # it took three evenings and five traces to see that nothing had been sent.
     #
-    # The 513 goes out STATELESSLY (§8.2.7): the message never reached the
-    # transaction layer, so there is no server transaction to reply on. No
-    # retransmission either, which costs nothing — a UDP peer losing this 513 is
-    # back to timing out, which is what it did before.
+    # This is the path for a message that FRAMED correctly and is only too big for
+    # the parser, so the connection stays up: the stream is still in step, and the
+    # other dialogs riding it are none of this message's business. On a stream
+    # transport the depacketizer now refuses first (`refuse_and_close/6`); what
+    # still arrives here is UDP and WSS, which have no framing layer.
     defp refuse_too_large(state, parsed_msg, tp_name, destip, destport) do
+      case refusal_response(parsed_msg, 513, tp_name, destip, destport) do
+        nil -> :ok
+        msgstr -> send_outside_this_callback(msgstr, destip, destport, false)
+      end
+
+      { :noreply, state }
+    end
+
+    @doc """
+    Answer what the depacketizer would not frame, then take the connection down.
+
+    Called from a stream transport's own callback on `:too_large` / `:bad_frame`
+    (see `SIP.Transport.Depack.on_data_received/3`). `headers` is the complete
+    header block, or `""` when the peer had not finished its headers — then there
+    is nothing to answer with and only the close happens.
+
+    The close is not severity, it is the only in-sync option: refusing means
+    deliberately NOT reading the octets Content-Length announced, so no later
+    offset in the stream is a message boundary any more. The transport's
+    `terminate/1` tells the dialogs riding the connection (`notify_transport_down/2`),
+    so they tear down instead of hanging.
+    """
+    @spec refuse_and_close(map(), 400 | 513, binary(), binary(), any(), any()) :: :ok
+    def refuse_and_close(_state, code, headers, tp_name, destip, destport) do
+      msgstr =
+        try do
+          case SIPMsg.parse(headers, fn _c, _m, _l, _li -> nil end) do
+            # The parse code is deliberately NOT required to be :ok. `:missing_body`
+            # is the expected answer here — the header block announces octets we
+            # chose not to read — and a malformed Content-Length stops the parse on
+            # the very header that made us refuse. What matters is whether enough of
+            # the request survived to answer it. The request is NOT dispatched
+            # either way: it was never received in full.
+            { _parse_code, parsed_msg } ->
+              if answerable?(parsed_msg) do
+                refusal_response(parsed_msg, code, tp_name, destip, destport)
+              end
+
+            _ -> nil
+          end
+        rescue
+          e ->
+            # Composing the answer must never be what keeps the connection open.
+            Logger.warning([module: __MODULE__, message: "#{tp_name}: cannot compose the " <>
+              "#{code} for #{peer_str(destip, destport)} (#{Exception.message(e)})"])
+            nil
+        end
+
+      if is_nil(msgstr) do
+        Logger.warning([module: __MODULE__, message: "#{tp_name}: closing the connection to " <>
+          "#{peer_str(destip, destport)} unanswered — nothing parseable to answer"])
+      end
+
+      send_outside_this_callback(msgstr, destip, destport, true)
+    end
+
+    # Enough of the request survived the parse to be answered: a response is built
+    # out of these five headers and nothing else (§8.2.6.2, and `@reply_filter`).
+    # Checked rather than assumed, because a refusal is composed from a PARTIAL
+    # parse on purpose.
+    defp answerable?(msg) do
+      is_map(msg) and is_atom(Map.get(msg, :method)) and
+        Enum.all?([ :via, :to, :from, :callid, :cseq ], &Map.has_key?(msg, &1))
+    end
+
+    # Which refusal a message gets, and the log line that says why. A response and
+    # an ACK are never answered — there is nothing to answer a response with, and
+    # §17.1.1.3 forbids answering an ACK — so both come back `nil`.
+    defp refusal_response(parsed_msg, code, tp_name, destip, destport) do
       cond do
         # A response carries `method: false`, and `false` is itself an atom.
         parsed_msg.method == false or not is_atom(parsed_msg.method) ->
           Logger.warning([module: __MODULE__, message: "#{tp_name}: dropping an oversized " <>
             "SIP response from #{peer_str(destip, destport)} — a response is never answered"])
+          nil
 
         parsed_msg.method == :ACK ->
           Logger.warning([module: __MODULE__, message: "#{tp_name}: dropping an oversized " <>
             "ACK from #{peer_str(destip, destport)} — an ACK is never answered"])
+          nil
 
         true ->
           Logger.warning([module: __MODULE__, message: "#{tp_name}: #{parsed_msg.method} from " <>
-            "#{peer_str(destip, destport)} exceeds #{SIPMsg.max_message_size()} bytes, " <>
-            "answering 513"])
+            "#{peer_str(destip, destport)} #{refusal_reason(code)}, answering #{code}"])
 
-          msgstr = SIPMsg.serialize(SIP.Msg.Ops.reply_to_request(parsed_msg, 513, nil))
-
-          # `send_msg/4` is a GenServer.call on this transport and we are running
-          # inside that very transport's callback: calling it here deadlocks the
-          # socket for the call timeout, then raises. A one-shot process borrows the
-          # transport's own send path instead, so the 513 is framed and logged like
-          # every other response it emits, on all four transports.
-          tid = self()
-          port = if is_integer(destport), do: destport, else: 0
-          spawn(fn -> SIP.Transport.send_msg(tid, msgstr, destip, port) end)
+          SIPMsg.serialize(SIP.Msg.Ops.reply_to_request(parsed_msg, code, nil))
       end
+    end
 
-      { :noreply, state }
+    defp refusal_reason(513), do: "past the #{SIPMsg.max_message_size()} byte bound"
+    defp refusal_reason(400), do: "unframeable"
+    defp refusal_reason(_code), do: "refused"
+
+    # `send_msg/4` is a GenServer.call on this transport, and we are running inside
+    # that very transport's callback: calling it here deadlocks the socket for the
+    # call timeout, then raises. A one-shot process borrows the transport's own send
+    # path instead, so the refusal is framed and logged like every other response it
+    # emits, on all four transports.
+    #
+    # It is also what keeps "answer, THEN close" in that order. Stopping the
+    # transport from the callback would close the socket with the response still
+    # queued behind us, and the peer would read a reset instead of a reason.
+    defp send_outside_this_callback(msgstr, destip, destport, close?) do
+      tid = self()
+      port = if is_integer(destport), do: destport, else: 0
+
+      spawn(fn ->
+        if msgstr, do: SIP.Transport.send_msg(tid, msgstr, destip, port)
+
+        if close? do
+          try do
+            GenServer.stop(tid, :normal)
+          catch
+            :exit, _ -> :ok
+          end
+        end
+      end)
+
+      :ok
     end
 
 

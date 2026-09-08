@@ -185,17 +185,180 @@ defmodule SIP.Test.MsgTooLarge do
     assert depak.state == :wait_for_msg
   end
 
-  test "the depacketizer still bounds a header block that never ends" do
-    put_limit(2_000)
-    cb = fn _what, _msg -> nil end
+  # ── What the depacketizer accumulates, and where it stops ──────────────────
+  #
+  # Three states hold attacker-controlled octets, and two of them used to hold
+  # them without any bound: a first line that never ends (:wait_for_msg), and a
+  # body whose Content-Length announced a gigabyte (:reading_body). One hundred
+  # connections per listener by default, each able to make the node hold whatever
+  # it cares to send.
 
-    assert_raise RuntimeError, fn ->
-      SIP.Transport.Depack.on_data_received(
-        %SIP.Transport.Depack{},
-        "INVITE sip:bob@example.com SIP/2.0\r\n" <> String.duplicate("X-Pad: pad\r\n", 400),
-        cb
-      )
+  defp depack(data, buf \\ %SIP.Transport.Depack{}) do
+    parent = self()
+    SIP.Transport.Depack.on_data_received(buf, data, fn what, msg -> send(parent, {what, msg}) end)
+  end
+
+  test "a first line that never ends is bounded, and nothing is answered" do
+    put_limit(2_000)
+
+    buf = depack(String.duplicate("X", 3_000))
+
+    # No CRLF, so not even a first line: there is nothing to build a response out
+    # of, and the empty header block says so.
+    assert_received {:too_large, ""}
+    assert buf.state == :refused
+    assert buf.buffer == ""
+  end
+
+  test "a header block that never ends is bounded, and nothing is answered" do
+    put_limit(2_000)
+
+    buf = depack("INVITE sip:bob@example.com SIP/2.0\r\n" <> String.duplicate("X-Pad: pad\r\n", 400))
+
+    assert_received {:too_large, ""}
+    assert buf.state == :refused
+  end
+
+  test "an announced body past the bound is refused before one octet is buffered" do
+    put_limit(2_000)
+
+    # Only the headers are sent: the gigabyte is never written, and the refusal
+    # must not wait for it. This is what turns the attack into 450 bytes of work.
+    headers =
+      "INVITE sip:bob@example.com SIP/2.0\r\n" <>
+        "Via: SIP/2.0/TCP 82.184.8.2:53936;branch=z9hG4bKflood\r\n" <>
+        "From: \"Alice\" <sip:alice@example.com>;tag=alice-tag\r\n" <>
+        "To: <sip:bob@example.com>\r\n" <>
+        "Call-ID: flood-1\r\n" <>
+        "CSeq: 1 INVITE\r\n" <>
+        "Content-Type: application/sdp\r\n" <>
+        "Content-Length: 1000000000\r\n\r\n"
+
+    buf = depack(headers)
+
+    assert_received {:too_large, handed_up}
+    assert buf.state == :refused
+    assert buf.body == ""
+
+    # The header block handed up is answerable, which is the whole point of handing
+    # it up rather than "". `:missing_body` is the expected code and not a failure:
+    # we deliberately did not read the gigabyte it announces.
+    assert {:missing_body, req} = SIPMsg.parse(handed_up, nocb())
+    assert req.method == :INVITE
+    assert req.callid == "flood-1"
+    assert req.cseq == [1, :INVITE]
+    resp = SIP.Msg.Ops.reply_to_request(req, 513, nil)
+    assert resp.response == 513
+    assert resp.reason == "Message too large"
+  end
+
+  test "a refused depacketizer frames nothing more" do
+    put_limit(2_000)
+
+    buf = depack(String.duplicate("X", 3_000))
+    assert_received {:too_large, ""}
+
+    # A whole valid message arriving behind the refusal is not framed: the
+    # connection is on its way down.
+    buf = depack(invite_wire("v=0\r\n"), buf)
+    assert buf.state == :refused
+    refute_received {:msg, _}
+  end
+
+  test "an unusable Content-Length is a 400, not a crash and not a desync" do
+    # `String.to_integer/1` used to raise out of the transport's callback and kill
+    # the connection with no answer at all.
+    for value <- ["lots", "", "5x", "0x10"] do
+      buf = depack(bodyless_invite("Content-Length: #{value}"))
+      assert_received {:bad_frame, _headers}, "Content-Length: #{value} was not refused"
+      assert buf.state == :refused
     end
+  end
+
+  test "a NEGATIVE Content-Length is refused, not framed backwards" do
+    # It used to go straight through, and String.split_at/2 counts from the END:
+    # split_at("abcdefgh", -5) is {"abc", "defgh"}. So the body was framed
+    # truncated and its tail re-read as the start of the next message — a frame
+    # desync on a connection several dialogs may be sharing.
+    buf = depack(bodyless_invite("Content-Length: -5") <> "AAAAAAAAAAAAAAAAAAAA")
+
+    assert_received {:bad_frame, _headers}
+    assert buf.state == :refused
+    refute_received {:msg, _}
+  end
+
+  test "a header line with no \": \" is skipped, not fatal" do
+    # It used to be destructured as [header, val] and raise a MatchError, taking
+    # the connection with it.
+    wire = bodyless_invite("X-Broken\r\nContent-Length: 0")
+
+    buf = depack(wire)
+    assert_received {:msg, framed}
+    assert framed == String.trim_trailing(wire, "\r\n\r\n")
+    assert buf.state == :wait_for_msg
+  end
+
+  # ── Integer headers, read from the wire ────────────────────────────────────
+  #
+  # `String.to_integer/1` used to be called on four header values straight off the
+  # network. A peer's typo then raised from INSIDE the parser, and the only thing a
+  # transport could do with an exception was log "unparsable message" and drop it:
+  # the reason was lost, and so was any chance of answering.
+
+  test "a malformed integer header is a parse error, never an exception" do
+    for {header, value, expected} <- [
+          {"Content-Length", "lots", :invalid_contentlength_header},
+          {"Content-Length", "5x", :invalid_contentlength_header},
+          {"Content-Length", "-5", :invalid_contentlength_header},
+          {"Expires", "soon", :invalid_expires_header},
+          {"Expires", "-1", :invalid_expires_header},
+          {"Max-Forwards", "many", :invalid_maxforwards_header},
+          {"CSeq", "x INVITE", :invalid_cseq_header}
+        ] do
+      wire = integer_header_invite(header, value)
+
+      code =
+        try do
+          SIPMsg.parse(wire, nocb()) |> elem(0)
+        rescue
+          e -> {:raised, e.__struct__}
+        end
+
+      assert code == expected, "#{header}: #{value} answered #{inspect(code)}"
+    end
+  end
+
+  test "a well-formed integer header is still read, spaces and all" do
+    assert {:ok, req} = SIPMsg.parse(integer_header_invite("Expires", "600"), nocb())
+    assert req.expires == 600
+
+    # Trailing whitespace is tolerated rather than fatal — the message layer owns
+    # how forgiving the reading is (see the Message Layer note in CLAUDE.md).
+    assert {:ok, req} = SIPMsg.parse(integer_header_invite("Expires", "600 "), nocb())
+    assert req.expires == 600
+  end
+
+  # A REGISTER carrying `header: value` and no body. REGISTER rather than INVITE so
+  # `Expires` is in its natural place.
+  defp integer_header_invite(header, value) do
+    "REGISTER sip:example.com SIP/2.0\r\n" <>
+      "Via: SIP/2.0/TCP 82.184.8.2:53936;branch=z9hG4bKint\r\n" <>
+      "From: \"Alice\" <sip:alice@example.com>;tag=alice-tag\r\n" <>
+      "To: <sip:alice@example.com>\r\n" <>
+      "Call-ID: int-1\r\n" <>
+      (if header == "CSeq", do: "", else: "CSeq: 1 REGISTER\r\n") <>
+      "#{header}: #{value}\r\n" <>
+      (if header == "Content-Length", do: "", else: "Content-Length: 0\r\n") <> "\r\n"
+  end
+
+  # An INVITE whose last header is `extra`, with no body.
+  defp bodyless_invite(extra) do
+    "INVITE sip:bob@example.com SIP/2.0\r\n" <>
+      "Via: SIP/2.0/TCP 82.184.8.2:53936;branch=z9hG4bKclen\r\n" <>
+      "From: \"Alice\" <sip:alice@example.com>;tag=alice-tag\r\n" <>
+      "To: <sip:bob@example.com>\r\n" <>
+      "Call-ID: clen-1\r\n" <>
+      "CSeq: 1 INVITE\r\n" <> extra <> "\r\n\r\n"
   end
 
   defp oversize(req, body) do

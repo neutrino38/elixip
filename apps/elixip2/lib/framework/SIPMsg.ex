@@ -185,15 +185,41 @@ defmodule SIPMsg do
 	end
 
 
+	# An integer header value, as it arrives from the wire: non-negative, nothing
+	# trailing. A peer's typo has to be a parse ERROR and not an exception —
+	# `String.to_integer/1` raised from inside the parser, and the only thing the
+	# transport could do with that was log "unparsable message" and drop it, losing
+	# both the reason and any chance of answering. RFC 3261 §20.14, §20.16 and
+	# §20.19 all bound these to non-negative values.
+	#
+	# A NEGATIVE value is not merely a small number here. `Content-Length: -5` used
+	# to be accepted and handed to the depacketizer, where `String.split_at/2` counts
+	# from the END — `split_at("abcdefgh", -5)` is `{"abc", "defgh"}` — so the body
+	# was framed truncated and its tail re-read as the next message.
+	defp header_integer(value) when is_binary(value) do
+		case Integer.parse(String.trim(value)) do
+			{ n, "" } when n >= 0 -> { :ok, n }
+			_ -> :invalid
+		end
+	end
+
+	defp header_integer(_value), do: :invalid
+
 	#Parse header content
-	defp parse_header_content( :cseq, value ) do
+	defp parse_header_content( :cseq, value ) when is_binary(value) do
 		case String.split(value, " ") do
 			[ seqnum, method ] ->
-				rez = [ String.to_integer(seqnum), method_to_atom(method) ]
-				if is_atom(Enum.at(rez,1)) do
-					{ :ok, rez }
-				else
-					{ :invalid_cseq_header, "Invalid method #{method} referenced in CSeq header." }
+				case header_integer(seqnum) do
+					{ :ok, num } ->
+						rez = [ num, method_to_atom(method) ]
+						if is_atom(Enum.at(rez,1)) do
+							{ :ok, rez }
+						else
+							{ :invalid_cseq_header, "Invalid method #{method} referenced in CSeq header." }
+						end
+
+					:invalid ->
+						{ :invalid_cseq_header, "Invalid sequence number '#{seqnum}' in CSeq header." }
 				end
 
 			_ -> { :invalid_cseq_header, "Invalid CSeq header format." }
@@ -209,11 +235,17 @@ defmodule SIPMsg do
 	end
 
 	defp parse_header_content( :contentlength, value ) do
-		{ :ok, String.to_integer(value) }
+		case header_integer(value) do
+			{ :ok, clen } -> { :ok, clen }
+			:invalid -> { :invalid_contentlength_header, "Invalid Content-Length value '#{inspect(value)}'" }
+		end
 	end
 
 	defp parse_header_content( :expires, value ) do
-		{ :ok, String.to_integer(value) }
+		case header_integer(value) do
+			{ :ok, expires } -> { :ok, expires }
+			:invalid -> { :invalid_expires_header, "Invalid Expires value '#{inspect(value)}'" }
+		end
 	end
 
 	# The wildcard Contact (RFC 3261 §10.2.2): "Contact: *" with "Expires: 0" is how
@@ -242,7 +274,10 @@ defmodule SIPMsg do
 	end
 
 	defp parse_header_content( "Max-Forwards", value ) do
-		{ :ok, String.to_integer(value) }
+		case header_integer(value) do
+			{ :ok, hops } -> { :ok, hops }
+			:invalid -> { :invalid_maxforwards_header, "Invalid Max-Forwards value '#{inspect(value)}'" }
+		end
 	end
 
 	defp parse_header_content( _key, value ) do
