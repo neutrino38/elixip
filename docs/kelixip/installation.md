@@ -180,6 +180,7 @@ Unknown keys are rejected too — a typo must not silently fall back to a defaul
 | `module_dir` | string | `/usr/lib/kelixip/modules` | Where module `.beam` files are loaded from |
 | `user_agent` | string | `Kelixip/1.5.0` | `User-Agent` / `Server` header value |
 | `max_calls` | int > 0 | *unlimited* | Node-wide concurrent-instance cap; beyond it, new requests get `503` |
+| `max_message_size` | int > 0 | `64000` | Biggest inbound SIP message, in bytes. Beyond it a request is answered `513 Message too large`; a response or an ACK, which are never answered, is dropped with a log line. A memory bound, not a protocol one: keep it well above a WebRTC offer, which weighs about 13 kB |
 
 #### `[log]`
 

@@ -3,6 +3,8 @@ defmodule SIPMsg do
 
 	require Logger
 
+	@default_max_message_size 64_000
+
 	# Concat multi value headers in a single list
 	defp concat_multi_header_values(val1, val2) when is_list(val1) and is_list(val2) do
 		val1 ++ val2
@@ -681,18 +683,35 @@ defmodule SIPMsg do
 	defp only_ws?(_), do: false
 
 	@doc """
+	The largest SIP message this stack accepts, in bytes.
+
+	Set with `config :elixip2, :max_message_size`, 64 000 when unset. On a kelixip
+	node it comes from `[server] max_message_size` in config.toml.
+
+	RFC 3261 §18.1.1 bounds a message for UDP only — 1300 bytes against the path
+	MTU — and names TCP as the way out; over a reliable transport the standard sets
+	no bound at all. So this is a memory bound of ours, not a protocol one, and it
+	has to stay an order of magnitude above normal traffic: a WebRTC offer with four
+	m-sections weighs about 13 kB, and the 10 000 that used to be hardcoded here cut
+	screen sharing in half — three m-sections passed, four did not.
+	"""
+	@spec max_message_size() :: pos_integer()
+	def max_message_size() do
+		Application.get_env(:elixip2, :max_message_size, @default_max_message_size)
+	end
+
+	@doc """
 	Parse a SIP message stored as a string and return it as map
 	Takes a callback that document all parsing errors. In case of
 	parsing error, the callback function is called as
 
 	parse_error_callback(err_code, err_message, line_num, offending_line)
+
+	A message past `max_message_size/0` answers `{ :msg_too_large, headers }`. The
+	parsed headers are handed back on purpose: they are what a caller needs to
+	refuse it with a 513 rather than drop it.
 	"""
 	def parse(message, parse_error_callback) when is_binary(message) do
-		# Size check
-		if String.length(message) > 10000 do
-			raise "SIP message exceeds max length of 10000"
-		end
-
 		# Separate headers from the rest.
 		{ headers, body } = case String.split(message, "\r\n\r\n", parts: 2) do
 			[ hs, bd ] ->
@@ -716,12 +735,27 @@ defmodule SIPMsg do
 		#					{ code, parsed_msg } )))
 
 			if code == :ok do
-				# Now parse message body and insert it into the map under de body key
-				{ code, final_msg, _rest } = add_body(parsed_msg_or_error, body)
-				if code == :ok do
-					{ code, final_msg }
+				# The size guard sits HERE, past the headers, because a refusal has to be
+				# answerable: a 513 (RFC 3261 §21.4.11) is built out of the Via, From, To,
+				# Call-ID and CSeq of the request it refuses, and §8.2.1 requires that a
+				# request be answered at all. It used to run before any parsing and
+				# `raise`; the transport caught that, logged it and sent nothing, so the
+				# far end saw a network outage and waited out its Timer B — 32 s of
+				# silence for every screen share.
+				#
+				# Measured in bytes: String.length/1 counts graphemes, which walked the
+				# whole message on the hot path and moved the boundary as soon as one
+				# header carried UTF-8.
+				if byte_size(message) > max_message_size() do
+					{ :msg_too_large, parsed_msg_or_error }
 				else
-					{ code, parsed_msg_or_error }
+					# Now parse message body and insert it into the map under de body key
+					{ code, final_msg, _rest } = add_body(parsed_msg_or_error, body)
+					if code == :ok do
+						{ code, final_msg }
+					else
+						{ code, parsed_msg_or_error }
+					end
 				end
 			else
 				parse_error_callback.(code, parsed_msg_or_error, 0, "")

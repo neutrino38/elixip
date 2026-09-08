@@ -48,6 +48,7 @@ defmodule Kelix.ConfigTest do
       assert cfg.max_calls == 2000
       # unset -> default
       assert cfg.module_dir == "/usr/lib/kelixip/modules"
+      assert cfg.max_message_size == 64_000
     end
 
     test "log section", %{cfg: cfg} do
@@ -233,6 +234,32 @@ defmodule Kelix.ConfigTest do
       block = Application.get_env(:elixip2, MediaServer.Mendooze, [])
       assert Keyword.get(block, :bitrate_feedback) == []
       assert Keyword.get(block, :video_bandwidth_kbps) == 3000
+    end
+  end
+
+  describe "parse/1 — [server] max_message_size" do
+    # The bound the SIP parser refuses a message past, with a 513. One number per
+    # node, and the framework reads it off the app env — so the assertion that
+    # matters is that apply_app_env/1 carries it there.
+    test "absent → 64 000 bytes" do
+      assert {:ok, cfg} = Config.parse("")
+      assert cfg.max_message_size == 64_000
+    end
+
+    test "honoured when given, and pushed into the :elixip2 app env" do
+      assert {:ok, cfg} = Config.parse("[server]\nmax_message_size = 200000")
+      assert cfg.max_message_size == 200_000
+
+      prev = Application.get_env(:elixip2, :max_message_size)
+      on_exit(fn -> Application.put_env(:elixip2, :max_message_size, prev) end)
+
+      :ok = Config.apply_app_env(cfg)
+      assert SIPMsg.max_message_size() == 200_000
+    end
+
+    test "wrong type is refused at boot" do
+      assert {:error, msg} = Config.parse(~s([server]\nmax_message_size = "big"))
+      assert msg =~ "max_message_size"
     end
   end
 

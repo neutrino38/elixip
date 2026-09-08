@@ -10,8 +10,6 @@ defmodule SIP.Transport do
     require SIPMsg
     require Logger
 
-    @maxmsgsize 8000
-
     defstruct [
       buffer: "",
       body: "",
@@ -86,9 +84,6 @@ defmodule SIP.Transport do
 
     def on_data_received(buf = %Depack{}, data, cb_fun) when is_binary(data) and is_function(cb_fun) and buf.state == :reading_headers do
       buf = %Depack{ buf | buffer: buf.buffer <> data } # Accumulate
-      if Kernel.byte_size(buf.buffer) > @maxmsgsize do
-        raise "SIP message exceeeds maximum size"
-      end
       # IO.puts("reading_headers !")
       if String.contains?(buf.buffer,"\r\n\r\n") do
         [ headers, rest ] = String.split(buf.buffer, "\r\n\r\n", parts: 2)
@@ -111,6 +106,15 @@ defmodule SIP.Transport do
           on_data_received(buf, rest, cb_fun)
         end
       else
+        # The bound is checked on a header block that has NOT ended yet — the only
+        # thing this state can bound, since Content-Length is unknown before the
+        # blank line. It used to be checked on the whole accumulated buffer, so a
+        # 13 kB message arriving in one read tripped it on its BODY and raised out
+        # of the transport's own callback: the TCP connection died instead of the
+        # parser refusing the message with a 513.
+        if Kernel.byte_size(buf.buffer) > SIPMsg.max_message_size() do
+          raise "SIP message headers exceed the #{SIPMsg.max_message_size()} byte limit"
+        end
         buf
       end
     end
@@ -437,6 +441,9 @@ defmodule SIP.Transport do
       case SIP.Transac.process_sip_message(message) do
         :ok -> { :noreply, state }
 
+        { :msg_too_large, parsed_msg } ->
+          refuse_too_large(state, parsed_msg, tp_name, destip, destport)
+
         { :no_matching_transaction, parsed_msg } ->
           # A request has a method atom (e.g. :REGISTER); a response carries
           # `method: false` (and `false` is itself an atom, so guard against it
@@ -492,6 +499,47 @@ defmodule SIP.Transport do
           Logger.error("Received an invalid SIP message from #{SIP.NetUtils.ip2string(destip)}:#{destport}")
           { :noreply, state }
       end
+    end
+
+    # A request past `SIPMsg.max_message_size/0` is REFUSED, not dropped: RFC 3261
+    # §21.4.11 defines 513 for exactly this and §8.2.1 requires an answer. Silence
+    # is indistinguishable from a network outage at the far end, which then waits
+    # out its Timer B — the screen-share re-INVITE of 2026-09-08 died that way, and
+    # it took three evenings and five traces to see that nothing had been sent.
+    #
+    # The 513 goes out STATELESSLY (§8.2.7): the message never reached the
+    # transaction layer, so there is no server transaction to reply on. No
+    # retransmission either, which costs nothing — a UDP peer losing this 513 is
+    # back to timing out, which is what it did before.
+    defp refuse_too_large(state, parsed_msg, tp_name, destip, destport) do
+      cond do
+        # A response carries `method: false`, and `false` is itself an atom.
+        parsed_msg.method == false or not is_atom(parsed_msg.method) ->
+          Logger.warning([module: __MODULE__, message: "#{tp_name}: dropping an oversized " <>
+            "SIP response from #{peer_str(destip, destport)} — a response is never answered"])
+
+        parsed_msg.method == :ACK ->
+          Logger.warning([module: __MODULE__, message: "#{tp_name}: dropping an oversized " <>
+            "ACK from #{peer_str(destip, destport)} — an ACK is never answered"])
+
+        true ->
+          Logger.warning([module: __MODULE__, message: "#{tp_name}: #{parsed_msg.method} from " <>
+            "#{peer_str(destip, destport)} exceeds #{SIPMsg.max_message_size()} bytes, " <>
+            "answering 513"])
+
+          msgstr = SIPMsg.serialize(SIP.Msg.Ops.reply_to_request(parsed_msg, 513, nil))
+
+          # `send_msg/4` is a GenServer.call on this transport and we are running
+          # inside that very transport's callback: calling it here deadlocks the
+          # socket for the call timeout, then raises. A one-shot process borrows the
+          # transport's own send path instead, so the 513 is framed and logged like
+          # every other response it emits, on all four transports.
+          tid = self()
+          port = if is_integer(destport), do: destport, else: 0
+          spawn(fn -> SIP.Transport.send_msg(tid, msgstr, destip, port) end)
+      end
+
+      { :noreply, state }
     end
 
 

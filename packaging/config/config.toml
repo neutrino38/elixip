@@ -16,6 +16,7 @@ script_dir = "/usr/share/kelixip"
 module_dir = "/usr/lib/kelixip/modules"
 # user_agent = "Kelixip/1.5.3"
 # max_calls  = 1000          # node-wide concurrent-instance cap; 503 beyond it
+# max_message_size = 64000   # biggest inbound SIP message, in bytes; 513 beyond it
 
 [log]
 # "syslog" ADDS an RFC 3164 sink over /dev/log; stdout stays live either way,
