@@ -157,6 +157,75 @@ defmodule Kelix.Control do
   end
 
   @doc """
+  Subscribe `pid` to the conference list as it changes (kelescope's conferencing
+  page — contract `docs/design/mcu-live-push.md`). Returns the current list;
+  `pid` then receives `{:kelix_conferences, {:upsert, conf_row}}` and
+  `{:kelix_conferences, {:remove, uid}}`, no polling needed.
+
+  `conf_row` is the row `mcu conference.list` returns. `owner` is the process
+  holding the subscription — monitor it and re-subscribe on `:DOWN`, or a module
+  restart stops the push silently. `owner: nil` with an empty list is the answer
+  when the conferencing module is not loaded: no conference can exist without it,
+  so there is nothing to watch and nothing to monitor.
+  """
+  @spec subscribe_conferences(pid()) :: {:ok, %{owner: pid() | nil, conferences: [map]}}
+  def subscribe_conferences(pid),
+    do: mcu_facade(:subscribe_conferences, [pid], {:ok, %{owner: nil, conferences: []}})
+
+  @doc "Stop a subscription started by `subscribe_conferences/1`."
+  @spec unsubscribe_conferences(pid()) :: :ok
+  def unsubscribe_conferences(pid) do
+    mcu_facade(:unsubscribe_conferences, [pid], :ok)
+    :ok
+  end
+
+  @doc """
+  Subscribe `pid` to one conference and its roster (an expanded panel). Returns the
+  current row and participants; `pid` then receives `{:kelix_conference, uid,
+  {:snapshot, %{conference:, participants:}}}` on every change, and
+  `{:kelix_conference, uid, :destroyed}` at the end.
+
+  The roster is pushed whole, in admission order — a ringing leg has no `part_id`
+  yet, so there is no key a per-participant delta could name.
+  """
+  @spec subscribe_conference(pid(), String.t()) ::
+          {:ok, %{owner: pid(), conference: map, participants: [map]}} | {:error, :not_found}
+  def subscribe_conference(pid, uid) when is_binary(uid),
+    do: mcu_facade(:subscribe_conference, [pid, uid], {:error, :not_found})
+
+  @doc "Stop a subscription started by `subscribe_conference/2`."
+  @spec unsubscribe_conference(pid(), String.t()) :: :ok
+  def unsubscribe_conference(pid, uid) when is_binary(uid) do
+    mcu_facade(:unsubscribe_conference, [pid, uid], :ok)
+    :ok
+  end
+
+  @doc """
+  Subscribe `pid` to one conference's participant statistics: one
+  `{:kelix_conference_stats, uid, sample}` immediately, then one per
+  `interval_ms` for as long as the subscription lasts.
+
+  Meant to follow an expanded panel and to be dropped when it collapses: a sweep is
+  one RPC per connected leg on the media server's own control channel.
+  `{:error, :disabled}` when the module's `stats_interval_ms` is `0`.
+  """
+  @spec subscribe_conference_stats(pid(), String.t()) ::
+          {:ok, %{owner: pid(), interval_ms: pos_integer}}
+          | {:error, :not_found | :disabled}
+  def subscribe_conference_stats(pid, uid) when is_binary(uid),
+    do: mcu_facade(:subscribe_conference_stats, [pid, uid], {:error, :not_found})
+
+  @doc "Stop a subscription started by `subscribe_conference_stats/2`."
+  @spec unsubscribe_conference_stats(pid(), String.t()) :: :ok
+  def unsubscribe_conference_stats(pid, uid) when is_binary(uid) do
+    mcu_facade(:unsubscribe_conference_stats, [pid, uid], :ok)
+    :ok
+  end
+
+  defp mcu_facade(fun, args, default),
+    do: safe(fn -> Kelix.ModuleRegistry.facade("mcu", fun, args, default) end, default)
+
+  @doc """
   Every served domain and its registrations (`kelictl registration list`), in
   `domains.toml` order.
 
