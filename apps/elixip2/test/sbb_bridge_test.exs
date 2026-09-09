@@ -247,6 +247,45 @@ defmodule SIP.Test.SbbBridge do
     assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
   end
 
+  # ── A controller stopping the call under the relay ─────────────────────────
+
+  # What `on_shutdown` promises in every reference script: "both legs are wound
+  # down by the automatic teardown". Only the callee's was — the caller's leg is
+  # not in the B2BUA's `legs`, it IS the scenario's dialog — so a call killed from
+  # kelictl or kelescope hung up Bob and left Alice off-hook in a call nothing was
+  # relaying any more (2026-09-08).
+  # A mockup instance of its own, like every test here that counts what reaches
+  # the callee: the teardown BYE this one is about carries no test identity, so
+  # sharing an instance would hand it to whichever test runs next.
+  test "a shutdown under the relay hangs up BOTH legs", %{stub: stub} do
+    %{instance: instance, ref: ref} = establish(stub, Interruptible, "sbb_bridge_kill")
+
+    send(instance, {:scenario_ctl, :shutdown, :graceful})
+
+    assert_receive {:sip_mockup, {:request_sent, :BYE, _}}, 5_000
+    assert_receive {:sent_on_inbound, %{method: :BYE}}, 5_000
+
+    assert_receive {:instance_done, {:aborted, _}}, 10_000
+    assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
+  end
+
+  # The other half of it: the caller is hung up because it is still up, not
+  # because the scenario ended. One that hung up first is owed nothing, and a
+  # second BYE is what a far end answers 481.
+  test "a caller that hung up first is not BYEd again by the teardown", %{stub: stub} do
+    %{instance: instance, ref: ref, invite: invite} =
+      establish(stub, Interruptible, "sbb_bridge_first")
+
+    send(instance, {:BYE, in_dialog(:BYE, invite), self(), stub})
+
+    # The relayed one, on the callee's leg.
+    assert_receive {:sip_mockup, {:request_sent, :BYE, _}}, 5_000
+    assert_receive {:instance_done, :ok}, 10_000
+    assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
+
+    refute_receive {:sent_on_inbound, %{method: :BYE}}, 500
+  end
+
   test "a break hands the call back and resume picks it up", %{stub: stub} do
     %{instance: instance, ref: ref, invite: invite} = establish(stub)
 

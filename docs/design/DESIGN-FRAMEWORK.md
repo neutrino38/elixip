@@ -317,6 +317,14 @@ end ([DESIGN-FSL.md](DESIGN-FSL.md) §3.3). A leg dying on its own is not a
 scenario failure: the leg-death hook purges it and answers its pending requests,
 so the surviving leg gets a final response instead of silence.
 
+**Both** legs, and the inbound one is the trap. It is not in the B2BUA's `legs`
+map — it *is* the scenario's own dialog — so a teardown reading that map alone
+hangs up the callee and leaves the caller off-hook. What decides is the question
+"is this dialog established" (`SIP.Dialog.established?/1`), asked of the dialog on
+each leg: only a dialog whose creating request was answered 2xx has a session for
+a BYE to end (RFC 3261 §15), and only a scenario that acted as a B2BUA is asked at
+all — a registrar session ends on an established dialog and owes nobody a BYE.
+
 The stack-level resilience behaviours (R1–R6) are in
 [DESIGN-SIPSTACK.md](DESIGN-SIPSTACK.md) §5.7. The media server as a failure
 domain (R8) is §6.7 below.

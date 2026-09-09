@@ -981,6 +981,17 @@ defmodule SIP.DialogImpl do
     {:reply, {state.fromtag, state.callid, state.totag}, state}
   end
 
+  # Is the request that created this dialog answered 2xx, i.e. is there a session
+  # here for a BYE to end (RFC 3261 §12.1, §15)?
+  #
+  # The dialog's own word, because nothing outside it can derive the answer. An
+  # INBOUND dialog mints its To tag when it is created, so a caller reading the
+  # dialog id sees a complete triplet on a call that is merely ringing — and,
+  # reading it as "established", BYEs a phone that was never answered.
+  def handle_call(:established?, _from, state) do
+    {:reply, state.state == :established, state}
+  end
+
   # Digest algorithm advertised by the short-path challenge below.
   #
   # MD5, for the same reason kelixip settled on it (`Kelix.Auth`): the algorithm

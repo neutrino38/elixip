@@ -3103,19 +3103,23 @@ defmodule SIP.Session.B2bua do
   # ── Teardown ────────────────────────────────────────────────────────────────
 
   @doc """
-  Wind down every leg this scenario created, whatever the exit path (success,
-  failure, abort, exception). Called by `SIP.Scenario.Runner.finalize/4` before
-  the media is released — the media of a leg outlives nothing, but a leg left
-  behind holds a call up at the far end for as long as its session timer runs.
+  Wind down BOTH legs of this B2BUA, whatever the exit path (success, failure,
+  abort, exception). Called by `SIP.Scenario.Runner.finalize/4` before the media
+  is released — the media of a leg outlives nothing, but a leg left behind holds
+  a call up at the far end for as long as its session timer runs.
 
-  Three things are owed at this point (§8):
+  Four things are owed at this point (§8):
 
     * an initial request still awaiting its final response is CANCELled — the
       callee is ringing for a call nobody will take;
     * an established INVITE leg gets a BYE;
     * every request relayed onto a leg and still unanswered gets a final
       response on the leg it came from, so no transaction is left hanging
-      (487 for an INVITE, whose attempt we just terminated; 408 otherwise).
+      (487 for an INVITE, whose attempt we just terminated; 408 otherwise);
+    * and the INBOUND leg — the scenario's own dialog, the one leg `legs` never
+      holds — gets that same BYE when it is established. The caller is a leg
+      like the callee: a B2BUA that stops relaying and leaves it up leaves a
+      phone off-hook in a call nobody is in.
 
   Returns the context with the leg bookkeeping cleared, so a second call is a
   no-op. Never raises: a leg that dies underneath us is exactly the state we
@@ -3125,7 +3129,8 @@ defmodule SIP.Session.B2bua do
   def release_legs(sip_ctx = %SIP.Context{}) do
     state = state(sip_ctx)
 
-    if state.legs == %{} and state.pending == %{} and is_nil(state.hunt) do
+    if state.legs == %{} and state.pending == %{} and is_nil(state.hunt) and
+         not inbound_up?(sip_ctx) do
       sip_ctx
     else
       # Release whatever a provider is holding for this call before anything
@@ -3134,8 +3139,54 @@ defmodule SIP.Session.B2bua do
       report_outcome(sip_ctx, :abandoned)
       Enum.each(Map.values(state.legs), &wind_down_leg(&1, state))
       Enum.each(state.pending, fn {_tid, pending} -> answer_orphan(sip_ctx, pending) end)
+      wind_down_inbound(sip_ctx)
       put_state(sip_ctx, %State{})
     end
+  end
+
+  # The bookkeeping being empty does not say the call is over: the inbound leg is
+  # not in `legs` and never was. It is empty for a callee that went away without
+  # a BYE — `on_leg_down/3` forgets the leg it lost and leaves the caller's fate
+  # to the scenario, which is a policy right up to the moment the scenario ends.
+  #
+  # Only a scenario that acted as a B2BUA is questioned (the appdata key exists
+  # once any b2bua verb has run), so no UAS or UAC script is asked, let alone hung
+  # up: ending on an established dialog is ordinary for a registrar session and a
+  # phone left off-hook for a relay.
+  defp inbound_up?(sip_ctx) do
+    b2bua?(sip_ctx) and established?(leg_pid(sip_ctx, :inbound))
+  end
+
+  defp b2bua?(sip_ctx), do: SIP.Context.appdata_get(sip_ctx, @appdata_key) != nil
+
+  # The caller's leg. Same BYE as `wind_down_leg/2` sends the callee, and owed for
+  # the same reason — with one thing fewer to decide, since an inbound INVITE
+  # still awaiting its final response is not established and has just been given
+  # one by `answer_orphan/2`.
+  #
+  # A dialog the caller itself closed answers `:already_closing`, and a dialog
+  # carrying anything but an INVITE (a registrar session) does not list BYE among
+  # its allowed methods: both come back here as "nothing to do", so this stays the
+  # one place the decision is made.
+  defp wind_down_inbound(sip_ctx) do
+    pid = leg_pid(sip_ctx, :inbound)
+
+    if established?(pid) do
+      protect("BYE the inbound leg #{inspect(pid)}", fn ->
+        case SIP.Dialog.new_request(pid, bye_request()) do
+          {:ok, _trans_pid} ->
+            Logger.info(
+              module: __MODULE__,
+              message: "teardown: BYEing the inbound leg (#{inspect(pid)})"
+            )
+
+          _already_closing_or_error ->
+            :ok
+        end
+      end)
+    end
+
+    :ok
   end
 
   defp wind_down_leg(%Leg{} = leg, state) do
@@ -3154,7 +3205,7 @@ defmodule SIP.Session.B2bua do
 
         :ok
 
-      leg.method == :INVITE and established?(leg) ->
+      leg.method == :INVITE and established?(leg.dialogpid) ->
         # Said out loud AFTER the dialog agreed, because this BYE is nobody's
         # relay: it is the teardown hanging up a leg the scenario left
         # established. The dialog refuses it when a BYE is already in flight
@@ -3180,20 +3231,21 @@ defmodule SIP.Session.B2bua do
     end
   end
 
-  # Did this leg ever become a session? "Its initial transaction is over" does
-  # NOT answer that: it is equally true of an INVITE answered 486 Busy, and
-  # BYEing *that* dialog sends a BYE with no remote target (RFC 3261 §12.1
-  # — a non-2xx final establishes no dialog, so nothing was learned from it).
+  # Did this leg ever become a session, i.e. is there something here for a BYE to
+  # end (RFC 3261 §15)? "Its initial transaction is over" does NOT answer that:
+  # it is equally true of an INVITE answered 486 Busy, and BYEing *that* dialog
+  # sends a BYE with no remote target (§12.1 — a non-2xx final establishes no
+  # dialog, so nothing was learned from it).
   #
-  # The dialog's remote tag is the honest signal: `add_totag/2` sets it only for
-  # a dialog-establishing response (< 300). An early dialog has one too, but a
-  # leg still ringing was already caught by the CANCEL branch above.
-  defp established?(%Leg{dialogpid: pid}) do
-    case protect("read dialog id", fn -> GenServer.call(pid, :getdialogid) end) do
-      {_fromtag, _callid, totag} -> is_binary(totag)
-      _ -> false
-    end
+  # The DIALOG answers it, on both legs, rather than each caller reading a symptom
+  # of its own. The To tag this used to go by is one such symptom, and it is wrong
+  # on the leg that matters most: an INBOUND dialog mints its To tag when it is
+  # created, so the tag is there while the phone is merely ringing.
+  defp established?(pid) when is_pid(pid) do
+    protect("read dialog state", fn -> SIP.Dialog.established?(pid) end) == true
   end
+
+  defp established?(_no_leg), do: false
 
   defp answer_orphan(sip_ctx, %Pending{orig_req: req, orig_leg: leg, method: method}) do
     case leg_pid(sip_ctx, leg) do

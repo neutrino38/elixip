@@ -28,24 +28,43 @@ defmodule Kelix.DirectCallWithAuthScriptTest do
   defmodule MockDialog do
     use GenServer
     def start_link(test), do: GenServer.start_link(__MODULE__, test)
-    def init(test), do: {:ok, test}
+    def init(test), do: {:ok, %{test: test, state: :initial}}
 
-    def handle_call({:replyreq, req, code, reason, fields}, _from, test) do
-      send(test, {:replied, code, reason, fields, req})
-      {:reply, :ok, test}
+    def handle_call({:replyreq, req, code, reason, fields}, _from, state) do
+      send(state.test, {:replied, code, reason, fields, req})
+      {:reply, :ok, note_reply(state, req, code)}
     end
 
     # A dialog also ORIGINATES: what the callee sends is relayed onto this leg.
     # The transaction pid handed back is this process — the B2BUA correlation only
     # ever compares it, never calls it. Without this clause the catch-all answered
     # `:ok`, which the relay reads as a failure ({:b2bua, :relay_failed, …}).
-    def handle_call({:newreq, req}, _from, test) do
-      send(test, {:sent_on_inbound, req})
-      {:reply, {:ok, self()}, test}
+    def handle_call({:newreq, req}, _from, state) do
+      send(state.test, {:sent_on_inbound, req})
+      {:reply, {:ok, self()}, note_sent(state, req)}
     end
 
-    def handle_call(_msg, _from, test), do: {:reply, :ok, test}
-    def handle_info(_msg, test), do: {:noreply, test}
+    # Alice's leg is a leg the teardown hangs up, so it is asked whether the call
+    # on it is up. Answered like a real dialog: a 2xx to the INVITE that created
+    # it establishes it, a BYE ends it. The catch-all below would say `:ok` —
+    # neither true nor false, and read as "not established".
+    def handle_call(:established?, _from, state),
+      do: {:reply, state.state == :established, state}
+
+    def handle_call(_msg, _from, state), do: {:reply, :ok, state}
+    def handle_info(_msg, state), do: {:noreply, state}
+
+    defp note_reply(state, req, code) do
+      case {Map.get(req, :method), code} do
+        {:INVITE, code} when code in 200..299 -> %{state | state: :established}
+        {:BYE, _} -> %{state | state: :terminated}
+        _ -> state
+      end
+    end
+
+    defp note_sent(state, req) do
+      if Map.get(req, :method) == :BYE, do: %{state | state: :terminated}, else: state
+    end
   end
 
   setup_all do
@@ -294,6 +313,39 @@ defmodule Kelix.DirectCallWithAuthScriptTest do
 
     assert_receive {:replied, 403, "Forbidden", _fields, _req}, 5_000
     refute_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 500
+  end
+
+  # The call killed from the outside — `kelictl`/kelescope send this instance a
+  # cooperative shutdown, which is also what a graceful stop of the whole node
+  # sends every instance. `on_shutdown` says "both legs are wound down by the
+  # automatic teardown", and only Bob's was: Alice's leg is not in the B2BUA's
+  # bookkeeping, it IS the scenario's own dialog, so she was left off-hook in a
+  # call nothing was relaying any more (found 2026-09-08).
+  test "a graceful shutdown of an established call hangs up BOTH legs",
+       %{scenario: module} do
+    :ok = register_callee("10.0.0.29", "auth_shutdown")
+    tp = mockup_pid("auth_shutdown")
+
+    {:ok, dialog} = MockDialog.start_link(self())
+    pid = spawn_call(module, dialog, invite())
+    ref = Process.monitor(pid)
+    send(pid, {:INVITE, invite(), self(), dialog})
+
+    challenge = challenge_received!()
+    send(pid, {:INVITE, invite(credentials(challenge), 2), self(), dialog})
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
+
+    # Bob answers, Alice's ACK is relayed: the call is up on both legs.
+    Manual.simulate(tp, 200, 0)
+    assert_receive {:replied, 200, _reason, _fields, _req}, 5_000
+    send(pid, {:ACK, %{invite(nil, 2) | method: :ACK, cseq: [2, :ACK]}, nil, dialog})
+    assert_receive {:sip_mockup, {:request_sent, :ACK, _}}, 5_000
+
+    send(pid, {:scenario_ctl, :shutdown, :graceful})
+
+    assert_receive {:sip_mockup, {:request_sent, :BYE, _}}, 5_000
+    assert_receive {:sent_on_inbound, %{method: :BYE}}, 5_000
+    assert_receive {:DOWN, ^ref, :process, ^pid, _}, 5_000
   end
 
   test "the script declares both modules it needs", %{scenario: module} do

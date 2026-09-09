@@ -433,6 +433,19 @@ defmodule SIP.Dialog do
   end
 
   @doc """
+  Is this dialog established — has the request that created it been answered 2xx?
+
+  The question a caller about to hang up has to ask, since a BYE only ends an
+  established dialog (RFC 3261 §15). Ask it here rather than deriving it from the
+  dialog id: an inbound dialog generates its To tag when it is created, so the
+  triplet is complete while the phone is still ringing.
+  """
+  @spec established?(pid()) :: boolean()
+  def established?(dialog_pid) when is_pid(dialog_pid) do
+    GenServer.call(dialog_pid, :established?)
+  end
+
+  @doc """
   End `dialog_pid` now, stating why: its application receives the one
   `{:dialog_terminated, dialog_pid, reason}` the contract promises, with `reason`
   verbatim.

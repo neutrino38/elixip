@@ -229,6 +229,54 @@ defmodule SIP.Test.B2bua.ThreeParty do
     refute_receive {:sip_mockup, {:response_sent, 200, _}}, 2_000
   end
 
+  # The call killed from the outside, on real dialogs: `kelictl` — and the
+  # graceful stop of a whole node — sends every instance a cooperative shutdown,
+  # and `on_shutdown` promises that "both legs are wound down by the automatic
+  # teardown". Only the callee's was: the caller's leg is not in the B2BUA's leg
+  # map, it IS the scenario's own dialog, so the caller was left off-hook in a
+  # call nothing was relaying any more (2026-09-08).
+  #
+  # Here rather than only in the stubbed suites because this is where the BYE the
+  # teardown sends the caller is really composed and really addressed — a stub
+  # answers `:ok` to anything.
+  @tag timeout: 120_000
+  test "a shutdown mid-call BYEs the caller as well as the callee", %{scenario: module} do
+    caller = peer("caller")
+    callee = peer("callee")
+
+    :ok = Mockup.set_peer(caller.tp_pid, Manual)
+    :ok = Mockup.attach_probe(caller.tp_pid)
+    :ok = Mockup.set_peer(callee.tp_pid, Manual)
+    :ok = Mockup.attach_probe(callee.tp_pid)
+
+    flush_mailbox()
+
+    {pid, ref} = arm_b2bua(module)
+    {invite, _branch} = caller_invites(caller)
+
+    assert_receive {:sip_mockup, {:response_sent, 100, _}}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
+    Manual.simulate(callee.tp_pid, 200, 100)
+    assert_receive {:sip_mockup, {:response_sent, 200, _}}, 5_000
+    Mockup.inject(caller.tp_pid, caller_ack(invite))
+
+    send(pid, {:scenario_ctl, :shutdown, :graceful})
+
+    # Two BYEs, one per leg. Both probes report to this process and a probe event
+    # carries no leg, so they are told apart by the Call-ID: the caller's leg
+    # carries the caller's own, the callee's leg the one the B2BUA minted for it.
+    byes =
+      for _ <- 1..2, into: MapSet.new() do
+        assert_receive {:sip_mockup, {:request_sent, :BYE, bye}}, 10_000
+        bye.callid == invite.callid
+      end
+
+    assert byes == MapSet.new([true, false])
+
+    assert_receive {:instance_done, {:aborted, _}}, 20_000
+    assert_receive {:DOWN, ^ref, :process, ^pid, _}, 5_000
+  end
+
   # The ACK of a 2xx is a transaction of its own and carries a FRESH branch
   # (RFC 3261 §17.1.1.3) — which is exactly what routes it past the INVITE server
   # transaction and up to the dialog, where the B2BUA is waiting for it.

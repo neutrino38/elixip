@@ -70,26 +70,48 @@ defmodule SIP.Test.B2bua.InboundDialogStub do
   Shared by the B2BUA suites. A stub rather than a real dialog because both legs
   would otherwise land on the *same* UDP mockup instance — every `unittest` URI
   resolves to one destination — which would tangle the two directions.
+
+  It tracks the one piece of dialog state anyone asks it for: whether the call on
+  this leg is established. The teardown asks before hanging the caller up
+  (`SIP.Session.B2bua.release_legs/1`), so a stub that always said "no" would
+  hide the very BYE these suites are here to see, and one that always said "yes"
+  would invent one on a caller that hung up first.
   """
   use GenServer
 
   def start_link(test_pid), do: GenServer.start_link(__MODULE__, test_pid)
 
   @impl true
-  def init(test_pid), do: {:ok, test_pid}
+  def init(test_pid), do: {:ok, %{test: test_pid, state: :initial}}
 
   @impl true
-  def handle_call({:replyreq, req, code, reason, fields}, _from, test_pid) do
-    send(test_pid, {:replied, code, reason, req, fields})
-    {:reply, :ok, test_pid}
+  def handle_call({:replyreq, req, code, reason, fields}, _from, state) do
+    send(state.test, {:replied, code, reason, req, fields})
+    {:reply, :ok, note_reply(state, req, code)}
   end
 
   # A dialog also ORIGINATES: a B2BUA relays onto its inbound leg whatever comes
   # in on the outbound one. The transaction pid handed back is this process — the
   # correlation only ever compares it, never calls it.
-  def handle_call({:newreq, req}, _from, test_pid) do
-    send(test_pid, {:sent_on_inbound, req})
-    {:reply, {:ok, self()}, test_pid}
+  def handle_call({:newreq, req}, _from, state) do
+    send(state.test, {:sent_on_inbound, req})
+    {:reply, {:ok, self()}, note_sent(state, req)}
+  end
+
+  def handle_call(:established?, _from, state), do: {:reply, state.state == :established, state}
+
+  # Same two transitions a real dialog makes: a 2xx to the INVITE that created it
+  # establishes it, and a BYE — answered here, or sent by us — ends it.
+  defp note_reply(state, req, code) do
+    case {Map.get(req, :method), code} do
+      {:INVITE, code} when code in 200..299 -> %{state | state: :established}
+      {:BYE, _} -> %{state | state: :terminated}
+      _ -> state
+    end
+  end
+
+  defp note_sent(state, req) do
+    if Map.get(req, :method) == :BYE, do: %{state | state: :terminated}, else: state
   end
 end
 
