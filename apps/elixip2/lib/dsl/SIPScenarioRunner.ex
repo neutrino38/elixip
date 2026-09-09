@@ -576,7 +576,14 @@ defmodule SIP.Scenario.Runner do
   # context to rebind in the calling state.
   @spec run_sbb(%SIP.Context{}, module(), keyword()) :: %SIP.Context{}
   def run_sbb(ctx, module, opts \\ []) do
-    unless function_exported?(module, :__sbb__, 0) do
+    # `Code.ensure_loaded?/1` before `function_exported?/3`, and not for tidiness:
+    # `function_exported?/3` answers false for a module that is not LOADED, even
+    # when its .beam sits on the code path. A block shipped in a kelixip
+    # `module_dir` is exactly that — loaded on first use — and `sbb_fsm` IS that
+    # first use, so without this the first call entering a given block raises
+    # "is not a service building block" and every later one works. The same
+    # pairing is already what `SIP.Scenario.register_sbb_namespace/2` does.
+    unless Code.ensure_loaded?(module) and function_exported?(module, :__sbb__, 0) do
       raise ArgumentError,
             "#{inspect(module)} is not a service building block (it must `use SIP.SBB`)"
     end

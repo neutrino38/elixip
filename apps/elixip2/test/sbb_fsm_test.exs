@@ -434,6 +434,50 @@ defmodule SIP.Test.SbbFsm do
     end
   end
 
+  # A block a scenario enters is not necessarily LOADED when it is entered. The
+  # case is not exotic: kelixip drops module .beams into `module_dir`, puts that
+  # directory on the code path, and lets the loader pull each module in on first
+  # use — and `sbb_fsm` IS that first use. `function_exported?/3` answers false
+  # for a module the loader has not pulled in yet, so recognising a block on that
+  # alone made the FIRST call entering it raise, and every later one work.
+  test "a block whose .beam is on the code path but not yet loaded is still a block" do
+    dir = Path.join(System.tmp_dir!(), "sbb-unloaded-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf!(dir) end)
+
+    source = """
+    defmodule SIP.Test.SbbFsm.NotYetLoaded do
+      use SIP.SBB
+      @sbb_returns [reached: "the block ran — %{}"]
+
+      state initial_state do
+        sbb_return({:not_yet_loaded, :reached, %{}})
+      end
+    end
+    """
+
+    [{module, binary}] = Code.compile_string(source)
+    File.write!(Path.join(dir, "#{module}.beam"), binary)
+    Code.append_path(dir)
+    on_exit(fn -> Code.delete_path(dir) end)
+
+    # Unload it, keeping its .beam findable: the state a module_dir module is in
+    # before anything has called it.
+    :code.purge(module)
+    :code.delete(module)
+    :code.purge(module)
+
+    refute :erlang.module_loaded(module),
+           "the block must be UNLOADED for this test to mean anything"
+
+    refute function_exported?(module, :__sbb__, 0),
+           "…which is exactly what made run_sbb refuse it"
+
+    SIP.Scenario.Runner.run_sbb(%SIP.Context{}, module)
+
+    assert_received {:not_yet_loaded, :reached, %{}}
+  end
+
   test "entering something that is not a block is rejected" do
     assert_raise ArgumentError, ~r/is not a service building block/, fn ->
       SIP.Scenario.Runner.run_sbb(%SIP.Context{}, HostEcho)
