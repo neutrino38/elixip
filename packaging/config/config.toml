@@ -169,6 +169,11 @@ port = 9095
 #shutdown_grace_ms = 5000           # grace given to live conferences at module stop
 #rtp_timeout_ms   = 10000           # RTP inactivity watchdog (needs media server support)
 #gc_orphans       = true            # sweep, at start, conferences no kelixip owns
+# How often the participant statistics of a WATCHED conference are read from the media
+# server and pushed to the admin UIs that asked for them. One RPC per connected leg,
+# on the same control channel as call setup, and only for a conference a UI has
+# actually expanded. 0 turns the whole statistics push off.
+#stats_interval_ms = 15000
 # The collaboration channel between the participants' SCRIPTS (a raised hand, a floor
 # token — not chat: text a human reads in the call is T.140, which the mixer handles).
 # CLOSED until you list the kinds it accepts, and a script must also declare that it

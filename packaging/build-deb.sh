@@ -182,8 +182,8 @@ chmod 0644 "$root/etc/default/kelixip"
 # a host without it.
 install -D -m 0644 "$stage/systemd/kelixip.service" "$root/lib/systemd/system/kelixip.service"
 
-# Shell completion for kelictl. Inert without the bash-completion package, hence no
-# dependency on it: the file is data, loaded by basename when the operator types.
+# Shell completion for kelictl. Inert without the bash-completion package, hence a
+# weak dependency only: the file is data, loaded by basename when the operator types.
 install -D -m 0644 "$stage/completion/kelictl" \
   "$root/usr/share/bash-completion/completions/kelictl"
 

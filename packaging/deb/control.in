@@ -7,6 +7,7 @@ Section: net
 Priority: optional
 Homepage: https://www.ives.fr/
 Depends: @DEPENDS@
+Recommends: bash-completion
 Suggests: kelixip-mod-registrar, kelixip-mod-auth-db, kelixip-mod-mcu
 Description: kelixip SIP application server
  kelixip is a SIP application server: declarative per-domain dispatch

@@ -48,6 +48,11 @@ Requires(pre):  shadow-utils
 # failure at the first install on a minimal host.
 Requires(post):   policycoreutils, policycoreutils-python-utils
 Requires(postun): policycoreutils-python-utils
+# The kelictl completion is data the shell reads, so the server runs without it and
+# this stays WEAK: a minimal host may refuse it and still install. A default
+# `dnf install` pulls it in, which is the point — on a host that lacks it, TAB is
+# silently inert and nothing says why.
+Recommends:     bash-completion
 
 %description
 kelixip is a SIP application server: declarative per-domain dispatch (config.toml
@@ -138,8 +143,8 @@ install -m 0644 sysconfig/kelixip %{buildroot}%{_sysconfdir}/sysconfig/%{name}
 
 install -D -m 0644 systemd/kelixip.service %{buildroot}%{_unitdir}/%{name}.service
 
-# Shell completion for kelictl. Inert without the bash-completion package, hence no
-# dependency on it: the file is data, loaded by basename when the operator types.
+# Shell completion for kelictl. Inert without the bash-completion package, hence a
+# weak dependency only: the file is data, loaded by basename when the operator types.
 install -D -m 0644 completion/kelictl \
     %{buildroot}%{_datadir}/bash-completion/completions/kelictl
 
