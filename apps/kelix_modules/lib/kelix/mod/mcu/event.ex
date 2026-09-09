@@ -5,8 +5,9 @@ defmodule Kelix.Mod.Mcu.Event do
   (per-conference HTTP callbacks) is a transport change and not a redesign.
 
   Everything the module observes is emitted here exactly once, and the consumers
-  read the same term: today the logger, tomorrow the metrics emitter and a callback
-  fan-out. Two invariants the design leans on:
+  read the same term: the logger, and `Kelix.Mod.Mcu.Push`, which relays what
+  changed to the subscribed UIs (`docs/design/mcu-live-push.md`). Two invariants the
+  design leans on:
 
   1. **`participant.left` is emitted exactly once per participant**, whatever the
      teardown path (BYE, kick, crash reaper, MCU loss) — the reason `leave/1` is
@@ -58,6 +59,7 @@ defmodule Kelix.Mod.Mcu.Event do
   def emit(name, uid, data \\ %{}) do
     event = %__MODULE__{name: name, uid: uid, at: DateTime.utc_now(), data: data}
     log(event)
+    Kelix.Mod.Mcu.Push.publish(name, uid)
     event
   end
 

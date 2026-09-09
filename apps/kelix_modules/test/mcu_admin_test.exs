@@ -401,7 +401,7 @@ defmodule Kelix.Mod.McuAdminTest do
       # decoded per media, with the server's own field order named (its `isReceiving`
       # comes before `isSending`, the reverse of the order §3.3 lists them in)
       assert shown.stats == %{
-               "audio" => %{
+               audio: %{
                  receiving: true,
                  sending: true,
                  lost_recv_packets: 0,

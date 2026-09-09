@@ -15,11 +15,16 @@ defmodule Kelix.Mod.Mcu.Supervisor do
 
   An MCU that is unreachable at boot does not prevent the module from starting: its
   client is up but marked `down` (§4.1, §9.4).
+
+  `Kelix.Mod.Mcu.Stats` comes **last**, after the clients it sends its RPCs through:
+  under `:rest_for_one` a crash of the statistics sweep then restarts nothing else,
+  while a registry restart still takes it with them — its previous samples belong to
+  a roster that is gone.
   """
   use Supervisor
 
   alias Kelix.Mod.Mcu
-  alias Kelix.Mod.Mcu.{Client, Config, EventQueue}
+  alias Kelix.Mod.Mcu.{Client, Config, EventQueue, Stats}
 
   @spec start_link(keyword) :: Supervisor.on_start()
   def start_link(opts), do: Supervisor.start_link(__MODULE__, opts, name: __MODULE__)
@@ -32,7 +37,8 @@ defmodule Kelix.Mod.Mcu.Supervisor do
 
     children =
       [{Mcu, config: config, module_name: module_name, mediaservers: mcus}] ++
-        Enum.flat_map(mcus, &mcu_children(&1, config))
+        Enum.flat_map(mcus, &mcu_children(&1, config)) ++
+        [{Stats, config: config}]
 
     Supervisor.init(children, strategy: :rest_for_one)
   end

@@ -2,11 +2,13 @@
 
 Status: **exploratory** (2026-07-26, push mechanism decided 2026-08-21, domain
 counters push decided 2026-09-07, registration detail push + admin-traced
-destructive actions decided 2026-09-08). Captures the locked decisions for a
-real-time web admin UI over kelixip. `Kelix.Control.subscribe_monitor/1`,
-`subscribe_domain_counters/1`, `subscribe_registrations/2`, and the `admin`
-argument on `unregister/4` / `shutdown_scenario/2` are implemented; the rest of
-this note is still ahead of the code.
+destructive actions decided 2026-09-08, conference push decided 2026-09-09).
+Captures the locked decisions for a real-time web admin UI over kelixip.
+`Kelix.Control.subscribe_monitor/1`, `subscribe_domain_counters/1`,
+`subscribe_registrations/2`, the three conference topics of
+[mcu-live-push.md](mcu-live-push.md), and the `admin` argument on `unregister/4` /
+`shutdown_scenario/2` are implemented; the rest of this note is still ahead of the
+code.
 
 The app is **kelescope** (`github.com/neutrino38/kelescope`, separate repo). It
 implements this note; its own Phase 1 (monitor + stop) plan lives in
@@ -150,6 +152,25 @@ Two gaps `subscribe_domain_counters/1` deliberately left open (it pushes a
   is `docs/design/kelixip_liveview.md`'s own open AuthN/Z question, not
   resolved by this.
 
+### Conference push (decided and implemented 2026-09-09)
+
+The conferencing panels had no push at all: a conference created, edited or
+destroyed, and a participant coming or going, were only visible on the next manual
+refresh — and per-participant media statistics could not be followed at all. Same
+subscriber-list-plus-`send/2` mechanism, three topics
+(`subscribe_conferences/1`, `subscribe_conference/2`,
+`subscribe_conference_stats/2`), fanned out from the mcu module's already-frozen
+event vocabulary rather than from twenty new broadcast sites. The contract is
+[mcu-live-push.md](mcu-live-push.md) — it is the wire spec kelescope implements
+against, and it closes L9 of [DESIGN-MCU.md](DESIGN-MCU.md) §12.
+
+Two things it does differently from the three surfaces above, both stated there:
+the roster of a conference is pushed **whole** (a ringing leg has no public id to key
+a delta on, and a conference is at most `max_participants` rows), and every
+`subscribe` returns the **pid holding the subscription**, so a subscriber can monitor
+it and re-subscribe when a module restart drops the list — the older three lose their
+subscribers silently and could take the same field later.
+
 ## Security caveat (the one real risk)
 
 Erlang distribution = **full trust between nodes** (shared cookie; RPC can call
@@ -167,8 +188,10 @@ anything). A compromised web node ⇒ full access to the SIP node. Therefore:
 reads/actions via `Kelix.Control` RPC; **live updates via a subscriber list +
 `send/2`** on `SIP.Scenario.Monitor` / `Kelix.InstancePool` (scenarios,
 `subscribe_monitor/1`), on `Kelix.InstancePool` / `Kelix.Mod.Registrar` (domain
-counters, `subscribe_domain_counters/1`), and on `Kelix.Mod.Registrar` alone
-(one domain's registration detail, `subscribe_registrations/2`) — all three
+counters, `subscribe_domain_counters/1`), on `Kelix.Mod.Registrar` alone
+(one domain's registration detail, `subscribe_registrations/2`) and on
+`Kelix.Mod.Mcu`'s event vocabulary (conferences, rosters and media statistics —
+[mcu-live-push.md](mcu-live-push.md)) — all four
 implemented; `unregister/4` and `shutdown_scenario/2` trace an admin name in
 kelixip's own logs, also implemented; REST (P8) reserved for external clients;
 cluster only over a trusted network / TLS distribution.

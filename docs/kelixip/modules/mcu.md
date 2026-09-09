@@ -134,6 +134,7 @@ Module block — `[module.mcu]` (in `config.toml`):
 | `shutdown_grace_ms` | integer | `5000` | Grace given to conferences at module stop |
 | `rtp_timeout_ms` | integer | `10000` | RTP inactivity watchdog, armed per media at the ACK. `0` disables it. Never armed on text, disarmed on a media the peer holds; a leg goes only when **every** watched media is silent |
 | `gc_orphans` | boolean | `true` | Sweep, at start, the conferences the media server still holds and no kelixip owns |
+| `stats_interval_ms` | integer | `15000` | How often a **watched** conference's participant statistics are read and pushed to the admin UIs that subscribed (see [Live push](#live-push-to-an-admin-ui)). One RPC per connected leg, only while a UI has that conference open. `0` disables the statistics push |
 | `message_kinds` | list | `[]` | The message kinds the collaboration channel accepts (see below). **Empty = the channel is closed** |
 | `message_rate` | integer | `5` | Messages per second and per participant (burst: twice that) |
 | `message_max_bytes` | integer | `1024` | Longer payloads are refused, never truncated |
@@ -736,10 +737,38 @@ additionally receives the standard `{:scenario_ctl, :shutdown, :kicked}`.
 Node-level events (`conference.created`, `participant.joined`,
 `participant.left`, `conference.recording_started` / `_stopped`,
 `conference.slot_changed`, `participant.message`, `mediaserver.down` …) are **logged**,
-one line per event carrying the conference `uid`, and counted in the Prometheus metrics
+one line per event carrying the conference `uid`, counted in the Prometheus metrics
 (`kelix_mcu_calls_total{result}`, `kelix_mcu_participants{mcu,conference}`,
-`kelix_mcu_rpc_errors_total{method,reason}` …). They are not delivered to
+`kelix_mcu_rpc_errors_total{method,reason}` …) and relayed to the subscribed admin
+UIs (next section). They are not delivered to
 scripts. See [§3.1 of the guide](mcu_module_guide.md#31-what-a-successful-join-looks-like).
+
+## Live push to an admin UI
+
+An admin console clustered with the node (kelescope) follows conferences without
+polling and without a refresh button. Contract:
+[mcu-live-push.md](../../design/mcu-live-push.md).
+
+Three topics, subscribed through `Kelix.Control` — every `subscribe` returns the
+current snapshot **and** the pid holding the subscription, which the subscriber
+monitors so a module restart cannot stop the push silently:
+
+| Subscribe | Then receives |
+|---|---|
+| `subscribe_conferences(pid)` | `{:kelix_conferences, {:upsert, conf_row}}` on any change to a conference, `{:kelix_conferences, {:remove, uid}}` when one is destroyed |
+| `subscribe_conference(pid, uid)` | `{:kelix_conference, uid, {:snapshot, %{conference:, participants:}}}` — the row and the **whole roster** in admission order, on every change — then `{:kelix_conference, uid, :destroyed}` |
+| `subscribe_conference_stats(pid, uid)` | `{:kelix_conference_stats, uid, sample}` at once, then every `stats_interval_ms`: per connected leg, the media server's counters plus the rates derived from the previous sample |
+
+`conf_row` is the row `conference.list` returns and a participant row is
+`participant.list`'s, from the same code — the initial read and the push cannot
+disagree about a field. Every message carries the whole truth for what it names, so
+applying one twice changes nothing.
+
+The statistics topic is the one that costs: a sweep is one
+`GetParticipantStatistics` per connected leg, on the same control channel as call
+setup. It runs only for a conference a UI has open, and stops the moment the last
+subscriber goes — hence "subscribe when the panel expands, unsubscribe when it
+collapses". `stats_interval_ms = 0` refuses the topic outright.
 
 ## Examples
 
