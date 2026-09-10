@@ -1,5 +1,10 @@
 defmodule SIP.Test.ReferenceScenarios do
-  use ExUnit.Case, async: true
+  # NOT async: `mix test` starts the async modules while it is still compiling the
+  # remaining test files, and loading a scenario DEFINES its module. Racing the
+  # compilation of uas_register_test.exs — which loads the same file at module
+  # level — aborted the whole app's suite with "cannot define module
+  # UAS.RegisterExample because it is currently being defined".
+  use ExUnit.Case, async: false
 
   @moduledoc """
   Every scenario shipped in `scenarios/` still loads.

@@ -1,3 +1,17 @@
+kelixip (1.5.4-1) stable; urgency=low
+
+  * `mcu`: the module pushes its events to kelixip, so a supervision view is told
+    what a conference and its legs do rather than polling for it.
+  * SBB `bridge()`: the outbound leg is disconnected cleanly during a progressive
+    shutdown, instead of being left to time out.
+  * sip: what the depacketizer accumulates is bounded, and a malformed header value
+    no longer raises.
+  * sip: an oversized message is answered 513 rather than silently dropped.
+  * Packaging: bash-completion is declared as an optional dependency.
+  * User-Agent is now Kelixip/1.5.4.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Thu, 10 Sep 2026 12:00:00 +0200
+
 kelixip (1.5.3-1) stable; urgency=low
 
   * Registrations are observable live: `Kelix.Control.registrations/0`,

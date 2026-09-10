@@ -9,7 +9,7 @@
 #   rpmbuild -bb --define "_topdir <dir>" packaging/rpm/elixipp.spec
 
 Name:           elixipp
-Version:        1.5.3
+Version:        1.5.4
 Release:        1%{?dist}
 Summary:        SIP scenario test tool driven by the Finite State Language
 License:        BUSL-1.1
@@ -46,6 +46,12 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 %{_bindir}/elixipp
 
 %changelog
+* Thu Sep 10 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.4-1
+- sip: what the depacketizer accumulates is bounded, and a malformed header value
+  no longer raises — the shared stack, so the tool gets it too.
+- sip: an oversized message is answered 513 rather than silently dropped.
+- User-Agent is now Elixipp-1.5.4.
+
 * Tue Sep 08 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.3-1
 - The escript follows the umbrella version; nothing changed in the tool itself.
 - User-Agent is now Elixipp-1.5.3.

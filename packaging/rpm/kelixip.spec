@@ -27,7 +27,7 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.5.3
+Version:        1.5.4
 # Counts the builds of this Version, and must be bumped for each one that leaves this
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
@@ -254,6 +254,17 @@ fi
 %{_datadir}/%{name}/mcu*.exs
 
 %changelog
+* Thu Sep 10 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.4-1
+- mcu: the module pushes its events to kelixip, so a supervision view is told what
+  a conference and its legs do rather than polling for it.
+- SBB bridge(): the outbound leg is disconnected cleanly during a progressive
+  shutdown, instead of being left to time out.
+- sip: what the depacketizer accumulates is bounded, and a malformed header value
+  no longer raises.
+- sip: an oversized message is answered 513 rather than silently dropped.
+- Packaging: bash-completion is declared as an optional dependency.
+- User-Agent is now Kelixip/1.5.4.
+
 * Tue Sep 08 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.3-1
 - Registrations are observable live: Kelix.Control.registrations/0,
   registrations/1 and registration/2 read the registrar's bindings per domain, and

@@ -56,9 +56,9 @@ In terms of capabilities, the emphasis will be on:
   policy per media: implemented
 
 ### Testing tool: elixipp
-- Interactive command elixpp for testing tools: done
+- Interactive command elixipp for testing tools: done
 - Interactive display for elixipp: done
-- multple calls + max duration of test and final reporting: done
+- multiple calls + max duration of test and final reporting: done
 - Interface with [Medooze Media server](https://github.com/neutrino38/mediaserver): done
 
 ### Scriptable SIP server kelixip
@@ -67,11 +67,11 @@ In terms of capabilities, the emphasis will be on:
 - declarative TOML config with hot-reloadable: done
 - a CLI + REST control API, and Prometheus metrics: done.
 - domains/dial-plan
-- digest auth (stateless nonce, HA1 via a `subscriber_db`  module)
-- a multi-domain **registrar** via the registrar mocule and the `registar.exs` script
-- NAT/flow for WebRTC —  a media-server pool, 
-- a Total Conversation cabable **conferencing (MCU)**: done
-- MCU: hardware acceleration watchdog and delegated codec negotiation: do,e
+- digest auth (stateless nonce, HA1 via the `auth_db` module)
+- a multi-domain **registrar** via the registrar module and the `registrar.exs` script
+- NAT/flow for WebRTC — a media-server pool
+- a Total Conversation capable **conferencing (MCU)**: done
+- MCU: hardware acceleration watchdog and delegated codec negotiation: done
 - kelixip B2BUA and call processing: in progress
 
 ## Roadmap
@@ -81,7 +81,7 @@ In terms of capabilities, the emphasis will be on:
 - kelixip distributed cluster tech
 - FSL: formal proof of scenario correctness
 - Total Conversation call recorder
-- Automated call captionning
+- Automated call captioning
 - Push notification support
 
 - **borderline** SBC: 
@@ -93,11 +93,11 @@ In terms of capabilities, the emphasis will be on:
 
 - kelixip 2.0:
   - domain based partitions of transaction and dialog layers
-  - use of RabbitMQ as link the the mediaser
+  - use of RabbitMQ as link to the mediaserver
   - Wesh Wesh Mesh network with auto discovery feature
   - full IP V6 support
   - XMPP support as first class citizen
-  - Matrix protocol support as first class cizizen
+  - Matrix protocol support as first class citizen
 
 ## The Finite State Language
 

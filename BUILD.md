@@ -35,8 +35,9 @@ mix test          # run every app's test suite
 ### Running the tests
 
 ```bash
-mix test                      # everything
-mix test --exclude live       # skip tests needing outbound network (a real SIP proxy)
+mix test                                    # everything
+mix test --exclude live --exclude flaky     # what the CI runs, and what must be green
+mix test --exclude live                     # skip tests needing a real SIP proxy
 mix test apps/elixip2/test/sip_parser_test.exs        # one file
 mix test apps/elixip2/test/sip_parser_test.exs:42     # one test by line
 ```
@@ -48,9 +49,10 @@ Notes:
   paths (`File.read("test/SIP-…")`, `scenarios/…`, `certs/…`) resolve inside the
   app.
 - A few tests are **order-dependent** (named singleton processes leak state
-  across test files) and the `ScenarioIntegration` **media** tests are flaky
-  under load. They pass when run in isolation — so the practical bar is
-  "green in isolation", not a spotless full run.
+  across test files), and some bind real ports or make a timing assumption. They
+  pass when run in isolation — so the practical bar is "green in isolation", not a
+  spotless full run. Those tests carry the ExUnit tag **`:flaky`**, so that bar is a
+  command rather than a convention; see *Continuous integration* below.
 - `:live` tests require outbound network to a real SIP proxy; exclude them where
   there is none.
 
@@ -61,8 +63,9 @@ attached to the GitHub release as an asset. That is what the Cyber Resilience Ac
 asks for: machine-readable, first-level dependencies at minimum
 (reference: BSI TR-03183-2).
 
-It is generated **by hand at release time**, not by CI. Three commands, from the
-repo root:
+On a tag, **the CI generates it** and keeps it as an artifact (see *Continuous
+integration* below). By hand — off a tag, or on a host with no runner — it is three
+commands from the repo root:
 
 ```bash
 mix deps.get
@@ -102,7 +105,7 @@ never committed.
 
 ### Checking the result
 
-51 components today: the 4 umbrella apps, their Hex dependencies (direct and
+52 components today: the 4 umbrella apps, their Hex dependencies (direct and
 transitive), and the system ones (Erlang/OTP applications, Elixir, Hex). Every
 component must carry a `version` — TR-03183-2 makes it mandatory, and a missing
 one means the SBoM was generated the wrong way (typically from the precompiled
@@ -560,6 +563,78 @@ are **conffiles**: on upgrade dpkg keeps your version, and (non-interactively) l
 the packaged one next to it as `*.dpkg-dist` — the deb equivalent of `*.rpmnew`, and
 worth diffing, since new keys show up there first. `apt purge` removes the state and
 log directories; the `kelixip` system user is deliberately left behind.
+
+## Continuous integration
+
+The repository is hosted on **framagit**, and `.gitlab-ci.yml` at the root drives
+everything above. Two pipelines, told apart by what was pushed:
+
+| Push | `compile` | `test` | `package` |
+|---|---|---|---|
+| a branch | ✅ | ✅ | — |
+| a **tag** | ✅ | ✅ | ✅ SBoM + 5 RPMs, kept 1 year |
+
+The runner must be an **Alma Linux 9** host carrying the packaging toolchain of
+*Build-host toolchain* above, and it must answer the GitLab tags `al9` and `rpm`.
+This is the golden rule again, not a preference: the release embeds a natively
+linked ERTS, so a package built anywhere else does not run on the target.
+
+### What the CI runs
+
+`test` runs one command:
+
+```bash
+mix test --exclude live --exclude flaky
+```
+
+`--exclude live` because those tests dial a real SIP proxy, which a runner has not
+got. `--exclude flaky` is the "green in isolation" bar of *Running the tests*, made
+executable: the unstable tests carry the ExUnit tag **`:flaky`**, each with a
+comment saying why it is there — a real port bound, a named singleton leaked by
+another file, or a timing assumption in the test itself. What is left goes red only
+on a regression, which is the only useful thing a pipeline can say.
+
+Tag a newly unstable test `:flaky` with its reason. Do not delete it, and do not
+widen the exclusion.
+
+> One trap the tag does **not** cover: a test file that loads a scenario at module
+> level. `mix test` starts the `async: true` modules while it is still compiling the
+> remaining test files, and loading a scenario *defines its module* — two files
+> loading the same `.exs` abort the whole app's suite with "cannot define module …
+> because it is currently being defined". A tag excludes a test from the run, never
+> from the load. The fix is `async: false` on the file that loads scenarios at
+> runtime (`reference_scenarios_test.exs`).
+
+### What the `package` job does, and why in one job
+
+It refuses first: the **tag has to name the version** the manifests carry, `v1.5.4`
+or `1.5.4` against `apps/kelixip/mix.exs`. Nothing else compares the two, and a
+mislabelled package installs as a silent no-op — the NEVRA rule of `CLAUDE.md`. So
+bump the version *before* tagging, per *Changing the version*; a pre-release tag like
+`v1.5.4-rc1` is rejected as it stands.
+
+Then it generates the SBoM, then it runs `packaging/build-rpm.sh` and
+`packaging/build-rpm-elixipp.sh`. Both in **one job**, deliberately: the SBoM has to
+be generated with the toolchain that builds the packages (see *What you must get
+right*), and one job is what guarantees it. Artifacts:
+
+```
+sbom.cdx.json
+packaging/dist/kelixip-<version>-1.el9.x86_64.rpm
+packaging/dist/kelixip-mod-{registrar,auth_db,mcu}-<version>-1.el9.x86_64.rpm
+packaging/dist/elixipp-<version>-1.el9.noarch.rpm
+```
+
+### What the CI does not do
+
+**It does not build the deb packages**, and that is not an omission. A deb must be
+built on the Ubuntu/Debian release it targets — the embedded ERTS is native, and
+`dpkg-shlibdeps` computes the `Depends` from the build host. The runner is AL9.
+Build them per target release, by hand or on a runner of that release, as *Building
+the deb packages* says.
+
+It does not bump `Release:` either. Nothing computes it — read the rule next to it in
+`packaging/rpm/kelixip.spec`.
 
 ## Development mode (no build artifact)
 
