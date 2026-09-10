@@ -1,5 +1,7 @@
 smoke:
   tags: [al9, rpm]
+  variables:
+    MIX_ENV: prod
   script:
     - id
     - pwd
