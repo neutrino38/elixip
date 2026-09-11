@@ -81,7 +81,7 @@ defmodule SIP.Transport.TLSListener do
       cert: [path: certfile],
       key: [path: keyfile],
       versions: [:"tlsv1.2", :"tlsv1.3"]
-    ]
+    ] ++ v6only_opt(family)
 
     case localip && Socket.SSL.listen(port, ssl_opts) do
       {:ok, listen_socket} ->
@@ -222,6 +222,10 @@ defmodule SIP.Transport.TLSListener do
   defp wildcard_of(:all, :ipv6), do: {0, 0, 0, 0, 0, 0, 0, 0}
   defp wildcard_of(:all, _family), do: {0, 0, 0, 0}
   defp wildcard_of(addr, _family), do: addr
+
+  # Why the two families need it to share a port: see SIP.Transport.TCPListener.
+  defp v6only_opt(:ipv6), do: [v6only: true]
+  defp v6only_opt(_family), do: []
 
   # nil when the host carries no address of the requested family: the listener
   # would then have nothing to write in a Via or a Contact.

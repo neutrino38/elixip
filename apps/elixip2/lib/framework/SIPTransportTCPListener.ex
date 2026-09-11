@@ -68,7 +68,9 @@ defmodule SIP.Transport.TCPListener do
     # `version:` — the bind address carries its family, and stating both lets them
     # disagree: `:all` still binds 0.0.0.0, so a v6 listener on it would exit
     # :badarg out of `init/1` instead of the IPv4 socket it silently gets today.
-    case localip && Socket.TCP.listen(port, packet: :raw, local: [address: bind_addr]) do
+    listen_opts = [packet: :raw, local: [address: bind_addr]] ++ v6only_opt(family)
+
+    case localip && Socket.TCP.listen(port, listen_opts) do
       {:ok, listen_socket} ->
         {_bound_ip, actual_port} = Socket.local!(listen_socket)
         listener_pid = self()
@@ -201,6 +203,13 @@ defmodule SIP.Transport.TCPListener do
   defp wildcard_of(:all, :ipv6), do: {0, 0, 0, 0, 0, 0, 0, 0}
   defp wildcard_of(:all, _family), do: {0, 0, 0, 0}
   defp wildcard_of(addr, _family), do: addr
+
+  # A dual-stack IPv6 socket holds the IPv4 wildcard as well, so on a host that
+  # carries both families a `[[listen]]` entry with no addr — one listener per
+  # family, same port — fails to bind the second one with :eaddrinuse. IPV6_V6ONLY
+  # is set before the bind or not at all.
+  defp v6only_opt(:ipv6), do: [v6only: true]
+  defp v6only_opt(_family), do: []
 
   # nil when the host carries no address of the requested family: the listener
   # would then have nothing to write in a Via or a Contact.
