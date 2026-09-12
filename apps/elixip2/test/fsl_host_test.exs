@@ -161,15 +161,29 @@ defmodule SIP.Test.FSL.HostTest do
   end
 
   describe "FSL.Host.call/4" do
-    # A binding implements what it needs and no more: every callback is
-    # optional, so a machine with no protocol runs with no host written.
-    test "falls back to the given default when the host does not implement it" do
-      defmodule Silent do
-        def __fsl_host__, do: __MODULE__
-      end
+    defmodule Silent do
+      def __fsl_host__, do: __MODULE__
+    end
 
-      assert FSL.Host.call(Silent, :bootstrap, [], :nothing_to_start) == :nothing_to_start
-      assert FSL.Host.call(Silent, :build_context, [[]], %FSL.Context{}) == %FSL.Context{}
+    # A binding implements what it needs and inherits the rest. `FSL.Host.Default`
+    # is what "the rest" means — not the literal the call site passes, which is
+    # only reached when the default host has nothing to say either.
+    test "a callback the host omits falls through to FSL.Host.Default" do
+      assert FSL.Host.call(Silent, :bootstrap, [], :never_reached) == :ok
+
+      # The one whose default does real work: without this fallthrough, a host
+      # that implemented any OTHER callback got an empty context here and its
+      # machine's whole `config` block was dropped on the floor, silently.
+      ctx = FSL.Host.call(Silent, :build_context, [[colour: "blue"]], :never_reached)
+      assert FSL.Context.appdata_get(ctx, :colour) == "blue"
+    end
+
+    test "…and to the literal only when the default host has nothing to say either" do
+      assert FSL.Host.call(Silent, :account, [%FSL.Context{}, :initial], "") == ""
+      assert FSL.Host.call(Silent, :injected_clauses, [Macro.var(:ctx, nil)], []) == []
+
+      ctx = %FSL.Context{appdata: %{a: 1}}
+      assert FSL.Host.call(Silent, :finalize, [ctx], ctx) == ctx
     end
   end
 
