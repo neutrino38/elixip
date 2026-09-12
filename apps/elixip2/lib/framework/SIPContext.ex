@@ -58,14 +58,26 @@ defmodule SIP.Context do
   `set/3` and `get/2`, plus the three that read a SIP message — `ctx_from`,
   `ctx_to` and `assert_identity`.
 
-  The double-injection guard lives in `FSL.Context.__using__` and covers both
-  halves: a scenario that reaches here through two `use` lines (SIP.Scenario ->
-  SIP.Session.CallUAC -> SIP.Context, and SIP.Session.RegisterUAC -> SIP.Context)
-  would otherwise redefine the macros and raise "previous clause always matches"
-  on every one of them.
+  Each half carries its own double-injection guard — `:fsl_context_used` in
+  `FSL.Context`, `:sip_context_used` here — because a scenario reaches this
+  module through two `use` lines (SIP.Scenario -> SIP.Session.CallUAC ->
+  SIP.Context, and SIP.Session.RegisterUAC -> SIP.Context) and would otherwise
+  redefine the macros, raising "previous clause always matches" on every one.
+  Two guards and not one: a module that had already `use`d `FSL.Context`
+  directly, to bind a context variable of its own, must still get the SIP
+  macros if it then asks for them.
+
+  Both are set imperatively, at expansion time, for the reason
+  `FSL.Context.__using__` gives.
   """
   defmacro __using__(_opts) do
-    already_used? = Module.get_attribute(__CALLER__.module, :fsl_context_used)
+    sip_macros =
+      if Module.get_attribute(__CALLER__.module, :sip_context_used) do
+        nil
+      else
+        Module.put_attribute(__CALLER__.module, :sip_context_used, true)
+        sip_macros()
+      end
 
     quote do
       use FSL.Context,
@@ -73,7 +85,7 @@ defmodule SIP.Context do
         setter: {SIP.Context, :set},
         getter: {SIP.Context, :get}
 
-      unquote(if already_used?, do: nil, else: sip_macros())
+      unquote(sip_macros)
     end
   end
 

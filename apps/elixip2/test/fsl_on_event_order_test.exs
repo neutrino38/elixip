@@ -310,8 +310,13 @@ defmodule SIP.Test.FSL.OnEventOrder do
     test "threads the context through the two hooks that produce one", %{src: src} do
       # note_event returns :ok and is called for its effect; the other two
       # rebind the context, and each must be given the previous one's output.
-      assert src =~ "var!(sip_ctx) = SIP.Session.B2bua.note_leg_event(var!(sip_ctx), evt)"
-      assert src =~ "var!(sip_ctx) = SIP.Session.CallUAS.auto_store(var!(sip_ctx), evt)"
+      #
+      # The variable reads `sip_ctx` and not `var!(sip_ctx)` because the name is
+      # now a parameter of the binding: the expansion carries the variable
+      # itself — `Macro.var(:sip_ctx, nil)`, which is exactly what `var!/1`
+      # produces — rather than a `var!` call left to expand later.
+      assert src =~ "sip_ctx = SIP.Session.B2bua.note_leg_event(sip_ctx, evt)"
+      assert src =~ "sip_ctx = SIP.Session.CallUAS.auto_store(sip_ctx, evt)"
     end
 
     # The clauses `on_events` injects are instrumented like any other: a media

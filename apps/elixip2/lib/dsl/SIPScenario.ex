@@ -233,6 +233,7 @@ defmodule SIP.Scenario do
   transition macro (`goto` / `scenario_success` / `scenario_failure`).
   """
   defmacro state(name_ast, do: body) do
+    ctx = ctx(__CALLER__)
     name = state_atom(name_ast)
     fname = :"__state_#{name}"
     check_stay_placement!(body, "state #{name}", __CALLER__)
@@ -240,10 +241,10 @@ defmodule SIP.Scenario do
     quote do
       require Logger
       @scenario_states unquote(name)
-      def unquote(fname)(var!(sip_ctx)) do
-        # Touch sip_ctx so a state whose body rebinds it before reading does not
-        # trigger an "unused variable" warning.
-        _ = var!(sip_ctx)
+      def unquote(fname)(unquote(ctx)) do
+        # Touch the context so a state whose body rebinds it before reading does
+        # not trigger an "unused variable" warning.
+        _ = unquote(ctx)
         # Clear the event type inferred by on_events, so a `goto` in this state
         # that is not inside a on_events clause stays untyped. Same for the
         # B2BUA leg/transaction of the matched event: an `after` clause acts on
@@ -304,19 +305,20 @@ defmodule SIP.Scenario do
   Aborts the scenario as a failure if `sip_ctx.lasterr` is not `:ok`.
   """
   defmacro goto(target_ast, desc \\ nil, type \\ nil) do
+    ctx = ctx(__CALLER__)
     target = target_ast |> state_atom() |> pseudo_target()
 
     quote do
-      if var!(sip_ctx).lasterr == :ok do
+      if unquote(ctx).lasterr == :ok do
         # An explicit type wins; otherwise fall back to the type inferred by the
         # enclosing on_events clause (nil when not in one).
         event_type = unquote(type) || Process.get(:scenario_event_type)
-        {:goto, unquote(target), unquote(desc), event_type, var!(sip_ctx)}
+        {:goto, unquote(target), unquote(desc), event_type, unquote(ctx)}
       else
         # lasterr aborts the scenario as a failure. Keep the same 5-tuple shape
         # (with the inferred event type) the runner expects for terminals.
-        {:terminal, :failure, var!(sip_ctx).lasterr, Process.get(:scenario_event_type),
-         var!(sip_ctx)}
+        {:terminal, :failure, unquote(ctx).lasterr, Process.get(:scenario_event_type),
+         unquote(ctx)}
       end
     end
   end
@@ -349,13 +351,15 @@ defmodule SIP.Scenario do
   `on_events` clause; anywhere else the scenario stops as a failure.
   """
   defmacro stay(desc \\ nil, type \\ nil) do
+    ctx = ctx(__CALLER__)
+
     quote do
-      if var!(sip_ctx).lasterr == :ok do
+      if unquote(ctx).lasterr == :ok do
         event_type = unquote(type) || Process.get(:scenario_event_type)
-        {:stay, unquote(desc), event_type, var!(sip_ctx)}
+        {:stay, unquote(desc), event_type, unquote(ctx)}
       else
-        {:terminal, :failure, var!(sip_ctx).lasterr, Process.get(:scenario_event_type),
-         var!(sip_ctx)}
+        {:terminal, :failure, unquote(ctx).lasterr, Process.get(:scenario_event_type),
+         unquote(ctx)}
       end
     end
   end
@@ -380,6 +384,7 @@ defmodule SIP.Scenario do
   `stay` comes back with the time that is left.
   """
   defmacro on_events(blocks) do
+    ctx = ctx(__CALLER__)
     do_clauses = Keyword.fetch!(blocks, :do)
 
     # The 1.4 inter-FSM event shapes are gone from the wire (§4.6 of
@@ -403,14 +408,16 @@ defmodule SIP.Scenario do
     # subroutine, and the message would be stale.
     sbb_clauses =
       if Module.get_attribute(__CALLER__.module, :scenario_kind) == :sbb,
-        do: [sbb_deadline_clause()],
+        do: [sbb_deadline_clause(ctx)],
         else: []
 
     # Make every on_events cooperatively shutdown-aware: prepend a clause matching
     # the control message, unless the scenario already handles :scenario_ctl
     # itself. Prepending keeps it ahead of a possible catch-all `_ ->` clause.
     ctl_clauses =
-      if Enum.any?(do_clauses, &ctl_clause?(&1, namespaces)), do: [], else: [shutdown_clause()]
+      if Enum.any?(do_clauses, &ctl_clause?(&1, namespaces)),
+        do: [],
+        else: [shutdown_clause(ctx)]
 
     # …and media-server-death-aware, the same way and for the same reason
     # (design docs/design/DESIGN-FRAMEWORK.md#67-the-media-server-as-a-failure-domain, R8). `:server_disconnected` is
@@ -421,7 +428,7 @@ defmodule SIP.Scenario do
     # Injected only when the scenario handles no media death itself, so a policy
     # that wants control keeps it — the rule `on_events` clauses already follow.
     media_clauses =
-      if Enum.any?(do_clauses, &handles_media_down?/1), do: [], else: [media_down_clause()]
+      if Enum.any?(do_clauses, &handles_media_down?/1), do: [], else: [media_down_clause(ctx)]
 
     # `stay` re-enters the wait, so the receive lives inside a closure that calls
     # itself. Hygienic unique vars: a state body may hold several on_events, and
@@ -435,9 +442,9 @@ defmodule SIP.Scenario do
     instrumented =
       Enum.map(
         sbb_clauses ++ media_clauses ++ ctl_clauses,
-        &instrument_receive_clause(&1, nil, nil, namespaces)
+        &instrument_receive_clause(&1, ctx, nil, nil, namespaces)
       ) ++
-        Enum.map(do_clauses, &instrument_receive_clause(&1, wait, deadline, namespaces))
+        Enum.map(do_clauses, &instrument_receive_clause(&1, ctx, wait, deadline, namespaces))
 
     {timeout_ast, new_blocks} =
       case Keyword.fetch(blocks, :after) do
@@ -458,14 +465,14 @@ defmodule SIP.Scenario do
     receive_ast = {:receive, [], [new_blocks]}
 
     quote do
-      unquote(wait) = fn unquote(wait), var!(sip_ctx), unquote(deadline) ->
-        _ = var!(sip_ctx)
+      unquote(wait) = fn unquote(wait), unquote(ctx), unquote(deadline) ->
+        _ = unquote(ctx)
         unquote(receive_ast)
       end
 
       unquote(wait).(
         unquote(wait),
-        var!(sip_ctx),
+        unquote(ctx),
         SIP.Scenario.deadline(unquote(timeout_ast))
       )
     end
@@ -487,10 +494,10 @@ defmodule SIP.Scenario do
   # a descriptor, because the block that armed the timer may be several frames up:
   # a nested block lets a parent's ref pass through, and `run_sbb/3` catches only
   # its own. `sip_ctx` travels with it so the host keeps what the block learned.
-  defp sbb_deadline_clause do
+  defp sbb_deadline_clause(ctx) do
     quote do
       {:sbb_deadline, sbb_deadline_ref} ->
-        throw({:sbb_deadline_hit, sbb_deadline_ref, var!(sip_ctx)})
+        throw({:sbb_deadline_hit, sbb_deadline_ref, unquote(ctx)})
     end
     |> hd()
   end
@@ -528,11 +535,11 @@ defmodule SIP.Scenario do
   # The auto-injected cooperative-shutdown clause: jump to the reserved
   # :__shutdown__ state, which the runner resolves to `on_shutdown` (if declared)
   # or to the default :aborted termination.
-  defp shutdown_clause do
+  defp shutdown_clause(ctx) do
     [clause] =
       quote do
         {:scenario_ctl, :shutdown, _reason} ->
-          {:goto, :__shutdown__, "shutdown", :control, var!(sip_ctx)}
+          {:goto, :__shutdown__, "shutdown", :control, unquote(ctx)}
       end
 
     clause
@@ -574,11 +581,11 @@ defmodule SIP.Scenario do
   # Idempotent by construction: it leaves the state, so a second
   # `:server_disconnected` (the MCU case relays the fact AND passes it through)
   # finds no `on_events` to match against.
-  defp media_down_clause do
+  defp media_down_clause(ctx) do
     [clause] =
       quote do
         {:ms_event, _ref, :server_disconnected} ->
-          {:goto, :__shutdown__, "media server down", :media, var!(sip_ctx)}
+          {:goto, :__shutdown__, "media server down", :media, unquote(ctx)}
       end
 
     clause
@@ -586,19 +593,23 @@ defmodule SIP.Scenario do
 
   @doc "Terminate the scenario successfully, transitioning to the success state."
   defmacro scenario_success(reason \\ "", type \\ nil) do
+    ctx = ctx(__CALLER__)
+
     quote do
       event_type = unquote(type) || Process.get(:scenario_event_type)
-      {:terminal, :success, unquote(reason), event_type, var!(sip_ctx)}
+      {:terminal, :success, unquote(reason), event_type, unquote(ctx)}
     end
   end
 
   @spec scenario_failure() :: {:__block__, [], [{:=, [...], [...]} | {:{}, [...], [...]}, ...]}
   @doc "Terminate the scenario as a failure, storing `reason` in the context."
   defmacro scenario_failure(reason \\ "", type \\ nil) do
+    ctx = ctx(__CALLER__)
+
     quote do
       event_type = unquote(type) || Process.get(:scenario_event_type)
-      var!(sip_ctx) = FSL.Context.put(var!(sip_ctx), :errorreason, to_string(unquote(reason)))
-      {:terminal, :failure, unquote(reason), event_type, var!(sip_ctx)}
+      unquote(ctx) = FSL.Context.put(unquote(ctx), :errorreason, to_string(unquote(reason)))
+      {:terminal, :failure, unquote(reason), event_type, unquote(ctx)}
     end
   end
 
@@ -608,9 +619,11 @@ defmodule SIP.Scenario do
   Typically used as the last statement of an `on_shutdown` block.
   """
   defmacro scenario_aborted(reason \\ "", type \\ nil) do
+    ctx = ctx(__CALLER__)
+
     quote do
       event_type = unquote(type) || Process.get(:scenario_event_type)
-      {:terminal, :aborted, unquote(reason), event_type, var!(sip_ctx)}
+      {:terminal, :aborted, unquote(reason), event_type, unquote(ctx)}
     end
   end
 
@@ -640,7 +653,7 @@ defmodule SIP.Scenario do
       end
   """
   defmacro spawn_fsm(target, opts \\ []) do
-    spawn_fsm_ast(target, opts, __CALLER__.file)
+    spawn_fsm_ast(ctx(__CALLER__), target, opts, __CALLER__.file)
   end
 
   @doc """
@@ -649,7 +662,7 @@ defmodule SIP.Scenario do
   """
   @deprecated "Use spawn_fsm/2 instead"
   defmacro sub_fsm(target, opts \\ []) do
-    spawn_fsm_ast(target, opts, __CALLER__.file)
+    spawn_fsm_ast(ctx(__CALLER__), target, opts, __CALLER__.file)
   end
 
   # A relative sub-scenario path is resolved against the directory of the file that
@@ -660,13 +673,13 @@ defmodule SIP.Scenario do
   # Resolving against the cwd is what broke uac_register_and_uas_invite.exs, whose
   # `spawn_fsm "scenarios/uas_invite.exs"` died with a bare "exception!" for anyone
   # not standing in apps/elixip2.
-  defp spawn_fsm_ast(target, opts, caller_file) do
+  defp spawn_fsm_ast(ctx, target, opts, caller_file) do
     base_dir = Path.expand(Path.dirname(caller_file))
 
     quote do
-      var!(sip_ctx) =
+      unquote(ctx) =
         SIP.Scenario.Runner.spawn_child(
-          var!(sip_ctx),
+          unquote(ctx),
           unquote(target),
           unquote(opts),
           self(),
@@ -713,11 +726,12 @@ defmodule SIP.Scenario do
   host's remaining timeout while it runs. Give the block its own state.
   """
   defmacro sbb_fsm(module, opts \\ []) do
+    ctx = ctx(__CALLER__)
     register_sbb_namespace(module, __CALLER__)
 
     quote do
-      var!(sip_ctx) =
-        SIP.Scenario.Runner.run_sbb(var!(sip_ctx), unquote(module), unquote(opts))
+      unquote(ctx) =
+        SIP.Scenario.Runner.run_sbb(unquote(ctx), unquote(module), unquote(opts))
     end
   end
 
@@ -781,10 +795,11 @@ defmodule SIP.Scenario do
   falls through leaves the host waiting for an event nobody will send.
   """
   defmacro sbb_return(event) do
+    ctx = ctx(__CALLER__)
     check_sbb_return!(event, __CALLER__)
 
     quote do
-      {:sbb_return, unquote(event), var!(sip_ctx)}
+      {:sbb_return, unquote(event), unquote(ctx)}
     end
   end
 
@@ -881,8 +896,10 @@ defmodule SIP.Scenario do
   collide with a host key of the same name.
   """
   defmacro sbb_data_get(key) do
+    ctx = ctx(__CALLER__)
+
     quote do
-      SIP.Scenario.Runner.sbb_data_get(var!(sip_ctx), __MODULE__, unquote(key))
+      SIP.Scenario.Runner.sbb_data_get(unquote(ctx), __MODULE__, unquote(key))
     end
   end
 
@@ -892,9 +909,11 @@ defmodule SIP.Scenario do
   shared `appdata` — not here.
   """
   defmacro sbb_data_set(key, value) do
+    ctx = ctx(__CALLER__)
+
     quote do
-      var!(sip_ctx) =
-        SIP.Scenario.Runner.sbb_data_set(var!(sip_ctx), __MODULE__, unquote(key), unquote(value))
+      unquote(ctx) =
+        SIP.Scenario.Runner.sbb_data_set(unquote(ctx), __MODULE__, unquote(key), unquote(value))
     end
   end
 
@@ -903,8 +922,10 @@ defmodule SIP.Scenario do
   `{:parent_msg, payload}`. Unknown name → logged and ignored.
   """
   defmacro notify(child_name, payload) do
+    ctx = ctx(__CALLER__)
+
     quote do
-      SIP.Scenario.Runner.notify_child(var!(sip_ctx), unquote(child_name), unquote(payload))
+      SIP.Scenario.Runner.notify_child(unquote(ctx), unquote(child_name), unquote(payload))
     end
   end
 
@@ -915,8 +936,10 @@ defmodule SIP.Scenario do
   parent (so the same scenario also runs standalone).
   """
   defmacro notify_parent(payload) do
+    ctx = ctx(__CALLER__)
+
     quote do
-      SIP.Scenario.Runner.notify_parent(var!(sip_ctx), unquote(payload))
+      SIP.Scenario.Runner.notify_parent(unquote(ctx), unquote(payload))
     end
   end
 
@@ -933,13 +956,14 @@ defmodule SIP.Scenario do
       end
   """
   defmacro on_shutdown(do: body) do
+    ctx = ctx(__CALLER__)
     check_stay_placement!(body, "on_shutdown block", __CALLER__)
 
     quote do
       require Logger
 
-      def __state___shutdown__(var!(sip_ctx)) do
-        _ = var!(sip_ctx)
+      def __state___shutdown__(unquote(ctx)) do
+        _ = unquote(ctx)
         Process.delete(:scenario_event_type)
 
         try do
@@ -953,6 +977,26 @@ defmodule SIP.Scenario do
       end
     end
   end
+
+  # ── The context variable ──────────────────────────────────────────────────
+  #
+  # A scenario reads `sip_ctx` because it is holding a SIP session; an XMPP one
+  # would read `xmpp_ctx`, a chatbot `bot_ctx`. What the language must not assume
+  # is that there is only one — so the name is a parameter, recorded once by the
+  # binding's context module (`use FSL.Context, ctx_var: :sip_ctx`, in
+  # SIP.Context) and read back here, at expansion time, off the scenario module
+  # being compiled.
+  #
+  # `Macro.var(name, nil)` is exactly what `var!/1` produces, so `unquote(ctx)`
+  # below is what `var!(sip_ctx)` was. It IS a loss of readability —
+  # `var!(sip_ctx)` says what it is, `unquote(ctx)` asks the reader to look up
+  # one line — and it is accepted because the alternative is a language that
+  # cannot be bound twice. Mitigated by binding `ctx` on the FIRST line of each
+  # macro and nowhere else: never inline, never conditionally. The pure helpers
+  # below take it as their first argument for the same reason.
+  defp ctx_var(caller), do: Module.get_attribute(caller.module, :fsl_ctx_var) || :fsl_ctx
+
+  defp ctx(caller), do: Macro.var(ctx_var(caller), nil)
 
   # Extract a state name (atom) from the macro argument, which is either a bare
   # identifier (`initial_state`, `next`, `loop`) parsed as a variable AST node,
@@ -981,7 +1025,7 @@ defmodule SIP.Scenario do
   #   3. wrap the clause result: a `{:stay, …}` descriptor re-enters the wait
   #      closure with the context the clause produced, so appdata mutations
   #      survive; anything else is a transition and propagates to the runner.
-  defp instrument_receive_clause({:->, meta, [head, body]}, wait, deadline, namespaces) do
+  defp instrument_receive_clause({:->, meta, [head, body]}, ctx, wait, deadline, namespaces) do
     # Compute the type from the ORIGINAL head, before the as-pattern rewrite.
     type = clause_event_type(head, namespaces)
     evt = Macro.unique_var(:evt, __MODULE__)
@@ -998,9 +1042,9 @@ defmodule SIP.Scenario do
         # given here, before the scenario's clause runs, so the caller is
         # answered the moment its callee goes rather than at the teardown
         # (design docs/design/DESIGN-SIPSTACK.md#57-resilience, R6).
-        var!(sip_ctx) = SIP.Session.B2bua.note_leg_event(var!(sip_ctx), unquote(evt))
-        var!(sip_ctx) = SIP.Session.CallUAS.auto_store(var!(sip_ctx), unquote(evt))
-        unquote(rewrite_stay(body, wait, deadline))
+        unquote(ctx) = SIP.Session.B2bua.note_leg_event(unquote(ctx), unquote(evt))
+        unquote(ctx) = SIP.Session.CallUAS.auto_store(unquote(ctx), unquote(evt))
+        unquote(rewrite_stay(body, ctx, wait, deadline))
       end
 
     {:->, meta, [bind_event_var(head, evt), new_body]}
@@ -1018,28 +1062,28 @@ defmodule SIP.Scenario do
   # reason in reverse — the deadline has expired, there is nothing to go back to.
 
   # No closure to go back to (auto-injected clause): the body IS the transition.
-  defp rewrite_stay(body, nil, nil), do: body
+  defp rewrite_stay(body, _ctx, nil, nil), do: body
 
-  defp rewrite_stay({:on_events, _meta, _args} = node, _wait, _deadline), do: node
-  defp rewrite_stay({:receive, _meta, _args} = node, _wait, _deadline), do: node
+  defp rewrite_stay({:on_events, _meta, _args} = node, _ctx, _wait, _deadline), do: node
+  defp rewrite_stay({:receive, _meta, _args} = node, _ctx, _wait, _deadline), do: node
 
-  defp rewrite_stay({:stay, _meta, args}, wait, deadline) when is_list(args),
-    do: stay_ast(args, wait, deadline)
+  defp rewrite_stay({:stay, _meta, args}, ctx, wait, deadline) when is_list(args),
+    do: stay_ast(ctx, args, wait, deadline)
 
   # `stay` alone on a line parses as a variable, not as a zero-arity call.
-  defp rewrite_stay({:stay, _meta, ctx}, wait, deadline) when is_atom(ctx),
-    do: stay_ast([], wait, deadline)
+  defp rewrite_stay({:stay, _meta, var_ctx}, ctx, wait, deadline) when is_atom(var_ctx),
+    do: stay_ast(ctx, [], wait, deadline)
 
-  defp rewrite_stay({fun, meta, args}, wait, deadline),
-    do: {rewrite_stay(fun, wait, deadline), meta, rewrite_stay(args, wait, deadline)}
+  defp rewrite_stay({fun, meta, args}, ctx, wait, deadline),
+    do: {rewrite_stay(fun, ctx, wait, deadline), meta, rewrite_stay(args, ctx, wait, deadline)}
 
-  defp rewrite_stay({left, right}, wait, deadline),
-    do: {rewrite_stay(left, wait, deadline), rewrite_stay(right, wait, deadline)}
+  defp rewrite_stay({left, right}, ctx, wait, deadline),
+    do: {rewrite_stay(left, ctx, wait, deadline), rewrite_stay(right, ctx, wait, deadline)}
 
-  defp rewrite_stay(list, wait, deadline) when is_list(list),
-    do: Enum.map(list, &rewrite_stay(&1, wait, deadline))
+  defp rewrite_stay(list, ctx, wait, deadline) when is_list(list),
+    do: Enum.map(list, &rewrite_stay(&1, ctx, wait, deadline))
 
-  defp rewrite_stay(other, _wait, _deadline), do: other
+  defp rewrite_stay(other, _ctx, _wait, _deadline), do: other
 
   # `stay` re-enters an `on_events` wait, so outside one there is nothing to
   # re-enter. Refuse it at compile time, where the scenario writer can still see
@@ -1080,25 +1124,25 @@ defmodule SIP.Scenario do
 
   defp stay_node(_other), do: nil
 
-  defp stay_ast(args, wait, deadline) do
+  defp stay_ast(ctx, args, wait, deadline) do
     desc = Enum.at(args, 0)
     type = Enum.at(args, 1)
 
     quote do
-      if var!(sip_ctx).lasterr == :ok do
+      if unquote(ctx).lasterr == :ok do
         unquote(wait).(
           unquote(wait),
           SIP.Scenario.Runner.note_stay(
             __MODULE__,
-            var!(sip_ctx),
+            unquote(ctx),
             unquote(desc),
             unquote(type) || Process.get(:scenario_event_type)
           ),
           unquote(deadline)
         )
       else
-        {:terminal, :failure, var!(sip_ctx).lasterr, Process.get(:scenario_event_type),
-         var!(sip_ctx)}
+        {:terminal, :failure, unquote(ctx).lasterr, Process.get(:scenario_event_type),
+         unquote(ctx)}
       end
     end
   end

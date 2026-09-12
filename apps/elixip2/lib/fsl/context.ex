@@ -195,23 +195,43 @@ defmodule FSL.Context do
   belongs to.
   """
   defmacro __using__(opts) do
-    # The flag is set imperatively, at expansion time: sibling `use` statements
-    # are expanded before a `@attr` set inside the quote is committed, so a
-    # second expansion would not see it.
+    # Everything here is written imperatively, at EXPANSION time, and this is not
+    # a style choice: a `@attr value` sitting in the quote below is *evaluated*
+    # later, when the module body runs, while sibling macro calls — the guard
+    # against a second injection, and every `state` of the scenario — are
+    # expanded before that. An attribute the language has to read while it
+    # expands must therefore be put, not quoted.
+    #
+    # The guard has always worked this way (a scenario reaches this module
+    # through two `use` chains and would otherwise redefine every macro). The
+    # context variable joined it the day `state` had to know the name to bind in
+    # the head it generates: quoted, it read `nil` at module level and
+    # `:sip_ctx` inside each state body, so the head bound one variable and the
+    # body read another.
     if Module.get_attribute(__CALLER__.module, :fsl_context_used) do
       quote(do: nil)
     else
       Module.put_attribute(__CALLER__.module, :fsl_context_used, true)
 
-      ctx_var = Keyword.get(opts, :ctx_var, :fsl_ctx)
-      {setter_mod, setter_fun} = Keyword.get(opts, :setter, {FSL.Context, :put})
-      {getter_mod, getter_fun} = Keyword.get(opts, :getter, {FSL.Context, :get})
+      Module.put_attribute(
+        __CALLER__.module,
+        :fsl_ctx_var,
+        Keyword.get(opts, :ctx_var, :fsl_ctx)
+      )
+
+      Module.put_attribute(
+        __CALLER__.module,
+        :fsl_setter,
+        Keyword.get(opts, :setter, {FSL.Context, :put})
+      )
+
+      Module.put_attribute(
+        __CALLER__.module,
+        :fsl_getter,
+        Keyword.get(opts, :getter, {FSL.Context, :get})
+      )
 
       quote do
-        @fsl_ctx_var unquote(ctx_var)
-        @fsl_setter {unquote(setter_mod), unquote(setter_fun)}
-        @fsl_getter {unquote(getter_mod), unquote(getter_fun)}
-
         defmacro ctx_set(prop, value),
           do: FSL.Context.ctx_set_ast(@fsl_ctx_var, @fsl_setter, [prop, value])
 
