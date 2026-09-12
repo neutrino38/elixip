@@ -94,7 +94,7 @@ defmodule SIP.Scenario.Runner do
       config
       |> build_context()
       |> apply_run_opts(opts)
-      |> SIP.Context.set(:currentstate, :initial_state)
+      |> FSL.Context.put(:currentstate, :initial_state)
 
     maybe_start_sequence_journal(module, ctx)
 
@@ -151,7 +151,7 @@ defmodule SIP.Scenario.Runner do
   # scripts carry none — the server knows they serve inbound traffic from
   # `domains.toml`. Only a request names a sender, hence the `is_req` guard.
   defp inbound_request(ctx) do
-    case SIP.Context.appdata_get(ctx, :inbound_request) do
+    case FSL.Context.appdata_get(ctx, :inbound_request) do
       req when is_req(req) -> req
       _none -> nil
     end
@@ -173,13 +173,13 @@ defmodule SIP.Scenario.Runner do
     ctx =
       case Keyword.get(opts, :parent_pid) do
         nil -> ctx
-        pid -> SIP.Context.set(ctx, :parent_pid, pid)
+        pid -> FSL.Context.put(ctx, :parent_pid, pid)
       end
 
     ctx =
       case Keyword.get(opts, :self_name) do
         nil -> ctx
-        name -> SIP.Context.appdata_set(ctx, :__self_name__, name)
+        name -> FSL.Context.appdata_set(ctx, :__self_name__, name)
       end
 
     # UAS scenarios: the dialog is created by the inbound request, so the
@@ -194,12 +194,12 @@ defmodule SIP.Scenario.Runner do
     ctx =
       case Keyword.get(opts, :inbound_request) do
         nil -> ctx
-        req -> SIP.Context.appdata_set(ctx, :inbound_request, req)
+        req -> FSL.Context.appdata_set(ctx, :inbound_request, req)
       end
 
     case Keyword.get(opts, :appdata) do
       map when is_map(map) ->
-        Enum.reduce(map, ctx, fn {k, v}, acc -> SIP.Context.appdata_set(acc, k, v) end)
+        Enum.reduce(map, ctx, fn {k, v}, acc -> FSL.Context.appdata_set(acc, k, v) end)
 
       _ ->
         ctx
@@ -238,7 +238,7 @@ defmodule SIP.Scenario.Runner do
 
     child = %SIP.Scenario.Child{name: name, pid: pid, ref: ref, module: module}
     children = ctx.appdata |> Map.get(:__children__, %{}) |> Map.put(name, child)
-    SIP.Context.appdata_set(ctx, :__children__, children)
+    FSL.Context.appdata_set(ctx, :__children__, children)
   end
 
   defp resolve_target(target, _base_dir) when is_atom(target), do: target
@@ -409,7 +409,7 @@ defmodule SIP.Scenario.Runner do
     do: SIP.Context.set(ctx, key, value)
 
   # Unknown / non-native keys (e.g. :proxy) are stored in appdata.
-  defp put_config(ctx, key, value), do: SIP.Context.appdata_set(ctx, key, value)
+  defp put_config(ctx, key, value), do: FSL.Context.appdata_set(ctx, key, value)
 
   # Apply a global key to the application env. `:proxyuri` accepts either an
   # already-parsed %SIP.Uri{} (from the JSON loader) or a string "sip:host:port"
@@ -604,8 +604,8 @@ defmodule SIP.Scenario.Runner do
     entry_ctx =
       ctx
       |> seed_sbb_sandbox(module, opts)
-      |> SIP.Context.set(:currentstate, :initial_state)
-      |> SIP.Context.set(:laststate, nil)
+      |> FSL.Context.put(:currentstate, :initial_state)
+      |> FSL.Context.put(:laststate, nil)
 
     timeout = Keyword.get(opts, :timeout, module.__sbb_timeout__())
     ref = make_ref()
@@ -633,8 +633,8 @@ defmodule SIP.Scenario.Runner do
 
     host_ctx =
       ctx2
-      |> SIP.Context.set(:currentstate, host_state)
-      |> SIP.Context.set(:laststate, host_laststate)
+      |> FSL.Context.put(:currentstate, host_state)
+      |> FSL.Context.put(:laststate, host_laststate)
 
     # Back to the caller's vocabulary. Without this the row would sit on the
     # block's last state while the host waits on the event we just posted — a
@@ -785,11 +785,11 @@ defmodule SIP.Scenario.Runner do
         do: Map.merge(sbb_sandbox(ctx, module), args),
         else: args
 
-    SIP.Context.appdata_set(ctx, {:sbb, module}, sandbox)
+    FSL.Context.appdata_set(ctx, {:sbb, module}, sandbox)
   end
 
   defp sbb_sandbox(ctx, module) do
-    case SIP.Context.appdata_get(ctx, {:sbb, module}) do
+    case FSL.Context.appdata_get(ctx, {:sbb, module}) do
       map when is_map(map) -> map
       _none -> %{}
     end
@@ -800,7 +800,7 @@ defmodule SIP.Scenario.Runner do
 
   @doc false
   def sbb_data_set(ctx, module, key, value) do
-    SIP.Context.appdata_set(
+    FSL.Context.appdata_set(
       ctx,
       {:sbb, module},
       ctx |> sbb_sandbox(module) |> Map.put(key, value)
@@ -832,8 +832,8 @@ defmodule SIP.Scenario.Runner do
   # only written when the state actually changes: re-entering a state (`goto
   # loop`, an explicit self-goto, `stay`) is not "coming from" it.
   defp enter(ctx, from, target) do
-    ctx = SIP.Context.set(ctx, :currentstate, target)
-    if target == from, do: ctx, else: SIP.Context.set(ctx, :laststate, from)
+    ctx = FSL.Context.put(ctx, :currentstate, target)
+    if target == from, do: ctx, else: FSL.Context.put(ctx, :laststate, from)
   end
 
   @doc false

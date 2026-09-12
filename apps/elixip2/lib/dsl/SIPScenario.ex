@@ -597,7 +597,7 @@ defmodule SIP.Scenario do
   defmacro scenario_failure(reason \\ "", type \\ nil) do
     quote do
       event_type = unquote(type) || Process.get(:scenario_event_type)
-      var!(sip_ctx) = SIP.Context.set(var!(sip_ctx), :errorreason, to_string(unquote(reason)))
+      var!(sip_ctx) = FSL.Context.put(var!(sip_ctx), :errorreason, to_string(unquote(reason)))
       {:terminal, :failure, unquote(reason), event_type, var!(sip_ctx)}
     end
   end
