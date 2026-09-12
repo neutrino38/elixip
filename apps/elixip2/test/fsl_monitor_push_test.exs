@@ -15,20 +15,38 @@ defmodule SIP.Test.FSL.MonitorPush do
   and `apps/kelixip/test/control_test.exs` for the join onto
   `{:kelix_monitor, …}` that consumes it.
 
-  Also pinned: **the row is flat**. `row.medias`, not `row.extra.medias`. That
-  is the decision of §4.7 and §8.4, and it is what keeps `ElixippCLI` (which
-  declares its table by plain key) and `Kelix.InstancePool` (which declares its
-  key list the same way) untouched by the extraction. The three call-shape
-  columns default to a *value* — `"n/a"`, `"none"` — which says "this call
-  negotiated nothing" where a blank cell would read as "nobody measured", and
-  those defaults travel with the columns that mean it.
+  Also pinned: **whose columns are whose, and that the row is flat.**
+
+  `scenario`, `state`, `event`, `event_type`, `command`, `command_type` and
+  `account` are the machine's — the last one because "who this run serves" is a
+  generic question even though only the embedding can answer it. `medias`,
+  `mediaserver` and `outbound` are SIP's, declared with their defaults when the
+  monitor is started (`SIP.FSL.Host.monitor_columns/0`), and the registry never
+  learns which keys are which.
+
+  And `row.medias`, not `row.extra.medias`. That is the decision of §4.7 and
+  §8.4, and it is what keeps `ElixippCLI` (which declares its table by plain
+  key) and `Kelix.InstancePool` (which declares its key list the same way)
+  untouched by the extraction. A host's defaults travel with its columns because
+  they mean something: `"n/a"` and `"none"` say "this call negotiated nothing",
+  where a blank cell would read as "nobody measured".
   """
   use ExUnit.Case, async: false
 
   alias SIP.Scenario.Monitor
 
-  setup do
-    {:ok, _pid} = Monitor.start()
+  setup context do
+    # A monitor started with no columns holds the machine's own and nothing else,
+    # which is what a machine with no protocol gets. The describe block that
+    # tests SIP's columns declares them, as its host does.
+    columns = if context[:sip_columns], do: SIP.FSL.Host.monitor_columns(), else: []
+
+    # The monitor is a named singleton and its columns are fixed at start, so a
+    # test that wants a different set has to start its own. Stopped rather than
+    # reused: `start/1` answers `:already_started` as success, which is what lets
+    # everything else share one.
+    if pid = Process.whereis(Monitor), do: GenServer.stop(pid)
+    {:ok, _pid} = Monitor.start(columns: columns)
     slot = System.unique_integer([:positive])
     on_exit(fn -> Monitor.unsubscribe(self()) end)
     on_exit(fn -> Monitor.clear(slot) end)
@@ -88,7 +106,31 @@ defmodule SIP.Test.FSL.MonitorPush do
   end
 
   describe "the row" do
-    test "is flat, and its host columns carry their own defaults", %{slot: slot} do
+    test "started with no columns, holds the machine's own and nothing else", %{slot: slot} do
+      Monitor.subscribe(self())
+      Monitor.report(slot, "My.Scenario", "alice", "waiting", "start", nil)
+
+      assert_receive {:sip_scenario_monitor, {:updated, ^slot, row}}, 2_000
+
+      assert Enum.sort(Map.keys(row)) ==
+               Enum.sort([
+                 :scenario,
+                 :account,
+                 :command,
+                 :command_type,
+                 :state,
+                 :event,
+                 :event_type,
+                 :depth,
+                 :slot
+               ])
+
+      # A column nobody declared is not invented.
+      refute Map.has_key?(row, :medias)
+    end
+
+    @tag :sip_columns
+    test "started with SIP's columns, carries them and their defaults", %{slot: slot} do
       Monitor.subscribe(self())
       Monitor.report(slot, "My.Scenario", "alice", "waiting", "start", nil)
 
@@ -121,6 +163,7 @@ defmodule SIP.Test.FSL.MonitorPush do
       assert row.outbound == "n/a"
     end
 
+    @tag :sip_columns
     test "the three call-shape columns are written by name", %{slot: slot} do
       Monitor.subscribe(self())
       Process.put(:scenario_slot_id, slot)
@@ -147,6 +190,20 @@ defmodule SIP.Test.FSL.MonitorPush do
       # An answer that carried none of the three is "none", not "".
       Monitor.note_medias([])
       assert_receive {:sip_scenario_monitor, {:updated, ^slot, %{medias: "none"}}}, 2_000
+    end
+
+    @tag :sip_columns
+    test "note/2 writes any declared column, and the registry asks no questions",
+         %{slot: slot} do
+      Monitor.subscribe(self())
+      Process.put(:scenario_slot_id, slot)
+      on_exit(fn -> Process.delete(:scenario_slot_id) end)
+
+      Monitor.report(slot, "My.Scenario", "alice", "waiting", "start", nil)
+      assert_receive {:sip_scenario_monitor, {:updated, ^slot, _}}, 2_000
+
+      Monitor.note(:medias, "AVT")
+      assert_receive {:sip_scenario_monitor, {:updated, ^slot, %{medias: "AVT"}}}, 2_000
     end
 
     test "note_account/1 overwrites the account, and a blank report preserves it", %{slot: slot} do

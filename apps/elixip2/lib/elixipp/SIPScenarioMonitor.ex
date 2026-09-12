@@ -17,6 +17,28 @@ defmodule SIP.Scenario.Monitor do
   Designed to hold several concurrent calls — today a single instance, tomorrow
   the SIPP-like parallel mode.
 
+  ## Whose columns are whose
+
+  `scenario`, `state`, `event`, `event_type`, `command` and `command_type` are
+  the machine's: where it is and what moved it. So is `account` — "who this run
+  serves" is a generic column, even though only the embedding can say what goes
+  in it (`c:FSL.Host.account/2`). Everything else on a row belongs to the
+  **embedding**, which declares its columns and their defaults when it starts
+  the monitor:
+
+      SIP.Scenario.Monitor.start(columns: SIP.FSL.Host.monitor_columns())
+
+  and writes one with `note/2`. The registry never learns which keys are which,
+  and the row **stays flat** — `row.medias`, not `row.extra.medias`. That is the
+  decision of the extraction plan (§4.7, §8.4) and it is not about tidiness: flat
+  rows are the only shape under which `ElixippCLI`, which declares its table by
+  plain key, and `Kelix.InstancePool`, which declares its key list the same way,
+  do not change when this module moves into a package.
+
+  A host's defaults travel with its columns, because they mean something:
+  `"n/a"` and `"none"` say "this call negotiated nothing", where a blank cell
+  would read as "nobody measured".
+
   A pid can also `subscribe/1` to be told of changes as they happen instead of
   polling `calls/0` — `{:sip_scenario_monitor, {:updated, slot, row}}` after
   every reported change, `{:sip_scenario_monitor, {:cleared, slot}}` when a slot
@@ -30,34 +52,30 @@ defmodule SIP.Scenario.Monitor do
   @typedoc "Category of a command, to drive the future sequence diagram."
   @type command_type :: :sip | :media | :http | :db | :scenario | :control | nil
 
-  @type call_info :: %{
-          scenario: String.t(),
-          command: String.t(),
-          command_type: command_type(),
-          state: String.t(),
-          event: String.t(),
-          event_type: command_type(),
-          medias: String.t(),
-          mediaserver: String.t(),
-          outbound: String.t()
-        }
+  @typedoc """
+  One row: the machine's own columns, plus whatever the embedding declared.
+  """
+  @type call_info :: %{required(atom()) => term()}
 
-  # The three call-shape columns default to a *value*, not to an empty string: a
-  # call that negotiated no media, connects to no media server and dials nobody is
-  # the ordinary case (a registrar), and "n/a" says so where a blank cell would
-  # read as "not measured".
-  @empty %{
+  # The machine's own columns. A host's are merged on top, from what it declared
+  # at start.
+  #
+  # `account` is on this list and the other three are not, which is the
+  # distinction the extraction plan draws (§4.7): "who this run serves" is a
+  # generic column whose *value* the binding supplies — through `c:account/2`,
+  # reported on every transition — while what a call negotiated, with which
+  # server, towards whom is the binding's question as well as its answer.
+  @fsm_columns [
     scenario: "",
     account: "",
     command: "",
     command_type: nil,
     state: "",
     event: "",
-    event_type: nil,
-    medias: "n/a",
-    mediaserver: "none",
-    outbound: "n/a"
-  }
+    event_type: nil
+  ]
+
+  @fsm_keys Keyword.keys(@fsm_columns)
 
   # Display letter of each negotiated media, in the order they are rendered.
   @media_letters [audio: "A", video: "V", text: "T"]
@@ -70,9 +88,9 @@ defmodule SIP.Scenario.Monitor do
   This is elixipp's imperative bootstrap, called from the CLI once it knows
   `--monitor` was asked for. A supervised owner wants `start_link/1` instead.
   """
-  @spec start() :: {:ok, pid()}
-  def start do
-    case GenServer.start(__MODULE__, :ok, name: __MODULE__) do
+  @spec start(keyword) :: {:ok, pid()}
+  def start(opts \\ []) do
+    case GenServer.start(__MODULE__, opts, name: __MODULE__) do
       {:ok, pid} -> {:ok, pid}
       {:error, {:already_started, pid}} -> {:ok, pid}
       err -> err
@@ -85,7 +103,7 @@ defmodule SIP.Scenario.Monitor do
   `child_spec/1` calls this).
   """
   @spec start_link(keyword) :: GenServer.on_start()
-  def start_link(_opts \\ []), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
+  def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
   @doc """
   Upsert the state of a call. `call_id` is the scenario process pid. `event_type`
@@ -98,19 +116,29 @@ defmodule SIP.Scenario.Monitor do
   end
 
   @doc """
+  Write one of the embedding's own columns on the current scenario's row.
+
+  The registry does not know what the key means — that is the point — so a host
+  adds a column by declaring it at start and writing it here. No-op if the
+  monitor is not running, so it stays free when monitoring is off.
+  """
+  @spec note(atom(), term()) :: :ok
+  def note(key, value) when is_atom(key) do
+    if Process.whereis(__MODULE__) do
+      slot_id = Process.get(:scenario_slot_id, self())
+      GenServer.cast(__MODULE__, {:put, slot_id, key, value})
+    end
+
+    :ok
+  end
+
+  @doc """
   Update the account column of the current scenario row. Called when the
   registered identity becomes known (e.g. after auth succeeds in a UAS
   REGISTER scenario). No-op if the monitor is not running.
   """
   @spec note_account(String.t()) :: :ok
-  def note_account(username) do
-    if Process.whereis(__MODULE__) do
-      slot_id = Process.get(:scenario_slot_id, self())
-      GenServer.cast(__MODULE__, {:account, slot_id, to_string(username)})
-    end
-
-    :ok
-  end
+  def note_account(username), do: note(:account, to_string(username))
 
   @doc """
   Record the media the call has just negotiated: the `kinds` of the answer the two
@@ -121,18 +149,14 @@ defmodule SIP.Scenario.Monitor do
   scenario has nothing to say about it. No-op if the monitor is not running.
   """
   @spec note_medias([:audio | :video | :text]) :: :ok
-  def note_medias(kinds) when is_list(kinds) do
-    put(:medias, media_label(kinds))
-  end
+  def note_medias(kinds) when is_list(kinds), do: note(:medias, media_label(kinds))
 
   @doc """
   Record the media server this call is connected to, by the name it is declared
   under (`[mediaserver.pool.<name>]`). No-op if the monitor is not running.
   """
   @spec note_mediaserver(String.t()) :: :ok
-  def note_mediaserver(name) do
-    put(:mediaserver, to_string(name))
-  end
+  def note_mediaserver(name), do: note(:mediaserver, to_string(name))
 
   @doc """
   Record the destination of the outbound leg: the target being dialled, and then
@@ -140,9 +164,7 @@ defmodule SIP.Scenario.Monitor do
   one the call is currently about. No-op if the monitor is not running.
   """
   @spec note_outbound(String.t() | %SIP.Uri{}) :: :ok
-  def note_outbound(uri) do
-    put(:outbound, uri_label(uri))
-  end
+  def note_outbound(uri), do: note(:outbound, uri_label(uri))
 
   defp media_label(kinds) do
     case Enum.map_join(@media_letters, "", fn {kind, letter} ->
@@ -163,15 +185,6 @@ defmodule SIP.Scenario.Monitor do
   end
 
   defp uri_label(uri), do: to_string(uri)
-
-  defp put(key, value) do
-    if Process.whereis(__MODULE__) do
-      slot_id = Process.get(:scenario_slot_id, self())
-      GenServer.cast(__MODULE__, {:put, slot_id, key, value})
-    end
-
-    :ok
-  end
 
   @doc """
   Record the last command issued by the current scenario process, with its
@@ -229,7 +242,13 @@ defmodule SIP.Scenario.Monitor do
   # ── Server ──────────────────────────────────────────────────────────────────
 
   @impl true
-  def init(:ok), do: {:ok, %{calls: %{}, seq: 0, subs: MapSet.new()}}
+  def init(opts) do
+    # The embedding's columns and their defaults, merged onto a new row. The
+    # registry stores them and never reads them.
+    columns = opts |> Keyword.get(:columns, []) |> Map.new()
+
+    {:ok, %{calls: %{}, seq: 0, subs: MapSet.new(), columns: columns}}
+  end
 
   @impl true
   def handle_call({:subscribe, pid}, _from, st),
@@ -239,7 +258,9 @@ defmodule SIP.Scenario.Monitor do
     do: {:reply, :ok, %{st | subs: MapSet.delete(st.subs, pid)}}
 
   def handle_call(:calls, _from, st) do
-    rows = st.calls |> Map.values() |> Enum.sort_by(& &1.idx) |> Enum.map(&row/1)
+    rows =
+      st.calls |> Map.values() |> Enum.sort_by(& &1.idx) |> Enum.map(&row(&1, st.columns))
+
     {:reply, rows, st}
   end
 
@@ -278,11 +299,6 @@ defmodule SIP.Scenario.Monitor do
   end
 
   @impl true
-  def handle_cast({:account, call_id, username}, st) do
-    update(st, call_id, %{account: username})
-  end
-
-  @impl true
   def handle_cast({:put, call_id, key, value}, st) do
     update(st, call_id, %{key => value})
   end
@@ -292,22 +308,12 @@ defmodule SIP.Scenario.Monitor do
     update(st, call_id, %{command: command, command_type: type})
   end
 
-  # The public shape of one entry (see `calls/0`): the display columns plus
-  # `:depth` (tree nesting) and `:slot` (the key it was reported under).
-  defp row(entry) do
+  # The public shape of one entry (see `calls/0`): the machine's columns, the
+  # embedding's, and `:depth` (tree nesting) plus `:slot` (the key it was
+  # reported under). Flat, deliberately: see the moduledoc.
+  defp row(entry, columns) do
     entry
-    |> Map.take([
-      :scenario,
-      :account,
-      :command,
-      :command_type,
-      :state,
-      :event,
-      :event_type,
-      :medias,
-      :mediaserver,
-      :outbound
-    ])
+    |> Map.take(@fsm_keys ++ Map.keys(columns))
     |> Map.put(:depth, length(entry.idx) - 1)
     |> Map.put(:slot, entry.slot)
   end
@@ -318,7 +324,14 @@ defmodule SIP.Scenario.Monitor do
     {base, seq} =
       case Map.fetch(st.calls, call_id) do
         :error ->
-          {@empty |> Map.put(:idx, index_for(st, call_id)) |> Map.put(:slot, call_id), st.seq + 1}
+          fresh =
+            @fsm_columns
+            |> Map.new()
+            |> Map.merge(st.columns)
+            |> Map.put(:idx, index_for(st, call_id))
+            |> Map.put(:slot, call_id)
+
+          {fresh, st.seq + 1}
 
         {:ok, existing} ->
           {existing, st.seq}
@@ -326,7 +339,7 @@ defmodule SIP.Scenario.Monitor do
 
     entry = Map.merge(base, fields)
     st = %{st | calls: Map.put(st.calls, call_id, entry), seq: seq}
-    notify(st, {:updated, call_id, row(entry)})
+    notify(st, {:updated, call_id, row(entry, st.columns)})
     {:noreply, st}
   end
 

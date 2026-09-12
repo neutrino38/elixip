@@ -179,7 +179,9 @@ defmodule SIP.Test.ScenarioMonitorCallShape do
   # ── Helpers ─────────────────────────────────────────────────────────────────
 
   defp monitor_slot(_ctx) do
-    {:ok, _pid} = SIP.Scenario.Monitor.start()
+    # The three call-shape columns are SIP's, declared by the host that owns them
+    # (SIP.FSL.Host.monitor_columns/0) — the registry itself is generic.
+    {:ok, _pid} = SIP.Scenario.Monitor.start(columns: SIP.FSL.Host.monitor_columns())
     slot = System.unique_integer([:positive])
     Process.put(:scenario_slot_id, slot)
     on_exit(fn -> SIP.Scenario.Monitor.clear(slot) end)

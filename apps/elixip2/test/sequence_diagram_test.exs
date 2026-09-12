@@ -28,8 +28,8 @@ defmodule SIP.Test.SequenceDiagram do
 
     assert out =~ "@startuml"
     assert out =~ "@enduml"
-    # Both participants are declared (the README example forgot `elixip`).
-    assert out =~ ~s(participant "alice" as elixip)
+    # Both participants are declared (the README example forgot the local one).
+    assert out =~ ~s(participant "alice" as local)
     assert out =~ ~s(participant "example.com" as peer)
   end
 
@@ -37,12 +37,12 @@ defmodule SIP.Test.SequenceDiagram do
     out = SequenceDiagram.to_plantuml(@events, @meta)
 
     # Outbound SIP command → request arrow with the bare method name.
-    assert out =~ "elixip -> peer : INVITE"
+    assert out =~ "local -> peer : INVITE"
     # A :sip transition carrying a description → inbound arrow.
-    assert out =~ "elixip <-- peer : 200 OK"
+    assert out =~ "local <-- peer : 200 OK"
     # First transition is the initial-state note; later ones are from -> to.
-    assert out =~ "note over elixip : initial_state"
-    assert out =~ "note over elixip : calling -> answered"
+    assert out =~ "note over local : initial_state"
+    assert out =~ "note over local : calling -> answered"
     # Terminal outcome.
     assert out =~ "succeeded: answered"
   end
@@ -53,10 +53,10 @@ defmodule SIP.Test.SequenceDiagram do
     # The media lane is declared as a `control`, only because media was touched.
     assert out =~ ~s(control "media server" as ms)
     # Media command → outbound colored arrow (the media_ prefix is stripped).
-    assert out =~ "elixip -[#DarkOrange]> ms : connect"
-    assert out =~ "elixip -[#DarkOrange]> ms : play"
+    assert out =~ "local -[#DarkOrange]> ms : connect"
+    assert out =~ "local -[#DarkOrange]> ms : play"
     # Media event → colored arrow from the media server.
-    assert out =~ "ms -[#DarkOrange]> elixip : media connected"
+    assert out =~ "ms -[#DarkOrange]> local : media connected"
   end
 
   test "omits the media lane when no media is involved" do
@@ -79,8 +79,13 @@ defmodule SIP.Test.SequenceDiagram do
   end
 
   test "auth command names keep an (auth) suffix" do
-    out = SequenceDiagram.to_plantuml([%{kind: :command, type: :sip, name: "send_auth_REGISTER"}], @meta)
-    assert out =~ "elixip -> peer : REGISTER (auth)"
+    out =
+      SequenceDiagram.to_plantuml(
+        [%{kind: :command, type: :sip, name: "send_auth_REGISTER"}],
+        @meta
+      )
+
+    assert out =~ "local -> peer : REGISTER (auth)"
   end
 
   test "builds a filename with a sanitized pid" do
@@ -125,18 +130,18 @@ defmodule SIP.Test.SequenceDiagram do
   defmodule SeqScenario do
     use SIP.Scenario
 
-    config username: "alice", authusername: "alice", domain: "example.com", passwd: "s3cret"
+    config(username: "alice", authusername: "alice", domain: "example.com", passwd: "s3cret")
 
     state initial_state do
       # Call the raw monitor hooks directly so the journal records commands
       # without needing the SIP stack / media server / network.
       SIP.Scenario.Monitor.note_command(:media, "media_connect")
-      goto next
+      goto(next)
     end
 
     state calling do
       SIP.Scenario.Monitor.note_command(:sip, "send_INVITE")
-      goto wait, "INVITE sent"
+      goto(wait, "INVITE sent")
     end
 
     state wait do
@@ -145,7 +150,12 @@ defmodule SIP.Test.SequenceDiagram do
   end
 
   test "a scenario run with --log-sequence enabled writes the PlantUML file" do
-    path = SequenceDiagram.filename(%{scenario: "SIP.Test.SequenceDiagram.SeqScenario", pid: inspect(self())})
+    path =
+      SequenceDiagram.filename(%{
+        scenario: "SIP.Test.SequenceDiagram.SeqScenario",
+        pid: inspect(self())
+      })
+
     File.rm(path)
 
     Application.put_env(:elixip2, :log_sequence, true)
@@ -161,12 +171,72 @@ defmodule SIP.Test.SequenceDiagram do
     content = File.read!(path)
     assert content =~ "@startuml"
     assert content =~ "@enduml"
-    assert content =~ "elixip -> peer : INVITE"
-    assert content =~ "elixip -[#DarkOrange]> ms : connect"
-    assert content =~ "note over elixip : initial_state -> calling"
+    assert content =~ "local -> peer : INVITE"
+    assert content =~ "local -[#DarkOrange]> ms : connect"
+    assert content =~ "note over local : initial_state -> calling"
     assert content =~ "passwd: ****"
     refute content =~ "s3cret"
 
     File.rm(path)
+  end
+
+  describe "the lane rule, by exclusion" do
+    @moduletag :lanes
+
+    # The one clause §4.8 had to generalize. Written as "`:sip` goes to the
+    # peer", a binding emitting `:matrix` fell through to the self-note and drew
+    # a worse diagram for no reason; written by exclusion, a type this renderer
+    # has never heard of is still drawn as coming from the peer — which is the
+    # only place an unrecognised protocol event can come from.
+    defp render_one(event) do
+      SIP.Scenario.SequenceDiagram.to_plantuml(
+        [
+          %{kind: :transition, to: :initial_state, event: "start", type: nil},
+          event
+        ],
+        %{scenario: "X", pid: "#PID<0.1.0>", config: []}
+      )
+    end
+
+    test "a protocol type FSL has never heard of is drawn from the peer" do
+      for type <- [:sip, :matrix, :xmpp, :teams] do
+        out = render_one(%{kind: :transition, to: :next, event: "200 OK", type: type})
+        assert out =~ "local <-- peer : 200 OK", "#{inspect(type)} was not drawn from the peer"
+      end
+    end
+
+    test "media is drawn from the media server" do
+      out = render_one(%{kind: :transition, to: :next, event: "ice_connected", type: :media})
+      assert out =~ "ms -[#DarkOrange]> local : ice_connected"
+      refute out =~ "<-- peer"
+    end
+
+    test "what came from nowhere is a note, not an arrow" do
+      for type <- [:scenario, :control, :timer, :http, :db, nil] do
+        out = render_one(%{kind: :transition, to: :next, event: "block returned", type: type})
+        refute out =~ "<-- peer", "#{inspect(type)} was drawn as an arrow"
+        assert out =~ "note over local : initial_state -> next"
+      end
+    end
+
+    test "the same rule applies to commands" do
+      peer =
+        SIP.Scenario.SequenceDiagram.to_plantuml(
+          [%{kind: :command, type: :matrix, name: "send_message"}],
+          %{scenario: "X", pid: "#PID<0.1.0>", config: []}
+        )
+
+      # …including the prefix rule, which is a naming convention and not a SIP
+      # table: `send_message` reads as well as `send_INVITE`.
+      assert peer =~ "local -> peer : MESSAGE"
+
+      note =
+        SIP.Scenario.SequenceDiagram.to_plantuml(
+          [%{kind: :command, type: :db, name: "lookup_subscriber"}],
+          %{scenario: "X", pid: "#PID<0.1.0>", config: []}
+        )
+
+      assert note =~ "note over local : lookup_subscriber"
+    end
   end
 end

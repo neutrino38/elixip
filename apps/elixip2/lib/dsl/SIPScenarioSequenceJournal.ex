@@ -85,8 +85,19 @@ defmodule SIP.Scenario.SequenceJournal do
 
       _ ->
         meta = Process.get(@meta_key)
-        content = SIP.Scenario.SequenceDiagram.to_plantuml(events(), meta)
-        path = SIP.Scenario.SequenceDiagram.filename(meta)
+
+        # The scenario's own host may name a renderer of its own; the default is
+        # the PlantUML one this library ships (`c:FSL.Host.diagram_renderer/0`).
+        renderer =
+          FSL.Host.call(
+            Process.get(:scenario_module),
+            :diagram_renderer,
+            [],
+            SIP.Scenario.SequenceDiagram
+          )
+
+        content = renderer.to_plantuml(events(), meta)
+        path = renderer.filename(meta)
         clear()
 
         case File.write(path, content) do

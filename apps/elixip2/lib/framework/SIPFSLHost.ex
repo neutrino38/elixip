@@ -421,4 +421,23 @@ defmodule SIP.FSL.Host do
 
   defp variable?({name, _meta, ctx_arg}) when is_atom(name) and is_atom(ctx_arg), do: true
   defp variable?(_), do: false
+
+  # ── The monitor's columns ───────────────────────────────────────────────────
+
+  @doc """
+  The columns a SIP call adds to the live monitor's row, with the defaults that
+  say what an empty one means.
+
+  Declared here, once, and passed to the monitor by whoever starts it —
+  `elixipp`'s `--monitor` bootstrap and `Kelix.Application`'s supervision tree.
+  The registry itself never learns which keys are which; it merges these onto
+  every new row and lets `note/2` write them (extraction plan §4.7).
+
+  The defaults are values and not blanks on purpose: a call that negotiated no
+  media, connects to no media server and dials nobody is the ordinary case — a
+  registrar session — and `"n/a"` says so, where an empty cell would read as
+  "nobody measured".
+  """
+  @spec monitor_columns() :: keyword()
+  def monitor_columns, do: [medias: "n/a", mediaserver: "none", outbound: "n/a"]
 end

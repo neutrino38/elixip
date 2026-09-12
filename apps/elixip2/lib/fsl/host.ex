@@ -38,8 +38,9 @@ defmodule FSL.Host do
   | `c:event_type/1` | `:ms_event` is media, anything else it is shown is SIP |
   | `c:injected_clauses/1` | the media server going away |
   | `c:clause_covers?/2` | whether the scenario already handles that itself |
+  | `c:diagram_renderer/0` | not implemented: the PlantUML renderer FSL ships is the right one |
 
-  One more arrives with the last seam of the extraction: `c:diagram_renderer/0`.
+  That is the whole list.
   """
 
   @doc """
@@ -202,7 +203,20 @@ defmodule FSL.Host do
   """
   @callback clause_covers?(name :: atom(), pattern :: Macro.t()) :: boolean()
 
+  @doc """
+  The module that turns this run's journal into a diagram.
+
+  A binding may want its own; the default is the one FSL ships,
+  `SIP.Scenario.SequenceDiagram` (PlantUML), which after §4.8 needs no protocol
+  vocabulary — its lane rule is by exclusion, so a type it has never heard of is
+  still drawn as coming from the peer.
+
+  The module must export `to_plantuml/2` and `filename/1`.
+  """
+  @callback diagram_renderer() :: module()
+
   @optional_callbacks bootstrap: 0,
+                      diagram_renderer: 0,
                       apply_run_opts: 2,
                       build_context: 1,
                       account: 2,

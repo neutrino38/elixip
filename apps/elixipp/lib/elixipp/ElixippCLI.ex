@@ -403,7 +403,7 @@ defmodule Elixipp.CLI do
           no_return()
   defp run_server_monitored(module, kind, limit, max_run, started) do
     {:ok, _} = Application.ensure_all_started(:owl)
-    {:ok, _} = SIP.Scenario.Monitor.start()
+    {:ok, _} = SIP.Scenario.Monitor.start(columns: SIP.FSL.Host.monitor_columns())
 
     if match?({:ok, _}, :io.rows()) do
       raw? = setup_raw_terminal(true)
@@ -875,7 +875,7 @@ defmodule Elixipp.CLI do
 
   defp run_parallel(module, limit, max_run, spawn_interval_ms, rate, monitor?, ext_config) do
     {:ok, _} = Application.ensure_all_started(:owl)
-    {:ok, _} = SIP.Scenario.Monitor.start()
+    {:ok, _} = SIP.Scenario.Monitor.start(columns: SIP.FSL.Host.monitor_columns())
     SIP.Scenario.Runner.bootstrap_stack()
 
     # Keyboard control (q / Ctrl+D) needs an interactive terminal; the live table

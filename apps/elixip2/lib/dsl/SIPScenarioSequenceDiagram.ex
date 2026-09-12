@@ -7,15 +7,43 @@ defmodule SIP.Scenario.SequenceDiagram do
   isolation. The fidelity is deliberately reduced (v1): the diagram is built from
   the instrumentation already available — outbound command names (`send_INVITE` →
   an `INVITE` arrow), state transitions (rendered as notes) and the free-text
-  description carried by each transition. A transition categorized as `:sip` with
-  a non-empty description is rendered as an inbound arrow (the description is the
-  message the scenario author labelled it with, e.g. `"200 OK"`).
+  description carried by each transition. A transition carrying a protocol event
+  and a non-empty description is rendered as an inbound arrow (the description is
+  the message the scenario author labelled it with, e.g. `"200 OK"`).
+
+  ## Three lanes, and which one an event is drawn on
+
+  The rule is **by exclusion**, which is what lets this renderer serve a binding
+  it has never heard of (extraction plan §4.8):
+
+  | Event / command type | Lane |
+  |---|---|
+  | `:media` | the media server |
+  | `:scenario`, `:control`, `:timer`, `:http`, `:db`, `nil` | a note over the local lane |
+  | **anything else** — `:sip`, `:matrix`, `:xmpp`, … | the peer |
+
+  Written the other way round — matching `:sip` for the peer — a binding
+  emitting `:matrix` would fall through to the self-note and produce a worse
+  diagram for no reason. By exclusion it reproduces today's rendering exactly
+  for every type Elixip emits, and does something sensible for one it has never
+  seen.
+
+  What is left of SIP vocabulary here is naming convention that generalizes for
+  free: `send_INVITE → INVITE` and `media_play → play` are prefix rules over
+  *command names*, and they read `send_message → MESSAGE` just as well.
   """
 
-  # Participant aliases used throughout the diagram.
-  @local "elixip"
+  # Participant aliases used throughout the diagram. `local` rather than
+  # `elixip`: it is an alias, and the rendered label is already the config's
+  # username.
+  @local "local"
   @remote "peer"
   @media "ms"
+
+  # The types that get a note over the local lane rather than an arrow: nothing
+  # came from anywhere for them. Everything NOT here is a protocol event and is
+  # drawn as coming from the peer.
+  @self_note_types [:scenario, :control, :timer, :http, :db, nil]
 
   # Media commands/events are drawn in a distinct color to stand out from SIP.
   @media_color "#DarkOrange"
@@ -108,19 +136,21 @@ defmodule SIP.Scenario.SequenceDiagram do
     lines
   end
 
-  # Outbound SIP command → request arrow towards the peer.
-  defp render(%{kind: :command, type: :sip, name: name}, current) do
-    {["#{@local} -> #{@remote} : #{method_label(name)}"], current}
-  end
-
   # Outbound media command → colored arrow towards the media server.
   defp render(%{kind: :command, type: :media, name: name}, current) do
     {["#{@local} -[#{@media_color}]> #{@media} : #{media_label(name)}"], current}
   end
 
-  # Other command categories have no dedicated lane: render them as a self-note.
-  defp render(%{kind: :command, name: name}, current) do
+  # A command that went nowhere — a timer armed, a database read, a block
+  # entered: a note, because there is no lane it travelled to.
+  defp render(%{kind: :command, type: type, name: name}, current)
+       when type in @self_note_types do
     {["note over #{@local} : #{name}"], current}
+  end
+
+  # Anything else is a protocol command, and a protocol command goes to the peer.
+  defp render(%{kind: :command, name: name}, current) do
+    {["#{@local} -> #{@remote} : #{method_label(name)}"], current}
   end
 
   # First transition (no previous state) = entering the initial state.
@@ -131,14 +161,22 @@ defmodule SIP.Scenario.SequenceDiagram do
   # Subsequent transition: optionally an inbound arrow (from the peer for a SIP
   # event, from the media server for a media event), then the state-change note.
   defp render(%{kind: :transition, to: to, event: event, type: type}, from) do
+    labelled? = event not in ["", "start"]
+
     inbound =
       cond do
-        type == :sip and event not in ["", "start"] ->
-          ["#{@local} <-- #{@remote} : #{event}"]
-
         # Media events are drawn as a colored arrow from the media server.
-        type == :media and event not in ["", "start"] ->
+        type == :media and labelled? ->
           ["#{@media} -[#{@media_color}]> #{@local} : #{event}"]
+
+        type in @self_note_types ->
+          []
+
+        # By exclusion: a type this renderer has never heard of came from the
+        # peer, which is the only place an unrecognised protocol event can come
+        # from.
+        labelled? ->
+          ["#{@local} <-- #{@remote} : #{event}"]
 
         true ->
           []
@@ -156,7 +194,8 @@ defmodule SIP.Scenario.SequenceDiagram do
 
   # ── Helpers ─────────────────────────────────────────────────────────────────
 
-  # "send_INVITE" → "INVITE", "send_auth_REGISTER" → "REGISTER (auth)".
+  # A prefix rule over command names, not a SIP table: "send_INVITE" → "INVITE",
+  # "send_auth_REGISTER" → "REGISTER (auth)", "send_message" → "MESSAGE".
   defp method_label(name) do
     base = String.replace_prefix(name, "send_", "")
 
