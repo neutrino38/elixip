@@ -47,7 +47,7 @@ defmodule SIPParser.MixProject do
       # SSL all need to bind one socket per family on one port —, a
       # transport_accept a server can bound its handshake with, and the options
       # mutual TLS needs on both ends.
-      {:socket2, github: "neutrino38/elixir-socket", tag: "2.2.0"},
+      {:socket2, github: "neutrino38/elixir-socket", tag: "2.2.1"},
       # 1.2 parses the m= fmt list as payload types for every RTP profile and
       # accepts the a=fingerprint hash-func token case-insensitively — both used
       # to be worked around in MediaServer.Mendooze.Sdp.
