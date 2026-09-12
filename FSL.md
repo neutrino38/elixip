@@ -5,7 +5,10 @@ specialized for the finite state machines that handle calls.
 
 > This is the **reference**: what to write in a scenario. How the language is
 > built — what the macros expand to, how the engine runs them and why — is
-> [docs/design/DESIGN-FSL.md](docs/design/DESIGN-FSL.md). It is not unlike ExUnit:
+> [design.md](https://github.com/neutrino38/finite-state-language/blob/main/elixir/docs/design.md)
+> (the language and its engine, a package of its own since 2026-09-12) and
+> [docs/design/DESIGN-FSL.md](docs/design/DESIGN-FSL.md) (what SIP adds to it).
+> It is not unlike ExUnit:
 a call or SIP scenario is an Elixir module saved as a `.exs` file.
 
 Here is a "typicall" scenario where:
@@ -846,7 +849,8 @@ and cause the finite state machine to dump the exception in the logs and call sc
 How the language is built — what `state`, `goto`, `on_events` and the terminals
 expand to, how the runner dispatches them, the teardown order, the sub-FSM and
 service-building-block engines, and the invariants all of it rests on — is
-[docs/design/DESIGN-FSL.md](docs/design/DESIGN-FSL.md).
+[design.md](https://github.com/neutrino38/finite-state-language/blob/main/elixir/docs/design.md),
+and what SIP adds to it in [docs/design/DESIGN-FSL.md](docs/design/DESIGN-FSL.md).
 
 ## Macro helpers
 

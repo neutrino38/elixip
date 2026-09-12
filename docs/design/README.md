@@ -9,7 +9,7 @@ tested and running**, and why it is built that way.
 |---|---|
 | [DESIGN-SIPSTACK.md](DESIGN-SIPSTACK.md) | transport, message, transaction and dialog layers |
 | [DESIGN-FRAMEWORK.md](DESIGN-FRAMEWORK.md) | session layer, mixins, B2BUA, media and the media-server adapters |
-| [DESIGN-FSL.md](DESIGN-FSL.md) | the Finite State Language, its macros and the FSM engine |
+| [DESIGN-FSL.md](DESIGN-FSL.md) | the **SIP binding** of FSL: `SIP.FSL.Host`, the facades, the SIP policy around the language. The language and its engine are a package of its own — [design.md](https://github.com/neutrino38/finite-state-language/blob/main/elixir/docs/design.md) |
 | [DESIGN-ELIXIPP.md](DESIGN-ELIXIPP.md) | the elixipp test tool |
 | [DESIGN-KELIXIP.md](DESIGN-KELIXIP.md) | the kelixip server and its module system |
 | [DESIGN-MCU.md](DESIGN-MCU.md) | the conferencing module |
