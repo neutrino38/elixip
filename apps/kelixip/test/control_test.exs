@@ -432,7 +432,15 @@ defmodule Kelix.ControlTest do
       assert Control.unsubscribe_monitor(self()) == :ok
 
       spawn_watched("unsub.test")
-      refute_receive {:kelix_monitor, _}, 200
+
+      # Scoped to this test's own domain, like every other assertion in this
+      # block. An instance of a neighbouring test may still be draining — the
+      # pool frees a slot on an async :DOWN, and `on_exit` shuts those
+      # instances down after their own test has ended — so its
+      # `{:remove, id}`, queued inside the brief window this test IS
+      # subscribed, says nothing about whether the subscription is still live.
+      # Our own instance appearing would.
+      refute_receive {:kelix_monitor, {:upsert, %{domain: "unsub.test"}}}, 200
     end
 
     # kelescope's live domain list (docs/design/kelixip_liveview.md): an

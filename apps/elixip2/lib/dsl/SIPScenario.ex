@@ -72,6 +72,20 @@ defmodule SIP.Scenario do
     # than growing a parallel one. See docs/design/DESIGN-SBB.md.
     kind = Keyword.get(opts, :kind, :scenario)
 
+    # Imperatively, at expansion time, for the reason FSL.Context.__using__
+    # gives: a quoted `@attr` is evaluated when the module body runs, after the
+    # sibling macro calls that read it have already been expanded.
+    # `Macro.expand/2`: `host:` arrives as an unexpanded alias AST
+    # (`{:__aliases__, _, [:Probe]}`), and what the attribute has to hold is the
+    # module atom the runner will call.
+    host =
+      case Keyword.fetch(opts, :host) do
+        {:ok, ast} -> Macro.expand(ast, __CALLER__)
+        :error -> SIP.FSL.Host
+      end
+
+    Module.put_attribute(__CALLER__.module, :fsl_host, host)
+
     quote do
       use SIP.Session.CallUAC
       use SIP.Session.Media
@@ -135,6 +149,13 @@ defmodule SIP.Scenario do
 
         @doc false
         def __scenario_type__, do: @scenario_type
+
+        @doc false
+        # The embedding this scenario is written for — what FSL calls back into
+        # for everything it must not know (FSL.Host). Read off the module and
+        # not out of a configuration key, so two bindings run side by side in
+        # one VM.
+        def __fsl_host__, do: @fsl_host
       end
 
     kind_specific =

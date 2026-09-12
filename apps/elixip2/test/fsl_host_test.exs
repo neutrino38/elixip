@@ -1,0 +1,275 @@
+defmodule SIP.Test.FSL.HostTest do
+  @moduledoc """
+  The host seam: a scenario names its embedding, the runner reads it back off
+  the module, and the two first callbacks — `c:bootstrap/0` and
+  `c:build_context/1` — are asked of it rather than hardcoded.
+
+  Named at `use` time and recorded on the module, deliberately not read from a
+  configuration key: two hosts then coexist in one VM, which is what makes the
+  language testable with a trivial host of its own and what a published package
+  needs (extraction plan §4, §4.6). The test of the seam is not that SIP still
+  works — it will, whatever we do — but that a host FSL never heard of answers
+  the same questions and gets the same engine.
+  """
+  use ExUnit.Case
+
+  # A host that is not SIP's: it starts nothing, and reads the config block its
+  # own way. Roughly what FSL.Test.Host becomes when the package has a suite of
+  # its own (§5.3).
+  defmodule Probe do
+    @behaviour FSL.Host
+
+    @impl true
+    def bootstrap do
+      send(Process.get(:fsl_test_pid), {:host, :bootstrap})
+      :ok
+    end
+
+    @impl true
+    def build_context(config) do
+      send(Process.get(:fsl_test_pid), {:host, {:build_context, config}})
+      # Its own reading of the block: everything under one key, which is a
+      # perfectly good answer and not the one SIP gives.
+      %FSL.Context{}
+      |> FSL.Context.appdata_set(:settings, Map.new(config))
+      |> FSL.Context.appdata_set(:probe, Process.get(:fsl_test_pid))
+    end
+  end
+
+  defmodule Machine do
+    use SIP.Scenario, host: Probe
+
+    config(colour: "blue", size: 3)
+
+    state initial_state do
+      send(appdata_get(:probe), {:settings, appdata_get(:settings)})
+      scenario_success("done")
+    end
+  end
+
+  defmodule PlainSip do
+    use SIP.Scenario
+
+    config(username: "alice", domain: "example.com")
+
+    state initial_state do
+      scenario_success("done")
+    end
+  end
+
+  describe "which host a scenario runs against" do
+    test "the one it named at use time" do
+      assert FSL.Host.of(Machine) == Probe
+      assert Machine.__fsl_host__() == Probe
+    end
+
+    test "SIP.FSL.Host by default, because SIP.Scenario says so" do
+      assert FSL.Host.of(PlainSip) == SIP.FSL.Host
+    end
+
+    test "FSL.Host.Default for a module that declares none at all" do
+      defmodule NoHost do
+        def __scenario_states__, do: [:initial_state]
+      end
+
+      assert FSL.Host.of(NoHost) == FSL.Host.Default
+    end
+
+    # Two bindings in one VM, which is the property the whole arrangement buys.
+    test "two scenarios in one VM answer to two different hosts" do
+      assert FSL.Host.of(Machine) != FSL.Host.of(PlainSip)
+    end
+  end
+
+  describe "c:build_context/1" do
+    test "the scenario's own host builds its context" do
+      test_pid = self()
+
+      spawn(fn ->
+        Process.put(:fsl_test_pid, test_pid)
+
+        send(
+          test_pid,
+          {:done, SIP.Scenario.Runner.run_instance(Machine, appdata: %{probe: test_pid})}
+        )
+      end)
+
+      assert_receive {:host, {:build_context, config}}, 2_000
+      assert Keyword.equal?(config, colour: "blue", size: 3)
+
+      # …and the context the machine runs on is the one that host produced,
+      # not a %SIP.Context{} the runner decided on.
+      assert_receive {:settings, %{colour: "blue", size: 3}}, 2_000
+      assert_receive {:done, :ok}, 2_000
+    end
+
+    test "SIP's routes each kind of key to its own destination" do
+      # The full routing table is pinned in fsl_build_context_test; what this
+      # asserts is that it is the HOST that holds it now.
+      ctx = SIP.FSL.Host.build_context(username: "bob", domain: "example.com", other: 1)
+
+      assert %SIP.Context{username: "bob", domain: "example.com"} = ctx
+      assert FSL.Context.appdata_get(ctx, :other) == 1
+      assert SIP.Scenario.Runner.build_context(username: "bob").username == "bob"
+    end
+
+    test "the default host puts everything in appdata" do
+      ctx = FSL.Host.Default.build_context(username: "bob", anything: %{a: 1})
+
+      assert %FSL.Context{} = ctx
+      assert FSL.Context.appdata_get(ctx, :username) == "bob"
+      assert FSL.Context.appdata_get(ctx, :anything) == %{a: 1}
+    end
+  end
+
+  describe "c:bootstrap/0" do
+    test "run/2 starts what the scenario's own host starts" do
+      test_pid = self()
+
+      spawn(fn ->
+        Process.put(:fsl_test_pid, test_pid)
+        send(test_pid, {:done, Machine.run(true)})
+      end)
+
+      assert_receive {:host, :bootstrap}, 2_000
+      assert_receive {:done, :ok}, 2_000
+    end
+
+    test "SIP's starts the SIP layers, and says :ok twice in a row" do
+      assert SIP.FSL.Host.bootstrap() == :ok
+      assert SIP.FSL.Host.bootstrap() == :ok
+      assert Process.whereis(Registry.SIP.Transac)
+      assert Process.whereis(Registry.SIPDialog)
+
+      # The old spellings still work: three apps and half a dozen tests call them.
+      assert SIP.Scenario.Runner.bootstrap_stack() == :ok
+      assert SIP.Scenario.start_stack() == :ok
+    end
+
+    test "the default host starts nothing" do
+      assert FSL.Host.Default.bootstrap() == :ok
+    end
+  end
+
+  describe "FSL.Host.call/4" do
+    # A binding implements what it needs and no more: every callback is
+    # optional, so a machine with no protocol runs with no host written.
+    test "falls back to the given default when the host does not implement it" do
+      defmodule Silent do
+        def __fsl_host__, do: __MODULE__
+      end
+
+      assert FSL.Host.call(Silent, :bootstrap, [], :nothing_to_start) == :nothing_to_start
+      assert FSL.Host.call(Silent, :build_context, [[]], %FSL.Context{}) == %FSL.Context{}
+    end
+  end
+
+  describe "c:apply_run_opts/2" do
+    # FSL owns :parent_pid, :self_name, :appdata, :slot_id and
+    # :config_overrides; everything else at run_instance/2 names something only
+    # the binding understands.
+    test "the binding's own run options reach its host, and FSL's do not" do
+      test_pid = self()
+
+      defmodule OptsHost do
+        @behaviour FSL.Host
+
+        @impl true
+        def build_context(_config), do: %FSL.Context{}
+
+        @impl true
+        def apply_run_opts(ctx, opts) do
+          FSL.Context.appdata_set(ctx, :seen_opts, opts)
+        end
+      end
+
+      defmodule TakesOpts do
+        use SIP.Scenario, host: OptsHost
+
+        state initial_state do
+          send(appdata_get(:probe), {:seen, appdata_get(:seen_opts), sip_ctx.parent_pid})
+          scenario_success("done")
+        end
+      end
+
+      spawn(fn ->
+        SIP.Scenario.Runner.run_instance(TakesOpts,
+          parent_pid: test_pid,
+          self_name: :kid,
+          appdata: %{probe: test_pid},
+          my_own_option: :interesting
+        )
+      end)
+
+      assert_receive {:seen, opts, parent}, 2_000
+      # Only the binding's key was handed over…
+      assert opts == [my_own_option: :interesting]
+      # …and FSL applied its own itself.
+      assert parent == test_pid
+    end
+
+    test "SIP's reads the dialog and the request an inbound instance was given" do
+      dialog = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(dialog, :kill) end)
+      req = %{method: :REGISTER, ruri: nil}
+
+      ctx = SIP.FSL.Host.apply_run_opts(%SIP.Context{}, dialog_pid: dialog, inbound_request: req)
+
+      assert ctx.dialogpid == dialog
+      assert FSL.Context.appdata_get(ctx, :inbound_request) == req
+    end
+  end
+
+  describe "c:account/2" do
+    # The full SIP reading is pinned in scenario_monitor_account_test; what this
+    # asserts is that it is the host that answers now, and that a host with
+    # nothing to say leaves the column empty.
+    test "SIP's names the config account for a UAC and the asserted one for a UAS" do
+      uac = %SIP.Context{username: "alice"}
+      assert SIP.FSL.Host.account(uac, :initial) == "alice"
+      assert SIP.FSL.Host.account(uac, :subsequent) == "alice"
+    end
+
+    test "a host that implements none leaves the column empty" do
+      defmodule Accountless do
+        def __fsl_host__, do: __MODULE__
+      end
+
+      assert FSL.Host.call(Accountless, :account, [%FSL.Context{}, :initial], "") == ""
+    end
+  end
+
+  describe "c:finalize/1" do
+    # The order of the five teardown steps is pinned in fsl_teardown_order_test.
+    # What matters here is that the middle one is the host's, whole: the
+    # B2BUA-before-media ordering and the bounded wait are one rule and must stay
+    # in one place.
+    test "SIP's releases the legs then the media, and is a no-op with neither" do
+      ctx = %SIP.Context{}
+      assert SIP.FSL.Host.finalize(ctx) == ctx
+    end
+
+    test "a host that implements none leaves the context untouched" do
+      defmodule Untidy do
+        def __fsl_host__, do: __MODULE__
+      end
+
+      ctx = %FSL.Context{appdata: %{a: 1}}
+      assert FSL.Host.call(Untidy, :finalize, [ctx], ctx) == ctx
+    end
+  end
+
+  describe "c:spawn_child/2" do
+    # The kind is opaque to FSL (§4.11): `uas :register` is a SIP annotation, and
+    # the language has no business knowing the role names of a protocol.
+    test "the kind is passed through untouched, whatever it is" do
+      defmodule ChildHost do
+        def __fsl_host__, do: __MODULE__
+        def spawn_child(kind, pid), do: send(pid, {:child_kind, kind})
+      end
+
+      FSL.Host.call(ChildHost, :spawn_child, [:something_only_a_binding_knows, self()], :ok)
+      assert_receive {:child_kind, :something_only_a_binding_knows}
+    end
+  end
+end

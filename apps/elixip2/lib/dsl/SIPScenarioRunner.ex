@@ -3,7 +3,8 @@ defmodule SIP.Scenario.Runner do
   Execution engine for `SIP.Scenario` finite state machines.
 
   A scenario module (one that does `use SIP.Scenario`) compiles each `state`
-  block into a function `__state_<name>/1` that takes the `%SIP.Context{}` and
+  block into a function `__state_<name>/1` that takes the context (a
+  `%SIP.Context{}` for a SIP scenario — see `FSL.Context`) and
   returns a *transition descriptor*:
 
     * `{:goto, target, desc, ctx}`     — move to another state
@@ -30,8 +31,6 @@ defmodule SIP.Scenario.Runner do
       the stack, then run one instance.
   """
   require Logger
-  # is_req/1: only an inbound *request* names an identity (see initial_account/1)
-  import SIP.Msg.Ops, only: [is_req: 1]
 
   @doc """
   Run a single scenario instance, optionally starting the SIP stack first.
@@ -43,7 +42,7 @@ defmodule SIP.Scenario.Runner do
   """
   @spec run(module(), boolean()) :: :ok | {:error, term()}
   def run(module, true) do
-    bootstrap_stack()
+    FSL.Host.call(module, :bootstrap, [], :ok)
     run_instance(module)
   end
 
@@ -51,20 +50,14 @@ defmodule SIP.Scenario.Runner do
 
   @doc """
   Start the SIP layers (transactions, transport selector, dialog, config
-  registry). Idempotent: each underlying layer treats an already-started layer
-  as success, so this is safe to call repeatedly.
+  registry, auth secret). Idempotent.
+
+  The layers themselves are `SIP.FSL.Host.bootstrap/0` — what the SIP embedding
+  starts is the SIP embedding's business. This name stays because three apps and
+  half a dozen tests call it.
   """
   @spec bootstrap_stack() :: :ok
-  def bootstrap_stack do
-    :ok = SIP.Transac.start()
-    :ok = SIP.Transport.Selector.start()
-    :ok = SIP.Dialog.start()
-    {:ok, _config_pid} = SIP.Session.ConfigRegistry.start()
-    # One server secret for the node's lifetime, keying every digest nonce
-    # (SIP.Auth.Nonce). kelixip supervises it instead; here it belongs to the run.
-    :ok = SIP.Auth.Secret.start()
-    :ok
-  end
+  defdelegate bootstrap_stack(), to: SIP.FSL.Host, as: :bootstrap
 
   @doc """
   Build the initial context from the scenario `config` block and run the FSM
@@ -91,85 +84,38 @@ defmodule SIP.Scenario.Runner do
     config = Keyword.merge(module.__scenario_config__(), Keyword.get(opts, :config_overrides, []))
 
     ctx =
-      config
-      |> build_context()
-      |> apply_run_opts(opts)
+      module
+      |> FSL.Host.call(:build_context, [config], %FSL.Context{})
+      |> apply_run_opts(module, opts)
       |> FSL.Context.put(:currentstate, :initial_state)
 
     maybe_start_sequence_journal(module, ctx)
 
-    report(module, initial_account(ctx), :initial_state, "start", nil)
+    report(module, account(module, ctx, :initial), :initial_state, "start", nil)
     loop(module, :initial_state, ctx, states)
   end
 
-  # What the monitor's `account` column shows until the scenario says better.
+  # Who a report is about, as the binding reads it (FSL.Host.account/2).
   #
-  # A UAS instance serves whoever called it, so it shows the identity the inbound
-  # request asserts — digest username, else P-Asserted-Identity, else From, the
-  # framework's single reading of that question (SIP.Msg.Ops.asserted_username/1).
-  # Its own `config` username, if it even has one, is the same string on every row
-  # and answers nothing. A UAC keeps showing its own account, untouched.
-  #
-  # "Is this a UAS instance" is decided on the **inbound request**, not on the
-  # `uas` annotation: that annotation is what tells `elixipp` to open listeners,
-  # and a kelixip script does not carry it — the server knows a script serves
-  # inbound traffic from `domains.toml`. A UAS instance is precisely one spawned
-  # with the request that created it (`spawn_uas_instance/2` — the only paths that
-  # pass `:inbound_request` are Kelix.InstancePool and Elixip.ScenarioUAS), and a
-  # UAC instance has none by construction, so it never reaches the request branch.
-  #
-  # A script that knows a better name (the AOR it registered, the conference it
-  # joined) overwrites it with `SIP.Scenario.Monitor.note_account/1` — see
-  # report_account/1 for why the transitions that follow keep quiet about it.
-  defp initial_account(ctx) do
-    case inbound_request(ctx) do
-      nil -> own_username(ctx)
-      req -> SIP.Msg.Ops.asserted_username(req) || own_username(ctx)
-    end
-  end
+  # `:initial` is the first row of a run and `:subsequent` every one after it —
+  # a distinction that is policy, not mechanism: SIP answers the identity the
+  # inbound request asserts for the first, and then keeps quiet so the script can
+  # name the AOR it registered or the conference it joined. A host that has
+  # nothing to say about accounts says "" and the column stays empty.
+  defp account(module, ctx, which), do: FSL.Host.call(module, :account, [ctx, which], "")
 
-  # What every report AFTER the first one says about the account.
-  #
-  # For a UAS instance: nothing. Its identity was resolved once, from the request
-  # that spawned it, and from then on only the script speaks. An empty username is
-  # how the monitor is told "keep what you have" — re-pushing the resolved identity
-  # on every transition would clobber the AOR the registrar noted or the conference
-  # DID an MCU call joined, which are the whole point of `note_account/1`.
-  #
-  # A UAC keeps reporting its own account, which a scenario may legitimately rebind
-  # mid-run.
-  defp report_account(ctx) do
-    case inbound_request(ctx) do
-      nil -> own_username(ctx)
-      _uas_instance -> ""
-    end
-  end
-
-  # The request that spawned this instance — set by `spawn_uas_instance/2` and by
-  # nothing else, so its presence IS "this is a UAS instance". Deliberately not the
-  # `uas` annotation: that one tells `elixipp` to open listeners, and the kelixip
-  # scripts carry none — the server knows they serve inbound traffic from
-  # `domains.toml`. Only a request names a sender, hence the `is_req` guard.
-  defp inbound_request(ctx) do
-    case FSL.Context.appdata_get(ctx, :inbound_request) do
-      req when is_req(req) -> req
-      _none -> nil
-    end
-  end
-
-  defp own_username(ctx) do
-    case ctx.username do
-      username when is_binary(username) -> username
-      _ -> ""
-    end
-  end
+  # The run options the FSM owns: who its parent is, the name that parent gave
+  # it, the slot it reports under, the overrides merged into its config, and an
+  # appdata seed. Everything else at `run_instance/2` names something only the
+  # binding understands, and goes to the host below.
+  @fsl_run_opts [:parent_pid, :self_name, :appdata, :slot_id, :config_overrides]
 
   # Seed the context from run_instance/2 options: the parent PID (struct field),
   # the name the parent assigned this instance (appdata :__self_name__), and any
   # `args` map passed at spawn time (merged into appdata). All are optional, so a
   # scenario started without a parent (mix scenario, single elixipp run) is left
   # untouched.
-  defp apply_run_opts(ctx, opts) do
+  defp apply_run_opts(ctx, module, opts) do
     ctx =
       case Keyword.get(opts, :parent_pid) do
         nil -> ctx
@@ -182,28 +128,18 @@ defmodule SIP.Scenario.Runner do
         name -> FSL.Context.appdata_set(ctx, :__self_name__, name)
       end
 
-    # UAS scenarios: the dialog is created by the inbound request, so the
-    # registrar hands us the dialog pid (so reply macros target it) and,
-    # optionally, the request itself (also delivered as a {:REGISTER, …} message).
     ctx =
-      case Keyword.get(opts, :dialog_pid) do
-        nil -> ctx
-        pid -> SIP.Context.set(ctx, :dialogpid, pid)
+      case Keyword.get(opts, :appdata) do
+        map when is_map(map) ->
+          Enum.reduce(map, ctx, fn {k, v}, acc -> FSL.Context.appdata_set(acc, k, v) end)
+
+        _ ->
+          ctx
       end
 
-    ctx =
-      case Keyword.get(opts, :inbound_request) do
-        nil -> ctx
-        req -> FSL.Context.appdata_set(ctx, :inbound_request, req)
-      end
-
-    case Keyword.get(opts, :appdata) do
-      map when is_map(map) ->
-        Enum.reduce(map, ctx, fn {k, v}, acc -> FSL.Context.appdata_set(acc, k, v) end)
-
-      _ ->
-        ctx
-    end
+    # What the caller passed that the FSM has no reading of — for SIP, the
+    # dialog an inbound request already created and the request itself.
+    FSL.Host.call(module, :apply_run_opts, [ctx, Keyword.drop(opts, @fsl_run_opts)], ctx)
   end
 
   # ── Sub-FSM (spawn_fsm) support ─────────────────────────────────────────────
@@ -216,8 +152,8 @@ defmodule SIP.Scenario.Runner do
   # Spawn `target` (a scenario module or a path to a .exs scenario file) as a
   # monitored child FSM, hand it our PID and the local name `as:`, and record the
   # resulting handle in the parent context appdata. Returns the updated context.
-  @spec spawn_child(%SIP.Context{}, module() | Path.t(), keyword(), pid(), Path.t() | nil) ::
-          %SIP.Context{}
+  @spec spawn_child(FSL.Context.t(), module() | Path.t(), keyword(), pid(), Path.t() | nil) ::
+          FSL.Context.t()
   def spawn_child(ctx, target, opts, parent_pid, base_dir \\ nil) do
     name = Keyword.fetch!(opts, :as)
     args = Keyword.get(opts, :args, %{})
@@ -234,7 +170,12 @@ defmodule SIP.Scenario.Runner do
         run_instance(module, parent_pid: parent_pid, self_name: name, appdata: args)
       end)
 
-    setup_uas_child(SIP.Scenario.Loader.scenario_type(module), pid)
+    # What a child of this kind needs before it can act — for SIP, a
+    # `:uas_invite` child has to be registered with the call dispatcher, because
+    # it does nothing until an INVITE is routed to it. The type is opaque here
+    # (§4.11): `uas :register` is a SIP annotation, and the language has no
+    # business knowing the role names of a protocol.
+    FSL.Host.call(module, :spawn_child, [SIP.Scenario.Loader.scenario_type(module), pid], :ok)
 
     child = %SIP.Scenario.Child{name: name, pid: pid, ref: ref, module: module}
     children = ctx.appdata |> Map.get(:__children__, %{}) |> Map.put(name, child)
@@ -278,38 +219,6 @@ defmodule SIP.Scenario.Runner do
     end
   end
 
-  # A `:uas_invite` child does not act on its own: it waits for an inbound
-  # INVITE. Route the next one to it by registering it with the call
-  # dispatcher, installed as the call processing module unless the app
-  # already configured one (e.g. Elixip.ScenarioUAS in elixipp server mode
-  # — never silently overridden).
-  defp setup_uas_child(:uas_invite, pid) do
-    {:ok, _} = SIP.Scenario.CallDispatcher.start()
-    :ok = SIP.Scenario.CallDispatcher.register_waiting(pid)
-
-    case SIP.Session.ConfigRegistry.get_call_processing_module() do
-      nil ->
-        SIP.Session.ConfigRegistry.set_call_processing_module(SIP.Scenario.CallDispatcher)
-
-      SIP.Scenario.CallDispatcher ->
-        :ok
-
-      other ->
-        Logger.warning(
-          "spawn_fsm: call processing module #{inspect(other)} already configured; " <>
-            "the :uas_invite child will not receive inbound INVITEs through the dispatcher"
-        )
-    end
-
-    :ok
-  end
-
-  defp setup_uas_child(type, _pid) when type in [:uas_register] do
-    Logger.warning("spawn_fsm: scenario type #{inspect(type)} is not supported as a sub-FSM yet")
-  end
-
-  defp setup_uas_child(_type, _pid), do: :ok
-
   @doc """
   Spawn a UAS scenario instance to handle one inbound dialog (e.g. a REGISTER).
   Used by a registration processing module (`Elixip.RegistrarUAS`) from inside
@@ -332,7 +241,7 @@ defmodule SIP.Scenario.Runner do
   @doc false
   # Send an application message to a named child. Unknown name → log + no-op so a
   # typo does not crash the parent FSM.
-  @spec notify_child(%SIP.Context{}, atom(), term()) :: :ok
+  @spec notify_child(FSL.Context.t(), atom(), term()) :: :ok
   def notify_child(ctx, name, payload) do
     case ctx.appdata |> Map.get(:__children__, %{}) |> Map.get(name) do
       %SIP.Scenario.Child{pid: pid} -> send(pid, {:parent_msg, payload})
@@ -346,7 +255,7 @@ defmodule SIP.Scenario.Runner do
   # Send an application message to the parent FSM, tagged with the name the parent
   # assigned us (so the parent can match on a stable literal). No-op when there is
   # no parent (standalone run).
-  @spec notify_parent(%SIP.Context{}, term()) :: :ok
+  @spec notify_parent(FSL.Context.t(), term()) :: :ok
   def notify_parent(ctx, payload) do
     case ctx.parent_pid do
       nil -> :ok
@@ -360,7 +269,11 @@ defmodule SIP.Scenario.Runner do
   # the CLI (Application env) or when the scenario enabled its debug flag. No-op
   # otherwise — the journal recording helpers are then free.
   defp maybe_start_sequence_journal(module, ctx) do
-    if Application.get_env(:elixip2, :log_sequence, false) or ctx.debug do
+    # `debug` is a field of the SIP context, not of FSL's: a machine whose
+    # binding does not define one simply never turns the journal on this way.
+    # Read tolerantly rather than through a seam of its own — the journal's
+    # switch is a question for the journal seam (§4.8), not for this one.
+    if Application.get_env(:elixip2, :log_sequence, false) or Map.get(ctx, :debug, false) do
       SIP.Scenario.SequenceJournal.start(%{
         scenario: scenario_label(module),
         pid: inspect(self()),
@@ -373,66 +286,15 @@ defmodule SIP.Scenario.Runner do
 
   # ── Context bootstrap ─────────────────────────────────────────────────────
 
-  @doc false
-  # Build a %SIP.Context{} from the config keyword list. `:passwd` is applied
-  # last because computing :ha1 requires :authusername / :domain / :algorithm to
-  # be set first. Global keys (:proxyuri / :proxyusesrv / :optionkeepaliveperiod)
-  # are routed to the :elixip2 application env. Remaining non-native keys (e.g.
-  # :proxy) are kept in the appdata map so scenarios can read them back.
-  @spec build_context(keyword()) :: %SIP.Context{}
-  def build_context(config) when is_list(config) do
-    {passwd, rest} = Keyword.pop(config, :passwd)
+  @doc """
+  Build the initial context from a `config` keyword list.
 
-    ctx =
-      Enum.reduce(rest, %SIP.Context{}, fn {key, value}, acc -> put_config(acc, key, value) end)
-
-    if is_nil(passwd), do: ctx, else: SIP.Context.set(ctx, :passwd, passwd)
-  end
-
-  @context_string_props [:username, :authusername, :displayname, :domain, :algorithm]
-
-  # Global keys are not per-session: they are routed to the :elixip2 application
-  # env (read by SIP.Resolver, SIP.Session.Register, …) instead of the context.
-  # This is the single place that applies them, whether they come from the
-  # scenario `config` block or from an external JSON header — so scenarios no
-  # longer need to `Application.put_env` by hand in their initial_state.
-  @global_keys [:proxyuri, :proxyusesrv, :optionkeepaliveperiod, :mediaserver]
-
-  defp put_config(ctx, key, value) when key in @global_keys do
-    apply_global_key(key, value)
-    ctx
-  end
-
-  defp put_config(ctx, :debug, value) when is_boolean(value), do: Map.put(ctx, :debug, value)
-
-  defp put_config(ctx, key, value) when key in @context_string_props and is_binary(value),
-    do: SIP.Context.set(ctx, key, value)
-
-  # Unknown / non-native keys (e.g. :proxy) are stored in appdata.
-  defp put_config(ctx, key, value), do: FSL.Context.appdata_set(ctx, key, value)
-
-  # Apply a global key to the application env. `:proxyuri` accepts either an
-  # already-parsed %SIP.Uri{} (from the JSON loader) or a string "sip:host:port"
-  # (from a scenario `config` block), parsing the latter so both paths converge.
-  defp apply_global_key(:proxyuri, %SIP.Uri{} = uri),
-    do: Application.put_env(:elixip2, :proxyuri, uri)
-
-  defp apply_global_key(:proxyuri, value) when is_binary(value) do
-    case SIP.Uri.parse(value) do
-      {:ok, uri} -> Application.put_env(:elixip2, :proxyuri, uri)
-      {err, _} -> raise "invalid proxyuri #{inspect(value)}: #{inspect(err)}"
-    end
-  end
-
-  # :mediaserver selects the media adapter used by media_connect/0:
-  # [module: :mockup | :mendooze | Module, url: "..."] (map accepted too).
-  defp apply_global_key(:mediaserver, value) when is_list(value) or is_map(value),
-    do: Application.put_env(:elixip2, :mediaserver, value)
-
-  defp apply_global_key(:mediaserver, value),
-    do: raise("invalid mediaserver config #{inspect(value)}: expected [module: ..., url: ...]")
-
-  defp apply_global_key(key, value), do: Application.put_env(:elixip2, key, value)
+  The routing — native property / global key / appdata — is the binding's, and
+  lives in `SIP.FSL.Host.build_context/1`. This name stays for the tests and the
+  external-config loader that call it.
+  """
+  @spec build_context(keyword()) :: FSL.Context.t()
+  defdelegate build_context(config), to: SIP.FSL.Host
 
   # ── FSM loop ──────────────────────────────────────────────────────────────
 
@@ -448,12 +310,12 @@ defmodule SIP.Scenario.Runner do
       {:goto, :next, desc, type, ctx2} ->
         next = next_state(state_name, states)
         log_transition(state_name, next, desc)
-        report(module, report_account(ctx2), next, desc, type)
+        report(module, account(module, ctx2, :subsequent), next, desc, type)
         loop(module, next, enter(ctx2, state_name, next), states)
 
       {:goto, :loop, desc, type, ctx2} ->
         log_transition(state_name, state_name, desc)
-        report(module, report_account(ctx2), state_name, desc, type)
+        report(module, account(module, ctx2, :subsequent), state_name, desc, type)
         loop(module, state_name, ctx2, states)
 
       # `goto back`: return to whatever state we came from. One slot, no stack —
@@ -467,12 +329,12 @@ defmodule SIP.Scenario.Runner do
               "Scenario #{inspect(module)} in state #{inspect(state_name)}: #{reason}."
             )
 
-            report(module, report_account(ctx2), :failed, reason, type)
+            report(module, account(module, ctx2, :subsequent), :failed, reason, type)
             finalize(module, ctx2, :failure, reason)
 
           previous ->
             log_transition(state_name, previous, desc)
-            report(module, report_account(ctx2), previous, desc, type)
+            report(module, account(module, ctx2, :subsequent), previous, desc, type)
             loop(module, previous, enter(ctx2, state_name, previous), states)
         end
 
@@ -483,22 +345,30 @@ defmodule SIP.Scenario.Runner do
       {:goto, :__shutdown__, desc, type, ctx2} ->
         if function_exported?(module, :__state___shutdown__, 1) do
           log_transition(state_name, :__shutdown__, desc)
-          report(module, report_account(ctx2), :__shutdown__, desc, type)
+          report(module, account(module, ctx2, :subsequent), :__shutdown__, desc, type)
           loop(module, :__shutdown__, enter(ctx2, state_name, :__shutdown__), states)
         else
-          report(module, report_account(ctx2), :aborted, desc, type)
+          report(module, account(module, ctx2, :subsequent), :aborted, desc, type)
           finalize(module, ctx2, :aborted, "shutdown")
         end
 
       {:goto, target, desc, type, ctx2} when is_atom(target) ->
         if target in states do
           log_transition(state_name, target, desc)
-          report(module, report_account(ctx2), target, desc, type)
+          report(module, account(module, ctx2, :subsequent), target, desc, type)
           loop(module, target, enter(ctx2, state_name, target), states)
         else
           reason = "jumped from state #{inspect(state_name)} to unknown state #{inspect(target)}"
           Logger.error("Scenario #{inspect(module)} #{reason}.")
-          report(module, report_account(ctx2), :failed, "unknown state #{target}", type)
+
+          report(
+            module,
+            account(module, ctx2, :subsequent),
+            :failed,
+            "unknown state #{target}",
+            type
+          )
+
           finalize(module, ctx2, :failure, {:unknown_state, target})
         end
 
@@ -508,7 +378,7 @@ defmodule SIP.Scenario.Runner do
       {:sbb_return, _event, ctx2} ->
         reason = "sbb_return used outside a service building block"
         Logger.error("Scenario #{inspect(module)} in state #{inspect(state_name)}: #{reason}.")
-        report(module, report_account(ctx2), :failed, reason, nil)
+        report(module, account(module, ctx2, :subsequent), :failed, reason, nil)
         finalize(module, ctx2, :failure, {:sbb_return_outside_sbb, state_name})
 
       # A `stay` that reached the runner was written outside an `on_events` clause
@@ -517,19 +387,19 @@ defmodule SIP.Scenario.Runner do
       {:stay, _desc, type, ctx2} ->
         reason = "stay used outside an on_events clause"
         Logger.error("Scenario #{inspect(module)} in state #{inspect(state_name)}: #{reason}.")
-        report(module, report_account(ctx2), :failed, reason, type)
+        report(module, account(module, ctx2, :subsequent), :failed, reason, type)
         finalize(module, ctx2, :failure, {:stay_outside_on_events, state_name})
 
       {:terminal, :success, reason, type, ctx2} ->
-        report(module, report_account(ctx2), :succeeded, reason, type)
+        report(module, account(module, ctx2, :subsequent), :succeeded, reason, type)
         finalize(module, ctx2, :success, reason)
 
       {:terminal, :failure, reason, type, ctx2} ->
-        report(module, report_account(ctx2), :failed, reason, type)
+        report(module, account(module, ctx2, :subsequent), :failed, reason, type)
         finalize(module, ctx2, :failure, reason)
 
       {:terminal, :aborted, reason, type, ctx2} ->
-        report(module, report_account(ctx2), :aborted, reason, type)
+        report(module, account(module, ctx2, :subsequent), :aborted, reason, type)
         finalize(module, ctx2, :aborted, reason)
 
       # A state must end with goto / scenario_success / scenario_failure. Anything
@@ -541,7 +411,7 @@ defmodule SIP.Scenario.Runner do
             "scenario_success / scenario_failure, got: #{inspect(other)}"
         )
 
-        report(module, report_account(ctx), :failed, "invalid transition", nil)
+        report(module, account(module, ctx, :subsequent), :failed, "invalid transition", nil)
         finalize(module, ctx, :failure, {:invalid_transition, state_name})
     end
   end
@@ -574,7 +444,7 @@ defmodule SIP.Scenario.Runner do
   @doc false
   # Back the `sbb_fsm` macro. Runs `module`'s FSM to completion and returns the
   # context to rebind in the calling state.
-  @spec run_sbb(%SIP.Context{}, module(), keyword()) :: %SIP.Context{}
+  @spec run_sbb(FSL.Context.t(), module(), keyword()) :: FSL.Context.t()
   def run_sbb(ctx, module, opts \\ []) do
     # `Code.ensure_loaded?/1` before `function_exported?/3`, and not for tidiness:
     # `function_exported?/3` answers false for a module that is not LOADED, even
@@ -615,7 +485,7 @@ defmodule SIP.Scenario.Runner do
     # terminal or a deadline unwinding through here leaves the stack — and the
     # reporting that reads it — as it found it.
     push_sbb_frame(module)
-    report(module, report_account(entry_ctx), :initial_state, "enter", :scenario)
+    report(module, account(module, entry_ctx, :subsequent), :initial_state, "enter", :scenario)
 
     {event, ctx2} =
       try do
@@ -639,7 +509,7 @@ defmodule SIP.Scenario.Runner do
     # Back to the caller's vocabulary. Without this the row would sit on the
     # block's last state while the host waits on the event we just posted — a
     # state the scenario never wrote, shown as where the call is.
-    report(module, report_account(host_ctx), host_state, event, :scenario)
+    report(module, account(module, host_ctx, :subsequent), host_state, event, :scenario)
 
     host_ctx
   end
@@ -674,12 +544,12 @@ defmodule SIP.Scenario.Runner do
       {:goto, :next, desc, type, ctx2} ->
         next = next_state(state_name, states)
         log_transition(state_name, next, desc)
-        report(module, report_account(ctx2), next, desc, type)
+        report(module, account(module, ctx2, :subsequent), next, desc, type)
         sbb_loop(module, next, enter(ctx2, state_name, next), states, ref)
 
       {:goto, :loop, desc, type, ctx2} ->
         log_transition(state_name, state_name, desc)
-        report(module, report_account(ctx2), state_name, desc, type)
+        report(module, account(module, ctx2, :subsequent), state_name, desc, type)
         sbb_loop(module, state_name, ctx2, states, ref)
 
       {:goto, :__back__, desc, type, ctx2} ->
@@ -689,7 +559,7 @@ defmodule SIP.Scenario.Runner do
 
           previous ->
             log_transition(state_name, previous, desc)
-            report(module, report_account(ctx2), previous, desc, type)
+            report(module, account(module, ctx2, :subsequent), previous, desc, type)
             sbb_loop(module, previous, enter(ctx2, state_name, previous), states, ref)
         end
 
@@ -712,7 +582,7 @@ defmodule SIP.Scenario.Runner do
       {:goto, :__shutdown__, desc, type, ctx2} ->
         if function_exported?(module, :__state___shutdown__, 1) do
           log_transition(state_name, :__shutdown__, desc)
-          report(module, report_account(ctx2), :__shutdown__, desc, type)
+          report(module, account(module, ctx2, :subsequent), :__shutdown__, desc, type)
           sbb_loop(module, :__shutdown__, enter(ctx2, state_name, :__shutdown__), states, ref)
         else
           throw({:sbb_shutdown, desc, type, ctx2})
@@ -721,7 +591,7 @@ defmodule SIP.Scenario.Runner do
       {:goto, target, desc, type, ctx2} when is_atom(target) ->
         if target in states do
           log_transition(state_name, target, desc)
-          report(module, report_account(ctx2), target, desc, type)
+          report(module, account(module, ctx2, :subsequent), target, desc, type)
           sbb_loop(module, target, enter(ctx2, state_name, target), states, ref)
         else
           reason =
@@ -842,7 +712,7 @@ defmodule SIP.Scenario.Runner do
   # by the `on_events` expansion, which then re-enters its own wait.
   def note_stay(module, ctx, desc, type) do
     log_transition(ctx.currentstate, ctx.currentstate, desc)
-    report(module, report_account(ctx), ctx.currentstate, desc, type)
+    report(module, account(module, ctx, :subsequent), ctx.currentstate, desc, type)
     ctx
   end
 
@@ -918,14 +788,20 @@ defmodule SIP.Scenario.Runner do
   # request before they are hard-killed.
   @child_shutdown_grace_ms 5_000
 
+  # The order is the FSM's, because three of its four steps are:
+  #
+  #   1. the children, first, so they release what they hold while our own
+  #      handles are still valid;
+  #   2. whatever the binding holds — one step, the host's, and opaque here;
+  #   3. the scenario's own `cleanup/1`, which can still read a context the
+  #      framework has not yet invalidated;
+  #   4. the parent, last: `{:child_exit, …}` says this instance is done with
+  #      everything it held, so a parent that reuses a resource may.
   defp finalize(module, ctx, outcome, reason) do
-    # Tear down any sub-FSMs first so they release their own resources before we
-    # release ours and report up to our parent.
     shutdown_children(ctx)
 
     ctx
-    |> release_b2bua_legs()
-    |> release_media()
+    |> then(&FSL.Host.call(module, :finalize, [&1], &1))
     |> run_cleanup_callback(module)
 
     notify_parent_exit(ctx, outcome, reason)
@@ -1010,31 +886,6 @@ defmodule SIP.Scenario.Runner do
     end
 
     :ok
-  end
-
-  # Wind down the B2BUA legs this scenario created, before the media: a leg left
-  # behind holds a call up at the far end. No-op for a scenario that created none
-  # (SIP.Session.B2bua.release_legs/1 returns the context untouched).
-  defp release_b2bua_legs(ctx), do: SIP.Session.B2bua.release_legs(ctx)
-
-  # If a media server is in use, wait (max 5 s) for the dialog to terminate
-  # before releasing media resources, as specified in the README.
-  defp release_media(ctx) do
-    if is_pid(ctx.mediaserverpid) and not is_nil(ctx.mediaservermodule) do
-      receive do
-        {:dialog_terminated, _dialog_pid, _reason} -> :ok
-        # The same event from a tagged leg (a B2BUA outbound leg): it says just
-        # as much about the call being over, and ignoring it would stall here
-        # for the full timeout.
-        {_tag, {:dialog_terminated, _dialog_pid, _reason}} -> :ok
-      after
-        5_000 -> :ok
-      end
-
-      SIP.Session.Media.media_cleanup_ressources(ctx)
-    else
-      ctx
-    end
   end
 
   defp run_cleanup_callback(ctx, module) do
