@@ -162,14 +162,63 @@ defmodule SIP.Scenario.Monitor do
   @doc false
   defdelegate note_account(username), to: FSL.Monitor
 
-  @doc false
-  defdelegate note_medias(kinds), to: FSL.Monitor
+  # ── The three call-shape columns ──────────────────────────────────────────
+  #
+  # These are the only part of the monitor that is SIP's rather than the
+  # machine's, and they are VALUES, not mechanism (extraction plan §2.2, §4.7):
+  # a list of media kinds rendered as letters, a media server's declared name,
+  # and a URI rendered as a request target. Each is a wrapper over the generic
+  # `FSL.Monitor.note/2`, and each writes a column `SIP.FSL.Host.monitor_columns/0`
+  # declared.
 
-  @doc false
-  defdelegate note_mediaserver(name), to: FSL.Monitor
+  @doc """
+  Record the media the call has just negotiated: the `kinds` of the answer the two
+  ends settled on, as `SIP.Msg.Ops.media_kinds/1` reads them. Rendered
+  `A` / `AV` / `AVT`, and `none` for an answer that carried none of the three.
 
-  @doc false
-  defdelegate note_outbound(uri), to: FSL.Monitor
+  Called by the framework wherever an answer is built, received or relayed, so a
+  scenario has nothing to say about it. No-op if the monitor is not running.
+  """
+  @spec note_medias([:audio | :video | :text]) :: :ok
+  def note_medias(kinds) when is_list(kinds), do: note(:medias, media_label(kinds))
+
+  @doc """
+  Record the media server this call is connected to, by the name it is declared
+  under (`[mediaserver.pool.<name>]`). No-op if the monitor is not running.
+  """
+  @spec note_mediaserver(String.t()) :: :ok
+  def note_mediaserver(name), do: note(:mediaserver, to_string(name))
+
+  @doc """
+  Record the destination of the outbound leg: the target being dialled, and then
+  the one that answered — a serial hunt walks several, and the column names the
+  one the call is currently about. No-op if the monitor is not running.
+  """
+  @spec note_outbound(String.t() | %SIP.Uri{}) :: :ok
+  def note_outbound(uri), do: note(:outbound, uri_label(uri))
+
+  # Display letter of each negotiated media, in the order they are rendered.
+  @media_letters [audio: "A", video: "V", text: "T"]
+
+  defp media_label(kinds) do
+    case Enum.map_join(@media_letters, "", fn {kind, letter} ->
+           if kind in kinds, do: letter, else: ""
+         end) do
+      "" -> "none"
+      label -> label
+    end
+  end
+
+  # The destination as an operator dialled it: the URI without its display name,
+  # its header parameters or its `method` — `SIP.Uri.serialize_ruri/1` is the one
+  # reading of "this URI as a request target" (see the URI-parameters rule in
+  # CLAUDE.md).
+  defp uri_label(%SIP.Uri{} = uri) do
+    {:ok, label} = SIP.Uri.serialize_ruri(uri)
+    label
+  end
+
+  defp uri_label(uri), do: to_string(uri)
 
   @doc false
   defdelegate note_command(type, command), to: FSL.Monitor

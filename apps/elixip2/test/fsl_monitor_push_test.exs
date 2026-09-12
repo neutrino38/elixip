@@ -172,22 +172,26 @@ defmodule SIP.Test.FSL.MonitorPush do
       Monitor.report(slot, "My.Scenario", "alice", "talking", "answered", :sip)
       assert_receive {:fsl_monitor, {:updated, ^slot, _}}, 2_000
 
-      Monitor.note_medias([:audio, :video])
+      # The three call-shape helpers are SIP's — a list of media kinds rendered
+      # as letters, a server's declared name, a URI rendered as a request target
+      # — so they live on SIP's side of the seam and write through the generic
+      # `FSL.Monitor.note/2` (extraction plan §2.2, §4.7).
+      SIP.Scenario.Monitor.note_medias([:audio, :video])
       assert_receive {:fsl_monitor, {:updated, ^slot, %{medias: "AV"}}}, 2_000
 
-      Monitor.note_mediaserver("mcu1")
+      SIP.Scenario.Monitor.note_mediaserver("mcu1")
       assert_receive {:fsl_monitor, {:updated, ^slot, %{mediaserver: "mcu1"}}}, 2_000
 
       # A %SIP.Uri{} is rendered as a request target — the one SIP value this
       # column carries, and the one computation that stays in Elixip (§2.2).
       uri = %SIP.Uri{scheme: "sip:", userpart: "bob", domain: "example.com"}
-      Monitor.note_outbound(uri)
+      SIP.Scenario.Monitor.note_outbound(uri)
 
       assert_receive {:fsl_monitor, {:updated, ^slot, %{outbound: "sip:bob@example.com"}}},
                      2_000
 
       # An answer that carried none of the three is "none", not "".
-      Monitor.note_medias([])
+      SIP.Scenario.Monitor.note_medias([])
       assert_receive {:fsl_monitor, {:updated, ^slot, %{medias: "none"}}}, 2_000
     end
 

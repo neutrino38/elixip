@@ -36,10 +36,22 @@ defmodule SIPParser.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
+      # The Finite State Language: the engine every scenario and every kelixip
+      # script runs on, extracted from this app (design in
+      # ../../../finite-state-language/elixir/docs/extraction-plan.md). A `path:`
+      # dep for the duration of the development; it becomes
+      # `{:finite_state_language, "~> 0.1"}` once published (plan §7, P4).
+      #
+      # It does NOT depend on :elixip2, and that is the point: the language knows
+      # nothing about SIP, and `mix compile --warnings-as-errors` over there is
+      # what proves it rather than asserts it. SIP plugs in through
+      # `SIP.FSL.Host` (framework/SIPFSLHost.ex).
+      {:fsl, path: "../../../finite-state-language/elixir"},
       {:logger_file_backend, "~> 0.0.12"},
       {:jason, "~> 1.4"},
-      # HTTP client for the HTTP.Session scenario mixin (http_GET). Req 0.6 is
-      # the current line; it brings Finch/NimblePool for connection pooling.
+      # HTTP client for the FSL.HTTP mixin (http_GET), where it is an OPTIONAL
+      # dep of :fsl and a real one here. Req 0.6 is the current line; it brings
+      # Finch/NimblePool for connection pooling.
       {:req, "~> 0.6"},
       # Our fork, on a tag. It carries what upstream lacks and we depend on: active
       # mode for WebSocket (delivers {:web, socket, data} to the owner), IPv6 —
