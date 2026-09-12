@@ -1,27 +1,36 @@
 defmodule FSL.Block do
   @moduledoc """
-  Declare a **service building block**: a reusable fragment of a call flow,
-  written in FSL, that a scenario enters with `sbb_fsm/2` and that talks back
-  through service-level events.
+  Declare a **service building block**: a reusable fragment of a flow, written in
+  FSL, that a machine enters with `sbb_fsm/2` and that talks back through
+  service-level events.
 
-      defmodule MyApp.Cancelling do
+  A block is the **subroutine** of the language: a machine calls it from a state,
+  it runs a machine of its own in the caller's process, and it hands control back
+  by posting one event. `sbb_fsm/2` and everything below is FSL's — nothing here
+  knows a protocol — while a binding wraps it in a facade the way `SIP.SBB`
+  wraps it, so a SIP block gets the SIP verbs along with the mechanism.
+
+      defmodule MyApp.Confirming do
         use FSL.Block
 
-        @sbb_namespace :cancel
+        @sbb_namespace :confirm
         @sbb_returns [
-          confirmed: "the callee answered the CANCEL with a 487 — %{}",
-          answered: "the callee picked up before the CANCEL arrived — %{code}"
+          accepted: "the far end agreed — %{}",
+          declined: "it said no — %{reason}"
         ]
 
-        @sbb_timeout 32_000
+        @sbb_args [prompt: "what to ask"]
+        @sbb_timeout 30_000
 
         state initial_state do
-          on_events do
-            {:outbound, {487, _resp, _trans, _dlg}} ->
-              sbb_return({:cancel, :confirmed, %{}})
+          notify_parent({:asking, sbb_data_get(:prompt)})
+          goto waiting
+        end
 
-            {:outbound, {200, _resp, _trans, _dlg}} ->
-              sbb_return({:cancel, :answered, %{code: 200}})
+        state waiting do
+          on_events do
+            {:parent_msg, :yes} -> sbb_return({:confirm, :accepted, %{}})
+            {:parent_msg, {:no, why}} -> sbb_return({:confirm, :declined, %{reason: why}})
           end
         end
       end
@@ -51,31 +60,40 @@ defmodule FSL.Block do
   declares raises instead of becoming a sandbox entry nobody reads. `args: %{…}`
   is the same thing spelled as a map, and both may be mixed.
 
-  A block is the same language as a scenario — same `state`, same `on_events`,
-  same session macros — with two differences:
+  ## What a block is, exactly
+
+  The same language as any machine — same `state`, same `on_events`, and whatever
+  verbs the binding brought — with two differences:
 
     * it gains `sbb_return/1`, `sbb_data_get/1` and `sbb_data_set/2`;
-    * it has **no `run/1`**, so it can never be mistaken for the scenario of the
-      `.exs` file that declares it.
+    * it has **no `run/1`**, so it can never be mistaken for the machine of the
+      `.exs` file that declares it. `FSL.Loader` picks the first module exporting
+      `run/1`, and a block declared above the machine in the same file would
+      otherwise be loaded and run *as* that machine.
 
-  It runs in the calling scenario's own process, on that scenario's dialogs and
-  mailbox: a block observes and acts on the host's call, which is what separates
-  it from `spawn_fsm/2` and its independent child. Terminals written inside a
-  block (`scenario_failure`, `scenario_aborted`) keep their ordinary meaning and
-  tear down the host too.
+  It runs in the **calling machine's own process**, on that machine's own
+  mailbox and resources: a block observes and acts on what its host is doing,
+  which is what separates it from `spawn_fsm/2` and its independent child.
+  Terminals written inside a block (`scenario_failure`, `scenario_aborted`) keep
+  their ordinary meaning and tear the host down too.
 
-  Design: `docs/design/DESIGN-SBB.md`; specification and
-  catalogue: `docs/design/DESIGN-SBB.md`.
+  `:ctx_var` and `:host` are passed through to `FSL.Machine`, so a binding's
+  facade declares them once for its blocks as it does for its machines.
+
+  Design: `docs/design/DESIGN-SBB.md`.
   """
 
   defmacro __using__(opts) do
     quote do
-      # Defaults for the completion bound every block carries (S7). 32 s is
-      # timer B, the limit a silent callee leaves.
+      # The completion bound every block carries (S7): a block that never
+      # returns would leave its host waiting on an `after` for a subroutine that
+      # is not coming. 32 s is inherited from SIP's timer B — the limit a silent
+      # callee leaves — and is as good a default as any for a bound that exists
+      # to be overridden per block and per call site.
       @sbb_timeout 32_000
 
       # The vocabulary. The namespace defaults to the block's last name segment,
-      # underscored — `MyApp.Cancelling` gives `:cancelling` — which is right for
+      # underscored — `MyApp.Confirming` gives `:confirming` — which is right for
       # a block named after what it does, and overridden by one line when it is
       # not: `SBB.Call.Establish` and `SBB.Call.Bridge` speak `:call` and
       # `:bridge`, after the verb the scenario writes, not after their own name.
