@@ -235,7 +235,7 @@ defmodule SIP.Scenario do
   defmacro state(name_ast, do: body) do
     name = state_atom(name_ast)
     fname = :"__state_#{name}"
-    check_stay_placement!(body, "state #{name}")
+    check_stay_placement!(body, "state #{name}", __CALLER__)
 
     quote do
       require Logger
@@ -933,7 +933,7 @@ defmodule SIP.Scenario do
       end
   """
   defmacro on_shutdown(do: body) do
-    check_stay_placement!(body, "on_shutdown block")
+    check_stay_placement!(body, "on_shutdown block", __CALLER__)
 
     quote do
       require Logger
@@ -1046,22 +1046,39 @@ defmodule SIP.Scenario do
   # which state is at fault — the runner would otherwise only fail the run.
   # Everything an `on_events` owns is pruned, its `after` body included: it is
   # that macro's business, and a `stay` left there fails at runtime.
-  defp check_stay_placement!(body, where) do
-    if stay?(body) do
-      raise CompileError,
-        description:
-          "stay is only allowed in an on_events clause, and #{where} uses it outside one. " <>
-            "Use goto loop to re-enter the state."
+  #
+  # The error names the SCENARIO's file and the line the `stay` sits on, like
+  # every other compile-time check here. Without them the message points at
+  # nothing — and once the language lives in a package of its own, "points at
+  # nothing" becomes "points into the package", which is precisely how a check
+  # meant to help the scenario writer stops helping.
+  defp check_stay_placement!(body, where, caller) do
+    case stay_node(body) do
+      nil ->
+        :ok
+
+      {_stay, meta, _args} ->
+        raise CompileError,
+          file: caller.file,
+          line: Keyword.get(meta, :line, caller.line),
+          description:
+            "stay is only allowed in an on_events clause, and #{where} uses it outside one. " <>
+              "Use goto loop to re-enter the state."
     end
   end
 
-  defp stay?({:on_events, _meta, _args}), do: false
-  defp stay?({:stay, _meta, args}) when is_list(args), do: true
-  defp stay?({:stay, _meta, ctx}) when is_atom(ctx), do: true
-  defp stay?({fun, _meta, args}), do: stay?(fun) or stay?(args)
-  defp stay?({left, right}), do: stay?(left) or stay?(right)
-  defp stay?(list) when is_list(list), do: Enum.any?(list, &stay?/1)
-  defp stay?(_other), do: false
+  # The first `stay` node outside any nested `on_events`, or nil. Returns the
+  # node rather than a boolean so the error can carry its line.
+  defp stay_node({:on_events, _meta, _args}), do: nil
+  defp stay_node({:stay, _meta, args} = node) when is_list(args), do: node
+  defp stay_node({:stay, _meta, ctx} = node) when is_atom(ctx), do: node
+  defp stay_node({fun, _meta, args}), do: stay_node(fun) || stay_node(args)
+  defp stay_node({left, right}), do: stay_node(left) || stay_node(right)
+
+  defp stay_node(list) when is_list(list),
+    do: Enum.find_value(list, &stay_node(&1))
+
+  defp stay_node(_other), do: nil
 
   defp stay_ast(args, wait, deadline) do
     desc = Enum.at(args, 0)
