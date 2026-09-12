@@ -97,7 +97,7 @@ only its own dependencies (design in
 
 ```
 apps/
-├── elixip2/       # shared SIP stack + FSL + media = LIBRARY (app :elixip2)
+├── elixip2/       # shared SIP stack + the FSL binding + media = LIBRARY (:elixip2)
 │                  #   all the framework/dsl/session code + the test suite
 ├── elixipp/       # the standalone test tool (escript `elixipp`) — depends on :elixip2
 │   └── lib/elixipp/ElixippCLI.ex   # CLI entry point + live --monitor rendering (owl)
@@ -132,22 +132,8 @@ organizational:
 ```
 apps/elixip2/lib/
 ├── framework/   # the reusable SIP stack (transport → message → transaction →
-│                #   dialog → session/context → media). See the layers below.
-├── fsl/         # the Finite State Language and its engine — namespace FSL.*, and
-│   │            #   NOT SIP: on its way out to a hex package of its own (see
-│   │            #   ../finite-state-language/elixir/docs/extraction-plan.md)
-│   ├── machine.ex            # FSL.Machine — state, goto, stay, config, on_events, …
-│   ├── runner.ex             # FSL.Runner — the FSM execution engine
-│   ├── block.ex              # FSL.Block — a service building block
-│   ├── context.ex            # FSL.Context — the FSM's six fields + the ctx_* macros
-│   ├── host.ex               # FSL.Host — what an embedding provides; + .Default
-│   ├── loader.ex             # FSL.Loader — loads machine .exs files / modules
-│   ├── child.ex              # FSL.Child — a spawned sub-FSM handle (struct)
-│   ├── monitor.ex            # FSL.Monitor — live registry behind --monitor / kelictl
-│   ├── journal.ex            # FSL.Journal — per-run sequence journal
-│   ├── diagram/plantuml.ex   # FSL.Diagram.PlantUML — renders the journal
-│   ├── valet.ex              # FSL.Valet — slow work as an event
-│   └── http.ex               # FSL.HTTP — HTTP-as-events (needs Req)
+│   │            #   dialog → session/context → media). See the layers below.
+│   └── SIPFSLHost.ex         # SIP.FSL.Host — the FSL.Host callbacks SIP answers
 ├── dsl/         # what SIP adds on top of FSL, keeping its own names
 │   ├── SIPScenario.ex        # SIP.Scenario — the facade a SIP scenario `use`s
 │   ├── SIPSBB.ex             # SIP.SBB — the same, for a building block
@@ -170,14 +156,19 @@ apps/elixip2/lib/
 takes `elixipp UAC.Invite`, `mix scenario UAC.Register` and everything ELIXIPP.md
 promises about "no file needed" with it.
 
-**`fsl/` knows nothing about SIP, and that is enforced rather than hoped for.**
-The language calls back into an `FSL.Host` implementation for everything it must
-not know; `SIP.FSL.Host` (`framework/SIPFSLHost.ex`) is SIP's, and reads as the
-answer to "what does SIP add to the state machine" — eleven callbacks, top to
-bottom. A machine that names no host gets `FSL.Host.Default` and runs with no
-protocol at all: `test/fsl_standalone_test.exs` is that case, and it is the smoke
-test for the extraction, because every other test here is a SIP test and a
-surviving coupling would survive unnoticed.
+**The Finite State Language is not in this repository.** It is the hex package
+`finite_state_language` (OTP app `:fsl`, modules `FSL.*`), developed in
+[finite-state-language](https://github.com/neutrino38/finite-state-language) under
+Apache-2.0 and declared as a dependency in `apps/elixip2/mix.exs`. The package
+knows nothing about SIP: it calls back into an `FSL.Host` implementation for
+everything it must not know, and `SIP.FSL.Host` (`framework/SIPFSLHost.ex`) is
+SIP's — eleven callbacks that read, top to bottom, as the answer to "what does SIP
+add to the state machine".
+
+That separation is enforced rather than hoped for: `:fsl` does not depend on
+`:elixip2`, so a coupling that crept back in fails to compile over there. The
+`apps/elixip2/test/fsl_*.exs` files are what remains here — each one asserts that
+the *SIP binding* answers a callback correctly, not that the language works.
 
 `dsl/` is the SIP side. `SIP.Scenario` is the name a SIP scenario **should**
 `use` — it brings the SIP verbs (`SIP.Session.CallUAC`, `Media`, `B2bua`) and

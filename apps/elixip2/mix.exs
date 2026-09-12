@@ -37,10 +37,13 @@ defmodule SIPParser.MixProject do
   defp deps do
     [
       # The Finite State Language: the engine every scenario and every kelixip
-      # script runs on, extracted from this app (design in
-      # ../../../finite-state-language/elixir/docs/extraction-plan.md). A `path:`
-      # dep for the duration of the development; it becomes
-      # `{:finite_state_language, "~> 0.1"}` once published (plan §7, P4).
+      # script runs on. It lives in its own repository and ships as the hex
+      # package `finite_state_language` (OTP app `:fsl`, Apache-2.0).
+      #
+      # A `path:` dep because the two are developed together: a change to the
+      # language is compiled and run against this suite in the same step, which
+      # is the only place a SIP binding exercises it. Pinning a released version
+      # instead is one line — `{:finite_state_language, "~> 0.2"}`.
       #
       # It does NOT depend on :elixip2, and that is the point: the language knows
       # nothing about SIP, and `mix compile --warnings-as-errors` over there is
