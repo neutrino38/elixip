@@ -151,7 +151,9 @@ defmodule SIP.Test.TransportSelector do
 
     test "no destproto ⇒ UDP (decision §16.6)" do
       selected =
-        Selector.select_transport(uri(destip: {10, 0, 0, 10}, destport: 41_236, tp_module: FakeDest))
+        Selector.select_transport(
+          uri(destip: {10, 0, 0, 10}, destport: 41_236, tp_module: FakeDest)
+        )
 
       assert selected.destproto == "UDP"
       assert is_pid(selected.tp_pid)
@@ -163,19 +165,27 @@ defmodule SIP.Test.TransportSelector do
       refute match?(%SIP.Uri{destip: {10, 0, 0, 9}}, result)
     end
   end
+
   describe "an unreliable transport has one instance per family" do
     test "the name carries the family, and the two do not collide" do
       assert Selector.unreliable_instance_name("UDP", :ipv4) == "UDP_ipv4"
       assert Selector.unreliable_instance_name("UDP", :ipv6) == "UDP_ipv6"
+
       refute Selector.unreliable_instance_name("UDP", :ipv4) ==
                Selector.unreliable_instance_name("UDP", :ipv6)
     end
 
     test "two destinations of different families get two instances" do
-      v4 = uri(destip: {192, 0, 2, 1}, destport: 5060,
-               destproto: "UDPFAKE", tp_module: FakeDatagram)
-      v6 = uri(destip: {0x2001, 0xdb8, 0, 0, 0, 0, 0, 1}, destport: 5060,
-               destproto: "UDPFAKE", tp_module: FakeDatagram)
+      v4 =
+        uri(destip: {192, 0, 2, 1}, destport: 5060, destproto: "UDPFAKE", tp_module: FakeDatagram)
+
+      v6 =
+        uri(
+          destip: {0x2001, 0xDB8, 0, 0, 0, 0, 0, 1},
+          destport: 5060,
+          destproto: "UDPFAKE",
+          tp_module: FakeDatagram
+        )
 
       assert %SIP.Uri{tp_pid: pid4} = Selector.select_transport(v4)
       assert %SIP.Uri{tp_pid: pid6} = Selector.select_transport(v6)
@@ -188,10 +198,21 @@ defmodule SIP.Test.TransportSelector do
     end
 
     test "a second destination of the same family reuses its instance" do
-      one = uri(destip: {192, 0, 2, 8}, destport: 5060,
-                destproto: "UDPFAKE2", tp_module: FakeDatagram)
-      two = uri(destip: {192, 0, 2, 9}, destport: 5062,
-                destproto: "UDPFAKE2", tp_module: FakeDatagram)
+      one =
+        uri(
+          destip: {192, 0, 2, 8},
+          destport: 5060,
+          destproto: "UDPFAKE2",
+          tp_module: FakeDatagram
+        )
+
+      two =
+        uri(
+          destip: {192, 0, 2, 9},
+          destport: 5062,
+          destproto: "UDPFAKE2",
+          tp_module: FakeDatagram
+        )
 
       assert %SIP.Uri{tp_pid: pid} = Selector.select_transport(one)
       assert %SIP.Uri{tp_pid: ^pid} = Selector.select_transport(two)

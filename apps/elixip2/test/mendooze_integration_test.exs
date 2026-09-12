@@ -109,7 +109,9 @@ defmodule Mendooze.IntegrationTest do
       assert :ok = Mendooze.set_remote_answer(caller, our_answer)
 
       # The outbound leg: a second endpoint IN THE SAME SESSION.
-      {:ok, outbound} = Mendooze.create_peer_connection(server, self(), opts ++ [bridge_with: inbound])
+      {:ok, outbound} =
+        Mendooze.create_peer_connection(server, self(), opts ++ [bridge_with: inbound])
+
       assert outbound == {inbound, :outbound}
 
       {:ok, our_offer} = Mendooze.get_local_offer(outbound)

@@ -4,7 +4,6 @@ defmodule SIP.Test.Call2 do
   use SIP.Session.CallUAC
   use SIP.Session.Media
 
-
   # Account to use for tests (centralized in config/test.exs)
   @account Application.compile_env(:elixip2, :test_account)
   @username @account.username
@@ -29,14 +28,14 @@ defmodule SIP.Test.Call2 do
     :ok
   end
 
-
   # Wait for the final 200 OK, ignoring provisional (1xx) responses.
   defp wait_for_200(timeout) do
     receive do
       {200, rsp, trans_pid, _dialog_pid} ->
         {:ok, rsp, trans_pid}
 
-      {code, _rsp, _trans_pid, _dialog_pid} when is_integer(code) and code >= 100 and code < 200 ->
+      {code, _rsp, _trans_pid, _dialog_pid}
+      when is_integer(code) and code >= 100 and code < 200 ->
         wait_for_200(timeout)
 
       {code, _rsp, _trans_pid, _dialog_pid} when is_integer(code) ->
@@ -110,13 +109,13 @@ defmodule SIP.Test.Call2 do
     media_connect(MediaServer.Mockup, "sip:localhost:8080")
 
     # ── Place the call: INVITE, then re-INVITE with proxy authentication ──────
-    send_INVITE(@callee, :mediaserver, [timeout: 90, webrtc: :no])
+    send_INVITE(@callee, :mediaserver, timeout: 90, webrtc: :no)
     assert ctx_get(:lasterr) == :ok
 
     sip_ctx =
       receive do
         {407, rsp, _trans_pid, _dialog_pid} ->
-          send_auth_INVITE(rsp, @callee, :mediaserver, [timeout: 90])
+          send_auth_INVITE(rsp, @callee, :mediaserver, timeout: 90)
           sip_ctx
 
         {code, _rsp, _trans_pid, _dialog_pid} when is_integer(code) ->
@@ -141,7 +140,7 @@ defmodule SIP.Test.Call2 do
     # ── Wait until ICE connectivity is established ────────────────────────────
     assert_receive {:ms_event, ^conn, :ice_connected}, 5_000
 
-        # ── Run an echo (media loopback) for 20 seconds ───────────────────────────
+    # ── Run an echo (media loopback) for 20 seconds ───────────────────────────
     media_start_echo()
     echo = SIP.Context.appdata_get(sip_ctx, :mediaactionid)
     assert is_pid(echo)
@@ -150,10 +149,7 @@ defmodule SIP.Test.Call2 do
     # ── Acknowledge the in-dialog MESSAGE sent by the echo service ────────────
     answer_message(5_000)
 
-
     Process.sleep(20_000)
-
-
 
     # ── Hang up: send BYE and wait for its 200 OK ─────────────────────────────
     send_BYE()
@@ -190,13 +186,13 @@ defmodule SIP.Test.Call2 do
     media_connect(MediaServer.Mockup, "sip:localhost:8080")
 
     # ── Place the call: INVITE, then re-INVITE with proxy authentication ──────
-    send_INVITE(@callee, :mediaserver, [timeout: 90, webrtc: :no])
+    send_INVITE(@callee, :mediaserver, timeout: 90, webrtc: :no)
     assert ctx_get(:lasterr) == :ok
 
     sip_ctx =
       receive do
         {407, rsp, _trans_pid, _dialog_pid} ->
-          send_auth_INVITE(rsp, @callee, :mediaserver, [timeout: 90])
+          send_auth_INVITE(rsp, @callee, :mediaserver, timeout: 90)
           sip_ctx
 
         {code, _rsp, _trans_pid, _dialog_pid} when is_integer(code) ->
@@ -258,13 +254,13 @@ defmodule SIP.Test.Call2 do
     media_connect(MediaServer.Mockup, "sip:localhost:8080")
 
     # ── Place the call: INVITE, then re-INVITE with proxy authentication ──────
-    send_INVITE(@callee, :mediaserver, [timeout: 90, webrtc: :no])
+    send_INVITE(@callee, :mediaserver, timeout: 90, webrtc: :no)
     assert ctx_get(:lasterr) == :ok
 
     sip_ctx =
       receive do
         {407, rsp, _trans_pid, _dialog_pid} ->
-          send_auth_INVITE(rsp, @callee, :mediaserver, [timeout: 90])
+          send_auth_INVITE(rsp, @callee, :mediaserver, timeout: 90)
           sip_ctx
 
         {code, _rsp, _trans_pid, _dialog_pid} when is_integer(code) ->

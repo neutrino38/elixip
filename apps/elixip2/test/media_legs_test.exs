@@ -61,7 +61,9 @@ defmodule SIP.Test.Media.Legs do
     test "an answer can be negotiated on a named leg", %{ctx: ctx} do
       {ctx, offer} = Media.get_sdp_offer(ctx, :no, :audio)
 
-      assert {ctx, {:ok, answer}} = Media.get_sdp_answer(ctx, offer, leg: :outbound, media: :audio)
+      assert {ctx, {:ok, answer}} =
+               Media.get_sdp_answer(ctx, offer, leg: :outbound, media: :audio)
+
       assert answer =~ "m=audio"
       assert Media.peer_connection(ctx, :outbound) != Media.peer_connection(ctx, :inbound)
     end

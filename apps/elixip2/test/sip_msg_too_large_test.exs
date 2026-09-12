@@ -195,6 +195,7 @@ defmodule SIP.Test.MsgTooLarge do
 
   defp depack(data, buf \\ %SIP.Transport.Depack{}) do
     parent = self()
+
     SIP.Transport.Depack.on_data_received(buf, data, fn what, msg -> send(parent, {what, msg}) end)
   end
 
@@ -213,7 +214,8 @@ defmodule SIP.Test.MsgTooLarge do
   test "a header block that never ends is bounded, and nothing is answered" do
     put_limit(2_000)
 
-    buf = depack("INVITE sip:bob@example.com SIP/2.0\r\n" <> String.duplicate("X-Pad: pad\r\n", 400))
+    buf =
+      depack("INVITE sip:bob@example.com SIP/2.0\r\n" <> String.duplicate("X-Pad: pad\r\n", 400))
 
     assert_received {:too_large, ""}
     assert buf.state == :refused
@@ -346,9 +348,9 @@ defmodule SIP.Test.MsgTooLarge do
       "From: \"Alice\" <sip:alice@example.com>;tag=alice-tag\r\n" <>
       "To: <sip:alice@example.com>\r\n" <>
       "Call-ID: int-1\r\n" <>
-      (if header == "CSeq", do: "", else: "CSeq: 1 REGISTER\r\n") <>
+      if(header == "CSeq", do: "", else: "CSeq: 1 REGISTER\r\n") <>
       "#{header}: #{value}\r\n" <>
-      (if header == "Content-Length", do: "", else: "Content-Length: 0\r\n") <> "\r\n"
+      if(header == "Content-Length", do: "", else: "Content-Length: 0\r\n") <> "\r\n"
   end
 
   # An INVITE whose last header is `extra`, with no body.
