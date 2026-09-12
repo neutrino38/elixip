@@ -151,8 +151,10 @@ defmodule Elixipp.CLI do
     # env, because this check sat *after* the server-mode branch below).
     case validate_log_sequence(opts, limit) do
       :ok ->
+        # `:fsl`, not `:elixip2`: the journal and its renderer are FSL's since
+        # the extraction, and so is the flag that turns them on.
         if Keyword.get(opts, :log_sequence, false),
-          do: Application.put_env(:elixip2, :log_sequence, true)
+          do: Application.put_env(:fsl, :log_sequence, true)
 
       {:error, msg} ->
         abort(msg, 2)
