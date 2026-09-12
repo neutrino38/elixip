@@ -55,7 +55,7 @@ defmodule SIP.Test.FSL.MonitorPush do
 
   describe "the push messages" do
     test "a reported change pushes {:updated, slot, row}", %{slot: slot} do
-      assert Monitor.subscribe(self()) == :ok
+      assert Monitor.subscribe(self()) == []
 
       Monitor.report(slot, "My.Scenario", "alice", "waiting", "send_INVITE", :sip)
 
@@ -244,8 +244,78 @@ defmodule SIP.Test.FSL.MonitorPush do
     # itself, taken inside the call that registers the subscriber. Today it
     # returns `:ok` and the snapshot is a second call; asserted so the change is
     # made on purpose rather than noticed later.
-    test "subscribe/1 returns :ok today; §4.12 makes it return the snapshot" do
-      assert Monitor.subscribe(self()) == :ok
+    test "subscribe/1 returns the snapshot, taken in the same call", %{slot: slot} do
+      # A row that already exists before anyone subscribes.
+      Monitor.report(slot, "Already.Running", "alice", "waiting", "start", nil)
+      assert [%{slot: ^slot, scenario: "Already.Running"}] = Monitor.subscribe(self())
+
+      # …and the subscription is live from that same call on.
+      Monitor.report(slot, "Already.Running", "alice", "talking", "answered", :sip)
+      assert_receive {:fsl_monitor, {:updated, ^slot, %{state: "talking"}}}, 2_000
+    end
+
+    test "an empty registry answers an empty snapshot, not nil" do
+      assert Monitor.subscribe(self()) == []
+    end
+
+    # The window §4.12 is about: a subscriber needs the rows that exist AND the
+    # changes from now on. Two calls leave a gap, and only one of the two orders
+    # survives it — subscribe-then-snapshot turns a change landing in between
+    # into a duplicate `upsert`, which is idempotent; snapshot-first loses the row
+    # until the call happens to change again. One call has no order to get wrong.
+    test "re-subscribing is idempotent and still answers the snapshot", %{slot: slot} do
+      assert Monitor.subscribe(self()) == []
+      Monitor.report(slot, "S", "alice", "waiting", "start", nil)
+      assert_receive {:fsl_monitor, {:updated, ^slot, _}}, 2_000
+
+      assert [%{slot: ^slot}] = Monitor.subscribe(self())
+
+      # Not subscribed twice: one change, one push.
+      Monitor.report(slot, "S", "alice", "talking", "ok", nil)
+      assert_receive {:fsl_monitor, {:updated, ^slot, %{state: "talking"}}}, 2_000
+      refute_receive {:fsl_monitor, {:updated, ^slot, %{state: "talking"}}}, 200
+    end
+
+    # §4.7's first defect. Invisible while the only in-tree subscriber was a
+    # supervised singleton; not invisible in a package, where subscribing is the
+    # normal way to use the thing and a set that only grows means every later
+    # change is sent into the void.
+    test "a subscriber that dies is dropped, with no unsubscribe", %{slot: slot} do
+      test_pid = self()
+
+      sub =
+        spawn(fn ->
+          Monitor.subscribe(self())
+          send(test_pid, :subscribed)
+
+          receive do
+            msg -> send(test_pid, {:forwarded, msg})
+          end
+        end)
+
+      assert_receive :subscribed, 2_000
+
+      # It is really subscribed…
+      Monitor.report(slot, "S", "alice", "waiting", "start", nil)
+      assert_receive {:forwarded, {:fsl_monitor, {:updated, ^slot, _}}}, 2_000
+
+      # …then it goes away, and the registry forgets it rather than pushing into
+      # a dead mailbox for the life of the node.
+      ref = Process.monitor(sub)
+      Process.exit(sub, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^sub, _}, 2_000
+
+      # Give the :DOWN time to reach the registry, then check it is gone by
+      # asking the one thing that observes the set: a further change must not
+      # raise, and the registry must still be alive and serving.
+      Monitor.report(slot, "S", "alice", "talking", "ok", nil)
+      assert [%{state: "talking"}] = Monitor.calls()
+      assert Process.alive?(Process.whereis(Monitor))
+      assert Monitor.subscribe(self()) != nil
+    end
+
+    test "unsubscribe/1 on a pid that never subscribed is a no-op" do
+      assert Monitor.unsubscribe(self()) == :ok
     end
 
     test "the snapshot and the pushes agree on the row", %{slot: slot} do

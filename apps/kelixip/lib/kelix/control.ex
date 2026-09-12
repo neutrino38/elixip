@@ -82,7 +82,9 @@ defmodule Kelix.Control do
   Subscribe `pid` to scenario changes as they happen (kelescope's live monitor —
   `docs/design/kelixip_liveview.md`), on the model of
   `Kelix.Mod.Registrar.subscribe_register_event/2`. Returns the current snapshot
-  (`monitor/0`'s shape); `pid` then receives `{:kelix_monitor, {:upsert, row}}`
+  (`monitor/0`'s shape), taken in the same call that registers the subscriber so
+  there is no window for a change to fall into; `pid` then receives
+  `{:kelix_monitor, {:upsert, row}}`
   (rows in that same shape) as a scenario appears or its FSM state/event/command/
   account/media changes, and `{:kelix_monitor, {:remove, id}}` when it ends — no
   polling needed.
@@ -92,10 +94,7 @@ defmodule Kelix.Control do
   what drops the subscription (`Kelix.InstancePool` monitors `pid`).
   """
   @spec subscribe_monitor(pid()) :: [map]
-  def subscribe_monitor(pid) do
-    Kelix.InstancePool.subscribe_monitor(pid)
-    monitor()
-  end
+  def subscribe_monitor(pid), do: safe(fn -> Kelix.InstancePool.subscribe_monitor(pid) end, [])
 
   @doc "Stop a subscription started by `subscribe_monitor/1`."
   @spec unsubscribe_monitor(pid()) :: :ok

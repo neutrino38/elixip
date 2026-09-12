@@ -96,14 +96,20 @@ defmodule Kelix.InstancePool do
   def shutdown(id, reason \\ :operator), do: GenServer.call(__MODULE__, {:shutdown, id, reason})
 
   @doc """
-  Subscribe `pid` to live joined rows — the sanctioned entry point is
-  `Kelix.Control.subscribe_monitor/1`, which calls this then returns the current
-  snapshot. `pid` gets `{:kelix_monitor, {:upsert, row}}` (rows in `monitor/0`'s
-  shape) as an instance appears or its FSM fields change, and
-  `{:kelix_monitor, {:remove, id}}` when it ends. `pid` is monitored, so a dead or
-  disconnected subscriber is dropped on its own.
+  Subscribe `pid` to live joined rows **and return the snapshot** — the
+  sanctioned entry point is `Kelix.Control.subscribe_monitor/1`, which is now
+  this one call. `pid` gets `{:kelix_monitor, {:upsert, row}}` (rows in
+  `monitor/0`'s shape) as an instance appears or its FSM fields change, and
+  `{:kelix_monitor, {:remove, id}}` when it ends. `pid` is monitored, so a dead
+  or disconnected subscriber is dropped on its own.
+
+  Registering and snapshotting in one call is what closes the window: a change
+  landing between two separate calls would have to arrive as a push *and* in the
+  snapshot to be safe, and that only holds for one of the two orders. One call
+  has no order to get wrong. `FSL.Monitor.subscribe/1` states the same contract
+  one layer down, which is where the FSM half of these rows comes from.
   """
-  @spec subscribe_monitor(pid()) :: :ok
+  @spec subscribe_monitor(pid()) :: [map]
   def subscribe_monitor(pid), do: GenServer.call(__MODULE__, {:subscribe_monitor, pid})
 
   @doc "Stop a subscription started by `subscribe_monitor/1`."
@@ -186,19 +192,20 @@ defmodule Kelix.InstancePool do
   end
 
   def handle_call({:subscribe_monitor, pid}, _from, state) do
-    if MapSet.member?(state.monitor_subs, pid) do
-      {:reply, :ok, state}
-    else
-      ref = Process.monitor(pid)
-
-      state = %{
+    state =
+      if MapSet.member?(state.monitor_subs, pid) do
         state
-        | monitor_subs: MapSet.put(state.monitor_subs, pid),
-          monitor_mons: Map.put(state.monitor_mons, ref, pid)
-      }
+      else
+        ref = Process.monitor(pid)
 
-      {:reply, :ok, state}
-    end
+        %{
+          state
+          | monitor_subs: MapSet.put(state.monitor_subs, pid),
+            monitor_mons: Map.put(state.monitor_mons, ref, pid)
+        }
+      end
+
+    {:reply, joined_rows(state), state}
   end
 
   def handle_call({:unsubscribe_monitor, pid}, _from, state) do
@@ -366,6 +373,22 @@ defmodule Kelix.InstancePool do
         broadcast_counter(state2, domain, :active_calls, Map.get(state2.per_domain, domain))
 
         {:reply, {:accept, pid}, bump(state2, :started)}
+    end
+  end
+
+  # The snapshot `subscribe_monitor/1` answers with: this pool's rows joined with
+  # the FSM view. Reading `FSL.Monitor` from inside a call of ours is safe — that
+  # registry reads its own state and calls nobody — and subscribing is rare
+  # enough that blocking the pool for one read costs nothing a caller will see.
+  defp joined_rows(state) do
+    fsm =
+      case FSL.Monitor.calls() do
+        rows when is_list(rows) -> Map.new(rows, &{&1.slot, &1})
+        _other -> %{}
+      end
+
+    for inst <- Map.values(state.instances) do
+      join_row(to_list_row(inst), Map.get(fsm, inst.id))
     end
   end
 

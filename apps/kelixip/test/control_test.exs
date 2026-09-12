@@ -409,6 +409,11 @@ defmodule Kelix.ControlTest do
     test "subscribe_monitor/1 returns the snapshot, then pushes appearance/state/removal" do
       on_exit(fn -> Control.unsubscribe_monitor(self()) end)
 
+      # One call registers AND snapshots. It used to be two — subscribe, then
+      # read — which is survivable in that order only, because a change landing
+      # between them arrives as a push *and* in the snapshot (a duplicate
+      # upsert, idempotent). One call has no order to get wrong; the same
+      # contract holds one layer down, on FSL.Monitor.subscribe/1.
       assert snapshot = Control.subscribe_monitor(self())
       assert is_list(snapshot)
 
@@ -425,6 +430,22 @@ defmodule Kelix.ControlTest do
 
       assert Control.shutdown_scenario(id) == :ok
       assert_receive {:kelix_monitor, {:remove, ^id}}, 1000
+    end
+
+    test "subscribe_monitor/1 answers the rows that already exist" do
+      on_exit(fn -> Control.unsubscribe_monitor(self()) end)
+
+      pid = spawn_watched("presub.test")
+      assert await_state("presub.test")
+
+      # An instance that was running BEFORE anyone subscribed has to be in the
+      # snapshot: a subscriber that only saw changes from now on would render an
+      # empty table on a busy node.
+      rows = Control.subscribe_monitor(self())
+      assert row = Enum.find(rows, &(&1.domain == "presub.test"))
+      assert row.pid == pid
+      assert row.state == "initial_state"
+      assert row.function == :registrar
     end
 
     test "unsubscribe_monitor/1 stops the pushes" do
