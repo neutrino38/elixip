@@ -255,6 +255,7 @@ defmodule SIP.Scenario do
   """
   defmacro state(name_ast, do: body) do
     ctx = ctx(__CALLER__)
+    host = host(__CALLER__)
     name = state_atom(name_ast)
     fname = :"__state_#{name}"
     check_stay_placement!(body, "state #{name}", __CALLER__)
@@ -267,11 +268,14 @@ defmodule SIP.Scenario do
         # not trigger an "unused variable" warning.
         _ = unquote(ctx)
         # Clear the event type inferred by on_events, so a `goto` in this state
-        # that is not inside a on_events clause stays untyped. Same for the
-        # B2BUA leg/transaction of the matched event: an `after` clause acts on
-        # the inbound leg, not on whatever the previous state matched.
+        # that is not inside an on_events clause stays untyped — that much is
+        # FSL's own bookkeeping. Whatever the binding remembered about the
+        # matched event goes with it: an `after` body acts on the state it is
+        # in, not on whatever the previous one matched.
         Process.delete(:scenario_event_type)
-        SIP.Session.B2bua.forget_event()
+
+        unquote(ctx) =
+          FSL.Host.hook(unquote(host), :on_state_enter, [unquote(ctx)], unquote(ctx))
 
         try do
           unquote(body)
@@ -406,6 +410,7 @@ defmodule SIP.Scenario do
   """
   defmacro on_events(blocks) do
     ctx = ctx(__CALLER__)
+    host = host(__CALLER__)
     do_clauses = Keyword.fetch!(blocks, :do)
 
     # The 1.4 inter-FSM event shapes are gone from the wire (§4.6 of
@@ -440,16 +445,21 @@ defmodule SIP.Scenario do
         do: [],
         else: [shutdown_clause(ctx)]
 
-    # …and media-server-death-aware, the same way and for the same reason
-    # (design docs/design/DESIGN-FRAMEWORK.md#67-the-media-server-as-a-failure-domain, R8). `:server_disconnected` is
-    # delivered to every sink and acted upon by nothing: a scenario without a
-    # clause for it leaves the event in its mailbox and goes on waiting for media
-    # that will never come, until its own `after` fires — if it has one.
+    # …and carrying whatever the binding wants every wait to carry — for SIP,
+    # the media server going away. Each of those is dropped when one of the
+    # scenario's own clauses already covers it, so a policy that wants control
+    # keeps it; the host answers that question clause by clause, and its answer
+    # is allowed to be generous (`c:FSL.Host.clause_covers?/2`).
     #
-    # Injected only when the scenario handles no media death itself, so a policy
-    # that wants control keeps it — the rule `on_events` clauses already follow.
-    media_clauses =
-      if Enum.any?(do_clauses, &handles_media_down?/1), do: [], else: [media_down_clause(ctx)]
+    # The asymmetry with the shutdown clause above is deliberate. That one is
+    # the FSM control protocol and only an explicit `:scenario_ctl` clause opts
+    # out of it; these are policy defaults, for scenarios that never considered
+    # the case rather than to overrule those that did.
+    host_clauses =
+      for {name, clause} <- FSL.Host.hook(host, :injected_clauses, [ctx], []),
+          not Enum.any?(do_clauses, &clause_covers?(host, name, &1)) do
+        clause
+      end
 
     # `stay` re-enters the wait, so the receive lives inside a closure that calls
     # itself. Hygienic unique vars: a state body may hold several on_events, and
@@ -462,10 +472,13 @@ defmodule SIP.Scenario do
     # rightly report as unreachable, once per scenario state.
     instrumented =
       Enum.map(
-        sbb_clauses ++ media_clauses ++ ctl_clauses,
-        &instrument_receive_clause(&1, ctx, nil, nil, namespaces)
+        sbb_clauses ++ host_clauses ++ ctl_clauses,
+        &instrument_receive_clause(&1, ctx, host, nil, nil, namespaces)
       ) ++
-        Enum.map(do_clauses, &instrument_receive_clause(&1, ctx, wait, deadline, namespaces))
+        Enum.map(
+          do_clauses,
+          &instrument_receive_clause(&1, ctx, host, wait, deadline, namespaces)
+        )
 
     {timeout_ast, new_blocks} =
       case Keyword.fetch(blocks, :after) do
@@ -548,8 +561,11 @@ defmodule SIP.Scenario do
   defp calls_sbb_fsm?(_other), do: false
 
   # Does this receive clause already match a {:scenario_ctl, ...} control message?
+  # `:control` is FSL's own reading of `{:scenario_ctl, …}`, so no host is
+  # consulted to answer this — the default one is passed for the shape of the
+  # call, and would answer `nil` if it ever were.
   defp ctl_clause?({:->, _meta, [head, _body]}, namespaces),
-    do: clause_event_type(head, namespaces) == :control
+    do: clause_event_type(head, namespaces, FSL.Host.Default) == :control
 
   defp ctl_clause?(_clause, _namespaces), do: false
 
@@ -566,51 +582,18 @@ defmodule SIP.Scenario do
     clause
   end
 
-  # Would any of this scenario's own clauses catch a media server going away?
-  #
-  # Deliberately generous: a clause matching `{:ms_event, _, :server_disconnected}`
-  # obviously does, but so does one matching every media event
-  # (`{:ms_event, _, evt}` and then deciding), and so does a catch-all. Being
-  # generous errs toward leaving the scenario in charge, which is the safe
-  # direction — the default exists for scenarios that never considered the case,
-  # not to overrule those that did.
-  defp handles_media_down?({:->, _meta, [head, _body]}), do: head_handles_media_down?(head)
-  defp handles_media_down?(_), do: false
-
-  defp head_handles_media_down?([{:when, _meta, [pattern | _guards]}]),
-    do: pattern_handles_media_down?(pattern)
-
-  defp head_handles_media_down?([pattern]), do: pattern_handles_media_down?(pattern)
-  defp head_handles_media_down?(_), do: false
-
-  # `{:ms_event, ref, evt}` is a 3-tuple, i.e. `{:{}, _, elems}` in quoted form.
-  defp pattern_handles_media_down?({:{}, _meta, [:ms_event, _ref, event]}),
-    do: event == :server_disconnected or variable?(event)
-
-  # A bare variable or `_`: a catch-all, which catches this too.
-  defp pattern_handles_media_down?(pattern), do: variable?(pattern)
-
-  defp variable?({name, _meta, ctx}) when is_atom(name) and is_atom(ctx), do: true
-  defp variable?(_), do: false
-
-  # The default reaction: the cooperative shutdown a controller would ask for, so
-  # `on_shutdown` runs if declared (and `:aborted` otherwise), `finalize` releases
-  # the legs and the media, and the caller is answered. R6's rule applied to the
-  # media plane — a dead resource ends the call it was serving, promptly, instead
-  # of being discovered at teardown.
-  #
-  # Idempotent by construction: it leaves the state, so a second
-  # `:server_disconnected` (the MCU case relays the fact AND passes it through)
-  # finds no `on_events` to match against.
-  defp media_down_clause(ctx) do
-    [clause] =
-      quote do
-        {:ms_event, _ref, :server_disconnected} ->
-          {:goto, :__shutdown__, "media server down", :media, unquote(ctx)}
-      end
-
-    clause
+  # Does one of the scenario's own clauses already cover the injected clause
+  # `name`? The question is the host's — it is the one that knows what its clause
+  # is for — and it is asked on the pattern, `when` guard stripped, because that
+  # is what the scenario wrote.
+  defp clause_covers?(host, name, {:->, _meta, [head, _body]}) do
+    case clause_pattern(head) do
+      nil -> false
+      pattern -> FSL.Host.hook(host, :clause_covers?, [name, pattern], false) == true
+    end
   end
+
+  defp clause_covers?(_host, _name, _clause), do: false
 
   @doc "Terminate the scenario successfully, transitioning to the success state."
   defmacro scenario_success(reason \\ "", type \\ nil) do
@@ -1019,6 +1002,12 @@ defmodule SIP.Scenario do
 
   defp ctx(caller), do: Macro.var(ctx_var(caller), nil)
 
+  # The embedding this scenario is written for (FSL.Host). Read at expansion
+  # time, like the context variable and for a sharper reason: three of the hooks
+  # — the event type, the injected clauses and their suppression — are questions
+  # about a *pattern*, and a pattern only exists while the macro is expanding.
+  defp host(caller), do: Module.get_attribute(caller.module, :fsl_host) || FSL.Host.Default
+
   # Extract a state name (atom) from the macro argument, which is either a bare
   # identifier (`initial_state`, `next`, `loop`) parsed as a variable AST node,
   # or a literal atom.
@@ -1036,35 +1025,37 @@ defmodule SIP.Scenario do
   # Instrument a receive clause with two compile-time additions:
   #   1. store the inferred event type in the process dict, so the trailing
   #      `goto` picks it up (event-type inference);
-  #   2. auto-store the matched event: bind it to a hygienic variable via an
-  #      as-pattern (`pattern = evt`) and prepend a call to
-  #      `SIP.Session.CallUAS.auto_store/2`, which stashes an inbound
-  #      INVITE/UPDATE (and its transaction pid) in the context so `reply_invite*`
-  #      can reply without re-passing the request. auto_store is a fully-qualified
-  #      runtime call (not an import): it works in every scenario — including a
-  #      UAC receiving a re-INVITE — and is a no-op for non-offer events.
+  #   2. hand the matched event to the binding (`c:FSL.Host.on_event/2`): bind it
+  #      to a hygienic variable via an as-pattern (`pattern = evt`) and call the
+  #      host with it before the scenario's own clause runs. What SIP does there
+  #      — the leg and the transaction, a dead leg's debts, stashing an inbound
+  #      request — is one function in SIP.FSL.Host, where the order it happens in
+  #      can be read;
   #   3. wrap the clause result: a `{:stay, …}` descriptor re-enters the wait
   #      closure with the context the clause produced, so appdata mutations
   #      survive; anything else is a transition and propagates to the runner.
-  defp instrument_receive_clause({:->, meta, [head, body]}, ctx, wait, deadline, namespaces) do
+  defp instrument_receive_clause(
+         {:->, meta, [head, body]},
+         ctx,
+         host,
+         wait,
+         deadline,
+         namespaces
+       ) do
     # Compute the type from the ORIGINAL head, before the as-pattern rewrite.
-    type = clause_event_type(head, namespaces)
+    type = clause_event_type(head, namespaces, host)
     evt = Macro.unique_var(:evt, __MODULE__)
 
     new_body =
       quote do
         Process.put(:scenario_event_type, unquote(type))
-        # Which B2BUA leg this event came from and which transaction it carries,
-        # so the b2bua_* macros need no direction argument. Runtime, not
-        # compile-time: a catch-all clause ({tag, evt}) has no literal tag to
-        # read off the pattern.
-        SIP.Session.B2bua.note_event(unquote(evt))
-        # A leg that has just died owes answers it will never send. They are
-        # given here, before the scenario's clause runs, so the caller is
-        # answered the moment its callee goes rather than at the teardown
-        # (design docs/design/DESIGN-SIPSTACK.md#57-resilience, R6).
-        unquote(ctx) = SIP.Session.B2bua.note_leg_event(unquote(ctx), unquote(evt))
-        unquote(ctx) = SIP.Session.CallUAS.auto_store(unquote(ctx), unquote(evt))
+
+        # Runtime and not compile-time: a catch-all clause ({tag, evt}) has no
+        # literal tag to read off the pattern, so only the event itself can
+        # answer what the binding needs to know about it.
+        unquote(ctx) =
+          FSL.Host.hook(unquote(host), :on_event, [unquote(ctx), unquote(evt)], unquote(ctx))
+
         unquote(rewrite_stay(body, ctx, wait, deadline))
       end
 
@@ -1220,11 +1211,11 @@ defmodule SIP.Scenario do
 
   # The clause head is a one-element list holding the pattern, optionally wrapped
   # in a `when` guard.
-  defp clause_event_type([{:when, _meta, [pattern | _guards]}], ns),
-    do: pattern_event_type(pattern, ns)
+  defp clause_event_type([{:when, _meta, [pattern | _guards]}], ns, host),
+    do: pattern_event_type(pattern, ns, host)
 
-  defp clause_event_type([pattern], ns), do: pattern_event_type(pattern, ns)
-  defp clause_event_type(_, _ns), do: nil
+  defp clause_event_type([pattern], ns, host), do: pattern_event_type(pattern, ns, host)
+  defp clause_event_type(_, _ns, _host), do: nil
 
   # Tuples with 0, 1 or 3+ elements are `{:{}, _, elems}`; 2-tuples are literal.
   #
@@ -1233,31 +1224,32 @@ defmodule SIP.Scenario do
   # blocks this module calls rather than listed here. It matters beyond the
   # colour in the monitor: a `:sip` event is drawn in the sequence diagram as an
   # arrow FROM THE PEER, and a block's return came from nobody.
-  defp pattern_event_type({:{}, _meta, [first, _outcome, _data]}, namespaces)
+  defp pattern_event_type({:{}, _meta, [first, _outcome, _data]}, namespaces, host)
        when is_atom(first) do
-    if first in namespaces, do: :scenario, else: first_element_type(first)
+    if first in namespaces, do: :scenario, else: first_element_type(first, host)
   end
 
-  defp pattern_event_type({:{}, _meta, [first | _rest]}, _ns), do: first_element_type(first)
-  defp pattern_event_type({first, _second}, _ns), do: first_element_type(first)
-  defp pattern_event_type(_, _ns), do: nil
+  defp pattern_event_type({:{}, _meta, [first | _rest]}, _ns, host),
+    do: first_element_type(first, host)
 
-  # Media events are `{:ms_event, ...}`; inter-FSM messages are `{:parent_msg,
-  # ...}` / `{:child_msg, ...}` / `{:child_exit, ...}`; control messages are
-  # `{:scenario_ctl, ...}`; SIP requests/responses are tuples whose first element
-  # is a method atom, a status code integer, or a bound variable.
-  defp first_element_type(:ms_event), do: :media
-  defp first_element_type(:parent_msg), do: :scenario
-  defp first_element_type(:child_msg), do: :scenario
-  defp first_element_type(:child_exit), do: :scenario
+  defp pattern_event_type({first, _second}, _ns, host), do: first_element_type(first, host)
+  defp pattern_event_type(_, _ns, _host), do: nil
+
+  # What the language owns: its own inter-FSM messages — `{:parent_msg, …}`,
+  # `{:child_msg, …}`, `{:child_exit, …}` — and its control protocol,
+  # `{:scenario_ctl, …}`. Everything else is the binding's to name, and so is the
+  # FALLBACK: an unrecognised leading atom drawing an arrow from a peer in the
+  # sequence diagram is a sentence about SIP, not about state machines.
+  defp first_element_type(:parent_msg, _host), do: :scenario
+  defp first_element_type(:child_msg, _host), do: :scenario
+  defp first_element_type(:child_exit, _host), do: :scenario
   # The 1.4 spellings. Nothing sends them any more; they are still typed here so
   # that a scenario matching one is classified — and warned about — rather than
-  # read as a SIP method (see deprecated_event_tag/1).
-  defp first_element_type(:scenario_msg), do: :scenario
-  defp first_element_type(:scenario_exit), do: :scenario
-  defp first_element_type(:scenario_ctl), do: :control
-  defp first_element_type(first) when is_atom(first), do: :sip
-  defp first_element_type(first) when is_integer(first), do: :sip
-  defp first_element_type({name, _meta, ctx}) when is_atom(name) and is_atom(ctx), do: :sip
-  defp first_element_type(_), do: nil
+  # handed to the binding and read as a method (see warn_deprecated_event/2).
+  defp first_element_type(:scenario_msg, _host), do: :scenario
+  defp first_element_type(:scenario_exit, _host), do: :scenario
+  defp first_element_type(:scenario_ctl, _host), do: :control
+
+  defp first_element_type(element, host),
+    do: FSL.Host.hook(host, :event_type, [element], nil)
 end

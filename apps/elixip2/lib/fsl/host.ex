@@ -33,10 +33,13 @@ defmodule FSL.Host do
   | `c:apply_run_opts/2` | the dialog an inbound request already created, and the request itself |
   | `c:spawn_child/2` | register a `:uas_invite` child with the call dispatcher, so the next inbound INVITE reaches it |
   | `c:finalize/1` | wind down the B2BUA legs, then the media, waiting first for the dialog to end |
+  | `c:on_event/2` | which leg and transaction the event came from, what a dead leg owes, then stash the request |
+  | `c:on_state_enter/1` | forget the matched event's leg and transaction |
+  | `c:event_type/1` | `:ms_event` is media, anything else it is shown is SIP |
+  | `c:injected_clauses/1` | the media server going away |
+  | `c:clause_covers?/2` | whether the scenario already handles that itself |
 
-  More arrive as the remaining seams of the extraction are cut: `c:on_event/2`,
-  `c:on_state_enter/1`, `c:event_type/1`, `c:injected_clauses/0`,
-  `c:clause_covers?/2`, `c:diagram_renderer/0`.
+  One more arrives with the last seam of the extraction: `c:diagram_renderer/0`.
   """
 
   @doc """
@@ -110,12 +113,106 @@ defmodule FSL.Host do
   """
   @callback apply_run_opts(ctx :: FSL.Context.t(), opts :: keyword()) :: FSL.Context.t()
 
+  @doc """
+  Act on an event the machine has just received, before the scenario's own
+  clause runs.
+
+  Called for **every** matched event, including the ones FSL injects itself, so a
+  binding sees the whole stream. SIP does three things here, and their order is
+  the reason this is one callback rather than three: it records which leg and
+  which transaction the event came from (so a clause replying to it needs no
+  direction argument), then answers what a leg that has just died owes — at once,
+  so the caller hears about its callee going away now rather than at the teardown
+  — and only then stashes an inbound request in the slot the reply macros serve.
+  Written as one function, that order is readable; spread over three injected
+  calls, it lived in the expansion of a macro.
+  """
+  @callback on_event(ctx :: FSL.Context.t(), event :: term()) :: FSL.Context.t()
+
+  @doc """
+  Forget whatever the last event left behind, because a state has just been
+  entered.
+
+  The mirror of `c:on_event/2`. FSL clears its own per-event bookkeeping either
+  way; this is for the binding's. SIP forgets the leg and the transaction of the
+  matched event, so an `after` body acts on the inbound leg rather than on
+  whatever the previous state happened to match.
+  """
+  @callback on_state_enter(ctx :: FSL.Context.t()) :: FSL.Context.t()
+
+  @doc """
+  Categorize an event from the **first element of the pattern** that matches it,
+  at macro-expansion time.
+
+  FSL classifies what it owns: its own inter-FSM messages (`:parent_msg`,
+  `:child_msg`, `:child_exit`) and the service-block namespaces a scenario has
+  learned are `:scenario`, its control protocol (`:scenario_ctl`) is `:control`.
+  Everything else is the binding's, and the binding's answer is not decoration:
+  the type decides which lane an arrow is drawn from in the sequence diagram, so
+  `:sip` means "from the peer", which is only meaningful when there is a peer.
+
+  SIP answers `:media` for `:ms_event` and `:sip` for anything else it is shown —
+  a method atom, a status code, a bound variable. That *fallback* is exactly why
+  this is a host decision: an unrecognised leading atom drawing an arrow from a
+  peer is a sentence about SIP, not about state machines.
+
+  `element` is quoted AST, not a value: a bound variable in the pattern arrives
+  as `{name, meta, context}`. Answer `nil` for anything with nothing to say.
+  """
+  @callback event_type(element :: Macro.t()) :: atom() | nil
+
+  @doc """
+  Clauses the binding wants prepended to **every** `on_events` wait, as
+  `{name, quoted_clause}`.
+
+  `ctx` is the context variable of the scenario being compiled, already quoted,
+  so a clause can hand the context back: a binding writes
+  `{:goto, :__shutdown__, "…", :media, unquote(ctx)}` and does not have to know
+  what this particular scenario calls it.
+
+  SIP injects one: a media server going away. `:server_disconnected` is delivered
+  to every sink and acted upon by nothing, so a scenario without a clause for it
+  would sit waiting for media that cannot come until its own `after` fires — if
+  it has one. FSL injects its own cooperative-shutdown clause, and a service
+  block's deadline, and neither is a host's business.
+
+  Run at expansion time. Every injected clause must **leave the state** by
+  construction, which is what lets them be instrumented without the `stay`
+  rewrite and produce no dead branch.
+  """
+  @callback injected_clauses(ctx :: Macro.t()) :: [{atom(), Macro.t()}]
+
+  @doc """
+  Does a clause the scenario wrote itself already cover the injected clause
+  called `name`? If so, the injection is dropped and the scenario keeps control.
+
+  `pattern` is the quoted pattern of one of the scenario's own clauses, `when`
+  guard stripped. Answered clause by clause, and SIP's answer is **deliberately
+  generous**: a clause matching `{:ms_event, _, :server_disconnected}` obviously
+  covers the media clause, but so does one matching every media event, and so
+  does a catch-all. Erring that way leaves the scenario in charge, which is the
+  safe direction — the default exists for scenarios that never considered the
+  case, not to overrule those that did.
+
+  Note that FSL's own shutdown clause is **not** governed by this, and the
+  asymmetry is the point: only an explicit `:scenario_ctl` clause opts out of
+  being stoppable. A scenario that merely writes `event -> …` has not thereby
+  declined to be stopped, and one that could not be stopped would be a node that
+  cannot drain.
+  """
+  @callback clause_covers?(name :: atom(), pattern :: Macro.t()) :: boolean()
+
   @optional_callbacks bootstrap: 0,
                       apply_run_opts: 2,
                       build_context: 1,
                       account: 2,
                       spawn_child: 2,
-                      finalize: 1
+                      finalize: 1,
+                      on_event: 2,
+                      on_state_enter: 1,
+                      event_type: 1,
+                      injected_clauses: 1,
+                      clause_covers?: 2
 
   @doc """
   The host a scenario module declared, or `FSL.Host.Default` when it declared
@@ -147,14 +244,31 @@ defmodule FSL.Host do
   every transition to cover that once is how a hook becomes a cost.
   """
   @spec call(module(), atom(), [term()], term()) :: term()
-  def call(module, fun, args, default) do
-    host = of(module)
+  def call(module, fun, args, default), do: hook(of(module), fun, args, default)
+
+  @doc """
+  Same, on a host that is already known — which is the case inside a macro, where
+  the scenario's host was read off the module at expansion time.
+
+  `Code.ensure_compiled/1` and not `ensure_loaded/1` in the fallback: some of
+  these hooks are asked *while the compiler is running*, and a host being
+  compiled in the same pass has to be waited for rather than declared absent.
+  That is what `ensure_compiled/1` does, and it is the whole reason a
+  compile-time hook can be trusted.
+  """
+  @spec hook(module(), atom(), [term()], term()) :: term()
+  def hook(host, fun, args, default) do
     arity = length(args)
 
     cond do
-      function_exported?(host, fun, arity) -> apply(host, fun, args)
-      Code.ensure_loaded?(host) and function_exported?(host, fun, arity) -> apply(host, fun, args)
-      true -> default
+      function_exported?(host, fun, arity) ->
+        apply(host, fun, args)
+
+      match?({:module, _}, Code.ensure_compiled(host)) and function_exported?(host, fun, arity) ->
+        apply(host, fun, args)
+
+      true ->
+        default
     end
   end
 end

@@ -1,17 +1,19 @@
 defmodule SIP.Test.FSL.OnEventOrder do
   @moduledoc """
-  The three per-event hooks `on_events` instruments into every clause, and the
-  order they run in.
+  What SIP does with every event the machine receives, before the scenario's own
+  clause runs, and the order it does it in.
 
-      SIP.Session.B2bua.note_event(evt)          # which leg, which transaction
-      sip_ctx = SIP.Session.B2bua.note_leg_event(sip_ctx, evt)   # a dead leg's debts
-      sip_ctx = SIP.Session.CallUAS.auto_store(sip_ctx, evt)     # stash the request
+      SIP.FSL.Host.on_event(sip_ctx, evt)
+        SIP.Session.B2bua.note_event(evt)          # which leg, which transaction
+        |> SIP.Session.B2bua.note_leg_event(evt)   # a dead leg's debts
+        |> SIP.Session.CallUAS.auto_store(evt)     # stash the request
       <the scenario's own clause body>
 
-  They collapse into one `c:on_event/2` callback
-  (finite-state-language/elixir/docs/extraction-plan.md §4.3), which is the
-  point of writing them as one function — the order becomes readable instead of
-  living in the expansion of a macro.
+  The three used to be three calls injected into every `on_events` clause; they
+  are one `c:FSL.Host.on_event/2` now
+  (finite-state-language/elixir/docs/extraction-plan.md §4.3). That is the whole
+  point of writing them as one function: the order becomes three statements a
+  reader can see, instead of living in the expansion of a macro.
 
   What each one buys:
 
@@ -30,14 +32,15 @@ defmodule SIP.Test.FSL.OnEventOrder do
   clause" is what those assertions actually check, and a hook dropped by the
   collapse fails one of them.
 
-  Their relative *order*, though, is invisible at runtime today: the three act
-  on disjoint classes of event (a tagged response, a dead leg, an inbound
-  request of a stored method), so no event reaches two of them and no
-  observation can tell which ran first. That is a property of today's events,
-  not a guarantee — an event both would classify is all it would take — so the
-  order is pinned where it is actually written: in the expansion of `on_events`,
-  by the last test of this file. That is also the artefact `c:on_event/2`
-  replaces, which is the right thing to be watching.
+  Their relative *order*, though, is invisible at runtime: the three act on
+  disjoint classes of event (a tagged response, a dead leg, an inbound request
+  of a stored method), so no event reaches two of them and no observation can
+  tell which ran first. That is a property of today's events and not a guarantee
+  — an event both would classify is all it would take — which is exactly why it
+  matters that the order is now written in one function rather than spread
+  across a macro expansion. The last blocks of this file check the two halves of
+  that: the host is called once per clause and its result threaded, and each of
+  its three steps has happened by the time it returns.
   """
   use ExUnit.Case
 
@@ -256,12 +259,11 @@ defmodule SIP.Test.FSL.OnEventOrder do
     assert_receive {:done, :ok}, 5_000
   end
 
-  # ── the order, where it is written ──────────────────────────────────────────
+  # ── what the expansion carries ──────────────────────────────────────────────
 
-  # The three hooks act on disjoint event classes, so no runtime observation can
-  # order them (see the moduledoc). The order lives in the macro expansion, and
-  # that is what `c:on_event/2` replaces — so it is read there, from a module
-  # that expands one `on_events` at compile time and keeps the result.
+  # One hook per clause, and the host named at compile time. Read off a module
+  # that expands one `on_events` while it is being compiled and keeps the
+  # result, because that is the only place an instrumented clause exists.
   defmodule Expansion do
     use SIP.Scenario
 
@@ -288,7 +290,18 @@ defmodule SIP.Test.FSL.OnEventOrder do
       %{src: Expansion.expansion()}
     end
 
-    test "carries the three hooks, in the documented order", %{src: src} do
+    test "calls the scenario's own host once, and threads the context", %{src: src} do
+      # The variable reads `sip_ctx` and not `var!(sip_ctx)` because the name is
+      # a parameter of the binding now: the expansion carries the variable
+      # itself — `Macro.var(:sip_ctx, nil)`, which is what `var!/1` produces —
+      # rather than a `var!` call left to expand later.
+      assert src =~ "sip_ctx = FSL.Host.hook(SIP.FSL.Host, :on_event, [sip_ctx, evt], sip_ctx)"
+
+      # …and the host was resolved while compiling, not looked up per event.
+      refute src =~ "__fsl_host__"
+    end
+
+    test "stores the inferred type before handing the event over", %{src: src} do
       at = fn needle ->
         case :binary.match(src, needle) do
           {pos, _len} -> pos
@@ -296,32 +309,14 @@ defmodule SIP.Test.FSL.OnEventOrder do
         end
       end
 
-      # The inferred type is stored first: the trailing transition reads it back.
-      assert at.("Process.put(:scenario_event_type") <
-               at.("SIP.Session.B2bua.note_event")
-
-      assert at.("SIP.Session.B2bua.note_event") <
-               at.("SIP.Session.B2bua.note_leg_event")
-
-      assert at.("SIP.Session.B2bua.note_leg_event") <
-               at.("SIP.Session.CallUAS.auto_store")
-    end
-
-    test "threads the context through the two hooks that produce one", %{src: src} do
-      # note_event returns :ok and is called for its effect; the other two
-      # rebind the context, and each must be given the previous one's output.
-      #
-      # The variable reads `sip_ctx` and not `var!(sip_ctx)` because the name is
-      # now a parameter of the binding: the expansion carries the variable
-      # itself — `Macro.var(:sip_ctx, nil)`, which is exactly what `var!/1`
-      # produces — rather than a `var!` call left to expand later.
-      assert src =~ "sip_ctx = SIP.Session.B2bua.note_leg_event(sip_ctx, evt)"
-      assert src =~ "sip_ctx = SIP.Session.CallUAS.auto_store(sip_ctx, evt)"
+      # The trailing transition reads the type back, so it has to be written
+      # before anything in the clause can transition.
+      assert at.("Process.put(:scenario_event_type") < at.("FSL.Host.hook")
     end
 
     # The clauses `on_events` injects are instrumented like any other: a media
-    # death or a shutdown request is an event the host gets to see, not a side
-    # door around the per-event hooks.
+    # death or a shutdown request is an event the binding gets to see, not a side
+    # door around the per-event hook.
     test "injected clauses are instrumented too", %{src: src} do
       for clause <- [
             "{:ms_event, _ref, :server_disconnected}",
@@ -330,10 +325,71 @@ defmodule SIP.Test.FSL.OnEventOrder do
         assert src =~ clause
       end
 
-      # Three clauses in this wait (two injected, one the scenario's own), three
-      # copies of each hook.
-      assert length(String.split(src, "SIP.Session.B2bua.note_event")) - 1 == 3
-      assert length(String.split(src, "SIP.Session.CallUAS.auto_store")) - 1 == 3
+      # Three clauses in this wait — two injected, one the scenario's own — and
+      # one hook each.
+      assert length(String.split(src, ":on_event")) - 1 == 3
+    end
+  end
+
+  # ── the three steps, on the host itself ─────────────────────────────────────
+
+  # `on_event/2` is an ordinary function now, so each of its steps can be asked
+  # for directly. That is what the collapse bought: the unit under test is the
+  # binding's reading of an event, not the shape of a macro expansion.
+  describe "SIP.FSL.Host.on_event/2" do
+    test "step 1: records which leg the event came from, and its transaction", %{stub: stub} do
+      SIP.Session.B2bua.forget_event()
+      tid = self()
+
+      SIP.FSL.Host.on_event(%SIP.Context{dialogpid: stub}, {:outbound, {200, %{}, tid, stub}})
+
+      assert Process.get(:scenario_event_leg) == :outbound
+      assert Process.get(:scenario_event_tid) == tid
+    end
+
+    test "step 2: answers what a leg that has just died owes", %{stub: stub} do
+      req = inbound_invite()
+      tid = self()
+
+      ctx =
+        FSL.Context.appdata_set(%SIP.Context{dialogpid: stub}, :__b2bua__, %State{
+          pending: %{tid => %Pending{orig_req: req, orig_leg: :inbound, method: :INVITE}}
+        })
+
+      ctx = SIP.FSL.Host.on_event(ctx, {:outbound, {:dialog_terminated, stub, :transport_down}})
+
+      assert_receive {:replied, 487, "Request Terminated", ^req, []}, 2_000
+      # …and the context it hands back has forgotten the request it just answered.
+      assert SIP.Session.B2bua.pending(ctx) == []
+    end
+
+    test "step 3: stashes an inbound request, with its transaction and dialog", %{stub: stub} do
+      req = inbound_invite()
+      tid = self()
+
+      ctx = SIP.FSL.Host.on_event(%SIP.Context{}, {:INVITE, req, tid, stub})
+
+      assert FSL.Context.appdata_get(ctx, :last_uas_req) == req
+      assert FSL.Context.appdata_get(ctx, :last_uas_req_tid) == tid
+      assert ctx.dialogpid == stub
+    end
+
+    test "a tagged event is not stashed: the slot is what reply_invite answers", %{stub: stub} do
+      event = {:outbound, {:INVITE, inbound_invite(), self(), stub}}
+      ctx = SIP.FSL.Host.on_event(%SIP.Context{}, event)
+
+      assert FSL.Context.appdata_get(ctx, :last_uas_req) == nil
+    end
+  end
+
+  describe "SIP.FSL.Host.on_state_enter/1" do
+    test "forgets the leg and the transaction of the matched event", %{stub: stub} do
+      SIP.FSL.Host.on_event(%SIP.Context{}, {:outbound, {200, %{}, self(), stub}})
+      assert Process.get(:scenario_event_leg) == :outbound
+
+      assert SIP.FSL.Host.on_state_enter(%SIP.Context{}) == %SIP.Context{}
+      assert Process.get(:scenario_event_leg) == nil
+      assert Process.get(:scenario_event_tid) == nil
     end
   end
 end

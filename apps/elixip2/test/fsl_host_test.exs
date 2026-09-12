@@ -272,4 +272,147 @@ defmodule SIP.Test.FSL.HostTest do
       assert_receive {:child_kind, :something_only_a_binding_knows}
     end
   end
+
+  # ── The three compile-time hooks ────────────────────────────────────────────
+
+  # A binding FSL has never heard of: it names its own event type, and it wants
+  # a clause of its own in every wait. This is the yardstick of §4.10 — the test
+  # of whether a seam is cut in the right place is not "does SIP still work" but
+  # whether a second binding could be written without touching FSL.
+  defmodule MatrixHost do
+    @behaviour FSL.Host
+
+    @impl true
+    def build_context(config) do
+      Enum.reduce(config, %FSL.Context{}, fn {k, v}, ctx ->
+        FSL.Context.appdata_set(ctx, k, v)
+      end)
+    end
+
+    # `:matrix` is a type FSL has no table entry for, and it must survive to the
+    # monitor and to the diagram exactly as `:sip` does.
+    @impl true
+    def event_type(:room_event), do: :matrix
+    def event_type(_element), do: nil
+
+    # Its own failure domain: the homeserver going away.
+    @impl true
+    def injected_clauses(ctx) do
+      [
+        {:server_gone,
+         quote do
+           {:homeserver, :gone} ->
+             {:goto, :__shutdown__, "homeserver gone", :matrix, unquote(ctx)}
+         end
+         |> hd()}
+      ]
+    end
+
+    @impl true
+    def clause_covers?(:server_gone, {:homeserver, _any}), do: true
+    def clause_covers?(_name, _pattern), do: false
+  end
+
+  defmodule MatrixBot do
+    use SIP.Scenario, host: MatrixHost
+
+    state initial_state do
+      on_events do
+        {:room_event, _payload} ->
+          send(appdata_get(:probe), {:typed, Process.get(:scenario_event_type)})
+          scenario_success("read the room")
+      after
+        5_000 -> scenario_failure("nothing came")
+      end
+    end
+  end
+
+  # Handles the homeserver itself, so the host's clause must not be injected
+  # ahead of it.
+  defmodule MatrixAware do
+    use SIP.Scenario, host: MatrixHost
+
+    state initial_state do
+      on_events do
+        {:homeserver, what} -> scenario_success("mine: #{inspect(what)}")
+      after
+        5_000 -> scenario_failure("clause never ran")
+      end
+    end
+  end
+
+  defp run_bot(module) do
+    test_pid = self()
+
+    spawn(fn ->
+      send(
+        test_pid,
+        {:done, SIP.Scenario.Runner.run_instance(module, appdata: %{probe: test_pid})}
+      )
+    end)
+  end
+
+  describe "c:event_type/1" do
+    test "a type the language has no table entry for survives" do
+      pid = run_bot(MatrixBot)
+      send(pid, {:room_event, %{}})
+
+      assert_receive {:typed, :matrix}, 5_000
+      assert_receive {:done, :ok}, 5_000
+    end
+
+    test "what the language owns, the language answers — with no host at all" do
+      # :parent_msg / :child_msg / :child_exit are :scenario and :scenario_ctl is
+      # :control whatever the binding is, so a host that answers nothing still
+      # gets its inter-FSM messages typed.
+      assert SIP.FSL.Host.event_type(:ms_event) == :media
+      assert SIP.FSL.Host.event_type(:INVITE) == :sip
+      assert SIP.FSL.Host.event_type(200) == :sip
+      # A bound variable in the pattern, as quoted AST.
+      assert SIP.FSL.Host.event_type({:tag, [], nil}) == :sip
+      assert SIP.FSL.Host.event_type("not a pattern element") == nil
+    end
+  end
+
+  describe "c:injected_clauses/1 and c:clause_covers?/2" do
+    test "the host's own clause is injected, and ends the run" do
+      pid = run_bot(MatrixBot)
+      send(pid, {:homeserver, :gone})
+
+      # Aborted, not failed: nothing went wrong with the machine, its
+      # homeserver went away — the same reading SIP gives a dead media server.
+      assert_receive {:done, {:aborted, _reason}}, 5_000
+    end
+
+    test "…unless the scenario already covers it" do
+      pid = run_bot(MatrixAware)
+      send(pid, {:homeserver, :gone})
+
+      assert_receive {:done, :ok}, 5_000
+    end
+
+    test "a host with no clauses of its own adds none" do
+      assert FSL.Host.hook(FSL.Host.Default, :injected_clauses, [Macro.var(:ctx, nil)], []) == []
+      assert FSL.Host.hook(FSL.Host.Default, :clause_covers?, [:whatever, nil], false) == false
+    end
+
+    test "SIP's clause is the media server going away, generously suppressed" do
+      assert [{:media_down, clause}] =
+               SIP.FSL.Host.injected_clauses(Macro.var(:sip_ctx, nil))
+
+      assert Macro.to_string(clause) =~ ":server_disconnected"
+      assert Macro.to_string(clause) =~ "media server down"
+
+      # The generosity, clause by clause (the end-to-end rule is pinned in
+      # fsl_injected_clause_suppression_test).
+      covers? = &SIP.FSL.Host.clause_covers?(:media_down, &1)
+
+      assert covers?.({:{}, [], [:ms_event, {:_, [], nil}, :server_disconnected]})
+      assert covers?.({:{}, [], [:ms_event, {:_, [], nil}, {:evt, [], nil}]})
+      assert covers?.({:event, [], nil})
+      refute covers?.({:{}, [], [:ms_event, {:_, [], nil}, :ice_connected]})
+      # …and it says nothing about a clause it was not asked about.
+      refute SIP.FSL.Host.clause_covers?(:something_else, {:event, [], nil})
+    end
+  end
 end

@@ -297,4 +297,128 @@ defmodule SIP.FSL.Host do
       req -> FSL.Context.appdata_set(sip_ctx, :inbound_request, req)
     end
   end
+
+  # ── Every event ─────────────────────────────────────────────────────────────
+
+  @doc """
+  What SIP does with an event the machine has just received, before the
+  scenario's own clause runs — and the order is the reason this is one function.
+
+    1. **which leg, which transaction.** Recorded first, because it is what the
+       `b2bua_*` verbs read to know where to act: a clause replying to the event
+       it just matched is not asked for a direction.
+    2. **what a leg that has just died owes.** A dialog dying is not news the
+       scenario has to translate: whatever it decides next, the requests that leg
+       was going to answer never will be, and someone is waiting for each of
+       them. They are answered here, at once, on the leg they came from — so the
+       caller hears about its callee going away now rather than at the teardown
+       (`docs/design/DESIGN-SIPSTACK.md#57-resilience`, R6).
+    3. **the inbound request, stashed last**, along with the dialog pid, in the
+       slot `reply_invite*` and `last_uas_req/0` serve.
+
+  Spread over three calls injected into every `on_events` clause, that order
+  lived in the expansion of a macro. Here it can be read.
+  """
+  @impl true
+  def on_event(sip_ctx, event) do
+    SIP.Session.B2bua.note_event(event)
+
+    sip_ctx
+    |> SIP.Session.B2bua.note_leg_event(event)
+    |> SIP.Session.CallUAS.auto_store(event)
+  end
+
+  @doc """
+  Forget the leg and the transaction of the matched event, because a state has
+  just been entered.
+
+  An `after` body acts on the inbound leg, not on whatever the previous state
+  happened to match.
+  """
+  @impl true
+  def on_state_enter(sip_ctx) do
+    SIP.Session.B2bua.forget_event()
+    sip_ctx
+  end
+
+  # ── Categorizing an event ───────────────────────────────────────────────────
+
+  @doc """
+  `:media` for a media-server event, `:sip` for everything else — a method atom,
+  a status code, or a bound variable standing for either.
+
+  The fallback is the point, and it is why this is SIP's answer and not the
+  language's: an unrecognised leading atom is read as coming *from the peer*, and
+  drawn that way in the sequence diagram. That sentence only means something
+  where there is a peer.
+
+  `element` is quoted AST: `{name, meta, context}` is a bound variable in the
+  scenario's pattern.
+  """
+  @impl true
+  def event_type(:ms_event), do: :media
+  def event_type(element) when is_atom(element), do: :sip
+  def event_type(element) when is_integer(element), do: :sip
+
+  def event_type({name, _meta, ctx_arg}) when is_atom(name) and is_atom(ctx_arg), do: :sip
+
+  def event_type(_element), do: nil
+
+  # ── The clause every wait carries ───────────────────────────────────────────
+
+  @doc """
+  One clause, prepended to every `on_events`: the media server going away.
+
+  `:server_disconnected` is delivered to every sink and acted upon by nothing, so
+  a scenario without a clause for it leaves the event in its mailbox and goes on
+  waiting for media that cannot come, until its own `after` fires — if it has
+  one. Six reference scenarios closed that by hand; the seventh was always going
+  to forget (`docs/design/DESIGN-FRAMEWORK.md#67-the-media-server-as-a-failure-domain`, R8).
+
+  The reaction is the cooperative shutdown a controller would have asked for, so
+  `on_shutdown` runs if declared (`:aborted` otherwise), the legs and the media
+  are released, and the caller is answered. R6's rule applied to the media plane:
+  a dead resource ends the call it was serving, promptly, instead of being
+  discovered at teardown.
+
+  Idempotent by construction, because it leaves the state: a second
+  `:server_disconnected` — the MCU case relays the fact AND passes it through —
+  finds no `on_events` to match against.
+  """
+  @impl true
+  def injected_clauses(ctx), do: [{:media_down, media_down_clause(ctx)}]
+
+  defp media_down_clause(ctx) do
+    [clause] =
+      quote do
+        {:ms_event, _ref, :server_disconnected} ->
+          {:goto, :__shutdown__, "media server down", :media, unquote(ctx)}
+      end
+
+    clause
+  end
+
+  @doc """
+  Would one of this scenario's own clauses catch a media server going away?
+
+  **Deliberately generous.** A clause matching `{:ms_event, _, :server_disconnected}`
+  obviously does, but so does one matching every media event
+  (`{:ms_event, _, evt}` and then deciding), and so does a catch-all. Being
+  generous errs toward leaving the scenario in charge, which is the safe
+  direction — the default exists for scenarios that never considered the case,
+  not to overrule those that did.
+  """
+  @impl true
+  def clause_covers?(:media_down, pattern), do: pattern_handles_media_down?(pattern)
+  def clause_covers?(_name, _pattern), do: false
+
+  # `{:ms_event, ref, evt}` is a 3-tuple, i.e. `{:{}, _, elems}` in quoted form.
+  defp pattern_handles_media_down?({:{}, _meta, [:ms_event, _ref, event]}),
+    do: event == :server_disconnected or variable?(event)
+
+  # A bare variable or `_`: a catch-all, which catches this too.
+  defp pattern_handles_media_down?(pattern), do: variable?(pattern)
+
+  defp variable?({name, _meta, ctx_arg}) when is_atom(name) and is_atom(ctx_arg), do: true
+  defp variable?(_), do: false
 end
