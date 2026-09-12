@@ -39,6 +39,16 @@ The user-facing counterparts live at the repository root —
 | [kelixip_liveview.md](kelixip_liveview.md), [liveview-adapter.md](liveview-adapter.md) | a real-time web console over kelixip |
 | [moteli-reboot.md](moteli-reboot.md) | RabbitMQ + protobuf control plane for the media servers (2.0) |
 
+## Designed elsewhere
+
+One open design does not live here, because its subject does not either:
+**extracting FSL as a standalone hex package** is planned in the
+finite-state-language repository, at
+[`elixir/docs/extraction-plan.md`](https://github.com/neutrino38/finite-state-language/blob/main/elixir/docs/extraction-plan.md).
+It inventories what leaves `apps/elixip2/lib/dsl/`, every coupling to cut, and
+what stays on this side — `SIP.Scenario` keeps its name as a facade, and no
+scenario or kelixip script changes.
+
 ## Notes
 
 [notes/](notes/) holds what is neither design nor plan: source studies of other
