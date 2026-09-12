@@ -102,6 +102,130 @@ defmodule Kelix.Control do
   def unsubscribe_monitor(pid), do: Kelix.InstancePool.unsubscribe_monitor(pid)
 
   @doc """
+  Subscribe `pid` to domain counter changes as they happen (kelescope's live
+  domain list, `docs/design/kelixip_liveview.md`) — the active-calls half from
+  `Kelix.InstancePool`, the registrations half from the registrar module (a
+  no-op when it is not loaded: no domain ever registers, so nothing is missed).
+  Returns the current snapshot (`domains/0`'s shape); `pid` then receives
+  `{:kelix_domain_counter, domain, :active_calls | :registrations, count}` per
+  counter change, no polling needed.
+  """
+  @spec subscribe_domain_counters(pid()) :: [map]
+  def subscribe_domain_counters(pid) do
+    Kelix.InstancePool.subscribe_domain_counters(pid)
+    registrar_facade(:subscribe_domain_counters, [pid])
+    domains()
+  end
+
+  @doc "Stop a subscription started by `subscribe_domain_counters/1`."
+  @spec unsubscribe_domain_counters(pid()) :: :ok
+  def unsubscribe_domain_counters(pid) do
+    Kelix.InstancePool.unsubscribe_domain_counters(pid)
+    registrar_facade(:unsubscribe_domain_counters, [pid])
+    :ok
+  end
+
+  defp registrar_facade(fun, args),
+    do: safe(fn -> Kelix.ModuleRegistry.facade("registrar", fun, args, :ok) end, :ok)
+
+  @doc """
+  Subscribe `pid` to one domain's registration detail as it changes (kelescope's
+  live registrations panel, `docs/design/kelixip_liveview.md`) — a no-op when the
+  registrar module is not loaded: no domain ever registers, so nothing is missed.
+  `domain` is matched the way inbound traffic is — name and aliases,
+  case-insensitively. Returns the same `%{domain, registrations}` entry
+  `registrations/1` returns; `pid` then receives `{:kelix_registrations, domain,
+  {:upsert, %{domain, aor, contacts}}}` (`domain` the canonical name) each time an
+  AOR gains or keeps a live contact, and `{:kelix_registrations, domain, {:remove,
+  aor}}` when its last one goes — no polling needed.
+  """
+  @spec subscribe_registrations(pid(), String.t()) :: {:ok, map} | {:error, :not_found}
+  def subscribe_registrations(pid, domain) when is_binary(domain) do
+    with {:ok, name} <- resolve_domain(domain) do
+      registrar_facade(:subscribe_registrations, [name, pid])
+      {:ok, domain_registrations(name)}
+    end
+  end
+
+  @doc "Stop a subscription started by `subscribe_registrations/2`."
+  @spec unsubscribe_registrations(pid(), String.t()) :: :ok
+  def unsubscribe_registrations(pid, domain) when is_binary(domain) do
+    case resolve_domain(domain) do
+      {:ok, name} -> registrar_facade(:unsubscribe_registrations, [name, pid])
+      {:error, _} -> :ok
+    end
+  end
+
+  @doc """
+  Subscribe `pid` to the conference list as it changes (kelescope's conferencing
+  page — contract `docs/design/mcu-live-push.md`). Returns the current list;
+  `pid` then receives `{:kelix_conferences, {:upsert, conf_row}}` and
+  `{:kelix_conferences, {:remove, uid}}`, no polling needed.
+
+  `conf_row` is the row `mcu conference.list` returns. `owner` is the process
+  holding the subscription — monitor it and re-subscribe on `:DOWN`, or a module
+  restart stops the push silently. `owner: nil` with an empty list is the answer
+  when the conferencing module is not loaded: no conference can exist without it,
+  so there is nothing to watch and nothing to monitor.
+  """
+  @spec subscribe_conferences(pid()) :: {:ok, %{owner: pid() | nil, conferences: [map]}}
+  def subscribe_conferences(pid),
+    do: mcu_facade(:subscribe_conferences, [pid], {:ok, %{owner: nil, conferences: []}})
+
+  @doc "Stop a subscription started by `subscribe_conferences/1`."
+  @spec unsubscribe_conferences(pid()) :: :ok
+  def unsubscribe_conferences(pid) do
+    mcu_facade(:unsubscribe_conferences, [pid], :ok)
+    :ok
+  end
+
+  @doc """
+  Subscribe `pid` to one conference and its roster (an expanded panel). Returns the
+  current row and participants; `pid` then receives `{:kelix_conference, uid,
+  {:snapshot, %{conference:, participants:}}}` on every change, and
+  `{:kelix_conference, uid, :destroyed}` at the end.
+
+  The roster is pushed whole, in admission order — a ringing leg has no `part_id`
+  yet, so there is no key a per-participant delta could name.
+  """
+  @spec subscribe_conference(pid(), String.t()) ::
+          {:ok, %{owner: pid(), conference: map, participants: [map]}} | {:error, :not_found}
+  def subscribe_conference(pid, uid) when is_binary(uid),
+    do: mcu_facade(:subscribe_conference, [pid, uid], {:error, :not_found})
+
+  @doc "Stop a subscription started by `subscribe_conference/2`."
+  @spec unsubscribe_conference(pid(), String.t()) :: :ok
+  def unsubscribe_conference(pid, uid) when is_binary(uid) do
+    mcu_facade(:unsubscribe_conference, [pid, uid], :ok)
+    :ok
+  end
+
+  @doc """
+  Subscribe `pid` to one conference's participant statistics: one
+  `{:kelix_conference_stats, uid, sample}` immediately, then one per
+  `interval_ms` for as long as the subscription lasts.
+
+  Meant to follow an expanded panel and to be dropped when it collapses: a sweep is
+  one RPC per connected leg on the media server's own control channel.
+  `{:error, :disabled}` when the module's `stats_interval_ms` is `0`.
+  """
+  @spec subscribe_conference_stats(pid(), String.t()) ::
+          {:ok, %{owner: pid(), interval_ms: pos_integer}}
+          | {:error, :not_found | :disabled}
+  def subscribe_conference_stats(pid, uid) when is_binary(uid),
+    do: mcu_facade(:subscribe_conference_stats, [pid, uid], {:error, :not_found})
+
+  @doc "Stop a subscription started by `subscribe_conference_stats/2`."
+  @spec unsubscribe_conference_stats(pid(), String.t()) :: :ok
+  def unsubscribe_conference_stats(pid, uid) when is_binary(uid) do
+    mcu_facade(:unsubscribe_conference_stats, [pid, uid], :ok)
+    :ok
+  end
+
+  defp mcu_facade(fun, args, default),
+    do: safe(fn -> Kelix.ModuleRegistry.facade("mcu", fun, args, default) end, default)
+
+  @doc """
   Every served domain and its registrations (`kelictl registration list`), in
   `domains.toml` order.
 
@@ -363,9 +487,48 @@ defmodule Kelix.Control do
     end
   end
 
+  @doc """
+  Same as `unregister/3`, but `admin` identifies who asked for it — kelescope
+  confirms this action and requires a name before sending it
+  (`docs/design/kelixip_liveview.md`), traced here in this node's own logs
+  rather than merely returned to the caller.
+  """
+  @spec unregister(String.t(), String.t(), String.t() | :all, String.t() | nil) ::
+          :ok | :notfound
+  def unregister(domain, aor, contact, admin) do
+    result = unregister(domain, aor, contact)
+
+    Logger.info(
+      module: __MODULE__,
+      message:
+        "unregister #{domain}/#{aor} contact=#{inspect(contact)} " <>
+          "by admin=#{admin || "unknown"}: #{inspect(result)}"
+    )
+
+    result
+  end
+
   @doc "Cooperatively shut down one scenario by id (`kelictl stop <id>`)."
   @spec shutdown_scenario(pos_integer) :: :ok | {:error, :not_found}
   def shutdown_scenario(id) when is_integer(id), do: Kelix.InstancePool.shutdown(id)
+
+  @doc """
+  Same as `shutdown_scenario/1`, but `admin` identifies who asked for it —
+  kelescope confirms this action and requires a name before sending it
+  (`docs/design/kelixip_liveview.md`), traced here in this node's own logs
+  rather than merely returned to the caller.
+  """
+  @spec shutdown_scenario(pos_integer, String.t() | nil) :: :ok | {:error, :not_found}
+  def shutdown_scenario(id, admin) when is_integer(id) do
+    result = shutdown_scenario(id)
+
+    Logger.info(
+      module: __MODULE__,
+      message: "shutdown_scenario #{id} by admin=#{admin || "unknown"}: #{inspect(result)}"
+    )
+
+    result
+  end
 
   @doc """
   Reload one or more scenario scripts by name (`kelictl reload-script <name…>`).

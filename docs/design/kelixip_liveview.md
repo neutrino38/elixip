@@ -1,8 +1,14 @@
 # kelixip admin web UI — architecture note
 
-Status: **exploratory** (2026-07-26, push mechanism decided 2026-08-21). Captures
-the locked decisions for a real-time web admin UI over kelixip. No code yet on
-the kelixip side.
+Status: **exploratory** (2026-07-26, push mechanism decided 2026-08-21, domain
+counters push decided 2026-09-07, registration detail push + admin-traced
+destructive actions decided 2026-09-08, conference push decided 2026-09-09).
+Captures the locked decisions for a real-time web admin UI over kelixip.
+`Kelix.Control.subscribe_monitor/1`, `subscribe_domain_counters/1`,
+`subscribe_registrations/2`, the three conference topics of
+[mcu-live-push.md](mcu-live-push.md), and the `admin` argument on `unregister/4` /
+`shutdown_scenario/2` are implemented; the rest of this note is still ahead of the
+code.
 
 The app is **kelescope** (`github.com/neutrino38/kelescope`, separate repo). It
 implements this note; its own Phase 1 (monitor + stop) plan lives in
@@ -80,6 +86,91 @@ the pattern already in the codebase:
   as the call's return value, then row-level `send/2` updates as they happen —
   no polling on the kelescope side.
 
+### Domain counters push (decided 2026-09-07)
+
+kelescope's domain list (`domains/0`'s `active_calls` / `registrations`) had no
+push counterpart: a domain's counters only changed on the next manual refresh.
+Same subscriber-list-plus-`send/2` mechanism as scenario monitoring, split
+across the two surfaces that actually hold each count:
+
+- **Active calls** — `Kelix.InstancePool` already keeps `per_domain` (§4.2). It
+  gained its own `counter_subs: MapSet(pid)` (kept apart from `monitor_subs`: a
+  subscriber may want one push without the other) plus
+  `subscribe_domain_counters/1` / `unsubscribe_domain_counters/1`. Every
+  `accept/4` and every instance's `:DOWN` now also `send/2`s
+  `{:kelix_domain_counter, domain, :active_calls, count}`.
+- **Registrations** — `Kelix.Mod.Registrar` gained the same `count_subs` plus
+  the same two functions, on the model of `subscribe_register_event/2`, but
+  subscribing to every domain at once rather than one AOR: kelescope's domain
+  list wants all of them live, and a per-AOR subscription for every AOR of
+  every domain would be the wrong granularity to manage. `notify/4` (already
+  called on every registered/unregistered/expired/disconnected transition)
+  additionally `send/2`s `{:kelix_domain_counter, domain, :registrations,
+  count}`, the count read off the domain's own ETS table size — cheap, and
+  exactly what `Kelix.Control.domain/1` counts.
+- **Exposed through `Kelix.Control`**, as one call: `subscribe_domain_counters/1`
+  subscribes to both (the registrar half through `Kelix.ModuleRegistry.facade/4`,
+  a no-op when the module is not loaded — no domain ever registers, so nothing
+  is missed) and returns the current snapshot (`domains/0`'s shape); the pid
+  then receives `{:kelix_domain_counter, domain, :active_calls | :registrations,
+  count}` per counter change. `unsubscribe_domain_counters/1` stops both.
+
+### Registration detail push + admin-traced destructive actions (decided 2026-09-08)
+
+Two gaps `subscribe_domain_counters/1` deliberately left open (it pushes a
+*count*, not the AORs behind it) and one the write verbs never had at all
+(kelescope now asks who is doing something before it does it):
+
+- **Registration detail push** — kelescope's registrations panel wants to open
+  a domain and see it update live, not re-fetch on every AOR change.
+  `Kelix.Mod.Registrar` gained `detail_subs: %{domain => MapSet(pid)}` (one
+  domain at a time, unlike `count_subs`: kelescope only ever has one panel open,
+  and the alternative — every domain's full detail to every subscriber — is the
+  wrong granularity for something this much bigger than a count) plus
+  `subscribe_registrations/2` / `unsubscribe_registrations/2`. `notify/4` now
+  also renders and `send/2`s `{:kelix_registrations, domain, {:upsert,
+  %{domain, aor, contacts}}}` when the AOR still has a live contact, or
+  `{:remove, aor}` when its last one is gone — skipped entirely when nobody
+  subscribed to that domain, so a domain nobody is watching costs nothing
+  beyond the existing `count_subs` push. The render duplicates `Kelix.Control`'s
+  contact rendering (`uri`/`source`/`transport` strings) rather than sharing it:
+  the core cannot reference this module's struct at compile time (§16.12), so
+  it renders through `Map.get` structurally; this side owns `%Contact{}`
+  directly and renders it as itself. Exposed through
+  `Kelix.Control.subscribe_registrations/2`, returning the same
+  `%{domain, registrations}` entry `registrations/1` does.
+- **Admin-traced `unregister` and `shutdown_scenario`** — kelescope confirms
+  these two destructive actions in a popup that requires a name before sending
+  the request, so the action can be traced back to a person in kelixip's own
+  logs — kelictl and the REST frontal have no such identity to offer and are
+  unaffected: `unregister/4` and `shutdown_scenario/2` are new arities, each
+  calling the existing 3-/1-arity verb unchanged and then `Logger.info`-ing the
+  domain/AOR/scenario id, the admin name and the outcome — kelictl/REST callers
+  stay on the untraced arity, so their behaviour does not change either.
+  Nothing here is authentication — `admin` is free text, exactly what kelescope
+  collected in its popup — only a trace of who *said* they did it; real identity
+  is `docs/design/kelixip_liveview.md`'s own open AuthN/Z question, not
+  resolved by this.
+
+### Conference push (decided and implemented 2026-09-09)
+
+The conferencing panels had no push at all: a conference created, edited or
+destroyed, and a participant coming or going, were only visible on the next manual
+refresh — and per-participant media statistics could not be followed at all. Same
+subscriber-list-plus-`send/2` mechanism, three topics
+(`subscribe_conferences/1`, `subscribe_conference/2`,
+`subscribe_conference_stats/2`), fanned out from the mcu module's already-frozen
+event vocabulary rather than from twenty new broadcast sites. The contract is
+[mcu-live-push.md](mcu-live-push.md) — it is the wire spec kelescope implements
+against, and it closes L9 of [DESIGN-MCU.md](DESIGN-MCU.md) §12.
+
+Two things it does differently from the three surfaces above, both stated there:
+the roster of a conference is pushed **whole** (a ringing leg has no public id to key
+a delta on, and a conference is at most `max_participants` rows), and every
+`subscribe` returns the **pid holding the subscription**, so a subscriber can monitor
+it and re-subscribe when a module restart drops the list — the older three lose their
+subscribers silently and could take the same field later.
+
 ## Security caveat (the one real risk)
 
 Erlang distribution = **full trust between nodes** (shared cookie; RPC can call
@@ -95,10 +186,15 @@ anything). A compromised web node ⇒ full access to the SIP node. Therefore:
 
 `kelescope`, separate repo and release, clustered with kelixip like `kelictl`;
 reads/actions via `Kelix.Control` RPC; **live updates via a subscriber list +
-`send/2`** on `SIP.Scenario.Monitor` / `Kelix.InstancePool`, exposed through
-new `Kelix.Control.subscribe_monitor/1` (to be added — no code yet); REST (P8)
-reserved for external clients; cluster only over a trusted network / TLS
-distribution.
+`send/2`** on `SIP.Scenario.Monitor` / `Kelix.InstancePool` (scenarios,
+`subscribe_monitor/1`), on `Kelix.InstancePool` / `Kelix.Mod.Registrar` (domain
+counters, `subscribe_domain_counters/1`), on `Kelix.Mod.Registrar` alone
+(one domain's registration detail, `subscribe_registrations/2`) and on
+`Kelix.Mod.Mcu`'s event vocabulary (conferences, rosters and media statistics —
+[mcu-live-push.md](mcu-live-push.md)) — all four
+implemented; `unregister/4` and `shutdown_scenario/2` trace an admin name in
+kelixip's own logs, also implemented; REST (P8) reserved for external clients;
+cluster only over a trusted network / TLS distribution.
 
 ## Open questions
 

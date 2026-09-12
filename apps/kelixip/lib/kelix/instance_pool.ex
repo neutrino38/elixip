@@ -16,6 +16,13 @@ defmodule Kelix.InstancePool do
   (`join_row/2`, the same join `Kelix.Control.monitor/0` runs on every read),
   forwarding `{:kelix_monitor, {:upsert, row}}` / `{:remove, id}` to whoever
   called `subscribe_monitor/1` — see `docs/design/kelixip_liveview.md`.
+
+  Also the active-calls half of `Kelix.Control.subscribe_domain_counters/1`:
+  `per_domain` changes on every `accept/4` and every instance's `:DOWN`, and
+  each change is pushed as `{:kelix_domain_counter, domain, :active_calls,
+  count}` to whoever called `subscribe_domain_counters/1` — same subscriber
+  bookkeeping as the monitor subscription, kept in its own set since a
+  subscriber may want one push without the other.
   """
   use GenServer
   require Logger
@@ -35,13 +42,16 @@ defmodule Kelix.InstancePool do
   # monitor_subs: MapSet(pid) subscribed via `subscribe_monitor/1`
   # monitor_mons: monitor_ref => subscriber pid, so a dead/disconnected subscriber
   #               is dropped without an explicit `unsubscribe_monitor/1`
+  # counter_subs / counter_mons: same bookkeeping, for `subscribe_domain_counters/1`
   defstruct instances: %{},
             per_domain: %{},
             total_active: 0,
             next_id: 1,
             counters: %{started: 0, succeeded: 0, aborted: 0, failed: 0, rejected_quota: 0},
             monitor_subs: MapSet.new(),
-            monitor_mons: %{}
+            monitor_mons: %{},
+            counter_subs: MapSet.new(),
+            counter_mons: %{}
 
   # The three call-shape columns default to a value, not to a blank — same
   # defaults and rationale as `SIP.Scenario.Monitor`'s `@empty`, for the row it
@@ -99,6 +109,20 @@ defmodule Kelix.InstancePool do
   @doc "Stop a subscription started by `subscribe_monitor/1`."
   @spec unsubscribe_monitor(pid()) :: :ok
   def unsubscribe_monitor(pid), do: GenServer.call(__MODULE__, {:unsubscribe_monitor, pid})
+
+  @doc """
+  Subscribe `pid` to active-calls-per-domain changes — the sanctioned entry
+  point is `Kelix.Control.subscribe_domain_counters/1`. `pid` gets
+  `{:kelix_domain_counter, domain, :active_calls, count}` each time a domain's
+  active-call count changes; monitored like `subscribe_monitor/1`.
+  """
+  @spec subscribe_domain_counters(pid()) :: :ok
+  def subscribe_domain_counters(pid), do: GenServer.call(__MODULE__, {:subscribe_counters, pid})
+
+  @doc "Stop a subscription started by `subscribe_domain_counters/1`."
+  @spec unsubscribe_domain_counters(pid()) :: :ok
+  def unsubscribe_domain_counters(pid),
+    do: GenServer.call(__MODULE__, {:unsubscribe_counters, pid})
 
   @doc """
   Join one `list/0` row with its `SIP.Scenario.Monitor.calls/0` entry (`nil` when
@@ -181,6 +205,26 @@ defmodule Kelix.InstancePool do
     {:reply, :ok, drop_monitor_sub(state, pid)}
   end
 
+  def handle_call({:subscribe_counters, pid}, _from, state) do
+    if MapSet.member?(state.counter_subs, pid) do
+      {:reply, :ok, state}
+    else
+      ref = Process.monitor(pid)
+
+      state = %{
+        state
+        | counter_subs: MapSet.put(state.counter_subs, pid),
+          counter_mons: Map.put(state.counter_mons, ref, pid)
+      }
+
+      {:reply, :ok, state}
+    end
+  end
+
+  def handle_call({:unsubscribe_counters, pid}, _from, state) do
+    {:reply, :ok, drop_counter_sub(state, pid)}
+  end
+
   @impl true
   def handle_cast({:shutdown_all, reason}, state) do
     broadcast_shutdown(state, reason)
@@ -192,7 +236,7 @@ defmodule Kelix.InstancePool do
   def handle_info({:DOWN, ref, :process, pid, reason}, state) do
     case Map.pop(state.instances, ref) do
       {nil, _} ->
-        {:noreply, drop_monitor_sub_by_ref(state, ref)}
+        {:noreply, state |> drop_monitor_sub_by_ref(ref) |> drop_counter_sub_by_ref(ref)}
 
       {inst, instances} ->
         ScriptRegistry.checkin(inst.script, inst.version)
@@ -207,13 +251,18 @@ defmodule Kelix.InstancePool do
           message: "instance #{inspect(pid)} ended (#{inspect(reason)})"
         )
 
-        {:noreply,
-         %{
-           state
-           | instances: instances,
-             per_domain: dec(state.per_domain, inst.domain),
-             total_active: state.total_active - 1
-         }}
+        per_domain = dec(state.per_domain, inst.domain)
+
+        state = %{
+          state
+          | instances: instances,
+            per_domain: per_domain,
+            total_active: state.total_active - 1
+        }
+
+        broadcast_counter(state, inst.domain, :active_calls, Map.get(per_domain, inst.domain, 0))
+
+        {:noreply, state}
     end
   end
 
@@ -314,6 +363,7 @@ defmodule Kelix.InstancePool do
         # A new row can show up before its first FSM report (design doc, "push
         # mechanism"): no fsm entry yet, so it degrades to the empty FSM columns.
         broadcast_monitor(state2, {:upsert, join_row(to_list_row(inst), nil)})
+        broadcast_counter(state2, domain, :active_calls, Map.get(state2.per_domain, domain))
 
         {:reply, {:accept, pid}, bump(state2, :started)}
     end
@@ -327,6 +377,37 @@ defmodule Kelix.InstancePool do
   defp broadcast_monitor(state, msg) do
     for pid <- state.monitor_subs, do: send(pid, {:kelix_monitor, msg})
     :ok
+  end
+
+  defp broadcast_counter(state, domain, kind, count) do
+    for pid <- state.counter_subs, do: send(pid, {:kelix_domain_counter, domain, kind, count})
+    :ok
+  end
+
+  defp drop_counter_sub(state, pid) do
+    case Enum.find(state.counter_mons, fn {_ref, p} -> p == pid end) do
+      nil ->
+        state
+
+      {ref, _pid} ->
+        Process.demonitor(ref, [:flush])
+
+        %{
+          state
+          | counter_subs: MapSet.delete(state.counter_subs, pid),
+            counter_mons: Map.delete(state.counter_mons, ref)
+        }
+    end
+  end
+
+  defp drop_counter_sub_by_ref(state, ref) do
+    case Map.pop(state.counter_mons, ref) do
+      {nil, _} ->
+        state
+
+      {pid, mons} ->
+        %{state | counter_mons: mons, counter_subs: MapSet.delete(state.counter_subs, pid)}
+    end
   end
 
   defp drop_monitor_sub(state, pid) do

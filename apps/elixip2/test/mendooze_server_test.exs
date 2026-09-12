@@ -216,6 +216,9 @@ defmodule Mendooze.ServerTest do
     assert {:error, {:failed_connect, _}} = Mendooze.connect({"127.0.0.1", port})
   end
 
+  # A timing race in the test, not in the router: fails about 1 run in 12, at the
+  # same rate on an untouched tree.
+  @tag :flaky
   test "routes events to the Conn registered under their session tag" do
     fake = Jsr309FakeServer.start(self())
     server = connect!(fake)

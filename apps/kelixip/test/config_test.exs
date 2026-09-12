@@ -48,6 +48,7 @@ defmodule Kelix.ConfigTest do
       assert cfg.max_calls == 2000
       # unset -> default
       assert cfg.module_dir == "/usr/lib/kelixip/modules"
+      assert cfg.max_message_size == 64_000
     end
 
     test "log section", %{cfg: cfg} do
@@ -236,6 +237,32 @@ defmodule Kelix.ConfigTest do
     end
   end
 
+  describe "parse/1 — [server] max_message_size" do
+    # The bound the SIP parser refuses a message past, with a 513. One number per
+    # node, and the framework reads it off the app env — so the assertion that
+    # matters is that apply_app_env/1 carries it there.
+    test "absent → 64 000 bytes" do
+      assert {:ok, cfg} = Config.parse("")
+      assert cfg.max_message_size == 64_000
+    end
+
+    test "honoured when given, and pushed into the :elixip2 app env" do
+      assert {:ok, cfg} = Config.parse("[server]\nmax_message_size = 200000")
+      assert cfg.max_message_size == 200_000
+
+      prev = Application.get_env(:elixip2, :max_message_size)
+      on_exit(fn -> Application.put_env(:elixip2, :max_message_size, prev) end)
+
+      :ok = Config.apply_app_env(cfg)
+      assert SIPMsg.max_message_size() == 200_000
+    end
+
+    test "wrong type is refused at boot" do
+      assert {:error, msg} = Config.parse(~s([server]\nmax_message_size = "big"))
+      assert msg =~ "max_message_size"
+    end
+  end
+
   describe "parse/1 — [mediaserver] transport_cc" do
     # Transport-wide congestion control is what feeds the media server's sender-side
     # bandwidth estimator (docs/design/kelixip-transport-wide-cc.md). It is off until
@@ -402,7 +429,7 @@ defmodule Kelix.ConfigTest do
   test "defaults when sections are absent" do
     assert {:ok, cfg} = Config.parse("")
     assert cfg.node_name == "kelixip@127.0.0.1"
-    assert cfg.user_agent == "Kelixip/1.5.2"
+    assert cfg.user_agent == "Kelixip/1.5.4"
     assert cfg.log.target == "stdout"
     assert cfg.listen == []
   end

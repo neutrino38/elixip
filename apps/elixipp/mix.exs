@@ -8,7 +8,7 @@ defmodule Elixipp.MixProject do
   def project do
     [
       app: :elixipp,
-      version: "1.5.2",
+      version: "1.5.4",
       elixir: "~> 1.15",
       # Umbrella: share the root _build / config / deps / lockfile
       build_path: "../../_build",

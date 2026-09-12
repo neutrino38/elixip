@@ -103,6 +103,11 @@ defmodule Kelix.Mod.Mcu.Config do
             shutdown_grace_ms: 5_000,
             rtp_timeout_ms: 10_000,
             gc_orphans: true,
+            # How often a watched conference's participant statistics are swept and
+            # pushed to the UIs that asked for them (`docs/design/mcu-live-push.md`).
+            # `0` disables the topic: the sweep is one RPC per connected leg on the
+            # media server's control channel, so an operator has to be able to say no.
+            stats_interval_ms: 15_000,
             # The collaboration channel between participants' scripts (§20). Bounds,
             # not features: a fan-out over the roster is N² messages if nothing caps
             # it, and a payload nobody bounded is a payload a script puts on the wire.
@@ -124,7 +129,8 @@ defmodule Kelix.Mod.Mcu.Config do
   # therefore **not** in @int_keys: a name is not a malformed integer.
   @int_keys ~w(rate max_participants video_fps video_bitrate
                video_intra_period xmlrpc_timeout_ms call_timeout_ms shutdown_grace_ms
-               rtp_timeout_ms message_rate message_max_bytes message_queue_max)
+               rtp_timeout_ms stats_interval_ms
+               message_rate message_max_bytes message_queue_max)
   @bool_keys ~w(dtmf destroy_when_empty auto_layout gc_orphans)
   @string_keys ~w(record_dir image_dir logo_file conference_file)
 
@@ -148,6 +154,7 @@ defmodule Kelix.Mod.Mcu.Config do
            did_ranges video_size video_fps video_bitrate video_intra_period
            preferred_video_codec
            xmlrpc_timeout_ms shutdown_grace_ms rtp_timeout_ms gc_orphans
+           stats_interval_ms
            record_dir image_dir logo_file conference_file
            message_rate message_max_bytes message_queue_max message_kinds) ++
           Map.keys(@retired_keys)
@@ -202,6 +209,7 @@ defmodule Kelix.Mod.Mcu.Config do
          shutdown_grace_ms: int(block, "shutdown_grace_ms", defaults.shutdown_grace_ms),
          rtp_timeout_ms: int(block, "rtp_timeout_ms", defaults.rtp_timeout_ms),
          gc_orphans: bool(block, "gc_orphans", defaults.gc_orphans),
+         stats_interval_ms: int(block, "stats_interval_ms", defaults.stats_interval_ms),
          record_dir: str(block, "record_dir", defaults.record_dir),
          image_dir: str(block, "image_dir", defaults.image_dir),
          logo_file: str(block, "logo_file", defaults.logo_file),

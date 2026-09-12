@@ -187,6 +187,13 @@ alias SIP.NetUtils
 
                   { :ok, sipmsg } when is_resp(sipmsg) -> raise "Cannot start an UAC transaction with SIP response"
 
+                  # The inbound bound applies here too, because a template is turned
+                  # into a message by the same parser. A request WE compose past it is
+                  # a bug in the composer, not a peer sending too much, so it fails
+                  # loudly and names the bound rather than raising a CaseClauseError.
+                  { :msg_too_large, _sipmsg } ->
+                    raise "SIP message built from template exceeds the #{SIPMsg.max_message_size()} byte limit"
+
                 end
 
               _err ->
@@ -306,6 +313,12 @@ alias SIP.NetUtils
 
         end
 
+
+      # Too large to be read, but its headers parsed, so it can still be answered.
+      # Measuring is the parser's job, refusing is the transport's: only it holds
+      # the socket the stateless 513 goes back out on.
+      { :msg_too_large, parsed_msg } ->
+        { :msg_too_large, parsed_msg }
 
       { code, _err } ->
         # Optionally dump the raw bytes (inspected, so CRLF/empty frames are

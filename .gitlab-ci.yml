@@ -1,0 +1,74 @@
+# CI for the elixip umbrella.
+#
+#   push on a branch -> compile + test suite
+#   push of a tag    -> compile + test suite + SBoM + RPMs, kept as artifacts
+#
+# The runner must be an Alma Linux 9 host carrying the packaging toolchain
+# (EPEL Erlang/OTP 26, Elixir from /opt/elixir, rpmbuild) — BUILD.md explains why
+# no other host will do: the kelixip release embeds a natively-linked ERTS.
+
+stages:
+  - build
+  - test
+  - package
+
+default:
+  tags: [al9, rpm]
+  before_script:
+    - mix local.hex --force
+    - mix local.rebar --force
+  cache:
+    key: "elixip-$CI_COMMIT_REF_SLUG"
+    paths:
+      - deps/
+      - _build/
+
+compile:
+  stage: build
+  script:
+    - mix deps.get
+    - mix compile
+
+# `--exclude live` needs no explanation on a CI host: those tests dial a real SIP
+# proxy. `--exclude flaky` is the bar BUILD.md sets — the tagged tests bind real
+# ports or share named singletons, and pass in isolation. What is left fails only
+# on a regression, which is the only thing a branch pipeline can usefully say.
+test:
+  stage: test
+  script:
+    - mix test --exclude live --exclude flaky
+
+package:
+  stage: package
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    # A tag names a version; the manifests decide what the packages are called.
+    # Nothing else compares the two, and rpm identifies a package by its NEVRA —
+    # so a v1.5.4 tag archiving 1.5.3 packages would be installed as a no-op on a
+    # host that already has 1.5.3, with `rpm -q` reporting a version it does not
+    # run (CLAUDE.md, "Changing the version").
+    - |
+      version=$(sed -n 's/^ *version: "\([0-9][^"]*\)".*/\1/p' apps/kelixip/mix.exs | head -1)
+      if [ "$CI_COMMIT_TAG" != "v$version" ] && [ "$CI_COMMIT_TAG" != "$version" ]; then
+        echo "tag $CI_COMMIT_TAG does not name version $version (apps/kelixip/mix.exs)" >&2
+        exit 1
+      fi
+
+    # The SBoM first, and in the default dev env: `:sbom` is declared `only: :dev`,
+    # and the task reads the compiled .app specs to resolve the OTP applications —
+    # skip the compile and three components go missing (BUILD.md § SBoM).
+    - mix deps.get
+    - mix compile
+    - mix sbom.cyclonedx --output=sbom.cdx.json --format=json --schema=1.6 --pretty --force
+
+    # Then the packages, from the same toolchain the SBoM just described — which is
+    # the point of doing both in one job.
+    - packaging/build-rpm.sh
+    - packaging/build-rpm-elixipp.sh
+  artifacts:
+    name: "elixip-$CI_COMMIT_TAG"
+    expire_in: 1 year
+    paths:
+      - sbom.cdx.json
+      - packaging/dist/

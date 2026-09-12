@@ -49,6 +49,7 @@ defmodule Kelix.Config do
           module_dir: String.t(),
           user_agent: String.t(),
           max_calls: pos_integer | nil,
+          max_message_size: pos_integer,
           log: map,
           listen: [listener],
           mediaserver_pool: [pool_entry],
@@ -60,6 +61,7 @@ defmodule Kelix.Config do
           metrics: map
         }
 
+  @default_max_message_size 64_000
   @default_video_bitrate_kbps 1500
   # The bitrate-feedback dialects the answer may confirm, as `[mediaserver]
   # bitrate_feedback` names them: "none", "tmmbr", "goog-remb" or both, in any
@@ -70,8 +72,12 @@ defmodule Kelix.Config do
   defstruct node_name: "kelixip@127.0.0.1",
             script_dir: "/usr/share/kelixip",
             module_dir: "/usr/lib/kelixip/modules",
-            user_agent: "Kelixip/1.5.2",
+            user_agent: "Kelixip/1.5.4",
             max_calls: nil,
+            # The largest inbound SIP message this node accepts, in bytes. Past it a
+            # request is answered 513 instead of being parsed. Read by the framework
+            # off the app env, so it bounds all four transports at once.
+            max_message_size: @default_max_message_size,
             log: %{target: "stdout", facility: "local0", level: "info"},
             listen: [],
             # The OUTBOUND TLS/WSS leg's policy: whether the certificate a peer we
@@ -205,6 +211,10 @@ defmodule Kelix.Config do
   @spec apply_app_env(t) :: :ok
   def apply_app_env(%__MODULE__{} = cfg) do
     Application.put_env(:elixip2, :useragent, cfg.user_agent)
+
+    # `[server] max_message_size` reaches the parser here: SIPMsg.max_message_size/0
+    # reads it, and the transports refuse anything past it with a 513.
+    Application.put_env(:elixip2, :max_message_size, cfg.max_message_size)
     # How the framework asks for a media server carrying a call's addressing
     # profiles. It cannot reach Kelix.MediaPool — a kelixip surface — so the
     # selection is declared here and called back into.
@@ -346,6 +356,7 @@ defmodule Kelix.Config do
          module_dir: server.module_dir,
          user_agent: server.user_agent,
          max_calls: server.max_calls,
+         max_message_size: server.max_message_size,
          log: log,
          listen: listen,
          mediaserver_pool: mediaserver.pool,
@@ -364,19 +375,25 @@ defmodule Kelix.Config do
     defaults = %__MODULE__{}
 
     with :ok <-
-           reject_keys(s, ~w(node_name script_dir module_dir user_agent max_calls), "[server]"),
+           reject_keys(
+             s,
+             ~w(node_name script_dir module_dir user_agent max_calls max_message_size),
+             "[server]"
+           ),
          {:ok, node_name} <- opt_string(s, "node_name", defaults.node_name, "[server]"),
          {:ok, script_dir} <- opt_string(s, "script_dir", defaults.script_dir, "[server]"),
          {:ok, module_dir} <- opt_string(s, "module_dir", defaults.module_dir, "[server]"),
          {:ok, user_agent} <- opt_string(s, "user_agent", defaults.user_agent, "[server]"),
-         {:ok, max_calls} <- opt_pos_integer(s, "max_calls", "[server]") do
+         {:ok, max_calls} <- opt_pos_integer(s, "max_calls", "[server]"),
+         {:ok, max_message_size} <- opt_pos_integer(s, "max_message_size", "[server]") do
       {:ok,
        %{
          node_name: node_name,
          script_dir: script_dir,
          module_dir: module_dir,
          user_agent: user_agent,
-         max_calls: max_calls
+         max_calls: max_calls,
+         max_message_size: max_message_size || defaults.max_message_size
        }}
     end
   end

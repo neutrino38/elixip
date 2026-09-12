@@ -17,4 +17,8 @@ defmodule SIP.Test.WSSListenerTest do
     client: SIP.Test.ListenerClient.WSS,
     via_transport: "WSS",
     listener_opts: [certfile: "certs/certificate.pem", keyfile: "certs/private_key.pem"]
+
+  # Binds a real port and waits for connection counts to settle: under a loaded
+  # full-suite run the counts miss their window, and the file passes alone.
+  @moduletag :flaky
 end

@@ -141,9 +141,11 @@ defmodule Kelix.MetricsTest do
       # unique reporter name so repeated start/stop can't collide on telemetry ids
       name = :"kelix_prom_#{System.unique_integer([:positive])}"
       start_supervised!({TelemetryMetricsPrometheus.Core, metrics: Metrics.metrics(), name: name})
-      # the Core reporter attaches its telemetry handlers asynchronously — wait
-      # until they are live so the emitted events are actually aggregated
+      # the Core reporter attaches its telemetry handlers asynchronously, one per
+      # metric — wait for EVERY event this test emits, not just the first: an event
+      # emitted before its own handler is attached is aggregated nowhere
       wait_for_handlers([:kelix, :dispatch, :accepted])
+      wait_for_handlers([:kelix, :dispatch, :rejected])
 
       Emit.dispatch_accepted("example.com", :registrar)
       Emit.dispatch_rejected("example.com", :calls, 503)

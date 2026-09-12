@@ -10,6 +10,8 @@ defmodule Kelix.ControlRegistrationsTest do
   """
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias Kelix.Control
 
   describe "registrations + unregister" do
@@ -72,6 +74,81 @@ defmodule Kelix.ControlRegistrationsTest do
 
       assert Control.unregister("example.com", "bob") == :ok
       assert Control.unregister("example.com", "bob") == :notfound
+    end
+
+    # kelescope confirms this action and requires an admin name before sending it
+    # (`docs/design/kelixip_liveview.md`) — traced here, not merely returned.
+    test "unregister/4 traces the admin name in this node's own logs" do
+      assert {:registered, _} = Kelix.Mod.Registrar.save(register("alice"), "example.com")
+
+      log =
+        capture_log(fn ->
+          assert Control.unregister("example.com", "alice", :all, "jdoe") == :ok
+        end)
+
+      assert log =~ "unregister example.com/alice"
+      assert log =~ "by admin=jdoe"
+      assert log =~ ":ok"
+    end
+
+    test "unregister/4 traces even a removal that finds nothing" do
+      log =
+        capture_log(fn ->
+          assert Control.unregister("example.com", "ghost", :all, "jdoe") == :notfound
+        end)
+
+      assert log =~ "by admin=jdoe"
+      assert log =~ ":notfound"
+    end
+  end
+
+  describe "subscribe_registrations/2" do
+    setup do
+      Kelix.Test.Fixtures.serve_domains("""
+      [[domain]]
+      name = "example.com"
+      aliases = ["example.org"]
+
+        [domain.registrar]
+        script = "uas_register"
+      """)
+
+      start_supervised!(
+        {Kelix.ModuleSupervisor,
+         name: :"modsup_sub_#{System.unique_integer([:positive])}", modules: %{"registrar" => %{}}}
+      )
+
+      on_exit(fn -> Kelix.ModuleRegistry.unregister("registrar") end)
+      :ok
+    end
+
+    # kelescope's live registrations panel (docs/design/kelixip_liveview.md):
+    # opening a domain's panel gets the current detail, then a push per change,
+    # with no polling.
+    test "returns the current detail, matched by name or alias, then pushes changes" do
+      assert {:registered, _} = Kelix.Mod.Registrar.save(register("alice"), "example.com")
+
+      assert {:ok, %{domain: "example.com", registrations: [%{aor: "alice"}]}} =
+               Control.subscribe_registrations(self(), "example.org")
+
+      assert {:registered, _} = Kelix.Mod.Registrar.save(register("bob"), "example.com")
+      assert_receive {:kelix_registrations, "example.com", {:upsert, %{aor: "bob"}}}, 500
+
+      assert Control.unregister("example.com", "alice") == :ok
+      assert_receive {:kelix_registrations, "example.com", {:remove, "alice"}}, 500
+    end
+
+    test "an unserved domain answers :not_found" do
+      assert Control.subscribe_registrations(self(), "ghost.example.org") ==
+               {:error, :not_found}
+    end
+
+    test "unsubscribe_registrations/2 stops the pushes" do
+      Control.subscribe_registrations(self(), "example.com")
+      assert Control.unsubscribe_registrations(self(), "example.com") == :ok
+
+      Kelix.Mod.Registrar.save(register("carol"), "example.com")
+      refute_receive {:kelix_registrations, _, _}, 100
     end
   end
 

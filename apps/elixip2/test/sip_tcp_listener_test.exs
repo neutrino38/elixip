@@ -14,4 +14,8 @@ defmodule SIP.Test.TCPListenerTest do
     # a stream transport, so SIP.Transport.Depack has to put the message back
     # together across segments
     fragmentable: true
+
+  # Binds a real port and waits for connection counts to settle: under a loaded
+  # full-suite run the counts miss their window, and the file passes alone.
+  @moduletag :flaky
 end

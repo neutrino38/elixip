@@ -72,7 +72,8 @@ defmodule Kelix.Mod.Mcu do
   end
 
   alias Kelix.Metrics.Emit
-  alias Kelix.Mod.Mcu.{Adapter, Args, Client, Conference, Config, Event, Message, Store}
+  alias Kelix.Mod.Mcu.{Adapter, Args, Client, Conference, Config, Event, Message, Push, Store}
+  alias Kelix.Mod.Mcu.Stats
   alias Kelix.Mod.Mcu.Vocabulary
   alias Kelix.Mod.Mcu.Supervisor, as: McuSupervisor
 
@@ -230,7 +231,15 @@ defmodule Kelix.Mod.Mcu do
         # the collaboration channel (§20, P10)
         accept_messages: 1,
         send_message: 4,
-        send_message: 5
+        send_message: 5,
+        # the live push a UI subscribes to (docs/design/mcu-live-push.md), reached
+        # through Kelix.Control and not from a script
+        subscribe_conferences: 1,
+        unsubscribe_conferences: 1,
+        subscribe_conference: 2,
+        unsubscribe_conference: 2,
+        subscribe_conference_stats: 2,
+        unsubscribe_conference_stats: 2
       ]
     }
 
@@ -298,6 +307,101 @@ defmodule Kelix.Mod.Mcu do
           [{^key, value}] -> {:ok, value}
           [] -> :error
         end
+    end
+  end
+
+  # ── live push (docs/design/mcu-live-push.md) ─────────────────────────────────
+
+  @doc """
+  Subscribe `pid` to the conference **list**, and return the current one.
+
+  `pid` then receives `{:kelix_conferences, {:upsert, conf_row}}` on any change to a
+  conference (created, edited, a participant in or out, its media server lost) and
+  `{:kelix_conferences, {:remove, uid}}` when one is destroyed — no polling.
+
+  `conf_row` is what `conference.list` returns, from the same function, so the
+  initial snapshot and the pushes cannot disagree about a field. `owner` is the
+  process holding the subscription: monitor it and re-subscribe if it dies, or the
+  push stops silently on a module restart.
+
+  Reached through `Kelix.Control.subscribe_conferences/1`; a pid on a clustered
+  kelescope works transparently, and losing that connection drops the subscription.
+  """
+  @spec subscribe_conferences(pid) ::
+          {:ok, %{owner: pid, conferences: [map]}} | {:error, :down | :timeout}
+  def subscribe_conferences(pid) when is_pid(pid), do: call({:push_subscribe, :list, pid})
+
+  @doc "Stop a subscription started by `subscribe_conferences/1`."
+  @spec unsubscribe_conferences(pid) :: :ok
+  def unsubscribe_conferences(pid) when is_pid(pid) do
+    call({:push_unsubscribe, :list, pid})
+    :ok
+  end
+
+  @doc """
+  Subscribe `pid` to **one conference** (an expanded panel), and return its current
+  row and roster.
+
+  `pid` then receives `{:kelix_conference, uid, {:snapshot, %{conference:,
+  participants:}}}` on every change to that conference — the whole roster, in
+  admission order, not a per-participant delta: a ringing leg has no `part_id` yet
+  (`admit/2` reserves its row before the MCU knows it), so there is no stable key to
+  address one by. `{:kelix_conference, uid, :destroyed}` ends it.
+  """
+  @spec subscribe_conference(pid, String.t()) ::
+          {:ok, %{owner: pid, conference: map, participants: [map]}}
+          | {:error, :not_found | :down | :timeout}
+  def subscribe_conference(pid, uid) when is_pid(pid) and is_binary(uid),
+    do: call({:push_subscribe, {:conf, uid}, pid})
+
+  @doc "Stop a subscription started by `subscribe_conference/2`."
+  @spec unsubscribe_conference(pid, String.t()) :: :ok
+  def unsubscribe_conference(pid, uid) when is_pid(pid) and is_binary(uid) do
+    call({:push_unsubscribe, {:conf, uid}, pid})
+    :ok
+  end
+
+  @doc """
+  Subscribe `pid` to one conference's **participant statistics**: one
+  `{:kelix_conference_stats, uid, sample}` every `interval_ms`, for as long as the
+  subscription lasts, plus one immediately.
+
+  `{:error, :disabled}` when `stats_interval_ms = 0`: the sweep is one RPC per
+  connected leg on the media server's control channel, so a deployment can refuse
+  it — and a subscription that would push nothing is refused rather than accepted.
+  """
+  @spec subscribe_conference_stats(pid, String.t()) ::
+          {:ok, %{owner: pid, interval_ms: pos_integer}}
+          | {:error, :not_found | :disabled | :down | :timeout}
+  def subscribe_conference_stats(pid, uid) when is_pid(pid) and is_binary(uid),
+    do: call({:push_subscribe, {:stats, uid}, pid})
+
+  @doc "Stop a subscription started by `subscribe_conference_stats/2`."
+  @spec unsubscribe_conference_stats(pid, String.t()) :: :ok
+  def unsubscribe_conference_stats(pid, uid) when is_pid(pid) and is_binary(uid) do
+    call({:push_unsubscribe, {:stats, uid}, pid})
+    :ok
+  end
+
+  @doc """
+  The media server's own view of one leg (`GetParticipantStatistics`, §3.3): sent and
+  received packets and bytes per media.
+
+  Runs the RPC in the CALLING process — `participant.show` answers a control request,
+  and the statistics sweep must not be serialised behind the registry.
+  """
+  @spec participant_statistics(Conference.t(), non_neg_integer) ::
+          {:ok, map} | {:error, :unknown_mcu | :mcu_down | :rpc_error}
+  def participant_statistics(%Conference{} = conf, part_id) when is_integer(part_id) do
+    case mediaserver(conf.mcu) do
+      {:ok, mcu} ->
+        case rpc(mcu, "GetParticipantStatistics", [conf.conf_id, part_id]) do
+          {:ok, rows} -> {:ok, decode_statistics(rows)}
+          {:error, reason} -> {:error, reason}
+        end
+
+      :error ->
+        {:error, :unknown_mcu}
     end
   end
 
@@ -968,7 +1072,8 @@ defmodule Kelix.Mod.Mcu do
           %{name: "layout", required: false, help: Vocabulary.layout_help()},
           %{name: "logo", required: false, help: Vocabulary.logo_help()},
           %{name: "max_participants", required: false},
-          %{name: "destroy_when_empty", required: false}
+          %{name: "destroy_when_empty", required: false},
+          %{name: "admin", required: false, help: "operator identity, traced in this node's logs"}
         ],
         help: "Create a conference (allocates a DID when none is given)"
       },
@@ -1029,7 +1134,11 @@ defmodule Kelix.Mod.Mcu do
         rest: {:delete, "/conferences/:uid"},
         errors: %{not_found: 404, not_empty: 409, mcu_down: 503, rpc_error: 502},
         rw: :w,
-        args: [%{name: "uid", required: true}, %{name: "force", required: false}],
+        args: [
+          %{name: "uid", required: true},
+          %{name: "force", required: false},
+          %{name: "admin", required: false, help: "operator identity, traced in this node's logs"}
+        ],
         help: "Destroy a conference (`force` disconnects the participants first)"
       },
       %{
@@ -1154,16 +1263,30 @@ defmodule Kelix.Mod.Mcu do
       {:error, :bad_request}
   end
 
+  # `admin` identifies who asked for it — kelescope confirms this action and
+  # requires a name before sending it (`docs/design/kelixip_liveview.md`), traced
+  # here rather than added to `@create_args` (it is not a conference field).
   defp do_control("conference.create", args) do
+    {admin, args} = Map.pop(args, "admin")
     args = drop_retired(args, "conference.create")
 
-    with :ok <- Args.reject_unknown(args, @create_args),
-         {:ok, spec} <- create_spec(args),
-         # `owner: :none`: a REST caller has no instance to own the conference — its
-         # "caller" is the HTTP request process, which dies as the response is sent
-         {:ok, conf, warning} <- call({:create, spec, :none}) do
-      {:ok, create_reply(conf, warning)}
-    end
+    result =
+      with :ok <- Args.reject_unknown(args, @create_args),
+           {:ok, spec} <- create_spec(args),
+           # `owner: :none`: a REST caller has no instance to own the conference — its
+           # "caller" is the HTTP request process, which dies as the response is sent
+           {:ok, conf, warning} <- call({:create, spec, :none}) do
+        {:ok, create_reply(conf, warning)}
+      end
+
+    Logger.info(
+      module: __MODULE__,
+      message:
+        "conference.create domain=#{Map.get(args, "domain")} by admin=#{admin || "unknown"}: " <>
+          "#{inspect(result)}"
+    )
+
+    result
   end
 
   defp do_control("conference.list", args) do
@@ -1194,12 +1317,25 @@ defmodule Kelix.Mod.Mcu do
     end
   end
 
+  # Same `admin` tracing as `conference.create` above.
   defp do_control("conference.delete", args) do
-    with :ok <- Args.reject_unknown(args, ~w(uid force)),
-         {:ok, uid} <- Args.required_string(args, "uid"),
-         {:ok, force} <- Args.bool(args, "force", false) do
-      call({:delete, uid, force})
-    end
+    {admin, args} = Map.pop(args, "admin")
+
+    result =
+      with :ok <- Args.reject_unknown(args, ~w(uid force)),
+           {:ok, uid} <- Args.required_string(args, "uid"),
+           {:ok, force} <- Args.bool(args, "force", false) do
+        call({:delete, uid, force})
+      end
+
+    Logger.info(
+      module: __MODULE__,
+      message:
+        "conference.delete uid=#{Map.get(args, "uid")} by admin=#{admin || "unknown"}: " <>
+          "#{inspect(result)}"
+    )
+
+    result
   end
 
   # §8.3.3: a partial merge. Omitted fields are left untouched — a PUT here never
@@ -1372,19 +1508,13 @@ defmodule Kelix.Mod.Mcu do
     end
   end
 
-  # The media server's own view of the leg (`GetParticipantStatistics`, §3.3): sent /
-  # received packets and bytes per media. A failure is reported rather than hidden —
-  # an operator reading zeros must be able to tell "no media" from "no answer".
+  # One reading of the leg's statistics, shared with the push sweep
+  # (`participant_statistics/2`). A failure is reported rather than hidden — an
+  # operator reading zeros must be able to tell "no media" from "no answer".
   defp statistics(conf, row) do
-    case mediaserver(conf.mcu) do
-      {:ok, mcu} ->
-        case rpc(mcu, "GetParticipantStatistics", [conf.conf_id, row.part_id]) do
-          {:ok, rows} -> %{stats: decode_statistics(rows)}
-          {:error, reason} -> %{stats: %{}, stats_error: reason}
-        end
-
-      :error ->
-        %{stats: %{}, stats_error: :unknown_mcu}
+    case participant_statistics(conf, row.part_id) do
+      {:ok, stats} -> %{stats: stats}
+      {:error, reason} -> %{stats: %{}, stats_error: reason}
     end
   end
 
@@ -1396,7 +1526,7 @@ defmodule Kelix.Mod.Mcu do
     for [media, receiving, sending, lost, recv_packets, sent_packets, recv_bytes, sent_bytes] <-
           rows,
         into: %{} do
-      {media,
+      {media_atom(media),
        %{
          receiving: receiving == 1,
          sending: sending == 1,
@@ -1410,6 +1540,16 @@ defmodule Kelix.Mod.Mcu do
   end
 
   defp decode_statistics(_rows), do: %{}
+
+  # Keyed like every other per-media map the module hands out (a participant row's
+  # `medias`), so one consumer reads both the same way. Bounded on purpose — the
+  # name comes off the wire, and `String.to_atom/1` on server input creates atoms
+  # nothing frees; an unknown one stays the string the server sent, as
+  # `EventQueue.media_atom/1` does with an unknown media id.
+  defp media_atom("audio"), do: :audio
+  defp media_atom("video"), do: :video
+  defp media_atom("text"), do: :text
+  defp media_atom(other), do: other
 
   # Decode the update body into the changes to apply, keeping only what was sent:
   # that map *is* the partial-merge semantics.
@@ -1560,6 +1700,10 @@ defmodule Kelix.Mod.Mcu do
     # three tables above (owner-writes-only) cannot allow. It holds counters and the
     # bounds, never a roster and never a payload.
     Message.create_table(config)
+    # The live-push subscriber list (`docs/design/mcu-live-push.md`): a table and not
+    # GenServer state, because `Event.emit/3` publishes from whatever process observed
+    # the transition. Writes still come through here.
+    Push.create_table()
 
     # Entries exist from the start, `down` until their client announces itself, so
     # `create` on an unreachable MCU is refused with a clear error instead of
@@ -1602,7 +1746,11 @@ defmodule Kelix.Mod.Mcu do
        # monitor_ref => conference uid: the creator of a script-made conference
        # (§17.3). Separate from `monitors` because the verdict differs — a dead
        # creator only takes an *empty* conference with it.
-       conf_monitors: %{}
+       conf_monitors: %{},
+       # monitor_ref => {topic, pid} for every live push subscription: a UI that
+       # disconnects without unsubscribing is dropped on its own, the way the
+       # registrar's counter subscribers are
+       push_mons: %{}
      }}
   end
 
@@ -1710,6 +1858,29 @@ defmodule Kelix.Mod.Mcu do
   # the configured defaults, for the phases that build on them
   def handle_call(:config, _from, state), do: {:reply, state.config, state}
 
+  # Subscribing and reading the snapshot happen in the SAME message, so no change can
+  # slip between the two: everything that publishes a row goes through this process,
+  # which makes the push exactly-once here rather than merely at-least-once.
+  def handle_call({:push_subscribe, topic, pid}, _from, state) do
+    case push_snapshot(state, topic) do
+      {:ok, snapshot} ->
+        state = add_push_sub(state, topic, pid)
+
+        # the panel that just expanded gets its first sample now, out of band: the
+        # sweep is RPCs, and this call must not wait for them
+        with {:stats, uid} <- topic, do: Stats.sweep(uid)
+
+        {:reply, {:ok, snapshot}, state}
+
+      {:error, _} = err ->
+        {:reply, err, state}
+    end
+  end
+
+  def handle_call({:push_unsubscribe, topic, pid}, _from, state) do
+    {:reply, :ok, drop_push_sub(state, topic, pid)}
+  end
+
   # `from` is the scenario instance: it is the process whose death must reap the
   # participant (§9.3), so it is recorded as the row's owner.
   def handle_call({:admit, domain, req, display_name}, {scenario, _tag}, state) do
@@ -1786,17 +1957,25 @@ defmodule Kelix.Mod.Mcu do
     {:noreply, state}
   end
 
-  # A participant's scenario died without a clean `leave/1`: run the same teardown.
-  # This is the safety net that makes "participant lifetime = adapter connection
-  # lifetime" true even for a `kill` (§9.3).
+  # Three things this process monitors, told apart by which map holds the ref: a
+  # subscribed UI (drop its subscription), a conference creator (§17.3) and a
+  # participant's scenario. The last is the safety net that makes "participant
+  # lifetime = adapter connection lifetime" true even for a `kill` (§9.3).
   def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
+    case Map.pop(state.push_mons, ref) do
+      {nil, _} -> instance_down(ref, state)
+      {{topic, pid}, mons} -> {:noreply, forget_push_sub(%{state | push_mons: mons}, topic, pid)}
+    end
+  end
+
+  def handle_info(_msg, state), do: {:noreply, state}
+
+  defp instance_down(ref, state) do
     case Map.pop(state.conf_monitors, ref) do
       {nil, _} -> participant_down(ref, state)
       {uid, monitors} -> {:noreply, creator_gone(%{state | conf_monitors: monitors}, uid)}
     end
   end
-
-  def handle_info(_msg, state), do: {:noreply, state}
 
   defp participant_down(ref, state) do
     case Map.pop(state.monitors, ref) do
@@ -1815,6 +1994,58 @@ defmodule Kelix.Mod.Mcu do
 
         {:noreply, do_leave(state, conf_uid, part_ref, :crash)}
     end
+  end
+
+  # ── live push subscriptions (docs/design/mcu-live-push.md) ───────────────────
+
+  defp push_snapshot(_state, :list),
+    do: {:ok, %{owner: self(), conferences: Enum.map(conferences(), &Push.render/1)}}
+
+  defp push_snapshot(_state, {:conf, uid}) do
+    with {:ok, conf} <- found(conference(uid)) do
+      {:ok, Map.put(Push.detail(conf), :owner, self())}
+    end
+  end
+
+  defp push_snapshot(%{config: %Config{stats_interval_ms: 0}}, {:stats, _uid}),
+    do: {:error, :disabled}
+
+  defp push_snapshot(%{config: %Config{stats_interval_ms: interval}}, {:stats, uid}) do
+    with {:ok, _conf} <- found(conference(uid)) do
+      {:ok, %{owner: self(), interval_ms: interval}}
+    end
+  end
+
+  # One monitor per subscription, and only one: a UI that subscribes twice to the
+  # same topic must not leave a monitor behind when it unsubscribes once.
+  defp add_push_sub(state, topic, pid) do
+    if push_sub_ref(state, topic, pid) do
+      state
+    else
+      Push.put(topic, pid)
+      ref = Process.monitor(pid)
+      %{state | push_mons: Map.put(state.push_mons, ref, {topic, pid})}
+    end
+  end
+
+  defp drop_push_sub(state, topic, pid) do
+    case push_sub_ref(state, topic, pid) do
+      nil ->
+        state
+
+      ref ->
+        Process.demonitor(ref, [:flush])
+        forget_push_sub(%{state | push_mons: Map.delete(state.push_mons, ref)}, topic, pid)
+    end
+  end
+
+  defp forget_push_sub(state, topic, pid) do
+    Push.drop(topic, pid)
+    state
+  end
+
+  defp push_sub_ref(state, topic, pid) do
+    Enum.find_value(state.push_mons, fn {ref, sub} -> if sub == {topic, pid}, do: ref end)
   end
 
   # ── admit / join / leave ─────────────────────────────────────────────────────
@@ -2219,6 +2450,18 @@ defmodule Kelix.Mod.Mcu do
         @conf_table,
         {conf.uid, %Conference{conf | stale: true, conf_id: nil, recording: nil}}
       )
+
+      # A conference whose media server went away is an operator-visible state change
+      # of that conference, and it had no line of its own: the logs said "mediaserver
+      # down" and nothing per room, and a UI reading only the events would keep
+      # showing a dead room as healthy while its DID answers 503. The frozen
+      # vocabulary already covers it (§11.1) — `recreate_stale/2` emits
+      # `conference.created` on the way back.
+      Event.emit(:"conference.updated", conf.uid, %{
+        changed: [:stale],
+        stale: true,
+        reason: :mcu_lost
+      })
     end
 
     :ok

@@ -15,8 +15,16 @@ config :logger, :file_log,
   level: :info
 
 config :elixip2,
-  useragent: "Elixipp-1.5.2",
+  useragent: "Elixipp-1.5.4",
   optionkeepaliveperiod: 15,
+  # The largest inbound SIP message accepted, in BYTES. Past it a request is
+  # answered 513 (Message too large) instead of being parsed; a response and an
+  # ACK, which are never answered, are dropped with a log line.
+  #
+  # A memory bound of ours, not a protocol one: RFC 3261 §18.1.1 bounds a message
+  # for UDP only and names TCP as the way out. Keep it an order of magnitude above
+  # normal traffic — a WebRTC offer with four m-sections weighs about 13 kB.
+  max_message_size: 64_000,
   # When true, an unparseable incoming SIP message is dumped verbatim (inspected,
   # so CRLF/empty frames are visible) at warning level — useful to diagnose a
   # peer sending non-canonical or malformed SIP. Off by default (noisy: e.g.

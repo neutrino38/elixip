@@ -1,3 +1,31 @@
+kelixip (1.5.4-1) stable; urgency=low
+
+  * `mcu`: the module pushes its events to kelixip, so a supervision view is told
+    what a conference and its legs do rather than polling for it.
+  * SBB `bridge()`: the outbound leg is disconnected cleanly during a progressive
+    shutdown, instead of being left to time out.
+  * sip: what the depacketizer accumulates is bounded, and a malformed header value
+    no longer raises.
+  * sip: an oversized message is answered 513 rather than silently dropped.
+  * Packaging: bash-completion is declared as an optional dependency.
+  * User-Agent is now Kelixip/1.5.4.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Thu, 10 Sep 2026 12:00:00 +0200
+
+kelixip (1.5.3-1) stable; urgency=low
+
+  * Registrations are observable live: `Kelix.Control.registrations/0`,
+    `registrations/1` and `registration/2` read the registrar's bindings per domain,
+    and `subscribe_registrations/2` pushes every change of a domain as it happens.
+    What kelescope displays, it is told; it does not poll.
+  * `registrar`: a binding taken, renewed or dropped is published as an event, so a
+    supervision view and the node agree without either re-deriving the REGISTER.
+  * `mcu`: a conference and its legs publish the same kind of events, for the same
+    view.
+  * User-Agent is now Kelixip/1.5.3.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Tue, 08 Sep 2026 12:00:00 +0200
+
 kelixip (1.5.2-1) stable; urgency=low
 
   * Multi-interface: a node speaks IPv4 and IPv6 at once, on an internal side and a

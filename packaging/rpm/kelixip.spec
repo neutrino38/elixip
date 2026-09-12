@@ -27,12 +27,12 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.5.2
+Version:        1.5.4
 # Counts the builds of this Version, and must be bumped for each one that leaves this
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        8%{?dist}
+Release:        1%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -48,6 +48,11 @@ Requires(pre):  shadow-utils
 # failure at the first install on a minimal host.
 Requires(post):   policycoreutils, policycoreutils-python-utils
 Requires(postun): policycoreutils-python-utils
+# The kelictl completion is data the shell reads, so the server runs without it and
+# this stays WEAK: a minimal host may refuse it and still install. A default
+# `dnf install` pulls it in, which is the point — on a host that lacks it, TAB is
+# silently inert and nothing says why.
+Recommends:     bash-completion
 
 %description
 kelixip is a SIP application server: declarative per-domain dispatch (config.toml
@@ -138,8 +143,8 @@ install -m 0644 sysconfig/kelixip %{buildroot}%{_sysconfdir}/sysconfig/%{name}
 
 install -D -m 0644 systemd/kelixip.service %{buildroot}%{_unitdir}/%{name}.service
 
-# Shell completion for kelictl. Inert without the bash-completion package, hence no
-# dependency on it: the file is data, loaded by basename when the operator types.
+# Shell completion for kelictl. Inert without the bash-completion package, hence a
+# weak dependency only: the file is data, loaded by basename when the operator types.
 install -D -m 0644 completion/kelictl \
     %{buildroot}%{_datadir}/bash-completion/completions/kelictl
 
@@ -249,6 +254,27 @@ fi
 %{_datadir}/%{name}/mcu*.exs
 
 %changelog
+* Thu Sep 10 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.4-1
+- mcu: the module pushes its events to kelixip, so a supervision view is told what
+  a conference and its legs do rather than polling for it.
+- SBB bridge(): the outbound leg is disconnected cleanly during a progressive
+  shutdown, instead of being left to time out.
+- sip: what the depacketizer accumulates is bounded, and a malformed header value
+  no longer raises.
+- sip: an oversized message is answered 513 rather than silently dropped.
+- Packaging: bash-completion is declared as an optional dependency.
+- User-Agent is now Kelixip/1.5.4.
+
+* Tue Sep 08 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.3-1
+- Registrations are observable live: Kelix.Control.registrations/0,
+  registrations/1 and registration/2 read the registrar's bindings per domain, and
+  subscribe_registrations/2 pushes every change of a domain as it happens. What
+  kelescope displays, it is told; it does not poll.
+- registrar: a binding taken, renewed or dropped is published as an event, so a
+  supervision view and the node agree without either re-deriving the REGISTER.
+- mcu: a conference and its legs publish the same kind of events, for the same view.
+- User-Agent is now Kelixip/1.5.3.
+
 * Sun Sep 06 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.2-7
 - Packaging: Release 6 was built more than once with different payloads, so dnf took
   the second install for a package it already had and kept the first — a node ran a
