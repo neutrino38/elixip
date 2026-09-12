@@ -133,13 +133,28 @@ organizational:
 apps/elixip2/lib/
 ├── framework/   # the reusable SIP stack (transport → message → transaction →
 │                #   dialog → session/context → media). See the layers below.
-├── dsl/         # the Finite State Language and its FSM engine (namespace SIP.Scenario)
-│   ├── SIPScenario.ex        # FSL macros: state, goto, stay, config, on_events, …
-│   ├── SIPScenarioRunner.ex  # FSM execution engine
-│   └── SIPScenarioLoader.ex  # loads scenario .exs files / modules
+├── fsl/         # the Finite State Language and its engine — namespace FSL.*, and
+│   │            #   NOT SIP: on its way out to a hex package of its own (see
+│   │            #   ../finite-state-language/elixir/docs/extraction-plan.md)
+│   ├── machine.ex            # FSL.Machine — state, goto, stay, config, on_events, …
+│   ├── runner.ex             # FSL.Runner — the FSM execution engine
+│   ├── block.ex              # FSL.Block — a service building block
+│   ├── context.ex            # FSL.Context — the FSM's six fields + the ctx_* macros
+│   ├── host.ex               # FSL.Host — what an embedding provides; + .Default
+│   ├── loader.ex             # FSL.Loader — loads machine .exs files / modules
+│   ├── child.ex              # FSL.Child — a spawned sub-FSM handle (struct)
+│   ├── monitor.ex            # FSL.Monitor — live registry behind --monitor / kelictl
+│   ├── journal.ex            # FSL.Journal — per-run sequence journal
+│   ├── diagram/plantuml.ex   # FSL.Diagram.PlantUML — renders the journal
+│   ├── valet.ex              # FSL.Valet — slow work as an event
+│   └── http.ex               # FSL.HTTP — HTTP-as-events (needs Req)
+├── dsl/         # what SIP adds on top of FSL, keeping its own names
+│   ├── SIPScenario.ex        # SIP.Scenario — the facade a SIP scenario `use`s
+│   ├── SIPSBB.ex             # SIP.SBB — the same, for a building block
+│   ├── SIPScenarioFacades.ex # the FSL.* engine under the names Elixip calls it
+│   ├── SIPScenarioCallDispatcher.ex
+│   └── SIPScenarioExternalConfig.ex
 ├── elixipp/     # scenario-engine support shared with the tool (stays in :elixip2)
-│   ├── SIPScenarioMonitor.ex # in-memory store feeding the --monitor view
-│   │                         #   (SIP.Scenario.Monitor; a no-op when not started)
 │   └── ElixippScenarioUAS.ex # Elixip.ScenarioUAS — UAS instance factory (quota)
 ├── built-in-scenarios/       # the scenarios COMPILED INTO the escript, run by
 │   │                         #   module name: `elixipp UAC.Register` needs no file
@@ -155,11 +170,32 @@ apps/elixip2/lib/
 takes `elixipp UAC.Invite`, `mix scenario UAC.Register` and everything ELIXIPP.md
 promises about "no file needed" with it.
 
-The `dsl` layer builds on `framework` (a scenario `use SIP.Scenario` pulls in
-`SIP.Session.CallUAC`, `SIP.Session.Media` and `SIP.Context`). The `elixipp`
-tool (`apps/elixipp`) drives the FSL engine; FSL itself runs fine without the
-tool. `kelixip` (`apps/kelixip`) is the productized server — see its design doc;
-today it is a P0 skeleton (`Kelix.Application` + supervision tree).
+**`fsl/` knows nothing about SIP, and that is enforced rather than hoped for.**
+The language calls back into an `FSL.Host` implementation for everything it must
+not know; `SIP.FSL.Host` (`framework/SIPFSLHost.ex`) is SIP's, and reads as the
+answer to "what does SIP add to the state machine" — eleven callbacks, top to
+bottom. A machine that names no host gets `FSL.Host.Default` and runs with no
+protocol at all: `test/fsl_standalone_test.exs` is that case, and it is the smoke
+test for the extraction, because every other test here is a SIP test and a
+surviving coupling would survive unnoticed.
+
+`dsl/` is the SIP side. `SIP.Scenario` is the name a SIP scenario **should**
+`use` — it brings the SIP verbs (`SIP.Session.CallUAC`, `Media`, `B2bua`) and
+names both the host and the `sip_ctx` variable — and `SIP.Scenario.Runner` &c.
+are the engine under the names three apps, a dozen tests and the kelixip server
+call it by. Those names are kept, not deprecated: `.exs` scenarios and kelixip
+scripts are loaded at **run** time, from `/etc/kelixip/scripts` and from customer
+directories, so a rename a compiler would catch here is a node that fails to
+start there.
+
+Two things a facade cannot forward, and which therefore did change: `FSL.Monitor`
+is the **registered name** of the live registry (a `Process.whereis` and a
+supervision child spec name the process, not a function), and its push tag is
+`{:fsl_monitor, …}`.
+
+The `elixipp` tool (`apps/elixipp`) drives the FSL engine; FSL itself runs fine
+without the tool. `kelixip` (`apps/kelixip`) is the productized server — see its
+design doc.
 
 ### Transport Layer (`SIP.Transport.*`)
 - `SIP.Transport.UDP`, `TCP`, `TLS`, `WSS` — protocol-specific transports (outbound + inbound)

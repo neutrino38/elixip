@@ -10,6 +10,11 @@ defmodule SIP.Test.FSL.HostTest do
   needs (extraction plan §4, §4.6). The test of the seam is not that SIP still
   works — it will, whatever we do — but that a host FSL never heard of answers
   the same questions and gets the same engine.
+
+  So every machine here says `use FSL.Machine, host: …`, which brings the
+  language and nothing else: no SIP verbs, no `sip_ctx`, no stack to start. That
+  is the spelling a second binding uses, and the one a published package has to
+  make work.
   """
   use ExUnit.Case
 
@@ -36,8 +41,12 @@ defmodule SIP.Test.FSL.HostTest do
     end
   end
 
+  # `use FSL.Machine` and not `use SIP.Scenario`: a machine of another binding
+  # gets the language and nothing else — no SIP verbs, no `sip_ctx`, no stack.
+  # After P2 that is spellable, and it is the path a published package needs to
+  # work.
   defmodule Machine do
-    use SIP.Scenario, host: Probe
+    use FSL.Machine, host: Probe
 
     config(colour: "blue", size: 3)
 
@@ -184,10 +193,10 @@ defmodule SIP.Test.FSL.HostTest do
       end
 
       defmodule TakesOpts do
-        use SIP.Scenario, host: OptsHost
+        use FSL.Machine, host: OptsHost
 
         state initial_state do
-          send(appdata_get(:probe), {:seen, appdata_get(:seen_opts), sip_ctx.parent_pid})
+          send(appdata_get(:probe), {:seen, appdata_get(:seen_opts), fsl_ctx.parent_pid})
           scenario_success("done")
         end
       end
@@ -314,7 +323,7 @@ defmodule SIP.Test.FSL.HostTest do
   end
 
   defmodule MatrixBot do
-    use SIP.Scenario, host: MatrixHost
+    use FSL.Machine, host: MatrixHost
 
     state initial_state do
       on_events do
@@ -330,7 +339,7 @@ defmodule SIP.Test.FSL.HostTest do
   # Handles the homeserver itself, so the host's clause must not be injected
   # ahead of it.
   defmodule MatrixAware do
-    use SIP.Scenario, host: MatrixHost
+    use FSL.Machine, host: MatrixHost
 
     state initial_state do
       on_events do

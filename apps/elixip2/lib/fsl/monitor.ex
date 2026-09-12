@@ -1,4 +1,4 @@
-defmodule SIP.Scenario.Monitor do
+defmodule FSL.Monitor do
   @moduledoc """
   In-memory registry of the scenario instances ("calls") currently running, used
   by the `elixipp --monitor` live view.
@@ -9,7 +9,7 @@ defmodule SIP.Scenario.Monitor do
   `send_INVITE`), the current FSM state and the event that triggered the last
   transition. A sub-FSM gets its own row, displayed right below its parent.
 
-  Both `SIP.Scenario.Runner` (state transitions) and the `SIP.Session.*` send_*
+  Both `FSL.Runner` (state transitions) and the `SIP.Session.*` send_*
   macros (commands) report here, but **only when the monitor is started** — the
   reporting helpers are a no-op otherwise, so there is zero overhead when
   monitoring is off.
@@ -26,7 +26,7 @@ defmodule SIP.Scenario.Monitor do
   **embedding**, which declares its columns and their defaults when it starts
   the monitor:
 
-      SIP.Scenario.Monitor.start(columns: SIP.FSL.Host.monitor_columns())
+      FSL.Monitor.start(columns: SIP.FSL.Host.monitor_columns())
 
   and writes one with `note/2`. The registry never learns which keys are which,
   and the row **stays flat** — `row.medias`, not `row.extra.medias`. That is the
@@ -40,8 +40,8 @@ defmodule SIP.Scenario.Monitor do
   would read as "nobody measured".
 
   A pid can also `subscribe/1` to be told of changes as they happen instead of
-  polling `calls/0` — `{:sip_scenario_monitor, {:updated, slot, row}}` after
-  every reported change, `{:sip_scenario_monitor, {:cleared, slot}}` when a slot
+  polling `calls/0` — `{:fsl_monitor, {:updated, slot, row}}` after
+  every reported change, `{:fsl_monitor, {:cleared, slot}}` when a slot
   (and any sub-FSM children) is cleared. On the model of
   `Kelix.Mod.Registrar.subscribe_register_event/2`; `Kelix.InstancePool` is the
   one subscriber today, joining these with its own rows for
@@ -204,7 +204,7 @@ defmodule SIP.Scenario.Monitor do
     end
 
     # Feed the PlantUML sequence journal (no-op when not enabled in this process).
-    SIP.Scenario.SequenceJournal.record_command(type, command)
+    FSL.Journal.record_command(type, command)
 
     :ok
   end
@@ -344,7 +344,7 @@ defmodule SIP.Scenario.Monitor do
   end
 
   defp notify(st, msg) do
-    for pid <- st.subs, do: send(pid, {:sip_scenario_monitor, msg})
+    for pid <- st.subs, do: send(pid, {:fsl_monitor, msg})
     :ok
   end
 

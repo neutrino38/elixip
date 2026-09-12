@@ -207,7 +207,7 @@ defmodule FSL.Host do
   The module that turns this run's journal into a diagram.
 
   A binding may want its own; the default is the one FSL ships,
-  `SIP.Scenario.SequenceDiagram` (PlantUML), which after §4.8 needs no protocol
+  `FSL.Diagram.PlantUML` (PlantUML), which after §4.8 needs no protocol
   vocabulary — its lane rule is by exclusion, so a type it has never heard of is
   still drawn as coming from the peer.
 

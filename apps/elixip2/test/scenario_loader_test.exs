@@ -50,7 +50,7 @@ defmodule SIP.Test.ScenarioLoader do
     end
 
     test "load_module! raises for a module that is not a scenario" do
-      assert_raise RuntimeError, ~r/not a SIP.Scenario/, fn ->
+      assert_raise RuntimeError, ~r/not a FSL.Machine/, fn ->
         Loader.load_module!("SIP.Uri")
       end
     end

@@ -58,7 +58,7 @@ defmodule Kelix.Control do
     * `Kelix.InstancePool.list/0` — **which** instances exist (`id`, `domain`,
       `function`, `script`, `pid`). The `id` is what `shutdown_scenario/1`
       (`kelictl stop <id>`) takes, and no other command exposes it.
-    * `SIP.Scenario.Monitor` — **where each FSM is**: current `state`, the `event`
+    * `FSL.Monitor` — **where each FSM is**: current `state`, the `event`
       that got it there, the last `command` it issued, and the `account` it serves.
       Reading the FSM state is the whole point of an FSL-driven server; without it
       the formalism is invisible from the outside. It also carries what SHAPE the
@@ -71,7 +71,7 @@ defmodule Kelix.Control do
   """
   @spec monitor() :: [map]
   def monitor() do
-    fsm = safe(fn -> Map.new(SIP.Scenario.Monitor.calls(), &{&1.slot, &1}) end, %{})
+    fsm = safe(fn -> Map.new(FSL.Monitor.calls(), &{&1.slot, &1}) end, %{})
 
     for row <- safe(fn -> Kelix.InstancePool.list() end, []) do
       Kelix.InstancePool.join_row(row, Map.get(fsm, row.id))

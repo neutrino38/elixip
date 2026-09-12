@@ -1,7 +1,7 @@
-defmodule SIP.Scenario.Child do
+defmodule FSL.Child do
   @moduledoc """
   Handle on a sub-FSM (child scenario) spawned from a parent scenario via the
-  `spawn_fsm` macro of `SIP.Scenario`.
+  `spawn_fsm` macro of `FSL.Machine`.
 
   The parent keeps one handle per child in its context appdata, under the
   `:__children__` key, indexed by the local name it assigned the child (`as:`).

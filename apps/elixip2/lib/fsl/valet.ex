@@ -1,6 +1,6 @@
-defmodule Valet do
+defmodule FSL.Valet do
   @moduledoc """
-  Valet turns any synchronous processing that takes time into an asynchronous
+  FSL.Valet turns any synchronous processing that takes time into an asynchronous
   one whose result is delivered as a single tagged message to the caller.
 
   `ask/4` spawns a disposable **coordinator** that owns a monitored **worker**

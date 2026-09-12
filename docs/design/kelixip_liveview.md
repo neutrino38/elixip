@@ -65,10 +65,11 @@ the pattern already in the codebase:
 - `Kelix.Mod.Registrar.subscribe_register_event/2` → `{:registrar, event,
   "aor@domain"}` (a pid subscribes to registration changes; state `subs: %{key
   => MapSet(pid)}`, notified by plain `send/2`) — the pattern to copy.
-- `SIP.Scenario.Monitor` (`apps/elixip2/lib/elixipp/SIPScenarioMonitor.ex`) is
+- `FSL.Monitor` (`apps/elixip2/lib/fsl/monitor.ex`, reachable under its former
+  name `SIP.Scenario.Monitor` for everything but the registered name) is
   the scenarios-in-progress store already feeding `--monitor` / `kelictl
   monitor`, via `calls/0` (pull-only today). Scenarios already push their state
-  into it in real time (`SIPScenarioRunner.ex`'s `report/5`, `note_stay/4`,
+  into it in real time (`fsl/runner.ex`'s `report/5`, `note_stay/4`,
   `note_command/2`, `note_account/1`, all `GenServer.cast`) — the push stops
   dead at `SIP.Scenario.Monitor`'s boundary; nothing relays it further.
 - **What to add**: a subscriber list (`subs: MapSet(pid)`) in

@@ -1,8 +1,8 @@
-defmodule SIP.Scenario.Runner do
+defmodule FSL.Runner do
   @moduledoc """
-  Execution engine for `SIP.Scenario` finite state machines.
+  Execution engine for `FSL.Machine` finite state machines.
 
-  A scenario module (one that does `use SIP.Scenario`) compiles each `state`
+  A scenario module (one that does `use FSL.Machine`) compiles each `state`
   block into a function `__state_<name>/1` that takes the context (a
   `%SIP.Context{}` for a SIP scenario — see `FSL.Context`) and
   returns a *transition descriptor*:
@@ -23,7 +23,7 @@ defmodule SIP.Scenario.Runner do
 
     * `bootstrap_stack/0` — start the SIP layers (idempotent). Call it once,
       either through `run/2` with `start_stack = true` or explicitly via
-      `SIP.Scenario.start_stack/0` before running several instances.
+      `FSL.Machine.start_stack/0` before running several instances.
     * `run_instance/1` — run a single scenario instance in the **calling
       process** (the dialog layer binds SIP/media events to `self()`, so the
       whole FSM must run where `run_instance/1` is called).
@@ -37,7 +37,7 @@ defmodule SIP.Scenario.Runner do
 
   `start_stack = true` is the one-shot mode used by `mix scenario` / `elixipp`.
   `start_stack = false` assumes the stack is already up (started once via
-  `SIP.Scenario.start_stack/0`) and is the basis for running many instances in
+  `FSL.Machine.start_stack/0`) and is the basis for running many instances in
   parallel later on.
   """
   @spec run(module(), boolean()) :: :ok | {:error, term()}
@@ -144,7 +144,7 @@ defmodule SIP.Scenario.Runner do
 
   # ── Sub-FSM (spawn_fsm) support ─────────────────────────────────────────────
   # These functions back the `spawn_fsm` / `notify` / `notify_parent` macros of
-  # SIP.Scenario. They run in the parent (resp. child) FSM process, the one that
+  # FSL.Machine. They run in the parent (resp. child) FSM process, the one that
   # owns the SIP/media mailbox, so the spawn_monitor link and the message sends
   # all originate from the right process.
 
@@ -175,9 +175,9 @@ defmodule SIP.Scenario.Runner do
     # it does nothing until an INVITE is routed to it. The type is opaque here
     # (§4.11): `uas :register` is a SIP annotation, and the language has no
     # business knowing the role names of a protocol.
-    FSL.Host.call(module, :spawn_child, [SIP.Scenario.Loader.scenario_type(module), pid], :ok)
+    FSL.Host.call(module, :spawn_child, [FSL.Loader.scenario_type(module), pid], :ok)
 
-    child = %SIP.Scenario.Child{name: name, pid: pid, ref: ref, module: module}
+    child = %FSL.Child{name: name, pid: pid, ref: ref, module: module}
     children = ctx.appdata |> Map.get(:__children__, %{}) |> Map.put(name, child)
     FSL.Context.appdata_set(ctx, :__children__, children)
   end
@@ -187,7 +187,7 @@ defmodule SIP.Scenario.Runner do
   defp resolve_target(target, base_dir) when is_binary(target) do
     target
     |> sibling_path(base_dir)
-    |> SIP.Scenario.Loader.load_file!()
+    |> FSL.Loader.load_file!()
   end
 
   # `spawn_fsm "child.exs"` names a file next to the scenario that declares it (the
@@ -244,7 +244,7 @@ defmodule SIP.Scenario.Runner do
   @spec notify_child(FSL.Context.t(), atom(), term()) :: :ok
   def notify_child(ctx, name, payload) do
     case ctx.appdata |> Map.get(:__children__, %{}) |> Map.get(name) do
-      %SIP.Scenario.Child{pid: pid} -> send(pid, {:parent_msg, payload})
+      %FSL.Child{pid: pid} -> send(pid, {:parent_msg, payload})
       nil -> Logger.warning("notify/2: unknown child #{inspect(name)}")
     end
 
@@ -274,7 +274,7 @@ defmodule SIP.Scenario.Runner do
     # Read tolerantly rather than through a seam of its own — the journal's
     # switch is a question for the journal seam (§4.8), not for this one.
     if Application.get_env(:elixip2, :log_sequence, false) or Map.get(ctx, :debug, false) do
-      SIP.Scenario.SequenceJournal.start(%{
+      FSL.Journal.start(%{
         scenario: scenario_label(module),
         pid: inspect(self()),
         config: module.__scenario_config__()
@@ -452,10 +452,10 @@ defmodule SIP.Scenario.Runner do
     # `module_dir` is exactly that — loaded on first use — and `sbb_fsm` IS that
     # first use, so without this the first call entering a given block raises
     # "is not a service building block" and every later one works. The same
-    # pairing is already what `SIP.Scenario.register_sbb_namespace/2` does.
+    # pairing is already what `FSL.Machine.register_sbb_namespace/2` does.
     unless Code.ensure_loaded?(module) and function_exported?(module, :__sbb__, 0) do
       raise ArgumentError,
-            "#{inspect(module)} is not a service building block (it must `use SIP.SBB`)"
+            "#{inspect(module)} is not a service building block (it must `use FSL.Block`)"
     end
 
     states = module.__scenario_states__()
@@ -736,10 +736,10 @@ defmodule SIP.Scenario.Runner do
   defp report(module, username, state, event, event_type) do
     {label, state} = report_label(module, state)
 
-    if Process.whereis(SIP.Scenario.Monitor) do
+    if Process.whereis(FSL.Monitor) do
       call_id = Process.get(:scenario_slot_id, self())
 
-      SIP.Scenario.Monitor.report(
+      FSL.Monitor.report(
         call_id,
         label,
         username,
@@ -750,7 +750,7 @@ defmodule SIP.Scenario.Runner do
     end
 
     # Feed the PlantUML sequence journal (no-op when not enabled in this process).
-    SIP.Scenario.SequenceJournal.record_transition(state, event_label(event), event_type)
+    FSL.Journal.record_transition(state, event_label(event), event_type)
 
     :ok
   end
@@ -806,7 +806,7 @@ defmodule SIP.Scenario.Runner do
 
     notify_parent_exit(ctx, outcome, reason)
 
-    case SIP.Scenario.SequenceJournal.flush() do
+    case FSL.Journal.flush() do
       {:ok, path} -> Logger.info("Sequence diagram written to #{path}")
       {:error, reason} -> Logger.warning("Could not write sequence diagram: #{inspect(reason)}")
       :disabled -> :ok
@@ -845,7 +845,7 @@ defmodule SIP.Scenario.Runner do
     if children == [] do
       :ok
     else
-      Enum.each(children, fn %SIP.Scenario.Child{pid: pid} ->
+      Enum.each(children, fn %FSL.Child{pid: pid} ->
         send(pid, {:scenario_ctl, :shutdown, :parent_terminated})
       end)
 
@@ -869,7 +869,7 @@ defmodule SIP.Scenario.Runner do
         wait_children_down(Map.delete(remaining, ref), timer)
 
       :__children_shutdown_deadline__ ->
-        Enum.each(remaining, fn {_ref, %SIP.Scenario.Child{pid: pid}} ->
+        Enum.each(remaining, fn {_ref, %FSL.Child{pid: pid}} ->
           Process.exit(pid, :kill)
         end)
 

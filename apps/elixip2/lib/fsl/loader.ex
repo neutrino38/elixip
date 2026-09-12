@@ -1,4 +1,4 @@
-defmodule SIP.Scenario.Loader do
+defmodule FSL.Loader do
   @moduledoc """
   Locate and load scenario modules, for the `mix scenario` task and the
   `elixipp` escript.
@@ -6,7 +6,7 @@ defmodule SIP.Scenario.Loader do
 
   @doc """
   Compile a scenario `.exs` file and return the scenario module it defines
-  (the one created by `use SIP.Scenario`). Raises if none is found.
+  (the one created by `use FSL.Machine`). Raises if none is found.
   """
   @spec load_file!(Path.t()) :: module()
   def load_file!(path) do
@@ -15,7 +15,7 @@ defmodule SIP.Scenario.Loader do
     |> Enum.map(&elem(&1, 0))
     |> Enum.find(&scenario_module?/1)
     |> case do
-      nil -> raise "No scenario module (use SIP.Scenario) found in #{path}"
+      nil -> raise "No scenario module (use FSL.Machine) found in #{path}"
       module -> module
     end
   end
@@ -30,7 +30,7 @@ defmodule SIP.Scenario.Loader do
 
     cond do
       not Code.ensure_loaded?(module) -> raise "Module #{name} is not available"
-      not scenario_module?(module) -> raise "Module #{name} is not a SIP.Scenario"
+      not scenario_module?(module) -> raise "Module #{name} is not a FSL.Machine"
       true -> module
     end
   end

@@ -12,7 +12,7 @@ defmodule Kelix.InstancePool do
   instance ends (`:DOWN`) its slot is freed and the script version checked back in.
 
   Also the live half of `Kelix.Control.subscribe_monitor/1`: subscribes to
-  `SIP.Scenario.Monitor` once at boot and re-joins its pushes with its own rows
+  `FSL.Monitor` once at boot and re-joins its pushes with its own rows
   (`join_row/2`, the same join `Kelix.Control.monitor/0` runs on every read),
   forwarding `{:kelix_monitor, {:upsert, row}}` / `{:remove, id}` to whoever
   called `subscribe_monitor/1` — see `docs/design/kelixip_liveview.md`.
@@ -54,7 +54,7 @@ defmodule Kelix.InstancePool do
             counter_mons: %{}
 
   # The three call-shape columns default to a value, not to a blank — same
-  # defaults and rationale as `SIP.Scenario.Monitor`'s `@empty`, for the row it
+  # defaults and rationale as `FSL.Monitor`'s own, for the row it
   # has nothing on (a scenario that only just appeared, or one the monitor lost).
   @empty_fsm %{
     scenario: "",
@@ -125,7 +125,7 @@ defmodule Kelix.InstancePool do
     do: GenServer.call(__MODULE__, {:unsubscribe_counters, pid})
 
   @doc """
-  Join one `list/0` row with its `SIP.Scenario.Monitor.calls/0` entry (`nil` when
+  Join one `list/0` row with its `FSL.Monitor.calls/0` entry (`nil` when
   there is none yet, or a sub-FSM slot the pool does not key on — see
   `Kelix.Control.monitor/0`). Public so this module can run the join live, once
   per pushed change, instead of `Kelix.Control.monitor/0` re-reading everything.
@@ -140,7 +140,7 @@ defmodule Kelix.InstancePool do
 
   @impl true
   def init(_opts) do
-    SIP.Scenario.Monitor.subscribe(self())
+    FSL.Monitor.subscribe(self())
     {:ok, %__MODULE__{}}
   end
 
@@ -243,8 +243,8 @@ defmodule Kelix.InstancePool do
         # Free the FSM monitor row (and those of any spawn_fsm children) — otherwise
         # a busy registrar accumulates one row per registration, forever. Also the
         # signal `subscribe_monitor/1`'s subscribers get told this row is gone
-        # (`{:sip_scenario_monitor, {:cleared, _}}` below).
-        SIP.Scenario.Monitor.clear(inst.id)
+        # (`{:fsl_monitor, {:cleared, _}}` below).
+        FSL.Monitor.clear(inst.id)
 
         Logger.debug(
           module: __MODULE__,
@@ -268,7 +268,7 @@ defmodule Kelix.InstancePool do
 
   # `SIP.Scenario.Monitor` pushes (subscribed to at init/1): re-join with our own
   # row and forward to whoever called `subscribe_monitor/1`.
-  def handle_info({:sip_scenario_monitor, {:updated, slot, fsm_row}}, state) do
+  def handle_info({:fsl_monitor, {:updated, slot, fsm_row}}, state) do
     with true <- is_integer(slot),
          inst when not is_nil(inst) <- find_instance(state, slot) do
       broadcast_monitor(state, {:upsert, join_row(to_list_row(inst), fsm_row)})
@@ -279,7 +279,7 @@ defmodule Kelix.InstancePool do
 
   # A {parent_slot, name} sub-FSM slot is not a row of ours (`monitor/0` does not
   # surface it either) — nothing to remove.
-  def handle_info({:sip_scenario_monitor, {:cleared, slot}}, state) do
+  def handle_info({:fsl_monitor, {:cleared, slot}}, state) do
     if is_integer(slot), do: broadcast_monitor(state, {:remove, slot})
     {:noreply, state}
   end

@@ -1,4 +1,4 @@
-defmodule SIP.Scenario.SequenceJournal do
+defmodule FSL.Journal do
   @moduledoc """
   Per-process, in-memory journal of a scenario instance's run: the commands it
   sent (`send_INVITE`, `media_play`, …), the state transitions it went through and
@@ -7,8 +7,8 @@ defmodule SIP.Scenario.SequenceJournal do
   debug flag (`ctx_set(:debug, true)`).
 
   The journal lives in the **process dictionary of the scenario instance process**
-  — the same process where `SIP.Scenario.Runner.run_instance/1`, the `send_*`
-  macros (`SIP.Scenario.Monitor.note_command/2`) and the runner `report/5` all
+  — the same process where `FSL.Runner.run_instance/1`, the `send_*`
+  macros (`FSL.Monitor.note_command/2`) and the runner `report/5` all
   run. It is therefore naturally isolated per call and adds zero overhead when
   disabled (every recording helper is a no-op when no journal has been started).
   """
@@ -93,7 +93,7 @@ defmodule SIP.Scenario.SequenceJournal do
             Process.get(:scenario_module),
             :diagram_renderer,
             [],
-            SIP.Scenario.SequenceDiagram
+            FSL.Diagram.PlantUML
           )
 
         content = renderer.to_plantuml(events(), meta)

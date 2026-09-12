@@ -5,12 +5,12 @@
 # blocks the scenario. See FSL.md ("SIP.Session.HTTP / http_GET") for the
 # scenario-side contract.
 
-defmodule HTTP.Session do
+defmodule FSL.HTTP do
   @moduledoc """
   HTTP helpers mixin for SIP scenarios — issue outbound HTTP requests from a
   scenario state without ever blocking the finite-state machine.
 
-  `use HTTP.Session` brings in the `http_GET/3` FSL macro. Like the other
+  `use FSL.HTTP` brings in the `http_GET/3` FSL macro. Like the other
   `SIP.Session.*` macros it operates on the implicit `sip_ctx`, sets
   `sip_ctx.lasterr` to `:ok` and returns the updated context (so a `goto` placed
   right after it works), but the HTTP *result* is delivered asynchronously, later,
@@ -71,7 +71,7 @@ defmodule HTTP.Session do
   require Logger
 
   # NOTE: this mixin must be combined with a session module (e.g. via
-  # `use SIP.Scenario`) that brings in `use SIP.Context`, because the macro
+  # `use FSL.Machine`) that brings in `use SIP.Context`, because the macro
   # rebinds `var!(sip_ctx)`.
   defmacro __using__(_opts) do
     quote do
@@ -80,15 +80,15 @@ defmodule HTTP.Session do
       `timeout` milliseconds. `tag` (an atom or any term) discriminates several
       concurrent requests. Does not block the scenario: sets `sip_ctx.lasterr` to
       `:ok`, returns the updated context, and delivers the result later as a
-      single `{tag, result}` message. See `HTTP.Session`.
+      single `{tag, result}` message. See `FSL.HTTP`.
       """
       defmacro http_GET(url, timeout, tag) do
         quote do
-          SIP.Scenario.Monitor.note_command(:http, "http_GET")
+          FSL.Monitor.note_command(:http, "http_GET")
 
           # `self()` here is the scenario process — the coordinator sends the
           # {tag, …} message back to it, where `on_events` collects it.
-          HTTP.Session.get_async(unquote(url), unquote(timeout), unquote(tag))
+          FSL.HTTP.get_async(unquote(url), unquote(timeout), unquote(tag))
 
           # Fire-and-forget: the launch itself cannot fail, so leave lasterr
           # clean for the `goto` that usually follows.
@@ -102,7 +102,7 @@ defmodule HTTP.Session do
   Launch an asynchronous HTTP GET. Spawns the disposable coordinator process
   (which owns the worker and the timeout) and returns its pid immediately; the
   calling process is never blocked. The result is delivered to the **caller** as
-  a single `{tag, result}` message (`Valet` captures `self()`).
+  a single `{tag, result}` message (`FSL.Valet` captures `self()`).
 
   `req_opts` is forwarded to `Req.get/2` — normally empty from the FSL macro,
   but used by the tests to inject a `Req.Test` stub / a fake `:adapter`.
@@ -111,6 +111,6 @@ defmodule HTTP.Session do
   def get_async(url, timeout, tag, req_opts \\ [])
       when is_binary(url) and is_integer(timeout) and timeout > 0 and
              is_list(req_opts) do
-    Valet.ask(tag, &Req.get/2, [url, req_opts], timeout)
+    FSL.Valet.ask(tag, &Req.get/2, [url, req_opts], timeout)
   end
 end

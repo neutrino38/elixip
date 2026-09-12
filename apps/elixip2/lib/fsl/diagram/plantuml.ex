@@ -1,6 +1,6 @@
-defmodule SIP.Scenario.SequenceDiagram do
+defmodule FSL.Diagram.PlantUML do
   @moduledoc """
-  Pure renderer turning a `SIP.Scenario.SequenceJournal` event list plus metadata
+  Pure renderer turning a `FSL.Journal` event list plus metadata
   into a [PlantUML](https://plantuml.com/sequence-diagram) sequence diagram.
 
   It has **no dependency on the SIP stack**, so it is fully unit-testable in

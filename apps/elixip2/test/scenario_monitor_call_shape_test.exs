@@ -180,7 +180,12 @@ defmodule SIP.Test.ScenarioMonitorCallShape do
 
   defp monitor_slot(_ctx) do
     # The three call-shape columns are SIP's, declared by the host that owns them
-    # (SIP.FSL.Host.monitor_columns/0) — the registry itself is generic.
+    # (SIP.FSL.Host.monitor_columns/0) — the registry itself is generic, and its
+    # columns are fixed when it starts. So a suite that reads them starts its own
+    # rather than inheriting whichever set a neighbouring suite happened to
+    # declare: `start/1` answers `:already_started` as success, which is exactly
+    # what would hand us an FSM-only row here.
+    if pid = Process.whereis(FSL.Monitor), do: GenServer.stop(pid)
     {:ok, _pid} = SIP.Scenario.Monitor.start(columns: SIP.FSL.Host.monitor_columns())
     slot = System.unique_integer([:positive])
     Process.put(:scenario_slot_id, slot)

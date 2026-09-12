@@ -266,7 +266,7 @@ defmodule SIP.Test.SpawnFsm do
 
     test "installs the call dispatcher and routes one INVITE to the waiting child" do
       ctx = SIP.Scenario.Runner.spawn_child(%SIP.Context{}, UasChild, [as: :callee], self())
-      %SIP.Scenario.Child{pid: child_pid} = ctx.appdata[:__children__][:callee]
+      %FSL.Child{pid: child_pid} = ctx.appdata[:__children__][:callee]
 
       assert SIP.Session.ConfigRegistry.get_call_processing_module() ==
                SIP.Scenario.CallDispatcher
@@ -291,7 +291,7 @@ defmodule SIP.Test.SpawnFsm do
       log =
         ExUnit.CaptureLog.capture_log(fn ->
           ctx = SIP.Scenario.Runner.spawn_child(%SIP.Context{}, UasChild, [as: :callee], self())
-          %SIP.Scenario.Child{pid: child_pid} = ctx.appdata[:__children__][:callee]
+          %FSL.Child{pid: child_pid} = ctx.appdata[:__children__][:callee]
 
           # Wind the child down so it does not sit in its 5s INVITE wait.
           send(child_pid, {:scenario_ctl, :shutdown, :test})
@@ -304,7 +304,7 @@ defmodule SIP.Test.SpawnFsm do
 
     test "a dead waiting child is purged from the dispatcher queue" do
       ctx = SIP.Scenario.Runner.spawn_child(%SIP.Context{}, UasChild, [as: :callee], self())
-      %SIP.Scenario.Child{pid: child_pid, ref: ref} = ctx.appdata[:__children__][:callee]
+      %FSL.Child{pid: child_pid, ref: ref} = ctx.appdata[:__children__][:callee]
 
       Process.exit(child_pid, :kill)
       assert_receive {:DOWN, ^ref, :process, ^child_pid, :killed}, 1_000

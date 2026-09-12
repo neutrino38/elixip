@@ -29,7 +29,7 @@ binding, not an adapter package — see "Media plane" below.
   browser, `handle_info` from anywhere).
 - An Elixip scenario is a BEAM process receiving messages
   (`on_events` ⇒ `receive`; one spawned process per scenario instance —
-  `SIPScenarioRunner.ex`, `spawn_monitor` in `spawn_child/5` and
+  `fsl/runner.ex`, `spawn_monitor` in `spawn_child/5` and
   `spawn_uas_instance/2`).
 - Bridging the two is *literally* message passing, and the scenario side
   already has the exact pattern: the **sub-FSM protocol**
@@ -52,7 +52,7 @@ What this buys that no JS stack can offer:
 
 The scenario runner **owns its process**: states are plain function calls and
 `on_events` compiles to a blocking `receive`
-(`SIPScenario.ex`, `on_events/1` ⇒ `{:receive, [], …}`). A LiveView, by
+(`fsl/machine.ex`, `on_events/1` ⇒ `{:receive, [], …}`). A LiveView, by
 contrast, is callback-driven: `handle_event/3` must return. Embedding the FSM
 in the LiveView process would require rewriting the runner in
 continuation-passing / `gen_statem` style — a rearchitecture of Elixip's
@@ -187,7 +187,7 @@ package.
 ## Open questions
 
 1. Scenario supervision: plain `Registry` + `DynamicSupervisor` per key, or
-   reuse/extend the dispatcher (`SIPScenarioCallDispatcher.ex`)?
+   reuse/extend the dispatcher (`dsl/SIPScenarioCallDispatcher.ex`)?
 2. `{:lv, name, params}` — keep raw string names from the DOM, or an
    app-declared mapping to atoms (mailbox hygiene vs. atom-leak safety)?
 3. Multi-view attach (several LiveViews mirroring one scenario — e.g. agent
