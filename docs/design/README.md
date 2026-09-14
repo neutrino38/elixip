@@ -38,6 +38,8 @@ The user-facing counterparts live at the repository root —
 | [socket2-websocket-limits.md](socket2-websocket-limits.md) | **known vulnerability, unfixed**: socket2 accumulates a fragmented WebSocket message with no bound |
 | [kelixip_liveview.md](kelixip_liveview.md), [liveview-adapter.md](liveview-adapter.md) | a real-time web console over kelixip |
 | [moteli-reboot.md](moteli-reboot.md) | RabbitMQ + protobuf control plane for the media servers (2.0) |
+| [DESIGN-PRESENCE.md](DESIGN-PRESENCE.md) | presence: the subscription layer, event packages, the composite state, the ACD |
+| [DESIGN-CHAT.md](DESIGN-CHAT.md) | instant messaging: MESSAGE dispatch, the Silo, chatrooms, attachments, bots |
 
 ## Designed elsewhere
 
