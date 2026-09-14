@@ -1,71 +1,72 @@
-# Présence et messagerie instantantanée
+# Presence and instant messaging
 
-## Objectifs
+## Objectives
 
-Implémenter RFC 3856 et l'utiliser de façon créative comme suit :
+Implement RFC 3856 and use it creatively, as follows.
 
-1- Proposer un état composite qui contiendrait à la fois
-   - l'état d'enregistrement de l'usager
-   - l'état de présence publié par l'usager 
-   - l'état d'occupation en terme d'appels via RFC 7463 - Shared Line Appearence
-   - la localisation soit publiée par l'usager, soit déterminée par IP location
-   - ses terminaux enregistrés pour les notifications push
+**1 — A composite state**, carrying at once:
 
-2- Implémenter la messagerie instantanée pair à pair (MESSAGE)
+- the user's registration state
+- the presence state the user publishes
+- call occupancy, through RFC 7463 — Shared Line Appearance
+- the location, either published by the user or derived from IP geolocation
+- the devices registered for push notification
 
+**2 — Peer-to-peer instant messaging (MESSAGE).**
 
-Script .exs qui gère:
-- Souscription pour rentrer dans la "liste d'amis" ( SUBSCRIBE monami@domain.com )
-- NOTIFY sip:monami@domain.com et acceptation ou pas.
-- NOTIFY sip:jechercheunami@domain.com avec le résultat.
+An `.exs` script handling:
 
-Question ouverte : comment obtenir sa liste d'amis ?
+- the subscription that enters a buddy list (`SUBSCRIBE monami@domain.com`)
+- `NOTIFY sip:monami@domain.com`, and its acceptance or refusal
+- `NOTIFY sip:jechercheunami@domain.com` with the outcome
 
-Envoi
+Open question: how does a user obtain their buddy list? Lead: RFC 4662 (RLS — one
+subscription for the whole list), with the list itself held in XCAP (RFC 4826).
+See *References*.
 
-Possibilité d'enregistrer un message audio / video / texte ? ou une photo et la pousser comme pièce jointe.
+Sending: can a user record an audio / video / text message, or a photo, and push
+it as an attachment?
 
-3- Implémenter la messagerie instantanée entre une UA et un scénario agissant comme un chatbot avec des sessions long terme
+**3 — Instant messaging between a UA and a scenario acting as a chatbot**, with
+long-lived sessions.
 
-La première idée est de faire des scénarios .exs capable de décrire des scénarios de chatbot et de reprendre des conversations si besoin.
+The first idea is `.exs` scenarios able to describe chatbot flows and to resume a
+conversation when needed.
 
+**4 — A Service Building Block for presence-based Automatic Call Distribution.**
 
-4- Implémenter un SBB de type Automatic Call Distribution basé sur la présence
+The idea is asterisk's `app_queue` with a purely SIP interface. Queues are
+persistent objects, like the MCU module's conferences: they are created, edited
+and destroyed through `kelictl` commands, the REST API and a dedicated kelescope
+view.
 
-L'idée est de réimplémenter l'équivalent d'app_queue asterisk avec une interface purement SIP.
-Les files d'attentes (queues) sont des objets persistents similaire aux conférences du module MCU. On peut les
-créer, les éditer et les détruire par commandes kelictl, API et via une vue kelescope ad hoc.
+Subscribing to a queue would be done like this:
 
-Sousscrire à une file d'attente serait fait comme ceci
-
-``̀ 
+```
 SUBSCRIBE sip:queuename@acddomain
-``̀ 
+```
 
-Le message subscribe serait traité par un scénario e.g. `acd-agent-subscribe.exs` après avoir fait 
-ses vérifications il appelle une fonction ACD.add_agent(queue, agent_sip_uri)
+The SUBSCRIBE would be handled by a scenario, e.g. `acd-agent-subscribe.exs`,
+which after its own checks calls `ACD.add_agent(queue, agent_sip_uri)`:
 
-
-``̀ Elixir
-
+```elixir
 STATE add_to_queue do
     req = last_req()
     ACD.add_agent(req.ruri.userpart, req.pai)
     ...
 end
+```
 
-``̀ 
+A user's call to an agent is queued through
+`ACD.queue_call(queue_name, req, options)`.
 
-Un appel d'un usager à un agent est mis en file d'attente grâce à un fonction `ACD.queue_call(queue_name, req, options)`
+It would look like this — to be refined, and revisited if need be:
 
-Cela ressemblerait (à préciser et si besoin remettre en cause)
-
-``̀ Elixir
-
+```elixir
 STATE queue_call do
     req = last_uas_req()
     ACD.queue_call("myqueue", req, [])
-    
+
     on_events do
         { :queued, queue_entry } -> goto session_progress
         { :unknown_queue, queue_entry } -> ...
@@ -77,7 +78,7 @@ STATE session_progress do
     reply_invite_with_sdp(183, [media: :tc, webrtc: :if_offered])
     on_events do
         {:ACK, _req, _trans, _dlg} -> goto play_background
-        {:CANCEL, _req, _trans, _dlg} -> 
+        {:CANCEL, _req, _trans, _dlg} ->
             ACD.cancel_queue_call("myqueue")
     end
 end
@@ -87,22 +88,22 @@ STATE session_progress do
     media_play("background.mp4")
     on_events do
         {:ms_event, _res, :player_ended} -> stay()
+```
 
-``̀ 
+The SBB places the call in the queue (held by a process of its own?). The next
+available agent — one who subscribed to the queue, is not handling a call, is
+registered and has declared themselves available — is selected according to the
+queue's policy, and the B2BUA module is used to connect them to the caller. If
+the agent answers, done. Otherwise the next agent is tried, possibly changing the
+agent's presence state along the way (the `autopause` option).
 
+The B2BUA's hunt function is obviously what is used here.
 
-Le SBB sélectionne place l'appel dans une file la file d'attente (tenue par un process à part ?). Le prochain agent
-disponible (= qui a souscrit à la file, qui ne traite pas un appel, qui est enregitré et qui s'est déclaré disponible) est sélectionné en fonction de la politique de la file d'attente et grâce au module B2BUA, on tente de mettre en relation
-l'usager et l'appelant. Si l'agent décroche, bingo. Sinon, on passe à l'agent suivant (possiblement en modifiant l'état
-de présence de l'agent si option autopause).
+`ACD.SBB.queue()` will have to end up as easy to use as asterisk's `app_queue()`.
 
-On doit utiliser la fonction hunt du module B2BUA ici évidement.
+## Configuration in domains.toml
 
-On devra construire un joli ACD.SBB.queue() aussi facile à utiliser qu'asterisk app_queue()
-
-## Configuration dans domains.toml
-
-``̀ 
+```toml
 [[domain.presence]]
 event-package=<event package>
 publish=publish-<event package>.exs
@@ -120,62 +121,280 @@ script="chatroom.exs"
 [[domain.chat]]
 default = true                    # catch-all, must be last
 script="p2p-chat.exs"
+```
 
-``̀ 
+# Design notes
 
-# Notes de conceptions
-
-## Implémentation dans elixip2
+## Implementation in elixip2
 
 - SIP stack: handling of presence
-- SIP.Presence.* - parsers des corps de messages
-- scénario présence UAC, présence UAS
-- scenario chat
+- `SIP.Presence.*` — the message-body parsers
+- presence UAC and presence UAS scenarios
+- chat scenario
 
-## Module Silo 
+## The subscription layer (framework)
 
-Un module Silo qui permet de stocker un message SIP et de l'envoyer "plus tard" à un AOR quand l'abonné est enregistré. Durée de rétention. Limite de message et de taille par AOR.
-Persistence en cas de redémarrage de kelixip. 
+RFC 6665 describes an entity the stack does not have. A SUBSCRIBE currently
+creates a generic dialog with a hardcoded 600 s lifetime, and nothing carries the
+event package, the negotiated expiry, the `Subscription-State`, the refresh or
+the final NOTIFY. That entity is what this layer adds — below presence, below
+chat, below the ACD, and shared by all three.
 
-Probablemetn un module kelixip - à confirmer
-Un par domain avec forte isolation. Lien avec le registrar: 
-- doit-on exiger un registrar dans le même domaine ? Simple et direct !
-ou 
-- un module qui implémente un behavior particulier ? Permettrait de le déporter dans elixip2 et de faire des scénarios de test. Dans ce cas, registrar implémenterait le behavior et kelixip initialiserai Silo en passant l'implémentation de registrar.
+**The framework holds one subscription; a kelixip module holds the collection.**
+One subscription is a dialog's point of view: its event package and `id`, its
+negotiated expiry, its state, its refresh. Who is subscribed to which resource —
+and therefore who must be notified when a state changes — is the `presence`
+module's business. The split is what lets `elixipp` play a watcher and a notifier
+end to end, with no kelixip node, which is the condition for testing any of this.
 
-contrainte : pas de présence sans registrar dans la même instance kelixip ? (ce n'est pas un problème d'imposer cela à mon sens)
+### Decisions
 
-## Module kelixip Presence
+**1. No process per subscription.** The state lives in the session layer above
+the dialog — `SIPSessionSubscribe.ex`, symmetric with `SIPSessionInvite.ex` — and
+the timers live in the dialog, which already carries `expirationtimer` and
+`keepalivetimer`. A dedicated process would make three for one SUBSCRIBE.
 
-Module pub/sub générique pour la présence. Comme le registrar, un par domaine avec une isolation forte. Dépend du module SILO
+Two consequences, neither of them neutral:
 
-Traite les SUBSCRIBE et PUBLISH, envoie les NOTIFY
+- **a subscription pins a script version.** It lives as long as the scenario
+  instance that accepted it: 3600 s for presence against minutes for a call. The
+  hot reload refcounts versions ([DESIGN-KELIXIP.md](DESIGN-KELIXIP.md#5-scripts)),
+  so a replaced version stays resident for hours, and a node with script churn
+  keeps several. "No call is interrupted by a reload" now reads "and no
+  subscription either, for an hour".
+- **nothing survives a restart.** Neither dialog nor subscription. Every refresh
+  then lands on an unknown subscription and is answered **481** — never accepted
+  as if it were new, which would leave the watcher believing its subscription is
+  established while no NOTIFY ever comes. A correct watcher re-subscribes. The
+  module's collection may persist its published states; it cannot resurrect the
+  dialogs, so persistence buys nothing for the subscriptions themselves.
+
+**2. An event package is a behaviour.** `SIP.EventPackage`, so the subscription
+layer knows nothing of PIDF:
+
+| Callback | Answers |
+|---|---|
+| `name/0` | `"presence"`, `"dialog"`, `"message-summary"` — matched against `Event`, else **489 Bad Event**, and composed into `Allow-Events` |
+| `default_expires/0`, `max_expires/0`, `min_expires/0` | the expiry bounds; below the minimum the notifier answers **423**. The default belongs to the package (3600 s for presence), never to the framework |
+| `content_types/0` | plural: the SUBSCRIBE carries `Accept`, and the notifier picks from that list or answers **406** |
+| `parse/2`, `serialize/2` | the body, in both directions |
+
+The negotiation is the subscription layer's — it reads `Event`, `Accept` and
+`Expires` and asks the package what it can produce. The package never reads a SIP
+message.
+
+Three implementations in v1, which is what justifies the behaviour rather than a
+hardcoded package: `presence` (RFC 3856), `presence.winfo` (RFC 3857) — consent
+is an event package of its own, and it is what answers "NOTIFY my friend, accept
+or not" in the objectives above — and `dialog` (RFC 4235) as soon as the
+composite state wants call occupancy.
+
+#### Who registers a package
+
+Three questions hide behind "registering": whether the **code is loaded**,
+whether the **node knows** the package (the `name → module` table that answers
+489 and composes `Allow-Events`), and whether a **domain enables** it. The third
+is already answered by `domains.toml` — a config key selecting packages
+node-wide, the way `:mediaserver` selects an adapter, would be a second place
+deciding the same thing.
+
+**The registry lives in elixip2, and kelixip is one of its clients.** The
+provided packages are compiled into the framework, which exposes
+`SIP.EventPackage.register/1` and `unregister/1`; a kelixip module may declare
+itself as an event package by calling it on start. elixipp therefore runs the
+base packages with no kelixip node, and no dependency is inverted.
+
+Four rules a registry mutable at run time needs:
+
+1. **`:persistent_term` holds the table.** It is read on the path of every
+   SUBSCRIBE, PUBLISH and NOTIFY, and written once at boot plus once per module
+   reload — that profile exactly. Not an ETS table with a process of its own to
+   supervise.
+2. **Start order stays out of the contract.** A domain naming a package whose
+   module has not started yet cannot be validated. kelixip already settled the
+   same case for domain functions: a **warning at boot**, not a refusal
+   ([DESIGN-KELIXIP.md](DESIGN-KELIXIP.md#7-the-module-system)). Same here, and a
+   **489** at run time if the package is still absent. Anything stricter carves
+   "modules start before domains are validated" into stone.
+3. **`register/1` is idempotent and paired with `unregister/1`.** A kelixip
+   module reloads hot: a reload replaces the entry, a module removed drops it. An
+   entry left pointing at an unloaded module kills the next SUBSCRIBE — in
+   embedded mode nothing reloads it implicitly.
+4. **Collisions are decided at registration, never at use.** A third party
+   **overriding** a provided package (an operator with their own PIDF) is
+   legitimate, allowed, and logged at warning naming both modules. Two third
+   parties claiming one name: the second is **refused**. Otherwise module start
+   order silently decides SIP behaviour — the reason an ambiguous control route
+   is refused at registration too.
+
+**Scope for v1:** the three packages stay in elixip2 and the `presence` module
+does **not** register itself — it would be consuming an API meant for third
+parties. `register/1` exists for a proprietary package and for tests, where a
+dummy package exercises the subscription layer without PIDF.
+
+Two consequences to hold on to:
+
+- **`Allow-Events` is a property of the domain, not of the node.** Two domains on
+  one node may offer different packages, and `Event: dialog` on a domain that
+  does not enable it is answered **489** even though the code is loaded.
+- **the Router reads `Event`.** With one `[[domain.presence]]` block per package,
+  dispatch step 3 can no longer pick the script from the method alone. That
+  reading belongs to `SIP.Msg.Ops` like every other, and the **489 is the
+  Router's**, raised before any script runs — a script never has to check that
+  the package concerns it.
+
+**Full state only in v1.** Partial state — `application/pidf-diff+xml` (RFC 5262),
+and the `dialog` package's own deltas — is an **optional** callback added later.
+The subscription layer emits complete state until it exists.
+
+**3. The subscription key carries the event type and `id` from the start.** RFC
+6665 keys a subscription on Call-ID + both tags + event type + `id`, and several
+subscriptions may share one dialog. Real clients do not (Linphone opens one
+dialog per subscription), so **v1 refuses a second package on an existing
+dialog** — but the key is complete from day one, because widening it later is a
+breaking change to everything that stores one.
+
+**4. The final NOTIFY belongs to the framework.** It arms the timer on the
+negotiated expiry and emits `Subscription-State: terminated;reason=timeout` if
+the scenario has not terminated the subscription itself. Left to the script it
+would be forgotten in three scripts out of four, and the subscription would leak
+on the watcher's side — the same failure mode `requested_expires/2` was written
+to end.
+
+**5. The watcher refreshes by itself.** Symmetric with `RegisterUAC`: the
+framework re-SUBSCRIBEs before expiry, and an `app_drives_…` control hands the
+refresh back to the scenario when it wants it.
+
+**6. Two concrete defects this layer must close:**
+
+- **the 600 s hardcoded dialog lifetime** for SUBSCRIBE, in
+  `SIP.Dialog.start_new_dialog_for/3`, becomes the negotiated expiry. This is a
+  **second** reading in `SIP.Msg.Ops`, not a reuse of `requested_expires/2`: a
+  SUBSCRIBE has no Contact `expires` parameter, its default comes from the event
+  package, and the notifier may shorten the value it grants or answer 423. Same
+  rule, different rules ([CLAUDE.md](../../CLAUDE.md), *Message Layer*): one
+  reading, in the message layer, and every caller delegates.
+- **the NOTIFY/200 race.** RFC 6665 requires the notifier to send the 2xx before
+  the first NOTIFY, and UDP reorders anyway. The watcher must therefore accept a
+  NOTIFY whose To tag matches no known dialog yet, matching on Call-ID plus the
+  local From tag and adopting the tag it carries.
+
+**7. Termination contract.** Exactly one `{:subscription_terminated, ref, reason}`
+to the application, with the RFC 6665 reasons — `deactivated`, `probation`,
+`rejected`, `timeout`, `giveup`, `noresource`, `invariant`. "Exactly one" is the
+contract, as it is for `{:dialog_terminated, …}`
+([DESIGN-SIPSTACK.md](DESIGN-SIPSTACK.md#55-the-termination-contract)).
+`deactivated` and `probation` mean *subscribe again*, and the framework does it
+without waking the scenario; the other five are terminal and surface.
+
+### What this leaves to the module
+
+The `presence` module owns the collection: resource → subscribers, the published
+state per resource, the authorisation policy fed by `presence.winfo`, and the
+fan-out that turns one PUBLISH into N NOTIFYs. It calls into this layer to send
+each of them; it never parses a SUBSCRIBE.
+
+## The Silo module
+
+A Silo module storing a SIP message and delivering it "later" to an AOR, once the
+subscriber registers. Retention period. Per-AOR message count and size limits.
+Persistence across a kelixip restart.
+
+Probably a kelixip module — to be confirmed. One per domain, strongly isolated.
+Its link to the registrar:
+
+- must a registrar in the same domain be required? Simple and direct.
+
+or
+
+- a module implementing a dedicated behaviour? That would allow moving it into
+  elixip2 and writing test scenarios for it. The registrar would implement the
+  behaviour, and kelixip would initialise Silo with the registrar's
+  implementation.
+
+Constraint: no presence without a registrar in the same kelixip instance?
+(imposing that is not a problem, in my view)
+
+## The kelixip Presence module
+
+A generic pub/sub module for presence. Like the registrar, one per domain with
+strong isolation. Depends on the Silo module.
+
+It handles SUBSCRIBE and PUBLISH, and sends the NOTIFYs.
 
 ## Chat
 
-Pour le chat pair à pair : un B2BUA chat
+Peer-to-peer chat: a chat B2BUA.
 
-Pour les chatrooms : 
-- un module kelixip,
-- des objets chatroom comme les conference du module 
-- des fonctions pour poster des messages
+Chatrooms:
 
-Support des médias: 
+- a kelixip module,
+- chatroom objects, like the MCU module's conferences,
+- functions to post messages.
 
-configurer un répertoire média pour photo et vidéo + vignette.
-envoi par URL dans un MESSAGE ? S'inspirer de RCS ?
+Media support: configure a media directory for photo and video, plus a thumbnail.
+Send the URL inside a MESSAGE? Take inspiration from RCS?
 
-Expiration des médias, téléchagement par le client?
+Media expiry; download by the client?
 
-Quid de RCS d'ailleurs ?
+And what about RCS, while we are at it?
 
 ## Bot
 
-Besoin d'un module minimum qui crée des grammaires. Comment traiter les messages ?
+A minimal module building grammars is needed. How are messages to be processed?
 
+# Test terminals
 
-# Terminaux de test
+- Linphone as the first reference
+- Extend Trix to go further
+- what about RCS?
+# References
 
-- Linphone comme première référence
-- Faire évoluer Trix pour aller plus loin.
--
+The specifications this document builds on, and what each one settles.
+
+### The notification mechanism
+
+| RFC | Title | Why it is here |
+|---|---|---|
+| [6665](https://www.rfc-editor.org/rfc/rfc6665) | SIP-Specific Event Notification | The subscription layer. **Obsoletes RFC 3265** — read 6665, not 3265: the dialog is created by the 2xx to the SUBSCRIBE and no longer by the NOTIFY, and `202 Accepted` is deprecated |
+| [3261](https://www.rfc-editor.org/rfc/rfc3261) | SIP | §12 dialogs, §20 headers, the transaction machines |
+| [3903](https://www.rfc-editor.org/rfc/rfc3903) | Event State Publication (PUBLISH) | The publish half: `SIP-If-Match`, the entity-tag lifecycle, refresh and remove |
+
+### Presence itself
+
+| RFC | Title | Why it is here |
+|---|---|---|
+| [3856](https://www.rfc-editor.org/rfc/rfc3856) | A Presence Event Package for SIP | The `presence` package: the objective of this document |
+| [3863](https://www.rfc-editor.org/rfc/rfc3863) | PIDF | The document format `SIP.Presence.*` parses and serializes |
+| [4479](https://www.rfc-editor.org/rfc/rfc4479) | A Data Model for Presence | Person / service / device — the three-level model the composite state needs to say "Alice is available, on this device, for this service" |
+| [4480](https://www.rfc-editor.org/rfc/rfc4480) | RPID | The rich-presence extensions to PIDF: activity, mood, place-type. Where a published location lands |
+| [5262](https://www.rfc-editor.org/rfc/rfc5262) | PIDF Extension for Partial Presence | `application/pidf-diff+xml`. **Deferred**: v1 emits full state |
+| [5263](https://www.rfc-editor.org/rfc/rfc5263) | Partial Notification of Presence Information | The SIP side of the same deferral |
+
+### Consent and the buddy list
+
+| RFC | Title | Why it is here |
+|---|---|---|
+| [3857](https://www.rfc-editor.org/rfc/rfc3857) | Watcher Information Event Template-Package | `presence.winfo` — the second `SIP.EventPackage` implementation. This is what tells Alice that Bob wants to watch her, and what carries her answer |
+| [3858](https://www.rfc-editor.org/rfc/rfc3858) | XML Format for Watcher Information | Its body |
+| [5025](https://www.rfc-editor.org/rfc/rfc5025) | Presence Authorization Rules | The policy document behind a `pending` subscription: who may watch, and how much they see |
+| [4662](https://www.rfc-editor.org/rfc/rfc4662) | Resource List Subscriptions (RLS) | **Answers the open question above.** One SUBSCRIBE to a list URI, one NOTIFY carrying the state of every buddy as `multipart/related`. Without it a client opens one subscription per buddy |
+| [4826](https://www.rfc-editor.org/rfc/rfc4826) | XCAP Resource Lists | Where the list itself lives |
+| [4825](https://www.rfc-editor.org/rfc/rfc4825) | XCAP | How a client reads and edits that list — HTTP, not SIP. A dependency outside the SIP stack |
+
+### Call state, for the composite state
+
+| RFC | Title | Why it is here |
+|---|---|---|
+| [4235](https://www.rfc-editor.org/rfc/rfc4235) | An INVITE-Initiated Dialog Event Package | The real prerequisite of objective 1's occupancy: RFC 7463 is built on it, so this package comes first |
+| [7463](https://www.rfc-editor.org/rfc/rfc7463) | Shared Appearances of a SIP AOR | Shared line appearance — appearance numbers and their seize/release arbitration, on top of 4235 |
+
+### Instant messaging
+
+| RFC | Title | Why it is here |
+|---|---|---|
+| [3428](https://www.rfc-editor.org/rfc/rfc3428) | SIP Extension for Instant Messaging | The MESSAGE method: objective 2 |
+| [5438](https://www.rfc-editor.org/rfc/rfc5438) | Instant Message Disposition Notification (IMDN) | Delivery and read receipts — what a modern client expects, and what the Silo module must honour when it delivers a stored message late |
+| [4975](https://www.rfc-editor.org/rfc/rfc4975) | MSRP | The session-mode alternative for large content. The "media by URL" idea in the Chat section is the other branch; both are open |
+| [5365](https://www.rfc-editor.org/rfc/rfc5365) | Multiple-Recipient MESSAGE Requests | One route to chatroom fan-out |
+| [4103](https://www.rfc-editor.org/rfc/rfc4103) | RTP Payload for Text Conversation (T.140) | Already carried by the MCU; the real-time-text neighbour of instant messaging |
