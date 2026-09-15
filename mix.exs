@@ -9,7 +9,7 @@ defmodule Elixip.Umbrella.MixProject do
   def project do
     [
       apps_path: "apps",
-      version: "1.5.4",
+      version: "1.5.5",
       start_permanent: Mix.env() == :prod,
       package: package(),
       deps: deps()

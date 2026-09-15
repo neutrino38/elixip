@@ -1,3 +1,13 @@
+kelixip (1.5.5-1) stable; urgency=low
+
+  * WSS: the WebSocket layer is hardened. What a fragmented message accumulates is
+    bounded, so a peer can no longer grow a connection's memory without end.
+  * The unused dependency on socket is dropped; socket2 carries the whole WebSocket
+    path.
+  * User-Agent is now Kelixip/1.5.5.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Tue, 15 Sep 2026 12:00:00 +0200
+
 kelixip (1.5.4-1) stable; urgency=low
 
   * `mcu`: the module pushes its events to kelixip, so a supervision view is told
