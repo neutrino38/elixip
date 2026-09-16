@@ -172,6 +172,28 @@ The third argument of `b2bua_forward/3`:
 `:yes`, `:no`, `:if_offered` or `:no_avp`, and this is where a gateway is
 expressed.
 
+`early_media:` says what a `18x` carrying the callee's SDP is worth. By default
+it is worth nothing: the body is dropped and the provisional relayed without it,
+because the caller's answer comes from the media server and committing it on a
+`1xx` would pin the call to the target that sent it — which is what leaves a hunt
+free to move on. With `early_media: true` the framework does the `2xx`
+choreography one exchange earlier — the callee's early answer goes to its
+endpoint, the legs are attached, and the caller receives OUR answer — so a
+network ringback or a gateway announcement is audible while it rings. Nobody is
+told the call is answered, so no RTP watchdog is armed on a leg still ringing.
+
+```elixir
+@media {:mediaserver,
+        inbound:  [webrtc: :no, media: :audio_video],
+        outbound: [webrtc: :no, media: :audio_video],
+        early_media: true}
+```
+
+For the services placed in front of a gateway, where the announcement IS what
+the caller called for. Leave it out everywhere else: it is a comfort, and it
+narrows nothing if the media server cannot do it — the provisional then crosses
+stripped, as by default.
+
 `transcode:` is a policy per media, and what it selects is a **codec for both
 legs at once** — the two legs of a B2BUA cannot be negotiated independently:
 
