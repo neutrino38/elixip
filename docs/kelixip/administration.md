@@ -233,7 +233,9 @@ same text is `kelictl registration help`.
 router is using right now, which after a rejected `domain reload-all` is *not* what
 is on disk (the version is in `kelictl status`). `show` resolves its argument the
 way inbound traffic is resolved, against the name **and** the aliases,
-case-insensitively, so the host seen on the wire is a valid argument. The
+case-insensitively and wildcards included, so the host seen on the wire is a
+valid argument — `domain show a.gw.out` answers for the `gw.out` domain whose
+aliases hold `*.gw.out`. The
 dial-plan is listed in file order and numbered, because it is first-match-wins:
 rule *n* is only tried if rules *1…n-1* did not match. `functions` lists what the
 domain actually serves (a function block present in the TOML = enabled), so an

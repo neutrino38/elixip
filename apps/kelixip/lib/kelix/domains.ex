@@ -13,7 +13,8 @@ defmodule Kelix.Domains do
   This module is both the supervised GenServer and the snapshot struct it holds:
     * `version`  — bumped on each successful reload
     * `domains`  — ordered `[%Kelix.Domain{}]`
-    * `index`    — `name` + each alias (lower-cased) → `%Kelix.Domain{}` for O(1) lookup
+    * `index`    — `name` + each literal alias (lower-cased) → `%Kelix.Domain{}` for O(1) lookup
+    * `suffixes` — each wildcard alias (`*.gw.out`) as `{".gw.out", domain}`, longest first
     * `modules`  — raw `[module.*]` blocks (carried for the module system, P5)
   """
   use GenServer
@@ -25,10 +26,11 @@ defmodule Kelix.Domains do
           version: non_neg_integer,
           domains: [Domain.t()],
           index: %{optional(String.t()) => Domain.t()},
+          suffixes: [{String.t(), Domain.t()}],
           modules: %{optional(String.t()) => map}
         }
 
-  defstruct version: 0, domains: [], index: %{}, modules: %{}
+  defstruct version: 0, domains: [], index: %{}, suffixes: [], modules: %{}
 
   @allowed_top_keys ~w(domain module)
   @registrar_keys %{
@@ -79,10 +81,23 @@ defmodule Kelix.Domains do
     end
   end
 
-  @doc "Resolve a host (R-URI/To host) to its domain, or nil. `name` + aliases, case-insensitive."
+  @doc """
+  Resolve a host (R-URI/To host) to its domain, or nil. `name` + aliases,
+  case-insensitive.
+
+  A literal name or alias always wins over a wildcard alias, and among wildcards
+  the longest suffix wins — so declaring `a.gw.out` alongside a `*.gw.out` domain
+  routes `a.gw.out` to the specific one, not to the catch-all.
+  """
   @spec lookup(t, String.t()) :: Domain.t() | nil
-  def lookup(%__MODULE__{index: index}, host) when is_binary(host),
-    do: Map.get(index, String.downcase(host))
+  def lookup(%__MODULE__{index: index, suffixes: suffixes}, host) when is_binary(host) do
+    host = String.downcase(host)
+
+    case Map.get(index, host) do
+      nil -> Enum.find_value(suffixes, fn {sfx, d} -> String.ends_with?(host, sfx) && d end)
+      %Domain{} = d -> d
+    end
+  end
 
   # ── GenServer callbacks ──────────────────────────────────────────────────────
 
@@ -227,12 +242,13 @@ defmodule Kelix.Domains do
     with {:ok, map} <- decode(content),
          :ok <- check_top_keys(map),
          {:ok, domains} <- parse_domains(Map.get(map, "domain", [])),
-         {:ok, index} <- build_index(domains) do
+         {:ok, {index, suffixes}} <- build_index(domains) do
       {:ok,
        %__MODULE__{
          version: 0,
          domains: domains,
          index: index,
+         suffixes: suffixes,
          modules: Map.get(map, "module", %{})
        }}
     end
@@ -261,6 +277,7 @@ defmodule Kelix.Domains do
   defp parse_domain(%{} = dm) do
     with {:ok, name} <- req_string(dm, "name", "domain"),
          {:ok, aliases} <- opt_string_list(dm, "aliases", name),
+         :ok <- check_aliases(aliases, name),
          {:ok, max_calls} <- opt_pos_integer(dm, "max_calls", name),
          {:ok, registrar} <- opt_fn_block(dm, "registrar", @registrar_keys, name),
          {:ok, presence} <- opt_fn_block(dm, "presence", @presence_keys, name),
@@ -345,20 +362,60 @@ defmodule Kelix.Domains do
     end
   end
 
+  # ── aliases: literal hosts, or `*.suffix` ────────────────────────────────────
+
+  # `*.suffix` is the only wildcard shape, and it matches any host ending in
+  # `.suffix`, at whatever depth. A `*` anywhere else is a typo, not a pattern:
+  # accepting it silently would route traffic an operator never meant to serve.
+  defp check_aliases(aliases, domain) do
+    case Enum.find(aliases, &bad_alias?/1) do
+      nil ->
+        :ok
+
+      bad ->
+        {:error,
+         "domain #{inspect(domain)}: bad alias #{inspect(bad)} — " <>
+           "a wildcard alias is written `*.suffix`"}
+    end
+  end
+
+  defp bad_alias?("*." <> rest), do: rest == "" or String.contains?(rest, "*")
+  defp bad_alias?(alias_), do: String.contains?(alias_, "*")
+
+  defp wildcard?("*." <> _), do: true
+  defp wildcard?(_), do: false
+
+  # `*.gw.out` -> `.gw.out`: the leading dot is kept, so the suffix never matches
+  # a host that merely *ends* with the letters (`notgw.out`).
+  defp wildcard_suffix("*" <> suffix), do: suffix
+
   # ── index (name + aliases -> domain; collisions rejected) ────────────────────
 
   defp build_index(domains) do
-    Enum.reduce_while(domains, {:ok, %{}}, fn d, {:ok, acc} ->
-      keys = [d.name | d.aliases] |> Enum.map(&String.downcase/1)
+    result =
+      Enum.reduce_while(domains, {:ok, {%{}, %{}}}, fn d, {:ok, {exact, wild}} ->
+        {wildcards, literals} =
+          d.aliases |> Enum.map(&String.downcase/1) |> Enum.split_with(&wildcard?/1)
 
-      case Enum.find(keys, &Map.has_key?(acc, &1)) do
-        nil ->
-          {:cont, {:ok, Enum.reduce(keys, acc, &Map.put(&2, &1, d))}}
+        keys = [String.downcase(d.name) | literals]
 
-        dup ->
+        dup =
+          Enum.find(keys, &Map.has_key?(exact, &1)) ||
+            Enum.find(wildcards, &Map.has_key?(wild, wildcard_suffix(&1)))
+
+        if dup do
           {:halt, {:error, "domain name/alias #{inspect(dup)} is used by more than one domain"}}
-      end
-    end)
+        else
+          {:cont,
+           {:ok,
+            {Enum.reduce(keys, exact, &Map.put(&2, &1, d)),
+             Enum.reduce(wildcards, wild, &Map.put(&2, wildcard_suffix(&1), d))}}}
+        end
+      end)
+
+    with {:ok, {exact, wild}} <- result do
+      {:ok, {exact, Enum.sort_by(Map.to_list(wild), fn {sfx, _} -> -byte_size(sfx) end)}}
+    end
   end
 
   # ── small validators ─────────────────────────────────────────────────────────

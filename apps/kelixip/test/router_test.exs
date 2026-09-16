@@ -60,6 +60,25 @@ defmodule Kelix.RouterTest do
       r = %{method: :REGISTER, ruri: %SIP.Uri{userpart: "a", domain: nil}, to: %SIP.Uri{domain: "example.com"}}
       assert {:route, %{function: :registrar}} = Router.resolve(snap, r)
     end
+
+    test "a wildcard alias routes a subdomain to its domain and its script" do
+      toml = """
+      [[domain]]
+      name = "gw.out"
+      aliases = ["*.gw.out"]
+
+      [[domain.call]]
+      default = true
+      script  = "gateway.exs"
+      """
+
+      {:ok, snap} = Domains.parse(toml)
+
+      assert {:route, %{domain: %{name: "gw.out"}, script: "gateway.exs"}} =
+               Router.resolve(snap, req(:INVITE, "0612345678", "sbc.eu.gw.out"))
+
+      assert {:reject, 404, _} = Router.resolve(snap, req(:INVITE, "0612345678", "notgw.out"))
+    end
   end
 
   describe "step 2 — function (method → enabled function)" do

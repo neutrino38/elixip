@@ -83,6 +83,72 @@ defmodule Kelix.DomainsTest do
     end
   end
 
+  describe "parse/1 — wildcard aliases" do
+    @wildcard """
+    [[domain]]
+    name = "a.gw.out"
+
+    [[domain]]
+    name = "gw.out"
+    aliases = ["*.gw.out", "passerelle.example.fr"]
+
+    [[domain]]
+    name = "deep"
+    aliases = ["*.dc.gw.out"]
+    """
+
+    setup do
+      {:ok, snap} = Domains.parse(@wildcard)
+      %{snap: snap}
+    end
+
+    test "matches any depth below the suffix", %{snap: snap} do
+      assert %Domain{name: "gw.out"} = Domains.lookup(snap, "b.gw.out")
+      assert %Domain{name: "gw.out"} = Domains.lookup(snap, "x.y.z.gw.out")
+      assert %Domain{name: "gw.out"} = Domains.lookup(snap, "B.GW.OUT")
+    end
+
+    test "the bare suffix resolves through `name`, not through the wildcard", %{snap: snap} do
+      assert %Domain{name: "gw.out"} = Domains.lookup(snap, "gw.out")
+      # the leading dot is part of the suffix: this is not a subdomain of gw.out
+      assert Domains.lookup(snap, "notgw.out") == nil
+    end
+
+    test "a literal name wins over a wildcard covering it", %{snap: snap} do
+      assert %Domain{name: "a.gw.out"} = Domains.lookup(snap, "a.gw.out")
+    end
+
+    test "the longest suffix wins", %{snap: snap} do
+      assert %Domain{name: "deep"} = Domains.lookup(snap, "srv.dc.gw.out")
+      assert %Domain{name: "gw.out"} = Domains.lookup(snap, "srv.other.gw.out")
+    end
+
+    test "literal aliases still work alongside a wildcard", %{snap: snap} do
+      assert %Domain{name: "gw.out"} = Domains.lookup(snap, "passerelle.example.fr")
+    end
+
+    test "aliases are reported as written", %{snap: snap} do
+      gw = Enum.find(snap.domains, &(&1.name == "gw.out"))
+      assert gw.aliases == ["*.gw.out", "passerelle.example.fr"]
+    end
+
+    test "two domains claiming the same suffix are rejected" do
+      toml =
+        ~s([[domain]]\nname = "a"\naliases = ["*.gw.out"]\n[[domain]]\nname = "b"\naliases = ["*.GW.OUT"])
+
+      assert {:error, msg} = Domains.parse(toml)
+      assert msg =~ "used by more than one domain"
+    end
+
+    test "a `*` anywhere but in front is rejected" do
+      for bad <- ~w(* *. a.*.b *gw.out gw.*) do
+        toml = ~s([[domain]]\nname = "a"\naliases = ["#{bad}"])
+        assert {:error, msg} = Domains.parse(toml), "accepted #{inspect(bad)}"
+        assert msg =~ "a wildcard alias is written"
+      end
+    end
+  end
+
   describe "parse/1 — validation errors" do
     test "missing domain name" do
       assert {:error, msg} = Domains.parse(~s([[domain]]\naliases = ["x"]))
