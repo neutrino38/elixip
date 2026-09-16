@@ -768,4 +768,45 @@ defmodule SIP.Test.Parser do
 		assert c2.domain == "10.0.0.1"
 	end
 
+	# A URI assembled field by field carries `port: nil` — the struct default —
+	# and only parse/1 ever filled the default in. A routing script writing
+	# `%SIP.Uri{userpart: u, domain: host}` then produced a destination with no
+	# port at all, which the transport refuses.
+	describe "target_port/1" do
+		test "the port the URI states wins" do
+			{:ok, uri} = SIP.Uri.parse("sip:bob@domain.fr:5070")
+			assert SIP.Uri.target_port(uri) == 5070
+		end
+
+		test "a URI built by hand still designates the default port" do
+			assert SIP.Uri.target_port(%SIP.Uri{userpart: "bob", domain: "domain.fr"}) == 5060
+		end
+
+		test "sips: defaults to 5061" do
+			assert SIP.Uri.target_port(%SIP.Uri{domain: "domain.fr", scheme: "sips:"}) == 5061
+		end
+
+		test "a parsed URI answers what parse/1 wrote into it" do
+			{:ok, plain} = SIP.Uri.parse("sip:bob@domain.fr")
+			{:ok, secure} = SIP.Uri.parse("sips:bob@domain.fr")
+			assert SIP.Uri.target_port(plain) == 5060
+			assert SIP.Uri.target_port(secure) == 5061
+		end
+	end
+
+	# `nil > 0` is true in Elixir: an atom sorts above every number. The check
+	# used to be that bare comparison, so a half-stamped URI passed for routed.
+	test "a URI stamped with an address but no port is not routing information" do
+		uri = %SIP.Uri{
+			domain: "domain.fr",
+			destip: {1, 2, 3, 4},
+			destport: nil,
+			tp_pid: self(),
+			tp_module: SIP.Transport.UDP
+		}
+
+		refute SIP.Uri.has_tp_info(uri)
+		assert SIP.Uri.has_tp_info(%SIP.Uri{uri | destport: 5060})
+	end
+
 end

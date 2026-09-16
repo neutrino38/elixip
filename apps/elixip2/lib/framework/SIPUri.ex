@@ -260,16 +260,7 @@ defmodule SIP.Uri do
             # Parse parameters
             params = parse_uri_parameters(Enum.drop(parts, 1))
 
-            finalport =
-              if core_uri.port != nil do
-                core_uri.port
-              else
-                if proto == "sips:" do
-                  5061
-                else
-                  5060
-                end
-              end
+            finalport = core_uri.port || default_port(proto)
 
             finaluri = %SIP.Uri{core_uri | scheme: proto, params: params, port: finalport}
 
@@ -469,6 +460,27 @@ defmodule SIP.Uri do
         hparams: Map.delete(sip_uri.hparams, param)
     }
   end
+
+  @doc """
+  The port this URI designates: the one it states, or the scheme's default when
+  it states none (RFC 3261 §19.1.2).
+
+  `port` is nil on a URI built field by field — the struct default — and only
+  `parse/1` used to fill the default in. A destination assembled by hand
+  (`%SIP.Uri{userpart: u, domain: host}`, as a routing script writes it) then
+  travelled portless all the way to `SIP.Transport.send_msg/4`, which takes an
+  integer and nothing else: the INVITE never went out and the leg was answered
+  488, on a target whose only sin was having no `:port` written down.
+
+  Reading the absent port is reading the URI, so it belongs here rather than in
+  each caller.
+  """
+  @spec target_port(%SIP.Uri{}) :: non_neg_integer()
+  def target_port(%SIP.Uri{port: port}) when is_integer(port) and port > 0, do: port
+  def target_port(%SIP.Uri{scheme: scheme}), do: default_port(scheme)
+
+  defp default_port(scheme) when scheme in ["sips:", "sips"], do: 5061
+  defp default_port(_scheme), do: 5060
 
   @doc "Obtain the transport string in capitals from the URI"
   def get_transport(uri = %SIP.Uri{}) do
@@ -681,8 +693,12 @@ defmodule SIP.Uri do
     {:ok, addr_spec}
   end
 
+  # `is_integer/1` before the comparison, and not for tidiness: an atom sorts
+  # ABOVE every number in Elixir, so `nil > 0` is true — a URI stamped with an
+  # address but no port passed for fully routed.
   def has_tp_info(uri = %SIP.Uri{}) do
-    is_tuple(uri.destip) and uri.destport > 0 and is_pid(uri.tp_pid) and not is_nil(uri.tp_module)
+    is_tuple(uri.destip) and is_integer(uri.destport) and uri.destport > 0 and
+      is_pid(uri.tp_pid) and not is_nil(uri.tp_module)
   end
 
   defimpl String.Chars do
