@@ -2038,18 +2038,25 @@ defmodule SIP.Session.B2bua do
       %Pending{} = pending ->
         # With a media server the response is not relayed as it stands: its SDP
         # is the callee's, and what the caller must receive is ours.
-        {sip_ctx, resp} = media_step(sip_ctx, resp, tid)
+        case media_step(sip_ctx, resp, tid) do
+          # The media step abandoned the attempt and CANCELled it. Nothing is
+          # relayed: the final response that CANCEL brings back comes through
+          # here like any other, and it is that one the caller gets.
+          {sip_ctx, :drop} ->
+            SIP.Context.set(sip_ctx, :lasterr, :ok)
 
-        # A refusal from one target of a serial hunt is not the answer to the
-        # call — it is the answer of one device. Try the next one instead of
-        # telling the caller the call failed.
-        # Before the hunt: a refusal of the OFFER is not a refusal by the device,
-        # and the same targets get another profile before the next ones get
-        # anything (§7.5).
-        if fallback?(sip_ctx, resp, tid) do
-          fall_back_one_rung(sip_ctx, resp, pending, tid)
-        else
-          hunt_or_relay(sip_ctx, resp, pending, tid)
+          # A refusal from one target of a serial hunt is not the answer to the
+          # call — it is the answer of one device. Try the next one instead of
+          # telling the caller the call failed.
+          # Before the hunt: a refusal of the OFFER is not a refusal by the device,
+          # and the same targets get another profile before the next ones get
+          # anything (§7.5).
+          {sip_ctx, resp} ->
+            if fallback?(sip_ctx, resp, tid) do
+              fall_back_one_rung(sip_ctx, resp, pending, tid)
+            else
+              hunt_or_relay(sip_ctx, resp, pending, tid)
+            end
         end
 
       nil ->
@@ -2223,9 +2230,11 @@ defmodule SIP.Session.B2bua do
   # the RTP watchdog on a ringing leg is what reaps the calls that ring longest
   # (`MediaServer.Behaviour.call_answered/1`).
   #
-  # Anything that does not line up — no SDP, a media server that refuses, a
-  # bridge that cannot be built — falls back to the default below. Early media is
-  # a comfort; it must never cost the call.
+  # Two kinds of "no" are told apart here, and only one of them is a failure.
+  # Early media not asked for, or a 18x with no SDP, is nothing at all: the
+  # provisional is relayed stripped, as it always was. A media server that
+  # refuses the description, or a bridge that cannot be built, is this call's
+  # media path — see `early_media_failed/3`.
   defp early_answer(sip_ctx, resp, %MediaPlan{} = plan) do
     with true <- early_media?(plan),
          sdp when is_binary(sdp) and sdp != "" <- SIP.Session.extract_sdp(resp),
@@ -2241,15 +2250,45 @@ defmodule SIP.Session.B2bua do
 
   defp early_media?(%MediaPlan{opts: opts}), do: Keyword.get(opts, :early_media, false) == true
 
+  # The media server could not take the callee's early description, or could not
+  # bridge it. That is not a comfort feature failing: it is this call's media
+  # path, and the 2xx would break on it one exchange later
+  # (`media_answer_failed/4`). Relaying the provisional would buy the caller a few
+  # seconds of a call that can never carry anything, and hide the cause behind a
+  # failure that looks like the callee's.
+  #
+  # So the attempt is abandoned the way §3.5 abandons one: CANCEL the branch in
+  # flight, keep the correlation, relay nothing. The 487 that comes back travels
+  # the ordinary path — a serial hunt moves to the next target, and the caller
+  # gets a final response either way.
   defp early_media_failed(sip_ctx, resp, reason) do
     Logger.warning(
       module: __MODULE__,
       message:
         "b2bua: the callee's early answer (#{resp.response}) could not be bridged " <>
-          "(#{inspect(reason)}); relaying the provisional without it"
+          "(#{inspect(reason)}); cancelling that attempt"
     )
 
-    {sip_ctx, strip_early_sdp(resp)}
+    case outbound_leg(sip_ctx) do
+      %Leg{dialogpid: dialog_pid} when is_pid(dialog_pid) ->
+        protect("cancel the attempt whose early media cannot be bridged", fn ->
+          SIP.Dialog.cancel(dialog_pid, current_tid())
+        end)
+
+      _ ->
+        :ok
+    end
+
+    sip_ctx =
+      case media_plan(sip_ctx) do
+        %MediaPlan{} = plan ->
+          put_media_plan(sip_ctx, %MediaPlan{plan | error: reason, bridged: false})
+
+        _ ->
+          sip_ctx
+      end
+
+    {sip_ctx, :drop}
   end
 
   # A 18x carrying the callee's SDP. Without a media server relaying it would

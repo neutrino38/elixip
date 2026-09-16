@@ -1463,7 +1463,6 @@ defmodule MediaServer.Mendooze.Conn do
   # the stream and the far end sees a discontinuity on every re-bridge.
   defp attach_pair(state, la, lb, media) do
     m = @media_int[media]
-    props = %{"useOriSeqNum" => "1"}
 
     with {:ok, _} <-
            rpc(state, "EndpointAttachToEndpoint", [
@@ -1479,15 +1478,35 @@ defmodule MediaServer.Mendooze.Conn do
              la.endpoint_id,
              m
            ]),
-         {:ok, _} <-
-           rpc(state, "EndpointSetRTPProperties", [state.sess_id, la.endpoint_id, m, props]),
-         {:ok, _} <-
-           rpc(state, "EndpointSetRTPProperties", [state.sess_id, lb.endpoint_id, m, props]) do
+         :ok <- keep_original_seqnum(state, la, media, m),
+         :ok <- keep_original_seqnum(state, lb, media, m) do
       :ok
     else
       {:error, reason} -> {:error, {:attach_failed, media, reason}}
     end
   end
+
+  # `EndpointSetRTPProperties` only knows Audio and Video. Asked for anything
+  # else it answers `Unknown media [2]` and the XML-RPC layer surfaces a bare
+  # "Error" — which failed the WHOLE bridge, both attaches included, although the
+  # server had just joined the two text streams and logged it (traffic of
+  # 2026-09-16: a total conversation call killed by its own early 183). T.140
+  # loses nothing by it: the server has no transcoder on that path either way, so
+  # nothing but the peer's own packets can be sent and there is no numbering to
+  # preserve against.
+  defp keep_original_seqnum(state, leg, media, m) when media in [:audio, :video] do
+    case rpc(state, "EndpointSetRTPProperties", [
+           state.sess_id,
+           leg.endpoint_id,
+           m,
+           %{"useOriSeqNum" => "1"}
+         ]) do
+      {:ok, _} -> :ok
+      {:error, _} = err -> err
+    end
+  end
+
+  defp keep_original_seqnum(_state, _leg, _media, _m), do: :ok
 
   # ── Per-leg handlers (run through on_leg/3) ─────────────────────────────────
 
