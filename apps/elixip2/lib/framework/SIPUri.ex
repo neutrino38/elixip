@@ -274,31 +274,40 @@ defmodule SIP.Uri do
 
       ["<", part2] ->
         # Form <sip:user@domain>;param=value
-        [core_uri_str, params_str] = String.split(part2, ">", parts: 2)
+        case String.split(part2, ">", parts: 2) do
+          # An opening bracket the value never closes. Reached on a header
+          # carrying two comma-separated values, tel: first (RFC 3325 §9.1):
+          # the display-name branch below mistakes `tel:+33…, ` for a display
+          # name and recurses on the tail. Refused rather than raised — every
+          # reader of a header value goes through here.
+          [_unterminated] ->
+            {:invalid_sip_uri_general, Map.new()}
 
-        case SIP.Uri.parse(proto <> core_uri_str) do
-          {:ok, core_uri} ->
-            # The closing bracket is the frontier (see the module doc): what the
-            # recursive parse above collected is the URI parameters, what follows
-            # here is the header field parameters. They are kept apart — merging
-            # them is what sent a `name-addr` out as a Request-URI.
-            header_params = params_str |> split_params() |> parse_uri_parameters()
+          [core_uri_str, params_str] ->
+            case SIP.Uri.parse(proto <> core_uri_str) do
+              {:ok, core_uri} ->
+                # The closing bracket is the frontier (see the module doc): what the
+                # recursive parse above collected is the URI parameters, what follows
+                # here is the header field parameters. They are kept apart — merging
+                # them is what sent a `name-addr` out as a Request-URI.
+                header_params = params_str |> split_params() |> parse_uri_parameters()
 
-            # `get_transport/1` on the assembled URI, not on `core_uri`: it reads
-            # both sets, so a UA that writes `<sip:x@y>;transport=tcp` — the
-            # parameter misplaced outside the bracket — is still understood as TCP
-            # instead of silently defaulting to UDP.
-            uri = %SIP.Uri{core_uri | hparams: header_params}
-            uri = %SIP.Uri{uri | proto: get_transport(uri)}
+                # `get_transport/1` on the assembled URI, not on `core_uri`: it reads
+                # both sets, so a UA that writes `<sip:x@y>;transport=tcp` — the
+                # parameter misplaced outside the bracket — is still understood as TCP
+                # instead of silently defaulting to UDP.
+                uri = %SIP.Uri{core_uri | hparams: header_params}
+                uri = %SIP.Uri{uri | proto: get_transport(uri)}
 
-            if uri.scheme == "sips" and uri.proto != "TLS" do
-              raise "Invalid URI. sips is specified and transport is not TLS"
-            else
-              {:ok, uri}
+                if uri.scheme == "sips" and uri.proto != "TLS" do
+                  raise "Invalid URI. sips is specified and transport is not TLS"
+                else
+                  {:ok, uri}
+                end
+
+              {code, core_uri} ->
+                {code, core_uri}
             end
-
-          {code, core_uri} ->
-            {code, core_uri}
         end
 
       [part1, part2] ->

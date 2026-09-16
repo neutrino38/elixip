@@ -23,6 +23,18 @@ defmodule SIP.Test.Uri do
 		assert code == :invalid_sip_uri_general
 	end
 
+  # A header value holding the two URIs RFC 3325 §9.1 allows, tel: first. The
+  # parser read `tel:+33970260233, ` as a display name and recursed on a tail
+  # with no closing bracket: it raised MatchError instead of refusing. Every
+  # reading of P-Asserted-Identity goes through here (SIP.Msg.Ops), and the
+  # monitor reads one on every request — so the raise took the instance with it.
+  test "Parse a value that is not a SIP URI and holds no closing bracket" do
+		for value <- ["tel:+33970260233, sip:dave@domain.fr", "tel:+33970260233 <sip:a@b.fr"] do
+			{ code, _parsed_uri } = SIP.Uri.parse(value)
+			assert code == :invalid_sip_uri_general, "#{value} was not refused"
+		end
+	end
+
   # A one-character user part is legal (RFC 3261 §19.1.1 user = 1*…) and routine:
   # short extensions, and test labs that dial "1". The parser used to require a
   # second character, and a URI that does not parse takes the whole message with it
