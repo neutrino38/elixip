@@ -208,6 +208,8 @@ defmodule Kelix.DomainsTest do
   # assertions are relative to the version captured at the start.
   test "reload is atomic — swap on success, keep current on any failure" do
     before = Domains.current()
+    empty = write_tmp("")
+    on_exit(fn -> Domains.reload(empty) end)
 
     # valid file -> version bumped, domains + index loaded
     good = write_tmp(@valid)

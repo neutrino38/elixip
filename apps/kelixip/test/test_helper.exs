@@ -3,6 +3,8 @@
 # SIP-REGISTER-REBIND fixture.
 Code.require_file("../../elixip2/test/support/wait.exs", __DIR__)
 Code.require_file("support/fixtures.exs", __DIR__)
+Code.require_file("support/app_boot.exs", __DIR__)
+Kelix.Test.AppBoot.ensure_started!()
 
 ExUnit.start(exclude: [:skip])
 
