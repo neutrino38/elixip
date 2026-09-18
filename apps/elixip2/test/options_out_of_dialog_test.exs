@@ -1,8 +1,6 @@
 defmodule SIP.Test.OptionsOutOfDialog do
   use ExUnit.Case
 
-  alias SIP.Test.Transport.Mockup
-
   @moduledoc """
   An OPTIONS received **outside** any dialog: a capability query, and in practice the
   liveness ping a proxy sends to decide whether this node still takes traffic

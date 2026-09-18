@@ -158,9 +158,12 @@ defmodule SIP.Test.TransportSelector do
     end
 
     test "a destport of 0 is not a resolved destination" do
-      # falls through to resolution, which does NOT keep destip as given
+      # Falls through to resolution, which stamps the transport module it resolved
+      # over the one given. The stamped ADDRESS is no evidence either way:
+      # `SIP.Resolver.resolve/2` deliberately keeps a destip carried without a
+      # port and only completes the port.
       result = Selector.select_transport(uri(destip: {10, 0, 0, 9}, tp_module: FakeDest))
-      refute match?(%SIP.Uri{destip: {10, 0, 0, 9}}, result)
+      refute match?(%SIP.Uri{tp_module: FakeDest}, result)
     end
   end
   describe "an unreliable transport has one instance per family" do
