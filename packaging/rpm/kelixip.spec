@@ -27,7 +27,7 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.5.5
+Version:        1.6.0
 # Counts the builds of this Version, and must be bumped for each one that leaves this
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
@@ -254,6 +254,16 @@ fi
 %{_datadir}/%{name}/mcu*.exs
 
 %changelog
+* Fri Sep 18 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-1
+- The Finite State Language leaves the tree: it is now the separate package
+  finite_state_language (OTP app :fsl, Apache-2.0), and SIP plugs into it through
+  SIP.FSL.Host. Scripts keep the names they use: SIP.Scenario and the other SIP
+  names stay, as facades over FSL.*.
+- The live-monitor registry is registered as FSL.Monitor, and pushes
+  {:fsl_monitor, ...}.
+- Includes 1.5.5.
+- User-Agent is now Kelixip/1.6.0.
+
 * Tue Sep 15 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.5-1
 - WSS: the WebSocket layer is hardened. What a fragmented message accumulates is
   bounded, so a peer can no longer grow a connection's memory without end.

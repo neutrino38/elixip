@@ -9,7 +9,7 @@
 #   rpmbuild -bb --define "_topdir <dir>" packaging/rpm/elixipp.spec
 
 Name:           elixipp
-Version:        1.5.5
+Version:        1.6.0
 Release:        1%{?dist}
 Summary:        SIP scenario test tool driven by the Finite State Language
 License:        BUSL-1.1
@@ -46,6 +46,13 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 %{_bindir}/elixipp
 
 %changelog
+* Fri Sep 18 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-1
+- The Finite State Language leaves the tree: it is now the separate package
+  finite_state_language (OTP app :fsl, Apache-2.0). Scenarios keep the names they
+  use: SIP.Scenario stays the facade a scenario uses.
+- Includes 1.5.5.
+- User-Agent is now Elixipp-1.6.0.
+
 * Tue Sep 15 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.5-1
 - WSS: the WebSocket layer is hardened — the shared stack, so the tool gets it too.
   What a fragmented message accumulates is bounded.

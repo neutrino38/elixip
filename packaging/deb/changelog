@@ -1,3 +1,16 @@
+kelixip (1.6.0-1) stable; urgency=low
+
+  * The Finite State Language leaves the tree: it is now the separate package
+    finite_state_language (OTP app :fsl, Apache-2.0), and SIP plugs into it
+    through SIP.FSL.Host. Scripts keep the names they use: SIP.Scenario and the
+    other SIP names stay, as facades over FSL.*.
+  * The live-monitor registry is registered as FSL.Monitor, and pushes
+    {:fsl_monitor, ...}.
+  * Includes 1.5.5.
+  * User-Agent is now Kelixip/1.6.0.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Fri, 18 Sep 2026 12:00:00 +0200
+
 kelixip (1.5.5-1) stable; urgency=low
 
   * WSS: the WebSocket layer is hardened. What a fragmented message accumulates is

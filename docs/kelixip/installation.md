@@ -178,7 +178,7 @@ Unknown keys are rejected too — a typo must not silently fall back to a defaul
 | `node_name` | string | `kelixip@127.0.0.1` | Erlang node name (`kelictl` reaches the node with it) |
 | `script_dir` | string | `/usr/share/kelixip` | Where scenario scripts are resolved from |
 | `module_dir` | string | `/usr/lib/kelixip/modules` | Where module `.beam` files are loaded from |
-| `user_agent` | string | `Kelixip/1.5.0` | `User-Agent` / `Server` header value |
+| `user_agent` | string | `Kelixip/1.6.0` | `User-Agent` / `Server` header value |
 | `max_calls` | int > 0 | *unlimited* | Node-wide concurrent-instance cap; beyond it, new requests get `503` |
 | `max_message_size` | int > 0 | `64000` | Biggest inbound SIP message, in bytes. A memory bound, not a protocol one: keep it well above a WebRTC offer, which weighs about 13 kB. Beyond it a request is answered `513 Message too large`; a response or an ACK, which are never answered, is dropped with a log line. On **TCP and TLS** the bound also applies to what the framing layer accumulates — an announced `Content-Length` past it, or a header block that never ends — and there the connection is **closed** after the answer: refusing means not reading the octets `Content-Length` announced, so no later point in the stream is a message boundary any more. An unusable `Content-Length` is answered `400 Bad request`, then closed the same way |
 
