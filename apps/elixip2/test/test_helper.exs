@@ -185,3 +185,6 @@ Enum.each([Registry.SIP.Transac, Registry.SIPTransport, Registry.SIPDialog], fn 
 end)
 
 ExUnit.start(exclude: [:skip])
+
+Code.require_file("support/test_log.exs", __DIR__)
+SIP.Test.Log.setup()

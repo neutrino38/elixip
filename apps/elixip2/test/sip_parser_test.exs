@@ -346,17 +346,21 @@ end
 
 defmodule SIP.Test.Parser do
   use ExUnit.Case
+  require Logger
   doctest SIPMsg
+
+	# Parse error callback shared by the tests below. A failed parse is caught by
+	# the assertions; this only carries the detail, so it goes to the log rather
+	# than to the console, where it would sit in the middle of the suite's report.
+	defp log_parse_error(code, errmsg, lineno, line) do
+		Logger.warning("parse error #{inspect(code)}: #{errmsg} — line #{lineno}: #{line}")
+	end
 
   test "Load and parse a REGISTER message" do
     { code, msg } = File.read("test/SIP-REGISTER.txt")
 		assert code == :ok
 
-		{ code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
-			IO.puts("\n" <> errmsg)
-			IO.puts("Offending line #{lineno}: #{line}")
-			IO.puts("Error code #{code}")
-		end)
+		{ code, parsed_msg } = SIPMsg.parse(msg, &log_parse_error/4)
 
     assert code == :ok
 		assert parsed_msg.method == :REGISTER
@@ -372,11 +376,7 @@ defmodule SIP.Test.Parser do
     { code, msg } = File.read("test/SIP-REGISTER-LVP.txt")
 		assert code == :ok
 
-		{ code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
-			IO.puts("\n" <> errmsg)
-			IO.puts("Offending line #{lineno}: #{line}")
-			IO.puts("Error code #{code}")
-		end)
+		{ code, parsed_msg } = SIPMsg.parse(msg, &log_parse_error/4)
 
     assert code == :ok
 		assert parsed_msg.method == :REGISTER
@@ -461,11 +461,7 @@ defmodule SIP.Test.Parser do
   	{ code, msg } = File.read("test/SIP-INVITE-BASIC-AUDIO.txt")
 		assert code == :ok # Test if file containing the SIP message is loaded
 
-		{ code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
-			IO.puts("\n" <> errmsg)
-			IO.puts("Offending line #{lineno}: #{line}")
-			IO.puts("Error code #{code}")
-			end)
+		{ code, parsed_msg } = SIPMsg.parse(msg, &log_parse_error/4)
 
     assert code == :ok
 		assert parsed_msg.method == :INVITE
@@ -482,11 +478,7 @@ defmodule SIP.Test.Parser do
 	{ code, msg } = File.read("test/SIP-INVITE-LOST.txt")
   	assert code == :ok # Test if file containing the SIP message is loaded
 
-  	{ code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
-	  IO.puts("\n" <> errmsg)
-	  IO.puts("Offending line #{lineno}: #{line}")
-	  IO.puts("Error code #{code}")
-  	end)
+  	{ code, parsed_msg } = SIPMsg.parse(msg, &log_parse_error/4)
 
   	assert code == :ok
   	assert parsed_msg.method == :INVITE
@@ -500,11 +492,7 @@ defmodule SIP.Test.Parser do
 			{ code, msg } = File.read("test/SIP-INVITE-LVP.txt")
 			assert code == :ok # Test if file containing the SIP message is loaded
 
-			{ code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
-			IO.puts("\n" <> errmsg)
-			IO.puts("Offending line #{lineno}: #{line}")
-			IO.puts("Error code #{code}")
-			end)
+			{ code, parsed_msg } = SIPMsg.parse(msg, &log_parse_error/4)
 
 			assert code == :ok
 			assert parsed_msg.method == :INVITE
@@ -519,11 +507,7 @@ defmodule SIP.Test.Parser do
 			{ code, msg } = File.read("test/SIP-180-LVP.txt")
 			assert code == :ok # Test if file containing the SIP message is loaded
 
-			{ code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
-			IO.puts("\n" <> errmsg)
-			IO.puts("Offending line #{lineno}: #{line}")
-			IO.puts("Error code #{code}")
-			end)
+			{ code, parsed_msg } = SIPMsg.parse(msg, &log_parse_error/4)
 
 			assert code == :ok
 			assert parsed_msg.method == false
@@ -538,11 +522,7 @@ defmodule SIP.Test.Parser do
 			{ code, msg } = File.read("test/SIP-200-LVP.txt")
 			assert code == :ok # Test if file containing the SIP message is loaded
 
-			{ code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
-				IO.puts("\n" <> errmsg)
-				IO.puts("Offending line #{lineno}: #{line}")
-				IO.puts("Error code #{code}")
-			end)
+			{ code, parsed_msg } = SIPMsg.parse(msg, &log_parse_error/4)
 
 			assert code == :ok
 			assert parsed_msg.method == false
@@ -569,11 +549,7 @@ defmodule SIP.Test.Parser do
 				"Call-Id: 7793171530617\r\n" <>
 				"Server: Glassfish_SIP_2.0.0\r\n\r\n"
 
-			{ code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
-				IO.puts("\n" <> errmsg)
-				IO.puts("Offending line #{lineno}: #{line}")
-				IO.puts("Error code #{code}")
-			end)
+			{ code, parsed_msg } = SIPMsg.parse(msg, &log_parse_error/4)
 
 			assert code == :ok
 			assert parsed_msg.method == false
@@ -590,11 +566,7 @@ defmodule SIP.Test.Parser do
 			{ code, msg } = File.read("test/SIP-BYE-LVP.txt")
 			assert code == :ok # Test if file containing the SIP message is loaded
 
-			{ code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
-				IO.puts("\n" <> errmsg)
-				IO.puts("Offending line #{lineno}: #{line}")
-				IO.puts("Error code #{code}")
-			end)
+			{ code, parsed_msg } = SIPMsg.parse(msg, &log_parse_error/4)
 
 			assert code == :ok
 			assert parsed_msg.method == :BYE
@@ -603,11 +575,7 @@ defmodule SIP.Test.Parser do
 			msg2 = SIPMsg.serialize(parsed_msg)
 			# IO.puts("\n")
 			# IO.puts(msg2)
-			{ code, parsed_msg2 } = SIPMsg.parse(msg2, fn code, errmsg, lineno, line ->
-				IO.puts("\n" <> errmsg)
-				IO.puts("Offending line #{lineno}: #{line}")
-				IO.puts("Error code #{code}")
-			end)
+			{ code, parsed_msg2 } = SIPMsg.parse(msg2, &log_parse_error/4)
 
 			assert code == :ok
 			assert parsed_msg2.method == :BYE
@@ -629,10 +597,7 @@ defmodule SIP.Test.Parser do
 			"Content-Length: 0\r\n" <>
 			"\r\n"
 
-		SIPMsg.parse(msg, fn _code, errmsg, lineno, line ->
-			IO.puts("\n" <> errmsg)
-			IO.puts("Offending line #{lineno}: #{line}")
-		end)
+		SIPMsg.parse(msg, &log_parse_error/4)
 	end
 
 	test "Single Contact is parsed as a SIP.Uri struct, not a list" do

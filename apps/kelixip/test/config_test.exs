@@ -530,6 +530,9 @@ defmodule Kelix.ConfigTest do
     # again on its own, and config.exs caps the console at :warning — so
     # `[log].level = "debug"` used to raise the primary level and change nothing
     # the operator could actually see.
+    # Capturing the log removes the :default handler for the duration of the test,
+    # and this one reads it.
+    @tag capture_log: false
     test "apply_logger pushes [log].level down to the sinks, not just the primary" do
       {:ok, %{level: previous}} = :logger.get_handler_config(:default)
       prev_primary = Logger.level()

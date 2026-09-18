@@ -131,7 +131,7 @@ defmodule SIP.IST do
       # come back. Standing alone — or with a TU that is slow for a good reason, a
       # DID lookup on a media server, a database — it fires and quenches the INVITE
       # retransmissions that until now arrived with nothing yet on the wire.
-      { :ok, state } -> { :noreply, state |> schedule_timer_F() |> schedule_timer_100() }
+      { :ok, state } -> { :noreply, state |> schedule_timer_ringing() |> schedule_timer_100() }
 
       # In case of failure, timerK is scheduled by internal_reply()
       { :upperlayerfailure, state } -> { :noreply, state }
@@ -164,11 +164,20 @@ defmodule SIP.IST do
     end
   end
 
-  # Timer F - timeout
-  def handle_info({ :timeout, _tref, :timerF } , state)  do
+  # The TU never sent a final response. Two things are owed, and the second one
+  # was missing: answer 408 on its behalf, because a caller left hanging is what
+  # no bound may allow — and TELL the layer above that we did. What the stack
+  # sends is not what the application decided, and the application is the only
+  # one that can act on it: a B2BUA whose caller's INVITE has just been ended has
+  # a callee still ringing for a call nobody can take, and must CANCEL it.
+  #
+  # `state.state` is `:proceeding` by then in every real case, our own automatic
+  # 100 Trying having moved it there 200 ms in; `:trying` is kept for the TU that
+  # answered the 100 itself and nothing after.
+  def handle_info({ :timeout, _tref, :timer_ringing } , state)  do
     if state.state in [ :trying, :proceeding ] do
-      # The app never sent a final response: answer 408 on its behalf
       { _rc, new_state } = reply_to_UAC(state, state.msg, 408, "Timeout", [], state.totag)
+      notify_dialog_layer(new_state, :timer_ringing, __MODULE__)
       { :noreply, new_state }
     else
       # Final response already sent; timer H owns the ACK timeout

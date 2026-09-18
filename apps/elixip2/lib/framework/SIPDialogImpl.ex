@@ -1418,8 +1418,11 @@ defmodule SIP.DialogImpl do
     end
   end
 
-  # Only a CLIENT transaction is reported: a server transaction timing out means
-  # the application never answered, which it hardly needs telling. The keepalive
+  # Only a CLIENT transaction is reported AS A RESPONSE. A server transaction
+  # that timed out has no response to deliver — the 408 went out to the far end,
+  # it did not come back from one, and handing it up here would read as the
+  # callee's answer. What the application is owed there is the end of its dialog,
+  # which `end_on_unanswered_initial/2` decides. The keepalive
   # OPTIONS we send ourselves stay dialog-internal too — an unanswered one is
   # counted by SIP.DialogImpl.KeepAlive, which tears the dialog down after
   # several, and surfacing it here would put a 408 in the application's mailbox
@@ -1923,14 +1926,46 @@ defmodule SIP.DialogImpl do
 
     # A SERVER transaction that ends unanswered says nothing about the dialog:
     # it means the application never replied, and handle_UAS_response/3 reads
-    # responses we RECEIVED. Leave the dialog alone.
+    # responses we RECEIVED. Leave the dialog alone — unless it carried the
+    # request that would have created it.
     if client_transaction?(module) do
       handle_UAS_response(state, timeout_response(req), transact_pid)
       |> end_on_unregister(req)
     else
-      state
+      end_on_unanswered_initial(state, req)
     end
   end
+
+  # The stack has just answered a final on the application's behalf, to the very
+  # request that would have created this dialog. So there is no dialog — the same
+  # reading handle_UAS_response/3 applies to an outbound one whose initial request
+  # was refused — and `unanswered_request/4` above turns that into the one
+  # {:dialog_terminated, …} the application is owed.
+  #
+  # Saying it is the point. The application is working for that caller, and the
+  # only thing that stops it is hearing that the caller's INVITE is over: without
+  # this, SBB.Call stayed in `proceeding` for its full ring timeout after the
+  # transaction under it had died, nothing CANCELled the outbound leg, and the
+  # callee's phone rang on for a call nobody could take (traffic of 2026-09-16).
+  #
+  # The CSeq pair tells the creating request from one received later, as in
+  # establish_inbound/3, and for the same reason: an in-dialog request left
+  # unanswered ends its transaction alone.
+  defp end_on_unanswered_initial(
+         state = %SIP.DialogImpl{direction: :inbound, msg: %{cseq: cseq}},
+         %{cseq: cseq}
+       )
+       when state.state in [:initial, :uas_challenged] do
+    Logger.info(
+      dialogpid: "#{inspect(self())}",
+      module: __MODULE__,
+      message: "initial request answered by the stack; no dialog"
+    )
+
+    %SIP.DialogImpl{state | state: :terminated}
+  end
+
+  defp end_on_unanswered_initial(state, _req), do: state
 
   # An un-REGISTER we sent ourselves ends the dialog once its transaction is over,
   # answered or not — the registration is gone either way. It needs saying here
