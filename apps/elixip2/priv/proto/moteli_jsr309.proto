@@ -262,6 +262,16 @@ message EndpointSetRtpPropertiesReq {
   map<string, string> properties = 4;
 }
 
+// Addressing profile of the leg (§6.7 bis): "publicv4", "publicv6",
+// "internalv4" or "internalv6". Absent or empty = the server's default profile.
+// It rides on StartSending and StartReceiving and nowhere else, because the
+// server applies it in the Start* that carries it — that is what binds the
+// interface and allocates the port published in the SDP. Both calls of one leg
+// MUST carry the same value; an unknown, unavailable or disagreeing profile is
+// an error, never a silent fallback on the default.
+//
+// A media with no RTP session (text over WebSocket) accepts it and applies
+// nothing: its address is the server's WebSocket listener, not the profile's.
 message EndpointStartSendingReq {
   uint32 session_id = 1;
   uint32 endpoint_id = 2;
@@ -269,6 +279,7 @@ message EndpointStartSendingReq {
   string send_ip = 4;
   uint32 send_port = 5;
   map<string, int32> rtp_map = 6;
+  optional string profile = 7;
 }
 
 message EndpointStopSendingReq {
@@ -283,6 +294,8 @@ message EndpointStartReceivingReq {
   MediaType media = 3;
   map<string, int32> rtp_map = 4;
   optional SdpOffer offer = 5;
+  // Same profile as this leg's EndpointStartSending (see above).
+  optional string profile = 6;
 }
 
 message EndpointStartReceivingResp {

@@ -165,6 +165,28 @@ defmodule SIP.Test.ListenerClient.WSS do
   end
 end
 
+defmodule SIP.Test.ListenerCase.CapturingRegistrar do
+  @moduledoc """
+  A registrar that hands the inbound REGISTER to the test process itself.
+
+  `{:accept, pid}` makes the dialog forward `{:REGISTER, req, transaction_id,
+  dialog_id}` to that pid, so the test reads the request exactly as the session
+  layer received it — R-URI, and therefore received transport, included.
+
+  The pid travels through the application env because the dialog layer calls this
+  callback, not the test: there is no argument to pass it through.
+  """
+  @behaviour SIP.Session.Registrar
+
+  @impl true
+  def on_new_registration(_dialog_id, _register, _transaction_id) do
+    {:accept, Application.fetch_env!(:elixip2, :listener_case_test_pid)}
+  end
+
+  @impl true
+  def on_registration_expired(_dialog_pid, _app_pid), do: nil
+end
+
 defmodule SIP.Test.ListenerCase do
   @moduledoc """
   The connection-tracking contract every inbound listener implements, run once per
@@ -325,6 +347,38 @@ defmodule SIP.Test.ListenerCase do
         @client.send_message(handle, register_message(@client.local_port(handle)))
 
         assert String.starts_with?(@client.recv_response(handle, 5_000), "SIP/2.0 ")
+        @client.close(handle)
+      end
+
+      # The R-URI of an inbound request is where the stack records where that request
+      # came FROM: an access-control rule and the registrar's `received` both read it,
+      # and neither may fall back on Via or on a `transport` parameter the sender
+      # wrote. The address was stamped and the transport was not, so every such reader
+      # saw a request with no transport at all.
+      test "an inbound request carries the transport it arrived over", %{port: port} do
+        Application.put_env(:elixip2, :listener_case_test_pid, self())
+
+        :ok =
+          SIP.Session.ConfigRegistry.set_registration_processing_module(
+            SIP.Test.ListenerCase.CapturingRegistrar
+          )
+
+        on_exit(fn ->
+          SIP.Session.ConfigRegistry.set_registration_processing_module(TestRegistrar)
+          Application.delete_env(:elixip2, :listener_case_test_pid)
+        end)
+
+        handle = @client.connect(port)
+        @client.send_message(handle, register_message(@client.local_port(handle)))
+
+        assert_receive {:REGISTER, req, _transaction_id, dialog_id}, 5_000
+
+        assert req.ruri.destproto == @via
+        assert is_tuple(req.ruri.destip)
+        assert is_integer(req.ruri.destport) and req.ruri.destport > 0
+        assert req.ruri.tp_module != nil
+
+        SIP.Dialog.reply(dialog_id, req, 200, "OK", [])
         @client.close(handle)
       end
 

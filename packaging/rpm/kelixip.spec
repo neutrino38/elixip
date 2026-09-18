@@ -27,7 +27,7 @@
 %global __provides_exclude_from ^%{kelixdir}/.*$
 
 Name:           kelixip
-Version:        1.5.4
+Version:        1.5.5
 # Counts the builds of this Version, and must be bumped for each one that leaves this
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
@@ -254,6 +254,13 @@ fi
 %{_datadir}/%{name}/mcu*.exs
 
 %changelog
+* Tue Sep 15 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.5-1
+- WSS: the WebSocket layer is hardened. What a fragmented message accumulates is
+  bounded, so a peer can no longer grow a connection's memory without end.
+- The unused dependency on socket is dropped; socket2 carries the whole WebSocket
+  path.
+- User-Agent is now Kelixip/1.5.5.
+
 * Thu Sep 10 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.4-1
 - mcu: the module pushes its events to kelixip, so a supervision view is told what
   a conference and its legs do rather than polling for it.

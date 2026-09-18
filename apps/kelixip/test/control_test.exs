@@ -493,6 +493,9 @@ defmodule Kelix.ControlTest do
     # console or elixip.log. Setting the primary level alone leaves every sink on
     # its own compiled-in level (console at :warning, the file backend at :info),
     # so the level has to reach the sinks too — same rule as [log].level at boot.
+    # Capturing the log removes the :default handler for the duration of the test,
+    # and this one reads it.
+    @tag capture_log: false
     test "set_log_level/1 applies a valid level to the sinks and rejects a bad one" do
       prev = Logger.level()
       {:ok, %{level: prev_sink}} = :logger.get_handler_config(:default)

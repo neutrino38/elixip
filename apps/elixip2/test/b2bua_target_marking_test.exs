@@ -64,6 +64,33 @@ defmodule SIP.Test.B2buaTargetMarking do
       assert marked.net_side == :internal
     end
 
+    # The shape a routing script writes — no `:port` anywhere. It used to come
+    # out of here with `destport: nil`, which travelled through the selector and
+    # the transaction down to SIP.Transport.send_msg/4; that one takes an integer
+    # and nothing else, so the INVITE never went out and the leg was answered 488.
+    test "a target built field by field is given a usable port" do
+      Application.put_env(:elixip2, :internal_networks, [{{127, 0, 0, 0}, 8}])
+
+      marked = B2bua.resolve_and_mark(%SIP.Uri{userpart: "bob", domain: "localhost"})
+
+      assert marked.destip == {127, 0, 0, 1}
+      assert marked.destport == 5060
+      assert marked.net_side == :internal
+    end
+
+    test "a target stamped with an address but no port keeps the address" do
+      # The address is the routing decision — a stored flow, a configured next
+      # hop — so it stands; only the missing port is completed.
+      Application.put_env(:elixip2, :internal_networks, [{{10, 0, 0, 0}, 8}])
+
+      stored = %SIP.Uri{uri("sip:bob@example.invalid") | destip: {10, 4, 5, 6}, destport: nil}
+      marked = B2bua.resolve_and_mark(stored)
+
+      assert marked.destip == {10, 4, 5, 6}
+      assert marked.destport == 5060
+      assert marked.net_side == :internal
+    end
+
     test "a target that cannot be resolved is left exactly as it was" do
       # It fails at its own turn, with the message it has always failed with: this
       # pass adds what it can and changes nothing else.

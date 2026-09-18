@@ -68,23 +68,41 @@ defmodule MediaServer.Mockup do
   def bridge(a, b, opts) do
     case MediaServer.transcoding_policy(opts) do
       {:ok, _policy} ->
-        :ok = GenServer.call(a, {:set_bridge_peer, b})
-        :ok = GenServer.call(b, {:set_bridge_peer, a})
+        case GenServer.call(a, :bridge_failure) do
+          nil ->
+            :ok = GenServer.call(a, {:set_bridge_peer, b})
+            :ok = GenServer.call(b, {:set_bridge_peer, a})
 
-        # The other half of the contract: leg `a`'s answer, REBUILT now that both
-        # legs are known. This mock returned a bare `:ok` for its whole life, so no
-        # call-flow test ever exercised the branch a real adapter takes — and that
-        # is where a caller silently kept the answer held since the INVITE
-        # (2026-08-12). Opt-in, so every existing test keeps its plain `:ok`.
-        case GenServer.call(a, :rebuilt_answer) do
-          sdp when is_binary(sdp) -> {:ok, %{inbound_answer: sdp}}
-          _ -> :ok
+            # The other half of the contract: leg `a`'s answer, REBUILT now that
+            # both legs are known. This mock returned a bare `:ok` for its whole
+            # life, so no call-flow test ever exercised the branch a real adapter
+            # takes — and that is where a caller silently kept the answer held
+            # since the INVITE (2026-08-12). Opt-in, so every existing test keeps
+            # its plain `:ok`.
+            case GenServer.call(a, :rebuilt_answer) do
+              sdp when is_binary(sdp) -> {:ok, %{inbound_answer: sdp}}
+              _ -> :ok
+            end
+
+          reason ->
+            {:error, reason}
         end
 
       {:error, _} = err ->
         err
     end
   end
+
+  @doc """
+  Test hook: make `bridge/3` refuse, the way a real server refuses a medium it
+  cannot wire — `{:error, {:attach_failed, media, reason}}` is the shape the
+  Mendooze adapter produces.
+
+  Set on the leg the bridge is taken FROM, which is the inbound one everywhere
+  the B2BUA calls it.
+  """
+  @spec fail_bridge(pid(), term()) :: :ok
+  def fail_bridge(conn, reason), do: GenServer.call(conn, {:fail_bridge, reason})
 
   @doc """
   Test hook: make the next `bridge/3` hand back `sdp` as leg `conn`'s rebuilt
@@ -240,6 +258,9 @@ defmodule MediaServer.Mockup.Conn do
     # one (see rebuild_answer_on_bridge/2). `nil` — the default — is the plain
     # `:ok` this mock returned for its whole life.
     rebuilt_answer: nil,
+    # Reason `bridge/3` must refuse with, when a test asked for one (see
+    # fail_bridge/2). `nil` — the default — bridges.
+    bridge_failure: nil,
     # media-connectivity state, mirroring the real adapter (§4)
     recv_medias: nil,
     ice_notified: false,
@@ -357,6 +378,14 @@ defmodule MediaServer.Mockup.Conn do
 
   def handle_call(:rebuilt_answer, _from, state) do
     {:reply, state.rebuilt_answer, state}
+  end
+
+  def handle_call({:fail_bridge, reason}, _from, state) do
+    {:reply, :ok, %{state | bridge_failure: reason}}
+  end
+
+  def handle_call(:bridge_failure, _from, state) do
+    {:reply, state.bridge_failure, state}
   end
 
   # The watchdog firing for one media, and the derived loss when every media of

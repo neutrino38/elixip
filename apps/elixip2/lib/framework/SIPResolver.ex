@@ -142,8 +142,19 @@ defmodule SIP.Resolver do
     end
   end
 
-  def resolve(uri = %SIP.Uri{}, _usesrv) when uri.destip != nil and uri.destport != 0 do
+  def resolve(uri = %SIP.Uri{}, _usesrv)
+      when uri.destip != nil and is_integer(uri.destport) and uri.destport > 0 do
     {uri.destip, uri.destport}
+  end
+
+  # An address stamped without a port. The address IS the routing decision and
+  # stands as it is — re-resolving the domain could send the request somewhere
+  # else — and only the port is completed, from the URI or its scheme's default.
+  #
+  # The guard above used to read `destport != 0`, which nil satisfies: such a URI
+  # was taken for fully resolved and the nil port went out as is.
+  def resolve(uri = %SIP.Uri{}, _usesrv) when is_tuple(uri.destip) do
+    {uri.destip, SIP.Uri.target_port(uri)}
   end
 
   def resolve(uri = %SIP.Uri{}, true) do
@@ -176,7 +187,7 @@ defmodule SIP.Resolver do
 
   defp getaddr(uri = %SIP.Uri{}, family) do
     case :inet.getaddr(String.to_charlist(uri.domain), family) do
-      {:ok, ip} -> {ip, uri.port}
+      {:ok, ip} -> {ip, SIP.Uri.target_port(uri)}
       {:error, :nxdomain} -> :nxdomain
       {:error, err} -> {:error, err}
     end
@@ -218,7 +229,12 @@ defmodule SIP.Resolver do
         message: " #{desturi} uses Websocket transport. Resolution will be done by socket layer"
       )
 
-      %SIP.Uri{uri | destip: desturi.domain, destport: desturi.port, destproto: transport}
+      %SIP.Uri{
+        uri
+        | destip: desturi.domain,
+          destport: SIP.Uri.target_port(desturi),
+          destproto: transport
+      }
     else
       # For UDP, TCP, TLS use regular DNS resolution
       Logger.debug(module: __MODULE__, message: "resolving #{desturi} with trysrv=#{usesrv}")

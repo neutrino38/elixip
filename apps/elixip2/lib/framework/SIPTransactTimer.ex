@@ -4,8 +4,16 @@ defmodule SIP.Trans.Timer do
   @timer_T2_val 4000
   @timer_T4_val 5000
   @trying_delay_val 200
+  @ist_ringing_val 600_000
 
-  defp notify_dialog_layer(state, timer, transact_module) do
+  @doc """
+  Tell the dialog layer that a transaction ended without the answer it waited for.
+
+  Public because a transaction that answers on the TU's behalf must say so
+  itself: what the stack sent is not what the application decided, and the
+  application is the only one that can act on it.
+  """
+  def notify_dialog_layer(state, timer, transact_module) do
     if !is_nil(state.app) do
       send(state.app, {:transaction_timeout, timer, self(), state.msg, transact_module })
     end
@@ -71,6 +79,26 @@ defmodule SIP.Trans.Timer do
 
   def cancel_timer_F(state) do
     schedule_generic_timer(state, :timerF, :timerf, nil)
+  end
+
+  @doc """
+  Schedule how long an INVITE server transaction may go unanswered by its TU.
+
+  RFC 3261 §17.2.1 gives an IST no timeout of its own: how long a phone rings is
+  the TU's decision. Timer F, which this replaces on that transaction, answers a
+  different question — 64*T1 is how long a CLIENT waits for a non-INVITE final —
+  and armed on an IST it ended every call that rang longer than 32 s, whatever
+  the TU was doing (traffic of 2026-09-16: 408 to the caller while the callee was
+  still ringing, whose 603 came back 48 s later with no transaction left to take
+  it).
+
+  A bound is kept all the same, far above every TU-level one (SBB.Call rings for
+  180 s then gives up; an SBB instance lives 300 s): a server transaction is
+  started unlinked, so nothing else would ever collect one whose TU went silent.
+  """
+  def schedule_timer_ringing(state) do
+    ms = Application.get_env(:elixip2, :sip_timer_ist_ringing, @ist_ringing_val)
+    schedule_generic_timer(state, :timer_ringing, :timer_ringing_ref, ms)
   end
 
   @doc """

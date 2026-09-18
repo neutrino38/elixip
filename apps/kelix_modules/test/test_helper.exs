@@ -9,3 +9,6 @@ Code.require_file("../../elixip2/test/support/wait.exs", __DIR__)
 Code.require_file("../../kelixip/test/support/fixtures.exs", __DIR__)
 
 ExUnit.start(exclude: [:skip])
+
+Code.require_file("../../elixip2/test/support/test_log.exs", __DIR__)
+SIP.Test.Log.setup()

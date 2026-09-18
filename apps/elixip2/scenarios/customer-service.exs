@@ -105,6 +105,13 @@ defmodule B2BUA.CustomerService do
         b2bua_cancel_forward()
         b2bua_reply(req, 200, "OK")
         scenario_success("caller hung up while we were hunting")
+
+      # The caller's leg is over without the caller having said so: its
+      # transaction ended under us and the stack answered a final on our behalf.
+      # Nobody is left to hunt for, so stop the agent still being rung.
+      {:dialog_terminated, _dlg, reason} ->
+        b2bua_cancel_forward()
+        scenario_aborted("caller gone: #{inspect(reason)}")
     after
       # The whole hunt, not one agent: with a static list there is no per-target
       # ring timeout — the hunt moves on when a target REFUSES, not when it

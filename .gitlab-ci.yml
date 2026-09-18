@@ -33,10 +33,17 @@ compile:
 # proxy. `--exclude flaky` is the bar BUILD.md sets — the tagged tests bind real
 # ports or share named singletons, and pass in isolation. What is left fails only
 # on a regression, which is the only thing a branch pipeline can usefully say.
+#
+# `--max-failures 1` stops the suite on the first failing test, `--raise` stops
+# the umbrella recursion instead of carrying on into the next app. Without them
+# the run goes to the end: the failure scrolls past under the compiler warnings
+# and three "0 failures" summaries print after it, so the job log ends on a green
+# line and only `exit status 2` says otherwise. The price is one failure reported
+# per pipeline.
 test:
   stage: test
   script:
-    - mix test --exclude live --exclude flaky
+    - mix test --exclude live --exclude flaky --max-failures 1 --raise
 
 package:
   stage: package

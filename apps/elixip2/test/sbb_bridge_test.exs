@@ -147,7 +147,7 @@ defmodule SIP.Test.SbbBridge do
     %{stub: stub}
   end
 
-  defp peer_uri(tag \\ "sbb_bridge") do
+  defp peer_uri(tag) do
     %SIP.Uri{scheme: "sip:", userpart: "callee", domain: "example.com", port: 5060}
     |> SIP.Uri.set_uri_param("unittest", tag)
   end
@@ -162,7 +162,7 @@ defmodule SIP.Test.SbbBridge do
     %{invite | method: method, body: [], contentlength: 0, cseq: [2, method]}
   end
 
-  defp start_instance(stub, invite, module \\ Interruptible, tag \\ "sbb_bridge") do
+  defp start_instance(stub, invite, module, tag) do
     test_pid = self()
 
     spawn_monitor(fn ->

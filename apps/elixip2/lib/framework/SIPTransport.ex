@@ -480,6 +480,13 @@ defmodule SIP.Transport do
     defp peer_str(ip, port) when is_binary(ip), do: "#{ip}:#{port}"
     defp peer_str(ip, port), do: "#{inspect(ip)}:#{port}"
 
+    # The transport a request came in over, asked of the transport itself and spelled
+    # as the selector's `@transport_map` keys are ("UDP", "TCP", "TLS", "WSS"). Never
+    # the R-URI's own `transport` parameter, nor the Via: those are declarative, and
+    # `destproto` is the received side of the URI — what an access-control rule and a
+    # registrar's `received` are entitled to trust.
+    defp received_proto(tp_mod), do: apply(tp_mod, :transport_str, []) |> String.upcase()
+
     defp process_sip_message(state, message, tp_name, tp_mod, socket, destip, destport) do
       # Log incoming SIP messages for debug purposes
       log_incoming_message(message, tp_name, destip, destport)
@@ -523,6 +530,7 @@ defmodule SIP.Transport do
           # wrongly take the request path and crash on the missing :ruri).
           if parsed_msg.method != false and is_atom(parsed_msg.method) do
             ruri_with_tp_info = %SIP.Uri{ parsed_msg.ruri | destip: destip, destport: destport,
+                                          destproto: received_proto(tp_mod),
                                           tp_module: tp_mod, tp_pid: self() }
             msg = Map.put(parsed_msg, :ruri, ruri_with_tp_info )
 

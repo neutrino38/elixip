@@ -261,8 +261,19 @@ defmodule Kelix.Router do
     host = req_host(req)
 
     case host && Domains.lookup(domains, host) do
-      %Domain{} = d -> {:ok, d}
-      _ -> {:reject, 404, "Not Found"}
+      %Domain{} = d ->
+        {:ok, d}
+
+      _ ->
+        log_reject(
+          req,
+          if(host,
+            do: "domain #{host} not declared in domains.toml",
+            else: "no domain in the Request-URI nor in the To header"
+          )
+        )
+
+        {:reject, 404, "Not Found"}
     end
   end
 
@@ -278,14 +289,27 @@ defmodule Kelix.Router do
   defp function_for(req, domain) do
     case Map.get(@method_function, Map.get(req, :method)) do
       nil ->
+        log_reject(req, "method #{Map.get(req, :method)} is not routable out of dialog")
         {:reject, 405, "Method Not Allowed"}
 
       function ->
-        if function_enabled?(domain, function),
-          do: {:ok, function},
-          else: {:reject, 405, "Method Not Allowed"}
+        if function_enabled?(domain, function) do
+          {:ok, function}
+        else
+          log_reject(req, not_configured(function, domain))
+          {:reject, 405, "Method Not Allowed"}
+        end
     end
   end
+
+  defp not_configured(:registrar, %Domain{name: name}),
+    do: "registrar not configured in domains.toml for domain #{name} (no [domain.registrar] block)"
+
+  defp not_configured(:presence, %Domain{name: name}),
+    do: "presence not configured in domains.toml for domain #{name} (no [domain.presence] block)"
+
+  defp not_configured(:calls, %Domain{name: name}),
+    do: "no call rule declared in domains.toml for domain #{name} (no [[domain.call]] block)"
 
   @doc "Is `function` enabled on `domain`? (a function block present = enabled)"
   @spec function_enabled?(Domain.t(), function_kind) :: boolean
@@ -298,12 +322,21 @@ defmodule Kelix.Router do
   defp pick_script(%Domain{registrar: %{script: s}}, :registrar, _req), do: {:ok, s}
   defp pick_script(%Domain{presence: %{script: s}}, :presence, _req), do: {:ok, s}
 
-  defp pick_script(%Domain{dial_plan: rules}, :calls, req) do
+  defp pick_script(%Domain{dial_plan: rules, name: name}, :calls, req) do
     user = ruri_user(req)
 
     case Enum.find(rules, &DialRule.matches?(&1, user || "")) do
-      %DialRule{script: s} -> {:ok, s}
-      nil -> {:reject, 404, "Not Found"}
+      %DialRule{script: s} ->
+        {:ok, s}
+
+      nil ->
+        log_reject(
+          req,
+          "destination #{req_uri_str(req)} does not match any call rule declared " <>
+            "in domain #{name} (#{length(rules)} [[domain.call]] rule(s) tried)"
+        )
+
+        {:reject, 404, "Not Found"}
     end
   end
 
@@ -311,6 +344,33 @@ defmodule Kelix.Router do
     case Map.get(req, :ruri) do
       %SIP.Uri{userpart: u} -> u
       _ -> nil
+    end
+  end
+
+  # ── why a request was refused, in the operator's words ───────────────────────
+
+  # Every routing reject used to leave nothing but a metric, so "kelixip answers
+  # 404 to my INVITE" could not be told from "kelixip answers 404 to my REGISTER
+  # for want of a [domain.registrar] block" without reading domains.toml next to a
+  # capture. The line names the request AND the domains.toml block that is missing.
+  defp log_reject(req, cause) do
+    Logger.info(
+      module: __MODULE__,
+      message: "#{Map.get(req, :method)} #{req_uri_str(req)} rejected: #{cause}"
+    )
+  end
+
+  # The R-URI as it arrived, else the To URI (the host fallback of `req_host/1`).
+  # `serialize_ruri/1` needs a host: a request with neither is already rejected by
+  # step 1, and must not crash the line that says so.
+  defp req_uri_str(req) do
+    case Map.get(req, :ruri) || Map.get(req, :to) do
+      %SIP.Uri{domain: d} = uri when is_binary(d) or is_tuple(d) ->
+        {:ok, str} = SIP.Uri.serialize_ruri(uri)
+        str
+
+      _ ->
+        "(no URI)"
     end
   end
 

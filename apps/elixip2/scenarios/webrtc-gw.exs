@@ -136,6 +136,13 @@ defmodule B2BUA.WebrtcGw do
       {:ms_event, _ref, :server_disconnected} ->
         b2bua_reply(last_uas_req(), 500, "Media Server Unavailable")
         goto(releasing, "media server gone before answer")
+
+      # The browser's leg is over without the browser having said so: its
+      # transaction ended under us and the stack answered a final on our behalf.
+      # Nobody is left to ring for, so stop the phone that still is.
+      {:dialog_terminated, _dlg, reason} ->
+        b2bua_cancel_forward()
+        goto(releasing, "caller gone: #{inspect(reason)}")
     after
       180_000 ->
         b2bua_reply(last_uas_req(), 408, "Request Timeout")

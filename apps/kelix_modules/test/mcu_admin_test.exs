@@ -14,7 +14,7 @@ defmodule Kelix.Mod.McuAdminTest do
 
   alias Kelix.Mcu.TestStub
   alias Kelix.Mod.Mcu
-  alias Kelix.Mod.Mcu.{Adapter, Client, Conference, Config}
+  alias Kelix.Mod.Mcu.{Adapter, Client, Config}
 
   # The media servers the module drives now come from [mediaserver.pool.*], decoded
   # by Kelix.Config; the registry takes the resulting list directly so a test needs
@@ -415,7 +415,7 @@ defmodule Kelix.Mod.McuAdminTest do
       refute Map.has_key?(shown, :stats_error)
     end
 
-    test "a statistics failure is reported, not hidden behind zeros", ctx do
+    test "a statistics failure is reported, not hidden behind zeros", _ctx do
       stop_supervised!(:client_mcu1)
       stop_supervised!(Mcu)
 

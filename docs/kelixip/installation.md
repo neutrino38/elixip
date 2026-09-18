@@ -498,13 +498,45 @@ wrong path.
 | Key | Type | Required | Meaning |
 |---|---|---|---|
 | `name` | string | **yes** | Nominal domain name. **This is also the digest `realm`** |
-| `aliases` | list of strings | no | Other hosts routed to this domain (case-insensitive). A name/alias used twice rejects the file |
+| `aliases` | list of strings | no | Other hosts routed to this domain (case-insensitive). An entry written `*.suffix` routes **every** host below that suffix. A name/alias used twice rejects the file |
 | `max_calls` | int > 0 | no | Per-domain concurrent-instance cap (`503` beyond) |
 
 A request is routed by its R-URI host (falling back to the `To` host); no match
 ⇒ `404`. Then the method selects the **function** — `REGISTER` → `registrar`,
 `INVITE` → `calls`, `SUBSCRIBE`/`PUBLISH`/`MESSAGE` → `presence` — and a function
 with no block on that domain is **not enabled** ⇒ `405`.
+
+##### Wildcard aliases
+
+An alias written `*.suffix` routes every host ending in `.suffix`, at any depth:
+
+```toml
+[[domain]]
+name    = "umbrella.com"
+aliases = ["*.umbrella.out"]
+```
+
+`umbrella.com`,`a.umbrella.com`, `a.b.umbrella.com` and `srv.dc.eu.umbrella.com` are all served by `umbrella.com`.
+`notumbrella.com` does not match.
+
+A wildcard can be overriden by other domain declarations
+
+* a literal `name` or alias always match beats a wildcard. ex: `a.umbrella.com` as a domain or in an alias, it will
+  take precedence.
+
+* another wildcard with a longer suffix. Ex: `*.dc.umbrella.com` declared as an alias in another domain would take precedence
+  over `*.umbrella.out`.
+
+The following declarations are rejected: 
+
+A `*` anywhere else — `*`, `gw.*`, `a.*.b` — is refused. It is a typo, and
+serving the traffic it would attract is worse than refusing to boot.
+
+One consequence to weigh before enabling `registrar` on a wildcard domain: an
+alias folds to the nominal name, so `alice@a.umbrella.com` and `alice@b.umbrella.com` are
+**one** registration (`alice@umbrella.com`), and the digest `realm` is `umbreall.com` for
+both. That is the intent for a gateway; but it is not what a multi-tenant
+deployment wants.
 
 #### `[domain.registrar]` / `[domain.presence]`
 
