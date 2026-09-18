@@ -766,7 +766,7 @@ The callee is an ordinary SIP phone behind the same proxy and understands none o
 that. The gateway terminates the media on both sides and lets the media server
 translate between them.
 
-Three things make this scenario different from the two above:
+Four things make this scenario different from the two above:
 
 - `media` is `{:mediaserver, …}`, with `webrtc: :yes` on the browser leg. From
   there the SDP bodies that cross are **ours** in both directions: the browser is
@@ -776,7 +776,14 @@ Three things make this scenario different from the two above:
   speaks is not known here — it is whatever the proxy pointed at — so the gateway
   offers WebRTC, then `RTP/AVPF`, then plain `RTP/AVP`, one INVITE per rung, and
   stops at the first the phone accepts. See [Offer profiles](#offer-profiles);
-- the call now has a media plane it can lose, which is three more clauses.
+- the call is resolved before it is carried. `b2bua_resolve/1` gives every target
+  its address, and `media_connect()` then asks for a media server that serves the
+  interface the phone is on. A server chosen before the target is a server that
+  may not reach it;
+- the call now has a media plane, and two ways to be without one. There may be no
+  media server at all: nothing is placed, the browser gets a `503`, and no handset
+  rings. Or the server goes away under a call already up, which the `:ms_event`
+  clauses handle.
 
 The R-URI is kept and the request routed back to the proxy — the proxy decided
 whom this call is for, and the gateway does not second-guess it.
@@ -790,18 +797,19 @@ defmodule B2BUA.WebrtcGw do
   config(
     domains: :any,
     proxy: "sip:proxy.example.com:5060",
-    # What the phone is offered, and what to offer it next if it refuses: the
-    # ladder is `webrtc -> avpf -> avp`. `:avp` for a gateway facing phones known
-    # never to do WebRTC; `:webrtc_required` for one that refuses to place the
-    # call in the clear.
+    # What the callee is offered, and what to offer it next if it refuses
+    # (design §7.5): the ladder is `webrtc → avpf → avp`. `:avp` for a gateway
+    # facing phones that are known never to do WebRTC — one offer, no ladder;
+    # `:webrtc_required` for one that refuses to place the call in the clear.
     profile: :webrtc_if_supported,
     mediaserver: %{module: :mendooze, url: "http://10.0.0.12:9090"}
   )
 
   # The browser leg takes WebRTC. The phone leg says nothing about transport
-  # here — the profile does, one rung at a time. Audio transcodes only if the two
-  # do not share a codec; video is forced because a browser's VP8 and a phone's
-  # H.264 never meet.
+  # here — the profile does, one rung at a time, and writing `webrtc:` in
+  # `outbound:` as well would fix the very thing the ladder exists to discover.
+  # Audio transcodes only if the two do not share a codec; video is forced
+  # because a browser's VP8 and a phone's H.264 never meet.
   @media {:mediaserver,
           inbound: [webrtc: :yes, media: :audio_video],
           outbound: [media: :audio_video],
@@ -816,10 +824,6 @@ defmodule B2BUA.WebrtcGw do
       {:INVITE, req, _trans, _dlg} ->
         b2bua_reply(req, 100, "Trying")
 
-        # The media server first: without one there is nothing to answer the
-        # browser with, and the outbound INVITE has no body to carry.
-        media_connect()
-
         peer = %SIP.B2bua.Peer{
           uris: [req.ruri],
           # keep what the proxy asked for; only route it back to the proxy
@@ -831,20 +835,70 @@ defmodule B2BUA.WebrtcGw do
           profile: ctx_get(:profile)
         }
 
-        b2bua_forward(req, peer, @media)
+        # Where the call goes, before which media server carries it: the outbound
+        # leg's media has to leave by an interface the callee can reach, and only
+        # the resolved target says which that is.
+        b2bua_resolve(peer)
 
-        if ctx_get(:lasterr) == :ok do
-          goto(proceeding, "INVITE relayed")
-        else
-          # The offer could not be terminated (no common codec, a WebRTC offer
-          # we were told not to take). That is a statement about what the caller
-          # asked for, so it is a 488 — not a 500, which would blame us.
-          b2bua_reply(req, 488, "Not Acceptable Here")
-          scenario_failure("media setup failed: #{inspect(ctx_get(:lasterr))}")
+        # Then the media server: without one there is nothing to answer the
+        # browser with, and the outbound INVITE has no body to carry.
+        media_connect()
+
+        # Do not ring a phone for a call we cannot carry. Both legs terminate
+        # their media here, so with no media server there is no offer to place
+        # and nothing to answer the browser with — the same verdict record.exs
+        # reads at the same spot, refused before the call goes anywhere.
+        #
+        # The refusal is SENT here rather than in the state it leads to: `goto`
+        # aborts the scenario outright while `lasterr` is set, and `b2bua_reply`
+        # is what puts it back to `:ok`. A reply deferred to the next state is a
+        # reply the browser never gets.
+        case ctx_get(:lasterr) do
+          {:error, :no_media_server} = err ->
+            b2bua_reply(req, 503, "Service Unavailable")
+            goto(no_media_server, "no media server: #{inspect(err)}")
+
+          _ ->
+            b2bua_forward(req, b2bua_resolved_peer(), @media)
+
+            cond do
+              ctx_get(:lasterr) == :ok ->
+                goto(proceeding, "INVITE relayed")
+
+              # The media plane went away between the connection and the offer.
+              b2bua_media_unavailable?() ->
+                reason = ctx_get(:lasterr)
+                b2bua_reply(req, 503, "Service Unavailable")
+                goto(no_media_server, "media plane gone: #{inspect(reason)}")
+
+              true ->
+                # The offer could not be terminated (no common codec, a WebRTC
+                # offer we were told not to take). That is a statement about what
+                # the caller asked for, so it is a 488 — not a 500, which would
+                # blame us.
+                reason = ctx_get(:lasterr)
+                b2bua_reply(req, 488, "Not Acceptable Here")
+                scenario_failure("media setup failed: #{inspect(reason)}")
+            end
         end
     after
       60_000 -> scenario_failure("no INVITE received")
     end
+  end
+
+  # No media plane to be had — the pool looked and found none, or the one it had
+  # went away while the offer was being placed. Ours, not the browser's, which is
+  # why the `503` above says so: it leaves the proxy in front free to try another
+  # gateway, where a `488` would blame an offer that was fine.
+  #
+  # A state of its own rather than two more lines in each branch, for the reason
+  # record.exs gives: both ways of losing the media plane end the same way, and
+  # the end includes releasing what the browser leg may already have allocated —
+  # `media_cleanup_ressources` is nil-safe, so the branch that never connected
+  # anything passes through it unchanged.
+  state no_media_server do
+    media_cleanup_ressources()
+    scenario_failure("no media server available")
   end
 
   state proceeding do
@@ -854,7 +908,7 @@ defmodule B2BUA.WebrtcGw do
       # to relay — the browser's answer was decided when its INVITE arrived.
       {:outbound, {code, resp, _trans, _dlg}} when code in 101..199 ->
         b2bua_forward_reply(resp)
-        goto(loop, "provisional #{code}")
+        stay("provisional #{code}")
 
       # The phone answered: the framework feeds its answer to the outbound
       # endpoint, attaches the two, and puts OUR answer in the 200 the browser
@@ -865,18 +919,30 @@ defmodule B2BUA.WebrtcGw do
 
       # A final from the phone — or a 2xx whose media could not be bridged,
       # which the framework hands over as a 488.
+      #
+      # `b2bua_hunting?/0` is what makes the offer ladder work from here: a 488
+      # relayed while a profile is left is not the end of the call, it is the
+      # framework having just re-offered the same phone something it may accept.
+      # The same question covers a hunt over several targets, which is why it is
+      # asked before anything is concluded.
       {:outbound, {code, resp, _trans, _dlg}} when code >= 300 ->
         b2bua_forward_reply(resp)
 
-        case b2bua_media_error() do
-          nil -> scenario_success("callee answered #{code}")
-          reason -> scenario_failure("call cannot be bridged: #{inspect(reason)}")
+        if b2bua_hunting?() do
+          stay("#{code}, still placing the call")
+        else
+          case b2bua_media_error() do
+            nil -> scenario_success("callee answered #{code}")
+            reason -> scenario_failure("call cannot be bridged: #{inspect(reason)}")
+          end
         end
 
+      # A CANCEL asks, it does not decide (RFC 3261 §16.7): wait for the phone's
+      # final before releasing anything.
       {:CANCEL, req, _trans, _dlg} ->
         b2bua_cancel_forward()
         b2bua_forward(req)
-        scenario_aborted("caller cancelled")
+        goto(cancelling, "caller cancelled")
 
       # The media plane went away while we were still ringing. There is no call
       # to hang up yet — the browser gets a 500 and the teardown CANCELs the
@@ -884,10 +950,55 @@ defmodule B2BUA.WebrtcGw do
       {:ms_event, _ref, :server_disconnected} ->
         b2bua_reply(last_uas_req(), 500, "Media Server Unavailable")
         goto(releasing, "media server gone before answer")
+
+      # The browser's leg is over without the browser having said so: its
+      # transaction ended under us and the stack answered a final on our behalf.
+      # Nobody is left to ring for, so stop the phone that still is.
+      {:dialog_terminated, _dlg, reason} ->
+        b2bua_cancel_forward()
+        goto(releasing, "caller gone: #{inspect(reason)}")
     after
       180_000 ->
         b2bua_reply(last_uas_req(), 408, "Request Timeout")
         goto(releasing, "callee never answered")
+    end
+  end
+
+  # The CANCEL has gone to the phone; its transaction is not over until a final
+  # response says so (RFC 3261 §16.7). Ending here instead would leave a handset
+  # that answers a fraction of a second later off-hook in a call nobody is in.
+  #
+  # `SIP.DialogImpl` catches that on its own — it is not a policy, so no script
+  # may get it wrong — and this state does not make it correct, it makes it
+  # VISIBLE. Every branch leaves through `releasing`, which frees the peer
+  # connection the browser leg allocated.
+  state cancelling do
+    on_events do
+      {:outbound, {487, _resp, _trans, _dlg}} ->
+        goto(releasing, "caller cancelled, phone confirmed")
+
+      # The race. Acknowledge the answer nobody is left to take, then end it
+      # (§13.2.2.4 then §15) — and release the media on the way out.
+      {:outbound, {200, _resp, _trans, _dlg}} ->
+        b2bua_send_BYE()
+        goto(releasing, "phone answered after the cancellation; hung up")
+
+      {:outbound, {code, _resp, _trans, _dlg}} when code in 100..199 ->
+        stay("provisional #{code} after cancel")
+
+      {:outbound, {code, _resp, _trans, _dlg}} when code >= 300 ->
+        goto(releasing, "caller cancelled, phone answered #{code}")
+
+      {:outbound, {:dialog_terminated, _dlg, _reason}} ->
+        goto(releasing, "caller cancelled, outbound leg gone")
+
+      {:ms_event, _ref, :server_disconnected} ->
+        goto(releasing, "media server gone while cancelling")
+
+      {:dialog_terminated, _dlg, _reason} ->
+        goto(releasing, "caller cancelled")
+    after
+      32_000 -> goto(releasing, "caller cancelled, phone never concluded")
     end
   end
 
@@ -922,28 +1033,28 @@ defmodule B2BUA.WebrtcGw do
         case b2bua_reoffer_kind(req) do
           kind when kind in [:address_change, :no_sdp, :no_change] ->
             b2bua_reply_reoffer(req)
-            goto(loop, "#{m} answered locally (#{kind})")
+            stay("#{m} answered locally (#{kind})")
 
           kind ->
             b2bua_forward(req)
-            goto(loop, "relayed #{m} (#{kind})")
+            stay("relayed #{m} (#{kind})")
         end
 
       {:outbound, {m, req, _trans, _dlg}} when m in [:INVITE, :UPDATE] ->
         case b2bua_reoffer_kind(req) do
           kind when kind in [:address_change, :no_sdp, :no_change] ->
             b2bua_reply_reoffer(req)
-            goto(loop, "#{m} answered locally (#{kind})")
+            stay("#{m} answered locally (#{kind})")
 
           kind ->
             b2bua_forward(req)
-            goto(loop, "relayed #{m} (#{kind})")
+            stay("relayed #{m} (#{kind})")
         end
 
       # One media went quiet. Worth saying, not worth hanging up for — a browser
       # that turned its camera off is still on the call.
       {:ms_event, _ref, {:media_timeout, media}} ->
-        goto(loop, "#{media} went silent")
+        stay("#{media} went silent")
 
       # Every negotiated media is silent: there is nothing left to carry.
       {:ms_event, _ref, :media_lost} ->
@@ -966,27 +1077,27 @@ defmodule B2BUA.WebrtcGw do
 
       {:ACK, req, _trans, _dlg} ->
         b2bua_forward(req)
-        goto(loop, "ACK relayed (caller -> callee)")
+        stay("ACK relayed (caller -> callee)")
 
       {:outbound, {:ACK, req, _trans, _dlg}} ->
         b2bua_forward(req)
-        goto(loop, "ACK relayed (callee -> caller)")
+        stay("ACK relayed (callee -> caller)")
 
       {:outbound, {m, req, _trans, _dlg}} when is_atom(m) ->
         b2bua_forward(req)
-        goto(loop, "relayed #{m} (callee -> caller)")
+        stay("relayed #{m} (callee -> caller)")
 
       {:outbound, {code, resp, _trans, _dlg}} when is_integer(code) ->
         b2bua_forward_reply(resp)
-        goto(loop, "relayed #{code} (callee -> caller)")
+        stay("relayed #{code} (callee -> caller)")
 
       {m, req, _trans, _dlg} when is_atom(m) ->
         b2bua_forward(req)
-        goto(loop, "relayed #{m} (caller -> callee)")
+        stay("relayed #{m} (caller -> callee)")
 
       {code, resp, _trans, _dlg} when is_integer(code) ->
         b2bua_forward_reply(resp)
-        goto(loop, "relayed #{code} (caller -> callee)")
+        stay("relayed #{code} (caller -> callee)")
     after
       14_400_000 -> goto(releasing, "maximum call duration reached")
     end
@@ -1037,6 +1148,12 @@ What is worth noticing:
 - **The re-offer clauses are the only place the media mode changes what crosses.**
   In `direct-call.exs` a re-INVITE simply relays; here reading it first is what
   keeps a browser's ICE restart from waking the phone up.
-- **`releasing` exists** because there is now something to release. It is reached
-  from every path, including the ones where the server is already gone — which is
-  why it uses `media_cleanup_ressources()` and not `media_stop()`.
+- **Two exits release the media, not one.** `releasing` ends every call that got
+  a media plane; `no_media_server` ends the ones that never got one, or lost it
+  while the call was being placed. Both use `media_cleanup_ressources()` and not
+  `media_stop()`, because the server may already be gone — and because it is
+  nil-safe, so the path that connected nothing goes through it unchanged.
+- **The `503` is sent before the `goto`, not in the state it leads to.** `goto`
+  aborts the scenario outright while `lasterr` is set, and the reply is what puts
+  it back to `:ok`. A refusal written inside `no_media_server` is a refusal the
+  browser never receives.
