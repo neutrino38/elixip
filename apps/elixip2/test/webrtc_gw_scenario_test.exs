@@ -26,6 +26,13 @@ defmodule SIP.Test.B2bua.WebrtcGwScenario do
   alias SIP.Test.Peers.Manual
   alias SIP.Test.Transport.Mockup
 
+  # A host media-server selector that looked and found nothing — the shape
+  # `Kelix.Router.media_for_profiles/1` answers with when no pooled MCU carries
+  # the profiles a resolved call needs. `:unavailable` is a verdict, not a server.
+  defmodule EmptyPool do
+    def media_for_profiles(_profiles), do: [module: :unavailable]
+  end
+
   @scenario Path.expand("../scenarios/webrtc-gw.exs", __DIR__)
 
   setup_all do
@@ -34,6 +41,20 @@ defmodule SIP.Test.B2bua.WebrtcGwScenario do
     :ok = SIP.Dialog.start()
     {:ok, _config_pid} = SIP.Session.ConfigRegistry.start()
     :ok = SIP.Auth.Secret.start()
+
+    # This scenario is the only reference one that calls `b2bua_resolve/1`, so it
+    # is the only one whose `media_connect()` consults the host's media-server
+    # selector (`SIP.Session.Media.use_mediaserver/1`, constrained path). Run from
+    # the umbrella ROOT, `:kelixip` has started and `Kelix.Config.apply_app_env/1`
+    # has written that key into the `:elixip2` env — so the pool of a kelixip
+    # nobody configured answered `:unavailable`, and both tests died on a 503 they
+    # never asked for. Green from `apps/elixip2`, red from the root, same code.
+    #
+    # These tests drive the scenario as the standalone tool does: no selector, the
+    # `config_overrides` below decide. The third test installs one deliberately.
+    SIP.Test.AppEnv.preserve([:mediaserver_selector])
+    Application.delete_env(:elixip2, :mediaserver_selector)
+
     module = SIP.Scenario.Loader.load_file!(@scenario)
     %{scenario: module}
   end
@@ -173,5 +194,38 @@ defmodule SIP.Test.B2bua.WebrtcGwScenario do
     # The browser learns of it, which is what `_required` means.
     assert_receive {:replied, 488, _reason, _req, _fields}, 5_000
     assert_receive {:instance_done, _outcome}, 10_000
+  end
+
+  # The gateway terminates BOTH legs' media on the server, so no media server
+  # means no call: nothing to answer the browser with, and no body for the
+  # outbound INVITE. The scenario reads that verdict where record.exs reads it —
+  # straight after `media_connect()` — and refuses before the phone is rung.
+  #
+  # The 503 is the point: the browser's offer was fine, we are the ones missing a
+  # resource, and a 503 is what lets the proxy in front try another gateway. A 488
+  # would send it back to the caller as its own fault.
+  @tag timeout: 60_000
+  test "no media server: the browser gets a 503 and the phone is never rung",
+       %{scenario: module, stub: stub} do
+    invite = inbound_invite(:nomedia)
+
+    tp_pid = transport_pid(:nomedia)
+    :ok = Mockup.set_peer(tp_pid, Manual)
+    :ok = Mockup.attach_probe(tp_pid)
+
+    Application.put_env(:elixip2, :mediaserver_selector, {EmptyPool, :media_for_profiles})
+    on_exit(fn -> Application.delete_env(:elixip2, :mediaserver_selector) end)
+
+    {instance, _ref} = start_instance(module, stub, invite, [])
+    send(instance, {:INVITE, invite, self(), stub})
+
+    assert_receive {:replied, 100, "Trying", _req, _fields}, 5_000
+    assert_receive {:replied, 503, "Service Unavailable", _req, _fields}, 5_000
+
+    # Nothing went out: the refusal happens before the call is placed, so no
+    # handset rings for a call that cannot carry a word.
+    refute_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 500
+
+    assert_receive {:instance_done, {:error, "no media server available"}}, 10_000
   end
 end
