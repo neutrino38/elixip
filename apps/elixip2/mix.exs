@@ -40,16 +40,16 @@ defmodule SIPParser.MixProject do
       # script runs on. It lives in its own repository and ships as the hex
       # package `finite_state_language` (OTP app `:fsl`, Apache-2.0).
       #
-      # A `path:` dep because the two are developed together: a change to the
-      # language is compiled and run against this suite in the same step, which
-      # is the only place a SIP binding exercises it. Pinning a released version
-      # instead is one line — `{:finite_state_language, "~> 0.2"}`.
+      # The dep carries both names: `:fsl` is the OTP app, `hex:` the package.
+      # Pinned to the patch level: before 1.0 a minor release may break the API.
+      # To run a change to the language against this suite before publishing it,
+      # swap in `path: "../../../finite-state-language/elixir"` locally.
       #
       # It does NOT depend on :elixip2, and that is the point: the language knows
       # nothing about SIP, and `mix compile --warnings-as-errors` over there is
       # what proves it rather than asserts it. SIP plugs in through
       # `SIP.FSL.Host` (framework/SIPFSLHost.ex).
-      {:fsl, path: "../../../finite-state-language/elixir"},
+      {:fsl, "~> 0.2.0", hex: :finite_state_language},
       {:logger_file_backend, "~> 0.0.12"},
       {:jason, "~> 1.4"},
       # HTTP client for the FSL.HTTP mixin (http_GET), where it is an OPTIONAL
