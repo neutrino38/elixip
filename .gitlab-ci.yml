@@ -89,8 +89,8 @@ publish:
   before_script: []          # pas de toolchain Elixir nécessaire ici
   cache: {}                  # ne pas tirer deps/ et _build/ pour un rsync
   script:
-    - chmod 644 rpm/*.rpm
-    - rpm --addsign rpm/*.rpm
-    - rpm -qpi rpm/*.rpm | grep -i '^Signature' | grep -qv '(none)'
-    - rsync -av rpm/*.rpm repo-publish:/var/www/repo/elixip/9/x86_64/
+    - chmod 644 package/dist/*.rpm
+    - rpm --addsign package/dist/*.rpm
+    - rpm -qpi package/dist/*.rpm | grep -i '^Signature' | grep -qv '(none)'
+    - rsync -av package/dist/*.rpm repo-publish:/var/www/repo/elixip/9/x86_64/
     - ssh repo-publish refresh
