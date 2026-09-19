@@ -90,7 +90,7 @@ publish:
   cache: {}                  # ne pas tirer deps/ et _build/ pour un rsync
   script:
     - chmod 644 package/dist/*.rpm
-    - rpm --addsign package/dist/*.rpm
-    - rpm -qpi package/dist/*.rpm | grep -i '^Signature' | grep -qv '(none)'
-    - rsync -av package/dist/*.rpm repo-publish:/var/www/repo/elixip/9/x86_64/
+    - rpm --addsign packaging/dist/*.rpm
+    - rpm -qpi packaging/dist/*.rpm | grep -i '^Signature' | grep -qv '(none)'
+    - rsync -av packaging/dist/*.rpm repo-publish:/var/www/repo/elixip/9/x86_64/
     - ssh repo-publish refresh
