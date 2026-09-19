@@ -171,6 +171,16 @@ Code.require_file("support/listener_case.exs", __DIR__)
 # `SIP.Session.ConfigRegistry` is deliberately NOT started here — its `start/0`
 # answers `{:ok, pid}` / `{:error, {:already_started, _}}` and several modules match
 # on `{:ok, _}`, so pre-starting it would break them.
+# From the umbrella root, Mix starts all four apps before the first suite runs, so
+# the kelixip server is up while this suite runs — and Kelix.Supervisor supervises
+# the very singletons this suite owns and stops at will (FSL.Monitor, the SIP
+# registries, SIP.Session.ConfigRegistry). Each stop is a restart there; enough of
+# them and the supervisor gives up, the :kelixip application exits, and the
+# registries it held vanish under whichever test is running: `unknown registry:
+# Registry.SIPDialog`. This suite tests the library, which depends on neither app;
+# the kelixip suites start their application again (Kelix.Test.AppBoot).
+for app <- [:kelix_modules, :kelixip], do: Application.stop(app)
+
 _sip_stack_owner =
   spawn(fn ->
     :ok = SIP.Transac.start()
