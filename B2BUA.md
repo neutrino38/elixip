@@ -190,9 +190,15 @@ told the call is answered, so no RTP watchdog is armed on a leg still ringing.
 ```
 
 For the services placed in front of a gateway, where the announcement IS what
-the caller called for. Leave it out everywhere else: it is a comfort, and it
-narrows nothing if the media server cannot do it — the provisional then crosses
-stripped, as by default.
+the caller called for. Leave it out everywhere else.
+
+An absence and a failure are two different things here. A `18x` with no SDP is
+an absence: the provisional crosses stripped, as by default. A media server that
+refuses the callee's early description, or a bridge that cannot be built, is
+this call's media path: the framework CANCELs the attempt and relays nothing,
+because the `2xx` would break on the same failure one exchange later. The `487`
+travels the ordinary path — a serial hunt moves to the next target, and the
+caller gets a final response either way.
 
 `transcode:` is a policy per media, and what it selects is a **codec for both
 legs at once** — the two legs of a B2BUA cannot be negotiated independently:
