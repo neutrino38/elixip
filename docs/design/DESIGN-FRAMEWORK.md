@@ -280,6 +280,29 @@ codec changes work through the bridge.
 key kept as an alias for the inbound leg so every pre-B2BUA scenario is
 unchanged.
 
+**Early media is an option of the mode, `early_media:`, and it is off.** A `18x`
+carrying the callee's SDP is not an offer/answer event here — the caller's answer
+was decided when its INVITE arrived — so the body is dropped and the provisional
+relayed without it, which is what keeps a hunt free to move to another target.
+`early_media: true` runs the 2xx choreography one exchange earlier instead:
+`set_remote_answer(PC_out, early_answer_B)` → attach the two endpoints → relay
+the provisional carrying `PC_in`'s answer. Three properties it holds on to, and
+each one is a bug it would otherwise be:
+
+1. the caller's answer is read **after** the bridge, so the 2xx that follows
+   carries the same session the 183 described — the bridge may narrow it, and it
+   is idempotent, so it is not re-taken on the 2xx;
+2. `call_answered/1` is **not** called: nobody has picked up, and arming an RTP
+   watchdog on a ringing leg reaps the calls that ring longest (§6.7);
+3. an absence and a failure are told apart. A `18x` with no SDP is an absence:
+   the provisional is relayed stripped, as by default. A media server that
+   refuses the early description, or a bridge that cannot be built, is this
+   call's media path — the branch in flight is CANCELled and nothing is
+   relayed, because the 2xx would break on the same failure one exchange later
+   (`media_answer_failed/4`). The 487 travels the ordinary path, so a serial
+   hunt moves to the next target and the caller gets a final response either
+   way.
+
 ### 5.8 Offer profiles
 
 Only meaningful with a media server: choosing a profile means *generating* an

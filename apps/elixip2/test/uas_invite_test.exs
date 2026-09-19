@@ -263,7 +263,6 @@ end
 defmodule SIP.Test.UASInvite do
   use ExUnit.Case
 
-  alias SIP.Test.Transport.Mockup
   require Logger
 
   @sdp_body [%{contenttype: "application/sdp", data: "v=0\r\no=- 1 1 IN IP4 1.2.3.4\r\n"}]

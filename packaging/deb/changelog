@@ -1,3 +1,46 @@
+kelixip (1.5.5-2) stable; urgency=low
+
+  * Rebuild only: the 1.5.5-1 changelog listed the WSS hardening alone, written
+    before the rest of the release landed. No code change.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Sat, 19 Sep 2026 19:00:00 +0200
+
+kelixip (1.5.5-1) stable; urgency=low
+
+  * sip: an INVITE server transaction no longer carries timer F. A call that rang
+    longer than 32 s was ended with a 408 to the caller while the callee was still
+    ringing. How long a phone rings is the application's decision (RFC 3261
+    §17.2.1); the remaining bound is `:sip_timer_ist_ringing`, 600 000 ms.
+  * sip: when the stack answers 408 for a silent application, the application is
+    told. A B2BUA now CANCELs the callee still ringing for a call nobody can take.
+  * sip: a 183 with no body no longer raises inside the server transaction, which
+    used to take the dialog and the whole call with it.
+  * b2bua: early media, as the `early_media:` option of the media mode, off by
+    default. A gateway's announcement and the network ringback are audible while
+    the callee rings. A media path that cannot be built CANCELs the attempt instead
+    of relaying a call that can never carry anything.
+  * mcu: a text medium (T.140 over WebSocket) no longer fails the bridge it is part
+    of. `EndpointSetRTPProperties` only knows audio and video, and its refusal
+    killed a whole total conversation call.
+  * sip: P-Asserted-Identity is read as a whole URI, display name kept, and the two
+    comma-separated values of RFC 3325 §9.1 are read apart.
+  * sip: a URI built field by field, as a routing script writes one, gets its
+    scheme's default port. Such a destination used to travel portless and the
+    INVITE never went out.
+  * sip: a received request is marked with the transport it came in over.
+  * kelixip: a domain alias written `*.suffix` routes every host below that suffix.
+    A literal name wins over a wildcard, the longest suffix wins among wildcards,
+    and a `*` written anywhere else rejects the file.
+  * kelixip: a routing refusal says why, naming the request and the domains.toml
+    block that is missing.
+  * WSS: the WebSocket layer is hardened. What a fragmented message accumulates is
+    bounded, so a peer can no longer grow a connection's memory without end.
+  * The unused dependency on socket is dropped; socket2 carries the whole WebSocket
+    path.
+  * User-Agent is now Kelixip/1.5.5.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Tue, 15 Sep 2026 12:00:00 +0200
+
 kelixip (1.5.4-1) stable; urgency=low
 
   * `mcu`: the module pushes its events to kelixip, so a supervision view is told

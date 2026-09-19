@@ -16,6 +16,8 @@
 #[[domain]]
 #name    = "example.com"
 #aliases = ["sip.example.com", "203.0.113.10"]     # also routed here; realm stays `name`
+#                                                  # `*.example.com` routes every host below
+#                                                  # that suffix, at any depth
 #max_calls = 200                                   # per-domain cap, 503 beyond it
 #
 #  # Presence of the block enables the function. The script is resolved under

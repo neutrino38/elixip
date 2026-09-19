@@ -212,10 +212,38 @@ defmodule SIP.Msg.Ops do
     end
   end
 
+  @doc """
+  The identity a trusted upstream asserted for the sender, as the whole
+  `%SIP.Uri{}` of `P-Asserted-Identity` (RFC 3325 §9.1). `nil` when the request
+  carries none that parses as a SIP URI.
+
+  The counterpart of `asserted_username/1` for a B2BUA that *re-asserts* what it
+  was handed: a scenario which has established that the request comes from inside
+  its trust domain feeds this to `SIP.Context.assert_identity/2`, and
+  `prepare_forwarded_request/2` writes it out on the outbound leg. The inbound
+  header itself never crosses a leg boundary — see `strip_asserted_identity/1`,
+  and never bypass it: relaying a foreign assertion verbatim is what RFC 3325 §5
+  forbids.
+
+  The display name is kept, unlike the one `SIP.Context.assert_identity/2` builds
+  from a digest verdict. Here it is not the caller's claim but part of what the
+  trusted upstream asserts, and dropping it would blank the callee's display.
+
+  A `tel:` URI yields `nil`: `SIP.Uri` does not model one, and there is no
+  honest way to assert it as a SIP URI. When the header carries both forms, the
+  `sip:` one is taken whichever comes first.
+  """
+  @spec asserted_identity(map()) :: %SIP.Uri{} | nil
+  def asserted_identity(msg) when is_map(msg) do
+    msg
+    |> header_values("p-asserted-identity")
+    |> Enum.find_value(&value_uri/1)
+  end
+
   # A header SIPMsg has no atom for keeps the spelling the peer used as its map key
   # (`headername_to_atomkey/1`), and header names are case-insensitive (RFC 3261
   # §7.3.1) — so the lookup is too. Repeated occurrences arrive as a list.
-  defp header_userpart(msg, lowercase_name) do
+  defp header_values(msg, lowercase_name) do
     msg
     |> Enum.find_value(fn
       {key, value} when is_binary(key) ->
@@ -225,6 +253,11 @@ defmodule SIP.Msg.Ops do
         nil
     end)
     |> List.wrap()
+  end
+
+  defp header_userpart(msg, lowercase_name) do
+    msg
+    |> header_values(lowercase_name)
     |> Enum.find_value(&value_userpart/1)
   end
 
@@ -237,6 +270,19 @@ defmodule SIP.Msg.Ops do
   end
 
   defp value_userpart(other), do: uri_userpart(other)
+
+  # Same value, read as a whole URI. The comma is only a separator once the
+  # value has failed to parse entire: a display name is allowed to hold one
+  # (`"Dupont, Jean" <sip:j@example.com>`).
+  defp value_uri(value) when is_binary(value) do
+    case to_uri(value) do
+      %SIP.Uri{} = uri -> uri
+      nil -> value |> String.split(",") |> Enum.find_value(&to_uri/1)
+    end
+  end
+
+  defp value_uri(%SIP.Uri{} = uri), do: uri
+  defp value_uri(_other), do: nil
 
   defp uri_userpart(%SIP.Uri{userpart: user}), do: presence(user)
 
@@ -254,7 +300,10 @@ defmodule SIP.Msg.Ops do
   # `tel:+33970260233;phone-context=+33` and `<tel:+33970260233>` assert
   # +33970260233. SIP.Uri does not model a tel: URI, and teaching it to would
   # change every parse in the stack — the number is read here instead.
-  @tel_uri ~r/^(?:[^<]*<)?tel:([^;>\s]+)/i
+  # The comma stops the number too: it separates the two values of RFC 3325 §9.1
+  # when they share a line, and `tel:+33970260233, sip:a@b` asserted a number with
+  # a comma glued to it.
+  @tel_uri ~r/^(?:[^<]*<)?tel:([^;>,\s]+)/i
 
   defp tel_number(value) do
     case Regex.run(@tel_uri, value) do
@@ -1245,12 +1294,18 @@ defmodule SIP.Msg.Ops do
         add_transaction_id(rsp)
       end
 
-    # Specific case for 200 OK and 183 Session Progress for invite
-    if req.method == :INVITE and resp_code in [183, 200] do
+    # A 200 OK to an INVITE always carries a session description: the answer to
+    # the offer it received, or an offer of its own when the INVITE had none
+    # (RFC 3261 §13.3.1). Nothing of the sort binds a 183 — it is a provisional,
+    # and one with no body at all is both legal and common. Refusing to BUILD it
+    # raised inside the server transaction, which took the dialog and the whole
+    # call with it, over a response the far end had every right to send
+    # (production, 2026-09-16: a gateway's 183 relayed by the B2BUA).
+    if req.method == :INVITE and resp_code == 200 do
       case Map.fetch(rsp, :body) do
-        {:ok, []} -> raise "183 or 200 OK response cannot have an empty body"
+        {:ok, []} -> raise "200 OK response cannot have an empty body"
         {:ok, _} -> nil
-        :error -> raise "183 or 200 OK need to be provided with an SDP body"
+        :error -> raise "200 OK needs to be provided with an SDP body"
       end
     end
 

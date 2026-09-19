@@ -3173,6 +3173,60 @@ defmodule Mendooze.ConnTest do
     assert answer =~ "m=audio 22000"
   end
 
+  # The gateway case: T.140 over a WebSocket on one leg, over RTP on the other.
+  # The server holds the first outside RTP altogether — it re-created that
+  # endpoint's text medium as a WebSocket one — so it answers `Unknown media [2]`
+  # to anything RTP asked about it, `useOriSeqNum` included.
+  defp ws_text_bridge_handler(method, params) do
+    case {method, params} do
+      {"EndpointSetRTPProperties", [_sess, 4, 2, _props]} -> {:error, "Error\n"}
+      {"GetMediaCandidates", [_, _, 2, 2]} -> {:ok, ["ws://192.168.5.5:9090"]}
+      {"EndpointStartReceiving", [_, _, 2, _]} -> {:ok, [9090]}
+      _ -> two_leg_handler(method, params)
+    end
+  end
+
+  test "a text medium the server holds outside RTP is bridged, not refused" do
+    %{server: server} = start_media_server(&ws_text_bridge_handler/2)
+
+    {:ok, conn} = Mendooze.create_peer_connection(server, self(), media: [:audio, :text])
+    assert_receive {:jsr309_call, "MediaSessionCreate", [_tag, _q]}, 1_000
+    assert {:ok, _answer} = Mendooze.set_remote_offer(conn, @elioz_offer)
+
+    {:ok, out} =
+      Mendooze.create_peer_connection(server, self(),
+        media: [:audio, :text],
+        audio_codec: "PCMU",
+        bridge_with: conn
+      )
+
+    {:ok, _offer} = Mendooze.get_local_offer(out)
+
+    :ok =
+      Mendooze.set_remote_answer(
+        out,
+        Sdp.build(%{
+          ip: "10.9.8.6",
+          medias: [
+            %{type: :audio, port: 40_000, codecs: ["PCMU"], dtmf: true},
+            %{type: :text, port: 40_004, codecs: ["T140"]}
+          ]
+        })
+      )
+
+    # Asking for the numbering property used to fail the bridge AFTER both text
+    # attaches had succeeded, and killed the call over a medium that was already
+    # joined (traffic of 2026-09-16).
+    assert {:ok, _} = Mendooze.bridge(conn, out, audio: :forbid)
+
+    assert_receive {:jsr309_call, "EndpointAttachToEndpoint", [3, 4, 5, 2]}, 1_000
+    assert_receive {:jsr309_call, "EndpointAttachToEndpoint", [3, 5, 4, 2]}, 1_000
+
+    refute_receive {:jsr309_call, "EndpointSetRTPProperties",
+                    [_, _, 2, %{"useOriSeqNum" => _}]},
+                   200
+  end
+
   # ── Text over a WebRTC data channel (RFC 8865) ──────────────────────────────
 
   # What a browser offers when its page opens a data channel: the section is real

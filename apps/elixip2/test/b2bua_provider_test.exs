@@ -276,7 +276,7 @@ defmodule SIP.Test.B2bua.Provider do
     assert_receive {:outbound, {:serial_waiting, 3_000, at}}, 2_000
     assert %DateTime{} = at
 
-    ctx = B2bua.do_try_next(ctx)
+    _ctx = B2bua.do_try_next(ctx)
     assert_receive {:outbound, {:serial_attempting, uri, _at}}, 2_000
     assert uri.domain == "prv8a.example.com"
   end

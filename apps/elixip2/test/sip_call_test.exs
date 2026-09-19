@@ -269,7 +269,6 @@ end
 defmodule SIP.Test.Call do
   use ExUnit.Case
 
-  alias SIP.Test.Transport.Mockup
   require SIP.Dialog
   doctest SIP.Session.Call
 

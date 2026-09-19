@@ -60,6 +60,19 @@ defmodule SIP.Test.SIP.Msg.Ops do
     end
   end
 
+  # A 183 carries a body when it has one to carry, and nothing when it does not.
+  # Refusing to build the second form raised inside the server transaction, which
+  # took the dialog and the call with it — a B2BUA relaying a gateway's 183 does
+  # exactly this (production, 2026-09-16).
+  test "Create a 183 resp with no body at all", context do
+    siprsp = SIP.Msg.Ops.reply_to_request(context.sipreq, 183, "Session Progress", [], "zz77998")
+
+    assert siprsp.response == 183
+    assert siprsp.body == []
+    # and it serializes: a provisional with no body is a message, not a draft
+    assert is_binary(SIPMsg.serialize(siprsp))
+  end
+
   test "Create a 200 OK resp with no contact field", context do
     try do
       body = %{ contentype: "application/sdp", data: "blabla"}

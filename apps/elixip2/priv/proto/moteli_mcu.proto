@@ -291,6 +291,13 @@ message IsCodecSupportedReq {
 
 // --- RTP media -------------------------------------------------------------------
 
+// Addressing profile of the leg (§6.7 bis): "publicv4", "publicv6",
+// "internalv4" or "internalv6". Absent or empty = the server's default profile.
+// It rides on StartReceiving and StartSending and nowhere else, because the
+// server applies it in the Start* that carries it — that is what binds the
+// interface and allocates the port returned here. Both calls of one leg MUST
+// carry the same value; an unknown, unavailable or disagreeing profile is an
+// error, never a silent fallback on the default.
 message StartReceivingReq {
   uint32 conf_id = 1;
   uint32 part_id = 2;
@@ -299,6 +306,7 @@ message StartReceivingReq {
   MediaRole role = 5;
   MediaProtocol proto = 6;
   optional SdpOffer offer = 7;
+  optional string profile = 8;
 }
 
 message StartReceivingResp {
@@ -334,6 +342,8 @@ message StartSendingReq {
   uint32 send_port = 5;
   map<string, int32> rtp_map = 6;
   MediaRole role = 7;
+  // Same profile as this leg's StartReceiving (see above).
+  optional string profile = 8;
 }
 
 message StopSendingReq {

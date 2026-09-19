@@ -9,8 +9,8 @@
 #   rpmbuild -bb --define "_topdir <dir>" packaging/rpm/elixipp.spec
 
 Name:           elixipp
-Version:        1.5.4
-Release:        1%{?dist}
+Version:        1.5.5
+Release:        2%{?dist}
 Summary:        SIP scenario test tool driven by the Finite State Language
 License:        BUSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -46,6 +46,29 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 %{_bindir}/elixipp
 
 %changelog
+* Sat Sep 19 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.5-2
+- Rebuild only: the 1.5.5-1 changelog listed the WSS hardening alone, written
+  before the rest of the release landed. No code change.
+
+* Tue Sep 15 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.5-1
+- sip: an INVITE server transaction no longer carries timer F, which ended every
+  call ringing longer than 32 s with a 408 to the caller. The remaining bound is
+  :sip_timer_ist_ringing, 600 000 ms.
+- sip: when the stack answers 408 for a scenario that did not reply, the scenario
+  is told, so it can end the leg it opened.
+- sip: a 183 with no body no longer raises inside the server transaction.
+- sip: P-Asserted-Identity is read as a whole URI, display name kept, and the two
+  comma-separated values of RFC 3325 §9.1 are read apart.
+- sip: a URI built field by field gets its scheme's default port; it used to
+  travel portless and the request never went out.
+- sip: a received request is marked with the transport it came in over.
+- b2bua: early media, as the `early_media:` option of the media mode, off by
+  default.
+- WSS: the WebSocket layer is hardened — the shared stack, so the tool gets it too.
+  What a fragmented message accumulates is bounded.
+- The unused dependency on socket is dropped.
+- User-Agent is now Elixipp-1.5.5.
+
 * Thu Sep 10 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.4-1
 - sip: what the depacketizer accumulates is bounded, and a malformed header value
   no longer raises — the shared stack, so the tool gets it too.

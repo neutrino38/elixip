@@ -164,8 +164,10 @@ defmodule SIP.B2bua.MediaPlan do
   `inbound_answer` is the caller's answer, produced the moment their offer was
   read and held back until the callee answers. It does not depend on WHICH target
   answers — it comes from the media server, not from the callee — and that is what
-  lets a hunt keep running behind an established early dialog (§7.4): no 1xx ever
-  carries this body, so nothing is committed until the 2xx.
+  lets a hunt keep running behind an established early dialog (§7.4): no 1xx
+  carries this body by default, so nothing is committed until the 2xx.
+  `early_media: true` in `opts` is the service that asks for the opposite — the
+  callee's ringback relayed during the ringing (`early_answer/3`).
 
   It is not immutable, though. `bridge/3` may hand back a rebuilt answer once both
   legs are known — a relayed media narrowed to what both can carry, or its codecs
@@ -2036,18 +2038,25 @@ defmodule SIP.Session.B2bua do
       %Pending{} = pending ->
         # With a media server the response is not relayed as it stands: its SDP
         # is the callee's, and what the caller must receive is ours.
-        {sip_ctx, resp} = media_step(sip_ctx, resp, tid)
+        case media_step(sip_ctx, resp, tid) do
+          # The media step abandoned the attempt and CANCELled it. Nothing is
+          # relayed: the final response that CANCEL brings back comes through
+          # here like any other, and it is that one the caller gets.
+          {sip_ctx, :drop} ->
+            SIP.Context.set(sip_ctx, :lasterr, :ok)
 
-        # A refusal from one target of a serial hunt is not the answer to the
-        # call — it is the answer of one device. Try the next one instead of
-        # telling the caller the call failed.
-        # Before the hunt: a refusal of the OFFER is not a refusal by the device,
-        # and the same targets get another profile before the next ones get
-        # anything (§7.5).
-        if fallback?(sip_ctx, resp, tid) do
-          fall_back_one_rung(sip_ctx, resp, pending, tid)
-        else
-          hunt_or_relay(sip_ctx, resp, pending, tid)
+          # A refusal from one target of a serial hunt is not the answer to the
+          # call — it is the answer of one device. Try the next one instead of
+          # telling the caller the call failed.
+          # Before the hunt: a refusal of the OFFER is not a refusal by the device,
+          # and the same targets get another profile before the next ones get
+          # anything (§7.5).
+          {sip_ctx, resp} ->
+            if fallback?(sip_ctx, resp, tid) do
+              fall_back_one_rung(sip_ctx, resp, pending, tid)
+            else
+              hunt_or_relay(sip_ctx, resp, pending, tid)
+            end
         end
 
       nil ->
@@ -2098,7 +2107,7 @@ defmodule SIP.Session.B2bua do
         complete_media(sip_ctx, resp, plan, tid)
 
       resp.response in 101..199 ->
-        {sip_ctx, strip_early_sdp(resp)}
+        early_answer(sip_ctx, resp, plan)
 
       true ->
         {sip_ctx, resp}
@@ -2204,11 +2213,92 @@ defmodule SIP.Session.B2bua do
     |> add_pending(to, pending.orig_req, pending.orig_leg, pending.method, pending.held_answer)
   end
 
+  # A 18x carrying the callee's SDP, on a call that asked for `early_media:`.
+  #
+  # The 2xx choreography, one exchange earlier and without answering anything:
+  # the callee's early answer goes to its endpoint, the two endpoints are
+  # attached, and the caller is handed OUR answer instead of an empty body. That
+  # is what makes an announcement or a network ringback audible, where the
+  # default leaves the caller with a 183 it can do nothing with.
+  #
+  # The caller's answer is sent AFTER the bridge, not before: `attach_legs/3` may
+  # rebuild it narrowed to what both legs carry, and it is that one the 2xx will
+  # carry too (the bridge is idempotent). Sending the held one here would
+  # describe to the caller a session neither leg ends up in.
+  #
+  # `call_answered/1` is deliberately NOT called: nobody has picked up. Arming
+  # the RTP watchdog on a ringing leg is what reaps the calls that ring longest
+  # (`MediaServer.Behaviour.call_answered/1`).
+  #
+  # Two kinds of "no" are told apart here, and only one of them is a failure.
+  # Early media not asked for, or a 18x with no SDP, is nothing at all: the
+  # provisional is relayed stripped, as it always was. A media server that
+  # refuses the description, or a bridge that cannot be built, is this call's
+  # media path — see `early_media_failed/3`.
+  defp early_answer(sip_ctx, resp, %MediaPlan{} = plan) do
+    with true <- early_media?(plan),
+         sdp when is_binary(sdp) and sdp != "" <- SIP.Session.extract_sdp(resp),
+         :ok <- ms_set_remote_answer(sip_ctx, sdp),
+         {sip_ctx, :ok} <- attach_legs(sip_ctx, plan, []) do
+      {sip_ctx, with_our_answer(resp, media_plan(sip_ctx))}
+    else
+      {sip_ctx = %SIP.Context{}, {:error, reason}} -> early_media_failed(sip_ctx, resp, reason)
+      {:error, reason} -> early_media_failed(sip_ctx, resp, reason)
+      _not_early_media -> {sip_ctx, strip_early_sdp(resp)}
+    end
+  end
+
+  defp early_media?(%MediaPlan{opts: opts}), do: Keyword.get(opts, :early_media, false) == true
+
+  # The media server could not take the callee's early description, or could not
+  # bridge it. That is not a comfort feature failing: it is this call's media
+  # path, and the 2xx would break on it one exchange later
+  # (`media_answer_failed/4`). Relaying the provisional would buy the caller a few
+  # seconds of a call that can never carry anything, and hide the cause behind a
+  # failure that looks like the callee's.
+  #
+  # So the attempt is abandoned the way §3.5 abandons one: CANCEL the branch in
+  # flight, keep the correlation, relay nothing. The 487 that comes back travels
+  # the ordinary path — a serial hunt moves to the next target, and the caller
+  # gets a final response either way.
+  defp early_media_failed(sip_ctx, resp, reason) do
+    Logger.warning(
+      module: __MODULE__,
+      message:
+        "b2bua: the callee's early answer (#{resp.response}) could not be bridged " <>
+          "(#{inspect(reason)}); cancelling that attempt"
+    )
+
+    case outbound_leg(sip_ctx) do
+      %Leg{dialogpid: dialog_pid} when is_pid(dialog_pid) ->
+        protect("cancel the attempt whose early media cannot be bridged", fn ->
+          SIP.Dialog.cancel(dialog_pid, current_tid())
+        end)
+
+      _ ->
+        :ok
+    end
+
+    sip_ctx =
+      case media_plan(sip_ctx) do
+        %MediaPlan{} = plan ->
+          put_media_plan(sip_ctx, %MediaPlan{plan | error: reason, bridged: false})
+
+        _ ->
+          sip_ctx
+      end
+
+    {sip_ctx, :drop}
+  end
+
   # A 18x carrying the callee's SDP. Without a media server relaying it would
   # pin the leg to that target and end the hunt (§7.4); WITH one it is not even
   # an offer/answer event — the caller's answer comes from the media server and
   # was decided when their INVITE arrived. So the body is dropped and the
   # provisional relayed without it, which is what keeps the hunt open.
+  #
+  # `early_media: true` on the media mode says the opposite, for the services
+  # where the callee's ringback IS the service (see `early_answer/3`).
   defp strip_early_sdp(resp) do
     case SIP.Session.extract_sdp(resp) do
       sdp when is_binary(sdp) and sdp != "" -> SIP.Msg.Ops.update_sip_msg(resp, {:body, []})
@@ -3007,9 +3097,13 @@ defmodule SIP.Session.B2bua do
 
   # A 2xx/3xx answering an INVITE or UPDATE needs a Contact, and it must be OURS
   # — forwarded_reply_fields/1 deliberately left the far end's behind.
+  #
+  # So does a provisional that carries an answer: it establishes an early dialog
+  # the caller may send an UPDATE on, and a Contact is the only thing saying
+  # where. A provisional with no body establishes nothing anyone writes to.
   defp maybe_add_contact(fields, sip_ctx, %Pending{method: method}, resp)
        when method in [:INVITE, :UPDATE] do
-    if resp.response in 200..399 do
+    if resp.response in 200..399 or early_answer?(resp) do
       Keyword.put_new(fields, :contact, local_contact(sip_ctx))
     else
       fields
@@ -3017,6 +3111,10 @@ defmodule SIP.Session.B2bua do
   end
 
   defp maybe_add_contact(fields, _sip_ctx, _pending, _resp), do: fields
+
+  defp early_answer?(resp) do
+    resp.response in 101..199 and is_binary(SIP.Session.extract_sdp(resp))
+  end
 
   # Mirrors SIP.Session.CallUAS.local_contact/1: the transport layer rewrites the
   # placeholder host with the actual bound address.

@@ -28,10 +28,10 @@ defmodule SIP.Test.Peers.Manual do
   @doc """
   Answer the request in progress with `code` after `after_ms` ms.
 
-  `100` is a bare Trying, `401`/`407` a Digest challenge, `200` an SDP answer on
-  an INVITE and a Contact echo on a REGISTER; every other code in 400..699 is a
-  plain rejection — a fork test needs a 6xx (RFC 3261 §16.7 stops a hunt on a
-  global refusal) as much as a 486.
+  `100` is a bare Trying, `401`/`407` a Digest challenge, `183` an early SDP
+  answer on an INVITE, `200` an SDP answer on an INVITE and a Contact echo on a
+  REGISTER; every other code in 400..699 is a plain rejection — a fork test needs
+  a 6xx (RFC 3261 §16.7 stops a hunt on a global refusal) as much as a 486.
   """
   @spec simulate(pid(), integer(), non_neg_integer()) :: :ok
   def simulate(t_pid, code, after_ms \\ 100) do
@@ -190,6 +190,14 @@ defmodule SIP.Test.Peers.Manual do
   end
 
   defp answer(req, 180, totag, after_ms), do: reply_as(totag, req, 180, "Ringing", [], after_ms)
+
+  # A gateway announcing it has media to play before anyone picks up: the same
+  # answer as the 2xx, one exchange earlier. What a B2BUA does with it is a
+  # policy (`early_media:`), and only a peer that really sends one can show it.
+  defp answer(%{method: :INVITE} = req, 183, totag, after_ms) do
+    fields = [body: [sdp_answer_body()], contact: remote_contact()]
+    reply_as(totag, req, 183, "Session Progress", fields, after_ms)
+  end
 
   defp answer(req, code, totag, after_ms), do: reply_as(totag, req, code, nil, [], after_ms)
 

@@ -492,6 +492,34 @@ defmodule SIP.Test.B2bua.Scenario do
     assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
   end
 
+  # The caller says nothing at all: its transaction ended under the scenario and
+  # the stack answered a final on its behalf (an IST that rang past its bound, a
+  # flow that died). The dialog reports that, and the callee must stop ringing —
+  # traffic of 2026-09-16: without it the phone rang on, and its 603 came back
+  # 48 s later with no transaction left to relay it to.
+  @tag timeout: 60_000
+  test "a caller whose dialog ends mid-ring stops the callee ringing",
+       %{scenario: module, stub: stub} do
+    invite = inbound_invite()
+    tp_pid = transport_pid()
+    :ok = Mockup.set_peer(tp_pid, Manual)
+    :ok = Mockup.attach_probe(tp_pid)
+
+    {instance, ref} = start_instance(module, stub, invite)
+    send(instance, {:INVITE, invite, self(), stub})
+
+    assert_receive {:replied, 100, "Trying", _req, _fields}, 5_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
+    Manual.simulate(tp_pid, 180, 100)
+    assert_receive {:replied, 180, _reason, _req, _fields}, 5_000
+
+    send(instance, {:dialog_terminated, stub, :timeout})
+
+    assert_receive {:sip_mockup, {:request_sent, :CANCEL, _}}, 5_000
+    assert_receive {:instance_done, {:aborted, _}}, 10_000
+    assert_receive {:DOWN, ^ref, :process, ^instance, _}, 5_000
+  end
+
   # ── The cancel race (RFC 3261 §16.7) ────────────────────────────────────────
 
   # Cancelling ASKS; it does not decide. The scenario used to end on the CANCEL,

@@ -77,6 +77,11 @@ defmodule SIP.Test.MsgOpsIdentity do
       assert Ops.asserted_username(req) == "dave"
     end
 
+    test "two values on one line, tel: first: the parser used to raise on that one" do
+      req = invite(%{"P-Asserted-Identity" => "tel:+33970260233, sip:dave@example.com"})
+      assert Ops.asserted_username(req) == "+33970260233"
+    end
+
     test "two occurrences arrive as a list" do
       req = invite(%{"P-Asserted-Identity" => ["tel:+33970260233", "sip:dave@example.com"]})
       assert Ops.asserted_username(req) == "+33970260233"
@@ -90,6 +95,75 @@ defmodule SIP.Test.MsgOpsIdentity do
     test "an unparsable value falls through to From rather than raising" do
       req = invite(%{"P-Asserted-Identity" => "junk", from: uri("sip:bob@example.com")})
       assert Ops.asserted_username(req) == "bob"
+    end
+  end
+
+  # What a B2BUA re-asserting an upstream's claim needs: the whole URI, not a
+  # name. The inbound header is always stripped on a forward (RFC 3325 §5), so
+  # the only way one leaves is a scenario reading it here, deciding the source is
+  # trusted, and handing it to SIP.Context.assert_identity/2.
+  describe "asserted_identity/1" do
+    test "the whole URI, display name included" do
+      req = invite(%{"P-Asserted-Identity" => "\"Alice\" <sip:+33970260233@example.com>"})
+
+      assert %SIP.Uri{
+               displayname: "Alice",
+               userpart: "+33970260233",
+               domain: "example.com"
+             } = Ops.asserted_identity(req)
+    end
+
+    test "the digest username does NOT win here, unlike asserted_username/1" do
+      req =
+        invite(%{
+          "P-Asserted-Identity" => "<sip:carol@example.com>",
+          authorization: %{"username" => "alice"}
+        })
+
+      assert %SIP.Uri{userpart: "carol"} = Ops.asserted_identity(req)
+      assert Ops.asserted_username(req) == "alice"
+    end
+
+    test "From is not a fallback: nothing was asserted" do
+      assert Ops.asserted_identity(invite(%{from: uri("sip:bob@example.com")})) == nil
+    end
+
+    test "the header name is matched case-insensitively" do
+      req = invite(%{"p-asserted-IDENTITY" => "sip:carol@example.com"})
+      assert %SIP.Uri{userpart: "carol"} = Ops.asserted_identity(req)
+    end
+
+    # RFC 3325 §9.1: one sip: and one tel:, on one line or on two.
+    test "of the two values on one line, the sip: one is taken, whichever comes first" do
+      sip_first = invite(%{"P-Asserted-Identity" => "sip:dave@example.com, tel:+33970260233"})
+      tel_first = invite(%{"P-Asserted-Identity" => "tel:+33970260233, sip:dave@example.com"})
+
+      assert %SIP.Uri{userpart: "dave", domain: "example.com"} = Ops.asserted_identity(sip_first)
+      assert %SIP.Uri{userpart: "dave", domain: "example.com"} = Ops.asserted_identity(tel_first)
+    end
+
+    test "two occurrences arrive as a list" do
+      req = invite(%{"P-Asserted-Identity" => ["tel:+33970260233", "sip:dave@example.com"]})
+      assert %SIP.Uri{userpart: "dave"} = Ops.asserted_identity(req)
+    end
+
+    # A tel: number cannot be asserted as a SIP URI without inventing a domain,
+    # so it is not asserted at all — where asserted_username/1 answers the number.
+    test "a tel:-only assertion yields nil" do
+      req = invite(%{"P-Asserted-Identity" => "<tel:+33970260233;phone-context=+33>"})
+      assert Ops.asserted_identity(req) == nil
+      assert Ops.asserted_username(req) == "+33970260233"
+    end
+
+    test "a comma inside a display name is not a value separator" do
+      req = invite(%{"P-Asserted-Identity" => "\"Dupont, Jean\" <sip:jean@example.com>"})
+
+      assert %SIP.Uri{displayname: "Dupont, Jean", userpart: "jean"} =
+               Ops.asserted_identity(req)
+    end
+
+    test "an unparsable value yields nil rather than raising" do
+      assert Ops.asserted_identity(invite(%{"P-Asserted-Identity" => "junk"})) == nil
     end
   end
 

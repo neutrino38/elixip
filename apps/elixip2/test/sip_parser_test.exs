@@ -23,6 +23,18 @@ defmodule SIP.Test.Uri do
 		assert code == :invalid_sip_uri_general
 	end
 
+  # A header value holding the two URIs RFC 3325 §9.1 allows, tel: first. The
+  # parser read `tel:+33970260233, ` as a display name and recursed on a tail
+  # with no closing bracket: it raised MatchError instead of refusing. Every
+  # reading of P-Asserted-Identity goes through here (SIP.Msg.Ops), and the
+  # monitor reads one on every request — so the raise took the instance with it.
+  test "Parse a value that is not a SIP URI and holds no closing bracket" do
+		for value <- ["tel:+33970260233, sip:dave@domain.fr", "tel:+33970260233 <sip:a@b.fr"] do
+			{ code, _parsed_uri } = SIP.Uri.parse(value)
+			assert code == :invalid_sip_uri_general, "#{value} was not refused"
+		end
+	end
+
   # A one-character user part is legal (RFC 3261 §19.1.1 user = 1*…) and routine:
   # short extensions, and test labs that dial "1". The parser used to require a
   # second character, and a URI that does not parse takes the whole message with it
@@ -334,17 +346,21 @@ end
 
 defmodule SIP.Test.Parser do
   use ExUnit.Case
+  require Logger
   doctest SIPMsg
+
+	# Parse error callback shared by the tests below. A failed parse is caught by
+	# the assertions; this only carries the detail, so it goes to the log rather
+	# than to the console, where it would sit in the middle of the suite's report.
+	defp log_parse_error(code, errmsg, lineno, line) do
+		Logger.warning("parse error #{inspect(code)}: #{errmsg} — line #{lineno}: #{line}")
+	end
 
   test "Load and parse a REGISTER message" do
     { code, msg } = File.read("test/SIP-REGISTER.txt")
 		assert code == :ok
 
-		{ code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
-			IO.puts("\n" <> errmsg)
-			IO.puts("Offending line #{lineno}: #{line}")
-			IO.puts("Error code #{code}")
-		end)
+		{ code, parsed_msg } = SIPMsg.parse(msg, &log_parse_error/4)
 
     assert code == :ok
 		assert parsed_msg.method == :REGISTER
@@ -360,11 +376,7 @@ defmodule SIP.Test.Parser do
     { code, msg } = File.read("test/SIP-REGISTER-LVP.txt")
 		assert code == :ok
 
-		{ code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
-			IO.puts("\n" <> errmsg)
-			IO.puts("Offending line #{lineno}: #{line}")
-			IO.puts("Error code #{code}")
-		end)
+		{ code, parsed_msg } = SIPMsg.parse(msg, &log_parse_error/4)
 
     assert code == :ok
 		assert parsed_msg.method == :REGISTER
@@ -449,11 +461,7 @@ defmodule SIP.Test.Parser do
   	{ code, msg } = File.read("test/SIP-INVITE-BASIC-AUDIO.txt")
 		assert code == :ok # Test if file containing the SIP message is loaded
 
-		{ code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
-			IO.puts("\n" <> errmsg)
-			IO.puts("Offending line #{lineno}: #{line}")
-			IO.puts("Error code #{code}")
-			end)
+		{ code, parsed_msg } = SIPMsg.parse(msg, &log_parse_error/4)
 
     assert code == :ok
 		assert parsed_msg.method == :INVITE
@@ -470,11 +478,7 @@ defmodule SIP.Test.Parser do
 	{ code, msg } = File.read("test/SIP-INVITE-LOST.txt")
   	assert code == :ok # Test if file containing the SIP message is loaded
 
-  	{ code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
-	  IO.puts("\n" <> errmsg)
-	  IO.puts("Offending line #{lineno}: #{line}")
-	  IO.puts("Error code #{code}")
-  	end)
+  	{ code, parsed_msg } = SIPMsg.parse(msg, &log_parse_error/4)
 
   	assert code == :ok
   	assert parsed_msg.method == :INVITE
@@ -488,11 +492,7 @@ defmodule SIP.Test.Parser do
 			{ code, msg } = File.read("test/SIP-INVITE-LVP.txt")
 			assert code == :ok # Test if file containing the SIP message is loaded
 
-			{ code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
-			IO.puts("\n" <> errmsg)
-			IO.puts("Offending line #{lineno}: #{line}")
-			IO.puts("Error code #{code}")
-			end)
+			{ code, parsed_msg } = SIPMsg.parse(msg, &log_parse_error/4)
 
 			assert code == :ok
 			assert parsed_msg.method == :INVITE
@@ -507,11 +507,7 @@ defmodule SIP.Test.Parser do
 			{ code, msg } = File.read("test/SIP-180-LVP.txt")
 			assert code == :ok # Test if file containing the SIP message is loaded
 
-			{ code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
-			IO.puts("\n" <> errmsg)
-			IO.puts("Offending line #{lineno}: #{line}")
-			IO.puts("Error code #{code}")
-			end)
+			{ code, parsed_msg } = SIPMsg.parse(msg, &log_parse_error/4)
 
 			assert code == :ok
 			assert parsed_msg.method == false
@@ -526,11 +522,7 @@ defmodule SIP.Test.Parser do
 			{ code, msg } = File.read("test/SIP-200-LVP.txt")
 			assert code == :ok # Test if file containing the SIP message is loaded
 
-			{ code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
-				IO.puts("\n" <> errmsg)
-				IO.puts("Offending line #{lineno}: #{line}")
-				IO.puts("Error code #{code}")
-			end)
+			{ code, parsed_msg } = SIPMsg.parse(msg, &log_parse_error/4)
 
 			assert code == :ok
 			assert parsed_msg.method == false
@@ -557,11 +549,7 @@ defmodule SIP.Test.Parser do
 				"Call-Id: 7793171530617\r\n" <>
 				"Server: Glassfish_SIP_2.0.0\r\n\r\n"
 
-			{ code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
-				IO.puts("\n" <> errmsg)
-				IO.puts("Offending line #{lineno}: #{line}")
-				IO.puts("Error code #{code}")
-			end)
+			{ code, parsed_msg } = SIPMsg.parse(msg, &log_parse_error/4)
 
 			assert code == :ok
 			assert parsed_msg.method == false
@@ -578,11 +566,7 @@ defmodule SIP.Test.Parser do
 			{ code, msg } = File.read("test/SIP-BYE-LVP.txt")
 			assert code == :ok # Test if file containing the SIP message is loaded
 
-			{ code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
-				IO.puts("\n" <> errmsg)
-				IO.puts("Offending line #{lineno}: #{line}")
-				IO.puts("Error code #{code}")
-			end)
+			{ code, parsed_msg } = SIPMsg.parse(msg, &log_parse_error/4)
 
 			assert code == :ok
 			assert parsed_msg.method == :BYE
@@ -591,11 +575,7 @@ defmodule SIP.Test.Parser do
 			msg2 = SIPMsg.serialize(parsed_msg)
 			# IO.puts("\n")
 			# IO.puts(msg2)
-			{ code, parsed_msg2 } = SIPMsg.parse(msg2, fn code, errmsg, lineno, line ->
-				IO.puts("\n" <> errmsg)
-				IO.puts("Offending line #{lineno}: #{line}")
-				IO.puts("Error code #{code}")
-			end)
+			{ code, parsed_msg2 } = SIPMsg.parse(msg2, &log_parse_error/4)
 
 			assert code == :ok
 			assert parsed_msg2.method == :BYE
@@ -617,10 +597,7 @@ defmodule SIP.Test.Parser do
 			"Content-Length: 0\r\n" <>
 			"\r\n"
 
-		SIPMsg.parse(msg, fn _code, errmsg, lineno, line ->
-			IO.puts("\n" <> errmsg)
-			IO.puts("Offending line #{lineno}: #{line}")
-		end)
+		SIPMsg.parse(msg, &log_parse_error/4)
 	end
 
 	test "Single Contact is parsed as a SIP.Uri struct, not a list" do
@@ -766,6 +743,47 @@ defmodule SIP.Test.Parser do
 		[c1, c2] = reparsed.contact
 		assert c1.domain == "192.168.1.1"
 		assert c2.domain == "10.0.0.1"
+	end
+
+	# A URI assembled field by field carries `port: nil` — the struct default —
+	# and only parse/1 ever filled the default in. A routing script writing
+	# `%SIP.Uri{userpart: u, domain: host}` then produced a destination with no
+	# port at all, which the transport refuses.
+	describe "target_port/1" do
+		test "the port the URI states wins" do
+			{:ok, uri} = SIP.Uri.parse("sip:bob@domain.fr:5070")
+			assert SIP.Uri.target_port(uri) == 5070
+		end
+
+		test "a URI built by hand still designates the default port" do
+			assert SIP.Uri.target_port(%SIP.Uri{userpart: "bob", domain: "domain.fr"}) == 5060
+		end
+
+		test "sips: defaults to 5061" do
+			assert SIP.Uri.target_port(%SIP.Uri{domain: "domain.fr", scheme: "sips:"}) == 5061
+		end
+
+		test "a parsed URI answers what parse/1 wrote into it" do
+			{:ok, plain} = SIP.Uri.parse("sip:bob@domain.fr")
+			{:ok, secure} = SIP.Uri.parse("sips:bob@domain.fr")
+			assert SIP.Uri.target_port(plain) == 5060
+			assert SIP.Uri.target_port(secure) == 5061
+		end
+	end
+
+	# `nil > 0` is true in Elixir: an atom sorts above every number. The check
+	# used to be that bare comparison, so a half-stamped URI passed for routed.
+	test "a URI stamped with an address but no port is not routing information" do
+		uri = %SIP.Uri{
+			domain: "domain.fr",
+			destip: {1, 2, 3, 4},
+			destport: nil,
+			tp_pid: self(),
+			tp_module: SIP.Transport.UDP
+		}
+
+		refute SIP.Uri.has_tp_info(uri)
+		assert SIP.Uri.has_tp_info(%SIP.Uri{uri | destport: 5060})
 	end
 
 end

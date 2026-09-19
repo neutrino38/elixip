@@ -1,6 +1,4 @@
 
-IO.puts("Répertoire de travail : #{File.cwd!()}")
-
 defmodule SIP.Test.Transact do
   use ExUnit.Case
   require SIP.Transac

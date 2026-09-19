@@ -218,7 +218,7 @@ defmodule SIP.Test.B2bua.SerialFork do
 
     assert %Leg{untried: []} = B2bua.outbound_leg(ctx)
 
-    ctx = relay_final(ctx, 486)
+    _ctx = relay_final(ctx, 486)
     assert_receive {:replied, 486, _reason, _req, _fields}, 2_000
     refute_receive {:sip_mockup, {:request_sent, :INVITE, _second}}, 300
   end
@@ -340,7 +340,7 @@ defmodule SIP.Test.B2bua.SerialFork do
       ctx = B2bua.do_cancel_forward(ctx)
       assert [{_tid, %Pending{}}] = B2bua.pending(ctx)
 
-      ctx = B2bua.release_legs(ctx)
+      _ctx = B2bua.release_legs(ctx)
       assert_receive {:replied, 487, "Request Terminated", _req, _}, 2_000
     end
 

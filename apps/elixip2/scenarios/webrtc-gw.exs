@@ -62,29 +62,61 @@ defmodule B2BUA.WebrtcGw do
         # browser with, and the outbound INVITE has no body to carry.
         media_connect()
 
-        b2bua_forward(req, b2bua_resolved_peer(), @media)
-
-        cond do
-          ctx_get(:lasterr) == :ok ->
-            goto(proceeding, "INVITE relayed")
-
-          # No media plane: media_connect() found no server, or the one it found
-          # is gone. Ours, not the browser's — a 503, which also leaves the proxy
-          # in front free to try another gateway.
-          b2bua_media_unavailable?() ->
+        # Do not ring a phone for a call we cannot carry. Both legs terminate
+        # their media here, so with no media server there is no offer to place
+        # and nothing to answer the browser with — the same verdict record.exs
+        # reads at the same spot, refused before the call goes anywhere.
+        #
+        # The refusal is SENT here rather than in the state it leads to: `goto`
+        # aborts the scenario outright while `lasterr` is set, and `b2bua_reply`
+        # is what puts it back to `:ok`. A reply deferred to the next state is a
+        # reply the browser never gets.
+        case ctx_get(:lasterr) do
+          {:error, :no_media_server} = err ->
             b2bua_reply(req, 503, "Service Unavailable")
-            scenario_failure("no media server: #{inspect(ctx_get(:lasterr))}")
+            goto(no_media_server, "no media server: #{inspect(err)}")
 
-          true ->
-            # The offer could not be terminated (no common codec, a WebRTC offer
-            # we were told not to take). That is a statement about what the caller
-            # asked for, so it is a 488 — not a 500, which would blame us.
-            b2bua_reply(req, 488, "Not Acceptable Here")
-            scenario_failure("media setup failed: #{inspect(ctx_get(:lasterr))}")
+          _ ->
+            b2bua_forward(req, b2bua_resolved_peer(), @media)
+
+            cond do
+              ctx_get(:lasterr) == :ok ->
+                goto(proceeding, "INVITE relayed")
+
+              # The media plane went away between the connection and the offer.
+              b2bua_media_unavailable?() ->
+                reason = ctx_get(:lasterr)
+                b2bua_reply(req, 503, "Service Unavailable")
+                goto(no_media_server, "media plane gone: #{inspect(reason)}")
+
+              true ->
+                # The offer could not be terminated (no common codec, a WebRTC
+                # offer we were told not to take). That is a statement about what
+                # the caller asked for, so it is a 488 — not a 500, which would
+                # blame us.
+                reason = ctx_get(:lasterr)
+                b2bua_reply(req, 488, "Not Acceptable Here")
+                scenario_failure("media setup failed: #{inspect(reason)}")
+            end
         end
     after
       60_000 -> scenario_failure("no INVITE received")
     end
+  end
+
+  # No media plane to be had — the pool looked and found none, or the one it had
+  # went away while the offer was being placed. Ours, not the browser's, which is
+  # why the `503` above says so: it leaves the proxy in front free to try another
+  # gateway, where a `488` would blame an offer that was fine.
+  #
+  # A state of its own rather than two more lines in each branch, for the reason
+  # record.exs gives: both ways of losing the media plane end the same way, and
+  # the end includes releasing what the browser leg may already have allocated —
+  # `media_cleanup_ressources` is nil-safe, so the branch that never connected
+  # anything passes through it unchanged.
+  state no_media_server do
+    media_cleanup_ressources()
+    scenario_failure("no media server available")
   end
 
   state proceeding do
@@ -136,6 +168,13 @@ defmodule B2BUA.WebrtcGw do
       {:ms_event, _ref, :server_disconnected} ->
         b2bua_reply(last_uas_req(), 500, "Media Server Unavailable")
         goto(releasing, "media server gone before answer")
+
+      # The browser's leg is over without the browser having said so: its
+      # transaction ended under us and the stack answered a final on our behalf.
+      # Nobody is left to ring for, so stop the phone that still is.
+      {:dialog_terminated, _dlg, reason} ->
+        b2bua_cancel_forward()
+        goto(releasing, "caller gone: #{inspect(reason)}")
     after
       180_000 ->
         b2bua_reply(last_uas_req(), 408, "Request Timeout")

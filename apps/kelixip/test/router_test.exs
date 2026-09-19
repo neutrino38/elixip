@@ -1,6 +1,8 @@
 defmodule Kelix.RouterTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias Kelix.{Router, Domains}
 
   # example.com: registrar + presence (no calls)
@@ -57,6 +59,25 @@ defmodule Kelix.RouterTest do
     test "falls back to the To host when the R-URI has none", %{snap: snap} do
       r = %{method: :REGISTER, ruri: %SIP.Uri{userpart: "a", domain: nil}, to: %SIP.Uri{domain: "example.com"}}
       assert {:route, %{function: :registrar}} = Router.resolve(snap, r)
+    end
+
+    test "a wildcard alias routes a subdomain to its domain and its script" do
+      toml = """
+      [[domain]]
+      name = "gw.out"
+      aliases = ["*.gw.out"]
+
+      [[domain.call]]
+      default = true
+      script  = "gateway.exs"
+      """
+
+      {:ok, snap} = Domains.parse(toml)
+
+      assert {:route, %{domain: %{name: "gw.out"}, script: "gateway.exs"}} =
+               Router.resolve(snap, req(:INVITE, "0612345678", "sbc.eu.gw.out"))
+
+      assert {:reject, 404, _} = Router.resolve(snap, req(:INVITE, "0612345678", "notgw.out"))
     end
   end
 
@@ -161,5 +182,43 @@ defmodule Kelix.RouterTest do
     {:ok, snap} = Domains.parse(toml)
     assert {:reject, 404, _} = Router.resolve(snap, req(:INVITE, "1234", "d.com"))
     assert {:route, %{script: "s.exs"}} = Router.resolve(snap, req(:INVITE, "911", "d.com"))
+  end
+
+  # Why a request was refused, for whoever reads the node's log rather than a
+  # capture. Each line must name the request AND the domains.toml block that is
+  # missing: a bare "404" sends the operator back to reading the TOML by hand.
+  describe "reject logs" do
+    test "unknown domain names the domain and the file", %{snap: snap} do
+      log = capture_log(fn -> Router.resolve(snap, req(:INVITE, "bob", "nope.net")) end)
+
+      assert log =~ "INVITE sip:bob@nope.net rejected"
+      assert log =~ "domain nope.net not declared in domains.toml"
+    end
+
+    test "REGISTER on a domain with no registrar block" do
+      toml = ~s([[domain]]\nname = "d.com"\n[[domain.call]]\npattern = "9XX"\nscript = "s.exs")
+      {:ok, no_reg} = Domains.parse(toml)
+
+      log = capture_log(fn -> Router.resolve(no_reg, req(:REGISTER, "alice", "d.com")) end)
+
+      assert log =~ "REGISTER sip:alice@d.com rejected"
+      assert log =~ "registrar not configured in domains.toml for domain d.com"
+    end
+
+    test "INVITE on a domain with no call rule at all", %{snap: snap} do
+      log = capture_log(fn -> Router.resolve(snap, req(:INVITE, "1234", "example.com")) end)
+
+      assert log =~ "INVITE sip:1234@example.com rejected"
+      assert log =~ "no call rule declared in domains.toml for domain example.com"
+    end
+
+    test "INVITE matching no dial-plan rule names the destination and the domain" do
+      toml = ~s([[domain]]\nname = "d.com"\n[[domain.call]]\npattern = "9XX"\nscript = "s.exs")
+      {:ok, snap} = Domains.parse(toml)
+
+      log = capture_log(fn -> Router.resolve(snap, req(:INVITE, "1234", "d.com")) end)
+
+      assert log =~ "destination sip:1234@d.com does not match any call rule declared in domain d.com"
+    end
   end
 end

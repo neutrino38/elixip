@@ -675,6 +675,52 @@ defmodule SIP.Test.B2bua.Session do
 
       B2bua.release_legs(ctx)
     end
+
+    # The same verdict, one exchange earlier. A bridge that cannot be built will
+    # not build on the 2xx either, so relaying the provisional would buy the
+    # caller a few seconds of a call that can never carry anything — and hide the
+    # cause behind a failure that looks like the callee's.
+    test "an early answer the media server cannot bridge cancels the attempt", %{ctx: ctx} do
+      tp_pid = arm_media_peer!()
+
+      mode =
+        {:mediaserver,
+         inbound: [webrtc: :no, media: :audio],
+         outbound: [webrtc: :no, media: :audio],
+         transcode: [audio: :avoid, video: :avoid],
+         early_media: true}
+
+      ctx = B2bua.do_create_leg(ctx, inbound_invite(), media_peer(), mode)
+      leg = B2bua.outbound_leg(ctx)
+      dlg = leg.dialogpid
+      assert_receive {:sip_mockup, {:request_sent, :INVITE, _fwd}}, 5_000
+
+      # What the server answered on a real call: both text streams joined, then
+      # a refusal on the RTP property that goes with the attach (2026-09-16).
+      MediaServer.Mockup.fail_bridge(
+        SIP.Session.Media.peer_connection(ctx, :inbound),
+        {:attach_failed, :text, {:jsr309_error, "Error\n"}}
+      )
+
+      Manual.simulate(tp_pid, 183, 100)
+      assert_receive {:outbound, {183, resp, tid, ^dlg}}, 5_000
+      assert is_binary(SIP.Session.extract_sdp(resp))
+
+      B2bua.note_event({:outbound, {183, resp, tid, self()}})
+      ctx = B2bua.do_relay_reply(ctx, resp)
+
+      # Nothing crossed towards the caller: not the callee's SDP, and not a
+      # body-less 183 either.
+      refute_receive {:replied, 183, _reason, _req, _fields}, 500
+
+      # The attempt is abandoned instead. Its 487 is what the caller will get,
+      # by the ordinary path — or the next target's answer, on a hunt.
+      assert_receive {:sip_mockup, {:request_sent, :CANCEL, _}}, 5_000
+
+      assert %{bridged: false, error: {:attach_failed, :text, _}} = B2bua.media_plan(ctx)
+
+      B2bua.release_legs(ctx)
+    end
   end
 
   # ── Calling a registered UA: the flow, not a fresh resolution ───────────────
