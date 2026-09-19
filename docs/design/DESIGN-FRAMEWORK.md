@@ -294,8 +294,14 @@ each one is a bug it would otherwise be:
    is idempotent, so it is not re-taken on the 2xx;
 2. `call_answered/1` is **not** called: nobody has picked up, and arming an RTP
    watchdog on a ringing leg reaps the calls that ring longest (§6.7);
-3. any failure — no SDP, a media server that refuses, a bridge that cannot be
-   built — falls back to the default. Early media must never cost the call.
+3. an absence and a failure are told apart. A `18x` with no SDP is an absence:
+   the provisional is relayed stripped, as by default. A media server that
+   refuses the early description, or a bridge that cannot be built, is this
+   call's media path — the branch in flight is CANCELled and nothing is
+   relayed, because the 2xx would break on the same failure one exchange later
+   (`media_answer_failed/4`). The 487 travels the ordinary path, so a serial
+   hunt moves to the next target and the caller gets a final response either
+   way.
 
 ### 5.8 Offer profiles
 
