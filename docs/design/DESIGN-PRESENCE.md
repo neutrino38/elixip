@@ -4,6 +4,9 @@ Registration state, published state, consent, and the composite state a
 subscriber presents to the others. Instant messaging is its neighbour and lives
 in [DESIGN-CHAT.md](DESIGN-CHAT.md), which also holds the Silo.
 
+The order this gets built in — the scope of *basic* presence, the phases, and what
+each one proves — is [presence-basic-plan.md](presence-basic-plan.md).
+
 ## Objectives
 
 Implement RFC 3856 and use it creatively, as follows.
@@ -341,6 +344,80 @@ published states surviving a restart. Undecided.
 
 It handles SUBSCRIBE and PUBLISH, and sends the NOTIFYs.
 
+## The data model is kamailio's
+
+```sql
+-- kamailio 6.1, utils/kamctl/postgres/presence-create.sql (byte-identical on master).
+-- The two tables presence reads and writes; the rest of that file is not ours.
+presentity      (username, domain, event, etag, expires, received_time, body,
+                 sender, priority, ruid)
+active_watchers (presentity_uri, watcher_username, watcher_domain, to_user, to_domain,
+                 event, event_id, to_tag, from_tag, callid, local_cseq, remote_cseq,
+                 contact, record_route, expires, status, reason, version, socket_info,
+                 local_contact, from_user, from_domain, updated, updated_winfo,
+                 flags, user_agent)
+```
+
+The goal is one thing: **kelixip is able to use kamailio's database format**. It
+does not own the schema — kamailio does — and it does not claim to use the base
+the way kamailio uses it. It reads and writes `presentity` (the published document
+per resource: PUBLISH's body, its entity-tag and its lifetime) and
+`active_watchers` (one live subscription: what `%SIP.Subscription{}` carries, plus
+the dialog carrying it), and it touches nothing else in that database.
+
+`watchers`, `xcap` and `pua` are **not part of this**. A kamailio base has them
+and they stay exactly as they are: kelixip neither reads, writes, creates nor
+migrates them. `watchers` is the consent decision, which arrives with
+`presence.winfo` and not before — until then the authorisation policy is a config
+key, and inventing rows in a table we do not use would be writing state nobody
+reads. `xcap` belongs to the buddy list (RLS), and `pua` is kamailio's own client
+side, whose counterpart here is the watcher scenario, not a row.
+
+### Three columns that decide the shape of our own records
+
+- **`expires` is an absolute epoch second**, not a remaining lifetime: kamailio
+  writes `expires + time(NULL)` and reads back `expires - time(NULL)`
+  (`presence/subscribe.c`, `presence/presentity.c`), and `received_time` is the
+  same. Our records hold those absolute values, so nothing converts between the
+  struct and the row — a conversion in the middle is where the sign error lives.
+- **`status` is kamailio's enum**, not ours: 1 active, 2 pending (the column's
+  default), 3 terminated, 4 waiting, 5 polite-block (`presence/subscribe.h`).
+  `:pending | :active | :terminated` maps onto it, and the integer is what is
+  stored.
+- **`event` is the package name as a string** (`presence`, `presence.winfo`,
+  `dialog`) with `event_id` beside it — exactly the `{package, id}` pair the
+  subscription key already carries, and `UNIQUE (callid, to_tag, from_tag)` is
+  that key's other half.
+
+### What compatibility means here — and what it does not
+
+**The format, not the usage.** What is promised is that the rows are kamailio's
+rows: those two tables, those columns, those value conventions — `expires`
+absolute, `status` as the enum above, `event` as the package name. An existing
+kamailio presence base is therefore usable as it stands, and what kelixip writes
+into it stays readable by the tooling an operator already has. On opening a base,
+`version` is checked for the table versions we know (`presentity` 5,
+`active_watchers` 12) and an unknown one is refused; no DDL of ours ever runs
+against it.
+
+**Using the base the way kamailio does is not promised**, and is not a goal. Its
+query patterns, its DB_ONLY and DB_FALLBACK modes, its cluster bookkeeping
+(`updated`, `updated_winfo`, `flags`) and the timing of its refreshes and sweeps
+are its own; kelixip fills those columns with the defaults the schema states and
+treats them as opaque. The direct consequence, stated rather than left to be
+discovered: **the two servers working on one base at the same time is not a
+supported configuration**, and nothing here is designed to make it one.
+
+Reading a row correctly and acting on a row another server is also acting on are
+two different claims. Only the first is made.
+
+### What this does not import
+
+kamailio's **module split** is not ours. `presence`, `presence_xml`, `pua`, `rls`
+and `xcap_server` are five modules because the C side needs them to be; here the
+document format is an `SIP.EventPackage` implementation and the store is one
+module. The tables are shared, the decomposition is not.
+
 # Test terminals
 
 - Linphone as the first reference
@@ -357,6 +434,13 @@ The specifications this document builds on, and what each one settles.
 | [6665](https://www.rfc-editor.org/rfc/rfc6665) | SIP-Specific Event Notification | The subscription layer. **Obsoletes RFC 3265** — read 6665, not 3265: the dialog is created by the 2xx to the SUBSCRIBE and no longer by the NOTIFY, and `202 Accepted` is deprecated |
 | [3261](https://www.rfc-editor.org/rfc/rfc3261) | SIP | §12 dialogs, §20 headers, the transaction machines |
 | [3903](https://www.rfc-editor.org/rfc/rfc3903) | Event State Publication (PUBLISH) | The publish half: `SIP-If-Match`, the entity-tag lifecycle, refresh and remove |
+
+### The data model
+
+| Source | What it settles |
+|---|---|
+| [kamailio `presence-create.sql`](https://github.com/kamailio/kamailio/blob/6.1/utils/kamctl/postgres/presence-create.sql) | `presentity` and `active_watchers` — the two tables the presence store reads and writes, with their columns and constraints (6.1, identical on master) |
+| `presence/subscribe.h`, `presence/subscribe.c`, `presence/presentity.c` | what the columns actually carry: the `status` enum, and `expires` as an absolute epoch second |
 
 ### Presence itself
 
