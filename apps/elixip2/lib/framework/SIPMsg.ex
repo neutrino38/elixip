@@ -78,6 +78,13 @@ defmodule SIPMsg do
 			"expires" -> :expires
 			"contact" -> :contact
 			"supported" -> :supported
+			# Event notification (RFC 6665 §8.2) and publication (RFC 3903 §11).
+			# SIP.Msg.Ops holds the single reading of each of them.
+			"event" -> :event
+			"accept" -> :accept
+			"subscription-state" -> :subscriptionstate
+			"sip-if-match" -> :sipifmatch
+			"allow-events" -> :allowevents
 			_ -> name
 		end
 	end
@@ -89,7 +96,9 @@ defmodule SIPMsg do
 		proxyauthenticate: "Proxy-Authenticate", wwwauthenticate: "WWW-Authenticate",
 		authorization: "Authorization",
 		expires: "Expires",
-		supported: "Supported" }
+		supported: "Supported",
+		event: "Event", accept: "Accept", subscriptionstate: "Subscription-State",
+		sipifmatch: "SIP-If-Match", allowevents: "Allow-Events" }
 
 	# Auth parameters that are bare tokens, never quoted strings (RFC 3261 ABNF /
 	# RFC 7616 §3.3-3.4). Quoting them is not cosmetic: a strict UA rejects

@@ -72,12 +72,13 @@ defmodule SIP.Msg.Ops do
   @doc """
   The `Expires` header as an integer, or `nil` when absent (or unparseable).
 
-  The parser already yields an integer; a binary is accepted too, because a message
-  built by hand (templates, tests, a scenario) carries the header as text.
+  The parser already yields an integer under the `:expires` key; a message built by
+  hand (templates, tests, a scenario) carries the header name as a string key and
+  its value as text, and both are read here.
   """
   @spec expires_header(map()) :: non_neg_integer() | nil
   def expires_header(msg) do
-    case Map.get(msg, :expires) do
+    case first_header_value(msg, :expires, "expires") do
       exp when is_integer(exp) and exp >= 0 -> exp
       exp when is_binary(exp) -> parse_expires(exp, nil)
       _ -> nil
@@ -164,6 +165,224 @@ defmodule SIP.Msg.Ops do
   end
 
   defp parse_expires(_value, fallback), do: fallback
+
+  # ── Event notification headers (RFC 6665 §8.2, RFC 3903 §11) ────────────────
+  #
+  # THE one place that answers what a SUBSCRIBE, a NOTIFY or a PUBLISH says about
+  # its event package, the bodies it accepts, the lifetime it asks for and the
+  # state of its subscription — the same rule as the sections above (CLAUDE.md,
+  # *Message Layer*). The subscription layer, the event packages, the presence
+  # module and the Router all layer their policy on these readings; none of them
+  # re-reads a header.
+  #
+  # Every reading here takes both message shapes. A parsed message carries the
+  # atom key `SIPMsg` assigns (`:event`, `:accept`, `:subscriptionstate`…); a
+  # message built by hand — a template, a test, a scenario — carries the header
+  # name as a string key, in whatever case its author typed, and header names are
+  # case-insensitive (RFC 3261 §7.3.1). A malformed value read off the network
+  # reads as "absent", it never raises: the rule `parse_expires/2` already
+  # encodes.
+
+  @doc """
+  The event package a request names, as `{package, id}`, or `nil` when it carries
+  no usable `Event` header.
+
+  The package name is case-insensitive (RFC 6665 §8.2.1) and comes back folded to
+  lower case, which is the form `SIP.EventPackage` is keyed on. The `id`
+  parameter is **not** case-insensitive and comes back verbatim, `nil` when the
+  header carries none.
+
+      iex> SIP.Msg.Ops.event_package(%{"Event" => "PRESENCE;id=Ab12"})
+      {"presence", "Ab12"}
+  """
+  @spec event_package(map()) :: {binary(), binary() | nil} | nil
+  def event_package(msg) when is_map(msg) do
+    with value when is_binary(value) <- first_header_value(msg, :event, "event"),
+         {name, params} when name != "" <- split_params(value) do
+      {String.downcase(name), presence(Map.get(params, "id"))}
+    else
+      _no_event_header -> nil
+    end
+  end
+
+  @doc """
+  The content types a SUBSCRIBE says it accepts, in the order it listed them,
+  folded to lower case.
+
+  `[]` means the request carried **no** `Accept` header, which RFC 6665 §4.4.5
+  reads as "the default type of the event package" — not as "nothing is
+  acceptable". Turning that empty list into the package's own default is the
+  notifier's business, not the message's.
+
+  `Accept` is a comma-separated list that may also be spread over several header
+  lines, and each entry may carry parameters (`;q=0.8`): the media range alone is
+  returned, in the order sent. The client's `q` is dropped on purpose — the
+  notifier picks from `content_types/0`, which is already in the *package's*
+  preference order.
+  """
+  @spec accepted_content_types(map()) :: [binary()]
+  def accepted_content_types(msg) when is_map(msg) do
+    msg
+    |> header_list(:accept, "accept")
+    |> Enum.flat_map(&String.split(&1, ","))
+    |> Enum.map(fn entry ->
+      entry |> split_params() |> elem(0) |> String.downcase()
+    end)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+  end
+
+  @doc """
+  The lifetime a SUBSCRIBE asks for: its `Expires` header, else `package_default`.
+
+  A **second** expiry reading, and deliberately not `requested_expires/2`: a
+  SUBSCRIBE carries no Contact `expires` parameter, the default it falls back on
+  belongs to the event package (RFC 6665 §4.4.1) and not to RFC 3261 §20.19, and
+  the notifier may grant less than what is asked. Same rule, different rules.
+
+  `Expires: 0` is a lifetime, not an absence: it is how a watcher un-subscribes
+  (RFC 6665 §4.4.4), so it comes back as `0` and never as the default.
+  """
+  @spec subscription_expires(map(), non_neg_integer()) :: non_neg_integer()
+  def subscription_expires(msg, package_default) when is_map(msg) do
+    expires_header(msg) || package_default
+  end
+
+  @doc """
+  The `Subscription-State` of a NOTIFY (RFC 6665 §8.2.3), as `{state, params}`,
+  or `nil` when the message carries no such header.
+
+  The state is `:active`, `:pending` or `:terminated`; an extension value nobody
+  here knows comes back as the lower-cased binary rather than as a new atom — a
+  value off the network never grows the atom table.
+
+  Parameter names are folded to lower case and their values kept verbatim, so
+  `reason` stays a string whether or not it is one of the seven of §8.2.3.
+  `expires` and `retry-after` are the two the layer acts on, so they are returned
+  as integers, and a malformed one is dropped rather than handed on as junk.
+
+      iex> SIP.Msg.Ops.subscription_state(%{"Subscription-State" => "active;expires=3600"})
+      {:active, %{"expires" => 3600}}
+  """
+  @spec subscription_state(map()) ::
+          {:active | :pending | :terminated | binary(), map()} | nil
+  def subscription_state(msg) when is_map(msg) do
+    with value when is_binary(value) <-
+           first_header_value(msg, :subscriptionstate, "subscription-state"),
+         {state, params} when state != "" <- split_params(value) do
+      {substate_value(state), numeric_params(params, ["expires", "retry-after"])}
+    else
+      _no_subscription_state -> nil
+    end
+  end
+
+  @doc """
+  The entity-tag a PUBLISH refreshes or removes — its `SIP-If-Match` header (RFC
+  3903 §11.3.2) — or `nil` when it carries none, which makes it an initial
+  publication.
+
+  The tag is opaque and case-sensitive: it comes back exactly as the publisher
+  wrote it, whitespace aside.
+  """
+  @spec publish_etag(map()) :: binary() | nil
+  def publish_etag(msg) when is_map(msg) do
+    case first_header_value(msg, :sipifmatch, "sip-if-match") do
+      value when is_binary(value) -> presence(String.trim(value))
+      _no_tag -> nil
+    end
+  end
+
+  @doc """
+  The value of an `Allow-Events` header (RFC 6665 §8.2.2) built from a list of
+  package names.
+
+  It is composed from what the **domain** enables, never from what the node has
+  compiled in (docs/design/presence-basic-plan.md, decision 3), so the caller
+  passes the names and this only writes them out.
+  """
+  @spec allow_events([binary()]) :: binary()
+  def allow_events(names) when is_list(names) do
+    names
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+    |> Enum.join(", ")
+  end
+
+  defp substate_value(value) do
+    case String.downcase(value) do
+      "active" -> :active
+      "pending" -> :pending
+      "terminated" -> :terminated
+      extension -> extension
+    end
+  end
+
+  # `name;p1=v1;p2` -> {"name", %{"p1" => "v1", "p2" => ""}}. A valueless
+  # parameter is kept as an empty value, which every reading above treats as
+  # "said nothing" — the shape `;expires` with no value arrives as.
+  defp split_params(value) when is_binary(value) do
+    [head | rest] = String.split(value, ";")
+
+    params =
+      Enum.reduce(rest, %{}, fn part, acc ->
+        case String.split(part, "=", parts: 2) do
+          [name, param_value] ->
+            put_param(acc, name, strip_quotes(param_value))
+
+          [name] ->
+            put_param(acc, name, "")
+        end
+      end)
+
+    {String.trim(head), params}
+  end
+
+  defp put_param(params, name, value) do
+    case String.downcase(String.trim(name)) do
+      "" -> params
+      name -> Map.put(params, name, value)
+    end
+  end
+
+  defp strip_quotes(value) do
+    case String.trim(value) do
+      "\"" <> _ = quoted -> String.trim(quoted, "\"")
+      plain -> plain
+    end
+  end
+
+  # The listed parameters as integers; one that does not parse is dropped, so a
+  # caller reading params["expires"] gets a number or nothing, never junk.
+  defp numeric_params(params, names) do
+    Enum.reduce(names, params, fn name, acc ->
+      case Map.fetch(acc, name) do
+        :error -> acc
+        {:ok, value} -> put_numeric_param(acc, name, parse_expires(value, nil))
+      end
+    end)
+  end
+
+  defp put_numeric_param(params, name, nil), do: Map.delete(params, name)
+  defp put_numeric_param(params, name, number), do: Map.put(params, name, number)
+
+  # A header by both of its keys: the atom SIPMsg gives a parsed message, and the
+  # name a hand-built one carries as a string key, case-insensitively. A header
+  # repeated on several lines arrives as a list — the first value wins for the
+  # single-valued ones, and `header_list/3` keeps them all for the others.
+  defp first_header_value(msg, atom_key, lowercase_name) do
+    case header_list(msg, atom_key, lowercase_name) do
+      [value | _] -> value
+      [] -> nil
+    end
+  end
+
+  defp header_list(msg, atom_key, lowercase_name) do
+    case Map.get(msg, atom_key) do
+      nil -> header_values(msg, lowercase_name)
+      value -> List.wrap(value)
+    end
+  end
 
   # ── Who a request says it is from (RFC 3261 §8.1.1.3, RFC 3325 §9) ───────────
   #
