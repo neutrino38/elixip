@@ -39,6 +39,9 @@ defmodule SIP.FSL.Host do
     # One server secret for the node's lifetime, keying every digest nonce
     # (SIP.Auth.Nonce). kelixip supervises it instead; here it belongs to the run.
     :ok = SIP.Auth.Secret.start()
+    # The event packages this library provides, so a SUBSCRIBE for one of them is
+    # not answered 489 by a run that never named a package (SIP.EventPackage).
+    :ok = SIP.EventPackage.register_builtins()
     :ok
   end
 

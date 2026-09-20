@@ -70,7 +70,14 @@ defmodule SIPParser.MixProject do
       # XML-RPC encode/decode for the Mendooze JSR309 control interface.
       # 1.5 is the first release accepting decimal ~> 3.0, which is required to
       # get away from the vulnerable decimal 2.x (EEF-CVE-2026-32686).
-      {:xmlrpc, "~> 1.5"}
+      {:xmlrpc, "~> 1.5"},
+      # The XML parser, for PIDF (SIP.Presence.Pidf). Already in the tree as a
+      # dependency of :xmlrpc, which parses untrusted input with it for the same
+      # reason we do: it resolves nothing external — no file, no URL, whatever a
+      # SYSTEM identifier says — and bounds entity nesting and expansion. Declared
+      # here rather than used transitively, since a body off the network is parsed
+      # with it on a path that has nothing to do with XML-RPC.
+      {:erlsom, "~> 1.5"}
       # NB: owl (terminal UI) moved to apps/elixipp — it is only used by the
       # elixipp escript's --monitor view, not by the shared stack.
     ]

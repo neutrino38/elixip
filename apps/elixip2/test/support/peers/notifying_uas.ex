@@ -20,6 +20,9 @@ defmodule SIP.Test.Peers.NotifyingUAS do
       established on one side only;
     * `event` — the package name it writes in `Event` (default `"dummy"`);
     * `body` — what the first NOTIFY carries (default `"open"`);
+    * `content_type` — the type that body is (default `"text/plain"`). A peer
+      notifying a watcher of a package whose document is XML says so, or the
+      watcher's package refuses to read what it sent;
     * `reply_delay` / `notify_delay` — in ms.
 
   Driven at runtime with `Mockup.tell_peer/2`: `{:notify, body}` for one more
@@ -58,6 +61,7 @@ defmodule SIP.Test.Peers.NotifyingUAS do
         notify_delay: 60,
         event: "dummy",
         body: "open",
+        content_type: "text/plain",
         granted: nil,
         notify_first: false,
         sub: nil,
@@ -159,7 +163,7 @@ defmodule SIP.Test.Peers.NotifyingUAS do
         via: ["SIP/2.0/UDP 82.184.8.2:53936;branch=#{branch}"],
         contentlength: 0
       }
-      |> put_body(body)
+      |> put_body(body, state.content_type)
 
     {{:inject, req, after_ms}, %{state | cseq: cseq}}
   end
@@ -170,12 +174,12 @@ defmodule SIP.Test.Peers.NotifyingUAS do
   defp substate_value({:terminated, reason}, _expires),
     do: SIP.Msg.Ops.subscription_state_value(:terminated, reason: reason)
 
-  defp put_body(req, nil), do: req
+  defp put_body(req, nil, _content_type), do: req
 
-  defp put_body(req, body) do
+  defp put_body(req, body, content_type) do
     req
     |> SIP.Msg.Ops.update_sip_msg({:body, body})
-    |> Map.put(:contenttype, "text/plain")
+    |> Map.put(:contenttype, content_type)
   end
 
   # The SUBSCRIBE this peer put aside is the parsed form of what it received, and

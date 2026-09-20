@@ -1,6 +1,6 @@
 # presence-basic-plan.md — building basic presence
 
-**Status: P1, P2 and P3 are implemented; P4 onwards is plan.** The design is
+**Status: P1 through P4 are implemented; P5 onwards is plan.** The design is
 [DESIGN-PRESENCE.md](DESIGN-PRESENCE.md); this document is the order it gets built
 in, what each phase delivers, and what proves it.
 
@@ -241,11 +241,10 @@ and `activity` a real client sends), `SIP.Presence.Pidf`, and
 `SIP.EventPackage.Presence` over them — `default_expires 3600`,
 `content_types ["application/pidf+xml"]`.
 
-The body comes off the network and is untrusted. Parsing goes through OTP's
-`:xmerl_scan` with external entity fetching disabled and a bound on the body size;
-the exact option set is verified against the OTP 26 xmerl surface when this phase
-is written, since entity expansion — not the XML — is the risk. `:xmerl` joins the
-release's applications.
+The body comes off the network and is untrusted. Entity expansion — not the XML —
+is the risk, so the parsing is bounded (a body over 64 kB is refused unread) and a
+`<!DOCTYPE` in the prolog is refused outright: a PIDF document has no use for a
+DTD, and every entity attack needs one.
 
 **Tests** round-trip on documents captured from Linphone, stored as
 `test/PIDF-*.xml` beside the existing `SIP-*.txt`; a document carrying an unknown
@@ -255,6 +254,35 @@ oversized body.
 **Done when** P3's suite passes again with `SIP.EventPackage.Presence` substituted
 for the dummy package. That substitution is the proof the behaviour is a
 behaviour.
+
+**Delivered 2026-09-20.** Three things settled differently from the paragraphs
+above:
+
+- **the parser is `:erlsom`, not `:xmerl`.** It was already in the tree — `:xmlrpc`
+  pulls it, and parses untrusted input with it for the same reason — it resolves
+  nothing external whatever a `SYSTEM` identifier says, and it bounds entity
+  nesting and expanded size on its own. `:xmerl`'s equivalent is an option set to
+  get right per OTP release, which is one more thing to verify at every upgrade;
+  it is declared explicitly in `apps/elixip2/mix.exs` rather than used
+  transitively.
+- **the RPID facet lands on the person, not in the tuple.** A presentity has one
+  activity and N devices, which is where PIDF puts them and what a `<dm:person>`
+  says; folding the activity into each tuple would have made the document unable
+  to say which of two devices is the open one. `activity` is an **atom** for the
+  values RFC 4480 names and the **raw string** for anything else — a document is
+  unauthenticated input, and the atom table does not grow with what a stranger
+  publishes.
+- **the substitution is one suite run twice**, `test/support/subscription_suite.ex`
+  parameterised by `SIP.Test.SubscriptionTraits` — six answers wide: the package,
+  a document, how to read one back, an unusable content type, a lifetime it accepts
+  and one it refuses. Two files asserting the same things in their own words would
+  drift apart at the first fix applied to one of them, and the proof is only worth
+  anything while the two runs are the same run.
+
+`SIP.EventPackage.register_builtins/0` is what puts the package in the table, from
+`SIP.FSL.Host.bootstrap/0` and from `Kelix.Application`. A run that never named a
+package would otherwise answer 489 to a SUBSCRIBE for the one package this
+release is about.
 
 ### P5 — PUBLISH
 

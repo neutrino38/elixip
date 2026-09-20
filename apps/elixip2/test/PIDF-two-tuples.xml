@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<presence xmlns="urn:ietf:params:xml:ns:pidf" entity="sip:dave@ives.fr">
+<tuple id="handset">
+<status><basic>closed</basic></status>
+<contact priority="0.2">sip:dave@10.0.0.7</contact>
+</tuple>
+<tuple id="softphone">
+<status><basic>open</basic></status>
+<contact priority="0.9">sip:dave@192.168.1.31</contact>
+</tuple>
+</presence>

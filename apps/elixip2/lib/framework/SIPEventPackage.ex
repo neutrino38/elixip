@@ -98,6 +98,11 @@ defmodule SIP.EventPackage do
 
   @table __MODULE__
 
+  # The packages compiled into this library (design, *Scope for v1*). A kelixip
+  # module does not register itself: it would be consuming an API meant for
+  # third parties.
+  @builtins [SIP.EventPackage.Presence]
+
   @doc """
   Add `module` to the table under the name it answers to `name/0`.
 
@@ -146,6 +151,21 @@ defmodule SIP.EventPackage do
   defp put(name, module, origin) do
     :persistent_term.put(@table, Map.put(table(), name, %{module: module, origin: origin}))
     :ok
+  end
+
+  @doc """
+  Register the packages this library provides.
+
+  Called from the boot path — `SIP.FSL.Host.bootstrap/0` for a standalone run,
+  `Kelix.Application` for a node — and idempotent, so calling it twice is what
+  happens on a second run in one VM, not a bug.
+
+  They go in as `:builtin`, which is what makes a third party allowed to override
+  one (rule 4) instead of being refused.
+  """
+  @spec register_builtins() :: :ok
+  def register_builtins do
+    Enum.each(@builtins, &register(&1, origin: :builtin))
   end
 
   @doc """
