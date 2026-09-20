@@ -293,6 +293,34 @@ defmodule SIP.Msg.Ops do
   end
 
   @doc """
+  The value of a `Subscription-State` header (RFC 6665 §8.2.3), built.
+
+  The writer beside the reader above, so the one place that knows how this header
+  is spelt is the one place that knows how to read it. `params` are appended in
+  the order given, values written verbatim:
+
+      iex> SIP.Msg.Ops.subscription_state_value(:active, expires: 600)
+      "active;expires=600"
+      iex> SIP.Msg.Ops.subscription_state_value(:terminated, reason: :timeout)
+      "terminated;reason=timeout"
+  """
+  @spec subscription_state_value(atom() | binary(), keyword()) :: binary()
+  def subscription_state_value(state, params \\ []) when is_list(params) do
+    Enum.reduce(params, to_string(state), fn
+      {_name, nil}, acc -> acc
+      {name, value}, acc -> acc <> ";" <> to_string(name) <> "=" <> to_string(value)
+    end)
+  end
+
+  @doc """
+  The value of an `Event` header (RFC 6665 §8.2.1) built from a package name and
+  an optional `id`.
+  """
+  @spec event_value(binary(), binary() | nil) :: binary()
+  def event_value(package, nil), do: package
+  def event_value(package, id), do: package <> ";id=" <> to_string(id)
+
+  @doc """
   The value of an `Allow-Events` header (RFC 6665 §8.2.2) built from a list of
   package names.
 

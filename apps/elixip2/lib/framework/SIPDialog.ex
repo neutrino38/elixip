@@ -208,7 +208,8 @@ defmodule SIP.Dialog do
     # before concluding that there is no matching dialog (RFC 3261 §12.2.2).
     matches =
       Registry.lookup(Registry.SIPDialog, dialog_id) ++
-        Registry.lookup(Registry.SIPDialog, swap_dialog_id(dialog_id))
+        Registry.lookup(Registry.SIPDialog, swap_dialog_id(dialog_id)) ++
+        early_notify_lookup(req2, dialog_id)
 
     case matches do
       # No such dialog - create it if the request
@@ -286,8 +287,21 @@ defmodule SIP.Dialog do
         # to add error log - PRACK should be in dialog
         :nomatchingdialog
 
-      m when m in [:PUBLISH, :REGISTER, :SUBSCRIBE] ->
-        # Todo compulte timeout from refresh contact period
+      # A PUBLISH is one transaction and nothing else (RFC 3903): its entity-tag
+      # lifecycle is the collection's state, not the instance's, and the instance
+      # is gone long before the refresh arrives (plan decision 5). 64*T1 is the
+      # lifetime of the server transaction under it — the dialog has no reason to
+      # outlive that, and the 600 s it used to get was 600 s of leaked process per
+      # published state.
+      :PUBLISH ->
+        start_inbound_dialog(req, 32, debug, dialog_id)
+
+      # The 600 s here is only the transaction timeout of a request this dialog may
+      # send out; what bounds the dialog itself is the expiration timer, and
+      # `SIP.DialogImpl.arm_expiration_timer/2` arms it on the lifetime the
+      # SUBSCRIBE asks for — then again on the one the notifier GRANTS, through
+      # `set_subscription/2`.
+      m when m in [:REGISTER, :SUBSCRIBE] ->
         start_inbound_dialog(req, 600, debug, dialog_id)
 
       m when m in [:REFER, :CANCEL, :UPDATE, :BYE] ->
@@ -323,6 +337,31 @@ defmodule SIP.Dialog do
   # Swap the from/to tags of a dialog id. Used to match an in-dialog request
   # received on a dialog we initiated, where the tag roles are reversed.
   defp swap_dialog_id({fromtag, callid, totag}), do: {totag, callid, fromtag}
+
+  @doc false
+  # The NOTIFY that overtakes the 200 to its own SUBSCRIBE.
+  #
+  # RFC 6665 §4.2.1.2 has the notifier send the 2xx *before* the first NOTIFY, and
+  # UDP reorders anyway — so the first NOTIFY of a subscription routinely arrives
+  # while the watcher's dialog is still registered `{fromtag, callid, nil}`, its
+  # remote tag unknown. Neither the triplet nor its swap can match that: both name
+  # a To tag the dialog has never heard of. It was answered **481**, the notifier
+  # gave up, and the subscription was established on one side only.
+  #
+  # The stable key is Call-ID plus OUR OWN tag — which a NOTIFY carries on its To,
+  # since we are the To of a dialog we initiated. The dialog then adopts the tag
+  # the NOTIFY brought (`SIP.DialogImpl.handle_cast/2`), exactly as it would have
+  # adopted the 2xx's.
+  #
+  # NOTIFY only, and only for a request that names no dialog we know: a request
+  # carrying a To tag belongs to an established dialog or to nothing (§12.2.2), and
+  # widening this to other methods would let any request into a half-open dialog.
+  defp early_notify_lookup(%{method: :NOTIFY}, {_fromtag, callid, totag})
+       when is_binary(totag) do
+    Registry.lookup(Registry.SIPDialog, {totag, callid, nil})
+  end
+
+  defp early_notify_lookup(_req, _dialog_id), do: []
 
   @doc """
   Reply to an in dialog request.
@@ -489,6 +528,84 @@ defmodule SIP.Dialog do
   @spec app_drives_keepalive(pid()) :: :ok
   def app_drives_keepalive(dialog_pid) when is_pid(dialog_pid) do
     GenServer.call(dialog_pid, :app_drives_keepalive)
+  end
+
+  @doc """
+  Hand `dialog_pid` the subscription it carries, and let it take over its end.
+
+  What the dialog does with it, and what no other layer can do (design decision 1
+  — the state lives in the session layer, the **timers** live in the dialog):
+
+    * fills the columns only it knows — both tags, the CSeqs, the route set, the
+      remote Contact and our own — and answers the completed `%SIP.Subscription{}`;
+    * re-arms the expiration timer on the lifetime that was **granted**, which is
+      not necessarily the one the SUBSCRIBE asked for;
+    * from then on answers every inbound NOTIFY 200 by itself, refreshes the
+      subscription (watcher side) at half that lifetime, and sends the final
+      NOTIFY when the lifetime lapses.
+
+  Called by `SIP.Session.Notifier.accept_subscription/1` on the notifier side and
+  by `SIP.Session.SubscribeUAC.process_subscribe_reply/3` on the watcher's.
+  """
+  @spec set_subscription(pid(), SIP.Subscription.t()) ::
+          {:ok, SIP.Subscription.t()} | {:error, any()}
+  def set_subscription(dialog_pid, %SIP.Subscription{} = sub) when is_pid(dialog_pid) do
+    GenServer.call(dialog_pid, {:set_subscription, sub})
+  end
+
+  @doc """
+  Re-arm this dialog's expiration timer on `seconds`.
+
+  For the lifetime that is negotiated rather than requested: a notifier may grant
+  less than it was asked for, and the dialog armed from the request would then
+  outlive the subscription it carries. `set_subscription/2` calls it; a caller
+  that only wants to move the deadline may call it directly.
+  """
+  @spec set_expiration(pid(), non_neg_integer()) :: :ok | {:error, any()}
+  def set_expiration(dialog_pid, seconds) when is_pid(dialog_pid) and is_integer(seconds) do
+    GenServer.call(dialog_pid, {:set_expiration, seconds})
+  end
+
+  @doc """
+  Send a NOTIFY carrying the current state of this dialog's subscription.
+
+  The dialog composes it — `Event`, `Subscription-State: active;expires=<what is
+  left>`, the Contact of the transport actually used — because those are answers
+  it alone holds, and because a scenario that had to write them would write them
+  differently in every script. Its 2xx is absorbed here and never reaches the
+  application: a NOTIFY is the framework's request, not the scenario's.
+  """
+  @spec send_notify(pid(), binary(), binary() | nil) :: :ok | {:error, any()}
+  def send_notify(dialog_pid, body, content_type) when is_pid(dialog_pid) do
+    GenServer.call(dialog_pid, {:send_notify, body, content_type})
+  end
+
+  @doc """
+  End the subscription this dialog carries, stating an RFC 6665 §4.1.3 reason.
+
+  The final NOTIFY goes out (`Subscription-State: terminated;reason=<reason>`), the
+  application is handed its one `{:subscription_terminated, ref, reason}`, and the
+  dialog stops. Exactly once, whichever of the two ways a subscription ends took
+  us here — this call, or the expiration timer.
+  """
+  @spec end_subscription(pid(), atom()) :: :ok | {:error, any()}
+  def end_subscription(dialog_pid, reason) when is_pid(dialog_pid) and is_atom(reason) do
+    GenServer.call(dialog_pid, {:end_subscription, reason})
+  end
+
+  @doc """
+  Announce that the application refreshes the subscription itself: the dialog
+  stands down and delivers `:subscription_refresh` at half the granted lifetime
+  instead of sending the SUBSCRIBE.
+
+  Symmetric with `app_drives_keepalive/1`, and exclusive with the dialog's own
+  refresh for the same reason: two refreshes per period put a spare response in
+  the application's mailbox, where every later state reads the previous request's
+  answer.
+  """
+  @spec app_drives_refresh(pid()) :: :ok
+  def app_drives_refresh(dialog_pid) when is_pid(dialog_pid) do
+    GenServer.call(dialog_pid, :app_drives_refresh)
   end
 
   def broadcast(msg_to_send) do

@@ -145,10 +145,10 @@ defmodule SIP.Session do
 
   @doc """
   Dispatch a SIP reply to the per-method handler, based on the method carried in
-  the response CSeq (`[seqno, method]`). INVITE, OPTIONS and REGISTER are routed
-  to their respective handlers; replies to any other method are ignored and the
-  context is returned unchanged. Backing function of the `process_sip_reply/2`
-  macro.
+  the response CSeq (`[seqno, method]`). INVITE, OPTIONS, REGISTER and SUBSCRIBE
+  are routed to their respective handlers; replies to any other method are ignored
+  and the context is returned unchanged. Backing function of the
+  `process_sip_reply/2` macro.
   """
   @spec dispatch_reply(%SIP.Context{}, map(), pid() | reference()) :: %SIP.Context{}
   def dispatch_reply(sip_ctx = %SIP.Context{}, resp, transaction_id) when is_map(resp) do
@@ -161,6 +161,9 @@ defmodule SIP.Session do
 
       [_seqno, :REGISTER] ->
         SIP.Session.RegisterUAC.process_register_reply(sip_ctx, resp, transaction_id)
+
+      [_seqno, :SUBSCRIBE] ->
+        SIP.Session.SubscribeUAC.process_subscribe_reply(sip_ctx, resp, transaction_id)
 
       _ ->
         sip_ctx
@@ -258,6 +261,24 @@ defmodule SIP.Session do
       end)
     end
 
+    @spec set_presence_processing_module(module()) :: :ok
+    @doc """
+    Specify which module serves inbound SUBSCRIBE / PUBLISH (see
+    `SIP.Session.Presence`). With none registered, such a request is answered 500
+    — until now it fell through to the catch-all and was answered **501**, which
+    told a watcher the stack did not implement SUBSCRIBE when in fact no
+    application had claimed it.
+    """
+    def set_presence_processing_module(module) do
+      Agent.update(__MODULE__, fn reg -> %ConfigRegistry{reg | presence: module} end)
+    end
+
+    @spec get_presence_processing_module() :: module() | nil
+    @doc "Return the configured presence processing module (nil when none)."
+    def get_presence_processing_module() do
+      Agent.get(__MODULE__, fn reg -> reg.presence end)
+    end
+
     @spec set_options_processing_module(module()) :: :ok
     @doc """
     Specify which module answers out-of-dialog OPTIONS (see `SIP.Session.Options`).
@@ -316,6 +337,37 @@ defmodule SIP.Session do
       )
     end
 
+    # Event notification (RFC 6665) and publication (RFC 3903). Until P3 these
+    # landed on the catch-all below and were answered 501 Not Implemented, whatever
+    # application was running: `presence:` was a struct field with no setter and no
+    # clause here.
+    def dispatch(dialog_id, req, transaction_id) when is_map(req) and req.method == :SUBSCRIBE do
+      internal_dispatch(
+        :presence,
+        :on_new_subscribe,
+        [dialog_id, req, transaction_id],
+        "No presence server defined"
+      )
+    end
+
+    def dispatch(dialog_id, req, transaction_id) when is_map(req) and req.method == :PUBLISH do
+      internal_dispatch(
+        :presence,
+        :on_new_publish,
+        [dialog_id, req, transaction_id],
+        "No presence server defined"
+      )
+    end
+
+    def dispatch(dialog_id, req, transaction_id) when is_map(req) and req.method == :MESSAGE do
+      internal_dispatch(
+        :presence,
+        :on_message,
+        [dialog_id, req, transaction_id],
+        "No presence server defined"
+      )
+    end
+
     def dispatch(:on_call_end, dialog_id, app_id) when is_pid(app_id) do
       internal_dispatch(
         :callprocessing,
@@ -331,6 +383,15 @@ defmodule SIP.Session do
         :on_registration_expired,
         [dialog_id, app_pid],
         "No registration server defined"
+      )
+    end
+
+    def dispatch(:on_subscription_expired, dialog_id, app_pid) when is_pid(app_pid) do
+      internal_dispatch(
+        :presence,
+        :on_subscription_expired,
+        [dialog_id, app_pid],
+        "No presence server defined"
       )
     end
 

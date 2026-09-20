@@ -409,6 +409,11 @@ defmodule SIP.Session.CallUAS do
   `sip_ctx.dialogpid`. No-op for any other event. Called by the on_events
   instrumentation for every matched event.
 
+  SUBSCRIBE is stored for the same reason REGISTER is, and it is the same reason:
+  a notifier instance serves a *succession* of SUBSCRIBEs on one dialog — the
+  initial one and every refresh — and `accept_subscription/1` negotiates the one
+  it has just received, never the one that created the instance.
+
   REGISTER is stored for the same reason the others are: a registrar instance
   serves a *succession* of REGISTERs on one dialog — the unauthenticated one, the
   digest replay, then every refresh — and each state has to act on the last one
@@ -418,7 +423,7 @@ defmodule SIP.Session.CallUAS do
   scenario would authenticate the refresh but save the contacts of the very first
   request.
   """
-  @uas_stored_methods [:INVITE, :UPDATE, :REGISTER]
+  @uas_stored_methods [:INVITE, :UPDATE, :REGISTER, :SUBSCRIBE]
 
   def auto_store(sip_ctx, {m, req, trans_pid, dlg})
       when m in @uas_stored_methods and is_map(req) and is_pid(dlg) do

@@ -1,6 +1,6 @@
 # presence-basic-plan.md — building basic presence
 
-**Status: plan. Nothing below is implemented.** The design is
+**Status: P1, P2 and P3 are implemented; P4 onwards is plan.** The design is
 [DESIGN-PRESENCE.md](DESIGN-PRESENCE.md); this document is the order it gets built
 in, what each phase delivers, and what proves it.
 
@@ -194,6 +194,36 @@ subscription whose dialog dies. One new canned peer,
 
 **Done when** a watcher scenario and a notifier scenario run against each other
 over the mockup transport through P2's dummy package — no PIDF, no node.
+
+**Delivered 2026-09-20**, with two things settled differently from the paragraphs
+above, both for the same reason — a scenario instance is the only process a
+subscription has, and it is blocked in a `receive` it cannot be made to leave and
+re-enter:
+
+- **the watcher's refresh is sent by the dialog**, not by the session layer. The
+  dialog holds the timer (decision 1 already put it there), the `Event`, the `id`,
+  the route set and the lifetime that was granted, which is the whole of a
+  refresh; its response surfaces like any other, because what to do about a
+  refresh answered 401 or 481 is a decision and decisions are the scenario's.
+  `SIP.Dialog.app_drives_refresh/1` hands the schedule back, symmetric with
+  `app_drives_keepalive/1`.
+- **`deactivated` and `probation` are surfaced like the other five reasons**
+  rather than re-subscribed under the scenario's feet. Re-subscribing opens a NEW
+  dialog — the old one is terminated by definition — and the only process that can
+  open one is the scenario. `send_SUBSCRIBE/3` recreates it on its own, standalone
+  method that SUBSCRIBE is, so a watcher that wants the behaviour writes one
+  clause. Closing this properly is a `SIP.Session.SubscribeUAC` re-subscribe verb
+  driven from an injected clause, which the language cannot express today: an
+  injected clause must LEAVE its state (`FSL.Machine`), and a refresh stays.
+
+Two defects beyond the two decision 6 names were found and closed on the way, both
+of them fatal to a subscription and neither visible before something used one:
+`SIP.DialogImpl` initialised an outbound dialog's remote sequence number to 1
+instead of leaving it empty (RFC 3261 §12.2.2), so the first NOTIFY — every
+notifier in the field numbers it CSeq 1 — was answered *500 Out of order*; and the
+2xx to a SUBSCRIBE carried no `Contact`, which RFC 6665 §4.2.1.2 makes mandatory
+for a dialog-forming request, so the notifier was unreachable for the
+un-SUBSCRIBE.
 
 ### P4 — the `presence` package
 

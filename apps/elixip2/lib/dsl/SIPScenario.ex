@@ -14,10 +14,16 @@ defmodule SIP.Scenario do
         end
       end
 
-  Three `use` lines' worth of SIP verbs — `SIP.Session.CallUAC`,
-  `SIP.Session.Media`, `SIP.Session.B2bua` — plus `FSL.Machine`, told which
-  embedding to call back into (`SIP.FSL.Host`) and what this binding calls its
-  context variable (`sip_ctx`).
+  Five `use` lines' worth of SIP verbs — `SIP.Session.CallUAC`,
+  `SIP.Session.Media`, `SIP.Session.B2bua`, and the two halves of the
+  subscription layer, `SIP.Session.SubscribeUAC` (watcher) and
+  `SIP.Session.Notifier` (notifier) — plus `FSL.Machine`, told which embedding to
+  call back into (`SIP.FSL.Host`) and what this binding calls its context
+  variable (`sip_ctx`).
+
+  Both halves of RFC 6665 are brought in unconditionally, the way both halves of
+  INVITE already are: a scenario is a UAC or a UAS by what it writes, not by what
+  it `use`s, and a macro nobody calls costs nothing.
 
   **This facade is not a transition device.** `SIP.Scenario` is the name a SIP
   scenario *should* use: it is the one that brings the SIP verbs with it, and it
@@ -62,6 +68,8 @@ defmodule SIP.Scenario do
       use SIP.Session.CallUAC
       use SIP.Session.Media
       use SIP.Session.B2bua
+      use SIP.Session.SubscribeUAC
+      use SIP.Session.Notifier
 
       use FSL.Machine,
         host: SIP.FSL.Host,

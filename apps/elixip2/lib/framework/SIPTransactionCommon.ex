@@ -635,8 +635,11 @@ defmodule SIP.Transac.Common do
     resp = reply_to_request(sipmsg, resp_code, reason, upd_fields, totag)
 
     resp =
-      if sipmsg.method == :INVITE and resp_code in 200..299 do
-        # Correct contact field for INVITE transaction
+      if sipmsg.method in [:INVITE, :SUBSCRIBE] and resp_code in 200..299 do
+        # The Contact of a 2xx to a DIALOG-FORMING request: it is what the peer
+        # sends its in-dialog requests to. SUBSCRIBE is one (RFC 6665 §4.2.1.2
+        # makes the header mandatory there), and it was getting none — so a
+        # notifier behind a proxy was unreachable for the un-SUBSCRIBE.
         SIP.Transport.add_contact_header(state.tmod, state.tpid, resp)
       else
         resp
