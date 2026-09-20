@@ -17,11 +17,12 @@ defmodule Kelix.Control do
 
   # ── read verbs ────────────────────────────────────────────────────────────────
 
-  @doc "Uptime, counters, media-pool and node state (`kelictl status`)."
+  @doc "Version, uptime, counters, media-pool and node state (`kelictl status`)."
   @spec status() :: map
   def status() do
     %{
       node: node(),
+      version: version(),
       uptime_ms: uptime_ms(),
       # Whether this node still tells upstream it takes traffic. A draining node looks
       # healthy in every other line here while answering 503 to the OPTIONS pings, so
@@ -872,6 +873,16 @@ defmodule Kelix.Control do
   # ── helpers ───────────────────────────────────────────────────────────────────
 
   defp uptime_ms(), do: elem(:erlang.statistics(:wall_clock), 0)
+
+  # Read from the running application's own spec, so it is the code the queried node
+  # is executing — not what the package on its disk says, which after an upgrade
+  # without restart is a different version.
+  defp version() do
+    case Application.spec(:kelixip, :vsn) do
+      nil -> "unknown"
+      vsn -> List.to_string(vsn)
+    end
+  end
 
   defp domain_names() do
     safe(fn -> Enum.map(Kelix.Domains.current().domains, & &1.name) end, [])

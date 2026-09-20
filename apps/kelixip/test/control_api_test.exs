@@ -31,6 +31,7 @@ defmodule Kelix.ControlAPITest do
       assert conn.status == 200
       b = body(conn)
       assert b["node"] == to_string(node())
+      assert b["version"] == to_string(Application.spec(:kelixip, :vsn))
       assert is_integer(b["uptime_ms"])
       assert is_map(b["instances"])
     end

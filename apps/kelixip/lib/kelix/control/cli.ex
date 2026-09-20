@@ -444,6 +444,7 @@ defmodule Kelix.Control.CLI do
     lines =
       [
         "node:            #{s.node}",
+        "version:         #{Map.get(s, :version, "unknown")}",
         "uptime:          #{format_uptime(s.uptime_ms)}",
         "active calls:    #{Map.get(s.instances, :active, 0)}",
         "listeners:       #{format_listeners(Map.get(s, :listeners, []))}",

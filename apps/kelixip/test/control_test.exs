@@ -344,6 +344,7 @@ defmodule Kelix.ControlTest do
     test "status/0 aggregates node + surfaces" do
       s = Control.status()
       assert s.node == node()
+      assert s.version == to_string(Application.spec(:kelixip, :vsn))
       assert is_integer(s.uptime_ms)
       assert is_map(s.instances)
       assert is_list(s.media_pool)
