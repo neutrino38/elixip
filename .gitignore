@@ -4,6 +4,10 @@
 erl_crash.dump
 *.ez
 elixip.log
+# Log file of `mix test` (config/test.exs sends the whole suite there). A green
+# suite deletes it; a failing one keeps it as test-<app>.log (SIP.Test.Log).
+/test.log
+/test-*.log
 
 # Standalone executable produced by `mix escript.build` (any app dir)
 /elixipp

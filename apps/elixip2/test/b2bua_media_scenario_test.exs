@@ -11,10 +11,6 @@ defmodule SIP.Test.B2bua.MediaScenario do
   """
   use ExUnit.Case
 
-  # A named singleton another file leaves behind makes the media leg answer 503, so
-  # the whole file goes red in a full run and green on its own.
-  @moduletag :flaky
-
   alias SIP.Test.Peers.Manual
   alias SIP.Test.Transport.Mockup
 
@@ -26,6 +22,20 @@ defmodule SIP.Test.B2bua.MediaScenario do
     :ok = SIP.Dialog.start()
     {:ok, _config_pid} = SIP.Session.ConfigRegistry.start()
     :ok = SIP.Auth.Secret.start()
+
+    # `b2bua_resolve/1` in the scenario gives `media_connect()` resolved profiles,
+    # which is what makes it consult the host's media-server selector. Run from the
+    # umbrella ROOT, `:kelixip` has started and `Kelix.Config.apply_app_env/1` has
+    # written that key into the `:elixip2` env — so the pool of a kelixip nobody
+    # configured answered `:unavailable` and every call here died on a 503. Green
+    # from `apps/elixip2`, red from the root, same code: that is what this file was
+    # tagged `:flaky` for.
+    #
+    # These tests drive the scenario as the standalone tool does: no selector, the
+    # `config_overrides` below decide.
+    SIP.Test.AppEnv.preserve([:mediaserver_selector])
+    Application.delete_env(:elixip2, :mediaserver_selector)
+
     module = SIP.Scenario.Loader.load_file!(@scenario)
     %{scenario: module}
   end

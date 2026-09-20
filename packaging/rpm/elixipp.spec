@@ -9,6 +9,7 @@
 #   rpmbuild -bb --define "_topdir <dir>" packaging/rpm/elixipp.spec
 
 Name:           elixipp
+
 Version:        1.6.0
 Release:        1%{?dist}
 Summary:        SIP scenario test tool driven by the Finite State Language
@@ -46,14 +47,32 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 %{_bindir}/elixipp
 
 %changelog
+
 * Fri Sep 18 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-1
 - The Finite State Language leaves the tree: it is now the separate package
   finite_state_language (OTP app :fsl, Apache-2.0). Scenarios keep the names they
   use: SIP.Scenario stays the facade a scenario uses.
-- Includes 1.5.5.
 - User-Agent is now Elixipp-1.6.0.
 
+* Sat Sep 19 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.5-2
+- Rebuild only: the 1.5.5-1 changelog listed the WSS hardening alone, written
+  before the rest of the release landed. No code change.
+
+
 * Tue Sep 15 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.5.5-1
+- sip: an INVITE server transaction no longer carries timer F, which ended every
+  call ringing longer than 32 s with a 408 to the caller. The remaining bound is
+  :sip_timer_ist_ringing, 600 000 ms.
+- sip: when the stack answers 408 for a scenario that did not reply, the scenario
+  is told, so it can end the leg it opened.
+- sip: a 183 with no body no longer raises inside the server transaction.
+- sip: P-Asserted-Identity is read as a whole URI, display name kept, and the two
+  comma-separated values of RFC 3325 §9.1 are read apart.
+- sip: a URI built field by field gets its scheme's default port; it used to
+  travel portless and the request never went out.
+- sip: a received request is marked with the transport it came in over.
+- b2bua: early media, as the `early_media:` option of the media mode, off by
+  default.
 - WSS: the WebSocket layer is hardened — the shared stack, so the tool gets it too.
   What a fragmented message accumulates is bounded.
 - The unused dependency on socket is dropped.
