@@ -193,6 +193,7 @@ defmodule SIP.Trans.Timer do
       # a dead transport. This is the retransmit path, so it runs long after the
       # pid was cached — and an exit here killed the transaction, which killed its
       # dialog by the link, without running terminate/2 (design §14.4, R3).
+      SIP.Scenario.SipTrace.sent(state, state.msgstr, retransmit: true)
       code = SIP.Transport.send_msg(state.tpid, state.msgstr, state.destip, state.destport)
       if code != :ok do
         Logger.error([ transid: state.msg.transid, message: "timer_A: Fail to retransmit message: #{code}"])
@@ -251,6 +252,7 @@ defmodule SIP.Trans.Timer do
 
   def handle_UAS_timerA({ :timerA, ms }, state) when ms < @timer_T2_val and state.state == :confirmed do
     # If transport is not reliable, retransmit
+    SIP.Scenario.SipTrace.sent(state, state.rspstr, retransmit: true)
     code = SIP.Transport.send_msg(state.tpid, state.rspstr, state.destip, state.destport)
     if code != :ok do
       Logger.warning([ transid: state.msg.transid, message: "timer_T1: Fail to retransmit message: #{code}"])

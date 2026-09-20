@@ -25,6 +25,7 @@ defmodule SIP.Transac.Common do
   def sendout_msg(state, sipmsg) when is_map(state) and is_map(sipmsg) do
     try do
       msgstr = SIPMsg.serialize(sipmsg)
+      SIP.Scenario.SipTrace.sent(state, sipmsg)
 
       state =
         case sipmsg.method do

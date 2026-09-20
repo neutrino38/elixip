@@ -79,13 +79,102 @@ defmodule SIP.Test.SequenceDiagram do
   end
 
   test "auth command names keep an (auth) suffix" do
-    out = SequenceDiagram.to_plantuml([%{kind: :command, type: :sip, name: "send_auth_REGISTER"}], @meta)
+    out =
+      SequenceDiagram.to_plantuml(
+        [%{kind: :command, type: :sip, name: "send_auth_REGISTER"}],
+        @meta
+      )
+
     assert out =~ "elixip -> peer : REGISTER (auth)"
   end
 
   test "builds a filename with a sanitized pid" do
     assert SequenceDiagram.filename(@meta) == "UAC.Invite_0.123.0.puml"
     assert SequenceDiagram.safe_pid("#PID<0.987.2>") == "0.987.2"
+  end
+
+  # ── Real SIP messages (recorded by SIP.Scenario.SipTrace) ───────────────────
+
+  @t0 1_000_000
+
+  defp sip(at_ms, dir, fields) do
+    Map.merge(
+      %{
+        kind: :sip,
+        at: @t0 + at_ms * 1_000,
+        dir: dir,
+        method: nil,
+        code: nil,
+        reason: nil,
+        cseq: nil,
+        callid: "c1",
+        peer: "10.0.0.1:5060/udp",
+        tag: nil,
+        retransmit: false,
+        sdp: false
+      },
+      fields
+    )
+  end
+
+  @traced_meta Map.put(@meta, :t0, @t0)
+
+  defp traced_events do
+    [
+      %{kind: :transition, at: @t0, to: :initial_state, event: "start", type: nil},
+      %{kind: :command, at: @t0 + 1_000, type: :sip, name: "send_INVITE"},
+      sip(2, :out, %{method: :INVITE, cseq: "1 INVITE", sdp: true}),
+      sip(502, :out, %{method: :INVITE, cseq: "1 INVITE", sdp: true, retransmit: true}),
+      sip(600, :in, %{code: 180, reason: "Ringing", cseq: "1 INVITE"}),
+      sip(900, :in, %{code: 200, reason: "OK", cseq: "1 INVITE", sdp: true}),
+      %{kind: :transition, at: @t0 + 901_000, to: :answered, event: "200 OK", type: :sip},
+      sip(902, :out, %{method: :ACK, cseq: "1 ACK"}),
+      sip(950, :out, %{
+        method: :INVITE,
+        cseq: "1 INVITE",
+        callid: "c2",
+        tag: :outbound,
+        peer: "10.0.0.9:5060/tcp"
+      }),
+      %{kind: :terminal, at: @t0 + 2_000_000, outcome: :succeeded, reason: "ok", type: :sip}
+    ]
+  end
+
+  test "one participant per Call-ID, labelled with the leg tag and the peer" do
+    out = SequenceDiagram.to_plantuml(traced_events(), @traced_meta)
+
+    assert out =~ ~s(participant "10.0.0.1:5060/udp" as peer1)
+    assert out =~ ~s(participant "outbound 10.0.0.9:5060/tcp" as peer2)
+    refute out =~ "as peer\n"
+    # The header names the Call-ID behind each lane.
+    assert out =~ "'   peer1: 10.0.0.1:5060/udp — Call-ID c1"
+    assert out =~ "'   peer2: outbound 10.0.0.9:5060/tcp — Call-ID c2"
+  end
+
+  test "real messages are arrows: solid requests, dashed responses, grey retransmissions" do
+    out = SequenceDiagram.to_plantuml(traced_events(), @traced_meta)
+
+    assert out =~ "elixip -> peer1 : +2ms INVITE #1 +SDP"
+    assert out =~ "elixip -[#Gray]> peer1 : +502ms INVITE #1 +SDP (retransmission)"
+    assert out =~ "peer1 --> elixip : +600ms 180 Ringing / 1 INVITE"
+    assert out =~ "peer1 --> elixip : +900ms 200 OK / 1 INVITE +SDP"
+    assert out =~ "elixip -> peer1 : +902ms ACK #1"
+    assert out =~ "elixip -> peer2 : +950ms INVITE #1"
+  end
+
+  test "with real messages, commands become notes and transitions stop drawing arrows" do
+    out = SequenceDiagram.to_plantuml(traced_events(), @traced_meta)
+
+    assert out =~ "hnote over elixip : +1ms send_INVITE"
+    refute out =~ "elixip -> peer :"
+    refute out =~ "elixip <-- peer"
+    assert out =~ "note over elixip : +901ms initial_state -> answered"
+    assert out =~ "note over elixip #LightGreen : +2000ms succeeded: ok"
+  end
+
+  test "events without a clock carry no time prefix" do
+    out = SequenceDiagram.to_plantuml(@events, @meta)
+    refute out =~ "+0ms"
   end
 
   # ── Journal collection (SequenceJournal) ────────────────────────────────────
@@ -101,7 +190,7 @@ defmodule SIP.Test.SequenceDiagram do
     SequenceJournal.record_transition(:answered, "200 OK", :sip)
     SequenceJournal.record_transition(:succeeded, "done", :sip)
 
-    assert SequenceJournal.events() == [
+    assert Enum.map(SequenceJournal.events(), &Map.delete(&1, :at)) == [
              %{kind: :transition, to: :initial_state, event: "start", type: nil},
              %{kind: :command, type: :sip, name: "send_INVITE"},
              %{kind: :transition, to: :answered, event: "200 OK", type: :sip},
@@ -125,18 +214,18 @@ defmodule SIP.Test.SequenceDiagram do
   defmodule SeqScenario do
     use SIP.Scenario
 
-    config username: "alice", authusername: "alice", domain: "example.com", passwd: "s3cret"
+    config(username: "alice", authusername: "alice", domain: "example.com", passwd: "s3cret")
 
     state initial_state do
       # Call the raw monitor hooks directly so the journal records commands
       # without needing the SIP stack / media server / network.
       SIP.Scenario.Monitor.note_command(:media, "media_connect")
-      goto next
+      goto(next)
     end
 
     state calling do
       SIP.Scenario.Monitor.note_command(:sip, "send_INVITE")
-      goto wait, "INVITE sent"
+      goto(wait, "INVITE sent")
     end
 
     state wait do
@@ -145,7 +234,12 @@ defmodule SIP.Test.SequenceDiagram do
   end
 
   test "a scenario run with --log-sequence enabled writes the PlantUML file" do
-    path = SequenceDiagram.filename(%{scenario: "SIP.Test.SequenceDiagram.SeqScenario", pid: inspect(self())})
+    path =
+      SequenceDiagram.filename(%{
+        scenario: "SIP.Test.SequenceDiagram.SeqScenario",
+        pid: inspect(self())
+      })
+
     File.rm(path)
 
     Application.put_env(:elixip2, :log_sequence, true)
@@ -161,9 +255,10 @@ defmodule SIP.Test.SequenceDiagram do
     content = File.read!(path)
     assert content =~ "@startuml"
     assert content =~ "@enduml"
-    assert content =~ "elixip -> peer : INVITE"
-    assert content =~ "elixip -[#DarkOrange]> ms : connect"
-    assert content =~ "note over elixip : initial_state -> calling"
+    # Every label opens with the time since the journal started.
+    assert content =~ ~r/elixip -> peer : \+\d+ms INVITE/
+    assert content =~ ~r/elixip -\[#DarkOrange\]> ms : \+\d+ms connect/
+    assert content =~ ~r/note over elixip : \+\d+ms initial_state -> calling/
     assert content =~ "passwd: ****"
     refute content =~ "s3cret"
 

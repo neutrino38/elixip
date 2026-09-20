@@ -536,9 +536,31 @@ Two sinks, both no-ops when not started, so a production run pays nothing:
   (commands, transitions, outcome) kept in the **process dictionary** of the
   scenario process, which is precisely where the runner, the macros and the
   reporting all run. It is therefore isolated per call with no registry and no
-  message passing. `SIP.Scenario.SequenceDiagram` renders it as PlantUML at
-  `finalize` time, when `--log-sequence` is set or the scenario's debug flag is
-  on.
+  message passing. Every event carries a monotonic timestamp.
+  `SIP.Scenario.SequenceDiagram` renders it as PlantUML at `finalize` time, when
+  `--log-sequence` is set or the scenario's debug flag is on — from the `config`
+  block or `ctx_set(:debug, true)`, which the loop checks after every state.
+- **`SIP.Scenario.SipTrace`** — the one sink that crosses processes, because the
+  SIP messages do not go through the scenario process: the transaction layer
+  sends and receives them on behalf of a dialog. It is one public ETS table. The
+  scenario watches itself when its journal starts; a dialog binds itself to its
+  application pid when it learns it (with its leg tag), or is adopted by the
+  scenario when it predates the journal (a UAS instance is spawned by the
+  request that created its dialog); the transaction layer records every message
+  it puts on or takes off the wire — first copy and retransmissions alike,
+  through `sendout_msg/2`, the retransmission timers and the eight
+  `{:onsipmsg, …}` clauses — against its `app` pid, one lookup away from the
+  scenario. The journal takes the rows back at flush and merges them on the
+  timestamps. The table does not exist until the first scenario watches itself,
+  so a run that traces nothing pays one `:ets.whereis` per message; the owning
+  process monitors the scenarios it watches and drops the rows of one that dies
+  without flushing.
+
+  Placing the hook in the transaction layer rather than the transport is what
+  gives it a correlation: a transport instance knows a socket, a transaction
+  knows the dialog it works for. The price is what a transaction never sees — a
+  stateless reply of the dialog layer, an out-of-dialog OPTIONS — and that is
+  documented in [ELIXIPP.md](../../ELIXIPP.md).
 
 ---
 

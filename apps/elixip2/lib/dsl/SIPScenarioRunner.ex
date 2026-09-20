@@ -356,20 +356,39 @@ defmodule SIP.Scenario.Runner do
     :ok
   end
 
-  # Start the per-instance PlantUML sequence journal when --log-sequence is set on
-  # the CLI (Application env) or when the scenario enabled its debug flag. No-op
-  # otherwise — the journal recording helpers are then free.
+  # Start the per-instance sequence journal when --log-sequence is set on the CLI
+  # (Application env) or when the scenario enabled its debug flag — in its `config`
+  # block, or with `ctx_set(:debug, true)` in a state, which is why the loop asks
+  # again after every state. No-op otherwise, and once started.
   defp maybe_start_sequence_journal(module, ctx) do
-    if Application.get_env(:elixip2, :log_sequence, false) or ctx.debug do
+    if not SIP.Scenario.SequenceJournal.enabled?() and
+         (Application.get_env(:elixip2, :log_sequence, false) or ctx.debug) do
       SIP.Scenario.SequenceJournal.start(%{
         scenario: scenario_label(module),
         pid: inspect(self()),
         config: module.__scenario_config__()
       })
+
+      if is_pid(ctx.dialogpid), do: SIP.Scenario.SequenceJournal.adopt_dialog(ctx.dialogpid)
+
+      case inbound_request(ctx) do
+        nil -> :ok
+        req -> SIP.Scenario.SequenceJournal.record_inbound_request(req)
+      end
     end
 
     :ok
   end
+
+  # The context a state handed back, whatever descriptor it came in.
+  defp descriptor_ctx(desc) when is_tuple(desc) and tuple_size(desc) > 0 do
+    case elem(desc, tuple_size(desc) - 1) do
+      %SIP.Context{} = ctx -> ctx
+      _ -> nil
+    end
+  end
+
+  defp descriptor_ctx(_desc), do: nil
 
   # ── Context bootstrap ─────────────────────────────────────────────────────
 
@@ -444,7 +463,10 @@ defmodule SIP.Scenario.Runner do
     # and one the per-state try/catch is transparent to (it catches :exit and
     # exceptions, never :throw). Caught here, at the root, it is re-applied as if
     # this state had written it: same report, same finalize, same verdict.
-    case run_state(module, fun, ctx) do
+    result = run_state(module, fun, ctx)
+    maybe_start_sequence_journal(module, descriptor_ctx(result) || ctx)
+
+    case result do
       {:goto, :next, desc, type, ctx2} ->
         next = next_state(state_name, states)
         log_transition(state_name, next, desc)

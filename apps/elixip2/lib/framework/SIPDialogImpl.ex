@@ -759,6 +759,7 @@ defmodule SIP.DialogImpl do
         #
         # `arm_expiration_timer/2` is a no-op for anything but a REGISTER, so an
         # inbound INVITE dialog is unaffected.
+        SIP.Scenario.SipTrace.bind(self(), app_id, state.tag)
         {:ok, arm_expiration_timer(state, req) |> Map.put(:app, app_id)}
 
       # Session has not been created. Abort dialog and propagate the requested
@@ -800,6 +801,7 @@ defmodule SIP.DialogImpl do
       allows: allows(req.method)
     }
 
+    SIP.Scenario.SipTrace.bind(self(), pid, tag)
     {state, req} = fix_outbound_request(state, req, true)
 
     try do
@@ -970,6 +972,7 @@ defmodule SIP.DialogImpl do
   @impl true
   def handle_call({:setapppid, app_pid}, _from, state) do
     if state.direction == :inbound and state.app == nil do
+      SIP.Scenario.SipTrace.bind(self(), app_pid, state.tag)
       {:reply, :ok, %SIP.DialogImpl{state | app: app_pid}}
     else
       {:reply, :alreadybound, state}

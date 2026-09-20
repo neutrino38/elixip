@@ -38,6 +38,7 @@ The user-facing counterparts live at the repository root —
 | [socket2-websocket-limits.md](socket2-websocket-limits.md) | **known vulnerability, unfixed**: socket2 accumulates a fragmented WebSocket message with no bound |
 | [kelixip_liveview.md](kelixip_liveview.md), [liveview-adapter.md](liveview-adapter.md) | a real-time web console over kelixip |
 | [moteli-reboot.md](moteli-reboot.md) | RabbitMQ + protobuf control plane for the media servers (2.0) |
+| [debug-improvments.md](debug-improvments.md) | scenario debugging: the sequence diagram drawn from the real SIP messages — what is built, its limits, what comes next (in French) |
 
 ## Notes
 

@@ -132,7 +132,9 @@ written.
 
 - `--log-file` / `--log-level` — the file log, separate from the console.
 - `--log-sequence` — one PlantUML sequence diagram per instance, rendered from
-  the per-process journal at teardown ([DESIGN-FSL.md](DESIGN-FSL.md) §7).
+  the per-process journal at teardown, with every SIP message the instance's
+  dialogs exchanged drawn as it went on the wire ([DESIGN-FSL.md](DESIGN-FSL.md)
+  §7).
   Rejected together with `--limit > 1`: N interleaved diagrams answer no
   question, and the option is meant for the single call being debugged.
 

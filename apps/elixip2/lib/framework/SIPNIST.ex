@@ -44,11 +44,13 @@ defmodule SIP.NIST do
   # Request retransmission from the UAC (RFC 3261 §17.2.2). As long as the
   # transaction is still :trying no response exists yet, so the retransmission is
   # simply absorbed; once a response has been produced, resend it.
-  def handle_cast({ :onsipmsg, sipmsg, _remoteip, _remoteport }, state) when is_map(sipmsg) do
+  def handle_cast({ :onsipmsg, sipmsg, remoteip, remoteport }, state) when is_map(sipmsg) do
+    SIP.Scenario.SipTrace.received(state, sipmsg, remoteip, remoteport, retransmit: true)
     case Map.get(state, :rspstr) do
       rspstr when is_binary(rspstr) ->
         Logger.debug([ transid: state.msg.transid, module: __MODULE__,
                        message: "Retransmitting last response to #{state.msg.method}"])
+        SIP.Scenario.SipTrace.sent(state, rspstr, retransmit: true)
         sendout_msg(state, rspstr)
 
       _ ->
