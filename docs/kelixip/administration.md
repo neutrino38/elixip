@@ -42,7 +42,7 @@ do about it — the release's own script would only say `cat: Permission denied`
 
 | Command | R/W | Does |
 |---|---|---|
-| `kelictl status` | R | Uptime, counters, listeners, media pool, node state |
+| `kelictl status` | R | Version, uptime, counters, listeners, media pool, node state |
 | `kelictl monitor` | R | Scenarios in progress: id, domain, function, **script**, account, FSM state/event/command, negotiated medias, media server, outbound destination (reuses the `--monitor` view) |
 | `kelictl monitor continuous` | R | Same view, redrawn live as scenarios appear, change state or end — no polling. Runs until stdin closes (Ctrl+D) |
 | `kelictl registration list [domain]` | R | Registrations, one list per domain — [registrar](modules/registrar.md#control-commands) |
@@ -125,6 +125,7 @@ live node, which is still running the previous release.
 ```console
 $ kelictl status
 node:            kelixip@127.0.0.1
+version:         1.5.5
 uptime:          0h0m1s
 active calls:    0
 listeners:       udp:0.0.0.0:5060, tcp:0.0.0.0:5060

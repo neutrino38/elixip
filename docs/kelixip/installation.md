@@ -150,6 +150,11 @@ survives the upgrade and the packaged one lands next to it — as `*.rpmnew` on 
 `dpkg` may ask instead). Worth diffing either way, since new keys show up there first.
 The unit is restarted by the upgrade, which drains in-progress scenarios first.
 
+After an upgrade, check the `version:` line of `kelictl status`. It is the version of
+the code the node is **running**, read from the release it booted on. `rpm -q` answers
+for the payload on disk, which is not the same fact: a node that was not restarted, or
+an install that silently kept an older payload, shows the older version here.
+
 Removing the package stops the service and drops the generated cookie. On the deb, a
 plain `apt remove` keeps `/var/lib/kelixip` and `/var/log/kelixip`; `apt purge` removes
 them, along with the configuration. The `kelixip` system user is left in place on
@@ -610,7 +615,7 @@ min_expires          = 60
 
 ```bash
 systemctl status kelixip
-kelictl status                            # listeners bound, modules loaded, domains version
+kelictl status                            # version, listeners bound, modules loaded, domains version
 curl -s http://127.0.0.1:9095/health      # {"status":"ok","live":true,"ready":true}
 ```
 
