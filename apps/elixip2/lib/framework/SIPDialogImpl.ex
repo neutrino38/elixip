@@ -2648,11 +2648,21 @@ defmodule SIP.DialogImpl do
     Logger.info(
       dialogpid: "#{inspect(self())}",
       module: __MODULE__,
-      message: "Subscription expired; sending the final NOTIFY and terminating the dialog"
+      message: subscription_expiry_message(state)
     )
 
     state |> finish_subscription(:timeout) |> close_after_subscription()
   end
+
+  # Only a notifier has a final NOTIFY to send (`send_final_notify/2` is guarded
+  # on the direction); a watcher reaching this deadline has simply outlived its
+  # subscription, and a line saying otherwise sends the next reader looking for a
+  # NOTIFY that was never meant to leave.
+  defp subscription_expiry_message(%SIP.DialogImpl{direction: :inbound}),
+    do: "Subscription expired; sending the final NOTIFY and terminating the dialog"
+
+  defp subscription_expiry_message(_state),
+    do: "Subscription expired; terminating the dialog"
 
   # The linger is over: the final NOTIFY has had 64*T1 to get through, which is all
   # a UDP transaction ever gets.

@@ -1,6 +1,6 @@
 # presence-basic-plan.md — building basic presence
 
-**Status: P1 through P5 are implemented; P6 onwards is plan.** The design is
+**Status: P1 through P6 are implemented; P7 is plan.** The design is
 [DESIGN-PRESENCE.md](DESIGN-PRESENCE.md); this document is the order it gets built
 in, what each phase delivers, and what proves it.
 
@@ -393,6 +393,58 @@ and `scenarios/uas_presence.exs` (notifier: accept, notify, terminate).
 monitor shows the SUBSCRIBE / 200 / NOTIFY sequence, and a Linphone client
 subscribing to the notifier displays the state it receives. This phase is what
 says whether the layer is usable; everything after it is productisation.
+
+**Delivered 2026-09-21.** Four things settled differently from the paragraphs
+above:
+
+- **the package a presence server serves is a config key**, `config
+  event_package: "presence"`, read by `Elixip.ScenarioUAS` the way `domains:` is
+  read for a call server. A scenario that declares none is not checked at the
+  factory at all — its instance's `accept_subscription/1` still answers the 489,
+  so a `dialog` or a proprietary package needs no change here.
+- **the factory serves both halves.** SUBSCRIBE and PUBLISH land on the same
+  presence slot and get an instance of the same scenario; which of the two it
+  answers is decided by the states it writes. So `uas_presence.exs` also answers
+  a PUBLISH — a Linphone that publishes its own state gets a 200 rather than a
+  transaction that times out — while keeping nothing, since the collection is
+  kelixip's (P7).
+- **`spawn_child/2` refuses `:uas_presence` as a sub-FSM**, beside `:uas_register`
+  and for the same reason: both are reached through a factory registered as the
+  processing module for their method, not through a per-child dispatcher like
+  `SIP.Scenario.CallDispatcher`. A sub-FSM would wait for a request that is
+  routed elsewhere, so it says so instead.
+- **the watcher reads a NOTIFY through the framework.**
+  `SIP.Session.SubscribeUAC.notified_document/1` hands back the document the
+  event package made of the body — the package of the subscription we hold, or
+  the one the NOTIFY's own `Event` names when the 200 has not come back yet. The
+  reference watcher would otherwise have re-derived a content type and an XML
+  parser in a `defp`, which is the symptom CLAUDE.md names.
+
+The end-to-end run is what found the one defect of this phase, and it is a
+framework one: a script `notify/1`s on every SUBSCRIBE it accepts, including an
+un-SUBSCRIBE — so a watcher was sent `active;expires=0` one second before the
+final NOTIFY that contradicted it. `accept_subscription/1` now marks a
+subscription granted 0 as **terminated** (kamailio's status 3), and `notify/1` on
+a terminated subscription sends nothing: the only NOTIFY still owed is the final
+one, which is the dialog's (decision 4). Left in the script, every notifier ever
+written would have had to know it.
+
+**Files** `elixipp/ElixippScenarioUAS.ex`, `framework/SIPSessionSubscribe.ex`,
+`framework/SIPFSLHost.ex`, `framework/SIPDialogImpl.ex`,
+`apps/elixipp/lib/elixipp/ElixippCLI.ex`, `apps/elixip2/scenarios/uac_subscribe.exs`,
+`apps/elixip2/scenarios/uas_presence.exs`, `ELIXIPP.md`,
+`test/uas_presence_test.exs`, `test/support/subscription_suite.ex`.
+
+**Tests** `test/uas_presence_test.exs` drives the two reference scenarios — the
+files an operator runs, not fixtures written to pass — through the factory over
+the mockup transport, and `test/reference_scenarios_test.exs` picks them up on
+its own. The un-SUBSCRIBE regression lives in the subscription suite, so it is
+asserted once per event package.
+
+Proven on the wire on 2026-09-21, two `elixipp` processes on localhost UDP:
+SUBSCRIBE / 200 / NOTIFY, the dialog's own refresh at half the granted lifetime
+with its NOTIFY, then un-SUBSCRIBE / 200 / final NOTIFY and both scenarios ending
+successfully. The Linphone half of the "done when" is the operator's.
 
 ### P7 — kelixip
 

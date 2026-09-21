@@ -336,6 +336,31 @@ defmodule SIP.Test.SubscriptionSuite do
           assert_receive {:sip_mockup, {:response_sent, 489, %{callid: ^cid}}}, 2_000
         end
 
+        test "answers an un-SUBSCRIBE with the final NOTIFY and nothing else" do
+          SIP.Test.PresenceUAS.serve(Fixture.Notifier)
+          tp = attach("notifier-unsubscribe")
+
+          req = subscribe(instance: "notifier-unsubscribe")
+          cid = req.callid
+          Mockup.inject(tp, req)
+          assert_receive {:sip_mockup, {:response_sent, 200, %{callid: ^cid}}}, 2_000
+          assert_receive {:sip_mockup, {:request_sent, :NOTIFY, %{callid: ^cid}}}, 2_000
+
+          # `Expires: 0` is accepted like any other SUBSCRIBE, and what it accepts
+          # is the end of the subscription. The script notifies as it does on any
+          # refresh — and the state it hands over must NOT go out: the next NOTIFY
+          # on this dialog is the terminated one, or a watcher is told `active`
+          # one second before it is told the subscription is over.
+          Mockup.inject(tp, refresh(req, 2) |> Map.put(:expires, 0))
+          assert_receive {:sip_mockup, {:response_sent, 200, %{callid: ^cid} = rsp}}, 2_000
+          assert SIP.Msg.Ops.expires_header(rsp) == 0
+
+          assert_receive {:sip_mockup, {:request_sent, :NOTIFY, %{callid: ^cid} = notify}}, 3_000
+
+          assert {:terminated, _params} = SIP.Msg.Ops.subscription_state(notify),
+                 "an un-SUBSCRIBE was followed by a NOTIFY that was not the final one"
+        end
+
         test "sends the final NOTIFY itself when the granted lifetime lapses" do
           # One second, granted by the scenario over what the watcher asked for.
           # The script says nothing about the end of the subscription — that is

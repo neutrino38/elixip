@@ -3,8 +3,10 @@
 #     elixipp --listen udp:5060 apps/elixip2/scenarios/uas_presence.exs
 #     elixipp apps/elixip2/scenarios/uac_subscribe.exs
 #
-# The target is the `watch` config key below; an external JSON config overrides
-# it, along with the credentials (see README, "Paramétrage par fichier JSON").
+# The presentity it watches is the `watch` key of the config block below: edit it,
+# the way uac_invite.exs's callee number is edited. `-c accounts.json` carries the
+# credentials and the domain of the run, not this target — the external JSON
+# validates a fixed set of keys (see ELIXIPP.md, "JSON parameterisation").
 #
 # Three things this scenario deliberately does NOT do, because the framework
 # does them: answer each NOTIFY 200 (the dialog does, before the request is even

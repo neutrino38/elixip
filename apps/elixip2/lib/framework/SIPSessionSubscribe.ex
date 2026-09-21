@@ -439,7 +439,11 @@ defmodule SIP.Session.Notifier do
         user_agent: Map.get(req, :useragent),
         ref: make_ref()
       }
-      |> SIP.Subscription.put_status(:active)
+      # An un-SUBSCRIBE is accepted like any other (RFC 6665 §4.4.4 makes it a
+      # lifetime of zero, not a refusal), and what it accepts is the END of the
+      # subscription: kamailio's `terminated`, not an `active` row with nothing
+      # left to run.
+      |> SIP.Subscription.put_status(if granted > 0, do: :active, else: :terminated)
       |> SIP.Subscription.grant(granted)
 
     fields =
@@ -483,7 +487,18 @@ defmodule SIP.Session.Notifier do
         SIP.Context.set(sip_ctx, :lasterr, {:error, :no_subscription})
 
       %SIP.Subscription{} = sub ->
-        send_notify(sip_ctx, sub, doc)
+        if SIP.Subscription.status(sub) == :terminated do
+          # The subscription is over — an un-SUBSCRIBE, or a lifetime that has
+          # lapsed — and the only NOTIFY still owed is the final one, which is
+          # the dialog's (design decision 4). A state sent here would reach the
+          # watcher as `active;expires=0` one second before the termination it
+          # contradicts, and every notifier script would have to know not to send
+          # it.
+          Logger.debug("notify/1 on a subscription that has ended; nothing sent")
+          SIP.Context.set(sip_ctx, :lasterr, :ok)
+        else
+          send_notify(sip_ctx, sub, doc)
+        end
     end
   end
 
