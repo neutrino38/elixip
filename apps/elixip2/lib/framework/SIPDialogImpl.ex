@@ -1077,19 +1077,22 @@ defmodule SIP.DialogImpl do
         {:ok, arm_expiration_timer(state, req) |> Map.put(:app, app_id)}
 
       # Session has not been created. Abort dialog and propagate the requested
-      # SIP status. The stop reason is the 4-tuple {:reject, code, reason, totag}
-      # — a VALID GenServer.init/1 stop return — which SIP.Dialog.start_dialog and
-      # process_incoming_request map back to a SIP response on the server
-      # transaction (registrar quota 503, UAS domain control 604, …). The totag
-      # (generated above) is embedded because a reply with code > 100 needs one.
+      # SIP status. The stop reason is the 5-tuple
+      # {:reject, code, reason, fields, totag} — a VALID GenServer.init/1 stop
+      # return — which SIP.Dialog.start_dialog and process_incoming_request map
+      # back to a SIP response on the server transaction (registrar quota 503,
+      # UAS domain control 604, …). The totag (generated above) is embedded
+      # because a reply with code > 100 needs one.
       {:reject, code, reason} ->
-        Logger.info(
-          dialogpid: "#{inspect(self())}",
-          module: __MODULE__,
-          message: "App rejected the request with #{code} #{reason}. Aborting dialog creation."
-        )
+        reject_dialog(state, code, reason, [])
 
-        {:stop, {:reject, code, reason, state.totag}}
+      # A refusal that has to carry a header to be actionable — the `Allow-Events`
+      # of a 489 (RFC 6665 §4.4.7), as mandatory to a watcher as `Min-Expires` is
+      # on a 423: without it the peer is told "not that package" and never which
+      # ones it could ask for. The fields travel with the code rather than being
+      # composed here, because what a domain serves is the application's to know.
+      {:reject, code, reason, fields} when is_list(fields) ->
+        reject_dialog(state, code, reason, fields)
     end
   end
 
@@ -1169,6 +1172,16 @@ defmodule SIP.DialogImpl do
         Logger.error(Exception.format(:error, err, __STACKTRACE__))
         {:stop, :transactionfailure}
     end
+  end
+
+  defp reject_dialog(state, code, reason, fields) do
+    Logger.info(
+      dialogpid: "#{inspect(self())}",
+      module: __MODULE__,
+      message: "App rejected the request with #{code} #{reason}. Aborting dialog creation."
+    )
+
+    {:stop, {:reject, code, reason, fields, state.totag}}
   end
 
   @impl true

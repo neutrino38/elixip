@@ -59,11 +59,11 @@ kelixip is a SIP application server: declarative per-domain dispatch (config.tom
 + domains.toml) onto scenario scripts, a REST/CLI control surface (kelictl), and
 Prometheus metrics.
 
-The core ships NO SIP function. The registrar, the authentication back-end and the
-conference mixer are loadable modules delivered as separate packages
-(kelixip-mod-registrar, kelixip-mod-auth_db, kelixip-mod-mcu) which drop their
-bytecode into the root-owned module directory; a deployment installs only what it
-uses.
+The core ships NO SIP function. The registrar, the authentication back-end, the
+conference mixer and the presence collection are loadable modules delivered as
+separate packages (kelixip-mod-registrar, kelixip-mod-auth_db, kelixip-mod-mcu,
+kelixip-mod-presence) which drop their bytecode into the root-owned module
+directory; a deployment installs only what it uses.
 
 This package embeds its own Erlang runtime — no system Erlang or Elixir is needed.
 
@@ -99,6 +99,21 @@ Unlike the other modules, this one needs a service to talk to: at least one
 [mediaserver.pool.<name>] entry pointing at a reachable `mediaserver` process. The
 address announced in the SDP is that server's own setting (`--public-ip`), never
 kelixip's. Installing the package is not enough to make a conference work.
+
+%package mod-presence
+Summary:        Presence collection module for kelixip
+Requires:       %{name} = %{version}-%{release}
+
+%description mod-presence
+The presence collection (RFC 3856 / RFC 3903): the published state of each
+presentity with its entity-tag, the live subscriptions to it, and the fan-out that
+turns one PUBLISH into one NOTIFY per watcher. Its records are kamailio's
+presentity and active_watchers rows, held in memory. Enable it with a
+[module.presence] block in config.toml, and declare the packages a domain serves
+with [[domain.presence]] blocks in domains.toml.
+
+Who may watch whom is NOT decided here: the reference scripts are, and that is
+where a deployment writes its rule.
 
 %prep
 %setup -q
@@ -253,8 +268,29 @@ fi
 # provides them, so a host that has them can run them.
 %{_datadir}/%{name}/mcu*.exs
 
+%files mod-presence
+%doc doc/modules/presence.md
+%{kelixdir}/modules/Elixir.Kelix.Mod.Presence*.beam
+# The two reference scripts, one per method. They call this module's verbs and
+# nothing else provides them.
+%{_datadir}/%{name}/presence-*.exs
+
 %changelog
 * Fri Sep 18 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-1
+- Presence (RFC 6665 / 3856 / 3903): SUBSCRIBE, PUBLISH and the NOTIFYs between
+  them. New subpackage kelixip-mod-presence — the collection, the entity-tags and
+  the fan-out — with the reference scripts presence-subscribe.exs and
+  presence-publish.exs.
+- domains.toml: [[domain.presence]] is now an array of tables, ONE PER EVENT
+  PACKAGE, each naming its subscribe and publish script. A single
+  [domain.presence] table is refused: replace it with a block carrying
+  event-package = "presence". A package a domain declares none for is answered
+  489, with Allow-Events naming the ones it serves.
+- An out-of-dialog MESSAGE is no longer routed to the presence function: it
+  carries no Event and page-mode chat is a function of its own. It is answered
+  405 until [[domain.chat]] lands.
+- OPTIONS now advertises what this server implements: INVITE, ACK, CANCEL, BYE,
+  SUBSCRIBE, PUBLISH and NOTIFY join REGISTER and OPTIONS in Allow.
 - The Finite State Language leaves the tree: it is now the separate package
   finite_state_language (OTP app :fsl, Apache-2.0), and SIP plugs into it through
   SIP.FSL.Host. Scripts keep the names they use: SIP.Scenario and the other SIP

@@ -89,6 +89,15 @@ defmodule Kelix.Metrics do
         description: "Registrar events (registered / unregistered / expired / disconnected)"
       ),
 
+      # Presence — the collection's lifecycle, per domain. `published` and
+      # `removed` are what a publisher did; `expired` is what the sweep found.
+      counter("kelix.presence.event.count",
+        event_name: [:kelix, :presence, :event],
+        measurement: :count,
+        tags: [:domain, :event],
+        description: "Presence events (published / removed / expired)"
+      ),
+
       # Gauges (emitted by the poller).
       last_value("kelix.calls.active",
         event_name: [:kelix, :poll, :calls],

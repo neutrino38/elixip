@@ -149,11 +149,11 @@ ln -s ../lib/kelixip/bin/kelictl "$root/usr/sbin/kelictl"
 ln -s ../lib/kelixip/bin/kelixip "$root/usr/sbin/kelixip"
 
 # script_dir — the reference scenario scripts. The ones that drive a module-less
-# core stay here; the mcu scripts are unusable without kelixip-mod-mcu (every
-# conference verb they call is the module's), so build_module ships them instead.
+# core stay here; the mcu and presence scripts are unusable without their module
+# (every verb they call is its own), so build_module ships them instead.
 install -d -m 0755 "$root/usr/share/kelixip"
 for exs in "$stage"/scripts/*.exs; do
-  case ${exs##*/} in mcu*.exs) continue ;; esac
+  case ${exs##*/} in mcu*.exs | presence-*.exs) continue ;; esac
   install -m 0644 "$exs" "$root/usr/share/kelixip/"
 done
 
@@ -241,6 +241,7 @@ build_module() {
 build_module kelixip-mod-registrar 'Elixir.Kelix.Mod.Registrar*.beam' "$DEBDIR/control-mod-registrar.in" 'registrar.md'
 build_module kelixip-mod-auth-db   'Elixir.Kelix.Mod.AuthDb*.beam'    "$DEBDIR/control-mod-auth-db.in"   'auth_db.md'
 build_module kelixip-mod-mcu       'Elixir.Kelix.Mod.Mcu*.beam'       "$DEBDIR/control-mod-mcu.in"       'mcu*.md' 'mcu*.exs'
+build_module kelixip-mod-presence  'Elixir.Kelix.Mod.Presence*.beam'  "$DEBDIR/control-mod-presence.in"  'presence.md' 'presence-*.exs'
 
 echo "==> packages in packaging/dist:"
 ls -1 "$DIST"/*.deb

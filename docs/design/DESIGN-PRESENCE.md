@@ -277,9 +277,14 @@ without waking the scenario; the other five are terminal and surface.
 ### What this leaves to the module
 
 The `presence` module owns the collection: resource → subscribers, the published
-state per resource, the authorisation policy fed by `presence.winfo`, and the
-fan-out that turns one PUBLISH into N NOTIFYs. It calls into this layer to send
-each of them; it never parses a SUBSCRIBE.
+state per resource, and the fan-out that turns one PUBLISH into N NOTIFYs. It
+calls into this layer to send each of them; it never parses a SUBSCRIBE.
+
+**Admission is not its.** Whether a watcher may watch a presentity is decided by
+the subscribe script, where every other per-deployment decision lives — a key in
+the module would be a second place deciding it. The consent flow that answers the
+question properly (`presence.winfo` feeding RFC 5025 authorization rules) plugs
+into this same collection when it arrives.
 
 ## The Silo module
 
@@ -368,8 +373,8 @@ the dialog carrying it), and it touches nothing else in that database.
 `watchers`, `xcap` and `pua` are **not part of this**. A kamailio base has them
 and they stay exactly as they are: kelixip neither reads, writes, creates nor
 migrates them. `watchers` is the consent decision, which arrives with
-`presence.winfo` and not before — until then the authorisation policy is a config
-key, and inventing rows in a table we do not use would be writing state nobody
+`presence.winfo` and not before — until then admission is decided by the subscribe
+script, and inventing rows in a table we do not use would be writing state nobody
 reads. `xcap` belongs to the buddy list (RLS), and `pua` is kamailio's own client
 side, whose counterpart here is the watcher scenario, not a row.
 

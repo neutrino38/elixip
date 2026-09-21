@@ -1,5 +1,19 @@
 kelixip (1.6.0-1) stable; urgency=low
 
+  * Presence (RFC 6665 / 3856 / 3903): SUBSCRIBE, PUBLISH and the NOTIFYs between
+    them. New package kelixip-mod-presence — the collection, the entity-tags and
+    the fan-out — with the reference scripts presence-subscribe.exs and
+    presence-publish.exs.
+  * domains.toml: [[domain.presence]] is now an array of tables, ONE PER EVENT
+    PACKAGE, each naming its subscribe and publish script. A single
+    [domain.presence] table is refused: replace it with a block carrying
+    event-package = "presence". A package a domain declares none for is answered
+    489, with Allow-Events naming the ones it serves.
+  * An out-of-dialog MESSAGE is no longer routed to the presence function: it
+    carries no Event and page-mode chat is a function of its own. It is answered
+    405 until [[domain.chat]] lands.
+  * OPTIONS now advertises what this server implements: INVITE, ACK, CANCEL, BYE,
+    SUBSCRIBE, PUBLISH and NOTIFY join REGISTER and OPTIONS in Allow.
   * The Finite State Language leaves the tree: it is now the separate package
     finite_state_language (OTP app :fsl, Apache-2.0), and SIP plugs into it
     through SIP.FSL.Host. Scripts keep the names they use: SIP.Scenario and the

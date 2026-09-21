@@ -1,6 +1,6 @@
 # presence-basic-plan.md — building basic presence
 
-**Status: P1 through P6 are implemented; P7 is plan.** The design is
+**Status: P1 through P7 are implemented.** The design is
 [DESIGN-PRESENCE.md](DESIGN-PRESENCE.md); this document is the order it gets built
 in, what each phase delivers, and what proves it.
 
@@ -24,7 +24,7 @@ Basic presence is **one watcher, one resource, full state**.
 
 | Out of v1 | Where it re-enters |
 |---|---|
-| consent / `presence.winfo` (RFC 3857, 3858, 5025) | a second `SIP.EventPackage` over the same layer and the same collection; v1's policy is a config key |
+| consent / `presence.winfo` (RFC 3857, 3858, 5025) | a second `SIP.EventPackage` over the same layer and the same collection; v1's admission is one `case` in the subscribe script |
 | the buddy list: RLS (RFC 4662) + XCAP (RFC 4825/4826) | a client subscribes once per buddy in v1 |
 | the `dialog` package (RFC 4235) and shared line appearance (RFC 7463) | objective 1's call occupancy, a third package |
 | the ACD service building block | needs a queue object and the B2BUA hunt, neither of which is presence |
@@ -455,8 +455,7 @@ subscribe = "presence-subscribe.exs"
 publish = "presence-publish.exs"
 
 [module.presence]
-policy = "registered"          # open | registered | allowlist
-default_expires = 3600
+call_timeout_ms = 5000
 ```
 
 **Delivers**
@@ -469,12 +468,10 @@ default_expires = 3600
   raises the **489** itself, before any script runs; `Allow-Events` is composed per
   domain from its blocks.
 - `Kelix.Mod.Presence`: the collection — resource → subscribers, the published
-  document and its entity-tag per resource, the authorization policy, and the
-  fan-out that turns one PUBLISH into N pushes. One per domain, isolated, like the
-  registrar ([DESIGN-KELIXIP.md](DESIGN-KELIXIP.md#7-the-module-system)). Its
-  records are `presentity` and `active_watchers` rows held in memory. The policy
-  is a config key and writes nothing: `watchers` is kamailio's consent table and
-  belongs to the winfo phase, so v1 neither fills it nor reads it.
+  document and its entity-tag per resource, and the fan-out that turns one PUBLISH
+  into N pushes. One per domain, isolated, like the registrar
+  ([DESIGN-KELIXIP.md](DESIGN-KELIXIP.md#7-the-module-system)). Its records are
+  `presentity` and `active_watchers` rows held in memory.
 - `kelictl presence` renders those columns under those names — `etag`, `expires`,
   `status`, `event`, `presentity_uri` — so an operator reading it and an operator
   reading the kamailio table they migrated from are reading one vocabulary.
@@ -489,14 +486,68 @@ default_expires = 3600
   `packaging/config/domains.toml`, and `docs/kelixip/modules/presence.md`.
 - `Kelix.Options`: `@allow` gains SUBSCRIBE, PUBLISH and NOTIFY.
 
-**Tests** `apps/kelixip/test/router_presence_test.exs` (Event → block, and the
-489), `domains_test.exs` (several blocks, a duplicate package refused),
-`apps/kelix_modules/test/presence_test.exs` (collection, policy, fan-out, a
-subscriber dying) and `presence_script_test.exs` — both reference scripts driven
-over the mockup transport, the way `registrar_script_test.exs` is.
+**Tests** `apps/kelixip/test/router_test.exs` (Event → block, and the 489 with its
+`Allow-Events`), `domains_test.exs` (several blocks, a duplicate package refused,
+the pre-P7 single table),  `apps/kelix_modules/test/presence_test.exs`
+(collection, fan-out, a watcher dying, the control surface) and
+`presence_script_test.exs` — both reference scripts driven through spawned
+instances, the way `registrar_script_test.exs` is.
 
 **Done when** a node with one domain, `[module.presence]` and the two scripts
 serves a Linphone → Linphone exchange, and `kelictl presence list` shows it.
+
+**Delivered 2026-09-21.** Five things settled differently from the paragraphs
+above, the first of them the one that matters:
+
+- **the module decides nothing about who may watch whom.** The `policy` key —
+  `open | registered | allowlist` — is not delivered and is not deferred: it is
+  **dropped**. Admission is the script's, and `presence-subscribe.exs` is where a
+  deployment writes its rule; a key here would be a second place deciding it, and
+  the real answer is RFC 5025 authorization rules carried over XCAP with
+  `presence.winfo` to feed them, which is a phase of its own plugging into this
+  same collection. What the reference script *does* check is that the presentity
+  is a subscriber of this deployment (`Kelix.Mod.AuthDb.subscriber?/2`, new —
+  the existence question without the secret that answers it); anything else is
+  **404**, never an empty state a watcher would wait on for an hour.
+  `[module.presence]` carries `call_timeout_ms` and nothing else: `default_expires`
+  goes the same way, the bounds of a subscription belonging to the event package
+  (RFC 6665 §4.4.1).
+- **a refusal can carry headers now.** The 489 is worth sending only with the
+  `Allow-Events` naming what the domain *does* serve (§4.4.7), and the
+  application's verdict could not carry one: `{:reject, code, reason}` reached the
+  server transaction through four layers that replied with `fields = []`. The
+  tuple gains an optional fourth element, all the way down —
+  `SIP.DialogImpl.init/1`, `SIP.Dialog.start_dialog/5`, `process_UAS_request/2` —
+  and the three-element shape is untouched, so every other rejection reads as it
+  did.
+- **MESSAGE leaves the presence function.** It carries no `Event`, so with one
+  block per package it can name none of them; page-mode chat is a function of its
+  own ([DESIGN-CHAT.md](DESIGN-CHAT.md#dispatch-chat-is-a-function-of-its-own))
+  and an out-of-dialog MESSAGE is answered **405** until `[[domain.chat]]` lands.
+  Routing it to a subscription script would have been a choice nothing documents.
+- **`publish` is optional on a block, `subscribe` is not.** A package published by
+  nobody — `dialog` (RFC 4235) — is subscribed to all the same, and a PUBLISH for
+  it is **405** rather than a script that would have to refuse it.
+- **the subscription's identity columns were not filled.** `watcher_username`,
+  `watcher_domain`, `to_user`, `to_domain`, `from_user` and `from_domain` were
+  left `nil` by P3, and `kelictl presence watchers` cannot name a watcher without
+  them. They are filled at acceptance, through one new reading in the message
+  layer (`SIP.Msg.Ops.header_aor/2`). `local_contact` stays empty: it is the
+  dialog's to know, and nothing reads it yet.
+
+`Kelix.Options` advertises `INVITE, ACK, CANCEL, BYE` beside the new `SUBSCRIBE,
+PUBLISH, NOTIFY`: the call function had landed without the list being updated, and
+a probe catches that lie in one request.
+
+**Files** `apps/kelixip/lib/kelix/{domain,domains,router,options,control,metrics}.ex`,
+`control/cli.ex`, `metrics/emit.ex`, `module_supervisor.ex`,
+`apps/kelix_modules/lib/kelix/mod/{presence,auth_db}.ex`,
+`apps/elixip2/lib/framework/{SIPMsgOps,SIPSessionSubscribe,SIPDialog,SIPDialogImpl,SIPTransactionCommon}.ex`,
+`apps/kelixip/scripts/presence-{subscribe,publish}.exs`, `packaging/*`,
+`docs/kelixip/{installation.md,modules/presence.md}`.
+
+**Not proven yet:** the Linphone → Linphone exchange on a real node, and
+`kelictl presence list` against it. Everything below that line is green.
 
 ## 4. Decisions this plan takes
 
@@ -521,10 +572,14 @@ serves a Linphone → Linphone exchange, and `kelictl presence list` shows it.
    domain, and `Kelix.Options` deliberately does not derive its answer from
    reloadable configuration. It goes on the responses that already know their
    domain: the 2xx to a SUBSCRIBE, and the 489.
-4. **The authorization policy is a config key, not a document.** `open |
-   registered | allowlist`. RFC 5025's policy document and the `presence.winfo`
-   flow that feeds it are the consent phase, and they plug into this same
-   collection.
+4. **The authorization policy is the script's, not a config key.** *Revised on
+   delivery (P7): this decision read "a config key, `open | registered |
+   allowlist`", and the key is not delivered.* Admission is one `case` in
+   `presence-subscribe.exs`, where every other per-deployment decision already
+   lives; the reference script checks that the presentity exists in the subscriber
+   base and admits, and a rule of one's own is written in that same state. RFC
+   5025's policy document and the `presence.winfo` flow that feeds it are the
+   consent phase, and they plug into this same collection.
 5. **A PUBLISH instance is short-lived.** Its dialog lives as long as its
    transaction; the entity-tag lifecycle is collection state.
 6. **The `presence` module does not register its own event package.** The three

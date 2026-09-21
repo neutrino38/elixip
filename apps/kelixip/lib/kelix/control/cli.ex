@@ -537,9 +537,11 @@ defmodule Kelix.Control.CLI do
         "active calls:  #{d.active_calls}",
         "registrations: #{d.registrations}",
         "registrar:     #{format_function(d.registrar)}",
-        "presence:      #{format_function(d.presence)}",
-        if(d.dial_plan == [], do: "dial-plan:     (disabled)", else: "dial-plan:")
-      ] ++ format_dial_plan(d.dial_plan)
+        if(d.presence == [], do: "presence:      (disabled)", else: "presence:")
+      ] ++
+        format_presence(d.presence) ++
+        [if(d.dial_plan == [], do: "dial-plan:     (disabled)", else: "dial-plan:")] ++
+        format_dial_plan(d.dial_plan)
 
     {0, Enum.join(lines, "\n")}
   end
@@ -575,7 +577,8 @@ defmodule Kelix.Control.CLI do
         # Named for what it is: this is the pool's own probe of the adapter channel,
         # not the health a conference rides — the module lines below carry that one.
         "health:       #{if m.healthy, do: "up", else: "down"} (pool probe)"
-      ] ++ mediaserver_status_lines(Map.get(m, :server, :unknown)) ++
+      ] ++
+        mediaserver_status_lines(Map.get(m, :server, :unknown)) ++
         module_view_lines(m.modules)
 
     {0, Enum.join(lines, "\n")}
@@ -1064,6 +1067,27 @@ defmodule Kelix.Control.CLI do
     Enum.map_join(Enum.sort(cfg), " ", fn {k, v} -> "#{k}=#{v}" end)
   end
 
+  # One line per event package, naming the script each method is routed to. Not
+  # numbered, unlike the dial-plan: the package is an exact key, so declaration
+  # order decides nothing.
+  defp format_presence(blocks) do
+    pw = blocks |> Enum.map(&String.length(&1.event_package)) |> Enum.max(fn -> 0 end)
+
+    for b <- blocks,
+        {method, script} <- [{"SUBSCRIBE", b.subscribe}, {"PUBLISH", b.publish}],
+        do:
+          "  #{String.pad_trailing(b.event_package, pw)} #{String.pad_trailing(method, 9)} -> " <>
+            format_presence_script(script)
+  end
+
+  # A package with no `publish` script: the method is not served on it, and the
+  # router answers 405. Printed, because an operator wondering why their PUBLISH
+  # is refused reads this view first.
+  defp format_presence_script(nil), do: "(not served)"
+
+  defp format_presence_script(%{script: script} = entry),
+    do: "#{script}  #{format_script_module(entry)}"
+
   # Numbered, because the dial-plan is first-match-wins: the position *is* the
   # semantics, and "which rule caught this call" is the usual question. The module
   # is printed next to the script because it is the file's `defmodule`, not its
@@ -1244,7 +1268,8 @@ defmodule Kelix.Control.CLI do
     ] ++
       codec_lines(status) ++
       [
-        "hardware:     VAAPI " <> yes_no(server_fact(status, ["capabilities", "hardware", "vaapi"])),
+        "hardware:     VAAPI " <>
+          yes_no(server_fact(status, ["capabilities", "hardware", "vaapi"])),
         "text:         " <> text_transports(status),
         "bfcp:         " <> yes_no(server_fact(status, ["capabilities", "bfcp"])),
         "encryption:   " <> names(server_fact(status, ["security", "modes"]), ", "),

@@ -340,7 +340,7 @@ defmodule Kelix.Control do
       functions:
         for(f <- [:registrar, :calls, :presence], Kelix.Router.function_enabled?(d, f), do: f),
       registrar: with_module(d.registrar, loaded),
-      presence: with_module(d.presence, loaded),
+      presence: Enum.map(d.presence, &render_presence_block(&1, loaded)),
       dial_plan: Enum.map(d.dial_plan, &render_rule(&1, loaded)),
       active_calls: Map.get(active, d.name, 0),
       registrations: map_size(registrations_for(d.name))
@@ -373,6 +373,18 @@ defmodule Kelix.Control do
   end
 
   defp with_module(cfg, _loaded), do: cfg
+
+  # One row per event package the domain serves. The two scripts are shown apart
+  # because they answer two different methods: an operator reading "SUBSCRIBE goes
+  # here, PUBLISH goes there" off this view is reading the router's own decision.
+  # `publish` absent = the package is subscribed to and published by nothing (405).
+  defp render_presence_block(%Kelix.PresenceBlock{} = block, loaded) do
+    %{
+      event_package: block.event_package,
+      subscribe: with_module(%{script: block.subscribe}, loaded),
+      publish: block.publish && with_module(%{script: block.publish}, loaded)
+    }
+  end
 
   defp render_rule(%Kelix.DialRule{default?: true, script: script}, loaded),
     do: with_module(%{pattern: nil, default: true, script: script}, loaded)

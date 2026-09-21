@@ -503,8 +503,16 @@ wrong path.
 
 A request is routed by its R-URI host (falling back to the `To` host); no match
 ⇒ `404`. Then the method selects the **function** — `REGISTER` → `registrar`,
-`INVITE` → `calls`, `SUBSCRIBE`/`PUBLISH`/`MESSAGE` → `presence` — and a function
-with no block on that domain is **not enabled** ⇒ `405`.
+`INVITE` → `calls`, `SUBSCRIBE`/`PUBLISH` → `presence` — and a function with no
+block on that domain is **not enabled** ⇒ `405`.
+
+For presence there is one more step: the request's `Event` header selects which
+`[[domain.presence]]` block serves it, and a package the domain declares none for
+is answered `489 Bad Event` — before any script runs, and carrying `Allow-Events`
+with the packages it does serve.
+
+An out-of-dialog `MESSAGE` is answered `405`: page-mode chat is a function of its
+own and its dispatch is not implemented yet.
 
 ##### Wildcard aliases
 
@@ -538,7 +546,7 @@ alias folds to the nominal name, so `alice@a.umbrella.com` and `alice@b.umbrella
 both. That is the intent for a gateway; but it is not what a multi-tenant
 deployment wants.
 
-#### `[domain.registrar]` / `[domain.presence]`
+#### `[domain.registrar]`
 
 Presence of the block = the function is enabled.
 
@@ -548,6 +556,33 @@ Presence of the block = the function is enabled.
 | `default_expires` | int > 0 | no | Overrides `[module.registrar].default_expires` **for this domain** |
 | `min_expires` | int > 0 | no | Overrides `[module.registrar].min_expires` **for this domain** |
 | `keepalive_period` | int > 0 | no | *Accepted and validated, but **not applied yet** — server-initiated OPTIONS keepalive towards registered UAs is not implemented (the framework's keepalive is outbound-only).* |
+
+#### `[[domain.presence]]` — one block per event package
+
+An **array** of tables: one block per event package the domain serves, and the
+package is the key.
+
+```toml
+  [[domain.presence]]
+  event-package = "presence"
+  subscribe     = "presence-subscribe.exs"
+  publish       = "presence-publish.exs"
+```
+
+| Key | Type | Required | Meaning |
+|---|---|---|---|
+| `event-package` | string | **yes** | Matched against the request's `Event`, case-insensitively. Two blocks claiming one package reject the file |
+| `subscribe` | string | **yes** | Scenario script serving `SUBSCRIBE` for this package |
+| `publish` | string | no | Scenario script serving `PUBLISH`; absent ⇒ a `PUBLISH` for this package is answered `405` |
+
+Both scripts go through the load-time contract check, so a missing `publish`
+script is caught by `kelictl domain reload-all` rather than by the first PUBLISH.
+
+The expiry bounds of a subscription belong to the event package, so there is no
+key for them here.
+
+Upgrading from a single `[domain.presence]` table: it is refused with a message
+naming the new form. Replace it with the block above.
 
 #### `[[domain.call]]` — the dial-plan (`calls`)
 
@@ -582,6 +617,19 @@ ignored.
 
 Both expiry bounds are per-domain-overridable in `[domain.registrar]` above.
 
+#### `[module.presence]`
+
+The presence collection (`kelixip-mod-presence`): what is published about each
+presentity, who watches it, and the fan-out between them. This block lives in
+`config.toml`.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `call_timeout_ms` | int > 0 | `5000` | Facade call bound |
+
+Who may watch whom is **not** decided here — the subscribe script decides it. See
+[modules/presence.md](modules/presence.md).
+
 #### A complete example
 
 ```toml
@@ -592,6 +640,11 @@ aliases = ["sip.example.com", "203.0.113.10"]
 
   [domain.registrar]
   script = "registrar.exs"
+
+  [[domain.presence]]
+  event-package = "presence"        # the Event header selects this block
+  subscribe     = "presence-subscribe.exs"
+  publish       = "presence-publish.exs"
 
   [[domain.call]]
   pattern = "0[1-9]XXXXXXXX"        # French landline/mobile

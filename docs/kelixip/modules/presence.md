@@ -1,0 +1,243 @@
+# presence
+
+This module holds the presence collection: the state published about each
+presentity, the live subscriptions to it, and the fan-out that turns one PUBLISH
+into one NOTIFY per watcher. One collection per domain, strongly separated.
+
+The module stores and pushes. **It decides nothing about who may watch whom**:
+that is the subscribe script's, and
+[`presence-subscribe.exs`](../../../apps/kelixip/scripts/presence-subscribe.exs)
+is where a deployment writes its rule.
+
+Its records are kamailio's `presentity` and `active_watchers` rows, held in
+memory. Nothing survives a restart: a dialog cannot be resurrected, so a watcher
+re-subscribes and a publisher re-publishes.
+
+> The reference scripts are
+> [`presence-subscribe.exs`](../../../apps/kelixip/scripts/presence-subscribe.exs)
+> and [`presence-publish.exs`](../../../apps/kelixip/scripts/presence-publish.exs).
+> The design document is [DESIGN-PRESENCE.md](../../design/DESIGN-PRESENCE.md).
+
+## Installing and activating the module
+
+### Installing the `kelixip-mod-presence` package
+
+`dnf install kelixip-mod-presence` / `apt install kelixip-mod-presence`
+
+The package carries the module and the two reference scripts.
+
+### Declaring the module in config.toml
+
+```toml
+# config.toml
+[module.presence]
+call_timeout_ms = 5000
+```
+
+Every key has a default, so an empty `[module.presence]` block is a valid one.
+
+### Declaring the packages a domain serves, in domains.toml
+
+One `[[domain.presence]]` block per event package. The package is the key: the
+`Event` header of a SUBSCRIBE or a PUBLISH selects the block, and a package the
+domain declares none for is answered **489 Bad Event** before any script runs,
+with `Allow-Events` naming the ones it does serve.
+
+```toml
+# domains.toml
+[[domain]]
+name = "example.com"
+
+  [[domain.presence]]
+  event-package = "presence"
+  subscribe     = "presence-subscribe.exs"
+  publish       = "presence-publish.exs"
+```
+
+`subscribe` is required. `publish` is optional: a package with no publish script
+answers **405** to a PUBLISH.
+
+Two blocks declaring the same event package are refused when the file is loaded.
+
+## Parameters
+
+Module block — `[module.presence]` (in `config.toml`):
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `call_timeout_ms` | integer | `5000` | Upper bound on a facade call (ms) |
+
+The expiry bounds of a subscription and of a publication belong to the event
+package (RFC 6665 §4.4.1), so this block carries none.
+
+Per-domain block — `[[domain.presence]]` (activates the function for a domain):
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `event-package` | string | **required** | The package this block serves (`presence`, `dialog`, …) |
+| `subscribe` | string | **required** | Script serving SUBSCRIBE for this package |
+| `publish` | string | — | Script serving PUBLISH; absent ⇒ `405` |
+
+## Facades
+
+```elixir
+import Kelix.Mod.Presence, only: [publish: 2, watch: 2, unwatch: 1, state_of: 2]
+```
+
+Each facade is non-blocking: a collection that is down answers `{:error, :down}`
+and a slow one `{:error, :timeout}`, leaving the script in control of the SIP
+response.
+
+### `publish/2`
+
+```elixir
+publish(sip_ctx, %SIP.Publication{}) ::
+  {:ok, etag :: String.t() | nil, expires :: non_neg_integer}
+  | {:error, 412}
+  | {:error, :down | :timeout}
+```
+
+Stores what a PUBLISH asks for and pushes the result to every watcher of the
+resource. The publication is the one `check_publish/1` handed the script.
+
+| Return | Meaning |
+|---|---|
+| `{:ok, etag, expires}` | Published. A **new** entity-tag is minted per publication (RFC 3903 §4.1); it is what the next refresh must present in `SIP-If-Match` |
+| `{:ok, nil, 0}` | Removal (`Expires: 0`). No entity-tag: there is no state left to name |
+| `{:error, 412}` | The tag presented is unknown or spent. The publisher must start over with an initial PUBLISH |
+
+A refresh keeps the document it refreshes and moves only its lifetime; a
+modification replaces it.
+
+### `watch/2`
+
+```elixir
+watch(sip_ctx, %SIP.Subscription{}) :: {:ok, document | nil} | {:error, :down | :timeout}
+```
+
+Registers the calling instance as a watcher of the subscription it has just
+accepted, and hands back the state as it stands — `nil` when nothing has been
+published about the resource yet.
+
+The instance is monitored: a watcher that dies with its dialog is dropped on its
+own. A subscription granted zero seconds (an un-SUBSCRIBE) is not stored.
+
+### `unwatch/1`
+
+```elixir
+unwatch(sip_ctx) :: :ok | {:error, :down | :timeout}
+```
+
+Stops watching. For the scenario that ends its subscription and keeps running.
+
+### `state_of/2`
+
+```elixir
+state_of(sip_ctx, {username, event_package}) :: document | nil | {:error, :down | :timeout}
+```
+
+The document published about a resource, for a script that wants it without
+subscribing.
+
+## Control commands
+
+| Command | REST | Description |
+|---|---|---|
+| `kelictl presence list --domain D` | `GET /modules/presence/presentities` | Published states, one row per entity-tag |
+| `kelictl presence show --domain D --aor bob` | `GET /modules/presence/presentities/bob` | One presentity: its states and its watchers |
+| `kelictl presence watchers --domain D --aor bob` | `GET /modules/presence/presentities/bob/watchers` | The live subscriptions to one presentity |
+| `kelictl presence remove --domain D --aor bob` | `DELETE /modules/presence/presentities/bob` | Drops the published state and tells the watchers |
+
+The columns are kamailio's, under kamailio's names — `presentity_uri`, `event`,
+`etag`, `expires`, `status`, `callid`.
+
+`remove` drops the published state, not the subscriptions: a watcher stays
+subscribed and is told there is no state left.
+
+## Events
+
+The fan-out reaches the watcher's **scenario instance**, which sends the NOTIFY
+from its own state:
+
+```elixir
+{:presence, :state, {username, domain, event_package}, document | nil}
+```
+
+`nil` means nothing is published about the resource any more — a removal, or a
+publication whose lifetime lapsed. What to notify then is the script's decision;
+the reference script sends an explicitly closed state.
+
+## Examples
+
+Answering a SUBSCRIBE, in `presence-subscribe.exs`:
+
+```elixir
+state subscribe do
+  case accept_subscription(
+         package: ctx_get(:event_package),
+         allow_events: Kelix.Domains.event_packages(sip_ctx.domain)
+       ) do
+    {:ok, sub} ->
+      case Kelix.Mod.Presence.watch(sip_ctx, sub) do
+        {:ok, doc} ->
+          notify(doc || SIP.Presence.Doc.new(sub.presentity_uri, :closed))
+          goto(subscribed, "200 + NOTIFY")
+
+        {:error, reason} ->
+          terminate_subscription(:noresource)
+          scenario_failure("presence store #{reason}")
+      end
+
+    {:error, code} ->
+      goto(wait_subscribe, "#{code}")
+  end
+end
+```
+
+Sending the state on when it changes:
+
+```elixir
+state subscribed do
+  on_events do
+    {:presence, :state, _resource, doc} ->
+      sub = last_subscription()
+      notify(doc || SIP.Presence.Doc.new(sub.presentity_uri, :closed))
+      stay("state pushed")
+  end
+end
+```
+
+Answering a PUBLISH, in `presence-publish.exs`:
+
+```elixir
+state publish do
+  case check_publish(package: ctx_get(:event_package)) do
+    {:ok, pub} ->
+      case Kelix.Mod.Presence.publish(sip_ctx, pub) do
+        {:ok, etag, expires} ->
+          reply_publish(200, etag: etag, expires: expires)
+          scenario_success("published (#{expires}s)")
+
+        {:error, 412} ->
+          reply_publish(412, "Conditional Request Failed")
+          scenario_success("412 unknown entity-tag")
+      end
+
+    {:error, code} ->
+      scenario_success("PUBLISH refused with #{code}")
+  end
+end
+```
+
+## Limitations
+
+- **Full state only.** Partial state (`application/pidf-diff+xml`, RFC 5262) is
+  not emitted.
+- **No composition.** Several publishers may hold state for one presentity at the
+  same time, each with its own entity-tag; what is notified is the most recent
+  publication, not a composite of them.
+- **In memory.** The collection does not survive a restart, and is local to one
+  node.
+- **No consent flow.** `presence.winfo` (RFC 3857/3858) and the authorization
+  rules of RFC 5025 carried over XCAP are not implemented; admission is the
+  subscribe script's.

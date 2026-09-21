@@ -429,6 +429,12 @@ defmodule SIP.Session.Notifier do
   end
 
   defp accept(sip_ctx, req, package, content_type, granted, opts) do
+    # The watcher is the From of the SUBSCRIBE, and `active_watchers` keeps it
+    # under three pairs of columns: the two addresses as sent, and the watcher
+    # itself. Read once, in the message layer, like every other header.
+    {from_user, from_domain} = SIP.Msg.Ops.header_aor(req, :from)
+    {to_user, to_domain} = SIP.Msg.Ops.header_aor(req, :to)
+
     sub =
       %SIP.Subscription{
         event: package.name(),
@@ -436,6 +442,12 @@ defmodule SIP.Session.Notifier do
         package: package,
         content_type: content_type,
         presentity_uri: presentity_uri(req),
+        watcher_username: from_user,
+        watcher_domain: from_domain,
+        from_user: from_user,
+        from_domain: from_domain,
+        to_user: to_user,
+        to_domain: to_domain,
         user_agent: Map.get(req, :useragent),
         ref: make_ref()
       }

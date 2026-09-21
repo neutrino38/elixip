@@ -1,0 +1,407 @@
+defmodule Kelix.Mod.PresenceTest do
+  # async: false — Kelix.Mod.Presence is a named singleton, shared with
+  # presence_script_test; serialize to avoid concurrent start_supervised.
+  use ExUnit.Case, async: false
+
+  alias Kelix.Mod.Presence
+
+  @domain "example.com"
+  @package "presence"
+
+  setup do
+    pid = start_supervised!({Presence, []})
+    %{pid: pid}
+  end
+
+  # A publication as `check_publish/1` hands it to the script: already read
+  # against the event package, with the operation, the tag presented and the
+  # lifetime that may be granted.
+  defp publication(user, opts \\ []) do
+    %SIP.Publication{
+      username: user,
+      domain: @domain,
+      event: @package,
+      etag: Keyword.get(opts, :etag),
+      operation: Keyword.get(opts, :operation, :initial),
+      content_type: "application/pidf+xml",
+      body: Keyword.get(opts, :body, "<presence/>"),
+      doc: Keyword.get(opts, :doc, doc(user, :open)),
+      sender: "sip:#{user}@#{@domain}"
+    }
+    |> SIP.Publication.grant(Keyword.get(opts, :expires, 3600))
+  end
+
+  defp doc(user, status, note \\ nil),
+    do: SIP.Presence.Doc.new("sip:#{user}@#{@domain}", status, note: note)
+
+  # A subscription as `accept_subscription/1` hands it back: granted, active, and
+  # naming the resource in `presentity_uri`.
+  defp subscription(presentity, watcher, opts \\ []) do
+    %SIP.Subscription{
+      callid: Keyword.get(opts, :callid, "call-#{presentity}-#{watcher}"),
+      to_tag: "totag",
+      from_tag: "fromtag",
+      event: @package,
+      event_id: Keyword.get(opts, :event_id),
+      presentity_uri: "sip:#{presentity}@#{@domain}",
+      watcher_username: watcher,
+      watcher_domain: @domain,
+      to_user: presentity,
+      to_domain: @domain
+    }
+    |> SIP.Subscription.put_status(Keyword.get(opts, :status, :active))
+    |> SIP.Subscription.grant(Keyword.get(opts, :expires, 3600))
+  end
+
+  describe "publish/2 — the entity-tag lifecycle (RFC 3903 §4.1)" do
+    test "an initial publication is granted a tag and its lifetime" do
+      assert {:ok, etag, 3600} = Presence.publish(@domain, publication("bob"))
+      assert is_binary(etag) and etag != ""
+    end
+
+    # The tag the publisher presented is spent: every successful publication gets
+    # a NEW one, which is what its next refresh must present.
+    test "a refresh presenting the tag gets a fresh one" do
+      {:ok, first, _} = Presence.publish(@domain, publication("bob"))
+
+      assert {:ok, second, 1800} =
+               Presence.publish(
+                 @domain,
+                 publication("bob", operation: :refresh, etag: first, expires: 1800)
+               )
+
+      assert second != first
+    end
+
+    # The one answer only the holder of the tags can give — everything else
+    # `check_publish/1` already refused before the script called us.
+    test "a tag this collection does not hold is 412" do
+      assert {:error, 412} =
+               Presence.publish(@domain, publication("bob", operation: :refresh, etag: "nope"))
+    end
+
+    test "a spent tag is 412 — a publisher may not replay the previous one" do
+      {:ok, first, _} = Presence.publish(@domain, publication("bob"))
+
+      {:ok, _second, _} =
+        Presence.publish(@domain, publication("bob", operation: :modify, etag: first))
+
+      assert {:error, 412} =
+               Presence.publish(@domain, publication("bob", operation: :modify, etag: first))
+    end
+
+    # A removal names no state, so it is handed no tag: one handed there would be
+    # presented on the next refresh and answered 412 for ever.
+    test "a removal answers with no entity-tag and no lifetime" do
+      {:ok, etag, _} = Presence.publish(@domain, publication("bob"))
+
+      assert {:ok, nil, 0} =
+               Presence.publish(
+                 @domain,
+                 publication("bob", operation: :remove, etag: etag, expires: 0)
+               )
+
+      assert Presence.state_of(@domain, {"bob", @package}) == nil
+    end
+
+    # A refresh carries no body (RFC 3903 §4.1): what is published stays, only
+    # its lifetime moves.
+    test "a refresh keeps the document it refreshes" do
+      published = doc("bob", :open, "In a meeting")
+      {:ok, etag, _} = Presence.publish(@domain, publication("bob", doc: published))
+
+      {:ok, _, _} =
+        Presence.publish(
+          @domain,
+          publication("bob", operation: :refresh, etag: etag, doc: nil, body: nil)
+        )
+
+      assert Presence.state_of(@domain, {"bob", @package}) == published
+    end
+
+    test "a modification replaces it" do
+      {:ok, etag, _} = Presence.publish(@domain, publication("bob"))
+      closed = doc("bob", :closed)
+
+      {:ok, _, _} =
+        Presence.publish(@domain, publication("bob", operation: :modify, etag: etag, doc: closed))
+
+      assert Presence.state_of(@domain, {"bob", @package}) == closed
+    end
+
+    # RFC 3903 §4.1: a handset and a desk phone may hold state for one presentity
+    # at the same time, each with a tag of its own. v1 emits the most recent
+    # rather than composing them — see the moduledoc.
+    test "two publishers of one presentity each keep their own tag" do
+      {:ok, phone, _} = Presence.publish(@domain, publication("bob", doc: doc("bob", :open)))
+      {:ok, desk, _} = Presence.publish(@domain, publication("bob", doc: doc("bob", :closed)))
+
+      assert phone != desk
+      assert [_, _] = Presence.presentities(@domain)
+
+      # both tags still refresh
+      assert {:ok, _, _} =
+               Presence.publish(@domain, publication("bob", operation: :refresh, etag: phone))
+
+      assert {:ok, _, _} =
+               Presence.publish(@domain, publication("bob", operation: :refresh, etag: desk))
+    end
+  end
+
+  describe "watch/2 and the fan-out" do
+    test "a watcher is handed the state as it stands" do
+      published = doc("bob", :open, "Available")
+      {:ok, _etag, _} = Presence.publish(@domain, publication("bob", doc: published))
+
+      assert {:ok, ^published} = Presence.watch(@domain, subscription("bob", "alice"))
+    end
+
+    test "a watcher of a resource nobody published gets nil, not an error" do
+      assert {:ok, nil} = Presence.watch(@domain, subscription("bob", "alice"))
+    end
+
+    # Decision 1: the push reaches the watcher's SCENARIO INSTANCE, which sends
+    # the NOTIFY from its own state — never the dialog from inside the module.
+    test "one PUBLISH becomes one push per watcher" do
+      {:ok, _} = Presence.watch(@domain, subscription("bob", "alice"))
+
+      other = watcher_process(self())
+      {:ok, _} = call_watch(other, subscription("bob", "carol"))
+
+      published = doc("bob", :open, "Back")
+      {:ok, _etag, _} = Presence.publish(@domain, publication("bob", doc: published))
+
+      resource = {"bob", @domain, @package}
+      assert_receive {:presence, :state, ^resource, ^published}
+      assert_receive {:watcher_got, ^other, {:presence, :state, ^resource, ^published}}
+    end
+
+    test "a watcher of another resource is not pushed to" do
+      {:ok, _} = Presence.watch(@domain, subscription("carol", "alice"))
+      {:ok, _etag, _} = Presence.publish(@domain, publication("bob"))
+
+      refute_receive {:presence, :state, _resource, _doc}, 100
+    end
+
+    # "Nothing is published about this resource any more": what to notify then is
+    # the watcher script's decision, not the collection's.
+    test "a removal pushes nil" do
+      {:ok, _} = Presence.watch(@domain, subscription("bob", "alice"))
+      {:ok, etag, _} = Presence.publish(@domain, publication("bob"))
+      assert_receive {:presence, :state, _resource, _doc}
+
+      {:ok, nil, 0} =
+        Presence.publish(@domain, publication("bob", operation: :remove, etag: etag, expires: 0))
+
+      assert_receive {:presence, :state, _resource, nil}
+    end
+
+    # An un-SUBSCRIBE is accepted as a lifetime of zero and IS the end of a
+    # subscription: storing it would leave a watcher nothing will ever reach.
+    test "a subscription granted zero seconds is not stored" do
+      {:ok, _} =
+        Presence.watch(@domain, subscription("bob", "alice", status: :terminated, expires: 0))
+
+      assert Presence.watchers(@domain, "bob") == []
+    end
+
+    test "unwatch/1 drops the caller" do
+      {:ok, _} = Presence.watch(@domain, subscription("bob", "alice"))
+      assert [_one] = Presence.watchers(@domain, "bob")
+
+      :ok = Presence.unwatch(@domain)
+      assert Presence.watchers(@domain, "bob") == []
+    end
+
+    # A subscription lives as long as the instance that accepted it, and that
+    # instance dies with its dialog. Nothing has to say so.
+    test "a watcher that dies is dropped" do
+      other = watcher_process(self())
+      {:ok, _} = call_watch(other, subscription("bob", "carol"))
+      assert [_one] = Presence.watchers(@domain, "bob")
+
+      ref = Process.monitor(other)
+      send(other, :stop)
+      assert_receive {:DOWN, ^ref, :process, ^other, _}
+
+      # the module's own monitor has to be processed before the read
+      assert eventually(fn -> Presence.watchers(@domain, "bob") == [] end)
+    end
+  end
+
+  describe "expiry" do
+    test "a lapsed publication is no longer the state of its resource" do
+      {:ok, _etag, _} = Presence.publish(@domain, publication("bob", expires: 0))
+      assert Presence.state_of(@domain, {"bob", @package}) == nil
+      assert Presence.presentities(@domain) == []
+    end
+
+    # The sweep is what tells the watchers: a watcher left believing in a state
+    # nobody refreshed is the failure it exists to prevent.
+    test "the sweep pushes the resource's watchers" do
+      stop_supervised!(Presence)
+      start_supervised!({Presence, [sweep_ms: 50]})
+
+      {:ok, _} = Presence.watch(@domain, subscription("bob", "alice"))
+      {:ok, _etag, _} = Presence.publish(@domain, publication("bob", expires: 1))
+      assert_receive {:presence, :state, _resource, _doc}
+
+      assert_receive {:presence, :state, {"bob", @domain, @package}, nil}, 2_000
+    end
+  end
+
+  describe "per-domain isolation" do
+    test "two domains publishing the same user part hold two resources" do
+      {:ok, _, _} = Presence.publish(@domain, publication("bob", doc: doc("bob", :open)))
+
+      other = %{publication("bob") | domain: "other.example"}
+      {:ok, _, _} = Presence.publish("other.example", other)
+
+      assert [%{presentity_uri: "sip:bob@example.com"}] = Presence.presentities(@domain)
+      assert [%{presentity_uri: "sip:bob@other.example"}] = Presence.presentities("other.example")
+    end
+
+    test "a watcher of one domain is not pushed by the other" do
+      {:ok, _} = Presence.watch(@domain, subscription("bob", "alice"))
+
+      other = %{publication("bob") | domain: "other.example"}
+      {:ok, _, _} = Presence.publish("other.example", other)
+
+      refute_receive {:presence, :state, _resource, _doc}, 100
+    end
+  end
+
+  describe "the control surface" do
+    setup do
+      {:ok, etag, _} = Presence.publish(@domain, publication("bob"))
+      {:ok, _} = Presence.watch(@domain, subscription("bob", "alice"))
+      %{etag: etag}
+    end
+
+    # kamailio's column names, deliberately: one vocabulary for an operator who
+    # migrated from it.
+    test "list renders the presentity rows", %{etag: etag} do
+      assert {:ok, [row]} = Presence.handle_control("list", %{"domain" => @domain})
+      assert row.presentity_uri == "sip:bob@#{@domain}"
+      assert row.event == @package
+      assert row.etag == etag
+      assert row.expires > 0
+    end
+
+    test "watchers names the watcher and the subscription" do
+      assert {:ok, [row]} =
+               Presence.handle_control("watchers", %{"domain" => @domain, "aor" => "bob"})
+
+      assert row.watcher == "sip:alice@#{@domain}"
+      assert row.status == "active"
+      assert row.presentity_uri == "sip:bob@#{@domain}"
+    end
+
+    test "show carries both halves" do
+      assert {:ok, detail} =
+               Presence.handle_control("show", %{"domain" => @domain, "aor" => "bob"})
+
+      assert [_state] = detail.states
+      assert [_watcher] = detail.watchers
+    end
+
+    test "show of an AOR nothing is held about is a 404" do
+      assert {:error, :not_found} =
+               Presence.handle_control("show", %{"domain" => @domain, "aor" => "nobody"})
+    end
+
+    # The published state goes; the subscriptions stay, and are told there is
+    # nothing left. Tearing them down would look the same here and quite
+    # different on the wire.
+    test "remove drops the state and pushes the watchers" do
+      assert {:ok, _} = Presence.handle_control("remove", %{"domain" => @domain, "aor" => "bob"})
+      assert_receive {:presence, :state, _resource, nil}
+      assert Presence.presentities(@domain) == []
+      assert [_still_watching] = Presence.watchers(@domain, "bob")
+    end
+
+    test "remove of an unknown AOR is a 404" do
+      assert {:error, :not_found} =
+               Presence.handle_control("remove", %{"domain" => @domain, "aor" => "nobody"})
+    end
+
+    test "an unknown command is named as such" do
+      assert {:error, {:unknown_command, "bogus"}} =
+               Presence.handle_control("bogus", %{"domain" => @domain})
+    end
+
+    # Two commands no request could tell apart would make dispatch depend on
+    # iteration order, so the whole surface is refused at registration. Both
+    # frontals derive from this one declaration, so checking it here checks
+    # `kelictl presence` and `/modules/presence` at once.
+    test "the declared command set is routable" do
+      assert :ok = Kelix.Control.Route.check_conflicts(Presence.describe_control())
+
+      # every declared command answers something — a name in describe_control/0
+      # with no handle_control/2 clause is a command that 500s on first use
+      for %{name: name} <- Presence.describe_control() do
+        refute match?(
+                 {:error, {:unknown_command, _}},
+                 Presence.handle_control(name, %{"domain" => @domain, "aor" => "bob"})
+               )
+      end
+    end
+  end
+
+  describe "validate_config/1" do
+    test "accepts what the module declares" do
+      assert :ok = Presence.validate_config(%{})
+      assert :ok = Presence.validate_config(%{"call_timeout_ms" => 2_000})
+    end
+
+    # Fail fast on a typo instead of silently running on the default — and on a
+    # key that belongs to the event package rather than to this collection.
+    test "refuses an unknown key" do
+      assert {:error, msg} = Presence.validate_config(%{"default_expires" => 3600})
+      assert msg =~ "unknown key(s): default_expires"
+
+      assert {:error, msg2} = Presence.validate_config(%{"policy" => "registered"})
+      assert msg2 =~ "policy"
+    end
+
+    test "refuses a bad call timeout" do
+      assert {:error, msg} = Presence.validate_config(%{"call_timeout_ms" => 0})
+      assert msg =~ "positive integer"
+    end
+  end
+
+  # A stand-in watcher instance: it forwards what the fan-out pushes to it, so a
+  # test can assert on a push that did NOT go to the test process.
+  defp watcher_process(owner) do
+    spawn(fn -> watcher_loop(owner) end)
+  end
+
+  defp watcher_loop(owner) do
+    receive do
+      :stop ->
+        :ok
+
+      {:watch, from, sub} ->
+        send(from, {:watched, Presence.watch(@domain, sub)})
+        watcher_loop(owner)
+
+      msg ->
+        send(owner, {:watcher_got, self(), msg})
+        watcher_loop(owner)
+    end
+  end
+
+  defp call_watch(pid, sub) do
+    send(pid, {:watch, self(), sub})
+    assert_receive {:watched, result}
+    result
+  end
+
+  defp eventually(fun, attempts \\ 20) do
+    cond do
+      fun.() -> true
+      attempts == 0 -> false
+      true -> Process.sleep(10) && eventually(fun, attempts - 1)
+    end
+  end
+end

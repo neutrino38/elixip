@@ -144,7 +144,9 @@ max calls:     500
 active calls:  0
 registrations: 0
 registrar:     default_expires=3600 module=Registrar.Example.V1 script=registrar.exs version=1
-presence:      (disabled)
+presence:
+  presence SUBSCRIBE -> presence-subscribe.exs  [Kelix.PresenceSubscribe.V1]
+  presence PUBLISH   -> presence-publish.exs    [Kelix.PresencePublish.V1]
 dial-plan:
   1. 0[1-9]XXXXXXXX -> user2pstn.exs  [User2Pstn.V1]
   2. (default)      -> catchall.exs   [Catchall.V3 — file changed since load]
@@ -467,9 +469,10 @@ entry, of which the `mcu` module is only one consumer. `domain`, `mediaserver`
 and `module` are core nouns and never reach a module, so a mistyped sub-command
 prints their usage rather than "unknown module".
 
-Of the shipped modules, only [mcu](modules/mcu.md) contributes commands today —
-[registrar](modules/registrar.md) and [auth_db](modules/auth_db.md) contribute
-none. The mechanism is documented in
+Of the shipped modules, [mcu](modules/mcu.md), [auth_db](modules/auth_db.md) and
+[presence](modules/presence.md) contribute commands today;
+[registrar](modules/registrar.md) contributes none — its registrations are a core
+noun, addressed as a sub-resource of their domain. The mechanism is documented in
 [modules/README.md](modules/README.md#module-administration-kelictl--rest-api).
 
 ## Parity with REST

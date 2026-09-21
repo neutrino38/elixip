@@ -736,6 +736,41 @@ defmodule SIP.Msg.Ops do
   @spec target_aor(map()) :: String.t() | nil
   def target_aor(msg) when is_map(msg), do: uri_userpart(Map.get(msg, :ruri))
 
+  @doc """
+  The user and the host of an address header, as `{user, domain}` — `{nil, nil}`
+  when the header is absent or unparsable.
+
+  `target_aor/1` answers "which resource", `asserted_username/1` "who claims to
+  send this"; this one answers "who do these two headers NAME", which is a
+  different question and the one a subscription row asks twice: `active_watchers`
+  keeps `from_user`/`from_domain` and `to_user`/`to_domain` side by side, plus
+  `watcher_username`/`watcher_domain` — the watcher being the `From` of the
+  SUBSCRIBE.
+
+  Tolerant like every other reading here: `SIPMsg` leaves `:from` and `:to` as
+  the raw header value (only `:ruri` and `:contact` are parsed), a hand-built
+  message carries a `%SIP.Uri{}`, and neither must make the caller parse.
+  """
+  @spec header_aor(map(), :from | :to) :: {String.t() | nil, String.t() | nil}
+  def header_aor(msg, header) when is_map(msg) and header in [:from, :to] do
+    case to_uri(Map.get(msg, header)) do
+      %SIP.Uri{userpart: user, domain: domain} -> {presence(user), host_string(domain)}
+      _ -> {nil, nil}
+    end
+  end
+
+  # A host may have been parsed as an IP tuple; a row column holds text.
+  defp host_string(domain) when is_binary(domain), do: presence(domain)
+
+  defp host_string(domain) when is_tuple(domain) do
+    case :inet.ntoa(domain) do
+      {:error, _} -> nil
+      addr -> to_string(addr)
+    end
+  end
+
+  defp host_string(_other), do: nil
+
   # ── The SDP body, and what a re-offer asks for (RFC 3264 §8, RFC 3261 §14) ───
   #
   # THE one place that answers "what does this offer change, given the one it

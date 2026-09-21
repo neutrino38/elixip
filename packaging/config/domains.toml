@@ -11,7 +11,10 @@
 #
 # A request is routed by its R-URI host (falling back to the To host); no match is
 # a 404. The method then selects the function — REGISTER -> registrar,
-# INVITE -> calls — and a function with no block on that domain is a 405.
+# INVITE -> calls, SUBSCRIBE/PUBLISH -> presence — and a function with no block on
+# that domain is a 405. For presence there is one more step: the request's `Event`
+# header selects which [[domain.presence]] block serves it, and a package this
+# domain declares none for is answered 489 before any script runs.
 
 #[[domain]]
 #name    = "example.com"
@@ -28,6 +31,14 @@
 #  script = "registrar.exs"
 #  #default_expires = 3600       # per-domain override of [module.registrar]
 #  #min_expires     = 60
+#
+#  # Presence: ONE block per event package the domain serves, and the package is
+#  # the key. `subscribe` is required; a package with no `publish` script answers
+#  # 405 to a PUBLISH. Both scripts need kelixip-mod-presence installed.
+#  [[domain.presence]]
+#  event-package = "presence"
+#  subscribe     = "presence-subscribe.exs"
+#  publish       = "presence-publish.exs"
 #
 #  # The dial-plan: ordered, first match wins on the R-URI user-part. Asterisk-style
 #  # patterns (X=0-9, Z=1-9, N=2-9, [13-6], . = 1+, ! = 0+). The catch-all is last.
@@ -46,3 +57,11 @@
 #max_contacts_per_aor = 10
 #min_expires          = 60
 #default_expires      = 3600
+
+# The presence collection (kelixip-mod-presence). It holds what is published and
+# who watches it; it decides nothing about WHO MAY WATCH — that is the subscribe
+# script's, and presence-subscribe.exs is where a deployment writes its rule.
+# The expiry bounds are the event package's (RFC 6665 §4.4.1), so there is no key
+# for them here.
+#[module.presence]
+#call_timeout_ms = 5000

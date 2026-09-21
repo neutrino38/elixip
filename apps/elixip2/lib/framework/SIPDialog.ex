@@ -167,13 +167,13 @@ defmodule SIP.Dialog do
       # Application rejected the request in DialogImpl.init/1 (nominal refusal,
       # not a failure): propagate the reject tuple verbatim. process_incoming_request
       # turns it into the requested SIP status. Logged at info, not error.
-      {:error, {:reject, code, reason, totag}} ->
+      {:error, {:reject, code, reason, fields, totag}} ->
         Logger.info(
           module: __MODULE__,
           message: "Dialog creation rejected by app: #{code} #{reason}."
         )
 
-        {:error, {:reject, code, reason, totag}}
+        {:error, {:reject, code, reason, fields, totag}}
 
       {:error, err} when is_exception(err) ->
         Logger.error(module: __MODULE__, message: "Failed to create dialog: exception raised")
@@ -320,14 +320,15 @@ defmodule SIP.Dialog do
   end
 
   # Create an inbound dialog and, when the app rejected it in DialogImpl.init/1,
-  # map the {:reject, code, reason, totag} error to the {:error, {code, reason,
-  # dialog_id}} shape that process_UAS_request turns into a SIP response on the
-  # server transaction (registrar quota → 503, UAS domain control → 604, …).
+  # map the {:reject, code, reason, fields, totag} error to the {:error, {code,
+  # reason, fields, dialog_id}} shape that process_UAS_request turns into a SIP
+  # response on the server transaction (registrar quota → 503, UAS domain control
+  # → 604, presence dispatch → 489 with its Allow-Events, …).
   # Any other start_dialog outcome (including generic errors → 403) is unchanged.
   defp start_inbound_dialog(req, timeout, debug, {fromtag, callid, _totag}) do
     case start_dialog(req, timeout, :inbound, debug) do
-      {:error, {:reject, code, reason, totag}} ->
-        {:error, {code, reason, {fromtag, callid, totag}}}
+      {:error, {:reject, code, reason, fields, totag}} ->
+        {:error, {code, reason, fields, {fromtag, callid, totag}}}
 
       other ->
         other

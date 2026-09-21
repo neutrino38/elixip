@@ -668,6 +668,13 @@ defmodule SIP.Transac.Common do
         {_errcode, state} = reply_to_UAC(state, state.msg, code, reason, [], totag)
         {:upperlayerfailure, state}
 
+      # The same, for a refusal that carries headers of its own: the Allow-Events
+      # of a 489 (RFC 6665 §4.4.7), the Min-Expires of a 423. A refusal a peer
+      # cannot act on is a refusal it retries identically.
+      {:error, {code, reason, fields, {_ftag, _cid, totag}}} when is_list(fields) ->
+        {_errcode, state} = reply_to_UAC(state, state.msg, code, reason, fields, totag)
+        {:upperlayerfailure, state}
+
       # The dialog layer answered the request itself and there is nothing to bind to
       # an application process: an out-of-dialog OPTIONS (RFC 3261 §11.2). Not a
       # failure, hence its own shape rather than the :error channel above — a 200

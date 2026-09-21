@@ -114,7 +114,8 @@ defmodule Kelix.ControlTest do
       assert d.max_calls == 500
       assert d.functions == [:registrar, :calls]
       assert d.registrar == %{script: "registrar-example.exs", default_expires: 3600}
-      assert d.presence == nil
+      # No [[domain.presence]] block: the function is served on no event package.
+      assert d.presence == []
       assert d.active_calls == 0
       assert d.registrations == 0
 

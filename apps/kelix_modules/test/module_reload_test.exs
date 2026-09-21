@@ -112,4 +112,30 @@ defmodule Kelix.ModuleReloadTest do
     assert Process.whereis(@registrar) == pid
     assert %{config: %{"max_contacts_per_aor" => 2}} = ModuleRegistry.lookup("registrar")
   end
+
+  # `[module.presence]` — a config.toml block, unlike the registrar's — resolves to
+  # Kelix.Mod.Presence by name alone, and the module's declared commands reach the
+  # control registry, which is what both frontals (`kelictl presence`,
+  # `/modules/presence`) derive from. A module that loads but whose surface never
+  # registers looks fine until an operator types.
+  test "a [module.presence] block starts the collection and registers its commands" do
+    on_exit(fn ->
+      ModuleRegistry.unregister("presence")
+      Kelix.Control.Registry.deregister("presence")
+    end)
+
+    start_supervised!(
+      {ModuleSupervisor,
+       name: :"modsup_#{System.unique_integer([:positive])}",
+       modules: %{"presence" => %{"call_timeout_ms" => 2000}}}
+    )
+
+    assert %{module: Kelix.Mod.Presence, config: %{"call_timeout_ms" => 2000}} =
+             ModuleRegistry.lookup("presence")
+
+    assert is_pid(Process.whereis(Kelix.Mod.Presence))
+
+    assert ~w(list show watchers remove) --
+             Enum.map(Kelix.Control.Registry.commands_for("presence"), & &1.name) == []
+  end
 end
