@@ -1,3 +1,32 @@
+# Answers 180 and then does nothing at all, so the test decides when its
+# application dies — which is what a scenario whose state raised looks like from
+# the dialog's side.
+defmodule SIP.Test.DyingUAS do
+  @behaviour SIP.Session.Call
+
+  @impl true
+  def on_new_call(dialog_pid, _req, transaction_id) when is_pid(transaction_id) do
+    probe = Process.whereis(:dialog_resilience_probe)
+
+    app =
+      spawn(fn ->
+        receive do
+          {:INVITE, _req, trans, _dlg} ->
+            SIP.Transac.reply(trans, 180, "Ringing")
+            receive do: (:never -> :ok)
+        after
+          2_000 -> :ok
+        end
+      end)
+
+    send(probe, {:inbound_dialog, dialog_pid, app})
+    {:accept, app}
+  end
+
+  @impl true
+  def on_call_end(_dialog_pid, _app_pid), do: nil
+end
+
 defmodule SIP.Test.DialogResilience do
   @moduledoc """
   What a dialog does when the layers under it fail — design
@@ -58,6 +87,29 @@ defmodule SIP.Test.DialogResilience do
     {:ok, dlg, _id} = SIP.Dialog.start_dialog(invite_to(name), 60, :outbound, false, opts)
     assert_receive {:outbound, {:onnewdialog, :ok, tid}}, 2_000
     {dlg, tid}
+  end
+
+  # An inbound INVITE off the wire, which is what creates a dialog of the other
+  # direction: it reaches SIP.Test.DyingUAS through the transport and the
+  # transaction layer, exactly as a real call does.
+  defp inject_invite(name) do
+    {:ok, raw} = File.read(Path.join(__DIR__, "SIP-INVITE-LVP.txt"))
+    {:ok, parsed} = SIPMsg.parse(raw, fn _c, _m, _l, _line -> :ok end)
+
+    parsed = Map.put(parsed, :callid, "#{name}-#{System.unique_integer([:positive])}")
+    branch = "z9hG4bK#{System.unique_integer([:positive])}"
+    parsed = SIP.Msg.Ops.add_via(parsed, {{2, 2, 2, 2}, 5090, "UDP"}, branch)
+
+    routed =
+      parsed.ruri
+      |> SIP.Uri.set_uri_param("unittest", name)
+      |> SIP.Transport.Selector.select_transport()
+
+    parsed = SIP.Msg.Ops.update_sip_msg(parsed, {:ruri, routed})
+
+    :ok = Mockup.attach_probe(routed.tp_pid)
+    Mockup.inject(routed.tp_pid, parsed)
+    parsed
   end
 
   # `refute Process.alive?/1` is a race against a process that has already
@@ -465,6 +517,81 @@ defmodule SIP.Test.DialogResilience do
     # The dialog is not linked to its application (GenServer.start, not
     # start_link), which is what let it still be here to clean up.
     assert Process.alive?(dlg)
+  end
+
+  # ── An application that dies under its dialog ───────────────────────────────
+
+  # A dialog is created FOR an application: it delivers everything it receives to
+  # it and takes its orders from it. One whose application has died used to keep
+  # running anyway, collecting in-dialog transactions until the fourth
+  # (`on_new_transaction/3` allows four) and answering 503 to every one after
+  # that — to the caller's own BYE among them, so the caller could not hang up
+  # either. Seen on dev71 on 2026-09-21, behind a scenario state that had raised.
+  test "an established dialog whose application dies is hung up and ends" do
+    tp = peer!("appdown1")
+    parent = self()
+
+    app =
+      spawn(fn ->
+        {:ok, dlg, _id} =
+          SIP.Dialog.start_dialog(invite_to("appdown1"), 60, :outbound, false, [])
+
+        send(parent, {:dialog, dlg})
+
+        receive do
+          {:onnewdialog, :ok, _tid} -> :ok
+        end
+
+        # The call connects and the application ACKs it, as a scenario does.
+        receive do
+          {200, _rsp, tid, _dlg} -> SIP.Transac.ack_uac_transaction(tid)
+        end
+
+        send(parent, :acked)
+
+        receive do
+          :die -> exit(:boom)
+        end
+      end)
+
+    assert_receive {:dialog, dlg}, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _req}}, 2_000
+
+    Manual.simulate(tp, 200, 0)
+    assert_receive :acked, 2_000
+    assert_receive {:sip_mockup, {:request_sent, :ACK, _}}, 2_000
+
+    Process.exit(app, :kill)
+
+    # The far end is told, rather than left off-hook in a call nobody is in.
+    assert_receive {:sip_mockup, {:request_sent, :BYE, _}}, 2_000
+    Manual.simulate(tp, 200, 0)
+    assert_dies(dlg)
+  end
+
+  # The production case, from the other side: an INBOUND dialog, its application
+  # gone before it ever answered. There is no session to end — nothing to send,
+  # nothing to wait for — so the dialog stops instead of staying to reject the
+  # in-dialog requests that keep arriving.
+  test "an inbound dialog whose application dies before answering ends too" do
+    parent = self()
+
+    previous = SIP.Session.ConfigRegistry.get_call_processing_module()
+    :ok = SIP.Session.ConfigRegistry.set_call_processing_module(SIP.Test.DyingUAS)
+    on_exit(fn -> SIP.Session.ConfigRegistry.set_call_processing_module(previous) end)
+
+    # The name goes with the test process when it ends, so there is nothing to
+    # undo: SIP.Test.DyingUAS runs inside the stack and has no other way to say
+    # which dialog and which application it just created.
+    Process.register(parent, :dialog_resilience_probe)
+
+    inject_invite("appdown3")
+
+    assert_receive {:inbound_dialog, dlg, app}, 2_000
+    assert_receive {:sip_mockup, {:response_sent, 180, _}}, 2_000
+
+    Process.exit(app, :kill)
+    assert_dies(dlg)
   end
 
   # The catch-all handle_info/2. `use GenServer` provides one, but a module that

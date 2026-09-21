@@ -256,6 +256,16 @@ at all.
 Where this step sits among the other four — children, the binding, `cleanup/1`,
 the parent — is the FSM's and stays in `FSL.Runner`.
 
+**What it is handed is the context the failing state had built**, and that takes
+a mechanism rather than a convention: the context is a stack variable, and the
+`rescue` clause of `state` sees the bindings of the moment the `try` was entered.
+So the three doors a scenario writes this context through — `SIP.Context.set/3`,
+`appdata_set/3` and `assert_identity/2` — each hand what they produce to
+`FSL.Context.snapshot/1`, which keeps it off the stack, and the clause reads it
+back with `FSL.Context.latest/1`. A scenario whose `place_call` state raised
+after setting both legs up released neither of them, held its MCU session until
+the RTP watchdog, and left the caller unable to hang up (dev71, 2026-09-21).
+
 ---
 
 ## 4. External JSON configuration
@@ -360,6 +370,8 @@ Design: [DESIGN-SBB.md](DESIGN-SBB.md).
 4. A scenario states a call flow; it does not implement one. A private helper
    carrying real logic in an `.exs` is a missing macro in the framework, not a
    style choice.
-5. No SIP symbol may reappear in `lib/fsl/` of the package — enforced by
+5. A state that fails tears down what it had allocated: `finalize/1` reads the
+   context the state built, not the one it was entered with (§3.8).
+6. No SIP symbol may reappear in `lib/fsl/` of the package — enforced by
    `mix compile --warnings-as-errors` over there, in a project that depends on no
    binding. The whole [extraction plan][plan] exists to keep that true.

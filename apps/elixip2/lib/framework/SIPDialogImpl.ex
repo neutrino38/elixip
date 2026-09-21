@@ -40,6 +40,9 @@ defmodule SIP.DialogImpl do
     ist_awaiting_ack: nil,
     # PID of the application
     app: nil,
+    # The monitor on that pid (see bind_app/2): an application that dies takes
+    # its dialog with it, instead of leaving one that answers nobody.
+    app_monitor: nil,
     # Event tag: when set (an atom), every message delivered to the app is
     # wrapped as {tag, msg} — see SIP.Dialog.start_dialog/5 and send_to_app/2.
     # nil (the default) delivers bare messages.
@@ -572,6 +575,27 @@ defmodule SIP.DialogImpl do
     :ok
   end
 
+  # Bind the application process to this dialog, and watch it.
+  #
+  # A dialog is created FOR an application and delivers everything it receives to
+  # it; one whose application has died has nobody to answer for the call. It kept
+  # running all the same: in-dialog requests piled up on it until the fourth
+  # (`on_new_transaction/3` allows four), after which it answered 503 — to the
+  # caller's own BYE among them, so the caller could not even hang up, and then
+  # 408 when the transactions expired. Seen on dev71 on 2026-09-21, behind a
+  # scenario whose state had raised.
+  #
+  # The monitor is the dialog's own net, and it does not replace the application's
+  # teardown: a scenario that ends normally hangs its legs up itself, and this is
+  # what answers for one that cannot. What a `:DOWN` then does is the same thing
+  # `answer_nobody_awaits/2` already does for a 2xx nobody is left to ACK — hang
+  # up if there is a session, stop in any case (see `handle_info({:DOWN, …})`).
+  defp bind_app(state, app_pid) when is_pid(app_pid) do
+    %SIP.DialogImpl{state | app: app_pid, app_monitor: Process.monitor(app_pid)}
+  end
+
+  defp bind_app(state, _app_pid), do: state
+
   defp app_alive?(%SIP.DialogImpl{app: app}) when is_pid(app), do: Process.alive?(app)
   defp app_alive?(_state), do: false
 
@@ -590,6 +614,35 @@ defmodule SIP.DialogImpl do
   end
 
   defp pending_invite_transaction(_state), do: nil
+
+  defp pending_client_transaction?(state) do
+    Enum.any?(transactions_of(state), fn {pid, %{module: module}} ->
+      client_transaction?(module) and Process.alive?(pid)
+    end)
+  end
+
+  # RFC 3261 §15: the BYE is the only way to end an established dialog, so the
+  # far end is told rather than left off-hook on a call nobody is in.
+  defp hang_up_orphaned_dialog(state) do
+    case send_in_dialog_request(state, hangup_request()) do
+      # The BYE is on its way: the dialog stops when its transaction ends, as
+      # it does for a BYE the application itself sent. Stopping here would take
+      # that transaction with it (terminate/2 kills our client transactions).
+      {{:ok, _transaction_pid}, state} ->
+        {:noreply, state}
+
+      # No transport, too many transactions, already closing: nothing more can
+      # be done for the far end, and there is nothing left to wait for.
+      {rc, state} ->
+        Logger.warning(
+          dialogpid: "#{inspect(self())}",
+          module: __MODULE__,
+          message: "Could not hang up the orphaned dialog: #{inspect(rc)}"
+        )
+
+        {:stop, {:shutdown, :app_down}, state}
+    end
+  end
 
   # A 2xx to our INVITE that no application is left to ACK.
   #
@@ -629,15 +682,23 @@ defmodule SIP.DialogImpl do
             "hanging up, so the far end is not left off-hook"
       )
 
-      SIP.Transac.ack_uac_transaction(transact_pid)
-
-      # The BYE goes out on the next message rather than here: it must follow the
-      # ACK on the wire, and `send_in_dialog_request/2` starts a transaction of its
-      # own — not something to nest inside the response handling that is still
-      # unwinding.
-      send(self(), :hang_up_unowned_dialog)
-      close_transaction(state, transact_pid)
+      ack_and_hang_up(state, transact_pid)
     end
+  end
+
+  # ACK the 2xx, then BYE: the only lawful way out of a dialog that connected
+  # with nobody left in it (RFC 3261 §13.2.2.4 and §15). Shared with the
+  # application-is-gone path (`handle_info({:DOWN, …})`), which reaches the same
+  # situation from the other side — there the answer came first and the
+  # application died after it.
+  #
+  # The BYE goes out on the next message rather than here: it must follow the ACK
+  # on the wire, and `send_in_dialog_request/2` starts a transaction of its own —
+  # not something to nest inside the response handling that is still unwinding.
+  defp ack_and_hang_up(state, transact_pid) do
+    SIP.Transac.ack_uac_transaction(transact_pid)
+    send(self(), :hang_up_unowned_dialog)
+    close_transaction(state, transact_pid)
   end
 
   # The BYE that ends a dialog whose application is gone (see
@@ -759,7 +820,7 @@ defmodule SIP.DialogImpl do
         #
         # `arm_expiration_timer/2` is a no-op for anything but a REGISTER, so an
         # inbound INVITE dialog is unaffected.
-        {:ok, arm_expiration_timer(state, req) |> Map.put(:app, app_id)}
+        {:ok, arm_expiration_timer(state, req) |> bind_app(app_id)}
 
       # Session has not been created. Abort dialog and propagate the requested
       # SIP status. The stop reason is the 4-tuple {:reject, code, reason, totag}
@@ -786,7 +847,6 @@ defmodule SIP.DialogImpl do
     state = %SIP.DialogImpl{
       msg: req,
       direction: :outbound,
-      app: pid,
       tag: tag,
       # Declared up front: the first branch goes out with the dialog, so its
       # failure must not tear the dialog down when more targets are waiting.
@@ -799,6 +859,8 @@ defmodule SIP.DialogImpl do
       totag: nil,
       allows: allows(req.method)
     }
+
+    state = bind_app(state, pid)
 
     {state, req} = fix_outbound_request(state, req, true)
 
@@ -970,7 +1032,7 @@ defmodule SIP.DialogImpl do
   @impl true
   def handle_call({:setapppid, app_pid}, _from, state) do
     if state.direction == :inbound and state.app == nil do
-      {:reply, :ok, %SIP.DialogImpl{state | app: app_pid}}
+      {:reply, :ok, bind_app(state, app_pid)}
     else
       {:reply, :alreadybound, state}
     end
@@ -2178,6 +2240,55 @@ defmodule SIP.DialogImpl do
         )
 
         unanswered_request(state, req, trans_pid, module)
+    end
+  end
+
+  # The application bound to this dialog is gone (see `bind_app/2`). Whatever
+  # killed it — a state that raised, a crash, an instance the pool reclaimed —
+  # nothing will answer on this dialog any more, so it ends here rather than
+  # collecting in-dialog transactions it can only reject.
+  #
+  # An established dialog is hung up first: RFC 3261 §15 makes the BYE the only
+  # way to end one, and the far end is otherwise left off-hook on a call nobody
+  # is in. The BYE is sent from `handle_info(:hang_up_unowned_dialog, …)`, the
+  # same one `answer_nobody_awaits/2` uses, and the dialog stops when that
+  # transaction ends.
+  def handle_info(
+        {:DOWN, ref, :process, pid, reason},
+        state = %SIP.DialogImpl{app_monitor: ref, app: pid}
+      ) do
+    Logger.warning(
+      dialogpid: "#{inspect(self())}",
+      module: __MODULE__,
+      message: "Application #{inspect(pid)} is gone (#{inspect(reason)}); ending the dialog"
+    )
+
+    # Nobody is left to be told, and terminate/2 would send it to a dead pid.
+    state = %SIP.DialogImpl{state | app: nil, app_monitor: nil}
+
+    cond do
+      state.state == :established ->
+        case pending_invite_transaction(state) do
+          # The 2xx was answered while the application was still there, and the
+          # ACK it owed never went out. It goes now, before the BYE.
+          transact_pid when is_pid(transact_pid) ->
+            {:noreply, ack_and_hang_up(state, transact_pid)}
+
+          nil ->
+            hang_up_orphaned_dialog(state)
+        end
+
+      # A request of ours is still out there, and its answer is worth waiting
+      # for: a 2xx that arrives now is ACKed and hung up by
+      # `answer_nobody_awaits/2` — the very case that established "the dialog
+      # outlives its application" — and anything else ends the dialog through
+      # `handle_UAS_response/3` as it always did. Stopping here instead would
+      # strand a callee that is about to pick up.
+      pending_client_transaction?(state) ->
+        {:noreply, state}
+
+      true ->
+        {:stop, {:shutdown, :app_down}, state}
     end
   end
 

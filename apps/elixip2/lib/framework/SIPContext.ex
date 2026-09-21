@@ -13,6 +13,16 @@ defmodule SIP.Context do
   Nothing else changes: the name, the nineteen fields, the `set/3` validation,
   `from/1` and `to/2` are as they were, and no scenario, script or mixin is
   affected.
+
+  ## Every write is photographed
+
+  `set/3`, `appdata_set/3` and `assert_identity/2` are the three doors a scenario
+  writes this context through, and each hands what it produces to
+  `FSL.Context.snapshot/1`. The context is a stack variable and an Elixir
+  `rescue` clause sees the bindings of the moment the `try` was entered, so
+  without the photo a state that raised after setting a call up handed the
+  teardown the context of *before* its own body — no leg to release, no media
+  session to free, a call left standing on both sides.
   """
   @after_compile FSL.Context
 
@@ -147,7 +157,7 @@ defmodule SIP.Context do
 
   @doc "Store an application-defined value in the context appdata map."
   def appdata_set(context = %SIP.Context{}, prop, value) do
-    Map.put(context, :appdata, Map.put(context.appdata, prop, value))
+    FSL.Context.snapshot(Map.put(context, :appdata, Map.put(context.appdata, prop, value)))
   end
 
   @spec set(map(), list()) :: list()
@@ -161,23 +171,43 @@ defmodule SIP.Context do
     set(new_ctx, remaining)
   end
 
-  # Set the username and create the fromtag if needed
-  def set(context, :username, value) when is_binary(value) do
+  @doc """
+  Write one property of the context.
+
+  The one door in: whatever the property is, the context that comes out is
+  photographed by `FSL.Context.snapshot/1` before it is returned, so that a state
+  raising later hands the teardown what it had allocated rather than the context
+  it was entered with (see `FSL.Context.snapshot/1`). The clauses below are the
+  validation, one per property; this is where the write is recorded.
+  """
+  def set(context, prop, value), do: FSL.Context.snapshot(do_set(context, prop, value))
+
+  # Set the username, minting the From tag on the first write.
+  #
+  # The `if` had no `else`, so a SECOND write — a scenario that reads its account
+  # from a backend after a first `config` value, a registrar instance reused for
+  # another AOR — returned nil and the `Map.put` below raised a BadMapError in the
+  # state that wrote it. The tag is minted once and kept: it identifies this side
+  # of every dialog this session opens (RFC 3261 §19.3), so re-minting it would be
+  # a worse fix than the crash it replaces.
+  defp do_set(context, :username, value) when is_binary(value) do
     context =
       if is_nil(context.ftag) do
         Map.put(context, :ftag, SIP.Msg.Ops.generate_from_or_to_tag())
+      else
+        context
       end
 
     Map.put(context, :username, value)
   end
 
   # Set a single property that is already int he map
-  def set(context, prop, value) when prop in @props and is_binary(value) do
+  defp do_set(context, prop, value) when prop in @props and is_binary(value) do
     Map.put(context, prop, value)
   end
 
   # Set the dialog PID
-  def set(context, :dialogpid, value) do
+  defp do_set(context, :dialogpid, value) do
     if is_pid(value) do
       Map.put(context, :dialogpid, value)
     else
@@ -187,11 +217,11 @@ defmodule SIP.Context do
 
   # Set the parent FSM PID (nil means this scenario has no parent and runs
   # standalone, so notify_parent / child_exit become no-ops).
-  def set(context, :parent_pid, nil) do
+  defp do_set(context, :parent_pid, nil) do
     Map.put(context, :parent_pid, nil)
   end
 
-  def set(context, :parent_pid, value) do
+  defp do_set(context, :parent_pid, value) do
     if is_pid(value) do
       Map.put(context, :parent_pid, value)
     else
@@ -200,11 +230,11 @@ defmodule SIP.Context do
   end
 
   # Set the media PID (nil clears it, e.g. after releasing media resources)
-  def set(context, :mediaserverpid, nil) do
+  defp do_set(context, :mediaserverpid, nil) do
     Map.put(context, :mediaserverpid, nil)
   end
 
-  def set(context, :mediaserverpid, value) do
+  defp do_set(context, :mediaserverpid, value) do
     if is_pid(value) do
       Map.put(context, :mediaserverpid, value)
     else
@@ -212,7 +242,7 @@ defmodule SIP.Context do
     end
   end
 
-  def set(context, :mediaservermodule, value) do
+  defp do_set(context, :mediaservermodule, value) do
     if is_atom(value) and Code.ensure_loaded?(value) do
       Map.put(context, :mediaservermodule, value)
     else
@@ -221,12 +251,12 @@ defmodule SIP.Context do
   end
 
   # Set the password
-  def set(ctx, :passwd, value)
+  defp do_set(ctx, :passwd, value)
       when ctx.authusername != nil and ctx.algorithm != nil and ctx.domain != nil do
     Map.put(ctx, :ha1, SIP.Auth.compute_ha1(ctx.algorithm, ctx.authusername, ctx.domain, value))
   end
 
-  def set(ctx, :passwd, _value)
+  defp do_set(ctx, :passwd, _value)
       when is_nil(ctx.authusername) or is_nil(ctx.algorithm) or is_nil(ctx.domain) do
     raise "Cannot set password. One of the following has not been set: authusername, domain, algorithm"
   end
@@ -236,21 +266,21 @@ defmodule SIP.Context do
   # defined once, in FSL, and not re-derived by every binding. The spellings
   # stay: `SIP.Context.set(ctx, :currentstate, …)` is what a test and a script
   # write, and FSL writes `FSL.Context.put/3`.
-  def set(ctx, prop, value) when prop in [:lasterr, :currentstate, :laststate, :errorreason] do
+  defp do_set(ctx, prop, value) when prop in [:lasterr, :currentstate, :laststate, :errorreason] do
     FSL.Context.put(ctx, prop, value)
   end
 
   # The identity an authentication verdict proved, as the URI to assert. Written
   # through assert_identity/2 rather than here in the ordinary case.
-  def set(ctx, :asserted_identity, nil) do
+  defp do_set(ctx, :asserted_identity, nil) do
     Map.put(ctx, :asserted_identity, nil)
   end
 
-  def set(ctx, :asserted_identity, %SIP.Uri{} = uri) do
+  defp do_set(ctx, :asserted_identity, %SIP.Uri{} = uri) do
     Map.put(ctx, :asserted_identity, uri)
   end
 
-  def set(_context, prop, _value) when is_atom(prop) do
+  defp do_set(_context, prop, _value) when is_atom(prop) do
     raise "Unsupported context property #{prop}"
   end
 
@@ -287,11 +317,11 @@ defmodule SIP.Context do
   """
   @spec assert_identity(%SIP.Context{}, map() | %SIP.Uri{} | nil) :: %SIP.Context{}
   def assert_identity(context = %SIP.Context{}, nil) do
-    Map.put(context, :asserted_identity, nil)
+    FSL.Context.snapshot(Map.put(context, :asserted_identity, nil))
   end
 
   def assert_identity(context = %SIP.Context{}, %SIP.Uri{} = uri) do
-    Map.put(context, :asserted_identity, uri)
+    FSL.Context.snapshot(Map.put(context, :asserted_identity, uri))
   end
 
   def assert_identity(context = %SIP.Context{}, identity) when is_map(identity) do
@@ -304,11 +334,13 @@ defmodule SIP.Context do
               " (context domain: #{inspect(context.domain)})"
     end
 
-    Map.put(context, :asserted_identity, %SIP.Uri{
-      scheme: "sip:",
-      userpart: to_string(user),
-      domain: to_string(realm)
-    })
+    FSL.Context.snapshot(
+      Map.put(context, :asserted_identity, %SIP.Uri{
+        scheme: "sip:",
+        userpart: to_string(user),
+        domain: to_string(realm)
+      })
+    )
   end
 
   def from(context) do

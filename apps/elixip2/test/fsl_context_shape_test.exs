@@ -122,4 +122,25 @@ defmodule SIP.Test.FSL.ContextShape do
       assert SIP.Context.get(ctx, :anything) == %{a: 1}
     end
   end
+
+  describe "set/3 on :username" do
+    test "the first write mints the From tag" do
+      ctx = SIP.Context.set(%SIP.Context{}, :username, "alice")
+
+      assert ctx.username == "alice"
+      assert is_binary(ctx.ftag)
+    end
+
+    # The `if` that minted the tag had no `else`, so the second write evaluated
+    # to nil and the `Map.put` that followed raised a BadMapError — inside
+    # whatever state wrote it. A scenario that takes its account from a backend
+    # after a `config` default does exactly this.
+    test "a second write keeps the tag and does not raise" do
+      ctx = SIP.Context.set(%SIP.Context{}, :username, "alice")
+      ctx2 = SIP.Context.set(ctx, :username, "bob")
+
+      assert ctx2.username == "bob"
+      assert ctx2.ftag == ctx.ftag
+    end
+  end
 end

@@ -49,7 +49,7 @@ defmodule SIPParser.MixProject do
       # nothing about SIP, and `mix compile --warnings-as-errors` over there is
       # what proves it rather than asserts it. SIP plugs in through
       # `SIP.FSL.Host` (framework/SIPFSLHost.ex).
-      {:fsl, "~> 0.2.0", hex: :finite_state_language},
+      {:fsl, "~> 0.2.1", hex: :finite_state_language},
       {:logger_file_backend, "~> 0.0.12"},
       {:jason, "~> 1.4"},
       # HTTP client for the FSL.HTTP mixin (http_GET), where it is an OPTIONAL
