@@ -183,6 +183,157 @@ defmodule SIP.Test.MsgOpsPresence do
     end
   end
 
+  # A PUBLISH in both shapes, body and all: the readings below are the ones that
+  # look at what a message CARRIES and not only at its headers. A body off the
+  # wire always states its type — the parser refuses one that does not — so the
+  # pair only differs on the headers the caller names.
+  defp publish_parsed(headers, body) do
+    headers =
+      if body == "" or List.keymember?(headers, "Content-Type", 0),
+        do: headers,
+        else: headers ++ [{"Content-Type", "application/pidf+xml"}]
+
+    raw =
+      "PUBLISH sip:bob@example.com SIP/2.0\r\n" <>
+        "Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK776asdhds\r\n" <>
+        "From: <sip:bob@example.com>;tag=1928301774\r\n" <>
+        "To: <sip:bob@example.com>\r\n" <>
+        "Call-ID: a84b4c76e66710@10.0.0.1\r\n" <>
+        "CSeq: 314159 PUBLISH\r\n" <>
+        Enum.map_join(headers, "", fn {name, value} -> "#{name}: #{value}\r\n" end) <>
+        "Content-Length: #{byte_size(body)}\r\n\r\n" <> body
+
+    {:ok, req} = SIPMsg.parse(raw, fn _code, _msg, _line, _text -> nil end)
+    req
+  end
+
+  defp publish_built(headers, body) do
+    req = Enum.into(headers, %{method: :PUBLISH})
+
+    if body == "",
+      do: req,
+      else: req |> Map.put(:body, body) |> Map.put_new("Content-Type", "application/pidf+xml")
+  end
+
+  defp both_publish(headers, body, fun) do
+    from_wire = fun.(publish_parsed(headers, body))
+    from_hand = fun.(publish_built(headers, body))
+
+    assert from_wire == from_hand,
+           "parsed #{inspect(from_wire)} but hand-built #{inspect(from_hand)}"
+
+    from_wire
+  end
+
+  describe "entity_tag/1" do
+    cases = [
+      {"the tag a compositor granted", [{"SIP-ETag", "dx200xyz"}], "dx200xyz"},
+      {"surrounding space is not part of it", [{"SIP-ETag", " dx200xyz "}], "dx200xyz"},
+      {"the tag is case-sensitive", [{"SIP-ETag", "DX200xyz"}], "DX200xyz"},
+      {"a 200 to a removal grants none", [], nil},
+      {"an empty header is no tag", [{"SIP-ETag", "  "}], nil}
+    ]
+
+    for {title, headers, expected} <- cases do
+      test title do
+        assert both(unquote(Macro.escape(headers)), &Ops.entity_tag/1) ==
+                 unquote(Macro.escape(expected))
+      end
+    end
+
+    test "it is the other half of publish_etag/1, and they never read each other" do
+      msg = %{"SIP-ETag" => "granted", "SIP-If-Match" => "presented", method: :PUBLISH}
+      assert Ops.entity_tag(msg) == "granted"
+      assert Ops.publish_etag(msg) == "presented"
+    end
+  end
+
+  describe "body_string/1 and body_content_type/1" do
+    test "a body carried as a bare string, with the message's Content-Type" do
+      headers = [{"Content-Type", "application/pidf+xml"}]
+      assert both_publish(headers, "<presence/>", &Ops.body_string/1) == "<presence/>"
+
+      assert both_publish(headers, "<presence/>", &Ops.body_content_type/1) ==
+               "application/pidf+xml"
+    end
+
+    test "the parser's part shape states its own type, and that one wins" do
+      msg = %{
+        method: :PUBLISH,
+        contenttype: "application/sdp",
+        body: [%{contenttype: "application/pidf+xml", data: "<presence/>"}]
+      }
+
+      assert Ops.body_string(msg) == "<presence/>"
+      assert Ops.body_content_type(msg) == "application/pidf+xml"
+    end
+
+    test "the type is folded and stripped of its parameters" do
+      msg = %{method: :PUBLISH, contenttype: "Application/PIDF+XML;charset=utf-8", body: "x"}
+      assert Ops.body_content_type(msg) == "application/pidf+xml"
+    end
+
+    test "no body at all, and a body of nothing, both read as absent" do
+      assert Ops.body_string(%{method: :PUBLISH}) == nil
+      assert Ops.body_string(%{method: :PUBLISH, body: ""}) == nil
+      assert Ops.body_string(%{method: :PUBLISH, body: []}) == nil
+      assert Ops.body_content_type(%{method: :PUBLISH}) == nil
+    end
+  end
+
+  describe "publish_operation/2" do
+    @doc_body "<presence/>"
+
+    test "a body and no tag: an initial publication, for the package's own default" do
+      assert both_publish([], @doc_body, &Ops.publish_operation(&1, 3600)) ==
+               {:initial, nil, 3600}
+    end
+
+    test "a body and a tag: a modification" do
+      assert both_publish(
+               [{"SIP-If-Match", "dx200xyz"}],
+               @doc_body,
+               &Ops.publish_operation(&1, 3600)
+             ) ==
+               {:modify, "dx200xyz", 3600}
+    end
+
+    test "a tag and no body: a refresh" do
+      assert both_publish([{"SIP-If-Match", "dx200xyz"}], "", &Ops.publish_operation(&1, 3600)) ==
+               {:refresh, "dx200xyz", 3600}
+    end
+
+    test "Expires: 0 is a removal, whatever else it carries" do
+      assert both_publish(
+               [{"SIP-If-Match", "dx200xyz"}, {"Expires", "0"}],
+               @doc_body,
+               &Ops.publish_operation(&1, 3600)
+             ) == {:remove, "dx200xyz", 0}
+    end
+
+    test "an initial publication with Expires: 0 names no state to keep" do
+      assert both_publish([{"Expires", "0"}], @doc_body, &Ops.publish_operation(&1, 3600)) ==
+               {:remove, nil, 0}
+    end
+
+    test "neither a tag nor a body is a request that asks for nothing" do
+      assert both_publish([], "", &Ops.publish_operation(&1, 3600)) == :invalid
+    end
+
+    test "the Expires header wins over the package default when it states one" do
+      assert both_publish([{"Expires", "600"}], @doc_body, &Ops.publish_operation(&1, 3600)) ==
+               {:initial, nil, 600}
+    end
+
+    # Hand-built only: `SIPMsg.parse/2` refuses a message whose Expires is not a
+    # number (`:invalid_expires_header`), so the junk this reading has to
+    # survive is the junk a template or a script writes, not a peer.
+    test "a malformed Expires falls back on the package default rather than crashing" do
+      req = publish_built([{"Expires", "soon"}], @doc_body)
+      assert Ops.publish_operation(req, 3600) == {:initial, nil, 3600}
+    end
+  end
+
   describe "allow_events/1" do
     test "composes the domain's package names" do
       assert Ops.allow_events(["presence", "presence.winfo"]) == "presence, presence.winfo"
@@ -217,6 +368,16 @@ defmodule SIP.Test.MsgOpsPresence do
       assert Ops.subscription_state(again) == {:active, %{"expires" => 3600}}
       assert Ops.accepted_content_types(again) == ["application/pidf+xml"]
       assert Ops.publish_etag(again) == "dx200xyz"
+    end
+
+    test "a 2xx keeps its SIP-ETag once re-serialized" do
+      rsp =
+        parsed([{"Event", "presence"}, {"SIP-ETag", "dx200xyz"}, {"Expires", "3600"}])
+
+      raw = SIPMsg.serialize(rsp)
+      {:ok, again} = SIPMsg.parse(raw, fn _code, _msg, _line, _text -> nil end)
+
+      assert Ops.entity_tag(again) == "dx200xyz"
     end
   end
 end

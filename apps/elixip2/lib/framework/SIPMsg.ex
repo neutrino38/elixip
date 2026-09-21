@@ -84,6 +84,7 @@ defmodule SIPMsg do
 			"accept" -> :accept
 			"subscription-state" -> :subscriptionstate
 			"sip-if-match" -> :sipifmatch
+			"sip-etag" -> :sipetag
 			"allow-events" -> :allowevents
 			_ -> name
 		end
@@ -98,7 +99,7 @@ defmodule SIPMsg do
 		expires: "Expires",
 		supported: "Supported",
 		event: "Event", accept: "Accept", subscriptionstate: "Subscription-State",
-		sipifmatch: "SIP-If-Match", allowevents: "Allow-Events" }
+		sipifmatch: "SIP-If-Match", sipetag: "SIP-ETag", allowevents: "Allow-Events" }
 
 	# Auth parameters that are bare tokens, never quoted strings (RFC 3261 ABNF /
 	# RFC 7616 §3.3-3.4). Quoting them is not cosmetic: a strict UA rejects

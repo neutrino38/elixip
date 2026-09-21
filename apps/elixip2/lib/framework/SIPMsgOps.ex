@@ -293,6 +293,112 @@ defmodule SIP.Msg.Ops do
   end
 
   @doc """
+  The entity-tag an event state compositor **granted** — the `SIP-ETag` of a 2xx
+  to a PUBLISH (RFC 3903 §11.3.1) — or `nil` when the response carries none.
+
+  The other half of `publish_etag/1`, which reads the tag a publisher
+  *presents* (`SIP-If-Match`). Two headers, two directions, one lifecycle: what
+  comes back here is what the next refresh sends back there. Opaque and
+  case-sensitive, like its counterpart.
+
+  A 2xx answering a removal carries none — there is no state left to name — so
+  `nil` is an answer and not an omission.
+  """
+  @spec entity_tag(map()) :: binary() | nil
+  def entity_tag(msg) when is_map(msg) do
+    case first_header_value(msg, :sipetag, "sip-etag") do
+      value when is_binary(value) -> presence(String.trim(value))
+      _no_tag -> nil
+    end
+  end
+
+  @doc """
+  What a PUBLISH is actually asking for (RFC 3903 §4.1 and §6), read from its
+  `SIP-If-Match`, its `Expires` and whether it carries a body:
+
+  | Answer | The request |
+  |---|---|
+  | `{:initial, nil, expires}` | a body and no tag: publish this state |
+  | `{:modify, etag, expires}` | a body and a tag: replace the state that tag names |
+  | `{:refresh, etag, expires}` | a tag and no body: the same state, for longer |
+  | `{:remove, etag, 0}` | `Expires: 0`: drop it |
+  | `:invalid` | neither a tag nor a body — nothing to publish and nothing to name (**400**) |
+
+  `package_default` is the lifetime to assume when the request states none: the
+  event package's, never a number of this layer's own — the same rule
+  `subscription_expires/2` follows, and the reason both exist beside
+  `requested_expires/2` rather than inside it.
+
+  `Expires: 0` reads as a removal whatever else the request carries, tag or body:
+  a publication with no lifetime is a publication that is not kept, which is what
+  the publisher asked for. An initial PUBLISH carrying `Expires: 0` is therefore
+  `{:remove, nil, 0}` — it names no state, and the 200 that answers it carries no
+  entity-tag.
+  """
+  @spec publish_operation(map(), non_neg_integer()) ::
+          {:initial | :modify | :refresh | :remove, binary() | nil, non_neg_integer()}
+          | :invalid
+  def publish_operation(req, package_default) when is_map(req) do
+    etag = publish_etag(req)
+    body = body_string(req)
+    expires = expires_header(req) || package_default
+
+    cond do
+      is_nil(etag) and is_nil(body) -> :invalid
+      expires == 0 -> {:remove, etag, 0}
+      is_nil(etag) -> {:initial, nil, expires}
+      is_nil(body) -> {:refresh, etag, expires}
+      true -> {:modify, etag, expires}
+    end
+  end
+
+  @doc """
+  The body of a message as a binary, whatever shape it arrived in — a bare
+  string, the parser's `[%{contenttype, data}]` part list, or a multipart list
+  (the first part) — and `nil` when it carries none.
+
+  `sdp_body/1` is the same question asked about a *session description*, and it
+  picks the SDP part out of a multipart body; this one makes no such choice,
+  because a PUBLISH body or an event state document is whatever its content type
+  says it is.
+  """
+  @spec body_string(map()) :: binary() | nil
+  def body_string(msg) when is_map(msg) do
+    case Map.get(msg, :body) do
+      body when is_binary(body) -> presence(body)
+      [%{data: data} | _] when is_binary(data) -> presence(data)
+      [data | _] when is_binary(data) -> presence(data)
+      _no_body -> nil
+    end
+  end
+
+  @doc """
+  The media type of a message's body, folded to lower case and stripped of its
+  parameters (`application/pidf+xml;charset=utf-8` reads
+  `"application/pidf+xml"`), or `nil` when it carries none.
+
+  The part's own Content-Type wins over the message's: a body carried as a part
+  states its type beside its bytes, and that is the one the body was written
+  with.
+  """
+  @spec body_content_type(map()) :: binary() | nil
+  def body_content_type(msg) when is_map(msg) do
+    value =
+      case Map.get(msg, :body) do
+        [%{contenttype: ct} | _] when is_binary(ct) -> ct
+        _ -> first_header_value(msg, :contenttype, "content-type")
+      end
+
+    case value do
+      value when is_binary(value) ->
+        value |> split_params() |> elem(0) |> String.downcase() |> presence()
+
+      _no_content_type ->
+        nil
+    end
+  end
+
+  @doc """
   The value of a `Subscription-State` header (RFC 6665 §8.2.3), built.
 
   The writer beside the reader above, so the one place that knows how this header

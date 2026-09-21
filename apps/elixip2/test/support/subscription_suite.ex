@@ -205,40 +205,6 @@ defmodule SIP.Test.SubscriptionSuite do
         def on_request(req, state), do: default_request(req, state)
       end
 
-      # ── The presence processing module ────────────────────────────────────
-
-      defmodule Fixture.PresenceUAS do
-        @moduledoc """
-        One notifier instance per inbound SUBSCRIBE dialog — what
-        `Elixip.ScenarioUAS` will do for `uas :presence` in P6, minus the quota
-        and the counters this suite has no use for.
-        """
-        @behaviour SIP.Session.Presence
-
-        @impl true
-        def on_new_subscribe(dialog_pid, req, _transaction_id) do
-          {module, appdata} = :persistent_term.get({__MODULE__, :scenario})
-
-          {pid, _ref} =
-            SIP.Scenario.Runner.spawn_uas_instance(module,
-              dialog_pid: dialog_pid,
-              inbound_request: req,
-              appdata: appdata
-            )
-
-          {:accept, pid}
-        end
-
-        @impl true
-        def on_new_publish(_dialog_pid, _req, _transaction_id),
-          do: {:reject, 501, "Not Implemented"}
-
-        def serve(module, appdata \\ %{}) do
-          :persistent_term.put({__MODULE__, :scenario}, {module, appdata})
-          :ok = SIP.Session.ConfigRegistry.set_presence_processing_module(__MODULE__)
-        end
-      end
-
       # ── Fixtures ──────────────────────────────────────────────────────────
 
       setup_all do
@@ -267,7 +233,7 @@ defmodule SIP.Test.SubscriptionSuite do
 
       describe "the notifier" do
         test "accepts a SUBSCRIBE and sends the state in the first NOTIFY" do
-          Fixture.PresenceUAS.serve(Fixture.Notifier)
+          SIP.Test.PresenceUAS.serve(Fixture.Notifier)
           tp = attach("notifier-accept")
 
           req = subscribe(instance: "notifier-accept")
@@ -287,7 +253,7 @@ defmodule SIP.Test.SubscriptionSuite do
         end
 
         test "refuses a lifetime below the package minimum with 423 and a Min-Expires" do
-          Fixture.PresenceUAS.serve(Fixture.Notifier)
+          SIP.Test.PresenceUAS.serve(Fixture.Notifier)
           tp = attach("notifier-423")
 
           req = subscribe(instance: "notifier-423", expires: @traits.too_brief())
@@ -303,7 +269,7 @@ defmodule SIP.Test.SubscriptionSuite do
         end
 
         test "refuses an Accept the package cannot satisfy with 406" do
-          Fixture.PresenceUAS.serve(Fixture.Notifier)
+          SIP.Test.PresenceUAS.serve(Fixture.Notifier)
           tp = attach("notifier-406")
 
           req = subscribe(instance: "notifier-406", accept: @traits.bad_accept())
@@ -314,7 +280,7 @@ defmodule SIP.Test.SubscriptionSuite do
         end
 
         test "refuses an event package the node does not know with 489" do
-          Fixture.PresenceUAS.serve(Fixture.Notifier)
+          SIP.Test.PresenceUAS.serve(Fixture.Notifier)
           tp = attach("notifier-489")
 
           req = subscribe(instance: "notifier-489", event: "nosuchpackage")
@@ -327,7 +293,7 @@ defmodule SIP.Test.SubscriptionSuite do
         test "refuses a package it does not serve with 489, without the script looking" do
           # `message-summary` is a perfectly good package name; this scenario
           # simply does not serve it, and says so before any of its own code runs.
-          Fixture.PresenceUAS.serve(Fixture.Notifier)
+          SIP.Test.PresenceUAS.serve(Fixture.Notifier)
           tp = attach("notifier-489-other")
 
           req = subscribe(instance: "notifier-489-other", event: "message-summary")
@@ -338,7 +304,7 @@ defmodule SIP.Test.SubscriptionSuite do
         end
 
         test "accepts a refresh on the same dialog and answers it 200" do
-          Fixture.PresenceUAS.serve(Fixture.Notifier)
+          SIP.Test.PresenceUAS.serve(Fixture.Notifier)
           tp = attach("notifier-refresh")
 
           req = subscribe(instance: "notifier-refresh")
@@ -356,7 +322,7 @@ defmodule SIP.Test.SubscriptionSuite do
         end
 
         test "refuses a second event package on an established dialog with 489" do
-          Fixture.PresenceUAS.serve(Fixture.Notifier)
+          SIP.Test.PresenceUAS.serve(Fixture.Notifier)
           tp = attach("notifier-second-package")
 
           req = subscribe(instance: "notifier-second-package")
@@ -374,7 +340,7 @@ defmodule SIP.Test.SubscriptionSuite do
           # One second, granted by the scenario over what the watcher asked for.
           # The script says nothing about the end of the subscription — that is
           # the point.
-          Fixture.PresenceUAS.serve(Fixture.Notifier, %{granted: 1})
+          SIP.Test.PresenceUAS.serve(Fixture.Notifier, %{granted: 1})
           tp = attach("notifier-expiry")
 
           req = subscribe(instance: "notifier-expiry")

@@ -1,6 +1,6 @@
 # presence-basic-plan.md — building basic presence
 
-**Status: P1 through P4 are implemented; P5 onwards is plan.** The design is
+**Status: P1 through P5 are implemented; P6 onwards is plan.** The design is
 [DESIGN-PRESENCE.md](DESIGN-PRESENCE.md); this document is the order it gets built
 in, what each phase delivers, and what proves it.
 
@@ -312,10 +312,63 @@ unique key, `body` is the document, and `expires` is an **absolute** epoch secon
 — kamailio's convention, adopted here so nothing converts between the struct and
 the row.
 
-**Files** `framework/SIPSessionPublish.ex`, `test/publish_test.exs`.
-
 **Done when** publish → refresh → remove works against an in-memory collection
 stub, and a refresh carrying a stale tag is answered 412.
+
+**Delivered 2026-09-21**, with four things settled differently from the
+paragraphs above, the first of them the one that matters:
+
+- **the script hands the collection a `%SIP.Publication{}`, not the request.**
+  `check_publish/1` is the verb: it reads the PUBLISH against the package
+  registry and answers the **489**, the **400** (neither a tag nor a body, RFC
+  3903 §11.3.2), the **415** (with `Accept`) and the **423** (with `Min-Expires`)
+  itself, then hands over a presentity row already read — the operation, the
+  entity-tag presented, the document parsed by the package, and an absolute
+  `expires`. Handing the module the raw request, as the sample above did, puts a
+  second reading of the message in the module ([CLAUDE.md](../../CLAUDE.md),
+  *Message Layer*) and makes every script check which package it is serving.
+  What is left to the collection is the **412** and the tag it issues, which are
+  the two things only the holder of the tags can know.
+- **`SIP.Publication` is the `presentity` row**, under that row's names and with
+  its value domains, exactly as `%SIP.Subscription{}` is an `active_watchers`
+  row (decision 2). `key/1` is `(username, domain, event, etag)` — the tag is
+  part of it, since §4.1 lets a handset and a desk phone hold state for one
+  presentity at the same time — and `resource/1` is the coarser key the fan-out
+  will notify on.
+- **a successful publication is given a NEW entity-tag** (§4.1), which is the
+  collection's to mint (`SIP.Publication.new_etag/0`). The framework's rule is
+  the other one: a 200 answering a removal carries **no** `SIP-ETag`, because
+  there is no state left to name — a publisher handed one there would present it
+  on its next refresh and be answered 412 for ever.
+- **the reading landed in the message layer**, not in `SIPSessionPublish.ex`:
+  `publish_operation/2` (which of the four things a PUBLISH asks for),
+  `entity_tag/1` (the `SIP-ETag` granted, the other half of `publish_etag/1`),
+  `body_string/1` and `body_content_type/1` are `SIP.Msg.Ops`'s, for the reason
+  every other header reading is. `SIP-ETag` gains its atom key in `SIPMsg`
+  beside the five of P1.
+
+One thing found on the way: `SIPMsg.parse/2` refuses a message whose `Expires`
+is not a number and one whose body states no `Content-Type`, so the junk
+`publish_operation/2` has to survive is the junk a template or a script writes,
+never a peer's. The tests say so where it would otherwise look like an untested
+branch.
+
+**Files** `framework/SIPSessionPublish.ex` (`SIP.Publication` and
+`SIP.Session.Publish`), `framework/SIPMsgOps.ex`, `framework/SIPMsg.ex`,
+`framework/SIPSessionInvite.ex` (`auto_store/2` stores a PUBLISH too),
+`dsl/SIPScenario.ex`, `test/publish_test.exs`,
+`test/support/publish_suite.ex`, `test/support/publish_collection.ex`,
+`test/support/presence_uas.ex`.
+
+**Tests** one suite run twice, over the dummy package and over `presence`, the
+way P4 settled it — `SIP.Test.PublishSuite` parameterised by the same
+`SIP.Test.SubscriptionTraits`, which needed no seventh callback. The collection
+it publishes into is a named Agent *outside* the instance
+(`SIP.Test.PublishCollection`), which is decision 5 asserted rather than
+assumed: a stub living in the scenario would prove the opposite. A third module
+covers what the dummy package cannot express — a body that is the right content
+type and still unreadable (a truncated document, a `<!DOCTYPE`), answered 400
+and published nowhere.
 
 ### P6 — elixipp, end to end with no node
 
