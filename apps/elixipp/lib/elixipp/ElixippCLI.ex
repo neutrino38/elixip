@@ -231,7 +231,7 @@ defmodule Elixipp.CLI do
   # instances (REGISTER beyond it are rejected with 503). Never returns.
   @spec run_server_mode(module(), atom(), keyword(), pos_integer(), term()) :: no_return()
   defp run_server_mode(module, kind, opts, limit, ext_config)
-       when kind in [:uas_register, :uas_invite],
+       when kind in [:uas_register, :uas_invite, :uas_presence],
        do: start_uas_server(module, kind, opts, limit, ext_config)
 
   defp run_server_mode(_module, type, _opts, _limit, _ext_config) do
@@ -244,7 +244,7 @@ defmodule Elixipp.CLI do
   # server loop. Never returns.
   @spec start_uas_server(
           module(),
-          :uas_register | :uas_invite,
+          :uas_register | :uas_invite | :uas_presence,
           keyword(),
           pos_integer(),
           term()
@@ -281,6 +281,12 @@ defmodule Elixipp.CLI do
 
         :uas_invite ->
           SIP.Session.ConfigRegistry.set_call_processing_module(Elixip.ScenarioUAS)
+
+        # SUBSCRIBE and PUBLISH both land on the presence slot (RFC 6665, RFC
+        # 3903): one scenario serves both, and which of the two it answers is
+        # decided by the states it writes.
+        :uas_presence ->
+          SIP.Session.ConfigRegistry.set_presence_processing_module(Elixip.ScenarioUAS)
       end
 
     started = start_listeners(listeners)
@@ -396,6 +402,7 @@ defmodule Elixipp.CLI do
 
   defp server_kind_label(:uas_register), do: "UAS Register"
   defp server_kind_label(:uas_invite), do: "UAS Invite (call server)"
+  defp server_kind_label(:uas_presence), do: "UAS Presence (notifier)"
 
   # Live monitored server loop: bring up Owl + the monitor, render the call table
   # in a live block and react to the keyboard (q / Ctrl+D / arrows). On a
@@ -1481,6 +1488,7 @@ defmodule Elixipp.CLI do
       elixipp -l 200 --listen udp:5060 uas_register.exs      # serveur, 200 abonnés max
       elixipp --listen tls:5061 --tls-cert cert.pem --tls-key key.pem uas_register.exs
       elixipp --listen wss:5065 --tls-cert cert.pem --tls-key key.pem uas_register.exs
+      elixipp --listen udp:5060 uas_presence.exs  # notifieur de présence (SUBSCRIBE/NOTIFY)
       elixipp --listen udp:5060 uas_invite.exs    # serveur d'appels (répond aux INVITE)
       elixipp -l 20 --listen udp:5060 uas_invite.exs         # 20 appels simultanés max
 

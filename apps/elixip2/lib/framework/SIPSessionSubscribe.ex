@@ -676,6 +676,25 @@ defmodule SIP.Session.SubscribeUAC do
           SIP.Context.appdata_get(var!(sip_ctx), :subscription)
         end
       end
+
+      @doc """
+      The state a NOTIFY carries, read by the event package that carries it.
+
+      Answers `{:ok, document}` — a `%SIP.Presence.Doc{}` for `presence`,
+      whatever the package models for anything else — or `{:error, reason}`,
+      `:no_body` being the final NOTIFY, which states a termination and carries
+      nothing.
+
+      A watcher that reads the body itself re-derives the content type, the
+      package and the parsing in every scenario that displays a state
+      ([CLAUDE.md](../../CLAUDE.md), *Writing a scenario*); this is the one
+      reading, and it is the same one the notifier wrote with.
+      """
+      defmacro notified_document(notify) do
+        quote do
+          SIP.Session.SubscribeUAC.document_of(var!(sip_ctx), unquote(notify))
+        end
+      end
     end
   end
 
@@ -796,6 +815,56 @@ defmodule SIP.Session.SubscribeUAC do
         Logger.error("send_unSUBSCRIBE called before any SUBSCRIBE was sent")
         SIP.Context.set(sip_ctx, :lasterr, {:error, :no_subscription})
     end
+  end
+
+  # ── Reading a NOTIFY ────────────────────────────────────────────────────────
+
+  @doc """
+  The document a NOTIFY carries, parsed by the event package of the subscription
+  it belongs to.
+
+  The package comes from the subscription this watcher holds; a NOTIFY arriving
+  before its own 200 (the race RFC 6665 §4.2.1.2 forbids and UDP produces anyway)
+  has none yet, so the `Event` header of the NOTIFY itself is the fallback — it is
+  mandatory there (§8.2.1), and the registry answers what it names.
+  """
+  @spec document_of(%SIP.Context{}, map()) :: {:ok, term()} | {:error, term()}
+  def document_of(sip_ctx = %SIP.Context{}, notify) when is_map(notify) do
+    with {:ok, package} <- package_for(sip_ctx, notify),
+         body when is_binary(body) <- SIP.Msg.Ops.body_string(notify) do
+      package.parse(content_type_of(notify, package), body)
+    else
+      {:error, reason} -> {:error, reason}
+      # A NOTIFY with no body at all: the final one says why the subscription
+      # ended in its Subscription-State, and there is no state left to carry.
+      nil -> {:error, :no_body}
+    end
+  end
+
+  defp package_for(sip_ctx, notify) do
+    case SIP.Context.appdata_get(sip_ctx, :subscription) do
+      %SIP.Subscription{package: package} when not is_nil(package) ->
+        {:ok, package}
+
+      _not_subscribed_yet ->
+        case SIP.Msg.Ops.event_package(notify) do
+          {name, _id} -> lookup_package(name)
+          nil -> {:error, :no_event_package}
+        end
+    end
+  end
+
+  defp lookup_package(name) do
+    case SIP.EventPackage.lookup(name) do
+      {:ok, package} -> {:ok, package}
+      :error -> {:error, {:unknown_event_package, name}}
+    end
+  end
+
+  # An absent Content-Type means the package's default type (RFC 6665 §4.4.5),
+  # the same reading the notifier applies to an absent Accept.
+  defp content_type_of(notify, package) do
+    SIP.Msg.Ops.body_content_type(notify) || List.first(package.content_types())
   end
 
   # ── Reading the answer ──────────────────────────────────────────────────────
