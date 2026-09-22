@@ -252,13 +252,38 @@ defmodule Kelix.Control.CLI do
   defp parse([module, "help", cmd]),
     do: {:ok, {:module_help, module, cmd}, :module_commands, [module]}
 
-  # module-contributed command: <module> <cmd> [args…]
+  # module-contributed command: <module> <cmd> [name=value…]
   defp parse([module, cmd | rest]),
-    do: {:ok, {:module, module, cmd}, :module_command, [module, cmd, %{"args" => rest}]}
+    do: {:ok, {:module, module, cmd}, :module_command, [module, cmd, module_args(rest)]}
 
   defp parse(_), do: {:error, usage()}
 
   defp pop_flag(args, flag), do: {flag in args, Enum.reject(args, &(&1 == flag))}
+
+  # The `name=value` tokens an operator types become the named arguments a module
+  # declares (`describe_control/0` `args:`, which is also what `<module> help`
+  # prints), so `handle_control/2` reads one shape whichever frontal it came from —
+  # REST already hands it the path, query and body keys merged at the top level.
+  #
+  # The frontal is where this belongs: it is the one that knows the CLI form.
+  # Leaving it to each module meant three readings of one convention, and
+  # `kelictl presence list domain=…` reached a module that had none — it answered
+  # "domain is required" to a command line that named one.
+  #
+  # The raw list stays under "args": a command that takes none answers on what it
+  # was not asked for (`Kelix.Mod.AuthDb`), and one that types its values does it
+  # from the tokens (`Kelix.Mod.Mcu.Args`).
+  defp module_args(tokens) do
+    named =
+      for token <- tokens, into: %{} do
+        case String.split(token, "=", parts: 2) do
+          [name, value] -> {name, value}
+          [flag] -> {flag, true}
+        end
+      end
+
+    Map.put(named, "args", tokens)
+  end
 
   # ── completion candidates ────────────────────────────────────────────────────
   #

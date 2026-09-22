@@ -58,10 +58,5 @@
 #min_expires          = 60
 #default_expires      = 3600
 
-# The presence collection (kelixip-mod-presence). It holds what is published and
-# who watches it; it decides nothing about WHO MAY WATCH — that is the subscribe
-# script's, and presence-subscribe.exs is where a deployment writes its rule.
-# The expiry bounds are the event package's (RFC 6665 §4.4.1), so there is no key
-# for them here.
-#[module.presence]
-#call_timeout_ms = 5000
+# [module.presence] lives in config.toml, not here: only `registrar` is read from
+# this file, and any other [module.*] block written here is ignored.

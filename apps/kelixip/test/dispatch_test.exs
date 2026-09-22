@@ -57,7 +57,7 @@ defmodule Kelix.DispatchTest do
 
     test "INVITE on a registrar-only domain (calls not enabled) → 405", %{snap: snap, dom: dom} do
       invite = %{method: :INVITE, ruri: %SIP.Uri{userpart: "1234", domain: dom}}
-      assert {:reject, 405, _} = Router.dispatch(self(), invite, snap)
+      assert {:reject, 405, _, [{"Allow", _}]} = Router.dispatch(self(), invite, snap)
     end
   end
 

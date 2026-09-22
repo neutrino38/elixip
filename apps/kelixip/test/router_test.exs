@@ -110,22 +110,31 @@ defmodule Kelix.RouterTest do
     end
 
     test "INVITE on a domain without calls → 405", %{snap: snap} do
-      assert {:reject, 405, _} = Router.resolve(snap, req(:INVITE, "1234", "example.com"))
+      assert {:reject, 405, _, _} = Router.resolve(snap, req(:INVITE, "1234", "example.com"))
     end
 
     test "SUBSCRIBE on a domain without presence → 405", %{snap: snap} do
-      assert {:reject, 405, _} =
+      assert {:reject, 405, _, _} =
                Router.resolve(snap, event_req(:SUBSCRIBE, "alice", "mydomain.de", "presence"))
     end
 
     test "an unmapped method (BYE out-of-dialog) → 405", %{snap: snap} do
-      assert {:reject, 405, _} = Router.resolve(snap, req(:BYE, "x", "example.com"))
+      assert {:reject, 405, _, _} = Router.resolve(snap, req(:BYE, "x", "example.com"))
     end
 
     # Page-mode chat is a function of its own with its own blocks (DESIGN-CHAT.md);
     # a MESSAGE carries no Event, so it can name none of the presence blocks.
     test "an out-of-dialog MESSAGE is not routed to presence", %{snap: snap} do
-      assert {:reject, 405, _} = Router.resolve(snap, req(:MESSAGE, "alice", "example.com"))
+      assert {:reject, 405, _, _} = Router.resolve(snap, req(:MESSAGE, "alice", "example.com"))
+    end
+
+    # RFC 3261 §21.4.6: a 405 states what IS allowed, and the list is the one this
+    # node advertises on OPTIONS — the two answers must not disagree.
+    test "a 405 carries the Allow this node advertises", %{snap: snap} do
+      assert {:reject, 405, _, fields} = Router.resolve(snap, req(:MESSAGE, "a", "example.com"))
+      assert {"Allow", allow} = List.keyfind(fields, "Allow", 0)
+      assert allow == Kelix.Options.allow()
+      refute allow =~ "MESSAGE"
     end
   end
 
@@ -178,7 +187,7 @@ defmodule Kelix.RouterTest do
     # The `dialog` block declares no publish script: the package is served, that
     # method on it is not.
     test "PUBLISH on a package whose block declares no publish script → 405", %{snap: snap} do
-      assert {:reject, 405, _} =
+      assert {:reject, 405, _, _} =
                Router.resolve(snap, event_req(:PUBLISH, "bob", "example.com", "dialog"))
     end
 

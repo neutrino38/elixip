@@ -8,12 +8,15 @@
 # 423 itself. What is left is what a script is for: who may watch, what state to
 # send, and when to stop.
 #
-# Admission is ONE question in this reference: is the presentity a subscriber of
-# this deployment? A deployment with a policy of its own writes it in
-# `authorize`, next to that question — a `reject_subscription(403, "Forbidden")`
-# in the same place.
+# Two questions, in this order. WHO is watching — the digest, and nothing else,
+# answers that — then MAY they watch, which in this reference is one question: is
+# the presentity a subscriber of this deployment? A deployment with a policy of
+# its own writes it in `authorize`, next to that question — a
+# `reject_subscription(403, "Forbidden")` in the same place, with the
+# authenticated identity already in the context.
 defmodule Kelix.PresenceSubscribe do
   use SIP.Scenario
+  use Kelix.Mod.AuthDb
   require Logger
 
   uas(:presence)
@@ -31,7 +34,7 @@ defmodule Kelix.PresenceSubscribe do
   state wait_subscribe do
     on_events do
       {:SUBSCRIBE, _req, _trans_pid, _dialog_pid} ->
-        goto(authorize, "SUBSCRIBE received")
+        goto(authenticate_watcher, "SUBSCRIBE received")
 
       {:dialog_terminated, _dialog_pid, :transport_down} ->
         scenario_aborted("watcher connection lost")
@@ -41,6 +44,43 @@ defmodule Kelix.PresenceSubscribe do
     after
       32_000 ->
         scenario_failure("no SUBSCRIBE received")
+    end
+  end
+
+  # WHO is watching? The digest proves it, and nothing else does: a SUBSCRIBE names
+  # its watcher in a `From` anyone can write. Without this state the state of every
+  # provisioned user is readable by whoever asks for it — presence is exactly the
+  # data a hostile watcher wants, since it says when someone is at their desk.
+  #
+  # 401, not 407: the presence server is the notifier of the resource, not a proxy
+  # on the way to it (RFC 3261 §22.1). The realm defaults to the served domain.
+  #
+  # A refresh comes back here too. A UA that was challenged once replays its
+  # credentials on every SUBSCRIBE of the dialog, so this costs nothing, and the
+  # alternative is a subscription that authenticated once and is then extended for
+  # hours by anyone who can guess a Call-ID.
+  state authenticate_watcher do
+    AuthDb.SBB.authenticate(code: 401)
+
+    on_events do
+      {:auth, :authenticated, %{user: user}} ->
+        goto(authorize, "SUBSCRIBE authenticated as #{user}")
+
+      {:auth, :caller_gone, %{reason: reason}} ->
+        scenario_aborted("watcher vanished while challenged: #{inspect(reason)}")
+
+      # A UA replays a challenge within a second. What does not is a scanner, or a
+      # phone with a wrong password: end the instance rather than hold a slot.
+      {:auth, :timeout, _} ->
+        scenario_success("no credentials came back")
+
+      {:auth, :refused, %{attempts: attempts}} ->
+        scenario_success("gave up on this watcher after #{attempts} refused attempts")
+
+      # A CANCEL on a SUBSCRIBE: legal, never seen. Named so the block's every
+      # outcome is answered — one nobody matches leaves the machine waiting.
+      {:auth, :cancelled, _} ->
+        scenario_success("watcher cancelled the challenged SUBSCRIBE")
     end
   end
 
@@ -104,7 +144,7 @@ defmodule Kelix.PresenceSubscribe do
       # A refresh is another SUBSCRIBE on the same dialog: negotiated again,
       # granted again, and answered with the state as it stands.
       {:SUBSCRIBE, _req, _trans_pid, _dialog_pid} ->
-        goto(authorize, "refresh")
+        goto(authenticate_watcher, "refresh")
 
       # The end of the subscription is the dialog's: it arms the granted
       # lifetime, sends the final NOTIFY and hands us exactly one of these. An

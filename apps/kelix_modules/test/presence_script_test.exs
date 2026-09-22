@@ -9,6 +9,7 @@ defmodule Kelix.PresenceScriptTest do
   alias Kelix.Mod.Presence
 
   @domain "example.com"
+  @pass "secret"
   @package "presence"
   @presentity "bob"
   @watcher "alice"
@@ -69,10 +70,11 @@ defmodule Kelix.PresenceScriptTest do
     start_supervised!(Presence)
     SIP.EventPackage.register_builtins()
 
-    # The "subscriber DB": bob and alice are provisioned, nobody else is. What the
-    # scripts ask of it is existence, not a secret.
+    # The "subscriber DB": bob and alice are provisioned, nobody else is. Both
+    # questions are asked of it now — does this user exist, and is this digest
+    # theirs — so it answers with the HA1 a real base would store.
     Application.put_env(:kelixip, :authdb_ha1_lookup, fn
-      user, @domain when user in [@presentity, @watcher] -> {:ok, String.duplicate("a", 32)}
+      user, @domain when user in [@presentity, @watcher] -> {:ok, ha1(user)}
       _user, _realm -> :notfound
     end)
 
@@ -92,12 +94,18 @@ defmodule Kelix.PresenceScriptTest do
     }
   end
 
+  # `user` is the presentity (To / R-URI); `sender` is who is publishing it (From),
+  # the same by default. They differ in exactly one case worth testing — a
+  # provisioned user publishing about one who is not — and telling them apart is
+  # what makes that 404 reachable now that the sender is authenticated.
   defp publish(opts \\ []) do
+    user = Keyword.get(opts, :user, @presentity)
+
     base = %{
       method: :PUBLISH,
-      from: %SIP.Uri{userpart: Keyword.get(opts, :user, @presentity), domain: @domain},
-      to: %SIP.Uri{userpart: Keyword.get(opts, :user, @presentity), domain: @domain},
-      ruri: %SIP.Uri{userpart: Keyword.get(opts, :user, @presentity), domain: @domain},
+      from: %SIP.Uri{userpart: Keyword.get(opts, :sender, user), domain: @domain},
+      to: %SIP.Uri{userpart: user, domain: @domain},
+      ruri: %SIP.Uri{userpart: user, domain: @domain},
       event: @package,
       expires: Keyword.get(opts, :expires, 3600),
       callid: "call-2",
@@ -109,6 +117,57 @@ defmodule Kelix.PresenceScriptTest do
       nil -> base
       etag -> Map.put(base, :sipifmatch, etag)
     end
+  end
+
+  # ── the digest, done as a client does it ─────────────────────────────────────
+
+  defp ha1(user), do: SIP.Auth.compute_ha1("MD5", user, @domain, @pass)
+
+  # The sender of a request is its From: that is who the digest must prove, and
+  # who `Kelix.Mod.AuthDb`'s identity check compares the credentials against for
+  # anything that is not a REGISTER.
+  defp sender(%{from: %SIP.Uri{userpart: user}}), do: user
+
+  defp digest_auth(nonce, req) do
+    user = sender(req)
+    uri = "sip:#{@domain}"
+    cnonce = "0a4f113b"
+    nc = "00000001"
+
+    response =
+      SIP.Auth.compute_auth_response_from_ha1(
+        "MD5",
+        nonce,
+        ha1(user),
+        Atom.to_string(req.method),
+        uri,
+        %{"nc" => nc, "cnonce" => cnonce, "qop" => "auth"}
+      )
+
+    %{
+      "username" => user,
+      "realm" => @domain,
+      "nonce" => nonce,
+      "uri" => uri,
+      "response" => response,
+      "algorithm" => "MD5",
+      "qop" => "auth",
+      "nc" => nc,
+      "cnonce" => cnonce
+    }
+  end
+
+  # What a UA does with a request that is challenged: send it, read the nonce out
+  # of the 401, replay it with the credentials. Every test below goes through this,
+  # because every request the scripts serve does.
+  defp submit(pid, dialog, req) do
+    send(pid, {req.method, req, nil, dialog})
+    assert_receive {:replied, 401, "Unauthorized", fields, _}, 1000
+    nonce = fields[:wwwauthenticate]["nonce"]
+
+    authenticated = Map.put(req, :authorization, digest_auth(nonce, req))
+    send(pid, {req.method, authenticated, nil, dialog})
+    authenticated
   end
 
   # The event package is injected by the router, exactly as the domain name is:
@@ -130,7 +189,7 @@ defmodule Kelix.PresenceScriptTest do
       {:ok, dialog} = MockDialog.start_link(self())
       pid = spawn_instance(module, dialog, publish())
 
-      send(pid, {:PUBLISH, publish(), nil, dialog})
+      submit(pid, dialog, publish())
       assert_receive {:replied, 200, _reason, fields, _req}, 1000
 
       # RFC 3903 §6 makes both mandatory on the 2xx: without the tag the
@@ -144,13 +203,13 @@ defmodule Kelix.PresenceScriptTest do
       {:ok, dialog} = MockDialog.start_link(self())
       pid = spawn_instance(m, dialog, publish())
 
-      send(pid, {:PUBLISH, publish(), nil, dialog})
+      submit(pid, dialog, publish())
       assert_receive {:replied, 200, _, fields, _}, 1000
       first = fields[:sipetag]
 
       # a PUBLISH is one transaction: the refresh is served by its own instance
       pid2 = spawn_instance(m, dialog, publish(etag: first, body: nil))
-      send(pid2, {:PUBLISH, publish(etag: first, body: nil), nil, dialog})
+      submit(pid2, dialog, publish(etag: first, body: nil))
       assert_receive {:replied, 200, _, refreshed, _}, 1000
 
       assert is_binary(refreshed[:sipetag])
@@ -164,19 +223,19 @@ defmodule Kelix.PresenceScriptTest do
       req = publish(etag: "never-issued", body: nil)
       pid = spawn_instance(m, dialog, req)
 
-      send(pid, {:PUBLISH, req, nil, dialog})
+      submit(pid, dialog, req)
       assert_receive {:replied, 412, _reason, _fields, _}, 1000
     end
 
     test "a removal is answered with no entity-tag", %{publish: m} do
       {:ok, dialog} = MockDialog.start_link(self())
       pid = spawn_instance(m, dialog, publish())
-      send(pid, {:PUBLISH, publish(), nil, dialog})
+      submit(pid, dialog, publish())
       assert_receive {:replied, 200, _, fields, _}, 1000
 
       removal = publish(etag: fields[:sipetag], body: nil, expires: 0)
       pid2 = spawn_instance(m, dialog, removal)
-      send(pid2, {:PUBLISH, removal, nil, dialog})
+      submit(pid2, dialog, removal)
       assert_receive {:replied, 200, _, removed, _}, 1000
 
       # There is no state left to name: a tag handed here would be presented on
@@ -185,12 +244,15 @@ defmodule Kelix.PresenceScriptTest do
       assert Presence.presentities(@domain) == []
     end
 
+    # bob is provisioned and proves it; the presentity he publishes about is not.
+    # The sender being someone else is the only way to reach this refusal now —
+    # a PUBLISH whose sender is unknown never gets past the digest.
     test "a presentity nobody provisioned is 404", %{publish: m} do
       {:ok, dialog} = MockDialog.start_link(self())
-      req = publish(user: "nobody")
+      req = publish(user: "nobody", sender: @presentity)
       pid = spawn_instance(m, dialog, req)
 
-      send(pid, {:PUBLISH, req, nil, dialog})
+      submit(pid, dialog, req)
       assert_receive {:replied, 404, _, _, _}, 1000
       assert Presence.presentities(@domain) == []
     end
@@ -200,7 +262,7 @@ defmodule Kelix.PresenceScriptTest do
       pid = spawn_instance(m, dialog, publish())
       stop_supervised!(Presence)
 
-      send(pid, {:PUBLISH, publish(), nil, dialog})
+      submit(pid, dialog, publish())
       assert_receive {:replied, 503, _, _, _}, 1000
     end
   end
@@ -210,7 +272,7 @@ defmodule Kelix.PresenceScriptTest do
       {:ok, dialog} = MockDialog.start_link(self())
       pid = spawn_instance(m, dialog, subscribe())
 
-      send(pid, {:SUBSCRIBE, subscribe(), nil, dialog})
+      submit(pid, dialog, subscribe())
       assert_receive {:replied, 200, "OK", fields, _}, 1000
 
       # Allow-Events is the DOMAIN's, composed from its [[domain.presence]]
@@ -227,12 +289,12 @@ defmodule Kelix.PresenceScriptTest do
     test "one PUBLISH becomes one NOTIFY on the watcher's dialog", %{subscribe: sub, publish: pub} do
       {:ok, dialog} = MockDialog.start_link(self())
       watcher = spawn_instance(sub, dialog, subscribe())
-      send(watcher, {:SUBSCRIBE, subscribe(), nil, dialog})
+      submit(watcher, dialog, subscribe())
       assert_receive {:replied, 200, "OK", _, _}, 1000
       assert_receive {:notified, _closed, _}, 1000
 
       publisher = spawn_instance(pub, dialog, publish())
-      send(publisher, {:PUBLISH, publish(), nil, dialog})
+      submit(publisher, dialog, publish())
       assert_receive {:replied, 200, _, _, _}, 1000
 
       # The fan-out reached the watcher INSTANCE, which sent the NOTIFY from its
@@ -246,7 +308,7 @@ defmodule Kelix.PresenceScriptTest do
       req = subscribe(user: "nobody")
       pid = spawn_instance(m, dialog, req)
 
-      send(pid, {:SUBSCRIBE, req, nil, dialog})
+      submit(pid, dialog, req)
       assert_receive {:replied, 404, _, _, _}, 1000
       assert Presence.watchers(@domain, "nobody") == []
     end
@@ -259,14 +321,14 @@ defmodule Kelix.PresenceScriptTest do
       pid = spawn_instance(m, dialog, subscribe())
       stop_supervised!(Presence)
 
-      send(pid, {:SUBSCRIBE, subscribe(), nil, dialog})
+      submit(pid, dialog, subscribe())
       assert_receive {:subscription_ended, :noresource}, 1000
     end
 
     test "the collection knows the watcher, under kamailio's names", %{subscribe: m} do
       {:ok, dialog} = MockDialog.start_link(self())
       pid = spawn_instance(m, dialog, subscribe())
-      send(pid, {:SUBSCRIBE, subscribe(), nil, dialog})
+      submit(pid, dialog, subscribe())
       assert_receive {:notified, _, _}, 1000
 
       assert [row] = Presence.watchers(@domain, @presentity)
@@ -282,12 +344,76 @@ defmodule Kelix.PresenceScriptTest do
     test "the subscription ending stops the watching", %{subscribe: m} do
       {:ok, dialog} = MockDialog.start_link(self())
       pid = spawn_instance(m, dialog, subscribe())
-      send(pid, {:SUBSCRIBE, subscribe(), nil, dialog})
+      submit(pid, dialog, subscribe())
       assert_receive {:notified, _, _}, 1000
       assert [_watching] = Presence.watchers(@domain, @presentity)
 
       send(pid, {:subscription_terminated, make_ref(), :timeout})
       assert eventually(fn -> Presence.watchers(@domain, @presentity) == [] end)
+    end
+  end
+
+  # The digest itself, on both halves. It is what says WHO is watching and WHOSE
+  # state is being published: a SUBSCRIBE names its watcher in a From anyone can
+  # write, and an unauthenticated PUBLISH lets a stranger declare a user online.
+  describe "authentication" do
+    test "an unauthenticated SUBSCRIBE is challenged, and nothing is watched", %{subscribe: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      pid = spawn_instance(m, dialog, subscribe())
+
+      send(pid, {:SUBSCRIBE, subscribe(), nil, dialog})
+
+      # 401, not 407: the presence server answers for itself, not as a proxy.
+      assert_receive {:replied, 401, "Unauthorized", fields, _}, 1000
+      params = fields[:wwwauthenticate]
+      assert params["realm"] == @domain
+      assert params["qop"] == "auth" and params["algorithm"] == "MD5"
+      assert Presence.watchers(@domain, @presentity) == []
+    end
+
+    test "an unauthenticated PUBLISH is challenged, and nothing is published", %{publish: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      pid = spawn_instance(m, dialog, publish())
+
+      send(pid, {:PUBLISH, publish(), nil, dialog})
+
+      assert_receive {:replied, 401, "Unauthorized", fields, _}, 1000
+      assert fields[:wwwauthenticate]["realm"] == @domain
+      assert Presence.presentities(@domain) == []
+    end
+
+    # The whole point of the challenge: a watcher who cannot prove who they are
+    # reads nobody's state. The block answers the refusal and keeps waiting, so a
+    # client that fixes its password can say so.
+    test "a SUBSCRIBE with a wrong password is refused", %{subscribe: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      pid = spawn_instance(m, dialog, subscribe())
+
+      send(pid, {:SUBSCRIBE, subscribe(), nil, dialog})
+      assert_receive {:replied, 401, _, fields, _}, 1000
+      nonce = fields[:wwwauthenticate]["nonce"]
+
+      wrong = Map.put(digest_auth(nonce, subscribe()), "response", String.duplicate("f", 32))
+      send(pid, {:SUBSCRIBE, Map.put(subscribe(), :authorization, wrong), nil, dialog})
+
+      assert_receive {:replied, code, _, _, _}, 1000
+      assert code in [401, 403]
+      assert Presence.watchers(@domain, @presentity) == []
+    end
+
+    # A watcher stays authenticated for as long as it keeps proving it: the refresh
+    # is a SUBSCRIBE of its own, challenged like the first one.
+    test "a refresh is authenticated too", %{subscribe: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      pid = spawn_instance(m, dialog, subscribe())
+
+      submit(pid, dialog, subscribe())
+      assert_receive {:replied, 200, "OK", _, _}, 1000
+      assert_receive {:notified, _, _}, 1000
+
+      submit(pid, dialog, subscribe(expires: 1800))
+      assert_receive {:replied, 200, "OK", fields, _}, 1000
+      assert fields[:expires] == 1800
     end
   end
 

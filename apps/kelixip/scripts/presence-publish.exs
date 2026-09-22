@@ -9,8 +9,14 @@
 # itself, handing back a presentity row already read. What is left is the one
 # answer only the holder of the entity-tags can give — the 412 — and the SIP each
 # outcome means.
+#
+# WHOSE state is being published is the first question, and the digest is what
+# answers it: a PUBLISH carries the presentity in a `From` anyone can write, and
+# an unauthenticated one lets a stranger say that a user is offline — or online,
+# which is worse.
 defmodule Kelix.PresencePublish do
   use SIP.Scenario
+  use Kelix.Mod.AuthDb
   require Logger
 
   uas(:presence)
@@ -24,13 +30,44 @@ defmodule Kelix.PresencePublish do
   state wait_publish do
     on_events do
       {:PUBLISH, _req, _trans_pid, _dialog_pid} ->
-        goto(authorize, "PUBLISH received")
+        goto(authenticate_publisher, "PUBLISH received")
 
       {:dialog_terminated, _dialog_pid, _reason} ->
         scenario_aborted("publisher vanished before the PUBLISH")
     after
       32_000 ->
         scenario_failure("no PUBLISH received")
+    end
+  end
+
+  # Who is publishing? 401, not 407: the compositor is the server of the event
+  # state, not a proxy on the way to it (RFC 3261 §22.1). The realm defaults to
+  # the served domain.
+  #
+  # The identity the digest proves is recorded in the context. A deployment that
+  # wants "you may only publish your own state" writes that comparison in
+  # `authorize` below, against `Kelix.Mod.AuthDb` having already refused a `From`
+  # asserting someone else (its `identity_check`).
+  state authenticate_publisher do
+    AuthDb.SBB.authenticate(code: 401)
+
+    on_events do
+      {:auth, :authenticated, %{user: user}} ->
+        goto(authorize, "PUBLISH authenticated as #{user}")
+
+      {:auth, :caller_gone, %{reason: reason}} ->
+        scenario_aborted("publisher vanished while challenged: #{inspect(reason)}")
+
+      {:auth, :timeout, _} ->
+        scenario_success("no credentials came back")
+
+      {:auth, :refused, %{attempts: attempts}} ->
+        scenario_success("gave up on this publisher after #{attempts} refused attempts")
+
+      # A CANCEL on a PUBLISH: legal, never seen. Named so every outcome the block
+      # declares is answered.
+      {:auth, :cancelled, _} ->
+        scenario_success("publisher cancelled the challenged PUBLISH")
     end
   end
 

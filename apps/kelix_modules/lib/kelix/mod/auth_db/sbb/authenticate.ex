@@ -9,6 +9,12 @@ defmodule Kelix.Mod.AuthDb.SBB.Authenticate do
   and the 32 s a challenge is worth waiting for. They were already copied
   verbatim into a second script.
 
+  **Whatever the method.** A digest gates a SUBSCRIBE and a PUBLISH the way it
+  gates an INVITE, so nothing here names one: the request served is the stored
+  one, the challenge goes out through `challenge_request/2`, and the re-submission
+  is awaited on the method that was challenged. Only the 100 Trying is an INVITE's
+  — it restarts the caller's timer A, and the other methods are answered once.
+
   ## What it does
 
   Asks `Kelix.Mod.AuthDb.authenticate/3` for a verdict on the request the host is
@@ -18,8 +24,8 @@ defmodule Kelix.Mod.AuthDb.SBB.Authenticate do
       the host places next carries a `P-Asserted-Identity`) and returns;
     * `{:requireauth, stale}` — challenges and waits for the request to come back
       with credentials, on the same dialog: same Call-ID, a new CSeq, no To tag.
-      Its ACK never reaches us — the server transaction absorbs the ACK of a
-      non-2xx (RFC 3261 §17.2.1);
+      An INVITE's ACK never reaches us — the server transaction absorbs the ACK of
+      a non-2xx (RFC 3261 §17.2.1), and the other methods have none;
     * `{:reject, code, reason}` — answers and **keeps waiting**. One request's
       verdict is not the end of the conversation: a client that fixes its
       credentials must be able to say so, and ending the instance would leave the
@@ -32,7 +38,9 @@ defmodule Kelix.Mod.AuthDb.SBB.Authenticate do
   Through `args`, all optional:
 
     * `:realm` — the realm to require, defaulting to `sip_ctx.domain`;
-    * `:code` — 407 (default) or 401;
+    * `:code` — 407 (default) or 401. A UA expects the server that routes its
+      calls to challenge as a proxy; a server answering *for itself* — a registrar,
+      a presence server — sends 401;
     * `:max_attempts` — rejected attempts to answer before giving up, 3 by
       default, `:infinity` for the behaviour the scripts had before this block.
 
@@ -45,9 +53,9 @@ defmodule Kelix.Mod.AuthDb.SBB.Authenticate do
   """
 
   use SIP.SBB
-  # `challenge_invite/2` lives in the UAS mixin, which `use SIP.Scenario` does
+  # `challenge_request/2` lives in the UAS mixin, which `use SIP.Scenario` does
   # not pull in — unlike `reply_invite`, which comes from CallUAC and is
-  # everywhere. A block that answers an inbound INVITE is a UAS and says so.
+  # everywhere. A block that answers an inbound request is a UAS and says so.
   use SIP.Session.CallUAS
 
   require Logger
@@ -100,11 +108,11 @@ defmodule Kelix.Mod.AuthDb.SBB.Authenticate do
             algorithm: Kelix.Mod.AuthDb.challenge_algorithm()
           )
 
-        challenge_invite(params, sbb_data_get(:code) || @default_code)
+        challenge_request(params, sbb_data_get(:code) || @default_code)
         goto(wait_credentials, if(stale, do: "challenge (stale)", else: "challenge"))
 
       {:reject, code, reason} ->
-        reply_invite(code, reason)
+        reply_request(req, code, reason)
         attempts = (sbb_data_get(:attempts) || 0) + 1
         sbb_data_set(:attempts, attempts)
 
@@ -122,6 +130,17 @@ defmodule Kelix.Mod.AuthDb.SBB.Authenticate do
       # the caller's UAC has restarted timer A on a fresh transaction.
       {:INVITE, _req, _trans, _dlg} ->
         reply_invite(100, "Trying")
+        goto(initial_state, "credentials re-submitted")
+
+      # The same, for the methods a provisional response would be noise on: a
+      # SUBSCRIBE and a PUBLISH are answered once, and the answer is the verdict
+      # `initial_state` is about to reach. The request needs no carrying — the
+      # instrumentation stored it, and `last_uas_req()` reads back the one that
+      # came with the credentials.
+      {:SUBSCRIBE, _req, _trans, _dlg} ->
+        goto(initial_state, "credentials re-submitted")
+
+      {:PUBLISH, _req, _trans, _dlg} ->
         goto(initial_state, "credentials re-submitted")
 
       # A caller that cancels the challenged attempt: nothing was forwarded, so

@@ -116,6 +116,15 @@ port = 9095
 # with `kelictl auth_db show`, which prints the transport it settled on.
 #allow_insecure_db_connection = true
 
+#[module.presence]                 # dnf install kelixip-mod-presence
+# The presence collection: what is published about each presentity, who watches it,
+# and the fan-out between them. It holds and pushes; it decides nothing about WHO
+# MAY WATCH — that is the subscribe script's, and presence-subscribe.exs is where a
+# deployment writes its rule. The expiry bounds of a subscription belong to the
+# event package (RFC 6665 §4.4.1), so there is no key for them.
+# Declare the packages a domain serves with [[domain.presence]] in domains.toml.
+#call_timeout_ms = 5000
+
 #[module.mcu]                      # dnf install kelixip-mod-mcu
 # Conferencing. Needs a [mediaserver.pool.*] entry below pointing at a reachable
 # mediaserver, and a domains.toml call rule sending the DID pattern to mcu.exs —

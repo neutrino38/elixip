@@ -9,6 +9,11 @@ that is the subscribe script's, and
 [`presence-subscribe.exs`](../../../apps/kelixip/scripts/presence-subscribe.exs)
 is where a deployment writes its rule.
 
+Both reference scripts authenticate the sender before anything else. A SUBSCRIBE
+and a PUBLISH are challenged with a **401**, in the realm of the served domain,
+through `Kelix.Mod.AuthDb` — so they need `kelixip-mod-auth_db` installed and a
+`[module.auth_db]` block. A refresh is challenged like the first request.
+
 Its records are kamailio's `presentity` and `active_watchers` rows, held in
 memory. Nothing survives a restart: a dialog cannot be resurrected, so a watcher
 re-subscribes and a publisher re-publishes.
@@ -143,10 +148,10 @@ subscribing.
 
 | Command | REST | Description |
 |---|---|---|
-| `kelictl presence list --domain D` | `GET /modules/presence/presentities` | Published states, one row per entity-tag |
-| `kelictl presence show --domain D --aor bob` | `GET /modules/presence/presentities/bob` | One presentity: its states and its watchers |
-| `kelictl presence watchers --domain D --aor bob` | `GET /modules/presence/presentities/bob/watchers` | The live subscriptions to one presentity |
-| `kelictl presence remove --domain D --aor bob` | `DELETE /modules/presence/presentities/bob` | Drops the published state and tells the watchers |
+| `kelictl presence list domain=D` | `GET /modules/presence/presentities` | Published states, one row per entity-tag |
+| `kelictl presence show domain=D aor=bob` | `GET /modules/presence/presentities/bob` | One presentity: its states and its watchers |
+| `kelictl presence watchers domain=D aor=bob` | `GET /modules/presence/presentities/bob/watchers` | The live subscriptions to one presentity |
+| `kelictl presence remove domain=D aor=bob` | `DELETE /modules/presence/presentities/bob` | Drops the published state and tells the watchers |
 
 The columns are kamailio's, under kamailio's names — `presentity_uri`, `event`,
 `etag`, `expires`, `status`, `callid`.
@@ -168,6 +173,22 @@ publication whose lifetime lapsed. What to notify then is the script's decision;
 the reference script sends an explicitly closed state.
 
 ## Examples
+
+Authenticating the sender, in both scripts:
+
+```elixir
+state authenticate_watcher do
+  AuthDb.SBB.authenticate(code: 401)
+
+  on_events do
+    {:auth, :authenticated, %{user: user}} ->
+      goto(authorize, "SUBSCRIBE authenticated as #{user}")
+
+    {:auth, :refused, %{attempts: attempts}} ->
+      scenario_success("gave up on this watcher after #{attempts} refused attempts")
+  end
+end
+```
 
 Answering a SUBSCRIBE, in `presence-subscribe.exs`:
 

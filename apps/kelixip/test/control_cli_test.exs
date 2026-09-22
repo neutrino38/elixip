@@ -666,6 +666,39 @@ defmodule Kelix.Control.CLITest do
     assert out =~ "error:"
   end
 
+  # A module reads the arguments it DECLARES, whichever frontal the command came
+  # from: REST merges the path, query and body keys at the top level, and the CLI
+  # turns its `name=value` tokens into the same map. `Kelix.Mod.Presence` matches
+  # on `%{"domain" => …}` and got `%{"args" => ["domain=…"]}`, so every
+  # `kelictl presence …` answered "domain is required" to a command line naming one.
+  describe "module command arguments" do
+    defmodule NamedArgsCtl do
+      def describe(), do: %{version: "1.0.0"}
+
+      def describe_control(),
+        do: [%{name: "list", rw: :r, args: [%{name: "domain", required: true}]}]
+
+      def handle_control("list", %{"domain" => domain}), do: {:ok, %{seen: domain}}
+      def handle_control("list", _args), do: {:error, "domain is required"}
+      # the raw tokens stay reachable for a command that counts what it was not asked for
+      def handle_control("raw", %{"args" => tokens}), do: {:ok, %{tokens: tokens}}
+    end
+
+    setup do
+      Kelix.Test.Fixtures.with_module("namedargs", NamedArgsCtl)
+    end
+
+    test "a name=value token becomes the named argument the module declares" do
+      {0, out} = run(["namedargs", "list", "domain=weshwesh.eu"])
+      assert out =~ "weshwesh.eu"
+    end
+
+    test "the raw tokens are still there" do
+      {0, out} = run(["namedargs", "raw", "verbose"])
+      assert out =~ "verbose"
+    end
+  end
+
   # FW-5 (docs/design/DESIGN-KELIXIP.md#7-the-module-system): the last CLI/REST parity gap was
   # discovery — a module's command set existed only in its source. Both listings are
   # rendered from `describe_control/0` + `describe/0`, so a module gets its usage

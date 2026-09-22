@@ -307,7 +307,30 @@ defmodule SIP.Session do
       else
         # If a module is configured, call the callback in this module
         Logger.debug("Dispatched #{proc_atom} to  #{inspect(call_mod)}.#{fun_atom}().")
-        apply(call_mod, fun_atom, args)
+        call_callback(call_mod, fun_atom, args)
+      end
+    end
+
+    # Half of the presence behaviour is `@optional_callbacks`, so a host that
+    # implements none of it is a legal host — and calling one of them anyway is an
+    # `:undef` raised inside `SIP.DialogImpl.init/1`, which kills the dialog before
+    # the request is answered at all. The peer then retries, and the only trace is a
+    # stack trace in the journal.
+    #
+    # Found on 2026-09-22 with a Linphone typing indicator: an out-of-dialog MESSAGE
+    # reached `Kelix.Router.on_message/3`, which does not exist. 501 is what the
+    # catch-all clause below already answers for a method no module handles, and it
+    # is the same answer here: the host is not equipped for this request.
+    defp call_callback(module, fun, args) do
+      if Code.ensure_loaded?(module) and function_exported?(module, fun, length(args)) do
+        apply(module, fun, args)
+      else
+        Logger.warning(
+          "#{inspect(module)} does not implement the optional callback " <>
+            "#{fun}/#{length(args)}: answering 501 Not Implemented."
+        )
+
+        {:reject, 501, "Not Implemented"}
       end
     end
 

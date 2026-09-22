@@ -33,7 +33,8 @@ defmodule Kelix.Router do
           script: String.t(),
           event_package: String.t() | nil
         }
-  @type reject :: {:reject, 404 | 405 | 489, String.t()} | {:reject, 489, String.t(), list}
+  @type reject ::
+          {:reject, 404 | 405 | 489, String.t()} | {:reject, 405 | 489, String.t(), list}
 
   # method → SIP function (spec §2.1 table)
   #
@@ -114,12 +115,26 @@ defmodule Kelix.Router do
   @impl SIP.Session.Presence
   def on_subscription_expired(_dialog_id, _app_pid), do: :ok
 
+  # An out-of-dialog MESSAGE goes through the same resolution as every other
+  # request, and `@method_function` maps it to nothing: the answer is 405 with the
+  # `Allow` this node advertises. It is routed here, not answered here, so the day
+  # `[[domain.chat]]` lands the block decides and this callback does not change.
+  #
+  # Not having it at all was a crash, not a refusal: `SIP.Session.ConfigRegistry`
+  # called an `@optional_callbacks` function that did not exist, `SIP.DialogImpl.init/1`
+  # died on the `:undef`, and the sender got nothing to read. Linphone's typing
+  # indicator is an out-of-dialog MESSAGE, so it happened on the first chat window
+  # anyone opened.
+  @impl SIP.Session.Presence
+  def on_message(dialog_id, msgreq, _transaction_id), do: dispatch(dialog_id, msgreq)
+
   @doc """
   Full dispatch of an out-of-dialog request: resolve (this module) then reserve a
   slot + spawn via `Kelix.InstancePool`. Returns `{:accept, pid}` or
-  `{:reject, code, reason}` (404/405 from routing, 503 quota, 500 script load) —
-  or `{:reject, 489, reason, fields}` when the refusal carries the domain's
-  `Allow-Events`, which the dialog layer puts on the response.
+  `{:reject, code, reason}` (404 from routing, 503 quota, 500 script load) — or
+  `{:reject, code, reason, fields}` when the refusal carries a header of its own,
+  which the dialog layer puts on the response: `Allow` on a 405 (RFC 3261
+  §21.4.6), the domain's `Allow-Events` on a 489.
   """
   @spec dispatch(pid | nil, map, Domains.t() | nil) ::
           {:accept, pid} | {:reject, integer, String.t()} | {:reject, integer, String.t(), list}
@@ -343,17 +358,24 @@ defmodule Kelix.Router do
     case Map.get(@method_function, Map.get(req, :method)) do
       nil ->
         log_reject(req, "method #{Map.get(req, :method)} is not routable out of dialog")
-        {:reject, 405, "Method Not Allowed"}
+        method_not_allowed()
 
       function ->
         if function_enabled?(domain, function) do
           {:ok, function}
         else
           log_reject(req, not_configured(function, domain))
-          {:reject, 405, "Method Not Allowed"}
+          method_not_allowed()
         end
     end
   end
+
+  # RFC 3261 §21.4.6 makes `Allow` mandatory on a 405: a refusal that does not say
+  # what IS allowed leaves the sender to find out by trying. The list is
+  # `Kelix.Options`', the one this node already advertises on OPTIONS, so a UA
+  # reading the two reads one answer.
+  defp method_not_allowed(),
+    do: {:reject, 405, "Method Not Allowed", [{"Allow", Kelix.Options.allow()}]}
 
   defp not_configured(:registrar, %Domain{name: name}),
     do:
@@ -400,7 +422,7 @@ defmodule Kelix.Router do
                 "#{domain.name}, but no #{method} script is declared for it"
             )
 
-            {:reject, 405, "Method Not Allowed"}
+            method_not_allowed()
         end
 
       nil ->
