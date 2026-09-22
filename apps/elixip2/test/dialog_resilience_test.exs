@@ -386,6 +386,19 @@ defmodule SIP.Test.DialogResilience do
     assert SIP.Transport.build_contact_uri(SIP.Transport.UDP, dead) == nil
   end
 
+  test "an in-dialog request that cannot be serialized fails alone, not the dialog" do
+    _silent = peer!("rs9")
+    {dlg, _tid} = start_call("rs9")
+    assert_receive {:sip_mockup, {:request_sent, :INVITE, _req}}, 2_000
+
+    # No remote target yet, so the Request-URI is taken as given: without a host.
+    info = %{invite_to("rs9") | method: :INFO, ruri: %SIP.Uri{userpart: nil, domain: nil}}
+
+    assert {:error, _reason} = SIP.Dialog.new_request(dlg, info)
+    assert Process.alive?(dlg)
+    assert {_ftag, _cid, _totag} = GenServer.call(dlg, :getdialogid)
+  end
+
   # ── Asked to end from the outside ───────────────────────────────────────────
 
   # `SIP.Dialog.terminate/2` — the same two assertions as every failure above, for

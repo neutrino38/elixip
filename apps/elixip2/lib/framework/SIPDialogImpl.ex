@@ -333,6 +333,17 @@ defmodule SIP.DialogImpl do
 
             {code, state}
 
+          # The transaction refused to start, e.g. a request it could not
+          # serialize. That request is lost; the dialog is not.
+          {:error, reason} ->
+            Logger.error(
+              dialogpid: "#{inspect(self())}",
+              module: __MODULE__,
+              message: "Cannot send #{req.method}: #{inspect(reason)}"
+            )
+
+            {{:error, reason}, state}
+
           {:ok, transaction_pid, modmsg} ->
             # Add the transaction in the transaction list
             newstate = add_transaction(state, transaction_pid, modmsg, uac_module(modmsg))
@@ -1311,19 +1322,26 @@ defmodule SIP.DialogImpl do
   # the head, so a request carrying none takes the fallback clause instead of
   # raising: send_in_dialog_request/2 keeps `msg` as the request that created the
   # dialog, and an inbound dialog never replaces it.
+  #
+  # A creating request answered 401/407 comes back under a new CSeq and still no
+  # To tag: the 2xx to that replay is the one that establishes the dialog.
   defp establish_inbound(
          state = %SIP.DialogImpl{direction: :inbound, state: :initial, msg: %{cseq: cseq}},
-         %{cseq: cseq},
+         req = %{cseq: req_cseq},
          resp_code
        )
        when resp_code in 200..299 do
-    Logger.debug(
-      dialogpid: "#{inspect(self())}",
-      module: __MODULE__,
-      message: "Inbound dialog established"
-    )
+    if req_cseq == cseq or not SIP.Msg.Ops.in_dialog?(req) do
+      Logger.debug(
+        dialogpid: "#{inspect(self())}",
+        module: __MODULE__,
+        message: "Inbound dialog established"
+      )
 
-    %SIP.DialogImpl{state | state: :established}
+      %SIP.DialogImpl{state | state: :established}
+    else
+      state
+    end
   end
 
   defp establish_inbound(state, _req, _resp_code), do: state
@@ -2314,7 +2332,7 @@ defmodule SIP.DialogImpl do
     end
   end
 
-  defp handle_UAS_response(state, rsp, transact_pid)
+  defp handle_UAS_response(state = %SIP.DialogImpl{direction: :outbound}, rsp, transact_pid)
        when state.state in [:initial, :uac_challenged] and rsp.response in 200..202 do
     Logger.debug(
       dialogpid: "#{inspect(self())}",
