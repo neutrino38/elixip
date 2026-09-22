@@ -233,6 +233,50 @@ defmodule SIP.Msg.Ops do
   end
 
   @doc """
+  The resource list a SUBSCRIBE carries in its own body (RFC 5367), or `:none`
+  when it carries none.
+
+  What makes a SUBSCRIBE a **list subscription** is read here and nowhere else:
+  `Content-Disposition: recipient-list` over a body of
+  `application/resource-lists+xml`. Both are required — a body with no
+  disposition is a body the request did not say what to do with — and the URIs
+  come back as the watcher wrote them.
+
+  `{:error, reason}` is a disposition that says "recipient-list" over something
+  that is not one: the request asked for a list subscription and did not supply a
+  readable list, which is a **400**, not a subscription to nothing.
+  """
+  @spec recipient_list(map()) :: {:ok, [binary()]} | :none | {:error, term()}
+  def recipient_list(msg) when is_map(msg) do
+    if content_disposition(msg) == "recipient-list" do
+      case {body_content_type(msg), body_string(msg)} do
+        {"application/resource-lists+xml", body} when is_binary(body) ->
+          SIP.Presence.ResourceLists.parse(body)
+
+        {type, _body} ->
+          {:error, {:not_a_resource_list, type}}
+      end
+    else
+      :none
+    end
+  end
+
+  @doc """
+  What a body is for (RFC 3261 §20.11), folded to lower case and stripped of its
+  parameters (`;handling=optional`), or `nil`.
+  """
+  @spec content_disposition(map()) :: binary() | nil
+  def content_disposition(msg) when is_map(msg) do
+    case first_header_value(msg, :contentdisposition, "content-disposition") do
+      value when is_binary(value) ->
+        value |> split_params() |> elem(0) |> String.trim() |> String.downcase() |> presence()
+
+      _absent ->
+        nil
+    end
+  end
+
+  @doc """
   The coding applied to the body (RFC 3261 §20.12), folded to lower case, or
   `nil` when the message carries no `Content-Encoding`.
 
@@ -248,6 +292,20 @@ defmodule SIP.Msg.Ops do
       [coding | _] -> coding
       [] -> nil
     end
+  end
+
+  @doc """
+  The codings a peer says it can read (RFC 3261 §20.2), folded to lower case.
+
+  `[]` is an absent header, which RFC 2616 §14.3 reads as "identity only": a body
+  we compress anyway is a body this peer cannot read.
+  """
+  @spec accepted_encodings(map()) :: [binary()]
+  def accepted_encodings(msg) when is_map(msg) do
+    msg
+    |> option_tags(:acceptencoding, "accept-encoding")
+    |> Enum.map(&(&1 |> split_params() |> elem(0)))
+    |> Enum.reject(&(&1 == ""))
   end
 
   @doc """

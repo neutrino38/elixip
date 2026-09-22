@@ -779,12 +779,31 @@ defmodule SIP.DialogImpl do
       contentlength: 0
     }
 
+    req = put_eventlist(req, sub)
+
     case body do
-      nil -> req
-      "" -> req
-      _ -> SIP.Msg.Ops.update_sip_msg(req, {:body, body}) |> Map.put(:contenttype, content_type)
+      nil ->
+        req
+
+      "" ->
+        req
+
+      _ ->
+        # The Content-Type goes on FIRST: a body composed as multipart carries its
+        # boundary in the type, and `update_sip_msg/2` keeps the one it finds.
+        req
+        |> Map.put(:contenttype, content_type)
+        |> SIP.Msg.Ops.update_sip_msg({:body, body})
     end
   end
+
+  # RFC 4662 §3.2: the NOTIFYs of a list subscription carry `Require: eventlist`.
+  # Stamped from the subscription rather than passed down by whoever composed the
+  # body: the dialog is the one place that knows, for every NOTIFY it sends —
+  # including the final one — which subscription it belongs to.
+  defp put_eventlist(req, %SIP.Subscription{list_uri: nil}), do: req
+  defp put_eventlist(req, %SIP.Subscription{}), do: Map.put(req, "Require", "eventlist")
+  defp put_eventlist(req, _no_subscription), do: req
 
   # The refresh SUBSCRIBE: the same subscription, asked for again. The lifetime is
   # the one that was GRANTED, kept as a duration — derived back from the absolute
