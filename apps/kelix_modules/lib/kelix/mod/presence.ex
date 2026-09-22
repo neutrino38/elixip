@@ -14,8 +14,9 @@ defmodule Kelix.Mod.Presence do
 
     * `publish/2` — store what a PUBLISH asks for, mint or refuse an entity-tag,
       and push the new state to every watcher of the resource;
-    * `watch/2` / `unwatch/1` — register the calling instance as a watcher of the
-      subscription it just accepted, and hand back the state as it stands;
+    * `watch/2` / `watch_many/3` / `unwatch/1` — register the calling instance as
+      a watcher of the subscription it just accepted — of one resource, or of the
+      N a list subscription names — and hand back the state as it stands;
     * `state_of/2` — the current document of a resource, for a script that wants
       it without subscribing;
     * `watchers/2`, `presentities/1`, `remove/2` — what `kelictl presence` shows
@@ -94,6 +95,7 @@ defmodule Kelix.Mod.Presence do
       exports: [
         publish: 2,
         watch: 2,
+        watch_many: 3,
         unwatch: 1,
         state_of: 2,
         presentities: 1,
@@ -276,6 +278,12 @@ defmodule Kelix.Mod.Presence do
   away, `nil` when nothing has been published about the resource yet — or
   `{:error, :down | :timeout}`.
 
+  The domain passed is a **fallback**, used only when the subscription's
+  presentity URI carries none: the resource belongs to the domain its own URI
+  names, never to the one that routed the SUBSCRIBE. The two differ as soon as a
+  watcher subscribes through a list URI — `sip:rls@sip.linphone.org` routes to
+  this node and names no presentity at all.
+
   The instance is **monitored**: a watcher that dies with its dialog is dropped
   without anything having to say so. `unwatch/1` is for the scenario that ends its
   subscription and keeps running.
@@ -295,13 +303,49 @@ defmodule Kelix.Mod.Presence do
     Kelix.Module.safe_call(__MODULE__, {:watch, served_domain(domain), sub, self()})
   end
 
-  @doc "Stop watching: drop the calling instance from every resource it watches."
+  @doc """
+  The same, for the N resources of one subscription (RFC 4662: one SUBSCRIBE to a
+  list, one state per entry).
+
+  `uris` are the entries as the watcher wrote them, and the answer is keyed on
+  those very strings — the script composes its RLMI out of the URIs it was given,
+  not out of whatever this collection folded them to. Their value is the document
+  held for each, `nil` when nothing is published about it.
+
+  Each entry is watched on **its own domain**, which is why a list is not N calls
+  to `watch/2` with one context: the three entries of one buddy list routinely sit
+  on three different domains, and only one of them can be the routed one.
+
+  The instance is monitored per resource, as `watch/2` monitors it: it is dropped
+  from every resource it watches when it dies, whatever domain each of them lives
+  on.
+  """
+  @spec watch_many(%SIP.Context{} | String.t(), SIP.Subscription.t(), [String.t()]) ::
+          {:ok, %{String.t() => term}} | {:error, :down | :timeout}
+  def watch_many(ctx_or_domain, sub, uris)
+
+  def watch_many(%SIP.Context{} = sip_ctx, %SIP.Subscription{} = sub, uris),
+    do: watch_many(sip_ctx.domain, sub, uris)
+
+  def watch_many(domain, %SIP.Subscription{} = sub, uris) when is_list(uris) do
+    SIP.Scenario.Monitor.note_command(:db, "presence_watch_many")
+    Kelix.Module.safe_call(__MODULE__, {:watch_many, served_domain(domain), sub, uris, self()})
+  end
+
+  @doc """
+  Stop watching: drop the calling instance from every resource it watches.
+
+  Every resource, on every domain — an instance serving a list subscription is
+  registered on as many domains as its list spans, and the domain it was routed
+  through says nothing about them. The argument is kept for the scripts that pass
+  their context, and is not read.
+  """
   @spec unwatch(%SIP.Context{} | String.t()) :: :ok | {:error, :down | :timeout}
   def unwatch(ctx_or_domain)
   def unwatch(%SIP.Context{} = sip_ctx), do: unwatch(sip_ctx.domain)
 
-  def unwatch(domain),
-    do: Kelix.Module.safe_call(__MODULE__, {:unwatch, served_domain(domain), self()})
+  def unwatch(_domain),
+    do: Kelix.Module.safe_call(__MODULE__, {:unwatch, self()})
 
   @doc """
   The document published about a resource, or `nil`.
@@ -362,12 +406,17 @@ defmodule Kelix.Mod.Presence do
     {:reply, reply, state}
   end
 
-  def handle_call({:unwatch, domain, pid}, _from, state) do
-    {:reply, :ok, drop_watcher(state, domain, pid)}
+  def handle_call({:watch_many, domain, sub, uris, pid}, _from, state) do
+    {reply, state} = do_watch_many(state, domain, sub, uris, pid)
+    {:reply, reply, state}
   end
 
-  def handle_call({:state_of, {_user, domain, _event} = resource}, _from, state) do
-    {:reply, current_doc(state, domain, resource), state}
+  def handle_call({:unwatch, pid}, _from, state) do
+    {:reply, :ok, drop_watcher(state, pid)}
+  end
+
+  def handle_call({:state_of, resource}, _from, state) do
+    {:reply, current_doc(state, resource), state}
   end
 
   def handle_call({:presentities, domain}, _from, state) do
@@ -417,9 +466,9 @@ defmodule Kelix.Mod.Presence do
   # ── publish ─────────────────────────────────────────────────────────────────
 
   defp do_publish(state, domain, pub) do
-    resource = resource_key(SIP.Publication.resource(pub), domain)
-    tid = ensure_table(state.states, domain)
-    state = %{state | states: Map.put(state.states, domain, tid)}
+    {_user, rdomain, _event} = resource = resource_key(SIP.Publication.resource(pub), domain)
+    tid = ensure_table(state.states, rdomain)
+    state = %{state | states: Map.put(state.states, rdomain, tid)}
     held = live_publications(lookup_list(tid, resource))
 
     case plan_publication(pub, held) do
@@ -437,13 +486,13 @@ defmodule Kelix.Mod.Presence do
 
       {:remove, previous} ->
         store(tid, resource, List.delete(held, previous))
-        {{:ok, nil, 0}, fan_out(state, domain, resource, :removed)}
+        {{:ok, nil, 0}, fan_out(state, resource, :removed)}
 
       {:store, previous, stored} ->
         store(tid, resource, List.delete(held, previous) ++ [stored])
 
         {{:ok, stored.etag, SIP.Publication.remaining(stored)},
-         fan_out(state, domain, resource, :published)}
+         fan_out(state, resource, :published)}
     end
   end
 
@@ -482,15 +531,51 @@ defmodule Kelix.Mod.Presence do
     # An un-SUBSCRIBE is accepted as a lifetime of zero and is the END of a
     # subscription: storing it would leave a watcher nothing will ever reach.
     if SIP.Subscription.status(sub) == :terminated do
-      {{:ok, current_doc(state, domain, resource)}, state}
+      {{:ok, current_doc(state, resource)}, state}
     else
-      tid = ensure_table(state.watchers, domain)
-      state = %{state | watchers: Map.put(state.watchers, domain, tid)}
-      subs = lookup_map(tid, resource)
-      :ets.insert(tid, {resource, Map.put(subs, pid, sub)})
-
-      {{:ok, current_doc(state, domain, resource)}, monitor_watcher(state, domain, resource, pid)}
+      state = register_watcher(state, resource, sub, pid)
+      {{:ok, current_doc(state, resource)}, state}
     end
+  end
+
+  defp do_watch_many(state, domain, sub, uris, pid) do
+    terminated? = SIP.Subscription.status(sub) == :terminated
+
+    {docs, state} =
+      Enum.reduce(uris, {%{}, state}, fn uri, {docs, st} ->
+        {_user, rdomain, _event} = resource = uri_resource(uri, domain, sub.event)
+
+        st =
+          if terminated? or not served?(rdomain),
+            do: st,
+            else: register_watcher(st, resource, %{sub | presentity_uri: uri}, pid)
+
+        {Map.put(docs, uri, current_doc(st, resource)), st}
+      end)
+
+    {{:ok, docs}, state}
+  end
+
+  # A buddy list names whatever the client put in it, `sip:someone@some.example`
+  # included. Registering a watcher on a domain this node does not serve costs a
+  # table and a monitor for a resource nobody will ever publish — and the list is
+  # the client's, so the count would be the client's too. Such an entry answers
+  # `nil` instead, which the notifier reports as `noresource`.
+  defp served?(domain) when is_binary(domain), do: domain_entry(domain) != :unknown
+  defp served?(_no_domain), do: false
+
+  # The table a resource lives in is the one of ITS domain, never the one that
+  # routed the request that named it. They are the same for a plain SUBSCRIBE and
+  # differ for every list subscription, so deriving it from the resource is what
+  # makes a PUBLISH on `weshwesh.eu` reach a watcher admitted through another
+  # domain.
+  defp register_watcher(state, {_user, rdomain, _event} = resource, sub, pid) do
+    tid = ensure_table(state.watchers, rdomain)
+    state = %{state | watchers: Map.put(state.watchers, rdomain, tid)}
+    subs = lookup_map(tid, resource)
+    :ets.insert(tid, {resource, Map.put(subs, pid, sub)})
+
+    monitor_watcher(state, rdomain, resource, pid)
   end
 
   defp monitor_watcher(state, domain, resource, pid) do
@@ -502,19 +587,19 @@ defmodule Kelix.Mod.Presence do
     end
   end
 
-  defp drop_watcher(state, domain, pid) do
-    case Map.get(state.watchers, domain) do
-      nil ->
-        state
+  # What this instance watches is read off the monitors rather than off one
+  # domain's table: a list subscription is registered on as many domains as its
+  # list spans, and sweeping only the domain it was routed through would leave
+  # every other entry pushing to a dead process.
+  defp drop_watcher(state, pid) do
+    state.mons
+    |> Enum.filter(fn {_ref, {_domain, _resource, p}} -> p == pid end)
+    |> Enum.reduce(state, fn {ref, {domain, resource, _p}}, st ->
+      Process.demonitor(ref, [:flush])
 
-      tid ->
-        state =
-          Enum.reduce(:ets.tab2list(tid), state, fn {resource, subs}, st ->
-            if Map.has_key?(subs, pid), do: forget_watcher(st, domain, resource, pid), else: st
-          end)
-
-        demonitor_watcher(state, domain, pid)
-    end
+      %{st | mons: Map.delete(st.mons, ref)}
+      |> forget_watcher(domain, resource, pid)
+    end)
   end
 
   defp forget_watcher(state, domain, resource, pid) do
@@ -532,33 +617,25 @@ defmodule Kelix.Mod.Presence do
     end
   end
 
-  defp demonitor_watcher(state, domain, pid) do
-    {dropped, kept} =
-      Enum.split_with(state.mons, fn {_ref, {d, _resource, p}} -> d == domain and p == pid end)
-
-    Enum.each(dropped, fn {ref, _} -> Process.demonitor(ref, [:flush]) end)
-    %{state | mons: Map.new(kept)}
-  end
-
   # ── the fan-out ─────────────────────────────────────────────────────────────
 
   # One PUBLISH, N pushes. The message reaches the watcher's SCENARIO INSTANCE,
   # which sends the NOTIFY from its own state (plan decision 1): a NOTIFY sent
   # from here would be invisible to `kelictl monitor` and to the sequence diagram,
   # and a scenario parked in a state would no longer describe what the node does.
-  defp fan_out(state, domain, resource, event) do
-    doc = current_doc(state, domain, resource)
+  defp fan_out(state, {_user, rdomain, _event} = resource, event) do
+    doc = current_doc(state, resource)
 
-    for {pid, _sub} <- watchers_of(state, domain, resource) do
+    for {pid, _sub} <- watchers_of(state, resource) do
       send(pid, {:presence, :state, resource, doc})
     end
 
-    Kelix.Metrics.Emit.presence_event(domain, event)
+    Kelix.Metrics.Emit.presence_event(rdomain, event)
     state
   end
 
-  defp watchers_of(state, domain, resource) do
-    case Map.get(state.watchers, domain) do
+  defp watchers_of(state, {_user, rdomain, _event} = resource) do
+    case Map.get(state.watchers, rdomain) do
       nil -> %{}
       tid -> lookup_map(tid, resource)
     end
@@ -566,8 +643,8 @@ defmodule Kelix.Mod.Presence do
 
   # The state of a resource: the most recent live publication's document (see the
   # moduledoc — composition is its own phase), `nil` when nothing is published.
-  defp current_doc(state, domain, resource) do
-    case Map.get(state.states, domain) do
+  defp current_doc(state, {_user, rdomain, _event} = resource) do
+    case Map.get(state.states, rdomain) do
       nil ->
         nil
 
@@ -595,7 +672,7 @@ defmodule Kelix.Mod.Presence do
             state =
               Enum.reduce(resources, state, fn resource, st ->
                 :ets.delete(tid, resource)
-                fan_out(st, domain, resource, :removed)
+                fan_out(st, resource, :removed)
               end)
 
             {:ok, state}
@@ -616,7 +693,7 @@ defmodule Kelix.Mod.Presence do
 
         live ->
           store(tid, resource, live)
-          fan_out(st, domain, resource, :expired)
+          fan_out(st, resource, :expired)
       end
     end)
   end
@@ -668,8 +745,18 @@ defmodule Kelix.Mod.Presence do
 
   defp subscription_resource(%SIP.Subscription{} = sub, domain) do
     case SIP.Uri.parse(to_string(sub.presentity_uri)) do
-      {:ok, %SIP.Uri{userpart: user}} -> resource_key({user, domain, sub.event})
-      _ -> resource_key({sub.to_user, domain, sub.event})
+      {:ok, %SIP.Uri{userpart: user, domain: dom}} -> resource_key({user, dom || domain, sub.event})
+      _ -> resource_key({sub.to_user, sub.to_domain || domain, sub.event})
+    end
+  end
+
+  # One entry of a resource list, as the watcher wrote it. Same rule: the domain
+  # comes from the URI, and the caller's is only what an entry without one falls
+  # back on.
+  defp uri_resource(uri, domain, event) do
+    case SIP.Uri.parse(to_string(uri)) do
+      {:ok, %SIP.Uri{userpart: user, domain: dom}} -> resource_key({user, dom || domain, event})
+      _ -> resource_key({uri, domain, event})
     end
   end
 
@@ -679,11 +766,21 @@ defmodule Kelix.Mod.Presence do
   defp served_domain(nil), do: nil
 
   defp served_domain(domain) when is_binary(domain) do
-    with pid when not is_nil(pid) <- Process.whereis(Kelix.Domains),
-         %Kelix.Domain{name: name} <- Kelix.Domains.lookup(Kelix.Domains.current(), domain) do
-      name
-    else
-      _ -> domain
+    case domain_entry(domain) do
+      %Kelix.Domain{name: name} -> name
+      _unknown_or_no_registry -> domain
+    end
+  end
+
+  # The domain as `domains.toml` holds it, `:unknown` when it holds no such
+  # domain, and `:no_registry` when there is no configuration to consult at all
+  # — a unit test, an elixipp run. The last two are deliberately different
+  # answers: with no registry there is no policy, and refusing everything would
+  # be one.
+  defp domain_entry(domain) do
+    case Process.whereis(Kelix.Domains) do
+      nil -> :no_registry
+      _pid -> Kelix.Domains.lookup(Kelix.Domains.current(), domain) || :unknown
     end
   end
 
