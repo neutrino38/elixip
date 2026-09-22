@@ -1209,6 +1209,43 @@ defmodule SIP.Msg.Ops do
     "elixip-boundary-" <> (:crypto.strong_rand_bytes(12) |> Base.encode16(case: :lower))
   end
 
+  @doc """
+  Stamp one boundary on `parts` and compose the `Content-Type` that goes with
+  them: `{parts, content_type}`.
+
+  `opts[:subtype]` is `"mixed"` by default. A list NOTIFY (RFC 4662 §4.2) needs
+  `"related"` with the two parameters that make its root part findable:
+
+      {parts, ctype} =
+        SIP.Msg.Ops.compose_multipart(parts,
+          subtype: "related",
+          type: "application/rlmi+xml",
+          start: "<rlmi@example.com>")
+
+  `type` names the media type of the root part and `start` its `Content-ID`
+  (RFC 2387 §3.1-3.2). Without `start` the root is the *first* part, which is why
+  it is a parameter rather than an ordering rule: a watcher reading the parts in
+  any other order finds the manifest by its identifier.
+
+  The caller hands the answer to `update_sip_msg/2` as `{:body, parts}` after
+  setting `:contenttype` — the parts carry the boundary, so neither is redrawn.
+  """
+  @spec compose_multipart([map()], keyword()) :: {[map()], binary()}
+  def compose_multipart(parts, opts \\ []) when is_list(parts) do
+    boundary = generate_boundary()
+    subtype = Keyword.get(opts, :subtype, "mixed")
+
+    parameters =
+      [{"type", Keyword.get(opts, :type)}, {"start", Keyword.get(opts, :start)}]
+      |> Enum.reject(fn {_name, value} -> is_nil(value) end)
+      |> Enum.map_join("", fn {name, value} -> "; #{name}=\"#{value}\"" end)
+
+    {Enum.map(parts, &Map.put(&1, :boundary, boundary)),
+     "multipart/" <> subtype <> parameters <> "; boundary=" <> boundary}
+  end
+
+  defp mixed(boundary), do: "multipart/mixed; boundary=" <> boundary
+
   @doc "Met a jour ou ajout des champs dans un message SIP"
   def update_sip_msg(sipmsg, fields) when is_list(fields) do
     Enum.reduce(fields, sipmsg, fn {header, value}, acc ->
@@ -1243,7 +1280,13 @@ defmodule SIP.Msg.Ops do
     sipmsg |> Map.put(:body, []) |> Map.put(:contentlength, 0)
   end
 
-  def update_sip_msg(sipmsg, {:body, [%{contenttype: ctype, data: body_data}]}) do
+  # One part and no boundary: a single-part body in the parser's own shape, whose
+  # own type is the message's. A part that DOES carry a boundary falls through to
+  # the multipart clause below even when it is alone — dropping the boundary there
+  # left a message announcing a multipart Content-Type over a bare payload, which
+  # is what a list NOTIFY naming one buddy with no published state looks like.
+  def update_sip_msg(sipmsg, {:body, [%{contenttype: ctype, data: body_data} = part]})
+      when not is_map_key(part, :boundary) do
     sipmsg
     |> Map.put(:body, [%{contenttype: ctype, data: body_data}])
     |> Map.put(:contenttype, ctype)
@@ -1261,19 +1304,26 @@ defmodule SIP.Msg.Ops do
   # boundary, stamp it on every part, set the top-level Content-Type and compute
   # the Content-Length from the serialized body octets. Each part must be a
   # `%{contenttype: ct, data: bin}` map (extra keys are preserved).
+  #
+  # Parts that ALREADY carry a boundary keep it, and keep the Content-Type the
+  # caller set: that is a body `compose_multipart/2` built, whose type names both
+  # the subtype and the boundary, and re-drawing either here would leave the
+  # message announcing a boundary its body does not use.
   def update_sip_msg(sipmsg, {:body, parts}) when is_list(parts) do
     if not Enum.all?(parts, &match?(%{contenttype: _, data: _}, &1)) do
       raise "Multipart body parts must be %{contenttype: ..., data: ...} maps, got #{inspect(parts)}"
     end
 
-    boundary = generate_boundary()
-    parts = Enum.map(parts, &Map.put(&1, :boundary, boundary))
-    body_octets = SIPMsg.multipart_body(parts)
+    {parts, content_type} =
+      case parts do
+        [%{boundary: boundary} | _] -> {parts, Map.get(sipmsg, :contenttype, mixed(boundary))}
+        _ -> compose_multipart(parts, [])
+      end
 
     sipmsg
     |> Map.put(:body, parts)
-    |> Map.put(:contenttype, "multipart/mixed; boundary=" <> boundary)
-    |> Map.put(:contentlength, Kernel.byte_size(body_octets))
+    |> Map.put(:contenttype, content_type)
+    |> Map.put(:contentlength, Kernel.byte_size(SIPMsg.multipart_body(parts)))
   end
 
   def update_sip_msg(sipmsg, {header, value}) do

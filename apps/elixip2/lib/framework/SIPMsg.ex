@@ -604,10 +604,14 @@ defmodule SIPMsg do
 	end
 
 	# Parse RFC 2046 mime, multipart body and returns a list of sub bodies
+	#
+	# Every multipart subtype, not `mixed` alone: a list NOTIFY (RFC 4662) is
+	# `multipart/related`, and its parameters come in whatever order the sender
+	# wrote them — `type=` and `start=` sit beside `boundary=`.
 	def parse_multi_part_body(ctype, body) do
-		case String.split(ctype, "; boundary=") do
-			[ "multipart/mixed", boundary] ->
-				# We do have a multipart mixed
+		case multipart_boundary(ctype) do
+			boundary when is_binary(boundary) ->
+				# We do have a multipart body
 				# Spilt into the parts according to the boundaries
 				bodies = String.split(body, "--" <> boundary )
 				if Kernel.length(bodies) < 3 do # prologue, bodies, last boundary
@@ -626,6 +630,27 @@ defmodule SIPMsg do
 			_ ->
 				# Single body
 				[ %{ contenttype: ctype, data: body } ]
+		end
+	end
+
+	@doc false
+	# The boundary of a multipart Content-Type, or nil when the type is not one.
+	# Parameter names are case-insensitive (RFC 2045 §5.1) and the value may be
+	# quoted — a boundary carrying a `;` has to be.
+	def multipart_boundary(ctype) do
+		[ type | params ] = String.split(to_string(ctype), ";")
+
+		if String.starts_with?(String.downcase(String.trim(type)), "multipart/") do
+			Enum.find_value(params, fn param ->
+				case String.split(String.trim(param), "=", parts: 2) do
+					[ name, value ] ->
+						if String.downcase(String.trim(name)) == "boundary" do
+							value |> String.trim() |> String.trim("\"")
+						end
+
+					_ -> nil
+				end
+			end)
 		end
 	end
 
@@ -992,6 +1017,16 @@ defmodule SIPMsg do
 		"\r\n" <> body
 	end
 
+	# A single part that carries a boundary is a MULTIPART of one, not a bare body:
+	# its Content-Type announces the boundary, and Content-Length was computed over
+	# the delimiters (SIP.Msg.Ops.update_sip_msg/2). Writing the payload alone here
+	# announced a length nobody could match and a boundary that was nowhere in the
+	# message. A list NOTIFY naming one buddy with no published state is exactly
+	# that message.
+	defp serialize_body([ %{ boundary: _ } = body ]) do
+		"\r\n" <> multipart_body([ body ])
+	end
+
 	defp serialize_body([ body ]) do
 		"\r\n" <> body.data
 	end
@@ -1013,12 +1048,29 @@ defmodule SIPMsg do
 		Enum.map_join(bodies, "", &serialize_sub_body/1) <> "--" <> boundary <> "--\r\n"
 	end
 
-	# One MIME part: delimiter line, its Content-Type, blank line, data, trailing
-	# CRLF (the CRLF that precedes the next boundary delimiter).
-	defp serialize_sub_body(%{ boundary: boundary, contenttype: ctype, data: data }) do
+	# One MIME part: delimiter line, its Content-Type, whatever other MIME headers
+	# it carries, blank line, data, trailing CRLF (the CRLF that precedes the next
+	# boundary delimiter).
+	#
+	# The other headers are not decoration. A `multipart/related` part is addressed
+	# by its `Content-ID` — that is what the RLMI of a list NOTIFY points at with
+	# `cid=` — so a part serialized without one cannot be referred to at all.
+	defp serialize_sub_body(part = %{ boundary: boundary, contenttype: ctype, data: data }) do
 		"--" <> boundary <> "\r\n" <>
-			"Content-Type: " <> to_string(ctype) <> "\r\n\r\n" <>
+			"Content-Type: " <> to_string(ctype) <> "\r\n" <>
+			serialize_part_headers(part) <> "\r\n" <>
 			data <> "\r\n"
+	end
+
+	# Every key of the part map that is not the three the shape itself is made of.
+	# A part parsed off the wire carries its headers under the names it was sent
+	# with (parse_sub_body/1), so this round-trips them.
+	defp serialize_part_headers(part) do
+		part
+		|> Enum.reject(fn { key, _value } -> key in [ :boundary, :contenttype, :data ] end)
+		|> Enum.map_join("", fn { key, value } ->
+				header_name_to_string(key) <> ": " <> to_string(value) <> "\r\n"
+			end)
 	end
 
 
