@@ -40,6 +40,20 @@
 #  subscribe     = "presence-subscribe.exs"
 #  publish       = "presence-publish.exs"
 #
+# A buddy list (RFC 4662) is a SUBSCRIBE to a LIST URI, and clients hard-code
+# which one: Linphone sends `sip:rls@sip.linphone.org` whatever the account's own
+# domain is. So the list server is declared as a domain of its own, named after
+# the URI the client sends, and serving nothing but presence. Its script is
+# `presence-rls.exs`, which authenticates the watcher on the realm of its own
+# From and answers with the state of every buddy this node serves.
+#
+#[[domain]]
+#name = "sip.linphone.org"
+#
+#  [[domain.presence]]
+#  event-package = "presence"
+#  subscribe     = "presence-rls.exs"
+#
 #  # The dial-plan: ordered, first match wins on the R-URI user-part. Asterisk-style
 #  # patterns (X=0-9, Z=1-9, N=2-9, [13-6], . = 1+, ! = 0+). The catch-all is last.
 #  [[domain.call]]

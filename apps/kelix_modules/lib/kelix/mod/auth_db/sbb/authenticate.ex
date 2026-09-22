@@ -37,7 +37,13 @@ defmodule Kelix.Mod.AuthDb.SBB.Authenticate do
 
   Through `args`, all optional:
 
-    * `:realm` — the realm to require, defaulting to `sip_ctx.domain`;
+    * `:realm` — the realm to require, defaulting to `sip_ctx.domain`. Pass
+      `:from_domain` to take it from the **watcher's own** `From` instead, which
+      is what a script serving a Request-URI that is not a served AOR needs: a
+      list subscription arrives at `sip:rls@sip.linphone.org` — a domain no
+      subscriber belongs to — while the account behind it is
+      `bob@weshwesh.eu`. Challenging on the routed domain there asks for
+      credentials nobody has;
     * `:code` — 407 (default) or 401. A UA expects the server that routes its
       calls to challenge as a proxy; a server answering *for itself* — a registrar,
       a presence server — sends 401;
@@ -88,7 +94,7 @@ defmodule Kelix.Mod.AuthDb.SBB.Authenticate do
   # credentials, never the challenged one.
   state initial_state do
     req = last_uas_req()
-    realm = sbb_data_get(:realm) || ctx_get(:domain)
+    realm = Kelix.Mod.AuthDb.SBB.Authenticate.realm_of(sbb_data_get(:realm), req, ctx_get(:domain))
 
     case Kelix.Mod.AuthDb.authenticate(req, realm) do
       # The digest proved `identity.user`, and the identity check has already had
@@ -152,6 +158,25 @@ defmodule Kelix.Mod.AuthDb.SBB.Authenticate do
         sbb_return({:auth, :caller_gone, %{reason: reason}})
     end
   end
+
+  @doc """
+  The realm to challenge on: what the caller asked for, the watcher's own domain
+  (`:from_domain`), or the served domain.
+
+  Public and here rather than inlined in the state above, because the state of an
+  SBB reads as a sequence of verbs: a script choosing its realm from the request
+  is choosing a policy, and resolving it is a reading of the message.
+  """
+  @spec realm_of(binary() | :from_domain | nil, map(), binary() | nil) :: binary() | nil
+  def realm_of(:from_domain, req, fallback) do
+    case SIP.Msg.Ops.header_aor(req, :from) do
+      {_user, domain} when is_binary(domain) -> domain
+      _no_from -> fallback
+    end
+  end
+
+  def realm_of(realm, _req, _fallback) when is_binary(realm), do: realm
+  def realm_of(_none, _req, fallback), do: fallback
 
   # `:infinity` is the behaviour the reference scripts had before this block:
   # answer every rejected attempt and let the block's own deadline end it.

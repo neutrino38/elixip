@@ -102,6 +102,50 @@ defmodule SIP.Test.MsgOpsPresence do
     end
   end
 
+  describe "required_extensions/1 and supported_extensions/1" do
+    cases = [
+      {"one tag", [{"Require", "recipient-list-subscribe"}], ["recipient-list-subscribe"]},
+      {"a comma-separated list", [{"Require", "eventlist, replaces"}], ["eventlist", "replaces"]},
+      {"spread over two header lines", [{"Require", "eventlist"}, {"Require", "replaces"}],
+       ["eventlist", "replaces"]},
+      {"folded to lower case, as the IANA registry holds them",
+       [{"Require", "Recipient-List-Subscribe"}], ["recipient-list-subscribe"]},
+      {"surrounding blanks are not part of the tag", [{"Require", " eventlist , replaces "}],
+       ["eventlist", "replaces"]},
+      {"a duplicate is listed once", [{"Require", "eventlist, eventlist"}], ["eventlist"]},
+      {"an empty entry is not a tag", [{"Require", "eventlist, , "}], ["eventlist"]},
+      {"no Require header refuses nothing", [], []}
+    ]
+
+    for {title, headers, expected} <- cases do
+      test title do
+        assert both(unquote(Macro.escape(headers)), &Ops.required_extensions/1) ==
+                 unquote(Macro.escape(expected))
+      end
+    end
+
+    test "Supported is read the same way, and the two never read each other" do
+      headers = [{"Supported", "eventlist, path"}, {"Require", "recipient-list-subscribe"}]
+
+      assert both(headers, &Ops.supported_extensions/1) == ["eventlist", "path"]
+      assert both(headers, &Ops.required_extensions/1) == ["recipient-list-subscribe"]
+    end
+
+    # The parser gives `Supported` an atom key AND splits it on ", " already
+    # (SIPMsg.parse_header_content/2), so this reading takes a list where every
+    # other one takes a string — and a peer writing "a,b" without the space
+    # leaves the splitting to be done here.
+    test "the parser's atom key for Supported holds a list, and is read all the same" do
+      req = parsed([{"Supported", "eventlist, path"}])
+
+      assert Map.get(req, :supported) == ["eventlist", "path"]
+      assert Ops.supported_extensions(req) == ["eventlist", "path"]
+
+      assert parsed([{"Supported", "eventlist,path"}]) |> Ops.supported_extensions() ==
+               ["eventlist", "path"]
+    end
+  end
+
   describe "subscription_expires/2" do
     cases = [
       {"the header wins over the package default", [{"Expires", "600"}], 600},

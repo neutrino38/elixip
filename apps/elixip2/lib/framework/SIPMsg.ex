@@ -566,6 +566,17 @@ defmodule SIPMsg do
 		end
 	end
 
+	# The header keeps whatever spelling the peer used (headername_to_atomkey/1 has
+	# no atom for it), so the key is matched folded rather than looked up.
+	defp drop_content_encoding(msg) do
+		msg
+		|> Enum.reject(fn
+			{ key, _value } when is_binary(key) -> String.downcase(key) == "content-encoding"
+			_other -> false
+		end)
+		|> Map.new()
+	end
+
 	# Parse RFC 2046 mime, multipart sub body and put it in a map
 	defp parse_sub_body(subbody) do
 
@@ -593,10 +604,14 @@ defmodule SIPMsg do
 	end
 
 	# Parse RFC 2046 mime, multipart body and returns a list of sub bodies
+	#
+	# Every multipart subtype, not `mixed` alone: a list NOTIFY (RFC 4662) is
+	# `multipart/related`, and its parameters come in whatever order the sender
+	# wrote them — `type=` and `start=` sit beside `boundary=`.
 	def parse_multi_part_body(ctype, body) do
-		case String.split(ctype, "; boundary=") do
-			[ "multipart/mixed", boundary] ->
-				# We do have a multipart mixed
+		case multipart_boundary(ctype) do
+			boundary when is_binary(boundary) ->
+				# We do have a multipart body
 				# Spilt into the parts according to the boundaries
 				bodies = String.split(body, "--" <> boundary )
 				if Kernel.length(bodies) < 3 do # prologue, bodies, last boundary
@@ -615,6 +630,27 @@ defmodule SIPMsg do
 			_ ->
 				# Single body
 				[ %{ contenttype: ctype, data: body } ]
+		end
+	end
+
+	@doc false
+	# The boundary of a multipart Content-Type, or nil when the type is not one.
+	# Parameter names are case-insensitive (RFC 2045 §5.1) and the value may be
+	# quoted — a boundary carrying a `;` has to be.
+	def multipart_boundary(ctype) do
+		[ type | params ] = String.split(to_string(ctype), ";")
+
+		if String.starts_with?(String.downcase(String.trim(type)), "multipart/") do
+			Enum.find_value(params, fn param ->
+				case String.split(String.trim(param), "=", parts: 2) do
+					[ name, value ] ->
+						if String.downcase(String.trim(name)) == "boundary" do
+							value |> String.trim() |> String.trim("\"")
+						end
+
+					_ -> nil
+				end
+			end)
 		end
 	end
 
@@ -681,22 +717,41 @@ defmodule SIPMsg do
 							"received; taking what is there"])
 				end
 
-				# :contentlength is re-stated as the size of the body we KEPT, so the
-				# message is self-consistent whatever the sender announced. A B2BUA
-				# relaying it then puts exactly that many octets back on the wire, and
-				# the far end's depacketizer finds the end of the message where it
-				# expects to. Without this a peer's wrong Content-Length propagates
-				# and desynchronizes a TCP connection for the rest of its life.
-				mod_msg =
-					parsed_msg
-					|> Map.put(:body,
-							parse_multi_part_body(
-								parsed_msg.contenttype,
-								Kernel.binary_part(body, 0, taken)))
-					|> Map.put(:contentlength, taken)
-
 				rest = if taken < sz do Kernel.binary_part(body, taken, sz - taken) else "" end
-				{ :ok, mod_msg, rest }
+
+				# Content-Length counts the octets ON THE WIRE, so the decoding comes
+				# AFTER the cut: a deflated body announces its compressed size, and
+				# `rest` — the next pipelined message on a stream transport — starts
+				# where the compressed body ends.
+				case SIP.Msg.BodyCoding.decode(Kernel.binary_part(body, 0, taken),
+						SIP.Msg.Ops.body_encoding(parsed_msg)) do
+					{ :ok, clear } ->
+						# :contentlength is re-stated as the size of the body we KEPT, so the
+						# message is self-consistent whatever the sender announced. A B2BUA
+						# relaying it then puts exactly that many octets back on the wire, and
+						# the far end's depacketizer finds the end of the message where it
+						# expects to. Without this a peer's wrong Content-Length propagates
+						# and desynchronizes a TCP connection for the rest of its life.
+						#
+						# `Content-Encoding` goes with the compression it named: what the map
+						# now holds is clear text of `byte_size(clear)` octets, and a B2BUA
+						# relaying a body announced `deflate` that is not deflated is the same
+						# desynchronization one layer up.
+						mod_msg =
+							parsed_msg
+							|> drop_content_encoding()
+							|> Map.put(:body, parse_multi_part_body(parsed_msg.contenttype, clear))
+							|> Map.put(:contentlength, Kernel.byte_size(clear))
+
+						{ :ok, mod_msg, rest }
+
+					{ :error, reason } ->
+						Logger.warning([ module: __MODULE__,
+							message: "body encoded with #{SIP.Msg.Ops.body_encoding(parsed_msg)} " <>
+								"cannot be read (#{reason}); answering 415"])
+
+						{ :unsupported_content_encoding, parsed_msg, rest }
+				end
 		end
 	end
 	@doc """
@@ -755,6 +810,10 @@ defmodule SIPMsg do
 	A message past `max_message_size/0` answers `{ :msg_too_large, headers }`. The
 	parsed headers are handed back on purpose: they are what a caller needs to
 	refuse it with a 513 rather than drop it.
+
+	A body in a `Content-Encoding` this node cannot undo answers
+	`{ :unsupported_content_encoding, headers }`, for the same reason and with the
+	same shape: the message is refused **415**, never dropped.
 	"""
 	def parse(message, parse_error_callback) when is_binary(message) do
 		# Separate headers from the rest.
@@ -958,6 +1017,16 @@ defmodule SIPMsg do
 		"\r\n" <> body
 	end
 
+	# A single part that carries a boundary is a MULTIPART of one, not a bare body:
+	# its Content-Type announces the boundary, and Content-Length was computed over
+	# the delimiters (SIP.Msg.Ops.update_sip_msg/2). Writing the payload alone here
+	# announced a length nobody could match and a boundary that was nowhere in the
+	# message. A list NOTIFY naming one buddy with no published state is exactly
+	# that message.
+	defp serialize_body([ %{ boundary: _ } = body ]) do
+		"\r\n" <> multipart_body([ body ])
+	end
+
 	defp serialize_body([ body ]) do
 		"\r\n" <> body.data
 	end
@@ -979,12 +1048,29 @@ defmodule SIPMsg do
 		Enum.map_join(bodies, "", &serialize_sub_body/1) <> "--" <> boundary <> "--\r\n"
 	end
 
-	# One MIME part: delimiter line, its Content-Type, blank line, data, trailing
-	# CRLF (the CRLF that precedes the next boundary delimiter).
-	defp serialize_sub_body(%{ boundary: boundary, contenttype: ctype, data: data }) do
+	# One MIME part: delimiter line, its Content-Type, whatever other MIME headers
+	# it carries, blank line, data, trailing CRLF (the CRLF that precedes the next
+	# boundary delimiter).
+	#
+	# The other headers are not decoration. A `multipart/related` part is addressed
+	# by its `Content-ID` — that is what the RLMI of a list NOTIFY points at with
+	# `cid=` — so a part serialized without one cannot be referred to at all.
+	defp serialize_sub_body(part = %{ boundary: boundary, contenttype: ctype, data: data }) do
 		"--" <> boundary <> "\r\n" <>
-			"Content-Type: " <> to_string(ctype) <> "\r\n\r\n" <>
+			"Content-Type: " <> to_string(ctype) <> "\r\n" <>
+			serialize_part_headers(part) <> "\r\n" <>
 			data <> "\r\n"
+	end
+
+	# Every key of the part map that is not the three the shape itself is made of.
+	# A part parsed off the wire carries its headers under the names it was sent
+	# with (parse_sub_body/1), so this round-trips them.
+	defp serialize_part_headers(part) do
+		part
+		|> Enum.reject(fn { key, _value } -> key in [ :boundary, :contenttype, :data ] end)
+		|> Enum.map_join("", fn { key, value } ->
+				header_name_to_string(key) <> ": " <> to_string(value) <> "\r\n"
+			end)
 	end
 
 

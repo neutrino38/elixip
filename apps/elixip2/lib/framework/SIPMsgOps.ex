@@ -233,6 +233,119 @@ defmodule SIP.Msg.Ops do
   end
 
   @doc """
+  The resource list a SUBSCRIBE carries in its own body (RFC 5367), or `:none`
+  when it carries none.
+
+  What makes a SUBSCRIBE a **list subscription** is read here and nowhere else:
+  `Content-Disposition: recipient-list` over a body of
+  `application/resource-lists+xml`. Both are required — a body with no
+  disposition is a body the request did not say what to do with — and the URIs
+  come back as the watcher wrote them.
+
+  `{:error, reason}` is a disposition that says "recipient-list" over something
+  that is not one: the request asked for a list subscription and did not supply a
+  readable list, which is a **400**, not a subscription to nothing.
+  """
+  @spec recipient_list(map()) :: {:ok, [binary()]} | :none | {:error, term()}
+  def recipient_list(msg) when is_map(msg) do
+    if content_disposition(msg) == "recipient-list" do
+      case {body_content_type(msg), body_string(msg)} do
+        {"application/resource-lists+xml", body} when is_binary(body) ->
+          SIP.Presence.ResourceLists.parse(body)
+
+        {type, _body} ->
+          {:error, {:not_a_resource_list, type}}
+      end
+    else
+      :none
+    end
+  end
+
+  @doc """
+  What a body is for (RFC 3261 §20.11), folded to lower case and stripped of its
+  parameters (`;handling=optional`), or `nil`.
+  """
+  @spec content_disposition(map()) :: binary() | nil
+  def content_disposition(msg) when is_map(msg) do
+    case first_header_value(msg, :contentdisposition, "content-disposition") do
+      value when is_binary(value) ->
+        value |> split_params() |> elem(0) |> String.trim() |> String.downcase() |> presence()
+
+      _absent ->
+        nil
+    end
+  end
+
+  @doc """
+  The coding applied to the body (RFC 3261 §20.12), folded to lower case, or
+  `nil` when the message carries no `Content-Encoding`.
+
+  Only the first coding is read. A stack of them (`deflate, gzip`) is legal on
+  paper, never sent, and the composite it would name is not one we can undo.
+
+      iex> SIP.Msg.Ops.body_encoding(%{"Content-Encoding" => "deflate"})
+      "deflate"
+  """
+  @spec body_encoding(map()) :: binary() | nil
+  def body_encoding(msg) when is_map(msg) do
+    case option_tags(msg, :contentencoding, "content-encoding") do
+      [coding | _] -> coding
+      [] -> nil
+    end
+  end
+
+  @doc """
+  The codings a peer says it can read (RFC 3261 §20.2), folded to lower case.
+
+  `[]` is an absent header, which RFC 2616 §14.3 reads as "identity only": a body
+  we compress anyway is a body this peer cannot read.
+  """
+  @spec accepted_encodings(map()) :: [binary()]
+  def accepted_encodings(msg) when is_map(msg) do
+    msg
+    |> option_tags(:acceptencoding, "accept-encoding")
+    |> Enum.map(&(&1 |> split_params() |> elem(0)))
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  @doc """
+  The option tags a request **requires** the server to support (RFC 3261 §20.32),
+  folded to lower case.
+
+  An extension named here is not a hint: a server that does not implement one of
+  them answers **420 Bad Extension** listing it in `Unsupported`, and answering
+  anything else is answering a request one did not read.
+
+      iex> SIP.Msg.Ops.required_extensions(%{"Require" => "recipient-list-subscribe"})
+      ["recipient-list-subscribe"]
+  """
+  @spec required_extensions(map()) :: [binary()]
+  def required_extensions(msg) when is_map(msg), do: option_tags(msg, :require, "require")
+
+  @doc """
+  The option tags a request says it **supports** (RFC 3261 §20.37), folded to
+  lower case.
+
+  `Supported: eventlist` is what tells a notifier a watcher can read the
+  `multipart/related` of RFC 4662; unlike `Require`, its absence refuses nothing.
+  """
+  @spec supported_extensions(map()) :: [binary()]
+  def supported_extensions(msg) when is_map(msg), do: option_tags(msg, :supported, "supported")
+
+  # One reading for both: a comma-separated list that may also be spread over
+  # several header lines, exactly like `Accept` above. Option tags are `token`s
+  # and the IANA registry holds them in lower case, so they are compared folded —
+  # a peer writing `Require: Replaces` means the registered extension.
+  defp option_tags(msg, atom_key, lowercase_name) do
+    msg
+    |> header_list(atom_key, lowercase_name)
+    |> Enum.flat_map(&String.split(to_string(&1), ","))
+    |> Enum.map(&(&1 |> String.trim() |> String.downcase()))
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+  end
+
+  @doc """
   The lifetime a SUBSCRIBE asks for: its `Expires` header, else `package_default`.
 
   A **second** expiry reading, and deliberately not `requested_expires/2`: a
@@ -1154,6 +1267,43 @@ defmodule SIP.Msg.Ops do
     "elixip-boundary-" <> (:crypto.strong_rand_bytes(12) |> Base.encode16(case: :lower))
   end
 
+  @doc """
+  Stamp one boundary on `parts` and compose the `Content-Type` that goes with
+  them: `{parts, content_type}`.
+
+  `opts[:subtype]` is `"mixed"` by default. A list NOTIFY (RFC 4662 §4.2) needs
+  `"related"` with the two parameters that make its root part findable:
+
+      {parts, ctype} =
+        SIP.Msg.Ops.compose_multipart(parts,
+          subtype: "related",
+          type: "application/rlmi+xml",
+          start: "<rlmi@example.com>")
+
+  `type` names the media type of the root part and `start` its `Content-ID`
+  (RFC 2387 §3.1-3.2). Without `start` the root is the *first* part, which is why
+  it is a parameter rather than an ordering rule: a watcher reading the parts in
+  any other order finds the manifest by its identifier.
+
+  The caller hands the answer to `update_sip_msg/2` as `{:body, parts}` after
+  setting `:contenttype` — the parts carry the boundary, so neither is redrawn.
+  """
+  @spec compose_multipart([map()], keyword()) :: {[map()], binary()}
+  def compose_multipart(parts, opts \\ []) when is_list(parts) do
+    boundary = generate_boundary()
+    subtype = Keyword.get(opts, :subtype, "mixed")
+
+    parameters =
+      [{"type", Keyword.get(opts, :type)}, {"start", Keyword.get(opts, :start)}]
+      |> Enum.reject(fn {_name, value} -> is_nil(value) end)
+      |> Enum.map_join("", fn {name, value} -> "; #{name}=\"#{value}\"" end)
+
+    {Enum.map(parts, &Map.put(&1, :boundary, boundary)),
+     "multipart/" <> subtype <> parameters <> "; boundary=" <> boundary}
+  end
+
+  defp mixed(boundary), do: "multipart/mixed; boundary=" <> boundary
+
   @doc "Met a jour ou ajout des champs dans un message SIP"
   def update_sip_msg(sipmsg, fields) when is_list(fields) do
     Enum.reduce(fields, sipmsg, fn {header, value}, acc ->
@@ -1188,7 +1338,13 @@ defmodule SIP.Msg.Ops do
     sipmsg |> Map.put(:body, []) |> Map.put(:contentlength, 0)
   end
 
-  def update_sip_msg(sipmsg, {:body, [%{contenttype: ctype, data: body_data}]}) do
+  # One part and no boundary: a single-part body in the parser's own shape, whose
+  # own type is the message's. A part that DOES carry a boundary falls through to
+  # the multipart clause below even when it is alone — dropping the boundary there
+  # left a message announcing a multipart Content-Type over a bare payload, which
+  # is what a list NOTIFY naming one buddy with no published state looks like.
+  def update_sip_msg(sipmsg, {:body, [%{contenttype: ctype, data: body_data} = part]})
+      when not is_map_key(part, :boundary) do
     sipmsg
     |> Map.put(:body, [%{contenttype: ctype, data: body_data}])
     |> Map.put(:contenttype, ctype)
@@ -1206,19 +1362,26 @@ defmodule SIP.Msg.Ops do
   # boundary, stamp it on every part, set the top-level Content-Type and compute
   # the Content-Length from the serialized body octets. Each part must be a
   # `%{contenttype: ct, data: bin}` map (extra keys are preserved).
+  #
+  # Parts that ALREADY carry a boundary keep it, and keep the Content-Type the
+  # caller set: that is a body `compose_multipart/2` built, whose type names both
+  # the subtype and the boundary, and re-drawing either here would leave the
+  # message announcing a boundary its body does not use.
   def update_sip_msg(sipmsg, {:body, parts}) when is_list(parts) do
     if not Enum.all?(parts, &match?(%{contenttype: _, data: _}, &1)) do
       raise "Multipart body parts must be %{contenttype: ..., data: ...} maps, got #{inspect(parts)}"
     end
 
-    boundary = generate_boundary()
-    parts = Enum.map(parts, &Map.put(&1, :boundary, boundary))
-    body_octets = SIPMsg.multipart_body(parts)
+    {parts, content_type} =
+      case parts do
+        [%{boundary: boundary} | _] -> {parts, Map.get(sipmsg, :contenttype, mixed(boundary))}
+        _ -> compose_multipart(parts, [])
+      end
 
     sipmsg
     |> Map.put(:body, parts)
-    |> Map.put(:contenttype, "multipart/mixed; boundary=" <> boundary)
-    |> Map.put(:contentlength, Kernel.byte_size(body_octets))
+    |> Map.put(:contenttype, content_type)
+    |> Map.put(:contentlength, Kernel.byte_size(SIPMsg.multipart_body(parts)))
   end
 
   def update_sip_msg(sipmsg, {header, value}) do

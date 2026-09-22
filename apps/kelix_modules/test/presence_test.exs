@@ -37,17 +37,19 @@ defmodule Kelix.Mod.PresenceTest do
   # A subscription as `accept_subscription/1` hands it back: granted, active, and
   # naming the resource in `presentity_uri`.
   defp subscription(presentity, watcher, opts \\ []) do
+    presentity_domain = Keyword.get(opts, :presentity_domain, @domain)
+
     %SIP.Subscription{
       callid: Keyword.get(opts, :callid, "call-#{presentity}-#{watcher}"),
       to_tag: "totag",
       from_tag: "fromtag",
       event: @package,
       event_id: Keyword.get(opts, :event_id),
-      presentity_uri: "sip:#{presentity}@#{@domain}",
+      presentity_uri: "sip:#{presentity}@#{presentity_domain}",
       watcher_username: watcher,
       watcher_domain: @domain,
       to_user: presentity,
-      to_domain: @domain
+      to_domain: presentity_domain
     }
     |> SIP.Subscription.put_status(Keyword.get(opts, :status, :active))
     |> SIP.Subscription.grant(Keyword.get(opts, :expires, 3600))
@@ -271,6 +273,150 @@ defmodule Kelix.Mod.PresenceTest do
     end
   end
 
+  # The domain that ROUTED a SUBSCRIBE says nothing about the domains of what it
+  # asks to watch. A Linphone client opens its buddy list on
+  # `sip:rls@sip.linphone.org` — an URI that names no presentity at all — and
+  # lists three buddies on three other domains. Keying what it watches on the
+  # routed domain files every one of them under a domain nobody ever publishes on.
+  describe "a resource belongs to the domain of its own URI" do
+    @other "other.example"
+
+    test "a watcher admitted through one domain is pushed by a PUBLISH on the resource's" do
+      sub = subscription("bob", "alice", presentity_domain: @other)
+      {:ok, nil} = Presence.watch(@domain, sub)
+
+      published = doc("bob", :open, "Back")
+      pub = %{publication("bob", doc: published) | domain: @other}
+      {:ok, _etag, _} = Presence.publish(@other, pub)
+
+      assert_receive {:presence, :state, {"bob", @other, @package}, ^published}
+    end
+
+    test "and it is listed on that domain, under the presentity it actually watches" do
+      {:ok, _} = Presence.watch(@domain, subscription("bob", "alice", presentity_domain: @other))
+
+      assert Presence.watchers(@domain, "bob") == []
+      assert [%{presentity_uri: "sip:bob@other.example"}] = Presence.watchers(@other, "bob")
+    end
+
+    test "the state it is handed at registration is the resource's own" do
+      pub = %{publication("bob", doc: doc("bob", :open, "Elsewhere")) | domain: @other}
+      {:ok, _etag, _} = Presence.publish(@other, pub)
+
+      assert {:ok, %SIP.Presence.Doc{note: "Elsewhere"}} =
+               Presence.watch(@domain, subscription("bob", "alice", presentity_domain: @other))
+    end
+  end
+
+  describe "watch_many/3 — one subscription, N resources (RFC 4662)" do
+    @entries [
+      "sip:900020123@visioassistance.net",
+      "sip:9876@conf.weshwesh.eu",
+      "sip:magali.buu@weshwesh.eu"
+    ]
+
+    # Two of the three entries are on domains this node serves; the third is on a
+    # domain it has never heard of, which is the normal shape of a buddy list.
+    setup do
+      path =
+        Path.join(
+          System.tmp_dir!(),
+          "presence_rls_domains_#{System.unique_integer([:positive])}.toml"
+        )
+
+      File.write!(path, """
+      [[domain]]
+      name = "weshwesh.eu"
+
+        [[domain.presence]]
+        event-package = "presence"
+        subscribe = "presence-subscribe.exs"
+
+      [[domain]]
+      name = "conf.weshwesh.eu"
+
+        [[domain.presence]]
+        event-package = "presence"
+        subscribe = "presence-subscribe.exs"
+      """)
+
+      :ok = Kelix.Domains.reload(path)
+
+      on_exit(fn ->
+        empty = Path.join(System.tmp_dir!(), "presence_rls_empty.toml")
+        File.write!(empty, "")
+        _ = Kelix.Domains.reload(empty)
+        File.rm(path)
+      end)
+
+      :ok
+    end
+
+    test "answers one state per entry, keyed on the URI the watcher wrote" do
+      pub = %{publication("magali.buu", doc: doc("magali.buu", :open)) | domain: "weshwesh.eu"}
+      {:ok, _etag, _} = Presence.publish("weshwesh.eu", pub)
+
+      assert {:ok, docs} =
+               Presence.watch_many(@domain, subscription("rls", "bob"), @entries)
+
+      assert Map.keys(docs) |> Enum.sort() == Enum.sort(@entries)
+      assert docs["sip:900020123@visioassistance.net"] == nil
+      assert %SIP.Presence.Doc{} = docs["sip:magali.buu@weshwesh.eu"]
+    end
+
+    test "each entry is watched on its own domain, and each pushes once" do
+      {:ok, _} = Presence.watch_many(@domain, subscription("rls", "bob"), @entries)
+
+      assert [%{presentity_uri: "sip:9876@conf.weshwesh.eu"}] =
+               Presence.watchers("conf.weshwesh.eu", "9876")
+
+      pub = %{publication("9876") | domain: "conf.weshwesh.eu"}
+      {:ok, _etag, _} = Presence.publish("conf.weshwesh.eu", pub)
+
+      assert_receive {:presence, :state, {"9876", "conf.weshwesh.eu", @package}, _doc}
+      refute_receive {:presence, :state, _resource, _doc}, 100
+    end
+
+    # The list is the client's, so the number of domains in it is the client's
+    # too: registering a watcher per invented domain is a table and a monitor per
+    # invented domain. The entry still gets an answer — `nil`, which the notifier
+    # reports as `noresource`.
+    test "an entry on a domain this node does not serve is answered, not registered" do
+      assert {:ok, docs} = Presence.watch_many(@domain, subscription("rls", "bob"), @entries)
+
+      assert docs["sip:900020123@visioassistance.net"] == nil
+      assert Presence.watchers("visioassistance.net", "900020123") == []
+    end
+
+    test "unwatch/1 drops it from every domain its list spans" do
+      {:ok, _} = Presence.watch_many(@domain, subscription("rls", "bob"), @entries)
+
+      :ok = Presence.unwatch(@domain)
+
+      for uri <- @entries do
+        {:ok, %SIP.Uri{userpart: user, domain: dom}} = SIP.Uri.parse(uri)
+        assert Presence.watchers(dom, user) == []
+      end
+    end
+
+    test "an instance that dies is dropped from every domain too" do
+      other = watcher_process(self())
+
+      assert {:ok, _} = call_watch_many(other, subscription("rls", "bob"), @entries)
+
+      assert [_one] = Presence.watchers("weshwesh.eu", "magali.buu")
+
+      ref = Process.monitor(other)
+      send(other, :stop)
+      assert_receive {:DOWN, ^ref, :process, ^other, _}
+
+      assert eventually(fn ->
+               Presence.watchers("weshwesh.eu", "magali.buu") == [] and
+                 Presence.watchers("conf.weshwesh.eu", "9876") == []
+             end)
+    end
+  end
+
   describe "the control surface" do
     setup do
       {:ok, etag, _} = Presence.publish(@domain, publication("bob"))
@@ -385,6 +531,10 @@ defmodule Kelix.Mod.PresenceTest do
         send(from, {:watched, Presence.watch(@domain, sub)})
         watcher_loop(owner)
 
+      {:watch_many, from, sub, uris} ->
+        send(from, {:watched, Presence.watch_many(@domain, sub, uris)})
+        watcher_loop(owner)
+
       msg ->
         send(owner, {:watcher_got, self(), msg})
         watcher_loop(owner)
@@ -393,6 +543,12 @@ defmodule Kelix.Mod.PresenceTest do
 
   defp call_watch(pid, sub) do
     send(pid, {:watch, self(), sub})
+    assert_receive {:watched, result}
+    result
+  end
+
+  defp call_watch_many(pid, sub, uris) do
+    send(pid, {:watch_many, self(), sub, uris})
     assert_receive {:watched, result}
     result
   end

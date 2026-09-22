@@ -105,7 +105,18 @@ defmodule SIP.Subscription do
     # The `SIP.EventPackage` implementation, and the content type negotiated out
     # of its `content_types/0` against the SUBSCRIBE's `Accept`.
     package: nil,
-    content_type: nil
+    content_type: nil,
+    # A list subscription (RFC 4662): the URI the watcher subscribed to — which
+    # names a LIST and no presentity — and the entries it asked for, as it wrote
+    # them. `nil` here means an ordinary subscription to one resource, and it is
+    # what every other layer tests: the dialog stamps `Require: eventlist` on the
+    # NOTIFYs of a list, and `notify_list/1` refuses to compose one for anything
+    # else.
+    list_uri: nil,
+    list_entries: [],
+    # The coding to apply to the bodies we send it (`Accept-Encoding`), `nil` for
+    # none. A list NOTIFY carrying one PIDF per buddy is past the UDP MTU.
+    body_encoding: nil
   ]
 
   @type t :: %__MODULE__{}
@@ -177,6 +188,7 @@ defmodule SIP.Session.Notifier do
 
   | Read | Against | Refusal |
   |---|---|---|
+  | `Require` | the extensions this layer implements | **420 Bad Extension**, with `Unsupported` |
   | `Event` | `SIP.EventPackage.lookup/1` | **489 Bad Event** |
   | `Accept` | the package's `content_types/0` | **406 Not Acceptable** |
   | `Expires` | the package's `min_expires/0` | **423 Interval Too Brief**, with `Min-Expires` |
@@ -269,6 +281,27 @@ defmodule SIP.Session.Notifier do
       end
 
       @doc """
+      Send the state of a **list** subscription (RFC 4662): one NOTIFY carrying
+      an RLMI manifest and one document part per resource.
+
+      `states` is a map of `uri => doc`, the URIs being the ones the watcher
+      listed. `nil` as a document says "this node holds no state for it" and the
+      resource is reported `terminated;reason=noresource` — which is what an entry
+      on a domain this node does not serve gets, and what a watcher needs in order
+      to stop waiting on it.
+
+      The first NOTIFY of the subscription is full state and the ones after it are
+      partial, so a partial push may name only the resources that changed. Both
+      follow from the subscription's `version`, which the framework counts.
+      """
+      defmacro notify_list(states) do
+        quote do
+          SIP.Scenario.Monitor.note_command(:sip, "notify_list")
+          var!(sip_ctx) = SIP.Session.Notifier.do_notify_list(var!(sip_ctx), unquote(states))
+        end
+      end
+
+      @doc """
       End this subscription now, stating why — one of RFC 6665 §4.1.3's reasons
       (`:noresource`, `:rejected`, `:deactivated`, `:probation`, `:giveup`,
       `:invariant`, `:timeout`).
@@ -301,8 +334,8 @@ defmodule SIP.Session.Notifier do
   Read a SUBSCRIBE against the packages this node knows, and say what may be
   granted.
 
-  Answers `{:ok, package_module, content_type, granted_expires}`, or
-  `{:error, code, reason, fields}` — `fields` being what the refusal must carry
+  Answers `{:ok, negotiated}` — see the type below — or
+  `{:error, code, reason, fields}`, `fields` being what the refusal must carry
   (the `Min-Expires` of a 423, RFC 6665 §4.2.1 making it as mandatory there as
   RFC 3261 §10.3 does for a REGISTER: without it the watcher has no way to know
   what to ask for and simply gives up).
@@ -310,15 +343,105 @@ defmodule SIP.Session.Notifier do
   Public because the Router asks the same question before any script runs, and
   asking it twice is how two answers to one question start.
   """
-  @spec negotiate(map(), keyword()) ::
-          {:ok, module(), binary(), non_neg_integer()} | {:error, 400..699, binary(), list()}
+  @typedoc """
+  What a SUBSCRIBE may be granted: the package serving it, the content type its
+  documents go out as, the lifetime, and — for a list subscription (RFC 4662) —
+  the list URI and the entries it named. `list_uri` is `nil` for an ordinary
+  subscription, and that is what every later layer tests.
+  """
+  @type negotiated :: %{
+          package: module(),
+          event_id: binary() | nil,
+          content_type: binary(),
+          expires: non_neg_integer(),
+          list_uri: binary() | nil,
+          list_entries: [binary()],
+          body_encoding: binary() | nil
+        }
+
+  @spec negotiate(map(), keyword()) :: {:ok, negotiated()} | {:error, 400..699, binary(), list()}
   def negotiate(req, opts \\ []) when is_map(req) do
-    with {:ok, name, id} <- read_event(req, opts),
+    with :ok <- check_required_extensions(req),
+         {:ok, name, id} <- read_event(req, opts),
          {:ok, package} <- lookup_package(name),
-         {:ok, content_type} <- pick_content_type(req, package),
+         {:ok, entries} <- read_recipient_list(req),
+         {:ok, content_type} <- pick_content_type(req, package, entries),
          {:ok, granted} <- bound_expires(req, package, opts) do
-      _ = id
-      {:ok, package, content_type, granted}
+      {:ok,
+       %{
+         package: package,
+         event_id: id,
+         content_type: content_type,
+         expires: granted,
+         list_uri: entries && list_uri(req),
+         list_entries: entries || [],
+         body_encoding: body_encoding(req)
+       }}
+    end
+  end
+
+  # `nil` — not `[]` — is "this SUBSCRIBE is not a list subscription": a watcher
+  # may legitimately send a list that names nobody, and it still gets a list
+  # NOTIFY, empty.
+  defp read_recipient_list(req) do
+    case SIP.Msg.Ops.recipient_list(req) do
+      :none ->
+        {:ok, nil}
+
+      {:ok, entries} ->
+        {:ok, entries}
+
+      {:error, reason} ->
+        # It asked for a list subscription and did not supply a readable list.
+        # Subscribing it to nothing would leave it watching an empty roster for
+        # an hour without ever being told why.
+        Logger.info("Subscription refused: unreadable recipient-list (#{inspect(reason)}) (400)")
+        {:error, 400, "Bad Request", []}
+    end
+  end
+
+  # The list URI is the Request-URI: it names a LIST, not a presentity
+  # (`sip:rls@sip.linphone.org`), and it is what the RLMI puts in its `uri`
+  # attribute so the watcher knows which of its subscriptions a NOTIFY answers.
+  defp list_uri(req) do
+    case SIP.Uri.serialize_ruri(Map.get(req, :ruri)) do
+      {:ok, uri} -> uri
+      _ -> nil
+    end
+  end
+
+  # What we may compress the NOTIFYs with. Only `deflate` — the one coding SIP
+  # peers actually implement, and the one `SIP.Msg.BodyCoding` undoes.
+  defp body_encoding(req) do
+    if "deflate" in SIP.Msg.Ops.accepted_encodings(req), do: "deflate"
+  end
+
+  # The extensions the subscription layer implements. Empty is a complete answer:
+  # what it means is "this layer implements no SIP extension a watcher may demand",
+  # and a watcher demanding one is told so rather than served something else.
+  # RFC 4662's event lists, and RFC 5367's list carried in the SUBSCRIBE itself.
+  # Declared here rather than per package: the envelope is the subscription
+  # layer's, and it is the same one whatever the documents inside it are.
+  @supported_extensions ["eventlist", "recipient-list-subscribe"]
+
+  # RFC 3261 §8.2.2.3. The 420 names the extensions in `Unsupported`, so a watcher
+  # that can do without them asks again; a refusal that says only "no" leaves it
+  # retrying the same request.
+  #
+  # Checked here, in the subscription layer, and NOT on every inbound request: a
+  # blanket check would start refusing the `Require: timer` and `Require: 100rel`
+  # of INVITEs this node serves today, which is a regression, not a fix.
+  defp check_required_extensions(req) do
+    case SIP.Msg.Ops.required_extensions(req) -- @supported_extensions do
+      [] ->
+        :ok
+
+      unsupported ->
+        Logger.info(
+          "Subscription refused: unsupported extension(s) #{Enum.join(unsupported, ", ")} (420)"
+        )
+
+        {:error, 420, "Bad Extension", [{"Unsupported", Enum.join(unsupported, ", ")}]}
     end
   end
 
@@ -365,7 +488,7 @@ defmodule SIP.Session.Notifier do
   # The package's own preference order decides, not the watcher's `q` — which is
   # why `accepted_content_types/1` drops it. An absent Accept means "the default
   # type of the package" (RFC 6665 §4.4.5), never "nothing is acceptable".
-  defp pick_content_type(req, package) do
+  defp pick_content_type(req, package, nil) do
     offered = package.content_types()
 
     case SIP.Msg.Ops.accepted_content_types(req) do
@@ -380,6 +503,34 @@ defmodule SIP.Session.Notifier do
           nil -> {:error, 406, "Not Acceptable", []}
           content_type -> {:ok, content_type}
         end
+    end
+  end
+
+  # A list subscription negotiates ONE more thing: that the watcher can read the
+  # envelope. The type stored is still the package's — each buddy's state travels
+  # as a part of its own, written by the package exactly as it would be alone —
+  # and the envelope is `notify_list/1`'s.
+  #
+  # The three requirements are RFC 4662 §4.1 and §5: `Supported: eventlist`
+  # (without it a notifier MUST NOT send an event list), and an `Accept` naming
+  # both the multipart that carries the parts and the manifest that indexes them.
+  # An `Accept` we cannot satisfy is a 406 here as anywhere else — with one
+  # difference worth stating: the watcher asked for this format itself, so a 406
+  # means it asked for a list with an Accept that cannot carry one.
+  defp pick_content_type(req, package, _entries) do
+    accepted = SIP.Msg.Ops.accepted_content_types(req)
+
+    cond do
+      "eventlist" not in SIP.Msg.Ops.supported_extensions(req) ->
+        Logger.info("List subscription refused: no `Supported: eventlist` (406)")
+        {:error, 406, "Not Acceptable", []}
+
+      "multipart/related" not in accepted or "application/rlmi+xml" not in accepted ->
+        Logger.info("List subscription refused: Accept carries no multipart/related + rlmi (406)")
+        {:error, 406, "Not Acceptable", []}
+
+      true ->
+        pick_content_type(req, package, nil)
     end
   end
 
@@ -419,8 +570,8 @@ defmodule SIP.Session.Notifier do
     req = stored_subscribe!(sip_ctx)
 
     case negotiate(req, opts) do
-      {:ok, package, content_type, granted} ->
-        accept(sip_ctx, req, package, content_type, granted, opts)
+      {:ok, negotiated} ->
+        accept(sip_ctx, req, negotiated, opts)
 
       {:error, code, reason, fields} ->
         sip_ctx = reply(sip_ctx, req, code, reason, fields, "reject_subscribe #{code}")
@@ -428,7 +579,8 @@ defmodule SIP.Session.Notifier do
     end
   end
 
-  defp accept(sip_ctx, req, package, content_type, granted, opts) do
+  defp accept(sip_ctx, req, negotiated, opts) do
+    %{package: package, content_type: content_type, expires: granted} = negotiated
     # The watcher is the From of the SUBSCRIBE, and `active_watchers` keeps it
     # under three pairs of columns: the two addresses as sent, and the watcher
     # itself. Read once, in the message layer, like every other header.
@@ -438,9 +590,12 @@ defmodule SIP.Session.Notifier do
     sub =
       %SIP.Subscription{
         event: package.name(),
-        event_id: elem(SIP.Msg.Ops.event_package(req) || {nil, nil}, 1),
+        event_id: negotiated.event_id,
         package: package,
         content_type: content_type,
+        list_uri: negotiated.list_uri,
+        list_entries: negotiated.list_entries,
+        body_encoding: negotiated.body_encoding,
         presentity_uri: presentity_uri(req),
         watcher_username: from_user,
         watcher_domain: from_domain,
@@ -533,6 +688,137 @@ defmodule SIP.Session.Notifier do
         )
 
         SIP.Context.set(sip_ctx, :lasterr, {:error, reason})
+    end
+  end
+
+  @doc false
+  @spec do_notify_list(%SIP.Context{}, %{binary() => term()}) :: %SIP.Context{}
+  def do_notify_list(sip_ctx = %SIP.Context{}, states) when is_map(states) do
+    case SIP.Context.appdata_get(sip_ctx, :subscription) do
+      nil ->
+        Logger.error("notify_list/1 called before a subscription was accepted; nothing sent")
+        SIP.Context.set(sip_ctx, :lasterr, {:error, :no_subscription})
+
+      %SIP.Subscription{list_uri: nil} ->
+        # An ordinary subscription asked for ONE document and would be handed an
+        # envelope it never said it could read. `notify/1` is the verb here.
+        Logger.error("notify_list/1 on a subscription that is not a list; nothing sent")
+        SIP.Context.set(sip_ctx, :lasterr, {:error, :not_a_list_subscription})
+
+      %SIP.Subscription{} = sub ->
+        if SIP.Subscription.status(sub) == :terminated do
+          Logger.debug("notify_list/1 on a subscription that has ended; nothing sent")
+          SIP.Context.set(sip_ctx, :lasterr, :ok)
+        else
+          send_list_notify(sip_ctx, sub, states)
+        end
+    end
+  end
+
+  defp send_list_notify(sip_ctx, sub, states) do
+    {manifest, parts} = compose_list(sub, states)
+
+    {:ok, rlmi} = SIP.Presence.Rlmi.serialize(manifest)
+    root_cid = "<rlmi." <> SIP.Presence.Rlmi.instance_id(to_string(sub.callid)) <> "@kelixip>"
+
+    root = %{
+      "Content-ID" => root_cid,
+      contenttype: SIP.Presence.Rlmi.content_type(),
+      data: rlmi
+    }
+
+    {body, content_type} =
+      SIP.Msg.Ops.compose_multipart([root | parts],
+        subtype: "related",
+        type: SIP.Presence.Rlmi.content_type(),
+        start: root_cid
+      )
+
+    rc = SIP.Dialog.send_notify(sip_ctx.dialogpid, body, content_type)
+
+    sip_ctx
+    |> SIP.Context.appdata_set(:subscription, %{sub | version: sub.version + 1})
+    |> SIP.Context.set(:lasterr, rc)
+  end
+
+  # The manifest and the parts are built in one pass: an instance's `cid` and the
+  # `Content-ID` of the part holding its state are the same identifier, and
+  # composing them apart is how they stop matching.
+  defp compose_list(sub, states) do
+    {resources, parts} =
+      Enum.reduce(states, {[], []}, fn {uri, doc}, {resources, parts} ->
+        case list_part(sub, entry_uri(sub, uri), doc) do
+          {:ok, resource, part} -> {resources ++ [resource], parts ++ [part]}
+          {:ok, resource} -> {resources ++ [resource], parts}
+        end
+      end)
+
+    manifest = %SIP.Presence.Rlmi{
+      uri: sub.list_uri,
+      version: sub.version,
+      # The first NOTIFY of a subscription is the only one a watcher has nothing
+      # to merge into (RFC 4662 §5.1).
+      full_state: sub.version == 0,
+      resources: resources
+    }
+
+    {manifest, parts}
+  end
+
+  # The resource is named in the manifest with the URI the WATCHER wrote, not
+  # with the one whoever pushed the state happened to compose. They differ as
+  # soon as a state comes back from a collection keyed on `{user, domain, event}`
+  # — `sip:Bob@Example.COM` in the list, `sip:bob@example.com` out of the store —
+  # and a watcher matches a resource by string: a manifest naming the folded form
+  # describes a buddy that is not in its roster.
+  defp entry_uri(%SIP.Subscription{list_entries: entries}, uri),
+    do: Enum.find(entries, uri, &same_aor?(&1, uri))
+
+  defp same_aor?(one, other) do
+    case {SIP.Uri.parse(to_string(one)), SIP.Uri.parse(to_string(other))} do
+      {{:ok, a}, {:ok, b}} ->
+        fold(a.userpart) == fold(b.userpart) and fold(a.domain) == fold(b.domain)
+
+      _unparseable ->
+        to_string(one) == to_string(other)
+    end
+  end
+
+  defp fold(nil), do: nil
+  defp fold(value), do: String.downcase(to_string(value))
+
+  # `nil` is "nothing is held about this resource" — an entry on a domain this
+  # node does not serve, or one nobody ever published. It is reported as an
+  # instance in the terminated state rather than left out: a resource absent from
+  # the manifest is one the watcher goes on waiting for.
+  defp list_part(_sub, uri, nil) do
+    {:ok,
+     %SIP.Presence.Rlmi.Resource{uri: uri, instances: [SIP.Presence.Rlmi.unserved(uri)]}}
+  end
+
+  defp list_part(sub, uri, doc) do
+    case sub.package.serialize(sub.content_type, doc) do
+      {:ok, body} ->
+        id = SIP.Presence.Rlmi.instance_id(uri)
+        cid = id <> "@kelixip"
+
+        resource = %SIP.Presence.Rlmi.Resource{
+          uri: uri,
+          instances: [%SIP.Presence.Rlmi.Instance{id: id, state: :active, cid: cid}]
+        }
+
+        {:ok, resource, %{"Content-ID" => "<" <> cid <> ">", contenttype: sub.content_type, data: body}}
+
+      {:error, reason} ->
+        # One buddy's document is unwritable; the other buddies' are not. Dropping
+        # the whole NOTIFY would punish the watcher for a resource it does not
+        # control, so this one is reported as having no state.
+        Logger.error(
+          "notify_list/1: #{inspect(sub.package)} cannot serialize #{uri} as " <>
+            "#{sub.content_type}: #{inspect(reason)}"
+        )
+
+        list_part(sub, uri, nil)
     end
   end
 

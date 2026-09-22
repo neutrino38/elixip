@@ -237,6 +237,7 @@ fi
 %dir %{_datadir}/%{name}
 %{_datadir}/%{name}/*.exs
 %exclude %{_datadir}/%{name}/mcu*.exs
+%exclude %{_datadir}/%{name}/presence-*.exs
 %dir %attr(0755,root,root) %{kelixdir}
 %{kelixdir}/bin
 %{kelixdir}/erts-*
@@ -271,11 +272,20 @@ fi
 %files mod-presence
 %doc doc/modules/presence.md
 %{kelixdir}/modules/Elixir.Kelix.Mod.Presence*.beam
-# The two reference scripts, one per method. They call this module's verbs and
-# nothing else provides them.
+# The reference scripts: one per method, plus the list server of RFC 4662. They
+# call this module's verbs and nothing else provides them.
 %{_datadir}/%{name}/presence-*.exs
 
 %changelog
+* Tue Sep 22 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-2
+- Buddy lists (RFC 4662 / RFC 5367): kelixip-mod-presence ships a third
+  reference script, presence-rls.exs, which serves a list subscription. Declare
+  the list URI the client sends (sip.linphone.org for Linphone) as a domain of
+  its own, served by that script.
+- The presence scripts are no longer also claimed by the core package: they
+  belong to kelixip-mod-presence alone, as the mcu scripts belong to
+  kelixip-mod-mcu.
+
 * Fri Sep 18 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-1
 - Presence (RFC 6665 / 3856 / 3903): SUBSCRIBE, PUBLISH and the NOTIFYs between
   them. New subpackage kelixip-mod-presence — the collection, the entity-tags and
