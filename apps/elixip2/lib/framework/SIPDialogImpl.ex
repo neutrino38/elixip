@@ -782,18 +782,9 @@ defmodule SIP.DialogImpl do
     req = put_eventlist(req, sub)
 
     case body do
-      nil ->
-        req
-
-      "" ->
-        req
-
-      _ ->
-        # The Content-Type goes on FIRST: a body composed as multipart carries its
-        # boundary in the type, and `update_sip_msg/2` keeps the one it finds.
-        req
-        |> Map.put(:contenttype, content_type)
-        |> SIP.Msg.Ops.update_sip_msg({:body, body})
+      nil -> req
+      "" -> req
+      _ -> put_notify_body(req, sub, body, content_type)
     end
   end
 
@@ -804,6 +795,31 @@ defmodule SIP.DialogImpl do
   defp put_eventlist(req, %SIP.Subscription{list_uri: nil}), do: req
   defp put_eventlist(req, %SIP.Subscription{}), do: Map.put(req, "Require", "eventlist")
   defp put_eventlist(req, _no_subscription), do: req
+
+  # The body, compressed when the watcher said it could read `deflate` and the
+  # body is large enough for it to matter. `Content-Encoding` applies to the whole
+  # body, the MIME composition included, so a multipart is serialized first and
+  # compressed as one — the Content-Type still names the subtype and the boundary.
+  defp put_notify_body(req, sub, body, content_type) do
+    req = Map.put(req, :contenttype, content_type)
+
+    case SIP.Msg.BodyCoding.encode(body_octets(body), encoding_of(sub)) do
+      {:ok, compressed} ->
+        req
+        |> SIP.Msg.Ops.update_sip_msg({:body, compressed})
+        |> Map.put(:contenttype, content_type)
+        |> Map.put("Content-Encoding", encoding_of(sub))
+
+      :as_is ->
+        SIP.Msg.Ops.update_sip_msg(req, {:body, body})
+    end
+  end
+
+  defp body_octets(parts) when is_list(parts), do: SIPMsg.multipart_body(parts)
+  defp body_octets(body) when is_binary(body), do: body
+
+  defp encoding_of(%SIP.Subscription{body_encoding: coding}), do: coding
+  defp encoding_of(_no_subscription), do: nil
 
   # The refresh SUBSCRIBE: the same subscription, asked for again. The lifetime is
   # the one that was GRANTED, kept as a duration — derived back from the absolute

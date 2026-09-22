@@ -240,6 +240,48 @@ defmodule SIP.Test.ListSubscription do
     end
   end
 
+  describe "a NOTIFY too big for a datagram" do
+    # A buddy list of any size produces a body past the UDP MTU, and IPv6 does not
+    # fragment in transit: the watcher advertised `deflate`, so the body goes out
+    # compressed.
+    #
+    # What is asserted is the ROUND TRIP, because that is all a peer can see — the
+    # mockup transport serializes what the stack sends and parses it back, so this
+    # NOTIFY has already been through `Content-Encoding` on both sides. That makes
+    # it the test of the two halves together: a body compressed without the header,
+    # or a header without the compression, and this parse fails instead of yielding
+    # nine parts.
+    test "survives compression and arrives with every part readable" do
+      tp = attach("list-deflate-out")
+      buddies = for n <- 1..8, do: "sip:buddy#{n}@unit.test"
+      serve(Map.new(buddies, &{&1, SIP.Presence.Doc.new(&1, :open, note: "Available here")}))
+
+      req = subscribe(instance: "list-deflate-out", entries: buddies)
+      cid = req.callid
+      Mockup.inject(tp, req)
+
+      assert_receive {:sip_mockup, {:request_sent, :NOTIFY, %{callid: ^cid} = notify}}, 2_000
+
+      # Past the bound: this is the body the compression exists for.
+      assert notify.contentlength > 1200
+      assert notify.contenttype =~ "multipart/related"
+
+      # What actually went out: deflated, and smaller than what came back up.
+      wire = wire_notify()
+      assert wire =~ "Content-Encoding: deflate"
+      assert byte_size(wire) < notify.contentlength
+
+      {manifest, parts} = read_list_notify(notify)
+      assert length(manifest.resources) == 8
+      assert length(parts) == 8
+
+      for buddy <- buddies do
+        assert [%Rlmi.Instance{state: :active, cid: part_cid}] = resource(manifest, buddy).instances
+        assert Enum.any?(parts, &(&1["Content-ID"] == "<" <> part_cid <> ">"))
+      end
+    end
+  end
+
   describe "a deflated exchange" do
     test "the list arrives compressed and the answer names the same buddies" do
       tp = attach("list-deflate")
@@ -294,6 +336,30 @@ defmodule SIP.Test.ListSubscription do
   end
 
   defp resource(manifest, uri), do: Enum.find(manifest.resources, &(&1.uri == uri))
+
+  # The NOTIFY as it went on the wire, which is the only place the coding applied
+  # to it is still visible: the transport parses what it sends back before handing
+  # it to the probe, and the parser undoes the compression.
+  defp wire_notify(timeout \\ 2_000) do
+    receive do
+      {:sip_mockup, {:wire_sent, octets}} ->
+        if String.starts_with?(octets, "NOTIFY "), do: octets, else: wire_notify(timeout)
+    after
+      timeout -> flunk("no NOTIFY went out")
+    end
+  end
+
+  # The two halves of the body, read the way a watcher reads them.
+  defp read_list_notify(notify) do
+    parts = SIPMsg.parse_multi_part_body(notify.contenttype, body_octets(notify))
+    [root | rest] = parts
+    assert root.contenttype == "application/rlmi+xml"
+    {:ok, manifest} = Rlmi.parse(root.data)
+    {manifest, rest}
+  end
+
+  defp body_octets(%{body: parts}) when is_list(parts), do: SIPMsg.multipart_body(parts)
+  defp body_octets(%{body: body}) when is_binary(body), do: body
 
   # The SUBSCRIBE Linphone Desktop sends, minus what a mockup transport supplies.
   defp subscribe(opts) do

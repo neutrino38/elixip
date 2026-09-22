@@ -160,6 +160,12 @@ defmodule SIP.Test.Transport.Mockup do
 
     case SIPMsg.parse(msgstr, &log_parse_error/4) do
       {:ok, sipmsg} ->
+        # The octets as they go out, BEFORE the parse below undoes what the
+        # stack applied to them: everything else a probe sees has already been
+        # read back, so a test about what is ON the wire — its size, its
+        # Content-Encoding — has nothing else to look at.
+        Probe.notify(state.probe, {:wire_sent, msgstr})
+
         {:reply, :ok, handle_sent_msg(sipmsg, state)}
 
       err ->
