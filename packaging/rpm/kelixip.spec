@@ -271,8 +271,8 @@ fi
 %files mod-presence
 %doc doc/modules/presence.md
 %{kelixdir}/modules/Elixir.Kelix.Mod.Presence*.beam
-# The two reference scripts, one per method. They call this module's verbs and
-# nothing else provides them.
+# The reference scripts: one per method, plus the list server of RFC 4662. They
+# call this module's verbs and nothing else provides them.
 %{_datadir}/%{name}/presence-*.exs
 
 %changelog

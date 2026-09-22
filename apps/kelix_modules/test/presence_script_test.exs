@@ -62,6 +62,10 @@ defmodule Kelix.PresenceScriptTest do
       publish:
         SIP.Scenario.Loader.load_file!(
           Path.expand("../../kelixip/scripts/presence-publish.exs", __DIR__)
+        ),
+      rls:
+        SIP.Scenario.Loader.load_file!(
+          Path.expand("../../kelixip/scripts/presence-rls.exs", __DIR__)
         )
     }
   end
@@ -353,6 +357,116 @@ defmodule Kelix.PresenceScriptTest do
     end
   end
 
+  # One SUBSCRIBE naming N buddies, answered by one NOTIFY carrying them all
+  # (RFC 4662 with the list in the request, RFC 5367). The Request-URI names the
+  # LIST — `sip:rls@…`, which is not a provisioned AOR — so everything this script
+  # does differently follows from there.
+  describe "presence-rls.exs" do
+    @outsider "sip:900020123@visioassistance.net"
+
+    setup do
+      path =
+        Path.join(System.tmp_dir!(), "presence_rls_script_#{System.unique_integer([:positive])}.toml")
+
+      File.write!(path, """
+      [[domain]]
+      name = "#{@domain}"
+
+        [[domain.presence]]
+        event-package = "presence"
+        subscribe = "presence-rls.exs"
+      """)
+
+      :ok = Kelix.Domains.reload(path)
+
+      on_exit(fn ->
+        empty = Path.join(System.tmp_dir!(), "presence_rls_script_empty.toml")
+        File.write!(empty, "")
+        _ = Kelix.Domains.reload(empty)
+        File.rm(path)
+      end)
+
+      :ok
+    end
+
+    test "SUBSCRIBE to a list → 200 + a NOTIFY naming every entry", %{rls: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      req = list_subscribe([bob_uri(), @outsider])
+      pid = spawn_instance(m, dialog, req)
+
+      submit(pid, dialog, req)
+      assert_receive {:replied, 200, "OK", _fields, _}, 1000
+      assert_receive {:notified, body, content_type}, 1000
+
+      assert content_type =~ ~s(multipart/related; type="application/rlmi+xml")
+      {manifest, _parts} = read_list(body, content_type)
+
+      assert manifest.uri == "sip:rls@#{@domain}"
+      assert manifest.full_state == true
+      assert Enum.map(manifest.resources, & &1.uri) |> Enum.sort() ==
+               Enum.sort([bob_uri(), @outsider])
+    end
+
+    # A buddy on a domain this node does not serve. The entry is named all the
+    # same, `terminated;reason=noresource`, so the watcher stops waiting for it.
+    test "an entry this node does not serve is reported, not omitted", %{rls: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      req = list_subscribe([@outsider])
+      pid = spawn_instance(m, dialog, req)
+
+      submit(pid, dialog, req)
+      assert_receive {:notified, body, content_type}, 1000
+      {manifest, parts} = read_list(body, content_type)
+
+      assert [%SIP.Presence.Rlmi.Resource{instances: [instance]}] = manifest.resources
+      assert instance.state == :terminated
+      assert instance.reason == "noresource"
+      # Nothing to point at, so no part beside the manifest.
+      assert parts == []
+    end
+
+    # The fan-out reaches the watcher instance one buddy at a time; the script
+    # collects them and sends ONE partial NOTIFY, which is what keeps a roster
+    # coming online from producing a NOTIFY per buddy.
+    test "a PUBLISH becomes one partial NOTIFY", %{rls: m, publish: pub} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      req = list_subscribe([bob_uri(), @outsider])
+      watcher = spawn_instance(m, dialog, req)
+
+      submit(watcher, dialog, req)
+      assert_receive {:notified, _full_state, _}, 1000
+
+      publisher = spawn_instance(pub, dialog, publish())
+      submit(publisher, dialog, publish())
+      assert_receive {:replied, 200, _, _, _}, 1000
+
+      assert_receive {:notified, body, content_type}, 2000
+      {manifest, parts} = read_list(body, content_type)
+
+      assert manifest.full_state == false
+      assert manifest.version == 1
+      # Only what changed, and its state travels with it.
+      assert [%{uri: uri, instances: [%{state: :active, cid: cid}]}] = manifest.resources
+      assert uri == bob_uri()
+      assert [part] = parts
+      assert part["Content-ID"] == "<" <> cid <> ">"
+      assert part.data =~ "open"
+    end
+
+    test "the collection knows the watcher on the entry's own domain", %{rls: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      req = list_subscribe([bob_uri(), @outsider])
+      pid = spawn_instance(m, dialog, req)
+
+      submit(pid, dialog, req)
+      assert_receive {:notified, _, _}, 1000
+
+      assert [row] = Presence.watchers(@domain, @presentity)
+      assert row.presentity_uri == bob_uri()
+      assert Presence.watchers("visioassistance.net", "900020123") == []
+    end
+  end
+
   # The digest itself, on both halves. It is what says WHO is watching and WHOSE
   # state is being published: a SUBSCRIBE names its watcher in a From anyone can
   # write, and an unauthenticated PUBLISH lets a stranger declare a user online.
@@ -415,6 +529,46 @@ defmodule Kelix.PresenceScriptTest do
       assert_receive {:replied, 200, "OK", fields, _}, 1000
       assert fields[:expires] == 1800
     end
+  end
+
+  # ── the list subscription's own fixtures ─────────────────────────────────────
+
+  defp bob_uri, do: "sip:#{@presentity}@#{@domain}"
+
+  # The SUBSCRIBE a client sends to open its buddy list: the list in the body,
+  # the Request-URI naming the list and not a presentity.
+  defp list_subscribe(entries) do
+    body =
+      ~s(<?xml version="1.0" encoding="UTF-8"?>\n) <>
+        ~s(<resource-lists xmlns="urn:ietf:params:xml:ns:resource-lists">\n <list>\n) <>
+        Enum.map_join(entries, "", fn uri -> ~s(  <entry uri="#{uri}"/>\n) end) <>
+        " </list>\n</resource-lists>\n"
+
+    %{
+      "Require" => "recipient-list-subscribe",
+      "Content-Disposition" => "recipient-list",
+      method: :SUBSCRIBE,
+      from: %SIP.Uri{userpart: @watcher, domain: @domain},
+      to: %SIP.Uri{userpart: "rls", domain: @domain},
+      ruri: %SIP.Uri{userpart: "rls", domain: @domain},
+      event: @package,
+      accept: "multipart/related, application/pidf+xml, application/rlmi+xml",
+      supported: ["eventlist"],
+      expires: 3600,
+      callid: "call-1",
+      body: body,
+      contenttype: "application/resource-lists+xml"
+    }
+  end
+
+  # `send_notify` is handed the composed PARTS, not the octets: the dialog is what
+  # serializes them, and here the dialog is a mock.
+  defp read_list(parts, content_type) when is_list(parts) do
+    assert content_type =~ "multipart/related"
+    [root | rest] = parts
+    assert root.contenttype == "application/rlmi+xml"
+    {:ok, manifest} = SIP.Presence.Rlmi.parse(root.data)
+    {manifest, rest}
   end
 
   defp eventually(fun, attempts \\ 20) do
