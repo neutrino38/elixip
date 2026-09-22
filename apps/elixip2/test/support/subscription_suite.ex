@@ -303,6 +303,44 @@ defmodule SIP.Test.SubscriptionSuite do
           assert_receive {:sip_mockup, {:response_sent, 489, %{callid: ^cid}}}, 2_000
         end
 
+        # RFC 3261 §8.2.2.3: the refusal has to NAME the extension, or the watcher
+        # has no way to know what to send instead and simply retries the same
+        # request.
+        test "refuses an extension it does not implement with 420 and an Unsupported" do
+          SIP.Test.PresenceUAS.serve(Fixture.Notifier)
+          tp = attach("notifier-420")
+
+          req = subscribe(instance: "notifier-420", require: "gruu")
+          cid = req.callid
+          Mockup.inject(tp, req)
+
+          assert_receive {:sip_mockup, {:response_sent, 420, %{callid: ^cid} = rsp}}, 2_000
+          assert Map.get(rsp, "Unsupported") == "gruu"
+        end
+
+        test "the Unsupported names only what is unsupported" do
+          SIP.Test.PresenceUAS.serve(Fixture.Notifier)
+          tp = attach("notifier-420-mixed")
+
+          req = subscribe(instance: "notifier-420-mixed", require: "eventlist, gruu")
+          cid = req.callid
+          Mockup.inject(tp, req)
+
+          assert_receive {:sip_mockup, {:response_sent, 420, %{callid: ^cid} = rsp}}, 2_000
+          assert Map.get(rsp, "Unsupported") == "gruu"
+        end
+
+        test "a Require the layer does implement refuses nothing" do
+          SIP.Test.PresenceUAS.serve(Fixture.Notifier)
+          tp = attach("notifier-420-none")
+
+          req = subscribe(instance: "notifier-420-none", require: "eventlist")
+          cid = req.callid
+          Mockup.inject(tp, req)
+
+          assert_receive {:sip_mockup, {:response_sent, 200, %{callid: ^cid}}}, 2_000
+        end
+
         test "accepts a refresh on the same dialog and answers it 200" do
           SIP.Test.PresenceUAS.serve(Fixture.Notifier)
           tp = attach("notifier-refresh")
@@ -548,7 +586,7 @@ defmodule SIP.Test.SubscriptionSuite do
             fromtag
           )
 
-        %{
+        req = %{
           "Max-Forwards" => "70",
           method: :SUBSCRIBE,
           ruri: ruri,
@@ -570,6 +608,11 @@ defmodule SIP.Test.SubscriptionSuite do
           useragent: "Mockup-watcher",
           contentlength: 0
         }
+
+        case Keyword.get(opts, :require) do
+          nil -> req
+          tags -> Map.put(req, "Require", tags)
+        end
       end
 
       # The same subscription, asked for again: same Call-ID and From tag, next

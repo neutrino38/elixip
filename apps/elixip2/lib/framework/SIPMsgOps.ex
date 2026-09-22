@@ -233,6 +233,43 @@ defmodule SIP.Msg.Ops do
   end
 
   @doc """
+  The option tags a request **requires** the server to support (RFC 3261 §20.32),
+  folded to lower case.
+
+  An extension named here is not a hint: a server that does not implement one of
+  them answers **420 Bad Extension** listing it in `Unsupported`, and answering
+  anything else is answering a request one did not read.
+
+      iex> SIP.Msg.Ops.required_extensions(%{"Require" => "recipient-list-subscribe"})
+      ["recipient-list-subscribe"]
+  """
+  @spec required_extensions(map()) :: [binary()]
+  def required_extensions(msg) when is_map(msg), do: option_tags(msg, :require, "require")
+
+  @doc """
+  The option tags a request says it **supports** (RFC 3261 §20.37), folded to
+  lower case.
+
+  `Supported: eventlist` is what tells a notifier a watcher can read the
+  `multipart/related` of RFC 4662; unlike `Require`, its absence refuses nothing.
+  """
+  @spec supported_extensions(map()) :: [binary()]
+  def supported_extensions(msg) when is_map(msg), do: option_tags(msg, :supported, "supported")
+
+  # One reading for both: a comma-separated list that may also be spread over
+  # several header lines, exactly like `Accept` above. Option tags are `token`s
+  # and the IANA registry holds them in lower case, so they are compared folded —
+  # a peer writing `Require: Replaces` means the registered extension.
+  defp option_tags(msg, atom_key, lowercase_name) do
+    msg
+    |> header_list(atom_key, lowercase_name)
+    |> Enum.flat_map(&String.split(to_string(&1), ","))
+    |> Enum.map(&(&1 |> String.trim() |> String.downcase()))
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+  end
+
+  @doc """
   The lifetime a SUBSCRIBE asks for: its `Expires` header, else `package_default`.
 
   A **second** expiry reading, and deliberately not `requested_expires/2`: a

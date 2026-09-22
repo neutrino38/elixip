@@ -177,6 +177,7 @@ defmodule SIP.Session.Notifier do
 
   | Read | Against | Refusal |
   |---|---|---|
+  | `Require` | the extensions this layer implements | **420 Bad Extension**, with `Unsupported` |
   | `Event` | `SIP.EventPackage.lookup/1` | **489 Bad Event** |
   | `Accept` | the package's `content_types/0` | **406 Not Acceptable** |
   | `Expires` | the package's `min_expires/0` | **423 Interval Too Brief**, with `Min-Expires` |
@@ -313,12 +314,39 @@ defmodule SIP.Session.Notifier do
   @spec negotiate(map(), keyword()) ::
           {:ok, module(), binary(), non_neg_integer()} | {:error, 400..699, binary(), list()}
   def negotiate(req, opts \\ []) when is_map(req) do
-    with {:ok, name, id} <- read_event(req, opts),
+    with :ok <- check_required_extensions(req),
+         {:ok, name, id} <- read_event(req, opts),
          {:ok, package} <- lookup_package(name),
          {:ok, content_type} <- pick_content_type(req, package),
          {:ok, granted} <- bound_expires(req, package, opts) do
       _ = id
       {:ok, package, content_type, granted}
+    end
+  end
+
+  # The extensions the subscription layer implements. Empty is a complete answer:
+  # what it means is "this layer implements no SIP extension a watcher may demand",
+  # and a watcher demanding one is told so rather than served something else.
+  @supported_extensions []
+
+  # RFC 3261 §8.2.2.3. The 420 names the extensions in `Unsupported`, so a watcher
+  # that can do without them asks again; a refusal that says only "no" leaves it
+  # retrying the same request.
+  #
+  # Checked here, in the subscription layer, and NOT on every inbound request: a
+  # blanket check would start refusing the `Require: timer` and `Require: 100rel`
+  # of INVITEs this node serves today, which is a regression, not a fix.
+  defp check_required_extensions(req) do
+    case SIP.Msg.Ops.required_extensions(req) -- @supported_extensions do
+      [] ->
+        :ok
+
+      unsupported ->
+        Logger.info(
+          "Subscription refused: unsupported extension(s) #{Enum.join(unsupported, ", ")} (420)"
+        )
+
+        {:error, 420, "Bad Extension", [{"Unsupported", Enum.join(unsupported, ", ")}]}
     end
   end
 
