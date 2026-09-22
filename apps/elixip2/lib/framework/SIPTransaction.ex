@@ -287,7 +287,11 @@ alias SIP.NetUtils
     end
   end
 
-  @spec process_sip_message(binary()) :: :ok | { :no_matching_transaction, map() } | atom()
+  @spec process_sip_message(binary()) ::
+          :ok
+          | { :no_matching_transaction, map() }
+          | { :msg_too_large | :unsupported_content_encoding, map() }
+          | atom()
   @doc "Process an incoming SIP message from the transport layer and dispatch it to the proper transaction"
   def process_sip_message(sipmsgstr, remoteip \\ nil, remoteport \\ nil) do
 
@@ -319,6 +323,11 @@ alias SIP.NetUtils
       # the socket the stateless 513 goes back out on.
       { :msg_too_large, parsed_msg } ->
         { :msg_too_large, parsed_msg }
+
+      # Same division of labour for a body we cannot decompress: the parser says
+      # so, the transport answers the 415 that names what we CAN read.
+      { :unsupported_content_encoding, parsed_msg } ->
+        { :unsupported_content_encoding, parsed_msg }
 
       { code, _err } ->
         # Optionally dump the raw bytes (inspected, so CRLF/empty frames are

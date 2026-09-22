@@ -233,6 +233,24 @@ defmodule SIP.Msg.Ops do
   end
 
   @doc """
+  The coding applied to the body (RFC 3261 §20.12), folded to lower case, or
+  `nil` when the message carries no `Content-Encoding`.
+
+  Only the first coding is read. A stack of them (`deflate, gzip`) is legal on
+  paper, never sent, and the composite it would name is not one we can undo.
+
+      iex> SIP.Msg.Ops.body_encoding(%{"Content-Encoding" => "deflate"})
+      "deflate"
+  """
+  @spec body_encoding(map()) :: binary() | nil
+  def body_encoding(msg) when is_map(msg) do
+    case option_tags(msg, :contentencoding, "content-encoding") do
+      [coding | _] -> coding
+      [] -> nil
+    end
+  end
+
+  @doc """
   The option tags a request **requires** the server to support (RFC 3261 §20.32),
   folded to lower case.
 

@@ -566,6 +566,17 @@ defmodule SIPMsg do
 		end
 	end
 
+	# The header keeps whatever spelling the peer used (headername_to_atomkey/1 has
+	# no atom for it), so the key is matched folded rather than looked up.
+	defp drop_content_encoding(msg) do
+		msg
+		|> Enum.reject(fn
+			{ key, _value } when is_binary(key) -> String.downcase(key) == "content-encoding"
+			_other -> false
+		end)
+		|> Map.new()
+	end
+
 	# Parse RFC 2046 mime, multipart sub body and put it in a map
 	defp parse_sub_body(subbody) do
 
@@ -681,22 +692,41 @@ defmodule SIPMsg do
 							"received; taking what is there"])
 				end
 
-				# :contentlength is re-stated as the size of the body we KEPT, so the
-				# message is self-consistent whatever the sender announced. A B2BUA
-				# relaying it then puts exactly that many octets back on the wire, and
-				# the far end's depacketizer finds the end of the message where it
-				# expects to. Without this a peer's wrong Content-Length propagates
-				# and desynchronizes a TCP connection for the rest of its life.
-				mod_msg =
-					parsed_msg
-					|> Map.put(:body,
-							parse_multi_part_body(
-								parsed_msg.contenttype,
-								Kernel.binary_part(body, 0, taken)))
-					|> Map.put(:contentlength, taken)
-
 				rest = if taken < sz do Kernel.binary_part(body, taken, sz - taken) else "" end
-				{ :ok, mod_msg, rest }
+
+				# Content-Length counts the octets ON THE WIRE, so the decoding comes
+				# AFTER the cut: a deflated body announces its compressed size, and
+				# `rest` — the next pipelined message on a stream transport — starts
+				# where the compressed body ends.
+				case SIP.Msg.BodyCoding.decode(Kernel.binary_part(body, 0, taken),
+						SIP.Msg.Ops.body_encoding(parsed_msg)) do
+					{ :ok, clear } ->
+						# :contentlength is re-stated as the size of the body we KEPT, so the
+						# message is self-consistent whatever the sender announced. A B2BUA
+						# relaying it then puts exactly that many octets back on the wire, and
+						# the far end's depacketizer finds the end of the message where it
+						# expects to. Without this a peer's wrong Content-Length propagates
+						# and desynchronizes a TCP connection for the rest of its life.
+						#
+						# `Content-Encoding` goes with the compression it named: what the map
+						# now holds is clear text of `byte_size(clear)` octets, and a B2BUA
+						# relaying a body announced `deflate` that is not deflated is the same
+						# desynchronization one layer up.
+						mod_msg =
+							parsed_msg
+							|> drop_content_encoding()
+							|> Map.put(:body, parse_multi_part_body(parsed_msg.contenttype, clear))
+							|> Map.put(:contentlength, Kernel.byte_size(clear))
+
+						{ :ok, mod_msg, rest }
+
+					{ :error, reason } ->
+						Logger.warning([ module: __MODULE__,
+							message: "body encoded with #{SIP.Msg.Ops.body_encoding(parsed_msg)} " <>
+								"cannot be read (#{reason}); answering 415"])
+
+						{ :unsupported_content_encoding, parsed_msg, rest }
+				end
 		end
 	end
 	@doc """
@@ -755,6 +785,10 @@ defmodule SIPMsg do
 	A message past `max_message_size/0` answers `{ :msg_too_large, headers }`. The
 	parsed headers are handed back on purpose: they are what a caller needs to
 	refuse it with a 513 rather than drop it.
+
+	A body in a `Content-Encoding` this node cannot undo answers
+	`{ :unsupported_content_encoding, headers }`, for the same reason and with the
+	same shape: the message is refused **415**, never dropped.
 	"""
 	def parse(message, parse_error_callback) when is_binary(message) do
 		# Separate headers from the rest.
