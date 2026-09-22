@@ -39,47 +39,20 @@ defmodule SIPParser.MixProject do
       # The Finite State Language: the engine every scenario and every kelixip
       # script runs on. It lives in its own repository and ships as the hex
       # package `finite_state_language` (OTP app `:fsl`, Apache-2.0).
-      #
-      # The dep carries both names: `:fsl` is the OTP app, `hex:` the package.
-      # Pinned to the patch level: before 1.0 a minor release may break the API.
-      # To run a change to the language against this suite before publishing it,
-      # swap in `path: "../../../finite-state-language/elixir"` locally.
-      #
-      # It does NOT depend on :elixip2, and that is the point: the language knows
-      # nothing about SIP, and `mix compile --warnings-as-errors` over there is
-      # what proves it rather than asserts it. SIP plugs in through
-      # `SIP.FSL.Host` (framework/SIPFSLHost.ex).
       {:fsl, "~> 0.2.0", hex: :finite_state_language},
       {:logger_file_backend, "~> 0.0.12"},
       {:jason, "~> 1.4"},
-      # HTTP client for the FSL.HTTP mixin (http_GET), where it is an OPTIONAL
-      # dep of :fsl and a real one here. Req 0.6 is the current line; it brings
-      # Finch/NimblePool for connection pooling.
       {:req, "~> 0.6"},
       # Our fork, on a tag. It carries what upstream lacks and we depend on: active
-      # mode for WebSocket (delivers {:web, socket, data} to the owner), IPv6 —
-      # address literals, IPv6reference parsing, the v6only option UDP, TCP and
-      # SSL all need to bind one socket per family on one port —, a
-      # transport_accept a server can bound its handshake with, and the options
-      # mutual TLS needs on both ends.
+      # mode for WebSocket, IPv6 improvments and mTLS support
       {:socket2, github: "neutrino38/elixir-socket", tag: "2.2.1"},
       # 1.2 parses the m= fmt list as payload types for every RTP profile and
-      # accepts the a=fingerprint hash-func token case-insensitively — both used
-      # to be worked around in MediaServer.Mendooze.Sdp.
+      # accepts the a=fingerprint hash-func token case-insensitively 
       {:ex_sdp, "~> 1.2"},
       # XML-RPC encode/decode for the Mendooze JSR309 control interface.
-      # 1.5 is the first release accepting decimal ~> 3.0, which is required to
-      # get away from the vulnerable decimal 2.x (EEF-CVE-2026-32686).
       {:xmlrpc, "~> 1.5"},
-      # The XML parser, for PIDF (SIP.Presence.Pidf). Already in the tree as a
-      # dependency of :xmlrpc, which parses untrusted input with it for the same
-      # reason we do: it resolves nothing external — no file, no URL, whatever a
-      # SYSTEM identifier says — and bounds entity nesting and expansion. Declared
-      # here rather than used transitively, since a body off the network is parsed
-      # with it on a path that has nothing to do with XML-RPC.
+      # The XML parser, for PIDF (SIP.Presence.Pidf).
       {:erlsom, "~> 1.5"}
-      # NB: owl (terminal UI) moved to apps/elixipp — it is only used by the
-      # elixipp escript's --monitor view, not by the shared stack.
     ]
   end
 end
