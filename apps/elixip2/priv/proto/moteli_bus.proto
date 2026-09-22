@@ -218,6 +218,7 @@ message ControlRequest {
     VideoTranscoderDettachReq video_transcoder_dettach = 275;
     GetMediaCandidatesReq get_media_candidates = 276;
     ConfigureMediaConnectionReq configure_media_connection = 277;
+    ConnectMediaConnectionReq connect_media_connection = 278;
   }
 }
 

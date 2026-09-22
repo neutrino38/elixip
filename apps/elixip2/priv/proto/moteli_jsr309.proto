@@ -609,6 +609,27 @@ message ConfigureMediaConnectionReq {
   string expected_payload = 7;
 }
 
+// Switch a media plane to a WebSocket the SERVER opens, and open it: the media
+// server plays the browser and dials the `url` the controller read from its
+// peer's answer (`a=ws` / `a=wss`). MEDIA_TEXT only.
+//
+// It replaces ConfigureMediaConnection for that arrangement rather than
+// extending it: no token is registered, since nobody enters by the server's own
+// WebSocket for this leg, and ConfigureMediaConnection demands a non-empty one
+// for PROTO_WS.
+//
+// Success means the leg is ARMED, not that the WebSocket is open. Only an
+// unusable URL is an immediate fault. Every opening arrives as event 7 and
+// every loss of an established connection as event 6; a failed attempt
+// publishes nothing, the server retrying on its own until the leg is destroyed.
+message ConnectMediaConnectionReq {
+  uint32 session_id = 1;
+  uint32 endpoint_id = 2;
+  MediaType media = 3;
+  MediaRole role = 4;
+  string url = 5;
+}
+
 // The SCTP parameters of a data channel text leg. The controller sends the
 // PEER's a=sctp-port and gets ours back, which it publishes in its answer: what
 // the server knows of itself is the server's to tell.

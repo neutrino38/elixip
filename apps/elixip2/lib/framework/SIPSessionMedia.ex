@@ -104,7 +104,7 @@ defmodule SIP.Session.Media do
   # `media:` we pass explicitly, so forwarding them again would put the same
   # decision in the list twice, under two spellings, with only `Keyword.get`
   # ordering deciding which one an adapter reads.
-  @framework_opts [:leg, :bridge_with, :webrtc, :media]
+  @framework_opts [:leg, :bridge_with, :webrtc, :media, :kind, :timeout]
 
   defp leg_of(opts), do: Keyword.get(opts, :leg, @default_leg)
   defp adapter_opts(opts), do: Keyword.drop(opts, @framework_opts)
@@ -112,11 +112,35 @@ defmodule SIP.Session.Media do
   defp pc_key(@default_leg), do: :mediapeerconnectionid
   defp pc_key(leg), do: {:mediapeerconnectionid, leg}
 
-  defp action_key(@default_leg), do: :mediaactionid
-  defp action_key(leg), do: {:mediaactionid, leg}
+  # An action slot is per KIND and per leg. A player feeds what the endpoint
+  # SENDS and a recorder takes what it RECEIVES: opposite directions on the media
+  # server, wired by two calls that are never each other's business, so a leg
+  # plays and records at the same time whenever a scenario asks it to. Recording
+  # what an echo returns while playing the source file is the case this exists
+  # for — it is the only way to compare a round trip to its input.
+  #
+  # A SECOND action of the SAME kind on one leg stays a scenario bug: one
+  # endpoint has one source and one recording.
+  @action_kinds [:player, :recorder, :echo]
 
-  defp action_kind_key(@default_leg), do: :mediaaction
-  defp action_kind_key(leg), do: {:mediaaction, leg}
+  defp action_key(@default_leg, kind), do: bare_action_key(kind)
+  defp action_key(leg, kind), do: {bare_action_key(kind), leg}
+
+  defp bare_action_key(:player), do: :mediaplayerid
+  defp bare_action_key(:recorder), do: :mediarecorderid
+  defp bare_action_key(:echo), do: :mediaechoid
+
+  defp stop_fun(:player), do: :stop_player
+  defp stop_fun(:recorder), do: :stop_recorder
+  defp stop_fun(:echo), do: :stop_echo
+
+  # Every action `leg` currently runs, in a fixed order so a teardown reads the
+  # same way twice.
+  defp running_actions(sip_ctx, leg) do
+    for kind <- @action_kinds,
+        handle = SIP.Context.appdata_get(sip_ctx, action_key(leg, kind)),
+        do: {kind, handle}
+  end
 
   @doc "The media-server peer connection of `leg`, or nil when it has none."
   @spec peer_connection(%SIP.Context{}, atom()) :: term() | nil
@@ -124,21 +148,18 @@ defmodule SIP.Session.Media do
     do: SIP.Context.appdata_get(sip_ctx, pc_key(leg))
 
   @doc """
-  The media action running on `leg` as `{kind, handle}` — `kind` being
-  `:player`, `:recorder` or `:echo` — or nil when that leg's slot is free.
+  The handle of the `kind` action running on `leg` — `:player`, `:recorder` or
+  `:echo` — or nil when that leg runs none of that kind.
 
   What a scenario reads to address the action it started rather than digging the
-  handle out of the appdata: two recorders in one call (one per leg) is the case
-  that makes the difference, since their events are told apart by their handles
-  and nothing else.
+  handle out of the appdata: a leg that plays and records at once, and two
+  recorders in one call (one per leg), are both cases where the handle is the
+  only thing telling two events apart.
   """
-  @spec media_action(%SIP.Context{}, atom()) :: {atom(), term()} | nil
-  def media_action(sip_ctx = %SIP.Context{}, leg \\ @default_leg) do
-    case SIP.Context.appdata_get(sip_ctx, action_key(leg)) do
-      nil -> nil
-      handle -> {SIP.Context.appdata_get(sip_ctx, action_kind_key(leg)), handle}
-    end
-  end
+  @spec media_action(%SIP.Context{}, :player | :recorder | :echo, atom()) :: term() | nil
+  def media_action(sip_ctx = %SIP.Context{}, kind, leg \\ @default_leg)
+      when kind in @action_kinds,
+      do: SIP.Context.appdata_get(sip_ctx, action_key(leg, kind))
 
   @doc """
   The leg a media handle belongs to, or nil when this context does not hold it.
@@ -154,7 +175,7 @@ defmodule SIP.Session.Media do
 
   def media_leg_of(sip_ctx = %SIP.Context{}, handle) do
     Enum.find(all_legs(sip_ctx), fn leg ->
-      SIP.Context.appdata_get(sip_ctx, action_key(leg)) == handle or
+      Enum.any?(running_actions(sip_ctx, leg), fn {_kind, h} -> h == handle end) or
         peer_connection(sip_ctx, leg) == handle
     end)
   end
@@ -646,47 +667,60 @@ defmodule SIP.Session.Media do
     end
   end
 
-  # An action is single-slot PER LEG: a connection plays, records or echoes, and
-  # asking for a second one on the same leg is a scenario bug rather than a
-  # request to stack them.
-  defp action_busy?(sip_ctx, leg, what) do
-    if is_nil(SIP.Context.appdata_get(sip_ctx, action_key(leg))) do
+  # A media server that refuses an action names what it refused, like
+  # `ensure_peer_connection/5` and `get_sdp_offer/4` above. A bare match here
+  # reports a MatchError on a line number instead.
+  defp action_ok!({:ok, handle}, _what), do: handle
+  defp action_ok!(:ok, _what), do: :ok
+
+  defp action_ok!(rez, what),
+    do: raise("Media server failed to #{what}: #{inspect(rez)}")
+
+  # Asking for a second action of the SAME kind on one leg is a scenario bug
+  # rather than a request to stack them. Another kind is not: see @action_kinds.
+  defp action_busy?(sip_ctx, leg, kind, what) do
+    if is_nil(SIP.Context.appdata_get(sip_ctx, action_key(leg, kind))) do
       false
     else
       Logger.warning(
         dialogpid: self(),
         module: __MODULE__,
-        message: "Media action already started on leg #{leg}, ignoring #{what} request"
+        message: "A #{kind} is already running on leg #{leg}, ignoring #{what} request"
       )
 
       true
     end
   end
 
-  defp put_action(sip_ctx, leg, kind, handle) do
-    sip_ctx
-    |> SIP.Context.appdata_set(action_key(leg), handle)
-    |> SIP.Context.appdata_set(action_kind_key(leg), kind)
-  end
+  defp put_action(sip_ctx, leg, kind, handle),
+    do: SIP.Context.appdata_set(sip_ctx, action_key(leg, kind), handle)
+
+  defp clear_action(sip_ctx, leg, kind),
+    do: SIP.Context.appdata_set(sip_ctx, action_key(leg, kind), nil)
 
   def start_echo(sip_ctx = %SIP.Context{}, opts \\ []) do
     leg = leg_of(opts)
     cnx = peer_connection!(sip_ctx, leg)
 
-    if action_busy?(sip_ctx, leg, "start_echo") do
+    if action_busy?(sip_ctx, leg, :echo, "start_echo") do
       sip_ctx
     else
-      {:ok, echo_pid} = apply(sip_ctx.mediaservermodule, :create_echo, [cnx])
+      echo_pid =
+        apply(sip_ctx.mediaservermodule, :create_echo, [cnx])
+        |> action_ok!("create the echo on leg #{leg}")
+
       put_action(sip_ctx, leg, :echo, echo_pid)
     end
   end
 
   @doc """
   Create a media player from `file_path` on the session peer connection and
-  start it, mirroring `start_echo/1`. The player handle becomes the current
-  media action (`:mediaactionid` / `:mediaaction = :player`) and is released by
-  `stop_media/1` and `media_cleanup_ressources/1`. `opts` is forwarded to the
+  start it, mirroring `start_echo/1`. The player handle is kept as the leg's
+  `:player` action (`media_action/3`, appdata `:mediaplayerid`) and is released
+  by `stop_media/2` and `media_cleanup_ressources/1`. `opts` is forwarded to the
   media server `create_player/3` callback (e.g. `loop: true`).
+
+  A recorder on the same leg is left alone: the two are opposite directions.
   """
   @spec start_player(%SIP.Context{}, binary(), keyword()) :: %SIP.Context{}
   def start_player(sip_ctx = %SIP.Context{}, file_path, opts \\ [])
@@ -694,13 +728,15 @@ defmodule SIP.Session.Media do
     leg = leg_of(opts)
     cnx = peer_connection!(sip_ctx, leg)
 
-    if action_busy?(sip_ctx, leg, "start_player") do
+    if action_busy?(sip_ctx, leg, :player, "start_player") do
       sip_ctx
     else
-      {:ok, player_pid} =
+      player_pid =
         apply(sip_ctx.mediaservermodule, :create_player, [cnx, file_path, adapter_opts(opts)])
+        |> action_ok!("create a player for #{file_path} on leg #{leg}")
 
-      :ok = apply(sip_ctx.mediaservermodule, :start_player, [player_pid])
+      apply(sip_ctx.mediaservermodule, :start_player, [player_pid])
+      |> action_ok!("start the player for #{file_path} on leg #{leg}")
 
       put_action(sip_ctx, leg, :player, player_pid)
     end
@@ -710,10 +746,13 @@ defmodule SIP.Session.Media do
   Create a recorder writing to `file_path` on the session peer connection and
   start it, mirroring `start_player/3`. The recorder stops on its own after
   `duration_ms` (the media server emits `{:recorder_stopped, :duration}`), on
-  DTMF/silence, or when released. The recorder handle becomes the current media
-  action (`:mediaactionid` / `:mediaaction = :recorder`) and is released by
-  `stop_media/1` and `media_cleanup_ressources/1`. `opts` is forwarded to the
-  media server `create_recorder/4` callback.
+  DTMF/silence, or when released. The recorder handle is kept as the leg's
+  `:recorder` action (`media_action/3`, appdata `:mediarecorderid`) and is
+  released by `stop_media/2` and `media_cleanup_ressources/1`. `opts` is
+  forwarded to the media server `create_recorder/4` callback.
+
+  A player on the same leg is left alone: recording what comes back while
+  playing a file is what a round-trip test is made of.
   """
   @spec start_recorder(%SIP.Context{}, binary(), non_neg_integer(), keyword()) :: %SIP.Context{}
   def start_recorder(sip_ctx = %SIP.Context{}, file_path, duration_ms, opts \\ [])
@@ -722,30 +761,36 @@ defmodule SIP.Session.Media do
     leg = leg_of(opts)
     cnx = peer_connection!(sip_ctx, leg)
 
-    if action_busy?(sip_ctx, leg, "start_recorder") do
+    if action_busy?(sip_ctx, leg, :recorder, "start_recorder") do
       sip_ctx
     else
-      {:ok, rec_pid} =
+      rec_pid =
         apply(sip_ctx.mediaservermodule, :create_recorder, [
           cnx,
           file_path,
           duration_ms,
           adapter_opts(opts)
         ])
+        |> action_ok!("create a recorder for #{file_path} on leg #{leg}")
 
-      :ok = apply(sip_ctx.mediaservermodule, :start_recorder, [rec_pid])
+      apply(sip_ctx.mediaservermodule, :start_recorder, [rec_pid])
+      |> action_ok!("start the recorder for #{file_path} on leg #{leg}")
 
       put_action(sip_ctx, leg, :recorder, rec_pid)
     end
   end
 
   @doc """
-  Stop the media action of `leg` (`leg: :inbound` by default), or of every leg
-  at once with `leg: :all`.
+  Stop media actions: every one `leg` runs (`leg: :inbound` by default), every
+  one of every leg with `leg: :all`, and only one kind with
+  `kind: :player | :recorder | :echo`.
 
-  `:all` is what a call recording both of its legs ends with: each recorder has
-  to be stopped for the media server to close its file, and a scenario that
+  `leg: :all` is what a call recording both of its legs ends with: each recorder
+  has to be stopped for the media server to close its file, and a scenario that
   stops one of the two leaves the other file without its index.
+
+  `kind:` is what a leg running two actions needs: ending the playback of a
+  round-trip test must not close the recording that is the test's result.
   """
   @spec stop_media(%SIP.Context{}, keyword()) :: %SIP.Context{}
   def stop_media(sip_ctx = %SIP.Context{}, opts \\ []) do
@@ -753,59 +798,52 @@ defmodule SIP.Session.Media do
       raise "No media server connected to the session context"
     end
 
-    case leg_of(opts) do
-      :all -> stop_every_leg(sip_ctx)
-      leg -> stop_one_leg(sip_ctx, leg)
-    end
-  end
+    kinds = stop_kinds(opts)
 
-  defp stop_every_leg(sip_ctx) do
-    busy = Enum.filter(all_legs(sip_ctx), &SIP.Context.appdata_get(sip_ctx, action_key(&1)))
-
-    if busy == [] do
-      Logger.warning(
-        dialogpid: self(),
-        module: __MODULE__,
-        message: "No media action started on any leg, ignoring stop_media request"
-      )
-
-      sip_ctx
-    else
-      Enum.reduce(busy, sip_ctx, &stop_one_leg(&2, &1))
-    end
-  end
-
-  defp stop_one_leg(sip_ctx, leg) do
-    action_pid = SIP.Context.appdata_get(sip_ctx, action_key(leg))
-
-    if not is_nil(action_pid) do
-      case SIP.Context.appdata_get(sip_ctx, action_kind_key(leg)) do
-        :echo ->
-          apply(sip_ctx.mediaservermodule, :stop_echo, [action_pid])
-
-        :player ->
-          apply(sip_ctx.mediaservermodule, :stop_player, [action_pid])
-
-        :recorder ->
-          apply(sip_ctx.mediaservermodule, :stop_recorder, [action_pid])
-
-        other ->
-          Logger.warning(
-            dialogpid: self(),
-            module: __MODULE__,
-            message: "Unknown media action #{inspect(other)}, ignoring stop_media request"
-          )
+    legs =
+      case leg_of(opts) do
+        :all -> all_legs(sip_ctx)
+        leg -> [leg]
       end
 
-      put_action(sip_ctx, leg, nil, nil)
-    else
+    running =
+      for leg <- legs,
+          {kind, handle} <- running_actions(sip_ctx, leg),
+          kind in kinds,
+          do: {leg, kind, handle}
+
+    if running == [] do
       Logger.warning(
         dialogpid: self(),
         module: __MODULE__,
-        message: "No media action started on leg #{leg}, ignoring stop_media request"
+        message:
+          "No #{Enum.join(kinds, "/")} running on #{Enum.join(legs, ", ")}, " <>
+            "ignoring stop_media request"
       )
 
       sip_ctx
+    else
+      Enum.reduce(running, sip_ctx, fn {leg, kind, handle}, ctx ->
+        apply(ctx.mediaservermodule, stop_fun(kind), [handle])
+        clear_action(ctx, leg, kind)
+      end)
+    end
+  end
+
+  # A `kind:` typo has to fail at the call. Silently stopping nothing — or worse,
+  # everything — is how a recording would be lost with no line to say why.
+  defp stop_kinds(opts) do
+    case Keyword.get(opts, :kind) do
+      nil ->
+        @action_kinds
+
+      kind when kind in @action_kinds ->
+        [kind]
+
+      other ->
+        raise ArgumentError,
+              "unknown media action kind: #{inspect(other)} " <>
+                "(expected one of #{inspect(@action_kinds)})"
     end
   end
 
@@ -835,31 +873,10 @@ defmodule SIP.Session.Media do
   end
 
   defp cleanup_action(sip_ctx, leg) do
-    action_pid = SIP.Context.appdata_get(sip_ctx, action_key(leg))
-
-    if is_nil(action_pid) do
-      sip_ctx
-    else
-      case SIP.Context.appdata_get(sip_ctx, action_kind_key(leg)) do
-        :echo ->
-          safe_ms_call(sip_ctx.mediaservermodule, :stop_echo, [action_pid])
-
-        :player ->
-          safe_ms_call(sip_ctx.mediaservermodule, :stop_player, [action_pid])
-
-        :recorder ->
-          safe_ms_call(sip_ctx.mediaservermodule, :stop_recorder, [action_pid])
-
-        other ->
-          Logger.warning(
-            dialogpid: self(),
-            module: __MODULE__,
-            message: "Cannot release unknown media action #{inspect(other)}"
-          )
-      end
-
-      put_action(sip_ctx, leg, nil, nil)
-    end
+    Enum.reduce(running_actions(sip_ctx, leg), sip_ctx, fn {kind, handle}, ctx ->
+      safe_ms_call(ctx.mediaservermodule, stop_fun(kind), [handle])
+      clear_action(ctx, leg, kind)
+    end)
   end
 
   defp cleanup_peer_connection(sip_ctx, leg), do: drop_peer_connection(sip_ctx, leg)

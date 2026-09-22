@@ -69,22 +69,22 @@ defmodule SIP.Test.Media.Legs do
     end
   end
 
-  describe "one action per leg" do
+  describe "one action per leg and per kind" do
     test "starting one on a leg leaves the other leg's slot free", %{ctx: ctx} do
       {ctx, _} = Media.get_sdp_offer(ctx, :no, :audio)
       {ctx, _} = Media.get_sdp_offer(ctx, :no, :audio, leg: :outbound)
 
       ctx = Media.start_echo(ctx, leg: :outbound)
 
-      assert SIP.Context.appdata_get(ctx, {:mediaactionid, :outbound}) != nil
-      assert SIP.Context.appdata_get(ctx, {:mediaaction, :outbound}) == :echo
+      assert SIP.Context.appdata_get(ctx, {:mediaechoid, :outbound}) != nil
+      assert Media.media_action(ctx, :echo, :outbound) != nil
 
       # The inbound leg is untouched — its slot is the bare key, and it is empty.
-      assert SIP.Context.appdata_get(ctx, :mediaactionid) == nil
+      assert SIP.Context.appdata_get(ctx, :mediaechoid) == nil
 
       # …so it can start one of its own, which single-slot bookkeeping refused.
       ctx = Media.start_echo(ctx)
-      assert SIP.Context.appdata_get(ctx, :mediaaction) == :echo
+      assert Media.media_action(ctx, :echo) != nil
     end
 
     test "stopping acts on the named leg only", %{ctx: ctx} do
@@ -94,8 +94,8 @@ defmodule SIP.Test.Media.Legs do
 
       ctx = Media.stop_media(ctx, leg: :outbound)
 
-      assert SIP.Context.appdata_get(ctx, {:mediaactionid, :outbound}) == nil
-      assert SIP.Context.appdata_get(ctx, :mediaactionid) != nil
+      assert Media.media_action(ctx, :echo, :outbound) == nil
+      assert Media.media_action(ctx, :echo) != nil
     end
 
     test "a leg with no connection refuses an action rather than starting one elsewhere", %{
@@ -125,8 +125,8 @@ defmodule SIP.Test.Media.Legs do
         |> Media.start_recorder("/rec/in.mp4", 0)
         |> Media.start_recorder("/rec/out.mp4", 0, leg: :outbound)
 
-      assert {:recorder, rec_in} = Media.media_action(ctx)
-      assert {:recorder, rec_out} = Media.media_action(ctx, :outbound)
+      assert rec_in = Media.media_action(ctx, :recorder)
+      assert rec_out = Media.media_action(ctx, :recorder, :outbound)
       assert rec_in != rec_out
 
       assert_receive {:ms_event, ^rec_in, :recorder_started}, 1_000
@@ -141,8 +141,8 @@ defmodule SIP.Test.Media.Legs do
         |> Media.start_recorder("/rec/in.mp4", 0)
         |> Media.start_recorder("/rec/out.mp4", 0, leg: :outbound)
 
-      {:recorder, rec_in} = Media.media_action(ctx)
-      {:recorder, rec_out} = Media.media_action(ctx, :outbound)
+      rec_in = Media.media_action(ctx, :recorder)
+      rec_out = Media.media_action(ctx, :recorder, :outbound)
 
       assert Media.media_leg_of(ctx, rec_in) == :inbound
       assert Media.media_leg_of(ctx, rec_out) == :outbound
@@ -159,20 +159,105 @@ defmodule SIP.Test.Media.Legs do
         |> Media.start_recorder("/rec/in.mp4", 0)
         |> Media.start_recorder("/rec/out.mp4", 0, leg: :outbound)
 
-      {:recorder, rec_in} = Media.media_action(ctx)
-      {:recorder, rec_out} = Media.media_action(ctx, :outbound)
+      rec_in = Media.media_action(ctx, :recorder)
+      rec_out = Media.media_action(ctx, :recorder, :outbound)
 
       ctx = Media.stop_media(ctx, leg: :all)
 
       assert_receive {:ms_event, ^rec_in, {:recorder_stopped, :caller}}, 1_000
       assert_receive {:ms_event, ^rec_out, {:recorder_stopped, :caller}}, 1_000
 
-      assert Media.media_action(ctx) == nil
-      assert Media.media_action(ctx, :outbound) == nil
+      assert Media.media_action(ctx, :recorder) == nil
+      assert Media.media_action(ctx, :recorder, :outbound) == nil
     end
 
     test "leg: :all on a call that started nothing is a no-op, not a crash", %{ctx: ctx} do
       assert Media.stop_media(ctx, leg: :all) == ctx
+    end
+  end
+
+  # A player feeds what the endpoint SENDS, a recorder takes what it RECEIVES.
+  # One leg therefore carries both, which is what a round-trip test is made of:
+  # play the source file, record what comes back, compare the two.
+  describe "playing and recording on one leg" do
+    setup %{ctx: ctx} do
+      {ctx, _} = Media.get_sdp_offer(ctx, :no, :audio)
+      %{ctx: ctx}
+    end
+
+    defp playing_and_recording(ctx) do
+      ctx =
+        ctx
+        |> Media.start_player("/rec/source.mp4")
+        |> Media.start_recorder("/rec/return.mp4", 0)
+
+      {ctx, Media.media_action(ctx, :player), Media.media_action(ctx, :recorder)}
+    end
+
+    test "both run, under two handles", %{ctx: ctx} do
+      {ctx, player, recorder} = playing_and_recording(ctx)
+
+      assert is_pid(player) and is_pid(recorder)
+      assert player != recorder
+
+      assert_receive {:ms_event, ^player, :player_started}, 1_000
+      assert_receive {:ms_event, ^recorder, :recorder_started}, 1_000
+
+      # and each resolves to the leg it runs on
+      assert Media.media_leg_of(ctx, player) == :inbound
+      assert Media.media_leg_of(ctx, recorder) == :inbound
+    end
+
+    test "stopping the player leaves the recording open", %{ctx: ctx} do
+      {ctx, player, recorder} = playing_and_recording(ctx)
+      assert_receive {:ms_event, ^recorder, :recorder_started}, 1_000
+
+      ctx = Media.stop_media(ctx, kind: :player)
+
+      refute Process.alive?(player)
+      assert Media.media_action(ctx, :player) == nil
+      assert Media.media_action(ctx, :recorder) == recorder
+      # the file is still being written: closing it here would lose the result
+      refute_receive {:ms_event, ^recorder, {:recorder_stopped, _}}, 100
+      assert Process.alive?(recorder)
+    end
+
+    test "stopping without a kind ends both", %{ctx: ctx} do
+      {ctx, player, recorder} = playing_and_recording(ctx)
+
+      ctx = Media.stop_media(ctx)
+
+      assert_receive {:ms_event, ^recorder, {:recorder_stopped, :caller}}, 1_000
+      refute Process.alive?(player)
+      assert Media.media_action(ctx, :player) == nil
+      assert Media.media_action(ctx, :recorder) == nil
+    end
+
+    test "a second action of the SAME kind is still refused", %{ctx: ctx} do
+      {ctx, player, _recorder} = playing_and_recording(ctx)
+
+      ctx = Media.start_player(ctx, "/rec/other.mp4")
+
+      assert Media.media_action(ctx, :player) == player
+    end
+
+    test "a kind typo fails at the call rather than stopping nothing", %{ctx: ctx} do
+      {ctx, _player, _recorder} = playing_and_recording(ctx)
+
+      assert_raise ArgumentError, ~r/unknown media action kind/, fn ->
+        Media.stop_media(ctx, kind: :recoder)
+      end
+    end
+
+    test "teardown releases both", %{ctx: ctx} do
+      {ctx, player, recorder} = playing_and_recording(ctx)
+
+      ctx = Media.media_cleanup_ressources(ctx)
+
+      refute Process.alive?(player)
+      refute Process.alive?(recorder)
+      assert Media.media_action(ctx, :player) == nil
+      assert Media.media_action(ctx, :recorder) == nil
     end
   end
 

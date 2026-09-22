@@ -1500,24 +1500,11 @@ defmodule SIP.DialogImpl do
 
   defp notify_transaction_timeout(state, _req, _transact_pid, _module), do: state
 
-  # A 408 the stack makes up for a request that was never answered. It is a local
-  # notification and never goes on the wire, so it carries only what a reader of
-  # a response needs: the status, and the dialog/CSeq coordinates that say WHICH
-  # request went unanswered (`SIP.Session.dispatch_reply/3` routes on the CSeq
-  # method, and the B2BUA correlates on the transaction pid delivered alongside).
-  defp timeout_response(req) do
-    %{
-      method: false,
-      response: 408,
-      reason: "Request Timeout",
-      callid: Map.get(req, :callid),
-      cseq: Map.get(req, :cseq),
-      from: Map.get(req, :from),
-      to: Map.get(req, :to),
-      contentlength: 0,
-      body: []
-    }
-  end
+  # A 408 the stack makes up for a request that was never answered (RFC 3261
+  # §8.1.3.1). The message layer composes it, as it composes the 503 that a
+  # request which could not be sent at all gets — same local notification, other
+  # status (`SIP.Msg.Ops.local_response/3`).
+  defp timeout_response(req), do: SIP.Msg.Ops.local_response(req, 408, "Request Timeout")
 
   defp adopts_totag?(%SIP.DialogImpl{forking: true}, rsp), do: rsp.response in 200..299
   defp adopts_totag?(_state, rsp), do: rsp.response < 300

@@ -466,14 +466,29 @@ Three details that each cost a real call:
 A browser cannot carry T.140 on an RTP profile — `RTCPeerConnection` has no
 `m=text`. There are two ways round it, and the adapter drives both:
 
-- a **WebSocket** beside the call, which the peer asks for with its own
-  `m=text … TCP/WS t140` section and we answer with a URL. We never offer one:
-  it is a door, opened when someone knocks;
+- a **WebSocket** beside the call, in either of the two roles the RFC 4145
+  `a=setup` names:
+  - the peer asks for one with its own `m=text … TCP/WS t140` section and we
+    answer with a URL. We never *offer* one in that role: it is a door, opened
+    when someone knocks;
+  - or **we** connect (`text_transport: :ws`): the offer is
+    `m=text 9 TCP/WSS t140` with `a=setup:active` and no URL of ours, and the
+    URL the answer publishes is what the media server is then armed with. It
+    plays the browser, which is the condition for testing a Total Conversation
+    call without one. Nothing of ours is bound on that leg, so a leg whose only
+    medium is such a WebSocket has no offer to build at all;
 - a **WebRTC data channel** (RFC 8865): `m=application … UDP/DTLS/SCTP
   webrtc-datachannel`, inside the leg's own DTLS and ICE. It is answered when
   offered, **and it is what our own offers carry by default on a WebRTC leg** —
-  `text_transport: :data_channel | :rtp` in the leg's options, defaulting to the
-  data channel with DTLS and to RTP without.
+  `text_transport: :data_channel | :rtp | :ws` in the leg's options, defaulting
+  to the data channel with DTLS and to RTP without.
+
+The two events a WebSocket we open produces say less than their name suggests.
+The media server publishes `EndpointConnectedEvent` at **every** opening and
+`EndpointDisconnectedEvent` at every loss, retrying every 5 s on its own, so
+neither carries the old meaning "DTLS done and first RTP packet in". Neither
+belongs in R (§6.6): a WebSocket carries no RTP, so a text opening never
+releases `:ice_connected` and a text loss never makes a lost call.
 
 Three things that are NOT symmetric with the WebSocket case, each of them a call
 that would have failed:
@@ -580,8 +595,12 @@ That single fact settles the shape of call recording:
   Conversation call are recorded only if both legs were negotiated with the
   three. Attaching, and detaching on the way out, follow the leg — not the
   connection, whose media list is the inbound leg's;
-* **the media action slot is per leg** (§5.7), so the two recorders coexist and
-  a second action on either leg is refused rather than stacked.
+* **the media action slot is per leg and per kind** (§5.7), so the two recorders
+  coexist, a leg records while it plays, and only a second action of the SAME
+  kind on one leg is refused rather than stacked. A player feeds what an endpoint
+  sends and a recorder takes what it receives — opposite directions, wired by two
+  calls that never touch each other. `media_stop(kind: :player)` ends one of the
+  two; `media_stop()` ends every action of the leg.
 
 Both recorders report through one event shape, so a scenario reads the leg from
 the handle (`media_leg_of/1`) rather than from the event. And stopping is not

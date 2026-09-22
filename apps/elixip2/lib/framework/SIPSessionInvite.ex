@@ -203,7 +203,8 @@ defmodule SIP.Session.CallUAC do
       timeout = Keyword.get(options, :timeout, 20)
       webrtc_support = Keyword.get(options, :webrtc, :no)
       medias = Keyword.get(options, :media, :tc)
-      {sip_ctx, sdp_offer} = SIP.Session.Media.get_sdp_offer(sip_ctx, webrtc_support, medias)
+      {sip_ctx, sdp_offer} =
+        SIP.Session.Media.get_sdp_offer(sip_ctx, webrtc_support, medias, options)
       # Cache the offer so an authenticated retry (auth_invite) reuses the exact
       # same SDP instead of rebuilding it — see auth_invite/5 for the rationale.
       sip_ctx = SIP.Context.appdata_set(sip_ctx, :localsdpoffer, sdp_offer)
@@ -246,7 +247,7 @@ defmodule SIP.Session.CallUAC do
         case SIP.Context.appdata_get(sip_ctx, :localsdpoffer) do
           nil ->
             webrtc_support = Keyword.get(options, :webrtc, :no)
-            SIP.Session.Media.get_sdp_offer(sip_ctx, webrtc_support, medias)
+            SIP.Session.Media.get_sdp_offer(sip_ctx, webrtc_support, medias, options)
 
           cached_offer ->
             {sip_ctx, cached_offer}
@@ -944,7 +945,7 @@ defmodule SIP.Session.CallInDialog do
   defp send_offer_request(sip_ctx, method, :mediaserver, opts) do
     webrtc = Keyword.get(opts, :webrtc, :no)
     medias = Keyword.get(opts, :media, :audio_video)
-    {sip_ctx, offer} = SIP.Session.Media.get_sdp_offer(sip_ctx, webrtc, medias)
+    {sip_ctx, offer} = SIP.Session.Media.get_sdp_offer(sip_ctx, webrtc, medias, opts)
     send_offer_request(sip_ctx, method, offer, opts)
   end
 

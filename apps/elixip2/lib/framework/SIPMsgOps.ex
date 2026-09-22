@@ -1329,6 +1329,35 @@ defmodule SIP.Msg.Ops do
   end
 
   @doc """
+  The response the stack makes up for a request that will never be answered.
+
+  RFC 3261 §8.1.3.1 names the two cases and the code each takes: a transaction
+  that times out is reported to the application as a **408**, a fatal transport
+  error as a **503**. Both are local notifications and neither goes on the wire,
+  so this response carries only what a reader of one needs — the status, and the
+  dialog / CSeq coordinates that say WHICH request it answers
+  (`SIP.Session.dispatch_reply/3` routes on the CSeq method, and the B2BUA
+  correlates on the transaction pid delivered alongside).
+
+  Deliberately not `reply_to_request/5`: that one composes a response a UAS sends
+  out, minting a To tag and demanding a Contact that this response has no use for.
+  """
+  @spec local_response(map(), 100..699, binary()) :: map()
+  def local_response(req, code, reason) when is_map(req) and code in 100..699 do
+    %{
+      method: false,
+      response: code,
+      reason: reason,
+      callid: Map.get(req, :callid),
+      cseq: Map.get(req, :cseq),
+      from: Map.get(req, :from),
+      to: Map.get(req, :to),
+      contentlength: 0,
+      body: []
+    }
+  end
+
+  @doc """
   Which response header carries a digest challenge for `resp_code`: a **401**
   answers as a UAS (`WWW-Authenticate`, RFC 3261 §22.2), a **407** as a proxy
   (`Proxy-Authenticate`, §22.3).

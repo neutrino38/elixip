@@ -142,7 +142,7 @@ defmodule SIP.Test.Call2 do
 
     # ── Run an echo (media loopback) for 20 seconds ───────────────────────────
     media_start_echo()
-    echo = SIP.Context.appdata_get(sip_ctx, :mediaactionid)
+    echo = SIP.Session.Media.media_action(sip_ctx, :echo)
     assert is_pid(echo)
     assert_receive {:ms_event, ^echo, :echo_started}, 1_000
 
@@ -217,7 +217,7 @@ defmodule SIP.Test.Call2 do
 
     # ── Play a (fictitious) media file; the mockup plays it for 15 s ──────────
     media_play("toto.mp4")
-    player = SIP.Context.appdata_get(sip_ctx, :mediaactionid)
+    player = SIP.Session.Media.media_action(sip_ctx, :player)
     assert is_pid(player)
     assert_receive {:ms_event, ^player, :player_started}, 1_000
 
@@ -285,7 +285,7 @@ defmodule SIP.Test.Call2 do
 
     # ── Record to a (fictitious) file for 30 s ────────────────────────────────
     media_record("toto.mp4", 30_000)
-    recorder = SIP.Context.appdata_get(sip_ctx, :mediaactionid)
+    recorder = SIP.Session.Media.media_action(sip_ctx, :recorder)
     assert is_pid(recorder)
     assert_receive {:ms_event, ^recorder, :recorder_started}, 1_000
 
