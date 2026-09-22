@@ -19,8 +19,9 @@ memory. Nothing survives a restart: a dialog cannot be resurrected, so a watcher
 re-subscribes and a publisher re-publishes.
 
 > The reference scripts are
-> [`presence-subscribe.exs`](../../../apps/kelixip/scripts/presence-subscribe.exs)
-> and [`presence-publish.exs`](../../../apps/kelixip/scripts/presence-publish.exs).
+> [`presence-subscribe.exs`](../../../apps/kelixip/scripts/presence-subscribe.exs),
+> [`presence-publish.exs`](../../../apps/kelixip/scripts/presence-publish.exs) and
+> [`presence-rls.exs`](../../../apps/kelixip/scripts/presence-rls.exs).
 > The design document is [DESIGN-PRESENCE.md](../../design/DESIGN-PRESENCE.md).
 
 ## Installing and activating the module
@@ -29,7 +30,7 @@ re-subscribes and a publisher re-publishes.
 
 `dnf install kelixip-mod-presence` / `apt install kelixip-mod-presence`
 
-The package carries the module and the two reference scripts.
+The package carries the module and the three reference scripts.
 
 ### Declaring the module in config.toml
 
@@ -64,6 +65,36 @@ answers **405** to a PUBLISH.
 
 Two blocks declaring the same event package are refused when the file is loaded.
 
+### Serving buddy lists
+
+A client opens its whole roster with one SUBSCRIBE to a list URI it carries
+hard-coded — Linphone sends `sip:rls@sip.linphone.org` whatever the account's own
+domain is — and puts the list itself in the request body (RFC 4662, RFC 5367).
+
+Declare that host as a domain of its own, served by `presence-rls.exs`:
+
+```toml
+# domains.toml
+[[domain]]
+name = "sip.linphone.org"
+
+  [[domain.presence]]
+  event-package = "presence"
+  subscribe     = "presence-rls.exs"
+```
+
+The script authenticates the watcher on the realm of its own `From`, then watches
+every entry of the list on the entry's own domain. The answer is one NOTIFY
+carrying an RLMI manifest and one PIDF part per buddy; state changes that follow
+are batched into one partial NOTIFY every 500 ms.
+
+An entry on a domain this node does not serve is reported
+`terminated;reason=noresource`.
+
+A watcher that does not advertise `Supported: eventlist`, or whose `Accept` does
+not name both `multipart/related` and `application/rlmi+xml`, is answered **406**
+and falls back to one subscription per buddy.
+
 ## Parameters
 
 Module block — `[module.presence]` (in `config.toml`):
@@ -86,7 +117,8 @@ Per-domain block — `[[domain.presence]]` (activates the function for a domain)
 ## Facades
 
 ```elixir
-import Kelix.Mod.Presence, only: [publish: 2, watch: 2, unwatch: 1, state_of: 2]
+import Kelix.Mod.Presence,
+  only: [publish: 2, watch: 2, watch_many: 3, unwatch: 1, state_of: 2]
 ```
 
 Each facade is non-blocking: a collection that is down answers `{:error, :down}`
@@ -127,13 +159,33 @@ published about the resource yet.
 The instance is monitored: a watcher that dies with its dialog is dropped on its
 own. A subscription granted zero seconds (an un-SUBSCRIBE) is not stored.
 
+### `watch_many/3`
+
+```elixir
+watch_many(sip_ctx, %SIP.Subscription{}, uris :: [String.t()]) ::
+  {:ok, %{String.t() => document | nil}} | {:error, :down | :timeout}
+```
+
+The same, for the N resources of one list subscription (RFC 4662). `uris` are the
+entries as the watcher wrote them — `sub.list_entries` — and the answer is keyed
+on those very strings.
+
+Each entry is watched on **the domain its own URI names**, not on the domain that
+routed the SUBSCRIBE: the entries of one buddy list routinely sit on several
+domains. An entry on a domain this node does not serve is answered `nil` and is
+not registered.
+
+The instance is monitored, as with `watch/2`: it is dropped from every resource it
+watches when it dies.
+
 ### `unwatch/1`
 
 ```elixir
 unwatch(sip_ctx) :: :ok | {:error, :down | :timeout}
 ```
 
-Stops watching. For the scenario that ends its subscription and keeps running.
+Stops watching, on every domain the instance was registered on. For the scenario
+that ends its subscription and keeps running.
 
 ### `state_of/2`
 

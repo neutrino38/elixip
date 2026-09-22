@@ -27,9 +27,9 @@ An `.exs` script handling:
 - `NOTIFY sip:monami@domain.com`, and its acceptance or refusal
 - `NOTIFY sip:jechercheunami@domain.com` with the outcome
 
-Open question: how does a user obtain their buddy list? Lead: RFC 4662 (RLS — one
-subscription for the whole list), with the list itself held in XCAP (RFC 4826).
-See *References*.
+How a user obtains their buddy list is answered below, in *The buddy list*: the
+client brings it, in the SUBSCRIBE itself (RFC 5367), and no XCAP server is
+needed for that.
 
 **3 — A Service Building Block for presence-based Automatic Call Distribution.**
 
@@ -337,6 +337,90 @@ Two reservations:
   "live processes" tier of the scale-out track
   ([DESIGN-CHAT.md](DESIGN-CHAT.md#horizontal-scale)).
 
+## The buddy list
+
+One SUBSCRIBE covering N buddies, answered by one NOTIFY carrying the state of
+each (RFC 4662). A client that cannot do this opens one subscription per buddy —
+one dialog, one timer and one refresh each — and a roster of thirty costs thirty
+of everything.
+
+### The list is in the request
+
+RFC 4662 assumes the list is held on the server and named by a URI. RFC 5367 has
+the watcher put it **in its own SUBSCRIBE** instead, under
+`Content-Disposition: recipient-list`, and that is the one real clients send —
+captured from Linphone Desktop 6.2.2 on 2026-09-22:
+
+```
+SUBSCRIBE sip:rls@sip.linphone.org SIP/2.0
+From: "Bob" <sip:bob@weshwesh.eu>;tag=sxplenBxl
+Supported: eventlist
+Require: recipient-list-subscribe
+Content-Type: application/resource-lists+xml
+Content-Encoding: deflate
+Content-Disposition: recipient-list
+Accept: multipart/related
+Accept: application/pidf+xml
+Accept: application/rlmi+xml
+```
+
+So no XCAP server and no list store: the node reads `application/resource-lists+xml`
+(`SIP.Presence.ResourceLists`) and subscribes to what it names. XCAP (RFC 4825 /
+4826) re-enters the day a deployment wants the list to survive the client that
+holds it, and it changes nothing below.
+
+### Three consequences, and they are what the design is
+
+**The Request-URI names a list, not a presentity.** `sip:rls@sip.linphone.org` is
+hard-coded in the client, whatever the account's own domain is. Two things follow.
+The node declares that host as a **domain of its own** in `domains.toml`, serving
+nothing but presence, because routing is by R-URI host and that is the host
+arriving. And the watcher is authenticated on the realm of its **own `From`**
+(`realm: :from_domain`) — challenging on the routed domain asks for credentials
+that exist nowhere.
+
+**A resource belongs to the domain of its own URI.** The three entries of one
+buddy list routinely sit on three domains, none of which has to be the routed one.
+`Kelix.Mod.Presence` therefore keys every resource on the domain its URI names,
+and the domain that routed the request is only a fallback for an entry that
+carries none. Keying on the routed domain files every buddy under a domain nobody
+publishes on — the watcher then gets state for nobody, for ever, with no error
+anywhere.
+
+**An entry we do not serve is reported, not omitted.** A list names whatever the
+client put in it. An entry on a domain this node does not serve gets
+`<instance state="terminated" reason="noresource"/>` in the manifest: the watcher
+stops waiting for it. It is not registered as a watcher either — the list is the
+client's, so the number of domains in it would be the client's too, and each one
+costs a table and a monitor. The `[outbound]` domain of a later phase is what will
+take those entries over by subscribing to their own servers.
+
+### What goes back
+
+A `multipart/related` (RFC 2387) whose root part is an **RLMI manifest**
+(`SIP.Presence.Rlmi`) naming every resource, each pointing through a `cid` at the
+part carrying its document. The manifest is indexed by `start=`, not by position,
+so the parts may be read in any order.
+
+`version` counts the NOTIFYs of one subscription and `fullState` says whether what
+follows is all of it: the first NOTIFY is full, the ones after it carry only what
+changed. Both are the **subscription's** — `%SIP.Subscription{}.version`, which
+the framework increments — because two watchers of one list have their own
+counters.
+
+The state changes are **batched** in the script (500 ms): the fan-out pushes one
+buddy at a time, and a roster coming online would otherwise produce one NOTIFY per
+buddy, each carrying the whole envelope.
+
+### `Content-Encoding` is not an optimisation here
+
+The captured SUBSCRIBE arrives deflated and asks for the answer deflated. A list
+NOTIFY carrying one PIDF per buddy passes the UDP MTU, and IPv6 does not fragment
+in transit: without the compression the NOTIFY does not arrive at all. The stack
+reads `deflate` on the way in (`SIP.Msg.BodyCoding`, both the zlib and the raw
+form — the field means both) and applies it on the way out past 1200 octets, low
+enough to matter and high enough to leave a small NOTIFY readable in a capture.
+
 ## The kelixip Presence module
 
 A generic pub/sub module for presence. Like the registrar, one per domain with
@@ -465,8 +549,10 @@ The specifications this document builds on, and what each one settles.
 | [3857](https://www.rfc-editor.org/rfc/rfc3857) | Watcher Information Event Template-Package | `presence.winfo` — the second `SIP.EventPackage` implementation. This is what tells Alice that Bob wants to watch her, and what carries her answer |
 | [3858](https://www.rfc-editor.org/rfc/rfc3858) | XML Format for Watcher Information | Its body |
 | [5025](https://www.rfc-editor.org/rfc/rfc5025) | Presence Authorization Rules | The policy document behind a `pending` subscription: who may watch, and how much they see |
-| [4662](https://www.rfc-editor.org/rfc/rfc4662) | Resource List Subscriptions (RLS) | **Answers the open question above.** One SUBSCRIBE to a list URI, one NOTIFY carrying the state of every buddy as `multipart/related`. Without it a client opens one subscription per buddy |
-| [4826](https://www.rfc-editor.org/rfc/rfc4826) | XCAP Resource Lists | Where the list itself lives |
+| [4662](https://www.rfc-editor.org/rfc/rfc4662) | Resource List Subscriptions (RLS) | **Implemented** — see *The buddy list*. One SUBSCRIBE to a list URI, one NOTIFY carrying the state of every buddy as `multipart/related`. Without it a client opens one subscription per buddy |
+| [5367](https://www.rfc-editor.org/rfc/rfc5367) | Subscriptions to Request-Contained Resource Lists | **Implemented.** The list travels in the SUBSCRIBE, which is what real clients send, and what makes a list server possible with no list store |
+| [2387](https://www.rfc-editor.org/rfc/rfc2387) | The MIME Multipart/Related Content-type | The envelope of a list NOTIFY: `type=` names the manifest, `start=` points at it, `Content-ID` addresses each part |
+| [4826](https://www.rfc-editor.org/rfc/rfc4826) | XCAP Resource Lists | Where a list lives when it is the SERVER that holds it. Deferred: the client brings its own |
 | [4825](https://www.rfc-editor.org/rfc/rfc4825) | XCAP | How a client reads and edits that list — HTTP, not SIP. A dependency outside the SIP stack |
 
 ### Call state, for the composite state

@@ -40,6 +40,7 @@ The user-facing counterparts live at the repository root —
 | [moteli-reboot.md](moteli-reboot.md) | RabbitMQ + protobuf control plane for the media servers (2.0) |
 | [DESIGN-PRESENCE.md](DESIGN-PRESENCE.md) | presence: the subscription layer, event packages, the composite state, the ACD |
 | [presence-basic-plan.md](presence-basic-plan.md) | the build order of the above, phase by phase: what basic presence is, and what each step proves |
+| [presence-rls-plan.md](presence-rls-plan.md) | the buddy list on top of it: one SUBSCRIBE covering N resources (RFC 4662 / 5367), lot by lot |
 | [DESIGN-CHAT.md](DESIGN-CHAT.md) | instant messaging: MESSAGE dispatch, the Silo, chatrooms, attachments, bots |
 
 ## Designed elsewhere
