@@ -124,6 +124,31 @@ defmodule SIP.Test.MsgTooLarge do
     assert resp.contentlength == 0
   end
 
+  # The bound sits above OTP's default UDP receive buffer (1460 octets on an IPv6
+  # socket, 8192 on IPv4): a 513 comes back only if the datagram reached the parser
+  # whole. Cut to the buffer, it would fall under the bound and go on truncated.
+  for {family, inet, addr} <- [
+        {:ipv4, :inet, {127, 0, 0, 1}},
+        {:ipv6, :inet6, {0, 0, 0, 0, 0, 0, 0, 1}}
+      ] do
+    test "a #{family} datagram past the default receive buffer reaches the parser whole" do
+      addr = unquote(Macro.escape(addr))
+      put_limit(9_000)
+      {:ok, port} = SIP.NetUtils.pick_free_port(:udp)
+
+      {:ok, tp_pid} =
+        GenServer.start(SIP.Transport.UDP, {:bind, addr, port, [family: unquote(family)]})
+
+      on_exit(fn -> if Process.alive?(tp_pid), do: GenServer.stop(tp_pid) end)
+
+      {:ok, client} = :gen_udp.open(0, [:binary, unquote(inet), ip: addr])
+      :ok = :gen_udp.send(client, addr, port, invite_wire(filler(9_500)))
+
+      assert_receive {:udp, ^client, _ip, ^port, resp}, 1_000
+      assert {:ok, %{response: 513}} = SIPMsg.parse(resp, nocb())
+    end
+  end
+
   test "an oversized ACK is dropped: an ACK is never answered" do
     put_limit(2_000)
     tp_pid = mockup_transport("toolargeack")

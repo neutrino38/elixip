@@ -84,6 +84,11 @@ defmodule SIP.Transport.UDP do
             {:ok, socket} ->
               :ok = Socket.UDP.process(socket, self())
 
+              # OTP's default user-level buffer is 1460 octets, and a longer datagram
+              # is cut to it without a word. `max_message_size` is the size policy;
+              # this only has to let any datagram through for it to apply.
+              :ok = :inet.setopts(socket, buffer: 65_535)
+
               # Say so, like the three connection-oriented listeners do. This socket
               # announces the address every Via and Contact of its family will carry,
               # so an operator reading the boot log must be able to see which address
