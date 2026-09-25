@@ -69,7 +69,7 @@ This package embeds its own Erlang runtime — no system Erlang or Elixir is nee
 
 %package mod-registrar
 Summary:        Registrar / user-location module for kelixip
-Requires:       %{name} = %{version}-%{release}
+Requires:       %{name} = %{version}
 
 %description mod-registrar
 The usrloc store: per-domain contact bindings with NAT/flow handling (received,
@@ -78,7 +78,7 @@ scripts drive. Enable it with a [module.registrar] block in domains.toml.
 
 %package mod-auth_db
 Summary:        Database authentication module for kelixip
-Requires:       %{name} = %{version}-%{release}
+Requires:       %{name} = %{version}
 
 %description mod-auth_db
 Digest authentication against a MariaDB/MySQL subscriber table (kamailio-compatible
@@ -87,7 +87,7 @@ compose the SIP response. Enable it with a [module.auth_db] block in config.toml
 
 %package mod-mcu
 Summary:        Conference mixer (MCU) module for kelixip
-Requires:       %{name} = %{version}-%{release}
+Requires:       %{name} = %{version}
 
 %description mod-mcu
 Audio/video/text conferencing: conferences addressed by DID, a mixed audio leg and
@@ -102,7 +102,7 @@ kelixip's. Installing the package is not enough to make a conference work.
 
 %package mod-presence
 Summary:        Presence collection module for kelixip
-Requires:       %{name} = %{version}-%{release}
+Requires:       %{name} = %{version}
 
 %description mod-presence
 The presence collection (RFC 3856 / RFC 3903): the published state of each
