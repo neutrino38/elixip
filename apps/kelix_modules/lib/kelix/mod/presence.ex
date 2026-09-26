@@ -432,13 +432,14 @@ defmodule Kelix.Mod.Presence do
   defp report_registration(sip_ctx, ending_dialog) do
     SIP.Scenario.Monitor.note_command(:db, "presence_registration")
 
-    case SIP.Session.CallUAS.stored_req(sip_ctx) do
-      %{to: %SIP.Uri{userpart: user}} when is_binary(user) ->
-        resource = resource_key({user, sip_ctx.domain, "presence"})
-        Kelix.Module.safe_call(__MODULE__, {:registration, resource, ending_dialog})
-
-      _no_register ->
-        :ok
+    # To is the raw header string on a parsed request: read it through the
+    # framework, never by matching a `%SIP.Uri{}` only a hand-built request has.
+    with %{} = req <- SIP.Session.CallUAS.stored_req(sip_ctx),
+         user when is_binary(user) <- SIP.Msg.Ops.to_username(req) do
+      resource = resource_key({user, sip_ctx.domain, "presence"})
+      Kelix.Module.safe_call(__MODULE__, {:registration, resource, ending_dialog})
+    else
+      _no_register -> :ok
     end
   end
 

@@ -506,7 +506,9 @@ defmodule Kelix.PresenceScriptTest do
       %{
         method: :REGISTER,
         from: %SIP.Uri{userpart: @presentity, domain: @domain},
-        to: %SIP.Uri{userpart: @presentity, domain: @domain},
+        # the raw header string, as SIPMsg leaves it: a struct here hid a script
+        # that could not find the AOR of any real REGISTER
+        to: "<sip:#{@presentity}@#{@domain}>",
         ruri: %SIP.Uri{
           userpart: @presentity,
           domain: @domain,

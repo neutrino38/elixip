@@ -372,8 +372,10 @@ defmodule Kelix.Mod.Registrar do
   """
   @spec remaining_ms(%SIP.Context{}) :: non_neg_integer | :infinity
   def remaining_ms(%SIP.Context{} = sip_ctx) do
-    with %{to: %SIP.Uri{userpart: user}} when is_binary(user) <-
-           SIP.Session.CallUAS.stored_req(sip_ctx),
+    # `to_username/1`, not `%{to: %SIP.Uri{}}`: a parsed request carries To as the
+    # raw header string, and only a hand-built one carries a struct.
+    with %{} = req <- SIP.Session.CallUAS.stored_req(sip_ctx),
+         user when is_binary(user) <- SIP.Msg.Ops.to_username(req),
          contacts when is_list(contacts) <- bindings(sip_ctx.domain, user) do
       contacts
       |> Enum.filter(&(&1.dialog_pid == sip_ctx.dialogpid))
