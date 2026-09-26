@@ -88,8 +88,48 @@ every entry of the list on the entry's own domain. The answer is one NOTIFY
 carrying an RLMI manifest and one PIDF part per buddy; state changes that follow
 are batched into one partial NOTIFY every 500 ms.
 
-An entry on a domain this node does not serve is reported
-`terminated;reason=noresource`.
+Each entry is answered as described in [State of a resource](#state-of-a-resource);
+an entry with no state is reported `terminated;reason=noresource`.
+
+### State of a resource
+
+The state notified for a resource is, in order:
+
+1. the live document its presentity PUBLISHed;
+2. when nothing live is published, **open** while one of the user's devices is
+   registered, as reported by the registrar script (see
+   [Registrations as presence](#registrations-as-presence));
+3. otherwise, on a domain with a `[domain.registrar]` block and for a user known
+   to `auth_db`: **closed**;
+4. otherwise no state (`nil`): a domain with no registrar, a domain this node does
+   not serve, an unknown user, or an event package other than `presence`.
+
+### Registrations as presence
+
+The reference script `registrar-presence.exs` is `registrar.exs` plus a report to
+this module each time a registration changes: a REGISTER saved, the device's
+connection dropped, or a registration not refreshed in time. Serve the domain's
+registrar with it:
+
+```toml
+# domains.toml
+[[domain]]
+name = "example.com"
+
+  [domain.registrar]
+  script = "registrar-presence.exs"
+```
+
+The subscriber is open while at least one of its devices holds a registration,
+and closed when the last one goes. A registration that is not refreshed is
+reported when it lapses in the registrar; a refused refresh (403, 423, 400, 503)
+leaves the registration running, and its lapse is reported the same way. Its watchers are NOTIFYed on each change;
+refreshing a registration notifies nothing, and neither does a change while a
+PUBLISH is live.
+
+A domain served by `registrar.exs` reports nothing: its subscribers are closed
+unless they publish. The script needs the `registrar`, `auth_db` and `presence`
+modules, and ships with `kelixip-mod-presence`.
 
 A watcher that does not advertise `Supported: eventlist`, or whose `Accept` does
 not name both `multipart/related` and `application/rlmi+xml`, is answered **406**
@@ -153,8 +193,8 @@ watch(sip_ctx, %SIP.Subscription{}) :: {:ok, document | nil} | {:error, :down | 
 ```
 
 Registers the calling instance as a watcher of the subscription it has just
-accepted, and hands back the state as it stands — `nil` when nothing has been
-published about the resource yet.
+accepted, and hands back the state as it stands (see
+[State of a resource](#state-of-a-resource)) — `nil` when there is none.
 
 The instance is monitored: a watcher that dies with its dialog is dropped on its
 own. A subscription granted zero seconds (an un-SUBSCRIBE) is not stored.
@@ -172,8 +212,8 @@ on those very strings.
 
 Each entry is watched on **the domain its own URI names**, not on the domain that
 routed the SUBSCRIBE: the entries of one buddy list routinely sit on several
-domains. An entry on a domain this node does not serve is answered `nil` and is
-not registered.
+domains. Each entry is answered its [state](#state-of-a-resource). An entry on a
+domain this node does not serve is answered `nil` and is not registered.
 
 The instance is monitored, as with `watch/2`: it is dropped from every resource it
 watches when it dies.
@@ -186,6 +226,27 @@ unwatch(sip_ctx) :: :ok | {:error, :down | :timeout}
 
 Stops watching, on every domain the instance was registered on. For the scenario
 that ends its subscription and keeps running.
+
+### `registration_changed/1`, `registration_ended/1`
+
+```elixir
+registration_changed(sip_ctx) :: :ok | {:error, :down | :timeout}
+registration_ended(sip_ctx)   :: :ok | {:error, :down | :timeout}
+registration_changed(domain, aor) :: :ok | {:error, :down | :timeout}
+```
+
+Called by the registrar script, with the context of the REGISTER dialog.
+`registration_changed/1` follows a `Kelix.Mod.Registrar.save/2`, whatever its
+verdict; `registration_ended/1` follows the end of the dialog — connection lost,
+or registration not refreshed.
+
+`registration_changed/2` is the same report for a registration removed by hand:
+`kelictl registration remove` and `DELETE /domains/<domain>/registrations/<aor>`
+call it when the presence module is loaded.
+
+None states open or closed: the module asks the registrar whether any device of
+the AOR still holds a registration, leaving out the ending dialog's own bindings
+(`Kelix.Mod.Registrar.registered?/3`).
 
 ### `state_of/2`
 
@@ -220,9 +281,11 @@ from its own state:
 {:presence, :state, {username, domain, event_package}, document | nil}
 ```
 
-`nil` means nothing is published about the resource any more — a removal, or a
-publication whose lifetime lapsed. What to notify then is the script's decision;
-the reference script sends an explicitly closed state.
+When the last publication goes — a removal, or a lifetime that lapsed — the
+document pushed is the [state](#state-of-a-resource) that follows: open or closed
+from the registrations, or `nil` where they do not apply. A registration change
+on a watched, unpublished resource is pushed the same way. What to notify for `nil` is the script's decision; the reference script
+sends an explicitly closed state.
 
 ## Examples
 
@@ -311,6 +374,7 @@ end
   publication, not a composite of them.
 - **In memory.** The collection does not survive a restart, and is local to one
   node.
+
 - **No consent flow.** `presence.winfo` (RFC 3857/3858) and the authorization
   rules of RFC 5025 carried over XCAP are not implemented; admission is the
   subscribe script's.

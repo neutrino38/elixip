@@ -146,7 +146,10 @@ defmodule Kelix.Mod.Registrar do
         subscribe_domain_counters: 1,
         unsubscribe_domain_counters: 1,
         subscribe_registrations: 2,
-        unsubscribe_registrations: 2
+        unsubscribe_registrations: 2,
+        registered?: 2,
+        registered?: 3,
+        remaining_ms: 1
       ]
     }
 
@@ -306,6 +309,82 @@ defmodule Kelix.Mod.Registrar do
   @doc "Raw current contacts for an AOR (expired ones filtered out)."
   @spec bindings(String.t(), String.t()) :: [Contact.t()]
   def bindings(domain, aor), do: Kelix.Module.safe_call(__MODULE__, {:bindings, domain, aor})
+
+  # A binding is tied to the dialog that created it **only over a
+  # connection-oriented transport** (§6.3, WebRTC-critical): there the UA is
+  # reachable over that one connection and nothing else, so losing it makes the
+  # contact undialable and the binding a lie.
+  #
+  # Over a **connectionless** transport the opposite holds, and this is a property
+  # of the transport mode, not of UDP specifically: one binding is shared by however
+  # many dialogs the UA takes part in, so it cannot belong to any single one of them.
+  # It lives its own life, bounded by `expires_at` and reclaimed by the periodic
+  # sweep — the usrloc semantics. Monitoring the dialog there made a registration
+  # evaporate as soon as that one dialog ended, which is exactly what a real handset
+  # triggered on 2026-07-28.
+  @connected_transports [SIP.Transport.TCP, SIP.Transport.TLS, SIP.Transport.WSS]
+
+  @doc """
+  Does `aor` still hold a binding that reaches a device, **other than the ones
+  `ending_dialog` owns**?
+
+  The question a registration asks when it ends — its connection dropped, or it
+  was not refreshed — before telling anyone the AOR is gone: another device of the
+  same subscriber may be registered, and then it is not. The bindings of the
+  ending dialog are left out because the store may not have dropped them yet; a
+  binding over a connected transport whose dialog is already dead is left out for
+  the same reason.
+
+  `ending_dialog` is `nil` for the question asked right after a `save/2`.
+  `false` too when the store cannot answer.
+  """
+  @spec registered?(String.t(), String.t(), pid | nil) :: boolean
+  def registered?(domain, aor, ending_dialog \\ nil) do
+    case Kelix.Module.safe_call(__MODULE__, {:bindings, domain, aor}) do
+      contacts when is_list(contacts) ->
+        Enum.any?(contacts, &reaches_device?(&1, ending_dialog))
+
+      _down ->
+        false
+    end
+  end
+
+  defp reaches_device?(%Contact{dialog_pid: pid}, ending) when is_pid(ending) and pid == ending,
+    do: false
+
+  defp reaches_device?(%Contact{dialog_pid: pid, flow_module: flow}, _ending)
+       when is_pid(pid) and flow in @connected_transports,
+       do: Process.alive?(pid)
+
+  defp reaches_device?(%Contact{}, _ending), do: true
+
+  @doc """
+  How long the registration held by this instance's dialog has left, in
+  milliseconds: the latest expiry among the AOR's bindings that the dialog owns.
+
+  `0` when the dialog owns none — never registered, removed, superseded by
+  another dialog, or lapsed. `:infinity` when the store cannot answer: a scenario
+  waiting on it then waits for its dialog to end rather than ending a registration
+  it cannot see.
+
+  The registration's own clock, not the dialog's: the dialog re-arms its lifetime
+  on every REGISTER it receives, refused ones included, and on the lifetime asked
+  rather than the one granted.
+  """
+  @spec remaining_ms(%SIP.Context{}) :: non_neg_integer | :infinity
+  def remaining_ms(%SIP.Context{} = sip_ctx) do
+    with %{to: %SIP.Uri{userpart: user}} when is_binary(user) <-
+           SIP.Session.CallUAS.stored_req(sip_ctx),
+         contacts when is_list(contacts) <- bindings(sip_ctx.domain, user) do
+      contacts
+      |> Enum.filter(&(&1.dialog_pid == sip_ctx.dialogpid))
+      |> Enum.map(&max(DateTime.diff(&1.expires_at, now(), :millisecond), 0))
+      |> Enum.max(fn -> 0 end)
+    else
+      {:error, _down} -> :infinity
+      _no_register -> 0
+    end
+  end
 
   @doc "All live bindings of a domain, as `%{aor => [Contact]}` (for status/CLI)."
   @spec all(String.t()) :: %{optional(String.t()) => [Contact.t()]}
@@ -565,43 +644,48 @@ defmodule Kelix.Mod.Registrar do
   end
 
   defp apply_actions(state, domain, aor, actions, req, dialog_pid, info) do
-    # `[:remove_all]` (wildcard) and an all-`{:remove, _}` plan converge on the
-    # same outcome: the AOR loses every binding it had.
-    unregister? = actions == [:remove_all] or Enum.all?(actions, &match?({:remove, _}, &1))
     tid = table_for(state, domain)
     state = put_table(state, domain, tid)
     existing = live_contacts_from(tid, aor)
 
-    if unregister? do
-      :ets.delete(tid, aor)
-      state = demonitor_aor(state, domain, aor)
-      notify(state, domain, aor, :unregistered)
-      {:unregistered, granted(aor, [], 0), state}
-    else
-      # apply removes then adds, keyed by contact URI string
-      kept = drop_contacts(existing, for({:remove, c} <- actions, do: binding_key(c)))
+    # A removal takes out the bindings it NAMES (RFC 3261 §10.3 step 7); only the
+    # `Contact: *` wildcard takes out all of them. Removing every binding on any
+    # un-REGISTER was un-registering a subscriber's other devices whenever one
+    # handset signed off.
+    kept =
+      if actions == [:remove_all],
+        do: [],
+        else: drop_contacts(existing, for({:remove, c} <- actions, do: binding_key(c)))
 
-      added =
-        for {:add, c, exp} <- actions do
-          %Contact{
-            contact: c,
-            received: received_of(req),
-            flow_pid: flow_of(req),
-            flow_module: flow_module_of(req),
-            dialog_pid: dialog_pid,
-            instance: contact_param(c, "+sip.instance"),
-            reg_id: contact_param(c, "reg-id"),
-            methods: contact_param(c, "methods"),
-            info: info,
-            expires_at: DateTime.add(now(), exp, :second)
-          }
-        end
+    added =
+      for {:add, c, exp} <- actions do
+        %Contact{
+          contact: c,
+          received: received_of(req),
+          flow_pid: flow_of(req),
+          flow_module: flow_module_of(req),
+          dialog_pid: dialog_pid,
+          instance: contact_param(c, "+sip.instance"),
+          reg_id: contact_param(c, "reg-id"),
+          methods: contact_param(c, "methods"),
+          info: info,
+          expires_at: DateTime.add(now(), exp, :second)
+        }
+      end
 
-      merged = upsert(kept, added)
+    merged = upsert(kept, added)
 
-      if length(merged) > state.max_contacts do
+    cond do
+      merged == [] ->
+        :ets.delete(tid, aor)
+        state = demonitor_aor(state, domain, aor)
+        notify(state, domain, aor, :unregistered)
+        {:unregistered, granted(aor, [], 0), state}
+
+      length(merged) > state.max_contacts ->
         {:error, {403, "Too many contacts"}}
-      else
+
+      true ->
         :ets.insert(tid, {aor, merged})
         # `merged`, not `added`: RFC 3261 §10.3 step 8 wants the 200 OK to
         # enumerate ALL current bindings, so a UA refreshing one of its two
@@ -612,7 +696,6 @@ defmodule Kelix.Mod.Registrar do
         state = supersede_owners(state, domain, aor, existing, added, dialog_pid)
         notify(state, domain, aor, :registered)
         {:registered, granted(aor, merged, granted_expires(actions)), state}
-      end
     end
   end
 
@@ -702,19 +785,7 @@ defmodule Kelix.Mod.Registrar do
   defp store_or_delete(tid, aor, []), do: :ets.delete(tid, aor)
   defp store_or_delete(tid, aor, contacts), do: :ets.insert(tid, {aor, contacts})
 
-  # A binding is tied to the dialog that created it **only over a
-  # connection-oriented transport** (§6.3, WebRTC-critical): there the UA is
-  # reachable over that one connection and nothing else, so losing it makes the
-  # contact undialable and the binding a lie.
-  #
-  # Over a **connectionless** transport the opposite holds, and this is a property
-  # of the transport mode, not of UDP specifically: one binding is shared by however
-  # many dialogs the UA takes part in, so it cannot belong to any single one of them.
-  # It lives its own life, bounded by `expires_at` and reclaimed by the periodic
-  # sweep — the usrloc semantics. Monitoring the dialog there made a registration
-  # evaporate as soon as that one dialog ended, which is exactly what a real handset
-  # triggered on 2026-07-28.
-  @connected_transports [SIP.Transport.TCP, SIP.Transport.TLS, SIP.Transport.WSS]
+  # `@connected_transports` is defined, and explained, above `registered?/3`.
 
   defp ensure_monitor(state, _domain, _aor, pid, _flow) when not is_pid(pid), do: state
 

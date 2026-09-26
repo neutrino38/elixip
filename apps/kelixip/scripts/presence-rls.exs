@@ -13,8 +13,10 @@
 #     `sip:rls@sip.linphone.org` whatever its own domain is, so the realm to
 #     challenge on is the watcher's — its `From` — and never the routed domain;
 #   * the buddies sit on their own domains, none of which has to be the routed
-#     one. `watch_many/3` files each on its own; an entry on a domain this node
-#     does not serve is answered `noresource` rather than left silent.
+#     one. `watch_many/3` files each on its own and answers its state — what was
+#     published, else open/closed from the registrar for a known subscriber of a
+#     domain that has one; any other entry is answered `noresource` rather than
+#     left silent.
 defmodule Kelix.PresenceRls do
   use SIP.Scenario
   use Kelix.Mod.AuthDb
@@ -76,7 +78,7 @@ defmodule Kelix.PresenceRls do
 
   # No `authorize` state, and that is a decision: the presentity of a list
   # subscription is the list, and a list is whatever the watcher put in its own
-  # SUBSCRIBE. There is nothing to look up and refuse — an entry we do not serve
+  # SUBSCRIBE. There is nothing to look up and refuse — an entry with no state
   # is reported `noresource` in the manifest, one buddy at a time.
   state subscribe do
     case accept_subscription(

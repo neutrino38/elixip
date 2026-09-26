@@ -42,6 +42,22 @@ defmodule Kelix.Mod.Presence do
   subscriptions whatever is written down, and what is taken from day one is the
   **shape**, so a backend later writes rows it already holds.
 
+  ## A resource nobody publishes
+
+  A presence state is first what its presentity PUBLISHed. When nothing live is
+  published, it is **open** while the presentity is registered — which the
+  registrar script says, through `registration_changed/1` and
+  `registration_ended/1` — and, on a domain that has a registrar, **closed** for a
+  subscriber `Kelix.Mod.AuthDb` knows. Anywhere else — a domain with no
+  registrar, a domain this node does not serve, a user nobody provisioned, a
+  package other than `presence` — there is no state, `nil`, which a list NOTIFY
+  reports as `noresource`.
+
+  A registration that opens or closes a watched resource nobody publishes is
+  pushed like a publication. The collection never follows the registrar on its
+  own: a domain whose registrar script does not report (`registrar.exs`) shows its
+  subscribers closed.
+
   ## Composition is not done here
 
   Several publishers may hold state for one presentity at the same time (RFC 3903
@@ -60,7 +76,13 @@ defmodule Kelix.Mod.Presence do
   #   states     %{domain => :ets.tid}  resource => [%SIP.Publication{}], one per etag
   #   watchers   %{domain => :ets.tid}  resource => %{pid => %SIP.Subscription{}}
   #   mons       %{monitor_ref => {domain, resource, pid}}  watcher instances
-  defstruct states: %{}, watchers: %{}, mons: %{}, sweep_ms: @sweep_ms
+  #   registered MapSet of `presence` resources whose presentity holds a binding,
+  #              as the registrar script reported it
+  defstruct states: %{},
+            watchers: %{},
+            mons: %{},
+            registered: MapSet.new(),
+            sweep_ms: @sweep_ms
 
   @type resource :: {String.t() | nil, String.t() | nil, String.t() | nil}
 
@@ -98,6 +120,9 @@ defmodule Kelix.Mod.Presence do
         watch_many: 3,
         unwatch: 1,
         state_of: 2,
+        registration_changed: 1,
+        registration_changed: 2,
+        registration_ended: 1,
         presentities: 1,
         watchers: 2,
         remove: 2
@@ -275,7 +300,8 @@ defmodule Kelix.Mod.Presence do
   Called by a notifier script right after `accept_subscription/1`: the
   subscription is the framework's (one dialog's point of view), the collection is
   ours (who watches what). Answers `{:ok, doc}` — the document to NOTIFY straight
-  away, `nil` when nothing has been published about the resource yet — or
+  away, the registrar's reading when nothing live is published (see *A resource
+  nobody publishes*), `nil` when there is none either — or
   `{:error, :down | :timeout}`.
 
   The domain passed is a **fallback**, used only when the subscription's
@@ -300,7 +326,12 @@ defmodule Kelix.Mod.Presence do
 
   def watch(domain, %SIP.Subscription{} = sub) do
     SIP.Scenario.Monitor.note_command(:db, "presence_watch")
-    Kelix.Module.safe_call(__MODULE__, {:watch, served_domain(domain), sub, self()})
+    domain = served_domain(domain)
+
+    case Kelix.Module.safe_call(__MODULE__, {:watch, domain, sub, self()}) do
+      {:ok, nil} -> {:ok, unpublished_state(subscription_resource(sub, domain))}
+      other -> other
+    end
   end
 
   @doc """
@@ -310,7 +341,8 @@ defmodule Kelix.Mod.Presence do
   `uris` are the entries as the watcher wrote them, and the answer is keyed on
   those very strings — the script composes its RLMI out of the URIs it was given,
   not out of whatever this collection folded them to. Their value is the document
-  held for each, `nil` when nothing is published about it.
+  held for each, the registrar's reading when nothing live is published, `nil`
+  when there is none either.
 
   Each entry is watched on **its own domain**, which is why a list is not N calls
   to `watch/2` with one context: the three entries of one buddy list routinely sit
@@ -329,7 +361,19 @@ defmodule Kelix.Mod.Presence do
 
   def watch_many(domain, %SIP.Subscription{} = sub, uris) when is_list(uris) do
     SIP.Scenario.Monitor.note_command(:db, "presence_watch_many")
-    Kelix.Module.safe_call(__MODULE__, {:watch_many, served_domain(domain), sub, uris, self()})
+    domain = served_domain(domain)
+
+    case Kelix.Module.safe_call(__MODULE__, {:watch_many, domain, sub, uris, self()}) do
+      {:ok, docs} when is_map(docs) ->
+        {:ok,
+         Map.new(docs, fn
+           {uri, nil} -> {uri, unpublished_state(uri_resource(uri, domain, sub.event))}
+           held -> held
+         end)}
+
+      other ->
+        other
+    end
   end
 
   @doc """
@@ -346,6 +390,57 @@ defmodule Kelix.Mod.Presence do
 
   def unwatch(_domain),
     do: Kelix.Module.safe_call(__MODULE__, {:unwatch, self()})
+
+  @doc """
+  Report that a REGISTER was saved — whatever its outcome — so the presentity it
+  names is open or closed from now on.
+
+  Called by the registrar script after `Kelix.Mod.Registrar.save/2`. The status is
+  not the script's to give: it is read off the registrar here, all the AOR's
+  devices included, so an un-REGISTER from one handset leaves the subscriber open
+  while another holds a binding. Watchers of the resource are pushed when the
+  status changes and nothing live is published; a refreshing REGISTER pushes
+  nothing.
+  """
+  @spec registration_changed(%SIP.Context{}) :: :ok | {:error, :down | :timeout}
+  def registration_changed(%SIP.Context{} = sip_ctx), do: report_registration(sip_ctx, nil)
+
+  @doc """
+  The same, for a change no registrar script saw: a binding removed by hand
+  (`kelictl registration remove`, `DELETE /domains/<domain>/registrations/<aor>`).
+  `domain` is the served domain's name, `aor` the user part.
+  """
+  @spec registration_changed(String.t(), String.t()) :: :ok | {:error, :down | :timeout}
+  def registration_changed(domain, aor) when is_binary(domain) and is_binary(aor) do
+    resource = resource_key({aor, domain, "presence"})
+    Kelix.Module.safe_call(__MODULE__, {:registration, resource, nil})
+  end
+
+  @doc """
+  Report that the registration of this instance's dialog ended — its connection
+  dropped, or it was not refreshed in time.
+
+  The bindings of the ending dialog no longer count, even if the registrar has not
+  dropped them yet; the presentity stays open while another device holds one.
+  """
+  @spec registration_ended(%SIP.Context{}) :: :ok | {:error, :down | :timeout}
+  def registration_ended(%SIP.Context{} = sip_ctx),
+    do: report_registration(sip_ctx, sip_ctx.dialogpid)
+
+  # The AOR is the REGISTER's To, on the domain the router resolved — the key the
+  # registrar stored the bindings under.
+  defp report_registration(sip_ctx, ending_dialog) do
+    SIP.Scenario.Monitor.note_command(:db, "presence_registration")
+
+    case SIP.Session.CallUAS.stored_req(sip_ctx) do
+      %{to: %SIP.Uri{userpart: user}} when is_binary(user) ->
+        resource = resource_key({user, sip_ctx.domain, "presence"})
+        Kelix.Module.safe_call(__MODULE__, {:registration, resource, ending_dialog})
+
+      _no_register ->
+        :ok
+    end
+  end
 
   @doc """
   The document published about a resource, or `nil`.
@@ -443,6 +538,17 @@ defmodule Kelix.Mod.Presence do
     {:reply, reply, state}
   end
 
+  # The registrar is asked HERE rather than in the reporting instance: two devices
+  # of one AOR reporting at once are then answered in turn, each reading the store
+  # as the other left it, and the last push is the true one.
+  def handle_call({:registration, {user, domain, _event} = resource, ending_dialog}, _from, state) do
+    open? =
+      Code.ensure_loaded?(Kelix.Mod.Registrar) and
+        Kelix.Mod.Registrar.registered?(domain, user, ending_dialog)
+
+    {:reply, :ok, set_registered(state, resource, open?)}
+  end
+
   # a watcher instance died with its dialog: it watches nothing any more
   @impl true
   def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
@@ -531,10 +637,10 @@ defmodule Kelix.Mod.Presence do
     # An un-SUBSCRIBE is accepted as a lifetime of zero and is the END of a
     # subscription: storing it would leave a watcher nothing will ever reach.
     if SIP.Subscription.status(sub) == :terminated do
-      {{:ok, current_doc(state, resource)}, state}
+      {{:ok, held_state(state, resource)}, state}
     else
       state = register_watcher(state, resource, sub, pid)
-      {{:ok, current_doc(state, resource)}, state}
+      {{:ok, held_state(state, resource)}, state}
     end
   end
 
@@ -550,7 +656,7 @@ defmodule Kelix.Mod.Presence do
             do: st,
             else: register_watcher(st, resource, %{sub | presentity_uri: uri}, pid)
 
-        {Map.put(docs, uri, current_doc(st, resource)), st}
+        {Map.put(docs, uri, held_state(st, resource)), st}
       end)
 
     {{:ok, docs}, state}
@@ -624,15 +730,102 @@ defmodule Kelix.Mod.Presence do
   # from here would be invisible to `kelictl monitor` and to the sequence diagram,
   # and a scenario parked in a state would no longer describe what the node does.
   defp fan_out(state, {_user, rdomain, _event} = resource, event) do
-    doc = current_doc(state, resource)
+    watchers = watchers_of(state, resource)
 
-    for {pid, _sub} <- watchers_of(state, resource) do
-      send(pid, {:presence, :state, resource, doc})
-    end
+    # Nothing to compute for nobody. When the last publication goes, the
+    # presentity published, so it exists — the subscriber base is not asked.
+    if map_size(watchers) > 0, do: push(watchers, resource, known_state(state, resource))
 
     Kelix.Metrics.Emit.presence_event(rdomain, event)
     state
   end
+
+  defp push(watchers, resource, doc) do
+    for {pid, _sub} <- watchers, do: send(pid, {:presence, :state, resource, doc})
+    :ok
+  end
+
+  # A registration moved. It is news only when the status actually changed — the
+  # registrar script reports every refreshing REGISTER — and only for a resource
+  # nobody publishes: a publication wins over the registration.
+  defp set_registered(state, resource, open?) do
+    if MapSet.member?(state.registered, resource) == open? do
+      state
+    else
+      registered =
+        if open?,
+          do: MapSet.put(state.registered, resource),
+          else: MapSet.delete(state.registered, resource)
+
+      state = %{state | registered: registered}
+      watchers = watchers_of(state, resource)
+
+      if map_size(watchers) > 0 and current_doc(state, resource) == nil,
+        do: push(watchers, resource, known_state(state, resource))
+
+      state
+    end
+  end
+
+  # ── a resource nobody publishes ─────────────────────────────────────────────
+
+  # The state as the collection alone can tell it: the publication, else open for
+  # a registered presentity, else closed on a domain with a registrar — the
+  # presentity being known to exist, since it published or registered — else nil.
+  defp known_state(state, resource) do
+    case current_doc(state, resource) do
+      nil -> status_doc(resource, registration_status(state, resource, true))
+      doc -> doc
+    end
+  end
+
+  # What the collection answers a watcher: the publication, else open for a
+  # registered presentity, else nil — which the facade completes in the caller's
+  # process with `unpublished_state/1`.
+  defp held_state(state, resource) do
+    case current_doc(state, resource) do
+      nil ->
+        if MapSet.member?(state.registered, resource), do: status_doc(resource, :open)
+
+      doc ->
+        doc
+    end
+  end
+
+  # The same, for a watcher that just subscribed: a presentity that neither
+  # publishes nor is registered may be one nobody provisioned. The existence
+  # question is a query on the subscriber base, so it runs in the CALLER's process
+  # (the facades call this on a `nil` the collection answered) — never in the
+  # collection's, where every other watcher and publisher would wait on it.
+  defp unpublished_state(resource),
+    do: status_doc(resource, registration_status(nil, resource, false))
+
+  # `:open` / `:closed`, or nil: another package than `presence`, a domain with no
+  # registrar (or not served), a user the subscriber base does not know.
+  defp registration_status(state, {user, domain, "presence"} = resource, known?)
+       when is_binary(user) and is_binary(domain) do
+    cond do
+      state != nil and MapSet.member?(state.registered, resource) -> :open
+      registrar_domain?(domain) and (known? or subscriber?(user, domain)) -> :closed
+      true -> nil
+    end
+  end
+
+  defp registration_status(_state, _resource, _known?), do: nil
+
+  defp status_doc(_resource, nil), do: nil
+
+  defp status_doc({user, domain, _event}, status),
+    do: SIP.Presence.Doc.new("sip:#{user}@#{domain}", status)
+
+  defp registrar_domain?(domain) do
+    match?(%Kelix.Domain{registrar: registrar} when registrar != nil, domain_entry(domain))
+  end
+
+  # The modules are installed separately: a node may run this one without the
+  # subscriber base, and the existence question then has no answer.
+  defp subscriber?(user, domain),
+    do: Code.ensure_loaded?(Kelix.Mod.AuthDb) and Kelix.Mod.AuthDb.subscriber?(user, domain)
 
   defp watchers_of(state, {_user, rdomain, _event} = resource) do
     case Map.get(state.watchers, rdomain) do
@@ -745,8 +938,11 @@ defmodule Kelix.Mod.Presence do
 
   defp subscription_resource(%SIP.Subscription{} = sub, domain) do
     case SIP.Uri.parse(to_string(sub.presentity_uri)) do
-      {:ok, %SIP.Uri{userpart: user, domain: dom}} -> resource_key({user, dom || domain, sub.event})
-      _ -> resource_key({sub.to_user, sub.to_domain || domain, sub.event})
+      {:ok, %SIP.Uri{userpart: user, domain: dom}} ->
+        resource_key({user, dom || domain, sub.event})
+
+      _ ->
+        resource_key({sub.to_user, sub.to_domain || domain, sub.event})
     end
   end
 

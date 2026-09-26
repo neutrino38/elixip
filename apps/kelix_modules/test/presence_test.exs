@@ -417,6 +417,258 @@ defmodule Kelix.Mod.PresenceTest do
     end
   end
 
+  # Nothing published: a registration reported by the registrar script opens the
+  # presentity; a subscriber of a domain with a registrar is closed otherwise.
+  # Everything else has no state.
+  describe "a resource nobody publishes" do
+    @entries [
+      "sip:900020123@visioassistance.net",
+      "sip:9876@conf.weshwesh.eu",
+      "sip:magali.buu@weshwesh.eu",
+      "sip:nobody@weshwesh.eu"
+    ]
+
+    @magali {"magali.buu", "weshwesh.eu", "presence"}
+
+    setup do
+      Kelix.Test.Fixtures.serve_domains("""
+      [[domain]]
+      name = "weshwesh.eu"
+
+        [domain.registrar]
+        script = "registrar.exs"
+
+        [[domain.presence]]
+        event-package = "presence"
+        subscribe = "presence-subscribe.exs"
+
+      [[domain]]
+      name = "conf.weshwesh.eu"
+
+        [[domain.presence]]
+        event-package = "presence"
+        subscribe = "presence-subscribe.exs"
+      """)
+
+      start_supervised!(Kelix.Mod.Registrar)
+
+      Application.put_env(:kelixip, :authdb_ha1_lookup, fn
+        "magali.buu", "weshwesh.eu" -> {:ok, "0123456789abcdef0123456789abcdef"}
+        _user, _realm -> :notfound
+      end)
+
+      on_exit(fn -> Application.delete_env(:kelixip, :authdb_ha1_lookup) end)
+      :ok
+    end
+
+    # One device of magali's: its REGISTER dialog (a live process standing in for
+    # it), and the context its registrar-presence instance reports with.
+    defp device(host) do
+      dialog = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(dialog, :kill) end)
+      %{host: host, dialog: dialog}
+    end
+
+    defp register_req(%{host: host}, expires) do
+      %{
+        method: :REGISTER,
+        to: %SIP.Uri{userpart: "magali.buu", domain: "weshwesh.eu"},
+        ruri: %SIP.Uri{
+          userpart: "magali.buu",
+          domain: "weshwesh.eu",
+          destip: {1, 2, 3, 4},
+          destport: 5060,
+          destproto: "UDP",
+          tp_pid: self()
+        },
+        contact: %SIP.Uri{userpart: "magali.buu", domain: host, port: 5060},
+        expires: expires,
+        callid: "reg-" <> host
+      }
+    end
+
+    defp ctx(device, req) do
+      %SIP.Context{domain: "weshwesh.eu", dialogpid: device.dialog}
+      |> SIP.Context.appdata_set(:last_uas_req, req)
+    end
+
+    # What registrar-presence.exs does with a REGISTER: save it, then report it.
+    defp register(device, expires \\ 3600) do
+      req = register_req(device, expires)
+      {verdict, _granted} = Kelix.Mod.Registrar.save(req, "weshwesh.eu", device.dialog)
+      :ok = Presence.registration_changed(ctx(device, req))
+      verdict
+    end
+
+    # ... and with the end of its dialog, the binding still in the store.
+    defp registration_ended(device),
+      do: :ok = Presence.registration_ended(ctx(device, register_req(device, 3600)))
+
+    defp status(%SIP.Presence.Doc{tuples: [%{status: status}]}), do: status
+
+    test "a registered subscriber is open, the others have no state" do
+      :registered = register(device("10.0.0.9"))
+
+      assert {:ok, docs} = Presence.watch_many(@domain, subscription("rls", "bob"), @entries)
+
+      assert status(docs["sip:magali.buu@weshwesh.eu"]) == :open
+      # a user the subscriber base does not know
+      assert docs["sip:nobody@weshwesh.eu"] == nil
+      # a served domain with no registrar
+      assert docs["sip:9876@conf.weshwesh.eu"] == nil
+      # a domain this node does not serve
+      assert docs["sip:900020123@visioassistance.net"] == nil
+    end
+
+    test "a subscriber that is not registered is closed" do
+      assert {:ok, docs} = Presence.watch_many(@domain, subscription("rls", "bob"), @entries)
+      assert status(docs["sip:magali.buu@weshwesh.eu"]) == :closed
+    end
+
+    # A registration nobody reported is not seen: registrar.exs does not report.
+    test "a binding the registrar script did not report leaves the subscriber closed" do
+      phone = device("10.0.0.9")
+      {:registered, _} = Kelix.Mod.Registrar.save(register_req(phone, 3600), "weshwesh.eu")
+
+      assert {:ok, docs} = Presence.watch_many(@domain, subscription("rls", "bob"), @entries)
+      assert status(docs["sip:magali.buu@weshwesh.eu"]) == :closed
+    end
+
+    test "a live publication wins over the registration" do
+      :registered = register(device("10.0.0.9"))
+
+      pub = %{
+        publication("magali.buu", doc: doc("magali.buu", :closed, "busy"))
+        | domain: "weshwesh.eu"
+      }
+
+      {:ok, _etag, _} = Presence.publish("weshwesh.eu", pub)
+
+      assert {:ok, docs} = Presence.watch_many(@domain, subscription("rls", "bob"), @entries)
+      assert %SIP.Presence.Doc{note: "busy"} = docs["sip:magali.buu@weshwesh.eu"]
+    end
+
+    test "watch/2 answers the same reading" do
+      sub = subscription("magali.buu", "bob", presentity_domain: "weshwesh.eu")
+      assert {:ok, doc} = Presence.watch(@domain, sub)
+      assert status(doc) == :closed
+
+      :registered = register(device("10.0.0.9"))
+      assert {:ok, doc} = Presence.watch(@domain, sub)
+      assert status(doc) == :open
+    end
+
+    test "registering pushes open once, un-registering pushes closed" do
+      {:ok, _} = Presence.watch_many(@domain, subscription("rls", "bob"), @entries)
+      phone = device("10.0.0.9")
+
+      :registered = register(phone)
+      assert_receive {:presence, :state, @magali, doc}
+      assert status(doc) == :open
+
+      # a refreshing REGISTER changes nothing a watcher can see
+      :registered = register(phone)
+      refute_receive {:presence, :state, @magali, _doc}, 100
+
+      :unregistered = register(phone, 0)
+      assert_receive {:presence, :state, @magali, doc}
+      assert status(doc) == :closed
+    end
+
+    test "a registration that ends — dropped or not refreshed — pushes closed" do
+      phone = device("10.0.0.9")
+      :registered = register(phone)
+      {:ok, _} = Presence.watch_many(@domain, subscription("rls", "bob"), @entries)
+
+      # the store still holds the binding: the ending dialog's own do not count
+      registration_ended(phone)
+      assert_receive {:presence, :state, @magali, doc}
+      assert status(doc) == :closed
+    end
+
+    test "a subscriber stays open while one of its devices is registered" do
+      {phone, softphone} = {device("10.0.0.9"), device("10.0.0.10")}
+      :registered = register(phone)
+      :registered = register(softphone)
+      {:ok, _} = Presence.watch_many(@domain, subscription("rls", "bob"), @entries)
+
+      # one device un-registers, the other drops: closed only after the second
+      # the AOR keeps the other device's binding, so it stays registered
+      :registered = register(phone, 0)
+      refute_receive {:presence, :state, @magali, _doc}, 100
+
+      registration_ended(softphone)
+      assert_receive {:presence, :state, @magali, doc}
+      assert status(doc) == :closed
+    end
+
+    # No registrar script sees a binding dropped by hand: the control layer, which
+    # both kelictl and REST go through, reports it when presence is loaded.
+    test "a registration removed by kelictl / REST pushes closed" do
+      Kelix.ModuleRegistry.register("registrar", Kelix.Mod.Registrar, %{})
+      Kelix.ModuleRegistry.register("presence", Presence, %{})
+
+      on_exit(fn ->
+        Kelix.ModuleRegistry.unregister("registrar")
+        Kelix.ModuleRegistry.unregister("presence")
+      end)
+
+      :registered = register(device("10.0.0.9"))
+      {:ok, _} = Presence.watch_many(@domain, subscription("rls", "bob"), @entries)
+
+      assert :ok = Kelix.Control.unregister("weshwesh.eu", "magali.buu")
+      assert_receive {:presence, :state, @magali, doc}
+      assert status(doc) == :closed
+    end
+
+    test "removing one of two devices by hand keeps the subscriber open" do
+      Kelix.ModuleRegistry.register("registrar", Kelix.Mod.Registrar, %{})
+      Kelix.ModuleRegistry.register("presence", Presence, %{})
+
+      on_exit(fn ->
+        Kelix.ModuleRegistry.unregister("registrar")
+        Kelix.ModuleRegistry.unregister("presence")
+      end)
+
+      :registered = register(device("10.0.0.9"))
+      :registered = register(device("10.0.0.10"))
+      {:ok, _} = Presence.watch_many(@domain, subscription("rls", "bob"), @entries)
+
+      [%{contact: first} | _] = Kelix.Mod.Registrar.bindings("weshwesh.eu", "magali.buu")
+      {:ok, contact} = SIP.Uri.serialize_ruri(first)
+
+      assert :ok = Kelix.Control.unregister("weshwesh.eu", "magali.buu", contact)
+      refute_receive {:presence, :state, @magali, _doc}, 100
+      assert [_other] = Kelix.Mod.Registrar.bindings("weshwesh.eu", "magali.buu")
+    end
+
+    test "a registration is not pushed over a live publication" do
+      pub = %{publication("magali.buu") | domain: "weshwesh.eu"}
+      {:ok, _etag, _} = Presence.publish("weshwesh.eu", pub)
+      {:ok, _} = Presence.watch_many(@domain, subscription("rls", "bob"), @entries)
+
+      :registered = register(device("10.0.0.9"))
+      refute_receive {:presence, :state, _resource, _doc}, 100
+    end
+
+    test "when the publication goes, a registered subscriber is pushed open" do
+      :registered = register(device("10.0.0.9"))
+      pub = %{publication("magali.buu", doc: doc("magali.buu", :closed)) | domain: "weshwesh.eu"}
+      {:ok, etag, _} = Presence.publish("weshwesh.eu", pub)
+      {:ok, _} = Presence.watch_many(@domain, subscription("rls", "bob"), @entries)
+
+      removal = %{
+        publication("magali.buu", operation: :remove, etag: etag, expires: 0)
+        | domain: "weshwesh.eu"
+      }
+
+      {:ok, nil, 0} = Presence.publish("weshwesh.eu", removal)
+
+      assert_receive {:presence, :state, @magali, doc}
+      assert status(doc) == :open
+    end
+  end
+
   describe "the control surface" do
     setup do
       {:ok, etag, _} = Presence.publish(@domain, publication("bob"))

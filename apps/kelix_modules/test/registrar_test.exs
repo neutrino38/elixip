@@ -164,6 +164,26 @@ defmodule Kelix.Mod.RegistrarTest do
       assert Registrar.bindings(@domain, "alice") == []
     end
 
+    # RFC 3261 §10.3 step 7: an un-REGISTER removes the bindings it names. One
+    # handset signing off must not un-register the subscriber's other devices.
+    test "unregistering one contact leaves the AOR's other bindings" do
+      assert {:registered, _} = Registrar.save(register("alice", "10.0.0.1"), @domain)
+
+      assert {:registered, _} =
+               Registrar.save(register("alice", "10.0.0.2", callid: "call-2"), @domain)
+
+      assert {:registered, granted} =
+               Registrar.save(register("alice", "10.0.0.1", expires: 0), @domain)
+
+      assert [%SIP.Uri{domain: "10.0.0.2"}] = granted.contacts
+      assert [%{contact: %SIP.Uri{domain: "10.0.0.2"}}] = Registrar.bindings(@domain, "alice")
+
+      assert {:unregistered, _} =
+               Registrar.save(register("alice", "10.0.0.2", expires: 0), @domain)
+
+      assert Registrar.bindings(@domain, "alice") == []
+    end
+
     test "domains are stored separately" do
       assert {:registered, _} = Registrar.save(register("alice", "10.0.0.9"), "example.com")
 

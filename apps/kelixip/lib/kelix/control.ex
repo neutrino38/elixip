@@ -486,13 +486,24 @@ defmodule Kelix.Control do
 
   Dropping a binding is destructive and per-domain by nature: there is deliberately
   no form that removes `"alice"` from *every* domain at once.
+
+  When the presence module is loaded it is told, as the registrar script tells it
+  of every other change: this removal goes through no script, and a subscriber
+  shown open because of the dropped binding would otherwise stay open.
   """
   @spec unregister(String.t(), String.t(), String.t() | :all) :: :ok | :notfound
   def unregister(domain, aor, contact \\ :all) do
     with {:ok, name} <- resolve_domain(domain),
          {:ok, user} <- aor_user(aor, name) do
       # via the registry: the registrar is a loadable module, absent from the core
-      Kelix.ModuleRegistry.facade("registrar", :remove, [name, user, contact], :notfound)
+      case Kelix.ModuleRegistry.facade("registrar", :remove, [name, user, contact], :notfound) do
+        :ok ->
+          Kelix.ModuleRegistry.facade("presence", :registration_changed, [name, user], :ok)
+          :ok
+
+        other ->
+          other
+      end
     else
       _ -> :notfound
     end

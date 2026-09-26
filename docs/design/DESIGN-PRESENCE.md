@@ -395,6 +395,41 @@ client's, so the number of domains in it would be the client's too, and each one
 costs a table and a monitor. The `[outbound]` domain of a later phase is what will
 take those entries over by subscribing to their own servers.
 
+**A resource nobody publishes is answered by its registrations.** An unpublished
+state and an unknown resource used to be the same `nil`, so a subscriber of this
+very node who publishes nothing was reported `noresource`, as if it did not
+exist. The state of a resource is now, in order: the live publication; else
+**open** while a device of the presentity is registered; else, on a domain with a
+registrar and for a user `auth_db` knows, **closed**; else no state, `noresource`.
+The subscriber check runs in the watcher's process, never in the collection's: it
+is a query on the subscriber base.
+
+**The registrar script reports, the collection does not follow.** Registrations
+reach the collection from `registrar-presence.exs`, which calls
+`registration_changed/1` after each save and `registration_ended/1` when its
+dialog ends — the connection dropped, or the registration was not refreshed. The
+collection does not subscribe to the registrar's events: a domain opts in by the
+registrar script it runs, and the report is a state of that script, visible to
+`kelictl monitor` like every other step of the flow.
+
+Neither report carries a status. The collection asks the registrar, inside its
+own process, whether any device of the AOR still holds a binding: two devices
+reporting at once are then answered in turn, each against the store as the other
+left it, and one handset leaving never closes a subscriber another keeps
+registered. The ending dialog's own bindings are left out of that question — the
+store may not have dropped them yet — and so are those over a connected transport
+whose dialog is already dead. A change is pushed only when the status moves and
+nothing live is published; a refreshing REGISTER pushes nothing.
+
+**A registration always has an instance to report its end.** The script's wait
+for a refresh ends when its dialog's bindings lapse in the registrar
+(`Kelix.Mod.Registrar.remaining_ms/1`), not when the dialog's own timer fires:
+that timer is re-armed by every REGISTER received, refused ones included, on the
+lifetime asked rather than the one granted. And a refused REGISTER changes no
+binding, so a refused refresh returns to that wait instead of ending the session
+— `registrar.exs` ends it after five idle seconds, which left a binding running
+with nobody to report its lapse.
+
 ### What goes back
 
 A `multipart/related` (RFC 2387) whose root part is an **RLMI manifest**

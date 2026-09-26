@@ -84,8 +84,11 @@ The verdict says what happened to the AOR:
 
 | Verdict | Meaning |
 |---|---|
-| `{:registered, granted}` | the AOR has live bindings |
-| `{:unregistered, granted}` | its last binding is gone (`Expires: 0`, or the `Contact: *` wildcard); `granted.contacts` is empty and `granted.expires` is `0` |
+| `{:registered, granted}` | the AOR has live bindings — including after an `Expires: 0` that removed some of them |
+| `{:unregistered, granted}` | its last binding is gone (`Expires: 0` on the last ones, or the `Contact: *` wildcard); `granted.contacts` is empty and `granted.expires` is `0` |
+
+An `Expires: 0` removes the bindings it names and no other; only `Contact: *`
+removes all of them (RFC 3261 §10.3 step 7).
 | `{:error, {code, reason}}` | `400` (no Contact / bad wildcard), `423` (too brief), `403` (too many contacts) |
 | `{:error, :down \| :timeout}` | the store could not answer |
 
@@ -151,6 +154,28 @@ Each failure is one atom, mapping to one SIP answer:
 Used by the reference script
 [`direct-call.exs`](../../../apps/kelixip/scripts/direct-call.exs) and its
 authenticated variants; commented in [B2BUA.md](../../../B2BUA.md).
+
+### `registered?/2`, `registered?/3`
+
+```elixir
+registered?(domain, aor, ending_dialog \\ nil) :: boolean
+```
+
+Whether the AOR still holds a binding that reaches a device, leaving out the
+bindings owned by `ending_dialog`, and the bindings over TCP, TLS or WSS whose
+dialog is gone. `false` when the store cannot answer. Used by the presence module
+when a registration changes or ends.
+
+### `remaining_ms/1`
+
+```elixir
+remaining_ms(sip_ctx) :: non_neg_integer | :infinity
+```
+
+How long the registration held by the calling instance's dialog has left, in
+milliseconds: the latest expiry among the AOR's bindings that this dialog owns.
+`0` when it owns none, `:infinity` when the store cannot answer. Used by
+`registrar-presence.exs` to wait for the end of its registration.
 
 ### `subscribe_register_event/2`, `unsubscribe_register_event/2`
 

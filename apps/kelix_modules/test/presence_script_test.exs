@@ -366,7 +366,10 @@ defmodule Kelix.PresenceScriptTest do
 
     setup do
       path =
-        Path.join(System.tmp_dir!(), "presence_rls_script_#{System.unique_integer([:positive])}.toml")
+        Path.join(
+          System.tmp_dir!(),
+          "presence_rls_script_#{System.unique_integer([:positive])}.toml"
+        )
 
       File.write!(path, """
       [[domain]]
@@ -403,6 +406,7 @@ defmodule Kelix.PresenceScriptTest do
 
       assert manifest.uri == "sip:rls@#{@domain}"
       assert manifest.full_state == true
+
       assert Enum.map(manifest.resources, & &1.uri) |> Enum.sort() ==
                Enum.sort([bob_uri(), @outsider])
     end
@@ -470,6 +474,149 @@ defmodule Kelix.PresenceScriptTest do
   # The digest itself, on both halves. It is what says WHO is watching and WHOSE
   # state is being published: a SUBSCRIBE names its watcher in a From anyone can
   # write, and an unauthenticated PUBLISH lets a stranger declare a user online.
+  # A subscriber who publishes nothing: its registrations, reported by the
+  # registrar script, open and close it — and each change reaches the watcher as
+  # a NOTIFY.
+  describe "registrar-presence.exs" do
+    setup do
+      Kelix.Test.Fixtures.serve_domains("""
+      [[domain]]
+      name = "example.com"
+
+        [domain.registrar]
+        script = "registrar-presence.exs"
+        min_expires = 1
+
+        [[domain.presence]]
+        event-package = "presence"
+        subscribe = "presence-subscribe.exs"
+      """)
+
+      start_supervised!(Kelix.Mod.Registrar)
+
+      %{
+        registrar:
+          SIP.Scenario.Loader.load_file!(
+            Path.expand("../../kelixip/scripts/registrar-presence.exs", __DIR__)
+          )
+      }
+    end
+
+    defp register(host, opts \\ []) do
+      %{
+        method: :REGISTER,
+        from: %SIP.Uri{userpart: @presentity, domain: @domain},
+        to: %SIP.Uri{userpart: @presentity, domain: @domain},
+        ruri: %SIP.Uri{
+          userpart: @presentity,
+          domain: @domain,
+          destip: {1, 2, 3, 4},
+          destport: 5060,
+          destproto: "UDP"
+        },
+        contact: %SIP.Uri{userpart: @presentity, domain: host, port: 5060},
+        expires: Keyword.get(opts, :expires, 3600),
+        callid: "reg-" <> host
+      }
+    end
+
+    # One device: its REGISTER dialog and its registrar-presence instance.
+    defp registered_device(module, host, opts \\ []) do
+      {:ok, dialog} = MockDialog.start_link(self())
+
+      {pid, _ref} =
+        SIP.Scenario.Runner.spawn_uas_instance(module,
+          dialog_pid: dialog,
+          inbound_request: register(host, opts),
+          config_overrides: [domain: @domain]
+        )
+
+      on_exit(fn -> send(pid, {:scenario_ctl, :shutdown, :test}) end)
+
+      submit(pid, dialog, register(host, opts))
+      assert_receive {:replied, 200, "OK", _, _}, 1000
+      %{pid: pid, dialog: dialog, host: host}
+    end
+
+    defp watch_bob(module) do
+      {:ok, dialog} = MockDialog.start_link(self())
+      watcher = spawn_instance(module, dialog, subscribe())
+      submit(watcher, dialog, subscribe())
+      assert_receive {:replied, 200, "OK", _, _}, 1000
+      assert_receive {:notified, body, "application/pidf+xml"}, 1000
+      body
+    end
+
+    test "registering NOTIFYs open, the connection dropping NOTIFYs closed",
+         %{subscribe: sub, registrar: reg} do
+      assert watch_bob(sub) =~ "closed"
+
+      phone = registered_device(reg, "10.0.0.9")
+      assert_receive {:notified, body, "application/pidf+xml"}, 1000
+      assert body =~ "<basic>open</basic>"
+
+      send(phone.pid, {:dialog_terminated, phone.dialog, :transport_down})
+      assert_receive {:notified, body, "application/pidf+xml"}, 1000
+      assert body =~ "<basic>closed</basic>"
+    end
+
+    test "a registration that was not refreshed NOTIFYs closed",
+         %{subscribe: sub, registrar: reg} do
+      phone = registered_device(reg, "10.0.0.9")
+      assert watch_bob(sub) =~ "<basic>open</basic>"
+
+      # what the dialog's :registerexpire timer ends it with
+      send(phone.pid, {:dialog_terminated, phone.dialog, :normal})
+      assert_receive {:notified, body, "application/pidf+xml"}, 1000
+      assert body =~ "<basic>closed</basic>"
+    end
+
+    # The mock dialog has no lifetime timer: what ends the wait is the
+    # registration lapsing in the registrar, which is the one clock that counts.
+    test "a registration nobody refreshes NOTIFYs closed when it lapses",
+         %{subscribe: sub, registrar: reg} do
+      _phone = registered_device(reg, "10.0.0.9", expires: 2)
+      assert watch_bob(sub) =~ "<basic>open</basic>"
+
+      assert_receive {:notified, body, "application/pidf+xml"}, 3_500
+      assert body =~ "<basic>closed</basic>"
+    end
+
+    # A refused refresh changes no binding. The session must outlive it — the
+    # idle 5 s of a session never registered would end it first, and nothing
+    # would then report the lapse.
+    test "a refused refresh keeps the session, which reports the lapse",
+         %{subscribe: sub, registrar: reg} do
+      phone = registered_device(reg, "10.0.0.9", expires: 3)
+      assert watch_bob(sub) =~ "<basic>open</basic>"
+
+      # a wildcard without Expires: 0 is a 400, and changes nothing
+      bad = %{register("10.0.0.9") | contact: :*}
+      submit(phone.pid, phone.dialog, bad)
+      assert_receive {:replied, 400, _, _, _}, 1000
+      assert [_still] = Kelix.Mod.Registrar.bindings(@domain, @presentity)
+
+      assert_receive {:notified, body, "application/pidf+xml"}, 4_000
+      assert body =~ "<basic>closed</basic>"
+    end
+
+    test "one device leaving keeps the subscriber open while another is registered",
+         %{subscribe: sub, registrar: reg} do
+      phone = registered_device(reg, "10.0.0.9")
+      _softphone = registered_device(reg, "10.0.0.10")
+      assert watch_bob(sub) =~ "<basic>open</basic>"
+
+      # the phone un-registers its own contact, then its dialog ends
+      submit(phone.pid, phone.dialog, register("10.0.0.9", expires: 0))
+      assert_receive {:replied, 200, "OK", _, _}, 1000
+      send(phone.pid, {:dialog_terminated, phone.dialog, :normal})
+      refute_receive {:notified, _body, _}, 300
+
+      assert [%{contact: %SIP.Uri{domain: "10.0.0.10"}}] =
+               Kelix.Mod.Registrar.bindings(@domain, @presentity)
+    end
+  end
+
   describe "authentication" do
     test "an unauthenticated SUBSCRIBE is challenged, and nothing is watched", %{subscribe: m} do
       {:ok, dialog} = MockDialog.start_link(self())
