@@ -10,7 +10,7 @@
 
 Name:           elixipp
 Version:        1.6.0
-Release:        7%{?dist}
+Release:        8%{?dist}
 Summary:        SIP scenario test tool driven by the Finite State Language
 License:        BUSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -46,6 +46,10 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 %{_bindir}/elixipp
 
 %changelog
+* Sat Sep 26 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-8
+- Rebuild, released together with kelixip 1.6.0-8 (a REGISTER dialog ends
+  with its registrar session).
+
 * Sat Sep 26 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-7
 - List NOTIFYs are deflated as soon as the body passes 500 octets, when the
   watcher accepts it. The bound was 1200 for the body alone, which ignored the ~700

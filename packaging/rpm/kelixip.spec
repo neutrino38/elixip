@@ -32,7 +32,7 @@ Version:        1.6.0
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        7%{?dist}
+Release:        8%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -280,6 +280,17 @@ fi
 %{_datadir}/%{name}/registrar-presence.exs
 
 %changelog
+* Sat Sep 26 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-8
+- Presence now follows real registrations. The registrar-presence.exs script read
+  the REGISTER's To as a parsed URI, which only a test request carries: presence
+  was never told of a registration (no NOTIFY to watchers), and the script ended
+  1 ms after its 200 OK. Every later REGISTER of that client went unanswered and
+  timed out 408.
+- A REGISTER dialog ends with its registrar session, so the client's next
+  REGISTER reaches a live one instead of timing out 408.
+- kelictl: module commands take positional arguments, bound in order to the
+  arguments the command declares — kelictl presence list weshwesh.eu.
+
 * Sat Sep 26 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-7
 - List NOTIFYs are deflated as soon as the body passes 500 octets, when the
   watcher accepts it. The bound was 1200 for the body alone, which ignored the ~700
