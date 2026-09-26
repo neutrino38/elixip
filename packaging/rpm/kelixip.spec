@@ -32,7 +32,7 @@ Version:        1.6.0
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        6%{?dist}
+Release:        7%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -280,6 +280,13 @@ fi
 %{_datadir}/%{name}/registrar-presence.exs
 
 %changelog
+* Sat Sep 26 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-7
+- List NOTIFYs are deflated as soon as the body passes 500 octets, when the
+  watcher accepts it. The bound was 1200 for the body alone, which ignored the ~700
+  octets of headers a list NOTIFY carries over IPv6: a three-entry list went out
+  clear in a 1806-octet datagram, which the path fragmented and the watcher never
+  received.
+
 * Sat Sep 26 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-6
 - Presence follows registrations: a new reference script, registrar-presence.exs
   (shipped with kelixip-mod-presence), is registrar.exs plus a report to the

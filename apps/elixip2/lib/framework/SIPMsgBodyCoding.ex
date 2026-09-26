@@ -24,9 +24,15 @@ defmodule SIP.Msg.BodyCoding do
   `identity` and an absent header are the same thing: the body as sent.
   """
 
-  # Past this, a body does not fit in one datagram beside its headers
-  # (RFC 3261 §18.1.1 puts the message bound at 1300).
-  @compress_above 1200
+  # Past this, a body does not fit in one datagram beside its headers. RFC 3261
+  # §18.1.1 puts the MESSAGE bound at 1300, and the headers of a list NOTIFY are
+  # not small: over IPv6 they carry the watcher's address twice (Request-URI and
+  # Via), ours in Contact, and a multipart Content-Type naming its root and its
+  # boundary — 679 octets on a Linphone subscription captured on 2026-09-26. The
+  # bound used to be 1200, as if headers took a hundred: a 1079-octet body went out
+  # clear in a 1806-octet datagram, which the path fragmented and the watcher's
+  # side dropped. 800 octets are kept for the headers.
+  @compress_above 500
 
   @doc """
   Undo `coding` on `body`.
@@ -55,8 +61,9 @@ defmodule SIP.Msg.BodyCoding do
   Compress `body` when the peer can read `coding` **and** the body is big enough
   to be worth it: `{:ok, octets}`, or `:as_is`.
 
-  The bound is #{@compress_above} octets, which is the RFC 3261 §18.1.1 figure for
-  "this will not fit in a datagram" minus room for the headers. Below it nothing is
+  The bound is #{@compress_above} octets: the RFC 3261 §18.1.1 figure of 1300 for
+  "this will not fit in a datagram", minus 800 for the headers of a list NOTIFY
+  sent over IPv6. Below it nothing is
   compressed, and that is deliberate: a small NOTIFY stays readable in a capture,
   where half the work of diagnosing presence is done. Above it a list NOTIFY does
   not fit in one IPv6 datagram at all, and nothing in the path will fragment it.

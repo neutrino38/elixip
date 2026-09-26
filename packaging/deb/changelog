@@ -1,3 +1,13 @@
+kelixip (1.6.0-7) stable; urgency=low
+
+  * List NOTIFYs are deflated as soon as the body passes 500 octets, when the
+    watcher accepts it. The bound was 1200 for the body alone, which ignored the ~700
+    octets of headers a list NOTIFY carries over IPv6: a three-entry list went out
+    clear in a 1806-octet datagram, which the path fragmented and the watcher never
+    received.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Sat, 26 Sep 2026 20:30:00 +0200
+
 kelixip (1.6.0-6) stable; urgency=low
 
   * Presence follows registrations: a new reference script, registrar-presence.exs

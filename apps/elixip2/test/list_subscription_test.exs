@@ -282,6 +282,31 @@ defmodule SIP.Test.ListSubscription do
     end
   end
 
+  # The body alone is under the old 1200 bound; the MESSAGE is not. This is the
+  # NOTIFY of 2026-09-26 — a three-entry list, 1079 octets of body beside 679 of
+  # headers — which went out clear in a 1806-octet datagram and never arrived.
+  describe "a body small enough, in a message that is not" do
+    test "is compressed too" do
+      tp = attach("list-deflate-mid")
+      buddies = ["sip:buddy1@unit.test"]
+      serve(Map.new(buddies, &{&1, SIP.Presence.Doc.new(&1, :open)}))
+
+      req = subscribe(instance: "list-deflate-mid", entries: buddies)
+      cid = req.callid
+      Mockup.inject(tp, req)
+
+      assert_receive {:sip_mockup, {:request_sent, :NOTIFY, %{callid: ^cid} = notify}}, 2_000
+      assert notify.contentlength in 500..1200
+
+      wire = wire_notify()
+      assert wire =~ "Content-Encoding: deflate"
+      assert byte_size(wire) < 1300
+
+      {manifest, _parts} = read_list_notify(notify)
+      assert length(manifest.resources) == 1
+    end
+  end
+
   describe "a deflated exchange" do
     test "the list arrives compressed and the answer names the same buddies" do
       tp = attach("list-deflate")
