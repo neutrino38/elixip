@@ -77,7 +77,7 @@ defmodule Kelix.ControlRegistrationsTest do
     end
 
     # kelescope confirms this action and requires an admin name before sending it
-    # (`docs/design/kelixip_liveview.md`) — traced here, not merely returned.
+    # — traced here, not merely returned.
     test "unregister/4 traces the admin name in this node's own logs" do
       assert {:registered, _} = Kelix.Mod.Registrar.save(register("alice"), "example.com")
 
@@ -122,7 +122,7 @@ defmodule Kelix.ControlRegistrationsTest do
       :ok
     end
 
-    # kelescope's live registrations panel (docs/design/kelixip_liveview.md):
+    # kelescope's live registrations panel:
     # opening a domain's panel gets the current detail, then a push per change,
     # with no polling.
     test "returns the current detail, matched by name or alias, then pushes changes" do

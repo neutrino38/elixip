@@ -6,7 +6,7 @@ defmodule Kelix.Mod.Mcu.Event do
 
   Everything the module observes is emitted here exactly once, and the consumers
   read the same term: the logger, and `Kelix.Mod.Mcu.Push`, which relays what
-  changed to the subscribed UIs (`docs/design/mcu-live-push.md`). Two invariants the
+  changed to the subscribed UIs. Two invariants the
   design leans on:
 
   1. **`participant.left` is emitted exactly once per participant**, whatever the

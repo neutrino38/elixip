@@ -656,7 +656,7 @@ defmodule Kelix.Mod.RegistrarTest do
   end
 
   describe "subscribe_domain_counters/1" do
-    # kelescope's live domain list (docs/design/kelixip_liveview.md): every AOR
+    # kelescope's live domain list: every AOR
     # change on a domain must push that domain's live count, with no polling —
     # the registrations half of `Kelix.Control.subscribe_domain_counters/1`.
     test "pushes the domain's registration count on every registered/unregistered AOR" do
@@ -682,7 +682,7 @@ defmodule Kelix.Mod.RegistrarTest do
   end
 
   describe "subscribe_registrations/2" do
-    # kelescope's live registrations panel (docs/design/kelixip_liveview.md): every
+    # kelescope's live registrations panel: every
     # AOR change on a domain must push its full detail, not just a count — the
     # registrations half of `Kelix.Control.subscribe_registrations/2`.
     test "pushes the AOR's detail on register, then :remove on its last unregister" do

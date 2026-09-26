@@ -671,7 +671,7 @@ defmodule Kelix.Control.CLI do
   #
   # `kelictl monitor` is a snapshot; `continuous` stays open and redraws as
   # scenarios appear, change state or end — fed by `Kelix.Control.subscribe_monitor/1`
-  # (docs/design/kelixip_liveview.md), not by polling. It runs inside the live node
+  # not by polling. It runs inside the live node
   # exactly like every other command (design §10.2), so `self()` here already is
   # the right subscriber pid whether that node is local or, one day, remote.
   #

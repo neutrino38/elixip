@@ -572,7 +572,7 @@ defmodule Kelix.Control.CLITest do
   end
 
   # `continuous` swaps the one-shot snapshot for `Kelix.Control.subscribe_monitor/1`'s
-  # push feed (docs/design/kelixip_liveview.md): capture_io with `""` as stdin makes
+  # push feed: capture_io with `""` as stdin makes
   # `IO.read/2` answer `:eof` immediately, standing in for an operator's Ctrl+D.
   describe "monitor continuous" do
     test "prints the live header and the snapshot, then stops on stdin EOF" do

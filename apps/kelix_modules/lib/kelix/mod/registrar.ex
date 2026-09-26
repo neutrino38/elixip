@@ -49,13 +49,12 @@ defmodule Kelix.Mod.Registrar do
     * `lookup/1` — rewrite a request to reach the registered UA(s);
     * `subscribe_register_event/2` / `unsubscribe_register_event/2`;
     * `subscribe_domain_counters/1` / `unsubscribe_domain_counters/1` — the
-      registrations half of `Kelix.Control.subscribe_domain_counters/1`
-      (`docs/design/kelixip_liveview.md`): every AOR change on any domain pushes
-      that domain's live count, `{:kelix_domain_counter, domain, :registrations,
+      registrations half of `Kelix.Control.subscribe_domain_counters/1`: every
+      AOR change on any domain pushes that domain's live count, `{:kelix_domain_counter, domain, :registrations,
       count}`, rather than the caller polling `all/1`;
     * `subscribe_registrations/2` / `unsubscribe_registrations/2` — same idea, one
       domain at a time and the full AOR detail rather than a count (kelescope's
-      live registrations panel, `docs/design/kelixip_liveview.md`).
+      live registrations panel).
 
   Delivered as a loadable `Kelix.Module` (P5): `validate_config/1`, `child_spec/2`
   and `describe/0` below; the facades route through `Kelix.Module.safe_call/3` so
@@ -417,7 +416,7 @@ defmodule Kelix.Mod.Registrar do
 
   @doc """
   Subscribe `pid` to `domain`'s registration detail — the registrations half of
-  `Kelix.Control.subscribe_registrations/2` (`docs/design/kelixip_liveview.md`).
+  `Kelix.Control.subscribe_registrations/2`.
   `pid` gets `{:kelix_registrations, domain, {:upsert, %{domain, aor, contacts}}}`
   each time an AOR gains or keeps a live contact, and `{:kelix_registrations,
   domain, {:remove, aor}}` when its last one goes; monitored, so a

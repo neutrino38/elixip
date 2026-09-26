@@ -79,8 +79,8 @@ defmodule Kelix.Control do
   end
 
   @doc """
-  Subscribe `pid` to scenario changes as they happen (kelescope's live monitor —
-  `docs/design/kelixip_liveview.md`), on the model of
+  Subscribe `pid` to scenario changes as they happen (kelescope's live monitor),
+  on the model of
   `Kelix.Mod.Registrar.subscribe_register_event/2`. Returns the current snapshot
   (`monitor/0`'s shape), taken in the same call that registers the subscriber so
   there is no window for a change to fall into; `pid` then receives
@@ -102,7 +102,7 @@ defmodule Kelix.Control do
 
   @doc """
   Subscribe `pid` to domain counter changes as they happen (kelescope's live
-  domain list, `docs/design/kelixip_liveview.md`) — the active-calls half from
+  domain list) — the active-calls half from
   `Kelix.InstancePool`, the registrations half from the registrar module (a
   no-op when it is not loaded: no domain ever registers, so nothing is missed).
   Returns the current snapshot (`domains/0`'s shape); `pid` then receives
@@ -129,7 +129,7 @@ defmodule Kelix.Control do
 
   @doc """
   Subscribe `pid` to one domain's registration detail as it changes (kelescope's
-  live registrations panel, `docs/design/kelixip_liveview.md`) — a no-op when the
+  live registrations panel) — a no-op when the
   registrar module is not loaded: no domain ever registers, so nothing is missed.
   `domain` is matched the way inbound traffic is — name and aliases,
   case-insensitively. Returns the same `%{domain, registrations}` entry
@@ -157,7 +157,7 @@ defmodule Kelix.Control do
 
   @doc """
   Subscribe `pid` to the conference list as it changes (kelescope's conferencing
-  page — contract `docs/design/mcu-live-push.md`). Returns the current list;
+  page). Returns the current list;
   `pid` then receives `{:kelix_conferences, {:upsert, conf_row}}` and
   `{:kelix_conferences, {:remove, uid}}`, no polling needed.
 
@@ -511,8 +511,8 @@ defmodule Kelix.Control do
 
   @doc """
   Same as `unregister/3`, but `admin` identifies who asked for it — kelescope
-  confirms this action and requires a name before sending it
-  (`docs/design/kelixip_liveview.md`), traced here in this node's own logs
+  confirms this action and requires a name before sending it, traced here in
+  this node's own logs
   rather than merely returned to the caller.
   """
   @spec unregister(String.t(), String.t(), String.t() | :all, String.t() | nil) ::
@@ -536,9 +536,8 @@ defmodule Kelix.Control do
 
   @doc """
   Same as `shutdown_scenario/1`, but `admin` identifies who asked for it —
-  kelescope confirms this action and requires a name before sending it
-  (`docs/design/kelixip_liveview.md`), traced here in this node's own logs
-  rather than merely returned to the caller.
+  kelescope confirms this action and requires a name before sending it, traced
+  here in this node's own logs rather than merely returned to the caller.
   """
   @spec shutdown_scenario(pos_integer, String.t() | nil) :: :ok | {:error, :not_found}
   def shutdown_scenario(id, admin) when is_integer(id) do

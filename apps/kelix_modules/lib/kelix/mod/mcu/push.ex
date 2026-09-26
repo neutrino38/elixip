@@ -1,7 +1,7 @@
 defmodule Kelix.Mod.Mcu.Push do
   @moduledoc """
-  The live-push transport of the module's event vocabulary (contract
-  `docs/design/mcu-live-push.md`): a subscriber list and `send/2`, the mechanism
+  The live-push transport of the module's event vocabulary: a subscriber list and
+  `send/2`, the mechanism
   `Kelix.Mod.Registrar` and `Kelix.Control.subscribe_monitor/1` already use.
 
   Three topics, one per panel a UI opens:
