@@ -412,6 +412,17 @@ The positional `args…` are handed to the module's `handle_control/2` as
 boolean, digits an integer, a leading `{`/`[` is JSON). These share the same
 cookie boundary as the core commands.
 
+A bare token binds to the next declared argument the line did not name, in the
+order `<module> help` lists them, as for the core commands:
+
+```
+kelictl presence list weshwesh.eu              # = domain=weshwesh.eu
+kelictl presence show weshwesh.eu magali.buu   # = domain=… aor=…
+```
+
+A bare token spelling a declared argument's name stays a flag (`force` =
+`force=true`).
+
 **Quote a value that contains spaces** — `name='Sales weekly'`,
 `layout='2x2 hd720p'` — and the quotes reach the module intact, JSON included
 (`muted='{"audio":true}'`). Before 2026-08 the wrapper joined the argument line

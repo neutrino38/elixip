@@ -676,10 +676,21 @@ defmodule Kelix.Control.CLITest do
       def describe(), do: %{version: "1.0.0"}
 
       def describe_control(),
-        do: [%{name: "list", rw: :r, args: [%{name: "domain", required: true}]}]
+        do: [
+          %{name: "list", rw: :r, args: [%{name: "domain", required: true}]},
+          %{
+            name: "show",
+            rw: :r,
+            args: [%{name: "domain", required: true}, %{name: "aor", required: true}]
+          }
+        ]
 
       def handle_control("list", %{"domain" => domain}), do: {:ok, %{seen: domain}}
       def handle_control("list", _args), do: {:error, "domain is required"}
+
+      def handle_control("show", %{"domain" => d, "aor" => a, "args" => tokens}),
+        do: {:ok, %{seen: "#{a}@#{d}", tokens: tokens}}
+
       # the raw tokens stay reachable for a command that counts what it was not asked for
       def handle_control("raw", %{"args" => tokens}), do: {:ok, %{tokens: tokens}}
     end
@@ -691,6 +702,21 @@ defmodule Kelix.Control.CLITest do
     test "a name=value token becomes the named argument the module declares" do
       {0, out} = run(["namedargs", "list", "domain=weshwesh.eu"])
       assert out =~ "weshwesh.eu"
+    end
+
+    # `registration list weshwesh.eu` is positional; `presence list weshwesh.eu`
+    # answered "domain is required" to the same line.
+    test "a bare token binds to the declared argument, as a core command's would" do
+      {0, out} = run(["namedargs", "list", "weshwesh.eu"])
+      assert out =~ "weshwesh.eu"
+    end
+
+    # In declaration order, skipping what the line named — and the raw tokens say
+    # the same, for a module that re-parses them (Kelix.Mod.Mcu.Args).
+    test "positional tokens fill the declared arguments the line did not name" do
+      {0, out} = run(["namedargs", "show", "aor=magali", "weshwesh.eu"])
+      assert out =~ "magali@weshwesh.eu"
+      assert out =~ "domain=weshwesh.eu"
     end
 
     test "the raw tokens are still there" do

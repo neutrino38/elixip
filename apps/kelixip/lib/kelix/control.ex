@@ -882,11 +882,53 @@ defmodule Kelix.Control do
     case Kelix.ModuleRegistry.lookup(module_name) do
       %{module: module} ->
         if function_exported?(module, :handle_control, 2),
-          do: module.handle_control(cmd, args),
+          do: module.handle_control(cmd, bind_positional(module, cmd, args)),
           else: {:error, :no_command_surface}
 
       nil ->
         {:error, :unknown_module}
+    end
+  end
+
+  # `kelictl presence list weshwesh.eu` — the positional form every core command
+  # takes (`registration list weshwesh.eu`) — binds its bare tokens, in order, to
+  # the arguments the command declares and the line did not name. Done here because
+  # the declaration lives on the node: the CLI only knows it was handed a token.
+  #
+  # Only the CLI shape is touched (a raw token list under "args"); REST already
+  # names every key. Both views are rewritten — the named key AND the raw token
+  # becomes `name=value` — so a module reading either (`Kelix.Mod.Mcu.Args`
+  # re-parses the tokens) sees one answer. A bare token spelling a declared name
+  # stays the flag it always was, and one left over once every declared argument
+  # is bound is passed through for the module to refuse.
+  defp bind_positional(module, cmd, %{"args" => tokens} = args) when is_list(tokens) do
+    declared = declared_args(module, cmd)
+    free = Enum.reject(declared, &Map.has_key?(args, &1))
+
+    {tokens, {args, _free}} =
+      Enum.map_reduce(tokens, {args, free}, fn
+        token, {acc, [name | rest]} = unchanged when is_binary(token) ->
+          if String.contains?(token, "=") or token in declared,
+            do: {token, unchanged},
+            else: {"#{name}=#{token}", {acc |> Map.delete(token) |> Map.put(name, token), rest}}
+
+        token, unchanged ->
+          {token, unchanged}
+      end)
+
+    Map.put(args, "args", tokens)
+  end
+
+  defp bind_positional(_module, _cmd, args), do: args
+
+  defp declared_args(module, cmd) do
+    if function_exported?(module, :describe_control, 0) do
+      safe(fn -> module.describe_control() end, [])
+      |> Enum.find(%{}, &(&1.name == cmd))
+      |> Map.get(:args, [])
+      |> Enum.map(& &1.name)
+    else
+      []
     end
   end
 
