@@ -10,7 +10,7 @@
 
 Name:           elixipp
 Version:        1.6.0
-Release:        1%{?dist}
+Release:        6%{?dist}
 Summary:        SIP scenario test tool driven by the Finite State Language
 License:        BUSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -46,6 +46,9 @@ install -D -m 0755 bin/elixipp %{buildroot}%{_bindir}/elixipp
 %{_bindir}/elixipp
 
 %changelog
+* Sat Sep 26 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-6
+- Rebuild, released together with kelixip 1.6.0-6.
+
 * Fri Sep 18 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-1
 - The Finite State Language leaves the tree: it is now the separate package
   finite_state_language (OTP app :fsl, Apache-2.0). Scenarios keep the names they

@@ -32,7 +32,7 @@ Version:        1.6.0
 # machine: rpm identifies a package by its NEVRA, so installing over an
 # already-installed one is a no-op — the host keeps the older payload while rpm -q
 # reports the version you expected. Back to 1 when Version changes (CLAUDE.md).
-Release:        5%{?dist}
+Release:        6%{?dist}
 Summary:        kelixip SIP application server
 License:        BSL-1.1
 URL:            https://github.com/neutrino38/elixip
@@ -238,6 +238,7 @@ fi
 %{_datadir}/%{name}/*.exs
 %exclude %{_datadir}/%{name}/mcu*.exs
 %exclude %{_datadir}/%{name}/presence-*.exs
+%exclude %{_datadir}/%{name}/registrar-presence.exs
 %dir %attr(0755,root,root) %{kelixdir}
 %{kelixdir}/bin
 %{kelixdir}/erts-*
@@ -272,11 +273,29 @@ fi
 %files mod-presence
 %doc doc/modules/presence.md
 %{kelixdir}/modules/Elixir.Kelix.Mod.Presence*.beam
-# The reference scripts: one per method, plus the list server of RFC 4662. They
-# call this module's verbs and nothing else provides them.
+# The reference scripts: one per method, plus the list server of RFC 4662 and
+# the registrar that reports registrations as presence. They call this module's
+# verbs and nothing else provides them.
 %{_datadir}/%{name}/presence-*.exs
+%{_datadir}/%{name}/registrar-presence.exs
 
 %changelog
+* Sat Sep 26 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-6
+- Presence follows registrations: a new reference script, registrar-presence.exs
+  (shipped with kelixip-mod-presence), is registrar.exs plus a report to the
+  presence collection on every change. A subscriber that does not PUBLISH is open
+  while one of its devices is registered and closed when the last one goes —
+  un-REGISTER, connection lost, or a registration that lapsed — and its watchers
+  are NOTIFYed on each change. A refused refresh no longer ends the session.
+- A list subscription reports an unpublished subscriber of a registrar domain as
+  open or closed, not noresource; noresource is kept for unknown users and for
+  domains with no registrar or not served.
+- kelictl registration remove and DELETE /domains/<domain>/registrations/<aor>
+  update presence when kelixip-mod-presence is loaded.
+- Registrar fix: an Expires: 0 now removes only the contacts it names (RFC 3261
+  §10.3). It used to remove every binding of the AOR, un-registering a
+  subscriber's other devices whenever one of them signed off.
+
 * Tue Sep 22 2026 Emmanuel BUU <emmanuel.buu@ives.fr> - 1.6.0-2
 - Buddy lists (RFC 4662 / RFC 5367): kelixip-mod-presence ships a third
   reference script, presence-rls.exs, which serves a list subscription. Declare

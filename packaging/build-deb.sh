@@ -153,7 +153,7 @@ ln -s ../lib/kelixip/bin/kelixip "$root/usr/sbin/kelixip"
 # (every verb they call is its own), so build_module ships them instead.
 install -d -m 0755 "$root/usr/share/kelixip"
 for exs in "$stage"/scripts/*.exs; do
-  case ${exs##*/} in mcu*.exs | presence-*.exs) continue ;; esac
+  case ${exs##*/} in mcu*.exs | presence-*.exs | registrar-presence.exs) continue ;; esac
   install -m 0644 "$exs" "$root/usr/share/kelixip/"
 done
 
@@ -241,7 +241,7 @@ build_module() {
 build_module kelixip-mod-registrar 'Elixir.Kelix.Mod.Registrar*.beam' "$DEBDIR/control-mod-registrar.in" 'registrar.md'
 build_module kelixip-mod-auth-db   'Elixir.Kelix.Mod.AuthDb*.beam'    "$DEBDIR/control-mod-auth-db.in"   'auth_db.md'
 build_module kelixip-mod-mcu       'Elixir.Kelix.Mod.Mcu*.beam'       "$DEBDIR/control-mod-mcu.in"       'mcu*.md' 'mcu*.exs'
-build_module kelixip-mod-presence  'Elixir.Kelix.Mod.Presence*.beam'  "$DEBDIR/control-mod-presence.in"  'presence.md' 'presence-*.exs'
+build_module kelixip-mod-presence  'Elixir.Kelix.Mod.Presence*.beam'  "$DEBDIR/control-mod-presence.in"  'presence.md' '*presence*.exs'
 
 echo "==> packages in packaging/dist:"
 ls -1 "$DIST"/*.deb

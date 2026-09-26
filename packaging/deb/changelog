@@ -1,3 +1,22 @@
+kelixip (1.6.0-6) stable; urgency=low
+
+  * Presence follows registrations: a new reference script, registrar-presence.exs
+    (shipped with kelixip-mod-presence), is registrar.exs plus a report to the
+    presence collection on every change. A subscriber that does not PUBLISH is open
+    while one of its devices is registered and closed when the last one goes —
+    un-REGISTER, connection lost, or a registration that lapsed — and its watchers
+    are NOTIFYed on each change. A refused refresh no longer ends the session.
+  * A list subscription reports an unpublished subscriber of a registrar domain as
+    open or closed, not noresource; noresource is kept for unknown users and for
+    domains with no registrar or not served.
+  * kelictl registration remove and DELETE /domains/<domain>/registrations/<aor>
+    update presence when kelixip-mod-presence is loaded.
+  * Registrar fix: an Expires: 0 now removes only the contacts it names (RFC 3261
+    §10.3). It used to remove every binding of the AOR, un-registering a
+    subscriber's other devices whenever one of them signed off.
+
+ -- Emmanuel BUU <emmanuel.buu@ives.fr>  Sat, 26 Sep 2026 12:00:00 +0200
+
 kelixip (1.6.0-1) stable; urgency=low
 
   * Presence (RFC 6665 / 3856 / 3903): SUBSCRIBE, PUBLISH and the NOTIFYs between

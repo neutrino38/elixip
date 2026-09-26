@@ -28,7 +28,9 @@
 #  # `config uses_modules:` is not loaded — so install kelixip-mod-registrar and
 #  # kelixip-mod-auth_db before pointing a domain at registrar.exs.
 #  [domain.registrar]
-#  script = "registrar.exs"
+#  script = "registrar.exs"               # or "registrar-presence.exs": the same, and
+#                                         # a subscriber that does not PUBLISH is open
+#                                         # while registered (kelixip-mod-presence)
 #  #default_expires = 3600       # per-domain override of [module.registrar]
 #  #min_expires     = 60
 #
