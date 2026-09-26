@@ -933,6 +933,18 @@ defmodule SIP.DialogImpl do
     :ok
   end
 
+  # A REGISTER dialog lives as long as the registration it carries, and nothing in
+  # the protocol ends it early: a registrar session that ended — or crashed —
+  # while the client still refreshes would leave the dialog forwarding every
+  # REGISTER to a dead pid, unanswered. Seen in production 2026-09-26: each
+  # refresh of a WebRTC client timed out 408. So the dialog watches its session
+  # and ends with it. Other dialogs are not watched: an INVITE dialog outliving its
+  # application still has a far end to hang up (`answer_nobody_awaits/2`).
+  defp monitor_register_app(%{method: :REGISTER}, app) when is_pid(app),
+    do: Process.monitor(app)
+
+  defp monitor_register_app(_req, _app), do: :ok
+
   defp app_alive?(%SIP.DialogImpl{app: app}) when is_pid(app), do: Process.alive?(app)
   defp app_alive?(_state), do: false
 
@@ -1120,6 +1132,7 @@ defmodule SIP.DialogImpl do
         #
         # `arm_expiration_timer/2` is a no-op for anything but a REGISTER, so an
         # inbound INVITE dialog is unaffected.
+        monitor_register_app(req, app_id)
         {:ok, arm_expiration_timer(state, req) |> Map.put(:app, app_id)}
 
       # Session has not been created. Abort dialog and propagate the requested
@@ -2764,6 +2777,20 @@ defmodule SIP.DialogImpl do
         {_rc, state} = send_in_dialog_request(state, subscribe_refresh_request(state))
         {:noreply, state}
     end
+  end
+
+  # The application of a REGISTER dialog is gone (see `monitor_register_app/2`).
+  # Ending the dialog is what lets the client's next REGISTER — same Call-ID —
+  # open a fresh dialog and reach a live session. Kept alive, the dialog would
+  # forward it to a dead pid and nobody would answer it: a 408 after Timer F.
+  def handle_info({:DOWN, _ref, :process, app, reason}, state = %SIP.DialogImpl{app: app}) do
+    Logger.info(
+      dialogpid: "#{inspect(self())}",
+      module: __MODULE__,
+      message: "Terminating REGISTER Dialog: its application ended (#{inspect(reason)})"
+    )
+
+    {:stop, :normal, state}
   end
 
   def handle_info({:timeout, _timerRef, :registerexpire}, state = %SIP.DialogImpl{}) do

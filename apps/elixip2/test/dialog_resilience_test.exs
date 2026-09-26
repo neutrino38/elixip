@@ -497,4 +497,54 @@ defmodule SIP.Test.DialogResilience do
     # Still working, not merely still breathing.
     assert {_ftag, _cid, _totag} = GenServer.call(dlg, :getdialogid)
   end
+
+  # ── A REGISTER dialog whose session is gone ─────────────────────────────────
+
+  # A registrar session that stands for no one: it hands the test the dialog it
+  # was bound to, then ends when told to.
+  defmodule OneShotRegistrar do
+    def on_new_registration(_dialog_pid, _req, _trans_pid) do
+      test = Application.get_env(:elixip2, :resilience_test_pid)
+
+      pid =
+        spawn(fn ->
+          receive do
+            {:REGISTER, _req, _trans, dialog} -> send(test, {:bound, dialog, self()})
+          end
+
+          receive do
+            :die -> :ok
+          end
+        end)
+
+      {:accept, pid}
+    end
+  end
+
+  # A REGISTER dialog outlives nothing but its registration, and the session is
+  # the registration: once it has ended — or crashed — the dialog must end too.
+  # Left alive, it forwarded the client's next REGISTER (same Call-ID, so in
+  # dialog) to a dead pid, and every refresh of a WebRTC client timed out 408
+  # (production, 2026-09-26).
+  test "a REGISTER dialog ends with its registrar session" do
+    Application.put_env(:elixip2, :resilience_test_pid, self())
+    :ok = SIP.Session.ConfigRegistry.set_registration_processing_module(OneShotRegistrar)
+
+    on_exit(fn ->
+      Application.delete_env(:elixip2, :resilience_test_pid)
+      SIP.Session.ConfigRegistry.set_registration_processing_module(TestRegistrar)
+    end)
+
+    {:ok, raw} = File.read("test/SIP-REGISTER-LVP.txt")
+    {:ok, req} = SIPMsg.parse(raw, fn _, _, _, _ -> :ok end)
+    ruri = SIP.Uri.set_uri_param(req.ruri, "unittest", "regsession")
+    req = SIP.Msg.Ops.update_sip_msg(req, {:ruri, ruri})
+    Mockup.inject(SIP.Transport.Selector.select_transport(ruri).tp_pid, req)
+
+    assert_receive {:bound, dlg, session}, 2_000
+    assert Process.alive?(dlg)
+
+    send(session, :die)
+    assert_dies(dlg)
+  end
 end
