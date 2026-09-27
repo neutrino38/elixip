@@ -44,6 +44,7 @@ defmodule Kelix.Application do
       {Registry, keys: :unique, name: Registry.SIP.Transac},
       {Registry, keys: :unique, name: Registry.SIPTransport},
       {Registry, keys: :unique, name: Registry.SIPDialog},
+      {Registry, keys: :duplicate, name: Registry.SIPDialogEvents},
       # ConfigRegistry: the low-level primitive the future Kelix.Router configures
       # (§4). Supervised Agent holding the SIP.Session.ConfigRegistry struct.
       Supervisor.child_spec(
