@@ -249,6 +249,8 @@ defmodule SIP.Test.SubscriptionSuite do
           assert {:active, params} = SIP.Msg.Ops.subscription_state(notify)
           assert params["expires"] <= @traits.expires()
           assert {package_name(), nil} == SIP.Msg.Ops.event_package(notify)
+          # The type the package negotiated, not the SDP a bare body defaults to.
+          assert notify.contenttype == content_type()
           assert @traits.status_of(body_of(notify)) == :open
         end
 

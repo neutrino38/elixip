@@ -844,8 +844,13 @@ defmodule SIP.DialogImpl do
         |> Map.put(:contenttype, content_type)
         |> Map.put("Content-Encoding", encoding_of(sub))
 
+      # The type is stamped AFTER the body: `update_sip_msg/2` names a bare
+      # binary `application/sdp`, which is what a NOTIFY carrying PIDF used to
+      # announce itself as.
       :as_is ->
-        SIP.Msg.Ops.update_sip_msg(req, {:body, body})
+        req
+        |> SIP.Msg.Ops.update_sip_msg({:body, body})
+        |> Map.put(:contenttype, content_type)
     end
   end
 
