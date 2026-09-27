@@ -1,6 +1,7 @@
 # WebRTC UAC scenario: place a call as a browser-shaped WebRTC client — SIP over
-# WSS, a WebRTC offer (DTLS/ICE, rtcp-mux, mid, candidates), mendooze media — and
-# play a media file once the media path is up.
+# WSS, a WebRTC offer (DTLS/ICE, rtcp-mux, mid, candidates), T.140 text on an
+# outgoing WebSocket, mendooze media — then play a media file and record what
+# comes back, so the returned file can be compared to the source.
 #
 # Emulates the captured IVeS web client (docs/design/DESIGN-FRAMEWORK.md#65-webrtc-sdp/§2.5)
 # against the IVeS WebRTC gateway. Run it against the dev platform with:
@@ -48,7 +49,17 @@ defmodule UAC.InviteWebRTC do
   state calling do
     # webrtc: :yes makes the media layer build a browser-shaped WebRTC offer
     # (UDP/TLS/RTP/SAVPF, setup:actpass, ice, rtcp-mux, mid, candidates).
-    send_INVITE("sip:#{@callee_num}@#{sip_ctx.domain}", :mediaserver, timeout: 90, webrtc: :yes, media: [ :audio, :video ])
+    #
+    # text_transport: :ws is the browser's own text arrangement: audio and video
+    # in RTP, and T.140 on a WebSocket the media server OPENS towards the URL the
+    # answer publishes. Drop the option and the text goes on a WebRTC data
+    # channel instead, which is the default on a WebRTC leg.
+    send_INVITE("sip:#{@callee_num}@#{sip_ctx.domain}", :mediaserver,
+      timeout: 90,
+      webrtc: :yes,
+      media: [ :audio, :video, :text ],
+      text_transport: :ws
+    )
 
     on_events do
       {100, _rsp, _trans_pid, _dialog_pid} ->
@@ -61,7 +72,8 @@ defmodule UAC.InviteWebRTC do
         send_auth_INVITE(rsp, "sip:#{@callee_num}@#{sip_ctx.domain}", :mediaserver,
           timeout: 90,
           webrtc: :yes,
-          media: [ :audio, :video ]
+          media: [ :audio, :video, :text ],
+          text_transport: :ws
         )
 
         stay("#{code} Authentication Required")
@@ -108,14 +120,34 @@ defmodule UAC.InviteWebRTC do
 
   # -------------------------------------------------------------------------------
   state call_established do
-    media_play("/home/ebuu/mediaserver/titi.mp4")
+    # The recorder FIRST: what the far end returns starts arriving as soon as the
+    # player sends, and a recorder started afterwards misses the head of it. Its
+    # duration is unbounded (0) — the playback is what decides how long this
+    # runs. Both handles live at once on this leg: a player feeds what the
+    # endpoint sends, a recorder takes what it receives.
+    #
+    # `.mkv`, not `.mp4`: the Matroska container takes PCMU, Opus, H.264, VP8 and
+    # the text track as they come. In MP4 a PCMU return is transcoded to AAC and
+    # a VP8 one is lost, so the comparison with the source would no longer say
+    # anything about the network (the media server's
+    # `docs/maintenance/recette-ws-client.md`).
+    media_record("/home/buu/record-return.mkv", 0)
+    media_play("/home/buu/record.mp4")
 
     on_events do
       {:ms_event, _player, :player_started} ->
         stay("media: start")
 
+      {:ms_event, _recorder, :recorder_started} ->
+        stay("record: start")
+
       {:ms_event, _player, :player_ended} ->
-        goto(hangup_call, "media: EOF")
+        goto(draining_record, "media: EOF")
+
+      # The media server closed the file on its own (an error, or a stop
+      # condition in its options): there is nothing left to record.
+      {:ms_event, _recorder, {:recorder_stopped, reason}} ->
+        goto(hangup_call, "record stopped: #{inspect(reason)}")
 
       {:BYE, req, _trans_pid, _dialog_pid} ->
         reply_request(req, 200, "OK")
@@ -127,6 +159,29 @@ defmodule UAC.InviteWebRTC do
       # so every media scenario owes this clause.
       {:ms_event, _server, :server_disconnected} ->
         goto(hangup_call, "media server disconnected")
+    end
+  end
+
+  # -------------------------------------------------------------------------------
+  # The far end returns what it was sent, so the tail of the file is still coming
+  # back when the player reaches EOF. The recording keeps running for that tail —
+  # without it the returned file stops short of its end and the comparison with
+  # the source fails on material nothing lost. `media_cleanup_ressources/0` in
+  # `hangup_call` is what closes the file, and closing it is what writes the MP4
+  # index.
+  state draining_record do
+    on_events do
+      {:ms_event, _recorder, {:recorder_stopped, reason}} ->
+        goto(hangup_call, "record stopped: #{inspect(reason)}")
+
+      {:BYE, req, _trans_pid, _dialog_pid} ->
+        reply_request(req, 200, "OK")
+        scenario_success("BYE")
+
+      {:ms_event, _server, :server_disconnected} ->
+        goto(hangup_call, "media server disconnected")
+    after
+      3_000 -> goto(hangup_call, "record tail elapsed")
     end
   end
 

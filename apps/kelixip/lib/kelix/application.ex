@@ -26,6 +26,11 @@ defmodule Kelix.Application do
 
     resolve_default_dns()
 
+    # The event packages compiled into the framework. Not a supervised child: the
+    # table is a :persistent_term written once, and the Router reads it to answer
+    # 489 on a package the node does not know.
+    :ok = SIP.EventPackage.register_builtins()
+
     children = [
       # Syslog sink (§3.1 `[log].target`). Before Kelix.Config, which decides in its
       # own init whether to enable it — so it must already be there to be asked.
@@ -64,7 +69,10 @@ defmodule Kelix.Application do
       # commands. It backs `kelictl monitor` — without it the runner's reporting
       # helpers are no-ops and the whole FSM formalism is invisible from outside.
       # Ordered before the InstancePool, which keys its rows on the instance id.
-      SIP.Scenario.Monitor,
+      # `columns:` is what a SIP call adds to a row on top of the machine's own
+      # (SIP.FSL.Host.monitor_columns/0): the registry is generic and merges
+      # whatever the embedding declares.
+      {FSL.Monitor, columns: SIP.FSL.Host.monitor_columns()},
       # Script loading/versioning (§5) and the shared instance factory (§4.2).
       Kelix.ScriptRegistry,
       Kelix.InstancePool,

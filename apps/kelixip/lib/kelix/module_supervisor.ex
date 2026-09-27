@@ -288,10 +288,13 @@ defmodule Kelix.ModuleSupervisor do
     :ok
   end
 
+  # `function_enabled?/2` is asked rather than re-derived: "a function block
+  # present = enabled" is one reading, and presence is enabled by a LIST of blocks
+  # — a domain serving no package has `[]`, which is not nil.
   defp domains_enabling(function) do
     if Process.whereis(Kelix.Domains) do
       for domain <- Kelix.Domains.current().domains,
-          Map.get(domain, function) != nil,
+          Kelix.Router.function_enabled?(domain, function),
           do: domain.name
     else
       []

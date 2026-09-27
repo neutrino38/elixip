@@ -232,8 +232,8 @@ defmodule Kelix.Mod.Mcu do
         accept_messages: 1,
         send_message: 4,
         send_message: 5,
-        # the live push a UI subscribes to (docs/design/mcu-live-push.md), reached
-        # through Kelix.Control and not from a script
+        # the live push a UI subscribes to, reached through Kelix.Control and not
+        # from a script
         subscribe_conferences: 1,
         unsubscribe_conferences: 1,
         subscribe_conference: 2,
@@ -310,7 +310,7 @@ defmodule Kelix.Mod.Mcu do
     end
   end
 
-  # ── live push (docs/design/mcu-live-push.md) ─────────────────────────────────
+  # ── live push ───────────────────────────────────────────────────────────────
 
   @doc """
   Subscribe `pid` to the conference **list**, and return the current one.
@@ -1264,8 +1264,8 @@ defmodule Kelix.Mod.Mcu do
   end
 
   # `admin` identifies who asked for it — kelescope confirms this action and
-  # requires a name before sending it (`docs/design/kelixip_liveview.md`), traced
-  # here rather than added to `@create_args` (it is not a conference field).
+  # requires a name before sending it, traced here rather than added to
+  # `@create_args` (it is not a conference field).
   defp do_control("conference.create", args) do
     {admin, args} = Map.pop(args, "admin")
     args = drop_retired(args, "conference.create")
@@ -1700,7 +1700,7 @@ defmodule Kelix.Mod.Mcu do
     # three tables above (owner-writes-only) cannot allow. It holds counters and the
     # bounds, never a roster and never a payload.
     Message.create_table(config)
-    # The live-push subscriber list (`docs/design/mcu-live-push.md`): a table and not
+    # The live-push subscriber list: a table and not
     # GenServer state, because `Event.emit/3` publishes from whatever process observed
     # the transition. Writes still come through here.
     Push.create_table()
@@ -1996,7 +1996,7 @@ defmodule Kelix.Mod.Mcu do
     end
   end
 
-  # ── live push subscriptions (docs/design/mcu-live-push.md) ───────────────────
+  # ── live push subscriptions ─────────────────────────────────────────────────
 
   defp push_snapshot(_state, :list),
     do: {:ok, %{owner: self(), conferences: Enum.map(conferences(), &Push.render/1)}}

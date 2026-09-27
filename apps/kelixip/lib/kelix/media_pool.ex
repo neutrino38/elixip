@@ -391,7 +391,9 @@ defmodule Kelix.MediaPool do
 
     case probe_connect(mod, url) do
       {:ok, pid} ->
-        facts = {true, read_fact(mod, pid, :network_profiles), read_fact(mod, pid, :server_status)}
+        facts =
+          {true, read_fact(mod, pid, :network_profiles), read_fact(mod, pid, :server_status)}
+
         try_disconnect(mod, pid)
         facts
 

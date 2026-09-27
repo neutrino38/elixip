@@ -252,13 +252,38 @@ defmodule Kelix.Control.CLI do
   defp parse([module, "help", cmd]),
     do: {:ok, {:module_help, module, cmd}, :module_commands, [module]}
 
-  # module-contributed command: <module> <cmd> [args…]
+  # module-contributed command: <module> <cmd> [name=value…]
   defp parse([module, cmd | rest]),
-    do: {:ok, {:module, module, cmd}, :module_command, [module, cmd, %{"args" => rest}]}
+    do: {:ok, {:module, module, cmd}, :module_command, [module, cmd, module_args(rest)]}
 
   defp parse(_), do: {:error, usage()}
 
   defp pop_flag(args, flag), do: {flag in args, Enum.reject(args, &(&1 == flag))}
+
+  # The `name=value` tokens an operator types become the named arguments a module
+  # declares (`describe_control/0` `args:`, which is also what `<module> help`
+  # prints), so `handle_control/2` reads one shape whichever frontal it came from —
+  # REST already hands it the path, query and body keys merged at the top level.
+  #
+  # The frontal is where this belongs: it is the one that knows the CLI form.
+  # Leaving it to each module meant three readings of one convention, and
+  # `kelictl presence list domain=…` reached a module that had none — it answered
+  # "domain is required" to a command line that named one.
+  #
+  # The raw list stays under "args": a command that takes none answers on what it
+  # was not asked for (`Kelix.Mod.AuthDb`), and one that types its values does it
+  # from the tokens (`Kelix.Mod.Mcu.Args`).
+  defp module_args(tokens) do
+    named =
+      for token <- tokens, into: %{} do
+        case String.split(token, "=", parts: 2) do
+          [name, value] -> {name, value}
+          [flag] -> {flag, true}
+        end
+      end
+
+    Map.put(named, "args", tokens)
+  end
 
   # ── completion candidates ────────────────────────────────────────────────────
   #
@@ -537,9 +562,11 @@ defmodule Kelix.Control.CLI do
         "active calls:  #{d.active_calls}",
         "registrations: #{d.registrations}",
         "registrar:     #{format_function(d.registrar)}",
-        "presence:      #{format_function(d.presence)}",
-        if(d.dial_plan == [], do: "dial-plan:     (disabled)", else: "dial-plan:")
-      ] ++ format_dial_plan(d.dial_plan)
+        if(d.presence == [], do: "presence:      (disabled)", else: "presence:")
+      ] ++
+        format_presence(d.presence) ++
+        [if(d.dial_plan == [], do: "dial-plan:     (disabled)", else: "dial-plan:")] ++
+        format_dial_plan(d.dial_plan)
 
     {0, Enum.join(lines, "\n")}
   end
@@ -575,7 +602,8 @@ defmodule Kelix.Control.CLI do
         # Named for what it is: this is the pool's own probe of the adapter channel,
         # not the health a conference rides — the module lines below carry that one.
         "health:       #{if m.healthy, do: "up", else: "down"} (pool probe)"
-      ] ++ mediaserver_status_lines(Map.get(m, :server, :unknown)) ++
+      ] ++
+        mediaserver_status_lines(Map.get(m, :server, :unknown)) ++
         module_view_lines(m.modules)
 
     {0, Enum.join(lines, "\n")}
@@ -643,7 +671,7 @@ defmodule Kelix.Control.CLI do
   #
   # `kelictl monitor` is a snapshot; `continuous` stays open and redraws as
   # scenarios appear, change state or end — fed by `Kelix.Control.subscribe_monitor/1`
-  # (docs/design/kelixip_liveview.md), not by polling. It runs inside the live node
+  # not by polling. It runs inside the live node
   # exactly like every other command (design §10.2), so `self()` here already is
   # the right subscriber pid whether that node is local or, one day, remote.
   #
@@ -1064,6 +1092,27 @@ defmodule Kelix.Control.CLI do
     Enum.map_join(Enum.sort(cfg), " ", fn {k, v} -> "#{k}=#{v}" end)
   end
 
+  # One line per event package, naming the script each method is routed to. Not
+  # numbered, unlike the dial-plan: the package is an exact key, so declaration
+  # order decides nothing.
+  defp format_presence(blocks) do
+    pw = blocks |> Enum.map(&String.length(&1.event_package)) |> Enum.max(fn -> 0 end)
+
+    for b <- blocks,
+        {method, script} <- [{"SUBSCRIBE", b.subscribe}, {"PUBLISH", b.publish}],
+        do:
+          "  #{String.pad_trailing(b.event_package, pw)} #{String.pad_trailing(method, 9)} -> " <>
+            format_presence_script(script)
+  end
+
+  # A package with no `publish` script: the method is not served on it, and the
+  # router answers 405. Printed, because an operator wondering why their PUBLISH
+  # is refused reads this view first.
+  defp format_presence_script(nil), do: "(not served)"
+
+  defp format_presence_script(%{script: script} = entry),
+    do: "#{script}  #{format_script_module(entry)}"
+
   # Numbered, because the dial-plan is first-match-wins: the position *is* the
   # semantics, and "which rule caught this call" is the usual question. The module
   # is printed next to the script because it is the file's `defmodule`, not its
@@ -1244,7 +1293,8 @@ defmodule Kelix.Control.CLI do
     ] ++
       codec_lines(status) ++
       [
-        "hardware:     VAAPI " <> yes_no(server_fact(status, ["capabilities", "hardware", "vaapi"])),
+        "hardware:     VAAPI " <>
+          yes_no(server_fact(status, ["capabilities", "hardware", "vaapi"])),
         "text:         " <> text_transports(status),
         "bfcp:         " <> yes_no(server_fact(status, ["capabilities", "bfcp"])),
         "encryption:   " <> names(server_fact(status, ["security", "modes"]), ", "),

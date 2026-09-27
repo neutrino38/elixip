@@ -94,6 +94,7 @@ defmodule SIP.Test.IPv6Transport do
     contact = SIP.Transport.build_contact_uri(SIP.Transport.UDP, pid)
     assert SIP.Uri.serialize(contact) == {:ok, "<sip:[::1]:#{port};transport=udp>"}
   end
+
   # ── The TCP listener ─────────────────────────────────────────────────────────
 
   test "the TCP listener binds the family and the address it was given" do
@@ -123,8 +124,12 @@ defmodule SIP.Test.IPv6Transport do
 
     # And it handshakes over that family: a v6 client reaches it and is counted.
     {:ok, client} =
-      :ssl.connect(@loopback_v6, port,
-        [:binary, {:active, false}, verify: :verify_none, versions: [:"tlsv1.2"]])
+      :ssl.connect(@loopback_v6, port, [
+        :binary,
+        {:active, false},
+        verify: :verify_none,
+        versions: [:"tlsv1.2"]
+      ])
 
     assert eventually(fn -> SIP.Transport.TLSListener.connection_count(pid) == 1 end)
 
@@ -146,7 +151,11 @@ defmodule SIP.Test.IPv6Transport do
     # WebSocket handshake, and is counted.
     client =
       Socket.Web.connect!("[::1]", port,
-        secure: true, verify: false, versions: [:"tlsv1.2"], protocol: ["sip"])
+        secure: true,
+        verify: false,
+        versions: [:"tlsv1.2"],
+        protocol: ["sip"]
+      )
 
     assert eventually(fn -> SIP.Transport.WSSListener.connection_count(pid) == 1 end)
 

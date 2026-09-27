@@ -34,6 +34,12 @@ defmodule Kelix.Metrics.Emit do
     :telemetry.execute([:kelix, :registrar, :event], %{count: 1}, %{domain: domain, event: event})
   end
 
+  @doc "A presence collection event (`:published | :removed | :expired`)."
+  @spec presence_event(String.t(), atom) :: :ok
+  def presence_event(domain, event) do
+    :telemetry.execute([:kelix, :presence, :event], %{count: 1}, %{domain: domain, event: event})
+  end
+
   # ── conferencing (mcu module, design docs/design/DESIGN-MCU.md#11-observability) ───────────
   #
   # The helpers live here, with the registrar's, for the reason the moduledoc gives:

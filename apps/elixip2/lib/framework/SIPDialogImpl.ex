@@ -9,6 +9,12 @@ defmodule SIP.DialogImpl do
   import SIP.Msg.Ops
   alias SIP.DialogImpl.KeepAlive
 
+  # The lifetime a SUBSCRIBE dialog is bounded by when the event package that
+  # would answer the question is not one this node knows. It is a bound on a
+  # process, not a protocol default: the request itself is about to be answered
+  # 489, and nothing should be left running for it.
+  @default_subscription_expires 3600
+
   defstruct [
     # SIP message that created this dialog
     msg: nil,
@@ -40,6 +46,9 @@ defmodule SIP.DialogImpl do
     ist_awaiting_ack: nil,
     # PID of the application
     app: nil,
+    # The monitor on that pid (see bind_app/2): an application that dies takes
+    # its dialog with it, instead of leaving one that answers nobody.
+    app_monitor: nil,
     # Event tag: when set (an atom), every message delivered to the app is
     # wrapped as {tag, msg} — see SIP.Dialog.start_dialog/5 and send_to_app/2.
     # nil (the default) delivers bare messages.
@@ -77,6 +86,25 @@ defmodule SIP.DialogImpl do
     # application's mailbox (see SIP.Session.RegisterUAC.process_register_reply/3).
     keepalive_owner: :dialog,
     missedkeepalive: 0,
+    # The subscription this dialog carries (RFC 6665), once one has been
+    # negotiated — `SIP.Dialog.set_subscription/2`. Everything below it is what
+    # the dialog owes that subscription and nothing else can: its deadline, its
+    # refresh, and the final NOTIFY that must go out even when the scenario has
+    # forgotten it exists (design decision 4).
+    subscription: nil,
+    # The lifetime that was GRANTED, in seconds. `%SIP.Subscription{}.expires` is
+    # an absolute instant (kamailio's convention); the duration is what a refresh
+    # asks for again, and deriving it back from the instant is how a subscription
+    # shrinks a little on every refresh.
+    subscription_lifetime: 0,
+    subscription_refresh_timer: nil,
+    # Who re-SUBSCRIBEs: :dialog (this layer, the default) or :app. Exactly one,
+    # for the reason `keepalive_owner` exists above.
+    refresh_owner: :dialog,
+    # Set the moment `{:subscription_terminated, …}` has been delivered. The
+    # contract is EXACTLY one per subscription, and there are three ways in here
+    # — the deadline, an explicit end, and the dialog dying under it.
+    subscription_ended: false,
     cseq: 1,
     cseqin: 1,
     fromtag: nil,
@@ -308,6 +336,17 @@ defmodule SIP.DialogImpl do
 
             {code, state}
 
+          # The transaction refused to start, e.g. a request it could not
+          # serialize. That request is lost; the dialog is not.
+          {:error, reason} ->
+            Logger.error(
+              dialogpid: "#{inspect(self())}",
+              module: __MODULE__,
+              message: "Cannot send #{req.method}: #{inspect(reason)}"
+            )
+
+            {{:error, reason}, state}
+
           {:ok, transaction_pid, modmsg} ->
             # Add the transaction in the transaction list
             newstate = add_transaction(state, transaction_pid, modmsg, uac_module(modmsg))
@@ -536,9 +575,77 @@ defmodule SIP.DialogImpl do
     }
   end
 
+  # Arm the lifetime of a SUBSCRIBE dialog: it lives exactly as long as the
+  # subscription it carries, and not the 600 s every SUBSCRIBE, PUBLISH and
+  # REGISTER used to be given alike.
+  #
+  # Twice, and the second time is the one that matters. The REQUEST says what the
+  # watcher asks for, and that is what this arms — the dialog must not outlive a
+  # SUBSCRIBE nobody ever answers. What the notifier GRANTS may be shorter, and
+  # `SIP.Dialog.set_subscription/2` re-arms on that value the moment it is known.
+  #
+  # The lifetime is read by `SIP.Msg.Ops.subscription_expires/2` — a SECOND expiry
+  # reading, deliberately not `requested_expires/2`: a SUBSCRIBE carries no Contact
+  # `expires` parameter and its default belongs to the event package (RFC 6665
+  # §4.4.1), not to RFC 3261 §20.19. When the package is not one this node knows
+  # the default is the framework's, because the dialog still has to be bounded; the
+  # 489 that request is about to get is the notifier's to send, not this timer's.
+  def arm_expiration_timer(state = %SIP.DialogImpl{}, req) when req.method == :SUBSCRIBE do
+    expire = SIP.Msg.Ops.subscription_expires(req, package_default_expires(req))
+
+    Logger.debug(
+      dialogpid: "#{inspect(self())}",
+      module: __MODULE__,
+      message:
+        "SUBSCRIBE lifetime #{expire}s (Event: #{inspect(SIP.Msg.Ops.event_package(req))}) " <>
+          "-> subscribeexpire"
+    )
+
+    arm_subscription_deadline(state, expire)
+  end
+
+  # A PUBLISH is one transaction (RFC 3903) and its dialog has no reason to
+  # outlive it: the entity-tag lifecycle is the collection's state, not this
+  # process's (plan decision 5). 64*T1 is what the server transaction under it
+  # lives; past that there is nothing left to answer.
+  def arm_expiration_timer(state = %SIP.DialogImpl{}, req) when req.method == :PUBLISH do
+    state = cancel_expiration_timer(state)
+
+    %SIP.DialogImpl{
+      state
+      | expirationtimer: :erlang.start_timer(32_000, self(), :publishexpire)
+    }
+  end
+
   # Default, do nothing
   def arm_expiration_timer(state = %SIP.DialogImpl{}, _req) do
     state
+  end
+
+  # The lifetime the event package gives a SUBSCRIBE that asks for none. Asked of
+  # the package, never written down here (design, *An event package is a
+  # behaviour*): a table of defaults on this side of the wire is a copy, and a
+  # copy drifts.
+  defp package_default_expires(req) do
+    with {name, _id} <- SIP.Msg.Ops.event_package(req),
+         {:ok, package} <- SIP.EventPackage.lookup(name) do
+      package.default_expires()
+    else
+      _unknown_package -> @default_subscription_expires
+    end
+  end
+
+  # `Expires: 0` is an un-subscribe (RFC 6665 §4.4.4), not a lifetime that is too
+  # brief — the same distinction a rebinding REGISTER carrying `;expires=0` taught
+  # the registrar. One second, so the 2xx and the final NOTIFY leave in that order.
+  defp arm_subscription_deadline(state, expire) do
+    state = cancel_expiration_timer(state)
+    delay = if expire == 0, do: 1, else: expire
+
+    %SIP.DialogImpl{
+      state
+      | expirationtimer: :erlang.start_timer(delay * 1000, self(), :subscribeexpire)
+    }
   end
 
   # The lifetime a REGISTER asks for is read by SIP.Msg.Ops.requested_expires/2 —
@@ -550,6 +657,263 @@ defmodule SIP.DialogImpl do
   defp contacts_to_string(contact) do
     contact |> List.wrap() |> Enum.map_join(", ", &to_string/1)
   end
+
+  # The refresh is the watcher's alone: a notifier does not refresh anything, it
+  # waits to be asked again. Half the granted lifetime, so one lost SUBSCRIBE has
+  # a second chance before the far end forgets us — the same margin the REGISTER
+  # refresh uses, and for the same reason.
+  defp arm_subscription_refresh(state = %SIP.DialogImpl{direction: :outbound}, granted)
+       when granted > 0 do
+    state = cancel_refresh_timer(state)
+
+    if state.refresh_owner == :dialog do
+      delay = max(div(granted, 2), 1)
+
+      %SIP.DialogImpl{
+        state
+        | subscription_refresh_timer: :erlang.start_timer(delay * 1000, self(), :subscriberefresh)
+      }
+    else
+      state
+    end
+  end
+
+  defp arm_subscription_refresh(state, _granted), do: cancel_refresh_timer(state)
+
+  defp cancel_refresh_timer(state = %SIP.DialogImpl{subscription_refresh_timer: nil}), do: state
+
+  defp cancel_refresh_timer(state) do
+    :erlang.cancel_timer(state.subscription_refresh_timer)
+    %SIP.DialogImpl{state | subscription_refresh_timer: nil}
+  end
+
+  # The three steps of a subscription ending, in one place because "exactly one
+  # final NOTIFY and exactly one termination event" is a promise about this
+  # function and not about the discipline of its three callers — the deadline, an
+  # explicit `end_subscription/2`, and a terminated NOTIFY off the wire.
+  defp finish_subscription(state, reason) do
+    state
+    |> send_final_notify(reason)
+    |> notify_subscription_end(reason)
+    |> cancel_refresh_timer()
+    |> cancel_expiration_timer()
+  end
+
+  # What a dialog does once its subscription has ended, and it is not the same on
+  # the two sides.
+  #
+  # A NOTIFIER has just put the final NOTIFY on the wire, and `terminate/2` takes
+  # this dialog's client transactions down with it — so stopping now leaves that
+  # NOTIFY with exactly one chance on UDP. One lost datagram would then leak the
+  # subscription on the watcher's side, which is the failure decision 4 exists to
+  # prevent. It lingers for 64*T1 instead, the lifetime of the NICT carrying it,
+  # and the transaction retransmits until the 200 comes back.
+  #
+  # A WATCHER has nothing left to send and must NOT linger: `SIP.Session.send_sip_request/3`
+  # recreates a dialog for a standalone method only when the previous one is dead,
+  # so a watcher re-subscribing during the linger would send its new SUBSCRIBE
+  # *inside* the subscription that has just ended.
+  defp close_after_subscription(state = %SIP.DialogImpl{direction: :inbound}) do
+    {:noreply,
+     %SIP.DialogImpl{
+       state
+       | expirationtimer: :erlang.start_timer(32_000, self(), :subscription_linger)
+     }}
+  end
+
+  defp close_after_subscription(state), do: {:stop, :normal, state}
+
+  # Only a notifier sends it: on the watcher's side the final NOTIFY is what
+  # brought us here, and answering it with another one would be nonsense.
+  defp send_final_notify(state = %SIP.DialogImpl{direction: :inbound, subscription: sub}, reason)
+       when not is_nil(sub) do
+    req =
+      notify_request(
+        state,
+        SIP.Msg.Ops.subscription_state_value(:terminated, reason: reason),
+        nil,
+        nil
+      )
+
+    {rc, state} = send_in_dialog_request(state, req)
+    mark_internal(state, rc)
+  end
+
+  defp send_final_notify(state, _reason), do: state
+
+  defp notify_subscription_end(state, reason) do
+    case {Map.get(state, :subscription), Map.get(state, :subscription_ended)} do
+      {%SIP.Subscription{} = sub, false} ->
+        send_to_app(state, {:subscription_terminated, sub.ref, reason})
+
+        %SIP.DialogImpl{
+          state
+          | subscription: %{
+              SIP.Subscription.put_status(sub, :terminated)
+              | reason: to_string(reason)
+            },
+            subscription_ended: true
+        }
+
+      _already_said_or_never_had_one ->
+        state
+    end
+  end
+
+  # The reason a terminated NOTIFY states, as an atom the application can match
+  # on. An extension reason nobody here knows stays a binary rather than growing
+  # the atom table with a value read off the network.
+  @notify_reasons ~w(deactivated probation rejected timeout giveup noresource invariant)
+  defp notify_reason(params) do
+    case Map.get(params, "reason") do
+      reason when reason in @notify_reasons -> String.to_existing_atom(reason)
+      nil -> :timeout
+      other -> other
+    end
+  end
+
+  # A NOTIFY this dialog originates. Everything that identifies it is dialog
+  # state, which is why it is composed here and not in a scenario:
+  # `address_in_dialog/2` fills both identities, their tags and the remote target,
+  # and `SIP.NICT` stamps the Contact of the transport actually used.
+  defp notify_request(state, substate, body, content_type) do
+    sub = state.subscription
+    uri = %SIP.Uri{userpart: nil, domain: nil}
+
+    req = %{
+      "Max-Forwards" => "70",
+      method: :NOTIFY,
+      ruri: uri,
+      from: uri,
+      to: uri,
+      event: SIP.Msg.Ops.event_value(sub.event, sub.event_id),
+      subscriptionstate: substate,
+      useragent: Application.get_env(:elixip2, :useragent, "Elixipp/0.1"),
+      callid: nil,
+      contentlength: 0
+    }
+
+    req = put_eventlist(req, sub)
+
+    case body do
+      nil -> req
+      "" -> req
+      _ -> put_notify_body(req, sub, body, content_type)
+    end
+  end
+
+  # RFC 4662 §3.2: the NOTIFYs of a list subscription carry `Require: eventlist`.
+  # Stamped from the subscription rather than passed down by whoever composed the
+  # body: the dialog is the one place that knows, for every NOTIFY it sends —
+  # including the final one — which subscription it belongs to.
+  defp put_eventlist(req, %SIP.Subscription{list_uri: nil}), do: req
+  defp put_eventlist(req, %SIP.Subscription{}), do: Map.put(req, "Require", "eventlist")
+  defp put_eventlist(req, _no_subscription), do: req
+
+  # The body, compressed when the watcher said it could read `deflate` and the
+  # body is large enough for it to matter. `Content-Encoding` applies to the whole
+  # body, the MIME composition included, so a multipart is serialized first and
+  # compressed as one — the Content-Type still names the subtype and the boundary.
+  defp put_notify_body(req, sub, body, content_type) do
+    req = Map.put(req, :contenttype, content_type)
+
+    case SIP.Msg.BodyCoding.encode(body_octets(body), encoding_of(sub)) do
+      {:ok, compressed} ->
+        req
+        |> SIP.Msg.Ops.update_sip_msg({:body, compressed})
+        |> Map.put(:contenttype, content_type)
+        |> Map.put("Content-Encoding", encoding_of(sub))
+
+      :as_is ->
+        SIP.Msg.Ops.update_sip_msg(req, {:body, body})
+    end
+  end
+
+  defp body_octets(parts) when is_list(parts), do: SIPMsg.multipart_body(parts)
+  defp body_octets(body) when is_binary(body), do: body
+
+  defp encoding_of(%SIP.Subscription{body_encoding: coding}), do: coding
+  defp encoding_of(_no_subscription), do: nil
+
+  # The refresh SUBSCRIBE: the same subscription, asked for again. The lifetime is
+  # the one that was GRANTED, kept as a duration — derived back from the absolute
+  # `expires` it would shrink by half on every refresh.
+  defp subscribe_refresh_request(state) do
+    sub = state.subscription
+    uri = %SIP.Uri{userpart: nil, domain: nil}
+
+    req = %{
+      "Max-Forwards" => "70",
+      method: :SUBSCRIBE,
+      ruri: uri,
+      from: uri,
+      to: uri,
+      event: SIP.Msg.Ops.event_value(sub.event, sub.event_id),
+      expires: state.subscription_lifetime,
+      useragent: Application.get_env(:elixip2, :useragent, "Elixipp/0.1"),
+      callid: nil,
+      contentlength: 0
+    }
+
+    case Map.get(state.msg, :accept) do
+      nil -> req
+      accept -> Map.put(req, :accept, accept)
+    end
+  end
+
+  # A NOTIFY we sent is ours: its 2xx answers a request the application never made
+  # and never has to read, exactly like the BYE that buries a late 2xx.
+  defp mark_internal(state, {:ok, trans_pid}) when is_pid(trans_pid) do
+    %SIP.DialogImpl{state | internal_trans: MapSet.put(state.internal_trans, trans_pid)}
+  end
+
+  defp mark_internal(state, _rc), do: state
+
+  defp normalize_send({:ok, _trans_pid}), do: :ok
+  defp normalize_send(rc), do: {:error, rc}
+
+  # The first NOTIFY of a subscription may be the first message that ever names
+  # the far end (see the NOTIFY clause of handle_cast/2). Only an outbound dialog
+  # still missing its remote tag adopts one: an inbound dialog minted its own at
+  # creation, and a dialog that already has one is established.
+  defp adopt_notify_tag(state = %SIP.DialogImpl{direction: :outbound, totag: nil}, msg) do
+    case SIP.Uri.get_uri_param(msg.from, "tag") do
+      {:ok, fromtag} when is_binary(fromtag) -> add_totag(state, fromtag)
+      _no_tag -> state
+    end
+  end
+
+  defp adopt_notify_tag(state, _msg), do: state
+
+  # `active_watchers` carries the Contact and the route set as text; so do we, so
+  # nothing converts between the struct and the row.
+  defp contact_string(nil), do: nil
+  defp contact_string(%SIP.Uri{} = uri), do: to_string(uri)
+  defp contact_string([first | _]), do: contact_string(first)
+  defp contact_string(other) when is_binary(other), do: other
+  defp contact_string(_other), do: nil
+
+  defp route_set_string([]), do: nil
+  defp route_set_string(rs) when is_binary(rs), do: rs
+  defp route_set_string(rs) when is_list(rs), do: Enum.join(rs, ",")
+  defp route_set_string(_rs), do: nil
+
+  # kamailio's `socket_info` names the local socket a subscription is served on
+  # (\"udp:192.0.2.1:5060\"). Ours is the transport the dialog-creating request
+  # arrived on or went out through, which is the same fact under the same name.
+  defp socket_info(%SIP.DialogImpl{
+         msg: %{ruri: %SIP.Uri{tp_module: tmod, destip: ip, destport: port}}
+       })
+       when not is_nil(tmod) do
+    proto = String.downcase(apply(tmod, :transport_str, []))
+
+    case SIP.NetUtils.ip2string(ip) do
+      {:error, _} -> proto
+      ipstr -> proto <> ":" <> ipstr <> ":" <> to_string(port)
+    end
+  end
+
+  defp socket_info(_state), do: nil
 
   @doc "Cancels the dialog expiration timer"
   def cancel_expiration_timer(state = %SIP.DialogImpl{}) do
@@ -572,6 +936,23 @@ defmodule SIP.DialogImpl do
     :ok
   end
 
+  # Bind the application process to this dialog, and watch it.
+  #
+  # A dialog is created FOR an application and delivers everything it receives to
+  # it; one whose application has died has nobody to answer for the call. It kept
+  # running all the same: in-dialog requests piled up on it.
+  #
+  # The monitor is the dialog's own net, and it does not replace the application's
+  # teardown: a scenario that ends normally hangs its legs up itself, and this is
+  # what answers for one that cannot. What a `:DOWN` then does is the same thing
+  # `answer_nobody_awaits/2` already does for a 2xx nobody is left to ACK — hang
+  # up if there is a session, stop in any case (see `handle_info({:DOWN, …})`).
+  defp bind_app(state, app_pid) when is_pid(app_pid) do
+    %SIP.DialogImpl{state | app: app_pid, app_monitor: Process.monitor(app_pid)}
+  end
+
+  defp bind_app(state, _app_pid), do: state
+
   defp app_alive?(%SIP.DialogImpl{app: app}) when is_pid(app), do: Process.alive?(app)
   defp app_alive?(_state), do: false
 
@@ -590,6 +971,35 @@ defmodule SIP.DialogImpl do
   end
 
   defp pending_invite_transaction(_state), do: nil
+
+  defp pending_client_transaction?(state) do
+    Enum.any?(transactions_of(state), fn {pid, %{module: module}} ->
+      client_transaction?(module) and Process.alive?(pid)
+    end)
+  end
+
+  # RFC 3261 §15: the BYE is the only way to end an established dialog, so the
+  # far end is told rather than left off-hook on a call nobody is in.
+  defp hang_up_orphaned_dialog(state) do
+    case send_in_dialog_request(state, hangup_request()) do
+      # The BYE is on its way: the dialog stops when its transaction ends, as
+      # it does for a BYE the application itself sent. Stopping here would take
+      # that transaction with it (terminate/2 kills our client transactions).
+      {{:ok, _transaction_pid}, state} ->
+        {:noreply, state}
+
+      # No transport, too many transactions, already closing: nothing more can
+      # be done for the far end, and there is nothing left to wait for.
+      {rc, state} ->
+        Logger.warning(
+          dialogpid: "#{inspect(self())}",
+          module: __MODULE__,
+          message: "Could not hang up the orphaned dialog: #{inspect(rc)}"
+        )
+
+        {:stop, {:shutdown, :app_down}, state}
+    end
+  end
 
   # A 2xx to our INVITE that no application is left to ACK.
   #
@@ -629,15 +1039,23 @@ defmodule SIP.DialogImpl do
             "hanging up, so the far end is not left off-hook"
       )
 
-      SIP.Transac.ack_uac_transaction(transact_pid)
-
-      # The BYE goes out on the next message rather than here: it must follow the
-      # ACK on the wire, and `send_in_dialog_request/2` starts a transaction of its
-      # own — not something to nest inside the response handling that is still
-      # unwinding.
-      send(self(), :hang_up_unowned_dialog)
-      close_transaction(state, transact_pid)
+      ack_and_hang_up(state, transact_pid)
     end
+  end
+
+  # ACK the 2xx, then BYE: the only lawful way out of a dialog that connected
+  # with nobody left in it (RFC 3261 §13.2.2.4 and §15). Shared with the
+  # application-is-gone path (`handle_info({:DOWN, …})`), which reaches the same
+  # situation from the other side — there the answer came first and the
+  # application died after it.
+  #
+  # The BYE goes out on the next message rather than here: it must follow the ACK
+  # on the wire, and `send_in_dialog_request/2` starts a transaction of its own —
+  # not something to nest inside the response handling that is still unwinding.
+  defp ack_and_hang_up(state, transact_pid) do
+    SIP.Transac.ack_uac_transaction(transact_pid)
+    send(self(), :hang_up_unowned_dialog)
+    close_transaction(state, transact_pid)
   end
 
   # The BYE that ends a dialog whose application is gone (see
@@ -759,22 +1177,25 @@ defmodule SIP.DialogImpl do
         #
         # `arm_expiration_timer/2` is a no-op for anything but a REGISTER, so an
         # inbound INVITE dialog is unaffected.
-        {:ok, arm_expiration_timer(state, req) |> Map.put(:app, app_id)}
+        {:ok, arm_expiration_timer(state, req) |> bind_app(app_id)}
 
       # Session has not been created. Abort dialog and propagate the requested
-      # SIP status. The stop reason is the 4-tuple {:reject, code, reason, totag}
-      # — a VALID GenServer.init/1 stop return — which SIP.Dialog.start_dialog and
-      # process_incoming_request map back to a SIP response on the server
-      # transaction (registrar quota 503, UAS domain control 604, …). The totag
-      # (generated above) is embedded because a reply with code > 100 needs one.
+      # SIP status. The stop reason is the 5-tuple
+      # {:reject, code, reason, fields, totag} — a VALID GenServer.init/1 stop
+      # return — which SIP.Dialog.start_dialog and process_incoming_request map
+      # back to a SIP response on the server transaction (registrar quota 503,
+      # UAS domain control 604, …). The totag (generated above) is embedded
+      # because a reply with code > 100 needs one.
       {:reject, code, reason} ->
-        Logger.info(
-          dialogpid: "#{inspect(self())}",
-          module: __MODULE__,
-          message: "App rejected the request with #{code} #{reason}. Aborting dialog creation."
-        )
+        reject_dialog(state, code, reason, [])
 
-        {:stop, {:reject, code, reason, state.totag}}
+      # A refusal that has to carry a header to be actionable — the `Allow-Events`
+      # of a 489 (RFC 6665 §4.4.7), as mandatory to a watcher as `Min-Expires` is
+      # on a 423: without it the peer is told "not that package" and never which
+      # ones it could ask for. The fields travel with the code rather than being
+      # composed here, because what a domain serves is the application's to know.
+      {:reject, code, reason, fields} when is_list(fields) ->
+        reject_dialog(state, code, reason, fields)
     end
   end
 
@@ -786,7 +1207,6 @@ defmodule SIP.DialogImpl do
     state = %SIP.DialogImpl{
       msg: req,
       direction: :outbound,
-      app: pid,
       tag: tag,
       # Declared up front: the first branch goes out with the dialog, so its
       # failure must not tear the dialog down when more targets are waiting.
@@ -797,8 +1217,12 @@ defmodule SIP.DialogImpl do
       fromtag: fromtag,
       callid: callid,
       totag: nil,
+      # Empty, as §12.2.2 has it — see check_seqno/2.
+      cseqin: nil,
       allows: allows(req.method)
     }
+
+    state = bind_app(state, pid)
 
     {state, req} = fix_outbound_request(state, req, true)
 
@@ -854,6 +1278,16 @@ defmodule SIP.DialogImpl do
     end
   end
 
+  defp reject_dialog(state, code, reason, fields) do
+    Logger.info(
+      dialogpid: "#{inspect(self())}",
+      module: __MODULE__,
+      message: "App rejected the request with #{code} #{reason}. Aborting dialog creation."
+    )
+
+    {:stop, {:reject, code, reason, fields, state.totag}}
+  end
+
   @impl true
   @doc """
   Invoked when the dialog GenServer stops (end of call: BYE in either direction,
@@ -872,6 +1306,14 @@ defmodule SIP.DialogImpl do
       end
 
     stop_client_transactions(state)
+
+    # A subscription whose dialog is gone cannot continue, and the application is
+    # owed exactly one termination event whichever way it ended. `invariant` is
+    # RFC 6665 §4.1.3\'s reason for a subscription ended by something other than
+    # its own lifecycle, which is what a transport dropping or a crash is. It goes
+    # out BEFORE {:dialog_terminated, …} so a scenario that ends on the latter
+    # still sees it.
+    state = notify_subscription_end(state, :invariant)
     send_to_app(state, {:dialog_terminated, self(), reason})
 
     :ok
@@ -938,19 +1380,26 @@ defmodule SIP.DialogImpl do
   # the head, so a request carrying none takes the fallback clause instead of
   # raising: send_in_dialog_request/2 keeps `msg` as the request that created the
   # dialog, and an inbound dialog never replaces it.
+  #
+  # A creating request answered 401/407 comes back under a new CSeq and still no
+  # To tag: the 2xx to that replay is the one that establishes the dialog.
   defp establish_inbound(
          state = %SIP.DialogImpl{direction: :inbound, state: :initial, msg: %{cseq: cseq}},
-         %{cseq: cseq},
+         req = %{cseq: req_cseq},
          resp_code
        )
        when resp_code in 200..299 do
-    Logger.debug(
-      dialogpid: "#{inspect(self())}",
-      module: __MODULE__,
-      message: "Inbound dialog established"
-    )
+    if req_cseq == cseq or not SIP.Msg.Ops.in_dialog?(req) do
+      Logger.debug(
+        dialogpid: "#{inspect(self())}",
+        module: __MODULE__,
+        message: "Inbound dialog established"
+      )
 
-    %SIP.DialogImpl{state | state: :established}
+      %SIP.DialogImpl{state | state: :established}
+    else
+      state
+    end
   end
 
   defp establish_inbound(state, _req, _resp_code), do: state
@@ -970,7 +1419,7 @@ defmodule SIP.DialogImpl do
   @impl true
   def handle_call({:setapppid, app_pid}, _from, state) do
     if state.direction == :inbound and state.app == nil do
-      {:reply, :ok, %SIP.DialogImpl{state | app: app_pid}}
+      {:reply, :ok, bind_app(state, app_pid)}
     else
       {:reply, :alreadybound, state}
     end
@@ -1232,6 +1681,89 @@ defmodule SIP.DialogImpl do
     end
   end
 
+  # ── The subscription this dialog carries (RFC 6665) ─────────────────────────
+
+  # Take the subscription over: fill the columns only this process knows, arm the
+  # granted deadline, and — on the watcher's side — the refresh.
+  #
+  # The struct comes back completed because the session layer stores it and the
+  # kelixip collection will write it as an `active_watchers` row: both tags, the
+  # CSeqs, the route set and the two Contacts are dialog state, and nothing above
+  # this layer can answer them.
+  def handle_call({:set_subscription, sub}, _from, state) do
+    sub = %SIP.Subscription{
+      sub
+      | callid: state.callid,
+        # `to_tag` is the notifier's and `from_tag` the watcher's, on both sides:
+        # the row describes the subscription, not the point of view. An inbound
+        # dialog is the notifier, so its local tag IS the To tag — and an outbound
+        # one is the watcher, whose local tag is the From tag. Both readings are
+        # the same two fields of this state.
+        to_tag: state.totag,
+        from_tag: state.fromtag,
+        local_cseq: state.cseq,
+        remote_cseq: state.cseqin || 0,
+        contact: contact_string(state.remotetarget),
+        record_route: route_set_string(state.routeset),
+        socket_info: socket_info(state)
+    }
+
+    granted = SIP.Subscription.remaining(sub)
+
+    state =
+      %SIP.DialogImpl{state | subscription: sub, subscription_lifetime: granted}
+      |> arm_subscription_deadline(granted)
+      |> arm_subscription_refresh(granted)
+
+    {:reply, {:ok, sub}, state}
+  end
+
+  def handle_call({:set_expiration, seconds}, _from, state) do
+    {:reply, :ok, arm_subscription_deadline(state, seconds)}
+  end
+
+  # The NOTIFY a notifier sends to say what the state is now. Composed here — the
+  # Event of the subscription, the `Subscription-State: active;expires=<what is
+  # left>` — and sent as a transaction of OUR own, so its 2xx is absorbed like the
+  # keepalives' and never lands in the scenario's mailbox: a NOTIFY is the
+  # framework's request, and the scenario has already been told it went out.
+  def handle_call({:send_notify, _body, _ct}, _from, %SIP.DialogImpl{subscription: nil} = state) do
+    {:reply, {:error, :no_subscription}, state}
+  end
+
+  def handle_call({:send_notify, body, content_type}, _from, state) do
+    sub = state.subscription
+
+    req =
+      notify_request(
+        state,
+        SIP.Msg.Ops.subscription_state_value(SIP.Subscription.status(sub),
+          expires: SIP.Subscription.remaining(sub)
+        ),
+        body,
+        content_type
+      )
+
+    {rc, state} = send_in_dialog_request(state, req)
+    {:reply, normalize_send(rc), mark_internal(state, rc)}
+  end
+
+  # The subscription ends now, on purpose. Same three steps as the deadline below,
+  # and deliberately the same code: "exactly one final NOTIFY and exactly one
+  # {:subscription_terminated, …}" is a promise about this function, not about the
+  # discipline of whoever calls it.
+  def handle_call({:end_subscription, reason}, _from, state) do
+    case state |> finish_subscription(reason) |> close_after_subscription() do
+      {:noreply, state} -> {:reply, :ok, state}
+      {:stop, why, state} -> {:stop, why, :ok, state}
+    end
+  end
+
+  def handle_call(:app_drives_refresh, _from, state) do
+    state = cancel_refresh_timer(state)
+    {:reply, :ok, %SIP.DialogImpl{state | refresh_owner: :app}}
+  end
+
   # The application announces that *it* drives the OPTIONS keepalive: stand down.
   # Called before any OPTIONS is sent, so the two mechanisms never overlap — even
   # for one period, which was enough to leave a stray response behind.
@@ -1281,6 +1813,18 @@ defmodule SIP.DialogImpl do
     else
       {:notallowed, state}
     end
+  end
+
+  # RFC 3261 §12.2.2: "If the remote sequence number was empty, it MUST be set to
+  # the value of the sequence number in the CSeq". An outbound dialog has heard
+  # nothing from the far end yet, so its remote sequence number IS empty — and the
+  # 1 it used to be initialised to rejected the first in-dialog request numbered 1
+  # with a 500 Out of order. Every notifier in the field numbers its first NOTIFY
+  # CSeq 1, so that was the whole subscription, answered 500 before the scenario
+  # ever saw it.
+  defp check_seqno(state = %SIP.DialogImpl{cseqin: nil}, msg) do
+    [seqno, _cmethod] = msg.cseq
+    {:ok, %SIP.DialogImpl{state | cseqin: seqno}}
   end
 
   defp check_seqno(state, msg) do
@@ -1348,6 +1892,101 @@ defmodule SIP.DialogImpl do
     {:stop, {:shutdown, reason}, state}
   end
 
+  # A NOTIFY inside a subscription (RFC 6665 §4.4.1) — i.e. on a dialog a
+  # SUBSCRIBE created, which is what tells it from the implicit subscription of a
+  # REFER, whose dialog was created by an INVITE and whose NOTIFYs the scenario
+  # answers itself.
+  #
+  # Three things happen here that used to be nobody's:
+  #
+  #   1. **the 200 goes out from here**, before the application is even handed the
+  #      request. A NOTIFY answered late — or not at all, because the scenario was
+  #      parked in a state with no clause for it — makes the notifier tear the
+  #      subscription down, and \"the scenario forgot to reply\" is not a failure
+  #      mode a framework should leave available.
+  #   2. **the remote tag is adopted from it.** The first NOTIFY routinely
+  #      overtakes the 2xx it belongs to (§4.2.1.2 has the notifier send the 2xx
+  #      first, and UDP reorders anyway), so it may be the first thing that ever
+  #      names the far end. `SIP.Dialog.process_incoming_request/3` is what routed
+  #      it here on Call-ID plus our own tag.
+  #   3. **a terminated `Subscription-State` ends the subscription**, with the
+  #      reason it carries, through the single function that promises exactly one
+  #      termination event.
+  def handle_cast({:sipmsg, msg, transact_pid}, state)
+      when is_req(msg) and msg.method == :NOTIFY and is_map(state.msg) and
+             state.msg.method == :SUBSCRIBE do
+    with {:ok, state} <- on_new_transaction(state, msg, transact_pid),
+         {:ok, state} <- check_allows(state, msg),
+         {:ok, state} <- check_seqno(state, msg) do
+      state = adopt_notify_tag(state, msg)
+
+      {_ret, uas_t} =
+        SIP.Transac.reply_req(msg, 200, "OK", [], state.totag, Map.keys(state.transactions))
+
+      state = close_transaction(state, uas_t)
+      send_to_app(state, {:NOTIFY, msg, transact_pid, self()})
+
+      case SIP.Msg.Ops.subscription_state(msg) do
+        {:terminated, params} ->
+          state |> finish_subscription(notify_reason(params)) |> close_after_subscription()
+
+        _still_alive ->
+          {:noreply, state}
+      end
+    else
+      {:notallowed, state} ->
+        SIP.Transac.reply(transact_pid, 405, "Method not allowed", [], state.totag)
+        {:noreply, state}
+
+      {:out_of_order, state} ->
+        SIP.Transac.reply(transact_pid, 500, "Out of order", [], state.totag)
+        {:noreply, state}
+
+      {:toomanytransactions, state} ->
+        SIP.Transac.reply(transact_pid, 503, "Service Denied", [], state.totag)
+        {:noreply, state}
+
+      {:nonewtrans, state} ->
+        {:noreply, state}
+    end
+  end
+
+  # A second event package on a dialog that already carries a subscription.
+  #
+  # RFC 6665 §4.4.1 allows it — a subscription is keyed on the package and its
+  # `id` as well as on the dialog — and v1 refuses it: real clients open one
+  # dialog per subscription (Linphone does), and the machinery for several would
+  # be written for nobody. The key carries the package from day one all the same,
+  # so accepting them later widens nothing (design decision 3).
+  #
+  # A refresh of the SAME package is not this: it falls through to the ordinary
+  # in-dialog path and reaches the scenario, which re-accepts it.
+  def handle_cast({:sipmsg, msg, transact_pid}, state)
+      when is_req(msg) and msg.method == :SUBSCRIBE and
+             not is_nil(state.subscription) do
+    case SIP.Msg.Ops.event_package(msg) do
+      {name, _id} when name != nil ->
+        if name == state.subscription.event do
+          in_dialog_request(state, msg, transact_pid)
+        else
+          Logger.info(
+            dialogpid: "#{inspect(self())}",
+            module: __MODULE__,
+            message:
+              "Refusing event '#{name}' on a dialog already carrying " <>
+                "'#{state.subscription.event}' (489)"
+          )
+
+          SIP.Transac.reply(transact_pid, 489, "Bad Event", [], state.totag)
+          {:noreply, state}
+        end
+
+      _no_event ->
+        SIP.Transac.reply(transact_pid, 489, "Bad Event", [], state.totag)
+        {:noreply, state}
+    end
+  end
+
   # An in-dialog OPTIONS is a keepalive (RFC 3261 §11): the dialog answers it
   # itself with a 200 OK instead of forwarding it to the app. This keeps
   # registrar / call scenarios free of keepalive plumbing — they no longer need
@@ -1380,6 +2019,12 @@ defmodule SIP.DialogImpl do
   end
 
   def handle_cast({:sipmsg, msg, transact_pid}, state) when is_req(msg) do
+    in_dialog_request(state, msg, transact_pid)
+  end
+
+  # The ordinary in-dialog path, named so the clauses above can fall back into it
+  # after deciding that what they matched is ordinary after all.
+  defp in_dialog_request(state, msg, transact_pid) do
     Logger.debug(
       dialogpid: self(),
       module: __MODULE__,
@@ -1438,24 +2083,11 @@ defmodule SIP.DialogImpl do
 
   defp notify_transaction_timeout(state, _req, _transact_pid, _module), do: state
 
-  # A 408 the stack makes up for a request that was never answered. It is a local
-  # notification and never goes on the wire, so it carries only what a reader of
-  # a response needs: the status, and the dialog/CSeq coordinates that say WHICH
-  # request went unanswered (`SIP.Session.dispatch_reply/3` routes on the CSeq
-  # method, and the B2BUA correlates on the transaction pid delivered alongside).
-  defp timeout_response(req) do
-    %{
-      method: false,
-      response: 408,
-      reason: "Request Timeout",
-      callid: Map.get(req, :callid),
-      cseq: Map.get(req, :cseq),
-      from: Map.get(req, :from),
-      to: Map.get(req, :to),
-      contentlength: 0,
-      body: []
-    }
-  end
+  # A 408 the stack makes up for a request that was never answered (RFC 3261
+  # §8.1.3.1). The message layer composes it, as it composes the 503 that a
+  # request which could not be sent at all gets — same local notification, other
+  # status (`SIP.Msg.Ops.local_response/3`).
+  defp timeout_response(req), do: SIP.Msg.Ops.local_response(req, 408, "Request Timeout")
 
   defp adopts_totag?(%SIP.DialogImpl{forking: true}, rsp), do: rsp.response in 200..299
   defp adopts_totag?(_state, rsp), do: rsp.response < 300
@@ -1745,7 +2377,7 @@ defmodule SIP.DialogImpl do
     end
   end
 
-  defp handle_UAS_response(state, rsp, transact_pid)
+  defp handle_UAS_response(state = %SIP.DialogImpl{direction: :outbound}, rsp, transact_pid)
        when state.state in [:initial, :uac_challenged] and rsp.response in 200..202 do
     Logger.debug(
       dialogpid: "#{inspect(self())}",
@@ -2117,6 +2749,77 @@ defmodule SIP.DialogImpl do
     {:stop, :normal, state}
   end
 
+  # The subscription's deadline. Whatever the scenario is doing — parked in a
+  # state, gone, never written to end anything — the watcher is owed a last NOTIFY
+  # saying the subscription is over (RFC 6665 §4.1.2.4), and the application is
+  # owed its one termination event. Left to the script it would be forgotten in
+  # three scripts out of four, and the subscription would leak on the far end
+  # (design decision 4).
+  def handle_info({:timeout, _timerRef, :subscribeexpire}, state = %SIP.DialogImpl{}) do
+    Logger.info(
+      dialogpid: "#{inspect(self())}",
+      module: __MODULE__,
+      message: subscription_expiry_message(state)
+    )
+
+    state |> finish_subscription(:timeout) |> close_after_subscription()
+  end
+
+  # The linger is over: the final NOTIFY has had 64*T1 to get through, which is all
+  # a UDP transaction ever gets.
+  def handle_info({:timeout, _timerRef, :subscription_linger}, state = %SIP.DialogImpl{}) do
+    {:stop, :normal, state}
+  end
+
+  # A PUBLISH dialog has outlived its transaction. There is nothing left to
+  # answer and nothing to tell anyone: the published state lives in the
+  # collection, not here (plan decision 5).
+  def handle_info({:timeout, _timerRef, :publishexpire}, state = %SIP.DialogImpl{}) do
+    {:stop, :normal, state}
+  end
+
+  # Half the granted lifetime: time to ask for it again.
+  #
+  # The dialog sends the refresh itself — it holds the Event, the `id`, the route
+  # set and the lifetime that was granted, which is everything a refresh is. The
+  # response surfaces like any other, because what to do about a refresh answered
+  # 401 or 481 is a decision, and decisions are the scenario's.
+  def handle_info({:timeout, _timerRef, :subscriberefresh}, state = %SIP.DialogImpl{}) do
+    state = %SIP.DialogImpl{state | subscription_refresh_timer: nil}
+
+    case {state.refresh_owner, state.subscription} do
+      {_owner, nil} ->
+        {:noreply, state}
+
+      {:app, _sub} ->
+        send_to_app(state, :subscription_refresh)
+        {:noreply, state}
+
+      {:dialog, _sub} ->
+        {_rc, state} = send_in_dialog_request(state, subscribe_refresh_request(state))
+        {:noreply, state}
+    end
+  end
+
+  # The application of a REGISTER dialog is gone (see `bind_app/2`). Ending the
+  # dialog is what lets the client's next REGISTER — same Call-ID — open a fresh
+  # dialog and reach a live session. Kept alive, the dialog would forward it to a
+  # dead pid and nobody would answer it: a 408 after Timer F (production,
+  # 2026-09-26). It stops at once: there is no far end to hang up, and the
+  # generic clause below would send a BYE on an `:established` REGISTER dialog.
+  def handle_info(
+        {:DOWN, ref, :process, app, reason},
+        state = %SIP.DialogImpl{app_monitor: ref, app: app, msg: %{method: :REGISTER}}
+      ) do
+    Logger.info(
+      dialogpid: "#{inspect(self())}",
+      module: __MODULE__,
+      message: "Terminating REGISTER Dialog: its application ended (#{inspect(reason)})"
+    )
+
+    {:stop, :normal, state}
+  end
+
   def handle_info({:timeout, _timerRef, :registerexpire}, state = %SIP.DialogImpl{}) do
     Logger.info(
       dialogpid: "#{inspect(self())}",
@@ -2181,6 +2884,55 @@ defmodule SIP.DialogImpl do
     end
   end
 
+  # The application bound to this dialog is gone (see `bind_app/2`). Whatever
+  # killed it — a state that raised, a crash, an instance the pool reclaimed —
+  # nothing will answer on this dialog any more, so it ends here rather than
+  # collecting in-dialog transactions it can only reject.
+  #
+  # An established dialog is hung up first: RFC 3261 §15 makes the BYE the only
+  # way to end one, and the far end is otherwise left off-hook on a call nobody
+  # is in. The BYE is sent from `handle_info(:hang_up_unowned_dialog, …)`, the
+  # same one `answer_nobody_awaits/2` uses, and the dialog stops when that
+  # transaction ends.
+  def handle_info(
+        {:DOWN, ref, :process, pid, reason},
+        state = %SIP.DialogImpl{app_monitor: ref, app: pid}
+      ) do
+    Logger.warning(
+      dialogpid: "#{inspect(self())}",
+      module: __MODULE__,
+      message: "Application #{inspect(pid)} is gone (#{inspect(reason)}); ending the dialog"
+    )
+
+    # Nobody is left to be told, and terminate/2 would send it to a dead pid.
+    state = %SIP.DialogImpl{state | app: nil, app_monitor: nil}
+
+    cond do
+      state.state == :established ->
+        case pending_invite_transaction(state) do
+          # The 2xx was answered while the application was still there, and the
+          # ACK it owed never went out. It goes now, before the BYE.
+          transact_pid when is_pid(transact_pid) ->
+            {:noreply, ack_and_hang_up(state, transact_pid)}
+
+          nil ->
+            hang_up_orphaned_dialog(state)
+        end
+
+      # A request of ours is still out there, and its answer is worth waiting
+      # for: a 2xx that arrives now is ACKed and hung up by
+      # `answer_nobody_awaits/2` — the very case that established "the dialog
+      # outlives its application" — and anything else ends the dialog through
+      # `handle_UAS_response/3` as it always did. Stopping here instead would
+      # strand a callee that is about to pick up.
+      pending_client_transaction?(state) ->
+        {:noreply, state}
+
+      true ->
+        {:stop, {:shutdown, :app_down}, state}
+    end
+  end
+
   # A connected transport is gone (design §14.4, R4/R5). Broadcast to every
   # dialog, so the first job is deciding whether it concerns us at all.
   #
@@ -2241,4 +2993,14 @@ defmodule SIP.DialogImpl do
 
     {:noreply, state}
   end
+
+  # Only a notifier has a final NOTIFY to send (`send_final_notify/2` is guarded
+  # on the direction); a watcher reaching this deadline has simply outlived its
+  # subscription, and a line saying otherwise sends the next reader looking for a
+  # NOTIFY that was never meant to leave.
+  defp subscription_expiry_message(%SIP.DialogImpl{direction: :inbound}),
+    do: "Subscription expired; sending the final NOTIFY and terminating the dialog"
+
+  defp subscription_expiry_message(_state),
+    do: "Subscription expired; terminating the dialog"
 end

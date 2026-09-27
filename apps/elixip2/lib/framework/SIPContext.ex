@@ -1,8 +1,33 @@
 defmodule SIP.Context do
   @moduledoc """
-  A SIP session context is a struct that store SIP user agent propertie (username, auth, etc. for a SIP session)
-  A SIP context is local to a session process
+  A SIP session context: the SIP user agent properties (username, auth, dialog,
+  media handles) of one session, local to the process running it.
+
+  It is **`FSL.Context` extended**, not a struct of its own that happens to hold
+  FSM fields too: the six fields of `FSL.Context.fields/0` are the state the
+  finite state machine keeps about itself, and the ones listed below are the SIP
+  session's. Which half a field belongs to is now written down rather than
+  inferred, and an `@after_compile` check refuses a `defstruct` that lost the
+  FSM half.
+
+  Nothing else changes: the name, the nineteen fields, the `set/3` validation,
+  `from/1` and `to/2` are as they were, and no scenario, script or mixin is
+  affected.
+
+  ## Every write is photographed
+
+  `set/3`, `appdata_set/3` and `assert_identity/2` are the three doors a scenario
+  writes this context through, and each hands what it produces to
+  `FSL.Context.snapshot/1`. The context is a stack variable and an Elixir
+  `rescue` clause sees the bindings of the moment the `try` was entered, so
+  without the photo a state that raised after setting a call up handed the
+  teardown the context of *before* its own body — no leg to release, no media
+  session to free, a call left standing on both sides.
   """
+  @after_compile FSL.Context
+
+  # The SIP session's own properties — the ones `set/3` accepts as a string, and
+  # `get/2` reads off the struct rather than out of appdata.
   @props [
     :username,
     :displayname,
@@ -18,92 +43,84 @@ defmodule SIP.Context do
     :parent_pid
   ]
 
-  defstruct username: nil,
-            authusername: nil,
-            displayname: nil,
-            domain: nil,
-            ha1: nil,
-            ha1b: nil,
-            algorithm: "MD5",
-            ftag: nil,
-            debug: false,
-            dialogpid: nil,
-            parent_pid: nil,
-            lasterr: :ok,
-            errorreason: "",
-            mediaservermodule: nil,
-            mediaserverpid: nil,
-            currentstate: nil,
-            laststate: nil,
-            asserted_identity: nil,
-            appdata: %{}
+  # The FSM's six (lasterr, errorreason, currentstate, laststate, parent_pid,
+  # appdata) come from FSL; the rest is this binding's.
+  defstruct FSL.Context.fields() ++
+              [
+                username: nil,
+                authusername: nil,
+                displayname: nil,
+                domain: nil,
+                ha1: nil,
+                ha1b: nil,
+                algorithm: "MD5",
+                ftag: nil,
+                debug: false,
+                dialogpid: nil,
+                mediaservermodule: nil,
+                mediaserverpid: nil,
+                asserted_identity: nil
+              ]
 
+  @doc """
+  Bring the context macros into a SIP scenario: the five generic ones from
+  `FSL.Context`, bound to `sip_ctx` and routed through this module's own
+  `set/3` and `get/2`, plus the three that read a SIP message — `ctx_from`,
+  `ctx_to` and `assert_identity`.
+
+  Each half carries its own double-injection guard — `:fsl_context_used` in
+  `FSL.Context`, `:sip_context_used` here — because a scenario reaches this
+  module through two `use` lines (SIP.Scenario -> SIP.Session.CallUAC ->
+  SIP.Context, and SIP.Session.RegisterUAC -> SIP.Context) and would otherwise
+  redefine the macros, raising "previous clause always matches" on every one.
+  Two guards and not one: a module that had already `use`d `FSL.Context`
+  directly, to bind a context variable of its own, must still get the SIP
+  macros if it then asks for them.
+
+  Both are set imperatively, at expansion time, for the reason
+  `FSL.Context.__using__` gives.
+  """
   defmacro __using__(_opts) do
-    # Guard against being injected twice into the same module: a scenario that
-    # `use`s both SIP.Scenario (-> SIP.Session.CallUAC -> SIP.Context) and
-    # SIP.Session.RegisterUAC (-> SIP.Context) would otherwise redefine the
-    # ctx_* macros, raising "previous clause always matches" warnings. The flag
-    # must be set imperatively here (at expansion time): sibling `use` statements
-    # are expanded before a `@attr` set inside the quote is committed, so the
-    # second expansion would not see it.
-    if Module.get_attribute(__CALLER__.module, :sip_context_used) do
-      quote do
+    sip_macros =
+      if Module.get_attribute(__CALLER__.module, :sip_context_used) do
+        nil
+      else
+        Module.put_attribute(__CALLER__.module, :sip_context_used, true)
+        sip_macros()
       end
-    else
-      Module.put_attribute(__CALLER__.module, :sip_context_used, true)
 
-      quote do
-        # Déclare la macro ctx_set
-        defmacro ctx_set(prop, value) do
-          quote do
-            var!(sip_ctx) = SIP.Context.set(var!(sip_ctx), unquote(prop), unquote(value))
-          end
+    quote do
+      use FSL.Context,
+        ctx_var: :sip_ctx,
+        setter: {SIP.Context, :set},
+        getter: {SIP.Context, :get}
+
+      unquote(sip_macros)
+    end
+  end
+
+  # The three that are SIP's: they read or compose a SIP URI, which is the
+  # message layer's business and travels with this binding.
+  defp sip_macros do
+    quote do
+      defmacro ctx_from() do
+        quote do
+          SIP.Context.from(var!(sip_ctx))
         end
+      end
 
-        defmacro ctx_get(prop) do
-          quote do
-            SIP.Context.get(var!(sip_ctx), unquote(prop))
-          end
+      defmacro ctx_to(userpart) do
+        quote do
+          SIP.Context.to(var!(sip_ctx), unquote(userpart))
         end
+      end
 
-        defmacro appdata_set(prop, value) do
-          quote do
-            appdata = Map.put(var!(sip_ctx).appdata, unquote(prop), unquote(value))
-            var!(sip_ctx) = Map.put(var!(sip_ctx), :appdata, appdata)
-          end
-        end
-
-        defmacro appdata_get(prop) do
-          quote do
-            Map.get(var!(sip_ctx).appdata, unquote(prop))
-          end
-        end
-
-        defmacro ctx_set_multiple(proplist) do
-          quote do
-            var!(sip_ctx) = SIP.Context.set(var!(sip_ctx), unquote(proplist))
-          end
-        end
-
-        defmacro ctx_from() do
-          quote do
-            SIP.Context.from(var!(sip_ctx))
-          end
-        end
-
-        defmacro ctx_to(userpart) do
-          quote do
-            SIP.Context.to(var!(sip_ctx), unquote(userpart))
-          end
-        end
-
-        # Record the identity an authentication verdict proved for this
-        # session's peer. See SIP.Context.assert_identity/2.
-        defmacro assert_identity(identity) do
-          quote do
-            var!(sip_ctx) =
-              SIP.Context.assert_identity(var!(sip_ctx), unquote(identity))
-          end
+      # Record the identity an authentication verdict proved for this
+      # session's peer. See SIP.Context.assert_identity/2.
+      defmacro assert_identity(identity) do
+        quote do
+          var!(sip_ctx) =
+            SIP.Context.assert_identity(var!(sip_ctx), unquote(identity))
         end
       end
     end
@@ -118,9 +135,10 @@ defmodule SIP.Context do
     Map.get(context, prop)
   end
 
-  # FSM bookkeeping fields driven by FSL (goto / scenario_failure).
+  # FSM bookkeeping fields. They are FSL's, so FSL answers for them — the one
+  # reading of what `currentstate` means lives there, not in each binding.
   def get(context, prop) when prop in [:currentstate, :laststate, :errorreason] do
-    Map.get(context, prop)
+    FSL.Context.get(context, prop)
   end
 
   # The proved identity of this session's peer (see assert_identity/2).
@@ -139,7 +157,7 @@ defmodule SIP.Context do
 
   @doc "Store an application-defined value in the context appdata map."
   def appdata_set(context = %SIP.Context{}, prop, value) do
-    Map.put(context, :appdata, Map.put(context.appdata, prop, value))
+    FSL.Context.snapshot(Map.put(context, :appdata, Map.put(context.appdata, prop, value)))
   end
 
   @spec set(map(), list()) :: list()
@@ -153,23 +171,43 @@ defmodule SIP.Context do
     set(new_ctx, remaining)
   end
 
-  # Set the username and create the fromtag if needed
-  def set(context, :username, value) when is_binary(value) do
+  @doc """
+  Write one property of the context.
+
+  The one door in: whatever the property is, the context that comes out is
+  photographed by `FSL.Context.snapshot/1` before it is returned, so that a state
+  raising later hands the teardown what it had allocated rather than the context
+  it was entered with (see `FSL.Context.snapshot/1`). The clauses below are the
+  validation, one per property; this is where the write is recorded.
+  """
+  def set(context, prop, value), do: FSL.Context.snapshot(do_set(context, prop, value))
+
+  # Set the username, minting the From tag on the first write.
+  #
+  # The `if` had no `else`, so a SECOND write — a scenario that reads its account
+  # from a backend after a first `config` value, a registrar instance reused for
+  # another AOR — returned nil and the `Map.put` below raised a BadMapError in the
+  # state that wrote it. The tag is minted once and kept: it identifies this side
+  # of every dialog this session opens (RFC 3261 §19.3), so re-minting it would be
+  # a worse fix than the crash it replaces.
+  defp do_set(context, :username, value) when is_binary(value) do
     context =
       if is_nil(context.ftag) do
         Map.put(context, :ftag, SIP.Msg.Ops.generate_from_or_to_tag())
+      else
+        context
       end
 
     Map.put(context, :username, value)
   end
 
   # Set a single property that is already int he map
-  def set(context, prop, value) when prop in @props and is_binary(value) do
+  defp do_set(context, prop, value) when prop in @props and is_binary(value) do
     Map.put(context, prop, value)
   end
 
   # Set the dialog PID
-  def set(context, :dialogpid, value) do
+  defp do_set(context, :dialogpid, value) do
     if is_pid(value) do
       Map.put(context, :dialogpid, value)
     else
@@ -179,11 +217,11 @@ defmodule SIP.Context do
 
   # Set the parent FSM PID (nil means this scenario has no parent and runs
   # standalone, so notify_parent / child_exit become no-ops).
-  def set(context, :parent_pid, nil) do
+  defp do_set(context, :parent_pid, nil) do
     Map.put(context, :parent_pid, nil)
   end
 
-  def set(context, :parent_pid, value) do
+  defp do_set(context, :parent_pid, value) do
     if is_pid(value) do
       Map.put(context, :parent_pid, value)
     else
@@ -192,11 +230,11 @@ defmodule SIP.Context do
   end
 
   # Set the media PID (nil clears it, e.g. after releasing media resources)
-  def set(context, :mediaserverpid, nil) do
+  defp do_set(context, :mediaserverpid, nil) do
     Map.put(context, :mediaserverpid, nil)
   end
 
-  def set(context, :mediaserverpid, value) do
+  defp do_set(context, :mediaserverpid, value) do
     if is_pid(value) do
       Map.put(context, :mediaserverpid, value)
     else
@@ -204,7 +242,7 @@ defmodule SIP.Context do
     end
   end
 
-  def set(context, :mediaservermodule, value) do
+  defp do_set(context, :mediaservermodule, value) do
     if is_atom(value) and Code.ensure_loaded?(value) do
       Map.put(context, :mediaservermodule, value)
     else
@@ -213,48 +251,36 @@ defmodule SIP.Context do
   end
 
   # Set the password
-  def set(ctx, :passwd, value)
+  defp do_set(ctx, :passwd, value)
       when ctx.authusername != nil and ctx.algorithm != nil and ctx.domain != nil do
     Map.put(ctx, :ha1, SIP.Auth.compute_ha1(ctx.algorithm, ctx.authusername, ctx.domain, value))
   end
 
-  def set(ctx, :passwd, _value)
+  defp do_set(ctx, :passwd, _value)
       when is_nil(ctx.authusername) or is_nil(ctx.algorithm) or is_nil(ctx.domain) do
     raise "Cannot set password. One of the following has not been set: authusername, domain, algorithm"
   end
 
-  def set(ctx, :lasterr, value) do
-    Map.put(ctx, :lasterr, value)
-  end
-
-  # Current FSM state name, written by the `goto` macro of FSL.
-  def set(ctx, :currentstate, value) when is_atom(value) do
-    Map.put(ctx, :currentstate, value)
-  end
-
-  # State the FSM was in before entering `currentstate`, written by the runner and
-  # read back by `goto back`. Re-entering a state (`goto loop`, `stay`) leaves it
-  # untouched.
-  def set(ctx, :laststate, value) when is_atom(value) do
-    Map.put(ctx, :laststate, value)
-  end
-
-  # Human-readable failure reason, written by `scenario_failure/1`.
-  def set(ctx, :errorreason, value) when is_binary(value) do
-    Map.put(ctx, :errorreason, value)
+  # The FSM's own four, delegated so that the meaning of each — an atom state
+  # name, a human-readable reason, an error channel that takes any term — is
+  # defined once, in FSL, and not re-derived by every binding. The spellings
+  # stay: `SIP.Context.set(ctx, :currentstate, …)` is what a test and a script
+  # write, and FSL writes `FSL.Context.put/3`.
+  defp do_set(ctx, prop, value) when prop in [:lasterr, :currentstate, :laststate, :errorreason] do
+    FSL.Context.put(ctx, prop, value)
   end
 
   # The identity an authentication verdict proved, as the URI to assert. Written
   # through assert_identity/2 rather than here in the ordinary case.
-  def set(ctx, :asserted_identity, nil) do
+  defp do_set(ctx, :asserted_identity, nil) do
     Map.put(ctx, :asserted_identity, nil)
   end
 
-  def set(ctx, :asserted_identity, %SIP.Uri{} = uri) do
+  defp do_set(ctx, :asserted_identity, %SIP.Uri{} = uri) do
     Map.put(ctx, :asserted_identity, uri)
   end
 
-  def set(_context, prop, _value) when is_atom(prop) do
+  defp do_set(_context, prop, _value) when is_atom(prop) do
     raise "Unsupported context property #{prop}"
   end
 
@@ -291,11 +317,11 @@ defmodule SIP.Context do
   """
   @spec assert_identity(%SIP.Context{}, map() | %SIP.Uri{} | nil) :: %SIP.Context{}
   def assert_identity(context = %SIP.Context{}, nil) do
-    Map.put(context, :asserted_identity, nil)
+    FSL.Context.snapshot(Map.put(context, :asserted_identity, nil))
   end
 
   def assert_identity(context = %SIP.Context{}, %SIP.Uri{} = uri) do
-    Map.put(context, :asserted_identity, uri)
+    FSL.Context.snapshot(Map.put(context, :asserted_identity, uri))
   end
 
   def assert_identity(context = %SIP.Context{}, identity) when is_map(identity) do
@@ -308,11 +334,13 @@ defmodule SIP.Context do
               " (context domain: #{inspect(context.domain)})"
     end
 
-    Map.put(context, :asserted_identity, %SIP.Uri{
-      scheme: "sip:",
-      userpart: to_string(user),
-      domain: to_string(realm)
-    })
+    FSL.Context.snapshot(
+      Map.put(context, :asserted_identity, %SIP.Uri{
+        scheme: "sip:",
+        userpart: to_string(user),
+        domain: to_string(realm)
+      })
+    )
   end
 
   def from(context) do

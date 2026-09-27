@@ -168,6 +168,13 @@ defmodule MediaServer.Mendooze.Conn do
   # de-redundified text.
   @ws_text_codecs ["T140", "T140RED"]
 
+  # The `m=` line of a text section we offer on a WebSocket WE will open. An
+  # active endpoint binds nothing, so RFC 4145 §4 puts the discard port there.
+  # The transport token is decorative in the same way: what tells ws from wss is
+  # the attribute NAME of the URL the answerer publishes, never this.
+  @ws_client_port 9
+  @ws_client_protocol "TCP/WSS"
+
   # ── API (called through the MediaServer.Mendooze facade) ───────────────────
 
   def start(server, event_sink, opts) do
@@ -1512,7 +1519,8 @@ defmodule MediaServer.Mendooze.Conn do
 
   defp do_get_local_offer(state, cross) do
     with {:ok, state} <- setup_local_security(state),
-         {:ok, state} <- start_receiving_all(state, cross) do
+         {:ok, state} <- start_receiving_all(state, cross),
+         {:ok, state} <- ensure_local_address(state) do
       offer =
         Sdp.build(%{
           ip: state.local_ip,
@@ -1530,6 +1538,15 @@ defmodule MediaServer.Mendooze.Conn do
       {:error, reason} -> {:fail, reason}
     end
   end
+
+  # An offer needs a `c=` line (RFC 4566 §5.7), and its address is the media
+  # server's — filled by the receive plane an RTP or data channel medium opens. A
+  # leg whose ONLY medium is a client-mode WebSocket opens none, and in that mode
+  # the server has no local address to give: it publishes the remote URL and
+  # refuses to answer for a port of its own. So there is no offer to build, and
+  # saying so beats an SDP with no address in it.
+  defp ensure_local_address(%{local_ip: nil}), do: {:error, :no_local_media_address}
+  defp ensure_local_address(state), do: {:ok, state}
 
   defp do_set_remote_answer(state, sdp) do
     with {:ok, descs} <- Sdp.parse(sdp),
@@ -2018,10 +2035,18 @@ defmodule MediaServer.Mendooze.Conn do
 
   defp start_receiving_all(state, cross) do
     Enum.reduce_while(state.medias, {:ok, state}, fn media, {:ok, st} ->
-      if media == :text and offer_text_transport(st) == :data_channel do
-        start_receiving_data_channel(st, media)
-      else
-        start_receiving_rtp(st, media, cross)
+      case media == :text and offer_text_transport(st) do
+        :data_channel ->
+          start_receiving_data_channel(st, media)
+
+        # Client mode: nothing of ours is bound, so there is no plane to open
+        # here. `ConnectMediaConnection` switches the port itself, and it needs
+        # the URL only the answer carries (`apply_remote_media/3`).
+        :ws ->
+          {:cont, {:ok, st}}
+
+        _ ->
+          start_receiving_rtp(st, media, cross)
       end
     end)
   end
@@ -2679,6 +2704,7 @@ defmodule MediaServer.Mendooze.Conn do
 
             case apply_remote_media(st, desc, Map.put(neg, :send_map, send_map)) do
               {:ok, st, neg} -> {:cont, {:ok, st, Map.put(acc, desc.type, neg)}}
+              {:skip, st} -> {:cont, {:ok, st, acc}}
               {:error, _} = err -> {:halt, err}
             end
         end
@@ -2702,8 +2728,16 @@ defmodule MediaServer.Mendooze.Conn do
   # destination to send to (the peer connects to us), no crypto (the WebSocket's
   # own TLS carries it) and nothing for the RTP watchdog to watch — T.140 is
   # legitimately silent between keystrokes anyway.
-  defp apply_remote_media(state, %{transport: :ws}, neg),
-    do: {:ok, state, neg}
+  #
+  # Unless WE are the one connecting, and then the answer's URL is this leg's
+  # whole configuration.
+  defp apply_remote_media(state, %{transport: :ws} = desc, neg) do
+    if ws_client?(state, desc.type) do
+      arm_ws_client(state, desc, neg)
+    else
+      {:ok, state, neg}
+    end
+  end
 
   # A data channel leg is NOT in that case, and goes through the ordinary clause
   # below on purpose: its StartSending is what posts the destination, and without
@@ -2731,6 +2765,64 @@ defmodule MediaServer.Mendooze.Conn do
       {:ok, note_negotiated(state, desc.type, neg) |> note_h264_mode(desc), neg}
     end
   end
+
+  # Arm the client-mode WebSocket text leg on the URL the answer publishes.
+  # `ConnectMediaConnection` switches the port to a WebSocket one and asks for
+  # the connection; its success says the leg is ARMED, not that the WebSocket is
+  # open. The opening — and every reconnection after a loss — arrives as an
+  # EndpointConnectedEvent, i.e. `{:media_connected, :text}` (the media server's
+  # `docs/conception/WS-CLIENT/SPEC.md`, §4.8).
+  #
+  # An answer without a URL, an RPC error, or a media server too old to know the
+  # verb costs the TEXT and not the call: the medium is left un-negotiated and
+  # the audio and video legs stand. Same policy as the two other text
+  # transports, and for the same reason.
+  defp arm_ws_client(state, %{ws_url: nil} = desc, _neg) do
+    Logger.warning(
+      module: __MODULE__,
+      cnx_tag: state.sess_tag,
+      message: "text over WebSocket answered without an a=ws / a=wss URL; dropping the medium"
+    )
+
+    {:skip, drop_medium(state, desc.type)}
+  end
+
+  defp arm_ws_client(state, desc, neg) do
+    case rpc(state, "ConnectMediaConnection", [
+           state.sess_id,
+           state.endpoint_id,
+           @media_int[desc.type],
+           @role_main,
+           desc.ws_url
+         ]) do
+      {:ok, _} ->
+        Logger.info(
+          module: __MODULE__,
+          cnx_tag: state.sess_tag,
+          message: "text over a WebSocket we open: armed on #{desc.ws_url}"
+        )
+
+        {:ok, state, neg}
+
+      {:error, reason} ->
+        Logger.warning(
+          module: __MODULE__,
+          cnx_tag: state.sess_tag,
+          message:
+            "could not arm the outgoing WebSocket for text on #{desc.ws_url} " <>
+              "(#{inspect(reason)}); dropping the medium"
+        )
+
+        {:skip, drop_medium(state, desc.type)}
+    end
+  end
+
+  # A medium this leg cannot carry after all. Distinct from `note_declined/2`:
+  # nobody turned it down, we failed to set it up, and a leg that still lists it
+  # would have `bridge/3` and the player attach to a medium the server holds
+  # nothing for.
+  defp drop_medium(state, media),
+    do: %{state | medias: List.delete(state.medias, media)}
 
   # A declined media carries nothing: its stale `negotiated`/`peer_codecs`
   # entries go with it, so neither the cross-leg selection nor the answer
@@ -3096,11 +3188,41 @@ defmodule MediaServer.Mendooze.Conn do
   # ── SDP spec builders ───────────────────────────────────────────────────────
 
   defp offer_media_spec(state, media, cross) do
-    if Map.has_key?(state.data_channels, media) do
-      dc_offer_media_spec(state, media)
-    else
-      rtp_offer_media_spec(state, media, cross)
+    cond do
+      Map.has_key?(state.data_channels, media) -> dc_offer_media_spec(state, media)
+      ws_client?(state, media) -> ws_client_offer_media_spec(state, media)
+      true -> rtp_offer_media_spec(state, media, cross)
     end
+  end
+
+  # A client-mode WebSocket text leg: we offered the section and we are the one
+  # who connects, so nothing of ours is bound and the answer's URL is what arms
+  # it. A leg that MINTED a URL is the server of its own WebSocket (`ws_urls`) —
+  # the opposite arrangement, and the one this must not be confused with, since
+  # both can carry `text_transport: :ws` in their options.
+  defp ws_client?(state, media) do
+    media == :text and offer_text_transport(state) == :ws and
+      not Map.has_key?(state.ws_urls, media)
+  end
+
+  # The TEXT medium offered on a WebSocket WE will open — the arrangement a
+  # browser's text channel has, the peer hosting and us connecting.
+  #
+  # `a=setup:active` is the whole of it (RFC 4145), and there is deliberately no
+  # `a=ws` attribute: we have no URL to publish, and the one that matters comes
+  # back in the answer. No rtpmap and no fmtp either — `t140` is the whole
+  # vocabulary of this transport and the redundancy is the media server's
+  # business.
+  defp ws_client_offer_media_spec(state, media) do
+    %{
+      ws_text: nil,
+      type: :text,
+      port: @ws_client_port,
+      protocol: @ws_client_protocol,
+      setup: :active,
+      direction: :sendrecv,
+      mid: offer_mid(state, media)
+    }
   end
 
   # The TEXT medium offered on a data channel (RFC 8865). Real media, so a real
@@ -3961,15 +4083,20 @@ defmodule MediaServer.Mendooze.Conn do
   #    receive: `RTCPeerConnection` has no `m=text` on an RTP profile;
   #  * `:rtp` — `m=text` with T.140 and the RFC 4103 redundancy. The default off
   #    WebRTC, and what a SIP Total Conversation endpoint speaks.
+  #  * `:ws` — `m=text … TCP/WSS t140` with `a=setup:active`: the media server
+  #    plays the browser and OPENS a WebSocket towards the URL the answer
+  #    publishes. Asked for explicitly, never a default.
   #
-  # A WebSocket is never OFFERED. It is a door we open when a peer asks for one
-  # (its own `m=text TCP/WS` section, answered with our URL); offering one would
-  # publish an address nobody asked for, and no client is built to look for it in
-  # an offer.
+  # We never offer a WebSocket of OUR own — that stays a door we open when a peer
+  # knocks (its own `m=text TCP/WS` section, answered with our URL), because
+  # publishing an address nobody asked for is not something any client looks for
+  # in an offer. `:ws` is the opposite arrangement: we are the one connecting, so
+  # the offer publishes nothing at all.
   #
   # A data channel needs DTLS. Asking for one off a WebRTC leg is a configuration
   # mistake, not a wish to honour silently: it is logged and the offer falls back
-  # to RTP, which is the only thing that leg can carry.
+  # to RTP, which is the only thing that leg can carry. `:ws` has no such
+  # constraint — a WebSocket is beside the call, not inside its DTLS.
   defp offer_text_transport(state) do
     case Keyword.get(state.opts, :text_transport, :default) do
       :default ->
@@ -3993,12 +4120,15 @@ defmodule MediaServer.Mendooze.Conn do
       :rtp ->
         :rtp
 
+      :ws ->
+        :ws
+
       other ->
         Logger.warning(
           module: __MODULE__,
           cnx_tag: state.sess_tag,
           message:
-            "unknown text_transport #{inspect(other)}; expected :data_channel or :rtp — " <>
+            "unknown text_transport #{inspect(other)}; expected :data_channel, :rtp or :ws — " <>
               "offering T.140 over RTP"
         )
 

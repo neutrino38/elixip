@@ -114,7 +114,8 @@ defmodule Kelix.ControlTest do
       assert d.max_calls == 500
       assert d.functions == [:registrar, :calls]
       assert d.registrar == %{script: "registrar-example.exs", default_expires: 3600}
-      assert d.presence == nil
+      # No [[domain.presence]] block: the function is served on no event package.
+      assert d.presence == []
       assert d.active_calls == 0
       assert d.registrations == 0
 
@@ -403,12 +404,17 @@ defmodule Kelix.ControlTest do
       assert row.command == ""
     end
 
-    # kelescope's live monitor (docs/design/kelixip_liveview.md): a scenario
+    # kelescope's live monitor: a scenario
     # appearing, changing state and ending must reach the subscriber as
     # `{:kelix_monitor, {:upsert | :remove, _}}`, with no polling.
     test "subscribe_monitor/1 returns the snapshot, then pushes appearance/state/removal" do
       on_exit(fn -> Control.unsubscribe_monitor(self()) end)
 
+      # One call registers AND snapshots. It used to be two — subscribe, then
+      # read — which is survivable in that order only, because a change landing
+      # between them arrives as a push *and* in the snapshot (a duplicate
+      # upsert, idempotent). One call has no order to get wrong; the same
+      # contract holds one layer down, on FSL.Monitor.subscribe/1.
       assert snapshot = Control.subscribe_monitor(self())
       assert is_list(snapshot)
 
@@ -427,15 +433,39 @@ defmodule Kelix.ControlTest do
       assert_receive {:kelix_monitor, {:remove, ^id}}, 1000
     end
 
+    test "subscribe_monitor/1 answers the rows that already exist" do
+      on_exit(fn -> Control.unsubscribe_monitor(self()) end)
+
+      pid = spawn_watched("presub.test")
+      assert await_state("presub.test")
+
+      # An instance that was running BEFORE anyone subscribed has to be in the
+      # snapshot: a subscriber that only saw changes from now on would render an
+      # empty table on a busy node.
+      rows = Control.subscribe_monitor(self())
+      assert row = Enum.find(rows, &(&1.domain == "presub.test"))
+      assert row.pid == pid
+      assert row.state == "initial_state"
+      assert row.function == :registrar
+    end
+
     test "unsubscribe_monitor/1 stops the pushes" do
       Control.subscribe_monitor(self())
       assert Control.unsubscribe_monitor(self()) == :ok
 
       spawn_watched("unsub.test")
-      refute_receive {:kelix_monitor, _}, 200
+
+      # Scoped to this test's own domain, like every other assertion in this
+      # block. An instance of a neighbouring test may still be draining — the
+      # pool frees a slot on an async :DOWN, and `on_exit` shuts those
+      # instances down after their own test has ended — so its
+      # `{:remove, id}`, queued inside the brief window this test IS
+      # subscribed, says nothing about whether the subscription is still live.
+      # Our own instance appearing would.
+      refute_receive {:kelix_monitor, {:upsert, %{domain: "unsub.test"}}}, 200
     end
 
-    # kelescope's live domain list (docs/design/kelixip_liveview.md): an
+    # kelescope's live domain list: an
     # instance appearing/ending must push that domain's active-calls count,
     # with no polling. The registrations half lives in the registrar module
     # (apps/kelix_modules/test/registrar_test.exs) — nothing here to load it.
@@ -560,7 +590,7 @@ defmodule Kelix.ControlTest do
     end
 
     # kelescope confirms this action and requires an admin name before sending it
-    # (`docs/design/kelixip_liveview.md`) — traced here, not merely returned.
+    # — traced here, not merely returned.
     test "shutdown_scenario/2 traces the admin name in this node's own logs" do
       spawn_watched("stop-admin.test")
       assert row = await_state("stop-admin.test")

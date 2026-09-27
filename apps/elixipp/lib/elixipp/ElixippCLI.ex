@@ -26,11 +26,18 @@ defmodule Elixipp.CLI do
       round-robin across runs. In server (UAS) mode there is no run counter to
       cycle on: the header and the first account are shared by every instance.
 
+  ## Live display (`--monitor`)
+
+  Two stacked blocks: the call table, five rows tall whatever the terminal is,
+  and a "Journal" pane holding the tail of the console log. Both belong to
+  `Owl.LiveScreen`, so nothing else may write to the terminal while they are up
+  — see `capture_logger/0`.
+
   ## Keys (interactive/live mode)
 
     * `q`       — graceful shutdown: no new calls, wait for active ones
     * `Ctrl+D`  — immediate stop (prints the summary, then halts)
-    * `↑ / ↓`   — scroll the call table when it exceeds the terminal height
+    * `↑ / ↓`   — scroll the call table when it holds more than five calls
 
   ## Logging
 
@@ -86,8 +93,20 @@ defmodule Elixipp.CLI do
     {"Destination", :outbound, 22}
   ]
 
-  # Rows to reserve for the counter line, border, and status bar.
-  @ui_overhead 6
+  # Call rows the table shows at once; ↑↓ scrolls through the rest. Fixed rather
+  # than "as many as the terminal has", so the log pane below always has its
+  # place — a run with -l 50 used to push everything else off the screen.
+  @table_rows 5
+
+  # Width of the rendered table: the cells, plus one border column between each
+  # pair and one on each side. The log pane is laid out to the same width.
+  @table_width Enum.sum(Enum.map(@columns, fn {_h, _k, w} -> w end)) + length(@columns) + 1
+
+  # Log lines the "Journal" pane shows, and how many it keeps behind them. Both
+  # fixed: the whole live display then has a height that does not depend on the
+  # terminal, which is what keeps the table and the pane both on screen.
+  @log_pane_rows 5
+  @log_buffer_size 500
 
   @spec main([String.t()]) :: no_return()
   def main(argv) do
@@ -151,8 +170,10 @@ defmodule Elixipp.CLI do
     # env, because this check sat *after* the server-mode branch below).
     case validate_log_sequence(opts, limit) do
       :ok ->
+        # `:fsl`, not `:elixip2`: the journal and its renderer are FSL's since
+        # the extraction, and so is the flag that turns them on.
         if Keyword.get(opts, :log_sequence, false),
-          do: Application.put_env(:elixip2, :log_sequence, true)
+          do: Application.put_env(:fsl, :log_sequence, true)
 
       {:error, msg} ->
         abort(msg, 2)
@@ -229,7 +250,7 @@ defmodule Elixipp.CLI do
   # instances (REGISTER beyond it are rejected with 503). Never returns.
   @spec run_server_mode(module(), atom(), keyword(), pos_integer(), term()) :: no_return()
   defp run_server_mode(module, kind, opts, limit, ext_config)
-       when kind in [:uas_register, :uas_invite],
+       when kind in [:uas_register, :uas_invite, :uas_presence],
        do: start_uas_server(module, kind, opts, limit, ext_config)
 
   defp run_server_mode(_module, type, _opts, _limit, _ext_config) do
@@ -242,7 +263,7 @@ defmodule Elixipp.CLI do
   # server loop. Never returns.
   @spec start_uas_server(
           module(),
-          :uas_register | :uas_invite,
+          :uas_register | :uas_invite | :uas_presence,
           keyword(),
           pos_integer(),
           term()
@@ -279,6 +300,12 @@ defmodule Elixipp.CLI do
 
         :uas_invite ->
           SIP.Session.ConfigRegistry.set_call_processing_module(Elixip.ScenarioUAS)
+
+        # SUBSCRIBE and PUBLISH both land on the presence slot (RFC 6665, RFC
+        # 3903): one scenario serves both, and which of the two it answers is
+        # decided by the states it writes.
+        :uas_presence ->
+          SIP.Session.ConfigRegistry.set_presence_processing_module(Elixip.ScenarioUAS)
       end
 
     started = start_listeners(listeners)
@@ -394,6 +421,7 @@ defmodule Elixipp.CLI do
 
   defp server_kind_label(:uas_register), do: "UAS Register"
   defp server_kind_label(:uas_invite), do: "UAS Invite (call server)"
+  defp server_kind_label(:uas_presence), do: "UAS Presence (notifier)"
 
   # Live monitored server loop: bring up Owl + the monitor, render the call table
   # in a live block and react to the keyboard (q / Ctrl+D / arrows). On a
@@ -403,10 +431,11 @@ defmodule Elixipp.CLI do
           no_return()
   defp run_server_monitored(module, kind, limit, max_run, started) do
     {:ok, _} = Application.ensure_all_started(:owl)
-    {:ok, _} = SIP.Scenario.Monitor.start()
+    {:ok, _} = FSL.Monitor.start(columns: SIP.FSL.Host.monitor_columns())
 
     if match?({:ok, _}, :io.rows()) do
       raw? = setup_raw_terminal(true)
+      capture_logger()
 
       Owl.LiveScreen.add_block(:display,
         state: {0, :none},
@@ -414,6 +443,8 @@ defmodule Elixipp.CLI do
           render_server_block(scroll, shutdown, module, limit, started)
         end
       )
+
+      Owl.LiveScreen.add_block(:logs, state: 0, render: &render_log_pane/1)
 
       start_input_reader(self())
 
@@ -436,7 +467,7 @@ defmodule Elixipp.CLI do
       :graceful_stop when state.shutdown == :none ->
         Elixip.ScenarioUAS.shutdown_all(:elixipp_graceful)
         state = %{state | shutdown: :graceful}
-        Owl.LiveScreen.update(:display, {state.scroll_offset, state.shutdown})
+        push_server_display(state)
         # Same deadline as the UAC path: an instance that does not honour the
         # cooperative shutdown must not leave the operator with only Ctrl+D.
         Process.send_after(self(), :shutdown_deadline, @shutdown_grace_ms)
@@ -471,21 +502,21 @@ defmodule Elixipp.CLI do
 
       :arrow_up ->
         state = %{state | scroll_offset: max(0, state.scroll_offset - 1)}
-        Owl.LiveScreen.update(:display, {state.scroll_offset, state.shutdown})
+        push_server_display(state)
         server_monitor_loop(state)
 
       :arrow_down ->
         total = length(SIP.Scenario.Monitor.calls())
         max_scroll = max(0, total - visible_rows())
         state = %{state | scroll_offset: min(max_scroll, state.scroll_offset + 1)}
-        Owl.LiveScreen.update(:display, {state.scroll_offset, state.shutdown})
+        push_server_display(state)
         server_monitor_loop(state)
 
       _ ->
         server_monitor_loop(state)
     after
       500 ->
-        Owl.LiveScreen.update(:display, {state.scroll_offset, state.shutdown})
+        push_server_display(state)
         stats = Elixip.ScenarioUAS.stats()
 
         # Auto-halt when max_run instances have all completed naturally.
@@ -507,9 +538,15 @@ defmodule Elixipp.CLI do
     end
   end
 
-  defp server_monitor_halt(state) do
+  defp push_server_display(state) do
     Owl.LiveScreen.update(:display, {state.scroll_offset, state.shutdown})
+    push_log_pane()
+  end
+
+  defp server_monitor_halt(state) do
+    push_server_display(state)
     Owl.LiveScreen.flush()
+    release_logger(true)
     restore_terminal(state.raw?)
     IO.puts("\r\nServeur arrêté.")
     print_uas_summary(state.module)
@@ -875,7 +912,7 @@ defmodule Elixipp.CLI do
 
   defp run_parallel(module, limit, max_run, spawn_interval_ms, rate, monitor?, ext_config) do
     {:ok, _} = Application.ensure_all_started(:owl)
-    {:ok, _} = SIP.Scenario.Monitor.start()
+    {:ok, _} = FSL.Monitor.start(columns: SIP.FSL.Host.monitor_columns())
     SIP.Scenario.Runner.bootstrap_stack()
 
     # Keyboard control (q / Ctrl+D) needs an interactive terminal; the live table
@@ -886,10 +923,14 @@ defmodule Elixipp.CLI do
     raw? = setup_raw_terminal(live?)
 
     if live? do
+      capture_logger()
+
       Owl.LiveScreen.add_block(:display,
         state: initial_block_state(),
         render: fn bs -> render_block(bs, limit, max_run) end
       )
+
+      Owl.LiveScreen.add_block(:logs, state: 0, render: &render_log_pane/1)
     end
 
     state = %{
@@ -930,6 +971,7 @@ defmodule Elixipp.CLI do
         # on screen. Printing render_table_plain on top would duplicate it.
         Owl.LiveScreen.update(:display, block_state(state))
         Owl.LiveScreen.flush()
+        release_logger(true)
         restore_terminal(raw?)
 
       monitor? ->
@@ -1085,8 +1127,9 @@ defmodule Elixipp.CLI do
   defp handle_graceful_stop(state) do
     case state.shutdown do
       :none ->
-        IO.write(
-          "\r\n[q] Arrêt propre — plus de nouveaux appels, demande d'arrêt aux actifs (Ctrl+D pour forcer).\r\n"
+        put_above_block(
+          state.live?,
+          "[q] Arrêt propre — plus de nouveaux appels, demande d'arrêt aux actifs (Ctrl+D pour forcer)."
         )
 
         # Ask every active call to wind down cooperatively, and arm a deadline to
@@ -1109,6 +1152,8 @@ defmodule Elixipp.CLI do
   # Ctrl+D (or EOF / Ctrl+C in raw mode): stop everything right now, whatever is
   # still in flight, and print the summary before halting.
   defp handle_force_quit(state) do
+    if state.live?, do: Owl.LiveScreen.flush()
+    release_logger(state.live?)
     IO.write("\r\n[Ctrl+D] Arrêt immédiat.\r\n")
     restore_terminal(state.raw?)
     print_summary(state)
@@ -1124,9 +1169,59 @@ defmodule Elixipp.CLI do
 
   defp push_display(%{live?: true} = state) do
     Owl.LiveScreen.update(:display, block_state(state))
+    push_log_pane()
   end
 
   defp push_display(_state), do: :ok
+
+  # The pane reads the buffer itself; the block state only has to differ from the
+  # last one for Owl to call the render function again.
+  defp push_log_pane do
+    Owl.LiveScreen.update(:logs, System.unique_integer([:monotonic]))
+  end
+
+  # The log pane, a block of its own UNDER the table — which is the whole point:
+  # Owl owns every row it has rendered, so the only place a log line can live
+  # without fighting the redraw is inside a block.
+  defp render_log_pane(_revision) do
+    rows = log_pane_rows()
+
+    content =
+      case Elixipp.LogPane.lines(rows) do
+        [] ->
+          Owl.Data.tag("(aucun message)", :light_black)
+
+        entries ->
+          entries
+          |> Enum.map(fn {level, line} -> Owl.Data.tag(line, log_color(level)) end)
+          |> Owl.Data.unlines()
+      end
+
+    Owl.Box.new(content,
+      title: log_pane_title(),
+      border_style: :solid_rounded,
+      min_width: @table_width,
+      max_width: @table_width,
+      min_height: rows + 2,
+      truncate_lines: true
+    )
+  end
+
+  defp log_pane_title do
+    case Elixipp.LogPane.dropped() do
+      0 -> "Journal"
+      n -> "Journal (#{n} ligne(s) plus ancienne(s) écartée(s))"
+    end
+  end
+
+  defp log_color(:emergency), do: :red
+  defp log_color(:alert), do: :red
+  defp log_color(:critical), do: :red
+  defp log_color(:error), do: :red
+  defp log_color(:warning), do: :yellow
+  defp log_color(:notice), do: :cyan
+  defp log_color(:info), do: :default_color
+  defp log_color(_), do: :light_black
 
   defp initial_block_state, do: {0, 0, 0, 0, 0, 0, :none}
 
@@ -1212,12 +1307,9 @@ defmodule Elixipp.CLI do
     IO.puts("════════════════════════════")
   end
 
-  defp visible_rows do
-    case :io.rows() do
-      {:ok, rows} -> max(5, rows - @ui_overhead)
-      _ -> 20
-    end
-  end
+  defp visible_rows, do: @table_rows
+
+  defp log_pane_rows, do: @log_pane_rows
 
   # ── Input reader (q = graceful, Ctrl+D = immediate, arrow keys) ───────────────
 
@@ -1286,6 +1378,68 @@ defmodule Elixipp.CLI do
     do: System.cmd("sh", ["-c", "stty sane </dev/tty"], stderr_to_stdout: true)
 
   defp restore_terminal(false), do: :ok
+
+  # ── Console logging while a live block is on screen ──────────────────────────
+
+  @logger_saved_config :elixipp_saved_default_handler
+  @pane_handler :elixipp_log_pane
+
+  # Nothing may reach the terminal behind Owl's back while a live block is on
+  # screen. Owl redraws the block by moving the cursor up by the height it last
+  # rendered; a line written straight to the tty shifts everything down by one and
+  # the next redraw then lands INSIDE the previous table instead of on top of it —
+  # counters and borders pile up down the screen. Console logging is what bypassed
+  # it: a single 407 retry writes three warnings, which is why the monitor table
+  # bled on every authenticated call.
+  #
+  # So the console handler is swapped for `Elixipp.LogPane`, which keeps the lines
+  # in a ring buffer rendered as a block of its own under the table. It inherits
+  # the level, the filters and the formatter it replaces, so what the pane shows
+  # is what the console would have shown. The file sink is a separate handler and
+  # is left alone: the pane holds the tail, `--log-file` holds everything.
+  #
+  # The writer is the `:default` :logger handler, not the `:console` Logger backend
+  # — Elixir translates `config :logger, :console` into that handler, and
+  # `Logger.configure_backend(:console, …)` answers `:ok` while changing nothing.
+  defp capture_logger do
+    case :logger.get_handler_config(:default) do
+      {:ok, config} ->
+        Process.put(@logger_saved_config, config)
+        {:ok, _pid} = Elixipp.LogPane.start(@log_buffer_size)
+        :logger.remove_handler(:default)
+
+        :logger.add_handler(
+          @pane_handler,
+          Elixipp.LogPane,
+          config |> Map.drop([:id, :module, :config])
+        )
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp release_logger(false), do: :ok
+
+  defp release_logger(true) do
+    :logger.remove_handler(@pane_handler)
+
+    case Process.delete(@logger_saved_config) do
+      nil ->
+        :ok
+
+      config ->
+        :logger.add_handler(:default, config.module, Map.drop(config, [:id, :module]))
+    end
+
+    Elixipp.LogPane.stop()
+  end
+
+  # Same rule for what the tool itself prints while the block is up. Owl ends the
+  # line on its own; the plain path spells out the carriage return, the terminal
+  # being in raw mode.
+  defp put_above_block(true, text), do: IO.write(Owl.LiveScreen, text)
+  defp put_above_block(false, text), do: IO.write(["\r\n", text, "\r\n"])
 
   # ── Row rendering ─────────────────────────────────────────────────────────────
 
@@ -1479,6 +1633,7 @@ defmodule Elixipp.CLI do
       elixipp -l 200 --listen udp:5060 uas_register.exs      # serveur, 200 abonnés max
       elixipp --listen tls:5061 --tls-cert cert.pem --tls-key key.pem uas_register.exs
       elixipp --listen wss:5065 --tls-cert cert.pem --tls-key key.pem uas_register.exs
+      elixipp --listen udp:5060 uas_presence.exs  # notifieur de présence (SUBSCRIBE/NOTIFY)
       elixipp --listen udp:5060 uas_invite.exs    # serveur d'appels (répond aux INVITE)
       elixipp -l 20 --listen udp:5060 uas_invite.exs         # 20 appels simultanés max
 

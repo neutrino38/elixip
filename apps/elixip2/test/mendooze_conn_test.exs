@@ -3173,6 +3173,170 @@ defmodule Mendooze.ConnTest do
     assert answer =~ "m=audio 22000"
   end
 
+  # ── Text over a WebSocket WE open (client mode) ─────────────────────────────
+
+  test "text_transport: :ws offers an active section and binds nothing of ours" do
+    %{server: server} = start_media_server()
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(),
+        media: [:audio, :text],
+        webrtc_support: :yes,
+        text_transport: :ws
+      )
+
+    assert {:ok, offer} = Mendooze.get_local_offer(conn)
+
+    # RFC 4145: we connect, the peer hosts. An active endpoint binds nothing,
+    # hence the discard port rather than one the server would have to hold.
+    assert offer =~ "m=text 9 TCP/WSS t140"
+    assert offer =~ "a=setup:active"
+    assert offer =~ "a=connection:new"
+
+    # no URL of ours — the one that matters comes back in the answer
+    refute offer =~ "a=ws"
+
+    # and nothing was asked of the media server for this medium: the port switch
+    # belongs to ConnectMediaConnection, which needs that URL to exist
+    refute_received {:jsr309_call, "ConfigureMediaConnection", _}
+    refute_received {:jsr309_call, "EndpointStartReceiving", [_, _, 2 | _]}
+    refute_received {:jsr309_call, "GetMediaCandidates", [_, _, _, 2]}
+
+    # the audio medium is an ordinary WebRTC one
+    assert {:ok, [audio, text]} = Sdp.parse(offer)
+    assert audio.crypto == {:dtls, :actpass, "sha-256", @fp}
+    assert text.transport == :ws
+    assert text.setup == :active
+    assert text.ws_url == nil
+  end
+
+  # What a peer hosting the WebSocket answers: its own section, `setup:passive`,
+  # and the URL to connect to — value relative to the protocol, scheme in the
+  # attribute name, which is how the deployed gateway publishes it.
+  @ws_client_answer """
+  v=0
+  o=- 4 1 IN IP4 10.9.8.7
+  s=-
+  c=IN IP4 10.9.8.7
+  t=0 0
+  m=audio 40000 RTP/AVP 0
+  a=rtpmap:0 PCMU/8000
+  m=text 9090 TCP/WSS t140
+  a=setup:passive
+  a=connection:new
+  a=wss://10.9.8.7:9090/jsr309/12/tok
+  a=sendrecv
+  """
+
+  defp ws_client_conn(server) do
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(),
+        media: [:audio, :text],
+        webrtc_support: :yes,
+        text_transport: :ws
+      )
+
+    {:ok, _offer} = Mendooze.get_local_offer(conn)
+    conn
+  end
+
+  test "the answer's URL arms an outgoing WebSocket for text" do
+    %{server: server} = start_media_server()
+    conn = ws_client_conn(server)
+
+    assert :ok = Mendooze.set_remote_answer(conn, @ws_client_answer)
+
+    # the scheme travels in the attribute NAME, so what the server is armed with
+    # is an absolute wss:// URL
+    assert_receive {:jsr309_call, "ConnectMediaConnection",
+                    [3, 4, 2, 0, "wss://10.9.8.7:9090/jsr309/12/tok"]}
+
+    # and this leg still has no RTP remote side: nothing to send to, nothing for
+    # the watchdog to watch
+    refute_received {:jsr309_call, "EndpointStartSending", [3, 4, 2 | _]}
+    refute_received {:jsr309_call, "EndpointStartRTPTimeout", [3, 4, 2, _]}
+  end
+
+  test "an answer without a URL loses the text, not the call" do
+    %{server: server} = start_media_server()
+    conn = ws_client_conn(server)
+
+    answer = String.replace(@ws_client_answer, "a=wss://10.9.8.7:9090/jsr309/12/tok\n", "")
+
+    assert :ok = Mendooze.set_remote_answer(conn, answer)
+    refute_received {:jsr309_call, "ConnectMediaConnection", _}
+    # the audio leg is live
+    assert_receive {:jsr309_call, "EndpointStartSending", [3, 4, 0 | _]}
+  end
+
+  test "a media server that cannot open the WebSocket loses the text, not the call" do
+    handler = fn
+      "ConnectMediaConnection", _ -> {:error, "Unknown method"}
+      "PlayerCreate", _ -> {:ok, [10]}
+      m, p -> rpc_handler(m, p)
+    end
+
+    %{server: server} = start_media_server(handler)
+    conn = ws_client_conn(server)
+
+    assert :ok = Mendooze.set_remote_answer(conn, @ws_client_answer)
+    assert_receive {:jsr309_call, "EndpointStartSending", [3, 4, 0 | _]}
+
+    # and the medium is gone from the leg: a player attached to a text port the
+    # server holds nothing for would fail the whole playback
+    {:ok, _player} = Mendooze.create_player(conn, "/tmp/nothing.mp4", [])
+    assert_receive {:jsr309_call, "EndpointAttachToPlayer", [3, 4, _p, 0]}
+    refute_received {:jsr309_call, "EndpointAttachToPlayer", [3, 4, _p, 2]}
+  end
+
+  # The media server publishes event 7 at EVERY opening of an outgoing WebSocket
+  # and event 6 at every loss of one, so their meaning is no longer "DTLS done
+  # and first RTP packet in". Neither says anything about the RTP plane, and R —
+  # the medias the connectivity milestone waits on — already excludes a
+  # WebSocket for that reason.
+  test "the WebSocket opening is connectivity for the text medium alone" do
+    %{server: server, stream: stream} = start_media_server()
+    conn = ws_client_conn(server)
+    assert_receive {:jsr309_call, "MediaSessionCreate", [sess_tag, _q]}
+    assert :ok = Mendooze.set_remote_answer(conn, @ws_client_answer)
+
+    connected(stream, sess_tag, 2)
+    assert_receive {:ms_event, ^conn, {:media_connected, :text}}
+
+    # a scenario may not start playing yet: the audio leg has said nothing
+    refute_receive {:ms_event, ^conn, :ice_connected}, 100
+
+    connected(stream, sess_tag, 0)
+    assert_receive {:ms_event, ^conn, :ice_connected}
+  end
+
+  test "a WebSocket loss is not the loss of the call" do
+    %{server: server, stream: stream} = start_media_server()
+    conn = ws_client_conn(server)
+    assert_receive {:jsr309_call, "MediaSessionCreate", [sess_tag, _q]}
+    assert :ok = Mendooze.set_remote_answer(conn, @ws_client_answer)
+
+    connected(stream, sess_tag, 0)
+    assert_receive {:ms_event, ^conn, :ice_connected}
+
+    # the server reconnects on its own every 5 s, and the audio is untouched
+    timed_out(stream, sess_tag, 2)
+    assert_receive {:ms_event, ^conn, {:media_timeout, :text}}
+    refute_receive {:ms_event, ^conn, :media_lost}, 100
+  end
+
+  test "a leg whose only medium is a client-mode WebSocket has no offer to build" do
+    %{server: server} = start_media_server()
+
+    {:ok, conn} =
+      Mendooze.create_peer_connection(server, self(), media: :text, text_transport: :ws)
+
+    # in client mode the media server publishes no local address, and an SDP
+    # without a c= line is not an offer
+    assert {:error, :no_local_media_address} = Mendooze.get_local_offer(conn)
+    assert_receive {:ms_event, _conn, {:media_error, :no_local_media_address}}
+  end
+
   # The gateway case: T.140 over a WebSocket on one leg, over RTP on the other.
   # The server holds the first outside RTP altogether — it re-created that
   # endpoint's text medium as a WebSocket one — so it answers `Unknown media [2]`

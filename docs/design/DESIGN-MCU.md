@@ -648,8 +648,8 @@ no core change ([DESIGN-KELIXIP.md](DESIGN-KELIXIP.md) §11).
 **The event vocabulary is frozen, and its first transport is built.** Everything
 the module observes is emitted internally as one canonical event, read by the
 logger, the metrics emitter, the owning scenario — and by `Kelix.Mod.Mcu.Push`,
-which relays what changed to the admin UIs that subscribed
-([mcu-live-push.md](mcu-live-push.md)): three topics (the conference list, one
+which relays what changed to the admin UIs that subscribed:
+three topics (the conference list, one
 conference and its roster, one conference's participant statistics), a subscriber
 list and `send/2`, no new dependency. That was the claim being tested: it took one
 consumer at the emission point, no new event name and no redesign. Per-conference
@@ -667,7 +667,7 @@ on the same terms.
 | L6 | no outbound calls (dial-out into a conference) — needs B2BUA legs |
 | L7 | a live participant's video profile is not renegotiated when the conference profile changes, and every leg is encoded at the same size and frame rate — **S6** of [mcu_server_evolutions.md](mcu_server_evolutions.md) makes both a consequence of the server's rate control instead of a setting |
 | L8 | **anyone who can dial the DID joins**; the perimeter must be protected upstream or by a derived script |
-| L9 | ~~event callbacks to an external UI are not delivered~~ — a clustered UI subscribes to three push topics ([mcu-live-push.md](mcu-live-push.md)); a non-BEAM client still has no callback and must poll the REST surface |
+| L9 | ~~event callbacks to an external UI are not delivered~~ — a clustered UI subscribes to three push topics; a non-BEAM client still has no callback and must poll the REST surface |
 | L10 | with script-driven creation, L8 widens: reaching an ad-hoc DID creates a room |
 | L11 | the empty-slot logo cannot be unset on a live conference (no reset RPC) |
 | L12 | a recording is not resumed after a media-server restart, and the partial file is left in place — deliberate |

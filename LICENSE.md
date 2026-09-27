@@ -47,6 +47,26 @@ that competes directly with Elixip, namely:
 whether offered online (hosted / SaaS) or on-premises, open source or not. Such uses require a separate
 commercial license (see below).
 
+## The Finite State Language is not part of the Licensed Work
+
+**FSL — the Finite State Language, its engine and its instrumentation — was
+extracted from Elixip on 2026-09-12 and relicensed by the Licensor to
+Apache-2.0.** It now lives in its own repository,
+[finite-state-language](https://github.com/neutrino38/finite-state-language), and
+Elixip consumes it as an ordinary permissive dependency (hex package
+`finite_state_language`, OTP app `:fsl`, modules `FSL.*`).
+
+That code is therefore **outside** the Licensed Work defined above, and no term of
+this License applies to it — neither the Additional Use Grant nor the
+competing-product restriction. What remains under this License is everything
+built *on* the language: the SIP stack, the session and B2BUA layers, the media
+layer, the SIP binding of FSL (`SIP.FSL.Host`, `SIP.Scenario`), and the tools —
+**elixipp**, **borderline**, **kelixip**.
+
+The relicensing travels in one direction and can only travel in that one: a
+source-available work may depend on a permissive one. Extracting further code
+from Elixip into that package is a decision for the Licensor, version by version.
+
 ## Scenario exemption
 
 Scripts and scenarios executed *by* the framework — the `.exs` scenario files run by the

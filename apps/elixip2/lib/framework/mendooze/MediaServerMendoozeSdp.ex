@@ -958,11 +958,6 @@ defmodule MediaServer.Mendooze.Sdp do
     }
   end
 
-  # `a=ws:<url>` / `a=wss:<url>`. Both attribute names are read, and the value
-  # may be absolute (`ws|wss|http|https`) or protocol-relative (`//host:port/…`,
-  # the form the historical Java gateway emitted because its client re-prefixed
-  # the scheme itself). Returns the value verbatim; interpreting it is the
-  # caller's business.
   defp dc_fmt?(fmt) when is_binary(fmt), do: String.downcase(String.trim(fmt)) == @dc_fmt
   defp dc_fmt?(_fmt), do: false
 
@@ -1088,13 +1083,27 @@ defmodule MediaServer.Mendooze.Sdp do
     end)
   end
 
+  # `a=ws:<url>` / `a=wss:<url>`, as an ABSOLUTE url. Both attribute names are
+  # read, and the value may be absolute (`ws|wss|http|https`) or
+  # protocol-relative (`//host:port/…`, the form the historical Java gateway
+  # emitted because its client re-prefixed the scheme itself). On that form the
+  # attribute NAME is the only thing saying whether the connection is TLS, so a
+  # verbatim value loses it — and what a client-mode text leg is armed with is a
+  # URL, not a pair. `ws_url_attribute/1` builds the same split the other way.
   defp find_ws_url(attrs) do
     Enum.find_value(attrs, fn
-      {"ws", v} -> v
-      {"wss", v} -> v
+      {"ws", v} -> absolute_ws_url("ws", v)
+      {"wss", v} -> absolute_ws_url("wss", v)
       _ -> nil
     end)
   end
+
+  defp absolute_ws_url(_name, "ws://" <> _rest = url), do: url
+  defp absolute_ws_url(_name, "wss://" <> _rest = url), do: url
+  defp absolute_ws_url(_name, "http://" <> rest), do: "ws://" <> rest
+  defp absolute_ws_url(_name, "https://" <> rest), do: "wss://" <> rest
+  defp absolute_ws_url(name, "//" <> _rest = url), do: name <> ":" <> url
+  defp absolute_ws_url(name, url), do: name <> "://" <> url
 
   defp parse_media(m, session_ip, session_attrs, raw_fmtp) do
     attrs = m.attributes

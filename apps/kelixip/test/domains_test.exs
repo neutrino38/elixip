@@ -1,7 +1,7 @@
 defmodule Kelix.DomainsTest do
   use ExUnit.Case, async: true
 
-  alias Kelix.{Domains, Domain, DialRule}
+  alias Kelix.{Domains, Domain, DialRule, PresenceBlock}
 
   @valid """
   [[domain]]
@@ -14,8 +14,14 @@ defmodule Kelix.DomainsTest do
   default_expires = 3600
   min_expires = 60
 
-  [domain.presence]
-  script = "presence-example.exs"
+  [[domain.presence]]
+  event-package = "presence"
+  subscribe = "presence-subscribe.exs"
+  publish = "presence-publish.exs"
+
+  [[domain.presence]]
+  event-package = "dialog"
+  subscribe = "dialog-subscribe.exs"
 
   [[domain]]
   name = "mydomain.de"
@@ -57,10 +63,25 @@ defmodule Kelix.DomainsTest do
                min_expires: 60
              }
 
-      assert ex.presence == %{script: "presence-example.exs"}
+      # One block per event package, in declaration order. `publish` absent means
+      # the package is subscribed to and published by nobody (405), not that the
+      # subscribe script serves both.
+      assert ex.presence == [
+               %PresenceBlock{
+                 event_package: "presence",
+                 subscribe: "presence-subscribe.exs",
+                 publish: "presence-publish.exs"
+               },
+               %PresenceBlock{
+                 event_package: "dialog",
+                 subscribe: "dialog-subscribe.exs",
+                 publish: nil
+               }
+             ]
+
       assert ex.dial_plan == []
       assert my.max_calls == nil
-      assert my.presence == nil
+      assert my.presence == []
     end
 
     test "index resolves name + aliases, case-insensitive", %{snap: snap} do
@@ -201,6 +222,53 @@ defmodule Kelix.DomainsTest do
       assert {:error, msg} = Domains.parse(~s([[domain]]\nname = "a"\nmax_calls = -1))
       assert msg =~ "positive integer"
     end
+
+    # Two blocks claiming one package: which of them serves a SUBSCRIBE would be
+    # decided by declaration order, and the second would be unreachable.
+    test "two presence blocks claiming the same event package" do
+      toml = """
+      [[domain]]
+      name = "a"
+      [[domain.presence]]
+      event-package = "presence"
+      subscribe = "one.exs"
+      [[domain.presence]]
+      event-package = "PRESENCE"
+      subscribe = "two.exs"
+      """
+
+      assert {:error, msg} = Domains.parse(toml)
+      assert msg =~ "served by more than one"
+      assert msg =~ "presence"
+    end
+
+    test "a presence block needs an event package and a subscribe script" do
+      no_package = ~s([[domain]]\nname = "a"\n[[domain.presence]]\nsubscribe = "s.exs")
+      assert {:error, msg} = Domains.parse(no_package)
+      assert msg =~ "missing required `event-package`"
+
+      no_script = ~s([[domain]]\nname = "a"\n[[domain.presence]]\nevent-package = "presence")
+      assert {:error, msg2} = Domains.parse(no_script)
+      assert msg2 =~ "missing required `subscribe`"
+    end
+
+    test "an unknown key in a presence block" do
+      toml =
+        ~s([[domain]]\nname = "a"\n[[domain.presence]]\nevent-package = "presence"\nsubscribe = "s.exs"\nnotify = "n.exs")
+
+      assert {:error, msg} = Domains.parse(toml)
+      assert msg =~ "unknown key(s): notify"
+    end
+
+    # The shape this key had before it carried the event package. An operator
+    # upgrading a node has the old form under their eyes, so the message names the
+    # new one rather than "must be an array of tables".
+    test "the pre-P7 single [domain.presence] table names the new form" do
+      toml = ~s([[domain]]\nname = "a"\n[domain.presence]\nscript = "presence.exs")
+      assert {:error, msg} = Domains.parse(toml)
+      assert msg =~ "array of tables"
+      assert msg =~ "event-package"
+    end
   end
 
   # Uses the Kelix.Domains singleton started by the :kelixip application (booted
@@ -208,6 +276,8 @@ defmodule Kelix.DomainsTest do
   # assertions are relative to the version captured at the start.
   test "reload is atomic — swap on success, keep current on any failure" do
     before = Domains.current()
+    empty = write_tmp("")
+    on_exit(fn -> Domains.reload(empty) end)
 
     # valid file -> version bumped, domains + index loaded
     good = write_tmp(@valid)
@@ -236,7 +306,12 @@ defmodule Kelix.DomainsTest do
 
       assert Domains.script_refs(snap) == [
                {"registrar-example.exs", "domain example.com [domain.registrar]"},
-               {"presence-example.exs", "domain example.com [domain.presence]"},
+               {"presence-subscribe.exs",
+                "domain example.com [[domain.presence]] subscribe (event-package presence)"},
+               {"presence-publish.exs",
+                "domain example.com [[domain.presence]] publish (event-package presence)"},
+               {"dialog-subscribe.exs",
+                "domain example.com [[domain.presence]] subscribe (event-package dialog)"},
                {"registrar-common.exs", "domain mydomain.de [domain.registrar]"},
                {"user2user.exs", ~s(domain mydomain.de call rule "XXXX")},
                {"user2pstn.exs", ~s(domain mydomain.de call rule "0[1-9]XXXXXXXX")},

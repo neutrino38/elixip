@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<presence xmlns="urn:ietf:params:xml:ns:pidf" xmlns:dm="urn:ietf:params:xml:ns:pidf:data-model" xmlns:caps="urn:ietf:params:xml:ns:pidf:caps" xmlns:acme="urn:example:acme:presence" entity="sip:erin@ives.fr">
+<tuple id="tid-7">
+<status><basic>open</basic></status>
+<caps:servcaps><caps:audio>true</caps:audio></caps:servcaps>
+<contact>sip:erin@10.0.0.9</contact>
+<acme:floor>3</acme:floor>
+</tuple>
+<acme:building name="HQ"/>
+<dm:device id="dev-7"><dm:deviceID>urn:uuid:0c0a1f2e</dm:deviceID></dm:device>
+</presence>

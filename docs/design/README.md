@@ -9,7 +9,7 @@ tested and running**, and why it is built that way.
 |---|---|
 | [DESIGN-SIPSTACK.md](DESIGN-SIPSTACK.md) | transport, message, transaction and dialog layers |
 | [DESIGN-FRAMEWORK.md](DESIGN-FRAMEWORK.md) | session layer, mixins, B2BUA, media and the media-server adapters |
-| [DESIGN-FSL.md](DESIGN-FSL.md) | the Finite State Language, its macros and the FSM engine |
+| [DESIGN-FSL.md](DESIGN-FSL.md) | the **SIP binding** of FSL: `SIP.FSL.Host`, the facades, the SIP policy around the language. The language and its engine are a package of its own — [design.md](https://github.com/neutrino38/finite-state-language/blob/main/elixir/docs/design.md) |
 | [DESIGN-ELIXIPP.md](DESIGN-ELIXIPP.md) | the elixipp test tool |
 | [DESIGN-KELIXIP.md](DESIGN-KELIXIP.md) | the kelixip server and its module system |
 | [DESIGN-MCU.md](DESIGN-MCU.md) | the conferencing module |
@@ -35,9 +35,22 @@ The user-facing counterparts live at the repository root —
 | [kelixip-b2bua.md](kelixip-b2bua.md) | `queue()` above the B2BUA primitives (`call()` shipped in 1.5.0) |
 | [sbb_evolutions.md](sbb_evolutions.md) | service building blocks: the catalogue, the published view, the TypeScript side |
 | [integration-fail2ban.md](integration-fail2ban.md) | making kelixip trivially protectable |
-| [socket2-websocket-limits.md](socket2-websocket-limits.md) | **known vulnerability, unfixed**: socket2 accumulates a fragmented WebSocket message with no bound |
-| [kelixip_liveview.md](kelixip_liveview.md), [liveview-adapter.md](liveview-adapter.md) | a real-time web console over kelixip |
+| [liveview-adapter.md](liveview-adapter.md) | a real-time web console over kelixip |
 | [moteli-reboot.md](moteli-reboot.md) | RabbitMQ + protobuf control plane for the media servers (2.0) |
+| [DESIGN-PRESENCE.md](DESIGN-PRESENCE.md) | presence: the subscription layer, event packages, the composite state, the ACD |
+| [presence-basic-plan.md](presence-basic-plan.md) | the build order of the above, phase by phase: what basic presence is, and what each step proves |
+| [presence-rls-plan.md](presence-rls-plan.md) | the buddy list on top of it: one SUBSCRIBE covering N resources (RFC 4662 / 5367), lot by lot |
+| [DESIGN-CHAT.md](DESIGN-CHAT.md) | instant messaging: MESSAGE dispatch, the Silo, chatrooms, attachments, bots |
+
+## Designed elsewhere
+
+One open design does not live here, because its subject does not either:
+**extracting FSL as a standalone hex package** is planned in the
+finite-state-language repository, at
+[`elixir/docs/extraction-plan.md`](https://github.com/neutrino38/finite-state-language/blob/main/elixir/docs/extraction-plan.md).
+It inventories what leaves `apps/elixip2/lib/dsl/`, every coupling to cut, and
+what stays on this side — `SIP.Scenario` keeps its name as a facade, and no
+scenario or kelixip script changes.
 
 ## Notes
 

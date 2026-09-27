@@ -24,7 +24,6 @@ defmodule Mendooze.ServerTest do
     server
   end
 
-
   describe "addressing profiles are asked for, never configured" do
     defp profiles_handler(profiles) do
       fn
@@ -49,7 +48,12 @@ defmodule Mendooze.ServerTest do
         Jsr309FakeServer.start(
           self(),
           profiles_handler([
-            profile("publicv4", available: true, announced: "203.0.113.9", bind: "", default: true),
+            profile("publicv4",
+              available: true,
+              announced: "203.0.113.9",
+              bind: "",
+              default: true
+            ),
             profile("publicv6", available: true, announced: "2001:db8::12", bind: "2001:db8::12"),
             profile("internalv4", available: true, announced: "10.0.0.4", bind: "10.0.0.4"),
             profile("internalv6")
@@ -167,9 +171,7 @@ defmodule Mendooze.ServerTest do
 
     test "a JSON body that is not an object is :unsupported" do
       fake =
-        Jsr309FakeServer.start(self(), status_handler(),
-          status: {:raw, "[1,2,3]"}
-        )
+        Jsr309FakeServer.start(self(), status_handler(), status: {:raw, "[1,2,3]"})
 
       server = connect!(fake)
 

@@ -58,13 +58,26 @@ defmodule Mendooze.NetworkProfileTest do
 
   defp handler(profiles) do
     fn
-      "EventQueueCreate", _ -> {:ok, [7, "/events/jsr309/7"]}
-      "GetNetworkProfiles", _ -> if profiles, do: {:ok, profiles}, else: {:error, "unknown method"}
-      "MediaSessionCreate", _ -> {:ok, [3]}
-      "EndpointCreate", _ -> {:ok, [4]}
-      "EndpointStartReceiving", _ -> {:ok, [22_000]}
-      "GetMediaCandidates", _ -> {:ok, ["rtp://192.168.5.5:22000"]}
-      _, _ -> {:ok, []}
+      "EventQueueCreate", _ ->
+        {:ok, [7, "/events/jsr309/7"]}
+
+      "GetNetworkProfiles", _ ->
+        if profiles, do: {:ok, profiles}, else: {:error, "unknown method"}
+
+      "MediaSessionCreate", _ ->
+        {:ok, [3]}
+
+      "EndpointCreate", _ ->
+        {:ok, [4]}
+
+      "EndpointStartReceiving", _ ->
+        {:ok, [22_000]}
+
+      "GetMediaCandidates", _ ->
+        {:ok, ["rtp://192.168.5.5:22000"]}
+
+      _, _ ->
+        {:ok, []}
     end
   end
 
@@ -161,6 +174,7 @@ defmodule Mendooze.NetworkProfileTest do
       refute_receive {:jsr309_call, "EndpointStartReceiving", _}, 200
     end
   end
+
   describe "a leg we place takes the profile of the target it is placed to" do
     test "address_profile: wins, because an outbound leg has no local address" do
       # `local_ip:` says which of ours a peer reached; a leg we place has none.

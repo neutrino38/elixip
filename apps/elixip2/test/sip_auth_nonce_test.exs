@@ -8,7 +8,9 @@ defmodule SIP.Test.AuthNonce do
 
   # deterministic opts (fixed secret + clock)
   defp gen(realm, now), do: Nonce.generate(realm, secret: @secret, now: now)
-  defp val(nonce, realm, now, max_age \\ 60), do: Nonce.validate(nonce, realm, secret: @secret, now: now, max_age: max_age)
+
+  defp val(nonce, realm, now, max_age \\ 60),
+    do: Nonce.validate(nonce, realm, secret: @secret, now: now, max_age: max_age)
 
   test "a fresh nonce validates :ok" do
     n = gen(@realm, 1_000_000)

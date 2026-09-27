@@ -12,8 +12,11 @@ defmodule Kelix.ScriptPreflightTest do
 
   @scripts Path.join(__DIR__, "support/scripts")
 
+  # Emptied before as well as after: the first test asserts on "no domain", and the
+  # singleton holds whatever the previous module left there.
   setup do
     empty = write_tmp("")
+    :ok = Domains.reload(empty)
     on_exit(fn -> Domains.reload(empty) end)
     :ok
   end

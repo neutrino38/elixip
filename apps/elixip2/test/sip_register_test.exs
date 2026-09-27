@@ -22,7 +22,7 @@ defmodule SIP.Test.Register do
     :ok = SIP.Transac.start()
     :ok = SIP.Transport.Selector.start()
     :ok = SIP.Dialog.start()
-    { :ok, _config_pid } = SIP.Session.ConfigRegistry.start()
+    {:ok, _config_pid} = SIP.Session.ConfigRegistry.start()
     Application.put_env(:elixip2, :proxyusesrv, false)
     :ok
   end
@@ -30,7 +30,7 @@ defmodule SIP.Test.Register do
   # Reset proxyuri to default (UDP) before each test to prevent contamination
   # between tests that override the transport protocol.
   setup do
-    Application.put_env(:elixip2, :proxyuri, %SIP.Uri{ domain: @proxy, scheme: "sip:", port: 5060 })
+    Application.put_env(:elixip2, :proxyuri, %SIP.Uri{domain: @proxy, scheme: "sip:", port: 5060})
     :ok
   end
 
@@ -69,7 +69,6 @@ defmodule SIP.Test.Register do
         until!(fn -> Process.whereis(:test_registrar) == nil end, 1_000)
     end
   end
-
 
   # The exchange every "Client Register using <transport>" test performs: ask for a
   # lifetime, get challenged, authenticate, and check the 200 granted what we asked
@@ -142,20 +141,22 @@ defmodule SIP.Test.Register do
     reset_test_registrar()
 
     # Load a REGISTER message from a file
-    { code, msg } = File.read("test/SIP-REGISTER-LVP.txt")
+    {code, msg} = File.read("test/SIP-REGISTER-LVP.txt")
     assert code == :ok
 
     # Parse it
-    { code, parsed_msg } = SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
-			IO.puts("\n" <> errmsg)
-			IO.puts("Offending line #{lineno}: #{line}")
-			IO.puts("Error code #{code}")
-			end)
+    {code, parsed_msg} =
+      SIPMsg.parse(msg, fn code, errmsg, lineno, line ->
+        IO.puts("\n" <> errmsg)
+        IO.puts("Offending line #{lineno}: #{line}")
+        IO.puts("Error code #{code}")
+      end)
+
     assert code == :ok
 
     # Add unittest param to RURI to trigger UDP mockeup transport selection
     upd_uri = SIP.Uri.set_uri_param(parsed_msg.ruri, "unittest", "sip_register")
-    parsed_msg = SIP.Msg.Ops.update_sip_msg( parsed_msg, { :ruri, upd_uri })
+    parsed_msg = SIP.Msg.Ops.update_sip_msg(parsed_msg, {:ruri, upd_uri})
 
     upd_uri = SIP.Transport.Selector.select_transport(upd_uri)
 
@@ -165,8 +166,7 @@ defmodule SIP.Test.Register do
     # Attendre l'apparition du processus test_registrar
     registrar_pid = until!(fn -> Process.whereis(:test_registrar) end, 2_000)
 
-    send(registrar_pid, { :stop, self() })
-
+    send(registrar_pid, {:stop, self()})
 
     receive do
       reg_count when is_integer(reg_count) ->
@@ -174,23 +174,23 @@ defmodule SIP.Test.Register do
         assert reg_count == 1
         Process.sleep(20)
 
-      _ -> assert(false, "Some strange stuff was received")
+      _ ->
+        assert(false, "Some strange stuff was received")
 
-      # Add Timeout
+        # Add Timeout
     end
   end
 
   test "Context" do
     sip_ctx = %SIP.Context{}
-    ctx_set :displayname, "Emmanuel BUU"
-    ctx_set :domain, "visioassistance.net"
-    ctx_set :username, "33924765453"
+    ctx_set(:displayname, "Emmanuel BUU")
+    ctx_set(:domain, "visioassistance.net")
+    ctx_set(:username, "33924765453")
 
-    assert  ctx_get(:username) == "33924765453"
+    assert ctx_get(:username) == "33924765453"
     from = ctx_from()
     assert from.displayname == "Emmanuel BUU"
     SIP.Context.set(sip_ctx, :dialogpid, self())
-
   end
 
   # The same client REGISTER over each transport the stack offers. Only the proxy URI
@@ -218,7 +218,6 @@ defmodule SIP.Test.Register do
 
   @tag :live
   test "Client OPTIONS UDP" do
-
     sip_ctx = %SIP.Context{
       username: @username,
       authusername: @authusername,
@@ -226,33 +225,33 @@ defmodule SIP.Test.Register do
       domain: @domain
     }
 
-
-    ctx_set :passwd, @passwd
+    ctx_set(:passwd, @passwd)
 
     send_OPTIONS()
     assert ctx_get(:lasterr) == :ok
 
-    ^sip_ctx = receive do
-      { _response, _rsp, _trans_pid, _dialog_pid } ->
-        sip_ctx
-    after
-      1_000 -> assert(false, "Did not receive 200 OK on time")
-    end
+    ^sip_ctx =
+      receive do
+        {_response, _rsp, _trans_pid, _dialog_pid} ->
+          sip_ctx
+      after
+        1_000 -> assert(false, "Did not receive 200 OK on time")
+      end
+
     Process.sleep(1000)
 
     # Send a second option
     send_OPTIONS()
     assert ctx_get(:lasterr) == :ok
 
-    ^sip_ctx = receive do
-      { _response, _rsp, _trans_pid, _dialog_pid } ->
-        sip_ctx
-    after
-      1_000 -> assert(false, "Did not receive 200 OK on time")
-    end
-
+    ^sip_ctx =
+      receive do
+        {_response, _rsp, _trans_pid, _dialog_pid} ->
+          sip_ctx
+      after
+        1_000 -> assert(false, "Did not receive 200 OK on time")
+      end
   end
-
 
   # What this adds over "Client Register using TLS" above is the rest of the
   # registration's life: a keepalive OPTIONS in the middle, then an un-REGISTER, on a
@@ -277,47 +276,49 @@ defmodule SIP.Test.Register do
     send_OPTIONS()
     assert ctx_get(:lasterr) == :ok
 
-    ^sip_ctx = receive do
-      { _response, _rsp, _trans_pid, _dialog_pid } ->
-        sip_ctx
-    after
-      1_000 -> assert(false, "Did not OPTIONS reply")
-    end
+    ^sip_ctx =
+      receive do
+        {_response, _rsp, _trans_pid, _dialog_pid} ->
+          sip_ctx
+      after
+        1_000 -> assert(false, "Did not OPTIONS reply")
+      end
 
     Process.sleep(1000)
 
-    send_REGISTER 0
+    send_REGISTER(0)
     assert ctx_get(:lasterr) == :ok
 
-
-    ^sip_ctx = receive do
-      { 401, rsp, _trans_pid, _dialog_pid } ->
-        send_auth_REGISTER(rsp, 0)
-        sip_ctx
-    end
+    ^sip_ctx =
+      receive do
+        {401, rsp, _trans_pid, _dialog_pid} ->
+          send_auth_REGISTER(rsp, 0)
+          sip_ctx
+      end
 
     assert ctx_get(:lasterr) == :ok
-    ^sip_ctx = receive do
-      { 200, rsp, _trans_pid, _dialog_pid } ->
-        contact = Map.get(rsp, :contact)
-        if contact != nil do
-          nil
-        else
-          assert contact == nil
-        end
-        # IO.puts(inspect(rsp.contact.params))
-        sip_ctx
 
-      { resp_code, _rsp, _trans_pid, _dialog_pid } when is_integer(resp_code) ->
-        assert(false, "Received unexpected SIP response #{resp_code}")
+    ^sip_ctx =
+      receive do
+        {200, rsp, _trans_pid, _dialog_pid} ->
+          contact = Map.get(rsp, :contact)
 
-      _ -> assert(false, "Received unexpected msg")
+          if contact != nil do
+            nil
+          else
+            assert contact == nil
+          end
 
-    after
-      2_000 -> assert(false, "un REGISTER reply not received")
-    end
+          # IO.puts(inspect(rsp.contact.params))
+          sip_ctx
 
+        {resp_code, _rsp, _trans_pid, _dialog_pid} when is_integer(resp_code) ->
+          assert(false, "Received unexpected SIP response #{resp_code}")
+
+        _ ->
+          assert(false, "Received unexpected msg")
+      after
+        2_000 -> assert(false, "un REGISTER reply not received")
+      end
   end
-
-
 end

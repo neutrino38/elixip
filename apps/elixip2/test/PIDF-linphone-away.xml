@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<presence xmlns="urn:ietf:params:xml:ns:pidf" xmlns:dm="urn:ietf:params:xml:ns:pidf:data-model" xmlns:rpid="urn:ietf:params:xml:ns:pidf:rpid" entity="sip:bob@ives.fr">
+<tuple id="tid-2f90aa">
+<status><basic>open</basic></status>
+<contact priority="0.8">sip:bob@10.0.0.4</contact>
+<note>R&amp;D &lt;meeting&gt;</note>
+<timestamp>2026-09-18T09:20:01Z</timestamp>
+</tuple>
+<dm:person id="pid-2f90aa">
+<rpid:activities><rpid:away/></rpid:activities>
+<dm:note>Back at 5</dm:note>
+</dm:person>
+</presence>

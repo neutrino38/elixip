@@ -118,16 +118,23 @@ defmodule SIP.Test.WSSKeepAliveTest do
     # A raw client, because what is under test is a header of the 101 itself.
     defp raw_upgrade(port, extra_headers) do
       {:ok, sock} =
-        :ssl.connect(~c"127.0.0.1", port,
-          [:binary, {:active, false}, {:verify, :verify_none}, {:versions, [:"tlsv1.2"]}], 5_000)
+        :ssl.connect(
+          ~c"127.0.0.1",
+          port,
+          [:binary, {:active, false}, {:verify, :verify_none}, {:versions, [:"tlsv1.2"]}],
+          5_000
+        )
 
-      :ok = :ssl.send(sock,
-        "GET / HTTP/1.1\r\n" <>
-        "Host: 127.0.0.1:#{port}\r\n" <>
-        "Upgrade: websocket\r\n" <>
-        "Connection: Upgrade\r\n" <>
-        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" <>
-        "Sec-WebSocket-Version: 13\r\n" <> extra_headers <> "\r\n")
+      :ok =
+        :ssl.send(
+          sock,
+          "GET / HTTP/1.1\r\n" <>
+            "Host: 127.0.0.1:#{port}\r\n" <>
+            "Upgrade: websocket\r\n" <>
+            "Connection: Upgrade\r\n" <>
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" <>
+            "Sec-WebSocket-Version: 13\r\n" <> extra_headers <> "\r\n"
+        )
 
       {:ok, response} = :ssl.recv(sock, 0, 5_000)
       :ssl.close(sock)

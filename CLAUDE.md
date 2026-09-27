@@ -97,7 +97,7 @@ only its own dependencies (design in
 
 ```
 apps/
-├── elixip2/       # shared SIP stack + FSL + media = LIBRARY (app :elixip2)
+├── elixip2/       # shared SIP stack + the FSL binding + media = LIBRARY (:elixip2)
 │                  #   all the framework/dsl/session code + the test suite
 ├── elixipp/       # the standalone test tool (escript `elixipp`) — depends on :elixip2
 │   └── lib/elixipp/ElixippCLI.ex   # CLI entry point + live --monitor rendering (owl)
@@ -132,14 +132,15 @@ organizational:
 ```
 apps/elixip2/lib/
 ├── framework/   # the reusable SIP stack (transport → message → transaction →
-│                #   dialog → session/context → media). See the layers below.
-├── dsl/         # the Finite State Language and its FSM engine (namespace SIP.Scenario)
-│   ├── SIPScenario.ex        # FSL macros: state, goto, stay, config, on_events, …
-│   ├── SIPScenarioRunner.ex  # FSM execution engine
-│   └── SIPScenarioLoader.ex  # loads scenario .exs files / modules
+│   │            #   dialog → session/context → media). See the layers below.
+│   └── SIPFSLHost.ex         # SIP.FSL.Host — the FSL.Host callbacks SIP answers
+├── dsl/         # what SIP adds on top of FSL, keeping its own names
+│   ├── SIPScenario.ex        # SIP.Scenario — the facade a SIP scenario `use`s
+│   ├── SIPSBB.ex             # SIP.SBB — the same, for a building block
+│   ├── SIPScenarioFacades.ex # the FSL.* engine under the names Elixip calls it
+│   ├── SIPScenarioCallDispatcher.ex
+│   └── SIPScenarioExternalConfig.ex
 ├── elixipp/     # scenario-engine support shared with the tool (stays in :elixip2)
-│   ├── SIPScenarioMonitor.ex # in-memory store feeding the --monitor view
-│   │                         #   (SIP.Scenario.Monitor; a no-op when not started)
 │   └── ElixippScenarioUAS.ex # Elixip.ScenarioUAS — UAS instance factory (quota)
 ├── built-in-scenarios/       # the scenarios COMPILED INTO the escript, run by
 │   │                         #   module name: `elixipp UAC.Register` needs no file
@@ -155,11 +156,37 @@ apps/elixip2/lib/
 takes `elixipp UAC.Invite`, `mix scenario UAC.Register` and everything ELIXIPP.md
 promises about "no file needed" with it.
 
-The `dsl` layer builds on `framework` (a scenario `use SIP.Scenario` pulls in
-`SIP.Session.CallUAC`, `SIP.Session.Media` and `SIP.Context`). The `elixipp`
-tool (`apps/elixipp`) drives the FSL engine; FSL itself runs fine without the
-tool. `kelixip` (`apps/kelixip`) is the productized server — see its design doc;
-today it is a P0 skeleton (`Kelix.Application` + supervision tree).
+**The Finite State Language is not in this repository.** It is the hex package
+`finite_state_language` (OTP app `:fsl`, modules `FSL.*`), developed in
+[finite-state-language](https://github.com/neutrino38/finite-state-language) under
+Apache-2.0 and declared as a dependency in `apps/elixip2/mix.exs`. The package
+knows nothing about SIP: it calls back into an `FSL.Host` implementation for
+everything it must not know, and `SIP.FSL.Host` (`framework/SIPFSLHost.ex`) is
+SIP's — eleven callbacks that read, top to bottom, as the answer to "what does SIP
+add to the state machine".
+
+That separation is enforced rather than hoped for: `:fsl` does not depend on
+`:elixip2`, so a coupling that crept back in fails to compile over there. The
+`apps/elixip2/test/fsl_*.exs` files are what remains here — each one asserts that
+the *SIP binding* answers a callback correctly, not that the language works.
+
+`dsl/` is the SIP side. `SIP.Scenario` is the name a SIP scenario **should**
+`use` — it brings the SIP verbs (`SIP.Session.CallUAC`, `Media`, `B2bua`) and
+names both the host and the `sip_ctx` variable — and `SIP.Scenario.Runner` &c.
+are the engine under the names three apps, a dozen tests and the kelixip server
+call it by. Those names are kept, not deprecated: `.exs` scenarios and kelixip
+scripts are loaded at **run** time, from `/etc/kelixip/scripts` and from customer
+directories, so a rename a compiler would catch here is a node that fails to
+start there.
+
+Two things a facade cannot forward, and which therefore did change: `FSL.Monitor`
+is the **registered name** of the live registry (a `Process.whereis` and a
+supervision child spec name the process, not a function), and its push tag is
+`{:fsl_monitor, …}`.
+
+The `elixipp` tool (`apps/elixipp`) drives the FSL engine; FSL itself runs fine
+without the tool. `kelixip` (`apps/kelixip`) is the productized server — see its
+design doc.
 
 ### Transport Layer (`SIP.Transport.*`)
 - `SIP.Transport.UDP`, `TCP`, `TLS`, `WSS` — protocol-specific transports (outbound + inbound)
@@ -386,7 +413,7 @@ stop_player / stop_recorder / stop_echo
 
 Runtime config lives in `config/config.exs`:
 - Logger writes warnings to console and info+ to `elixip.log`
-- `:useragent` — the User-Agent header value (`"Elixipp-1.5.4"`)
+- `:useragent` — the User-Agent header value (`"Elixipp-1.6.0"`)
 - `:optionkeepaliveperiod` — OPTIONS keep-alive interval in seconds (15)
 
 ### Media server selection

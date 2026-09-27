@@ -1,503 +1,278 @@
-# DESIGN-FSL.md — the Finite State Language and its engine
+# DESIGN-FSL.md — the SIP binding of FSL
 
-The as-built design of **FSL**, the domain-specific language in which call
-scenarios are written, and of the engine that runs them. Everything described
-here is implemented and covered by tests; it lives in
-`apps/elixip2/lib/dsl/`.
+**The language and its engine moved out.** FSL — states, transitions,
+`on_events`, `stay`, `goto back`, sub-FSMs, cooperative shutdown, service
+building blocks, the live registry, the journal and the PlantUML renderer — is a
+package of its own since 2026-09-12, and its as-built design is
+[**`finite-state-language/elixir/docs/design.md`**][fsl-design]. Read that first
+if the question is about the language.
 
-This document is the **why and how it is built**. The language *reference* —
-what to write in a scenario, macro by macro, with examples — is
-[FSL.md](../../FSL.md); this one explains what those macros expand to and why. The
-call, media and B2BUA macros a scenario also uses belong to the session layer:
-[DESIGN-FRAMEWORK.md](DESIGN-FRAMEWORK.md). Below both,
-[DESIGN-SIPSTACK.md](DESIGN-SIPSTACK.md).
+This document is what stayed: **the SIP binding**. FSL calls back into an
+embedding for everything it must not know, and Elixip is the first one — the
+answer to "what does SIP add to the state machine".
 
----
+[fsl-design]: https://github.com/neutrino38/finite-state-language/blob/main/elixir/docs/design.md
+[plan]: https://github.com/neutrino38/finite-state-language/blob/main/elixir/docs/extraction-plan.md
 
-## 1. The compilation model
-
-A scenario is a plain Elixir module — usually an `.exs` file — that does
-`use SIP.Scenario`. That single line pulls in the language *and* three session
-mixins (`SIP.Session.CallUAC`, `SIP.Session.Media`, `SIP.Session.B2bua`), so the
-call and media verbs are in scope inside the states without further ceremony. A
-server scenario adds its own mixin (`use SIP.Session.CallUAS`,
-`use SIP.Session.RegisterUAC`, …).
-
-Each `state name do … end` compiles to a function `__state_<name>/1` taking the
-implicit `sip_ctx`. Its body must end with a **transition macro**, which returns
-a *transition descriptor* — a tuple the runner consumes:
-
-| Descriptor | Meaning |
-|---|---|
-| `{:goto, target, desc, type, ctx}` | move to another state |
-| `{:stay, desc, type, ctx}` | (error path only — see §2.4) |
-| `{:terminal, :success \| :failure \| :aborted, reason, type, ctx}` | the scenario ends |
-
-`@before_compile` generates three introspection functions —
-`__scenario_states__/0` (declaration order, which is what `goto next` means),
-`__scenario_config__/0`, `__scenario_type__/0` — plus the `run/1` entry point.
-
-**A state never calls the next state.** It returns a descriptor and the runner
-performs the transition (§3.2). That is what keeps the call stack flat across an
-arbitrary number of transitions: a call that rings for an hour and loops through
-a thousand keep-alives has the same stack depth as one that answers immediately.
+The language *reference* an integrator reads is still [FSL.md](../../FSL.md), and
+it is deliberately one document rather than two: splitting it into "the FSL part"
+and "the SIP part" because the code now lives in two repositories would move a
+packaging problem onto the reader. The call, media and B2BUA verbs a scenario uses
+belong to the session layer — [DESIGN-FRAMEWORK.md](DESIGN-FRAMEWORK.md); below
+it, [DESIGN-SIPSTACK.md](DESIGN-SIPSTACK.md).
 
 ---
 
-## 2. The language surface
+## 1. What a SIP scenario writes
 
-| Macro | Role |
-|---|---|
-| `config/1` | declare the SIP identity and parameters; builds the initial `%SIP.Context{}` |
-| `uas/1` | declare a server scenario (`uas :register` → `:uas_register`) |
-| `state/2` | declare a state |
-| `goto/1..3` | transition |
-| `stay/0..2` | consume an event, keep waiting |
-| `on_events/1` | typed `receive` |
-| `scenario_success/failure/aborted` | terminals |
-| `spawn_fsm/2`, `notify/2`, `notify_parent/1`, `on_shutdown/1` | sub-FSMs and cooperative shutdown |
-| `sbb_fsm/2`, `sbb_return/1`, `sbb_data_get/1`, `sbb_data_set/2` | service building blocks (§4bis) |
+`use SIP.Scenario`, and that is the name it **should** use: it is the one that
+brings the SIP verbs with it.
 
-### 2.1 `config` and the context
+```elixir
+defmodule UAC.Invite do
+  use SIP.Scenario
 
-`config` stores a keyword list read at instantiation by
-`SIP.Scenario.Runner.build_context/1`, which routes each key to one of three
-places: a native `%SIP.Context{}` property (`username`, `domain`, `ha1`
-computed from `passwd`, …), the `:elixip2` **application env** for a global key
-(`proxyuri`, `proxyusesrv`, `optionkeepaliveperiod`, `mediaserver`), or the
-context **appdata** map for anything else.
+  config username: "toto", domain: "mydomain.com", passwd: "xxxx"
 
-That three-way routing is the whole reason `config` is a macro and not a map:
-the same declaration seeds a per-session identity and a process-wide setting,
-and a scenario should not have to know which is which.
+  state calling do
+    send_INVITE("sip:bob@mydomain.com", :mediaserver, timeout: 30)
+    goto wait_answer
+  end
+end
+```
 
-The `%SIP.Context{}` itself — what a state sees as `sip_ctx`, and what
-`ctx_set` / `appdata_set` write into — is described in
-[DESIGN-FRAMEWORK.md](DESIGN-FRAMEWORK.md). Two of its fields are owned by the
-engine and by nothing else: `currentstate` and `laststate` (§2.3).
+`SIP.Scenario` (`lib/dsl/SIPScenario.ex`, ~100 lines) is three `use` lines' worth
+of SIP verbs — `SIP.Session.CallUAC`, `SIP.Session.Media`, `SIP.Session.B2bua` —
+plus `use FSL.Machine, host: SIP.FSL.Host, ctx_var: :sip_ctx`. It also defines
+`uas/1`, because `uac` and `uas` are role names in a protocol and the language
+has no business knowing them (§3.5).
 
-### 2.2 `state`
+**The order of those lines is load-bearing.** The session mixins reach
+`SIP.Context`, which records `sip_ctx` and this binding's own `set/3` / `get/2` as
+the accessors the generic context macros go through — and that has to have
+happened before `FSL.Machine` expands a single `state`, because that macro
+generates the function head that binds the variable. A module attribute set inside
+a `use`'s quote is *evaluated* when the module body runs, while sibling macro
+calls are *expanded* before that.
 
-Beyond declaring the function, the `state` macro installs the safety net that
-makes a scenario failure *a scenario failure* rather than a dead process:
-
-- it **rescues** exceptions → `scenario_failure("exception!")`;
-- it **catches exits** → `scenario_failure("exit!")`. Every SIP primitive is a
-  `GenServer.call` toward a dialog or a transport that may have died between the
-  check and the call. Until this existed, such an exit killed the scenario
-  process outright and `finalize/4` never ran: no B2BUA leg was torn down, no
-  media released, and the caller of a relayed INVITE waited forever for a final
-  response nobody would send. The stack's own R3/R6 keep the ordinary cases from
-  getting here; this is the net under them, so that **whatever happens the
-  scenario ends** — which is what runs the teardown that answers the caller;
-- it clears the inferred event type and the B2BUA event binding, so a `goto`
-  written outside an `on_events` clause is untyped and an `after` body acts on
-  the inbound leg rather than on whatever the previous state matched.
-
-### 2.3 `goto`
-
-Four target kinds: a named state, `next` (the next declared state), `loop`
-(re-enter this one) and `back` (the state entered before this one). `next`,
-`loop` and `back` are reserved words; `back` is mapped at expansion time to the
-pseudo-target `:__back__` so it cannot collide with a state actually named
-`back`.
-
-**`back` is one slot, not a stack.** The runner writes `ctx.laststate` in
-`enter/3` on every transition *that actually changes state* — `goto loop`, an
-explicit self-goto and `stay` leave it alone, because re-entering a state is not
-"coming from" it. Two consecutive `goto back` therefore toggle between two
-states, and `goto back` with no previous state fails the scenario cleanly. A
-stack is deliberately out of scope until a scenario needs one.
-
-**The `lasterr` contract.** Every transition macro first checks
-`sip_ctx.lasterr`; anything other than `:ok` aborts the scenario as a failure
-instead of transitioning. This is what lets a session verb report an error by
-writing the context, and a scenario stay readable without an `if` after every
+`SIP.SBB` is the same arrangement for a service building block: `FSL.Block` plus
+the SIP verbs, because a block runs in its host's process and acts on its host's
 call.
 
-**Event typing.** `goto target, desc, type` records what kind of event caused
-the move (`:sip`, `:media`, `:timer`, `:http`, `:db`, …). When the type is
-omitted and the `goto` sits inside an `on_events` clause, it is **inferred from
-the matched pattern** at compile time (`{:ms_event, …}` → `:media`, the other SIP
-tuples → `:sip`) and passed through the process dictionary. An explicit type
-always wins. The type is what makes the live monitor and the sequence diagram
-readable, so it is collected by default rather than on request.
+---
 
-### 2.4 `stay` — and why it is a rewrite, not a descriptor
+## 2. The names Elixip keeps
 
-`stay` consumes the matched event and goes back to waiting **on the same
-`on_events`**, without re-running the state body. `goto loop` cannot do this: it
-re-executes the body and replays its side effects — re-sending a request,
-re-arming work, re-allocating media. Answering an in-dialog MESSAGE or a
-keep-alive OPTIONS inside `call_established` needs exactly that distinction.
+Every module of the engine is reachable under the name three apps, a dozen tests,
+`mix scenario` and the kelixip server call it by
+(`lib/dsl/SIPScenarioFacades.ex`):
 
-The `after` timeout is **not** re-armed: it is the deadline of the *wait*,
-computed once when the block is entered (`SIP.Scenario.deadline/1`), and a
-`stay` comes back with the time that is left
-(`SIP.Scenario.remaining_timeout/1`). Otherwise a keep-alive answered every 10 s
-would hold a 30 s answer timeout open forever — a bug wearing a feature's
-clothes. This also matches FSL/TS, the TypeScript sibling language, whose
-transition model we keep aligned on purpose.
-
-`stay` is **rewritten in the clause AST** into a call back into the wait
-closure, rather than returning a `{:stay, …}` descriptor that the clause result
-is matched against. The descriptor version is the obvious design and it does not
-survive contact with the compiler: Elixir infers the exact type each clause
-returns, so in the normal case — no clause stays — the `{:stay, …}` branch is
-provably dead and the compiler says so, once per state of every scenario. Nine
-warnings for the two built-in scenarios alone.
-
-Consequences of rewriting rather than dispatching:
-
-- the recursion stops at a nested `on_events` / `receive`, and never walks the
-  `after` body — a `stay` there belongs to another wait, or to none;
-- `stay` outside an `on_events` is caught at **compile time** (`state/2` and
-  `on_shutdown/1` walk their body for it);
-- the runner still fails the scenario on a `{:stay, …}` tuple that reaches it,
-  which is how a `stay` in a hand-written `receive` is reported;
-- `stay` is a reserved word inside a state body, like `next` and `loop`.
-
-A `stay` is logged and reported to the monitor like a transition
-`(state) -> (state)`, so a scenario whose whole activity is `stay` never looks
-frozen in the live view.
-
-### 2.5 `on_events`
-
-A `receive` whose clauses are instrumented at compile time. Four things happen
-to every clause:
-
-1. **type inference** from the pattern (§2.3);
-2. **auto-store** of the matched event: the pattern is bound through an
-   as-pattern and `SIP.Session.CallUAS.auto_store/2` is called on it, stashing an
-   inbound INVITE/UPDATE and its transaction pid in the context — which is why
-   `reply_invite` needs no argument repeating what just arrived, and why a
-   scenario does not carry the request from state to state by hand;
-3. **`stay` rewriting** (§2.4);
-4. **wait closure**: the `receive` lives inside a self-calling closure so `stay`
-   re-enters it without leaving the state function. The closure and deadline
-   variables are `Macro.unique_var/2`, so nested `on_events` never capture each
-   other's.
-
-Two clauses are **injected** unless the scenario handles them itself, and they
-are prepended so a catch-all `_ ->` cannot swallow them first:
-
-| Injected clause | Why |
+| Elixip's name | The engine |
 |---|---|
-| `{:scenario_ctl, :shutdown, _}` → `:__shutdown__` | makes every wait cooperatively stoppable (§4.4) without the scenario writer thinking about it |
-| `{:ms_event, _, :server_disconnected}` → `:__shutdown__` | the media server's death is delivered to every sink and acted on by nothing: a scenario without a clause for it waits for media that will never come, until its own `after` fires — if it has one |
+| `SIP.Scenario` | `FSL.Machine` (+ the SIP verbs, §1) |
+| `SIP.SBB` | `FSL.Block` (+ the SIP verbs) |
+| `SIP.Scenario.Runner` | `FSL.Runner` |
+| `SIP.Scenario.Loader` | `FSL.Loader` (+ the `:uac` default, §3.5) |
+| `SIP.Scenario.Monitor` | `FSL.Monitor` (+ the three call-shape columns, §3.6) |
+| `SIP.Scenario.SequenceJournal` | `FSL.Journal` |
+| `SIP.Scenario.SequenceDiagram` | `FSL.Diagram.PlantUML` |
+| `SIP.Context` | `FSL.Context` + the thirteen SIP session fields |
+| `HTTP.Session` | `FSL.HTTP` |
 
-Both leave the state by construction, so they are instrumented without the
-`stay` rewrite — a dead `{:stay, …}` branch there would be one compiler warning
-per state, again.
+These are **not** a transition device to be removed later. `.exs` scenarios and
+kelixip scripts are loaded at **run** time, from `/etc/kelixip/scripts` and from
+customer directories: a rename a compiler would catch here is a node that fails to
+start there.
 
-### 2.6 Terminals
+**Three things a facade cannot forward**, and they did change:
 
-`scenario_success` and `scenario_failure` are the two ordinary outcomes;
-`scenario_failure` also writes `errorreason` into the context.
-`scenario_aborted` is a **third** outcome for a controller-driven wind-down, kept
-distinct so a graceful stop is not counted as a failure in the tool's verdict
-tally.
+- the **registered name** of the live registry is `FSL.Monitor` — a
+  `Process.whereis/1` and a supervision child spec name the process, not a
+  function. Four sites: `Kelix.Application`'s tree, elixipp's `--monitor`
+  bootstrap, `Kelix.InstancePool`'s subscription, and the runner's own `whereis`;
+- its **push tag** is `{:fsl_monitor, …}`, with `Kelix.InstancePool`'s two
+  `handle_info` clauses. Not compile-checked: a missed clause is a message that
+  falls through and a live view that silently stops updating;
+- `%FSL.Child{}` — a struct has no alias.
 
 ---
 
-## 3. The engine
+## 3. `SIP.FSL.Host` — what SIP adds to the state machine
 
-### 3.1 One FSM, one process
+`lib/framework/SIPFSLHost.ex`. Eleven callbacks of the `FSL.Host` behaviour, and
+the reason this module exists is as much readability as decoupling: the same
+answers used to be spread across three files and two macro expansions — three
+`use` lines, three calls injected into every `on_events` clause, one on state
+entry, a media clause, an inference table, and four more couplings inside the
+runner's teardown. Read here, top to bottom, it is one module.
 
-`SIP.Scenario.Runner.run_instance/2` runs the whole FSM **in the calling
-process**. This is not an implementation detail one could relax: the dialog and
-media layers bind SIP and media events to `self()`, so two FSMs sharing a
-process would share one mailbox and steal each other's responses and
-`{:ms_event, …}`. Every consequence in §4 follows from this single constraint.
+The behaviour itself, and what each callback is *for*, is
+[the package's design doc][fsl-design] §3. What follows is SIP's answers.
 
-`bootstrap_stack/0` starts the SIP layers and is idempotent, so `run(true)` (the
-one-shot mode of `mix scenario` and `elixipp`) and `run(false)` (many instances
-over an already-started stack) are the same code path.
+### 3.1 `bootstrap/0` — the layers
 
-### 3.2 The loop
+Transactions, the transport selector, the dialog layer, the session config
+registry, and the node's auth secret (one server secret for the node's lifetime,
+keying every digest nonce). Idempotent, so `run(true)` and `run(false)` are the
+same code path. `SIP.Scenario.start_stack/0` is the public spelling.
 
-`loop/4` applies `__state_<name>/1`, matches the descriptor, resolves the
-pseudo-targets, logs the transition, reports it to `SIP.Scenario.Monitor` and
-the sequence journal, then tail-calls itself on the next state. Four descriptors
-are error paths that end the scenario cleanly rather than crashing it:
+kelixip supervises those layers itself instead (`Kelix.Application`), which is
+why this is a callback and not a fixed startup.
 
-| Situation | Outcome |
+### 3.2 `build_context/1` — the three-way routing
+
+One `config` keyword list, three destinations, and a key goes to exactly one:
+
+| Kind of key | Destination |
 |---|---|
-| `goto` to an undeclared state | failure `{:unknown_state, target}` |
-| `goto back` with no previous state | failure, "goto back with no previous state" |
-| `{:stay, …}` reaching the runner | failure `{:stay_outside_on_events, state}` |
-| anything that is not a descriptor | failure `{:invalid_transition, state}` — a state that forgot its transition macro |
+| a native property — `:username`, `:domain`, `:authusername`, `:displayname`, `:algorithm`, `:debug` | a `%SIP.Context{}` field |
+| a **global** key — `:proxyuri`, `:proxyusesrv`, `:optionkeepaliveperiod`, `:mediaserver` | the `:elixip2` application env |
+| anything else | `appdata`, so a scenario can read it back |
 
-`:__shutdown__` is resolved here too: if the scenario declared `on_shutdown`,
-the runner enters it as a state; otherwise it terminates with the `:aborted`
-outcome.
+That routing is the whole reason `config` is a macro and not a map: the same
+declaration seeds a per-session identity and a process-wide setting, and a
+scenario should not have to know which is which. This is the single place the
+global keys are applied, whether they come from the `config` block or from an
+external JSON header (§4), so a scenario no longer has to `Application.put_env`
+by hand in its `initial_state`.
 
-### 3.3 Teardown — `finalize/4`
+`:passwd` is applied **last**, because computing `:ha1` needs `:authusername`,
+`:domain` and `:algorithm` to be set first — which is why it cannot simply be a
+fourth clause in the fold.
 
-The order is fixed and it matters:
+### 3.3 `apply_run_opts/2` — the two options only SIP can read
 
-```
-shutdown_children      # sub-FSMs first: they release their own resources
-  → release_b2bua_legs # a leg left behind holds a call up at the far end
-    → release_media    # after waiting for {:dialog_terminated, …}, max 5 s
-      → cleanup/1      # the scenario's own optional callback
-        → notify_parent_exit
-          → flush the sequence journal
-```
-
-`release_media` waits for the dialog's termination event before releasing the
-media resources, and accepts it **tagged** as well as bare — a B2BUA outbound
-leg's `{:outbound, {:dialog_terminated, …}}` says just as much about the call
-being over, and ignoring it stalled the teardown for the full five seconds.
-
----
-
-## 4. Sub-FSMs
-
-### 4.1 The shape
-
-`spawn_fsm target, as: :name, args: %{…}` spawns another scenario as a **separate
-monitored process** and stores a `%SIP.Scenario.Child{name, pid, ref, module}`
-handle in `ctx.appdata[:__children__]`, so it survives across states. `target` is
-a compiled module or a path to an `.exs` file — resolved against the directory
-of the file that *declares* it (include semantics), not against the current
-working directory. Resolving against the cwd is what made
-`spawn_fsm "scenarios/uas_invite.exs"` die with a bare "exception!" for anyone not
-standing in `apps/elixip2`.
-
-Decisions, all deliberate:
-
-| Question | Choice |
-|---|---|
-| parent reference in the child | a dedicated `parent_pid` field on `%SIP.Context{}` |
-| OTP coupling | **monitor only** (`spawn_monitor`), no link — a child crash must not kill the parent |
-| cleanup when the parent ends | cooperative shutdown message, then a hard kill after a 5 s grace period |
-| nesting | a full tree: a child may spawn its own children |
-| scope of the shutdown protocol | **generalized** — the same control message any controller uses, including elixipp's graceful stop |
-| the event names | `{:parent_msg, …}` / `{:child_msg, …}` / `{:child_exit, …}` since 1.5.0, matching `parent:msg` / `child:msg` / `child:exit` of the TypeScript FSL. They were one `{:scenario_msg, from, …}` for both directions: that names the transport and hides the direction, and TS cannot fold the two into one type because it dispatches on the type alone. A message takes no deprecated alias, so `on_events` warns at compile time when a scenario matches an old shape |
-| the name | `spawn_fsm`, after `fx.spawn` of the TypeScript FSL — one name per concept across the two dialects. Spelled `sub_fsm` up to 1.4.1; the old macro is kept as a deprecated alias sharing the same expansion, because `.exs` scenarios are loaded at run time and a rename would break them in the field, not at compile time |
-
-### 4.2 The message protocol
-
-Three families, all plain `send/2` into the FSM's mailbox and matched in
-`on_events`:
-
-| Message | Direction | Meaning |
-|---|---|---|
-| `{:parent_msg, payload}` | parent → child | application message downwards. The sender was always `:parent`, so the name is dropped from the tuple and put in the tag |
-| `{:child_msg, name, payload}` | child → parent | application message upwards, tagged with the name the parent assigned at spawn (`as:`), so the parent matches a stable literal in every state |
-| `{:scenario_ctl, :shutdown, reason}` | controller → FSM | cooperative stop. The 3-tuple envelope leaves room for future verbs without changing shape |
-| `{:child_exit, name, outcome, reason}` | child → parent | how the child ended |
-| `{:DOWN, ref, :process, pid, reason}` | OTP → parent | safety net when the child died without reporting |
-
-### 4.3 Cooperative shutdown
-
-A shutdown request is *observed* by the injected `on_events` clause (§2.5), which
-jumps to the reserved `:__shutdown__` state. The scenario's `on_shutdown` block
-runs there — release resources, send a BYE, end with `scenario_aborted` — and
-when there is none the runner ends the scenario as `:aborted` by itself. A
-parent tearing down asks every child, waits (bounded) for their `:DOWN`, and
-hard-kills the stragglers past the grace period.
-
-### 4.4 `SIP.Scenario.CallDispatcher`
-
-The one piece needed to make a **child** answer an inbound call.
-`spawn_child/5` registers a `:uas_invite` child as waiting and installs the
-dispatcher as the call-processing module. On an inbound INVITE it hands the
-dialog to the first waiting child (`{:accept, pid}`), which then receives
-`{:INVITE, req, trans, dlg}` — exactly what a UAS scenario waits for. One child
-handles one call; with none waiting the INVITE gets `486 Busy Here`.
-
-Unlike elixipp's `Elixip.ScenarioUAS` factory (see
-[DESIGN-ELIXIPP.md](DESIGN-ELIXIPP.md)), it spawns nothing per call: the parent
-scenario controls the lifecycle by spawning another child when it wants to take
-another call. That is what keeps the FSL layer self-contained — a two-party test
-scenario needs no server mode.
-
----
-
-## 4bis. Service building blocks
-
-A **sub-FSM** is a second process with legs of its own. A **service building
-block** is the opposite animal: `sbb_fsm module, opts` makes the *current*
-process enter `module`'s FSM, on the current scenario's context, dialogs and
-mailbox, until the block hands control back with `sbb_return event`. A
-subroutine call, not a spawn.
-
-The shape follows from invariant 2, not from preference: the dialog and media
-layers bind their events to `self()`, so a block running anywhere else could not
-receive the host's leg events at all.
-
-### Why a layer above the primitives
-
-The B2BUA design is deliberate about where things live: the framework offers
-low-level primitives, the scenario writes the policy, and anything expressible
-in FSL stays in FSL. That is the right split — but it means a working
-call takes a scenario with five or six states, and an ACD queue rather more.
-Asked to route a call to a subscriber, an integrator should not have to write
-the hunt loop, the early-media rule of §7.4 and the profile ladder of §7.5.
-
-So a layer above, offering the two verbs Asterisk made the vocabulary of the
-field: `call()`, the equivalent of `Dial()`, and `queue()`, the equivalent of
-`Queue()`.
-
-They are **not** a replacement for the primitives, and the primitives must stay
-usable directly — that is what makes an unusual call flow possible at all. The
-two verbs are the paved road, not the only road.
-
-### 4bis.1 What it needed from FSL — delivered in 1.5.0
-
-This section asked for **reusable FSM fragments**: a named group of states,
-parameterised, that a scenario can enter and return from, on the calling
-scenario's own dialogs. That is the **service building block** layer —
-[DESIGN-SBB.md](DESIGN-SBB.md) for what it must do,
-[DESIGN-SBB.md](DESIGN-SBB.md) for how,
-[FSL.md](../../FSL.md#service-building-blocks-sbb) for how to write one.
-
-The open question was whether a fragment is a macro expanding states into the
-caller at compile time or a runtime construct with an explicit return state. **It
-is a runtime construct**, and it keeps what the compile-time form was wanted for:
-the block's states are reported to the monitor and to the sequence journal,
-qualified by the block they belong to.
-
-`call()` itself is delivered as `SBB.Call.call/1`, in `:elixip2` rather than in a
-kelixip module — it is call flow rather than server policy, and both FSL dialects
-want it. `bridge/1` came with it: the established call is a block of its own.
-`queue()` stays future work, and stays kelixip's, because it takes names for the
-objects of §3.
-
-
-### 4bis.2 The engine side
-
-`loop/4` already takes the module, the state name, the context and the state
-list as arguments — nothing in it is bound to *the* scenario. A block is that
-same dispatcher, so `sbb_loop/5` differs in exactly two ways: it never calls
-`finalize/4` (the host's legs, media and children are not the block's to
-release) and it never reports an outcome to a parent FSM (its caller is a state,
-not a process).
-
-| Descriptor | Produced by | Handled by |
-|---|---|---|
-| `{:sbb_return, event, ctx}` | `sbb_return/1` | `sbb_loop/5` returns it; `loop/4` treats it as a scenario error, since there is nothing to return to |
-| `throw {:sbb_terminal, outcome, reason, type, ctx}` | a terminal inside a block | `loop/4` only — re-applied as if the host state had written it |
-| `throw {:sbb_deadline_hit, ref, ctx}` | the clause `on_events` injects into every SBB state | the `run_sbb/3` frame whose `ref` it is |
-
-Both non-local exits are `throw`, and both rely on one property of the engine:
-the `try` wrapping every state body catches **exceptions and `:exit`, never
-`:throw`**. A thrown term therefore crosses every state frame and every nested
-block. `sbb_loop/5` deliberately does not catch either, so a terminal three
-blocks deep still unwinds to the root, and a parent's deadline passes through a
-running child to the frame that armed it.
-
-### 4bis.3 The return contract
-
-A block returns `{namespace, outcome, data}` — fixed arity, last element a map,
-so a block can report one more thing without breaking a host that matches it
-(S13). The namespace and the outcomes are declared (`@sbb_namespace`,
-`@sbb_returns`) and `sbb_return/1` checks a literal return against them at
-compile time: a mistyped outcome is otherwise not an error but a silence, the
-host waiting on its `after` for an event nobody sends.
-
-The namespace is the block author's word, so `on_events` cannot classify a return
-from a table — and an unknown leading atom falls through to `:sip`, which the
-sequence diagram draws as an arrow *from the peer*. The namespaces are therefore
-**learned at macro-expansion time**: expanding `sbb_fsm(Block, …)` resolves the
-alias and records `Block.__sbb_namespace__/0` on the calling module, and a face
-module records its own from `__using__` (`SIP.Scenario.register_namespace/2`).
-`on_events` reads the list when it classifies its clauses.
-
-The list is a plain attribute written with read-modify-write, **not**
-`accumulate: true`. It is written and read during expansion, whereas a
-`Module.register_attribute` call placed in `__using__`'s quote runs later, when
-the module body is evaluated — and would clear at that point everything expansion
-had gathered.
-
-### 4bis.3 The context
-
-The block gets the host's `%SIP.Context{}` as it stands — that is the whole
-point. Three things are put back on return: `currentstate` and `laststate` (so
-`goto back` inside a block cannot land in a host state), and, by construction,
-the host's `after` deadline, which does not exist yet when a state body runs.
-
-`appdata` is shared, with one reserved key per block — `{:sbb, Module}` — for
-its scratch space, read and written with `sbb_data_get/1` and `sbb_data_set/2`.
-It is **cleared on every call**, so a serial hunt entering a block target after
-target does not inherit the previous attempt; `resume: true` is the exception,
-for a block designed to be re-entered after an interruption.
-
-### 4bis.4 What the live view shows
-
-A block's states are reported on the **host's own row** — one call, one row —
-with the state qualified by the block it belongs to: `MyApp.Cancelling/waiting`.
-Making the sequence visible is the layer's purpose, so hiding it while the host
-is suspended would be a strange way to serve it, and reporting the block's states
-bare would show a call in states its scenario does not declare.
-
-`run_sbb/3` pushes the block on a per-process stack and pops it in its `after`,
-so an unwinding terminal leaves the reporting as it found it; the outcome that
-follows is the host's and is reported unqualified. The row always names the
-scenario the process runs (`:scenario_module` in the process dictionary), never
-the block — on the way *out* of `run_sbb/3` the block is already off the stack,
-and the report that restores the host's state would otherwise be labelled with
-it. Nesting shows the innermost block, which is where the call actually is.
-
-### 4bis.5 Two rules the compiler enforces
-
-- **`sbb_fsm` is refused inside an `on_events` clause.** That clause's deadline
-  is absolute (`SIP.Scenario.deadline/1`), so a block called from one would burn
-  the host's remaining timeout while it runs. From a state body the suspension
-  is free. Same check, and the same rationale, as `stay` outside an `on_events`;
-- **a block defines no `run/1`.** `SIP.Scenario.Loader.scenario_module?/1`
-  accepts anything exporting `run/1` and `__scenario_states__/0`, and
-  `load_file!/1` takes the first match — so a block declared above the scenario
-  in the same `.exs` would otherwise be run *as* the scenario.
-
-Specification: [DESIGN-SBB.md](DESIGN-SBB.md).
-Design: [DESIGN-SBB.md](DESIGN-SBB.md).
-
----
-
-## 5. Server scenarios
-
-A scenario declares itself a server with `uas :register` / `uas :invite`, which
-sets `@scenario_type` and is read back through `__scenario_type__/0`; the
-default is `:uac`. `SIP.Scenario.Loader.scenario_type/1` exposes it — that is
-how `elixipp` decides between the outbound client mode and the listening server
-mode, and it defaults to `:uac` for a module compiled before the annotation
-existed.
-
-There is **no separate runner**. `run_instance/2` takes the options a server
-instance needs:
+A UAS scenario does not create its dialog: the inbound request did, before the
+instance existed.
 
 | Option | Effect |
 |---|---|
-| `:dialog_pid` | seeds `ctx.dialogpid`, so the reply macros target that dialog |
-| `:inbound_request` | the request that created the instance, also in the mailbox |
-| `:parent_pid` | the factory, which gets `{:child_exit, …}` and releases its quota slot |
-| `:config_overrides` | the external-JSON overrides (§6) |
+| `:dialog_pid` | seeds `sip_ctx.dialogpid`, so the reply macros target that dialog |
+| `:inbound_request` | the request that created the instance, also in its mailbox. **Its presence is what makes this a server instance** as far as `account/2` is concerned |
 
-`spawn_uas_instance/2` wraps `run_instance/2` in a `spawn_monitor`, which is what
-a factory calls per inbound dialog.
+FSL owns `:parent_pid`, `:self_name`, `:appdata`, `:slot_id` and
+`:config_overrides`, and hands the rest over.
 
-Two contracts specific to a server instance:
+### 3.4 `on_event/2` and `on_state_enter/1` — every event
 
-- **the initial state emits nothing.** It falls straight through to a state that
-  waits in `on_events`. There is no race to lose — the triggering request is
-  already in the instance's mailbox when it starts.
-- **the context is seeded from the inbound request**, not from an account of the
-  external config: a server scenario has no outbound `passwd`/`ha1`. Credentials
-  for verifying a challenge are resolved at challenge time, from whatever
-  account source the application has.
+Three things, and the order is why they are one function:
 
-The reply verbs themselves (`accept_registration`, `reply_invite`, …) are
-session mixins — [DESIGN-FRAMEWORK.md](DESIGN-FRAMEWORK.md).
+1. **which leg, which transaction** (`SIP.Session.B2bua.note_event/1`). First,
+   because it is what the `b2bua_*` verbs read to know where to act: a clause
+   replying to the event it just matched is not asked for a direction.
+2. **what a leg that has just died owes** (`note_leg_event/2`). A dialog dying is
+   not news the scenario has to translate: whatever it decides next, the requests
+   that leg was going to answer never will be, and someone is waiting for each of
+   them. They are answered here, at once, on the leg they came from — so the
+   caller hears about its callee going away now rather than at the teardown
+   ([DESIGN-SIPSTACK.md](DESIGN-SIPSTACK.md#57-resilience), R6).
+3. **the inbound request, stashed last** (`SIP.Session.CallUAS.auto_store/2`),
+   with the dialog pid, in the slot `reply_invite*` and `last_uas_req/0` serve.
+   That slot is why a scenario does not carry the request from state to state by
+   hand.
+
+`on_state_enter/1` forgets the leg and the transaction, so an `after` body acts on
+the inbound leg rather than on whatever the previous state matched.
+
+### 3.5 `event_type/1` and the `uas` vocabulary
+
+`:ms_event` is `:media`; **anything else** SIP is shown — a method atom, a status
+code, a bound variable — is `:sip`. The fallback is the point, and it is why this
+is a host decision: an unrecognised leading atom read as coming *from the peer*,
+and drawn that way in the sequence diagram, is a sentence about SIP.
+
+`uas :register` sets FSL's opaque `__scenario_type__/0` slot to `:uas_register`;
+`SIP.Scenario`'s `__using__` sets `:uac` as the default, and
+`SIP.Scenario.Loader.scenario_type/1` applies it for a module compiled before the
+annotation existed. `elixipp` reads it to decide between the outbound client mode
+and the listening server mode.
+
+### 3.6 `account/2` and the monitor's columns
+
+`account(ctx, :initial)` answers the identity the inbound request asserts —
+digest username, else P-Asserted-Identity, else From, the framework's single
+reading of that question (`SIP.Msg.Ops.asserted_username/1`). A UAC keeps showing
+its own account.
+
+`account(ctx, :subsequent)` answers `""` for a server instance, and that is not
+laziness: an empty username is how the registry is told *keep what you have*.
+Re-pushing the resolved identity on every transition would clobber the AOR a
+registrar noted or the conference DID an MCU call joined with
+`note_account/1` — which are the whole point of that call.
+
+"Is this a server instance" is decided on the **inbound request**, not on the
+`uas` annotation: that annotation tells `elixipp` to open listeners, and a kelixip
+script carries none — the server knows a script serves inbound traffic from
+`domains.toml`.
+
+Three columns are SIP's, declared with their defaults by
+`SIP.FSL.Host.monitor_columns/0` and passed to the registry by whoever starts it:
+`medias`, `mediaserver`, `outbound`. Each is written through the generic
+`FSL.Monitor.note/2` by a one-line wrapper on `SIP.Scenario.Monitor` — they are
+*values*, not mechanism: a list of media kinds rendered as letters
+(`SIP.Msg.Ops.media_kinds/1`), a server's declared name, and a URI rendered as a
+request target (`SIP.Uri.serialize_ruri/1`).
+
+### 3.7 `injected_clauses/1` and `clause_covers?/2` — the media failure domain
+
+One clause, prepended to every `on_events`: the media server going away.
+`:server_disconnected` is delivered to every sink and acted upon by nothing, so a
+scenario without a clause for it would sit waiting for media that cannot come
+until its own `after` fires — if it has one. Six reference scenarios closed that
+by hand; the seventh was always going to forget
+([DESIGN-FRAMEWORK.md](DESIGN-FRAMEWORK.md#67-the-media-server-as-a-failure-domain),
+R8).
+
+The reaction is the cooperative shutdown a controller would have asked for, so
+`on_shutdown` runs if declared (`:aborted` otherwise), the legs and the media are
+released, and the caller is answered. R6's rule applied to the media plane: a dead
+resource ends the call it was serving, promptly, instead of being discovered at
+teardown. Idempotent by construction, because it leaves the state.
+
+The suppression test is **deliberately generous**: a clause matching
+`{:ms_event, _, :server_disconnected}` obviously covers it, but so does one
+matching every media event, and so does a catch-all. Erring that way leaves the
+scenario in charge, which is the safe direction.
+
+> **The asymmetry with FSL's own shutdown clause is deliberate.** That one is the
+> FSM control protocol and only an explicit `:scenario_ctl` clause opts out of it;
+> a scenario that merely writes `event -> …` has not thereby declined to be
+> stoppable, and one that could not be stopped would be a node that cannot drain.
+> This one is a policy default.
+
+### 3.8 `finalize/1` — the legs, then the media
+
+One callback and not two, because the order between them is one rule: a leg left
+behind holds a call up at the far end, and it is the leg that carries the media
+the server is about to stop serving. Releasing the media first would leave the far
+end with a live call and nothing on it.
+
+`release_media` waits (bounded, 5 s) for the dialog's termination event before
+releasing, and accepts it **tagged** as well as bare — a B2BUA outbound leg's
+`{:outbound, {:dialog_terminated, …}}` says just as much about the call being
+over, and ignoring it stalled the teardown for the full five seconds with no error
+at all.
+
+Where this step sits among the other four — children, the binding, `cleanup/1`,
+the parent — is the FSM's and stays in `FSL.Runner`.
+
+**What it is handed is the context the failing state had built**, and that takes
+a mechanism rather than a convention: the context is a stack variable, and the
+`rescue` clause of `state` sees the bindings of the moment the `try` was entered.
+So the three doors a scenario writes this context through — `SIP.Context.set/3`,
+`appdata_set/3` and `assert_identity/2` — each hand what they produce to
+`FSL.Context.snapshot/1`, which keeps it off the stack, and the clause reads it
+back with `FSL.Context.latest/1`. A scenario whose `place_call` state raised
+after setting both legs up released neither of them, held its MCU session until
+the RTP watchdog, and left the caller unable to hang up (dev71, 2026-09-21).
 
 ---
 
-## 6. External JSON configuration
+## 4. External JSON configuration
 
-`SIP.Scenario.ExternalConfig` loads a file holding a header and N accounts, and
-parameterizes a run without touching the scenario:
+`SIP.Scenario.ExternalConfig` (`lib/dsl/SIPScenarioExternalConfig.ex`) stays
+Elixip's: its whole model is SIP accounts. It loads a file holding a header and N
+accounts and parameterizes a run without touching the scenario:
 
 ```json
 { "domain": "example.net", "proxyuri": "sip:sip.example.com:5060",
@@ -511,9 +286,10 @@ scenario config block  <  JSON header  <  JSON account
 ```
 
 `overrides_for/2` produces the keyword list for instance *n*, handed to
-`run_instance/2` as `:config_overrides`; `build_context/1` then applies the
-same three-way key routing as §2.1, so a header `proxyuri` reaches the
-application env and an account `username` reaches the context.
+`FSL.Runner.run_instance/2` as `:config_overrides` — which is already the seam.
+`build_context/1` then applies the same three-way routing as §3.2, so a header
+`proxyuri` reaches the application env and an account `username` reaches the
+context.
 
 Validation is **strict** — unknown key, missing required account field,
 unresolved domain or type mismatch all raise with a message naming the offender.
@@ -522,68 +298,80 @@ malformed file cannot exhaust the atom table.
 
 ---
 
-## 7. Observability
+## 5. `SIP.Scenario.CallDispatcher`
 
-Two sinks, both no-ops when not started, so a production run pays nothing:
+The one piece needed to make a **child** scenario answer an inbound call, and the
+implementation of `c:FSL.Host.spawn_child/2` for a `:uas_invite` child.
 
-- **`SIP.Scenario.Monitor`** — an in-memory registry of the running instances
-  feeding elixipp's `--monitor` live view: one row per call (a sub-FSM gets its
-  own, under its parent), holding the scenario name, the last command sent, the
-  current state and the event that caused the last transition. The runner reports
-  transitions; the session `send_*` macros report commands. Detailed in
-  [DESIGN-ELIXIPP.md](DESIGN-ELIXIPP.md).
-- **`SIP.Scenario.SequenceJournal`** — a per-instance chronological journal
-  (commands, transitions, outcome) kept in the **process dictionary** of the
-  scenario process, which is precisely where the runner, the macros and the
-  reporting all run. It is therefore isolated per call with no registry and no
-  message passing. `SIP.Scenario.SequenceDiagram` renders it as PlantUML at
-  `finalize` time, when `--log-sequence` is set or the scenario's debug flag is
-  on.
+`spawn_child/5` registers the child as waiting and installs the dispatcher as the
+call-processing module — unless the application already configured one
+(`Elixip.ScenarioUAS` in elixipp server mode), which is never silently
+overridden. On an inbound INVITE the dispatcher hands the dialog to the first
+waiting child (`{:accept, pid}`), which then receives `{:INVITE, req, trans,
+dlg}` — exactly what a UAS scenario waits for. One child handles one call; with
+none waiting the INVITE gets `486 Busy Here`.
 
----
-
-## 8. Loading and running a scenario
-
-`SIP.Scenario.Loader` has two entry points and one predicate:
-
-- `load_file!/1` compiles an `.exs` and returns the module that defines both
-  `run/1` and `__scenario_states__/0` — the signature of `use SIP.Scenario`;
-- `load_module!/1` resolves a name (`"UAC.Register"`) among already-compiled
-  modules;
-- `scenario_type/1` (§5).
-
-Both paths exist on purpose. `lib/built-in-scenarios/` holds the scenarios
-**compiled into** the escript (`UAC.Invite`, `UAC.Register`), which run by module
-name with no file present; `apps/elixip2/scenarios/` holds editable `.exs`
-copies loaded by path, deliberately under different module names
-(`UAC.InviteExample`, `UAC.RegisterExample`) so both can coexist.
-
-`use SIP.Scenario` generates the `run/1` those paths call: it starts the SIP
-stack when asked (transactions, transport selector, dialog layer, config
-registry), builds the initial `%SIP.Context{}` from the `config` block and enters
-`initial_state`. It returns `:ok` on a success terminal, `{:error, reason}` on a
-failure one, and `{:aborted, reason}` when the scenario was wound down by a
-cooperative shutdown — three outcomes rather than two, so tooling can tell a
-controller-driven stop from a scenario that failed.
-
-`mix scenario` runs either form and exits `0`/`1`, so a scenario is a CI check.
+Unlike elixipp's `Elixip.ScenarioUAS` factory
+([DESIGN-ELIXIPP.md](DESIGN-ELIXIPP.md)), it spawns nothing per call: the parent
+scenario controls the lifecycle by spawning another child when it wants to take
+another call. That is what keeps a two-party test scenario self-contained — it
+needs no server mode.
 
 ---
 
-## 9. Invariants
+## 6. Server scenarios
 
-1. A state ends with a transition macro and returns a descriptor; it never calls
-   the next state (§1).
-2. One FSM *stack*, one process — because the dialog and media layers bind their
-   events to `self()` (§3.1). A sub-FSM is another process with legs of its own;
-   a service building block is a nested FSM on this process's legs (§4bis).
-3. A scenario always *ends*: an exception or an exit inside a state becomes a
-   failure, so teardown runs (§2.2).
-4. Teardown order is children → B2BUA legs → media → cleanup → parent (§3.3).
-5. `laststate` is written only when the state actually changes (§2.3).
-6. `stay` does not re-arm the `after` deadline (§2.4).
-7. Every `on_events` is stoppable and media-death-aware, whether or not the
-   author thought about it (§2.5).
-8. A scenario states a call flow; it does not implement one. A private helper
+There is **no separate runner**. `FSL.Runner.run_instance/2` takes the options a
+server instance needs (§3.3), and `spawn_uas_instance/2` wraps it in a
+`spawn_monitor`, which is what a factory calls per inbound dialog.
+
+Two contracts specific to a server instance:
+
+- **the initial state emits nothing.** It falls straight through to a state that
+  waits in `on_events`. There is no race to lose — the triggering request is
+  already in the instance's mailbox when it starts.
+- **the context is seeded from the inbound request**, not from an account of the
+  external config: a server scenario has no outbound `passwd`/`ha1`. Credentials
+  for verifying a challenge are resolved at challenge time, from whatever account
+  source the application has.
+
+The reply verbs themselves (`accept_registration`, `reply_invite`, …) are session
+mixins — [DESIGN-FRAMEWORK.md](DESIGN-FRAMEWORK.md).
+
+---
+
+## 7. What `SBB.Call` is, and why it is here
+
+`lib/dsl/sbb/call.ex`. A **concrete** service building block, written in FSL, that
+does the B2BUA call flow: the hunt loop, the early-media rule and the profile
+ladder an integrator should not have to write in order to route a call to a
+subscriber. `call()` after Asterisk's `Dial()`; `bridge/1` came with it, the
+established call being a block of its own.
+
+It is a **consumer** of the block mechanism, not part of it — which is why the
+extraction left it here while `FSL.Block` moved. It is in `:elixip2` rather than
+in a kelixip module because it is call flow rather than server policy, and both
+FSL dialects want it. `queue()`, after `Queue()`, stays future work and stays
+kelixip's, because it takes names for objects the server owns.
+
+Design: [DESIGN-SBB.md](DESIGN-SBB.md).
+
+---
+
+## 8. Invariants of the binding
+
+1. The scenario-visible surface did not change across the extraction: no `.exs`
+   scenario, no kelixip script and no `use SIP.Scenario` line was touched.
+2. `%SIP.Context{}` is `FSL.Context.fields()` plus the SIP session's, and
+   `@after_compile FSL.Context` makes forgetting the first half a compile error.
+3. Message interpretation stays in the message layer, in exactly one place — see
+   CLAUDE.md. `SIP.FSL.Host` reads a request in exactly two callbacks
+   (`account/2`, `on_event/2`) and delegates both readings.
+4. A scenario states a call flow; it does not implement one. A private helper
    carrying real logic in an `.exs` is a missing macro in the framework, not a
    style choice.
+5. A state that fails tears down what it had allocated: `finalize/1` reads the
+   context the state built, not the one it was entered with (§3.8).
+6. No SIP symbol may reappear in `lib/fsl/` of the package — enforced by
+   `mix compile --warnings-as-errors` over there, in a project that depends on no
+   binding. The whole [extraction plan][plan] exists to keep that true.

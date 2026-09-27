@@ -124,6 +124,31 @@ defmodule SIP.Test.MsgTooLarge do
     assert resp.contentlength == 0
   end
 
+  # The bound sits above OTP's default UDP receive buffer (1460 octets on an IPv6
+  # socket, 8192 on IPv4): a 513 comes back only if the datagram reached the parser
+  # whole. Cut to the buffer, it would fall under the bound and go on truncated.
+  for {family, inet, addr} <- [
+        {:ipv4, :inet, {127, 0, 0, 1}},
+        {:ipv6, :inet6, {0, 0, 0, 0, 0, 0, 0, 1}}
+      ] do
+    test "a #{family} datagram past the default receive buffer reaches the parser whole" do
+      addr = unquote(Macro.escape(addr))
+      put_limit(9_000)
+      {:ok, port} = SIP.NetUtils.pick_free_port(:udp)
+
+      {:ok, tp_pid} =
+        GenServer.start(SIP.Transport.UDP, {:bind, addr, port, [family: unquote(family)]})
+
+      on_exit(fn -> if Process.alive?(tp_pid), do: GenServer.stop(tp_pid) end)
+
+      {:ok, client} = :gen_udp.open(0, [:binary, unquote(inet), ip: addr])
+      :ok = :gen_udp.send(client, addr, port, invite_wire(filler(9_500)))
+
+      assert_receive {:udp, ^client, _ip, ^port, resp}, 1_000
+      assert {:ok, %{response: 513}} = SIPMsg.parse(resp, nocb())
+    end
+  end
+
   test "an oversized ACK is dropped: an ACK is never answered" do
     put_limit(2_000)
     tp_pid = mockup_transport("toolargeack")
@@ -195,6 +220,7 @@ defmodule SIP.Test.MsgTooLarge do
 
   defp depack(data, buf \\ %SIP.Transport.Depack{}) do
     parent = self()
+
     SIP.Transport.Depack.on_data_received(buf, data, fn what, msg -> send(parent, {what, msg}) end)
   end
 
@@ -213,7 +239,8 @@ defmodule SIP.Test.MsgTooLarge do
   test "a header block that never ends is bounded, and nothing is answered" do
     put_limit(2_000)
 
-    buf = depack("INVITE sip:bob@example.com SIP/2.0\r\n" <> String.duplicate("X-Pad: pad\r\n", 400))
+    buf =
+      depack("INVITE sip:bob@example.com SIP/2.0\r\n" <> String.duplicate("X-Pad: pad\r\n", 400))
 
     assert_received {:too_large, ""}
     assert buf.state == :refused
@@ -346,9 +373,9 @@ defmodule SIP.Test.MsgTooLarge do
       "From: \"Alice\" <sip:alice@example.com>;tag=alice-tag\r\n" <>
       "To: <sip:alice@example.com>\r\n" <>
       "Call-ID: int-1\r\n" <>
-      (if header == "CSeq", do: "", else: "CSeq: 1 REGISTER\r\n") <>
+      if(header == "CSeq", do: "", else: "CSeq: 1 REGISTER\r\n") <>
       "#{header}: #{value}\r\n" <>
-      (if header == "Content-Length", do: "", else: "Content-Length: 0\r\n") <> "\r\n"
+      if(header == "Content-Length", do: "", else: "Content-Length: 0\r\n") <> "\r\n"
   end
 
   # An INVITE whose last header is `extra`, with no body.

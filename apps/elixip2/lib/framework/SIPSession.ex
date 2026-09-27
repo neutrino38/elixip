@@ -107,10 +107,10 @@ defmodule SIP.Session do
               |> SIP.Context.set(:lasterr, :ok)
 
             rez ->
-              SIP.Context.set(sip_ctx, :lasterr, rez)
+              unsent_request(sip_ctx, req, rez)
           end
         catch
-          :exit, _reason -> SIP.Context.set(sip_ctx, :lasterr, :dialogterminated)
+          :exit, _reason -> unsent_request(sip_ctx, req, :dialogterminated)
         end
 
       is_nil(sip_ctx.dialogpid) or req.method in @standalone_methods ->
@@ -126,29 +126,61 @@ defmodule SIP.Session do
             |> SIP.Context.set(:lasterr, :ok)
             |> register_initial_transaction(req.method)
 
-          {:error, err} ->
-            SIP.Context.set(sip_ctx, :lasterr, err)
+          # `{:error, reason}` for a dialog that refused to start, and the bare
+          # `:error` start_dialog/5 answers when its own creation raised.
+          {:error, err} -> unsent_request(sip_ctx, req, err)
+          err -> unsent_request(sip_ctx, req, err)
         end
 
       true ->
         # The dialog (e.g. an INVITE call dialog ended by BYE) has terminated and
         # this is an in-dialog request: do not implicitly recreate it.
-        Logger.warning(
-          module: __MODULE__,
-          message:
-            "Dialog #{inspect(sip_ctx.dialogpid)} terminated; dropping in-dialog #{req.method} request"
-        )
-
-        SIP.Context.set(sip_ctx, :lasterr, {:error, :dialogterminated})
+        unsent_request(sip_ctx, req, {:error, :dialogterminated})
     end
+  end
+
+  # A request that never left, whatever stopped it: no transport toward the
+  # destination, a destination that does not resolve, a dialog that died under
+  # us, a transaction that could not be created.
+  #
+  # RFC 3261 §8.1.3.1 says what the application is owed — a fatal transport error
+  # is reported to the TU as a **503**, exactly as a transaction timeout is
+  # reported as a 408 (the dialog layer does that half, `timeout_response/1`). It
+  # used to be owed nothing at all: `lasterr` was set and nobody reads it, so the
+  # scenario went on to its `on_events` and waited for a response that could not
+  # come. An unreachable proxy then read as "the callee did not answer after 30
+  # s", thirty seconds later, with a stack trace in the log as the only clue.
+  #
+  # Delivered as the response event the scenario already knows how to read, so
+  # its `code in 400..699` clause ends the run — nothing new to write in a
+  # scenario, and a retry-on-503 policy applies to it unchanged. There is no
+  # transaction to name, and the dialog pid is whatever we had (nil for an
+  # initial request).
+  #
+  # The reason phrase names what stopped the request, which is the one thing a
+  # 503 the far end sent could not tell apart from this one. It never goes on
+  # the wire, so it is free to say more than the §21.5.4 text; `lasterr` keeps
+  # the same cause as an atom, for a scenario deciding on it.
+  defp unsent_request(sip_ctx = %SIP.Context{}, req, reason) do
+    cause = "#{inspect(reason)} sending #{req.method} to #{req.ruri}"
+
+    Logger.error(
+      module: __MODULE__,
+      message: "Request not sent: #{cause}. Reporting it to the scenario as a 503."
+    )
+
+    rsp = SIP.Msg.Ops.local_response(req, 503, "Service Unavailable (#{cause})")
+    send(self(), {503, rsp, nil, sip_ctx.dialogpid})
+
+    SIP.Context.set(sip_ctx, :lasterr, reason)
   end
 
   @doc """
   Dispatch a SIP reply to the per-method handler, based on the method carried in
-  the response CSeq (`[seqno, method]`). INVITE, OPTIONS and REGISTER are routed
-  to their respective handlers; replies to any other method are ignored and the
-  context is returned unchanged. Backing function of the `process_sip_reply/2`
-  macro.
+  the response CSeq (`[seqno, method]`). INVITE, OPTIONS, REGISTER and SUBSCRIBE
+  are routed to their respective handlers; replies to any other method are ignored
+  and the context is returned unchanged. Backing function of the
+  `process_sip_reply/2` macro.
   """
   @spec dispatch_reply(%SIP.Context{}, map(), pid() | reference()) :: %SIP.Context{}
   def dispatch_reply(sip_ctx = %SIP.Context{}, resp, transaction_id) when is_map(resp) do
@@ -161,6 +193,9 @@ defmodule SIP.Session do
 
       [_seqno, :REGISTER] ->
         SIP.Session.RegisterUAC.process_register_reply(sip_ctx, resp, transaction_id)
+
+      [_seqno, :SUBSCRIBE] ->
+        SIP.Session.SubscribeUAC.process_subscribe_reply(sip_ctx, resp, transaction_id)
 
       _ ->
         sip_ctx
@@ -258,6 +293,24 @@ defmodule SIP.Session do
       end)
     end
 
+    @spec set_presence_processing_module(module()) :: :ok
+    @doc """
+    Specify which module serves inbound SUBSCRIBE / PUBLISH (see
+    `SIP.Session.Presence`). With none registered, such a request is answered 500
+    — until now it fell through to the catch-all and was answered **501**, which
+    told a watcher the stack did not implement SUBSCRIBE when in fact no
+    application had claimed it.
+    """
+    def set_presence_processing_module(module) do
+      Agent.update(__MODULE__, fn reg -> %ConfigRegistry{reg | presence: module} end)
+    end
+
+    @spec get_presence_processing_module() :: module() | nil
+    @doc "Return the configured presence processing module (nil when none)."
+    def get_presence_processing_module() do
+      Agent.get(__MODULE__, fn reg -> reg.presence end)
+    end
+
     @spec set_options_processing_module(module()) :: :ok
     @doc """
     Specify which module answers out-of-dialog OPTIONS (see `SIP.Session.Options`).
@@ -286,7 +339,30 @@ defmodule SIP.Session do
       else
         # If a module is configured, call the callback in this module
         Logger.debug("Dispatched #{proc_atom} to  #{inspect(call_mod)}.#{fun_atom}().")
-        apply(call_mod, fun_atom, args)
+        call_callback(call_mod, fun_atom, args)
+      end
+    end
+
+    # Half of the presence behaviour is `@optional_callbacks`, so a host that
+    # implements none of it is a legal host — and calling one of them anyway is an
+    # `:undef` raised inside `SIP.DialogImpl.init/1`, which kills the dialog before
+    # the request is answered at all. The peer then retries, and the only trace is a
+    # stack trace in the journal.
+    #
+    # Found on 2026-09-22 with a Linphone typing indicator: an out-of-dialog MESSAGE
+    # reached `Kelix.Router.on_message/3`, which does not exist. 501 is what the
+    # catch-all clause below already answers for a method no module handles, and it
+    # is the same answer here: the host is not equipped for this request.
+    defp call_callback(module, fun, args) do
+      if Code.ensure_loaded?(module) and function_exported?(module, fun, length(args)) do
+        apply(module, fun, args)
+      else
+        Logger.warning(
+          "#{inspect(module)} does not implement the optional callback " <>
+            "#{fun}/#{length(args)}: answering 501 Not Implemented."
+        )
+
+        {:reject, 501, "Not Implemented"}
       end
     end
 
@@ -316,6 +392,37 @@ defmodule SIP.Session do
       )
     end
 
+    # Event notification (RFC 6665) and publication (RFC 3903). Until P3 these
+    # landed on the catch-all below and were answered 501 Not Implemented, whatever
+    # application was running: `presence:` was a struct field with no setter and no
+    # clause here.
+    def dispatch(dialog_id, req, transaction_id) when is_map(req) and req.method == :SUBSCRIBE do
+      internal_dispatch(
+        :presence,
+        :on_new_subscribe,
+        [dialog_id, req, transaction_id],
+        "No presence server defined"
+      )
+    end
+
+    def dispatch(dialog_id, req, transaction_id) when is_map(req) and req.method == :PUBLISH do
+      internal_dispatch(
+        :presence,
+        :on_new_publish,
+        [dialog_id, req, transaction_id],
+        "No presence server defined"
+      )
+    end
+
+    def dispatch(dialog_id, req, transaction_id) when is_map(req) and req.method == :MESSAGE do
+      internal_dispatch(
+        :presence,
+        :on_message,
+        [dialog_id, req, transaction_id],
+        "No presence server defined"
+      )
+    end
+
     def dispatch(:on_call_end, dialog_id, app_id) when is_pid(app_id) do
       internal_dispatch(
         :callprocessing,
@@ -331,6 +438,15 @@ defmodule SIP.Session do
         :on_registration_expired,
         [dialog_id, app_pid],
         "No registration server defined"
+      )
+    end
+
+    def dispatch(:on_subscription_expired, dialog_id, app_pid) when is_pid(app_pid) do
+      internal_dispatch(
+        :presence,
+        :on_subscription_expired,
+        [dialog_id, app_pid],
+        "No presence server defined"
       )
     end
 

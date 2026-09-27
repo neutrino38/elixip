@@ -140,11 +140,15 @@ the code decides which header carries them.
 | ACK | **never** | it has no response (§17.1.1.3) — challenging it is meaningless |
 | CANCEL | **never** | §22.1; it must be accepted for the transaction it cancels |
 | re-INVITE / UPDATE / BYE in-dialog | **no** | the dialog was authenticated when it was created; re-challenging mid-call breaks UAs and buys nothing |
-| SUBSCRIBE / REFER out of dialog | yes | dialog-creating, same treatment as INVITE |
-| MESSAGE / PUBLISH / OPTIONS | **OPEN** | not dialog-creating but abusable. OPTIONS especially: challenging it breaks liveness probing (see `Kelix.Options`), so probably never |
+| SUBSCRIBE / REFER out of dialog | yes | dialog-creating, same treatment as INVITE. A SUBSCRIBE refresh is challenged too: it is a request of its own, and a subscription authenticated once would otherwise be extended for hours by whoever knows its Call-ID |
+| PUBLISH | yes | 401, like a SUBSCRIBE. It is not dialog-creating, and it is the request that says a user is online or off: unauthenticated, a stranger declares someone's state |
+| MESSAGE | **OPEN** | answered 405 until `[[domain.chat]]` lands ([DESIGN-CHAT.md](DESIGN-CHAT.md)); the decision belongs with that function |
+| OPTIONS | **never** | challenging it breaks liveness probing (see `Kelix.Options`) |
 
 So the rule is not "creates a dialog" but **"is an initial request other than ACK,
-CANCEL and OPTIONS"**. Worth stating that way in the spec: it is checkable in one
+CANCEL and OPTIONS"**. The code that applies it is method-agnostic accordingly:
+`AuthDb.SBB.authenticate/1` challenges through `challenge_request/2` and waits for
+the re-submission of whatever method it challenged. Worth stating that way in the spec: it is checkable in one
 place and does not need a list to be maintained per method.
 
 ### 2.5 Nonce lifetime

@@ -203,7 +203,8 @@ defmodule SIP.Session.CallUAC do
       timeout = Keyword.get(options, :timeout, 20)
       webrtc_support = Keyword.get(options, :webrtc, :no)
       medias = Keyword.get(options, :media, :tc)
-      {sip_ctx, sdp_offer} = SIP.Session.Media.get_sdp_offer(sip_ctx, webrtc_support, medias)
+      {sip_ctx, sdp_offer} =
+        SIP.Session.Media.get_sdp_offer(sip_ctx, webrtc_support, medias, options)
       # Cache the offer so an authenticated retry (auth_invite) reuses the exact
       # same SDP instead of rebuilding it — see auth_invite/5 for the rationale.
       sip_ctx = SIP.Context.appdata_set(sip_ctx, :localsdpoffer, sdp_offer)
@@ -246,7 +247,7 @@ defmodule SIP.Session.CallUAC do
         case SIP.Context.appdata_get(sip_ctx, :localsdpoffer) do
           nil ->
             webrtc_support = Keyword.get(options, :webrtc, :no)
-            SIP.Session.Media.get_sdp_offer(sip_ctx, webrtc_support, medias)
+            SIP.Session.Media.get_sdp_offer(sip_ctx, webrtc_support, medias, options)
 
           cached_offer ->
             {sip_ctx, cached_offer}
@@ -396,6 +397,23 @@ defmodule SIP.Session.CallUAS do
             )
         end
       end
+
+      # The same challenge, of whatever request this instance is serving. A
+      # SUBSCRIBE and a PUBLISH are gated on a digest exactly as an INVITE is, and
+      # `challenge_invite` naming the method is what kept the block that does it
+      # from being reused — see do_challenge_request/3.
+      defmacro challenge_request(params, code \\ 401) do
+        quote do
+          SIP.Scenario.Monitor.note_command(:sip, "challenge_request #{unquote(code)}")
+
+          var!(sip_ctx) =
+            SIP.Session.CallUAS.do_challenge_request(
+              var!(sip_ctx),
+              unquote(params),
+              unquote(code)
+            )
+        end
+      end
     end
   end
 
@@ -409,6 +427,17 @@ defmodule SIP.Session.CallUAS do
   `sip_ctx.dialogpid`. No-op for any other event. Called by the on_events
   instrumentation for every matched event.
 
+  SUBSCRIBE is stored for the same reason REGISTER is, and it is the same reason:
+  a notifier instance serves a *succession* of SUBSCRIBEs on one dialog — the
+  initial one and every refresh — and `accept_subscription/1` negotiates the one
+  it has just received, never the one that created the instance.
+
+  PUBLISH is stored for a narrower one: its instance serves exactly one request
+  (the dialog lives as long as its transaction), but `check_publish/1` and
+  `reply_publish/2` read it from the same slot every other UAS verb answers
+  from, and a slot filled by the framework is one thing a script cannot forget
+  to carry.
+
   REGISTER is stored for the same reason the others are: a registrar instance
   serves a *succession* of REGISTERs on one dialog — the unauthenticated one, the
   digest replay, then every refresh — and each state has to act on the last one
@@ -418,7 +447,7 @@ defmodule SIP.Session.CallUAS do
   scenario would authenticate the refresh but save the contacts of the very first
   request.
   """
-  @uas_stored_methods [:INVITE, :UPDATE, :REGISTER]
+  @uas_stored_methods [:INVITE, :UPDATE, :REGISTER, :SUBSCRIBE, :PUBLISH]
 
   def auto_store(sip_ctx, {m, req, trans_pid, dlg})
       when m in @uas_stored_methods and is_map(req) and is_pid(dlg) do
@@ -644,15 +673,42 @@ defmodule SIP.Session.CallUAS do
           %SIP.Context{}
   def do_challenge_invite(sip_ctx = %SIP.Context{}, params, code)
       when code in [401, 407] and is_map(params) do
-    do_reply_invite(sip_ctx, code, SIP.Msg.Ops.sip_reason(code), [
-      {SIP.Msg.Ops.challenge_header(code), params}
-    ])
+    do_challenge_request(sip_ctx, params, code)
   end
 
   def do_challenge_invite(sip_ctx = %SIP.Context{}, realm, code)
       when code in [401, 407] and is_binary(realm) do
     req = fetch_stored_req!(sip_ctx)
     rc = SIP.Dialog.challenge(sip_ctx.dialogpid, req, code, realm)
+    SIP.Context.set(sip_ctx, :lasterr, reply_lasterr(rc))
+  end
+
+  @doc """
+  Challenge the request this instance is serving — 401 or 407 — whatever its
+  method. Backs `challenge_request/1,2`.
+
+  `params` is the digest parameter set the application composed
+  (`Kelix.Auth.challenge_params/2`), sent verbatim in the header the code calls
+  for: `stale` and the `algorithm` the stored secret was hashed with are the
+  authentication backend's to decide, and neither survives being re-derived here.
+
+  A digest gates a SUBSCRIBE and a PUBLISH the way it gates an INVITE, and the
+  stored request is read from the one slot every UAS verb answers from — so this
+  is `do_challenge_invite/3` with the method taken out of its name. 401 by
+  default, which is what a server challenging *for itself* sends: a presence
+  server is the notifier of the resource, not a proxy on the way to it. A
+  scenario routing calls passes 407.
+  """
+  @spec do_challenge_request(%SIP.Context{}, map(), 401 | 407) :: %SIP.Context{}
+  def do_challenge_request(sip_ctx = %SIP.Context{}, params, code)
+      when code in [401, 407] and is_map(params) do
+    req = fetch_stored_req!(sip_ctx)
+
+    rc =
+      reply_to(sip_ctx, req, code, SIP.Msg.Ops.sip_reason(code), [
+        {SIP.Msg.Ops.challenge_header(code), params}
+      ])
+
     SIP.Context.set(sip_ctx, :lasterr, reply_lasterr(rc))
   end
 
@@ -944,7 +1000,7 @@ defmodule SIP.Session.CallInDialog do
   defp send_offer_request(sip_ctx, method, :mediaserver, opts) do
     webrtc = Keyword.get(opts, :webrtc, :no)
     medias = Keyword.get(opts, :media, :audio_video)
-    {sip_ctx, offer} = SIP.Session.Media.get_sdp_offer(sip_ctx, webrtc, medias)
+    {sip_ctx, offer} = SIP.Session.Media.get_sdp_offer(sip_ctx, webrtc, medias, opts)
     send_offer_request(sip_ctx, method, offer, opts)
   end
 
