@@ -978,6 +978,30 @@ defmodule SIP.DialogImpl do
 
   defp bind_app(state, _app_pid), do: state
 
+  defp invite_dialog?(%SIP.DialogImpl{msg: %{method: :INVITE}}), do: true
+  defp invite_dialog?(_state), do: false
+
+  defp active_notifier_subscription?(%SIP.DialogImpl{
+         direction: :inbound,
+         subscription: %SIP.Subscription{},
+         subscription_ended: false
+       }),
+       do: true
+
+  defp active_notifier_subscription?(_state), do: false
+
+  # 64*T1, the lifetime of a non-INVITE client transaction (RFC 3261 §17.1.2.2):
+  # the transaction in flight has ended by then, answered or not. The timer is
+  # the one an ended subscription lingers on, and stops the dialog the same way.
+  defp linger(state) do
+    state = cancel_expiration_timer(state)
+
+    %SIP.DialogImpl{
+      state
+      | expirationtimer: :erlang.start_timer(32_000, self(), :subscription_linger)
+    }
+  end
+
   defp app_alive?(%SIP.DialogImpl{app: app}) when is_pid(app), do: Process.alive?(app)
   defp app_alive?(_state), do: false
 
@@ -1013,8 +1037,16 @@ defmodule SIP.DialogImpl do
       {{:ok, _transaction_pid}, state} ->
         {:noreply, state}
 
-      # No transport, too many transactions, already closing: nothing more can
-      # be done for the far end, and there is nothing left to wait for.
+      # A BYE is already on its way — relayed by the application just before it
+      # ended. The dialog stops when that transaction ends; stopping now would
+      # kill it and leave it one chance on UDP. The linger is the net under it.
+      {:already_closing, state} ->
+        if pending_client_transaction?(state),
+          do: {:noreply, linger(state)},
+          else: {:stop, {:shutdown, :app_down}, state}
+
+      # No transport, too many transactions: nothing more can be done for the
+      # far end, and there is nothing left to wait for.
       {rc, state} ->
         Logger.warning(
           dialogpid: "#{inspect(self())}",
@@ -2966,16 +2998,37 @@ defmodule SIP.DialogImpl do
   # nothing will answer on this dialog any more, so it ends here rather than
   # collecting in-dialog transactions it can only reject.
   #
-  # An established dialog is hung up first: RFC 3261 §15 makes the BYE the only
-  # way to end one, and the far end is otherwise left off-hook on a call nobody
-  # is in. The BYE is sent from `handle_info(:hang_up_unowned_dialog, …)`, the
-  # same one `answer_nobody_awaits/2` uses, and the dialog stops when that
-  # transaction ends.
+  # What "ending" owes the far end depends on what the dialog carries:
+  #
+  #   * a CALL that is established is hung up: RFC 3261 §15 makes the BYE the
+  #     only way to end one, and the far end is otherwise left off-hook on a
+  #     call nobody is in. The BYE is sent from
+  #     `handle_info(:hang_up_unowned_dialog, …)`, the same one
+  #     `answer_nobody_awaits/2` uses, and the dialog stops when that
+  #     transaction ends;
+  #   * a SUBSCRIPTION we notify that is still active gets its final NOTIFY,
+  #     `deactivated` — RFC 6665 §4.2.2: the watcher may re-subscribe at once,
+  #     and reaches a live notifier. Without it the watcher believes itself
+  #     subscribed until the lifetime lapses;
+  #   * anything else has no session to end. A BYE there is refused
+  #     (`allows/1`), and a PUBLISH, a MESSAGE or an ended subscription is
+  #     "established" only in that its request was answered 2xx
+  #     (`establish_inbound/3`). What it may still owe is a request of ours in
+  #     flight — the final NOTIFY above, or the one the subscription ending
+  #     just sent — so the dialog lingers for that transaction's lifetime
+  #     instead of stopping, which would kill it (`terminate/2`).
   def handle_info(
         {:DOWN, ref, :process, pid, reason},
         state = %SIP.DialogImpl{app_monitor: ref, app: pid}
       ) do
-    Logger.warning(
+    # A request answered, then its script ending, is the normal life of every
+    # dialog that carries no call: not worth a warning.
+    level =
+      if reason in [:normal, :shutdown] and not invite_dialog?(state),
+        do: :info,
+        else: :warning
+
+    Logger.log(level,
       dialogpid: "#{inspect(self())}",
       module: __MODULE__,
       message: "Application #{inspect(pid)} is gone (#{inspect(reason)}); ending the dialog"
@@ -2985,7 +3038,7 @@ defmodule SIP.DialogImpl do
     state = %SIP.DialogImpl{state | app: nil, app_monitor: nil}
 
     cond do
-      state.state == :established ->
+      invite_dialog?(state) and state.state == :established ->
         case pending_invite_transaction(state) do
           # The 2xx was answered while the application was still there, and the
           # ACK it owed never went out. It goes now, before the BYE.
@@ -2996,14 +3049,19 @@ defmodule SIP.DialogImpl do
             hang_up_orphaned_dialog(state)
         end
 
+      active_notifier_subscription?(state) ->
+        state |> finish_subscription(:deactivated) |> close_after_subscription()
+
       # A request of ours is still out there, and its answer is worth waiting
-      # for: a 2xx that arrives now is ACKed and hung up by
+      # for. On a call leg, a 2xx that arrives now is ACKed and hung up by
       # `answer_nobody_awaits/2` — the very case that established "the dialog
       # outlives its application" — and anything else ends the dialog through
       # `handle_UAS_response/3` as it always did. Stopping here instead would
       # strand a callee that is about to pick up.
       pending_client_transaction?(state) ->
-        {:noreply, state}
+        if invite_dialog?(state),
+          do: {:noreply, state},
+          else: {:noreply, linger(state)}
 
       true ->
         {:stop, {:shutdown, :app_down}, state}

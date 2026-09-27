@@ -57,6 +57,7 @@ defmodule SIP.Test.SubscriptionSuite do
                    ) do
                 {:ok, _sub} ->
                   notify(unquote(traits).document(:open))
+                  probe(:notifier, self())
                   goto(subscribed, "200 + NOTIFY")
 
                 {:error, code} ->
@@ -200,6 +201,25 @@ defmodule SIP.Test.SubscriptionSuite do
         @impl true
         def on_request(%{method: :NOTIFY} = req, state) do
           {[reply(req, 200, "OK", [], 10)], state}
+        end
+
+        def on_request(req, state), do: default_request(req, state)
+      end
+
+      defmodule Fixture.FinalNotifyLostPeer do
+        @moduledoc """
+        A watcher whose answer to the FINAL NOTIFY is lost: it answers every
+        NOTIFY 200 except the terminated one, so the transaction carrying that
+        one has to retransmit it.
+        """
+        use SIP.Test.Peer
+
+        @impl true
+        def on_request(%{method: :NOTIFY} = req, state) do
+          case SIP.Msg.Ops.subscription_state(req) do
+            {:terminated, _params} -> {[], state}
+            _active -> {[reply(req, 200, "OK", [], 10)], state}
+          end
         end
 
         def on_request(req, state), do: default_request(req, state)
@@ -399,6 +419,45 @@ defmodule SIP.Test.SubscriptionSuite do
 
           assert {:terminated, _params} = SIP.Msg.Ops.subscription_state(notify),
                  "an un-SUBSCRIBE was followed by a NOTIFY that was not the final one"
+        end
+
+        # The script ends on the termination it is handed, which is the moment its
+        # dialog loses its application. The dialog must still outlive it: the
+        # final NOTIFY's transaction retransmits until the watcher answers, or one
+        # lost datagram leaks the subscription on the watcher's side.
+        test "retransmits the final NOTIFY after the script has ended" do
+          SIP.Test.PresenceUAS.serve(Fixture.Notifier)
+          tp = attach("notifier-linger")
+          :ok = Mockup.set_peer(tp, Fixture.FinalNotifyLostPeer)
+
+          req = subscribe(instance: "notifier-linger")
+          cid = req.callid
+          Mockup.inject(tp, req)
+          assert_receive {:sip_mockup, {:response_sent, 200, %{callid: ^cid}}}, 2_000
+          assert_receive {:sip_mockup, {:request_sent, :NOTIFY, %{callid: ^cid}}}, 2_000
+
+          Mockup.inject(tp, refresh(req, 2) |> Map.put(:expires, 0))
+          assert %{} = await_final_notify(cid)
+          assert_receive {:terminated, _reason}, 2_000
+
+          assert %{} = await_final_notify(cid, 3_000)
+        end
+
+        # A notifier instance that dies mid-subscription — a crash, the pool
+        # reclaiming it — leaves nobody to end the subscription. The dialog does:
+        # `deactivated` tells the watcher to subscribe again, now.
+        test "sends the final NOTIFY, deactivated, when the script dies subscribed" do
+          SIP.Test.PresenceUAS.serve(Fixture.Notifier)
+          tp = attach("notifier-crash")
+
+          req = subscribe(instance: "notifier-crash")
+          cid = req.callid
+          Mockup.inject(tp, req)
+          assert_receive {:sip_mockup, {:response_sent, 200, %{callid: ^cid}}}, 2_000
+          assert_receive {:notifier, notifier}, 2_000
+
+          Process.exit(notifier, :kill)
+          assert %{"reason" => "deactivated"} = await_final_notify(cid)
         end
 
         test "sends the final NOTIFY itself when the granted lifetime lapses" do
