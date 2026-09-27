@@ -19,8 +19,9 @@ defmodule Kelix.Mod.Presence do
       N a list subscription names — and hand back the state as it stands;
     * `state_of/2` — the current document of a resource, for a script that wants
       it without subscribing;
-    * `report/4` — another module stating the presence of a resource on its own
-      authority (see *Reported states*);
+    * `report/5` — another module stating the state of a resource, on one event
+      package, on its own authority (see *Reported states*); `report/4` is the
+      `presence` case;
     * `exists?/2` — whether a presentity exists at all, the question a notifier
       script asks before it accepts a subscription;
     * `watchers/2`, `presentities/1`, `remove/2` — what `kelictl presence` shows
@@ -57,9 +58,16 @@ defmodule Kelix.Mod.Presence do
   registrar script says, through `registration_changed/1` and
   `registration_ended/1` — and, on a domain that has a registrar, **closed** for a
   subscriber `Kelix.Mod.AuthDb` knows. Anywhere else — a domain with no
-  registrar, a domain this node does not serve, a user nobody provisioned, a
-  package other than `presence` — there is no state, `nil`, which a notifier
-  reports as `noresource`.
+  registrar, a domain this node does not serve, a user nobody provisioned — there
+  is no state, `nil`, which a notifier reports as `noresource`.
+
+  On the `dialog` package (RFC 4235) nothing is published and the registration
+  says nothing: the state is what a module **reported** — the calls of the AOR —
+  and, for a subscriber `Kelix.Mod.AuthDb` knows, an **empty** document when
+  nothing is: an idle phone has no dialog, which is what its BLF key displays,
+  and `noresource` would end the subscription of every idle phone at subscribe
+  time (docs/design/dialog-state-plan.md, decision 7). Any other package has no
+  state.
 
   A registration that opens or closes a watched resource nobody publishes is
   pushed like a publication. The collection never follows the registrar on its
@@ -70,7 +78,9 @@ defmodule Kelix.Mod.Presence do
 
   A module other than this one may state the presence of a resource on its own
   authority — `Kelix.Mod.McuPresence` says a conference room is open, busy or
-  closed — through `report/4`. A reported state is held per `{resource, source}`,
+  closed, a reporter on the `dialog` package which calls an AOR is on — through
+  `report/5`. A reported state is held per `{resource, source}`, the package
+  included,
   ranks below a live publication and above the registration, and goes when its
   source withdraws it (`nil`) or when the process that reported it dies: the
   reporter is monitored, and a module that restarts reports again.
@@ -99,7 +109,7 @@ defmodule Kelix.Mod.Presence do
   #   registered MapSet of `presence` resources whose presentity holds a binding,
   #              as the registrar script reported it
   #   reported   %{resource => %{source => %{doc, pid, seq, known?}}}, the states
-  #              `report/4` stated; `known?` is whether the subscriber base knows
+  #              `report/5` stated; `known?` is whether the subscriber base knows
   #              the presentity, asked in the reporter's process at report time
   #   reporters  %{pid => monitor_ref} of the processes that reported a state
   #   panel_subs %{domain => MapSet(pid)} subscribed via `subscribe_presentities/2`
@@ -152,6 +162,7 @@ defmodule Kelix.Mod.Presence do
         unwatch: 1,
         state_of: 2,
         report: 4,
+        report: 5,
         exists?: 2,
         registration_changed: 1,
         registration_changed: 2,
@@ -496,30 +507,41 @@ defmodule Kelix.Mod.Presence do
     do: Kelix.Module.safe_call(__MODULE__, {:state_of, resource_key({user, dom, event})})
 
   @doc """
-  State the presence of a resource on the calling module's own authority.
+  State the presence of a resource on the calling module's own authority, on the
+  `presence` package: `report/5` with `"presence"`.
+  """
+  @spec report(String.t(), String.t(), atom, SIP.Presence.Doc.t() | nil) ::
+          :ok | {:error, :down | :timeout}
+  def report(domain, user, source, doc), do: report(domain, user, source, doc, "presence")
 
-  `user` is the user part of the presentity on `domain` — package `presence` —
-  `source` names who says so (`:mcu`), and `doc` is the document its watchers are
-  to be told; `nil` withdraws what `source` said. The state ranks below a live
-  publication and above the registration (see *Reported states*), and the watchers
-  are pushed when the resolved state changes, and only then.
+  @doc """
+  State a resource's state on one event package, on the calling module's own
+  authority.
+
+  `user` is the user part of the presentity on `domain`, `package` the event
+  package the statement is about (`"presence"`, `"dialog"`), `source` names who
+  says so (`:mcu`, `:dialog_state`), and `doc` is the document its watchers are to
+  be told — what the package models: a `%SIP.Presence.Doc{}`, a
+  `%SIP.DialogInfo.Doc{}`; `nil` withdraws what `source` said. The state ranks
+  below a live publication and above what the collection tells for a resource
+  nobody reports (see *Reported states* and *A resource nobody publishes*), and
+  the watchers are pushed when the resolved state changes, and only then.
 
   The calling process is monitored: when it dies, every state it reported is
   withdrawn and the watchers told what follows. A reporter that restarts reports
   again.
   """
-  @spec report(String.t(), String.t(), atom, SIP.Presence.Doc.t() | nil) ::
+  @spec report(String.t(), String.t(), atom, term | nil, String.t()) ::
           :ok | {:error, :down | :timeout}
-  def report(domain, user, source, doc)
-      when is_binary(domain) and is_binary(user) and is_atom(source) do
-    resource = resource_key({user, domain, "presence"})
-    {_user, rdomain, _event} = resource
+  def report(domain, user, source, doc, package)
+      when is_binary(domain) and is_binary(user) and is_atom(source) and is_binary(package) do
+    resource = resource_key({user, domain, package})
 
     # The existence question is a query on the subscriber base: asked HERE, in the
     # reporter's process, and kept with the report, so that withdrawing it later —
-    # the reporter's death included — can tell a subscriber (closed) from a
-    # resource that only existed through the report (no state).
-    known? = doc != nil and registrar_domain?(rdomain) and subscriber?(elem(resource, 0), rdomain)
+    # the reporter's death included — can tell a subscriber (closed, or idle) from
+    # a resource that only existed through the report (no state).
+    known? = doc != nil and provisioned?(resource)
 
     Kelix.Module.safe_call(__MODULE__, {:report, resource, source, doc, known?})
   end
@@ -1027,11 +1049,12 @@ defmodule Kelix.Mod.Presence do
   # ── a resource nobody publishes ─────────────────────────────────────────────
 
   # The state of a resource, in order: its live publication, a reported state,
-  # open for a registered presentity, closed on a domain with a registrar for a
-  # presentity known to exist — `known?`, which the caller answers — else nil.
+  # then what its package tells for a presentity known to exist — `known?`, which
+  # the caller answers — else nil. On `presence`: open for a registered
+  # presentity, closed on a domain with a registrar. On `dialog`: no call.
   defp resolved_state(state, resource, known?) do
     current_doc(state, resource) || reported_doc(state, resource) ||
-      status_doc(resource, registration_status(state, resource, known?))
+      status_doc(resource, implied_status(state, resource, known?))
   end
 
   # The state as the collection alone can tell it, for a resource known to exist
@@ -1052,11 +1075,14 @@ defmodule Kelix.Mod.Presence do
   # (the facades call this on a `nil` the collection answered) — never in the
   # collection's, where every other watcher and publisher would wait on it.
   defp unpublished_state(resource),
-    do: status_doc(resource, registration_status(nil, resource, false))
+    do: status_doc(resource, implied_status(nil, resource, false))
 
-  # `:open` / `:closed`, or nil: another package than `presence`, a domain with no
-  # registrar (or not served), a user the subscriber base does not know.
-  defp registration_status(state, {user, domain, "presence"} = resource, known?)
+  # What the package says of a presentity nobody publishes nor reports. On
+  # `presence`: `:open` / `:closed`, or nil on a domain with no registrar (or not
+  # served), or for a user the subscriber base does not know. On `dialog`: `:idle`
+  # for a subscriber the base knows — the registration says nothing about a call
+  # — else nil. Any other package: nil.
+  defp implied_status(state, {user, domain, "presence"} = resource, known?)
        when is_binary(user) and is_binary(domain) do
     cond do
       state != nil and MapSet.member?(state.registered, resource) -> :open
@@ -1065,12 +1091,29 @@ defmodule Kelix.Mod.Presence do
     end
   end
 
-  defp registration_status(_state, _resource, _known?), do: nil
+  defp implied_status(_state, {user, domain, "dialog"} = resource, known?)
+       when is_binary(user) and is_binary(domain) do
+    if known? or provisioned?(resource), do: :idle, else: nil
+  end
+
+  defp implied_status(_state, _resource, _known?), do: nil
 
   defp status_doc(_resource, nil), do: nil
 
+  defp status_doc({user, domain, "dialog"}, :idle),
+    do: %SIP.DialogInfo.Doc{entity: "sip:#{user}@#{domain}"}
+
   defp status_doc({user, domain, _event}, status),
     do: SIP.Presence.Doc.new("sip:#{user}@#{domain}", status)
+
+  # Whether the subscriber base provisions the presentity, as far as the package
+  # can use the answer: on `presence` it takes a registrar to say "closed", on
+  # `dialog` a known AOR is idle whatever registers it.
+  defp provisioned?({user, domain, "presence"}),
+    do: registrar_domain?(domain) and subscriber?(user, domain)
+
+  defp provisioned?({user, domain, "dialog"}), do: subscriber?(user, domain)
+  defp provisioned?(_resource), do: false
 
   defp registrar_domain?(domain) do
     match?(%Kelix.Domain{registrar: registrar} when registrar != nil, domain_entry(domain))
@@ -1244,9 +1287,13 @@ defmodule Kelix.Mod.Presence do
     end
   end
 
-  # The document is opaque to the collection; only a PIDF one has these fields.
+  # The document is opaque to the collection; only a PIDF one has these fields,
+  # and a dialog-info one is shown by what it lists.
   defp doc_field(%SIP.Presence.Doc{} = doc, :status),
     do: doc |> SIP.Presence.Doc.status() |> to_string()
+
+  defp doc_field(%SIP.DialogInfo.Doc{dialogs: [_one]}, :status), do: "1 dialog"
+  defp doc_field(%SIP.DialogInfo.Doc{dialogs: dialogs}, :status), do: "#{length(dialogs)} dialogs"
 
   defp doc_field(%SIP.Presence.Doc{activity: nil}, :activity), do: nil
   defp doc_field(%SIP.Presence.Doc{activity: a}, :activity), do: to_string(a)

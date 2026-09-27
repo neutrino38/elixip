@@ -176,12 +176,12 @@ defmodule Kelix.PresenceScriptTest do
 
   # The event package is injected by the router, exactly as the domain name is:
   # the script is the domain's, the package is the block's.
-  defp spawn_instance(module, dialog, req) do
+  defp spawn_instance(module, dialog, req, package \\ @package) do
     {pid, _ref} =
       SIP.Scenario.Runner.spawn_uas_instance(module,
         dialog_pid: dialog,
         inbound_request: req,
-        config_overrides: [domain: @domain, event_package: @package]
+        config_overrides: [domain: @domain, event_package: package]
       )
 
     on_exit(fn -> send(pid, {:scenario_ctl, :shutdown, :test}) end)
@@ -346,6 +346,35 @@ defmodule Kelix.PresenceScriptTest do
       assert row.presentity_uri == "sip:bob@example.com"
       assert row.status == "active"
       assert row.callid == "call-1"
+    end
+
+    # RFC 4235 through the same script: the package is the block's, injected by
+    # the router as the domain is. An idle subscriber is an EMPTY document, not
+    # noresource (dialog-state-plan.md, decision 7): the BLF key shows "no call".
+    test "Event: dialog for a subscriber is 200 + an empty dialog-info", %{subscribe: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      req = subscribe(event: "dialog")
+      pid = spawn_instance(m, dialog, req, "dialog")
+
+      submit(pid, dialog, req)
+      assert_receive {:replied, 200, "OK", _, _}, 1000
+      assert_receive {:notified, body, "application/dialog-info+xml"}, 1000
+      assert body =~ ~s(entity="sip:bob@example.com")
+      refute body =~ "<dialog "
+      refute_received {:subscription_ended, _}
+
+      assert [row] = Presence.watchers(@domain, @presentity)
+      assert row.event == "dialog"
+    end
+
+    test "Event: dialog for a user nobody provisioned is 404", %{subscribe: m} do
+      {:ok, dialog} = MockDialog.start_link(self())
+      req = subscribe(user: "nobody", event: "dialog")
+      pid = spawn_instance(m, dialog, req, "dialog")
+
+      submit(pid, dialog, req)
+      assert_receive {:replied, 404, _, _, _}, 1000
+      assert Presence.watchers(@domain, "nobody") == []
     end
 
     # A DID is no subscriber: it exists because a module reports a state for it.
@@ -939,6 +968,10 @@ defmodule Kelix.PresenceScriptTest do
 
       [[domain.presence]]
       event-package = "presence"
+      subscribe = "presence-subscribe.exs"
+
+      [[domain.presence]]
+      event-package = "dialog"
       subscribe = "presence-subscribe.exs"
     """)
 

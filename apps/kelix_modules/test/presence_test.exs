@@ -43,7 +43,7 @@ defmodule Kelix.Mod.PresenceTest do
       callid: Keyword.get(opts, :callid, "call-#{presentity}-#{watcher}"),
       to_tag: "totag",
       from_tag: "fromtag",
-      event: @package,
+      event: Keyword.get(opts, :event, @package),
       event_id: Keyword.get(opts, :event_id),
       presentity_uri: "sip:#{presentity}@#{presentity_domain}",
       watcher_username: watcher,
@@ -869,6 +869,115 @@ defmodule Kelix.Mod.PresenceTest do
     end
   end
 
+  describe "report/5 — the dialog package (RFC 4235)" do
+    @bob_calls {"bob", @domain, "dialog"}
+
+    setup do
+      Application.put_env(:kelixip, :authdb_ha1_lookup, fn
+        "bob", @domain -> {:ok, "0123456789abcdef0123456789abcdef"}
+        _user, _realm -> :notfound
+      end)
+
+      on_exit(fn -> Application.delete_env(:kelixip, :authdb_ha1_lookup) end)
+    end
+
+    defp idle(user), do: %SIP.DialogInfo.Doc{entity: "sip:#{user}@#{@domain}"}
+
+    defp on_a_call(user) do
+      %SIP.DialogInfo.Doc{
+        entity: "sip:#{user}@#{@domain}",
+        dialogs: [
+          %SIP.DialogInfo.Dialog{
+            id: "d1",
+            call_id: "call-1",
+            direction: :recipient,
+            state: :confirmed,
+            remote: %SIP.DialogInfo.Party{identity: "sip:alice@#{@domain}"}
+          }
+        ]
+      }
+    end
+
+    # Decision 7: an idle phone is an empty document, which its BLF key displays
+    # as "no call"; noresource would end the subscription at subscribe time. No
+    # registrar on this domain, no binding: the registration rank does not apply.
+    test "a subscriber nobody reports on is an empty document, not no state" do
+      assert {:ok, doc} = Presence.watch(@domain, subscription("bob", "alice", event: "dialog"))
+      assert doc == idle("bob")
+    end
+
+    test "a user nobody provisioned has no state" do
+      assert {:ok, nil} =
+               Presence.watch(@domain, subscription("nobody", "alice", event: "dialog"))
+    end
+
+    test "a report is pushed, and its withdrawal pushes the empty document back" do
+      reporter = reporter_process()
+      {:ok, _idle} = Presence.watch(@domain, subscription("bob", "alice", event: "dialog"))
+
+      doc = on_a_call("bob")
+      :ok = report_dialog_from(reporter, "bob", doc)
+      assert_receive {:presence, :state, @bob_calls, ^doc}
+
+      # the same thing said again is news to nobody
+      :ok = report_dialog_from(reporter, "bob", doc)
+      refute_receive {:presence, :state, @bob_calls, _doc}, 100
+
+      :ok = report_dialog_from(reporter, "bob", nil)
+      assert_receive {:presence, :state, @bob_calls, empty}
+      assert empty == idle("bob")
+    end
+
+    test "the reporter's death brings the empty document back too" do
+      reporter = reporter_process()
+      {:ok, _idle} = Presence.watch(@domain, subscription("bob", "alice", event: "dialog"))
+      :ok = report_dialog_from(reporter, "bob", on_a_call("bob"))
+      assert_receive {:presence, :state, @bob_calls, %SIP.DialogInfo.Doc{dialogs: [_one]}}
+
+      send(reporter, :stop)
+      assert_receive {:presence, :state, @bob_calls, %SIP.DialogInfo.Doc{dialogs: []}}
+    end
+
+    test "a resource that only existed through the report has no state once withdrawn" do
+      reporter = reporter_process()
+      {:ok, nil} = Presence.watch(@domain, subscription("nobody", "alice", event: "dialog"))
+
+      :ok = report_dialog_from(reporter, "nobody", on_a_call("nobody"))
+      assert_receive {:presence, :state, {"nobody", @domain, "dialog"}, %SIP.DialogInfo.Doc{}}
+
+      :ok = report_dialog_from(reporter, "nobody", nil)
+      assert_receive {:presence, :state, {"nobody", @domain, "dialog"}, nil}
+    end
+
+    test "the two packages of one AOR are two resources" do
+      reporter = reporter_process()
+      {:ok, _} = Presence.watch(@domain, subscription("bob", "alice"))
+      {:ok, _} = Presence.watch(@domain, subscription("bob", "carol", event: "dialog"))
+
+      :ok = report_dialog_from(reporter, "bob", on_a_call("bob"))
+      assert_receive {:presence, :state, @bob_calls, _calls}
+      refute_receive {:presence, :state, {"bob", @domain, "presence"}, _doc}, 100
+
+      :ok = report_from(reporter, "bob", doc("bob", :open))
+      assert_receive {:presence, :state, {"bob", @domain, "presence"}, _open}
+      refute_receive {:presence, :state, @bob_calls, _doc}, 100
+    end
+
+    test "list, show and the live panel render the document by its dialog count" do
+      {:ok, []} = Presence.subscribe_presentities(@domain, self())
+      reporter = reporter_process()
+      :ok = report_dialog_from(reporter, "bob", on_a_call("bob"), :dialog_state)
+
+      assert_receive {:kelix_presence, @domain, {:upsert, %{aor: "bob", states: [row]}}}
+      assert %{event: "dialog", source: "dialog_state", status: "1 dialog"} = row
+
+      assert {:ok, [^row]} = Presence.handle_control("list", %{"domain" => @domain})
+
+      assert {:ok, %{states: [^row]}} =
+               Presence.handle_control("show", %{"domain" => @domain, "aor" => "bob"})
+    end
+  end
+
   describe "exists?/2 against the subscriber base" do
     setup do
       Application.put_env(:kelixip, :authdb_ha1_lookup, fn
@@ -1004,6 +1113,10 @@ defmodule Kelix.Mod.PresenceTest do
         send(from, {:reported, self(), Presence.report(domain, user, source, doc)})
         reporter_loop()
 
+      {:report, from, domain, user, source, doc, package} ->
+        send(from, {:reported, self(), Presence.report(domain, user, source, doc, package)})
+        reporter_loop()
+
       :stop ->
         :ok
     end
@@ -1011,6 +1124,12 @@ defmodule Kelix.Mod.PresenceTest do
 
   defp report_from(reporter, user, doc, source \\ :mcu, domain \\ @domain) do
     send(reporter, {:report, self(), domain, user, source, doc})
+    assert_receive {:reported, ^reporter, result}
+    result
+  end
+
+  defp report_dialog_from(reporter, user, doc, source \\ :dialog_state) do
+    send(reporter, {:report, self(), @domain, user, source, doc, "dialog"})
     assert_receive {:reported, ^reporter, result}
     result
   end
