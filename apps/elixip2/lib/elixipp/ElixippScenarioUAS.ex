@@ -1,15 +1,21 @@
 defmodule Elixip.ScenarioUAS do
   @moduledoc """
   UAS scenario factory used by the `elixipp` tool when it runs a server scenario
-  (`:uas_register` or `:uas_invite`). It is a single GenServer implementing **both**
-  the `SIP.Session.Registrar` and the `SIP.Session.Call` behaviours, so the same
-  quota / monitoring / stats machinery drives registrar and call servers.
+  (`:uas_register`, `:uas_invite` or `:uas_presence`). It is a single GenServer
+  implementing the `SIP.Session.Registrar`, `SIP.Session.Call` and
+  `SIP.Session.Presence` behaviours, so the same quota / monitoring / stats
+  machinery drives registrar, call and presence servers.
 
   On each inbound request the dialog layer calls `on_new_registration/3`
-  (REGISTER) or `on_new_call/3` (INVITE). This module:
+  (REGISTER), `on_new_call/3` (INVITE) or `on_new_subscribe/3` /
+  `on_new_publish/3` (SUBSCRIBE, PUBLISH). This module:
 
     * for an INVITE, rejects with `604 Does Not Exist Anywhere` when the R-URI
       domain does not match the configured `domains` (`:any` = catch-all);
+    * for a SUBSCRIBE or a PUBLISH, rejects with `489 Bad Event` when the
+      `Event` header does not name the package the scenario declares
+      (`config event_package: "presence"`), so the script never has to check
+      that the package concerns it;
     * rejects with `503 Service Unavailable` when `max_instances` concurrent
       instances are already running, or `max_run` total runs have been reached;
     * otherwise spawns one scenario instance (via
@@ -23,6 +29,7 @@ defmodule Elixip.ScenarioUAS do
   """
   @behaviour SIP.Session.Registrar
   @behaviour SIP.Session.Call
+  @behaviour SIP.Session.Presence
   use GenServer
   require Logger
 
@@ -31,6 +38,7 @@ defmodule Elixip.ScenarioUAS do
             max_run: nil,
             scenario_overrides: [],
             domains: :any,
+            event_package: nil,
             instances: %{},
             total_started: 0,
             total_succeeded: 0,
@@ -50,7 +58,10 @@ defmodule Elixip.ScenarioUAS do
     * `:scenario_overrides` — keyword list merged on top of the scenario `config`
       block for every spawned instance (e.g. `[password: "secret"]`);
     * `:domains` — served domains for a call server (`:any` or a list of hosts);
-      defaults to the scenario's `config[:domains]`, itself defaulting to `:any`.
+      defaults to the scenario's `config[:domains]`, itself defaulting to `:any`;
+    * `:event_package` — the event package a presence server serves, defaulting
+      to the scenario's `config[:event_package]`. With none declared nothing is
+      checked here and the instance's own `accept_subscription/1` raises the 489.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -98,6 +109,23 @@ defmodule Elixip.ScenarioUAS do
     GenServer.cast(__MODULE__, {:instance_ended, dialog_id, app_pid})
   end
 
+  # ── SIP.Session.Presence behaviour ────────────────────────────────────────
+
+  @impl SIP.Session.Presence
+  def on_new_subscribe(dialog_id, sub_req, transaction_id) do
+    GenServer.call(__MODULE__, {:new_subscribe, dialog_id, sub_req, transaction_id})
+  end
+
+  @impl SIP.Session.Presence
+  def on_new_publish(dialog_id, pub_req, transaction_id) do
+    GenServer.call(__MODULE__, {:new_publish, dialog_id, pub_req, transaction_id})
+  end
+
+  @impl SIP.Session.Presence
+  def on_subscription_expired(dialog_id, app_pid) do
+    GenServer.cast(__MODULE__, {:instance_ended, dialog_id, app_pid})
+  end
+
   # ── GenServer callbacks ───────────────────────────────────────────────────
 
   @impl GenServer
@@ -107,7 +135,8 @@ defmodule Elixip.ScenarioUAS do
       max_instances: Keyword.get(opts, :max_instances, 1),
       max_run: Keyword.get(opts, :max_run, nil),
       scenario_overrides: Keyword.get(opts, :scenario_overrides, []),
-      domains: resolve_domains(opts)
+      domains: resolve_domains(opts),
+      event_package: resolve_event_package(opts)
     }
 
     {:ok, state}
@@ -131,6 +160,18 @@ defmodule Elixip.ScenarioUAS do
       {:reply, {:reject, 604, "Does Not Exist Anywhere"},
        %{state | total_rejected_domain: state.total_rejected_domain + 1}}
     end
+  end
+
+  # A SUBSCRIBE or a PUBLISH for a package this scenario does not serve is
+  # answered **489 Bad Event** here, before an instance exists — the same answer
+  # the kelixip Router raises before any script runs. The package name is read
+  # once, by the message layer.
+  def handle_call({:new_subscribe, dialog_id, req, _transaction_id}, _from, state) do
+    presence_accept_or_reject(state, dialog_id, req, "SUBSCRIBE")
+  end
+
+  def handle_call({:new_publish, dialog_id, req, _transaction_id}, _from, state) do
+    presence_accept_or_reject(state, dialog_id, req, "PUBLISH")
   end
 
   def handle_call(:stats, _from, state) do
@@ -245,6 +286,51 @@ defmodule Elixip.ScenarioUAS do
         {:reply, {:accept, pid},
          %{state | instances: instances, total_started: state.total_started + 1}}
     end
+  end
+
+  defp presence_accept_or_reject(state, dialog_id, req, kind) do
+    if package_ok?(state.event_package, req) do
+      accept_or_reject(state, dialog_id, req, kind)
+    else
+      Logger.info(
+        "ScenarioUAS: #{kind} for event package #{inspect(inbound_package(req))} not served " <>
+          "(serving #{inspect(state.event_package)}), rejecting with 489"
+      )
+
+      {:reply, {:reject, 489, "Bad Event"}, state}
+    end
+  end
+
+  # No package declared: nothing is checked here, and the instance decides
+  # (`accept_subscription/1` / `check_publish/1` raise the 489 themselves).
+  defp package_ok?(nil, _req), do: true
+  defp package_ok?(package, req), do: inbound_package(req) == package
+
+  defp inbound_package(req) do
+    case SIP.Msg.Ops.event_package(req) do
+      {name, _id} -> name
+      nil -> nil
+    end
+  end
+
+  # The event package a presence server serves: explicit option, else the
+  # scenario `config[:event_package]`, else nil (no check). Folded to lower case,
+  # like every package name the message layer hands back.
+  defp resolve_event_package(opts) do
+    raw =
+      case Keyword.get(opts, :event_package) do
+        nil ->
+          module = Keyword.fetch!(opts, :scenario_module)
+
+          if function_exported?(module, :__scenario_config__, 0),
+            do: Keyword.get(module.__scenario_config__(), :event_package),
+            else: nil
+
+        package ->
+          package
+      end
+
+    if is_binary(raw), do: String.downcase(raw), else: nil
   end
 
   # Effective served domains: explicit :domains option wins, else the scenario

@@ -1,7 +1,7 @@
 defmodule Kelix.Mod.Mcu.Stats do
   @moduledoc """
   The per-participant statistics sweep behind the `{:kelix_conference_stats, uid,
-  sample}` topic (contract `docs/design/mcu-live-push.md`).
+  sample}` topic.
 
   `GetParticipantStatistics` is per participant — the media server exposes no
   conference-wide statistics RPC — so one sweep of one conference is one RPC per

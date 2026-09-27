@@ -1,6 +1,6 @@
 defmodule Kelix.Mod.McuPushTest do
   @moduledoc """
-  The live push a UI subscribes to (contract `docs/design/mcu-live-push.md`).
+  The live push a UI subscribes to.
 
   What is worth pinning down here is not that a message arrives — it is the four
   properties kelescope builds on and which nothing else in the suite would catch:

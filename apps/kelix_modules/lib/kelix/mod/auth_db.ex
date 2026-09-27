@@ -155,14 +155,15 @@ defmodule Kelix.Mod.AuthDb do
   @impl Kelix.Module
   def describe(),
     do: %{
-      version: "1.2",
+      version: "1.3",
       exports: [
         authenticate: 3,
         challengeable?: 1,
         challenge_algorithm: 0,
         do_registration_auth: 3,
         fetch_credential: 2,
-        lookup_ha1: 2
+        lookup_ha1: 2,
+        subscriber?: 2
       ]
     }
 
@@ -430,6 +431,37 @@ defmodule Kelix.Mod.AuthDb do
     case lookup(username, realm, opts) do
       {:ok, ha1} -> {:ok, {:ha1, algorithm, normalize_hex(ha1)}}
       other -> other
+    end
+  end
+
+  @doc """
+  Is `username`@`realm` a subscriber of this deployment?
+
+  The existence question alone, without the secret that answers it: a script
+  refusing a SUBSCRIBE for a presentity nobody provisioned (**404**) has no use
+  for an HA1, and moving one through a scenario to compare it against `:notfound`
+  is a credential travelling for nothing.
+
+  `true` / `false`, and `false` on a base that cannot answer — with the reason
+  logged. A caller that must tell "no such user" from "the base is down" asks
+  `fetch_credential/3`, which keeps the three-way answer.
+  """
+  @spec subscriber?(String.t() | nil, String.t()) :: boolean
+  def subscriber?(username, realm) do
+    case lookup(username, realm, []) do
+      {:ok, _ha1} ->
+        true
+
+      :notfound ->
+        false
+
+      {:error, reason} ->
+        Logger.warning(
+          module: __MODULE__,
+          message: "subscriber? #{inspect(username)}@#{realm} unanswered: #{inspect(reason)}"
+        )
+
+        false
     end
   end
 

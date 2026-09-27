@@ -572,7 +572,7 @@ defmodule Kelix.Control.CLITest do
   end
 
   # `continuous` swaps the one-shot snapshot for `Kelix.Control.subscribe_monitor/1`'s
-  # push feed (docs/design/kelixip_liveview.md): capture_io with `""` as stdin makes
+  # push feed: capture_io with `""` as stdin makes
   # `IO.read/2` answer `:eof` immediately, standing in for an operator's Ctrl+D.
   describe "monitor continuous" do
     test "prints the live header and the snapshot, then stops on stdin EOF" do
@@ -664,6 +664,65 @@ defmodule Kelix.Control.CLITest do
   test "a module command on an unknown module → error, exit 1" do
     {1, out} = run(["mymod", "docmd", "arg"])
     assert out =~ "error:"
+  end
+
+  # A module reads the arguments it DECLARES, whichever frontal the command came
+  # from: REST merges the path, query and body keys at the top level, and the CLI
+  # turns its `name=value` tokens into the same map. `Kelix.Mod.Presence` matches
+  # on `%{"domain" => …}` and got `%{"args" => ["domain=…"]}`, so every
+  # `kelictl presence …` answered "domain is required" to a command line naming one.
+  describe "module command arguments" do
+    defmodule NamedArgsCtl do
+      def describe(), do: %{version: "1.0.0"}
+
+      def describe_control(),
+        do: [
+          %{name: "list", rw: :r, args: [%{name: "domain", required: true}]},
+          %{
+            name: "show",
+            rw: :r,
+            args: [%{name: "domain", required: true}, %{name: "aor", required: true}]
+          }
+        ]
+
+      def handle_control("list", %{"domain" => domain}), do: {:ok, %{seen: domain}}
+      def handle_control("list", _args), do: {:error, "domain is required"}
+
+      def handle_control("show", %{"domain" => d, "aor" => a, "args" => tokens}),
+        do: {:ok, %{seen: "#{a}@#{d}", tokens: tokens}}
+
+      # the raw tokens stay reachable for a command that counts what it was not asked for
+      def handle_control("raw", %{"args" => tokens}), do: {:ok, %{tokens: tokens}}
+    end
+
+    setup do
+      Kelix.Test.Fixtures.with_module("namedargs", NamedArgsCtl)
+    end
+
+    test "a name=value token becomes the named argument the module declares" do
+      {0, out} = run(["namedargs", "list", "domain=weshwesh.eu"])
+      assert out =~ "weshwesh.eu"
+    end
+
+    # `registration list weshwesh.eu` is positional; `presence list weshwesh.eu`
+    # answered "domain is required" to the same line.
+    test "a bare token binds to the declared argument, as a core command's would" do
+      {0, out} = run(["namedargs", "list", "weshwesh.eu"])
+      assert out =~ "weshwesh.eu"
+    end
+
+    # In declaration order, skipping what the line named — and the raw tokens say
+    # the same, for a module that re-parses them (Kelix.Mod.Mcu.Args).
+    test "positional tokens fill the declared arguments the line did not name" do
+      {0, out} = run(["namedargs", "show", "aor=magali", "weshwesh.eu"])
+      assert out =~ "magali@weshwesh.eu"
+      assert out =~ "domain=weshwesh.eu"
+    end
+
+    test "the raw tokens are still there" do
+      {0, out} = run(["namedargs", "raw", "verbose"])
+      assert out =~ "verbose"
+    end
   end
 
   # FW-5 (docs/design/DESIGN-KELIXIP.md#7-the-module-system): the last CLI/REST parity gap was

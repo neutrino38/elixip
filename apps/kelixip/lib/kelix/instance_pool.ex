@@ -15,7 +15,7 @@ defmodule Kelix.InstancePool do
   `FSL.Monitor` once at boot and re-joins its pushes with its own rows
   (`join_row/2`, the same join `Kelix.Control.monitor/0` runs on every read),
   forwarding `{:kelix_monitor, {:upsert, row}}` / `{:remove, id}` to whoever
-  called `subscribe_monitor/1` — see `docs/design/kelixip_liveview.md`.
+  called `subscribe_monitor/1`.
 
   Also the active-calls half of `Kelix.Control.subscribe_domain_counters/1`:
   `per_domain` changes on every `accept/4` and every instance's `:DOWN`, and

@@ -164,6 +164,26 @@ defmodule Kelix.Mod.RegistrarTest do
       assert Registrar.bindings(@domain, "alice") == []
     end
 
+    # RFC 3261 §10.3 step 7: an un-REGISTER removes the bindings it names. One
+    # handset signing off must not un-register the subscriber's other devices.
+    test "unregistering one contact leaves the AOR's other bindings" do
+      assert {:registered, _} = Registrar.save(register("alice", "10.0.0.1"), @domain)
+
+      assert {:registered, _} =
+               Registrar.save(register("alice", "10.0.0.2", callid: "call-2"), @domain)
+
+      assert {:registered, granted} =
+               Registrar.save(register("alice", "10.0.0.1", expires: 0), @domain)
+
+      assert [%SIP.Uri{domain: "10.0.0.2"}] = granted.contacts
+      assert [%{contact: %SIP.Uri{domain: "10.0.0.2"}}] = Registrar.bindings(@domain, "alice")
+
+      assert {:unregistered, _} =
+               Registrar.save(register("alice", "10.0.0.2", expires: 0), @domain)
+
+      assert Registrar.bindings(@domain, "alice") == []
+    end
+
     test "domains are stored separately" do
       assert {:registered, _} = Registrar.save(register("alice", "10.0.0.9"), "example.com")
 
@@ -636,7 +656,7 @@ defmodule Kelix.Mod.RegistrarTest do
   end
 
   describe "subscribe_domain_counters/1" do
-    # kelescope's live domain list (docs/design/kelixip_liveview.md): every AOR
+    # kelescope's live domain list: every AOR
     # change on a domain must push that domain's live count, with no polling —
     # the registrations half of `Kelix.Control.subscribe_domain_counters/1`.
     test "pushes the domain's registration count on every registered/unregistered AOR" do
@@ -662,7 +682,7 @@ defmodule Kelix.Mod.RegistrarTest do
   end
 
   describe "subscribe_registrations/2" do
-    # kelescope's live registrations panel (docs/design/kelixip_liveview.md): every
+    # kelescope's live registrations panel: every
     # AOR change on a domain must push its full detail, not just a count — the
     # registrations half of `Kelix.Control.subscribe_registrations/2`.
     test "pushes the AOR's detail on register, then :remove on its last unregister" do

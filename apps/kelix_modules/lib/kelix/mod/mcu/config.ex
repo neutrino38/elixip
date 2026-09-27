@@ -104,7 +104,7 @@ defmodule Kelix.Mod.Mcu.Config do
             rtp_timeout_ms: 10_000,
             gc_orphans: true,
             # How often a watched conference's participant statistics are swept and
-            # pushed to the UIs that asked for them (`docs/design/mcu-live-push.md`).
+            # pushed to the UIs that asked for them.
             # `0` disables the topic: the sweep is one RPC per connected leg on the
             # media server's control channel, so an operator has to be able to say no.
             stats_interval_ms: 15_000,

@@ -1,0 +1,23 @@
+Package: kelixip-mod-presence
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Emmanuel BUU <emmanuel.buu@ives.fr>
+Installed-Size: @INSTALLED_SIZE@
+Section: net
+Priority: optional
+Homepage: https://www.ives.fr/
+Depends: kelixip (= @VERSION@)
+Description: Presence collection module for kelixip
+ The presence collection (RFC 3856 / RFC 3903): the published state of each
+ presentity with its entity-tag, the live subscriptions to it, and the fan-out
+ that turns one PUBLISH into one NOTIFY per watcher. Its records are kamailio's
+ presentity and active_watchers rows, held in memory. Enable it with a
+ [module.presence] block in config.toml, and declare the packages a domain
+ serves with [[domain.presence]] blocks in domains.toml.
+ .
+ Who may watch whom is NOT decided here: the reference scripts are, and that is
+ where a deployment writes its rule.
+ .
+ The payload is BEAM bytecode, but the package is architecture-dependent on
+ purpose: it must be built and shipped alongside the core whose embedded ERTS
+ will load it.

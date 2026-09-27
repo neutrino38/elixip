@@ -297,7 +297,9 @@ defmodule SIP.Session.Media do
   # kelixip surface — so the selection is injected the way the unit-test transport
   # is: `{module, function}` under `:mediaserver_selector`, called with the
   # `{family, side}` pairs and answering the same keyword list the override
-  # carries. Absent, or nothing resolved, and the override decides as before.
+  # carries. Absent, nothing resolved, or a selector answering `nil` — no pool on
+  # this node, which is not a pool answering `module: :unavailable` — and the
+  # override decides as before.
   defp ms_config(sip_ctx) do
     case constrained_config(sip_ctx) do
       nil ->
@@ -314,9 +316,8 @@ defmodule SIP.Session.Media do
   defp constrained_config(sip_ctx) do
     with {module, fun} <- Application.get_env(:elixip2, :mediaserver_selector),
          [_ | _] = profiles <- SIP.Session.B2bua.resolved_profiles(sip_ctx),
-         true <- Code.ensure_loaded?(module) and function_exported?(module, fun, 1) do
-      cfg = apply(module, fun, [profiles])
-
+         true <- Code.ensure_loaded?(module) and function_exported?(module, fun, 1),
+         [_ | _] = cfg <- apply(module, fun, [profiles]) do
       Logger.debug(
         module: __MODULE__,
         message:

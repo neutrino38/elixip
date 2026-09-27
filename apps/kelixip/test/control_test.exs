@@ -114,7 +114,8 @@ defmodule Kelix.ControlTest do
       assert d.max_calls == 500
       assert d.functions == [:registrar, :calls]
       assert d.registrar == %{script: "registrar-example.exs", default_expires: 3600}
-      assert d.presence == nil
+      # No [[domain.presence]] block: the function is served on no event package.
+      assert d.presence == []
       assert d.active_calls == 0
       assert d.registrations == 0
 
@@ -403,7 +404,7 @@ defmodule Kelix.ControlTest do
       assert row.command == ""
     end
 
-    # kelescope's live monitor (docs/design/kelixip_liveview.md): a scenario
+    # kelescope's live monitor: a scenario
     # appearing, changing state and ending must reach the subscriber as
     # `{:kelix_monitor, {:upsert | :remove, _}}`, with no polling.
     test "subscribe_monitor/1 returns the snapshot, then pushes appearance/state/removal" do
@@ -464,7 +465,7 @@ defmodule Kelix.ControlTest do
       refute_receive {:kelix_monitor, {:upsert, %{domain: "unsub.test"}}}, 200
     end
 
-    # kelescope's live domain list (docs/design/kelixip_liveview.md): an
+    # kelescope's live domain list: an
     # instance appearing/ending must push that domain's active-calls count,
     # with no polling. The registrations half lives in the registrar module
     # (apps/kelix_modules/test/registrar_test.exs) — nothing here to load it.
@@ -589,7 +590,7 @@ defmodule Kelix.ControlTest do
     end
 
     # kelescope confirms this action and requires an admin name before sending it
-    # (`docs/design/kelixip_liveview.md`) — traced here, not merely returned.
+    # — traced here, not merely returned.
     test "shutdown_scenario/2 traces the admin name in this node's own logs" do
       spawn_watched("stop-admin.test")
       assert row = await_state("stop-admin.test")

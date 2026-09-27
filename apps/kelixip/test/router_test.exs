@@ -15,8 +15,14 @@ defmodule Kelix.RouterTest do
   [domain.registrar]
   script = "registrar-example.exs"
 
-  [domain.presence]
-  script = "presence-example.exs"
+  [[domain.presence]]
+  event-package = "presence"
+  subscribe = "presence-subscribe.exs"
+  publish = "presence-publish.exs"
+
+  [[domain.presence]]
+  event-package = "dialog"
+  subscribe = "dialog-subscribe.exs"
 
   [[domain]]
   name = "mydomain.de"
@@ -46,6 +52,12 @@ defmodule Kelix.RouterTest do
     %{method: method, ruri: %SIP.Uri{userpart: user, domain: host}}
   end
 
+  # A SUBSCRIBE / PUBLISH as it arrives: the event package is a header, and it is
+  # what step 3 routes on.
+  defp event_req(method, user, host, package) do
+    Map.put(req(method, user, host), :event, package)
+  end
+
   describe "step 1 — domain" do
     test "unknown domain → 404", %{snap: snap} do
       assert {:reject, 404, _} = Router.resolve(snap, req(:REGISTER, "alice", "nope.net"))
@@ -57,7 +69,12 @@ defmodule Kelix.RouterTest do
     end
 
     test "falls back to the To host when the R-URI has none", %{snap: snap} do
-      r = %{method: :REGISTER, ruri: %SIP.Uri{userpart: "a", domain: nil}, to: %SIP.Uri{domain: "example.com"}}
+      r = %{
+        method: :REGISTER,
+        ruri: %SIP.Uri{userpart: "a", domain: nil},
+        to: %SIP.Uri{domain: "example.com"}
+      }
+
       assert {:route, %{function: :registrar}} = Router.resolve(snap, r)
     end
 
@@ -88,20 +105,95 @@ defmodule Kelix.RouterTest do
     end
 
     test "SUBSCRIBE → presence when enabled", %{snap: snap} do
-      assert {:route, %{function: :presence, script: "presence-example.exs"}} =
-               Router.resolve(snap, req(:SUBSCRIBE, "alice", "example.com"))
+      assert {:route, %{function: :presence, script: "presence-subscribe.exs"}} =
+               Router.resolve(snap, event_req(:SUBSCRIBE, "alice", "example.com", "presence"))
     end
 
     test "INVITE on a domain without calls → 405", %{snap: snap} do
-      assert {:reject, 405, _} = Router.resolve(snap, req(:INVITE, "1234", "example.com"))
+      assert {:reject, 405, _, _} = Router.resolve(snap, req(:INVITE, "1234", "example.com"))
     end
 
     test "SUBSCRIBE on a domain without presence → 405", %{snap: snap} do
-      assert {:reject, 405, _} = Router.resolve(snap, req(:SUBSCRIBE, "alice", "mydomain.de"))
+      assert {:reject, 405, _, _} =
+               Router.resolve(snap, event_req(:SUBSCRIBE, "alice", "mydomain.de", "presence"))
     end
 
     test "an unmapped method (BYE out-of-dialog) → 405", %{snap: snap} do
-      assert {:reject, 405, _} = Router.resolve(snap, req(:BYE, "x", "example.com"))
+      assert {:reject, 405, _, _} = Router.resolve(snap, req(:BYE, "x", "example.com"))
+    end
+
+    # Page-mode chat is a function of its own with its own blocks (DESIGN-CHAT.md);
+    # a MESSAGE carries no Event, so it can name none of the presence blocks.
+    test "an out-of-dialog MESSAGE is not routed to presence", %{snap: snap} do
+      assert {:reject, 405, _, _} = Router.resolve(snap, req(:MESSAGE, "alice", "example.com"))
+    end
+
+    # RFC 3261 §21.4.6: a 405 states what IS allowed, and the list is the one this
+    # node advertises on OPTIONS — the two answers must not disagree.
+    test "a 405 carries the Allow this node advertises", %{snap: snap} do
+      assert {:reject, 405, _, fields} = Router.resolve(snap, req(:MESSAGE, "a", "example.com"))
+      assert {"Allow", allow} = List.keyfind(fields, "Allow", 0)
+      assert allow == Kelix.Options.allow()
+      refute allow =~ "MESSAGE"
+    end
+  end
+
+  # The step the event package added: one domain serves as many packages as it
+  # declares blocks, and which of them a request is about is written in its Event
+  # header. The 489 is raised HERE, before any script runs.
+  describe "step 3 — script (presence: the event package picks the block)" do
+    test "each package gets its own script, and the method picks which", %{snap: snap} do
+      assert {:route, %{script: "presence-subscribe.exs", function: :presence}} =
+               Router.resolve(snap, event_req(:SUBSCRIBE, "bob", "example.com", "presence"))
+
+      assert {:route, %{script: "presence-publish.exs"}} =
+               Router.resolve(snap, event_req(:PUBLISH, "bob", "example.com", "presence"))
+
+      assert {:route, %{script: "dialog-subscribe.exs"}} =
+               Router.resolve(snap, event_req(:SUBSCRIBE, "bob", "example.com", "dialog"))
+    end
+
+    test "the package name is matched case-insensitively", %{snap: snap} do
+      assert {:route, %{script: "presence-subscribe.exs"}} =
+               Router.resolve(snap, event_req(:SUBSCRIBE, "bob", "example.com", "PRESENCE"))
+    end
+
+    # RFC 6665 §4.4.1: the `id` parameter names one subscription among several on
+    # a dialog; it is not part of the package name and must not defeat the match.
+    test "an Event id does not defeat the match", %{snap: snap} do
+      assert {:route, %{script: "presence-subscribe.exs"}} =
+               Router.resolve(snap, event_req(:SUBSCRIBE, "bob", "example.com", "presence;id=42"))
+    end
+
+    test "a package this domain does not serve → 489 carrying Allow-Events", %{snap: snap} do
+      assert {:reject, 489, "Bad Event", fields} =
+               Router.resolve(
+                 snap,
+                 event_req(:SUBSCRIBE, "bob", "example.com", "message-summary")
+               )
+
+      # What the watcher could have asked for instead — without it the refusal is
+      # one the client can only retry identically (RFC 6665 §4.4.7).
+      assert {"Allow-Events", "presence, dialog"} = List.keyfind(fields, "Allow-Events", 0)
+    end
+
+    # No Event header at all: the package is what says which state is being asked
+    # for, so its absence is the same answer as a package we do not serve.
+    test "a SUBSCRIBE with no Event header → 489", %{snap: snap} do
+      assert {:reject, 489, "Bad Event", _fields} =
+               Router.resolve(snap, req(:SUBSCRIBE, "bob", "example.com"))
+    end
+
+    # The `dialog` block declares no publish script: the package is served, that
+    # method on it is not.
+    test "PUBLISH on a package whose block declares no publish script → 405", %{snap: snap} do
+      assert {:reject, 405, _, _} =
+               Router.resolve(snap, event_req(:PUBLISH, "bob", "example.com", "dialog"))
+    end
+
+    test "allow_events/1 is composed from the domain's blocks, in order", %{snap: snap} do
+      assert Router.allow_events(Domains.lookup(snap, "example.com")) == "presence, dialog"
+      assert Router.allow_events(Domains.lookup(snap, "mydomain.de")) == ""
     end
   end
 
@@ -126,7 +218,7 @@ defmodule Kelix.RouterTest do
     test "enabled_methods reflects the domain's functions", %{snap: snap} do
       example = Domains.lookup(snap, "example.com")
       my = Domains.lookup(snap, "mydomain.de")
-      assert Enum.sort(Router.enabled_methods(example)) == [:MESSAGE, :PUBLISH, :REGISTER, :SUBSCRIBE]
+      assert Enum.sort(Router.enabled_methods(example)) == [:PUBLISH, :REGISTER, :SUBSCRIBE]
       assert Enum.sort(Router.enabled_methods(my)) == [:INVITE, :REGISTER]
     end
   end
@@ -149,7 +241,12 @@ defmodule Kelix.RouterTest do
 
     test "a pool with nothing serviceable → :unavailable, never a silent fallback" do
       # A pool whose only entry fails its probe. `checkout/1` then says :no_mcu.
-      mp = start_pool([%{name: "mcu1", module: :mendooze, url: "http://mcu.test:9090", enabled: true}], fn _ -> false end)
+      mp =
+        start_pool(
+          [%{name: "mcu1", module: :mendooze, url: "http://mcu.test:9090", enabled: true}],
+          fn _ -> false end
+        )
+
       :ok = Kelix.MediaPool.check_health(mp)
       assert {:error, :no_mcu} = Kelix.MediaPool.checkout(mp)
 
@@ -162,17 +259,30 @@ defmodule Kelix.RouterTest do
     # shows in its `mediaserver` column, and an operator reading it next to
     # `kelictl mediaserver list` needs the same word on both sides.
     test "a healthy pool → that MCU's name, module and url, for this call only" do
-      mp = start_pool([%{name: "mcu1", module: :mendooze, url: "http://mcu.test:9090", enabled: true}], fn _ -> true end)
+      mp =
+        start_pool(
+          [%{name: "mcu1", module: :mendooze, url: "http://mcu.test:9090", enabled: true}],
+          fn _ -> true end
+        )
+
       :ok = Kelix.MediaPool.check_health(mp)
 
-      assert Router.media_override(mp) == [name: "mcu1", module: :mendooze, url: "http://mcu.test:9090"]
+      assert Router.media_override(mp) == [
+               name: "mcu1",
+               module: :mendooze,
+               url: "http://mcu.test:9090"
+             ]
     end
   end
 
   # start a test-owned pool with an injected probe; periodic check pushed far out
   defp start_pool(pool, probe) do
     name = :"router_mp_#{System.unique_integer([:positive])}"
-    start_supervised!({Kelix.MediaPool, name: name, pool: pool, probe: probe, first_check_ms: 60_000})
+
+    start_supervised!(
+      {Kelix.MediaPool, name: name, pool: pool, probe: probe, first_check_ms: 60_000}
+    )
+
     name
   end
 
@@ -218,7 +328,8 @@ defmodule Kelix.RouterTest do
 
       log = capture_log(fn -> Router.resolve(snap, req(:INVITE, "1234", "d.com")) end)
 
-      assert log =~ "destination sip:1234@d.com does not match any call rule declared in domain d.com"
+      assert log =~
+               "destination sip:1234@d.com does not match any call rule declared in domain d.com"
     end
   end
 end

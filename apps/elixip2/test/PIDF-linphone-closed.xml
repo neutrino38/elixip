@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<presence xmlns="urn:ietf:params:xml:ns:pidf" entity="sip:carol@ives.fr">
+<tuple id="tid-0">
+<status><basic>closed</basic></status>
+</tuple>
+</presence>

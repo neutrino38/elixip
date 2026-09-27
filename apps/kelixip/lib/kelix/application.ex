@@ -26,6 +26,11 @@ defmodule Kelix.Application do
 
     resolve_default_dns()
 
+    # The event packages compiled into the framework. Not a supervised child: the
+    # table is a :persistent_term written once, and the Router reads it to answer
+    # 489 on a package the node does not know.
+    :ok = SIP.EventPackage.register_builtins()
+
     children = [
       # Syslog sink (§3.1 `[log].target`). Before Kelix.Config, which decides in its
       # own init whether to enable it — so it must already be there to be asked.

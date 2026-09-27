@@ -57,4 +57,33 @@ defmodule SIP.Session.MediaOverrideTest do
     assert SIP.Context.get(ctx, :mediaservermodule) == MediaServer.Mockup
     assert SIP.Context.get(ctx, :lasterr) == :ok
   end
+
+  # A declared selector answering `nil` says "no pool on this node" — `Kelix.Router`
+  # answers that whenever `Kelix.MediaPool` is not running. It is NOT the
+  # `module: :unavailable` verdict above, so the configuration decides.
+  #
+  # Regression for the umbrella run: `mix test` at the root starts every app, so
+  # `Kelix.Config` installs the selector in the same VM the elixip2 suite runs in,
+  # with no pool behind it. Every B2BUA media test then died on `Keyword.get(nil,
+  # :name)` — in a code path a node reaches too, on any call resolved before its
+  # pool is up.
+  test "a selector answering nil falls back to the configuration" do
+    Application.put_env(:elixip2, :mediaserver_selector, {__MODULE__, :no_pool})
+    on_exit(fn -> Application.delete_env(:elixip2, :mediaserver_selector) end)
+
+    ctx =
+      %SIP.Context{}
+      |> SIP.Context.appdata_set(:resolved_peer, %SIP.B2bua.Peer{
+        resolved: [[%SIP.Uri{destip: {127, 0, 0, 1}, net_side: :internal}]]
+      })
+
+    assert SIP.Session.B2bua.resolved_profiles(ctx) == [{:ipv4, :internal}]
+
+    ctx = SIP.Session.Media.use_mediaserver(ctx)
+
+    assert SIP.Context.get(ctx, :mediaservermodule) == MediaServer.Mockup
+    assert SIP.Context.get(ctx, :lasterr) == :ok
+  end
+
+  def no_pool(_profiles), do: nil
 end

@@ -5,9 +5,6 @@ is doing**. A supervision app clustered with kelixip now receives registrations
 and domain counters as they change, and the destructive actions it drives are
 traced to a person. One dependency upgrade closes two CVEs.
 
-Reference: [kelixip_liveview.md](../design/kelixip_liveview.md) — the design of
-the push mechanism and of the app that consumes it.
-
 ## Observability — what kelescope shows, it is told
 
 [kelescope](https://github.com/neutrino38/kelescope) is the admin web console,
@@ -26,9 +23,6 @@ subscription; so does the death of the subscribing pid.
 The subscription to one domain's detail is per domain, and costs nothing for a
 domain nobody watches. The counters subscription covers every domain at once:
 a domain list wants all of them.
-
-Reference: [kelixip_liveview.md](../design/kelixip_liveview.md) — the design of
-the push mechanism and of the app that consumes it.
 
 ### A destructive action is traced to a name
 

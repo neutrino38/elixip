@@ -65,8 +65,7 @@ New module key: `stats_interval_ms` in `[module.mcu]`, **15 000** by default. `0
 disables the statistics topic entirely, which an operator has to be able to say
 given what a sweep costs.
 
-Reference: [mcu-live-push.md](../design/mcu-live-push.md), and
-[mcu.md](../kelixip/modules/mcu.md) for the module's own documentation.
+Reference: [mcu.md](../kelixip/modules/mcu.md), the module's own documentation.
 
 ## Service Building Blocks — two fixes
 

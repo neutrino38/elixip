@@ -22,12 +22,20 @@ defmodule Kelix.OptionsTest do
       assert {:reply, 200, "OK", fields} = Kelix.Options.on_options(%{method: :OPTIONS}, self())
       assert {"Allow", allow} = List.keyfind(fields, "Allow", 0)
 
-      # The registrar and OPTIONS itself. INVITE joins the list when the call function
-      # lands — a probe would catch the lie until then.
-      assert allow == "OPTIONS, REGISTER"
-      assert allow =~ "REGISTER"
-      assert allow =~ "OPTIONS"
-      refute allow =~ "INVITE"
+      # Every function kelixip serves: the registrar, calls, the subscription
+      # layer, and OPTIONS itself. A probe catches any lie in this list, which is
+      # why it is asserted whole rather than one method at a time.
+      assert allow == "OPTIONS, REGISTER, INVITE, ACK, CANCEL, BYE, SUBSCRIBE, PUBLISH, NOTIFY"
+    end
+
+    test "does not advertise MESSAGE, which no function serves yet" do
+      {:reply, 200, "OK", fields} = Kelix.Options.on_options(%{method: :OPTIONS}, self())
+      {"Allow", allow} = List.keyfind(fields, "Allow", 0)
+
+      # Page-mode chat is a function of its own ([[domain.chat]], DESIGN-CHAT.md)
+      # and nothing routes an out-of-dialog MESSAGE today: advertising it would
+      # promise a 405.
+      refute allow =~ "MESSAGE"
     end
 
     test "the advertised list is the one Kelix.Options exposes" do

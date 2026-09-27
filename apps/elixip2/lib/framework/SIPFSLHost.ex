@@ -39,6 +39,9 @@ defmodule SIP.FSL.Host do
     # One server secret for the node's lifetime, keying every digest nonce
     # (SIP.Auth.Nonce). kelixip supervises it instead; here it belongs to the run.
     :ok = SIP.Auth.Secret.start()
+    # The event packages this library provides, so a SUBSCRIBE for one of them is
+    # not answered 489 by a run that never named a package (SIP.EventPackage).
+    :ok = SIP.EventPackage.register_builtins()
     :ok
   end
 
@@ -227,7 +230,12 @@ defmodule SIP.FSL.Host do
     :ok
   end
 
-  defp setup_uas_child(type, _pid) when type in [:uas_register] do
+  # A `:uas_register` or `:uas_presence` child is reached through a factory
+  # registered as the processing module for its method (`Elixip.ScenarioUAS`,
+  # the kelixip Router), not through a per-child dispatcher like the call one
+  # above: there is nothing to register a waiting pid with, so a sub-FSM of
+  # either kind would wait for a request that is routed elsewhere.
+  defp setup_uas_child(type, _pid) when type in [:uas_register, :uas_presence] do
     Logger.warning("spawn_fsm: scenario type #{inspect(type)} is not supported as a sub-FSM yet")
   end
 
